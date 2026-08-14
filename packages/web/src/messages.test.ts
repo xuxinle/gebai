@@ -528,15 +528,38 @@ describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式�
     expect(head?.textContent).toContain("b=x")
   })
 
-  test("长路径智能截断：保留尾部文件名，悬浮 tooltip 可见全文，参数区不再重复", () => {
+  test("超长标题参数不缩略：头部不放后缀，降级为参数气泡（键值行全文展示）", () => {
     const long = `very/long/path/${"nested/".repeat(20)}file.ts`
     __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])
     const bubble = toolBubbleFor({ id: "tt3", role: "tool", name: "read", content: "", arguments: { path: long }, createdAt: 0 }, "")
-    const suffix = bubble.querySelector("span.tool-suffix") as HTMLElement | null
-    expect(suffix?.textContent?.startsWith("· …")).toBe(true)
-    expect(suffix?.textContent?.endsWith("file.ts")).toBe(true)
-    expect(suffix?.dataset.tip).toContain(long)
-    // path 全部入标题：无参数区
+    // 头部只显示工具名（后缀全文超长，一行放不下，不放入头部也不缩略）
+    expect(bubble.querySelector("span.tool-suffix")).toBeNull()
+    // 参数气泡：键值行展示 key + 完整路径（不截断）
+    const rows = bubble.querySelectorAll("div.tool-kv-row")
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.textContent).toContain("path")
+    expect(rows[0]?.textContent).toContain(long)
+    expect(bubble.querySelector("pre.tool-code")).toBeNull()
+  })
+
+  test("超长标题参数与其余参数一并展示为键值行（不重复、不省略）", () => {
+    const long = `${"sub/".repeat(30)}deep/file.ts`
+    __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])
+    const bubble = toolBubbleFor({ id: "tt3b", role: "tool", name: "read", content: "", arguments: { path: long, offset: 5 }, createdAt: 0 }, "")
+    expect(bubble.querySelector("span.tool-suffix")).toBeNull()
+    const rows = bubble.querySelectorAll("div.tool-kv-row")
+    expect(rows.length).toBe(2)
+    expect(rows[0]?.textContent).toContain(long)
+    expect(rows[1]?.textContent).toContain("offset")
+    expect(rows[1]?.textContent).toContain("5")
+  })
+
+  test("无参数工具调用卡片：仅头部（🛠 工具名），无参数区", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor({ id: "tt3c", role: "tool", content: "", createdAt: 0 }, "→ ls")
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("🛠")
+    expect(head?.textContent).toContain("ls")
     expect(bubble.querySelector("div.tool-kv")).toBeNull()
     expect(bubble.querySelector("pre.tool-code")).toBeNull()
   })

@@ -199,13 +199,12 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
       scrollSessionSticky(sub.body)
       return
     }
-    if (argsObj && Object.keys(argsObj).length > 0) {
-      const args = JSON.stringify(argsObj, null, 2)
-      const wrapper = appendMsg({ id: uuid(), role: "tool", content: `→ ${ev.name} ${args}`, createdAt: Date.now() }, false, sub.body)
-      const body = wrapper.querySelector<HTMLElement>(".msg-body")
-      if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args, runId })
-      scrollSessionSticky(sub.body)
-    }
+    // 调用即建卡（无参数仅头部）：参数先展示、结果到达后追加，不在执行完成后一并出现
+    const args = argsObj && Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj, null, 2) : ""
+    const wrapper = appendMsg({ id: uuid(), role: "tool", content: args ? `→ ${ev.name} ${args}` : `→ ${ev.name}`, createdAt: Date.now() }, false, sub.body)
+    const body = wrapper.querySelector<HTMLElement>(".msg-body")
+    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args, runId })
+    scrollSessionSticky(sub.body)
     return
   }
   sealSegment(ev.sessionId) // 文本分段：工具调用处截断当前文本段
@@ -216,13 +215,11 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
     if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "todo" })
     return
   }
-  // 无参数的工具调用不创建空卡片；结果到达时由 appendToolResult 兜底单独展示
-  if (argsObj && Object.keys(argsObj).length > 0) {
-    const args = JSON.stringify(argsObj, null, 2)
-    const wrapper = appendMsg({ id: uuid(), role: "tool", content: `→ ${ev.name} ${args}`, createdAt: Date.now() })
-    const body = wrapper.querySelector<HTMLElement>(".msg-body")
-    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args })
-  }
+  // 调用即建卡（无参数仅头部）：参数先展示、结果到达后追加，不在执行完成后一并出现
+  const args = argsObj && Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj, null, 2) : ""
+  const wrapper = appendMsg({ id: uuid(), role: "tool", content: args ? `→ ${ev.name} ${args}` : `→ ${ev.name}`, createdAt: Date.now() })
+  const body = wrapper.querySelector<HTMLElement>(".msg-body")
+  if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args })
 }
 function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string }) {
   const cur = getCurrentSession()
