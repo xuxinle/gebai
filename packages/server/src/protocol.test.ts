@@ -33,9 +33,9 @@ let approval: ServerHandle
 beforeAll(async () => {
   single = await startServer({ gebaiHome: homeSingle, auth: "local", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0 })
   ;(single.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
-  multi = await startServer({ gebaiHome: homeMulti, auth: "server", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0 })
+  multi = await startServer({ gebaiHome: homeMulti, auth: "server", sandbox: "on", binaryMode: false, preloadSubAgents: [], port: 0 })
   ;(multi.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
-  approval = await startServer({ gebaiHome: mkdtempSync(join(tmpdir(), "gebai-proto-approval-")), auth: "server", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0, signupMode: "approval" })
+  approval = await startServer({ gebaiHome: mkdtempSync(join(tmpdir(), "gebai-proto-approval-")), auth: "server", sandbox: "on", binaryMode: false, preloadSubAgents: [], port: 0, signupMode: "approval" })
   ;(approval.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
   // 预置管理员（admin 引导走 GEBAI_ADMIN_PASSWORD_HASH，测试直接建用户）
   await multi.auth.createUser("admin", "admin123", "admin")

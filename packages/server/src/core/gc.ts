@@ -1,4 +1,4 @@
-import { readdir, stat, mkdir, rename, rm } from "node:fs/promises"
+import { readdir, readFile, stat, mkdir, rename, rm } from "node:fs/promises"
 import { join, dirname } from "node:path"
 import { walkDir } from "./paths"
 
@@ -102,6 +102,46 @@ export async function runGC(home: string, opts: GCOptions = {}): Promise<GCStats
     }
   }
   return stats
+}
+
+/**
+ * 在 trash/ 中查找已归档会话（恢复用）：遍历各用户 trash/{date}/{sessionId} 目录，
+ * 读取 chat.json 的 userId 作为归属（文件缺失时以目录所属用户兜底）。未找到返回 null。
+ */
+export async function findInTrash(home: string, sessionId: string): Promise<{ trashDir: string; owner: string } | null> {
+  let users: string[] = []
+  try {
+    users = (await readdir(join(home, "users"), { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name)
+  } catch {
+    return null
+  }
+  for (const user of users) {
+    const trashRoot = join(home, "users", user, "trash")
+    let dates: import("node:fs").Dirent[]
+    try {
+      dates = await readdir(trashRoot, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const d of dates) {
+      if (!d.isDirectory()) continue
+      const cand = join(trashRoot, d.name, sessionId)
+      try {
+        await stat(cand)
+      } catch {
+        continue
+      }
+      let owner = user
+      try {
+        const data = JSON.parse(await readFile(join(cand, "chat.json"), "utf8")) as { userId?: string }
+        if (data.userId) owner = data.userId
+      } catch {
+        /* chat.json 缺失/损坏：以目录所属用户兜底 */
+      }
+      return { trashDir: cand, owner }
+    }
+  }
+  return null
 }
 
 /** 按日期目录名清理超保留期目录（trash/feedback 共用）。 */

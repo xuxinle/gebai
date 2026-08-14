@@ -4,6 +4,7 @@ import type { AgentEvent } from "@gebai/sdk"
 import type { EventBus } from "./core/event-bus"
 import { hmacHex } from "./core/paths"
 import { hostBlockReason } from "./core/ip"
+import { fetchWithRedirectGuard } from "./core/tools"
 
 export interface WebhookConfig {
   id: string
@@ -37,8 +38,9 @@ const ALLOW_PRIVATE = process.env.GEBAI_WEBHOOK_ALLOW_PRIVATE === "true"
 /** Webhook URL 校验：必须 http(s)，默认拒绝回环/链路本地/云元数据地址（SSRF 防护）。
  * 主机名判定统一走 `core/ip.ts`（覆盖 IPv4-mapped IPv6、尾点 FQDN、规范化 IPv4 字面量等
  * 绕过形式）；私网（10.x/192.168.x/172.16-31.x/ULA）默认放行——内网回调是 webhook 的
- * 常见合法场景，需全私网拒绝时使用 `GEBAI_WEBHOOK_ALLOW_PRIVATE=true` 之外另行网关管控。 */
-function checkWebhookUrl(raw: string): void {
+ * 常见合法场景，需全私网拒绝时使用 `GEBAI_WEBHOOK_ALLOW_PRIVATE=true` 之外另行网关管控。
+ * 注册与投递逐跳共用（防「注册公网 URL → 302 内网」跳板绕过）。 */
+export function checkWebhookUrl(raw: string): void {
   let url: URL
   try {
     url = new URL(raw)
@@ -53,14 +55,19 @@ function checkWebhookUrl(raw: string): void {
 
 type DeliverFn = (url: string, body: unknown, headers: Record<string, string>) => Promise<{ ok: boolean; status: number }>
 
-/** 默认投递：全局 fetch，超时 10s。 */
+/** 默认投递：带逐跳 SSRF 校验的 fetch（重定向每跳都须过 checkWebhookUrl，防「注册公网 URL → 302
+ *  内网/元数据」跳板绕过注册期校验），超时 10s。 */
 const defaultDeliver: DeliverFn = async (url, body, headers) => {
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10000),
-  })
+  const res = await fetchWithRedirectGuard(
+    url,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10000),
+    },
+    checkWebhookUrl,
+  )
   return { ok: res.ok, status: res.status }
 }
 

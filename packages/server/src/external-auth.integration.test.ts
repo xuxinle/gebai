@@ -13,7 +13,7 @@ beforeAll(async () => {
   handle = await startServer({
     gebaiHome: home,
     auth: "server",
-    sandbox: "off",
+    sandbox: "on",
     binaryMode: false,
     preloadSubAgents: [],
     port: 0,
@@ -86,7 +86,7 @@ describe("external auth endpoints", () => {
     const h2 = await startServer({
       gebaiHome: home,
       auth: "server",
-      sandbox: "off",
+      sandbox: "on",
       binaryMode: false,
       preloadSubAgents: [],
       port: 0,
@@ -112,7 +112,7 @@ describe("external auth disabled", () => {
     const h2 = await startServer({
       gebaiHome: home,
       auth: "local",
-      sandbox: "off",
+      sandbox: "on",
       binaryMode: false,
       preloadSubAgents: [],
       port: 0,
@@ -138,7 +138,7 @@ describe("external auth disabled", () => {
     const h2 = await startServer({
       gebaiHome: home,
       auth: "server",
-      sandbox: "off",
+      sandbox: "on",
       binaryMode: false,
       preloadSubAgents: [],
       port: 0,

@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import type { Context } from "hono"
 import { serveStatic } from "hono/bun"
 import { existsSync, readFileSync } from "node:fs"
+import { rename } from "node:fs/promises"
 import { join } from "node:path"
 import type { AttachmentInput, EnvVarSource, FeedbackInfo, FeedbackInput, FileEntry, TodoItem } from "@gebai/sdk"
 import type { AuthService, AuthUser } from "./auth"
@@ -19,7 +20,8 @@ import type { SubAgentManager } from "./core/subagents"
 import type { WebhookManager } from "./webhooks"
 import type { ServerConfig } from "./core/config"
 import { readFeedback, writeFeedback } from "./feedback"
-import { basenameName, isValidSessionId } from "./core/paths"
+import { basenameName, isValidSessionId, sessionPath } from "./core/paths"
+import { findInTrash } from "./core/gc"
 import { TokenBucket } from "./core/ratelimit"
 import { buildZip } from "./zip"
 import { deleteMiniTool, getMiniTool, listMiniTools } from "./core/mini-tools"
@@ -115,6 +117,22 @@ async function resolveUser(d: AppDeps, c: Context): Promise<AuthUser | null> {
 export function createApp(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   const d = deps
+  // CORS（GEBAI_CORS_ORIGINS，缺省 * 允许所有来源）：浏览器跨源接入 REST API 用；
+  // WS 通道不受 CORS 约束（WebSocket 不执行同源策略，靠 token 鉴权）。
+  // 手写中间件而非 hono/cors：cors 包会重建响应体，导致 Bun.file 自动推断的
+  // content-type 丢失（files/content 二进制下载损坏）；c.header() 原地追加头不影响响应。
+  const corsOrigins = (d.config.corsOrigins ?? []).length ? d.config.corsOrigins : ["*"]
+  app.use("/api/*", async (c: Context<AppEnv>, next) => {
+    const reqOrigin = c.req.header("origin") ?? ""
+    const allow = corsOrigins.includes("*") ? "*" : corsOrigins.includes(reqOrigin) ? reqOrigin : corsOrigins[0]
+    c.header("Access-Control-Allow-Origin", allow)
+    c.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    c.header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    c.header("Access-Control-Max-Age", "86400")
+    c.header("Vary", "Origin")
+    if (c.req.method === "OPTIONS") return new Response(null, { status: 204 })
+    await next()
+  })
   app.use(async (c: Context<AppEnv>, next) => {
     c.set("deps", deps)
     const user = await resolveUser(deps, c)
@@ -150,6 +168,15 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   /** 每用户 prompt 速率限制（容量 60 突发、30/秒补充；防单用户刷 LLM 配额，与 WS 同规则）。 */
   const promptRateLimit = new TokenBucket(60, 30)
+  /** 登录/兑换端点限流（防 CPU DoS：scrypt 即使异步化仍耗 CPU，轮换用户名即可绕过按用户名锁定）：
+   *  全局桶兜底总量，来源桶按客户端标识（GEBAI_TRUST_PROXY=true 时取 X-Forwarded-For 首段，否则共桶）。 */
+  const loginGlobalLimit = new TokenBucket(60, 2)
+  const loginSourceLimit = new TokenBucket(10, 0.2)
+  const loginSourceKey = (c: Context): string => {
+    if (!d.config.trustProxy) return "local"
+    const fwd = c.req.header("x-forwarded-for")
+    return (fwd ? fwd.split(",")[0].trim() : "") || "local"
+  }
 
   // 会话 ID 格式白名单（多用户隔离防线）：`:id` 段必须为 32 位小写 hex，
   // 畸形/穿越形态一律 400。Hono 路由匹配前已整体 decodeURI，`%2F` 不可能进入单段，
@@ -179,6 +206,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // （token 文件与 feishu_docs 子 Agent 工具共用，会话内资源操作自动以用户身份生效）。
   // 公开端点（免鉴权）：state 即会话关联凭证（随机不可猜，兑换后一次性消费防重放）。
   app.get("/api/v1/oauth/feishu/callback", async (c) => {
+    // HTML 转义（反射型 XSS 防护）：飞书用户显示名（昵称可含任意字符）与接口错误消息
+    // 均为外部可控内容，直接插值进公开页面即可在同源执行脚本（窃取 localStorage 令牌）
+    const esc = (s: string): string => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch)
     const page = (title: string, body: string): Response => {
       const html: string = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f7;color:#333}.card{text-align:center;background:#fff;padding:36px 48px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);max-width:560px}.ok{font-size:44px}.title{font-size:20px;font-weight:600;margin:12px 0 8px}.detail{color:#666;font-size:14px;line-height:1.7;word-break:break-all}.err{color:#c0392b}</style></head><body><div class="card"><div class="ok">${title.includes("成功") ? "✅" : "❌"}</div><div class="title">${title}</div><div class="detail ${title.includes("成功") ? "" : "err"}">${body}</div><script>setTimeout(()=>location.href="/",1600)</script></div></body></html>`
       return c.html(html, 200, { "Cache-Control": "no-cache" })
@@ -209,16 +239,20 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       consumePendingAuth(state)
       d.events.publish({ type: "oauth.completed", sessionId: pending.sessionId, payload: { ok: true, user: entry.name ?? "", openId: entry.openId ?? "" }, timestamp: Date.now() })
       const who = entry.name ?? entry.openId ?? "未知用户"
-      return page("飞书授权成功", `已绑定用户「${who}」，user_access_token 已保存到当前会话。<br>回到歌白会话即可继续操作（将自动以该用户身份执行）。`)
+      return page("飞书授权成功", `已绑定用户「${esc(who)}」，user_access_token 已保存到当前会话。<br>回到歌白会话即可继续操作（将自动以该用户身份执行）。`)
     } catch (err) {
       consumePendingAuth(state)
-      return page("飞书授权失败", `${(err as Error).message}<br>请回到歌白会话，重新执行 auth_user_authorize 后重试。`)
+      return page("飞书授权失败", `${esc(String((err as Error).message || err))}<br>请回到歌白会话，重新执行 auth_user_authorize 后重试。`)
     }
   })
 
   // Auth
   app.post("/api/v1/auth/login", async (c) => {
-    const { username, password } = await c.req.json<{ username: string; password: string }>()
+    if (!loginGlobalLimit.allow("global") || !loginSourceLimit.allow(loginSourceKey(c))) {
+      return c.json({ error: "rate limited: too many requests" }, 429)
+    }
+    const body = await c.req.json<{ username?: string; password?: string }>().catch(() => ({ username: "", password: "" }))
+    const { username = "", password = "" } = body
     const token = await d.auth.login(username, password)
     if (!token) return c.json({ error: "invalid credentials" }, 401)
     return c.json({ token })
@@ -247,6 +281,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   // 外部身份兑换：同源部署网站把本地登录态换为歌白令牌（扩展点见 external-auth.ts）
   app.post("/api/v1/auth/exchange", async (c) => {
+    if (!loginGlobalLimit.allow("global") || !loginSourceLimit.allow(loginSourceKey(c))) {
+      return c.json({ error: "rate limited: too many requests" }, 429)
+    }
     if (d.config.auth !== "server" || !d.externalAuth) return c.json({ error: "not found" }, 404)
     const { username, credential } = await c.req.json<{ username?: string; credential?: string }>()
     if (!username || !credential) return c.json({ error: "invalid request" }, 400)
@@ -310,6 +347,24 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.delete("/api/v1/sessions/:id", async (c) => {
     const user = await userOf(c)
     await d.store.delete(c.req.param("id"), user.id)
+    return c.json({ ok: true })
+  })
+  // 从 GC 归档（trash/，保留期 7 天）恢复会话：归属用户或 admin 可操作；
+  // 恢复 = 目录整体移回分片存储位置（会话数据/tmp 附件/env 一并恢复）
+  app.post("/api/v1/sessions/:id/restore", async (c) => {
+    const user = await userOf(c)
+    const id = c.req.param("id")
+    const hit = await findInTrash(d.config.gebaiHome, id)
+    // 归属不符与未找到同应答（不泄露他人会话存在性）
+    if (!hit || (user.role !== "admin" && hit.owner !== user.id)) return c.json({ error: "not found" }, 404)
+    const target = sessionPath(d.config.gebaiHome, hit.owner, id)
+    if (existsSync(target)) return c.json({ error: "session already exists" }, 409)
+    try {
+      await rename(hit.trashDir, target)
+    } catch (err) {
+      return c.json({ error: `restore failed: ${String((err as Error).message || err)}` }, 500)
+    }
+    d.store.evict(id)
     return c.json({ ok: true })
   })
   app.patch("/api/v1/sessions/:id", async (c) => {
@@ -635,6 +690,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         "/api/v1/users": { get: { summary: "用户列表（管理员）" }, post: { summary: "创建用户（管理员）" } },
         "/api/v1/sessions": { get: { summary: "会话列表" }, post: { summary: "创建会话" } },
         "/api/v1/sessions/{id}": { get: { summary: "会话详情" }, delete: { summary: "删除会话" }, patch: { summary: "重命名会话" } },
+        "/api/v1/sessions/{id}/restore": { post: { summary: "从回收站恢复会话（GC 归档保留期内）" } },
         "/api/v1/sessions/{id}/prompt": { post: { summary: "发送消息（SSE 流）" } },
         "/api/v1/sessions/{id}/attachments": { post: { summary: "上传附件（multipart）" } },
         "/api/v1/sessions/{id}/cancel": { post: { summary: "取消任务" } },

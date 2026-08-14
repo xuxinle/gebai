@@ -1,7 +1,10 @@
-import { randomBytes, scryptSync, timingSafeEqual, createHmac, createHash } from "node:crypto"
+import { randomBytes, scrypt as scryptCb, timingSafeEqual, createHmac, createHash } from "node:crypto"
+import { promisify } from "node:util"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import type { UserInfo, UserPatch } from "@gebai/sdk"
+
+const scrypt = promisify(scryptCb) as (password: string | Buffer, salt: string | Buffer, keylen: number) => Promise<Buffer>
 
 const TOKEN_TTL = 7 * 24 * 3600 * 1000
 /** 登录失败锁定：连续失败次数与锁定时长（防在线爆破）。 */
@@ -10,6 +13,29 @@ const AUTH_LOCK_MS = 60 * 1000
 /** 登录失败记录条目上限（防匿名 Basic/登录请求以随机用户名无界填充内存）。 */
 const AUTH_MAX_FAIL_ENTRIES = 10000
 
+/** Windows 保留设备名（作为目录名会产生异常行为），拒绝注册。 */
+const RESERVED_USERNAMES = new Set([
+  "con", "prn", "aux", "nul",
+  "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+])
+
+/**
+ * 用户名规范化与校验（注册/建户/外部身份兑换统一入口）：
+ * - 小写折叠：用户名同时是数据目录名（users/{user}/），Windows 文件系统不区分大小写，
+ *   折叠后 `Alice` 与 `alice` 不再形成两个注册表键共享同一物理目录（env/feedback 串写）
+ * - 格式白名单：`[a-z0-9][a-z0-9_-]*`，1-32 字符——拒绝 `..`、`.`、路径分隔符与控制字符
+ *   （防用户数据目录穿越到 home 根），拒绝 Windows 保留设备名
+ */
+export function normalizeUsername(raw: string): string {
+  const name = String(raw ?? "").trim().toLowerCase()
+  if (!name || name.length > 32 || name === "." || name === ".." || !/^[a-z0-9][a-z0-9_-]*$/.test(name)) {
+    throw new Error("用户名非法（1-32 字符，小写字母/数字开头，可含 _ 与 -，不含路径分隔符）")
+  }
+  if (RESERVED_USERNAMES.has(name)) throw new Error("用户名为系统保留名，请更换")
+  return name
+}
+
 export interface AuthUser extends UserInfo {
   salt: string
   hash: string
@@ -17,8 +43,10 @@ export interface AuthUser extends UserInfo {
 
 export class AuthService {
   private registryPath: string
+  private tokensPath: string
   private tokenSecret = randomBytes(32).toString("hex")
   private tokens = new Map<string, { userId: string; exp: number }>()
+  private tokensLoaded = false
   private loginFails = new Map<string, { count: number; until: number }>()
 
   constructor(
@@ -26,6 +54,8 @@ export class AuthService {
     private mode: "local" | "server",
   ) {
     this.registryPath = join(home, "users", "registry.json")
+    // 令牌持久化（重启不掉线）：内存 Map 为权威态，签发/撤销/过期清理时落盘
+    this.tokensPath = join(home, "auth-tokens.json")
   }
 
   /** 本地模式默认用户：admin（特权用户，无登录、不受任何权限限制）。 */
@@ -47,22 +77,51 @@ export class AuthService {
     await writeFile(this.registryPath, JSON.stringify(reg, null, 2))
   }
 
-  private hashPassword(password: string, salt: string): string {
-    return scryptSync(password, salt, 64).toString("hex")
+  private async hashPassword(password: string, salt: string): Promise<string> {
+    return (await scrypt(password, salt, 64)).toString("hex")
   }
 
-  private verifyPassword(password: string, salt: string, expected: string): boolean {
-    const actual = Buffer.from(this.hashPassword(password, salt), "hex")
+  private async verifyPassword(password: string, salt: string, expected: string): Promise<boolean> {
+    const actual = Buffer.from(await this.hashPassword(password, salt), "hex")
     const exp = Buffer.from(expected, "hex")
     if (actual.length !== exp.length) return false
     return timingSafeEqual(actual, exp)
   }
 
-  private sign(userId: string): string {
+  /** 令牌表惰性加载（进程重启后恢复已签发令牌，用户不掉线）。 */
+  private async ensureTokensLoaded(): Promise<void> {
+    if (this.tokensLoaded) return
+    this.tokensLoaded = true
+    try {
+      const raw = JSON.parse(await readFile(this.tokensPath, "utf8")) as Record<string, { userId?: string; exp?: number }>
+      for (const [tok, v] of Object.entries(raw)) {
+        if (v && typeof v.userId === "string" && typeof v.exp === "number") this.tokens.set(tok, { userId: v.userId, exp: v.exp })
+      }
+    } catch {
+      /* 首次运行/文件损坏：空表 */
+    }
+  }
+
+  private async saveTokens(): Promise<void> {
+    const now = Date.now()
+    // 顺带清理已过期令牌（持久化文件不无限增长）
+    for (const [tok, v] of this.tokens) {
+      if (v.exp < now) this.tokens.delete(tok)
+    }
+    try {
+      await mkdir(dirname(this.tokensPath), { recursive: true })
+      await writeFile(this.tokensPath, JSON.stringify(Object.fromEntries(this.tokens), null, 2))
+    } catch {
+      /* 写失败静默：令牌仍存内存，仅重启丢失 */
+    }
+  }
+
+  private async sign(userId: string): Promise<string> {
     const payload = `${userId}.${Date.now() + TOKEN_TTL}`
     const sig = createHmac("sha256", this.tokenSecret).update(payload).digest("hex")
     const token = `${Buffer.from(payload).toString("base64url")}.${sig}`
     this.tokens.set(token, { userId, exp: Date.now() + TOKEN_TTL })
+    await this.saveTokens()
     return token
   }
 
@@ -71,17 +130,18 @@ export class AuthService {
    * 失败/禁用/锁定期一律返回 null（统一 401，不泄露原因）。
    */
   async verifyCredentials(username: string, password: string): Promise<AuthUser | null> {
+    await this.ensureTokensLoaded()
     const fail = this.loginFails.get(username)
     if (fail && fail.until > Date.now()) return null // 锁定期内直接拒绝（不泄露原因）
     const reg = await this.readRegistry()
     const user = reg[username]
     if (!user) {
       // 恒时：用户名不存在也执行一次等成本 scrypt（防用户名枚举时序侧信道——存在用户才会走慢路径）
-      this.hashPassword(password, randomBytes(16).toString("hex"))
+      await this.hashPassword(password, randomBytes(16).toString("hex"))
       this.recordLoginFail(username)
       return null
     }
-    if (user.disabled || !this.verifyPassword(password, user.salt, user.hash)) {
+    if (user.disabled || !(await this.verifyPassword(password, user.salt, user.hash))) {
       this.recordLoginFail(username)
       return null
     }
@@ -124,15 +184,14 @@ export class AuthService {
    * 不可经注册创建/提权）。
    * - open 模式（默认）：注册即登录（返回令牌，enabled）
    * - approval 模式：注册用户置 disabled+pending（待 admin 审批，不可登录，不签发令牌）
-   * 用户名限 ≤64 字符且禁路径分隔符（防用户目录越界）。
+   * 用户名经 normalizeUsername 规范化（小写折叠 + 白名单，见该函数注释）。
    */
   async register(username: string, password: string, mode: "open" | "approval" = "open"): Promise<{ user: AuthUser; token: string | null; pending: boolean }> {
-    const name = username.trim()
-    if (!name || name.length > 64 || /[\/\\]/.test(name)) throw new Error("用户名非法（≤64 字符，不含路径分隔符）")
+    const name = normalizeUsername(username)
     if (!password) throw new Error("密码不能为空")
     const pending = mode === "approval"
-    const user = await this.createUser(name, password, "user", { disabled: pending, pending })
-    return { user, token: pending ? null : this.sign(user.id), pending }
+    const user = await this.createUserEntry(name, password, "user", { disabled: pending, pending })
+    return { user, token: pending ? null : await this.sign(user.id), pending }
   }
 
   /**
@@ -141,10 +200,16 @@ export class AuthService {
    * 失败/禁用/白名单外一律返回 null（统一 401，不泄露原因）；连续失败触发与登录一致的锁定（防回调模式被无限触发）。
    */
   async exchangeExternal(username: string, provider: { verify(c: { username: string; credential: string }): Promise<string | null> }, credential: string, autocreate: boolean): Promise<string | null> {
+    await this.ensureTokensLoaded()
     const fail = this.loginFails.get(username)
     if (fail && fail.until > Date.now()) return null // 锁定期内直接拒绝（不泄露原因）
-    const name = (await provider.verify({ username, credential }))?.trim()
-    if (!name || name.length > 64 || /[\/\\]/.test(name)) {
+    let name = ""
+    try {
+      name = normalizeUsername((await provider.verify({ username, credential })) ?? "")
+    } catch {
+      name = ""
+    }
+    if (!name) {
       this.recordLoginFail(username)
       return null
     }
@@ -153,7 +218,7 @@ export class AuthService {
     let user = reg[name]
     if (!user && autocreate) {
       try {
-        user = await this.createUser(name, randomBytes(32).toString("hex"), "user")
+        user = await this.createUserEntry(name, randomBytes(32).toString("hex"), "user")
       } catch {
         user = (await this.readRegistry())[name] // 并发创建竞态：已存在则复用
       }
@@ -163,14 +228,18 @@ export class AuthService {
   }
 
   async logout(token: string): Promise<void> {
+    await this.ensureTokensLoaded()
     this.tokens.delete(token)
+    await this.saveTokens()
   }
 
   async authorize(token: string): Promise<AuthUser | null> {
+    await this.ensureTokensLoaded()
     const t = this.tokens.get(token)
     if (!t) return null
     if (t.exp < Date.now()) {
       this.tokens.delete(token)
+      void this.saveTokens()
       return null
     }
     const reg = await this.readRegistry()
@@ -225,20 +294,25 @@ export class AuthService {
   }
 
   async createUser(username: string, password: string, role: "user" | "admin" = "user", init?: { disabled?: boolean; pending?: boolean }): Promise<AuthUser> {
+    return this.createUserEntry(normalizeUsername(username), password, role, init)
+  }
+
+  /** 建户实现（注册/管理员创建/外部身份共用）：统一经 normalizeUsername 校验后写注册表。 */
+  private async createUserEntry(name: string, password: string, role: "user" | "admin", init?: { disabled?: boolean; pending?: boolean }): Promise<AuthUser> {
     const reg = await this.readRegistry()
-    if (reg[username]) throw new Error(`user exists: ${username}`)
+    if (reg[name]) throw new Error(`user exists: ${name}`)
     const salt = randomBytes(16).toString("hex")
     const user: AuthUser = {
-      id: createHash("sha256").update(username + salt).digest("hex").slice(0, 16),
-      username,
+      id: createHash("sha256").update(name + salt).digest("hex").slice(0, 16),
+      username: name,
       role,
       disabled: init?.disabled ?? false,
       pending: init?.pending,
       createdAt: Date.now(),
       salt,
-      hash: this.hashPassword(password, salt),
+      hash: await this.hashPassword(password, salt),
     }
-    reg[username] = user
+    reg[name] = user
     await this.writeRegistry(reg)
     return user
   }
@@ -249,7 +323,7 @@ export class AuthService {
     if (!user) throw new Error(`user not found: ${id}`)
     if (patch.password) {
       user.salt = randomBytes(16).toString("hex")
-      user.hash = this.hashPassword(patch.password, user.salt)
+      user.hash = await this.hashPassword(patch.password, user.salt)
     }
     if (patch.role) user.role = patch.role
     if (patch.disabled !== undefined) user.disabled = patch.disabled

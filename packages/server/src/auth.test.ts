@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AuthService } from "./auth"
+import { AuthService, normalizeUsername } from "./auth"
 import { EnvManager } from "./core/env"
 import { SessionStore } from "./core/store"
 
@@ -209,3 +209,88 @@ describe("EnvManager describe", () => {
 function cleanup(home: string) {
   rmSync(home, { recursive: true, force: true })
 }
+
+describe("用户名规范化与校验", () => {
+  test("normalizeUsername：.. / 分隔符 / 大写折叠 / 保留名 / 长度限制", () => {
+    expect(normalizeUsername("Alice")).toBe("alice") // 小写折叠（Windows 文件系统不区分大小写）
+    expect(normalizeUsername("ALICE_01")).toBe("alice_01")
+    expect(() => normalizeUsername("..")).toThrow(/用户名非法/)
+    expect(() => normalizeUsername(".")).toThrow(/用户名非法/)
+    expect(() => normalizeUsername("a/b")).toThrow(/用户名非法/)
+    expect(() => normalizeUsername("a\b")).toThrow(/用户名非法/)
+    expect(() => normalizeUsername("x".repeat(33))).toThrow(/用户名非法/)
+    expect(() => normalizeUsername("con")).toThrow(/保留名/)
+    expect(() => normalizeUsername("COM1")).toThrow(/保留名/)
+  })
+
+  test("createUser 拒绝路径穿越与大小写冲突", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-auth-user-"))
+    const auth = new AuthService(home, "server")
+    try {
+      await expect(auth.createUser("..", "pw")).rejects.toThrow(/用户名非法/)
+      const alice = await auth.createUser("alice", "pw")
+      expect(alice.username).toBe("alice")
+      // 大小写折叠后重名：Alice 与 alice 冲突（注册表键折叠前防重）
+      await expect(auth.createUser("Alice", "pw")).rejects.toThrow(/exists/)
+      // register 同样折叠（Alice → alice 已存在）
+      await expect(auth.register("ALICE", "pw")).rejects.toThrow(/exists/)
+      await expect(auth.register("..", "pw")).rejects.toThrow(/用户名非法/)
+    } finally {
+      cleanup(home)
+    }
+  })
+
+  test("register 拒绝路径穿越用户名（服务模式开放注册防线）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-auth-reg-"))
+    const auth = new AuthService(home, "server")
+    try {
+      await expect(auth.register("..", "pw")).rejects.toThrow(/用户名非法/)
+      await expect(auth.register("a/b", "pw")).rejects.toThrow(/用户名非法/)
+      const r = await auth.register("New-User_1", "pw")
+      expect(r.user.username).toBe("new-user_1")
+    } finally {
+      cleanup(home)
+    }
+  })
+})
+
+describe("令牌持久化（重启不掉线）", () => {
+  test("login 签发的令牌在进程重启（新实例）后仍有效；logout 持久撤销", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-auth-token-"))
+    const a1 = new AuthService(home, "server")
+    await a1.applyAdminHash(undefined)
+    try {
+      await a1.createUser("alice", "pw1")
+      const token = await a1.login("alice", "pw1")
+      expect(token).toBeTruthy()
+      // 模拟重启：新实例从 auth-tokens.json 恢复
+      const a2 = new AuthService(home, "server")
+      const user = await a2.authorize(token!)
+      expect(user?.username).toBe("alice")
+      // 登出持久撤销（重启后同样失效）
+      await a2.logout(token!)
+      const a3 = new AuthService(home, "server")
+      expect(await a3.authorize(token!)).toBeNull()
+    } finally {
+      cleanup(home)
+    }
+  })
+
+  test("过期令牌在 authorize/保存时被清理", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-auth-exp-"))
+    const auth = new AuthService(home, "server")
+    try {
+      await auth.createUser("bob", "pw")
+      const token = await auth.login("bob", "pw")
+      expect(token).toBeTruthy()
+      // 直接篡改内存中的过期时间（越过 TTL）
+      const inner = (auth as unknown as { tokens: Map<string, { userId: string; exp: number }> }).tokens
+      const entry = inner.get(token!)!
+      entry.exp = Date.now() - 1000
+      expect(await auth.authorize(token!)).toBeNull() // 过期即失效
+      expect(inner.has(token!)).toBe(false) // 顺带清理（不残留泄漏）
+    } finally {
+      cleanup(home)
+    }
+  })
+})

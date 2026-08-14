@@ -3,7 +3,8 @@ import { join } from "node:path"
 import type { SessionStore } from "./store"
 import type { EnvVarSource } from "@gebai/sdk"
 
-const SENSITIVE_RE = /(_KEY|_TOKEN|_SECRET|PASSWORD|_PASSWD)$/i
+const SENSITIVE_RE =
+  /(_KEY|_TOKEN|_SECRET|PASSWORD|_PASSWD|_PAT|_CREDENTIAL|_CREDENTIALS|_AUTH|_SECRETS|CONNECTION_STRING|DATABASE_URL|PRIVATE_KEY|CLIENT_SECRET|APP_SECRET)$/i
 
 export function isSensitive(name: string): boolean {
   return SENSITIVE_RE.test(name)

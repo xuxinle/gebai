@@ -22,7 +22,7 @@ import { makeCronTools } from "./core/tools"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
 import { DevReloadManager, webRootOf } from "./dev-reload"
 import type { ServerWebSocket } from "bun"
-import { handleWsMessage, type WsConn } from "./ws"
+import { handleWsMessage, type WsConn, type WsSink } from "./ws"
 import { WsStateService } from "./ws-state"
 import { FeishuBot } from "./feishu-bot/bot"
 import { EngineBotAdapter } from "./feishu-bot/adapter"
@@ -60,6 +60,26 @@ const wsConns = new WeakMap<object, WsConn>()
  * 对齐 SDK 假设的「服务端顺序处理消息」契约（认证消息先于其后请求生效）。
  */
 const wsMsgChains = new WeakMap<object, Promise<void>>()
+
+/** 单连接发送缓冲上限（字节）：Bun WebSocket 发送缓冲超限说明客户端消费速度远低于
+ *  推送速率（慢客户端/高频流式），继续发送缓冲无界增长——断开让其走自动重连 + seq 重放收敛。 */
+const WS_MAX_BUFFERED = 16 * 1024 * 1024
+
+/** 构造带背压保护的发送 sink：超限断开连接（客户端自动重连后按事件 seq 重放补偿）。 */
+function makeWsSink(ws: ServerWebSocket<unknown>): WsSink {
+  return {
+    send: (data: string) => {
+      if (ws.readyState !== WebSocket.OPEN) return
+      const buffered = (ws as unknown as { getBufferedAmount?: () => number }).getBufferedAmount?.() ?? 0
+      if (buffered > WS_MAX_BUFFERED) {
+        console.warn("[ws] 慢客户端发送缓冲超限（16MB），断开连接——客户端将自动重连并按 seq 重放")
+        ws.close()
+        return
+      }
+      ws.send(data)
+    },
+  }
+}
 
 /**
  * 构建 WS 连接上下文：连接级用户 + 连接级当前会话。
@@ -160,13 +180,17 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   // 沙箱 auto 判定（DESIGN「GEBAI_SANDBOX」）：只看运行形态，不判定监听 IP——
   // 服务模式（多用户公用、远程可达）强制启用沙箱（防普通用户越权读写/操控宿主）；
   // 本地模式（操作者本人）默认不限制。显式 GEBAI_SANDBOX=on/off 仍可覆盖。
+  // 防呆：服务模式 + 显式关沙箱 = 多租户下任意用户可越界读写宿主任意路径（files 接口回退 resolve），
+  // 启动直接拒绝（安全配置错误在启动期暴露，而非运行期出事后追溯）。
+  if (config.sandbox === "off" && config.auth === "server") {
+    throw new Error("GEBAI_SANDBOX=off 与服务模式（GEBAI_MODE=server）互斥：多用户隔离要求路径沙箱，请使用 auto/on")
+  }
   const sandbox = new Sandbox({
     home: config.gebaiHome,
     enabled: config.sandbox === "on" || (config.sandbox === "auto" && config.auth === "server"),
-    // admin 为特权用户（本地模式默认用户即 admin，服务模式 admin 账号）：
-    // 豁免路径沙箱（绝对路径直用、脚本环境不脱敏），不受用户级权限限制；
-    // 其余用户按沙箱约束
-    isExempt: (u) => u === "admin",
+    // 豁免语义（与 DESIGN 一致）：仅本地模式默认用户（id=admin）豁免路径沙箱——
+    // 本地模式是操作者本人机器，不受限；服务模式一律沙箱（admin 也不豁免，多租户边界一致）
+    isExempt: (u) => u === "admin" && config.auth === "local",
   })
 
   const auth = new AuthService(config.gebaiHome, config.auth)
@@ -206,7 +230,10 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
     // 无覆盖返回 undefined（引擎沿用 opts.provider 实例）
     resolveProvider: (env) => {
       const cfg = applyModelEnvOverrides(mainConfig, env)
-      return cfg === mainConfig ? undefined : createProvider(cfg)
+      // 语义比较而非引用比较：applyModelEnvOverrides 有覆盖时返回新对象；但 .env 配置的
+      // GEBAI_LLM_* 同时进入 mainConfig 与任务 env，覆盖结果与启动配置逐字段相同——
+      // 引用比较会把「无实际覆盖」误判为重建（每次任务新建 Provider + 测试注入的 fake 被绕过）
+      return JSON.stringify(cfg) === JSON.stringify(mainConfig) ? undefined : createProvider(cfg)
     },
   })
   // 定时任务：GEBAI_CRON_ENABLED=true 时启动调度器（工具注册见上，关闭时完全不注册）
@@ -260,7 +287,7 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   if (config.devReload) {
     devReload = new DevReloadManager(webRootOf(config.gebaiHome), () => {
       for (const ws of devReloadClients) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "reload" }))
+        makeWsSink(ws).send(JSON.stringify({ type: "reload" }))
       }
     })
     devReload.start()
@@ -288,25 +315,19 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
         }
         // 连接级事件推送：订阅该用户的事件日志（在线推送 = 日志条目实时投递，带 seq）。
         // 退订函数存于 WeakMap，避免被 auth.login 的 ws.data 覆盖而泄漏订阅。
+        // 发送统一走背压保护 sink（慢客户端超限断开，见 makeWsSink）
         const conn = makeWsConn(ws, deps, state)
-        let unsub = state.subscribe(conn.get().id, (entry) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(entry))
-          }
-        })
+        const sink = makeWsSink(ws)
+        let unsub = state.subscribe(conn.get().id, (entry) => sink.send(JSON.stringify(entry)))
         // 用户变更（auth.login/logout）：事件订阅重绑到新用户
         conn.onUserChange?.(() => {
           unsub()
-          unsub = state.subscribe(conn.get().id, (entry) => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(entry))
-            }
-          })
+          unsub = state.subscribe(conn.get().id, (entry) => sink.send(JSON.stringify(entry)))
         })
         wsSubs.set(ws, () => unsub())
         // 本地模式：建连即推送状态快照（服务模式在 auth.login 后推送）
         if (config.auth === "local") {
-          void state.pushSnapshot({ send: (s) => ws.send(s) }, conn).catch(() => {})
+          void state.pushSnapshot(sink, conn).catch(() => {})
         }
       },
       async message(ws, raw) {
@@ -314,14 +335,14 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
         try {
           msg = JSON.parse(raw as string)
         } catch {
-          ws.send(JSON.stringify({ type: "error", ok: false, error: "bad json" }))
+          makeWsSink(ws).send(JSON.stringify({ type: "error", ok: false, error: "bad json" }))
           return
         }
         const conn = makeWsConn(ws, deps, state)
         // 按到达顺序串行处理（见 wsMsgChains 注释）：前一条消息完成后再处理下一条，
         // 保证 auth.login 的 conn.set(u) 先于后续请求生效（Bun 不保证 async handler 串行）
         const prev = wsMsgChains.get(ws) ?? Promise.resolve()
-        const next = prev.then(() => handleWsMessage(deps, { send: (s) => ws.send(s) }, msg, conn)).catch(() => {})
+        const next = prev.then(() => handleWsMessage(deps, makeWsSink(ws), msg, conn)).catch(() => {})
         wsMsgChains.set(ws, next)
         await next
       },
