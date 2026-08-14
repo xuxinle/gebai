@@ -1,11 +1,13 @@
 import { describe, expect, mock, test } from "bun:test"
+import type { ToolInfo } from "@gebai/sdk"
 import type { RunState, SessionRunState } from "./state"
 // markdown.ts 模块级 import dompurify：bun test 无 DOM 环境 sanitize 不可用，先 mock 模块（须早于动态 import messages）
 mock.module("dompurify", () => ({ default: { sanitize: (s: unknown) => s } }))
 
 // state.ts 模块加载期访问 document（getElementById("messages") 等），bun test 无 DOM：
 // 最小 DOM mock（Proxy 兜底未定义成员为 no-op）；createElement 返回带真实子节点树的对象，
-// querySelectorAll 支持按「tag.class」（如 details.subagent-run）遍历（子Agent 容器回放断言用）
+// querySelectorAll 支持按「tag.class」（如 details.subagent-run）遍历（子Agent 容器回放断言用）；
+// textContent 语义贴近真实 DOM：读取聚合自身文本 + 子节点文本（工具卡片结构化头部断言用），写入清空子节点
 interface MockEl {
   children: MockEl[]
   className: string
@@ -16,11 +18,18 @@ interface MockEl {
 }
 function makeMockEl(tag = "div"): MockEl {
   const dataset: Record<string, string> = {}
+  let ownText = ""
   const el: MockEl = {
     children: [],
     className: "",
     tagName: tag.toUpperCase(),
-    textContent: "",
+    get textContent() {
+      return ownText + el.children.map((c) => c.textContent ?? "").join("")
+    },
+    set textContent(v: string) {
+      ownText = String(v ?? "")
+      el.children.length = 0
+    },
     append(...nodes: unknown[]) {
       for (const n of nodes) if (n && typeof n === "object") el.children.push(n as MockEl)
     },
@@ -489,5 +498,142 @@ describe("agent_run 工具卡片（头部列全部预加载子Agent 名，参数
     )
     expect(bubble.querySelector("div.agent-run-input")).toBeNull()
     expect(bubble.querySelector("div.tool-head")?.textContent).toContain("code")
+  })
+})
+
+describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式）", () => {
+  test("单标题参数仅显示值（省略 key= 前缀），标题参数不在参数区重复", () => {
+    __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])
+    const bubble = toolBubbleFor(
+      { id: "tt1", role: "tool", name: "read", content: "", arguments: { path: "src/main.ts", offset: 2 }, createdAt: 0 },
+      "",
+    )
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("read")
+    expect(head?.textContent).toContain("src/main.ts")
+    expect(head?.textContent).not.toContain("path=")
+    // path 已入标题：参数区只展示 offset（键值行），无 JSON 块
+    const rows = bubble.querySelectorAll("div.tool-kv-row")
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.textContent).toContain("offset")
+    expect(rows[0]?.textContent).toContain("2")
+    expect(bubble.querySelector("pre.tool-code")).toBeNull()
+  })
+
+  test("多标题参数 key=value 展示", () => {
+    __setToolCardMetaForTest([["cfg", { titleParams: ["a", "b"] }]])
+    const bubble = toolBubbleFor({ id: "tt2", role: "tool", name: "cfg", content: "", arguments: { a: "1", b: "x" }, createdAt: 0 }, "")
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("a=1")
+    expect(head?.textContent).toContain("b=x")
+  })
+
+  test("长路径智能截断：保留尾部文件名，悬浮 tooltip 可见全文，参数区不再重复", () => {
+    const long = `very/long/path/${"nested/".repeat(20)}file.ts`
+    __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])
+    const bubble = toolBubbleFor({ id: "tt3", role: "tool", name: "read", content: "", arguments: { path: long }, createdAt: 0 }, "")
+    const suffix = bubble.querySelector("span.tool-suffix") as HTMLElement | null
+    expect(suffix?.textContent?.startsWith("· …")).toBe(true)
+    expect(suffix?.textContent?.endsWith("file.ts")).toBe(true)
+    expect(suffix?.dataset.tip).toContain(long)
+    // path 全部入标题：无参数区
+    expect(bubble.querySelector("div.tool-kv")).toBeNull()
+    expect(bubble.querySelector("pre.tool-code")).toBeNull()
+  })
+
+  test("嵌套参数回退 JSON 高亮块（无键值行）", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor({ id: "tt4", role: "tool", name: "some_tool", content: "", arguments: { cfg: { a: 1 } }, createdAt: 0 }, "")
+    expect(bubble.querySelector("pre.tool-code")).not.toBeNull()
+    expect(bubble.querySelector("div.tool-kv")).toBeNull()
+  })
+
+  test("超长参数自动折叠为「查看参数」折叠块", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor({ id: "tt5", role: "tool", name: "some_tool", content: "", arguments: { text: "x".repeat(1000) }, createdAt: 0 }, "")
+    const fold = bubble.querySelector("details.tool-fold")
+    expect(fold).not.toBeNull()
+    expect(fold?.textContent).toContain("查看参数")
+  })
+
+  test("显式 json 声明：标题参数不省略、键值行不生效（完整 JSON 保真展示）", () => {
+    __setToolCardMetaForTest([["read", { titleParams: ["path"], args: "json" }]])
+    const bubble = toolBubbleFor({ id: "tt6", role: "tool", name: "read", content: "", arguments: { path: "a.ts" }, createdAt: 0 }, "")
+    expect(bubble.querySelector("pre.tool-code")).not.toBeNull()
+    expect(bubble.querySelector("div.tool-kv")).toBeNull()
+  })
+
+  test("显式 kv 声明：嵌套值紧凑 JSON 单行展示", () => {
+    __setToolCardMetaForTest([["cfg", { args: "kv" }]])
+    const bubble = toolBubbleFor({ id: "tt7", role: "tool", name: "cfg", content: "", arguments: { opts: { a: 1 } }, createdAt: 0 }, "")
+    expect(bubble.querySelector("pre.tool-code")).toBeNull()
+    const rows = bubble.querySelectorAll("div.tool-kv-row")
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.textContent).toContain("opts")
+    expect(rows[0]?.textContent).toContain('{"a":1}')
+  })
+})
+
+describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", () => {
+  const meta: Array<[string, NonNullable<ToolInfo["card"]>]> = [["edit", { titleParams: ["path"], args: "edits", codeField: "edits" }]]
+
+  test("多处修改：编号 + 每处旧/新块，path 入标题不重复", () => {
+    __setToolCardMetaForTest(meta)
+    const bubble = toolBubbleFor(
+      {
+        id: "te1",
+        role: "tool",
+        name: "edit",
+        content: "",
+        arguments: { path: "src/a.ts", edits: [{ oldString: "foo", newString: "bar" }, { oldString: "x", newString: "y" }] },
+        createdAt: 0,
+      },
+      "",
+    )
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("edit")
+    expect(head?.textContent).toContain("src/a.ts")
+    // 无 JSON 块；两处修改各有编号与旧/新块
+    expect(bubble.querySelector("pre.tool-code")).toBeNull()
+    const idx = bubble.querySelectorAll("div.tool-edit-idx")
+    expect(idx.length).toBe(2)
+    expect(idx[0]?.textContent).toBe("修改 1/2")
+    const olds = bubble.querySelectorAll("pre.tool-edit-old")
+    const news = bubble.querySelectorAll("pre.tool-edit-new")
+    expect(olds.length).toBe(2)
+    expect(news.length).toBe(2)
+    expect(olds[0]?.textContent).toBe("foo")
+    expect(news[0]?.textContent).toBe("bar")
+  })
+
+  test("单处修改无编号；纯新增只显示新块", () => {
+    __setToolCardMetaForTest(meta)
+    const bubble = toolBubbleFor(
+      { id: "te2", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ oldString: "", newString: "added" }] }, createdAt: 0 },
+      "",
+    )
+    expect(bubble.querySelector("div.tool-edit-idx")).toBeNull()
+    expect(bubble.querySelector("pre.tool-edit-old")).toBeNull()
+    expect(bubble.querySelector("pre.tool-edit-new")?.textContent).toBe("added")
+  })
+
+  test("edits 形态不符（非字符串对数组）回退 JSON 高亮块", () => {
+    __setToolCardMetaForTest(meta)
+    const bubble = toolBubbleFor({ id: "te3", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: { bad: 1 } }, createdAt: 0 }, "")
+    expect(bubble.querySelector("div.tool-edits")).toBeNull()
+    expect(bubble.querySelector("pre.tool-code")).not.toBeNull()
+  })
+
+  test("超长修改内容自动折叠", () => {
+    __setToolCardMetaForTest(meta)
+    const bubble = toolBubbleFor(
+      { id: "te4", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ oldString: "o".repeat(500), newString: "n".repeat(500) }] }, createdAt: 0 },
+      "",
+    )
+    const fold = bubble.querySelector("details.tool-fold")
+    expect(fold).not.toBeNull()
+    expect(fold?.textContent).toContain("查看参数")
+    // 折叠块内仍是旧/新对比块
+    expect(fold?.querySelectorAll("pre.tool-edit-old").length).toBe(1)
   })
 })

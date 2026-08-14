@@ -181,6 +181,7 @@ export const writeTool: Tool = {
 export const lsTool: Tool = {
   name: "ls",
   description: "列出目录内容（文件/子目录、大小）。路径默认会话工作目录。",
+  card: { titleParams: ["path"] },
   parameters: schema({ path: { type: "string", description: "目录路径（默认 .）" } }),
   async execute(args, ctx) {
     const path = ctx.resolvePath(args.path ? String(args.path) : ".")
@@ -196,6 +197,7 @@ export const lsTool: Tool = {
 export const deleteFileTool: Tool = {
   name: "delete_file",
   description: "删除文件或目录（递归）。删除不可恢复，谨慎使用。",
+  card: { titleParams: ["path"] },
   parameters: schema({ path: { type: "string" } }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
@@ -207,6 +209,7 @@ export const deleteFileTool: Tool = {
 export const moveFileTool: Tool = {
   name: "move_file",
   description: "移动或重命名文件/目录。",
+  card: { titleParams: ["from", "to"] },
   parameters: schema({ from: { type: "string" }, to: { type: "string" } }, ["from", "to"]),
   async execute(args, ctx) {
     const from = ctx.resolvePath(String(args.from))
@@ -219,6 +222,7 @@ export const moveFileTool: Tool = {
 export const grepTool: Tool = {
   name: "grep",
   description: "在会话目录中按正则表达式递归搜索文本内容，返回 文件:行号: 匹配行。path 可限定子目录。",
+  card: { titleParams: ["pattern"] },
   parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" }, ignoreCase: { type: "boolean" } }, ["pattern"]),
   async execute(args, ctx) {
     let re: RegExp
@@ -268,6 +272,7 @@ function globToRegExp(pattern: string): RegExp {
 export const searchFilesTool: Tool = {
   name: "search_files",
   description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话目录中递归查找文件，返回相对路径。path 可限定子目录。",
+  card: { titleParams: ["pattern"] },
   parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" } }, ["pattern"]),
   async execute(args, ctx) {
     const re = globToRegExp(String(args.pattern ?? ""))
@@ -602,6 +607,7 @@ export const saveTool: Tool = {
   interaction: "realtime",
   description:
     "保存 HTML 小工具到服务端小工具库（供标题栏「小工具」弹窗随时加载使用）。工作流：先用 render_html 在聊天中调试预览，满意后调用本工具保存。scope=public 公用（所有用户可见）/ private 用户私有（默认）。同名工具覆盖更新。工具名仅限字母/数字/下划线/中文（不含 . / 等分隔符）。无需审批。",
+  card: { titleParams: ["name"] },
   parameters: schema(
     {
       name: { type: "string", description: "工具名（1-40 字符，字母/数字/下划线/中文；列表与加载均按此名）" },
@@ -629,6 +635,7 @@ export const deleteTool: Tool = {
   interaction: "realtime",
   description: "删除已保存的 HTML 小工具（按名称 + 范围，不可恢复）。私有工具仅本人可删；公用工具删除影响所有用户，需审批。",
   requiresApproval: true,
+  card: { titleParams: ["name"] },
   parameters: schema(
     {
       name: { type: "string", description: "要删除的工具名" },
@@ -648,6 +655,7 @@ export const editTool: Tool = {
   name: "edit",
   description:
     "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动。原文不匹配则整体失败不落盘；改动较多或行号容易偏移时改用 apply_patch 应用 unified diff（一次多 hunk、容错更强）。",
+  card: { titleParams: ["path"], args: "edits", codeField: "edits" },
   parameters: schema(
     {
       path: { type: "string" },
@@ -736,7 +744,7 @@ export const applyPatchTool: Tool = {
   name: "apply_patch",
   description:
     "应用 unified diff 补丁到文件（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造，---/+++ 文件头可省略），格式：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\n-旧行\n+新行）；全部 hunk 校验通过才整体落盘（原子），任一 hunk 不匹配整体失败不修改；dryRun=true 仅预演不落盘。单次仅处理一个文件（多文件补丁请分文件调用）。改动较多或行号容易偏移时优先于 edit 使用。",
-  card: { args: "code", codeField: "patch", codeLang: "diff" },
+  card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff" },
   parameters: schema(
     {
       path: { type: "string", description: "目标文件路径" },

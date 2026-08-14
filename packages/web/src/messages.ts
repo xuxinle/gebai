@@ -19,7 +19,7 @@ import {
   type SessionRunState,
 } from "./state"
 import { blockText, highlightedCode, markdownBlock } from "./markdown"
-import { askUserBubble, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, shortToolName, todoBubble, toolBubbleFor, toolOutput, toolTitleSuffix } from "./tool-cards"
+import { askUserBubble, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
@@ -624,16 +624,16 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
     }
     const head = entry.wrapper.querySelector(".tool-head")
     if (head) {
-      // 完成态保留标题后缀（titleParams 声明的参数不因完成而丢失）
-      let suffix = ""
+      // 完成态：重建结构化头部（✓ 图标，保留标题后缀——titleParams 声明的参数不因完成而丢失）
+      let argsObj: Record<string, unknown> | null = null
       if (entry.argsText) {
         try {
-          suffix = toolTitleSuffix(name, JSON.parse(entry.argsText) as Record<string, unknown>)
+          argsObj = JSON.parse(entry.argsText) as Record<string, unknown>
         } catch {
-          /* 非 JSON 参数：无后缀 */
+          /* 非 JSON 参数：无标题后缀 */
         }
       }
-      head.textContent = `✓ ${displayToolName(name)}${suffix}`
+      head.replaceWith(toolHead("done", name, argsObj))
     }
     const bubble = entry.wrapper.querySelector(".bubble")
     if (bubble && output) {

@@ -595,11 +595,13 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 **工具卡片展示元数据（`Tool.card`，注册时声明）**
 
 - 工具定义可声明 `card: { titleParams?, args?, codeField?, codeLang? }`，经 `session.tool.get` 随 ToolInfo 下发，前端按声明渲染工具调用卡片，**不在前端硬编码工具名**：
-  - `titleParams`：参数名列表，其值直接拼入卡片标题（`🛠 name · key=value`，长值截断），简单工具的关键参数（如 `open` 的 url、`write` 的 path）一目了然
-  - `args`：参数区模式——`"json"`（默认，参数以 JSON 块展示）/ `"none"`（不展示参数区，如 `current_time`/`env_detect`）/ `"code"`（`codeField` 参数渲染为语法高亮代码块，如 `sh` 的 command）/ `"block"`（**结果直出内容块**：调用不显示通用工具卡片，结果直接渲染 blocks 内容块，如 `draw`/`diff`/`render_html`）
-  - 已声明示例：全局 `sh`/`py`/`write`（code 模式）、`read`/`fetch_url`/`agent_load`/`agent_run`（标题参数）、`current_time`/`system_info`/`env_detect`（无参数区）、`draw`/`diff`/`render_html`（block 模式）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
-  - **`agent_run` 专用卡片**：卡片头部直接列出**全部预加载子Agent 名**（`🛠 agent_run · code + playwright`，以 `+` 连接、不截断、省略 `key=` 前缀）；参数区**只显示输入提示词**（任务指令全文、pre-wrap 展示）；实时卡片完成态（`✓`）保留标题后缀，参数区不因执行完成而消失（执行中与完成后均可见）
-  - 元数据拉取失败或未声明时按默认渲染（标题仅工具名、参数 JSON 块），不影响功能
+  - **卡片头部为结构化布局**（图标 `🛠`/`✓` + 工具名 + 标题参数后缀三个 span）：后缀**单行省略**不撑爆卡片头，截断时悬浮 tooltip 可见全文；实时调用、完成态更新（`appendToolResult` 重建头部）与历史重载三态共用同一渲染入口（`toolHead`）
+  - `titleParams`：参数名列表，其值直接拼入卡片标题——**单参数仅显示值**（`🛠 read · src/main.ts`，省略 `key=` 前缀），多参数 `key=value`（`·` 连接）；**长值智能截断**（URL 保留头部、路径型保留尾部文件名、其余截断尾部），简单工具的关键参数（如 `open` 的 url、`write` 的 path）一目了然
+  - `args`：参数区模式——**缺省自适应**（扁平标量参数渲染为**键值行**：参数名 + 值 pre-wrap 展示，比 JSON 块更可读；嵌套结构回退 JSON 语法高亮）/ `"json"`（强制完整 JSON 高亮，标题参数不省略）/ `"kv"`（强制键值行，嵌套值紧凑 JSON 单行展示）/ `"none"`（不展示参数区，如 `current_time`/`env_detect`）/ `"code"`（`codeField` 参数渲染为语法高亮代码块，其余参数键值行/JSON 附注，如 `sh` 的 command）/ `"edits"`（`codeField` 数组参数的 `{oldString,newString}` 项渲染为**旧（红）/新（绿）对比块**——多处修改编号「修改 i/n」，空串侧省略（纯新增/纯删除），形态不符回退自适应渲染；`edit` 工具因此不再显示 JSON）/ `"block"`（**结果直出内容块**：调用不显示通用工具卡片，结果直接渲染 blocks 内容块，如 `draw`/`diff`/`render_html`）
+  - **标题参数不在参数区重复展示**（titleParams 已入标题的键从参数区省略，如 `read` 参数区只显示 offset/limit；全部参数入标题时无参数区）；**超长参数区自动折叠**（>800 字符默认收起为「查看参数（N 字符）」，点击展开，与输出折叠同款交互）
+  - 已声明示例：全局 `sh`/`py`/`write`（code 模式）、`edit`（edits 模式，标题参数 path）、`read`/`fetch_url`/`agent_load`/`agent_run`/`ls`/`delete_file`/`move_file`/`grep`/`search_files`/`save_tool`/`delete_tool`（标题参数）、`apply_patch`（code 模式 + 标题参数 path）、`current_time`/`system_info`/`env_detect`（无参数区）、`draw`/`diff`/`render_html`（block 模式）；code `search_symbols`/`analyze`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
+  - **`agent_run` 专用卡片**：卡片头部直接列出**全部预加载子Agent 名**（`🛠 agent_run · code + playwright`，以 `+` 连接、不截断、省略 `key=` 前缀——后缀 span 带 `wrap` 标记允许多行完整展示）；参数区**只显示输入提示词**（任务指令全文、pre-wrap 展示，不参与自动折叠）；实时卡片完成态（`✓`）保留标题后缀，参数区不因执行完成而消失（执行中与完成后均可见）
+  - 元数据拉取失败或未声明时按默认渲染（标题仅工具名、参数区按缺省自适应规则），不影响功能
 
 #### 新会话执行安全限制
 

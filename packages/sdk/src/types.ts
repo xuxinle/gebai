@@ -265,7 +265,7 @@ export interface ToolInfo {
   group: "global" | string
   approvalRequired: boolean
   /** 卡片展示元数据（同服务端 Tool.card，前端渲染工具卡片用）。 */
-  card?: { titleParams?: string[]; args?: "json" | "none" | "code" | "block"; codeField?: string; codeLang?: string }
+  card?: { titleParams?: string[]; args?: "json" | "kv" | "none" | "code" | "edits" | "block"; codeField?: string; codeLang?: string }
 }
 
 export interface SubAgentInfo {

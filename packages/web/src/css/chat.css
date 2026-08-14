@@ -230,10 +230,16 @@
 .msg-act:hover { background: var(--bg-hover); color: var(--text); }
 .msg-act.done { color: var(--success); cursor: default; }
 .msg.tool { max-width: 100%; }
-.msg.tool .bubble .tool-head { font-family: var(--font-ui); font-weight: 600; font-size: 13px; color: var(--tool); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
-/* 工具长输出自动折叠：超长默认收起，点击展开 */
-.msg.tool .bubble .tool-out { margin-top: 6px; }
-.msg.tool .bubble .tool-out summary {
+.msg.tool .bubble .tool-head { font-family: var(--font-ui); font-weight: 600; font-size: 13px; color: var(--tool); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; min-width: 0; }
+.msg.tool .bubble .tool-head .tool-ico { flex: none; }
+.msg.tool .bubble .tool-head .tool-name { flex: none; white-space: nowrap; }
+/* 标题参数后缀：单行省略不撑爆卡片头（截断时悬浮 tooltip 见全文） */
+.msg.tool .bubble .tool-head .tool-suffix { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+/* agent_run 子Agent 列表不截断：允许换行完整展示 */
+.msg.tool .bubble .tool-head .tool-suffix.wrap { white-space: pre-wrap; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+/* 工具长输出/长参数自动折叠：超长默认收起，点击展开 */
+.msg.tool .bubble .tool-out, .msg.tool .bubble .tool-fold { margin-top: 6px; }
+.msg.tool .bubble .tool-out summary, .msg.tool .bubble .tool-fold summary {
   cursor: pointer;
   font-size: 13px;
   color: var(--tool);
@@ -244,9 +250,9 @@
   border-radius: 999px;
   transition: background var(--transition);
 }
-.msg.tool .bubble .tool-out summary:hover { background: color-mix(in srgb, var(--tool) 12%, transparent); }
-.msg.tool .bubble .tool-out[open] summary { background: color-mix(in srgb, var(--tool) 12%, transparent); }
-.msg.tool .bubble .tool-out pre {
+.msg.tool .bubble .tool-out summary:hover, .msg.tool .bubble .tool-fold summary:hover { background: color-mix(in srgb, var(--tool) 12%, transparent); }
+.msg.tool .bubble .tool-out[open] summary, .msg.tool .bubble .tool-fold[open] summary { background: color-mix(in srgb, var(--tool) 12%, transparent); }
+.msg.tool .bubble .tool-out pre, .msg.tool .bubble .tool-fold pre {
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -254,13 +260,25 @@
   overflow: visible; /* 内容随卡片自然伸展，不截断 */
   margin-top: 8px;
 }
-.msg.tool .bubble .tool-out code {
+.msg.tool .bubble .tool-out code, .msg.tool .bubble .tool-fold code {
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 键值行参数块：扁平参数的紧凑可读展示（参数名 + 值，值 pre-wrap 不截断） */
+.msg.tool .bubble .tool-kv { margin-top: 4px; display: flex; flex-direction: column; gap: 3px; }
+.msg.tool .bubble .tool-kv-row { display: flex; gap: 8px; align-items: baseline; }
+.msg.tool .bubble .tool-kv-key { flex: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-faint); }
+.msg.tool .bubble .tool-kv-val { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.msg.tool .bubble .tool-fold .tool-kv { margin-top: 8px; }
+/* edits 参数块：每处修改旧（红）/ 新（绿）对比展示（edit 工具） */
+.msg.tool .bubble .tool-edits { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.msg.tool .bubble .tool-edit-idx { font-family: var(--font-ui); font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+.msg.tool .bubble pre.tool-edit-old, .msg.tool .bubble pre.tool-edit-new { margin: 0; padding: 6px 10px; border-radius: var(--radius-sm); border-left: 3px solid; }
+.msg.tool .bubble pre.tool-edit-old { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--bg-inset)); }
+.msg.tool .bubble pre.tool-edit-new { border-left-color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--bg-inset)); }
 /* 工具卡内所有代码块统一换行策略：长 token 强制断行，绝不横向溢出 */
 .msg.tool .bubble pre {
   white-space: pre-wrap;

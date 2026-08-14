@@ -130,10 +130,14 @@ export interface Tool {
    *  multi_turn=至少多轮交互（如 ask_user/draw，飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。 */
   interaction?: Exclude<InteractionMode, "none">
   /** 卡片展示元数据（注册时声明，前端按声明渲染卡片，不硬编码工具名）：
-   *  titleParams：参数名列表，其值直接拼入卡片标题（简单工具的关键参数，如 write 的 path）；
-   *  args：参数展示模式——"json"（默认，参数以 JSON 块展示）/ "none"（不展示参数区）/ "code"（codeField 参数渲染为代码块）/ "block"（结果直出内容块，调用不显示通用卡片，如 draw/diff/render_html）；
-   *  codeField/codeLang：args="code" 时对应的代码字段名与语言（如 sh 的 command/bash）。 */
-  card?: { titleParams?: string[]; args?: "json" | "none" | "code" | "block"; codeField?: string; codeLang?: string }
+   *  titleParams：参数名列表，其值直接拼入卡片标题（简单工具的关键参数，如 write 的 path；单参数仅显示值、多参数 key=value，
+   *    长值智能截断——URL 保留头部、路径型保留尾部，截断时悬浮见全文；标题参数不在参数区重复展示）；
+   *  args：参数展示模式——缺省自适应（扁平标量参数渲染为键值行，嵌套结构 JSON 高亮）/ "json"（强制完整 JSON 高亮）/
+   *    "kv"（强制键值行，嵌套值紧凑 JSON）/ "none"（不展示参数区）/ "code"（codeField 参数渲染为代码块，其余参数键值行/JSON 附注）/
+   *    "edits"（codeField 数组参数的 {oldString,newString} 项渲染为旧(红)/新(绿)对比块，如 edit 的 edits）/
+   *    "block"（结果直出内容块，调用不显示通用卡片，如 draw/diff/render_html）；超长参数区自动折叠；
+   *  codeField/codeLang：args="code"/"edits" 时对应的代码/修改数组字段名与语言（如 sh 的 command/bash、edit 的 edits）。 */
+  card?: { titleParams?: string[]; args?: "json" | "kv" | "none" | "code" | "edits" | "block"; codeField?: string; codeLang?: string }
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>
 }
 

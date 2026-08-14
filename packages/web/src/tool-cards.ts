@@ -2,6 +2,7 @@ import type { Message, TodoItem, ToolInfo } from "@gebai/sdk"
 import { client, composer, el, getCurrentSession, getSubAgentNames, input, todoState } from "./state"
 import { codeBlock, highlightedCode, markdownBlock } from "./markdown"
 import { loadLocalEnv, saveLocalEnv } from "./env-local"
+import { tip } from "./ui"
 
 /* ---------- 工具名解析：`{agent}_{tool}` → 子Agent 名 + 短工具名 ---------- */
 
@@ -97,27 +98,64 @@ export function isBlockOnly(name: string): boolean {
   return metaOf(name)?.args === "block"
 }
 
-/** 标题参数拼接：titleParams 声明的参数值直接拼入卡片标题（`· key=value`，长值截断）。 */
-function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Record<string, unknown> | null): string {
-  if (!meta?.titleParams?.length || !args) return ""
+/* ---------- 卡片头部（图标 + 工具名 + 标题参数后缀，结构化灵活展示） ---------- */
+
+/** 标题后缀信息：text 展示文本（含前导 `·`）；full 未截断全文（仅截断时设置，悬浮 tooltip 可见）；wrap 允许多行完整展示。 */
+interface TitleSuffixInfo {
+  text: string
+  full?: string
+  wrap?: boolean
+}
+
+/** 长值智能截断：URL 保留头部（域名优先），路径型保留尾部（文件名优先），其余截断尾部。 */
+function smartTruncate(s: string, max: number): string {
+  if (s.length <= max) return s
+  if (/^https?:\/\//.test(s)) return `${s.slice(0, max - 1)}…`
+  if (s.includes("/") || s.includes("\\")) return `…${s.slice(-(max - 1))}`
+  return `${s.slice(0, max - 1)}…`
+}
+
+/** 标题参数拼接：titleParams 声明的参数值拼入标题——单参数仅显示值（`· src/main.ts`，省略 `key=` 前缀），
+ *  多参数 `key=value`（`·` 连接）；长值智能截断，截断时 full 携带全文。 */
+function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Record<string, unknown> | null): TitleSuffixInfo | null {
+  if (!meta?.titleParams?.length || !args) return null
+  const single = meta.titleParams.length === 1
   const parts: string[] = []
+  const fullParts: string[] = []
   for (const k of meta.titleParams) {
     const v = args[k]
     if (v === undefined || v === null || v === "") continue
     const s = String(v)
-    parts.push(`${k}=${s.length > 24 ? `${s.slice(0, 24)}…` : s}`)
+    parts.push(single ? smartTruncate(s, 48) : `${k}=${smartTruncate(s, 24)}`)
+    fullParts.push(single ? s : `${k}=${s}`)
   }
-  return parts.length ? ` · ${parts.join(" · ")}` : ""
+  if (!parts.length) return null
+  const text = `· ${parts.join(" · ")}`
+  const full = `· ${fullParts.join(" · ")}`
+  return { text, full: full === text ? undefined : full }
 }
 
-/** 按工具注册声明的标题后缀（`· key=value`）：实时卡片创建与完成态复用（与历史 toolCard 一致）。
- *  agent_run 专用：头部直接列出全部预加载子Agent 名（`· code + playwright`，不截断、省略 `key=` 前缀）。 */
-export function toolTitleSuffix(name: string, args: Record<string, unknown> | null): string {
+/** 标题后缀统一入口：agent_run 专用（头部直接列出全部预加载子Agent 名，`+` 连接、不截断、允许多行）；其余按 titleParams 声明。 */
+function titleSuffixInfo(name: string, args: Record<string, unknown> | null): TitleSuffixInfo | null {
   if (isAgentRun(name)) {
     const agents = Array.isArray(args?.agents) ? args.agents.map(String).filter(Boolean) : []
-    return agents.length ? ` · ${agents.join(" + ")}` : ""
+    return agents.length ? { text: `· ${agents.join(" + ")}`, wrap: true } : null
   }
   return titleSuffix(metaOf(name), args)
+}
+
+/** 工具卡片头部：图标（🛠 调用中 / ✓ 完成）+ 工具名 + 标题参数后缀（后缀单行省略不撑爆头部，截断时悬浮见全文）。
+ *  实时调用、完成态更新与历史重载共用，保证三态一致。 */
+export function toolHead(state: "call" | "done", name: string, args: Record<string, unknown> | null): HTMLElement {
+  const head = el("div", "tool-head")
+  head.append(el("span", "tool-ico", state === "done" ? "✓" : "🛠"), el("span", "tool-name", displayToolName(name)))
+  const sfx = titleSuffixInfo(name, args)
+  if (sfx) {
+    const span = el("span", sfx.wrap ? "tool-suffix wrap" : "tool-suffix", sfx.text)
+    if (sfx.full) tip(span, sfx.full)
+    head.appendChild(span)
+  }
+  return head
 }
 
 /** agent_run 参数区：输入提示词以块展示（与普通工具参数块同款样式，预加载子Agent 名已在卡片头部列出）。 */
@@ -132,7 +170,64 @@ function agentRunArgsBlock(args: string): HTMLElement | null {
   return el("div", "agent-run-input", obj.input)
 }
 
-/** 参数区渲染：按服务端 card 声明——"none" 不展示；"code" 渲染 codeField 为代码块；默认 JSON 高亮。返回 null 表示无参数区。 */
+/* ---------- 参数区（键值行 / JSON 高亮 / 代码块，超长自动折叠） ---------- */
+
+/** 参数区超长折叠阈值（字符数）：超出后默认收起为「查看参数」折叠块（与输出折叠同款交互）。 */
+const ARGS_FOLD_CHARS = 800
+
+/** 参数值标量判定：标量走键值行，嵌套结构回退 JSON 高亮。 */
+function isScalar(v: unknown): boolean {
+  return v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean"
+}
+
+/** 键值行参数块：扁平参数的紧凑可读展示（嵌套值以紧凑 JSON 单行展示，空串显示为 ""）。 */
+function kvArgsBlock(obj: Record<string, unknown>): HTMLElement {
+  const wrap = el("div", "tool-kv")
+  for (const [k, v] of Object.entries(obj)) {
+    const row = el("div", "tool-kv-row")
+    row.appendChild(el("span", "tool-kv-key", k))
+    row.appendChild(el("div", "tool-kv-val", isScalar(v) ? (v === "" ? '""' : String(v)) : JSON.stringify(v)))
+    wrap.appendChild(row)
+  }
+  return wrap
+}
+
+/** 超长参数内容包装为折叠块（默认收起，点击展开完整参数）。 */
+function foldArgsBlock(inner: HTMLElement, chars: number): HTMLElement {
+  if (chars <= ARGS_FOLD_CHARS) return inner
+  const details = document.createElement("details")
+  details.className = "tool-fold"
+  details.append(el("summary", undefined, `查看参数（${chars} 字符）`), inner)
+  return details
+}
+
+/** edits 参数项判定：{ oldString, newString } 字符串对。 */
+function isEditPair(v: unknown): v is { oldString: string; newString: string } {
+  return !!v && typeof v === "object" && typeof (v as { oldString?: unknown }).oldString === "string" && typeof (v as { newString?: unknown }).newString === "string"
+}
+
+/** edits 参数块：每处修改渲染为旧（红）/ 新（绿）对比块（多处编号），比 JSON 数组直观；空串侧省略（纯新增/纯删除）。 */
+function editsArgsBlock(list: Array<{ oldString: string; newString: string }>): HTMLElement {
+  const wrap = el("div", "tool-edits")
+  list.forEach((e, i) => {
+    if (list.length > 1) wrap.appendChild(el("div", "tool-edit-idx", `修改 ${i + 1}/${list.length}`))
+    if (e.oldString) wrap.appendChild(el("pre", "tool-edit-old", e.oldString))
+    if (e.newString) wrap.appendChild(el("pre", "tool-edit-new", e.newString))
+  })
+  return wrap
+}
+
+/** code/edits 模式共用：其余参数附注（codeField 与标题参数不重复）；扁平标量以键值行展示。返回 null 表示无其余参数。 */
+function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["card"]>): HTMLElement | null {
+  const rest: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) if (k !== meta.codeField && !meta.titleParams?.includes(k)) rest[k] = v
+  if (!Object.keys(rest).length) return null
+  return Object.values(rest).every(isScalar) ? kvArgsBlock(rest) : el("div", "tool-rest", JSON.stringify(rest, null, 2))
+}
+
+/** 参数区渲染：按服务端 card 声明——"none" 不展示；"code" 渲染 codeField 为代码块；"edits" 渲染 codeField 数组为旧/新对比块
+ *  （其余参数键值行/JSON 附注）；"kv" 强制键值行；"json" 强制完整 JSON 高亮（不省略标题参数）；缺省自适应（扁平标量→键值行，嵌套→JSON 高亮）。
+ *  标题参数（titleParams）已在卡片标题展示，参数区不再重复（显式 "json" 声明除外）；超长参数自动折叠。返回 null 表示无参数区。 */
 function toolArgsBlock(args: string, meta?: NonNullable<ToolInfo["card"]>): HTMLElement | null {
   let obj: Record<string, unknown> | null = null
   try {
@@ -141,26 +236,45 @@ function toolArgsBlock(args: string, meta?: NonNullable<ToolInfo["card"]>): HTML
     /* 非 JSON，按纯文本展示 */
   }
   if (meta?.args === "none") return null
+  if (obj && !Object.keys(obj).length) return null
   if (meta?.args === "code" && obj && meta.codeField) {
     const codeText = obj[meta.codeField]
     if (typeof codeText === "string" && codeText.trim()) {
       const wrap = el("div")
       wrap.appendChild(codeBlock(meta.codeLang ?? "", codeText))
-      // 其余参数（如 write 的 path）以 JSON 附注展示
-      const rest: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(obj)) if (k !== meta.codeField) rest[k] = v
-      if (Object.keys(rest).length) {
-        const note = el("div", "tool-rest", JSON.stringify(rest, null, 2))
-        wrap.appendChild(note)
-      }
+      const note = restArgsNote(obj, meta)
+      if (note) wrap.appendChild(note)
       return wrap
     }
   }
-  // 默认：参数 JSON 语法高亮
+  if (meta?.args === "edits" && obj && meta.codeField) {
+    const list = obj[meta.codeField]
+    if (Array.isArray(list) && list.length && list.every(isEditPair)) {
+      const wrap = el("div")
+      wrap.appendChild(editsArgsBlock(list))
+      const note = restArgsNote(obj, meta)
+      if (note) wrap.appendChild(note)
+      const chars = list.reduce((n, e) => n + e.oldString.length + e.newString.length, 0)
+      return foldArgsBlock(wrap, chars)
+    }
+    /* 形态不符（非 edits 数组）：回退自适应渲染 */
+  }
+  // 标题已展示的参数不在参数区重复（显式 "json" 声明除外——强制完整 JSON 保真展示）
+  let shown = obj
+  if (shown && meta?.args !== "json" && meta?.titleParams?.length) {
+    shown = Object.fromEntries(Object.entries(shown).filter(([k]) => !meta.titleParams!.includes(k)))
+  }
+  if (shown && !Object.keys(shown).length) return null
+  // 键值行：显式 "kv" 声明，或缺省自适应（扁平标量参数）
+  if (shown && (meta?.args === "kv" || (meta?.args !== "json" && Object.values(shown).every(isScalar)))) {
+    return foldArgsBlock(kvArgsBlock(shown), JSON.stringify(shown).length)
+  }
+  // JSON 语法高亮：嵌套结构 / 显式 "json" / 非 JSON 纯文本
+  const text = shown ? JSON.stringify(shown, null, 2) : args
   const pre = el("pre")
   pre.className = "tool-code"
-  pre.appendChild(highlightedCode("json", args))
-  return pre
+  pre.appendChild(highlightedCode("json", text))
+  return foldArgsBlock(pre, text.length)
 }
 
 function toolBubble(content: string): HTMLElement {
@@ -168,7 +282,8 @@ function toolBubble(content: string): HTMLElement {
   // 工具结果卡片：`✓ name\n<输出>`
   const result = content.match(/^✓\s*([^\n]+)\n?([\s\S]*)$/)
   if (result) {
-    const head = el("div", "tool-head", `✓ ${result[1]}`)
+    const head = el("div", "tool-head")
+    head.append(el("span", "tool-ico", "✓"), el("span", "tool-name", result[1].trim()))
     bubble.appendChild(head)
     const out = result[2].trim()
     if (out) bubble.appendChild(toolOutput(out))
@@ -185,8 +300,7 @@ function toolBubble(content: string): HTMLElement {
         /* 非 JSON：无标题后缀 */
       }
     }
-    const head = el("div", "tool-head", `🛠 ${displayToolName(parsed.name)}${toolTitleSuffix(parsed.name, argsObj)}`)
-    bubble.appendChild(head)
+    bubble.appendChild(toolHead("call", parsed.name, argsObj))
     if (parsed.args) {
       const ab = isAgentRun(parsed.name) ? agentRunArgsBlock(parsed.args) : toolArgsBlock(parsed.args, metaOf(parsed.name))
       if (ab) bubble.appendChild(ab)
@@ -356,8 +470,7 @@ export function toolCard(msg: Message): HTMLElement {
   }
   const bubble = el("div", "bubble")
   const meta = metaOf(msg.name ?? "")
-  const head = el("div", "tool-head", `🛠 ${msg.name ? displayToolName(msg.name) : "tool"}${toolTitleSuffix(msg.name ?? "", msg.arguments ?? null)}`)
-  bubble.appendChild(head)
+  bubble.appendChild(toolHead("call", msg.name ?? "tool", msg.arguments ?? null))
   if (msg.arguments && Object.keys(msg.arguments).length) {
     const ab = isAgentRun(msg.name ?? "") ? agentRunArgsBlock(JSON.stringify(msg.arguments, null, 2)) : toolArgsBlock(JSON.stringify(msg.arguments, null, 2), meta)
     if (ab) bubble.appendChild(ab)
