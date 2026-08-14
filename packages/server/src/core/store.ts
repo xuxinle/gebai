@@ -51,23 +51,49 @@ export function toSessionInfo(s: SessionData): SessionInfo {
   }
 }
 
+/** CJK 字符判定（统一表意文字/假名/谚文/全角符号区段；charCode 范围判断比正则逐字符快）。 */
+function isCjkChar(ch: string): boolean {
+  const c = ch.charCodeAt(0)
+  return (
+    (c >= 0x3000 && c <= 0x303f) ||
+    (c >= 0x3040 && c <= 0x30ff) ||
+    (c >= 0x3400 && c <= 0x4dbf) ||
+    (c >= 0x4e00 && c <= 0x9fff) ||
+    (c >= 0xf900 && c <= 0xfaff) ||
+    (c >= 0xff00 && c <= 0xffef)
+  )
+}
+
+/** 文本 token 估算（CJK 感知）：CJK 字符约 1 token/字，其余（含 ASCII）约 4 字符/token。
+ *  中文场景下 chars/4 会系统性低估 2~4 倍，导致压缩阈值触发过晚、真实窗口提前打满。
+ *  引擎（增量估算）与会话列表展示（estimateCtxTokens）共用同一口径。 */
+export function estimateCharsTokens(text: string): number {
+  let cjk = 0
+  let other = 0
+  for (const ch of text) {
+    if (isCjkChar(ch)) cjk++
+    else other++
+  }
+  return Math.ceil(cjk + other / 4)
+}
+
 /**
- * 上下文 token 估算（chars/4，会话列表展示兜底口径，单位 k）：忽略 system 角色（system 为运行时拼装、
+ * 上下文 token 估算（CJK 感知，会话列表展示兜底口径，单位 k）：忽略 system 角色（system 为运行时拼装、
  * 不随会话持久化，统一口径避免显示值在运行结束前后回跳）。仅在无 usage 真值（老会话/接口不返回 usage）时
  * 由 toSessionInfo/任务结束持久化使用；有真值时的口径见 engine（真实 input tokens + 未发送增量估算）。
  */
 export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown; toolCalls?: Array<{ name?: string; arguments?: unknown }>; session?: boolean; subAgent?: boolean }>): number {
-  let chars = 0
+  let tokens = 0
   for (const m of msgs) {
     if (m.role === "system") continue
     // 新会话执行过程消息不进主 LLM 上下文：不计入上下文占用（会话列表展示口径与引擎一致；subAgent 为旧版兼容）
     if (m.session || m.subAgent) continue
-    chars += Array.isArray(m.content) ? JSON.stringify(m.content).length : String(m.content ?? "").length
+    tokens += estimateCharsTokens(Array.isArray(m.content) ? JSON.stringify(m.content) : String(m.content ?? ""))
     if (m.toolCalls) {
-      for (const tc of m.toolCalls) chars += (tc.name ?? "").length + JSON.stringify(tc.arguments ?? {}).length
+      for (const tc of m.toolCalls) tokens += estimateCharsTokens((tc.name ?? "") + JSON.stringify(tc.arguments ?? {}))
     }
   }
-  return Math.ceil(chars / 4)
+  return tokens
 }
 
 /**

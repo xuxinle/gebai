@@ -17,6 +17,8 @@ export interface LLMChunk {
   type: "text" | "reasoning" | "tool_call" | "done"
   text?: string
   toolCall?: { id: string; name: string; arguments: Record<string, unknown> }
+  /** 工具参数不是合法 JSON 时携带原始片段（引擎据此回传模型让其修正，而非静默以 {} 执行）。 */
+  toolArgsError?: string
   stopReason?: string
   /** usage 真值（挂在 done chunk 上，一次调用一个值）。 */
   usage?: LLMUsage
@@ -419,7 +421,8 @@ class OpenAIProvider implements LLMProvider {
     }
     for (const tc of toolCallsByIndex.values()) {
       if (!tc.name) continue
-      yield { type: "tool_call", toolCall: { id: tc.id, name: tc.name, arguments: parseArgs(tc.args) } }
+      const pa = parseArgs(tc.args)
+      yield { type: "tool_call", toolCall: { id: tc.id, name: tc.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
     }
   }
 }
@@ -476,7 +479,8 @@ class ResponsesProvider implements LLMProvider {
         const cur = calls.get(String(evt.item_id))
         if (cur) {
           if (typeof evt.arguments === "string") cur.args = evt.arguments
-          yield { type: "tool_call", toolCall: { id: cur.callId, name: cur.name, arguments: parseArgs(cur.args) } }
+          const pa = parseArgs(cur.args)
+          yield { type: "tool_call", toolCall: { id: cur.callId, name: cur.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
           calls.delete(String(evt.item_id))
         }
       } else if (type === "response.output_text.delta") {
@@ -511,7 +515,8 @@ class ResponsesProvider implements LLMProvider {
     // 兜底：completed 未触发（异常断流）时清掉尚未产出的函数调用并补 done
     for (const c of calls.values()) {
       if (!c.name) continue
-      yield { type: "tool_call", toolCall: { id: c.callId, name: c.name, arguments: parseArgs(c.args) } }
+      const pa = parseArgs(c.args)
+      yield { type: "tool_call", toolCall: { id: c.callId, name: c.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
     }
     if (!done) yield { type: "done", stopReason: "stop" }
   }
@@ -581,7 +586,8 @@ class AnthropicProvider implements LLMProvider {
         } else if (delta?.type === "input_json_delta" && currentTool) currentTool.args += delta.partial_json as string
       } else if (type === "content_block_stop") {
         if (currentTool) {
-          yield { type: "tool_call", toolCall: { id: currentTool.id, name: currentTool.name, arguments: parseArgs(currentTool.args) } }
+          const pa = parseArgs(currentTool.args)
+          yield { type: "tool_call", toolCall: { id: currentTool.id, name: currentTool.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
           currentTool = null
         }
       } else if (type === "message_delta") {
@@ -595,12 +601,12 @@ class AnthropicProvider implements LLMProvider {
   }
 }
 
-function parseArgs(raw: string): Record<string, unknown> {
-  if (!raw) return {}
+function parseArgs(raw: string): { args: Record<string, unknown>; error?: string } {
+  if (!raw) return { args: {} }
   try {
-    return JSON.parse(raw)
+    return { args: JSON.parse(raw) }
   } catch {
-    return {}
+    return { args: {}, error: raw.slice(0, 500) }
   }
 }
 

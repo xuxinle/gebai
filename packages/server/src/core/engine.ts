@@ -3,7 +3,7 @@ import { parseExtraParams, type LLMChunk, type LLMProvider, type LLMUsage } from
 import { VISION_MAX_IMAGE_BYTES } from "./vision"
 import type { ToolRegistry } from "./registry"
 import type { SessionStore } from "./store"
-import { estimateCtxTokens, isProtectedMessage } from "./store"
+import { estimateCtxTokens, estimateCharsTokens, isProtectedMessage } from "./store"
 import type { EnvManager } from "./env"
 import type { Sandbox } from "./sandbox"
 import type { EventBus } from "./event-bus"
@@ -50,6 +50,19 @@ const SUMMARY_OUTPUT_LIMIT = 2000
 const ATTACHMENT_INLINE_LIMIT = VISION_MAX_IMAGE_BYTES
 /** 图片附件 MIME 白名单（OpenAI 系与 Anthropic 均接受）。 */
 const VISION_MIME_SET = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
+/** 历史图片内联窗口：仅最近 N 条含图片的用户消息内联进上下文，更早的降级为文本说明
+ *  （图片永久占据上下文且不受压缩保护，长会话会被历史图片占死窗口）。 */
+const INLINE_IMAGE_RECENT = 3
+/** 单次 agent_run（新会话执行）可预加载的子Agent 数量上限（防异常/恶意调用拼装超大提示词）。 */
+const MAX_AGENTS_PER_RUN = 5
+/** 任务中途上下文回收阈值：最近一次真实 input tokens 超过窗口该比例时回收最早的旧工具结果
+ *  （替换为归档占位——超长结果本就已落盘 tmp/truncated/，原文不丢）。 */
+const MID_RUN_RECLAIM_RATIO = 0.9
+/** 中途回收保留的最近工具结果条数（模型近期操作上下文不受影响）。 */
+const RECLAIM_KEEP_RECENT = 8
+/** LLM 流式调用读空闲超时（毫秒）：SSE 建立后超过该时长无任何 chunk 判定接口假死，中止本次调用
+ *  （无产出走重试，有产出上抛为任务错误，不再无限挂起）。 */
+const LLM_IDLE_TIMEOUT_MS = 120_000
 
 function attachmentSizeText(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`
@@ -63,20 +76,20 @@ function attachmentNote(ref: { name: string; path: string; mime: string; size: n
   return `[用户附件${isImage ? "图片" : "文件"}: ${ref.name}（${ref.mime}，${attachmentSizeText(ref.size)}，会话路径 ${ref.path}）${vision}]`
 }
 
-/** 粗略估算消息 token 数（字符数 / 4；中文按字符计，近似即可）。
+/** 粗略估算消息 token 数（CJK 感知，见 store.estimateCharsTokens）。
  *  仅用于估算「真实 usage 基线之外尚未发送的增量」与无 usage 真值时的兜底（全量）。 */
 function estimateTokens(msgs: MessageLike[]): number {
-  let chars = 0
+  let tokens = 0
   for (const m of msgs) {
     // 多模态内容块（图片 base64）按序列化长度计，避免低估触发压缩不及时
-    chars += Array.isArray(m.content) ? JSON.stringify(m.content).length : String(m.content).length
+    tokens += estimateCharsTokens(Array.isArray(m.content) ? JSON.stringify(m.content) : String(m.content))
     if (m.toolCalls) {
       for (const tc of m.toolCalls) {
-        chars += tc.name.length + JSON.stringify(tc.arguments).length
+        tokens += estimateCharsTokens(tc.name + JSON.stringify(tc.arguments))
       }
     }
   }
-  return Math.ceil(chars / 4)
+  return tokens
 }
 
 /** 任务级 GEBAI_LLM_EXTRA_PARAMS 解析：非法 JSON 静默忽略（不阻塞任务），仅记录控制台提示。 */
@@ -212,6 +225,8 @@ export interface AgentEngineOptions {
   captureTimeoutMs?: number
   /** 工具执行超时兜底（毫秒，默认 9 分钟；测试可注入短超时验证超时返回给模型）。 */
   toolTimeoutMs?: number
+  /** LLM 流式调用读空闲超时（毫秒，默认 120s；测试可注入短超时验证假死中止）。 */
+  llmIdleTimeoutMs?: number
   /** 认证模式（"server"=服务模式多用户隔离）。无交互通道（REST）的审批策略按此分级：本地模式保持「自动通过」，
    * 服务模式下需审批工具一律拒绝执行（防普通用户经 REST 免审批执行 sh/py 等敏感工具）。 */
   authMode?: "local" | "server"
@@ -608,6 +623,87 @@ export class AgentEngine {
     return { compacted: removed, summary }
   }
 
+  /** 上下文占用估算（真实 usage 基线 + 未发送增量；无基线全量估算，CJK 感知）。 */
+  private async estimateContext(sessionId: string, user: string, systemPrompt: string, history: MessageLike[]): Promise<number> {
+    const baseline = await this.opts.store.load(sessionId, user)
+    if (baseline?.ctxInputTokens !== undefined) {
+      return baseline.ctxInputTokens + estimateTokens(history.slice(Math.max(0, baseline.ctxAtMessage ?? 0)))
+    }
+    return estimateTokens([{ role: "system", content: systemPrompt }, ...history])
+  }
+
+  /**
+   * 溢出硬护栏（上下文压缩无法收敛时的最后防线）：受保护消息让路——
+   * 1) 最旧带图片附件的用户消息：附件图片降级为文本说明（图片永久占窗口且不参与压缩）；
+   * 2) 仍无图片可降级：最旧用户消息内容替换为裁剪占位（原文仍在 chat.json，UI 可查、不丢数据）。
+   * 最新一条用户消息（本次任务的输入）永不裁剪——裁掉当前任务输入则任务失去意义。
+   * 返回是否发生降级。
+   */
+  private async degradeProtectedMessages(sessionId: string, user: string): Promise<boolean> {
+    const session = await this.opts.store.load(sessionId, user)
+    if (!session) return false
+    let lastUserIdx = -1
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      if (session.messages[i].role === "user") {
+        lastUserIdx = i
+        break
+      }
+    }
+    // 1) 图片附件降级（从最旧开始，一次降级一条消息的全部图片附件）
+    for (let i = 0; i < session.messages.length; i++) {
+      if (i === lastUserIdx) continue
+      const m = session.messages[i]
+      if (m.role !== "user" || !m.attachments?.length) continue
+      const images = m.attachments.filter((a) => VISION_MIME_SET.has(a.mime))
+      if (!images.length) continue
+      m.attachments = m.attachments.filter((a) => !VISION_MIME_SET.has(a.mime))
+      const note = images.map((a) => `[历史图片已降级为路径说明: ${a.path}（${a.name}），可用 vision/read 工具按需查看]`).join(" ")
+      m.content = `${note}\n${m.content}`
+      console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息的 ${images.length} 张图片降级为文本说明`)
+      await this.opts.store.save(session)
+      return true
+    }
+    // 2) 最旧用户消息裁剪占位（最新一条用户消息即本次任务输入，跳过）
+    for (let i = 0; i < session.messages.length; i++) {
+      if (i === lastUserIdx) continue
+      const m = session.messages[i]
+      if (m.role !== "user" || typeof m.content !== "string" || m.content.length <= 500) continue
+      if (m.content.startsWith("[历史消息已裁剪")) continue
+      const size = m.content.length
+      m.content = `[历史消息已裁剪（原 ${size} 字符，原文仍在会话记录中可查看）] ${m.content.slice(0, 200)}`
+      console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息（${size} 字符）裁剪为占位`)
+      await this.opts.store.save(session)
+      return true
+    }
+    return false
+  }
+
+  /**
+   * 任务中途工具结果回收（长任务上下文护栏）：真实 usage 逼近窗口上限时，把最早的
+   * 旧工具结果替换为归档占位（每轮一条，渐进收敛；保留最近 RECLAIM_KEEP_RECENT 条，
+   * 模型近期操作上下文不受影响）。超长结果本就落盘 tmp/truncated/，原文可经文件面板读取。
+   * 返回本次回收的条目（调用方同步替换内存消息副本）。
+   */
+  private async recycleOldToolOutputs(sessionId: string, user: string): Promise<Array<{ toolCallId: string; saved: number }>> {
+    const session = await this.opts.store.load(sessionId, user)
+    if (!session) return []
+    const out: Array<{ toolCallId: string; saved: number }> = []
+    const plainTools = session.messages.filter((m) => m.role === "tool" && !m.sessionRun && !m.session && typeof m.content === "string")
+    const recent = plainTools.slice(-RECLAIM_KEEP_RECENT)
+    for (const m of plainTools) {
+      if (recent.includes(m)) continue
+      const content = m.content as string
+      if (content.length <= 800) continue
+      const saved = content.length
+      m.content = `[工具结果已归档回收（原 ${saved} 字符；完整内容见会话文件面板，可用 read 读取）]`
+      console.warn(`[engine] 会话 ${sessionId} 中途回收：工具 ${m.name} 结果（${saved} 字符）归档为占位`)
+      out.push({ toolCallId: String(m.toolCallId ?? ""), saved })
+      break
+    }
+    if (out.length) await this.opts.store.save(session)
+    return out
+  }
+
   /** 用 LLM 生成最早历史消息的摘要；失败返回降级占位文本（滚动裁剪语义）。
    *  默认用启动 Provider；自动压缩（任务内触发）可传入任务级 Provider（与任务同模型）。 */
   private async summarize(slice: Array<import("@gebai/sdk").Message>, provider: LLMProvider = this.opts.provider): Promise<string> {
@@ -697,19 +793,23 @@ export class AgentEngine {
       // 基线之后的增量估算（history.slice(ctxAtMessage)）；无基线（新会话/接口不返回 usage/压缩后失效）全量估算兜底
       const cap = taskProvider.capabilities().maxContextTokens
       if (cap > 0) {
-        const baseline = await this.opts.store.load(sessionId, user)
-        const estimate =
-          baseline?.ctxInputTokens !== undefined
-            ? baseline.ctxInputTokens + estimateTokens(history.slice(Math.max(0, baseline.ctxAtMessage ?? 0)))
-            : estimateTokens([{ role: "system", content: systemPrompt }, ...history])
-        if (estimate > cap * COMPACT_RATIO) {
-          // 触发诊断日志：占用估算/窗口/基线来源，便于排查「提前压缩」问题（任务级窗口被 env 覆盖 or usage 真值含 schema 开销）
-          const baseInfo = baseline?.ctxInputTokens !== undefined ? `基线=${baseline.ctxInputTokens}@消息${baseline.ctxAtMessage}，增量估算 ${estimate - baseline.ctxInputTokens}` : "基线=无(全量估算)"
-          console.warn(
-            `[engine] 会话 ${sessionId} 自动压缩触发: 占用估算 ${estimate} > 阈值 ${Math.floor(cap * COMPACT_RATIO)}（任务级窗口 ${cap} × ${COMPACT_RATIO}）；${baseInfo}，历史 ${history.length} 条`,
-          )
+        // 迭代压缩：单次压缩可能不够（压缩后估算仍超阈值则继续压缩更近的区间）；
+        // 压缩无效（无可压缩内容，如历史几乎全是用户输入/系统提示词）时启用硬护栏——
+        // 受保护消息让路（历史图片降级为文本说明、最旧用户消息裁剪为占位），
+        // 保证长会话存在可收敛的溢出兜底，而非等模型接口报错后任务失败
+        let estimate = await this.estimateContext(sessionId, user, systemPrompt, history)
+        for (let guard = 0; guard < 4 && estimate > cap * COMPACT_RATIO; guard++) {
+          const before = history.length
           await this.compactSession(sessionId, user, undefined, taskProvider)
           history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
+          estimate = await this.estimateContext(sessionId, user, systemPrompt, history)
+          if (history.length >= before) {
+            // 压缩无效（仅剩受保护消息）：硬护栏降级受保护消息（原文仍在会话存储中，不丢数据）
+            const degraded = await this.degradeProtectedMessages(sessionId, user)
+            if (!degraded) break
+            history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
+            estimate = await this.estimateContext(sessionId, user, systemPrompt, history)
+          }
         }
       }
       const messages: MessageLike[] = [{ role: "system", content: systemPrompt }, ...history]
@@ -808,7 +908,22 @@ export class AgentEngine {
     // 装载发生在会话中途，若按原位透传会夹在 assistant(tool_calls) 与 tool 结果之间，
     // 接口校验失败（assistant tool_calls 后必须紧跟 tool 响应消息），装载后会话即无法继续
     const agentSystems: MessageLike[] = []
-    for (const m of session?.messages ?? []) {
+    // 历史图片内联窗口（从后往前数第几组图片附件）：超过窗口的降级为文本说明——
+    // 图片永久占据上下文且不参与压缩，长会话会被历史图片占死窗口
+    let recentImageGroups = 0
+    // 先确定哪些位置的图片允许内联（从最新往回数 INLINE_IMAGE_RECENT 组）
+    const msgs = session?.messages ?? []
+    const inlineAllowed = new Array<boolean>(msgs.length).fill(false)
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]
+      if (m.role !== "user" || !m.attachments?.some((a) => VISION_MIME_SET.has(a.mime))) continue
+      if (recentImageGroups >= INLINE_IMAGE_RECENT) break
+      inlineAllowed[i] = true
+      recentImageGroups++
+    }
+    let idx = 0
+    for (const m of msgs) {
+      const allowInline = inlineAllowed[idx++]
       // 子Agent 执行过程消息：仅存档与前端回放，不进入主 LLM 上下文
       if (m.subAgent || m.session) continue
       if (m.role === "system") {
@@ -823,7 +938,7 @@ export class AgentEngine {
       if (m.role === "user") {
         out.push({
           role: "user",
-          content: m.attachments?.length ? await this.userAttachmentBlocks(sessionId, user, m.content, m.attachments, inlineMultimodal) : m.content,
+          content: m.attachments?.length ? await this.userAttachmentBlocks(sessionId, user, m.content, m.attachments, inlineMultimodal && allowInline) : m.content,
         })
       } else if (m.role === "assistant") {
         // 推理独立字段（Message.reasoning）绝不进模型上下文——此处仅映射 content；
@@ -852,9 +967,9 @@ export class AgentEngine {
    * - 其余（非图片/超限/文件缺失/模型无多模态能力）：文本说明（路径 + MIME + 大小 + vision 工具指引），
    *   由模型决定用 vision（外挂视觉模型）/read 等工具处理
    */
-  private async userAttachmentBlocks(sessionId: string, user: string, prompt: string, refs: AttachmentRef[], inlineMultimodal = this.opts.provider.capabilities().multimodal): Promise<Array<Record<string, unknown>>> {
+  private async userAttachmentBlocks(sessionId: string, user: string, prompt: string, refs: AttachmentRef[], inlineImages = this.opts.provider.capabilities().multimodal): Promise<Array<Record<string, unknown>>> {
     const blocks: Array<Record<string, unknown>> = [{ type: "text", text: prompt }]
-    const inline = inlineMultimodal
+    const inline = inlineImages
     for (const ref of refs) {
       const isImage = VISION_MIME_SET.has(ref.mime)
       if (inline && isImage && ref.size <= ATTACHMENT_INLINE_LIMIT) {
@@ -1025,6 +1140,23 @@ export class AgentEngine {
     return added
   }
 
+  /**
+   * 从会话卸载子Agent（与 loadAgentToSession 对称）：移除该子Agent 的装载提示词消息
+   * （卸载后提示词不再占用上下文）与 loadedSubAgents 记录（会话恢复时不再按记录重新装载），
+   * 并注销其工具注册。会话不存在抛错。
+   */
+  async unloadAgentFromSession(sessionId: string, user: string, name: string): Promise<void> {
+    const session = await this.opts.store.load(sessionId, user)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    session.messages = session.messages.filter((m) => !(m.role === "system" && m.loadedAgent === name))
+    if (session.loadedSubAgents) {
+      session.loadedSubAgents = session.loadedSubAgents.filter((n) => n !== name)
+      if (!session.loadedSubAgents.length) session.loadedSubAgents = undefined
+    }
+    await this.opts.store.save(session)
+    this.opts.subAgents.unload(name)
+  }
+
   private buildContext(
     sessionId: string,
     user: string,
@@ -1186,8 +1318,8 @@ export class AgentEngine {
     signal: AbortSignal,
     onChunk?: (chunk: LLMChunk) => void,
     extraParams?: Record<string, unknown>,
-  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>; usage?: LLMUsage }> {
-    const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = []
+  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }>; usage?: LLMUsage }> {
+    const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }> = []
     let text = ""
     let reasoningSeen = false
     let attempts = 0
@@ -1201,10 +1333,10 @@ export class AgentEngine {
       const msgs = hint ? [...messages, { role: "user" as const, content: hint }] : messages
       try {
         usage = undefined
-        for await (const chunk of provider.chat(msgs, { tools: schemas, signal, extraParams })) {
+        for await (const chunk of this.chatWithIdleTimeout(provider, msgs, schemas, signal, extraParams)) {
           if (chunk.type === "text") text += chunk.text
           else if (chunk.type === "reasoning" && chunk.text?.trim()) reasoningSeen = true
-          else if (chunk.type === "tool_call" && chunk.toolCall) toolCalls.push(chunk.toolCall)
+          else if (chunk.type === "tool_call" && chunk.toolCall) toolCalls.push({ ...chunk.toolCall, argsError: chunk.toolArgsError })
           if (chunk.usage) usage = chunk.usage
           onChunk?.(chunk)
         }
@@ -1244,6 +1376,38 @@ export class AgentEngine {
         throw new Error(`模型未返回任何内容（已重试 ${attempts} 次）`)
       }
       return { text, toolCalls, usage }
+    }
+  }
+
+  /**
+   * 流式调用带读空闲超时（接口假死防护）：连续超过 opts.llmIdleTimeoutMs（默认 120s）
+   * 未收到任何 chunk 即中止本次调用——SSE 建立后网关/上游挂起会无限挂起任务，
+   * 此前无任何总超时机制。用 Promise.race 硬超时（不依赖 provider 响应 abort——
+   * fetch 会响应 abort 释放连接，但实现异常的迭代器可能不响应，超时必须强制生效）。
+   * 中止后按接口异常路径处理（无产出走重试，有产出上抛）。取消仍经 signal 传播。
+   */
+  private async *chatWithIdleTimeout(
+    provider: LLMProvider,
+    messages: MessageLike[],
+    schemas: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+    signal: AbortSignal,
+    extraParams?: Record<string, unknown>,
+  ): AsyncGenerator<LLMChunk> {
+    const idleMs = this.opts.llmIdleTimeoutMs ?? LLM_IDLE_TIMEOUT_MS
+    const iter = provider.chat(messages, { tools: schemas, signal, extraParams })[Symbol.asyncIterator]()
+    try {
+      for (;;) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timedOut = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`模型接口读超时（${Math.round(idleMs / 1000)} 秒无数据），判定接口假死`)), idleMs)
+        })
+        const next = await Promise.race([iter.next(), timedOut])
+        if (timer) clearTimeout(timer)
+        if (next.done) return
+        yield next.value
+      }
+    } finally {
+      void iter.return?.().catch(() => {})
     }
   }
 
@@ -1296,6 +1460,22 @@ export class AgentEngine {
         ctxInputTokens = usage.inputTokens
         ctxCountedLen = messages.length
       }
+      // 任务中途上下文回收：真实 usage 接近窗口上限（长任务逐步累积工具结果）时，
+      // 渐进回收最早的旧工具结果（原文已落盘，替换为归档占位），防中途打满窗口被接口拒绝
+      const cap2 = provider.capabilities().maxContextTokens
+      if (cap2 > 0 && usage?.inputTokens !== undefined && usage.inputTokens > cap2 * MID_RUN_RECLAIM_RATIO) {
+        const recycled = await this.recycleOldToolOutputs(sessionId, user)
+        for (const r of recycled) {
+          const mi = messages.findIndex((x) => x.role === "tool" && (x as { toolCallId?: string }).toolCallId === r.toolCallId)
+          if (mi >= 0) {
+            messages[mi] = {
+              role: "tool",
+              toolCallId: r.toolCallId,
+              content: `[工具结果已归档回收（原 ${r.saved} 字符；完整内容见会话文件面板，可用 read 读取）]`,
+            }
+          }
+        }
+      }
       // 上下文大小实时推送（前端会话列表展示，单位 k）：真实 usage 基准 + 未发送增量估算
       this.publish(sessionId, "event.session.ctx", {
         ctxTokens: ctxInputTokens !== undefined ? ctxInputTokens + estimateTokens(messages.slice(ctxCountedLen)) : estimateTokens(messages),
@@ -1332,6 +1512,13 @@ export class AgentEngine {
           if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
           await persist({ id: crypto.randomUUID(), role: "tool", content: note, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
           messages.push({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        // 工具参数不是合法 JSON（接口聚合失败）：不执行（以 {} 执行会做出错误行为），回传原始片段让模型修正
+        if (tc.argsError) {
+          const errMsg = `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`
+          await persist({ id: crypto.randomUUID(), role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
+          messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
         const rt = registry.resolve(tc.name)
@@ -1493,6 +1680,9 @@ export class AgentEngine {
     signal: AbortSignal,
     depth = 0,
   ): Promise<{ output: string; archive: SessionRunArchive }> {
+    // 加固：去重 + 数量上限（异常/恶意调用拼装超大提示词会撑爆上下文）
+    agents = [...new Set(agents)]
+    if (agents.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${agents.length} > ${MAX_AGENTS_PER_RUN}）`)
     const defs = agents.map((name) => {
       const def = this.opts.subAgents.def(name)
       if (!def) throw new Error(`未知子Agent: ${name}`)
@@ -1723,6 +1913,13 @@ export class AgentEngine {
           const note = `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`
           await pushArchive({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        // 工具参数不是合法 JSON：与主循环一致，回传原始片段让模型修正（不执行）
+        if (tc.argsError) {
+          const errMsg = `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`
+          await pushArchive({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
+          messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
         const rt = reg.resolve(tc.name)

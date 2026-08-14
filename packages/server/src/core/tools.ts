@@ -900,6 +900,46 @@ export const pyTool: Tool = {
   },
 }
 
+/** 用户反馈查询工具（反馈闭环）：self_optimize 等子Agent 经本工具读取用户反馈，
+ *  反馈数据才真正进入 Agent 上下文（此前仅有 REST/WS 通道，Agent 无法消费）。 */
+export const readFeedbackTool: Tool = {
+  name: "read_feedback",
+  description:
+    "读取用户提交的反馈（本用户，按时间倒序，最近 N 条）。用于自我优化等场景了解用户对既往输出的评价（点赞/点踩/文字反馈/建议）与改进点。limit 默认 10，上限 50；可按 sessionId 过滤某会话的反馈。",
+  parameters: schema(
+    {
+      limit: { type: "integer", description: "返回条数（默认 10，上限 50）" },
+      sessionId: { type: "string", description: "可选：仅返回该会话的反馈" },
+    },
+  ),
+  async execute(args, ctx) {
+    const { readFeedback } = await import("../feedback")
+    const list = await readFeedback(ctx.home, ctx.user)
+    const filtered = args.sessionId ? list.filter((f) => f.sessionId === String(args.sessionId)) : list
+    const n = Math.min(Math.max(Number(args.limit ?? 10) || 10, 1), 50)
+    const items = filtered.slice(0, n)
+    if (!items.length) return { output: args.sessionId ? `该会话暂无反馈记录。` : "暂无反馈记录。" }
+    const label = (t: string) => (t === "thumbs_up" ? "👍" : t === "thumbs_down" ? "👎" : t === "suggestion" ? "建议" : "文字")
+    return {
+      output:
+        `用户反馈（最近 ${items.length} 条${args.sessionId ? `，会话 ${String(args.sessionId)}` : ""}）：\n` +
+        items
+          .map((f) => {
+            const parts = [
+              `- [${new Date(f.createdAt).toISOString().slice(0, 19).replace("T", " ")}] ${label(f.type)}`,
+              f.sessionId ? `会话 ${f.sessionId}` : "",
+              f.messageId ? `消息 ${f.messageId}` : "",
+              f.label ? `标签 ${f.label}` : "",
+              f.subAgent ? `子Agent ${f.subAgent}` : "",
+            ].filter(Boolean)
+            const body = f.text ? `\n  ${f.text.slice(0, 500)}` : ""
+            return `${parts.join("，")}${body}`
+          })
+          .join("\n"),
+    }
+  },
+}
+
 /** 时区偏移文本（如 +08:00 / -05:30），供本地时间标注。 */
 function tzOffsetText(d: Date): string {
   const off = -d.getTimezoneOffset()
@@ -1653,6 +1693,7 @@ export function createGlobalTools(): Record<string, Tool> {
     todo: todoTool,
     ask_user: askUserTool,
     ask_env: askEnvTool,
+    read_feedback: readFeedbackTool,
     preview_server: makePreviewServerTool(),
     current_time: currentTimeTool,
     system_info: systemInfoTool,

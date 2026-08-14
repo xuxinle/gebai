@@ -39,7 +39,8 @@ describe("Sandbox 豁免用户（auth=none 默认用户不受用户沙箱控制�
     const sb = new Sandbox({ home, enabled: true, isExempt: (u) => u === "default" })
     try {
       // 豁免用户（默认用户）：绝对路径直接使用、../ 可越界
-      expect(sb.resolvePath("default", sid, "/etc/passwd")).toBe("/etc/passwd")
+      // （Windows 下 resolve("/etc/passwd") 为盘符根路径，断言与解析器同口径）
+      expect(sb.resolvePath("default", sid, "/etc/passwd")).toBe(resolve("/etc/passwd"))
       expect(sb.resolvePath("default", sid, "../secret")).toBe(resolve(sessionPath(home, "default", sid), "../secret"))
       // 其余用户（含多用户模式同名 default 之外的用户）：沙箱拒绝
       expect(() => sb.resolvePath("alice", sid, "/etc/passwd")).toThrow()

@@ -248,7 +248,8 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
   // loadConfig 会显式加载项目根 .env（loadRootDotEnv，如 GEBAI_LLM_MODEL）注入 process.env，
   // 泄漏进 EnvManager.resolve 会污染「无覆盖沿用启动实例」类断言——此处（loadConfig 之后）统一清理
   for (const k of Object.keys(process.env)) {
-    if (k.startsWith("GEBAI_LLM_")) {
+    // 项目根 .env 的 LLM 与预置项目配置泄漏会污染断言（任务级模型覆盖/系统提示词清单），统一清理
+    if (k.startsWith("GEBAI_LLM_") || k.startsWith("CODE_")) {
       savedEnv[k] = process.env[k]
       delete process.env[k]
     }
