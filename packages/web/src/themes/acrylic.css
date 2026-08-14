@@ -361,3 +361,11 @@
 [data-theme="acrylic"][data-acrylic-lt="light"] .hljs-built_in,
 [data-theme="acrylic"][data-acrylic-lt="light"] .hljs-builtin-name { color: #953800; }
 [data-theme="acrylic"][data-acrylic-lt="light"] .hljs-meta { color: #953800; }
+
+/* 全屏图表查看：背景更不透明（毛玻璃下会话内容会透出干扰看图，0.82 → 0.95） */
+[data-theme="acrylic"] .preview-overlay .preview-card.diagram-preview {
+  background: rgba(18, 18, 23, 0.95) !important;
+}
+[data-theme="acrylic"][data-acrylic-lt="light"] .preview-overlay .preview-card.diagram-preview {
+  background: rgba(252, 252, 255, 0.95) !important;
+}
