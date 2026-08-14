@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { analyzeCode } from "./analyzer"
+import { analyzeCode, _setWasmLoaderForTest } from "./analyzer"
 
 describe("tree-sitter analyze", () => {
   test("javascript: top-level declarations and class methods", async () => {
@@ -31,6 +31,43 @@ describe("tree-sitter analyze", () => {
   })
 
   test("unsupported language returns hint with supported list", async () => {
+    const out = await analyzeCode("x", "unknown", "a.xyz")
+    expect(out).toContain("不支持的语言")
+    expect(out).toContain("ts")
+  })
+})
+
+describe("wasm 资源加载（二进制回退与诚实报错）", () => {
+  test("wasm 加载失败报「语法分析不可用」而非误导的「不支持的语言」", async () => {
+    // 模拟二进制模式资源缺失：加载源返回 null（内嵌产物缺失/损坏）
+    _setWasmLoaderForTest(async () => null)
+    try {
+      const out = await analyzeCode("let a = 1", "js", "x.js")
+      expect(out).toContain("语法分析不可用")
+      expect(out).not.toContain("不支持的语言")
+    } finally {
+      _setWasmLoaderForTest(null)
+    }
+  })
+
+  test("加载源注入合法 wasm 字节（内嵌回退路径）可正常解析", async () => {
+    // 直接从 node_modules 读真实语法 wasm，模拟内嵌注册表还原出的字节
+    const { readFileSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    const wasmPath = require.resolve("tree-sitter-wasms/out/tree-sitter-go.wasm")
+    const bytes = new Uint8Array(readFileSync(wasmPath))
+    void join
+    _setWasmLoaderForTest(async () => bytes)
+    try {
+      const out = await analyzeCode("package main\n\nfunc main() {}\n", "go", "main.go")
+      expect(out).toContain("[go] main.go")
+      expect(out).toContain("function_declaration main")
+    } finally {
+      _setWasmLoaderForTest(null)
+    }
+  })
+
+  test("未知语言仍报「不支持的语言」并附支持列表", async () => {
     const out = await analyzeCode("x", "unknown", "a.xyz")
     expect(out).toContain("不支持的语言")
     expect(out).toContain("ts")

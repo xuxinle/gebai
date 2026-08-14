@@ -42,8 +42,17 @@ const LANG_WASM: Record<string, string> = {
   ex: "tree-sitter-elixir.wasm",
 }
 
+/** 导出供构建脚本（scripts/build-analyzer-wasm.ts）收集需内嵌的语法文件（单一真相源，勿与脚本重复维护清单）。 */
+export { LANG_WASM }
+
 let initPromise: Promise<void> | null = null
 const parsers = new Map<string, Parser>()
+
+/** 测试用：覆盖 wasm 字节加载源（模拟二进制模式资源缺失/内嵌损坏），null 恢复默认。 */
+let wasmLoadOverride: ((name: string) => Promise<Uint8Array | null>) | null = null
+export function _setWasmLoaderForTest(fn: ((name: string) => Promise<Uint8Array | null>) | null): void {
+  wasmLoadOverride = fn
+}
 
 /** 初始化 tree-sitter 运行时（幂等单例）。 */
 function ensureInit(): Promise<void> {
@@ -51,17 +60,44 @@ function ensureInit(): Promise<void> {
   return initPromise
 }
 
-/** 按语言加载（并缓存）parser。不支持的语言返回 null。 */
+/** 内嵌产物注册表（构建脚本生成的 gzip+base64 wasm）：二进制模式 node_modules 不存在时的回退来源。 */
+let embeddedPromise: Promise<Record<string, string> | null> | null = null
+function loadEmbeddedRegistry(): Promise<Record<string, string> | null> {
+  if (!embeddedPromise) {
+    embeddedPromise = import("./analyzer-wasm.embedded.generated.json")
+      .then((m) => ((m as { default?: { gzip?: boolean; files?: Record<string, string> } }).default?.gzip ? ((m as { default: { files: Record<string, string> } }).default.files) : null))
+      .catch(() => null)
+  }
+  return embeddedPromise
+}
+
+/** 加载语法 wasm 字节：dev 模式读 node_modules（tree-sitter-wasms），失败（二进制/打包模式）回退内嵌产物。 */
+async function loadWasmBytes(name: string): Promise<Uint8Array | null> {
+  try {
+    const wasmPath = require.resolve(`tree-sitter-wasms/out/${name}`)
+    return new Uint8Array(await Bun.file(wasmPath).arrayBuffer())
+  } catch {
+    const files = await loadEmbeddedRegistry()
+    const b64 = files?.[name]
+    if (!b64) return null
+    try {
+      return Bun.gunzipSync(Buffer.from(b64, "base64"))
+    } catch {
+      return null // 内嵌产物损坏
+    }
+  }
+}
+
+/** 按语言加载（并缓存）parser。语言不支持返回 null；资源加载失败同样返回 null（调用方按「不可用」报错）。 */
 async function parserFor(lang: string): Promise<Parser | null> {
   const wasmName = LANG_WASM[lang]
   if (!wasmName) return null
   const cached = parsers.get(lang)
-  if (cached) return cached
+  if (cached && !wasmLoadOverride) return cached
   await ensureInit()
+  const buf = wasmLoadOverride ? await wasmLoadOverride(wasmName) : await loadWasmBytes(wasmName)
+  if (!buf) return null
   try {
-    const wasmPath = require.resolve(`tree-sitter-wasms/out/${wasmName}`)
-    // Uint8Array 加载：兼容二进制打包与各运行时（Bun/Node 均可）
-    const buf = new Uint8Array(await Bun.file(wasmPath).arrayBuffer())
     const language = await Language.load(buf)
     const parser = new Parser()
     parser.setLanguage(language)
@@ -130,8 +166,13 @@ function extractOutline(root: import("web-tree-sitter").Node): OutlineEntry[] {
 
 /** 用 tree-sitter 解析代码，返回结构概览文本。 */
 export async function analyzeCode(code: string, ext: string, displayPath: string): Promise<string> {
+  if (!LANG_WASM[ext]) return `analyze: 不支持的语言（.${ext}）。支持: ${Object.keys(LANG_WASM).slice(0, 20).join(", ")}`
   const parser = await parserFor(ext)
-  if (!parser) return `analyze: 不支持的语言（.${ext}）。支持: ${Object.keys(LANG_WASM).slice(0, 20).join(", ")}`
+  if (!parser) {
+    // 与「不支持的语言」区分：语法在支持列表内但 wasm 资源加载失败（二进制打包未内嵌/依赖缺失/内嵌损坏），
+    // 误导性报错会令模型反复尝试或放弃正确路径
+    return `analyze: 语法分析不可用（tree-sitter wasm 资源加载失败：${ext}）——请确认依赖已安装（dev 模式 bun install）或构建时已内嵌（二进制打包应运行 scripts/build-analyzer-wasm.ts）。可改用 read 分段阅读该文件。`
+  }
   const tree = parser.parse(code)!
   const root = tree.rootNode
   const entries = extractOutline(root)
