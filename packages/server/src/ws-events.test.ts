@@ -203,7 +203,7 @@ describe("WS event push (multi-user isolation)", () => {
   const mhome = mkdtempSync(join(tmpdir(), "gebai-ws-multi-"))
 
   beforeAll(async () => {
-    mh = await startServer({ gebaiHome: mhome, auth: "server", sandbox: "off", binaryMode: false, preloadSubAgents: [], port: 0 })
+    mh = await startServer({ gebaiHome: mhome, auth: "server", sandbox: "on", binaryMode: false, preloadSubAgents: [], port: 0 })
     ;(mh.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new WsFake()
     await mh.auth.createUser("alice", "pw")
     await mh.auth.createUser("bob", "pw")

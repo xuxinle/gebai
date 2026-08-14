@@ -15,7 +15,7 @@ const promptRateLimit = new TokenBucket(60, 30)
 const SESSION_ID_MSGS = new Set([
   "session.get", "session.delete", "session.rename", "session.switch", "session.compact",
   "session.prompt", "session.attachment.upload", "session.todo.get", "session.env.get", "session.env.set",
-  "session.files.list", "session.files.get", "session.cancel",
+  "session.files.list", "session.files.get", "session.cancel", "session.restore",
   "approval.decide", "choice.decide", "env.decide", "draw.result", "capture.result",
 ])
 
@@ -149,10 +149,14 @@ export async function handleWsMessage(
       // 发起任务（流式事件经 event.* 推送回流，reply 仅确认）
       const sessionId = String(p.id)
       const prompt = String(p.prompt ?? "")
-      if (!prompt) return reply(false, undefined, "prompt required")
+      if (!prompt) return reply(false, { code: "prompt_required" }, "prompt required")
       // 每用户消息速率限制（防高频 prompt 消耗 LLM 配额/资源，与 REST 同规则）
-      if (!promptRateLimit.allow(user.id)) return reply(false, undefined, "rate limited: too many requests")
-      if (d.engine.isRunning(sessionId)) return reply(false, undefined, "task already running")
+      if (!promptRateLimit.allow(user.id)) return reply(false, { code: "rate_limited" }, "rate limited: too many requests")
+      if (d.engine.isRunning(sessionId)) return reply(false, { code: "already_running" }, "task already running")
+      // 应答语义如实：会话不存在/任务冲突等启动期失败在 reply 中返回错误码（客户端据此判定，
+      // 不再依赖错误文案正则）；任务运行期错误仍经 event.task.error 推送
+      const existing = await d.store.load(sessionId, user.id)
+      if (!existing) return reply(false, { code: "session_not_found" }, "session not found")
       // 请求层交互模式与输出方式配置（默认 realtime + 流式输出，前端不传即现状）：
       // interactionMode 可选 none/multi_turn/realtime；stream=false 时仅最终响应（不推送文本增量/推理流）
       const interactionMode = p.interactionMode == null ? undefined : String(p.interactionMode)
@@ -173,7 +177,10 @@ export async function handleWsMessage(
           outputMode: outputMode as "final_only" | "streaming" | undefined,
           role: user.role,
         })
-        .catch(() => {})
+        .catch((err) => {
+          // 引擎 run 内部已发布 event.task.error；此处兜底记录（正常不应到达）
+          console.warn(`[ws] engine.run failed: ${String((err as Error).message || err)}`)
+        })
       return reply(true)
     }
     case "session.attachment.upload": {
@@ -342,6 +349,42 @@ export async function handleWsMessage(
         }
       }
       await d.subAgents.load(name)
+      return reply(true)
+    }
+    case "sub_agent.unload": {
+      // 卸载子Agent：带 sessionId 时同步清理该会话内已持久化的提示词消息与装载记录（与 load 对称，
+      // 卸载后提示词不再占用上下文；ensureSessionAgents 也不会再按记录重新装载）
+      const name = String(p.name)
+      if (p.sessionId) {
+        const sid = String(p.sessionId)
+        if (!isValidSessionId(sid)) return reply(false, undefined, `invalid session id: ${sid}`)
+        try {
+          await d.engine.unloadAgentFromSession(sid, user.id, name)
+          return reply(true)
+        } catch (err) {
+          return reply(false, undefined, String((err as Error).message || err))
+        }
+      }
+      d.subAgents.unload(name)
+      return reply(true)
+    }
+    case "session.restore": {
+      // 从 GC 归档（trash/）恢复会话（归属用户或 admin；详见 REST /sessions/:id/restore）
+      const { rename } = await import("node:fs/promises")
+      const { existsSync } = await import("node:fs")
+      const { findInTrash } = await import("./core/gc")
+      const { sessionPath } = await import("./core/paths")
+      const id = String(p.id)
+      const hit = await findInTrash(d.config.gebaiHome, id)
+      if (!hit || (user.role !== "admin" && hit.owner !== user.id)) return reply(false, { code: "session_not_found" }, "session not found")
+      const target = sessionPath(d.config.gebaiHome, hit.owner, id)
+      if (existsSync(target)) return reply(false, { code: "session_exists" }, "session already exists")
+      try {
+        await rename(hit.trashDir, target)
+      } catch (err) {
+        return reply(false, undefined, `restore failed: ${String((err as Error).message || err)}`)
+      }
+      d.store.evict(id)
       return reply(true)
     }
     default:
