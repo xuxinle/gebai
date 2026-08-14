@@ -1,0 +1,412 @@
+import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import { mkdtempSync, mkdirSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, dirname } from "node:path"
+import type { ToolContext } from "../../core/types"
+import {
+  screenshotTool,
+  windowListTool,
+  windowFocusTool,
+  typeTextTool,
+  keyPressTool,
+  mouseClickTool,
+  clipboardReadTool,
+  screenInfoTool,
+  detectSensitive,
+} from "./desktop_tools"
+import { def as desktopDef } from "./desktop"
+
+// 工具按 process.platform 分支（win32 走 PowerShell，linux 走 xdotool 等）：
+// 大部分用例断言 Windows 行为，统一 mock 为 win32（linux 专属用例内部自行覆盖并恢复）
+const ORIGINAL_PLATFORM = process.platform
+beforeAll(() => {
+  Object.defineProperty(process, "platform", { value: "win32" })
+})
+afterAll(() => {
+  Object.defineProperty(process, "platform", { value: ORIGINAL_PLATFORM })
+})
+
+function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
+  const tmp = join(home, "users", "default", "sessions", "s1", "tmp")
+  mkdirSync(tmp, { recursive: true })
+  const base: ToolContext = {
+    user: "default",
+    sessionId: "s1",
+    workdir: tmp,
+    home,
+    env: {},
+    sandboxed: false,
+    resolvePath: (p) => join(tmp, p),
+    readFile: async (p) => await Bun.file(p).text(),
+    readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
+    writeFile: async (p, content) => {
+      const { mkdir, writeFile } = await import("node:fs/promises")
+      await mkdir(dirname(p), { recursive: true })
+      await writeFile(p, content)
+    },
+    listFiles: async () => [],
+    listDir: async () => [],
+    deleteFile: async () => {},
+    moveFile: async () => {},
+    runCommand: async () => ({ stdout: "", stderr: "", code: 0 }),
+    uploadAttachment: async (r) => r.path,
+    publish: () => {},
+    projects: [],
+    resolveProjectPath: () => { throw new Error("未知预置项目") },
+    getTodos: async () => [],
+    setTodos: async () => {},
+    registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
+    listSubAgentDefs: () => [],
+    loadSubAgent: async () => {},
+    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
+    waitForChoice: async () => null,
+    waitForEnv: async () => false,
+    waitForDraw: async () => ({ ok: true }),
+    waitForCapture: async () => null,
+  }
+  return { ...base, ...overrides }
+}
+
+/** 解码 PowerShell -EncodedCommand，便于断言脚本内容。 */
+function decodeCmd(cmd: string): string {
+  const m = cmd.match(/-EncodedCommand (\S+)/)
+  return m ? Buffer.from(m[1], "base64").toString("utf16le") : cmd
+}
+
+describe("desktop tools", () => {
+  test("screenshot rejects in sandboxed (server deployment) mode", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, { sandboxed: true })
+    await expect(screenshotTool.execute({}, c)).rejects.toThrow(/本地\/桌面/)
+  })
+
+  test("screenshot captures full screen and returns image block", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        // 只记录主截图命令（探测命令 identify/convert 忽略，不影响断言）
+        if (cmd.includes("powershell")) seenCmd = cmd
+        const script = decodeCmd(cmd)
+        const m = script.match(/'([^']+\.png)'/)
+        if (m) await c.writeFile(m[1], "")
+        return { stdout: "", stderr: "", code: 0 }
+      },
+    })
+    const r = await screenshotTool.execute({}, c)
+    expect(seenCmd).toContain("powershell")
+    expect(seenCmd).toContain("-EncodedCommand")
+    expect(r.blocks?.[0]).toMatchObject({ type: "image", name: expect.stringMatching(/^screenshot_\d+\.png$/) })
+    // 文件已落盘
+    const { readdir } = await import("node:fs/promises")
+    const files = await readdir(c.workdir)
+    expect(files.some((f) => f.startsWith("screenshot_"))).toBe(true)
+  })
+
+  test("screenshot validates region format", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const r = await screenshotTool.execute({ region: "abc" }, ctx(home))
+    expect(r.output).toContain("region 格式错误")
+  })
+
+  test("window_list parses TSV output into aligned table", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async () => ({ stdout: "1234\tnotepad\t无标题 - 记事本\n5678\tchrome\tGitHub - 工作", stderr: "", code: 0 }),
+    })
+    const r = await windowListTool.execute({}, c)
+    expect(r.output).toContain("共 2 个窗口")
+    expect(r.output).toContain("notepad")
+    expect(r.output).toContain("chrome")
+  })
+
+  test("window_focus requires pid or title", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const r = await windowFocusTool.execute({}, ctx(home))
+    expect(r.output).toContain("pid 或 title")
+  })
+
+  test("type_text embeds text via base64 into PowerShell clipboard command", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已输入 3 字符", stderr: "", code: 0 }
+      },
+    })
+    const r = await typeTextTool.execute({ text: "你好GEBAI" }, c)
+    expect(r.output).toContain("已输入")
+    expect(r.output).toContain("内容预览")
+    expect(seenCmd).toContain("powershell")
+    // 脚本内通过 base64 注入文本，避免引号转义；剪贴板先备份后恢复
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain(Buffer.from("你好GEBAI", "utf8").toString("base64"))
+    expect(script).toContain("Get-Clipboard -Raw")
+    expect(script).toContain("finally")
+  })
+
+  test("type_text aborts on sensitive key patterns (密钥泄漏防护)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let ran = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        ran = cmd
+        return { stdout: "", stderr: "", code: 0 }
+      },
+    })
+    const r = await typeTextTool.execute({ text: "FEISHU_APP_SECRET=sk-abcdef0123456789" }, c)
+    expect(r.output).toContain("敏感信息")
+    expect(r.output).toContain("mode=\"keys\"")
+    expect(ran).toBe("") // 未执行任何命令
+  })
+
+  test("type_text keys mode types ASCII via SendKeys without touching clipboard", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已输入 5 字符（keys 模式）", stderr: "", code: 0 }
+      },
+    })
+    const r = await typeTextTool.execute({ text: "a+b%c", mode: "keys" }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain("SendWait")
+    expect(script).not.toContain("Get-Clipboard")
+    // 特殊字符逐字符 {} 转义（+ 和 % 不会被解释为修饰键）
+    expect(script).toContain(Buffer.from("a{+}b{%}c", "utf8").toString("base64"))
+    expect(r.output).toContain("keys 模式")
+  })
+
+  test("type_text keys mode rejects non-ASCII", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let ran = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        ran = cmd
+        return { stdout: "", stderr: "", code: 0 }
+      },
+    })
+    const r = await typeTextTool.execute({ text: "你好", mode: "keys" }, c)
+    expect(r.output).toContain("仅支持 ASCII")
+    expect(ran).toBe("")
+  })
+
+  test("clipboard_read shows content and warns on sensitive patterns", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "APP_SECRET=sk-abcdef0123456789\n", stderr: "", code: 0 }
+      },
+    })
+    const r = await clipboardReadTool.execute({}, c)
+    expect(decodeCmd(seenCmd)).toContain("Get-Clipboard")
+    expect(r.output).toContain("剪贴板内容")
+    expect(r.output).toContain("⚠️ 检测到疑似敏感信息")
+  })
+
+  test("clipboard_read empty clipboard reports cleanly", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async () => ({ stdout: "（剪贴板为空）", stderr: "", code: 0 }),
+    })
+    const r = await clipboardReadTool.execute({}, c)
+    expect(r.output).toContain("剪贴板为空")
+    expect(r.output).not.toContain("⚠️")
+  })
+
+  test("screenshot parses STAT metadata and warns on black frame (A1 黑帧检测)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        const script = decodeCmd(cmd)
+        const m = script.match(/'([^']+\.png)'/)
+        if (m) await c.writeFile(m[1], "")
+        return { stdout: "STAT 1920x1080 mean=3.2 colors=4", stderr: "", code: 0 }
+      },
+    })
+    const r = await screenshotTool.execute({}, c)
+    expect(r.output).toContain("1920x1080")
+    expect(r.output).toContain("平均亮度 3.2")
+    expect(r.output).toContain("疑似黑屏")
+  })
+
+  test("screenshot dark solid frame warns as non-real image", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        const script = decodeCmd(cmd)
+        const m = script.match(/'([^']+\.png)'/)
+        if (m) await c.writeFile(m[1], "")
+        return { stdout: "STAT 800x600 mean=25.0 colors=3", stderr: "", code: 0 }
+      },
+    })
+    const r = await screenshotTool.execute({}, c)
+    expect(r.output).toContain("单一暗色")
+  })
+
+  test("screenshot normal frame carries size metadata without warning", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        const script = decodeCmd(cmd)
+        const m = script.match(/'([^']+\.png)'/)
+        if (m) await c.writeFile(m[1], "")
+        return { stdout: "STAT 1920x1080 mean=128.4 colors=2000", stderr: "", code: 0 }
+      },
+    })
+    const r = await screenshotTool.execute({}, c)
+    expect(r.output).toContain("1920x1080")
+    expect(r.output).not.toContain("⚠️")
+  })
+
+  test("screen_info lists monitors with resolution and primary flag", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async () => ({
+        stdout: "\\\\.\\DISPLAY1\t0\t0\t1920\t1080\tTrue\n\\\\.\\DISPLAY2\t1920\t0\t2560\t1440\tFalse",
+        stderr: "",
+        code: 0,
+      }),
+    })
+    const r = await screenInfoTool.execute({}, c)
+    expect(r.output).toContain("共 2 个显示器")
+    expect(r.output).toContain("1920x1080")
+    expect(r.output).toContain("2560x1440")
+    expect(r.output).toContain("（主屏）")
+  })
+
+  test("detectSensitive matches key/value and sk- patterns, misses plain text", () => {
+    expect(detectSensitive("sk-abcdef0123456789xyz")).toMatch(/\*\*\*\*/)
+    expect(detectSensitive("api_key=xxxxxxxxxxxxxxxxxxxxxxxx")).not.toBeNull()
+    expect(detectSensitive("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")).not.toBeNull()
+    expect(detectSensitive("今天天气不错")).toBeNull()
+    expect(detectSensitive("Hello world 123")).toBeNull()
+  })
+
+  test("key_press sends SendKeys command", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "ok", stderr: "", code: 0 }
+      },
+    })
+    await keyPressTool.execute({ keys: "^c" }, c)
+    expect(decodeCmd(seenCmd)).toContain("SendWait")
+    expect(decodeCmd(seenCmd)).toContain(Buffer.from("^c", "utf8").toString("base64"))
+  })
+
+  test("mouse_click builds click command", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已left点击 (100, 200)", stderr: "", code: 0 }
+      },
+    })
+    const r = await mouseClickTool.execute({ x: 100, y: 200 }, c)
+    expect(r.output).toContain("(100, 200)")
+    expect(decodeCmd(seenCmd)).toContain("SetCursorPos(100, 200)")
+  })
+
+  test("command failure surfaces stderr", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async () => ({ stdout: "", stderr: "access denied", code: 1 }),
+    })
+    const r = await screenshotTool.execute({}, c)
+    expect(r.output).toContain("截图失败")
+    expect(r.output).toContain("access denied")
+  })
+
+  test("window_focus title is base64-injected (no PowerShell interpolation surface)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "未找到匹配窗口", stderr: "", code: 0 }
+      },
+    })
+    // 恶意 title：若裸插值会执行 calc
+    await windowFocusTool.execute({ title: "$(Start-Process calc)" }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).not.toContain("Start-Process calc")
+    // 标题以 base64 注入脚本内解码后匹配
+    expect(script).toContain(Buffer.from("$(Start-Process calc)", "utf8").toString("base64"))
+    expect(script).toContain("MainWindowTitle.Contains($t)")
+  })
+
+  test("mouse_click double uses the defined Add-Type class", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已double点击 (1, 2)", stderr: "", code: 0 }
+      },
+    })
+    const r = await mouseClickTool.execute({ x: 1, y: 2, button: "double" }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain("GebaiMouse2")
+    expect(script).not.toContain("[GebaiMouse]::")
+    expect(r.output).toContain("double")
+  })
+
+  test("Linux key_press rejects shell metacharacters", async () => {
+    const original = process.platform
+    Object.defineProperty(process, "platform", { value: "linux" })
+    try {
+      const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+      let ran = ""
+      const c = ctx(home, {
+        runCommand: async (cmd) => {
+          if (cmd.includes("command -v")) return { stdout: "/usr/bin/xdotool", stderr: "", code: 0 }
+          ran = cmd
+          return { stdout: "", stderr: "", code: 0 }
+        },
+      })
+      const r = await keyPressTool.execute({ keys: "a; touch /tmp/pwn; echo" }, c)
+      expect(r.output).toContain("非法字符")
+      expect(ran).toBe("") // 未执行任何命令
+    } finally {
+      Object.defineProperty(process, "platform", { value: original })
+    }
+  })
+})
+
+describe("desktop definition", () => {
+  test("tool names conform to sub-agent tool naming rules", () => {
+    for (const t of Object.keys(desktopDef.tools ?? {})) {
+      expect(t).toMatch(/^[a-zA-Z0-9_]+$/)
+      expect(t).not.toMatch(/[.\-:]/)
+      expect(`desktop_${t}`.length).toBeLessThanOrEqual(40)
+    }
+  })
+
+  test("input/click/window tools require approval; screenshot/list do not", () => {
+    expect(desktopDef.requiresApproval).toMatchObject({
+      type_text: true,
+      key_press: true,
+      mouse_click: true,
+      window_focus: true,
+    })
+    expect(desktopDef.requiresApproval?.screenshot).toBeFalsy()
+    expect(desktopDef.requiresApproval?.window_list).toBeFalsy()
+  })
+
+  test("preload off and tools registered", () => {
+    expect(desktopDef.preload).toBe(false)
+    expect(Object.keys(desktopDef.tools ?? {}).sort()).toEqual(
+      ["agent_run", "clipboard_read", "key_press", "mouse_click", "mouse_move", "screen_info", "screenshot", "type_text", "window_focus", "window_list", "window_move"].sort(),
+    )
+    // 编排工具 agent_run（验证多通道委托 code 读应用数据文件）：只读免审批
+    expect(desktopDef.tools!.agent_run.requiresApproval).toBeFalsy()
+  })
+})

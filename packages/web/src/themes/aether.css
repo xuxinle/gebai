@@ -1,0 +1,844 @@
+/* ============================================================
+   GEBAI 主题：aether — 光与以太（旗舰视觉）
+   深空底 + 动态极光 mesh gradient + 极致玻璃拟态
+   多层径向渐变缓慢呼吸，玻璃面板 + 细描边 + 多层光晕
+   ============================================================ */
+
+[data-theme="aether"] {
+  /* 深空底色系（不是纯黑，带紫调） */
+  --bg: #06060e;
+  --bg-elev: #0c0c1a;
+  --bg-elev-2: #11112a;
+  --bg-hover: #181835;
+  --bg-active: #1f1f44;
+  --bg-inset: #050510;
+
+  /* 极细描边（玻璃感核心：几乎透明） */
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  /* 极光文字色（冷调高级白） */
+  --text: #e8eaff;
+  --text-muted: #9aa0c8;
+  --text-faint: #5e648a;
+
+  /* 极光主色（四色系） */
+  --accent: #06b6d4;        /* 青蓝（主） */
+  --accent-hover: #22d3ee;
+  --accent-soft: rgba(6, 182, 212, 0.14);
+  --aurora-cyan: #06b6d4;
+  --aurora-violet: #8b5cf6;
+  --aurora-pink: #ec4899;
+  --aurora-amber: #f59e0b;
+
+  --success: #10d9a0;
+  --danger: #ff4d6d;
+  --warning: #ffb020;
+  --tool: #22d3ee;
+  --user-grad: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%);
+
+  /* 形状：更大圆角，更柔软 */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-msg: 18px;
+
+  /* 阴影：多层光晕（不再是单层黑） */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.05) inset, 0 0 24px rgba(139, 92, 246, 0.08);
+  --shadow-pop: 0 16px 56px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08) inset, 0 0 40px rgba(139, 92, 246, 0.18);
+  --shadow-glow: 0 0 24px rgba(6, 182, 212, 0.4), 0 0 48px rgba(139, 92, 246, 0.2);
+
+  /* 玻璃：极强模糊 + 饱和度提升 */
+  --glass: blur(28px) saturate(1.8);
+  --msg-shadow: 0 4px 24px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+
+  /* 字体：极致精致的 system-ui 堆栈 */
+  --font-ui: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  --font-size: 14px;
+  --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   动态极光 mesh gradient 背景（四层径向渐变 + 缓慢呼吸）
+   ============================================================ */
+[data-theme="aether"] body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 1200px 600px at 85% -8%, rgba(6, 182, 212, 0.18), transparent 55%),
+    radial-gradient(ellipse 1000px 520px at -10% 105%, rgba(139, 92, 246, 0.16), transparent 55%),
+    radial-gradient(ellipse 800px 400px at 50% 50%, rgba(236, 72, 153, 0.06), transparent 60%),
+    radial-gradient(ellipse 600px 300px at 110% 80%, rgba(245, 158, 11, 0.04), transparent 60%);
+  background-attachment: fixed;
+  position: relative;
+  overflow: hidden;
+  animation: aether-breathe 24s ease-in-out infinite alternate;
+}
+
+/* 极光呼吸：缓慢移动光斑位置 + 微调透明度 */
+@keyframes aether-breathe {
+  0%   { background-position: 0% 0%, 0% 0%, 0% 0%, 0% 0%; filter: hue-rotate(0deg); }
+  50%  { background-position: 5% 8%, -3% -5%, 8% -3%, -5% 5%; filter: hue-rotate(-8deg); }
+  100% { background-position: -5% -8%, 3% 5%, -8% 3%, 5% -5%; filter: hue-rotate(8deg); }
+}
+
+/* 极光层（细网格 noise 模拟）—— 已删除：与 body 自身的 mesh gradient 视觉重叠
+   仅保留顶部高光带（极光"地平线"）作为标志性细节 */
+
+/* 顶部高光带（极光"地平线"） */
+[data-theme="aether"] body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.6), rgba(139, 92, 246, 0.6), rgba(236, 72, 153, 0.4), transparent);
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.4);
+}
+
+/* 玻璃面板（header / aside / settings-panel 等；composer 无背景条，融入主背景） */
+[data-theme="aether"] header,
+[data-theme="aether"] aside,
+[data-theme="aether"] .settings-panel,
+[data-theme="aether"] .login-card,
+[data-theme="aether"] .theme-pop,
+[data-theme="aether"] .preview-card {
+  background: rgba(12, 12, 26, 0.55) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* header 专属：底部细光带 —— 已删除：与 body::after 顶部光带形成上下双光带，去掉一个 */
+[data-theme="aether"] header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* aside：右侧细光带 */
+[data-theme="aether"] aside {
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.04) inset;
+}
+
+/* 连接状态徽章：简洁玻璃（去掉重复的 box-shadow） */
+[data-theme="aether"] .conn {
+  background: rgba(16, 217, 160, 0.1);
+  border: 1px solid rgba(16, 217, 160, 0.3);
+}
+
+/* 图标按钮：精简 hover（去掉 ::before 径向光，hover 上浮 + 着色足够） */
+[data-theme="aether"] .icon-btn {
+  transition: all var(--transition);
+}
+[data-theme="aether"] .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+[data-theme="aether"] .icon-btn.active {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.4);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+}
+
+/* 新建会话按钮：极光渐变（去掉背景扫光动画 —— 与 hover 扫光重复） */
+[data-theme="aether"] #new-session {
+  background: linear-gradient(135deg, #06b6d4, #8b5cf6);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+  position: relative;
+  overflow: hidden;
+  transition: all var(--transition);
+}
+[data-theme="aether"] #new-session::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.25), transparent);
+  transition: left 0.5s ease;
+}
+[data-theme="aether"] #new-session:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(6, 182, 212, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+}
+[data-theme="aether"] #new-session:hover::before { left: 100%; }
+
+/* 会话列表 */
+[data-theme="aether"] #session-list li {
+  border: 1px solid transparent;
+  transition: all var(--transition);
+}
+[data-theme="aether"] #session-list li:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  transform: translateX(2px);
+}
+[data-theme="aether"] #session-list li.active {
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.15), rgba(139, 92, 246, 0.08) 80%, transparent);
+  border-color: rgba(6, 182, 212, 0.35);
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.12), inset 2px 0 0 #06b6d4;
+}
+[data-theme="aether"] #session-list li.active .session-ico {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.3), rgba(139, 92, 246, 0.3));
+  color: #fff;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.4);
+}
+
+/* 消息气泡：assistant 玻璃 + 微光 */
+[data-theme="aether"] .msg.assistant .bubble {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--msg-shadow);
+  position: relative;
+  border-bottom-left-radius: 4px;
+}
+[data-theme="aether"] .msg.assistant:hover .bubble {
+  border-color: rgba(6, 182, 212, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(6, 182, 212, 0.2) inset, 0 0 20px rgba(6, 182, 212, 0.1);
+}
+
+/* user 气泡：极光渐变（去掉双层扫光动画 —— 单一渐变 + 静态光晕足够） */
+[data-theme="aether"] .msg.user .bubble {
+  background: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 18px rgba(139, 92, 246, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  border-bottom-right-radius: 4px;
+}
+
+
+/* 工具卡片：精致玻璃 + 青光左边 */
+[data-theme="aether"] .msg.tool .bubble {
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.05), rgba(34, 211, 238, 0.02));
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-left: 2px solid #22d3ee;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(34, 211, 238, 0.1) inset;
+}
+[data-theme="aether"] .msg.tool .bubble .tool-head { color: #22d3ee; text-shadow: 0 0 8px rgba(34, 211, 238, 0.4); }
+[data-theme="aether"] .msg.tool .bubble .tool-out summary {
+  background: rgba(34, 211, 238, 0.08);
+  border-color: rgba(34, 211, 238, 0.3);
+  color: #22d3ee;
+}
+[data-theme="aether"] .msg.tool .bubble .tool-out summary:hover { background: rgba(34, 211, 238, 0.15); }
+
+/* 消息操作按钮（复制/反馈） */
+[data-theme="aether"] .msg-act { color: var(--text-muted); }
+[data-theme="aether"] .msg-act:hover {
+  background: rgba(6, 182, 212, 0.12);
+  color: #06b6d4;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+}
+
+/* 流式光标：渐变光带（去掉 caret-pulse —— 渐变 + blink 足够） */
+[data-theme="aether"] .msg.streaming .bubble::after {
+  content: "▍";
+  background: linear-gradient(180deg, #06b6d4, #8b5cf6, #ec4899);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  filter: drop-shadow(0 0 6px rgba(139, 92, 246, 0.6));
+  margin-left: 2px;
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+/* composer：无背景横条，输入区融入主背景（胶囊输入行自身保持玻璃可辨识） */
+[data-theme="aether"] #composer {
+  padding: 14px clamp(16px, 4vw, 48px) 16px;
+}
+[data-theme="aether"] .composer-row {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  padding: 6px 8px;
+  transition: all var(--transition);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+[data-theme="aether"] .composer-row:focus-within {
+  border-color: rgba(6, 182, 212, 0.4);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12), 0 0 0 1px rgba(6, 182, 212, 0.3) inset;
+}
+[data-theme="aether"] #attach-btn { color: var(--text-muted); }
+[data-theme="aether"] #attach-btn:hover {
+  background: rgba(6, 182, 212, 0.1);
+  color: #06b6d4;
+}
+[data-theme="aether"] #input { color: var(--text); }
+[data-theme="aether"] #input::placeholder { color: rgba(154, 160, 200, 0.5); }
+
+/* 发送按钮：极光渐变（去掉背景扫光动画 —— hover 放大 + 静态渐变已足够） */
+[data-theme="aether"] #send {
+  background: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  transition: all var(--transition);
+}
+[data-theme="aether"] #send:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(6, 182, 212, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.2) inset;
+}
+[data-theme="aether"] #send:active { transform: scale(0.94); }
+[data-theme="aether"] #send.stopping {
+  background: linear-gradient(135deg, #ff4d6d, #ec4899);
+  box-shadow: 0 4px 14px rgba(255, 77, 109, 0.4);
+}
+
+/* 审批卡片：警告色 + 玻璃 */
+[data-theme="aether"] .approval {
+  background: rgba(255, 176, 32, 0.08);
+  border: 1px solid rgba(255, 176, 32, 0.3);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), 0 0 16px rgba(255, 176, 32, 0.1);
+}
+[data-theme="aether"] .approval .yes {
+  background: linear-gradient(135deg, #10d9a0, #06b6d4);
+  box-shadow: 0 4px 12px rgba(16, 217, 160, 0.3);
+}
+[data-theme="aether"] .approval .no {
+  background: rgba(255, 77, 109, 0.1);
+  color: #ff4d6d;
+  border: 1px solid rgba(255, 77, 109, 0.4);
+}
+
+/* Markdown：精致排版 */
+[data-theme="aether"] .markdown h1,
+[data-theme="aether"] .markdown h2,
+[data-theme="aether"] .markdown h3 {
+  background: linear-gradient(135deg, #e8eaff 0%, #c4c8f0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+[data-theme="aether"] .markdown h2 {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+[data-theme="aether"] .markdown a {
+  color: #06b6d4;
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(6, 182, 212, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .markdown a:hover {
+  color: #22d3ee;
+  text-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+  border-bottom-color: rgba(34, 211, 238, 0.8);
+}
+[data-theme="aether"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  color: #22d3ee;
+  border-radius: 6px;
+  padding: 0.12em 0.5em;
+  font-size: 0.88em;
+}
+[data-theme="aether"] .markdown pre {
+  background: rgba(5, 5, 16, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aether"] .markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+}
+[data-theme="aether"] .markdown blockquote {
+  border-left: 3px solid #06b6d4;
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.06), transparent);
+  color: var(--text-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+[data-theme="aether"] .markdown table { border-color: rgba(255, 255, 255, 0.08); }
+[data-theme="aether"] .markdown th {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+[data-theme="aether"] .markdown th,
+[data-theme="aether"] .markdown td { border-color: rgba(255, 255, 255, 0.06); }
+[data-theme="aether"] .markdown hr { border-top-color: rgba(255, 255, 255, 0.08); }
+[data-theme="aether"] .copy-btn {
+  background: rgba(12, 12, 26, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aether"] .copy-btn:hover { background: rgba(6, 182, 212, 0.15); color: #06b6d4; }
+
+/* 推理块：玻璃 + 淡紫色 */
+[data-theme="aether"] .reasoning .reasoning-body {
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.06), transparent);
+  border-left: 2px solid rgba(139, 92, 246, 0.4);
+  color: var(--text-muted);
+}
+
+/* 主题选择气泡：玻璃 */
+[data-theme="aether"] .theme-pop {
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08) inset, 0 0 24px rgba(139, 92, 246, 0.1);
+}
+[data-theme="aether"] .theme-opt:hover {
+  background: rgba(6, 182, 212, 0.08);
+  box-shadow: inset 2px 0 0 #06b6d4;
+}
+[data-theme="aether"] .theme-opt.active {
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.15), rgba(139, 92, 246, 0.08) 80%, transparent);
+  box-shadow: inset 2px 0 0 #06b6d4;
+}
+[data-theme="aether"] .theme-opt .swatch {
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* 设置抽屉：精致玻璃 */
+[data-theme="aether"] .settings-overlay {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aether"] .settings-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+[data-theme="aether"] .settings-tabs {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+[data-theme="aether"] .settings-tabs button.active {
+  background: rgba(6, 182, 212, 0.12);
+  color: #06b6d4;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+}
+[data-theme="aether"] .settings-tabs button:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+[data-theme="aether"] .settings-row {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .settings-row:hover {
+  background: rgba(6, 182, 212, 0.05);
+  border-color: rgba(6, 182, 212, 0.25);
+  transform: translateX(2px);
+}
+[data-theme="aether"] .settings-form {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+[data-theme="aether"] .settings-form input,
+[data-theme="aether"] .settings-form select {
+  background: rgba(5, 5, 16, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .settings-form input:focus,
+[data-theme="aether"] .settings-form select:focus {
+  border-color: rgba(6, 182, 212, 0.5);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12);
+  outline: none;
+}
+[data-theme="aether"] .mini-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .mini-btn:hover {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.4);
+  color: #06b6d4;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+}
+[data-theme="aether"] .settings-group-name { color: #06b6d4; text-shadow: 0 0 8px rgba(6, 182, 212, 0.3); }
+
+/* 登录卡片：沉浸式玻璃 */
+[data-theme="aether"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1200px 600px at 50% 30%, rgba(139, 92, 246, 0.15), transparent 60%),
+    radial-gradient(ellipse 1000px 500px at 50% 100%, rgba(6, 182, 212, 0.12), transparent 60%),
+    var(--bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+[data-theme="aether"] .login-card {
+  background: rgba(12, 12, 26, 0.5);
+  backdrop-filter: blur(32px) saturate(1.6);
+  -webkit-backdrop-filter: blur(32px) saturate(1.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.06) inset, 0 0 60px rgba(139, 92, 246, 0.2);
+}
+[data-theme="aether"] .login-brand {
+  background: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  letter-spacing: 6px;
+  filter: drop-shadow(0 0 16px rgba(139, 92, 246, 0.4));
+}
+[data-theme="aether"] .login-sub { color: var(--text-muted); letter-spacing: 3px; }
+[data-theme="aether"] .login-card input {
+  background: rgba(5, 5, 16, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .login-card input:focus {
+  border-color: rgba(6, 182, 212, 0.5);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12);
+  outline: none;
+}
+[data-theme="aether"] .login-submit {
+  background: linear-gradient(135deg, #06b6d4, #8b5cf6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  letter-spacing: 4px;
+}
+
+/* 空状态：极光品牌（去掉 aether-text-glow 动画 —— 渐变 + drop-shadow 静态已足够） */
+[data-theme="aether"] .empty-state .es-slogan {
+  background: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 300;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 20px rgba(139, 92, 246, 0.3));
+}
+[data-theme="aether"] .es-suggestions button {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .es-suggestions button:hover {
+  background: rgba(6, 182, 212, 0.1);
+  border-color: rgba(6, 182, 212, 0.4);
+  color: #06b6d4;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(6, 182, 212, 0.2);
+}
+
+/* 选择卡片：精致玻璃 */
+[data-theme="aether"] .choice-opt {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="aether"] .choice-opt:hover {
+  background: rgba(6, 182, 212, 0.1);
+  border-color: rgba(6, 182, 212, 0.4);
+  color: #06b6d4;
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.2);
+  transform: translateY(-1px);
+}
+
+/* 待办卡片 */
+[data-theme="aether"] .todo-ico { color: #06b6d4; }
+
+/* 压缩通知 */
+[data-theme="aether"] .bubble.compact-notice {
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px dashed rgba(139, 92, 246, 0.3);
+  color: var(--text-muted);
+}
+
+/* 附件 chip */
+[data-theme="aether"] .attach-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* 文件预览 modal */
+[data-theme="aether"] .preview-overlay {
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aether"] .preview-head { border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+[data-theme="aether"] .preview-close:hover {
+  background: rgba(255, 77, 109, 0.15);
+  color: #ff4d6d;
+}
+
+/* 滚动条：极精致 */
+[data-theme="aether"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+}
+[data-theme="aether"] ::-webkit-scrollbar-thumb:hover { background: rgba(6, 182, 212, 0.4); }
+[data-theme="aether"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* 极光语法高亮 */
+[data-theme="aether"] .hljs { color: #e8eaff; }
+[data-theme="aether"] .hljs-comment,
+[data-theme="aether"] .hljs-quote { color: #5e648a; font-style: italic; }
+[data-theme="aether"] .hljs-keyword,
+[data-theme="aether"] .hljs-selector-tag,
+[data-theme="aether"] .hljs-literal,
+[data-theme="aether"] .hljs-type { color: #c4b5fd; font-weight: 500; }
+[data-theme="aether"] .hljs-string,
+[data-theme="aether"] .hljs-regexp,
+[data-theme="aether"] .hljs-addition { color: #67e8f9; }
+[data-theme="aether"] .hljs-number,
+[data-theme="aether"] .hljs-symbol,
+[data-theme="aether"] .hljs-bullet { color: #f9a8d4; }
+[data-theme="aether"] .hljs-title,
+[data-theme="aether"] .hljs-section,
+[data-theme="aether"] .hljs-name,
+[data-theme="aether"] .hljs-selector-id { color: #fcd34d; }
+[data-theme="aether"] .hljs-attr,
+[data-theme="aether"] .hljs-attribute,
+[data-theme="aether"] .hljs-variable,
+[data-theme="aether"] .hljs-template-variable { color: #93c5fd; }
+[data-theme="aether"] .hljs-built_in,
+[data-theme="aether"] .hljs-builtin-name { color: #fdba74; }
+[data-theme="aether"] .hljs-meta,
+[data-theme="aether"] .hljs-doctag { color: #6b7280; }
+
+/* "跳到最新"浮动按钮：aether 极光美化 */
+[data-theme="aether"] .jump-bottom {
+  background: rgba(12, 12, 26, 0.55);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04) inset, 0 0 18px rgba(139, 92, 246, 0.1);
+}
+[data-theme="aether"] .jump-bottom:hover {
+  border-color: rgba(6, 182, 212, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(6, 182, 212, 0.3) inset, 0 0 24px rgba(6, 182, 212, 0.18);
+}
+[data-theme="aether"] .jump-bottom svg { color: #22d3ee; }
+
+/* diagram / 流程图 */
+[data-theme="aether"] .diagram {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+[data-theme="aether"] .diagram-editor {
+  background: rgba(5, 5, 16, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* 响应式：保持细节 */
+@media (max-width: 860px) {
+  [data-theme="aether"] aside {
+    background: rgba(6, 6, 14, 0.85);
+    backdrop-filter: blur(32px) saturate(1.6);
+    -webkit-backdrop-filter: blur(32px) saturate(1.6);
+  }
+}
+
+/* ============================================================
+   补漏：与新基线对齐（matrix 密度）—— 8 个组件补全
+   包含：caret-blink 定义、conn 状态灯、msg-name/time、session-ico/time/del、
+         scrollbar 极光风、msg-act 加强、msg-name 渐变光字
+   ============================================================ */
+
+/* 流式光标闪烁动画（aether 之前引用但未定义） */
+@keyframes caret-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* 连接状态徽章：极光状态灯 + 呼吸脉冲 */
+[data-theme="aether"] .conn {
+  position: relative;
+  padding-left: 18px;
+}
+[data-theme="aether"] .conn::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background: var(--success);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--success), 0 0 12px rgba(16, 217, 160, 0.3);
+  animation: aether-pulse 1.6s ease-in-out infinite;
+}
+[data-theme="aether"] .conn.bad::before {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger), 0 0 12px rgba(255, 77, 109, 0.3);
+}
+@keyframes aether-pulse {
+  0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); }
+  50% { opacity: 0.4; transform: translateY(-50%) scale(0.85); }
+}
+
+/* 消息元信息：极光渐变名 + 时间 monospace */
+[data-theme="aether"] .msg-name {
+  background: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  filter: drop-shadow(0 0 4px rgba(139, 92, 246, 0.3));
+}
+[data-theme="aether"] .msg-time {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+/* 消息操作按钮：玻璃感 + 极光 hover */
+[data-theme="aether"] .msg-act {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+[data-theme="aether"] .msg-act:hover {
+  color: #06b6d4;
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.3);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.25);
+  text-shadow: 0 0 4px rgba(6, 182, 212, 0.5);
+}
+
+/* 会话图标：基础样式（之前只有 active） */
+[data-theme="aether"] .session-ico {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+[data-theme="aether"] #session-list li:hover .session-ico {
+  border-color: rgba(6, 182, 212, 0.3);
+  color: #06b6d4;
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.2);
+}
+
+/* 会话名 */
+[data-theme="aether"] .session-name { font-weight: 500; }
+
+/* 滚动条：极光渐变 thumb */
+[data-theme="aether"] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+[data-theme="aether"] ::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+[data-theme="aether"] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(6, 182, 212, 0.3), rgba(139, 92, 246, 0.3));
+  border-radius: 4px;
+  box-shadow: 0 0 4px rgba(139, 92, 246, 0.2);
+}
+[data-theme="aether"] ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(6, 182, 212, 0.6), rgba(139, 92, 246, 0.6));
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.4);
+}
+
+/* 主题面板：极光玻璃 + 顶部极光线 */
+[data-theme="aether"] .theme-pop {
+  background: rgba(12, 12, 26, 0.6);
+  backdrop-filter: blur(28px) saturate(1.8);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+[data-theme="aether"] .theme-pop::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.6), rgba(139, 92, 246, 0.5), rgba(236, 72, 153, 0.3), transparent);
+  pointer-events: none;
+}
+
+/* 设置按钮 hover 极光 */
+[data-theme="aether"] #settings-btn:hover {
+  background: rgba(6, 182, 212, 0.1);
+  color: #06b6d4;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+}
+
+/* 加速审批按钮悬停 */
+[data-theme="aether"] #approval-skip:hover {
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.2);
+}
+
+/* 压缩按钮 hover */
+[data-theme="aether"] #compact-btn:hover {
+  background: rgba(139, 92, 246, 0.1);
+  color: #8b5cf6;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.2);
+}
+
+/* 登出按钮 hover */
+[data-theme="aether"] #logout-btn:hover {
+  background: rgba(255, 77, 109, 0.1);
+  color: #ff4d6d;
+  box-shadow: 0 0 12px rgba(255, 77, 109, 0.2);
+}
+
+/* 主题按钮 hover */
+[data-theme="aether"] #theme-btn:hover {
+  background: rgba(236, 72, 153, 0.1);
+  color: #ec4899;
+  box-shadow: 0 0 12px rgba(236, 72, 153, 0.2);
+}
+
+/* sidebar-toggle hover */
+[data-theme="aether"] #sidebar-toggle:hover {
+  background: rgba(6, 182, 212, 0.1);
+  color: #06b6d4;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+}
+
+/* 空状态装饰：slogan 下方加极光下划线 */
+[data-theme="aether"] .empty-state .es-slogan {
+  position: relative;
+  padding-bottom: 4px;
+}
+[data-theme="aether"] .empty-state .es-slogan::after {
+  content: "";
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 120px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #06b6d4, #8b5cf6, #ec4899, transparent);
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.4);
+}
+

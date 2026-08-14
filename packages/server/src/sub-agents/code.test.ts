@@ -1,0 +1,191 @@
+import { describe, expect, test } from "bun:test"
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, dirname } from "node:path"
+import type { ToolContext } from "../core/types"
+import { def as codeDef } from "./code"
+
+function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
+  const tmp = join(home, "users", "default", "sessions", "s1", "tmp")
+  mkdirSync(tmp, { recursive: true })
+  const base: ToolContext = {
+    user: "default",
+    sessionId: "s1",
+    workdir: tmp,
+    home,
+    env: {},
+    sandboxed: false,
+    resolvePath: (p) => join(tmp, p),
+    readFile: async (p) => await Bun.file(p).text(),
+    readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
+    writeFile: async (p, content) => {
+      const { mkdir, writeFile } = await import("node:fs/promises")
+      await mkdir(dirname(p), { recursive: true })
+      await writeFile(p, content)
+    },
+    listFiles: async () => [],
+    listDir: async () => [],
+    deleteFile: async () => {},
+    moveFile: async () => {},
+    runCommand: async () => ({ stdout: "", stderr: "", code: 0 }),
+    uploadAttachment: async (r) => r.path,
+    publish: () => {},
+    projects: [{ name: "app", path: "", description: "测试项目" }],
+    resolveProjectPath: (name) => {
+      if (name !== "app") throw new Error(`未知预置项目: ${name}`)
+      return join(home, "users", "default", "sessions", "s1", "proj")
+    },
+    getTodos: async () => [],
+    setTodos: async () => {},
+    registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
+    listSubAgentDefs: () => [],
+    loadSubAgent: async () => {},
+    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
+    waitForChoice: async () => null,
+    waitForEnv: async () => false,
+    waitForDraw: async () => ({ ok: true }),
+    waitForCapture: async () => null,
+  }
+  return { ...base, ...overrides }
+}
+
+describe("code sub-agent", () => {
+  test("def exposes full toolset with project routing and approval policy", () => {
+    const names = Object.keys(codeDef.tools!)
+    // 文件工具与探索/分析工具齐全（含补丁应用与符号定位）
+    for (const t of ["read", "write", "edit", "apply_patch", "sh", "py", "ls", "grep", "search_files", "search_symbols", "move_file", "delete_file", "diff", "analyze", "git"]) {
+      expect(names).toContain(t)
+    }
+    // 参考 opencode 补齐：文档查阅、方案确认、任务规划、浏览器端验证委托
+    for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
+      expect(names).toContain(t)
+    }
+    // 写操作与命令执行全部需审批；路径型工具都带 project 参数
+    for (const t of ["edit", "write", "apply_patch", "sh", "py"]) {
+      expect(codeDef.requiresApproval![t]).toBe(true)
+    }
+    for (const t of ["read", "write", "edit", "apply_patch", "sh", "py", "ls", "grep", "search_files", "search_symbols", "move_file", "delete_file", "diff", "analyze", "git"]) {
+      expect(codeDef.tools![t].parameters.properties).toHaveProperty("project")
+    }
+    // 只读类不审批（git/search_symbols 只读但带 project 参数）
+    for (const t of ["git", "search_symbols"]) {
+      expect(codeDef.tools![t].requiresApproval).toBeUndefined()
+    }
+    // 无 project 参数：纯交互/全局类
+    for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
+      expect(codeDef.tools![t].requiresApproval).toBeUndefined()
+      expect(codeDef.tools![t].parameters.properties).not.toHaveProperty("project")
+    }
+    expect(codeDef.preload).toBe(false)
+  })
+
+  test("project param routes diff paths and py/sh workdir to project root", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-code-"))
+    const c = ctx(home)
+    const root = c.resolveProjectPath("app")
+    await c.writeFile(join(root, "old.txt"), "line1\nold\n")
+    await c.writeFile(join(root, "new.txt"), "line1\nnew\n")
+
+    // diff：project 模式下 oldPath/newPath 相对项目根解析
+    const d = await codeDef.tools!.diff.execute({ project: "app", oldPath: "old.txt", newPath: "new.txt", name: "对比" }, c)
+    expect(d.output).toContain("-old")
+    expect(d.output).toContain("+new")
+
+    // py：project 模式下脚本与执行目录都在项目根
+    const runs: string[] = []
+    c.runCommand = async (_cmd, o) => {
+      runs.push(o?.workdir ?? "")
+      return { stdout: "ok", stderr: "", code: 0 }
+    }
+    const py = await codeDef.tools!.py.execute({ project: "app", code: "print(1)" }, c)
+    expect(py.output).toContain("ok")
+    // 最后一次 runCommand 为实际执行（前面可能有 resolvePythonCmd 的探测调用，workdir 无意义）
+    expect(runs[runs.length - 1]).toBe(root)
+
+    // sh：project 模式下 workdir 切到项目根
+    runs.length = 0
+    const sh = await codeDef.tools!.sh.execute({ project: "app", command: "pwd" }, c)
+    expect(sh.output).toBe("ok")
+    expect(runs).toEqual([root])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("ask_user blocks for user choice (multi) via waitForChoice", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-code-"))
+    const c = ctx(home, {
+      waitForChoice: async (prompt, options, multi) => {
+        expect(prompt).toBe("选择测试方案")
+        expect(options).toEqual([{ title: "方案A", description: "快" }, "方案B"])
+        expect(multi).toBe(true)
+        return { kind: "multi", values: ["方案A"] }
+      },
+    })
+    const r = await codeDef.tools!.ask_user.execute({ prompt: "选择测试方案", options: [{ title: "方案A", description: "快" }, "方案B"], multi: true }, c)
+    expect(r.output).toContain("方案A")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("todo tools plan and track multi-step work via session todos", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-code-"))
+    let todos: Array<{ id: string; title: string; status: string; priority: string }> = []
+    const c = ctx(home, {
+      getTodos: async () => todos as never,
+      setTodos: async (t) => {
+        todos = t as never
+      },
+    })
+    const add = await codeDef.tools!.todo.execute({ entries: [{ op: "add", title: "定位 Bug", priority: "high" }] }, c)
+    expect(add.output).toContain("定位 Bug")
+    expect(todos).toHaveLength(1)
+    const list = await codeDef.tools!.todo.execute({}, c) // 空列表 = 查询
+    expect(list.output).toContain("查询待办")
+    expect(list.output).toContain("定位 Bug")
+    const update = await codeDef.tools!.todo.execute({ entries: [{ op: "update", id: todos[0].id, status: "in_progress" }] }, c)
+    expect(update.output).toContain("in_progress")
+    expect(todos[0].status).toBe("in_progress")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("agent_run delegates browser verification to another sub-agent", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-code-"))
+    const c = ctx(home, {
+      runNewSession: async (agents, input) => ({ output: `${agents.join("+")}|${input}`, archive: { runId: "r", agents, input, output: `${agents.join("+")}|${input}`, messages: [] } }),
+    })
+    const r = await codeDef.tools!.agent_run.execute({ agents: ["playwright"], input: "验证首页渲染" }, c)
+    expect(r.output).toContain("playwright|验证首页渲染")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("受限模式（CODE_RESTRICT_PROJECTS=true）：无 project 的自由路径被拒绝，带 project 正常", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-restrict-"))
+    const c = ctx(home, { env: { CODE_RESTRICT_PROJECTS: "true" } })
+    // 无 project（无绑定根）：自由路径被拒
+    const denied = await codeDef.tools!.write.execute({ path: "out.txt", content: "hi" }, c)
+    expect(denied.output).toContain("受限模式")
+    expect(denied.output).toContain("project 参数")
+    // 带 project 参数：正常路由到预置项目根
+    const ok = await codeDef.tools!.write.execute({ project: "app", path: "out.txt", content: "hi" }, c)
+    expect(ok.output).toContain("已写入")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("受限模式：项目绑定根内（boundProjectRoot）未传 project 放行；默认关闭不限制", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-restrict2-"))
+    // 绑定根（子Agent 新会话执行模式 + CODE_PROJECT）：受限下未传 project 仍可用（路径基准即绑定根）
+    const bound = join(home, "proj")
+    mkdirSync(bound, { recursive: true })
+    const c1 = ctx(home, {
+      env: { CODE_RESTRICT_PROJECTS: "true" },
+      workdir: bound,
+      boundProjectRoot: bound,
+      resolvePath: (p) => join(bound, p),
+    })
+    const r1 = await codeDef.tools!.write.execute({ path: "a.txt", content: "x" }, c1)
+    expect(r1.output).toContain("已写入")
+    // 默认关闭（未设置环境变量）：自由路径不限制
+    const c2 = ctx(home, {})
+    const r2 = await codeDef.tools!.write.execute({ path: "out.txt", content: "y" }, c2)
+    expect(r2.output).toContain("已写入")
+    rmSync(home, { recursive: true, force: true })
+  })
+})

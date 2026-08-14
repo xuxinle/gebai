@@ -1,0 +1,4 @@
+# Bun 配置：子 Agent 目录形式的系统提示词 md 文件按纯文本导入
+# （Bun 默认将 .md 走 html loader，会包裹 <p> 标签；此处统一为 text）
+[loader]
+".md" = "text"

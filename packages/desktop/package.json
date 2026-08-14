@@ -1,0 +1,24 @@
+{
+  "name": "@gebai/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "server:build": "bun run --cwd ../web build && bun run ../server/scripts/build-web-bundle.ts && bun run ../server/scripts/build-subagents.ts && bun run ../server/scripts/build-d2js.ts && bun build ./src/server-main.ts --compile --outfile=src-tauri/binaries/gebai-x86_64-pc-windows-msvc.exe --external @terrastruct/d2 && bun run scripts/copy-driver.ts",
+    "tauri:dev": "bunx --yes @tauri-apps/cli dev",
+    "tauri:build": "bun run server:build && bunx --yes @tauri-apps/cli build",
+    "build": "bun run tauri:build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'no lint configured'"
+  },
+  "dependencies": {
+    "@gebai/server": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

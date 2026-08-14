@@ -1,0 +1,823 @@
+/* ============================================================
+   GEBAI 主题：synthwave — 浪潮（80 年代复古 · 霓虹日落）
+   紫红底 + 透视网格地平线 + 远处霓虹太阳 + 落日圆盘
+   标志性细节：地面网格透视、霓虹太阳、扫描线、磁带感
+   ============================================================ */
+
+[data-theme="synthwave"] {
+  /* 紫红底（向落日过渡） */
+  --bg: #1a0a2e;
+  --bg-elev: #2a1340;
+  --bg-elev-2: #3a1a55;
+  --bg-hover: #4a2168;
+  --bg-active: #5a2880;
+  --bg-inset: #10061f;
+
+  /* 霓虹紫粉描边 */
+  --border: rgba(255, 110, 199, 0.2);
+  --border-strong: rgba(255, 110, 199, 0.4);
+
+  /* 霓虹白文字 */
+  --text: #ffe5f3;
+  --text-muted: #b88cc7;
+  --text-faint: #75568a;
+
+  /* 浪潮主色（粉紫 + 青蓝） */
+  --accent: #ff6ec7;
+  --accent-2: #00d4ff;
+  --accent-hover: #ff8ed4;
+  --accent-soft: rgba(255, 110, 199, 0.16);
+  --on-accent: #1a0a2e;
+  --success: #00ffa3;
+  --danger: #ff3860;
+  --warning: #ffd700;
+  --tool: #00d4ff;
+  --user-grad: linear-gradient(135deg, #ff6ec7 0%, #c084fc 50%, #00d4ff 100%);
+  --nav-active: #ff6ec7;
+
+  /* 形状：中等圆角 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-msg: 12px;
+
+  /* 阴影：霓虹双辉光 */
+  --shadow-sm: 0 0 8px rgba(255, 110, 199, 0.15);
+  --shadow-md: 0 0 24px rgba(255, 110, 199, 0.2), 0 0 12px rgba(0, 212, 255, 0.1), 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 0 40px rgba(255, 110, 199, 0.3), 0 0 20px rgba(0, 212, 255, 0.15), 0 16px 48px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 16px rgba(255, 110, 199, 0.5), 0 0 32px rgba(192, 132, 252, 0.3);
+  --glass: blur(20px) saturate(1.5);
+  --msg-shadow: 0 0 12px rgba(0, 212, 255, 0.08);
+
+  /* 字体 */
+  --font-ui: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --font-size: 14px;
+  --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   背景：紫红底 + 透视网格地平线 + 远处霓虹太阳
+   网格用 ::before 伪元素实现（更可控）
+   ============================================================ */
+[data-theme="synthwave"] body {
+  background-color: var(--bg);
+  background-image: linear-gradient(180deg, #10061f 0%, #2a0a3a 40%, #3c143c 60%, #d96ba0 72%, #e386a5 78%, #c98a55 88%, #b89848 100%);
+  background-attachment: fixed;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 透视网格地平线（地面 50% 区域） */
+[data-theme="synthwave"] body::before {
+  content: "";
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 50%;
+  background-image:
+    /* 水平线 */
+    repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 49px,
+      rgba(255, 110, 199, 0.6) 49px,
+      rgba(255, 110, 199, 0.6) 50px
+    ),
+    /* 垂直线 */
+    repeating-linear-gradient(
+      90deg,
+      transparent 0,
+      transparent 79px,
+      rgba(255, 110, 199, 0.5) 79px,
+      rgba(255, 110, 199, 0.5) 80px
+    );
+  z-index: 0;
+  pointer-events: none;
+  /* 从地平线向外渐隐，模拟透视消失 */
+  mask-image: linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.4) 30%, black 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.4) 30%, black 100%);
+}
+
+/* 远处霓虹太阳圆盘（用 ::after 不可行，因为已经被用作 body::after）
+   这里用 body::before 不可行（被 matrix 用了），改用 #app::after */
+[data-theme="synthwave"] #app::after {
+  content: "";
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 400px;
+  height: 400px;
+  margin-top: -200px;
+  margin-left: -200px;
+  background: radial-gradient(circle, #e076b4 0%, #ec8fb8 40%, #c79355 60%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(2px);
+  z-index: 0;
+  pointer-events: none;
+  animation: synthwave-sun 8s ease-in-out infinite alternate;
+}
+
+@keyframes synthwave-sun {
+  0% { opacity: 0.62; transform: scale(1); }
+  100% { opacity: 0.78; transform: scale(1.05); }
+}
+
+/* 内容层置于背景装饰之上：main 背景透明以透出太阳/网格，气泡/卡片自身背景保证可读 */
+[data-theme="synthwave"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+
+/* 顶部粉光带 */
+[data-theme="synthwave"] body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255, 110, 199, 0.6) 30%, rgba(192, 132, 252, 0.5) 60%, rgba(0, 212, 255, 0.4) 90%, transparent);
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 0 12px rgba(255, 110, 199, 0.5);
+}
+
+/* ============================================================
+   全局元素
+   ============================================================ */
+[data-theme="synthwave"] ::selection { background: var(--accent); color: var(--on-accent); }
+[data-theme="synthwave"] a {
+  color: var(--accent-2);
+  text-decoration: none;
+  text-shadow: 0 0 6px rgba(0, 212, 255, 0.4);
+  border-bottom: 1px dashed rgba(0, 212, 255, 0.4);
+}
+[data-theme="synthwave"] a:hover {
+  color: var(--accent);
+  text-shadow: 0 0 6px rgba(255, 110, 199, 0.5);
+  border-bottom-color: var(--accent);
+}
+
+[data-theme="synthwave"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-theme="synthwave"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 110, 199, 0.3);
+  border-radius: 0;
+  box-shadow: 0 0 4px rgba(255, 110, 199, 0.3);
+}
+[data-theme="synthwave"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+[data-theme="synthwave"] ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.4); }
+
+/* ============================================================
+   面板：玻璃 + 霓虹边
+   ============================================================ */
+[data-theme="synthwave"] header,
+[data-theme="synthwave"] aside,
+[data-theme="synthwave"] .settings-panel {
+  background: rgbabackground: rgba(26, 10, 46, 0.7) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  position: relative;
+  z-index: 1;
+}
+/* 浮层（主题面板/预览卡片）：保持 fixed 定位 */
+[data-theme="synthwave"] .theme-pop,
+[data-theme="synthwave"] .preview-card {
+background: rgba(26, 10, 46, 0.7) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+[data-theme="synthwave"] #composer {
+  /* 无背景无边框：透出主题背景（渐变/网格），输入行自身保持可辨识 */
+  background: transparent !important;
+  position: relative;
+  z-index: 1;
+}
+[data-theme="synthwave"] .login-card {
+  background: rgba(26, 10, 46, 0.7) !important;
+  backdrop-filter: blur(32px) saturate(1.5);
+  -webkit-backdrop-filter: blur(32px) saturate(1.5);
+  border: 1px solid var(--accent);
+  box-shadow: var(--shadow-pop);
+}
+
+/* ============================================================
+   icon-btn
+   ============================================================ */
+[data-theme="synthwave"] .icon-btn {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .icon-btn:hover {
+  background: rgba(255, 110, 199, 0.1);
+  border-color: var(--border-strong);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(255, 110, 199, 0.3);
+}
+[data-theme="synthwave"] .icon-btn.active {
+  background: rgba(0, 212, 255, 0.15);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  box-shadow: 0 0 12px rgba(0, 212, 255, 0.4);
+}
+
+/* ============================================================
+   连接状态徽章
+   ============================================================ */
+[data-theme="synthwave"] .conn {
+  background: rgba(0, 255, 163, 0.12);
+  border: 1px solid rgba(0, 255, 163, 0.4);
+  color: var(--success);
+  border-radius: var(--radius-sm);
+  position: relative;
+  padding-left: 18px;
+  text-shadow: 0 0 4px rgba(0, 255, 163, 0.4);
+}
+[data-theme="synthwave"] .conn::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  border-radius: 50%;
+  animation: synthwave-pulse 1.5s ease-in-out infinite;
+}
+[data-theme="synthwave"] .conn.bad {
+  background: rgba(255, 56, 96, 0.12);
+  border-color: var(--danger);
+  color: var(--danger);
+  text-shadow: 0 0 4px rgba(255, 56, 96, 0.4);
+}
+[data-theme="synthwave"] .conn.bad::before { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+@keyframes synthwave-pulse {
+  0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); }
+  50% { opacity: 0.5; transform: translateY(-50%) scale(0.8); }
+}
+
+/* ============================================================
+   新会话按钮
+   ============================================================ */
+[data-theme="synthwave"] #new-session {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  font-weight: 700;
+  box-shadow: 0 0 16px rgba(255, 110, 199, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] #new-session:hover {
+  box-shadow: 0 0 24px rgba(255, 110, 199, 0.6), 0 0 8px rgba(0, 212, 255, 0.4) inset;
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   会话列表
+   ============================================================ */
+[data-theme="synthwave"] #session-list li {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] #session-list li:hover {
+  background: rgba(255, 110, 199, 0.08);
+  border-color: var(--border);
+  transform: translateX(2px);
+}
+[data-theme="synthwave"] #session-list li.active {
+  background: linear-gradient(90deg, rgba(255, 110, 199, 0.18), rgba(192, 132, 252, 0.08) 80%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(255, 110, 199, 0.2), inset 2px 0 0 var(--accent);
+}
+[data-theme="synthwave"] .session-ico {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, rgba(255, 110, 199, 0.2), rgba(0, 212, 255, 0.2));
+  color: var(--accent);
+  border: 1px solid var(--border);
+  box-shadow: 0 0 8px rgba(255, 110, 199, 0.2);
+}
+[data-theme="synthwave"] .session-name { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   消息气泡
+   ============================================================ */
+[data-theme="synthwave"] .msg-name {
+  color: var(--accent-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 0 4px rgba(0, 212, 255, 0.3);
+}
+[data-theme="synthwave"] .msg-time { color: var(--text-faint); font-size: 11px; }
+[data-theme="synthwave"] .msg-act {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .msg-act:hover {
+  color: var(--accent);
+  background: rgba(255, 110, 199, 0.1);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 6px rgba(255, 110, 199, 0.2);
+}
+
+/* assistant 气泡：紫粉边 + 内发光 */
+[data-theme="synthwave"] .msg.assistant .bubble {
+  background: rgba(26, 10, 46, 0.6);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 0 12px rgba(0, 212, 255, 0.05) inset, 0 4px 16px rgba(0, 0, 0, 0.3);
+  position: relative;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="synthwave"] .msg.assistant:hover .bubble {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.2), 0 0 0 1px var(--accent-2) inset;
+}
+
+/* user 气泡：粉紫蓝渐变 + 强光晕 */
+[data-theme="synthwave"] .msg.user .bubble {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 0 16px rgba(255, 110, 199, 0.4);
+}
+
+/* tool 气泡：青色左边 */
+[data-theme="synthwave"] .msg.tool .bubble {
+  background: rgba(0, 212, 255, 0.04);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  border-left: 2px solid var(--tool);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.05) inset;
+}
+[data-theme="synthwave"] .msg.tool .tool-head { color: var(--tool); text-shadow: 0 0 6px rgba(0, 212, 255, 0.4); }
+[data-theme="synthwave"] .msg.tool .tool-out { color: var(--text-muted); font-family: var(--font-mono); font-size: 12.5px; }
+
+/* 流式光标 */
+[data-theme="synthwave"] .msg.streaming .bubble::after {
+  content: "▍";
+  color: var(--accent-2);
+  background: none;
+  -webkit-text-fill-color: var(--accent-2);
+  text-shadow: 0 0 8px var(--accent-2);
+  margin-left: 2px;
+  animation: synthwave-blink 0.8s steps(2, start) infinite;
+}
+@keyframes synthwave-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ============================================================
+   composer
+   ============================================================ */
+[data-theme="synthwave"] #composer {
+  padding: 12px clamp(16px, 4vw, 48px) 14px;
+}
+[data-theme="synthwave"] .composer-row {
+  background: rgba(16, 6, 31, 0.6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 4px 8px;
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.1);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .composer-row:focus-within {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.15), 0 0 16px rgba(0, 212, 255, 0.3);
+}
+[data-theme="synthwave"] #attach-btn { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="synthwave"] #attach-btn:hover { background: rgba(0, 212, 255, 0.1); color: var(--accent-2); }
+[data-theme="synthwave"] #input { color: var(--text); caret-color: var(--accent-2); }
+[data-theme="synthwave"] #input::placeholder { color: var(--text-faint); }
+
+[data-theme="synthwave"] #send {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 16px rgba(255, 110, 199, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] #send:hover {
+  box-shadow: 0 0 24px rgba(255, 110, 199, 0.6), 0 0 8px rgba(0, 212, 255, 0.4) inset;
+  filter: brightness(1.15);
+}
+[data-theme="synthwave"] #send:active { transform: scale(0.96); }
+[data-theme="synthwave"] #send.stopping {
+  background: var(--danger);
+  border-color: var(--danger);
+  box-shadow: 0 0 12px rgba(255, 56, 96, 0.5);
+}
+
+/* ============================================================
+   审批卡片
+   ============================================================ */
+[data-theme="synthwave"] .approval {
+  background: rgba(255, 215, 0, 0.08);
+  border: 1px solid rgba(255, 215, 0, 0.4);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 12px rgba(255, 215, 0, 0.1);
+}
+[data-theme="synthwave"] .approval .yes {
+  background: linear-gradient(135deg, #00ffa3, #00d4ff);
+  color: var(--on-accent);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  box-shadow: 0 0 8px rgba(0, 255, 163, 0.3);
+}
+[data-theme="synthwave"] .approval .no {
+  background: rgba(255, 56, 96, 0.1);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+/* ============================================================
+   Markdown
+   ============================================================ */
+[data-theme="synthwave"] .markdown h1, [data-theme="synthwave"] .markdown h2, [data-theme="synthwave"] .markdown h3 {
+  background: linear-gradient(135deg, #ff6ec7 0%, #c084fc 50%, #00d4ff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+[data-theme="synthwave"] .markdown h2 { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+[data-theme="synthwave"] .markdown a {
+  color: var(--accent-2);
+  text-decoration: none;
+  text-shadow: 0 0 4px rgba(0, 212, 255, 0.3);
+  border-bottom: 1px dashed rgba(0, 212, 255, 0.4);
+}
+[data-theme="synthwave"] .markdown a:hover {
+  color: var(--accent);
+  text-shadow: 0 0 6px rgba(255, 110, 199, 0.5);
+  border-bottom-color: var(--accent);
+}
+[data-theme="synthwave"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(0, 212, 255, 0.08);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+  padding: 0.12em 0.5em;
+  font-size: 0.9em;
+}
+[data-theme="synthwave"] .markdown pre {
+  background: rgba(16, 6, 31, 0.7);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 0 8px rgba(0, 212, 255, 0.05) inset;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+[data-theme="synthwave"] .markdown pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 13px; }
+[data-theme="synthwave"] .markdown blockquote {
+  border-left: 3px solid var(--accent);
+  background: rgba(255, 110, 199, 0.05);
+  color: var(--text-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+[data-theme="synthwave"] .markdown table { border-color: var(--border); }
+[data-theme="synthwave"] .markdown th {
+  background: rgba(255, 110, 199, 0.1);
+  color: var(--accent);
+  border-color: var(--border);
+  text-shadow: 0 0 4px rgba(255, 110, 199, 0.3);
+}
+[data-theme="synthwave"] .markdown td { border-color: var(--border); }
+[data-theme="synthwave"] .markdown tr:hover td { background: rgba(0, 212, 255, 0.04); }
+[data-theme="synthwave"] .markdown hr { border-top: 1px dashed var(--border); }
+[data-theme="synthwave"] .markdown ul li::marker, [data-theme="synthwave"] .markdown ol li::marker { color: var(--accent); }
+[data-theme="synthwave"] .copy-btn {
+  background: rgba(26, 10, 46, 0.7);
+  color: var(--accent-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+[data-theme="synthwave"] .copy-btn:hover { background: var(--accent); color: var(--on-accent); border-color: var(--accent); box-shadow: 0 0 8px rgba(255, 110, 199, 0.4); }
+[data-theme="synthwave"] .reasoning .reasoning-body {
+  background: linear-gradient(90deg, rgba(192, 132, 252, 0.05), transparent);
+  border-left: 2px solid rgba(192, 132, 252, 0.4);
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   主题选择气泡
+   ============================================================ */
+[data-theme="synthwave"] .theme-pop { box-shadow: var(--shadow-pop); }
+[data-theme="synthwave"] .theme-section-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  padding: 8px 10px 4px;
+  border-bottom: 1px dashed var(--border);
+  text-transform: uppercase;
+}
+[data-theme="synthwave"] .accent-opt {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+  position: relative;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.5) inset;
+}
+[data-theme="synthwave"] .accent-opt::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 6px var(--swatch);
+}
+[data-theme="synthwave"] .accent-opt:hover { border-color: var(--accent); box-shadow: 0 0 8px rgba(255, 110, 199, 0.4); }
+[data-theme="synthwave"] .accent-opt.active {
+  border-color: var(--accent);
+  background: rgba(255, 110, 199, 0.2);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 12px rgba(255, 110, 199, 0.5);
+}
+[data-theme="synthwave"] .accent-reset {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+}
+[data-theme="synthwave"] .accent-reset:hover { color: var(--accent); border-color: var(--accent); background: rgba(255, 110, 199, 0.1); }
+[data-theme="synthwave"] .theme-opt {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .theme-opt:hover {
+  background: rgba(255, 110, 199, 0.08);
+  border-color: var(--border);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+[data-theme="synthwave"] .theme-opt.active {
+  background: linear-gradient(90deg, rgba(255, 110, 199, 0.15), rgba(192, 132, 252, 0.08) 80%, transparent);
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 12px rgba(255, 110, 199, 0.2);
+}
+[data-theme="synthwave"] .theme-opt .swatch { border-radius: 4px; border: 1px solid var(--border-strong); }
+[data-theme="synthwave"] .theme-opt .t-label { color: var(--text); font-weight: 600; }
+[data-theme="synthwave"] .theme-opt .t-desc { color: var(--text-faint); font-size: 10.5px; }
+
+/* ============================================================
+   设置抽屉
+   ============================================================ */
+[data-theme="synthwave"] .settings-overlay { background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); }
+[data-theme="synthwave"] .settings-head { border-bottom: 1px solid var(--border); }
+[data-theme="synthwave"] .settings-tabs { border-bottom: 1px solid var(--border); background: rgba(255, 110, 199, 0.02); }
+[data-theme="synthwave"] .settings-tabs button { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="synthwave"] .settings-tabs button:hover { background: rgba(255, 110, 199, 0.08); color: var(--accent); }
+[data-theme="synthwave"] .settings-tabs button.active {
+  background: rgba(255, 110, 199, 0.15);
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+  box-shadow: 0 -2px 8px rgba(255, 110, 199, 0.2) inset;
+}
+[data-theme="synthwave"] .settings-row {
+  background: rgba(255, 110, 199, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .settings-row:hover {
+  border-color: var(--accent);
+  background: rgba(255, 110, 199, 0.05);
+  box-shadow: 0 0 8px rgba(255, 110, 199, 0.15) inset;
+  transform: translateX(2px);
+}
+[data-theme="synthwave"] .settings-form { background: rgba(255, 110, 199, 0.02); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="synthwave"] .settings-form label { color: var(--text-muted); font-size: 12px; }
+[data-theme="synthwave"] .settings-form input,
+[data-theme="synthwave"] .settings-form select,
+[data-theme="synthwave"] .settings-form textarea {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .settings-form input:focus,
+[data-theme="synthwave"] .settings-form select:focus,
+[data-theme="synthwave"] .settings-form textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 110, 199, 0.15);
+  outline: none;
+}
+[data-theme="synthwave"] .mini-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .mini-btn:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 0 12px rgba(255, 110, 199, 0.4);
+}
+[data-theme="synthwave"] .mini-btn.danger { color: var(--danger); border-color: rgba(255, 56, 96, 0.4); }
+[data-theme="synthwave"] .mini-btn.danger:hover { background: var(--danger); color: #fff; box-shadow: 0 0 8px rgba(255, 56, 96, 0.5); }
+[data-theme="synthwave"] .settings-group-name {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-shadow: 0 0 4px rgba(255, 110, 199, 0.3);
+}
+
+/* ============================================================
+   登录卡片
+   ============================================================ */
+[data-theme="synthwave"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1200px 600px at 50% 50%, rgba(255, 110, 199, 0.15), transparent 60%),
+    var(--bg);
+}
+[data-theme="synthwave"] .login-brand {
+  background: linear-gradient(135deg, #ff6ec7 0%, #c084fc 50%, #00d4ff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 12px rgba(255, 110, 199, 0.4));
+}
+[data-theme="synthwave"] .login-sub { color: var(--text-muted); letter-spacing: 0.2em; font-size: 11px; }
+[data-theme="synthwave"] .login-card input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  caret-color: var(--accent-2);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .login-card input:focus {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.15);
+  outline: none;
+}
+[data-theme="synthwave"] .login-submit {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  box-shadow: 0 0 16px rgba(255, 110, 199, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .login-submit:hover { box-shadow: 0 0 24px rgba(255, 110, 199, 0.6); filter: brightness(1.15); }
+
+/* ============================================================
+   空状态
+   ============================================================ */
+[data-theme="synthwave"] .empty-state .es-slogan {
+  background: linear-gradient(135deg, #ff6ec7 0%, #c084fc 50%, #00d4ff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 300;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 20px rgba(255, 110, 199, 0.3));
+}
+[data-theme="synthwave"] .es-suggestions button {
+  background: rgba(26, 10, 46, 0.6);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .es-suggestions button:hover {
+  background: rgba(255, 110, 199, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 16px rgba(255, 110, 199, 0.2);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   选择 / 待办 / 压缩 / 附件 / 预览
+   ============================================================ */
+[data-theme="synthwave"] .choice-opt {
+  background: rgba(26, 10, 46, 0.6);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .choice-opt:hover {
+  background: rgba(0, 212, 255, 0.08);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.2);
+  transform: translateY(-1px);
+}
+[data-theme="synthwave"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(255, 110, 199, 0.4); }
+[data-theme="synthwave"] .bubble.compact-notice {
+  background: rgba(192, 132, 252, 0.06);
+  border: 1px dashed rgba(192, 132, 252, 0.3);
+  color: var(--text-muted);
+}
+[data-theme="synthwave"] .attach-chip {
+  background: rgba(26, 10, 46, 0.6);
+  border: 1px solid var(--border-strong);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+}
+[data-theme="synthwave"] .attach-chip:hover { background: rgba(0, 212, 255, 0.1); border-color: var(--accent-2); }
+[data-theme="synthwave"] .preview-overlay { background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+[data-theme="synthwave"] .preview-head { border-bottom: 1px solid var(--border); }
+[data-theme="synthwave"] .preview-close { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="synthwave"] .preview-close:hover { color: var(--danger); background: rgba(255, 56, 96, 0.15); }
+
+/* ============================================================
+   跳到最新
+   ============================================================ */
+[data-theme="synthwave"] .jump-bottom {
+  background: rgba(26, 10, 46, 0.7);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 12px rgba(255, 110, 199, 0.4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="synthwave"] .jump-bottom:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 0 20px rgba(255, 110, 199, 0.6);
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   diagram
+   ============================================================ */
+[data-theme="synthwave"] .diagram { background: rgba(26, 10, 46, 0.6); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="synthwave"] .diagram-editor { background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); border-radius: var(--radius-sm); }
+
+/* ============================================================
+   浪潮语法高亮
+   ============================================================ */
+[data-theme="synthwave"] .hljs { color: var(--text); background: transparent; }
+[data-theme="synthwave"] .hljs-comment, [data-theme="synthwave"] .hljs-quote { color: var(--text-faint); font-style: italic; }
+[data-theme="synthwave"] .hljs-keyword, [data-theme="synthwave"] .hljs-selector-tag, [data-theme="synthwave"] .hljs-literal, [data-theme="synthwave"] .hljs-type { color: #c084fc; font-weight: 600; }
+[data-theme="synthwave"] .hljs-string, [data-theme="synthwave"] .hljs-regexp, [data-theme="synthwave"] .hljs-addition { color: #00ffa3; }
+[data-theme="synthwave"] .hljs-number, [data-theme="synthwave"] .hljs-symbol, [data-theme="synthwave"] .hljs-bullet { color: #ffd700; }
+[data-theme="synthwave"] .hljs-title, [data-theme="synthwave"] .hljs-section, [data-theme="synthwave"] .hljs-name, [data-theme="synthwave"] .hljs-selector-id { color: #00d4ff; }
+[data-theme="synthwave"] .hljs-attr, [data-theme="synthwave"] .hljs-attribute, [data-theme="synthwave"] .hljs-variable, [data-theme="synthwave"] .hljs-template-variable { color: #ff8ed4; }
+[data-theme="synthwave"] .hljs-built_in, [data-theme="synthwave"] .hljs-builtin-name { color: #67e8f9; }
+[data-theme="synthwave"] .hljs-meta, [data-theme="synthwave"] .hljs-doctag { color: var(--text-faint); }
+[data-theme="synthwave"] .hljs-tag, [data-theme="synthwave"] .hljs-name { color: var(--accent-2); }
+
+/* 响应式 */
+@media (max-width: 860px) {
+  [data-theme="synthwave"] aside { background: rgba(26, 10, 46, 0.92) !important; }
+  /* 移动端去掉太阳和透视网格以减负 */
+  [data-theme="synthwave"] #app::after { display: none; }
+  [data-theme="synthwave"] body { background-image: linear-gradient(180deg, #10061f 0%, #2a0a3a 50%, #4a1a4a 100%); }
+}
+
+/* header 层级高于 main：避免 main 盖住 header 内 fixed 浮出的 theme-pop（点击失效） */
+[data-theme="synthwave"] header {
+  z-index: 2;
+}

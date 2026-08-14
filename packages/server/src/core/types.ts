@@ -1,0 +1,197 @@
+import type { AgentEvent, AttachmentRef, ContentBlock, FileEntry, ToolSchema } from "@gebai/sdk"
+
+export interface ToolResult {
+  output: string
+  blocks?: ContentBlock[]
+  truncated?: boolean
+  filePath?: string
+  /** agent_run（执行新会话）工具返回：新会话 run 完整存档（扩展字段落盘到工具调用记录，历史回放渲染用）。 */
+  sessionRun?: import("@gebai/sdk").SessionRunArchive
+}
+
+/** 预置项目（来自 {AGENT_NAME_UPPER}_PROJECTS 环境变量的 JSON 数组项）。 */
+export interface PresetProject {
+  name: string
+  path: string
+  description?: string
+}
+
+/**
+ * ask_user 选项：纯文本（`string`）或复杂选项（`{ title, description? }`，UI 按标题+说明展示，提交值取 title）。
+ */
+export type ChoiceOption = string | { title: string; description?: string }
+
+/**
+ * ask_user 选择结果：
+ * - `{ kind: "option"; value }`：单选（点选选项或输入的自定义文本）
+ * - `{ kind: "multi"; values }`：多选（用户勾选的选项集合，可能含自定义文本）
+ * - `{ kind: "refuse" }`：用户拒绝回答
+ * - `null`：超时未作答
+ */
+export type ChoiceResult = { kind: "option"; value: string } | { kind: "multi"; values: string[] } | { kind: "refuse" } | null
+
+export type ToolContext = {
+  user: string
+  /** 发起任务用户的角色（admin/user；公共资源权限判定用，如公共 mini-tool 仅管理员可写）。 */
+  userRole?: string
+  /** 认证模式（local=本地模式单用户 / server=服务模式多用户隔离；公共资源权限判定用）。 */
+  authMode?: "local" | "server"
+  sessionId: string
+  workdir: string
+  /** 子Agent 项目绑定根（{AGENT_NAME_UPPER}_PROJECT 解析结果，未绑定为空）：受限模式下未传 project 时允许在绑定根内操作。 */
+  boundProjectRoot?: string
+  /** GEBAI_HOME（截断文件/产物落盘基准，避免依赖进程 cwd）。 */
+  home: string
+  env: Record<string, string>
+  sandboxed: boolean
+  resolvePath: (p: string) => string
+  readFile: (p: string) => Promise<string>
+  /** 读取二进制文件原始字节（vision 等工具用，路径同样经 resolvePath/沙箱约束）。 */
+  readBinaryFile: (p: string) => Promise<Uint8Array>
+  writeFile: (p: string, content: string) => Promise<void>
+  /** 写入二进制文件原始字节（draw 后端渲染 PNG 落盘等，路径同样经 resolvePath/沙箱约束）。 */
+  writeBinaryFile?: (p: string, data: Uint8Array) => Promise<void>
+  /** 后端渲染图表源码为 PNG 字节（draw 工具 render=backend 时用；format 缺省 plantuml；未注入时该模式不可用）。 */
+  renderDiagram?: (code: string, opts?: { format?: import("@gebai/sdk").DiagramFormat; background?: string; maxWidth?: number; maxHeight?: number }) => Promise<Uint8Array>
+  listFiles: (p?: string) => Promise<FileEntry[]>
+  /** 列出单层目录内容（ls 工具用）。 */
+  listDir: (p: string) => Promise<FileEntry[]>
+  /** 删除文件/目录（delete_file 工具用）。 */
+  deleteFile: (p: string) => Promise<void>
+  /** 移动/重命名文件（move_file 工具用）。 */
+  moveFile: (from: string, to: string) => Promise<void>
+  runCommand: (cmd: string, opts?: { shell?: string; workdir?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string; code: number }>
+  uploadAttachment: (ref: AttachmentRef) => Promise<string>
+  publish: (type: string, payload: Record<string, unknown>) => void
+  /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：pipe 等工具内直接执行工具的工具需按同规则拦截。 */
+  safeMode?: boolean
+  /** 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量解析，子Agent 运行环境注入）。 */
+  projects: PresetProject[]
+  /** 按预置项目名解析项目根（绝对路径，已按沙箱规则约束）；未知项目名抛错。 */
+  resolveProjectPath: (name: string) => string
+  getTodos: () => Promise<import("@gebai/sdk").TodoItem[]>
+  setTodos: (todos: import("@gebai/sdk").TodoItem[]) => Promise<void>
+  registry: {
+    schemas(enabledOnly?: boolean): Array<{ name: string; description: string; parameters: Record<string, unknown> }>
+    resolve(name: string): { name: string; tool: Tool } | undefined
+    getAgentNames(): string[]
+  }
+  listSubAgentDefs: () => Array<{ name: string; description: string; preload: boolean; loaded: boolean }>
+  /** 装载子Agent 能力模块（agent_load 工具）：其工具并入当前工具集、能力描述注入系统提示词；不创建新上下文、无独立执行（DESIGN「装载 vs 新会话执行」）。 */
+  loadSubAgent: (name: string) => Promise<void>
+  /** 执行新会话（agent_run 工具）：派生临时新会话、预加载指定子Agent 列表（完整系统提示词+工具）后阻塞执行任务，
+   *  返回最终输出文本与完整执行存档（存档作为工具调用记录扩展字段落盘）。 */
+  runNewSession: (agents: string[], input: string) => Promise<{ output: string; archive: import("@gebai/sdk").SessionRunArchive }>
+  /** 向用户提出选择并阻塞等待选择结果（ask_user 工具用）；multi=true 多选；超时返回 null。 */
+  waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>
+  /**
+   * 请求用户设置环境变量并阻塞等待（ask_env 工具用）：发布 event.env.request 给前端弹窗填值，
+   * 用户提交后值写入任务 env（本次任务后续工具读取立即生效）返回 true；拒绝/超时返回 false。
+   */
+  waitForEnv: (name: string, description?: string, secret?: boolean) => Promise<boolean>
+  /**
+   * 前端渲染图表并等待渲染结果（draw 工具用）：发布 event.draw.render（含源码与图表语言 format）给前端，
+   * 前端渲染成功后回传结果本方法才返回；渲染错误回传 error；超时（5 秒）返回 null。
+   */
+  waitForDraw: (render: { code: string; name?: string; format?: import("@gebai/sdk").DiagramFormat }) => Promise<{ ok: boolean; error?: string } | null>
+  /**
+   * 请求前端捕获当前页面并等待结果（page_capture 工具用）：发布 event.capture.request 给前端，
+   * 前端回传渲染后 DOM html 与截图 base64（imageBase64）后返回；前端离线/超时（30 秒）返回 null。
+   * fullPage=true 时前端截整页（高度上限见常量参考），缺省截视口。
+   */
+  waitForCapture: (opts?: { fullPage?: boolean; delayMs?: number }) => Promise<{ html: string; imageBase64?: string; error?: string } | null>
+  /**
+   * 定时任务（cron_* 工具用，按当前会话绑定；服务端未启用定时任务能力时为空）。
+   */
+  cron?: {
+    add: (input: import("./cron").CronCreateInput) => Promise<import("./cron").CronTask>
+    list: () => Promise<import("./cron").CronTask[]>
+    remove: (id: string) => Promise<boolean>
+    update: (id: string, patch: import("./cron").CronUpdateInput) => Promise<import("./cron").CronTask | null>
+  }
+}
+
+/** 引擎交互模式（DESIGN「交互模式」）：none=无交互（如 REST/HTTP 调用，单次请求无往返，需审批工具自动通过）、
+ *  multi_turn=多轮交互（如飞书对话，多轮往返但无前端页面，仅关键操作询问用户）、realtime=实时交互（Web 前端）。
+ *  工具按最低可用模式声明（Tool.interaction，缺省 none 即全模式可用）；高于当前模式声明的工具被自动禁用。 */
+export type InteractionMode = "none" | "multi_turn" | "realtime"
+
+/** 输出方式（请求层配置，DESIGN「交互模式与输出方式」）：final_only=仅最终响应（不推送文本增量/推理流）、
+ *  streaming=流式输出（推送 event.message.delta/reasoning，默认）。结构化事件（工具调用/审批/最终 done）两种方式均推送。 */
+export type OutputMode = "final_only" | "streaming"
+
+export interface Tool {
+  name: string
+  description: string
+  parameters: ToolSchema
+  requiresApproval?: boolean
+  returns?: "text" | "json"
+  /** 最低可用交互模式（缺省 none=全模式可用）：realtime=仅实时前端（如 page_capture/render_html/ask_env）、
+   *  multi_turn=至少多轮交互（如 ask_user/draw，飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。 */
+  interaction?: Exclude<InteractionMode, "none">
+  /** 卡片展示元数据（注册时声明，前端按声明渲染卡片，不硬编码工具名）：
+   *  titleParams：参数名列表，其值直接拼入卡片标题（简单工具的关键参数，如 write 的 path）；
+   *  args：参数展示模式——"json"（默认，参数以 JSON 块展示）/ "none"（不展示参数区）/ "code"（codeField 参数渲染为代码块）/ "block"（结果直出内容块，调用不显示通用卡片，如 draw/diff/render_html）；
+   *  codeField/codeLang：args="code" 时对应的代码字段名与语言（如 sh 的 command/bash）。 */
+  card?: { titleParams?: string[]; args?: "json" | "none" | "code" | "block"; codeField?: string; codeLang?: string }
+  execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>
+}
+
+export type ToolSet = Record<string, Tool>
+
+/** 子Agent 可配置环境变量项（前端环境变量面板白名单来源，变量名须以 `{AGENT_NAME_UPPER}_` 前缀）。 */
+export interface EnvCatalogVar {
+  name: string
+  /** 变量作用说明（前端 tip 展示）。 */
+  description: string
+}
+
+export interface SubAgentDef {
+  name: string
+  description: string
+  systemPrompt: string
+  /** 子Agent 自有工具（注册为 {agent}_{tool}）。可省略：纯提示词子 Agent（简单/组合式），
+   *  省略时子 Agent 运行环境自动注入编排工具（agent_list/agent_load/agent_run）。 */
+  tools?: ToolSet
+  requiresApproval?: Record<string, boolean>
+  preload?: boolean
+  /** 子Agent 可配置环境变量声明（`{AGENT_NAME_UPPER}_*` 前缀）；汇总进环境变量目录（前端面板白名单）。 */
+  envVars?: EnvCatalogVar[]
+}
+
+export interface ToolCallRecord {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
+  approvalRequired: boolean
+  status: "pending" | "approved" | "rejected" | "running" | "done" | "error"
+  result?: string
+  error?: string
+  retries: number
+}
+
+export interface SessionData {
+  id: string
+  name: string
+  userId: string
+  messages: Array<import("@gebai/sdk").Message>
+  todos: import("@gebai/sdk").TodoItem[]
+  createdAt: number
+  updatedAt: number
+  /** 会话已装载子Agent 名单（chat.json 持久化）：恢复历史会话时据此重新注册工具；
+   *  未定义 = 新会话/旧格式，首次运行按启动预载名单（GEBAI_PRELOAD_SUB_AGENTS）初始化。 */
+  loadedSubAgents?: string[]
+  /** 上下文 token 估算（chars/4）：任务结束时持久化，会话列表展示用（单位 k）。
+   *  有 usage 真值时 = 最近一次调用的真实 input tokens + 未发送增量估算。 */
+  ctxTokens?: number
+  /** 最近一次模型调用的真实 input tokens（服务端 usage 真值，含 system 提示词与工具 schema）：
+   *  跨 run 上下文压缩判定基线；未定义 = 无真值（老会话/接口不返回 usage/压缩后锚点失效），走估算兜底。 */
+  ctxInputTokens?: number
+  /** 建立 ctxInputTokens 基线那次调用已覆盖的历史消息条数（loadHistory 坐标）：下次 run 以
+   *  history.slice(ctxAtMessage) 估算基线之后的增量（下一次真实调用会用真值接管并重建基线）。 */
+  ctxAtMessage?: number
+}
+
+export interface EventSink {
+  publish(event: AgentEvent): void
+}

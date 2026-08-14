@@ -1,0 +1,363 @@
+/* ============================================================
+   GEBAI 主题：acrylic — 黑色亚克力极简（默认主题）
+   深黑半透明面板 + 毛玻璃（backdrop blur），会话元素零边框，
+   靠背景层次、圆角与细腻过渡区分，去装饰化
+   ============================================================ */
+
+[data-theme="acrylic"] {
+  /* 黑色亚克力：半透明深黑，靠毛玻璃透出背景光晕；面板/卡片与全局背景同色系但保留可辨层次 */
+  --bg: rgba(12, 12, 15, 0.9);
+  --bg-elev: rgba(18, 18, 23, 0.82);
+  --bg-elev-2: rgba(24, 24, 30, 0.78);
+  --bg-hover: rgba(255, 255, 255, 0.09);
+  --bg-active: rgba(255, 255, 255, 0.14);
+  --bg-inset: rgba(0, 0, 0, 0.4);
+
+  /* 弱描边但可辨：浮层/输入态/卡片边界均可见（极简不是不可见） */
+  --border: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  /* 文字：提亮层级，保证前景/背景对比 */
+  --text: #f2f2f5;
+  --text-muted: #b4b4be;
+  --text-faint: #80808c;
+
+  /* 低饱和蓝紫强调色（提亮，深底更醒目） */
+  --accent: #8b9aff;
+  --accent-hover: #a0adff;
+  --accent-soft: rgba(139, 154, 255, 0.16);
+  --on-accent: #ffffff;
+  --success: #55d396;
+  --danger: #ff7a7a;
+  --warning: #e6bd6d;
+  --tool: #9a9aa6;
+  --user-grad: linear-gradient(135deg, rgba(66, 70, 104, 0.7), rgba(46, 48, 70, 0.65));
+  --nav-active: #8b9aff;
+
+  /* 形状：柔和大圆角 */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-msg: 12px;
+
+  /* 阴影：柔和深影 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.1);
+  --glass: blur(20px) saturate(1.35);
+  --msg-shadow: none; /* 气泡无阴影：避免透明背景上出现边缘突出轮廓 */
+
+  /* 组件变量（基础值；面板/输入区/搜索框/按钮等共享，便于统一调整） */
+  --panel-bg: rgba(16, 16, 20, 0.72); /* 面板/输入区毛玻璃背景（比主背景略亮，层次可辨） */
+  --field-bg: rgba(255, 255, 255, 0.08); /* 搜索框/输入字段背景 */
+  --field-bg-hover: rgba(255, 255, 255, 0.12);
+  --send-bg: rgba(255, 255, 255, 0.18); /* 发送/新建会话按钮（低调灰白） */
+  --send-fg: rgba(255, 255, 255, 0.95);
+  --check-border: rgba(255, 255, 255, 0.4); /* 会话勾选框描边 */
+  --jump-color: rgba(255, 255, 255, 0.6); /* 跳到最新按钮（深底上比 text-faint 更清晰） */
+  --jump-hover-bg: rgba(255, 255, 255, 0.12);
+  --scroll-thumb: rgba(255, 255, 255, 0.22);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.36);
+
+  /* 字体 */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-size: 14px;
+  --transition: 0.12s ease;
+}
+
+/* ============================================================
+   背景：近黑 + 极弱光晕（为毛玻璃提供可模糊内容）
+   ============================================================ */
+[data-theme="acrylic"] body {
+  background-color: #08080a;
+  background-image:
+    radial-gradient(1100px 700px at 15% -10%, rgba(139, 154, 255, 0.1), transparent 60%),
+    radial-gradient(900px 600px at 110% 20%, rgba(85, 211, 150, 0.08), transparent 60%),
+    linear-gradient(180deg, #0b0b0f, #060607);
+  background-attachment: fixed;
+  color: var(--text);
+}
+
+[data-theme="acrylic"] ::selection { background: var(--accent-soft); color: var(--text); }
+
+/* ============================================================
+   滚动条：细 · 弱白
+   ============================================================ */
+[data-theme="acrylic"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-theme="acrylic"] ::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+[data-theme="acrylic"] ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); border: 2px solid transparent; background-clip: content-box; }
+[data-theme="acrylic"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   面板：黑色亚克力（半透明 + 毛玻璃）
+   输入区 #composer 不在此列：与经典主题一致融入主背景，只保留输入胶囊
+   ============================================================ */
+[data-theme="acrylic"] header,
+[data-theme="acrylic"] aside,
+[data-theme="acrylic"] .settings-panel,
+[data-theme="acrylic"] .login-card,
+[data-theme="acrylic"] .theme-pop,
+[data-theme="acrylic"] .preview-card,
+[data-theme="acrylic"] .session-ctx-menu,
+[data-theme="acrylic"] .msg-nav-tip {
+  background: var(--panel-bg);
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+}
+
+/* ============================================================
+   会话元素：去除所有边框（纯靠背景/圆角/焦点阴影区分）
+   ============================================================ */
+[data-theme="acrylic"] #session-search {
+  border: none;
+  background: var(--field-bg);
+}
+[data-theme="acrylic"] #session-search:focus {
+  border: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+[data-theme="acrylic"] #session-list {
+  gap: 1px; /* 行间距收紧：无边框无装饰，稀疏感来自多余间隙 */
+}
+[data-theme="acrylic"] #session-list li,
+[data-theme="acrylic"] #session-list li.active,
+[data-theme="acrylic"] #session-list li.selected {
+  border: none;
+  padding: 4px 8px; /* 压扁行高：无边框后默认 8px 上下内边距显得页面很空 */
+}
+[data-theme="acrylic"] #session-list li.active,
+[data-theme="acrylic"] #session-list li.selected {
+  border: none;
+  background: var(--accent-soft);
+}
+/* 勾选框保留极弱描边（无边框则不可见） */
+[data-theme="acrylic"] .session-check { border-color: var(--check-border); }
+[data-theme="acrylic"] .batch-bar button,
+[data-theme="acrylic"] .batch-del,
+[data-theme="acrylic"] .batch-cancel { border: none; }
+
+/* ============================================================
+   输入区与消息：亚克力气泡（零色差消融，清晰度靠整体背景层次） 
+   ============================================================ */
+[data-theme="acrylic"] .composer-row {
+  background: var(--panel-bg);
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+}
+[data-theme="acrylic"] .composer-row:focus-within {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+[data-theme="acrylic"] .bubble,
+[data-theme="acrylic"] .msg.tool .bubble {
+  background: transparent; /* 与全局背景完全一致：零色差消融（用户气泡保留其半透明渐变以示区分） */
+  border-color: transparent;
+  padding: 0; /* 背景融合无边框无底色：默认 10px 14px 内边距纯浪费空间 */
+}
+/* 用户气泡保留半透明渐变背景：保留内边距保证文字与气泡边缘留白可读 */
+[data-theme="acrylic"] .msg.user .bubble {
+  padding: 10px 14px;
+}
+[data-theme="acrylic"] .msg:hover .bubble,
+[data-theme="acrylic"] .msg.assistant:hover .bubble,
+[data-theme="acrylic"] .msg.tool:hover .bubble {
+  background: transparent; /* hover 无背景无边框：保持与全局背景完全一致 */
+  border-color: transparent;
+}
+/* 用户气泡 hover 保持渐变背景：其文字为白色（--on-accent），
+   浅色亚克力下若被置为透明 = 白底白字无法阅读（浅色 hover 变白问题的根因） */
+[data-theme="acrylic"] .msg.user:hover .bubble {
+  background: var(--user-grad);
+  border-color: transparent;
+}
+/* 推理块同样消融：去边框、背景并入、内边距归零 */
+[data-theme="acrylic"] .reasoning {
+  background: transparent;
+  border-color: transparent;
+}
+[data-theme="acrylic"] .reasoning summary,
+[data-theme="acrylic"] .reasoning .reasoning-body {
+  padding: 0;
+}
+/* 审批卡片：深黑毛玻璃面板 + 金色警示点缀（边框用主题标准淡描边） */
+[data-theme="acrylic"] .approval {
+  background: var(--panel-bg);
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+/* 聚焦 outline 去掉：卡片弹出即自动聚焦，蓝色焦点环与毛玻璃边缘透出的背景蓝晕叠成双层蓝边 */
+[data-theme="acrylic"] .approval:focus,
+[data-theme="acrylic"] .approval:focus-visible {
+  outline: none;
+}
+[data-theme="acrylic"] .approval .approval-title { color: var(--warning); }
+[data-theme="acrylic"] .approval .approval-tool { color: var(--text-faint); }
+/* 审批按钮：亚克力半透明语义色（常态透明叠加，hover 实色/加深） */
+[data-theme="acrylic"] .approval .yes {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+}
+[data-theme="acrylic"] .approval .yes:hover {
+  background: var(--success);
+  color: #fff;
+}
+[data-theme="acrylic"] .approval .no {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+}
+[data-theme="acrylic"] .approval .no:hover {
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+}
+
+/* ============================================================
+   图标按钮：无边框，hover 淡背景
+   ============================================================ */
+[data-theme="acrylic"] .icon-btn { border-color: transparent; color: var(--text-muted); }
+[data-theme="acrylic"] .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+[data-theme="acrylic"] .icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+/* ============================================================
+   发送按钮 / 新建会话按钮：统一低调灰白（亚克力极简），hover 亮起 accent
+   ============================================================ */
+[data-theme="acrylic"] #send,
+[data-theme="acrylic"] #new-session {
+  background: var(--send-bg);
+  color: var(--send-fg);
+}
+[data-theme="acrylic"] #send:hover,
+[data-theme="acrylic"] #new-session:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+[data-theme="acrylic"] #send:disabled,
+[data-theme="acrylic"] #new-session:disabled { opacity: 0.5; }
+
+/* ============================================================
+   细节打磨：输入条零边框、搜索框 hover 反馈、浮动按钮提亮
+   ============================================================ */
+[data-theme="acrylic"] .composer-row {
+  border-color: transparent; /* 常态零边框（聚焦态仅光晕） */
+}
+[data-theme="acrylic"] #session-search:hover {
+  background: var(--field-bg-hover);
+}
+[data-theme="acrylic"] .jump-bottom {
+  color: var(--jump-color); /* 深底上比 text-faint 更清晰 */
+}
+[data-theme="acrylic"] .jump-bottom:hover {
+  background: var(--jump-hover-bg);
+  color: var(--accent);
+}
+
+/* ============================================================
+   连接状态徽章（断开态）
+   ============================================================ */
+[data-theme="acrylic"] .conn.bad {
+  background: rgba(255, 107, 107, 0.12);
+  border-color: rgba(255, 107, 107, 0.3);
+  color: var(--danger);
+}
+
+/* ============================================================
+   白色亚克力：data-acrylic-lt="light"（黑白切换的「亮」）
+   白色半透明面板 + 毛玻璃，浅色光晕背景，深色文字
+   ============================================================ */
+[data-theme="acrylic"][data-acrylic-lt="light"] {
+  /* 白色亚克力：半透明白，毛玻璃透出浅色光晕 */
+  --bg: rgba(250, 250, 252, 0.9);
+  --bg-elev: rgba(255, 255, 255, 0.8);
+  --bg-elev-2: rgba(244, 244, 248, 0.85);
+  --bg-hover: rgba(0, 0, 0, 0.05);
+  --bg-active: rgba(0, 0, 0, 0.09);
+  --bg-inset: rgba(0, 0, 0, 0.05);
+
+  /* 浅色描边 */
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+
+  /* 深色文字 */
+  --text: #141418;
+  --text-muted: #4e4e5a;
+  --text-faint: #7a7a88;
+
+  /* 强调色加深（浅底可读性） */
+  --accent: #5566ee;
+  --accent-hover: #4355e8;
+  --accent-soft: rgba(85, 102, 238, 0.12);
+  --on-accent: #ffffff;
+  --success: #1f9d5f;
+  --danger: #e5484d;
+  --warning: #b07f1e;
+  --tool: #6f6f7c;
+  --user-grad: linear-gradient(135deg, rgba(88, 96, 140, 0.85), rgba(60, 64, 96, 0.8));
+  --nav-active: #5566ee;
+
+  /* 阴影：浅色下更轻 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.16);
+  --shadow-glow: 0 0 0 1px rgba(0, 0, 0, 0.06);
+
+  /* 组件变量（浅色版） */
+  --panel-bg: rgba(255, 255, 255, 0.62);
+  --field-bg: rgba(0, 0, 0, 0.045);
+  --field-bg-hover: rgba(0, 0, 0, 0.075);
+  --send-bg: rgba(0, 0, 0, 0.14);
+  --send-fg: rgba(255, 255, 255, 0.95);
+  --check-border: rgba(0, 0, 0, 0.35);
+  --jump-color: rgba(0, 0, 0, 0.5);
+  --jump-hover-bg: rgba(0, 0, 0, 0.07);
+  --scroll-thumb: rgba(0, 0, 0, 0.18);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.32);
+}
+
+/* 浅色背景光晕（为毛玻璃提供可模糊内容） */
+[data-theme="acrylic"][data-acrylic-lt="light"] body {
+  background-color: #e8e8ee;
+  background-image:
+    radial-gradient(1100px 700px at 15% -10%, rgba(85, 102, 238, 0.12), transparent 60%),
+    radial-gradient(900px 600px at 110% 20%, rgba(31, 157, 95, 0.08), transparent 60%),
+    linear-gradient(180deg, #f2f2f6, #e0e0e8);
+  background-attachment: fixed;
+}
+
+/* 代码块语法高亮：浅色亚克力下覆盖为深色调（GitHub Light 系），
+   默认 .hljs-* 为深色主题的亮色系前景，浅底上不清晰 */
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-comment,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-quote { color: #6e7781; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-keyword,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-selector-tag,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-literal,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-type { color: #cf222e; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-string,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-regexp,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-addition { color: #0a3069; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-number,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-symbol,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-bullet { color: #0550ae; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-title,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-section,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-name,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-selector-id { color: #8250df; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-attr,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-attribute,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-variable,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-template-variable { color: #0550ae; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-built_in,
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-builtin-name { color: #953800; }
+[data-theme="acrylic"][data-acrylic-lt="light"] .hljs-meta { color: #953800; }

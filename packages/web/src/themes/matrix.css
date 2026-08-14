@@ -1,0 +1,1227 @@
+/* ============================================================
+   GEBAI 主题：matrix — 矩阵（终端绿 · 黑客帝国）
+   纯黑底 + 终端荧光绿 + CRT 扫描线 + 等宽字体 + 锐利实线
+   标志性细节：CRT 横向扫描、横竖光晕、字符雨背景层、
+   终端 prompt 角标、实心方块光标、绿光语法高亮
+   ============================================================ */
+
+[data-theme="matrix"] {
+  /* 纯黑底色系（带极淡绿调，避免死黑一片） */
+  --bg: #000000;
+  --bg-elev: #050a05;
+  --bg-elev-2: #0a120a;
+  --bg-hover: #0f1a0f;
+  --bg-active: #14241a;
+  --bg-inset: #020602;
+
+  /* 锐利实线（终端框线） */
+  --border: rgba(0, 255, 65, 0.22);
+  --border-strong: rgba(0, 255, 65, 0.45);
+
+  /* 终端绿文字色（亮绿主、次绿、暗绿三级） */
+  --text: #d4ffd4;
+  --text-muted: #5fb573;
+  --text-faint: #2f5a3a;
+
+  /* 终端荧光主色 */
+  --accent: #00ff41;
+  --accent-hover: #39ff7a;
+  --accent-soft: rgba(0, 255, 65, 0.12);
+  --on-accent: #001a08;
+  --success: #00ff41;
+  --danger: #ff3030;
+  --warning: #ffb000;
+  --tool: #00ff7f;
+  --user-grad: linear-gradient(180deg, #00cc33 0%, #00ff41 50%, #00cc33 100%);
+  --nav-active: #00ff41;
+
+  /* 形状：极锐利（终端感） */
+  --radius-sm: 0;
+  --radius-md: 2px;
+  --radius-lg: 4px;
+  --radius-msg: 2px;
+
+  /* 阴影：终端绿光（不再是黑色阴影主导） */
+  --shadow-sm: 0 0 0 1px rgba(0, 255, 65, 0.18);
+  --shadow-md: 0 0 12px rgba(0, 255, 65, 0.2), 0 0 0 1px rgba(0, 255, 65, 0.3) inset;
+  --shadow-pop: 0 0 24px rgba(0, 255, 65, 0.3), 0 0 0 1px rgba(0, 255, 65, 0.4) inset, 0 4px 24px rgba(0, 0, 0, 0.8);
+  --shadow-glow: 0 0 8px rgba(0, 255, 65, 0.6), 0 0 16px rgba(0, 255, 65, 0.3);
+  --msg-shadow: 0 0 0 1px rgba(0, 255, 65, 0.3) inset, 0 0 12px rgba(0, 255, 65, 0.08);
+
+  /* 玻璃：终端感不需要玻璃（关掉） */
+  --glass: none;
+
+  /* 字体：UI 元素 monospace,正文仍用 sans 保证可读性 */
+  --font-ui: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, monospace;
+  --font-size: 13.5px;
+  --transition: 0.12s steps(2, end);
+}
+
+/* ============================================================
+   终端环境背景
+   - 纯黑底
+   - 角落绿色径向辉光
+   - CRT 横向扫描线（每 3px 一道，2% 透明）
+   - 顶部 + 底部绿色"屏幕辉光"
+   ============================================================ */
+[data-theme="matrix"] body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 900px 500px at 88% -10%, rgba(0, 255, 65, 0.08), transparent 60%),
+    radial-gradient(ellipse 800px 500px at -5% 110%, rgba(0, 255, 65, 0.06), transparent 60%),
+    repeating-linear-gradient(
+      0deg,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 255, 65, 0.025) 2px,
+      rgba(0, 255, 65, 0.025) 3px
+    );
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-ui);
+  position: relative;
+  overflow: hidden;
+}
+
+/* CRT 屏幕辉光（底部绿色信号光） */
+[data-theme="matrix"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 120% 200px at 50% 0%, rgba(0, 255, 65, 0.05), transparent 60%),
+    radial-gradient(ellipse 120% 200px at 50% 100%, rgba(0, 255, 65, 0.04), transparent 60%);
+  pointer-events: none;
+  z-index: 1;
+  mix-blend-mode: screen;
+}
+
+/* 顶部 1px 终端分隔线 + 终端 prompt 装饰
+   不挤压 header：给 #app 整体加 padding-top:18px，让 header 出现在装饰条下方 */
+[data-theme="matrix"] #app {
+  padding-top: 18px;
+}
+[data-theme="matrix"] #app::before {
+  content: "┌─[ root@gebai ]─[ /var/sessions ]─[ READY ]──────────────────────────────────────────────────────────────";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  padding: 0 10px;
+  line-height: 18px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: rgba(0, 255, 65, 0.5);
+  background: rgba(0, 255, 65, 0.05);
+  border-bottom: 1px solid rgba(0, 255, 65, 0.3);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: clip;
+  z-index: 60;
+  pointer-events: none;
+  letter-spacing: 0;
+}
+
+/* ============================================================
+   全局元素 — 终端风格基线
+   ============================================================ */
+[data-theme="matrix"] ::selection {
+  background: var(--accent);
+  color: var(--on-accent);
+  text-shadow: none;
+}
+[data-theme="matrix"] ::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+[data-theme="matrix"] ::-webkit-scrollbar-thumb {
+  background: rgba(0, 255, 65, 0.4);
+  border-radius: 0;
+  box-shadow: 0 0 4px rgba(0, 255, 65, 0.3);
+}
+[data-theme="matrix"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+[data-theme="matrix"] ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.5); }
+
+[data-theme="matrix"] a { color: var(--accent); text-decoration: underline dotted; }
+[data-theme="matrix"] a:hover {
+  color: var(--accent-hover);
+  text-shadow: 0 0 6px rgba(0, 255, 65, 0.6);
+  background: rgba(0, 255, 65, 0.08);
+}
+
+/* ============================================================
+   面板（header / aside / settings-panel 等）— 终端窗口
+   （#composer 不在此列：融入主背景，只保留输入胶囊）
+   ============================================================ */
+[data-theme="matrix"] header,
+[data-theme="matrix"] aside,
+[data-theme="matrix"] .settings-panel,
+[data-theme="matrix"] .login-card,
+[data-theme="matrix"] .theme-pop,
+[data-theme="matrix"] .preview-card {
+  background: var(--bg-elev) !important;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  border-radius: 0;
+}
+
+/* header: 顶部窗口条（仅是 header 自己的伪装饰，不再叠 #app::before 上去） */
+[data-theme="matrix"] header {
+  border-top: 0;
+  border-radius: 0;
+  position: relative;
+}
+
+/* aside: 侧边窗口 */
+[data-theme="matrix"] aside { border-radius: 0; }
+
+/* ============================================================
+   icon-btn — 终端图标按钮
+   ============================================================ */
+[data-theme="matrix"] .icon-btn {
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  border-radius: 0;
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .icon-btn:hover {
+  background: rgba(0, 255, 65, 0.1);
+  border-color: var(--border-strong);
+  color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+[data-theme="matrix"] .icon-btn.active {
+  background: rgba(0, 255, 65, 0.2);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+[data-theme="matrix"] .icon-btn.active::before {
+  content: "▸";
+  position: absolute;
+  left: -10px;
+  color: var(--accent);
+  text-shadow: 0 0 6px var(--accent);
+}
+
+/* ============================================================
+   连接状态徽章 — 终端状态灯
+   ============================================================ */
+[data-theme="matrix"] .conn {
+  background: rgba(0, 255, 65, 0.1);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 0;
+  position: relative;
+  padding-left: 18px;
+}
+[data-theme="matrix"] .conn::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: matrix-blink 1.2s steps(2, start) infinite;
+}
+[data-theme="matrix"] .conn.bad {
+  background: rgba(255, 48, 48, 0.1);
+  border-color: rgba(255, 48, 48, 0.5);
+  color: #ff6060;
+}
+[data-theme="matrix"] .conn.bad::before {
+  background: #ff3030;
+  box-shadow: 0 0 6px #ff3030;
+}
+
+/* ============================================================
+   新会话按钮 — 终端命令
+   ============================================================ */
+[data-theme="matrix"] #new-session {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  position: relative;
+  padding-left: 22px;
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.2);
+  transition: all var(--transition);
+}
+[data-theme="matrix"] #new-session::before {
+  content: "$";
+  position: absolute;
+  left: 8px;
+  color: var(--accent-hover);
+  font-weight: 700;
+}
+[data-theme="matrix"] #new-session:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-glow);
+  text-shadow: none;
+}
+[data-theme="matrix"] #new-session:hover::before { color: var(--on-accent); }
+
+/* ============================================================
+   会话列表 — 终端目录树
+   ============================================================ */
+[data-theme="matrix"] #session-list {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+[data-theme="matrix"] #session-list li {
+  border: 1px solid transparent;
+  border-radius: 0;
+  padding: 6px 8px 6px 24px;
+  position: relative;
+  transition: all var(--transition);
+}
+[data-theme="matrix"] #session-list li::before {
+  content: "├─";
+  position: absolute;
+  left: 6px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+[data-theme="matrix"] #session-list li:last-child::before { content: "└─"; }
+[data-theme="matrix"] #session-list li:hover {
+  background: rgba(0, 255, 65, 0.06);
+  border-color: var(--border);
+}
+[data-theme="matrix"] #session-list li:hover::before { color: var(--accent); }
+[data-theme="matrix"] #session-list li.active {
+  background: rgba(0, 255, 65, 0.12);
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.2) inset, 0 0 8px rgba(0, 255, 65, 0.15);
+}
+[data-theme="matrix"] #session-list li.active::before { color: var(--accent); }
+[data-theme="matrix"] #session-list li.active::after {
+  content: "●";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--accent);
+  text-shadow: 0 0 6px var(--accent);
+  font-size: 10px;
+  animation: matrix-blink 1.2s steps(2, start) infinite;
+}
+[data-theme="matrix"] .session-ico {
+  border-radius: 0;
+  background: rgba(0, 255, 65, 0.15);
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+[data-theme="matrix"] .session-name { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   消息气泡 — 终端窗口
+   ============================================================ */
+
+/* assistant 气泡：黑底 + 实线绿边 + [ASSISTANT] 角标 */
+[data-theme="matrix"] .msg.assistant .bubble {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  position: relative;
+  padding: 18px 16px 14px;
+  box-shadow: var(--msg-shadow);
+  font-family: var(--font-ui);
+}
+[data-theme="matrix"] .msg.assistant .bubble::before {
+  content: "[ASSISTANT] >_";
+  position: absolute;
+  top: -10px;
+  left: 12px;
+  background: var(--bg);
+  padding: 0 8px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+}
+[data-theme="matrix"] .msg.assistant:hover .bubble {
+  border-color: var(--accent);
+  box-shadow: 0 0 16px rgba(0, 255, 65, 0.25), 0 0 0 1px var(--accent) inset;
+}
+
+/* user 气泡：实心绿底 + 黑字 + [YOU] 角标 */
+[data-theme="matrix"] .msg.user .bubble {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-hover);
+  border-radius: 0;
+  position: relative;
+  padding: 18px 16px 14px;
+  box-shadow: 0 0 12px rgba(0, 255, 65, 0.5), 0 0 0 1px rgba(0, 255, 65, 0.3) inset;
+  font-family: var(--font-ui);
+}
+[data-theme="matrix"] .msg.user .bubble::before {
+  content: "[YOU] >_";
+  position: absolute;
+  top: -10px;
+  right: 12px;
+  background: var(--bg);
+  padding: 0 8px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+}
+
+/* tool 气泡：终端后台输出风格 */
+[data-theme="matrix"] .msg.tool .bubble {
+  background: rgba(0, 255, 65, 0.04);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--tool);
+  border-radius: 0;
+  position: relative;
+  padding: 14px 16px;
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.08) inset;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+}
+[data-theme="matrix"] .msg.tool .bubble::before {
+  content: "[TOOL] $";
+  position: absolute;
+  top: -10px;
+  left: 12px;
+  background: var(--bg);
+  padding: 0 8px;
+  color: var(--tool);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid var(--tool);
+  box-shadow: 0 0 6px rgba(0, 255, 127, 0.4);
+}
+[data-theme="matrix"] .msg.tool .tool-head { color: var(--tool); }
+[data-theme="matrix"] .msg.tool .tool-out { color: var(--text-muted); }
+
+/* ============================================================
+   消息操作按钮
+   ============================================================ */
+[data-theme="matrix"] .msg-act {
+  color: var(--text-faint);
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-radius: 0;
+}
+[data-theme="matrix"] .msg-act:hover {
+  color: var(--accent);
+  background: rgba(0, 255, 65, 0.1);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.3);
+}
+
+[data-theme="matrix"] .msg-name {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-shadow: 0 0 4px rgba(0, 255, 65, 0.4);
+}
+[data-theme="matrix"] .msg-time { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; }
+
+/* ============================================================
+   流式光标 — 实心方块闪烁
+   ============================================================ */
+[data-theme="matrix"] .msg.streaming .bubble::after {
+  content: "█";
+  color: var(--accent);
+  background: none;
+  -webkit-text-fill-color: var(--accent);
+  text-shadow: 0 0 8px var(--accent);
+  margin-left: 2px;
+  animation: matrix-blink 0.6s steps(2, start) infinite;
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
+   composer — 终端输入框
+   装饰条改为内嵌到 composer 顶部 8px padding 内（不再外凸挤压消息）
+   ============================================================ */
+[data-theme="matrix"] #composer {
+  padding: 20px clamp(16px, 4vw, 48px) 14px;
+  position: relative;
+}
+[data-theme="matrix"] #composer::before {
+  content: "─[ COMPOSER ]─────────────────────────────────────────────────────────────────────────────────────────────────";
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  height: 12px;
+  padding: 0 12px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: rgba(0, 255, 65, 0.35);
+  line-height: 12px;
+  background: transparent;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+}
+[data-theme="matrix"] .composer-row {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  padding: 4px 8px;
+  position: relative;
+  box-shadow: 0 0 12px rgba(0, 255, 65, 0.15);
+  transition: all var(--transition);
+}
+/* 提示符作为 flex 首项（终端风：user@gebai:~$ 附件 输入 发送），垂直居中 */
+[data-theme="matrix"] .composer-row::before {
+  content: "user@gebai:~$";
+  flex: none;
+  align-self: center;
+  margin-right: 8px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: 0 0 4px rgba(0, 255, 65, 0.5);
+}
+[data-theme="matrix"] .composer-row:focus-within {
+  border-color: var(--accent-hover);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 16px rgba(0, 255, 65, 0.4);
+  animation: none;
+}
+[data-theme="matrix"] #attach-btn {
+  color: var(--text-muted);
+  border-radius: 0;
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] #attach-btn:hover {
+  background: rgba(0, 255, 65, 0.1);
+  border-color: var(--border-strong);
+  color: var(--accent);
+}
+[data-theme="matrix"] #input {
+  color: var(--text);
+  font-family: var(--font-mono);
+  caret-color: var(--accent);
+}
+[data-theme="matrix"] #input::placeholder {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+/* 发送按钮 — 终端执行按钮（图标由内联 SVG 提供，不再叠加字符） */
+[data-theme="matrix"] #send {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-hover);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="matrix"] #send:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow-glow);
+  filter: brightness(1.15);
+}
+[data-theme="matrix"] #send:active {
+  transform: scale(0.96);
+  box-shadow: 0 0 4px rgba(0, 255, 65, 0.5);
+}
+[data-theme="matrix"] #send.stopping {
+  background: var(--danger);
+  color: #fff;
+  border-color: #ff6060;
+  box-shadow: 0 0 8px rgba(255, 48, 48, 0.5);
+}
+
+/* ============================================================
+   审批卡片 — 终端确认 [Y/n]
+   ============================================================ */
+[data-theme="matrix"] .approval {
+  background: rgba(255, 176, 0, 0.06);
+  border: 1px solid rgba(255, 176, 0, 0.4);
+  border-left: 2px solid var(--warning);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  box-shadow: 0 0 8px rgba(255, 176, 0, 0.15);
+  flex-wrap: wrap; /* 横幅独占一行，避免挤占标题/按钮行导致内容竖排 */
+}
+[data-theme="matrix"] .approval::before {
+  content: "[CONFIRM REQUIRED] $";
+  display: block;
+  flex: 0 0 100%;
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+  text-shadow: 0 0 4px rgba(255, 176, 0, 0.5);
+}
+[data-theme="matrix"] .approval .yes {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-hover);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.4);
+}
+[data-theme="matrix"] .approval .yes::before { content: "[Y] "; }
+[data-theme="matrix"] .approval .no {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+[data-theme="matrix"] .approval .no::before { content: "[N] "; }
+[data-theme="matrix"] .approval .kbd-hint { display: none; } /* 已有 [Y]/[N] 前缀，去掉重复提示 */
+[data-theme="matrix"] .approval .yes:hover { background: var(--accent-hover); box-shadow: var(--shadow-glow); }
+[data-theme="matrix"] .approval .no:hover { background: rgba(255, 48, 48, 0.15); box-shadow: 0 0 6px rgba(255, 48, 48, 0.4); }
+
+/* ============================================================
+   Markdown — 终端排版
+   ============================================================ */
+[data-theme="matrix"] .markdown h1,
+[data-theme="matrix"] .markdown h2,
+[data-theme="matrix"] .markdown h3 {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+}
+[data-theme="matrix"] .markdown h1::before { content: "# "; color: var(--text-faint); }
+[data-theme="matrix"] .markdown h2::before { content: "## "; color: var(--text-faint); }
+[data-theme="matrix"] .markdown h3::before { content: "### "; color: var(--text-faint); }
+[data-theme="matrix"] .markdown h2 {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+[data-theme="matrix"] .markdown h4,
+[data-theme="matrix"] .markdown h5,
+[data-theme="matrix"] .markdown h6 {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .markdown h4::before { content: "▸ "; color: var(--text-faint); }
+
+[data-theme="matrix"] .markdown a {
+  color: var(--accent);
+  text-decoration: underline dotted rgba(0, 255, 65, 0.4);
+  border-bottom: none;
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .markdown a:hover {
+  color: var(--accent-hover);
+  background: rgba(0, 255, 65, 0.1);
+  text-shadow: 0 0 6px var(--accent);
+}
+
+[data-theme="matrix"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(0, 255, 65, 0.08);
+  border: 1px solid var(--border);
+  color: var(--accent-hover);
+  border-radius: 0;
+  padding: 0.12em 0.5em;
+  font-size: 0.92em;
+}
+
+/* pre: 终端窗口样式（带标题栏） */
+[data-theme="matrix"] .markdown pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  padding: 18px 14px 14px;
+  position: relative;
+  box-shadow: 0 0 12px rgba(0, 255, 65, 0.1) inset;
+}
+[data-theme="matrix"] .markdown pre::before {
+  content: "─[ /bin/output.log ]────────────────────────────";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 16px;
+  padding: 0 10px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-faint);
+  line-height: 16px;
+  background: rgba(0, 255, 65, 0.04);
+  border-bottom: 1px solid var(--border);
+  white-space: pre;
+  overflow: hidden;
+}
+[data-theme="matrix"] .markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+[data-theme="matrix"] .markdown blockquote {
+  border-left: 2px solid var(--accent);
+  background: rgba(0, 255, 65, 0.04);
+  color: var(--text-muted);
+  border-radius: 0;
+  font-style: normal;
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .markdown blockquote::before {
+  content: "▎ ";
+  color: var(--accent);
+}
+
+[data-theme="matrix"] .markdown table { border-color: var(--border); }
+[data-theme="matrix"] .markdown th {
+  background: rgba(0, 255, 65, 0.12);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  border-color: var(--border);
+}
+[data-theme="matrix"] .markdown td { border-color: var(--border); }
+[data-theme="matrix"] .markdown tr:hover td { background: rgba(0, 255, 65, 0.04); }
+[data-theme="matrix"] .markdown hr { border-top: 1px dashed var(--border-strong); }
+[data-theme="matrix"] .markdown ul li::marker { color: var(--accent); }
+[data-theme="matrix"] .markdown ol li::marker { color: var(--accent); font-family: var(--font-mono); }
+[data-theme="matrix"] .copy-btn {
+  background: var(--bg);
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+[data-theme="matrix"] .copy-btn:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-glow);
+}
+
+/* 推理块 */
+[data-theme="matrix"] .reasoning .reasoning-body {
+  background: rgba(0, 255, 65, 0.04);
+  border-left: 2px solid var(--accent);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+/* ============================================================
+   主题选择气泡 — 终端菜单
+   ============================================================ */
+[data-theme="matrix"] .theme-pop {
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+[data-theme="matrix"] .theme-section-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  padding: 8px 10px 4px;
+  border-bottom: 1px dashed var(--border);
+  text-transform: uppercase;
+}
+[data-theme="matrix"] .theme-section-label::before { content: "## "; color: var(--accent); }
+
+[data-theme="matrix"] .accent-opt {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 0;
+  position: relative;
+}
+[data-theme="matrix"] .accent-opt::after {
+  content: "■";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--swatch);
+  font-size: 14px;
+  text-shadow: 0 0 4px var(--swatch);
+}
+[data-theme="matrix"] .accent-opt:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+[data-theme="matrix"] .accent-opt.active {
+  border-color: var(--accent);
+  background: rgba(0, 255, 65, 0.2);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 8px rgba(0, 255, 65, 0.5);
+}
+
+[data-theme="matrix"] .accent-reset {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 0;
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .accent-reset:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(0, 255, 65, 0.1);
+}
+
+[data-theme="matrix"] .theme-opt {
+  border: 1px solid transparent;
+  border-radius: 0;
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .theme-opt:hover {
+  background: rgba(0, 255, 65, 0.08);
+  border-color: var(--border);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+[data-theme="matrix"] .theme-opt.active {
+  background: rgba(0, 255, 65, 0.15);
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 8px rgba(0, 255, 65, 0.2);
+}
+[data-theme="matrix"] .theme-opt .swatch {
+  border-radius: 0;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+}
+[data-theme="matrix"] .theme-opt .t-label { color: var(--text); font-weight: 600; }
+[data-theme="matrix"] .theme-opt .t-desc { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; }
+
+/* ============================================================
+   设置抽屉
+   ============================================================ */
+[data-theme="matrix"] .settings-overlay {
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(2px);
+}
+[data-theme="matrix"] .settings-head {
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .settings-head h2::before { content: "## "; color: var(--accent); }
+
+[data-theme="matrix"] .settings-tabs {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .settings-tabs button {
+  border-radius: 0;
+  color: var(--text-muted);
+}
+[data-theme="matrix"] .settings-tabs button:hover {
+  background: rgba(0, 255, 65, 0.08);
+  color: var(--accent);
+}
+[data-theme="matrix"] .settings-tabs button.active {
+  background: rgba(0, 255, 65, 0.2);
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+  box-shadow: 0 -2px 8px rgba(0, 255, 65, 0.3) inset;
+}
+
+[data-theme="matrix"] .settings-row {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .settings-row:hover {
+  border-color: var(--accent);
+  background: rgba(0, 255, 65, 0.05);
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.15) inset;
+}
+
+[data-theme="matrix"] .settings-form {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0;
+}
+[data-theme="matrix"] .settings-form label { color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; }
+[data-theme="matrix"] .settings-form input,
+[data-theme="matrix"] .settings-form select,
+[data-theme="matrix"] .settings-form textarea {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  border-radius: 0;
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .settings-form input:focus,
+[data-theme="matrix"] .settings-form select:focus,
+[data-theme="matrix"] .settings-form textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 8px rgba(0, 255, 65, 0.3);
+  outline: none;
+}
+
+[data-theme="matrix"] .mini-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .mini-btn:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-glow);
+}
+[data-theme="matrix"] .mini-btn.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+[data-theme="matrix"] .mini-btn.danger:hover {
+  background: var(--danger);
+  color: #fff;
+  box-shadow: 0 0 8px rgba(255, 48, 48, 0.5);
+}
+
+[data-theme="matrix"] .settings-group-name {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-shadow: 0 0 4px rgba(0, 255, 65, 0.4);
+}
+[data-theme="matrix"] .settings-group-name::before { content: "## "; }
+
+/* ============================================================
+   登录卡片 — 终端登录
+   ============================================================ */
+[data-theme="matrix"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1000px 500px at 50% 50%, rgba(0, 255, 65, 0.08), transparent 60%),
+    var(--bg);
+}
+[data-theme="matrix"] .login-card {
+  border: 1px solid var(--accent);
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-mono);
+  position: relative;
+}
+[data-theme="matrix"] .login-card::before {
+  content: "─[ LOGIN ]──────────────────────────────────────────────────────────────────────────────────────────────";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  padding: 0 12px;
+  font-size: 9px;
+  color: rgba(0, 255, 65, 0.4);
+  line-height: 18px;
+  background: rgba(0, 255, 65, 0.06);
+  border-bottom: 1px solid var(--border);
+  transform: translateY(-100%);
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+}
+[data-theme="matrix"] .login-brand {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  text-shadow: 0 0 12px rgba(0, 255, 65, 0.6);
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .login-brand::before { content: "▌ "; color: var(--accent-hover); }
+[data-theme="matrix"] .login-sub {
+  color: var(--text-faint);
+  letter-spacing: 0.2em;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+[data-theme="matrix"] .login-sub::before {
+  content: "$ ./gebai --login";
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent);
+  opacity: 0.7;
+}
+[data-theme="matrix"] .login-card label {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+[data-theme="matrix"] .login-card label::before { content: "> "; color: var(--accent-hover); }
+[data-theme="matrix"] .login-card input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  border-radius: 0;
+  caret-color: var(--accent);
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .login-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 12px rgba(0, 255, 65, 0.3);
+  outline: none;
+}
+[data-theme="matrix"] .login-submit {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-hover);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  box-shadow: 0 0 12px rgba(0, 255, 65, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .login-submit::before { content: "$ "; }
+[data-theme="matrix"] .login-submit:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow-glow);
+}
+
+/* ============================================================
+   空状态
+   ============================================================ */
+[data-theme="matrix"] .empty-state .es-slogan {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-shadow: 0 0 8px rgba(0, 255, 65, 0.5);
+}
+[data-theme="matrix"] .empty-state .es-slogan::before { content: "$ "; color: var(--accent-hover); }
+[data-theme="matrix"] .empty-state .es-slogan::after  { content: " █"; animation: matrix-blink 1s steps(2, start) infinite; }
+
+[data-theme="matrix"] .es-suggestions button {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-align: left;
+  padding-left: 28px;
+  position: relative;
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .es-suggestions button::before {
+  content: "▸";
+  position: absolute;
+  left: 10px;
+  color: var(--accent);
+}
+[data-theme="matrix"] .es-suggestions button:hover {
+  background: rgba(0, 255, 65, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--shadow-glow);
+  transform: translateX(2px);
+}
+
+/* ============================================================
+   选择卡片
+   ============================================================ */
+[data-theme="matrix"] .choice-opt {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  transition: all var(--transition);
+  position: relative;
+  padding-left: 24px;
+}
+[data-theme="matrix"] .choice-opt::before {
+  content: "[ ]";
+  position: absolute;
+  left: 6px;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+[data-theme="matrix"] .choice-opt:hover {
+  background: rgba(0, 255, 65, 0.08);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+[data-theme="matrix"] .choice-opt:hover::before { content: "[▸]"; color: var(--accent); }
+
+/* ============================================================
+   待办、压缩、附件、预览
+   ============================================================ */
+[data-theme="matrix"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(0, 255, 65, 0.5); }
+[data-theme="matrix"] .bubble.compact-notice {
+  background: rgba(255, 176, 0, 0.06);
+  border: 1px dashed rgba(255, 176, 0, 0.4);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+[data-theme="matrix"] .bubble.compact-notice::before { content: "[SYSTEM] "; color: var(--warning); font-weight: 600; }
+
+[data-theme="matrix"] .attach-chip {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: 0;
+  padding: 4px 8px;
+}
+[data-theme="matrix"] .attach-chip::before { content: "📎 "; opacity: 0.6; }
+[data-theme="matrix"] .attach-chip:hover {
+  background: rgba(0, 255, 65, 0.1);
+  box-shadow: var(--shadow-sm);
+}
+
+[data-theme="matrix"] .preview-overlay {
+  background: rgba(0, 0, 0, 0.92);
+  backdrop-filter: blur(4px);
+}
+[data-theme="matrix"] .preview-head {
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .preview-head::before { content: "─[ FILE PREVIEW ]──────────────────────────────────────────────────────────────"; }
+[data-theme="matrix"] .preview-close {
+  color: var(--text-muted);
+  border-radius: 0;
+  font-family: var(--font-mono);
+}
+[data-theme="matrix"] .preview-close:hover {
+  color: var(--danger);
+  background: rgba(255, 48, 48, 0.1);
+  border: 1px solid var(--danger);
+}
+
+/* ============================================================
+   跳到最新按钮
+   ============================================================ */
+[data-theme="matrix"] .jump-bottom {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  box-shadow: var(--shadow-glow);
+  transition: all var(--transition);
+}
+[data-theme="matrix"] .jump-bottom:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 0 16px rgba(0, 255, 65, 0.6);
+}
+[data-theme="matrix"] .jump-bottom svg { color: currentColor; }
+
+/* ============================================================
+   diagram / 流程图
+   ============================================================ */
+[data-theme="matrix"] .diagram {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+}
+[data-theme="matrix"] .diagram-editor {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  border-radius: 0;
+}
+
+/* ============================================================
+   终端绿语法高亮
+   ============================================================ */
+[data-theme="matrix"] .hljs { color: var(--text); background: transparent; }
+[data-theme="matrix"] .hljs-comment,
+[data-theme="matrix"] .hljs-quote { color: var(--text-faint); font-style: italic; }
+[data-theme="matrix"] .hljs-keyword,
+[data-theme="matrix"] .hljs-selector-tag,
+[data-theme="matrix"] .hljs-literal,
+[data-theme="matrix"] .hljs-type { color: var(--accent); font-weight: 600; }
+[data-theme="matrix"] .hljs-string,
+[data-theme="matrix"] .hljs-regexp,
+[data-theme="matrix"] .hljs-addition { color: #b8ffb8; }
+[data-theme="matrix"] .hljs-number,
+[data-theme="matrix"] .hljs-symbol,
+[data-theme="matrix"] .hljs-bullet { color: var(--warning); }
+[data-theme="matrix"] .hljs-title,
+[data-theme="matrix"] .hljs-section,
+[data-theme="matrix"] .hljs-name,
+[data-theme="matrix"] .hljs-selector-id { color: var(--tool); }
+[data-theme="matrix"] .hljs-attr,
+[data-theme="matrix"] .hljs-attribute,
+[data-theme="matrix"] .hljs-variable,
+[data-theme="matrix"] .hljs-template-variable { color: #a0ffd0; }
+[data-theme="matrix"] .hljs-built_in,
+[data-theme="matrix"] .hljs-builtin-name { color: #79ffa9; }
+[data-theme="matrix"] .hljs-meta,
+[data-theme="matrix"] .hljs-doctag { color: var(--text-faint); }
+[data-theme="matrix"] .hljs-tag,
+[data-theme="matrix"] .hljs-name { color: var(--accent); }
+[data-theme="matrix"] .hljs-emphasis { font-style: italic; color: var(--accent-hover); }
+[data-theme="matrix"] .hljs-strong { font-weight: 700; color: var(--accent-hover); }
+
+/* ============================================================
+   动效 — 终端光标闪烁 + 字符雨缓动
+   ============================================================ */
+@keyframes matrix-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+@keyframes matrix-scan {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(3px); }
+}
+@keyframes matrix-flicker {
+  0%, 92%, 100% { opacity: 1; }
+  93% { opacity: 0.85; }
+  95% { opacity: 0.92; }
+  97% { opacity: 0.8; }
+}
+[data-theme="matrix"] body {
+  animation: matrix-flicker 8s steps(40, end) infinite;
+}
+
+/* 响应式：移动端减负（去掉顶部装饰条 + 对应 padding） */
+@media (max-width: 860px) {
+  [data-theme="matrix"] #app { padding-top: 0; }
+  [data-theme="matrix"] #app::before { display: none; }
+  [data-theme="matrix"] header::before { display: none; }
+  [data-theme="matrix"] #composer::before { display: none; }
+  [data-theme="matrix"] .login-card::before { display: none; }
+  [data-theme="matrix"] aside {
+    background: var(--bg-elev);
+  }
+}

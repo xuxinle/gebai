@@ -1,0 +1,323 @@
+export interface AttachmentRef {
+  path: string
+  mime: string
+  name: string
+  size: number
+}
+
+export interface AttachmentInput {
+  name: string
+  mime?: string
+  path?: string
+  data?: Uint8Array
+}
+
+export interface AttachmentInfo {
+  id: string
+  name: string
+  mime: string
+  size: number
+  path: string
+}
+
+export interface ToolCall {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
+}
+
+/** 行级 diff 结果（`diff` 内容块）：按顺序排列，每行标注差异类型。 */
+export interface DiffLine {
+  kind: "equal" | "add" | "del"
+  text: string
+}
+
+/** 图表语言（draw 工具三格式）：plantuml=UML 严谨建模 / mermaid=通用流程图时序图 / d2=美观架构图。 */
+export type DiagramFormat = "plantuml" | "mermaid" | "d2"
+
+/**
+ * Rich content blocks embedded in messages, rendered by the UI.
+ * `image`/`file` `path` values are logical paths relative to the session tmp/ dir.
+ */
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "code"; text: string; language?: string }
+  | { type: "image"; path: string; name?: string; mime?: string }
+  | { type: "file"; path: string; name: string; mime?: string }
+  | { type: "diagram"; format: DiagramFormat; code: string; name?: string; version?: number }
+  | { type: "diff"; oldText: string; newText: string; language?: string; name?: string; oldName?: string; newName?: string; lines: DiffLine[] }
+  | { type: "html"; html: string; name?: string; width?: number; height?: number }
+
+export interface Message {
+  id: string
+  role: "user" | "assistant" | "tool" | "system"
+  content: string
+  /** 推理内容（reasoning_content/thinking）独立字段：assistant 消息持久化时写入，content 保持纯正文；
+   *  回放给 LLM 时（loadHistory）不携带——推理绝不进模型上下文；UI 历史渲染为折叠推理卡。 */
+  reasoning?: string
+  blocks?: ContentBlock[]
+  attachments?: AttachmentRef[]
+  toolCalls?: ToolCall[]
+  toolCallId?: string
+  name?: string
+  /** 工具消息：调用参数（历史会话重载时用于渲染卡片，与实时一致） */
+  arguments?: Record<string, unknown>
+  /** 子Agent 装载提示词消息标记（role=system）：装载（agent_load/启动预载/WS sub_agent.load）时写入会话记录，
+   *  内容为子Agent 完整系统提示词；loadHistory 时按 system 角色透传进模型上下文，UI 渲染为简短装载提示。 */
+  loadedAgent?: string
+  /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
+  compacted?: boolean
+  /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */
+  summary?: string
+  /** 新会话执行（agent_run）过程消息标记：完整存档但【不进入主 LLM 上下文】（loadHistory 跳过），前端按 runId 分组折叠渲染。 */
+  session?: boolean
+  /** 新会话执行 run 标识：同一次 agent_run 执行过程的消息共享（前端回放按此分组）。 */
+  sessionRunId?: string
+  /** 新会话执行 run 元信息（仅该 run 首条消息携带）：折叠容器标题用（预加载子Agent 名与输入）。 */
+  sessionMeta?: { agents: string[]; input: string }
+  /**
+   * 新会话执行完整存档（agent_run 工具调用记录的扩展字段）：该次执行的全部内容
+   * （输入/每轮回复/推理/工具调用与结果），历史会话回放据此渲染折叠容器。
+   */
+  sessionRun?: SessionRunArchive
+  /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
+  subAgent?: boolean
+  /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
+  subAgentRunId?: string
+  /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
+  subAgentMeta?: { agent: string; input: string }
+  /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
+  subAgentRun?: LegacySubAgentRunArchive
+  createdAt: number
+}
+
+/** 新会话执行存档条目：执行过程消息（user/assistant/tool 全量内容）。 */
+export interface SessionRunEntry {
+  role: "user" | "assistant" | "tool"
+  name?: string
+  content: string
+  /** 推理内容独立字段（同 Message.reasoning 语义）：assistant 条目持久化时写入，回放展示不回流模型。 */
+  reasoning?: string
+  toolCalls?: ToolCall[]
+  toolCallId?: string
+  arguments?: Record<string, unknown>
+  blocks?: ContentBlock[]
+  /** 嵌套 agent_run（新会话内再执行新会话）的存档递归携带。 */
+  sessionRun?: SessionRunArchive
+}
+
+/** 新会话执行完整存档（agent_run 工具记录扩展字段，见 Message.sessionRun）。 */
+export interface SessionRunArchive {
+  runId: string
+  /** 预加载进新会话的子Agent 列表（完整系统提示词与工具进入新会话上下文）。 */
+  agents: string[]
+  input: string
+  /** 最终返回文本（容器折叠后摘要展示；异常/取消为空串）。 */
+  output: string
+  messages: SessionRunEntry[]
+}
+
+/** 旧版（agent_call 时代）子Agent run 存档：结构同 SessionRunArchive 但 agent 为单值，仅历史会话兼容回放。 */
+export interface LegacySubAgentRunEntry {
+  role: "user" | "assistant" | "tool"
+  name?: string
+  content: string
+  toolCalls?: ToolCall[]
+  toolCallId?: string
+  arguments?: Record<string, unknown>
+  blocks?: ContentBlock[]
+  subAgentRun?: LegacySubAgentRunArchive
+}
+
+/** 旧版（agent_call 时代）子Agent run 完整存档（仅历史会话兼容回放，见 Message.subAgentRun）。 */
+export interface LegacySubAgentRunArchive {
+  runId: string
+  agent: string
+  input: string
+  output: string
+  messages: LegacySubAgentRunEntry[]
+}
+
+export interface ChatChunk {
+  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "session_start" | "session_done"
+  messageId?: string
+  /** 事件来自新会话执行过程（agent_run 派生会话；主回复不带此标记）。 */
+  session?: boolean
+  /** 新会话执行 run 标识：同一次 agent_run 的执行过程事件共享（前端按此分组渲染）。 */
+  sessionRunId?: string
+  /** 新会话执行 run 元信息：session_start 携带 agents/input，session_done 携带 agents/output（前端折叠容器标题用）。 */
+  sessionMeta?: { agents: string[]; input?: string; output?: string }
+  text?: string
+  toolCall?: ToolCall
+  approval?: { toolCallId: string; retries: number; tool: string }
+  output?: string
+  blocks?: ContentBlock[]
+  error?: string
+}
+
+export interface AgentEvent {
+  type: string
+  sessionId: string
+  payload: Record<string, unknown>
+  timestamp: number
+  /** 服务端每用户事件日志序号（断线重连后按 seq 重放补偿；旧服务端不携带）。 */
+  seq?: number
+}
+
+/** WS 状态快照（state.snapshot payload）：重连/登录后客户端模型收敛基线。 */
+export interface WsSnapshot {
+  currentSessionId: string | null
+  sessions: SessionInfo[]
+  running: string[]
+  lastSeq: number
+  /** 模型上下文窗口（token）：0=未知/未配置，标题栏上下文占比显示用。 */
+  maxContextTokens?: number
+}
+
+export interface SessionInfo {
+  id: string
+  name: string
+  userId: string
+  createdAt: number
+  updatedAt: number
+  /** 上下文 token 估算（chars/4，会话列表展示用，单位 k）。 */
+  ctxTokens?: number
+}
+
+export interface SessionDetail extends SessionInfo {
+  messages: Message[]
+}
+
+export interface TodoItem {
+  id: string
+  title: string
+  status: "pending" | "in_progress" | "completed" | "failed" | "cancelled"
+  priority?: "low" | "medium" | "high"
+  progress?: number
+  etaMin?: number
+  dependencies?: string[]
+  note?: string
+}
+
+export interface FileEntry {
+  path: string
+  size: number
+  modifiedAt: number
+  isDir: boolean
+}
+
+export interface FeedbackInput {
+  messageId: string
+  sessionId: string
+  type: "thumbs_up" | "thumbs_down" | "text" | "suggestion"
+  text?: string
+  label?: string
+  anonymous?: boolean
+}
+
+export interface FeedbackFilter {
+  messageId?: string
+  sessionId?: string
+  type?: FeedbackInput["type"]
+}
+
+export interface FeedbackInfo extends FeedbackInput {
+  id: string
+  userId: string
+  model?: string
+  subAgent?: string
+  createdAt: number
+}
+
+export interface WebhookInfo {
+  id: string
+  url: string
+  /** 订阅的事件类型白名单；为空数组时订阅全部事件。 */
+  events: string[]
+  /** HMAC 签名密钥（服务端脱敏返回 ***）。 */
+  secret?: string
+  userId?: string
+  createdAt: number
+}
+
+export interface UserInfo {
+  id: string
+  username: string
+  role: "user" | "admin"
+  disabled: boolean
+  /** 注册待审批标记（GEBAI_SIGNUP_MODE=approval 时注册用户为 true，admin 批准后清除）。 */
+  pending?: boolean
+  createdAt: number
+}
+
+export interface UserPatch {
+  password?: string
+  role?: "user" | "admin"
+  disabled?: boolean
+  /** 待审批标记：admin 批准注册用户时置 false（同时 disabled=false 启用）。 */
+  pending?: boolean
+}
+
+export interface ToolInfo {
+  name: string
+  description: string
+  enabled: boolean
+  group: "global" | string
+  approvalRequired: boolean
+  /** 卡片展示元数据（同服务端 Tool.card，前端渲染工具卡片用）。 */
+  card?: { titleParams?: string[]; args?: "json" | "none" | "code" | "block"; codeField?: string; codeLang?: string }
+}
+
+export interface SubAgentInfo {
+  name: string
+  description: string
+  tools: string[]
+  preload: boolean
+  loaded: boolean
+  bundled: boolean
+}
+
+/** HTML 小工具（Agent 经 save_tool 保存到服务端，公用或用户私有）。 */
+export interface MiniToolMeta {
+  name: string
+  scope: "public" | "private"
+  /** 创建者用户 id（公用工具记录归属）。 */
+  owner?: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 完整小工具信息（含 HTML 源码，仅单条读取时返回）。 */
+export interface MiniToolInfo extends MiniToolMeta {
+  html: string
+}
+
+export interface LLMCapabilities {
+  streaming: boolean
+  toolCalling: boolean
+  multimodal: boolean
+  maxContextTokens: number
+}
+
+export interface ToolSchema {
+  type: "object"
+  properties: Record<string, unknown>
+  required?: string[]
+}
+
+export interface EnvVarSource {
+  name: string
+  value: string
+  source: "global" | "user" | "session"
+  sensitive: boolean
+}
+
+export interface MessageLike {
+  role: "system" | "user" | "assistant" | "tool"
+  content: string | Array<Record<string, unknown>>
+  name?: string
+  toolCallId?: string
+  toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> | string }>
+  /** 嵌套 agent_run 存档（仅服务端内存态挂载，provider 序列化忽略；不进主 LLM 上下文）。 */
+  sessionRun?: SessionRunArchive
+}

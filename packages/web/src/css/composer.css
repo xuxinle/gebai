@@ -1,0 +1,231 @@
+/* ---------- 审批卡片 ---------- */
+/* 底部留白：卡片与输入框之间不紧贴 */
+#approvals { padding: 0 clamp(16px, 4vw, 48px) 10px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+/* 非当前会话的审批卡片隐藏（display:flex 会覆盖 UA 的 [hidden]，需显式规则） */
+.approval[hidden] { display: none; }
+/* 交互卡片（选择/环境变量填值，多会话并行：随会话显示/隐藏） */
+.interaction-card[hidden] { display: none; }
+#approvals .interaction-card { align-self: stretch; max-width: 760px; }
+.approval {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(460px, 100%);
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-elev));
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  animation: approval-in 0.2s ease;
+}
+@keyframes approval-in { from { opacity: 0; transform: translateY(-6px); } }
+.approval .approval-ico { font-size: 16px; }
+.approval .approval-txt { flex: 1; min-width: 0; }
+.approval .approval-txt .approval-title { font-weight: 600; font-size: 13px; }
+/* 工具名单行截断（title 悬浮可见全名），避免长工具名把卡片撑成长条 */
+.approval .approval-txt .approval-tool { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.approval .approval-actions { display: flex; gap: 8px; flex: none; }
+.approval button {
+  padding: 5px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  transition: filter var(--transition), transform 0.06s ease;
+}
+.approval button:active { transform: scale(0.97); }
+.approval .yes { background: var(--success); color: #fff; }
+.approval .no { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); }
+/* 快捷键提示：按钮内弱化小字 */
+.approval .kbd-hint { opacity: 0.65; font-size: 11px; font-weight: 500; margin-left: 6px; }
+.approval .yes:hover { filter: brightness(1.1); }
+.approval .no:hover { filter: brightness(1.08); }
+
+/* ---------- 输入区 ---------- */
+#composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px clamp(16px, 4vw, 48px) 12px;
+  background: var(--bg);
+}
+
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px 4px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip .chip-size { color: var(--text-faint); flex: none; }
+.attach-chip button {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.attach-chip button:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* 一体化输入条：胶囊容器，focus 高亮 */
+.composer-row {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 6px 8px;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+.composer-row:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 0 14px color-mix(in srgb, var(--accent) 18%, transparent);
+  background: var(--bg-elev-2);
+}
+#attach-btn {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  background: none;
+  color: var(--text-muted);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 16px;
+  display: grid;
+  place-items: center;
+  transition: background var(--transition), color var(--transition);
+}
+#attach-btn:hover { background: var(--bg-hover); color: var(--accent); }
+#input {
+  flex: 1;
+  min-height: 36px;
+  max-height: 180px;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  padding: 8px 6px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+#input::placeholder { color: var(--text-faint); }
+#input:focus { outline: none; }
+/* 审批锁定：输入禁用态弱化（禁用会触发聚焦丢失，解锁后由 approvals.ts 恢复焦点） */
+#input:disabled { opacity: 0.55; }
+#attach-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+#send {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background var(--transition), transform 0.08s ease, filter var(--transition);
+}
+#send:hover { background: var(--accent-hover); filter: brightness(1.06); }
+#send:active { transform: scale(0.92); }
+#send:disabled { opacity: 0.45; cursor: not-allowed; }
+#send.stopping { background: var(--danger); }
+#send.stopping:hover { background: var(--danger); filter: brightness(1.1); }
+/* 发送/停止图标：CSS class 控制显隐（不依赖 hidden 属性，避免属性切换在部分环境失效） */
+#send .ic-stop { display: none; }
+#send.stopping .ic-send { display: none; }
+#send.stopping .ic-stop { display: block; }
+
+/* ---------- 空状态 ---------- */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 40px 20px;
+  user-select: none;
+}
+.empty-state .es-slogan {
+  font-size: 46px;
+  font-weight: 400;
+  letter-spacing: 0.3em;
+  margin: 0;
+  color: var(--text-faint);
+  opacity: 0.55;
+  user-select: none;
+}
+@keyframes slogan-flow { to { background-position: 300% 0; } }
+.es-suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 18px; }
+.es-suggestions button {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+.es-suggestions button:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+/* 快捷按钮：单按钮胶囊（无嵌套元素，杜绝双层边框）；hover 右上角显现 ✕ 删除徽章 */
+.es-shortcut {
+  position: relative;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+.es-shortcut:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.es-shortcut .es-shortcut-del {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-pop);
+}
+.es-shortcut:hover .es-shortcut-del { display: inline-flex; }
+.es-shortcut .es-shortcut-del:hover { color: var(--danger); border-color: var(--danger); }
+.es-suggestions .es-shortcut-add {
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-muted);
+}
+.es-suggestions .es-shortcut-add:hover {
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--text);
+}
+

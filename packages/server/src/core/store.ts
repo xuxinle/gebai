@@ -1,0 +1,421 @@
+import { mkdir, writeFile, readFile, rm, readdir, stat } from "node:fs/promises"
+import { join, resolve, sep } from "node:path"
+import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
+import { isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "./paths"
+import { randomUUID } from "node:crypto"
+
+const MAX_CACHE_MESSAGES = 100
+const MAX_CACHE_SESSIONS = 10
+
+export interface SessionStoreOptions {
+  home: string
+}
+
+export interface SessionFile {
+  session: SessionData
+  env: Record<string, string>
+}
+
+export interface SessionData {
+  id: string
+  name: string
+  userId: string
+  messages: Message[]
+  todos: TodoItem[]
+  createdAt: number
+  updatedAt: number
+  /** 会话已装载子Agent 名单（chat.json 持久化）：恢复历史会话时据此重新注册工具；
+   *  未定义 = 新会话/旧格式，首次运行按启动预载名单（GEBAI_PRELOAD_SUB_AGENTS）初始化。 */
+  loadedSubAgents?: string[]
+  /** 上下文 token 估算（chars/4）：任务结束时持久化，会话列表展示用（单位 k）。
+   *  有 usage 真值时 = 最近一次调用的真实 input tokens + 未发送增量估算。 */
+  ctxTokens?: number
+  /** 最近一次模型调用的真实 input tokens（服务端 usage 真值，含 system 提示词与工具 schema）：
+   *  跨 run 上下文压缩判定基线；未定义 = 无真值（老会话/接口不返回 usage/压缩后锚点失效），压缩判定与显示走估算兜底。 */
+  ctxInputTokens?: number
+  /** 建立 ctxInputTokens 基线那次调用已覆盖的历史消息条数（loadHistory 坐标）：下次 run 以
+   *  history.slice(ctxAtMessage) 估算基线之后的增量（下一次真实调用会用真值接管并重建基线）。 */
+  ctxAtMessage?: number
+}
+
+/** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。 */
+export function toSessionInfo(s: SessionData): SessionInfo {
+  // ctxTokens 兜底：旧会话（新版本运行前创建）无持久化值时按持久化消息即时估算，保证列表全部有值
+  return {
+    id: s.id,
+    name: s.name,
+    userId: s.userId,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+    ctxTokens: s.ctxTokens ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
+  }
+}
+
+/**
+ * 上下文 token 估算（chars/4，会话列表展示兜底口径，单位 k）：忽略 system 角色（system 为运行时拼装、
+ * 不随会话持久化，统一口径避免显示值在运行结束前后回跳）。仅在无 usage 真值（老会话/接口不返回 usage）时
+ * 由 toSessionInfo/任务结束持久化使用；有真值时的口径见 engine（真实 input tokens + 未发送增量估算）。
+ */
+export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown; toolCalls?: Array<{ name?: string; arguments?: unknown }>; session?: boolean; subAgent?: boolean }>): number {
+  let chars = 0
+  for (const m of msgs) {
+    if (m.role === "system") continue
+    // 新会话执行过程消息不进主 LLM 上下文：不计入上下文占用（会话列表展示口径与引擎一致；subAgent 为旧版兼容）
+    if (m.session || m.subAgent) continue
+    chars += Array.isArray(m.content) ? JSON.stringify(m.content).length : String(m.content ?? "").length
+    if (m.toolCalls) {
+      for (const tc of m.toolCalls) chars += (tc.name ?? "").length + JSON.stringify(tc.arguments ?? {}).length
+    }
+  }
+  return Math.ceil(chars / 4)
+}
+
+/**
+ * 上下文保护消息（不压缩、不改变）：系统提示词（含 loadedAgent 装载提示词/compacted 摘要/旧格式 system）
+ * 与用户输入原样保留，新会话执行存档（session/sessionRun/subAgent/subAgentRun）同理——压缩不选进区间、
+ * 不进摘要输入、超限截断不丢弃、区间夹带时原位保留。
+ */
+export function isProtectedMessage(m: { role?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
+  if (m.role === "user" || m.role === "system") return true
+  return !!(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
+}
+
+export class SessionStore {
+  private cache = new Map<string, SessionData>()
+  private envCache = new Map<string, Record<string, string>>()
+  /** 按用户索引的会话路径缓存（listSessions 填充；load 的归属回退仅能命中本用户的列表）。 */
+  private indexedPathsByUser = new Map<string, string[]>()
+  /** 会话 id → 所有者 user id（无 user 上下文的归属查询用，如 webhook 事件过滤）。 */
+  private owners = new Map<string, string>()
+
+  constructor(private opts: SessionStoreOptions) {}
+
+  private dir(user: string, id: string) {
+    // 防御纵深：即使调用方漏校验，sessionPath 的格式白名单也会拒绝穿越串
+    return sessionPath(this.opts.home, user, id)
+  }
+
+  private async ensureDir(p: string) {
+    await mkdir(p, { recursive: true })
+  }
+
+  async createSession(userId: string, name?: string): Promise<SessionData> {
+    const id = randomUUID().replace(/-/g, "")
+    const now = Date.now()
+    const session: SessionData = {
+      id,
+      name: name || "新会话",
+      userId,
+      messages: [],
+      todos: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    const dir = this.dir(userId, id)
+    await this.ensureDir(join(dir, "tmp"))
+    await this.save(session)
+    return session
+  }
+
+  async load(id: string, user?: string): Promise<SessionData | null> {
+    if (!isValidSessionId(id)) return null // 格式白名单：穿越串/畸形 id 一律视为不存在
+    const cached = this.cache.get(id)
+    if (cached) {
+      // 缓存命中仍须校验归属：session id 可能被跨用户猜中/引用，
+      // 按 id 直接返回会形成跨用户读取与实时事件泄漏。
+      // 旧版无 userId 会话在 load 时已按查找目录补全归属（见下），缓存内必有归属
+      if (!user || cached.userId === user) return cached
+      return null
+    }
+    if (user) {
+      // Deterministic path lookup when the owning user is known (sharded by id hash).
+      const direct = join(sessionPath(this.opts.home, user, id), "chat.json")
+      const s = await this.readFileByPath(direct)
+      if (s) {
+        // 归属校验与缓存分支一致：路径命中但 chat.json 内 userId 属于他人时拒绝
+        // （正常会话的 userId 即所在目录用户；不一致仅可能因目录被手工移动/复制）
+        if (s.userId && s.userId !== user) return null
+        // 旧版会话缺 userId 字段：所在目录即归属，读时补全（防缓存/索引跨用户命中旧数据）
+        if (!s.userId) s.userId = user
+        this.touchCache(s)
+        return s
+      }
+      // Fallback: index populated by a prior listSessions(user) —— 仅搜索该用户自己的索引，
+      // 避免「跨用户索引命中无 userId 的旧版会话」导致会话泄漏
+      const viaIndex = await this.readFileByPath(this.findByList(id, this.indexedPathsByUser.get(user) ?? []))
+      if (viaIndex && (!viaIndex.userId || viaIndex.userId === user)) {
+        if (!viaIndex.userId) viaIndex.userId = user
+        this.touchCache(viaIndex)
+        return viaIndex
+      }
+    }
+    return null
+  }
+
+  private findByList(id: string, index: string[]): string | null {
+    // resolved from listSessions paths cache
+    const tail = `${id}${sep}chat.json`
+    for (const p of index) {
+      if (p.endsWith(tail)) return p
+    }
+    return null
+  }
+
+  async listSessions(userId: string): Promise<SessionData[]> {
+    const base = join(this.opts.home, "users", userId, "sessions")
+    const out: SessionData[] = []
+    const index: string[] = []
+    await walkDir(base, 3, async (p) => {
+      if (!p.endsWith("chat.json")) return
+      try {
+        const raw = await readFile(p, "utf8")
+        const session = JSON.parse(raw) as SessionData
+        if (session.id && (session.userId === userId || !session.userId)) {
+          out.push(session)
+          index.push(p)
+        }
+      } catch {
+        /* skip corrupt */
+      }
+    })
+    this.indexedPathsByUser.set(userId, index)
+    return out.sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  /**
+   * 会话归属查询（无 user 上下文的调用方使用，如 webhook 事件过滤）：命中内存缓存
+   * 或最近加载/创建记录；未命中返回 null（表示归属未知，调用方按未过滤处理）。
+   */
+  ownerOf(sessionId: string): string | null {
+    const cached = this.cache.get(sessionId)
+    if (cached?.userId) return cached.userId
+    return this.owners.get(sessionId) ?? null
+  }
+
+  private async readFileByPath(p: string | null): Promise<SessionData | null> {
+    if (!p) return null
+    try {
+      const raw = await readFile(p, "utf8")
+      return JSON.parse(raw) as SessionData
+    } catch {
+      return null
+    }
+  }
+
+  async save(session: SessionData): Promise<void> {
+    session.updatedAt = Date.now()
+    const dir = this.dir(session.userId, session.id)
+    await this.ensureDir(dir)
+    await writeFile(join(dir, "chat.json"), JSON.stringify(session, null, 2))
+    this.touchCache(session)
+  }
+
+  /**
+   * 超限截断（顺序保留）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/新会话执行存档）
+   * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直至长度不超上限——不重排消息顺序（append 语义
+   * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免长会话中上下文压缩机制被静默破坏、
+   * 避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身超过上限时按原样保留（软上限，
+   * 用户输入与系统提示词不改变优先）。
+   */
+  private trimToCacheLimit(messages: Message[]): Message[] {
+    if (messages.length <= MAX_CACHE_MESSAGES) return messages
+    const over = messages.length - MAX_CACHE_MESSAGES
+    const out: Message[] = []
+    let dropped = 0
+    for (const m of messages) {
+      if (isProtectedMessage(m)) {
+        out.push(m)
+        continue
+      }
+      if (dropped < over) {
+        dropped++
+        continue
+      }
+      out.push(m)
+    }
+    return out
+  }
+
+  async appendMessage(sessionId: string, msg: Message): Promise<void> {
+    const session = await this.load(sessionId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    session.messages.push(msg)
+    session.messages = this.trimToCacheLimit(session.messages)
+    await this.save(session)
+  }
+
+  /** 截断会话消息：删除 beforeMsgId 及之后的所有消息（撤回该消息及其后续）。 */
+  async truncateMessages(sessionId: string, userId: string, beforeMsgId: string): Promise<void> {
+    const session = await this.load(sessionId, userId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    const idx = session.messages.findIndex((m) => m.id === beforeMsgId)
+    if (idx === -1) throw new Error(`message not found: ${beforeMsgId}`)
+    session.messages = session.messages.slice(0, idx)
+    await this.save(session)
+  }
+
+  /**
+   * 上下文压缩：将 [from, to) 区间内【可压缩】历史消息替换为一条摘要消息（DESIGN「上下文保护」）。
+   * 区间内夹带的受保护消息（isProtectedMessage：系统提示词/用户输入/新会话执行存档）**原样保留**
+   * （不参与压缩替换，仅其前后的普通消息合并为摘要）；摘要消息标记 compacted/summary，loadHistory 时作为
+   * assistant 角色注入（不污染 system 段）。区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）。
+   * 返回压缩后的消息列表。
+   */
+  async compactMessages(sessionId: string, userId: string, opts: { from: number; to: number; summary: string }): Promise<Message[]> {
+    const session = await this.load(sessionId, userId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    const messages = session.messages
+    const start = Math.max(0, opts.from)
+    const end = Math.min(messages.length, opts.to)
+    if (start >= end) return messages
+    const slice = messages.slice(start, end)
+    // 受保护消息（系统提示词/用户输入/存档）原位保留——用户输入与系统提示词不压缩不改变
+    const kept = slice.filter(isProtectedMessage)
+    const removed = slice.length - kept.length
+    if (removed === 0) return messages
+    const firstTs = messages[start]?.createdAt
+    const lastTs = messages[end - 1]?.createdAt
+    const compacted: Message = {
+      id: randomUUID().replace(/-/g, ""),
+      role: "system",
+      content: opts.summary,
+      compacted: true,
+      summary: removed > 1 ? `已压缩 ${removed} 条历史消息（${firstTs} ~ ${lastTs}）` : "已压缩 1 条历史消息",
+      createdAt: Date.now(),
+    }
+    const next = [...messages.slice(0, start), ...kept, compacted, ...messages.slice(end)]
+    session.messages = this.trimToCacheLimit(next)
+    // 消息被摘要替换后，真实 usage 基线的索引锚点（ctxAtMessage）错位：清除基线，
+    // 压缩判定回退估算，直至下一次真实模型调用重建基线（DESIGN「上下文保护」）
+    session.ctxInputTokens = undefined
+    session.ctxAtMessage = undefined
+    await this.save(session)
+    return session.messages
+  }
+
+  async getTodos(sessionId: string, userId?: string): Promise<TodoItem[]> {
+    const session = await this.load(sessionId, userId)
+    return session?.todos ?? []
+  }
+
+  async setTodos(sessionId: string, todos: TodoItem[], userId?: string): Promise<void> {
+    const session = await this.load(sessionId, userId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    session.todos = todos
+    await this.save(session)
+  }
+
+  async rename(sessionId: string, name: string, userId?: string): Promise<void> {
+    const session = await this.load(sessionId, userId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    session.name = name
+    await this.save(session)
+  }
+
+  async delete(sessionId: string, userId?: string): Promise<void> {
+    this.evict(sessionId)
+    this.owners.delete(sessionId)
+    const session = await this.load(sessionId, userId)
+    if (!session) return
+    const dir = this.dir(session.userId, sessionId)
+    await rm(dir, { recursive: true, force: true })
+  }
+
+  getTmpDir(sessionId: string, userId: string): string {
+    return join(this.dir(userId, sessionId), "tmp")
+  }
+
+  /** 失效会话缓存（GC 归档/外部移动会话目录后调用，防止缓存命中后 save() 重建目录）。 */
+  evict(sessionId: string): void {
+    this.cache.delete(sessionId)
+    this.envCache.delete(sessionId)
+  }
+
+  /** 会话根目录（工具产物与附件统一以它为基准）。 */
+  getSessionDir(sessionId: string, userId: string): string {
+    return this.dir(userId, sessionId)
+  }
+
+  /** 会话 tmp/ 子树文件列表（DESIGN「会话临时文件查看与下载」：文件操作严格限定在会话 tmp/ 内，
+   *  chat.json/env.json/todo.json 等会话数据文件不暴露）；保留 `tmp/` 前缀与既有路径语义一致。 */
+  async listSessionFiles(sessionId: string, userId: string): Promise<FileEntry[]> {
+    const root = join(this.dir(userId, sessionId), "tmp")
+    const out: FileEntry[] = []
+    await this.walkFiles(root, "tmp", out)
+    return out
+  }
+
+  /** 文件接口路径解析：以会话 tmp/ 为根（仅所有者可访问，配合沙箱拒绝 ../、绝对路径、符号链接）；
+   *  兼容 `tmp/` 前缀路径（旧附件/截断引用路径）。返回安全绝对路径。 */
+  resolveSessionTmpFile(sessionId: string, userId: string, path: string, sandboxEnabled: boolean): string {
+    const tmp = join(this.dir(userId, sessionId), "tmp")
+    const p = path.startsWith("tmp/") ? path.slice(4) : path
+    if (sandboxEnabled) return resolveInSandbox(tmp, p)
+    return resolve(tmp, p)
+  }
+
+  private async walkFiles(dir: string, prefix: string, out: FileEntry[]) {
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const full = join(dir, e.name)
+      const rel = prefix ? `${prefix}/${e.name}` : e.name
+      if (e.isDirectory()) {
+        out.push({ path: rel, size: 0, modifiedAt: 0, isDir: true })
+        await this.walkFiles(full, rel, out)
+      } else {
+        try {
+          const st = await stat(full)
+          out.push({ path: rel, size: st.size, modifiedAt: st.mtimeMs, isDir: false })
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  async getEnv(sessionId: string, userId: string): Promise<Record<string, string>> {
+    if (this.envCache.has(sessionId)) return this.envCache.get(sessionId)!
+    const p = join(this.dir(userId, sessionId), "env.json")
+    try {
+      const raw = await readFile(p, "utf8")
+      const env = JSON.parse(raw) as Record<string, string>
+      this.envCache.set(sessionId, env)
+      return env
+    } catch {
+      return {}
+    }
+  }
+
+  async setEnv(sessionId: string, userId: string, vars: Record<string, string | null>): Promise<Record<string, string>> {
+    const current = await this.getEnv(sessionId, userId)
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === null) delete current[k]
+      else current[k] = v
+    }
+    const p = join(this.dir(userId, sessionId), "env.json")
+    await this.ensureDir(this.dir(userId, sessionId))
+    await writeFile(p, JSON.stringify(current, null, 2))
+    this.envCache.set(sessionId, current)
+    return current
+  }
+
+  private touchCache(session: SessionData) {
+    this.cache.delete(session.id)
+    this.cache.set(session.id, session)
+    if (session.userId) {
+      this.owners.delete(session.id)
+      this.owners.set(session.id, session.userId)
+    }
+    if (this.cache.size > MAX_CACHE_SESSIONS) {
+      const first = this.cache.keys().next().value
+      if (first !== undefined) this.cache.delete(first)
+    }
+    // 归属记录上限保护：防止无界增长（活动会话规模远小于上限，超限仅影响归属兜底命中率）
+    if (this.owners.size > 10_000) this.owners.clear()
+  }
+}

@@ -1,0 +1,59 @@
+# secrets & local env — never commit
+.env
+.env.*
+!.env.example
+
+# deps
+node_modules/
+
+# build output
+dist/
+build/
+out/
+# 桌面端编译产物（bun --compile --outfile=gebai）
+packages/desktop/gebai
+
+# turbo
+.turbo/
+
+# coverage
+coverage/
+
+# logs
+*.log
+gebai.log
+
+# runtime data (GEBAI_HOME when script-debug at repo root)
+users/
+tmp/
+feishu/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# editor
+.idea/
+.reasonix/
+
+# 设计预览稿（不提交、不进构建产物）
+docs/preview-screens/
+packages/web/public/preview-*
+packages/web/public/mobile-mock.html
+
+*.exe
+# 构建时生成的子 Agent bundle 注册表（由 scripts/build-subagents.ts 生成）
+packages/server/src/core/subagents.bundle.generated.ts
+# 构建时生成的 Web UI bundle 注册表（由 scripts/build-web-bundle.ts 生成）
+packages/server/src/core/web.bundle.generated.ts
+# 构建时生成的 D2.js 内嵌产物注册表（由 scripts/build-d2js.ts 生成）
+packages/server/src/core/d2js.embedded.generated.json
+# 构建时从 node_modules 拷贝的 @plantuml/core 引擎（由 scripts/copy-plantuml.ts 生成）
+packages/web/public/vendor/
+# Tauri 构建产物（Rust target / 侧车 binaries / 安装包）
+packages/desktop/src-tauri/target/
+packages/desktop/src-tauri/binaries/
+packages/desktop/src-tauri/gen/
+
+# bun lockfile（不提交，bun install 时本地生成）
+bun.lock

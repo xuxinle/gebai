@@ -1,0 +1,33 @@
+{
+  "name": "@gebai/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun run scripts/build-subagents.ts && bun run scripts/build-d2js.ts && bun build ./src/index.ts --target=bun --outdir dist --external @terrastruct/d2",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "hash-password": "bun run scripts/hash-password.ts",
+    "typecheck": "bun run scripts/build-subagents.ts && bun run scripts/build-d2js.ts && tsc --noEmit",
+    "lint": "echo 'no lint configured'"
+  },
+  "dependencies": {
+    "@gebai/sdk": "workspace:*",
+    "@plantuml/core": "^1.2026.6",
+    "@resvg/resvg-js": "^2.6.2",
+    "@terrastruct/d2": "^0.1.33",
+    "dompurify": "^3.4.13",
+    "happy-dom": "^20.11.2",
+    "hono": "^4.6.0",
+    "mermaid": "^11.16.1",
+    "playwright": "^1.62.1",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "0.25.10"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

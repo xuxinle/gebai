@@ -1,0 +1,184 @@
+import { readdir, access } from "node:fs/promises"
+import { join } from "node:path"
+import type { SubAgentDef, ToolSet } from "./types"
+import type { ToolRegistry } from "./registry"
+import type { SubAgentInfo } from "@gebai/sdk"
+import { parseSubAgentMd } from "./sub-agent-md"
+
+export interface SubAgentManagerOptions {
+  registry: ToolRegistry
+  preloadOverride?: string[]
+  bundledNames?: string[]
+}
+
+export class SubAgentManager {
+  private defs = new Map<string, SubAgentDef>()
+  private loaded = new Set<string>()
+  private registry: ToolRegistry
+  private preloadOverride?: string[]
+  private bundledNames: Set<string>
+
+  constructor(opts: SubAgentManagerOptions) {
+    this.registry = opts.registry
+    this.preloadOverride = opts.preloadOverride
+    this.bundledNames = new Set(opts.bundledNames || [])
+  }
+
+  async discover(): Promise<void> {
+    // core/ 下一级为 src/sub-agents（dev 模式）；dist/二进制模式下目录不存在，回退到构建时生成的 bundle 注册表
+    const dir = join(import.meta.dirname, "..", "sub-agents")
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      // dist/二进制模式：源码目录不存在，回退到构建时生成的 bundle 注册表
+      try {
+        const { bundledDefs } = await import("./subagents.bundle.generated")
+        for (const def of bundledDefs) this.defs.set(def.name, def)
+      } catch {
+        // 漏跑 scripts/build-subagents.ts 时降级为空列表（不影响服务启动）
+        console.warn("[subagents] bundle 注册表缺失：请先运行 bun run scripts/build-subagents.ts")
+      }
+      await this.preload()
+      return
+    }
+    for (const e of entries) {
+      if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
+        const base = e.name.slice(0, -3)
+        if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则校验（DESIGN：子Agent 名 [a-z0-9_]+）
+        try {
+          const mod = await import(`../sub-agents/${base}`)
+          const def = mod.def as SubAgentDef | undefined
+          if (def) this.defs.set(def.name, def)
+          else console.warn(`[subagents] ${base}.ts 未导出 def，已跳过`)
+        } catch (err) {
+          console.warn(`[subagents] 加载 ${base}.ts 失败: ${(err as Error).message}`)
+        }
+      } else if (e.isDirectory()) {
+        // 目录形式：{dir}/{dir}.ts 为定义入口；系统提示词可拆 {dir}.md 由入口文件导入并修饰。
+        // 无同名 ts（或不导出 def）时支持纯提示词简化定义：{dir}/{dir}.md 单独存在即构成子Agent（零 TS）。
+        const base = e.name
+        if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则校验
+        const tsEntry = join(dir, base, `${base}.ts`)
+        if (await access(tsEntry).then(() => true, () => false)) {
+          try {
+            const mod = await import(`../sub-agents/${base}/${base}`)
+            const def = mod.def as SubAgentDef | undefined
+            if (def) this.defs.set(def.name, def)
+            else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
+          } catch (err) {
+            console.warn(`[subagents] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
+          }
+        } else {
+          await this.loadMdOnly(base, dir)
+        }
+      }
+    }
+    await this.preload()
+  }
+
+  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description）。 */
+  private async loadMdOnly(base: string, dir: string): Promise<void> {
+    try {
+      const md = await Bun.file(join(dir, base, `${base}.md`)).text()
+      const { description, systemPrompt } = parseSubAgentMd(base, md)
+      this.defs.set(base, { name: base, description, systemPrompt })
+    } catch (err) {
+      console.warn(`[subagents] 加载 ${base}/${base}.md 失败: ${(err as Error).message}`)
+    }
+  }
+
+  private async preload(): Promise<void> {
+    const targets = this.preloadOverride?.length ? this.preloadOverride : []
+    for (const def of this.defs.values()) {
+      const shouldPreload = targets.length ? targets.includes(def.name) : !!def.preload
+      if (shouldPreload) await this.load(def.name)
+    }
+  }
+
+  /** 装载子Agent 能力模块（agent_load 工具 / WS sub_agent.load / 预加载的统一入口，幂等）：
+   *  模块语义（DESIGN「装载 vs 新会话执行」）——工具并入当前工具集（{agent}_ 命名空间注册）、完整系统提示词由调用方写入会话记录，
+   *  不创建新上下文、无独立执行；与新会话执行（agent_run，派生临时新会话执行）是两种不同概念。
+   *  返回本次实际装载的名字列表（幂等跳过的不计入；self_optimize 连带装载 code 时两者都计入）。 */
+  async load(name: string): Promise<string[]> {
+    if (this.loaded.has(name)) return []
+    const def = this.defs.get(name)
+    if (!def) throw new Error(`unknown sub-agent: ${name}`)
+    // self_optimize 连带装载 code：self_optimize 是 code 的超集（工作流参考 code），
+    // 所有装载路径（WS sub_agent.load / agent_load 工具 / 预加载）装载 self_optimize 时自动连带装载 code。
+    // load 幂等（loaded 去重）：code 已装载则跳过，不重复注册工具。
+    if (name === "self_optimize" && this.defs.has("code")) {
+      const loadedNow = await this.load("code") // 连带装载：code 本次装载集合（已装载则 []）
+      // 工具去重：与 code 重叠的文件/分析类工具不注册到总Agent（避免 code_/self_optimize_ 双命名空间冗余），
+      // 仅注册独有工具（如 preview_server/page_capture/vision）；
+      // agent_run 执行新会话（预加载 self_optimize）时仍用其完整工具集（runNewSession 独立 registry，不受影响）
+      const overlap = new Set(Object.keys(this.defs.get("code")!.tools ?? {}))
+      const uniqueTools: ToolSet = {}
+      for (const [toolName, tool] of Object.entries(def.tools ?? {})) {
+        if (!overlap.has(toolName)) uniqueTools[toolName] = tool
+      }
+      this.registry.registerSubAgentTools(name, uniqueTools, def.requiresApproval)
+      this.loaded.add(name)
+      return [...loadedNow, name]
+    }
+    this.registry.registerSubAgentTools(name, def.tools ?? {}, def.requiresApproval)
+    this.loaded.add(name)
+    return [name]
+  }
+
+  unload(name: string): void {
+    this.registry.unregisterAgent(name)
+    this.loaded.delete(name)
+  }
+
+  def(name: string): SubAgentDef | undefined {
+    return this.defs.get(name)
+  }
+
+  /** 全部子Agent 定义（含 envVars 声明；环境变量目录等消费方）。 */
+  allDefs(): SubAgentDef[] {
+    return [...this.defs.values()]
+  }
+
+  /** 动态注册子Agent 定义（测试/运行期扩展用；重名覆盖）。 */
+  register(def: SubAgentDef): void {
+    this.defs.set(def.name, def)
+  }
+
+  isLoaded(name: string): boolean {
+    return this.loaded.has(name)
+  }
+
+  getLoaded(): SubAgentDef[] {
+    return [...this.loaded].map((n) => this.defs.get(n)!).filter(Boolean)
+  }
+
+  list(): SubAgentInfo[] {
+    return [...this.defs.values()].map((d) => ({
+      name: d.name,
+      description: d.description,
+      tools: Object.keys(d.tools ?? {}),
+      preload: !!d.preload,
+      loaded: this.loaded.has(d.name),
+      bundled: this.bundledNames.size === 0 || this.bundledNames.has(d.name),
+    }))
+  }
+
+  /** 未装载子Agent 轻量引导注入总Agent 系统提示词。
+   *  已装载子Agent 的完整系统提示词不在此注入——装载时已作为 system 消息写入会话记录（chat.json 持久化，
+   *  loadHistory 透传进模型上下文），此处再注入会双份占用上下文；未装载的仅注入轻量列表（名称 + 描述），
+   *  引导模型 agent_load 装载（工具注册进会话、提示词写入会话记录）或 agent_run 执行新会话。
+   *  不展开工具列表——工具名已注册进工具集（schema 全名）。
+   *  describe：可选描述覆写（engine 用于在描述中动态体现预置项目清单，方便按项目名关联任务）。 */
+  systemPromptInjection(describe?: (d: SubAgentDef) => string): string {
+    const lines: string[] = []
+    const unloaded = [...this.defs.values()].filter((d) => !this.loaded.has(d.name))
+    if (unloaded.length) {
+      lines.push("可选子Agent（未装载：先用 agent_load 装载后直接调用其工具——工具注册进当前会话、完整系统提示词写入会话记录；或不经装载直接 agent_run 执行新会话）:")
+      for (const d of unloaded) {
+        lines.push(`- ${d.name}: ${describe ? describe(d) : d.description}`)
+      }
+    }
+    return lines.length ? `\n\n${lines.join("\n")}` : ""
+  }
+}

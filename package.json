@@ -1,0 +1,23 @@
+{
+  "name": "gebai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd packages/server dev",
+    "dev:desktop": "bun run --cwd packages/desktop dev",
+    "dev:web": "bun run --cwd packages/web dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "turbo": "^2.5.0"
+  },
+  "packageManager": "bun@1.2.0"
+}

@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src", "../server/src/types", "../server/src/feishu-bot/plantuml-core.d.ts"]
+}
+

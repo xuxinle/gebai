@@ -1,0 +1,810 @@
+/* ============================================================
+   GEBAI 主题：aurora — 极光（青绿紫渐变 · 空灵 · 极地夜空）
+   深底 + 缓慢流动的 conic 极光 + 轻玻璃 + 青绿紫渐变
+   标志性细节：旋转 conic 极光层、绸带感光斑、玻璃面板、柔和光晕
+   ============================================================ */
+
+[data-theme="aurora"] {
+  /* 深底（带极淡蓝绿） */
+  --bg: #050a14;
+  --bg-elev: #0a1220;
+  --bg-elev-2: #0e1830;
+  --bg-hover: #142244;
+  --bg-active: #1a2c52;
+  --bg-inset: #03060d;
+
+  /* 极光描边（半透明白） */
+  --border: rgba(180, 240, 220, 0.12);
+  --border-strong: rgba(180, 240, 220, 0.25);
+
+  /* 冷绿白文字 */
+  --text: #e0fff0;
+  --text-muted: #7eb8a8;
+  --text-faint: #4a7568;
+
+  /* 极光四色（青/绿/紫/粉） */
+  --accent: #2dd4bf;
+  --accent-2: #8b5cf6;
+  --accent-hover: #5eead4;
+  --accent-soft: rgba(45, 212, 191, 0.16);
+  --on-accent: #03110d;
+  --success: #34d399;
+  --danger: #fb7185;
+  --warning: #fbbf24;
+  --tool: #5eead4;
+  --user-grad: linear-gradient(135deg, #2dd4bf 0%, #34d399 35%, #8b5cf6 75%, #c084fc 100%);
+  --nav-active: #2dd4bf;
+
+  /* 形状：中大圆角 + 柔软 */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-msg: 16px;
+
+  /* 阴影：极光双辉光 */
+  --shadow-sm: 0 1px 4px rgba(45, 212, 191, 0.12), 0 0 0 1px rgba(180, 240, 220, 0.04) inset;
+  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(180, 240, 220, 0.06) inset, 0 0 24px rgba(45, 212, 191, 0.08);
+  --shadow-pop: 0 16px 56px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(180, 240, 220, 0.1) inset, 0 0 40px rgba(139, 92, 246, 0.2);
+  --shadow-glow: 0 0 20px rgba(45, 212, 191, 0.4), 0 0 40px rgba(139, 92, 246, 0.2);
+  --glass: blur(24px) saturate(1.6);
+  --msg-shadow: 0 4px 24px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(180, 240, 220, 0.04) inset;
+
+  /* 字体 */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-size: 14px;
+  --transition: 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   背景：深底 + 流动的 conic 极光层 + 多层光斑
+   ============================================================ */
+[data-theme="aurora"] body {
+  background-color: var(--bg);
+  background-image:
+    /* 顶部极光带 */
+    radial-gradient(ellipse 1200px 400px at 50% -10%, rgba(45, 212, 191, 0.18), transparent 60%),
+    /* 左下紫光 */
+    radial-gradient(ellipse 1000px 500px at -10% 110%, rgba(139, 92, 246, 0.18), transparent 55%),
+    /* 右下绿光 */
+    radial-gradient(ellipse 800px 400px at 110% 90%, rgba(52, 211, 153, 0.12), transparent 55%),
+    /* 中央粉光 */
+    radial-gradient(ellipse 700px 350px at 50% 50%, rgba(192, 132, 252, 0.05), transparent 60%);
+  background-attachment: fixed;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 旋转 conic 极光层（标志性细节） */
+[data-theme="aurora"] body::before {
+  content: "";
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(45, 212, 191, 0.08) 30deg,
+    transparent 60deg,
+    rgba(139, 92, 246, 0.1) 120deg,
+    transparent 150deg,
+    rgba(192, 132, 252, 0.08) 210deg,
+    transparent 240deg,
+    rgba(52, 211, 153, 0.1) 300deg,
+    transparent 360deg
+  );
+  filter: blur(60px);
+  animation: aurora-rotate 60s linear infinite;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+/* 内容层置于背景装饰之上：main 背景透明以透出光晕，气泡/卡片自身背景保证可读 */
+[data-theme="aurora"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+
+/* 顶部光带 */
+[data-theme="aurora"] body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(45, 212, 191, 0.5) 30%, rgba(139, 92, 246, 0.4) 60%, rgba(192, 132, 252, 0.3) 80%, transparent);
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.4);
+}
+
+@keyframes aurora-rotate {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* ============================================================
+   全局元素
+   ============================================================ */
+[data-theme="aurora"] ::selection { background: var(--accent); color: var(--on-accent); }
+[data-theme="aurora"] a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(45, 212, 191, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] a:hover {
+  color: var(--accent-hover);
+  text-shadow: 0 0 6px rgba(45, 212, 191, 0.5);
+  border-bottom-color: var(--accent);
+}
+
+[data-theme="aurora"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-theme="aurora"] ::-webkit-scrollbar-thumb {
+  background: rgba(45, 212, 191, 0.3);
+  border-radius: 8px;
+}
+[data-theme="aurora"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+[data-theme="aurora"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   玻璃面板
+   ============================================================ */
+[data-theme="aurora"] header,
+[data-theme="aurora"] aside,
+[data-theme="aurora"] .settings-panel,
+[data-theme="aurora"] .login-card {
+  background: rgba(10, 18, 32, 0.55) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  position: relative;
+  z-index: 1;
+}
+/* 浮层（主题面板/预览卡片）：仅玻璃视觉，保持 fixed 定位 */
+[data-theme="aurora"] .theme-pop,
+[data-theme="aurora"] .preview-card {
+  background: rgba(10, 18, 32, 0.55) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+[data-theme="aurora"] #composer {
+  /* 无背景条：输入区与消息区一样透出极光背景 */
+  background: transparent !important;
+  position: relative;
+  z-index: 1;
+}
+[data-theme="aurora"] .login-card {
+  background: rgba(10, 18, 32, 0.6) !important;
+  backdrop-filter: blur(32px) saturate(1.6);
+  -webkit-backdrop-filter: blur(32px) saturate(1.6);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+}
+
+/* ============================================================
+   icon-btn
+   ============================================================ */
+[data-theme="aurora"] .icon-btn {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .icon-btn:hover {
+  background: rgba(45, 212, 191, 0.1);
+  border-color: var(--border-strong);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.2);
+}
+[data-theme="aurora"] .icon-btn.active {
+  background: rgba(45, 212, 191, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 16px rgba(45, 212, 191, 0.3);
+}
+
+/* ============================================================
+   连接状态徽章
+   ============================================================ */
+[data-theme="aurora"] .conn {
+  background: rgba(52, 211, 153, 0.12);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  color: var(--success);
+  border-radius: var(--radius-sm);
+  position: relative;
+  padding-left: 18px;
+  text-shadow: 0 0 4px rgba(52, 211, 153, 0.4);
+}
+[data-theme="aurora"] .conn::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  border-radius: 50%;
+  animation: aurora-pulse 1.8s ease-in-out infinite;
+}
+[data-theme="aurora"] .conn.bad {
+  background: rgba(251, 113, 133, 0.12);
+  border-color: var(--danger);
+  color: var(--danger);
+  text-shadow: 0 0 4px rgba(251, 113, 133, 0.4);
+}
+[data-theme="aurora"] .conn.bad::before { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+@keyframes aurora-pulse {
+  0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); }
+  50% { opacity: 0.5; transform: translateY(-50%) scale(0.85); }
+}
+
+/* ============================================================
+   新会话按钮
+   ============================================================ */
+[data-theme="aurora"] #new-session {
+  background: linear-gradient(135deg, #2dd4bf, #8b5cf6);
+  color: var(--on-accent);
+  border: 1px solid rgba(180, 240, 220, 0.2);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(45, 212, 191, 0.3), 0 0 0 1px rgba(180, 240, 220, 0.1) inset;
+  transition: all var(--transition);
+}
+[data-theme="aurora"] #new-session:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(45, 212, 191, 0.5), 0 0 0 1px rgba(180, 240, 220, 0.2) inset;
+  filter: brightness(1.08);
+}
+
+/* ============================================================
+   会话列表
+   ============================================================ */
+[data-theme="aurora"] #session-list li {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] #session-list li:hover {
+  background: rgba(45, 212, 191, 0.06);
+  border-color: var(--border);
+  transform: translateX(2px);
+}
+[data-theme="aurora"] #session-list li.active {
+  background: linear-gradient(90deg, rgba(45, 212, 191, 0.15), rgba(139, 92, 246, 0.08) 80%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.15), inset 2px 0 0 var(--accent);
+}
+[data-theme="aurora"] .session-ico {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.2), rgba(139, 92, 246, 0.2));
+  color: var(--accent);
+  border: 1px solid var(--border);
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.2);
+}
+[data-theme="aurora"] .session-name { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   消息气泡
+   ============================================================ */
+[data-theme="aurora"] .msg-name {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: 0 0 4px rgba(45, 212, 191, 0.3);
+}
+[data-theme="aurora"] .msg-time { color: var(--text-faint); font-size: 11px; }
+[data-theme="aurora"] .msg-act {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .msg-act:hover {
+  color: var(--accent);
+  background: rgba(45, 212, 191, 0.1);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.2);
+}
+
+/* assistant 气泡：玻璃 + 微光 */
+[data-theme="aurora"] .msg.assistant .bubble {
+  background: linear-gradient(180deg, rgba(180, 240, 220, 0.04), rgba(180, 240, 220, 0.02));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-msg);
+  box-shadow: var(--msg-shadow);
+  position: relative;
+  border-bottom-left-radius: 6px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+[data-theme="aurora"] .msg.assistant:hover .bubble {
+  border-color: rgba(45, 212, 191, 0.4);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(45, 212, 191, 0.3) inset, 0 0 20px rgba(45, 212, 191, 0.12);
+}
+
+/* user 气泡：极光渐变 */
+[data-theme="aurora"] .msg.user .bubble {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid rgba(180, 240, 220, 0.2);
+  border-radius: var(--radius-msg);
+  border-bottom-right-radius: 6px;
+  box-shadow: 0 4px 20px rgba(139, 92, 246, 0.3), 0 0 0 1px rgba(180, 240, 220, 0.1) inset;
+}
+
+/* tool 气泡：薄荷绿左边 */
+[data-theme="aurora"] .msg.tool .bubble {
+  background: linear-gradient(180deg, rgba(94, 234, 212, 0.05), rgba(94, 234, 212, 0.02));
+  border: 1px solid rgba(94, 234, 212, 0.2);
+  border-left: 2px solid var(--tool);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(94, 234, 212, 0.08) inset;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aurora"] .msg.tool .tool-head { color: var(--tool); text-shadow: 0 0 6px rgba(94, 234, 212, 0.4); }
+[data-theme="aurora"] .msg.tool .tool-out { color: var(--text-muted); font-family: var(--font-mono); font-size: 12.5px; }
+
+/* 流式光标 */
+[data-theme="aurora"] .msg.streaming .bubble::after {
+  content: "▍";
+  background: linear-gradient(180deg, #2dd4bf, #8b5cf6, #c084fc);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  filter: drop-shadow(0 0 6px rgba(139, 92, 246, 0.5));
+  margin-left: 2px;
+  animation: aurora-blink 1s steps(2, start) infinite;
+}
+@keyframes aurora-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ============================================================
+   composer
+   ============================================================ */
+[data-theme="aurora"] #composer {
+  padding: 14px clamp(16px, 4vw, 48px) 16px;
+}
+[data-theme="aurora"] .composer-row {
+  background: rgba(180, 240, 220, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 6px 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(180, 240, 220, 0.04) inset;
+  transition: all var(--transition);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aurora"] .composer-row:focus-within {
+  border-color: rgba(45, 212, 191, 0.4);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.12), 0 0 0 1px rgba(45, 212, 191, 0.3) inset;
+}
+[data-theme="aurora"] #attach-btn { color: var(--text-muted); border-radius: 50%; }
+[data-theme="aurora"] #attach-btn:hover { background: rgba(45, 212, 191, 0.1); color: var(--accent); }
+[data-theme="aurora"] #input { color: var(--text); }
+[data-theme="aurora"] #input::placeholder { color: var(--text-faint); }
+
+[data-theme="aurora"] #send {
+  background: linear-gradient(135deg, #2dd4bf 0%, #8b5cf6 50%, #c084fc 100%);
+  color: var(--on-accent);
+  border: 1px solid rgba(180, 240, 220, 0.2);
+  border-radius: 50%;
+  box-shadow: 0 4px 14px rgba(45, 212, 191, 0.4), 0 0 0 1px rgba(180, 240, 220, 0.1) inset;
+  transition: all var(--transition);
+}
+[data-theme="aurora"] #send:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(45, 212, 191, 0.6), 0 0 0 1px rgba(180, 240, 220, 0.2) inset;
+}
+[data-theme="aurora"] #send:active { transform: scale(0.94); }
+[data-theme="aurora"] #send.stopping {
+  background: linear-gradient(135deg, #fb7185, #f43f5e);
+  box-shadow: 0 4px 14px rgba(244, 63, 94, 0.4);
+}
+
+/* ============================================================
+   审批卡片
+   ============================================================ */
+[data-theme="aurora"] .approval {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 16px rgba(251, 191, 36, 0.1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+[data-theme="aurora"] .approval .yes {
+  background: linear-gradient(135deg, #34d399, #2dd4bf);
+  color: var(--on-accent);
+  border: 1px solid rgba(180, 240, 220, 0.2);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(52, 211, 153, 0.3);
+}
+[data-theme="aurora"] .approval .no {
+  background: rgba(251, 113, 133, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(251, 113, 133, 0.4);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+/* ============================================================
+   Markdown
+   ============================================================ */
+[data-theme="aurora"] .markdown h1, [data-theme="aurora"] .markdown h2, [data-theme="aurora"] .markdown h3 {
+  background: linear-gradient(135deg, #e0fff0 0%, #c4b5fd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+[data-theme="aurora"] .markdown h2 { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+[data-theme="aurora"] .markdown a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(45, 212, 191, 0.4);
+}
+[data-theme="aurora"] .markdown a:hover {
+  color: var(--accent-hover);
+  text-shadow: 0 0 6px rgba(45, 212, 191, 0.5);
+  border-bottom-color: var(--accent);
+}
+[data-theme="aurora"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(45, 212, 191, 0.08);
+  border: 1px solid rgba(45, 212, 191, 0.2);
+  color: var(--accent-hover);
+  border-radius: 6px;
+  padding: 0.12em 0.5em;
+  font-size: 0.9em;
+}
+[data-theme="aurora"] .markdown pre {
+  background: rgba(3, 6, 13, 0.6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.05) inset;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aurora"] .markdown pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 13px; }
+[data-theme="aurora"] .markdown blockquote {
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(90deg, rgba(45, 212, 191, 0.05), transparent);
+  color: var(--text-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+[data-theme="aurora"] .markdown table { border-color: var(--border); }
+[data-theme="aurora"] .markdown th { background: rgba(45, 212, 191, 0.08); color: var(--accent); border-color: var(--border); }
+[data-theme="aurora"] .markdown td { border-color: var(--border); }
+[data-theme="aurora"] .markdown tr:hover td { background: rgba(45, 212, 191, 0.04); }
+[data-theme="aurora"] .markdown hr { border-top: 1px solid var(--border); }
+[data-theme="aurora"] .markdown ul li::marker, [data-theme="aurora"] .markdown ol li::marker { color: var(--accent); }
+[data-theme="aurora"] .copy-btn {
+  background: rgba(10, 18, 32, 0.7);
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="aurora"] .copy-btn:hover { background: var(--accent); color: var(--on-accent); box-shadow: var(--shadow-glow); }
+[data-theme="aurora"] .reasoning .reasoning-body {
+  background: linear-gradient(90deg, rgba(139, 92, 246, 0.05), transparent);
+  border-left: 2px solid rgba(139, 92, 246, 0.4);
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   主题选择气泡
+   ============================================================ */
+[data-theme="aurora"] .theme-pop { box-shadow: var(--shadow-pop); }
+[data-theme="aurora"] .theme-section-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  padding: 8px 10px 4px;
+  border-bottom: 1px dashed var(--border);
+  text-transform: uppercase;
+}
+[data-theme="aurora"] .accent-opt {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+  position: relative;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4) inset;
+}
+[data-theme="aurora"] .accent-opt::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 6px var(--swatch);
+}
+[data-theme="aurora"] .accent-opt:hover { border-color: var(--accent); box-shadow: 0 0 8px rgba(45, 212, 191, 0.4); }
+[data-theme="aurora"] .accent-opt.active {
+  border-color: var(--accent);
+  background: rgba(45, 212, 191, 0.2);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 12px rgba(45, 212, 191, 0.5);
+}
+[data-theme="aurora"] .accent-reset {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+}
+[data-theme="aurora"] .accent-reset:hover { color: var(--accent); border-color: var(--accent); background: rgba(45, 212, 191, 0.1); }
+[data-theme="aurora"] .theme-opt {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .theme-opt:hover {
+  background: rgba(45, 212, 191, 0.08);
+  border-color: var(--border);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+[data-theme="aurora"] .theme-opt.active {
+  background: linear-gradient(90deg, rgba(45, 212, 191, 0.15), rgba(139, 92, 246, 0.08) 80%, transparent);
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 12px rgba(45, 212, 191, 0.2);
+}
+[data-theme="aurora"] .theme-opt .swatch { border-radius: 4px; border: 1px solid var(--border-strong); }
+[data-theme="aurora"] .theme-opt .t-label { color: var(--text); font-weight: 600; }
+[data-theme="aurora"] .theme-opt .t-desc { color: var(--text-faint); font-size: 10.5px; }
+
+/* ============================================================
+   设置抽屉
+   ============================================================ */
+[data-theme="aurora"] .settings-overlay { background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+[data-theme="aurora"] .settings-head { border-bottom: 1px solid var(--border); }
+[data-theme="aurora"] .settings-tabs { border-bottom: 1px solid var(--border); background: rgba(45, 212, 191, 0.02); }
+[data-theme="aurora"] .settings-tabs button { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="aurora"] .settings-tabs button:hover { background: rgba(45, 212, 191, 0.08); color: var(--accent); }
+[data-theme="aurora"] .settings-tabs button.active {
+  background: rgba(45, 212, 191, 0.15);
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+  box-shadow: 0 -2px 8px rgba(45, 212, 191, 0.2) inset;
+}
+[data-theme="aurora"] .settings-row {
+  background: rgba(180, 240, 220, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .settings-row:hover {
+  border-color: var(--accent);
+  background: rgba(45, 212, 191, 0.05);
+  transform: translateX(2px);
+  box-shadow: 0 0 8px rgba(45, 212, 191, 0.1) inset;
+}
+[data-theme="aurora"] .settings-form { background: rgba(180, 240, 220, 0.02); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="aurora"] .settings-form label { color: var(--text-muted); font-size: 12px; }
+[data-theme="aurora"] .settings-form input,
+[data-theme="aurora"] .settings-form select,
+[data-theme="aurora"] .settings-form textarea {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .settings-form input:focus,
+[data-theme="aurora"] .settings-form select:focus,
+[data-theme="aurora"] .settings-form textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.12);
+  outline: none;
+}
+[data-theme="aurora"] .mini-btn {
+  background: rgba(180, 240, 220, 0.04);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .mini-btn:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-glow);
+}
+[data-theme="aurora"] .mini-btn.danger { color: var(--danger); border-color: rgba(251, 113, 133, 0.4); }
+[data-theme="aurora"] .mini-btn.danger:hover { background: var(--danger); color: #fff; box-shadow: 0 0 8px rgba(244, 63, 94, 0.4); }
+[data-theme="aurora"] .settings-group-name {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-shadow: 0 0 4px rgba(45, 212, 191, 0.3);
+}
+
+/* ============================================================
+   登录卡片
+   ============================================================ */
+[data-theme="aurora"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1200px 600px at 50% 30%, rgba(139, 92, 246, 0.15), transparent 60%),
+    radial-gradient(ellipse 1000px 500px at 50% 100%, rgba(45, 212, 191, 0.12), transparent 60%),
+    var(--bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+[data-theme="aurora"] .login-brand {
+  background: linear-gradient(135deg, #2dd4bf 0%, #8b5cf6 50%, #c084fc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 16px rgba(139, 92, 246, 0.4));
+}
+[data-theme="aurora"] .login-sub { color: var(--text-muted); letter-spacing: 0.3em; font-size: 11px; }
+[data-theme="aurora"] .login-card input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .login-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.12);
+  outline: none;
+}
+[data-theme="aurora"] .login-submit {
+  background: linear-gradient(135deg, #2dd4bf, #8b5cf6);
+  color: var(--on-accent);
+  border: 1px solid rgba(180, 240, 220, 0.2);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  box-shadow: 0 4px 14px rgba(45, 212, 191, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .login-submit:hover { filter: brightness(1.1); box-shadow: var(--shadow-glow); }
+
+/* ============================================================
+   空状态
+   ============================================================ */
+[data-theme="aurora"] .empty-state .es-slogan {
+  background: linear-gradient(135deg, #2dd4bf 0%, #8b5cf6 50%, #c084fc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 300;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 20px rgba(139, 92, 246, 0.3));
+}
+[data-theme="aurora"] .es-suggestions button {
+  background: rgba(180, 240, 220, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .es-suggestions button:hover {
+  background: rgba(45, 212, 191, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 16px rgba(45, 212, 191, 0.2);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   选择 / 待办 / 压缩 / 附件 / 预览
+   ============================================================ */
+[data-theme="aurora"] .choice-opt {
+  background: rgba(180, 240, 220, 0.04);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .choice-opt:hover {
+  background: rgba(45, 212, 191, 0.08);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 16px rgba(45, 212, 191, 0.2);
+  transform: translateY(-1px);
+}
+[data-theme="aurora"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(45, 212, 191, 0.4); }
+[data-theme="aurora"] .bubble.compact-notice {
+  background: rgba(139, 92, 246, 0.06);
+  border: 1px dashed rgba(139, 92, 246, 0.3);
+  color: var(--text-muted);
+}
+[data-theme="aurora"] .attach-chip {
+  background: rgba(180, 240, 220, 0.04);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+[data-theme="aurora"] .attach-chip:hover { background: rgba(45, 212, 191, 0.1); border-color: var(--accent); }
+[data-theme="aurora"] .preview-overlay { background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+[data-theme="aurora"] .preview-head { border-bottom: 1px solid var(--border); }
+[data-theme="aurora"] .preview-close { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="aurora"] .preview-close:hover { color: var(--danger); background: rgba(251, 113, 133, 0.15); }
+
+/* ============================================================
+   跳到最新
+   ============================================================ */
+[data-theme="aurora"] .jump-bottom {
+  background: rgba(10, 18, 32, 0.7);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(180, 240, 220, 0.04) inset, 0 0 18px rgba(139, 92, 246, 0.15);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all var(--transition);
+}
+[data-theme="aurora"] .jump-bottom:hover {
+  border-color: var(--accent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(45, 212, 191, 0.3) inset, 0 0 24px rgba(45, 212, 191, 0.2);
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   diagram
+   ============================================================ */
+[data-theme="aurora"] .diagram { background: rgba(180, 240, 220, 0.02); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="aurora"] .diagram-editor { background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); border-radius: var(--radius-sm); }
+
+/* ============================================================
+   极光语法高亮
+   ============================================================ */
+[data-theme="aurora"] .hljs { color: var(--text); background: transparent; }
+[data-theme="aurora"] .hljs-comment, [data-theme="aurora"] .hljs-quote { color: var(--text-faint); font-style: italic; }
+[data-theme="aurora"] .hljs-keyword, [data-theme="aurora"] .hljs-selector-tag, [data-theme="aurora"] .hljs-literal, [data-theme="aurora"] .hljs-type { color: #c4b5fd; font-weight: 500; }
+[data-theme="aurora"] .hljs-string, [data-theme="aurora"] .hljs-regexp, [data-theme="aurora"] .hljs-addition { color: #67e8f9; }
+[data-theme="aurora"] .hljs-number, [data-theme="aurora"] .hljs-symbol, [data-theme="aurora"] .hljs-bullet { color: #f9a8d4; }
+[data-theme="aurora"] .hljs-title, [data-theme="aurora"] .hljs-section, [data-theme="aurora"] .hljs-name, [data-theme="aurora"] .hljs-selector-id { color: #fcd34d; }
+[data-theme="aurora"] .hljs-attr, [data-theme="aurora"] .hljs-attribute, [data-theme="aurora"] .hljs-variable, [data-theme="aurora"] .hljs-template-variable { color: #93c5fd; }
+[data-theme="aurora"] .hljs-built_in, [data-theme="aurora"] .hljs-builtin-name { color: #fdba74; }
+[data-theme="aurora"] .hljs-meta, [data-theme="aurora"] .hljs-doctag { color: #6b7280; }
+[data-theme="aurora"] .hljs-tag, [data-theme="aurora"] .hljs-name { color: var(--accent); }
+
+/* 响应式 */
+@media (max-width: 860px) {
+  [data-theme="aurora"] aside { background: rgba(10, 18, 32, 0.85) !important; }
+}
+
+/* header 层级高于 main：避免 main 盖住 header 内 fixed 浮出的 theme-pop（点击失效） */
+[data-theme="aurora"] header {
+  z-index: 2;
+}

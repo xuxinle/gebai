@@ -1,0 +1,1090 @@
+/* ============================================================
+   GEBAI Web UI — 基础样式与设计令牌
+   - 所有主题差异通过 CSS 变量（令牌）表达，:root 为默认主题 classic
+   - 其他主题（dark / modern / minimal）为独立 CSS 文件，按需加载
+   - 业务逻辑不依赖任何具体主题，仅依赖令牌
+   ============================================================ */
+
+/* ---------- 内置字体（随产物分发，避免目标机器缺字体） ---------- */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* 颜色令牌 */
+  --bg: #0f1117;
+  --bg-elev: #161a24;
+  --bg-elev-2: #1a1f2c;
+  --bg-hover: #232a3d;
+  --bg-active: #2a3248;
+  --bg-inset: #0d1117;
+  --border: #262b3a;
+  --border-strong: #35405c;
+  --text: #e6e6e6;
+  --text-muted: #8a93a8;
+  --text-faint: #5c6478;
+  --accent: #3b82f6;
+  --accent-hover: #5a93f8;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --on-accent: #ffffff;
+  --success: #3fb950;
+  --danger: #f85149;
+  --warning: #d29922;
+  --tool: #2dd4a7;
+  --user-grad: linear-gradient(135deg, #2b5cae, #4f9cf8);
+  --nav-active: #ff7a4d; /* 消息导航活动条强调色 */
+
+  /* 形状与效果 */
+  --radius-sm: 7px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-msg: 14px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.04) inset, 0 0 24px rgba(59, 130, 246, 0.08);
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.06) inset, 0 0 36px rgba(59, 130, 246, 0.14);
+  --glass: none;
+  --msg-shadow: 0 2px 6px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+
+  /* 字体与布局 */
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace;
+  --font-size: 14px;
+  --header-h: 44px;
+  --sidebar-w: 264px;
+  --msg-max-w: 800px;
+  --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  --msg-gap: 18px;
+}
+
+/* ============================================================
+   classic 装饰层（默认主题）：深蓝光晕背景 + 多层辉光 + 精致细节
+   ============================================================ */
+[data-theme="classic"] body {
+  background:
+    radial-gradient(ellipse 1100px 520px at 88% -10%, rgba(59, 130, 246, 0.14), transparent 58%),
+    radial-gradient(ellipse 900px 460px at -8% 108%, rgba(99, 102, 241, 0.11), transparent 55%),
+    radial-gradient(ellipse 700px 360px at 50% 50%, rgba(45, 212, 191, 0.04), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  position: relative;
+  overflow: hidden;
+  animation: classic-breathe 28s ease-in-out infinite alternate;
+}
+@keyframes classic-breathe {
+  0%   { background-position: 0% 0%, 0% 0%, 0% 0%; filter: hue-rotate(0deg); }
+  100% { background-position: -3% 5%, 2% -3%, 4% -2%; filter: hue-rotate(-4deg); }
+}
+/* 顶部高光带（克制的蓝色调） */
+[data-theme="classic"] body::after {
+  content: "";
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.7), rgba(99, 102, 241, 0.5), transparent);
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+}
+
+
+/* 图标按钮：精简 hover（去掉 ::before 径向光 —— hover 上浮 + 着色足够） */
+[data-theme="classic"] .icon-btn {
+  transition: all var(--transition);
+}
+[data-theme="classic"] .icon-btn:hover {
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--text);
+  border-color: rgba(59, 130, 246, 0.2);
+}
+[data-theme="classic"] .icon-btn.active {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+}
+
+/* 新建会话按钮：精致蓝紫渐变（去掉背景扫光动画 —— 与 hover 扫光重复） */
+[data-theme="classic"] #new-session {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+  position: relative;
+  overflow: hidden;
+  transition: all var(--transition);
+}
+[data-theme="classic"] #new-session::before {
+  content: "";
+  position: absolute;
+  top: 0; left: -100%;
+  width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.25), transparent);
+  transition: left 0.5s ease;
+}
+[data-theme="classic"] #new-session:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(59, 130, 246, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+}
+[data-theme="classic"] #new-session:hover::before { left: 100%; }
+
+/* 会话列表：激活态蓝色光带 */
+[data-theme="classic"] #session-list li {
+  border: 1px solid transparent;
+  transition: all var(--transition);
+}
+[data-theme="classic"] #session-list li:hover {
+  background: rgba(59, 130, 246, 0.06);
+  border-color: rgba(59, 130, 246, 0.18);
+  transform: translateX(2px);
+}
+[data-theme="classic"] #session-list li.active {
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.16), rgba(99, 102, 241, 0.08) 80%, transparent);
+  border-color: rgba(59, 130, 246, 0.35);
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.12), inset 2px 0 0 #3b82f6;
+}
+[data-theme="classic"] #session-list li.active .session-ico {
+  background: rgba(59, 130, 246, 0.25);
+  color: var(--accent);
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.4);
+}
+
+/* 消息气泡：assistant 描边 hover 蓝光 */
+[data-theme="classic"] .msg.assistant .bubble {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--bg-elev-2), var(--bg-elev));
+  box-shadow: var(--msg-shadow);
+  transition: all var(--transition);
+}
+[data-theme="classic"] .msg.assistant:hover .bubble {
+  border-color: rgba(59, 130, 246, 0.4);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(59, 130, 246, 0.2) inset;
+}
+
+/* user 气泡：蓝紫渐变 + 蓝色光晕（去掉双层扫光动画 —— 静态渐变已足够） */
+[data-theme="classic"] .msg.user .bubble {
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+}
+
+/* 工具卡片：青绿色 + 精致 */
+[data-theme="classic"] .msg.tool .bubble {
+  background: linear-gradient(180deg, rgba(45, 212, 167, 0.06), rgba(45, 212, 167, 0.02));
+  border: 1px solid rgba(45, 212, 167, 0.25);
+  border-left: 2px solid #2dd4a7;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3), 0 0 16px rgba(45, 212, 167, 0.08);
+}
+[data-theme="classic"] .msg.tool .bubble .tool-head { color: #2dd4a7; text-shadow: 0 0 8px rgba(45, 212, 167, 0.4); }
+[data-theme="classic"] .msg.tool .bubble .tool-out summary {
+  background: rgba(45, 212, 167, 0.08);
+  border-color: rgba(45, 212, 167, 0.35);
+  color: #2dd4a7;
+}
+[data-theme="classic"] .msg.tool .bubble .tool-out summary:hover { background: rgba(45, 212, 167, 0.15); }
+
+/* 消息操作按钮 */
+[data-theme="classic"] .msg-act { color: var(--text-muted); transition: all var(--transition); }
+[data-theme="classic"] .msg-act:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+}
+
+/* 流式光标：蓝色光带（去掉 caret-pulse —— 渐变 + blink 足够） */
+[data-theme="classic"] .msg.streaming .bubble::after {
+  content: "▍";
+  background: linear-gradient(180deg, #3b82f6, #6366f1, #5a93f8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  filter: drop-shadow(0 0 6px rgba(59, 130, 246, 0.6));
+  margin-left: 2px;
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+/* composer：focus 时蓝色光晕（合并 2 道光晕为 1 道） */
+[data-theme="classic"] .composer-row {
+  transition: all var(--transition);
+}
+[data-theme="classic"] .composer-row:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--bg-elev-2);
+}
+[data-theme="classic"] #attach-btn { color: var(--text-muted); transition: all var(--transition); }
+[data-theme="classic"] #attach-btn:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+}
+
+/* 发送按钮：蓝紫渐变（去掉背景扫光动画 —— hover 放大 + 静态渐变已足够） */
+[data-theme="classic"] #send {
+  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 50%, #818cf8 100%);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  transition: all var(--transition);
+}
+[data-theme="classic"] #send:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.2) inset;
+}
+[data-theme="classic"] #send:active { transform: scale(0.94); }
+[data-theme="classic"] #send.stopping {
+  background: linear-gradient(135deg, #f85149, #ef4444);
+  box-shadow: 0 4px 14px rgba(248, 81, 73, 0.4);
+}
+
+/* 审批卡片 */
+[data-theme="classic"] .approval {
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), 0 0 16px rgba(210, 153, 34, 0.1);
+}
+[data-theme="classic"] .approval .yes {
+  background: linear-gradient(135deg, #3fb950, #2dd4a7);
+  box-shadow: 0 4px 12px rgba(63, 185, 80, 0.3);
+}
+[data-theme="classic"] .approval .no {
+  background: rgba(248, 81, 73, 0.1);
+  color: #f85149;
+  border: 1px solid rgba(248, 81, 73, 0.4);
+}
+
+/* Markdown：精致排版 */
+[data-theme="classic"] .markdown a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(59, 130, 246, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="classic"] .markdown a:hover {
+  color: #5a93f8;
+  text-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+  border-bottom-color: rgba(90, 147, 248, 0.8);
+}
+[data-theme="classic"] .markdown code {
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: #5a93f8;
+  border-radius: 5px;
+  padding: 0.12em 0.5em;
+  font-size: 0.92em;
+}
+[data-theme="classic"] .markdown pre {
+  font-size: 13px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+[data-theme="classic"] .markdown pre code {
+  background: none; border: none; padding: 0;
+}
+[data-theme="classic"] .markdown blockquote {
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.06), transparent);
+  color: var(--text-muted);
+}
+[data-theme="classic"] .markdown h2 {
+  border-bottom: 1px solid var(--border);
+}
+
+/* 主题切换面板 */
+[data-theme="classic"] .theme-pop {
+  box-shadow: var(--shadow-pop);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+}
+[data-theme="classic"] .theme-opt:hover {
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: inset 2px 0 0 #3b82f6;
+}
+[data-theme="classic"] .theme-opt.active {
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.15), rgba(99, 102, 241, 0.08) 80%, transparent);
+  box-shadow: inset 2px 0 0 #3b82f6;
+}
+[data-theme="classic"] .theme-opt .swatch {
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* 设置抽屉 */
+[data-theme="classic"] .settings-overlay {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+[data-theme="classic"] .settings-tabs button.active {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+}
+[data-theme="classic"] .settings-row {
+  transition: all var(--transition);
+}
+[data-theme="classic"] .settings-row:hover {
+  background: rgba(59, 130, 246, 0.06);
+  border-color: rgba(59, 130, 246, 0.3);
+  transform: translateX(2px);
+}
+[data-theme="classic"] .settings-form input:focus,
+[data-theme="classic"] .settings-form select:focus {
+  border-color: rgba(59, 130, 246, 0.5);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+  outline: none;
+}
+[data-theme="classic"] .mini-btn {
+  transition: all var(--transition);
+}
+[data-theme="classic"] .mini-btn:hover {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+}
+[data-theme="classic"] .settings-group-name {
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
+}
+
+/* 登录卡片 */
+[data-theme="classic"] .login-overlay {
+  background:
+    radial-gradient(900px 420px at 80% -10%, rgba(59, 130, 246, 0.12), transparent 60%),
+    var(--bg);
+}
+[data-theme="classic"] .login-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(59, 130, 246, 0.1) inset, 0 0 40px rgba(59, 130, 246, 0.1);
+}
+[data-theme="classic"] .login-brand {
+  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 50%, #5a93f8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  letter-spacing: 6px;
+  filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.4));
+}
+[data-theme="classic"] .login-sub { color: var(--text-muted); letter-spacing: 3px; }
+[data-theme="classic"] .login-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none;
+}
+[data-theme="classic"] .login-submit {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  letter-spacing: 4px;
+}
+
+/* 空状态：极光品牌（去掉 text-glow 动画 —— 渐变 + drop-shadow 静态已足够） */
+[data-theme="classic"] .empty-state .es-slogan {
+  background: linear-gradient(135deg, #5a93f8 0%, #3b82f6 50%, #6366f1 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 300;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 20px rgba(59, 130, 246, 0.3));
+}
+[data-theme="classic"] .es-suggestions button {
+  transition: all var(--transition);
+}
+[data-theme="classic"] .es-suggestions button:hover {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #3b82f6;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(59, 130, 246, 0.2);
+}
+
+/* 选择卡片 */
+[data-theme="classic"] .choice-opt {
+  transition: all var(--transition);
+}
+[data-theme="classic"] .choice-opt:hover {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #3b82f6;
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.2);
+  transform: translateY(-1px);
+}
+
+/* 连接徽章：简洁（去掉 box-shadow —— 背景 + 边框已足够） */
+[data-theme="classic"] .conn {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+}
+
+/* 头部 + 侧边栏（去掉 header::after 底部光带 —— 与 body::after 顶部光带形成上下双光带） */
+[data-theme="classic"] header {
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+[data-theme="classic"] aside {
+  border-right: 1px solid var(--border);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.04) inset;
+}
+
+/* 文件预览 / diagram：精致 */
+[data-theme="classic"] .preview-overlay {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+[data-theme="classic"] .copy-btn {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+[data-theme="classic"] .copy-btn:hover { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
+
+/* 滚动条 */
+[data-theme="classic"] ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+[data-theme="classic"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); background-clip: content-box; }
+
+/* ---------- Reset / 基础 ---------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--font-size);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.55;
+  transition: background var(--transition), color var(--transition);
+}
+button { font-family: inherit; }
+[hidden] { display: none !important; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- 布局骨架 ---------- */
+#app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: var(--header-h) 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  z-index: 30;
+  position: relative;
+}
+/* 标题栏居中显示当前会话标题：flex:1 占满中间区域（文本居中），与右侧上下文占比互不重叠 */
+.header-title {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+.conn {
+  flex: none; /* 信号灯位于上下文占比左侧，出现/消失不推动 ctx 左右移动 */
+  font-size: 12px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+  padding: 2px 10px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.conn::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* 已连接：只保留圆点信号灯（无文字、无胶囊；id 特异性压过各主题的 .conn 胶囊样式） */
+#conn:not(.bad) {
+  background: transparent;
+  border-color: transparent;
+  padding: 0;
+  font-size: 0;
+  gap: 0;
+  min-width: 12px;
+  min-height: 12px;
+  justify-content: center;
+}
+#conn:not(.bad)::before {
+  width: 9px;
+  height: 9px;
+  background: var(--accent); /* 信号灯用主题色（原绿色） */
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent);
+  flex: none;
+}
+/* 已连接：纯信号灯（仅圆点无文字）；空闲（无生成）时隐藏，生成/思考时显示并快速闪烁 */
+#conn:not(.bad) {
+  display: none;
+}
+#conn.thinking:not(.bad) {
+  display: inline-flex;
+}
+/* 思考/生成中（任意会话运行）：信号灯快速不规则闪烁（多关键帧错落明暗，避免匀速脉动的规律感） */
+@keyframes conn-thinking {
+  0%, 100% { opacity: 1; }
+  20% { opacity: 0.15; }
+  45% { opacity: 0.95; }
+  65% { opacity: 0.2; }
+  82% { opacity: 1; }
+}
+#conn.thinking:not(.bad)::before {
+  animation: conn-thinking 0.25s ease-in-out infinite;
+}
+.conn.bad { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
+/* 侧栏底部按钮区分隔线（两组按钮之间） */
+.hdivider { width: 1px; height: 18px; background: var(--border); margin: 0 2px; flex: none; }
+
+.icon-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+/* 点击穿透 SVG 图标：保证任何位置点击都落在按钮本身（避免 path 命中时事件丢失） */
+.icon-btn svg { pointer-events: none; }
+.icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.icon-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+#sidebar-toggle { display: grid; } /* 桌面端也常驻（折叠/展开整栏会话列表） */
+
+/* ---------- 侧栏（会话列表） ---------- */
+aside {
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  gap: 10px;
+  transition: transform var(--transition);
+}
+.session-top { display: flex; gap: 8px; flex: none; }
+/* 搜索框容器（放大镜图标 + 输入框）：图标绝对定位，输入框左侧留白 */
+.session-search-wrap { position: relative; flex: 1; min-width: 0; }
+.session-search-ico {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+  transition: color var(--transition);
+}
+.session-search-wrap:focus-within .session-search-ico { color: var(--accent); }
+#session-search {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px 8px 30px;
+  background: var(--bg-inset);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+#session-search::placeholder { color: var(--text-faint); }
+#session-search:focus { border-color: var(--accent); }
+#new-session {
+  flex: none;
+  width: 38px;
+  padding: 0;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 17px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), transform 0.06s ease;
+}
+#new-session:hover { background: var(--accent-hover); }
+#new-session:active { transform: scale(0.98); }
+#new-session:disabled { opacity: 0.5; cursor: default; transform: none; }
+/* 批量操作条：已选计数 + 删除所选 + 取消 */
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 6px 2px 0;
+}
+.batch-bar[hidden] { display: none; }
+#batch-count { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#batch-del,
+#batch-cancel {
+  flex: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+#batch-del { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
+#batch-del:hover { background: color-mix(in srgb, var(--danger) 30%, transparent); }
+#batch-del:disabled { opacity: 0.5; cursor: default; }
+#batch-cancel { background: var(--bg-inset); color: var(--text-muted); }
+#batch-cancel:hover { background: var(--bg-hover); color: var(--text); }
+#session-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 -12px 0 0; /* 向右扩展覆盖 aside 右侧 padding：滚动条贴到侧栏面板最右，不留空隙 */
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden; /* 横向永不滚动：长会话名靠 ellipsis 截断，水平滚动条无用途 */
+  scrollbar-width: none; /* Firefox：静止时滚动条零宽（不占位不留空白），hover/滑动时显示 */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* 滚动条自动隐藏：hover 列表或滑动中（.scrolling 由 sessions.ts 的 scroll 事件维护）才出现 */
+#session-list:hover,
+#session-list.scrolling {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+#session-list::-webkit-scrollbar { width: 0; height: 0; }
+#session-list:hover::-webkit-scrollbar,
+#session-list.scrolling::-webkit-scrollbar { width: 8px; height: 8px; }
+#session-list::-webkit-scrollbar-thumb { background: transparent; border: 0; }
+#session-list:hover::-webkit-scrollbar-thumb,
+#session-list.scrolling::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+#session-list:hover::-webkit-scrollbar-thumb:hover,
+#session-list.scrolling::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+#session-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-right: 12px; /* 与左侧 aside padding 12px 对称；hover/滑动时滚动条占位 8px + margin 4px = 12px，位置恒定 */
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--transition), border-color var(--transition);
+}
+#session-list:hover li,
+#session-list.scrolling li { margin-right: 4px; } /* 滚动条占位 8px，合计仍 12px 与左对称 */
+/* 侧栏底部按钮区：低频操作按钮（小工具/导出/压缩/自动审批/主题/设置/登出）
+ * 从标题栏移入，窄栏时自动换行 */
+.session-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+#session-list li:hover { background: var(--bg-hover); }
+#session-list li.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+/* 批量模式：选中行高亮（比当前会话 active 弱一档，避免混淆） */
+#session-list li.selected { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+#session-list li.selected .session-name { color: var(--accent); }
+/* 设置面板工具启停勾选框（自绘，非原生外观） */
+.ck {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-inset);
+  color: var(--on-accent);
+  cursor: pointer;
+  display: grid;
+  place-content: center;
+  transition: background var(--transition), border-color var(--transition), opacity var(--transition);
+}
+/* 会话行选中按钮（多选勾选，自绘非原生外观）：默认隐藏，进入多选（批量）模式后常驻 */
+.session-check {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-inset);
+  color: var(--on-accent);
+  cursor: pointer;
+  display: grid;
+  place-content: center;
+  transition: background var(--transition), border-color var(--transition), opacity var(--transition);
+  opacity: 0;
+  pointer-events: none;
+}
+#session-list.batch-mode .session-check {
+  opacity: 1;
+  pointer-events: auto;
+}
+.session-check:hover { border-color: var(--accent); }
+.session-check:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  /* input 是替换元素不支持 ::after，勾选对勾用 SVG data URI（currentColor 取 on-accent） */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.5 5 9l4.5-6' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 11px 11px;
+}
+/* 会话图标：冗余（每个会话前面都是同一个 💬，无辨识度）—— 直接隐藏，节省空间 */
+.session-ico { display: none; }
+#session-list li.active .session-ico { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.session-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  color: var(--text);
+}
+/* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：上行数字 + 下行进度条，比例分级着色 */
+#header-ctx {
+  flex: none;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  white-space: nowrap;
+}
+#header-ctx[hidden] { display: none; }
+#header-ctx .ctx-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+#header-ctx .ctx-bar {
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-inset);
+  overflow: hidden;
+  flex: none;
+}
+#header-ctx .ctx-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+#header-ctx.warn .ctx-fill { background: var(--warning); }
+#header-ctx.danger .ctx-fill { background: var(--danger); }
+/* 会话右键菜单（多选/重命名/删除）：悬浮浮层，随光标定位 */
+.session-ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 128px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+}
+.session-ctx-menu .ctx-item {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.session-ctx-menu .ctx-item:hover { background: var(--bg-hover); color: var(--accent); }
+.session-ctx-menu .ctx-item.danger { color: var(--danger); }
+.session-ctx-menu .ctx-item.danger:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+/* 会话分组头（今天/昨天/近7天/更早）：点击折叠/展开组；批量模式下点击切换全组选中 */
+#session-list li.session-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 2px;
+  border: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  user-select: none;
+}
+#session-list li.session-group:hover { background: transparent; }
+#session-list li.session-group .sg-chevron {
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform var(--transition);
+}
+#session-list li.session-group.collapsed .sg-chevron { transform: rotate(-90deg); }
+#session-list li.session-group .sg-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#session-list li.session-group .sg-count { font-weight: 500; }
+/* 会话内联重命名输入框 */
+.session-rename {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-inset);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-size: 13px;
+  padding: 1px 5px;
+  outline: none;
+}
+
+/* ---------- 主区域 ---------- */
+main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+.chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: none; /* 隐藏滚动条：由右侧小地图承担滚动感知与导航 */
+  padding: 20px clamp(16px, 4vw, 48px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--msg-gap);
+}
+#messages::-webkit-scrollbar { display: none; }
+#messages.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
+
+/* ---------- 响应式（窄屏折叠侧栏） ---------- */
+/* 桌面端整栏折叠（标题栏最左按钮切换）：隐藏侧栏、主区占满；窄屏滑动抽屉行为不受影响 */
+@media (min-width: 861px) {
+  body.sidebar-collapsed #app { grid-template-columns: 1fr; }
+  body.sidebar-collapsed aside { display: none; }
+}
+@media (max-width: 860px) {
+  #app { grid-template-columns: 1fr; }
+  aside {
+    position: fixed;
+    top: var(--header-h);
+    bottom: 0;
+    left: 0;
+    width: min(var(--sidebar-w), 78vw);
+    z-index: 40;
+    transform: translateX(-105%);
+    box-shadow: var(--shadow-pop);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  aside.open { transform: translateX(0); }
+  .msg.user { max-width: 88%; }
+  .msg.assistant, .msg.tool { max-width: 94%; }
+  /* 触摸目标放大：移动端最小 44x44 */
+  .icon-btn { min-width: 44px; min-height: 44px; }
+  .choice-opt { padding: 10px 18px; font-size: 14px; }
+  #session-list li { padding: 12px 12px; }
+  /* 输入区：iOS 安全区 + 键盘弹起不挡底 */
+  #composer {
+    padding: 10px clamp(12px, 4vw, 20px);
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  .composer-row { padding: 4px 6px; }
+  #input { font-size: 16px; /* 防止 iOS 自动放大 */ }
+  #send, #attach-btn { width: 40px; height: 40px; }
+  /* 消息间距更紧凑 */
+  #messages { padding: 14px clamp(12px, 4vw, 20px); gap: 14px; }
+  .bubble { padding: 9px 12px; }
+  /* 设置抽屉全屏化 */
+  .settings-panel { width: 100vw; }
+  /* 主题面板靠右留出更多空间 */
+  .theme-pop { right: 8px; max-width: calc(100vw - 16px); }
+}
+
+/* ---------- 超小屏（手机竖屏）---------- */
+@media (max-width: 480px) {
+  :root { --font-size: 13.5px; --msg-gap: 12px; }
+  header { padding: 0 10px; gap: 8px; }
+  .icon-btn { font-size: 14px; }
+  .conn { font-size: 11px; padding: 2px 8px; }
+  #messages { padding: 12px; }
+  .msg-name { font-size: 11px; }
+  .msg-time { font-size: 10.5px; }
+  .markdown pre { font-size: 13px; padding: 10px 12px; }
+  .markdown code { font-size: 0.86em; }
+  /* 输入区单行 */
+  #input { min-height: 32px; }
+  /* 隐藏不必要图标 */
+  .conn { display: none; }
+}
+
+/* ---------- 主题切换丝滑动画 ---------- */
+/* 1) View Transitions API（Chrome 111+ / Edge / Safari 18+ / Firefox 128+） */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.45s;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) {
+  animation-name: theme-fade-out;
+}
+::view-transition-new(root) {
+  animation-name: theme-fade-in;
+}
+@keyframes theme-fade-out {
+  0%   { opacity: 1; filter: blur(0) hue-rotate(0deg); }
+  60%  { opacity: 0.2; filter: blur(8px) hue-rotate(15deg); }
+  100% { opacity: 0; filter: blur(16px) hue-rotate(-15deg); }
+}
+@keyframes theme-fade-in {
+  0%   { opacity: 0; filter: blur(16px) hue-rotate(15deg); transform: scale(0.99); }
+  40%  { opacity: 0.6; filter: blur(4px) hue-rotate(0deg); }
+  100% { opacity: 1; filter: blur(0) hue-rotate(0deg); transform: scale(1); }
+}
+
+/* 2) 兜底扫描光（不支持 View Transitions 时由 JS 注入 #gb-theme-sweep） */
+#gb-theme-sweep {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 35%, transparent) 35%,
+    color-mix(in srgb, var(--accent) 65%, transparent) 50%,
+    color-mix(in srgb, var(--accent) 35%, transparent) 65%,
+    transparent 100%
+  );
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: sweep-fall 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+@keyframes sweep-fall {
+  0%   { opacity: 0; transform: translateY(-100%) scaleY(0.3); }
+  20%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(100%) scaleY(1.2); }
+}
+
+/* 3) 全局过渡：让非动画元素也能丝滑响应主题/强调色变更 */
+body, .bubble, .markdown pre, .markdown code, .markdown blockquote,
+header, aside, #composer, .composer-row, .settings-panel, .login-card,
+.theme-pop, .preview-card, .icon-btn, .msg-act, .conn,
+.choice-opt, .es-suggestions button, .attach-chip, .approval,
+.jump-bottom {
+  transition: background-color 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              color 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.bubble, .markdown pre { transition: background-color 0.32s, border-color 0.32s, box-shadow 0.32s, transform 0.32s; }
+
+/* 用户偏好：减少动效 */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.12s;
+  }
+  #gb-theme-sweep { display: none; }
+  body, .bubble, .markdown pre { transition: none; }
+}
+
+/* ---------- 低性能模式（无 GPU/低配机器自动开启，设置面板「外观」可手动覆盖） ---------- */
+/* 关闭全部动画与过渡：主题呼吸/脉冲/流动渐变、入场动画、hover 过渡等不再持续占用 GPU/CPU */
+html[data-low-power="on"] *,
+html[data-low-power="on"] *::before,
+html[data-low-power="on"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+/* 主题切换动画（View Transitions 淡入淡出 + 扫描光）直接跳过 */
+html[data-low-power="on"] ::view-transition-old(root),
+html[data-low-power="on"] ::view-transition-new(root) {
+  animation: none !important;
+}
+html[data-low-power="on"] #gb-theme-sweep { display: none; }
+/* backdrop-filter（毛玻璃）需要持续重绘背景，是无 GPU 时最卡的特效之一：关闭 */
+html[data-low-power="on"] * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* 例外：流式输出光标保留闪烁（输出进行中的必要指示，开销极小） */
+html[data-low-power="on"] .msg.streaming .bubble::after {
+  animation: caret-blink 1s steps(2, start) infinite !important;
+}
+/* 例外：连接信号灯保留闪烁（任意会话思考/生成进行中的必要指示，开销极小） */
+html[data-low-power="on"] #conn.thinking:not(.bad)::before {
+  animation: conn-thinking 0.25s ease-in-out infinite !important;
+}
+/* 长会话消息列表：视口外消息跳过布局/绘制（content-visibility: auto，contain-intrinsic-size
+   保留滚动条估算高度防跳动；含 iframe 的卡片移入视口时浏览器再渲染） */
+html[data-low-power="on"] .msg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+

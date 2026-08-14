@@ -1,0 +1,767 @@
+/* ============================================================
+   GEBAI 主题：tokyo-night — 东京夜（程序员配色 · 紫蓝城市夜空）
+   深蓝紫底 + 静态星点 + 紫蓝渐变 + 玻璃拟态 + 霓虹灯牌
+   标志性细节：星点装饰、霓虹灯牌边框、东京铁道感蓝紫调
+   ============================================================ */
+
+[data-theme="tokyo-night"] {
+  /* 东京夜深蓝紫底（带极淡紫） */
+  --bg: #1a1b26;
+  --bg-elev: #1f2030;
+  --bg-elev-2: #24253a;
+  --bg-hover: #2c2d44;
+  --bg-active: #353650;
+  --bg-inset: #16171f;
+
+  /* 紫蓝描边（锐利） */
+  --border: #2a2b3a;
+  --border-strong: #3b3d55;
+
+  /* 冷紫蓝文字 */
+  --text: #c0caf5;
+  --text-muted: #9aa5ce;
+  --text-faint: #565f89;
+
+  /* 东京夜主色（紫蓝 + 蓝 + 青） */
+  --accent: #7aa2f7;
+  --accent-2: #bb9af7;
+  --accent-hover: #9eb6f9;
+  --accent-soft: rgba(122, 162, 247, 0.14);
+  --on-accent: #1a1b26;
+  --success: #9ece6a;
+  --danger: #f7768e;
+  --warning: #e0af68;
+  --tool: #7dcfff;
+  --user-grad: linear-gradient(135deg, #7aa2f7 0%, #bb9af7 50%, #f7768e 100%);
+  --nav-active: #7aa2f7;
+
+  /* 形状：低圆角 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-msg: 10px;
+
+  /* 阴影：紫蓝辉光 */
+  --shadow-sm: 0 0 6px rgba(122, 162, 247, 0.1);
+  --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.55), 0 0 20px rgba(122, 162, 247, 0.08);
+  --shadow-pop: 0 10px 36px rgba(0, 0, 0, 0.6), 0 0 28px rgba(187, 154, 247, 0.15);
+  --shadow-glow: 0 0 12px rgba(122, 162, 247, 0.3), 0 0 24px rgba(187, 154, 247, 0.15);
+  --glass: blur(20px) saturate(1.4);
+  --msg-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+
+  /* 字体：等宽偏重（程序员感） */
+  --font-ui: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  --font-size: 13.5px;
+  --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   背景：深蓝紫 + 静态星点 + 紫蓝径向光晕
+   ============================================================ */
+[data-theme="tokyo-night"] body {
+  background-color: var(--bg);
+  background-image:
+    /* 城市顶部紫光 */
+    radial-gradient(ellipse 900px 400px at 85% -10%, rgba(187, 154, 247, 0.12), transparent 60%),
+    /* 城市底部蓝光 */
+    radial-gradient(ellipse 800px 500px at -5% 110%, rgba(122, 162, 247, 0.1), transparent 55%),
+    /* 静态星点（多层，加大到 2px） */
+    radial-gradient(2px 2px at 20% 30%, rgba(192, 202, 245, 0.9), transparent),
+    radial-gradient(2px 2px at 40% 70%, rgba(192, 202, 245, 0.85), transparent),
+    radial-gradient(2px 2px at 60% 20%, rgba(187, 154, 247, 0.9), transparent),
+    radial-gradient(2px 2px at 80% 50%, rgba(192, 202, 245, 0.8), transparent),
+    radial-gradient(2px 2px at 15% 80%, rgba(192, 202, 245, 0.85), transparent),
+    radial-gradient(2px 2px at 70% 85%, rgba(187, 154, 247, 0.8), transparent),
+    radial-gradient(2.5px 2.5px at 50% 50%, rgba(192, 202, 245, 1), transparent),
+    radial-gradient(2px 2px at 90% 15%, rgba(192, 202, 245, 0.85), transparent),
+    radial-gradient(2px 2px at 10% 45%, rgba(192, 202, 245, 0.8), transparent),
+    radial-gradient(2px 2px at 35% 90%, rgba(187, 154, 247, 0.85), transparent),
+    radial-gradient(2px 2px at 25% 12%, rgba(192, 202, 245, 0.8), transparent),
+    radial-gradient(2px 2px at 75% 38%, rgba(187, 154, 247, 0.85), transparent),
+    radial-gradient(2px 2px at 45% 25%, rgba(192, 202, 245, 0.8), transparent);
+  background-attachment: fixed;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 顶部蓝紫光带 */
+[data-theme="tokyo-night"] body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(122, 162, 247, 0.5) 30%, rgba(187, 154, 247, 0.4) 60%, rgba(247, 118, 142, 0.3) 85%, transparent);
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: 0 0 10px rgba(122, 162, 247, 0.3);
+}
+
+/* ============================================================
+   全局元素
+   ============================================================ */
+[data-theme="tokyo-night"] ::selection { background: var(--accent); color: var(--on-accent); }
+[data-theme="tokyo-night"] a {
+  color: var(--tool);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(125, 207, 255, 0.4);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] a:hover {
+  color: var(--accent-2);
+  text-shadow: 0 0 6px rgba(187, 154, 247, 0.5);
+  border-bottom-color: var(--accent-2);
+}
+
+[data-theme="tokyo-night"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-theme="tokyo-night"] ::-webkit-scrollbar-thumb {
+  background: rgba(122, 162, 247, 0.3);
+  border-radius: 4px;
+}
+[data-theme="tokyo-night"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+[data-theme="tokyo-night"] ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.3); }
+
+/* ============================================================
+   面板
+   ============================================================ */
+[data-theme="tokyo-night"] header,
+[data-theme="tokyo-night"] aside,
+[data-theme="tokyo-night"] .settings-panel {
+  background: rgbabackground: rgba(31, 32, 48, 0.75) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  position: relative;
+  z-index: 1;
+}
+/* 浮层（主题面板/预览卡片）：保持 fixed 定位 */
+[data-theme="tokyo-night"] .theme-pop,
+[data-theme="tokyo-night"] .preview-card {
+background: rgba(31, 32, 48, 0.75) !important;
+  backdrop-filter: var(--glass);
+  -webkit-backdrop-filter: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+[data-theme="tokyo-night"] #composer {
+  /* 无背景条：输入区融入主背景 */
+  position: relative;
+  z-index: 1;
+}
+[data-theme="tokyo-night"] .login-card {
+  background: rgba(31, 32, 48, 0.75) !important;
+  backdrop-filter: blur(32px) saturate(1.4);
+  -webkit-backdrop-filter: blur(32px) saturate(1.4);
+  border: 1px solid var(--accent-2);
+  box-shadow: var(--shadow-pop);
+}
+
+/* ============================================================
+   icon-btn
+   ============================================================ */
+[data-theme="tokyo-night"] .icon-btn {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .icon-btn:hover {
+  background: rgba(122, 162, 247, 0.1);
+  border-color: var(--border-strong);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(122, 162, 247, 0.2);
+}
+[data-theme="tokyo-night"] .icon-btn.active {
+  background: rgba(187, 154, 247, 0.15);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.3);
+}
+
+/* ============================================================
+   连接状态徽章
+   ============================================================ */
+[data-theme="tokyo-night"] .conn {
+  background: rgba(158, 206, 106, 0.12);
+  border: 1px solid rgba(158, 206, 106, 0.4);
+  color: var(--success);
+  border-radius: var(--radius-sm);
+  position: relative;
+  padding-left: 18px;
+  font-size: 11px;
+}
+[data-theme="tokyo-night"] .conn::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  border-radius: 50%;
+  animation: tokyo-pulse 1.6s ease-in-out infinite;
+}
+[data-theme="tokyo-night"] .conn.bad {
+  background: rgba(247, 118, 142, 0.12);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+[data-theme="tokyo-night"] .conn.bad::before { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+@keyframes tokyo-pulse {
+  0%, 100% { opacity: 1; transform: translateY(-50%) scale(1); }
+  50% { opacity: 0.4; transform: translateY(-50%) scale(0.85); }
+}
+
+/* ============================================================
+   新会话按钮
+   ============================================================ */
+[data-theme="tokyo-night"] #new-session {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid rgba(122, 162, 247, 0.5);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.3);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] #new-session:hover {
+  box-shadow: 0 0 20px rgba(187, 154, 247, 0.5), 0 0 8px rgba(122, 162, 247, 0.3) inset;
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   会话列表
+   ============================================================ */
+[data-theme="tokyo-night"] #session-list li {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] #session-list li:hover {
+  background: rgba(122, 162, 247, 0.06);
+  border-color: var(--border);
+  transform: translateX(2px);
+}
+[data-theme="tokyo-night"] #session-list li.active {
+  background: linear-gradient(90deg, rgba(122, 162, 247, 0.15), rgba(187, 154, 247, 0.08) 80%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(122, 162, 247, 0.15) inset, 0 0 8px rgba(122, 162, 247, 0.2);
+}
+[data-theme="tokyo-night"] .session-ico {
+  border-radius: var(--radius-sm);
+  background: rgba(122, 162, 247, 0.15);
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+[data-theme="tokyo-night"] .session-name { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   消息气泡
+   ============================================================ */
+[data-theme="tokyo-night"] .msg-name {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+[data-theme="tokyo-night"] .msg-time { color: var(--text-faint); font-family: var(--font-mono); font-size: 10.5px; }
+[data-theme="tokyo-night"] .msg-act {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .msg-act:hover {
+  color: var(--accent);
+  background: rgba(122, 162, 247, 0.1);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 6px rgba(122, 162, 247, 0.2);
+}
+
+/* assistant 气泡：玻璃 + 蓝紫描边 */
+[data-theme="tokyo-night"] .msg.assistant .bubble {
+  background: rgba(31, 32, 48, 0.7);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-msg);
+  position: relative;
+  box-shadow: 0 0 8px rgba(122, 162, 247, 0.05) inset, 0 4px 16px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+[data-theme="tokyo-night"] .msg.assistant:hover .bubble {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 16px rgba(187, 154, 247, 0.2), 0 0 0 1px var(--accent-2) inset;
+}
+
+/* user 气泡：紫蓝粉渐变 */
+[data-theme="tokyo-night"] .msg.user .bubble {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid rgba(122, 162, 247, 0.5);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.3);
+}
+
+/* tool 气泡：青色左边 */
+[data-theme="tokyo-night"] .msg.tool .bubble {
+  background: rgba(125, 207, 255, 0.05);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--tool);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 0 8px rgba(125, 207, 255, 0.05) inset;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+[data-theme="tokyo-night"] .msg.tool .tool-head { color: var(--tool); text-shadow: 0 0 6px rgba(125, 207, 255, 0.4); }
+[data-theme="tokyo-night"] .msg.tool .tool-out { color: var(--text-muted); }
+
+/* 流式光标 */
+[data-theme="tokyo-night"] .msg.streaming .bubble::after {
+  content: "▍";
+  color: var(--accent-2);
+  background: none;
+  -webkit-text-fill-color: var(--accent-2);
+  text-shadow: 0 0 6px var(--accent-2);
+  margin-left: 2px;
+  animation: tokyo-blink 1s steps(2, start) infinite;
+}
+@keyframes tokyo-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ============================================================
+   composer
+   ============================================================ */
+[data-theme="tokyo-night"] #composer {
+  padding: 12px clamp(16px, 4vw, 48px) 14px;
+}
+[data-theme="tokyo-night"] .composer-row {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 4px 8px;
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .composer-row:focus-within {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px var(--accent-2), 0 0 12px rgba(187, 154, 247, 0.3);
+}
+[data-theme="tokyo-night"] #attach-btn { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="tokyo-night"] #attach-btn:hover { background: rgba(122, 162, 247, 0.1); color: var(--accent); }
+[data-theme="tokyo-night"] #input { color: var(--text); caret-color: var(--accent-2); }
+[data-theme="tokyo-night"] #input::placeholder { color: var(--text-faint); }
+
+[data-theme="tokyo-night"] #send {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid rgba(122, 162, 247, 0.5);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.3);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] #send:hover {
+  box-shadow: 0 0 20px rgba(187, 154, 247, 0.5), 0 0 8px rgba(122, 162, 247, 0.4) inset;
+  transform: scale(1.04);
+  filter: brightness(1.1);
+}
+[data-theme="tokyo-night"] #send:active { transform: scale(0.96); }
+[data-theme="tokyo-night"] #send.stopping {
+  background: var(--danger);
+  border-color: var(--danger);
+  box-shadow: 0 0 12px rgba(247, 118, 142, 0.4);
+}
+
+/* ============================================================
+   审批卡片
+   ============================================================ */
+[data-theme="tokyo-night"] .approval {
+  background: rgba(224, 175, 104, 0.08);
+  border: 1px solid rgba(224, 175, 104, 0.4);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 12px rgba(224, 175, 104, 0.1);
+}
+[data-theme="tokyo-night"] .approval .yes {
+  background: linear-gradient(135deg, #9ece6a, #7aa2f7);
+  color: var(--on-accent);
+  border: 1px solid rgba(158, 206, 106, 0.5);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  box-shadow: 0 0 8px rgba(158, 206, 106, 0.3);
+}
+[data-theme="tokyo-night"] .approval .no {
+  background: rgba(247, 118, 142, 0.1);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+/* ============================================================
+   Markdown
+   ============================================================ */
+[data-theme="tokyo-night"] .markdown h1, [data-theme="tokyo-night"] .markdown h2, [data-theme="tokyo-night"] .markdown h3 {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+[data-theme="tokyo-night"] .markdown h2 { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+[data-theme="tokyo-night"] .markdown a {
+  color: var(--tool);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(125, 207, 255, 0.4);
+}
+[data-theme="tokyo-night"] .markdown a:hover {
+  color: var(--accent-2);
+  text-shadow: 0 0 6px rgba(187, 154, 247, 0.5);
+  border-bottom-color: var(--accent-2);
+}
+[data-theme="tokyo-night"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(187, 154, 247, 0.08);
+  border: 1px solid rgba(187, 154, 247, 0.2);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+  padding: 0.12em 0.5em;
+  font-size: 0.9em;
+}
+[data-theme="tokyo-night"] .markdown pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.3) inset;
+}
+[data-theme="tokyo-night"] .markdown pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 13px; }
+[data-theme="tokyo-night"] .markdown blockquote {
+  border-left: 2px solid var(--accent-2);
+  background: rgba(187, 154, 247, 0.05);
+  color: var(--text-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+[data-theme="tokyo-night"] .markdown table { border-color: var(--border); }
+[data-theme="tokyo-night"] .markdown th {
+  background: rgba(122, 162, 247, 0.1);
+  color: var(--accent);
+  border-color: var(--border);
+}
+[data-theme="tokyo-night"] .markdown td { border-color: var(--border); }
+[data-theme="tokyo-night"] .markdown tr:hover td { background: rgba(122, 162, 247, 0.04); }
+[data-theme="tokyo-night"] .markdown hr { border-top: 1px dashed var(--border-strong); }
+[data-theme="tokyo-night"] .markdown ul li::marker, [data-theme="tokyo-night"] .markdown ol li::marker { color: var(--accent-2); }
+[data-theme="tokyo-night"] .copy-btn {
+  background: var(--bg-elev-2);
+  color: var(--accent-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+[data-theme="tokyo-night"] .copy-btn:hover { background: var(--accent-2); color: var(--on-accent); border-color: var(--accent-2); box-shadow: 0 0 8px rgba(187, 154, 247, 0.4); }
+[data-theme="tokyo-night"] .reasoning .reasoning-body {
+  background: rgba(187, 154, 247, 0.05);
+  border-left: 2px solid var(--accent-2);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+/* ============================================================
+   主题选择气泡
+   ============================================================ */
+[data-theme="tokyo-night"] .theme-pop { box-shadow: var(--shadow-pop); }
+[data-theme="tokyo-night"] .theme-section-label {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  padding: 8px 10px 4px;
+  border-bottom: 1px dashed var(--border);
+  text-transform: uppercase;
+}
+[data-theme="tokyo-night"] .accent-opt {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+  position: relative;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4) inset;
+}
+[data-theme="tokyo-night"] .accent-opt::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: 0 0 6px var(--swatch);
+}
+[data-theme="tokyo-night"] .accent-opt:hover { border-color: var(--accent); box-shadow: 0 0 8px rgba(122, 162, 247, 0.4); }
+[data-theme="tokyo-night"] .accent-opt.active {
+  border-color: var(--accent-2);
+  background: rgba(187, 154, 247, 0.2);
+  box-shadow: 0 0 0 1px var(--accent-2), 0 0 12px rgba(187, 154, 247, 0.5);
+}
+[data-theme="tokyo-night"] .accent-reset {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+}
+[data-theme="tokyo-night"] .accent-reset:hover { color: var(--accent-2); border-color: var(--accent-2); background: rgba(187, 154, 247, 0.1); }
+[data-theme="tokyo-night"] .theme-opt {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .theme-opt:hover {
+  background: rgba(122, 162, 247, 0.08);
+  border-color: var(--border);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+[data-theme="tokyo-night"] .theme-opt.active {
+  background: linear-gradient(90deg, rgba(122, 162, 247, 0.15), rgba(187, 154, 247, 0.08) 80%, transparent);
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 8px rgba(122, 162, 247, 0.2);
+}
+[data-theme="tokyo-night"] .theme-opt .swatch { border-radius: 4px; border: 1px solid var(--border-strong); }
+[data-theme="tokyo-night"] .theme-opt .t-label { color: var(--text); font-weight: 600; }
+[data-theme="tokyo-night"] .theme-opt .t-desc { color: var(--text-faint); font-family: var(--font-mono); font-size: 10px; }
+
+/* ============================================================
+   设置抽屉
+   ============================================================ */
+[data-theme="tokyo-night"] .settings-overlay { background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); }
+[data-theme="tokyo-night"] .settings-head { border-bottom: 1px solid var(--border); }
+[data-theme="tokyo-night"] .settings-tabs { border-bottom: 1px solid var(--border); background: rgba(122, 162, 247, 0.02); }
+[data-theme="tokyo-night"] .settings-tabs button { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="tokyo-night"] .settings-tabs button:hover { background: rgba(122, 162, 247, 0.08); color: var(--accent); }
+[data-theme="tokyo-night"] .settings-tabs button.active {
+  background: rgba(187, 154, 247, 0.15);
+  color: var(--accent-2);
+  border-bottom: 2px solid var(--accent-2);
+  box-shadow: 0 -2px 8px rgba(187, 154, 247, 0.2) inset;
+}
+[data-theme="tokyo-night"] .settings-row {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .settings-row:hover {
+  border-color: var(--accent-2);
+  background: rgba(187, 154, 247, 0.05);
+  box-shadow: 0 0 6px rgba(187, 154, 247, 0.1) inset;
+  transform: translateX(2px);
+}
+[data-theme="tokyo-night"] .settings-form { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="tokyo-night"] .settings-form label { color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; }
+[data-theme="tokyo-night"] .settings-form input,
+[data-theme="tokyo-night"] .settings-form select,
+[data-theme="tokyo-night"] .settings-form textarea {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .settings-form input:focus,
+[data-theme="tokyo-night"] .settings-form select:focus,
+[data-theme="tokyo-night"] .settings-form textarea:focus {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px var(--accent-2), 0 0 8px rgba(187, 154, 247, 0.3);
+  outline: none;
+}
+[data-theme="tokyo-night"] .mini-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .mini-btn:hover {
+  background: var(--accent-2);
+  color: var(--on-accent);
+  box-shadow: 0 0 8px rgba(187, 154, 247, 0.4);
+}
+[data-theme="tokyo-night"] .mini-btn.danger { color: var(--danger); border-color: rgba(247, 118, 142, 0.4); }
+[data-theme="tokyo-night"] .mini-btn.danger:hover { background: var(--danger); color: #fff; box-shadow: 0 0 8px rgba(247, 118, 142, 0.4); }
+[data-theme="tokyo-night"] .settings-group-name {
+  color: var(--accent-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ============================================================
+   登录卡片
+   ============================================================ */
+[data-theme="tokyo-night"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1000px 500px at 50% 50%, rgba(187, 154, 247, 0.12), transparent 60%),
+    var(--bg);
+}
+[data-theme="tokyo-night"] .login-brand {
+  background: linear-gradient(135deg, #7aa2f7 0%, #bb9af7 50%, #f7768e 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 12px rgba(122, 162, 247, 0.4));
+}
+[data-theme="tokyo-night"] .login-sub { color: var(--text-muted); letter-spacing: 0.2em; font-family: var(--font-mono); font-size: 11px; }
+[data-theme="tokyo-night"] .login-card input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  border-radius: var(--radius-sm);
+  caret-color: var(--accent-2);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .login-card input:focus {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px var(--accent-2), 0 0 12px rgba(187, 154, 247, 0.3);
+  outline: none;
+}
+[data-theme="tokyo-night"] .login-submit {
+  background: var(--user-grad);
+  color: #fff;
+  border: 1px solid rgba(122, 162, 247, 0.5);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.3);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .login-submit:hover { filter: brightness(1.1); box-shadow: 0 0 20px rgba(187, 154, 247, 0.5); }
+
+/* ============================================================
+   空状态
+   ============================================================ */
+[data-theme="tokyo-night"] .empty-state .es-slogan {
+  background: linear-gradient(135deg, #7aa2f7 0%, #bb9af7 50%, #f7768e 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-weight: 300;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 20px rgba(122, 162, 247, 0.3));
+}
+[data-theme="tokyo-night"] .es-suggestions button {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .es-suggestions button:hover {
+  background: rgba(187, 154, 247, 0.1);
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.2);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   选择 / 待办 / 压缩 / 附件 / 预览
+   ============================================================ */
+[data-theme="tokyo-night"] .choice-opt {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .choice-opt:hover {
+  background: rgba(122, 162, 247, 0.08);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 12px rgba(122, 162, 247, 0.2);
+  transform: translateY(-1px);
+}
+[data-theme="tokyo-night"] .todo-ico { color: var(--accent-2); }
+[data-theme="tokyo-night"] .bubble.compact-notice {
+  background: rgba(187, 154, 247, 0.05);
+  border: 1px dashed rgba(187, 154, 247, 0.3);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+[data-theme="tokyo-night"] .attach-chip {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+}
+[data-theme="tokyo-night"] .attach-chip:hover { background: rgba(187, 154, 247, 0.1); border-color: var(--accent-2); }
+[data-theme="tokyo-night"] .preview-overlay { background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(4px); }
+[data-theme="tokyo-night"] .preview-head { border-bottom: 1px solid var(--border); }
+[data-theme="tokyo-night"] .preview-close { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="tokyo-night"] .preview-close:hover { color: var(--danger); background: rgba(247, 118, 142, 0.15); }
+
+/* ============================================================
+   跳到最新
+   ============================================================ */
+[data-theme="tokyo-night"] .jump-bottom {
+  background: var(--bg-elev);
+  border: 1px solid var(--accent-2);
+  color: var(--accent-2);
+  border-radius: 50%;
+  box-shadow: 0 0 12px rgba(187, 154, 247, 0.3);
+  transition: all var(--transition);
+}
+[data-theme="tokyo-night"] .jump-bottom:hover {
+  background: var(--accent-2);
+  color: var(--on-accent);
+  box-shadow: 0 0 20px rgba(187, 154, 247, 0.5);
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   diagram
+   ============================================================ */
+[data-theme="tokyo-night"] .diagram { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="tokyo-night"] .diagram-editor { background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); border-radius: var(--radius-sm); }
+
+/* ============================================================
+   东京夜语法高亮（经典 Tokyo Night Storm 配色）
+   ============================================================ */
+[data-theme="tokyo-night"] .hljs { color: var(--text); background: transparent; }
+[data-theme="tokyo-night"] .hljs-comment, [data-theme="tokyo-night"] .hljs-quote { color: var(--text-faint); font-style: italic; }
+[data-theme="tokyo-night"] .hljs-keyword, [data-theme="tokyo-night"] .hljs-selector-tag, [data-theme="tokyo-night"] .hljs-literal, [data-theme="tokyo-night"] .hljs-type { color: #bb9af7; font-weight: 500; }
+[data-theme="tokyo-night"] .hljs-string, [data-theme="tokyo-night"] .hljs-regexp, [data-theme="tokyo-night"] .hljs-addition { color: #9ece6a; }
+[data-theme="tokyo-night"] .hljs-number, [data-theme="tokyo-night"] .hljs-symbol, [data-theme="tokyo-night"] .hljs-bullet { color: #ff9e64; }
+[data-theme="tokyo-night"] .hljs-title, [data-theme="tokyo-night"] .hljs-section, [data-theme="tokyo-night"] .hljs-name, [data-theme="tokyo-night"] .hljs-selector-id { color: #7dcfff; }
+[data-theme="tokyo-night"] .hljs-attr, [data-theme="tokyo-night"] .hljs-attribute, [data-theme="tokyo-night"] .hljs-variable, [data-theme="tokyo-night"] .hljs-template-variable { color: #73daca; }
+[data-theme="tokyo-night"] .hljs-built_in, [data-theme="tokyo-night"] .hljs-builtin-name { color: #7aa2f7; }
+[data-theme="tokyo-night"] .hljs-meta, [data-theme="tokyo-night"] .hljs-doctag { color: #565f89; }
+[data-theme="tokyo-night"] .hljs-tag, [data-theme="tokyo-night"] .hljs-name { color: #f7768e; }
+[data-theme="tokyo-night"] .hljs-emphasis { font-style: italic; color: var(--accent-2); }
+[data-theme="tokyo-night"] .hljs-strong { font-weight: 700; color: var(--accent); }
+
+/* 响应式：移动端 */
+@media (max-width: 860px) {
+  [data-theme="tokyo-night"] aside { background: rgba(31, 32, 48, 0.95) !important; }
+}
