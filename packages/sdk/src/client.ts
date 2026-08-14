@@ -393,8 +393,12 @@ export class GebaiClient {
       const { resolve, reject, timer } = this.pending.get(msg.id)!
       this.pending.delete(msg.id)
       if (timer) clearTimeout(timer)
-      if (msg.ok === false) reject(new Error(msg.error || "WS error"))
-      else resolve(msg)
+      if (msg.ok === false) {
+        // 错误码透传（协议级判定依据，如补发幂等识别 already_running——不再依赖错误文案正则）
+        const err = new Error(msg.error || "WS error") as Error & { code?: string }
+        err.code = typeof msg.payload?.code === "string" ? msg.payload.code : undefined
+        reject(err)
+      } else resolve(msg)
       return
     }
     if (typeof msg.type === "string" && msg.type.startsWith("event.")) {
@@ -405,16 +409,25 @@ export class GebaiClient {
         timestamp: Date.now(),
       }
       if (typeof msg.seq === "number") event.seq = msg.seq
-      if (typeof event.seq === "number") {
-        this.lastSeq = Math.max(this.lastSeq, event.seq)
-        if (event.seq > this.snapshot.lastSeq) this.snapshot.lastSeq = event.seq
-      }
-      // 模型增量：运行中会话集合随任务事件更新（快照 running 的实时延续）
-      if (event.type === "event.task.done" || event.type === "event.task.error") {
-        this.snapshot.running = this.snapshot.running.filter((id) => id !== event.sessionId)
-      }
-      for (const h of this.eventHandlers) h(event)
+      this.dispatchEvent(event)
     }
+  }
+
+  /**
+   * 事件分发（在线推送与断线重放共用）：更新 seq/运行态模型基线后通知全部订阅者。
+   * 断线补偿的重放事件同样经此分发——离线期间的审批/选择/工具事件全局订阅者（前端卡片渲染）
+   * 也能看到，而非只进 sendPrompt 的 chunk 通道（否则重连后审批卡不出现、任务卡死至超时）。
+   */
+  private dispatchEvent(event: AgentEvent): void {
+    if (typeof event.seq === "number") {
+      this.lastSeq = Math.max(this.lastSeq, event.seq)
+      if (event.seq > this.snapshot.lastSeq) this.snapshot.lastSeq = event.seq
+    }
+    // 模型增量：运行中会话集合随任务事件更新（快照 running 的实时延续）
+    if (event.type === "event.task.done" || event.type === "event.task.error") {
+      this.snapshot.running = this.snapshot.running.filter((id) => id !== event.sessionId)
+    }
+    for (const h of this.eventHandlers) h(event)
   }
 
   private applySnapshot(payload: Record<string, unknown>): void {
@@ -709,6 +722,14 @@ export class GebaiClient {
   loadSubAgent(name: string, sessionId?: string): Promise<void> {
     return this.request<void>("sub_agent.load", { name, ...(sessionId ? { sessionId } : {}) })
   }
+  /** 卸载子Agent：sessionId 传入时同步清理该会话内已持久化的装载提示词与记录；缺省仅注销全局工具注册。 */
+  unloadSubAgent(name: string, sessionId?: string): Promise<void> {
+    return this.request<void>("sub_agent.unload", { name, ...(sessionId ? { sessionId } : {}) })
+  }
+  /** 从回收站（GC 归档，保留期 7 天）恢复会话；归属用户或 admin 可操作。 */
+  restoreSession(id: string): Promise<void> {
+    return this.request<void>("session.restore", { id })
+  }
 
   // ---- HTML 小工具库（REST） ----
   /** 列出对当前用户可见的小工具（公用全部 + 本人私有；同名时私有覆盖公用）。 */
@@ -881,8 +902,9 @@ export class GebaiClient {
         accepted = true
         markRunning()
       } catch (e) {
-        // 任务已在运行（重连补发/并发）：视为已接受，转入恢复流程
-        if (/任务.*运行|task already running/i.test(String((e as Error).message || e))) {
+        // 任务已在运行（重连补发/并发）：视为已接受，转入恢复流程。
+        // 以协议错误码判定（不再依赖服务端错误文案正则——跨包隐式契约，改文案即静默破坏恢复）
+        if ((e as Error & { code?: string }).code === "already_running") {
           accepted = true
           return
         }
@@ -955,7 +977,9 @@ export class GebaiClient {
           }
           return
         }
-        for (const ev of r.events) processEvent(ev)
+        // 重放事件经 dispatchEvent 分发：sendPrompt 的 chunk 通道与全局 onEvent 订阅者
+        // （前端审批/选择/工具卡片渲染）都收到——离线期间的交互卡片重连后可恢复
+        for (const ev of r.events) this.dispatchEvent(ev)
         if (finished) return
         // 实时事件中超出重放范围的（重放应答期间到达的）继续处理，避免重复
         for (const ev of live) {

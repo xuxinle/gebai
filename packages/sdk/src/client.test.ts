@@ -784,3 +784,126 @@ describe("GebaiClient state snapshot (MVC model)", () => {
     }
   })
 })
+
+describe("断线重放事件回流全局订阅者", () => {
+  /** 与 makeResumeServer 相同的重连模拟：首连接推送后断开，重放 journal 中的审批事件。 */
+  function makeReplayServer(journal: Array<{ seq: number; type: string; payload: Record<string, unknown> }>) {
+    let conns = 0
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { type: string; id?: string; payload?: Record<string, unknown> }
+          const reply = (payload: Record<string, unknown>) => ws.send(JSON.stringify({ type: msg.type, id: msg.id, ok: true, payload }))
+          switch (msg.type) {
+            case "session.prompt":
+              conns++
+              if (conns === 1) {
+                ws.send(JSON.stringify({ type: "session.prompt", id: msg.id, ok: true }))
+                setTimeout(() => ws.close(), 30) // 未推任何事件即断开
+              } else {
+                reply({})
+              }
+              break
+            case "state.snapshot":
+              reply({ currentSessionId: null, sessions: [], running: ["s1"], lastSeq: Math.max(0, ...journal.map((e) => e.seq)) })
+              break
+            case "sync.request": {
+              const after = Number(msg.payload?.lastSeq ?? 0)
+              const events = journal.filter((e) => e.seq > after).map((e) => ({ ...e, sessionId: "s1", payload: { ...e.payload, sessionId: "s1" } }))
+              reply({ events, overrun: false, lastSeq: Math.max(after, ...events.map((e) => e.seq)) })
+              break
+            }
+            case "session.get":
+              reply({ session: { id: "s1", name: "t", userId: "default", createdAt: 0, updatedAt: 0, messages: [] } })
+              break
+            default:
+              reply({})
+          }
+        },
+      },
+    })
+    return srv
+  }
+
+  test("离线期间的审批/工具事件重放后回流全局 onEvent（前端审批卡恢复）", async () => {
+    const srv = makeReplayServer([
+      { seq: 1, type: "event.approval.request", payload: { toolCallId: "tc1", tool: "sh" } },
+      { seq: 2, type: "event.tool.call", payload: { toolCallId: "tc1", name: "sh" } },
+      { seq: 3, type: "event.task.done", payload: {} },
+    ])
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const globalEvents: string[] = []
+      const unsub = c.onEvent((ev) => globalEvents.push(ev.type))
+      const got: Array<{ kind: string }> = []
+      for await (const chunk of c.sendPrompt("s1", "hi")) got.push({ kind: chunk.kind })
+      unsub()
+      // 全局订阅者收到重放的审批请求（断线前的事件 + 重放事件）
+      expect(globalEvents).toContain("event.approval.request")
+      expect(globalEvents).toContain("event.tool.call")
+      // sendPrompt chunk 流同样收到（approval/task.done 均转换）
+      expect(got.map((g) => g.kind)).toEqual(["approval", "tool_call", "done"])
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  test("session.prompt 补发幂等以协议错误码判定（already_running 不抛错）", async () => {
+    let conns = 0
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return
+        return new Response("upgrade failed", { status: 500 })
+      },
+      websocket: {
+        open() {},
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { type: string; id?: string; payload?: Record<string, unknown> }
+          switch (msg.type) {
+            case "session.prompt":
+              conns++
+              if (conns === 1) {
+                // 首连接：不回复确认即断开（请求确认丢失，客户端转入挂起恢复）
+                setTimeout(() => ws.close(), 30)
+              } else {
+                // 重连补发：服务端返回错误码（已运行）——客户端按协议码接受并转入恢复
+                ws.send(JSON.stringify({ type: "session.prompt", id: msg.id, ok: false, error: "task already running", payload: { code: "already_running" } }))
+                ws.send(JSON.stringify({ type: "event.message.delta", seq: 10, sessionId: "s1", payload: { text: "好", sessionId: "s1" }, timestamp: Date.now() }))
+                ws.send(JSON.stringify({ type: "event.task.done", seq: 11, sessionId: "s1", payload: { sessionId: "s1" }, timestamp: Date.now() }))
+              }
+              break
+            case "state.snapshot":
+              // 快照未显示运行中：客户端补发 prompt，随后服务端回 already_running 协议码
+              ws.send(JSON.stringify({ type: "state.snapshot", id: msg.id, ok: true, payload: { currentSessionId: null, sessions: [], running: [], lastSeq: 9 } }))
+              break
+            case "sync.request":
+              ws.send(JSON.stringify({ type: "sync.request", id: msg.id, ok: true, payload: { events: [], overrun: false, lastSeq: 9 } }))
+              break
+            case "session.get":
+              ws.send(JSON.stringify({ type: "session.get", id: msg.id, ok: true, payload: { session: { id: "s1", name: "t", userId: "default", createdAt: 0, updatedAt: 0, messages: [] } } }))
+              break
+            default:
+              ws.send(JSON.stringify({ type: msg.type, id: msg.id, ok: true, payload: {} }))
+          }
+        },
+      },
+    })
+    try {
+      const c = new GebaiClient({ baseUrl: `http://127.0.0.1:${srv.port}` })
+      const got: Array<{ kind: string; text?: string }> = []
+      for await (const chunk of c.sendPrompt("s1", "hi")) got.push({ kind: chunk.kind, text: chunk.text })
+      // 错误码判定为「已接受」：转入恢复流程，正常收尾而非抛「task already running」
+      expect(got.map((g) => g.kind)).toEqual(["text", "done"])
+      expect(got[0].text).toBe("好")
+    } finally {
+      srv.stop(true)
+    }
+  })
+})
