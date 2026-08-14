@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, dirname } from "node:path"
+import { join, dirname, isAbsolute } from "node:path"
 import type { ToolContext } from "../core/types"
 import { setVisionProviderGetter } from "../core/vision"
 import { def as selfOptimizeDef } from "./self_optimize"
@@ -17,7 +17,7 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     home,
     env: {},
     sandboxed: false,
-    resolvePath: (p) => join(tmp, p),
+    resolvePath: (p) => (isAbsolute(p) ? p : join(tmp, p)),
     readFile: async (p) => await Bun.file(p).text(),
     readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
     writeFile: async (p, content) => {
@@ -96,5 +96,56 @@ describe("self_optimize sub-agent", () => {
     expect(r.output).toContain("视觉能力不可用")
     expect(r.output).toContain("GEBAI_VISION_MODEL")
     cleanup(home)
+  })
+})
+
+describe("self_optimize 写保护闸门（代码级强制，非仅提示词）", () => {
+  /** 构造最小歌白仓库结构（sub-agents 目录 + DESIGN.md + core 目录）。 */
+  function makeRepo(): { root: string; sub: string } {
+    const root = mkdtempSync(join(tmpdir(), "gebai-selfopt-repo-"))
+    mkdirSync(join(root, "packages", "server", "src", "sub-agents"), { recursive: true })
+    mkdirSync(join(root, "packages", "server", "src", "core"), { recursive: true })
+    return { root, sub: join(root, "packages", "server", "src", "sub-agents") }
+  }
+
+  test("默认只读模式：子Agent 目录与仓库级文档可写，核心引擎源码拒绝", async () => {
+    const { root, sub } = makeRepo()
+    delete process.env.GEBAI_SELF_MODIFY
+    const c = ctx(root, { env: { SELF_OPTIMIZE_PROJECT: root } })
+    try {
+      const write = selfOptimizeDef.tools!.write
+      const ok = await write.execute({ path: join(sub, "new_agent.ts"), content: "x" }, c)
+      expect(ok.output).toContain("已写入")
+      const doc = await write.execute({ path: join(root, "DESIGN.md"), content: "d" }, c)
+      expect(doc.output).toContain("已写入")
+      const denied = await write.execute({ path: join(root, "packages", "server", "src", "core", "engine.ts"), content: "x" }, c)
+      expect(denied.output).toContain("拒绝写入")
+      // 越出仓库根（.. 逃逸）同样拒绝
+      const escape = await write.execute({ path: join(dirname(root), "outside.txt"), content: "x" }, c)
+      expect(escape.output).toContain("拒绝写入")
+    } finally {
+      cleanup(root)
+    }
+  })
+
+  test("GEBAI_SELF_MODIFY=true：仓库内任意路径放行", async () => {
+    const { root } = makeRepo()
+    process.env.GEBAI_SELF_MODIFY = "true"
+    const c = ctx(root, { env: { SELF_OPTIMIZE_PROJECT: root } })
+    try {
+      const write = selfOptimizeDef.tools!.write
+      const ok = await write.execute({ path: join(root, "packages", "server", "src", "core", "engine.ts"), content: "x" }, c)
+      expect(ok.output).toContain("已写入")
+    } finally {
+      delete process.env.GEBAI_SELF_MODIFY
+      cleanup(root)
+    }
+  })
+
+  test("run_tests 与 rollback 工具存在且需审批（测试准入凭证 + 回滚恢复路径）", () => {
+    expect(selfOptimizeDef.tools!.run_tests).toBeTruthy()
+    expect(selfOptimizeDef.tools!.rollback).toBeTruthy()
+    expect(selfOptimizeDef.requiresApproval!.run_tests).toBe(true)
+    expect(selfOptimizeDef.requiresApproval!.rollback).toBe(true)
   })
 })

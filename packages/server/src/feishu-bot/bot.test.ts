@@ -2,9 +2,15 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
 import type { SessionData } from "../core/types"
-import { FeishuBot, parseMessageContent, sanitizeId, stripMentions, sniffImageMime, truncateForFeishu } from "./bot"
+import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu } from "./bot"
+
+/** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
+const funame = (openId: string) => `feishu_${createHash("sha256").update(openId).digest("hex").slice(0, 24)}`
+/** 测试辅助：oc_chat1 的派生会话 id（32-hex，满足存储层白名单）。 */
+const sid = () => sessionIdForChat("oc_chat1")
 
 /** 微任务冲刷（ChatOutbox 发送队列）。 */
 const flush = () => new Promise((r) => setTimeout(r, 0))
@@ -310,10 +316,10 @@ describe("消息处理", () => {
     const f = makeBot()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    expect(f.sessions.has("feishu_oc_chat1")).toBe(true)
-    expect(f.sessions.get("feishu_oc_chat1")!.name).toBe("测试群")
+    expect(f.sessions.has(sid())).toBe(true)
+    expect(f.sessions.get(sid())!.name).toBe("测试群")
     expect(f.runs).toHaveLength(1)
-    expect(f.runs[0]).toMatchObject({ sessionId: "feishu_oc_chat1", user: "admin", prompt: "你好" })
+    expect(f.runs[0]).toMatchObject({ sessionId: sid(), user: "admin", prompt: "你好" })
     expect((f.runs[0].opts as { messageId: string }).messageId).toBe("om_msg12")
   })
 
@@ -368,7 +374,7 @@ describe("消息处理", () => {
 
   test("任务运行中拒绝新消息", async () => {
     const f = makeBot()
-    f.running.add("feishu_oc_chat1")
+    f.running.add(sid())
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
     expect(f.runs).toHaveLength(0)
@@ -411,8 +417,8 @@ describe("身份映射", () => {
     const f = makeBot({ authMode: "server" })
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    expect(f.users.has("feishu_ou_123")).toBe(true)
-    expect(f.runs[0].user).toBe("uid_feishu_ou_123")
+    expect(f.users.has(funame("ou_123"))).toBe(true)
+    expect(f.runs[0].user).toBe(`uid_${funame("ou_123")}`)
     // 缓存命中：第二次不重复创建
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_m2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "hi" }) } }))
     await flush()
@@ -421,7 +427,7 @@ describe("身份映射", () => {
 
   test("多用户模式：已存在用户直接映射", async () => {
     const f = makeBot({ authMode: "server" })
-    f.users.set("feishu_ou_123", { id: "existing", username: "feishu_ou_123", role: "user" })
+    f.users.set(funame("ou_123"), { id: "existing", username: funame("ou_123"), role: "user" })
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
     expect(f.runs[0].user).toBe("existing")
@@ -439,19 +445,19 @@ describe("身份映射", () => {
     const f1 = makeBot({ authMode: "server", home })
     await f1.bot.handleFeishuEvent(receiveEvent()) // ou_123 创建
     await flush()
-    expect(f1.sessions.get("feishu_oc_chat1")!.userId).toBe("uid_feishu_ou_123")
+    expect(f1.sessions.get(sid())!.userId).toBe(`uid_${funame("ou_123")}`)
     // 模拟重启：新 bot 实例（同一 home），内存状态全新，store 只有磁盘语义（fake Map 共享）
     const f2 = makeBot({ authMode: "server", home })
     await f2.bot.handleFeishuEvent(receiveEvent({ sender: { sender_id: { open_id: "ou_999" }, sender_type: "user" }, message: { message_id: "om_r", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "重启后发言" }) } }))
     await flush()
     // 会话仍属 ou_123，未以 ou_999 重建；引擎身份为归属用户
-    expect(f2.sessions.get("feishu_oc_chat1")!.userId).toBe("uid_feishu_ou_123")
-    expect(f2.runs[0].user).toBe("uid_feishu_ou_123")
+    expect(f2.sessions.get(sid())!.userId).toBe(`uid_${funame("ou_123")}`)
+    expect(f2.runs[0].user).toBe(`uid_${funame("ou_123")}`)
   })
 })
 
 describe("引擎事件推送", () => {
-  const base = { sessionId: "feishu_oc_chat1", timestamp: 0 }
+  const base = { sessionId: sid(), timestamp: 0 }
 
   test("仅最终回复：无预览流，done 直接发最终卡片", async () => {
     const f = makeBot()
@@ -559,7 +565,7 @@ describe("引擎事件推送", () => {
     expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("需要审批"))).toBe(true)
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
-    expect(f.approvals).toEqual([{ sessionId: "feishu_oc_chat1", toolCallId: "tc9", approve: true }])
+    expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc9", approve: true }])
     // 无待审批时拒绝
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
@@ -581,7 +587,7 @@ describe("引擎事件推送", () => {
     // 发起者本人批准 → 成功
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap4", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
-    expect(f.approvals).toEqual([{ sessionId: "feishu_oc_chat1", toolCallId: "tc7", approve: true }])
+    expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc7", approve: true }])
     f.releaseRuns()
   })
 
@@ -602,7 +608,7 @@ describe("引擎事件推送", () => {
     // ou_123 可以批准
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap6", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
-    expect(f.approvals).toEqual([{ sessionId: "feishu_oc_chat1", toolCallId: "tc8", approve: true }])
+    expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc8", approve: true }])
     f.releaseRuns()
   })
 
@@ -632,10 +638,10 @@ describe("引擎事件推送", () => {
     expect(imgMsg).toBeDefined()
     expect(JSON.stringify(imgMsg!.content)).toContain("image_key")
     // 渲染成功回传引擎（工具返回成功）
-    expect(f.drawResults[0]).toEqual({ sessionId: "feishu_oc_chat1", renderId: "r1", result: { ok: true } })
+    expect(f.drawResults[0]).toEqual({ sessionId: sid(), renderId: "r1", result: { ok: true } })
     // PNG 产物落盘会话 tmp/（与 .puml 并列，Web UI 文件面板可见）
     const { existsSync } = await import("node:fs")
-    expect(existsSync(join(f.home, "sessions", "tmp", "feishu_oc_chat1", "flow.png"))).toBe(true)
+    expect(existsSync(join(f.home, "sessions", "tmp", sid(), "flow.png"))).toBe(true)
   })
 
   test("画图（draw）：渲染失败把错误回传引擎（模型据此修正）", async () => {
@@ -658,7 +664,7 @@ describe("引擎事件推送", () => {
     await flush()
     f.emit({ type: "event.draw.render", ...base, payload: { renderId: "r3", code: "flowchart LR\nA --> B", name: "flow", format: "mermaid" } })
     await waitUntil(() => f.drawResults.length === 1)
-    expect(f.drawResults[0]).toEqual({ sessionId: "feishu_oc_chat1", renderId: "r3", result: { ok: true } })
+    expect(f.drawResults[0]).toEqual({ sessionId: sid(), renderId: "r3", result: { ok: true } })
     expect(f.renderCalls[0]).toEqual({ code: "flowchart LR\nA --> B", format: "mermaid" })
     expect(f.uploads).toHaveLength(1)
     expect(f.sent.some((s) => s.msgType === "image")).toBe(true)
@@ -714,7 +720,7 @@ describe("引擎事件推送", () => {
         context: { open_message_id: "om_c1", open_chat_id: "oc_chat1" },
       },
     })
-    expect(f.choices).toEqual([{ sessionId: "feishu_oc_chat1", choiceId: "c1", selection: "B" }])
+    expect(f.choices).toEqual([{ sessionId: sid(), choiceId: "c1", selection: "B" }])
     // 决策后卡片更新为终态（「已选择」文案，按钮不可再点）
     expect(JSON.stringify(resp)).toContain("已选择：B")
     // 再发一次选择卡并拒绝
@@ -727,7 +733,7 @@ describe("引擎事件推送", () => {
         context: { open_message_id: "om_c2", open_chat_id: "oc_chat1" },
       },
     })
-    expect(f.choices[1]).toEqual({ sessionId: "feishu_oc_chat1", choiceId: "c2", selection: null })
+    expect(f.choices[1]).toEqual({ sessionId: sid(), choiceId: "c2", selection: null })
     f.releaseRuns()
   })
 
@@ -761,7 +767,7 @@ describe("引擎事件推送", () => {
         context: { open_message_id: "om_c3", open_chat_id: "oc_chat1" },
       },
     })
-    expect(f.choices).toEqual([{ sessionId: "feishu_oc_chat1", choiceId: "c3", selection: ["Vue"] }])
+    expect(f.choices).toEqual([{ sessionId: sid(), choiceId: "c3", selection: ["Vue"] }])
     f.releaseRuns()
   })
 
@@ -867,8 +873,8 @@ describe("命令", () => {
     await flush()
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_n", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
     await flush()
-    expect(f.deleted).toContain("feishu_oc_chat1")
-    expect(f.sessions.get("feishu_oc_chat1")!.messages).toEqual([])
+    expect(f.deleted).toContain(sid())
+    expect(f.sessions.get(sid())!.messages).toEqual([])
   })
 
   test("/sessions 列出会话", async () => {
@@ -880,17 +886,38 @@ describe("命令", () => {
     expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("测试群"))).toBe(true)
   })
 
-  test("/new 多用户群聊：以会话所有者身份重建（不产生归属漂移）", async () => {
+  test("/new 多用户群聊：非创建者被拒；创建者以会话所有者身份重建（不产生归属漂移）", async () => {
     const f = makeBot({ authMode: "server" })
-    await f.bot.handleFeishuEvent(receiveEvent()) // ou_123 建会话
+    await f.bot.handleFeishuEvent(receiveEvent()) // ou_123 建会话（即创建者）
     await flush()
-    const owner = f.sessions.get("feishu_oc_chat1")!.userId
-    expect(owner).toBe("uid_feishu_ou_123")
-    // 另一成员 ou_999 触发 /new
+    const owner = f.sessions.get(sid())!.userId
+    expect(owner).toBe(`uid_${funame("ou_123")}`)
+    // 另一成员 ou_999 触发 /new：被拒（群聊防越权——清空共享会话上下文仅创建者可做）
     await f.bot.handleFeishuEvent(receiveEvent({ sender: { sender_id: { open_id: "ou_999" }, sender_type: "user" }, message: { message_id: "om_n2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
     await flush()
-    expect(f.sessions.get("feishu_oc_chat1")!.userId).toBe(owner)
-    expect(f.deleted).toContain("feishu_oc_chat1")
+    expect(f.deleted).toEqual([])
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("只有创建该会话的用户"))).toBe(true)
+    // 创建者 ou_123 触发 /new：成功重建，归属不漂移
+    await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_n3", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
+    await flush()
+    expect(f.sessions.get(sid())!.userId).toBe(owner)
+    expect(f.deleted).toContain(sid())
+  })
+
+  test("/cancel 群聊：非任务发起者被拒，发起者可取消", async () => {
+    const f = makeBot({ hangRun: true })
+    void f.bot.handleFeishuEvent(receiveEvent()) // ou_123 发起任务（fake engine 挂起，不 await）
+    await waitUntil(() => f.runs.length === 1)
+    // 另一成员 ou_999 /cancel：被拒
+    await f.bot.handleFeishuEvent(receiveEvent({ sender: { sender_id: { open_id: "ou_999" }, sender_type: "user" }, message: { message_id: "om_c2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/cancel" }) } }))
+    await flush()
+    expect(f.cancels).toEqual([])
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("只有任务发起者"))).toBe(true)
+    // 发起者 ou_123 /cancel：生效
+    await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_c3", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/cancel" }) } }))
+    await flush()
+    expect(f.cancels).toContain(sid())
+    f.releaseRuns()
   })
 
   test("/cancel 取消任务", async () => {
@@ -899,7 +926,7 @@ describe("命令", () => {
     await flush()
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_c", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/cancel" }) } }))
     await flush()
-    expect(f.cancels).toContain("feishu_oc_chat1")
+    expect(f.cancels).toContain(sid())
   })
 
   test("/approval-skip 单用户可设、多用户拒绝", async () => {
@@ -908,7 +935,7 @@ describe("命令", () => {
     await flush()
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_a", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approval-skip" }) } }))
     await flush()
-    expect(f.envSets).toEqual([{ sessionId: "feishu_oc_chat1", vars: { GEBAI_APPROVAL_SKIP: "true" } }])
+    expect(f.envSets).toEqual([{ sessionId: sid(), vars: { GEBAI_APPROVAL_SKIP: "true" } }])
 
     const m = makeBot({ authMode: "server" })
     await m.bot.handleFeishuEvent(receiveEvent())
@@ -934,5 +961,112 @@ describe("启动/停止", () => {
     expect(f.connCalls).toContain("start")
     f.bot.stop()
     expect(f.connCalls).toContain("stop")
+  })
+})
+
+describe("真实存储集成", () => {
+  test("派生会话 id 满足存储层白名单：真实 SessionStore 下创建/加载/运行全链路可用", async () => {
+    const { SessionStore } = await import("../core/store")
+    const home = mkdtempSync(join(tmpdir(), "feishu-real-store-"))
+    const store = new SessionStore({ home })
+    const sessions: SessionData[] = []
+    const runs: Array<{ sessionId: string; user: string }> = []
+    const auth = {
+      defaultUser: () => ({ id: "admin", username: "admin", role: "admin" as const, disabled: false, createdAt: 0, salt: "", hash: "" }),
+      listUsers: async () => [] as never[],
+      createUser: async () => {
+        throw new Error("not expected")
+      },
+    }
+    const adapter = {
+      isRunning: () => false,
+      run: async (sessionId: string, user: string) => {
+        runs.push({ sessionId, user })
+      },
+    }
+    const bot = new FeishuBot({
+      appId: "cli_a",
+      appSecret: "sec",
+      authMode: "local",
+      home,
+      store: store as never,
+      adapter: adapter as never,
+      auth: auth as never,
+      api: {
+        getTenantToken: async () => "t",
+        sendMessage: async () => "om_1",
+        replyMessage: async () => "om_2",
+        deleteMessage: async () => true,
+        addMessageReaction: async () => null,
+        deleteMessageReaction: async () => true,
+        downloadResource: async () => new Uint8Array(),
+        uploadImage: async () => "img",
+        getChatName: async () => "测试群",
+      },
+      conn: { start: async () => {}, stop: () => {} },
+    })
+    await bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    // 派生 id 为 32 位小写 hex（feishu_{chatId} 形态会被存储层白名单拒绝——本测试即回归防线）
+    const id = sid()
+    expect(id).toMatch(/^[0-9a-f]{32}$/)
+    expect(runs).toEqual([{ sessionId: id, user: "admin" }])
+    const loaded = await store.load(id, "admin")
+    expect(loaded).not.toBeNull()
+    expect(loaded!.name).toBe("测试群")
+    expect(sessions.length).toBe(0)
+  })
+
+  test("映射用户创建失败时中止（绝不以默认 admin 兜底运行任务）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feishu-nofallback-"))
+    const runs: Array<{ sessionId: string; user: string }> = []
+    const auth = {
+      defaultUser: () => ({ id: "admin", username: "admin", role: "admin" as const, disabled: false, createdAt: 0, salt: "", hash: "" }),
+      listUsers: async () => [] as never[],
+      createUser: async () => {
+        throw new Error("registry broken")
+      },
+    }
+    const sent: Array<{ content: unknown }> = []
+    const bot = new FeishuBot({
+      appId: "cli_a",
+      appSecret: "sec",
+      authMode: "server",
+      home,
+      store: {
+        load: async () => null,
+        save: async (s: SessionData) => void (s as SessionData),
+        delete: async () => {},
+        listSessions: async () => [],
+        setEnv: async () => ({}),
+        getTmpDir: () => home,
+      } as never,
+      adapter: {
+        isRunning: () => false,
+        run: async (sessionId: string, user: string) => {
+          runs.push({ sessionId, user })
+        },
+      } as never,
+      auth: auth as never,
+      api: {
+        getTenantToken: async () => "t",
+        sendMessage: async (_o: { content: unknown }) => {
+          sent.push({ content: _o.content })
+          return "om_1"
+        },
+        replyMessage: async () => "om_2",
+        deleteMessage: async () => true,
+        addMessageReaction: async () => null,
+        deleteMessageReaction: async () => true,
+        downloadResource: async () => new Uint8Array(),
+        uploadImage: async () => "img",
+        getChatName: async () => "测试群",
+      },
+      conn: { start: async () => {}, stop: () => {} },
+    })
+    await bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    expect(runs).toEqual([]) // 不得以 admin 兜底运行
+    expect(sent.some((s) => String(JSON.stringify(s.content)).includes("会话初始化失败"))).toBe(true)
   })
 })

@@ -1,12 +1,14 @@
 /**
  * 飞书机器人对话桥接：消息事件 → 歌白会话 → Agent 回复推送。
- * - 会话映射：每个飞书单聊/群聊（chat_id）映射独立会话 `feishu_{chat_id}`
+ * - 会话映射：每个飞书单聊/群聊（chat_id）映射独立会话（id = sha256("feishu:"+chat_id) 前 32 位 hex，
+ *   满足存储层会话 id 白名单 [0-9a-f]{32}——chatId 形如 oc_xxx 不能直接作为目录名/会话 id）
  * - 身份映射：单用户模式固定默认用户；多用户模式按 open_id 自动创建映射用户
  * - 桥接方式：经接口层（BotPromptAdapter）以「多轮交互 + 仅最终回复」运行——关键操作（审批/选择）
  *   回调询问用户，回复仅最终消息（无流式预览），不直接接触引擎层（不订阅事件总线）
  * - 命令：/help /new /sessions /cancel /approve /reject /approval-skip
  * 依赖全部注入（store/adapter/auth/api/conn），可独立单测。
  */
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import type { AuthService } from "../auth"
@@ -242,6 +244,12 @@ export function sanitizeId(raw: string): string | null {
   return /^[A-Za-z0-9_-]{1,64}$/.test(raw) ? raw : null
 }
 
+/** 飞书会话 id 派生：sha256("feishu:"+chatId) 前 32 位 hex——确定性（重启不变）且满足存储层
+ *  会话 id 白名单（`feishu_{chatId}` 含 `_` 与大写不在 [0-9a-f]{32} 内，真实 SessionStore 下 save 抛错）。 */
+export function sessionIdForChat(chatId: string): string {
+  return createHash("sha256").update(`feishu:${chatId}`).digest("hex").slice(0, 32)
+}
+
 /** 解析消息 content（JSON 字符串）为文本；非文本类型返回 null。 */
 export function parseMessageContent(messageType: string, content: string): string | null {
   try {
@@ -344,6 +352,8 @@ export class FeishuBot {
   private runOwners = new Map<string, string>()
   /** chatId → 会话归属用户 id（内存 + feishu/chat-owners.json 持久化，重启恢复）。 */
   private chatOwners = new Map<string, string>()
+  /** chatId → 会话创建者 open_id（群聊命令授权：/new /approval-skip /cancel 仅创建者/任务发起者可操作）。 */
+  private chatCreators = new Map<string, string>()
   private ownersPath: string
   private ownersLoaded = false
   /** 归属映射写入串行队列（不同 chatId 首次交互并发时防整文件覆盖竞态）。 */
@@ -358,7 +368,10 @@ export class FeishuBot {
     const connOpts: FeishuConnOptions = {
       appId: opts.appId,
       appSecret: opts.appSecret,
-      onEvent: (ev) => void this.handleFeishuEvent(ev),
+      onEvent: (ev) => {
+        // 事件处理异常必须捕获（async 回调的 rejection 无人接会成为 unhandled rejection）
+        void this.handleFeishuEvent(ev).catch((err) => this.log(`event handler failed: ${String((err as Error).message || err)}`))
+      },
       onCardAction: (payload) => this.handleCardAction(payload),
       ...opts.connOptions,
     }
@@ -391,7 +404,13 @@ export class FeishuBot {
     const chatId = sanitizeId(message.chat_id ?? "")
     const openId = sanitizeId(sender.sender_id?.open_id ?? "")
     if (!chatId || !openId) return
-    const sessionId = await this.ensureSession(chatId, openId)
+    let sessionId: string
+    try {
+      sessionId = await this.ensureSession(chatId, openId)
+    } catch (err) {
+      this.outbox(chatId).sendText(`⚠️ 会话初始化失败：${String((err as Error).message || err)}`)
+      return
+    }
     const messageId = message.message_id ?? ""
     const messageType = message.message_type ?? ""
     const content = message.content ?? ""
@@ -431,14 +450,14 @@ export class FeishuBot {
     this.outbox(chatId).sendText(`暂不支持 ${messageType} 类型消息，请发送文字。`)
   }
 
-  /** 会话映射：`feishu_{chat_id}`，按需创建（chatId 级并发锁 + 归属持久化）。
+  /** 会话映射：sessionIdForChat(chatId)（确定性 32-hex），按需创建（chatId 级并发锁 + 归属持久化）。
    *  会话归属：首聊用户创建并持久化（feishu/chat-owners.json），群聊成员共享同一会话，
    *  引擎身份始终为会话归属用户（重启后从持久化恢复，不因他人发言重建/覆盖）。 */
   ensureSession(chatId: string, openId: string): Promise<string> {
     const locked = this.ensureLocks.get(chatId)
     if (locked) return locked
     const p = (async () => {
-      const sessionId = `feishu_${chatId}`
+      const sessionId = sessionIdForChat(chatId)
       await this.loadOwners()
       const owner = this.chatOwners.get(chatId)
       if (owner) {
@@ -452,18 +471,21 @@ export class FeishuBot {
         }
         return sessionId
       }
-      // 首次交互：当前用户创建并记录归属
+      // 首次交互：当前用户创建并记录归属（映射用户创建失败时抛错——绝不能以默认 admin 兜底运行任务）
       const userId = await this.resolveUser(openId)
+      if (!userId) throw new Error("无法为该飞书用户创建映射用户（用户注册失败）")
       const name = (await this.api.getChatName(chatId)) ?? "飞书会话"
       const now = this.clock()
       await this.opts.store.save({ id: sessionId, name, userId, messages: [], todos: [], createdAt: now, updatedAt: now })
       this.chatOwners.set(chatId, userId)
+      this.chatCreators.set(chatId, openId)
       await this.saveOwners()
       this.log(`session created: ${sessionId} (user=${userId})`)
       return sessionId
     })()
     this.ensureLocks.set(chatId, p)
-    void p.finally(() => this.ensureLocks.delete(chatId))
+    // finally 链产生的 promise 需自行捕获（锁清理链不得产生 unhandled rejection）
+    void p.finally(() => this.ensureLocks.delete(chatId)).catch(() => {})
     return p
   }
 
@@ -471,10 +493,18 @@ export class FeishuBot {
     if (this.ownersLoaded) return
     this.ownersLoaded = true
     try {
-      const raw = JSON.parse(await readFile(this.ownersPath, "utf8")) as Record<string, string>
-      for (const [chatId, userId] of Object.entries(raw)) {
-        // 双向校验：chatId 与 userId 均须为安全字符（防本地文件被篡改后注入引擎身份）
-        if (/^[A-Za-z0-9_-]{1,64}$/.test(chatId) && /^[A-Za-z0-9_-]{1,64}$/.test(userId)) this.chatOwners.set(chatId, userId)
+      const raw = JSON.parse(await readFile(this.ownersPath, "utf8")) as Record<string, unknown>
+      for (const [chatId, v] of Object.entries(raw)) {
+        // 双向校验：chatId/userId/creator 均须为安全字符（防本地文件被篡改后注入引擎身份）；
+        // 兼容旧格式（chatId → userId 字符串）与新格式（chatId → {user, creator?}）
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(chatId)) continue
+        if (typeof v === "string") {
+          if (/^[A-Za-z0-9_-]{1,64}$/.test(v)) this.chatOwners.set(chatId, v)
+        } else if (v && typeof v === "object") {
+          const o = v as { user?: unknown; creator?: unknown }
+          if (typeof o.user === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(o.user)) this.chatOwners.set(chatId, o.user)
+          if (typeof o.creator === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(o.creator)) this.chatCreators.set(chatId, o.creator)
+        }
       }
     } catch {
       /* 首次运行/文件损坏：空表 */
@@ -485,7 +515,12 @@ export class FeishuBot {
     this.ownersWriteQueue = this.ownersWriteQueue.then(async () => {
       try {
         await mkdir(join(this.opts.home, "feishu"), { recursive: true })
-        await writeFile(this.ownersPath, JSON.stringify(Object.fromEntries(this.chatOwners), null, 2))
+        const data: Record<string, { user: string; creator?: string }> = {}
+        for (const [chatId, user] of this.chatOwners) {
+          const creator = this.chatCreators.get(chatId)
+          data[chatId] = creator ? { user, creator } : { user }
+        }
+        await writeFile(this.ownersPath, JSON.stringify(data, null, 2))
       } catch (err) {
         this.log(`chat owners persist failed: ${String((err as Error).message || err)}`)
       }
@@ -493,10 +528,13 @@ export class FeishuBot {
     return this.ownersWriteQueue
   }
 
-  /** 身份映射：单用户 → 默认用户；多用户 → open_id 映射用户（自动创建，10 分钟缓存）。 */
-  async resolveUser(openId: string): Promise<string> {
+  /** 身份映射：单用户 → 默认用户；多用户 → open_id 映射用户（自动创建，10 分钟缓存）。
+   *  创建失败返回 null（调用方必须中止——不得以默认用户兜底，那会让飞书侧任务以沙箱豁免的 admin 身份运行）。 */
+  async resolveUser(openId: string): Promise<string | null> {
     if (this.opts.authMode === "local") return this.opts.auth.defaultUser().id
-    const username = `feishu_${openId}`
+    // 映射用户名按 openId 哈希派生：openId 可含大写/超长（≤64），直接拼接过不了用户名白名单
+    // （小写折叠 + 1-32 字符）；sha256 前 24 位 hex 确定性防碰撞
+    const username = `feishu_${createHash("sha256").update(openId).digest("hex").slice(0, 24)}`
     const cached = this.userCache.get(username)
     if (cached && this.clock() - cached.at < 10 * 60_000) return cached.userId
     let user = (await this.opts.auth.listUsers()).find((u) => u.username === username)
@@ -513,7 +551,7 @@ export class FeishuBot {
       this.userCache.set(username, { userId: user.id, at: this.clock() })
       return user.id
     }
-    return this.opts.auth.defaultUser().id
+    return null
   }
 
   private runPrompt(
@@ -542,7 +580,12 @@ export class FeishuBot {
       }
       try {
         // 经接口层运行（多轮交互 + 仅最终回复）：关键操作（审批/选择）回调询问，回复仅最终消息
-        await this.opts.adapter.run(sessionId, (await this.userOf(sessionId)), text, {
+        const owner = await this.userOf(sessionId)
+        if (!owner) {
+          this.outbox(chatId).error("会话归属用户不可用（映射用户缺失），无法运行任务。请联系管理员检查用户注册表。", messageId)
+          return
+        }
+        await this.opts.adapter.run(sessionId, owner, text, {
           messageId: /^[A-Za-z0-9_-]{8,64}$/.test(messageId) ? messageId : undefined,
           attachments,
         }, {
@@ -584,16 +627,14 @@ export class FeishuBot {
     })()
   }
 
-  /** 引擎身份：会话归属用户（chatOwners 持久化映射优先，磁盘会话兜底）。 */
-  private async userOf(sessionId: string): Promise<string> {
-    const chatId = sessionId.startsWith("feishu_") ? sessionId.slice("feishu_".length) : ""
-    if (chatId) {
-      await this.loadOwners()
-      const owner = this.chatOwners.get(chatId)
-      if (owner) return owner
+  /** 引擎身份：会话归属用户（chatOwners 持久化映射优先，磁盘会话兜底；均未知返回 null——绝不以默认用户兜底）。 */
+  private async userOf(sessionId: string): Promise<string | null> {
+    await this.loadOwners()
+    for (const [chatId, owner] of this.chatOwners) {
+      if (sessionIdForChat(chatId) === sessionId) return owner
     }
     const s = await this.opts.store.load(sessionId)
-    return s?.userId ?? this.opts.auth.defaultUser().id
+    return s?.userId ?? null
   }
 
   private outbox(chatId: string): ChatOutbox {
@@ -622,9 +663,11 @@ export class FeishuBot {
       // 产物落盘会话 tmp/（与 .puml 并列，Web UI 文件面板可见；失败不阻塞图片发送）
       try {
         const owner = await this.userOf(sessionId)
-        const tmp = this.opts.store.getTmpDir(sessionId, owner)
-        await mkdir(tmp, { recursive: true })
-        await writeFile(join(tmp, `${name}.png`), png)
+        if (owner) {
+          const tmp = this.opts.store.getTmpDir(sessionId, owner)
+          await mkdir(tmp, { recursive: true })
+          await writeFile(join(tmp, `${name}.png`), png)
+        }
       } catch (err) {
         this.log(`draw png persist failed: ${String((err as Error).message || err)}`)
       }
@@ -738,6 +781,10 @@ export class FeishuBot {
     const cmd = raw.toLowerCase().split(/\s+/)[0]
     const outbox = this.outbox(chatId)
     const userId = await this.resolveUser(openId)
+    // 会话级管理命令授权（群聊防越权）：会话创建者或（运行中任务的）发起者才可操作破坏性命令
+    await this.loadOwners()
+    const creator = this.chatCreators.get(chatId)
+    const restricted = creator && creator !== openId
     switch (cmd) {
       case "/help":
         outbox.sendText(
@@ -754,10 +801,18 @@ export class FeishuBot {
         )
         break
       case "/new": {
+        if (restricted) {
+          outbox.sendText("⚠️ 只有创建该会话的用户可以新建会话（清空上下文）。")
+          break
+        }
         // 运行中任务先取消（避免重建后事件路由丢失）；以会话归属用户身份重建（不产生归属漂移）
         if (this.opts.adapter.isRunning(sessionId)) this.opts.adapter.cancel(sessionId)
         await this.loadOwners()
-        const owner = this.chatOwners.get(chatId) ?? userId
+        const owner = this.chatOwners.get(chatId) ?? userId ?? undefined
+        if (!owner) {
+          outbox.sendText("⚠️ 无法确定会话归属用户，新建会话失败。")
+          break
+        }
         if (!this.chatOwners.has(chatId)) {
           // 归属未知（如映射文件被清）时记录，避免下一位成员以自己的身份重建
           this.chatOwners.set(chatId, owner)
@@ -775,7 +830,13 @@ export class FeishuBot {
         break
       }
       case "/sessions": {
-        const sessions = await this.opts.store.listSessions(userId)
+        // 以会话归属用户身份列出（群聊成员共享同一会话，归属者视角才是本会话的会话列表）
+        const owner = (await this.userOf(sessionId)) ?? userId
+        if (!owner) {
+          outbox.sendText("暂无会话。")
+          break
+        }
+        const sessions = await this.opts.store.listSessions(owner)
         if (!sessions.length) {
           outbox.sendText("暂无会话。")
           break
@@ -787,10 +848,17 @@ export class FeishuBot {
         outbox.sendText(`📂 最近会话：\n${lines.join("\n")}`)
         break
       }
-      case "/cancel":
+      case "/cancel": {
+        // 授权：任务发起者或会话创建者可取消（运行中任务无主时任何人可取消——此时为空操作）
+        const runOwner = this.runOwners.get(sessionId)
+        if (runOwner && runOwner !== openId && !(creator && creator === openId)) {
+          outbox.sendText("⚠️ 只有任务发起者可以取消当前任务。")
+          break
+        }
         this.opts.adapter.cancel(sessionId)
         outbox.sendText("🛑 已发送取消指令。")
         break
+      }
       case "/approve":
       case "/reject": {
         const pending = this.pendingApprovals.get(chatId)
@@ -814,9 +882,17 @@ export class FeishuBot {
           outbox.sendText("⚠️ 多用户模式下非管理员不能设置审批跳过。")
           break
         }
+        if (restricted) {
+          outbox.sendText("⚠️ 只有创建该会话的用户可以修改审批设置。")
+          break
+        }
         // 以会话真实所有者身份设置（群聊中任何成员触发均作用于同一会话）
         const cur = await this.opts.store.load(sessionId)
         const owner = cur?.userId ?? userId
+        if (!owner) {
+          outbox.sendText("⚠️ 无法确定会话归属用户，设置失败。")
+          break
+        }
         await this.opts.store.setEnv(sessionId, owner, { GEBAI_APPROVAL_SKIP: "true" })
         outbox.sendText("✅ 已设置会话级审批跳过。")
         break
