@@ -233,12 +233,53 @@ const headerTitleEl = document.getElementById("header-title")
 const headerCtxEl = document.getElementById("header-ctx")
 const ctxTextEl = document.querySelector<HTMLElement>("#header-ctx .ctx-text")
 const ctxFillEl = document.querySelector<HTMLElement>("#header-ctx .ctx-fill")
+const headerSessionIdEl = document.getElementById("header-session-id")
 
 /** 浏览器 tab 标题固定为「歌白」（不拼接会话名）；标题栏居中会话标题跟随当前会话。 */
 export function updateTitle() {
   document.title = "歌白"
   if (headerTitleEl) headerTitleEl.textContent = currentSession ? currentSession.name : ""
+  // 会话 ID 徽标（定位/反馈问题用）：当前会话存在时显示前 8 位，点击复制完整 ID
+  if (headerSessionIdEl) {
+    if (currentSession) {
+      headerSessionIdEl.hidden = false
+      headerSessionIdEl.textContent = `ID ${currentSession.id.slice(0, 8)}…`
+      headerSessionIdEl.title = `会话 ID: ${currentSession.id}\n点击复制`
+    } else {
+      headerSessionIdEl.hidden = true
+    }
+  }
   renderHeaderCtx()
+}
+
+/** 复制当前会话完整 ID 到剪贴板（点击会话 ID 徽标触发；回调由 sessions 层注册）。 */
+export function copySessionId(): string | null {
+  if (!currentSession) return null
+  const id = currentSession.id
+  const copy = async (): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(id)
+      return true
+    } catch {
+      // 非安全上下文（http/file）回退 execCommand
+      const ta = document.createElement("textarea")
+      ta.value = id
+      ta.style.position = "fixed"
+      ta.style.opacity = "0"
+      document.body.appendChild(ta)
+      ta.select()
+      let ok = false
+      try {
+        ok = document.execCommand("copy")
+      } catch {
+        ok = false
+      }
+      ta.remove()
+      return ok
+    }
+  }
+  void copy()
+  return id
 }
 
 /** 模型上下文窗口（token）：来自服务端快照/session.list（0=未知/未配置）。 */

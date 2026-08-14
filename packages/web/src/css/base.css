@@ -1088,3 +1088,21 @@ html[data-low-power="on"] .msg {
   contain-intrinsic-size: auto 320px;
 }
 
+/* 会话 ID 徽标（标题栏，定位/反馈问题用）：等宽小字，点击复制完整 ID */
+.header-session-id {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+  cursor: copy;
+  opacity: 0.75;
+}
+.header-session-id:hover {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+}

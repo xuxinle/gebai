@@ -24,6 +24,7 @@ import {
   sidebarToggle,
   todoState,
   updateTitle,
+  copySessionId,
   saveDraft,
   getDraft,
   clearDraft,
@@ -670,12 +671,20 @@ export { hideEmptyState }
 
 export async function maybeAutoTitle(sessionId: string) {
   if (autoNamed.has(sessionId)) return
-  const session = await client.getSession(sessionId).catch(() => null)
-  if (!session) return
-  if (session.name !== "新会话") {
-    // 已自定义标题（如创建时指定），不再自动命名
+  // 名称判定优先走快照（避免为取标题全量拉取会话消息）；快照无此会话时才回退 getSession
+  const snapInfo = client.getSnapshot().sessions.find((s) => s.id === sessionId)
+  if (snapInfo && snapInfo.name !== "新会话") {
     autoNamed.add(sessionId)
     return
+  }
+  if (!snapInfo) {
+    const session = await client.getSession(sessionId).catch(() => null)
+    if (!session) return
+    if (session.name !== "新会话") {
+      // 已自定义标题（如创建时指定），不再自动命名
+      autoNamed.add(sessionId)
+      return
+    }
   }
   const first = firstInputOf(sessionId)
   if (!first) return
@@ -815,6 +824,11 @@ export function bindSessionActions() {
     }
   }
   sidebarToggle.onclick = toggleSidebar
+  // 会话 ID 徽标：点击复制完整 ID（定位问题/反馈用）
+  document.getElementById("header-session-id")?.addEventListener("click", () => {
+    const id = copySessionId()
+    if (id) toast(`已复制会话 ID: ${id}`, "ok")
+  })
   // Ctrl+B 快捷键切换会话列表（拦截浏览器默认书签行为；任意焦点状态可用）
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {

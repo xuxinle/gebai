@@ -12,7 +12,7 @@ import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
-import { initLowPower, isLowPower } from "./low-power"
+import { initLowPower } from "./low-power"
 import { bindSessionActions, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { addApproval, clearApprovals } from "./approvals"
 import {
@@ -413,7 +413,7 @@ composer.addEventListener("submit", async (e) => {
             run.reasoningEl = reasoningBlock()
             bubble.prepend(run.reasoningEl)
           }
-          // 推理内容 markdown 渲染：与正文同走节流渲染路径（标准模式逐 chunk，低性能模式合并 120ms）
+          // 推理内容 markdown 渲染：与正文同走 120ms 尾沿节流渲染路径
           scheduleStreamRender(run)
           if (getCurrentSession()?.id === sessionId) {
             scrollIfSticky()
@@ -529,13 +529,10 @@ function renderStreamText(run: RunState): void {
   }
 }
 
-/** 低性能模式：流式文本渲染按 120ms 尾沿节流（markdown 全量重解析是流式期间最重的 CPU 开销）；
- * 标准模式逐 chunk 同步渲染（无延迟）。计时器挂 run 上：封段/结束时随 run 清理。 */
+/** 流式文本渲染按 120ms 尾沿节流（markdown 全量重解析是流式期间最重的 CPU 开销，
+ * 逐 chunk 同步渲染在长回答下 O(n²) 全量重解析——所有模式统一节流，消除性能悬崖）。
+ * 计时器挂 run 上：封段/结束时随 run 清理。 */
 function scheduleStreamRender(run: RunState): void {
-  if (!isLowPower()) {
-    renderStreamText(run)
-    return
-  }
   if (run.renderTimer) return // 已排期：本轮仅累积 run.acc，到点一起渲染
   run.renderTimer = setTimeout(() => {
     run.renderTimer = undefined
@@ -575,12 +572,8 @@ function renderSessionStreamText(sub: SessionRunState): void {
   refreshJumpBottom()
 }
 
-/** 低性能模式：新会话容器内流式文本渲染按 120ms 尾沿节流（与主循环 scheduleStreamRender 同构）。 */
+/** 新会话容器内流式文本渲染按 120ms 尾沿节流（与主循环 scheduleStreamRender 同构，所有模式统一）。 */
 function scheduleSessionRender(sub: SessionRunState): void {
-  if (!isLowPower()) {
-    renderSessionStreamText(sub)
-    return
-  }
   if (sub.renderTimer) return
   sub.renderTimer = setTimeout(() => {
     sub.renderTimer = undefined
