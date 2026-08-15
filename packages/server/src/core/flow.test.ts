@@ -525,6 +525,33 @@ describe("runFlow 数据流编排", () => {
     expect(n).toBeLessThan(999)
   })
 
+  test("sh strict: non-zero exit interrupts flow; optional tolerates", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const sh: Tool = {
+      name: "sh",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      requiresApproval: true,
+      async execute(args) {
+        const strict = args.strict === true
+        const fail = String(args.command ?? "").includes("fail")
+        if (strict && fail) throw new Error("命令执行失败（exit 1）：boom")
+        return { output: `ok:${args.command}`, data: { stdout: `out:${args.command}`, exitCode: fail ? 1 : 0 } }
+      },
+    }
+    const c = flowCtx({ sh, after: tool("after", () => "after") }, calls)
+    // strict 非 0 中断整个 flow
+    await expect(
+      runFlow({ steps: [{ id: "s", tool: "sh", params: { command: "fail", strict: true } }, { tool: "after" }] }, c),
+    ).rejects.toThrow(/exit 1/)
+    // optional 容错：strict 失败不中断
+    const r = await runFlow({ steps: [{ id: "s", tool: "sh", params: { command: "fail", strict: true }, optional: true }, { tool: "after" }] }, c)
+    expect(r.output).toContain("after")
+    // 非 strict 默认不中断（非 0 是正常结果）
+    const r2 = await runFlow({ steps: [{ id: "s", tool: "sh", params: { command: "fail" } }, { tool: "after" }] }, c)
+    expect(r2.output).toContain("after")
+  })
+
   test("timeout 非法/缺省不限制（行为不变）", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
     const c = flowCtx({ t: tool("t", () => "x") }, calls)

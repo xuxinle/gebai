@@ -105,6 +105,37 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("sh strict: non-zero exit throws tool-level error; default returns result with exitCode", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-strict-"))
+    const c = ctx(home)
+    c.runCommand = async (cmd) => (cmd.includes("fail") ? { stdout: "out", stderr: "boom", code: 3 } : { stdout: "ok", stderr: "", code: 0 })
+    // 默认：非 0 退出作为正常结果（data.exitCode 可见）
+    const r = await shTool.execute({ command: "fail" }, c)
+    expect(r.output).toContain("[exit 3]")
+    expect((r.data as { exitCode: number }).exitCode).toBe(3)
+    // strict：非 0 退出抛工具级错误（flow 中未 optional 时中断）
+    await expect(shTool.execute({ command: "fail", strict: true }, c)).rejects.toThrow(/exit 3[\s\S]*boom/)
+    await expect(shTool.execute({ command: "ok", strict: true }, c)).resolves.toBeDefined()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("py strict: non-zero exit throws; zero exit unaffected", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-py-strict-"))
+    const c = ctx(home)
+    // 脚本经临时文件执行（命令是解释器+路径，无法从命令内容判断脚本），按脚本调用序号模拟退出码；
+    // --version 探测恒成功
+    let scriptCalls = 0
+    c.runCommand = async (cmd) => {
+      if (cmd.includes("--version")) return { stdout: "Python 3.12.0\n", stderr: "", code: 0 }
+      scriptCalls++
+      return scriptCalls === 1 ? { stdout: "", stderr: "Traceback", code: 1 } : { stdout: "ok", stderr: "", code: 0 }
+    }
+    await expect(pyTool.execute({ code: "print('boom')", strict: true }, c)).rejects.toThrow(/exit 1[\s\S]*Traceback/)
+    const ok = await pyTool.execute({ code: "print(1)", strict: true }, c)
+    expect(ok.output.trim()).toBe("ok")
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("sh tool timeout param passes through, defaults 300s and clamps to 540s", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sh-timeout-"))
     const c = ctx(home)

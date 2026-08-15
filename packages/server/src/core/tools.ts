@@ -910,7 +910,7 @@ function scriptData(stdout: string, stderr: string, exitCode: number): Record<st
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令。输出以 stdout 为准，需审批。可选 input 参数作为命令 stdin（flow 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）。",
+  description: "执行 Shell 命令。输出以 stdout 为准，需审批。可选 input 参数作为命令 stdin（flow 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
   requiresApproval: true,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -918,6 +918,7 @@ export const shTool: Tool = {
       command: { type: "string" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
+      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
     },
     ["command"],
   ),
@@ -925,6 +926,10 @@ export const shTool: Tool = {
   async execute(args, ctx) {
     const input = args.input != null ? String(args.input) : undefined
     const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir: ctx.workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
+    // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
+    if (args.strict === true && code !== 0) {
+      throw new Error(`命令执行失败（exit ${code}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
+    }
     const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
     // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
     const final = code === 0 && !stdout.trim() ? "（命令执行成功，无输出）" : out
@@ -956,7 +961,7 @@ export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
 
 export const pyTool: Tool = {
   name: "py",
-  description: "执行 Python 代码，需审批。代码经临时文件执行，stdin（input 参数，flow 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）。",
+  description: "执行 Python 代码，需审批。代码经临时文件执行，stdin（input 参数，flow 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
   requiresApproval: true,
   card: { args: "code", codeField: "code", codeLang: "python" },
   parameters: schema(
@@ -964,6 +969,7 @@ export const pyTool: Tool = {
       code: { type: "string", description: "Python 程序源码" },
       input: { type: "string", description: "可选：作为程序 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
+      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
     },
     ["code"],
   ),
@@ -979,6 +985,10 @@ export const pyTool: Tool = {
       // -X utf8 / PYTHONUTF8=1：强制 UTF-8 输出（Windows 默认 GBK 会造成乱码）
       const py = await resolvePythonCmd(ctx)
       const { stdout, stderr, code: exit } = await ctx.runCommand(`${py} -X utf8 "${scriptPath}"`, { workdir: ctx.workdir, env: { ...ctx.env, PYTHONUTF8: "1" }, input, timeoutMs: scriptTimeoutMs(args.timeout) })
+      // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
+      if (args.strict === true && exit !== 0) {
+        throw new Error(`程序执行失败（exit ${exit}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
+      }
       const out = exit === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${exit}]`
       // 成功但无输出：明确提示（区分「程序成功无输出」与「stdout 捕获失败」）
       const final = exit === 0 && !stdout.trim() ? "（程序执行成功，无输出）" : out
@@ -1584,13 +1594,13 @@ export function makeFlowTool(): Tool {
     description:
       "数据流编排：一次调用执行多步工具链（把工具视为函数做动态编程），减少与模型的往返与词元消耗。支持引用映射、条件分支与循环：\n" +
       "- **步骤**：steps 每项为工具步骤 `{ id?, tool, params?, input?, when?, optional? }` 或循环分组 `{ id?, foreach | while, maxLoops?, steps: [...] }`（分组须声明 foreach 或 while）。\n" +
-      "- **引用**：`{{s1.data.xxx}}` 引用步骤结构化输出（各工具 data 结构先用 tool_schemas 批量查询），`{{s1.output}}` 引用文本输出。params 值恰为一个 `{{表达式}}` 时保留原始类型（数字/数组/对象原样传递），混排字符串按文本拼接。根名：步骤 id（缺省自动编号 s1/s2…）、`prev`（上一实际执行步骤）、`item`/`index`（foreach 当前项/序号）、`iteration`（while 轮次）、`input`（flow 参数 input）。路径访问 `.字段`/`[下标]`/`.length`。\n" +
+      "- **引用**：`{{s1.data.xxx}}` 引用步骤结构化输出（各工具 data 结构先用 tool_schemas 批量查询），`{{s1.output}}` 引用文本输出。params 值恰为一个 `{{表达式}}` 时保留原始类型（数字/数组/对象原样传递），混排字符串按文本拼接——**多行字段（如 data.stdout）混排会带入换行**，拼进脚本源码字符串会语法错误：多行文本建议走 stdin（input 参数）或三引号包裹，引用单值字段（exitCode/length）不受影响。根名：步骤 id（缺省自动编号 s1/s2…）、`prev`（上一实际执行步骤）、`item`/`index`（foreach 当前项/序号）、`iteration`（while 轮次）、`input`（flow 参数 input）。路径访问 `.字段`/`[下标]`/`.length`。\n" +
       "- **input 显式映射**：`{ 目标参数名: \"{{源}}\" }`，解析后覆盖 params 同名字段并抑制自动注入——字段改名、多对一汇聚（多个步骤输出映射进同一工具的不同参数）都用它表达；**非对象形式**（如 `input: \"{{item}}\"`）等价于 `{ input: \"{{item}}\" }`，直接给工具的 input 参数传值（脚本 stdin）。\n" +
       "- **when 条件分支**：表达式为假时跳过该步（不中断）。支持两种写法（等价）：裸表达式 `gen.data.ok == true` 或 `{{表达式}}` 包裹/混排 `{{gen.data.ok}} == true`。运算：`==`/`!=`/`>`/`>=`/`<`/`<=`、`&&`/`||`/`!`、括号、函数 `len()`/`contains()`/`exists()`；空数组视为假；引用不存在的路径解析为 undefined/空串（不报错，需判定存在性用 `exists()`）。\n" +
       "- **foreach 数据循环**（一对多扇出）：表达式求值为数组（逐项，**JSON 数组文本如 `[1,2,3]` 自动解析**）或正整数（按次），体内经 `{{item}}`/`{{index}}` 引用；**快照语义**——迭代次数固定为求值时的长度，循环体修改源数组不影响遍历；**嵌套时内层 `{{item}}`/`{{index}}` 遮蔽外层同名引用**（外层值需提前映射到中间步骤）；组结果 data = 每轮末步 data 的数组。\n" +
       "- **while 条件循环**（do-while：先执行一轮再判断，条件可引用本组最新结果如 `{{g.data.exitCode}}`，适合重试直到成功）：为真继续下一轮，达上限停止；`maxLoops` 默认 10、上限 50；需前置判断时配 when。\n" +
       "- **timeout 超时**（整体预算，秒）：步骤间累计执行时间超限即中止（循环失控保护），返回已执行部分 + 超时说明；缺省不限制。单步执行中无法中止——慢步骤请用各工具自身 timeout 参数。\n" +
-      "- **optional 容错**：该步失败不中断（记录错误继续）；未声明时任一步失败中断整个 flow，报告失败位置与原因。\n" +
+      "- **失败语义**：**工具级异常才中断** flow（调用不存在的工具、strict 脚本非 0 退出等），报告失败位置与原因；sh/py **非 0 退出码默认是正常结果**（exitCode 在 data，可用 when 判定，或给该步传 strict: true 转为中断）；`optional: true` 的步骤失败不中断（记录错误继续）。\n" +
       "- **自动注入**（未显式 input 映射时保留旧版语义）：脚本工具（sh/py）上一步输出经 stdin（input 参数）传入；其余工具的上一步 JSON 输出按参数名映射注入，兜底注入 input 参数。\n" +
       "- **审批与安全**：内部任一工具需审批则整个 flow 提交一次审批（通过后依次执行）；安全模式下风险工具在 step 层同规则拦截。\n" +
       "- **规模上限**：单次工具调用总数 ≤ 100、foreach ≤ 50 项、分组嵌套 ≤ 4 层；超限请拆分多次调用。",
