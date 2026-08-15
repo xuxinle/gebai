@@ -481,6 +481,60 @@ describe("runFlow 数据流编排", () => {
     const r = await runFlow({ steps: [{ while: "true", maxLoops: 999, steps: [{ tool: "t" }] }] }, c)
     expect(r.output).toContain(`已达轮数上限 ${FLOW_WHILE_HARD_MAX}`)
   })
+
+  test("timeout 整体超时：步骤边界中止并返回已执行部分（不抛错）", async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        fast: tool("fast", () => "f"),
+        slow: tool("slow", async () => {
+          await sleep(100)
+          return "s"
+        }),
+        never: tool("never", () => "n"),
+      },
+      calls,
+    )
+    const r = await runFlow(
+      { steps: [{ tool: "fast" }, { tool: "slow" }, { tool: "never" }], timeout: 0.09 },
+      c,
+    )
+    // fast 立即 + slow 100ms：slow 执行前未超预算（<90ms），slow 后预算耗尽：never 未执行；
+    // 超时作为部分结果返回而非错误
+    expect(calls.map((x) => x.name)).toEqual(["fast", "slow"])
+    expect(r.output).toContain("执行超时")
+    const data = r.data as { timedOut?: boolean; executed?: number }
+    expect(data.timedOut).toBe(true)
+    expect(data.executed).toBe(2)
+  })
+
+  test("timeout 截断失控 while 循环（轮首检查）", async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+    let n = 0
+    const c = flowCtx({
+      t: tool("t", async () => {
+        await sleep(50)
+        return { more: ++n < 999 }
+      }),
+    })
+    const r = await runFlow({ steps: [{ id: "g", while: "{{g.data.more}}", steps: [{ tool: "t" }] }], timeout: 0.2 }, c)
+    // 每轮约 50ms：第 5 轮前（≈200ms）超预算截断，执行 4 轮后停止
+    expect(r.output).toContain("执行超时")
+    expect((r.data as { executed?: number }).executed).toBe(4)
+    expect(n).toBeLessThan(999)
+  })
+
+  test("timeout 非法/缺省不限制（行为不变）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx({ t: tool("t", () => "x") }, calls)
+    // 非法值（0/负数/非数字）与缺省等价：全部步骤照常执行
+    await runFlow({ steps: [{ tool: "t" }, { tool: "t" }], timeout: 0 }, c)
+    await runFlow({ steps: [{ tool: "t" }], timeout: -5 }, c)
+    await runFlow({ steps: [{ tool: "t" }], timeout: "abc" }, c)
+    await runFlow({ steps: [{ tool: "t" }] }, c)
+    expect(calls.length).toBe(5)
+  })
 })
 
 describe("scanFlowApprovals 审批扫描", () => {

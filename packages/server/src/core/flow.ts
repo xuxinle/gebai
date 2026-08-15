@@ -22,6 +22,14 @@ export const FLOW_REPORT_STEP_CHARS = 2000
 /** 报告中单轮（循环迭代）输出保留字符数。 */
 export const FLOW_REPORT_ROUND_CHARS = 500
 
+/** flow 整体超时（timeout 参数，秒）预算耗尽信号：在步骤边界/循环轮首抛出，由 runFlow 捕获转为部分结果（不中断任务）。 */
+export class FlowTimeoutError extends Error {
+  constructor(public executed: number) {
+    super(`flow 执行超时（已执行 ${executed} 步）`)
+    this.name = "FlowTimeoutError"
+  }
+}
+
 /** 工具步骤：执行单个工具调用。 */
 export interface FlowToolStep {
   id?: string
@@ -408,6 +416,8 @@ interface FlowState {
   order: FlowStepResult[]
   prev?: FlowStepResult
   executed: number
+  /** 总时间预算截止（timeout 参数解析，毫秒时间戳；undefined = 不限制）。 */
+  deadline?: number
 }
 
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -474,6 +484,11 @@ async function runStepList(
 ): Promise<FlowStepResult | undefined> {
   let last: FlowStepResult | undefined
   for (const step of steps) {
+    // 总时间预算（timeout 参数）：步骤边界与循环轮首检查，超限中止（防循环失控累积超时；
+    // 单步执行中无法中止——单步超时用各工具自身 timeout 参数）
+    if (state.deadline !== undefined && Date.now() > state.deadline) {
+      throw new FlowTimeoutError(state.order.length)
+    }
     const id = step.id!
     const res = isGroupStep(step)
       ? await runGroup(step as FlowGroupStep, id, state, scope, report, depth)
@@ -668,18 +683,45 @@ async function runRound(
 }
 
 /** flow 主入口：执行数据流编排，返回模型报告文本 + 步骤摘要结构化数据。 */
-export async function runFlow(args: { steps: unknown; input?: unknown }, ctx: ToolContext): Promise<ToolResult> {
+export async function runFlow(args: { steps: unknown; input?: unknown; timeout?: unknown }, ctx: ToolContext): Promise<ToolResult> {
   const steps = normalizeSteps(args.steps)
-  const state: FlowState = { ctx, results: new Map(), order: [], executed: 0 }
+  // timeout（秒）：合法正数生效（步骤间累计预算），非法/缺省不限制
+  const timeoutMs = parseTimeoutMs(args.timeout)
+  const state: FlowState = { ctx, results: new Map(), order: [], executed: 0, deadline: timeoutMs !== undefined ? Date.now() + timeoutMs : undefined }
   const scope: ExprScope = { input: args.input }
   const report: string[] = []
-  await runStepList(steps, state, scope, report, 0)
+  try {
+    await runStepList(steps, state, scope, report, 0)
+  } catch (err) {
+    // 总时间预算耗尽：优雅返回已执行部分（超时是预期内事件，不按错误中断任务），
+    // 模型可见报告含超时说明，可据此调整（减小循环规模/加单步 timeout/拆分）
+    if (err instanceof FlowTimeoutError) {
+      const timedOut = state.order.length
+      report.push(`### ⏱ flow 执行超时（已执行 ${timedOut} 步，timeout=${String(args.timeout)} 秒）\n已停止继续执行。请分析耗时原因（循环规模过大/单步执行慢等）后调整：减小循环规模、为慢步骤加单步 timeout、或拆分为多次 flow。`)
+      return {
+        output: report.join("\n\n"),
+        data: {
+          steps: state.order.map((r) => ({ id: r.id, tool: r.tool, status: r.status, runs: r.runs, data: r.data ?? null })),
+          timedOut: true,
+          executed: timedOut,
+        },
+      }
+    }
+    throw err
+  }
   return {
     output: report.join("\n\n"),
     data: {
       steps: state.order.map((r) => ({ id: r.id, tool: r.tool, status: r.status, runs: r.runs, data: r.data ?? null })),
     },
   }
+}
+
+/** 解析 flow timeout 参数（秒 → 毫秒）：正有限数生效，其余（非法/零/负）返回 undefined（不限制）。 */
+function parseTimeoutMs(raw: unknown): number | undefined {
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  return Math.round(n * 1000)
 }
 
 /** 递归扫描步骤内全部工具的审批要求（flow 的动态 requiresApproval 用）：任一需审批则整体需审批。
