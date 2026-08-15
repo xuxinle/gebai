@@ -349,10 +349,13 @@ export function evalExpr(src: string, scope: ExprScope): unknown {
   return evalNode(parseExpr(src), scope)
 }
 
-/** 条件求值（when/while/foreach）：兼容裸表达式与整值 `{{表达式}}` 包裹两种写法。 */
-function evalCond(src: string, scope: ExprScope): unknown {
-  const m = src.trim().match(/^\{\{([^{}]+)\}\}$/)
-  return evalExpr(m ? m[1].trim() : src.trim(), scope)
+/** 条件求值（when/while/foreach）：非字符串（如 foreach 数字）原样返回；
+ *  字符串支持两种写法——裸表达式（`gen2.data.stdout == '5'`）或 `{{表达式}}` 包裹/混排（`{{gen2.data.stdout}} == '5'`，
+ *  包裹块归一化为括号子表达式后求值）。 */
+function evalCond(src: unknown, scope: ExprScope): unknown {
+  if (typeof src !== "string") return src
+  const normalized = src.replace(/\{\{([^{}]+)\}\}/g, "($1)")
+  return evalExpr(normalized, scope)
 }
 
 // ---------------------------------------------------------------------------
@@ -522,9 +525,14 @@ async function runToolStep(
   }
   const params = { ...(resolveTemplate(step.params ?? {}, scope) as Record<string, unknown>) }
   if (step.input !== undefined) {
-    // 显式映射：解析后覆盖同名字段，并抑制自动注入
-    const mapped = resolveTemplate(step.input, scope) as Record<string, unknown>
-    Object.assign(params, mapped)
+    // 显式映射：对象 = { 目标参数名: 表达式 }，解析后覆盖同名字段并抑制自动注入；
+    // 非对象（字符串/数字等）= 给 input 参数的模板值（等价 { input: 值 }，与 params.input 语义一致）
+    const mapped = resolveTemplate(step.input, scope)
+    if (mapped !== null && typeof mapped === "object" && !Array.isArray(mapped)) {
+      Object.assign(params, mapped as Record<string, unknown>)
+    } else {
+      params.input = mapped
+    }
   } else if (state.prev !== undefined) {
     autoInject(params, rt.tool, state.prev.output)
   }

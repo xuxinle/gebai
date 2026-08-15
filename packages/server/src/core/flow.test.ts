@@ -216,6 +216,86 @@ describe("runFlow 数据流编排", () => {
     expect(calls[1].params.input).toBe(JSON.stringify({ ok: false }))
   })
 
+  test("when/while 条件支持 {{}} 包裹与混排语法（与裸表达式等价）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        gen: tool("gen", () => ({ stdout: "5" })),
+        hit: tool("hit", (a) => `hit:${a.input ?? ""}`),
+        miss: tool("miss", () => "miss"),
+      },
+      calls,
+    )
+    const r = await runFlow(
+      {
+        steps: [
+          { id: "gen", tool: "gen" },
+          { tool: "hit", when: "{{gen.data.stdout}} == '5'" }, // 混排包裹
+          { tool: "miss", when: "{{gen.data.stdout}} == '6'" }, // 为假跳过
+          { tool: "hit", when: "{{exists(gen)}}" }, // 整值包裹
+        ],
+      },
+      c,
+    )
+    expect(calls.map((x) => x.name)).toEqual(["gen", "hit", "hit"])
+    expect(r.output).toContain("跳过")
+  })
+
+  test("foreach 数字（非字符串）按次数循环", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx({ tick: tool("tick", () => "t") }, calls)
+    await runFlow({ steps: [{ foreach: 3, steps: [{ tool: "tick" }] }] }, c)
+    expect(calls.length).toBe(3)
+  })
+
+  test("步骤 input 字符串作为 input 参数模板值（组内 {{item}} 直传 stdin）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        list: tool("list", () => ({ files: ["a.md", "b.md"] })),
+        cat: tool("cat", (a) => `cat:${a.input ?? ""}`),
+      },
+      calls,
+    )
+    await runFlow(
+      {
+        steps: [
+          { id: "list", tool: "list" },
+          { foreach: "{{list.data.files}}", steps: [{ tool: "cat", input: "{{item}}" }] },
+        ],
+      },
+      c,
+    )
+    expect(calls.filter((x) => x.name === "cat").map((x) => x.params.input)).toEqual(["a.md", "b.md"])
+  })
+
+  test("引用不存在的路径解析为空（不报错，可用 exists() 判定）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        gen: tool("gen", () => ({ ok: true })),
+        echo: tool("echo", (a) => `in:[${a.input ?? ""}]`),
+        probe: tool("probe", (a) => `probe:${a.path ?? "none"}`),
+      },
+      calls,
+    )
+    await runFlow(
+      {
+        steps: [
+          { id: "gen", tool: "gen" },
+          { tool: "probe", input: { path: "{{gen.stdout}}" } }, // 步骤对象无 stdout 字段 → 空串
+          { tool: "echo", input: "{{gen.missing.deep}}" }, // 缺失路径 → 空串
+          { tool: "echo", when: "!exists(gen.data.nope)" }, // exists() 判缺失
+        ],
+      },
+      c,
+    )
+    // 整值引用缺失路径 → undefined 原样传递（类型保真）；混排字符串缺失 → 空串拼接
+    expect(calls[1].params.path).toBeUndefined()
+    expect(calls[2].params.input).toBeUndefined()
+    expect(calls.length).toBe(4) // when 为真（缺失判定成立）→ 第 4 步执行
+  })
+
   test("foreach 数据循环：item/index 引用与扇出收集", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
     const c = flowCtx(
