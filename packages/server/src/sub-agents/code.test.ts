@@ -60,9 +60,17 @@ describe("code sub-agent", () => {
     for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
       expect(names).toContain(t)
     }
-    // 写操作与命令执行全部需审批；路径型工具都带 project 参数
-    for (const t of ["edit", "write", "apply_patch", "sh", "py"]) {
+    // 写操作需审批；sh/py 走工具自身动态审批（默认需审批、approval:false 按次免审），不静态覆盖
+    for (const t of ["edit", "write", "apply_patch"]) {
       expect(codeDef.requiresApproval![t]).toBe(true)
+    }
+    expect(codeDef.requiresApproval!.sh).toBeUndefined()
+    expect(codeDef.requiresApproval!.py).toBeUndefined()
+    for (const t of ["sh", "py"]) {
+      const ra = codeDef.tools![t].requiresApproval as (args: Record<string, unknown>) => boolean
+      expect(ra({})).toBe(true)
+      expect(ra({ approval: true })).toBe(true)
+      expect(ra({ approval: false })).toBe(false)
     }
     for (const t of ["read", "write", "edit", "apply_patch", "sh", "py", "ls", "grep", "search_files", "search_symbols", "move_file", "delete_file", "diff", "analyze", "git"]) {
       expect(codeDef.tools![t].parameters.properties).toHaveProperty("project")

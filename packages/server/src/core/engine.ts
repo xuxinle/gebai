@@ -114,6 +114,19 @@ async function toolRequiresApproval(tool: Tool, args: Record<string, unknown>, c
   }
 }
 
+/** 递归剥离参数中的 approval 免审标记（仅删键，其余原样深拷贝）：服务模式无交互硬门槛用——
+ *  sh/py 的 approval:false 只放宽交互审批（不弹卡），不得绕过「无人值守不执行敏感工具」拒绝；
+ *  flow 嵌套步骤的 params 同规则递归剥离，防经编排免审执行内层脚本。 */
+function stripApprovalFlags(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(stripApprovalFlags)
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) if (k !== "approval") out[k] = stripApprovalFlags(val)
+    return out
+  }
+  return v
+}
+
 function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
   if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"))
   return new Promise((resolve, reject) => {
@@ -1618,15 +1631,21 @@ export class AgentEngine {
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
-        const approvalRequired = (await toolRequiresApproval(rt.tool, tc.arguments, ctx)) && !(await this.isApprovalSkipped(sessionId, user, env))
+        const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
+        const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
+        // 多用户隔离 + 无交互通道（REST）：无人可审批，默认需审批的工具直接拒绝（防普通用户经 REST 免审批执行敏感工具）；
+        // approval:false 只放宽交互审批——硬门槛按剥离免审标记后的审批姿态解析（flow 嵌套步骤同规则），防模型自行声明免审绕过
+        if (
+          this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
+          (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
+        ) {
+          const denied = this.noInteractionDenied(rt.name)
+          await persist({ id: crypto.randomUUID(), role: "tool", content: denied, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
+          messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        const approvalRequired = requiresByArgs && !approvalSkipped
         if (approvalRequired) {
-          // 多用户隔离 + 无交互通道（REST）：无人可审批，直接拒绝执行（防普通用户经 REST 免审批执行 sh/py 等敏感工具）
-          if (this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none") {
-            const denied = this.noInteractionDenied(rt.name)
-            await persist({ id: crypto.randomUUID(), role: "tool", content: denied, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
-            messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
-            continue
-          }
           const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
           this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true })
           this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries })
@@ -2027,14 +2046,19 @@ export class AgentEngine {
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
-        if ((await toolRequiresApproval(rt.tool, tc.arguments, ctx)) && !(await this.isApprovalSkipped(sessionId, user, env))) {
-          // 多用户隔离 + 无交互通道（REST）：无人可审批，直接拒绝执行（与主循环一致）
-          if (this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none") {
-            const denied = this.noInteractionDenied(rt.name)
-            await pushArchive({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
-            messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
-            continue
-          }
+        const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
+        const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
+        // 与主循环一致：服务模式 + 无交互通道按默认审批姿态拒绝（approval:false 免审标记剥离后解析，防绕过）
+        if (
+          this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
+          (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
+        ) {
+          const denied = this.noInteractionDenied(rt.name)
+          await pushArchive({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
+          messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        if (requiresByArgs && !approvalSkipped) {
           const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
           this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true, session: true, sessionRunId: archive.runId })
           this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, session: true, sessionRunId: archive.runId, sessionId })

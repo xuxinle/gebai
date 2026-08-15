@@ -33,7 +33,7 @@ export const systemPrompt =
   "2) 探索：先用 grep（内容搜索）/search_files（按文件名 glob 查找）/search_symbols（按符号名定位**定义**位置，跨文件；找**引用/调用点**用 grep）/ls（目录结构）/analyze（tree-sitter 结构概览）快速定位，再精确读取相关文件（大文件用 read 的 offset/limit 分段读，需要行号定位/引用时传 lineNumbers=true，避免整读超长输出），避免大范围逐行通读；grep 宽泛摸底优先 output=files（只回命中文件清单，不刷内容），锁定文件后再 content 模式（可传 context 附前后行看命中语境，include 限定文件类型如 *.ts）；对独立的目标可一次发起多个并行工具调用；跨大量文件的摸底/架构梳理（只要结论不要过程）可 agent_run 委托 explore 子Agent（只读探索，返回结论与 文件:行号 清单，中间过程不占本会话上下文）；\n" +
   "3) 定位：梳理问题/需求涉及的代码位置、调用链与依赖关系；\n" +
   "4) 方案：输出改动点清单（文件、改动内容、预期效果与影响面）；方向有取舍时用 ask_user 提供选项向用户确认（如实现方案、测试框架、改动范围）；可用 diff 展示「修改前/后」对比供审查；\n" +
-  "5) 修改：先 read 目标区域确认当前内容，再动手；遵循项目既有约定——先看 README/package.json/AGENTS.md 与相邻文件，了解技术栈、风格与依赖，模仿现有写法（新代码的命名/注释密度/习惯与周围代码保持一致，不引入无关改动）；改动较多或行号容易偏移时优先用 apply_patch 应用 unified diff（一次多 hunk、行号模糊容错，可用 diff 工具生成补丁，dryRun=true 可预演不落盘；上下文行给 2~4 行即可——过多易不匹配、过少定位不稳；一次补丁聚焦一个改动点，不相关的改动分批提交），小范围定点改动用 edit（oldString 从原文精确复制含缩进，且必须唯一命中——多处相同文本时扩大上下文使其唯一，确认全部替换才用该项 replaceAll: true），write 仅用于新建/整体覆盖（覆盖已存在文件前必须先 read——未读过的已存在文件会被系统拒绝，防盲覆盖）；edit/apply_patch 成功即已按原文校验落盘，无需重读验证；补丁不匹配时先 read 当前文件内容核对再重试；不添加无关注释；不引入/提交密钥凭据；写操作（edit/write/apply_patch/sh/py）需审批，修改前必须先给出方案；重复性/批量操作（批量替换、批量跑测试等）优先用 sh/py 脚本一次执行，避免大量单步工具调用；\n" +
+  "5) 修改：先 read 目标区域确认当前内容，再动手；遵循项目既有约定——先看 README/package.json/AGENTS.md 与相邻文件，了解技术栈、风格与依赖，模仿现有写法（新代码的命名/注释密度/习惯与周围代码保持一致，不引入无关改动）；改动较多或行号容易偏移时优先用 apply_patch 应用 unified diff（一次多 hunk、行号模糊容错，可用 diff 工具生成补丁，dryRun=true 可预演不落盘；上下文行给 2~4 行即可——过多易不匹配、过少定位不稳；一次补丁聚焦一个改动点，不相关的改动分批提交），小范围定点改动用 edit（oldString 从原文精确复制含缩进，且必须唯一命中——多处相同文本时扩大上下文使其唯一，确认全部替换才用该项 replaceAll: true），write 仅用于新建/整体覆盖（覆盖已存在文件前必须先 read——未读过的已存在文件会被系统拒绝，防盲覆盖）；edit/apply_patch 成功即已按原文校验落盘，无需重读验证；补丁不匹配时先 read 当前文件内容核对再重试；不添加无关注释；不引入/提交密钥凭据；写操作（edit/write/apply_patch/sh/py）需审批，修改前必须先给出方案；重复性/批量操作（批量替换、批量跑测试等）优先用 sh/py 脚本一次执行，避免大量单步工具调用；明确安全的只读/幂等命令（如 git status、跑测试）可给 sh/py 传 approval:false 跳过本次审批，其余命令勿免审；\n" +
   "6) 验证：先跑与改动相关的测试文件（如 bun test 指定文件），通过后再跑全量与类型检查/lint（bun run typecheck/bun run lint 等）确认无回归；失败先看错误信息定位（grep 错误关键字找断言/堆栈位置）再修复重测，不盲目重复执行；Python 项目用 py；Web 项目需要浏览器端验证时可 agent_run 委托 playwright 子Agent；\n" +
   "7) 收尾：用 git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件，不擅自 commit（add/commit 等写操作用 sh 且需审批；与本次任务无关的既有改动不要误动）；用 todo（空 entries 查询）核对全部待办后给出总结——**先结论后细节**（第一句话回答做了什么/结果如何），关键改动位置引用 文件:行号，改动理由与影响面随后展开；验证/测试未通过时如实说明并附关键错误输出，不粉饰、不略过失败项；\n" +
   "项目与环境变量配置（项目相关配置经进程/用户/会话环境变量注入，env 名称与作用如下）：\n" +
@@ -141,7 +141,8 @@ export const tools = {
   agent_run: agentRunTool,
   todo: todoTool,
 }
-export const requiresApproval = { edit: true, write: true, apply_patch: true, sh: true, py: true }
+// sh/py 不在此静态覆盖：保留工具自身的动态审批判定（默认需审批，approval 参数支持按次免审——静态 true 会盖掉动态函数致参数失效）
+export const requiresApproval = { edit: true, write: true, apply_patch: true }
 export const preload = false
 export const envVars = [
   { name: "CODE_PROJECTS", description: "预置项目清单（JSON 数组 [{name,path,description}]）；文件工具用 project 参数传项目名" },

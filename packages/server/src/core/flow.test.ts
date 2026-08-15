@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { evalExpr, parseExpr, resolveTemplate, runFlow, scanFlowApprovals, normalizeSteps, FLOW_FOREACH_MAX, FLOW_WHILE_HARD_MAX } from "./flow"
 import type { Tool, ToolContext } from "./types"
-import { createGlobalTools } from "./tools"
+import { createGlobalTools, shTool } from "./tools"
 
 function baseCtx(home: string): ToolContext {
   return {
@@ -596,5 +596,11 @@ describe("scanFlowApprovals 审批扫描", () => {
     expect(typeof flow.requiresApproval).toBe("function")
     expect(await (flow.requiresApproval as (a: unknown, ctx: ToolContext) => Promise<boolean>)({ steps: [{ tool: "read" }] }, c)).toBe(false)
     expect(await (flow.requiresApproval as (a: unknown, ctx: ToolContext) => Promise<boolean>)({ steps: [{ tool: "sh" }] }, c)).toBe(true)
+  })
+  test("内层脚本工具按次免审（approval:false）传导为 flow 整体免审", async () => {
+    // 真实 sh 工具：缺省需审批 → flow 整体需审批；步骤声明 approval:false → 该步免审 → 全免审步骤时 flow 免审
+    const c = flowCtx({ read: safe, sh: shTool })
+    expect(await scanFlowApprovals([{ tool: "sh", params: { command: "ls" } }], c)).toBe(true)
+    expect(await scanFlowApprovals([{ tool: "read" }, { tool: "sh", params: { command: "ls", approval: false } }], c)).toBe(false)
   })
 })

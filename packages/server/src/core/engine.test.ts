@@ -1666,6 +1666,44 @@ describe("AgentEngine", () => {
     cleanup(s.home)
   })
 
+  test("multi-user + interactionMode=none: sh approval:false cannot bypass the hard gate", async () => {
+    // approval:false 只放宽交互审批（弹卡）：服务模式无交互通道按剥离免审标记后的默认审批姿态拒绝，
+    // 防模型自行声明免审绕过「无人值守不执行敏感工具」（含 flow 嵌套步骤，见 stripApprovalFlags）
+    const s = await setup("approval", false, "server")
+    s.provider.toolName = "sh"
+    s.provider.toolArgs = { command: "echo bypass", approval: false }
+    const session = await s.store.createSession("default", "t")
+    const approvals: string[] = []
+    s.events.subscribe((e) => {
+      if (e.type === "event.approval.request") approvals.push(String((e.payload as { tool?: unknown }).tool))
+    })
+    await s.engine.run(session.id, "default", "run tool", { interactionMode: "none" })
+    expect(approvals).toEqual([])
+    const loaded = await s.store.load(session.id)
+    const denied = loaded!.messages.find((m) => m.role === "tool" && m.name === "sh")
+    expect(denied).toBeDefined()
+    expect(String(denied!.content)).toContain("需要审批")
+    expect(String(denied!.content)).not.toContain("bypass")
+    cleanup(s.home)
+  })
+
+  test("realtime: sh approval:false skips the approval card and executes directly", async () => {
+    // 交互通道：模型声明免审（明确安全命令）时不弹审批卡，直接执行
+    const s = await setup("approval")
+    s.provider.toolName = "sh"
+    s.provider.toolArgs = { command: "echo relax", approval: false }
+    const session = await s.store.createSession("default", "t")
+    const approvals: string[] = []
+    s.events.subscribe((e) => {
+      if (e.type === "event.approval.request") approvals.push(String((e.payload as { tool?: unknown }).tool))
+    })
+    await s.engine.run(session.id, "default", "run tool")
+    expect(approvals).toEqual([])
+    const loaded = await s.store.load(session.id)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "sh" && String(m.content).includes("relax"))).toBe(true)
+    cleanup(s.home)
+  })
+
   test("multi-user ask_env cannot set GEBAI_APPROVAL_SKIP (fourth channel blocked)", async () => {
     // ask_env 是模型驱动的 env 写入通道：多用户模式下不得借此设置审批跳过键
     const s = await setup("askenv", false, "server")

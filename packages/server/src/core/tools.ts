@@ -1087,10 +1087,19 @@ function scriptData(stdout: string, stderr: string, exitCode: number): Record<st
   }
 }
 
+/** sh/py 免审参数（approval:false 跳过本次审批）的动态审批判定：缺省/true 需审批，显式 false 免审。 */
+function scriptRequiresApproval(args: Record<string, unknown>): boolean {
+  return args.approval !== false
+}
+
+const SCRIPT_APPROVAL_PARAM = {
+  approval: { type: "boolean", description: "可选：本次调用是否需要用户审批（默认 true 需审批）；仅对明确安全的只读/幂等命令（如查看状态、跑测试）可设 false 跳过审批，风险命令勿关闭" },
+}
+
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令。输出以 stdout 为准，需审批。可选 input 参数作为命令 stdin（flow 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
-  requiresApproval: true,
+  description: "执行 Shell 命令。输出以 stdout 为准，默认需审批（可选 approval 参数设为 false 时跳过本次审批，仅限安全只读/幂等命令）。可选 input 参数作为命令 stdin（flow 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
+  requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
     {
@@ -1098,6 +1107,7 @@ export const shTool: Tool = {
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
+      ...SCRIPT_APPROVAL_PARAM,
     },
     ["command"],
   ),
@@ -1140,8 +1150,8 @@ export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
 
 export const pyTool: Tool = {
   name: "py",
-  description: "执行 Python 代码，需审批。代码经临时文件执行，stdin（input 参数，flow 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
-  requiresApproval: true,
+  description: "执行 Python 代码，默认需审批（可选 approval 参数设为 false 时跳过本次审批，仅限安全只读/幂等脚本）。代码经临时文件执行，stdin（input 参数，flow 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
+  requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "code", codeLang: "python" },
   parameters: schema(
     {
@@ -1149,6 +1159,7 @@ export const pyTool: Tool = {
       input: { type: "string", description: "可选：作为程序 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
+      ...SCRIPT_APPROVAL_PARAM,
     },
     ["code"],
   ),

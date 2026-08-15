@@ -169,6 +169,21 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("sh/py approval param: dynamic requiresApproval defaults to true, explicit false skips", () => {
+    // 动态审批：缺省/true 需审批，显式 false 免审（引擎审批点与 flow 动态扫描均按调用参数解析）
+    const ra = shTool.requiresApproval as (args: Record<string, unknown>) => boolean
+    expect(ra({})).toBe(true)
+    expect(ra({ command: "ls" })).toBe(true)
+    expect(ra({ command: "ls", approval: true })).toBe(true)
+    expect(ra({ command: "ls", approval: false })).toBe(false)
+    const raPy = pyTool.requiresApproval as (args: Record<string, unknown>) => boolean
+    expect(raPy({})).toBe(true)
+    expect(raPy({ code: "print(1)", approval: false })).toBe(false)
+    // 参数 schema 暴露 approval 开关
+    expect(shTool.parameters.properties).toHaveProperty("approval")
+    expect(pyTool.parameters.properties).toHaveProperty("approval")
+  })
+
   test("truncate writes full content to session tmp/truncated/ with logical path", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-trunc-"))
     const sid = "0123456789abcdef0123456789abcdef" // 合法会话 id（32 位 hex）
