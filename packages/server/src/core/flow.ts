@@ -588,11 +588,21 @@ async function runGroup(
   scope[id] = result
   const lines: string[] = []
   if (group.foreach !== undefined) {
-    let list: unknown[]
     const raw = evalCond(group.foreach, scope)
-    if (Array.isArray(raw)) list = raw
-    else if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) list = Array.from({ length: raw }, (_, i) => i)
-    else throw new Error(`flow: 分组 ${id} foreach 表达式须为数组或正整数（得到 ${typeof raw}）`)
+    let list: unknown[]
+    if (Array.isArray(raw)) {
+      // 快照语义：迭代次数固定为求值时的长度，循环体修改源数组/覆盖源步骤不影响遍历（防删除场景提前终止）
+      list = [...raw]
+    } else if (typeof raw === "string") {
+      // JSON 数组文本自动解析（脚本 stdout 常见形态，如 py 输出 [1,2,3]）
+      const parsed = tryParseJson(raw)
+      if (Array.isArray(parsed)) list = [...parsed]
+      else throw new Error(`flow: 分组 ${id} foreach 表达式须为数组、JSON 数组文本或正整数（得到字符串）`)
+    } else if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) {
+      list = Array.from({ length: raw }, (_, i) => i)
+    } else {
+      throw new Error(`flow: 分组 ${id} foreach 表达式须为数组、JSON 数组文本或正整数（得到 ${typeof raw === "number" ? String(raw) : typeof raw}）`)
+    }
     if (list.length > FLOW_FOREACH_MAX) {
       throw new Error(`flow: 分组 ${id} foreach 规模超上限（${list.length} > ${FLOW_FOREACH_MAX}），请分批处理`)
     }

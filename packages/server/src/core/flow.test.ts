@@ -248,6 +248,91 @@ describe("runFlow 数据流编排", () => {
     expect(calls.length).toBe(3)
   })
 
+  test("foreach JSON 数组文本自动解析（脚本 stdout 形态）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        gen: tool("gen", () => ({ stdout: "[10,20,30]" })),
+        tick: tool("tick", (a) => `t:${a.v ?? ""}`),
+      },
+      calls,
+    )
+    await runFlow(
+      {
+        steps: [
+          { id: "gen", tool: "gen" },
+          { foreach: "{{gen.data.stdout}}", steps: [{ tool: "tick", input: { v: "{{item}}" } }] },
+        ],
+      },
+      c,
+    )
+    expect(calls.filter((x) => x.name === "tick").map((x) => x.params.v)).toEqual([10, 20, 30])
+  })
+
+  test("foreach 快照语义：循环体修改源数组不影响迭代次数", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    // 源数组为共享引用：循环体内 shrink 原地缩短它（模拟「删除后重新查询/原地清理」类流程）
+    const shared = ["a", "b", "c", "d", "e"]
+    const c = flowCtx(
+      {
+        src: tool("src", () => ({ files: shared })),
+        shrink: tool("shrink", () => {
+          shared.splice(0, 2)
+          return { files: shared }
+        }),
+        del: tool("del", (a) => `del:${a.id ?? ""}`),
+      },
+      calls,
+    )
+    const r = await runFlow(
+      {
+        steps: [
+          { id: "src", tool: "src" },
+          {
+            id: "g",
+            foreach: "{{src.data.files}}",
+            steps: [
+              { tool: "del", input: { id: "{{item}}" } },
+              { tool: "shrink" },
+            ],
+          },
+        ],
+      },
+      c,
+    )
+    const g = ((r.data as { steps: Array<{ id: string; runs?: number }> }).steps).find((s) => s.id === "g")!
+    expect(g.runs).toBe(5) // 快照：迭代次数固定为求值时的长度，不随源数组缩短
+    expect(calls.filter((x) => x.name === "del").map((x) => x.params.id)).toEqual(["a", "b", "c", "d", "e"])
+  })
+
+  test("嵌套 foreach：内层 item/index 遮蔽外层同名引用（作用域语义）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        add: tool("add", (a) => `add:${a.title}`),
+      },
+      calls,
+    )
+    await runFlow(
+      {
+        steps: [
+          {
+            foreach: "2",
+            steps: [
+              {
+                foreach: "2",
+                steps: [{ tool: "add", input: { title: "inner-{{item}}-idx{{index}}" } }],
+              },
+            ],
+          },
+        ],
+      },
+      c,
+    )
+    // 内层 item/index 完全遮蔽外层：4 次 add 标题均为内层值（0/1）
+    expect(calls.map((x) => x.params.title)).toEqual(["inner-0-idx0", "inner-1-idx1", "inner-0-idx0", "inner-1-idx1"])
+  })
+
   test("步骤 input 字符串作为 input 参数模板值（组内 {{item}} 直传 stdin）", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
     const c = flowCtx(
