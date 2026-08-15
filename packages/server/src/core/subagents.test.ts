@@ -63,7 +63,7 @@ describe("SubAgentManager systemPromptInjection", () => {
   })
 })
 
-/** self_optimize 连带加载测试：与 code 重叠的工具（read）+ 独有工具（page_capture）。 */
+/** self_optimize 连带加载测试：def 只声明独有工具（page_capture），通用工具由 code 提供。 */
 function makeSelfOptimizeManager(): { mgr: SubAgentManager; registry: ToolRegistry } {
   const registry = new ToolRegistry()
   const mgr = new SubAgentManager({ registry, preloadOverride: [] })
@@ -73,7 +73,6 @@ function makeSelfOptimizeManager(): { mgr: SubAgentManager; registry: ToolRegist
     description: "优化自身",
     systemPrompt: "你是 self_optimize。",
     tools: {
-      read: { name: "read", description: "读文件", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "x" }) },
       page_capture: { name: "page_capture", description: "捕获页面", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "ok" }) },
     },
   })
@@ -81,15 +80,14 @@ function makeSelfOptimizeManager(): { mgr: SubAgentManager; registry: ToolRegist
 }
 
 describe("self_optimize cascade load", () => {
-  test("loading self_optimize auto-loads code and skips overlapping tool registration", async () => {
+  test("loading self_optimize auto-loads code (通用能力复用：工具与提示词不重复注册)", async () => {
     const { mgr, registry } = makeSelfOptimizeManager()
     await mgr.load("self_optimize")
-    // 连带加载 code
+    // 连带加载 code：code 工具完整注册
     expect(mgr.isLoaded("code")).toBe(true)
     expect(mgr.isLoaded("self_optimize")).toBe(true)
-    // code 工具完整注册
     expect(registry.resolve("code_read")).toBeDefined()
-    // self_optimize 仅注册独有工具，重叠的 read 跳过（避免双命名空间冗余）
+    // self_optimize 只注册自己的独有工具（def 不声明通用工具——复用 code_* 命名空间）
     expect(registry.resolve("self_optimize_page_capture")).toBeDefined()
     expect(registry.resolve("self_optimize_read")).toBeUndefined()
   })
@@ -103,7 +101,7 @@ describe("self_optimize cascade load", () => {
     expect(registry.resolve("self_optimize_page_capture")).toBeDefined()
   })
 
-  test("self_optimize registers full toolset when code is absent", async () => {
+  test("self_optimize registers own toolset as declared when code is absent", async () => {
     const registry = new ToolRegistry()
     const mgr = new SubAgentManager({ registry, preloadOverride: [] })
     mgr.register({
@@ -115,6 +113,7 @@ describe("self_optimize cascade load", () => {
         page_capture: { name: "page_capture", description: "捕获页面", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "ok" }) },
       },
     })
+    // code 不存在时无连带：按 def 声明原样注册（不做隐式去重——去重由「def 不声明重叠工具」这一约定承担）
     await mgr.load("self_optimize")
     expect(registry.resolve("self_optimize_read")).toBeDefined()
     expect(registry.resolve("self_optimize_page_capture")).toBeDefined()

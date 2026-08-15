@@ -38,7 +38,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -186,6 +186,39 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // subself：agent_run 预加载 self_optimize（验证连带预载 code + 写范围守卫）——
+    // 新会话内先试写核心引擎源码（守卫拒绝），再写子Agent 目录（放行）
+    if (this.mode === "subself" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-so1", name: "agent_run", arguments: { agents: ["self_optimize"], input: "optimize gebai" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subself" && this.calls === 2) {
+      yield { type: "tool_call", toolCall: { id: "tc-so2", name: "code_write", arguments: { path: "packages/server/src/core/engine.ts", content: "x" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subself" && this.calls === 3) {
+      yield { type: "tool_call", toolCall: { id: "tc-so3", name: "code_write", arguments: { path: "packages/server/src/sub-agents/new_agent.ts", content: "x" } } }
+      yield { type: "done" }
+      return
+    }
+    // guard：write 防误覆盖守卫全链路——第1轮盲覆盖被拒、第2轮 read、第3轮 write 成功（fileGuard 会话级追踪）
+    if (this.mode === "guard" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-gd1", name: "write", arguments: { path: "guard.txt", content: "v2" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "guard" && this.calls === 2) {
+      yield { type: "tool_call", toolCall: { id: "tc-gd2", name: "read", arguments: { path: "guard.txt" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "guard" && this.calls === 3) {
+      yield { type: "tool_call", toolCall: { id: "tc-gd3", name: "write", arguments: { path: "guard.txt", content: "v2" } } }
+      yield { type: "done" }
+      return
+    }
     // interact：模型第一轮尝试调用 ask_user（交互模式禁用验证用：schema 过滤 + 执行阻止）
     if (this.mode === "interact" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-i1", name: "ask_user", arguments: { prompt: "选择方案", options: ["方案A", "方案B"] } } }
@@ -230,7 +263,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -293,6 +326,22 @@ describe("AgentEngine", () => {
     const loaded = await store.load(session.id)
     expect(loaded!.messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true)
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "hello from fake")).toBe(true)
+    cleanup(home)
+  })
+
+  test("write 防误覆盖守卫：未读过的已存在文件拒绝整体覆盖，read 后放行（fileGuard 会话级追踪）", async () => {
+    const { home, engine, store, provider } = await setup("guard")
+    const session = await store.createSession("default", "t")
+    // 预置已存在文件（本会话从未 read/write 过）；文件工具相对路径基于会话根解析
+    const file = join(sessionPath(home, "default", session.id), "guard.txt")
+    writeFileSync(file, "v1")
+    await engine.run(session.id, "default", "把 guard.txt 覆盖为 v2")
+    // 最终文件被覆盖为 v2（第1轮被拒 → 第2轮 read → 第3轮 write 成功）
+    expect(await Bun.file(file).text()).toBe("v2")
+    // 第2轮模型上下文携带拒绝提示（防盲覆盖），第4轮携带写入成功结果
+    const chats = JSON.stringify(provider.seenChats)
+    expect(chats).toContain("防盲覆盖")
+    expect(chats).toContain("已写入")
     cleanup(home)
   })
 
@@ -2134,6 +2183,36 @@ describe("context compaction", () => {
     const written = await Bun.file(join(project, "out.txt")).text()
     expect(written).toBe("hi")
     rmSync(project, { recursive: true, force: true })
+    cleanup(s.home)
+  })
+
+  test("agent_run 预加载 self_optimize 连带预载 code（工具与提示词复用）+ 写范围守卫生效", async () => {
+    const s = await setup("subself")
+    // 临时歌白仓库结构（SELF_OPTIMIZE_PROJECT 指向它，守卫按它界定仓库边界）
+    const repo = mkdtempSync(join(tmpdir(), "gebai-selfopt-repo-"))
+    mkdirSync(join(repo, "packages", "server", "src", "sub-agents"), { recursive: true })
+    mkdirSync(join(repo, "packages", "server", "src", "core"), { recursive: true })
+    const session = await s.store.createSession("default", "t")
+    await s.store.setEnv(session.id, "default", { SELF_OPTIMIZE_PROJECT: repo, GEBAI_APPROVAL_SKIP: "true" })
+    await s.engine.run(session.id, "default", "optimize gebai")
+    // 新会话系统消息：连带预载 code（两段职责提示词都在，通用工作流来自 code）
+    const sys = String(s.provider.seenChats[1][0].content)
+    expect(sys).toContain("已预加载子Agent: code, self_optimize")
+    expect(sys).toContain("### code（")
+    expect(sys).toContain("源码分析与修改专家")
+    expect(sys).toContain("### self_optimize（")
+    expect(sys).toContain("自我优化专家")
+    // 新会话工具集：code_* 通用工具 + self_optimize_* 独有工具并存（不重复注册）
+    expect(s.provider.seenTools[1]).toContain("code_read")
+    expect(s.provider.seenTools[1]).toContain("code_write")
+    expect(s.provider.seenTools[1]).toContain("self_optimize_run_tests")
+    expect(s.provider.seenTools[1]).not.toContain("self_optimize_write")
+    // 写范围守卫：核心引擎源码被拒（未写入），子Agent 目录放行
+    expect(existsSync(join(repo, "packages", "server", "src", "core", "engine.ts"))).toBe(false)
+    expect(await Bun.file(join(repo, "packages", "server", "src", "sub-agents", "new_agent.ts")).text()).toBe("x")
+    const chats = JSON.stringify(s.provider.seenChats)
+    expect(chats).toContain("拒绝写入")
+    rmSync(repo, { recursive: true, force: true })
     cleanup(s.home)
   })
 

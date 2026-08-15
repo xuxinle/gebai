@@ -144,14 +144,24 @@ export function sliceLines(content: string, offset?: number, limit?: number): st
   return lines.slice(start, limit != null && limit > 0 ? start + limit : undefined).join("\n")
 }
 
+/** cat -n 风格行号前缀：startLine 为首行真实行号（offset/limit 切片后仍对应文件行号），右对齐 + 制表符分隔。 */
+function withLineNumbers(text: string, startLine: number): string {
+  const lines = text.split("\n")
+  if (lines.length && lines[lines.length - 1] === "") lines.pop()
+  const width = String(startLine + Math.max(0, lines.length - 1)).length
+  return lines.map((l, i) => `${String(startLine + i).padStart(width)}\t${l}`).join("\n")
+}
+
 export const readTool: Tool = {
   name: "read",
-  description: "读取文件内容。路径为会话 tmp/ 或用户目录内（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset 为起始行号（1 起始，默认从头）；limit 为读取行数（正数读 offset 起 N 行，负数读末尾 N 行），返回内容不自动带行号。",
+  description:
+    "读取文件内容。路径为会话 tmp/ 或用户目录内（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset 为起始行号（1 起始，默认从头）；limit 为读取行数（正数读 offset 起 N 行，负数读末尾 N 行）；lineNumbers=true 时每行前缀真实行号（右对齐+制表符，便于精确定位与按 文件:行号 引用，规划修改/汇报位置时推荐开启）。读取成功即登记「本会话已读」——write 整体覆盖已存在文件前要求先读过（防盲覆盖）。",
   card: { titleParams: ["path"] },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
     offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
     limit: { type: "integer", description: "读取行数（正数取 offset 起 N 行；负数取末尾 N 行）" },
+    lineNumbers: { type: "boolean", description: "每行前缀真实行号（默认 false；定位/引用行号时开启）" },
   }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
@@ -159,7 +169,20 @@ export const readTool: Tool = {
     const offset = args.offset == null ? undefined : Number(args.offset)
     const limit = args.limit == null ? undefined : Number(args.limit)
     const sliced = sliceLines(content, offset, limit)
-    const truncated = await truncate(sliced, "read", ctx)
+    let body = sliced
+    if (args.lineNumbers === true) {
+      // 切片首行的真实行号：offset 起 → offset；尾部切片（limit<0）按全文行数倒推
+      let startLine = 1
+      if (limit != null && limit < 0) {
+        const total = content.split("\n").length - (content.endsWith("\n") ? 1 : 0)
+        const shown = sliced.split("\n").length
+        startLine = Math.max(1, total - shown + 1)
+      } else if (offset != null && offset > 1) startLine = offset
+      body = withLineNumbers(sliced, startLine)
+    }
+    const truncated = await truncate(body, "read", ctx)
+    // 登记已读（write 防误覆盖守卫依据；读取失败抛错不登记）
+    ctx.fileGuard?.markRead(path)
     const blocks = artifactBlocks(String(args.path), content)
     return { ...truncated, blocks }
   },
@@ -167,12 +190,31 @@ export const readTool: Tool = {
 
 export const writeTool: Tool = {
   name: "write",
-  description: "写入文件（整体覆盖）。路径受沙箱限制。",
+  description:
+    "写入文件（整体覆盖）。路径受沙箱限制。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/apply_patch/write 成功过的文件视为已读；只改局部优先 edit/apply_patch。",
   card: { titleParams: ["path"], args: "code", codeField: "content" },
   parameters: schema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
+    // 写范围守卫（子Agent 声明，引擎注入）：拒绝则作为工具结果返回（不落盘）
+    const guardMsg = await ctx.writeGuard?.([path])
+    if (guardMsg) return { output: guardMsg }
+    // 防误覆盖守卫（ZCode Write 语义）：已存在但未读过 → 拒绝并引导先 read（模型下一轮自纠，一次往返）
+    if (ctx.fileGuard) {
+      let exists = true
+      try {
+        await ctx.readFile(path)
+      } catch {
+        exists = false
+      }
+      if (exists && !ctx.fileGuard.hasRead(path)) {
+        return {
+          output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 apply_patch（unified diff）。新建文件不受此限制。`,
+        }
+      }
+    }
     await ctx.writeFile(path, String(args.content ?? ""))
+    ctx.fileGuard?.markRead(path)
     const blocks = artifactBlocks(String(args.path), String(args.content ?? ""))
     return { output: `已写入 ${args.path}（${String(args.content).length} 字符）`, blocks }
   },
@@ -210,6 +252,8 @@ export const deleteFileTool: Tool = {
   parameters: schema({ path: { type: "string" } }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
+    const guardMsg = await ctx.writeGuard?.([path])
+    if (guardMsg) return { output: guardMsg }
     await ctx.deleteFile(path)
     return { output: `已删除 ${args.path}` }
   },
@@ -223,6 +267,8 @@ export const moveFileTool: Tool = {
   async execute(args, ctx) {
     const from = ctx.resolvePath(String(args.from))
     const to = ctx.resolvePath(String(args.to))
+    const guardMsg = await ctx.writeGuard?.([from, to])
+    if (guardMsg) return { output: guardMsg }
     await ctx.moveFile(from, to)
     return { output: `已移动 ${args.from} → ${args.to}` }
   },
@@ -230,16 +276,34 @@ export const moveFileTool: Tool = {
 
 export const grepTool: Tool = {
   name: "grep",
-  description: "在会话目录中按正则表达式递归搜索文本内容，返回 文件:行号: 匹配行。path 可限定子目录。",
+  description:
+    "按正则表达式在目录中递归搜索文本内容，返回 文件:行号: 匹配行。output 选择结果形态：content（默认，逐行匹配内容）/ files（仅命中文件清单——大范围摸底定位优先用，不刷内容）/ count（每文件命中行数）。context 为匹配行前后各附的上下文行数（0-10，默认 0，仅 content 模式；匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔，同 grep -n -C）。include 按文件路径 glob 过滤（如 *.ts、**\/*.test.ts）。path 可限定子目录；匹配上限 200 处。",
   card: { titleParams: ["pattern"] },
-  parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" }, ignoreCase: { type: "boolean" } }, ["pattern"]),
-  outputSchema: schema({
-    matches: {
-      type: "array",
-      description: "匹配列表（按文件与行号顺序，上限 200）",
-      items: schema({ file: { type: "string" }, line: { type: "integer", description: "行号（1 起始）" }, text: { type: "string", description: "匹配行（去除首尾空白，截取前 200 字符）" } }, ["file", "line", "text"]),
+  parameters: schema(
+    {
+      pattern: { type: "string" },
+      path: { type: "string", description: "搜索起点（默认 .）" },
+      ignoreCase: { type: "boolean" },
+      output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
+      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式，格式同 grep -n -C）" },
+      include: { type: "string", description: "文件路径 glob 过滤（如 *.ts；** 跨目录、* 任意、? 单字符）" },
     },
-  }, ["matches"]),
+    ["pattern"],
+  ),
+  outputSchema: schema(
+    {
+      mode: { type: "string", enum: ["content", "files", "count"], description: "本次结果形态" },
+      matches: {
+        type: "array",
+        description: "匹配列表（mode=content；按文件与行号顺序，上限 200）",
+        items: schema({ file: { type: "string" }, line: { type: "integer", description: "行号（1 起始）" }, text: { type: "string", description: "匹配行（去除首尾空白，截取前 200 字符）" } }, ["file", "line", "text"]),
+      },
+      files: { type: "array", description: "命中文件列表（mode=files）", items: { type: "string" } },
+      counts: { type: "array", description: "每文件命中行数（mode=count，按命中数降序）", items: schema({ file: { type: "string" }, count: { type: "integer" } }, ["file", "count"]) },
+      truncated: { type: "boolean", description: "是否达到匹配上限（结果可能不完整）" },
+    },
+    ["mode"],
+  ),
   async execute(args, ctx) {
     let re: RegExp
     try {
@@ -247,11 +311,20 @@ export const grepTool: Tool = {
     } catch {
       return { output: `grep: 无效正则: ${args.pattern}` }
     }
+    const mode = args.output === "files" || args.output === "count" ? args.output : "content"
+    const context = Math.max(0, Math.min(10, Math.floor(Number(args.context) || 0)))
+    const includeRe = args.include ? globToRegExp(String(args.include)) : null
     const path = args.path ? String(args.path) : ""
     const prefix = path ? `${path.replace(/\/+$/, "")}/` : ""
-    const files = (await ctx.listFiles()).filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (prefix ? f.path.startsWith(prefix) : true))
-    if (!files.length) return { output: "（无匹配文件）", data: { matches: [] } }
+    const files = (await ctx.listFiles())
+      .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (prefix ? f.path.startsWith(prefix) : true) && (!includeRe || includeRe.test(f.path)))
+    if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
     const matches: Array<{ file: string; line: number; text: string }> = []
+    // content 模式渲染行（含 context 组）；非 content 模式按文件聚合命中数
+    const blocks: string[] = []
+    const fileCounts: Array<{ file: string; count: number }> = []
+    let total = 0
+    let capped = false
     for (const f of files) {
       let content: string
       try {
@@ -259,18 +332,61 @@ export const grepTool: Tool = {
       } catch {
         continue // 二进制等不可读文件跳过
       }
-      for (const [i, line] of content.split("\n").entries()) {
-        if (matches.length >= GREP_MAX_MATCHES) break
-        if (re.test(line)) matches.push({ file: f.path, line: i + 1, text: line.trim().slice(0, 200) })
+      const lines = content.split("\n")
+      const hitIdx: number[] = []
+      let fileCount = 0
+      for (const [i, line] of lines.entries()) {
+        if (!re.test(line)) continue
+        if (total >= GREP_MAX_MATCHES) {
+          capped = true
+          break
+        }
+        total++
+        if (mode === "content") {
+          matches.push({ file: f.path, line: i + 1, text: line.trim().slice(0, 200) })
+          hitIdx.push(i)
+        } else fileCount++
       }
-      if (matches.length >= GREP_MAX_MATCHES) break
+      if (mode !== "content" && fileCount > 0) fileCounts.push({ file: f.path, count: fileCount })
+      if (mode === "content" && hitIdx.length) {
+        if (context > 0) {
+          // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔）
+          const ranges: Array<[number, number]> = []
+          for (const i of hitIdx) {
+            const s = Math.max(0, i - context)
+            const e = Math.min(lines.length - 1, i + context)
+            const last = ranges[ranges.length - 1]
+            if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
+            else ranges.push([s, e])
+          }
+          const hitSet = new Set(hitIdx)
+          for (const [s, e] of ranges) {
+            for (let i = s; i <= e; i++) {
+              const text = lines[i].trim().slice(0, 200)
+              blocks.push(hitSet.has(i) ? `${f.path}:${i + 1}: ${text}` : `${f.path}-${i + 1}- ${text}`)
+            }
+            blocks.push("--")
+          }
+        } else {
+          blocks.push(...hitIdx.map((i) => `${f.path}:${i + 1}: ${lines[i].trim().slice(0, 200)}`))
+        }
+      }
+      if (capped) break
     }
-    if (!matches.length) return { output: "（无匹配）", data: { matches: [] } }
-    const result = matches.map((m) => `${m.file}:${m.line}: ${m.text}`).join("\n")
-    const truncated = matches.length >= GREP_MAX_MATCHES
-      ? await truncate(`${result}\n…（已达匹配上限）`, "grep", ctx)
-      : await truncate(result, "grep", ctx)
-    return { ...truncated, data: { matches } }
+    const capNote = capped ? "\n…（已达匹配上限，结果可能不完整；可缩小 pattern/path/include 范围）" : ""
+    if (mode === "files") {
+      const fl = fileCounts.map((c) => c.file)
+      if (!fl.length) return { output: "（无匹配）", data: { mode, files: [], counts: [] } }
+      return { ...(await truncate(fl.join("\n") + capNote, "grep", ctx)), data: { mode, files: fl, truncated: capped } }
+    }
+    if (mode === "count") {
+      if (!fileCounts.length) return { output: "（无匹配）", data: { mode, counts: [], files: [] } }
+      const sorted = [...fileCounts].sort((a, b) => b.count - a.count || a.file.localeCompare(b.file))
+      return { ...(await truncate(sorted.map((c) => `${c.file}: ${c.count}`).join("\n") + capNote, "grep", ctx)), data: { mode, counts: sorted, truncated: capped } }
+    }
+    if (!matches.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
+    const truncated = await truncate(blocks.join("\n") + capNote, "grep", ctx)
+    return { ...truncated, data: { mode, matches, truncated: capped } }
   },
 }
 
@@ -681,30 +797,88 @@ export const deleteTool: Tool = {
   },
 }
 
+/** 统计 needle 在 content 中的非重叠出现位置（起始索引），limit 后截断（防巨量匹配耗尽内存）。 */
+function findOccurrences(content: string, needle: string, limit = 1000): number[] {
+  const out: number[] = []
+  let i = content.indexOf(needle)
+  while (i >= 0 && out.length < limit) {
+    out.push(i)
+    i = content.indexOf(needle, i + needle.length)
+  }
+  return out
+}
+
+/** 索引位置对应的行号（1 起始）。 */
+function lineOfIndex(content: string, index: number): number {
+  let line = 1
+  for (let i = 0; i < index; i++) if (content.charCodeAt(i) === 10 /* \n */) line++
+  return line
+}
+
+/** 空白归一化（近似匹配提示用）：所有空白折叠为单空格并去首尾。 */
+function collapseWhitespace(s: string): string {
+  return s.replace(/\s+/g, " ").trim()
+}
+
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动。原文不匹配则整体失败不落盘；改动较多或行号容易偏移时改用 apply_patch 应用 unified diff（一次多 hunk、容错更强）。",
+    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动。**唯一性校验**：默认要求 oldString 在文件中唯一命中（多处命中报错并列出位置——扩大 oldString 上下文使其唯一，或确认全部替换时该项传 replaceAll: true）；原文不匹配则整体失败不落盘（含空白/缩进近似提示）；oldString 不得为空。改动较多或行号容易偏移时改用 apply_patch 应用 unified diff（一次多 hunk、容错更强）。修改前先 read 目标区域，oldString 从原文精确复制（含缩进）。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits" },
   parameters: schema(
     {
       path: { type: "string" },
-      edits: { type: "array", items: { type: "object", properties: { oldString: { type: "string" }, newString: { type: "string" } }, required: ["oldString", "newString"] } },
+      edits: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            oldString: { type: "string", description: "原文片段（非空，从文件当前内容精确复制，含缩进；须在文件中唯一，否则补充上下文或用 replaceAll）" },
+            newString: { type: "string", description: "替换后的内容" },
+            replaceAll: { type: "boolean", description: "true 时替换全部匹配（默认 false：多处匹配报错不落盘）" },
+          },
+          required: ["oldString", "newString"],
+        },
+      },
     },
     ["path", "edits"],
   ),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
+    const guardMsg = await ctx.writeGuard?.([path])
+    if (guardMsg) return { output: guardMsg }
     let content = await ctx.readFile(path)
-    const edits = (args.edits as Array<{ oldString: string; newString: string }>) || []
-    for (const e of edits) {
-      if (!content.includes(e.oldString)) {
-        throw new Error(`修改失败: oldString 未在文件中精确匹配: ${e.oldString.slice(0, 60)}`)
+    const edits = (args.edits as Array<{ oldString: string; newString: string; replaceAll?: boolean }>) || []
+    const applied: string[] = []
+    for (const [idx, e] of edits.entries()) {
+      const oldString = String(e.oldString ?? "")
+      const newString = String(e.newString ?? "")
+      const nth = `第 ${idx + 1} 项`
+      if (!oldString) {
+        throw new Error(`修改失败: ${nth} oldString 为空（oldString 必须是文件中的非空原文片段；新建文件用 write）`)
       }
-      content = content.replace(e.oldString, e.newString)
+      const occ = findOccurrences(content, oldString)
+      if (!occ.length) {
+        // 空白近似提示：归一化后可命中 → 大概率是缩进/空白复制不精确
+        const near = collapseWhitespace(content).includes(collapseWhitespace(oldString))
+        throw new Error(
+          `修改失败: ${nth} oldString 未在文件中精确匹配: ${oldString.slice(0, 60)}${near ? "（检测到空白/缩进不一致的近似原文——请 read 后从原文逐字符复制 oldString）" : "（请先 read 当前文件核对最新内容）"}`,
+        )
+      }
+      if (occ.length > 1 && e.replaceAll !== true) {
+        const lines = occ.slice(0, 8).map((i) => lineOfIndex(content, i)).join("、")
+        throw new Error(`修改失败: ${nth} oldString 匹配 ${occ.length} 处（行 ${lines}${occ.length > 8 ? "…" : ""}）——请扩大 oldString 上下文使其唯一，或确认全部替换时该项传 replaceAll: true`)
+      }
+      const lineNos = e.replaceAll === true ? occ : [occ[0]]
+      // 行号在替换前的内容上计算（替换会移动后续文本位置）
+      const shown = lineNos.slice(0, 8).map((i) => lineOfIndex(content, i))
+      content = e.replaceAll === true ? content.split(oldString).join(newString) : content.replace(oldString, newString)
+      applied.push(`${idx + 1}) 行 ${shown.join("、")}${lineNos.length > 8 ? `（共 ${lineNos.length} 处）` : ""}`)
     }
     await ctx.writeFile(path, content)
-    return { output: `已对 ${args.path} 应用 ${edits.length} 处修改` }
+    // 修改后内容即已掌握（模型无需重读验证），登记已读
+    ctx.fileGuard?.markRead(path)
+    return { output: `已对 ${args.path} 应用 ${edits.length} 处修改：${applied.join("；")}` }
   },
 }
 
@@ -805,7 +979,12 @@ export const applyPatchTool: Tool = {
       return { output: `apply_patch: 第 ${r.hunkIndex + 1} 处 hunk 未匹配：${r.error}（请先 read 当前文件内容核对，或改用 edit 定点替换；dryRun=true 可预演）` }
     }
     if (args.dryRun === true) return { output: `apply_patch 预演通过：${describeAppliedPatch(r.applied)}（dryRun，未写入）` }
-    await ctx.writeFile(ctx.resolvePath(path), r.result)
+    const abs = ctx.resolvePath(path)
+    const guardMsg = await ctx.writeGuard?.([abs])
+    if (guardMsg) return { output: guardMsg }
+    await ctx.writeFile(abs, r.result)
+    // 写入内容即已掌握，登记已读（write 防误覆盖守卫依据）
+    ctx.fileGuard?.markRead(abs)
     return { output: `apply_patch 已写入 ${path}：${describeAppliedPatch(r.applied)}` }
   },
 }

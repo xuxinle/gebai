@@ -196,6 +196,8 @@ function editsArgsBlock(list: Array<{ oldString: string; newString: string }>): 
   const wrap = el("div", "tool-edits")
   list.forEach((e, i) => {
     if (list.length > 1) wrap.appendChild(el("div", "tool-edit-idx", `修改 ${i + 1}/${list.length}`))
+    // replaceAll 标记：该项替换全部匹配（审批时可见替换范围）
+    if ((e as { replaceAll?: unknown }).replaceAll === true) wrap.appendChild(el("div", "tool-edit-idx", "replaceAll（替换全部匹配）"))
     if (e.oldString) wrap.appendChild(el("pre", "tool-edit-old", e.oldString))
     if (e.newString) wrap.appendChild(el("pre", "tool-edit-new", e.newString))
   })

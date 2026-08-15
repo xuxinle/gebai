@@ -68,6 +68,17 @@ export type ToolContext = {
   publish: (type: string, payload: Record<string, unknown>) => void
   /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：flow 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
+  /** 会话级已读文件追踪（防误覆盖，引擎按会话注入）：read/write/edit/apply_patch 成功后登记已读绝对路径，
+   *  write 整体覆盖「已存在但本会话未读过」的文件前据此拦截（模型须先 read 掌握原文再覆盖）。
+   *  可选：测试桩/无引擎环境不注入时相关守卫自动放行（不改变行为）。 */
+  fileGuard?: {
+    markRead(absPath: string): void
+    hasRead(absPath: string): boolean
+  }
+  /** 写范围守卫（子Agent 声明、引擎按「会话已装载/新会话预加载的子Agent」注入）：文件写类工具
+   *  （write/edit/apply_patch/move_file/delete_file）写入前以**解析后的绝对路径**调用，
+   *  返回非空字符串 = 拒绝写入（作为工具结果返回引导模型调整，不抛错）。可选：未注入时不限制。 */
+  writeGuard?: (absPaths: string[]) => string | null | Promise<string | null>
   /** 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量解析，子Agent 运行环境注入）。 */
   projects: PresetProject[]
   /** 按预置项目名解析项目根（绝对路径，已按沙箱规则约束）；未知项目名抛错。 */
@@ -167,6 +178,10 @@ export interface SubAgentDef {
   preload?: boolean
   /** 子Agent 可配置环境变量声明（`{AGENT_NAME_UPPER}_*` 前缀）；汇总进环境变量目录（前端面板白名单）。 */
   envVars?: EnvCatalogVar[]
+  /** 写范围守卫声明：会话装载本子Agent（或新会话预加载）后，本政策注入 ToolContext.writeGuard——
+   *  文件写类工具写入前以解析后的绝对路径调用，返回非空字符串 = 拒绝写入。用于 self_optimize 的
+   *  「核心引擎源码默认只读」代码级强制（工具与提示词复用 code，写范围政策独立声明）。 */
+  writeGuard?: (env: Record<string, string>, absPaths: string[]) => string | null
 }
 
 export interface ToolCallRecord {

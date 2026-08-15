@@ -347,6 +347,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.delete("/api/v1/sessions/:id", async (c) => {
     const user = await userOf(c)
     await d.store.delete(c.req.param("id"), user.id)
+    d.engine.forgetSession(c.req.param("id"))
     return c.json({ ok: true })
   })
   // 从 GC 归档（trash/，保留期 7 天）恢复会话：归属用户或 admin 可操作；

@@ -692,6 +692,72 @@ describe("global tools", () => {
     cleanup(home)
   })
 
+  test("edit 多处匹配整体失败不落盘并列出行号；replaceAll 替换全部", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-multi-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "m.txt", content: "x\nfoo\ny\nfoo\n" }, c)
+    await expect(editTool.execute({ path: "m.txt", edits: [{ oldString: "foo", newString: "bar" }] }, c)).rejects.toThrow("匹配 2 处")
+    await expect(editTool.execute({ path: "m.txt", edits: [{ oldString: "foo", newString: "bar" }] }, c)).rejects.toThrow("replaceAll")
+    // 整体失败不落盘
+    expect(await Bun.file(join(c.workdir, "m.txt")).text()).toBe("x\nfoo\ny\nfoo\n")
+    const r = await editTool.execute({ path: "m.txt", edits: [{ oldString: "foo", newString: "bar", replaceAll: true }] }, c)
+    expect(r.output).toContain("行 2、4")
+    expect(await Bun.file(join(c.workdir, "m.txt")).text()).toBe("x\nbar\ny\nbar\n")
+    cleanup(home)
+  })
+
+  test("edit 拒绝空 oldString；空白近似命中给出提示；成功回报应用行号", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-hint-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "e.txt", content: "line1\n  indented foo\nline3\n" }, c)
+    await expect(editTool.execute({ path: "e.txt", edits: [{ oldString: "", newString: "x" }] }, c)).rejects.toThrow("为空")
+    await expect(editTool.execute({ path: "e.txt", edits: [{ oldString: "indented  foo", newString: "x" }] }, c)).rejects.toThrow("空白")
+    const r = await editTool.execute({ path: "e.txt", edits: [{ oldString: "line3", newString: "LINE3" }] }, c)
+    expect(r.output).toContain("行 3")
+    expect(await Bun.file(join(c.workdir, "e.txt")).text()).toContain("LINE3")
+    cleanup(home)
+  })
+
+  test("write 防误覆盖守卫：未读过的已存在文件拒绝，read 后放行，新建不受限，无 fileGuard 兼容放行", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-write-guard-"))
+    const c = ctx(home)
+    const read = new Set<string>()
+    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    // 会话外预置的已存在文件（未经 read/write/edit/apply_patch）：盲覆盖被拒
+    writeFileSync(join(c.workdir, "pre.txt"), "v1")
+    const blind = await writeTool.execute({ path: "pre.txt", content: "v2" }, c)
+    expect(blind.output).toContain("防盲覆盖")
+    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("v1")
+    // read 后放行
+    await readTool.execute({ path: "pre.txt" }, c)
+    const ok = await writeTool.execute({ path: "pre.txt", content: "v2" }, c)
+    expect(ok.output).toContain("已写入")
+    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("v2")
+    // 新建文件不受限
+    expect((await writeTool.execute({ path: "new.txt", content: "x" }, c)).output).toContain("已写入")
+    // 无 fileGuard（测试桩/未注入环境）：行为不变（守卫可选）
+    const c2 = ctx(mkdtempSync(join(tmpdir(), "gebai-write-guard2-")))
+    writeFileSync(join(c2.workdir, "p.txt"), "a")
+    expect((await writeTool.execute({ path: "p.txt", content: "b" }, c2)).output).toContain("已写入")
+    cleanup(home)
+  })
+
+  test("read lineNumbers=true 前缀真实行号（全文/offset 切片/尾部切片）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-read-ln-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "n.txt", content: "a\nb\nc\nd\n" }, c)
+    const r1 = await readTool.execute({ path: "n.txt", lineNumbers: true }, c)
+    expect(r1.output).toBe("1\ta\n2\tb\n3\tc\n4\td")
+    const r2 = await readTool.execute({ path: "n.txt", offset: 3, limit: 2, lineNumbers: true }, c)
+    expect(r2.output).toBe("3\tc\n4\td")
+    const r3 = await readTool.execute({ path: "n.txt", limit: -2, lineNumbers: true }, c)
+    expect(r3.output).toBe("3\tc\n4\td")
+    // 默认不带行号（兼容既有行为；原样返回含尾换行）
+    const r4 = await readTool.execute({ path: "n.txt" }, c)
+    expect(r4.output).toBe("a\nb\nc\nd\n")
+    cleanup(home)
+  })
+
   test("current_time returns multiple time formats directly (ISO/Unix 秒与毫秒/本地含星期与时区)", async () => {
     const out = (await currentTimeTool.execute({}, ctx(""))).output
     // 四种格式一应俱全，后续无需再做格式转换；星期几合并进本地日期时间行
@@ -1193,6 +1259,54 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // 无效正则
     const bad = await createGlobalTools().grep.execute({ pattern: "(" }, c)
     expect(bad.output).toContain("无效正则")
+    cleanup(home)
+  })
+
+  test("grep output=files/count 模式与 include 文件过滤", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-mode-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "src/a.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "src/b.js", size: 10, modifiedAt: 0, isDir: false },
+      { path: "src/c.ts", size: 10, modifiedAt: 0, isDir: false },
+    ]
+    c.readFile = async (p) => {
+      if (p.endsWith("a.ts")) return "todo: one\ntodo: two\n"
+      if (p.endsWith("c.ts")) return "todo: three\n"
+      return "todo: js\n"
+    }
+    const tools = createGlobalTools()
+    // files 模式：只回命中文件清单（宽泛摸底不刷内容）
+    const files = await tools.grep.execute({ pattern: "todo", output: "files" }, c)
+    expect(files.output.split("\n").sort()).toEqual(["src/a.ts", "src/b.js", "src/c.ts"].sort())
+    expect((files.data as { mode: string }).mode).toBe("files")
+    // include glob 过滤：仅 .ts
+    const tsOnly = await tools.grep.execute({ pattern: "todo", output: "files", include: "*.ts" }, c)
+    expect(tsOnly.output).toContain("src/a.ts")
+    expect(tsOnly.output).not.toContain("src/b.js")
+    // count 模式：每文件命中行数（data 按命中数降序）
+    const count = await tools.grep.execute({ pattern: "todo", output: "count" }, c)
+    expect(count.output).toContain("src/a.ts: 2")
+    expect(count.output).toContain("src/b.js: 1")
+    const counts = (count.data as { counts: Array<{ file: string; count: number }> }).counts
+    expect(counts[0]).toEqual({ file: "src/a.ts", count: 2 })
+    cleanup(home)
+  })
+
+  test("grep context 附上下文行（匹配行 : 前缀、上下文行 - 前缀、组间 -- 分隔）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-ctx-"))
+    const c = ctx(home)
+    c.listFiles = async () => [{ path: "a.ts", size: 10, modifiedAt: 0, isDir: false }]
+    c.readFile = async () => "l1\nl2 todo\nl3\nl4\nl5\nl6 todo\nl7\n"
+    const r = await createGlobalTools().grep.execute({ pattern: "todo", context: 1 }, c)
+    expect(r.output).toContain("a.ts:2: l2 todo")
+    expect(r.output).toContain("a.ts-1- l1")
+    expect(r.output).toContain("a.ts-3- l3")
+    expect(r.output).toContain("a.ts:6: l6 todo")
+    expect(r.output).toContain("--")
+    // content 模式默认无上下文（保持 文件:行号: 匹配行）
+    const plain = await createGlobalTools().grep.execute({ pattern: "todo" }, c)
+    expect(plain.output).not.toContain("a.ts-1-")
     cleanup(home)
   })
 

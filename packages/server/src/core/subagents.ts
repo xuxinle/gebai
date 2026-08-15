@@ -1,6 +1,6 @@
 import { readdir, access } from "node:fs/promises"
 import { join } from "node:path"
-import type { SubAgentDef, ToolSet } from "./types"
+import type { SubAgentDef } from "./types"
 import type { ToolRegistry } from "./registry"
 import type { SubAgentInfo } from "@gebai/sdk"
 import { parseSubAgentMd } from "./sub-agent-md"
@@ -104,20 +104,12 @@ export class SubAgentManager {
     if (this.loaded.has(name)) return []
     const def = this.defs.get(name)
     if (!def) throw new Error(`unknown sub-agent: ${name}`)
-    // self_optimize 连带装载 code：self_optimize 是 code 的超集（工作流参考 code），
-    // 所有装载路径（WS sub_agent.load / agent_load 工具 / 预加载）装载 self_optimize 时自动连带装载 code。
+    // self_optimize 复用 code 的通用能力（其 def 只声明 code 没有的独有工具，提示词亦不复刻 code 工作流）：
+    // 装载 self_optimize 时连带装载 code——文件/分析类工具直接用 code_* 命名空间，无需重复注册。
     // load 幂等（loaded 去重）：code 已装载则跳过，不重复注册工具。
     if (name === "self_optimize" && this.defs.has("code")) {
-      const loadedNow = await this.load("code") // 连带装载：code 本次装载集合（已装载则 []）
-      // 工具去重：与 code 重叠的文件/分析类工具不注册到总Agent（避免 code_/self_optimize_ 双命名空间冗余），
-      // 仅注册独有工具（如 preview_server/page_capture/vision）；
-      // agent_run 执行新会话（预加载 self_optimize）时仍用其完整工具集（runNewSession 独立 registry，不受影响）
-      const overlap = new Set(Object.keys(this.defs.get("code")!.tools ?? {}))
-      const uniqueTools: ToolSet = {}
-      for (const [toolName, tool] of Object.entries(def.tools ?? {})) {
-        if (!overlap.has(toolName)) uniqueTools[toolName] = tool
-      }
-      this.registry.registerSubAgentTools(name, uniqueTools, def.requiresApproval)
+      const loadedNow = await this.load("code")
+      this.registry.registerSubAgentTools(name, def.tools ?? {}, def.requiresApproval)
       this.loaded.add(name)
       return [...loadedNow, name]
     }

@@ -247,10 +247,70 @@ export interface AgentEngineOptions {
 export class AgentEngine {
   private tasks = new Map<string, TaskState>()
 
+  /** 会话级已读文件追踪（fileGuard 防误覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → 已读绝对路径集合。
+   *  read/edit/apply_patch/write 成功后登记，write 整体覆盖「已存在但未读过」的文件前据此拦截；
+   *  会话删除经 forgetSession 释放（进程内无界增长防护）。 */
+  private readFiles = new Map<string, Set<string>>()
+  /** 单会话已读登记上限（防长会话无界增长；超出整表重置——守卫降级为「需重读」，保护语义不破坏）。 */
+  private static readonly READ_TRACK_CAP = 2000
+
   constructor(private opts: AgentEngineOptions) {}
 
   isRunning(sessionId: string): boolean {
     return this.tasks.has(sessionId)
+  }
+
+  /** 会话删除时释放其运行态（已读文件追踪等）；幂等，供 REST/WS 删除会话入口调用。 */
+  forgetSession(sessionId: string): void {
+    this.readFiles.delete(sessionId)
+  }
+
+  /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件（绝对路径）。 */
+  private fileGuardFor(sessionId: string): NonNullable<ToolContext["fileGuard"]> {
+    let set = this.readFiles.get(sessionId)
+    if (!set) {
+      set = new Set<string>()
+      this.readFiles.set(sessionId, set)
+    }
+    const tracked = set
+    return {
+      markRead(absPath: string) {
+        if (tracked.size >= AgentEngine.READ_TRACK_CAP) tracked.clear()
+        tracked.add(absPath)
+      },
+      hasRead(absPath: string) {
+        return tracked.has(absPath)
+      },
+    }
+  }
+
+  /** 装载模式写范围守卫：按**调用时点**的会话装载名单（loadedSubAgents）收集各子Agent 声明的
+   *  SubAgentDef.writeGuard 并依次校验——任务中途 agent_load 装载（如 self_optimize）后立即生效；
+   *  任一守卫返回非空即拒绝。无声明守卫的子Agent 不产生开销（快速返回 null）。 */
+  private async sessionWriteGuard(sessionId: string, user: string, env: Record<string, string>, absPaths: string[]): Promise<string | null> {
+    const names = (await this.opts.store.load(sessionId, user))?.loadedSubAgents ?? []
+    for (const n of names) {
+      const g = this.opts.subAgents.def(n)?.writeGuard
+      if (!g) continue
+      const msg = g(env, absPaths)
+      if (msg) return msg
+    }
+    return null
+  }
+
+  /** 新会话模式写范围守卫：预加载子Agent 名单静态已知，静态组合各 SubAgentDef.writeGuard。 */
+  private defsWriteGuard(agentNames: string[], env: Record<string, string>): ToolContext["writeGuard"] {
+    const guards = agentNames
+      .map((n) => this.opts.subAgents.def(n)?.writeGuard)
+      .filter((g): g is NonNullable<import("./types").SubAgentDef["writeGuard"]> => !!g)
+    if (!guards.length) return () => null
+    return (absPaths) => {
+      for (const g of guards) {
+        const msg = g(env, absPaths)
+        if (msg) return msg
+      }
+      return null
+    }
   }
 
   /** 模型上下文窗口（token）：0 表示未知/未配置；前端用于上下文占比显示（context 使用比例）。 */
@@ -1174,7 +1234,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: ToolRegistry },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: ToolRegistry; writeGuard?: ToolContext["writeGuard"] },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1196,6 +1256,9 @@ export class AgentEngine {
       env,
       sandboxed: sandbox.enforcedFor(user),
       safeMode: this.opts.config.safeMode,
+      fileGuard: this.fileGuardFor(sessionId),
+      // 写范围守卫：显式传入（新会话模式：预加载子Agent 名单静态已知）或按会话装载名单动态收集（装载模式）
+      writeGuard: opts?.writeGuard ?? ((absPaths: string[]) => this.sessionWriteGuard(sessionId, user, env, absPaths)),
       resolvePath: (p) => {
         // 子Agent 项目绑定：路径以项目根为基准（沙箱约束用户限定项目内，豁免/本地模式放开）
         if (resolveRoot) return sandbox.enforcedFor(user) ? resolveInSandbox(resolveRoot, p) : resolve(resolveRoot, p)
@@ -1695,6 +1758,12 @@ export class AgentEngine {
   ): Promise<{ output: string; archive: SessionRunArchive }> {
     // 加固：去重 + 数量上限（异常/恶意调用拼装超大提示词会撑爆上下文）
     agents = [...new Set(agents)]
+    // self_optimize 复用 code 的通用能力（def 只声明独有工具，提示词不复刻 code 工作流）：
+    // 预加载 self_optimize 时自动连带预加载 code（与装载模式 SubAgentManager.load 的连带装载同规则），
+    // 文件/分析类工具与通用工作流提示词由 code 提供——不重复定义
+    if (agents.includes("self_optimize") && this.opts.subAgents.def("code") && !agents.includes("code")) {
+      agents = ["code", ...agents]
+    }
     if (agents.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${agents.length} > ${MAX_AGENTS_PER_RUN}）`)
     const defs = agents.map((name) => {
       const def = this.opts.subAgents.def(name)
@@ -1872,7 +1941,7 @@ export class AgentEngine {
     // 取消中止判定：新会话执行不设独立超时，中止仅由父任务取消传播（报「已取消」）
     const activeSignal = signal
     const abortReason = () => (activeSignal.reason instanceof Error ? activeSignal.reason.message : activeSignal.reason ? String(activeSignal.reason) : "cancelled")
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role }, depth)
+    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env) }, depth)
     // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）
     const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
