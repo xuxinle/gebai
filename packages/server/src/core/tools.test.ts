@@ -7,7 +7,7 @@ import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./too
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath } from "./paths"
 import { getMiniTool } from "./mini-tools"
-import type { ToolContext } from "./types"
+import type { ToolContext, Tool, ToolResult } from "./types"
 
 function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): ToolContext {
   const base = home || tmpdir()
@@ -66,6 +66,11 @@ function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): 
     waitForDraw: async () => ({ ok: true }),
     waitForCapture: async () => null,
   }
+}
+
+/** 轻量 mock 工具（flow/编排测试用）。 */
+function mkTool(name: string, execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>): Tool {
+  return { name, description: "", parameters: { type: "object", properties: {} }, execute }
 }
 
 describe("global tools", () => {
@@ -684,7 +689,7 @@ describe("global tools", () => {
     const tools = createGlobalTools()
     for (const n of [
       "read", "write", "ls", "grep", "search_files", "delete_file", "move_file",
-      "edit", "pipe", "sh", "py", "draw", "render_html", "save_tool", "delete_tool", "fetch_url",
+      "edit", "flow", "sh", "py", "draw", "render_html", "save_tool", "delete_tool", "fetch_url",
       "todo", "ask_user", "ask_env", "preview_server", "current_time", "system_info",
       "agent_load", "agent_run",
     ]) {
@@ -940,8 +945,8 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
   })
 })
 
-  test("pipe chains tools passing previous output as input", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-pipe-"))
+  test("flow chains tools passing previous output as input", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-flow-"))
     const calls: Array<Record<string, unknown>> = []
     const mockTool: import("./types").Tool = {
       name: "echo_input",
@@ -960,16 +965,16 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
         getAgentNames: () => [],
       },
     }
-    const r = await createGlobalTools().pipe.execute({ steps: [{ tool: "echo_input" }, { tool: "echo_input" }] }, c)
+    const r = await createGlobalTools().flow.execute({ steps: [{ tool: "echo_input" }, { tool: "echo_input" }] }, c)
     expect(r.output).toContain("out:out:")
     expect(calls[1].input).toBe("out:")
     // 未知工具报错
-    await expect(createGlobalTools().pipe.execute({ steps: [{ tool: "nope" }] }, c)).rejects.toThrow(/未知工具/)
+    await expect(createGlobalTools().flow.execute({ steps: [{ tool: "nope" }] }, c)).rejects.toThrow(/未知工具/)
     cleanup(home)
   })
 
-  test("pipe passes previous output to script tools (sh/py) via stdin input param", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-pipe-stdin-"))
+  test("flow passes previous output to script tools (sh/py) via stdin input param", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-flow-stdin-"))
     const calls: Array<Record<string, unknown>> = []
     const shMock: import("./types").Tool = {
       name: "sh",
@@ -988,7 +993,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
         getAgentNames: () => [],
       },
     }
-    const r = await createGlobalTools().pipe.execute(
+    const r = await createGlobalTools().flow.execute(
       { steps: [{ tool: "sh", params: { command: "echo a" } }, { tool: "sh", params: { command: "cat" } }] },
       c,
     )
@@ -998,8 +1003,8 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
-  test("pipe maps JSON output fields into next tool params by schema", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-pipe-map-"))
+  test("flow maps JSON output fields into next tool params by schema", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-flow-map-"))
     const seen: Array<Record<string, unknown>> = []
     const producer: import("./types").Tool = {
       name: "producer",
@@ -1026,10 +1031,84 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
         getAgentNames: () => [],
       },
     }
-    await createGlobalTools().pipe.execute({ steps: [{ tool: "producer" }, { tool: "mapper" }] }, c)
+    await createGlobalTools().flow.execute({ steps: [{ tool: "producer" }, { tool: "mapper" }] }, c)
     // JSON 字段 path 按 schema 映射注入；extra 不在 schema 中不注入
     expect(seen[0].path).toBe("data.json")
     expect(seen[0].extra).toBeUndefined()
+    cleanup(home)
+  })
+
+  test("flow dataflow: branch/loop/mapping with structured data", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-flow-flow-"))
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const list = mkTool("list", async () => ({ output: "3 files", data: { files: [{ path: "a.md" }, { path: "b.md" }] } }))
+    const read = mkTool("read", async (a) => ({ output: `content of ${a.path}`, data: { path: a.path } }))
+    const write = mkTool("write", async (a) => ({ output: `wrote ${a.path}` }))
+    const c: ToolContext = {
+      ...ctx(home),
+      registry: {
+        schemas: () => [],
+        resolve: (name) =>
+          name === "list" ? { name, tool: list } : name === "read" ? { name, tool: read } : name === "write" ? { name, tool: write } : undefined,
+        getAgentNames: () => [],
+      },
+    }
+    for (const t of [list, read, write]) {
+      const orig = t.execute
+      t.execute = async (args, cc) => {
+        calls.push({ name: t.name, params: args })
+        return orig(args, cc)
+      }
+    }
+    const r = await createGlobalTools().flow.execute(
+      {
+        steps: [
+          { id: "list", tool: "list" },
+          { id: "batch", foreach: "{{list.data.files}}", steps: [{ tool: "read", input: { path: "{{item.path}}" } }] },
+          { tool: "write", when: "len(list.data.files) > 1", input: { path: "merged.md", content: "{{batch.data[0].path}}" } },
+        ],
+      },
+      c,
+    )
+    expect(calls.map((x) => `${x.name}:${x.params.path ?? ""}`)).toEqual(["list:", "read:a.md", "read:b.md", "write:merged.md"])
+    expect(r.output).toContain("merged.md")
+    const steps = (r.data as { steps: Array<{ id: string; status: string; runs?: number }> }).steps
+    expect(steps.find((s) => s.id === "batch")?.runs).toBe(2)
+    cleanup(home)
+  })
+
+  test("tool_schemas batch fetches input and output schemas", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-toolschemas-"))
+    const probe = mkTool("probe", async () => ({ output: "ok" }))
+    probe.outputSchema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] }
+    const c: ToolContext = {
+      ...ctx(home),
+      registry: {
+        schemas: () => [{ name: "probe", description: "探针", parameters: { type: "object", properties: {} } }],
+        resolve: (name) => (name === "probe" ? { name, tool: probe } : undefined),
+        getAgentNames: () => [],
+      },
+    }
+    const tools = createGlobalTools()
+    const r1 = await tools.tool_schemas.execute({ tools: ["probe"] }, c)
+    expect(r1.output).toContain("probe")
+    expect(r1.output).toContain("boolean")
+    const r2 = await tools.tool_schemas.execute({ tools: ["nope"] }, c)
+    expect(r2.output).toContain("未知或未启用")
+    cleanup(home)
+  })
+
+  test("structured tools return data matching declared outputSchema", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-data-"))
+    const c = ctx(home)
+    c.listDir = async () => [
+      { path: "a.txt", isDir: false, size: 12 },
+      { path: "sub", isDir: true, size: 0 },
+    ] as import("@gebai/sdk").FileEntry[]
+    const ls = await createGlobalTools().ls.execute({ path: "." }, c)
+    expect(ls.data).toEqual({ entries: [{ path: "sub", isDir: true, size: 0 }, { path: "a.txt", isDir: false, size: 12 }] })
+    const t = await createGlobalTools().current_time.execute({}, c)
+    expect((t.data as { iso: string }).iso).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     cleanup(home)
   })
 

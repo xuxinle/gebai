@@ -1,7 +1,7 @@
 /**
  * 安全模式风险工具判定（DESIGN「安全模式」）：全局工具精确名 + 子Agent 工具短名
  * （{agent}_sh → sh 等，按最后一段匹配）。命令执行/写删文件/定时任务调度均为修改类操作，安全模式下只读可用。
- * 引擎主/子循环与 pipe 管道工具共用（pipe 直接调 rt.tool.execute 不经引擎拦截，须在 step 层同规则判定）。
+ * 引擎主/子循环与 flow 数据流编排工具共用（flow 直接调 rt.tool.execute 不经引擎拦截，须在 step 层同规则判定）。
  */
 export const SAFE_MODE_RISKY_TOOLS = new Set([
   "sh", "py", "write", "edit", "delete_file", "move_file", "delete_tool",
@@ -15,7 +15,7 @@ export function isRiskyToolName(name: string): boolean {
   return short !== name && SAFE_MODE_RISKY_TOOLS.has(short)
 }
 
-/** 安全模式拦截返回给模型的限制信息（引擎与 pipe 工具共用，措辞一致）。 */
+/** 安全模式拦截返回给模型的限制信息（引擎与 flow 工具共用，措辞一致）。 */
 export function safeModeRestrictionMsg(name: string): string {
   return `安全模式：工具 ${name} 已限制（安全模式下仅允许只读操作，命令执行与文件修改类工具不可用）。请改用只读方式（如 read/grep/fetch_url 等），或直接给出分析与建议。`
 }

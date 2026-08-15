@@ -2,6 +2,9 @@ import type { AgentEvent, AttachmentRef, ContentBlock, FileEntry, ToolSchema } f
 
 export interface ToolResult {
   output: string
+  /** 结构化输出（DESIGN「工具双输出」）：供 flow 数据流编排引用/映射（`{{步骤id.data.xxx}}`），不进模型上下文（模型只见 output 文本）。
+   *  与 output 相互独立——output 面向模型分析，data 面向编排消费；无结构化语义的工具可省略。 */
+  data?: unknown
   blocks?: ContentBlock[]
   truncated?: boolean
   filePath?: string
@@ -63,7 +66,7 @@ export type ToolContext = {
   runCommand: (cmd: string, opts?: { shell?: string; workdir?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string; code: number }>
   uploadAttachment: (ref: AttachmentRef) => Promise<string>
   publish: (type: string, payload: Record<string, unknown>) => void
-  /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：pipe 等工具内直接执行工具的工具需按同规则拦截。 */
+  /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：flow 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
   /** 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量解析，子Agent 运行环境注入）。 */
   projects: PresetProject[]
@@ -124,8 +127,11 @@ export interface Tool {
   name: string
   description: string
   parameters: ToolSchema
-  requiresApproval?: boolean
-  returns?: "text" | "json"
+  /** 是否需审批：布尔静态声明，或函数按调用参数动态判定（flow 等编排工具据此实现「内部任一工具需审批则整体审批」，
+   *  引擎在审批点解析两种形态；函数异常按需审批处理）。 */
+  requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => boolean | Promise<boolean>)
+  /** 结构化输出（ToolResult.data）的 JSON Schema：经 tool_schemas 工具批量暴露给模型，供编排前理解输出结构。 */
+  outputSchema?: ToolSchema
   /** 最低可用交互模式（缺省 none=全模式可用）：realtime=仅实时前端（如 page_capture/render_html/ask_env）、
    *  multi_turn=至少多轮交互（如 ask_user/draw，飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。 */
   interaction?: Exclude<InteractionMode, "none">

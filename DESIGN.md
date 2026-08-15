@@ -447,7 +447,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **环境变量隔离**：用户/会话环境变量副本归属各自命名空间（`users/{user}/env.json`、会话 `env.json`），互不可见；子Agent 仅能访问 `{AGENT_NAME_UPPER}_*` 前缀，敏感变量（密钥/令牌）脱敏存储
 - **子Agent共享**：子Agent 为服务端内置代码，构建时编译进二进制，全局共享、只读、无用户差异
 - **审批隔离**：`/approval-skip` 为会话级设置，仅作用于当前会话，不影响其他用户；**服务模式下该键仅管理员可设置**（REST `PUT /env`、WS `session.env.set` 显式管理通道严格拒绝、非管理员返回 403；**prompt 浏览器本地注入通道宽容过滤**——非管理员注入的 `GEBAI_APPROVAL_SKIP` 被 `filterEnvInjection` 静默丢弃、任务照常执行（不拒绝，防 localStorage 残留越权键阻断任务）；**ask_env 填值通道为第四通道，服务模式下一律拒绝该键**——模型驱动的写入不得绕过审批边界），普通用户无法自设审批跳过绕过 `sh`/`py`/`cron_*` 审批
-- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`）、文件修改（`write`/`edit`/`delete_file`/`move_file`/`delete_tool`）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`pipe` 管道工具在 step 层同规则拦截（其直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
+- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`）、文件修改（`write`/`edit`/`delete_file`/`move_file`/`delete_tool`）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`flow` 数据流编排工具在 step 层同规则拦截（其直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
 
 ### 总Agent
@@ -906,7 +906,7 @@ export const preload = false          // 按需装载，非默认注入
 ### 工具审批
 - 全局工具：`sh`、`py` 默认需要审批；`read`/`write`/`edit` 默认无需审批；`cron_add`/`cron_update`/`cron_remove` 默认需要审批（定时任务 = 无人值守执行，见「定时任务」）
 - 子Agent工具：通过 `requiresApproval` 声明（含对 `edit`/`write` 等全局工具的按需收紧）
-- `pipe`：是否需要审批取决于管道内调用的工具（见「pipe 管道工具」）
+^- `flow`：是否需要审批取决于编排内调用的工具（**动态审批机制**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（函数异常按需审批 fail-safe）；flow 的函数递归扫描全部步骤，任一工具需审批则整个 flow 提交一次审批，见「flow 数据流编排工具」）
 - 会话级跳过：`/approval-skip` 命令；**会话运行中开启即时生效**——引擎审批点实时判定（任务 env 快照或会话实时 env 任一为 `true` 即跳过，前端开启时自动通过当前等待中的审批卡片，后续审批直接跳过；关闭需下次任务生效）；**服务模式下仅管理员可设置 `GEBAI_APPROVAL_SKIP`**（该键会让 `sh`/`py`/`cron_*` 等敏感工具免审批执行，普通用户自设即可绕过审批边界——REST `PUT /env`/WS `session.env.set` 显式管理通道返回 403，prompt 浏览器本地注入通道静默丢弃该键、任务照常执行）
 - 同一消息最多重试 10 次
 
@@ -1034,6 +1034,20 @@ export const preload = false          // 按需装载，非默认注入
 - 宿主机已有 `node`/`bun` 时，`sh` 直接调用亦可，两条路径并存
 - 能力探测：启动时检测宿主可用解释器（`python`/`node`/`bun`），在工具 schema 描述与 UI 中标注当前环境可用性，模型据实选择
 - **输出大小**：工具输出超过截断阈值走上下文保护（截断落盘），防止内存膨胀
+
+#### 工具双输出（output / data）与输出 Schema
+
+工具结果（`ToolResult`）携带两条相互独立的输出通道（面向「工具即函数、模型动态编程」的编排能力）：
+
+| 通道 | 字段 | 消费方 | 说明 |
+|------|------|--------|------|
+| 文本输出 | `output` | 模型（进 LLM 上下文） | 面向模型分析的文本，截断保护照常生效 |
+| 结构化输出 | `data` | **flow 数据流编排**（不进 LLM 上下文） | 供编排步骤引用/映射（`{{步骤id.data.字段}}`）、分支判定；运行期在编排引擎内传递，不落盘、不占上下文词元 |
+
+- **`Tool.outputSchema`**：声明 `data` 的 JSON Schema，经 `tool_schemas` 工具批量暴露给模型——编排前先查输出结构，避免逐个试调浪费往返
+- **引擎兜底截断保留 `data`**（含 `sessionRun` 扩展字段）：截断只作用于模型可见文本
+- 已提供结构化输出的全局工具：`ls`（entries）、`search_files`（files/total）、`grep`（matches）、`git`（status：branch/ahead/behind/changes；log：commits）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`current_time`、`system_info`、`todo`（todos）、`agent_list`（agents）、`read_feedback`（items）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`）
+- **`tool_schemas` 工具**（批量查询）：`tools` 传工具名列表返回各工具 `{name, description, parameters, outputSchema}`（未知/未启用标记错误）；省略时返回全部已启用工具的输出结构概要（紧凑一行一个，不含输入参数）
 
 #### 富内容块渲染
 
@@ -1233,7 +1247,8 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `apply_patch` | **应用 unified diff 补丁**：一次多 hunk、行号模糊容错（上下文裁剪重试），全部 hunk 校验通过才整体落盘（原子），`dryRun` 可预演不落盘；单次单文件（见「apply_patch 补丁应用工具」） | 否 |
 | `diff` | **文本/文件对比**：对比两段文本或两个文件（旧 → 新），输出 unified diff 文本并返回 `diff` 内容块，UI 并排对比渲染、按文本类型语法高亮 | 否 |
 | `git` | **只读 Git 操作**：`status`（工作区状态）/`diff`（未暂存或暂存区变更）/`log`（最近提交），不修改仓库无需审批；写操作（add/commit 等）走 `sh`（需审批，见「git 版本控制工具（只读）」） | 否 |
-| `pipe` | 串联多个工具调用（审批取决于内部调用的工具，见「pipe 管道工具」） | **取决于内部工具** |
+| `flow` | **数据流编排**（工具即函数、动态编程）：一次调用执行多步工具链——引用映射（`{{id.data.字段}}`，一对一/一对多/多对一）、`when` 条件分支、`foreach`/`while` 循环、`optional` 容错；旧版线性串联格式兼容（见「flow 数据流编排工具」） | **取决于内部工具**（动态审批） |
+| `tool_schemas` | **批量获取工具 schema**：按工具名列表返回输入参数与结构化输出（`data`）的 JSON Schema；省略时返回全部已启用工具的输出结构概要——编排（flow）前理解输出结构，避免逐个试调 | 否 |
 | `agent_list` | 列出可用子Agent（名称/描述/是否已装载；**不列工具名**，工具名以注册的工具集为准）。**不注册进总Agent 全局工具集**——未装载清单已由 `systemPromptInjection` 注入提示词（模型上下文已有，工具冗余且干扰工具选择）；仅在新会话执行环境注入（纯 md 组合子Agent 自动注入编排工具时，见「子Agent文件格式」） | 否 |
 | `agent_load` | **装载**子Agent 能力模块（类比 import 子模块：工具并入当前工具集、**完整系统提示词作为 system 消息写入会话记录**（持久化，恢复会话自动还原），**不创建独立上下文**；默认使用方式：装载后直接用其工具，仅在需要干净上下文或防膨胀时才改用 `agent_run` 新会话执行） | 否 |
 | `agent_run` | **执行新会话**（派生临时新会话，**无需装载**：预加载一个或多个子Agent（完整系统提示词拼接+工具并入）后阻塞执行一次并返回最终结果，中间过程/推理/内部工具不进主上下文，全程存档可回放；默认优先 `agent_load` 装载后直接用其工具，仅在需要干净上下文或防上下文膨胀时使用） | 否 |
@@ -1268,7 +1283,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 - **参数**：`path`（目标文件）+ `edits: { oldString, newString }[]`（可一次多处替换）
 - **安全校验**：替换前校验 `oldString` 在文件中**精确匹配**（唯一或指定 occurrence），不匹配则整体失败并报错，**不落盘**，避免模型基于过期内容误改
-- **与 `write` 的关系**：`edit` 用于既有文件的定点修改（保留无关内容）；`write` 用于新建/整体覆盖；模型按需选择，`pipe` 中可混用；改动较多或行号容易偏移时优先用 `apply_patch` 应用 unified diff（见「apply_patch 补丁应用工具」）
+- **与 `write` 的关系**：`edit` 用于既有文件的定点修改（保留无关内容）；`write` 用于新建/整体覆盖；模型按需选择，`flow` 中可混用；改动较多或行号容易偏移时优先用 `apply_patch` 应用 unified diff（见「apply_patch 补丁应用工具」）
 - **审批**：默认无需审批（与 `write` 同级）；子Agent 可通过 `requiresApproval` 声明 `edit` 需审批
 - **路径限制**：与 `read`/`write` 同一路径沙箱（服务端部署限会话 `tmp/` 或用户目录，桌面/本地浏览器不限制）
 
@@ -1305,36 +1320,72 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 - **只读安全边界**：不提供任何写操作（`add`/`commit`/`checkout` 等仍走 `sh`，需审批且受沙箱约束）——免审批仅限读操作，写操作权限不变
 - **审批**：默认无需审批；`code`/`self_optimize` 子Agent 中经 `projectAware` 包装（`git` 以项目根为工作目录，预置项目形态按项目根执行）
 
-### `pipe` 管道工具
+### `flow` 数据流编排工具
 
-将多个工具调用串联为一次执行，减少与 LLM 的往返次数。
+将工具视为函数、flow 调用视为动态编程：一次调用编排多步工具链（引用映射 / 条件分支 / 循环），把「多轮工具调用往返」压缩为「一次编排 + 一次结果」，显著降低时延与词元消耗。编排引擎为纯函数模块 `core/flow.ts`（表达式解析/求值 + 步骤执行器，可独立单测）。
 
-```
-// 非脚本→脚本：read 的 JSON 输出自动匹配 py 的 params，py 脚本通过 stdin 接收内容
-pipe([
-  { tool: "read", params: { path: "data.json" } },
-  { tool: "py",   params: { code: "import sys; ..." } },
-  { tool: "write", params: { path: "result.txt" } },
-])
+#### 步骤模型
 
-// 脚本→非脚本：sh 的 stdout 作为下一个工具的输入参数
-pipe([
-  { tool: "sh", params: { command: "git diff HEAD~1" } },
-  { tool: "agent_run", params: { ... } },
-])
-```
+- **工具步骤** `{ id?, tool, params?, input?, when?, optional? }`：执行单个工具；**分组步骤** `{ id?, foreach | while, maxLoops?, when?, steps: [...] }`：循环体（子步骤数组，必须声明 `foreach` 或 `while` 之一）
+- 步骤 `id` 缺省按声明顺序自动编号 `s1`/`s2`…（自动编号跳过与显式 id 冲突的序号）；显式 id 须为标识符，不得重复、不得占用保留根名（`prev`/`item`/`index`/`iteration`/`input`）
+- 分组嵌套深度 ≤ 4
 
-管道自动识别下一步工具类型，采用不同数据传递方式：
+#### 引用与映射（一对一 / 一对多 / 多对一）
+
+- **引用表达式**：`{{s1.data.xxx}}` 引用步骤**结构化输出**（`ToolResult.data`，各工具结构经 `tool_schemas` 批量查询）、`{{s1.output}}` 引用文本输出、`{{s1.status}}`/`{{s1.runs}}` 引用执行状态。根名：步骤 id / `prev`（上一实际执行步骤）/ `item`+`index`（foreach 当前项与序号）/ `iteration`（while 轮次）/ `input`（flow 的 `input` 参数）。路径访问 `.字段`、`[下标]`、`.length`
+- **模板插值**：params 值恰为一个 `{{表达式}}` 时**保留原始类型**（数字/数组/对象原样传递）；混排字符串（如 `report_{{item.id}}.md`）按文本拼接；对象与数组递归插值
+- **`input` 显式映射**：`{ 目标参数名: "{{源}}" }`，解析结果覆盖 params 同名字段并**抑制自动注入**——字段改名（`path: "{{s1.data.file}}"`）、**多对一汇聚**（多个步骤输出映射进同一工具的不同参数）均由此表达
+- **`foreach` 一对多扇出**：表达式求值为数组（逐项）或正整数（按次数），体内经 `{{item}}`/`{{index}}` 引用；分组结果 `data` = 每轮末步 `data` 的数组，供后续步骤按下标消费
+
+#### 分支与循环
+
+- **`when` 条件分支**（工具步骤与分组均可）：条件表达式为假时跳过（`status=skipped`，不更新 `prev`、不中断后续）。空数组视为假（`when: "s1.data.items"` 即「有内容才执行」）
+- **`while` 条件循环**（do-while 语义）：先执行一轮再判断，条件为真继续下一轮——条件可引用本组最新结果（如 `while: "g.data.exitCode != 0"` 的重试直到成功模式）；需前置判断配 `when`。`maxLoops` 默认 10、硬上限 50，达上限停止并在报告注明
+- 表达式语言（裸表达式，`{{}}` 包裹整值亦可）：比较 `==`/`!=`/`>`/`>=`/`<`/`<=`、逻辑 `&&`/`||`/`!`、括号、字面量（数字/单双引号字符串/true/false/null）、函数 `len()`/`contains()`/`exists()`；宽松相等（null/undefined 等价、数字与数字字符串按数值、对象按 JSON 文本）；求值器为手写递归下降解析（无 eval/Function）
+
+#### 失败语义与守卫
+
+- 任一步失败中断整个 flow（错误信息带步骤 id 与原因）；`optional: true` 的步骤失败不中断（`status=error`、`data={error}`，继续后续）
+- 规模上限：单次工具调用总数 ≤ 100（含循环迭代展开）、foreach ≤ 50 项、分组嵌套 ≤ 4 层；报告单步输出截断 2000 字符、单轮 500 字符（完整内容在 `data` 与工具自身截断文件中）
+
+#### 自动注入（旧版线性格式兼容）
+
+未显式 `input` 映射时保留旧版数据传递（`{steps: [{tool, params}]}` 线性写法行为不变）：
 
 - **非脚本工具** → 上一步的 JSON 输出自动匹配下一步的输入参数 schema，按字段名映射注入
-- **脚本工具（`sh`/`py`）** → 上一步的文本输出通过 stdin 传入，脚本的 stdout 作为输出
+- **脚本工具（`sh`/`py`）** → 上一步的文本输出通过 stdin（`input` 参数）传入
 
-管道执行规则：
+#### 审批与安全模式
 
-- 任一步失败则中断整个管道，返回错误位置和原因
-- **审批取决于内部工具**：管道内任一工具需要审批（如 `sh`/`py`，或子Agent 工具声明 `requiresApproval`），则整个管道提交一次审批（审批卡片列出各步详情），通过后自动依次执行；管道内全部工具均无需审批时，管道直接执行，无需审批
-- 管道整体输出按 Markdown 代码块渲染，标注每一步的起止和类型
-- 管道内任一工具输出超截断阈值时，截断规则与单工具一致
+- **审批取决于内部工具（动态审批）**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（主循环与新会话循环一致，函数异常按需审批 fail-safe）；flow 声明的函数递归扫描全部步骤（含循环体），任一工具需审批则**整个 flow 提交一次审批**（审批卡片参数区含完整步骤定义），通过后依次执行；全部工具无需审批时直接执行
+- **安全模式**：风险工具在 step 层同规则拦截（返回限制信息、不执行）；拦截步骤不计入审批判定（不弹审批卡）；子Agent 同名短工具（`{agent}_sh` 等）同样命中
+
+#### 结果
+
+- 模型可见 `output`：逐步报告（`### id · 工具（✓/跳过/受限/失败）` + 摘要，循环分组逐轮摘要）
+- 结构化 `data`：`{ steps: [{id, tool, status, runs, data}] }`（编排结果自身也走双输出）
+
+#### 模型引导（系统提示词）
+
+编排能力内嵌进两处系统提示词，引导模型在复杂任务中主动少轮次（每轮工具调用都产生往返时延与上下文词元）：
+
+- **总Agent 系统提示词**（`buildSystemPrompt`）：「复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构），或编写脚本（sh/py）一次执行，避免大量单步工具调用」
+- **新会话执行环境**（`agent_run`）：同样注册 `flow`/`tool_schemas`（工具以会话注册表解析——子Agent 工具可在 flow 内编排），系统消息内嵌同样的编排优先引导（子Agent 内部任务同样受益）
+
+```
+// 多对一 + 分支 + 一对多扇出示例
+flow({
+  input: { repo: "gebai" },
+  steps: [
+    { id: "files", tool: "search_files", params: { pattern: "*.ts" } },
+    { tool: "write", when: "len(files.data.files) > 0", input: { path: "report.md", content: "共 {{files.data.total}} 个文件" } },
+    { id: "batch", foreach: "{{files.data.files}}", steps: [
+      { tool: "read", input: { path: "{{item}}" } },
+      { tool: "grep", params: { pattern: "TODO" }, when: "len(prev.output) > 0" },
+    ] },
+  ],
+})
+```
 
 ### 通信协议
 
@@ -1668,7 +1719,7 @@ bun run --cwd packages/server build:win --exclude-sub-agents x
 **阶段一：核心闭环（MVP）**
 - 服务端骨架：Hono + WS/REST 单端口 + `SessionStore`（分片）+ `EnvManager` 三级变量
 - `LLMProvider`（OpenAI 兼容接口 + 流式解析 + 能力声明）与 `AgentEngine` 主循环
-- 全局工具：`read`/`write`/`sh`/`py`/`pipe`/`current_time`/`system_info`
+- 全局工具：`read`/`write`/`sh`/`py`/`flow`/`current_time`/`system_info`
 - 审批流 + 工具执行/渲染 + 上下文截断保护
 - 会话 CRUD + `session.prompt` 流式 + SDK 基础 + 最小 Web UI（聊天/会话列表）
 
@@ -1813,6 +1864,12 @@ bun run --cwd packages/sdk test
 | 小工具 HTML 上限 | 200KB | `save_tool` 单次保存的 HTML 源码大小上限（超限报错提示精简） |
 | 小工具名称规则 | `[a-zA-Z0-9_\u4e00-\u9fff]{1,40}` | 工具名即文件名（分片键），不含 `.`/`/` 等路径分隔符 |
 | render_html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
+| flow 工具调用总数上限 | 100 | 单次 flow 执行的工具调用总数（含循环迭代展开，`FLOW_MAX_STEPS`） |
+| flow foreach 展开上限 | 50 项 | foreach 数组长度/计数上限，超限报错提示分批（`FLOW_FOREACH_MAX`） |
+| flow while 轮数上限 | 默认 10 / 硬上限 50 | `maxLoops` 参数可调，超硬上限钳制（`FLOW_WHILE_DEFAULT_MAX`/`FLOW_WHILE_HARD_MAX`） |
+| flow 分组嵌套深度上限 | 4 层 | 循环分组嵌套上限（`FLOW_MAX_DEPTH`） |
+| flow 报告截断 | 单步 2000 / 单轮 500 字符 | flow 报告中步骤/循环轮次输出保留长度（完整内容在 data 与截断文件中，`FLOW_REPORT_STEP_CHARS`/`FLOW_REPORT_ROUND_CHARS`） |
+| sh/py 结构化 data 文本上限 | 100k 字符 | `data.stdout`/`data.stderr` 超长截断（完整文本以 output 截断文件为准，`SCRIPT_DATA_TEXT_CAP`） |
 | 后端图表渲染超时 | 20 秒 | 后端组合渲染器（`core/diagram-render.ts`）单次超时上限：plantuml 走 `plantuml.ts` `PLANTUML_TIMEOUT_MS`（可注入），mermaid 渲染与 d2 编译/渲染各 20 秒 Promise 超时；引擎渲染本身秒级，超时防大图/挂起 |
 | 后端图表输出尺寸上限 | 1600 × 2400 px | 后端渲染默认 2x 超采样，超出按比例缩放到该上限（防超大 PNG 超飞书图片限制；`DEFAULT_MAX_WIDTH`/`DEFAULT_MAX_HEIGHT`） |
 | 图表语言 | `mermaid` / `plantuml` / `d2` | draw 工具 `format` 参数三取值（SDK `DiagramFormat`）；产物扩展名 `.mmd`/`.puml`/`.d2`；前端本地渲染与后端组合渲染器（飞书/`render=backend`）均三语言全支持 |

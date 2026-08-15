@@ -38,7 +38,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "loadproj" | "interact" | "askenv" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -160,6 +160,21 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // subpipe：总Agent 调 code 执行新会话；新会话内调用 flow（内部编排 code 子Agent 工具），
+    // 验证数据流编排能力（flow/tool_schemas）在新会话环境注册且经会话注册表解析子Agent 工具
+    if (this.mode === "subpipe" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-p1", name: "agent_run", arguments: { agents: ["code"], input: "batch task" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subpipe" && this.calls === 2) {
+      yield {
+        type: "tool_call",
+        toolCall: { id: "tc-p2", name: "flow", arguments: { steps: [{ id: "q", tool: "code_todo", params: { entries: [] } }] } },
+      }
+      yield { type: "done" }
+      return
+    }
     // loadproj：装载模式（agent_load 后直接用 code_read）下预置项目 project 参数路由验证用
     if (this.mode === "loadproj" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-l1", name: "agent_load", arguments: { name: "code" } } }
@@ -215,7 +230,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "loadproj" | "interact" | "askenv" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -868,6 +883,20 @@ describe("AgentEngine", () => {
     cleanup(home)
   })
 
+  test("agent_run environment provides flow dataflow orchestration (sub-agent tools resolvable inside flow)", async () => {
+    const { home, engine, store } = await setup("subpipe")
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "run pipeline")
+    const loaded = await store.load(session.id)
+    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    expect(callMsg).toBeDefined()
+    const archive = callMsg!.sessionRun!
+    // 新会话内 flow 执行成功：子Agent 工具（code_todo）经会话注册表解析、无「未知工具」错误
+    expect(archive.messages.some((m) => m.role === "tool" && m.name === "flow" && m.content.includes("code_todo"))).toBe(true)
+    expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
+    cleanup(home)
+  })
+
   test("agent_run preloads multiple sub-agents: 完整提示词拼接 + 多 Agent 工具集叠加", async () => {
     const { home, engine, store, subAgents, provider } = await setup("submulti")
     // 动态注册第二个测试子Agent（带工具）：验证多 Agent 预加载时其工具同样进入新会话
@@ -1482,15 +1511,15 @@ describe("AgentEngine", () => {
     cleanup(s.home)
   })
 
-  test("safe mode blocks risky tools inside pipe (no bypass via pipeline wrapper)", async () => {
-    const s = await setup("tool", false, "local", true) // safeMode=true；pipe 内嵌 sh/write
-    s.provider.toolName = "pipe"
+  test("safe mode blocks risky tools inside flow (no bypass via pipeline wrapper)", async () => {
+    const s = await setup("tool", false, "local", true) // safeMode=true；flow 内嵌 sh/write
+    s.provider.toolName = "flow"
     s.provider.toolArgs = { steps: [{ tool: "sh", params: { command: "echo pwned" } }, { tool: "write", params: { path: "x.txt", content: "x" } }] }
     const session = await s.store.createSession("default", "t")
-    await s.engine.run(session.id, "default", "pipe it")
+    await s.engine.run(session.id, "default", "flow it")
     const loaded = await s.store.load(session.id)
-    // pipe 内每个风险 step 被拦截（pipe 直接调 rt.tool.execute 不经引擎拦截点，step 层同规则判定）
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "pipe")
+    // flow 内每个风险 step 被拦截（flow 直接调 rt.tool.execute 不经引擎拦截点，step 层同规则判定）
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "flow")
     expect(toolMsg?.content).toContain("安全模式")
     expect(toolMsg?.content).toContain("sh")
     expect(toolMsg?.content).toContain("write")

@@ -10,7 +10,7 @@ import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from ".
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from "./patch"
 import { hostBlockReason } from "./ip"
 import { deleteMiniTool, saveMiniTool } from "./mini-tools"
-import { isRiskyToolName, safeModeRestrictionMsg } from "./safety"
+import { runFlow, scanFlowApprovals } from "./flow"
 
 export const TRUNCATE_THRESHOLD = 12000
 /** 截断消息保留的首/尾字符数（DESIGN「常量参考」）。 */
@@ -183,14 +183,23 @@ export const lsTool: Tool = {
   description: "列出目录内容（文件/子目录、大小）。路径默认会话工作目录。",
   card: { titleParams: ["path"] },
   parameters: schema({ path: { type: "string", description: "目录路径（默认 .）" } }),
+  outputSchema: schema({
+    entries: {
+      type: "array",
+      description: "目录条目（目录在前，按路径排序）",
+      items: schema({ path: { type: "string", description: "相对路径" }, isDir: { type: "boolean" }, size: { type: "integer", description: "字节（目录为 0）" } }, ["path", "isDir", "size"]),
+    },
+  }, ["entries"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(args.path ? String(args.path) : ".")
     const entries = await ctx.listDir(path)
-    if (!entries.length) return { output: `（空目录）` }
-    const lines = entries
-      .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.path.localeCompare(b.path))
-      .map((e) => (e.isDir ? `${e.path}/` : `${e.path}  (${e.size} B)`))
-    return { output: lines.join("\n") }
+    if (!entries.length) return { output: `（空目录）`, data: { entries: [] } }
+    const sorted = entries.sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.path.localeCompare(b.path))
+    const lines = sorted.map((e) => (e.isDir ? `${e.path}/` : `${e.path}  (${e.size} B)`))
+    return {
+      output: lines.join("\n"),
+      data: { entries: sorted.map((e) => ({ path: e.path, isDir: e.isDir, size: e.size })) },
+    }
   },
 }
 
@@ -224,6 +233,13 @@ export const grepTool: Tool = {
   description: "在会话目录中按正则表达式递归搜索文本内容，返回 文件:行号: 匹配行。path 可限定子目录。",
   card: { titleParams: ["pattern"] },
   parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" }, ignoreCase: { type: "boolean" } }, ["pattern"]),
+  outputSchema: schema({
+    matches: {
+      type: "array",
+      description: "匹配列表（按文件与行号顺序，上限 200）",
+      items: schema({ file: { type: "string" }, line: { type: "integer", description: "行号（1 起始）" }, text: { type: "string", description: "匹配行（去除首尾空白，截取前 200 字符）" } }, ["file", "line", "text"]),
+    },
+  }, ["matches"]),
   async execute(args, ctx) {
     let re: RegExp
     try {
@@ -234,8 +250,8 @@ export const grepTool: Tool = {
     const path = args.path ? String(args.path) : ""
     const prefix = path ? `${path.replace(/\/+$/, "")}/` : ""
     const files = (await ctx.listFiles()).filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (prefix ? f.path.startsWith(prefix) : true))
-    if (!files.length) return { output: "（无匹配文件）" }
-    const matches: string[] = []
+    if (!files.length) return { output: "（无匹配文件）", data: { matches: [] } }
+    const matches: Array<{ file: string; line: number; text: string }> = []
     for (const f of files) {
       let content: string
       try {
@@ -245,13 +261,16 @@ export const grepTool: Tool = {
       }
       for (const [i, line] of content.split("\n").entries()) {
         if (matches.length >= GREP_MAX_MATCHES) break
-        if (re.test(line)) matches.push(`${f.path}:${i + 1}: ${line.trim().slice(0, 200)}`)
+        if (re.test(line)) matches.push({ file: f.path, line: i + 1, text: line.trim().slice(0, 200) })
       }
       if (matches.length >= GREP_MAX_MATCHES) break
     }
-    if (!matches.length) return { output: "（无匹配）" }
-    const result = matches.join("\n")
-    return matches.length >= GREP_MAX_MATCHES ? truncate(`${result}\n…（已达匹配上限）`, "grep", ctx) : truncate(result, "grep", ctx)
+    if (!matches.length) return { output: "（无匹配）", data: { matches: [] } }
+    const result = matches.map((m) => `${m.file}:${m.line}: ${m.text}`).join("\n")
+    const truncated = matches.length >= GREP_MAX_MATCHES
+      ? await truncate(`${result}\n…（已达匹配上限）`, "grep", ctx)
+      : await truncate(result, "grep", ctx)
+    return { ...truncated, data: { matches } }
   },
 }
 
@@ -274,6 +293,10 @@ export const searchFilesTool: Tool = {
   description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话目录中递归查找文件，返回相对路径。path 可限定子目录。",
   card: { titleParams: ["pattern"] },
   parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" } }, ["pattern"]),
+  outputSchema: schema({
+    files: { type: "array", items: { type: "string" }, description: "匹配文件相对路径（最多 200 个）" },
+    total: { type: "integer", description: "匹配总数（可能大于 files 长度）" },
+  }, ["files", "total"]),
   async execute(args, ctx) {
     const re = globToRegExp(String(args.pattern ?? ""))
     const path = args.path ? String(args.path) : ""
@@ -293,8 +316,9 @@ export const searchFilesTool: Tool = {
       .filter((f) => !f.isDir)
       .map((f) => f.path)
       .filter((p) => (prefix ? p.startsWith(prefix) : true) && re.test(prefix ? p.slice(prefix.length) : p))
-    if (!files.length) return { output: "（无匹配文件）" }
-    return { output: files.slice(0, 200).join("\n") }
+    if (!files.length) return { output: "（无匹配文件）", data: { files: [] } }
+    const listed = files.slice(0, 200)
+    return { output: listed.join("\n"), data: { files: listed, total: files.length } }
   },
 }
 
@@ -303,6 +327,12 @@ export const fetchUrlTool: Tool = {
   description: "抓取 URL 内容（网页/API/文档）。服务端部署模式限制公网地址（防 SSRF，含重定向逐跳校验）；响应超过阈值截断。",
   card: { titleParams: ["url"], args: "none" },
   parameters: schema({ url: { type: "string" } }, ["url"]),
+  outputSchema: schema({
+    ok: { type: "boolean", description: "是否抓取成功（输出文本可用）" },
+    status: { type: "integer", description: "HTTP 状态码（发起请求并有响应时）" },
+    contentType: { type: "string", description: "响应 Content-Type" },
+    error: { type: "string", description: "失败原因（ok=false 时）" },
+  }, ["ok"]),
   async execute(args, ctx) {
     const url = String(args.url)
     let res: Response
@@ -313,16 +343,16 @@ export const fetchUrlTool: Tool = {
         ? await fetchWithRedirectGuard(url, { signal: AbortSignal.timeout(FETCH_URL_TIMEOUT) }, assertPublicHttpUrl)
         : await fetch(url, { signal: AbortSignal.timeout(FETCH_URL_TIMEOUT) })
     } catch (err) {
-      return { output: `fetch_url 失败: ${(err as Error).message}` }
+      return { output: `fetch_url 失败: ${(err as Error).message}`, data: { ok: false, error: (err as Error).message } }
     }
-    if (!res.ok) return { output: `fetch_url 失败: HTTP ${res.status} ${res.statusText}` }
+    if (!res.ok) return { output: `fetch_url 失败: HTTP ${res.status} ${res.statusText}`, data: { ok: false, status: res.status } }
     const ct = res.headers.get("content-type") || ""
     if (!/text|json|xml|html|markdown|javascript|css/i.test(ct)) {
-      return { output: `非文本内容（${ct || "未知类型"}），已跳过内容抓取。` }
+      return { output: `非文本内容（${ct || "未知类型"}），已跳过内容抓取。`, data: { ok: false, status: res.status, contentType: ct } }
     }
     const buf = new Uint8Array(await res.arrayBuffer())
     const text = new TextDecoder().decode(buf)
-    return truncate(text.slice(0, FETCH_URL_MAX_BYTES), "fetch_url", ctx)
+    return { ...(await truncate(text.slice(0, FETCH_URL_MAX_BYTES), "fetch_url", ctx)), data: { ok: true, status: res.status, contentType: ct } }
   },
 }
 
@@ -798,6 +828,14 @@ export const gitTool: Tool = {
     },
     ["action"],
   ),
+  outputSchema: schema({
+    action: { type: "string", enum: ["status", "diff", "log"] },
+    branch: { type: "string", description: "当前分支（仅 status）" },
+    ahead: { type: "integer", description: "领先远端提交数（仅 status，无则省略）" },
+    behind: { type: "integer", description: "落后远端提交数（仅 status，无则省略）" },
+    changes: { type: "array", description: "变更文件（仅 status）", items: schema({ status: { type: "string", description: "git 状态码（如 M/A/??）" }, path: { type: "string" } }, ["status", "path"]) },
+    commits: { type: "array", description: "提交历史（仅 log）", items: schema({ hash: { type: "string" }, subject: { type: "string" } }, ["hash", "subject"]) },
+  }, ["action"]),
   async execute(args, ctx) {
     const action = String(args.action)
     const dir = ctx.resolvePath(args.dir ? String(args.dir) : ".")
@@ -812,9 +850,32 @@ export const gitTool: Tool = {
     if (code !== 0) return { output: `git ${action} 失败（exit ${code}，目录 ${args.dir || "."} 可能不是 Git 仓库）:\n${stderr || stdout}` }
     if (!stdout.trim()) {
       const empty = action === "diff" ? "（工作区无变更）" : action === "status" ? "（工作区干净）" : "（无提交记录）"
-      return { output: empty }
+      return { output: empty, data: { action, ...(action === "status" ? { changes: [] } : action === "log" ? { commits: [] } : {}) } }
     }
-    return truncate(stdout, "git", ctx)
+    if (action === "status") {
+      const lines = stdout.split("\n").filter(Boolean)
+      const branchLine = lines[0]?.startsWith("##") ? lines[0].slice(2).trim() : ""
+      const m = branchLine.match(/^(\S+?)(?:\.\.\.)?(?:\s+\[ahead (\d+)(?:, behind (\d+))?\])?/)
+      const rest = lines.filter((l) => !l.startsWith("##"))
+      return {
+        ...(await truncate(stdout, "git", ctx)),
+        data: {
+          action,
+          branch: m?.[1] ?? branchLine,
+          ...(m?.[2] ? { ahead: Number(m[2]) } : {}),
+          ...(m?.[3] ? { behind: Number(m[3]) } : {}),
+          changes: rest.map((l) => ({ status: l.slice(0, 2).trim(), path: l.slice(3).trim() })),
+        },
+      }
+    }
+    if (action === "log") {
+      const commits = stdout.split("\n").filter(Boolean).map((l) => {
+        const i = l.indexOf(" ")
+        return i < 0 ? { hash: l, subject: "" } : { hash: l.slice(0, i), subject: l.slice(i + 1) }
+      })
+      return { ...(await truncate(stdout, "git", ctx)), data: { action, commits } }
+    }
+    return { ...(await truncate(stdout, "git", ctx)), data: { action } }
   },
 }
 
@@ -829,9 +890,27 @@ function scriptTimeoutMs(v: unknown): number {
   return Math.min(n, SCRIPT_TIMEOUT_MAX_S) * 1000
 }
 
+/** sh/py 结构化 data 中 stdout/stderr 字符上限：data 供编排引用（分支判定/字段映射），超长截断防映射膨胀；完整文本以 output（及截断文件）为准。 */
+const SCRIPT_DATA_TEXT_CAP = 100000
+
+/** sh/py 共用结构化输出：{ stdout, stderr, exitCode }（编排可按 exitCode 分支、按 stdout 映射）。 */
+const scriptOutputSchema = schema({
+  stdout: { type: "string", description: "标准输出（超长截断至 100k 字符）" },
+  stderr: { type: "string", description: "标准错误（超长截断至 100k 字符）" },
+  exitCode: { type: "integer", description: "退出码（0=成功）" },
+}, ["stdout", "stderr", "exitCode"])
+
+function scriptData(stdout: string, stderr: string, exitCode: number): Record<string, unknown> {
+  return {
+    stdout: stdout.length > SCRIPT_DATA_TEXT_CAP ? stdout.slice(0, SCRIPT_DATA_TEXT_CAP) : stdout,
+    stderr: stderr.length > SCRIPT_DATA_TEXT_CAP ? stderr.slice(0, SCRIPT_DATA_TEXT_CAP) : stderr,
+    exitCode,
+  }
+}
+
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令。输出以 stdout 为准，需审批。可选 input 参数作为命令 stdin（pipe 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）。",
+  description: "执行 Shell 命令。输出以 stdout 为准，需审批。可选 input 参数作为命令 stdin（flow 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）。",
   requiresApproval: true,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -842,13 +921,14 @@ export const shTool: Tool = {
     },
     ["command"],
   ),
+  outputSchema: scriptOutputSchema,
   async execute(args, ctx) {
     const input = args.input != null ? String(args.input) : undefined
     const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir: ctx.workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
     const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
     // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
     const final = code === 0 && !stdout.trim() ? "（命令执行成功，无输出）" : out
-    return truncate(final, "sh", ctx)
+    return { ...(await truncate(final, "sh", ctx)), data: scriptData(stdout, stderr, code) }
   },
 }
 
@@ -876,7 +956,7 @@ export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
 
 export const pyTool: Tool = {
   name: "py",
-  description: "执行 Python 代码，需审批。代码经临时文件执行，stdin（input 参数，pipe 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）。",
+  description: "执行 Python 代码，需审批。代码经临时文件执行，stdin（input 参数，flow 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）。",
   requiresApproval: true,
   card: { args: "code", codeField: "code", codeLang: "python" },
   parameters: schema(
@@ -887,6 +967,7 @@ export const pyTool: Tool = {
     },
     ["code"],
   ),
+  outputSchema: scriptOutputSchema,
   async execute(args, ctx) {
     const code = String(args.code ?? "")
     const input = args.input != null ? String(args.input) : undefined
@@ -901,7 +982,7 @@ export const pyTool: Tool = {
       const out = exit === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${exit}]`
       // 成功但无输出：明确提示（区分「程序成功无输出」与「stdout 捕获失败」）
       const final = exit === 0 && !stdout.trim() ? "（程序执行成功，无输出）" : out
-      return truncate(final, "py", ctx)
+      return { ...(await truncate(final, "py", ctx)), data: scriptData(stdout, stderr, exit) }
     } finally {
       await rm(scriptPath, { force: true }).catch(() => {})
     }
@@ -920,13 +1001,28 @@ export const readFeedbackTool: Tool = {
       sessionId: { type: "string", description: "可选：仅返回该会话的反馈" },
     },
   ),
+  outputSchema: schema({
+    items: {
+      type: "array",
+      description: "反馈列表（按时间倒序）",
+      items: schema({
+        type: { type: "string", description: "thumbs_up/thumbs_down/suggestion/text" },
+        createdAt: { type: "integer", description: "毫秒时间戳" },
+        sessionId: { type: "string" },
+        messageId: { type: "string" },
+        label: { type: "string" },
+        subAgent: { type: "string" },
+        text: { type: "string" },
+      }, ["type", "createdAt"]),
+    },
+  }, ["items"]),
   async execute(args, ctx) {
     const { readFeedback } = await import("../feedback")
     const list = await readFeedback(ctx.home, ctx.user)
     const filtered = args.sessionId ? list.filter((f) => f.sessionId === String(args.sessionId)) : list
     const n = Math.min(Math.max(Number(args.limit ?? 10) || 10, 1), 50)
     const items = filtered.slice(0, n)
-    if (!items.length) return { output: args.sessionId ? `该会话暂无反馈记录。` : "暂无反馈记录。" }
+    if (!items.length) return { output: args.sessionId ? `该会话暂无反馈记录。` : "暂无反馈记录。", data: { items: [] } }
     const label = (t: string) => (t === "thumbs_up" ? "👍" : t === "thumbs_down" ? "👎" : t === "suggestion" ? "建议" : "文字")
     return {
       output:
@@ -944,6 +1040,7 @@ export const readFeedbackTool: Tool = {
             return `${parts.join("，")}${body}`
           })
           .join("\n"),
+      data: { items },
     }
   },
 }
@@ -964,6 +1061,12 @@ export const currentTimeTool: Tool = {
   description: "获取当前时间（一次性给出多种格式，直接取用无需转换）：ISO 8601 / Unix 秒与毫秒 / 本地日期时间（含星期与时区偏移）。",
   card: { args: "none" },
   parameters: schema({}),
+  outputSchema: schema({
+    iso: { type: "string", description: "ISO 8601（UTC）" },
+    unix: { type: "integer", description: "Unix 秒" },
+    unixMs: { type: "integer", description: "Unix 毫秒" },
+    local: { type: "string", description: "本地日期时间（含星期与时区偏移）" },
+  }, ["iso", "unix", "unixMs", "local"]),
   async execute() {
     const now = new Date()
     const pad = (n: number) => String(n).padStart(2, "0")
@@ -975,6 +1078,7 @@ export const currentTimeTool: Tool = {
         `- Unix 秒: ${Math.floor(now.getTime() / 1000)}\n` +
         `- Unix 毫秒: ${now.getTime()}\n` +
         `- 本地日期时间: ${localDateTime}`,
+      data: { iso: now.toISOString(), unix: Math.floor(now.getTime() / 1000), unixMs: now.getTime(), local: localDateTime },
     }
   },
 }
@@ -984,20 +1088,18 @@ export const systemInfoTool: Tool = {
   description: "获取系统信息（平台、架构、Node 版本、当前工作目录）。",
   card: { args: "none" },
   parameters: schema({}),
+  outputSchema: schema({
+    platform: { type: "string" }, arch: { type: "string" }, runtime: { type: "string" }, cwd: { type: "string" }, pid: { type: "integer" },
+  }, ["platform", "arch", "runtime", "cwd", "pid"]),
   async execute() {
-    return {
-      output: JSON.stringify(
-        {
-          platform: process.platform,
-          arch: process.arch,
-          runtime: `bun ${Bun.version}`,
-          cwd: process.cwd(),
-          pid: process.pid,
-        },
-        null,
-        2,
-      ),
+    const info = {
+      platform: process.platform,
+      arch: process.arch,
+      runtime: `bun ${Bun.version}`,
+      cwd: process.cwd(),
+      pid: process.pid,
     }
+    return { output: JSON.stringify(info, null, 2), data: info }
   },
 }
 
@@ -1126,11 +1228,21 @@ export function makeTodoTool(): Tool {
         },
       },
     }),
+    outputSchema: schema({
+      todos: {
+        type: "array",
+        description: "操作后的全部待办（查询时即当前清单）",
+        items: schema({
+          id: { type: "string" }, title: { type: "string" }, status: { type: "string", description: "pending/in_progress/completed/failed/cancelled" },
+          priority: { type: "string", description: "low/medium/high" }, progress: { type: "number" }, etaMin: { type: "number", description: "预计耗时（分钟）" }, note: { type: "string" },
+        }, ["id", "title", "status", "priority"]),
+      },
+    }, ["todos"]),
     async execute(args, ctx) {
       const todos = await ctx.getTodos()
       const entries = Array.isArray(args.entries) ? (args.entries as Array<Record<string, unknown>>) : []
       // 空列表 = 查询：不落盘不发布事件
-      if (!entries.length) return { output: `查询待办：\n${snapshot(todos)}` }
+      if (!entries.length) return { output: `查询待办：\n${snapshot(todos)}`, data: { todos } }
       const results: string[] = []
       const failures: string[] = []
       for (const raw of entries) {
@@ -1186,7 +1298,7 @@ export function makeTodoTool(): Tool {
         `待办操作完成（${results.length} 成功${failures.length ? `，${failures.length} 失败` : ""}）：\n` +
         results.join("\n") +
         (failures.length ? `\n失败：\n${failures.join("\n")}` : "")
-      return { output: `${head}\n${snapshot(todos)}` }
+      return { output: `${head}\n${snapshot(todos)}`, data: { todos } }
     },
   }
   return tool
@@ -1466,85 +1578,85 @@ export function makePreviewServerTool(overrides: Partial<PreviewServerDeps> = {}
   }
 }
 
-function makePipeTool(): Tool {
-  const pipe: Tool = {
-    name: "pipe",
-    description: "串联多个工具调用，上一步输出自动传入下一步。steps 为工具调用数组。",
+export function makeFlowTool(): Tool {
+  const flow: Tool = {
+    name: "flow",
+    description:
+      "数据流编排：一次调用执行多步工具链（把工具视为函数做动态编程），减少与模型的往返与词元消耗。支持引用映射、条件分支与循环：\n" +
+      "- **步骤**：steps 每项为工具步骤 `{ id?, tool, params?, input?, when?, optional? }` 或循环分组 `{ id?, foreach | while, maxLoops?, steps: [...] }`（分组须声明 foreach 或 while）。\n" +
+      "- **引用**：`{{s1.data.xxx}}` 引用步骤结构化输出（各工具 data 结构先用 tool_schemas 批量查询），`{{s1.output}}` 引用文本输出。params 值恰为一个 `{{表达式}}` 时保留原始类型（数字/数组/对象原样传递），混排字符串按文本拼接。根名：步骤 id（缺省自动编号 s1/s2…）、`prev`（上一实际执行步骤）、`item`/`index`（foreach 当前项/序号）、`iteration`（while 轮次）、`input`（flow 参数 input）。路径访问 `.字段`/`[下标]`/`.length`。\n" +
+      "- **input 显式映射**：`{ 目标参数名: \"{{源}}\" }`，解析后覆盖 params 同名字段并抑制自动注入——字段改名、多对一汇聚（多个步骤输出映射进同一工具的不同参数）都用它表达。\n" +
+      "- **when 条件分支**：表达式为假时跳过该步（不中断）。运算：`==`/`!=`/`>`/`>=`/`<`/`<=`、`&&`/`||`/`!`、括号、函数 `len()`/`contains()`/`exists()`；空数组视为假。\n" +
+      "- **foreach 数据循环**（一对多扇出）：表达式求值为数组（逐项）或正整数（按次），体内经 `{{item}}`/`{{index}}` 引用；组结果 data = 每轮末步 data 的数组。\n" +
+      "- **while 条件循环**（do-while：先执行一轮再判断，条件可引用本组最新结果如 `{{g.data.exitCode}}`，适合重试直到成功）：为真继续下一轮，达上限停止；`maxLoops` 默认 10、上限 50；需前置判断时配 when。\n" +
+      "- **optional 容错**：该步失败不中断（记录错误继续）；未声明时任一步失败中断整个 flow，报告失败位置与原因。\n" +
+      "- **自动注入**（未显式 input 映射时保留旧版语义）：脚本工具（sh/py）上一步输出经 stdin（input 参数）传入；其余工具的上一步 JSON 输出按参数名映射注入，兜底注入 input 参数。\n" +
+      "- **审批与安全**：内部任一工具需审批则整个 flow 提交一次审批（通过后依次执行）；安全模式下风险工具在 step 层同规则拦截。\n" +
+      "- **规模上限**：单次工具调用总数 ≤ 100、foreach ≤ 50 项、分组嵌套 ≤ 4 层；超限请拆分多次调用。",
+    requiresApproval: (args, ctx) => scanFlowApprovals(args.steps, ctx),
     parameters: schema(
       {
-        steps: { type: "array", items: { type: "object", properties: { tool: { type: "string" }, params: { type: "object" } }, required: ["tool"] } },
+        steps: {
+          type: "array",
+          description: "步骤列表：工具步骤 { id?, tool, params?, input?, when?, optional? } 或循环分组 { id?, foreach|while, maxLoops?, steps }",
+          items: { type: "object", properties: { tool: { type: "string" }, params: { type: "object" } }, required: ["tool"] },
+        },
+        input: { description: "初始输入（任意类型），步骤中经 {{input}} 引用" },
       },
       ["steps"],
     ),
     async execute(args, ctx) {
-      const steps = (args.steps as Array<{ tool: string; params: Record<string, unknown> }>) || []
-      const out: string[] = []
-      let prevText: string | undefined
-      for (const step of steps) {
-        const rt = ctx.registry.resolve(step.tool)
-        if (!rt) throw new Error(`pipe: 未知工具 ${step.tool}`)
-        // 安全模式（DESIGN「安全模式」）：pipe 直接执行工具、不经引擎拦截点，step 层须同规则判定——
-        // 风险工具（命令执行/写删文件/定时任务调度）不执行，返回限制信息（防 pipe 包装绕过）
-        if (ctx.safeMode && isRiskyToolName(step.tool)) {
-          const blocked = safeModeRestrictionMsg(step.tool)
-          prevText = blocked
-          out.push(`### ${step.tool}\n${blocked}`)
-          continue
-        }
-        const params = { ...(step.params || {}) }
-        // 上一步输出自动传入下一步（DESIGN「pipe 管道工具」数据传递规则）：
-        // - 脚本工具（sh/py）：上一步文本输出经 stdin（input 参数）传入
-        // - 非脚本工具：上一步输出可解析为 JSON 时按字段名映射注入；否则注入 input 字段
-        if (prevText !== undefined) {
-          const schemaProps = Object.keys((rt.tool.parameters?.properties as Record<string, unknown>) || {})
-          if (rt.tool.name === "sh" || rt.tool.name === "py") {
-            if (params.input === undefined) params.input = prevText
-          } else {
-            let injected = false
-            const parsed = tryParseJson(prevText)
-            if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-              for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-                if (schemaProps.includes(k) && params[k] === undefined) {
-                  params[k] = v
-                  injected = true
-                }
-              }
-            }
-            if (!injected && params.input === undefined) params.input = prevText
-          }
-        }
-        const result = await rt.tool.execute(params, ctx)
-        prevText = result.output
-        out.push(`### ${step.tool}\n${result.output}`)
-      }
-      return { output: out.join("\n\n") }
+      return runFlow({ steps: args.steps, input: args.input }, ctx)
     },
   }
-  return pipe
+  return flow
 }
 
-/** 尝试解析上一步输出为 JSON（pipe 非脚本工具的字段映射注入用）。解析失败返回 null。 */
-function tryParseJson(text: string): unknown {
-  const trimmed = text.trim()
-  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null
-  try {
-    return JSON.parse(trimmed)
-  } catch {
-    return null
-  }
+/** 批量获取工具的输入参数与结构化输出 schema（DESIGN「工具双输出」）：编排（flow）前理解输出结构，避免逐个试调。 */
+export const toolSchemasTool: Tool = {
+  name: "tool_schemas",
+  description:
+    "批量获取工具的输入参数 schema 与结构化输出（data）schema。编写 flow 数据流编排前先用本工具了解相关工具的输出结构（引用 {{步骤id.data.字段}} 的前提）。tools 传工具名列表（可含子Agent 命名空间工具，如 code_read）；省略时返回全部已启用工具的输出结构概要（不含输入参数，紧凑一行一个）。无 outputSchema 的工具仅有文本 output（无结构化 data 可引用）。",
+  parameters: schema({
+    tools: { type: "array", items: { type: "string" }, description: "工具名列表（省略 = 全部已启用工具的输出概要）" },
+  }),
+  async execute(args, ctx) {
+    const all = ctx.registry.schemas()
+    const names = Array.isArray(args.tools) ? args.tools.map(String).filter(Boolean) : []
+    if (!names.length) {
+      const lines = all.map((s) => {
+        const os = ctx.registry.resolve(s.name)?.tool.outputSchema
+        return `- ${s.name}: ${os ? JSON.stringify(os) : "（仅文本 output，无结构化 data）"}`
+      })
+      return { output: `已启用工具（${all.length} 个）的输出结构：\n${lines.join("\n")}`, data: { tools: all.map((s) => ({ name: s.name, outputSchema: ctx.registry.resolve(s.name)?.tool.outputSchema ?? null })) } }
+    }
+    const entries = names.map((name) => {
+      const s = all.find((x) => x.name === name)
+      if (!s) return { name, error: "未知或未启用的工具" }
+      return { name, description: s.description, parameters: s.parameters, outputSchema: ctx.registry.resolve(name)?.tool.outputSchema ?? null }
+    })
+    return { output: JSON.stringify(entries, null, 2), data: { tools: entries } }
+  },
 }
 
 export const agentListTool: Tool = {
   name: "agent_list",
   description: "列出可用子Agent（名称、描述、是否已装载）。工具名以已注册的工具集为准，不在此列出。",
   parameters: schema({}),
+  outputSchema: schema({
+    agents: {
+      type: "array",
+      items: schema({ name: { type: "string" }, description: { type: "string" }, loaded: { type: "boolean", description: "是否已装载" } }, ["name", "description", "loaded"]),
+    },
+  }, ["agents"]),
   async execute(_args, ctx) {
     const defs = ctx.listSubAgentDefs()
-    if (!defs.length) return { output: "无可用子Agent。" }
+    if (!defs.length) return { output: "无可用子Agent。", data: { agents: [] } }
     return {
       output: defs
         .map((d) => `- ${d.name}${d.loaded ? " [已装载]" : " [未装载]"}: ${d.description}`)
         .join("\n"),
+      data: { agents: defs.map((d) => ({ name: d.name, description: d.description, loaded: d.loaded })) },
     }
   },
 }
@@ -1690,7 +1802,8 @@ export function createGlobalTools(): Record<string, Tool> {
     apply_patch: applyPatchTool,
     diff: diffTool,
     git: gitTool,
-    pipe: makePipeTool(),
+    flow: makeFlowTool(),
+    tool_schemas: toolSchemasTool,
     sh: shTool,
     py: pyTool,
     draw: drawTool,

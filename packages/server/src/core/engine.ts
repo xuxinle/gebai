@@ -11,7 +11,7 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isRiskyToolName, safeModeRestrictionMsg } from "./safety"
@@ -99,6 +99,18 @@ function parseExtraParamsSafe(raw: string | undefined): Record<string, unknown> 
   } catch (err) {
     console.warn(`[gebai] 忽略无效的 GEBAI_LLM_EXTRA_PARAMS: ${(err as Error).message}`)
     return {}
+  }
+}
+
+/** 解析工具审批要求（DESIGN「工具审批」）：布尔静态声明，或函数按调用参数动态判定
+ *  （flow 等编排工具据此实现「内部任一工具需审批则整体审批」）；函数异常按需审批处理（fail-safe）。 */
+async function toolRequiresApproval(tool: Tool, args: Record<string, unknown>, ctx: ToolContext): Promise<boolean> {
+  const ra = tool.requiresApproval
+  if (typeof ra !== "function") return !!ra
+  try {
+    return !!(await ra(args ?? {}, ctx))
+  } catch {
+    return true
   }
 }
 
@@ -1014,7 +1026,7 @@ export class AgentEngine {
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
       `当前会话临时工作目录: ${workdir}/tmp${sandboxNote}`,
-      `复杂操作请优先编写脚本（sh/py）一次执行，避免大量单步工具调用。`,
+      `复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行(支持 {{步骤id.data.字段}} 引用映射、when 分支、foreach/while 循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述)，或编写脚本（sh/py）一次执行，避免大量单步工具调用浪费往返与词元。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
@@ -1162,7 +1174,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[] },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: ToolRegistry },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1250,12 +1262,12 @@ export class AgentEngine {
       getTodos: () => store.getTodos(sessionId),
       setTodos: (todos) => store.setTodos(sessionId, todos),
       registry: {
-        schemas: (enabledOnly = true) => self.opts.registry.schemas(enabledOnly),
+        schemas: (enabledOnly = true) => (opts?.registry ?? self.opts.registry).schemas(enabledOnly),
         resolve: (name) => {
-          const rt = self.opts.registry.resolve(name)
+          const rt = (opts?.registry ?? self.opts.registry).resolve(name)
           return rt ? { name: rt.name, tool: rt.tool } : undefined
         },
-        getAgentNames: () => self.opts.registry.getAgentNames(),
+        getAgentNames: () => (opts?.registry ?? self.opts.registry).getAgentNames(),
       },
       listSubAgentDefs: () =>
         self.opts.subAgents.list().map((d) => ({ name: d.name, description: self.agentDescription(d, user, env), preload: d.preload, loaded: d.loaded })),
@@ -1543,7 +1555,7 @@ export class AgentEngine {
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
-        const approvalRequired = !!rt.tool.requiresApproval && !(await this.isApprovalSkipped(sessionId, user, env))
+        const approvalRequired = (await toolRequiresApproval(rt.tool, tc.arguments, ctx)) && !(await this.isApprovalSkipped(sessionId, user, env))
         if (approvalRequired) {
           // 多用户隔离 + 无交互通道（REST）：无人可审批，直接拒绝执行（防普通用户经 REST 免审批执行 sh/py 等敏感工具）
           if (this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none") {
@@ -1576,9 +1588,10 @@ export class AgentEngine {
         this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id })
         // 取消/超时统一收口：停止按钮中断执行（脚本进程同步被杀），超时作为结果返回模型不结束任务
         const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, signal, rt.name)
-        // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸
+        // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
+        // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
         const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks }
+          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
           : result
         await persist({ id: crypto.randomUUID(), role: "tool", content: safe.output, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, sessionRun: safe.sessionRun, createdAt: Date.now() })
         messages.push({ role: "tool", content: safe.output, toolCallId: tc.id, name: tc.name })
@@ -1705,6 +1718,9 @@ export class AgentEngine {
         }
       }
     }
+    // 数据流编排能力（与总Agent 主循环一致）：新会话内同样可用 flow 一次编排多步、tool_schemas 批量查询输出结构
+    reg.register(makeFlowTool())
+    reg.register(toolSchemasTool)
 
     // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；
     // 每个子Agent 前加职责分隔头（名称 + 能力描述），明确各段提示词对应的工具命名空间与职责域，多 Agent 预加载时不混淆
@@ -1740,7 +1756,7 @@ export class AgentEngine {
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n\n${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述），或编写脚本（sh/py）一次执行，避免大量单步工具调用浪费往返与词元。\n\n${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]
@@ -1856,7 +1872,7 @@ export class AgentEngine {
     // 取消中止判定：新会话执行不设独立超时，中止仅由父任务取消传播（报「已取消」）
     const activeSignal = signal
     const abortReason = () => (activeSignal.reason instanceof Error ? activeSignal.reason.message : activeSignal.reason ? String(activeSignal.reason) : "cancelled")
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, role: this.tasks.get(sessionId)?.role }, depth)
+    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role }, depth)
     // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）
     const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
@@ -1942,7 +1958,7 @@ export class AgentEngine {
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
-        if (rt.tool.requiresApproval && !(await this.isApprovalSkipped(sessionId, user, env))) {
+        if ((await toolRequiresApproval(rt.tool, tc.arguments, ctx)) && !(await this.isApprovalSkipped(sessionId, user, env))) {
           // 多用户隔离 + 无交互通道（REST）：无人可审批，直接拒绝执行（与主循环一致）
           if (this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none") {
             const denied = this.noInteractionDenied(rt.name)
@@ -1969,9 +1985,9 @@ export class AgentEngine {
         // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
         this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
         const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name)
-        // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀
+        // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
         const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks }
+          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
           : result
         // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
         // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
