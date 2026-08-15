@@ -1,14 +1,16 @@
 import { startServer } from "@gebai/server"
 
 /**
- * 桌面端宿主（scaffold）：
- * 同进程启动服务端；桌面 WebView 集成需在具体平台实现（Windows WebView2 /
- * macOS WKWebView / Linux WebKitGTK）。当前以「本地浏览器访问」作为跨平台兜底，
- * 后续可用原生 WebView 替换 openBrowser。
+ * 桌面端宿主（浏览器形态）：同进程启动服务端并自动打开系统默认浏览器；
+ * 原生窗口形态见 launcher/（tao/wry 启动器，spawn 本二进制并连接 WebView，
+ * 以 GEBAI_NO_OPEN=1 走此入口时不打开浏览器）。
  */
 export async function runDesktop(overrides: Parameters<typeof startServer>[0] = {}) {
-  const { server, config } = await startServer(overrides)
-  const url = `http://${config.host}:${config.port}`
+  // 桌面形态默认 OS 分配空闲端口（port=0），根治与 dev 服务/其他实例的 3000 端口冲突；
+  // 显式 GEBAI_PORT 或调用方 overrides.port 优先
+  const port = overrides.port ?? (process.env.GEBAI_PORT ? Number(process.env.GEBAI_PORT) : 0)
+  const { server } = await startServer({ ...overrides, port })
+  const url = `http://${server.hostname}:${server.port}`
   if (process.env.GEBAI_NO_OPEN !== "1") {
     await openBrowser(url)
   }

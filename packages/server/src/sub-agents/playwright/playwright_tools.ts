@@ -3,7 +3,8 @@ import { artifactBlocks, truncate } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
 import { pathToFileURL } from "node:url"
 import { isAbsolute, join, normalize, sep } from "node:path"
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { isBinaryMode, resolveGebaiHome } from "../../core/config"
 
 /**
  * playwright 子Agent 工具集：浏览器自动化（打开页面/读取内容/截图/交互/JS 执行）。
@@ -30,9 +31,31 @@ function num(v: unknown, dflt: number): number {
   return Number.isFinite(n) && n > 0 ? n : dflt
 }
 
-/** driver 脚本绝对路径：源码模式与 dist（单文件 bundle）模式均与入口文件同目录。 */
+/** driver 脚本绝对路径：源码模式与本文件同目录（dist 非编译形态则与入口同目录）。 */
 export function driverPath(): string {
   return join(import.meta.dir, DRIVER_FILE)
+}
+
+/**
+ * 解析 driver 脚本路径：源码模式直接取同目录文件；二进制（bun --compile）模式从内嵌产物
+ * （`core/driver.embedded.generated.json`，构建脚本 `scripts/build-driver-embed.ts` 生成，gzip base64）
+ * 物化到 `{GEBAI_HOME}/vendor/playwright/driver.mjs`（与 d2js 同思路的打包闭环）。
+ */
+export async function resolveDriverFile(): Promise<string> {
+  if (!isBinaryMode()) return driverPath()
+  const dir = join(resolveGebaiHome(), "vendor", "playwright")
+  const file = join(dir, DRIVER_FILE)
+  if (!existsSync(file)) {
+    const embedded = await import("../../core/driver.embedded.generated.json")
+      .then((m) => m.default as { gzip: true; driver: string })
+      .catch(() => null)
+    if (!embedded) {
+      throw new Error("playwright 桥接驱动内嵌产物缺失（构建时请先运行 scripts/build-driver-embed.ts）")
+    }
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(file, Bun.gunzipSync(Buffer.from(embedded.driver, "base64")))
+  }
+  return file
 }
 
 /** playwright 包入口的 file:// URL（Bun 侧解析真实路径，node 进程按此动态 import）。 */
@@ -50,7 +73,7 @@ export interface BridgeLike {
 }
 
 export class Bridge implements BridgeLike {
-  private readonly opts: { driverPath: string; playwrightModule: string; requestTimeoutMs: number }
+  private readonly opts: { driverPath?: string; playwrightModule: string; requestTimeoutMs: number }
   private proc: Bun.Subprocess | null = null
   private stdin: Bun.FileSink | null = null
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
@@ -60,7 +83,7 @@ export class Bridge implements BridgeLike {
 
   constructor(opts: { driverPath?: string; playwrightModule?: string; requestTimeoutMs?: number } = {}) {
     this.opts = {
-      driverPath: opts.driverPath ?? driverPath(),
+      driverPath: opts.driverPath,
       playwrightModule: opts.playwrightModule ?? playwrightModuleUrl(),
       requestTimeoutMs: opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
     }
@@ -86,11 +109,11 @@ export class Bridge implements BridgeLike {
 
   private async ensureStarted(): Promise<void> {
     if (this.started && this.proc && !this.proc.killed) return
-    const path = this.opts.driverPath
+    const path = this.opts.driverPath ?? (await resolveDriverFile())
     const { existsSync } = await import("node:fs")
     if (!existsSync(path)) {
       throw new Error(
-        `playwright 桥接驱动缺失: ${path}（dist 构建需将 driver.mjs 与入口同目录；bun --compile 单二进制形态不支持 playwright 子Agent）`
+        `playwright 桥接驱动缺失: ${path}（dist 构建需将 driver.mjs 与入口同目录；二进制形态需构建时运行 scripts/build-driver-embed.ts 生成内嵌产物）`,
       )
     }
     const proc = Bun.spawn(["node", path], {

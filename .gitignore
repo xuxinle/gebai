@@ -49,12 +49,18 @@ packages/server/src/core/web.bundle.generated.ts
 # 构建时生成的 D2.js 内嵌产物注册表（由 scripts/build-d2js.ts 生成）
 packages/server/src/core/d2js.embedded.generated.json
 packages/server/src/core/analyzer-wasm.embedded.generated.json
+# 构建时生成的 playwright driver 内嵌产物（由 scripts/build-driver-embed.ts 生成）
+packages/server/src/core/driver.embedded.generated.json
 # 构建时从 node_modules 拷贝的 @plantuml/core 引擎（由 scripts/copy-plantuml.ts 生成）
 packages/web/public/vendor/
-# Tauri 构建产物（Rust target / 侧车 binaries / 安装包）
-packages/desktop/src-tauri/target/
-packages/desktop/src-tauri/binaries/
-packages/desktop/src-tauri/gen/
+# 构建时从 favicon.svg 生成的大脑图标 ICO（由 scripts/gen-icon.ts 生成）
+packages/desktop/icons/
+
+# 原生 WebView 启动器 Rust 构建产物（cargo target）
+packages/desktop/launcher/target/
+
+# bun build 编译临时文件
+*.bun-build
 
 # bun lockfile（不提交，bun install 时本地生成）
 bun.lock

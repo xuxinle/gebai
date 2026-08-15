@@ -6,11 +6,11 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun run scripts/build-subagents.ts && bun run scripts/build-d2js.ts && bun run scripts/build-analyzer-wasm.ts && bun build ./src/index.ts --target=bun --outdir dist --external @terrastruct/d2",
+    "build": "bun run scripts/build-subagents.ts && bun run scripts/build-d2js.ts && bun run scripts/build-analyzer-wasm.ts && bun run scripts/build-driver-embed.ts && bun build ./src/index.ts --target=bun --outdir dist --external @terrastruct/d2",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "hash-password": "bun run scripts/hash-password.ts",
-    "typecheck": "bun run scripts/build-subagents.ts && bun run scripts/build-d2js.ts && bun run scripts/build-analyzer-wasm.ts && tsc --noEmit",
+    "typecheck": "bun run scripts/build-subagents.ts && bun run scripts/build-d2js.ts && bun run scripts/build-analyzer-wasm.ts && bun run scripts/build-driver-embed.ts && tsc --noEmit",
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {

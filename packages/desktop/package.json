@@ -6,10 +6,9 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "server:build": "bun run --cwd ../web build && bun run ../server/scripts/build-web-bundle.ts && bun run ../server/scripts/build-subagents.ts && bun run ../server/scripts/build-d2js.ts && bun build ./src/server-main.ts --compile --outfile=src-tauri/binaries/gebai-x86_64-pc-windows-msvc.exe --external @terrastruct/d2 && bun run scripts/copy-driver.ts",
-    "tauri:dev": "bunx --yes @tauri-apps/cli dev",
-    "tauri:build": "bun run server:build && bunx --yes @tauri-apps/cli build",
-    "build": "bun run tauri:build",
+    "server:build": "bun run scripts/gen-icon.ts && bun run --cwd ../web build && bun run ../server/scripts/build-web-bundle.ts && bun run ../server/scripts/build-subagents.ts && bun run ../server/scripts/build-d2js.ts && bun run ../server/scripts/build-driver-embed.ts && bun build ./src/index.ts --compile --outfile=dist/gebai.exe --external @terrastruct/d2 && bun run scripts/embed-icon.ts",
+    "launcher:build": "cargo build --release --manifest-path launcher/Cargo.toml && bun run scripts/copy-launcher.ts",
+    "build": "bun run server:build && bun run launcher:build",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "echo 'no lint configured'"
@@ -18,6 +17,7 @@
     "@gebai/server": "workspace:*"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/bun": "latest",
     "typescript": "^5.7.0"
   }

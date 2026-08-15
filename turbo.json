@@ -6,8 +6,8 @@
       "outputs": ["dist/**"]
     },
     "@gebai/desktop#build": {
-      "outputs": ["gebai", "gebai.exe"],
-      "inputs": ["src/**", "package.json", "../../packages/server/src/sub-agents/**", "../../packages/server/scripts/build-subagents.ts"]
+      "outputs": ["dist/**"],
+      "inputs": ["src/**", "scripts/**", "launcher/**", "package.json", "../../packages/server/src/sub-agents/**", "../../packages/server/scripts/**"]
     },
     "dev": {
       "cache": false,

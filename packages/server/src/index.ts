@@ -354,8 +354,9 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
     },
   })
 
+  // 实际监听端口以 Bun.serve 结果为准（port=0 时为 OS 分配的空闲端口，桌面形态用）
   console.log(
-    `[gebai] listening on http://${config.host}:${config.port} (GEBAI_HOME=${config.gebaiHome}, auth=${config.auth}, sandbox=${sandbox.enabled}${config.devReload ? ", dev-reload" : ""})`,
+    `[gebai] listening on http://${server.hostname}:${server.port} (GEBAI_HOME=${config.gebaiHome}, auth=${config.auth}, sandbox=${sandbox.enabled}${config.devReload ? ", dev-reload" : ""})`,
   )
   // 进程退出时终止 vite build --watch 子进程（防孤儿）
   process.on("exit", () => devReload?.stop())

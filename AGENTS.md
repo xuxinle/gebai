@@ -24,7 +24,7 @@ Bun workspaces + Turborepo 的 Monorepo：
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono、Agent 引擎、会话管理、子 Agent 加载、REST/WS/Webhook |
 | `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WS/REST 连接管理、类型定义、API 契约 |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制 |
-| `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：Bun 启动系统原生 WebView |
+| `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制） |
 
 - 语言：TypeScript，运行时 Bun。
 - Web 框架：Hono（服务端）、Vite（前端构建）。

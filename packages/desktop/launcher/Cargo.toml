@@ -1,0 +1,18 @@
+[package]
+name = "gebai-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "GEBAI desktop launcher (tao window + wry WebView + embedded server sidecar)"
+
+[dependencies]
+dirs = "6"
+tao = "0.36"
+wry = "0.56"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
