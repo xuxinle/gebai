@@ -593,7 +593,7 @@ export const renderHtmlTool: Tool = {
       path: { type: "string", description: "会话内已存在的 .html 文件路径（与 html 二选一：读取文件内容直接渲染，适合已生成页面文件仅需重新展示/调整预览尺寸的场景）" },
       name: { type: "string", description: "页面标题/文件名（不含扩展名；未传时默认 page，path 模式默认取文件主名）" },
       width: { type: "number", description: "预览宽度（px，可选，默认铺满消息流宽度）" },
-      height: { type: "number", description: "预览高度（px，可选，默认 480）" },
+      height: { type: "number", description: "预览高度（px，可选，不传默认取会话区域高度的 2/3）" },
     },
   ),
   async execute(args, ctx) {

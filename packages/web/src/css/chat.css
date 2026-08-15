@@ -1067,7 +1067,9 @@
 .html-toolbar button.ok { color: var(--success); }
 .html-frame {
   width: 100%;
+  /* 默认高度 = 会话区域（.chat-wrap，容器查询单位 cqh）高度的 2/3，随窗口尺寸自动重算；不支持 cqh 的旧浏览器回退 480px */
   height: 480px;
+  height: 66.67cqh;
   border: 1px solid var(--border); /* 主题边框：预览区与主题保持一致 */
   display: block;
   background: var(--bg-inset); /* 主题背景：内容页无自带背景时与主题一致，避免亮色突兀块 */
@@ -1083,9 +1085,9 @@
   border-radius: 0;
   box-shadow: none;
 }
-.html-viewer-overlay .preview-body { padding: 0; }
-/* 全屏 iframe 宽度固定铺满（不参与内容宽度反馈，避免越缩越窄） */
-.html-viewer-overlay .html-frame-full { width: 100%; height: calc(100vh - 45px); cursor: default; }
+.html-viewer-overlay .preview-body { padding: 0; display: flex; min-height: 0; }
+/* 全屏 iframe 撑满标题栏以下全部空间（flex 拉伸，不猜标题栏高度，杜绝底部留白/裁切） */
+.html-viewer-overlay .html-frame-full { flex: 1; min-width: 0; width: auto; height: auto; cursor: default; }
 /* 卡片横向滚动条（iframe 按实际宽展示后出现）：显式跟随主题 */
 .html-card::-webkit-scrollbar { width: 10px; height: 10px; }
 .html-card::-webkit-scrollbar-track { background: transparent; }
@@ -1096,7 +1098,7 @@
   background-clip: content-box;
 }
 .html-card::-webkit-scrollbar-thumb:hover { background: var(--text-faint); border: 2px solid transparent; background-clip: content-box; }
-.html-frame-full { height: calc(100vh - 210px); cursor: default; }
+
 .html-error { font-size: 12px; color: var(--danger); padding: 12px; }
 
 

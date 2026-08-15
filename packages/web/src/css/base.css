@@ -909,7 +909,7 @@ aside {
 
 /* ---------- 主区域 ---------- */
 main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
-.chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; container-type: size; /* 会话区域尺寸容器：HTML 预览卡片高度按 cqh 取它的 2/3 */ }
 #messages {
   flex: 1;
   overflow-y: auto;
