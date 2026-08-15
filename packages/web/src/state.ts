@@ -42,10 +42,18 @@ export const settingsBody = document.getElementById("settings-body")!
 /* ---------- 可变状态（跨模块共享） ---------- */
 
 export let currentSession: SessionInfo | null = null
+/** 草稿态（空白页、会话未创建）：点击「新会话」进入，首条消息发送时才真正创建会话；
+ *  该标志阻止迟到的服务端快照把草稿页覆盖回服务端记忆的当前会话。 */
+let draftView = false
+/** 是否处于草稿态（当前无会话的空白页）。 */
+export function isDraftView(): boolean {
+  return draftView
+}
 /** 记住当前浏览的会话：刷新页面后恢复。 */
 const SESSION_KEY = "gebai.ui.session"
 export function setCurrentSession(s: SessionInfo | null): void {
   currentSession = s
+  draftView = s === null
   if (s) {
     try {
       localStorage.setItem(SESSION_KEY, s.id)

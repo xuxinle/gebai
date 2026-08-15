@@ -13,7 +13,7 @@ import { bindMiniTools } from "./mini-tools"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
 import { initLowPower } from "./low-power"
-import { bindSessionActions, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
+import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { addApproval, clearApprovals } from "./approvals"
 import {
   addMetaActions,
@@ -49,6 +49,7 @@ import {
   focusInput,
   getCurrentSession,
   input,
+  isDraftView,
   lastSessionId,
   pendingFiles,
   pendingTools,
@@ -262,7 +263,23 @@ composer.addEventListener("submit", async (e) => {
     return
   }
   const text = input.value.trim()
-  if ((!text && pendingFiles.length === 0) || !cur) return
+  if (!text && pendingFiles.length === 0) return
+  let sessionId: string
+  if (cur) {
+    sessionId = cur.id
+  } else {
+    // 草稿态（空白页）：首条消息发送时才创建会话（新会话懒创建，避免落盘空会话）
+    let s
+    try {
+      s = await client.createSession()
+    } catch (err) {
+      setConn(`创建会话失败: ${(err as Error).message}`, false)
+      return
+    }
+    setCurrentSession(s)
+    sessionId = s.id
+    void refreshSessions() // 列表即时出现新会话（不阻塞发送）
+  }
   input.value = ""
   autosize()
   hideEmptyState()
@@ -273,14 +290,12 @@ composer.addEventListener("submit", async (e) => {
   const msgId = uuid()
   if (text) {
     appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
-    recordInput(cur.id, text)
+    recordInput(sessionId, text)
   }
-  const attachments = await sendPending(cur.id)
+  const attachments = await sendPending(sessionId)
   // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
   const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
   if (!prompt) return
-
-  const sessionId = cur.id
   // 不预创建空占位消息：空内容（无文本/推理）时不显示任何消息，首个实质内容到达时惰性创建
   const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), abort: new AbortController() }
   runs.set(sessionId, run)
@@ -644,7 +659,8 @@ async function init() {
   // 状态快照（建连/登录/重连后到达）：重连后模型收敛——静默刷新会话列表；
   // 当前会话缺失时恢复服务端当前会话（含 localStorage 记忆，供 init 对齐）
   client.onSnapshot((snap) => {
-    if (!getCurrentSession() && snap.currentSessionId) {
+    // 草稿态（用户主动进入空白页）不被服务端记忆的当前会话覆盖
+    if (!getCurrentSession() && !isDraftView() && snap.currentSessionId) {
       const s = snap.sessions.find((x) => x.id === snap.currentSessionId)
       if (s) {
         setCurrentSession(s)
@@ -653,7 +669,7 @@ async function init() {
     }
     // 模型上下文窗口：标题栏占比显示用（snapshot 与 session.list 均携带）
     setMaxCtxTokens(snap.maxContextTokens ?? 0)
-    if (getCurrentSession()) void refreshSessions(snap.sessions)
+    if (getCurrentSession() || isDraftView()) void refreshSessions(snap.sessions)
   })
   // connect 与 listSubAgents 并行（SDK 内共享同一连接尝试，listSubAgents 复用该连接）
   const connPromise = client.connect()
@@ -665,11 +681,11 @@ async function init() {
   let sessions: SessionInfo[] = []
   try {
     sessions = await client.listSessions()
-    // 恢复上次浏览的会话；没有本地保存或已删除则新建会话
+    // 恢复上次浏览的会话；没有本地保存或已删除则进入空白草稿页（首条消息发送时才创建，不产生空会话）
     const saved = lastSessionId()
     const target = saved ? sessions.find((s) => s.id === saved) : undefined
     if (target) setCurrentSession(target)
-    else setCurrentSession(await client.createSession())
+    else enterDraftView()
   } catch (err) {
     // 服务模式未登录 / 无权限：进入登录态
     showLogin((err as Error).message)

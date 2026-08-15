@@ -40,6 +40,17 @@ export interface LLMProvider {
 
 export type ApiKind = "openai" | "responses" | "anthropic"
 
+/** 模型接口未配置错误（apiBase 缺失）：配置类错误无需重试，引擎据此直接失败并给出配置入口指引。 */
+export class LLMConfigError extends Error {}
+
+function assertApiConfigured(config: ProviderConfig): void {
+  if (!config.apiBase) {
+    throw new LLMConfigError(
+      "模型接口地址未配置：请在「设置 → 环境变量」配置 GEBAI_LLM_API_BASE（及 GEBAI_LLM_API_KEY / GEBAI_LLM_MODEL，随消息生效、不落盘），或配置服务端环境变量后重启",
+    )
+  }
+}
+
 export interface ProviderConfig {
   apiKind: ApiKind
   apiBase: string
@@ -351,6 +362,7 @@ class OpenAIProvider implements LLMProvider {
   }
 
   async *chat(msgs: MessageLike[], opts: ChatOptions = {}): AsyncIterable<LLMChunk> {
+    assertApiConfigured(this.config)
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: toOpenAIMessages(msgs),
@@ -436,6 +448,7 @@ class ResponsesProvider implements LLMProvider {
   }
 
   async *chat(msgs: MessageLike[], opts: ChatOptions = {}): AsyncIterable<LLMChunk> {
+    assertApiConfigured(this.config)
     const body: Record<string, unknown> = {
       model: this.config.model,
       input: toResponsesInput(msgs),
@@ -531,6 +544,7 @@ class AnthropicProvider implements LLMProvider {
   }
 
   async *chat(msgs: MessageLike[], opts: ChatOptions = {}): AsyncIterable<LLMChunk> {
+    assertApiConfigured(this.config)
     const system = msgs.filter((m) => m.role === "system").map((m) => String(m.content)).join("\n")
     const body: Record<string, unknown> = {
       model: this.config.model,

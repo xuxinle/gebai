@@ -1,5 +1,5 @@
 import type { AttachmentInput, AttachmentRef, DiagramFormat, Message, MessageLike, SessionRunArchive, SessionRunEntry } from "@gebai/sdk"
-import { parseExtraParams, type LLMChunk, type LLMProvider, type LLMUsage } from "./llm"
+import { LLMConfigError, parseExtraParams, type LLMChunk, type LLMProvider, type LLMUsage } from "./llm"
 import { VISION_MAX_IMAGE_BYTES } from "./vision"
 import type { ToolRegistry } from "./registry"
 import type { SessionStore } from "./store"
@@ -665,10 +665,12 @@ export class AgentEngine {
     sessionId: string,
     user: string,
     scope?: "all" | { from: number; to: number },
-    provider: LLMProvider = this.opts.provider,
+    provider?: LLMProvider,
   ): Promise<{ compacted: number; summary: string }> {
     const session = await this.opts.store.load(sessionId, user)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    // Provider 未显式指定（UI/REST 主动压缩入口）时按合并后 env 解析：用户/会话级模型配置同样生效
+    const llm = provider ?? (this.opts.resolveProvider ? this.opts.resolveProvider(await this.opts.env.resolve(sessionId, user)) : this.opts.provider)
     const messages = session.messages
     // 可压缩消息：排除受保护消息（isProtectedMessage：系统提示词含装载提示词/压缩摘要、用户输入、
     // 新会话执行存档）——用户输入与系统提示词不压缩不改变（不选进区间、不进摘要输入，
@@ -702,7 +704,7 @@ export class AgentEngine {
     const removed = slice.length - kept.length
     if (removed === 0) return { compacted: 0, summary: "" } // 区间内仅剩受保护消息：无可压缩内容
     // 摘要输入只含将被移除的消息（受保护消息原样保留，无需进摘要）
-    const summary = await this.summarize(slice.filter((m) => !isProtectedMessage(m)), provider)
+    const summary = await this.summarize(slice.filter((m) => !isProtectedMessage(m)), llm)
     await this.opts.store.compactMessages(sessionId, user, { from, to, summary })
     this.publish(sessionId, "event.message.compact", { from, to, count: removed, summary, sessionId })
     return { compacted: removed, summary }
@@ -1430,6 +1432,8 @@ export class AgentEngine {
         }
       } catch (err) {
         if (signal.aborted) throw err
+        // 配置类错误（模型接口地址未配置）：重试无意义，直接失败并保留指引文案
+        if (err instanceof LLMConfigError) throw err
         // 图片块被接口拒绝（HTTP 4xx，如模型实际不支持 image_url）：一次性降级为文本说明后重试，
         // 模型可改走 vision 工具（外挂视觉模型路径），实现「无多模态能力自动降级」
         if (

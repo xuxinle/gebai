@@ -230,6 +230,8 @@ async function renderSettingsEnv() {
     settingsBody.appendChild(det)
   }
 
+  settingsBody.appendChild(blockText("说明：仅可配置上表目录项（模型 / 子Agent / 常用变量），不可自定义变量名；未配置的项留空、请求不携带；启动级与安全敏感变量（GEBAI_MODE、GEBAI_ADMIN_PASSWORD_HASH、GEBAI_SAFE_MODE 等）不可配置。变量仅保存在本浏览器（localStorage，清除站点数据即清除），随每次发送消息临时注入服务端（仅本次任务生效，不落盘）——服务端不配置模型变量时，仅在此配置即可使用。"))
+
   const actions = el("div", "settings-actions")
   const saveBtn = el("button", "mini-btn", "保存")
   saveBtn.onclick = () => {
@@ -246,8 +248,6 @@ async function renderSettingsEnv() {
   }
   actions.appendChild(saveBtn)
   settingsBody.appendChild(actions)
-
-  settingsBody.appendChild(blockText("说明：仅可配置上表目录项（模型 / 子Agent / 常用变量），不可自定义变量名；未配置的项留空、请求不携带；启动级与安全敏感变量（GEBAI_MODE、GEBAI_ADMIN_PASSWORD_HASH、GEBAI_SAFE_MODE 等）不可配置。变量随每次发送消息临时注入服务端（仅本次任务生效，不落盘）。"))
 }
 
 async function renderSettingsWebhooks() {

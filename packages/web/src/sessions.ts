@@ -544,16 +544,19 @@ function startRename(s: SessionInfo, nameEl: HTMLElement) {
   inputEl.onblur = () => void finish(true)
 }
 
-/** 删除会话后，若当前会话被删则切到剩余第一个，没有则新建。 */
+/** 删除会话后，若当前会话被删则切到剩余第一个，没有则进入空白草稿页。 */
 async function fallbackCurrentSession(deleted: Set<string>) {
   const cur = getCurrentSession()
   if (cur && !deleted.has(cur.id)) return
   // 被删会话的草稿/附件/滚动记忆一并清理（防残留）
   for (const id of deleted) clearSessionViewState(id)
   const remaining = (await client.listSessions()).filter((x) => !deleted.has(x.id))
-  setCurrentSession(remaining.length ? remaining[0] : await client.createSession())
-  const cur2 = getCurrentSession()
-  if (cur2) await loadMessages(cur2.id)
+  if (remaining.length) {
+    setCurrentSession(remaining[0])
+    await loadMessages(remaining[0].id)
+  } else {
+    enterDraftView()
+  }
 }
 
 /** 删除会话确认：自绘 modal（ui.confirmDialog），确认后执行删除。 */
@@ -638,6 +641,25 @@ function openSessionMenu(e: MouseEvent, s: SessionInfo, li: HTMLElement): void {
 /* ---------- 空状态 ---------- */
 
 let searchQuery = ""
+
+/** 进入空白草稿页（不创建会话）：清空消息视图与输入，首条消息发送时才真正创建会话，
+ *  避免点「新会话」即落盘产生大量空会话。 */
+export function enterDraftView(): void {
+  setCurrentSession(null)
+  aside.classList.remove("open")
+  msgEl.innerHTML = ""
+  clearMsgNav()
+  clearUnread()
+  setEmptyState(null)
+  showEmptyState()
+  input.value = ""
+  autosize()
+  setPendingFiles([])
+  renderAttachments()
+  updateTitle()
+  syncSendButton()
+  focusInput()
+}
 
 function showEmptyState() {
   if (getEmptyState()) {
@@ -793,14 +815,12 @@ export function bindSessionActions() {
   })
   document.addEventListener("scroll", () => closeSessionMenu(), true)
   window.addEventListener("resize", () => closeSessionMenu())
-  newSessionBtn.onclick = async () => {
-    const s: SessionInfo = await client.createSession()
+  newSessionBtn.onclick = () => {
+    // 草稿态：不立即创建会话（避免落盘大量空会话），首条消息发送时才真正创建
     const prev = getCurrentSession()
     if (prev) saveSessionViewState(prev.id)
-    setCurrentSession(s)
-    clearSessionViewState(s.id) // 新会话：输入框/附件/滚动位置从零开始
-    await loadMessages(s.id)
-    await refreshSessions()
+    enterDraftView()
+    void refreshSessions() // 清除列表中旧会话的激活高亮
   }
   // 整栏折叠：桌面端（>860px）折叠隐藏侧栏（主区占满，状态持久化）；窄屏保持滑动抽屉行为
   const SIDEBAR_KEY = "gebai.ui.sidebarCollapsed"

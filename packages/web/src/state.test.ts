@@ -45,11 +45,28 @@ const doc = {
 ;(globalThis as Record<string, unknown>).navigator = { onLine: true }
 ;(globalThis as Record<string, unknown>).location = { protocol: "http:", host: "localhost" }
 
-const { pendingTools, pendingToolsKey, clearPendingTools } = await import("./state")
+const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView } = await import("./state")
 
 function entry(sessionId: string, _toolCallId: string) {
   return { wrapper: base as unknown as HTMLElement, body: base as unknown as HTMLElement, session: sessionId, kind: "tool" as const, name: "sh" }
 }
+
+describe("草稿态标志（新会话懒创建）", () => {
+  test("setCurrentSession(null) 进入草稿态，指定会话即退出", () => {
+    const s = { id: "abc123", name: "新会话", userId: "admin", createdAt: 0, updatedAt: 0 }
+    setCurrentSession(s)
+    expect(getCurrentSession()?.id).toBe("abc123")
+    expect(isDraftView()).toBe(false)
+    // 点击「新会话」：进入空白草稿页（不创建会话）
+    setCurrentSession(null)
+    expect(getCurrentSession()).toBeNull()
+    expect(isDraftView()).toBe(true)
+    // 首条消息发送时创建会话：退出草稿态
+    setCurrentSession({ ...s, id: "def456" })
+    expect(isDraftView()).toBe(false)
+    setCurrentSession(null)
+  })
+})
 
 describe("pendingTools（会话隔离工具调用配对）", () => {
   test("key 按会话隔离：同名 toolCallId 跨会话不冲突；runId 区分子Agent 容器内调用", () => {

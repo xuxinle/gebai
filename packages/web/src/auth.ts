@@ -1,5 +1,5 @@
-import { client, getCurrentSession, loginErr, loginForm, loginOverlay, loginPass, loginPass2, loginSubmit, loginToggle, loginUser, logoutBtn, msgEl, runs, sessionList, setCurrentSession } from "./state"
-import { loadMessages, refreshSessions } from "./sessions"
+import { client, loginErr, loginForm, loginOverlay, loginPass, loginPass2, loginSubmit, loginToggle, loginUser, logoutBtn, msgEl, runs, sessionList, setCurrentSession } from "./state"
+import { loadMessages, refreshSessions, enterDraftView } from "./sessions"
 import { toast } from "./ui"
 import { parseExternalCredential } from "./external-auth"
 
@@ -145,10 +145,14 @@ export function bindAuth() {
       hideLogin()
       await refreshSessions()
       const sessions = await client.listSessions()
-      // 新注册用户无会话：自动创建（与 init 兜底同规则），否则无当前会话时发送会被忽略
-      setCurrentSession(sessions[0] ?? (await client.createSession()))
-      const cur = getCurrentSession()
-      if (cur) await loadMessages(cur.id)
+      // 登录后进入最近会话；无会话则进入空白草稿页（首条消息发送时才创建，与主流程一致）
+      if (sessions.length) {
+        setCurrentSession(sessions[0])
+        void refreshSessions(sessions)
+        await loadMessages(sessions[0].id)
+      } else {
+        enterDraftView()
+      }
     } catch (err) {
       loginErr.textContent = (err as Error).message
       loginErr.hidden = false
