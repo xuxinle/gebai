@@ -33,6 +33,7 @@ import { markdownBlock } from "./markdown"
 import { appendMsg, appendTodoCard, beginMsgBatch, finishSessionRun, flushMsgBatch, reasoningBlock, renderLegacySubAgentArchive, renderSessionArchive, sessionRunBox } from "./messages"
 import { clearUnread, isAtBottom, lockToBottom, refreshJumpBottom } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
+import { applyMinimalMode } from "./minimal-mode"
 import { applyApprovalVisibility } from "./approvals"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
 import { confirmDialog, toast } from "./ui"
@@ -107,6 +108,7 @@ export async function loadMessages(sessionId: string) {
     /* 忽略 */
   }
   void applyApprovalSkip(sessionId) // 自动审批开启时，确保该会话 env 同步
+  void applyMinimalMode(sessionId) // 极简模式开关同理（开启/关闭均同步，避免服务端内存态 env 残留旧值）
   // 空内容消息（无 content/blocks/attachments/reasoning）不显示：按渲染后的实际可见消息数判空
   const visible = (session.messages ?? []).filter((m) => m.content || m.blocks?.length || m.attachments?.length || m.reasoning)
   if (visible.length === 0) showEmptyState()

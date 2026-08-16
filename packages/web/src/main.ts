@@ -7,6 +7,7 @@ import "./css/overlays.css"
 import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
 import { capturePage } from "./capture"
 import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
+import { bindMinimalMode, applyMinimalMode } from "./minimal-mode"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
@@ -553,6 +554,7 @@ composer.addEventListener("submit", async (e) => {
   // 自动审批开关同步会话 env：草稿首条消息创建的会话不经过 loadMessages（applyApprovalSkip 的既有同步点），
   // 每次任务启动前幂等补齐——WS 同连接按序处理，env 写入先于任务请求落地（服务端进程重启丢内存 env 时同样恢复）
   void applyApprovalSkip(sessionId)
+  void applyMinimalMode(sessionId) // 极简模式开关同样在任务启动前幂等同步
   input.value = ""
   autosize()
   syncSendButton()
@@ -685,6 +687,7 @@ async function init() {
   bindTooltips() // 自定义 tooltip（[data-tip] 全局委托）先于面板绑定
   bindThemePop()
   bindApprovalSkip()
+  bindMinimalMode()
   bindMiniTools()
   restoreToken()
   await loadToolCardMeta() // 工具卡片展示元数据（titleParams/args 模式），先于历史消息渲染就绪

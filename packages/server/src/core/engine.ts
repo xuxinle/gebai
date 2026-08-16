@@ -219,6 +219,8 @@ interface TaskState {
   pendingCaptures: Map<string, PendingCapture>
   /** 通道级禁用工具（如飞书桥接禁用依赖前端页面的工具）：精确名或 {agent}_ 前缀名匹配。 */
   disabledTools: string[]
+  /** 极简模式工具白名单（DESIGN「极简模式」）：设置后仅名单内工具可用（schema 过滤 + 执行阻止）。 */
+  enabledTools?: string[]
   /** 交互模式（none/multi_turn/realtime，DESIGN「交互模式」）：工具声明的最低可用模式高于此值时被禁用。 */
   interactionMode: InteractionMode
   /** 发起任务用户的角色（admin/user；公共资源权限判定用，如公共 mini-tool 仅管理员可写）。 */
@@ -876,6 +878,8 @@ export class AgentEngine {
       const env = { ...(await this.opts.env.resolve(sessionId, user)), ...(opts.envOverride || {}) }
       // 任务级 env 引用：ask_env 用户填值后原地更新（ctx.env 同一引用，工具后续读取立即生效）
       this.tasks.get(sessionId)!.env = env
+      // 极简模式（DESIGN「极简模式」）：任务启动按 env 快照裁剪工具白名单（仅 sh/edit），下次任务起生效
+      if (env.GEBAI_MINIMAL_MODE === "true") this.tasks.get(sessionId)!.enabledTools = ["sh", "edit"]
       // 任务级主模型：env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖时沿用启动实例）
       const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
       const systemPrompt = this.buildSystemPrompt(sessionId, user, env)
@@ -1114,6 +1118,9 @@ export class AgentEngine {
       this.subAgentProjectNote(user, env),
       this.opts.subAgents.systemPromptInjection((d) => this.agentDescription(d, user, env)),
     ]
+    if (env.GEBAI_MINIMAL_MODE === "true") {
+      parts.push("当前会话处于极简模式：仅启用 sh 与 edit 两个工具（其余工具均不可用）。查看/读取文件请用 sh 执行命令（cat、ls 等），修改文件请用 edit 工具。")
+    }
     return parts.filter(Boolean).join("\n")
   }
 
@@ -1628,7 +1635,7 @@ export class AgentEngine {
         }
         if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {
           // 通道禁用工具（DESIGN「飞书机器人集成」）：模型不应调用，被调用时阻止执行并说明原因
-          const disabledMsg = `工具 ${rt.name} 在当前通道不可用（该工具需要前端页面配合，而当前会话来自飞书聊天），请改用其他方式。`
+          const disabledMsg = this.toolDisabledMsg(sessionId, rt.name)
           await persist({ id: crypto.randomUUID(), role: "tool", content: disabledMsg, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
           messages.push({ role: "tool", content: disabledMsg, toolCallId: tc.id, name: tc.name })
           continue
@@ -1733,11 +1740,22 @@ export class AgentEngine {
     const task = this.tasks.get(sessionId)
     if (!task) return false
     if (task.disabledTools.some((d) => name === d || name.endsWith(`_${d}`))) return true
+    // 极简模式（DESIGN「极简模式」）：白名单外工具一律禁用（schema 过滤 + 执行阻止）
+    if (task.enabledTools && !task.enabledTools.includes(name)) return true
     if (tool?.interaction) {
       const level: Record<InteractionMode, number> = { none: 1, multi_turn: 2, realtime: 3 }
       if (level[tool.interaction] > level[task.interactionMode]) return true
     }
     return false
+  }
+
+  /** 工具禁用原因说明（isToolDisabled 为真时取消息）：极简模式白名单 / 通道禁用（含交互模式不足）。 */
+  private toolDisabledMsg(sessionId: string, name: string): string {
+    const task = this.tasks.get(sessionId)
+    if (task?.enabledTools && !task.enabledTools.includes(name)) {
+      return `工具 ${name} 在当前会话不可用：会话处于极简模式，仅启用 sh 与 edit 两个工具。请改用 sh/edit 完成。`
+    }
+    return `工具 ${name} 在当前通道不可用（该工具需要前端页面配合，而当前会话来自飞书聊天），请改用其他方式。`
   }
 
   /**
@@ -2050,7 +2068,7 @@ export class AgentEngine {
           continue
         }
         if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {
-          const disabledMsg = `工具 ${rt.name} 在当前通道不可用（该工具需要前端页面配合），请改用其他方式。`
+          const disabledMsg = this.toolDisabledMsg(sessionId, rt.name)
           await pushArchive({ role: "tool", content: disabledMsg, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: disabledMsg, toolCallId: tc.id, name: tc.name })
           continue

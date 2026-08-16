@@ -1525,6 +1525,42 @@ describe("AgentEngine", () => {
     cleanup(s.home)
   })
 
+  test("极简模式（GEBAI_MINIMAL_MODE=true）：schema 仅含 sh/edit，其余工具调用被阻止", async () => {
+    const s = await setup("tool")
+    const session = await s.store.createSession("default", "t")
+    await s.store.setEnv(session.id, "default", { GEBAI_MINIMAL_MODE: "true" })
+    await s.engine.run(session.id, "default", "what time")
+    const loaded = await s.store.load(session.id)
+    // 模型看到的 schema 仅 sh/edit（默认 first-call current_time 也被过滤）
+    const seen = s.provider.seenTools[0]
+    expect(seen).toContain("sh")
+    expect(seen).toContain("edit")
+    expect(seen).not.toContain("current_time")
+    expect(seen).not.toContain("read")
+    // 系统提示词带极简模式说明
+    expect(String(s.provider.seenChats[0][0].content)).toContain("极简模式")
+    // 假模型仍调用 current_time → 执行被阻止，返回极简模式说明
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "current_time")
+    expect(toolMsg?.content).toContain("极简模式")
+    // 模型收到说明后第二轮直接回复，任务正常收尾
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("极简模式下 sh 工具照常执行（白名单内不受限）", async () => {
+    const s = await setup("tool")
+    s.provider.toolName = "sh"
+    s.provider.toolArgs = { command: "echo minimal-ok", approval: false }
+    const session = await s.store.createSession("default", "t")
+    await s.store.setEnv(session.id, "default", { GEBAI_MINIMAL_MODE: "true" })
+    await s.engine.run(session.id, "default", "echo it")
+    const loaded = await s.store.load(session.id)
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "sh")
+    expect(toolMsg).toBeDefined()
+    expect(toolMsg?.content).toContain("minimal-ok")
+    cleanup(s.home)
+  })
+
   test("safe mode blocks risky tools in main loop: restriction info returned, no approval, no side effect", async () => {
     const s = await setup("approval", false, "local", true) // safeMode=true；approval 模式首轮调用 sh（requiresApproval + 风险）
     const session = await s.store.createSession("default", "t")
