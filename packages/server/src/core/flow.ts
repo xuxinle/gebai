@@ -540,10 +540,11 @@ async function runToolStep(
   }
   const params = { ...(resolveTemplate(step.params ?? {}, scope) as Record<string, unknown>) }
   if (step.input !== undefined) {
-    // 显式映射：对象 = { 目标参数名: 表达式 }，解析后覆盖同名字段并抑制自动注入；
-    // 非对象（字符串/数字等）= 给 input 参数的模板值（等价 { input: 值 }，与 params.input 语义一致）
+    // 显式映射：对象字面量 = { 目标参数名: 表达式 }，解析后覆盖同名字段并抑制自动注入；
+    // 非对象（字符串/数字等）= 给 input 参数的模板值（等价 { input: 值 }，与 params.input 语义一致）——
+    // 按 step.input 的原始形态判定（模板求值结果即使为对象/数组也归入 input 传值，防止 {{item}} 对象被误当映射展开）
     const mapped = resolveTemplate(step.input, scope)
-    if (mapped !== null && typeof mapped === "object" && !Array.isArray(mapped)) {
+    if (typeof step.input === "object" && step.input !== null && !Array.isArray(step.input)) {
       Object.assign(params, mapped as Record<string, unknown>)
     } else {
       params.input = mapped

@@ -363,6 +363,26 @@ describe("runFlow 数据流编排", () => {
     expect(calls.filter((x) => x.name === "cat").map((x) => x.params.input)).toEqual(["a.md", "b.md"])
   })
 
+  test("foreach 对象项经 input 直传 stdin 保留为对象（工具侧序列化为 JSON 文本）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx(
+      {
+        cat: tool("cat", (a) => `cat:${a.input ?? ""}`),
+      },
+      calls,
+    )
+    await runFlow(
+      {
+        steps: [
+          { foreach: '[{"name":"a","v":1},{"name":"b","v":2}]', steps: [{ tool: "cat", input: "{{item}}" }] },
+        ],
+      },
+      c,
+    )
+    // 整值 {{item}} 保原始类型：对象原样传入（py/sh 工具侧 JSON 化），不丢类型
+    expect(calls.map((x) => x.params.input)).toEqual([{ name: "a", v: 1 }, { name: "b", v: 2 }])
+  })
+
   test("引用不存在的路径解析为空（不报错，可用 exists() 判定）", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
     const c = flowCtx(

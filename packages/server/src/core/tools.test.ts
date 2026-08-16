@@ -1177,6 +1177,25 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("py/sh 对象 input 序列化为 JSON 文本（脚本 json.loads 可直接解析，非 [object Object]）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-py-json-"))
+    _resetPythonCmdCache()
+    const r = await createGlobalTools().py.execute(
+      { code: "import json, sys\nprint(json.loads(sys.stdin.read())['name'])", input: { name: "demo", v: 1 } },
+      ctx(home),
+    )
+    expect(r.output.trim()).toBe("demo")
+    const c = ctx(tmpdir())
+    let got = ""
+    c.runCommand = async (_cmd, o) => {
+      got = o?.input ?? ""
+      return { stdout: "", stderr: "", code: 0 }
+    }
+    await createGlobalTools().sh.execute({ command: "cat", input: { a: 1, b: "x" } }, c)
+    expect(got).toBe('{"a":1,"b":"x"}')
+    cleanup(home)
+  })
+
   test("resolvePythonCmd falls back to python when python3 missing", async () => {
     _resetPythonCmdCache()
     const c = ctx(tmpdir())
