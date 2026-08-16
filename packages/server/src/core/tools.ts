@@ -154,7 +154,7 @@ function withLineNumbers(text: string, startLine: number): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。路径为会话 tmp/ 或用户目录内（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset 为起始行号（1 起始，默认从头）；limit 为读取行数（正数读 offset 起 N 行，负数读末尾 N 行）；lineNumbers=true 时每行前缀真实行号（右对齐+制表符，便于精确定位与按 文件:行号 引用，规划修改/汇报位置时推荐开启）。读取成功即登记「本会话已读」——write 整体覆盖已存在文件前要求先读过（防盲覆盖）。",
+    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset 为起始行号（1 起始，默认从头）；limit 为读取行数（正数读 offset 起 N 行，负数读末尾 N 行）；lineNumbers=true 时每行前缀真实行号（右对齐+制表符，便于精确定位与按 文件:行号 引用，规划修改/汇报位置时推荐开启）。读取成功即登记「本会话已读」——write 整体覆盖已存在文件前要求先读过（防盲覆盖）。",
   card: { titleParams: ["path"] },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
@@ -190,7 +190,7 @@ export const readTool: Tool = {
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件（整体覆盖）。路径受沙箱限制。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。",
+    "写入文件（整体覆盖）。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。",
   card: { titleParams: ["path"], args: "code", codeField: "content" },
   parameters: schema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
   async execute(args, ctx) {
@@ -221,7 +221,7 @@ export const writeTool: Tool = {
 
 export const lsTool: Tool = {
   name: "ls",
-  description: "列出目录内容（文件/子目录、大小）。路径默认会话工作目录。",
+  description: "列出目录内容（文件/子目录、大小）。路径默认会话工作目录（tmp/，前缀可省略）。",
   card: { titleParams: ["path"] },
   parameters: schema({ path: { type: "string", description: "目录路径（默认 .）" } }),
   outputSchema: schema({
@@ -502,15 +502,22 @@ export const fileTool: Tool = {
   },
 }
 
+/** 列表逻辑路径坐标候选：会话列表带 `tmp/` 前缀（UI/REST 契约），剥离前缀后的裸坐标一并匹配，
+ *  使 path/include 过滤在「带/不带 tmp/ 前缀」两种写法下等价（统一路径基准后无需感知前缀）；
+ *  项目上下文列表无前缀，仅原样候选。 */
+function listPathCandidates(p: string): string[] {
+  return p.startsWith("tmp/") ? [p, p.slice(4)] : [p]
+}
+
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在目录中递归搜索文本内容，返回 文件:行号: 匹配行。output 选择结果形态：content（默认，逐行匹配内容）/ files（仅命中文件清单——大范围摸底定位优先用，不刷内容）/ count（每文件命中行数）。context 为匹配行前后各附的上下文行数（0-10，默认 0，仅 content 模式；匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔，同 grep -n -C）。include 按文件路径 glob 过滤（如 *.ts、**\/*.test.ts）。path 可限定子目录；匹配上限 200 处。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。output 选择结果形态：content（默认，逐行匹配内容）/ files（仅命中文件清单——大范围摸底定位优先用，不刷内容）/ count（每文件命中行数）。context 为匹配行前后各附的上下文行数（0-10，默认 0，仅 content 模式；匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔，同 grep -n -C）。include 按文件路径 glob 过滤（如 *.ts、**\/*.test.ts）。path 可限定子目录（tmp/ 前缀可省略）；匹配上限 200 处。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
       pattern: { type: "string" },
-      path: { type: "string", description: "搜索起点（默认 .）" },
+      path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
       ignoreCase: { type: "boolean" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
       context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式，格式同 grep -n -C）" },
@@ -542,10 +549,10 @@ export const grepTool: Tool = {
     const mode = args.output === "files" || args.output === "count" ? args.output : "content"
     const context = Math.max(0, Math.min(10, Math.floor(Number(args.context) || 0)))
     const includeRe = args.include ? globToRegExp(String(args.include)) : null
-    const path = args.path ? String(args.path) : ""
+    const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
     const prefix = path ? `${path.replace(/\/+$/, "")}/` : ""
     const files = (await ctx.listFiles())
-      .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (prefix ? f.path.startsWith(prefix) : true) && (!includeRe || includeRe.test(f.path)))
+      .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (prefix ? listPathCandidates(f.path).some((c) => c.startsWith(prefix)) : true) && (!includeRe || listPathCandidates(f.path).some((c) => includeRe.test(c))))
     if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
     const matches: Array<{ file: string; line: number; text: string }> = []
     // content 模式渲染行（含 context 组）；非 content 模式按文件聚合命中数
@@ -634,23 +641,23 @@ function globToRegExp(pattern: string): RegExp {
 
 export const globTool: Tool = {
   name: "glob",
-  description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话目录中递归查找文件，返回相对路径。path 可限定子目录。",
+  description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。path 可限定子目录（tmp/ 前缀可省略）。",
   card: { titleParams: ["pattern"] },
-  parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" } }, ["pattern"]),
+  parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" } }, ["pattern"]),
   outputSchema: schema({
     files: { type: "array", items: { type: "string" }, description: "匹配文件相对路径（最多 200 个）" },
     total: { type: "integer", description: "匹配总数（可能大于 files 长度）" },
   }, ["files", "total"]),
   async execute(args, ctx) {
     const re = globToRegExp(String(args.pattern ?? ""))
-    const path = args.path ? String(args.path) : ""
-    // path 统一经 resolvePath 解析（与 read/write/ls 一致）：支持相对路径与绝对路径，
-    // 解析回会话根相对逻辑路径后做前缀匹配（沙箱模式拒绝越界路径）
+    const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
+    // path 统一经 resolvePath 解析（与 read/write/ls 一致：相对路径基于会话工作目录 tmp/，tmp/ 前缀可省略；
+    // 项目上下文基于项目根），解析回基准相对逻辑路径后与列表坐标做前缀匹配（沙箱模式拒绝越界路径）
     let prefix = ""
     if (path) {
       const root = ctx.resolvePath(".")
       const rel = relative(root, ctx.resolvePath(path)).replace(/\\/g, "/")
-      // listFiles 仅覆盖会话目录：path 落在会话外（本地模式放开沙箱时可能）则无可列文件
+      // listFiles 仅覆盖列表范围（会话 tmp/ 子树或项目根）：path 落在范围外（本地模式放开沙箱时可能）则无可列文件
       if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
         return { output: "（无匹配文件）" }
       }
@@ -659,7 +666,7 @@ export const globTool: Tool = {
     const files = (await ctx.listFiles())
       .filter((f) => !f.isDir)
       .map((f) => f.path)
-      .filter((p) => (prefix ? p.startsWith(prefix) : true) && re.test(prefix ? p.slice(prefix.length) : p))
+      .filter((p) => listPathCandidates(p).some((c) => (prefix ? c.startsWith(prefix) : true) && re.test(prefix ? c.slice(prefix.length) : c)))
     if (!files.length) return { output: "（无匹配文件）", data: { files: [] } }
     const listed = files.slice(0, 200)
     return { output: listed.join("\n"), data: { files: listed, total: files.length } }
@@ -1968,7 +1975,7 @@ export function makeFlowTool(): Tool {
       "- **引用**：`{{s1.data.xxx}}` 引用步骤结构化输出（各工具 data 结构先用 tool_schemas 批量查询），`{{s1.output}}` 引用文本输出。params 值恰为一个 `{{表达式}}` 时保留原始类型（数字/数组/对象原样传递），混排字符串按文本拼接——**多行字段（如 data.stdout）混排会带入换行**，拼进脚本源码字符串会语法错误：多行文本建议走 stdin（input 参数）或三引号包裹，引用单值字段（exitCode/length）不受影响。根名：步骤 id（缺省自动编号 s1/s2…）、`prev`（上一实际执行步骤）、`item`/`index`（foreach 当前项/序号）、`iteration`（while 轮次）、`input`（flow 参数 input）。路径访问 `.字段`/`[下标]`/`.length`。\n" +
       "- **input 显式映射**：`{ 目标参数名: \"{{源}}\" }`，解析后覆盖 params 同名字段并抑制自动注入——字段改名、多对一汇聚（多个步骤输出映射进同一工具的不同参数）都用它表达；**非对象形式**（如 `input: \"{{item}}\"`）等价于 `{ input: \"{{item}}\" }`，直接给工具的 input 参数传值（脚本 stdin）。\n" +
       "- **when 条件分支**：表达式为假时跳过该步（不中断）。支持两种写法（等价）：裸表达式 `gen.data.ok == true` 或 `{{表达式}}` 包裹/混排 `{{gen.data.ok}} == true`。运算：`==`/`!=`/`>`/`>=`/`<`/`<=`、`&&`/`||`/`!`、括号、函数 `len()`/`contains()`/`exists()`；空数组视为假；引用不存在的路径解析为 undefined/空串（不报错，需判定存在性用 `exists()`）。\n" +
-      "- **foreach 数据循环**（一对多扇出）：表达式求值为数组（逐项，**JSON 数组文本如 `[1,2,3]` 自动解析**）或正整数（按次），体内经 `{{item}}`/`{{index}}` 引用；**快照语义**——迭代次数固定为求值时的长度，循环体修改源数组不影响遍历；**嵌套时内层 `{{item}}`/`{{index}}` 遮蔽外层同名引用**（外层值需提前映射到中间步骤）；组结果 data = 每轮末步 data 的数组。\n" +
+      "- **foreach 数据循环**（一对多扇出）：值为数组（逐项——**可直接写 JSON 数组文本如 `\"[1,2,3]\"`**，或表达式/`{{引用}}` 求值为数组，脚本 stdout 的 JSON 数组文本同样自动解析）或正整数（按次），体内经 `{{item}}`/`{{index}}` 引用；**快照语义**——迭代次数固定为求值时的长度，循环体修改源数组不影响遍历；**嵌套时内层 `{{item}}`/`{{index}}` 遮蔽外层同名引用**（外层值需提前映射到中间步骤）；组结果 data = 每轮末步 data 的数组。\n" +
       "- **while 条件循环**（do-while：先执行一轮再判断，条件可引用本组最新结果如 `{{g.data.exitCode}}`，适合重试直到成功）：为真继续下一轮，达上限停止；`maxLoops` 默认 10、上限 50；需前置判断时配 when。\n" +
       "- **timeout 超时**（整体预算，秒）：步骤间累计执行时间超限即中止（循环失控保护），返回已执行部分 + 超时说明；缺省不限制。单步执行中无法中止——慢步骤请用各工具自身 timeout 参数。\n" +
       "- **失败语义**：**工具级异常才中断** flow（调用不存在的工具、strict 脚本非 0 退出等），报告失败位置与原因；sh/py **非 0 退出码默认是正常结果**（exitCode 在 data，可用 when 判定，或给该步传 strict: true 转为中断）；`optional: true` 的步骤失败不中断（记录错误继续）。\n" +

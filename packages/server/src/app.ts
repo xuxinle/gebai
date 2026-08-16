@@ -9,7 +9,7 @@ import type { AuthService, AuthUser } from "./auth"
 import type { ExternalAuthProvider } from "./external-auth"
 import type { SessionStore } from "./core/store"
 import { toSessionInfo } from "./core/store"
-import { validateEnvVars, rejectApprovalSkip, maskEnv, filterEnvInjection } from "./core/env"
+import { validateEnvVars, maskEnv, filterEnvInjection } from "./core/env"
 import { getEnvCatalog } from "./core/env-catalog"
 import type { EnvManager } from "./core/env"
 import type { Sandbox } from "./core/sandbox"
@@ -377,12 +377,10 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   // Env
   // 环境变量配置目录：前端面板白名单（全局静态组 + 各子Agent 导出 envVars 汇总组；不含启动级/安全敏感变量）。
-  // 无敏感信息，local/server 模式均可用（服务模式需登录）；按角色过滤——非管理员不展示
-  // GEBAI_APPROVAL_SKIP（该键非管理员注入时会被过滤跳过（filterEnvInjection），
-  // 配置了也不生效，目录不应诱导配置，仅管理员可见可配）。
+  // 无敏感信息，local/server 模式均可用（服务模式需登录）。
   app.get("/api/v1/env/catalog", async (c) => {
-    const user = await userOf(c)
-    return c.json({ groups: getEnvCatalog(d.subAgents.allDefs(), user.role) })
+    await userOf(c)
+    return c.json({ groups: getEnvCatalog(d.subAgents.allDefs()) })
   })
   app.get("/api/v1/sessions/:id/env", async (c) => {
     const user = await userOf(c)
@@ -390,6 +388,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     const envs: EnvVarSource[] = await d.env.describe(sessionId, user.id)
     return c.json(envs)
   })
+  // 会话 env 写入（内存态，不落盘——用户环境变量只存浏览器本地，此处仅供运行中即时生效类开关使用；
+  // 进程重启即空，前端每次加载会话自行重新同步）
   app.put("/api/v1/sessions/:id/env", async (c) => {
     const user = await userOf(c)
     const sessionId = c.req.param("id")
@@ -402,9 +402,6 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     // 名称合法性校验：仅允许标识符形式且拒绝 __proto__（原型污染，防注入/防污染会话 env）
     const err = validateEnvVars(vars)
     if (err) return c.json({ error: err }, 400)
-    // 审批跳过键权限限制：多用户模式非管理员禁止自设（防绕过审批执行敏感工具）
-    const skipErr = rejectApprovalSkip(d.config.auth, user.role, vars)
-    if (skipErr) return c.json({ error: skipErr }, 403)
     const env = await d.store.setEnv(sessionId, user.id, vars as Record<string, string | null>)
     // 敏感键脱敏返回（与 GET describe 同规则，防明文密钥回读）
     return c.json(maskEnv(env))
@@ -645,9 +642,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       data: a.data ? new Uint8Array(a.data) : undefined,
     }))
     // 浏览器本地环境变量注入（与 WS prompt 同规则）：不支持/非法的变量直接跳过（宽容过滤，
-    // 防 localStorage 残留旧版目录外/越权键阻断整个任务），其余随任务临时生效、不持久化
+    // 防 localStorage 残留旧版目录外键阻断整个任务），其余随任务临时生效、不持久化
     const envOverride: Record<string, string> | undefined = body.env
-      ? filterEnvInjection(body.env, d.config.auth, user.role)
+      ? filterEnvInjection(body.env)
       : undefined
 
     // 同步等待任务完成，返回最终 assistant 消息；任务错误（LLM 失败等）经 event.task.error 捕获返回。

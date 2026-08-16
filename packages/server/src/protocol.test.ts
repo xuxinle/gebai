@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
@@ -201,13 +201,13 @@ describe("REST protocol additions", () => {
     expect(all).not.toContain("GEBAI_ADMIN_PASSWORD_HASH") // 特殊变量不可配置
   })
 
-  test("GET /api/v1/env/catalog filters GEBAI_APPROVAL_SKIP by role (非管理员不可配置)", async () => {
-    // 本地模式默认用户即 admin：可见
+  test("GET /api/v1/env/catalog 所有用户均含 GEBAI_APPROVAL_SKIP（会话级审批跳过开放）", async () => {
+    // 本地模式默认用户：可见
     const adminRes = await fetch(`${base(single)}/api/v1/env/catalog`)
     const adminBody = (await adminRes.json()) as { groups: Array<{ group: string; vars: Array<{ name: string }> }> }
     const adminGlobal = adminBody.groups.find((g) => g.group === "global")!
     expect(adminGlobal.vars.map((v) => v.name)).toContain("GEBAI_APPROVAL_SKIP")
-    // 服务模式普通用户：不可见（该键非管理员配置后 prompt 注入会被拒，目录不应诱导配置）
+    // 服务模式普通用户：同样可见（用户本人会话生效，非管理员仍受沙箱约束）
     await multi.auth.createUser("envcat", "pw")
     const login = (await (
       await fetch(`${base(multi)}/api/v1/auth/login`, {
@@ -220,7 +220,7 @@ describe("REST protocol additions", () => {
     expect(userRes.status).toBe(200)
     const userBody = (await userRes.json()) as { groups: Array<{ group: string; vars: Array<{ name: string }> }> }
     const userGlobal = userBody.groups.find((g) => g.group === "global")!
-    expect(userGlobal.vars.map((v) => v.name)).not.toContain("GEBAI_APPROVAL_SKIP")
+    expect(userGlobal.vars.map((v) => v.name)).toContain("GEBAI_APPROVAL_SKIP")
     expect(userBody.groups.some((g) => g.group === "feishu_docs")).toBe(true) // 子Agent 组不受影响
   })
 
@@ -328,7 +328,7 @@ describe("REST protocol additions", () => {
     expect(traversal.status).toBe(400)
   })
 
-  test("PUT /sessions/:id/env validates variable names and persists session env", async () => {
+  test("PUT /sessions/:id/env validates variable names and writes in-memory session env (零落盘)", async () => {
     const created = (await (await fetch(`${base(single)}/api/v1/sessions`, { method: "POST" })).json()) as { id: string }
     // 非法名（含 __proto__ 原型污染）→ 400
     for (const bad of [{ "bad name": "x" }, { "1abc": "x" }, { "a-b": "x" }, JSON.parse('{"__proto__": "x"}'), { A: 42 }]) {
@@ -346,7 +346,7 @@ describe("REST protocol additions", () => {
       body: "null",
     })
     expect(notObj.status).toBe(400)
-    // 合法设置 → 200，读取可见（来源 session）
+    // 合法设置 → 200，读取可见（来源 session，内存态）
     const ok = await fetch(`${base(single)}/api/v1/sessions/${created.id}/env`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -358,6 +358,8 @@ describe("REST protocol additions", () => {
     expect(flag?.source).toBe("session")
     const secret = envs.find((e) => e.name === "TEST_SECRET")
     expect(secret?.sensitive).toBe(true) // *_KEY 等敏感命名脱敏标记
+    // 用户环境变量服务端零留存：会话目录不产生 env.json（只存浏览器本地）
+    expect(existsSync(join(single.store.getSessionDir(created.id, "admin"), "env.json"))).toBe(false)
   })
 
   test("POST /sessions/:id/prompt with env injects temporarily without persisting", async () => {
@@ -654,9 +656,9 @@ describe("multi-user WS authorization", () => {
     ws.close()
   })
 
-  test("非管理员 prompt 注入 GEBAI_APPROVAL_SKIP 被过滤跳过，不拒绝任务（宽容兼容）", async () => {
-    // 浏览器 env 注入通道对不支持变量宽容跳过：普通用户 localStorage 残留越权键
-    // 不得阻断整个任务（显式管理通道 session.env.set 仍严格拒绝，见 core.test.ts）
+  test("非管理员 prompt 注入 GEBAI_APPROVAL_SKIP 保留（会话级审批跳过开放），非法名仍被过滤且不拒绝任务（宽容兼容）", async () => {
+    // 浏览器 env 注入通道对不支持变量宽容跳过：非法键不得阻断整个任务；
+    // GEBAI_APPROVAL_SKIP 已开放给用户本人，注入通道照常保留
     await multi.auth.createUser("envskip", "pw")
     const token = await new Promise<string>((resolve, reject) => {
       fetch(`${base(multi)}/api/v1/auth/login`, {
@@ -681,7 +683,7 @@ describe("multi-user WS authorization", () => {
     ws.send(JSON.stringify({ type: "auth.login", payload: { token }, id: "rb1" }))
     await waitFor(() => replies.has("rb1"))
     expect(replies.get("rb1")?.ok).toBe(true)
-    // 含越权键与非法名：任务照常接收（env 内这两个键被过滤，任务可能因 LLM 不可用失败，但绝不被注入校验拒绝）
+    // 含审批跳过键与非法名：任务照常接收（非法键被过滤，GEBAI_APPROVAL_SKIP/GOOD_VAR 保留，任务可能因 LLM 不可用失败，但绝不被注入校验拒绝）
     const created = (await (await fetch(`${base(multi)}/api/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${token}` } })).json()) as { id: string }
     ws.send(
       JSON.stringify({
@@ -860,24 +862,24 @@ describe("multi-user REST authorization", () => {
     expect(ok.status).toBe(200)
   })
 
-  test("GEBAI_APPROVAL_SKIP settable by admin only in multi-user mode", async () => {
+  test("GEBAI_APPROVAL_SKIP settable by any user on own session (multi-user mode)", async () => {
     const bobToken = await loginAs("bob", "bob123")
     const bobAuth = { Authorization: `Bearer ${bobToken}`, "Content-Type": "application/json" }
     const session = (await (await fetch(`${base(multi)}/api/v1/sessions`, { method: "POST", headers: bobAuth })).json()) as { id: string }
-    // 普通用户：设置审批跳过键 403（防绕过审批执行 sh/py/cron）
-    const denied = await fetch(`${base(multi)}/api/v1/sessions/${session.id}/env`, {
+    // 普通用户：自己的会话可设置审批跳过（会话级 env 只影响本人会话，非管理员仍受沙箱约束）
+    const ok = await fetch(`${base(multi)}/api/v1/sessions/${session.id}/env`, {
       method: "PUT",
       headers: bobAuth,
       body: JSON.stringify({ GEBAI_APPROVAL_SKIP: "true" }),
     })
-    expect(denied.status).toBe(403)
+    expect(ok.status).toBe(200)
     // 普通用户：普通 env 不受影响
-    const ok = await fetch(`${base(multi)}/api/v1/sessions/${session.id}/env`, {
+    const plain = await fetch(`${base(multi)}/api/v1/sessions/${session.id}/env`, {
       method: "PUT",
       headers: bobAuth,
       body: JSON.stringify({ CODE_PROJECT: "/x" }),
     })
-    expect(ok.status).toBe(200)
+    expect(plain.status).toBe(200)
     // 管理员可设置（自己会话）
     const adminToken = await loginAs("admin", "admin123")
     const adminSession = (await (await fetch(`${base(multi)}/api/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${adminToken}` } })).json()) as { id: string }

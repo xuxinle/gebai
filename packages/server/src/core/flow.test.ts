@@ -269,6 +269,15 @@ describe("runFlow 数据流编排", () => {
     expect(calls.filter((x) => x.name === "tick").map((x) => x.params.v)).toEqual([10, 20, 30])
   })
 
+  test("foreach 裸 JSON 数组文本直接解析（无需表达式包裹）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    const c = flowCtx({ tick: tool("tick", (a) => `t:${a.v ?? ""}`) }, calls)
+    await runFlow({ steps: [{ foreach: "[10,20,30]", steps: [{ tool: "tick", input: { v: "{{item}}" } }] }] }, c)
+    expect(calls.map((x) => x.params.v)).toEqual([10, 20, 30])
+    // 非法文本报错信息可读（附原始解析错误与正确写法）
+    await expect(runFlow({ steps: [{ id: "g", foreach: "[a,b]", steps: [{ tool: "tick" }] }] }, c)).rejects.toThrow(/foreach 无效/)
+  })
+
   test("foreach 快照语义：循环体修改源数组不影响迭代次数", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
     // 源数组为共享引用：循环体内 shrink 原地缩短它（模拟「删除后重新查询/原地清理」类流程）

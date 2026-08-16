@@ -878,10 +878,6 @@ export class FeishuBot {
         break
       }
       case "/approval-skip": {
-        if (this.opts.authMode === "server") {
-          outbox.sendText("⚠️ 多用户模式下非管理员不能设置审批跳过。")
-          break
-        }
         if (restricted) {
           outbox.sendText("⚠️ 只有创建该会话的用户可以修改审批设置。")
           break

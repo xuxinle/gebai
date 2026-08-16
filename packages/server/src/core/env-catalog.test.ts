@@ -37,16 +37,12 @@ describe("环境变量目录（前端配置白名单）", () => {
     }
   })
 
-  test("GEBAI_APPROVAL_SKIP 仅管理员可见（非管理员目录不展示，防配置一个必然被注入校验拒绝的键）", () => {
-    const adminGlobal = getEnvCatalog(defs, "admin").find((g) => g.group === "global")!
-    expect(adminGlobal.vars.map((v) => v.name)).toContain("GEBAI_APPROVAL_SKIP")
-    const userGlobal = getEnvCatalog(defs, "user").find((g) => g.group === "global")!
-    expect(userGlobal.vars.map((v) => v.name)).not.toContain("GEBAI_APPROVAL_SKIP")
-    // 角色缺省（兼容旧调用）等同非管理员：不展示
-    expect(getEnvCatalog(defs).flatMap((g) => g.vars.map((v) => v.name))).not.toContain("GEBAI_APPROVAL_SKIP")
+  test("GEBAI_APPROVAL_SKIP 对所有用户可见（会话级审批跳过开放给用户本人，目录不再按角色过滤）", () => {
+    const global = getEnvCatalog(defs).find((g) => g.group === "global")!
+    expect(global.vars.map((v) => v.name)).toContain("GEBAI_APPROVAL_SKIP")
     // 子Agent 组不受影响
-    const userFeishu = getEnvCatalog(defs, "user").find((g) => g.group === "feishu_docs")!
-    expect(userFeishu.vars.map((v) => v.name)).toContain("FEISHU_DOCS_APP_ID")
+    const feishu = getEnvCatalog(defs).find((g) => g.group === "feishu_docs")!
+    expect(feishu.vars.map((v) => v.name)).toContain("FEISHU_DOCS_APP_ID")
   })
 
   test("变量名合法且全局无重复；子Agent 变量以 {AGENT}_ 前缀开头", () => {

@@ -308,7 +308,7 @@ export interface ToolSchema {
 export interface EnvVarSource {
   name: string
   value: string
-  source: "global" | "user" | "session"
+  source: "global" | "session"
   sensitive: boolean
 }
 

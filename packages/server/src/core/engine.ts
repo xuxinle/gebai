@@ -504,7 +504,7 @@ export class AgentEngine {
    * 发布 event.capture.request（含 captureId），前端捕获渲染后 DOM html 与截图后经
    * decideCaptureResult 回传；30 秒超时返回 null（前端离线或捕获超时）。
    */
-  /** 自动审批实时判定：任务 env 快照（含浏览器本地注入）或会话实时 env 任一为 true 即跳过审批——会话运行中开启自动审批即时生效（关闭需下次任务）。 */
+  /** 自动审批实时判定：任务 env 快照（含浏览器本地注入）或会话内存态 env 任一为 true 即跳过审批——会话运行中开启自动审批即时生效（关闭需下次任务；会话 env 不落盘，重启后由前端重新同步）。 */
   private async isApprovalSkipped(sessionId: string, user: string, env: Record<string, string>): Promise<boolean> {
     // 无交互模式（REST 等单次请求通道）：单用户本地模式无人可询问，需审批工具自动通过；
     // 多用户隔离模式下不允许自动通过——普通用户不得经 REST 免审批执行敏感工具（见审批点拒绝逻辑）
@@ -584,7 +584,8 @@ export class AgentEngine {
   }
 
   /** ask_env 可设置的变量名校验：标识符格式 + 拒绝 __proto__（原型污染）+ 多用户模式拒绝审批跳过键
-   * （GEBAI_APPROVAL_SKIP 仅管理员经正式 env 通道设置，ask_env 是模型驱动的第四通道，不得绕过）。 */
+   * （GEBAI_APPROVAL_SKIP 是模型驱动的第四通道，不得自设——用户本人经前端开关/env 接口/飞书命令设置，
+   * 防提示词注入诱导模型请求开启审批跳过；本地/单用户模式不受限）。 */
   private isEnvNameAllowed(name: string): boolean {
     if (name === "__proto__" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return false
     if (name === "GEBAI_APPROVAL_SKIP" && this.opts.authMode === "server") return false
@@ -1100,7 +1101,7 @@ export class AgentEngine {
       : `（本地模式：不限制文件目录，可访问本机任意路径）`
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
-      `当前会话临时工作目录: ${workdir}/tmp${sandboxNote}`,
+      `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
       `复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行(支持 {{步骤id.data.字段}} 引用映射、when 分支、foreach/while 循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述)，或编写脚本（sh/py）一次执行，避免大量单步工具调用浪费往返与词元。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；

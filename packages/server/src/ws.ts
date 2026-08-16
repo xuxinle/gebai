@@ -5,7 +5,7 @@ import { SERVICE_USER, type AppDeps } from "./app"
 import { readFeedback, writeFeedback } from "./feedback"
 import { toSessionInfo } from "./core/store"
 import { basenameName, isValidSessionId } from "./core/paths"
-import { validateEnvVars, rejectApprovalSkip, maskEnv, filterEnvInjection } from "./core/env"
+import { validateEnvVars, maskEnv, filterEnvInjection } from "./core/env"
 import { TokenBucket } from "./core/ratelimit"
 
 /** 每用户 prompt 速率限制（容量 60 突发、30/秒补充；防单用户刷 LLM 配额，与 REST 同规则）。 */
@@ -164,9 +164,9 @@ export async function handleWsMessage(
       if (interactionMode && !["none", "multi_turn", "realtime"].includes(interactionMode)) return reply(false, undefined, `interactionMode 非法: ${interactionMode}（可选 none/multi_turn/realtime）`)
       const outputMode = p.stream === true ? "streaming" : p.stream === false ? "final_only" : undefined
       // 浏览器本地环境变量注入（与 REST prompt 同规则）：不支持/非法的变量直接跳过（宽容过滤，
-      // 防 localStorage 残留旧版目录外/越权键阻断整个任务），其余随任务临时生效、不持久化
+      // 防 localStorage 残留旧版目录外键阻断整个任务），其余随任务临时生效、不持久化
       const envOverride: Record<string, string> | undefined = p.env
-        ? filterEnvInjection(p.env as Record<string, string | null>, d.config.auth, user.role)
+        ? filterEnvInjection(p.env as Record<string, string | null>)
         : undefined
       const attachments = (Array.isArray(p.attachments) ? p.attachments : []) as Array<{ name: string; mime?: string; path?: string; data?: number[] }>
       void d.engine
@@ -207,11 +207,9 @@ export async function handleWsMessage(
       return reply(true, { env: envs })
     }
     case "session.env.set": {
+      // 会话 env 写入（内存态，不落盘——用户环境变量只存浏览器本地，重启即空，前端加载会话自行同步）
       const err = validateEnvVars(p.vars)
       if (err) return reply(false, undefined, err)
-      // 审批跳过键权限限制（与 REST 一致）：多用户模式非管理员禁止自设
-      const skipErr = rejectApprovalSkip(d.config.auth, user.role, p.vars)
-      if (skipErr) return reply(false, undefined, skipErr)
       const env = await d.store.setEnv(String(p.id), user.id, (p.vars as Record<string, string | null>) || {})
       // 敏感键脱敏返回（与 REST 同规则，防明文密钥回读）
       return reply(true, { env: maskEnv(env) })

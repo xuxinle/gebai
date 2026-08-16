@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AuthService, normalizeUsername } from "./auth"
@@ -191,14 +191,14 @@ describe("EnvManager describe", () => {
   test("describes env with source and masking", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-env2-"))
     const store = new SessionStore({ home })
-    const env = new EnvManager(home, store)
+    const env = new EnvManager(store)
     const session = await store.createSession("default")
-    writeFileSync(join(home, "users", "default", "env.json"), JSON.stringify({ MY_KEY: "usersecret" }))
     process.env.GLOBAL_VAR = "g"
+    await store.setEnv(session.id, "default", { MY_KEY: "usersecret" })
     const listed = await env.describe(session.id, "default")
     expect(listed.some((e) => e.name === "GLOBAL_VAR" && e.source === "global")).toBe(true)
     const masked = listed.find((e) => e.name === "MY_KEY")
-    expect(masked!.source).toBe("user")
+    expect(masked!.source).toBe("session")
     expect(masked!.sensitive).toBe(true)
     expect(masked!.value).not.toContain("usersecret")
     delete process.env.GLOBAL_VAR

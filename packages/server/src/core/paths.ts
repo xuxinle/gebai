@@ -51,6 +51,14 @@ export async function walkDir(dir: string, depth: number, onFile: (p: string) =>
   }
 }
 
+/** 剥离逻辑路径首段 `tmp/` 前缀（统一以会话 tmp/ 为路径基准后，兼容带前缀引用——列表/UI/附件契约路径
+ *  如 `tmp/a.txt`；仅相对路径首段生效，绝对路径原样返回）。 */
+export function stripTmpPrefix(p: string): string {
+  if (p.startsWith("tmp/")) return p.slice(4)
+  if (p.startsWith("tmp\\")) return p.slice(4).replace(/\\/g, "/")
+  return p
+}
+
 /** 截断文件逻辑路径（相对会话根，模型/前端感知的逻辑路径，如 `tmp/truncated/read_xxx.txt`；固定正斜杠跨平台）。 */
 export function truncatedLogicalPath(toolName: string, content: string): string {
   const hash = sha256Hex(content)

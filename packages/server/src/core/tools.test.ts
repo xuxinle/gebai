@@ -5,7 +5,7 @@ import { join, dirname, resolve } from "node:path"
 import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool } from "./tools"
 import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
-import { resolveInSandbox, sessionPath } from "./paths"
+import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
 import type { ToolContext, Tool, ToolResult } from "./types"
 
 function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): ToolContext {
@@ -19,8 +19,8 @@ function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): 
     home: base,
     env,
     sandboxed: false,
-    // 与真实引擎（沙箱关闭）一致：resolve 对绝对路径直接采用，相对路径基于会话根解析
-    resolvePath: (p) => resolve(tmp, p),
+    // 与真实引擎（沙箱关闭）一致：绝对路径直接采用，相对路径基于会话 tmp/ 解析（tmp/ 前缀剥离兼容）
+    resolvePath: (p) => resolve(tmp, stripTmpPrefix(p)),
     readFile: async (p) => await Bun.file(p).text(),
     readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
     writeFile: async (p, content) => {
@@ -293,7 +293,7 @@ describe("global tools", () => {
     expect(file.output).toContain("@startuml")
     expect(file.output).toContain("Alice -> Bob")
     expect(file.output).toContain("skinparam ranksep 80")
-    expect(await Bun.file(join(c.workdir, "tmp", "flow.puml")).text()).toContain("@startuml")
+    expect(await Bun.file(join(c.workdir, "flow.puml")).text()).toContain("@startuml")
     cleanup(home)
   })
 
@@ -330,9 +330,9 @@ describe("global tools", () => {
     expect(r.output).toContain("渲染为图片")
     expect(r.output).toContain("tmp/flow.png")
     // PNG 与 .puml 均落盘会话 tmp/（文件面板可见）
-    const png = new Uint8Array(await Bun.file(join(c.workdir, "tmp", "flow.png")).arrayBuffer())
+    const png = new Uint8Array(await Bun.file(join(c.workdir, "flow.png")).arrayBuffer())
     expect(png).toEqual(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))
-    expect(await Bun.file(join(c.workdir, "tmp", "flow.puml")).text()).toContain("@startuml")
+    expect(await Bun.file(join(c.workdir, "flow.puml")).text()).toContain("@startuml")
     cleanup(home)
   })
 
@@ -420,7 +420,7 @@ describe("global tools", () => {
     expect(block.format).toBe("mermaid")
     expect(block.name).toBe("flow.mmd")
     // mermaid 源码原样落盘（不做 PlantUML 规范化/布局注入）
-    expect(await Bun.file(join(c.workdir, "tmp", "flow.mmd")).text()).toBe("flowchart LR\nA --> B")
+    expect(await Bun.file(join(c.workdir, "flow.mmd")).text()).toBe("flowchart LR\nA --> B")
     cleanup(home)
   })
 
@@ -438,7 +438,7 @@ describe("global tools", () => {
     expect(block.type).toBe("diagram")
     expect(block.format).toBe("d2")
     expect(block.name).toBe("arch.d2")
-    expect(await Bun.file(join(c.workdir, "tmp", "arch.d2")).text()).toBe("gateway -> auth")
+    expect(await Bun.file(join(c.workdir, "arch.d2")).text()).toBe("gateway -> auth")
     cleanup(home)
   })
 
@@ -549,7 +549,7 @@ describe("global tools", () => {
     expect(imgBlock.mime).toBe("image/png")
     // 落盘校验（逻辑路径可经 read 读取）
     expect(await readTool.execute({ path: htmlBlock.path }, c)).toMatchObject({ output: html })
-    const imgBytes = await Bun.file(join(c.workdir, ...imgBlock.path.split("/"))).arrayBuffer()
+    const imgBytes = await Bun.file(join(c.workdir, ...stripTmpPrefix(imgBlock.path).split("/"))).arrayBuffer()
     expect(Buffer.from(imgBytes).toString()).toBe("fake-png-bytes")
     cleanup(home)
   })
@@ -599,7 +599,7 @@ describe("global tools", () => {
     expect(r.output).toContain("tmp/report.html")
     // 产物落盘会话 tmp/，模型可经 read 读同一逻辑路径
     expect(await readTool.execute({ path: "tmp/report.html" }, c)).toMatchObject({ output: html })
-    expect(await Bun.file(join(c.workdir, "tmp", "report.html")).text()).toBe(html)
+    expect(await Bun.file(join(c.workdir, "report.html")).text()).toBe(html)
     cleanup(home)
   })
 
@@ -1293,6 +1293,34 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // path 指向会话外（本地模式放开沙箱）时无可列文件
     const outside = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "..", "outside") }, c)
     expect(outside.output).toBe("（无匹配文件）")
+    cleanup(home)
+  })
+
+  test("glob/grep 兼容会话列表 tmp/ 前缀坐标：裸路径与带前缀路径等价（统一路径基准）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-search-tmp-"))
+    const c = ctx(home)
+    // 生产 listSessionFiles 坐标：路径带 tmp/ 前缀
+    c.listFiles = async () => [
+      { path: "tmp/src/a.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "tmp/src/b.js", size: 10, modifiedAt: 0, isDir: false },
+      { path: "tmp/top.md", size: 10, modifiedAt: 0, isDir: false },
+    ]
+    c.readFile = async (p) => (p.endsWith("a.ts") ? "todo: x\n" : "nothing")
+    const tools = createGlobalTools()
+    // glob：裸文件名（不带 tmp/ 前缀）可命中（旧实现仅匹配 tmp/top.md 全串，top.md 无法命中）；返回保留 tmp/ 前缀
+    const byName = await tools.glob.execute({ pattern: "top.md" }, c)
+    expect(byName.output).toContain("tmp/top.md")
+    const byStar = await tools.glob.execute({ pattern: "**/a.ts" }, c)
+    expect(byStar.output).toContain("tmp/src/a.ts")
+    // glob path：裸子目录与带 tmp/ 前缀子目录等价
+    const sub = await tools.glob.execute({ pattern: "*.ts", path: "src" }, c)
+    expect(sub.output).toContain("tmp/src/a.ts")
+    expect(sub.output).not.toContain("b.js")
+    const subPrefixed = await tools.glob.execute({ pattern: "*.ts", path: "tmp/src" }, c)
+    expect(subPrefixed.output).toContain("tmp/src/a.ts")
+    // grep：path 裸子目录过滤 + include 裸相对路径过滤均可命中（旧实现须传 tmp/src）
+    const g = await tools.grep.execute({ pattern: "todo", path: "src", include: "*.ts" }, c)
+    expect(g.output).toContain("tmp/src/a.ts:1: todo: x")
     cleanup(home)
   })
 

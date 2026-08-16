@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { ToolRegistry } from "./registry"
 import { shardPath, sessionPath, resolveInSandbox, sha256Hex } from "./paths"
-import { EnvManager, isSensitive, rejectApprovalSkip, filterEnvInjection } from "./env"
+import { EnvManager, isSensitive, filterEnvInjection, cleanupLegacyUserEnv } from "./env"
 import { Sandbox } from "./sandbox"
 import { SessionStore, toSessionInfo, estimateCtxTokens } from "./store"
 import type { Tool, ToolContext } from "./types"
@@ -216,17 +216,39 @@ describe("SessionStore context tokens", () => {
 })
 
 describe("EnvManager precedence", () => {
-  test("session > user > global", async () => {
+  test("session（内存态）> global，会话 env 零落盘（服务端不留存）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-env-"))
     const store = new SessionStore({ home })
-    const env = new EnvManager(home, store)
+    const env = new EnvManager(store)
     const session = await store.createSession("default")
-    writeFileSync(join(home, "users", "default", "env.json"), JSON.stringify({ FOO: "user-foo" }))
-    await store.setEnv(session.id, "default", { FOO: "session-foo" })
     process.env.FOO_GLOBAL = "global"
+    await store.setEnv(session.id, "default", { FOO: "session-foo" })
     const resolved = await env.resolve(session.id, "default")
     expect(resolved.FOO).toBe("session-foo")
     expect(resolved.FOO_GLOBAL).toBe("global")
+    // 用户环境变量只存浏览器本地：会话目录不产生 env.json
+    expect(existsSync(join(store.getSessionDir(session.id, "default"), "env.json"))).toBe(false)
+    delete process.env.FOO_GLOBAL
+    cleanup(home)
+  })
+
+  test("存量会话 env.json 首次触达惰性清理（迁移，不再读取）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-env-mig-"))
+    const store = new SessionStore({ home })
+    const session = await store.createSession("default")
+    const p = join(store.getSessionDir(session.id, "default"), "env.json")
+    writeFileSync(p, JSON.stringify({ LEGACY: "1" }))
+    expect(await store.getEnv(session.id, "default")).toEqual({})
+    expect(existsSync(p)).toBe(false)
+    cleanup(home)
+  })
+
+  test("cleanupLegacyUserEnv 启动清理历史用户级 env.json（用户层废弃）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-env-user-"))
+    mkdirSync(join(home, "users", "alice"), { recursive: true })
+    writeFileSync(join(home, "users", "alice", "env.json"), "{}")
+    await cleanupLegacyUserEnv(home)
+    expect(existsSync(join(home, "users", "alice", "env.json"))).toBe(false)
     cleanup(home)
   })
 
@@ -246,13 +268,15 @@ describe("Sandbox exec", () => {
     cleanup(home)
   })
 
-  test("enabled sandbox restricts path to user dir", () => {
+  test("enabled sandbox restricts path to session tmp dir", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sandbox2-"))
     const sandbox = new Sandbox({ home, enabled: true })
     const session = "0123456789abcdef0123456789abcdef"
     const root = sessionPath(home, "alice", session)
     const inside = sandbox.resolvePath("alice", session, "tmp/a.txt")
-    expect(inside.startsWith(root)).toBe(true)
+    expect(inside.startsWith(join(root, "tmp"))).toBe(true)
+    // 相对路径基准 = 会话 tmp/：a.txt 与 tmp/a.txt 同一目标（tmp/ 前缀剥离兼容）
+    expect(sandbox.resolvePath("alice", session, "a.txt")).toBe(join(root, "tmp", "a.txt"))
     expect(() => sandbox.resolvePath("alice", session, "../x")).toThrow()
     expect(() => sandbox.resolvePath("alice", session, "/etc/passwd")).toThrow()
     cleanup(home)
@@ -264,9 +288,9 @@ describe("Sandbox exec", () => {
     const session = "0123456789abcdef0123456789abcdef"
     const abs = sandbox.resolvePath("alice", session, "/tmp/anywhere.txt")
     expect(abs).toBe(resolve("/tmp/anywhere.txt"))
-    // 相对路径仍基于会话根解析（保持 tmp 产物语义），允许越界
+    // 相对路径仍基于会话 tmp/ 解析（与 sh/py 工作目录一致），允许越界
     const parent = sandbox.resolvePath("alice", session, "../x.txt")
-    expect(parent).toBe(resolve(sessionPath(home, "alice", session), "../x.txt"))
+    expect(parent).toBe(resolve(join(sessionPath(home, "alice", session), "tmp"), "../x.txt"))
     cleanup(home)
   })
 
@@ -314,33 +338,19 @@ describe("Sandbox exec", () => {
   })
 })
 
-describe("rejectApprovalSkip (multi-user approval boundary)", () => {
-  test("non-admin cannot set GEBAI_APPROVAL_SKIP in multi mode", () => {
-    expect(rejectApprovalSkip("server", "user", { GEBAI_APPROVAL_SKIP: "true" })).toContain("仅管理员")
-    expect(rejectApprovalSkip("server", "admin", { GEBAI_APPROVAL_SKIP: "true" })).toBeNull()
-    expect(rejectApprovalSkip("server", "user", { CODE_PROJECT: "/x" })).toBeNull()
-    expect(rejectApprovalSkip("server", "user", {})).toBeNull()
-    // auth=none（默认用户即 admin）不拦截
-    expect(rejectApprovalSkip("local", "admin", { GEBAI_APPROVAL_SKIP: "true" })).toBeNull()
-  })
-})
-
 describe("filterEnvInjection (prompt 注入通道宽容过滤)", () => {
   test("非 string/null 值丢弃，合法变量保留", () => {
-    expect(filterEnvInjection({ A: "1", B: null, C: 2 as never }, "local", "admin")).toEqual({ A: "1" })
+    expect(filterEnvInjection({ A: "1", B: null, C: 2 as never })).toEqual({ A: "1" })
   })
 
   test("非法标识符名与 __proto__ 丢弃（原型污染防御）", () => {
-    const out = filterEnvInjection({ "a-b": "x", "__proto__": "p", OK_VAR: "1" }, "local", "admin")
+    const out = filterEnvInjection({ "a-b": "x", "__proto__": "p", OK_VAR: "1" })
     expect(out).toEqual({ OK_VAR: "1" })
     expect(({} as Record<string, string>).polluted).toBeUndefined()
   })
 
-  test("服务模式非管理员 GEBAI_APPROVAL_SKIP 丢弃，其余保留", () => {
-    expect(filterEnvInjection({ GEBAI_APPROVAL_SKIP: "true", CODE_PROJECT: "/x" }, "server", "user")).toEqual({ CODE_PROJECT: "/x" })
-    // 管理员 / 本地模式保留
-    expect(filterEnvInjection({ GEBAI_APPROVAL_SKIP: "true" }, "server", "admin")).toEqual({ GEBAI_APPROVAL_SKIP: "true" })
-    expect(filterEnvInjection({ GEBAI_APPROVAL_SKIP: "true" }, "local", "admin")).toEqual({ GEBAI_APPROVAL_SKIP: "true" })
+  test("GEBAI_APPROVAL_SKIP 不再按角色过滤（会话级审批跳过对所有用户开放，注入通道保留）", () => {
+    expect(filterEnvInjection({ GEBAI_APPROVAL_SKIP: "true", CODE_PROJECT: "/x" })).toEqual({ GEBAI_APPROVAL_SKIP: "true", CODE_PROJECT: "/x" })
   })
 })
 

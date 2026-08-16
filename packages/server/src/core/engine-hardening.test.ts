@@ -58,7 +58,7 @@ async function setupEngine(provider: HardenProvider, opts: Partial<ConstructorPa
   const registry = new ToolRegistry()
   for (const tool of Object.values(createGlobalTools())) registry.register(tool)
   const sandbox = new Sandbox({ home, enabled: false })
-  const env = new EnvManager(home, store)
+  const env = new EnvManager(store)
   const events = new EventBus()
   const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
   await subAgents.discover()

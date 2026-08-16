@@ -929,7 +929,7 @@ describe("命令", () => {
     expect(f.cancels).toContain(sid())
   })
 
-  test("/approval-skip 单用户可设、多用户拒绝", async () => {
+  test("/approval-skip 单用户与多用户会话所有者均可设（会话级审批跳过开放）", async () => {
     const f = makeBot()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
@@ -937,13 +937,13 @@ describe("命令", () => {
     await flush()
     expect(f.envSets).toEqual([{ sessionId: sid(), vars: { GEBAI_APPROVAL_SKIP: "true" } }])
 
+    // 多用户模式：会话所有者同样可设（非管理员仍受沙箱约束；非所有者被 restricted 拒绝见上）
     const m = makeBot({ authMode: "server" })
     await m.bot.handleFeishuEvent(receiveEvent())
     await flush()
     await m.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_a2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approval-skip" }) } }))
     await flush()
-    expect(m.envSets).toHaveLength(0)
-    expect(m.sent.some((s) => String(JSON.stringify(s.content)).includes("非管理员"))).toBe(true)
+    expect(m.envSets).toEqual([{ sessionId: sid(), vars: { GEBAI_APPROVAL_SKIP: "true" } }])
   })
 
   test("未知命令提示", async () => {

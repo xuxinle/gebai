@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, rm, readdir, stat } from "node:fs/promises"
+import { mkdir, writeFile, readFile, rm, readdir, stat, unlink } from "node:fs/promises"
 import { join, resolve, sep } from "node:path"
 import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
 import { isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "./paths"
@@ -404,17 +404,19 @@ export class SessionStore {
     }
   }
 
+  /** 会话 env（**纯内存，零落盘**——用户环境变量只存浏览器本地，服务端不留存）：
+   *  进程重启即空，前端每次加载会话时自行同步所需键（applyApprovalSkip）；
+   *  首次触达惰性清理历史版本落盘的 env.json（迁移，删除失败忽略）。 */
   async getEnv(sessionId: string, userId: string): Promise<Record<string, string>> {
+    const dir = this.dir(userId, sessionId)
     if (this.envCache.has(sessionId)) return this.envCache.get(sessionId)!
-    const p = join(this.dir(userId, sessionId), "env.json")
+    this.envCache.set(sessionId, {})
     try {
-      const raw = await readFile(p, "utf8")
-      const env = JSON.parse(raw) as Record<string, string>
-      this.envCache.set(sessionId, env)
-      return env
+      await unlink(join(dir, "env.json"))
     } catch {
-      return {}
+      /* 不存在（常态）或已清理 */
     }
+    return {}
   }
 
   async setEnv(sessionId: string, userId: string, vars: Record<string, string | null>): Promise<Record<string, string>> {
@@ -423,9 +425,6 @@ export class SessionStore {
       if (v === null) delete current[k]
       else current[k] = v
     }
-    const p = join(this.dir(userId, sessionId), "env.json")
-    await this.ensureDir(this.dir(userId, sessionId))
-    await writeFile(p, JSON.stringify(current, null, 2))
     this.envCache.set(sessionId, current)
     return current
   }

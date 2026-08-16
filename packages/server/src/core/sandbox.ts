@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { join, resolve } from "node:path"
 import { sessionPath } from "./paths"
-import { resolveInSandbox } from "./paths"
+import { resolveInSandbox, stripTmpPrefix } from "./paths"
 import { isSensitive } from "./env"
 
 export interface SandboxOptions {
@@ -45,14 +45,20 @@ export class Sandbox {
 
   /**
    * Resolve a tool-supplied path.
-   * - 沙箱启用（服务端部署/GEBAI_SANDBOX=on）且用户未豁免：仅允许会话目录内路径，拒绝 `../`、绝对路径、符号链接
+   * - 会话内相对路径统一以会话 `tmp/` 为基准（与 sh/py 工作目录、glob/grep 搜索范围、文件面板一致，
+   *   跨工具传递路径无需考虑前缀）；带 `tmp/` 前缀的逻辑路径（列表/附件/截断产物契约，如 `tmp/a.txt`）剥离前缀后解析
+   * - 沙箱启用（服务端部署/GEBAI_SANDBOX=on）且用户未豁免：仅允许会话 `tmp/` 内路径，拒绝 `../`、绝对路径、符号链接
    * - 沙箱禁用或用户豁免（本地运行/GEBAI_SANDBOX=off/默认用户豁免）：放开限制——绝对路径直接使用；
-   *   相对路径仍基于会话根解析（保持 tmp 产物路径语义），允许越界
+   *   相对路径仍基于会话 `tmp/` 解析，允许越界
    */
   resolvePath(user: string, sessionId: string | null, input: string): string {
-    const root = sessionId ? sessionPath(this.opts.home, user, sessionId) : join(this.opts.home, "users", user)
-    if (this.enforcedFor(user)) return resolveInSandbox(root, input)
-    return resolve(root, input)
+    if (sessionId) {
+      const tmp = this.workdir(user, sessionId)
+      const rel = stripTmpPrefix(input)
+      return this.enforcedFor(user) ? resolveInSandbox(tmp, rel) : resolve(tmp, rel)
+    }
+    const root = join(this.opts.home, "users", user)
+    return this.enforcedFor(user) ? resolveInSandbox(root, input) : resolve(root, input)
   }
 
   workdir(user: string, sessionId: string): string {

@@ -34,7 +34,7 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "GEBAI_VISION_API_KIND", description: "视觉模型接口类型：openai / responses / anthropic（缺省同主模型）" },
   { name: "GEBAI_VISION_MAX_CONTEXT", description: "视觉模型上下文 token 预算（数字，默认 128000）" },
   { name: "GEBAI_VISION_EXTRA_PARAMS", description: "视觉模型额外请求体参数（JSON 对象）" },
-  { name: "GEBAI_APPROVAL_SKIP", description: "会话级审批跳过：true/false（服务模式仅管理员可设置）" },
+  { name: "GEBAI_APPROVAL_SKIP", description: "会话级审批跳过：true/false（用户本人会话生效；非管理员仍受沙箱约束）" },
   { name: "HTTP_PROXY", description: "HTTP 代理地址（脚本/网络工具使用）" },
   { name: "HTTPS_PROXY", description: "HTTPS 代理地址（脚本/网络工具使用）" },
   { name: "NO_PROXY", description: "不走代理的地址列表（逗号分隔）" },
@@ -42,13 +42,9 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "TZ", description: "时区（如 Asia/Shanghai），影响定时任务与时间显示" },
 ]
 
-/** 环境变量目录（前端展示白名单）：全局静态组 + 各子Agent 导出 envVars 汇总组。
- *  role：当前用户角色——非管理员（服务模式普通用户）隐藏 GEBAI_APPROVAL_SKIP：
- *  该键非管理员配置后每条 prompt 都会被注入校验拒绝（「仅管理员可设置」），
- *  目录对所有人可见会诱导普通用户配置一个必然导致任务失败的键，故仅管理员可见。 */
-export function getEnvCatalog(subAgentDefs: SubAgentDef[] = [], role?: string): EnvCatalogGroup[] {
-  const globalVars = role === "admin" ? GLOBAL_VARS : GLOBAL_VARS.filter((v) => v.name !== "GEBAI_APPROVAL_SKIP")
-  const groups: EnvCatalogGroup[] = [{ group: "global", label: "全局", vars: globalVars }]
+/** 环境变量目录（前端展示白名单）：全局静态组 + 各子Agent 导出 envVars 汇总组。 */
+export function getEnvCatalog(subAgentDefs: SubAgentDef[] = []): EnvCatalogGroup[] {
+  const groups: EnvCatalogGroup[] = [{ group: "global", label: "全局", vars: GLOBAL_VARS }]
   for (const def of subAgentDefs) {
     if (!def.envVars?.length) continue
     groups.push({ group: def.name, label: def.name, vars: def.envVars })

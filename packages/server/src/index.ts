@@ -7,7 +7,7 @@ import { SessionStore } from "./core/store"
 import { ToolRegistry } from "./core/registry"
 import { createGlobalTools } from "./core/tools"
 import { Sandbox } from "./core/sandbox"
-import { EnvManager } from "./core/env"
+import { EnvManager, cleanupLegacyUserEnv } from "./core/env"
 import { EventBus } from "./core/event-bus"
 import { AuthService, type AuthUser } from "./auth"
 import { SubAgentManager } from "./core/subagents"
@@ -206,7 +206,9 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       }
     }
   }
-  const env = new EnvManager(config.gebaiHome, store)
+  // 用户环境变量零留存（只存浏览器本地）：启动时清理历史用户级 env.json（旧版三层结构遗留）
+  await cleanupLegacyUserEnv(config.gebaiHome)
+  const env = new EnvManager(store)
   const events = new EventBus()
   const subAgents = new SubAgentManager({ registry, preloadOverride: config.preloadSubAgents })
   await subAgents.discover()

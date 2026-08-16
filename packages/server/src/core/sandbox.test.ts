@@ -38,10 +38,10 @@ describe("Sandbox 豁免用户（auth=none 默认用户不受用户沙箱控制�
     const sid = "0123456789abcdef0123456789abcdef"
     const sb = new Sandbox({ home, enabled: true, isExempt: (u) => u === "default" })
     try {
-      // 豁免用户（默认用户）：绝对路径直接使用、../ 可越界
+      // 豁免用户（默认用户）：绝对路径直接使用、../ 可越界（相对路径基准 = 会话 tmp/，../ 越界到会话根）
       // （Windows 下 resolve("/etc/passwd") 为盘符根路径，断言与解析器同口径）
       expect(sb.resolvePath("default", sid, "/etc/passwd")).toBe(resolve("/etc/passwd"))
-      expect(sb.resolvePath("default", sid, "../secret")).toBe(resolve(sessionPath(home, "default", sid), "../secret"))
+      expect(sb.resolvePath("default", sid, "../secret")).toBe(resolve(join(sessionPath(home, "default", sid), "tmp"), "../secret"))
       // 其余用户（含多用户模式同名 default 之外的用户）：沙箱拒绝
       expect(() => sb.resolvePath("alice", sid, "/etc/passwd")).toThrow()
       expect(() => sb.resolvePath("alice", sid, "../secret")).toThrow()

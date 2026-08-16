@@ -100,7 +100,7 @@ function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = fa
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const store = new SessionStore({ home })
   const sandbox = new Sandbox({ home, enabled: false })
-  const env = new EnvManager(home, store)
+  const env = new EnvManager(store)
   const events = new EventBus()
   const h: Harness = {
     home,

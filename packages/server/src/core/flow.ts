@@ -603,7 +603,18 @@ async function runGroup(
   scope[id] = result
   const lines: string[] = []
   if (group.foreach !== undefined) {
-    const raw = evalCond(group.foreach, scope)
+    // 宽容解析：裸 JSON 数组文本（如 "[10,20,30]"）先按 JSON 直接解析（与工具描述一致，无需表达式包裹）；
+    // 非 JSON 再走表达式求值（{{引用}} / 裸表达式 / 正整数字符串）
+    const jsonParsed = typeof group.foreach === "string" ? tryParseJson(group.foreach) : null
+    let raw: unknown
+    if (Array.isArray(jsonParsed)) raw = jsonParsed
+    else {
+      try {
+        raw = evalCond(group.foreach, scope)
+      } catch (err) {
+        throw new Error(`flow: 分组 ${id} foreach 无效（${(err as Error).message}）：须为 JSON 数组文本（如 "[1,2,3]"）、求值为数组/正整数的表达式或正整数`)
+      }
+    }
     let list: unknown[]
     if (Array.isArray(raw)) {
       // 快照语义：迭代次数固定为求值时的长度，循环体修改源数组/覆盖源步骤不影响遍历（防删除场景提前终止）

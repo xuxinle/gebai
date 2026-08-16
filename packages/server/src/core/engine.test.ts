@@ -279,7 +279,7 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
   for (const tool of Object.values(createGlobalTools())) registry.register(tool)
   const sandbox = new Sandbox({ home, enabled: sandboxEnabled })
   const auth = new AuthService(home, "local")
-  const env = new EnvManager(home, store)
+  const env = new EnvManager(store)
   const events = new EventBus()
   const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
   await subAgents.discover()
@@ -332,8 +332,8 @@ describe("AgentEngine", () => {
   test("write 防误覆盖守卫：未读过的已存在文件拒绝整体覆盖，read 后放行（fileGuard 会话级追踪）", async () => {
     const { home, engine, store, provider } = await setup("guard")
     const session = await store.createSession("default", "t")
-    // 预置已存在文件（本会话从未 read/write 过）；文件工具相对路径基于会话根解析
-    const file = join(sessionPath(home, "default", session.id), "guard.txt")
+    // 预置已存在文件（本会话从未 read/write 过）；文件工具相对路径基于会话 tmp/ 解析
+    const file = join(sessionPath(home, "default", session.id), "tmp", "guard.txt")
     writeFileSync(file, "v1")
     await engine.run(session.id, "default", "把 guard.txt 覆盖为 v2")
     // 最终文件被覆盖为 v2（第1轮被拒 → 第2轮 read → 第3轮 write 成功）
@@ -1302,14 +1302,14 @@ describe("AgentEngine", () => {
     const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     const root = sessionPath(s.home, "default", session.id)
-    // 预置源文件（会话根内相对路径 a.txt）
-    writeFileSync(join(root, "a.txt"), "hello")
+    // 预置源文件（相对路径基准 = 会话 tmp/）
+    writeFileSync(join(root, "tmp", "a.txt"), "hello")
     s.provider.toolName = "file"
     s.provider.toolArgs = { action: "move", path: "a.txt", to: "moved/b.txt" }
     await s.engine.run(session.id, "default", "move it")
     // 目标父目录 moved/ 被自动创建（rename 本身对缺失父目录报 ENOENT）
-    expect(existsSync(join(root, "moved", "b.txt"))).toBe(true)
-    expect(existsSync(join(root, "a.txt"))).toBe(false)
+    expect(existsSync(join(root, "tmp", "moved", "b.txt"))).toBe(true)
+    expect(existsSync(join(root, "tmp", "a.txt"))).toBe(false)
     cleanup(s.home)
   })
 
@@ -1572,9 +1572,9 @@ describe("AgentEngine", () => {
     expect(toolMsg?.content).toContain("安全模式")
     expect(toolMsg?.content).toContain("sh")
     expect(toolMsg?.content).toContain("write")
-    // 无副作用：write step 未创建文件
+    // 无副作用：write step 未创建文件（相对路径基准 = 会话 tmp/）
     const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "x.txt"))).toBe(false)
+    expect(existsSync(join(root, "tmp", "x.txt"))).toBe(false)
     cleanup(s.home)
   })
 
@@ -1585,7 +1585,7 @@ describe("AgentEngine", () => {
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "write file")
     const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "out.txt"))).toBe(true)
+    expect(existsSync(join(root, "tmp", "out.txt"))).toBe(true)
     cleanup(s.home)
   })
 
@@ -1730,8 +1730,12 @@ describe("AgentEngine", () => {
       if (e.type === "event.approval.request") approvals.push(String((e.payload as { tool?: unknown }).tool))
     })
     const run = s.engine.run(session.id, "default", "run tool", { interactionMode: "multi_turn" })
-    await new Promise((r) => setTimeout(r, 50))
-    // 多轮交互：关键操作（requiresApproval）经审批卡片询问用户
+    // 多轮交互：关键操作（requiresApproval）经审批卡片询问用户（轮询等待审批事件，防全量并行下偶发超时）
+    const t0 = Date.now()
+    while (approvals.length === 0) {
+      if (Date.now() - t0 > 2000) throw new Error("approval.request not published")
+      await new Promise((r) => setTimeout(r, 20))
+    }
     expect(approvals).toEqual(["sh"])
     await s.engine.decideApproval(session.id, "tc-1", true)
     await run
@@ -2512,7 +2516,7 @@ describe("AgentEngine cron integration", () => {
     const registry = new ToolRegistry()
     for (const tool of Object.values(createGlobalTools())) registry.register(tool)
     const sandbox = new Sandbox({ home, enabled: false })
-    const env = new EnvManager(home, store)
+    const env = new EnvManager(store)
     const events = new EventBus()
     // cron 子Agent：discover 注册定义 + 预载装载（cron_add/list/update/remove 命名空间工具进入注册表）
     const subAgents = new SubAgentManager({ registry, preloadOverride: ["cron"] })
