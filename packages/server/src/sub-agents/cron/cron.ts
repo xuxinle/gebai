@@ -19,7 +19,7 @@ export const systemPrompt =
 const add: Tool = {
   name: "add",
   description:
-    "创建定时任务，到点自动执行。类型二选一：script（脚本运行——shell 命令在会话 tmp/ 目录以会话环境执行，执行结果写入会话消息）；prompt（提示词运行 agent——以指定提示词触发一次完整 Agent 会话，过程与结果出现在会话消息流）。schedule 支持 5 段 cron（分 时 日 月 周，本地时区，如 0 9 * * * 每天 9:00）或 @every 30m（每 30 分钟）/ @daily / @hourly / @weekly / @monthly。仅服务端开启定时任务能力（GEBAI_CRON_ENABLED=true）时可用。",
+    "创建定时任务，到点自动执行。类型二选一：script（脚本运行——shell 命令在会话 tmp/ 目录以会话环境执行，执行结果写入会话消息）；prompt（提示词运行 agent——以指定提示词触发一次完整 Agent 会话，过程与结果出现在会话消息流）。schedule 定时表达式支持 5 段 cron 与 @every 30m/@daily 等简写。仅服务端开启定时任务能力（GEBAI_CRON_ENABLED=true）时可用。",
   requiresApproval: true,
   parameters: schema(
     {

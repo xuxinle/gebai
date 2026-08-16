@@ -21,7 +21,7 @@ const save: Tool = {
   name: "save",
   // 仅实时前端可用（供标题栏「小工具」面板加载，依赖前端 UI），多轮交互/无交互模式禁用
   interaction: "realtime",
-  description: "保存 HTML 小工具（同名覆盖）。建议先用 render_html 调试满意后再保存。scope=public 公用（所有用户可见）/ private 用户私有（默认）。",
+  description: "保存 HTML 小工具（同名覆盖）。建议先用 render_html 调试满意后再保存。scope 参数选择可见范围（private 用户私有默认 / public 公用）。",
   card: { titleParams: ["name"] },
   parameters: schema(
     {

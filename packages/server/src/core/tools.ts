@@ -154,7 +154,7 @@ function withLineNumbers(text: string, startLine: number): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset 为起始行号（1 起始，默认从头）；limit 为读取行数（正数读 offset 起 N 行，负数读末尾 N 行）；lineNumbers=true 时每行前缀真实行号（右对齐+制表符，便于精确定位与按 文件:行号 引用，规划修改/汇报位置时推荐开启）。读取成功即登记「本会话已读」——write 整体覆盖已存在文件前要求先读过（防盲覆盖）。",
+    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset/limit 分段读取、lineNumbers 行号标注（按 文件:行号 精确定位与引用时推荐开启）。读取成功即登记「本会话已读」——write 整体覆盖已存在文件前要求先读过（防盲覆盖）。",
   card: { titleParams: ["path"] },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
@@ -373,7 +373,7 @@ function looksBinary(buf: Buffer, bytesRead: number): boolean {
 export const fileTool: Tool = {
   name: "file",
   description:
-    "文件管理（单工具多动作）：rename 重命名（同目录改名，newName 仅名字不含路径）/ move 移动或跨目录改名（to 含目标文件名，父目录不存在自动创建）/ delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite 等）、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**；附大小与修改时间，目录附直接子条目数。路径与 read/write 同一解析规则（沙箱约束）。",
+    "文件管理（单工具多动作）：rename 重命名 / move 移动或跨目录改名 / delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite 等）、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**；附大小与修改时间，目录附直接子条目数。路径与 read/write 同一解析规则（沙箱约束）。",
   card: { titleParams: ["action", "path"] },
   parameters: schema(
     {
@@ -512,7 +512,7 @@ function listPathCandidates(p: string): string[] {
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。output 选择结果形态：content（默认，逐行匹配内容）/ files（仅命中文件清单——大范围摸底定位优先用，不刷内容）/ count（每文件命中行数）。context 为匹配行前后各附的上下文行数（0-10，默认 0，仅 content 模式；匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔，同 grep -n -C）。include 按文件路径 glob 过滤（如 *.ts、**\/*.test.ts）。path 可限定子目录（tmp/ 前缀可省略）；匹配上限 200 处。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。output 选择结果形态（content 默认/files/count）；context 附上下文行；include 按文件路径 glob 过滤；path 限定子目录（tmp/ 前缀可省略）。匹配上限 200 处。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
@@ -520,7 +520,7 @@ export const grepTool: Tool = {
       path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
       ignoreCase: { type: "boolean" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
-      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式，格式同 grep -n -C）" },
+      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式）：匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔（同 grep -n -C）" },
       include: { type: "string", description: "文件路径 glob 过滤（如 *.ts；** 跨目录、* 任意、? 单字符）" },
     },
     ["pattern"],
@@ -801,11 +801,11 @@ export const drawTool: Tool = {
   // 需至少多轮交互（前端实时渲染或飞书后端渲染 PNG 两种通道），无交互模式禁用
   interaction: "multi_turn",
   description:
-    "创建/更新图表。支持三种图表语言，按需求选最合适的（选择指南见 format 参数）：Mermaid（流程图/时序图/状态图/甘特图/用户旅程等通用场景首选，语法最简洁、文档嵌入最佳）；PlantUML（类图/组件图/部署图/用例图/活动图/ER 图等标准 UML 严谨建模首选，功能最全面）；D2（系统架构图/云架构/网络拓扑等对外展示首选，默认布局最美观）。code 与 path 二选一：code 直接给源码；path 指定会话内已存在的图表文件（.mmd/.puml/.plantuml/.d2，已生成过图表文件时直接渲染文件，避免重发源码；文件名派生图表名；format 未传时按扩展名推断）。渲染成功才返回成功，失败返回错误信息供修正；PlantUML 勿手动添加 @startuml/@enduml（自动补全）。产物保存到会话 tmp/ 并返回图表内容块。render 参数选择渲染通道：**首选 frontend**（默认，浏览器本地渲染 SVG 可交互缩放，零服务端开销）/ backend（服务端直接渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用；前端渲染不可用时改用 backend 重试）。PlantUML 布局规范（保证图不杂乱）：① 流程/时序类图表显式声明方向——横向流程用 `left to right direction`，分层架构保持默认纵向，勿靠逐条连线上写 -down->/-right-> 硬控全局布局；② 密集图表（节点多/跨层连线多）用 `skinparam ranksep 80` 与 `skinparam nodesep 40` 拉开间距（未设置时系统自动注入该默认值）；③ 关系紧密的节点用 `together { … }` 保持相邻；④ 控制规模：单图节点 ≤20 个，架构图按层拆包（package），跨层连线过多时拆成多个图表分别展示。",
+    "创建/更新图表。支持三种图表语言，按需求选最合适的（选择指南见 format 参数）：Mermaid（通用场景首选）/ PlantUML（标准 UML 严谨建模首选）/ D2（架构图等对外展示首选）。code 与 path 二选一：code 直接给源码；path 渲染会话内已存在的图表文件（.mmd/.puml/.plantuml/.d2，避免重发源码；format 未传时按扩展名推断）。渲染成功才返回成功，失败返回错误信息供修正；PlantUML 勿手动添加 @startuml/@enduml（自动补全）。产物保存到会话 tmp/ 并返回图表内容块。render 参数选择渲染通道：默认 frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销），确需 PNG 文件导出时用 backend。",
   card: { args: "block" },
   parameters: schema(
     {
-      code: { type: "string", description: "图表源码（与 path 二选一；与 format 参数一致——Mermaid 直接给图定义；PlantUML 无需 @startuml/@enduml 包裹，自动补全，请勿手动包裹；D2 直接给声明式文本）。PlantUML 布局建议：流程类显式声明 `left to right direction` 或保持默认纵向；密集图设置 `skinparam ranksep 80`/`skinparam nodesep 40` 防节点拥挤；节点 ≤20 个，大图按层拆包" },
+      code: { type: "string", description: "图表源码（与 path 二选一；与 format 参数一致——Mermaid 直接给图定义；PlantUML 无需 @startuml/@enduml 包裹，自动补全，请勿手动包裹；D2 直接给声明式文本）。PlantUML 布局建议：流程类显式声明 `left to right direction` 或保持默认纵向，勿靠逐条连线上写方向硬控布局；密集图设置 `skinparam ranksep 80`/`skinparam nodesep 40` 防节点拥挤（未设置时系统自动注入）；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包" },
       path: { type: "string", description: "会话内已存在的图表文件路径（.mmd/.mermaid/.puml/.plantuml/.d2，与 code 二选一：读取文件内容直接渲染，适合已生成图表文件仅需重新渲染/换通道/再次展示的场景；format 未传时按扩展名推断）" },
       name: { type: "string", description: "图表文件名（不含扩展名；未传时默认 diagram，path 模式默认取文件主名）" },
       format: {
@@ -894,7 +894,7 @@ export const pageCaptureTool: Tool = {
   // 仅实时前端可用（请求当前页面捕获并由前端回传），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 vision 工具分析视觉效果。fullPage=true 截整页（长页面 UI 整体效果），缺省截视口（首屏）；delay 为捕获前等待毫秒数（UI 操作/渲染完成后截图，如点击后等动画结束，上限 10 秒）。前端离线或 30 秒未响应时返回失败。无需审批。",
+    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。无需审批。",
   parameters: schema({
     fullPage: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，大页面截图较慢）" },
     delay: { type: "number", description: "捕获前等待毫秒数（默认 0；UI 操作/动画/异步渲染完成后截图，上限 10000）" },
@@ -936,7 +936,7 @@ export const renderHtmlTool: Tool = {
   // 仅实时前端可用（聊天界面内渲染展示），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "生成 HTML 页面并直接在聊天界面内渲染展示（沙箱 iframe 域隔离预览：脚本可执行，但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航）。适合网页原型、数据报表、卡片/徽章、可视化组件、带交互脚本的小页面。html 与 path 二选一：html 直接给源码；path 指定会话内已存在的 .html 文件（已生成过页面时直接渲染文件，避免重发源码；文件名派生页面名）。样式用内联 CSS，图片可用 data: URI 或外部 URL，脚本内联或外部均可。可按内容设计指定预览尺寸 width/height（px，如窄高的移动端页面传小宽大高、宽表格页面传大宽），不传则默认固定铺满消息流宽度。产物保存到会话 tmp/ 并返回 html 内容块，无需审批。",
+    "生成 HTML 页面并直接在聊天界面内渲染展示（沙箱 iframe 域隔离预览：脚本可执行，但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航）。适合网页原型、数据报表、卡片/徽章、可视化组件、带交互脚本的小页面。html 与 path 二选一：html 直接给源码；path 渲染会话内已存在的 .html 文件（避免重发源码）。样式用内联 CSS，图片可用 data: URI 或外部 URL，脚本内联或外部均可。可选 width/height 指定预览尺寸（px），不传默认铺满消息流宽度。产物保存到会话 tmp/ 并返回 html 内容块，无需审批。",
   card: { args: "block" },
   parameters: schema(
     {
@@ -1011,7 +1011,7 @@ function collapseWhitespace(s: string): string {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动。**唯一性校验**：默认要求 oldString 在文件中唯一命中（多处命中报错并列出位置——扩大 oldString 上下文使其唯一，或确认全部替换时该项传 replaceAll: true）；原文不匹配则整体失败不落盘（含空白/缩进近似提示）；oldString 不得为空。改动较多或行号容易偏移时改用 patch 应用 unified diff（一次多 hunk、容错更强）。修改前先 read 目标区域，oldString 从原文精确复制（含缩进）。",
+    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配）则整体不落盘。改动较多或行号容易偏移时改用 patch 应用 unified diff（一次多 hunk、容错更强）。修改前先 read 目标区域，oldString 从原文精确复制（含缩进）。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits" },
   parameters: schema(
     {
@@ -1184,7 +1184,7 @@ const GIT_MAX_LOG = 50
 export const gitTool: Tool = {
   name: "git",
   description:
-    "只读 Git 检查（仅 status/diff/log 三操作，不修改仓库、无需审批）：status 工作区状态 / diff 未暂存或暂存区变更 / log 最近提交。写操作（add/commit 等）请用 sh（需审批）。",
+    "只读 Git 检查（仅 status/diff/log 三操作，不修改仓库、无需审批；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh（需审批）。",
   card: { args: "none" },
   parameters: schema(
     {
@@ -1286,7 +1286,7 @@ const SCRIPT_APPROVAL_PARAM = {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令。输出以 stdout 为准，默认需审批（可选 approval 参数设为 false 时跳过本次审批，仅限安全只读/幂等命令）。可选 input 参数作为命令 stdin（flow 管道数据传递）；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时按进程树终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
+  description: "执行 Shell 命令。输出以 stdout 为准；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等命令）。可选参数：input（作为命令 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -1338,7 +1338,7 @@ export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
 
 export const pyTool: Tool = {
   name: "py",
-  description: "执行 Python 代码，默认需审批（可选 approval 参数设为 false 时跳过本次审批，仅限安全只读/幂等脚本）。代码经临时文件执行，stdin（input 参数，flow 管道数据）供程序读取，stdout 为输出；可选 timeout 参数设置执行超时秒数（默认 300，上限 540，超时进程被终止并返回超时结果）；可选 strict 参数：true 时退出码非 0 抛工具级错误（flow 编排中「非 0 即中断」用；默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出中）。",
+  description: "执行 Python 代码，代码经临时文件执行，stdout 为输出；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等脚本）。可选参数：input（作为程序 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "code", codeLang: "python" },
   parameters: schema(
@@ -1382,7 +1382,7 @@ export const pyTool: Tool = {
 export const readFeedbackTool: Tool = {
   name: "read_feedback",
   description:
-    "读取用户提交的反馈（本用户，按时间倒序，最近 N 条）。用于自我优化等场景了解用户对既往输出的评价（点赞/点踩/文字反馈/建议）与改进点。limit 默认 10，上限 50；可按 sessionId 过滤某会话的反馈。",
+    "读取用户提交的反馈（本用户，按时间倒序）。用于自我优化等场景了解用户对既往输出的评价（点赞/点踩/文字反馈/建议）与改进点。",
   parameters: schema(
     {
       limit: { type: "integer", description: "返回条数（默认 10，上限 50）" },
@@ -1595,7 +1595,7 @@ export function makeTodoTool(): Tool {
   const tool: Tool = {
     name: "todo",
     description:
-      "待办管理（统一入口）：entries 为操作列表，每项 op=add/update/delete——add 新建（需 title，可带 priority/note/eta），update 按 id 或 title 修改（status/progress；改标题需用 id 定位），delete 按 id 或 title 删除。省略 entries 或传空数组 = 查询（清单含 id）。返回操作摘要与当前全部待办状态。",
+      "待办管理（统一入口）：entries 为操作列表，每项 op=add/update/delete。省略 entries 或传空数组 = 查询（清单含 id）。返回操作摘要与当前全部待办状态。",
     parameters: schema({
       entries: {
         type: "array",
@@ -1734,7 +1734,7 @@ const askUserTool: Tool = {
 export const askEnvTool: Tool = {
   name: "ask_env",
   description:
-    "向用户请求设置一个环境变量并**阻塞等待**：前端弹出填值窗口（展示变量名与用途说明），用户填写提交后值即注入本次任务环境（后续工具读取立即生效），同时保存到浏览器本地（后续任务自动生效）。用于工具缺少必需环境变量（API 密钥/Token/应用凭证等）时向用户索取——如 feishu_docs 缺少 FEISHU_DOCS_APP_ID 时可调用本工具。secret=true 时输入框掩码显示。用户拒绝/超时返回失败，请改用其他方式或说明所需配置。",
+    "向用户请求设置一个环境变量并**阻塞等待**：前端弹出填值窗口，用户填写提交后值即注入本次任务环境（后续工具读取立即生效），同时保存到浏览器本地（后续任务自动生效）。用于工具缺少必需环境变量（API 密钥/Token/应用凭证等）时向用户索取——如 feishu_docs 缺少 FEISHU_DOCS_APP_ID 时可调用本工具。用户拒绝/超时返回失败，请改用其他方式或说明所需配置。",
   // 需至少多轮交互（前端填值弹窗），无交互模式禁用
   interaction: "realtime",
   card: { titleParams: ["name"], args: "none" },
@@ -1971,13 +1971,12 @@ export function makeFlowTool(): Tool {
     name: "flow",
     description:
       "数据流编排：一次调用执行多步工具链（把工具视为函数做动态编程），减少与模型的往返与词元消耗。支持引用映射、条件分支与循环：\n" +
-      "- **步骤**：steps 每项为工具步骤 `{ id?, tool, params?, input?, when?, optional? }` 或循环分组 `{ id?, foreach | while, maxLoops?, steps: [...] }`（分组须声明 foreach 或 while）。\n" +
+      "- **步骤**：steps 为工具步骤或循环分组列表（分组须声明 foreach 或 while）。\n" +
       "- **引用**：`{{s1.data.xxx}}` 引用步骤结构化输出（各工具 data 结构先用 tool_schemas 批量查询），`{{s1.output}}` 引用文本输出。params 值恰为一个 `{{表达式}}` 时保留原始类型（数字/数组/对象原样传递），混排字符串按文本拼接——**多行字段（如 data.stdout）混排会带入换行**，拼进脚本源码字符串会语法错误：多行文本建议走 stdin（input 参数）或三引号包裹，引用单值字段（exitCode/length）不受影响。根名：步骤 id（缺省自动编号 s1/s2…）、`prev`（上一实际执行步骤）、`item`/`index`（foreach 当前项/序号）、`iteration`（while 轮次）、`input`（flow 参数 input）。路径访问 `.字段`/`[下标]`/`.length`。\n" +
       "- **input 显式映射**：`{ 目标参数名: \"{{源}}\" }`，解析后覆盖 params 同名字段并抑制自动注入——字段改名、多对一汇聚（多个步骤输出映射进同一工具的不同参数）都用它表达；**非对象形式**（如 `input: \"{{item}}\"`）等价于 `{ input: \"{{item}}\" }`，直接给工具的 input 参数传值（脚本 stdin）。\n" +
       "- **when 条件分支**：表达式为假时跳过该步（不中断）。支持两种写法（等价）：裸表达式 `gen.data.ok == true` 或 `{{表达式}}` 包裹/混排 `{{gen.data.ok}} == true`。运算：`==`/`!=`/`>`/`>=`/`<`/`<=`、`&&`/`||`/`!`、括号、函数 `len()`/`contains()`/`exists()`；空数组视为假；引用不存在的路径解析为 undefined/空串（不报错，需判定存在性用 `exists()`）。\n" +
       "- **foreach 数据循环**（一对多扇出）：值为数组（逐项——**可直接写 JSON 数组文本如 `\"[1,2,3]\"`**，或表达式/`{{引用}}` 求值为数组，脚本 stdout 的 JSON 数组文本同样自动解析）或正整数（按次），体内经 `{{item}}`/`{{index}}` 引用；**快照语义**——迭代次数固定为求值时的长度，循环体修改源数组不影响遍历；**嵌套时内层 `{{item}}`/`{{index}}` 遮蔽外层同名引用**（外层值需提前映射到中间步骤）；组结果 data = 每轮末步 data 的数组。\n" +
       "- **while 条件循环**（do-while：先执行一轮再判断，条件可引用本组最新结果如 `{{g.data.exitCode}}`，适合重试直到成功）：为真继续下一轮，达上限停止；`maxLoops` 默认 10、上限 50；需前置判断时配 when。\n" +
-      "- **timeout 超时**（整体预算，秒）：步骤间累计执行时间超限即中止（循环失控保护），返回已执行部分 + 超时说明；缺省不限制。单步执行中无法中止——慢步骤请用各工具自身 timeout 参数。\n" +
       "- **失败语义**：**工具级异常才中断** flow（调用不存在的工具、strict 脚本非 0 退出等），报告失败位置与原因；sh/py **非 0 退出码默认是正常结果**（exitCode 在 data，可用 when 判定，或给该步传 strict: true 转为中断）；`optional: true` 的步骤失败不中断（记录错误继续）。\n" +
       "- **自动注入**（未显式 input 映射时保留旧版语义）：脚本工具（sh/py）上一步输出经 stdin（input 参数）传入；其余工具的上一步 JSON 输出按参数名映射注入，兜底注入 input 参数。\n" +
       "- **审批与安全**：内部任一工具需审批则整个 flow 提交一次审批（通过后依次执行）；安全模式下风险工具在 step 层同规则拦截。\n" +
@@ -2064,7 +2063,7 @@ export const agentLoadTool: Tool = {
 
 export const agentRunTool: Tool = {
   name: "agent_run",
-  description: "执行新会话：派生一个临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（一个或多个，其完整系统提示词与工具进入新会话上下文），然后阻塞执行任务直到结束，只返回最终结果文本；新会话执行过程全程存档供历史回放。默认优先 agent_load 装载后直接用其工具；仅在需要干净上下文（子任务结果隔离、不污染主上下文）或防止上下文膨胀（子任务中间过程多、输出大）时使用。",
+  description: "执行新会话：派生一个临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与工具进入新会话上下文），然后阻塞执行任务直到结束，只返回最终结果文本；新会话执行过程全程存档供历史回放。默认优先 agent_load 装载后直接用其工具；仅在需要干净上下文（子任务结果隔离、不污染主上下文）或防止上下文膨胀（子任务中间过程多、输出大）时使用。",
   card: { titleParams: ["agents"] },
   parameters: schema(
     {

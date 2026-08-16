@@ -69,7 +69,7 @@ export const writeGuard = (env: Record<string, string>, absPaths: string[]): str
 const runTestsTool: import("../core/types").Tool = {
   name: "run_tests",
   description:
-    "在歌白仓库根执行测试（测试是自我修改的唯一准入凭证）：files 传相关测试文件（相对仓库根，如 [\"src/core/engine.test.ts\"]，可多个），确认无回归后 all=true 跑全量 bun run test。输出测试结果（失败需修复或 rollback 回滚）。需审批。",
+    "在歌白仓库根执行测试（测试是自我修改的唯一准入凭证）：files 传相关测试文件（相对仓库根，可多个），确认无回归后 all=true 跑全量。输出测试结果（失败需修复或 rollback 回滚）。需审批。",
   requiresApproval: true,
   parameters: schema({
     files: { type: "array", items: { type: "string" }, description: "测试文件列表（相对仓库根；如 [\"src/core/engine.test.ts\"]）" },
@@ -91,7 +91,7 @@ const runTestsTool: import("../core/types").Tool = {
 const rollbackTool: import("../core/types").Tool = {
   name: "rollback",
   description:
-    "回滚工作区未提交改动（测试失败后的恢复路径）：paths 传要回滚的文件/目录（相对仓库根，可多个），all=true 回滚全部未提交改动（git checkout -- .）。**注意：会丢弃未提交的修改**——仅用于撤销本次失败的自我修改；工作区若有与本次任务无关的既有改动，请用 paths 精确指定而非 all。需审批。",
+    "回滚工作区未提交改动（测试失败后的恢复路径）：paths 传要回滚的文件/目录（相对仓库根，可多个），all=true 回滚全部未提交改动。**注意：会丢弃未提交的修改**——仅用于撤销本次失败的自我修改；工作区若有与本次任务无关的既有改动，请用 paths 精确指定而非 all。需审批。",
   requiresApproval: true,
   parameters: schema({
     paths: { type: "array", items: { type: "string" }, description: "回滚文件/目录列表（相对仓库根）" },

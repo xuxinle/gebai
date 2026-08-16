@@ -210,7 +210,7 @@ export function createCaptureTools(deps: { bridge?: BridgeLike } = {}): ToolSet 
     capture_list: {
       name: "capture_list",
       description:
-        "列出录制的网络请求。默认仅摘要（序号/时间/方法/地址/状态/类型）；detail=true 包含请求头/请求体/响应头/响应体预览。可按 method / url（正则或子串）/ status 过滤；file 参数把完整记录（含详情）写入会话 tmp/ 的 JSON 文件。",
+        "列出录制的网络请求。默认仅摘要（序号/时间/方法/地址/状态/类型）；detail=true 时包含请求/响应头与体预览。",
       parameters: schema({
         detail: { type: "boolean", description: "是否包含请求/响应头与体（默认 false）" },
         method: { type: "string", description: "按请求方法过滤（GET/POST/...）" },

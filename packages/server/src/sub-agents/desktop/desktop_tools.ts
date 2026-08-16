@@ -82,7 +82,7 @@ function blackFrameWarn(mean: number | null, colors: number | null): string | nu
 export const screenshotTool: Tool = {
   name: "screenshot",
   description:
-    "截取屏幕（全屏或指定区域），保存 PNG 到会话 tmp/ 并返回图片供 UI 展示。参数 region 为 'x,y,width,height'（相对主屏左上角），省略则全屏。返回尺寸元数据并自动检测黑屏/纯色帧（显示器休眠/锁屏时主动提示）。平台：Windows/macOS 内置支持；Linux 需 scrot 或 ImageMagick import。",
+    "截取屏幕（全屏或指定区域），保存 PNG 到会话 tmp/ 并返回图片供 UI 展示。region 参数指定截取区域（相对主屏左上角，省略则全屏）。返回尺寸元数据并自动检测黑屏/纯色帧（显示器休眠/锁屏时主动提示）。平台：Windows/macOS 内置支持；Linux 需 scrot 或 ImageMagick import。",
   card: { titleParams: ["region"], args: "none" },
   parameters: schema({
     region: { type: "string", description: "可选：截取区域 'x,y,w,h'（像素，省略则全屏）" },
@@ -354,7 +354,7 @@ if ($p -and $p.MainWindowHandle -ne 0) {
 export const typeTextTool: Tool = {
   name: "type_text",
   description:
-    "向当前聚焦窗口输入文本。mode 默认 clipboard（中文/符号可靠：剪贴板粘贴法，输入前备份、输入后恢复剪贴板；输入前自动做敏感信息检测并预览内容）；mode=\"keys\" 为纯按键模式（绕开剪贴板，仅支持 ASCII 可打印字符）。先确保目标窗口已聚焦（window_focus）。",
+    "向当前聚焦窗口输入文本。默认 clipboard 模式（剪贴板粘贴法，中文/符号可靠：输入前备份、输入后恢复剪贴板；输入前自动做敏感信息检测并预览内容），keys 模式为纯按键逐字符输入（绕开剪贴板，仅支持 ASCII，见 mode 参数描述）。先确保目标窗口已聚焦（window_focus）。",
   parameters: schema(
     {
       text: { type: "string", description: "要输入的文本" },

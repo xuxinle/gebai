@@ -256,12 +256,12 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     open: {
       name: "open",
       description:
-        "打开 URL（http/https 或 file:// 本地文件），返回页面标题与最终地址。会话内首次调用自动启动无头浏览器；后续调用复用当前页面。参数 waitUntil 可选 load/domcontentloaded/networkidle/commit（默认 load）。本地 HTML 文件可用 file:// 直接打开，或先用 serve_dir 起静态服务器。",
+        "打开 URL（http/https 或 file:// 本地文件），返回页面标题与最终地址。会话内首次调用自动启动无头浏览器；后续调用复用当前页面。waitUntil 可选择加载完成条件（默认 load）。本地 HTML 文件可用 file:// 直接打开，或先用 serve_dir 起静态服务器。",
       card: { titleParams: ["url"], args: "none" },
       parameters: schema(
         {
           url: { type: "string", description: "要打开的 http(s) 或 file:// 地址" },
-          waitUntil: { type: "string", description: "等待加载完成的条件（默认 load）" },
+          waitUntil: { type: "string", description: "等待加载完成的条件：load/domcontentloaded/networkidle/commit（默认 load）" },
           timeout: { type: "number", description: "超时毫秒（默认 30000，上限 120000）" },
         },
         ["url"]
@@ -280,9 +280,9 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     content: {
       name: "content",
       description:
-        "读取当前页面（或指定元素）的内容。mode 为 text（可见文本，省 token，默认）/ html（DOM 结构）/ both。selector 省略则作用于整个页面。内容较大时自动截断保存，可用 read 读取全文。",
+        "读取当前页面（或指定元素）的内容。mode 选择 text（可见文本，省 token）/ html（DOM 结构）/ both（默认 text）；selector 省略则作用于整个页面。内容较大时自动截断保存，可用 read 读取全文。",
       parameters: schema({
-        mode: { type: "string", description: "text | html | both（默认 text）" },
+        mode: { type: "string", description: "text（可见文本，省 token）/ html（DOM 结构）/ both（默认 text）" },
         selector: { type: "string", description: "可选：CSS 选择器，读取指定元素" },
         index: { type: "number", description: "可选：标签页序号（默认当前页）" },
       }),
@@ -303,7 +303,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     screenshot: {
       name: "screenshot",
       description:
-        "对当前页面（或指定元素）截图，保存 PNG 到会话 tmp/ 并返回图片。fullPage=true 截取整个滚动页面；selector 指定元素区域。",
+        "对当前页面（或指定元素）截图，保存 PNG 到会话 tmp/ 并返回图片。fullPage 截整页、selector 指定元素区域。",
       card: { titleParams: ["selector"], args: "none" },
       parameters: schema({
         fullPage: { type: "boolean", description: "是否整页截图（默认 false）" },
@@ -415,10 +415,10 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     wait_for: {
       name: "wait_for",
       description:
-        "等待页面条件：selector（元素出现/可见，state 可选 visible/attached/hidden/detached）、url（地址匹配，支持 glob）、或 loadState（网络空闲等，默认 networkidle）。适合等待异步渲染完成后再读取/截图。",
+        "等待页面条件：selector（元素出现，state 指定等待状态）、url（地址匹配，支持 glob）、或 loadState（网络加载状态，默认 networkidle）。适合等待异步渲染完成后再读取/截图。",
       parameters: schema({
         selector: { type: "string", description: "等待出现的 CSS 选择器" },
-        state: { type: "string", description: "selector 的等待状态（默认 visible）" },
+        state: { type: "string", description: "selector 的等待状态（visible/attached/hidden/detached，默认 visible）" },
         url: { type: "string", description: "等待 URL 匹配（glob 模式，如 **/order/*）" },
         loadState: { type: "string", description: "load | domcontentloaded | networkidle" },
         timeout: { type: "number", description: "超时毫秒（默认 30000）" },
