@@ -1525,25 +1525,70 @@ describe("AgentEngine", () => {
     cleanup(s.home)
   })
 
-  test("极简模式（GEBAI_MINIMAL_MODE=true）：schema 仅含 sh/edit，其余工具调用被阻止", async () => {
+  test("极简模式（GEBAI_MINIMAL_MODE=true）：schema 仅含 sh/edit/full_mode，其余工具调用被阻止，系统提示词极简化", async () => {
     const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     await s.store.setEnv(session.id, "default", { GEBAI_MINIMAL_MODE: "true" })
     await s.engine.run(session.id, "default", "what time")
     const loaded = await s.store.load(session.id)
-    // 模型看到的 schema 仅 sh/edit（默认 first-call current_time 也被过滤）
+    // 模型看到的 schema 仅 sh/edit + full_mode 切换入口（默认 first-call current_time 也被过滤）
     const seen = s.provider.seenTools[0]
     expect(seen).toContain("sh")
     expect(seen).toContain("edit")
+    expect(seen).toContain("full_mode")
     expect(seen).not.toContain("current_time")
     expect(seen).not.toContain("read")
-    // 系统提示词带极简模式说明
-    expect(String(s.provider.seenChats[0][0].content)).toContain("极简模式")
-    // 假模型仍调用 current_time → 执行被阻止，返回极简模式说明
+    // 系统提示词极简化：保留极简说明，裁剪编排/子Agent 清单等（对应工具均不可用，注入纯属浪费上下文）
+    const sys = String(s.provider.seenChats[0][0].content)
+    expect(sys).toContain("极简模式")
+    expect(sys).not.toContain("可选子Agent")
+    expect(sys).not.toContain("数据流编排")
+    // 假模型仍调用 current_time → 执行被阻止，返回极简模式说明（含 full_mode 切换指引）
     const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "current_time")
     expect(toolMsg?.content).toContain("极简模式")
+    expect(toolMsg?.content).toContain("full_mode")
     // 模型收到说明后第二轮直接回复，任务正常收尾
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("极简模式 full_mode 切换完整模式：审批通过后解锁全工具、系统提示词原地升级、会话 env 清除、事件通知前端", async () => {
+    const s = await setup("tool")
+    s.provider.toolName = "full_mode"
+    const session = await s.store.createSession("default", "t")
+    await s.store.setEnv(session.id, "default", { GEBAI_MINIMAL_MODE: "true" })
+    const minimalEvents: boolean[] = []
+    s.events.subscribe((e) => {
+      if (e.type === "event.session.minimal") minimalEvents.push(e.payload.enabled === false)
+    })
+    const run = s.engine.run(session.id, "default", "need more tools")
+    await new Promise((r) => setTimeout(r, 50))
+    // full_mode 需审批：批准后执行切换（清除白名单 + 提示词升级）
+    await s.engine.decideApproval(session.id, "tc-1", true)
+    await run
+    const loaded = await s.store.load(session.id)
+    // 第一轮（极简）：仅 sh/edit/full_mode，提示词为极简版
+    expect(s.provider.seenTools[0]).toContain("full_mode")
+    expect(s.provider.seenTools[0]).not.toContain("current_time")
+    expect(String(s.provider.seenChats[0][0].content)).toContain("极简模式")
+    // 第二轮（已切换）：schema 全量下发（full_mode 自身随之隐藏），系统提示词升级为完整版
+    expect(s.provider.seenTools[1]).toContain("current_time")
+    expect(s.provider.seenTools[1]).not.toContain("full_mode")
+    expect(String(s.provider.seenChats[1][0].content)).toContain("可选子Agent")
+    // 工具结果说明切换成功
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "full_mode")
+    expect(toolMsg?.content).toContain("已切换到完整模式")
+    // 会话内存 env 极简标记已删（下一任务不再极简），前端通知事件已发布
+    expect(await s.store.getEnv(session.id, "default")).not.toHaveProperty("GEBAI_MINIMAL_MODE")
+    expect(minimalEvents).toEqual([true])
+    cleanup(s.home)
+  })
+
+  test("非极简会话：full_mode 不出现在 schema（仅极简会话可见，防冗余工具干扰选择）", async () => {
+    const s = await setup("tool")
+    const session = await s.store.createSession("default", "t")
+    await s.engine.run(session.id, "default", "what time")
+    expect(s.provider.seenTools[0]).not.toContain("full_mode")
     cleanup(s.home)
   })
 

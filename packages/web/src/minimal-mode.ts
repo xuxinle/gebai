@@ -17,7 +17,20 @@ function minimalModeEnabled(): boolean {
 function syncMinimalModeBtn() {
   const on = minimalModeEnabled()
   minimalModeBtn.classList.toggle("active", on)
-  tip(minimalModeBtn, on ? "极简模式已开启：会话仅启用 sh 与 edit 工具" : "极简模式：会话仅启用 sh 与 edit 工具（持久化到本地）")
+  tip(minimalModeBtn, on ? "极简模式已开启：会话仅启用 sh 与 edit 工具" : "极简模式：会话仅启用 sh 与 edit 工具（持久化到本地；任务中模型可经 full_mode 工具请求切换完整模式）")
+}
+
+/** 服务端侧模式变更同步（full_mode 工具经用户批准切换完整模式）：本地开关随之关闭。
+ *  开关是用户级偏好（localStorage 单份），不区分来源会话——若保持开启，任何会话下次任务启动前的
+ *  幂等同步都会把极简标记写回服务端，违背用户刚批准的切换，故统一关闭。 */
+export function syncMinimalModeFromServer(enabled: boolean) {
+  if (enabled) return // 仅处理关闭方向（开启仍由用户本地开关驱动）
+  try {
+    localStorage.setItem(MINIMAL_KEY, "0")
+  } catch {
+    /* 忽略 */
+  }
+  syncMinimalModeBtn()
 }
 
 /** 当前会话同步极简模式开关（幂等）。开关本身持久化在浏览器本地（localStorage 为准）；

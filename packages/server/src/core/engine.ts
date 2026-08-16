@@ -878,8 +878,9 @@ export class AgentEngine {
       const env = { ...(await this.opts.env.resolve(sessionId, user)), ...(opts.envOverride || {}) }
       // 任务级 env 引用：ask_env 用户填值后原地更新（ctx.env 同一引用，工具后续读取立即生效）
       this.tasks.get(sessionId)!.env = env
-      // 极简模式（DESIGN「极简模式」）：任务启动按 env 快照裁剪工具白名单（仅 sh/edit），下次任务起生效
-      if (env.GEBAI_MINIMAL_MODE === "true") this.tasks.get(sessionId)!.enabledTools = ["sh", "edit"]
+      // 极简模式（DESIGN「极简模式」）：任务启动按 env 快照裁剪工具白名单（仅 sh/edit + full_mode 切换入口），
+      // 系统提示词同步极简化（buildSystemPrompt 极简分支），下次任务起生效
+      if (env.GEBAI_MINIMAL_MODE === "true") this.tasks.get(sessionId)!.enabledTools = ["sh", "edit", "full_mode"]
       // 任务级主模型：env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖时沿用启动实例）
       const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
       const systemPrompt = this.buildSystemPrompt(sessionId, user, env)
@@ -1108,6 +1109,15 @@ export class AgentEngine {
     const sandboxNote = this.opts.sandbox.enforcedFor(user)
       ? `（文件读写限定在此目录内，禁止越界）`
       : `（本地模式：不限制文件目录，可访问本机任意路径）`
+    // 极简模式提示词极简化（DESIGN「极简模式」）：编排/任务路由/子Agent 清单等说明对应工具均已裁剪，
+    // 注入纯属浪费上下文——仅保留身份、路径基准与极简工具说明（full_mode 切换完整模式后原地升级为完整提示词）
+    if (env.GEBAI_MINIMAL_MODE === "true") {
+      return [
+        `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
+        `当前会话工作目录: ${workdir}/tmp（sh 命令与 edit 等文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
+        `当前会话处于极简模式：仅启用 sh、edit 与 full_mode 三个工具（其余工具均不可用）。查看/读取文件请用 sh 执行命令（cat、ls、find 等），修改文件请用 edit 工具；若任务确需其他工具能力，调用 full_mode 工具（需用户批准）切换到完整模式，批准后全部工具与完整说明立即生效。`,
+      ].join("\n")
+    }
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
       `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
@@ -1118,9 +1128,6 @@ export class AgentEngine {
       this.subAgentProjectNote(user, env),
       this.opts.subAgents.systemPromptInjection((d) => this.agentDescription(d, user, env)),
     ]
-    if (env.GEBAI_MINIMAL_MODE === "true") {
-      parts.push("当前会话处于极简模式：仅启用 sh 与 edit 两个工具（其余工具均不可用）。查看/读取文件请用 sh 执行命令（cat、ls 等），修改文件请用 edit 工具。")
-    }
     return parts.filter(Boolean).join("\n")
   }
 
@@ -1287,6 +1294,25 @@ export class AgentEngine {
       fileGuard: this.fileGuardFor(sessionId),
       // 写范围守卫：显式传入（新会话模式：预加载子Agent 名单静态已知）或按会话装载名单动态收集（装载模式）
       writeGuard: opts?.writeGuard ?? ((absPaths: string[]) => this.sessionWriteGuard(sessionId, user, env, absPaths)),
+      // 退出极简模式（full_mode 工具，DESIGN「极简模式」）：清会话极简标记（任务 env 快照 + 会话内存 env）并
+      // 解锁当前任务工具白名单（下一轮 schema 即全量下发）；系统提示词原地升级为完整版（极简任务以极简提示词
+      // 启动，首条 system 与极简参照全等才替换——agent_run 新会话 messages[0] 为子Agent 提示词，天然不触发）；
+      // 发布 event.session.minimal 通知前端关闭本地开关（防下次任务前幂等同步把极简标记写回）
+      exitMinimalMode: async () => {
+        const m = opts?.messages
+        const minimalRef = m?.length && m[0].role === "system" && typeof m[0].content === "string"
+          ? this.buildSystemPrompt(sessionId, user, { ...env, GEBAI_MINIMAL_MODE: "true" })
+          : undefined
+        delete env.GEBAI_MINIMAL_MODE
+        const task = this.tasks.get(sessionId)
+        if (task) {
+          delete task.env.GEBAI_MINIMAL_MODE
+          task.enabledTools = undefined
+        }
+        await store.setEnv(sessionId, user, { GEBAI_MINIMAL_MODE: null })
+        if (minimalRef !== undefined && m![0].content === minimalRef) m![0].content = this.buildSystemPrompt(sessionId, user, env)
+        this.publish(sessionId, "event.session.minimal", { enabled: false, sessionId })
+      },
       resolvePath: (p) => {
         // 子Agent 项目绑定：路径以项目根为基准（沙箱约束用户限定项目内，豁免/本地模式放开）
         if (resolveRoot) return sandbox.enforcedFor(user) ? resolveInSandbox(resolveRoot, p) : resolve(resolveRoot, p)
@@ -1740,8 +1766,13 @@ export class AgentEngine {
     const task = this.tasks.get(sessionId)
     if (!task) return false
     if (task.disabledTools.some((d) => name === d || name.endsWith(`_${d}`))) return true
-    // 极简模式（DESIGN「极简模式」）：白名单外工具一律禁用（schema 过滤 + 执行阻止）
-    if (task.enabledTools && !task.enabledTools.includes(name)) return true
+    if (task.enabledTools) {
+      // 极简模式（DESIGN「极简模式」）：白名单外工具一律禁用（schema 过滤 + 执行阻止）
+      if (!task.enabledTools.includes(name)) return true
+    } else if (name === "full_mode") {
+      // 完整模式（极简未启用/已切换）：full_mode 仅极简会话可见可用，其余会话从 schema 移除（防冗余工具干扰选择）
+      return true
+    }
     if (tool?.interaction) {
       const level: Record<InteractionMode, number> = { none: 1, multi_turn: 2, realtime: 3 }
       if (level[tool.interaction] > level[task.interactionMode]) return true
@@ -1753,8 +1784,9 @@ export class AgentEngine {
   private toolDisabledMsg(sessionId: string, name: string): string {
     const task = this.tasks.get(sessionId)
     if (task?.enabledTools && !task.enabledTools.includes(name)) {
-      return `工具 ${name} 在当前会话不可用：会话处于极简模式，仅启用 sh 与 edit 两个工具。请改用 sh/edit 完成。`
+      return `工具 ${name} 在当前会话不可用：会话处于极简模式，仅启用 sh 与 edit 两个工具。请改用 sh/edit 完成，或调用 full_mode 工具（需用户批准）切换到完整模式。`
     }
+    if (name === "full_mode" && !task?.enabledTools) return "会话已是完整模式（全部工具可用），无需切换。"
     return `工具 ${name} 在当前通道不可用（该工具需要前端页面配合，而当前会话来自飞书聊天），请改用其他方式。`
   }
 

@@ -7,7 +7,7 @@ import "./css/overlays.css"
 import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
 import { capturePage } from "./capture"
 import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
-import { bindMinimalMode, applyMinimalMode } from "./minimal-mode"
+import { bindMinimalMode, applyMinimalMode, syncMinimalModeFromServer } from "./minimal-mode"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
@@ -727,6 +727,9 @@ async function init() {
     } else if (ev.type === "event.session.ctx") {
       // 运行中上下文大小实时更新（会话列表 k 显示）
       updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0))
+    } else if (ev.type === "event.session.minimal") {
+      // 任务中模型经 full_mode 工具（用户批准）切换到完整模式：本地极简开关随之关闭
+      if (ev.payload.enabled === false) syncMinimalModeFromServer(false)
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流

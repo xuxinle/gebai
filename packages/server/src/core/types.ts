@@ -115,6 +115,12 @@ export type ToolContext = {
    */
   waitForCapture: (opts?: { fullPage?: boolean; delayMs?: number }) => Promise<{ html: string; imageBase64?: string; error?: string } | null>
   /**
+   * 退出极简模式（full_mode 工具用）：清除会话极简标记（会话内存 env + 当前任务工具白名单）并解锁
+   * 全部工具（本任务后续轮次 schema 立即全量下发），发布 event.session.minimal 通知前端同步开关。
+   * 可选：未注入（测试桩/无引擎环境）时 full_mode 返回不可用说明。
+   */
+  exitMinimalMode?: () => void | Promise<void>
+  /**
    * 定时任务（cron_* 工具用，按当前会话绑定；服务端未启用定时任务能力时为空）。
    */
   cron?: {
