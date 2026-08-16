@@ -138,6 +138,8 @@ export interface RunState {
   /** 流活跃时间（毫秒）：流式 chunk 与交互等待事件（选择/填值/画图/捕获）到达时刷新，
    *  空闲超时兜底按此判定——等待用户回应的挂起不算无数据，防误杀。 */
   lastActivity: number
+  /** 空闲超时兜底已触发（150s 无数据主动中止）：收尾时据此给出显式提示而非静默结束。 */
+  idleTimedOut?: boolean
   /** 流中断控制器：空闲超时兜底中断挂起的 SSE（防止运行态/信号灯残留）。 */
   abort: AbortController
   /** 低性能模式流式渲染节流定时器（跨 chunk 合并渲染，未排期时为 undefined）。 */
@@ -242,53 +244,35 @@ const headerTitleEl = document.getElementById("header-title")
 const headerCtxEl = document.getElementById("header-ctx")
 const ctxTextEl = document.querySelector<HTMLElement>("#header-ctx .ctx-text")
 const ctxFillEl = document.querySelector<HTMLElement>("#header-ctx .ctx-fill")
-const headerSessionIdEl = document.getElementById("header-session-id")
 
 /** 浏览器 tab 标题固定为「歌白」（不拼接会话名）；标题栏居中会话标题跟随当前会话。 */
 export function updateTitle() {
   document.title = "歌白"
   if (headerTitleEl) headerTitleEl.textContent = currentSession ? currentSession.name : ""
-  // 会话 ID 徽标（定位/反馈问题用）：当前会话存在时显示前 8 位，点击复制完整 ID
-  if (headerSessionIdEl) {
-    if (currentSession) {
-      headerSessionIdEl.hidden = false
-      headerSessionIdEl.textContent = `ID ${currentSession.id.slice(0, 8)}…`
-      headerSessionIdEl.title = `会话 ID: ${currentSession.id}\n点击复制`
-    } else {
-      headerSessionIdEl.hidden = true
-    }
-  }
   renderHeaderCtx()
 }
 
-/** 复制当前会话完整 ID 到剪贴板（点击会话 ID 徽标触发；回调由 sessions 层注册）。 */
-export function copySessionId(): string | null {
-  if (!currentSession) return null
-  const id = currentSession.id
-  const copy = async (): Promise<boolean> => {
+/** 复制文本到剪贴板（非安全上下文 http/file 回退 execCommand）；返回是否成功（会话右键菜单「复制会话 ID」等用）。 */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const ta = document.createElement("textarea")
+    ta.value = text
+    ta.style.position = "fixed"
+    ta.style.opacity = "0"
+    document.body.appendChild(ta)
+    ta.select()
+    let ok = false
     try {
-      await navigator.clipboard.writeText(id)
-      return true
+      ok = document.execCommand("copy")
     } catch {
-      // 非安全上下文（http/file）回退 execCommand
-      const ta = document.createElement("textarea")
-      ta.value = id
-      ta.style.position = "fixed"
-      ta.style.opacity = "0"
-      document.body.appendChild(ta)
-      ta.select()
-      let ok = false
-      try {
-        ok = document.execCommand("copy")
-      } catch {
-        ok = false
-      }
-      ta.remove()
-      return ok
+      ok = false
     }
+    ta.remove()
+    return ok
   }
-  void copy()
-  return id
 }
 
 /** 模型上下文窗口（token）：来自服务端快照/session.list（0=未知/未配置）。 */

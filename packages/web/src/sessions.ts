@@ -4,6 +4,7 @@ import {
   aside,
   autoNamed,
   client,
+  copyTextToClipboard,
   el,
   focusInput,
   getCurrentSession,
@@ -24,7 +25,6 @@ import {
   sidebarToggle,
   todoState,
   updateTitle,
-  copySessionId,
   saveDraft,
   getDraft,
   clearDraft,
@@ -623,6 +623,8 @@ function openSessionMenu(e: MouseEvent, s: SessionInfo, li: HTMLElement): void {
     items.push({ label: "选中", action: () => { enterBatch(); toggleSelect(s.id, li) } })
   }
   items.push(
+    // 复制会话 ID（定位问题/反馈用）：任意条目可复制，不限于当前会话
+    { label: "复制会话 ID", action: () => { void copyTextToClipboard(s.id).then((ok) => toast(ok ? `已复制会话 ID: ${s.id}` : "复制失败", ok ? "ok" : "error")) } },
     { label: "重命名", action: () => startRename(s, li.querySelector<HTMLElement>(".session-name")!) },
     { label: "删除", danger: true, action: () => showDeleteConfirm(s.id, s.name) },
   )
@@ -849,11 +851,6 @@ export function bindSessionActions() {
     }
   }
   sidebarToggle.onclick = toggleSidebar
-  // 会话 ID 徽标：点击复制完整 ID（定位问题/反馈用）
-  document.getElementById("header-session-id")?.addEventListener("click", () => {
-    const id = copySessionId()
-    if (id) toast(`已复制会话 ID: ${id}`, "ok")
-  })
   // Ctrl+B 快捷键切换会话列表（拦截浏览器默认书签行为；任意焦点状态可用）
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {

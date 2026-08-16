@@ -407,6 +407,23 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
   }
 }
 
+/** 空闲超时兜底（无数据视为挂起的判定窗口，毫秒）：高于服务端 LLM 读空闲超时（120s）——
+ *  模型调用假死先由服务端超时上报明确错误（「模型接口读超时」），前端看门狗只兜底
+ *  服务端也检测不到的挂起；此前 60s 先于服务端超时静默取消，慢模型（长思考无流式输出）
+ *  被误杀且用户看不到任何原因。 */
+const IDLE_TIMEOUT_MS = 150_000
+
+/** 任务无任何可见输出时的收尾说明气泡（静默结束兜底：用户始终能看到「为什么没有回复」）。 */
+function appendFinalNotice(sessionId: string, text: string): void {
+  if (getCurrentSession()?.id !== sessionId) return
+  const wrapper = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() })
+  const bubble = wrapper.querySelector<HTMLElement>(".msg-body .bubble")
+  if (bubble) {
+    bubble.appendChild(blockText(text))
+    addMetaActions(wrapper.querySelector<HTMLElement>(".msg-meta") ?? wrapper, wrapper, bubble, { role: "assistant", content: text, id: uuid() })
+  }
+}
+
 /**
  * 运行一个任务流并渲染（直接发送与排队输入自动执行共用）：
  * 建立运行态与空闲看门狗，迭代 ChatChunk 流式渲染，收尾统一清理（运行态/审批卡/配对/焦点），
@@ -419,10 +436,12 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
   syncConnThinking() // 运行开始：信号灯闪烁
   syncSendButton() // 不禁用按钮：运行中点击 = 停止（stopping 拦截）
   const source = makeSource(run)
-  // 空闲超时兜底：流 60s 无任何数据视为挂起（服务端/网络异常），中断并清理，防止运行态/信号灯残留；
-  // 交互等待（选择/填值/画图/捕获）由 touchRunActivity 刷新活跃时间，等待用户回应的挂起不算无数据
+  // 空闲超时兜底：流 IDLE_TIMEOUT_MS 无任何数据视为挂起（服务端/网络异常），中断并清理，
+  // 防止运行态/信号灯残留；交互等待（选择/填值/画图/捕获）由 touchRunActivity 刷新活跃时间，
+  // 等待用户回应的挂起不算无数据
   const idleTimer = setInterval(() => {
-    if (Date.now() - run.lastActivity > 60_000 && !run.abort.signal.aborted) {
+    if (Date.now() - run.lastActivity > IDLE_TIMEOUT_MS && !run.abort.signal.aborted) {
+      run.idleTimedOut = true // 标记：收尾时给出显式提示（此前静默取消，用户无从得知原因）
       run.abort.abort()
       void client.cancelTask(sessionId).catch(() => {})
     }
@@ -433,8 +452,14 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
     for await (const chunk of source) {
       run.lastActivity = Date.now()
       if (chunk.kind === "error") {
-        // 任务被取消（手动停止 / 审批拒绝 / 中断插入）：静默收尾，不渲染错误气泡
-        if (chunk.error === "cancelled") return
+        if (chunk.error === "cancelled") {
+          // 任务被取消：手动停止/审批拒绝/中断插入为有意为之，静默收尾；
+          // 空闲超时兜底的取消非用户意图且无任何输出时，给出显式说明（有输出则保留内容静默）
+          if (run.idleTimedOut && !run.el?.isConnected && !run.reasoningEl?.isConnected && !run.acc.trim()) {
+            appendFinalNotice(sessionId, "生成超时：长时间未收到数据（模型响应过慢或连接中断），任务已中止。请重试或检查网络/模型配置。")
+          }
+          return
+        }
         // 服务端任务失败（LLM 接口错误等）：与 catch 分支一致渲染错误气泡
         throw new Error(chunk.error || "任务失败")
       }
@@ -447,6 +472,9 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
       run.el.classList.remove("streaming")
       const bubble = run.el.querySelector<HTMLElement>(".msg-body .bubble")
       if (bubble) addMetaActions(run.el.querySelector<HTMLElement>(".msg-meta") ?? run.el, run.el, bubble, { role: "assistant", content: run.acc, id: run.messageId })
+    } else if (!run.reasoningEl?.isConnected && !run.acc.trim() && !run.reasoningAcc.trim()) {
+      // 任务正常结束却无任何可见输出（接口返回空回复等异常形态）：显式提示，不留「无声无息就结束」的悬念
+      appendFinalNotice(sessionId, "任务已结束，但没有收到任何回复内容。请重试；若反复出现请检查模型配置。")
     }
   } catch (err) {
     clearStreamRender(run) // 错误路径：作废低性能节流排期（防补渲覆盖错误气泡）
@@ -462,6 +490,10 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
           addMetaActions(run.el.querySelector<HTMLElement>(".msg-meta") ?? run.el, run.el, bubble, { role: "assistant", content: run.acc || msg, id: run.messageId })
         }
       }
+    } else {
+      // 无任何输出即失败（首条内容到达前的接口错误/断连）：此前静默结束，补渲染错误气泡说明原因
+      const msg = run.abort.signal.aborted ? "生成超时，请重试" : `错误: ${(err as Error).message}`
+      appendFinalNotice(sessionId, msg)
     }
   } finally {
     clearInterval(idleTimer) // 空闲超时兜底定时器随流结束清理

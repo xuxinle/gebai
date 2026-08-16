@@ -511,11 +511,12 @@ header {
   z-index: 30;
   position: relative;
 }
-/* 标题栏居中显示当前会话标题：flex:1 占满中间区域（文本居中），与右侧上下文占比互不重叠 */
+/* 标题栏居中显示当前会话标题：绝对居中（left 50% + 反向位移），不受左右元素（信号灯/上下文占比）宽度影响 */
 .header-title {
-  flex: 1;
-  min-width: 0;
-  text-align: center;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 40%;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
@@ -693,20 +694,22 @@ aside {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden; /* 横向永不滚动：长会话名靠 ellipsis 截断，水平滚动条无用途 */
-  scrollbar-width: none; /* Firefox：静止时滚动条零宽（不占位不留空白），hover/滑动时显示 */
+  /* 滚动条占位恒定（scrollbar-gutter: stable + 恒定宽度 + 透明 thumb）：条目宽度不随 hover 伸缩。
+     此前 hover 时 margin 补偿（12→4px）依赖滚动条真实占位，覆盖式滚动条（Windows Chrome/WebView）
+     下占位为 0——条目 hover 无端变长 8px、离开又缩回 */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin; /* Firefox：恒定 thin 占位（静止透明、不可见） */
+  scrollbar-color: transparent transparent;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-/* 滚动条自动隐藏：hover 列表或滑动中（.scrolling 由 sessions.ts 的 scroll 事件维护）才出现 */
+/* 滚动条自动显色：hover 列表或滑动中（.scrolling 由 sessions.ts 的 scroll 事件维护）才可见 */
 #session-list:hover,
 #session-list.scrolling {
-  scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
 }
-#session-list::-webkit-scrollbar { width: 0; height: 0; }
-#session-list:hover::-webkit-scrollbar,
-#session-list.scrolling::-webkit-scrollbar { width: 8px; height: 8px; }
+#session-list::-webkit-scrollbar { width: 8px; height: 8px; }
 #session-list::-webkit-scrollbar-thumb { background: transparent; border: 0; }
 #session-list:hover::-webkit-scrollbar-thumb,
 #session-list.scrolling::-webkit-scrollbar-thumb {
@@ -725,14 +728,12 @@ aside {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  margin-right: 12px; /* 与左侧 aside padding 12px 对称；hover/滑动时滚动条占位 8px + margin 4px = 12px，位置恒定 */
+  margin-right: 4px; /* 8px 滚动条恒定占位 + 4px = 12px 与左侧 aside padding 对称；占位恒定故宽度稳定 */
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: 1px solid transparent;
   transition: background var(--transition), border-color var(--transition);
 }
-#session-list:hover li,
-#session-list.scrolling li { margin-right: 4px; } /* 滚动条占位 8px，合计仍 12px 与左对称 */
 /* 侧栏底部按钮区：低频操作按钮（小工具/导出/压缩/自动审批/主题/设置/登出）
  * 从标题栏移入，窄栏时自动换行 */
 .session-bottom {
@@ -811,6 +812,7 @@ aside {
 /* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：上行数字 + 下行进度条，比例分级着色 */
 #header-ctx {
   flex: none;
+  margin-left: auto; /* 靠右端（标题已绝对居中，不再有 flex:1 占位元素推挤） */
   display: inline-flex;
   flex-direction: column;
   align-items: flex-end;
@@ -1086,23 +1088,4 @@ html[data-low-power="on"] #conn.thinking:not(.bad)::before {
 html[data-low-power="on"] .msg {
   content-visibility: auto;
   contain-intrinsic-size: auto 320px;
-}
-
-/* 会话 ID 徽标（标题栏，定位/反馈问题用）：等宽小字，点击复制完整 ID */
-.header-session-id {
-  flex: none;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  color: var(--text-dim, #888);
-  background: transparent;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  padding: 1px 6px;
-  cursor: copy;
-  opacity: 0.75;
-}
-.header-session-id:hover {
-  opacity: 1;
-  color: var(--accent);
-  border-color: var(--accent);
 }
