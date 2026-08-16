@@ -1,3 +1,62 @@
+/* ---------- 标题栏按钮轮盘 ----------
+   容器 = hover 保持区（fixed，覆盖整个扇形，顶部贴标题栏下沿）；
+   扇形按钮 fixed 定位于圆心（JS 按入口按钮 rect 计算），transform translate 到弧位；
+   收起态 visibility hidden + pointer-events none，展开态由 .open 切换 */
+.wheel {
+  position: fixed;
+  z-index: 25; /* 低于 header(30)：扇形顶部与标题栏重叠区域由 header 覆盖 */
+  visibility: hidden;
+  pointer-events: none;
+}
+.wheel.open { visibility: visible; pointer-events: auto; }
+.wheel svg { position: fixed; pointer-events: none; }
+.wheel svg path { fill: none; stroke: var(--border); stroke-width: 1; }
+/* 扇形按钮：双背景垫实——::before 与本体各铺一层 --bg-elev-2，半透明主题（acrylic 0.78）双层叠加
+   达 ~95% 不透明，不透明主题本就实心；所有主题下按钮表面均接近实色、图标清晰。
+   选择器用 .wheel button.icon-btn（0,2,1）压过各主题的 [data-theme] .icon-btn（0,2,0）覆盖 */
+.wheel button.icon-btn {
+  position: fixed;
+  transform: translate(0, 0) scale(0.4);
+  opacity: 0;
+  background: var(--bg-elev-2);
+  border: 1px solid color-mix(in srgb, var(--text) 24%, transparent);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  transition: transform 140ms ease-out, opacity 110ms ease-out, background var(--transition), color var(--transition), border-color var(--transition);
+}
+.wheel button.icon-btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--bg-elev-2);
+  z-index: -1;
+}
+.wheel button.icon-btn:hover {
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--text);
+}
+.wheel button.icon-btn:hover::before {
+  background: var(--bg-hover);
+}
+/* 内弧（会话操作组）分区底色 */
+.wheel button.icon-btn.wheel-inner {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev-2));
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.wheel button.icon-btn.wheel-inner::before {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev-2));
+}
+.wheel button.icon-btn.wheel-inner:hover {
+  background: color-mix(in srgb, var(--accent) 24%, var(--bg-elev-2));
+  color: var(--accent);
+}
+.wheel button.icon-btn.wheel-inner:hover::before {
+  background: color-mix(in srgb, var(--accent) 24%, var(--bg-elev-2));
+}
+
 /* ---------- 主题切换面板 ----------
    关键：position: fixed（脱离 header），top 用 viewport 坐标计算，
    这样 max-height 才跟 top 起点对齐 —— 9 套主题也不会溢出屏幕 */

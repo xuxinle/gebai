@@ -69,6 +69,7 @@
         <div id="conn" class="conn"></div>
         <span id="header-title" class="header-title"></span>
         <div id="header-ctx" hidden><span class="ctx-text"></span><span class="ctx-meta"><span class="ctx-bar"><span class="ctx-fill"></span></span></span></div>
+        <button id="wheel-btn" class="icon-btn" aria-label="快捷操作" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg></button>
       </header>
       <aside id="sessions">
         <div class="session-top">
@@ -84,11 +85,11 @@
           <button id="batch-cancel" class="batch-cancel">取消</button>
         </div>
         <ul id="session-list"></ul>
-        <div class="session-bottom">
+        <!-- 轮盘按钮源容器：8 个低频操作按钮由 wheel.ts 移入标题栏轮盘（main.ts 顶层有元素绑定，须保持元素存在） -->
+        <div id="wheel-source" hidden>
           <button id="mini-tools-btn" class="icon-btn" data-tip="小工具" aria-label="HTML 小工具"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg></button>
           <button id="export-btn" class="icon-btn" data-tip="导出会话" aria-label="导出会话"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg></button>
           <button id="compact-btn" class="icon-btn" data-tip="压缩上下文" aria-label="压缩上下文"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg></button>
-          <span class="hdivider" aria-hidden="true"></span>
           <button id="approval-skip" class="icon-btn" data-tip="自动审批" aria-label="切换自动审批"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M13 2L4.5 13H11l-1 9 8.5-11H12l1-9z"/></svg></button>
           <button id="minimal-mode" class="icon-btn" data-tip="极简模式" aria-label="切换极简模式"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></button>
           <button id="theme-btn" class="icon-btn" data-tip="主题" aria-label="切换 UI 风格" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.19-4.03-8-9-8zm-5.5 9C5.67 12 5 11.33 5 10.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12zm3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5 11 5.67 11 6.5 10.33 8 9.5 8zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5 16 5.67 16 6.5 15.33 8 14.5 8zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9 19 9.67 19 10.5 18.33 12 17.5 12z"/></svg></button>

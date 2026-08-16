@@ -573,8 +573,6 @@ header {
   animation: conn-thinking 0.25s ease-in-out infinite;
 }
 .conn.bad { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
-/* 侧栏底部按钮区分隔线（两组按钮之间） */
-.hdivider { width: 1px; height: 18px; background: var(--border); margin: 0 2px; flex: none; }
 
 .icon-btn {
   background: none;
@@ -730,17 +728,6 @@ aside {
   border: 1px solid transparent;
   transition: background var(--transition), border-color var(--transition);
 }
-/* 侧栏底部按钮区：低频操作按钮（小工具/导出/压缩/自动审批/主题/设置/登出）
- * 从标题栏移入，窄栏时自动换行 */
-.session-bottom {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-}
 #session-list li:hover { background: var(--bg-hover); }
 #session-list li.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 /* 批量模式：选中行高亮（比当前会话 active 弱一档，避免混淆） */
@@ -820,6 +807,8 @@ aside {
   white-space: nowrap;
 }
 #header-ctx[hidden] { display: none; }
+/* 轮盘入口按钮：自身靠右（上下文占比隐藏时不被 flex 布局拉回左侧） */
+#wheel-btn { margin-left: auto; }
 #header-ctx .ctx-meta {
   display: inline-flex;
   align-items: center;

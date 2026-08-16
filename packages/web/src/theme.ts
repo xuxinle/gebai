@@ -416,10 +416,12 @@ export function bindThemePop() {
     themePop.hidden = !themePop.hidden
     themeBtn.setAttribute("aria-expanded", String(!themePop.hidden))
     if (!themePop.hidden) {
-      // 面板跟随按钮弹出（按钮位于侧栏底部，固定右上角会离按钮太远）：
+      // 面板跟随按钮弹出（按钮可能位于标题栏轮盘等右侧位置）：
+      // 面板右缘对齐按钮右缘并钳制在视口内（左对齐会让 252px 面板右侧出界）；
       // 按钮下方空间足够则向下展开，否则向上展开
       const r = themeBtn.getBoundingClientRect()
-      themePop.style.left = `${r.left}px`
+      const w = themePop.offsetWidth
+      themePop.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`
       themePop.style.right = "auto"
       const spaceBelow = window.innerHeight - r.bottom
       if (spaceBelow >= 300) {
