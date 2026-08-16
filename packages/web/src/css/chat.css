@@ -337,6 +337,21 @@
 .todo-body { min-width: 0; flex: 1; }
 .todo-title { font-family: var(--font-ui); font-size: 13px; color: var(--text); line-height: 1.5; }
 .todo-meta { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
+/* 折叠行：过长清单中隐藏的已完成待办收敛为可点击展开/收起的按钮 */
+.todo-collapse {
+  display: block;
+  margin: 3px 0;
+  padding: 3px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font-size: 12px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+.todo-collapse:hover { color: var(--accent); border-color: var(--accent); }
 
 /* 选择卡片 */
 .choice-opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }

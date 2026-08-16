@@ -303,23 +303,75 @@ function toolBubble(content: string): HTMLElement {
   return bubble
 }
 
-/** 待办卡片：清单形式（状态图标 + 标题 + 元信息）。 */
+/** 待办折叠：清单超过阈值时隐藏较早的已完成项（保留最近 KEEP 项完成作上下文），未完成项始终可见。 */
+const TODO_COLLAPSE_THRESHOLD = 8
+const TODO_KEEP_COMPLETED = 3
+
+/** 待办行：状态图标 + 标题 + 元信息。 */
+function todoRow(t: TodoItem): HTMLElement {
+  const row = el("div", "todo-item")
+  const ico = t.status === "completed" ? "✅" : t.status === "in_progress" ? "🔄" : t.status === "failed" ? "❌" : t.status === "cancelled" ? "🚫" : "⬜"
+  row.appendChild(el("span", "todo-ico", ico))
+  const body = el("div", "todo-body")
+  body.appendChild(el("div", "todo-title", t.title))
+  const meta = [t.status, t.priority, t.progress != null ? `${t.progress}%` : undefined, t.note].filter(Boolean).join(" · ")
+  if (meta) body.appendChild(el("div", "todo-meta", meta))
+  row.appendChild(body)
+  return row
+}
+
+/** 折叠切换行（隐藏段收敛为一行按钮，点击展开/收起）。 */
+function todoToggleRow(text: string, onClick: () => void): HTMLButtonElement {
+  const btn = el("button", "todo-collapse", text)
+  btn.onclick = onClick
+  return btn
+}
+
+/** 待办卡片：清单形式（状态图标 + 标题 + 元信息）。清单过长时折叠较早的已完成项，点击折叠行展开、展开后可收起。 */
 export function todoBubble(todos: TodoItem[]): HTMLElement {
   const bubble = el("div", "bubble")
-  const head = el("div", "tool-head", "📋 待办清单")
-  bubble.appendChild(head)
-  if (!todos.length) bubble.appendChild(el("div", "block-text", "（暂无待办）"))
-  for (const t of todos) {
-    const row = el("div", "todo-item")
-    const ico = t.status === "completed" ? "✅" : t.status === "in_progress" ? "🔄" : t.status === "failed" ? "❌" : t.status === "cancelled" ? "🚫" : "⬜"
-    row.appendChild(el("span", "todo-ico", ico))
-    const body = el("div", "todo-body")
-    body.appendChild(el("div", "todo-title", t.title))
-    const meta = [t.status, t.priority, t.progress != null ? `${t.progress}%` : undefined, t.note].filter(Boolean).join(" · ")
-    if (meta) body.appendChild(el("div", "todo-meta", meta))
-    row.appendChild(body)
-    bubble.appendChild(row)
+  bubble.appendChild(el("div", "tool-head", "📋 待办清单"))
+  const list = el("div", "todo-list")
+  bubble.appendChild(list)
+  let expanded = false
+  const render = () => {
+    list.textContent = ""
+    if (!todos.length) {
+      list.appendChild(el("div", "block-text", "（暂无待办）"))
+      return
+    }
+    const completedIdx: number[] = []
+    todos.forEach((t, i) => {
+      if (t.status === "completed") completedIdx.push(i)
+    })
+    const collapsible = todos.length > TODO_COLLAPSE_THRESHOLD && completedIdx.length > TODO_KEEP_COMPLETED
+    const hidden = new Set<number>()
+    if (collapsible && !expanded) {
+      for (const i of completedIdx.slice(0, completedIdx.length - TODO_KEEP_COMPLETED)) hidden.add(i)
+    }
+    let run = 0
+    todos.forEach((t, i) => {
+      if (hidden.has(i)) {
+        run++
+        if (!hidden.has(i + 1)) {
+          list.appendChild(todoToggleRow(`⋯ 已折叠 ${run} 项已完成 · 点击展开`, () => {
+            expanded = true
+            render()
+          }))
+          run = 0
+        }
+        return
+      }
+      list.appendChild(todoRow(t))
+    })
+    if (expanded && collapsible) {
+      list.appendChild(todoToggleRow("收起已完成待办", () => {
+        expanded = false
+        render()
+      }))
+    }
   }
+  render()
   return bubble
 }
 
