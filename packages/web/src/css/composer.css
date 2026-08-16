@@ -229,3 +229,98 @@
   color: var(--text);
 }
 
+
+/* ---------- 会话输入队列（运行中排队条） ---------- */
+#queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 clamp(16px, 4vw, 48px) 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+#queue[hidden] { display: none; }
+.queue-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.queue-head .queue-title { font-weight: 600; }
+.queue-head .queue-hint { color: var(--text-faint); font-size: 11px; }
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px 8px 6px 10px;
+  animation: approval-in 0.2s ease;
+}
+.queue-ord {
+  flex: none;
+  min-width: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.queue-files { margin-left: 6px; color: var(--text-faint); font-size: 12px; }
+.queue-actions { display: flex; gap: 4px; flex: none; }
+.queue-act {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.queue-act:hover { background: var(--bg-hover); color: var(--accent); }
+.queue-act.queue-del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.queue-editor { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.queue-editor textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 160px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 6px 8px;
+}
+.queue-editor textarea:focus { outline: none; border-color: var(--accent); }
+.queue-editor-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.queue-editor-actions button {
+  padding: 3px 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.queue-editor-actions .queue-save { background: var(--accent); color: var(--on-accent); }
+.queue-editor-actions .queue-cancel { background: var(--bg-hover); color: var(--text-muted); }

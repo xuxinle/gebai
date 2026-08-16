@@ -1,19 +1,34 @@
-import { attachBtn, client, composer, fileInput, focusInput, getCurrentSession, input, msgEl, runs, sendBtn } from "./state"
+import { attachBtn, client, composer, fileInput, focusInput, getCurrentSession, input, msgEl, pendingFiles, runs, sendBtn } from "./state"
 import { addPendingFiles } from "./attachments"
 import { tip } from "./ui"
 
 /* ---------- 发送/停止按钮 ---------- */
 
 /**
- * 同步发送/停止按钮状态：由「当前显示的会话是否在运行」决定（多会话后台运行时，
+ * 同步发送/停止按钮状态（由「当前显示的会话是否在运行」决定；多会话后台运行时，
  * 每个会话结束只应影响自己——按钮跟随当前会话，而非全局运行状态）。
+ * 运行中且有草稿：发送箭头（提交 = 排队，Ctrl+Enter = 中断插入）；运行中无草稿：停止方块（点击 = 停止）。
  * 图标显隐由 CSS class 控制（#send.stopping 切换 .ic-send/.ic-stop 的 display）。
  */
 export function syncSendButton() {
   const cur = getCurrentSession()
   const running = !!cur && runs.has(cur.id)
-  sendBtn.classList.toggle("stopping", running)
-  tip(sendBtn, running ? "停止回答" : "发送")
+  const hasDraft = !!input.value.trim() || pendingFiles.length > 0
+  sendBtn.classList.toggle("stopping", running && !hasDraft)
+  tip(sendBtn, running ? (hasDraft ? "排队发送（Ctrl+Enter 中断插入）" : "停止回答") : "发送")
+}
+
+/** 下次提交为「中断插入」（Ctrl+Enter）：运行中取消当前任务循环后立即执行本条；空闲等同普通发送。 */
+let interruptNext = false
+export function requestInterruptSubmit(): void {
+  interruptNext = true
+  composer.requestSubmit()
+}
+/** 读取并清除中断插入标记（submit 处理器消费）。 */
+export function takeInterruptNext(): boolean {
+  const v = interruptNext
+  interruptNext = false
+  return v
 }
 
 export function bindComposer() {
@@ -121,9 +136,18 @@ export function autosize() {
 }
 
 export function bindInputBehavior() {
-  input.addEventListener("input", autosize)
+  input.addEventListener("input", () => {
+    autosize()
+    syncSendButton() // 草稿有无影响运行中按钮形态（排队发送 ↔ 停止）
+  })
 
   input.addEventListener("keydown", (e) => {
+    // Ctrl+Enter = 中断插入提交（运行中取消当前循环后立即执行；空闲等同普通发送）
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+      e.preventDefault()
+      requestInterruptSubmit()
+      return
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault()
       composer.requestSubmit()

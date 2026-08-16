@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ContentBlock, DiagramFormat, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
+import type { ChatChunk, ContentBlock, DiagramFormat, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
@@ -7,7 +7,7 @@ import "./css/overlays.css"
 import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
 import { capturePage } from "./capture"
 import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
-import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton } from "./composer"
+import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
 import { loadLocalEnv } from "./env-local"
@@ -40,6 +40,7 @@ import { isBlockOnly, loadToolCardMeta, shortToolName } from "./tool-cards"
 import { lockToBottom, noteIncoming, refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
 import { scrollReasoningSticky } from "./reasoning-scroll"
 import { bindMsgNav } from "./msg-nav"
+import { drainQueue, enqueueFront, enqueueInput, setQueueExecutor, type QueuedInput } from "./queue"
 import {
   client,
   compactBtn,
@@ -253,57 +254,171 @@ function onMessageCompact(ev: { sessionId: string; count: number; summary: strin
   appendCompactNotice(`已压缩 ${count} 条历史消息`, String(ev.summary ?? ""))
 }
 
-composer.addEventListener("submit", async (e) => {
-  e.preventDefault()
-  const cur = getCurrentSession()
-  // 运行中提交（Enter）= 停止：与「停止」按钮语义一致，防同会话双流并发写同一 RunState；
-  // 空输入 Enter 仅忽略（不取消任务，避免误触停止）
-  if (cur && runs.has(cur.id)) {
-    if (input.value.trim() || pendingFiles.length) void client.cancelTask(cur.id).catch(() => {})
+/** 单个流式 chunk 的渲染处理（直接发送与排队输入自动执行共用的流式渲染管道）。 */
+function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): void {
+  if (chunk.kind === "resume") {
+    // 断线重连后的全量重同步：重置本轮回累积并重建消息元素，防止内容重复渲染
+    run.acc = ""
+    run.reasoningAcc = ""
+    run.messageId = ""
+    run.lastTextKind = undefined
+    run.lastTextMsgId = undefined
+    run.sessionRuns = undefined // 新会话容器随消息元素一并重建（服务端每轮重推 start，容器会重新创建）
+    if (run.el) {
+      run.el.classList.remove("streaming")
+      run.el.remove()
+    }
+    run.el = null
+    run.reasoningEl = null
     return
   }
-  const text = input.value.trim()
-  if (!text && pendingFiles.length === 0) return
-  let sessionId: string
-  if (cur) {
-    sessionId = cur.id
-  } else {
-    // 草稿态（空白页）：首条消息发送时才创建会话（新会话懒创建，避免落盘空会话）
-    let s
-    try {
-      s = await client.createSession()
-    } catch (err) {
-      setConn(`创建会话失败: ${(err as Error).message}`, false)
+  if (chunk.kind === "text") {
+    if (chunk.messageId) run.messageId = chunk.messageId
+    const runId = chunk.sessionRunId
+    if (runId) {
+      // 新会话执行过程文本：渲染进该 run 的折叠容器（执行中展开，与主回复同流显示）
+      const sub = run.sessionRuns?.get(runId)
+      if (!sub) return // 容器从未创建（切走期间未渲染）：由 loadMessages 兜底
+      // 切走/重载中（容器脱离 DOM）：先累积文本（切回由 loadMessages 恢复渲染），与主循环累积语义一致
+      if (!sub.container.isConnected) {
+        sub.acc += chunk.text ?? ""
+        return
+      }
+      // 新会话新一轮回复（messageId 变化）：封存上一段
+      if (chunk.messageId && sub.messageId && chunk.messageId !== sub.messageId) sealSessionSegment(sub)
+      if (chunk.messageId) sub.messageId = chunk.messageId
+      sub.acc += chunk.text ?? ""
+      // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
+      if (!sub.acc.trim()) return
+      if (!sub.el?.isConnected) {
+        sub.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, sub.body)
+      }
+      scheduleSessionRender(sub)
       return
     }
-    setCurrentSession(s)
-    sessionId = s.id
-    void refreshSessions() // 列表即时出现新会话（不阻塞发送）
+    // 新会话输出与主回复分段（换行分隔）：来源切换（主↔新会话）或
+    // 新会话新一轮回复（messageId 变化）时封存当前文本段，避免内容一直追加成同一条
+    const isSub = chunk.session === true
+    if (run.lastTextKind !== undefined) {
+      const kindChanged = run.lastTextKind !== (isSub ? "sub" : "main")
+      const subRoundChanged = isSub && !!run.lastTextMsgId && !!chunk.messageId && run.lastTextMsgId !== chunk.messageId
+      if (kindChanged || subRoundChanged) sealSegment(sessionId)
+    }
+    run.lastTextKind = isSub ? "sub" : "main"
+    if (chunk.messageId) run.lastTextMsgId = chunk.messageId
+    run.acc += chunk.text ?? ""
+    // 推理完成、正文开始：自动折叠推理块（用户可点 summary 重新展开）
+    if (run.reasoningEl?.isConnected && (run.reasoningEl as HTMLDetailsElement).open) (run.reasoningEl as HTMLDetailsElement).open = false
+    // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
+    if (!run.acc.trim()) return
+    // 会话守卫：切到其他会话时只累积不触碰 DOM（切回时由 loadMessages 从 run.acc 恢复渲染）
+    if (getCurrentSession()?.id !== sessionId) return
+    // 工具调用已封段后（run.el 为 null）或元素脱离 DOM：惰性重建消息元素
+    if (!run.el?.isConnected) {
+      run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+    }
+    scheduleStreamRender(run)
+  } else if (chunk.kind === "reasoning") {
+    const runId = chunk.sessionRunId
+    if (runId) {
+      // 新会话执行过程推理：渲染进容器内气泡（与主循环同构的折叠推理块）
+      const sub = run.sessionRuns?.get(runId)
+      if (!sub) return
+      if (!sub.container.isConnected) {
+        // 切走/重载中：只累积推理（切回由 loadMessages 恢复），与主循环累积语义一致
+        sub.reasoningAcc += chunk.text ?? ""
+        return
+      }
+      sub.reasoningAcc += chunk.text ?? ""
+      if (!sub.reasoningAcc.trim()) return
+      if (!sub.el?.isConnected) {
+        sub.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, sub.body)
+      }
+      const bubble = sub.el.querySelector(".msg-body .bubble")
+      if (bubble && sub.el.isConnected) {
+        if (!sub.reasoningEl?.isConnected) {
+          sub.reasoningEl = reasoningBlock()
+          bubble.prepend(sub.reasoningEl)
+        }
+        scheduleSessionRender(sub)
+        scrollIfSticky()
+        refreshJumpBottom()
+      }
+      return
+    }
+    run.reasoningAcc += chunk.text ?? ""
+    // 空白推理内容不展示（不创建折叠块）
+    if (!run.reasoningAcc.trim()) return
+    // 会话守卫：切走时只累积（推理内容不持久化，切回由正文恢复；再流式时重建折叠块）
+    if (getCurrentSession()?.id !== sessionId) return
+    if (!run.el?.isConnected) {
+      run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+    }
+    const bubble = run.el.querySelector(".msg-body .bubble")
+    if (bubble && run.el.isConnected) {
+      if (!run.reasoningEl?.isConnected) {
+        run.reasoningEl = reasoningBlock()
+        bubble.prepend(run.reasoningEl)
+      }
+      // 推理内容 markdown 渲染：与正文同走 120ms 尾沿节流渲染路径
+      scheduleStreamRender(run)
+      if (getCurrentSession()?.id === sessionId) {
+        scrollIfSticky()
+        refreshJumpBottom()
+      }
+    }
+  } else if (chunk.kind === "session_start") {
+    // 新会话 run 开始：创建折叠容器（执行中展开并滚动到可见；服务端每轮重推同 runId start，已存在则忽略）
+    const runId = chunk.sessionRunId ?? ""
+    if (!runId || getCurrentSession()?.id !== sessionId) return
+    sealSegment(sessionId) // 新会话开始：主文本段在此分段
+    run.sessionRuns ??= new Map()
+    if (run.sessionRuns.get(runId)?.container.isConnected) return
+    const box = sessionRunBox({ runId, agents: chunk.sessionMeta?.agents ?? [], input: chunk.sessionMeta?.input ?? "" })
+    run.sessionRuns.set(runId, {
+      runId,
+      agents: chunk.sessionMeta?.agents ?? [],
+      input: chunk.sessionMeta?.input ?? "",
+      container: box.container,
+      body: box.body,
+      outputEl: box.outputEl,
+      acc: "",
+      el: null,
+      messageId: "",
+      reasoningAcc: "",
+      reasoningEl: null,
+    })
+    scrollIfSticky()
+    refreshJumpBottom()
+  } else if (chunk.kind === "session_done") {
+    // 新会话 run 结束：封存流式文本段，写入最终返回摘要并自动折叠容器（只显示输入与最终返回）
+    const runId = chunk.sessionRunId ?? ""
+    const sub = run.sessionRuns?.get(runId)
+    if (sub) {
+      if (sub.el?.isConnected) {
+        sub.el.classList.remove("streaming")
+        const bubble = sub.el.querySelector<HTMLElement>(".msg-body .bubble")
+        if (bubble) addMetaActions(sub.el.querySelector<HTMLElement>(".msg-meta") ?? sub.el, sub.el, bubble, { role: "assistant", content: sub.acc, id: sub.messageId })
+      }
+      sealSessionSegment(sub)
+      finishSessionRun(sub.container, sub.outputEl, chunk.sessionMeta?.output ?? "")
+      run.sessionRuns?.delete(runId)
+    }
   }
-  // 自动审批开关同步会话 env：草稿首条消息创建的会话不经过 loadMessages（applyApprovalSkip 的既有同步点），
-  // 每次任务启动前幂等补齐——WS 同连接按序处理，env 写入先于任务请求落地（服务端进程重启丢内存 env 时同样恢复）
-  void applyApprovalSkip(sessionId)
-  input.value = ""
-  autosize()
-  hideEmptyState()
-  // 发送即锁定粘底：用户此前滚走阅读历史时，新消息自动恢复跟随滚动到底
-  lockToBottom()
-  // 用户消息 id 客户端生成并随请求携带（服务端采用同一 id 持久化），
-  // 撤回（truncate 按 id 精确匹配）与反馈定位才能对「当前会话刚发的消息」生效
-  const msgId = uuid()
-  if (text) {
-    appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
-    recordInput(sessionId, text)
-  }
-  const attachments = await sendPending(sessionId)
-  // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
-  const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
-  if (!prompt) return
-  // 不预创建空占位消息：空内容（无文本/推理）时不显示任何消息，首个实质内容到达时惰性创建
+}
+
+/**
+ * 运行一个任务流并渲染（直接发送与排队输入自动执行共用）：
+ * 建立运行态与空闲看门狗，迭代 ChatChunk 流式渲染，收尾统一清理（运行态/审批卡/配对/焦点），
+ * 收尾后自动发送下一条排队输入（会话输入队列）。
+ * makeSource 以运行态的 abort 信号构造流（信号由空闲超时兜底触发中止）。
+ */
+async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) => AsyncIterable<ChatChunk>): Promise<void> {
   const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), abort: new AbortController() }
   runs.set(sessionId, run)
   syncConnThinking() // 运行开始：信号灯闪烁
   syncSendButton() // 不禁用按钮：运行中点击 = 停止（stopping 拦截）
+  const source = makeSource(run)
   // 空闲超时兜底：流 60s 无任何数据视为挂起（服务端/网络异常），中断并清理，防止运行态/信号灯残留；
   // 交互等待（选择/填值/画图/捕获）由 touchRunActivity 刷新活跃时间，等待用户回应的挂起不算无数据
   const idleTimer = setInterval(() => {
@@ -315,164 +430,15 @@ composer.addEventListener("submit", async (e) => {
   try {
     // 文本/推理增量与审批/工具调用/结果等结构化事件统一走 WS（sendPrompt 内部订阅 event.*
     // 并转换为 ChatChunk）；WS 断开时迭代抛错（流中断），由 catch 分支渲染错误
-    // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
-    for await (const chunk of client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal })) {
+    for await (const chunk of source) {
       run.lastActivity = Date.now()
       if (chunk.kind === "error") {
-        // 任务被取消（手动停止 / 审批拒绝）：静默收尾，不渲染错误气泡
+        // 任务被取消（手动停止 / 审批拒绝 / 中断插入）：静默收尾，不渲染错误气泡
         if (chunk.error === "cancelled") return
         // 服务端任务失败（LLM 接口错误等）：与 catch 分支一致渲染错误气泡
         throw new Error(chunk.error || "任务失败")
       }
-      if (chunk.kind === "resume") {
-        // 断线重连后的全量重同步：重置本轮回累积并重建消息元素，防止内容重复渲染
-        run.acc = ""
-        run.reasoningAcc = ""
-        run.messageId = ""
-        run.lastTextKind = undefined
-        run.lastTextMsgId = undefined
-        run.sessionRuns = undefined // 新会话容器随消息元素一并重建（服务端每轮重推 start，容器会重新创建）
-        if (run.el) {
-          run.el.classList.remove("streaming")
-          run.el.remove()
-        }
-        run.el = null
-        run.reasoningEl = null
-        continue
-      }
-      if (chunk.kind === "text") {
-        if (chunk.messageId) run.messageId = chunk.messageId
-        const runId = chunk.sessionRunId
-        if (runId) {
-          // 新会话执行过程文本：渲染进该 run 的折叠容器（执行中展开，与主回复同流显示）
-          const sub = run.sessionRuns?.get(runId)
-          if (!sub) continue // 容器从未创建（切走期间未渲染）：由 loadMessages 兜底
-          // 切走/重载中（容器脱离 DOM）：先累积文本（切回由 loadMessages 恢复渲染），与主循环累积语义一致
-          if (!sub.container.isConnected) {
-            sub.acc += chunk.text ?? ""
-            continue
-          }
-          // 新会话新一轮回复（messageId 变化）：封存上一段
-          if (chunk.messageId && sub.messageId && chunk.messageId !== sub.messageId) sealSessionSegment(sub)
-          if (chunk.messageId) sub.messageId = chunk.messageId
-          sub.acc += chunk.text ?? ""
-          // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
-          if (!sub.acc.trim()) continue
-          if (!sub.el?.isConnected) {
-            sub.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, sub.body)
-          }
-          scheduleSessionRender(sub)
-          continue
-        }
-        // 新会话输出与主回复分段（换行分隔）：来源切换（主↔新会话）或
-        // 新会话新一轮回复（messageId 变化）时封存当前文本段，避免内容一直追加成同一条
-        const isSub = chunk.session === true
-        if (run.lastTextKind !== undefined) {
-          const kindChanged = run.lastTextKind !== (isSub ? "sub" : "main")
-          const subRoundChanged = isSub && !!run.lastTextMsgId && !!chunk.messageId && run.lastTextMsgId !== chunk.messageId
-          if (kindChanged || subRoundChanged) sealSegment(sessionId)
-        }
-        run.lastTextKind = isSub ? "sub" : "main"
-        if (chunk.messageId) run.lastTextMsgId = chunk.messageId
-        run.acc += chunk.text ?? ""
-        // 推理完成、正文开始：自动折叠推理块（用户可点 summary 重新展开）
-        if (run.reasoningEl?.isConnected && (run.reasoningEl as HTMLDetailsElement).open) (run.reasoningEl as HTMLDetailsElement).open = false
-        // 空白内容不渲染：工具调用之间的空文本段不产生空气泡
-        if (!run.acc.trim()) continue
-        // 会话守卫：切到其他会话时只累积不触碰 DOM（切回时由 loadMessages 从 run.acc 恢复渲染）
-        if (getCurrentSession()?.id !== sessionId) continue
-        // 工具调用已封段后（run.el 为 null）或元素脱离 DOM：惰性重建消息元素
-        if (!run.el?.isConnected) {
-          run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
-        }
-        scheduleStreamRender(run)
-      } else if (chunk.kind === "reasoning") {
-        const runId = chunk.sessionRunId
-        if (runId) {
-          // 新会话执行过程推理：渲染进容器内气泡（与主循环同构的折叠推理块）
-          const sub = run.sessionRuns?.get(runId)
-          if (!sub) continue
-          if (!sub.container.isConnected) {
-            // 切走/重载中：只累积推理（切回由 loadMessages 恢复），与主循环累积语义一致
-            sub.reasoningAcc += chunk.text ?? ""
-            continue
-          }
-          sub.reasoningAcc += chunk.text ?? ""
-          if (!sub.reasoningAcc.trim()) continue
-          if (!sub.el?.isConnected) {
-            sub.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, sub.body)
-          }
-          const bubble = sub.el.querySelector(".msg-body .bubble")
-          if (bubble && sub.el.isConnected) {
-            if (!sub.reasoningEl?.isConnected) {
-              sub.reasoningEl = reasoningBlock()
-              bubble.prepend(sub.reasoningEl)
-            }
-            scheduleSessionRender(sub)
-            scrollIfSticky()
-            refreshJumpBottom()
-          }
-          continue
-        }
-        run.reasoningAcc += chunk.text ?? ""
-        // 空白推理内容不展示（不创建折叠块）
-        if (!run.reasoningAcc.trim()) continue
-        // 会话守卫：切走时只累积（推理内容不持久化，切回由正文恢复；再流式时重建折叠块）
-        if (getCurrentSession()?.id !== sessionId) continue
-        if (!run.el?.isConnected) {
-          run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
-        }
-        const bubble = run.el.querySelector(".msg-body .bubble")
-        if (bubble && run.el.isConnected) {
-          if (!run.reasoningEl?.isConnected) {
-            run.reasoningEl = reasoningBlock()
-            bubble.prepend(run.reasoningEl)
-          }
-          // 推理内容 markdown 渲染：与正文同走 120ms 尾沿节流渲染路径
-          scheduleStreamRender(run)
-          if (getCurrentSession()?.id === sessionId) {
-            scrollIfSticky()
-            refreshJumpBottom()
-          }
-        }
-      } else if (chunk.kind === "session_start") {
-        // 新会话 run 开始：创建折叠容器（执行中展开并滚动到可见；服务端每轮重推同 runId start，已存在则忽略）
-        const runId = chunk.sessionRunId ?? ""
-        if (!runId || getCurrentSession()?.id !== sessionId) continue
-        sealSegment(sessionId) // 新会话开始：主文本段在此分段
-        run.sessionRuns ??= new Map()
-        if (run.sessionRuns.get(runId)?.container.isConnected) continue
-        const box = sessionRunBox({ runId, agents: chunk.sessionMeta?.agents ?? [], input: chunk.sessionMeta?.input ?? "" })
-        run.sessionRuns.set(runId, {
-          runId,
-          agents: chunk.sessionMeta?.agents ?? [],
-          input: chunk.sessionMeta?.input ?? "",
-          container: box.container,
-          body: box.body,
-          outputEl: box.outputEl,
-          acc: "",
-          el: null,
-          messageId: "",
-          reasoningAcc: "",
-          reasoningEl: null,
-        })
-        scrollIfSticky()
-        refreshJumpBottom()
-      } else if (chunk.kind === "session_done") {
-        // 新会话 run 结束：封存流式文本段，写入最终返回摘要并自动折叠容器（只显示输入与最终返回）
-        const runId = chunk.sessionRunId ?? ""
-        const sub = run.sessionRuns?.get(runId)
-        if (sub) {
-          if (sub.el?.isConnected) {
-            sub.el.classList.remove("streaming")
-            const bubble = sub.el.querySelector<HTMLElement>(".msg-body .bubble")
-            if (bubble) addMetaActions(sub.el.querySelector<HTMLElement>(".msg-meta") ?? sub.el, sub.el, bubble, { role: "assistant", content: sub.acc, id: sub.messageId })
-          }
-          sealSessionSegment(sub)
-          finishSessionRun(sub.container, sub.outputEl, chunk.sessionMeta?.output ?? "")
-          run.sessionRuns?.delete(runId)
-        }
-      }
+      applyStreamChunk(run, sessionId, chunk)
     }
     // 推理后无正文直接结束（如纯工具链）：兜底折叠推理块。
     // 不依赖 run.el 连接状态：最后一次工具调用封段后 run.el 为 null，但推理块仍在 DOM
@@ -512,9 +478,81 @@ composer.addEventListener("submit", async (e) => {
     syncConnThinking() // 运行结束：信号灯恢复常亮
     syncSendButton()
     void maybeAutoTitle(sessionId)
+    // 队列继续：任务收尾（完成/取消/出错）后自动发送下一条排队输入（运行中为空转）
+    drainQueue(sessionId)
     // 焦点守卫：仅当用户仍在发起会话（未切走）时恢复输入焦点，避免后台流结束抢走当前会话光标
     if (getCurrentSession()?.id === sessionId) focusInput()
   }
+}
+
+/** 排队输入执行器（队列消化入口，init 注册）：渲染用户消息（同直接发送）并走同一 sendPrompt 任务流。 */
+setQueueExecutor(async (sessionId, item: QueuedInput) => {
+  if (getCurrentSession()?.id === sessionId) {
+    lockToBottom() // 发送即锁定粘底（与直接发送一致）
+    appendMsg({ id: item.messageId, role: "user", content: item.text, attachments: item.files as Array<{ path: string; mime: string; name: string; size: number }>, createdAt: item.createdAt })
+    recordInput(sessionId, item.text)
+  }
+  // env：发送时点取浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
+  await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, item.text, { attachments: item.files, env: loadLocalEnv(), messageId: item.messageId, signal: run.abort.signal }))
+})
+
+composer.addEventListener("submit", async (e) => {
+  e.preventDefault()
+  const interrupt = takeInterruptNext() // Ctrl+Enter：中断插入（运行中取消当前循环后立即执行）
+  const cur = getCurrentSession()
+  const text = input.value.trim()
+  if (!text && pendingFiles.length === 0) return
+  let sessionId: string
+  if (cur) {
+    sessionId = cur.id
+  } else {
+    // 草稿态（空白页）：首条消息发送时才创建会话（新会话懒创建，避免落盘空会话堆积）
+    let s
+    try {
+      s = await client.createSession()
+    } catch (err) {
+      setConn(`创建会话失败: ${(err as Error).message}`, false)
+      return
+    }
+    setCurrentSession(s)
+    sessionId = s.id
+    void refreshSessions() // 列表即时出现新会话（不阻塞发送）
+  }
+  // 自动审批开关同步会话 env：草稿首条消息创建的会话不经过 loadMessages（applyApprovalSkip 的既有同步点），
+  // 每次任务启动前幂等补齐——WS 同连接按序处理，env 写入先于任务请求落地（服务端进程重启丢内存 env 时同样恢复）
+  void applyApprovalSkip(sessionId)
+  input.value = ""
+  autosize()
+  syncSendButton()
+  hideEmptyState()
+  // 发送即锁定粘底：用户此前滚走阅读历史时，新消息自动恢复跟随滚动到底
+  lockToBottom()
+  // 用户消息 id 客户端生成并随请求携带（服务端采用同一 id 持久化），
+  // 撤回（truncate 按 id 精确匹配）与反馈定位才能对「当前会话刚发的消息」生效
+  const msgId = uuid()
+  // 运行中：输入不进消息流，入本地会话输入队列（排队条呈现）——当前任务结束后自动按序发送；
+  // Ctrl+Enter（interrupt）插队首并取消当前循环，其收尾后立即执行
+  if (runs.has(sessionId)) {
+    const attachments = await sendPending(sessionId)
+    // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
+    const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
+    if (!prompt) return
+    const item: QueuedInput = { id: uuid(), text: prompt, files: attachments, messageId: msgId, createdAt: Date.now() }
+    if (interrupt) enqueueFront(sessionId, item)
+    else enqueueInput(sessionId, item)
+    recordInput(sessionId, prompt)
+    return
+  }
+  if (text) {
+    appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
+    recordInput(sessionId, text)
+  }
+  const attachments = await sendPending(sessionId)
+  // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
+  const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
+  if (!prompt) return
+  // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
+  await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal }))
 })
 
 /** 流式文本渲染：整段累积文本重新走 markdown 解析（低性能模式下节流合并，降频重解析）。

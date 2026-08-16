@@ -11,6 +11,7 @@ export const composer = document.getElementById("composer") as HTMLFormElement
 export const input = document.getElementById("input") as HTMLTextAreaElement
 export const connEl = document.getElementById("conn")!
 export const approvalsEl = document.getElementById("approvals")!
+export const queueEl = document.getElementById("queue")!
 export const newSessionBtn = document.getElementById("new-session") as HTMLButtonElement
 export const sidebarToggle = document.getElementById("sidebar-toggle")!
 export const aside = document.getElementById("sessions")!

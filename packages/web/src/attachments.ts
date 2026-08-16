@@ -1,6 +1,7 @@
 import { attachmentsEl, client, el, getCurrentSession, pendingFiles, pendingFilesBySession, setPendingFiles } from "./state"
 import { uuid } from "./uuid"
 import { appendMsg } from "./messages"
+import { syncSendButton } from "./composer"
 
 /* ---------- 附件 ---------- */
 
@@ -100,6 +101,8 @@ function renderAttachments() {
     chip.appendChild(rm)
     attachmentsEl.appendChild(chip)
   }
+  // 附件增减影响发送按钮形态（运行中有草稿=排队发送，无草稿=停止）
+  syncSendButton()
 }
 
 /** 附件列表重渲染（sessions 切换恢复时调用；当前会话的附件由本模块内部维护）。 */

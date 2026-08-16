@@ -39,6 +39,7 @@ import { confirmDialog, toast } from "./ui"
 import { renderShortcutButtons } from "./shortcuts"
 import { clearMsgNav, updateMsgNav } from "./msg-nav"
 import { renderAttachments } from "./attachments"
+import { clearQueue, renderQueue } from "./queue"
 
 export type LoadMessagesFn = (sessionId: string) => Promise<void>
 
@@ -546,10 +547,13 @@ function startRename(s: SessionInfo, nameEl: HTMLElement) {
 
 /** 删除会话后，若当前会话被删则切到剩余第一个，没有则进入空白草稿页。 */
 async function fallbackCurrentSession(deleted: Set<string>) {
+  // 被删会话的草稿/附件/滚动记忆/排队输入状态一并清理（防残留，含后台删除的会话）
+  for (const id of deleted) {
+    clearSessionViewState(id)
+    clearQueue(id)
+  }
   const cur = getCurrentSession()
   if (cur && !deleted.has(cur.id)) return
-  // 被删会话的草稿/附件/滚动记忆一并清理（防残留）
-  for (const id of deleted) clearSessionViewState(id)
   const remaining = (await client.listSessions()).filter((x) => !deleted.has(x.id))
   if (remaining.length) {
     setCurrentSession(remaining[0])
@@ -656,6 +660,7 @@ export function enterDraftView(): void {
   autosize()
   setPendingFiles([])
   renderAttachments()
+  renderQueue() // 排队条随会话视图隐藏
   updateTitle()
   syncSendButton()
   focusInput()
