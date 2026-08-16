@@ -1,11 +1,11 @@
-import type { FeedbackInfo, SubAgentInfo, ToolInfo, UserInfo, WebhookInfo } from "@gebai/sdk"
-import { client, el, setConn, settingsBody, settingsBtn, settingsOverlay, settingsTabs, currentSession } from "./state"
+import type { FeedbackInfo, UserInfo } from "@gebai/sdk"
+import { client, el, setConn, settingsBody, settingsBtn, settingsOverlay, settingsTabs } from "./state"
 import { blockText } from "./markdown"
 import { getLowPowerSetting, isLowPower, probeWebGL, setLowPowerSetting } from "./low-power"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
 
-/* ---------- 设置面板（工具 / 子Agent / 环境变量 / Webhook / 用户 / 反馈） ---------- */
+/* ---------- 设置面板（环境变量 / 外观 / 用户 / 反馈；工具启停、子Agent 装载与 Webhook 管理经 API 使用） ---------- */
 
 export function bindSettings() {
   settingsBtn.onclick = () => openSettings()
@@ -25,8 +25,8 @@ export function bindSettings() {
   document.addEventListener("gebai:low-power-change", () => refreshAppearanceDesc())
 }
 
-/** 打开设置面板（默认「工具」tab：全局工具 + 子Agent 分组工具一览；外部入口可指定 tab）。 */
-export function openSettings(tab = "tools") {
+/** 打开设置面板（默认「环境变量」tab；外部入口可指定 tab）。 */
+export function openSettings(tab = "env") {
   settingsOverlay.hidden = false
   void renderSettingsTab(tab)
 }
@@ -51,10 +51,7 @@ async function renderSettingsTab(tab: string) {
   } catch {
     /* 非服务模式：保持默认隐藏 */
   }
-  if (tab === "tools") return void renderSettingsTools()
-  if (tab === "agents") return void renderSettingsAgents()
   if (tab === "env") return void renderSettingsEnv()
-  if (tab === "webhooks") return void renderSettingsWebhooks()
   if (tab === "appearance") return void renderSettingsAppearance()
   if (tab === "users") return void renderSettingsUsers()
   if (tab === "feedback") return void renderSettingsFeedback()
@@ -64,58 +61,6 @@ function settingsSection(title: string): HTMLElement {
   const sec = el("div", "settings-section")
   sec.appendChild(el("div", "settings-section-title", title))
   return sec
-}
-
-async function renderSettingsTools() {
-  settingsBody.appendChild(settingsSection("工具启停（全局精确匹配，按子Agent 分组）"))
-  const list = el("div", "settings-list")
-  let tools: ToolInfo[] = []
-  try {
-    tools = await client.listTools()
-  } catch (err) {
-    settingsBody.appendChild(blockText(`加载失败: ${(err as Error).message}`))
-    return
-  }
-  const groups = new Map<string, ToolInfo[]>()
-  for (const t of tools) {
-    const g = groups.get(t.group) || []
-    g.push(t)
-    groups.set(t.group, g)
-  }
-  for (const [group, ts] of groups) {
-    const g = el("div", "settings-group")
-    g.appendChild(el("div", "settings-group-name", group === "global" ? "全局工具" : `子Agent: ${group}`))
-    for (const t of ts) {
-      const row = el("label", "settings-row")
-      const cb = document.createElement("input")
-      cb.type = "checkbox"
-      cb.className = "ck"
-      cb.checked = t.enabled
-      cb.onchange = async () => {
-        // 请求期间禁用防重入：快速双击的两次请求乱序返回会让 UI 状态与服务器最终状态相反
-        cb.disabled = true
-        try {
-          await client.setToolEnabled(t.name, cb.checked)
-        } catch (err) {
-          cb.checked = !cb.checked
-          setConn(`工具切换失败: ${(err as Error).message}`, false)
-        } finally {
-          cb.disabled = false
-        }
-      }
-      // 子Agent 分组下工具名显示不带 `{agent}_` 前缀（全名仅用于启停提交）
-      const shortName = group === "global" ? t.name : t.name.replace(`${group}_`, "")
-      const info = el("div", "settings-row-info")
-      info.append(
-        el("div", "settings-row-name", shortName),
-        el("div", "settings-row-desc", `${t.description || "（无描述）"}${group !== "global" && shortName !== t.name ? ` · ${t.name}` : ""}`),
-      )
-      row.append(cb, info)
-      g.appendChild(row)
-    }
-    list.appendChild(g)
-  }
-  settingsBody.appendChild(list)
 }
 
 function renderSettingsAppearance() {
@@ -149,44 +94,6 @@ function renderSettingsAppearance() {
     refreshDesc()
   }
   refreshDesc()
-}
-
-async function renderSettingsAgents() {
-  settingsBody.appendChild(settingsSection("子Agent 模块（按需装载，装载后工具注入总Agent）"))
-  const list = el("div", "settings-list")
-  let agents: SubAgentInfo[] = []
-  try {
-    agents = await client.listSubAgents()
-  } catch (err) {
-    settingsBody.appendChild(blockText(`加载失败: ${(err as Error).message}`))
-    return
-  }
-  for (const a of agents) {
-    const row = el("div", "settings-row agent-row")
-    const info = el("div", "settings-row-info")
-    info.append(
-      el("div", "settings-row-name", `${a.name}${a.loaded ? " · 已装载" : ""}${a.bundled ? "" : " · 未打包"}`),
-      el("div", "settings-row-desc", a.description || "（无描述）"),
-      el("div", "settings-row-sub", `工具: ${a.tools.join(", ") || "无"}`),
-    )
-    if (!a.loaded) {
-      const btn = el("button", "mini-btn", "装载")
-      btn.onclick = async () => {
-        try {
-          // 装载到当前会话（注册工具 + 提示词消息写入会话记录；无当前会话时仅全局注册工具）
-          await client.loadSubAgent(a.name, currentSession?.id)
-          await renderSettingsAgents()
-        } catch (err) {
-          setConn(`加载失败: ${(err as Error).message}`, false)
-        }
-      }
-      row.append(info, btn)
-    } else {
-      row.appendChild(info)
-    }
-    list.appendChild(row)
-  }
-  settingsBody.appendChild(list)
 }
 
 async function renderSettingsEnv() {
@@ -248,77 +155,6 @@ async function renderSettingsEnv() {
   }
   actions.appendChild(saveBtn)
   settingsBody.appendChild(actions)
-}
-
-async function renderSettingsWebhooks() {
-  settingsBody.appendChild(settingsSection("Webhook（事件推送，HMAC 签名；失败自动重试）"))
-  const form = el("form", "settings-form")
-  form.setAttribute("novalidate", "") // 原生校验气泡关闭，改自绘校验
-  const url = document.createElement("input")
-  url.type = "url"
-  url.placeholder = "https://example.com/hook"
-  const events = document.createElement("input")
-  events.placeholder = "事件类型（逗号分隔，留空=默认三类）"
-  const secret = document.createElement("input")
-  secret.placeholder = "签名密钥（可选）"
-  const add = el("button", "mini-btn", "注册")
-  form.append(el("div", "settings-form-label", "URL"), url, el("div", "settings-form-label", "事件"), events, el("div", "settings-form-label", "密钥"), secret, add)
-  form.onsubmit = async (e) => {
-    e.preventDefault()
-    if (!url.value.trim()) {
-      toast("请填写 Webhook URL")
-      return
-    }
-    if (!/^https?:\/\//i.test(url.value.trim())) {
-      toast("URL 需以 http:// 或 https:// 开头")
-      return
-    }
-    try {
-      await client.registerWebhook({
-        url: url.value.trim(),
-        events: events.value ? events.value.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
-        secret: secret.value || undefined,
-      })
-      url.value = ""
-      secret.value = ""
-      events.value = ""
-      await renderSettingsWebhooks()
-    } catch (err) {
-      setConn(`注册失败: ${(err as Error).message}`, false)
-    }
-  }
-  settingsBody.appendChild(form)
-
-  const list = el("div", "settings-list")
-  let hooks: WebhookInfo[] = []
-  try {
-    hooks = await client.listWebhooks()
-  } catch (err) {
-    settingsBody.appendChild(blockText(`加载失败: ${(err as Error).message}`))
-    return
-  }
-  for (const h of hooks) {
-    const row = el("div", "settings-row")
-    const info = el("div", "settings-row-info")
-    info.append(
-      el("div", "settings-row-name", h.url),
-      el("div", "settings-row-desc", `事件: ${h.events.join(", ") || "全部"}${h.secret ? " · 已签名" : ""}`),
-    )
-    const del = el("button", "mini-btn danger", "删除")
-    del.onclick = async () => {
-      if (!(await confirmDialog({ title: "删除 Webhook", text: `删除 Webhook ${h.url}？` }))) return
-      try {
-        await client.deleteWebhook(h.id)
-        await renderSettingsWebhooks()
-      } catch (err) {
-        setConn(`删除失败: ${(err as Error).message}`, false)
-      }
-    }
-    row.append(info, del)
-    list.appendChild(row)
-  }
-  if (!hooks.length) list.appendChild(blockText("（未注册 Webhook）"))
-  settingsBody.appendChild(list)
 }
 
 async function renderSettingsUsers() {

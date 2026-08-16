@@ -361,10 +361,6 @@
   color: var(--accent);
   box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
 }
-[data-theme="classic"] .settings-group-name {
-  color: var(--accent);
-  text-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
-}
 
 /* 登录卡片 */
 [data-theme="classic"] .login-overlay {
