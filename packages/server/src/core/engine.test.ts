@@ -263,7 +263,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -292,7 +292,7 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
   })
   const provider = new FakeProvider(mode)
   if (mode === "approval" || mode === "approval2") provider.toolName = "sh"
-  const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents, retryBackoffMs: 5, authMode })
+  const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents, retryBackoffMs: 5, authMode, ...extraOpts })
   // loadConfig 会显式加载项目根 .env（loadRootDotEnv，如 GEBAI_LLM_MODEL）注入 process.env，
   // 泄漏进 EnvManager.resolve 会污染「无覆盖沿用启动实例」类断言——此处（loadConfig 之后）统一清理
   for (const k of Object.keys(process.env)) {
@@ -799,6 +799,22 @@ describe("AgentEngine", () => {
     const loaded = await store.load(session.id)
     // sub-agent run finished (assistant reply present)
     expect(loaded!.messages.some((m) => m.role === "assistant")).toBe(true)
+    cleanup(home)
+  })
+
+  test("long tool execution publishes event.tool.alive heartbeats (frontend idle watchdog keepalive)", async () => {
+    const { home, engine, store, events, provider } = await setup("tool", false, "local", false, { heartbeatMs: 30 })
+    const session = await store.createSession("default", "t")
+    const alive: string[] = []
+    events.subscribe((ev) => {
+      if (ev.type === "event.tool.alive") alive.push(String((ev.payload as { name: string }).name))
+    })
+    // 阻塞 200ms 的 sh 命令（approval:false 免审批），跨多个 30ms 心跳周期
+    provider.toolName = "sh"
+    provider.toolArgs = { command: `node -e "setTimeout(()=>{},200)"`, approval: false }
+    await engine.run(session.id, "default", "run slow tool")
+    expect(alive.length).toBeGreaterThan(0)
+    expect(alive.every((n) => n === "sh")).toBe(true)
     cleanup(home)
   })
 

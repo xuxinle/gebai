@@ -35,6 +35,9 @@ const CAPTURE_PENDING_LIMIT = 64
 /** 工具执行超时兜底（毫秒）：脚本类工具由 sandbox 自身 timeoutMs（默认 5 分钟）先杀进程并返回超时结果；
  * 此兜底覆盖不响应超时的工具（如网络请求挂起）。超时不结束任务——结果作为「执行超时」返回给模型继续。 */
 const TOOL_TIMEOUT_MS = 9 * 60 * 1000
+/** 长工具执行心跳间隔（毫秒）：执行期间定期发布 event.tool.alive，供前端空闲看门狗（60s 无数据取消任务）刷新活跃——
+ * 阻塞类工具（sh/py 跑构建/测试等）执行期间无其他事件，不心跳会被前端误判挂起取消（工具自身超时未及生效）。 */
+const TOOL_HEARTBEAT_MS = 25_000
 const SUBAGENT_DEPTH = 3
 /** 模型接口异常/空响应的重试次数与退避基数（指数退避，DESIGN「常量参考」）。 */
 const LLM_RETRY_COUNT = 2
@@ -250,6 +253,8 @@ export interface AgentEngineOptions {
   captureTimeoutMs?: number
   /** 工具执行超时兜底（毫秒，默认 9 分钟；测试可注入短超时验证超时返回给模型）。 */
   toolTimeoutMs?: number
+  /** 长工具执行心跳间隔（毫秒，默认 25s；测试可注入短间隔验证心跳事件发布）。 */
+  heartbeatMs?: number
   /** LLM 流式调用读空闲超时（毫秒，默认 120s；测试可注入短超时验证假死中止）。 */
   llmIdleTimeoutMs?: number
   /** 认证模式（"server"=服务模式多用户隔离）。无交互通道（REST）的审批策略按此分级：本地模式保持「自动通过」，
@@ -1674,7 +1679,7 @@ export class AgentEngine {
 
         this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id })
         // 取消/超时统一收口：停止按钮中断执行（脚本进程同步被杀），超时作为结果返回模型不结束任务
-        const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, signal, rt.name)
+        const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, signal, rt.name, sessionId, tc.id)
         // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
         // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
         const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
@@ -1743,16 +1748,22 @@ export class AgentEngine {
    *   由模型决定调整方案重试（脚本先由 sandbox 自身超时杀进程，此兜底覆盖挂起的非脚本工具）
    * - 工具异常：转为「工具执行失败」结果（与原有行为一致）
    */
-  private runToolInterruptible(tool: Tool, args: Record<string, unknown>, ctx: ToolContext, signal: AbortSignal, name: string): Promise<ToolResult> {
+  private runToolInterruptible(tool: Tool, args: Record<string, unknown>, ctx: ToolContext, signal: AbortSignal, name: string, sessionId: string, toolCallId: string): Promise<ToolResult> {
     if (signal.aborted) return Promise.resolve({ output: `工具 ${name} 已取消（任务已停止）` })
     return new Promise<ToolResult>((resolve) => {
       let done = false
       let timer: ReturnType<typeof setTimeout>
       let onAbort: () => void
+      // 长工具心跳：执行期间按 heartbeatMs 周期发布（快工具在首个周期前结束，不产生事件）——
+      // 前端空闲看门狗据此刷新活跃，阻塞类工具（sh/py 长命令）不被误判挂起取消
+      const hb = setInterval(() => {
+        this.publish(sessionId, "event.tool.alive", { name, toolCallId })
+      }, this.opts.heartbeatMs ?? TOOL_HEARTBEAT_MS)
       const finish = (r: ToolResult) => {
         if (done) return
         done = true
         clearTimeout(timer)
+        clearInterval(hb)
         signal.removeEventListener("abort", onAbort)
         resolve(r)
       }
@@ -2082,7 +2093,7 @@ export class AgentEngine {
         }
         // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
         this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
-        const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name)
+        const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
         // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
         const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
           ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }

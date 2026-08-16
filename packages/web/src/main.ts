@@ -6,7 +6,7 @@ import "./css/composer.css"
 import "./css/overlays.css"
 import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
 import { capturePage } from "./capture"
-import { bindApprovalSkip } from "./approval-skip"
+import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton } from "./composer"
 import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
@@ -280,6 +280,9 @@ composer.addEventListener("submit", async (e) => {
     sessionId = s.id
     void refreshSessions() // 列表即时出现新会话（不阻塞发送）
   }
+  // 自动审批开关同步会话 env：草稿首条消息创建的会话不经过 loadMessages（applyApprovalSkip 的既有同步点），
+  // 每次任务启动前幂等补齐——WS 同连接按序处理，env 写入先于任务请求落地（服务端进程重启丢内存 env 时同样恢复）
+  void applyApprovalSkip(sessionId)
   input.value = ""
   autosize()
   hideEmptyState()
@@ -641,6 +644,9 @@ async function init() {
       onCaptureRequest({ sessionId: ev.sessionId, captureId: String(ev.payload.captureId ?? ""), fullPage: ev.payload.fullPage === true, delay: Number(ev.payload.delay ?? 0) })
     } else if (ev.type === "event.tool.call") {
       onToolCall({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? ""), arguments: ev.payload.arguments as Record<string, unknown> | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
+    } else if (ev.type === "event.tool.alive") {
+      // 长工具执行心跳：阻塞类工具（sh/py 长命令）执行期间无其他数据，据此刷新活跃，防空闲看门狗误取消
+      touchRunActivity(ev.sessionId)
     } else if (ev.type === "event.tool.result") {
       onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
     } else if (ev.type === "event.message.compact") {
