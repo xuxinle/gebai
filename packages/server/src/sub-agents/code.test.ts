@@ -53,15 +53,21 @@ describe("code sub-agent", () => {
   test("def exposes full toolset with project routing and approval policy", () => {
     const names = Object.keys(codeDef.tools!)
     // 文件工具与探索/分析工具齐全（含补丁应用与符号定位）
-    for (const t of ["read", "write", "edit", "apply_patch", "sh", "py", "ls", "grep", "search_files", "search_symbols", "move_file", "delete_file", "diff", "analyze", "git"]) {
+    for (const t of ["read", "write", "edit", "patch", "sh", "py", "ls", "grep", "glob", "search_symbols", "file", "diff", "analyze", "git"]) {
       expect(names).toContain(t)
     }
     // 参考 opencode 补齐：文档查阅、方案确认、任务规划、浏览器端验证委托
     for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
       expect(names).toContain(t)
     }
+    // 开发验证/环境探测（自全局工具集下沉，无 project 参数、默认无需审批）
+    for (const t of ["preview_server", "env_detect", "system_info"]) {
+      expect(names).toContain(t)
+      expect(codeDef.tools![t].parameters.properties).not.toHaveProperty("project")
+      expect(codeDef.tools![t].requiresApproval).toBeUndefined()
+    }
     // 写操作需审批；sh/py 走工具自身动态审批（默认需审批、approval:false 按次免审），不静态覆盖
-    for (const t of ["edit", "write", "apply_patch"]) {
+    for (const t of ["edit", "write", "patch"]) {
       expect(codeDef.requiresApproval![t]).toBe(true)
     }
     expect(codeDef.requiresApproval!.sh).toBeUndefined()
@@ -72,7 +78,7 @@ describe("code sub-agent", () => {
       expect(ra({ approval: true })).toBe(true)
       expect(ra({ approval: false })).toBe(false)
     }
-    for (const t of ["read", "write", "edit", "apply_patch", "sh", "py", "ls", "grep", "search_files", "search_symbols", "move_file", "delete_file", "diff", "analyze", "git"]) {
+    for (const t of ["read", "write", "edit", "patch", "sh", "py", "ls", "grep", "glob", "search_symbols", "file", "diff", "analyze", "git"]) {
       expect(codeDef.tools![t].parameters.properties).toHaveProperty("project")
     }
     // 只读类不审批（git/search_symbols 只读但带 project 参数）

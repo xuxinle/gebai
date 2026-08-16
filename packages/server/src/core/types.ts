@@ -59,16 +59,16 @@ export type ToolContext = {
   listFiles: (p?: string) => Promise<FileEntry[]>
   /** 列出单层目录内容（ls 工具用）。 */
   listDir: (p: string) => Promise<FileEntry[]>
-  /** 删除文件/目录（delete_file 工具用）。 */
+  /** 删除文件/目录（file 工具 delete 动作用）。 */
   deleteFile: (p: string) => Promise<void>
-  /** 移动/重命名文件（move_file 工具用）。 */
+  /** 移动/重命名文件（file 工具 move/rename 动作用）。 */
   moveFile: (from: string, to: string) => Promise<void>
   runCommand: (cmd: string, opts?: { shell?: string; workdir?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string; code: number }>
   uploadAttachment: (ref: AttachmentRef) => Promise<string>
   publish: (type: string, payload: Record<string, unknown>) => void
   /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：flow 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
-  /** 会话级已读文件追踪（防误覆盖，引擎按会话注入）：read/write/edit/apply_patch 成功后登记已读绝对路径，
+  /** 会话级已读文件追踪（防误覆盖，引擎按会话注入）：read/write/edit/patch 成功后登记已读绝对路径，
    *  write 整体覆盖「已存在但本会话未读过」的文件前据此拦截（模型须先 read 掌握原文再覆盖）。
    *  可选：测试桩/无引擎环境不注入时相关守卫自动放行（不改变行为）。 */
   fileGuard?: {
@@ -76,7 +76,7 @@ export type ToolContext = {
     hasRead(absPath: string): boolean
   }
   /** 写范围守卫（子Agent 声明、引擎按「会话已装载/新会话预加载的子Agent」注入）：文件写类工具
-   *  （write/edit/apply_patch/move_file/delete_file）写入前以**解析后的绝对路径**调用，
+   *  （write/edit/patch/file（rename/move/delete））写入前以**解析后的绝对路径**调用，
    *  返回非空字符串 = 拒绝写入（作为工具结果返回引导模型调整，不抛错）。可选：未注入时不限制。 */
   writeGuard?: (absPaths: string[]) => string | null | Promise<string | null>
   /** 预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS 环境变量解析，子Agent 运行环境注入）。 */

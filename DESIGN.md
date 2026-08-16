@@ -22,7 +22,7 @@
 GEBAI_HOME/
 ├── gebai.log              # 日志文件（全局）
 ├── conn-state.json        # WS 连接状态（每用户当前会话，防抖落盘；重连/重启后恢复，见「WebSocket」）
-├── tools/                 # 公用 HTML 小工具（Agent 经 save_tool 保存，全局共享，按名称哈希分片）
+├── tools/                 # 公用 HTML 小工具（widgets 子Agent 保存，全局共享，按名称哈希分片）
 │   └── {h0}/{h1}/{name}.json   # { name, html, scope:"public", owner, createdAt, updatedAt }
 └── users/                 # 用户数据目录（多用户安全隔离）
     ├── registry.json      # 用户注册表（服务模式）：用户名 → 加盐哈希/角色/状态
@@ -212,10 +212,10 @@ class GebaiClient {
 
 Agent 可将**调试好的 HTML 小工具**保存到服务端（侧栏底部「小工具」按钮随时加载使用），与消息流内的 `render_html` 预览卡片互补——前者一次性展示，后者持久可复用：
 
-- **保存流程**：Agent 先用 `render_html` 在聊天中调试预览，满意后调用 `save_tool` 保存（参数 `name`/`html`/`scope`；`scope=public` 公用 / `private` 用户私有，默认私有）；`delete_tool` 删除（默认需审批）
+- **保存流程**：Agent 先用 `render_html` 在聊天中调试预览，满意后装载 `widgets` 子Agent 保存（`widgets_save`，参数 `name`/`html`/`scope`；`scope=public` 公用 / `private` 用户私有，默认私有）；小工具增删改查经 `widgets_save`/`widgets_list`/`widgets_get`/`widgets_delete` 四工具（`delete` 需审批），详见「widgets 子Agent」
 - **存储**：公用存 `{GEBAI_HOME}/tools/{h0}/{h1}/{name}.json`（全局共享、记录 `owner`），私有存 `{GEBAI_HOME}/users/{user}/tools/{h0}/{h1}/{name}.json`（按名称哈希分片，仅本人可见）；同名覆盖更新（保留 `createdAt`）；私有与公用同名时**私有优先**（列表与读取均只命中用户侧）
 - **名称约束**：`[a-zA-Z0-9_\u4e00-\u9fff]{1,40}`（不含 `.`/`/` 等路径分隔符，直接作为文件名），HTML 上限 200KB
-- **权限**：私有工具天然按用户目录隔离（他人不可读/删）；公用工具任何用户可读，**服务模式下仅管理员可创建/覆盖/删除**（共享资源防投毒——普通用户 `save_tool`/`delete_tool`/REST DELETE 指定 public 一律拒绝并提示改用 private；本地模式不限制）；删除公用工具需审批（本地模式）
+- **权限**：私有工具天然按用户目录隔离（他人不可读/删）；公用工具任何用户可读，**服务模式下仅管理员可创建/覆盖/删除**（共享资源防投毒——普通用户 `widgets_save`/`widgets_delete`/REST DELETE 指定 public 一律拒绝并提示改用 private；本地模式不限制）；删除公用工具需审批（本地模式）
 - **REST**：`GET /api/v1/mini-tools`（列表，不含 html）、`GET /api/v1/mini-tools/:name`（单条含 html）、`DELETE /api/v1/mini-tools/:name?scope=`（删除）；SDK：`listMiniTools`/`getMiniTool`/`deleteMiniTool`
 - **UI**：侧栏底部「小工具」按钮（会话操作组最左）→ 弹窗列表（名称 + 公用/私有徽标，打开时实时拉取、可手动刷新；行 hover 显示 ✕ 删除按钮，触屏常驻——**删除走确认弹窗**：私有「删除后不可恢复」、公用额外强调「所有用户不可用」，成功后刷新列表并**一并关闭该工具已打开的悬浮窗口**）→ 点击**加载到独立悬浮窗口**（沙箱 iframe 渲染，域隔离同 `render_html`：`sandbox="allow-scripts"` 无 `allow-same-origin`，主题跟随广播）；**重复点击同一工具 = 恢复之前的窗口**（置顶聚焦，不重新创建/重载）；**关闭（✕）仅隐藏窗口**（微信小程序式：保留 iframe 运行状态，再次点击同工具即恢复，不重载），**刷新按钮才重新加载内容**（工具更新后可见新版本）；窗口可拖拽（指针捕获，松手即停）/缩放，多个工具可同时打开（层叠定位，点击置顶）
 - **安全**：工具 HTML 视为不可信输入，渲染于沙箱 iframe（与 `render_html` 同一隔离与 CSP 注入管线）
@@ -295,7 +295,7 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（侧栏底部「�
 | `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs` 子Agent 的全局兜底 + 机器人桥接凭证）、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）** | 不启用 |
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
-| `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：有风险的工具（命令执行 `sh`/`py`、文件修改 `write`/`edit`/`delete_file`/`move_file`/`delete_tool`、定时任务调度 `cron_add`/`cron_update`/`cron_remove`，及子Agent 同名短工具如 `code_sh`）被阻止执行——模型调用时直接返回限制信息（不执行、不弹审批），只读操作不受影响 | `false` |
+| `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：有风险的工具（命令执行 `sh`/`py`、文件修改 `write`/`edit`/`patch`/`file`（rename/move/delete）、删除类 `delete`（如 `widgets_delete`）、定时任务调度 `cron_add`/`cron_update`/`cron_remove`，及子Agent 同名短工具如 `code_sh`）被阻止执行——模型调用时直接返回限制信息（不执行、不弹审批），只读操作不受影响 | `false` |
 | `GEBAI_LLM_MODEL` / `OPENAI_*` | LLM Provider 与模型配置 | - |
 | `GEBAI_LLM_API_BASE` / `GEBAI_LLM_API_KEY` | LLM 服务地址与密钥（等价 `OPENAI_*`） | - |
 | `GEBAI_LLM_API_KIND` | LLM 接口类型：`openai`（兼容 chat/completions）/ `responses`（OpenAI Responses API）/ `anthropic` | `openai` |
@@ -390,7 +390,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **中断与取消**：客户端可随时取消当前任务，服务端停止本轮循环并保留已生成内容；**停止即时打断进行中的工具执行**（工具执行包装统一收口：任务取消信号传递到 `Sandbox.exec`，脚本类子进程按进程树终止——Unix 杀进程组、Windows `taskkill /T`，结果标记 `[interrupted by user]`；非脚本工具立即返回「已取消」结果落盘）；**取消统一解开全部挂起等待**（审批/选择/画图/捕获的等待 promise 同步 resolve——仅 abort 信号不会中断 `await`，不 resolve 会让 runLoop 永久挂起、任务收尾不完成、`isRunning` 残留，下一次 prompt 被「task already running」拒绝，表现为**中断后要发两次才能继续**；四个等待函数同时监听取消/超时信号，子Agent 超时同样立即解开）；**审批拒绝同样停止会话生成**（不再让模型调整方案继续执行，前端静默收尾并清理该会话残留审批卡片，取消/拒绝不渲染错误气泡）
 - **重复检测**：模型连续/交替重复调用相同工具（工具名+参数相同，最近 8 次内第 3 次）时中断该次执行并注入引导提示（「不要重复相同操作，改用其他方法或直接给出最终回答」）；中断超过 2 次判定模型陷入重复，终止工具循环提前返回（仍返回最后产出文本，保持会话消息序列完整）；待办续做中模型回复与上上轮完全相同（纯文本）时，续做提醒追加「请勿复述」提示
 - **错误恢复**：LLM 请求失败/超时自动退避重试；工具执行失败将错误注入上下文，引导模型自行修正；**工具执行超时不结束任务**——脚本类工具先由脚本执行超时（`sh`/`py` 可经 `timeout` 参数（秒，默认 300、上限 540）调整个别执行超时，缺省 5 分钟）杀进程并返回超时结果，引擎层 9 分钟兜底（`TOOL_TIMEOUT_MS`）覆盖不响应超时的工具（如网络请求挂起），超时均作为工具结果返回给模型自行调整方案
-- **防盲覆盖守卫**：`write` 覆盖「已存在但本会话未读过」的文件被拒绝（会话级 fileGuard 已读追踪，`read`/`edit`/`apply_patch`/`write` 成功即登记），引导模型先 `read` 再覆盖——拒绝作为工具结果返回，模型一轮自愈，不中断任务（见「write 防误覆盖守卫」）
+- **防盲覆盖守卫**：`write` 覆盖「已存在但本会话未读过」的文件被拒绝（会话级 fileGuard 已读追踪，`read`/`edit`/`patch`/`write` 成功即登记），引导模型先 `read` 再覆盖——拒绝作为工具结果返回，模型一轮自愈，不中断任务（见「write 防误覆盖守卫」）
 - **上下文管理**：历史超出窗口阈值时自动压缩（工具输出截断 → 旧消息摘要 → 滚动裁剪，见「上下文保护」），也支持用户主动压缩
 - **审批超时**：审批请求超时（见常量参考）自动拒绝该次调用并提示模型调整，避免任务悬挂
 
@@ -448,7 +448,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **环境变量隔离**：用户/会话环境变量副本归属各自命名空间（`users/{user}/env.json`、会话 `env.json`），互不可见；子Agent 仅能访问 `{AGENT_NAME_UPPER}_*` 前缀，敏感变量（密钥/令牌）脱敏存储
 - **子Agent共享**：子Agent 为服务端内置代码，构建时编译进二进制，全局共享、只读、无用户差异
 - **审批隔离**：`/approval-skip` 为会话级设置，仅作用于当前会话，不影响其他用户；**服务模式下该键仅管理员可设置**（REST `PUT /env`、WS `session.env.set` 显式管理通道严格拒绝、非管理员返回 403；**prompt 浏览器本地注入通道宽容过滤**——非管理员注入的 `GEBAI_APPROVAL_SKIP` 被 `filterEnvInjection` 静默丢弃、任务照常执行（不拒绝，防 localStorage 残留越权键阻断任务）；**ask_env 填值通道为第四通道，服务模式下一律拒绝该键**——模型驱动的写入不得绕过审批边界），普通用户无法自设审批跳过绕过 `sh`/`py`/`cron_*` 审批
-- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`）、文件修改（`write`/`edit`/`delete_file`/`move_file`/`delete_tool`）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`flow` 数据流编排工具在 step 层同规则拦截（其直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
+- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`）、文件修改（`write`/`edit`/`patch`/`file`（rename/move/delete））、删除类（`widgets_delete` 等 `delete` 短名）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write`/`{agent}_file` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`flow` 数据流编排工具在 step 层同规则拦截（其直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
 
 ### 总Agent
@@ -600,7 +600,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
   - `titleParams`：参数名列表，其值直接拼入卡片标题——**单参数仅显示值**（`🛠 read · src/main.ts`，省略 `key=` 前缀），多参数 `key=value`（`·` 连接）；简单工具的关键参数（如 `open` 的 url、`write` 的 path）一目了然
   - `args`：参数区模式——**缺省自适应**（扁平标量参数渲染为**键值行**：参数名 + 值 pre-wrap 展示，比 JSON 块更可读；嵌套结构回退 JSON 语法高亮）/ `"json"`（强制完整 JSON 高亮，标题参数不省略）/ `"kv"`（强制键值行，嵌套值紧凑 JSON 单行展示）/ `"none"`（不展示参数区，如 `current_time`/`env_detect`）/ `"code"`（`codeField` 参数渲染为语法高亮代码块，其余参数键值行/JSON 附注，如 `sh` 的 command）/ `"edits"`（`codeField` 数组参数的 `{oldString,newString}` 项渲染为**旧（红）/新（绿）对比块**——多处修改编号「修改 i/n」，空串侧省略（纯新增/纯删除），形态不符回退自适应渲染；`edit` 工具因此不再显示 JSON）/ `"block"`（**结果直出内容块**：调用不显示通用工具卡片，结果直接渲染 blocks 内容块，如 `draw`/`diff`/`render_html`）
   - **标题参数不在参数区重复展示**（titleParams 已入标题的键从参数区省略，如 `read` 参数区只显示 offset/limit；全部参数入标题时无参数区）；**超长未入标题的标题参数降级为参数气泡**（与其余参数一同以键值行全文展示，如超长路径 `path: <全文>`，不截断）；**超长参数区自动折叠**（>800 字符默认收起为「查看参数（N 字符）」，点击展开，与输出折叠同款交互）
-  - 已声明示例：全局 `sh`/`py`/`write`（code 模式）、`edit`（edits 模式，标题参数 path）、`read`/`fetch_url`/`agent_load`/`agent_run`/`ls`/`delete_file`/`move_file`/`grep`/`search_files`/`save_tool`/`delete_tool`（标题参数）、`apply_patch`（code 模式 + 标题参数 path）、`current_time`/`system_info`/`env_detect`（无参数区）、`draw`/`diff`/`render_html`（block 模式）；code `search_symbols`/`analyze`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
+  - 已声明示例：全局 `sh`/`py`/`write`（code 模式）、`edit`（edits 模式，标题参数 path）、`read`/`fetch_url`/`agent_load`/`agent_run`/`ls`/`grep`/`glob`/`file`（标题参数）、`patch`（code 模式 + 标题参数 path）、`current_time`（无参数区）、`draw`/`diff`/`render_html`（block 模式）；code `search_symbols`/`analyze`（标题参数）、`env_detect`/`system_info`（无参数区）；widgets `save`/`get`/`delete`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
   - **`agent_run` 专用卡片**：卡片头部直接列出**全部预加载子Agent 名**（`🛠 agent_run · code + playwright`，以 `+` 连接、不截断、省略 `key=` 前缀——后缀 span 带 `wrap` 标记允许多行完整展示）；参数区**只显示输入提示词**（任务指令全文、pre-wrap 展示，不参与自动折叠）；实时卡片完成态（`✓`）保留标题后缀，参数区不因执行完成而消失（执行中与完成后均可见）
   - 元数据拉取失败或未声明时按默认渲染（标题仅工具名、参数区按缺省自适应规则），不影响功能
 
@@ -617,26 +617,27 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 ```ts
 export const name = "code"
-export const description = "涉及代码编写与源码分析时装载本子Agent（不处理歌白自身代码，自我优化用 self_optimize）：新建/修改项目与功能实现、代码分析、问题定位修复；装载后按 探索→方案→修改→验证 流程执行，改动较多时优先 apply_patch；写操作需审批。输入：需求/问题描述；输出：代码修改方案与验证结果。"
-export const systemPrompt = "你是源码分析与修改专家（工作流参考 opencode 编码助手）。工作流程：0) 环境确认：开工前先读本提示词开头注入的项目环境注记（项目根/工作目录、预置项目清单、受限模式说明）——目标代码所在项目与 project 参数取值由此确定；分析某系统/服务源码时，先在预置项目清单（名称/说明/路径）中定位系统本体，警惕与目标同名的 API 封装/适配层（网关封装 ≠ 被管理系统源码），不要在其上浪费时间；清单确无对应项目时才用 search_files/ls 在自由路径探索；1) 规划：多步骤任务先用 todo 建立待办清单（entries 一次可含 add/update/delete 多条，探索→定位→方案→修改→验证），eta 参数给出每步预计耗时（分钟）让用户有耗时预期；每完成一步用 todo 更新状态，返回的清单即最新全部待办，无需再查；2) 探索：先用 grep（内容搜索）/search_files（按文件名 glob 查找）/search_symbols（按符号名定位**定义**位置，跨文件；找**引用/调用点**用 grep）/ls（目录结构）/analyze（tree-sitter 结构概览）快速定位，再精确读取相关文件（大文件用 read 的 offset/limit 分段读，需要行号定位/引用时传 lineNumbers=true，避免整读超长输出），避免大范围逐行通读；grep 宽泛摸底优先 output=files（只回命中文件清单，不刷内容），锁定文件后再 content 模式（可传 context 附前后行看命中语境，include 限定文件类型如 *.ts）；对独立的目标可一次发起多个并行工具调用；跨大量文件的摸底/架构梳理（只要结论不要过程）可 agent_run 委托 explore 子Agent（只读探索，返回结论与 文件:行号 清单，中间过程不占本会话上下文）；3) 定位：梳理问题/需求涉及的代码位置、调用链与依赖关系；4) 方案：输出改动点清单（文件、改动内容、预期效果与影响面）；方向有取舍时用 ask_user 提供选项向用户确认（如实现方案、测试框架、改动范围）；可用 diff 展示「修改前/后」对比供审查；5) 修改：先 read 目标区域确认当前内容，再动手；遵循项目既有约定——先看 README/package.json/AGENTS.md 与相邻文件，了解技术栈、风格与依赖，模仿现有写法（新代码的命名/注释密度/习惯与周围代码保持一致，不引入无关改动）；改动较多或行号容易偏移时优先用 apply_patch 应用 unified diff（一次多 hunk、行号模糊容错，可用 diff 工具生成补丁，dryRun=true 可预演不落盘；上下文行给 2~4 行即可——过多易不匹配、过少定位不稳；一次补丁聚焦一个改动点，不相关的改动分批提交），小范围定点改动用 edit（oldString 从原文精确复制含缩进，且必须唯一命中——多处相同文本时扩大上下文使其唯一，确认全部替换才用该项 replaceAll: true），write 仅用于新建/整体覆盖（覆盖已存在文件前必须先 read——未读过的已存在文件会被系统拒绝，防盲覆盖）；edit/apply_patch 成功即已按原文校验落盘，无需重读验证；补丁不匹配时先 read 当前文件内容核对再重试；不添加无关注释；不引入/提交密钥凭据；写操作（edit/write/apply_patch/sh/py）需审批，修改前必须先给出方案；重复性/批量操作（批量替换、批量跑测试等）优先用 sh/py 脚本一次执行，避免大量单步工具调用；明确安全的只读/幂等命令（如 git status、跑测试）可给 sh/py 传 approval:false 跳过本次审批，其余命令勿免审；6) 验证：先跑与改动相关的测试文件（如 bun test 指定文件），通过后再跑全量与类型检查/lint（bun run typecheck/bun run lint 等）确认无回归；失败先看错误信息定位（grep 错误关键字找断言/堆栈位置）再修复重测，不盲目重复执行；Python 项目用 py；Web 项目需要浏览器端验证时可 agent_run 委托 playwright 子Agent；7) 收尾：用 git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件，不擅自 commit（add/commit 等写操作用 sh 且需审批；与本次任务无关的既有改动不要误动）；用 todo（空 entries 查询）核对全部待办后给出总结——**先结论后细节**（第一句话回答做了什么/结果如何），关键改动位置引用 文件:行号，改动理由与影响面随后展开；验证/测试未通过时如实说明并附关键错误输出，不粉饰、不略过失败项。项目与环境变量配置（项目相关配置经进程/用户/会话环境变量注入，env 名称与作用如下）：- CODE_PROJECTS：预置项目注册表（JSON 数组 [{name,path,description}]）——声明命名项目，文件工具用 project 参数传**项目名**（实际清单与项目说明见本提示词开头「预置项目」注记），路径参数相对所选项目根解析；- CODE_PROJECT：默认项目根绑定——设置后默认工作目录与路径解析以该项目根为基准，未指定 project 时即操作该项目（绑定根路径注入系统提示词）；- CODE_RESTRICT_PROJECTS：受限模式（true 开启）——仅允许操作预配置项目（CODE_PROJECTS 清单或 CODE_PROJECT 绑定根），文件工具必须携带 project 参数，自由路径（path）被拒绝；项目选择（二选一）：1) 预置项目：配置了 CODE_PROJECTS 时，文件工具用 project 参数传**项目名**，路径参数相对所选项目根；未指定 project 时按默认工作目录/CODE_PROJECT 解析。2) 自由项目：直接用 path 参数传项目/文件路径（未设置预置项目时的默认方式）。项目范围：CODE_PROJECT 绑定项目根后，文件操作以项目根为基准（服务端部署限定项目内，本地模式不限制目录）。语法分析：对代码文件可先用 analyze（tree-sitter）获取结构化概览（函数/类/方法/类型定义与行号），代替逐行阅读快速定位；找函数/类**定义**用 search_symbols（按符号名，跨文件），找**引用/调用点**用 grep（按内容匹配）；search_files 按文件名查找，ls 查看目录结构；查阅第三方库/框架文档用 fetch_url。"
-export const tools: ToolSet = { read, write, edit, apply_patch, sh, py, ls, grep, search_files, search_symbols, move_file, delete_file, diff, analyze, git, fetch_url, ask_user, agent_run, todo }
-export const requiresApproval = { edit: true, write: true, apply_patch: true } // sh/py 走工具自身动态审批（默认需审批、approval 参数按次免审），不静态覆盖
+export const description = "涉及代码编写与源码分析时装载本子Agent（不处理歌白自身代码，自我优化用 self_optimize）：新建/修改项目与功能实现、代码分析、问题定位修复；装载后按 探索→方案→修改→验证 流程执行，改动较多时优先 patch；写操作需审批。输入：需求/问题描述；输出：代码修改方案与验证结果。"
+export const systemPrompt = "你是源码分析与修改专家（工作流参考 opencode 编码助手）。工作流程：0) 环境确认：开工前先读本提示词开头注入的项目环境注记（项目根/工作目录、预置项目清单、受限模式说明）——目标代码所在项目与 project 参数取值由此确定；分析某系统/服务源码时，先在预置项目清单（名称/说明/路径）中定位系统本体，警惕与目标同名的 API 封装/适配层（网关封装 ≠ 被管理系统源码），不要在其上浪费时间；清单确无对应项目时才用 glob/ls 在自由路径探索；1) 规划：多步骤任务先用 todo 建立待办清单（entries 一次可含 add/update/delete 多条，探索→定位→方案→修改→验证），eta 参数给出每步预计耗时（分钟）让用户有耗时预期；每完成一步用 todo 更新状态，返回的清单即最新全部待办，无需再查；2) 探索：先用 grep（内容搜索）/glob（按文件名 glob 查找）/search_symbols（按符号名定位**定义**位置，跨文件；找**引用/调用点**用 grep）/ls（目录结构）/analyze（tree-sitter 结构概览）快速定位，再精确读取相关文件（大文件用 read 的 offset/limit 分段读，需要行号定位/引用时传 lineNumbers=true，避免整读超长输出），避免大范围逐行通读；grep 宽泛摸底优先 output=files（只回命中文件清单，不刷内容），锁定文件后再 content 模式（可传 context 附前后行看命中语境，include 限定文件类型如 *.ts）；对独立的目标可一次发起多个并行工具调用；跨大量文件的摸底/架构梳理（只要结论不要过程）可 agent_run 委托 explore 子Agent（只读探索，返回结论与 文件:行号 清单，中间过程不占本会话上下文）；3) 定位：梳理问题/需求涉及的代码位置、调用链与依赖关系；4) 方案：输出改动点清单（文件、改动内容、预期效果与影响面）；方向有取舍时用 ask_user 提供选项向用户确认（如实现方案、测试框架、改动范围）；可用 diff 展示「修改前/后」对比供审查；5) 修改：先 read 目标区域确认当前内容，再动手；遵循项目既有约定——先看 README/package.json/AGENTS.md 与相邻文件，了解技术栈、风格与依赖，模仿现有写法（新代码的命名/注释密度/习惯与周围代码保持一致，不引入无关改动）；改动较多或行号容易偏移时优先用 patch 应用 unified diff（一次多 hunk、行号模糊容错，可用 diff 工具生成补丁，dryRun=true 可预演不落盘；上下文行给 2~4 行即可——过多易不匹配、过少定位不稳；一次补丁聚焦一个改动点，不相关的改动分批提交），小范围定点改动用 edit（oldString 从原文精确复制含缩进，且必须唯一命中——多处相同文本时扩大上下文使其唯一，确认全部替换才用该项 replaceAll: true），write 仅用于新建/整体覆盖（覆盖已存在文件前必须先 read——未读过的已存在文件会被系统拒绝，防盲覆盖）；edit/patch 成功即已按原文校验落盘，无需重读验证；补丁不匹配时先 read 当前文件内容核对再重试；不添加无关注释；不引入/提交密钥凭据；写操作（edit/write/patch/sh/py）需审批，修改前必须先给出方案；重复性/批量操作（批量替换、批量跑测试等）优先用 sh/py 脚本一次执行，避免大量单步工具调用；明确安全的只读/幂等命令（如 git status、跑测试）可给 sh/py 传 approval:false 跳过本次审批，其余命令勿免审；6) 验证：先跑与改动相关的测试文件（如 bun test 指定文件），通过后再跑全量与类型检查/lint（bun run typecheck/bun run lint 等）确认无回归；失败先看错误信息定位（grep 错误关键字找断言/堆栈位置）再修复重测，不盲目重复执行；Python 项目用 py；Web 项目需要浏览器端验证时可 agent_run 委托 playwright 子Agent；服务端功能类改动可让用户用 preview_server 在临时新端口启动独立验证服务确认（不中断当前会话，验证完 action=stop 停止）；环境/依赖异常（工具链缺失、PATH 问题）用 env_detect 探测（平台/PATH/关键工具链版本/缺失组件），系统基础信息用 system_info；7) 收尾：用 git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件，不擅自 commit（add/commit 等写操作用 sh 且需审批；与本次任务无关的既有改动不要误动）；用 todo（空 entries 查询）核对全部待办后给出总结——**先结论后细节**（第一句话回答做了什么/结果如何），关键改动位置引用 文件:行号，改动理由与影响面随后展开；验证/测试未通过时如实说明并附关键错误输出，不粉饰、不略过失败项。项目与环境变量配置（项目相关配置经进程/用户/会话环境变量注入，env 名称与作用如下）：- CODE_PROJECTS：预置项目注册表（JSON 数组 [{name,path,description}]）——声明命名项目，文件工具用 project 参数传**项目名**（实际清单与项目说明见本提示词开头「预置项目」注记），路径参数相对所选项目根解析；- CODE_PROJECT：默认项目根绑定——设置后默认工作目录与路径解析以该项目根为基准，未指定 project 时即操作该项目（绑定根路径注入系统提示词）；- CODE_RESTRICT_PROJECTS：受限模式（true 开启）——仅允许操作预配置项目（CODE_PROJECTS 清单或 CODE_PROJECT 绑定根），文件工具必须携带 project 参数，自由路径（path）被拒绝；项目选择（二选一）：1) 预置项目：配置了 CODE_PROJECTS 时，文件工具用 project 参数传**项目名**，路径参数相对所选项目根；未指定 project 时按默认工作目录/CODE_PROJECT 解析。2) 自由项目：直接用 path 参数传项目/文件路径（未设置预置项目时的默认方式）。项目范围：CODE_PROJECT 绑定项目根后，文件操作以项目根为基准（服务端部署限定项目内，本地模式不限制目录）。语法分析：对代码文件可先用 analyze（tree-sitter）获取结构化概览（函数/类/方法/类型定义与行号），代替逐行阅读快速定位；找函数/类**定义**用 search_symbols（按符号名，跨文件），找**引用/调用点**用 grep（按内容匹配）；glob 按文件名查找，ls 查看目录结构；查阅第三方库/框架文档用 fetch_url。"
+export const tools: ToolSet = { read, write, edit, patch, sh, py, ls, grep, glob, search_symbols, file, diff, analyze, git, fetch_url, ask_user, agent_run, todo, preview_server, env_detect, system_info }
+export const requiresApproval = { edit: true, write: true, patch: true } // sh/py 走工具自身动态审批（默认需审批、approval 参数按次免审），不静态覆盖
 export const preload = false
 ```
 
 要点：
 
-- **工作流（参考 opencode 编码助手）**：环境确认（先读提示词开头注入的项目环境注记——预置项目清单/项目根/受限模式，确定目标项目与 project 参数，警惕与目标同名的 API 封装/适配层）→ 规划（todo 待办跟踪）→ 探索（grep/search_files/search_symbols/ls/analyze 先定位、并行调用；grep 宽泛摸底用 files 形态、锁定后 content+context 看语境；大范围摸底可 agent_run 委托 explore 只读探索，再精确读取）→ 定位 → 方案（改动点清单 + `ask_user` 方向确认 + `diff` 前后对比展示）→ 修改（遵循项目既有约定、与周围代码风格一致；改动多时 `apply_patch` 补丁应用优先、`edit` 定点替换（唯一性校验）次之、`write` 仅新建/整体覆盖（未读守卫），不添加无关注释/密钥，成功后无需重读验证）→ 验证（测试 + typecheck/lint，失败续修）→ 收尾（`git` 工具只读核对变更后只提交预期文件，不擅自 commit；总结先结论后细节、引用 文件:行号、失败如实报告）
-- **分析工具**：`read`（读源码，`lineNumbers=true` 行号定位）、`ls`（目录结构）、`grep`（内容搜索：files/count 形态摸底 + content/context 精读、include 过滤文件类型）、`search_files`（文件名 glob 查找）、`search_symbols`（**跨文件符号定义定位**：tree-sitter 解析函数/类/方法/类型定义，返回 文件:行号: 类型 名称，精确匹配优先，比 grep 更精准）、`analyze`（tree-sitter 语法结构概览）、`diff`（修改前后/两文件对比，UI 并排高亮）、`fetch_url`（查阅第三方库/框架文档）、`sh`（运行测试）
-- **修改工具**：`apply_patch`（**unified diff 补丁应用**：一次多 hunk、行号模糊容错、原子落盘、dryRun 预演，改动多/行号易偏移时优先）/`edit`（定点替换，小范围改动）/`write`（新建/整体覆盖）由 code 的 `requiresApproval` 声明审批；`sh`/`py`（Python 项目执行测试与脚本）走工具自身动态审批（默认需用户审批，复用统一审批流；`approval:false` 按次免审，见「工具审批」）；`move_file`/`delete_file` 文件管理；`git`（**只读**：status/diff/log 免审批，写操作走 `sh`）
+- **工作流（参考 opencode 编码助手）**：环境确认（先读提示词开头注入的项目环境注记——预置项目清单/项目根/受限模式，确定目标项目与 project 参数，警惕与目标同名的 API 封装/适配层）→ 规划（todo 待办跟踪）→ 探索（grep/glob/search_symbols/ls/analyze 先定位、并行调用；grep 宽泛摸底用 files 形态、锁定后 content+context 看语境；大范围摸底可 agent_run 委托 explore 只读探索，再精确读取）→ 定位 → 方案（改动点清单 + `ask_user` 方向确认 + `diff` 前后对比展示）→ 修改（遵循项目既有约定、与周围代码风格一致；改动多时 `patch` 补丁应用优先、`edit` 定点替换（唯一性校验）次之、`write` 仅新建/整体覆盖（未读守卫），不添加无关注释/密钥，成功后无需重读验证）→ 验证（测试 + typecheck/lint，失败续修）→ 收尾（`git` 工具只读核对变更后只提交预期文件，不擅自 commit；总结先结论后细节、引用 文件:行号、失败如实报告）
+- **分析工具**：`read`（读源码，`lineNumbers=true` 行号定位）、`ls`（目录结构）、`grep`（内容搜索：files/count 形态摸底 + content/context 精读、include 过滤文件类型）、`glob`（文件名 glob 查找）、`search_symbols`（**跨文件符号定义定位**：tree-sitter 解析函数/类/方法/类型定义，返回 文件:行号: 类型 名称，精确匹配优先，比 grep 更精准）、`analyze`（tree-sitter 语法结构概览）、`diff`（修改前后/两文件对比，UI 并排高亮）、`fetch_url`（查阅第三方库/框架文档）、`sh`（运行测试）
+- **修改工具**：`patch`（**unified diff 补丁应用**：一次多 hunk、行号模糊容错、原子落盘、dryRun 预演，改动多/行号易偏移时优先）/`edit`（定点替换，小范围改动）/`write`（新建/整体覆盖）由 code 的 `requiresApproval` 声明审批；`sh`/`py`（Python 项目执行测试与脚本）走工具自身动态审批（默认需用户审批，复用统一审批流；`approval:false` 按次免审，见「工具审批」）；`file` 文件管理（rename/move/delete/info 多动作）；`git`（**只读**：status/diff/log 免审批，写操作走 `sh`）
 - **协作工具**：`ask_user`（需求澄清、方案取舍确认，阻塞等待用户选择）、`todo`（待办增删改查统一入口，entries 列表一次批量操作、空列表即查询，与会话待办联动）、`agent_run`（执行新会话委托其他子Agent——如 `playwright` 做 Web 项目浏览器端验证；**不得委托 `self_optimize`**，见「职责边界」）
+- **验证/环境工具（自全局工具集下沉，全局集最小化）**：`preview_server`（临时新端口启动/停止一份独立进程的 GEBAI 服务，`action=start`/`stop`，供用户验证服务端类改动——不中断当前会话，启动返回 URL/PID/日志路径）、`env_detect`（环境探测：平台/架构、PATH 去重、关键工具链版本 node/bun/python/git/cargo 等（缺失标记不可用）、Windows MSVC 与 WebView2 状态，指导安装缺失组件）、`system_info`（系统基础信息）——三者不注册为全局工具，以 `code_preview_server`/`code_env_detect`/`code_system_info` 命名空间暴露（`self_optimize` 经连带装载 code 一并获得），全部免审批
 - **tree-sitter 语法分析（`analyze`）**：基于 `web-tree-sitter`（wasm）按语言加载语法（JS/TS/TSX/Python/Go/Rust/Java/C/C++/JSON/HTML/CSS/Bash 等 30+ 语言，语法文件来自 `tree-sitter-wasms`），输出结构化概览（导入/导出、函数/类/方法/类型定义及行号、嵌套关系），替代逐行阅读快速定位；首次使用懒加载、按语言缓存 parser；**wasm 加载双通道**——dev 模式 `require.resolve` 读 node_modules，二进制/打包模式回退构建期内嵌注册表（`analyzer-wasm.embedded.generated.json`，`scripts/build-analyzer-wasm.ts` 生成，gzip 压缩约 3.6MB）；**报错区分两类**：语言不在映射表报「不支持的语言」（附支持列表），wasm 资源加载失败报「语法分析不可用」（提示依赖缺失/未内嵌并引导改用 read）——不再把资源缺失误报为语言不支持
 - **两种项目形态（二选一）**：
   - **预置项目**：会话环境变量 `CODE_PROJECTS`（JSON 数组 `[{name, path, description?}]`）声明命名项目注册表——**工具以 `project` 参数（项目名）选择目标项目**，路径参数相对所选项目根解析；预置项目**可携带项目说明**（`description`），清单（名称/说明/路径）注入**子Agent 系统提示词**（engine 组装子Agent 提示词时注入——`agent_run` 执行新会话与装载写会话记录（`ensureSessionAgents`）均注入，**不注入总Agent 系统提示词**；注记置于职责分隔头之后、静态提示词之前（环境信息前置，模型开工先读清单按名选项目））；**描述动态体现**：engine 的 `agentDescription` 把预置项目摘要（名称: 说明（路径））追加进 code 描述——未装载清单（总Agent 系统提示词）与 `agent_list` 输出均展示，总Agent 装载前即可按项目名关联任务与代码位置，完整注记（工具 project 参数用法说明）仍只在子Agent 提示词；非法 JSON 静默忽略（回退自由项目模式），同名项目去重（首个生效）
   - **自由项目**：不配置/不传 `project` 时，直接用 `path` 参数传项目或文件路径（含 `CODE_PROJECT` 项目绑定下的相对路径），行为与旧版一致
-  - 实现：`code` 的每个文件工具经 `projectAware` 包装（`sub-agents/code.ts`）——传入 `project` 时把 `resolvePath`/`workdir`/`listFiles` 基准切换到该项目根（沙箱模式限定项目内，本地模式放开）；`grep`/`search_files`/`search_symbols` 在项目模式下递归扫描项目根（跳过 `.git`/`node_modules`/`dist` 等大型目录，限深 10 层）；`git` 以项目根为工作目录
+  - 实现：`code` 的每个文件工具经 `projectAware` 包装（`sub-agents/code.ts`）——传入 `project` 时把 `resolvePath`/`workdir`/`listFiles` 基准切换到该项目根（沙箱模式限定项目内，本地模式放开）；`grep`/`glob`/`search_symbols` 在项目模式下递归扫描项目根（跳过 `.git`/`node_modules`/`dist` 等大型目录，限深 10 层）；`git` 以项目根为工作目录
 - **项目内置（特定项目绑定）**：会话环境变量 `CODE_PROJECT`（子Agent 大写前缀 `CODE_AGENT_*` 约定）声明默认项目根——子Agent 的工作目录与路径解析以项目根为基准，系统提示词注入项目路径；沙箱模式限定项目内，本地模式放开；未设置时按用户给定路径处理。**沙箱降级**：沙箱模式下越界/绝对路径的项目配置（`{AGENT}_PROJECT` 绑定与 `{AGENT}_PROJECTS` 预置项目）解析失败时**静默跳过/回退工作目录**（不使任务失败，与非法 JSON 忽略一致），避免本机环境变量注入的越界路径拖垮服务端部署。通用机制：任意子Agent 均可通过 `{AGENT_NAME_UPPER}_PROJECT`（项目根绑定）与 `{AGENT_NAME_UPPER}_PROJECTS`（预置项目注册表，engine 解析并注入 ctx/提示词，工具自行决定是否暴露 `project` 参数）使用。**总Agent 侧注入项目绑定（不含预置项目清单）**：`buildSystemPrompt` 汇总所有已注册子Agent 的 `{AGENT}_PROJECT`（「xx 子Agent 项目绑定：<根路径>（agent_run 新会话执行该子Agent 时以其为项目根；装载模式下路径基准为会话目录，访问项目用 project 参数或绝对路径）」——仅声明绑定，不宣称装载模式下工作目录已切换）注入总Agent 系统提示词；`{AGENT}_PROJECTS` 预置项目说明（含清单）**只注入子Agent 系统提示词**（`agent_run` 执行新会话形态，见上），总Agent 侧仅经**描述摘要**（`agentDescription`：未装载清单/`agent_list` 中描述附「预置项目：名称: 说明（路径）」）轻量体现，不注入完整清单注记；主循环 `buildContext` 合并全部预置项目供 `project` 参数路由（装载模式直接用其工具时 project 参数照常可用；清单提示词装载模式同样注入——`ensureSessionAgents` 写会话记录提示词消息时动态拼接 presetNote，与 `agent_run` 新会话一致）
-- **受限模式（CODE_RESTRICT_PROJECTS=true）**：code 子Agent 文件工具（read/write/edit/apply_patch/ls/grep/search_files/search_symbols/move_file/delete_file/diff/analyze/sh/py/git）**仅允许操作预配置项目**——必须携带 `project` 参数（项目名须在 `CODE_PROJECTS` 清单中），自由路径（`path`）被拒绝并提示改用 project 参数；处于 `{AGENT}_PROJECT` 绑定根内（新会话执行模式）时未传 project 放行。**默认关闭（不限制）**，可经会话/用户/进程环境变量开启；受限说明属 code 子Agent 行为约束，**只注入子Agent 系统提示词**（`agent_run` 新会话执行时，code 静态提示词含开关含义、动态 restrictNote 注入当前开启状态），**不注入总Agent 系统提示词**——装载模式下模型走自由路径时由工具错误提示自愈引导（DESIGN「环境变量配置」）
+- **受限模式（CODE_RESTRICT_PROJECTS=true）**：code 子Agent 文件工具（read/write/edit/patch/ls/grep/glob/search_symbols/file/diff/analyze/sh/py/git）**仅允许操作预配置项目**——必须携带 `project` 参数（项目名须在 `CODE_PROJECTS` 清单中），自由路径（`path`）被拒绝并提示改用 project 参数；处于 `{AGENT}_PROJECT` 绑定根内（新会话执行模式）时未传 project 放行。**默认关闭（不限制）**，可经会话/用户/进程环境变量开启；受限说明属 code 子Agent 行为约束，**只注入子Agent 系统提示词**（`agent_run` 新会话执行时，code 静态提示词含开关含义、动态 restrictNote 注入当前开启状态），**不注入总Agent 系统提示词**——装载模式下模型走自由路径时由工具错误提示自愈引导（DESIGN「环境变量配置」）
 - **环境变量一览注入提示词**：系统提示词内置「项目与环境变量配置」段落，逐条列出项目相关 env 的名称与作用（`CODE_PROJECTS` 预置项目注册表 / `CODE_PROJECT` 项目根绑定 / `CODE_RESTRICT_PROJECTS` 受限模式），模型无需猜测配置来源即可直接按名使用项目；预置项目实际清单（名称/说明/路径）仍由 engine 动态注入（见上），注记前置（职责分隔头之后、静态提示词之前）保证模型开工先读环境
 - **项目约定自动注入（AGENTS.md）**：子Agent 项目根存在 `AGENTS.md`（兼容 `AGENT.md` 命名）时，engine 在 `runNewSession` 组装系统提示词时**自动读取并注入**（`\n\n项目约定（AGENTS.md，编码/维护必须遵守）:\n<内容>`，≤8KB 截断，不存在/不可读静默跳过）——code 绑定项目（`CODE_PROJECT`）与 self_optimize 绑定 GEBAI 仓库（`SELF_OPTIMIZE_PROJECT`）均生效，模型无需先 `read` 即可遵守项目约定；预置项目（`project` 参数形态）运行期才确定目标，不自动注入（模型可用 `read` 按需读取）
 - **工作区限制（按运行形态）**：
@@ -715,19 +716,34 @@ export const preload = false
 实现于 `sub-agents/explore/explore.ts`（目录形式），参照 ZCode Explore 子代理设计的**只读探索专家**——把「大范围扫读」从主上下文中剥离出去，主会话只拿结论：
 
 - **用途**：跨大量文件的代码摸底/架构梳理/多点位定位——`code`（或总Agent）经 `agent_run` 委托执行，广度优先搜索后返回**结论 + 文件:行号 引用清单**，中间搜索/读取过程留在新会话存档里，不占主上下文（防上下文膨胀的标准委托形态）
-- **硬约束（代码级）**：工具集**只有只读工具**（read/ls/grep/search_files/search_symbols/analyze/git/fetch_url/todo，全部免审批）——没有 write/edit/apply_patch/sh/py/delete_file/move_file，探索不可能产生任何修改或命令执行；需要修改时装载/委托 `code`
-- **工作流（提示词内置）**：圈定范围（project 参数/任务给定根；ls/search_files 看结构、grep output=files 宽泛定位）→ 抽查精读（关键文件 read 分段读、search_symbols 定位定义、grep context 看调用语境、analyze 结构概览代替通读）→ 汇总结论（**先结论后细节**，关键位置给 文件:行号，未确认点明确标注不猜测）→ 规模纪律（命中面大先 output=count 估面再挑重点；只保留与目标相关的结论）
+- **硬约束（代码级）**：工具集**只有只读工具**（read/ls/grep/glob/search_symbols/analyze/git/fetch_url/todo，全部免审批）——没有 write/edit/patch/sh/py/file（含 delete/move 动作），探索不可能产生任何修改或命令执行；需要修改时装载/委托 `code`
+- **工作流（提示词内置）**：圈定范围（project 参数/任务给定根；ls/glob 看结构、grep output=files 宽泛定位）→ 抽查精读（关键文件 read 分段读、search_symbols 定位定义、grep context 看调用语境、analyze 结构概览代替通读）→ 汇总结论（**先结论后细节**，关键位置给 文件:行号，未确认点明确标注不猜测）→ 规模纪律（命中面大先 output=count 估面再挑重点；只保留与目标相关的结论）
 - **项目路由**：文件工具经 `projectAware` 包装（复用 code 的实现，导出共享）——支持 `project` 参数按预置项目名路由，路径相对项目根解析；受限模式（CODE_RESTRICT_PROJECTS）同规则生效
 - 与 `code` 的分工：`code` 是「探索→方案→修改→验证」全流程执行者；`explore` 只做其中的「探索」段且产出为结论——大范围摸底先委托 explore 拿地图，再由 code 精确改动，两段各司其职
+
+
+#### `widgets`（HTML 小工具库管理）
+
+实现于 `sub-agents/widgets/widgets.ts`，承接原全局工具 `save_tool`/`delete_tool` 并**补齐增删改查**（原缺 list/get，模型无法查看已保存的小工具清单与源码）；工具名从 `save_tool`/`delete_tool` 简化为命名空间内单字（`widgets_save` 等），**语义上与模型工具（tool call）区分**——「小工具」指 Web 标题栏「小工具」面板中加载的 HTML 页面组件，提示词中明确这一区分：
+
+- **工具集**（四工具均 `interaction: "realtime"` 仅实时前端，多轮交互/无交互通道自动移除）：
+  - `save`（`name`/`html`/`scope`）：保存/覆盖（增+改）；`scope=public` 公用 / `private` 用户私有（默认）
+  - `list`：列出全部小工具（名称/范围/更新时间；私有同名覆盖公用不重复展示）——查清单
+  - `get`（`name`）：读取完整源码与元信息（解析顺序：用户私有 → 公用）——查明细，修改前先 get
+  - `delete`（`name`/`scope`）：删除（不可恢复），**需审批**（公用删除影响所有用户）
+- **工作流（提示词内置）**：创建（render_html 调试满意 → save）→ 查看（list/get）→ 修改（get 读源码 → 改 → save 同名覆盖 → render_html 复核）→ 删除（delete，公用删前向用户确认）
+- **存储/权限**：复用 `core/mini-tools.ts`（公用 `tools/` + 私有 `users/{user}/tools/` 哈希分片，同名私有覆盖公用；服务模式公用写仅管理员），见「HTML 小工具库」
+- **预加载**：`preload = false`，按需装载
 
 
 #### 命名与预加载总览
 
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
 |---------|------|------|--------|------|
-| `code` | read/write/edit/apply_patch/sh/py/ls/grep/search_files/search_symbols/move_file/delete_file/diff/analyze/git/fetch_url/ask_user/agent_run/todo | edit+write+apply_patch+sh+py | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析、补丁应用、符号定位、git 只读核对、修改前后对比、文档查阅、待办规划、方案确认、Python 执行、浏览器端验证委托、项目内置） |
-| `self_optimize` | 独有工具 read_feedback/run_tests/rollback/preview_server/page_capture/vision；**通用工具与工作流直接复用 code**（装载/`agent_run` 预加载均连带 code——文件/分析类操作用 `code_*` 工具，code 工作流提示词随连带装载注入，不重复注册）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback（code_* 写类审批由 code 声明承接） | ✗ | 优化歌白自身（tree-sitter/补丁应用等通用能力经 code；特有：反馈读取、测试准入+回滚、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析、验证服务、写范围守卫；**装载即连带装载 code**） |
-| `explore` | read/ls/grep/search_files/search_symbols/analyze/git/fetch_url/todo（全部只读，支持 project 参数路由） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行，返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
+| `code` | read/write/edit/patch/sh/py/ls/grep/glob/search_symbols/file/diff/analyze/git/fetch_url/ask_user/agent_run/todo/preview_server/env_detect/system_info | edit+write+patch+sh+py | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析、补丁应用、符号定位、git 只读核对、修改前后对比、文档查阅、待办规划、方案确认、Python 执行、浏览器端验证委托、项目内置、验证服务（自全局下沉 preview_server）与环境/工具链探测（env_detect/system_info）、文件管理（file：重命名/移动/删除/信息）） |
+| `self_optimize` | 独有工具 read_feedback/run_tests/rollback/page_capture/vision；**通用工具与工作流直接复用 code**（装载/`agent_run` 预加载均连带 code——文件/分析/验证类操作用 `code_*` 工具（含 code_preview_server/code_file），code 工作流提示词随连带装载注入，不重复注册）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback（code_* 写类审批由 code 声明承接） | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经 code；特有：反馈读取、测试准入+回滚、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析、写范围守卫；**装载即连带装载 code**） |
+| `widgets` | save/list/get/delete | delete（公用/私有删除均需审批） | ✗ | HTML 小工具库增删改查（自全局 save_tool/delete_tool 下沉并补齐：保存/清单/读取源码/删除；四工具限实时前端 interaction=realtime；与模型工具语义区分——小工具是「小工具」面板加载的页面组件） |
+| `explore` | read/ls/grep/glob/search_symbols/analyze/git/fetch_url/todo（全部只读，支持 project 参数路由） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行，返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
 | `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_read/screen_info | window_*+type/key/mouse | ✗ | 桌面控制（截图/窗口/输入/剪贴板/屏幕信息，仅本地模式） |
 | `feishu_docs` | auth_status/auth_user_authorize/auth_user_token/auth_user_status/auth_user_clear/create_doc/get_doc_meta/get_doc_text/get_doc_blocks/list_blocks/find_blocks/add_blocks/update_block/delete_blocks/import_markdown/export_doc/list_files/create_folder/get_file_meta/upload_file/download_file/delete_file/search/create_sheet/get_sheet_meta/read_sheet/write_sheet/append_sheet/create_bitable/list_bitable_tables/list_bitable_records/add_bitable_records/update_bitable_record/delete_bitable_records/list_wiki_spaces/create_wiki_node/get_wiki_node/get_board/add_permission/api_call | 写操作全部（创建/修改/删除/上传/授权） | ✗ | 飞书云文档（文档/表格/多维表格/知识库/云空间/搜索/权限/思维导图画板；**可配置 user_access_token 以用户身份操作、创建用户所有权资源**；需配置 `FEISHU_DOCS_*` 或全局 `GEBAI_FEISHU_*` 凭证） |
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
@@ -773,12 +789,12 @@ Agent 通过修改**自身代码**来持续改进自己，不使用记忆（memo
 
 #### `self_optimize` 专用子Agent
 
-自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、验证服务、页面捕获、视觉分析），通用编码能力（文件/分析/修改工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供，**不重复注册工具、不复刻提示词**：
+自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、页面捕获、视觉分析），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**：
 
 ```ts
 export const name = "self_optimize"
-export const description = "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具）并同步 DESIGN.md，测试失败可 rollback 回滚。不处理外部项目（外部代码用 code）。"
-export const tools: ToolSet = { read_feedback, run_tests, rollback, preview_server, page_capture, vision }
+export const description = "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 self_optimize_read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具）并同步 DESIGN.md，测试失败可 rollback 回滚。不处理外部项目（外部代码用 code）。"
+export const tools: ToolSet = { read_feedback, run_tests, rollback, page_capture, vision }
 export const requiresApproval = { run_tests: true, rollback: true }
 export const preload = false          // 按需装载，非默认注入
 export const writeGuard = (env, absPaths) => string | null   // 写范围守卫声明（见下「写范围守卫」）
@@ -788,13 +804,13 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
   - **装载模式**：装载 `self_optimize` 时 `SubAgentManager.load` **连带装载 `code`**（幂等，WS `sub_agent.load`/`agent_load`/预加载所有装载路径均生效）——code 完整提示词写入会话记录，文件/分析类操作直接用 `code_*` 工具（带 project 参数，可按名操作预置项目）
   - **新会话执行（`agent_run`）**：`runNewSession` 预加载 `self_optimize` 时**自动连带预加载 `code`**（code 前置，系统提示词含两段职责分隔头——code 的通用工作流在前，self_optimize 的特有流程与约束在后），新会话工具集为 `code_*` 通用工具 + `self_optimize_*` 独有工具
   - 提示词分层：self_optimize 静态提示词**只承载自我优化特有内容**（反馈输入、写范围、设计同步铁律、测试准入/回滚、用户验证、git 收尾），通用工作流以「直接遵循 code 子Agent 提示词」引用（两种路径下 code 提示词均在上下文内）——符合「子Agent 静态提示词不复刻其他子Agent 内容」的分层原则
-- **反馈读取（`read_feedback`）**：复用全局工具（本用户反馈按时间倒序）；新会话执行环境下全局工具不在注册表，声明进 def 保证 `self_optimize_read_feedback` 可用（反馈是自我优化的核心输入通道）
+- **反馈读取（`self_optimize_read_feedback`）**：自全局工具集下沉（全局不再注册 `read_feedback`，自我优化为唯一消费方）——按用户反馈按时间倒序读取，声明进 def 同时覆盖装载模式（`self_optimize_read_feedback` 命名空间）与新会话执行环境（全局工具不在注册表，def 声明保证可用）；反馈是自我优化的核心输入通道
 - **页面捕获（`page_capture`）**：仿 draw 的前端配合链路——引擎发布 `event.capture.request`（含 captureId + fullPage + delay）→ 前端捕获**当前浏览器页面**（渲染后 DOM html 截断 300KB + modern-screenshot 截图，png/jpeg，体积压缩 ≤2MB；fullPage=true 截整页，高度上限 12000px，缺省视口；**delay 为捕获前等待毫秒数**（UI 操作/动画/异步渲染完成后截图，上限 10 秒，前端 sleep 后统一捕获 html 与截图））经 WS `capture.result` 回传 → 服务端落盘会话 `tmp/capture/`（`page-<ts>.html` + `page-<ts>.png|jpg`）并返回文件/图片内容块；模型用 `read`（code_*）读取实际渲染 html、用 `vision` 分析截图——**UI 修改后模型直接看到真实渲染效果**（dev 模式修改后自动热更新，捕获前提示用户刷新页面；30 秒超时返回失败提示）
 - **视觉分析（`vision`）**：与主 Agent 同一 provider 解析逻辑——组装层（`index.ts`）注册 `setVisionProviderGetter`，`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落；子Agent 定义经 `getVisionProvider` 构造工具
-- **写范围守卫（`SubAgentDef.writeGuard`，代码级强制而非仅提示词）**：def 声明 `writeGuard(env, absPaths)`，引擎注入 `ToolContext.writeGuard`——文件写类工具（`write`/`edit`/`apply_patch`/`move_file`/`delete_file`）写入前以**解析后的绝对路径**调用，返回非空字符串即拒绝（作为工具结果返回引导模型调整，不抛错不落盘）。**装载模式按会话装载名单动态收集**（`sessionWriteGuard`：调用时点读会话 `loadedSubAgents`，任务中途 `agent_load` 装载后立即生效）、**新会话模式按预加载名单静态组合**（`defsWriteGuard`）——两个路径一致生效（旧实现仅新会话路径有守卫，装载路径因工具去重丢失守卫副本，现已修复）。政策内容：**默认只读模式仅允许写入 子Agent 目录（`packages/server/src/sub-agents/`）与仓库级文档/配置（`DESIGN.md`/`AGENTS.md`/`.env.example`/`README.md`/`kilo.json`）**，核心引擎源码（`core/`/`app`/`ws` 等）拒绝写入（返回拒绝说明引导改用子Agent 扩展或开启开关）；`GEBAI_SELF_MODIFY=true`（启动级环境变量）放开到仓库内任意路径；仓库根解析：`SELF_OPTIMIZE_PROJECT` 优先，dev 模式按模块路径推导，二进制模式必须显式配置；**守卫只保护歌白仓库**——仓库根之外的常规写入（会话 `tmp/` 产物等）不受限（守卫目的是保护服务端源码，不约束无关产物）
-- **测试准入 + 回滚工具**：`run_tests`（在仓库根执行 `bun test` 指定文件或 `bun run test` 全量，需审批）——测试是自我修改的唯一准入凭证；`rollback`（`git checkout --` 指定路径或全部，需审批）——测试失败后的恢复路径；code_* 写类工具的审批由 code 的 `requiresApproval` 声明承接（edit/write/apply_patch），sh/py 走工具自身动态审批（默认需审批、`approval` 参数按次免审，见「工具审批」）
-- **验证服务（`preview_server`）**：临时新端口独立进程（不中断当前会话），用于服务端功能类修改的验证；UI/前端类修改优先走 `page_capture` 当前页面验证
-- **工作流**：通用段（规划→探索→定位→方案→修改→验证→收尾）直接遵循 code 提示词（探索段 grep/analyze/search_symbols 分工、修改段 apply_patch 优先等见「code」章节）；特有段：反馈输入（`read_feedback`）→ **设计同步铁律**（任何行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 `DESIGN.md` 对应章节）→ 修改（范围由写范围守卫代码级强制）→ 验证（`run_tests` 测试准入，失败 `rollback` 回滚，再 typecheck/lint）→ 用户验证（UI 类 `page_capture`、服务端类 `preview_server`）→ 收尾（`git` 只读核对、不擅自 commit、总结先结论后细节）
+- **写范围守卫（`SubAgentDef.writeGuard`，代码级强制而非仅提示词）**：def 声明 `writeGuard(env, absPaths)`，引擎注入 `ToolContext.writeGuard`——文件写类工具（`write`/`edit`/`patch`/`file`（rename/move/delete 动作，move/rename 校验源与目标两路径））写入前以**解析后的绝对路径**调用，返回非空字符串即拒绝（作为工具结果返回引导模型调整，不抛错不落盘）。**装载模式按会话装载名单动态收集**（`sessionWriteGuard`：调用时点读会话 `loadedSubAgents`，任务中途 `agent_load` 装载后立即生效）、**新会话模式按预加载名单静态组合**（`defsWriteGuard`）——两个路径一致生效（旧实现仅新会话路径有守卫，装载路径因工具去重丢失守卫副本，现已修复）。政策内容：**默认只读模式仅允许写入 子Agent 目录（`packages/server/src/sub-agents/`）与仓库级文档/配置（`DESIGN.md`/`AGENTS.md`/`.env.example`/`README.md`/`kilo.json`）**，核心引擎源码（`core/`/`app`/`ws` 等）拒绝写入（返回拒绝说明引导改用子Agent 扩展或开启开关）；`GEBAI_SELF_MODIFY=true`（启动级环境变量）放开到仓库内任意路径；仓库根解析：`SELF_OPTIMIZE_PROJECT` 优先，dev 模式按模块路径推导，二进制模式必须显式配置；**守卫只保护歌白仓库**——仓库根之外的常规写入（会话 `tmp/` 产物等）不受限（守卫目的是保护服务端源码，不约束无关产物）
+- **测试准入 + 回滚工具**：`run_tests`（在仓库根执行 `bun test` 指定文件或 `bun run test` 全量，需审批）——测试是自我修改的唯一准入凭证；`rollback`（`git checkout --` 指定路径或全部，需审批）——测试失败后的恢复路径；code_* 写类工具的审批由 code 的 `requiresApproval` 声明承接（edit/write/patch），sh/py 走工具自身动态审批（默认需审批、`approval` 参数按次免审，见「工具审批」）
+- **验证服务（`preview_server`，经 code 命名空间 `code_preview_server` 使用）**：临时新端口独立进程（不中断当前会话），用于服务端功能类修改的验证；UI/前端类修改优先走 `page_capture` 当前页面验证
+- **工作流**：通用段（规划→探索→定位→方案→修改→验证→收尾）直接遵循 code 提示词（探索段 grep/analyze/search_symbols 分工、修改段 patch 优先等见「code」章节）；特有段：反馈输入（`self_optimize_read_feedback`）→ **设计同步铁律**（任何行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 `DESIGN.md` 对应章节）→ 修改（范围由写范围守卫代码级强制）→ 验证（`run_tests` 测试准入，失败 `rollback` 回滚，再 typecheck/lint）→ 用户验证（UI 类 `page_capture`、服务端类 `preview_server`）→ 收尾（`git` 只读核对、不擅自 commit、总结先结论后细节）
 - **与 `code` 的差异**：
   - 工作区：服务端源码（`packages/server/src/sub-agents/` 等，`GEBAI_SELF_MODIFY` 开启时更宽） vs 会话 `tmp/` 外部项目
   - 审批：自我优化改动影响所有用户，默认更严格（改动子Agent 定义即影响全局能力）
@@ -955,7 +971,7 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 | `multi_turn`（**多轮交互**） | 多轮请求-响应往返（非流式），有往返但无前端页面；**仅关键操作（requiresApproval）询问用户**（如飞书审批回调卡片），非关键操作自动 | 飞书机器人 | `none` + `multi_turn` 声明（ask_user/draw 已有按钮/后端渲染适配） |
 | `realtime`（**实时交互**） | 实时流式交互：完整前端，关键操作询问用户 | WebSocket（Web UI，默认） | 全部 |
 
-- **工具声明**（`interaction: "realtime"` 仅实时前端）：`page_capture`/`render_html`/`save_tool`/`delete_tool`/`ask_env`（依赖前端页面配合，ask_env 需填值弹窗）；`interaction: "multi_turn"`（至少多轮交互）：`ask_user`/`draw`（飞书通道已有选择卡片/后端渲染适配）；其余工具缺省 `none`
+- **工具声明**（`interaction: "realtime"` 仅实时前端）：`page_capture`/`render_html`/`ask_env` 与 widgets 四工具（`save`/`list`/`get`/`delete`，依赖前端页面配合，ask_env 需填值弹窗）；`interaction: "multi_turn"`（至少多轮交互）：`ask_user`/`draw`（飞书通道已有选择卡片/后端渲染适配）；其余工具缺省 `none`
 - **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/定时任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书回调卡片），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
 - **飞书通道** = `interactionMode: "multi_turn"`：realtime 声明的 5 个工具自动禁用（原 `FEISHU_DISABLED_TOOLS` 名单已移除，由声明统一驱动），`ask_user`/`draw` 可用（走飞书交互卡片/后端渲染），关键操作经审批卡片询问
 - **REST 通道** = `interactionMode: "none"`：`ask_user`/`draw` 及实时前端工具自动禁用，不再等待至超时；本地模式需审批工具自动通过，**服务模式需审批工具直接拒绝**（防免审批执行）；需要完整交互能力请走 WS 通道
@@ -1064,7 +1080,7 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 
 - **`Tool.outputSchema`**：声明 `data` 的 JSON Schema，经 `tool_schemas` 工具批量暴露给模型——编排前先查输出结构，避免逐个试调浪费往返
 - **引擎兜底截断保留 `data`**（含 `sessionRun` 扩展字段）：截断只作用于模型可见文本
-- 已提供结构化输出的全局工具：`ls`（entries）、`search_files`（files/total）、`grep`（matches）、`git`（status：branch/ahead/behind/changes；log：commits）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`current_time`、`system_info`、`todo`（todos）、`agent_list`（agents）、`read_feedback`（items）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`）
+- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（matches）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`current_time`、`todo`（todos）、`agent_list`（agents）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
 - **`tool_schemas` 工具**（批量查询）：`tools` 传工具名列表返回各工具 `{name, description, parameters, outputSchema}`（未知/未启用标记错误）；省略时返回全部已启用工具的输出结构概要（紧凑一行一个，不含输入参数）
 
 #### 富内容块渲染
@@ -1258,13 +1274,11 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `write` | 写入文件（整体覆盖）。路径受沙箱限制；目标文件**已存在且本会话未 read 过**时拒绝（防盲覆盖，先 read 再覆盖，见「write 防误覆盖守卫」） | 否 |
 | `ls` | 列出目录内容（文件/子目录、大小） | 否 |
 | `grep` | 按正则表达式在会话目录中递归搜索文本内容（返回 文件:行号: 匹配行，限文件大小与匹配数）；`output` 三种结果形态（`content` 逐行内容 / `files` 仅命中文件清单——宽泛摸底定位优先 / `count` 每文件命中行数）、`context` 附匹配行前后上下文（格式同 `grep -n -C`：匹配行 `文件:行号:` 前缀、上下文行 `文件-行号-` 前缀、组间 `--` 分隔）、`include` 按文件路径 glob 过滤（如 `*.ts`）（见「grep 内容检索工具」） | 否 |
-| `search_files` | 按文件名模式（glob：`*`/`**` 跨目录、`?` 单字符）递归查找文件（path 可限定子目录，支持绝对路径，与 `read`/`write` 同一路径解析规则） | 否 |
-| `delete_file` | 删除文件或目录（递归，不可恢复） | 否 |
-| `move_file` | 移动/重命名文件或目录（目标父目录不存在时自动创建，与 `write` 一致） | 否 |
+| `glob` | 按文件名模式（glob：`*`/`**` 跨目录、`?` 单字符）递归查找文件（path 可限定子目录，支持绝对路径，与 `read`/`write` 同一路径解析规则） | 否 |
+| `file` | **文件管理（单工具多动作）**：`rename` 重命名（同目录改名，`newName` 仅名字不含路径——含分隔符拒绝防越界，跨目录用 move）/ `move` 移动或跨目录改名（`to` 含目标文件名，父目录不存在自动创建，与 `write` 一致）/ `delete` 删除文件或目录（递归，不可恢复）/ `info` 查看文件信息——**按内容探测**（类似 `file` 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite/Java class 等）、文本 vs 二进制判定（二进制勿盲 read）、编码检测（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**（`data.extMismatch`）；附人类可读大小与修改时间，目录附直接子条目数。写动作（rename/move/delete）走写范围守卫；与 `ls`（目录列表）分工——`ls` 单独保留 | 否 |
 | `edit` | **精确修改文件**：基于 `old_string` → `new_string` 替换（可多处），替换前校验原文匹配与**唯一性**（多处命中报错列出行号，或该项 `replaceAll: true` 全部替换），失败即报错不落盘；空 `oldString` 拒绝；成功回报各处应用行号（见「edit 修改工具」） | 否 |
-| `apply_patch` | **应用 unified diff 补丁**：一次多 hunk、行号模糊容错（上下文裁剪重试），全部 hunk 校验通过才整体落盘（原子），`dryRun` 可预演不落盘；单次单文件（见「apply_patch 补丁应用工具」） | 否 |
+| `patch` | **应用 unified diff 补丁**：一次多 hunk、行号模糊容错（上下文裁剪重试），全部 hunk 校验通过才整体落盘（原子），`dryRun` 可预演不落盘；单次单文件（见「patch 补丁应用工具」） | 否 |
 | `diff` | **文本/文件对比**：对比两段文本或两个文件（旧 → 新），输出 unified diff 文本并返回 `diff` 内容块，UI 并排对比渲染、按文本类型语法高亮 | 否 |
-| `git` | **只读 Git 操作**：`status`（工作区状态）/`diff`（未暂存或暂存区变更）/`log`（最近提交），不修改仓库无需审批；写操作（add/commit 等）走 `sh`（需审批，见「git 版本控制工具（只读）」） | 否 |
 | `flow` | **数据流编排**（工具即函数、动态编程）：一次调用执行多步工具链——引用映射（`{{id.data.字段}}`，一对一/一对多/多对一）、`when` 条件分支、`foreach`/`while` 循环、`optional` 容错；旧版线性串联格式兼容（见「flow 数据流编排工具」） | **取决于内部工具**（动态审批） |
 | `tool_schemas` | **批量获取工具 schema**：按工具名列表返回输入参数与结构化输出（`data`）的 JSON Schema；省略时返回全部已启用工具的输出结构概要——编排（flow）前理解输出结构，避免逐个试调 | 否 |
 | `agent_list` | 列出可用子Agent（名称/描述/是否已装载；**不列工具名**，工具名以注册的工具集为准）。**不注册进总Agent 全局工具集**——未装载清单已由 `systemPromptInjection` 注入提示词（模型上下文已有，工具冗余且干扰工具选择）；仅在新会话执行环境注入（纯 md 组合子Agent 自动注入编排工具时，见「子Agent文件格式」） | 否 |
@@ -1274,18 +1288,12 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `py` | 执行Python代码（**`timeout` 参数同 `sh`**；**`strict` 参数同 `sh`**；**`approval` 参数同 `sh`**） | **是**（默认；`approval:false` 按次免审） |
 | `draw` | **创建/更新结构化图表**（**三种图表语言**：`format` 必选参数 `mermaid`/`plantuml`/`d2`，工具描述与参数说明内置选择指南指导模型按需选择——Mermaid 通用流程图/时序图/状态图/甘特图首选、PlantUML 标准 UML 严谨建模首选（类图/组件图/部署图/用例图等）、D2 美观架构图/云架构/对外展示首选，见「图表交互式创作」），渲染成功才返回成功、报错回传模型、5 秒超时判定画图能力受限；渲染按通道实现——Web 前端本地渲染（三种语言各自本地引擎、配色跟随 UI 主题）、飞书桥接后端渲染成 PNG 图片（三语言组合渲染器）、`render=backend` 参数服务端直接渲染成 PNG 图片（三语言组合渲染器，返回 `image` 内容块）；**`code` 与 `path` 二选一（文件渲染）**——`path` 指定会话内已有 `.mmd`/`.puml`/`.plantuml`/`.d2` 文件直接读取渲染（图表名默认取文件主名、format 按扩展名推断，不重发源码）；默认 `frontend` 通道，保存到会话 `tmp/` 并返回 `diagram` 内容块（`format` 字段携带图表语言）供 UI 交互式渲染；**PlantUML 布局规范内置于工具描述**（方向声明/间距 skinparam/together/节点规模控制，未设置间距时自动注入 `skinparam ranksep 80`/`nodesep 40` 兜底，见「图表交互式创作」） | 否 |
 | `render_html` | **生成 HTML 页面并直接在聊天界面内渲染展示**（沙箱 iframe 域隔离预览：脚本可执行、隔离于宿主页面；适合网页原型/数据报表/可视化组件/带交互脚本的小页面），保存到会话 `tmp/` 并返回 `html` 内容块；**`html` 与 `path` 二选一（文件渲染）**——`path` 指定会话内已有 `.html` 文件直接读取渲染（页面名默认取文件主名，不重发源码）；与 `draw`/`diff` 同属 `card.args="block"` 声明（调用不显示通用卡片，结果直出内容块） | 否 |
-| `save_tool` | **保存 HTML 小工具到服务端小工具库**（`name` 工具名 + `html` 源码 + `scope`：`public` 公用 / `private` 用户私有，默认私有；同名覆盖；供侧栏底部「小工具」弹窗随时加载），建议先用 `render_html` 调试满意后再保存 | 否 |
-| `delete_tool` | **删除已保存的 HTML 小工具**（按 `name` + `scope`，不可恢复；私有仅本人，公用删除影响所有用户） | **是** |
 | `fetch_url` | 抓取 URL 内容（网页/API/文档；服务端部署模式限制公网地址防 SSRF 并逐跳校验重定向，响应超阈值截断） | 否 |
 | `vision` | **视觉分析**：把图片文件交给多模态（视觉）模型分析（参数 `target` 目标 + `image` 图片文件路径；模型选择 `GEBAI_VISION_*` 额外视觉模型，未配置回落到声明多模态能力的主模型；base64 内联传输，单图 8MB 上限），返回分析文本并携带 `image` 内容块 | 否 |
 | `todo` | 待办管理（统一入口）：`entries` 操作列表，每项 `op=add/update/delete`——add 新建（需 title，可带 priority/note/eta），update 按 id 改 status/progress/title，delete 按 id 删除；省略/空数组 = 查询；返回操作摘要与当前全部待办状态 | 否 |
 | `ask_user` | 向用户提出选项并**阻塞等待回应**（选项可多选/复杂选项 title+description/自定义文本/拒绝均可，见「选择工具」） | 否 |
-| `read_feedback` | **读取用户反馈**（本用户，按时间倒序最近 N 条，可按 sessionId 过滤）——反馈数据进入 Agent 上下文（self_optimize 等经本工具消费反馈形成闭环） | 否 |
 | `ask_env` | **请求用户设置环境变量并阻塞等待**（name 变量名 + description 用途说明 + secret 敏感值掩码；前端弹窗填值，提交后值注入本次任务 env——后续工具读取立即生效，并保存到浏览器本地后续任务自动生效；用户拒绝/超时返回失败，见「环境变量」） | 否 |
-| `preview_server` | **验证服务**：在临时新端口启动/停止一份独立进程的 GEBAI 服务（`action=start`/`stop`，不中断当前会话与主服务），供用户验证代码改动；启动返回访问 URL/PID/日志路径，`stop` 按 pid 或 port 停止；日志与状态记录于系统临时目录 | 否 |
 | `current_time` | 获取当前时间（一次性给出多种格式直接取用：ISO 8601 / Unix 秒与毫秒 / 本地日期时间（含星期与时区偏移），无需再转换） | 否 |
-| `system_info` | 获取系统信息 | 否 |
-| `env_detect` | **环境探测**：一次性输出平台/架构、PATH（去重）、关键工具链版本（node/bun/python/git/cargo/rustc/go/docker，缺失标记不可用）、Windows 下 VS Build Tools（MSVC）与 WebView2 运行时状态，指导安装缺失组件 | 否 |
 | `cron_add` | 创建定时任务（`schedule`：5 段 cron 或 `@every 30m`/`@daily` 等；`type=script` 脚本运行 / `type=prompt` 提示词运行 agent） | **是** |
 | `cron_list` | 查看本会话定时任务列表 | 否 |
 | `cron_update` | 修改定时任务（启用/周期/类型/内容） | **是** |
@@ -1293,7 +1301,9 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 > `cron_*` 工具仅 `GEBAI_CRON_ENABLED=true` 时注册（见「定时任务」），关闭时完全不可见。
 
-> **路径基准**：文件工具（`read`/`write`/`edit`/`apply_patch`/`ls`/`grep`/`search_files`/`delete_file`/`move_file`/`draw`）的路径参数以**会话根目录**为基准（沙箱模式限定其内，桌面/本地浏览器放开）；而 `sh`/`py` 的子进程工作目录（cwd）为会话 **`tmp/`** 子目录（见「脚本隔离」）。建议产物统一写入 `tmp/`（UI 文件面板仅展示 `tmp/` 内容），跨工具引用时注意两者基准差异。
+> **全局工具集最小化**：编码工作流专属工具不注册为全局工具——`git`（只读变更核对，`code_git`/`explore_git` 命名空间暴露）与 `preview_server`/`env_detect`/`system_info`（验证服务与环境/工具链探测，`code_preview_server`/`code_env_detect`/`code_system_info`）由 `code`/`explore` 子Agent 按需暴露（`self_optimize` 经连带装载 code 一并获得）；小工具库管理（原全局 `save_tool`/`delete_tool`）下沉 `widgets` 子Agent 并补齐增删改查（`widgets_save`/`widgets_list`/`widgets_get`/`widgets_delete`，与模型工具语义区分）；反馈读取（`read_feedback`）下沉 `self_optimize`（`self_optimize_read_feedback`，自我优化专属输入通道）；`delete_file`/`move_file` 合并为全局 `file` 多动作工具——全局集只保留高频基线与编排/交互入口，低频域工具下沉子Agent。
+
+> **路径基准**：文件工具（`read`/`write`/`edit`/`patch`/`ls`/`grep`/`glob`/`file`/`draw`）的路径参数以**会话根目录**为基准（沙箱模式限定其内，桌面/本地浏览器放开）；而 `sh`/`py` 的子进程工作目录（cwd）为会话 **`tmp/`** 子目录（见「脚本隔离」）。建议产物统一写入 `tmp/`（UI 文件面板仅展示 `tmp/` 内容），跨工具引用时注意两者基准差异。
 
 ### `edit` 修改工具
 
@@ -1304,7 +1314,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 - **安全校验**：替换前校验 `oldString` 在文件中**精确匹配**，不匹配则整体失败并报错，**不落盘**，避免模型基于过期内容误改；`oldString` 为空直接拒绝（空串匹配会静默插入文件头，显式报错引导新建文件用 `write`）
 - **近似匹配提示**：精确匹配失败但空白归一化后可命中时，错误信息提示「空白/缩进不一致的近似原文」——引导模型 `read` 后从原文逐字符复制（含缩进），常见于模型凭记忆写 `oldString` 忘记缩进的场景
 - **应用行号回报**：成功后输出每处修改的应用行号（如 `已对 a.ts 应用 2 处修改：1) 行 12；2) 行 40`），便于汇报与后续引用
-- **与 `write` 的关系**：`edit` 用于既有文件的定点修改（保留无关内容）；`write` 用于新建/整体覆盖（受防误覆盖守卫约束）；模型按需选择，`flow` 中可混用；改动较多或行号容易偏移时优先用 `apply_patch` 应用 unified diff（见「apply_patch 补丁应用工具」）
+- **与 `write` 的关系**：`edit` 用于既有文件的定点修改（保留无关内容）；`write` 用于新建/整体覆盖（受防误覆盖守卫约束）；模型按需选择，`flow` 中可混用；改动较多或行号容易偏移时优先用 `patch` 应用 unified diff（见「patch 补丁应用工具」）
 - **审批**：默认无需审批（与 `write` 同级）；子Agent 可通过 `requiresApproval` 声明 `edit` 需审批
 - **路径限制**：与 `read`/`write` 同一路径沙箱（服务端部署限会话 `tmp/` 或用户目录，桌面/本地浏览器不限制）
 
@@ -1318,7 +1328,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
   - `files`：仅命中文件清单（不刷内容）——**宽泛摸底定位优先用**（「哪些文件涉及 X」先看文件面，再对重点文件精读，避免大量匹配行灌进上下文）
   - `count`：每文件命中行数（按命中数降序）——快速评估命中面大小、决定深入策略
 - **上下文行（`context`，0-10，仅 content 模式）**：匹配行前后各附 N 行，格式同 `grep -n -C`——匹配行前缀 `文件:行号:`、上下文行前缀 `文件-行号-`、不相邻组之间 `--` 分隔；重叠区间自动合并，一次调用即可看清命中语境（免二次 `read`）
-- **文件过滤（`include`）**：按文件路径 glob 过滤（如 `*.ts`、`**/*.test.ts`；`*`/`**` 跨目录、`?` 单字符，与 `search_files` 同一套 glob 语义）
+- **文件过滤（`include`）**：按文件路径 glob 过滤（如 `*.ts`、`**/*.test.ts`；`*`/`**` 跨目录、`?` 单字符，与 `glob` 工具同一套语义）
 - **上限**：单文件 1MB、全局匹配 200 处（三种形态同一口径，达上限附「结果可能不完整」提示）；输出超长走统一截断保护
 - **结构化输出**：`data = { mode, matches?, files?, counts?, truncated? }`（按形态携带，`mode` 标明本次形态），供 flow 编排引用
 - **审批**：默认无需审批（纯读取）
@@ -1327,11 +1337,11 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 防止模型**盲覆盖**未见过的文件内容（参照 ZCode Write 的「未读不许覆盖」设计）：
 
-- **守卫规则**：`write` 目标文件**已存在且本会话未读取过**时拒绝写入，返回引导信息（先 `read` 掌握现有内容，确认整体覆盖再 `write`；只改局部用 `edit`/`apply_patch`）；**新建文件不受限**
-- **已读登记（fileGuard）**：引擎维护会话级已读文件集合（`AgentEngine.readFiles`，sessionId → 已读绝对路径），经 `ToolContext.fileGuard`（`markRead`/`hasRead`）注入工具上下文；`read`/`edit`/`apply_patch`/`write` 成功后自动登记——修改过的文件视为已掌握内容，后续 `write` 覆盖放行（迭代改写自身产物不受阻）
+- **守卫规则**：`write` 目标文件**已存在且本会话未读取过**时拒绝写入，返回引导信息（先 `read` 掌握现有内容，确认整体覆盖再 `write`；只改局部用 `edit`/`patch`）；**新建文件不受限**
+- **已读登记（fileGuard）**：引擎维护会话级已读文件集合（`AgentEngine.readFiles`，sessionId → 已读绝对路径），经 `ToolContext.fileGuard`（`markRead`/`hasRead`）注入工具上下文；`read`/`edit`/`patch`/`write` 成功后自动登记——修改过的文件视为已掌握内容，后续 `write` 覆盖放行（迭代改写自身产物不受阻）
 - **生命周期**：登记按会话隔离（`agent_run` 新会话有独立追踪）；REST/WS 删除会话时经 `engine.forgetSession` 释放；单会话登记上限 2000 条（`READ_TRACK_CAP`，超出整表重置——守卫降级为「需重读」，保护语义不破坏）；进程重启后登记为空（重新 read 即可，文件可能已变化，重读本身即正确行为）
 - **兼容性**：`fileGuard` 为可选注入——测试桩/无引擎环境不注入时守卫自动放行（行为与旧版一致）；`flow` 编排内的工具调用走同一 ctx，守卫同样生效
-- **设计动机**：`edit`/`apply_patch` 天然带原文校验（幻觉内容匹配不上），而 `write` 整体覆盖**没有任何内容校验**——未读守卫补齐这一盲区；拒绝结果作为正常工具输出返回（模型下一轮自行 `read` 后重写，一次往返自愈，不中断任务）
+- **设计动机**：`edit`/`patch` 天然带原文校验（幻觉内容匹配不上），而 `write` 整体覆盖**没有任何内容校验**——未读守卫补齐这一盲区；拒绝结果作为正常工具输出返回（模型下一轮自行 `read` 后重写，一次往返自愈，不中断任务）
 
 ### `diff` 文本对比工具
 
@@ -1343,7 +1353,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 - **前端渲染**：左右两栏（旧/新）并排、行号对齐，增删行分别红/绿着色；按 `language` 对**连续同类段整段高亮后切行**，跨行注释/字符串的着色不被截断；历史消息持久化后以同一渲染管线重放；与 `draw` 同属 `card.args="block"` 声明——**不渲染通用工具卡片**，调用与结果直接呈现 diff 内容块（无内容块时以输出文本兜底）
 - **审批**：默认无需审批（纯读取/纯文本计算，不落盘）
 
-### `apply_patch` 补丁应用工具
+### `patch` 补丁应用工具
 
 在 `edit`（定点替换）之外提供**整体补丁应用**能力，适合改动较多、行号容易偏移的代码修改：
 
@@ -1352,19 +1362,19 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 - **匹配与容错（`applyPatch`）**：含删除行的 hunk 以删除行作锚点在文件中整体匹配，上下文不符时**裁剪头/尾上下文各至多 3 行重试**（`PATCH_FUZZ_LINES`，只裁上下文、删除行必在匹配块内，防「应删未删」残留）；纯新增 hunk 按 `@@` 头行号（叠加先前 hunk 的行数偏移）定位插入，带上下文则同样校验
 - **原子性**：全部 hunk 校验通过才一次性写盘（与 `edit` 同语义——任一 hunk 不匹配整体失败不修改，返回失败 hunk 序号与原因，提示先 `read` 当前文件核对或改用 `edit`）
 - **新建文件**：`--- /dev/null` 头或目标文件不存在时按新建处理（仅允许新增行）；删除类补丁（全部删除行）自然清空文件
-- **与 `edit` 的关系**：改动多/跨多处/行号易偏移时 `apply_patch` 一次提交全部改动（可基于 `diff` 工具输出构造补丁，`dryRun=true` 预演）；小范围定点改动用 `edit`；`write` 仅用于新建/整体覆盖
+- **与 `edit` 的关系**：改动多/跨多处/行号易偏移时 `patch` 一次提交全部改动（可基于 `diff` 工具输出构造补丁，`dryRun=true` 预演）；小范围定点改动用 `edit`；`write` 仅用于新建/整体覆盖
 - **上限**：hunk 数 ≤ 100（`PATCH_MAX_HUNKS`）、目标文件 ≤ 5MB（`PATCH_MAX_FILE_BYTES`，超出提示改用 `edit` 分段）
-- **审批**：默认无需审批（与 `edit` 同级）；`code`/`self_optimize` 子Agent 声明 `apply_patch` 需审批（与 `edit`/`write` 同级，见下）
+- **审批**：默认无需审批（与 `edit` 同级）；`code`/`self_optimize` 子Agent 声明 `patch` 需审批（与 `edit`/`write` 同级，见下）
 - **路径限制**：与 `read`/`write` 同一路径沙箱
 
 ### `git` 版本控制工具（只读）
 
-将编码工作流收尾环节的 git 只读操作从 `sh`（每次需审批）独立出来，免审批直接查看变更：
+将编码工作流收尾环节的 git 只读操作从 `sh`（每次需审批）独立出来，免审批直接查看变更。**不注册为全局工具**（全局集最小化，见功能列表注记）——经 `code`/`explore` 子Agent 以 `code_git`/`explore_git` 命名空间暴露（`self_optimize` 经连带装载 code 获得；写操作 add/commit 等在任何命名空间下仍走 `sh` 需审批）：
 
 - **参数**：`action`（`status` 工作区状态 / `diff` 变更内容 / `log` 最近提交）+ 可选 `dir`（仓库目录，默认会话工作目录，经路径沙箱约束）+ `staged`（diff 是否查看暂存区）+ `maxEntries`（log 条数，默认 10、上限 50）
 - **执行**：命令参数由 action 枚举构造（无用户字符串拼接注入），以 `dir` 为 cwd 执行 `git -C <dir> status --short --branch` / `git diff [--staged] --no-color` / `git log --oneline -n N`；非零退出码附 stderr（非仓库目录等可诊断信息）；输出走统一截断保护
 - **只读安全边界**：不提供任何写操作（`add`/`commit`/`checkout` 等仍走 `sh`，需审批且受沙箱约束）——免审批仅限读操作，写操作权限不变
-- **审批**：默认无需审批；`code`/`self_optimize` 子Agent 中经 `projectAware` 包装（`git` 以项目根为工作目录，预置项目形态按项目根执行）
+- **审批**：默认无需审批；经 `code`/`explore` 子Agent 的 `projectAware` 包装暴露（`code_git`/`explore_git`，以项目根为工作目录，预置项目形态按项目根执行；`self_optimize` 经连带装载 code 获得）
 
 ### `flow` 数据流编排工具
 
@@ -1426,7 +1436,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 flow({
   input: { repo: "gebai" },
   steps: [
-    { id: "files", tool: "search_files", params: { pattern: "*.ts" } },
+    { id: "files", tool: "glob", params: { pattern: "*.ts" } },
     { tool: "write", when: "len(files.data.files) > 0", input: { path: "report.md", content: "共 {{files.data.total}} 个文件" } },
     { id: "batch", foreach: "{{files.data.files}}", steps: [
       { tool: "read", input: { path: "{{item}}" } },
@@ -1643,7 +1653,7 @@ WebSocket 消息格式（JSON）：
 - **消息互通**：文本消息（群聊自动剥离 `@_user_N` 提及占位）→ `session.prompt`；图片消息 → 下载为附件（魔数探测 mime）进入会话；Agent 流式回复实时推送——增量文本节流合并（60 字符/1.5s）为「✍️ 预览」消息（发新撤旧，撤回尽力而为），任务完成发最终 **interactive 卡片**（`lark_md` 渲染 Markdown，超长截断并提示 Web UI 查看），工具调用发「🔧 正在执行」状态消息（同任务至多一条）
 - **画图（`draw`）后端渲染**：飞书通道不再依赖前端渲染，由桥接**后端直接渲染成图片**——`event.draw.render` 到达后，桥接调用**三语言组合渲染器**（`core/diagram-render.ts`：plantuml = `@plantuml/core` TeaVM 引擎本地渲染 SVG（零网络，浏览器 DOM API 以极简 shim 垫层运行）、mermaid = mermaid + happy-dom 垫层（getBBox 几何估算覆盖）、d2 = `@terrastruct/d2` WASM（二进制模式内嵌产物物化到 `{GEBAI_HOME}/vendor/d2js/`）→ `@resvg/resvg-js` 栅格化 PNG，浅色主题白底图，单一串行队列防引擎/全局环境冲突，超长按上限等比缩放）→ PNG 落盘会话 `tmp/{name}.png`（与源码文件并列，Web UI 文件面板可见）→ 上传飞书图片（`im/v1/images`，multipart）→ 发送 `image` 消息 → 经 `decideDrawResult` 回传引擎（成功才返回成功；失败把渲染错误回传模型供修正源码；`EngineBotAdapter.onDraw` 透传 format 字段）；**该渲染器同样供 Web 通道 `draw` 工具 `render=backend` 复用**（引擎经 ToolContext `renderDiagram` 惰性加载，落盘 `tmp/{name}.png` 并返回 `image` 内容块）
 - **选择（`ask_user`）交互卡片**：`event.choice.request` 到达后发送**交互式按钮卡片**（选项按钮每行至多 5 个，`value` 携带 `choiceId`+`act`+选项值）替代前端选择卡；按钮点击经卡片交互帧回传——单选立即 `decideChoice`，多选切换勾选（点击回包 `card` 字段更新卡片按钮态与「已选」提示），「✅ 完成选择」提交勾选集合、「❌ 拒绝回答/放弃」提交拒绝；**已决策的卡片经 ACK 响应更新为终态**（「✅ 已选择：X」/「❌ 已放弃回答」，按钮不可再点）；**仅任务发起者可作答**（与审批授权一致，防群聊成员越权，他人点击回 toast 拒绝）；任务结束（完成/错误）撤回待作答卡片并清理状态
-- **接口层桥接（多轮交互 + 仅最终回复）**：飞书 bot 不直接接触 AgentEngine/EventBus（不侵入引擎层），经 `BotPromptAdapter` 接口运行——固定 `interactionMode: "multi_turn"` + `outputMode: "final_only"`；引擎事件流由 `EngineBotAdapter` 映射为语义回调（onApproval/onChoice/onDraw/onDone/onError/onEnd），**过程事件（工具调用状态、文本增量、推理、新会话执行过程）不推送**，回复仅最终消息（无打字机预览）；**收到消息先给用户消息添加「Typing」表情反应模拟「正在输入」（飞书开放平台无 typing 接口——实测 `POST /im/v1/messages/{id}/typing` 与 `POST /im/v1/chats/{id}/input_status` 均 404；改用 Message Reaction API `POST /im/v1/messages/{message_id}/reactions`，body `{"reaction_type":{"emoji_type":"Typing"}}`——`emoji_type` 必须为[官方表情文案说明](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce)中的标准 ID（`Typing` 为敲键盘表情，传 emoji 字符会报 231001），响应 `data.reaction_id` 为唯一标识；权限 `im:message` 或 `im:message.reactions:write_only` 任一即可），输出完成（最终回复/出错/兜底）后撤回该反应（`DELETE /im/v1/messages/{message_id}/reactions/{reaction_id}`），不发送额外表情/状态消息；**最终回复（interactive 卡片）、错误回复与任务完成兜底提示均以「回复」形式引用原消息发送（`POST /im/v1/messages/{message_id}/reply`，客户端显示引用气泡；message_id 不合法时回落普通发送）**；依赖实时前端的工具（`page_capture`/`render_html`/`save_tool`/`delete_tool`/`ask_env`，声明 `interaction: "realtime"`）由引擎按交互模式自动从模型 schema 中移除（含子Agent 命名空间同名工具 `{agent}_{tool}`），被调用时阻止执行并返回「当前通道不可用」说明（见「交互模式」）；`ask_user`/`draw` 声明 `multi_turn` 可用，走飞书交互卡片/后端渲染；关键操作（requiresApproval）经审批回调卡片询问用户
+- **接口层桥接（多轮交互 + 仅最终回复）**：飞书 bot 不直接接触 AgentEngine/EventBus（不侵入引擎层），经 `BotPromptAdapter` 接口运行——固定 `interactionMode: "multi_turn"` + `outputMode: "final_only"`；引擎事件流由 `EngineBotAdapter` 映射为语义回调（onApproval/onChoice/onDraw/onDone/onError/onEnd），**过程事件（工具调用状态、文本增量、推理、新会话执行过程）不推送**，回复仅最终消息（无打字机预览）；**收到消息先给用户消息添加「Typing」表情反应模拟「正在输入」（飞书开放平台无 typing 接口——实测 `POST /im/v1/messages/{id}/typing` 与 `POST /im/v1/chats/{id}/input_status` 均 404；改用 Message Reaction API `POST /im/v1/messages/{message_id}/reactions`，body `{"reaction_type":{"emoji_type":"Typing"}}`——`emoji_type` 必须为[官方表情文案说明](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce)中的标准 ID（`Typing` 为敲键盘表情，传 emoji 字符会报 231001），响应 `data.reaction_id` 为唯一标识；权限 `im:message` 或 `im:message.reactions:write_only` 任一即可），输出完成（最终回复/出错/兜底）后撤回该反应（`DELETE /im/v1/messages/{message_id}/reactions/{reaction_id}`），不发送额外表情/状态消息；**最终回复（interactive 卡片）、错误回复与任务完成兜底提示均以「回复」形式引用原消息发送（`POST /im/v1/messages/{message_id}/reply`，客户端显示引用气泡；message_id 不合法时回落普通发送）**；依赖实时前端的工具（`page_capture`/`render_html`/`ask_env` 及 widgets 四工具（save/list/get/delete），声明 `interaction: "realtime"`）由引擎按交互模式自动从模型 schema 中移除（含子Agent 命名空间同名工具 `{agent}_{tool}`），被调用时阻止执行并返回「当前通道不可用」说明（见「交互模式」）；`ask_user`/`draw` 声明 `multi_turn` 可用，走飞书交互卡片/后端渲染；关键操作（requiresApproval）经审批回调卡片询问用户
 - **交互命令**：`/help`、`/new`（清空当前对话上下文重建会话，**仅会话创建者可操作**）、`/sessions`、`/cancel`（**仅任务发起者可操作**）、`/approve`、`/reject`（批准/拒绝最近一个待审批工具调用，**仅审批发起者可操作**）、`/approval-skip`（服务模式非管理员拒绝；**本地模式仅会话创建者可开启**——群聊成员不得为共享会话开启免审批）
 - **审批**：Agent 审批请求推送提示消息（工具名 + /approve /reject 指引），文本命令式完成审批
 - **富文本**：最终回复卡片渲染 Markdown；长内容截断附 Web UI 会话提示（会话文件下载依赖 Web UI 访问）
@@ -1667,7 +1677,7 @@ export const preload?: boolean            // 是否预加载（默认 false，�
 export const envVars?: EnvCatalogVar[]    // 可配置环境变量声明（{AGENT_NAME_UPPER}_ 前缀），汇总进环境变量目录（前端面板白名单，见「环境变量配置」）
 export const writeGuard?: (env: Record<string, string>, absPaths: string[]) => string | null
 // 写范围守卫声明：会话装载本子Agent（或新会话预加载）后注入 ToolContext.writeGuard——
-// 文件写类工具（write/edit/apply_patch/move_file/delete_file）写入前以解析后的绝对路径调用，
+// 文件写类工具（write/edit/patch/file（rename/move/delete））写入前以解析后的绝对路径调用，
 // 返回非空字符串 = 拒绝写入（self_optimize 用它实现「核心引擎源码默认只读」的代码级强制）
 ```
 
@@ -1831,7 +1841,7 @@ bun run --cwd packages/sdk test
 - 已实现：`@gebai/server`（AgentEngine 主循环、LLMProvider（OpenAI 兼容 chat/completions + OpenAI Responses + Anthropic 三接口 SSE 解析，**usage 真值解析**（OpenAI `stream_options.include_usage` 末 chunk / Responses `response.usage` / Anthropic `message_start.input_tokens`+`message_delta.output_tokens`，统一挂 done chunk 的 `usage` 字段；服务端不返回时为 undefined → 引擎估算兜底，见「上下文占用口径」），**统一多模态内容块转换**（图片块 base64 内联 → OpenAI `image_url` / Anthropic `image`，`imageMessageBlocks` 助手），**额外模型接口参数 `GEBAI_LLM_EXTRA_PARAMS`（JSON，如推理强度 `reasoning_effort`）Provider 级 + 任务级（浏览器本地注入）两级覆盖，顶层合并进请求体**）、ToolRegistry 命名空间解析（含注册期前缀互斥校验）、SessionStore 分片持久化、EnvManager 三级变量、Sandbox 路径沙箱/子进程、AuthService 多用户令牌、**外部身份扩展点**（同源部署集成网站：`POST /api/v1/auth/exchange` 外部身份 → GEBAI 令牌，验证器可插拔——`GEBAI_EXTERNAL_AUTH_SECRET` HMAC 验签（±10 分钟防重放）或 `GEBAI_EXTERNAL_AUTH_URL` HTTP 回调验证，互斥同设报错；`AUTOCREATE` 自动创建/白名单两种映射；Web UI 启动时 URL 参数或 localStorage 同源直读自动兑换，SDK `exchangeExternalUser`/`getExternalAuthConfig`；`external-auth.ts` 单测 13 用例 + 端点集成测试 6 用例）、EventBus、富内容块（text/code/image/file/diagram/diff/html）渲染、**视觉工具 `vision`**（额外多模态模型 `GEBAI_VISION_*` 配置，目标 `target` + 图片文件 `image` 参数，base64 内联调用视觉模型，未配置时回落到显式声明多模态能力的主模型，单图 8MB 上限，输出截断保护 + `image` 内容块；`makeVisionTool` 依赖注入可单测）、**图片附件链路**（本地模式附件源路径按会话根解析（修复 CWD 误解析）、`AttachmentRef` 存逻辑路径、多模态主模型 base64 内联/其余降级文本说明 + vision 指引、接口 HTTP 4xx 拒绝图片块时自动降级重试、Web 端 canvas 图片压缩 1280px/2MB）、**画图工具 `draw`**（**三种图表语言**——`format` 必选参数 `mermaid`/`plantuml`/`d2`，工具描述与参数说明内置选择指南指导模型按需选择；前端实时渲染确认：成功才返回、报错回传模型、5 秒超时降级；Web 前端本地渲染三语言各自引擎（mermaid npm 包 / `@plantuml/core` / `@terrastruct/d2` WASM，均零网络）；**后端组合渲染器三语言全支持**（飞书与 `render=backend` 通道：plantuml TeaVM 引擎 / mermaid + happy-dom 垫层（getBBox 几何估算覆盖防布局坍缩）/ d2 WASM（二进制模式内嵌产物物化 `{GEBAI_HOME}/vendor/d2js/`）+ 共享 resvg 栅格化（负原点 viewBox 平移归一兼容），全局环境切换 + 单一串行队列，`globalThis.window` 仅临时存在））、**HTML 页面工具 `render_html`**（沙箱 iframe 域隔离渲染：`allow-scripts` 不含 `allow-same-origin`，脚本可执行但隔离于 opaque origin，无法访问宿主页面 DOM/存储/顶层导航；落盘会话 `tmp/` 并返回 `html` 块，支持模型显式指定预览尺寸 `width`/`height`，未指定时 iframe 固定铺满消息流宽度、无任何内容宽度反馈）、**全局 diff 工具**（LCS 行级对比 + unified diff 文本，纯函数 `core/diff.ts`）、5 个内置子Agent（含 `desktop`、**飞书云文档 `feishu_docs`**：42 个工具覆盖文档 docx 创建/读取/块编辑/按文本反查块 id（`find_blocks`）/Markdown 导入导出/**插入图片（`insert_image` 三步流程）**/**思维导图画板读取（`get_board`：mindnote 块自动提取画板 token，结构化提取 PlantUML 源码或重建连接线流程）**/**用户授权（`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear`：OAuth code 流程配置 user_access_token，会话级存储+自动刷新，配置后资源操作以用户身份执行、创建用户所有权文档；**默认自动回调**——授权后浏览器跳回内置端点 `GET /api/v1/oauth/feishu/callback` 自动兑换写回会话（`GEBAI_PUBLIC_URL` 可配，见「飞书用户授权」））**、云空间、电子表格、多维表格、知识库、搜索、权限与 `api_call` 兜底；块列表附 `type_name` 标注、`page_all` 自动翻页（达上限提示）、小节读取、块操作失败本地诊断、**权限类错误码自动附所需 scope 与授权链接**；`FEISHU_DOCS_*` 凭证 + tenant_access_token 缓存；写操作审批；`createFeishuTools` 依赖注入 + `markdownToBlocks`/`blockText`/`extractBoardContent`/`extractOAuthCode` 纯函数 + 共享 OAuth 模块（`oauth.ts`：兑换/刷新/会话令牌存取/授权状态注册，工具与 REST 回调共用），单测覆盖率 95%）、**浏览器自动化 `playwright`**（无头 Chromium，15 个工具覆盖导航/读取/截图/交互/表单/JS 执行/多标签页；**node 桥接架构**——Bun 与 playwright driver pipe 兼容问题用常驻 node 子进程 JSON-RPC 规避，BrowserContext 按会话隔离 + 空闲回收，导航/交互/脚本类默认审批；`createPlaywrightTools` 依赖注入 + Bridge 协议层单测 17 用例，真实 chromium E2E 验证通过）、REST/WS 双通道 API（WS 消息处理独立 `ws.ts`、反馈存取独立 `feedback.ts`；REST 全端点：feedback 查询/导出、多选 zip 打包下载、Webhook CRUD、OpenAPI 文档、auth/me、**飞书 OAuth 回调 `/api/v1/oauth/feishu/callback`**）、**上下文压缩**（主动 + 自动 80% 阈值，LLM 摘要 + 滚动裁剪降级）、**Webhook 推送**（HMAC 签名、3 次指数退避重试、事件白名单、多用户会话归属过滤）、命名空间注册期碰撞校验、服务模式 admin 密码哈希引导（`GEBAI_ADMIN_PASSWORD_HASH`：设置启用/未设置禁用，启动参数权威配置）、会话操作归属校验）、`@gebai/sdk`（GebaiClient：含 getCurrentSession、webhook/工具启停/打包下载方法）、`@gebai/web`（Vite 聊天 UI，按功能域模块化拆分：state/messages/tool-cards/sessions/composer/attachments/approvals/settings/auth/markdown/diagram/diff/html-view/jump-bottom 等，样式按 base/chat/composer/overlays 分片；**Inter / JetBrains Mono 字体内置**（@font-face 随产物分发，不依赖目标机器字体）；富内容块渲染、历史加载、**交互式图表编辑（Mermaid/PlantUML/D2 三语言本地渲染 + 主题适配——PlantUML skinparam 注入与渲染后颜色兜底修正、Mermaid 按 UI 明暗重新 initialize、D2 按 UI 明暗选主题 ID 0/200）**、**diff 并排对比视图（按语言语法高亮，跨行着色平衡）**、**HTML 页面沙箱渲染（预览卡片 + 全屏查看器 + 源码/复制/下载，`render_html` 工具产物）**、**多套 UI 风格（11 套）**、**低性能模式（无 GPU 自动检测，降级动画/毛玻璃特效与图表导出采样，设置面板可手动覆盖）**、多用户登录页、会话重命名、压缩入口与压缩通知、设置面板（工具启停/子Agent/**浏览器本地环境变量增删改（localStorage，对本浏览器所有会话生效，随消息临时注入服务端、不落盘防泄露；服务端不配模型变量时仅前端配置即可使用；含 `GEBAI_LLM_EXTRA_PARAMS` 建议项，可按任务覆盖模型接口参数）**/Webhook/用户管理/反馈列表）、**图表预览卡片随内容自适应**、**发送消息/切换会话自动锁定滚动到底（粘底锁定与「跳到最新」按钮显隐完全一致（同一 64px 阈值）：按钮隐藏 = 锁定跟随（新内容持续滚动到底），按钮显示 = 用户在阅读历史不打扰；位置即状态——任何滚动事件按位置刷新锁定与按钮，不另设独立锁定态；程序滚动事件异步送达、期间内容可能增长导致"位置在目标却不在当前底部"，按目标位置比对识别为程序滚动——保持锁定并续滚到最新底部，避免流式跟随悄悄失效；**目标位置须记录浏览器 clamp 后的实际落位**（`scrollTop = scrollHeight` 会被钳制到 `scrollHeight - clientHeight`，须赋值后读回 scrollTop 记录，否则比对永不命中、续滚兜底失效——工具卡片等大块内容在程序滚动与事件送达之间追加时，迟到事件被误判为用户滚动、锁定悄悄解除、会话自动滚动到底失灵；新内容（DOM 变化 / 图片加载）触发滚动，rAF 节流每帧至多一次保证流式高频更新性能；纯逻辑抽 `sticky-scroll.ts` 工厂注入滚动容器/按钮，可独立单测）；新会话折叠容器（session-run）内粘底同构防护（迟到事件按同一落位比对续滚）；跳到最新按钮滚动到底（同样按 clamp 落位）重新锁定；图片异步加载改变高度含 markdown 内嵌 `<img>` 均跟随，由 `msgEl` 委托捕获阶段 load 监听统一处理）**、**消息质量反馈（助手消息 👍/👎 提交反馈，设置面板反馈页可见）**、**会话导出（Markdown 下载）**、DOM 引用统一集中于 `state.ts` 与代码高亮复用（`highlightedCode`））、`@gebai/desktop`（服务端同进程 + 浏览器兜底宿主）。
 
 - 测试：`bun run --cwd packages/server test` 718 个用例通过（核心引擎、命名空间、沙箱、压缩、Webhook、ZIP、协议契约、服务模式鉴权、飞书机器人全覆盖；另 1 个 Windows 平台既有失败：`/etc/passwd` 在 win32 下被 `path.resolve` 解析为盘符相对路径，与本次改动无关）。
-- 已实现补充：**原生 WebView 桌面宿主**（`packages/desktop/launcher/`：tao 窗口 + wry WebView，无 Tauri 依赖；`include_bytes!` 内嵌 `gebai.exe`，物化到 `%LOCALAPPDATA%\gebai\` 后 spawn，stdout 解析端口导航 WebView，关窗回收侧车）、**playwright driver 打包闭环**（`scripts/build-driver-embed.ts` 生成 `driver.embedded.generated.json` 内嵌产物，二进制运行时物化 `{GEBAI_HOME}/vendor/playwright/driver.mjs`）、**数据生命周期 GC**（`core/gc.ts`：会话 90 天闲置归档 `trash/`、`trash/` 7 天物理删除、`feedback/` 180 天清理、遗留用户级 `truncated/` 迁移清理；启动即跑 + 每日周期，`GEBAI_GC_DISABLED=1` 关闭）、**子Agent 目录化**（`sub-agents/{name}/{name}.ts` + `{name}.md` 提示词拆分与 ts 导入修饰）、**子Agent 打包闭环**（`scripts/build-subagents.ts` 构建时生成 bundle 注册表，dist/二进制模式 `discover()` 回退加载，md 提示词随静态 import 内联进产物；playwright 的 node 桥接驱动 `driver.mjs` 复制到 dist/ 与产物同目录；**D2.js 打包闭环**——`scripts/build-d2js.ts` 生成内嵌产物 `d2js.embedded.generated.json`（node-esm 构建 7 文件 gzip base64，静态 import 随产物打进二进制，运行时物化到 `{GEBAI_HOME}/vendor/d2js/` 供文件路径 Worker 运行；构建命令 `--external @terrastruct/d2`））、**定时任务**（`core/cron.ts`：`GEBAI_CRON_ENABLED` 开关（默认关闭，关闭时 `cron_*` 工具完全不注册）；会话内 `cron_add`/`cron_list`/`cron_update`/`cron_remove` 工具（创建/修改/删除默认需审批）；脚本运行 + 提示词运行 agent 两种类型；5 段 cron（本地时区，日周 OR 语义）/`@every n{s,m,h,d}`/`@daily` 等表达式；会话级 `cron.json` 持久化 + 重启扫描加载；30 秒 tick 调度；会话删除自动清理；`event.cron.run`/`event.cron.result` 事件）、**多用户安全加固**（REST 用户管理端点管理员校验（与 WS 同权限，防提权）、`GEBAI_APPROVAL_SKIP` 服务模式仅管理员可设（REST/WS/浏览器本地注入三通道）、沙箱模式脚本子进程环境剔除敏感变量（`*_KEY`/`*_TOKEN`/`*_SECRET`/`PASSWORD`，防服务端密钥经 sh/py/cron 外泄）、`PATCH /api/v1/tools` 服务模式限管理员、**默认用户沙箱豁免**（**admin 用户为特权用户**，`Sandbox.isExempt`/`enforcedFor(user)` 按用户判定豁免——沙箱启用时仍按本地模式放开：绝对路径/越界放行、脚本环境不脱敏、桌面控制/私网访问可用；普通用户受约束）、`store.load` 按用户索引 + 会话归属记录（修复旧版无 userId 会话跨用户命中））、**HTML 小工具库**（`core/mini-tools.ts`：公用 `tools/` + 私有 `users/{user}/tools/` 按名称哈希分片存储，同名私有覆盖公用；全局工具 `save_tool`/`delete_tool`（后者需审批）；REST `GET/DELETE /api/v1/mini-tools` + SDK `listMiniTools`/`getMiniTool`/`deleteMiniTool`；Web 标题栏「小工具」按钮弹窗列表 + 独立悬浮窗口加载（沙箱 iframe、可拖拽/刷新/关闭，重复点击恢复原窗口不重载））、**前端页面捕获 `page_capture`**（仿 draw 前端配合链路：引擎发布 `event.capture.request` → 前端捕获当前页面渲染后 DOM html（截断 300KB）+ modern-screenshot 截图（png/jpeg，体积压缩 ≤2MB）→ WS `capture.result` 回传 → 落盘会话 `tmp/capture/` 并返回文件/图片块；`self_optimize` 重构为 **code 超集**（继承其全部工具 + preview_server/page_capture/vision），vision provider 经 `setVisionProviderGetter` 注册点与主 Agent 共用解析逻辑；SDK `submitCaptureResult`；页面捕获超时 30 秒、整页截图高度上限 12000px）、**飞书机器人对话桥接**（`feishu-bot/`：自研极简 protobuf 帧编解码（pbbp2.Frame）+ 长连接协议层（endpoint 发现/心跳/分片合包/ACK/自动重连）+ 开放平台 API（tenant_access_token 缓存、消息发送/撤回、图片资源下载、会话信息）+ 桥接编排（会话映射 `feishu_{chat_id}`、身份映射（多用户按 open_id 自动建户）、文本/图片消息处理、@提及剥离、流式增量预览（节流合并发新撤旧）+ 最终卡片（lark_md）、斜杠命令、文本命令式审批；`GEBAI_FEISHU_BOT_ENABLED` 开关，依赖全部注入；单测 79 用例 + 真实凭证长连接握手验证通过）。
+- 已实现补充：**原生 WebView 桌面宿主**（`packages/desktop/launcher/`：tao 窗口 + wry WebView，无 Tauri 依赖；`include_bytes!` 内嵌 `gebai.exe`，物化到 `%LOCALAPPDATA%\gebai\` 后 spawn，stdout 解析端口导航 WebView，关窗回收侧车）、**playwright driver 打包闭环**（`scripts/build-driver-embed.ts` 生成 `driver.embedded.generated.json` 内嵌产物，二进制运行时物化 `{GEBAI_HOME}/vendor/playwright/driver.mjs`）、**数据生命周期 GC**（`core/gc.ts`：会话 90 天闲置归档 `trash/`、`trash/` 7 天物理删除、`feedback/` 180 天清理、遗留用户级 `truncated/` 迁移清理；启动即跑 + 每日周期，`GEBAI_GC_DISABLED=1` 关闭）、**子Agent 目录化**（`sub-agents/{name}/{name}.ts` + `{name}.md` 提示词拆分与 ts 导入修饰）、**子Agent 打包闭环**（`scripts/build-subagents.ts` 构建时生成 bundle 注册表，dist/二进制模式 `discover()` 回退加载，md 提示词随静态 import 内联进产物；playwright 的 node 桥接驱动 `driver.mjs` 复制到 dist/ 与产物同目录；**D2.js 打包闭环**——`scripts/build-d2js.ts` 生成内嵌产物 `d2js.embedded.generated.json`（node-esm 构建 7 文件 gzip base64，静态 import 随产物打进二进制，运行时物化到 `{GEBAI_HOME}/vendor/d2js/` 供文件路径 Worker 运行；构建命令 `--external @terrastruct/d2`））、**定时任务**（`core/cron.ts`：`GEBAI_CRON_ENABLED` 开关（默认关闭，关闭时 `cron_*` 工具完全不注册）；会话内 `cron_add`/`cron_list`/`cron_update`/`cron_remove` 工具（创建/修改/删除默认需审批）；脚本运行 + 提示词运行 agent 两种类型；5 段 cron（本地时区，日周 OR 语义）/`@every n{s,m,h,d}`/`@daily` 等表达式；会话级 `cron.json` 持久化 + 重启扫描加载；30 秒 tick 调度；会话删除自动清理；`event.cron.run`/`event.cron.result` 事件）、**多用户安全加固**（REST 用户管理端点管理员校验（与 WS 同权限，防提权）、`GEBAI_APPROVAL_SKIP` 服务模式仅管理员可设（REST/WS/浏览器本地注入三通道）、沙箱模式脚本子进程环境剔除敏感变量（`*_KEY`/`*_TOKEN`/`*_SECRET`/`PASSWORD`，防服务端密钥经 sh/py/cron 外泄）、`PATCH /api/v1/tools` 服务模式限管理员、**默认用户沙箱豁免**（**admin 用户为特权用户**，`Sandbox.isExempt`/`enforcedFor(user)` 按用户判定豁免——沙箱启用时仍按本地模式放开：绝对路径/越界放行、脚本环境不脱敏、桌面控制/私网访问可用；普通用户受约束）、`store.load` 按用户索引 + 会话归属记录（修复旧版无 userId 会话跨用户命中））、**HTML 小工具库**（`core/mini-tools.ts`：公用 `tools/` + 私有 `users/{user}/tools/` 按名称哈希分片存储，同名私有覆盖公用；widgets 子Agent 四工具 `widgets_save`/`widgets_list`/`widgets_get`/`widgets_delete`（后者需审批）；REST `GET/DELETE /api/v1/mini-tools` + SDK `listMiniTools`/`getMiniTool`/`deleteMiniTool`；Web 标题栏「小工具」按钮弹窗列表 + 独立悬浮窗口加载（沙箱 iframe、可拖拽/刷新/关闭，重复点击恢复原窗口不重载））、**前端页面捕获 `page_capture`**（仿 draw 前端配合链路：引擎发布 `event.capture.request` → 前端捕获当前页面渲染后 DOM html（截断 300KB）+ modern-screenshot 截图（png/jpeg，体积压缩 ≤2MB）→ WS `capture.result` 回传 → 落盘会话 `tmp/capture/` 并返回文件/图片块；`self_optimize` 重构为 **code 超集**（继承其全部工具（含并入 code 的 preview_server）+ page_capture/vision），vision provider 经 `setVisionProviderGetter` 注册点与主 Agent 共用解析逻辑；SDK `submitCaptureResult`；页面捕获超时 30 秒、整页截图高度上限 12000px）、**飞书机器人对话桥接**（`feishu-bot/`：自研极简 protobuf 帧编解码（pbbp2.Frame）+ 长连接协议层（endpoint 发现/心跳/分片合包/ACK/自动重连）+ 开放平台 API（tenant_access_token 缓存、消息发送/撤回、图片资源下载、会话信息）+ 桥接编排（会话映射 `feishu_{chat_id}`、身份映射（多用户按 open_id 自动建户）、文本/图片消息处理、@提及剥离、流式增量预览（节流合并发新撤旧）+ 最终卡片（lark_md）、斜杠命令、文本命令式审批；`GEBAI_FEISHU_BOT_ENABLED` 开关，依赖全部注入；单测 79 用例 + 真实凭证长连接握手验证通过）。
 - 未完成（后续迭代）：子Agent 选择性打包（白名单/黑名单裁剪）、飞书机器人 Webhook 回调模式与交互卡片审批、OIDC 身份对接。
 
 ### 稳定性保障：防「模型误改」安全网
@@ -1864,9 +1874,9 @@ bun run --cwd packages/sdk test
 | grep 单文件读取上限 | 1MB | 超出跳过该文件（防大文件/二进制拖慢搜索） |
 | grep 最大匹配行 | 200 行 | 达到即停止，返回结果附「已达匹配上限」提示（content/files/count 三形态同一口径）；`context` 参数 0-10 行 |
 | 已读登记上限 | 2000 条/会话 | write 防误覆盖守卫的会话级已读集合上限（`READ_TRACK_CAP`，超出整表重置——守卫降级为「需重读」）；会话删除时释放（`engine.forgetSession`） |
-| apply_patch 行号容错 | 3 行 | 上下文裁剪重试上限（`PATCH_FUZZ_LINES`，只裁上下文、删除行必在匹配块内） |
-| apply_patch hunk 上限 | 100 处 | 单次补丁 hunk 数上限（超出提示拆分补丁） |
-| apply_patch 文件上限 | 5MB | 目标文件大小上限（超出提示改用 edit 分段修改） |
+| patch 行号容错 | 3 行 | 上下文裁剪重试上限（`PATCH_FUZZ_LINES`，只裁上下文、删除行必在匹配块内） |
+| patch hunk 上限 | 100 处 | 单次补丁 hunk 数上限（超出提示拆分补丁） |
+| patch 文件上限 | 5MB | 目标文件大小上限（超出提示改用 edit 分段修改） |
 | search_symbols 单文件上限 | 1MB | 超出跳过该文件（与 grep 同级） |
 | search_symbols 扫描上限 | 500 个文件 | 最多扫描文件数（内容预筛后 tree-sitter 解析） |
 | search_symbols 匹配上限 | 50 条 | 达到即停止，精确匹配优先排序 |
@@ -1919,7 +1929,7 @@ bun run --cwd packages/sdk test
 | 定时任务 tick 周期 | 30 秒 | 调度器检查周期（`CRON_TICK_INTERVAL_MS`） |
 | 定时脚本执行超时 | 5 分钟 | 脚本型定时任务单次执行上限（与 `sh`/`py` 同级） |
 | 定时任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
-| 小工具 HTML 上限 | 200KB | `save_tool` 单次保存的 HTML 源码大小上限（超限报错提示精简） |
+| 小工具 HTML 上限 | 200KB | `widgets_save` 单次保存的 HTML 源码大小上限（超限报错提示精简） |
 | 小工具名称规则 | `[a-zA-Z0-9_\u4e00-\u9fff]{1,40}` | 工具名即文件名（分片键），不含 `.`/`/` 等路径分隔符 |
 | render_html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
 | flow 工具调用总数上限 | 100 | 单次 flow 执行的工具调用总数（含循环迭代展开，`FLOW_MAX_STEPS`） |

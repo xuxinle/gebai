@@ -1298,14 +1298,14 @@ describe("AgentEngine", () => {
     cleanup(s.home)
   })
 
-  test("move_file auto-creates the destination parent directory (matches write behavior)", async () => {
+  test("file action=move auto-creates the destination parent directory (matches write behavior)", async () => {
     const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     const root = sessionPath(s.home, "default", session.id)
     // 预置源文件（会话根内相对路径 a.txt）
     writeFileSync(join(root, "a.txt"), "hello")
-    s.provider.toolName = "move_file"
-    s.provider.toolArgs = { from: "a.txt", to: "moved/b.txt" }
+    s.provider.toolName = "file"
+    s.provider.toolArgs = { action: "move", path: "a.txt", to: "moved/b.txt" }
     await s.engine.run(session.id, "default", "move it")
     // 目标父目录 moved/ 被自动创建（rename 本身对缺失父目录报 ENOENT）
     expect(existsSync(join(root, "moved", "b.txt"))).toBe(true)
@@ -1493,11 +1493,11 @@ describe("AgentEngine", () => {
     s.provider.toolName = "render_html"
     s.provider.toolArgs = { html: "<p>hi</p>" }
     const session = await s.store.createSession("default", "t")
-    await s.engine.run(session.id, "default", "render a page", { disabledTools: ["render_html", "save_tool", "delete_tool", "page_capture"] })
+    await s.engine.run(session.id, "default", "render a page", { disabledTools: ["render_html", "fetch_url", "page_capture"] })
     const loaded = await s.store.load(session.id)
     // 模型看到的 schema 已过滤（首轮即无禁用工具）
     expect(s.provider.seenTools[0]).not.toContain("render_html")
-    expect(s.provider.seenTools[0]).not.toContain("save_tool")
+    expect(s.provider.seenTools[0]).not.toContain("fetch_url")
     expect(s.provider.seenTools[0]).toContain("draw")
     // 模型仍调用禁用工具（假模型行为）→ 执行被阻止，返回说明消息，产物不落盘
     const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "render_html")
@@ -1617,8 +1617,6 @@ describe("AgentEngine", () => {
     // 实时前端工具禁用（与飞书通道行为一致）
     expect(s.provider.seenTools[0]).not.toContain("page_capture")
     expect(s.provider.seenTools[0]).not.toContain("render_html")
-    expect(s.provider.seenTools[0]).not.toContain("save_tool")
-    expect(s.provider.seenTools[0]).not.toContain("delete_tool")
     expect(s.provider.seenTools[0]).not.toContain("ask_env")
     // 会话类工具可用（飞书有按钮/后端渲染适配）
     expect(s.provider.seenTools[0]).toContain("ask_user")

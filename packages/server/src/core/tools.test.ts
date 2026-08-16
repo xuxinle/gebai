@@ -2,11 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, saveTool, deleteTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, makeCronTools, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, applyPatchTool, gitTool, agentListTool, agentLoadTool } from "./tools"
+import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, makeCronTools, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool } from "./tools"
 import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath } from "./paths"
-import { getMiniTool } from "./mini-tools"
 import type { ToolContext, Tool, ToolResult } from "./types"
 
 function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): ToolContext {
@@ -658,36 +657,7 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("save_tool saves private tool by default and public tool on scope=public", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-tools-save-"))
-    const c = ctx(home)
-    const priv = await saveTool.execute({ name: "calc", html: "<p>1</p>" }, c)
-    expect(priv.output).toContain("calc")
-    expect(priv.output).toContain("用户私有")
-    const pub = await saveTool.execute({ name: "clock", html: "<p>2</p>", scope: "public" }, c)
-    expect(pub.output).toContain("公用")
-    // 存储位置：私有 → users/{user}/tools/，公用 → tools/
-    expect(await getMiniTool(home, "default", "calc")).toMatchObject({ name: "calc", scope: "private" })
-    expect(await getMiniTool(home, "default", "clock")).toMatchObject({ name: "clock", scope: "public" })
-    cleanup(home)
-  })
-
-  test("save_tool rejects invalid name and delete_tool removes tool", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-tools-del-"))
-    const c = ctx(home)
-    await expect(saveTool.execute({ name: "bad name", html: "x" }, c)).rejects.toThrow("工具名仅限")
-    await saveTool.execute({ name: "temp", html: "x", scope: "public" }, c)
-    const del = await deleteTool.execute({ name: "temp", scope: "public" }, c)
-    expect(del.output).toContain("已删除")
-    expect(await getMiniTool(home, "default", "temp")).toBeNull()
-    const missing = await deleteTool.execute({ name: "temp", scope: "public" }, c)
-    expect(missing.output).toContain("不存在")
-    cleanup(home)
-  })
-
-  test("delete_tool requires approval", async () => {
-    expect(deleteTool.requiresApproval).toBe(true)
-  })
+  // save_tool/delete_tool（小工具库）已下沉 widgets 子Agent，对应测试见 sub-agents/widgets/widgets.test.ts
 
   test("edit replaces matching substring", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools2-"))
@@ -738,7 +708,7 @@ describe("global tools", () => {
     const c = ctx(home)
     const read = new Set<string>()
     c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
-    // 会话外预置的已存在文件（未经 read/write/edit/apply_patch）：盲覆盖被拒
+    // 会话外预置的已存在文件（未经 read/write/edit/patch）：盲覆盖被拒
     writeFileSync(join(c.workdir, "pre.txt"), "v1")
     const blind = await writeTool.execute({ path: "pre.txt", content: "v2" }, c)
     expect(blind.output).toContain("防盲覆盖")
@@ -800,15 +770,29 @@ describe("global tools", () => {
   test("createGlobalTools returns all tools", () => {
     const tools = createGlobalTools()
     for (const n of [
-      "read", "write", "ls", "grep", "search_files", "delete_file", "move_file",
-      "edit", "flow", "sh", "py", "draw", "render_html", "save_tool", "delete_tool", "fetch_url",
-      "todo", "ask_user", "ask_env", "preview_server", "current_time", "system_info",
+      "read", "write", "ls", "grep", "glob", "file",
+      "edit", "flow", "sh", "py", "draw", "render_html", "fetch_url",
+      "todo", "ask_user", "ask_env", "current_time",
       "agent_load", "agent_run",
     ]) {
       expect(tools[n]).toBeDefined()
     }
     // agent_list 不注册进总Agent 全局工具集（未装载清单已注入提示词，避免冗余干扰；仅新会话组合编排环境注入）
     expect(tools.agent_list).toBeUndefined()
+    // preview_server/env_detect/system_info 下沉 code 子Agent（开发验证/环境探测属编码工作流，code_ 命名空间暴露）
+    expect(tools.preview_server).toBeUndefined()
+    expect(tools.env_detect).toBeUndefined()
+    expect(tools.system_info).toBeUndefined()
+    // git 下沉 code/explore 子Agent（只读 git 属编码工作流，code_git/explore_git 命名空间暴露）
+    expect(tools.git).toBeUndefined()
+    // delete_file/move_file 合并为 file（rename/move/delete/info 多动作）
+    expect(tools.delete_file).toBeUndefined()
+    expect(tools.move_file).toBeUndefined()
+    // save_tool/delete_tool（小工具库）下沉 widgets 子Agent（widgets_save/list/get/delete，增删改查）
+    expect(tools.save_tool).toBeUndefined()
+    expect(tools.delete_tool).toBeUndefined()
+    // read_feedback 下沉 self_optimize 子Agent（自我优化专属输入通道，self_optimize_read_feedback 命名空间暴露）
+    expect(tools.read_feedback).toBeUndefined()
   })
 
   test("cron tools delegate to ctx.cron and report disabled capability", async () => {
@@ -1325,7 +1309,7 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
-  test("search_files matches glob patterns", async () => {
+  test("glob tool matches glob patterns", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-search-"))
     const c = ctx(home)
     c.listFiles = async () => [
@@ -1333,35 +1317,89 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
       { path: "src/b.js", size: 1, modifiedAt: 0, isDir: false },
       { path: "test/c.ts", size: 1, modifiedAt: 0, isDir: false },
     ]
-    const r = await createGlobalTools().search_files.execute({ pattern: "*.ts" }, c)
+    const r = await createGlobalTools().glob.execute({ pattern: "*.ts" }, c)
     expect(r.output).toContain("src/a.ts")
     expect(r.output).toContain("test/c.ts")
     expect(r.output).not.toContain("src/b.js")
     // path 限定子目录
-    const sub = await createGlobalTools().search_files.execute({ pattern: "*.ts", path: "src" }, c)
+    const sub = await createGlobalTools().glob.execute({ pattern: "*.ts", path: "src" }, c)
     expect(sub.output).toContain("src/a.ts")
     expect(sub.output).not.toContain("test/c.ts")
     // 绝对路径 path：与 read/write 一致经 resolvePath 解析后按会话内逻辑路径匹配
-    const abs = await createGlobalTools().search_files.execute({ pattern: "*.ts", path: join(c.workdir, "src") }, c)
+    const abs = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "src") }, c)
     expect(abs.output).toContain("src/a.ts")
     expect(abs.output).not.toContain("test/c.ts")
     // path 指向会话外（本地模式放开沙箱）时无可列文件
-    const outside = await createGlobalTools().search_files.execute({ pattern: "*.ts", path: join(c.workdir, "..", "outside") }, c)
+    const outside = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "..", "outside") }, c)
     expect(outside.output).toBe("（无匹配文件）")
     cleanup(home)
   })
 
-  test("delete_file and move_file call ctx", async () => {
+  test("file tool rename/move/delete call ctx, info reports type/size/mtime", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fsop-"))
     const c = ctx(home)
     const deleted: string[] = []
     const moved: Array<[string, string]> = []
     c.deleteFile = async (p) => void deleted.push(p)
     c.moveFile = async (from, to) => void moved.push([from, to])
-    await createGlobalTools().delete_file.execute({ path: "old.txt" }, c)
+    const t = createGlobalTools().file
+    await t.execute({ action: "delete", path: "old.txt" }, c)
     expect(deleted).toEqual([join(c.workdir, "old.txt")])
-    await createGlobalTools().move_file.execute({ from: "a.txt", to: "b.txt" }, c)
+    await t.execute({ action: "move", path: "a.txt", to: "b.txt" }, c)
     expect(moved).toEqual([[join(c.workdir, "a.txt"), join(c.workdir, "b.txt")]])
+    await t.execute({ action: "rename", path: "a.txt", newName: "renamed.txt" }, c)
+    expect(moved[1]).toEqual([join(c.workdir, "a.txt"), join(c.workdir, "renamed.txt")])
+    // rename 拒绝含路径分隔符的 newName（防越界改写，跨目录应走 move）
+    const bad = await t.execute({ action: "rename", path: "a.txt", newName: "../evil.txt" }, c)
+    expect(bad.output).toContain("file 拒绝")
+    // info：内容探测（UTF-8 文本 + 扩展名标签；非扩展名推断）
+    writeFileSync(join(c.workdir, "note.md"), "# hi")
+    const info = await t.execute({ action: "info", path: "note.md" }, c)
+    expect(info.output).toContain("Markdown 文档（UTF-8 文本）")
+    expect(info.output).toContain("4 B")
+    expect((info as ToolResult).data).toMatchObject({ type: "Markdown 文档（UTF-8 文本）", size: 4, isDir: false, text: true, encoding: "utf-8" })
+    // 空文件
+    writeFileSync(join(c.workdir, "empty.bin"), "")
+    const empty = await t.execute({ action: "info", path: "empty.bin" }, c)
+    expect(empty.output).toContain("空文件")
+    mkdirSync(join(c.workdir, "docs"))
+    const dir = await t.execute({ action: "info", path: "docs" }, c)
+    expect(dir.output).toContain("目录")
+    expect((dir as ToolResult).data).toMatchObject({ isDir: true, entries: 0 })
+    const missing = await t.execute({ action: "info", path: "nope.txt" }, c)
+    expect(missing.output).toContain("无法访问")
+    cleanup(home)
+  })
+
+  test("file info 内容探测：魔数识别类型、扩展名不符提示、shebang、GBK 编码", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fsop-sniff-"))
+    const c = ctx(home)
+    const t = createGlobalTools().file
+    // 魔数识别：PNG 头（扩展名故意写成 .txt → 提示不符）
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])
+    writeFileSync(join(c.workdir, "img.txt"), png)
+    const r1 = await t.execute({ action: "info", path: "img.txt" }, c)
+    expect(r1.output).toContain("PNG 图片")
+    expect(r1.output).toContain("扩展名 .txt 与实际内容不符")
+    expect((r1 as ToolResult).data).toMatchObject({ type: "PNG 图片", extMismatch: true })
+    // UTF-8 BOM
+    writeFileSync(join(c.workdir, "bom.txt"), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("hi")]))
+    const r2 = await t.execute({ action: "info", path: "bom.txt" }, c)
+    expect(r2.output).toContain("UTF-8（BOM）")
+    expect((r2 as ToolResult).data).toMatchObject({ encoding: "utf-8-bom", text: true })
+    // shebang 解释器
+    writeFileSync(join(c.workdir, "run.sh"), "#!/usr/bin/env python3\nprint(1)\n")
+    const r3 = await t.execute({ action: "info", path: "run.sh" }, c)
+    expect(r3.output).toContain("shebang: python3")
+    // 疑似 GBK 编码（合法 GBK 双字节 + CJK，非 UTF-8）
+    writeFileSync(join(c.workdir, "gbk.txt"), Buffer.from([0xc4, 0xe3, 0xba, 0xc3, 0x0a]))
+    const r4 = await t.execute({ action: "info", path: "gbk.txt" }, c)
+    expect(r4.output).toContain("疑似 GBK/ANSI 编码")
+    expect((r4 as ToolResult).data).toMatchObject({ encoding: "gbk", text: true })
+    // 无扩展名 UTF-8 文本 → 泛称 UTF-8 文本
+    writeFileSync(join(c.workdir, "LICENSE"), "hello world\n")
+    const r5 = await t.execute({ action: "info", path: "LICENSE" }, c)
+    expect(r5.output).toContain("UTF-8 文本")
     cleanup(home)
   })
 
@@ -1558,12 +1596,12 @@ describe("preview_server", () => {
   })
 })
 
-describe("apply_patch tool", () => {
+describe("patch tool", () => {
   test("applies unified diff to existing file", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-"))
     const c = ctx(home)
     await writeTool.execute({ path: "src/a.ts", content: "const a = 1\nconst b = 2\nconst c = 3\n" }, c)
-    const r = await applyPatchTool.execute({ path: "src/a.ts", patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2,1 +2,1 @@\n-const b = 2\n+const b = 22\n" }, c)
+    const r = await patchTool.execute({ path: "src/a.ts", patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2,1 +2,1 @@\n-const b = 2\n+const b = 22\n" }, c)
     expect(r.output).toContain("已写入 src/a.ts")
     expect(r.output).toContain("1 处 hunk")
     expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "src", "a.ts")).text()).toBe("const a = 1\nconst b = 22\nconst c = 3\n")
@@ -1574,7 +1612,7 @@ describe("apply_patch tool", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-dry-"))
     const c = ctx(home)
     await writeTool.execute({ path: "a.ts", content: "a\nb\nc\n" }, c)
-    const r = await applyPatchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-b\n+B\n", dryRun: true }, c)
+    const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-b\n+B\n", dryRun: true }, c)
     expect(r.output).toContain("预演")
     expect(r.output).toContain("未写入")
     expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
@@ -1585,7 +1623,7 @@ describe("apply_patch tool", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-fail-"))
     const c = ctx(home)
     await writeTool.execute({ path: "a.ts", content: "a\nb\nc\n" }, c)
-    const r = await applyPatchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-zzz\n+ZZZ\n" }, c)
+    const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-zzz\n+ZZZ\n" }, c)
     expect(r.output).toContain("未匹配")
     expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
     cleanup(home)
@@ -1594,7 +1632,7 @@ describe("apply_patch tool", () => {
   test("creates new file from /dev/null patch", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-new-"))
     const c = ctx(home)
-    const r = await applyPatchTool.execute({ path: "new.ts", patch: "--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1,2 @@\n+export const x = 1\n+export const y = 2\n" }, c)
+    const r = await patchTool.execute({ path: "new.ts", patch: "--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1,2 @@\n+export const x = 1\n+export const y = 2\n" }, c)
     expect(r.output).toContain("已写入 new.ts")
     expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "new.ts")).text()).toBe("export const x = 1\nexport const y = 2\n")
     cleanup(home)
@@ -1603,9 +1641,9 @@ describe("apply_patch tool", () => {
   test("multi-file patch rejected; empty patch reports no hunks", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-multi-"))
     const c = ctx(home)
-    const multi = await applyPatchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n-c\n+d\n" }, c)
+    const multi = await patchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n-c\n+d\n" }, c)
     expect(multi.output).toContain("2 个文件")
-    const empty = await applyPatchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n" }, c)
+    const empty = await patchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n" }, c)
     expect(empty.output).toContain("未解析到任何 hunk")
     cleanup(home)
   })

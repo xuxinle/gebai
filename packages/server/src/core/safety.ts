@@ -4,7 +4,7 @@
  * 引擎主/子循环与 flow 数据流编排工具共用（flow 直接调 rt.tool.execute 不经引擎拦截，须在 step 层同规则判定）。
  */
 export const SAFE_MODE_RISKY_TOOLS = new Set([
-  "sh", "py", "write", "edit", "delete_file", "move_file", "delete_tool",
+  "sh", "py", "write", "edit", "patch", "file", "delete",
   "cron_add", "cron_update", "cron_remove",
 ])
 

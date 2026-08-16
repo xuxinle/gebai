@@ -52,11 +52,11 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
 describe("explore sub-agent（只读代码探索）", () => {
   test("只读工具集：探索/分析/待办齐全，无任何写或执行工具，全部免审批", () => {
     const names = Object.keys(exploreDef.tools!)
-    for (const t of ["read", "ls", "grep", "search_files", "search_symbols", "analyze", "git", "fetch_url", "todo"]) {
+    for (const t of ["read", "ls", "grep", "glob", "search_symbols", "analyze", "git", "fetch_url", "todo"]) {
       expect(names).toContain(t)
     }
     // 硬约束：探索不修改——写/执行/删除类工具一律缺席
-    for (const t of ["write", "edit", "apply_patch", "sh", "py", "delete_file", "move_file"]) {
+    for (const t of ["write", "edit", "patch", "sh", "py", "file"]) {
       expect(names).not.toContain(t)
     }
     expect(exploreDef.requiresApproval).toBeUndefined()

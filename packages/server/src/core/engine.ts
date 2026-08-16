@@ -261,7 +261,7 @@ export class AgentEngine {
   private tasks = new Map<string, TaskState>()
 
   /** 会话级已读文件追踪（fileGuard 防误覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → 已读绝对路径集合。
-   *  read/edit/apply_patch/write 成功后登记，write 整体覆盖「已存在但未读过」的文件前据此拦截；
+   *  read/edit/patch/write 成功后登记，write 整体覆盖「已存在但未读过」的文件前据此拦截；
    *  会话删除经 forgetSession 释放（进程内无界增长防护）。 */
   private readFiles = new Map<string, Set<string>>()
   /** 单会话已读登记上限（防长会话无界增长；超出整表重置——守卫降级为「需重读」，保护语义不破坏）。 */

@@ -1,15 +1,15 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { SubAgentDef } from "../core/types"
-import { readFeedbackTool, makePreviewServerTool, pageCaptureTool, truncate } from "../core/tools"
+import { readFeedbackTool, pageCaptureTool, truncate } from "../core/tools"
 import { makeVisionTool, getVisionProvider } from "../core/vision"
 import { isBinaryMode } from "../core/config"
 
 export const name = "self_optimize"
 export const description =
-  "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具）并同步 DESIGN.md，测试失败可 rollback 回滚。不处理外部项目（外部代码用 code）。"
+  "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 self_optimize_read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具）并同步 DESIGN.md，测试失败可 rollback 回滚。不处理外部项目（外部代码用 code）。"
 export const systemPrompt =
-  "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/apply_patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内），文件与分析类工具即 code_* 命名空间工具；本提示词只补充自我优化特有的流程与约束：\n" +
-  "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 read_feedback 工具读取，作为优化输入；\n" +
+  "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内），文件与分析类工具即 code_* 命名空间工具；本提示词只补充自我优化特有的流程与约束：\n" +
+  "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；\n" +
   "2) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；\n" +
   "3) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；\n" +
   "4) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认后 all=true 跑全量），失败则修复或 rollback 回滚（rollback 按路径回滚工作区改动；失败先看错误信息定位再修复重测，不盲目重复执行）；再运行 bun run typecheck/bun run lint 确认无回归（sh 工具，需审批）；\n" +
@@ -38,7 +38,7 @@ function selfOptimizeRoot(env: Record<string, string>): string | null {
 
 /**
  * 写范围守卫（SubAgentDef.writeGuard，引擎注入 ToolContext.writeGuard）——「核心引擎源码默认只读」的
- * **代码级**强制（文件写类工具 write/edit/apply_patch/move_file/delete_file 写入前调用）：
+ * **代码级**强制（文件写类工具 write/edit/patch/move_file/delete_file 写入前调用）：
  * - GEBAI_SELF_MODIFY=true：完全放开；仓库根无法定位（二进制模式未配 SELF_OPTIMIZE_PROJECT）：无保护对象，放行；
  * - 命中仓库根内的路径：仅 子Agent 目录 + 仓库级文档/配置 可写，核心引擎源码拒绝；
  * - 仓库根外的路径（会话 tmp 等产物）：不限制——守卫保护的是歌白仓库，不约束常规产物写入。
@@ -124,7 +124,6 @@ export const tools = {
   read_feedback: readFeedbackTool,
   run_tests: runTestsTool,
   rollback: rollbackTool,
-  preview_server: makePreviewServerTool(),
   page_capture: pageCaptureTool,
   vision: makeVisionTool({ vision: getVisionProvider }),
 }

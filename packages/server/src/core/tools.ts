@@ -9,7 +9,6 @@ import { isBinaryMode } from "./config"
 import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from "./diff"
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from "./patch"
 import { hostBlockReason } from "./ip"
-import { deleteMiniTool, saveMiniTool } from "./mini-tools"
 import { runFlow, scanFlowApprovals } from "./flow"
 
 export const TRUNCATE_THRESHOLD = 12000
@@ -191,7 +190,7 @@ export const readTool: Tool = {
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件（整体覆盖）。路径受沙箱限制。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/apply_patch/write 成功过的文件视为已读；只改局部优先 edit/apply_patch。",
+    "写入文件（整体覆盖）。路径受沙箱限制。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。",
   card: { titleParams: ["path"], args: "code", codeField: "content" },
   parameters: schema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
   async execute(args, ctx) {
@@ -209,7 +208,7 @@ export const writeTool: Tool = {
       }
       if (exists && !ctx.fileGuard.hasRead(path)) {
         return {
-          output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 apply_patch（unified diff）。新建文件不受此限制。`,
+          output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
         }
       }
     }
@@ -245,32 +244,261 @@ export const lsTool: Tool = {
   },
 }
 
-export const deleteFileTool: Tool = {
-  name: "delete_file",
-  description: "删除文件或目录（递归）。删除不可恢复，谨慎使用。",
-  card: { titleParams: ["path"] },
-  parameters: schema({ path: { type: "string" } }, ["path"]),
-  async execute(args, ctx) {
-    const path = ctx.resolvePath(String(args.path))
-    const guardMsg = await ctx.writeGuard?.([path])
-    if (guardMsg) return { output: guardMsg }
-    await ctx.deleteFile(path)
-    return { output: `已删除 ${args.path}` }
-  },
+/** file info 类型猜测（扩展名 → 描述；目录与未知扩展名另行处理）。 */
+const FILE_TYPE_BY_EXT: Record<string, string> = {
+  ts: "TypeScript 源码", tsx: "TypeScript JSX 源码", js: "JavaScript 源码", mjs: "JavaScript 模块", jsx: "JSX 源码",
+  py: "Python 源码", go: "Go 源码", rs: "Rust 源码", java: "Java 源码", c: "C 源码", h: "C 头文件", cpp: "C++ 源码",
+  cs: "C# 源码", rb: "Ruby 源码", php: "PHP 源码", sh: "Shell 脚本", bat: "Windows 批处理", ps1: "PowerShell 脚本",
+  json: "JSON 数据", yaml: "YAML 配置", yml: "YAML 配置", toml: "TOML 配置", ini: "INI 配置", env: "环境变量文件",
+  md: "Markdown 文档", txt: "纯文本", html: "HTML 文档", htm: "HTML 文档", css: "样式表", csv: "CSV 数据", sql: "SQL 脚本",
+  png: "PNG 图片", jpg: "JPEG 图片", jpeg: "JPEG 图片", gif: "GIF 图片", webp: "WebP 图片", svg: "SVG 矢量图", ico: "图标文件",
+  pdf: "PDF 文档", docx: "Word 文档", xlsx: "Excel 表格", pptx: "PPT 演示", log: "日志文件", lock: "锁文件",
+  zip: "ZIP 压缩包", gz: "Gzip 压缩", tar: "TAR 归档", "7z": "7z 压缩包", rar: "RAR 压缩包",
+  exe: "可执行文件", msi: "Windows 安装包", dll: "动态链接库", so: "共享库", dylib: "共享库", bin: "二进制文件",
+  mp3: "音频", wav: "音频", flac: "音频", mp4: "视频", mov: "视频", mkv: "视频", webm: "视频",
+  mmd: "Mermaid 图表", puml: "PlantUML 图表", plantuml: "PlantUML 图表", d2: "D2 图表",
 }
 
-export const moveFileTool: Tool = {
-  name: "move_file",
-  description: "移动或重命名文件/目录。",
-  card: { titleParams: ["from", "to"] },
-  parameters: schema({ from: { type: "string" }, to: { type: "string" } }, ["from", "to"]),
+/** 人类可读大小（B/KB/MB/GB，保留 1 位小数）。 */
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
+}
+
+/** 扩展名隐含的粗分类（info 扩展名/内容不符判定用；文本类参与——内容探测为 text 时一致不报，为二进制/图片等时报不符）。 */
+const EXT_KIND: Record<string, string> = {
+  txt: "text", md: "text", json: "text", html: "text", htm: "text", xml: "text", yaml: "text", yml: "text",
+  toml: "text", ini: "text", env: "text", csv: "text", css: "text", log: "text", sql: "text",
+  ts: "text", tsx: "text", js: "text", mjs: "text", jsx: "text", py: "text", go: "text", rs: "text",
+  java: "text", c: "text", h: "text", cpp: "text", cs: "text", rb: "text", php: "text",
+  sh: "text", bat: "text", ps1: "text", mmd: "text", puml: "text", plantuml: "text", d2: "text",
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", bmp: "image", ico: "image", svg: "image",
+  pdf: "document", docx: "document", xlsx: "document", pptx: "document",
+  zip: "archive", gz: "archive", tgz: "archive", "7z": "archive", rar: "archive", tar: "archive",
+  exe: "executable", msi: "executable", dll: "executable", so: "executable", dylib: "executable", bin: "executable",
+  mp3: "audio", wav: "audio", flac: "audio", mp4: "video", mov: "video", mkv: "video", webm: "video",
+}
+
+/** 二进制魔数探测（类似 file 命令）：命中返回 { type, kind, encoding? }，未命中返回 null（继续按文本处理）。 */
+function sniffMagic(buf: Buffer, ext: string): { type: string; kind: string; encoding?: string } | null {
+  const a = (n: number, s = 0) => buf.toString("latin1", s, s + n)
+  if (buf[0] === 0x89 && buf[1] === 0x50) return { type: "PNG 图片", kind: "image" }
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { type: "JPEG 图片", kind: "image" }
+  if (a(6) === "GIF87a" || a(6) === "GIF89a") return { type: "GIF 图片", kind: "image" }
+  if (a(4) === "RIFF" && a(4, 8) === "WEBP") return { type: "WebP 图片", kind: "image" }
+  if (a(2) === "BM") return { type: "BMP 图片", kind: "image" }
+  if (buf[0] === 0 && buf[1] === 0 && buf[2] === 1 && buf[3] === 0) return { type: "ICO 图标", kind: "image" }
+  if (a(5) === "%PDF-") return { type: "PDF 文档", kind: "document" }
+  if (buf[0] === 0x50 && buf[1] === 0x4b && (buf[2] === 3 || buf[2] === 5 || buf[2] === 7)) {
+    // ZIP 容器：Office Open XML/EPUB/JAR 等按扩展名细分，否则泛称 ZIP
+    const z: Record<string, string> = {
+      docx: "Word 文档（Office Open XML，ZIP 容器）", xlsx: "Excel 表格（Office Open XML，ZIP 容器）", pptx: "PPT 演示（Office Open XML，ZIP 容器）",
+      epub: "EPUB 电子书（ZIP 容器）", jar: "JAR 包（ZIP 容器）", apk: "APK 安装包（ZIP 容器）",
+    }
+    return { type: z[ext] ?? "ZIP 压缩包（或 Office/EPUB 等 ZIP 容器）", kind: "archive" }
+  }
+  if (buf[0] === 0x1f && buf[1] === 0x8b) return { type: "Gzip 压缩", kind: "archive" }
+  if (a(6) === "7z\xbc\xaf\x27\x1c") return { type: "7z 压缩包", kind: "archive" }
+  if (a(4) === "Rar!") return { type: "RAR 压缩包", kind: "archive" }
+  if (a(5, 257) === "ustar") return { type: "TAR 归档", kind: "archive" }
+  if (a(15) === "SQLite format ") return { type: "SQLite 数据库", kind: "data" }
+  if (buf[0] === 0x7f && a(4) === "\x7fELF") return { type: "ELF 可执行/共享库", kind: "executable" }
+  if (a(2) === "MZ") return { type: "PE 可执行（exe/dll）", kind: "executable" }
+  if (buf[0] === 0xca && buf[1] === 0xfe && buf[2] === 0xba && buf[3] === 0xbe) return { type: "Java class 文件", kind: "executable" }
+  // UTF-16 BOM（文本族，带编码）
+  if (buf[0] === 0xff && buf[1] === 0xfe) return { type: "UTF-16 LE 文本", kind: "text", encoding: "utf-16le" }
+  if (buf[0] === 0xfe && buf[1] === 0xff) return { type: "UTF-16 BE 文本", kind: "text", encoding: "utf-16be" }
+  return null
+}
+
+/** UTF-8 文本内容判定：shebang 解释器 / 高置信格式（SVG/HTML/XML/JSON）→ 具体类型，否则纯 UTF-8 文本。 */
+function sniffText(buf: Buffer, bytesRead: number, wholeFile: boolean): { type: string; encoding: string } | null {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buf.subarray(0, bytesRead))
+    const hasBom = buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf
+    const encoding = hasBom ? "utf-8-bom" : "utf-8"
+    const m = /^#!/.test(text)
+    if (m) {
+      // shebang 解析：取首行去掉 #! 后按空白切分——env 形式取其后解释器（env python3 → python3），
+      // 路径形式取最后一段（/usr/bin/python3 → python3，/bin/bash -e → bash）
+      const nl = text.indexOf("\n")
+      const line = (nl === -1 ? text : text.slice(0, nl)).slice(2).trim()
+      const parts = line.split(/\s+/).filter(Boolean)
+      const interp = parts[0] === "env" ? (parts[1] ?? "env") : parts[parts.length - 1] ?? ""
+      return { type: `脚本（shebang: ${interp}）`, encoding }
+    }
+    const head = text.trimStart().slice(0, 32).toLowerCase()
+    if (head.startsWith("<svg")) return { type: "SVG 矢量图（XML 文本）", encoding }
+    if (head.startsWith("<!doctype html") || head.startsWith("<html")) return { type: "HTML 文档（文本）", encoding }
+    if (head.startsWith("<?xml")) return { type: "XML 文档（文本）", encoding }
+    const t = text.trim()
+    if (wholeFile && (t.startsWith("{") || t.startsWith("["))) {
+      try {
+        JSON.parse(t)
+        return { type: "JSON 数据（文本）", encoding }
+      } catch {
+        // 形似 JSON 但解析失败，按普通文本
+      }
+    }
+    return { type: "UTF-8 文本", encoding }
+  } catch {
+    return null
+  }
+}
+
+/** 非 UTF-8 且无魔数：疑似 GBK/ANSI 编码文本（合法 GBK 解码 + 含 CJK + 无替换符；NUL 字节按二进制处理）。 */
+function sniffGbk(buf: Buffer, bytesRead: number): boolean {
+  const slice = buf.subarray(0, bytesRead)
+  if (slice.includes(0)) return false
+  try {
+    // @types/node 的 Encoding 枚举未含 gbk（Node/Bun 运行时均支持），断言绕过类型限制
+    const s = new TextDecoder("gbk" as never).decode(slice)
+    return !s.includes("\uFFFD") && /[\u4e00-\u9fff]/.test(s)
+  } catch {
+    return false
+  }
+}
+
+/** 未知二进制判定：NUL 字节或控制字符占比过高（\t\n\r 除外）。 */
+function looksBinary(buf: Buffer, bytesRead: number): boolean {
+  const slice = buf.subarray(0, bytesRead)
+  if (slice.includes(0)) return true
+  let ctrl = 0
+  for (const b of slice) if (b < 0x20 && b !== 9 && b !== 10 && b !== 13) ctrl++
+  return ctrl / Math.max(1, bytesRead) > 0.3
+}
+
+export const fileTool: Tool = {
+  name: "file",
+  description:
+    "文件管理（单工具多动作）：rename 重命名（同目录改名，newName 仅名字不含路径）/ move 移动或跨目录改名（to 含目标文件名，父目录不存在自动创建）/ delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite 等）、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**；附大小与修改时间，目录附直接子条目数。路径与 read/write 同一解析规则（沙箱约束）。",
+  card: { titleParams: ["action", "path"] },
+  parameters: schema(
+    {
+      action: { enum: ["rename", "move", "delete", "info"], description: "操作：rename 重命名 / move 移动 / delete 删除 / info 查看信息" },
+      path: { type: "string", description: "目标文件/目录路径（rename/move 的源路径，delete/info 的目标路径）" },
+      to: { type: "string", description: "move 目标路径（含目标文件名；父目录不存在时自动创建）" },
+      newName: { type: "string", description: "rename 新名字（仅名字、不含路径分隔符；跨目录改名用 move）" },
+    },
+    ["action", "path"],
+  ),
+  outputSchema: schema({
+    path: { type: "string", description: "info：逻辑路径" },
+    type: { type: "string", description: "info：类型描述（内容探测结果：魔数/文本格式/编码，目录/空文件）" },
+    size: { type: "integer", description: "info：字节数（目录为 0）" },
+    isDir: { type: "boolean", description: "info：是否目录" },
+    modifiedAt: { type: "string", description: "info：修改时间（ISO 8601）" },
+    entries: { type: "integer", description: "info：目录直接子条目数（仅目录）" },
+    encoding: { type: "string", description: "info：文本编码（utf-8/utf-8-bom/utf-16le/utf-16be/gbk，仅文本）" },
+    text: { type: "boolean", description: "info：是否文本内容（true 时可安全 read）" },
+    extMismatch: { type: "boolean", description: "info：扩展名隐含分类与实际内容不符" },
+  }),
   async execute(args, ctx) {
-    const from = ctx.resolvePath(String(args.from))
-    const to = ctx.resolvePath(String(args.to))
-    const guardMsg = await ctx.writeGuard?.([from, to])
-    if (guardMsg) return { output: guardMsg }
-    await ctx.moveFile(from, to)
-    return { output: `已移动 ${args.from} → ${args.to}` }
+    const action = String(args.action ?? "")
+    const path = ctx.resolvePath(String(args.path))
+    if (action === "rename") {
+      const newName = String(args.newName ?? "").trim()
+      if (!newName || newName.includes("/") || newName.includes("\\") || newName === "." || newName === "..") {
+        return { output: "file 拒绝：rename 需要合法的 newName（仅新名字、不含路径分隔符）；跨目录移动请用 action=move。" }
+      }
+      const to = join(dirname(path), newName)
+      const guardMsg = await ctx.writeGuard?.([path, to])
+      if (guardMsg) return { output: guardMsg }
+      await ctx.moveFile(path, to)
+      return { output: `已重命名 ${args.path} → ${newName}` }
+    }
+    if (action === "move") {
+      if (!args.to) return { output: "file 拒绝：move 需要 to（目标路径，含目标文件名）。" }
+      const to = ctx.resolvePath(String(args.to))
+      const guardMsg = await ctx.writeGuard?.([path, to])
+      if (guardMsg) return { output: guardMsg }
+      await ctx.moveFile(path, to)
+      return { output: `已移动 ${args.path} → ${args.to}` }
+    }
+    if (action === "delete") {
+      const guardMsg = await ctx.writeGuard?.([path])
+      if (guardMsg) return { output: guardMsg }
+      await ctx.deleteFile(path)
+      return { output: `已删除 ${args.path}` }
+    }
+    if (action === "info") {
+      const { stat, readdir, open } = await import("node:fs/promises")
+      let st
+      try {
+        st = await stat(path)
+      } catch (err) {
+        return { output: `file: 无法访问 ${args.path}（${err instanceof Error ? err.message : String(err)}）——不存在或无权限，可用 ls/glob 确认。` }
+      }
+      const modifiedAt = new Date(st.mtimeMs).toISOString()
+      if (st.isDirectory()) {
+        let entries = -1
+        try {
+          entries = (await readdir(path)).length
+        } catch {
+          // 无权限列举时保留 -1（输出省略条目数）
+        }
+        return {
+          output: `${args.path}: 目录${entries >= 0 ? `，${entries} 个直接子条目` : ""}，修改时间 ${modifiedAt}`,
+          data: { path: String(args.path), type: "目录", size: 0, isDir: true, modifiedAt, ...(entries >= 0 ? { entries } : {}) },
+        }
+      }
+      const base = path.replace(/[\\/]/g, "/").split("/").pop() ?? ""
+      const dot = base.lastIndexOf(".")
+      const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : ""
+      const extLabel = FILE_TYPE_BY_EXT[ext] ?? ""
+      // 内容探测（类似 file 命令，读头部 1KB）：魔数 → UTF-8 文本（shebang/格式/编码）→ 疑似 GBK → 未知二进制
+      if (st.size === 0) {
+        return {
+          output: `${args.path}: 空文件，修改时间 ${modifiedAt}`,
+          data: { path: String(args.path), type: "空文件", size: 0, isDir: false, modifiedAt },
+        }
+      }
+      const fh = await open(path, "r")
+      const buf = Buffer.alloc(1024)
+      const { bytesRead } = await fh.read(buf, 0, 1024, 0)
+      await fh.close()
+      const wholeFile = st.size <= 1024
+      let type: string
+      let kind: string
+      let encoding: string | undefined
+      const magic = sniffMagic(buf, ext)
+      if (magic) {
+        type = magic.type
+        kind = magic.kind
+        encoding = magic.encoding
+      } else {
+        const text = sniffText(buf, bytesRead, wholeFile)
+        if (text) {
+          kind = "text"
+          encoding = text.encoding
+          // 内容有更具体的判定（shebang/SVG/HTML/XML/JSON）用它；否则扩展名标签 + 编码组合，无扩展名泛称
+          const specific = !/^(UTF-8 文本)$/.test(text.type)
+          const encNote = text.encoding === "utf-8-bom" ? "UTF-8（BOM）" : "UTF-8"
+          type = specific ? text.type : extLabel ? `${extLabel}（${encNote} 文本）` : `${encNote} 文本`
+        } else if (sniffGbk(buf, bytesRead)) {
+          kind = "text"
+          encoding = "gbk"
+          type = extLabel ? `${extLabel}（疑似 GBK/ANSI 编码，非 UTF-8——直接 read 会乱码）` : "文本（疑似 GBK/ANSI 编码，非 UTF-8——直接 read 会乱码）"
+        } else {
+          kind = "binary"
+          type = extLabel ? `${extLabel}（二进制内容）` : looksBinary(buf, bytesRead) ? "二进制文件（未知格式）" : "未知格式（非 UTF-8，且无法识别魔数）"
+        }
+      }
+      // 扩展名隐含分类与实际内容不符时显式提示（防误读/误传：模型据此不再盲 read 二进制）
+      const extKind = EXT_KIND[ext]
+      const mismatch = extKind && extKind !== kind && !(extKind === "image" && ext === "svg" && kind === "text")
+      const mismatchNote = mismatch ? `（扩展名 .${ext} 与实际内容不符）` : ""
+      return {
+        output: `${args.path}: ${type}${mismatchNote}，${humanSize(st.size)}（${st.size} B），修改时间 ${modifiedAt}`,
+        data: {
+          path: String(args.path), type, size: st.size, isDir: false, modifiedAt,
+          ...(encoding ? { encoding } : {}), ...(kind === "text" ? { text: true } : {}), ...(mismatch ? { extMismatch: true } : {}),
+        },
+      }
+    }
+    return { output: `file: 未知 action「${action}」，支持 rename/move/delete/info。` }
   },
 }
 
@@ -404,8 +632,8 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${out}$`)
 }
 
-export const searchFilesTool: Tool = {
-  name: "search_files",
+export const globTool: Tool = {
+  name: "glob",
   description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话目录中递归查找文件，返回相对路径。path 可限定子目录。",
   card: { titleParams: ["pattern"] },
   parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .）" } }, ["pattern"]),
@@ -747,55 +975,8 @@ export const renderHtmlTool: Tool = {
   },
 }
 
-export const saveTool: Tool = {
-  name: "save_tool",
-  // 仅实时前端可用（供标题栏「小工具」弹窗加载，依赖前端 UI），多轮交互/无交互模式禁用
-  interaction: "realtime",
-  description:
-    "保存 HTML 小工具到服务端小工具库（供标题栏「小工具」弹窗随时加载使用）。工作流：先用 render_html 在聊天中调试预览，满意后调用本工具保存。scope=public 公用（所有用户可见）/ private 用户私有（默认）。同名工具覆盖更新。工具名仅限字母/数字/下划线/中文（不含 . / 等分隔符）。无需审批。",
-  card: { titleParams: ["name"] },
-  parameters: schema(
-    {
-      name: { type: "string", description: "工具名（1-40 字符，字母/数字/下划线/中文；列表与加载均按此名）" },
-      html: { type: "string", description: "HTML 源码（完整文档或片段，加载时经沙箱 iframe 渲染，脚本可执行但隔离于宿主页面）" },
-      scope: { enum: ["private", "public"], description: "可见范围：private=用户私有（默认）/ public=公用（所有用户可用）" },
-    },
-    ["name", "html"],
-  ),
-  async execute(args, ctx) {
-    const scope = args.scope === "public" ? "public" : "private"
-    const info = await saveMiniTool(ctx.home, ctx.user, {
-      name: String(args.name ?? ""),
-      html: String(args.html ?? ""),
-      scope,
-    }, { mode: ctx.authMode ?? "local", role: ctx.userRole })
-    return {
-      output: `小工具已保存: ${info.name}（${scope === "public" ? "公用" : "用户私有"}，${info.html.length} 字符）\n可在标题栏「小工具」弹窗中加载使用${scope === "public" ? "，所有用户可见" : ""}。`,
-    }
-  },
-}
-
-export const deleteTool: Tool = {
-  name: "delete_tool",
-  // 仅实时前端可用（删除的是前端小工具库条目），多轮交互/无交互模式禁用
-  interaction: "realtime",
-  description: "删除已保存的 HTML 小工具（按名称 + 范围，不可恢复）。私有工具仅本人可删；公用工具删除影响所有用户，需审批。",
-  requiresApproval: true,
-  card: { titleParams: ["name"] },
-  parameters: schema(
-    {
-      name: { type: "string", description: "要删除的工具名" },
-      scope: { enum: ["private", "public"], description: "删除的范围：private（默认）/ public" },
-    },
-    ["name"],
-  ),
-  async execute(args, ctx) {
-    const scope = args.scope === "public" ? "public" : "private"
-    const removed = await deleteMiniTool(ctx.home, ctx.user, String(args.name ?? ""), scope, { mode: ctx.authMode ?? "local", role: ctx.userRole })
-    if (!removed) return { output: `小工具不存在或名称非法: ${args.name}（scope=${scope}）` }
-    return { output: `小工具已删除: ${args.name}（${scope === "public" ? "公用" : "用户私有"}）` }
-  },
-}
+// save_tool/delete_tool（HTML 小工具库）已下沉 widgets 子Agent：core/mini-tools.ts 提供存储实现，
+// widgets_save/widgets_list/widgets_get/widgets_delete 以子Agent 命名空间暴露（与模型工具语义区分）
 
 /** 统计 needle 在 content 中的非重叠出现位置（起始索引），limit 后截断（防巨量匹配耗尽内存）。 */
 function findOccurrences(content: string, needle: string, limit = 1000): number[] {
@@ -823,7 +1004,7 @@ function collapseWhitespace(s: string): string {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动。**唯一性校验**：默认要求 oldString 在文件中唯一命中（多处命中报错并列出位置——扩大 oldString 上下文使其唯一，或确认全部替换时该项传 replaceAll: true）；原文不匹配则整体失败不落盘（含空白/缩进近似提示）；oldString 不得为空。改动较多或行号容易偏移时改用 apply_patch 应用 unified diff（一次多 hunk、容错更强）。修改前先 read 目标区域，oldString 从原文精确复制（含缩进）。",
+    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动。**唯一性校验**：默认要求 oldString 在文件中唯一命中（多处命中报错并列出位置——扩大 oldString 上下文使其唯一，或确认全部替换时该项传 replaceAll: true）；原文不匹配则整体失败不落盘（含空白/缩进近似提示）；oldString 不得为空。改动较多或行号容易偏移时改用 patch 应用 unified diff（一次多 hunk、容错更强）。修改前先 read 目标区域，oldString 从原文精确复制（含缩进）。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits" },
   parameters: schema(
     {
@@ -937,15 +1118,15 @@ export const diffTool: Tool = {
   },
 }
 
-/** apply_patch 应用结果摘要（hunk 位置与净变化）。 */
+/** patch 应用结果摘要（hunk 位置与净变化）。 */
 function describeAppliedPatch(applied: Array<{ line: number; delta: number }>): string {
   const add = applied.reduce((s, a) => s + Math.max(0, a.delta), 0)
   const del = applied.reduce((s, a) => s + Math.max(0, -a.delta), 0)
   return `已应用 ${applied.length} 处 hunk（净 +${add}/-${del} 行，首处位于行 ${applied[0]?.line ?? 0}）`
 }
 
-export const applyPatchTool: Tool = {
-  name: "apply_patch",
+export const patchTool: Tool = {
+  name: "patch",
   description:
     "应用 unified diff 补丁到文件（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造，---/+++ 文件头可省略），格式：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\n-旧行\n+新行）；全部 hunk 校验通过才整体落盘（原子），任一 hunk 不匹配整体失败不修改；dryRun=true 仅预演不落盘。单次仅处理一个文件（多文件补丁请分文件调用）。改动较多或行号容易偏移时优先于 edit 使用。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff" },
@@ -960,10 +1141,10 @@ export const applyPatchTool: Tool = {
   async execute(args, ctx) {
     const path = String(args.path)
     const files = parsePatch(String(args.patch ?? ""))
-    if (files.length === 0) return { output: "apply_patch: 补丁未解析到任何 hunk（请提供含 @@ 头的 unified diff 文本，格式见 diff 工具输出）" }
-    if (files.length > 1) return { output: `apply_patch: 补丁含 ${files.length} 个文件，请分文件调用（本次仅处理 ${path}）` }
+    if (files.length === 0) return { output: "patch: 补丁未解析到任何 hunk（请提供含 @@ 头的 unified diff 文本，格式见 diff 工具输出）" }
+    if (files.length > 1) return { output: `patch: 补丁含 ${files.length} 个文件，请分文件调用（本次仅处理 ${path}）` }
     const patch = files[0]
-    if (patch.hunks.length > PATCH_MAX_HUNKS) return { output: `apply_patch: hunk 数超上限（${patch.hunks.length} > ${PATCH_MAX_HUNKS}），请拆分补丁` }
+    if (patch.hunks.length > PATCH_MAX_HUNKS) return { output: `patch: hunk 数超上限（${patch.hunks.length} > ${PATCH_MAX_HUNKS}），请拆分补丁` }
     let content = ""
     let exists = true
     try {
@@ -972,20 +1153,20 @@ export const applyPatchTool: Tool = {
       exists = false
     }
     if (exists && content.length > PATCH_MAX_FILE_BYTES) {
-      return { output: `apply_patch: 文件过大（${content.length} 字符，上限 ${PATCH_MAX_FILE_BYTES}），请改用 edit 分段修改` }
+      return { output: `patch: 文件过大（${content.length} 字符，上限 ${PATCH_MAX_FILE_BYTES}），请改用 edit 分段修改` }
     }
     const r = applyPatch(content, patch)
     if (!r.ok) {
-      return { output: `apply_patch: 第 ${r.hunkIndex + 1} 处 hunk 未匹配：${r.error}（请先 read 当前文件内容核对，或改用 edit 定点替换；dryRun=true 可预演）` }
+      return { output: `patch: 第 ${r.hunkIndex + 1} 处 hunk 未匹配：${r.error}（请先 read 当前文件内容核对，或改用 edit 定点替换；dryRun=true 可预演）` }
     }
-    if (args.dryRun === true) return { output: `apply_patch 预演通过：${describeAppliedPatch(r.applied)}（dryRun，未写入）` }
+    if (args.dryRun === true) return { output: `patch 预演通过：${describeAppliedPatch(r.applied)}（dryRun，未写入）` }
     const abs = ctx.resolvePath(path)
     const guardMsg = await ctx.writeGuard?.([abs])
     if (guardMsg) return { output: guardMsg }
     await ctx.writeFile(abs, r.result)
     // 写入内容即已掌握，登记已读（write 防误覆盖守卫依据）
     ctx.fileGuard?.markRead(abs)
-    return { output: `apply_patch 已写入 ${path}：${describeAppliedPatch(r.applied)}` }
+    return { output: `patch 已写入 ${path}：${describeAppliedPatch(r.applied)}` }
   },
 }
 
@@ -1997,30 +2178,29 @@ export function createGlobalTools(): Record<string, Tool> {
     write: writeTool,
     ls: lsTool,
     grep: grepTool,
-    search_files: searchFilesTool,
-    delete_file: deleteFileTool,
-    move_file: moveFileTool,
+    glob: globTool,
+    file: fileTool,
     edit: editTool,
-    apply_patch: applyPatchTool,
+    patch: patchTool,
     diff: diffTool,
-    git: gitTool,
     flow: makeFlowTool(),
     tool_schemas: toolSchemasTool,
     sh: shTool,
     py: pyTool,
     draw: drawTool,
     render_html: renderHtmlTool,
-    save_tool: saveTool,
-    delete_tool: deleteTool,
+    // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）
     fetch_url: fetchUrlTool,
     todo: todoTool,
     ask_user: askUserTool,
     ask_env: askEnvTool,
-    read_feedback: readFeedbackTool,
-    preview_server: makePreviewServerTool(),
     current_time: currentTimeTool,
-    system_info: systemInfoTool,
-    env_detect: envDetectTool,
+    // read_feedback 不注册进总Agent 全局工具集（读取用户反馈是自我优化专属输入通道，
+    // 由 self_optimize 子Agent 以 self_optimize_read_feedback 命名空间暴露；def 声明保证新会话模式可用）
+    // git 不注册进总Agent 全局工具集（只读 git 属编码工作流，由 code/explore 子Agent 以
+    // code_git/explore_git 命名空间暴露；self_optimize 经连带装载 code 一并获得）
+    // preview_server/env_detect/system_info 不注册进总Agent 全局工具集（开发验证/环境探测属编码工作流，
+    // 由 code 子Agent 以 code_ 命名空间暴露；self_optimize 经连带装载 code 一并获得）
     // agent_list 不注册进总Agent 全局工具集：未装载子Agent 清单已由 systemPromptInjection 注入提示词
     // （模型上下文已有，工具调用冗余且干扰工具选择）；agent_list 仅在新会话执行（组合子Agent 编排环境）
     // 注入——runNewSession 对纯 md 组合式子Agent 自动注入 agent_list/agent_load/agent_run

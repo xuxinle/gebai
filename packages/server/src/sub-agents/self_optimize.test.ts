@@ -58,8 +58,8 @@ function cleanup(home: string) {
 describe("self_optimize sub-agent", () => {
   test("工具集只含 code 没有的独有工具（复用 code 通用能力，不重复注册）", () => {
     const names = Object.keys(selfOptimizeDef.tools!)
-    // 独有能力：反馈读取、测试准入、回滚、验证服务、页面捕获、视觉分析
-    for (const t of ["read_feedback", "run_tests", "rollback", "preview_server", "page_capture", "vision"]) {
+    // 独有能力：反馈读取、测试准入、回滚、页面捕获、视觉分析（preview_server 已并入 code，随连带装载获得）
+    for (const t of ["read_feedback", "run_tests", "rollback", "page_capture", "vision"]) {
       expect(names).toContain(t)
     }
     // 不复刻 code 的通用工具（装载/预加载时连带装载 code，文件/分析类直接用 code_* 命名空间）

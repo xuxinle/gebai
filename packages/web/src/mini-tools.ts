@@ -109,7 +109,7 @@ export function toggleMiniToolsPop(): void {
   refresh.onclick = () => void refreshList(listEl, emptyEl)
   head.appendChild(refresh)
   const listEl = el("div", "mini-tools-list")
-  const emptyEl = el("div", "mini-tools-empty", "暂无小工具 — 让 Agent 先用 render_html 调试，再用 save_tool 保存")
+  const emptyEl = el("div", "mini-tools-empty", "暂无小工具 — 让 Agent 生成 HTML 页面，调试满意后保存为小工具")
   pop.append(head, listEl, emptyEl)
   document.body.appendChild(pop)
   // 定位：按钮下方右对齐

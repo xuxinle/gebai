@@ -1,7 +1,7 @@
 import { splitLines } from "./diff"
 
 /**
- * apply_patch：unified diff 补丁解析与应用（纯函数，无 fs 依赖，与 diff.ts 同构）。
+ * patch 工具：unified diff 补丁解析与应用（纯函数，无 fs 依赖，与 diff.ts 同构）。
  * - 解析：`---`/`+++` 文件头（可省略）、`@@ -l,c +l,c @@` hunk 头（容错省略 count 的形式）、
  *   上下文/新增/删除行、`\ No newline` 标记；git 风格元数据行（diff --git/index/mode 等）容忍跳过
  * - 应用：逐 hunk 顺序应用到行数组（偏移累积）；删除行作锚点全文件匹配，上下文不符时
@@ -13,7 +13,7 @@ import { splitLines } from "./diff"
 export const PATCH_FUZZ_LINES = 3
 /** 单次补丁 hunk 数上限。 */
 export const PATCH_MAX_HUNKS = 100
-/** apply_patch 目标文件大小上限（字符）。 */
+/** patch 目标文件大小上限（字符）。 */
 export const PATCH_MAX_FILE_BYTES = 5 * 1024 * 1024
 
 /** 补丁行类型：0=上下文、1=新增、-1=删除。 */
