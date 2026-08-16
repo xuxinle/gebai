@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, makeCronTools, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool } from "./tools"
+import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool } from "./tools"
 import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath } from "./paths"
@@ -793,50 +793,11 @@ describe("global tools", () => {
     expect(tools.delete_tool).toBeUndefined()
     // read_feedback 下沉 self_optimize 子Agent（自我优化专属输入通道，self_optimize_read_feedback 命名空间暴露）
     expect(tools.read_feedback).toBeUndefined()
-  })
-
-  test("cron tools delegate to ctx.cron and report disabled capability", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-cron-tools-"))
-    const c = ctx(home)
-    const cronTools = makeCronTools()
-    expect(Object.keys(cronTools).sort()).toEqual(["cron_add", "cron_list", "cron_remove", "cron_update"])
-
-    // 未启用（ctx.cron 为空）：明确提示，不抛错
-    const disabled = await cronTools.cron_add.execute({ schedule: "0 9 * * *", type: "script", script: "echo" }, c)
-    expect(disabled.output).toContain("未启用")
-
-    // 启用：add 透传并格式化输出
-    const added: import("./cron").CronTask = { id: "t1", sessionId: "s1", user: "default", name: "daily", type: "script", schedule: "0 9 * * *", script: "echo hi", enabled: true, createdAt: 1, updatedAt: 1, nextRunAt: 2, runCount: 0 }
-    c.cron = {
-      add: async (input) => ({ ...added, ...input, id: "t1" }),
-      list: async () => [added],
-      remove: async (id) => id === "t1",
-      update: async (id, patch) => (id === "t1" ? { ...added, ...patch } : null),
-    }
-    const r = await cronTools.cron_add.execute({ name: "daily", schedule: "0 9 * * *", type: "script", script: "echo hi" }, c)
-    expect(r.output).toContain("t1")
-    expect(r.output).toContain("下次执行")
-
-    const listed = await cronTools.cron_list.execute({}, c)
-    expect(listed.output).toContain("t1")
-    expect(listed.output).toContain("echo hi")
-
-    const updated = await cronTools.cron_update.execute({ id: "t1", enabled: false }, c)
-    expect(updated.output).toContain("已更新")
-
-    const removed = await cronTools.cron_remove.execute({ id: "t1" }, c)
-    expect(removed.output).toContain("已删除")
-    const missing = await cronTools.cron_remove.execute({ id: "nope" }, c)
-    expect(missing.output).toContain("不存在")
-  })
-
-  test("cron mutation tools require approval; list does not", async () => {
-    const cronTools = makeCronTools()
-    // 定时任务 = 无人值守的任意命令/会话执行：创建/修改/删除均需审批（防多用户模式绕过审批边界）
-    expect(cronTools.cron_add.requiresApproval).toBe(true)
-    expect(cronTools.cron_update.requiresApproval).toBe(true)
-    expect(cronTools.cron_remove.requiresApproval).toBe(true)
-    expect(cronTools.cron_list.requiresApproval).toBeFalsy()
+    // cron_* 下沉 cron 子Agent（cron_add/list/update/remove 命名空间暴露；对应测试见 sub-agents/cron/cron.test.ts）
+    expect(tools.cron_add).toBeUndefined()
+    expect(tools.cron_list).toBeUndefined()
+    expect(tools.cron_update).toBeUndefined()
+    expect(tools.cron_remove).toBeUndefined()
   })
 
   test("ask_user tool blocks waiting for the user's choice (via waitForChoice)", async () => {

@@ -18,7 +18,6 @@ import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveVision
 import { makeVisionTool, setVisionProviderGetter, getVisionProvider } from "./core/vision"
 import { scheduleGC } from "./core/gc"
 import { CronManager } from "./core/cron"
-import { makeCronTools } from "./core/tools"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
 import { DevReloadManager, webRootOf } from "./dev-reload"
 import type { ServerWebSocket } from "bun"
@@ -171,10 +170,6 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   // 任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider
   setVisionProviderGetter((env) => resolveVisionProvider(mainConfig, visionConfig, env))
   registry.register(makeVisionTool({ vision: getVisionProvider }))
-  // 定时任务工具：仅 GEBAI_CRON_ENABLED=true 时注册（关闭时 cron_* 完全不可见，不进工具表/schema）
-  if (config.cronEnabled) {
-    for (const tool of Object.values(makeCronTools())) registry.register(tool)
-  }
   registry.enableSet(config.toolEnable, config.toolDisable)
 
   // 沙箱 auto 判定（DESIGN「GEBAI_SANDBOX」）：只看运行形态，不判定监听 IP——
@@ -215,6 +210,9 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   const events = new EventBus()
   const subAgents = new SubAgentManager({ registry, preloadOverride: config.preloadSubAgents })
   await subAgents.discover()
+  // 定时任务能力开关（GEBAI_CRON_ENABLED）：关闭时 cron 子Agent 不注册（agent_list/agent_load/agent_run
+  // 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时 cron 子Agent 正常可见、按需装载
+  if (!config.cronEnabled) subAgents.unregister("cron")
 
   const engine = new AgentEngine({
     provider,

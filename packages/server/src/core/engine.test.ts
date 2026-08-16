@@ -2511,13 +2511,13 @@ describe("AgentEngine cron integration", () => {
     const store = new SessionStore({ home })
     const registry = new ToolRegistry()
     for (const tool of Object.values(createGlobalTools())) registry.register(tool)
-    const { makeCronTools } = await import("./tools")
-    for (const tool of Object.values(makeCronTools())) registry.register(tool)
     const sandbox = new Sandbox({ home, enabled: false })
     const env = new EnvManager(home, store)
     const events = new EventBus()
-    const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
+    // cron 子Agent：discover 注册定义 + 预载装载（cron_add/list/update/remove 命名空间工具进入注册表）
+    const subAgents = new SubAgentManager({ registry, preloadOverride: ["cron"] })
     await subAgents.discover()
+    expect(registry.resolve("cron_add")).toBeDefined()
     const provider = new FakeProvider("tool")
     provider.toolName = "cron_add"
     provider.toolArgs = { name: "daily-backup", schedule: "0 9 * * *", type: "script", script: "echo backup" }
@@ -2551,9 +2551,25 @@ describe("AgentEngine cron integration", () => {
     mkdirSync(join(home, "users", "default"), { recursive: true })
     const registry = new ToolRegistry()
     for (const tool of Object.values(createGlobalTools())) registry.register(tool)
-    // 未启用 cron：工具不在注册表（模型不可见、不可调用）
+    // 未启用 cron：子Agent 未装载/未注册，cron_* 工具不在注册表（模型不可见、不可调用）
     expect(registry.resolve("cron_add")).toBeUndefined()
     expect(registry.resolve("cron_list")).toBeUndefined()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("cron sub-agent unregistered when capability disabled (invisible to agent_list/agent_run)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-gate-"))
+    mkdirSync(join(home, "users", "default"), { recursive: true })
+    const registry = new ToolRegistry()
+    for (const tool of Object.values(createGlobalTools())) registry.register(tool)
+    const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
+    await subAgents.discover()
+    expect(subAgents.def("cron")).toBeDefined() // 默认发现注册（能力开启形态）
+    subAgents.unregister("cron") // GEBAI_CRON_ENABLED=false 启动时执行同一撤销
+    expect(subAgents.def("cron")).toBeUndefined()
+    expect(registry.resolve("cron_add")).toBeUndefined()
+    expect(subAgents.list().some((a) => a.name === "cron")).toBe(false)
+    await expect(subAgents.load("cron")).rejects.toThrow(/unknown sub-agent/)
     rmSync(home, { recursive: true, force: true })
   })
 })

@@ -137,6 +137,13 @@ export class SubAgentManager {
     this.defs.set(def.name, def)
   }
 
+  /** 撤销子Agent 定义（能力开关关闭时隐藏，如 GEBAI_CRON_ENABLED=false 移除 cron）：未装载直接删除定义；
+   *  已装载则先注销其工具（注册表残留工具不清理会让模型可见但引擎不可用）。 */
+  unregister(name: string): void {
+    if (this.loaded.has(name)) this.unload(name)
+    this.defs.delete(name)
+  }
+
   isLoaded(name: string): boolean {
     return this.loaded.has(name)
   }
