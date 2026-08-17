@@ -507,7 +507,7 @@ header {
   z-index: 30;
   position: relative;
 }
-/* 标题栏居中显示当前会话标题：绝对居中（left 50% + 反向位移），不受左右元素（信号灯/上下文占比）宽度影响 */
+/* 标题栏居中显示当前会话标题：绝对居中（left 50% + 反向位移），不受左右元素（折叠按钮/上下文圆环组）宽度影响 */
 .header-title {
   position: absolute;
   left: 50%;
@@ -522,44 +522,37 @@ header {
   pointer-events: none;
   user-select: none;
 }
+/* 连接信号灯：居于上下文圆环圆心（#header-ctx 内，见下方 #header-ctx 块）；基类仅保留圆点 ::before 与配色，
+   胶囊徽章底色/内边距由 #conn（id 特异性）统一中和，各主题只接管圆点颜色/光晕 */
 .conn {
-  flex: none; /* 信号灯位于上下文占比左侧，出现/消失不推动 ctx 左右移动 */
+  flex: none;
   font-size: 12px;
   color: var(--success);
-  background: color-mix(in srgb, var(--success) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
-  padding: 2px 10px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   white-space: nowrap;
 }
 .conn::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-/* 已连接：只保留圆点信号灯（无文字、无胶囊；id 特异性压过各主题的 .conn 胶囊样式） */
-#conn:not(.bad) {
-  background: transparent;
-  border-color: transparent;
-  padding: 0;
-  font-size: 0;
-  gap: 0;
-  min-width: 12px;
-  min-height: 12px;
+/* 圆心信号灯：绝对铺满环形容器并居中圆点；中和基类与各主题的胶囊徽章样式（原独立徽章布局废止） */
+#conn {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
   justify-content: center;
+  padding: 0;
+  gap: 0;
+  font-size: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  white-space: nowrap;
 }
+#conn::before { width: 8px; height: 8px; flex: none; }
+/* 已连接且空闲：隐藏信号灯（仅剩圆环）；思考/生成中：圆点显示并快速闪烁 */
+#conn:not(.bad) { display: none; }
+#conn.thinking:not(.bad) { display: flex; }
 #conn:not(.bad)::before {
-  width: 9px;
-  height: 9px;
   background: var(--accent); /* 信号灯用主题色（原绿色） */
   box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent);
-  flex: none;
-}
-/* 已连接：纯信号灯（仅圆点无文字）；空闲（无生成）时隐藏，生成/思考时显示并快速闪烁 */
-#conn:not(.bad) {
-  display: none;
-}
-#conn.thinking:not(.bad) {
-  display: inline-flex;
 }
 /* 思考/生成中（任意会话运行）：信号灯快速不规则闪烁（多关键帧错落明暗，避免匀速脉动的规律感） */
 @keyframes conn-thinking {
@@ -572,7 +565,9 @@ header {
 #conn.thinking:not(.bad)::before {
   animation: conn-thinking 0.25s ease-in-out infinite;
 }
-.conn.bad { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
+/* 断开/异常：红点常亮（圆心放不下文字徽章，具体信息 hover 圆点经 data-tip 展示；currentColor 取红色，
+   主题 .conn.bad / .conn.bad::before 仍可覆写底色与光晕） */
+.conn.bad { color: var(--danger); }
 
 .icon-btn {
   background: none;
@@ -792,22 +787,18 @@ aside {
   font-size: 13.5px;
   color: var(--text);
 }
-/* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：上行数字 + 下行进度条，比例分级着色；
+/* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：24px SVG 圆环 + 圆心信号灯（#conn），
+   具体数值 hover 经 data-tip 展示；比例分级着色（弧线颜色）<50% 主题色、50-80% 警告色、≥80% 危险色；
    位于右侧固定组 .header-right 内（组容器单一 margin-left:auto 整体靠右） */
 #header-ctx {
+  position: relative;
+  width: 24px;
+  height: 24px;
   flex: none;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 3px;
-  font-size: 11px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
   user-select: none;
-  white-space: nowrap;
 }
 #header-ctx[hidden] { display: none; }
-/* 标题栏右侧固定组（上下文占比 + 轮盘入口）：单一 margin-left:auto 整体靠右——
+/* 标题栏右侧固定组（上下文圆环 + 轮盘入口）：单一 margin-left:auto 整体靠右——
    若 ctx 与入口各自带 auto margin，flex 会平分剩余空间把 ctx 拉向中线与居中标题重叠 */
 .header-right {
   margin-left: auto;
@@ -816,28 +807,33 @@ aside {
   gap: 12px;
   flex: none;
 }
-#header-ctx .ctx-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-#header-ctx .ctx-bar {
-  width: 64px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bg-inset);
-  overflow: hidden;
-  flex: none;
-}
-#header-ctx .ctx-fill {
-  display: block;
+/* 圆环：-90° 旋转使弧线从 12 点方向顺时针填充；pathLength=100 归一化周长，
+   JS 直接以百分比数值写 stroke-dashoffset（100-占比），免周长换算 */
+#header-ctx .ctx-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
   height: 100%;
-  border-radius: 2px;
-  background: var(--accent);
-  transition: width 0.2s ease;
+  transform: rotate(-90deg);
 }
-#header-ctx.warn .ctx-fill { background: var(--warning); }
-#header-ctx.danger .ctx-fill { background: var(--danger); }
+#header-ctx .ctx-track,
+#header-ctx .ctx-fill {
+  fill: none;
+  stroke-width: 2.5;
+}
+/* 底环用 --border（与标题栏底边框同级亮度，各主题均有定义且可辨识）——原 --bg-inset 比标题栏背景还深，空环几乎不可见 */
+#header-ctx .ctx-track { stroke: var(--border); }
+#header-ctx .ctx-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  transition: stroke-dashoffset 0.2s ease, stroke 0.2s ease;
+}
+#header-ctx.warn .ctx-fill { stroke: var(--warning); }
+#header-ctx.danger .ctx-fill { stroke: var(--danger); }
+/* 无上下文数据（未配置窗口/空会话）：隐藏圆环仅剩圆心信号灯（思考闪烁/断开红点仍可见） */
+#header-ctx.no-ring .ctx-ring { display: none; }
 /* 会话右键菜单（多选/重命名/删除）：悬浮浮层，随光标定位 */
 .session-ctx-menu {
   position: fixed;
@@ -964,7 +960,6 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   :root { --font-size: 13.5px; --msg-gap: 12px; }
   header { padding: 0 10px; gap: 8px; }
   .icon-btn { font-size: 14px; }
-  .conn { font-size: 11px; padding: 2px 8px; }
   #messages { padding: 12px; }
   .msg-name { font-size: 11px; }
   .msg-time { font-size: 10.5px; }
@@ -972,8 +967,6 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   .markdown code { font-size: 0.86em; }
   /* 输入区单行 */
   #input { min-height: 32px; }
-  /* 隐藏不必要图标 */
-  .conn { display: none; }
 }
 
 /* ---------- 主题切换丝滑动画 ---------- */

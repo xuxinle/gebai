@@ -408,37 +408,99 @@ function renderThemePop() {
   syncThemePop()
 }
 
+/* 悬浮交互延迟：入口 hover 短延迟展开（扫过轮盘扇区不误弹，同轮盘可调回 0），
+   离开入口/面板 250ms 后收起（入口 → 面板间移动空隙不误关，与轮盘 CLOSE_DELAY 一致） */
+const POP_OPEN_DELAY = 120
+const POP_CLOSE_DELAY = 250
+
 export function bindThemePop() {
   renderThemePop()
-  themeBtn.onclick = () => {
-    // 每次打开重渲染：人民币配色分组随当前主题显示/隐藏
-    if (themePop.hidden) renderThemePop()
-    themePop.hidden = !themePop.hidden
-    themeBtn.setAttribute("aria-expanded", String(!themePop.hidden))
-    if (!themePop.hidden) {
-      // 面板跟随按钮弹出（按钮可能位于标题栏轮盘等右侧位置）：
-      // 面板右缘对齐按钮右缘并钳制在视口内（左对齐会让 252px 面板右侧出界）；
-      // 按钮下方空间足够则向下展开，否则向上展开
-      const r = themeBtn.getBoundingClientRect()
-      const w = themePop.offsetWidth
-      themePop.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`
-      themePop.style.right = "auto"
-      const spaceBelow = window.innerHeight - r.bottom
-      if (spaceBelow >= 300) {
-        themePop.style.top = `${r.bottom + 8}px`
-        themePop.style.bottom = "auto"
-        themePop.style.maxHeight = `${spaceBelow - 16}px`
-      } else {
-        themePop.style.top = "auto"
-        themePop.style.bottom = `${window.innerHeight - r.top + 8}px`
-        themePop.style.maxHeight = `${Math.max(200, r.top - 16)}px`
-      }
+  let openTimer: number | null = null
+  let closeTimer: number | null = null
+  const cancelOpen = () => {
+    if (openTimer) {
+      clearTimeout(openTimer)
+      openTimer = null
     }
   }
-  document.addEventListener("click", (e) => {
-    if (!themePop.hidden && !themePop.contains(e.target as Node) && e.target !== themeBtn) {
-      themePop.hidden = true
-      themeBtn.setAttribute("aria-expanded", "false")
+  const cancelClose = () => {
+    if (closeTimer) {
+      clearTimeout(closeTimer)
+      closeTimer = null
     }
+  }
+  const closePop = () => {
+    cancelOpen()
+    cancelClose()
+    themePop.hidden = true
+    themeBtn.setAttribute("aria-expanded", "false")
+  }
+  const openPop = () => {
+    cancelClose()
+    if (!themePop.hidden) return
+    renderThemePop() // 每次打开重渲染：人民币配色分组随当前主题显示/隐藏
+    themePop.hidden = false
+    themeBtn.setAttribute("aria-expanded", "true")
+    positionPop()
+  }
+  // 面板跟随按钮弹出（按钮可能位于标题栏轮盘等右侧位置）：
+  // 面板右缘对齐按钮右缘并钳制在视口内（左对齐会让 252px 面板右侧出界）；
+  // 按钮下方空间足够则向下展开，否则向上展开
+  const positionPop = () => {
+    const r = themeBtn.getBoundingClientRect()
+    const w = themePop.offsetWidth
+    themePop.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`
+    themePop.style.right = "auto"
+    const spaceBelow = window.innerHeight - r.bottom
+    if (spaceBelow >= 300) {
+      themePop.style.top = `${r.bottom + 8}px`
+      themePop.style.bottom = "auto"
+      themePop.style.maxHeight = `${spaceBelow - 16}px`
+    } else {
+      themePop.style.top = "auto"
+      themePop.style.bottom = `${window.innerHeight - r.top + 8}px`
+      themePop.style.maxHeight = `${Math.max(200, r.top - 16)}px`
+    }
+  }
+  const scheduleOpen = () => {
+    cancelClose()
+    if (!themePop.hidden || openTimer) return
+    openTimer = window.setTimeout(() => {
+      openTimer = null
+      openPop()
+    }, POP_OPEN_DELAY)
+  }
+  const scheduleClose = () => {
+    cancelOpen()
+    if (themePop.hidden || closeTimer) return
+    closeTimer = window.setTimeout(() => {
+      closeTimer = null
+      closePop()
+    }, POP_CLOSE_DELAY)
+  }
+  // 悬浮自动展开：入口/面板互为保持区，两者都离开才收起
+  themeBtn.addEventListener("pointerenter", scheduleOpen)
+  themeBtn.addEventListener("pointerleave", scheduleClose)
+  themePop.addEventListener("pointerenter", cancelClose)
+  themePop.addEventListener("pointerleave", scheduleClose)
+  // 键盘可达：焦点进入入口即展开；焦点离开入口+面板之外收起
+  themeBtn.addEventListener("focusin", openPop)
+  themePop.addEventListener("focusin", cancelClose)
+  const onfocusout = (e: FocusEvent) => {
+    const to = e.relatedTarget as Node | null
+    if (to && (themeBtn.contains(to) || themePop.contains(to))) return
+    closePop()
+  }
+  themeBtn.addEventListener("focusout", onfocusout)
+  themePop.addEventListener("focusout", onfocusout)
+  // Enter/空格仅展开不切换（hover 已展开时点击不误关）
+  themeBtn.onclick = () => openPop()
+  // 外点/Esc/resize 收起
+  document.addEventListener("pointerdown", (e) => {
+    if (!themePop.hidden && !themePop.contains(e.target as Node) && !themeBtn.contains(e.target as Node)) closePop()
   })
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closePop()
+  })
+  window.addEventListener("resize", closePop)
 }

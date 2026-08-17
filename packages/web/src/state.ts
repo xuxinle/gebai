@@ -189,14 +189,19 @@ export function getSubAgentNames(): string[] {
 /* ---------- 基础工具函数 ---------- */
 
 export function setConn(text: string, ok = true) {
-  // 已连接：纯信号灯（仅圆点无文字，CSS 由 #conn:not(.bad) 渲染）；断开/异常：红字状态徽章
-  connEl.textContent = ok ? "" : text
+  // 信号灯居于上下文圆环圆心：正常仅圆点（空闲隐藏/思考闪烁，CSS 渲染）；
+  // 断开/异常：红点常亮，具体信息走 data-tip（圆心放不下原文字徽章）
+  connEl.textContent = ""
   connEl.classList.toggle("bad", !ok)
+  if (ok) delete connEl.dataset.tip
+  else connEl.dataset.tip = text
+  syncCtxSignal()
 }
 
 /** 思考信号：任意会话运行（流式生成）中信号灯闪烁；运行结束恢复常亮。 */
 export function syncConnThinking() {
   connEl.classList.toggle("thinking", runs.size > 0)
+  syncCtxSignal()
 }
 
 export function filesContent(sessionId: string, path: string): string {
@@ -242,8 +247,7 @@ export function focusInput() {
 
 const headerTitleEl = document.getElementById("header-title")
 const headerCtxEl = document.getElementById("header-ctx")
-const ctxTextEl = document.querySelector<HTMLElement>("#header-ctx .ctx-text")
-const ctxFillEl = document.querySelector<HTMLElement>("#header-ctx .ctx-fill")
+const ctxFillEl = document.querySelector<SVGCircleElement>("#header-ctx .ctx-fill")
 
 /** 浏览器 tab 标题固定为「歌白」（不拼接会话名）；标题栏居中会话标题跟随当前会话。 */
 export function updateTitle() {
@@ -283,22 +287,28 @@ export function setMaxCtxTokens(v: number): void {
 }
 
 /**
- * 标题栏上下文占比显示：当前会话 ctxTokens / 模型窗口（进度条 + 文本），
- * 切换会话时随 updateTitle 联动；运行中由 event.session.ctx 实时更新。
- * 使用比例分级着色：<50% 主题色、50-80% 警告色、≥80% 危险色。
+ * 标题栏上下文占比显示：当前会话 ctxTokens / 模型窗口（SVG 圆环弧线），圆心为连接信号灯（#conn），
+ * 具体数值 hover 经 data-tip 展示；切换会话时随 updateTitle 联动；运行中由 event.session.ctx 实时更新。
+ * 弧线比例分级着色：<50% 主题色、50-80% 警告色、≥80% 危险色；pathLength=100 下 dashoffset 直接用 100-占比。
  */
 export function renderHeaderCtx(): void {
-  if (!headerCtxEl || !ctxTextEl || !ctxFillEl) return
+  if (!headerCtxEl || !ctxFillEl) return
   const used = currentSession?.ctxTokens ?? 0
-  if (used <= 0 || maxCtxTokens <= 0) {
-    headerCtxEl.hidden = true
-    return
-  }
-  headerCtxEl.hidden = false
-  const pct = Math.min(100, Math.round((used / maxCtxTokens) * 100))
-  ctxTextEl.textContent = `${(used / 1000).toFixed(1)}k / ${(maxCtxTokens / 1000).toFixed(0)}k`
-  ctxTextEl.title = `上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）`
-  ctxFillEl.style.width = `${pct}%`
-  headerCtxEl.classList.toggle("warn", pct >= 50 && pct < 80)
-  headerCtxEl.classList.toggle("danger", pct >= 80)
+  const hasCtx = used > 0 && maxCtxTokens > 0
+  const pct = hasCtx ? Math.min(100, Math.round((used / maxCtxTokens) * 100)) : 0
+  headerCtxEl.classList.toggle("no-ring", !hasCtx)
+  ctxFillEl.style.strokeDashoffset = String(100 - pct)
+  headerCtxEl.classList.toggle("warn", hasCtx && pct >= 50 && pct < 80)
+  headerCtxEl.classList.toggle("danger", hasCtx && pct >= 80)
+  if (hasCtx) headerCtxEl.dataset.tip = `上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）`
+  else delete headerCtxEl.dataset.tip
+  syncCtxSignal()
+}
+
+/** 圆环容器可见性：有上下文数据出环；无数据时仅当圆心信号灯需要展示（思考闪烁/断开红点）才保留容器。 */
+function syncCtxSignal(): void {
+  if (!headerCtxEl) return
+  const hasRing = !headerCtxEl.classList.contains("no-ring")
+  const signal = connEl.classList.contains("thinking") || connEl.classList.contains("bad")
+  headerCtxEl.hidden = !hasRing && !signal
 }
