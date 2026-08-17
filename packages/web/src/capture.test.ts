@@ -1,11 +1,19 @@
 import { describe, expect, test, mock } from "bun:test"
 
+// 全量测试下 window 可能被其他测试文件泄漏为 globalThis（navigator 无 userAgent），
+// 真实 modern-screenshot 模块在导入时求值 `window.navigator?.userAgent.includes(...)` 会抛
+// 「USER_AGENT.includes is not a function」——先固定受控浏览器环境，保证模块级求值安全
+;(globalThis as Record<string, unknown>).window = { navigator: { userAgent: "bun-test" } }
+;(globalThis as Record<string, unknown>).navigator = { userAgent: "bun-test", onLine: true }
+
 // mock modern-screenshot（bun test 无浏览器）：domToPng 返回固定 data URL
 mock.module("modern-screenshot", () => ({
   domToPng: async () => "data:image/png;base64,aGVsbG8=",
 }))
 
-import { capturePage, CAPTURE_HTML_LIMIT } from "./capture"
+// 静态 import 会被提升到文件顶部（先于 mock.module 与全局设置执行，真实模块会以泄漏的 window 求值而崩溃），
+// 改用动态 import 保证「全局 mock → mock.module 注册 → capture 加载」的顺序
+const { capturePage, CAPTURE_HTML_LIMIT } = await import("./capture")
 
 /** 最小 document mock（capturePage 只读 documentElement/getComputedStyle）。 */
 function mockDoc(html: string, opts: { clientWidth?: number; clientHeight?: number; scrollHeight?: number } = {}) {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool } from "./tools"
+import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
 import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -772,7 +772,7 @@ describe("global tools", () => {
     for (const n of [
       "read", "write", "ls", "grep", "glob", "file",
       "edit", "flow", "sh", "py", "draw", "render_html", "fetch_url",
-      "todo", "ask_user", "ask_env", "current_time",
+      "todo", "ask_user", "ask_env", "plan", "current_time",
       "agent_load", "agent_run",
     ]) {
       expect(tools[n]).toBeDefined()
@@ -836,6 +836,90 @@ describe("global tools", () => {
     expect(received).toEqual({ prompt: "选择方案", options: [{ title: "方案A", description: "第一个方案" }, "方案B"], multi: true })
     // 无选项时报错
     await expect(createGlobalTools().ask_user.execute({ prompt: "x", options: [] }, c)).rejects.toThrow(/至少一个选项/)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("plan tool writes plan document to session tmp/plans/ and maps approval outcomes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-plan-"))
+    const c = ctx(home)
+    const tools = createGlobalTools()
+    // 批准执行：计划落盘 + 输出批准引导
+    c.waitForChoice = async () => ({ kind: "option", value: "批准执行" })
+    const approved = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状", "拆分接口", "迁移数据"] }, c)
+    expect(approved.output.startsWith("计划已批准")).toBe(true)
+    expect(approved.output).toContain("tmp/plans/重构订单模块.md")
+    expect(approved.data).toMatchObject({ status: "approved", title: "重构订单模块", path: "tmp/plans/重构订单模块.md" })
+    // 落盘内容与 buildPlanMarkdown 一致（title + 勾选清单）
+    const filePath = join(c.workdir, "plans", "重构订单模块.md")
+    expect(await Bun.file(filePath).text()).toBe(buildPlanMarkdown("重构订单模块", ["梳理现状", "拆分接口", "迁移数据"]))
+    // 拒绝执行（未附意见）：引导模型自省修订
+    c.waitForChoice = async () => ({ kind: "option", value: "拒绝执行" })
+    const rejected = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    expect(rejected.output.startsWith("计划已拒绝")).toBe(true)
+    expect(rejected.data).toMatchObject({ status: "rejected", feedback: "" })
+    // 自定义修改意见：作为拒绝反馈返回
+    c.waitForChoice = async () => ({ kind: "option", value: "缺少回归测试步骤" })
+    const feedback = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    expect(feedback.output).toContain("用户修改意见：缺少回归测试步骤")
+    expect(feedback.data).toMatchObject({ status: "rejected", feedback: "缺少回归测试步骤" })
+    // 用户拒绝回答：取消计划
+    c.waitForChoice = async () => ({ kind: "refuse" })
+    const cancelled = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    expect(cancelled.output).toContain("用户拒绝审核计划")
+    expect(cancelled.data).toMatchObject({ status: "cancelled" })
+    // 超时：降级提示
+    c.waitForChoice = async () => null
+    const timedOut = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    expect(timedOut.output).toContain("审批超时")
+    expect(timedOut.data).toMatchObject({ status: "timeout" })
+    // 审批等待的 prompt 携带计划路径与选项
+    let received: { prompt: string; options: unknown[] } | undefined
+    c.waitForChoice = async (prompt, options) => {
+      received = { prompt, options: options as unknown[] }
+      return { kind: "option", value: "批准执行" }
+    }
+    await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    expect(received?.prompt).toContain("请审核计划「重构订单模块」")
+    expect(received?.prompt).toContain("tmp/plans/重构订单模块.md")
+    expect(received?.options).toEqual(["批准执行", "拒绝执行"])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("plan tool: content 覆盖拼装、参数校验与文件名清洗", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-plan2-"))
+    const c = ctx(home)
+    c.waitForChoice = async () => null
+    const tools = createGlobalTools()
+    // content 提供时原样落盘（覆盖 steps 自动拼装）
+    const content = "# 迁移方案\n\n| 步骤 | 说明 |\n| --- | --- |\n| 1 | 冻结 |"
+    const r = await tools.plan.execute({ title: "数据库迁移", steps: ["无关步骤"], content }, c)
+    expect(r.data).toMatchObject({ status: "timeout", path: "tmp/plans/数据库迁移.md" })
+    expect(await Bun.file(join(c.workdir, "plans", "数据库迁移.md")).text()).toBe(content)
+    // 文件名清洗：路径分隔符/斜杠等替换为 `-`，空标题回退 plan
+    expect(planFileName("重构 订单/模块:v2")).toBe("重构-订单-模块-v2.md")
+    expect(planFileName("   ")).toBe("plan.md")
+    expect(planFileName("a".repeat(200))).toHaveLength(63) // 60 字符 + ".md"
+    // 参数校验：无标题 / 无步骤且无内容
+    const noTitle = await tools.plan.execute({ steps: ["x"] }, c)
+    expect(noTitle.output).toContain("需要指定计划标题")
+    const noSteps = await tools.plan.execute({ title: "x" }, c)
+    expect(noSteps.output).toContain("至少一个执行步骤")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("plan tool 不注册为需审批工具（审批内置于 waitForChoice），写范围守卫命中时拒绝落盘", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-plan3-"))
+    const c = ctx(home)
+    expect(planTool.requiresApproval).toBeUndefined()
+    expect(planTool.interaction).toBe("multi_turn")
+    let guard: string | null = "拒绝写入 /repo/src/core/engine.ts：self_optimize 默认只读"
+    c.writeGuard = async () => guard
+    const r = await planTool.execute({ title: "x", steps: ["y"] }, c)
+    expect(r.output).toContain("计划文档未落盘")
+    // 守卫放行时正常落盘
+    guard = null
+    const ok = await planTool.execute({ title: "x", steps: ["y"] }, c)
+    expect(ok.output).toContain("审批超时")
     rmSync(home, { recursive: true, force: true })
   })
 

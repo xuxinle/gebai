@@ -1773,6 +1773,94 @@ function normalizeChoiceOption(o: unknown): ChoiceOption {
 }
 export { askUserTool }
 
+/** 计划文档存储目录（会话 tmp/plans/，与其它文件工具同一路径基准，随会话文件面板可见）。 */
+export const PLAN_DIR = "plans"
+
+/** 计划文件名清洗：仅保留字母/数字/下划线/连字符，其余替换为 `-`，空标题回退 `plan`（直接作文件名，防路径穿越）。 */
+export function planFileName(title: string): string {
+  const slug = String(title ?? "")
+    .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+  return `${slug || "plan"}.md`
+}
+
+/** 组装计划 Markdown：content 提供时原样使用，否则由 title + steps 拼装（勾选清单；前端展示与落盘同构，双端同规则）。 */
+export function buildPlanMarkdown(title: string, steps: string[], content?: string): string {
+  const body = content && String(content).trim() ? String(content).trim() : ["# " + title, "", "## 执行计划", ""].concat(steps.map((s) => `- [ ] ${s}`)).join("\n")
+  return body
+}
+
+/**
+ * 计划审批工具（全局）：为复杂/多步骤任务制定执行计划——把计划文档写入会话 tmp/plans/（前端消息流直接展示全文），
+ * 然后阻塞等待用户审核：批准后模型按计划逐步执行；拒绝（可附修改意见）则修订后重新提交。
+ */
+export const planTool: Tool = {
+  name: "plan",
+  // 需至少多轮交互（用户审批），无交互模式禁用（与 ask_user 同规则）
+  interaction: "multi_turn",
+  description:
+    "为复杂/多步骤任务制定执行计划并提交用户审核：把计划文档写入会话文件（tmp/plans/{标题}.md）并在聊天界面直接展示给用户，然后**阻塞等待用户批准/拒绝**。批准后严格按计划逐步执行；拒绝时根据用户修改意见修订计划后重新调用本工具提交新版本；审批超时或用户拒绝审核时不再提交，基于现有信息直接回答。适用于多步骤、有风险、不可逆或用户需要把关的任务；简单任务无需使用，用 todo 跟踪即可。",
+  card: { titleParams: ["title"] },
+  parameters: schema(
+    {
+      title: { type: "string", description: "计划标题（简明概括任务目标，如「重构订单模块」）" },
+      steps: { type: "array", items: { type: "string" }, description: "执行步骤清单（按顺序，每步一句可执行动作；与 content 二选一）" },
+      content: { type: "string", description: "可选：完整计划 Markdown 正文（提供时覆盖 steps 的自动拼装，用于复杂嵌套/表格结构）" },
+    },
+    ["title"],
+  ),
+  outputSchema: schema(
+    {
+      status: { type: "string", description: "审批结果：approved/rejected/cancelled/timeout" },
+      title: { type: "string", description: "计划标题" },
+      path: { type: "string", description: "计划文档逻辑路径（tmp/plans/ 下，模型可经 read 读取）" },
+      feedback: { type: "string", description: "拒绝时的用户修改意见（无则空）" },
+    },
+    ["status", "title", "path"],
+  ),
+  async execute(args, ctx) {
+    const title = String(args.title ?? "").trim()
+    const steps = (Array.isArray(args.steps) ? args.steps : []).map(String).filter(Boolean)
+    const content = args.content != null ? String(args.content) : ""
+    if (!title) return { output: "plan 需要指定计划标题（title）。" }
+    if (!steps.length && !content.trim()) return { output: "plan 需要至少一个执行步骤（steps）或完整计划内容（content）。" }
+    const md = buildPlanMarkdown(title, steps, content || undefined)
+    const logical = `tmp/${PLAN_DIR}/${planFileName(title)}`
+    const abs = ctx.resolvePath(logical)
+    // 写范围守卫（子Agent 声明，引擎注入）：命中则拒绝落盘（计划文档属会话产物，常规不命中）
+    const guardMsg = await ctx.writeGuard?.([abs])
+    if (guardMsg) return { output: `计划文档未落盘：${guardMsg}` }
+    try {
+      await ctx.writeFile(abs, md)
+    } catch (err) {
+      return { output: `计划文档保存失败：${(err as Error).message}。请检查会话目录权限后重试。` }
+    }
+    // 阻塞等待用户审批：批准 → 模型继续按计划执行；拒绝（含自定义修改意见）→ 修订后重新提交
+    const choice = await ctx.waitForChoice(
+      `请审核计划「${title}」（已保存到会话文件 ${logical}）：批准后将按计划逐步执行；拒绝将返回模型修改；也可直接输入修改意见（视为拒绝）。`,
+      ["批准执行", "拒绝执行"],
+    )
+    const data = { status: "", title, path: logical }
+    if (!choice) {
+      return { output: `计划审批超时：「${title}」（5 分钟未响应）。请先向用户确认计划是否可执行；若继续执行，说明计划已提交过审批。`, data: { ...data, status: "timeout" } }
+    }
+    if (choice.kind === "refuse") {
+      return { output: `用户拒绝审核计划「${title}」。请停止计划相关操作，基于现有信息直接回答用户或询问其需求。`, data: { ...data, status: "cancelled" } }
+    }
+    const value = choice.kind === "multi" ? choice.values.join("、") : choice.value
+    if (value === "批准执行") {
+      return { output: `计划已批准：「${title}」。请严格按计划逐步执行（计划文档：${logical}，可用 read 读取），每完成一步用 todo 更新状态，关键节点向用户汇报。`, data: { ...data, status: "approved" } }
+    }
+    const feedback = value === "拒绝执行" ? "" : value
+    const reviseNote =
+      feedback === ""
+        ? "用户未附具体修改意见，请自行分析计划可能存在的不足（目标不清/步骤缺失/风险未评估等），修订后重新调用 plan 提交新版本。"
+        : `用户修改意见：${feedback}。请按意见修订计划后重新调用 plan 提交新版本。`
+    return { output: `计划已拒绝：「${title}」。${reviseNote}`, data: { ...data, status: "rejected", feedback } }
+  },
+}
+
 const PREVIEW_START_TIMEOUT_MS = 15000
 const PREVIEW_POLL_INTERVAL_MS = 300
 const PREVIEW_STATE_FILE = "gebai-preview.json"
@@ -2128,6 +2216,7 @@ export function createGlobalTools(): Record<string, Tool> {
     todo: todoTool,
     ask_user: askUserTool,
     ask_env: askEnvTool,
+    plan: planTool,
     current_time: currentTimeTool,
     // read_feedback 不注册进总Agent 全局工具集（读取用户反馈是自我优化专属输入通道，
     // 由 self_optimize 子Agent 以 self_optimize_read_feedback 命名空间暴露；def 声明保证新会话模式可用）

@@ -111,9 +111,9 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserCard, appendToolResult } = await import("./messages")
+const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserCard, appendPlanCard, appendToolResult } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey } = await import("./state")
-const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest } = await import("./tool-cards")
+const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead } = await import("./tool-cards")
 
 function fakeRun(overrides: Partial<RunState> = {}): RunState {
   return {
@@ -460,6 +460,71 @@ describe("ask_user 消息流问答卡片（像 draw 一样中断并开启输出�
     // msgEl 可能指向其他测试文件的 mock，跨文件共享模块注册表导致断言不可靠）
     expect(() => appendToolResult("s1", "tc-unknown", "ask_user", "用户选择：B")).not.toThrow()
     expect(pendingTools.size).toBe(0)
+  })
+})
+
+describe("plan 计划卡片（消息流展示计划全文 + 审批结果更新）", () => {
+  test("buildPlanMarkdown 与服务端同构：content 优先，否则 title + 勾选清单", () => {
+    expect(buildPlanMarkdown("重构订单模块", ["梳理现状", "拆分接口"])).toBe(
+      "# 重构订单模块\n\n## 执行计划\n\n- [ ] 梳理现状\n- [ ] 拆分接口",
+    )
+    const content = "# 迁移方案\n\n| 步骤 | 说明 |"
+    expect(buildPlanMarkdown("数据库迁移", ["无关步骤"], content)).toBe(content)
+  })
+
+  test("appendPlanCard renders title + plan markdown container into the flow (展示态)", () => {
+    const wrapper = appendPlanCard({ title: "重构订单模块", steps: ["梳理现状", "拆分接口"] })
+    expect(wrapper.className).toContain("msg")
+    expect(wrapper.className).toContain("tool")
+    const head = wrapper.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("计划")
+    expect(head?.textContent).toContain("重构订单模块")
+    // 计划全文经 markdown 渲染容器展示（内容正确性由 buildPlanMarkdown 单测覆盖；测试 DOM mock 无 innerHTML）
+    expect(wrapper.querySelector("div.markdown")).not.toBeNull()
+  })
+
+  test("appendToolResult kind=plan 更新头部为审批结果并追加结果文本", () => {
+    const wrapper = appendPlanCard({ title: "重构订单模块", steps: ["梳理现状"] })
+    const body = wrapper.querySelector(".msg-body") as HTMLElement
+    pendingTools.set(pendingToolsKey("s1", "tc1"), { wrapper, body, session: "s1", kind: "plan" })
+    appendToolResult("s1", "tc1", "plan", "计划已批准：「重构订单模块」。请严格按计划逐步执行。")
+    expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✓ 计划已批准")
+    expect(wrapper.querySelector("div.choice-answer")?.textContent).toContain("计划已批准")
+    expect(pendingTools.has(pendingToolsKey("s1", "tc1"))).toBe(false)
+    // 拒绝场景：头部与文本更新
+    pendingTools.set(pendingToolsKey("s1", "tc2"), { wrapper, body, session: "s1", kind: "plan" })
+    appendToolResult("s1", "tc2", "plan", "计划已拒绝：「重构订单模块」。用户修改意见：缺少回归测试步骤。")
+    expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✕ 计划已拒绝")
+    pendingTools.clear()
+  })
+
+  test("planResultHead 按输出前缀映射审批结果（与服务端输出文案一致）", () => {
+    expect(planResultHead("计划已批准：x")).toBe("✓ 计划已批准")
+    expect(planResultHead("计划已拒绝：x")).toBe("✕ 计划已拒绝")
+    expect(planResultHead("用户拒绝审核计划：x")).toBe("✕ 计划已取消")
+    expect(planResultHead("计划审批超时：「x」（5 分钟未响应）。")).toBe("⏱ 计划审批超时")
+    expect(planResultHead("计划文档保存失败：磁盘满")).toBe("✓ 计划已处理")
+  })
+
+  test("history card (toolCard): plan 历史消息渲染计划卡片（带审批结果态与结果文本）", () => {
+    const bubble = toolBubbleFor(
+      { id: "t1", role: "tool", name: "plan", content: "计划已批准：「重构订单模块」。请严格按计划逐步执行。", arguments: { title: "重构订单模块", steps: ["梳理现状", "迁移数据"] }, createdAt: 0 },
+      "计划已批准",
+    )
+    // 历史重载：头部直接呈现审批结果态，结果文本追加（与实时流一致）
+    expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 计划已批准")
+    expect(bubble.querySelector("div.choice-answer")?.textContent).toContain("计划已批准")
+    // 计划全文 markdown 容器（mock 无 innerHTML，结构断言即可）
+    expect(bubble.querySelector("div.markdown")).not.toBeNull()
+  })
+
+  test("history card (toolCard): plan 无结果文本（仅调用）时保持计划卡样式", () => {
+    const bubble = toolBubbleFor(
+      { id: "t2", role: "tool", name: "plan", content: "", arguments: { title: "重构订单模块", steps: ["梳理现状"] }, createdAt: 0 },
+      "",
+    )
+    expect(bubble.querySelector("div.tool-head")?.textContent).toBe("📋 计划 · 重构订单模块")
+    expect(bubble.querySelector("div.choice-answer")).toBeNull()
   })
 })
 

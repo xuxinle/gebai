@@ -19,7 +19,7 @@ import {
   type SessionRunState,
 } from "./state"
 import { blockText, highlightedCode, markdownBlock } from "./markdown"
-import { askUserBubble, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
+import { askUserBubble, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
@@ -622,6 +622,15 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
     }
+    if (entry.kind === "plan") {
+      // plan：计划卡片更新头部为审批结果并追加结果文本（审批由审批容器选择卡片承载）
+      const head = entry.wrapper.querySelector(".tool-head")
+      if (head) head.textContent = planResultHead(output)
+      const bubble = entry.wrapper.querySelector(".bubble")
+      if (bubble && output) bubble.appendChild(choiceAnswerBlock(output))
+      pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
+      return
+    }
     const head = entry.wrapper.querySelector(".tool-head")
     if (head) {
       // 完成态：重建结构化头部（✓ 图标，保留标题后缀——titleParams 声明的参数不因完成而丢失）
@@ -663,6 +672,27 @@ export function appendAskUserCard(prompt: string, options: Array<string | Record
   meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))
   body.appendChild(meta)
   body.appendChild(askUserBubble(prompt, options, multi))
+  wrapper.appendChild(body)
+  if (parent) parent.appendChild(wrapper)
+  else {
+    msgEl.appendChild(wrapper)
+    addMsgNavSeg(wrapper)
+    scrollIfSticky()
+  }
+  return wrapper
+}
+
+/** plan 计划卡片（消息流内展示计划全文，像 ask_user 一样开启新输出卡片；展示态，
+ *  交互作答由审批容器选择卡片承载；结果到达后由 appendToolResult 更新头部并追加结果）。 */
+export function appendPlanCard(args: { title?: unknown; steps?: unknown; content?: unknown }, parent?: HTMLElement): HTMLElement {
+  const wrapper = el("div", "msg tool")
+  const body = el("div", "msg-body")
+  const meta = el("div", "msg-meta")
+  meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))
+  body.appendChild(meta)
+  body.appendChild(
+    planBubble(String(args.title ?? ""), Array.isArray(args.steps) ? (args.steps as unknown[]).map(String) : [], args.content != null ? String(args.content) : undefined),
+  )
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
   else {

@@ -22,6 +22,7 @@ import {
   appendAskUserCard,
   appendCompactNotice,
   appendMsg,
+  appendPlanCard,
   appendTodoCard,
   appendToolResult,
   assistantContent,
@@ -187,6 +188,28 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
     const wrapper = appendAskUserCard(prompt, options, multi)
     const body = wrapper.querySelector<HTMLElement>(".msg-body")
     if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "ask_user" })
+    return
+  }
+  // plan：像 ask_user 一样在消息流中开启计划卡片（展示态，交互作答由审批容器选择卡片承载）
+  if (short === "plan") {
+    const args = (argsObj ?? {}) as { title?: unknown; steps?: unknown; content?: unknown }
+    const title = String(args.title ?? "").trim()
+    if (!title) return
+    noteIncoming()
+    if (runId) {
+      const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
+      if (!sub?.container.isConnected) return
+      sealSessionSegment(sub) // 容器内文本分段：计划卡片处截断当前文本段
+      const wrapper = appendPlanCard(args, sub.body)
+      const body = wrapper.querySelector<HTMLElement>(".msg-body")
+      if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "plan", runId })
+      scrollSessionSticky(sub.body)
+      return
+    }
+    sealSegment(ev.sessionId) // 文本分段：计划卡片处截断当前文本段
+    const wrapper = appendPlanCard(args)
+    const body = wrapper.querySelector<HTMLElement>(".msg-body")
+    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "plan" })
     return
   }
   if (isBlockOnly(String(ev.name ?? ""))) return
@@ -524,6 +547,8 @@ setQueueExecutor(async (sessionId, item: QueuedInput) => {
   if (getCurrentSession()?.id === sessionId) {
     lockToBottom() // 发送即锁定粘底（与直接发送一致）
     appendMsg({ id: item.messageId, role: "user", content: item.text, attachments: item.files as Array<{ path: string; mime: string; name: string; size: number }>, createdAt: item.createdAt })
+    lockToBottom() // 消息上屏后再落底一次：新消息立即可见（与直接发送一致）
+    refreshJumpBottom()
     recordInput(sessionId, item.text)
   }
   // env：发送时点取浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
@@ -582,6 +607,9 @@ composer.addEventListener("submit", async (e) => {
     appendMsg({ id: msgId, role: "user", content: text, createdAt: Date.now() })
     recordInput(sessionId, text)
   }
+  // 用户消息上屏后再落底一次：发送即滚动到底立即可见（不依赖观察器 rAF 时序；此前滚走阅读历史时同样恢复跟随）
+  lockToBottom()
+  refreshJumpBottom()
   const attachments = await sendPending(sessionId)
   // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
   const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")

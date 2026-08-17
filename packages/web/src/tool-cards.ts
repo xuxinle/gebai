@@ -511,6 +511,20 @@ export function toolCard(msg: Message): HTMLElement {
     const options = Array.isArray(args.options) ? (args.options as Array<string | Record<string, unknown>>) : []
     return choiceBubble(prompt, options, undefined, undefined, args.multi === true)
   }
+  // plan 工具：渲染计划卡片（标题 + 计划 Markdown 全文，展示态；历史消息带审批结果时头部更新为结果态并附结果文本）
+  if (short === "plan") {
+    const args = msg.arguments ?? {}
+    const title = String(args.title ?? "")
+    const steps = Array.isArray(args.steps) ? args.steps.map(String) : []
+    const content = args.content != null ? String(args.content) : undefined
+    const bubble = planBubble(title, steps, content)
+    if (msg.content) {
+      const head = bubble.querySelector(".tool-head")
+      if (head) head.textContent = planResultHead(msg.content)
+      bubble.appendChild(el("div", "choice-answer", msg.content))
+    }
+    return bubble
+  }
   const bubble = el("div", "bubble")
   const meta = metaOf(msg.name ?? "")
   bubble.appendChild(toolHead("call", msg.name ?? "tool", msg.arguments ?? null))
@@ -552,6 +566,30 @@ export function askUserBubble(prompt: string, options: Array<string | Record<str
   }
   bubble.appendChild(opts)
   return bubble
+}
+
+/** 组装计划展示 Markdown：与服务端 plan 工具同一规则（content 优先，否则 title + steps 勾选清单，双端同构）。 */
+export function buildPlanMarkdown(title: string, steps: string[], content?: string): string {
+  const body = content && content.trim() ? content.trim() : ["# " + title, "", "## 执行计划", "", ...steps.map((s) => `- [ ] ${s}`)].join("\n")
+  return body
+}
+
+/** plan 工具消息流计划卡片（展示态，不可交互）：计划标题 + 计划 Markdown 全文；
+ *  交互作答由审批容器选择卡片承载（批准/拒绝/修改意见）。 */
+export function planBubble(title: string, steps: string[], content?: string): HTMLElement {
+  const bubble = el("div", "bubble")
+  bubble.appendChild(el("div", "tool-head", `📋 计划 · ${title}`))
+  bubble.appendChild(markdownBlock(buildPlanMarkdown(title, steps, content)))
+  return bubble
+}
+
+/** plan 工具结果头部状态（按输出前缀识别审批结果，与服务端 plan 工具输出文案一致）。 */
+export function planResultHead(output: string): string {
+  if (output.startsWith("计划已批准")) return "✓ 计划已批准"
+  if (output.startsWith("计划已拒绝")) return "✕ 计划已拒绝"
+  if (output.startsWith("用户拒绝审核")) return "✕ 计划已取消"
+  if (output.startsWith("计划审批超时")) return "⏱ 计划审批超时"
+  return "✓ 计划已处理"
 }
 
 /** 环境变量请求卡片（event.env.request 实时渲染）：展示变量名与说明，用户填值提交后保存到浏览器本地并回传引擎（ask_env 工具阻塞等待）。 */
