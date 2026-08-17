@@ -9,8 +9,10 @@
   pointer-events: none;
 }
 .wheel.open { visibility: visible; pointer-events: auto; }
-.wheel svg { position: fixed; pointer-events: none; }
-.wheel svg path { fill: none; stroke: var(--border); stroke-width: 1; }
+.wheel > svg { position: fixed; pointer-events: none; }
+/* 仅分区弧线（.wheel 直接子级的弧 SVG）：path 描边、去填充。
+   必须用 > 限定直接子级——否则会误伤扇形按钮图标里的 path（fill:none 后图标只剩 1px 暗描边，形同被压住） */
+.wheel > svg path { fill: none; stroke: var(--border); stroke-width: 1; }
 /* 扇形按钮：双背景垫实——::before 与本体各铺一层 --bg-elev-2，半透明主题（acrylic 0.78）双层叠加
    达 ~95% 不透明，不透明主题本就实心；所有主题下按钮表面均接近实色、图标清晰。
    选择器用 .wheel button.icon-btn（0,2,1）压过各主题的 [data-theme] .icon-btn（0,2,0）覆盖 */
@@ -40,21 +42,61 @@
 .wheel button.icon-btn:hover::before {
   background: var(--bg-hover);
 }
-/* 内弧（会话操作组）分区底色 */
+/* 内弧（会话操作组）：accent 边框作组标识，背景与其余扇形按钮一致（--bg-elev-2）——
+   accent 调底与开关开启态 accent-soft 底过于接近、干扰视觉；图标统一 --text
+   （accent 图标叠 accent 底相对亮度差被抹平，亮色主题仅 2:1~4:1 不可读，全主题 ≥7:1） */
 .wheel button.icon-btn.wheel-inner {
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev-2));
-  color: var(--accent);
+  background: var(--bg-elev-2);
+  color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .wheel button.icon-btn.wheel-inner::before {
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev-2));
+  background: var(--bg-elev-2);
 }
 .wheel button.icon-btn.wheel-inner:hover {
-  background: color-mix(in srgb, var(--accent) 24%, var(--bg-elev-2));
-  color: var(--accent);
+  background: var(--bg-hover);
+  color: var(--text);
 }
 .wheel button.icon-btn.wheel-inner:hover::before {
-  background: color-mix(in srgb, var(--accent) 24%, var(--bg-elev-2));
+  background: var(--bg-hover);
+}
+/* 轮盘内开关类按钮（自动审批/极简模式）开启态：accent-soft 底 + accent 边框作"开"标识，
+   图标保持 --text——各主题 [data-theme] .icon-btn.active（0,3,0）会把图标染成 accent
+   （亮色主题 2:1~4:1 看不清），此处 (0,3,1) 压过；active:hover 置后保证开启悬停不丢高亮 */
+.wheel button.icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.wheel button.icon-btn.active::before {
+  background: var(--accent-soft);
+}
+.wheel button.icon-btn.active:hover {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--text);
+}
+.wheel button.icon-btn.active:hover::before {
+  background: var(--accent-soft);
+}
+/* 轮盘入口按钮：静止态无底色（仅图标、不画框）——.icon-btn 基线静止态无底色（背景 none/边框 transparent/
+   图标 muted），入口按钮补亮图标色 --text，hover/展开态才有底色反馈；无底色时 box-shadow 无意义故不设。
+   选择器 #wheel-btn.icon-btn（1,1,0）压过各主题 [data-theme] .icon-btn（0,2,0）覆盖 */
+#wheel-btn.icon-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text);
+}
+#wheel-btn.icon-btn:hover {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text);
+  transition: none; /* hover 即时反馈，不渐入（底色/图标立即出现）；松开仍走静止态过渡平滑淡出 */
+}
+#wheel-btn.icon-btn.active {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--text);
 }
 
 /* ---------- 主题切换面板 ----------

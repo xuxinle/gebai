@@ -792,10 +792,10 @@ aside {
   font-size: 13.5px;
   color: var(--text);
 }
-/* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：上行数字 + 下行进度条，比例分级着色 */
+/* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：上行数字 + 下行进度条，比例分级着色；
+   位于右侧固定组 .header-right 内（组容器单一 margin-left:auto 整体靠右） */
 #header-ctx {
   flex: none;
-  margin-left: auto; /* 靠右端（标题已绝对居中，不再有 flex:1 占位元素推挤） */
   display: inline-flex;
   flex-direction: column;
   align-items: flex-end;
@@ -807,8 +807,15 @@ aside {
   white-space: nowrap;
 }
 #header-ctx[hidden] { display: none; }
-/* 轮盘入口按钮：自身靠右（上下文占比隐藏时不被 flex 布局拉回左侧） */
-#wheel-btn { margin-left: auto; }
+/* 标题栏右侧固定组（上下文占比 + 轮盘入口）：单一 margin-left:auto 整体靠右——
+   若 ctx 与入口各自带 auto margin，flex 会平分剩余空间把 ctx 拉向中线与居中标题重叠 */
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
 #header-ctx .ctx-meta {
   display: inline-flex;
   align-items: center;
