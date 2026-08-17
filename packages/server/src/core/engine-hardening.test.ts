@@ -130,9 +130,19 @@ describe("agent_run 加固", () => {
 })
 
 describe("溢出硬护栏", () => {
-  test("全部用户消息无压缩空间时：最旧用户消息裁剪为占位，最新输入不被裁", async () => {
+  test("全部用户消息无压缩空间时：接口拒绝 → 硬护栏裁剪最旧用户消息为占位，最新输入不被裁", async () => {
     const provider = new HardenProvider()
-    provider.maxCtx = 800 // 极小窗口强制触发压缩+护栏
+    provider.maxCtx = 800 // 极小窗口
+    // 接口以上下文长度错误拒绝（真实大小信号）→ 压缩（无 assistant/tool 可压缩）→ 硬护栏降级
+    let calls = 0
+    const origChat = provider.chat.bind(provider)
+    provider.chat = async function* (msgs: MessageLike[], opts?: ChatOptions) {
+      calls++
+      if (calls <= 3) {
+        throw new Error("模型接口错误（HTTP 400）: This model's maximum context length is 800 tokens. However, your messages resulted in 9000 tokens.")
+      }
+      yield* origChat(msgs, opts)
+    }
     const { home, store, engine } = await setupEngine(provider)
     const session = await store.createSession("default", "t")
     // 预置多条历史用户消息（无 assistant/tool → 无可压缩内容；>500 字符才可被护栏裁剪）
@@ -142,7 +152,7 @@ describe("溢出硬护栏", () => {
     await engine.run(session.id, "default", `最新输入`.repeat(50))
     const loaded = await store.load(session.id)
     const users = loaded!.messages.filter((m) => m.role === "user")
-    // 最旧用户消息被裁剪为占位
+    // 最旧用户消息被裁剪为占位（原文仍在会话存储中）
     expect(users[0].content).toContain("历史消息已裁剪")
     // 最新输入（本次任务）原样保留
     expect(users[users.length - 1].content.startsWith("最新输入")).toBe(true)
@@ -150,27 +160,37 @@ describe("溢出硬护栏", () => {
   })
 })
 
-describe("任务中途工具结果回收", () => {
-  test("真实 usage 逼近窗口上限时最早的工具结果回收为归档占位", async () => {
-    const provider = new HardenProvider()
-    provider.maxCtx = 10000
-    provider.usageInput = 9500 // 超过 0.9 × 10000
-    // 10 轮 read（结果 >800 字符）→ 保留最近 8 条，最早的被回收
-    provider.script = Array.from({ length: 10 }, (): HardenProvider["script"][number] => ({ mode: "tool", tool: "read" }))
-    provider.script.push({ mode: "text", text: "done" })
+describe("任务中途自动压缩（真实 usage 驱动）", () => {
+  test("真实 input tokens 超过窗口阈值时压缩最早历史，任务继续完成", async () => {
+    // 每轮调用返回相同的真实 usage（8500 > 0.8 × 10000）：压缩判定只用模型服务返回的大小
+    let calls = 0
+    const provider = {
+      id: "fake-midrun",
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: true, maxContextTokens: 10000 }),
+      async *chat(_msgs: MessageLike[], _o?: ChatOptions): AsyncIterable<LLMChunk> {
+        calls++
+        if (calls <= 6) {
+          // offset 随轮次变化（避免重复检测中断连续读同一文件）
+          yield { type: "tool_call", toolCall: { id: `tc-${calls}`, name: "read", arguments: { path: "tmp/x.txt", offset: calls } } }
+          yield { type: "done", usage: { inputTokens: 8500 } }
+          return
+        }
+        yield { type: "text", text: "done" }
+        yield { type: "done", usage: { inputTokens: 8500 } }
+      },
+    } as unknown as HardenProvider
     const { home, store, engine } = await setupEngine(provider, { authMode: "local" })
     const session = await store.createSession("default", "t")
     const tmp = store.getTmpDir(session.id, "default")
     mkdirSync(tmp, { recursive: true })
-    writeFileSync(join(tmp, "x.txt"), "长内容".repeat(600))
+    writeFileSync(join(tmp, "x.txt"), "长内容\n".repeat(600))
     await engine.run(session.id, "default", "hi")
     const loaded = await store.load(session.id)
-    const toolMsgs = loaded!.messages.filter((m) => m.role === "tool")
-    // 最早的超长结果被回收为占位
-    expect(toolMsgs.some((m) => m.content.includes("已归档回收"))).toBe(true)
-    // 最近的结果未被回收（近期操作上下文保留）
-    const unreclaimed = toolMsgs.filter((m) => !m.content.includes("已归档回收"))
-    expect(unreclaimed.length).toBe(9)
+    // 中途压缩发生：最早历史被摘要替换（真实 usage 触发，压缩后基线锚点失效清除）
+    expect(loaded!.messages.some((m) => m.compacted)).toBe(true)
+    // 压缩后消息列表重建，任务继续执行：后续轮次的工具结果保留、最终回复收尾
+    expect(loaded!.messages.filter((m) => m.role === "tool" && m.content.includes("长内容")).length).toBeGreaterThanOrEqual(1)
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "done")).toBe(true)
     rmSync(home, { recursive: true, force: true })
   })
 })

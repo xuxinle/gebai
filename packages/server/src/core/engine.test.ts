@@ -2188,13 +2188,17 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("auto compaction triggers when context approaches the window threshold", async () => {
+  test("auto compaction triggers when the model service rejects with context length exceeded（接口 4xx = 真实大小信号）", async () => {
     const s = await sessionWithHistory(10)
-    // 极小上下文窗口：估算必然超 80% 阈值 → run 前自动压缩
+    // 无 usage 基线（新会话/接口不返回 usage）：不做估算预判——接口以上下文长度错误拒绝
+    // （真实大小信号）后，压缩最早历史并重试成功
+    let calls = 0
     const smallCap = {
       ...s.provider,
       capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 40 }),
       chat: async function* () {
+        calls++
+        if (calls <= 3) throw new Error("模型接口错误（HTTP 400）: This model's maximum context length is 40 tokens. However, your messages resulted in 5000 tokens.")
         yield { type: "text", text: "ok" }
         yield { type: "done" }
       },
@@ -2202,7 +2206,7 @@ describe("context compaction", () => {
     ;(s.engine as unknown as { opts: { provider: unknown } }).opts.provider = smallCap
     await s.engine.run(s.session.id, "default", "继续")
     const loaded = await s.store.load(s.session.id)
-    expect(loaded!.messages.some((m) => m.compacted)).toBe(true)
+    expect(loaded!.messages.some((m) => m.compacted)).toBe(true) // 溢出恢复触发自动压缩
     cleanup(s.home)
   })
 

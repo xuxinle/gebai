@@ -58,11 +58,6 @@ const VISION_MIME_SET = new Set(["image/png", "image/jpeg", "image/gif", "image/
 const INLINE_IMAGE_RECENT = 3
 /** 单次 agent_run（新会话执行）可预加载的子Agent 数量上限（防异常/恶意调用拼装超大提示词）。 */
 const MAX_AGENTS_PER_RUN = 5
-/** 任务中途上下文回收阈值：最近一次真实 input tokens 超过窗口该比例时回收最早的旧工具结果
- *  （替换为归档占位——超长结果本就已落盘 tmp/truncated/，原文不丢）。 */
-const MID_RUN_RECLAIM_RATIO = 0.9
-/** 中途回收保留的最近工具结果条数（模型近期操作上下文不受影响）。 */
-const RECLAIM_KEEP_RECENT = 8
 /** LLM 流式调用读空闲超时（毫秒）：SSE 建立后超过该时长无任何 chunk 判定接口假死，中止本次调用
  *  （无产出走重试，有产出上抛为任务错误，不再无限挂起）。 */
 const LLM_IDLE_TIMEOUT_MS = 120_000
@@ -718,15 +713,6 @@ export class AgentEngine {
     return { compacted: removed, summary }
   }
 
-  /** 上下文占用估算（真实 usage 基线 + 未发送增量；无基线全量估算，CJK 感知）。 */
-  private async estimateContext(sessionId: string, user: string, systemPrompt: string, history: MessageLike[]): Promise<number> {
-    const baseline = await this.opts.store.load(sessionId, user)
-    if (baseline?.ctxInputTokens !== undefined) {
-      return baseline.ctxInputTokens + estimateTokens(history.slice(Math.max(0, baseline.ctxAtMessage ?? 0)))
-    }
-    return estimateTokens([{ role: "system", content: systemPrompt }, ...history])
-  }
-
   /**
    * 溢出硬护栏（上下文压缩无法收敛时的最后防线）：受保护消息让路——
    * 1) 最旧带图片附件的用户消息：附件图片降级为文本说明（图片永久占窗口且不参与压缩）；
@@ -773,32 +759,6 @@ export class AgentEngine {
     return false
   }
 
-  /**
-   * 任务中途工具结果回收（长任务上下文护栏）：真实 usage 逼近窗口上限时，把最早的
-   * 旧工具结果替换为归档占位（每轮一条，渐进收敛；保留最近 RECLAIM_KEEP_RECENT 条，
-   * 模型近期操作上下文不受影响）。超长结果本就落盘 tmp/truncated/，原文可经文件面板读取。
-   * 返回本次回收的条目（调用方同步替换内存消息副本）。
-   */
-  private async recycleOldToolOutputs(sessionId: string, user: string): Promise<Array<{ toolCallId: string; saved: number }>> {
-    const session = await this.opts.store.load(sessionId, user)
-    if (!session) return []
-    const out: Array<{ toolCallId: string; saved: number }> = []
-    const plainTools = session.messages.filter((m) => m.role === "tool" && !m.sessionRun && !m.session && typeof m.content === "string")
-    const recent = plainTools.slice(-RECLAIM_KEEP_RECENT)
-    for (const m of plainTools) {
-      if (recent.includes(m)) continue
-      const content = m.content as string
-      if (content.length <= 800) continue
-      const saved = content.length
-      m.content = `[工具结果已归档回收（原 ${saved} 字符；完整内容见会话文件面板，可用 read 读取）]`
-      console.warn(`[engine] 会话 ${sessionId} 中途回收：工具 ${m.name} 结果（${saved} 字符）归档为占位`)
-      out.push({ toolCallId: String(m.toolCallId ?? ""), saved })
-      break
-    }
-    if (out.length) await this.opts.store.save(session)
-    return out
-  }
-
   /** 用 LLM 生成最早历史消息的摘要；失败返回降级占位文本（滚动裁剪语义）。
    *  默认用启动 Provider；自动压缩（任务内触发）可传入任务级 Provider（与任务同模型）。 */
   private async summarize(slice: Array<import("@gebai/sdk").Message>, provider: LLMProvider = this.opts.provider): Promise<string> {
@@ -824,6 +784,78 @@ export class AgentEngine {
     } catch {
       // 摘要失败降级为滚动裁剪：仅丢弃，占位文本向模型说明历史已被裁剪
       return "[上下文已裁剪：历史消息过多，已丢弃最早部分。如需详情可查看会话文件。]"
+    }
+  }
+
+  /** 上下文溢出（模型服务 4xx 拒绝）判定：真实窗口大小的权威信号——压缩判定不靠估算，
+   *  接口报「上下文长度/token 超限」即确凿的溢出证据。匹配 OpenAI/Anthropic/中文网关常见表述。 */
+  private isContextOverflowError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false
+    if (!/模型接口错误（HTTP 4\d\d）/.test(err.message)) return false
+    return /(context|上下文|prompt|输入|请求).{0,30}(length|长度|limit|exceed|超|过长|太大|过大|too|long)/i.test(err.message) ||
+      /too many tokens|token.{0,20}(limit|exceed|超)/i.test(err.message)
+  }
+
+  /**
+   * 上下文腾挪（真实 usage 驱动的压缩判定落点）：依次尝试
+   * 1) 压缩最早可压缩历史为摘要（保留最近一半，受保护消息原位保留）；
+   * 2) 无可压缩内容（历史几乎全为受保护消息）时硬护栏降级受保护消息——历史图片降级为
+   *    文本说明、最旧用户消息裁剪为占位（原文仍在会话存储中，不丢数据）。
+   * 每次改动后重建主循环消息（真实 usage 基线锚点失效，标记清除）。返回是否发生改动。
+   */
+  private async makeContextRoom(
+    sessionId: string,
+    user: string,
+    provider: LLMProvider,
+    messages: MessageLike[],
+    systemPrompt: string,
+    ctx: { ctxInputTokens?: number; ctxCountedLen: number },
+  ): Promise<boolean> {
+    const { compacted } = await this.compactSession(sessionId, user, undefined, provider)
+    if (compacted === 0) {
+      if (!(await this.degradeProtectedMessages(sessionId, user))) return false
+    }
+    const fresh = await this.loadHistory(sessionId, user, provider.capabilities().multimodal)
+    messages.length = 0
+    messages.push({ role: "system", content: systemPrompt }, ...fresh)
+    ctx.ctxInputTokens = undefined
+    ctx.ctxCountedLen = 0
+    return true
+  }
+
+  /**
+   * 单轮模型调用（含上下文溢出恢复）：模型服务返回上下文长度 4xx = 真实窗口大小的权威信号——
+   * 压缩判定不靠估算，接口拒绝即确凿证据。压缩最早历史后重试（至多 3 次）；恢复期间清除
+   * 真实 usage 基线锚点（消息被摘要替换后失效，由下一次成功调用重建）。无可压缩内容或
+   * 压缩 3 次仍溢出时上抛原错误（任务失败由调用方呈现）。
+   */
+  private async callModelWithOverflowRecovery(
+    sessionId: string,
+    user: string,
+    provider: LLMProvider,
+    messages: MessageLike[],
+    schemas: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+    systemPrompt: string,
+    signal: AbortSignal,
+    extraParams: Record<string, unknown> | undefined,
+    ctxUsage: { ctxInputTokens?: number; ctxCountedLen: number },
+    onChunk?: (chunk: LLMChunk) => void,
+  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }>; usage?: LLMUsage }> {
+    try {
+      return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams)
+    } catch (err) {
+      if (!this.isContextOverflowError(err)) throw err
+      for (let i = 0; i < 3; i++) {
+        // 压缩/护栏腾挪均无效（上下文确实无处可让）时恢复失败，上抛原错误
+        if (!(await this.makeContextRoom(sessionId, user, provider, messages, systemPrompt, ctxUsage))) throw err
+        try {
+          return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams)
+        } catch (err2) {
+          if (!this.isContextOverflowError(err2)) throw err2
+          if (i === 2) throw err2 // 压缩 3 次仍溢出：无可收敛空间，上抛
+        }
+      }
+      throw err
     }
   }
 
@@ -887,26 +919,28 @@ export class AgentEngine {
       let history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
       // 自动压缩（DESIGN「上下文保护」）：上下文接近窗口阈值（80%）时先压缩最早历史，
       // 保证最新上下文完整、压缩过程对进行中的任务透明（阈值与摘要均用任务级模型）。
-      // 占用口径：上次任务的真实 usage 基线（session.ctxInputTokens，含 system 与工具 schema）+
-      // 基线之后的增量估算（history.slice(ctxAtMessage)）；无基线（新会话/接口不返回 usage/压缩后失效）全量估算兜底
+      // 占用口径：只认模型服务返回的真实 input tokens——上次任务最后一次调用持久化的 usage
+      // 基线（session.ctxInputTokens，含 system 与工具 schema）。基线本身已超阈值即先压缩
+      // （本次调用只会更大）；无基线（新会话/接口不返回 usage/压缩后锚点失效）不做估算预判，
+      // 由本次调用返回的真实 usage（中途压缩）与接口上下文溢出恢复兜底，避免估算误判
       const cap = taskProvider.capabilities().maxContextTokens
       if (cap > 0) {
-        // 迭代压缩：单次压缩可能不够（压缩后估算仍超阈值则继续压缩更近的区间）；
+        // 迭代压缩：单次压缩可能不够（压缩后基线清除——摘要替换消息使锚点失效，循环随基线退出）；
         // 压缩无效（无可压缩内容，如历史几乎全是用户输入/系统提示词）时启用硬护栏——
         // 受保护消息让路（历史图片降级为文本说明、最旧用户消息裁剪为占位），
         // 保证长会话存在可收敛的溢出兜底，而非等模型接口报错后任务失败
-        let estimate = await this.estimateContext(sessionId, user, systemPrompt, history)
-        for (let guard = 0; guard < 4 && estimate > cap * COMPACT_RATIO; guard++) {
+        let baseline = (await this.opts.store.load(sessionId, user))?.ctxInputTokens
+        for (let guard = 0; guard < 4 && baseline !== undefined && baseline > cap * COMPACT_RATIO; guard++) {
           const before = history.length
           await this.compactSession(sessionId, user, undefined, taskProvider)
           history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
-          estimate = await this.estimateContext(sessionId, user, systemPrompt, history)
+          baseline = (await this.opts.store.load(sessionId, user))?.ctxInputTokens
           if (history.length >= before) {
             // 压缩无效（仅剩受保护消息）：硬护栏降级受保护消息（原文仍在会话存储中，不丢数据）
             const degraded = await this.degradeProtectedMessages(sessionId, user)
             if (!degraded) break
             history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
-            estimate = await this.estimateContext(sessionId, user, systemPrompt, history)
+            baseline = (await this.opts.store.load(sessionId, user))?.ctxInputTokens
           }
         }
       }
@@ -1561,9 +1595,9 @@ export class AgentEngine {
     let lastReasoning = ""
     // 上下文占用口径（真实 usage 为基准，估算只补未发送增量）：ctxInputTokens = 最近一次模型调用返回的
     // 真实 input tokens（含 system 与工具 schema）；ctxCountedLen = 那次调用时 messages 长度（已被真值覆盖的部分），
-    // 其后的消息（增量）尚未发送，用 estimateTokens 估算补足——下一次真实调用会用真值接管
-    let ctxInputTokens: number | undefined
-    let ctxCountedLen = 0
+    // 其后的消息（增量）尚未发送，用 estimateTokens 估算补足——下一次真实调用会用真值接管；
+    // 压缩重建消息后锚点失效（makeContextRoom 原地清除），真实值由下一次调用重新建立
+    const ctxUsage: { ctxInputTokens?: number; ctxCountedLen: number } = { ctxCountedLen: 0 }
     // 重复检测（DESIGN「重复检测」）：最近 MAX_REPEAT_WINDOW 次工具调用签名窗口，
     // 相同签名（工具+参数）出现 ≥MAX_REPEAT_HITS 次判定为无效重复 → 中断该次执行并注入引导提示；
     // 连续中断超过 MAX_REPEAT_STALLS 次终止循环，避免无效空转
@@ -1577,7 +1611,9 @@ export class AgentEngine {
       // 本轮推理全文累积（流式 publish 的同时落盘合并为 <think> 块，历史会话可见）
       let reasoningAcc = ""
 
-      const { text, toolCalls, usage } = await this.callModel(provider, messages, registry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, registry.resolve(s.name)?.tool)), signal, (chunk) => {
+      const schemas = registry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, registry.resolve(s.name)?.tool))
+      // 模型调用（含上下文溢出恢复：接口 4xx 上下文长度错误 = 真实大小信号，压缩后重试）
+      const call = await this.callModelWithOverflowRecovery(sessionId, user, provider, messages, schemas, params.systemPrompt, signal, extraParams, ctxUsage, (chunk) => {
         // 输出方式：仅最终响应（final_only）不推送文本增量与推理流，流式输出（streaming）正常推送
         if (chunk.type === "text") {
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, sessionId })
@@ -1585,32 +1621,18 @@ export class AgentEngine {
           reasoningAcc += chunk.text
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, sessionId })
         }
-      }, extraParams)
+      })
+      const { text, toolCalls, usage } = call
       lastText = text
       lastReasoning = reasoningAcc
       if (usage?.inputTokens !== undefined) {
-        ctxInputTokens = usage.inputTokens
-        ctxCountedLen = messages.length
-      }
-      // 任务中途上下文回收：真实 usage 接近窗口上限（长任务逐步累积工具结果）时，
-      // 渐进回收最早的旧工具结果（原文已落盘，替换为归档占位），防中途打满窗口被接口拒绝
-      const cap2 = provider.capabilities().maxContextTokens
-      if (cap2 > 0 && usage?.inputTokens !== undefined && usage.inputTokens > cap2 * MID_RUN_RECLAIM_RATIO) {
-        const recycled = await this.recycleOldToolOutputs(sessionId, user)
-        for (const r of recycled) {
-          const mi = messages.findIndex((x) => x.role === "tool" && (x as { toolCallId?: string }).toolCallId === r.toolCallId)
-          if (mi >= 0) {
-            messages[mi] = {
-              role: "tool",
-              toolCallId: r.toolCallId,
-              content: `[工具结果已归档回收（原 ${r.saved} 字符；完整内容见会话文件面板，可用 read 读取）]`,
-            }
-          }
-        }
+        ctxUsage.ctxInputTokens = usage.inputTokens
+        ctxUsage.ctxCountedLen = messages.length
       }
       // 上下文大小实时推送（前端会话列表展示，单位 k）：真实 usage 基准 + 未发送增量估算
       this.publish(sessionId, "event.session.ctx", {
-        ctxTokens: ctxInputTokens !== undefined ? ctxInputTokens + estimateTokens(messages.slice(ctxCountedLen)) : estimateTokens(messages),
+        ctxTokens:
+          ctxUsage.ctxInputTokens !== undefined ? ctxUsage.ctxInputTokens + estimateTokens(messages.slice(ctxUsage.ctxCountedLen)) : estimateTokens(messages),
       })
       if (!toolCalls.length) {
         this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, sessionId })
@@ -1626,6 +1648,15 @@ export class AgentEngine {
         createdAt: Date.now(),
       })
       messages.push({ role: "assistant", content: text, toolCalls })
+
+      // 任务中途上下文腾挪（真实 usage 驱动）：本次调用返回的真实 input tokens 超过窗口阈值
+      // （80%）时压缩最早历史，防止长任务继续膨胀——已持久化的 assistant 消息随 loadHistory
+      // 回到重建后的消息列表（同序），后续工具结果照常追加，会话语义不受影响；
+      // 压缩无效时硬护栏降级受保护消息（历史图片降级/最旧用户消息裁剪，原文不丢）
+      const cap2 = provider.capabilities().maxContextTokens
+      if (cap2 > 0 && ctxUsage.ctxInputTokens !== undefined && ctxUsage.ctxInputTokens > cap2 * COMPACT_RATIO) {
+        await this.makeContextRoom(sessionId, user, provider, messages, params.systemPrompt, ctxUsage)
+      }
 
       // 重复判定后终止循环：本轮剩余工具调用跳过（保持 tool 消息序列完整），随后退出
       let stopped = false
@@ -1734,7 +1765,7 @@ export class AgentEngine {
       rounds++
       if (stopped) break
     }
-    return { text: lastText, reasoning: lastReasoning, ctxInputTokens, ctxCountedLen }
+    return { text: lastText, reasoning: lastReasoning, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCountedLen: ctxUsage.ctxCountedLen }
   }
 
   /**

@@ -60,19 +60,52 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
       scrollRaf = false
       // 以执行时锁定状态为准（排期期间可能被用户滚动翻转）
       if (following) scrollBottom()
+      noteFollowActivity()
     })
+  }
+
+  /**
+   * 粘底对齐保持：内容高度存在不触发 MutationObserver 的异步修正（content-visibility
+   * 懒布局、字体/图片加载等）——长会话（低性能模式）中视口外消息的高度估算会在滚动后
+   * 数百毫秒~数秒内陆续修正，单次滚动与短时收敛都会在修正到达前提前退出，把最新消息
+   * 永久切在视口外（用户消息只显示一半）。跟随期间按帧续查对齐，任何滚动活动重置帧预算，
+   * 预算耗尽（连续贴底无变化）后自停；用户上翻（following=false）立即停转。每帧仅三次
+   * 属性读取（布局干净时不触发重排），成本可忽略。
+   */
+  const KEEP_ALIGN_FRAMES = 240
+  let keepAligning = false
+  let keepFrames = 0
+
+  function noteFollowActivity() {
+    keepFrames = 0
+    if (keepAligning) return
+    keepAligning = true
+    requestAnimationFrame(keepTick)
+  }
+
+  function keepTick() {
+    keepAligning = false
+    if (!following) return
+    keepFrames++
+    if (el.scrollTop < el.scrollHeight - el.clientHeight) scrollBottom()
+    if (keepFrames < KEEP_ALIGN_FRAMES) {
+      keepAligning = true
+      requestAnimationFrame(keepTick)
+    }
   }
 
   function lockToBottom(): void {
     following = true
     scrollBottom()
     refresh()
+    noteFollowActivity()
   }
 
   btn.onclick = () => {
     // 点击滚动到底：落位后按钮隐藏（锁定），由滚动事件按目标比对保持锁定
     following = true
     scrollBottom()
+    noteFollowActivity()
   }
 
   el.addEventListener(

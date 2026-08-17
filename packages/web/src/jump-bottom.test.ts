@@ -144,4 +144,35 @@ describe("sticky-scroll 粘底滚动", () => {
     sticky.scrollIfSticky()
     expect(el.scrollTop).toBe(1200) // 锁定保持，继续跟随
   })
+
+  test("无事件内容增长（content-visibility 异步高度修正）：跟随帧内自动续滚对齐，最新消息不被切出视口", async () => {
+    // 真实浏览器中 rAF 按帧推进，粘底对齐保持循环跨帧存活——用异步 rAF stub 模拟
+    const origRaf = globalThis.requestAnimationFrame
+    let rafId = 0
+    const timers = new Set<ReturnType<typeof setTimeout>>()
+    ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: (t: number) => void) => {
+      const id = rafId++
+      const t = setTimeout(() => cb(performance.now()), 8)
+      timers.add(t)
+      return id
+    }
+    ;(globalThis as Record<string, unknown>).cancelAnimationFrame = () => {}
+    try {
+      const el = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+      const sticky = createStickyScroll(el as unknown as HTMLElement, makeBtn() as unknown as HTMLElement)
+      sticky.lockToBottom()
+      expect(el.scrollTop).toBe(800)
+      // 模拟 content-visibility 懒布局修正：无 DOM 变化、无 scroll 事件的内容高度增长
+      el.scrollHeight = 1142
+      await Bun.sleep(40) // 数个跟随帧窗口
+      expect(el.scrollTop).toBe(942) // 跟随循环自动续滚到新底部，最新消息不被切在视口外
+      // 修正收敛后不再滚动（不产生多余滚动事件）
+      const before = el.scrollTop
+      await Bun.sleep(40)
+      expect(el.scrollTop).toBe(before)
+    } finally {
+      for (const t of timers) clearTimeout(t)
+      ;(globalThis as Record<string, unknown>).requestAnimationFrame = origRaf
+    }
+  })
 })
