@@ -173,7 +173,7 @@ export class SubAgentManager {
     const lines: string[] = []
     const unloaded = [...this.defs.values()].filter((d) => !this.loaded.has(d.name))
     if (unloaded.length) {
-      lines.push("可选子Agent（未装载：先用 agent_load 装载后直接调用其工具——工具注册进当前会话、完整系统提示词写入会话记录；或不经装载直接 agent_run 执行新会话）:")
+      lines.push("可选子Agent（未装载）:")
       for (const d of unloaded) {
         lines.push(`- ${d.name}: ${describe ? describe(d) : d.description}`)
       }

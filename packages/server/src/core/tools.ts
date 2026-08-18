@@ -176,7 +176,7 @@ function withLineNumbers(text: string, startLine: number): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。offset/limit 分段读取、lineNumbers 行号标注（按 文件:行号 精确定位与引用时推荐开启）。读取成功即登记「本会话已读」——write 整体覆盖已存在文件前要求先读过（防盲覆盖）。",
+    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
   card: { titleParams: ["path"] },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
@@ -398,11 +398,11 @@ function looksBinary(buf: Buffer, bytesRead: number): boolean {
 export const fileTool: Tool = {
   name: "file",
   description:
-    "文件管理（单工具多动作）：rename 重命名 / move 移动或跨目录改名 / delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite 等）、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**；附大小与修改时间，目录附直接子条目数。路径与 read/write 同一解析规则（沙箱约束）。",
+    "文件管理（单工具多动作）：rename 重命名 / move 移动或跨目录改名 / delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
   card: { titleParams: ["action", "path"] },
   parameters: schema(
     {
-      action: { enum: ["rename", "move", "delete", "info"], description: "操作：rename 重命名 / move 移动 / delete 删除 / info 查看信息" },
+      action: { enum: ["rename", "move", "delete", "info"], description: "操作类型" },
       path: { type: "string", description: "目标文件/目录路径（rename/move 的源路径，delete/info 的目标路径）" },
       to: { type: "string", description: "move 目标路径（含目标文件名；父目录不存在时自动创建）" },
       newName: { type: "string", description: "rename 新名字（仅名字、不含路径分隔符；跨目录改名用 move）" },
@@ -543,7 +543,7 @@ function listPathCandidates(p: string): string[] {
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。output 选择结果形态（content 默认/files/count）；context 附上下文行；include 按文件路径 glob 过滤；path 限定子目录（tmp/ 前缀可省略）。匹配上限 200 处。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。宽泛摸底优先 output=files。匹配上限 200 处。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
@@ -672,7 +672,7 @@ function globToRegExp(pattern: string): RegExp {
 
 export const globTool: Tool = {
   name: "glob",
-  description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。path 可限定子目录（tmp/ 前缀可省略）。",
+  description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。",
   card: { titleParams: ["pattern"] },
   parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" } }, ["pattern"]),
   outputSchema: schema({
@@ -832,21 +832,21 @@ export const drawTool: Tool = {
   // 需至少多轮交互（前端实时渲染或飞书后端渲染 PNG 两种通道），无交互模式禁用
   interaction: "multi_turn",
   description:
-    "创建/更新图表。支持三种图表语言，按需求选最合适的（选择指南见 format 参数）：Mermaid（通用场景首选）/ PlantUML（标准 UML 严谨建模首选）/ D2（架构图等对外展示首选）。code 与 path 二选一：code 直接给源码；path 渲染会话内已存在的图表文件（.mmd/.puml/.plantuml/.d2，避免重发源码；format 未传时按扩展名推断）。渲染成功才返回成功，失败返回错误信息供修正；PlantUML 勿手动添加 @startuml/@enduml（自动补全）。产物保存到会话 tmp/ 并返回图表内容块。render 参数选择渲染通道：默认 frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销），确需 PNG 文件导出时用 backend。",
+    "创建/更新图表，支持 Mermaid（通用首选）/ PlantUML（标准 UML 建模）/ D2（美观架构图），选型指南见 format 参数。code 与 path 二选一：code 直接给源码；path 渲染会话内已存在的图表文件（.mmd/.puml/.plantuml/.d2，避免重发源码；format 未传时按扩展名推断）。渲染成功才返回成功，失败返回错误信息供修正；PlantUML 勿手动添加 @startuml/@enduml（自动补全）。产物保存到会话 tmp/ 并返回图表内容块。",
   card: { args: "block" },
   parameters: schema(
     {
-      code: { type: "string", description: "图表源码（与 path 二选一；与 format 参数一致——Mermaid 直接给图定义；PlantUML 无需 @startuml/@enduml 包裹，自动补全，请勿手动包裹；D2 直接给声明式文本）。PlantUML 布局建议：流程类显式声明 `left to right direction` 或保持默认纵向，勿靠逐条连线上写方向硬控布局；密集图设置 `skinparam ranksep 80`/`skinparam nodesep 40` 防节点拥挤（未设置时系统自动注入）；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包" },
+      code: { type: "string", description: "图表源码（与 path 二选一）。PlantUML 布局：流程类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包" },
       path: { type: "string", description: "会话内已存在的图表文件路径（.mmd/.mermaid/.puml/.plantuml/.d2，与 code 二选一：读取文件内容直接渲染，适合已生成图表文件仅需重新渲染/换通道/再次展示的场景；format 未传时按扩展名推断）" },
       name: { type: "string", description: "图表文件名（不含扩展名；未传时默认 diagram，path 模式默认取文件主名）" },
       format: {
         enum: ["mermaid", "plantuml", "d2"],
         description:
-          "图表语言（必选，按需求选择）：\n" +
-          "【mermaid】通用场景首选：流程图/时序图/状态图/甘特图/用户旅程、Markdown 文档嵌入（README/Wiki/博客）、简单架构，图表复杂度中等且需求明确（触发词：流程图、时序图、状态图、甘特图、文档）。语法最简洁。\n" +
-          "【plantuml】UML 与严谨建模首选：类图/组件图/部署图/用例图/活动图/ER 图等标准 UML，表达复杂继承/依赖/关联关系，语义严谨性要求高（触发词：类图、UML、组件图、部署图、用例图、ER图、继承关系、软件设计）。支持全部 14 种 UML 图，功能最全面。\n" +
-          "【d2】美观架构图与对外展示首选：系统架构图/云架构/网络拓扑/微服务，对外展示/PPT/汇报/技术分享等视觉美观场景，希望图表默认好看不愿调布局（触发词：架构图、系统架构、云架构、微服务、汇报、美观）。默认布局最现代化。\n" +
-          "组合场景：系统设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图。",
+          "图表语言（必选）：\n" +
+          "【mermaid】流程图/时序图/状态图/甘特图/用户旅程、Markdown 文档嵌入、简单架构；语法最简。\n" +
+          "【plantuml】类图/组件图/部署图/用例图/活动图/ER 图等标准 UML 与严谨建模，功能最全。\n" +
+          "【d2】系统架构/云架构/网络拓扑/微服务等对外展示场景（PPT/汇报），默认布局最现代。\n" +
+          "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图。",
       },
       render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（默认 frontend，首选前端渲染降低服务端负载）：frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销）/ backend（服务端渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用，三语言均支持；前端渲染不可用（收到「画图能力受限」）时改用 backend 重试）" },
     },
@@ -925,7 +925,7 @@ export const pageCaptureTool: Tool = {
   // 仅实时前端可用（请求当前页面捕获并由前端回传），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。无需审批。",
+    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。",
   parameters: schema({
     fullPage: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，大页面截图较慢）" },
     delay: { type: "number", description: "捕获前等待毫秒数（默认 0；UI 操作/动画/异步渲染完成后截图，上限 10000）" },
@@ -967,7 +967,7 @@ export const renderHtmlTool: Tool = {
   // 仅实时前端可用（聊天界面内渲染展示），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "生成 HTML 页面并直接在聊天界面内渲染展示（沙箱 iframe 域隔离预览：脚本可执行，但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航）。适合网页原型、数据报表、卡片/徽章、可视化组件、带交互脚本的小页面。html 与 path 二选一：html 直接给源码；path 渲染会话内已存在的 .html 文件（避免重发源码）。样式用内联 CSS，图片可用 data: URI 或外部 URL，脚本内联或外部均可。可选 width/height 指定预览尺寸（px），不传默认铺满消息流宽度。产物保存到会话 tmp/ 并返回 html 内容块，无需审批。",
+    "生成 HTML 页面并直接在聊天界面内渲染展示（沙箱 iframe 域隔离预览：脚本可执行，但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航）。适合网页原型、数据报表、卡片/徽章、可视化组件、带交互脚本的小页面。html 与 path 二选一：html 直接给源码；path 渲染会话内已存在的 .html 文件（避免重发源码）。样式用内联 CSS，图片可用 data: URI 或外部 URL，脚本内联或外部均可。可选 width/height 指定预览尺寸（px），不传默认铺满消息流宽度。产物保存到会话 tmp/ 并返回 html 内容块。",
   card: { args: "block" },
   parameters: schema(
     {
@@ -1042,7 +1042,7 @@ function collapseWhitespace(s: string): string {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配）则整体不落盘。改动较多或行号容易偏移时改用 patch 应用 unified diff（一次多 hunk、容错更强）。修改前先 read 目标区域，oldString 从原文精确复制（含缩进）。",
+    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配）则整体不落盘。改动较多或行号容易偏移时改用 patch。修改前先 read 目标区域。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits" },
   parameters: schema(
     {
@@ -1169,7 +1169,7 @@ function describeAppliedPatch(applied: Array<{ line: number; delta: number }>): 
 export const patchTool: Tool = {
   name: "patch",
   description:
-    "应用 unified diff 补丁到文件（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造，---/+++ 文件头可省略），格式：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\n-旧行\n+新行）；全部 hunk 校验通过才整体落盘（原子），任一 hunk 不匹配整体失败不修改；dryRun=true 仅预演不落盘。单次仅处理一个文件（多文件补丁请分文件调用）。改动较多或行号容易偏移时优先于 edit 使用。",
+    "应用 unified diff 补丁到文件（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造，---/+++ 文件头可省略），格式：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\n-旧行\n+新行）；全部 hunk 校验通过才整体落盘（原子），任一 hunk 不匹配整体失败不修改。单次仅处理一个文件（多文件补丁请分文件调用）。改动较多或行号容易偏移时优先于 edit 使用。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff" },
   parameters: schema(
     {
@@ -1221,7 +1221,7 @@ const GIT_MAX_LOG = 50
 export const gitTool: Tool = {
   name: "git",
   description:
-    "只读 Git 检查（仅 status/diff/log 三操作，不修改仓库、无需审批；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh（需审批）。",
+    "只读 Git 检查（仅 status/diff/log 三操作，不修改仓库；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh。",
   card: { args: "none" },
   parameters: schema(
     {
@@ -1330,7 +1330,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令。输出以 stdout 为准；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等命令）。可选参数：input（作为命令 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。",
+  description: "执行 Shell 命令，输出以 stdout 为准。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -1387,7 +1387,7 @@ export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
 
 export const pyTool: Tool = {
   name: "py",
-  description: "执行 Python 代码，代码经临时文件执行，stdout 为输出；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等脚本）。可选参数：input（作为程序 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。安全模式下审计钩子屏蔽写文件/进程/网络系统调用（仅保留文件读取）。",
+  description: "执行 Python 代码（经临时文件），stdout 为输出。安全模式下审计钩子屏蔽写文件/进程/网络（仅保留文件读取）。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "code", codeLang: "python" },
   parameters: schema(
@@ -1508,7 +1508,7 @@ export const systemInfoTool: Tool = {
 export const envDetectTool: Tool = {
   name: "env_detect",
   description:
-    "探测当前运行环境：平台/架构、PATH（去重）、关键工具链版本（node/bun/python/git/cargo/rustc/go/docker 等，缺失标记不可用）、Windows 下 VS Build Tools（MSVC，cargo/rustc 依赖）与 WebView2 运行时状态。用于一次判断工具链可用性、指导安装缺失组件，避免逐命令探测。无需审批。",
+    "探测当前运行环境：平台/架构、PATH（去重）、关键工具链版本（node/bun/python/git/cargo/rustc/go/docker 等，缺失标记不可用）、Windows 下 VS Build Tools（MSVC，cargo/rustc 依赖）与 WebView2 运行时状态。用于一次判断工具链可用性、指导安装缺失组件，避免逐命令探测。",
   card: { args: "none" },
   parameters: schema({}),
   async execute(_args, ctx) {
@@ -1617,13 +1617,13 @@ export function makeTodoTool(): Tool {
           type: "object",
           properties: {
             op: { enum: ["add", "update", "delete"], description: "操作类型" },
-            title: { type: "string", description: "add 必填：标题；update 可选：传 id 时作为新标题，无 id 时用作定位（精确/唯一包含匹配，多个同名请用 id）；delete 可选：用作定位（同 update 无 id 时）" },
-            id: { type: "string", description: "update/delete 可选：待办 id（todo 返回清单中的 id，优先于 title 定位）" },
-            status: { enum: ["pending", "in_progress", "completed", "failed", "cancelled"], description: "update 可选：目标状态" },
-            progress: { type: "number", description: "update 可选：目标进度（0-100）" },
-            priority: { enum: ["low", "medium", "high"], description: "add 可选：优先级" },
-            note: { type: "string", description: "add 可选：备注" },
-            eta: { type: "number", description: "add 可选：预计耗时（分钟）" },
+            title: { type: "string", description: "add：标题；update/delete：定位目标（无 id 时按标题精确或唯一包含匹配，多条同名用 id；update 有 id 时作为新标题）" },
+            id: { type: "string", description: "update/delete：待办 id（清单返回，优先于标题定位）" },
+            status: { enum: ["pending", "in_progress", "completed", "failed", "cancelled"], description: "update：目标状态" },
+            progress: { type: "number", description: "update：目标进度（0-100）" },
+            priority: { enum: ["low", "medium", "high"], description: "add：优先级" },
+            note: { type: "string", description: "add：备注" },
+            eta: { type: "number", description: "add：预计耗时（分钟）" },
           },
           required: ["op"],
         },
@@ -1806,7 +1806,7 @@ export const planTool: Tool = {
   // 需至少多轮交互（用户审批），无交互模式禁用（与 ask_user 同规则）
   interaction: "multi_turn",
   description:
-    "为复杂/多步骤任务制定执行计划并提交用户审核：把计划文档写入会话文件（tmp/plans/{标题}.md）并在聊天界面直接展示给用户，然后**阻塞等待用户批准/拒绝**。批准后严格按计划逐步执行；拒绝时根据用户修改意见修订计划后重新调用本工具提交新版本；审批超时或用户拒绝审核时不再提交，基于现有信息直接回答。适用于多步骤、有风险、不可逆或用户需要把关的任务；简单任务无需使用，用 todo 跟踪即可。",
+    "为复杂/多步骤任务制定执行计划并提交用户审核：计划文档写入会话文件（tmp/plans/）并在聊天界面展示，**阻塞等待用户批准/拒绝**。批准后严格按计划逐步执行；拒绝（可附修改意见）则修订后重新提交；审批超时或用户拒绝审核时不再提交，基于现有信息直接回答。适用于多步骤、有风险、不可逆或需用户把关的任务；简单任务用 todo 跟踪即可。",
   card: { titleParams: ["title"] },
   parameters: schema(
     {
@@ -2153,7 +2153,7 @@ export const agentListTool: Tool = {
 
 export const agentLoadTool: Tool = {
   name: "agent_load",
-  description: "装载指定子Agent 能力模块（类比 import 子模块）：其工具立即并入当前工具集（以 {agent}_ 前缀调用）、完整系统提示词（工作流与行为约束）注入当前上下文，获得该子Agent 的完整能力。装载不创建新上下文、不启动独立执行——装载后直接调用其工具，全程在当前会话上下文内完成；重复装载幂等跳过。默认使用方式：先装载后直接用其工具；仅在需要干净上下文（结果隔离）或防止上下文膨胀时才改用 agent_run（执行新会话，预加载子Agent 后独立执行，无需装载）。",
+  description: "装载指定子Agent 能力模块（类比 import 子模块）：其工具立即并入当前工具集（以 {agent}_ 前缀调用）、完整系统提示词注入当前上下文。不创建新上下文、无独立执行——装载后直接调用其工具，全程在当前会话内完成；重复装载幂等跳过。",
   card: { titleParams: ["name"], args: "none" },
   parameters: schema({ name: { type: "string" } }, ["name"]),
   async execute(args, ctx) {
@@ -2164,7 +2164,7 @@ export const agentLoadTool: Tool = {
 
 export const agentRunTool: Tool = {
   name: "agent_run",
-  description: "执行新会话：派生一个临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与工具进入新会话上下文），然后阻塞执行任务直到结束，只返回最终结果文本；新会话执行过程全程存档供历史回放。默认优先 agent_load 装载后直接用其工具；仅在需要干净上下文（子任务结果隔离、不污染主上下文）或防止上下文膨胀（子任务中间过程多、输出大）时使用。",
+  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与工具进入新会话），阻塞执行任务直到结束，只返回最终结果文本；执行过程全程存档供历史回放。",
   card: { titleParams: ["agents"] },
   parameters: schema(
     {

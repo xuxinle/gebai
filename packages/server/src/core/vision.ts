@@ -34,7 +34,7 @@ export function makeVisionTool(deps: { vision: (env?: Record<string, string>) =>
   return {
     name: "vision",
     description:
-      "视觉分析：将图片文件交给多模态（视觉）模型分析。参数 target 为分析目标（要查看/识别/描述的内容，如「图中有几个人」「识别屏幕上的报错信息」）；image 为图片文件路径（相对会话工作目录，tmp/ 前缀可省略，支持 png/jpg/jpeg/gif/webp）。",
+      "视觉分析：将图片文件交给多模态（视觉）模型分析。target 为分析目标（要查看/识别/描述的内容，如「图中有几个人」「识别屏幕上的报错信息」）。",
       parameters: {
         type: "object",
         properties: {

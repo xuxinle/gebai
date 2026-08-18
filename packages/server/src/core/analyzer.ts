@@ -245,7 +245,7 @@ export async function searchSymbols(
 export const searchSymbolsTool: Tool = {
   name: "search_symbols",
   description:
-    "在目录中按符号名搜索代码定义位置（tree-sitter 解析：函数/类/方法/接口/类型定义），返回 文件:行号: 类型 名称，精确匹配优先。定位函数/类等定义比 grep 更精准（grep 仅内容匹配）；纯内容搜索请用 grep。",
+    "按符号名搜索代码定义位置（tree-sitter 解析：函数/类/方法/接口/类型定义），返回 文件:行号: 类型 名称，精确匹配优先。找**定义**比 grep 精准；找**引用/调用点**用 grep。",
   card: { titleParams: ["symbol"] },
   parameters: {
     type: "object",
