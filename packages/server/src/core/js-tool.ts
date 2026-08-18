@@ -9,6 +9,14 @@
  * 二进制 = `gebai exec` 隐藏子命令复用内嵌 Bun 运行时）→ stdio JSON 行协议桥接：
  * 子进程 tools.call 发 {t:"call"} 到 stdout、父进程回 {t:"res"} 到 stdin；
  * console.* 输出与返回值经 {t:"log"}/{t:"done"} 回传。超时/取消按进程树终止（同 sh）。
+ *
+ * 三条分发层守卫（runJsScript）：
+ * - 免审拦截：免审运行（approval:false / 免审动态工具）时内部调用需审批的工具按剥离免审标记后的
+ *   审批姿态拒绝（与引擎无交互硬门槛同规则）；默认审批运行的 js 一次审批覆盖内部调用。
+ * - 嵌套封死：RPC 执行工具统一携带 fromJsBridge 标记，js/动态工具 execute 见标记即拒——
+ *   js→flow→js 交替递归无通道；动态工具运行器（depth 1）内不可再 defineTool。
+ * - env 不落盘：ctx.env 改为子进程内运行时引用 process.env（spawn 已传同源环境），
+ *   脚本文件不再明文嵌入密钥；messages 等会话数据仍嵌入（任务数据契约）。
  */
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
@@ -16,7 +24,8 @@ import { rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { DynamicToolDef, Tool, ToolContext } from "./types"
 import { isSensitive } from "./env"
-import { isToolBlockedInSafeMode, safeModeRestrictionMsg, scanJsReadOnly } from "./safety"
+import { isToolBlockedInSafeMode, safeModeRestrictionMsg, scanJsReadOnly, stripApprovalFlags } from "./safety"
+import type { ContentBlock } from "@gebai/sdk"
 import { isBinaryMode } from "./config"
 import { truncate, scriptTimeoutMs } from "./tools"
 
@@ -30,9 +39,13 @@ export const JS_RPC_FIELD_CAP = 100_000
 export const JS_DATA_TEXT_CAP = 100_000
 /** 输出中返回值预览保留字符数（完整值在 data.result）。 */
 export const JS_RESULT_PREVIEW_CHARS = 2000
+/** 内层工具 blocks 透传上限（去重后；图片/图表等重内容限量，防巨量 blocks 撑爆结果）。 */
+export const JS_BLOCKS_CAP = 10
 /** 会话上下文 messages 注入：最多条数与单条内容字符上限。 */
 export const JS_CONTEXT_MESSAGES_MAX = 50
 export const JS_CONTEXT_MESSAGE_CHARS = 2000
+/** 非 JSON 输出行的日志透传长度上限（更长——多为子进程侧 2MB 截断产生的非法 JSON——丢弃留注）。 */
+const JS_NON_PROTOCOL_LINE_CAP = 100_000
 
 /** 子进程运行时桥前导：工具调用（stdio JSON 行协议）+ console 重定向 + 引导执行用户代码。
  *  纯 ES5 风格（无模板字符串/箭头函数），避免嵌入转义问题；不 import 任何模块（模块格式无关）。 */
@@ -184,6 +197,9 @@ export function toolFnDecls(toolNames: string[]): string {
     const name = String(raw)
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) continue
     if (JS_RESERVED.has(name) || JS_GLOBAL_DENY.has(name) || name.startsWith("__G_")) continue
+    // JS 全局名（JSON/Promise/fetch/Bun/Date 等子Agent 大写或撞名工具）不声明：模块作用域函数声明会遮蔽全局，
+    // 用户代码 `JSON.parse` 会莫名变成工具调用（仍可经 tools.call 动态调用）
+    if (name in globalThis) continue
     if (seen.has(name)) continue
     seen.add(name)
     lines.push(`async function ${name}(params) { return __G_call(${JSON.stringify(name)}, params) }`)
@@ -198,7 +214,12 @@ export function toolFnDecls(toolNames: string[]): string {
  *  prelude：__G_main 之前追加的额外声明（动态工具运行器注入 `var __TOOL_FN = (源码)` 用）；
  *  safeMode：注入只读运行时 shim（写/进程/网络 API 屏蔽，调用方须先过 scanJsReadOnly 静态扫描）。 */
 export function buildChildScript(userCode: string, injected: { ctx: unknown; input: unknown }, toolNames: string[] = [], prelude = "", safeMode = false): string {
-  const ctxJson = JSON.stringify(injected.ctx ?? {})
+  // env 不落盘：ctx 历来整体明文嵌入 workdir 下的临时脚本文件（非沙箱模式含合并后的全部 process.env 密钥）——
+  // 子进程本就从 spawn env 拿到同源环境（沙箱脱敏同规则），文件内嵌一份纯冗余且有崩溃残留风险，改为运行时引用。
+  // messages 等会话数据仍嵌入（ctx 注入契约，属任务数据而非密钥）。
+  const ctxObj = { ...((injected.ctx ?? {}) as Record<string, unknown>) }
+  delete ctxObj.env
+  const ctxJson = JSON.stringify(ctxObj)
   const inputJson = JSON.stringify(injected.input ?? null)
   return (
     scriptPreamble() +
@@ -206,7 +227,7 @@ export function buildChildScript(userCode: string, injected: { ctx: unknown; inp
     `\n${toolFnDecls(toolNames)}\n` +
     (prelude ? `${prelude}\n` : "") +
     "async function __G_main() {\n" +
-    `var ctx = ${ctxJson}\nvar input = ${inputJson}\n` +
+    `var ctx = ${ctxJson}\nctx.env = process.env\nvar input = ${inputJson}\n` +
     userCode +
     "\n}\n__G_main().then(\n" +
     "  function (value) {\n" +
@@ -263,6 +284,8 @@ interface JsRunResult {
   logs: string[]
   result: unknown
   calls: Array<{ name: string; ok: boolean; error?: string }>
+  /** 内层工具 blocks 汇集（去重限量，JS_BLOCKS_CAP 封顶）——透传到 js 结果供 UI/模型消费。 */
+  blocks: ContentBlock[]
   error?: string
   timedOut: boolean
   interrupted: boolean
@@ -270,11 +293,14 @@ interface JsRunResult {
 }
 
 /** 执行子进程脚本并桥接工具调用。结构/约定见模块注释；失败信息聚合进 error 供调用方组装输出。
- *  depth：子进程层级（0=js 工具本体，1=动态工具运行器）——动态工具（runtimeDefined）仅 depth 0 可调用，防递归嵌套。 */
+ *  depth：子进程层级（0=js 工具本体，1=动态工具运行器）——动态工具（runtimeDefined）仅 depth 0 可调用、
+ *  depth>0 不可 defineTool（防递归注册与嵌套子进程）。
+ *  approvalFree：本次运行为免审（js 的 approval:false / 免审动态工具）——脚本体未经用户审阅，
+ *  内部调用需审批的工具在 RPC 分发层拦截（按剥离免审标记后的审批姿态解析，与引擎无交互硬门槛同规则）。 */
 async function runJsScript(
   scriptPath: string,
   ctx: ToolContext,
-  opts: { timeoutMs: number; depth?: number },
+  opts: { timeoutMs: number; depth?: number; approvalFree?: boolean },
 ): Promise<JsRunResult> {
   const mergedEnv = { ...process.env, ...ctx.env }
   const env = ctx.sandboxed
@@ -290,7 +316,8 @@ async function runJsScript(
     stdio: ["pipe", "pipe", "pipe"],
     detached: !isWin,
   })
-  const out: JsRunResult = { exitCode: 0, logs: [], result: null, calls: [], timedOut: false, interrupted: false }
+  const out: JsRunResult = { exitCode: 0, logs: [], result: null, calls: [], blocks: [], timedOut: false, interrupted: false }
+  const seenBlockKeys = new Set<string>()
   let stdoutBuf = ""
   let callCount = 0
   let settled = false
@@ -332,7 +359,8 @@ async function runJsScript(
     try {
       msg = JSON.parse(line)
     } catch {
-      out.logs.push(line) // 非 JSON 行按日志透传（绕过 console 补丁的直写输出）
+      // 非 JSON 行按日志透传（绕过 console 补丁的直写输出）；超长行多为子进程侧 2MB 截断产生的非法 JSON——丢弃留注，防垃圾文本刷屏
+      out.logs.push(line.length > JS_NON_PROTOCOL_LINE_CAP ? "（超长非协议输出行已丢弃）" : line)
       return
     }
     if (msg.t === "log") {
@@ -360,6 +388,12 @@ async function runJsScript(
     }
     // 运行时工具定义（defineTool）：注册会话级动态工具
     if (msg.t === "def") {
+      if ((opts.depth ?? 0) > 0) {
+        // 动态工具运行器内不可再注册（防递归注册/嵌套子进程——注册了 depth>0 也调不了，前置拒绝给清晰错误）
+        out.calls.push({ name: `defineTool:${String(msg.name ?? "")}`, ok: false, error: "动态工具内不可 defineTool" })
+        respond(false, "动态工具运行器内不能再 defineTool（防递归注册与嵌套子进程）")
+        return
+      }
       if (!ctx.defineDynamicTool) {
         respond(false, "当前环境不支持运行时工具定义（defineTool）")
         return
@@ -425,8 +459,30 @@ async function runJsScript(
         respond(false, `工具 ${rt.name} 缺少必填参数: ${missing.join(", ")}${props.length ? `（参数: ${props.join(", ")}）` : ""}，请修正后重试`)
         return
       }
+      // 免审运行（approval:false）时内部审批工具拦截：脚本体未经用户审阅，需审批工具不得经 RPC 免审执行——
+      // 按剥离免审标记后的审批姿态解析（防脚本内再传 approval:false 自我免审，与引擎无交互硬门槛同规则；
+      // requiresApproval 函数异常按需审批处理，同引擎）。默认审批运行的 js 一次审批覆盖内部调用（代码用户已审）
+      if (opts.approvalFree) {
+        const ra = rt.tool.requiresApproval
+        let needs: boolean
+        if (typeof ra === "function") {
+          try {
+            needs = !!(await ra(stripApprovalFlags(params) as Record<string, unknown>, ctx))
+          } catch {
+            needs = true
+          }
+        } else {
+          needs = !!ra
+        }
+        if (needs) {
+          out.calls.push({ name: rt.name, ok: false, error: "免审运行禁用审批工具" })
+          respond(false, `本次 js 以免审模式（approval:false）运行，内部调用需审批的工具 ${rt.name} 被拒绝。请去掉 approval:false（整体审批覆盖内部调用），或改用只读/免审工具`)
+          return
+        }
+      }
       try {
-        const r = await rt.tool.execute(params, ctx)
+        // fromJsBridge 标记：js/动态工具 execute 见标记即拒——封死经 flow 等直执行工具回到 js 的所有嵌套路径
+        const r = await rt.tool.execute(params, { ...ctx, fromJsBridge: true })
         const cap = (s: unknown): string | null => {
           const t = s == null ? "" : String(s)
           return t.length > JS_RPC_FIELD_CAP ? `${t.slice(0, JS_RPC_FIELD_CAP)}…` : t
@@ -436,6 +492,14 @@ async function runJsScript(
           data = JSON.parse(JSON.stringify(r.data ?? null, (_k, v) => (typeof v === "string" && v.length > JS_RPC_FIELD_CAP ? `${v.slice(0, JS_RPC_FIELD_CAP)}…` : v)))
         } catch {
           data = null // 结构化 data 不可序列化（BigInt/循环等）：丢弃，output 仍完整
+        }
+        // 内层 blocks 汇集（去重限量）：js 编排图片/图表/文件类工具时产物块透传到 js 结果，供 UI/模型消费
+        for (const b of r.blocks ?? []) {
+          if (seenBlockKeys.size >= JS_BLOCKS_CAP) break
+          const key = `${b.type}:${(b as { path?: string; name?: string }).path ?? (b as { name?: string }).name ?? ""}`
+          if (seenBlockKeys.has(key)) continue
+          seenBlockKeys.add(key)
+          out.blocks.push(b)
         }
         out.calls.push({ name: rt.name, ok: true })
         respond(true, {
@@ -564,6 +628,11 @@ export const jsTool: Tool = {
   async execute(args, ctx) {
     const userCode = String(args.code ?? "")
     if (!userCode.trim()) return { output: "js 拒绝：code 不能为空。" }
+    // 嵌套守卫（一刀切）：经 js RPC 桥执行的任何工具（flow 步骤、编排工具等）再调 js 时携带 fromJsBridge
+    // 标记——见标记即拒，封死 js→flow→js→… 交替递归与桥内失控子进程（直呼 js 已在 RPC 分发层拦截）
+    if (ctx.fromJsBridge) {
+      return { output: "js 拒绝：不能在经 js 桥调用的工具（如 flow 步骤）内嵌套执行 js（防递归子进程）。请把编排逻辑写进当前脚本，或在顶层会话直接调用 js。" }
+    }
     // 安全模式：静态扫描（动态加载/字符串代码执行通道 shim 拦不住，前置拒绝）+ 子进程只读 shim
     if (ctx.safeMode) {
       const deny = scanJsReadOnly(userCode)
@@ -574,7 +643,8 @@ export const jsTool: Tool = {
     const toolNames = ctx.registry.schemas().map((s) => s.name)
     await writeFile(scriptPath, buildChildScript(userCode, { ctx: scriptSessionContext(ctx), input: args.input }, toolNames, "", ctx.safeMode === true))
     try {
-      const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(args.timeout) })
+      // approvalFree：免审运行的脚本体未经用户审阅，内部需审批工具在 RPC 分发层拦截
+      const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(args.timeout), approvalFree: args.approval === false })
       const success = !run.error && !run.timedOut && !run.interrupted && !run.spawnError && run.exitCode === 0
       const parts: string[] = []
       if (run.logs.length) parts.push(run.logs.join("\n"))
@@ -610,6 +680,8 @@ export const jsTool: Tool = {
           ...(run.timedOut ? { timedOut: true } : {}),
           ...(run.interrupted ? { interrupted: true } : {}),
         },
+        // 内层工具 blocks 透传（去重限量）：js 编排图片/图表/文件类工具时产物块直达 UI/模型
+        ...(run.blocks.length ? { blocks: run.blocks } : {}),
       }
     } finally {
       await rm(scriptPath, { force: true }).catch(() => {})
@@ -661,6 +733,10 @@ export function makeDynamicTool(def: DynamicToolDefInput): Tool {
     requiresApproval: def.requiresApproval !== false,
     runtimeDefined: true,
     async execute(args, ctx) {
+      // 嵌套守卫说明：动态工具**不经** fromJsBridge 标记拒绝——depth 0（js 脚本内调用，含 defineTool 后
+      // 同脚本立即调用）是合法路径，动态嵌套由 RPC 分发层 depth 守卫拦截（depth>0 拒调动态工具）；
+      // js→flow→dyn 至多一层动态子进程（runJsScript depth:1），无递归通道；js 重入由 jsTool.execute 的
+      // 标记拒绝封死。
       // 安全模式：动态工具与 js 同规则降级（源码静态扫描 + 子进程只读 shim），而非整体禁用——
       // 持久化的只读动态工具（数据处理/查询类）在安全模式下保持可用
       const safe = ctx.safeMode === true
@@ -679,7 +755,8 @@ export function makeDynamicTool(def: DynamicToolDefInput): Tool {
       )
       await writeFile(scriptPath, script)
       try {
-        const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(undefined), depth: 1 })
+        // approvalFree：免审动态工具（requiresApproval:false）的 execute 体未经审批执行，内部需审批工具在 RPC 分发层拦截
+        const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(undefined), depth: 1, approvalFree: def.requiresApproval === false })
         if (run.error) throw new Error(`工具 ${def.name} 执行失败：\n${run.error.slice(0, 2000)}`)
         if (run.spawnError) throw new Error(`工具 ${def.name} 子进程启动失败: ${run.spawnError}`)
         if (run.timedOut) throw new Error(`工具 ${def.name} 执行超时（300 秒）已终止`)

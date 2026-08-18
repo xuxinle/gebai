@@ -376,6 +376,23 @@ export function validateShCommandSafeMode(cmd: string, ctx: { sandboxed?: boolea
 }
 
 // ---------------------------------------------------------------------------
+// 审批免审标记剥离（js RPC 分发层与引擎无交互硬门槛共用）
+// ---------------------------------------------------------------------------
+
+/** 递归剥离参数中的 approval 免审标记（仅删键，其余原样深拷贝）：`approval:false` 只放宽交互审批，
+ *  不得绕过「未经审阅的执行体免审调用需审批工具」的判定——引擎服务模式无交互硬门槛、js 免审运行的
+ *  内部工具拦截均按剥离后的审批姿态解析（防脚本内再传 approval:false 自我免审）。 */
+export function stripApprovalFlags(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(stripApprovalFlags)
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) if (k !== "approval") out[k] = stripApprovalFlags(val)
+    return out
+  }
+  return v
+}
+
+// ---------------------------------------------------------------------------
 // js 只读静态扫描（安全模式）
 // ---------------------------------------------------------------------------
 

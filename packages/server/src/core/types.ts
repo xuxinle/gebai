@@ -76,6 +76,9 @@ export type ToolContext = {
   defineDynamicTool?: (def: DynamicToolDef) => Promise<void>
   /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：flow 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
+  /** js RPC 桥标记（js-tool 分发层注入，仅 js-tool 内部使用）：本 ctx 正在 js/动态工具子进程桥内执行工具——
+   *  js 与动态工具的 execute 见标记即拒，封死 js→flow→js 交替递归与桥内失控子进程。 */
+  fromJsBridge?: boolean
   /** 会话级已读文件追踪（防误覆盖，引擎按会话注入）：read/write/edit/patch 成功后登记已读绝对路径，
    *  write 整体覆盖「已存在但本会话未读过」的文件前据此拦截（模型须先 read 掌握原文再覆盖）。
    *  可选：测试桩/无引擎环境不注入时相关守卫自动放行（不改变行为）。 */

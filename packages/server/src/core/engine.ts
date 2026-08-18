@@ -15,7 +15,7 @@ import { agentListTool, agentLoadTool, agentRunTool, isGlobalToolExcluded, makeF
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
-import { isToolBlockedInSafeMode, safeModeRestrictionMsg } from "./safety"
+import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "./safety"
 
 const MAX_TOOL_ROUNDS = 200
 /** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。 */
@@ -111,19 +111,6 @@ async function toolRequiresApproval(tool: Tool, args: Record<string, unknown>, c
   } catch {
     return true
   }
-}
-
-/** 递归剥离参数中的 approval 免审标记（仅删键，其余原样深拷贝）：服务模式无交互硬门槛用——
- *  sh/py 的 approval:false 只放宽交互审批（不弹卡），不得绕过「无人值守不执行敏感工具」拒绝；
- *  flow 嵌套步骤的 params 同规则递归剥离，防经编排免审执行内层脚本。 */
-function stripApprovalFlags(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(stripApprovalFlags)
-  if (v && typeof v === "object") {
-    const out: Record<string, unknown> = {}
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) if (k !== "approval") out[k] = stripApprovalFlags(val)
-    return out
-  }
-  return v
 }
 
 function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {

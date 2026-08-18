@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { jsTool, buildChildScript, scriptSessionContext, jsRuntimeCommand, JS_TOOL_MAX_CALLS, makeDynamicTool } from "./js-tool"
-import { writeTool } from "./tools"
+import { jsTool, buildChildScript, scriptSessionContext, jsRuntimeCommand, JS_TOOL_MAX_CALLS, makeDynamicTool, toolFnDecls } from "./js-tool"
+import { makeFlowTool, writeTool } from "./tools"
 import type { ToolContext, Tool, ToolResult } from "./types"
 
 function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): ToolContext {
@@ -273,6 +273,130 @@ return out`,
     expect(data.result).toContain("writer-blocked")
     expect(data.result).toContain("read-ok:readable-content")
     expect(existsSync(join(c.workdir, "evil.txt"))).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+
+  test("免审运行（approval:false）：内部需审批工具在 RPC 分发层被拒（剥免审标记防自我免审），默认审批运行放行", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-appr-"))
+    const c = ctxWithTools(home)
+    const risky: Tool = mkTool("risky", async () => ({ output: "risky-ran" }))
+    risky.requiresApproval = true
+    const ro: Tool = mkTool("ro", async () => ({ output: "read-ok" }))
+    c.registry.resolve = (name: string) => {
+      if (name === "risky") return { name, tool: risky }
+      if (name === "ro") return { name, tool: ro }
+      return undefined
+    }
+    // 免审运行：risky 拒绝（含 params 里再传 approval:false 的绕过尝试——剥离免审标记后同判需审批）
+    const r = await jsTool.execute(
+      {
+        code: `const errs = []
+try { await tools.call("risky", {}) } catch (e) { errs.push("risky:" + e.message.includes("免审")) }
+try { await tools.call("risky", { approval: false }) } catch (e) { errs.push("risky-strip:" + e.message.includes("免审")) }
+const ro = await tools.call("ro", {})
+return { errs, ro: ro.output }`,
+        approval: false,
+      },
+      c,
+    )
+    const data = r.data as { result: { errs: string[]; ro: string }; calls: Array<{ name: string; ok: boolean }> }
+    expect(data.result.errs).toEqual(["risky:true", "risky-strip:true"])
+    expect(data.result.ro).toBe("read-ok") // 免审工具照常
+    expect(data.calls.filter((x) => x.name === "risky").every((x) => !x.ok)).toBe(true)
+    // 默认审批运行：一次审批覆盖内部调用 → risky 放行
+    const r2 = await jsTool.execute({ code: `return (await tools.call("risky", {})).output` }, c)
+    expect((r2.data as { result: string }).result).toBe("risky-ran")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("嵌套守卫：fromJsBridge 标记下 js/动态工具拒绝；js→flow→js 通道封死", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-nest2-"))
+    // 标记直拒（js 工具）
+    const cMarked = ctxWithTools(home)
+    cMarked.fromJsBridge = true
+    const refused = await jsTool.execute({ code: "return 1" }, cMarked)
+    expect(refused.output).toContain("嵌套")
+    // 动态工具不经 marker 拒绝（depth 0 同脚本调用是合法路径，动态嵌套由 depth 守卫拦截——见 defineTool 系列测试）
+    const c = ctxWithTools(home)
+    // 集成：js 调 flow、flow 步骤再调 js → 步骤得到拒绝说明（不再起嵌套子进程）
+    c.registry.resolve = (name: string) =>
+      name === "flow" ? { name, tool: makeFlowTool() } : name === "js" ? { name, tool: jsTool } : undefined
+    c.registry.schemas = () => [
+      { name: "flow", description: "", parameters: {} },
+      { name: "js", description: "", parameters: {} },
+    ]
+    const r = await jsTool.execute(
+      { code: `const r = await tools.call("flow", { steps: [{ id: "s1", tool: "js", params: { code: "return 1" } }] })
+return r.output` },
+      c,
+    )
+    expect(r.output).toContain("嵌套")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("ctx.env 不落盘：脚本文件不含 env 值，运行时 ctx.env 引用子进程 process.env（同源）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-envfile-"))
+    const c = ctxWithTools(home)
+    c.env = { MY_PLAIN: "plain-value" }
+    // 生成文本：env 值不进脚本文件（密钥不再明文落盘），改为运行时引用
+    const script = buildChildScript("return 1", { ctx: { user: "u", env: { SECRET_XYZ: "s3cret-val" } }, input: null }, [])
+    expect(script).not.toContain("s3cret-val")
+    expect(script).toContain("ctx.env = process.env")
+    // 运行时同源：spawn 传入的任务 env 经 ctx.env 可读
+    const r = await jsTool.execute({ code: `return { plain: ctx.env.MY_PLAIN ?? "missing" }` }, c)
+    expect((r.data as { result: { plain: string } }).result.plain).toBe("plain-value")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("内部工具 blocks 去重限量透传到 js 结果", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-blocks-"))
+    const c = ctxWithTools(home)
+    const img: Tool = mkTool("img", async () => ({
+      output: "img",
+      blocks: [
+        { type: "image", path: "tmp/a.png", name: "a.png", mime: "image/png" },
+        { type: "image", path: "tmp/a.png", name: "a.png", mime: "image/png" },
+      ],
+    }))
+    c.registry.resolve = (name: string) => (name === "img" ? { name, tool: img } : undefined)
+    c.registry.schemas = () => [{ name: "img", description: "", parameters: {} }]
+    const r = await jsTool.execute({ code: `await img({}); await tools.call("img", {}); return "done"` }, c)
+    // 同 path 去重：两次调用各两个块 → 结果仅 1 个
+    expect(r.blocks).toHaveLength(1)
+    expect((r.blocks as Array<{ type: string; path: string }>)[0]).toMatchObject({ type: "image", path: "tmp/a.png" })
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("toolFnDecls：JS 全局名（fetch/JSON 等）不生成内置函数声明（防模块作用域遮蔽全局）", () => {
+    const decls = toolFnDecls(["fetch", "read", "JSON"])
+    expect(decls).toContain("async function read(")
+    expect(decls).not.toContain("async function fetch(")
+    expect(decls).not.toContain("async function JSON(")
+  })
+
+  test("超长非协议输出行丢弃留注（防 2MB 截断垃圾 JSON 刷屏）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-longline-"))
+    const c = ctxWithTools(home)
+    const r = await jsTool.execute({ code: `process.stdout.write("Z".repeat(150000) + "\\n"); return 1` }, c)
+    expect(r.output).toContain("超长非协议输出行已丢弃")
+    expect(r.output).not.toContain("ZZZZ")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("动态工具运行器内 defineTool 被拒（防递归注册）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-dynreg-"))
+    const c = ctxWithTools(home)
+    c.defineDynamicTool = async () => {
+      throw new Error("不应到达注册通道")
+    }
+    const dyn = makeDynamicTool({
+      name: "dyn_reg",
+      description: "d",
+      parameters: { type: "object", properties: {} },
+      source: `async () => { await defineTool({ name: "inner_x", description: "x", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "x" }) }); return { output: "done" } }`,
+    })
+    await expect(dyn.execute({}, c)).rejects.toThrow(/defineTool/)
     rmSync(home, { recursive: true, force: true })
   })
 
