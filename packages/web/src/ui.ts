@@ -393,3 +393,26 @@ export function bindSuggestions(input: HTMLInputElement, items: string[]): void 
   input.addEventListener("focus", render)
   input.addEventListener("input", render)
 }
+
+export interface AutoHideScrollbarOptions {
+  /** 滚动停止后移除 .scrolling 的延迟（毫秒），默认 400。 */
+  hideDelayMs?: number
+}
+
+/**
+ * 滚动条自动隐藏（会话列表 / 主消息列共用）：滚动中加 .scrolling（CSS 显示滑块），
+ * 停止 hideDelayMs 后移除——覆盖触摸板惯性滚动等指针不在容器上的情况；静止可见性由 :hover 承担。
+ */
+export function autoHideScrollbar(el: HTMLElement, opts: AutoHideScrollbarOptions = {}): void {
+  const hideDelayMs = opts.hideDelayMs ?? 400
+  let hideTimer: ReturnType<typeof setTimeout> | null = null
+  el.addEventListener(
+    "scroll",
+    () => {
+      el.classList.add("scrolling")
+      if (hideTimer) clearTimeout(hideTimer)
+      hideTimer = setTimeout(() => el.classList.remove("scrolling"), hideDelayMs)
+    },
+    { passive: true },
+  )
+}

@@ -2,7 +2,7 @@
 .msg-nav {
   position: absolute;
   top: 12px;
-  right: 22px; /* 避让常显滚动条（10px）+ 间距；窄屏媒体查询内同步右移 */
+  right: 22px; /* 避让滚动条（8px 恒定占位，静止透明）+ 间距；窄屏媒体查询内同步右移 */
   bottom: 56px; /* 避开右下「跳到最新」按钮 */
   width: 38px; /* 给活动条"探出"留出空间 */
   display: flex;
