@@ -945,7 +945,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const exportDoc = tool(
     "export_doc",
-    "导出云文档为本地文件格式。token 为文档级 token（**docx 传 document_id、sheet 传 spreadsheet_token、bitable 传 app_token（bascn 开头）——不要传数据表 table_id 作 token，实测报 1069914 file token invalid**）；file_extension 按类型支持：docx→docx/pdf、sheet→xlsx/csv、bitable→xlsx/csv。返回导出文件 file_token，可用 download_file 下载。",
+    "导出云文档为本地文件格式。token 为文档级 token（**docx 传 document_id、sheet 传 spreadsheet_token、bitable 传 app_token——不要传数据表 table_id 作 token，实测报 1069914 file token invalid**）；file_extension 按类型支持：docx→docx/pdf、sheet→xlsx/csv、bitable→xlsx/csv。返回导出文件 file_token，可用 download_file 下载。",
     {
       token: { type: "string" },
       type: { type: "string", description: "docx/sheet/bitable，默认 docx" },
@@ -958,7 +958,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const type = args.type ? String(args.type) : "docx"
       const fileExt = String(args.file_extension)
       const token = String(args.token)
-      // 实测 1069914 file token invalid：导出 token 必须是文档级 token（bitable 为 app_token，bascn 开头），
+      // 实测 1069914 file token invalid：导出 token 必须是文档级 token（bitable 为 app_token），
       // 数据表 table_id 是子表 ID，只能作为 sub_id 传参（官方接口：sub_id 仅当 sheet/bitable 导出 csv 时使用）
       const subId = args.sub_id !== undefined ? String(args.sub_id) : undefined
       if ((type === "bitable" || type === "sheet") && fileExt === "csv" && !subId) {
@@ -1251,10 +1251,17 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     // 已是 sheet_id（oVs 开头长 token）：直接返回，不触发名称查询
     if (/^oVs[A-Za-z0-9_-]{6,}$/.test(head)) return range
     const data = (await api(ctx, `/open-apis/sheets/v3/spreadsheets/${token}/sheets/query`)) as { sheets?: Array<{ sheet_id?: string; title?: string }> }
-    const hit = (data.sheets ?? []).find((s) => s.title === head)
+    const sheets = data.sheets ?? []
+    const hit = sheets.find((s) => s.title === head)
     if (hit?.sheet_id) return `${hit.sheet_id}!${m[2]}`
-    // 数字下标引用（未命中名称时）：原样使用；其余交由飞书接口报错
+    // 数字下标引用（未命中名称时）：原样使用
     if (/^\d+$/.test(head)) return range
+    // 前缀与任何工作表名/sheet_id 均不匹配（常见误因：用了表格标题而非工作表名）：直接报可用清单，替代接口侧 90215 盲错；
+    // 仅在拿到非空清单时判定（清单为空=接口异常/降级，无从判定，保持旧行为交由飞书接口报错）
+    if (sheets.length && !sheets.some((s) => s.sheet_id === head)) {
+      const titles = sheets.map((s) => s.title).filter(Boolean).join("、")
+      throw new Error(`range 前缀「${head}」不是本表格的工作表${titles ? `（可用工作表：${titles}）` : ""}——前缀须用工作表名或 get_sheet_meta 返回的 sheet_id，表格标题不可作前缀`)
+    }
     return range
   }
 

@@ -1511,6 +1511,34 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep path 归一化：显式 \".\"/\"./\" 与省略等价；path 精确命中单文件时直接内搜", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-path-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "tmp/src/a.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "tmp/src/b.js", size: 10, modifiedAt: 0, isDir: false },
+    ]
+    c.readFile = async (p) => (p.endsWith("a.ts") ? "todo: in-a\n" : "todo: in-b\n")
+    const tools = createGlobalTools()
+    // 显式 "."（旧实现拼 ./ 前缀匹配不到任何列表坐标，误报无匹配）与省略等价：全树搜索
+    for (const dot of [".", "./"]) {
+      const r = await tools.grep.execute({ pattern: "todo", path: dot }, c)
+      expect(r.output).toContain("tmp/src/a.ts:1: todo: in-a")
+      expect(r.output).toContain("tmp/src/b.js:1: todo: in-b")
+    }
+    // path 精确命中单文件（tmp/ 前缀可省略）：仅内搜该文件，不再按目录前缀过滤（旧实现拼 文件名/ 前缀必空）
+    const file = await tools.grep.execute({ pattern: "todo", path: "src/a.ts" }, c)
+    expect(file.output).toContain("tmp/src/a.ts:1: todo: in-a")
+    expect(file.output).not.toContain("b.js")
+    const filePrefixed = await tools.grep.execute({ pattern: "todo", path: "tmp/src/b.js" }, c)
+    expect(filePrefixed.output).toContain("tmp/src/b.js:1: todo: in-b")
+    expect(filePrefixed.output).not.toContain("a.ts")
+    // 单文件 + include 不匹配 → 无匹配
+    const filtered = await tools.grep.execute({ pattern: "todo", path: "src/a.ts", include: "*.js" }, c)
+    expect(filtered.output).toBe("（无匹配文件）")
+    cleanup(home)
+  })
+
   test("file tool rename/move/delete call ctx, info reports type/size/mtime", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fsop-"))
     const c = ctx(home)
