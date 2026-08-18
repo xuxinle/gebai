@@ -1539,6 +1539,41 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep 本地模式 tmp 外路径实际遍历：目录/单文件/不存在三态 + 二进制内容跳过", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-out-"))
+    const c = ctx(home)
+    // 范围外真实目录（会话 tmp/ 之外）：旧实现静默「无匹配文件」，与 read 可读同一路径矛盾
+    const proj = mkdtempSync(join(tmpdir(), "gebai-grep-proj-"))
+    mkdirSync(join(proj, "src"), { recursive: true })
+    mkdirSync(join(proj, "node_modules", "pkg"), { recursive: true })
+    writeFileSync(join(proj, "src", "a.ts"), "todo: out-a\n")
+    writeFileSync(join(proj, "b.md"), "todo: out-b\n")
+    writeFileSync(join(proj, "bin.dat"), "bin\x00todo: binary\n")
+    writeFileSync(join(proj, "node_modules", "pkg", "c.js"), "todo: skipped\n")
+    const tools = createGlobalTools()
+    const projPath = proj.replace(/\\/g, "/")
+    // 目录：递归命中，路径带给定前缀（read 可直接消费）；二进制内容（NUL 字节）跳过；跳过目录不进结果
+    const dir = await tools.grep.execute({ pattern: "todo", path: projPath }, c)
+    expect(dir.output).toContain(`${projPath}/src/a.ts:1: todo: out-a`)
+    expect(dir.output).toContain(`${projPath}/b.md:1: todo: out-b`)
+    expect(dir.output).not.toContain("bin.dat")
+    expect(dir.output).not.toContain("node_modules")
+    // include 过滤范围外结果同样生效
+    const inc = await tools.grep.execute({ pattern: "todo", path: projPath, include: "*.ts" }, c)
+    expect(inc.output).toContain("a.ts")
+    expect(inc.output).not.toContain("b.md")
+    // 单文件（范围外绝对路径）
+    const file = await tools.grep.execute({ pattern: "todo", path: `${projPath}/b.md` }, c)
+    expect(file.output).toBe(`${projPath}/b.md:1: todo: out-b`)
+    // 路径不存在：明确报错（不再静默无匹配）
+    const missing = await tools.grep.execute({ pattern: "todo", path: `${projPath}/nope` }, c)
+    expect(missing.output).toContain("路径不存在或无可搜文件")
+    // 沙箱部署模式：范围外路径仍拒绝（不遍历）
+    const denied = await tools.grep.execute({ pattern: "todo", path: projPath }, { ...c, sandboxed: true })
+    expect(denied.output).toBe("（无匹配文件）")
+    cleanup(home)
+  })
+
   test("file tool rename/move/delete call ctx, info reports type/size/mtime", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fsop-"))
     const c = ctx(home)
