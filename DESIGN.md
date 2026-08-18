@@ -1523,17 +1523,20 @@ await defineTool({
 
 #### 守卫与限制
 
-- **审批**：与 `sh` 同姿态——默认需审批（脚本=任意代码执行），`approval:false` 按次免审；**审批覆盖整个脚本含内部工具调用**（flow 同语义：一次审批、依次执行）
+- **审批**：与 `sh` 同姿态——默认需审批（脚本=任意代码执行），`approval:false` 按次免审；**默认审批一次覆盖整个脚本含内部工具调用**（flow 同语义：一次审批、依次执行）；**免审运行（`approval:false`/免审动态工具）时内部调用需审批的工具在 RPC 分发层被拒**——免审脚本体未经用户审阅，按剥离免审标记后的审批姿态解析（`stripApprovalFlags`，防脚本内再传 `approval:false` 自我免审，与引擎无交互硬门槛同规则；`requiresApproval` 函数异常按需审批处理）
 - **安全模式**：`js` 本身**降级为只读运行时**而非禁用——静态扫描（`scanJsReadOnly`：动态 `import()`/`require()`/`eval()`/`Function()`/`import.meta.require`/`process.getBuiltinModule`/`process.binding`/`Bun.fetch`/`Bun.sqlite` 前置拒绝）+ 子进程 shim（Bun 写/进程/网络 API 屏蔽、`Bun.file` 拦写留读、eval/Function/fetch/Worker 全局删除、`Function.prototype.constructor` 中性化）；内部工具调用在 RPC 分发层按硬阻断集（`isToolBlockedInSafeMode`，cron 调度类）拦截（无绕过通道），`sh`/`py`/`write` 等照常可调、由各工具降级规则执行；`defineTool` 与磁盘持久化动态工具同规则降级（execute 源码扫描 + 只读 shim），注册与水合均允许——只读动态工具安全模式下可用
 - **内部调用走同一 `ToolContext`**：`writeGuard`（子Agent 写范围）/`fileGuard`（防盲覆盖）等会话级守卫对脚本内工具调用同样生效
-- **防嵌套**：脚本内不能再调用 `js`（含 `{agent}_js`）——防嵌套 RPC 桥子进程失控；**动态工具内不能调用动态工具/js**（`runtimeDefined` + depth 守卫）；`sh`/`py` 不受限（脚本本就可 `Bun.spawn`）
-- **规模上限**：单次脚本工具调用总数 ≤ 100（与 flow 对齐）；RPC 协议行子进程侧 ~2MB / 服务端 2.5MB 截断兜底（防巨对象撑爆内存）
+- **防嵌套**：脚本内不能再调用 `js`（含 `{agent}_js`）——防嵌套 RPC 桥子进程失控；**动态工具内不能调用动态工具/js**（`runtimeDefined` + depth 守卫），**动态工具运行器（depth 1）内不能再 `defineTool`**（防递归注册）；RPC 分发层执行工具统一携带 **`fromJsBridge` 标记**，`js` 的 execute 见标记即拒——封死 js→flow→js→… 交替递归与所有经直执行工具回到 js 的路径（动态工具不经标记拒绝：depth 0 同脚本调用是合法路径，js→flow→dyn 至多一层动态子进程、无递归通道）；`sh`/`py` 不受限（脚本本就可 `Bun.spawn`）
+- **规模上限**：单次脚本工具调用总数 ≤ 100（与 flow 对齐）；RPC 协议行子进程侧 ~2MB / 服务端 2.5MB 截断兜底（防巨对象撑爆内存）；非 JSON 输出行 ≤100k 按日志透传、超长丢弃留注（多为 2MB 截断产生的非法 JSON，防垃圾文本刷屏）
+- **密钥不落盘**：`ctx.env` 不嵌入临时脚本文件（历来明文写入合并后的全部环境变量，崩溃残留即密钥泄漏）——子进程内改为运行时引用 `process.env`（spawn 已传同源环境、沙箱脱敏同规则，语义完全一致）；messages 等会话数据仍嵌入（ctx 注入契约，属任务数据）
+- **内置函数声明过滤 JS 全局名**：子Agent 工具名为 JS 全局（`fetch`/`JSON`/`Promise`/`Bun` 等）时不生成模块作用域函数声明（会遮蔽全局，`JSON.parse` 莫名变工具调用），仍可经 `tools.call` 动态调用
 - **失败语义**：未捕获异常/非 0 退出/超时/中断 → 失败结果（`[脚本失败]` + 错误/退出码，不中断任务）；`strict:true` 时失败抛工具级错误（flow 编排「失败即中断」，与 sh/py 一致）；成功无输出明确提示「（脚本执行成功，无输出）」
 
 #### 结果（双输出）
 
-- 模型可见 `output`：console 输出汇总（warn/error 加前缀）+ `[返回值]` 预览（2000 字符，完整值在 data）
+- 模型可见 `output`：console 输出汇总（warn/error 加前缀）+ `[返回值]` 预览（2000 字符，完整值在 data；返回值须为纯 JSON 结构——Map/Set/Date 经 JSON 序列化会变形或丢失）
 - 结构化 `data`：`{ exitCode, logs, result, calls: [{name, ok, error?}], timedOut?, interrupted? }`（logs/result 截断至 100k 字符）
+- **blocks 透传**：内部工具产生的图片/图表/文件块去重（`type:path`）限量（10 个）透传到 js 结果——编排 read 图片/产物类工具时图像块直达 UI/模型，不再丢失
 
 ```
 // 动态编程示例：读文件 → 按内容分支重试 → 聚合返回（工具像内置函数一样直接调用）
