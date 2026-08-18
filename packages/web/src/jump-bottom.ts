@@ -1,8 +1,10 @@
 import { jumpBottom, msgEl } from "./state"
 import { createStickyScroll } from "./sticky-scroll"
+import { autoHideScrollbar } from "./ui"
 
 /** 粘底滚动（逻辑见 sticky-scroll.ts）：真实 DOM 绑定入口，各模块经命名导出使用。 */
 const sticky = createStickyScroll(msgEl, jumpBottom)
+autoHideScrollbar(msgEl)
 
 export const isAtBottom = sticky.isAtBottom
 export const scrollIfSticky = sticky.scrollIfSticky

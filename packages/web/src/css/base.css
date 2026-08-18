@@ -693,7 +693,7 @@ aside {
   flex-direction: column;
   gap: 2px;
 }
-/* 滚动条自动显色：hover 列表或滑动中（.scrolling 由 sessions.ts 的 scroll 事件维护）才可见 */
+/* 滚动条自动显色：hover 列表或滑动中（.scrolling 由 ui.ts autoHideScrollbar 维护）才可见 */
 #session-list:hover,
 #session-list.scrolling {
   scrollbar-color: var(--border-strong) transparent;
@@ -903,12 +903,29 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 #messages {
   flex: 1;
   overflow-y: auto;
-  /* 滚动条保留常显（消息导航小地图只承担定位导航，滚动位置感知仍需滚动条；
-     右侧导航条已右移避让，见 chat.css .msg-nav） */
+  /* 滚动条自动显隐（与会话列表 #session-list 同构）：沟槽恒定占位、静止透明，
+     hover / 滚动中（.scrolling 由 ui.ts autoHideScrollbar 维护）才显示滑块；
+     消息导航小地图避让见 chat.css .msg-nav */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin; /* Firefox：恒定 thin 占位（静止透明） */
+  scrollbar-color: transparent transparent;
   padding: 20px clamp(16px, 4vw, 48px);
   display: flex;
   flex-direction: column;
   gap: var(--msg-gap);
+}
+#messages:hover,
+#messages.scrolling {
+  scrollbar-color: var(--border-strong) transparent;
+}
+#messages::-webkit-scrollbar { width: 8px; height: 8px; }
+#messages::-webkit-scrollbar-track { background: transparent; }
+#messages::-webkit-scrollbar-thumb { background: transparent; border: 0; }
+#messages:hover::-webkit-scrollbar-thumb,
+#messages.scrolling::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 #messages.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
 

@@ -35,7 +35,7 @@ import { applyApprovalSkip } from "./approval-skip"
 import { applyMinimalMode } from "./minimal-mode"
 import { applyApprovalVisibility } from "./approvals"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
-import { confirmDialog, toast } from "./ui"
+import { autoHideScrollbar, confirmDialog, toast } from "./ui"
 import { renderShortcutButtons } from "./shortcuts"
 import { clearMsgNav, updateMsgNav } from "./msg-nav"
 import { renderAttachments } from "./attachments"
@@ -794,17 +794,7 @@ function blockToMarkdown(b: ContentBlock): string {
 
 /** 新会话 / 侧栏开关 / 批量删除绑定（供 main 组装）。 */
 export function bindSessionActions() {
-  // 滚动条自动隐藏：滑动中加 .scrolling（CSS 显示滑块），停止 400ms 后移除（覆盖触摸板惯性滚动等鼠标不在列表上的情况）
-  let scrollHideTimer: ReturnType<typeof setTimeout> | null = null
-  sessionList.addEventListener(
-    "scroll",
-    () => {
-      sessionList.classList.add("scrolling")
-      if (scrollHideTimer) clearTimeout(scrollHideTimer)
-      scrollHideTimer = setTimeout(() => sessionList.classList.remove("scrolling"), 400)
-    },
-    { passive: true },
-  )
+  autoHideScrollbar(sessionList)
   // 搜索输入防抖（150ms）：快速击键不触发全量列表请求风暴
   let searchTimer: ReturnType<typeof setTimeout> | null = null
   searchInputEl.addEventListener("input", () => {
