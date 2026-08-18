@@ -1074,3 +1074,11 @@ html[data-low-power="on"] .msg {
   content-visibility: auto;
   contain-intrinsic-size: auto 320px;
 }
+/* content-visibility 与浏览器滚动锚定（scroll anchoring）组合缺陷：生成中底部内容持续增长，
+   用户上翻后锚定节点被跳过渲染/高度异步修正，锚定算法选中失效锚点把视口猛拉到列表顶部
+   （跳回第一输入）。主消息区与新会话容器关闭浏览器滚动锚定——粘底跟随由应用自管
+   （sticky-scroll / scrollSessionSticky），底部追加内容不影响已上翻的阅读位置。 */
+html[data-low-power="on"] #messages,
+html[data-low-power="on"] .session-body {
+  overflow-anchor: none;
+}

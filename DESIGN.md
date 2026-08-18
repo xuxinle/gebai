@@ -252,7 +252,7 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 - **低性能模式**：无 GPU / 低配机器自动开启，可手动强制开启（设置面板「外观」tab 单开关），不影响配色与布局、仅降级特效与渲染开销：
   - **自动检测（默认）**：WebGL 不可用（GPU 缺失/驱动禁用）、CPU ≤4 核、内存 ≤4GB（`navigator.deviceMemory`，Chrome/Edge），任一命中即开启；`localStorage["gebai.ui.lowPower"]` 仅存 `"on"`（强制开启），不存/其它值 = 自动检测（旧三态 `auto`/`off` 兼容映射），跨标签页 storage 事件同步
   - **生效标记**：根元素 `data-low-power="on"`，CSS 全局关闭动画/过渡（主题呼吸、脉冲、入场动画等）、View Transitions 与扫描光切换动画、`backdrop-filter` 毛玻璃（无 GPU 时持续重绘最卡）；**状态指示动画豁免**：流式输出光标（`caret-blink`）与连接信号灯闪烁（`conn-thinking`）是任务进行中的必要指示且开销极小，低性能模式下保留
-  - **消息渲染降级**：视口外消息跳过布局/绘制（`.msg` `content-visibility: auto` + `contain-intrinsic-size: auto 320px`，滚动条高度估算防跳动；含 iframe 卡片移入视口时浏览器再渲染）
+  - **消息渲染降级**：视口外消息跳过布局/绘制（`.msg` `content-visibility: auto` + `contain-intrinsic-size: auto 320px`，滚动条高度估算防跳动；含 iframe 卡片移入视口时浏览器再渲染）；主消息区 `#messages` 与新会话容器 `.session-body` 同时关闭浏览器滚动锚定（`overflow-anchor: none`）——content-visibility 与 scroll anchoring 组合缺陷：生成中底部内容持续增长、用户上翻后锚定节点被跳过渲染/高度异步修正，锚定算法选中失效锚点把视口猛拉到列表顶部（跳回第一输入）；粘底跟随由应用自管，底部追加不影响已上翻的阅读位置
   - **流式输出降频**：文本 delta 渲染按 120ms 尾沿节流合并（`scheduleStreamRender`，计时器挂 `RunState.renderTimer`，封段/重置/结束时随 run 清理）——markdown 全量重解析是流式期间最重 CPU 开销；标准模式保持逐 chunk 同步渲染
   - **代码高亮降级**：无语言标注的代码块跳过 `highlightAuto` 自动检测（穷举全部语言最贵），仅转义；显式语言标注仍正常高亮
   - **图表始终默认渲染**：缩略图自动渲染（不随低性能模式改为按需，避免「图不默认渲染」困惑；渲染失败只显示占位提示、错误细节不暴露到主页面，进查看器/控制台）；本地渲染引擎不做空闲预热（低性能模式，首次渲染由消息流触发）；PNG 导出超采样 3x → 1.5x、复制图片 2x → 1x（`isLowPower()` 实时读取），渲染与 draw 工具链路不变
