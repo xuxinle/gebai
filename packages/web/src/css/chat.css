@@ -276,7 +276,7 @@
 /* edits 参数块：每处修改旧（红）/ 新（绿）对比展示（edit 工具） */
 .msg.tool .bubble .tool-edits { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .msg.tool .bubble .tool-edit-idx { font-family: var(--font-ui); font-size: 11px; color: var(--text-faint); margin-top: 2px; }
-.msg.tool .bubble pre.tool-edit-old, .msg.tool .bubble pre.tool-edit-new { margin: 0; padding: 6px 10px; border-radius: var(--radius-sm); border-left: 3px solid; }
+.msg.tool .bubble pre.tool-edit-old, .msg.tool .bubble pre.tool-edit-new { margin: 0; padding: 6px 10px; border-radius: var(--radius-sm); border-left: 3px solid; font-family: var(--font-mono); font-size: 13px; }
 .msg.tool .bubble pre.tool-edit-old { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--bg-inset)); }
 .msg.tool .bubble pre.tool-edit-new { border-left-color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--bg-inset)); }
 /* 工具卡内所有代码块统一换行策略：长 token 强制断行，绝不横向溢出 */
