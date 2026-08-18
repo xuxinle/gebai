@@ -12,8 +12,28 @@ import { hostBlockReason } from "./ip"
 import { runFlow, scanFlowApprovals } from "./flow"
 import { jsTool } from "./js-tool"
 import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, validateShCommandSafeMode } from "./safety"
+import { EXCLUDED_GLOBAL_TOOLS } from "./tools-excluded.generated"
 
 export const TRUNCATE_THRESHOLD = 12000
+
+/** 构建期排除的全局工具名单（`GEBAI_BUILD_EXCLUDE_TOOLS` → `scripts/build-tools.ts` 生成并烘焙，
+ *  二进制形态无法改源码，须构建时定死）。**静态导入**（运行时读文件在 bun --compile 单文件形态不可行，
+ *  顶层 await 动态导入在 tools↔js-tool/engine 循环依赖图下产生未初始化绑定）；生成文件提交默认空名单，
+ *  裁剪构建后为脏属预期（下次常规构建自动恢复全量）。 */
+const excludedGlobalTools = new Set<string>(EXCLUDED_GLOBAL_TOOLS)
+
+/** 测试注入：覆写构建期排除名单（测试环境生成文件为默认空名单，无法验证过滤路径）。 */
+export function _setExcludedGlobalToolsForTest(names: string[]): void {
+  excludedGlobalTools.clear()
+  for (const n of names) excludedGlobalTools.add(n)
+}
+
+/** 工具是否被构建期排除：index.ts 注册（含 vision）、engine agent_run 新会话内建编排工具（flow/tool_schemas/js）
+ *  注入共用——排除 = 不注册不暴露（schema 不可见、调用报未知工具）。 */
+export function isGlobalToolExcluded(name: string): boolean {
+  return excludedGlobalTools.has(name)
+}
+
 /** 截断消息保留的首/尾字符数（DESIGN「常量参考」）。 */
 export const TRUNCATE_HEAD_CHARS = 4000
 export const TRUNCATE_TAIL_CHARS = 4000
@@ -2179,7 +2199,9 @@ export const fullModeTool: Tool = {
   },
 }
 
-export function createGlobalTools(): Record<string, Tool> {
+/** 全量全局工具表（不经构建期排除过滤）：构建脚本校验清单用（`scripts/build-tools.ts` 须对全量名单校验，
+ *  否则连续两次不同排除清单的构建会误拒上次被排除的名字）。 */
+export function createAllGlobalTools(): Record<string, Tool> {
   const todoTool = makeTodoTool()
   return {
     read: readTool,
@@ -2221,6 +2243,12 @@ export function createGlobalTools(): Record<string, Tool> {
     // 完整模式会话从 schema 移除，防冗余工具干扰选择）
     full_mode: fullModeTool,
   }
+}
+
+/** 全局工具表（构建期排除过滤后）：被 GEBAI_BUILD_EXCLUDE_TOOLS 排除的工具不注册不暴露。 */
+export function createGlobalTools(): Record<string, Tool> {
+  const all = createAllGlobalTools()
+  return Object.fromEntries(Object.entries(all).filter(([name]) => !excludedGlobalTools.has(name)))
 }
 
 export type ToolSet = Record<string, Tool>

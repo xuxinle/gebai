@@ -11,7 +11,7 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
@@ -2016,10 +2016,10 @@ export class AgentEngine {
       }
     }
     // 数据流编排能力（与总Agent 主循环一致）：新会话内同样可用 flow 一次编排多步、tool_schemas 批量查询输出结构、
-    // js 脚本动态编程（直接调用工具 + 会话上下文注入）
-    reg.register(makeFlowTool())
-    reg.register(toolSchemasTool)
-    reg.register(jsTool)
+    // js 脚本动态编程（直接调用工具 + 会话上下文注入）——构建期排除清单（GEBAI_BUILD_EXCLUDE_TOOLS）同规则生效
+    if (!isGlobalToolExcluded("flow")) reg.register(makeFlowTool())
+    if (!isGlobalToolExcluded("tool_schemas")) reg.register(toolSchemasTool)
+    if (!isGlobalToolExcluded("js")) reg.register(jsTool)
 
     // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；
     // 每个子Agent 前加职责分隔头（名称 + 能力描述），明确各段提示词对应的工具命名空间与职责域，多 Agent 预加载时不混淆
