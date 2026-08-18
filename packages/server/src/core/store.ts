@@ -36,6 +36,8 @@ export interface SessionData {
   /** 建立 ctxInputTokens 基线那次调用已覆盖的历史消息条数（loadHistory 坐标）：下次 run 以
    *  history.slice(ctxAtMessage) 估算基线之后的增量（下一次真实调用会用真值接管并重建基线）。 */
   ctxAtMessage?: number
+  /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
+  dynamicTools?: import("./types").DynamicToolDef[]
 }
 
 /** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。 */

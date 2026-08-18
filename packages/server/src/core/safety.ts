@@ -1,10 +1,10 @@
 /**
  * 安全模式风险工具判定（DESIGN「安全模式」）：全局工具精确名 + 子Agent 工具短名
- * （{agent}_sh → sh 等，按最后一段匹配）。命令执行/写删文件/定时任务调度均为修改类操作，安全模式下只读可用。
- * 引擎主/子循环与 flow 数据流编排工具共用（flow 直接调 rt.tool.execute 不经引擎拦截，须在 step 层同规则判定）。
+ * （{agent}_sh → sh 等，按最后一段匹配）。命令执行（sh/py/js）/写删文件/定时任务调度均为修改类操作，安全模式下只读可用。
+ * 引擎主/子循环、flow 数据流编排工具与 js 脚本工具 RPC 分发层共用（后两者直接调 rt.tool.execute 不经引擎拦截，须同规则判定）。
  */
 export const SAFE_MODE_RISKY_TOOLS = new Set([
-  "sh", "py", "write", "edit", "patch", "file", "delete",
+  "sh", "py", "js", "write", "edit", "patch", "file", "delete",
   "cron_add", "cron_update", "cron_remove",
 ])
 

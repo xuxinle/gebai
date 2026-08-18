@@ -66,6 +66,14 @@ export type ToolContext = {
   runCommand: (cmd: string, opts?: { shell?: string; workdir?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string; code: number }>
   uploadAttachment: (ref: AttachmentRef) => Promise<string>
   publish: (type: string, payload: Record<string, unknown>) => void
+  /** 任务取消信号（引擎按任务注入）：长时工具（js 脚本子进程等）监听中止并终止子进程。可选：测试桩不注入时不响应取消。 */
+  signal?: AbortSignal
+  /** 会话上下文注入（js 脚本工具用）：当前会话最近消息快照（文本抽取、条数/长度截断）。
+   *  可选：测试桩/无引擎环境不注入时脚本侧 ctx.messages 为空数组。 */
+  recentMessages?: () => Array<{ role: string; name?: string; content: string }>
+  /** 运行时工具定义（js 脚本 defineTool 用）：校验并注册会话级动态工具（引擎注入——主会话进会话覆盖层并
+   *  随会话落盘、新会话执行进本次运行注册表）。可选：未注入（测试桩/无引擎环境）时 defineTool 返回不可用错误。 */
+  defineDynamicTool?: (def: DynamicToolDef) => Promise<void>
   /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：flow 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
   /** 会话级已读文件追踪（防误覆盖，引擎按会话注入）：read/write/edit/patch 成功后登记已读绝对路径，
@@ -161,6 +169,9 @@ export interface Tool {
    *    "block"（结果直出内容块，调用不显示通用卡片，如 draw/diff/render_html）；超长参数区自动折叠；
    *  codeField/codeLang：args="code"/"edits" 时对应的代码/修改数组字段名与语言（如 sh 的 command/bash、edit 的 edits）。 */
   card?: { titleParams?: string[]; args?: "json" | "kv" | "none" | "code" | "edits" | "block"; codeField?: string; codeLang?: string }
+  /** 运行时定义工具标记（js 脚本 defineTool 注册）：js/动态工具子进程内禁止再调用（防递归嵌套子进程），
+   *  RPC 分发层按本标记拦截。内置/子Agent 工具无此标记。 */
+  runtimeDefined?: boolean
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>
 }
 
@@ -201,6 +212,16 @@ export interface ToolCallRecord {
   retries: number
 }
 
+/** 会话级运行时定义工具（js defineTool）的持久化形态：execute 源码序列化保存，
+ *  随会话 chat.json 落盘、重启恢复；新会话执行内定义的工具不落盘（仅本次运行注册表）。 */
+export interface DynamicToolDef {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  source: string
+  requiresApproval?: boolean
+}
+
 export interface SessionData {
   id: string
   name: string
@@ -221,6 +242,8 @@ export interface SessionData {
   /** 建立 ctxInputTokens 基线那次调用已覆盖的历史消息条数（loadHistory 坐标）：下次 run 以
    *  history.slice(ctxAtMessage) 估算基线之后的增量（下一次真实调用会用真值接管并重建基线）。 */
   ctxAtMessage?: number
+  /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
+  dynamicTools?: DynamicToolDef[]
 }
 
 export interface EventSink {
