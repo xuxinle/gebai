@@ -1922,6 +1922,26 @@ bun run --cwd packages/sdk test
 | 契约测试 | WS/REST 消息格式、SDK 与协议一致性 | 协议变更必须有契约测试兜底 |
 | E2E | 端到端（mock LLM + 内存存储）：prompt → 工具调用 → 审批 → 完成 | 阶段一闭环后建立，回归主路径 |
 
+### 自测工具：fake-llm（假模型端到端自测）
+
+`packages/server/scripts/fake-llm.ts`——无真实模型 Key 的**手工端到端自测**工具：按场景脚本回放 OpenAI `chat/completions` 流式响应（文本分片 / tool_calls 分片 / usage），服务端 provider 无感接入，用于浏览器实测前端行为（流式渲染、agent_run 执行过程、计划审批滚动等单测覆盖不到的 UI 链路）。
+
+```bash
+bun run --cwd packages/server fake-llm [场景]   # 场景缺省 = text；端口 9801（FAKE_LLM_PORT 覆盖）
+# 服务端指向假模型联调：
+GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
+  GEBAI_LLM_MODEL=fake GEBAI_PORT=3900 bun run --cwd packages/server dev
+```
+
+| 场景 | 脚本 | 验证点 |
+|------|------|--------|
+| `text` | 单轮纯文本回复 | 链路冒烟（消息上屏/流式渲染） |
+| `agent_run` | 主会话调 `agent_run` → 子会话两轮（文本 + `code_ls` 工具 / 多行结论）→ 主会话收尾 | 新会话执行过程实时渲染、结果 markdown 换行无双倍空行 |
+| `plan` | 延迟 4s 调 `plan`（阻塞等审批）→ 批准后收尾 | 计划卡片全文、选择卡片弹出时消息流落底、审批后继续 |
+| `error` | 每次调用 HTTP 500 | 错误气泡与重试耗尽呈现 |
+
+场景脚本耗尽后回复固定收尾文本（防场景外调用死循环）；`/probe` 页面（`http://127.0.0.1:9801/probe`）连服务端 `/ws` 验证浏览器连通性（标题 `WS_OK`/`WS_ERR`/`WS_TIMEOUT`）。
+
 ### 覆盖率门槛
 
 - 核心引擎（AgentEngine、ToolRegistry、EnvManager、Sandbox、命名空间解析）行覆盖率 ≥ 90%
