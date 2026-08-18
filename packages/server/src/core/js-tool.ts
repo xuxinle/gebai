@@ -586,14 +586,12 @@ async function runJsScript(
 export const jsTool: Tool = {
   name: "js",
   description:
-    "执行 JS/TS 脚本（Bun 运行时，支持 TS/await/fetch/Bun API），可直接调用其他工具并注入会话上下文——**工具的动态编程**：完整语言能力（变量/函数/循环/条件/异常处理）编排工具链，表达 flow 声明式编排写不出的逻辑（复杂变换/动态参数/错误分支重试/跨步骤聚合）。\n" +
+    "执行 JS/TS 脚本（Bun 运行时，支持 TS/await/fetch/Bun API），可直接调用其他工具并注入会话上下文——完整语言能力（变量/函数/循环/条件/异常处理）编排工具链，表达 flow 声明式编排写不出的逻辑（复杂变换/动态参数/错误分支重试/跨步骤聚合）。\n" +
     "- **工具即内置函数**：`const r = await read({ path: \"a.txt\" })`（当前已启用的每个工具名都是一个可直接 await 的函数，无需前缀）；动态名字用 `await tools.call(name, params)` 或 `await tools.xxx(params)`。返回 `{ output, data, blocks, truncated, filePath }`（data 为结构化输出，结构可先用 tool_schemas 查询）；工具抛错 = Promise reject（可 try/catch 容错）。并行用 `Promise.all`；调用总数上限 100 次。\n" +
     "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；flow/编排传入的 `input` 参数可直接引用（JSON 文本需自行 JSON.parse）。\n" +
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
-    "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名/同写法，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（**默认 true 需审批**——固化后的每次调用与 sh 同姿态，仅明确安全的只读/幂等工具显式传 false）。\n" +
-    "- 其余同 sh：`timeout` 超时秒数（默认 300、上限 540，超时按进程树终止）、`strict`（true 时失败抛工具级错误，供 flow 中断编排）、`approval`（默认需审批，只读/幂等脚本可 false 免审）。\n" +
-    "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。\n" +
-    "- 安全模式：自动降级为只读运行时——动态 import/eval/Function 等加载与代码执行通道拒绝，写文件/子进程/网络 API 屏蔽（仅保留文件读取；写文件用 write 工具、网络用 fetch_url）。",
+    "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（默认 true 需审批，仅明确安全的只读/幂等工具传 false）。\n" +
+    "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。",
   requiresApproval: (args) => args.approval !== false,
   card: { args: "code", codeField: "code", codeLang: "javascript" },
   parameters: {

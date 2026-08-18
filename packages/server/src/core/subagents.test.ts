@@ -35,8 +35,8 @@ describe("SubAgentManager systemPromptInjection", () => {
     expect(out).not.toContain("已装载子Agent 模块")
     expect(out).not.toContain("你是 code。")
     expect(out).not.toContain("code:")
-    // 未装载的保持轻量引导列表
-    expect(out).toContain("可选子Agent（未装载：先用 agent_load 装载后直接调用其工具——工具注册进当前会话、完整系统提示词写入会话记录；或不经装载直接 agent_run 执行新会话）")
+    // 未装载的保持轻量引导列表（装载/新会话执行机制说明由系统提示词路由段与 agent_load/agent_run 工具描述承载）
+    expect(out).toContain("可选子Agent（未装载）")
     expect(out).toContain("- writer: 文档撰写")
   })
 

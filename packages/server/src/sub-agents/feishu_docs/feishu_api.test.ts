@@ -2305,9 +2305,11 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
     expect(desc).toContain("不可经 API 创建")
     expect(desc).toContain("callout.style")
     expect(desc).toContain("不带 width_ratio")
-    // 系统提示词块类型速查章节存在
-    expect(feishuDef.systemPrompt).toContain("块类型速查")
-    expect(feishuDef.systemPrompt).toContain("callout")
-    expect(feishuDef.systemPrompt).toContain("不可经 API 创建")
+    // md-only 细节已并入 add_blocks 描述：todo.style.done、grid 列宽 api_call 调整
+    expect(desc).toContain("todo.style.done")
+    expect(desc).toContain("update_grid_column_width_ratio")
+    // 块类型知识单源于 add_blocks 描述：系统提示词只留指针，不重复整表
+    expect(feishuDef.systemPrompt).toContain("add_blocks 工具描述")
+    expect(feishuDef.systemPrompt).not.toContain("## 块类型速查")
   })
 })

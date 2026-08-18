@@ -3,7 +3,7 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型，见「块类型速查」；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎）、`export_doc` 导出（docx/pdf/xlsx/csv；**token 传文档级 token——bitable 直接传 app_token（bascn 开头），不要传数据表 table_id 作 token（实测 1069914）；bitable/sheet 导出 csv 时须指定 sub_id 子表 ID**）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **文档 docx**：`create_doc` 创建、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -55,33 +55,7 @@
 - **元信息**：`get_file_meta` 查 docx **建议显式传 `type=docx`**（缺省自动识别对 docx 不稳定可能报 970005；普通 file 类型缺省识别失败时工具会自动回退补查，无需手动指定）
 - **错误码引导**：权限类错误（9999166x/9999167x）会自动附带「建议开通的 scope + 授权链接」（如 `docs:document:export`/`board:whiteboard`）；仍失败时把完整错误文本（含授权链接）反馈给用户去开发者后台开通，不要反复重试同一请求
 - **导入**：`import_markdown` 默认本地转换（标题/列表/代码/引用/表格/行内样式）；复杂 Markdown 用 `engine="official"` 走官方转换通道；内容超长时自动分批写入
-- **导出**：`export_doc` 返回 file_token 后用 `download_file` 下载到会话目录；**token 语义**——docx 传 `document_id`、sheet 传 `spreadsheet_token`、bitable 传 `app_token`（bascn 开头，传数据表 table_id 报 1069914 file token invalid）；**bitable/sheet 导出 csv 必须指定 `sub_id`**（数据表/工作表 ID，xlsx 不需要）
+- **导出**：`export_doc` 返回 file_token 后用 `download_file` 下载到会话目录；**token 语义（docx/sheet/bitable 各传什么）与 sub_id 要求见 export_doc 工具描述**
 - **多维表格占位记录**：`create_bitable` 创建后平台默认自动生成 10 条空占位记录（平台行为，非工具 bug）——写入数据时直接更新/追加这些记录即可，无需删除
 - **频率限制**：文档编辑类接口单应用 3 次/秒，失败时等待后重试；批量添加块（`add_blocks` 自动分批 ≤50）与批量记录（`add_bitable_records` ≤100）由工具自动分批，**不并发轰炸同一接口**——串行分批写入，429/限频错误等待后重试
 - **安全**：绝不输出或要求提供 app_secret / access_token 明文；错误信息中的 token 类字段保持脱敏；`api_call` 的 path 必须以 `/open-apis/` 开头
-
-## 块类型速查（add_blocks 创建）
-
-创建块时用「类型对应驼峰字段 + elements」，`{"block_type":n,"text":"..."}` 的 text 快捷写法会自动映射（equation 除外——不可创建）；code 块 `language` 传语言名自动转枚举。
-
-| block_type | 类型 | 字段要点 |
-|----|----|----|
-| 2 | text 文本 | `text.elements` |
-| 3~11 | heading1~9 标题 | `headingN.elements` |
-| 12 / 13 | bullet / ordered 列表 | `bullet.elements` / `ordered.elements` |
-| 14 | code 代码块 | `code.elements` + `code.style.language`（语言名） |
-| 15 | quote 引用 | `quote.elements` |
-| 16 | equation 公式 | **不可经 API 创建**（创建接口枚举不含 16，实测 99992402）——用普通文本块代替或提示用户手动插入 |
-| 17 | todo 待办 | `todo.elements` + `todo.style.done` |
-| 22 | divider 分割线 | `divider:{}`（自动补） |
-| 31 | table 表格 | 简化写法 `table.rows` 二维数组一次创建；嵌套写法带 children=[table_cell] |
-| 24 / 25 | grid 分栏 / grid_column 栏 | `grid.column_size`（2~5 必填，与 grid_column 子块数一致），children=[grid_column]（每列一个）；**grid_column 不带 `width_ratio`（实测 9499 invalid parameter，列宽默认均分）**——列内内容创建后经 `update_block` 填充（先 `get_doc_blocks` 查列内默认文本块 id），带 children 报 field validation failed；调整列宽可用 `api_call` 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}` |
-| 19 | callout 高亮块 | **正文在 `callout.elements`（Text 结构），不是 children**；**颜色/emoji 字段放 `callout.style` 内**——`background_color/border_color/text_color` 数字枚举、`emoji_id` 字符串（用表情名如 pushpin/bulb，实测放 callout 顶层报 schema mismatch）；text 快捷写法自动映射到 elements |
-| 35 | embed 嵌入 | `embed.url` 必填（外部地址） |
-| 37 | file 文件 | `file.token`（云空间文件 token） |
-| 39 | sheet 表格嵌入 | `sheet.token`（电子表格 token） |
-| 43 | mindnote 思维导图/画板 | `mindnote.token`（画板 token）；读取用 `get_board` |
-| 44 | bitable 多维表格 | `bitable.token`（app token，可加 `view_type`） |
-| 46 | diagram 流程图 | `diagram.diagram_type` |
-
-限制：**image(27) 用 `insert_image` 工具**（三步流程，add_blocks 不支持；**本地图片路径须传绝对路径**，相对路径相对会话目录会 ENOENT）；32 table_cell 不可单独创建（须随 table）；1 page 为文档根块不可创建——**普通文本用 2 text**；**22 divider 用 `divider:{}` 即可，不要传空 text**。含 table/todo/callout/grid/children 嵌套时自动走创建嵌套块接口一次创建（追加到末尾，index 不生效）。

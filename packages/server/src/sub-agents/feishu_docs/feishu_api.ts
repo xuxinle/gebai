@@ -420,7 +420,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const authUserAuthorize = tool(
     "auth_user_authorize",
-    "生成飞书用户授权链接（配置 user_access_token 第一步——以用户身份操作云文档，创建「用户所有权」的资源而非应用所有权）。默认自动回调：授权后浏览器自动跳回歌白（/api/v1/oauth/feishu/callback），**自动完成兑换并写回本会话，无需粘贴 code**。参数：scopes 可选（空格分隔，缺省 'docx:document offline_access auth:user.id:read'，补充能力需对应 scope 如 sheets:spreadsheet/drive:drive/wiki:wiki/board:whiteboard）；redirect_uri 可选——覆盖默认回调地址（须与开发者后台「安全设置 → 重定向 URL」登记一致；自定义地址时需手动粘贴 code 走 auth_user_token）。回调地址默认取 GEBAI_PUBLIC_URL（或本机 http://localhost:{GEBAI_PORT 或 3000}）拼 /api/v1/oauth/feishu/callback——**首次使用前需在开发者后台登记该回调地址**。返回授权链接（5 分钟有效、一次性）与操作说明。",
+    "生成飞书用户授权链接（配置 user_access_token 第一步——以用户身份操作云文档，创建「用户所有权」的资源而非应用所有权）。默认自动回调：授权后浏览器自动跳回歌白（/api/v1/oauth/feishu/callback），**自动完成兑换并写回本会话，无需粘贴 code**。补充能力需对应 scope（如 sheets:spreadsheet/drive:drive/wiki:wiki/board:whiteboard）；自定义 redirect_uri 时需手动粘贴 code 走 auth_user_token。回调地址默认取 GEBAI_PUBLIC_URL（或本机 http://localhost:{GEBAI_PORT 或 3000}）拼 /api/v1/oauth/feishu/callback——**首次使用前需在开发者后台登记该回调地址**。返回授权链接（5 分钟有效、一次性）与操作说明。",
     {
       scopes: { type: "string", description: "空格分隔的授权 scope 列表（可选，缺省 docx:document offline_access auth:user.id:read）" },
       redirect_uri: { type: "string", description: "回调地址（可选，覆盖默认 GEBAI 回调；需已在开发者后台登记）" },
@@ -456,7 +456,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const authUserToken = tool(
     "auth_user_token",
-    "用授权码兑换 user_access_token 并保存到当前会话（手动粘贴流程，自动回调流程无需使用）。参数：code 必填——auth_user_authorize 授权后得到的 code，或包含 code= 的完整回调地址（自动提取）；redirect_uri 可选——兑换时须与授权链接中一致（回调地址场景无需传）。兑换成功后本会话的资源类操作（文档/表格/多维表格/知识库/云空间/画板）自动以该用户身份执行；access_token 过期自动用 refresh_token 刷新。令牌绝不输出明文。",
+    "用授权码兑换 user_access_token 并保存到当前会话（手动粘贴流程，自动回调流程无需使用）。兑换成功后本会话的资源类操作（文档/表格/多维表格/知识库/云空间/画板）自动以该用户身份执行；access_token 过期自动用 refresh_token 刷新。令牌绝不输出明文。",
     {
       code: { type: "string", description: "授权码，或带 code= 的完整回调地址" },
       redirect_uri: { type: "string", description: "回调地址（可选，须与授权链接一致）" },
@@ -538,8 +538,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const createDoc = tool(
     "create_doc",
-    "创建飞书在线文档（docx）。参数：title 标题；folder_token 可选，目标文件夹 token（省略则应用云空间根目录）。返回 document_id 与文档 URL。",
-    { title: { type: "string", description: "文档标题" }, folder_token: { type: "string", description: "目标文件夹 token（可选）" } },
+    "创建飞书在线文档（docx）。返回 document_id 与文档 URL。",
+    { title: { type: "string", description: "文档标题" }, folder_token: { type: "string", description: "目标文件夹 token（可选，省略则应用云空间根目录）" } },
     ["title"],
     async (args, ctx) => {
       const data = (await api(ctx, "/open-apis/docx/v1/documents", {
@@ -552,7 +552,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getDocMeta = tool(
     "get_doc_meta",
-    "获取文档元信息（document_id、title、revision_id、url）。参数：document_id。",
+    "获取文档元信息（document_id、title、revision_id、url）。",
     { document_id: { type: "string" } },
     ["document_id"],
     async (args, ctx) => {
@@ -563,8 +563,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getDocText = tool(
     "get_doc_text",
-    "获取文档纯文本内容。参数：document_id 必填；block_id 可选——指定时只读取该块子树文本（含标题层级与表格行，长文档按小节读取用，可传标题块 id）。缺省 block_id 时返回整篇 raw_content。",
-    { document_id: { type: "string" }, block_id: { type: "string", description: "可选：起始块（如某标题块），只读取其子树" } },
+    "获取文档纯文本内容。",
+    { document_id: { type: "string" }, block_id: { type: "string", description: "可选：起始块（如某标题块），只读取其子树（含标题层级与表格行，长文档按小节读取用）；缺省读整篇纯文本" } },
     ["document_id"],
     async (args, ctx) => {
       const docId = String(args.document_id)
@@ -580,7 +580,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getDocBlocks = tool(
     "get_doc_blocks",
-    "获取文档全部块（含块类型/文本元素/子块 id 的富结构 JSON，每块附 type_name 类型标注）。参数：document_id；page_token/page_size 可选分页（默认 100）；page_all=true 自动翻页取全部（上限 2000 块，达到上限会提示）。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
+    "获取文档全部块（含块类型/文本元素/子块 id 的富结构 JSON，每块附 type_name 类型标注）。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
     {
       document_id: { type: "string" },
       page_token: { type: "string", description: "分页标记（可选）" },
@@ -606,7 +606,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const listBlocks = tool(
     "list_blocks",
-    "获取指定块下的子块列表（每块附 type_name 类型标注）。参数：document_id；block_id 可选（缺省为文档根块）；page_token/page_size 可选分页；page_all=true 自动翻页取全部（上限 2000）。失败时自动附带本地诊断（块不存在/叶子块不支持子块等）。",
+    "获取指定块下的子块列表（每块附 type_name 类型标注）。失败时自动附带本地诊断（块不存在/叶子块不支持子块等）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块）" },
@@ -638,10 +638,10 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const findBlocks = tool(
     "find_blocks",
-    "按文本关键词在文档中查找块，返回匹配块的 block_id/块类型(type_name)/文本/所在路径——按标题文本反查 block_id 的首选方式。参数：document_id、query 必填（子串匹配，忽略大小写）；block_type 可选（数字或名称，如 heading/text/bullet/table）；max_results 可选（默认 20）。",
+    "按文本关键词在文档中查找块，返回匹配块的 block_id/块类型(type_name)/文本/所在路径——按标题文本反查 block_id 的首选方式。",
     {
       document_id: { type: "string" },
-      query: { type: "string" },
+      query: { type: "string", description: "搜索关键词（子串匹配，忽略大小写）" },
       block_type: { type: "string", description: "块类型过滤：数字或名称（heading/text/bullet/ordered/code/quote/todo/table 等）" },
       max_results: { type: "number", description: "最多返回条数（默认 20）" },
     },
@@ -675,7 +675,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const addBlocks = tool(
     "add_blocks",
-    "在文档指定块下添加子块。参数：document_id；block_id 可选（缺省文档根块=末尾追加）；blocks 为块 JSON 数组（单块无需 block_id）；text 快捷参数=追加一个纯文本块；index 可选插入位置（缺省末尾）。单次最多 50 块，超出自动分批。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（自动转枚举）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文在 callout.elements（Text 结构），不是 children**；**颜色/emoji 字段放 callout.style 内**——background_color/border_color/text_color 数字枚举、emoji_id 字符串（如 pushpin/bulb），实测放 callout 顶层报 schema mismatch；text 快捷写法自动映射到 elements）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。含表格/嵌套/todo/callout/grid 时自动走创建嵌套块接口（追加到末尾，index 不生效）。",
+    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（自动转枚举）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文在 callout.elements（Text 结构），不是 children**；**颜色/emoji 字段放 callout.style 内**——background_color/border_color/text_color 数字枚举、emoji_id 字符串（如 pushpin/bulb），实测放 callout 顶层报 schema mismatch；text 快捷写法自动映射到 elements）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**，调整列宽可 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}`——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
@@ -761,7 +761,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const updateBlock = tool(
     "update_block",
-    "更新文档块内容。参数：document_id、block_id 必填；text=整体替换文本（支持 **加粗** `代码` [链接](url) 行内语法）；style 可选对象 {bold,italic,underline,strikethrough,inline_code}（需与 text/insert_text 配合）；insert_text=在 index 处插入文本。",
+    "更新文档块内容。",
     {
       document_id: { type: "string" },
       block_id: { type: "string" },
@@ -819,7 +819,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const deleteBlocks = tool(
     "delete_blocks",
-    "批量删除文档块（按子块下标区间 [start_index, end_index)，不含 end_index）。参数：document_id 必填；block_id 可选（缺省文档根块）；start_index/end_index 为子块下标（含 start 不含 end）；只删一个时省略 end_index 或与 start_index 相同（自动按单个块删除，B6：API 要求 end > start）。注意：删除不可恢复。",
+    "批量删除文档块（按子块下标区间 [start_index, end_index)，不含 end_index；只删一个时省略 end_index 或与 start_index 相同）。**注意：删除不可恢复**。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块）" },
@@ -875,13 +875,13 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const importMarkdown = tool(
     "import_markdown",
-    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：标题/段落/有序无序列表/任务列表/代码块/引用/表格/分割线/行内加粗代码链接。engine 参数：local（默认，本地转换后写入）；official（官方 blocks/convert 转换通道，支持更复杂的 Markdown）。返回 document_id。",
+    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：标题/段落/有序无序列表/任务列表/代码块/引用/表格/分割线/行内加粗代码链接。返回 document_id。",
     {
       content: { type: "string", description: "Markdown 文本" },
       document_id: { type: "string", description: "目标文档（缺省新建）" },
       title: { type: "string", description: "新建时的文档标题（document_id 缺省时必填）" },
       folder_token: { type: "string", description: "新建时的目标文件夹（可选）" },
-      engine: { type: "string", description: "local 或 official（默认 local）" },
+      engine: { type: "string", description: "local（默认，本地转换）或 official（官方转换通道，支持更复杂的 Markdown）" },
     },
     ["content"],
     async (args, ctx) => {
@@ -945,12 +945,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const exportDoc = tool(
     "export_doc",
-    "导出云文档为本地文件格式。参数：token 文档 token（**docx 传 document_id、sheet 传 spreadsheet_token、bitable 传 app_token（bascn 开头）——不要传数据表 table_id 作 token，实测报 1069914 file token invalid**）；type 文档类型 docx/sheet/bitable（默认 docx）；file_extension 导出格式（docx 支持 docx/pdf，sheet 支持 xlsx/csv，bitable 支持 xlsx/csv）；sub_id 可选（**bitable/sheet 导出 csv 时必填**：bitable 传数据表 table_id、sheet 传工作表 sheet_id，作为 sub_id 传参——导出 xlsx 不需要）；file_name 可选。返回导出文件 file_token，可用 download_file 下载。",
+    "导出云文档为本地文件格式。token 为文档级 token（**docx 传 document_id、sheet 传 spreadsheet_token、bitable 传 app_token（bascn 开头）——不要传数据表 table_id 作 token，实测报 1069914 file token invalid**）；file_extension 按类型支持：docx→docx/pdf、sheet→xlsx/csv、bitable→xlsx/csv。返回导出文件 file_token，可用 download_file 下载。",
     {
       token: { type: "string" },
       type: { type: "string", description: "docx/sheet/bitable，默认 docx" },
       file_extension: { type: "string", description: "docx/pdf/xlsx/csv，默认 docx" },
-      sub_id: { type: "string", description: "bitable/sheet 导出 csv 时的子表 ID（bitable 传数据表 table_id、sheet 传工作表 sheet_id；导出 xlsx 不需要）" },
+      sub_id: { type: "string", description: "bitable/sheet 导出 csv 时必填：bitable 传数据表 table_id、sheet 传工作表 sheet_id（导出 xlsx 不需要）" },
       file_name: { type: "string", description: "导出文件名（可选）" },
     },
     ["token", "file_extension"],
@@ -999,7 +999,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const listFiles = tool(
     "list_files",
-    "列出云空间文件夹中的文件清单（名称/token/类型/URL）。参数：folder_token 可选（缺省根目录）；page_size/page_token 可选分页。文件类型 type 取值：docx/sheet/bitable/file/folder 等。",
+    "列出云空间文件夹中的文件清单（名称/token/类型/URL），文件类型 type 取值 docx/sheet/bitable/file/folder 等。",
     {
       folder_token: { type: "string", description: "文件夹 token（缺省根目录）" },
       page_size: { type: "number" },
@@ -1016,8 +1016,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const createFolder = tool(
     "create_folder",
-    "在云空间创建文件夹。参数：name 文件夹名；folder_token 父文件夹 token（可选，缺省根目录）。返回 folder token。",
-    { name: { type: "string" }, folder_token: { type: "string", description: "父文件夹 token（可选）" } },
+    "在云空间创建文件夹。返回 folder token。",
+    { name: { type: "string" }, folder_token: { type: "string", description: "父文件夹 token（可选，缺省根目录）" } },
     ["name"],
     async (args, ctx) => {
       const data = await api(ctx, "/open-apis/drive/v1/files/create_folder", {
@@ -1047,8 +1047,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getFileMeta = tool(
     "get_file_meta",
-    "获取云空间文件/文件夹元信息（名称、类型、URL 等）。参数：file_token；type 可选 docx/sheet/bitable/file/folder（缺省自动识别——普通 file 类型无法自动识别时会自动回退按 file 查询；**docx 建议显式传 type=docx**，缺省识别不稳定可能报 970005）。内部走 metas/batch_query（B2：files/{token} 对 docx 返回 404）。",
-    { file_token: { type: "string" }, type: { type: "string", description: "文件类型（可选，缺省自动识别）" } },
+    "获取云空间文件/文件夹元信息（名称、类型、URL 等；普通 file 类型无法自动识别时会自动回退按 file 查询）。内部走 metas/batch_query（B2：files/{token} 对 docx 返回 404）。",
+    { file_token: { type: "string" }, type: { type: "string", description: "文件类型（可选，缺省自动识别；docx 建议显式传 docx——缺省识别不稳定可能报 970005）" } },
     ["file_token"],
     async (args, ctx) => {
       const token = String(args.file_token)
@@ -1072,11 +1072,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const uploadFile = tool(
     "upload_file",
-    "上传文件到云空间。参数：file_name 文件名（含扩展名）；content 文件内容（encoding=base64 时为 base64 文本，否则按 UTF-8 文本）；folder_token 可选目标文件夹（缺省应用云空间根目录）；encoding 可选 'base64'。返回 file_token。单文件 ≤ 20MB。",
+    "上传文件到云空间（单文件 ≤ 20MB）。返回 file_token。",
     {
-      file_name: { type: "string" },
-      content: { type: "string", description: "文件内容（或 base64）" },
-      folder_token: { type: "string", description: "目标文件夹 token（可选）" },
+      file_name: { type: "string", description: "文件名（含扩展名）" },
+      content: { type: "string", description: "文件内容（encoding=base64 时为 base64 文本，否则按 UTF-8 文本）" },
+      folder_token: { type: "string", description: "目标文件夹 token（可选，缺省应用云空间根目录）" },
       encoding: { type: "string", description: "base64 或 text（默认 text）" },
     },
     ["file_name", "content"],
@@ -1097,11 +1097,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const insertImage = tool(
     "insert_image",
-    "在文档中插入图片（飞书官方三步流程，实测验证）：1) 创建空 image 块（block_type=27，image:{}，创建时**不传 token**——传 token 报 1770001）；2) 上传图片素材到该块（POST drive/v1/medias/upload_all，multipart：parent_type=docx_image、parent_node=新建块 id；**云空间的 file_token 不能直接用于文档 image 块**，必须走 media 上传）；3) PATCH replace_image 设置素材 token（返回 width/height 自动识别）。参数：document_id；block_id 可选父块（缺省文档根块末尾）；image 图片内容——encoding=base64 时为 base64 文本，否则为本地图片文件路径（**须传绝对路径**，相对路径相对会话目录会 ENOENT）；file_name 可选（缺省 image.png）。",
+    "在文档中插入图片（飞书官方三步流程，实测验证）：1) 创建空 image 块（block_type=27，image:{}，创建时**不传 token**——传 token 报 1770001）；2) 上传图片素材到该块（POST drive/v1/medias/upload_all，multipart：parent_type=docx_image、parent_node=新建块 id；**云空间的 file_token 不能直接用于文档 image 块**，必须走 media 上传）；3) PATCH replace_image 设置素材 token（返回 width/height 自动识别）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
-      image: { type: "string", description: "base64 文本（encoding=base64）或本地图片文件路径" },
+      image: { type: "string", description: "base64 文本（encoding=base64）或本地图片文件路径（**须传绝对路径**，相对路径相对会话目录会 ENOENT）" },
       file_name: { type: "string", description: "文件名（缺省 image.png）" },
       encoding: { type: "string", description: "base64 或 path（默认 path）" },
     },
@@ -1151,8 +1151,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const downloadFile = tool(
     "download_file",
-    "下载云空间文件到会话 tmp/ 目录。参数：file_token；save_path 可选保存路径（缺省为工作目录下的原文件名）。返回保存路径与大小（文本内容会附上前 300 字符预览）。",
-    { file_token: { type: "string" }, save_path: { type: "string", description: "保存路径（可选，缺省工作目录）" } },
+    "下载云空间文件到会话 tmp/ 目录。返回保存路径与大小（文本内容会附上前 300 字符预览）。",
+    { file_token: { type: "string" }, save_path: { type: "string", description: "保存路径（可选，缺省为工作目录下的原文件名）" } },
     ["file_token"],
     async (args, ctx) => {
       const fileToken = String(args.file_token)
@@ -1195,8 +1195,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const deleteFile = tool(
     "delete_file",
-    "删除云空间文件/文件夹（删除不可恢复）。参数：file_token；type 必填 docx/sheet/bitable/file/folder。",
-    { file_token: { type: "string" }, type: { type: "string", description: "docx/sheet/bitable/file/folder" } },
+    "删除云空间文件/文件夹（删除不可恢复）。",
+    { file_token: { type: "string" }, type: { type: "string", description: "docx/sheet/bitable/file/folder（必填）" } },
     ["file_token", "type"],
     async (args, ctx) => {
       const data = await api(ctx, `/open-apis/drive/v1/files/${String(args.file_token)}`, { method: "DELETE", query: { type: args.type } })
@@ -1208,11 +1208,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const search = tool(
     "search",
-    "搜索云文档（文档/表格/多维表格/文件夹/知识库等）。参数：query 关键词；docs_types 可选类型数组（如 [\"docx\",\"sheet\"]）；count 可选条数（默认 10）。注意：需应用开通「云文档搜索」权限，否则返回权限错误。",
+    "搜索云文档（文档/表格/多维表格/文件夹/知识库等）。注意：需应用开通「云文档搜索」权限，否则返回权限错误。",
     {
-      query: { type: "string" },
+      query: { type: "string", description: "搜索关键词" },
       docs_types: { type: "string", description: "JSON 数组，如 [\"docx\",\"sheet\"]" },
-      count: { type: "number" },
+      count: { type: "number", description: "条数（默认 10）" },
     },
     ["query"],
     async (args, ctx) => {
@@ -1231,7 +1231,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const createSheet = tool(
     "create_sheet",
-    "创建飞书电子表格。参数：title 标题；folder_token 可选目标文件夹。返回 spreadsheet_token。",
+    "创建飞书电子表格。返回 spreadsheet_token。",
     { title: { type: "string" }, folder_token: { type: "string", description: "目标文件夹 token（可选）" } },
     ["title"],
     async (args, ctx) => {
@@ -1260,7 +1260,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getSheetMeta = tool(
     "get_sheet_meta",
-    "获取电子表格信息（标题与完整工作表列表，含每个 sheet_id/title/index）。参数：spreadsheet_token。读数据前先调用本工具获取 sheet_id。",
+    "获取电子表格信息（标题与完整工作表列表，含每个 sheet_id/title/index）。读数据前先调用本工具获取 sheet_id。",
     { spreadsheet_token: { type: "string" } },
     ["spreadsheet_token"],
     async (args, ctx) => {
@@ -1276,8 +1276,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const readSheet = tool(
     "read_sheet",
-    "读取电子表格数据。参数：spreadsheet_token；range 可选（缺省返回工作表列表）。range 前缀支持工作表名称（自动解析为 sheet_id）或直接 sheet_id，如 'Sheet1!A1:C10'。值以字符串形式返回。",
-    { spreadsheet_token: { type: "string" }, range: { type: "string", description: "如 Sheet1!A1:C10（可选）" } },
+    "读取电子表格数据，值以字符串形式返回。",
+    { spreadsheet_token: { type: "string" }, range: { type: "string", description: "如 Sheet1!A1:C10（可选；前缀支持工作表名称自动解析为 sheet_id；缺省返回工作表列表）" } },
     ["spreadsheet_token"],
     async (args, ctx) => {
       const token = String(args.spreadsheet_token)
@@ -1295,8 +1295,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const writeSheet = tool(
     "write_sheet",
-    "写入电子表格（整体覆盖指定区域）。参数：spreadsheet_token；range 如 'Sheet1!A1:C3'（前缀支持工作表名称自动解析为 sheet_id）；values 二维数组 JSON，如 [[\"a\",\"b\"],[\"c\",\"d\"]]。",
-    { spreadsheet_token: { type: "string" }, range: { type: "string" }, values: { type: "string", description: "二维数组 JSON" } },
+    "写入电子表格（整体覆盖指定区域）。",
+    { spreadsheet_token: { type: "string" }, range: { type: "string", description: "如 'Sheet1!A1:C3'（前缀支持工作表名称自动解析为 sheet_id）" }, values: { type: "string", description: "二维数组 JSON，如 [[\"a\",\"b\"],[\"c\",\"d\"]]" } },
     ["spreadsheet_token", "range", "values"],
     async (args, ctx) => {
       const values = jsonArg(args.values, "values")
@@ -1312,8 +1312,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const appendSheet = tool(
     "append_sheet",
-    "向电子表格追加行。参数：spreadsheet_token；range 如 'Sheet1!A1'（追加基准，通常取首列首格；前缀支持工作表名称自动解析为 sheet_id；仅给起始格时自动扩展覆盖全部数据行）；values 二维数组 JSON。",
-    { spreadsheet_token: { type: "string" }, range: { type: "string" }, values: { type: "string", description: "二维数组 JSON" } },
+    "向电子表格追加行。",
+    { spreadsheet_token: { type: "string" }, range: { type: "string", description: "追加基准格如 'Sheet1!A1'（通常取首列首格；前缀支持工作表名称自动解析为 sheet_id；仅给起始格时自动扩展覆盖全部数据行）" }, values: { type: "string", description: "二维数组 JSON" } },
     ["spreadsheet_token", "range", "values"],
     async (args, ctx) => {
       const values = jsonArg(args.values, "values")
@@ -1335,11 +1335,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const createBitable = tool(
     "create_bitable",
-    "创建多维表格。参数：name 名称；folder_token 可选目标文件夹；fields 可选=数据表字段定义 JSON 数组（默认表创建后自动建字段，如 [{\"name\":\"名称\",\"type\":1},{\"name\":\"状态\",\"type\":3,\"property\":{\"options\":[{\"name\":\"进行中\"},{\"name\":\"已完成\"}]}}]），type 枚举：1 多行文本/2 数字/3 单选/4 多选/5 日期/7 复选框/11 人员/13 电话/15 超链接，单选多选需 property.options。返回 app_token 与默认数据表 id。",
+    "创建多维表格。返回 app_token 与默认数据表 id。",
     {
       name: { type: "string" },
       folder_token: { type: "string", description: "目标文件夹 token（可选）" },
-      fields: { type: "string", description: "数据表字段定义 JSON 数组（可选）" },
+      fields: { type: "string", description: "数据表字段定义 JSON 数组（可选，默认表创建后自动建字段，如 [{\"name\":\"名称\",\"type\":1},{\"name\":\"状态\",\"type\":3,\"property\":{\"options\":[{\"name\":\"进行中\"},{\"name\":\"已完成\"}]}}]；type 枚举：1 多行文本/2 数字/3 单选/4 多选/5 日期/7 复选框/11 人员/13 电话/15 超链接，单选多选需 property.options）" },
     },
     ["name"],
     async (args, ctx) => {
@@ -1378,7 +1378,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const listBitableTables = tool(
     "list_bitable_tables",
-    "列出多维表格的数据表（table_id/name）。参数：app_token。",
+    "列出多维表格的数据表（table_id/name）。",
     { app_token: { type: "string" } },
     ["app_token"],
     async (args, ctx) => {
@@ -1389,13 +1389,13 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const listBitableRecords = tool(
     "list_bitable_records",
-    "列出多维表格记录。参数：app_token、table_id 必填；page_size/page_token 可选分页（默认 100）；filter 可选 JSON 字符串（字段过滤条件，如 {\"conjunction\":\"and\",\"conditions\":[{\"field_name\":\"状态\",\"operator\":\"is\",\"value\":[\"完成\"]}]}）。",
+    "列出多维表格记录。",
     {
       app_token: { type: "string" },
       table_id: { type: "string" },
-      page_size: { type: "number" },
-      page_token: { type: "string" },
-      filter: { type: "string", description: "过滤条件 JSON（可选）" },
+      page_size: { type: "number", description: "分页大小（默认 100）" },
+      page_token: { type: "string", description: "分页标记（可选）" },
+      filter: { type: "string", description: "过滤条件 JSON（可选，如 {\"conjunction\":\"and\",\"conditions\":[{\"field_name\":\"状态\",\"operator\":\"is\",\"value\":[\"完成\"]}]}）" },
     },
     ["app_token", "table_id"],
     async (args, ctx) => {
@@ -1421,8 +1421,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const addBitableRecords = tool(
     "add_bitable_records",
-    "新增多维表格记录（批量）。参数：app_token、table_id；records 为 JSON 数组，元素可直接是字段对象 {字段:值} 或 {fields:{字段:值}}（自动包装）。单次最多 100 条。",
-    { app_token: { type: "string" }, table_id: { type: "string" }, records: { type: "string", description: "记录 JSON 数组" } },
+    "新增多维表格记录（批量，单次最多 100 条）。",
+    { app_token: { type: "string" }, table_id: { type: "string" }, records: { type: "string", description: "记录 JSON 数组，元素可直接是字段对象 {字段:值} 或 {fields:{字段:值}}（自动包装）" } },
     ["app_token", "table_id", "records"],
     async (args, ctx) => {
       const records = jsonArg(args.records, "records")
@@ -1438,12 +1438,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const updateBitableRecord = tool(
     "update_bitable_record",
-    "更新多维表格单条记录。参数：app_token、table_id、record_id；fields 为字段对象 JSON {字段:新值}。",
+    "更新多维表格单条记录。",
     {
       app_token: { type: "string" },
       table_id: { type: "string" },
       record_id: { type: "string" },
-      fields: { type: "string", description: "字段对象 JSON" },
+      fields: { type: "string", description: "字段对象 JSON {字段:新值}" },
     },
     ["app_token", "table_id", "record_id", "fields"],
     async (args, ctx) => {
@@ -1459,8 +1459,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const deleteBitableRecords = tool(
     "delete_bitable_records",
-    "删除多维表格记录（批量，不可恢复）。参数：app_token、table_id；record_ids 为 JSON 数组或逗号分隔的 record_id 列表。",
-    { app_token: { type: "string" }, table_id: { type: "string" }, record_ids: { type: "string", description: "record_id 数组 JSON 或逗号分隔" } },
+    "删除多维表格记录（批量，不可恢复）。",
+    { app_token: { type: "string" }, table_id: { type: "string" }, record_ids: { type: "string", description: "record_id 数组 JSON 或逗号分隔的列表" } },
     ["app_token", "table_id", "record_ids"],
     async (args, ctx) => {
       let ids: string[] = []
@@ -1495,7 +1495,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const listWikiSpaces = tool(
     "list_wiki_spaces",
-    "列出知识空间（space_id/name）。参数：page_size/page_token 可选。",
+    "列出知识空间（space_id/name）。",
     { page_size: { type: "number" }, page_token: { type: "string" } },
     [],
     async (args, ctx) => {
@@ -1508,7 +1508,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const createWikiNode = tool(
     "create_wiki_node",
-    "在知识空间创建节点（文档）。参数：space_id、title 必填；parent_node_token 可选父节点（缺省知识库根）；markdown 可选=创建后写入 Markdown 正文；body 可选=块 JSON 数组（与 markdown 二选一）。返回 node_token 与 obj_token（obj_token 即文档 document_id）。",
+    "在知识空间创建节点（文档）。返回 node_token 与 obj_token（obj_token 即文档 document_id）。",
     {
       space_id: { type: "string" },
       title: { type: "string" },
@@ -1548,7 +1548,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getWikiNode = tool(
     "get_wiki_node",
-    "根据 token 查询知识库节点信息（node_token/obj_token/space_id/标题等）。参数：token；obj_type 可选 docx/sheet/bitable/file/wiki（缺省 docx）。",
+    "根据 token 查询知识库节点信息（node_token/obj_token/space_id/标题等）。",
     { token: { type: "string" }, obj_type: { type: "string", description: "docx/sheet/bitable/file/wiki（可选）" } },
     ["token"],
     async (args, ctx) => {
@@ -1618,12 +1618,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const addPermission = tool(
     "add_permission",
-    "为云文档添加协作者（分享）。参数：token 文档 token；type 文档类型 docx/sheet/bitable/file/folder/wiki；member_type 成员类型 openid/unionid/userid/email/chat；member_id 成员 id（chat=群 chat_id）；perm 权限 view/edit/full_access。",
+    "为云文档添加协作者（分享）。",
     {
       token: { type: "string" },
       type: { type: "string", description: "docx/sheet/bitable/file/folder/wiki" },
       member_type: { type: "string", description: "openid/unionid/userid/email/chat" },
-      member_id: { type: "string" },
+      member_id: { type: "string", description: "成员 id（chat=群 chat_id）" },
       perm: { type: "string", description: "view/edit/full_access" },
     },
     ["token", "type", "member_type", "member_id", "perm"],
@@ -1639,11 +1639,11 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const setLinkShare = tool(
     "set_link_share",
-    "设置云文档链接分享范围（PATCH permissions/{token}/public——**方法为 PATCH，PUT 实测 404**）。参数：token 必填；type 必填 docx/sheet/bitable/file/folder/wiki 等（缺失返回 404）；link_share_entity 分享范围（缺省 tenant_readable=组织内可阅读；枚举：tenant_readable/tenant_editable/anyone_readable/anyone_editable/closed）；external_access_entity/security_entity 可选（security_entity 枚举：anyone_can_view/anyone_can_edit/only_full_access）。需应用开通云文档分享相关权限（drive:drive 等，否则返回权限错误）。",
+    "设置云文档链接分享范围（PATCH permissions/{token}/public——**方法为 PATCH，PUT 实测 404**）。需应用开通云文档分享相关权限（drive:drive 等，否则返回权限错误）。",
     {
       token: { type: "string" },
       type: { type: "string", description: "docx/sheet/bitable/file/folder/wiki（必填，缺失 404）" },
-      link_share_entity: { type: "string", description: "tenant_readable（缺省）/tenant_editable/anyone_readable/anyone_editable/closed" },
+      link_share_entity: { type: "string", description: "分享范围：tenant_readable=组织内可阅读（缺省）/tenant_editable/anyone_readable/anyone_editable/closed" },
       external_access_entity: { type: "string", description: "外部访问范围（可选）" },
       security_entity: { type: "string", description: "安全设置：anyone_can_view/anyone_can_edit/only_full_access（可选）" },
     },
@@ -1680,7 +1680,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const apiCall = tool(
     "api_call",
-    "直接调用任意飞书开放平台接口（兜底，覆盖未单独封装的新接口）。参数：method 必填 GET/POST/PUT/PATCH/DELETE；path 必填，以 /open-apis/ 开头（如 /open-apis/docx/v1/documents）；query 可选对象；body 可选 JSON。自动携带 tenant_access_token。",
+    "直接调用任意飞书开放平台接口（兜底，覆盖未单独封装的新接口），自动携带 tenant_access_token。",
     {
       method: { type: "string", description: "GET/POST/PUT/PATCH/DELETE" },
       path: { type: "string", description: "以 /open-apis/ 开头的接口路径" },
