@@ -1,4 +1,5 @@
 import { msgEl, msgNav, ROLE_NAME } from "./state"
+import { stopFollowing } from "./jump-bottom"
 
 /* ---------- 会话内消息导航 ----------
  * 右侧窄导航列：每条消息一个短横线，等间距集中展示在导航列中部（不按消息实际距离分布），
@@ -191,6 +192,7 @@ function hideTooltip() {
 function jumpToIdx(idx: number) {
   const seg = segs[idx]
   if (!seg) return
+  stopFollowing() // 用户导航：解除粘底跟随，平滑滚动过程不被跟随循环拽回底部
   const top = seg.msg.offsetTop - 12
   msgEl.scrollTo({ top, behavior: dragging ? "auto" : "smooth" })
 }

@@ -305,15 +305,17 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
   })
 
   test("scrollSessionSticky follows bottom while sticky and stops after user scrolls up", () => {
-    // 伪造可滚动 body（scrollTop/scrollHeight/clientHeight 可读写，监听记录回调）
-    let listener: (() => void) | null = null
+    // 伪造可滚动 body（scrollTop/scrollHeight/clientHeight 可读写，监听按类型记录）
+    const listeners: Record<string, Array<(ev?: unknown) => void>> = {}
     const body = {
-      dataset: {} as Record<string, string>,
       scrollTop: 0,
       scrollHeight: 100,
       clientHeight: 50,
-      addEventListener: (_: string, cb: () => void) => {
-        listener = cb
+      addEventListener: (type: string, cb: (ev?: unknown) => void) => {
+        ;(listeners[type] ??= []).push(cb)
+      },
+      emit: (type: string, ev?: unknown) => {
+        for (const cb of listeners[type] ?? []) cb(ev)
       },
     }
     bindSessionScroll(body as unknown as HTMLElement)
@@ -321,26 +323,26 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
     body.scrollHeight = 200
     scrollSessionSticky(body as unknown as HTMLElement)
     expect(body.scrollTop).toBe(200)
-    // 用户上翻（未贴底）：停止跟随
+    // 用户上翻（滚轮输入先于滚动效果）：停止跟随
+    body.emit("wheel", { deltaY: -1 })
     body.scrollTop = 40
-    listener!()
+    body.emit("scroll")
     body.scrollHeight = 300
     scrollSessionSticky(body as unknown as HTMLElement)
     expect(body.scrollTop).toBe(40) // 不再跟随
     // 用户滚回底部：恢复跟随
     body.scrollTop = 250
     body.scrollHeight = 300
-    listener!()
+    body.emit("scroll")
     scrollSessionSticky(body as unknown as HTMLElement)
     expect(body.scrollTop).toBe(300)
   })
 
   test("scrollSessionSticky delayed program scroll event after content growth keeps following (工具卡片追加场景)", () => {
     // 伪造可滚动 body：scrollTop 按浏览器语义 clamp 到 scrollHeight - clientHeight
-    let listener: (() => void) | null = null
+    const listeners: Record<string, Array<(ev?: unknown) => void>> = {}
     let scrollTop = 0
     const body = {
-      dataset: {} as Record<string, string>,
       clientHeight: 50,
       get scrollTop() {
         return scrollTop
@@ -349,8 +351,11 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
         scrollTop = Math.max(0, Math.min(v, body.scrollHeight - body.clientHeight))
       },
       scrollHeight: 200,
-      addEventListener: (_: string, cb: () => void) => {
-        listener = cb
+      addEventListener: (type: string, cb: (ev?: unknown) => void) => {
+        ;(listeners[type] ??= []).push(cb)
+      },
+      emit: (type: string, ev?: unknown) => {
+        for (const cb of listeners[type] ?? []) cb(ev)
       },
     }
     bindSessionScroll(body as unknown as HTMLElement)
@@ -358,13 +363,12 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
     scrollSessionSticky(body as unknown as HTMLElement)
     expect(scrollTop).toBe(150) // clamp 落位（200-50）
     body.scrollHeight = 600 // 工具卡片在事件送达前追加
-    listener!() // 迟到的程序滚动事件（位置 150 已不在当前底部）
-    expect(scrollTop).toBe(550) // 识别为程序滚动：续滚到最新底部，跟随未失效
-    expect(body.dataset.sticky).toBe("1")
-    // 用户上翻仍能解除跟随
+    body.emit("scroll") // 迟到的程序滚动事件（位置 150 已不在当前底部）
+    expect(scrollTop).toBe(550) // 静默窗口内归因为内部动作：续滚到最新底部，跟随未失效
+    // 用户上翻仍能解除跟随（滚轮输入先于滚动效果）
+    body.emit("wheel", { deltaY: -1 })
     scrollTop = 100
-    listener!()
-    expect(body.dataset.sticky).toBe("0")
+    body.emit("scroll")
     scrollSessionSticky(body as unknown as HTMLElement)
     expect(scrollTop).toBe(100) // 不再跟随
   })

@@ -8,6 +8,7 @@ export const isAtBottom = sticky.isAtBottom
 export const scrollIfSticky = sticky.scrollIfSticky
 export const lockToBottom = sticky.lockToBottom
 export const restoreScroll = sticky.restoreScroll
+export const stopFollowing = sticky.stopFollowing
 export const noteIncoming = sticky.noteIncoming
 export const clearUnread = sticky.clearUnread
 export const refreshJumpBottom = sticky.refresh

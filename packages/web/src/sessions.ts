@@ -17,7 +17,6 @@ import {
   pendingTools,
   renderHeaderCtx,
   runs,
-  scrollToBottom,
   sessionList,
   setCurrentSession,
   setEmptyState,
@@ -224,7 +223,7 @@ export async function loadMessages(sessionId: string) {
         textWrap.appendChild(markdownBlock(run.acc))
         bubble.appendChild(textWrap)
       }
-      scrollToBottom()
+      lockToBottom()
     }
   }
   // 恢复运行中工具调用的卡片 DOM 引用（切回时重建，后续 tool.result 仍能在同一卡片追加；

@@ -1076,11 +1076,14 @@ html[data-low-power="on"] .msg {
   content-visibility: auto;
   contain-intrinsic-size: auto 320px;
 }
-/* content-visibility 与浏览器滚动锚定（scroll anchoring）组合缺陷：生成中底部内容持续增长，
-   用户上翻后锚定节点被跳过渲染/高度异步修正，锚定算法选中失效锚点把视口猛拉到列表顶部
-   （跳回第一输入）。主消息区与新会话容器关闭浏览器滚动锚定——粘底跟随由应用自管
-   （sticky-scroll / scrollSessionSticky），底部追加内容不影响已上翻的阅读位置。 */
-html[data-low-power="on"] #messages,
-html[data-low-power="on"] .session-body {
+/* 关闭浏览器滚动锚定（scroll anchoring），全模式生效（不限于低性能模式）：
+   ① content-visibility（低性能模式）与锚定组合缺陷——生成中底部内容持续增长、用户上翻后
+   锚定节点被跳过渲染/高度异步修正，锚定算法选中失效锚点把视口猛拉到列表顶部（跳回第一输入）；
+   ② 锚定调整自行产生滚动事件，粘底跟随核心（sticky-follow，意图驱动）无法将其归因为内部动作，
+   会误判为用户滚动而解除跟随（推理块自动折叠、新会话容器完成折叠等内容收缩场景）。
+   粘底跟随由应用自管，底部追加内容不影响已上翻的阅读位置。 */
+#messages,
+.session-body,
+.reasoning .reasoning-body {
   overflow-anchor: none;
 }
