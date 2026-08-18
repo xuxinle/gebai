@@ -1876,6 +1876,25 @@ describe("bitable / sheets 其余操作", () => {
     const queryCount = records.filter((r) => r.url.includes("/sheets/query")).length
     expect(queryCount).toBe(3)
   })
+
+  test("read_sheet range 前缀未命中任何工作表名/sheet_id 时报可用清单（替代 90215 盲错）；新格式 sheet_id 按 sheet_id 字段透传", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/sheets/query")) {
+        return jsonResponse({ code: 0, msg: "success", data: { sheets: [{ sheet_id: "oVsAj1", title: "Sheet1" }, { sheet_id: "Mm1gs7Ur", title: "数据" }] } })
+      }
+      return jsonResponse({ code: 0, msg: "success", data: { valueRange: { values: [[1]] } } })
+    })
+    // 常见误因：用了表格标题作 range 前缀——直接报可用工作表清单，不发起 values 请求（旧实现交由接口报 90215 盲错）
+    const bad = await tools.read_sheet.execute({ spreadsheet_token: "sht1", range: "表格标题!A1:C3" }, ctx())
+    expect(bad.output).toContain("不是本表格的工作表")
+    expect(bad.output).toContain("Sheet1、数据")
+    expect(records.some((r) => r.url.includes("/values/"))).toBe(false)
+    // 新版 sheet_id（无 oVs 前缀）：按 sheets/query 返回的 sheet_id 字段透传，不误报
+    const ok = await tools.read_sheet.execute({ spreadsheet_token: "sht1", range: "Mm1gs7Ur!A1" }, ctx())
+    expect(ok.output).not.toContain("不是本表格的工作表")
+    expect(records.some((r) => r.url.includes("/values/") && decodeURIComponent(r.url).includes("Mm1gs7Ur!A1"))).toBe(true)
+  })
 })
 
 describe("update_block / 下载 / 分享（新修复）", () => {

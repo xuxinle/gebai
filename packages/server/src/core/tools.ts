@@ -548,7 +548,7 @@ export const grepTool: Tool = {
   parameters: schema(
     {
       pattern: { type: "string" },
-      path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
+      path: { type: "string", description: "搜索起点：目录（递归）或单个文件（直接内搜）（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
       ignoreCase: { type: "boolean" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
       context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式）：匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔（同 grep -n -C）" },
@@ -581,9 +581,22 @@ export const grepTool: Tool = {
     const context = Math.max(0, Math.min(10, Math.floor(Number(args.context) || 0)))
     const includeRe = args.include ? globToRegExp(String(args.include)) : null
     const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
-    const prefix = path ? `${path.replace(/\/+$/, "")}/` : ""
-    const files = (await ctx.listFiles())
-      .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (prefix ? listPathCandidates(f.path).some((c) => c.startsWith(prefix)) : true) && (!includeRe || listPathCandidates(f.path).some((c) => includeRe.test(c))))
+    // path 统一经 resolvePath 解析归一化（同 glob：显式传 "." 与省略等价、tmp/ 前缀可省略；越界路径无匹配）
+    let relPath = ""
+    if (path) {
+      const root = ctx.resolvePath(".")
+      const rel = relative(root, ctx.resolvePath(path)).replace(/\\/g, "/")
+      if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
+        return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
+      }
+      relPath = rel === "." ? "" : rel.replace(/\/+$/, "")
+    }
+    const prefix = relPath ? `${relPath}/` : ""
+    const listing = await ctx.listFiles()
+    // path 精确命中单文件时直接内搜该文件（grep 传文件语义），否则按目录前缀过滤
+    const exact = relPath ? listing.find((f) => !f.isDir && listPathCandidates(f.path).includes(relPath)) : undefined
+    const files = (exact ? [exact] : listing)
+      .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (!prefix || exact || listPathCandidates(f.path).some((c) => c.startsWith(prefix))) && (!includeRe || listPathCandidates(f.path).some((c) => includeRe.test(c))))
     if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
     const matches: Array<{ file: string; line: number; text: string }> = []
     // content 模式渲染行（含 context 组）；非 content 模式按文件聚合命中数
@@ -1330,7 +1343,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令，输出以 stdout 为准。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。",
+  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号语义以 cmd 为准。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
