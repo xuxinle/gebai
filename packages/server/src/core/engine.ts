@@ -15,7 +15,7 @@ import { agentListTool, agentLoadTool, agentRunTool, makeFlowTool, toolSchemasTo
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
-import { isRiskyToolName, safeModeRestrictionMsg } from "./safety"
+import { isToolBlockedInSafeMode, safeModeRestrictionMsg } from "./safety"
 
 const MAX_TOOL_ROUNDS = 200
 /** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。 */
@@ -316,7 +316,7 @@ export class AgentEngine {
   /** 注册会话级动态工具（js defineTool RPC → ToolContext.defineDynamicTool）：校验命名/重名/命名空间
    *  碰撞与安全模式后并入覆盖层，并随会话 chat.json 落盘（重启恢复）。 */
   private async registerDynamicTool(sessionId: string, user: string, def: DynamicToolDef): Promise<void> {
-    if (this.opts.config.safeMode) throw new Error("安全模式：运行时工具定义不可用（js 脚本工具整体受限）")
+    // 安全模式：动态工具与 js 同规则降级（makeDynamicTool.execute 源码静态扫描 + 子进程只读 shim），允许注册
     const tool = makeDynamicTool(def)
     const view = this.sessionRegistry(sessionId)
     if (view.resolve(tool.name)) throw new Error(`工具名已存在: ${tool.name}（与现有工具/已定义工具冲突，请换名）`)
@@ -351,7 +351,7 @@ export class AgentEngine {
    *  安全模式（GEBAI_SAFE_MODE）不水合——动态工具 execute 为任意代码，与只读承诺冲突（绕过通道）。 */
   private async hydrateDynamicTools(sessionId: string, session: SessionData): Promise<void> {
     const defs = session.dynamicTools
-    if (!defs?.length || this.opts.config.safeMode) return
+    if (!defs?.length) return
     const m = this.dynamicTools.get(sessionId) ?? new Map<string, { tool: Tool; def: DynamicToolDef }>()
     for (const d of defs.slice(0, AgentEngine.DYNAMIC_TOOLS_CAP)) {
       if (m.has(d.name) || this.opts.registry.resolve(d.name)) continue
@@ -1236,11 +1236,16 @@ export class AgentEngine {
         `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
         `当前会话工作目录: ${workdir}/tmp（sh 命令与 edit 等文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
         `当前会话处于极简模式：仅启用 sh、edit 与 full_mode 三个工具（其余工具均不可用）。查看/读取文件请用 sh 执行命令（cat、ls、find 等），修改文件请用 edit 工具；若任务确需其他工具能力，调用 full_mode 工具（需用户批准）切换到完整模式，批准后全部工具与完整说明立即生效。`,
+        ...(this.opts.config.safeMode ? [`安全模式已启用：sh 仅允许只读命令白名单、edit 限定用户目录内修改。`] : []),
       ].join("\n")
     }
+    const safeModeNote = this.opts.config.safeMode
+      ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用。`
+      : ""
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
       `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
+      ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行(支持 {{步骤id.data.字段}} 引用映射、when 分支、foreach/while 循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述)；流程逻辑复杂(flow 表达式写不出：动态参数、条件重试、跨步骤聚合等)时用 js 脚本动态编程一次执行(脚本内工具像内置函数一样直接 \`await read(params)\` 调用、ctx 注入会话上下文，详见 js 工具描述)；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先制定计划：调用 plan 工具把计划文档写入会话文件并在界面展示，阻塞等待用户批准后再执行（被拒绝则按修改意见修订计划后重新提交 plan）；简单任务无需 plan，直接用 todo 跟踪即可。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
@@ -1810,14 +1815,6 @@ export class AgentEngine {
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
-        if (this.opts.config.safeMode && rt.tool.runtimeDefined) {
-          // 安全模式纵深防御：动态工具（js defineTool 注册）execute 为任意代码，与只读承诺冲突——
-          // 水合/注册入口均已拦截，此处兜底防未来注册通道疏漏（不执行、不弹审批）
-          const safeMsg = `安全模式：工具 ${rt.name} 已限制（运行时定义工具的 execute 为任意代码，安全模式下不提供）。请改用只读方式。`
-          await persist({ id: crypto.randomUUID(), role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
-          messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
-          continue
-        }
         const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
         const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
         // 多用户隔离 + 无交互通道（REST）：无人可审批，默认需审批的工具直接拒绝（防普通用户经 REST 免审批执行敏感工具）；
@@ -1897,13 +1894,14 @@ export class AgentEngine {
    * 交互模式：工具声明的最低可用模式（Tool.interaction）高于当前模式时同样禁用（schema 过滤 + 执行阻止）。
    */
   /**
-   * 安全模式风险工具判定（GEBAI_SAFE_MODE=true 启动时加载，DESIGN「安全模式」）：
-   * 全局工具精确名命中，或子Agent 工具按 `{agent}_{tool}` 剥离前缀后短名命中（如 code_sh → sh）。
+   * 安全模式硬阻断判定（GEBAI_SAFE_MODE=true 启动时加载，DESIGN「安全模式」）：
+   * 仅定时任务调度类（cron_add/update/remove 及短名命中）无法降级被阻断；
+   * sh/py/js/write 等风险工具在各自 execute 内降级（白名单/审计钩子/只读 shim/写范围），引擎不拦截。
    * 拦截语义与通道禁用不同：模型仍可见该工具 schema，调用时被阻止并返回限制信息（模型可据此调整方案）。
    */
   private isRiskyInSafeMode(name: string): boolean {
     if (!this.opts.config.safeMode) return false
-    return isRiskyToolName(name)
+    return isToolBlockedInSafeMode(name)
   }
 
   private isToolDisabled(sessionId: string, name: string, tool?: Tool): boolean {
@@ -2000,8 +1998,9 @@ export class AgentEngine {
       return def
     })
     if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${agents.join(",")}`)
-    // 新会话工具注册：每个预加载子Agent 的工具以 {agent}_ 命名空间并入（装载语义）
-    const reg = new BaseToolRegistry()
+    // 新会话工具注册：每个预加载子Agent 的工具以 {agent}_ 命名空间并入（装载语义）；
+    // 安全模式与主注册表同规则（Tool.safeMode 自主声明过滤，引擎构造期常量）
+    const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
     let orchestrationInjected = false
     for (const def of defs) {
       reg.registerSubAgentTools(def.name, def.tools ?? {}, def.requiresApproval)
@@ -2053,10 +2052,13 @@ export class AgentEngine {
         }
       }
     }
+    const safeNote = this.opts.config.safeMode
+      ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用；部分子Agent 风险工具未注册。`
+      : ""
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述）；流程逻辑复杂时用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。\n\n${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述）；流程逻辑复杂时用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]
@@ -2175,7 +2177,7 @@ export class AgentEngine {
     // 会话上下文注入：messages 透传 buildContext（js 脚本工具 ctx.messages 快照源）；
     // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄主会话）；
     // 安全模式拒绝（与主会话 registerDynamicTool 同规则，js 工具已拦截，此为纵深防御）
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { if (this.opts.config.safeMode) throw new Error("安全模式：运行时工具定义不可用（js 脚本工具整体受限）"); reg.register(makeDynamicTool(def)) } }, depth)
+    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) } }, depth)
     // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）
     const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
@@ -2257,13 +2259,6 @@ export class AgentEngine {
         if (this.isRiskyInSafeMode(rt.name)) {
           // 安全模式：子Agent 内风险工具同样拦截（与主循环一致），返回限制信息供子Agent 调整方案
           const safeMsg = safeModeRestrictionMsg(rt.name)
-          await pushArchive({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
-          continue
-        }
-        if (this.opts.config.safeMode && rt.tool.runtimeDefined) {
-          // 与主循环一致的安全模式纵深防御：动态工具（任意代码）在安全模式下不执行（见主循环同段注释）
-          const safeMsg = `安全模式：工具 ${rt.name} 已限制（运行时定义工具的 execute 为任意代码，安全模式下不提供）。请改用只读方式。`
           await pushArchive({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue

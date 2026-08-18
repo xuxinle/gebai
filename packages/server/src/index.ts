@@ -164,7 +164,8 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       }
     : null
 
-  const registry = new ToolRegistry()
+  // 安全模式：子Agent 工具按 Tool.safeMode 自主声明过滤（全局风险工具内置降级，不过滤）
+  const registry = new ToolRegistry({ safeMode: config.safeMode })
   for (const tool of Object.values(createGlobalTools())) registry.register(tool)
   // 视觉 provider 提供者注册（子Agent 定义如 self_optimize 的 vision 工具经 getVisionProvider 复用同一解析逻辑）；
   // 任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider

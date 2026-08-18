@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { readTool, writeTool, editTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
@@ -151,6 +151,84 @@ describe("global tools", () => {
     expect(seen).toEqual([10000, 300000, 540000, 300000, 300000])
     rmSync(home, { recursive: true, force: true })
   })
+
+  test("sh 安全模式：白名单只读命令执行，非白名单拒绝且不执行（无副作用）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-safe-"))
+    const c = ctx(home)
+    const executed: string[] = []
+    c.runCommand = async (cmd) => {
+      executed.push(cmd)
+      return { stdout: "done", stderr: "", code: 0 }
+    }
+    c.safeMode = true
+    const ok = await shTool.execute({ command: "cat a.txt | grep x 2>/dev/null" }, c)
+    expect(ok.output).toBe("done")
+    const denied = await shTool.execute({ command: "rm -rf /nope" }, c)
+    expect(denied.output).toContain("安全模式")
+    expect(denied.output).toContain("白名单")
+    expect(executed).toEqual(["cat a.txt | grep x 2>/dev/null"])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("write 安全模式：用户目录内放行，越界拒绝（降级而非禁用）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-write-safe-"))
+    const c = ctx(home)
+    c.safeMode = true
+    const ok = await writeTool.execute({ path: "inside.txt", content: "hi" }, c)
+    expect(ok.output).toContain("已写入")
+    const outside = process.platform === "win32" ? "C:\\Windows\\gebai-evil.txt" : "/tmp-outside-gebai/evil.txt"
+    const denied = await writeTool.execute({ path: outside, content: "x" }, c)
+    expect(denied.output).toContain("安全模式")
+    expect(denied.output).toContain("用户目录")
+    expect(existsSync(outside)).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("py 安全模式审计钩子（真实 python）：写文件/子进程被拒仅保留读取，无 python 跳过", async () => {
+    _resetPythonCmdCache()
+    const probe = (cmd: string) => {
+      try {
+        return Bun.spawnSync([cmd, "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0
+      } catch {
+        return false // 可执行文件缺失（ENOENT）：Bun spawnSync 直接抛错
+      }
+    }
+    const py = ["python3", "python", "py"].filter(probe)[0]
+    if (!py) return test.skip("python 不可用", () => {})
+    const home = mkdtempSync(join(tmpdir(), "gebai-py-safe-"))
+    const c = ctx(home)
+    await c.writeFile(join(c.workdir, "data.txt"), "hello-python")
+    // 真实执行（Bun.spawnSync）：ctx.runCommand 默认桩不执行命令，此处替换为真实子进程；
+    // --version 探测按真实可用性应答（python3 缺失须报非 0，防 resolvePythonCmd 缓存错误候选）
+    c.runCommand = async (cmd, o) => {
+      if (cmd.endsWith("--version")) {
+        return probe(cmd.split(" ")[0]) ? { stdout: "Python 3.x\n", stderr: "", code: 0 } : { stdout: "", stderr: "", code: 1 }
+      }
+      const m = /^(\S+) -X utf8 "(.+)"$/.exec(cmd)
+      if (!m) return { stdout: "", stderr: `bad cmd: ${cmd}`, code: 1 }
+      const r = Bun.spawnSync([m[1], "-X", "utf8", m[2]], {
+        cwd: o?.workdir,
+        env: { ...process.env, ...(o?.env ?? {}), PYTHONUTF8: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      return { stdout: r.stdout.toString(), stderr: r.stderr.toString(), code: r.exitCode ?? 1 }
+    }
+    c.safeMode = true
+    // 读取照常
+    const ok = await pyTool.execute({ code: `print(open("data.txt", encoding="utf-8").read())` }, c)
+    expect(ok.output).toContain("hello-python")
+    // 写文件被审计钩子拒绝（PermissionError），文件未创建
+    const deniedWrite = await pyTool.execute({ code: `open("evil.txt", "w").write("x")` }, c)
+    expect(deniedWrite.output).toContain("安全模式")
+    expect(existsSync(join(c.workdir, "evil.txt"))).toBe(false)
+    // 子进程系统调用被拒（回溯源码行只进 stderr；真实执行的话 stdout 才会有 echo 输出）
+    const deniedExec = await pyTool.execute({ code: `import os\nos.system("echo subproc-ran")` }, c)
+    expect(deniedExec.output).toContain("安全模式")
+    expect(deniedExec.output).toContain("os.system")
+    expect((deniedExec.data as { stdout?: string }).stdout ?? "").not.toContain("subproc-ran")
+    rmSync(home, { recursive: true, force: true })
+  }, 30000)
 
   test("py tool timeout param passes through to runCommand", async () => {
     _resetPythonCmdCache()

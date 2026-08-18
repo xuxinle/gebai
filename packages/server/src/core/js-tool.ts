@@ -16,7 +16,7 @@ import { rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { DynamicToolDef, Tool, ToolContext } from "./types"
 import { isSensitive } from "./env"
-import { isRiskyToolName, safeModeRestrictionMsg } from "./safety"
+import { isToolBlockedInSafeMode, safeModeRestrictionMsg, scanJsReadOnly } from "./safety"
 import { isBinaryMode } from "./config"
 import { truncate, scriptTimeoutMs } from "./tools"
 
@@ -115,6 +115,56 @@ function scriptPreamble(): string {
   ].join("\n")
 }
 
+/** 安全模式运行时 shim（注入子进程脚本，用户代码执行前生效；纯 ES5 同前导）：
+ *  屏蔽 Bun 写/进程/网络/数据库 API、字符串代码执行通道与运行时模块加载入口，仅保留文件读取。
+ *  Bun 全局绑定不可替换（non-configurable），改为**对象属性覆写**（属性可写：write/spawn/$ 等覆写为抛错桩，
+ *  Bun.file 包装为返回拦截 write/writer/sink/truncate 的 Proxy）；个别不可覆写的 getter（Bun.fetch/sqlite）
+ *  由静态扫描（scanJsReadOnly）前置拒绝。eval/Function/fetch/Worker 等全局删除、Function.prototype.constructor
+ *  中性化防 (fn).constructor 回收；process 仅拦 binding/dlopen/getBuiltinModule/kill（桥协议依赖 stdin/stdout/exit）；
+ *  字符串定时器拒绝。import()/require() 等动态加载通道同样由静态扫描前置拒绝——模块实例可拿到未受控的全新全局环境。 */
+function safeModeShim(): string {
+  return [
+    "function __G_safe() {",
+    "  var die = function (what) { throw new Error('安全模式：' + what + ' 已屏蔽（仅保留文件读取；写文件用 write 工具、执行命令用 sh 白名单、网络用 fetch_url 工具）') }",
+    "  try { delete globalThis.eval } catch (e) {}",
+    "  try { delete globalThis.Function } catch (e) {}",
+    "  try { delete globalThis.fetch } catch (e) {}",
+    "  try { delete globalThis.WebSocket } catch (e) {}",
+    "  try { delete globalThis.EventSource } catch (e) {}",
+    "  try { delete globalThis.Worker } catch (e) {}",
+    "  try { delete globalThis.SharedWorker } catch (e) {}",
+    "  try { Function.prototype.constructor = function () { die('Function 构造器') } } catch (e) {}",
+    "  try { process.binding = function () { die('process.binding') } } catch (e) {}",
+    "  try { process.dlopen = function () { die('process.dlopen') } } catch (e) {}",
+    "  try { if (typeof process.getBuiltinModule === 'function') process.getBuiltinModule = function (n) { die('process.getBuiltinModule(' + n + ')') } } catch (e) {}",
+    "  try { process.kill = function () { die('process.kill') } } catch (e) {}",
+    "  var _st = setTimeout, _si = setInterval",
+    "  setTimeout = function (fn) { if (typeof fn !== 'function') die('字符串定时器代码'); return _st.apply(null, arguments) }",
+    "  setInterval = function (fn) { if (typeof fn !== 'function') die('字符串定时器代码'); return _si.apply(null, arguments) }",
+    "  var _Bun = globalThis.Bun",
+    "  if (_Bun) {",
+    "    var blocked = function (what) { return function () { die(what) } }",
+    "    var denyList = ['write','spawn','spawnSync','spawnViaNode','serve','listen','connect','udpSocket','dns','build','plugin','preload','$','Shell','ShellError','ShellSyntaxError','generateHeapSnapshot','sql','SQL','SQLite','TCP','TCPSocket','UDPSocket','unix','NodeFS','auto','add','remove','install','update','publish','link','unlink','pm','upgrade']",
+    "    for (var i = 0; i < denyList.length; i++) {",
+    "      try { _Bun[denyList[i]] = blocked('Bun.' + denyList[i]) } catch (e) {} // 非可写属性（fetch/sqlite 等 getter）由静态扫描前置拒绝",
+    "    }",
+    "    var _file = _Bun.file",
+    "    try {",
+    "      _Bun.file = function (p, o) {",
+    "        var f = _file(p, o)",
+    "        return new Proxy(f, { get: function (ft, fk) {",
+    "          if (fk === 'write' || fk === 'writer' || fk === 'sink' || fk === 'truncate') die('BunFile.' + fk + '（写文件）')",
+    "          var v = ft[fk]",
+    "          return typeof v === 'function' ? v.bind(f) : v",
+    "        }})",
+    "      }",
+    "    } catch (e) {}",
+    "  }",
+    "}",
+    "__G_safe()",
+  ].join("\n")
+}
+
 /** 生成工具内置函数声明（模块顶层作用域）：每个已启用工具一个 `async function {name}(params)`，
  *  用户代码在 __G_main 内直接 `await read({...})` 像内置函数一样调用（无需 tools. 前缀）；
  *  声明在模块作用域，用户代码内同名 let/const/function 遮蔽不冲突。
@@ -143,14 +193,16 @@ export function toolFnDecls(toolNames: string[]): string {
 
 /** 生成完整子进程脚本：前导 + 工具内置函数声明（模块作用域）+ 用户代码（包进 __G_main，
  *  支持顶层 await 与 return 返回值；内部 let/const 同名遮蔽顶层函数声明，无冲突）+ 引导。 */
-/** 生成完整子进程脚本：前导 + 工具内置函数声明（模块作用域，用户代码同名 let/const/function 遮蔽无冲突）
+/** 生成完整子进程脚本：前导 + 安全模式 shim（可选）+ 工具内置函数声明（模块作用域，用户代码同名 let/const/function 遮蔽无冲突）
  *  + __G_main 开头 + 用户代码（支持顶层 await 与 return 返回值）+ 引导。
- *  prelude：__G_main 之前追加的额外声明（动态工具运行器注入 `var __TOOL_FN = (源码)` 用）。 */
-export function buildChildScript(userCode: string, injected: { ctx: unknown; input: unknown }, toolNames: string[] = [], prelude = ""): string {
+ *  prelude：__G_main 之前追加的额外声明（动态工具运行器注入 `var __TOOL_FN = (源码)` 用）；
+ *  safeMode：注入只读运行时 shim（写/进程/网络 API 屏蔽，调用方须先过 scanJsReadOnly 静态扫描）。 */
+export function buildChildScript(userCode: string, injected: { ctx: unknown; input: unknown }, toolNames: string[] = [], prelude = "", safeMode = false): string {
   const ctxJson = JSON.stringify(injected.ctx ?? {})
   const inputJson = JSON.stringify(injected.input ?? null)
   return (
     scriptPreamble() +
+    (safeMode ? `\n${safeModeShim()}\n` : "") +
     `\n${toolFnDecls(toolNames)}\n` +
     (prelude ? `${prelude}\n` : "") +
     "async function __G_main() {\n" +
@@ -351,8 +403,9 @@ async function runJsScript(
         respond(false, `动态工具 ${rt.name} 不能在 js/动态工具内调用（防递归嵌套子进程）`)
         return
       }
-      // 安全模式：风险工具在 RPC 分发层同规则拦截（与 flow step 层一致，无绕过通道）
-      if (ctx.safeMode && isRiskyToolName(rt.name)) {
+      // 安全模式：硬阻断工具（cron 调度类）在 RPC 分发层同规则拦截（与 flow step 层/引擎一致，无绕过通道）；
+      // sh/py/write 等风险工具不再拦截——各自在 execute 内降级（白名单/审计钩子/写范围）
+      if (ctx.safeMode && isToolBlockedInSafeMode(rt.name)) {
         const msg2 = safeModeRestrictionMsg(rt.name)
         out.calls.push({ name: rt.name, ok: false, error: "安全模式限制" })
         respond(false, msg2)
@@ -475,7 +528,8 @@ export const jsTool: Tool = {
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
     "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名/同写法，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（**默认 true 需审批**——固化后的每次调用与 sh 同姿态，仅明确安全的只读/幂等工具显式传 false）。\n" +
     "- 其余同 sh：`timeout` 超时秒数（默认 300、上限 540，超时按进程树终止）、`strict`（true 时失败抛工具级错误，供 flow 中断编排）、`approval`（默认需审批，只读/幂等脚本可 false 免审）。\n" +
-    "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。",
+    "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。\n" +
+    "- 安全模式：自动降级为只读运行时——动态 import/eval/Function 等加载与代码执行通道拒绝，写文件/子进程/网络 API 屏蔽（仅保留文件读取；写文件用 write 工具、网络用 fetch_url）。",
   requiresApproval: (args) => args.approval !== false,
   card: { args: "code", codeField: "code", codeLang: "javascript" },
   parameters: {
@@ -510,10 +564,15 @@ export const jsTool: Tool = {
   async execute(args, ctx) {
     const userCode = String(args.code ?? "")
     if (!userCode.trim()) return { output: "js 拒绝：code 不能为空。" }
+    // 安全模式：静态扫描（动态加载/字符串代码执行通道 shim 拦不住，前置拒绝）+ 子进程只读 shim
+    if (ctx.safeMode) {
+      const deny = scanJsReadOnly(userCode)
+      if (deny) return { output: deny }
+    }
     const scriptPath = join(ctx.workdir, `.gebai_js_${randomUUID().replace(/-/g, "")}.ts`)
     // 已启用工具名列表 → 生成内置函数声明（脚本内直接 await read(...) 调用）
     const toolNames = ctx.registry.schemas().map((s) => s.name)
-    await writeFile(scriptPath, buildChildScript(userCode, { ctx: scriptSessionContext(ctx), input: args.input }, toolNames))
+    await writeFile(scriptPath, buildChildScript(userCode, { ctx: scriptSessionContext(ctx), input: args.input }, toolNames, "", ctx.safeMode === true))
     try {
       const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(args.timeout) })
       const success = !run.error && !run.timedOut && !run.interrupted && !run.spawnError && run.exitCode === 0
@@ -602,6 +661,13 @@ export function makeDynamicTool(def: DynamicToolDefInput): Tool {
     requiresApproval: def.requiresApproval !== false,
     runtimeDefined: true,
     async execute(args, ctx) {
+      // 安全模式：动态工具与 js 同规则降级（源码静态扫描 + 子进程只读 shim），而非整体禁用——
+      // 持久化的只读动态工具（数据处理/查询类）在安全模式下保持可用
+      const safe = ctx.safeMode === true
+      if (safe) {
+        const deny = scanJsReadOnly(src)
+        if (deny) throw new Error(deny)
+      }
       const scriptPath = join(ctx.workdir, `.gebai_dt_${randomUUID().replace(/-/g, "").slice(0, 12)}.ts`)
       const toolNames = ctx.registry.schemas().map((s) => s.name)
       const script = buildChildScript(
@@ -609,6 +675,7 @@ export function makeDynamicTool(def: DynamicToolDefInput): Tool {
         { ctx: scriptSessionContext(ctx), input: args },
         toolNames,
         `var __TOOL_FN = (${normalizeFnSource(src)}\n)\n`,
+        safe,
       )
       await writeFile(scriptPath, script)
       try {

@@ -11,6 +11,7 @@ import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from ".
 import { hostBlockReason } from "./ip"
 import { runFlow, scanFlowApprovals } from "./flow"
 import { jsTool } from "./js-tool"
+import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, validateShCommandSafeMode } from "./safety"
 
 export const TRUNCATE_THRESHOLD = 12000
 /** 截断消息保留的首/尾字符数（DESIGN「常量参考」）。 */
@@ -196,6 +197,9 @@ export const writeTool: Tool = {
   parameters: schema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
+    // 安全模式：写入限定用户目录内（降级而非禁用）
+    const safeMsg = ctx.safeMode ? safeModeWriteCheck([path], ctx) : null
+    if (safeMsg) return { output: safeMsg }
     // 写范围守卫（子Agent 声明，引擎注入）：拒绝则作为工具结果返回（不落盘）
     const guardMsg = await ctx.writeGuard?.([path])
     if (guardMsg) return { output: guardMsg }
@@ -399,6 +403,12 @@ export const fileTool: Tool = {
   async execute(args, ctx) {
     const action = String(args.action ?? "")
     const path = ctx.resolvePath(String(args.path))
+    // 安全模式：变更动作（rename/move/delete）限定用户目录内；info 只读不限
+    if (ctx.safeMode && action !== "info") {
+      const targets = action === "move" ? [path, ctx.resolvePath(String(args.to ?? path))] : [path]
+      const safeMsg = safeModeWriteCheck(targets, ctx)
+      if (safeMsg) return { output: safeMsg }
+    }
     if (action === "rename") {
       const newName = String(args.newName ?? "").trim()
       if (!newName || newName.includes("/") || newName.includes("\\") || newName === "." || newName === "..") {
@@ -1034,6 +1044,9 @@ export const editTool: Tool = {
   ),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
+    // 安全模式：修改限定用户目录内（降级而非禁用）
+    const safeMsg = ctx.safeMode ? safeModeWriteCheck([path], ctx) : null
+    if (safeMsg) return { output: safeMsg }
     const guardMsg = await ctx.writeGuard?.([path])
     if (guardMsg) return { output: guardMsg }
     let content = await ctx.readFile(path)
@@ -1169,6 +1182,9 @@ export const patchTool: Tool = {
     }
     if (args.dryRun === true) return { output: `patch 预演通过：${describeAppliedPatch(r.applied)}（dryRun，未写入）` }
     const abs = ctx.resolvePath(path)
+    // 安全模式：修改限定用户目录内（降级而非禁用）
+    const safeMsg = ctx.safeMode ? safeModeWriteCheck([abs], ctx) : null
+    if (safeMsg) return { output: safeMsg }
     const guardMsg = await ctx.writeGuard?.([abs])
     if (guardMsg) return { output: guardMsg }
     await ctx.writeFile(abs, r.result)
@@ -1294,7 +1310,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令。输出以 stdout 为准；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等命令）。可选参数：input（作为命令 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。",
+  description: "执行 Shell 命令。输出以 stdout 为准；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等命令）。可选参数：input（作为命令 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -1310,6 +1326,11 @@ export const shTool: Tool = {
   outputSchema: scriptOutputSchema,
   async execute(args, ctx) {
     const input = scriptInput(args.input)
+    // 安全模式：只读命令白名单 + 输出重定向限用户目录（降级而非禁用；解析 fail-closed）
+    if (ctx.safeMode) {
+      const deny = validateShCommandSafeMode(String(args.command), ctx)
+      if (deny) return { output: deny }
+    }
     const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir: ctx.workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
     // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
     if (args.strict === true && code !== 0) {
@@ -1346,7 +1367,7 @@ export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
 
 export const pyTool: Tool = {
   name: "py",
-  description: "执行 Python 代码，代码经临时文件执行，stdout 为输出；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等脚本）。可选参数：input（作为程序 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。",
+  description: "执行 Python 代码，代码经临时文件执行，stdout 为输出；默认需审批（approval 参数可设为 false 免审，仅限安全只读/幂等脚本）。可选参数：input（作为程序 stdin）、timeout（超时秒数）、strict（true 时非 0 退出抛工具级错误）。安全模式下审计钩子屏蔽写文件/进程/网络系统调用（仅保留文件读取）。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "code", codeLang: "python" },
   parameters: schema(
@@ -1363,10 +1384,12 @@ export const pyTool: Tool = {
   async execute(args, ctx) {
     const code = String(args.code ?? "")
     const input = scriptInput(args.input)
-    // 代码写临时文件执行：stdin 留给管道数据（原实现 code 走 stdin，无法同时传输入）
+    // 代码写临时文件执行：stdin 留给管道数据（原实现 code 走 stdin，无法同时传输入）；
+    // 安全模式：前置审计钩子引导段（sys.addaudithook 拦写模式 open 与进程/网络/文件变更系统调用，仅保留文件读取）
+    const finalCode = ctx.safeMode ? `${PY_SAFE_BOOTSTRAP}\n${code}` : code
     const { writeFile, rm } = await import("node:fs/promises")
     const scriptPath = `${ctx.workdir}/.gebai_py_${randomUUID().replace(/-/g, "")}.py`
-    await writeFile(scriptPath, code)
+    await writeFile(scriptPath, finalCode)
     try {
       // -X utf8 / PYTHONUTF8=1：强制 UTF-8 输出（Windows 默认 GBK 会造成乱码）
       const py = await resolvePythonCmd(ctx)

@@ -281,7 +281,7 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
     safeMode,
   })
   const store = new SessionStore({ home })
-  const registry = new ToolRegistry()
+  const registry = new ToolRegistry({ safeMode })
   for (const tool of Object.values(createGlobalTools())) registry.register(tool)
   const sandbox = new Sandbox({ home, enabled: sandboxEnabled })
   const auth = new AuthService(home, "local")
@@ -519,7 +519,7 @@ console.log("defined ok")`,
     cleanup(home)
   }, 60000)
 
-  test("安全模式：磁盘持久化的动态工具不水合（只读承诺无绕过通道）", async () => {
+  test("安全模式：动态工具水合并降级执行（只读动态工具照常可用，写通道被扫描拒绝）", async () => {
     const { home, engine, store, provider, registry, sandbox, env, events, subAgents } = await setup("dyn")
     provider.toolName = "js"
     provider.toolArgs = {
@@ -544,9 +544,10 @@ console.log("defined ok")`,
     providerSafe.toolArgs = { who: "bypass" }
     const engineSafe = new AgentEngine({ provider: providerSafe, registry, store, env, sandbox, events, config: configSafe, subAgents, retryBackoffMs: 5, authMode: "local" })
     await engineSafe.run(session.id, "default", "again")
-    expect(providerSafe.seenTools[0].includes("hello_tool")).toBe(false)
+    // 水合不跳过（与 js 同规则降级：源码扫描 + 只读 shim）：schema 含动态工具，只读 execute 正常返回
+    expect(providerSafe.seenTools[0].includes("hello_tool")).toBe(true)
     const after = await store.load(session.id)
-    expect(after!.messages.some((m) => m.role === "tool" && m.content.includes("hello, bypass"))).toBe(false)
+    expect(after!.messages.some((m) => m.role === "tool" && m.content.includes("hello, bypass"))).toBe(true)
     cleanup(home)
   }, 60000)
 
@@ -1687,8 +1688,9 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("safe mode blocks risky tools in main loop: restriction info returned, no approval, no side effect", async () => {
-    const s = await setup("approval", false, "local", true) // safeMode=true；approval 模式首轮调用 sh（requiresApproval + 风险）
+  test("safe mode degrades sh in main loop: non-whitelisted command denied without approval, whitelisted read-only executes", async () => {
+    const s = await setup("approval", false, "local", true) // safeMode=true；approval 模式首轮调用 sh
+    s.provider.toolArgs = { command: "rm -rf /nope", approval: false }
     const session = await s.store.createSession("default", "t")
     const approvals: string[] = []
     s.events.subscribe((e) => {
@@ -1696,31 +1698,43 @@ console.log("defined ok")`,
     })
     await s.engine.run(session.id, "default", "run command")
     const loaded = await s.store.load(session.id)
-    // 风险工具被拦截：返回限制信息（不执行、不弹审批）
+    // sh 降级：非白名单命令在工具内被拒（白名单提示返回模型），免审标记下不弹审批
     const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "sh")
     expect(toolMsg?.content).toContain("安全模式")
-    expect(toolMsg?.content).toContain("sh")
-    expect(approvals).toEqual([]) // 安全模式直接拒绝，无审批请求
-    // schema 仍可见（与通道禁用不同：模型可调用但收到限制信息后调整方案）
+    expect(toolMsg?.content).toContain("白名单")
+    expect(approvals).toEqual([]) // approval:false 免审 → 无审批请求
+    // schema 仍可见（风险工具降级而非移除）
     expect(s.provider.seenTools[0]).toContain("sh")
-    // 拦截后任务正常收尾（模型收到限制信息后第二轮直接回复）
+    // 拒绝后任务正常收尾（模型收到限制信息后第二轮直接回复）
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(s.home)
   })
 
-  test("safe mode blocks risky sub-agent tools (code_write) and persists restriction in archive", async () => {
+  test("safe mode: whitelisted read-only sh command executes (degraded, not blocked)", async () => {
+    const s = await setup("approval", false, "local", true)
+    s.provider.toolArgs = { command: "echo whitelisted-ok", approval: false }
+    const session = await s.store.createSession("default", "t")
+    await s.engine.run(session.id, "default", "run command")
+    const loaded = await s.store.load(session.id)
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "sh")
+    expect(toolMsg?.content).toContain("whitelisted-ok")
+    expect(toolMsg?.content).not.toContain("安全模式")
+    cleanup(s.home)
+  })
+
+  test("safe mode: risky-named sub-agent tools are not registered (unknown tool on call, no side effect)", async () => {
     const s = await setup("subwrite", false, "local", true) // safeMode=true；子Agent 内调 code_write 写文件
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "write file")
     const loaded = await s.store.load(session.id)
-    // 子Agent 内风险工具同样拦截：存档（agent_run 记录扩展字段）含限制信息，文件未创建
+    // 子Agent 风险短名工具（code_write）注册期被 Tool.safeMode 规则过滤：schema 不下发，调用报未知工具
     const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
     expect(callMsg).toBeDefined()
     const subToolMsg = callMsg!.sessionRun!.messages.find((m) => m.role === "tool" && m.name === "code_write")
-    expect(subToolMsg?.content).toContain("安全模式")
+    expect(subToolMsg?.content).toContain("未知工具")
     const root = sessionPath(s.home, "default", session.id)
     expect(existsSync(join(root, "tmp", "out.txt"))).toBe(false)
-    // 子Agent 收到限制信息后调整（最终正常返回，主循环收尾）
+    // 子Agent 收到未知工具说明后调整（最终正常返回，主循环收尾）
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(s.home)
   })
@@ -1738,21 +1752,19 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("safe mode blocks risky tools inside flow (no bypass via pipeline wrapper)", async () => {
-    const s = await setup("tool", false, "local", true) // safeMode=true；flow 内嵌 sh/write
+  test("safe mode degrades risky tools inside flow (sh whitelist executes, write scoped to user dir)", async () => {
+    const s = await setup("tool", false, "local", true) // safeMode=true；flow 内嵌 sh/write（降级执行）
     s.provider.toolName = "flow"
-    s.provider.toolArgs = { steps: [{ tool: "sh", params: { command: "echo pwned" } }, { tool: "write", params: { path: "x.txt", content: "x" } }] }
+    s.provider.toolArgs = { steps: [{ tool: "sh", params: { command: "echo pwned", approval: false } }, { tool: "write", params: { path: "x.txt", content: "x" } }] }
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "flow it")
     const loaded = await s.store.load(session.id)
-    // flow 内每个风险 step 被拦截（flow 直接调 rt.tool.execute 不经引擎拦截点，step 层同规则判定）
+    // flow step 层不再一刀切拦截（仅 cron 调度类硬阻断）：sh 白名单命令执行、write 限用户目录内落盘
     const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "flow")
-    expect(toolMsg?.content).toContain("安全模式")
-    expect(toolMsg?.content).toContain("sh")
-    expect(toolMsg?.content).toContain("write")
-    // 无副作用：write step 未创建文件（相对路径基准 = 会话 tmp/）
+    expect(toolMsg?.content).toContain("pwned")
+    expect(toolMsg?.content).not.toContain("安全模式")
     const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "tmp", "x.txt"))).toBe(false)
+    expect(existsSync(join(root, "tmp", "x.txt"))).toBe(true) // 会话 tmp 在用户目录内 → 放行
     cleanup(s.home)
   })
 

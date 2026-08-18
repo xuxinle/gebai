@@ -1,10 +1,17 @@
 import type { Tool, ToolSet } from "./types"
+import { isRiskyToolName } from "./safety"
 
 export interface RegisteredTool {
   name: string
   tool: Tool
   agent?: string
   enabled: boolean
+}
+
+export interface ToolRegistryOptions {
+  /** 安全模式（GEBAI_SAFE_MODE）：子Agent 工具按 Tool.safeMode 自主声明过滤——true 强制可提供 /
+   *  false 强制不提供 / 未声明按短名风险规则默认（isRiskyToolName）。全局工具不过滤（风险工具内置降级）。 */
+  safeMode?: boolean
 }
 
 function normalize(name: string): string {
@@ -14,11 +21,21 @@ function normalize(name: string): string {
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>()
   private agents = new Map<string, { tools: string[] }>()
+  private safeMode: boolean
+
+  constructor(opts: ToolRegistryOptions = {}) {
+    this.safeMode = !!opts.safeMode
+  }
 
   register(tool: Tool, agent?: string): void {
     const name = agent ? `${agent}_${tool.name}` : tool.name
     const key = normalize(name)
     if (this.tools.has(key)) throw new Error(`duplicate tool name: ${key}`)
+    // 安全模式子Agent 工具过滤（DESIGN「安全模式」）：自主声明覆盖默认短名风险规则，不注册即不可见不可调
+    if (agent && this.safeMode) {
+      const allowed = tool.safeMode === undefined ? !isRiskyToolName(key) : tool.safeMode === true
+      if (!allowed) return
+    }
     if (agent) {
       // 注册期碰撞检查（DESIGN「命名约束」）：子Agent 名不得互为前缀，
       // 否则 `{agent}_` 前缀解析产生歧义；全局工具名不得以任何 `{agent}_` 开头
