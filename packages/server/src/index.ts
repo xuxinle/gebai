@@ -365,9 +365,12 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
 
 if (import.meta.main) {
   // 隐藏子命令 `gebai exec <script.ts>`（DESIGN「脚本执行环境」）：复用编译进二进制的 Bun 运行时
-  // 自执行 JS/TS 脚本（js 脚本工具二进制模式的子进程入口）；脚本调试模式下 bun 直跑脚本，不经此路径
-  if (process.argv[2] === "exec" && process.argv[3]) {
-    await importExecScript(process.argv[3])
+  // 自执行 JS/TS 脚本（js 脚本工具二进制模式的子进程入口）；脚本调试模式下 bun 直跑脚本，不经此路径。
+  // exec 段两种 argv 布局：编译单文件形态 spawn [gebai, "exec", script]（argv[1]=内嵌虚拟入口，exec 在
+  // argv[2]）；容器形态（execPath=bun 跑 dist 产物）spawn 须带真实入口段 [bun, 入口, "exec", script]（exec 在 argv[3]）
+  const arg = process.argv[2] === "exec" ? 3 : process.argv[3] === "exec" ? 4 : 0
+  if (arg && process.argv[arg]) {
+    await importExecScript(process.argv[arg])
   } else {
     await ensureWebDistBuilt()
     startServer().catch((err) => {

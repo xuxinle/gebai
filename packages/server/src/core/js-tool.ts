@@ -169,9 +169,15 @@ export function buildChildScript(userCode: string, injected: { ctx: unknown; inp
   )
 }
 
-/** 子进程命令：脚本调试模式 = bun 直跑；二进制模式 = `gebai exec`（内嵌 Bun 运行时自执行）。 */
-export function jsRuntimeCommand(scriptPath: string): string[] {
-  return isBinaryMode() ? [process.execPath, "exec", scriptPath] : [process.execPath, scriptPath]
+/** 子进程命令：脚本调试模式 = bun 直跑；二进制模式 = `gebai exec` 隐藏子命令（复用内嵌 Bun
+ *  运行时自执行），统一带入口段 [execPath, 入口, "exec", script]：
+ *  - 编译单文件（desktop `gebai.exe`）：子进程 argv[1] 自动为内嵌虚拟入口，入口段仅占位，
+ *    index.ts 按「exec 在 argv[2] 或 argv[3]」双位置路由；
+ *  - 容器形态（execPath=bun 跑 dist 打包产物，包内各模块 import.meta.path 一致指向打包产物）：
+ *    入口段是真实 dist 入口——缺失时 bun 会把 exec 当命令名、script 当其参数直接报错。
+ *  binary 参数仅供测试注入（默认取 isBinaryMode()）。 */
+export function jsRuntimeCommand(scriptPath: string, binary = isBinaryMode()): string[] {
+  return binary ? [process.execPath, import.meta.path, "exec", scriptPath] : [process.execPath, scriptPath]
 }
 
 /** 会话上下文快照（注入脚本 ctx）：user/session/workdir/env（沙箱模式脱敏同 sh 子进程）/projects/messages。 */

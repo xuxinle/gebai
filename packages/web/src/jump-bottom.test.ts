@@ -175,4 +175,81 @@ describe("sticky-scroll 粘底滚动", () => {
       ;(globalThis as Record<string, unknown>).requestAnimationFrame = origRaf
     }
   })
+
+  test("用户上翻但 scroll 事件未送达（rAF 先行）：对齐保持循环按程序落位比对停转，不拽回底部", async () => {
+    // 异步 rAF stub（keepTick 跨帧存活的拽底窗口）
+    const origRaf = globalThis.requestAnimationFrame
+    const timers = new Set<ReturnType<typeof setTimeout>>()
+    ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: (t: number) => void) => {
+      const t = setTimeout(() => cb(performance.now()), 8)
+      timers.add(t)
+      return 0
+    }
+    ;(globalThis as Record<string, unknown>).cancelAnimationFrame = () => {}
+    try {
+      const el = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+      const btn = makeBtn()
+      const sticky = createStickyScroll(el as unknown as HTMLElement, btn as unknown as HTMLElement)
+      sticky.lockToBottom() // 落底 800 并启动 240 帧对齐保持循环
+      expect(el.scrollTop).toBe(800)
+      el.scrollTop = 500 // 用户上翻，scroll 事件未送达（不 emit）——旧 following 仍为 true
+      await Bun.sleep(60) // 数个 keepTick 帧窗口
+      expect(el.scrollTop).toBe(500) // 不拽回底部
+      expect(btn.hidden).toBe(false) // 按位置解除锁定，按钮显示
+      // 迟到的 scroll 事件到达：按位置维持同一结论（阅读历史，内容增长不打扰）
+      el.emit("scroll")
+      el.scrollHeight = 2000
+      sticky.scrollIfSticky()
+      expect(el.scrollTop).toBe(500)
+    } finally {
+      for (const t of timers) clearTimeout(t)
+      ;(globalThis as Record<string, unknown>).requestAnimationFrame = origRaf
+    }
+  })
+
+  test("生成中用户上翻（事件未送达）后内容增长：scrollIfSticky 的 rAF 回调先行不拽回", () => {
+    const { el, sticky } = setup()
+    sticky.lockToBottom()
+    expect(el.scrollTop).toBe(800)
+    el.scrollTop = 500 // 用户上翻，scroll 事件未送达（不 emit）
+    el.scrollHeight = 2000 // 内容增长触发跟随（rAF 同步执行）
+    sticky.scrollIfSticky()
+    expect(el.scrollTop).toBe(500) // rAF 先行：按程序落位比对识别用户上翻，不拽回
+  })
+
+  test("restoreScroll：恢复历史位置同步锁定状态，未决跟随回调不把位置拽到底（loadMessages 尾部竞态）", async () => {
+    const origRaf = globalThis.requestAnimationFrame
+    const timers = new Set<ReturnType<typeof setTimeout>>()
+    ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: (t: number) => void) => {
+      const t = setTimeout(() => cb(performance.now()), 8)
+      timers.add(t)
+      return 0
+    }
+    ;(globalThis as Record<string, unknown>).cancelAnimationFrame = () => {}
+    try {
+      const el = makeEl({ scrollHeight: 1000, clientHeight: 200 })
+      const btn = makeBtn()
+      const sticky = createStickyScroll(el as unknown as HTMLElement, btn as unknown as HTMLElement)
+      // loadMessages 尾部时序：flushMsgBatch 排期 scrollIfSticky rAF → lockToBottom（启动保持循环）→ 恢复 scrollTop=mem
+      sticky.scrollIfSticky()
+      sticky.lockToBottom()
+      sticky.restoreScroll(300)
+      await Bun.sleep(60) // 未决 rAF 与对齐保持循环的执行窗口
+      expect(el.scrollTop).toBe(300) // 不被拽到底部
+      expect(btn.hidden).toBe(false) // 按钮显示（阅读历史）
+      el.scrollHeight = 2000 // 后续内容增长不打扰阅读
+      sticky.scrollIfSticky()
+      await Bun.sleep(30)
+      expect(el.scrollTop).toBe(300)
+      // 恢复位置在底部阈值内：保持粘底跟随语义
+      sticky.restoreScroll(1800) // 2000-1800-200=0，贴底
+      el.scrollHeight = 2400
+      sticky.scrollIfSticky()
+      await Bun.sleep(30)
+      expect(el.scrollTop).toBe(2200)
+    } finally {
+      for (const t of timers) clearTimeout(t)
+      ;(globalThis as Record<string, unknown>).requestAnimationFrame = origRaf
+    }
+  })
 })
