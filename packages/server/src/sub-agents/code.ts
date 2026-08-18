@@ -1,5 +1,4 @@
 import { resolve } from "node:path"
-import type { FileEntry } from "@gebai/sdk"
 import type { SubAgentDef, Tool, ToolContext } from "../core/types"
 import {
   readTool,
@@ -21,6 +20,7 @@ import {
   makePreviewServerTool,
   systemInfoTool,
   envDetectTool,
+  walkDirFiles,
 } from "../core/tools"
 import { analyzeTool, searchSymbolsTool } from "../core/analyzer"
 import { resolveInSandbox } from "../core/paths"
@@ -48,42 +48,6 @@ const PROJECT_PARAM = {
   project: { type: "string", description: "预置项目名（CODE_PROJECTS 清单项）；传入时路径参数相对该项目根解析" },
 }
 
-/** 项目目录遍历时跳过的大型/生成目录（防 grep/glob 全量扫描拖慢）。 */
-const PROJECT_SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", ".cache", "__pycache__", ".venv", "venv", "target", ".idea", ".vscode", "coverage", ".turbo"])
-const PROJECT_MAX_DEPTH = 10
-
-/** 递归列出项目根下文件（相对路径，正斜杠；跳过大型/生成目录，限制深度）。 */
-async function listProjectFiles(root: string): Promise<FileEntry[]> {
-  const { readdir, stat } = await import("node:fs/promises")
-  const out: FileEntry[] = []
-  const walk = async (dir: string, depth: number): Promise<void> => {
-    if (depth > PROJECT_MAX_DEPTH) return
-    let entries
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const e of entries) {
-      if (e.isDirectory()) {
-        if (PROJECT_SKIP_DIRS.has(e.name)) continue
-        await walk(`${dir}/${e.name}`, depth + 1)
-      } else if (e.isFile()) {
-        let size = 0
-        try {
-          const st = await stat(`${dir}/${e.name}`)
-          size = st.size
-        } catch {
-          /* stat 失败按 0 处理 */
-        }
-        out.push({ path: dir === root ? e.name : `${dir.slice(root.length + 1)}/${e.name}`, size, modifiedAt: 0, isDir: false })
-      }
-    }
-  }
-  await walk(root, 0)
-  return out
-}
-
 /**
  * 为工具添加可选 project 参数（预置项目名）：传入时把路径解析基准与工作目录
  * 切换到该预置项目根（沙箱模式限定项目内，本地模式不限制）；未传时行为不变。
@@ -109,7 +73,7 @@ export function projectAware(tool: Tool, opts: { workdir?: boolean } = {}): Tool
         ...ctx,
         workdir: opts.workdir ? root : ctx.workdir,
         resolvePath: (p) => (ctx.sandboxed ? resolveInSandbox(root, p) : resolve(root, p)),
-        listFiles: () => listProjectFiles(root),
+        listFiles: () => walkDirFiles(root),
       }
       return tool.execute(rest, pctx)
     },

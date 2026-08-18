@@ -1,7 +1,7 @@
 import { dirname, isAbsolute, join, relative } from "node:path"
 import { homedir, tmpdir } from "node:os"
 import { createServer, connect, type AddressInfo } from "node:net"
-import type { ContentBlock, DiagramFormat, TodoItem, ToolSchema } from "@gebai/sdk"
+import type { ContentBlock, DiagramFormat, FileEntry, TodoItem, ToolSchema } from "@gebai/sdk"
 import type { ChoiceOption, Tool, ToolContext, ToolResult } from "./types"
 import { truncatedPath, truncatedLogicalPath } from "./paths"
 import { randomUUID } from "node:crypto"
@@ -540,10 +540,50 @@ function listPathCandidates(p: string): string[] {
   return p.startsWith("tmp/") ? [p, p.slice(4)] : [p]
 }
 
+/** 目录递归遍历时跳过的大型/生成目录（grep 范围外路径与 code/explore 项目根遍历共用，防全量扫描拖慢）。 */
+export const WALK_SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", ".cache", "__pycache__", ".venv", "venv", "target", ".idea", ".vscode", "coverage", ".turbo"])
+export const WALK_MAX_DEPTH = 10
+
+/** 目录递归遍历（跳过大型/生成目录、深度上限；root 为单文件时直接返回单条）。pathBase 传入时输出路径带该前缀
+ *  （tmp/项目根外搜索的结果路径可直接用于 read 等文件工具），缺省相对 root；root 不存在/不可读返回空。 */
+export async function walkDirFiles(root: string, pathBase = ""): Promise<FileEntry[]> {
+  const { readdir, stat } = await import("node:fs/promises")
+  const st = await stat(root).catch(() => null)
+  if (!st) return []
+  if (st.isFile()) return [{ path: pathBase || root.replace(/\\/g, "/"), size: st.size, modifiedAt: st.mtimeMs, isDir: false }]
+  const out: FileEntry[] = []
+  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+    if (depth > WALK_MAX_DEPTH) return
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (WALK_SKIP_DIRS.has(e.name)) continue
+        await walk(`${dir}/${e.name}`, rel ? `${rel}/${e.name}` : e.name, depth + 1)
+      } else if (e.isFile()) {
+        let size = 0
+        try {
+          size = (await stat(`${dir}/${e.name}`)).size
+        } catch {
+          /* stat 失败按 0 处理 */
+        }
+        const relPath = rel ? `${rel}/${e.name}` : e.name
+        out.push({ path: pathBase ? `${pathBase}/${relPath}` : relPath, size, modifiedAt: 0, isDir: false })
+      }
+    }
+  }
+  await walk(root, "", 0)
+  return out
+}
+
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。宽泛摸底优先 output=files。匹配上限 200 处。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。匹配上限 200 处。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
@@ -581,20 +621,24 @@ export const grepTool: Tool = {
     const context = Math.max(0, Math.min(10, Math.floor(Number(args.context) || 0)))
     const includeRe = args.include ? globToRegExp(String(args.include)) : null
     const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
-    // path 统一经 resolvePath 解析归一化（同 glob：显式传 "." 与省略等价、tmp/ 前缀可省略；越界路径无匹配）
+    // path 统一经 resolvePath 解析归一化（同 glob：显式传 "." 与省略等价、tmp/ 前缀可省略）
     let relPath = ""
+    let outside: FileEntry[] | undefined
     if (path) {
       const root = ctx.resolvePath(".")
-      const rel = relative(root, ctx.resolvePath(path)).replace(/\\/g, "/")
+      const resolved = ctx.resolvePath(path)
+      const rel = relative(root, resolved).replace(/\\/g, "/")
       if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
-        return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
-      }
-      relPath = rel === "." ? "" : rel.replace(/\/+$/, "")
+        // tmp/项目根外路径：本地模式与 read 同款自由度，按给定 path 前缀实际遍历搜索；沙箱部署模式仍拒绝越界
+        if (ctx.sandboxed) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
+        outside = await walkDirFiles(resolved, path.replace(/\/+$/, ""))
+        if (!outside.length) return { output: `grep: 路径不存在或无可搜文件: ${path}`, data: { mode, matches: [], files: [], counts: [] } }
+      } else relPath = rel === "." ? "" : rel.replace(/\/+$/, "")
     }
     const prefix = relPath ? `${relPath}/` : ""
-    const listing = await ctx.listFiles()
-    // path 精确命中单文件时直接内搜该文件（grep 传文件语义），否则按目录前缀过滤
-    const exact = relPath ? listing.find((f) => !f.isDir && listPathCandidates(f.path).includes(relPath)) : undefined
+    const listing = outside ?? (await ctx.listFiles())
+    // path 精确命中单文件时直接内搜该文件（grep 传文件语义），否则按目录前缀过滤（范围外已按给定 path 定界）
+    const exact = !outside && relPath ? listing.find((f) => !f.isDir && listPathCandidates(f.path).includes(relPath)) : undefined
     const files = (exact ? [exact] : listing)
       .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (!prefix || exact || listPathCandidates(f.path).some((c) => c.startsWith(prefix))) && (!includeRe || listPathCandidates(f.path).some((c) => includeRe.test(c))))
     if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
@@ -611,6 +655,8 @@ export const grepTool: Tool = {
       } catch {
         continue // 二进制等不可读文件跳过
       }
+      // 二进制内容（NUL 字节）跳过：防乱码匹配行刷进上下文（同 grep 二进制检测语义）
+      if (content.includes("\0")) continue
       const lines = content.split("\n")
       const hitIdx: number[] = []
       let fileCount = 0
