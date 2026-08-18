@@ -281,8 +281,20 @@ export function flushMsgBatch(): void {
   }
 }
 
+/** 低性能模式 content-visibility 视口外高度估算（px）：meta 行 + 内容行数（约 40 字符/行、
+ *  23px 行高）+ 块卡片/附件固定高度（图表/HTML 卡片可达数百 px）。纯估算只为滚动条高度
+ *  接近真实——统一按 320px 估算时长回答（真实高度可达数千 px）滚动经过首渲染会顶开视口
+ *  「跳一大段」；渲染后由 contain-intrinsic-size 的 auto 关键字记忆真实高度（回看稳定）。 */
+function estimateIntrinsicHeight(msg: Message): number {
+  const chars = msg.content.length + (msg.reasoning?.length ?? 0) + (msg.arguments ? JSON.stringify(msg.arguments).length : 0)
+  const extra = (msg.blocks?.length ?? 0) + (msg.attachments?.length ?? 0)
+  return Math.min(24_000, Math.max(96, 56 + Math.ceil(chars / 40) * 23 + extra * 360))
+}
+
 export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): HTMLElement {
   const wrapper = el("div", `msg ${msg.role}${stream ? " streaming" : ""}`)
+  // 低性能模式高度估算内联（样式表 320px 为兜底；非低性能模式无 content-visibility，属性无效不生效）
+  wrapper.style.containIntrinsicSize = `auto ${estimateIntrinsicHeight(msg)}px`
   const body = el("div", "msg-body")
   const meta = el("div", "msg-meta")
   meta.append(el("span", "msg-name", ROLE_NAME[msg.role] ?? msg.role), el("span", "msg-time", formatTime(msg.createdAt)))

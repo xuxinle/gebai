@@ -18,6 +18,10 @@ export interface StickyScrollHandle {
   scrollIfSticky(): void
   /** 发送新消息 / 会话加载完成时调用：滚动到底并锁定（此前用户滚走阅读历史后，操作即恢复跟随）。 */
   lockToBottom(): void
+  /** 程序恢复历史滚动位置（会话切回的阅读位置记忆）：落位后按新位置同步锁定状态，
+   *  并使未决的跟随回调（排期中的 rAF / 对齐保持循环）失效——它们晚于恢复执行时
+   *  会把刚恢复的历史位置拽到底部（loadMessages 尾部竞态）。 */
+  restoreScroll(top: number): void
   /** 新消息到达时由 messages / main 调用：按当前位置刷新按钮显隐。 */
   noteIncoming(): void
   /** 清空按钮状态（切换会话、流式结束时）：按当前位置刷新显隐。 */
@@ -44,11 +48,28 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
    *  事件位置与目标一致即识别为程序滚动，保持锁定并续滚到最新底部。 */
   let programTarget: number | null = null
 
+  /** 最近一次程序滚动后的落位（scrollTop 赋值后的读回值）。scroll 事件异步送达，rAF 可能
+   *  先行执行（keepTick / scrollIfSticky 回调读到旧 following）：位置距程序落位的跌幅超过
+   *  底部阈值 = 用户已上翻（上翻只会减小 scrollTop），立即按位置解除跟随，不拽回底部。 */
+  let programTop = 0
+
   /** 程序滚动到底：位置有变化才记录落位（无变化浏览器不产生滚动事件，不留残余目标）。 */
   function scrollBottom() {
     const before = el.scrollTop
     el.scrollTop = el.scrollHeight
     if (el.scrollTop !== before) programTarget = el.scrollTop
+    programTop = el.scrollTop
+  }
+
+  /** 跟随回调执行前的用户滚动检测（scroll 事件未送达窗口）：上翻只会减小 scrollTop——
+   *  距程序落位的跌幅在底部阈值内（等价 scroll 事件按事件时几何判 isAtBottom：小幅上滚
+   *  仍算贴底）保持跟随；跌幅超阈值 = 用户已上翻，按位置解除跟随并返回 false。不能按
+   *  当前几何判 isAtBottom——rAF 前内容增长会把「离开时还贴底」的位置误判为远离底部。 */
+  function stillFollowing(): boolean {
+    if (el.scrollTop >= programTop - BOTTOM_THRESHOLD - 1) return true
+    following = false
+    refresh()
+    return false
   }
 
   // rAF 节流：流式高频内容变化每帧至多滚动一次（性能）
@@ -58,8 +79,9 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
     scrollRaf = true
     requestAnimationFrame(() => {
       scrollRaf = false
-      // 以执行时锁定状态为准（排期期间可能被用户滚动翻转）
-      if (following) scrollBottom()
+      // 以执行时锁定状态为准（排期期间可能被用户滚动翻转）；用户已上翻但 scroll 事件
+      // 未送达（rAF 先行）→ 按程序落位比对识别，不拽回
+      if (following && stillFollowing()) scrollBottom()
       noteFollowActivity()
     })
   }
@@ -86,6 +108,9 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
   function keepTick() {
     keepAligning = false
     if (!following) return
+    // 用户已上翻但 scroll 事件未送达（rAF 先行执行）：按程序落位比对识别，立即停转不拽回
+    // （否则 lockToBottom 后的 240 帧窗口内用户滚一下即被拽回底部）
+    if (!stillFollowing()) return
     keepFrames++
     if (el.scrollTop < el.scrollHeight - el.clientHeight) scrollBottom()
     if (keepFrames < KEEP_ALIGN_FRAMES) {
@@ -99,6 +124,13 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
     scrollBottom()
     refresh()
     noteFollowActivity()
+  }
+
+  function restoreScroll(top: number): void {
+    el.scrollTop = top
+    programTarget = null // 恢复产生的 scroll 事件按用户分支处理（following 已按下落位同步）
+    following = isAtBottom()
+    refresh()
   }
 
   btn.onclick = () => {
@@ -143,5 +175,5 @@ export function createStickyScroll(el: HTMLElement, btn: HTMLElement): StickyScr
   const noteIncoming = refresh
   const clearUnread = refresh
 
-  return { isAtBottom, scrollIfSticky, lockToBottom, noteIncoming, clearUnread, refresh }
+  return { isAtBottom, scrollIfSticky, lockToBottom, restoreScroll, noteIncoming, clearUnread, refresh }
 }

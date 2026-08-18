@@ -1068,8 +1068,10 @@ html[data-low-power="on"] .msg.streaming .bubble::after {
 html[data-low-power="on"] #conn.thinking:not(.bad)::before {
   animation: conn-thinking 0.25s ease-in-out infinite !important;
 }
-/* 长会话消息列表：视口外消息跳过布局/绘制（content-visibility: auto，contain-intrinsic-size
-   保留滚动条估算高度防跳动；含 iframe 的卡片移入视口时浏览器再渲染） */
+/* 长会话消息列表：视口外消息跳过布局/绘制（content-visibility: auto）；高度估算不统一用
+   320px（长消息滚动经过时首渲染高度突变顶开视口「跳一大段」）——appendMsg 按内容长度
+   内联 contain-intrinsic-size（此处 320px 仅为无内联值兜底；auto 保留「记住上次渲染高度」，
+   回看稳定）；含 iframe 的卡片移入视口时浏览器再渲染 */
 html[data-low-power="on"] .msg {
   content-visibility: auto;
   contain-intrinsic-size: auto 320px;

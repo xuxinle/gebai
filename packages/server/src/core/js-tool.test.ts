@@ -345,9 +345,19 @@ return { lines: txt.split("\\n").length }`,
   })
 
   test("jsRuntimeCommand：脚本调试模式 bun 直跑（无 exec 前缀）", () => {
-    const cmd = jsRuntimeCommand("/tmp/x.ts")
+    const cmd = jsRuntimeCommand("/tmp/x.ts", false)
+    expect(cmd).toEqual([process.execPath, "/tmp/x.ts"])
+  })
+
+  test("jsRuntimeCommand：二进制模式带入口段（入口+exec+script 三段）——容器形态（execPath=bun 跑 dist 产物）缺入口段时 bun 把 exec 当命令名直接报错", () => {
+    const cmd = jsRuntimeCommand("/tmp/x.ts", true)
+    expect(cmd).toHaveLength(4)
     expect(cmd[0]).toBe(process.execPath)
-    expect(cmd[1]).toBe("/tmp/x.ts")
+    // 入口段：源码/测试形态 = 本模块真实路径；容器形态 = dist 打包产物路径（包内各模块 import.meta.path 一致）；
+    // 编译单文件形态 = 内嵌虚拟入口（仅占位，index.ts 按 exec 段双位置路由）
+    expect(cmd[1]).toMatch(/js-tool\.ts$/)
+    expect(cmd[2]).toBe("exec")
+    expect(cmd[3]).toBe("/tmp/x.ts")
   })
 
   test("必填参数校验：缺参即时拒绝并指明参数名", async () => {
