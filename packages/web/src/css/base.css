@@ -535,6 +535,7 @@ header {
 #conn {
   position: absolute;
   inset: 0;
+  margin: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -546,7 +547,17 @@ header {
   border-radius: 0;
   white-space: nowrap;
 }
-#conn::before { width: 8px; height: 8px; flex: none; }
+/* 圆点调小并中和各主题遗留的徽章式绝对定位与脉冲动画（left:6px 等旧徽章布局把点钉离圆心；
+   思考闪烁挂在更高优先级的 #conn.thinking:not(.bad)::before 上不受影响），主题只接管配色/光晕 */
+#conn::before {
+  position: static;
+  inset: auto;
+  transform: none;
+  animation: none;
+  width: 6px;
+  height: 6px;
+  flex: none;
+}
 /* 已连接且空闲：隐藏信号灯（仅剩圆环）；思考/生成中：圆点显示并快速闪烁 */
 #conn:not(.bad) { display: none; }
 #conn.thinking:not(.bad) { display: flex; }
