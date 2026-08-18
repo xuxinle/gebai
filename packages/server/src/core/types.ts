@@ -172,6 +172,11 @@ export interface Tool {
   /** 运行时定义工具标记（js 脚本 defineTool 注册）：js/动态工具子进程内禁止再调用（防递归嵌套子进程），
    *  RPC 分发层按本标记拦截。内置/子Agent 工具无此标记。 */
   runtimeDefined?: boolean
+  /** 安全模式可用性自主声明（子Agent 工具用；全局风险工具不使用本字段——它们内置降级为只读/限范围形态）：
+   *  true = 作者判定安全模式下可提供（即使短名风险如 xxx_sh，须自行保证实现只读或在体内按 ctx.safeMode 校验）；
+   *  false = 作者判定安全模式下不提供（即使名字无风险命中，如内部会写文件/外发请求的工具）；
+   *  未声明 = 按短名风险规则默认（isRiskyToolName 命中则安全模式下不注册）。 */
+  safeMode?: boolean
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>
 }
 

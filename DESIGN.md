@@ -291,7 +291,7 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs` 子Agent 的全局兜底 + 机器人桥接凭证）、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）** | 不启用 |
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
-| `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：有风险的工具（命令执行 `sh`/`py`、文件修改 `write`/`edit`/`patch`/`file`（rename/move/delete）、删除类 `delete`（如 `widgets_delete`）、定时任务调度 `cron_add`/`cron_update`/`cron_remove`，及子Agent 同名短工具如 `code_sh`）被阻止执行——模型调用时直接返回限制信息（不执行、不弹审批），只读操作不受影响 | `false` |
+| `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：风险能力**降级而非禁用**——`sh` 只读命令白名单 + 重定向限用户目录、`py`/`js` 只读运行时（写/进程/网络屏蔽，仅保留文件读取）、`write`/`edit`/`patch`/`file` 限定用户目录内、`cron_*` 调度类硬阻断、子Agent 工具按 `Tool.safeMode` 自主声明过滤注册（详见「安全模型 → 安全模式」） | `false` |
 | `GEBAI_LLM_MODEL` / `OPENAI_*` | LLM Provider 与模型配置 | - |
 | `GEBAI_LLM_API_BASE` / `GEBAI_LLM_API_KEY` | LLM 服务地址与密钥（等价 `OPENAI_*`） | - |
 | `GEBAI_LLM_API_KIND` | LLM 接口类型：`openai`（兼容 chat/completions）/ `responses`（OpenAI Responses API）/ `anthropic` | `openai` |
@@ -456,7 +456,17 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **环境变量隔离**：**用户环境变量服务端零留存**（只存浏览器本地 localStorage，服务端不落任何 env 文件；会话内存态 env 不落盘、重启即空），用户间互不可见；子Agent 仅能访问 `{AGENT_NAME_UPPER}_*` 前缀，敏感变量（密钥/令牌）脱敏显示
 - **子Agent共享**：子Agent 为服务端内置代码，构建时编译进二进制，全局共享、只读、无用户差异
 - **审批隔离**：`/approval-skip` 为会话级设置，仅作用于当前会话（会话内存态 env，不落盘），不影响其他用户；**用户本人可设置自己的会话**（前端开关、REST `PUT /env`、WS `session.env.set`、飞书 `/approval-skip` 命令——写入只影响本人会话，非管理员仍受路径/脚本/网络沙箱完整约束）；**ask_env 填值通道服务模式下一律拒绝 `GEBAI_APPROVAL_SKIP`**——模型驱动的写入不得自设审批跳过（防提示词注入诱导），本地/单用户模式不受限
-- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`/`js`）、文件修改（`write`/`edit`/`patch`/`file`（rename/move/delete））、删除类（`widgets_delete` 等 `delete` 短名）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write`/`{agent}_file` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`flow` 数据流编排工具在 step 层、`js` 脚本工具在 RPC 分发层同规则拦截（两者直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
+- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启降级运行形态（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——原则是**风险能力降级而非一刀切禁用**，各风险工具在自身 execute 内降级：
+  | 能力 | 安全模式降级形态 |
+  |------|------------------|
+  | `sh` | 只读命令白名单（`cat`/`head`/`tail`/`grep`/`find`/`ls`/`git` 读子命令/`sort`/`diff` 等查看与文本处理类；`sed`/`awk` 有脚本内写/执行通道、`less`/`more` 有 `!` shell 逃逸，均不入列）；命令解析 fail-closed（反引号/后台执行 `&`/进程替换 `<(cmd)`/未闭合引号等无法识别的结构一律拒绝）；输出重定向 `>`/`>>`/`2>`/`&>` 目标须在**安全写范围**内（`/dev/null`/`NUL` 放行），fd 复制 `2>&1` 放行；`$(...)` 命令替换与双引号内替换按替换语义**递归校验**（POSIX 双引号内 `$()` 与反引号会执行，单引号为字面量）；`find` 禁 `-exec`/`-delete` 等执行/写动作、`sort` 禁 `-o`/`--output`、`git` 仅读子命令（`status`/`log`/`diff`/`show`/`blame`/`rev-parse`/`ls-files`/`describe` 等）、`env` 仅单独执行、`date` 禁 `-s`/`--set`、`hostname` 仅 flag 参数 |
+  | `py` | 子进程内 `sys.addaudithook` 审计钩子（`core/safety.ts` `PY_SAFE_BOOTSTRAP`）：写模式 `open`（mode 含 `w`/`a`/`x`/`+` 或 flags 含 `O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`）、进程（`os.system`/`subprocess.*`/`os.posix_spawn`/`os.fork`）、网络（`socket.connect`/`bind`）、文件变更（`os.remove`/`rename`/`mkdir`/`chmod` 等、`shutil.*`）、`ctypes.dlopen`（防绕过钩子的裸系统调用）、`sqlite3.connect` 全部拒绝；钩子堆叠不可移除，**仅保留文件读取** |
+  | `js` | 双层降级：静态扫描（`scanJsReadOnly`）前置拒绝运行时 shim 拦不住的通道——动态 `import()`/`require()`/`import.meta.require`/`eval()`/`Function()`/`process.getBuiltinModule`/`process.binding`/`Bun.fetch`/`Bun.sqlite`（模块实例可拿到未受控全局环境、字符串代码执行可回收全部全局、个别 Bun getter 不可覆写）；运行时 shim（注入子进程）屏蔽其余——`Bun` 对象属性覆写为抛错桩（`write`/`spawn`/`serve`/`$`/`sql` 等，全局绑定不可替换但属性可写）、`Bun.file` 包装拦截 `write`/`writer`/`sink`/`truncate`（读方法照常）、删除 `eval`/`Function`/`fetch`/`WebSocket`/`Worker` 全局、`Function.prototype.constructor` 中性化防 `(fn).constructor` 回收、`process` 仅拦 `binding`/`dlopen`/`getBuiltinModule`/`kill`（桥协议依赖 stdin/stdout/exit）、字符串定时器拒绝——**仅保留文件读取**；写文件用 `write` 工具、网络用 `fetch_url` 工具（RPC 调用各工具按其降级规则执行） |
+  | `write`/`edit`/`patch`/`file` | 限定**安全写范围**内（`safeModeWriteCheck`）：沙箱模式=用户数据根（`users/{user}`）；本地模式=OS 用户主目录 + `GEBAI_HOME` + 会话工作目录（Windows 大小写不敏感比较）。越界拒绝并提示，范围内照常 |
+  | 动态工具（`js` defineTool） | 与 `js` 同规则降级（execute 源码静态扫描 + 子进程只读 shim），注册与水合**不再跳过**——只读动态工具（数据处理/查询类）安全模式下保持可用 |
+  | `cron_add`/`cron_update`/`cron_remove` | **维持硬阻断**（定时任务延迟触发任意执行，无法降级）：引擎主/子循环、`flow` step 层、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批） |
+  | 子Agent 工具 | **自主声明 `Tool.safeMode`**：`true`=作者判定安全模式下可提供（即使短名风险如 `{agent}_sh`，须自行保证实现只读或体内按 `ctx.safeMode` 校验）；`false`=判定不提供（即使名字无风险）；未声明=按短名风险规则默认（`isRiskyToolName`：`{agent}_sh`/`{agent}_write`/`{agent}_file`/`{agent}_delete`/`{agent}_cron_add` 等 `_risk` 后缀命中则不注册）。注册期过滤（`ToolRegistry({safeMode})`，主注册表与 agent_run 新会话注册表同规则）——不注册即 schema 不可见、调用报未知工具 |
+  **安全写范围**与**降级说明注入**：系统提示词（主循环与 agent_run 新会话）在安全模式下追加降级能力说明（模型知晓能力边界）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）；审批姿态不变（各工具原 `requiresApproval` 规则照常生效）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
 
 ### 总Agent
@@ -1441,7 +1451,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 #### 审批与安全模式
 
 - **审批取决于内部工具（动态审批）**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（主循环与新会话循环一致，函数异常按需审批 fail-safe）；flow 声明的函数递归扫描全部步骤（含循环体），任一工具需审批则**整个 flow 提交一次审批**（审批卡片参数区含完整步骤定义），通过后依次执行；全部工具无需审批时直接执行；步骤 params 中的 `approval: false` 同样生效（如 sh 步骤声明免审则该步不触发整体审批——全部步骤免审时 flow 整体免审；服务模式无交互通道的硬拒绝仍按剥离免审标记后的姿态解析，见「工具审批」）
-- **安全模式**：风险工具在 step 层同规则拦截（返回限制信息、不执行）；拦截步骤不计入审批判定（不弹审批卡）；子Agent 同名短工具（`{agent}_sh` 等）同样命中
+- **安全模式**：step 层按硬阻断集（`isToolBlockedInSafeMode`，cron 调度类）拦截（返回限制信息、不执行），拦截步骤不计入审批判定（不弹审批卡）；`sh`/`py`/`js`/`write` 等风险工具 step 不再一刀切拦截——直接执行、由各工具 execute 内降级（白名单/审计钩子/只读 shim/写范围），内部审批姿态（如 `sh` 的 `approval` 参数）照常参与整体审批判定
 
 #### 结果
 
@@ -1513,7 +1523,7 @@ await defineTool({
 #### 守卫与限制
 
 - **审批**：与 `sh` 同姿态——默认需审批（脚本=任意代码执行），`approval:false` 按次免审；**审批覆盖整个脚本含内部工具调用**（flow 同语义：一次审批、依次执行）
-- **安全模式**：内部工具调用在 RPC 分发层按 `isRiskyToolName` 同规则拦截（无绕过通道）；`js` 本身属命令执行类，安全模式下整体禁用（`defineTool` 注册亦被拒绝、**磁盘持久化的动态工具不水合**——动态工具 execute 为任意代码，与只读承诺冲突，引擎分发层另有 `runtimeDefined` 兜底拦截）
+- **安全模式**：`js` 本身**降级为只读运行时**而非禁用——静态扫描（`scanJsReadOnly`：动态 `import()`/`require()`/`eval()`/`Function()`/`import.meta.require`/`process.getBuiltinModule`/`process.binding`/`Bun.fetch`/`Bun.sqlite` 前置拒绝）+ 子进程 shim（Bun 写/进程/网络 API 屏蔽、`Bun.file` 拦写留读、eval/Function/fetch/Worker 全局删除、`Function.prototype.constructor` 中性化）；内部工具调用在 RPC 分发层按硬阻断集（`isToolBlockedInSafeMode`，cron 调度类）拦截（无绕过通道），`sh`/`py`/`write` 等照常可调、由各工具降级规则执行；`defineTool` 与磁盘持久化动态工具同规则降级（execute 源码扫描 + 只读 shim），注册与水合均允许——只读动态工具安全模式下可用
 - **内部调用走同一 `ToolContext`**：`writeGuard`（子Agent 写范围）/`fileGuard`（防盲覆盖）等会话级守卫对脚本内工具调用同样生效
 - **防嵌套**：脚本内不能再调用 `js`（含 `{agent}_js`）——防嵌套 RPC 桥子进程失控；**动态工具内不能调用动态工具/js**（`runtimeDefined` + depth 守卫）；`sh`/`py` 不受限（脚本本就可 `Bun.spawn`）
 - **规模上限**：单次脚本工具调用总数 ≤ 100（与 flow 对齐）；RPC 协议行子进程侧 ~2MB / 服务端 2.5MB 截断兜底（防巨对象撑爆内存）
@@ -1767,6 +1777,11 @@ export const tools: ToolSet               // 子Agent 自有工具（注册为 {
 export function toolSchemas(): ToolSet
 export const requiresApproval?: Record<string, boolean>
 export const preload?: boolean            // 是否预加载（默认 false，按需装载）
+// 工具级安全模式自主声明（Tool.safeMode，写在各工具定义上）：
+//   true  = 作者判定安全模式下可提供（即使短名风险如 xxx_sh——须自行保证实现只读或体内按 ctx.safeMode 校验）
+//   false = 作者判定安全模式下不提供（即使名字无风险命中，如内部写文件/外发请求的工具）
+//   未声明 = 按短名风险规则默认（{agent}_sh / {agent}_write / {agent}_file / {agent}_delete / {agent}_cron_add 等 _risk 后缀命中则不注册）
+// 注册期过滤（ToolRegistry({safeMode})）：不注册即 schema 不可见、调用报未知工具，见「安全模型 → 安全模式」
 export const envVars?: EnvCatalogVar[]    // 可配置环境变量声明（{AGENT_NAME_UPPER}_ 前缀），汇总进环境变量目录（前端面板白名单，见「环境变量配置」）
 export const writeGuard?: (env: Record<string, string>, absPaths: string[]) => string | null
 // 写范围守卫声明：会话装载本子Agent（或新会话预加载）后注入 ToolContext.writeGuard——

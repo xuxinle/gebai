@@ -481,12 +481,14 @@ describe("runFlow 数据流编排", () => {
     await expect(runFlow({ steps: [{ tool: "nope" }] }, c)).rejects.toThrow(/未知工具 nope/)
   })
 
-  test("安全模式拦截风险工具步骤", async () => {
+  test("安全模式：cron 调度类 step 层硬阻断；风险工具 step 放行（降级在工具 execute 内）", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
-    const c = flowCtx({ sh: tool("sh", () => "ran") }, calls, { safeMode: true })
-    const r = await runFlow({ steps: [{ tool: "sh", params: { command: "ls" } }, { tool: "sh", params: { command: "pwd" } }] }, c)
-    expect(calls.length).toBe(0)
+    const c = flowCtx({ cron_add: tool("cron_add", () => "added"), sh: tool("sh", () => "ran") }, calls, { safeMode: true })
+    const r = await runFlow({ steps: [{ tool: "cron_add", params: {} }, { tool: "sh", params: { command: "ls" } }] }, c)
+    // cron 调度无法降级：step 层拦截返回限制信息；sh 等风险工具不再一刀切拦截（工具内白名单降级）
+    expect(calls.map((x) => x.name)).toEqual(["sh"])
     expect(r.output).toContain("安全模式")
+    expect(r.output).toContain("ran")
   })
 
   test("规模上限：foreach 超限报错", async () => {

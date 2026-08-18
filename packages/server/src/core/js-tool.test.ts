@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { jsTool, buildChildScript, scriptSessionContext, jsRuntimeCommand, JS_TOOL_MAX_CALLS, makeDynamicTool } from "./js-tool"
@@ -210,19 +210,69 @@ return errs`,
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("安全模式：RPC 分发层拦截风险工具（同 flow step 层规则）", async () => {
+  test("安全模式：RPC 分发层硬阻断 cron 调度类；write 在用户目录内放行（工具内降级）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-safe-"))
     const c = ctxWithTools(home)
+    c.registry.resolve = (name: string) => {
+      if (name === "cron_add") return { name, tool: mkTool("cron_add", async () => ({ output: "added" })) }
+      return name === "write" ? { name, tool: writeTool } : undefined
+    }
     c.safeMode = true
     const r = await jsTool.execute(
       {
-        code: `try { await tools.write({ path: "x.txt", content: "1" }) } catch (e) { console.log(e.message.slice(0, 6)) }`,
+        code: `const errs = []
+try { await tools.call("cron_add", {}) } catch (e) { errs.push(e.message.slice(0, 4)) }
+const w = await write({ path: "x.txt", content: "1" })
+return { errs, wrote: w.output }`,
       },
       c,
     )
     expect(r.output).toContain("安全模式")
-    const data = r.data as { calls: Array<{ ok: boolean }> }
-    expect(data.calls[0].ok).toBe(false)
+    const data = r.data as { calls: Array<{ ok: boolean }>; result: { errs: string[]; wrote: string } }
+    expect(data.calls[0].ok).toBe(false) // cron 调度类：RPC 分发层拦截（无绕过通道）
+    expect(data.calls[1].ok).toBe(true) // write：用户目录内（tmpdir 在 OS 用户主目录下）→ 放行
+    expect(data.result.wrote).toContain("已写入")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("安全模式：脚本静态扫描拒绝动态加载/字符串代码执行通道；只读 API 照常", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-scan-"))
+    const c = ctxWithTools(home)
+    c.safeMode = true
+    const denied = await jsTool.execute({ code: `await import("node:fs")` }, c)
+    expect(denied.output).toContain("安全模式")
+    expect(denied.output).toContain("import")
+    const denied2 = await jsTool.execute({ code: `const f = Function("return 1"); return f()` }, c)
+    expect(denied2.output).toContain("安全模式")
+    const ok = await jsTool.execute({ code: `return 1 + 1` }, c)
+    expect((ok.data as { result: number }).result).toBe(2)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("安全模式：子进程运行时 shim 屏蔽写/进程 API（仅保留文件读取）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-shim-"))
+    writeFileSync(join(home, "readable.txt"), "readable-content")
+    const homeFwd = home.split("\\").join("/") // 嵌入脚本代码的路径用正斜杠（反斜号在生成源码里成转义序列）
+    const c = ctxWithTools(home)
+    c.safeMode = true
+    const r = await jsTool.execute(
+      {
+        code: `const out = []
+try { await Bun.write("evil.txt", "x") } catch (e) { out.push("write-blocked") }
+try { Bun.spawn(["echo", "hi"]) } catch (e) { out.push("spawn-blocked") }
+try { Bun.file("evil2.txt").writer() } catch (e) { out.push("writer-blocked") }
+const f = Bun.file("${homeFwd}/readable.txt")
+out.push("read-ok:" + (await f.text()))
+return out`,
+      },
+      c,
+    )
+    const data = r.data as { result: string[] }
+    expect(data.result).toContain("write-blocked")
+    expect(data.result).toContain("spawn-blocked")
+    expect(data.result).toContain("writer-blocked")
+    expect(data.result).toContain("read-ok:readable-content")
+    expect(existsSync(join(c.workdir, "evil.txt"))).toBe(false)
     rmSync(home, { recursive: true, force: true })
   })
 

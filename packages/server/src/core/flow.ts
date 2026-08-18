@@ -6,7 +6,7 @@
  * 表达式求值器为纯函数（无 eval/Function），可独立单测。
  */
 import type { ToolContext, ToolResult } from "./types"
-import { isRiskyToolName, safeModeRestrictionMsg } from "./safety"
+import { isToolBlockedInSafeMode, safeModeRestrictionMsg } from "./safety"
 
 /** 单次 flow 执行的工具调用总数上限（含循环迭代展开）。 */
 export const FLOW_MAX_STEPS = 100
@@ -531,7 +531,7 @@ async function runToolStep(
   const rt = ctx.registry.resolve(step.tool)
   if (!rt) throw new Error(`flow: 未知工具 ${step.tool}`)
   // 安全模式（DESIGN「安全模式」）：flow 直接执行工具、不经引擎拦截点，step 层同规则拦截风险工具
-  if (ctx.safeMode && isRiskyToolName(step.tool)) {
+  if (ctx.safeMode && isToolBlockedInSafeMode(step.tool)) {
     const blocked = safeModeRestrictionMsg(step.tool)
     return { id, tool: step.tool, kind: "tool", status: "blocked", output: blocked }
   }
@@ -751,7 +751,7 @@ export async function scanFlowApprovals(rawSteps: unknown, ctx: ToolContext): Pr
         if (await scan(step.steps)) return true
         continue
       }
-      if (ctx.safeMode && isRiskyToolName(step.tool)) continue
+      if (ctx.safeMode && isToolBlockedInSafeMode(step.tool)) continue
       const rt = ctx.registry.resolve(step.tool)
       if (!rt) continue
       const ra = rt.tool.requiresApproval
