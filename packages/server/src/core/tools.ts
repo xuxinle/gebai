@@ -10,6 +10,7 @@ import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from ".
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from "./patch"
 import { hostBlockReason } from "./ip"
 import { runFlow, scanFlowApprovals } from "./flow"
+import { jsTool } from "./js-tool"
 
 export const TRUNCATE_THRESHOLD = 12000
 /** 截断消息保留的首/尾字符数（DESIGN「常量参考」）。 */
@@ -1250,8 +1251,8 @@ export const gitTool: Tool = {
 const SCRIPT_TIMEOUT_DEFAULT_S = 300
 const SCRIPT_TIMEOUT_MAX_S = 540
 
-/** 脚本超时参数解析（秒 → 毫秒）：非正数/非法回退默认值，超上限截断。 */
-function scriptTimeoutMs(v: unknown): number {
+/** 脚本超时参数解析（秒 → 毫秒）：非正数/非法回退默认值，超上限截断。（js 脚本工具复用，导出） */
+export function scriptTimeoutMs(v: unknown): number {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return SCRIPT_TIMEOUT_DEFAULT_S * 1000
   return Math.min(n, SCRIPT_TIMEOUT_MAX_S) * 1000
@@ -2209,6 +2210,7 @@ export function createGlobalTools(): Record<string, Tool> {
     tool_schemas: toolSchemasTool,
     sh: shTool,
     py: pyTool,
+    js: jsTool,
     draw: drawTool,
     render_html: renderHtmlTool,
     // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）
