@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { readTool, writeTool, editTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
-import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./tools"
+import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
 import type { ToolContext, Tool, ToolResult } from "./types"
@@ -841,7 +841,7 @@ describe("global tools", () => {
     ]) {
       expect(tools[n]).toBeDefined()
     }
-    // agent_list 不注册进总Agent 全局工具集（未装载清单已注入提示词，避免冗余干扰；仅新会话组合编排环境注入）
+    // agent_list 不注册进总Agent 全局工具集（未装载清单已注入提示词，避免冗余；仅新会话组合编排环境注入）
     expect(tools.agent_list).toBeUndefined()
     // preview_server/env_detect/system_info 下沉 code 子Agent（开发验证/环境探测属编码工作流，code_ 命名空间暴露）
     expect(tools.preview_server).toBeUndefined()
@@ -862,6 +862,28 @@ describe("global tools", () => {
     expect(tools.cron_list).toBeUndefined()
     expect(tools.cron_update).toBeUndefined()
     expect(tools.cron_remove).toBeUndefined()
+  })
+
+  test("构建期排除清单：createGlobalTools 过滤、createAllGlobalTools 全量、isGlobalToolExcluded 判定", () => {
+    _setExcludedGlobalToolsForTest(["draw", "fetch_url"])
+    try {
+      const global = createGlobalTools()
+      expect(global.draw).toBeUndefined()
+      expect(global.fetch_url).toBeUndefined()
+      expect(global.read).toBeDefined()
+      expect(global.js).toBeDefined()
+      expect(isGlobalToolExcluded("draw")).toBe(true)
+      expect(isGlobalToolExcluded("fetch_url")).toBe(true)
+      expect(isGlobalToolExcluded("read")).toBe(false)
+      // 全量表（构建脚本校验用）不受排除影响
+      const all = createAllGlobalTools()
+      expect(all.draw).toBeDefined()
+      expect(all.fetch_url).toBeDefined()
+      expect(Object.keys(all).length).toBe(Object.keys(global).length + 2)
+    } finally {
+      _setExcludedGlobalToolsForTest([]) // 恢复空名单，防污染同文件其他用例
+    }
+    expect(isGlobalToolExcluded("draw")).toBe(false)
   })
 
   test("ask_user tool blocks waiting for the user's choice (via waitForChoice)", async () => {

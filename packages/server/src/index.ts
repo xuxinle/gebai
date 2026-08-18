@@ -5,7 +5,7 @@ import { loadConfig, isBinaryMode } from "./core/config"
 import { walkDir } from "./core/paths"
 import { SessionStore } from "./core/store"
 import { ToolRegistry } from "./core/registry"
-import { createGlobalTools } from "./core/tools"
+import { createGlobalTools, isGlobalToolExcluded } from "./core/tools"
 import { Sandbox } from "./core/sandbox"
 import { EnvManager, cleanupLegacyUserEnv } from "./core/env"
 import { EventBus } from "./core/event-bus"
@@ -170,7 +170,8 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   // 视觉 provider 提供者注册（子Agent 定义如 self_optimize 的 vision 工具经 getVisionProvider 复用同一解析逻辑）；
   // 任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider
   setVisionProviderGetter((env) => resolveVisionProvider(mainConfig, visionConfig, env))
-  registry.register(makeVisionTool({ vision: getVisionProvider }))
+  // 构建期排除清单（GEBAI_BUILD_EXCLUDE_TOOLS）同规则生效（与全局工具表一致：不注册不暴露）
+  if (!isGlobalToolExcluded("vision")) registry.register(makeVisionTool({ vision: getVisionProvider }))
   registry.enableSet(config.toolEnable, config.toolDisable)
 
   // 沙箱 auto 判定（DESIGN「GEBAI_SANDBOX」）：只看运行形态，不判定监听 IP——

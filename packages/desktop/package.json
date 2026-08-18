@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "server:build": "bun run scripts/gen-icon.ts && bun run --cwd ../web build && bun run ../server/scripts/build-web-bundle.ts && bun run ../server/scripts/build-subagents.ts && bun run ../server/scripts/build-d2js.ts && bun run ../server/scripts/build-driver-embed.ts && bun build ./src/index.ts --compile --outfile=dist/gebai.exe --external @terrastruct/d2 && bun run scripts/embed-icon.ts",
+    "server:build": "bun run scripts/gen-icon.ts && bun run --cwd ../web build && bun run ../server/scripts/build-web-bundle.ts && bun run ../server/scripts/build-subagents.ts && bun run ../server/scripts/build-tools.ts && bun run ../server/scripts/build-d2js.ts && bun run ../server/scripts/build-driver-embed.ts && bun build ./src/index.ts --compile --outfile=dist/gebai.exe --external @terrastruct/d2 && bun run scripts/embed-icon.ts",
     "launcher:build": "cargo build --release --manifest-path launcher/Cargo.toml && bun run scripts/copy-launcher.ts",
     "build": "bun run server:build && bun run launcher:build",
     "test": "bun test",
