@@ -235,10 +235,6 @@ export function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, 
   return node
 }
 
-export function scrollToBottom() {
-  msgEl.scrollTop = msgEl.scrollHeight
-}
-
 /** 聚焦输入框并把光标置于末尾（各交互时机自动调用）。 */
 export function focusInput() {
   input.focus()

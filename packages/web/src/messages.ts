@@ -24,6 +24,7 @@ import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
 import { lockToBottom, scrollIfSticky } from "./jump-bottom"
+import { createStickyFollow, type StickyFollowHandle } from "./sticky-follow"
 import { addMsgNavSeg } from "./msg-nav"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
@@ -533,38 +534,23 @@ export function renderLegacySubAgentArchive(archive: import("@gebai/sdk").Legacy
 
 /**
  * 新会话容器内粘底滚动：内容追加后若用户未在容器内上翻则跟随滚动到底（与主聊天区粘底语义一致，
- * 用户上翻历史过程时停止跟随，回到底部后恢复）。
- * 状态挂在 body.dataset.sticky（"1"=跟随，"0"=用户已上翻）。
- * 与 jump-bottom 同构的程序滚动迟到事件防护：scroll 事件异步送达，期间内容可能已增长，
- * 事件报告的位置虽是我们刚设置的落位、却已不在当前底部——若按用户滚动处理会把跟随误翻为 "0"，
- * 导致容器内流式跟随悄悄失效。按 clamp 后的实际落位精确比对识别（scrollTop = scrollHeight
- * 会被浏览器钳制，必须读回 scrollTop 记录），命中则恢复跟随并续滚到最新底部。 */
-const sessionProgTarget = new WeakMap<HTMLElement, number>()
+ * 用户上翻历史过程时停止跟随，回到底部后恢复）。核心机制见 sticky-follow.ts（意图驱动）——
+ * 容器内流式高频更新同样存在「程序滚动事件迟到 + 内容增长被误判为用户滚动」的失效窗口。 */
+
+/** 容器贴底判定阈值（距底部 < 8px 视为贴底）。 */
+const SESSION_STICKY_THRESHOLD = 8
+
+/** 每个容器 body 的跟随核心（sessionRunBox 创建时绑定）。 */
+const sessionFollowers = new WeakMap<HTMLElement, StickyFollowHandle>()
 
 export function scrollSessionSticky(body: HTMLElement): void {
-  if (body.dataset.sticky === "0") return
-  body.scrollTop = body.scrollHeight
-  sessionProgTarget.set(body, body.scrollTop)
+  sessionFollowers.get(body)?.contentChanged()
 }
 
-/** 新会话容器滚动监听：用户上翻（未贴底）时停止跟随，滚回底部时恢复跟随。 */
 export function bindSessionScroll(body: HTMLElement): void {
-  body.dataset.sticky = "1"
-  body.addEventListener("scroll", () => {
-    const target = sessionProgTarget.get(body)
-    if (target !== undefined && body.scrollTop === target) {
-      // 程序滚动产生的滚动事件：恢复跟随；若内容在事件送达前已增长（目标过期、
-      // 位置已不在当前底部），继续滚动到最新底部。
-      sessionProgTarget.delete(body)
-      body.dataset.sticky = "1"
-      if (body.scrollHeight - body.scrollTop - body.clientHeight >= 8) body.scrollTop = body.scrollHeight
-      return
-    }
-    if (target !== undefined) sessionProgTarget.delete(body)
-    // 用户滚动（滚轮 / 触控板 / 键盘 / 滚动条拖动）：贴底自动恢复跟随，脱离底部立即解除
-    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 8
-    body.dataset.sticky = nearBottom ? "1" : "0"
-  })
+  if (!sessionFollowers.has(body)) {
+    sessionFollowers.set(body, createStickyFollow(body, { threshold: SESSION_STICKY_THRESHOLD, keepFrames: 120 }))
+  }
 }
 
 /**

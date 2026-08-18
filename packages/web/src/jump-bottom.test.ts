@@ -3,15 +3,14 @@ import { createStickyScroll } from "./sticky-scroll"
 
 /**
  * 粘底滚动（sticky-scroll.ts，jump-bottom 纯逻辑）单测：
- * 粘底锁定与「跳到最新」按钮显隐完全一致（同一 64px 阈值）：按钮隐藏 = 锁定跟随，
- * 按钮显示 = 用户阅读历史中不打扰。程序滚动与 scroll 事件送达之间存在时间窗，期间内容
- * 增长（工具调用卡片/长输出追加）会让迟到事件报告的位置「在目标却不在当前底部」，按
- * clamp 后的实际落位比对识别程序滚动——保持锁定并续滚到最新底部（`scrollTop = scrollHeight`
- * 会被钳制到 `scrollHeight - clientHeight`，须赋值后读回 scrollTop 记录，否则比对永不命中）。
+ * 按钮显隐 = 几何贴底（同一 64px 阈值），跟随切换机制见 sticky-follow.ts（意图驱动）——
+ * 用户滚动必须先发对应输入事件（wheel 等）再改位置/发 scroll 事件：真实浏览器中输入事件
+ * 必然先于其滚动效果。程序滚动与 scroll 事件送达之间存在时间窗，期间内容增长/收缩产生的
+ * 钳制与迟到事件由静默窗口归因为内部动作（保持跟随并回正），不误判为用户滚动。
  */
 
 interface Listener {
-  (): void
+  (ev?: unknown): void
 }
 
 /** 最小滚动容器 fake：模拟浏览器 scrollTop 的 clamp（上限 scrollHeight - clientHeight）与事件监听。 */
@@ -39,15 +38,22 @@ function makeEl(init: { scrollHeight: number; clientHeight: number }) {
     scrollTo(opts: { top: number }) {
       scrollTop = Math.max(0, Math.min(opts.top, scrollHeight - el.clientHeight))
     },
-    emit(type: string) {
-      for (const fn of listeners[type] ?? []) fn()
+    emit(type: string, ev?: unknown) {
+      for (const fn of listeners[type] ?? []) fn(ev)
     },
   }
-  return el as unknown as HTMLElement & { emit(type: string): void; scrollHeight: number; scrollTop: number }
+  return el as unknown as HTMLElement & { emit(type: string, ev?: unknown): void; scrollHeight: number; scrollTop: number }
 }
 
 function makeBtn() {
   return { hidden: true, onclick: null as (() => void) | null, click() { this.onclick?.() } }
+}
+
+/** 用户上滚：wheel 输入事件（先于滚动效果）+ 位置变化 + scroll 事件。 */
+function userScrollUp(el: ReturnType<typeof makeEl>, top: number) {
+  el.emit("wheel", { deltaY: -120 })
+  el.scrollTop = top
+  el.emit("scroll")
 }
 
 // RAF 同步执行（测试无需真实帧循环）；MutationObserver 仅注册
@@ -83,7 +89,7 @@ describe("sticky-scroll 粘底滚动", () => {
     // 工具调用卡片追加：内容在程序滚动事件送达前增长 → 迟到事件位置=旧底部、已不在当前底部
     el.scrollHeight = 2000
     el.emit("scroll")
-    expect(el.scrollTop).toBe(1800) // 识别为程序滚动：续滚到最新底部，跟随未失效
+    expect(el.scrollTop).toBe(1800) // 静默窗口内归因为内部动作：续滚到最新底部，跟随未失效
     // 后续内容仍持续跟随
     el.scrollHeight = 2400
     sticky.scrollIfSticky()
@@ -93,18 +99,33 @@ describe("sticky-scroll 粘底滚动", () => {
   test("用户上滚阅读历史：按钮显示、内容增长不拽回底部；滚回底部自动恢复锁定", () => {
     const { el, btn, sticky } = setup()
     sticky.lockToBottom()
-    el.scrollTop = 50
-    el.emit("scroll") // 用户上滚（距底部 750px > 阈值）→ 解除锁定，按钮显示
+    userScrollUp(el, 50)
     expect(btn.hidden).toBe(false)
     el.scrollHeight = 2000
     sticky.scrollIfSticky()
     expect(el.scrollTop).toBe(50) // 不打扰阅读历史
     el.scrollTop = 1800 // 滚回底部
-    el.emit("scroll") // → 恢复锁定，按钮隐藏
+    el.emit("scroll")
     expect(btn.hidden).toBe(true)
     el.scrollHeight = 2400
     sticky.scrollIfSticky()
     expect(el.scrollTop).toBe(2200) // 恢复跟随
+  })
+
+  test("内容收缩钳制（推理折叠/容器折叠）：贴底钳制事件保持锁定，收缩后增长继续跟随", () => {
+    const { el, btn, sticky } = setup()
+    sticky.lockToBottom()
+    expect(el.scrollTop).toBe(800)
+    el.scrollHeight = 600 // 内容收缩：浏览器钳制 scrollTop 到新底部
+    el.scrollTop = 400
+    el.emit("scroll")
+    expect(btn.hidden).toBe(true) // 贴底钳制：锁定保持、按钮隐藏
+    el.scrollHeight = 1000 // 收缩后内容又增长（位置已离开底部）
+    el.emit("scroll")
+    expect(el.scrollTop).toBe(800) // 回正到底，跟随未失效（旧实现此处静默死亡）
+    el.scrollHeight = 1400
+    sticky.scrollIfSticky()
+    expect(el.scrollTop).toBe(1200)
   })
 
   test("小幅上滚（阈值内，按钮不显示）仍视为锁定：内容增长继续跟随到底", () => {
@@ -119,16 +140,15 @@ describe("sticky-scroll 粘底滚动", () => {
     expect(el.scrollTop).toBe(1800) // 锁定未解除，拽回最新底部
   })
 
-  test("跳到最新按钮：按 clamp 落位比对，动画期间内容增长终点过期仍续滚并重新锁定", () => {
+  test("跳到最新按钮：点击落底重新锁定，事件迟到期间内容增长仍续滚", () => {
     const { el, btn, sticky } = setup()
     sticky.lockToBottom()
-    el.scrollTop = 50
-    el.emit("scroll") // 用户已上滚（解除锁定）
-    btn.click() // 滚动到旧底部 800
+    userScrollUp(el, 50) // 用户已上滚（解除锁定）
+    btn.click() // 滚动到底部 800
     expect(el.scrollTop).toBe(800)
-    el.scrollHeight = 2000 // 动画期间内容增长（终点过期）
+    el.scrollHeight = 2000 // 事件送达前内容增长（终点过期）
     el.emit("scroll") // 滚动终点事件
-    expect(el.scrollTop).toBe(1800) // 终点不在当前底部 → 续滚并重新锁定
+    expect(el.scrollTop).toBe(1800) // 终点不在当前底部 → 续滚并保持锁定
     el.scrollHeight = 2400
     sticky.scrollIfSticky()
     expect(el.scrollTop).toBe(2200) // 锁定保持，持续跟随
@@ -176,12 +196,12 @@ describe("sticky-scroll 粘底滚动", () => {
     }
   })
 
-  test("用户上翻但 scroll 事件未送达（rAF 先行）：对齐保持循环按程序落位比对停转，不拽回底部", async () => {
+  test("用户上翻但 scroll 事件未送达（rAF 先行）：对齐保持循环停转，不拽回底部", async () => {
     // 异步 rAF stub（keepTick 跨帧存活的拽底窗口）
     const origRaf = globalThis.requestAnimationFrame
     const timers = new Set<ReturnType<typeof setTimeout>>()
-    ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: (t: number) => void) => {
-      const t = setTimeout(() => cb(performance.now()), 8)
+    ;(globalThis as Record<string, unknown>).requestAnimationFrame = (cb: () => void) => {
+      const t = setTimeout(() => cb(), 8)
       timers.add(t)
       return 0
     }
@@ -192,11 +212,13 @@ describe("sticky-scroll 粘底滚动", () => {
       const sticky = createStickyScroll(el as unknown as HTMLElement, btn as unknown as HTMLElement)
       sticky.lockToBottom() // 落底 800 并启动 240 帧对齐保持循环
       expect(el.scrollTop).toBe(800)
-      el.scrollTop = 500 // 用户上翻，scroll 事件未送达（不 emit）——旧 following 仍为 true
+      // 用户上翻：wheel 输入事件先于滚动效果送达（scroll 事件可能滞后）
+      el.emit("wheel", { deltaY: -120 })
+      el.scrollTop = 500
       await Bun.sleep(60) // 数个 keepTick 帧窗口
       expect(el.scrollTop).toBe(500) // 不拽回底部
-      expect(btn.hidden).toBe(false) // 按位置解除锁定，按钮显示
-      // 迟到的 scroll 事件到达：按位置维持同一结论（阅读历史，内容增长不打扰）
+      expect(btn.hidden).toBe(false) // 按钮显示
+      // 迟到的 scroll 事件到达：维持同一结论（阅读历史，内容增长不打扰）
       el.emit("scroll")
       el.scrollHeight = 2000
       sticky.scrollIfSticky()
@@ -211,10 +233,20 @@ describe("sticky-scroll 粘底滚动", () => {
     const { el, sticky } = setup()
     sticky.lockToBottom()
     expect(el.scrollTop).toBe(800)
-    el.scrollTop = 500 // 用户上翻，scroll 事件未送达（不 emit）
+    el.emit("wheel", { deltaY: -120 }) // 用户上翻意图（scroll 事件未送达）
+    el.scrollTop = 500
     el.scrollHeight = 2000 // 内容增长触发跟随（rAF 同步执行）
     sticky.scrollIfSticky()
-    expect(el.scrollTop).toBe(500) // rAF 先行：按程序落位比对识别用户上翻，不拽回
+    expect(el.scrollTop).toBe(500) // rAF 先行：执行时跟随已解除，不拽回
+  })
+
+  test("stopFollowing（消息导航跳转）：显式解除后内容增长不拽走", () => {
+    const { el, sticky } = setup()
+    sticky.lockToBottom()
+    sticky.stopFollowing()
+    el.scrollHeight = 2000
+    sticky.scrollIfSticky()
+    expect(el.scrollTop).toBe(800)
   })
 
   test("restoreScroll：恢复历史位置同步锁定状态，未决跟随回调不把位置拽到底（loadMessages 尾部竞态）", async () => {
