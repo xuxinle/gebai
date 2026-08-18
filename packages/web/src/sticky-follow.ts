@@ -58,7 +58,8 @@ export interface StickyFollowHandle {
 export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = {}): StickyFollowHandle {
   const threshold = opts.threshold ?? 64
   const keepBudget = opts.keepFrames ?? 0
-  const now = opts.now ?? performance.now
+  // 不能直接取 performance.now：脱离宿主的 Performance 方法在浏览器抛 Illegal invocation（测试注入覆盖不到该路径）
+  const now = opts.now ?? (() => performance.now())
 
   let following = true
   let lastInternalAt = 0
