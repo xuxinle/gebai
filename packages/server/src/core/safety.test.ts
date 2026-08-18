@@ -14,7 +14,7 @@ describe("safe mode risky tool names", () => {
 
   test("只读/展示/交互类不命中", () => {
     for (const n of [
-      "read", "ls", "grep", "glob", "draw", "render_html", "fetch_url", "todo", "current_time",
+      "read", "ls", "grep", "glob", "draw", "render_html", "fetch_url", "todo", "ls",
       "code_read", "code_glob", "code_git", "widgets_save", "widgets_get", "widgets_list",
     ]) {
       expect(isRiskyToolName(n)).toBe(false)

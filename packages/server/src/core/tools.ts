@@ -1441,44 +1441,6 @@ export const readFeedbackTool: Tool = {
   },
 }
 
-/** 时区偏移文本（如 +08:00 / -05:30），供本地时间标注。 */
-function tzOffsetText(d: Date): string {
-  const off = -d.getTimezoneOffset()
-  const sign = off >= 0 ? "+" : "-"
-  const abs = Math.abs(off)
-  const pad = (n: number) => String(n).padStart(2, "0")
-  return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
-}
-
-const WEEKDAY_CN = ["日", "一", "二", "三", "四", "五", "六"]
-
-export const currentTimeTool: Tool = {
-  name: "current_time",
-  description: "获取当前时间（一次性给出多种格式，直接取用无需转换）：ISO 8601 / Unix 秒与毫秒 / 本地日期时间（含星期与时区偏移）。",
-  card: { args: "none" },
-  parameters: schema({}),
-  outputSchema: schema({
-    iso: { type: "string", description: "ISO 8601（UTC）" },
-    unix: { type: "integer", description: "Unix 秒" },
-    unixMs: { type: "integer", description: "Unix 毫秒" },
-    local: { type: "string", description: "本地日期时间（含星期与时区偏移）" },
-  }, ["iso", "unix", "unixMs", "local"]),
-  async execute() {
-    const now = new Date()
-    const pad = (n: number) => String(n).padStart(2, "0")
-    const localDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())} 星期${WEEKDAY_CN[now.getDay()]}（${tzOffsetText(now)}）`
-    return {
-      output:
-        `当前时间（多种格式，按需取用）:\n` +
-        `- ISO 8601: ${now.toISOString()}\n` +
-        `- Unix 秒: ${Math.floor(now.getTime() / 1000)}\n` +
-        `- Unix 毫秒: ${now.getTime()}\n` +
-        `- 本地日期时间: ${localDateTime}`,
-      data: { iso: now.toISOString(), unix: Math.floor(now.getTime() / 1000), unixMs: now.getTime(), local: localDateTime },
-    }
-  },
-}
-
 export const systemInfoTool: Tool = {
   name: "system_info",
   description: "获取系统信息（平台、架构、Node 版本、当前工作目录）。",
@@ -2219,7 +2181,8 @@ export function createGlobalTools(): Record<string, Tool> {
     ask_user: askUserTool,
     ask_env: askEnvTool,
     plan: planTool,
-    current_time: currentTimeTool,
+    // current_time 已移除：时间获取用 sh/py/js 脚本（如 sh date）按需完成，不占全局工具位；
+    // 刻意不注入时间相关提示词引导——模型自身知道如何用现有工具取时间
     // read_feedback 不注册进总Agent 全局工具集（读取用户反馈是自我优化专属输入通道，
     // 由 self_optimize 子Agent 以 self_optimize_read_feedback 命名空间暴露；def 声明保证新会话模式可用）
     // git 不注册进总Agent 全局工具集（只读 git 属编码工作流，由 code/explore 子Agent 以

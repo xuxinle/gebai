@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, currentTimeTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
+import { readTool, writeTool, editTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
 import { createGlobalTools, resolvePythonCmd, _resetPythonCmdCache } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -743,21 +743,7 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("current_time returns multiple time formats directly (ISO/Unix 秒与毫秒/本地含星期与时区)", async () => {
-    const out = (await currentTimeTool.execute({}, ctx(""))).output
-    // 四种格式一应俱全，后续无需再做格式转换；星期几合并进本地日期时间行
-    expect(out).toContain("ISO 8601: ")
-    expect(out).toContain("Unix 秒: ")
-    expect(out).toContain("Unix 毫秒: ")
-    expect(out).toContain("本地日期时间: ")
-    expect(out).toMatch(/本地日期时间: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} 星期[日一二三四五六]（[+-]\d{2}:\d{2}）/)
-    // 冗余的本地完整/UTC 完整两行已移除
-    expect(out).not.toContain("本地完整")
-    expect(out).not.toContain("UTC 完整")
-    // ISO 与 Unix 毫秒数值一致（同一时刻）
-    const iso = out.match(/ISO 8601: (.+)/)![1]
-    const ms = Number(out.match(/Unix 毫秒: (\d+)/)![1])
-    expect(Date.parse(iso)).toBe(ms)
+  test("system_info returns platform info (current_time 已移除：时间经 sh/py/js 脚本获取)", async () => {
     const si = await systemInfoTool.execute({}, ctx(""))
     expect(JSON.parse(si.output).platform).toBe(process.platform)
   })
@@ -772,7 +758,7 @@ describe("global tools", () => {
     for (const n of [
       "read", "write", "ls", "grep", "glob", "file",
       "edit", "flow", "sh", "py", "draw", "render_html", "fetch_url",
-      "todo", "ask_user", "ask_env", "plan", "current_time",
+      "todo", "ask_user", "ask_env", "plan",
       "agent_load", "agent_run",
     ]) {
       expect(tools[n]).toBeDefined()
@@ -1248,8 +1234,6 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     ] as import("@gebai/sdk").FileEntry[]
     const ls = await createGlobalTools().ls.execute({ path: "." }, c)
     expect(ls.data).toEqual({ entries: [{ path: "sub", isDir: true, size: 0 }, { path: "a.txt", isDir: false, size: 12 }] })
-    const t = await createGlobalTools().current_time.execute({}, c)
-    expect((t.data as { iso: string }).iso).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     cleanup(home)
   })
 

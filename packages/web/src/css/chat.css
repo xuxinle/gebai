@@ -2,7 +2,7 @@
 .msg-nav {
   position: absolute;
   top: 12px;
-  right: 10px;
+  right: 22px; /* 避让常显滚动条（10px）+ 间距；窄屏媒体查询内同步右移 */
   bottom: 56px; /* 避开右下「跳到最新」按钮 */
   width: 38px; /* 给活动条"探出"留出空间 */
   display: flex;
@@ -210,6 +210,14 @@
   overflow-wrap: anywhere;
   max-width: 100%;
   box-sizing: border-box;
+}
+/* 工具气泡内 markdown 输出（agent_run 最终返回/计划卡片）恢复正常换行语义：气泡的
+   pre-wrap 面向纯文本参数/输出（保留源换行）；markdown 渲染的软换行已是 <br>，
+   markdown-it 在 <br> 后保留的源 \n 若再按 pre-wrap 折行，每行之间会多出一个空行 */
+.msg.tool .bubble .markdown {
+  white-space: normal;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
 }
 /* 消息称谓行操作按钮组（复制/撤回/重新生成）：hover 消息时显示（JS .show），不占空间不遮盖 */
 .msg-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; transition: opacity 0.12s ease; }

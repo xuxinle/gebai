@@ -10,7 +10,7 @@ import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 class WsFake implements LLMProvider {
   readonly id = "fake"
   calls = 0
-  toolName = "current_time"
+  toolName = "ls"
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 1000 }
   }

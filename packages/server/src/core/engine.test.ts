@@ -19,7 +19,7 @@ import { loadConfig } from "./config"
 class FakeProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
-  toolName = "current_time"
+  toolName = "ls"
   /** 工具调用参数（除 ask_user 外的工具使用）。 */
   toolArgs: Record<string, unknown> = {}
   /** 每次 chat 调用收到的完整消息数组（子Agent 内部消息/工具结果断言用）。 */
@@ -1601,7 +1601,7 @@ console.log("defined ok")`,
     expect(toolMsg?.content).toContain("当前通道不可用")
     const root = sessionPath(s.home, "default", session.id)
     expect(existsSync(join(root, "tmp", "page.html"))).toBe(false)
-    // 未被禁用的工具照常执行（第二轮调用 current_time 完成）
+    // 未被禁用的工具照常执行（第二轮调用 ls 完成）
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(s.home)
   })
@@ -1612,20 +1612,20 @@ console.log("defined ok")`,
     await s.store.setEnv(session.id, "default", { GEBAI_MINIMAL_MODE: "true" })
     await s.engine.run(session.id, "default", "what time")
     const loaded = await s.store.load(session.id)
-    // 模型看到的 schema 仅 sh/edit + full_mode 切换入口（默认 first-call current_time 也被过滤）
+    // 模型看到的 schema 仅 sh/edit + full_mode 切换入口（默认 first-call ls 也被过滤）
     const seen = s.provider.seenTools[0]
     expect(seen).toContain("sh")
     expect(seen).toContain("edit")
     expect(seen).toContain("full_mode")
-    expect(seen).not.toContain("current_time")
+    expect(seen).not.toContain("ls")
     expect(seen).not.toContain("read")
     // 系统提示词极简化：保留极简说明，裁剪编排/子Agent 清单等（对应工具均不可用，注入纯属浪费上下文）
     const sys = String(s.provider.seenChats[0][0].content)
     expect(sys).toContain("极简模式")
     expect(sys).not.toContain("可选子Agent")
     expect(sys).not.toContain("数据流编排")
-    // 假模型仍调用 current_time → 执行被阻止，返回极简模式说明（含 full_mode 切换指引）
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "current_time")
+    // 假模型仍调用 ls → 执行被阻止，返回极简模式说明（含 full_mode 切换指引）
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ls")
     expect(toolMsg?.content).toContain("极简模式")
     expect(toolMsg?.content).toContain("full_mode")
     // 模型收到说明后第二轮直接回复，任务正常收尾
@@ -1650,10 +1650,10 @@ console.log("defined ok")`,
     const loaded = await s.store.load(session.id)
     // 第一轮（极简）：仅 sh/edit/full_mode，提示词为极简版
     expect(s.provider.seenTools[0]).toContain("full_mode")
-    expect(s.provider.seenTools[0]).not.toContain("current_time")
+    expect(s.provider.seenTools[0]).not.toContain("ls")
     expect(String(s.provider.seenChats[0][0].content)).toContain("极简模式")
     // 第二轮（已切换）：schema 全量下发（full_mode 自身随之隐藏），系统提示词升级为完整版
-    expect(s.provider.seenTools[1]).toContain("current_time")
+    expect(s.provider.seenTools[1]).toContain("ls")
     expect(s.provider.seenTools[1]).not.toContain("full_mode")
     expect(String(s.provider.seenChats[1][0].content)).toContain("可选子Agent")
     // 工具结果说明切换成功
@@ -1725,13 +1725,13 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("safe mode allows read-only tools (current_time) and keeps risky tools out of execution only", async () => {
-    const s = await setup("tool", false, "local", true) // safeMode=true；默认 current_time（只读）
+  test("safe mode allows read-only tools (ls) and keeps risky tools out of execution only", async () => {
+    const s = await setup("tool", false, "local", true) // safeMode=true；默认 ls（只读）
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "what time")
     const loaded = await s.store.load(session.id)
     // 只读工具照常执行
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "current_time")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ls")
     expect(toolMsg).toBeDefined()
     expect(toolMsg?.content).not.toContain("安全模式")
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
@@ -1789,7 +1789,7 @@ console.log("defined ok")`,
   })
 
   test("interactionMode=multi_turn 保留多轮交互类工具（ask_user/draw），禁用实时前端工具", async () => {
-    const s = await setup("tool") // 第一轮调 current_time（无交互），仅验证 schema 过滤
+    const s = await setup("tool") // 第一轮调 ls（无交互），仅验证 schema 过滤
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "do a thing", { interactionMode: "multi_turn" })
     // 实时前端工具禁用（与飞书通道行为一致）
@@ -1884,7 +1884,7 @@ console.log("defined ok")`,
     // ask_env 是模型驱动的 env 写入通道：多用户模式下不得借此设置审批跳过键
     const s = await setup("askenv", false, "server")
     s.provider.askEnvName = "GEBAI_APPROVAL_SKIP"
-    s.provider.askEnvSecondTool = "current_time" // 第二轮换无需审批工具，避免审批等待
+    s.provider.askEnvSecondTool = "ls" // 第二轮换无需审批工具，避免审批等待
     const session = await s.store.createSession("default", "t")
     const envReqs: string[] = []
     s.events.subscribe((e) => {
@@ -1921,8 +1921,8 @@ console.log("defined ok")`,
   })
 
   test("outputMode=final_only 不推送文本增量/推理流，仍推送 done 与工具事件", async () => {
-    const s = await setup("tool") // 第一轮 text "using tool" + tool_call current_time；第二轮文本收尾
-    s.provider.toolName = "current_time"
+    const s = await setup("tool") // 第一轮 text "using tool" + tool_call ls；第二轮文本收尾
+    s.provider.toolName = "ls"
     const session = await s.store.createSession("default", "t")
     const deltas: string[] = []
     const reasoning: string[] = []
@@ -1939,7 +1939,7 @@ console.log("defined ok")`,
     expect(deltas).toEqual([])
     expect(reasoning).toEqual([])
     // 结构化事件保留：工具调用事件与最终 done 正常推送
-    expect(toolCalls).toContain("current_time")
+    expect(toolCalls).toContain("ls")
     expect(dones.some((d) => d.includes("result after"))).toBe(true)
     cleanup(s.home)
   })
@@ -2137,7 +2137,7 @@ console.log("defined ok")`,
       calls++
       if (calls < 4) {
         yield { type: "text", text: "try again" }
-        yield { type: "tool_call", toolCall: { id: `tc-r${calls}`, name: "current_time", arguments: {} } }
+        yield { type: "tool_call", toolCall: { id: `tc-r${calls}`, name: "ls", arguments: {} } }
         yield { type: "done", stopReason: "tool_calls" }
         return
       }
@@ -2147,7 +2147,7 @@ console.log("defined ok")`,
     }
     await s.engine.run(session.id, "default", "do it")
     const loaded = await s.store.load(session.id)
-    const toolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.name === "current_time")
+    const toolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.name === "ls")
     // 前两次正常执行，第三次被中断（注入引导提示，未再次执行）
     expect(toolMsgs.filter((m) => String(m.content).includes("已中断重复的工具调用")).length).toBe(1)
     expect(toolMsgs.filter((m) => !String(m.content).includes("已中断重复的工具调用")).length).toBe(2)
@@ -2163,7 +2163,7 @@ console.log("defined ok")`,
     s.provider.chat = async function* () {
       calls++
       yield { type: "text", text: `round ${calls}` }
-      yield { type: "tool_call", toolCall: { id: `tc-s${calls}`, name: "current_time", arguments: {} } }
+      yield { type: "tool_call", toolCall: { id: `tc-s${calls}`, name: "ls", arguments: {} } }
       yield { type: "done", stopReason: "tool_calls" }
     }
     await s.engine.run(session.id, "default", "loop")

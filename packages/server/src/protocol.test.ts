@@ -15,7 +15,7 @@ class ProtocolFake implements LLMProvider {
   async *chat(_msgs: MessageLike[], _opts?: ChatOptions): AsyncIterable<LLMChunk> {
     this.calls++
     if (this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-1", name: "current_time", arguments: {} } }
+      yield { type: "tool_call", toolCall: { id: "tc-1", name: "ls", arguments: {} } }
       yield { type: "done" }
       return
     }

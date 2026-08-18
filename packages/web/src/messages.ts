@@ -23,7 +23,7 @@ import { askUserBubble, choiceBubble, displayToolName, envRequestBubble, isBlock
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
-import { scrollIfSticky } from "./jump-bottom"
+import { lockToBottom, scrollIfSticky } from "./jump-bottom"
 import { addMsgNavSeg } from "./msg-nav"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
@@ -390,12 +390,36 @@ export function appendCompactNotice(title: string, summary: string) {
   scrollIfSticky()
 }
 
-/** 封存文本段通用逻辑：取消低性能节流排期、移除流式光标、折叠推理块、清空累积（主循环与新会话容器共用）。 */
-function sealTextState(s: { renderTimer?: ReturnType<typeof setTimeout>; el: HTMLElement | null; reasoningEl: HTMLElement | null; acc: string; reasoningAcc: string }): void {
-  if (s.renderTimer) {
-    clearTimeout(s.renderTimer)
-    s.renderTimer = undefined
+/** 冲刷节流窗口内未上屏的流式内容（封段前调用）：作废排期并把累积文本/推理同步渲染进气泡，
+ *  与 main.ts renderStreamText 同构；不含滚动副作用（封段后紧跟工具卡片追加/容器折叠，滚动无意义）。 */
+function flushStreamRender(s: { renderTimer?: ReturnType<typeof setTimeout>; el: HTMLElement | null; reasoningEl: HTMLElement | null; acc: string; reasoningAcc: string }): void {
+  clearTimeout(s.renderTimer)
+  s.renderTimer = undefined
+  if (s.reasoningEl?.isConnected) {
+    const rb = s.reasoningEl.querySelector<HTMLElement>(".reasoning-body")
+    if (rb) {
+      rb.textContent = ""
+      if (s.reasoningAcc.trim()) rb.appendChild(markdownBlock(s.reasoningAcc.trim()))
+    }
   }
+  if (!s.acc || !s.el?.isConnected) return
+  const bubble = s.el.querySelector<HTMLElement>(".msg-body .bubble")
+  if (!bubble) return
+  let textWrap = bubble.querySelector<HTMLElement>(".msg-text")
+  if (!textWrap) {
+    textWrap = el("div", "msg-text")
+    bubble.appendChild(textWrap)
+  }
+  textWrap.innerHTML = ""
+  textWrap.appendChild(assistantContent(s.acc))
+}
+
+/** 封存文本段通用逻辑：冲刷未上屏的节流窗口内容、移除流式光标、折叠推理块、清空累积（主循环与新会话容器共用）。 */
+function sealTextState(s: { renderTimer?: ReturnType<typeof setTimeout>; el: HTMLElement | null; reasoningEl: HTMLElement | null; acc: string; reasoningAcc: string }): void {
+  // 节流排期待触发 = acc/reasoningAcc 存在未上屏增量：先同步冲刷最后一帧再清零，
+  // 否则封段前最后一个节流窗口（120ms）内的内容永久丢失——快速模型整轮回复可全部
+  // 落在一个窗口内，气泡残留空白（agent_run 执行过程「只见结果不见过程」的主因）
+  if (s.renderTimer) flushStreamRender(s)
   // 无条件移除流式光标：工具执行期间即使正文为空（只有推理/无内容）也不应持续闪烁；
   // 工具调用后若继续输出，文本/推理分支会惰性重建 streaming 气泡
   if (s.el?.isConnected) s.el.classList.remove("streaming")
@@ -758,6 +782,10 @@ export function renderChoiceCard(
   wrapper.appendChild(body)
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
+  // 计划审批（服务端 plan 工具提示词前缀「请审核计划」）：计划全文卡片在消息流底部，
+  // 用户可能正上翻阅读历史——滚动到底把计划展示出来再作审批决策（选择卡片本身在
+  // 消息流下方常驻可见，缺的是消息流里的计划内容）
+  if (prompt.startsWith("请审核计划") && getCurrentSession()?.id === sessionId) lockToBottom()
 }
 
 /** 环境变量请求卡片（event.env.request 实时渲染，绑定 envId 提交用户填值）。渲染到审批容器（同选择卡片）。 */

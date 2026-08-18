@@ -903,13 +903,13 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 #messages {
   flex: 1;
   overflow-y: auto;
-  scrollbar-width: none; /* 隐藏滚动条：由右侧小地图承担滚动感知与导航 */
+  /* 滚动条保留常显（消息导航小地图只承担定位导航，滚动位置感知仍需滚动条；
+     右侧导航条已右移避让，见 chat.css .msg-nav） */
   padding: 20px clamp(16px, 4vw, 48px);
   display: flex;
   flex-direction: column;
   gap: var(--msg-gap);
 }
-#messages::-webkit-scrollbar { display: none; }
 #messages.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
 
 /* ---------- 响应式（窄屏折叠侧栏） ---------- */
