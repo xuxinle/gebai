@@ -364,11 +364,29 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
 }
 
 if (import.meta.main) {
-  await ensureWebDistBuilt()
-  startServer().catch((err) => {
+  // 隐藏子命令 `gebai exec <script.ts>`（DESIGN「脚本执行环境」）：复用编译进二进制的 Bun 运行时
+  // 自执行 JS/TS 脚本（js 脚本工具二进制模式的子进程入口）；脚本调试模式下 bun 直跑脚本，不经此路径
+  if (process.argv[2] === "exec" && process.argv[3]) {
+    await importExecScript(process.argv[3])
+  } else {
+    await ensureWebDistBuilt()
+    startServer().catch((err) => {
+      console.error(err)
+      process.exit(1)
+    })
+  }
+}
+
+/** `gebai exec` 子命令实现：动态 import 目标脚本（模块顶层执行；退出码由脚本自身 process.exit 决定）。 */
+async function importExecScript(file: string): Promise<void> {
+  const { resolve } = await import("node:path")
+  const { pathToFileURL } = await import("node:url")
+  try {
+    await import(pathToFileURL(resolve(file)).href)
+  } catch (err) {
     console.error(err)
     process.exit(1)
-  })
+  }
 }
 
 /**

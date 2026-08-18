@@ -38,7 +38,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -258,12 +258,18 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    if (this.mode === "dyn" && this.calls === 2) {
+      // 动态工具在第二轮已进入 schema：模型直接调用（js 脚本 defineTool 注册的会话级工具）
+      yield { type: "tool_call", toolCall: { id: "tc-2", name: "hello_tool", arguments: { who: "test" } } }
+      yield { type: "done" }
+      return
+    }
     yield { type: "text", text: `result after ${this.calls - 1} tool rounds` }
     yield { type: "done" }
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -468,6 +474,81 @@ describe("AgentEngine", () => {
     expect(JSON.stringify(visited).includes("huge_out_")).toBe(true)
     cleanup(home)
   })
+
+  test("js defineTool 注册的会话级动态工具：落盘持久化、重启恢复、随 forgetSession 释放", async () => {
+    const { home, engine, store, provider, registry, sandbox, env, events, subAgents, config } = await setup("dyn")
+    provider.toolName = "js"
+    provider.toolArgs = {
+      code: `await defineTool({
+  name: "hello_tool",
+  description: "向 who 问好（运行时定义工具）",
+  parameters: { type: "object", properties: { who: { type: "string" } }, required: ["who"] },
+  requiresApproval: false,
+  async execute(args) {
+    return { output: "hello, " + args.who }
+  },
+})
+console.log("defined ok")`,
+      approval: false,
+    }
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "define a tool")
+    // 第二轮 schema 包含动态工具（defineTool 后会话覆盖层立即可见）
+    expect(provider.seenTools[1].includes("hello_tool")).toBe(true)
+    // 定义清单落盘 chat.json（SessionData.dynamicTools，重启恢复的持久化载体）
+    const loaded = await store.load(session.id)
+    expect(loaded!.dynamicTools?.some((t) => t.name === "hello_tool")).toBe(true)
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.content.includes("hello, test"))
+    expect(toolMsg).toBeDefined()
+    // 重启恢复（模拟进程重启：同 store/home 新建引擎）：会话无需重新定义，按名调用直接执行（磁盘水合）
+    const provider2 = new FakeProvider("tool")
+    provider2.toolName = "hello_tool"
+    provider2.toolArgs = { who: "restart" }
+    const engine2 = new AgentEngine({ provider: provider2, registry, store, env, sandbox, events, config, subAgents, retryBackoffMs: 5, authMode: "local" })
+    await engine2.run(session.id, "default", "again")
+    const after = await store.load(session.id)
+    expect(after!.messages.some((m) => m.role === "tool" && m.content.includes("hello, restart"))).toBe(true)
+    // forgetSession（会话删除路径）释放内存态：新建会话运行后不再可见（磁盘定义随会话删除清理）
+    engine.forgetSession(session.id)
+    engine2.forgetSession(session.id)
+    const session2 = await store.createSession("default", "t2")
+    await engine.run(session2.id, "default", "again")
+    // 最后一轮 chat 的 schema 不再含 hello_tool（新会话无覆盖层）
+    const lastSeen = provider.seenTools[provider.seenTools.length - 1]
+    expect(lastSeen.includes("hello_tool")).toBe(false)
+    cleanup(home)
+  }, 60000)
+
+  test("安全模式：磁盘持久化的动态工具不水合（只读承诺无绕过通道）", async () => {
+    const { home, engine, store, provider, registry, sandbox, env, events, subAgents } = await setup("dyn")
+    provider.toolName = "js"
+    provider.toolArgs = {
+      code: `await defineTool({
+  name: "hello_tool",
+  description: "向 who 问好（运行时定义工具）",
+  parameters: { type: "object", properties: { who: { type: "string" } }, required: ["who"] },
+  requiresApproval: false,
+  async execute(args) {
+    return { output: "hello, " + args.who }
+  },
+})`,
+      approval: false,
+    }
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "define a tool")
+    expect((await store.load(session.id))!.dynamicTools?.some((t) => t.name === "hello_tool")).toBe(true)
+    // 重启进安全模式：水合被跳过——schema 无动态工具、按名调用报未知工具，任意代码不执行
+    const configSafe = loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: [], binaryMode: false, safeMode: true })
+    const providerSafe = new FakeProvider("tool")
+    providerSafe.toolName = "hello_tool"
+    providerSafe.toolArgs = { who: "bypass" }
+    const engineSafe = new AgentEngine({ provider: providerSafe, registry, store, env, sandbox, events, config: configSafe, subAgents, retryBackoffMs: 5, authMode: "local" })
+    await engineSafe.run(session.id, "default", "again")
+    expect(providerSafe.seenTools[0].includes("hello_tool")).toBe(false)
+    const after = await store.load(session.id)
+    expect(after!.messages.some((m) => m.role === "tool" && m.content.includes("hello, bypass"))).toBe(false)
+    cleanup(home)
+  }, 60000)
 
   test("cancel during tool execution interrupts the tool and stops the task", async () => {
     const { home, engine, store, registry, provider, events } = await setup("tool")

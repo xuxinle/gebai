@@ -9,9 +9,10 @@ import type { Sandbox } from "./sandbox"
 import type { EventBus } from "./event-bus"
 import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
-import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData } from "./types"
+import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
 import { agentListTool, agentLoadTool, agentRunTool, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
+import { jsTool, makeDynamicTool } from "./js-tool"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isRiskyToolName, safeModeRestrictionMsg } from "./safety"
@@ -269,15 +270,98 @@ export class AgentEngine {
   /** 单会话已读登记上限（防长会话无界增长；超出整表重置——守卫降级为「需重读」，保护语义不破坏）。 */
   private static readonly READ_TRACK_CAP = 2000
 
+  /** 会话级运行时定义工具（js defineTool，DESIGN「js 脚本工具」运行时工具定义）：sessionId → (工具名 → {Tool, 定义})。
+   *  定义随会话 chat.json 落盘（SessionData.dynamicTools）、run() 水合恢复，随会话删除释放；
+   *  模型可见性经 sessionRegistry 覆盖层并入；执行用 Tool、持久化用 def（execute 源码序列化）。 */
+  private dynamicTools = new Map<string, Map<string, { tool: Tool; def: DynamicToolDef }>>()
+  /** 单会话动态工具上限（防注册风暴；重启水合同限）。 */
+  private static readonly DYNAMIC_TOOLS_CAP = 50
+
   constructor(private opts: AgentEngineOptions) {}
 
   isRunning(sessionId: string): boolean {
     return this.tasks.has(sessionId)
   }
 
-  /** 会话删除时释放其运行态（已读文件追踪等）；幂等，供 REST/WS 删除会话入口调用。 */
+  /** 会话删除时释放其运行态（已读文件追踪/动态工具等）；幂等，供 REST/WS 删除会话入口调用。 */
   forgetSession(sessionId: string): void {
     this.readFiles.delete(sessionId)
+    this.dynamicTools.delete(sessionId)
+  }
+
+  /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层）：runLoop/buildContext 经此解析，
+   *  动态工具定义后同任务后续轮次 schema 立即可见、脚本内可直接按名调用。 */
+  private sessionRegistry(sessionId: string): Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames"> {
+    const base = this.opts.registry
+    const self = this
+    return {
+      schemas: (enabledOnly = true) => {
+        const dyn = [...(self.dynamicTools.get(sessionId)?.values() ?? [])].map(({ tool }) => ({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters as unknown as Record<string, unknown>,
+        }))
+        return [...dyn, ...base.schemas(enabledOnly)]
+      },
+      resolve: (name: string) => {
+        const dyn = self.dynamicTools.get(sessionId)?.get(name.replace(/[-.:]/g, "_"))
+        if (dyn) return { name: dyn.tool.name, tool: dyn.tool, enabled: true }
+        const rt = base.resolve(name)
+        return rt ? { name: rt.name, tool: rt.tool, agent: rt.agent, enabled: rt.enabled } : undefined
+      },
+      getAgentNames: () => base.getAgentNames(),
+    }
+  }
+
+  /** 注册会话级动态工具（js defineTool RPC → ToolContext.defineDynamicTool）：校验命名/重名/命名空间
+   *  碰撞与安全模式后并入覆盖层，并随会话 chat.json 落盘（重启恢复）。 */
+  private async registerDynamicTool(sessionId: string, user: string, def: DynamicToolDef): Promise<void> {
+    if (this.opts.config.safeMode) throw new Error("安全模式：运行时工具定义不可用（js 脚本工具整体受限）")
+    const tool = makeDynamicTool(def)
+    const view = this.sessionRegistry(sessionId)
+    if (view.resolve(tool.name)) throw new Error(`工具名已存在: ${tool.name}（与现有工具/已定义工具冲突，请换名）`)
+    for (const agent of view.getAgentNames()) {
+      if (tool.name.startsWith(`${agent}_`)) throw new Error(`工具名 ${tool.name} 与子Agent 命名空间冲突（${agent}_ 前缀保留）`)
+    }
+    let m = this.dynamicTools.get(sessionId)
+    if (!m) {
+      m = new Map()
+      this.dynamicTools.set(sessionId, m)
+    }
+    if (m.size >= AgentEngine.DYNAMIC_TOOLS_CAP) throw new Error(`本会话动态工具数量超上限（${AgentEngine.DYNAMIC_TOOLS_CAP}）`)
+    // 持久化用定义（makeDynamicTool 校验/归一化后的形态）：parameters 取归一化 schema，源码去首尾空白；
+    // requiresApproval 始终显式写布尔（默认 true 语义下省略键会被水合回 true，显式 false 定义必须保真）
+    const persisted: DynamicToolDef = {
+      name: tool.name,
+      description: def.description.trim(),
+      parameters: tool.parameters as unknown as Record<string, unknown>,
+      source: def.source.trim(),
+      requiresApproval: tool.requiresApproval === true,
+    }
+    m.set(tool.name, { tool, def: persisted })
+    // 落盘 chat.json（store 缓存与 runLoop 消息追加同一引用，单任务/会话串行无并发写冲突）
+    const session = await this.opts.store.load(sessionId, user)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    session.dynamicTools = [...m.values()].map((x) => x.def)
+    await this.opts.store.save(session)
+  }
+
+  /** run() 水合会话级动态工具（重启恢复）：按 chat.json 持久化定义重建 Tool 并入覆盖层。
+   *  防御：损坏定义/与全局工具重名跳过（手工编辑等），水合数量受 DYNAMIC_TOOLS_CAP 限制；
+   *  安全模式（GEBAI_SAFE_MODE）不水合——动态工具 execute 为任意代码，与只读承诺冲突（绕过通道）。 */
+  private async hydrateDynamicTools(sessionId: string, session: SessionData): Promise<void> {
+    const defs = session.dynamicTools
+    if (!defs?.length || this.opts.config.safeMode) return
+    const m = this.dynamicTools.get(sessionId) ?? new Map<string, { tool: Tool; def: DynamicToolDef }>()
+    for (const d of defs.slice(0, AgentEngine.DYNAMIC_TOOLS_CAP)) {
+      if (m.has(d.name) || this.opts.registry.resolve(d.name)) continue
+      try {
+        m.set(d.name, { tool: makeDynamicTool(d), def: d })
+      } catch {
+        /* 损坏定义（手工编辑等）：跳过，不阻塞会话 */
+      }
+    }
+    if (m.size) this.dynamicTools.set(sessionId, m)
   }
 
   /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件（绝对路径）。 */
@@ -880,6 +964,8 @@ export class AgentEngine {
     // 会话级子Agent 装载保障（DESIGN「装载 vs 新会话执行」）：新会话按启动预载名单初始化
     // （工具注册 + 提示词 system 消息写入会话记录），恢复历史会话时按会话记录重新注册工具并补齐提示词消息
     await this.ensureSessionAgents(session)
+    // 会话级动态工具水合（重启恢复）：js defineTool 注册的定义随 chat.json 落盘，run() 时重建
+    await this.hydrateDynamicTools(sessionId, session)
     const controller = new AbortController()
     const task: TaskState = { controller, approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
     this.tasks.set(sessionId, task)
@@ -958,7 +1044,7 @@ export class AgentEngine {
           user,
           messages,
           systemPrompt,
-          registry: this.opts.registry,
+          registry: this.sessionRegistry(sessionId),
           signal: controller.signal,
           env,
           provider: taskProvider,
@@ -1155,7 +1241,7 @@ export class AgentEngine {
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
       `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
-      `复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行(支持 {{步骤id.data.字段}} 引用映射、when 分支、foreach/while 循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述)，或编写脚本（sh/py）一次执行，避免大量单步工具调用浪费往返与词元。`,
+      `复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行(支持 {{步骤id.data.字段}} 引用映射、when 分支、foreach/while 循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述)；流程逻辑复杂(flow 表达式写不出：动态参数、条件重试、跨步骤聚合等)时用 js 脚本动态编程一次执行(脚本内工具像内置函数一样直接 \`await read(params)\` 调用、ctx 注入会话上下文，详见 js 工具描述)；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先制定计划：调用 plan 工具把计划文档写入会话文件并在界面展示，阻塞等待用户批准后再执行（被拒绝则按修改意见修订计划后重新提交 plan）；简单任务无需 plan，直接用 todo 跟踪即可。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
@@ -1304,7 +1390,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: ToolRegistry; writeGuard?: ToolContext["writeGuard"] },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void> },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1325,6 +1411,21 @@ export class AgentEngine {
       home: this.opts.config.gebaiHome,
       env,
       sandboxed: sandbox.enforcedFor(user),
+      // 任务取消信号：js 脚本工具等监听中止并终止子进程（sh/py 经 runCommand 默认注入 execSignal）
+      signal,
+      // 会话上下文快照（js 脚本工具 ctx.messages 注入源）：live messages 数组按需取值，
+      // 文本抽取（内容块取 text 段）、跳过 system/空消息；条数/单条长度截断由 js-tool 侧负责
+      recentMessages: opts?.messages
+        ? () =>
+            (opts!.messages ?? [])
+              .filter((m) => m.role !== "system")
+              .map((m) => ({
+                role: m.role,
+                ...(m.name ? { name: m.name } : {}),
+                content: typeof m.content === "string" ? m.content : (m.content ?? []).map((b) => (typeof b?.text === "string" ? (b.text as string) : "")).filter(Boolean).join("\n"),
+              }))
+              .filter((m) => m.content.trim().length > 0)
+        : undefined,
       safeMode: this.opts.config.safeMode,
       fileGuard: this.fileGuardFor(sessionId),
       // 写范围守卫：显式传入（新会话模式：预加载子Agent 名单静态已知）或按会话装载名单动态收集（装载模式）
@@ -1453,6 +1554,9 @@ export class AgentEngine {
       },
       // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；深度 +1 限制递归嵌套
       runNewSession: (agents, input) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1),
+      // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
+      // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
+      defineDynamicTool: opts?.registerDynamic,
       waitForChoice: (prompt, options, multi) => self.waitForChoice(sessionId, prompt, options, multi, execSignal),
       waitForEnv: (name, description, secret) => self.waitForEnv(sessionId, name, description ?? "", secret === true, execSignal),
       waitForDraw: (render) => self.waitForDraw(sessionId, render, execSignal),
@@ -1582,7 +1686,7 @@ export class AgentEngine {
     user: string
     messages: MessageLike[]
     systemPrompt: string
-    registry: ToolRegistry
+    registry: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">
     signal: AbortSignal
     env: Record<string, string>
     provider: LLMProvider
@@ -1603,7 +1707,7 @@ export class AgentEngine {
     // 连续中断超过 MAX_REPEAT_STALLS 次终止循环，避免无效空转
     const recentCalls: string[] = []
     let repeatStalls = 0
-    const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages }, 0)
+    const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages, registry, registerDynamic: (def) => this.registerDynamicTool(sessionId, user, def) }, 0)
 
     while (rounds < MAX_TOOL_ROUNDS) {
       if (signal.aborted) throw new Error("cancelled")
@@ -1702,6 +1806,14 @@ export class AgentEngine {
           // 安全模式（DESIGN「安全模式」）：风险工具（命令执行/写删文件/定时任务调度）不执行、不弹审批，
           // 直接返回限制信息给模型（模型仍可见 schema，可据此改用只读方案）
           const safeMsg = safeModeRestrictionMsg(rt.name)
+          await persist({ id: crypto.randomUUID(), role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
+          messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        if (this.opts.config.safeMode && rt.tool.runtimeDefined) {
+          // 安全模式纵深防御：动态工具（js defineTool 注册）execute 为任意代码，与只读承诺冲突——
+          // 水合/注册入口均已拦截，此处兜底防未来注册通道疏漏（不执行、不弹审批）
+          const safeMsg = `安全模式：工具 ${rt.name} 已限制（运行时定义工具的 execute 为任意代码，安全模式下不提供）。请改用只读方式。`
           await persist({ id: crypto.randomUUID(), role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name, createdAt: Date.now() })
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue
@@ -1904,9 +2016,11 @@ export class AgentEngine {
         }
       }
     }
-    // 数据流编排能力（与总Agent 主循环一致）：新会话内同样可用 flow 一次编排多步、tool_schemas 批量查询输出结构
+    // 数据流编排能力（与总Agent 主循环一致）：新会话内同样可用 flow 一次编排多步、tool_schemas 批量查询输出结构、
+    // js 脚本动态编程（直接调用工具 + 会话上下文注入）
     reg.register(makeFlowTool())
     reg.register(toolSchemasTool)
+    reg.register(jsTool)
 
     // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；
     // 每个子Agent 前加职责分隔头（名称 + 能力描述），明确各段提示词对应的工具命名空间与职责域，多 Agent 预加载时不混淆
@@ -1942,7 +2056,7 @@ export class AgentEngine {
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述），或编写脚本（sh/py）一次执行，避免大量单步工具调用浪费往返与词元。\n\n${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述）；流程逻辑复杂时用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。\n\n${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]
@@ -2058,7 +2172,10 @@ export class AgentEngine {
     // 取消中止判定：新会话执行不设独立超时，中止仅由父任务取消传播（报「已取消」）
     const activeSignal = signal
     const abortReason = () => (activeSignal.reason instanceof Error ? activeSignal.reason.message : activeSignal.reason ? String(activeSignal.reason) : "cancelled")
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env) }, depth)
+    // 会话上下文注入：messages 透传 buildContext（js 脚本工具 ctx.messages 快照源）；
+    // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄主会话）；
+    // 安全模式拒绝（与主会话 registerDynamicTool 同规则，js 工具已拦截，此为纵深防御）
+    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { if (this.opts.config.safeMode) throw new Error("安全模式：运行时工具定义不可用（js 脚本工具整体受限）"); reg.register(makeDynamicTool(def)) } }, depth)
     // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）
     const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
@@ -2140,6 +2257,13 @@ export class AgentEngine {
         if (this.isRiskyInSafeMode(rt.name)) {
           // 安全模式：子Agent 内风险工具同样拦截（与主循环一致），返回限制信息供子Agent 调整方案
           const safeMsg = safeModeRestrictionMsg(rt.name)
+          await pushArchive({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
+          messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        if (this.opts.config.safeMode && rt.tool.runtimeDefined) {
+          // 与主循环一致的安全模式纵深防御：动态工具（任意代码）在安全模式下不执行（见主循环同段注释）
+          const safeMsg = `安全模式：工具 ${rt.name} 已限制（运行时定义工具的 execute 为任意代码，安全模式下不提供）。请改用只读方式。`
           await pushArchive({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
           continue

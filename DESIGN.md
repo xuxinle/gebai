@@ -448,7 +448,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **数据隔离**：会话、临时文件、截断内容均存储于 `{GEBAI_HOME}/users/{user}/` 下，用户之间互不可见
 - **会话归属校验**：任何会话操作（读取、切换、发送、删除）均校验当前登录用户与会话所有者一致，禁止跨用户访问
 - **路径沙箱**：服务端部署模式下，文件类工具（`read`/`write` 等）的相对路径统一以当前会话 `tmp/` 为基准（见「路径基准」），仅允许访问该目录内路径，对目录外路径一律拒绝，防止路径穿越（`../`、绝对路径、符号链接）；**桌面/本地浏览器模式默认不启用目录限制**，可访问本机任意路径（由 `GEBAI_SANDBOX` 控制，默认按运行形态自动选择）；**仅本地模式默认用户（id=admin）豁免路径沙箱**（`Sandbox.isExempt`/`enforcedFor(user)` 按用户判定：本地模式是操作者本人机器、豁免用户即使沙箱启用也按本地模式放开；**服务模式一律沙箱**——admin 也不豁免，多租户边界一致）；**`GEBAI_SANDBOX=off` 与服务模式互斥**（启动即拒绝：多租户 + 关沙箱会让 files 接口回退裸 `resolve` 可 `../` 越界读任意路径，安全配置错误在启动期暴露）
-- **脚本隔离**：`sh`/`py` 脚本以独立子进程运行，工作目录限定为当前会话 `tmp/`，环境变量注入当前用户上下文；**沙箱（服务端部署）模式下脚本子进程环境剔除敏感变量**（`*_KEY`/`*_TOKEN`/`*_SECRET`/`PASSWORD` 等，防止任意用户经脚本 `env`/读取外泄服务端全局密钥；**豁免用户（admin，特权用户）不剔除**，本地模式不剔除）；JS/TS 脚本优先通过**内置运行时自执行**（见「脚本执行环境」），不依赖宿主机安装 bun/node
+- **脚本隔离**：`sh`/`py`/`js` 脚本以独立子进程运行，工作目录限定为当前会话 `tmp/`，环境变量注入当前用户上下文；**沙箱（服务端部署）模式下脚本子进程环境剔除敏感变量**（`*_KEY`/`*_TOKEN`/`*_SECRET`/`PASSWORD` 等，防止任意用户经脚本 `env`/读取外泄服务端全局密钥；**豁免用户（admin，特权用户）不剔除**，本地模式不剔除；`js` 的会话上下文注入 `ctx.env` 同规则脱敏）；JS/TS 脚本优先通过**内置运行时自执行**（见「脚本执行环境」），不依赖宿主机安装 bun/node
 - **桌面控制隔离**：`desktop`（截图/窗口控制/键盘鼠标输入）是对宿主机桌面的真实操作，**仅本地/桌面模式或沙箱豁免用户可用**——服务端部署（沙箱约束用户）下全部工具一律拒绝执行；输入/点击/窗口控制类工具默认需审批，防远程滥用与误操作。部署警示：**服务模式（`GEBAI_SANDBOX=auto` 时）自动强制启用沙箱**，阻断远程桌面操控（admin 豁免除外）
 - **浏览器隔离**：`playwright`（无头浏览器自动化）运行在**隔离的浏览器环境**（独立 Chromium 进程，不触宿主机桌面/文件系统），服务端部署可用；但导航/交互/脚本类工具（`open`/`click`/`fill`/`press`/`select`/`check`/`evaluate`/`new_page`）默认需审批——防远程用户借服务端浏览器探测内网（SSRF）、提交表单或执行任意页面脚本；浏览器上下文按会话隔离，`evaluate` 可读取页面内数据（含表单值/cookie），仅限审批后执行
 - **Webhook SSRF 防护**：Webhook 注册默认拒绝回环/链路本地/云元数据地址（`localhost`、`127.*`、`169.254.*`、`::1`、`fe80:*` 及其 IPv4-mapped/尾点 FQDN 等绕过形式），需内网回调时以 `GEBAI_WEBHOOK_ALLOW_PRIVATE=true` 显式放开；**投递同样带逐跳重定向校验**（复用 `fetchWithRedirectGuard`，每跳 Location 重新过 `checkWebhookUrl`，防「注册公网 URL → 302 内网/元数据」跳板绕过注册期校验，与 `fetch_url`/`http_request` 同口径）
@@ -456,7 +456,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **环境变量隔离**：**用户环境变量服务端零留存**（只存浏览器本地 localStorage，服务端不落任何 env 文件；会话内存态 env 不落盘、重启即空），用户间互不可见；子Agent 仅能访问 `{AGENT_NAME_UPPER}_*` 前缀，敏感变量（密钥/令牌）脱敏显示
 - **子Agent共享**：子Agent 为服务端内置代码，构建时编译进二进制，全局共享、只读、无用户差异
 - **审批隔离**：`/approval-skip` 为会话级设置，仅作用于当前会话（会话内存态 env，不落盘），不影响其他用户；**用户本人可设置自己的会话**（前端开关、REST `PUT /env`、WS `session.env.set`、飞书 `/approval-skip` 命令——写入只影响本人会话，非管理员仍受路径/脚本/网络沙箱完整约束）；**ask_env 填值通道服务模式下一律拒绝 `GEBAI_APPROVAL_SKIP`**——模型驱动的写入不得自设审批跳过（防提示词注入诱导），本地/单用户模式不受限
-- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`）、文件修改（`write`/`edit`/`patch`/`file`（rename/move/delete））、删除类（`widgets_delete` 等 `delete` 短名）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write`/`{agent}_file` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`flow` 数据流编排工具在 step 层同规则拦截（其直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
+- **安全模式（`GEBAI_SAFE_MODE`）**：部署方可在启动时开启只读模式（**仅启动时从 .env/环境变量加载，不进会话/任务级 env，`ask_env` 与前端本地 env 注入均无法修改**）——命令执行（`sh`/`py`/`js`）、文件修改（`write`/`edit`/`patch`/`file`（rename/move/delete））、删除类（`widgets_delete` 等 `delete` 短名）、定时任务调度（`cron_add`/`cron_update`/`cron_remove`）及子Agent 同名短工具（`{agent}_sh`/`{agent}_write`/`{agent}_file` 等）在主循环与新会话执行循环前被阻止：模型调用时**直接返回限制信息**（不执行、不弹审批、说明消息落盘），模型仍可见工具 schema 并可据此改用只读方案；只读操作（`read`/`ls`/`grep`/`fetch_url` 等）不受影响。**无绕过通道**：`flow` 数据流编排工具在 step 层、`js` 脚本工具在 RPC 分发层同规则拦截（两者直接执行工具、不经引擎拦截点）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
 
 ### 总Agent
@@ -1084,10 +1084,10 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 |------|---------|-----------|
 | `sh` | 子进程执行 shell（Windows 自动 `chcp 65001` 切 UTF-8 代码页 + 输出自适应解码：UTF-8 优先、含替换字符回退 GBK；Windows 子进程不设 detached——实测会导致外部程序管道输出丢失；命令成功但无输出时明确提示「无输出」，区分捕获失败；**`timeout` 参数（秒，默认 300、上限 540）调整个别执行超时**） | 有 shell（各平台自带） |
 | `py` | 子进程执行 python（**`timeout` 参数同 `sh`**） | 安装 Python |
-| JS/TS | **内置运行时自执行**：二进制以隐藏子命令（如 `gebai exec`）自执行脚本，复用**编译进二进制的 Bun 运行时**，子进程隔离 | **无需安装 bun/node** |
+| `js` | 子进程执行 JS/TS（Bun 运行时：脚本调试模式 `bun <script>` 直跑；二进制模式 `gebai exec <script>` 复用**编译进二进制的 Bun 运行时**自执行，见「js 脚本工具」；**`timeout` 参数同 `sh`**） | **无需安装**（运行时已内嵌） |
+| JS/TS（经 `sh`） | 宿主机已有 `node`/`bun` 时 `sh` 直接调用亦可（`bun run x.ts` / `node x.js`），与 `js` 工具两条路径并存 | 安装 bun/node |
 
-- 二进制编译时已内嵌 Bun 运行时，`gebai exec` 子命令让 `sh` 工具即使在没有 bun/node 的宿主机上也能运行 JS/TS 脚本，同时保持子进程隔离（不回到进程内执行）
-- 宿主机已有 `node`/`bun` 时，`sh` 直接调用亦可，两条路径并存
+- 二进制编译时已内嵌 Bun 运行时，`gebai exec` 隐藏子命令（`import.meta.main` 入口拦截 `process.argv`）让二进制无需宿主机安装 bun/node 即可执行 JS/TS 脚本，同时保持子进程隔离（不回到进程内执行）
 - 能力探测：启动时检测宿主可用解释器（`python`/`node`/`bun`），在工具 schema 描述与 UI 中标注当前环境可用性，模型据实选择
 - **输出大小**：工具输出超过截断阈值走上下文保护（截断落盘），防止内存膨胀
 
@@ -1102,7 +1102,7 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 
 - **`Tool.outputSchema`**：声明 `data` 的 JSON Schema，经 `tool_schemas` 工具批量暴露给模型——编排前先查输出结构，避免逐个试调浪费往返
 - **引擎兜底截断保留 `data`**（含 `sessionRun` 扩展字段）：截断只作用于模型可见文本
-- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（matches）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`current_time`、`todo`（todos）、`agent_list`（agents）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
+- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（matches）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`js`（logs/result/exitCode/calls，logs/result 截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`current_time`、`todo`（todos）、`agent_list`（agents）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
 - **`tool_schemas` 工具**（批量查询）：`tools` 传工具名列表返回各工具 `{name, description, parameters, outputSchema}`（未知/未启用标记错误）；省略时返回全部已启用工具的输出结构概要（紧凑一行一个，不含输入参数）
 
 #### 富内容块渲染
@@ -1312,6 +1312,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `full_mode` | **切换完整模式**（**仅极简模式会话可见可用**，完整模式会话从 schema 移除）：极简下任务确需其他工具能力时调用，用户批准后解锁全部工具（本任务后续轮次 schema 立即全量下发）、系统提示词原地升级为完整版、会话极简标记清除并通知前端关闭开关；可选 `reason` 参数说明原因供审批参考（见「工具选择」极简模式） | **是** |
 | `sh` | 执行Shell命令（**`input` 参数**：stdin 输入，对象/数组自动序列化为 JSON 文本（双引号，脚本 `json.loads` 可解析）；**`timeout` 参数：执行超时秒数，默认 300、上限 540，超时按进程树终止并返回超时结果**；**`strict` 参数**：true 时非 0 退出码抛工具级错误（flow 编排「非 0 即中断」，默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出）；**`approval` 参数**：本次调用是否需审批，默认 true，明确安全的只读/幂等命令可传 false 按次免审（见「工具审批」）；可运行 `bun run`/`node`；JS/TS 亦可通过内置运行时 `gebai exec` 自执行，见「脚本执行环境」） | **是**（默认；`approval:false` 按次免审） |
 | `py` | 执行Python代码（**`input` 参数同 `sh`**；**`timeout` 参数同 `sh`**；**`strict` 参数同 `sh`**；**`approval` 参数同 `sh`**） | **是**（默认；`approval:false` 按次免审） |
+| `js` | **执行 JS/TS 脚本（工具动态编程）**：Bun 子进程运行，脚本内工具**像内置函数一样直接调用**——`await read(params)`（已启用工具名即顶层函数，动态名字 `tools.call`）+ `ctx` **注入会话上下文**（user/sessionId/workdir/home/sandboxed/env/projects/messages 最近消息快照）+ `input`（flow/编排传入）；console 输出即工具输出，`return` 值进 `data.result`；`timeout`/`strict`/`approval` 参数同 `sh`（见「js 脚本工具」） | **是**（默认；`approval:false` 按次免审） |
 | `draw` | **创建/更新结构化图表**（**三种图表语言**：`format` 必选参数 `mermaid`/`plantuml`/`d2`，工具描述与参数说明内置选择指南指导模型按需选择——Mermaid 通用流程图/时序图/状态图/甘特图首选、PlantUML 标准 UML 严谨建模首选（类图/组件图/部署图/用例图等）、D2 美观架构图/云架构/对外展示首选，见「图表交互式创作」），渲染成功才返回成功、报错回传模型、5 秒超时判定画图能力受限；渲染按通道实现——Web 前端本地渲染（三种语言各自本地引擎、配色跟随 UI 主题）、飞书桥接后端渲染成 PNG 图片（三语言组合渲染器）、`render=backend` 参数服务端直接渲染成 PNG 图片（三语言组合渲染器，返回 `image` 内容块）；**`code` 与 `path` 二选一（文件渲染）**——`path` 指定会话内已有 `.mmd`/`.puml`/`.plantuml`/`.d2` 文件直接读取渲染（图表名默认取文件主名、format 按扩展名推断，不重发源码）；默认 `frontend` 通道，保存到会话 `tmp/` 并返回 `diagram` 内容块（`format` 字段携带图表语言）供 UI 交互式渲染；**PlantUML 布局规范内置于工具描述**（方向声明/间距 skinparam/together/节点规模控制，未设置间距时自动注入 `skinparam ranksep 80`/`nodesep 40` 兜底，见「图表交互式创作」） | 否 |
 | `render_html` | **生成 HTML 页面并直接在聊天界面内渲染展示**（沙箱 iframe 域隔离预览：脚本可执行、隔离于宿主页面；适合网页原型/数据报表/可视化组件/带交互脚本的小页面），保存到会话 `tmp/` 并返回 `html` 内容块；**`html` 与 `path` 二选一（文件渲染）**——`path` 指定会话内已有 `.html` 文件直接读取渲染（页面名默认取文件主名，不重发源码）；与 `draw`/`diff` 同属 `card.args="block"` 声明（调用不显示通用卡片，结果直出内容块） | 否 |
 | `fetch_url` | 抓取 URL 内容（网页/API/文档；服务端部署模式限制公网地址防 SSRF 并逐跳校验重定向，响应超阈值截断） | 否 |
@@ -1449,8 +1450,8 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 编排能力内嵌进两处系统提示词，引导模型在复杂任务中主动少轮次（每轮工具调用都产生往返时延与上下文词元）：
 
-- **总Agent 系统提示词**（`buildSystemPrompt`）：「复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构），或编写脚本（sh/py）一次执行，避免大量单步工具调用」
-- **新会话执行环境**（`agent_run`）：同样注册 `flow`/`tool_schemas`（工具以会话注册表解析——子Agent 工具可在 flow 内编排），系统消息内嵌同样的编排优先引导（子Agent 内部任务同样受益）
+- **总Agent 系统提示词**（`buildSystemPrompt`）：「复杂/多步操作优先数据流编排：可预判的多步固定流程用 flow 一次调用执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构）；流程逻辑复杂（flow 表达式写不出：动态参数、条件重试、跨步骤聚合等）时用 js 脚本动态编程一次执行（脚本内 `await tools.xxx(params)` 直接调用任意工具、ctx 注入会话上下文）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元」
+- **新会话执行环境**（`agent_run`）：同样注册 `flow`/`tool_schemas`/`js`（工具以会话注册表解析——子Agent 工具可在 flow 内编排、js 内调用），系统消息内嵌同样的编排优先引导（子Agent 内部任务同样受益）
 
 ```
 // 多对一 + 分支 + 一对多扇出示例
@@ -1465,6 +1466,75 @@ flow({
     ] },
   ],
 })
+```
+
+### `js` 脚本工具（工具动态编程）
+
+flow 的声明式步骤 + 表达式语言覆盖「可预判的固定流程」；当编排逻辑本身需要**真正的编程**（动态构造参数、按中间结果分支重试、复杂聚合变换、正则/字符串处理、错误分类处理）时，用 `js` 一次编程执行——脚本运行于 Bun 子进程（隔离、可超时终止），进程内注入**工具调用桥**与**会话上下文**，把工具当作函数做动态编程。实现为纯模块 `core/js-tool.ts`（前导生成 + 子进程桥接，可独立单测）。
+
+#### 执行模型
+
+- 生成脚本文件（会话 `tmp/.gebai_js_{uuid}.ts`）= **运行时桥前导**（工具调用/日志重定向/引导执行）+ **工具内置函数声明**（模块作用域，按当前已启用工具名生成）+ 用户代码（包进 async 函数：顶层 await 可用、`return` 返回值），子进程执行后即删
+- **子进程命令**：脚本调试模式 `bun <script>`；二进制模式 `gebai exec <script>`（隐藏子命令复用内嵌 Bun 运行时，见「脚本执行环境」）；无 shell 参与（参数数组直传，无注入面）
+- 子进程环境/工作目录与 `sh` 同规则：cwd=会话 `tmp/`、任务 env 注入；沙箱模式剔除敏感变量（豁免/本地不剔除）；超时/取消按进程树终止（Unix 进程组 / Windows taskkill，`timeout` 默认 300s 上限 540s，超时/中断退出码 124）
+- **stdio JSON 行协议桥**：脚本调用工具 → stdout 写 `{"t":"call",id,name,params}`；运行时工具定义（defineTool）→ `{"t":"def",id,name,description,parameters,source}`；服务端分发执行 → stdin 回 `{"t":"res",id,ok,result|error}`（行级并发：脚本可 `Promise.all` 并行调用，应答按 id 配对）；`console.*` 经补丁转 `{"t":"log",level,text}` 回传（stdout 保持纯协议通道）；结束以 `{"t":"done",value}`（返回值）或 `{"t":"fail",error}`（未捕获异常）收口，非 JSON 行按日志透传兜底
+
+#### 注入脚本的调用面（内置函数风格）
+
+- **工具函数（内置函数风格）**：执行时按当前已启用工具名生成**模块顶层函数声明**——`const r = await read({ path: "a.txt" })`，每个工具名都是一个可直接 await 的函数（含子Agent 命名空间工具）；动态名字用 `await tools.call(name, params)` 或 `await tools.xxx(params)`。返回 `{ output, data, blocks, truncated, filePath }`（`data` 即工具双输出的结构化通道，结构可先用 `tool_schemas` 查询）；工具级异常 = Promise reject（脚本可 try/catch 容错继续）；单字段 RPC 截断 100k 字符。**遮蔽无冲突**：函数声明在模块作用域，用户代码在 `__G_main` 内层——同名 let/const/function 正常遮蔽；非法标识符/保留字/与注入全局（tools/ctx/input/console）冲突的工具名跳过生成（仍可 `tools.call` 动态调用）
+- **`ctx`（会话上下文）**：`{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`——`env` 与子进程环境同规则脱敏；`messages` 为最近会话消息快照（默认最近 50 条、单条 2000 字符，文本抽取、跳过 system/空消息）；另有 `input`（flow 步骤/编排传入的任意输入，JSON 文本自行 `JSON.parse`）
+- **`defineTool(def)`（运行时工具定义）**：与子Agent 工具同写法定义新工具（见「运行时工具定义（defineTool）」），注册成功即注入脚本全局、后续可像内置函数一样调用
+
+#### 运行时工具定义（defineTool）
+
+脚本可以像在子Agent 文件里写工具一样，把一段能力**固化为会话级新工具**：`await defineTool({ name, description, parameters, execute })`——`execute` 与子Agent 工具同签名 `async (args, ctx) => ({ output, data? })`（方法简写 `async execute(args) {...}` / 箭头 / 具名函数均可，`fn.toString()` 序列化保存）。
+
+- **注册**：定义经 RPC `{t:"def"}` 桥到服务端，引擎校验（命名 `[a-z][a-z0-9_]{0,39}`、重名/子Agent 命名空间碰撞、描述与 execute 源码合法、安全模式拒绝）后并入**会话覆盖层**；注册成功即注入脚本全局——**同脚本内可立即像内置函数一样调用**；后续轮次模型直接按名调用（schema 随下一轮下发，与内置工具一致可进 flow/被其他 js 脚本调用）
+- **执行模型**：后续每次调用在子进程求值 execute 源码（复用 js 运行时桥：体内可调任意工具/ctx/内置函数，`runtimeDefined` 标记 + RPC 分发层 depth 守卫——**动态工具内不能再调用动态工具/js**（防递归嵌套子进程））；返回 `{output, data?}`（子Agent 语义，字符串自动映射为 output），失败抛工具级错误（flow 编排「失败即中断」语义）
+- **作用域与生命周期**：会话级，定义清单随会话 `chat.json` 落盘（`SessionData.dynamicTools`，execute 源码序列化保存）、`run()` 水合恢复（重启不丢）、`forgetSession` 随会话删除释放（会话删除即文件删除）；新会话执行（agent_run）内定义的工具进本次运行注册表（运行结束释放，不落盘、不外泄主会话）；单会话上限 50（水合同限）
+- **审批**：`requiresApproval` 可选（**默认 true 需审批**——固化后的每次调用与 sh 同姿态，仅明确安全的只读/幂等工具定义时显式传 false；定义时脚本本身已经过一次审批，代码展示在审批卡）；沙箱模式经 `isRiskyToolName` 拦截（js 整体受限，无定义入口）
+- **校验反馈**：RPC 分发层对工具调用做必填参数校验（缺参即时拒绝并列出参数名，近似 TS 类型检查的即时反馈）；execute 源码须自包含（不闭包脚本局部变量——每次调用在全新子进程求值，体内可用 `read(...)` 等工具函数/`ctx`/`input`）
+
+```
+// 示例：把多轮要复用的加工流程固化为工具（后续直接 hello_tool({who})，不必重贴脚本）
+await defineTool({
+  name: "hello_tool",
+  description: "向指定对象问好",
+  parameters: { type: "object", properties: { who: { type: "string" } }, required: ["who"] },
+  async execute(args, ctx) {
+    const r = await current_time()
+    return { output: `hello, ${args.who}（${r.data.iso}）` }
+  },
+})
+```
+
+#### 守卫与限制
+
+- **审批**：与 `sh` 同姿态——默认需审批（脚本=任意代码执行），`approval:false` 按次免审；**审批覆盖整个脚本含内部工具调用**（flow 同语义：一次审批、依次执行）
+- **安全模式**：内部工具调用在 RPC 分发层按 `isRiskyToolName` 同规则拦截（无绕过通道）；`js` 本身属命令执行类，安全模式下整体禁用（`defineTool` 注册亦被拒绝、**磁盘持久化的动态工具不水合**——动态工具 execute 为任意代码，与只读承诺冲突，引擎分发层另有 `runtimeDefined` 兜底拦截）
+- **内部调用走同一 `ToolContext`**：`writeGuard`（子Agent 写范围）/`fileGuard`（防盲覆盖）等会话级守卫对脚本内工具调用同样生效
+- **防嵌套**：脚本内不能再调用 `js`（含 `{agent}_js`）——防嵌套 RPC 桥子进程失控；**动态工具内不能调用动态工具/js**（`runtimeDefined` + depth 守卫）；`sh`/`py` 不受限（脚本本就可 `Bun.spawn`）
+- **规模上限**：单次脚本工具调用总数 ≤ 100（与 flow 对齐）；RPC 协议行子进程侧 ~2MB / 服务端 2.5MB 截断兜底（防巨对象撑爆内存）
+- **失败语义**：未捕获异常/非 0 退出/超时/中断 → 失败结果（`[脚本失败]` + 错误/退出码，不中断任务）；`strict:true` 时失败抛工具级错误（flow 编排「失败即中断」，与 sh/py 一致）；成功无输出明确提示「（脚本执行成功，无输出）」
+
+#### 结果（双输出）
+
+- 模型可见 `output`：console 输出汇总（warn/error 加前缀）+ `[返回值]` 预览（2000 字符，完整值在 data）
+- 结构化 `data`：`{ exitCode, logs, result, calls: [{name, ok, error?}], timedOut?, interrupted? }`（logs/result 截断至 100k 字符）
+
+```
+// 动态编程示例：读文件 → 按内容分支重试 → 聚合返回（工具像内置函数一样直接调用）
+// js({ code }) — 已启用工具名即顶层函数：read/sh/glob/...，直接 await 调用
+const r = await read({ path: "config.json" })
+let cfg
+for (let i = 0; ; i++) {
+  try { cfg = JSON.parse(r.output); break } catch (e) {
+    if (i >= 2) throw new Error("配置解析失败: " + e.message)
+    await sh({ command: "echo retry", approval: false })
+  }
+}
+const items = await Promise.all(cfg.files.map(f => tools.call("read", { path: f })))
+return { total: items.length, sizes: items.map(x => x.output.length) }
 ```
 
 ### 通信协议
@@ -1959,6 +2029,14 @@ bun run --cwd packages/sdk test
 | flow while 轮数上限 | 默认 10 / 硬上限 50 | `maxLoops` 参数可调，超硬上限钳制（`FLOW_WHILE_DEFAULT_MAX`/`FLOW_WHILE_HARD_MAX`） |
 | flow 分组嵌套深度上限 | 4 层 | 循环分组嵌套上限（`FLOW_MAX_DEPTH`） |
 | flow 报告截断 | 单步 2000 / 单轮 500 字符 | flow 报告中步骤/循环轮次输出保留长度（完整内容在 data 与截断文件中，`FLOW_REPORT_STEP_CHARS`/`FLOW_REPORT_ROUND_CHARS`） |
+| js 工具调用总数上限 | 100 | 单次 js 脚本内工具调用总数（`JS_TOOL_MAX_CALLS`，与 flow 对齐） |
+| js RPC 字段截断 | 100k 字符 | js 工具调用桥单字段（output/data）截断（`JS_RPC_FIELD_CAP`） |
+| js data 截断 | 100k 字符 | js 结构化 data 中 logs/result 截断（`JS_DATA_TEXT_CAP`，与 sh/py 对齐）；返回值预览 2000 字符（`JS_RESULT_PREVIEW_CHARS`） |
+| js RPC 协议行上限 | 子进程 2MB / 服务端 2.5MB | 协议行截断兜底（防巨对象撑爆内存，超出注明截断） |
+| js 会话上下文注入 | 最近 50 条 / 单条 2000 字符 | ctx.messages 快照条数与单条内容上限（`JS_CONTEXT_MESSAGES_MAX`/`JS_CONTEXT_MESSAGE_CHARS`） |
+| js 动态工具上限 | 50 / 会话 | 会话内运行时定义工具数量上限（防注册风暴，`DYNAMIC_TOOLS_CAP`）；定义清单随会话 chat.json 落盘、重启恢复 |
+| js 动态工具源码上限 | 100k 字符 | execute 源码长度上限（`JS_DYNAMIC_SOURCE_CAP`，源码随会话持久化，防撑爆 chat.json） |
+| js 动态工具名 | `[a-z][a-z0-9_]{0,39}` | 运行时定义工具命名约束（与全局工具命名一致，`DYNAMIC_TOOL_NAME_RE`）；execute 源码 ≤ 2000 字符描述 |
 | sh/py 结构化 data 文本上限 | 100k 字符 | `data.stdout`/`data.stderr` 超长截断（完整文本以 output 截断文件为准，`SCRIPT_DATA_TEXT_CAP`） |
 | 后端图表渲染超时 | 20 秒 | 后端组合渲染器（`core/diagram-render.ts`）单次超时上限：plantuml 走 `plantuml.ts` `PLANTUML_TIMEOUT_MS`（可注入），mermaid 渲染与 d2 编译/渲染各 20 秒 Promise 超时；引擎渲染本身秒级，超时防大图/挂起 |
 | 后端图表输出尺寸上限 | 1600 × 2400 px | 后端渲染默认 2x 超采样，超出按比例缩放到该上限（防超大 PNG 超飞书图片限制；`DEFAULT_MAX_WIDTH`/`DEFAULT_MAX_HEIGHT`） |
