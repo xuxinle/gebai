@@ -305,8 +305,8 @@ describe("GebaiClient sendPrompt (WS)", () => {
             ws.send(JSON.stringify({ type, payload: { ...payload, sessionId }, timestamp: Date.now() }))
           push("event.message.delta", { text: "你", messageId: "m1" })
           push("event.message.delta", { text: "好", messageId: "m1" })
-          push("event.tool.call", { toolCallId: "t1", name: "current_time", arguments: {} })
-          push("event.tool.result", { toolCallId: "t1", name: "current_time", output: "now" })
+          push("event.tool.call", { toolCallId: "t1", name: "ls", arguments: {} })
+          push("event.tool.result", { toolCallId: "t1", name: "ls", output: "now" })
           push("event.task.done", {})
         },
       },

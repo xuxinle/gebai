@@ -141,7 +141,7 @@ describe("isBlockOnly (card.args=block 声明驱动，替代前端 BLOCK_ONLY_TO
     expect(isBlockOnly("playwright_open")).toBe(true) // 子 Agent 全名
     // 非 block 声明 / 未声明：false
     expect(isBlockOnly("write")).toBe(false)
-    expect(isBlockOnly("current_time")).toBe(false)
+    expect(isBlockOnly("plain_tool")).toBe(false)
     expect(isBlockOnly("open")).toBe(false) // 未注册短名
     expect(isBlockOnly("")).toBe(false)
   })
