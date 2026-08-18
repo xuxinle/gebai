@@ -1,7 +1,7 @@
 import type { FeedbackInfo, UserInfo } from "@gebai/sdk"
-import { client, el, setConn, settingsBody, settingsBtn, settingsOverlay, settingsTabs } from "./state"
+import { client, el, setConn, settingsBody, settingsBtn, settingsFoot, settingsOverlay, settingsTabs } from "./state"
 import { blockText } from "./markdown"
-import { getLowPowerSetting, isLowPower, probeWebGL, setLowPowerSetting } from "./low-power"
+import { getLowPowerSetting, isLowPower, setLowPowerSetting } from "./low-power"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
 
@@ -41,6 +41,8 @@ async function renderSettingsTab(tab: string) {
   for (const b of settingsTabs.querySelectorAll("button")) b.classList.toggle("active", b.dataset.tab === tab)
   appearanceRefresh = null // 离开外观 tab 后事件不再刷新旧描述
   settingsBody.innerHTML = ""
+  settingsFoot.hidden = true // 底部固定区仅环境变量 tab 使用
+  settingsFoot.innerHTML = ""
   // 管理员 tab（用户/反馈）按当前用户角色显示
   try {
     const me = await client.getCurrentUser()
@@ -64,40 +66,30 @@ function settingsSection(title: string): HTMLElement {
 }
 
 function renderSettingsAppearance() {
-  settingsBody.appendChild(settingsSection("外观（性能模式：无 GPU/低配机器自动降级，可手动强制开启）"))
   const list = el("div", "settings-list")
-  const row = el("label", "settings-row")
-  const cb = document.createElement("input")
-  cb.type = "checkbox"
-  cb.className = "ck"
+  const row = el("div", "settings-row")
   const info = el("div", "settings-row-info")
   const desc = el("div", "settings-row-desc")
+  const btn = el("button", "mini-btn")
   const refreshDesc = () => {
     const forced = getLowPowerSetting() === "on" // 跨标签同步：设置可能在别的标签被修改
-    const active = isLowPower()
-    const noGpu = probeWebGL() ? "" : " · 未检测到 WebGL（GPU 不可用）"
-    if (forced) desc.textContent = "已手动开启，低性能模式生效"
-    else desc.textContent = active ? `自动检测已触发，低性能模式生效${noGpu}` : `自动检测未触发，标准模式${noGpu}`
-    if (active) desc.textContent += "；降级内容：关闭动画/过渡/毛玻璃特效，图表按需渲染（点按「渲染图表」才渲染，引擎不预加载），无语言标注的代码块不做高亮自动检测，流式输出降频重渲染，视口外消息跳过渲染，图表 PNG 导出降采样"
+    btn.textContent = forced ? "关闭" : "开启"
+    if (isLowPower()) desc.textContent = forced ? "已开启：关闭动画等特效" : "已自动开启（低配机器）：关闭动画等特效"
+    else desc.textContent = "未开启：使用完整动画与特效"
   }
-  cb.checked = getLowPowerSetting() === "on"
-  cb.onchange = () => {
-    setLowPowerSetting(cb.checked ? "on" : "off")
-    refreshDesc() // 局部刷新说明，保持开关可用
+  btn.onclick = () => {
+    setLowPowerSetting(getLowPowerSetting() === "on" ? "off" : "on")
+    refreshDesc() // 局部刷新说明，保持按钮可用
   }
-  info.append(el("div", "settings-row-name", "性能模式"), desc)
-  row.append(cb, info)
+  info.append(el("div", "settings-row-name", "低性能模式"), desc)
+  row.append(info, btn)
   list.appendChild(row)
   settingsBody.appendChild(list)
-  appearanceRefresh = () => {
-    cb.checked = getLowPowerSetting() === "on"
-    refreshDesc()
-  }
+  appearanceRefresh = refreshDesc
   refreshDesc()
 }
 
 async function renderSettingsEnv() {
-  settingsBody.appendChild(settingsSection("环境变量（目录来自服务端、不可自定义；保存在浏览器本地，发送消息时随请求临时注入，不落盘）"))
   let groups: EnvCatalogGroup[] = []
   try {
     groups = (await client.getEnvCatalog()).groups
@@ -137,9 +129,7 @@ async function renderSettingsEnv() {
     settingsBody.appendChild(det)
   }
 
-  settingsBody.appendChild(blockText("说明：仅可配置上表目录项（模型 / 子Agent / 常用变量），不可自定义变量名；未配置的项留空、请求不携带；启动级与安全敏感变量（GEBAI_MODE、GEBAI_ADMIN_PASSWORD_HASH、GEBAI_SAFE_MODE 等）不可配置。变量仅保存在本浏览器（localStorage，清除站点数据即清除），随每次发送消息临时注入服务端（仅本次任务生效，不落盘）——服务端不配置模型变量时，仅在此配置即可使用。"))
-
-  const actions = el("div", "settings-actions")
+  // 说明 + 保存按钮固定在面板底部，不随变量列表滚动
   const saveBtn = el("button", "mini-btn", "保存")
   saveBtn.onclick = () => {
     const vars: Record<string, string> = {}
@@ -153,8 +143,8 @@ async function renderSettingsEnv() {
       : "已保存到浏览器本地（对本浏览器所有会话生效）"
     toast(msg)
   }
-  actions.appendChild(saveBtn)
-  settingsBody.appendChild(actions)
+  settingsFoot.append(el("div", "settings-foot-desc", "仅保存在本浏览器，对所有会话生效"), saveBtn)
+  settingsFoot.hidden = false
 }
 
 async function renderSettingsUsers() {

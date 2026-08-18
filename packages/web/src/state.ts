@@ -39,6 +39,7 @@ export const loginErr = document.getElementById("login-err")!
 export const settingsOverlay = document.getElementById("settings-overlay")!
 export const settingsTabs = document.getElementById("settings-tabs")!
 export const settingsBody = document.getElementById("settings-body")!
+export const settingsFoot = document.getElementById("settings-foot")!
 
 /* ---------- 可变状态（跨模块共享） ---------- */
 
