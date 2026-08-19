@@ -1,8 +1,10 @@
-All changes are coherent and verified. Here's the summary:
+根因与修复
+根因：packages/server/src/sub-agents/reverse_site/reverse_site.ts:14 在模块作用域执行 new Bridge()，而 Bridge 构造函数会经 playwrightModuleUrl() 调用 Bun.resolveSync("playwright", ...)。编译进 exe 后这类包解析锚定真实 CWD 的 node_modules 可达性：从 repo 目录跑能找到 node_modules/playwright，桌面 launcher 以 %LOCALAPPDATA%\gebai 为 CWD spawn 时找不到 → 抛 ResolveMessage: Cannot find package 'playwright' from 'B:\~BUN\root' → 整个 bundle 注册表初始化失败 → 服务端启动即退出（launcher 报 "exited without reporting a port"）。playwright.ts:14 经工厂默认 new Bridge() 存在同样的隐患（之前的 require/import 改动方向是错的，真正的坑是 bundle 图内模块作用域的包解析）。
 
-根因（已用实验/仓库证据坐实）
-你朋友那台机器报 [subagents] bundle 注册表缺失：请先运行 bun run scripts/build-subagents.ts、子Agent 一个都没有，根源是：
+修复（4 个文件 + DESIGN.md 同步）：
 
-subagents.bundle.generated.ts 被 .gitignore（构建时生成、不入库）。
-SubAgentManager.discover()（subagents.ts:36）在 dist/二进制模式下回退 await import("./subagents.bundle.generated")；若该 exe 是在裸检出未先跑 build-subagents.ts 的旧/不完整工作区构建的，bundle 缺失 → 子Agent 注册表为空 → 你本地「自己用」正常，拷给别人全缺。
-连带结果正是你最开始问的「环境变量前端丢失无法配置」：env catalog（getEnvCatalog(allDefs())）只含被打包子Agent 的 envVars，子Agent 全缺 → 目录只剩全局组，前端 filterEnvToCatalog 白名单又过滤掉目录外一切变量 → 即使手动写 localStorage 也会被丢弃；且前端 renderSettingsEnv 在 catalog 请求失败时直接 return，保存按钮与表单都不渲染。
+playwright_tools.ts：新增 createLazyBridge() —— 首次工具调用才构造真实 Bridge（解析失败降级为工具级运行时错误），并作为两个工厂的默认实现。
+reverse_site.ts：模块作用域 new Bridge() 改为共享的 createLazyBridge()（仍与 capture 工具共享同一桥接进程/浏览器会话）。
+reverse_site_tools.ts：工厂默认同样改惰性。
+subagents.ts：移除 debug 插桩，恢复简洁报错（保留注册表加载失败必抛错、绝不静默降级为空列表的语义）。
+DESIGN.md「打包闭环」：更正为准确机制——bundle 静态内嵌 + bundle 图内子 Agent 模块禁止模块作用域第三方包解析（playwright 必须经 createLazyBridge 惰性化）。
