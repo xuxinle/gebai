@@ -547,24 +547,29 @@ header {
   border-radius: 0;
   white-space: nowrap;
 }
-/* 圆点调小并中和各主题遗留的徽章式绝对定位与脉冲动画（left:6px 等旧徽章布局把点钉离圆心；
-   思考闪烁挂在更高优先级的 #conn.thinking:not(.bad)::before 上不受影响），主题只接管配色/光晕 */
-#conn::before {
-  position: static;
-  inset: auto;
-  transform: none;
-  animation: none;
-  width: 6px;
-  height: 6px;
-  flex: none;
-}
-/* 已连接且空闲：隐藏信号灯（仅剩圆环）；思考/生成中：圆点显示并快速闪烁 */
+/* 圆点改绘于 ctx-ring SVG 内（.conn-dot，见下方 ctx 区块）：与圆环同一坐标系同一栅格化管线，
+   任何 DPI/主题下严格同心——原 DOM ::before 圆点在分数布局原点（44px 头部 - 1px 边框 = 43px
+   内容盒）上光栅化，100% 缩放下恒偏半像素。::before 整体隐藏（同时中和各主题遗留的徽章式
+   绝对定位/脉冲动画），#conn 保留为状态载体（thinking/bad 类、data-tip hover、:has() 锚点） */
+#conn::before { display: none; }
+/* 已连接且空闲：隐藏信号灯（仅剩圆环）；思考/生成中：圆点显示并快速闪烁（绘制见 .conn-dot） */
 #conn:not(.bad) { display: none; }
 #conn.thinking:not(.bad) { display: flex; }
-#conn:not(.bad)::before {
-  background: var(--accent); /* 信号灯用主题色（原绿色） */
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent);
+/* 信号灯圆点：ctx-ring SVG 内的第三圆；状态经 #header-ctx:has(#conn.*) 桥接（#conn 不再绘制）。
+   闪烁周期经 #header-ctx 的 --conn-blink 分级（见下） */
+.ctx-ring .conn-dot { fill: none; }
+#header-ctx:has(#conn.thinking:not(.bad)) .conn-dot {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 60%, transparent));
+  animation: conn-thinking var(--conn-blink, 0.25s) ease-in-out infinite;
 }
+/* 断开/异常：红点常亮（圆心放不下文字徽章，具体信息 hover 圆点经 data-tip 展示；currentColor 取红色，
+   主题 .conn.bad 仍可覆写配色） */
+#header-ctx:has(#conn.bad) .conn-dot {
+  fill: var(--danger);
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--danger) 60%, transparent));
+}
+.conn.bad { color: var(--danger); }
 /* 思考/生成中（任意会话运行）：信号灯快速不规则闪烁（多关键帧错落明暗，避免匀速脉动的规律感） */
 @keyframes conn-thinking {
   0%, 100% { opacity: 1; }
@@ -573,9 +578,15 @@ header {
   65% { opacity: 0.2; }
   82% { opacity: 1; }
 }
-#conn.thinking:not(.bad)::before {
-  animation: conn-thinking 0.25s ease-in-out infinite;
-}
+/* 思考闪烁周期按时长分级放缓（与单轮计时器六级一致，阈值同 10s/30s/1m/3m/5m，越久越慢——
+   闪得慢=执行得慢）；变量挂在 #header-ctx 上供 SVG 圆点（.conn-dot）继承 */
+#header-ctx { --conn-blink: 0.25s; }
+#header-ctx[data-dur="0"] { --conn-blink: 0.07s; } /* <10s：急促（刚开始，活跃） */
+#header-ctx[data-dur="1"] { --conn-blink: 0.11s; } /* 10-30s */
+#header-ctx[data-dur="2"] { --conn-blink: 0.16s; } /* 30s-1m */
+#header-ctx[data-dur="3"] { --conn-blink: 0.25s; } /* 1-3m（原速） */
+#header-ctx[data-dur="4"] { --conn-blink: 0.4s; }  /* 3-5m */
+#header-ctx[data-dur="5"] { --conn-blink: 0.6s; }  /* ≥5m：缓慢（执行得慢） */
 /* 断开/异常：红点常亮（圆心放不下文字徽章，具体信息 hover 圆点经 data-tip 展示；currentColor 取红色，
    主题 .conn.bad / .conn.bad::before 仍可覆写底色与光晕） */
 .conn.bad { color: var(--danger); }
@@ -809,7 +820,7 @@ aside {
   user-select: none;
 }
 #header-ctx[hidden] { display: none; }
-/* 标题栏右侧固定组（上下文圆环 + 轮盘入口）：单一 margin-left:auto 整体靠右——
+/* 标题栏右侧固定组（单轮计时器 + 上下文圆环 + 轮盘入口）：单一 margin-left:auto 整体靠右——
    若 ctx 与入口各自带 auto margin，flex 会平分剩余空间把 ctx 拉向中线与居中标题重叠 */
 .header-right {
   margin-left: auto;
@@ -818,6 +829,35 @@ aside {
   gap: 12px;
   flex: none;
 }
+/* 单轮计时器：上下文占比左侧常驻显示——运行中实时走（沙漏图标呼吸），运行结束定格保留、
+   下次运行重启归零；六级时长渐进变色（冷→暖，阈值 10s/30s/1m/3m/5m，与上下文圆环分级着色
+   语言一致）；hover 经 data-tip 显示总运行时（每轮净耗时累加，不含轮间空闲）；
+   外观设置关闭（data-turn-timer="off"）时隐藏 */
+.turn-timer {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-faint); /* <10s：极淡 */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  user-select: none;
+  transition: color 0.3s ease;
+}
+.turn-timer[data-dur="1"] { color: var(--text-muted); } /* 10-30s：中性 */
+.turn-timer[data-dur="2"] { color: var(--tool); }       /* 30s-1m：工具青绿 */
+.turn-timer[data-dur="3"] { color: var(--accent); }     /* 1-3m：主题色 */
+.turn-timer[data-dur="4"] { color: var(--warning); }    /* 3-5m：警告 */
+.turn-timer[data-dur="5"] { color: var(--danger); }     /* ≥5m：危险 */
+.turn-timer .tt-ico { flex: none; opacity: 0.9; }
+.turn-timer.running .tt-ico { animation: tt-ico-breathe 2s ease-in-out infinite alternate; }
+@keyframes tt-ico-breathe {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+:root[data-low-power="on"] .turn-timer.running .tt-ico { animation: none; }
+.turn-timer[hidden] { display: none; }
+:root[data-turn-timer="off"] .turn-timer { display: none; }
 /* 圆环：-90° 旋转使弧线从 12 点方向顺时针填充；pathLength=100 归一化周长，
    JS 直接以百分比数值写 stroke-dashoffset（100-占比），免周长换算 */
 #header-ctx .ctx-ring {
@@ -843,8 +883,9 @@ aside {
 }
 #header-ctx.warn .ctx-fill { stroke: var(--warning); }
 #header-ctx.danger .ctx-fill { stroke: var(--danger); }
-/* 无上下文数据（未配置窗口/空会话）：隐藏圆环仅剩圆心信号灯（思考闪烁/断开红点仍可见） */
-#header-ctx.no-ring .ctx-ring { display: none; }
+/* 无上下文数据（未配置窗口/空会话）：隐藏圆环轨道，SVG 保留（信号灯圆点仍可显示/闪烁） */
+#header-ctx.no-ring .ctx-track,
+#header-ctx.no-ring .ctx-fill { display: none; }
 /* 会话右键菜单（多选/重命名/删除）：悬浮浮层，随光标定位 */
 .session-ctx-menu {
   position: fixed;
@@ -1092,9 +1133,10 @@ html[data-low-power="on"] * {
 html[data-low-power="on"] .msg.streaming .bubble::after {
   animation: caret-blink 1s steps(2, start) infinite !important;
 }
-/* 例外：连接信号灯保留闪烁（任意会话思考/生成进行中的必要指示，开销极小） */
-html[data-low-power="on"] #conn.thinking:not(.bad)::before {
-  animation: conn-thinking 0.25s ease-in-out infinite !important;
+/* 例外：连接信号灯保留闪烁（任意会话思考/生成进行中的必要指示，开销极小）；
+   周期仍按六级放缓（--conn-blink 随 #header-ctx[data-dur] 解析，时长分级不因低性能模式丢失） */
+html[data-low-power="on"] #header-ctx:has(#conn.thinking:not(.bad)) .conn-dot {
+  animation: conn-thinking var(--conn-blink, 0.25s) ease-in-out infinite !important;
 }
 /* 长会话消息列表：视口外消息跳过布局/绘制（content-visibility: auto）；高度估算不统一用
    320px（长消息滚动经过时首渲染高度突变顶开视口「跳一大段」）——appendMsg 按内容长度

@@ -164,7 +164,7 @@ async function renderSettingsEnv() {
     const msg = stale.length
       ? `已保存到浏览器本地（忽略 ${stale.length} 个目录外旧变量：${stale.join("、")}）`
       : "已保存到浏览器本地（对本浏览器所有会话生效）"
-    toast(msg)
+    toast(msg, "ok")
   }
   settingsFoot.append(el("div", "settings-foot-desc", "仅保存在本浏览器，对所有会话生效"), saveBtn)
   settingsFoot.hidden = false

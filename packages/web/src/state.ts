@@ -40,6 +40,7 @@ export const settingsOverlay = document.getElementById("settings-overlay")!
 export const settingsTabs = document.getElementById("settings-tabs")!
 export const settingsBody = document.getElementById("settings-body")!
 export const settingsFoot = document.getElementById("settings-foot")!
+export const turnTimerEl = document.getElementById("turn-timer")!
 
 /* ---------- 可变状态（跨模块共享） ---------- */
 
@@ -155,9 +156,7 @@ export interface RunState {
   modelErrorEl?: HTMLElement | null
   /** 单轮计时开始时刻（consumeTaskStream 入口记录）。 */
   startedAt: number
-  /** 单轮计时 span（跟随当前流式消息 meta 迁移复用；外观开关关闭或消息脱离 DOM 时置空）。 */
-  timerEl?: HTMLElement | null
-  /** 单轮计时 interval（任务收尾随 finally 清理）。 */
+  /** 单轮计时 interval（驱动标题栏计时刷新，任务收尾随 finally 清理）。 */
   timerInterval?: ReturnType<typeof setInterval>
 }
 
@@ -251,7 +250,8 @@ export function focusInput() {
 }
 
 const headerTitleEl = document.getElementById("header-title")
-const headerCtxEl = document.getElementById("header-ctx")
+/** 上下文占比容器：信号灯闪烁分级（data-dur → --conn-blink）的变量挂载点（SVG 圆点继承）。 */
+export const headerCtxEl = document.getElementById("header-ctx")
 const ctxFillEl = document.querySelector<SVGCircleElement>("#header-ctx .ctx-fill")
 
 /** 浏览器 tab 标题固定为「歌白」（不拼接会话名）；标题栏居中会话标题跟随当前会话。 */

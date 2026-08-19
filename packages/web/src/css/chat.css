@@ -180,22 +180,6 @@
 .msg:hover .msg-time,
 .msg:focus-within .msg-time { opacity: 1; }
 
-/* 单轮计时器：任务运行中常显（live），结束定格后与时间同规则（hover 淡入）；
- * 外观设置关闭（根元素 data-turn-timer="off"）时整体隐藏 */
-.msg-timer {
-  color: var(--text-faint);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.msg:hover .msg-timer,
-.msg:focus-within .msg-timer,
-.msg-timer.live { opacity: 1; }
-.msg-timer.live { color: var(--text-muted); }
-:root[data-turn-timer="off"] .msg-timer { display: none; }
-
 .bubble {
   padding: 10px 14px;
   border-radius: var(--radius-msg);

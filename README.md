@@ -106,7 +106,7 @@ The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playw
 - **上下文保护**：以模型真实 `input_tokens` 为口径自动压缩（截断落盘 → 旧消息摘要 → 滚动裁剪 → 溢出硬护栏）
 - **富内容块**：代码、图片、文件、并排 diff、沙箱 HTML 渲染，以及 **Mermaid / PlantUML / D2 三种图表的交互式创作**（本地渲染，零网络请求，配色跟随主题）
 - **12 套 UI 主题**：亚克力（默认）/ 以太 / 经典 / 暗夜 / 现代 / 极简 / 矩阵 / 东京夜 / 赛博 / 浪潮 / 极光 / 人民币，运行时热切换
-- **单轮计时器**：任务运行期间实时显示本轮耗时、结束定格（设置 → 外观，可开关）
+- **单轮计时器**：标题栏上下文占比左侧常驻显示本轮耗时，按时长分级变色，hover 查看逐轮累计的总运行时；运行中实时走、结束定格保留、下次运行重启（设置 → 外观，可开关）
 
 **English.**
 
@@ -114,7 +114,7 @@ The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playw
 - **Context protection**: automatic compaction keyed on the model's real `input_tokens` (truncation persisted to disk → summarize old messages → rolling trim → hard overflow guard)
 - **Rich content blocks**: code, images, files, side-by-side diffs, sandboxed HTML, plus **interactive authoring for Mermaid / PlantUML / D2 diagrams** (rendered locally, zero network, colors follow the theme)
 - **12 UI themes**: Acrylic (default) / Aether / Classic / Dark / Modern / Minimal / Matrix / Tokyo Night / Cyberpunk / Synthwave / Aurora / CNY — hot-swappable at runtime
-- **Per-turn timer**: shows live elapsed time for the current turn while it runs, frozen when it ends (toggle in Settings → Appearance)
+- **Per-turn timer**: elapsed time pinned in the title bar to the left of the context ring — ticks live, color-grades by duration, hover reveals the cumulative total across turns; stays frozen when a turn ends and restarts on the next run (toggle in Settings → Appearance)
 
 ### ⚙️ 面向工程的能力
 
