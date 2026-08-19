@@ -913,14 +913,14 @@ export class AgentEngine {
     onChunk?: (chunk: LLMChunk) => void,
   ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }>; usage?: LLMUsage }> {
     try {
-      return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams)
+      return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams, sessionId)
     } catch (err) {
       if (!this.isContextOverflowError(err)) throw err
       for (let i = 0; i < 3; i++) {
         // 压缩/护栏腾挪均无效（上下文确实无处可让）时恢复失败，上抛原错误
         if (!(await this.makeContextRoom(sessionId, user, provider, messages, systemPrompt, ctxUsage))) throw err
         try {
-          return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams)
+          return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams, sessionId)
         } catch (err2) {
           if (!this.isContextOverflowError(err2)) throw err2
           if (i === 2) throw err2 // 压缩 3 次仍溢出：无可收敛空间，上抛
@@ -1233,7 +1233,7 @@ export class AgentEngine {
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
       `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
       ...(safeModeNote ? [safeModeNote] : []),
-      `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构），逻辑复杂（动态参数/条件重试/跨步骤聚合）用 js 脚本动态编程，纯系统操作用 sh/py 脚本。`,
+      `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 plan 制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需 plan，直接用 todo 跟踪即可。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
@@ -1578,6 +1578,7 @@ export class AgentEngine {
     signal: AbortSignal,
     onChunk?: (chunk: LLMChunk) => void,
     extraParams?: Record<string, unknown>,
+    sessionId?: string,
   ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }>; usage?: LLMUsage }> {
     const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }> = []
     let text = ""
@@ -1621,6 +1622,9 @@ export class AgentEngine {
         if (attempts >= LLM_RETRY_COUNT) {
           throw new Error(`模型接口调用失败（已重试 ${attempts} 次）: ${(err as Error).message}`)
         }
+        // 模型服务异常且将重试（DESIGN「模型服务异常可见」）：推送前端实时提示——
+        // 重试退避期间任务无任何输出，用户无从得知模型服务已出错
+        if (sessionId) this.publish(sessionId, "event.model.error", { error: (err as Error).message, retry: attempts + 1, maxRetry: LLM_RETRY_COUNT, sessionId })
         hint = "" // 普通接口异常：与内容无关，不注入提示
         attempts++
         await sleep((this.opts.retryBackoffMs ?? LLM_RETRY_BACKOFF_MS) * 2 ** (attempts - 1), signal)
@@ -1630,6 +1634,7 @@ export class AgentEngine {
       if (!text && !toolCalls.length) {
         if (signal.aborted) throw new Error("cancelled")
         if (attempts < LLM_RETRY_COUNT) {
+          if (sessionId) this.publish(sessionId, "event.model.error", { error: "模型未返回任何内容（空响应）", retry: attempts + 1, maxRetry: LLM_RETRY_COUNT, sessionId })
           hint = "你上一轮没有返回任何内容。请直接给出回答，或调用工具继续，不要复述要求。"
           attempts++
           await sleep(this.opts.retryBackoffMs ?? LLM_RETRY_BACKOFF_MS, signal)
@@ -2045,7 +2050,7 @@ export class AgentEngine {
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述）；流程逻辑复杂时用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]
@@ -2192,7 +2197,7 @@ export class AgentEngine {
           reasoningAcc += chunk.text
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, session: true, sessionRunId: archive.runId, messageId: assistantMsgId, sessionId })
         }
-      }, extraParams)
+      }, extraParams, sessionId)
       lastText = text
       if (!toolCalls.length) {
         this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, session: true, sessionRunId: archive.runId, sessionId })

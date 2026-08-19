@@ -151,6 +151,8 @@ export interface RunState {
   lastTextMsgId?: string
   /** 新会话 run 折叠容器：runId → 状态（agent_run 执行过程，结束后折叠保留在 DOM）。 */
   sessionRuns?: Map<string, SessionRunState>
+  /** 模型服务异常瞬时提示元素（event.model.error 重试期间显示；文本恢复/任务结束时移除）。 */
+  modelErrorEl?: HTMLElement | null
 }
 
 /** 正在流式运行中的会话（多会话后台运行）。 */

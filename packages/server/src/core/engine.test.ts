@@ -2105,6 +2105,35 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
+  test("模型服务异常重试期间发布 event.model.error（前端可见的非终态提示）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    let calls = 0
+    s.provider.chat = async function* () {
+      calls++
+      if (calls === 1) throw new Error("网络中断")
+      if (calls === 2) {
+        yield { type: "done", stopReason: "stop" } // 空响应也重试
+        return
+      }
+      yield { type: "text", text: "第三次成功" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    const modelErrors: Array<Record<string, unknown>> = []
+    s.events.subscribe((e) => {
+      if (e.type === "event.model.error") modelErrors.push(e.payload)
+    })
+    await s.engine.run(session.id, "default", "hi")
+    // 两次将重试的异常均推送（接口异常 + 空响应），携带 retry/maxRetry；最终成功（非终态）
+    expect(modelErrors.length).toBe(2)
+    expect(modelErrors[0]).toMatchObject({ error: "网络中断", retry: 1 })
+    expect(String(modelErrors[1].error)).toContain("空响应")
+    expect(modelErrors[1].retry).toBe(2)
+    const loaded = await s.store.load(session.id)
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "第三次成功")).toBe(true)
+    cleanup(s.home)
+  })
+
   test("stream interruption after partial output is not retried (avoids duplicate text)", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
