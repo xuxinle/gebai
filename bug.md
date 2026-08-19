@@ -17,3 +17,11 @@ store.ts:7 的 MAX_CACHE_MESSAGES = 100：chat.json 里消息超过 100 条时�
 工具调用密集的会话（一次任务往往产生很多轮 assistant+tool 消息对）条数涨得飞快，100 条上限很快触达，这很可能就是你观察到"远没到上下文大小就开始丢东西"的直接原因。
 
 
+
+推荐方案：playwright-core 内嵌 + 驱动系统自带 Edge
+思路转变关键点：浏览器本体不用内嵌，用 Windows 系统自带的 Edge（Win10/11 必装，Chromium 内核）。playwright 支持 chromium.launch({ channel: "msedge" }) 直接驱动系统 Edge，不需要 playwright install 下载任何浏览器。
+
+只内嵌 playwright-core（12.8 MB，零外部依赖）——比内嵌完整 playwright 还省 4.8 MB 的壳层，它的 API（chromium/page/网络录制）和现在 driver.mjs 用的完全一致，driver 业务逻辑一行业务代码都不用改，只把 init 注入的模块路径换掉 + launch 加一个 channel。
+桌面端（Windows）：系统 Edge → 完全离线、零下载、零 CWD 依赖，比之前「库内置 + 在线下载浏览器」的方案更强。
+Linux 服务端部署：没有系统 Edge，走真实 chromium（下载到 ~/.cache/ms-playwright）——解析顺序回退即可，两种形态共存。
+改造点和你上一个问题的方案完全重合：build 脚本内嵌 playwright-core → playwrightModuleUrl() 解析顺序回退 → 物化到 {GEBAI_HOME}/vendor/。channel 由 Bun 侧按平台注入（Windows 默认 msedge）。
