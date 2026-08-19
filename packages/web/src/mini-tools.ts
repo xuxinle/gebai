@@ -87,7 +87,7 @@ async function deleteToolRow(name: string, scope: "public" | "private"): Promise
       w.el.remove()
       wins.delete(name)
     }
-    toast(`已删除「${name}」`)
+    toast(`已删除「${name}」`, "ok")
     return true
   } catch (err) {
     toast(`删除失败：${(err as Error).message}`, "error")

@@ -53,6 +53,7 @@ import {
   exportBtn,
   focusInput,
   getCurrentSession,
+  headerCtxEl,
   input,
   isDraftView,
   lastSessionId,
@@ -68,6 +69,7 @@ import {
   setSubAgentNames,
   syncConnThinking,
   todoState,
+  turnTimerEl,
   type RunState,
   type SessionRunState,
 } from "./state"
@@ -345,7 +347,6 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     // 工具调用已封段后（run.el 为 null）或元素脱离 DOM：惰性重建消息元素
     if (!run.el?.isConnected) {
       run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
-      turnTimerTick(run) // 单轮计时器：元素即建即显示（不等下一 tick，极短任务也能定格）
     }
     scheduleStreamRender(run)
   } else if (chunk.kind === "reasoning") {
@@ -383,7 +384,6 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     if (getCurrentSession()?.id !== sessionId) return
     if (!run.el?.isConnected) {
       run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
-      turnTimerTick(run) // 单轮计时器：元素即建即显示（不等下一 tick，极短任务也能定格）
     }
     const bubble = run.el.querySelector(".msg-body .bubble")
     if (bubble && run.el.isConnected) {
@@ -470,45 +470,69 @@ function formatTurnDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
 }
 
-/** 单轮计时器 tick：耗时 span 挂在当前流式助手消息的 meta 行（msg-time 旁）。
- *  流式元素惰性创建、封段后重建：每次 tick 迁移到最新 run.el（span 复用，不随旧元素丢弃）；
- *  外观开关运行中被关闭：即时摘除并停表。 */
+/** 单轮计时器：标题栏右侧、上下文占比左侧常驻显示。运行中实时走（图标呼吸），
+ *  运行结束不清除（定格保留），下次运行重启归零；多会话并发时由最近一次开始的运行接管显示。
+ *  时长分级变色（<1min 中性 / 1-5min 主题色 / ≥5min 警告色，与上下文圆环分级着色语言一致）；
+ *  hover 显示总运行时——每轮净耗时累加（不含轮间空闲），而非距第一条消息的墙钟时间。 */
+let activeTimerRun: RunState | null = null
+/** 已完成轮次的净耗时累计（页面生命周期内，每轮收尾累加）。 */
+let totalRunMs = 0
+
+/** 时长分级（颜色渐进，冷→暖）：<10s 极淡 / 10-30s 中性 / 30s-1m 工具青绿 / 1-3m 主题色 / 3-5m 警告 / ≥5m 危险。 */
+function turnDurLevel(ms: number): 0 | 1 | 2 | 3 | 4 | 5 {
+  if (ms >= 300_000) return 5
+  if (ms >= 180_000) return 4
+  if (ms >= 60_000) return 3
+  if (ms >= 30_000) return 2
+  if (ms >= 10_000) return 1
+  return 0
+}
+
+/** 刷新计时显示：文本 + 分级色 + 运行态；信号灯思考闪烁周期同步分级（越久越慢——闪得慢=执行得慢）。 */
+function renderTurnTimer(elapsedMs: number, running: boolean): void {
+  const dur = String(turnDurLevel(elapsedMs))
+  turnTimerEl.dataset.dur = dur
+  if (headerCtxEl) {
+    if (running) headerCtxEl.dataset.dur = dur
+    else delete headerCtxEl.dataset.dur // 非运行态：信号灯恢复默认闪烁周期
+  }
+  turnTimerEl.classList.toggle("running", running)
+  ;(turnTimerEl.querySelector<HTMLElement>(".tt-text")!).textContent = formatTurnDuration(elapsedMs)
+}
+
 function turnTimerTick(run: RunState): void {
   if (!isTurnTimerEnabled()) {
     if (run.timerInterval) {
       clearInterval(run.timerInterval)
       run.timerInterval = undefined
     }
-    run.timerEl?.remove()
-    run.timerEl = null
     return
   }
-  const meta = run.el?.isConnected ? run.el.querySelector<HTMLElement>(":scope > .msg-body > .msg-meta") : null
-  if (!meta) return
-  if (!run.timerEl?.isConnected) run.timerEl = el("span", "msg-timer live")
-  if (run.timerEl.parentElement !== meta) meta.appendChild(run.timerEl)
-  run.timerEl.textContent = formatTurnDuration(Date.now() - run.startedAt)
+  if (run !== activeTimerRun) return // 显示已被更新的运行接管：空转，interval 随收尾清理
+  const elapsed = Date.now() - run.startedAt
+  turnTimerEl.hidden = false
+  renderTurnTimer(elapsed, true)
+  turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration(totalRunMs + elapsed)}` // 含进行中这轮
 }
 
 function startTurnTimer(run: RunState): void {
   if (!isTurnTimerEnabled()) return
+  activeTimerRun = run
   turnTimerTick(run)
   run.timerInterval = setInterval(() => turnTimerTick(run), 250)
 }
 
-/** 任务收尾：停表并定格最终耗时（消息仍在 DOM 时保留显示，脱离 DOM 则随元素消亡）。 */
 function stopTurnTimer(run: RunState): void {
   if (run.timerInterval) {
     clearInterval(run.timerInterval)
     run.timerInterval = undefined
   }
-  if (!isTurnTimerEnabled()) return
-  // 极短任务（本地快模型/纯工具直返）可能在首个 250ms tick 前结束：兜底补挂后再定格
-  if ((!run.timerEl || !run.timerEl.isConnected) && run.el?.isConnected) turnTimerTick(run)
-  if (run.timerEl?.isConnected) {
-    run.timerEl.classList.remove("live")
-    run.timerEl.textContent = formatTurnDuration(Date.now() - run.startedAt)
-  }
+  if (run !== activeTimerRun) return
+  activeTimerRun = null
+  const elapsed = Date.now() - run.startedAt
+  totalRunMs += elapsed // 每段累加：总运行时 = 各轮净耗时之和（不含轮间空闲）
+  renderTurnTimer(elapsed, false) // 结束不清除：定格保留
+  turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration(totalRunMs)}`
 }
 
 /** 空闲超时兜底（无数据视为挂起的判定窗口，毫秒）：高于服务端 LLM 读空闲超时（120s）——

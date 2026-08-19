@@ -69,10 +69,17 @@
         <button id="sidebar-toggle" class="icon-btn" data-tip="会话列表" aria-label="切换会话列表"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg></button>
         <span id="header-title" class="header-title"></span>
         <div class="header-right">
+          <!-- 单轮计时器：运行中实时走，结束定格保留，下次运行重启；按时长分级变色，hover 显示累计总运行时（外观 tab 可关） -->
+          <div id="turn-timer" class="turn-timer" hidden aria-hidden="true">
+            <svg class="tt-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>
+            <span class="tt-text"></span>
+          </div>
           <div id="header-ctx" hidden>
             <svg class="ctx-ring" viewBox="0 0 24 24" aria-hidden="true">
               <circle class="ctx-track" cx="12" cy="12" r="9" pathLength="100"></circle>
               <circle class="ctx-fill" cx="12" cy="12" r="9" pathLength="100"></circle>
+              <!-- 信号灯圆点：与圆环同一 SVG 坐标系，任何 DPI 下严格同心 -->
+              <circle class="conn-dot" cx="12" cy="12" r="3"></circle>
             </svg>
             <div id="conn" class="conn"></div>
           </div>
