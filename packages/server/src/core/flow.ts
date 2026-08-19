@@ -445,6 +445,7 @@ export function normalizeSteps(raw: unknown): FlowStep[] {
         if (step.foreach == null && step.while == null) {
           throw new Error(`flow: 分组步骤（steps 数组）必须声明 foreach 或 while 之一（步骤 ${String(step.id ?? i)}）`)
         }
+        if (!step.steps.length) throw new Error(`flow: 分组步骤（步骤 ${String(step.id ?? i)}）的 steps 不能为空`)
         validate(step.steps, depth + 1)
       } else if (typeof step.tool !== "string" || !step.tool) {
         throw new Error(`flow: steps[${i}] 缺少 tool 字段`)
@@ -518,18 +519,31 @@ async function runToolStep(
   scope: ExprScope,
 ): Promise<FlowStepResult> {
   const ctx = state.ctx
+  // optional 容错统一入口：任何步骤级错误（含参数模板/when 表达式/未知工具）都可转为软失败继续
+  const softFail = (msg: string): FlowStepResult | undefined =>
+    step.optional === true
+      ? { id, tool: step.tool, kind: "tool", status: "error", output: `（optional 步骤失败，已继续）${msg}`, data: { error: msg } }
+      : undefined
   // 条件分支：为假跳过（不更新 prev，不阻断后续）
   if (step.when !== undefined) {
     let ok: boolean
     try {
       ok = truthy(evalCond(step.when, scope))
     } catch (err) {
-      throw new Error(`flow: 步骤 ${id}（${step.tool}）when 表达式错误: ${(err as Error).message}`)
+      const wrapped = new Error(`步骤 ${id}（${step.tool}）when 表达式错误: ${(err as Error).message}`)
+      const soft = softFail(`flow: ${wrapped.message}`)
+      if (soft) return soft
+      throw new Error(`flow: ${wrapped.message}`)
     }
     if (!ok) return { id, tool: step.tool, kind: "tool", status: "skipped", output: "（when 条件为假，已跳过）" }
   }
   const rt = ctx.registry.resolve(step.tool)
-  if (!rt) throw new Error(`flow: 未知工具 ${step.tool}`)
+  if (!rt) {
+    const msg = `flow: 未知工具 ${step.tool}`
+    const soft = softFail(msg)
+    if (soft) return soft
+    throw new Error(msg)
+  }
   // 安全模式（DESIGN「安全模式」）：flow 直接执行工具、不经引擎拦截点，step 层同规则拦截风险工具
   if (ctx.safeMode && isToolBlockedInSafeMode(step.tool)) {
     const blocked = safeModeRestrictionMsg(step.tool)
@@ -538,30 +552,37 @@ async function runToolStep(
   if (state.executed >= FLOW_MAX_STEPS) {
     throw new Error(`flow: 工具调用总数超上限（>${FLOW_MAX_STEPS}），已执行 ${state.executed} 次；请拆分为多次 flow 或减少循环规模`)
   }
-  const params = { ...(resolveTemplate(step.params ?? {}, scope) as Record<string, unknown>) }
-  if (step.input !== undefined) {
-    // 显式映射：对象字面量 = { 目标参数名: 表达式 }，解析后覆盖同名字段并抑制自动注入；
-    // 非对象（字符串/数字等）= 给 input 参数的模板值（等价 { input: 值 }，与 params.input 语义一致）——
-    // 按 step.input 的原始形态判定（模板求值结果即使为对象/数组也归入 input 传值，防止 {{item}} 对象被误当映射展开）
-    const mapped = resolveTemplate(step.input, scope)
-    if (typeof step.input === "object" && step.input !== null && !Array.isArray(step.input)) {
-      Object.assign(params, mapped as Record<string, unknown>)
-    } else {
-      params.input = mapped
+  let params: Record<string, unknown>
+  try {
+    params = { ...(resolveTemplate(step.params ?? {}, scope) as Record<string, unknown>) }
+    if (step.input !== undefined) {
+      // 显式映射：对象字面量 = { 目标参数名: 表达式 }，解析后覆盖同名字段并抑制自动注入；
+      // 非对象（字符串/数字等）= 给 input 参数的模板值（等价 { input: 值 }，与 params.input 语义一致）——
+      // 按 step.input 的原始形态判定（模板求值结果即使为对象/数组也归入 input 传值，防止 {{item}} 对象被误当映射展开）
+      const mapped = resolveTemplate(step.input, scope)
+      if (typeof step.input === "object" && step.input !== null && !Array.isArray(step.input)) {
+        Object.assign(params, mapped as Record<string, unknown>)
+      } else {
+        params.input = mapped
+      }
+    } else if (state.prev !== undefined) {
+      autoInject(params, rt.tool, state.prev.output)
     }
-  } else if (state.prev !== undefined) {
-    autoInject(params, rt.tool, state.prev.output)
+  } catch (err) {
+    const wrapped = new Error(`flow: 步骤 ${id}（${step.tool}）参数模板错误: ${(err as Error).message ?? String(err)}`)
+    const soft = softFail(wrapped.message)
+    if (soft) return soft
+    throw wrapped
   }
   state.executed++
   let result: ToolResult
   try {
     result = await rt.tool.execute(params, ctx)
   } catch (err) {
-    if (step.optional) {
-      const msg = (err as Error).message ?? String(err)
-      return { id, tool: step.tool, kind: "tool", status: "error", output: `（optional 步骤失败，已继续）${msg}`, data: { error: msg } }
-    }
-    throw new Error(`flow: 步骤 ${id}（${step.tool}）失败: ${(err as Error).message ?? String(err)}`)
+    const msg = (err as Error).message ?? String(err)
+    const soft = softFail(msg)
+    if (soft) return soft
+    throw new Error(`flow: 步骤 ${id}（${step.tool}）失败: ${msg}`)
   }
   return { id, tool: step.tool, kind: "tool", status: "done", output: result.output, data: result.data }
 }
@@ -595,8 +616,14 @@ async function runGroup(
   report: string[],
   depth: number,
 ): Promise<FlowStepResult> {
-  if (group.when !== undefined && !truthy(evalCond(group.when, scope))) {
-    return { id, kind: "group", status: "skipped", output: "（when 条件为假，已跳过）" }
+  if (group.when !== undefined) {
+    let ok: boolean
+    try {
+      ok = truthy(evalCond(group.when, scope))
+    } catch (err) {
+      throw new Error(`flow: 分组 ${id} when 表达式错误: ${(err as Error).message}`)
+    }
+    if (!ok) return { id, kind: "group", status: "skipped", output: "（when 条件为假，已跳过）" }
   }
   // 组内子步骤引用本组结果：先占位（循环期间引用到的是未完成的占位对象，结束后为完整结果）
   const result: FlowStepResult = { id, kind: "group", status: "done", output: "" }
@@ -656,7 +683,13 @@ async function runGroup(
     last = await runRound(group.steps, state, scope, {}, report, depth, lines, `轮${rounds}`)
     result.data = last?.data ?? null
     rounds++
-    if (!truthy(evalCond(group.while!, scope))) break
+    let again: boolean
+    try {
+      again = truthy(evalCond(group.while!, scope))
+    } catch (err) {
+      throw new Error(`flow: 分组 ${id} while 表达式错误: ${(err as Error).message}（已执行 ${rounds} 轮；条件可引用本组最新结果 {{${id}.data.字段}}）`)
+    }
+    if (!again) break
   }
   delete scope.iteration
   result.runs = rounds
@@ -694,6 +727,13 @@ async function runRound(
   }
 }
 
+/** 步骤失败时附加的已执行步骤清单（模型判断副作用与续接点用）：最近 20 步的 id·工具·状态摘要。 */
+function stepTrail(state: FlowState): string {
+  const recent = state.order.slice(-20)
+  const head = state.order.length > recent.length ? `${state.order.length - recent.length} 步…、` : ""
+  return head + recent.map((r) => `${r.id}·${r.tool ?? "循环"}·${STATUS_LABEL[r.status]}`).join("、")
+}
+
 /** flow 主入口：执行数据流编排，返回模型报告文本 + 步骤摘要结构化数据。 */
 export async function runFlow(args: { steps: unknown; input?: unknown; timeout?: unknown }, ctx: ToolContext): Promise<ToolResult> {
   const steps = normalizeSteps(args.steps)
@@ -718,6 +758,11 @@ export async function runFlow(args: { steps: unknown; input?: unknown; timeout?:
           executed: timedOut,
         },
       }
+    }
+    // 步骤失败附加已执行清单：已执行步骤的副作用（写文件/发请求等）真实存在，模型需要知道
+    // 哪些步骤已成功才能安全重试/续接（失败步骤加 optional:true 可不中断后续步骤）
+    if (state.order.length && err instanceof Error) {
+      err.message += `（此前已执行 ${state.order.length} 步: ${stepTrail(state)}；如需失败后继续执行后续步骤，给该步骤加 optional: true）`
     }
     throw err
   }

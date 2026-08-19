@@ -280,6 +280,13 @@ describe("wsEventToChunk", () => {
     })
     expect(wsEventToChunk(ev("event.task.done"))).toEqual({ kind: "done" })
     expect(wsEventToChunk(ev("event.task.error", { error: "boom" }))).toEqual({ kind: "error", error: "boom" })
+    // 模型服务异常（引擎自动重试中）：非终态 model_error chunk
+    expect(wsEventToChunk(ev("event.model.error", { error: "connection reset", retry: 1, maxRetry: 2 }))).toEqual({
+      kind: "model_error",
+      error: "connection reset",
+      retry: 1,
+      maxRetry: 2,
+    })
     // 非会话事件类型 → null（未知事件忽略）
     expect(wsEventToChunk(ev("event.cron.run"))).toBeNull()
   })

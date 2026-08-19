@@ -875,7 +875,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const importMarkdown = tool(
     "import_markdown",
-    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：标题/段落/有序无序列表/任务列表/代码块/引用/表格/分割线/行内加粗代码链接。返回 document_id。",
+    "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级）/任务列表（- [ ] / - [x]）/代码块（标注语言）/引用/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格/分割线/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
     {
       content: { type: "string", description: "Markdown 文本" },
       document_id: { type: "string", description: "目标文档（缺省新建）" },
@@ -1893,10 +1893,10 @@ export function extractBoardContent(nodes: unknown[]): string {
 
 /* ================= Markdown → docx 块转换（纯函数，可独立测试） ================= */
 
-/** 行内 Markdown → text_run 元素数组（**加粗**、`代码`、[链接](url)、*斜体*）。 */
+/** 行内 Markdown → text_run 元素数组（**加粗**、`代码`、[链接](url)、*斜体*、***粗斜体***、~~删除线~~）。 */
 export function textElements(md: string, style?: Record<string, unknown>): Record<string, unknown>[] {
   const els: Record<string, unknown>[] = []
-  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]\n]+\]\([^)\s]+\)|\*[^*\n]+\*)/g
+  const re = /(\*\*\*[^*\n]+\*\*\*|\*\*[^*\n]+\*\*|~~[^~\n]+~~|`[^`\n]+`|\[[^\]\n]+\]\([^)\s]+\)|\*[^*\n]+\*)/g
   let last = 0
   let m: RegExpExecArray | null
   const push = (content: string, st: Record<string, unknown> | undefined) => {
@@ -1907,7 +1907,9 @@ export function textElements(md: string, style?: Record<string, unknown>): Recor
   while ((m = re.exec(md))) {
     push(md.slice(last, m.index), style)
     const tok = m[0]
-    if (tok.startsWith("**") && tok.endsWith("**")) push(tok.slice(2, -2), { bold: true, ...style })
+    if (tok.startsWith("***") && tok.endsWith("***")) push(tok.slice(3, -3), { bold: true, italic: true, ...style })
+    else if (tok.startsWith("**") && tok.endsWith("**")) push(tok.slice(2, -2), { bold: true, ...style })
+    else if (tok.startsWith("~~") && tok.endsWith("~~")) push(tok.slice(2, -2), { strikethrough: true, ...style })
     else if (tok.startsWith("`") && tok.endsWith("`")) push(tok.slice(1, -1), { inline_code: true, ...style })
     else if (tok.startsWith("[")) {
       const link = tok.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/)
@@ -2399,6 +2401,64 @@ function dividerBlock(): Record<string, unknown> {
   return { block_type: BLOCK_TYPE.DIVIDER, divider: {} }
 }
 
+/** GitHub 告示语法（`> [!NOTE]` 等）→ callout 高亮块样式映射：背景用浅色系枚举、边框同色系（官方 CalloutBackgroundColor/CalloutBorderColor）。 */
+const ALERT_CALLOUT_STYLE: Record<string, { background_color: number; border_color: number; emoji_id: string }> = {
+  NOTE: { background_color: 5, border_color: 5, emoji_id: "bulb" },
+  TIP: { background_color: 4, border_color: 4, emoji_id: "bulb" },
+  IMPORTANT: { background_color: 6, border_color: 6, emoji_id: "pushpin" },
+  WARNING: { background_color: 3, border_color: 3, emoji_id: "pushpin" },
+  CAUTION: { background_color: 1, border_color: 1, emoji_id: "pushpin" },
+}
+
+/** 告示块（callout）：标题粗体置首 + 正文（行内样式），无标题/正文时保留空元素占位。 */
+function calloutBlock(kind: string, title: string, body: string): Record<string, unknown> {
+  const els: Record<string, unknown>[] = []
+  if (title) els.push({ text_run: { content: title, text_element_style: { bold: true } } })
+  els.push(...textElements(body))
+  return { block_type: BLOCK_TYPE.CALLOUT, callout: { style: ALERT_CALLOUT_STYLE[kind], elements: els } }
+}
+
+/** Markdown 列表行解析（含缩进）：返回层级（缩进每 2 空格/1 tab 一级）、类型（bullet/ordered/todo）与文本。 */
+interface ListLineInfo {
+  depth: number
+  kind: "bullet" | "ordered" | "todo"
+  done: boolean
+  text: string
+}
+
+function parseListLine(line: string): ListLineInfo | undefined {
+  const m = /^(\s*)(?:[-*+]\s+(?:\[([ xX])\]\s+)?|(\d+)[.)]\s+)(.*)$/.exec(line)
+  if (!m) return undefined
+  const indent = m[1].replace(/\t/g, "  ")
+  return {
+    depth: Math.floor(indent.length / 2),
+    kind: m[3] !== undefined ? "ordered" : m[2] !== undefined ? "todo" : "bullet",
+    done: (m[2] ?? "").toLowerCase() === "x",
+    text: m[4],
+  }
+}
+
+/** 列表树节点（嵌套列表构建中间结构）。 */
+interface ListNode {
+  kind: "bullet" | "ordered" | "todo"
+  done: boolean
+  text: string
+  children: ListNode[]
+}
+
+function listBlockOf(node: ListNode): Record<string, unknown> {
+  if (node.kind === "todo") {
+    return { block_type: BLOCK_TYPE.TODO, todo: { style: { done: node.done }, elements: textElements(node.text) } }
+  }
+  return textBlock(node.text, node.kind === "ordered" ? BLOCK_TYPE.ORDERED : BLOCK_TYPE.BULLET)
+}
+
+/** 递归发射列表树：子项作为父块 children 引用（descendant 接口一次创建嵌套列表）。 */
+function emitListItem(node: ListNode, bb: BlockBuilder): string {
+  const childIds = node.children.map((c) => emitListItem(c, bb))
+  return bb.add(listBlockOf(node), childIds)
+}
+
 /** 表格 → 块组：table 块 + table_cell 块 + 单元格内文本块（官方推荐结构，单元格至少含一个空文本块）。 */
 function tableGroup(rows: string[][], base: number): BlockGroup {
   const bb = new BlockBuilder(base)
@@ -2559,13 +2619,15 @@ function isTableSeparator(line: string): boolean {
 
 const LIST_RE = /^\s*(?:[-*+]\s+|(\d+)[.)]\s+)/
 const TODO_RE = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)/
-const HEADING_RE = /^(#{1,6})\s+(.*)/
+const HEADING_RE = /^(#{1,9})\s+(.*)/
 const DIVIDER_RE = /^(-{3,}|\*{3,}|_{3,})$/
 const FENCE_RE = /^```(\w*)/
+const ALERT_RE = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i
 
 /**
  * 将 Markdown 文本转换为「创建嵌套块」接口所需的块组数组。
- * 支持：标题/段落/有序无序列表/任务列表/代码块/引用/表格/分割线/行内加粗代码链接斜体。
+ * 支持：标题（1~9 级）/段落/有序无序列表（缩进嵌套，2 空格或 1 tab 一级）/任务列表/代码块/引用/
+ * GitHub 告示（`> [!NOTE]` 等 → callout 高亮块）/表格/分割线/行内加粗粗斜体斜体删除线代码链接。
  * 每个块组自带 block_id 与 children 引用，可直接分批插入（单批 ≤1000 块）。
  */
 export function markdownToBlocks(md: string): BlockGroup[] {
@@ -2607,36 +2669,28 @@ export function markdownToBlocks(md: string): BlockGroup[] {
       continue
     }
 
-    const todo = trimmed.match(TODO_RE)
-    if (todo) {
-      const done = todo[1].toLowerCase() === "x"
-      groups.push(leafGroup({ block_type: BLOCK_TYPE.TODO, todo: { style: { done }, elements: textElements(todo[2]) } }, idBase))
-      idBase += 1
-      i++
-      continue
-    }
-
-    if (LIST_RE.test(trimmed)) {
+    const listStart = parseListLine(line)
+    if (listStart) {
+      // 连续列表行 → 嵌套树（按缩进层级，跳级缩进归一为 +1 级，最深 9 级）
+      const roots: ListNode[] = []
+      const stack: Array<{ raw: number; clamped: number; node: ListNode }> = []
       while (i < lines.length) {
-        const t = lines[i].trim()
-        const tTodo = t.match(TODO_RE)
-        const m1 = t.match(/^\s*[-*+]\s+(?!\[[ xX]\])(.*)/)
-        const m2 = t.match(/^\s*\d+[.)]\s+(.*)/)
-        if (tTodo) {
-          const done = tTodo[1].toLowerCase() === "x"
-          groups.push(leafGroup({ block_type: BLOCK_TYPE.TODO, todo: { style: { done }, elements: textElements(tTodo[2]) } }, idBase))
-          idBase += 1
-          i++
-        } else if (m1) {
-          groups.push(leafGroup(textBlock(m1[1], BLOCK_TYPE.BULLET), idBase))
-          idBase += 1
-          i++
-        } else if (m2) {
-          groups.push(leafGroup(textBlock(m2[1], BLOCK_TYPE.ORDERED), idBase))
-          idBase += 1
-          i++
-        } else break
+        const cur = parseListLine(lines[i])
+        if (!cur) break
+        const node: ListNode = { kind: cur.kind, done: cur.done, text: cur.text, children: [] }
+        while (stack.length && stack[stack.length - 1].raw >= cur.depth) stack.pop()
+        const clamped = Math.min(stack.length ? stack[stack.length - 1].clamped + 1 : 0, cur.depth, 9)
+        ;(stack.length ? stack[stack.length - 1].node.children : roots).push(node)
+        stack.push({ raw: cur.depth, clamped, node })
+        i++
       }
+      const bb = new BlockBuilder(idBase)
+      for (const root of roots) {
+        const start = bb.blocks.length
+        const rootId = emitListItem(root, bb)
+        groups.push({ rootId, blocks: bb.blocks.slice(start) })
+      }
+      idBase = bb.counter
       continue
     }
 
@@ -2646,7 +2700,13 @@ export function markdownToBlocks(md: string): BlockGroup[] {
         quote.push(lines[i].trim().replace(/^>\s?/, ""))
         i++
       }
-      groups.push(leafGroup(textBlock(quote.join("\n"), BLOCK_TYPE.QUOTE), idBase))
+      // GitHub 告示语法（首行 [!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]）→ callout 高亮块
+      const alert = ALERT_RE.exec(quote[0] ?? "")
+      if (alert) {
+        groups.push(leafGroup(calloutBlock(alert[1].toUpperCase(), alert[2].trim(), quote.slice(1).join("\n")), idBase))
+      } else {
+        groups.push(leafGroup(textBlock(quote.join("\n"), BLOCK_TYPE.QUOTE), idBase))
+      }
       idBase += 1
       continue
     }

@@ -481,6 +481,64 @@ describe("runFlow 数据流编排", () => {
     await expect(runFlow({ steps: [{ tool: "nope" }] }, c)).rejects.toThrow(/未知工具 nope/)
   })
 
+  test("稳定性：步骤失败错误携带已执行步骤清单", async () => {
+    const boom: Tool = {
+      name: "boom",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        throw new Error("炸了")
+      },
+    }
+    const c = flowCtx({ ok: tool("ok", () => "done"), boom, after: tool("after", () => "after") })
+    await expect(
+      runFlow({ steps: [{ id: "first", tool: "ok" }, { id: "bad", tool: "boom" }, { tool: "after" }] }, c),
+    ).rejects.toThrow(/bad.*失败.*炸了.*first·ok·✓.*optional: true/s)
+  })
+
+  test("稳定性：optional 覆盖参数模板错误与未知工具（软失败继续）", async () => {
+    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
+    // 参数模板错误（未知函数）+ optional：软失败继续
+    const c = flowCtx({ echo: tool("echo", () => "e"), after: tool("after", () => "after") }, calls)
+    const r1 = await runFlow(
+      {
+        steps: [
+          { id: "e", tool: "echo", params: {} },
+          { id: "t", tool: "echo", params: { x: "{{unknownFn(e.data)}}" }, optional: true },
+          { tool: "after" },
+        ],
+      },
+      c,
+    )
+    expect(r1.output).toContain("optional 步骤失败")
+    expect(calls.map((x) => x.name)).toContain("after")
+    // 未知工具 + optional：软失败继续
+    const c2 = flowCtx({ after: tool("after", () => "after") }, calls)
+    const r2 = await runFlow({ steps: [{ id: "n", tool: "nope", optional: true }, { tool: "after" }] }, c2)
+    expect(r2.output).toContain("optional 步骤失败")
+  })
+
+  test("稳定性：参数模板错误未声明 optional 时带步骤上下文中断", async () => {
+    const c = flowCtx({ echo: tool("echo", () => "e") })
+    await expect(
+      runFlow({ steps: [{ id: "e", tool: "echo", params: {} }, { id: "t", tool: "echo", params: { x: "{{badFn(1)}}" } }] }, c),
+    ).rejects.toThrow(/t（echo）参数模板错误.*未知函数/)
+  })
+
+  test("稳定性：分组 when/while 表达式错误带分组上下文", async () => {
+    const c = flowCtx({ t: tool("t", () => "x") })
+    await expect(
+      runFlow({ steps: [{ id: "g1", foreach: "[1]", when: "badFn(1)", steps: [{ tool: "t" }] }] }, c),
+    ).rejects.toThrow(/分组 g1 when 表达式错误/)
+    await expect(
+      runFlow({ steps: [{ id: "g2", while: "badFn(1)", maxLoops: 2, steps: [{ tool: "t" }] }] }, c),
+    ).rejects.toThrow(/分组 g2 while 表达式错误.*已执行 1 轮/)
+  })
+
+  test("稳定性：分组空 steps 结构校验报错", () => {
+    expect(() => normalizeSteps([{ id: "g", foreach: "[1]", steps: [] }])).toThrow(/steps 不能为空/)
+  })
+
   test("安全模式：cron 调度类 step 层硬阻断；风险工具 step 放行（降级在工具 execute 内）", async () => {
     const calls: Array<{ name: string; params: Record<string, unknown> }> = []
     const c = flowCtx({ cron_add: tool("cron_add", () => "added"), sh: tool("sh", () => "ran") }, calls, { safeMode: true })

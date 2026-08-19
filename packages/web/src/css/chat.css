@@ -1197,3 +1197,27 @@
 /* 降级视图（无行级数据）：两侧代码块贴边 */
 .diff-panes .tool-code { margin: 0; border: none; border-radius: 0; }
 .diff-panes .tool-code + .tool-code { border-left: 1px solid var(--border); }
+
+/* 模型服务异常瞬时提示（event.model.error：引擎自动重试期间显示，恢复输出即移除） */
+.model-error-notice {
+  max-width: var(--msg-max-w);
+  width: fit-content;
+  margin: 4px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  animation: fade-in 0.15s ease-out;
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+/* 任务错误说明（已有部分输出后失败：追加在气泡末尾，不覆盖已生成内容） */
+.msg-error-notice {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  font-size: 13px;
+}

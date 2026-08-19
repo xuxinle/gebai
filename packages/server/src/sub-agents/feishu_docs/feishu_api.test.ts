@@ -123,6 +123,60 @@ describe("markdownToBlocks", () => {
     expect(groups[2].blocks[0]).toMatchObject({ todo: { style: { done: true } } })
     expect(groups[3].blocks[0]).toMatchObject({ todo: { style: { done: false } } })
   })
+  test("嵌套列表：缩进 2 空格一级，子项作为父块 children", () => {
+    const groups = markdownToBlocks("- a\n  - a1\n    - a1x\n- b\n  1. b1\n  2. b2")
+    // 两个顶层项各成一个块组（root + 嵌套子树）
+    expect(groups.length).toBe(2)
+    const rootA = groups[0].blocks.find((b) => b.block_id === groups[0].rootId)!
+    const a1 = groups[0].blocks.find((b) => (b.children as string[])?.includes((rootA.children as string[])[0]))!
+    expect(a1.block_type).toBe(12)
+    const a1Child = groups[0].blocks.find((b) => (b.children as string[]).includes((a1.children as string[])[0]))
+    expect(a1Child?.block_type).toBe(12) // 三级仍为 bullet（- a1x）
+    const rootB = groups[1].blocks.find((b) => b.block_id === groups[1].rootId)!
+    const bKids = rootB.children as string[]
+    expect(bKids.length).toBe(2)
+    const ordered = bKids.map((id) => groups[1].blocks.find((b) => b.block_id === id)!.block_type)
+    expect(ordered).toEqual([13, 13]) // 嵌套有序列表
+  })
+  test("嵌套列表：跳级缩进归一为 +1 级；todo 可嵌套", () => {
+    const groups = markdownToBlocks("- a\n        - deep\n- [x] 顶层\n  - [ ] 子待办")
+    const rootA = groups[0].blocks.find((b) => b.block_id === groups[0].rootId)!
+    expect((rootA.children as string[]).length).toBe(1) // 8 空格缩进归一为一级子项
+    const rootTodo = groups[1].blocks.find((b) => b.block_id === groups[1].rootId)!
+    expect(rootTodo.block_type).toBe(17)
+    const subTodo = groups[1].blocks.find((b) => b.block_id === (rootTodo.children as string[])[0])!
+    expect(subTodo).toMatchObject({ block_type: 17, todo: { style: { done: false } } })
+  })
+  test("GitHub 告示语法转 callout 高亮块（配色 + emoji + 标题粗体）", () => {
+    const groups = markdownToBlocks("> [!NOTE] 提示标题\n> 正文内容")
+    expect(groups.length).toBe(1)
+    expect(groups[0].blocks[0]).toMatchObject({
+      block_type: 19,
+      callout: {
+        style: { background_color: 5, border_color: 5, emoji_id: "bulb" },
+        elements: [
+          { text_run: { content: "提示标题", text_element_style: { bold: true } } },
+          { text_run: { content: "正文内容" } },
+        ],
+      },
+    })
+    expect(markdownToBlocks("> [!CAUTION]\n> 危险操作")[0].blocks[0]).toMatchObject({
+      callout: { style: { background_color: 1, border_color: 1, emoji_id: "pushpin" } },
+    })
+    // 普通引用不误判
+    expect(markdownToBlocks("> 普通引用")[0].blocks[0].block_type).toBe(15)
+  })
+  test("多级标题 7~9 与行内删除线/粗斜体", () => {
+    const groups = markdownToBlocks("####### h7")
+    expect(groups[0].blocks[0].block_type).toBe(9)
+    expect(markdownToBlocks("######### h9")[0].blocks[0].block_type).toBe(11)
+    const els = textElements("~~gone~~ ***both***")
+    expect(els).toEqual([
+      { text_run: { content: "gone", text_element_style: { strikethrough: true } } },
+      { text_run: { content: " " } },
+      { text_run: { content: "both", text_element_style: { bold: true, italic: true } } },
+    ])
+  })
   test("代码块与引用与分割线", () => {
     const groups = markdownToBlocks("```ts\nconst a = 1\n```\n\n> 引用内容\n\n---")
     expect(groups.length).toBe(3)

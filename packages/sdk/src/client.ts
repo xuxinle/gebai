@@ -1081,6 +1081,14 @@ export function wsEventToChunk(ev: AgentEvent): ChatChunk | null {
       return { kind: "done" }
     case "event.task.error":
       return { kind: "error", error: String(p.error ?? "unknown error") }
+    case "event.model.error":
+      // 模型服务异常（引擎将自动重试）：非终态瞬时提示，任务继续
+      return {
+        kind: "model_error",
+        error: String(p.error ?? "模型服务异常"),
+        retry: typeof p.retry === "number" ? p.retry : undefined,
+        maxRetry: typeof p.maxRetry === "number" ? p.maxRetry : undefined,
+      }
     default:
       return null
   }

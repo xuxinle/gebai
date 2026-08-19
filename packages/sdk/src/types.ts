@@ -139,7 +139,7 @@ export interface LegacySubAgentRunArchive {
 }
 
 export interface ChatChunk {
-  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "session_start" | "session_done"
+  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "session_start" | "session_done" | "model_error"
   messageId?: string
   /** 事件来自新会话执行过程（agent_run 派生会话；主回复不带此标记）。 */
   session?: boolean
@@ -153,6 +153,9 @@ export interface ChatChunk {
   output?: string
   blocks?: ContentBlock[]
   error?: string
+  /** model_error：即将进行的重试序号（第几次重试）与总次数（引擎自动重试中的瞬时异常提示）。 */
+  retry?: number
+  maxRetry?: number
 }
 
 export interface AgentEvent {

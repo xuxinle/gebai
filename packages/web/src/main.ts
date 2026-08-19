@@ -55,6 +55,7 @@ import {
   input,
   isDraftView,
   lastSessionId,
+  msgEl,
   pendingFiles,
   pendingTools,
   pendingToolsKey,
@@ -298,6 +299,8 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     return
   }
   if (chunk.kind === "text") {
+    // 模型恢复输出：移除模型服务异常瞬时提示
+    if (run.modelErrorEl?.isConnected) clearModelErrorNotice(run)
     if (chunk.messageId) run.messageId = chunk.messageId
     const runId = chunk.sessionRunId
     if (runId) {
@@ -429,7 +432,30 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
       finishSessionRun(sub.container, sub.outputEl, chunk.sessionMeta?.output ?? "")
       run.sessionRuns?.delete(runId)
     }
+  } else if (chunk.kind === "model_error") {
+    // 模型服务异常（引擎自动重试中）：消息流尾部瞬时提示，非终态——文本恢复时移除
+    showModelErrorNotice(run, sessionId, chunk)
   }
+}
+
+/** 模型服务异常瞬时提示（重试期间）：单一元素复用更新（重连重放不堆叠），文本恢复/任务结束时移除。 */
+function showModelErrorNotice(run: RunState, sessionId: string, chunk: ChatChunk): void {
+  if (getCurrentSession()?.id !== sessionId) return
+  const retry = chunk.retry ? (chunk.maxRetry ? `（第 ${chunk.retry}/${chunk.maxRetry} 次重试）` : `（第 ${chunk.retry} 次重试）`) : ""
+  const text = `模型服务异常${retry}：${chunk.error ?? ""}，正在自动重试…`
+  if (!run.modelErrorEl?.isConnected) {
+    run.modelErrorEl = el("div", "model-error-notice")
+    msgEl.appendChild(run.modelErrorEl)
+    scrollIfSticky()
+    refreshJumpBottom()
+  }
+  run.modelErrorEl.textContent = text
+}
+
+/** 移除模型服务异常瞬时提示（模型恢复输出/任务结束时调用）。 */
+function clearModelErrorNotice(run: RunState): void {
+  run.modelErrorEl?.remove()
+  run.modelErrorEl = null
 }
 
 /** 空闲超时兜底（无数据视为挂起的判定窗口，毫秒）：高于服务端 LLM 读空闲超时（120s）——
@@ -509,9 +535,16 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
       if (bubble) {
         // 空闲超时主动中断且回答已有内容：内容完整，静默收尾不渲染错误气泡；否则提示超时/错误
         if (!(run.abort.signal.aborted && run.acc.trim())) {
-          bubble.innerHTML = ""
           const msg = run.abort.signal.aborted ? "生成超时，请重试" : `错误: ${(err as Error).message}`
-          bubble.appendChild(blockText(msg))
+          if (run.acc.trim()) {
+            // 已有部分输出后失败：保留已生成内容，错误说明追加其后（不覆盖）
+            const notice = el("div", "msg-error-notice")
+            notice.appendChild(blockText(msg))
+            bubble.appendChild(notice)
+          } else {
+            bubble.innerHTML = ""
+            bubble.appendChild(blockText(msg))
+          }
           addMetaActions(run.el.querySelector<HTMLElement>(".msg-meta") ?? run.el, run.el, bubble, { role: "assistant", content: run.acc || msg, id: run.messageId })
         }
       }
@@ -521,6 +554,7 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
       appendFinalNotice(sessionId, msg)
     }
   } finally {
+    clearModelErrorNotice(run) // 任务结束：模型服务异常瞬时提示随流收尾移除
     clearInterval(idleTimer) // 空闲超时兜底定时器随流结束清理
     // 流结束：低性能节流排期未到点则同步补渲最后一帧（防末尾文本丢失）；错误路径已清排期，不重复渲染
     if (run.renderTimer) {
