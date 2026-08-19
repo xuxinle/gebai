@@ -11,6 +11,11 @@ export interface SubAgentManagerOptions {
   bundledNames?: string[]
 }
 
+/** 源码目录扫描结果缓存（进程级）：目录内容在进程内不变（运行期改动经重启生效），
+ *  服务端每进程只 discover 一次；测试中每个用例新建 SubAgentManager 再 discover 时
+ *  跳过重复的目录扫描/动态 import，只做本实例的注册与预载。 */
+let discoveredDefsCache: SubAgentDef[] | null = null
+
 export class SubAgentManager {
   private defs = new Map<string, SubAgentDef>()
   private loaded = new Set<string>()
@@ -25,6 +30,12 @@ export class SubAgentManager {
   }
 
   async discover(): Promise<void> {
+    // 命中缓存：直接复用首次扫描的定义（def 为纯数据 + 工具函数引用，跨实例共享安全）
+    if (discoveredDefsCache) {
+      for (const def of discoveredDefsCache) this.defs.set(def.name, def)
+      await this.preload()
+      return
+    }
     // core/ 下一级为 src/sub-agents（dev 模式）；dist/二进制模式下目录不存在，回退到构建时生成的 bundle 注册表
     const dir = join(import.meta.dirname, "..", "sub-agents")
     let entries
@@ -77,6 +88,7 @@ export class SubAgentManager {
         }
       }
     }
+    discoveredDefsCache = [...this.defs.values()]
     await this.preload()
   }
 

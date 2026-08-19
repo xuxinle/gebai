@@ -59,6 +59,21 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
     }
   })
 
+  test("UI 风格白名单：aether 直通、非法值回落默认 acrylic", async () => {
+    const dist = mkdtempSync(join(tmpdir(), "gebai-dist-style-"))
+    try {
+      writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
+      const pass = createApp(makeDeps({ webDist: dist, uiStyle: "aether" }))
+      const passHtml = await (await pass.request("/")).text()
+      expect(passHtml).toContain('__GEBAI_UI_STYLE__="aether"')
+      const fallback = createApp(makeDeps({ webDist: dist, uiStyle: "neon" }))
+      const fallbackHtml = await (await fallback.request("/")).text()
+      expect(fallbackHtml).toContain('__GEBAI_UI_STYLE__="acrylic"')
+    } finally {
+      rmSync(dist, { recursive: true, force: true })
+    }
+  })
+
   test("非 dev-reload 且 dist 缺失时 UI 路由不注册（404）", async () => {
     const dist = mkdtempSync(join(tmpdir(), "gebai-dist-"))
     rmSync(dist, { recursive: true, force: true })

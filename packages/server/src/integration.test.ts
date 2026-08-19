@@ -82,7 +82,7 @@ describe("REST API", () => {
       expect(html).toContain("<html")
       // 服务端注入全局默认 UI 风格（GEBAI_UI_STYLE → __GEBAI_UI_STYLE__，白名单校验）
       expect(html).toContain("__GEBAI_UI_STYLE__=")
-      expect(html).toMatch(/__GEBAI_UI_STYLE__="(acrylic|classic|dark|modern|minimal|cyberpunk|aurora|synthwave|matrix|tokyo-night|cny)"/)
+      expect(html).toMatch(/__GEBAI_UI_STYLE__="(acrylic|classic|aether|dark|modern|minimal|cyberpunk|aurora|synthwave|matrix|tokyo-night|cny)"/)
     } else {
       // web build not present in this environment; acceptable
       expect([404, 200]).toContain(res.status)

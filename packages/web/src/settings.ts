@@ -2,6 +2,7 @@ import type { FeedbackInfo, UserInfo } from "@gebai/sdk"
 import { client, el, setConn, settingsBody, settingsBtn, settingsFoot, settingsOverlay, settingsTabs } from "./state"
 import { blockText } from "./markdown"
 import { getLowPowerSetting, isLowPower, setLowPowerSetting } from "./low-power"
+import { isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
 
@@ -67,6 +68,8 @@ function settingsSection(title: string): HTMLElement {
 
 function renderSettingsAppearance() {
   const list = el("div", "settings-list")
+
+  // 低性能模式
   const row = el("div", "settings-row")
   const info = el("div", "settings-row-info")
   const desc = el("div", "settings-row-desc")
@@ -84,9 +87,29 @@ function renderSettingsAppearance() {
   info.append(el("div", "settings-row-name", "低性能模式"), desc)
   row.append(info, btn)
   list.appendChild(row)
+
+  // 单轮计时器：任务运行期间在流式消息上显示本轮耗时，结束定格
+  const ttRow = el("div", "settings-row")
+  const ttInfo = el("div", "settings-row-info")
+  const ttDesc = el("div", "settings-row-desc")
+  const ttBtn = el("button", "mini-btn")
+  const ttRefreshDesc = () => {
+    const on = isTurnTimerEnabled() // 跨标签同步：设置可能在别的标签被修改
+    ttBtn.textContent = on ? "关闭" : "开启"
+    ttDesc.textContent = on ? "已开启：消息上显示本轮任务耗时" : "已关闭：不显示任务耗时"
+  }
+  ttBtn.onclick = () => {
+    setTurnTimerSetting(isTurnTimerEnabled() ? "off" : "on")
+    ttRefreshDesc()
+  }
+  ttInfo.append(el("div", "settings-row-name", "单轮计时器"), ttDesc)
+  ttRow.append(ttInfo, ttBtn)
+  list.appendChild(ttRow)
+
   settingsBody.appendChild(list)
   appearanceRefresh = refreshDesc
   refreshDesc()
+  ttRefreshDesc()
 }
 
 async function renderSettingsEnv() {

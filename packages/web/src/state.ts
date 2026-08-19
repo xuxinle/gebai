@@ -153,6 +153,12 @@ export interface RunState {
   sessionRuns?: Map<string, SessionRunState>
   /** 模型服务异常瞬时提示元素（event.model.error 重试期间显示；文本恢复/任务结束时移除）。 */
   modelErrorEl?: HTMLElement | null
+  /** 单轮计时开始时刻（consumeTaskStream 入口记录）。 */
+  startedAt: number
+  /** 单轮计时 span（跟随当前流式消息 meta 迁移复用；外观开关关闭或消息脱离 DOM 时置空）。 */
+  timerEl?: HTMLElement | null
+  /** 单轮计时 interval（任务收尾随 finally 清理）。 */
+  timerInterval?: ReturnType<typeof setInterval>
 }
 
 /** 正在流式运行中的会话（多会话后台运行）。 */
