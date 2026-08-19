@@ -4,7 +4,7 @@ import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
 import { isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "./paths"
 import { randomUUID } from "node:crypto"
 
-const MAX_CACHE_MESSAGES = 100
+const MAX_CACHE_MESSAGES = 300
 const MAX_CACHE_SESSIONS = 10
 
 export interface SessionStoreOptions {
@@ -243,23 +243,25 @@ export class SessionStore {
    * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直至长度不超上限——不重排消息顺序（append 语义
    * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免长会话中上下文压缩机制被静默破坏、
    * 避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身超过上限时按原样保留（软上限，
-   * 用户输入与系统提示词不改变优先）。
+   * 用户输入与系统提示词不改变优先）。丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时
+   * 连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），
+   * 实际保留条数可略低于上限（配对完整性优先）。
    */
   private trimToCacheLimit(messages: Message[]): Message[] {
     if (messages.length <= MAX_CACHE_MESSAGES) return messages
     const over = messages.length - MAX_CACHE_MESSAGES
     const out: Message[] = []
     let dropped = 0
-    for (const m of messages) {
-      if (isProtectedMessage(m)) {
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i]
+      if (isProtectedMessage(m) || dropped >= over) {
         out.push(m)
         continue
       }
-      if (dropped < over) {
-        dropped++
-        continue
+      dropped++
+      if (m.role === "assistant" && m.toolCalls?.length) {
+        while (i + 1 < messages.length && messages[i + 1].role === "tool" && !isProtectedMessage(messages[i + 1])) i++
       }
-      out.push(m)
     }
     return out
   }

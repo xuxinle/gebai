@@ -1,7 +1,7 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { Tool, ToolResult, ToolSet } from "../../core/types"
 import { truncate, assertPublicHttpUrl, fetchWithRedirectGuard } from "../../core/tools"
-import { Bridge, type BridgeLike } from "../playwright/playwright_tools"
+import { createLazyBridge, type BridgeLike } from "../playwright/playwright_tools"
 
 /**
  * reverse_site 子Agent 工具集：接口逆向。
@@ -157,9 +157,9 @@ export interface CapturedRequest {
   body?: string
 }
 
-/** capture_* 网络录制工具（与 playwright 工具共享桥接进程/浏览器会话）。 */
+/** capture_* 网络录制工具（与 playwright 工具共享桥接进程/浏览器会话，默认惰性单例）。 */
 export function createCaptureTools(deps: { bridge?: BridgeLike } = {}): ToolSet {
-  const bridge: BridgeLike = deps.bridge ?? new Bridge()
+  const bridge: BridgeLike = deps.bridge ?? createLazyBridge()
   const request = (sessionId: string, op: string, args: Record<string, unknown>): Promise<unknown> =>
     bridge.request(op, { sessionId, ...args })
 

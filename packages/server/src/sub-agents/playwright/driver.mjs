@@ -134,6 +134,7 @@ function attachNetworkListeners(s) {
 /** 惰性加载的 playwright 模块（init 时注入路径，规避 node 侧模块解析问题）。 */
 let pw = null
 let browser = null
+let channel = "" // 浏览器启动 channel（init 注入；空 = 不指定，用默认 chromium）
 /** sessionId -> { context, lastUsed, activePageIndex } */
 const sessions = new Map()
 let lastOp = null // 最近一次请求上下文（错误信息补充）
@@ -180,8 +181,8 @@ function str(v, dflt = "") {
 async function ensureBrowser() {
   if (!pw) throw new Error("driver 未初始化（init 未调用或失败）")
   if (browser && browser.isConnected()) return browser
-  log("launching chromium...")
-  browser = await pw.chromium.launch({ headless: true })
+  log("launching chromium" + (channel ? ` (${channel})` : "") + "...")
+  browser = await pw.chromium.launch({ headless: true, ...(channel ? { channel } : {}) })
   browser.on("disconnected", () => {
     log("browser disconnected")
     browser = null
@@ -259,13 +260,17 @@ function assertNavUrl(url) {
 /* ---------------- 操作实现 ---------------- */
 
 const ops = {
-  /** 初始化：注入 playwright 模块绝对路径（file:// URL）。幂等。 */
+  /** 初始化：注入 playwright 模块绝对路径（file:// URL）与浏览器 channel。幂等。 */
   async init(args) {
     if (!pw) {
       const path = str(args.playwrightModule)
       if (!path) throw new Error("缺少 playwrightModule 参数")
-      pw = await import(path)
-      log("playwright loaded:", path)
+      const mod = await import(path)
+      // CJS 包经 file:// import 时具名导出可能缺失（cjs-module-lexer 未识别），回退 default
+      pw = mod && mod.chromium ? mod : (mod.default ?? mod)
+      if (!pw || !pw.chromium) throw new Error(`playwright 模块不可用（未导出 chromium）: ${path}`)
+      channel = str(args.channel)
+      log("playwright loaded:", path, channel ? `(channel: ${channel})` : "")
     }
     return { ok: true }
   },

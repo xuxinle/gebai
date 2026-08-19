@@ -2,8 +2,8 @@ import type { ToolContext, ToolResult, ToolSet } from "../../core/types"
 import { artifactBlocks, truncate } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
 import { pathToFileURL } from "node:url"
-import { isAbsolute, join, normalize, sep } from "node:path"
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { dirname, isAbsolute, join, normalize, sep } from "node:path"
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { isBinaryMode, resolveGebaiHome } from "../../core/config"
 
 /**
@@ -13,6 +13,10 @@ import { isBinaryMode, resolveGebaiHome } from "../../core/config"
  * 因此不直接 import playwright，而是经常驻 node 子进程桥接——本文件 spawn
  * `node driver.mjs`，通过 stdin/stdout 行分隔 JSON-RPC 通信（见 driver.mjs 顶部协议说明）。
  * 浏览器在 node 进程内单例，BrowserContext 按会话隔离，空闲自动回收。
+ *
+ * 桥接进程与浏览器会话全进程共享（createLazyBridge 惰性单例，首次工具调用才构造——
+ * bundle 图内禁止模块作用域的第三方包解析）；Windows 默认驱动系统自带 Edge
+ * （channel=msedge，免下载浏览器），GEBAI_PLAYWRIGHT_CHANNEL 覆写。
  *
  * 服务端部署（sandboxed）可用：浏览器是隔离环境，与 desktop（操控宿主机桌面）不同；
  * 但导航/交互/JS 执行类操作默认需审批，防 SSRF 与任意脚本滥用。
@@ -66,6 +70,76 @@ function playwrightModuleUrl(): string {
   return pathToFileURL(resolved).href
 }
 
+/** 浏览器启动 channel（driver 侧 chromium.launch 的 channel 参数）：
+ *  GEBAI_PLAYWRIGHT_CHANNEL 覆写（留空 = 不指定）；缺省 Windows 用系统自带 Edge
+ *  （msedge，Win10/11 必装，免 playwright install 下载浏览器），其余平台不指定（默认 chromium）。 */
+export function resolveChannel(platform: string = process.platform, envValue = process.env.GEBAI_PLAYWRIGHT_CHANNEL): string {
+  if (envValue !== undefined) return envValue
+  return platform === "win32" ? "msedge" : ""
+}
+
+/** 内嵌 playwright-core 产物（scripts/build-pwcore-embed.ts 生成，gitignore）。 */
+interface EmbeddedPwCore {
+  version: string
+  entry: string
+  files: Array<{ path: string; data: string }>
+}
+
+let pwcoreMaterializing: Promise<void> | null = null
+
+/** 物化内嵌 playwright-core 到 `{GEBAI_HOME}/vendor/playwright-core/`（版本不一致整目录重建；并发共享一次执行）。导出供测试。 */
+export async function materializePwCore(embedded: EmbeddedPwCore): Promise<void> {
+  const vendorRoot = join(resolveGebaiHome(), "vendor")
+  const dir = join(vendorRoot, "playwright-core")
+  const marker = join(vendorRoot, "playwright-core.version")
+  if (existsSync(marker) && readFileSync(marker, "utf8") === embedded.version) return
+  if (pwcoreMaterializing) {
+    await pwcoreMaterializing // 并发调用共享同一次执行（内嵌产物单版本，无需重复物化）
+    return
+  }
+  pwcoreMaterializing = (async () => {
+    rmSync(dir, { recursive: true, force: true })
+    mkdirSync(vendorRoot, { recursive: true })
+    for (const f of embedded.files) {
+      const target = join(dir, f.path)
+      if (!normalize(target).startsWith(normalize(dir) + sep)) continue // 防穿越（产物自生成，纵深防御）
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, Bun.gunzipSync(Buffer.from(f.data, "base64")))
+    }
+    writeFileSync(marker, embedded.version)
+  })()
+  try {
+    await pwcoreMaterializing
+  } finally {
+    pwcoreMaterializing = null // 完成（成功或失败）后复位，后续调用按需重新物化
+  }
+}
+
+/**
+ * 解析 driver 用的 playwright 模块（file:// URL）：二进制形态优先物化内嵌 playwright-core
+ * （编译产物中 `Bun.resolveSync` 锚定真实 CWD 的 node_modules 可达性，用户机器上不可依赖），
+ * 回退解析 node_modules 的 playwright 包（源码/服务端部署形态）。仅在桥接进程首次启动
+ * （首次工具调用）时执行——模块作用域禁止调用（见 createLazyBridge）。
+ */
+async function resolvePlaywrightModule(): Promise<string> {
+  if (isBinaryMode()) {
+    const embedded = await import("../../core/pwcore.embedded.generated.json")
+      .then((m) => m.default as EmbeddedPwCore)
+      .catch(() => null)
+    if (embedded) {
+      await materializePwCore(embedded)
+      return pathToFileURL(join(resolveGebaiHome(), "vendor", "playwright-core", embedded.entry)).href
+    }
+  }
+  try {
+    return playwrightModuleUrl()
+  } catch (err) {
+    throw new Error(
+      `playwright 模块解析失败（源码/部署形态需安装 playwright 依赖并 bunx playwright install；单二进制形态需构建时运行 scripts/build-pwcore-embed.ts 生成内嵌产物）: ${err instanceof Error ? err.message : err}`,
+    )
+  }
+}
+
 /* ---------------- 桥接进程 ---------------- */
 
 export interface BridgeLike {
@@ -73,18 +147,23 @@ export interface BridgeLike {
 }
 
 export class Bridge implements BridgeLike {
-  private readonly opts: { driverPath?: string; playwrightModule: string; requestTimeoutMs: number }
+  private readonly opts: { driverPath?: string; playwrightModule?: string; channel: string; requestTimeoutMs: number }
   private proc: Bun.Subprocess | null = null
   private stdin: Bun.FileSink | null = null
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private nextId = 1
   private started = false
   private stderrTail = ""
+  private resolvedModule: string | null = null
+  private starting: Promise<void> | null = null
 
-  constructor(opts: { driverPath?: string; playwrightModule?: string; requestTimeoutMs?: number } = {}) {
+  /** 构造零副作用（不解析 playwright 模块——bundle 图模块作用域安全，见 createLazyBridge）：
+   *  playwrightModule 显式注入优先，缺省首次启动时解析；channel 同理（resolveChannel）。 */
+  constructor(opts: { driverPath?: string; playwrightModule?: string; channel?: string; requestTimeoutMs?: number } = {}) {
     this.opts = {
       driverPath: opts.driverPath,
-      playwrightModule: opts.playwrightModule ?? playwrightModuleUrl(),
+      playwrightModule: opts.playwrightModule,
+      channel: opts.channel ?? resolveChannel(),
       requestTimeoutMs: opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
     }
   }
@@ -107,8 +186,14 @@ export class Bridge implements BridgeLike {
     })
   }
 
-  private async ensureStarted(): Promise<void> {
-    if (this.started && this.proc && !this.proc.killed) return
+  /** 启动串行化：并发的首次请求共用同一次启动（含 init 注入），防驱动未就绪即下发操作。 */
+  private ensureStarted(): Promise<void> {
+    if (this.started && this.proc && !this.proc.killed) return Promise.resolve()
+    this.starting ??= this.start().finally(() => (this.starting = null))
+    return this.starting
+  }
+
+  private async start(): Promise<void> {
     const path = this.opts.driverPath ?? (await resolveDriverFile())
     const { existsSync } = await import("node:fs")
     if (!existsSync(path)) {
@@ -159,8 +244,9 @@ export class Bridge implements BridgeLike {
         }
       } catch { /* 进程退出 */ }
     })()
-    // 首次启动注入 playwright 模块路径
-    await this.request("init", { playwrightModule: this.opts.playwrightModule }, 30_000)
+    // 首次启动注入 playwright 模块路径与浏览器 channel（模块解析惰性执行，失败即本次请求失败）
+    this.resolvedModule ??= this.opts.playwrightModule ?? (await resolvePlaywrightModule())
+    await this.request("init", { playwrightModule: this.resolvedModule, channel: this.opts.channel }, 30_000)
   }
 
   private dispatch(line: string): void {
@@ -202,6 +288,30 @@ function logBridge(msg: string): void {
   console.error(`[playwright-bridge] ${msg}`)
 }
 
+/* ---------------- 惰性桥接 ---------------- */
+
+/** 惰性桥接：首次请求才构造 Bridge。bundle 图内的子Agent 模块禁止模块作用域的第三方包解析
+ *  （编译产物中 `Bun.resolveSync` 锚定真实 CWD 的 node_modules 可达性，启动期解析失败会炸掉
+ *  整个 bundle 注册表、服务启动即退出）——Bridge 构造已零副作用，此处再延迟到首次工具调用，
+ *  解析失败降级为工具级运行时错误（不影响服务启动与其他子Agent）。 */
+export function lazyBridge(create: () => Bridge): BridgeLike {
+  let bridge: Bridge | null = null
+  return {
+    request: (op, args, timeoutMs) => {
+      bridge ??= create()
+      return bridge.request(op, args, timeoutMs)
+    },
+  }
+}
+
+let sharedLazyBridge: BridgeLike | undefined
+
+/** 全进程共享惰性桥接单例：playwright / reverse_site 等子Agent 共用同一桥接进程与浏览器
+ *  会话——同会话混用两命名空间工具时操作的是同一浏览器，页面状态一致。 */
+export function createLazyBridge(): BridgeLike {
+  return (sharedLazyBridge ??= lazyBridge(() => new Bridge()))
+}
+
 /* ---------------- 会话串行化 ---------------- */
 
 /** 同一会话的浏览器操作串行执行，避免并发操作同一页面互相干扰。 */
@@ -233,7 +343,7 @@ function serveMime(p: string): string {
 /* ---------------- 工具集 ---------------- */
 
 export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolSet {
-  const bridge: BridgeLike = deps.bridge ?? new Bridge()
+  const bridge: BridgeLike = deps.bridge ?? createLazyBridge()
   const request = (sessionId: string, op: string, args: Record<string, unknown>): Promise<unknown> =>
     withSessionLock(sessionId, () => bridge.request(op, { sessionId, ...args }))
 

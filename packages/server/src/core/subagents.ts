@@ -35,9 +35,12 @@ export class SubAgentManager {
       try {
         const { bundledDefs } = await import("./subagents.bundle.generated")
         for (const def of bundledDefs) this.defs.set(def.name, def)
-      } catch {
-        // 漏跑 scripts/build-subagents.ts 时降级为空列表（不影响服务启动）
-        console.warn("[subagents] bundle 注册表缺失：请先运行 bun run scripts/build-subagents.ts")
+      } catch (err) {
+        // 必抛错，绝不静默降级为空列表——启动「成功」但没有任何子Agent 比启动失败更难排查；
+        // 加载失败常见根因是子Agent 模块的模块作用域副作用（如第三方包解析，见 DESIGN「打包闭环」铁律）
+        throw new Error(
+          `[subagents] bundle 注册表缺失或加载失败（构建时先运行 scripts/build-subagents.ts）: ${err instanceof Error ? err.message : err}`,
+        )
       }
       await this.preload()
       return

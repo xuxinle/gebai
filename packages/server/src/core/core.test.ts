@@ -7,7 +7,7 @@ import { ToolRegistry } from "./registry"
 import { shardPath, sessionPath, resolveInSandbox, sha256Hex } from "./paths"
 import { EnvManager, isSensitive, filterEnvInjection, cleanupLegacyUserEnv } from "./env"
 import { Sandbox } from "./sandbox"
-import { SessionStore, toSessionInfo, estimateCtxTokens } from "./store"
+import { SessionStore, toSessionInfo, estimateCtxTokens, isProtectedMessage } from "./store"
 import type { Tool, ToolContext } from "./types"
 
 function tool(name: string, approval = false): Tool {
@@ -420,11 +420,11 @@ describe("SessionStore 装载提示词消息保护", () => {
       await store.appendMessage(session.id, { id: `m-${i}`, role: "user", content: `msg ${i}`, createdAt: i + 1 } as never)
     }
     await store.appendMessage(session.id, { id: "load-1", role: "system", loadedAgent: "code", content: "### code（提示词）", createdAt: 6 } as never)
-    for (let i = 5; i < 155; i++) {
+    for (let i = 5; i < 355; i++) {
       await store.appendMessage(session.id, { id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 2 } as never)
     }
     const loaded = await store.load(session.id)
-    expect(loaded!.messages.length).toBeLessThanOrEqual(100)
+    expect(loaded!.messages.length).toBeLessThanOrEqual(300)
     // 用户输入与系统提示词全部保留（截断只丢可压缩的 assistant 消息）
     for (let i = 0; i < 5; i++) expect(loaded!.messages.some((m) => m.id === `m-${i}`)).toBe(true)
     const loadIdx = loaded!.messages.findIndex((m) => m.loadedAgent === "code")
@@ -432,6 +432,32 @@ describe("SessionStore 装载提示词消息保护", () => {
     // 顺序保持：截断为「原数组子序列」（从最早的非 protected 丢弃），装载提示词后的消息仍是原序后续（未被重排/穿插）
     const ids = loaded!.messages.map((m) => m.id)
     expect(ids[ids.indexOf("load-1") + 1]).toBe("m-61") // 丢最早 56 条 assistant 后，装载消息后紧跟原序后续
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("appendMessage 超限截断按 tool_call 配对原子丢弃（不产生孤儿 tool 消息）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-store-trim-pair-"))
+    const store = new SessionStore({ home })
+    const session = await store.createSession("default")
+    await store.appendMessage(session.id, { id: "u-0", role: "user", content: "q", createdAt: 1 } as never)
+    // 150 轮工具调用（assistant(toolCalls) + tool 结果交替）+ 1 条用户输入 = 301 条，恰超 300 上限 1 条：
+    // 预算只允许丢 1 条——首轮 assistant 被丢后其 tool 结果必须连带丢弃（配对原子性的关键场景）
+    for (let i = 0; i < 150; i++) {
+      await store.appendMessage(session.id, { id: `a-${i}`, role: "assistant", toolCalls: [{ id: `tc-${i}`, name: "read", arguments: {} }], content: "", createdAt: 2 + i * 2 } as never)
+      await store.appendMessage(session.id, { id: `t-${i}`, role: "tool", toolCallId: `tc-${i}`, name: "read", content: "ok", createdAt: 3 + i * 2 } as never)
+    }
+    const msgs = (await store.load(session.id))!.messages
+    expect(msgs.length).toBe(299) // 301 - 首轮整对 2 条（软上限允许略低于 300）
+    // 首轮 assistant 与其 tool 结果一起消失（而非只丢 assistant 留下孤儿 tool）
+    expect(msgs.some((m) => m.id === "a-0" || m.id === "t-0")).toBe(false)
+    // 每条 tool 消息的前一条都是包含其 toolCallId 的 assistant（配对完整，无孤儿）
+    for (let i = 1; i < msgs.length; i++) {
+      if (msgs[i].role !== "tool") continue
+      const prev = msgs[i - 1]
+      expect(prev?.role === "assistant" && prev.toolCalls?.some((tc) => tc.id === msgs[i].toolCallId)).toBe(true)
+    }
+    // 首个非保护消息是某轮的 assistant（而非被拆散出来的 tool）
+    expect(msgs.find((m) => !isProtectedMessage(m))?.role).toBe("assistant")
     rmSync(home, { recursive: true, force: true })
   })
 

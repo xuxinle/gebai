@@ -51,6 +51,8 @@ packages/server/src/core/d2js.embedded.generated.json
 packages/server/src/core/analyzer-wasm.embedded.generated.json
 # 构建时生成的 playwright driver 内嵌产物（由 scripts/build-driver-embed.ts 生成）
 packages/server/src/core/driver.embedded.generated.json
+# 构建时生成的 playwright-core 内嵌产物（由 scripts/build-pwcore-embed.ts 生成）
+packages/server/src/core/pwcore.embedded.generated.json
 # 构建时从 node_modules 拷贝的 @plantuml/core 引擎（由 scripts/copy-plantuml.ts 生成）
 packages/web/public/vendor/
 # 构建时从 favicon.svg 生成的大脑图标 ICO（由 scripts/gen-icon.ts 生成）
