@@ -8,3 +8,12 @@ reverse_site.ts：模块作用域 new Bridge() 改为共享的 createLazyBridge(
 reverse_site_tools.ts：工厂默认同样改惰性。
 subagents.ts：移除 debug 插桩，恢复简洁报错（保留注册表加载失败必抛错、绝不静默降级为空列表的语义）。
 DESIGN.md「打包闭环」：更正为准确机制——bundle 静态内嵌 + bundle 图内子 Agent 模块禁止模块作用域第三方包解析（playwright 必须经 createLazyBridge 惰性化）。
+
+
+
+按消息条数触发的机制：100 条截断（不是摘要）
+store.ts:7 的 MAX_CACHE_MESSAGES = 100：chat.json 里消息超过 100 条时，从最早的非受保护消息（assistant/tool）开始丢弃到 100 条（store.ts:248-265）。它不生成摘要、不调 LLM，纯粹是存储上的上限修剪——所以如果你看到旧消息凭空消失、没有"已压缩 N 条"的通知，那就是它干的。
+
+工具调用密集的会话（一次任务往往产生很多轮 assistant+tool 消息对）条数涨得飞快，100 条上限很快触达，这很可能就是你观察到"远没到上下文大小就开始丢东西"的直接原因。
+
+
