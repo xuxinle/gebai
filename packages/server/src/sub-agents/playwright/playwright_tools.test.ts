@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import type { ToolContext } from "../../core/types"
-import { createPlaywrightTools, Bridge, type BridgeLike } from "./playwright_tools"
+import { createPlaywrightTools, Bridge, createLazyBridge, lazyBridge, materializePwCore, resolveChannel, type BridgeLike } from "./playwright_tools"
 import { def as playwrightDef } from "./playwright"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
@@ -310,6 +310,73 @@ describe("playwright tools", () => {
       expect(playwrightDef.tools?.[t].name).toBe(t)
     }
     expect(Object.keys(playwrightDef.tools ?? {})).toHaveLength(expected.length)
+  })
+})
+
+describe("lazy bridge", () => {
+  test("lazyBridge defers construction to first request and reuses instance", async () => {
+    let constructed = 0
+    let inner!: Bridge
+    const lazy = lazyBridge(() => {
+      constructed++
+      inner = new Bridge({ driverPath: fakeDriverScript(), playwrightModule: "file:///fake/index.mjs", requestTimeoutMs: 5_000 })
+      return inner
+    })
+    expect(constructed).toBe(0) // 构造零副作用：创建代理不触发 playwright 解析/进程启动
+    expect(await lazy.request("ping", {})).toEqual({ pong: true })
+    await lazy.request("ping", {})
+    expect(constructed).toBe(1) // 复用同一实例
+    inner.kill()
+  })
+
+  test("createLazyBridge returns process-wide shared singleton", () => {
+    expect(createLazyBridge()).toBe(createLazyBridge())
+  })
+
+  test("Bridge construction has no side effects (no playwright resolution)", () => {
+    expect(() => new Bridge()).not.toThrow()
+  })
+
+  test("resolveChannel: env override wins, win32 defaults to msedge", () => {
+    expect(resolveChannel("win32", undefined)).toBe("msedge")
+    expect(resolveChannel("linux", undefined)).toBe("")
+    expect(resolveChannel("linux", "chrome")).toBe("chrome")
+    expect(resolveChannel("win32", "")).toBe("")
+  })
+
+  test("materializePwCore writes files, guards traversal, rebuilds on version change", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-vendor-"))
+    const prevHome = process.env.GEBAI_HOME
+    process.env.GEBAI_HOME = home
+    try {
+      const gz = (s: string) => Buffer.from(Bun.gzipSync(Buffer.from(s))).toString("base64")
+      const mk = (version: string) => ({
+        version,
+        entry: "index.mjs",
+        files: [
+          { path: "index.mjs", data: gz(`export const v = "${version}"`) },
+          { path: "lib/a.js", data: gz("module.exports = 1") },
+          { path: "../evil.js", data: gz("bad" ) },
+        ],
+      })
+      await materializePwCore(mk("v1"))
+      const dir = join(home, "vendor", "playwright-core")
+      expect(readFileSync(join(dir, "index.mjs"), "utf8")).toContain('"v1"')
+      expect(existsSync(join(dir, "lib", "a.js"))).toBe(true)
+      expect(existsSync(join(home, "vendor", "evil.js"))).toBe(false) // 穿越条目被拒
+      expect(readFileSync(join(home, "vendor", "playwright-core.version"), "utf8")).toBe("v1")
+      // 版本一致：跳过重建（marker 未变）
+      await materializePwCore(mk("v1"))
+      expect(readFileSync(join(home, "vendor", "playwright-core.version"), "utf8")).toBe("v1")
+      // 版本变化：整目录重建
+      await materializePwCore(mk("v2"))
+      expect(readFileSync(join(dir, "index.mjs"), "utf8")).toContain('"v2"')
+      expect(readFileSync(join(home, "vendor", "playwright-core.version"), "utf8")).toBe("v2")
+    } finally {
+      if (prevHome === undefined) delete process.env.GEBAI_HOME
+      else process.env.GEBAI_HOME = prevHome
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 

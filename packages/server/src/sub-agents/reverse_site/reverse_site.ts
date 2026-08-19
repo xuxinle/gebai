@@ -1,6 +1,6 @@
 import type { SubAgentDef } from "../../core/types"
 import { readTool, writeTool, fetchUrlTool, agentListTool, agentLoadTool, agentRunTool } from "../../core/tools"
-import { Bridge, createPlaywrightTools } from "../playwright/playwright_tools"
+import { createPlaywrightTools, createLazyBridge } from "../playwright/playwright_tools"
 import { createCaptureTools, createHttpRequestTool } from "./reverse_site_tools"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./reverse_site.md"
@@ -10,8 +10,10 @@ export const description =
   "涉及网站/接口逆向时装载本子Agent：分析站点结构、捕获网络请求还原接口、探测验证，输出站点地图与 API 文档（可转交 self_optimize 生成子Agent）；仅限授权站点，浏览器交互与接口探测需审批。输入：目标 URL 与逆向目标；输出：分析文档与接口清单。"
 export const systemPrompt = systemPromptBase
 
-// 与 playwright 共享同一桥接进程与浏览器会话：页面操作与网络录制天然一致
-const bridge = new Bridge()
+// 惰性桥接单例（首次工具调用才构造——模块作用域构造会在编译产物中触发 playwright 包解析，
+// 炸掉整个 bundle 注册表）：与 playwright 子Agent 共享同一桥接进程与浏览器会话，
+// 页面操作与网络录制天然一致
+const bridge = createLazyBridge()
 export const tools = {
   ...createPlaywrightTools({ bridge }),
   ...createCaptureTools({ bridge }),
