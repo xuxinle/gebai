@@ -15,6 +15,7 @@ import { bindWheel } from "./wheel"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
 import { initLowPower } from "./low-power"
+import { initTurnTimer, isTurnTimerEnabled } from "./turn-timer"
 import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { addApproval, clearApprovals } from "./approvals"
 import {
@@ -344,6 +345,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     // 工具调用已封段后（run.el 为 null）或元素脱离 DOM：惰性重建消息元素
     if (!run.el?.isConnected) {
       run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+      turnTimerTick(run) // 单轮计时器：元素即建即显示（不等下一 tick，极短任务也能定格）
     }
     scheduleStreamRender(run)
   } else if (chunk.kind === "reasoning") {
@@ -381,6 +383,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     if (getCurrentSession()?.id !== sessionId) return
     if (!run.el?.isConnected) {
       run.el = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true)
+      turnTimerTick(run) // 单轮计时器：元素即建即显示（不等下一 tick，极短任务也能定格）
     }
     const bubble = run.el.querySelector(".msg-body .bubble")
     if (bubble && run.el.isConnected) {
@@ -458,6 +461,56 @@ function clearModelErrorNotice(run: RunState): void {
   run.modelErrorEl = null
 }
 
+/** 单轮耗时展示格式：<1m 整秒；<1h 分+秒；以上时+分。 */
+function formatTurnDuration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
+}
+
+/** 单轮计时器 tick：耗时 span 挂在当前流式助手消息的 meta 行（msg-time 旁）。
+ *  流式元素惰性创建、封段后重建：每次 tick 迁移到最新 run.el（span 复用，不随旧元素丢弃）；
+ *  外观开关运行中被关闭：即时摘除并停表。 */
+function turnTimerTick(run: RunState): void {
+  if (!isTurnTimerEnabled()) {
+    if (run.timerInterval) {
+      clearInterval(run.timerInterval)
+      run.timerInterval = undefined
+    }
+    run.timerEl?.remove()
+    run.timerEl = null
+    return
+  }
+  const meta = run.el?.isConnected ? run.el.querySelector<HTMLElement>(":scope > .msg-body > .msg-meta") : null
+  if (!meta) return
+  if (!run.timerEl?.isConnected) run.timerEl = el("span", "msg-timer live")
+  if (run.timerEl.parentElement !== meta) meta.appendChild(run.timerEl)
+  run.timerEl.textContent = formatTurnDuration(Date.now() - run.startedAt)
+}
+
+function startTurnTimer(run: RunState): void {
+  if (!isTurnTimerEnabled()) return
+  turnTimerTick(run)
+  run.timerInterval = setInterval(() => turnTimerTick(run), 250)
+}
+
+/** 任务收尾：停表并定格最终耗时（消息仍在 DOM 时保留显示，脱离 DOM 则随元素消亡）。 */
+function stopTurnTimer(run: RunState): void {
+  if (run.timerInterval) {
+    clearInterval(run.timerInterval)
+    run.timerInterval = undefined
+  }
+  if (!isTurnTimerEnabled()) return
+  // 极短任务（本地快模型/纯工具直返）可能在首个 250ms tick 前结束：兜底补挂后再定格
+  if ((!run.timerEl || !run.timerEl.isConnected) && run.el?.isConnected) turnTimerTick(run)
+  if (run.timerEl?.isConnected) {
+    run.timerEl.classList.remove("live")
+    run.timerEl.textContent = formatTurnDuration(Date.now() - run.startedAt)
+  }
+}
+
 /** 空闲超时兜底（无数据视为挂起的判定窗口，毫秒）：高于服务端 LLM 读空闲超时（120s）——
  *  模型调用假死先由服务端超时上报明确错误（「模型接口读超时」），前端看门狗只兜底
  *  服务端也检测不到的挂起；此前 60s 先于服务端超时静默取消，慢模型（长思考无流式输出）
@@ -482,8 +535,9 @@ function appendFinalNotice(sessionId: string, text: string): void {
  * makeSource 以运行态的 abort 信号构造流（信号由空闲超时兜底触发中止）。
  */
 async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) => AsyncIterable<ChatChunk>): Promise<void> {
-  const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), abort: new AbortController() }
+  const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), startedAt: Date.now(), abort: new AbortController() }
   runs.set(sessionId, run)
+  startTurnTimer(run) // 单轮计时器：本轮耗时实时显示（外观 tab 可关）
   syncConnThinking() // 运行开始：信号灯闪烁
   syncSendButton() // 不禁用按钮：运行中点击 = 停止（stopping 拦截）
   const source = makeSource(run)
@@ -555,6 +609,7 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
     }
   } finally {
     clearModelErrorNotice(run) // 任务结束：模型服务异常瞬时提示随流收尾移除
+    stopTurnTimer(run) // 任务结束：单轮计时停表定格
     clearInterval(idleTimer) // 空闲超时兜底定时器随流结束清理
     // 流结束：低性能节流排期未到点则同步补渲最后一帧（防末尾文本丢失）；错误路径已清排期，不重复渲染
     if (run.renderTimer) {
@@ -746,6 +801,7 @@ function hideSplash(): void {
 
 async function init() {
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
+  initTurnTimer()
   initTheme()
   bindTooltips() // 自定义 tooltip（[data-tip] 全局委托）先于面板绑定
   bindThemePop()
