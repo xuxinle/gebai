@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import type { ToolContext } from "../core/types"
-import { def as codeDef } from "./code"
+import { def as codeDef, _resetSessionProjectRootsForTest } from "./code"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   const tmp = join(home, "users", "default", "sessions", "s1", "tmp")
@@ -60,11 +60,22 @@ describe("code sub-agent", () => {
     for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
       expect(names).toContain(t)
     }
-    // 开发验证/环境探测（自全局工具集下沉，无 project 参数、默认无需审批）
+    // sh 异步任务管理与会话项目设定（DESIGN「sh 异步执行」/「项目机制」）
+    // 注：project 工具自身的 project 参数是「use 的目标项目」，不是 projectAware 的路径路由参数
+    expect(names).toContain("sh_task")
+    expect(codeDef.tools!.sh_task.parameters.properties).not.toHaveProperty("project")
+    expect(codeDef.tools!.sh_task.requiresApproval).toBeUndefined()
+    expect(names).toContain("project")
+    expect(codeDef.tools!.project.parameters.properties).toHaveProperty("project")
+    expect(codeDef.tools!.project.requiresApproval).toBeUndefined()
+    // 开发验证/环境探测（自全局工具集下沉；preview_server 带 project 参数路由工作目录，env/system 无）
     for (const t of ["preview_server", "env_detect", "system_info"]) {
       expect(names).toContain(t)
-      expect(codeDef.tools![t].parameters.properties).not.toHaveProperty("project")
       expect(codeDef.tools![t].requiresApproval).toBeUndefined()
+    }
+    expect(codeDef.tools!.preview_server.parameters.properties).toHaveProperty("project")
+    for (const t of ["env_detect", "system_info"]) {
+      expect(codeDef.tools![t].parameters.properties).not.toHaveProperty("project")
     }
     // 写操作需审批；sh/py 走工具自身动态审批（默认需审批、approval:false 按次免审），不静态覆盖
     for (const t of ["edit", "write", "patch"]) {
@@ -208,6 +219,67 @@ describe("code sub-agent", () => {
     const c2 = ctx(home, {})
     const r2 = await codeDef.tools!.write.execute({ path: "out.txt", content: "y" }, c2)
     expect(r2.output).toContain("已写入")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("project 参数路径形态（自由项目）：绝对路径为根解析相对路径，未知名仍报错", async () => {
+    _resetSessionProjectRootsForTest()
+    const home = mkdtempSync(join(tmpdir(), "gebai-freepath-"))
+    const root = join(home, "freeproj")
+    mkdirSync(join(root, "src"), { recursive: true })
+    writeFileSync(join(root, "src", "a.ts"), "export const free = 1\n")
+    const c = ctx(home)
+    // 绝对路径形态：read 相对该根解析
+    const r = await codeDef.tools!.read.execute({ project: root, path: "src/a.ts" }, c)
+    expect(r.output).toContain("export const free = 1")
+    // 非路径形态的未知名：仍走 resolveProjectPath 抛「未知预置项目」
+    let err = ""
+    try {
+      await codeDef.tools!.read.execute({ project: "nope", path: "x" }, c)
+    } catch (e) {
+      err = (e as Error).message
+    }
+    expect(err).toContain("未知预置项目")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("project 工具设定会话粘性项目根：未传 project 的调用以该根为基准；list/clear 管理", async () => {
+    _resetSessionProjectRootsForTest()
+    const home = mkdtempSync(join(tmpdir(), "gebai-sticky-"))
+    const root = join(home, "sticky")
+    mkdirSync(join(root, "src"), { recursive: true })
+    writeFileSync(join(root, "src", "b.ts"), "export const sticky = 2\n")
+    const c = ctx(home)
+    // use 设定（路径形态）
+    const use = await codeDef.tools!.project.execute({ action: "use", project: root }, c)
+    expect(use.output).toContain("已设定会话默认项目根")
+    expect(use.output).toContain(root)
+    // 未传 project 的 read 以粘性根为基准
+    const r = await codeDef.tools!.read.execute({ path: "src/b.ts" }, c)
+    expect(r.output).toContain("export const sticky = 2")
+    // list 展示当前设定与预置清单
+    const list = await codeDef.tools!.project.execute({ action: "list" }, c)
+    expect(list.output).toContain(root)
+    expect(list.output).toContain("app")
+    // 清除后回到会话工作目录基准（src/b.ts 不再可解析到粘性根）
+    await codeDef.tools!.project.execute({ action: "clear" }, c)
+    const cleared = await codeDef.tools!.project.execute({ action: "list" }, c)
+    expect(cleared.output).toContain("当前未设定默认项目根")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("受限模式下 project use 仅接受预置项目名，粘性根放行未传 project 的调用", async () => {
+    _resetSessionProjectRootsForTest()
+    const home = mkdtempSync(join(tmpdir(), "gebai-sticky-restrict-"))
+    const c = ctx(home, { env: { CODE_RESTRICT_PROJECTS: "true" } })
+    // 自由路径 use 被拒
+    const denied = await codeDef.tools!.project.execute({ action: "use", project: join(home, "elsewhere") }, c)
+    expect(denied.output).toContain("受限模式")
+    // 预置项目名 use 成功，此后未传 project 的调用以该根为基准（不再被受限模式拒绝）
+    const use = await codeDef.tools!.project.execute({ action: "use", project: "app" }, c)
+    expect(use.output).toContain("已设定会话默认项目根")
+    const w = await codeDef.tools!.write.execute({ path: "out.txt", content: "hi" }, c)
+    expect(w.output).toContain("已写入")
     rmSync(home, { recursive: true, force: true })
   })
 })

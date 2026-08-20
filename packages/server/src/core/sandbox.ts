@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { createWriteStream } from "node:fs"
 import { join, resolve } from "node:path"
 import { sessionPath } from "./paths"
 import { resolveInSandbox, stripTmpPrefix } from "./paths"
@@ -173,5 +174,76 @@ export class Sandbox {
         resolve({ stdout: decodeOutput(Buffer.concat(stdoutChunks)), stderr: decodeOutput(Buffer.concat(stderrChunks)), code: code ?? 1 })
       })
     })
+  }
+
+  /**
+   * 后台任务进程（sh async:true，DESIGN「sh 异步执行」）：与 exec 同规则的 shell/env 脱敏/chcp/进程组语义，
+   * 但不等待完成——stdout+stderr 合并持续写入 opts.logPath（WriteStream 落盘，不占内存），立即返回进程句柄。
+   * 无超时（生命周期上限由 ShTaskRunner 惰性检查并 kill）；句柄 kill() 按进程树终止并收尾日志流。
+   */
+  spawnBackground(
+    cmd: string,
+    opts: {
+      cwd?: string
+      env?: Record<string, string>
+      logPath: string
+      input?: string
+      /** 发起用户：豁免用户脚本子进程不剔除敏感变量（与 exec 同规则）。 */
+      user?: string
+    },
+  ): { pid: number | null; exited: Promise<number>; kill: () => void } {
+    const merged = { ...process.env, ...opts.env }
+    const stripSensitive = this.opts.enabled && (opts.user == null || !this.isExempt(opts.user))
+    const env = stripSensitive ? Object.fromEntries(Object.entries(merged).filter(([k]) => !isSensitive(k))) : merged
+    const isWin = process.platform === "win32"
+    const shellCmd = isWin ? `chcp 65001 >nul && ${cmd}` : cmd
+    const child = spawn(shellCmd, { cwd: opts.cwd, env, shell: true, stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
+    const log = createWriteStream(opts.logPath, { flags: "a" })
+    child.stdout?.pipe(log)
+    child.stderr?.pipe(log)
+    if (opts.input != null) child.stdin?.write(opts.input)
+    child.stdin?.end()
+    const exited = new Promise<number>((resolveExit, rejectExit) => {
+      child.once("error", (err) => {
+        log.end()
+        rejectExit(err)
+      })
+      child.once("close", (code) => {
+        log.end()
+        resolveExit(code ?? 1)
+      })
+    })
+    const kill = () => {
+      const pid = child.pid
+      try {
+        if (pid == null) return
+        if (isWin) {
+          try {
+            spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" }).on("error", () => {})
+          } catch {
+            /* taskkill 不可用 */
+          }
+          try {
+            child.kill("SIGKILL")
+          } catch {
+            /* 已退出 */
+          }
+        } else {
+          try {
+            process.kill(-pid, "SIGKILL")
+          } catch {
+            /* 进程组不存在（已退出） */
+          }
+          try {
+            child.kill("SIGKILL")
+          } catch {
+            /* 已退出 */
+          }
+        }
+      } catch {
+        /* 进程已退出 */
+      }
+    }
+    return { pid: child.pid ?? null, exited, kill }
   }
 }

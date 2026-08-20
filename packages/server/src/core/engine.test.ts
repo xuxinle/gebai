@@ -38,7 +38,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -250,6 +250,23 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // autoload：总Agent 未装载 code 直接调用 code_ls（主循环路由自愈：自动装载后执行）
+    if (this.mode === "autoload" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-al1", name: "code_ls", arguments: { path: "." } } }
+      yield { type: "done" }
+      return
+    }
+    // subautoload：新会话（combo_test 纯 md 组合，未预加载 code）内直接调用 code_ls（新会话循环路由自愈）
+    if (this.mode === "subautoload" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-sa1", name: "agent_run", arguments: { agents: ["combo_test"], input: "list files" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subautoload" && this.calls === 2) {
+      yield { type: "tool_call", toolCall: { id: "tc-sa2", name: "code_ls", arguments: { path: "." } } }
+      yield { type: "done" }
+      return
+    }
     if (this.calls === 1) {
       yield { type: "text", text: "using tool" }
       // ask_user 工具需要有效参数（prompt + options），否则会因无选项抛错
@@ -269,7 +286,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -1044,6 +1061,41 @@ console.log("defined ok")`,
     // 新会话内 flow 执行成功：子Agent 工具（code_todo）经会话注册表解析、无「未知工具」错误
     expect(archive.messages.some((m) => m.role === "tool" && m.name === "flow" && m.content.includes("code_todo"))).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
+    cleanup(home)
+  })
+
+  test("路由自愈（主循环）：未装载子Agent 的 {agent}_* 调用自动装载后执行", async () => {
+    const { home, engine, store, provider, subAgents } = await setup("autoload")
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "ls via code")
+    // code 已被自动装载：全局注册表可见 + 会话记录 loadedSubAgents 与装载提示词消息
+    expect(subAgents.isLoaded("code")).toBe(true)
+    const loaded = await store.load(session.id)
+    expect(loaded!.loadedSubAgents).toContain("code")
+    expect(loaded!.messages.some((m) => m.role === "system" && m.loadedAgent === "code")).toBe(true)
+    // 工具结果带自动装载说明且正常执行（非「未知工具」）；第二轮模型上下文已拼接 code 提示词段
+    const toolResults = JSON.stringify(loaded!.messages.filter((m) => m.role === "tool"))
+    expect(toolResults).toContain("自动装载子Agent code")
+    expect(toolResults).not.toContain("未知工具")
+    expect(provider.seenChats[1].some((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("源码分析与修改专家"))).toBe(true)
+    cleanup(home)
+  })
+
+  test("路由自愈（新会话循环）：未预加载子Agent 的 {agent}_* 调用在本次运行内装载执行（隔离语义）", async () => {
+    const { home, engine, store, provider, subAgents } = await setup("subautoload")
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "delegate")
+    // 新会话内 code_ls 经自愈装载执行：无「未知工具」，后续轮次 schema 已含 code_ls、上下文拼接 code 提示词段
+    const callMsg = (await store.load(session.id))!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    const archive = callMsg!.sessionRun!
+    expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("自动装载子Agent code"))).toBe(true)
+    expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
+    expect(provider.seenTools[2]).toContain("code_ls")
+    expect(provider.seenChats[2].some((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("源码分析与修改专家"))).toBe(true)
+    // 隔离语义：不写全局注册表、不落盘父会话装载记录
+    expect(subAgents.isLoaded("code")).toBe(false)
+    const loaded = await store.load(session.id)
+    expect(loaded!.loadedSubAgents ?? []).not.toContain("code")
     cleanup(home)
   })
 
