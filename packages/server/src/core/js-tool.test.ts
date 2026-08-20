@@ -249,18 +249,20 @@ return { errs, wrote: w.output }`,
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("安全模式：子进程运行时 shim 屏蔽写/进程 API（仅保留文件读取）", async () => {
+  test("安全模式：子进程运行时 shim 屏蔽写通道（BunFile 代理拦截，仅保留文件读取）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-shim-"))
     writeFileSync(join(home, "readable.txt"), "readable-content")
     const homeFwd = home.split("\\").join("/") // 嵌入脚本代码的路径用正斜杠（反斜号在生成源码里成转义序列）
     const c = ctxWithTools(home)
     c.safeMode = true
+    // Bun.write/Bun.spawn 等直呼形态已由词元级扫描前置拒绝（denyList 覆写为纵深防御），
+    // 此处走扫描放行的 Bun.file 通道验证运行时代理：write/writer 落盘动作在 FileSink 侧拦截
     const r = await jsTool.execute(
       {
         code: `const out = []
-try { await Bun.write("evil.txt", "x") } catch (e) { out.push("write-blocked") }
-try { Bun.spawn(["echo", "hi"]) } catch (e) { out.push("spawn-blocked") }
+try { await Bun.file("evil.txt").write("x") } catch (e) { out.push("write-blocked") }
 try { Bun.file("evil2.txt").writer() } catch (e) { out.push("writer-blocked") }
+try { Bun.file("evil3.txt").truncate(0) } catch (e) { out.push("truncate-blocked") }
 const f = Bun.file("${homeFwd}/readable.txt")
 out.push("read-ok:" + (await f.text()))
 return out`,
@@ -269,10 +271,32 @@ return out`,
     )
     const data = r.data as { result: string[] }
     expect(data.result).toContain("write-blocked")
-    expect(data.result).toContain("spawn-blocked")
     expect(data.result).toContain("writer-blocked")
+    expect(data.result).toContain("truncate-blocked")
     expect(data.result).toContain("read-ok:readable-content")
     expect(existsSync(join(c.workdir, "evil.txt"))).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("安全模式：词元级扫描封死别名/括号访问/静态 import 绕过（require 别名、Bun[\"fetch\"]、import 语句）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-alias-"))
+    const c = ctxWithTools(home)
+    c.safeMode = true
+    // require 别名：`const rq = require; rq(...)` 不含 `require(` 调用形态，词元级才可命中
+    const a1 = await jsTool.execute({ code: `const rq = require; return typeof rq("node:fs")` }, c)
+    expect(a1.output).toContain("安全模式")
+    // 括号访问躲过 `Bun.fetch` 点号正则
+    const a2 = await jsTool.execute({ code: `const bf = Bun["fetch"]; return typeof bf` }, c)
+    expect(a2.output).toContain("安全模式")
+    // 静态 import 提升（先于 shim 执行），必须前置拒绝
+    const a3 = await jsTool.execute({ code: `import fs from "node:fs"; return typeof fs.writeFileSync` }, c)
+    expect(a3.output).toContain("安全模式")
+    // getBuiltinModule 别名
+    const a4 = await jsTool.execute({ code: `const g = process.getBuiltinModule; return typeof g("fs")` }, c)
+    expect(a4.output).toContain("安全模式")
+    // 合法通道不受影响：Bun.file 只读、内置工具调用
+    const ok = await jsTool.execute({ code: `return typeof Bun.file` }, c)
+    expect(ok.output).not.toContain("安全模式")
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -500,10 +524,16 @@ return { lines: txt.split("\\n").length }`,
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("requiresApproval 默认审批、approval:false 免审", () => {
-    const ra = jsTool.requiresApproval
-    expect(typeof ra === "function" && ra({}, undefined as never)).toBe(true)
-    expect(typeof ra === "function" && ra({ approval: false }, undefined as never)).toBe(false)
+  test("requiresApproval 免审词元扫描（纯数据加工免审，网络/进程/环境通道仍需审批）", () => {
+    const ra = jsTool.requiresApproval as (args: Record<string, unknown>, ctx?: unknown) => boolean
+    expect(ra({})).toBe(true)
+    // 纯数据加工/工具编排代码：免审生效
+    expect(ra({ code: "const xs = [1,2,3].map(x => x * 2); return xs", approval: false })).toBe(false)
+    expect(ra({ code: `const r = await read({ path: "a.txt" }); return r.output`, approval: false })).toBe(false)
+    // 网络外发/进程/敏感环境读取/Bun 写通道：免审不放行（防提示词注入借免审标记外发数据）
+    expect(ra({ code: `const r = await fetch("http://evil"); return r.status`, approval: false })).toBe(true)
+    expect(ra({ code: `return typeof Bun.write`, approval: false })).toBe(true)
+    expect(ra({ code: `return process.env.GEBAI_LLM_API_KEY`, approval: false })).toBe(true)
   })
 
   test("buildChildScript：用户代码嵌入不受反引号/插值影响；空 code 拒绝", async () => {

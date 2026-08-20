@@ -24,7 +24,12 @@ export interface ExternalAuthProvider {
 const CREDENTIAL_TTL_MS = 10 * 60 * 1000
 const CALLBACK_TIMEOUT_MS = 5000
 
-/** HMAC 共享密钥验证器：credential = "{exp}.{sig}"，sig = HMAC-SHA256(secret, "{username}.{exp}")。 */
+/** 已消费凭证缓存（一次性消费防重放）：键为凭证摘要，容量上限淘汰最旧；条目随窗口过期惰性清理。 */
+const consumedCredentials = new Map<string, number>()
+const CONSUMED_CACHE_MAX = 10_000
+
+/** HMAC 共享密钥验证器：credential = "{exp}.{sig}"，sig = HMAC-SHA256(secret, "{username}.{exp}")。
+ *  凭证一次性消费（签名本身无 nonce，窃取的凭证在有效窗口内原本可反复兑换）。 */
 export class HmacExternalAuth implements ExternalAuthProvider {
   readonly kind = "hmac" as const
   constructor(private secret: string) {}
@@ -38,6 +43,14 @@ export class HmacExternalAuth implements ExternalAuthProvider {
     const a = Buffer.from(sig)
     const b = Buffer.from(expected)
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null
+    // 一次性消费：同一凭证窗口内重复兑换拒绝（摘要为键，缓存不落地明文凭证）
+    const digest = createHmac("sha256", this.secret).update(`${c.username}:${c.credential}`).digest("hex")
+    if (consumedCredentials.has(digest)) return null
+    if (consumedCredentials.size >= CONSUMED_CACHE_MAX) {
+      const oldest = consumedCredentials.keys().next().value
+      if (oldest !== undefined) consumedCredentials.delete(oldest)
+    }
+    consumedCredentials.set(digest, Date.now() + CREDENTIAL_TTL_MS)
     return c.username
   }
 }

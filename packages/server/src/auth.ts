@@ -216,6 +216,9 @@ export class AuthService {
     this.loginFails.delete(username)
     const reg = await this.readRegistry()
     let user = reg[name]
+    // 外部命名空间与本地特权账号无隔离：外部系统同名 admin 的用户兑换会直接继承本地 admin 角色
+    // （注册表条目原样复用）。外部身份通道禁止命中本地 admin——admin 唯一入口是启动参数口令。
+    if (user?.role === "admin") return null
     if (!user && autocreate) {
       try {
         user = await this.createUserEntry(name, randomBytes(32).toString("hex"), "user")

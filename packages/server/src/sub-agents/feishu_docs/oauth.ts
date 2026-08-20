@@ -100,13 +100,34 @@ export interface FeishuPendingAuth {
 const pendingByState = new Map<string, FeishuPendingAuth>()
 const pendingBySession = new Map<string, FeishuPendingAuth>()
 
+/** pending 有效期与容量上限：state 条目含 appId/appSecret 明文驻留内存，未完成授权的条目按 TTL
+ *  惰性清理、超容量淘汰最旧（反复生成授权链接不完成授权不再无界累积）。 */
+const PENDING_TTL_MS = 10 * 60 * 1000
+const PENDING_MAX = 32
+
 export function registerPendingAuth(pending: FeishuPendingAuth): void {
+  const now = Date.now()
+  for (const [k, v] of pendingByState) {
+    if (now - v.createdAt > PENDING_TTL_MS) consumePendingAuth(k)
+    else break
+  }
+  while (pendingByState.size >= PENDING_MAX) {
+    const oldest = pendingByState.keys().next().value
+    if (oldest === undefined) break
+    consumePendingAuth(oldest)
+  }
   pendingByState.set(pending.state, pending)
   pendingBySession.set(`${pending.user}|${pending.sessionId}`, pending)
 }
 
 export function getPendingAuth(state: string): FeishuPendingAuth | undefined {
-  return pendingByState.get(state)
+  const pending = pendingByState.get(state)
+  if (!pending) return undefined
+  if (Date.now() - pending.createdAt > PENDING_TTL_MS) {
+    consumePendingAuth(state)
+    return undefined
+  }
+  return pending
 }
 
 /** 会话最近一次授权的 pending（auth_user_token 手动粘贴 flow 的 state 校验用）。 */

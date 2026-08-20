@@ -193,6 +193,8 @@ export interface CronManagerDeps {
 export class CronManager {
   private entries = new Map<string, CronTask>()
   private timer: ReturnType<typeof setInterval> | null = null
+  /** 执行中的任务 id（重入防护）：script 单次执行可远超 tick 间隔，nextRunAt 完成后才推进。 */
+  private firing = new Set<string>()
   private writes = new Map<string, Promise<void>>()
   private engine: AgentEngine | undefined
   private now: () => number
@@ -220,6 +222,16 @@ export class CronManager {
         for (const t of tasks) {
           if (!t || typeof t.id !== "string" || !t.sessionId || !t.user || typeof t.schedule !== "string") continue
           const entry = t as CronTask
+          // schedule 合法性校验（add/update 时已拒，此处防外部编辑损坏）：非法表达式直接禁用，
+          // 否则 nextTime 解析失败回退 +30s 会形成每 30s 触发一次的热循环
+          if (entry.enabled) {
+            try {
+              parseCronSchedule(entry.schedule)
+            } catch {
+              entry.enabled = false
+              entry.lastError = "schedule 表达式非法：启动加载时已禁用（请修正后重新启用）"
+            }
+          }
           if (entry.enabled && (typeof entry.nextRunAt !== "number" || entry.nextRunAt <= now)) {
             entry.nextRunAt = this.nextTime(entry, now)
           }
@@ -339,6 +351,19 @@ export class CronManager {
   }
 
   private async fire(entry: CronTask, now: number): Promise<void> {
+    // 重入防护：script 型单次执行可长达 CRON_SCRIPT_TIMEOUT_MS（远超 30s tick 间隔），而 nextRunAt
+    // 要等执行结束才推进——无防护时每 tick 都会再次 fire 同一任务，长脚本被并发叠加执行（副作用重复）。
+    // 执行中跳过本轮触发。
+    if (this.firing.has(entry.id)) return
+    this.firing.add(entry.id)
+    try {
+      await this.fireInner(entry, now)
+    } finally {
+      this.firing.delete(entry.id)
+    }
+  }
+
+  private async fireInner(entry: CronTask, now: number): Promise<void> {
     const { sessionId, user } = entry
     // 会话已删除（内存缓存可能残留）：校验磁盘目录真实存在，不存在则清理内存条目
     const chatFile = join(sessionPath(this.deps.home, user, sessionId), "chat.json")

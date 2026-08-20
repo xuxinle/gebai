@@ -46,6 +46,10 @@ export const JS_CONTEXT_MESSAGES_MAX = 50
 export const JS_CONTEXT_MESSAGE_CHARS = 2000
 /** 非 JSON 输出行的日志透传长度上限（更长——多为子进程侧 2MB 截断产生的非法 JSON——丢弃留注）。 */
 const JS_NON_PROTOCOL_LINE_CAP = 100_000
+/** 父进程侧日志总量上限（字符）：护栏见 runJsScript pushLog。 */
+const JS_LOG_TOTAL_CAP = 2 * 1024 * 1024
+/** 无换行连续输出的 stdoutBuf 硬上限：行长检查只在遇到换行时生效，无换行巨流需在此封顶。 */
+const JS_STDOUT_BUF_CAP = 4 * 1024 * 1024
 
 /** 子进程运行时桥前导：工具调用（stdio JSON 行协议）+ console 重定向 + 引导执行用户代码。
  *  纯 ES5 风格（无模板字符串/箭头函数），避免嵌入转义问题；不 import 任何模块（模块格式无关）。 */
@@ -132,9 +136,11 @@ function scriptPreamble(): string {
  *  屏蔽 Bun 写/进程/网络/数据库 API、字符串代码执行通道与运行时模块加载入口，仅保留文件读取。
  *  Bun 全局绑定不可替换（non-configurable），改为**对象属性覆写**（属性可写：write/spawn/$ 等覆写为抛错桩，
  *  Bun.file 包装为返回拦截 write/writer/sink/truncate 的 Proxy）；个别不可覆写的 getter（Bun.fetch/sqlite）
- *  由静态扫描（scanJsReadOnly）前置拒绝。eval/Function/fetch/Worker 等全局删除、Function.prototype.constructor
- *  中性化防 (fn).constructor 回收；process 仅拦 binding/dlopen/getBuiltinModule/kill（桥协议依赖 stdin/stdout/exit）；
- *  字符串定时器拒绝。import()/require() 等动态加载通道同样由静态扫描前置拒绝——模块实例可拿到未受控的全新全局环境。 */
+ *  由静态扫描（scanJsReadOnly）按词元级前置拒绝（Bun 仅放行 .file）。eval/Function/fetch/Worker 等全局删除、
+ *  Function.prototype.constructor 中性化防 (fn).constructor 回收；process 仅拦 binding/dlopen/getBuiltinModule/kill
+ *  （桥协议依赖 stdin/stdout/exit）；字符串定时器拒绝；Reflect.get 作用于 Bun 对象时拒绝（防绕过属性覆写的
+ *  反射读取）；require 在**模块级**以 var 重声明中和（CJS 参数遮蔽 / ESM 定义绑定，别名引用拿到拒绝桩）；
+ *  import()/require() 等动态加载通道同样由静态扫描前置拒绝——模块实例可拿到未受控的全新全局环境。 */
 function safeModeShim(): string {
   return [
     "function __G_safe() {",
@@ -159,7 +165,7 @@ function safeModeShim(): string {
     "    var blocked = function (what) { return function () { die(what) } }",
     "    var denyList = ['write','spawn','spawnSync','spawnViaNode','serve','listen','connect','udpSocket','dns','build','plugin','preload','$','Shell','ShellError','ShellSyntaxError','generateHeapSnapshot','sql','SQL','SQLite','TCP','TCPSocket','UDPSocket','unix','NodeFS','auto','add','remove','install','update','publish','link','unlink','pm','upgrade']",
     "    for (var i = 0; i < denyList.length; i++) {",
-    "      try { _Bun[denyList[i]] = blocked('Bun.' + denyList[i]) } catch (e) {} // 非可写属性（fetch/sqlite 等 getter）由静态扫描前置拒绝",
+    "      try { _Bun[denyList[i]] = blocked('Bun.' + denyList[i]) } catch (e) {} // 非可写属性（fetch/sqlite 等 getter）由静态扫描词元级前置拒绝",
     "    }",
     "    var _file = _Bun.file",
     "    try {",
@@ -173,8 +179,15 @@ function safeModeShim(): string {
     "      }",
     "    } catch (e) {}",
     "  }",
+    "  try {",
+    "    var _rg = Reflect.get",
+    "    Reflect.get = function (t, k) { if (t === globalThis.Bun && k !== 'file') die('Reflect.get(Bun.' + k + ')'); return _rg.apply(Reflect, arguments) }",
+    "  } catch (e) {}",
     "}",
     "__G_safe()",
+    "// 模块级 require 中和（运行时兜底；静态扫描已拒绝 require 词元）：CJS 参数被 var 重声明遮蔽、",
+    "// ESM 下定义模块绑定——别名引用（const rq = require）拿到的同样是拒绝桩",
+    "var require = function (n) { throw new Error('安全模式：require(' + n + ') 已屏蔽（仅保留文件读取；模块加载用工具体系）') }",
   ].join("\n")
 }
 
@@ -253,10 +266,9 @@ export function jsRuntimeCommand(scriptPath: string, binary = isBinaryMode()): s
   return binary ? [process.execPath, import.meta.path, "exec", scriptPath] : [process.execPath, scriptPath]
 }
 
-/** 会话上下文快照（注入脚本 ctx）：user/session/workdir/env（沙箱模式脱敏同 sh 子进程）/projects/messages。 */
+/** 会话上下文快照（注入脚本 ctx）：user/session/workdir/env（沙箱与安全模式脱敏同 sh 子进程）/projects/messages。 */
 export function scriptSessionContext(ctx: ToolContext): Record<string, unknown> {
-  const mergedEnv = { ...process.env, ...ctx.env }
-  const env = ctx.sandboxed ? Object.fromEntries(Object.entries(mergedEnv).filter(([k]) => !isSensitive(k))) : mergedEnv
+  const env = scriptChildEnv(ctx)
   let messages: Array<{ role: string; name?: string; content: string }> = []
   try {
     messages = (ctx.recentMessages?.() ?? []).slice(-JS_CONTEXT_MESSAGES_MAX).map((m) => ({
@@ -297,15 +309,24 @@ interface JsRunResult {
  *  depth>0 不可 defineTool（防递归注册与嵌套子进程）。
  *  approvalFree：本次运行为免审（js 的 approval:false / 免审动态工具）——脚本体未经用户审阅，
  *  内部调用需审批的工具在 RPC 分发层拦截（按剥离免审标记后的审批姿态解析，与引擎无交互硬门槛同规则）。 */
+/** 子进程环境：沙箱模式或安全模式下剔除敏感变量（安全模式承诺「仅保留文件读取」，进程环境中的
+ *  密钥同样不应暴露给脚本——process.env 读取通道与文件写入同级别屏蔽）。 */
+function scriptChildEnv(ctx: ToolContext): Record<string, string> {
+  const mergedEnv: Record<string, string> = {}
+  for (const [k, v] of Object.entries({ ...process.env, ...ctx.env })) {
+    if (v !== undefined) mergedEnv[k] = v
+  }
+  return ctx.sandboxed || ctx.safeMode === true
+    ? Object.fromEntries(Object.entries(mergedEnv).filter(([k]) => !isSensitive(k)))
+    : mergedEnv
+}
+
 async function runJsScript(
   scriptPath: string,
   ctx: ToolContext,
   opts: { timeoutMs: number; depth?: number; approvalFree?: boolean },
 ): Promise<JsRunResult> {
-  const mergedEnv = { ...process.env, ...ctx.env }
-  const env = ctx.sandboxed
-    ? Object.fromEntries(Object.entries(mergedEnv).filter(([k]) => !isSensitive(k)))
-    : mergedEnv
+  const env = scriptChildEnv(ctx)
   const isWin = process.platform === "win32"
   const cmd = jsRuntimeCommand(scriptPath)
   // detached（Unix）：进程组组长，超时/取消按进程组整体终止（同 sh）；Windows 不 detached（管道输出兼容），taskkill /T 杀树
@@ -354,18 +375,33 @@ async function runJsScript(
     }
   }
 
+  // 日志总量护栏：子进程侧超时只杀进程不回收已累积内容——while(true) console.log 或无换行巨流
+  // 在超时窗口内可累积到 GB 级；父进程按总字符数封顶（达到后丢弃并留注一次）
+  let logChars = 0
+  let logCapped = false
+  const pushLog = (line: string) => {
+    if (logCapped) return
+    if (logChars + line.length > JS_LOG_TOTAL_CAP) {
+      logCapped = true
+      out.logs.push(`（日志总量超 ${JS_LOG_TOTAL_CAP} 字符上限，后续日志已丢弃）`)
+      return
+    }
+    logChars += line.length
+    out.logs.push(line)
+  }
+
   const dispatchLine = async (line: string): Promise<void> => {
     let msg: { t?: string; id?: number; name?: string; params?: Record<string, unknown>; level?: string; text?: string; value?: unknown; error?: string; description?: string; parameters?: Record<string, unknown>; source?: string; requiresApproval?: boolean }
     try {
       msg = JSON.parse(line)
     } catch {
       // 非 JSON 行按日志透传（绕过 console 补丁的直写输出）；超长行多为子进程侧 2MB 截断产生的非法 JSON——丢弃留注，防垃圾文本刷屏
-      out.logs.push(line.length > JS_NON_PROTOCOL_LINE_CAP ? "（超长非协议输出行已丢弃）" : line)
+      pushLog(line.length > JS_NON_PROTOCOL_LINE_CAP ? "（超长非协议输出行已丢弃）" : line)
       return
     }
     if (msg.t === "log") {
       const level = msg.level === "warn" || msg.level === "error" ? msg.level : "log"
-      out.logs.push(level === "log" ? String(msg.text ?? "") : `[${level}] ${String(msg.text ?? "")}`)
+      pushLog(level === "log" ? String(msg.text ?? "") : `[${level}] ${String(msg.text ?? "")}`)
       return
     }
     if (msg.t === "done") {
@@ -548,18 +584,23 @@ async function runJsScript(
     child.stdout.setEncoding("utf8")
     child.stdout.on("data", (chunk: string) => {
       stdoutBuf += chunk
+      if (stdoutBuf.length > JS_STDOUT_BUF_CAP) {
+        // 无换行巨流：丢弃缓冲留注（防 2.5MB 行长检查因无换行永不触发而无限累积）
+        stdoutBuf = ""
+        pushLog(`（单行输出超 ${JS_STDOUT_BUF_CAP} 字符无换行，已丢弃该段缓冲）`)
+      }
       let idx: number
       while ((idx = stdoutBuf.indexOf("\n")) >= 0) {
         // 超长行（子进程侧已限 ~2MB，此处兜底）跳过解析并注明（防巨对象撑爆内存）
         if (idx > 2_500_000) {
-          out.logs.push("（超长输出行已截断）")
+          pushLog("（超长输出行已截断）")
           stdoutBuf = stdoutBuf.slice(idx + 1)
           continue
         }
         const line = stdoutBuf.slice(0, idx)
         stdoutBuf = stdoutBuf.slice(idx + 1)
         // 行级并发分发（脚本可 Promise.all 并行调用工具；应答带 id，顺序无关）
-        void dispatchLine(line).catch((e) => out.logs.push(`(分发错误: ${(e as Error).message})`))
+        void dispatchLine(line).catch((e) => pushLog(`(分发错误: ${(e as Error).message})`))
       }
     })
     let stderrTail = ""
@@ -583,6 +624,12 @@ async function runJsScript(
   })
 }
 
+/** js 免审词元扫描：出现网络外发/进程执行/敏感环境读取/Bun 写通道的代码不免审（fail-closed，
+ *  字符串中的误报只是多一次审批，方向安全）。 */
+function jsApprovalFreeAllowed(code: string): boolean {
+  return !/\b(fetch|WebSocket|EventSource|XMLHttpRequest|process\.env|require\s*\(|import\s*\(|Deno|NodeJS)\b|\bBun\.(?!file\b)/.test(code)
+}
+
 export const jsTool: Tool = {
   name: "js",
   description:
@@ -592,7 +639,10 @@ export const jsTool: Tool = {
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
     "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（默认 true 需审批，仅明确安全的只读/幂等工具传 false）。\n" +
     "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。",
-  requiresApproval: (args) => args.approval !== false,
+  // js 免审按词元扫描放行：纯数据加工/工具编排代码（无网络外发/进程/环境读取/Bun 写通道）免审生效，
+  //  含上述通道的一律仍需审批（防提示词注入借免审标记外发数据或执行进程）。approval:false 参数
+  //  另用于 execute 内部 approvalFree 语义（动态工具 RPC 分发层按剥离免审标记解析）
+  requiresApproval: (args) => !(args.approval === false && jsApprovalFreeAllowed(String(args.code ?? ""))),
   card: { args: "code", codeField: "code", codeLang: "javascript" },
   parameters: {
     type: "object",

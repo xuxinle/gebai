@@ -678,6 +678,14 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
         } catch {
           return { output: `目录不存在: ${root}` }
         }
+        // 数量上限（最旧淘汰）：每个服务过的目录长期占用端口与监听句柄、无停止工具，防无界累积
+        while (staticServers.size >= 8 && !staticServers.has(root)) {
+          const oldest = staticServers.keys().next().value
+          if (oldest === undefined) break
+          const s = staticServers.get(oldest)
+          staticServers.delete(oldest)
+          try { s?.stop() } catch { /* 已停 */ }
+        }
         const existing = staticServers.get(root)
         if (existing) return { output: `该目录已在服务中: ${existing.url}` }
         const port = num(args.port, 0)

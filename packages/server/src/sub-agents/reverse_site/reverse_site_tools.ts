@@ -99,7 +99,7 @@ export function createHttpRequestTool(deps: { fetch?: FetchLike } = {}): Tool {
       }
       if (ctx.sandboxed) {
         try {
-          assertPublicHttpUrl(url)
+          await assertPublicHttpUrl(url)
         } catch (err) {
           return { output: `http_request 失败: ${(err as Error).message}` }
         }
@@ -118,7 +118,7 @@ export function createHttpRequestTool(deps: { fetch?: FetchLike } = {}): Tool {
       try {
         // 默认路径：逐跳校验重定向（初始 URL 与每跳 Location 均须通过公网校验，防 302 跳板绕过）；
         // 测试注入的 fetcher 原样使用（测试场景自行控制）
-        const fetcher: FetchLike = deps.fetch ?? ((url, init) => fetchWithRedirectGuard(url, init ?? {}, (u) => { if (ctx.sandboxed) assertPublicHttpUrl(u) }))
+        const fetcher: FetchLike = deps.fetch ?? ((url, init) => fetchWithRedirectGuard(url, init ?? {}, (u) => { if (ctx.sandboxed) return assertPublicHttpUrl(u) }))
         const res = await fetcher(url, {
           method,
           headers,

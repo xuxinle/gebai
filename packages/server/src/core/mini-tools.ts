@@ -7,6 +7,8 @@ import { shardPath } from "./paths"
 export const MINI_TOOL_MAX_HTML = 200 * 1024
 /** 工具名：小写字母/数字/下划线/中文，1-40 字符（用于文件名与 UI 列表展示）。 */
 export const MINI_TOOL_NAME_RE = /^[a-zA-Z0-9_\u4e00-\u9fff]{1,40}$/
+/** Windows 保留设备名（CON/NUL/COM1 等）：作文件名时落盘失败（saveMiniTool 直接抛系统错误），保存期拒绝。 */
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
 
 export type MiniToolScope = "public" | "private"
 
@@ -31,6 +33,9 @@ export interface MiniToolMeta {
 /** 工具名合法性校验：返回错误文案（合法返回空字符串）。 */
 export function validateToolName(name: string): string {
   if (!name) return "工具名不能为空"
+  if (WINDOWS_RESERVED_NAME.test(name)) {
+    throw new Error(`工具名 ${name} 是 Windows 保留设备名（CON/NUL/COM1 等），无法保存，请换名`)
+  }
   if (!MINI_TOOL_NAME_RE.test(name)) {
     return "工具名仅限字母/数字/下划线/中文，长度 1-40 字符（不含 . / : 等分隔符）"
   }

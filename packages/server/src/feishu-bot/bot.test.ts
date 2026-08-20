@@ -263,10 +263,12 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
   }
 }
 
+let receiveEventSeq = 0
 function receiveEvent(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schema: "2.0",
-    header: { event_type: "im.message.receive_v1", event_id: "ev_1" },
+    // event_id 每次唯一（服务端按 event_id 去重重推，同 id 会被幂等丢弃）
+    header: { event_type: "im.message.receive_v1", event_id: `ev_${++receiveEventSeq}` },
     event: {
       sender: { sender_id: { open_id: "ou_123" }, sender_type: "user" },
       message: { message_id: "om_msg12", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "你好" }) },

@@ -3,8 +3,11 @@ import { join } from "node:path"
 import type { SessionStore } from "./store"
 import type { EnvVarSource } from "@gebai/sdk"
 
+/** 敏感判定按「完整结尾单词」匹配（`(^|_)WORD$`），同时覆盖后缀与前缀/裸名形态：
+ *  如 GEBAI_ADMIN_PASSWORD_HASH（_HASH 结尾，管理员口令哈希）、AWS_ACCESS_KEY_ID（_KEY_ID）、
+ *  TOKEN/SECRET/PASSWORD 等裸名与 SECRET_* 前缀式命名均不再漏判。 */
 const SENSITIVE_RE =
-  /(_KEY|_TOKEN|_SECRET|PASSWORD|_PASSWD|_PAT|_CREDENTIAL|_CREDENTIALS|_AUTH|_SECRETS|CONNECTION_STRING|DATABASE_URL|PRIVATE_KEY|CLIENT_SECRET|APP_SECRET)$/i
+  /(^|_)(PASSWORD|PASSWD|PASSPHRASE|SECRET|SECRETS|TOKEN|TOKENS|KEY|KEYS|KEY_ID|CREDENTIAL|CREDENTIALS|CRED|AUTH|PAT|HASH|APIKEY|DSN|CONNECTION_STRING|DATABASE_URL)$/i
 
 export function isSensitive(name: string): boolean {
   return SENSITIVE_RE.test(name)

@@ -1,5 +1,7 @@
 import { dirname, isAbsolute, join, relative } from "node:path"
 import { homedir, tmpdir } from "node:os"
+import { spawn } from "node:child_process"
+import { lookup } from "node:dns/promises"
 import { createServer, connect, type AddressInfo } from "node:net"
 import type { ContentBlock, DiagramFormat, FileEntry, TodoItem, ToolSchema } from "@gebai/sdk"
 import type { ChoiceOption, Tool, ToolContext, ToolResult } from "./types"
@@ -10,8 +12,8 @@ import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from ".
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from "./patch"
 import { hostBlockReason } from "./ip"
 import { runFlow, scanFlowApprovals } from "./flow"
-import { jsTool } from "./js-tool"
-import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, validateShCommandSafeMode } from "./safety"
+import { jsTool, jsRuntimeCommand } from "./js-tool"
+import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, shApprovalFreeAllowed, validateShCommandSafeMode } from "./safety"
 import { EXCLUDED_GLOBAL_TOOLS } from "./tools-excluded.generated"
 
 export const TRUNCATE_THRESHOLD = 12000
@@ -37,12 +39,106 @@ export function isGlobalToolExcluded(name: string): boolean {
 /** 截断消息保留的首/尾字符数（DESIGN「常量参考」）。 */
 export const TRUNCATE_HEAD_CHARS = 4000
 export const TRUNCATE_TAIL_CHARS = 4000
+/** read/edit 文件大小上限（内存护栏）：全量读入内存前先 stat 预检——GB 级文件直接读入会 OOM；
+ *  超限引导 offset/limit 分段读取（read）或 patch（edit，同 PATCH_MAX_FILE_BYTES 口径）。 */
+const READ_MAX_FILE_BYTES = 8 * 1024 * 1024
+const EDIT_MAX_FILE_BYTES = PATCH_MAX_FILE_BYTES
+
+/** 读前大小预检：超过上限返回明确错误（throw 由工具框架转为输出）。 */
+async function assertReadableSize(path: string, tool: string, maxBytes: number): Promise<void> {
+  const { stat } = await import("node:fs/promises")
+  const st = await stat(path)
+  if (st.size > maxBytes) {
+    throw new Error(`${tool}: 文件过大（${st.size} 字节，上限 ${maxBytes}）——请用 offset/limit 分段读取，或 grep/patch 定位修改`)
+  }
+}
 /** grep：单文件读取上限与最大匹配行数。 */
 const GREP_MAX_FILE_BYTES = 1024 * 1024
 const GREP_MAX_MATCHES = 200
-/** fetch_url：响应大小上限与超时。 */
+/** grep 匹配子进程超时：模型提供的正则存在灾难性回溯形态（如 (a+)+b 配超长单行），同步执行
+ *  会挂死 JS 事件循环且无同步中断手段（服务端全部会话冻结）——匹配在独立子进程执行，超时强杀。 */
+const GREP_MATCHER_TIMEOUT_MS = 20_000
+
+/** grep 匹配 runner（独立子进程，bun 直跑）：stdin 收 JSON 请求、stdout 回 JSON 结果。
+ *  只做正则匹配（返回每文件命中行号），文件读取与结果渲染留在进程内（ctx.readFile 抽象/上下文块逻辑）。 */
+const GREP_MATCHER_SCRIPT = [
+  "let input = ''",
+  "process.stdin.setEncoding('utf8')",
+  "process.stdin.on('data', (d) => { input += d })",
+  "process.stdin.on('end', () => {",
+  "  try {",
+  "    const req = JSON.parse(input)",
+  "    const re = new RegExp(req.pattern, req.flags || '')",
+  "    const hits = []",
+  "    let total = 0, capped = false",
+  "    for (const f of req.files) {",
+  "      const hitIdx = []",
+  "      for (let i = 0; i < f.lines.length; i++) {",
+  "        if (!re.test(f.lines[i])) continue",
+  "        if (total >= req.maxMatches) { capped = true; break }",
+  "        total++; hitIdx.push(i)",
+  "      }",
+  "      hits.push({ display: f.display, hitIdx })",
+  "      if (capped) break",
+  "    }",
+  "    process.stdout.write(JSON.stringify({ hits, total, capped }))",
+  "  } catch (e) {",
+  "    process.stdout.write(JSON.stringify({ error: String((e && e.message) || e) }))",
+  "  }",
+  "})",
+].join("\n")
+
+let grepRunnerPath: string | null = null
+
+/** grep 匹配子进程执行：请求 {pattern, flags, maxMatches, files:[{display,lines}]} → {hits, total, capped}。
+ *  超时/崩溃/输出非法时返回 error（不回退进程内匹配——回退即重新暴露事件循环挂死面）。 */
+async function runGrepMatcher(
+  req: Record<string, unknown>,
+): Promise<{ error?: string; hits?: Array<{ display: string; hitIdx: number[] }>; total?: number; capped?: boolean }> {
+  const { writeFile } = await import("node:fs/promises")
+  if (!grepRunnerPath) {
+    grepRunnerPath = join(tmpdir(), `gebai-grep-runner-${process.pid}.js`)
+    await writeFile(grepRunnerPath, GREP_MATCHER_SCRIPT)
+  }
+  const cmd = jsRuntimeCommand(grepRunnerPath)
+  const isWin = process.platform === "win32"
+  const child = spawn(cmd[0], cmd.slice(1), { stdio: ["pipe", "pipe", "pipe"], detached: !isWin })
+  let settled = false
+  const kill = () => {
+    if (settled) return
+    try {
+      if (isWin) spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"])
+      else if (child.pid) process.kill(-child.pid, "SIGKILL")
+    } catch {
+      try { child.kill("SIGKILL") } catch { /* 已退出 */ }
+    }
+  }
+  const timer = setTimeout(kill, GREP_MATCHER_TIMEOUT_MS)
+  try {
+    child.stdin!.end(JSON.stringify(req))
+    const stdout = await new Promise<string>((resolve, reject) => {
+      let buf = ""
+      child.stdout!.setEncoding("utf8")
+      child.stdout!.on("data", (d: string) => (buf += d))
+      child.stdout!.on("end", () => resolve(buf))
+      child.stdout!.on("error", reject)
+      child.on("error", reject)
+    })
+    const parsed = JSON.parse(stdout) as Record<string, unknown>
+    if (typeof parsed.error === "string") return { error: parsed.error }
+    return parsed as { hits: Array<{ display: string; hitIdx: number[] }>; total: number; capped: boolean }
+  } catch {
+    return { error: `正则匹配超时或子进程异常（> ${Math.round(GREP_MATCHER_TIMEOUT_MS / 1000)}s）——模式可能引发灾难性回溯（如嵌套量词 (a+)+b），请简化 pattern 或缩小 path/include 范围` }
+  } finally {
+    settled = true
+    clearTimeout(timer)
+    kill()
+  }
+}
+/** fetch_url：响应大小上限与超时；STREAM 上限为流式读取的内存护栏（超限中止读取）。 */
 const FETCH_URL_MAX_BYTES = 200 * 1024
 const FETCH_URL_TIMEOUT = 15000
+const FETCH_URL_STREAM_MAX_BYTES = 10 * 1024 * 1024
 /** render_html：显式预览尺寸上限（px），超限忽略回退默认。 */
 export const RENDER_HTML_MAX_WIDTH = 4000
 export const RENDER_HTML_MAX_HEIGHT = 2000
@@ -186,6 +282,7 @@ export const readTool: Tool = {
   }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
+    await assertReadableSize(path, "read", READ_MAX_FILE_BYTES)
     const content = await ctx.readFile(path)
     const offset = args.offset == null ? undefined : Number(args.offset)
     const limit = args.limit == null ? undefined : Number(args.limit)
@@ -400,6 +497,8 @@ export const fileTool: Tool = {
   description:
     "文件管理（单工具多动作）：rename 重命名 / move 移动或跨目录改名 / delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
   card: { titleParams: ["action", "path"] },
+  // delete 递归且不可恢复（能力上甚于一次 sh rm，sh 一律审批）：与审批矩阵对齐，delete 动态需审批
+  requiresApproval: (args) => args.action === "delete",
   parameters: schema(
     {
       action: { enum: ["rename", "move", "delete", "info"], description: "操作类型" },
@@ -611,9 +710,9 @@ export const grepTool: Tool = {
     ["mode"],
   ),
   async execute(args, ctx) {
-    let re: RegExp
+    // 正则合法性预检（实际匹配在子进程，见 runGrepMatcher）
     try {
-      re = new RegExp(String(args.pattern), args.ignoreCase ? "i" : "")
+      new RegExp(String(args.pattern), args.ignoreCase ? "i" : "")
     } catch {
       return { output: `grep: 无效正则: ${args.pattern}` }
     }
@@ -642,13 +741,36 @@ export const grepTool: Tool = {
     const files = (exact ? [exact] : listing)
       .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (!prefix || exact || listPathCandidates(f.path).some((c) => c.startsWith(prefix))) && (!includeRe || listPathCandidates(f.path).some((c) => includeRe.test(c))))
     if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
-    const matches: Array<{ file: string; line: number; text: string }> = []
-    // content 模式渲染行（含 context 组）；非 content 模式按文件聚合命中数
-    const blocks: string[] = []
-    const fileCounts: Array<{ file: string; count: number }> = []
-    let total = 0
+    // 分批读文件 → 行数据送子进程匹配（灾难性回溯防护，见 runGrepMatcher）→ 命中行号回父进程渲染。
+    // 批大小上限控制 stdin 载荷与瞬时内存；命中文件的行保留用于上下文渲染（受匹配上限约束）
+    const BATCH_BYTES = 4 * 1024 * 1024
+    const hitFiles: Array<{ display: string; lines: string[]; hitIdx: number[] }> = []
     let capped = false
+    let matcherError: string | null = null
+    let batch: Array<{ display: string; lines: string[] }> = []
+    let batchBytes = 0
+    let stop = false
+    const flushBatch = async () => {
+      if (!batch.length) return
+      const sent = batch
+      const r = await runGrepMatcher({ pattern: String(args.pattern), flags: args.ignoreCase ? "i" : "", maxMatches: GREP_MAX_MATCHES, files: sent })
+      batch = []
+      batchBytes = 0
+      if (r.error) {
+        matcherError = r.error
+        stop = true
+        return
+      }
+      for (const [i, h] of (r.hits ?? []).entries()) {
+        if (h.hitIdx.length) hitFiles.push({ display: h.display, lines: sent[i]?.lines ?? [], hitIdx: h.hitIdx })
+      }
+      if (r.capped) {
+        capped = true
+        stop = true
+      }
+    }
     for (const f of files) {
+      if (stop) break
       let content: string
       try {
         content = await ctx.readFile(ctx.resolvePath(f.path))
@@ -658,45 +780,47 @@ export const grepTool: Tool = {
       // 二进制内容（NUL 字节）跳过：防乱码匹配行刷进上下文（同 grep 二进制检测语义）
       if (content.includes("\0")) continue
       const lines = content.split("\n")
-      const hitIdx: number[] = []
-      let fileCount = 0
-      for (const [i, line] of lines.entries()) {
-        if (!re.test(line)) continue
-        if (total >= GREP_MAX_MATCHES) {
-          capped = true
-          break
-        }
-        total++
-        if (mode === "content") {
-          matches.push({ file: f.path, line: i + 1, text: line.trim().slice(0, 200) })
-          hitIdx.push(i)
-        } else fileCount++
+      if (batchBytes + content.length > BATCH_BYTES) {
+        await flushBatch()
+        if (stop) break
       }
-      if (mode !== "content" && fileCount > 0) fileCounts.push({ file: f.path, count: fileCount })
-      if (mode === "content" && hitIdx.length) {
-        if (context > 0) {
-          // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔）
-          const ranges: Array<[number, number]> = []
-          for (const i of hitIdx) {
-            const s = Math.max(0, i - context)
-            const e = Math.min(lines.length - 1, i + context)
-            const last = ranges[ranges.length - 1]
-            if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
-            else ranges.push([s, e])
-          }
-          const hitSet = new Set(hitIdx)
-          for (const [s, e] of ranges) {
-            for (let i = s; i <= e; i++) {
-              const text = lines[i].trim().slice(0, 200)
-              blocks.push(hitSet.has(i) ? `${f.path}:${i + 1}: ${text}` : `${f.path}-${i + 1}- ${text}`)
-            }
-            blocks.push("--")
-          }
-        } else {
-          blocks.push(...hitIdx.map((i) => `${f.path}:${i + 1}: ${lines[i].trim().slice(0, 200)}`))
-        }
+      batch.push({ display: f.path, lines })
+      batchBytes += content.length
+    }
+    await flushBatch()
+    if (matcherError) return { output: `grep: ${matcherError}`, data: { mode, matches: [], files: [], counts: [] } }
+    const matches: Array<{ file: string; line: number; text: string }> = []
+    // content 模式渲染行（含 context 组）；非 content 模式按文件聚合命中数
+    const blocks: string[] = []
+    const fileCounts: Array<{ file: string; count: number }> = []
+    for (const f of hitFiles) {
+      if (mode === "content") {
+        for (const i of f.hitIdx) matches.push({ file: f.display, line: i + 1, text: f.lines[i]?.trim().slice(0, 200) ?? "" })
+      } else {
+        fileCounts.push({ file: f.display, count: f.hitIdx.length })
+        continue
       }
-      if (capped) break
+      if (context > 0) {
+        // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔）
+        const ranges: Array<[number, number]> = []
+        for (const i of f.hitIdx) {
+          const s = Math.max(0, i - context)
+          const e = Math.min(f.lines.length - 1, i + context)
+          const last = ranges[ranges.length - 1]
+          if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
+          else ranges.push([s, e])
+        }
+        const hitSet = new Set(f.hitIdx)
+        for (const [s, e] of ranges) {
+          for (let i = s; i <= e; i++) {
+            const text = f.lines[i]?.trim().slice(0, 200) ?? ""
+            blocks.push(hitSet.has(i) ? `${f.display}:${i + 1}: ${text}` : `${f.display}-${i + 1}- ${text}`)
+          }
+          blocks.push("--")
+        }
+      } else {
+        blocks.push(...f.hitIdx.map((i) => `${f.display}:${i + 1}: ${f.lines[i]?.trim().slice(0, 200) ?? ""}`))
+      }
     }
     const capNote = capped ? "\n…（已达匹配上限，结果可能不完整；可缩小 pattern/path/include 范围）" : ""
     if (mode === "files") {
@@ -791,8 +915,34 @@ export const fetchUrlTool: Tool = {
     if (!/text|json|xml|html|markdown|javascript|css/i.test(ct)) {
       return { output: `非文本内容（${ct || "未知类型"}），已跳过内容抓取。`, data: { ok: false, status: res.status, contentType: ct } }
     }
-    const buf = new Uint8Array(await res.arrayBuffer())
-    const text = new TextDecoder().decode(buf)
+    // 流式限量读取（先下载后截断防不住内存：超大/无限流响应在截断前就已全量入内存）
+    const reader = res.body?.getReader()
+    let text = ""
+    if (reader) {
+      const chunks: Uint8Array[] = []
+      let received = 0
+      let oversized = false
+      const dec = new TextDecoder()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value) {
+          received += value.byteLength
+          if (received > FETCH_URL_STREAM_MAX_BYTES) {
+            oversized = true
+            void reader.cancel().catch(() => {})
+            break
+          }
+          chunks.push(value)
+          text += dec.decode(value, { stream: true })
+        }
+      }
+      text += dec.decode()
+      if (oversized) text += `
+…（响应超过 ${Math.round(FETCH_URL_STREAM_MAX_BYTES / 1024 / 1024)}MB 读取上限，已截断）`
+    } else {
+      text = await res.text()
+    }
     return { ...(await truncate(text.slice(0, FETCH_URL_MAX_BYTES), "fetch_url", ctx)), data: { ok: true, status: res.status, contentType: ct } }
   },
 }
@@ -808,11 +958,11 @@ const REDIRECT_MAX_HOPS = 5
 export async function fetchWithRedirectGuard(
   rawUrl: string,
   init: RequestInit,
-  guard: (url: string) => void,
+  guard: (url: string) => void | Promise<void>,
 ): Promise<Response> {
   let url = rawUrl
   for (let hop = 0; ; hop++) {
-    guard(url)
+    await guard(url)
     const res = await fetch(url, { ...init, redirect: "manual" })
     const status = res.status
     if (status >= 300 && status < 400) {
@@ -837,8 +987,10 @@ export async function fetchWithRedirectGuard(
 
 /** 服务端部署模式的 URL 安全校验：拒绝回环/链路本地/私网（防 SSRF）。
  * 主机名判定统一走 `core/ip.ts`（覆盖 IPv4-mapped IPv6、ULA、尾点 FQDN、规范化的
- * 整数/十六进制 IPv4 等绕过形式）；DNS 重绑定由 fetchWithRedirectGuard 的逐跳校验兜底。 */
-export function assertPublicHttpUrl(raw: string): void {
+ * 整数/十六进制 IPv4 等绕过形式）；**域名做 DNS 解析复查**——字面量之外，「解析到私网/回环的域名」
+ * （内网 DNS 名 kubernetes.default.svc、A 记录指向内网的攻击域名）同样拒绝，解析失败放行
+ * （fetch 自会失败）；逐跳校验防重定向跳板（解析时刻与 fetch 时刻仍有窗口，纵深依赖出口网络一致性）。 */
+export async function assertPublicHttpUrl(raw: string): Promise<void> {
   let url: URL
   try {
     url = new URL(raw)
@@ -846,9 +998,24 @@ export function assertPublicHttpUrl(raw: string): void {
     throw new Error(`无效的 URL: ${raw}`)
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`无效的 URL（仅支持 http/https）: ${raw}`)
-  const reason = hostBlockReason(url.hostname, { blockPrivate: true })
+  const hostname = url.hostname.replace(/\.$/, "") // 尾点 FQDN 归一（ip.ts 同款）
+  const reason = hostBlockReason(hostname, { blockPrivate: true })
   if (reason === "私网地址") throw new Error(`URL 不允许（私网地址）: ${raw}`)
   if (reason) throw new Error(`URL 不允许（回环/链路本地地址）: ${raw}`)
+  // DNS 解析复查（3s 超时放行——挂起的解析器不应额外阻断，fetch 层自有超时）
+  let addrs: Array<{ address: string }>
+  try {
+    addrs = await Promise.race([
+      lookup(hostname, { all: true }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dns-timeout")), 3000)),
+    ])
+  } catch {
+    return
+  }
+  for (const a of addrs) {
+    const r = hostBlockReason(a.address, { blockPrivate: true })
+    if (r) throw new Error(`URL 不允许（域名解析到${r === "私网地址" ? "私网" : "回环/链路本地"}地址 ${a.address}）: ${raw}`)
+  }
 }
 
 /** 各类图块的 start/end 指令（@startmindmap 等非 @startuml 块同样支持）。 */
@@ -1128,6 +1295,7 @@ export const editTool: Tool = {
     if (safeMsg) return { output: safeMsg }
     const guardMsg = await ctx.writeGuard?.([path])
     if (guardMsg) return { output: guardMsg }
+    await assertReadableSize(path, "edit", EDIT_MAX_FILE_BYTES)
     let content = await ctx.readFile(path)
     const edits = (args.edits as Array<{ oldString: string; newString: string; replaceAll?: boolean }>) || []
     const applied: string[] = []
@@ -1371,13 +1539,21 @@ function scriptData(stdout: string, stderr: string, exitCode: number): Record<st
   }
 }
 
-/** sh/py 免审参数（approval:false 跳过本次审批）的动态审批判定：缺省/true 需审批，显式 false 免审。 */
-function scriptRequiresApproval(args: Record<string, unknown>): boolean {
-  return args.approval !== false
+/** sh/py 免审参数（approval:false 跳过本次审批）的动态审批判定：缺省/true 需审批；显式 false 时
+ *  **强制白名单校验**——仅只读（validateShCommandSafeMode）或测试/静态检查类命令（shApprovalFreeAllowed）
+ *  放行免审，其余仍需审批（防提示词注入借免审标记执行任意命令）；py 的 code 为任意代码、无法静态判定，
+ *  免审标记不生效。 */
+function scriptRequiresApproval(args: Record<string, unknown>, ctx?: ToolContext): boolean {
+  if (args.approval !== false) return true
+  // 安全模式：sh 在 execute 内按只读白名单降级（非白名单命令直接被拒并回提示），风险已由白名单
+  // 约束——审批层不再重复拦截，免审标记直接生效（降级语义与审批语义分层）
+  if (ctx?.safeMode) return false
+  if (ctx && typeof args.command === "string" && shApprovalFreeAllowed(args.command, { sandboxed: ctx.sandboxed, home: ctx.home, user: ctx.user, workdir: ctx.workdir })) return false
+  return true
 }
 
 const SCRIPT_APPROVAL_PARAM = {
-  approval: { type: "boolean", description: "可选：本次调用是否需要用户审批（默认 true 需审批）；仅对明确安全的只读/幂等命令（如查看状态、跑测试）可设 false 跳过审批，风险命令勿关闭" },
+  approval: { type: "boolean", description: "可选：本次调用是否需要用户审批（默认 true 需审批）；仅对明确安全的只读命令（cat/ls/git status 等）或测试/静态检查类（bun test、pytest、tsc、eslint 等）可设 false 跳过审批（服务端强制白名单校验，不满足仍会弹审批）；风险命令勿关闭" },
 }
 
 /** 脚本 stdin 序列化：对象/数组转 JSON 文本（双引号，Python json.loads 可直接解析），其余按字符串。 */
@@ -1455,7 +1631,7 @@ export const pyTool: Tool = {
       input: { type: "string", description: "可选：作为程序 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
-      ...SCRIPT_APPROVAL_PARAM,
+      approval: { type: "boolean", description: "兼容参数：py 的 code 为任意代码、无法静态判定安全性，免审标记不生效（默认且恒需审批）" },
     },
     ["code"],
   ),

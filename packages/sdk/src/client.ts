@@ -101,6 +101,8 @@ export class GebaiClient {
   private token?: string
   private ws?: WebSocket
   private connectPromise: Promise<void> | null = null
+  /** 建连共享 promise 的 reject（onclose 无 onopen/onerror 极端路径 settle 用）。 */
+  private connectReject: ((e: Error) => void) | undefined
   private connectTimeoutMs: number
   private eventHandlers: Array<(event: AgentEvent) => void> = []
   private statusHandlers: Array<(status: "connected" | "disconnected") => void> = []
@@ -249,11 +251,10 @@ export class GebaiClient {
   private sendHeartbeat(): void {
     const ws = this.ws
     if (!ws || ws.readyState !== WebSocket.OPEN || this.manualClose) return
-    // 上一拍 pong 未归：连接已被静默断开，主动关闭走自动重连
-    if (this.heartbeatPending) {
-      ws.close()
-      return
-    }
+    // 上一拍 pong 未归：不立即判死（判死阈值是 heartbeatTimeoutMs，不是下一拍间隔——
+    // interval < timeout 的高延迟链路上，pong 5~10s 往返会被间隔误杀成「连上→杀→重连」循环），
+    // 交给该拍请求自身的超时 onError 触发关闭
+    if (this.heartbeatPending) return
     this.heartbeatPending = true
     this.send(
       "ping",
@@ -307,6 +308,7 @@ export class GebaiClient {
       url = resolveWsUrl(this.baseUrl, loc ?? null)
     }
     this.connectPromise = new Promise<void>((resolve, reject) => {
+        this.connectReject = reject
       const ws = new WebSocket(url)
       // 连接超时保护：服务不可达（代理挂起等）时避免页面永久卡在初始化
       const timer = setTimeout(() => {
@@ -337,8 +339,15 @@ export class GebaiClient {
       // 运行期断开（正常 close frame 不触发 onerror）：失败在途请求并清空连接状态以便重连
       ws.onclose = () => {
         if (this.ws !== ws) return // 旧连接的迟到 close：新连接的在途请求不受影响
-        this.connectPromise = null // 建连期单独触发 close（无 onopen/onerror 的极端路径）也释放共享 promise
-        for (const { reject } of this.pending.values()) reject(new Error("WS closed"))
+        // 建连期单独触发 close（无 onopen/onerror 的极端路径）：settle 共享 promise，否则等待方永久挂起
+        this.connectPromise = null
+        this.connectReject?.(new Error("WS closed"))
+        this.connectReject = undefined
+        // 在途请求统一失败并清超时 timer（不清会悬挂触发第二次 onError——误导性的「WS 请求超时」）
+        for (const { reject, timer } of this.pending.values()) {
+          if (timer) clearTimeout(timer)
+          reject(new Error("WS closed"))
+        }
         this.pending.clear()
         this.ws = undefined
         this.stopHeartbeat()
@@ -420,7 +429,10 @@ export class GebaiClient {
    */
   private dispatchEvent(event: AgentEvent): void {
     if (typeof event.seq === "number") {
-      this.lastSeq = Math.max(this.lastSeq, event.seq)
+      // seq 去重：并发 sendPrompt 恢复（多会话同时流式输出时断线重连）会各自重放同一批用户级事件，
+      // 已分发过的 seq 直接跳过（chunk 重复拼接/卡片双份渲染）；seq 单调，旧 seq 同样视为已见
+      if (event.seq <= this.lastSeq) return
+      this.lastSeq = event.seq
       if (event.seq > this.snapshot.lastSeq) this.snapshot.lastSeq = event.seq
     }
     // 模型增量：运行中会话集合随任务事件更新（快照 running 的实时延续）
@@ -893,7 +905,7 @@ export class GebaiClient {
         await this.request("session.prompt", {
           id: sessionId,
           prompt,
-          attachments: opts?.attachments,
+          attachments: opts?.attachments?.map((a) => ({ ...a, data: a.data ? Array.from(a.data) : undefined })),
           env: opts?.env,
           messageId: opts?.messageId,
           interactionMode: opts?.interactionMode,
@@ -929,6 +941,10 @@ export class GebaiClient {
       push({ kind: "done" })
       finished = true
       wake()
+      // 本路径不经 syncEvents：后台收敛 seq 基线（防下次断线恢复重复重放旧区间）
+      void this.syncEvents(this.lastSeq).then((r) => {
+        this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
+      }).catch(() => {})
       return true
     }
 
@@ -971,6 +987,8 @@ export class GebaiClient {
         const live = held
         held = []
         if (r.overrun) {
+          // overrun 分支不分发日志事件（全量重同步）：直接收敛基线，防下次恢复重复判定缺口
+          this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
           await resyncOverrun()
           if (!finished) {
             for (const ev of live) processEvent(ev) // 重放范围外的新事件继续
@@ -980,6 +998,10 @@ export class GebaiClient {
         // 重放事件经 dispatchEvent 分发：sendPrompt 的 chunk 通道与全局 onEvent 订阅者
         // （前端审批/选择/工具卡片渲染）都收到——离线期间的交互卡片重连后可恢复
         for (const ev of r.events) this.dispatchEvent(ev)
+        // 分发后收敛 seq 基线：缺口后方「无新事件」窗口内 lastSeq 停留在断线前的滞后值，
+        // 下次断线恢复会重复重放旧区间（含旧 task.done 截断新任务流）；并发 resume 的重复
+        // 事件也由 dispatchEvent 的 seq 去重过滤（重放事件已在此前分发推进过 lastSeq）
+        this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
         if (finished) return
         // 实时事件中超出重放范围的（重放应答期间到达的）继续处理，避免重复
         for (const ev of live) {

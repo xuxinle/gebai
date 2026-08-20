@@ -11,6 +11,9 @@ import { TokenBucket } from "./core/ratelimit"
 /** 每用户 prompt 速率限制（容量 60 突发、30/秒补充；防单用户刷 LLM 配额，与 REST 同规则）。 */
 const promptRateLimit = new TokenBucket(60, 30)
 
+/** WS auth.login 密码路径限流（防 scrypt CPU DoS，与 REST login 同规则；令牌路径为廉价查表不限）。 */
+const wsLoginRateLimit = new TokenBucket(30, 1)
+
 /** 需要合法会话 ID 的 WS 消息类型（入口统一校验，防 sessionId 路径穿越）。 */
 const SESSION_ID_MSGS = new Set([
   "session.get", "session.delete", "session.rename", "session.switch", "session.compact",
@@ -67,6 +70,8 @@ export async function handleWsMessage(
         tok = String(p.token)
         u = await d.auth.authorize(tok)
       } else {
+        // 密码路径限流：轮换用户名可绕过按用户名锁定，桶级兜底总量（与 REST login 同动机）
+        if (d.config.auth === "server" && !wsLoginRateLimit.allow("ws-login")) return reply(false, undefined, "rate limited: too many attempts")
         tok = (await d.auth.login(String(p.username), String(p.password))) ?? undefined
         if (tok) u = await d.auth.authorize(tok)
       }
@@ -347,6 +352,8 @@ export async function handleWsMessage(
           return reply(false, undefined, String((err as Error).message || err))
         }
       }
+      // 全局装载（无 sessionId）变更所有用户的工具面（REST 同能力仅 admin）：服务模式需 admin
+      if (d.config.auth === "server" && user.role !== "admin") return reply(false, undefined, "admin only（全局装载影响所有用户，会话级装载请传 sessionId）")
       await d.subAgents.load(name)
       return reply(true)
     }
@@ -364,6 +371,8 @@ export async function handleWsMessage(
           return reply(false, undefined, String((err as Error).message || err))
         }
       }
+      // 同 sub_agent.load：全局卸载仅 admin（会话级卸载传 sessionId 不受限）
+      if (d.config.auth === "server" && user.role !== "admin") return reply(false, undefined, "admin only（全局卸载影响所有用户，会话级卸载请传 sessionId）")
       d.subAgents.unload(name)
       return reply(true)
     }

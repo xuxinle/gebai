@@ -140,6 +140,12 @@ class ChatOutbox {
     })
   }
 
+  /** 新任务开始：复位 finalSent——上一任务的完成标记跨任务残留会吞掉本任务空最终回复时的
+   *  taskDone 兜底（结果全在子 Agent/画图输出中的任务在飞书侧得不到任何完成信号）。 */
+  beginTask(): void {
+    this.finalSent = false
+  }
+
   /** 任务完成兜底：最终回复未发出时补一条完成提示并撤回状态消息（finalSent 检查在队列内，避免与 final 竞态）。 */
   taskDone(replyTo?: string): void {
     this.clearTransient()
@@ -388,11 +394,24 @@ export class FeishuBot {
     this.conn.stop()
   }
 
+  /** 已见 event_id（飞书重推去重）：Map 迭代序即插入序，超容量淘汰最旧。 */
+  private seenEventIds = new Map<string, true>()
+
   /** 飞书事件入口（im.message.receive_v1）。 */
   async handleFeishuEvent(event: Record<string, unknown>): Promise<void> {
     if (event.schema !== "2.0") return
-    const header = (event.header ?? {}) as { event_type?: string }
+    const header = (event.header ?? {}) as { event_type?: string; event_id?: string }
     if (header.event_type !== "im.message.receive_v1") return
+    // event_id 去重：ACK 前进程被杀/ACK 发送失败/断连时飞书会重推同一事件——重复执行任务
+    // 意味着重复写文档/消费审批（官方 SDK 按 message_id 幂等，此处同语义）
+    if (header.event_id) {
+      if (this.seenEventIds.has(header.event_id)) return
+      if (this.seenEventIds.size >= 256) {
+        const oldest = this.seenEventIds.keys().next().value
+        if (oldest !== undefined) this.seenEventIds.delete(oldest)
+      }
+      this.seenEventIds.set(header.event_id, true)
+    }
     const ev = (event.event ?? {}) as {
       sender?: { sender_id?: { open_id?: string }; sender_type?: string }
       message?: { message_id?: string; chat_id?: string; message_type?: string; content?: string; mentions?: Array<{ key?: string }> }
@@ -568,7 +587,11 @@ export class FeishuBot {
         return
       }
       this.active.set(sessionId, chatId)
-      this.runOwners.set(sessionId, openId) // 审批授权：绑定任务发起者
+      // 审批授权：绑定任务发起者。条件写入（不覆盖既有绑定）——并发消息竞态下后来者的 run 必然
+      // 因「已有任务在运行」失败，覆盖只会丢失真正发起者的绑定（空 openId 使「仅发起者可操作」
+      // 校验整体失效，任意群成员可批准高危操作）
+      if (!this.runOwners.has(sessionId)) this.runOwners.set(sessionId, openId)
+      this.outbox(chatId).beginTask()
       // 收到消息：给用户消息添加「Typing」表情反应模拟「正在输入」（飞书无 typing 接口；emoji_type 用官方标准 ID，输出完成后撤回）
       let reactionId: string | null = null
       if (/^[A-Za-z0-9_-]{8,64}$/.test(messageId)) {
@@ -608,11 +631,12 @@ export class FeishuBot {
             this.outbox(chatId).error(error, messageId)
           },
           onEnd: () => {
-            // 任务结束（完成/出错）：收尾清理
+            // 任务结束（完成/出错）：收尾清理（仅当自己仍是绑定的发起者时解绑——并发竞态下
+            // 别的任务可能已接管绑定）
             this.outbox(chatId).taskDone(messageId)
             this.cleanupChoices(chatId)
             this.active.delete(sessionId)
-            this.runOwners.delete(sessionId)
+            if (this.runOwners.get(sessionId) === openId) this.runOwners.delete(sessionId)
           },
         })
       } catch (err) {
@@ -622,7 +646,8 @@ export class FeishuBot {
         if (reactionId && /^[A-Za-z0-9_-]{8,64}$/.test(messageId)) {
           void this.api.deleteMessageReaction(messageId, reactionId)
         }
-        this.runOwners.delete(sessionId)
+        // 仅当自己仍是绑定的发起者时解绑（本 runPrompt 失败时绑定属于真正在跑的任务）
+        if (this.runOwners.get(sessionId) === openId) this.runOwners.delete(sessionId)
       }
     })()
   }
