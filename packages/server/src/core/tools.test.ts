@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
+import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, drawTool, pageCaptureTool, renderHtmlTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -149,6 +149,64 @@ describe("global tools", () => {
     await shTool.execute({ command: "echo hi", timeout: 0 }, c)
     await shTool.execute({ command: "echo hi", timeout: "abc" }, c)
     expect(seen).toEqual([10000, 300000, 540000, 300000, 300000])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("sh async:true returns taskId immediately without waiting; sh_task wait/list manage it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-async-"))
+    const c = ctx(home)
+    // shTasks 服务桩：模拟一个很快以退出码 0 结束、日志含构建输出的后台任务
+    const started: Array<{ command: string; cwd?: string; maxMs?: number }> = []
+    const doneRec = () => ({ id: "tabc1234", command: "bun run build", cwd: "", pid: 4321, startedAt: Date.now() - 1000, maxMs: 1800_000, endedAt: Date.now(), exitCode: 0 })
+    c.shTasks = {
+      start: async (command, opts) => {
+        started.push({ command, cwd: opts.cwd, maxMs: opts.maxMs })
+        return { id: "tabc1234", command, cwd: opts.cwd ?? "", pid: 4321, startedAt: Date.now(), maxMs: opts.maxMs ?? 1800_000 }
+      },
+      refresh: async (id) => (id === "tabc1234" ? doneRec() : undefined),
+      wait: async (id, timeoutMs) => {
+        if (id !== "tabc1234") return undefined
+        await new Promise((res) => setTimeout(res, Math.min(60, timeoutMs)))
+        return doneRec()
+      },
+      kill: async (id) => (id === "tabc1234" ? { ...doneRec(), exitCode: undefined, killed: true } : undefined),
+      list: async () => [doneRec()],
+      readLog: async (id, tail) => (id === "tabc1234" ? "building...\nbuild ok\n".slice(-tail) : ""),
+    }
+    // async 启动：立即返回 taskId，不调用同步 runCommand
+    const start = await shTool.execute({ command: "bun run build", async: true, timeout: 600 }, c)
+    expect(start.output).toContain("[后台任务已启动]")
+    expect(start.output).toContain("tabc1234")
+    expect((start.data as { taskId: string }).taskId).toBe("tabc1234")
+    expect(started).toEqual([{ command: "bun run build", cwd: c.workdir, maxMs: 600_000 }])
+    // sh_task wait：等待完成返回终态与输出尾部
+    const waited = await shTaskTool.execute({ action: "wait", id: "tabc1234" }, c)
+    expect(waited.output).toContain("[done]")
+    expect(waited.output).toContain("build ok")
+    expect((waited.data as { status: string }).status).toBe("done")
+    expect((waited.data as { exitCode: number | null }).exitCode).toBe(0)
+    // sh_task list
+    const listed = await shTaskTool.execute({ action: "list" }, c)
+    expect(listed.output).toContain("tabc1234")
+    expect(listed.output).toContain("bun run build")
+    // sh_task kill（终态记录）
+    const killed = await shTaskTool.execute({ action: "kill", id: "tabc1234" }, c)
+    expect(killed.output).toContain("[killed]")
+    // 缺 id / 未知 id 的引导信息
+    const noId = await shTaskTool.execute({ action: "status" }, c)
+    expect(noId.output).toContain("缺少任务 id")
+    const unknown = await shTaskTool.execute({ action: "status", id: "nope" }, c)
+    expect(unknown.output).toContain("未找到后台任务")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("sh async/sh_task 在无 shTasks 服务时返回不可用说明", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-async-none-"))
+    const c = ctx(home)
+    const start = await shTool.execute({ command: "x", async: true }, c)
+    expect(start.output).toContain("不支持后台任务")
+    const q = await shTaskTool.execute({ action: "list" }, c)
+    expect(q.output).toContain("不支持后台任务")
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -1770,8 +1828,8 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const c: ToolContext = {
       ...ctx(home),
       listSubAgentDefs: () => [
-        { name: "code", description: "code", preload: true, loaded: true },
-        { name: "writer", description: "docs", preload: false, loaded: false },
+        { name: "code", description: "code", preload: true, loaded: true, tools: ["read", "edit"] },
+        { name: "writer", description: "docs", preload: false, loaded: false, tools: ["draft", "polish"] },
       ],
       loadSubAgent: async (name) => {
         expect(name).toBe("writer")
@@ -1785,6 +1843,17 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     expect(list.output).not.toContain("工具")
     const load = await agentLoadTool.execute({ name: "writer" }, c)
     expect(load.output).toContain("已装载")
+    // 装载反馈枚举实际并入的工具全名（{agent}_{tool}，模型直接调用即可）
+    expect(load.output).toContain("writer_draft、writer_polish")
+    expect((load.data as { tools: string[] }).tools).toEqual(["writer_draft", "writer_polish"])
+    // 无自有工具的纯提示词子Agent：说明能力以提示词注入
+    const c2: ToolContext = {
+      ...c,
+      listSubAgentDefs: () => [{ name: "combo", description: "组合", preload: false, loaded: false }],
+      loadSubAgent: async () => {},
+    }
+    const load2 = await agentLoadTool.execute({ name: "combo" }, c2)
+    expect(load2.output).toContain("系统提示词形式注入")
     cleanup(home)
   })
 

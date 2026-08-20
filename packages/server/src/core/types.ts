@@ -64,6 +64,9 @@ export type ToolContext = {
   /** 移动/重命名文件（file 工具 move/rename 动作用）。 */
   moveFile: (from: string, to: string) => Promise<void>
   runCommand: (cmd: string, opts?: { shell?: string; workdir?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string; code: number }>
+  /** sh 异步后台任务服务（引擎按会话注入，会话 tmp/sh-tasks/ 落盘）：sh async:true 启动、sh_task 查询/等待/终止。
+   *  可选：测试桩/无引擎环境不注入时 sh async 与 sh_task 返回不可用说明。 */
+  shTasks?: import("./sh-tasks").ShTaskService
   uploadAttachment: (ref: AttachmentRef) => Promise<string>
   publish: (type: string, payload: Record<string, unknown>) => void
   /** 任务取消信号（引擎按任务注入）：长时工具（js 脚本子进程等）监听中止并终止子进程。可选：测试桩不注入时不响应取消。 */
@@ -101,7 +104,7 @@ export type ToolContext = {
     resolve(name: string): { name: string; tool: Tool } | undefined
     getAgentNames(): string[]
   }
-  listSubAgentDefs: () => Array<{ name: string; description: string; preload: boolean; loaded: boolean }>
+  listSubAgentDefs: () => Array<{ name: string; description: string; preload: boolean; loaded: boolean; tools?: string[] }>
   /** 装载子Agent 能力模块（agent_load 工具）：其工具并入当前工具集、能力描述注入系统提示词；不创建新上下文、无独立执行（DESIGN「装载 vs 新会话执行」）。 */
   loadSubAgent: (name: string) => Promise<void>
   /** 执行新会话（agent_run 工具）：派生临时新会话、预加载指定子Agent 列表（完整系统提示词+工具）后阻塞执行任务，

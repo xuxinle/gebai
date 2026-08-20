@@ -14,6 +14,7 @@ import { hostBlockReason } from "./ip"
 import { runFlow, scanFlowApprovals } from "./flow"
 import { jsTool, jsRuntimeCommand } from "./js-tool"
 import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, shApprovalFreeAllowed, validateShCommandSafeMode } from "./safety"
+import { shTaskLifetimeMs, shTaskStatus, type ShTaskRecord } from "./sh-tasks"
 import { EXCLUDED_GLOBAL_TOOLS } from "./tools-excluded.generated"
 
 export const TRUNCATE_THRESHOLD = 12000
@@ -1565,15 +1566,16 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号语义以 cmd 为准。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。",
+  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号语义以 cmd 为准。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 sh_task 回头查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
     {
       command: { type: "string" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
-      timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
+      timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540，超时进程被终止并返回超时结果；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
+      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId 不等待完成（适合构建/测试等长命令，期间可处理其他任务）；后续用 sh_task（action=status/wait/kill/list）查询输出、等待完成或终止" },
       ...SCRIPT_APPROVAL_PARAM,
     },
     ["command"],
@@ -1586,6 +1588,15 @@ export const shTool: Tool = {
       const deny = validateShCommandSafeMode(String(args.command), ctx)
       if (deny) return { output: deny }
     }
+    // 异步后台执行（DESIGN「sh 异步执行」）：spawn 进后台 + 落盘会话 tmp/sh-tasks/，立即返回 taskId
+    if (args.async === true) {
+      if (!ctx.shTasks) return { output: "当前环境不支持后台任务执行（shTasks 服务未注入）。" }
+      const rec = await ctx.shTasks.start(String(args.command), { cwd: ctx.workdir, env: ctx.env, input, maxMs: shTaskLifetimeMs(args.timeout) })
+      return {
+        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 sh_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=kill 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
+        data: { taskId: rec.id, pid: rec.pid },
+      }
+    }
     const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir: ctx.workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
     // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
     if (args.strict === true && code !== 0) {
@@ -1595,6 +1606,90 @@ export const shTool: Tool = {
     // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
     const final = code === 0 && !stdout.trim() ? "（命令执行成功，无输出）" : out
     return { ...(await truncate(final, "sh", ctx)), data: scriptData(stdout, stderr, code) }
+  },
+}
+
+/** sh_task 输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
+const SH_TASK_TAIL_DEFAULT = 4000
+const SH_TASK_TAIL_MAX = 20000
+/** wait 默认等待秒数（上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底）。 */
+const SH_TASK_WAIT_DEFAULT_S = 60
+const SH_TASK_WAIT_MAX_S = 540
+
+function shTaskTailChars(v: unknown): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SH_TASK_TAIL_DEFAULT
+  return Math.min(Math.floor(n), SH_TASK_TAIL_MAX)
+}
+
+function shTaskWaitMs(v: unknown): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SH_TASK_WAIT_DEFAULT_S * 1000
+  return Math.min(n, SH_TASK_WAIT_MAX_S) * 1000
+}
+
+function shTaskElapsed(r: { startedAt: number; endedAt?: number }, now = Date.now()): number {
+  return Math.round(((r.endedAt ?? now) - r.startedAt) / 1000)
+}
+
+/** sh 异步后台任务状态行（status/wait/kill 单任务 + list 每行共用）。 */
+function shTaskLine(r: ShTaskRecord, label?: string): string {
+  const status = shTaskStatus(r)
+  const head = `${label ?? ""}taskId ${r.id} [${status}] ${shTaskElapsed(r)}s`
+  if (status === "running") return `${head} — ${r.command}`
+  const exit = r.exitCode === undefined ? "（退出码未知）" : `（exit ${r.exitCode}）`
+  const suffix = r.timedOut ? " [生命周期超时已终止]" : r.killed ? " [已手动终止]" : r.lost ? " [进程已结束，服务可能重启过]" : r.spawnError ? ` [启动失败: ${r.spawnError.slice(0, 200)}]` : ""
+  return `${head}${exit}${suffix} — ${r.command}`
+}
+
+/** sh 异步后台任务管理：查询（status）/等待（wait，阻塞至完成或超时）/终止（kill，进程树）/清单（list）。
+ *  任务由 sh async:true 启动（返回 taskId）；输出为 stdout+stderr 合并日志尾部（完整日志在 tmp/sh-tasks/{id}.log）。 */
+export const shTaskTool: Tool = {
+  name: "sh_task",
+  description: "管理 sh 异步后台任务（sh async:true 启动并返回 taskId）。action=status 立即返回任务状态与输出尾部；action=wait 阻塞等待完成（timeout 秒内未完成返回当前状态，适合「先做别的再回头等结果」）；action=kill 终止任务进程树；action=list 列出本会话全部后台任务。",
+  card: { titleParams: ["action", "id"] },
+  parameters: schema(
+    {
+      action: { type: "string", enum: ["status", "wait", "kill", "list"], description: "操作（必填）" },
+      id: { type: "string", description: "任务 taskId（action=list 可省略）" },
+      timeout: { type: "number", description: "wait 操作等待秒数（默认 60，上限 540）" },
+      tail: { type: "number", description: "返回输出尾部字符数（默认 4000，上限 20000）" },
+    },
+    ["action"],
+  ),
+  outputSchema: schema(
+    {
+      id: { type: "string", description: "任务 id（list 为空）" },
+      status: { type: "string", description: "running/done/failed/killed/timed_out/lost" },
+      exitCode: { type: "integer", description: "退出码（未知为 null）" },
+      output: { type: "string", description: "输出尾部（stdout+stderr 合并）" },
+      tasks: { type: "array", description: "list 的任务概要", items: schema({ id: { type: "string" }, status: { type: "string" }, command: { type: "string" } }, ["id", "status"]) },
+    },
+    [],
+  ),
+  async execute(args, ctx) {
+    if (!ctx.shTasks) return { output: "当前环境不支持后台任务（shTasks 服务未注入）。" }
+    const action = String(args.action ?? "status")
+    const tail = shTaskTailChars(args.tail)
+    if (action === "list") {
+      const tasks = await ctx.shTasks.list()
+      if (!tasks.length) return { output: "本会话暂无后台任务（用 sh async:true 启动）。", data: { tasks: [] } }
+      const lines = tasks.map((r) => shTaskLine(r))
+      return { output: `本会话后台任务（${tasks.length} 个，按启动顺序）:\n${lines.join("\n")}`, data: { tasks: tasks.map((r) => ({ id: r.id, status: shTaskStatus(r), command: r.command })) } }
+    }
+    const id = String(args.id ?? "")
+    if (!id) return { output: "缺少任务 id（status/wait/kill 需要传 sh async:true 返回的 taskId；列清单用 action=list）。" }
+    let rec = action === "wait" ? await ctx.shTasks.wait(id, shTaskWaitMs(args.timeout)) : action === "kill" ? await ctx.shTasks.kill(id) : await ctx.shTasks.refresh(id)
+    if (!rec) return { output: `未找到后台任务: ${id}（taskId 以 sh async:true 的返回为准；查现有任务用 action=list）。` }
+    if (action === "wait" && !rec.endedAt) {
+      // 等待超时仍在运行：返回当前状态与已有输出，模型可再次 wait 或继续其他工作
+      const out = await ctx.shTasks.readLog(id, tail)
+      const text = `${shTaskLine(rec, "")}\n（等待超时仍在运行；可再次 wait、用 status 查询，或 kill 终止）\n已产出输出（尾部 ${Math.min(out.length, tail)} 字符）:\n${out || "（暂无输出）"}`
+      return { ...(await truncate(text, "sh_task", ctx)), data: { id, status: shTaskStatus(rec), exitCode: null, output: out } }
+    }
+    const out = await ctx.shTasks.readLog(id, tail)
+    const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，完整日志 tmp/sh-tasks/${id}.log）:\n${out}` : "\n（无输出）"}`
+    return { ...(await truncate(text, "sh_task", ctx)), data: { id, status: shTaskStatus(rec), exitCode: rec.exitCode ?? null, output: out } }
   },
 }
 
@@ -2392,8 +2487,15 @@ export const agentLoadTool: Tool = {
   card: { titleParams: ["name"], args: "none" },
   parameters: schema({ name: { type: "string" } }, ["name"]),
   async execute(args, ctx) {
-    await ctx.loadSubAgent(String(args.name))
-    return { output: `子Agent ${args.name} 已装载（其工具已并入当前工具集，可直接调用 ${args.name}_* 工具）。` }
+    const name = String(args.name)
+    await ctx.loadSubAgent(name)
+    // 装载反馈枚举实际并入的工具全名（模型无需猜测 {agent}_* 的具体形态，直接调用即可）
+    const tools = ctx.listSubAgentDefs().find((d) => d.name === name)?.tools ?? []
+    const names = tools.map((t) => `${name}_${t}`)
+    const toolNote = names.length
+      ? `已并入工具（${names.length} 个）: ${names.join("、")}，直接调用即可`
+      : `其能力以系统提示词形式注入（无自有工具）`
+    return { output: `子Agent ${name} 已装载（${toolNote}）。`, data: { loaded: name, tools: names } }
   },
 }
 
@@ -2451,6 +2553,7 @@ export function createAllGlobalTools(): Record<string, Tool> {
     flow: makeFlowTool(),
     tool_schemas: toolSchemasTool,
     sh: shTool,
+    sh_task: shTaskTool,
     py: pyTool,
     js: jsTool,
     draw: drawTool,

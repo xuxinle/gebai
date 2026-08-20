@@ -9,10 +9,11 @@ import type { Sandbox } from "./sandbox"
 import type { EventBus } from "./event-bus"
 import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
-import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef } from "./types"
+import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
 import { agentListTool, agentLoadTool, agentRunTool, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
+import { ShTaskRunner } from "./sh-tasks"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "./safety"
@@ -266,16 +267,22 @@ export class AgentEngine {
   /** 单会话动态工具上限（防注册风暴；重启水合同限）。 */
   private static readonly DYNAMIC_TOOLS_CAP = 50
 
+  /** 会话级 sh 异步后台任务服务（会话 tmp/sh-tasks/ 落盘，跨调用/跨重启可见）：user:sessionId → runner。 */
+  private shTaskServices = new Map<string, ShTaskRunner>()
+
   constructor(private opts: AgentEngineOptions) {}
 
   isRunning(sessionId: string): boolean {
     return this.tasks.has(sessionId)
   }
 
-  /** 会话删除时释放其运行态（已读文件追踪/动态工具等）；幂等，供 REST/WS 删除会话入口调用。 */
+  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务等）；幂等，供 REST/WS 删除会话入口调用。 */
   forgetSession(sessionId: string): void {
     this.readFiles.delete(sessionId)
     this.dynamicTools.delete(sessionId)
+    for (const key of this.shTaskServices.keys()) {
+      if (key.endsWith(`:${sessionId}`)) this.shTaskServices.delete(key)
+    }
   }
 
   /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层）：runLoop/buildContext 经此解析，
@@ -1271,7 +1278,7 @@ export class AgentEngine {
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
       this.subAgentProjectNote(user, env),
-      this.opts.subAgents.systemPromptInjection((d) => this.agentDescription(d, user, env)),
+      this.opts.subAgents.systemPromptInjection((d) => this.agentDescription({ name: d.name, description: d.description, tools: Object.keys(d.tools ?? {}) }, user, env)),
     ]
     return parts.filter(Boolean).join("\n")
   }
@@ -1335,12 +1342,18 @@ export class AgentEngine {
       .join("\n")}`
   }
 
-  /** 子Agent 对外描述（动态）：静态 description + 预置项目摘要（{AGENT}_PROJECTS 名称: 说明（路径））——
-   *  未装载清单（总Agent 提示词）与 agent_list 展示用，模型在装载前即可按项目名关联任务与代码位置。 */
-  private agentDescription(d: { name: string; description: string }, user: string, env: Record<string, string>): string {
+  /** 子Agent 对外描述（动态）：静态 description + 预置项目摘要（{AGENT}_PROJECTS 名称: 说明（路径））+
+   *  装载后工具摘要（短名，超出 10 个截断）——未装载清单（总Agent 提示词）与 agent_list 展示用，
+   *  模型在装载前即可按项目名/工具能力关联任务与代码位置（路由匹配面）。 */
+  private agentDescription(d: { name: string; description: string; tools?: string[] }, user: string, env: Record<string, string>): string {
     const projects = this.presetProjectsFor(user, env, d.name)
-    if (!projects.length) return d.description
-    return `${d.description} 预置项目：${projects.map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`).join("、")}`
+    const parts = [d.description]
+    if (projects.length) parts.push(`预置项目：${projects.map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`).join("、")}`)
+    const tools = d.tools ?? []
+    if (tools.length) {
+      parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}（以 ${d.name}_ 前缀调用）`)
+    }
+    return parts.join(" ")
   }
 
   /**
@@ -1416,7 +1429,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void> },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1530,6 +1543,9 @@ export class AgentEngine {
         await rename(from, to)
       },
       runCommand: (cmd, o) => sandbox.exec(cmd, { cwd: o?.workdir ?? workdir, env: o?.env ?? env, timeoutMs: o?.timeoutMs, input: o?.input, signal: o?.signal ?? execSignal, user }),
+      // sh 异步后台任务服务（DESIGN「sh 异步执行」）：会话 tmp/sh-tasks/ 落盘，进程经 Sandbox.spawnBackground
+      // 启动（同 exec 的 env 脱敏/chcp/进程组语义，输出合并写日志文件）
+      shTasks: this.shTaskServiceFor(user, sessionId),
       uploadAttachment: async (ref) => ref.path,
       publish: (type, payload) => self.publish(sessionId, type, payload),
       projects,
@@ -1549,7 +1565,7 @@ export class AgentEngine {
         getAgentNames: () => (opts?.registry ?? self.opts.registry).getAgentNames(),
       },
       listSubAgentDefs: () =>
-        self.opts.subAgents.list().map((d) => ({ name: d.name, description: self.agentDescription(d, user, env), preload: d.preload, loaded: d.loaded })),
+        self.opts.subAgents.list().map((d) => ({ name: d.name, description: self.agentDescription({ name: d.name, description: d.description, tools: d.tools }, user, env), preload: d.preload, loaded: d.loaded, tools: d.tools })),
       loadSubAgent: async (name) => {
         // 装载子Agent 到当前会话：注册工具 + 提示词 system 消息写入会话记录并落盘；
         // 若当前 run 的 messages 可达，提示词消息同时并入系统前置段（紧跟主 system 提示词之后，
@@ -1577,6 +1593,10 @@ export class AgentEngine {
           // 新会话执行形态（临时会话无持久化 SessionData）：仅全局注册工具（共享 run 标记防引用表随每次 agent_run 增长）
           await self.opts.subAgents.load(String(name), "agent_run").catch(() => {})
         }
+        // 新会话执行形态的双注册（DESIGN「子Agent 路由」）：ctx 处于 per-run 注册表环境（loadIntoRegistry 注入）时，
+        // 工具须同时注册进本次运行注册表——仅注册进全局注册表对新会话循环不可见（reg.resolve 查不到），
+        // 模型装载后立即调用会「未知工具」
+        if (opts?.loadIntoRegistry) self.registerIntoRegistry(opts.loadIntoRegistry, String(name))
       },
       // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；深度 +1 限制递归嵌套
       runNewSession: (agents, input) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1),
@@ -1595,6 +1615,101 @@ export class AgentEngine {
             update: (id, patch) => self.opts.cron!.update(sessionId, user, id, patch),
           }
         : undefined,
+    }
+  }
+
+  /** 会话级 sh 异步后台任务服务（按 user:sessionId 复用；记录落盘会话 tmp/sh-tasks/，跨调用/跨重启可见）。 */
+  private shTaskServiceFor(user: string, sessionId: string): ShTaskRunner {
+    const key = `${user}:${sessionId}`
+    let svc = this.shTaskServices.get(key)
+    if (!svc) {
+      const sandbox = this.opts.sandbox
+      svc = new ShTaskRunner({
+        dir: join(sandbox.workdir(user, sessionId), "sh-tasks"),
+        spawner: (cmd, o) => sandbox.spawnBackground(cmd, { cwd: o.cwd, env: o.env, logPath: o.logPath, input: o.input, user }),
+      })
+      this.shTaskServices.set(key, svc)
+    }
+    return svc
+  }
+
+  /** 工具名 → 子Agent 归属（最长 `{agent}_` 前缀匹配，路由自愈用）：无匹配返回 undefined。 */
+  private subAgentForToolName(name: string): string | undefined {
+    const candidates = this.opts.subAgents.list().map((d) => d.name).filter((a) => name.startsWith(`${a}_`))
+    if (!candidates.length) return undefined
+    return candidates.sort((a, b) => b.length - a.length)[0]
+  }
+
+  /** 未知工具错误信息：命中某子Agent 命名空间时列出其可用工具全名（模型拼错工具名时的直接恢复路径）。 */
+  private unknownToolMsg(name: string): string {
+    const agent = this.subAgentForToolName(name)
+    if (!agent) return `未知工具: ${name}`
+    const tools = Object.keys(this.opts.subAgents.def(agent)?.tools ?? {}).map((t) => `${agent}_${t}`)
+    return tools.length ? `未知工具: ${name}（${agent} 的可用工具: ${tools.join("、")}）` : `未知工具: ${name}`
+  }
+
+  /** 工具注册进指定注册表（幂等：任一工具已可解析则视为已注册；纯提示词子Agent 补注入编排工具；
+   *  self_optimize 连带 code 同规则级联）。新会话循环内装载（路由自愈/显式 agent_load）用。 */
+  private registerIntoRegistry(reg: ToolRegistry, name: string): void {
+    const cascade = name === "self_optimize" && this.opts.subAgents.def("code") ? ["code", name] : [name]
+    for (const n of cascade) {
+      const def = this.opts.subAgents.def(n)
+      if (!def) continue
+      const keys = Object.keys(def.tools ?? {})
+      if (!keys.length) {
+        // 纯提示词子Agent：编排工具补注入（已注入则跳过——register 重名会抛错）
+        if (!reg.resolve("agent_list")) {
+          reg.register(agentListTool)
+          reg.register(agentLoadTool)
+          reg.register(agentRunTool)
+        }
+        continue
+      }
+      if (keys.some((k) => reg.resolve(`${n}_${k}`))) continue
+      reg.registerSubAgentTools(n, def.tools ?? {}, def.requiresApproval)
+    }
+  }
+
+  /** 子Agent 提示词段落（职责分隔头 + 项目注记 + 静态提示词 + 项目 AGENTS.md）：runNewSession 预加载拼接
+   *  与运行中装载（路由自愈）共用。动态环境注记（项目根/预置项目清单/受限模式）置于职责分隔头之后、
+   *  静态提示词之前——配置信息前置，模型开工先读环境（目标项目与 project 参数取值），再读工作流。 */
+  private async buildAgentSection(def: SubAgentDef, user: string, env: Record<string, string>, sessionId: string): Promise<string> {
+    // 项目内置（特定项目绑定）：会话环境变量 {AGENT_NAME_UPPER}_PROJECT（如 CODE_PROJECT）指定子Agent 的项目根
+    const projectRoot = this.resolveSubAgentProject(user, env, def.name)
+    const presetProjects = this.presetProjectsFor(user, env, def.name)
+    const workNote = projectRoot ? `\n项目根: ${projectRoot}` : `\n工作目录: ${sessionPath(this.opts.config.gebaiHome, user, sessionId)}/tmp`
+    const presetNote = this.buildPresetNote(def.name, projectRoot, presetProjects)
+    const restrictNote = env.CODE_RESTRICT_PROJECTS === "true"
+      ? `\n受限模式（CODE_RESTRICT_PROJECTS=true）：仅允许操作预配置项目（${def.name} 的 ${def.name.toUpperCase()}_PROJECTS 清单，或 ${def.name.toUpperCase()}_PROJECT 绑定根），文件工具必须携带 project 参数，自由路径（path）不可用。`
+      : ""
+    return `### ${def.name}（${def.description}）\n${workNote}${presetNote}${restrictNote}${def.systemPrompt}${await this.loadProjectAgentsMd(projectRoot)}`
+  }
+
+  /** 新会话循环内的装载（路由自愈）：注册进本次运行注册表 + 提示词段落插入临时 messages 系统前置段 +
+   *  预置项目并入 ctx.projects 引用数组——不写全局注册表、不落盘父会话记录（新会话执行隔离语义）。 */
+  private async loadAgentIntoRun(
+    reg: ToolRegistry,
+    agent: string,
+    messages: MessageLike[],
+    user: string,
+    env: Record<string, string>,
+    sessionId: string,
+    projects?: PresetProject[],
+  ): Promise<void> {
+    const def = this.opts.subAgents.def(agent)
+    if (!def) return
+    this.registerIntoRegistry(reg, agent)
+    let i = 0
+    while (i < messages.length && messages[i].role === "system") i++
+    messages.splice(i, 0, { role: "system", content: await this.buildAgentSection(def, user, env, sessionId) })
+    if (projects) {
+      const seen = new Set(projects.map((p) => p.name))
+      for (const p of this.presetProjectsFor(user, env, agent)) {
+        if (!seen.has(p.name)) {
+          seen.add(p.name)
+          projects.push(p)
+        }
+      }
     }
   }
 
@@ -1838,9 +1953,21 @@ export class AgentEngine {
             await persistTool(tc, `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`)
             continue
           }
-          const rt = registry.resolve(tc.name)
+          let rt = registry.resolve(tc.name)
+          let autoLoaded = ""
           if (!rt) {
-            await persistTool(tc, `未知工具: ${tc.name}`)
+            // 路由自愈（DESIGN「子Agent 路由」）：模型直接调用了未装载子Agent 的 {agent}_* 工具——
+            // 按 agent_load 同路径自动装载（注册工具 + 提示词注入会话记录与当前上下文）后重解析执行，
+            // 一次可恢复的调用不再以「未知工具」失败；仍不可解析（拼错工具名等）给出该子Agent 可用工具清单
+            const agent = this.subAgentForToolName(tc.name)
+            if (agent) {
+              await ctx.loadSubAgent(agent).catch(() => {})
+              rt = registry.resolve(tc.name)
+              if (rt) autoLoaded = agent
+            }
+          }
+          if (!rt) {
+            await persistTool(tc, this.unknownToolMsg(tc.name))
             continue
           }
           if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {
@@ -1897,7 +2024,7 @@ export class AgentEngine {
           const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
             ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
             : result
-          await persistTool(tc, safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun })
+          await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun })
           this.publish(sessionId, "event.tool.result", {
             name: tc.name,
             toolCallId: tc.id,
@@ -2070,24 +2197,12 @@ export class AgentEngine {
     const seen = new Set<string>()
     let baseProjectRoot: string | undefined
     for (const def of defs) {
-      // 项目内置（特定项目绑定）：会话环境变量 {AGENT_NAME_UPPER}_PROJECT
-      // （如 CODE_PROJECT / SELF_OPTIMIZE_PROJECT）指定子Agent 的项目根
+      // 项目内置（特定项目绑定）：会话环境变量 {AGENT_NAME_UPPER}_PROJECT（如 CODE_PROJECT）指定子Agent 的项目根
       // —— 工作目录与路径解析以项目根为基准，系统提示词注入项目路径
-      const projectRoot = this.resolveSubAgentProject(user, env, def.name)
-      baseProjectRoot ??= projectRoot
-      const presetProjects = this.presetProjectsFor(user, env, def.name)
-      const workNote = projectRoot ? `\n项目根: ${projectRoot}` : `\n工作目录: ${sessionPath(this.opts.config.gebaiHome, user, sessionId)}/tmp`
-      // 预置项目清单注入子Agent 系统提示词：文件工具可用 project 参数（项目名）切换目标项目
-      const presetNote = this.buildPresetNote(def.name, projectRoot, presetProjects)
-      // 受限模式（CODE_RESTRICT_PROJECTS=true）：仅允许操作预配置项目（CODE_PROJECTS 清单），禁止自由路径
-      const restrictNote = env.CODE_RESTRICT_PROJECTS === "true"
-        ? `\n受限模式（CODE_RESTRICT_PROJECTS=true）：仅允许操作预配置项目（${def.name} 的 ${def.name.toUpperCase()}_PROJECTS 清单，或 ${def.name.toUpperCase()}_PROJECT 绑定根），文件工具必须携带 project 参数，自由路径（path）不可用。`
-        : ""
-      // 动态环境注记（项目根/预置项目清单/受限模式）置于职责分隔头之后、静态提示词之前——
-      // 配置信息前置，模型开工先读环境（目标项目与 project 参数取值），再读工作流
-      systemParts.push(`### ${def.name}（${def.description}）\n${workNote}${presetNote}${restrictNote}${def.systemPrompt}${await this.loadProjectAgentsMd(projectRoot)}`)
+      baseProjectRoot ??= this.resolveSubAgentProject(user, env, def.name)
+      systemParts.push(await this.buildAgentSection(def, user, env, sessionId))
       // 预置项目全量合并（同名去重）：多 Agent 预加载时 project 参数路由均可用
-      for (const p of presetProjects) {
+      for (const p of this.presetProjectsFor(user, env, def.name)) {
         if (!seen.has(p.name)) {
           seen.add(p.name)
           mergedPresets.push(p)
@@ -2219,7 +2334,7 @@ export class AgentEngine {
     // 会话上下文注入：messages 透传 buildContext（js 脚本工具 ctx.messages 快照源）；
     // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄主会话）；
     // 安全模式拒绝（与主会话 registerDynamicTool 同规则，js 工具已拦截，此为纵深防御）
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) } }, depth)
+    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, loadIntoRegistry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) } }, depth)
     // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）
     const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
@@ -2285,9 +2400,20 @@ export class AgentEngine {
           messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
-        const rt = reg.resolve(tc.name)
+        let rt = reg.resolve(tc.name)
+        let autoLoaded = ""
         if (!rt) {
-          const errMsg = `未知工具: ${tc.name}`
+          // 路由自愈（与主循环一致，DESIGN「子Agent 路由」）：新会话内的装载走本运行注册表 + 临时 messages
+          // 插段（loadAgentIntoRun），不写全局注册表/父会话记录（新会话执行隔离语义）
+          const agent = this.subAgentForToolName(tc.name)
+          if (agent) {
+            await this.loadAgentIntoRun(reg, agent, messages, user, env, sessionId, ctxOpts?.projects).catch(() => {})
+            rt = reg.resolve(tc.name)
+            if (rt) autoLoaded = agent
+          }
+        }
+        if (!rt) {
+          const errMsg = this.unknownToolMsg(tc.name)
           await pushArchive({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           continue
@@ -2344,8 +2470,9 @@ export class AgentEngine {
         // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
         // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
         const nested = safe.sessionRun ? { sessionRun: safe.sessionRun } : {}
-        await pushArchive({ role: "tool", content: safe.output, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
-        messages.push({ role: "tool", content: safe.output, toolCallId: tc.id, name: tc.name, ...nested })
+        const withNote = autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入本次执行、提示词已注入上下文）\n${safe.output}` : safe.output
+        await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
+        messages.push({ role: "tool", content: withNote, toolCallId: tc.id, name: tc.name, ...nested })
         this.publish(sessionId, "event.tool.result", {
           name: tc.name,
           toolCallId: tc.id,
