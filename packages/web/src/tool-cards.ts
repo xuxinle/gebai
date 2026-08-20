@@ -214,7 +214,8 @@ function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["
 }
 
 /** 参数区渲染：按服务端 card 声明——"none" 不展示；"code" 渲染 codeField 为代码块；"edits" 渲染 codeField 数组为旧/新对比块
- *  （其余参数键值行/JSON 附注）；"kv" 强制键值行；"json" 强制完整 JSON 高亮（不省略标题参数）；缺省自适应（扁平标量→键值行，嵌套→JSON 高亮）。
+ *  （其余参数键值行/JSON 附注；edit 工具无声明时按参数形态内建兜底同样渲染对比块）；"kv" 强制键值行；"json" 强制完整 JSON 高亮（不省略标题参数）；
+ *  缺省自适应（扁平标量→键值行，嵌套→JSON 高亮）。
  *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长未入标题的标题参数降级为参数气泡（键值行全文展示）；
  *  超长参数自动折叠。返回 null 表示无参数区。 */
 function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["card"]>): HTMLElement | null {
@@ -235,16 +236,24 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
       wrap.appendChild(codeBlock(meta.codeLang ?? "", codeText))
       const note = restArgsNote(obj, meta, titleInHead)
       if (note) wrap.appendChild(note)
-      return wrap
+      return foldArgsBlock(wrap, codeText.length)
     }
   }
-  if (meta?.args === "edits" && obj && meta.codeField) {
-    const list = obj[meta.codeField]
+  // edits 形态内建兜底：edit 工具 card 声明不可用（工具清单拉取失败/旧服务端未声明）时
+  // 按参数形态识别渲染对比块，长修改同样先渲染后折叠，不回退直显 JSON
+  const editsField = meta?.args === "edits" ? meta.codeField : !meta && shortToolName(name) === "edit" ? "edits" : undefined
+  if (obj && editsField) {
+    const list = obj[editsField]
     if (Array.isArray(list) && list.length && list.every(isEditPair)) {
       const wrap = el("div")
       wrap.appendChild(editsArgsBlock(list))
-      const note = restArgsNote(obj, meta, titleInHead)
-      if (note) wrap.appendChild(note)
+      if (meta) {
+        const note = restArgsNote(obj, meta, titleInHead)
+        if (note) wrap.appendChild(note)
+      } else if (Object.keys(obj).some((k) => k !== editsField)) {
+        // 兜底无声明：其余参数（path 等）键值行展示
+        wrap.appendChild(kvArgsBlock(Object.fromEntries(Object.entries(obj).filter(([k]) => k !== editsField))))
+      }
       const chars = list.reduce((n, e) => n + e.oldString.length + e.newString.length, 0)
       return foldArgsBlock(wrap, chars)
     }
@@ -504,11 +513,13 @@ export function toolCard(msg: Message): HTMLElement {
     const cur = getCurrentSession()
     return todoBubble(todoState.get(cur?.id ?? "") ?? [])
   }
-  // ask_user 工具：渲染选择卡片（prompt + 选项按钮，支持复杂选项与多选）
+  // ask_user 工具：带结果（content）渲染问答记录卡（问题 + 选项展示态 + 回答），
+  // 无结果的裸调用（异常中断）回退可交互选择卡兜底
   if (short === "ask_user") {
     const args = msg.arguments ?? {}
     const prompt = String(args.prompt ?? "")
     const options = Array.isArray(args.options) ? (args.options as Array<string | Record<string, unknown>>) : []
+    if (msg.content) return askUserBubble(prompt, options, args.multi === true, msg.content)
     return choiceBubble(prompt, options, undefined, undefined, args.multi === true)
   }
   // plan 工具：渲染计划卡片（标题 + 计划 Markdown 全文，展示态；历史消息带审批结果时头部更新为结果态并附结果文本）
@@ -548,11 +559,10 @@ export function toolBubbleFor(msg: Message, content: string): HTMLElement {
   return msg.name ? toolCard(msg) : toolBubble(content)
 }
 
-/**
- * ask_user 消息流问答卡片（展示态，不可交互）：问题 + 选项静态展示（禁用态按钮），
- * 结果到达后由 appendToolResult 更新头部并追加回答——交互作答由审批容器的选择卡片承载。
- */
-export function askUserBubble(prompt: string, options: Array<string | Record<string, unknown>>, multi: boolean): HTMLElement {
+/** ask_user 消息流问答卡片（展示态，不可交互）：问题 + 选项静态展示（禁用态按钮），
+ *  带 answer（结果输出）时为问答记录卡：头部按结果文案更新并追加回答块；
+ *  等待作答的交互由审批容器的选择卡片承载，消息流不再重复渲染问题预览。 */
+export function askUserBubble(prompt: string, options: Array<string | Record<string, unknown>>, multi: boolean, answer?: string): HTMLElement {
   const bubble = el("div", "bubble")
   const head = el("div", "tool-head", multi ? "🧭 请选择（可多选）" : "🧭 请选择")
   bubble.appendChild(head)
@@ -561,11 +571,28 @@ export function askUserBubble(prompt: string, options: Array<string | Record<str
   for (const o of normalizeChoiceOpts(options)) {
     const btn = el("button", "choice-opt", o.title)
     btn.disabled = true
-    btn.title = "请在上方选择卡片作答"
+    btn.title = "历史问答记录"
     opts.appendChild(btn)
   }
   bubble.appendChild(opts)
+  if (answer) {
+    head.textContent = askUserResultHead(answer)
+    bubble.appendChild(choiceAnswerBlock(answer))
+  }
   return bubble
+}
+
+/** ask_user 结果头部状态（按输出前缀识别，与服务端 ask_user 输出文案一致）。 */
+export function askUserResultHead(output: string): string {
+  if (output.startsWith("用户选择")) return "✓ 用户回答"
+  if (output.startsWith("用户拒绝")) return "✕ 用户拒绝"
+  if (output.startsWith("用户未在时限内")) return "⏱ 选择超时"
+  return "✓ 用户回答"
+}
+
+/** ask_user 回答结果块（问答卡片完成态追加，与问题展示区分）。 */
+export function choiceAnswerBlock(output: string): HTMLElement {
+  return el("div", "choice-answer", output)
 }
 
 /** 组装计划展示 Markdown：与服务端 plan 工具同一规则（content 优先，否则 title + steps 勾选清单，双端同构）。 */

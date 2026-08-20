@@ -19,7 +19,7 @@ import {
   type SessionRunState,
 } from "./state"
 import { blockText, highlightedCode, markdownBlock } from "./markdown"
-import { askUserBubble, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
+import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
@@ -630,30 +630,27 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
   if (entry) {
     if (entry.kind === "todo") {
       // todo 工具：占位卡替换为最新待办清单
-      const bubble = entry.wrapper.querySelector(".bubble")
+      const bubble = entry.wrapper?.querySelector(".bubble")
       if (bubble) bubble.replaceWith(todoBubble(todoState.get(entry.session) ?? []))
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
     }
     if (entry.kind === "ask_user") {
-      // ask_user：问答卡片更新头部为完成态并追加回答（交互作答由审批容器选择卡片承载）
-      const head = entry.wrapper.querySelector(".tool-head")
-      if (head) head.textContent = "✓ 用户回答"
-      const bubble = entry.wrapper.querySelector(".bubble")
-      if (bubble && output) bubble.appendChild(choiceAnswerBlock(output))
+      // ask_user：结果到达时消息流落问答记录卡（等待期交互由审批容器选择卡片承载，消息流不重复预览问题）
+      appendAskUserRecord(entry.askArgs ?? { prompt: "", options: [] }, output, runId ? parent : undefined)
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
     }
     if (entry.kind === "plan") {
       // plan：计划卡片更新头部为审批结果并追加结果文本（审批由审批容器选择卡片承载）
-      const head = entry.wrapper.querySelector(".tool-head")
+      const head = entry.wrapper?.querySelector(".tool-head")
       if (head) head.textContent = planResultHead(output)
-      const bubble = entry.wrapper.querySelector(".bubble")
+      const bubble = entry.wrapper?.querySelector(".bubble")
       if (bubble && output) bubble.appendChild(choiceAnswerBlock(output))
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
     }
-    const head = entry.wrapper.querySelector(".tool-head")
+    const head = entry.wrapper?.querySelector(".tool-head")
     if (head) {
       // 完成态：重建结构化头部（✓ 图标，保留标题后缀——titleParams 声明的参数不因完成而丢失）
       let argsObj: Record<string, unknown> | null = null
@@ -666,13 +663,13 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
       }
       head.replaceWith(toolHead("done", name, argsObj))
     }
-    const bubble = entry.wrapper.querySelector(".bubble")
+    const bubble = entry.wrapper?.querySelector(".bubble")
     if (bubble && output) {
       // agent_run：最终返回为 markdown 输出，直接渲染（与历史 toolCard 一致）
       if (shortToolName(name) === "agent_run") bubble.appendChild(markdownBlock(output))
       else bubble.appendChild(toolOutput(output))
     }
-    if (blocks?.length) renderBlocks(entry.body, blocks, entry.session)
+    if (blocks?.length && entry.body) renderBlocks(entry.body, blocks, entry.session)
     pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
     return
   }
@@ -680,20 +677,16 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
   appendMsg({ id: uuid(), role: "tool", content: `✓ ${displayToolName(name)}${output ? `\n${output}` : ""}`, blocks, createdAt: Date.now() }, false, parent)
 }
 
-/** ask_user 回答文本块（问答卡片完成态追加，与问题展示区分）。 */
-function choiceAnswerBlock(output: string): HTMLElement {
-  return el("div", "choice-answer", output)
-}
-
-/** ask_user 问答输出卡片（消息流内展示问答交换，像 draw 内容块一样开启新输出卡片；
- *  展示态不可交互，作答由审批容器选择卡片承载；结果到达后由 appendToolResult 更新）。 */
-export function appendAskUserCard(prompt: string, options: Array<string | Record<string, unknown>>, multi: boolean, parent?: HTMLElement): HTMLElement {
+/** ask_user 问答记录卡（结果到达 appendToolResult / 历史回放 toolCard 渲染）：问题 + 选项展示态 + 回答结果，
+ *  像内容块一样在消息流开启新输出卡片；等待作答期间消息流不渲染问题预览（交互作答由审批容器选择卡片承载，
+ *  与展示卡上下堆叠会被视为重复卡片）；parent 指定容器内渲染目标（子Agent 过程）。 */
+export function appendAskUserRecord(args: { prompt: string; options: Array<string | Record<string, unknown>>; multi?: boolean }, output: string, parent?: HTMLElement): HTMLElement {
   const wrapper = el("div", "msg tool")
   const body = el("div", "msg-body")
   const meta = el("div", "msg-meta")
   meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))
   body.appendChild(meta)
-  body.appendChild(askUserBubble(prompt, options, multi))
+  body.appendChild(askUserBubble(args.prompt, args.options, args.multi === true, output))
   wrapper.appendChild(body)
   if (parent) parent.appendChild(wrapper)
   else {
@@ -748,7 +741,8 @@ export function appendTodoCard(sessionId: string, parent?: HTMLElement): HTMLEle
 }
 
 /** 选择卡片（event.choice.request 实时渲染，绑定 choiceId 提交决策；支持复杂选项与多选）。
- * 渲染到审批容器（独立于消息流）：切走隐藏、切回恢复，不随消息重载丢失；任务结束随审批一并清理。 */
+ * 渲染到审批容器（独立于消息流）：切走隐藏、切回恢复，不随消息重载丢失；任务结束随审批一并清理。
+ * 同一 choiceId 重复推送（断线重连事件重放）时替换旧卡，避免选择卡片重复堆叠。 */
 export function renderChoiceCard(
   prompt: string,
   options: Array<string | Record<string, unknown>>,
@@ -756,9 +750,13 @@ export function renderChoiceCard(
   sessionId: string,
   multi = false,
 ) {
+  for (const old of approvalsEl.querySelectorAll<HTMLElement>(".interaction-card")) {
+    if (old.dataset.reqId === choiceId) old.remove()
+  }
   const wrapper = el("div", "msg tool interaction-card")
   wrapper.dataset.session = sessionId
   wrapper.dataset.kind = "choice"
+  wrapper.dataset.reqId = choiceId
   const body = el("div", "msg-body")
   const meta = el("div", "msg-meta")
   meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))
@@ -774,11 +772,16 @@ export function renderChoiceCard(
   if (prompt.startsWith("请审核计划") && getCurrentSession()?.id === sessionId) lockToBottom()
 }
 
-/** 环境变量请求卡片（event.env.request 实时渲染，绑定 envId 提交用户填值）。渲染到审批容器（同选择卡片）。 */
+/** 环境变量请求卡片（event.env.request 实时渲染，绑定 envId 提交用户填值）。渲染到审批容器（同选择卡片，
+ *  同一 envId 重复推送替换旧卡防堆叠）。 */
 export function renderEnvRequestCard(name: string, description: string, secret: boolean, envId: string, sessionId: string) {
+  for (const old of approvalsEl.querySelectorAll<HTMLElement>(".interaction-card")) {
+    if (old.dataset.reqId === envId) old.remove()
+  }
   const wrapper = el("div", "msg tool interaction-card")
   wrapper.dataset.session = sessionId
   wrapper.dataset.kind = "env"
+  wrapper.dataset.reqId = envId
   const body = el("div", "msg-body")
   const meta = el("div", "msg-meta")
   meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))

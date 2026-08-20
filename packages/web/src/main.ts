@@ -20,7 +20,6 @@ import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, load
 import { addApproval, clearApprovals } from "./approvals"
 import {
   addMetaActions,
-  appendAskUserCard,
   appendCompactNotice,
   appendMsg,
   appendPlanCard,
@@ -167,9 +166,9 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
   const runId = ev.sessionRunId
   const short = shortToolName(String(ev.name ?? ""))
   const argsObj = ev.arguments as Record<string, unknown> | undefined
-  // ask_user：像 draw 一样中断当前文本段并在消息流中开启问答输出卡片（展示态，
-  // 交互作答由 event.choice.request 选择卡片承载）；card.args="block" 工具（draw/diff/render_html）：
-  // 内容块直接渲染，不显示工具卡片
+  // ask_user：等待期只在审批容器渲染交互选择卡片（event.choice.request 承载），消息流不重复渲染
+  // 问题预览卡（上下两张同款卡片会被视为重复）；结果到达时 appendToolResult 落问答记录卡并封段当前文本；
+  // card.args="block" 工具（draw/diff/render_html）：内容块直接渲染，不显示工具卡片
   if (short === "ask_user") {
     const args = (argsObj ?? {}) as { prompt?: unknown; options?: unknown; multi?: unknown }
     const prompt = String(args.prompt ?? "")
@@ -177,21 +176,18 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
     const multi = args.multi === true
     if (!prompt && !options.length) return
     noteIncoming()
-    // 新会话执行过程内的调用：渲染进该 run 的折叠容器
+    const askArgs = { prompt, options, multi }
+    // 新会话执行过程内的调用：记录卡渲染进该 run 的折叠容器
     if (runId) {
       const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
       if (!sub?.container.isConnected) return
-      sealSessionSegment(sub) // 容器内文本分段：问答卡片处截断当前文本段
-      const wrapper = appendAskUserCard(prompt, options, multi, sub.body)
-      const body = wrapper.querySelector<HTMLElement>(".msg-body")
-      if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "ask_user", runId })
+      sealSessionSegment(sub) // 容器内文本分段：问答记录卡处截断当前文本段
+      pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_user", runId, askArgs })
       scrollSessionSticky(sub.body)
       return
     }
-    sealSegment(ev.sessionId) // 文本分段：问答卡片处截断当前文本段
-    const wrapper = appendAskUserCard(prompt, options, multi)
-    const body = wrapper.querySelector<HTMLElement>(".msg-body")
-    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "ask_user" })
+    sealSegment(ev.sessionId) // 文本分段：问答记录卡处截断当前文本段
+    pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { session: ev.sessionId, kind: "ask_user", askArgs })
     return
   }
   // plan：像 ask_user 一样在消息流中开启计划卡片（展示态，交互作答由审批容器选择卡片承载）
