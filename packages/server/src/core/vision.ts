@@ -65,7 +65,8 @@ export function makeVisionTool(deps: { vision: (env?: Record<string, string>) =>
         return { output: `vision: 图片过大（${(buf.byteLength / 1024 / 1024).toFixed(1)}MB，上限 8MB），请压缩后再试` }
       }
       const base64 = Buffer.from(buf).toString("base64")
-      const text = await collectChatText(provider.chat([{ role: "user", content: imageMessageBlocks(target, mime, base64) }]))
+      // 取消信号透传（用户停止任务后中止上游请求，不继续消耗配额）
+      const text = await collectChatText(provider.chat([{ role: "user", content: imageMessageBlocks(target, mime, base64) }], { signal: ctx.signal }))
       const truncated = await truncate(text, "vision", ctx)
       return { ...truncated, blocks: [{ type: "image", path: image, mime }] }
     },

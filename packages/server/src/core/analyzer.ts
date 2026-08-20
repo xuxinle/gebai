@@ -176,6 +176,8 @@ export async function analyzeCode(code: string, ext: string, displayPath: string
   const tree = parser.parse(code)!
   const root = tree.rootNode
   const entries = extractOutline(root)
+  // Tree/Node 为 wasm 原生内存对象（不随 GC 自动回收）：用毕显式释放，防频繁分析的堆累积
+  tree.delete?.()
   if (!entries.length) return `[${ext}] ${displayPath} — 未发现可提取的顶层结构（${root.type} 根节点）。`
   const lines = [`[${ext}] ${displayPath} — ${entries.length} 个结构定义:`]
   for (const e of entries) {
@@ -229,11 +231,15 @@ export async function searchSymbols(
     parsed++
     const tree = parser.parse(content)
     if (!tree) continue
-    for (const e of extractOutline(tree.rootNode)) {
-      if (!e.name || hits.length >= SYMBOL_MAX_MATCHES) break
-      if (kind && !e.type.includes(kind)) continue
-      if (e.name !== symbol && !e.name.includes(symbol)) continue
-      hits.push({ path: f.path, line: e.start, type: e.type, name: e.name })
+    try {
+      for (const e of extractOutline(tree.rootNode)) {
+        if (!e.name || hits.length >= SYMBOL_MAX_MATCHES) break
+        if (kind && !e.type.includes(kind)) continue
+        if (e.name !== symbol && !e.name.includes(symbol)) continue
+        hits.push({ path: f.path, line: e.start, type: e.type, name: e.name })
+      }
+    } finally {
+      tree.delete?.() // wasm 原生内存显式释放（同 analyze）
     }
   }
   // 精确匹配优先，其余按路径/行号稳定排序

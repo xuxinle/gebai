@@ -57,6 +57,8 @@ export class FeishuConn {
   private ws: WsLike | null = null
   private serviceId = 0
   private pingTimer: ReturnType<typeof setTimeout> | null = null
+  /** 最近 pong 时间（静默死链检测，见 startPing）。 */
+  private lastPongAt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private stopped = false
   private assembler: FrameAssembler
@@ -176,8 +178,16 @@ export class FeishuConn {
 
   private startPing(): void {
     if (this.pingTimer) clearInterval(this.pingTimer)
+    this.lastPongAt = Date.now()
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === 1) {
+        // pong 超时检测：NAT 超时/网络切换/半开 TCP 下 onclose 不触发、ping 写入死 socket 不报错，
+        // 连接实际已死却"在线"——连续 pingInterval*3 无 pong 主动断开走重连
+        if (Date.now() - this.lastPongAt > this.cfg.pingInterval * 3) {
+          this.log("pong timeout, forcing reconnect")
+          try { this.ws.close() } catch { /* 已死 */ }
+          return
+        }
         try {
           this.ws.send(buildPingFrame(this.serviceId))
         } catch {
@@ -211,9 +221,12 @@ export class FeishuConn {
   private dispatch(buf: Uint8Array): void {
     const info = parseDataFrame(buf)
     if (info.frame.method === FRAME_CONTROL) {
-      if (info.type === "pong" && info.payload.length > 0) {
-        const conf = parseClientConfig(info.payload)
-        if (conf) this.applyConfig(conf)
+      if (info.type === "pong") {
+        this.lastPongAt = Date.now()
+        if (info.payload.length > 0) {
+          const conf = parseClientConfig(info.payload)
+          if (conf) this.applyConfig(conf)
+        }
       }
       return
     }
@@ -303,7 +316,9 @@ export class FeishuConn {
       if (this.stopped) return
       const count = this.cfg.reconnectCount
       if (count >= 0 && attempt + 1 >= count) {
-        this.log("reconnect limit reached")
+        // 达到服务端配置上限后不永久停摆（进程仍"健康"存活、bot 失联无告警）：降频续试（60s 封顶退避）
+        this.log("reconnect limit reached, retrying at reduced cadence")
+        this.scheduleReconnect(60_000, 0)
         return
       }
       this.scheduleReconnect(this.cfg.reconnectInterval, attempt + 1)

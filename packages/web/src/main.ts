@@ -115,6 +115,9 @@ function touchRunActivity(sessionId: string): void {
 function onApprovalRequest(ev: { sessionId: string; toolCallId: string; tool: string }) {
   // 审批绑定来源会话：卡片仅随当前会话显示（切走隐藏、切回恢复）；当前会话有审批时锁定输入
   addApproval(ev.sessionId, ev.toolCallId, ev.tool)
+  // 审批等待同样刷新活跃时间：服务端审批超时 5 分钟 > 前端空闲看门狗 150s，
+  // 不刷新会在用户思考超 150s 时被看门狗误杀任务（选择/填值/画图/捕获均已刷新，此前漏了审批）
+  touchRunActivity(ev.sessionId)
 }
 function onTodoUpdate(ev: { sessionId: string; todos: TodoItem[] }) {
   // 待办状态更新（任意会话，后台也记录）
@@ -250,7 +253,12 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
 }
 function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string }) {
   const cur = getCurrentSession()
-  if (ev.sessionId !== cur?.id) return
+  if (ev.sessionId !== cur?.id) {
+    // 切走会话时结果不渲染，但配对必须清理：残留会让切回时 loadMessages 按「未完成配对」
+    // 重建等待卡，与历史渲染的已完成工具卡重复且永不更新
+    if (ev.toolCallId) pendingTools.delete(pendingToolsKey(ev.sessionId, ev.toolCallId, ev.sessionRunId))
+    return
+  }
   const name = String(ev.name ?? "tool")
   noteIncoming()
   const blocks = ev.blocks as ContentBlock[] | undefined
@@ -304,8 +312,17 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     const runId = chunk.sessionRunId
     if (runId) {
       // 新会话执行过程文本：渲染进该 run 的折叠容器（执行中展开，与主回复同流显示）
-      const sub = run.sessionRuns?.get(runId)
-      if (!sub) return // 容器从未创建（切走期间未渲染）：由 loadMessages 兜底
+      let sub = run.sessionRuns?.get(runId)
+      if (!sub) {
+        // 容器缺失（重连全量重同步清空 sessionRuns 后服务端不重推 start——事件已在断线前投递）：
+        // 惰性重建容器兜底，否则该 run 后续输出静默丢弃、容器永久停留旧状态
+        run.sessionRuns ??= new Map()
+        const box = sessionRunBox({ runId, agents: [], input: "" })
+        sub = { runId, agents: [], input: "", container: box.container, body: box.body, outputEl: box.outputEl, acc: "", el: null, messageId: "", reasoningAcc: "", reasoningEl: null }
+        run.sessionRuns.set(runId, sub)
+        scrollIfSticky()
+        refreshJumpBottom()
+      }
       // 切走/重载中（容器脱离 DOM）：先累积文本（切回由 loadMessages 恢复渲染），与主循环累积语义一致
       if (!sub.container.isConnected) {
         sub.acc += chunk.text ?? ""

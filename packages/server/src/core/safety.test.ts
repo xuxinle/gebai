@@ -152,7 +152,11 @@ describe("js 只读静态扫描", () => {
   test("动态加载与字符串代码执行通道拒绝", () => {
     expect(scanJsReadOnly(`await import("node:fs")`)).toContain("import")
     expect(scanJsReadOnly(`const fs = require("fs")`)).toContain("require")
-    expect(scanJsReadOnly(`const r = import.meta.require("fs")`)).toContain("import.meta.require")
+    // 词元级拒绝：别名/括号访问/静态 import 同样命中（import.meta.require 由 import 词元规则先行命中）
+    expect(scanJsReadOnly(`const r = import.meta.require("fs")`)).toContain("import")
+    expect(scanJsReadOnly(`const rq = require; rq("node:fs")`)).toContain("require")
+    expect(scanJsReadOnly(`import fs from "node:fs"; fs.writeFileSync("x", "")`)).toContain("import")
+    expect(scanJsReadOnly(`const bf = Bun["fetch"]; return typeof bf`)).toContain("Bun")
     expect(scanJsReadOnly(`eval("code")`)).toContain("eval")
     expect(scanJsReadOnly(`new Function("return 1")`)).toContain("Function")
     expect(scanJsReadOnly(`process.getBuiltinModule("fs")`)).toContain("getBuiltinModule")

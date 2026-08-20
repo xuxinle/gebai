@@ -891,7 +891,10 @@ console.log("defined ok")`,
     events.subscribe((ev) => {
       if (ev.type === "event.tool.alive") alive.push(String((ev.payload as { name: string }).name))
     })
-    // 阻塞 200ms 的 sh 命令（approval:false 免审批），跨多个 30ms 心跳周期
+    // 阻塞 200ms 的 sh 命令（node -e 非免审白名单 → 审批等待 → 测试侧自动批准），跨多个 30ms 心跳周期
+    events.subscribe((ev) => {
+      if (ev.type === "event.approval.request") void engine.decideApproval(session.id, String(ev.payload.toolCallId), true)
+    })
     provider.toolName = "sh"
     provider.toolArgs = { command: `node -e "setTimeout(()=>{},200)"`, approval: false }
     await engine.run(session.id, "default", "run slow tool")

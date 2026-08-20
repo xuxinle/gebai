@@ -97,6 +97,16 @@ const GIT_READ_SUBCOMMANDS = new Set([
   "status", "log", "diff", "show", "blame", "rev-parse", "ls-files", "describe", "shortlog", "reflog", "grep", "cat-file",
 ])
 
+/** approval:false 免审放行判定用的子命令白名单（见 shApprovalFreeAllowed）。 */
+const APPROVAL_FREE_ANY_ARGS = new Set([
+  "pytest", "py.test", "vitest", "jest", "mocha", "karma",
+  "tsc", "eslint", "biome", "stylelint", "ruff", "mypy", "flake8", "prettier",
+])
+/** 需要子命令联判的命令：git 仅读子命令；包管理器 test / run <脚本名>；语言工具链 test 子命令。 */
+const APPROVAL_FREE_GIT_READ = GIT_READ_SUBCOMMANDS
+const APPROVAL_FREE_PKG_MGR = new Set(["npm", "pnpm", "yarn", "bun"])
+const APPROVAL_FREE_TEST_SUBCMD = new Set(["go", "cargo", "mvn", "gradle"])
+
 /** find 的执行/写动作参数（出现即拒绝）。 */
 const FIND_WRITE_FLAGS = /^-(exec|execdir|delete|fprint|fprintf|fls)/
 
@@ -392,26 +402,71 @@ export function stripApprovalFlags(v: unknown): unknown {
   return v
 }
 
+/**
+ * `approval:false` 免审放行判定（审批门免审例外的强制口径，防提示词注入借免审标记执行任意命令）：
+ * 模型可自行传参声明免审，但仅对**只读/测试验证类**命令生效——
+ * 1) validateShCommandSafeMode 全量解析通过（只读白名单）→ 放行；
+ * 2) 测试/静态检查/包管理器 test 子命令 → 放行（`run` 仅脚本名形态，禁文件路径直跑）；
+ * 3) 其余（含命令替换/反引号/输出重定向/无法识别结构）一律不放行（fail-closed，仍走审批）。
+ */
+export function shApprovalFreeAllowed(cmd: string, ctx: { sandboxed?: boolean; home: string; user: string; workdir?: string }): boolean {
+  if (!cmd.trim()) return false
+  if (validateShCommandSafeMode(cmd, ctx) === null) return true
+  if (/`|\$\(/.test(cmd)) return false
+  // 轻量分段（&& || ; | 换行）：引号内分隔符会被多切一段——多切出的段同样要过白名单，方向安全（从严）
+  for (const segRaw of cmd.split(/(?:&&|\|\||;|\||\n)/)) {
+    const seg = segRaw.trim()
+    if (!seg) continue
+    if (seg.includes(">")) return false // 输出重定向：写动作，免审不放行
+    if (validateShCommandSafeMode(seg, ctx) === null) continue // 该段本身只读（如管道尾的 head/grep）
+    const tokens = seg.split(/\s+/).filter(Boolean)
+    let i = 0
+    while (i < tokens.length && (tokens[i] === "time" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i++
+    const name = normalizeCmdName(tokens[i] ?? "")
+    const sub = tokens[i + 1] ?? ""
+    if (APPROVAL_FREE_ANY_ARGS.has(name)) continue
+    if (name === "git") {
+      if (APPROVAL_FREE_GIT_READ.has(sub)) continue
+      return false
+    }
+    if (APPROVAL_FREE_PKG_MGR.has(name)) {
+      if (sub === "test") continue
+      if (sub === "run" && tokens[i + 2] && /^[A-Za-z0-9:_-]+$/.test(tokens[i + 2])) continue // run <脚本名>（package.json scripts；带路径/扩展名的直跑不放行）
+      if (name !== "bun" && sub === "ci") continue
+      return false
+    }
+    if (APPROVAL_FREE_TEST_SUBCMD.has(name)) {
+      if (sub === "test") continue
+      return false
+    }
+    return false
+  }
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // js 只读静态扫描（安全模式）
 // ---------------------------------------------------------------------------
 
 /** 运行时 shim 无法可靠拦截的通道（动态模块加载拿到全新全局环境、字符串代码执行）：
- *  import.meta.require / process.getBuiltinModule / process.binding / Bun.fetch / Bun.sqlite 运行时也可拦
- *  （可覆写属性）或不可覆写（getter），前置扫描给出更早更清晰的错误。 */
+ *  按**词元级**拒绝而非调用形态——别名绕过（`const rq = require; rq(...)`）、括号访问（`Bun["fetch"]`）、
+ *  静态 import（提升先于 shim 执行）均只认 token 才能封死：
+ *  - `import`/`require` 任意出现即拒绝（安全模式无任何合法模块加载形态）；
+ *  - `Bun` 仅放行 `Bun.file` 只读通道（fetch/sqlite 为不可覆写 getter、Bun 全局本身 non-configurable，
+ *    运行时无法代理，扫描是唯一防线）；
+ *  - `getBuiltinModule` 词元拒绝（调用形态外的别名同样拿到未受控模块环境）。 */
 const JS_READONLY_DENY: Array<[RegExp, string]> = [
-  [/\bimport\s*\.\s*meta\s*\.\s*require\b/, "import.meta.require"],
-  [/\bBun\s*\.\s*(fetch|sqlite)\b/, "Bun.fetch/Bun.sqlite（不可覆写的网络/数据库入口）"],
-  [/\bimport\s*\(/, "动态 import()"],
-  [/\brequire\s*\(/, "require()"],
+  [/\bimport\b/, "import（静态/动态均屏蔽）"],
+  [/\brequire\b/, "require（含别名引用）"],
+  [/\bBun\b(?!\s*\.\s*file\b)/, "Bun.*（安全模式仅允许 Bun.file 只读访问；fetch/sqlite 等为不可覆写入口）"],
   [/\beval\s*\(/, "eval()"],
   [/\bFunction\s*\(/, "Function 构造器"],
-  [/process\s*\.\s*getBuiltinModule/, "process.getBuiltinModule"],
+  [/\bgetBuiltinModule\b/, "process.getBuiltinModule"],
   [/process\s*\.\s*binding/, "process.binding"],
 ]
 
 /** js 脚本安全模式只读预检：命中不可运行时拦截的通道返回拒绝消息，否则 null。
- *  运行时另有 shim 兜底（Bun 写/进程/网络 API 屏蔽）——静态扫描拦截的是绕过 shim 的源头。 */
+ *  运行时另有 shim 兜底（Bun 写/进程/网络 API 屏蔽 + require 模块级中和）——静态扫描拦截的是绕过 shim 的源头。 */
 export function scanJsReadOnly(code: string): string | null {
   for (const [re, what] of JS_READONLY_DENY) {
     if (re.test(code)) {

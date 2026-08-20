@@ -301,6 +301,18 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
     idleTimeout: 240,
     fetch: (req, srv) => {
       const url = new URL(req.url)
+      // 跨站来源防护（本地/桌面免登录形态）：WebSocket 不受同源策略约束，恶意网页可直接连
+      // ws://127.0.0.1:* 以 admin 身份建会话执行命令。浏览器发起的 WS 必带 Origin——
+      // 与请求 Host 不同源即拒绝升级；非浏览器客户端（无 Origin）不受影响。
+      const wsOrigin = req.headers.get("origin")
+      if (wsOrigin) {
+        const host = req.headers.get("host") ?? url.host
+        try {
+          if (new URL(wsOrigin).host !== host) return new Response("cross-origin ws rejected", { status: 403 })
+        } catch {
+          return new Response("invalid origin", { status: 403 })
+        }
+      }
       const wsPath = `${config.basePath === "/" ? "" : config.basePath}/ws`
       if (url.pathname === wsPath && srv.upgrade(req, { data: {} })) return
       // 开发热刷新通道（仅 --reload 模式注册）：页面经此接收 reload 广播

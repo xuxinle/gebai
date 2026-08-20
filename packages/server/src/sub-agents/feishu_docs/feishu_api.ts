@@ -139,19 +139,33 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     return json.tenant_access_token
   }
 
+  /** 会话级刷新单飞（refresh_token 单次有效：并发两个调用各自携带同一条 refresh_token 刷新，
+   *  其一成功轮换、另一条必失败——失败侧静默回退 tenant 身份，创建的资源归属应用而非用户且无提示）。 */
+  const refreshInFlight = new Map<string, Promise<UserTokenEntry | null>>()
+
   /** 用 refresh_token 换取新令牌并落盘（单次有效；失败返回 null 由调用方决定回退）。 */
-  async function refreshUserToken(ctx: ToolContext): Promise<UserTokenEntry | null> {
-    const entry = await loadUserToken(ctx)
-    if (!entry?.refreshToken) return null
-    try {
-      const { appId, appSecret } = readConfig(ctx)
-      const json = await exchangeOAuthToken(deps.fetchFn, { clientId: appId, clientSecret: appSecret, grantType: "refresh_token", refreshToken: entry.refreshToken })
-      const fresh = toUserTokenEntry(json, entry)
-      await saveUserToken(ctx, fresh)
-      return fresh
-    } catch {
-      return null
-    }
+  function refreshUserToken(ctx: ToolContext): Promise<UserTokenEntry | null> {
+    const inflight = refreshInFlight.get(ctx.sessionId)
+    if (inflight) return inflight
+    const p = (async () => {
+      try {
+        const entry = await loadUserToken(ctx)
+        if (!entry?.refreshToken) return null
+        try {
+          const { appId, appSecret } = readConfig(ctx)
+          const json = await exchangeOAuthToken(deps.fetchFn, { clientId: appId, clientSecret: appSecret, grantType: "refresh_token", refreshToken: entry.refreshToken })
+          const fresh = toUserTokenEntry(json, entry)
+          await saveUserToken(ctx, fresh)
+          return fresh
+        } catch {
+          return null
+        }
+      } finally {
+        refreshInFlight.delete(ctx.sessionId)
+      }
+    })()
+    refreshInFlight.set(ctx.sessionId, p)
+    return p
   }
 
   /** 获取会话可用的 user_access_token：未配置返回 null；临近过期自动刷新（refresh 不可用/失败也返回 null）。 */
@@ -166,6 +180,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
   class FeishuApiError extends Error {
     code = 0
     violations?: string[]
+    /** tenant token 失效重试标记（防循环重试）。 */
+    retryTenantOnce?: boolean
   }
 
   interface ApiOptions {
@@ -260,7 +276,24 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         }
       }
     }
-    return await attempt(await getTenantToken(ctx))
+    const tenantAttempt = async (): Promise<unknown> => {
+      const token = await getTenantToken(ctx)
+      try {
+        return await attempt(token)
+      } catch (err) {
+        // tenant token 远端已失效（提前吊销/时钟偏移，缓存仍按 expireAt 判活）：逐出缓存取新 token 重试一次，
+        // 否则最长约 2 小时所有调用持续失败（错误文案还承诺「将自动刷新重试」）
+        const fe = err as FeishuApiError
+        if ((fe.code === 99991661 || fe.code === 99991663) && typeof fe.retryTenantOnce === "undefined") {
+          fe.retryTenantOnce = true
+          const { appId } = readConfig(ctx)
+          deps.tokenCache.delete(appId)
+          return await attempt(await getTenantToken(ctx))
+        }
+        throw err
+      }
+    }
+    return await tenantAttempt()
   }
 
   /** JSON 字符串参数解析（兼容已解析对象）。 */
@@ -1087,7 +1120,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const form = new FormData()
       form.append("file_name", fileName)
       form.append("parent_type", "explorer")
-      form.append("parent_node", args.folder_token ? String(args.folder_token) : "")
+      // 缺省省略 parent_node（空串被飞书拒绝；描述称「缺省根目录」需先 root_folder_meta 取 token 传入）
+      if (args.folder_token) form.append("parent_node", String(args.folder_token))
       form.append("size", String(bytes.length))
       form.append("file", new Blob([bytes], { type: "application/octet-stream" }), fileName)
       const data = await api(ctx, "/open-apis/drive/v1/files/upload_all", { method: "POST", form })
@@ -1110,14 +1144,8 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const docId = String(args.document_id)
       const blockId = args.block_id ? String(args.block_id) : await rootBlockId(ctx, docId)
       const fileName = String(args.file_name ?? "image.png")
-      // 步骤 1：创建空 image 块（image:{} 不传 token，否则 1770001 invalid param）
-      const created = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children`, {
-        method: "POST",
-        body: { children: [{ block_type: BLOCK_TYPE.IMAGE, image: {} }] },
-      })) as { children?: Array<{ block_id?: string }> }
-      const imageBlockId = created.children?.[0]?.block_id
-      if (!imageBlockId) throw new Error("创建 image 块失败：响应缺少 block_id")
-      // 步骤 2：上传图片素材到该块（multipart；parent_type=docx_image 关联 image 块）
+      // 先读文件/校验，后创建块：原顺序（先建空块）在路径错误/base64 非法/超限时会在文档中
+      // 残留一个空 image 块（三步流程无回滚，脏数据需模型额外感知清理）
       let bytes: Uint8Array
       if (args.encoding === "base64") {
         try {
@@ -1131,6 +1159,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       if (!bytes.length) throw new Error("图片内容为空（文件不存在或 base64 无效？）")
       // 大小上限（飞书 media 上传限制 20MB）：显式校验做纵深防御（base64 双份拷贝内存峰值约 2.7×）
       if (bytes.length > 20 * 1024 * 1024) throw new Error(`图片超过 20MB 上限: ${(bytes.length / 1024 / 1024).toFixed(1)}MB`)
+      // 步骤 1：创建空 image 块（image:{} 不传 token，否则 1770001 invalid param）
+      const created = (await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${blockId}/children`, {
+        method: "POST",
+        body: { children: [{ block_type: BLOCK_TYPE.IMAGE, image: {} }] },
+      })) as { children?: Array<{ block_id?: string }> }
+      const imageBlockId = created.children?.[0]?.block_id
+      if (!imageBlockId) throw new Error("创建 image 块失败：响应缺少 block_id")
+      // 步骤 2：上传图片素材到该块（multipart；parent_type=docx_image 关联 image 块）
       const form = new FormData()
       form.append("file_name", fileName)
       form.append("parent_type", "docx_image")

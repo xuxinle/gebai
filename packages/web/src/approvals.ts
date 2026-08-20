@@ -42,8 +42,13 @@ export function clearApprovals(sessionId: string) {
 }
 
 export function addApproval(sessionId: string, toolCallId: string, tool: string) {
+  // 同 toolCallId 重复推送（无 seq 服务端的事件重放/重放应答窗口）替换旧卡不堆叠——
+  // 同款防御已存在于选择/环境变量卡（choiceId/envId），审批卡此前缺失；堆叠会虚高
+  // pendingBySession 计数，处理一张后输入持续锁定
+  for (const old of approvalsEl.querySelectorAll<HTMLElement>(`.approval[data-toolcall="${CSS.escape(toolCallId)}"]`)) old.remove()
   const box = el("div", "approval")
   box.dataset.session = sessionId
+  box.dataset.toolcall = toolCallId
   const ico = el("span", "approval-ico", "⚠️")
   const txt = el("div", "approval-txt")
   const toolName = displayToolName(tool)
@@ -93,6 +98,8 @@ document.addEventListener("keydown", (e) => {
   const key = e.key
   if (key !== "y" && key !== "Y" && key !== "n" && key !== "N") return
   if (e.ctrlKey || e.metaKey || e.altKey) return
+  // 文本输入焦点不触发（会话搜索/重命名/设置/排队条/自定义输入框打出含 y/n 的字符会误批/误拒）
+  if ((e.target as HTMLElement | null)?.closest?.("input, textarea, [contenteditable]")) return
   const card = approvalsEl.querySelector<HTMLElement>(".approval:not([hidden])")
   if (!card) return
   const btn = card.querySelector<HTMLButtonElement>(key === "y" || key === "Y" ? ".yes" : ".no")

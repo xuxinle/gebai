@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, rm, readdir, stat, unlink } from "node:fs/promises"
+import { mkdir, writeFile, readFile, rm, readdir, stat, unlink, rename } from "node:fs/promises"
 import { join, resolve, sep } from "node:path"
 import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
 import { isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "./paths"
@@ -6,6 +6,8 @@ import { randomUUID } from "node:crypto"
 
 const MAX_CACHE_MESSAGES = 300
 const MAX_CACHE_SESSIONS = 10
+/** 会话 env 内存缓存上限（LRU）：仅活跃会话驻留，防长生命周期进程无界增长。 */
+const MAX_ENV_CACHE_SESSIONS = 256
 
 export interface SessionStoreOptions {
   home: string
@@ -108,6 +110,79 @@ export function isProtectedMessage(m: { role?: string; session?: boolean; sessio
   return !!(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
 }
 
+/** repairToolPairing 的结构化入参（Message 与 provider 层 MessageLike 均可赋入）。 */
+export interface PairingRepairMessage {
+  id?: string
+  role: "user" | "assistant" | "tool" | "system"
+  content?: unknown
+  name?: string
+  toolCallId?: string
+  toolCalls?: Array<{ id: string; name: string; arguments?: unknown }>
+  createdAt?: number
+  session?: boolean
+  sessionRun?: unknown
+  subAgent?: boolean
+  subAgentRun?: unknown
+}
+
+/**
+ * assistant(toolCalls)/tool 配对完整性修复（上下文保护的兜底）：历史因任务取消中断、压缩/截断边界或
+ * 旧版本缺陷产生「孤儿 tool 结果」（发起 assistant 已被删）或「未应答 toolCalls」（tool 结果缺失）时，
+ * 严格校验的 LLM 接口（OpenAI 要求 tool 消息跟随对应 tool_calls、Anthropic 要求每个 tool_use 有
+ * tool_result）会拒绝整个请求——会话自此每次运行都被 400 卡死，本函数使历史自愈：
+ * - 孤儿 tool 消息：受保护的（agent_run 存档等）补一条最小 assistant(toolCalls) 桩保持配对可见，普通的丢弃；
+ * - 中途出现未应答 toolCalls（其后已有后续消息）时补占位 tool 结果；
+ * - 尾部未应答 toolCalls **只在 flushTail 时补占位**（llm 序列化前调用——发送时刻不可能存在在途批次）；
+ *   存储/装载路径不 flush 尾部——正常执行流 assistant(toolCalls) 先落盘、结果随后到达，提前 flush 会
+ *   让真实结果落盘时反被判孤儿丢弃。
+ * 不重排顺序、不改动已配对消息。
+ */
+export function repairToolPairing<T extends PairingRepairMessage>(messages: T[], opts: { flushTail?: boolean } = {}): T[] {
+  const out: T[] = []
+  const pending = new Map<string, string>() // 未应答 toolCallId → 工具名
+  const lastTs = () => (out.length && typeof out[out.length - 1].createdAt === "number" ? (out[out.length - 1].createdAt as number) : Date.now())
+  const flush = () => {
+    for (const [id, name] of pending) {
+      out.push({
+        id: randomUUID().replace(/-/g, ""),
+        role: "tool",
+        content: "（占位结果：该工具调用无结果记录——会话中断或历史边界调整丢失，已自动补齐以保持消息配对）",
+        toolCallId: id,
+        name,
+        createdAt: lastTs(),
+      } as T)
+    }
+    pending.clear()
+  }
+  for (const m of messages) {
+    if (m.role === "tool") {
+      if (m.toolCallId && pending.has(m.toolCallId)) {
+        pending.delete(m.toolCallId)
+        out.push(m)
+      } else if (isProtectedMessage(m) && m.toolCallId) {
+        // 受保护 tool（agent_run 存档）：补最小 assistant 桩而非丢弃——存档内容保持可见
+        out.push({
+          id: randomUUID().replace(/-/g, ""),
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: m.toolCallId, name: m.name ?? "tool", arguments: {} }],
+          createdAt: typeof m.createdAt === "number" ? m.createdAt : lastTs(),
+        } as T)
+        out.push(m)
+      }
+      // 普通孤儿 tool：丢弃（无发起 assistant 的结果会被接口拒绝，对模型亦无意义）
+      continue
+    }
+    flush()
+    out.push(m)
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      for (const tc of m.toolCalls) pending.set(tc.id, tc.name)
+    }
+  }
+  if (opts.flushTail) flush()
+  return out
+}
+
 export class SessionStore {
   private cache = new Map<string, SessionData>()
   private envCache = new Map<string, Record<string, string>>()
@@ -152,7 +227,12 @@ export class SessionStore {
       // 缓存命中仍须校验归属：session id 可能被跨用户猜中/引用，
       // 按 id 直接返回会形成跨用户读取与实时事件泄漏。
       // 旧版无 userId 会话在 load 时已按查找目录补全归属（见下），缓存内必有归属
-      if (!user || cached.userId === user) return cached
+      // 命中刷新位置（LRU）：运行中会话不因其他会话活跃而被挤出（挤出后无 user 的
+      // appendMessage/getTodos 装载失败会中断运行中任务）
+      if (!user || cached.userId === user) {
+        this.touchCache(cached)
+        return cached
+      }
       return null
     }
     if (user) {
@@ -224,7 +304,10 @@ export class SessionStore {
     if (!p) return null
     try {
       const raw = await readFile(p, "utf8")
-      return JSON.parse(raw) as SessionData
+      const s = JSON.parse(raw) as SessionData
+      // 旧版本/中断产生的历史配对缺陷在装载时自愈（下次 save 落盘），否则会话将无法继续请求模型
+      s.messages = repairToolPairing(s.messages)
+      return s
     } catch {
       return null
     }
@@ -234,7 +317,20 @@ export class SessionStore {
     session.updatedAt = Date.now()
     const dir = this.dir(session.userId, session.id)
     await this.ensureDir(dir)
-    await writeFile(join(dir, "chat.json"), JSON.stringify(session, null, 2))
+    // 原子写（tmp + rename）：每条消息都全量重写 chat.json，进程崩溃/断电/磁盘满中断在写入中途
+    // 会留下截断 JSON——装载侧 parse 失败被静默吞掉（会话「消失」且无法自愈）。先写临时文件、
+    // rename 原子替换（Bun/libuv 在 Windows 上等价 MoveFileExW REPLACE_EXISTING），最坏情况
+    // 只残留无害的 .tmp 文件
+    const target = join(dir, "chat.json")
+    const tmpPath = `${target}.tmp`
+    await writeFile(tmpPath, JSON.stringify(session, null, 2))
+    try {
+      await rename(tmpPath, target)
+    } catch {
+      // Windows 上目标正被并发读取（readFile 句柄未关）时 MoveFileEx 替换失败（EPERM）：
+      // 回退直接覆写（原子性降级为最佳努力）——rename 竞态不应中断整个任务
+      await writeFile(target, JSON.stringify(session, null, 2))
+    }
     this.touchCache(session)
   }
 
@@ -266,8 +362,9 @@ export class SessionStore {
     return out
   }
 
-  async appendMessage(sessionId: string, msg: Message): Promise<void> {
-    const session = await this.load(sessionId)
+  /** userId 可选：任务流程内的持久化调用传归属用户，缓存被挤出后仍可从磁盘确定性装载（LRU 双保险）。 */
+  async appendMessage(sessionId: string, msg: Message, userId?: string): Promise<void> {
+    const session = await this.load(sessionId, userId)
     if (!session) throw new Error(`session not found: ${sessionId}`)
     session.messages.push(msg)
     session.messages = this.trimToCacheLimit(session.messages)
@@ -314,7 +411,8 @@ export class SessionStore {
       createdAt: Date.now(),
     }
     const next = [...messages.slice(0, start), ...kept, compacted, ...messages.slice(end)]
-    session.messages = this.trimToCacheLimit(next)
+    // 区间边界可能切在 assistant(toolCalls)/tool 配对中间——压缩后立即修复配对完整性
+    session.messages = this.trimToCacheLimit(repairToolPairing(next))
     // 消息被摘要替换后，真实 usage 基线的索引锚点（ctxAtMessage）错位：清除基线，
     // 压缩判定回退估算，直至下一次真实模型调用重建基线（DESIGN「上下文保护」）
     session.ctxInputTokens = undefined
@@ -413,7 +511,17 @@ export class SessionStore {
    *  首次触达惰性清理历史版本落盘的 env.json（迁移，删除失败忽略）。 */
   async getEnv(sessionId: string, userId: string): Promise<Record<string, string>> {
     const dir = this.dir(userId, sessionId)
-    if (this.envCache.has(sessionId)) return this.envCache.get(sessionId)!
+    if (this.envCache.has(sessionId)) {
+      // LRU：命中刷新位置，超限时淘汰最久未用（长生命周期进程防无界增长）
+      const hit = this.envCache.get(sessionId)!
+      this.envCache.delete(sessionId)
+      this.envCache.set(sessionId, hit)
+      return hit
+    }
+    if (this.envCache.size >= MAX_ENV_CACHE_SESSIONS) {
+      const oldest = this.envCache.keys().next().value
+      if (oldest !== undefined) this.envCache.delete(oldest)
+    }
     this.envCache.set(sessionId, {})
     try {
       await unlink(join(dir, "env.json"))

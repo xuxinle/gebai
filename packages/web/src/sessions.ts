@@ -228,8 +228,19 @@ export async function loadMessages(sessionId: string) {
   }
   // 恢复运行中工具调用的卡片 DOM 引用（切回时重建，后续 tool.result 仍能在同一卡片追加；
   // 切走期间已到达的结果由服务端历史消息兜底，本列表仅覆盖未完成配对；子Agent 容器内调用重建到容器）
-  for (const entry of pendingTools.values()) {
+  // 历史消息中已有结果的 toolCallId 不再重建（切走期间完成的结果已由历史渲染，重建会重复出卡）
+  const doneIds = new Set<string>()
+  for (const m of (await client.getSession(sessionId)).messages ?? []) {
+    if (m.role === "tool" && m.toolCallId) doneIds.add(m.toolCallId)
+  }
+  for (const [key, entry] of pendingTools.entries()) {
     if (entry.session !== sessionId) continue
+    // key 形如 `{sessionId}:{runId}:{toolCallId}`（各段不含 ":"）
+    const toolCallId = key.split(":")[2]
+    if (toolCallId && doneIds.has(toolCallId)) {
+      pendingTools.delete(key)
+      continue
+    }
     const parent = entry.runId ? run?.sessionRuns?.get(entry.runId)?.body : undefined
     if (entry.kind === "todo") {
       const w = appendTodoCard(sessionId, parent)

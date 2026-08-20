@@ -644,8 +644,23 @@ async function downloadCurrentPng(code: string, name: string, format: DiagramFor
   }
 }
 
-/** 已渲染图表：canvas -> 最新源码与语言（主题切换时重绘）。 */
-const rendered = new Map<HTMLElement, { code: string; format: DiagramFormat }>()
+/** 已渲染图表：canvas -> 最新源码与语言（主题切换时重绘）。WeakMap 不阻止 canvas 回收——
+ *  强引用 Map 在主题切换清理前会累积脱离 DOM 的完整 SVG 节点（反复切换会话的渐进泄漏）。 */
+const rendered = new WeakMap<HTMLElement, { code: string; format: DiagramFormat }>()
+
+/** 活跃 canvas 轻列表（主题重绘遍历用）：条目为 WeakRef，不阻止回收，遍历时滤除已回收/离 DOM 的。 */
+const activeCanvases = new Set<WeakRef<HTMLElement>>()
+function trackRendered(canvas: HTMLElement, entry: { code: string; format: DiagramFormat }): void {
+  rendered.set(canvas, entry)
+  activeCanvases.add(new WeakRef(canvas))
+  if (activeCanvases.size > 500) {
+    // 惰性收缩：清掉已回收/离 DOM 的引用
+    for (const ref of activeCanvases) {
+      const c = ref.deref()
+      if (!c || !c.isConnected) activeCanvases.delete(ref)
+    }
+  }
+}
 
 // 主题切换后按最新主题配色重绘所有已渲染缩略图（编辑态/已移除的跳过）
 document.addEventListener("gebai:theme-change", () => {
@@ -653,9 +668,15 @@ document.addEventListener("gebai:theme-change", () => {
   mermaidCache.clear() // mermaid 主题为全局初始化状态，切换后重渲染
   d2Cache.clear() // d2 主题 ID 随明暗变化，缓存失效
   void (async () => {
-    for (const [canvas, entry] of rendered) {
+    for (const ref of [...activeCanvases]) {
+      const canvas = ref.deref()
+      const entry = canvas ? rendered.get(canvas) : undefined
+      if (!canvas || !entry) {
+        activeCanvases.delete(ref) // 已回收
+        continue
+      }
       if (!canvas.isConnected) {
-        rendered.delete(canvas) // 已脱离 DOM（如会话切换清空）：释放引用
+        activeCanvases.delete(ref) // 已脱离 DOM（如会话切换清空）
         continue
       }
       canvas.innerHTML = ""
@@ -715,7 +736,7 @@ export async function renderDiagram(container: HTMLElement, b: Extract<ContentBl
 
   const render = async (code: string) => {
     thumb.innerHTML = ""
-    rendered.set(thumb, { code, format })
+    trackRendered(thumb, { code, format })
     await renderThumbnail(thumb, code, format)
   }
   const open = () => openViewer(b.code, b.name || "图表", format)

@@ -75,7 +75,8 @@ export function sandboxedHtml(
   if (inject.bg || inject.scrollThumb || (inject.vars && Object.keys(inject.vars).length))
     parts.push(themeScript(inject.bg ?? "", inject.scrollThumb ?? "", inject.scrollThumbHover ?? "", inject.vars ?? {}, inject.theme ?? ""))
   const headExtra = parts.join("")
-  const m = html.match(/<head[^>]*>/i)
+  // `<head(?:\s[^>]*)?>`：[^>]* 会误匹配 `<header>`（meta CSP 注入到 body 中失效——纵深防御层失位）
+  const m = html.match(/<head(?:\s[^>]*)?>/i)
   if (m) {
     const idx = m.index! + m[0].length
     return html.slice(0, idx) + headExtra + html.slice(idx)

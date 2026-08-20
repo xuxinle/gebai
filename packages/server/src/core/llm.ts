@@ -1,4 +1,5 @@
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
+import { repairToolPairing } from "./store"
 
 export interface LLMToolDef {
   name: string
@@ -80,23 +81,28 @@ export function parseExtraParams(raw: string | undefined): Record<string, unknow
   return parsed as Record<string, unknown>
 }
 
-/** Parse an SSE byte stream into `data:` payload strings. */
-export async function* parseSSE(stream: ReadableStream<Uint8Array>, _signal?: AbortSignal): AsyncGenerator<string> {
+/** Parse an SSE byte stream into `data:` payload strings.
+ *  事件分隔与行结束按 SSE 规范兼容 `\n`/`\r\n`/`\r` 三种形态（部分网关以 CRLF 行结尾，
+ *  只按 `\n\n` 切分会永远切不出事件边界、整轮静默无输出）；多行 `data:` 按 `\n` join。 */
+export async function* parseSSE(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<string> {
   const reader = stream.getReader()
   const decoder = new TextDecoder()
   let buf = ""
   try {
     for (;;) {
+      if (signal?.aborted) break
       const { done, value } = await reader.read()
       if (done) break
-      buf += decoder.decode(value, { stream: true })
+      buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n")
       let idx: number
       while ((idx = buf.indexOf("\n\n")) >= 0) {
         const raw = buf.slice(0, idx)
         buf = buf.slice(idx + 2)
         let data = ""
         for (const line of raw.split("\n")) {
-          if (line.startsWith("data:")) data += line.slice(5).trim()
+          if (!line.startsWith("data:")) continue
+          const v = line.slice(5).replace(/^ /, "")
+          data = data ? `${data}\n${v}` : v
         }
         if (data) yield data
       }
@@ -104,6 +110,8 @@ export async function* parseSSE(stream: ReadableStream<Uint8Array>, _signal?: Ab
     const rest = buf.trim()
     if (rest.startsWith("data:")) yield rest.slice(5).trim()
   } finally {
+    // 消费方提前退出（空闲超时 iter.return/取消）：cancel 通知上游中止传输，防连接悬挂累积
+    void reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }
@@ -166,7 +174,7 @@ function toOpenAIContentBlock(b: Record<string, unknown>): Record<string, unknow
 
 function toOpenAIMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of msgs) {
+  for (const m of repairToolPairing(msgs, { flushTail: true })) {
     if (m.role === "tool") {
       const msg: Record<string, unknown> = { role: "tool", tool_call_id: m.toolCallId, content: typeof m.content === "string" ? m.content : "" }
       if (m.name) msg.name = m.name
@@ -200,7 +208,7 @@ function toAnthropicContentBlock(b: Record<string, unknown>): Record<string, unk
 
 function toAnthropicMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of msgs) {
+  for (const m of repairToolPairing(msgs, { flushTail: true })) {
     if (m.role === "tool") {
       out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: typeof m.content === "string" ? m.content : "" }] })
     } else if (m.role === "assistant" && m.toolCalls) {
@@ -219,10 +227,26 @@ function toAnthropicMessages(msgs: MessageLike[]): Array<Record<string, unknown>
     } else if (m.role === "system") {
       // system messages folded by the caller; ignore here to keep ordering valid
     } else {
-      out.push({ role: m.role, content: typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.map(toAnthropicContentBlock) : "") })
+      // 文本内容统一为块数组（与 tool_result/tool_use 分支同构），使相邻同角色消息可合并
+      const content: unknown =
+        typeof m.content === "string"
+          ? (m.content ? [{ type: "text", text: m.content }] : "")
+          : (Array.isArray(m.content) ? m.content.map(toAnthropicContentBlock) : "")
+      out.push({ role: m.role, content })
     }
   }
-  return out
+  // 相邻同角色合并（Anthropic 要求 user/assistant 交替）：配对修复在 tool_result 后可能紧跟 user 文本、
+  // 历史装载的连续 user/assistant 消息同理——content 数组拼接为单条消息
+  const merged: Array<Record<string, unknown>> = []
+  for (const m of out) {
+    const prev = merged[merged.length - 1]
+    if (prev && prev.role === m.role && Array.isArray(prev.content) && Array.isArray(m.content)) {
+      prev.content = [...(prev.content as unknown[]), ...(m.content as unknown[])]
+    } else {
+      merged.push(m)
+    }
+  }
+  return merged
 }
 
 function capabilities(config: ProviderConfig): LLMCapabilities {
@@ -241,7 +265,7 @@ function capabilities(config: ProviderConfig): LLMCapabilities {
  */
 function toResponsesInput(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of msgs) {
+  for (const m of repairToolPairing(msgs, { flushTail: true })) {
     if (m.role === "tool") {
       out.push({ type: "function_call_output", call_id: m.toolCallId, output: typeof m.content === "string" ? m.content : "" })
     } else if (m.role === "assistant" && m.toolCalls) {
@@ -430,6 +454,9 @@ class OpenAIProvider implements LLMProvider {
     }
     if (pendingStop !== undefined) {
       yield { type: "done", stopReason: pendingStop, ...(usage ? { usage } : {}) }
+    } else {
+      // 异常断流（无 finish_reason 即连接结束）：补 done 保持三家语义一致（下游终止信号不缺位）
+      yield { type: "done", stopReason: "stop" }
     }
     for (const tc of toolCallsByIndex.values()) {
       if (!tc.name) continue
@@ -572,6 +599,7 @@ class AnthropicProvider implements LLMProvider {
       throw new Error(`模型接口错误（HTTP ${res.status}）: ${detail || res.statusText}`)
     }
     let currentTool: { id: string; name: string; args: string } | null = null
+    let doneYielded = false
     // usage 真值：message_start 的 input_tokens（含 system 与工具 schema，即「真上下文」）+ message_delta 的 output_tokens
     let inputTokens: number | undefined
     for await (const data of parseSSE(res.body, opts.signal)) {
@@ -608,10 +636,14 @@ class AnthropicProvider implements LLMProvider {
         const delta = evt.delta as Record<string, unknown> | undefined
         const out = pickUsage(evt.usage as Record<string, unknown> | undefined)?.outputTokens
         const usage = inputTokens !== undefined || out !== undefined ? { inputTokens, outputTokens: out } : undefined
-        if (delta?.stop_reason) yield { type: "done", stopReason: delta.stop_reason as string, ...(usage ? { usage } : {}) }
+        if (delta?.stop_reason) {
+          doneYielded = true
+          yield { type: "done", stopReason: delta.stop_reason as string, ...(usage ? { usage } : {}) }
+        }
       }
     }
-    if (!currentTool) yield { type: "done", stopReason: "end_turn" }
+    // 兜底 done（恰好一次）：正常流 message_delta 已产出则跳过；异常断流补终止信号
+    if (!currentTool && !doneYielded) yield { type: "done", stopReason: "end_turn" }
   }
 }
 

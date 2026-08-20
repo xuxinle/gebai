@@ -111,29 +111,56 @@ export class SubAgentManager {
     }
   }
 
+  /** 装载者引用表（agent → owner 集合）：全局装载记 GLOBAL_OWNER，会话级装载记会话 id。
+   *  卸载按 owner 解引用——还有其他装载者时只解除本方引用、工具注册保留（一个会话卸载
+   *  不得砍掉其他会话正在使用的工具：注册表是全局的，装载状态却按会话建模）。 */
+  private static readonly GLOBAL_OWNER = "*global*"
+  private ownersByAgent = new Map<string, Map<string, true>>()
+
   /** 装载子Agent 能力模块（agent_load 工具 / WS sub_agent.load / 预加载的统一入口，幂等）：
    *  模块语义（DESIGN「装载 vs 新会话执行」）——工具并入当前工具集（{agent}_ 命名空间注册）、完整系统提示词由调用方写入会话记录，
    *  不创建新上下文、无独立执行；与新会话执行（agent_run，派生临时新会话执行）是两种不同概念。
+   *  owner：装载者（会话 id / agent_run 共享标记 / 缺省全局），unload 按其解引用。
    *  返回本次实际装载的名字列表（幂等跳过的不计入；self_optimize 连带装载 code 时两者都计入）。 */
-  async load(name: string): Promise<string[]> {
-    if (this.loaded.has(name)) return []
+  async load(name: string, owner: string = SubAgentManager.GLOBAL_OWNER): Promise<string[]> {
     const def = this.defs.get(name)
     if (!def) throw new Error(`unknown sub-agent: ${name}`)
+    const track = (n: string) => {
+      let owners = this.ownersByAgent.get(n)
+      if (!owners) {
+        owners = new Map()
+        this.ownersByAgent.set(n, owners)
+      }
+      owners.set(owner, true)
+    }
+    if (this.loaded.has(name)) {
+      track(name) // 已注册（他方装载）：幂等跳过注册，但记入本装载者引用
+      return []
+    }
     // self_optimize 复用 code 的通用能力（其 def 只声明 code 没有的独有工具，提示词亦不复刻 code 工作流）：
     // 装载 self_optimize 时连带装载 code——文件/分析类工具直接用 code_* 命名空间，无需重复注册。
     // load 幂等（loaded 去重）：code 已装载则跳过，不重复注册工具。
     if (name === "self_optimize" && this.defs.has("code")) {
-      const loadedNow = await this.load("code")
+      const loadedNow = await this.load("code", owner)
       this.registry.registerSubAgentTools(name, def.tools ?? {}, def.requiresApproval)
       this.loaded.add(name)
+      track(name)
       return [...loadedNow, name]
     }
     this.registry.registerSubAgentTools(name, def.tools ?? {}, def.requiresApproval)
     this.loaded.add(name)
+    track(name)
     return [name]
   }
 
-  unload(name: string): void {
+  /** 卸载（解引用）：仅当无其他装载者时才注销工具注册（owner 缺省为全局卸载）。 */
+  unload(name: string, owner: string = SubAgentManager.GLOBAL_OWNER): void {
+    const owners = this.ownersByAgent.get(name)
+    if (owners && owners.size > 0) {
+      owners.delete(owner)
+      if (owners.size > 0) return // 其他装载者仍在用：保留工具注册
+      this.ownersByAgent.delete(name)
+    }
     this.registry.unregisterAgent(name)
     this.loaded.delete(name)
   }

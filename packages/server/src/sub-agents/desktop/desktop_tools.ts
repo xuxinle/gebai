@@ -90,7 +90,9 @@ export const screenshotTool: Tool = {
   }),
   async execute(args, ctx) {
     desktopGate(ctx)
-    const rel = `screenshot_${Date.now()}.png`
+    // name 参数落地（此前声明未实现，模型按描述传名无效）：消毒为安全文件名基名
+    const nameBase = String(args.name ?? "").trim().replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60)
+    const rel = `${nameBase || `screenshot_${Date.now()}`}.png`
     const path = ctx.resolvePath(rel)
     const region = String(args.region ?? "").trim()
     if (region && !/^\d+,\d+,\d+,\d+$/.test(region)) {

@@ -124,6 +124,17 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   const corsOrigins = (d.config.corsOrigins ?? []).length ? d.config.corsOrigins : ["*"]
   app.use("/api/*", async (c: Context<AppEnv>, next) => {
     const reqOrigin = c.req.header("origin") ?? ""
+    // 本地/桌面免登录形态的跨站防护：CORS * + 免鉴权 = 任意网页可跨源读写全部 API（等效 RCE）。
+    // 浏览器跨源请求必带 Origin——服务模式有令牌鉴权豁免；显式配置 GEBAI_CORS_ORIGINS 视为
+    // 有意开放（按配置放行），仅缺省 * 且本地模式时要求 Origin 与 Host 同源（非浏览器无 Origin 不受限）
+    if (d.config.auth !== "server" && corsOrigins.includes("*") && reqOrigin) {
+      const host = c.req.header("host") ?? ""
+      try {
+        if (new URL(reqOrigin).host !== host) return c.json({ error: "cross-origin rejected" }, 403)
+      } catch {
+        return c.json({ error: "invalid origin" }, 403)
+      }
+    }
     const allow = corsOrigins.includes("*") ? "*" : corsOrigins.includes(reqOrigin) ? reqOrigin : corsOrigins[0]
     c.header("Access-Control-Allow-Origin", allow)
     c.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -172,6 +183,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
    *  全局桶兜底总量，来源桶按客户端标识（GEBAI_TRUST_PROXY=true 时取 X-Forwarded-For 首段，否则共桶）。 */
   const loginGlobalLimit = new TokenBucket(60, 2)
   const loginSourceLimit = new TokenBucket(10, 0.2)
+  /** 注册独立桶（scrypt 同动机；不复用登录小来源桶——正常「登录多次+注册一次」的用量不互相挤占）。 */
+  const registerGlobalLimit = new TokenBucket(30, 0.5)
+  const registerSourceLimit = new TokenBucket(10, 0.1)
   const loginSourceKey = (c: Context): string => {
     if (!d.config.trustProxy) return "local"
     const fwd = c.req.header("x-forwarded-for")
@@ -261,6 +275,10 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // open（默认）=注册即登录；approval=待 admin 审批（disabled+pending，不签发令牌）
   app.post("/api/v1/auth/register", async (c) => {
     if (d.config.auth !== "server") return c.json({ error: "not found" }, 404)
+    // 注册同样走 scrypt（CPU DoS 同动机）且可无限制造用户条目：独立限流桶
+    if (!registerGlobalLimit.allow("global") || !registerSourceLimit.allow(loginSourceKey(c))) {
+      return c.json({ error: "rate limited: too many requests" }, 429)
+    }
     const { username, password } = await c.req.json<{ username?: string; password?: string }>()
     try {
       const { user, token, pending } = await d.auth.register(String(username ?? ""), String(password ?? ""), d.config.signupMode)

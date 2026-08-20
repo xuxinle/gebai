@@ -255,7 +255,13 @@ describe("EnvManager precedence", () => {
   test("sensitive detection", () => {
     expect(isSensitive("API_KEY")).toBe(true)
     expect(isSensitive("OPENAI_API_KEY")).toBe(true)
-    expect(isSensitive("TOKEN")).toBe(false)
+    expect(isSensitive("GEBAI_ADMIN_PASSWORD_HASH")).toBe(true)
+    expect(isSensitive("AWS_ACCESS_KEY_ID")).toBe(true)
+    expect(isSensitive("DATABASE_URL")).toBe(true)
+    // 裸名形态同样视为敏感（TOKEN 历史漏判已修复）
+    expect(isSensitive("TOKEN")).toBe(true)
+    expect(isSensitive("PATH")).toBe(false)
+    expect(isSensitive("GEBAI_HOME")).toBe(false)
   })
 })
 
@@ -484,6 +490,56 @@ describe("SessionStore 装载提示词消息保护", () => {
     expect(loaded!.messages.some((m) => m.id === "m-8")).toBe(true)
     // 摘要计数 = 实际移除条数（2 条 assistant）
     expect(loaded!.messages.find((m) => m.compacted)!.summary).toContain("已压缩 2 条")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("compactMessages 边界切在 assistant(toolCalls)/tool 配对中间时不产生孤儿（配对修复）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-store-compact-pair-"))
+    const store = new SessionStore({ home })
+    const session = await store.createSession("default")
+    // [A(tc), T, A(tc), T, U] 压缩 [0,2)：第一条配对整体入摘要，第二条保留——不产生孤儿
+    await store.appendMessage(session.id, { id: "a1", role: "assistant", content: "call1", toolCalls: [{ id: "tc1", name: "sh", arguments: {} }], createdAt: 1 } as never)
+    await store.appendMessage(session.id, { id: "t1", role: "tool", content: "r1", toolCallId: "tc1", name: "sh", createdAt: 2 } as never)
+    await store.appendMessage(session.id, { id: "a2", role: "assistant", content: "call2", toolCalls: [{ id: "tc2", name: "sh", arguments: {} }], createdAt: 3 } as never)
+    await store.appendMessage(session.id, { id: "t2", role: "tool", content: "r2", toolCallId: "tc2", name: "sh", createdAt: 4 } as never)
+    await store.appendMessage(session.id, { id: "u1", role: "user", content: "next", createdAt: 5 } as never)
+    await store.compactMessages(session.id, "default", { from: 0, to: 2, summary: "第一对已压缩" })
+    const loaded = await store.load(session.id)
+    const tools = loaded!.messages.filter((m) => m.role === "tool")
+    const assistants = loaded!.messages.filter((m) => m.role === "assistant")
+    // 剩余 tool 消息（t2）必有发起 assistant（a2）；孤儿 tool（tc1 随 a1 被压缩）不残留
+    expect(tools.every((t) => assistants.some((a) => a.toolCalls?.some((tc) => tc.id === t.toolCallId)))).toBe(true)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.toolCallId === "tc1")).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("repairToolPairing：孤儿 tool 丢弃/受保护补桩、中途未应答补占位（磁盘装载自愈）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-store-repair-"))
+    const store = new SessionStore({ home })
+    const session = await store.createSession("default")
+    // 构造历史损坏：中途未应答 toolCalls（a1 无结果即被 u1 跟随）、孤儿普通 tool（t-x）、孤儿受保护 tool（t-run）
+    await store.appendMessage(session.id, { id: "a1", role: "assistant", content: "x", toolCalls: [{ id: "tc-1", name: "sh", arguments: {} }], createdAt: 1 } as never)
+    await store.appendMessage(session.id, { id: "u1", role: "user", content: "q", createdAt: 2 } as never)
+    await store.appendMessage(session.id, { id: "t-x", role: "tool", content: "orphan", toolCallId: "tc-none", name: "sh", createdAt: 3 } as never)
+    await store.appendMessage(session.id, { id: "t-run", role: "tool", content: "archive", toolCallId: "tc-run", name: "agent_run", sessionRun: { entries: [] }, createdAt: 4 } as never)
+    // 新实例（无内存缓存）从磁盘装载：readFileByPath 修复
+    const store2 = new SessionStore({ home })
+    const loaded = await store2.load(session.id, "default")
+    // a1 的 tc-1 得到占位结果（在 u1 之前，保持 assistant→tool 相邻）
+    const placeholder = loaded!.messages.find((m) => m.role === "tool" && m.toolCallId === "tc-1")
+    expect(placeholder).toBeTruthy()
+    expect(loaded!.messages.indexOf(placeholder!)).toBeLessThan(loaded!.messages.findIndex((m) => m.id === "u1"))
+    // 孤儿普通 tool 丢弃；受保护 t-run 前补最小 assistant 桩（紧邻其后）
+    expect(loaded!.messages.some((m) => m.id === "t-x")).toBe(false)
+    const stubIdx = loaded!.messages.findIndex((m) => m.role === "assistant" && m.toolCalls?.some((tc) => tc.id === "tc-run"))
+    expect(stubIdx).toBeGreaterThan(-1)
+    expect(loaded!.messages.findIndex((m) => m.id === "t-run")).toBe(stubIdx + 1)
+    // 全序列两两配对完整（OpenAI/Anthropic 校验前提）
+    const seen = new Set<string>()
+    for (const m of loaded!.messages) {
+      if (m.role === "tool") expect(seen.has(m.toolCallId!)).toBe(true)
+      if (m.role === "assistant" && m.toolCalls) for (const tc of m.toolCalls) seen.add(tc.id)
+    }
     rmSync(home, { recursive: true, force: true })
   })
 })
