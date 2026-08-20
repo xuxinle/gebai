@@ -15,8 +15,11 @@ interface MockEl {
   textContent: string
   append(...nodes: unknown[]): void
   appendChild(n: unknown): void
+  remove(): void
 }
-function makeMockEl(tag = "div"): MockEl {
+/** MockEl + 查询能力（由 Proxy 陷阱提供，类型上补齐声明）。 */
+type MockElWithQuery = MockEl & { querySelector(sel: string): unknown; querySelectorAll(sel: string): unknown[] }
+function makeMockEl(tag = "div"): MockElWithQuery {
   const dataset: Record<string, string> = {}
   let ownText = ""
   const el: MockEl = {
@@ -31,10 +34,23 @@ function makeMockEl(tag = "div"): MockEl {
       el.children.length = 0
     },
     append(...nodes: unknown[]) {
-      for (const n of nodes) if (n && typeof n === "object") el.children.push(n as MockEl)
+      for (const n of nodes) {
+        if (n && typeof n === "object") {
+          ;(n as MockEl & { parentRef?: MockEl }).parentRef = el
+          el.children.push(n as MockEl)
+        }
+      }
     },
     appendChild(n: unknown) {
-      if (n && typeof n === "object") el.children.push(n as MockEl)
+      if (n && typeof n === "object") {
+        ;(n as MockEl & { parentRef?: MockEl }).parentRef = el
+        el.children.push(n as MockEl)
+      }
+    },
+    remove() {
+      const p = (el as MockEl & { parentRef?: MockEl }).parentRef
+      const self = (el as unknown as { selfProxy?: MockEl }).selfProxy ?? el
+      if (p) p.children = p.children.filter((c) => c !== self)
     },
   }
   // classList 直接操作 className（与真实 DOM 语义一致：属性赋值与 classList 增删互不覆盖）
@@ -50,7 +66,7 @@ function makeMockEl(tag = "div"): MockEl {
       classList.contains(c) ? classList.remove(c) : classList.add(c)
     },
   }
-  return new Proxy(el, {
+  const proxy = new Proxy(el, {
     get(t, k) {
       if (typeof k === "string" && k in t) return (t as unknown as Record<string, unknown>)[k]
       if (k === "classList") return classList
@@ -76,6 +92,9 @@ function makeMockEl(tag = "div"): MockEl {
       return () => {}
     },
   })
+  // remove() 以 children 中存的外部引用（proxy）比对自身：挂 self 引用供比对
+  ;(el as unknown as { selfProxy?: MockEl }).selfProxy = proxy as unknown as MockEl
+  return proxy as unknown as MockElWithQuery
 }
 const base = makeMockEl("div")
 base.textContent = ""
@@ -111,9 +130,9 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserCard, appendPlanCard, appendToolResult } = await import("./messages")
-const { runs, pendingTools, pendingToolsKey } = await import("./state")
-const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead } = await import("./tool-cards")
+const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard } = await import("./messages")
+const { runs, pendingTools, pendingToolsKey, approvalsEl } = await import("./state")
+const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead } = await import("./tool-cards")
 
 function fakeRun(overrides: Partial<RunState> = {}): RunState {
   return {
@@ -434,28 +453,38 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
   })
 })
 
-describe("ask_user 消息流问答卡片（像 draw 一样中断并开启输出卡片）", () => {
-  test("appendAskUserCard renders question + static options into the flow (展示态不可交互)", () => {
-    const wrapper = appendAskUserCard("选择方案", [{ title: "A", description: "方案A" }, "B"], false)
+describe("ask_user 问答记录卡（等待期消息流不预览问题，结果到达落记录卡）", () => {
+  test("appendAskUserRecord 渲染问题 + 禁用选项 + 回答结果（头部按结果文案更新）", () => {
+    const wrapper = appendAskUserRecord({ prompt: "选择方案", options: [{ title: "A", description: "方案A" }, "B"] }, "用户选择：A")
     expect(wrapper.className).toContain("msg")
     expect(wrapper.className).toContain("tool")
-    const head = wrapper.querySelector("div.tool-head")
-    expect(head?.textContent).toContain("请选择")
+    expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
     expect(wrapper.querySelector("div.block-text")?.textContent).toBe("选择方案")
-    // 选项为禁用按钮静态展示（交互作答由审批容器选择卡片承载）
+    // 选项为禁用按钮静态展示（等待期交互作答由审批容器选择卡片承载，消息流不重复渲染问题卡）
     const opts = wrapper.querySelectorAll("button.choice-opt")
     expect(opts.length).toBe(2)
-    for (const o of opts) expect((o as HTMLButtonElement).disabled).toBe(true)
+    for (const o of opts) expect((o as unknown as { disabled: boolean }).disabled).toBe(true)
+    expect(wrapper.querySelector("div.choice-answer")?.textContent).toBe("用户选择：A")
   })
 
-  test("appendToolResult kind=ask_user 更新头部为完成态并追加回答", () => {
-    const wrapper = appendAskUserCard("选择方案", ["A", "B"], false)
-    const body = wrapper.querySelector(".msg-body") as HTMLElement
-    pendingTools.set(pendingToolsKey("s1", "tc1"), { wrapper, body, session: "s1", kind: "ask_user" })
-    appendToolResult("s1", "tc1", "ask_user", "用户选择：A")
-    expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
-    expect(wrapper.querySelector("div.choice-answer")?.textContent).toBe("用户选择：A")
-    expect(pendingTools.has(pendingToolsKey("s1", "tc1"))).toBe(false)
+  test("askUserResultHead 按输出前缀识别结果态", () => {
+    expect(askUserResultHead("用户选择：A")).toBe("✓ 用户回答")
+    expect(askUserResultHead("用户选择：A、B")).toBe("✓ 用户回答")
+    expect(askUserResultHead("用户拒绝了本次询问。")).toBe("✕ 用户拒绝")
+    expect(askUserResultHead("用户未在时限内做出选择，已取消本次询问。")).toBe("⏱ 选择超时")
+  })
+
+  test("appendToolResult kind=ask_user 按登记参数落问答记录卡（无 wrapper：等待期未渲染预览）", () => {
+    // approvalsEl/msgEl 为共享 mock 基座（跨文件注册表可能指向其他文件的 no-op stub）：
+    // runId + 显式 parent 把记录卡落进本地容器断言，不依赖共享 DOM
+    const parent = makeMockEl("div")
+    pendingTools.set(pendingToolsKey("s1", "tc1", "r1"), { session: "s1", kind: "ask_user", runId: "r1", askArgs: { prompt: "选择方案", options: ["A", "B"], multi: false } })
+    appendToolResult("s1", "tc1", "ask_user", "用户选择：A", undefined, "r1", parent as unknown as HTMLElement)
+    expect(pendingTools.has(pendingToolsKey("s1", "tc1", "r1"))).toBe(false)
+    const answers = parent.querySelectorAll("div.choice-answer") as unknown as MockEl[]
+    expect(answers.length).toBe(1)
+    expect(answers[0]?.textContent).toBe("用户选择：A")
+    expect((parent.querySelector("div.tool-head") as unknown as MockEl | undefined)?.textContent).toBe("✓ 用户回答")
     pendingTools.clear()
   })
 
@@ -464,6 +493,28 @@ describe("ask_user 消息流问答卡片（像 draw 一样中断并开启输出�
     // msgEl 可能指向其他测试文件的 mock，跨文件共享模块注册表导致断言不可靠）
     expect(() => appendToolResult("s1", "tc-unknown", "ask_user", "用户选择：B")).not.toThrow()
     expect(pendingTools.size).toBe(0)
+  })
+})
+
+describe("选择卡片去重（同一 choiceId 重复推送替换旧卡，断线重放不堆叠）", () => {
+  test("renderChoiceCard 同一 choiceId 二次推送只剩一张交互卡", () => {
+    // approvalsEl 为共享 mock 基座（跨文件注册表可能指向其他文件的 no-op stub）：
+    // 临时把 appendChild/querySelectorAll 改道到本地沙箱容器断言，测试后还原
+    const sandbox = makeMockEl("div")
+    const target = approvalsEl as unknown as Record<string, unknown>
+    const origAppend = target.appendChild
+    const origQsa = target.querySelectorAll
+    target.appendChild = (n: unknown) => sandbox.appendChild(n)
+    target.querySelectorAll = (sel: string) => (sel === ".interaction-card" ? sandbox.querySelectorAll(sel) : [])
+    try {
+      renderChoiceCard("选择方案", ["A", "B"], "cid1", "s1")
+      renderChoiceCard("选择方案", ["A", "B"], "cid1", "s1")
+      const cards = sandbox.querySelectorAll("div.interaction-card").filter((c) => (c as unknown as { dataset: Record<string, string> }).dataset.reqId === "cid1")
+      expect(cards.length).toBe(1)
+    } finally {
+      target.appendChild = origAppend
+      target.querySelectorAll = origQsa
+    }
   })
 })
 
@@ -727,5 +778,69 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
     expect(fold?.textContent).toContain("查看参数")
     // 折叠块内仍是旧/新对比块
     expect(fold?.querySelectorAll("pre.tool-edit-old").length).toBe(1)
+  })
+
+  test("card 声明缺失（清单拉取失败/旧服务端）按参数形态兜底渲染对比块，不直显 JSON", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor(
+      { id: "te5", role: "tool", name: "edit", content: "", arguments: { path: "src/a.ts", edits: [{ oldString: "foo", newString: "bar" }] }, createdAt: 0 },
+      "",
+    )
+    expect(bubble.querySelector("div.tool-edits")).not.toBeNull()
+    expect(bubble.querySelector("pre.tool-edit-old")?.textContent).toBe("foo")
+    expect(bubble.querySelector("pre.tool-code")).toBeNull()
+    // 其余参数（path）键值行展示
+    expect(bubble.querySelector("div.tool-kv-row")?.textContent).toContain("path")
+  })
+
+  test("兜底渲染的超长修改同样先渲染后折叠", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor(
+      { id: "te6", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ oldString: "o".repeat(600), newString: "n".repeat(600) }] }, createdAt: 0 },
+      "",
+    )
+    const fold = bubble.querySelector("details.tool-fold")
+    expect(fold).not.toBeNull()
+    expect(fold?.querySelectorAll("pre.tool-edit-new").length).toBe(1)
+  })
+})
+
+describe("code 参数折叠（write/patch/js 等长内容默认收起）", () => {
+  test("超长 code 参数自动折叠", () => {
+    __setToolCardMetaForTest([["write", { titleParams: ["path"], args: "code", codeField: "content" }]])
+    const bubble = toolBubbleFor({ id: "tc1", role: "tool", name: "write", content: "", arguments: { path: "a.ts", content: "x".repeat(900) }, createdAt: 0 }, "")
+    expect(bubble.querySelector("details.tool-fold")).not.toBeNull()
+  })
+
+  test("短 code 参数不折叠", () => {
+    __setToolCardMetaForTest([["write", { titleParams: ["path"], args: "code", codeField: "content" }]])
+    const bubble = toolBubbleFor({ id: "tc2", role: "tool", name: "write", content: "", arguments: { path: "a.ts", content: "short" }, createdAt: 0 }, "")
+    expect(bubble.querySelector("details.tool-fold")).toBeNull()
+  })
+})
+
+describe("ask_user 历史回放（带结果渲染问答记录卡）", () => {
+  test("带结果（content）渲染问答记录卡：头部结果态 + 回答块，选项禁用展示", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor(
+      { id: "ta1", role: "tool", name: "ask_user", content: "用户选择：A", arguments: { prompt: "选哪个方案", options: ["A", "B"] }, createdAt: 0 },
+      "",
+    )
+    expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
+    expect(bubble.querySelector("div.block-text")?.textContent).toBe("选哪个方案")
+    expect(bubble.querySelector("div.choice-answer")?.textContent).toBe("用户选择：A")
+    // 展示态：无自定义输入/拒绝按钮（不再重复可交互选择卡）
+    expect(bubble.querySelector("div.choice-custom")).toBeNull()
+    expect(bubble.querySelector("button.choice-refuse")).toBeNull()
+  })
+
+  test("无结果的裸调用（异常中断）回退可交互选择卡", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor(
+      { id: "ta2", role: "tool", name: "ask_user", content: "", arguments: { prompt: "选哪个方案", options: ["A", "B"] }, createdAt: 0 },
+      "",
+    )
+    expect(bubble.querySelector("div.choice-custom")).not.toBeNull()
+    expect(bubble.querySelector("button.choice-refuse")).not.toBeNull()
   })
 })

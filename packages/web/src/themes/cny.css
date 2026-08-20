@@ -360,13 +360,16 @@
   border-color: rgba(232, 163, 61, 0.3);
 }
 
-/* assistant 气泡：丝绒浮卡，左下小圆角 */
+/* assistant 气泡：丝绒浮卡，左下小圆角；overflow 裁齐圆角——左侧鎏金竖条（::before）
+   是直角元素，气泡大圆角处（尤其左上 14px）竖条会戳出圆角外造成「边条与圆角分离」，
+   裁剪后竖条沿圆角收边（卡片内容本就全部盒内，无外溢元素受影响） */
 [data-theme="cny"] .msg.assistant .bubble {
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius-msg) var(--radius-msg) var(--radius-msg) 6px;
   box-shadow: var(--msg-shadow);
   position: relative;
+  overflow: hidden;
 }
 [data-theme="cny"] .msg.assistant .bubble::before {
   content: "";

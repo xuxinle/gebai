@@ -164,8 +164,21 @@ export interface RunState {
 export const runs = new Map<string, RunState>()
 
 /** 工具调用配对：会话隔离 key（toolCallId 由 LLM 生成，不保证跨会话唯一）→ 已渲染的调用卡片
- * （tool.result 到达后在同一卡片追加结果；name/argsText 供切回时重建卡片 DOM 引用；runId 区分子Agent 容器内调用）。 */
-export const pendingTools = new Map<string, { wrapper: HTMLElement; body: HTMLElement; session: string; kind: "tool" | "todo" | "ask_user" | "plan"; name?: string; argsText?: string; runId?: string }>()
+ * （tool.result 到达后在同一卡片追加结果；name/argsText 供切回时重建卡片 DOM 引用；runId 区分子Agent 容器内调用；
+ * ask_user 等待期不渲染消息流卡片——askArgs 携带问答参数，结果到达时落问答记录卡，wrapper/body 为空）。 */
+export const pendingTools = new Map<
+  string,
+  {
+    wrapper?: HTMLElement
+    body?: HTMLElement
+    session: string
+    kind: "tool" | "todo" | "ask_user" | "plan"
+    name?: string
+    argsText?: string
+    runId?: string
+    askArgs?: { prompt: string; options: Array<string | Record<string, unknown>>; multi: boolean }
+  }
+>()
 
 /** 工具调用配对 key：`{sessionId}:{runId}:{toolCallId}`，跨会话不串台；runId 区分主循环与子Agent 容器内调用。 */
 export function pendingToolsKey(sessionId: string, toolCallId: string, runId?: string): string {
