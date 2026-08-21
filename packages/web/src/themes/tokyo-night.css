@@ -85,6 +85,13 @@
   position: relative;
   overflow: hidden;
 }
+/* 内容层置于背景装饰之上：main 背景透明以透出环境特效（theme-fx 画布），气泡/卡片自身背景保证可读 */
+[data-theme="tokyo-night"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
 
 /* 顶部蓝紫光带 */
 [data-theme="tokyo-night"] body::after {

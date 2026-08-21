@@ -12,7 +12,7 @@ function makeDeps(overrides: Partial<ServerConfig> = {}): AppDeps {
     binaryMode: false,
     devReload: false,
     basePath: "/",
-    uiStyle: "classic",
+    uiStyle: "matrix",
     ...overrides,
   } as unknown as ServerConfig
   return { config, auth: { defaultUser: () => SERVICE_USER } } as unknown as AppDeps
@@ -52,7 +52,7 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
       const res = await app.request("/")
       expect(res.status).toBe(200)
       const html = await res.text()
-      expect(html).toContain('__GEBAI_UI_STYLE__="classic"')
+        expect(html).toContain('__GEBAI_UI_STYLE__="matrix"')
       expect(html).toContain("ok")
     } finally {
       rmSync(dist, { recursive: true, force: true })

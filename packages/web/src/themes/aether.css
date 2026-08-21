@@ -75,6 +75,13 @@
   overflow: hidden;
   animation: aether-breathe 24s ease-in-out infinite alternate;
 }
+/* 内容层置于背景装饰之上：main 背景透明以透出环境特效（theme-fx 画布），气泡/卡片自身背景保证可读 */
+[data-theme="aether"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
 
 /* 极光呼吸：缓慢移动光斑位置 + 微调透明度 */
 @keyframes aether-breathe {

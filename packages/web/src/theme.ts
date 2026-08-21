@@ -24,16 +24,13 @@ type ThemeDef = { id: string; label: string; desc?: string; swatch: string; grou
 
 export const THEMES = [
   { id: "acrylic", label: "默认", swatch: "#0c0c0e" }, // 不归属任何分组，独立显示于列表顶部
-  { id: "classic", label: "经典", desc: "深蓝复古", swatch: "#3b82f6", group: "基础" },
-  { id: "dark", label: "暗夜", desc: "高对比", swatch: "#4f9cf9", group: "基础" },
-  { id: "modern", label: "现代", desc: "明亮玻璃", swatch: "#8b5cf6", group: "基础" },
-  { id: "minimal", label: "极简", desc: "黑白留白", swatch: "#111111", group: "基础" },
   { id: "matrix", label: "矩阵", desc: "终端绿", swatch: "#00ff41", group: "科技风" },
   { id: "tokyo-night", label: "东京夜", desc: "紫蓝夜空", swatch: "#7aa2f7", group: "科技风" },
   { id: "cyberpunk", label: "赛博", desc: "霓虹朋克", swatch: "#ff2d78", group: "科技风" },
   { id: "synthwave", label: "浪潮", desc: "霓虹日落", swatch: "#ff6ec7", group: "科技风" },
   { id: "aether", label: "以太", desc: "光之玻璃", swatch: "linear-gradient(135deg, #06b6d4, #8b5cf6, #ec4899)", group: "氛围风" },
   { id: "aurora", label: "极光", desc: "青绿紫", swatch: "#2dd4bf", group: "氛围风" },
+  { id: "ink", label: "水墨", desc: "宣纸墨韵", swatch: "linear-gradient(135deg, #f6f1e7, #cfc6b2)", group: "氛围风" },
   { id: "cny", label: "人民币", desc: "中国红", swatch: "linear-gradient(135deg, #d92d3a, #e8a33d)", group: "特色" },
 ] as const satisfies readonly ThemeDef[]
 
@@ -82,9 +79,8 @@ function isAcrylicLt(v: unknown): v is AcrylicLtId {
   return typeof v === "string" && (ACRYLIC_LT_MODES as readonly { id: string }[]).some((s) => s.id === v)
 }
 
-/** classic 为主题变量兜底（:root），无需额外样式文件；其余主题按需加载。 */
-function themeCssUrl(id: ThemeId): string | null {
-  if (id === "classic") return null
+/** 所有主题均为独立样式文件，按需加载。 */
+function themeCssUrl(id: ThemeId): string {
   return new URL(`./themes/${id}.css`, import.meta.url).href
 }
 
@@ -166,11 +162,7 @@ export async function applyTheme(id: ThemeId): Promise<void> {
   document.documentElement.dataset.theme = id
   const url = themeCssUrl(id)
   const swap = async () => {
-    if (url) await loadCss(url)
-    else if (themeLink) {
-      themeLink.remove()
-      themeLink = null
-    }
+    await loadCss(url)
   }
   // View Transitions API
   const doc = document as Document & {

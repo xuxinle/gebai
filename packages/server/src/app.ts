@@ -737,7 +737,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   const embedded = d.config.binaryMode ? embeddedWebAssets() : null
   if (existsSync(d.config.webDist) || embedded || d.config.devReload) {
     // 注入全局默认 UI 风格（GEBAI_UI_STYLE），前端按 会话/URL > 用户 > 全局 优先级解析
-    const UI_STYLES = ["acrylic", "classic", "aether", "dark", "modern", "minimal", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "cny"]
+    const UI_STYLES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny"]
     const style = UI_STYLES.includes(d.config.uiStyle) ? d.config.uiStyle : "acrylic"
     let cachedHtml: string | null = null
     app.get("/", (c) => {

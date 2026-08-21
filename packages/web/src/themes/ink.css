@@ -1,0 +1,619 @@
+/* ============================================================
+   GEBAI 主题：ink — 水墨（宣纸墨韵 · 亮色）
+   宣纸暖白底、墨色正文、朱砂印章红点缀、黛青辅色
+   标志性细节：纸纹底 + 顶部朱砂细线 + 墨块代码 + 墨晕悬浮
+   ============================================================ */
+
+[data-theme="ink"] {
+  /* 宣纸底（暖白带微黄） */
+  --bg: #f5f0e6;
+  --bg-elev: #faf7ef;
+  --bg-elev-2: #f1ece0;
+  --bg-hover: #ece6d8;
+  --bg-active: #e4ddcc;
+  --bg-inset: #efe9db;
+
+  /* 纸灰描边 */
+  --border: #ddd5c2;
+  --border-strong: #c8bda3;
+
+  /* 墨色文字 */
+  --text: #2a2620;
+  --text-muted: #6e675a;
+  --text-faint: #a39a87;
+
+  /* 朱砂印章红（主色）+ 黛青（辅色） */
+  --accent: #b03a2e;
+  --accent-hover: #8f2d23;
+  --accent-soft: rgba(176, 58, 46, 0.08);
+  --accent-2: #3f5c6e;
+  --on-accent: #fdf9f0;
+  --success: #4a7c59;
+  --danger: #a93226;
+  --warning: #a0682a;
+  --tool: #3f5c6e;
+  --user-grad: linear-gradient(135deg, #35312b, #1f1c18);
+  --nav-active: #b03a2e;
+
+  /* 形状：中等圆角（笔触感） */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-msg: 10px;
+
+  /* 阴影：纸上淡影（暖色调） */
+  --shadow-sm: 0 1px 3px rgba(60, 50, 30, 0.08);
+  --shadow-md: 0 4px 16px rgba(60, 50, 30, 0.12);
+  --shadow-pop: 0 8px 32px rgba(60, 50, 30, 0.18);
+  --shadow-glow: 0 0 0 1px rgba(176, 58, 46, 0.35);
+  --glass: none;
+  --msg-shadow: 0 1px 4px rgba(60, 50, 30, 0.06);
+
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-size: 14px;
+  --transition: 0.18s ease;
+}
+
+/* ============================================================
+   宣纸背景：暖白 + 极淡纤维纹 + 四角纸色晕染
+   ============================================================ */
+[data-theme="ink"] body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 1100px 600px at 90% -10%, rgba(200, 189, 163, 0.22), transparent 58%),
+    radial-gradient(ellipse 900px 550px at -5% 110%, rgba(200, 189, 163, 0.16), transparent 55%),
+    repeating-linear-gradient(
+      92deg,
+      transparent 0px,
+      transparent 5px,
+      rgba(160, 148, 124, 0.025) 5px,
+      rgba(160, 148, 124, 0.025) 6px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      transparent 0px,
+      transparent 7px,
+      rgba(160, 148, 124, 0.02) 7px,
+      rgba(160, 148, 124, 0.02) 8px
+    );
+  background-attachment: fixed;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 内容层置于背景装饰之上：main 背景透明以透出环境特效（theme-fx 画布），气泡/卡片自身背景保证可读 */
+[data-theme="ink"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+/* 顶部朱砂细线（印章红） */
+[data-theme="ink"] body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(176, 58, 46, 0.55) 25%, rgba(176, 58, 46, 0.35) 60%, transparent);
+  z-index: 50;
+  pointer-events: none;
+}
+
+/* ============================================================
+   全局元素
+   ============================================================ */
+[data-theme="ink"] ::selection { background: var(--accent); color: var(--on-accent); }
+[data-theme="ink"] a {
+  color: var(--accent-2);
+  text-decoration: underline;
+  text-decoration-color: rgba(63, 92, 110, 0.35);
+  text-underline-offset: 3px;
+  transition: all var(--transition);
+}
+[data-theme="ink"] a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+
+[data-theme="ink"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-theme="ink"] ::-webkit-scrollbar-thumb {
+  background: #cfc5ad;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+[data-theme="ink"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); background-clip: content-box; }
+[data-theme="ink"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   面板：宣纸卡片 + 细边
+   ============================================================ */
+[data-theme="ink"] header,
+[data-theme="ink"] aside,
+[data-theme="ink"] #composer,
+[data-theme="ink"] .settings-panel,
+[data-theme="ink"] .login-card,
+[data-theme="ink"] .theme-pop,
+[data-theme="ink"] .preview-card {
+  background: rgba(250, 247, 239, 0.92);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+[data-theme="ink"] header { border-radius: 0; border-top: 0; border-left: 0; border-right: 0; }
+[data-theme="ink"] aside { border-radius: 0; border-top: 0; border-bottom: 0; border-left: 0; }
+
+/* ============================================================
+   icon-btn
+   ============================================================ */
+[data-theme="ink"] .icon-btn {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .icon-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+[data-theme="ink"] .icon-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ============================================================
+   新会话按钮：笔锋虚线 → 落笔实线
+   ============================================================ */
+[data-theme="ink"] #new-session {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] #new-session:hover {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+/* ============================================================
+   会话列表
+   ============================================================ */
+[data-theme="ink"] #session-list li {
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] #session-list li:hover { background: var(--bg-hover); }
+[data-theme="ink"] #session-list li.active {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+[data-theme="ink"] #session-list li.active .session-ico { color: var(--accent); }
+
+/* ============================================================
+   消息
+   ============================================================ */
+[data-theme="ink"] .msg-name { color: var(--text); font-weight: 600; }
+[data-theme="ink"] .msg-time { color: var(--text-faint); font-family: var(--font-mono); font-size: 10.5px; }
+[data-theme="ink"] .msg-act {
+  color: var(--text-muted);
+  opacity: 0.6;
+  transition: all var(--transition);
+}
+[data-theme="ink"] .msg-act:hover { color: var(--accent); opacity: 1; }
+
+[data-theme="ink"] .msg.assistant .bubble {
+  background: #fdfbf5;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-msg);
+  box-shadow: var(--msg-shadow);
+  transition: box-shadow var(--transition);
+}
+[data-theme="ink"] .msg.assistant:hover .bubble {
+  box-shadow: 0 2px 12px rgba(42, 38, 32, 0.1);
+}
+[data-theme="ink"] .msg.user .bubble {
+  background: var(--user-grad);
+  color: #f2ede1;
+  border: 1px solid #1f1c18;
+  border-radius: var(--radius-msg);
+  box-shadow: 0 2px 8px rgba(42, 38, 32, 0.18);
+}
+[data-theme="ink"] .msg.tool .bubble {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent-2);
+  border-radius: var(--radius-msg);
+}
+[data-theme="ink"] .msg.tool .bubble .tool-head { color: var(--accent-2); font-family: var(--font-mono); }
+[data-theme="ink"] .msg.tool .bubble .tool-out { color: var(--text-muted); }
+
+/* 流式墨标 */
+[data-theme="ink"] .msg.streaming .bubble::after {
+  content: "▍";
+  color: var(--accent);
+  background: none;
+  -webkit-text-fill-color: var(--accent);
+  margin-left: 2px;
+  animation: ink-blink 1s steps(2, start) infinite;
+}
+@keyframes ink-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ============================================================
+   composer
+   ============================================================ */
+[data-theme="ink"] .composer-row {
+  background: #fdfbf5;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .composer-row:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 2px 10px rgba(176, 58, 46, 0.1);
+}
+[data-theme="ink"] #attach-btn { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="ink"] #attach-btn:hover { background: var(--bg-hover); color: var(--accent); }
+[data-theme="ink"] #input { color: var(--text); caret-color: var(--accent); }
+[data-theme="ink"] #input::placeholder { color: var(--text-faint); }
+
+[data-theme="ink"] #send {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-hover);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] #send:hover {
+  background: var(--accent-hover);
+  transform: scale(1.04);
+}
+[data-theme="ink"] #send:active { transform: scale(0.96); }
+[data-theme="ink"] #send.stopping {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ============================================================
+   审批卡片
+   ============================================================ */
+[data-theme="ink"] .approval {
+  background: rgba(160, 104, 42, 0.06);
+  border: 1px solid rgba(160, 104, 42, 0.35);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius-md);
+}
+[data-theme="ink"] .approval .yes {
+  background: var(--success);
+  color: #fdf9f0;
+  border: 1px solid rgba(74, 124, 89, 0.6);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+[data-theme="ink"] .approval .no {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+/* ============================================================
+   Markdown：墨块代码（代码块反白为墨底纸字）
+   ============================================================ */
+[data-theme="ink"] .markdown h1, [data-theme="ink"] .markdown h2, [data-theme="ink"] .markdown h3 {
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+[data-theme="ink"] .markdown h2 {
+  border-bottom: 1px solid var(--border-strong);
+  padding-bottom: 4px;
+}
+[data-theme="ink"] .markdown a {
+  color: var(--accent-2);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(63, 92, 110, 0.4);
+}
+[data-theme="ink"] .markdown a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+[data-theme="ink"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(63, 92, 110, 0.08);
+  border: 1px solid rgba(63, 92, 110, 0.18);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+  padding: 0.12em 0.5em;
+  font-size: 0.9em;
+}
+[data-theme="ink"] .markdown pre {
+  background: #2b2721;
+  border: 1px solid #1f1c18;
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 2px 10px rgba(42, 38, 32, 0.2);
+}
+[data-theme="ink"] .markdown pre code { background: none; border: none; padding: 0; color: #e8e2d4; font-size: 13px; }
+[data-theme="ink"] .markdown blockquote {
+  border-left: 2px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 12.5px;
+}
+[data-theme="ink"] .markdown table { border-color: var(--border); }
+[data-theme="ink"] .markdown th {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border);
+}
+[data-theme="ink"] .markdown td { border-color: var(--border); }
+[data-theme="ink"] .markdown tr:hover td { background: rgba(176, 58, 46, 0.03); }
+[data-theme="ink"] .markdown hr { border-top: 1px dashed var(--border-strong); }
+[data-theme="ink"] .markdown ul li::marker, [data-theme="ink"] .markdown ol li::marker { color: var(--accent); }
+[data-theme="ink"] .copy-btn {
+  background: var(--bg-elev-2);
+  color: var(--accent-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+[data-theme="ink"] .copy-btn:hover { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+[data-theme="ink"] .reasoning .reasoning-body {
+  background: rgba(63, 92, 110, 0.05);
+  border-left: 2px solid var(--accent-2);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* ============================================================
+   主题选择气泡
+   ============================================================ */
+[data-theme="ink"] .theme-pop { box-shadow: var(--shadow-pop); }
+[data-theme="ink"] .theme-section-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  padding: 8px 10px 4px;
+  border-bottom: 1px dashed var(--border);
+}
+[data-theme="ink"] .accent-opt {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+  position: relative;
+}
+[data-theme="ink"] .accent-opt::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--swatch);
+}
+[data-theme="ink"] .accent-opt:hover { border-color: var(--accent); }
+[data-theme="ink"] .accent-opt.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+[data-theme="ink"] .accent-reset {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  border-radius: 50%;
+}
+[data-theme="ink"] .accent-reset:hover { color: var(--accent); border-color: var(--accent); }
+[data-theme="ink"] .theme-opt {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .theme-opt:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+[data-theme="ink"] .theme-opt.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+[data-theme="ink"] .theme-opt .swatch { border-radius: 4px; border: 1px solid var(--border-strong); }
+[data-theme="ink"] .theme-opt .t-label { color: var(--text); font-weight: 600; }
+[data-theme="ink"] .theme-opt .t-desc { color: var(--text-faint); font-size: 10px; }
+
+/* ============================================================
+   设置抽屉
+   ============================================================ */
+[data-theme="ink"] .settings-overlay { background: rgba(42, 38, 32, 0.45); backdrop-filter: blur(4px); }
+[data-theme="ink"] .settings-head { border-bottom: 1px solid var(--border); }
+[data-theme="ink"] .settings-tabs { border-bottom: 1px solid var(--border); }
+[data-theme="ink"] .settings-tabs button { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="ink"] .settings-tabs button:hover { background: var(--bg-hover); color: var(--text); }
+[data-theme="ink"] .settings-tabs button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+[data-theme="ink"] .settings-row {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .settings-row:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+[data-theme="ink"] .settings-form { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="ink"] .settings-form label { color: var(--text-muted); font-size: 12px; }
+[data-theme="ink"] .settings-form input,
+[data-theme="ink"] .settings-form select,
+[data-theme="ink"] .settings-form textarea {
+  background: #fdfbf5;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .settings-form input:focus,
+[data-theme="ink"] .settings-form select:focus,
+[data-theme="ink"] .settings-form textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  outline: none;
+}
+[data-theme="ink"] .mini-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="ink"] .mini-btn:hover { background: var(--accent-2); color: var(--on-accent); }
+[data-theme="ink"] .mini-btn.danger { color: var(--danger); border-color: rgba(169, 50, 38, 0.4); }
+[data-theme="ink"] .mini-btn.danger:hover { background: var(--danger); color: #fff; }
+
+/* ============================================================
+   登录卡片
+   ============================================================ */
+[data-theme="ink"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1000px 500px at 50% 45%, rgba(200, 189, 163, 0.25), transparent 60%),
+    var(--bg);
+}
+[data-theme="ink"] .login-brand {
+  color: var(--text);
+  font-weight: 800;
+  letter-spacing: 0.3em;
+}
+[data-theme="ink"] .login-sub { color: var(--text-muted); letter-spacing: 0.2em; font-size: 11px; }
+[data-theme="ink"] .login-card input {
+  background: #fdfbf5;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  caret-color: var(--accent);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .login-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  outline: none;
+}
+[data-theme="ink"] .login-submit {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-hover);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  transition: all var(--transition);
+}
+[data-theme="ink"] .login-submit:hover { background: var(--accent-hover); }
+
+/* ============================================================
+   空状态
+   ============================================================ */
+[data-theme="ink"] .empty-state .es-slogan {
+  color: var(--text);
+  font-weight: 300;
+  letter-spacing: 0.35em;
+}
+[data-theme="ink"] .es-suggestions button {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .es-suggestions button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   选择 / 待办 / 压缩 / 附件 / 预览
+   ============================================================ */
+[data-theme="ink"] .choice-opt {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .choice-opt:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+[data-theme="ink"] .todo-ico { color: var(--accent-2); }
+[data-theme="ink"] .bubble.compact-notice {
+  background: rgba(63, 92, 110, 0.05);
+  border: 1px dashed rgba(63, 92, 110, 0.3);
+  color: var(--text-muted);
+}
+[data-theme="ink"] .attach-chip {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+}
+[data-theme="ink"] .attach-chip:hover { background: var(--bg-hover); border-color: var(--accent-2); }
+[data-theme="ink"] .preview-overlay { background: rgba(42, 38, 32, 0.55); backdrop-filter: blur(4px); }
+[data-theme="ink"] .preview-head { border-bottom: 1px solid var(--border); }
+[data-theme="ink"] .preview-close { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="ink"] .preview-close:hover { color: var(--danger); background: rgba(169, 50, 38, 0.1); }
+
+/* ============================================================
+   跳到最新
+   ============================================================ */
+[data-theme="ink"] .jump-bottom {
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 50%;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition);
+}
+[data-theme="ink"] .jump-bottom:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   diagram
+   ============================================================ */
+[data-theme="ink"] .diagram { background: #fdfbf5; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="ink"] .diagram-editor { background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); border-radius: var(--radius-sm); }
+
+/* ============================================================
+   水墨语法高亮（墨块底 · 淡墨纸色调）
+   ============================================================ */
+[data-theme="ink"] .hljs { color: #e8e2d4; background: transparent; }
+[data-theme="ink"] .hljs-comment, [data-theme="ink"] .hljs-quote { color: #8a8272; font-style: italic; }
+[data-theme="ink"] .hljs-keyword, [data-theme="ink"] .hljs-selector-tag, [data-theme="ink"] .hljs-literal, [data-theme="ink"] .hljs-type { color: #e8a296; font-weight: 500; }
+[data-theme="ink"] .hljs-string, [data-theme="ink"] .hljs-regexp, [data-theme="ink"] .hljs-addition { color: #a3c9a0; }
+[data-theme="ink"] .hljs-number, [data-theme="ink"] .hljs-symbol, [data-theme="ink"] .hljs-bullet { color: #d9b06a; }
+[data-theme="ink"] .hljs-title, [data-theme="ink"] .hljs-section, [data-theme="ink"] .hljs-selector-id { color: #9fc2d8; }
+[data-theme="ink"] .hljs-attr, [data-theme="ink"] .hljs-attribute, [data-theme="ink"] .hljs-variable, [data-theme="ink"] .hljs-template-variable { color: #c4cbb0; }
+[data-theme="ink"] .hljs-built_in, [data-theme="ink"] .hljs-builtin-name { color: #c9a3a3; }
+[data-theme="ink"] .hljs-meta, [data-theme="ink"] .hljs-doctag { color: #a89f8d; }
+[data-theme="ink"] .hljs-tag, [data-theme="ink"] .hljs-name { color: #d98f8f; }
+[data-theme="ink"] .hljs-emphasis { font-style: italic; }
+[data-theme="ink"] .hljs-strong { font-weight: 700; }
+
+/* 响应式：移动端 */
+@media (max-width: 860px) {
+  [data-theme="ink"] aside { background: #faf7ef !important; }
+}
