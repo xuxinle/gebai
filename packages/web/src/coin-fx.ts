@@ -3,8 +3,8 @@
  * - 金币：3D 翻转（椭圆面压缩 + 近侧视时的边缘厚度）、鎏金径向渐变、内环 + ¥ 浮雕、落地反弹两次后静止消隐。
  * - 纸币：第五套人民币六面额配色（100 红 / 50 绿 / 20 棕 / 10 蓝黑 / 5 紫 / 1 橄榄绿），飘落摇摆
  *   （终端速度 + 正弦横摆 + 绕横轴翻面的纵向压缩），版面细节（内框双线/水印圆/人像剪影/面额与角标数字）。
- * - 拖动轨迹（popTrailMoney）：小尺寸金币/纸币**漂浮**消散——负净加速度缓升 + 强空气阻力 + 轻摆慢转，
- *   不与地面交互（区别于爆发的坠落反弹物理）。
+ * - 拖动轨迹（popTrailMoney）：小尺寸金币/纸币**原地散开**消散——全向低速初速、零净加速度、
+ *   强空气阻力衰减到停，停留原位轻转渐隐（不上升不坠落，不与地面交互）。
  * - 性能：金币翻转帧与各面额纸币均**预渲染精灵**（离屏 canvas 2x 超采样），逐帧只做 transform + drawImage；
  *   canvas 懒创建、定位样式内联（不依赖主题 CSS 加载时序），粒子耗尽自动移除；rAF 仅在有粒子时运行。
  * - 降级：低性能模式 / prefers-reduced-motion 不发射（装饰性动画，遵循全局低功耗约定）。
@@ -56,6 +56,8 @@ interface Note {
   drag?: number
   /** 漂浮粒子：不与地面交互（无贴地减速，升空渐隐消散）。 */
   noFloor?: boolean
+  /** 横摆幅度（px/s，缺省 72；散开粒子用小摆幅）。 */
+  swayAmp?: number
 }
 
 type Particle = Coin | Note
@@ -357,7 +359,7 @@ function updateParticle(p: Particle, dt: number, H: number): void {
       p.vy *= 1 - p.drag * 0.6 * dt
     }
     p.sway += p.swayV * dt
-    p.x += (p.vx + Math.sin(p.sway) * 72) * dt
+    p.x += (p.vx + Math.sin(p.sway) * (p.swayAmp ?? 72)) * dt
     p.y += p.vy * dt
     p.rot += p.rotV * dt
     p.flip += p.flipV * dt
@@ -478,8 +480,8 @@ function spawnWave(x: number, y: number, n: number, speed: number): void {
   startLoop()
 }
 
-/** 拖动轨迹粒子：小尺寸金币 + 半数概率小纸币，**漂浮**消散——负净加速度缓升、强空气阻力衰减初速、
- *  轻摆慢转、不与地面交互，升空过程渐隐（区别于爆发的坠落反弹物理）。 */
+/** 拖动轨迹粒子：小尺寸金币 + 半数概率小纸币，**原地散开**消散——全向低速初速、零净加速度、
+ *  强空气阻力迅速衰减到停，停留原位轻转渐隐（不上升不坠落，不与地面交互）。 */
 export function popTrailMoney(x: number, y: number): void {
   if (coinFxDisabled()) return
   ensureCanvas()
@@ -487,40 +489,41 @@ export function popTrailMoney(x: number, y: number): void {
     kind: "coin",
     x,
     y,
-    vx: (Math.random() - 0.5) * 90,
-    vy: -30 - Math.random() * 80,
-    r: 4 + Math.random() * 2.5,
+    vx: (Math.random() - 0.5) * 130,
+    vy: (Math.random() - 0.5) * 130,
+    r: 3 + Math.random() * 1.5,
     phase: Math.random() * Math.PI * 2,
-    phaseV: (3 + Math.random() * 3) * (Math.random() < 0.5 ? -1 : 1),
+    phaseV: (2 + Math.random() * 2.5) * (Math.random() < 0.5 ? -1 : 1),
     tilt: (Math.random() - 0.5) * 0.6,
-    tiltV: (Math.random() - 0.5) * 2,
+    tiltV: (Math.random() - 0.5) * 1.5,
     bounces: 2,
     age: 0,
-    life: 1.4 + Math.random() * 0.6,
-    ay: -50 - Math.random() * 60,
-    drag: 2.2,
+    life: 1 + Math.random() * 0.4,
+    ay: 0,
+    drag: 3,
     noFloor: true,
   })
   if (Math.random() < 0.5) {
     particles.push({
       kind: "note",
-      x: x + (Math.random() * 16 - 8),
-      y: y + (Math.random() * 12 - 6),
-      vx: (Math.random() - 0.5) * 110,
-      vy: -20 - Math.random() * 70,
-      w: 30 + Math.random() * 10,
+      x: x + (Math.random() * 14 - 7),
+      y: y + (Math.random() * 10 - 5),
+      vx: (Math.random() - 0.5) * 150,
+      vy: (Math.random() - 0.5) * 150,
+      w: 22 + Math.random() * 8,
       rot: (Math.random() - 0.5) * 1,
-      rotV: (Math.random() - 0.5) * 2.5,
+      rotV: (Math.random() - 0.5) * 2,
       flip: Math.random() * Math.PI * 2,
-      flipV: (2 + Math.random() * 2.5) * (Math.random() < 0.5 ? -1 : 1),
+      flipV: (1.5 + Math.random() * 2) * (Math.random() < 0.5 ? -1 : 1),
       sway: Math.random() * Math.PI * 2,
-      swayV: 2 + Math.random() * 2,
+      swayV: 1.5 + Math.random() * 1.5,
       scheme: Math.floor(Math.random() * CNY_SCHEMES.length),
       age: 0,
-      life: 1.6 + Math.random() * 0.6,
-      ay: -40 - Math.random() * 50,
-      drag: 1.8,
+      life: 1.2 + Math.random() * 0.4,
+      ay: 0,
+      drag: 2.6,
       noFloor: true,
+      swayAmp: 18,
     })
   }
   if (particles.length > MAX_PARTICLES) particles.splice(0, particles.length - MAX_PARTICLES)
