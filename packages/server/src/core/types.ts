@@ -47,6 +47,9 @@ export type ToolContext = {
   home: string
   env: Record<string, string>
   sandboxed: boolean
+  /** 当前任务交互模式（引擎按任务注入）：show 等合并型工具按分支校验通道能力（如 HTML 预览仅 realtime）。
+   *  可选：测试桩/无引擎环境不注入时不做分支门控（保持全通道行为）。 */
+  interactionMode?: InteractionMode
   resolvePath: (p: string) => string
   readFile: (p: string) => Promise<string>
   /** 读取二进制文件原始字节（vision 等工具用，路径同样经 resolvePath/沙箱约束）。 */
@@ -163,8 +166,9 @@ export interface Tool {
   requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => boolean | Promise<boolean>)
   /** 结构化输出（ToolResult.data）的 JSON Schema：经 tool_schemas 工具批量暴露给模型，供编排前理解输出结构。 */
   outputSchema?: ToolSchema
-  /** 最低可用交互模式（缺省 none=全模式可用）：realtime=仅实时前端（如 page_capture/render_html/ask_env）、
-   *  multi_turn=至少多轮交互（如 ask_user/draw，飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。 */
+  /** 最低可用交互模式（缺省 none=全模式可用）：realtime=仅实时前端（如 page_capture/ask_env）、
+   *  multi_turn=至少多轮交互（如 ask_user，飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。
+   *  合并型工具（如 show）不做工具级门控，按 ctx.interactionMode 在分支内校验通道能力。 */
   interaction?: Exclude<InteractionMode, "none">
   /** 卡片展示元数据（注册时声明，前端按声明渲染卡片，不硬编码工具名）：
    *  titleParams：参数名列表，其值直接拼入卡片标题（简单工具的关键参数，如 write 的 path；单参数仅显示值、多参数 key=value，
@@ -172,7 +176,7 @@ export interface Tool {
    *  args：参数展示模式——缺省自适应（扁平标量参数渲染为键值行，嵌套结构 JSON 高亮）/ "json"（强制完整 JSON 高亮）/
    *    "kv"（强制键值行，嵌套值紧凑 JSON）/ "none"（不展示参数区）/ "code"（codeField 参数渲染为代码块，其余参数键值行/JSON 附注）/
    *    "edits"（codeField 数组参数的 {oldString,newString} 项渲染为旧(红)/新(绿)对比块，如 edit 的 edits）/
-   *    "block"（结果直出内容块，调用不显示通用卡片，如 draw/diff/render_html）；超长参数区自动折叠；
+   *    "block"（结果直出内容块，调用不显示通用卡片，如 show/diff）；超长参数区自动折叠；
    *  codeField/codeLang：args="code"/"edits" 时对应的代码/修改数组字段名与语言（如 sh 的 command/bash、edit 的 edits）。 */
   card?: { titleParams?: string[]; args?: "json" | "kv" | "none" | "code" | "edits" | "block"; codeField?: string; codeLang?: string }
   /** 运行时定义工具标记（js 脚本 defineTool 注册）：js/动态工具子进程内禁止再调用（防递归嵌套子进程），
