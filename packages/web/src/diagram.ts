@@ -587,10 +587,12 @@ export function renderDiagramSvg(format: DiagramFormat, code: string): Promise<s
 }
 
 function showFallback(canvas: HTMLElement, code: string, message: string): void {
-  canvas.appendChild(el("div", "diagram-error", message))
+  // pre 包在 .diagram-error 内（命中其 pre 规则：pre-wrap + 自身滚动），zoom overflow:hidden 时不被裁
+  const box = el("div", "diagram-error", message)
   const pre = el("pre")
   pre.textContent = code
-  canvas.appendChild(pre)
+  box.appendChild(pre)
+  canvas.appendChild(box)
 }
 
 /* ---------- 查看/下载源码与渲染图片 ---------- */
@@ -991,6 +993,8 @@ function bindViewerZoom(body: HTMLElement, zoom: HTMLElement) {
     st.transform = "scale(1)"
     zoom.style.width = `${w}px`
     zoom.style.height = `${h}px`
+    // 空态占位 min-height 退场：显式定高后防止 240px 把小图区域撑出底部空白（图片不垂直居中）
+    zoom.style.minHeight = "0px"
   }
 
   body.addEventListener(
