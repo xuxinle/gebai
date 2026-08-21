@@ -142,7 +142,9 @@ function onDrawRender(ev: { sessionId: string; renderId: string; code: string; f
   noteIncoming()
   void (async () => {
     try {
-      const format = (ev.format === "mermaid" || ev.format === "d2" ? ev.format : "plantuml") as DiagramFormat
+      // format 原样透传：未知语言由 renderDiagramSvg 显式报错（此处不得归一为 plantuml——
+      // echarts 曾被这里吞掉喂给 PlantUML 引擎，报出「PlantUML 渲染错误」误导排查）
+      const format = (ev.format || "plantuml") as DiagramFormat
       await renderDiagramSvg(format, String(ev.code ?? ""))
       await client.submitDrawResult(ev.sessionId, String(ev.renderId ?? ""), true)
     } catch (err) {
