@@ -76,6 +76,13 @@
   position: relative;
   overflow: hidden;
 }
+/* 内容层置于背景装饰之上：main 背景透明以透出环境特效（theme-fx 画布），气泡/卡片自身背景保证可读 */
+[data-theme="cyberpunk"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
 
 /* 顶部故障光带（粉 + 青） */
 [data-theme="cyberpunk"] body::after {

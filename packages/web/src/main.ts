@@ -14,6 +14,7 @@ import { bindMiniTools } from "./mini-tools"
 import { bindWheel } from "./wheel"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
+import { initThemeFx } from "./theme-fx"
 import { cnyCatTurnEnd, initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { initTurnTimer, isTurnTimerEnabled } from "./turn-timer"
@@ -845,6 +846,7 @@ async function init() {
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initTurnTimer()
   initTheme()
+  initThemeFx() // 各主题画布环境特效（随主题切换/低功耗启停）
   initCnyCat() // 招财猫（cny 主题专属，随主题切换挂载/卸载）
   bindTooltips() // 自定义 tooltip（[data-tip] 全局委托）先于面板绑定
   bindThemePop()
