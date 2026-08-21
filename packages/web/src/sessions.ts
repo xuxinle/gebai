@@ -792,8 +792,8 @@ function blockToMarkdown(b: ContentBlock): string {
     case "file":
       return `📎 ${b.name}（\`${b.path}\`）`
     case "diagram": {
-      const ext = { plantuml: "puml", mermaid: "mmd", d2: "d2" }[b.format ?? "plantuml"] ?? "puml"
-      const label = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2" }[b.format ?? "plantuml"] ?? "PlantUML"
+      const ext = { plantuml: "puml", mermaid: "mmd", d2: "d2", echarts: "echarts" }[b.format ?? "plantuml"] ?? "puml"
+      const label = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }[b.format ?? "plantuml"] ?? "PlantUML"
       return `📊 图表${b.name ? ` ${b.name}` : ""}（${label}）：\n\`\`\`${ext}\n${b.code}\n\`\`\``
     }
     case "diff":

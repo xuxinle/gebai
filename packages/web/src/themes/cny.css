@@ -825,3 +825,40 @@
 @media (max-width: 860px) {
   [data-theme="cny"] aside { background: var(--bg-elev); }
 }
+
+/* ============================================================
+   招财猫玩偶（悬浮可拖动，点击/单轮结束爆金币；粒子画布见 coin-fx.ts）
+   核心定位（fixed/宽/z-index/touch-action）由 cny-cat.ts 内联，此处只做装饰动效
+   ============================================================ */
+#gb-cny-cat {
+  filter: drop-shadow(0 6px 14px rgba(120, 20, 20, 0.35));
+  transition: transform 0.18s ease;
+}
+#gb-cny-cat:hover { transform: scale(1.06) rotate(-2deg); }
+#gb-cny-cat.dragging {
+  cursor: grabbing;
+  transition: none;
+  transform: scale(1.1) rotate(3deg);
+}
+/* 点击/单轮结束的弹跳反馈 */
+#gb-cny-cat.bounce { animation: cny-cat-bounce 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes cny-cat-bounce {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.14, 0.88); }
+  70% { transform: scale(0.94, 1.08); }
+  100% { transform: scale(1); }
+}
+/* 挥手手臂：绕肩关节小幅摆动（低性能模式被全局规则停用；减少动画偏好单独停用） */
+#gb-cny-cat .cny-cat-arm {
+  transform-box: view-box;
+  transform-origin: 86px 66px;
+  animation: cny-arm-wave 1.5s ease-in-out infinite;
+}
+@keyframes cny-arm-wave {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(10deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #gb-cny-cat .cny-cat-arm { animation: none; }
+  #gb-cny-cat.bounce { animation: none; }
+}

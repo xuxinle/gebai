@@ -1158,6 +1158,7 @@ console.log("defined ok")`,
   test("tool result blocks are persisted to session message", async () => {
     const s = await setup("tool")
     s.provider.toolName = "draw"
+    s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     // draw 工具执行期间等待前端渲染回传：模拟前端渲染成功
     s.events.subscribe((e) => {
@@ -1422,6 +1423,7 @@ console.log("defined ok")`,
   test("draw tool blocks the loop until the frontend render result arrives (decideDrawResult resumes)", async () => {
     const s = await setup("tool")
     s.provider.toolName = "draw"
+    s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     let renderId = ""
     s.events.subscribe((e) => {
@@ -1469,6 +1471,7 @@ console.log("defined ok")`,
   test("draw tool returns render error and timeout message to the model", async () => {
     const s = await setup("tool")
     s.provider.toolName = "draw"
+    s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     let renderId = ""
     s.events.subscribe((e) => {
