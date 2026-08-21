@@ -1173,27 +1173,15 @@ export const drawTool: Tool = {
     }
     // 实时渲染（Web 前端按 format 本地渲染或飞书后端渲染，通道实现不同但结果一致）：成功才返回成功，渲染错误回传模型，5 秒超时判定画图能力受限
     const rendered = await ctx.waitForDraw({ code, name: base, format })
-    if (rendered === null || !rendered.ok) {
-      // echarts 前端通道失败自动转后端渲染（SSR 纯计算、结果确定）：覆盖前端离线/超时/渲染报错，
-      // 尤其是旧版前端把 echarts 当 PlantUML 渲染的场景（版本错位下一次调用仍能出图，无需模型重试）
-      if (format === "echarts" && ctx.renderDiagram && ctx.writeBinaryFile) {
-        try {
-          const png = await ctx.renderDiagram(code, { format })
-          const pngRel = `tmp/${base}.png`
-          await ctx.writeBinaryFile(ctx.resolvePath(pngRel), png)
-          await ctx.writeFile(ctx.resolvePath(rel), code)
-          return {
-            output: `图表已由后端渲染为图片: ${pngRel}（前端渲染通道${rendered === null ? "超时" : `报错：${(rendered.error ?? "未知错误").slice(0, 120)}`}，已自动回退后端渲染；若反复出现请刷新页面更新前端版本）`,
-            blocks: [{ type: "image", path: pngRel, name: `${base}.png`, mime: "image/png" }],
-          }
-        } catch (err) {
-          return {
-            output: `画图失败（渲染错误）：${rendered === null ? "前端渲染超时" : rendered.error ?? "未知错误"}；后端渲染同样失败：${err instanceof Error ? err.message : String(err)}。请修正 ${label} 源码后重试。`,
-          }
-        }
-      }
-      if (rendered === null) {
-        return { output: "画图能力受限：未能在 5 秒内完成渲染（渲染端离线或超时），请稍后重试，或用其他方式表达图表内容。" }
+    if (rendered === null) {
+      return { output: "画图能力受限：未能在 5 秒内完成渲染（渲染端离线或超时），请稍后重试，或用其他方式表达图表内容。" }
+    }
+    if (!rendered.ok) {
+      // 报错引擎与请求语言不符（如请求 echarts 却由 PlantUML 引擎报错）= 前端为旧版本（旧代码把未知
+      // 语言静默当 PlantUML 渲染）：明确诊断引导刷新页面——前端渲染是默认通道，不自动换通道旁路
+      const engine = (rendered.error ?? "").match(/^(PlantUML|Mermaid|D2|ECharts) 渲染/)?.[1]
+      if (engine && engine !== label) {
+        return { output: `画图失败：前端渲染器版本过旧（请求 ${label} 图表却由 ${engine} 引擎渲染报错）。请提示用户刷新页面（加载新前端版本）后重试；确需本次立即出图可改用 render=backend。` }
       }
       return { output: `画图失败（渲染错误）：${rendered.error ?? "未知错误"}。请修正 ${label} 源码后重试。` }
     }

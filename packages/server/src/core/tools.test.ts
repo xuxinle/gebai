@@ -538,36 +538,17 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("draw echarts 前端通道失败自动回退后端渲染（旧版前端把 echarts 当 PlantUML 渲染的场景）", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-tools-draw-echarts-fb-"))
+  test("draw echarts 前端为旧版本（当 PlantUML 渲染报错）时明确诊断引导刷新，不自动换通道", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-draw-echarts-stale-"))
     const code = JSON.stringify({ xAxis: { type: "category", data: ["a", "b"] }, yAxis: {}, series: [{ type: "bar", data: [1, 2] }] })
     const c = ctx(home)
-    c.renderDiagram = async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47])
-    // 前端渲染报错（旧版前端会回 PlantUML 引擎错误）→ 自动后端渲染出图，模型无需重试
+    // 旧版前端把未知语言静默走 PlantUML 引擎：报错引擎与请求语言不符 → 版本错位诊断
     c.waitForDraw = async () => ({ ok: false, error: "PlantUML 渲染错误：[From textarea (line 2)]" })
     const r = await drawTool.execute({ code, name: "sales", format: "echarts" }, c)
-    expect(r.blocks![0].type).toBe("image")
-    expect((r.blocks![0] as { path: string }).path).toBe("tmp/sales.png")
-    expect(r.output).toContain("自动回退后端渲染")
-    expect(r.output).toContain("PlantUML 渲染错误")
-    // 前端超时（null）同样回退
-    c.waitForDraw = async () => null
-    const r2 = await drawTool.execute({ code, name: "sales", format: "echarts" }, c)
-    expect((r2.blocks![0] as { path: string }).path).toBe("tmp/sales.png")
-    expect(r2.output).toContain("前端渲染通道超时")
-    cleanup(home)
-  })
-
-  test("draw echarts 前端与后端渲染皆失败时返回合并错误", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-tools-draw-echarts-both-"))
-    const c = ctx(home)
-    c.waitForDraw = async () => ({ ok: false, error: "PlantUML 渲染错误" })
-    c.renderDiagram = async () => {
-      throw new Error("ECharts 渲染错误：Unknown series")
-    }
-    const r = await drawTool.execute({ code: '{"series":[{"type":"nope"}]}', name: "x", format: "echarts" }, c)
-    expect(r.output).toContain("后端渲染同样失败")
-    expect(r.output).toContain("ECharts 渲染错误")
+    expect(r.output).toContain("前端渲染器版本过旧")
+    expect(r.output).toContain("PlantUML")
+    expect(r.output).toContain("刷新页面")
+    expect(r.output).not.toContain("自动回退")
     expect(r.blocks).toBeUndefined()
     cleanup(home)
   })
