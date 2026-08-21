@@ -897,8 +897,13 @@
 }
 .diagram-zoom-toolbar button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .diagram-zoom-tip { margin-left: auto; font-size: 12px; color: var(--text-faint); }
-.diagram-zoom { min-height: 240px; cursor: grab; }
+/* overflow:hidden：缩放用 transform（视觉缩放），内容元素布局尺寸仍为原始 px，会溢出 zoom 盒并
+   虚增 .preview-body 滚动区域（fitView 居中公式据此计算 → 图顶部被滚出视口）；裁在 zoom 内——
+   transform 后视觉尺寸恰好等于 zoom 盒，不会裁到可见内容。min-height 供「渲染中…」空态占位，
+   setContent 显式定高后由内联清零。 */
+.diagram-zoom { min-height: 240px; cursor: grab; overflow: hidden; }
 .diagram-zoom svg { display: block; max-width: none; height: auto; }
+.diagram-zoom img { display: block; max-width: none; }
 /* 图表查看器：图默认居中（小于视口时完全居中，溢出时左上可滚动） */
 .preview-overlay .preview-card.diagram-preview .preview-body { display: flex; }
 .preview-overlay .preview-card.diagram-preview .diagram-zoom { margin: auto; }
