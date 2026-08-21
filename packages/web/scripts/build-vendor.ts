@@ -5,6 +5,7 @@
  *   打包链路，构建耗时约 11s（占 web 构建 90%+）；改以静态资源原样伺服，构建时间降至 ~1s。
  * - viz-global.js：PlantUML 依赖的 Graphviz 布局（classic script 注入全局）。
  * - mermaid.js：mermaid 官方 dist/mermaid.min.js（约 3.5MB 自包含 UMD，含全部图型）。
+ * - echarts.js：echarts 官方 dist/echarts.min.js（约 1MB 自包含 UMD，含 SVG 渲染器，SSR 模式输出 SVG 字符串）。
  * - d2js/：@terrastruct/d2 官方浏览器构建目录（index.js + worker.js + wasm 等，内部相对路径引用）。
  *
  * 背景：mermaid/@terrastruct/d2 若走 vite 自动分包会生成**带内容 hash 的文件名**，开发模式重建后旧页面
@@ -56,4 +57,5 @@ function copyDirIfChanged(srcDir: string, outDir: string, label: string): void {
 copyFileIfChanged(join(root, "node_modules", "@plantuml", "core", "plantuml.js"), join(vendor, "plantuml.js"), "plantuml.js")
 copyFileIfChanged(join(root, "node_modules", "@plantuml", "core", "viz-global.js"), join(vendor, "viz-global.js"), "viz-global.js")
 copyFileIfChanged(join(root, "node_modules", "mermaid", "dist", "mermaid.min.js"), join(vendor, "mermaid.js"), "mermaid.js")
+copyFileIfChanged(join(root, "node_modules", "echarts", "dist", "echarts.min.js"), join(vendor, "echarts.js"), "echarts.js")
 copyDirIfChanged(join(root, "node_modules", "@terrastruct", "d2", "dist", "browser"), join(vendor, "d2js"), "d2js")

@@ -14,6 +14,7 @@ import { bindMiniTools } from "./mini-tools"
 import { bindWheel } from "./wheel"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
+import { cnyCatTurnEnd, initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { initTurnTimer, isTurnTimerEnabled } from "./turn-timer"
 import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
@@ -606,6 +607,8 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
         throw new Error(chunk.error || "任务失败")
       }
       applyStreamChunk(run, sessionId, chunk)
+      // 单轮完成庆祝（人民币主题招财猫爆金币，运行越久爆得越多）；错误/取消路径不庆祝
+      if (chunk.kind === "done") cnyCatTurnEnd(Date.now() - run.startedAt)
     }
     // 推理后无正文直接结束（如纯工具链）：兜底折叠推理块。
     // 不依赖 run.el 连接状态：最后一次工具调用封段后 run.el 为 null，但推理块仍在 DOM
@@ -840,6 +843,7 @@ async function init() {
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initTurnTimer()
   initTheme()
+  initCnyCat() // 招财猫（cny 主题专属，随主题切换挂载/卸载）
   bindTooltips() // 自定义 tooltip（[data-tip] 全局委托）先于面板绑定
   bindThemePop()
   bindApprovalSkip()

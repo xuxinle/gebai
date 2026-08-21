@@ -6,12 +6,12 @@ import { isLowPower } from "./low-power"
 import { cssVarToHex } from "./css-color"
 import { injectPlantUmlLayout } from "./plantuml-layout"
 
-/* ---------- 图表渲染：三种图表语言本地引擎（PlantUML @plantuml/core / Mermaid mermaid / D2 @terrastruct/d2），配色跟随 UI 主题 ---------- */
+/* ---------- 图表渲染：四种图表语言本地引擎（PlantUML @plantuml/core / Mermaid mermaid / D2 @terrastruct/d2 / ECharts echarts），配色跟随 UI 主题 ---------- */
 
 /** 图表语言 → 产物文件扩展名（与 draw 工具落盘约定一致）。 */
-export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2" }
+export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2", echarts: "echarts" }
 /** 图表语言展示名（源码查看器/导出用）。 */
-export const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2" }
+export const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }
 
 /** 读取 CSS 变量为不透明 hex（rgba 与 body 背景合成，见 css-color.ts）。 */
 function cssVar(name: string, fallback: string): string {
@@ -450,6 +450,106 @@ async function renderD2Svg(code: string): Promise<string> {
   }
 }
 
+/* ---------- ECharts 渲染：echarts 官方 UMD（vendor/echarts.js）SSR 模式直接输出 SVG 字符串，JSON option → SVG 纯计算 ---------- */
+
+type EchartsChart = { setOption: (o: Record<string, unknown>) => void; renderToSVGString: () => string; dispose: () => void }
+type EchartsApi = { init: (el: null, theme: null, opts: { renderer: "svg"; ssr: boolean; width: number; height: number }) => EchartsChart }
+
+let echartsLoadPromise: Promise<EchartsApi> | null = null
+
+/** 加载 ECharts 本地渲染引擎（vendor/echarts.js 自包含 UMD，classic script 注入 globalThis.echarts，懒加载，失败/挂起可重试）。 */
+function loadEcharts(): Promise<EchartsApi> {
+  if (!echartsLoadPromise) {
+    echartsLoadPromise = (async () => {
+      await withTimeout(loadVendorScript(`${import.meta.env.BASE_URL}vendor/echarts.js`, "本地渲染引擎加载失败（echarts.js）"), 15000, "本地渲染引擎加载超时（echarts.js）")
+      const m = (globalThis as { echarts?: EchartsApi }).echarts
+      if (typeof m?.init !== "function") throw new Error("本地 ECharts 引擎加载失败")
+      return m
+    })().catch((err) => {
+      echartsLoadPromise = null
+      throw err
+    })
+  }
+  return echartsLoadPromise
+}
+
+/** JSON 宽松解析：严格 JSON 失败后剥掉注释与尾逗号重试（`//` 前带 `:`（URL）不剥）。 */
+function lenientJsonParse(code: string): unknown {
+  try {
+    return JSON.parse(code)
+  } catch {
+    /* 降级宽松解析 */
+  }
+  const stripped = code
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'\\\w])\/\/[^\n\r]*/g, "$1")
+    .replace(/,(\s*[}\]])/g, "$1")
+  return JSON.parse(stripped)
+}
+
+/** 解析 ECharts 源码（JSON option 或 {"option":…,"width":…,"height":…} 信封）：注入 animation:false 与 darkMode（按当前 UI 明暗）。 */
+function parseEchartsOption(code: string, dark: boolean): { option: Record<string, unknown>; width: number; height: number } {
+  let obj: unknown
+  try {
+    obj = lenientJsonParse(code)
+  } catch (err) {
+    throw new Error(
+      `ECharts 源码必须是合法 JSON（键名与字符串一律双引号；不支持单引号/裸键名/…省略号缩写；值禁止函数，格式化用字符串模板如 "{b}: {c}"）：${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new Error("ECharts 源码必须是 JSON 对象（option）")
+  const record = obj as Record<string, unknown>
+  let option = record
+  let width = 960
+  let height = 600
+  if (typeof record.option === "object" && record.option !== null && !Array.isArray(record.option)) {
+    option = record.option as Record<string, unknown>
+    const clampSize = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) ? Math.min(4000, Math.max(200, Math.round(v))) : undefined
+    width = clampSize(record.width) ?? width
+    height = clampSize(record.height) ?? height
+  }
+  return {
+    option: { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark },
+    width,
+    height,
+  }
+}
+
+/** ECharts 渲染缓存（key 含主题明暗，主题切换后失效）。 */
+const echartsCache = new Map<string, Promise<string>>()
+
+/** 渲染 ECharts JSON option 为 SVG（SSR 模式，零 DOM 挂载）；option 非法抛错（供回传模型修正）。 */
+async function renderEchartsSvg(code: string): Promise<string> {
+  const dark = isDarkTheme()
+  const key = `${dark ? "dark" : "light"}:${code}`
+  let p = echartsCache.get(key)
+  if (!p) {
+    p = (async () => {
+      const echarts = await loadEcharts()
+      const { option, width, height } = parseEchartsOption(code, dark)
+      const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width, height })
+      try {
+        chart.setOption(option)
+        const svg = chart.renderToSVGString()
+        // 输出含文本/图形等用户数据：注入 DOM 前净化（与其余图表引擎同一防线）
+        const clean = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } })
+        if (!clean) throw new Error("ECharts 渲染结果安全校验失败")
+        return clean
+      } finally {
+        chart.dispose()
+      }
+    })()
+    echartsCache.set(key, p)
+  }
+  try {
+    return await p
+  } catch (err) {
+    echartsCache.delete(key) // 失败不缓存，允许重试
+    throw err
+  }
+}
+
 /** 动态加载失败兜底（最后一层防线）：引擎已全部改为 public/vendor/ 稳定文件名静态伺服，
  *  重建后 URL 不变、hash 分块 404 已从根上消除；此处兜底理论上仅极端场景（vendor 文件缺失/网络异常）
  *  触发——整页刷新一次恢复。 */
@@ -462,9 +562,26 @@ function handleStaleChunk(err: unknown): void {
   }
 }
 
-/** 按图表语言分派渲染（draw 工具 event.draw.render 与内容块展示共用）。 */
+/** 按图表语言分派渲染（draw 工具 event.draw.render 与内容块展示共用）；未知语言显式报错引导换通道，
+ *  不静默回退 PlantUML——服务端新增图表语言而前端为旧版本时，回退会把源码当 PlantUML 渲染出误导性错误。 */
 export function renderDiagramSvg(format: DiagramFormat, code: string): Promise<string> {
-  const p = format === "mermaid" ? renderMermaidSvg(code) : format === "d2" ? renderD2Svg(code) : renderPlantUmlSvg(code)
+  let p: Promise<string>
+  switch (format) {
+    case "mermaid":
+      p = renderMermaidSvg(code)
+      break
+    case "d2":
+      p = renderD2Svg(code)
+      break
+    case "echarts":
+      p = renderEchartsSvg(code)
+      break
+    case "plantuml":
+      p = renderPlantUmlSvg(code)
+      break
+    default:
+      p = Promise.reject(new Error(`前端暂不支持图表语言「${String(format)}」（前端版本较旧或语言未识别），请改用 render=backend 渲染`))
+  }
   p.catch(handleStaleChunk)
   return p
 }
@@ -667,6 +784,7 @@ document.addEventListener("gebai:theme-change", () => {
   svgCache.clear() // PlantUML skinparam 随主题变化，缓存失效
   mermaidCache.clear() // mermaid 主题为全局初始化状态，切换后重渲染
   d2Cache.clear() // d2 主题 ID 随明暗变化，缓存失效
+  echartsCache.clear() // echarts darkMode 随明暗变化，缓存失效
   void (async () => {
     for (const ref of [...activeCanvases]) {
       const canvas = ref.deref()
@@ -685,7 +803,7 @@ document.addEventListener("gebai:theme-change", () => {
   })()
 })
 
-// 空闲预热本地渲染引擎（PlantUML 6.9MB + mermaid 3.5MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口；
+// 空闲预热本地渲染引擎（PlantUML 6.9MB + mermaid 3.5MB + echarts 1MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口；
 // D2（8MB WASM）加载开销大且架构图频率低，不预热；低性能模式跳过预热（引擎内存/加载开销大），首次渲染由消息流触发
 if (typeof window !== "undefined") {
   window.addEventListener(
@@ -697,6 +815,7 @@ if (typeof window !== "undefined") {
       schedule(() => {
         void loadPlantUml().catch(() => {})
         void loadMermaid().catch(() => {})
+        void loadEcharts().catch(() => {})
       })
     },
     { once: true },

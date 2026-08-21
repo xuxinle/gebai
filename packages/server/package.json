@@ -21,6 +21,7 @@
     "@resvg/resvg-js": "^2.6.2",
     "@terrastruct/d2": "^0.1.33",
     "dompurify": "^3.4.13",
+    "echarts": "^6.1.0",
     "happy-dom": "^20.11.2",
     "hono": "^4.6.0",
     "mermaid": "^11.16.1",

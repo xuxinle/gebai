@@ -3,9 +3,9 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { gzipSync } from "node:zlib"
-import { createDiagramRenderer, estimateGeometry, materializeD2Files, normalizeSvgRoot, svgLogicalSize, textWidthEstimate } from "./diagram-render"
+import { createDiagramRenderer, estimateGeometry, materializeD2Files, normalizeSvgRoot, parseEchartsInput, svgLogicalSize, textWidthEstimate } from "./diagram-render"
 
-describe("diagram-render（后端三语言图表渲染）", () => {
+describe("diagram-render（后端四语言图表渲染）", () => {
   test("svgLogicalSize: width/height 属性优先，非数值回退 viewBox（mermaid 输出形态），缺失为 0", () => {
     expect(svgLogicalSize('<svg width="100" height="50"></svg>')).toEqual({ width: 100, height: 50 })
     expect(svgLogicalSize('<svg width="100%" viewBox="0 0 320 240"></svg>')).toEqual({ width: 320, height: 240 })
@@ -180,4 +180,78 @@ describe("diagram-render（后端三语言图表渲染）", () => {
     // 串行执行：a 完成后才开始 bad，bad 失败后 b 仍执行
     expect(order).toEqual(["start:a", "end:a", "start:bad", "end:bad", "start:b", "end:b"])
   })
+
+  test("parseEchartsInput: 严格/宽松 JSON、信封尺寸钳制、非对象拒绝、SSR 默认注入", () => {
+    // 整体 JSON 即 option；注入 animation:false 与 darkMode 缺省值；默认画布 960×600
+    const opt = parseEchartsInput('{"series":[{"type":"pie","data":[1,2]}]}')
+    expect((opt.option.series as unknown[]).length).toBe(1)
+    expect(opt.option.animation).toBe(false)
+    expect(opt.option.darkMode).toBe(false)
+    expect(opt.width).toBe(960)
+    expect(opt.height).toBe(600)
+    // dark 参数注入（前端暗色主题）
+    expect(parseEchartsInput('{"xAxis":{}}', true).option.darkMode).toBe(true)
+    // 用户显式 darkMode 保留
+    expect(parseEchartsInput('{"darkMode":true}').option.darkMode).toBe(true)
+    // 宽松解析：注释 + 尾逗号
+    expect(parseEchartsInput('{\n  // 注释\n  "series": [1],\n}').option.series).toEqual([1])
+    // 信封：option + width/height
+    const env = parseEchartsInput('{"option":{"series":[1]},"width":800,"height":500}')
+    expect(env.width).toBe(800)
+    expect(env.height).toBe(500)
+    expect(env.option.series).toEqual([1])
+    // 尺寸钳制 200-4000（非法值回退默认）
+    const clamped = parseEchartsInput('{"option":{},"width":99999,"height":10}')
+    expect(clamped.width).toBe(4000)
+    expect(clamped.height).toBe(200)
+    expect(parseEchartsInput('{"option":{},"width":"wide"}').width).toBe(960)
+    // 非法输入给出可读错误（回传模型修正）
+    expect(() => parseEchartsInput("{bad json")).toThrow("合法 JSON")
+    expect(() => parseEchartsInput("[1,2,3]")).toThrow("JSON 对象")
+    expect(() => parseEchartsInput('"str"')).toThrow("JSON 对象")
+  })
+
+  test("createDiagramRenderer: echarts 走注入引擎并栅格化，错误带 ECharts 前缀", async () => {
+    const calls: string[] = []
+    const renderer = createDiagramRenderer({
+      echarts: async (code) => {
+        calls.push(code)
+        return '<svg width="10" height="10">ech</svg>'
+      },
+      rasterize: async (svg, opts) => new TextEncoder().encode(`PNG:${svg}|bg=${opts.background ?? ""}`),
+    })
+    const png = await renderer.renderPng('{"series":[]}', { format: "echarts" })
+    expect(new TextDecoder().decode(png)).toContain("ech")
+    expect(new TextDecoder().decode(png)).toContain("bg=#ffffff")
+    expect(calls).toEqual(['{"series":[]}'])
+    const bad = createDiagramRenderer({
+      echarts: async () => {
+        throw new Error("Unknown series nope")
+      },
+      rasterize: async () => new Uint8Array([1]),
+    })
+    const err = await bad.renderPng("{}", { format: "echarts" }).then(
+      () => null,
+      (e) => e as Error,
+    )
+    expect(err).toBeInstanceOf(Error)
+    expect(err!.message).toContain("ECharts 渲染错误：")
+  })
+
+  test("createDiagramRenderer: 真实 echarts SSR 引擎渲染 PNG（JSON option → SVG → PNG 字节）", async () => {
+    const renderer = createDiagramRenderer()
+    const code = JSON.stringify({
+      title: { text: "季度营收" },
+      xAxis: { type: "category", data: ["Q1", "Q2", "Q3"] },
+      yAxis: { type: "value" },
+      series: [
+        { type: "bar", data: [10, 20, 15] },
+        { type: "line", data: [8, 18, 12] },
+      ],
+    })
+    const png = await renderer.renderPng(code, { format: "echarts" })
+    expect(png.byteLength).toBeGreaterThan(1000)
+    expect(png[0]).toBe(0x89) // PNG 魔数
+    expect(png[1]).toBe(0x50)
+  }, 20000)
 })

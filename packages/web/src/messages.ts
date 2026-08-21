@@ -76,6 +76,15 @@ function openFilePreview(sessionId: string, b: Extract<ContentBlock, { type: "fi
     body.appendChild(img)
     return
   }
+  if (mime === "application/pdf") {
+    // PDF：浏览器原生渲染内嵌查看（show_file 无法内联类型的兜底预览）
+    const frame = document.createElement("iframe")
+    frame.src = filesContent(sessionId, b.path)
+    frame.title = b.name || "PDF 预览"
+    frame.style.cssText = "width:100%;height:72vh;border:0;border-radius:8px;background:#fff"
+    body.appendChild(frame)
+    return
+  }
   void fetch(filesContent(sessionId, b.path))
     .then(async (r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`)

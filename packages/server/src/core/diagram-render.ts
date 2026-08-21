@@ -1,15 +1,19 @@
 /**
- * 后端图表渲染器（draw 工具 `render=backend` 与飞书通道共用）：三种图表语言 → SVG（本地引擎，零网络）→ PNG（@resvg/resvg-js）。
+ * 后端图表渲染器（draw 工具 `render=backend` 与飞书通道共用）：四种图表语言 → SVG（本地引擎，零网络）→ PNG（@resvg/resvg-js）。
  * - **plantuml**：复用 `feishu-bot/plantuml.ts`（TeaVM 引擎 + DOM shim，浅色主题白底）。
  * - **mermaid**：`mermaid` npm 包 + happy-dom DOM 垫层——**垫层必须先在 mermaid 导入前安装**（mermaid 模块求值即建样式表）；
  *   固定浅色主题（`theme: "default"`）+ `htmlLabels: false`（resvg 不支持 foreignObject，纯 SVG 输出）。
  * - **d2**：`@terrastruct/d2` 官方 WASM（node-esm 构建，文件路径 Worker——bun build 无法内联）：dev 模式直接 import 包；
  *   **二进制模式**从内嵌产物（`d2js.embedded.generated.json`，构建脚本 `scripts/build-d2js.ts` 生成，gzip base64）
  *   物化到 `{GEBAI_HOME}/vendor/d2js/{version}/` 后动态 import（与 playwright 子Agent 的 driver.mjs 复制同思路的打包闭环）。
+ * - **echarts**：`echarts` npm 包 SSR 渲染（`ssr:true` + SVGRenderer，零 DOM）——**顶层急切导入**：zrender 环境探测在模块求值期
+ *   完成，若在 happy-dom/PlantUML 垫层污染全局 window/document 后才加载会误判浏览器环境（文本测量需真 canvas，垫层不支持）；
+ *   本文件经引擎惰性 import，急切导入不增加启动开销。
  * - 各语言渲染经**串行队列**（mermaid 的 happy-dom document 与 d2 单 Worker 均为共享状态，防并发冲突）；依赖全部可注入（测试用 fake）。
  * - 失败抛错携带渲染原因（供回传模型修正源码）。
  */
 import type { DiagramFormat } from "@gebai/sdk"
+import * as echarts from "echarts"
 import { dirname, join } from "node:path"
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { pathToFileURL } from "node:url"
@@ -335,6 +339,81 @@ async function renderMermaidSvg(code: string): Promise<string> {
   return svg
 }
 
+/* ---------------- echarts：npm 包 SSR 渲染（JSON option → SVG，零 DOM） ---------------- */
+
+/** echarts 默认画布尺寸（信封未指定时）。 */
+export const ECHARTS_DEFAULT_WIDTH = 960
+export const ECHARTS_DEFAULT_HEIGHT = 600
+const ECHARTS_MIN_SIZE = 200
+const ECHARTS_MAX_SIZE = 4000
+
+/** JSON 宽松解析：严格 JSON 失败后剥掉注释与尾逗号重试（模型常产出带注释/尾逗号的对象字面量；`//` 前带 `:`（URL）不剥）。 */
+function lenientJsonParse(code: string): unknown {
+  try {
+    return JSON.parse(code)
+  } catch {
+    /* 降级宽松解析 */
+  }
+  const stripped = code
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'\\\w])\/\/[^\n\r]*/g, "$1")
+    .replace(/,(\s*[}\]])/g, "$1")
+  return JSON.parse(stripped)
+}
+
+/** echarts 渲染输入：option + 画布尺寸。 */
+export interface EchartsInput {
+  option: Record<string, unknown>
+  width: number
+  height: number
+}
+
+/**
+ * 解析 echarts 源码为渲染输入：整个 JSON 对象即 option，或 `{"option": {...}, "width": 960, "height": 600}` 信封指定画布尺寸
+ * （尺寸钳制 200-4000）。注入 `animation: false`（SSR 静态输出必须）；`darkMode` 缺省取参数（后端固定浅色，前端按主题传入）。
+ */
+export function parseEchartsInput(code: string, dark = false): EchartsInput {
+  let obj: unknown
+  try {
+    obj = lenientJsonParse(code)
+  } catch (err) {
+    throw new Error(
+      `ECharts 源码必须是合法 JSON（键名与字符串一律双引号；不支持单引号/裸键名/…省略号缩写；值禁止函数，格式化用字符串模板如 "{b}: {c}"）：${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+    throw new Error("ECharts 源码必须是 JSON 对象（option），不能是数组或标量")
+  }
+  const record = obj as Record<string, unknown>
+  let option = record
+  let width = ECHARTS_DEFAULT_WIDTH
+  let height = ECHARTS_DEFAULT_HEIGHT
+  if (typeof record.option === "object" && record.option !== null && !Array.isArray(record.option)) {
+    option = record.option as Record<string, unknown>
+    const clampSize = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) ? Math.min(ECHARTS_MAX_SIZE, Math.max(ECHARTS_MIN_SIZE, Math.round(v))) : undefined
+    width = clampSize(record.width) ?? width
+    height = clampSize(record.height) ?? height
+  }
+  return {
+    option: { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark },
+    width,
+    height,
+  }
+}
+
+/** 渲染 ECharts JSON option 为 SVG（SSR 模式，浅色；白底由栅格化兜底）；option 非法抛错（供回传模型修正）。 */
+async function renderEchartsSvg(code: string): Promise<string> {
+  const { option, width, height } = parseEchartsInput(code)
+  const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width, height })
+  try {
+    chart.setOption(option)
+    return chart.renderToSVGString()
+  } finally {
+    chart.dispose()
+  }
+}
+
 /* ---------------- d2：@terrastruct/d2 WASM（dev import / 二进制物化） ---------------- */
 
 type D2Api = {
@@ -444,7 +523,7 @@ export function formatD2Error(msg: string): string {
 
 /** 错误信息归一（截断 + 语言前缀，供回传模型；D2 错误 JSON 转可读文本）。 */
 function wrapError(format: DiagramFormat, err: unknown): Error {
-  const label = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2" }[format]
+  const label = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }[format]
   let msg = err instanceof Error ? err.message : String(err)
   if (format === "d2") msg = formatD2Error(msg)
   return new Error(`${label} 渲染错误：${msg.slice(0, 200)}`)
@@ -457,6 +536,8 @@ export interface DiagramRendererDeps {
   mermaid?: (code: string) => Promise<string>
   /** D2 渲染（测试注入 fake；缺省本地引擎）。 */
   d2?: (code: string) => Promise<string>
+  /** ECharts 渲染（测试注入 fake；缺省本地引擎）。 */
+  echarts?: (code: string) => Promise<string>
   /** SVG → PNG 栅格化（测试注入 fake；缺省 @resvg/resvg-js）。 */
   rasterize?: (svg: string, opts: RasterizeOpts) => Promise<Uint8Array>
 }
@@ -464,6 +545,7 @@ export interface DiagramRendererDeps {
 export function createDiagramRenderer(deps: DiagramRendererDeps = {}): DiagramRenderer {
   const mermaidRender = deps.mermaid ?? renderMermaidSvg
   const d2Render = deps.d2 ?? renderD2Svg
+  const echartsRender = deps.echarts ?? renderEchartsSvg
   const rasterize = deps.rasterize ?? svgRasterize
   const plantumlRender = deps.plantuml ?? (async () => {
     const { createPlantUmlRenderer } = await import("../feishu-bot/plantuml")
@@ -476,6 +558,10 @@ export function createDiagramRenderer(deps: DiagramRendererDeps = {}): DiagramRe
       const rasterOpts: RasterizeOpts = { background: opts.background ?? "#ffffff", maxWidth: opts.maxWidth, maxHeight: opts.maxHeight }
       return enqueue(async () => {
         try {
+          if (format === "echarts") {
+            // SSR 渲染零 DOM，与 mermaid/d2 的垫层互不影响（echarts 已在模块求值期以 Node 环境加载）
+            return await rasterize(await echartsRender(code), rasterOpts)
+          }
           if (format === "mermaid") {
             // PlantUML 垫层会覆盖全局 document/XMLSerializer：mermaid 渲染前强制还原 happy-dom 环境
             installDomShim(true)

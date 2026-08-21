@@ -1,12 +1,12 @@
-import { dirname, isAbsolute, join, relative } from "node:path"
+import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { homedir, tmpdir } from "node:os"
 import { spawn } from "node:child_process"
 import { lookup } from "node:dns/promises"
 import { createServer, connect, type AddressInfo } from "node:net"
 import type { ContentBlock, DiagramFormat, FileEntry, TodoItem, ToolSchema } from "@gebai/sdk"
 import type { ChoiceOption, Tool, ToolContext, ToolResult } from "./types"
-import { truncatedPath, truncatedLogicalPath } from "./paths"
-import { randomUUID } from "node:crypto"
+import { truncatedPath, truncatedLogicalPath, sessionPath } from "./paths"
+import { randomUUID, createHash } from "node:crypto"
 import { isBinaryMode } from "./config"
 import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from "./diff"
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from "./patch"
@@ -149,13 +149,13 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
 }
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp)$/i
-const DIAGRAM_EXT = /\.(puml|plantuml|mmd|mermaid|d2)$/i
+const DIAGRAM_EXT = /\.(puml|plantuml|mmd|mermaid|d2|echarts)$/i
 /** 图表文件扩展名 → 图表语言（draw 工具 path 模式与 read/write 产物块推断用）。 */
-const DIAGRAM_FORMATS: Record<string, DiagramFormat> = { puml: "plantuml", plantuml: "plantuml", mmd: "mermaid", mermaid: "mermaid", d2: "d2" }
+const DIAGRAM_FORMATS: Record<string, DiagramFormat> = { puml: "plantuml", plantuml: "plantuml", mmd: "mermaid", mermaid: "mermaid", d2: "d2", echarts: "echarts" }
 /** 图表语言 → 产物文件扩展名（draw 工具落盘 tmp/ 用）。 */
-export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2" }
+export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2", echarts: "echarts" }
 /** 图表语言展示名（错误提示/文档用）。 */
-const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2" }
+const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }
 
 /** 按文件名扩展名推断图表语言（未命中返回 undefined）。 */
 export function diagramFormatFor(path: string): DiagramFormat | undefined {
@@ -166,7 +166,31 @@ export function diagramFormatFor(path: string): DiagramFormat | undefined {
 function mimeFor(path: string): string | undefined {
   const ext = path.split(".").pop()?.toLowerCase()
   if (!ext) return undefined
-  const mimes: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp" }
+  const mimes: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    svg: "image/svg+xml",
+    bmp: "image/bmp",
+    // 文档/数据/音视频（show_file 文件卡片提示与预览入口用）
+    pdf: "application/pdf",
+    txt: "text/plain",
+    md: "text/markdown",
+    csv: "text/csv",
+    json: "application/json",
+    html: "text/html",
+    xml: "application/xml",
+    yaml: "application/yaml",
+    zip: "application/zip",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    mp4: "video/mp4",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+  }
   return mimes[ext]
 }
 
@@ -1059,21 +1083,22 @@ export const drawTool: Tool = {
   // 需至少多轮交互（前端实时渲染或飞书后端渲染 PNG 两种通道），无交互模式禁用
   interaction: "multi_turn",
   description:
-    "创建/更新图表，支持 Mermaid（通用首选）/ PlantUML（标准 UML 建模）/ D2（美观架构图），选型指南见 format 参数。code 与 path 二选一：code 直接给源码；path 渲染会话内已存在的图表文件（.mmd/.puml/.plantuml/.d2，避免重发源码；format 未传时按扩展名推断）。渲染成功才返回成功，失败返回错误信息供修正；PlantUML 勿手动添加 @startuml/@enduml（自动补全）。产物保存到会话 tmp/ 并返回图表内容块。",
+    "创建/更新图表，支持 Mermaid（通用首选）/ PlantUML（标准 UML 建模）/ D2（美观架构图）/ ECharts（数据图表），选型指南见 format 参数。code 与 path 二选一：code 直接给源码；path 渲染会话内已存在的图表文件（.mmd/.puml/.plantuml/.d2/.echarts，避免重发源码；format 未传时按扩展名推断）。渲染成功才返回成功，失败返回错误信息供修正；PlantUML 勿手动添加 @startuml/@enduml（自动补全）。产物保存到会话 tmp/ 并返回图表内容块。",
   card: { args: "block" },
   parameters: schema(
     {
-      code: { type: "string", description: "图表源码（与 path 二选一）。PlantUML 布局：流程类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包" },
-      path: { type: "string", description: "会话内已存在的图表文件路径（.mmd/.mermaid/.puml/.plantuml/.d2，与 code 二选一：读取文件内容直接渲染，适合已生成图表文件仅需重新渲染/换通道/再次展示的场景；format 未传时按扩展名推断）" },
+      code: { type: "string", description: "图表源码（与 path 二选一）。PlantUML 布局：流程类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包。ECharts：传 option 的严格 JSON（键名与字符串一律双引号，不支持单引号/裸键名/…省略号缩写；容错 //注释 与尾逗号），格式化用字符串模板如 \"{b}: {c}\"" },
+      path: { type: "string", description: "会话内已存在的图表文件路径（.mmd/.mermaid/.puml/.plantuml/.d2/.echarts，与 code 二选一：读取文件内容直接渲染，适合已生成图表文件仅需重新渲染/换通道/再次展示的场景；format 未传时按扩展名推断）" },
       name: { type: "string", description: "图表文件名（不含扩展名；未传时默认 diagram，path 模式默认取文件主名）" },
       format: {
-        enum: ["mermaid", "plantuml", "d2"],
+        enum: ["mermaid", "plantuml", "d2", "echarts"],
         description:
           "图表语言（必选）：\n" +
           "【mermaid】流程图/时序图/状态图/甘特图/用户旅程、Markdown 文档嵌入、简单架构；语法最简。\n" +
           "【plantuml】类图/组件图/部署图/用例图/活动图/ER 图等标准 UML 与严谨建模，功能最全。\n" +
           "【d2】系统架构/云架构/网络拓扑/微服务等对外展示场景（PPT/汇报），默认布局最现代。\n" +
-          "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图。",
+          "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等数据可视化与统计图表；code 传 option 的严格 JSON（键名与字符串一律双引号，值禁止函数），可选信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸（默认 960×600）。\n" +
+          "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图；数据分析=echarts 统计图表。",
       },
       render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（默认 frontend，首选前端渲染降低服务端负载）：frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销）/ backend（服务端渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用，三语言均支持；前端渲染不可用（收到「画图能力受限」）时改用 backend 重试）" },
     },
@@ -1082,7 +1107,12 @@ export const drawTool: Tool = {
   async execute(args, ctx) {
     const pathArg = args.path ? String(args.path) : ""
     const formatArg = String(args.format ?? "")
-    let format: DiagramFormat = formatArg === "mermaid" || formatArg === "d2" ? formatArg : "plantuml"
+    // format 校验前置（必选）：缺失/非法立即报错而非静默回退 plantuml——实测复盘：漏传 format 时
+    // ECharts JSON 被当 PlantUML 渲染，报「PlantUML 渲染错误」误导模型连续多轮失败
+    if (formatArg && formatArg !== "mermaid" && formatArg !== "plantuml" && formatArg !== "d2" && formatArg !== "echarts") {
+      return { output: `画图失败：format 参数无效（"${formatArg}"）。可选值：mermaid / plantuml / d2 / echarts（必选）。` }
+    }
+    let format: DiagramFormat | null = formatArg ? (formatArg as DiagramFormat) : null
     let raw: string
     let base: string
     if (pathArg) {
@@ -1092,11 +1122,17 @@ export const drawTool: Tool = {
       } catch (err) {
         return { output: `画图失败：无法读取文件 ${pathArg}（${err instanceof Error ? err.message : String(err)}）。请确认文件存在（可用 ls 查看会话文件）。` }
       }
-      const inferred = diagramFormatFor(pathArg)
-      if (!formatArg && inferred) format = inferred
+      if (!format) {
+        const inferred = diagramFormatFor(pathArg)
+        if (!inferred) {
+          return { output: `画图失败：未传 format 且无法从 ${pathArg} 的扩展名推断图表语言。请显式传 format：mermaid / plantuml / d2 / echarts。` }
+        }
+        format = inferred
+      }
       const fileBase = baseName(pathArg).replace(DIAGRAM_EXT, "")
       base = (args.name ? String(args.name) : fileBase || "diagram").replace(DIAGRAM_EXT, "")
     } else {
+      if (!format) return { output: "画图失败：缺少必选参数 format（mermaid / plantuml / d2 / echarts）。" }
       raw = String(args.code ?? "")
       base = (args.name ? String(args.name) : "diagram").replace(DIAGRAM_EXT, "")
     }
@@ -1242,6 +1278,123 @@ export const renderHtmlTool: Tool = {
 
 // save_tool/delete_tool（HTML 小工具库）已下沉 widgets 子Agent：core/mini-tools.ts 提供存储实现，
 // widgets_save/widgets_list/widgets_get/widgets_delete 以子Agent 命名空间暴露（与模型工具语义区分）
+
+/** show_file：非会话 tmp/ 文件复制进会话文件区的尺寸上限（超出提示改为告知路径，防大文件拖垮磁盘/传输）。 */
+export const SHOW_FILE_MAX_BYTES = 100 * 1024 * 1024
+/** show_file：文本直读展示的读取上限（字节，超出不再内联文本，仅给查看/下载卡片）。 */
+export const SHOW_FILE_TEXT_DIRECT_BYTES = 512 * 1024
+/** show_file：内联文本/代码块字符上限（超出截断展示 + 附 file 卡片取全文）。 */
+export const SHOW_FILE_TEXT_MAX_CHARS = 40_000
+
+/** show_file：可内联直显的文本/代码扩展名（命中则内容直接进 code 块展示）。 */
+const SHOW_FILE_TEXT_EXT = new Set(
+  "txt md markdown csv tsv json jsonl xml yaml yml log toml ini env properties conf cfg ts tsx js jsx mjs cjs py pyw rb go rs java kt kts c h cpp hpp cc cs php sh bash zsh bat cmd ps1 ps1m1 sql lua dart swift scala r pl vue svelte css scss less sass".split(
+    " ",
+  ),
+)
+
+/**
+ * show_file：把文件**直接展示给用户**——按文件类型产出直显内容块，内容在消息流内联呈现：
+ * - 图片 → `image` 块（内联 `<img>` + 全屏查看器）；图表源文件（.puml/.mmd/.d2/.echarts）→ `diagram` 块（本地渲染卡片）；
+ *   `.html` → `html` 块（沙箱 iframe 预览）；文本/代码 → `code` 块内联展示（超长截断 + 附 file 卡片取全文）。
+ * - 无法内联的类型（PDF/压缩包/Office/音视频等）→ `file` 块（查看/下载卡片，点击时才经 files/content 按需加载）。
+ * - 会话 `tmp/` 内文件直接引用（零复制）；本地模式工作区/绝对路径文件复制一份到 `tmp/shown/`
+ *   （内容哈希命名，重复展示复用同一副本）后引用——前端文件接口只服务会话 `tmp/`，复制保证可见性与文件面板留存。
+ * - 归属判定用会话 tmp 真实绝对路径（项目绑定子Agent 的 resolvePath 基准是项目根，不能作判定依据）；
+ *   复制目标写会话 tmp 绝对路径（同样绕开项目根基准，保证落在真实会话文件区）。
+ */
+export const showFileTool: Tool = {
+  name: "show_file",
+  description:
+    "把文件直接展示给用户（内容在消息流内联呈现）：图片内联显示、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 渲染成页面预览、文本/代码内联展示内容；无法内联的类型（PDF/压缩包/Office/音视频等）给查看/下载卡片。适合交付产物（报表/图片/导出文件）或需要用户过目的文件。path 为会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径——不在会话文件区内的文件会复制一份（≤100MB）到会话文件区再展示。",
+  card: { args: "block" },
+  parameters: schema(
+    {
+      path: { type: "string", description: "文件路径（会话 tmp/ 相对路径；本地模式可为工作区相对/绝对路径）" },
+      name: { type: "string", description: "展示文件名（默认取文件主名）" },
+    },
+    ["path"],
+  ),
+  async execute(args, ctx) {
+    const raw = String(args.path ?? "").trim()
+    if (!raw) return { output: "show_file 失败：缺少 path 参数。" }
+    let abs: string
+    try {
+      abs = ctx.resolvePath(raw)
+    } catch (err) {
+      return { output: `show_file 失败：路径被拒绝（${err instanceof Error ? err.message : String(err)}）。请确认路径在允许范围内。` }
+    }
+    const { stat } = await import("node:fs/promises")
+    let size: number
+    try {
+      const st = await stat(abs)
+      if (!st.isFile()) return { output: `show_file 失败：${raw} 不是文件（目录请用 ls 列出后选择具体文件）。` }
+      size = st.size
+    } catch {
+      return { output: `show_file 失败：文件不存在（${raw}）。请确认路径（可用 ls 查看）。` }
+    }
+    const display = args.name ? String(args.name) : raw.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "file"
+    const sessionTmp = join(sessionPath(ctx.home, ctx.user, ctx.sessionId), "tmp")
+    const inSessionTmp = abs === sessionTmp || abs.startsWith(sessionTmp + sep)
+    // 非会话文件先复制（所有分支统一：内联展示的同时产物留存会话文件区，文件面板可见/可下载）
+    let logical: string
+    let copiedBytes: Uint8Array | null = null
+    if (inSessionTmp) {
+      logical = `tmp/${relative(sessionTmp, abs).split(sep).join("/")}`
+    } else {
+      if (size > SHOW_FILE_MAX_BYTES) {
+        return { output: `show_file 失败：文件过大（${size} 字节，复制上限 ${SHOW_FILE_MAX_BYTES} 字节）。请改为在回复中告知文件路径。` }
+      }
+      if (!ctx.readBinaryFile || !ctx.writeBinaryFile) {
+        return { output: "show_file 失败：当前环境不支持二进制复制（readBinaryFile/writeBinaryFile 未启用），仅支持会话 tmp/ 内文件。" }
+      }
+      try {
+        copiedBytes = await ctx.readBinaryFile(abs)
+      } catch (err) {
+        return { output: `show_file 失败：无法读取 ${raw}（${err instanceof Error ? err.message : String(err)}）。` }
+      }
+      const base = display.replace(/\.[^.]+$/, "") || "file"
+      const ext = display.match(/\.[^.]+$/)?.[0] ?? ""
+      const hash = createHash("sha256").update(copiedBytes).digest("hex").slice(0, 8)
+      logical = `tmp/shown/${base}-${hash}${ext}`
+      // 复制目标写会话 tmp 绝对路径（项目绑定子Agent 的 resolvePath 基准是项目根，直接写会落错位置）
+      await ctx.writeBinaryFile(join(sessionTmp, "shown", `${base}-${hash}${ext}`), copiedBytes)
+    }
+    // 读取文本内容（图表/HTML/文本分支共用）：会话内文件按路径读，已复制的直接解码
+    const readText = async (): Promise<string> => {
+      if (copiedBytes) return new TextDecoder().decode(copiedBytes)
+      return ctx.readFile(abs)
+    }
+    const copiedNote = inSessionTmp ? "" : `（源 ${raw}，已复制到会话文件区 ${logical}）`
+    const blocks: ContentBlock[] = []
+    let how = ""
+    if (IMAGE_EXT.test(abs)) {
+      blocks.push({ type: "image", path: logical, name: display, mime: mimeFor(abs) })
+      how = "图片内联展示，点击可全屏查看"
+    } else if (DIAGRAM_EXT.test(abs)) {
+      blocks.push({ type: "diagram", format: diagramFormatFor(abs) ?? "plantuml", code: await readText(), name: display, version: 1 })
+      how = "图表渲染展示"
+    } else if (/\.html?$/i.test(abs)) {
+      blocks.push({ type: "html", html: await readText(), name: display })
+      how = "HTML 页面预览展示"
+    } else if (SHOW_FILE_TEXT_EXT.has(abs.split(".").pop()?.toLowerCase() ?? "") && size <= SHOW_FILE_TEXT_DIRECT_BYTES) {
+      const text = await readText()
+      if (text.length <= SHOW_FILE_TEXT_MAX_CHARS) {
+        blocks.push({ type: "code", text, language: inferLang(display) || undefined })
+        how = `内容内联展示（${text.length} 字符）`
+      } else {
+        // 超长文本截断展示 + 附查看/下载卡片取全文
+        blocks.push({ type: "code", text: `${text.slice(0, SHOW_FILE_TEXT_MAX_CHARS)}\n…（文本过长已截断，全文 ${text.length} 字符见下方文件卡片）`, language: inferLang(display) || undefined })
+        blocks.push({ type: "file", path: logical, name: display, mime: mimeFor(abs) })
+        how = `内容截断内联展示（前 ${SHOW_FILE_TEXT_MAX_CHARS} 字符）+ 文件卡片取全文`
+      }
+    } else {
+      blocks.push({ type: "file", path: logical, name: display, mime: mimeFor(abs) })
+      how = "该类型无法内联展示，已提供查看/下载卡片（点击时才加载内容）"
+    }
+    return { output: `已向用户展示文件 ${display}（${logical}，${size} 字节，${how}）${copiedNote}。`, blocks }
+  },
+}
 
 /** 统计 needle 在 content 中的非重叠出现位置（起始索引），limit 后截断（防巨量匹配耗尽内存）。 */
 function findOccurrences(content: string, needle: string, limit = 1000): number[] {
@@ -2558,6 +2711,7 @@ export function createAllGlobalTools(): Record<string, Tool> {
     js: jsTool,
     draw: drawTool,
     render_html: renderHtmlTool,
+    show_file: showFileTool,
     // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）
     fetch_url: fetchUrlTool,
     todo: todoTool,
