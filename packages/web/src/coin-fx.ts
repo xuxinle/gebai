@@ -3,6 +3,8 @@
  * - 金币：3D 翻转（椭圆面压缩 + 近侧视时的边缘厚度）、鎏金径向渐变、内环 + ¥ 浮雕、落地反弹两次后静止消隐。
  * - 纸币：第五套人民币六面额配色（100 红 / 50 绿 / 20 棕 / 10 蓝黑 / 5 紫 / 1 橄榄绿），飘落摇摆
  *   （终端速度 + 正弦横摆 + 绕横轴翻面的纵向压缩），版面细节（内框双线/水印圆/人像剪影/面额与角标数字）。
+ * - 拖动轨迹（popTrailMoney）：小尺寸金币/纸币**漂浮**消散——负净加速度缓升 + 强空气阻力 + 轻摆慢转，
+ *   不与地面交互（区别于爆发的坠落反弹物理）。
  * - 性能：金币翻转帧与各面额纸币均**预渲染精灵**（离屏 canvas 2x 超采样），逐帧只做 transform + drawImage；
  *   canvas 懒创建、定位样式内联（不依赖主题 CSS 加载时序），粒子耗尽自动移除；rAF 仅在有粒子时运行。
  * - 降级：低性能模式 / prefers-reduced-motion 不发射（装饰性动画，遵循全局低功耗约定）。
@@ -24,6 +26,12 @@ interface Coin {
   bounces: number
   age: number
   life: number
+  /** 垂直净加速度覆盖（px/s²，负值=漂浮缓升；缺省用标准重力）。 */
+  ay?: number
+  /** 空气阻力系数（每秒速度衰减比例，漂浮粒子用；缺省无额外阻力）。 */
+  drag?: number
+  /** 漂浮粒子：不与地面交互（无反弹/无贴地，升空渐隐消散）。 */
+  noFloor?: boolean
 }
 
 interface Note {
@@ -42,6 +50,12 @@ interface Note {
   scheme: number
   age: number
   life: number
+  /** 垂直净加速度覆盖（px/s²，负值=漂浮缓升；缺省用标准重力+终端速度）。 */
+  ay?: number
+  /** 空气阻力系数（每秒速度衰减比例，漂浮粒子用；缺省无额外阻力）。 */
+  drag?: number
+  /** 漂浮粒子：不与地面交互（无贴地减速，升空渐隐消散）。 */
+  noFloor?: boolean
 }
 
 type Particle = Coin | Note
@@ -306,38 +320,54 @@ function tick(ts: number): void {
 
 function updateParticle(p: Particle, dt: number, H: number): void {
   if (p.kind === "coin") {
-    p.vy += G_COIN * dt
+    p.vy += (p.ay ?? G_COIN) * dt
+    if (p.drag) {
+      p.vx *= 1 - p.drag * dt
+      p.vy *= 1 - p.drag * 0.6 * dt
+    }
     p.x += p.vx * dt
     p.y += p.vy * dt
     p.phase += p.phaseV * dt
     p.tilt += p.tiltV * dt
-    const floor = H - p.r - 2
-    if (p.y > floor && p.vy > 0) {
-      if (p.bounces < 2 && p.vy > 150) {
-        p.vy = -p.vy * 0.45
-        p.vx *= 0.72
-        p.tiltV *= 0.7
-        p.phaseV *= 0.75
-        p.bounces++
-      } else {
-        p.vy = 0
-        p.vx *= 0.85
-        p.tiltV *= 0.85
+    if (!p.noFloor) {
+      const floor = H - p.r - 2
+      if (p.y > floor && p.vy > 0) {
+        if (p.bounces < 2 && p.vy > 150) {
+          p.vy = -p.vy * 0.45
+          p.vx *= 0.72
+          p.tiltV *= 0.7
+          p.phaseV *= 0.75
+          p.bounces++
+        } else {
+          p.vy = 0
+          p.vx *= 0.85
+          p.tiltV *= 0.85
+        }
+        p.y = floor
       }
-      p.y = floor
     }
   } else {
-    p.vy = Math.min(p.vy + G_NOTE * dt, NOTE_TERMINAL_VY)
+    if (p.ay !== undefined) {
+      p.vy += p.ay * dt
+    } else {
+      p.vy = Math.min(p.vy + G_NOTE * dt, NOTE_TERMINAL_VY)
+    }
+    if (p.drag) {
+      p.vx *= 1 - p.drag * dt
+      p.vy *= 1 - p.drag * 0.6 * dt
+    }
     p.sway += p.swayV * dt
     p.x += (p.vx + Math.sin(p.sway) * 72) * dt
     p.y += p.vy * dt
     p.rot += p.rotV * dt
     p.flip += p.flipV * dt
-    p.vx *= 1 - 0.6 * dt
-    p.rotV *= 1 - 0.35 * dt
-    if (p.y > H - 14) {
-      p.y = H - 14
-      p.vy = Math.min(p.vy, 40)
+    if (!p.noFloor) {
+      p.vx *= 1 - 0.6 * dt
+      p.rotV *= 1 - 0.35 * dt
+      if (p.y > H - 14) {
+        p.y = H - 14
+        p.vy = Math.min(p.vy, 40)
+      }
     }
   }
 }
@@ -448,7 +478,8 @@ function spawnWave(x: number, y: number, n: number, speed: number): void {
   startLoop()
 }
 
-/** 拖动轨迹粒子：每拍一枚小金币 + 半数概率一张小纸币（低初速、小尺寸、快速消隐）。 */
+/** 拖动轨迹粒子：小尺寸金币 + 半数概率小纸币，**漂浮**消散——负净加速度缓升、强空气阻力衰减初速、
+ *  轻摆慢转、不与地面交互，升空过程渐隐（区别于爆发的坠落反弹物理）。 */
 export function popTrailMoney(x: number, y: number): void {
   if (coinFxDisabled()) return
   ensureCanvas()
@@ -456,34 +487,40 @@ export function popTrailMoney(x: number, y: number): void {
     kind: "coin",
     x,
     y,
-    vx: (Math.random() - 0.5) * 100,
-    vy: -130 - Math.random() * 140,
-    r: 6 + Math.random() * 3,
+    vx: (Math.random() - 0.5) * 90,
+    vy: -30 - Math.random() * 80,
+    r: 4 + Math.random() * 2.5,
     phase: Math.random() * Math.PI * 2,
-    phaseV: (5 + Math.random() * 6) * (Math.random() < 0.5 ? -1 : 1),
-    tilt: 0,
-    tiltV: (Math.random() - 0.5) * 4,
+    phaseV: (3 + Math.random() * 3) * (Math.random() < 0.5 ? -1 : 1),
+    tilt: (Math.random() - 0.5) * 0.6,
+    tiltV: (Math.random() - 0.5) * 2,
     bounces: 2,
     age: 0,
-    life: 1 + Math.random() * 0.4,
+    life: 1.4 + Math.random() * 0.6,
+    ay: -50 - Math.random() * 60,
+    drag: 2.2,
+    noFloor: true,
   })
   if (Math.random() < 0.5) {
     particles.push({
       kind: "note",
       x: x + (Math.random() * 16 - 8),
       y: y + (Math.random() * 12 - 6),
-      vx: (Math.random() - 0.5) * 160,
-      vy: -70 - Math.random() * 130,
-      w: 44 + Math.random() * 12,
-      rot: (Math.random() - 0.5) * 1.2,
-      rotV: (Math.random() - 0.5) * 4,
+      vx: (Math.random() - 0.5) * 110,
+      vy: -20 - Math.random() * 70,
+      w: 30 + Math.random() * 10,
+      rot: (Math.random() - 0.5) * 1,
+      rotV: (Math.random() - 0.5) * 2.5,
       flip: Math.random() * Math.PI * 2,
-      flipV: (3 + Math.random() * 5) * (Math.random() < 0.5 ? -1 : 1),
+      flipV: (2 + Math.random() * 2.5) * (Math.random() < 0.5 ? -1 : 1),
       sway: Math.random() * Math.PI * 2,
-      swayV: 2.2 + Math.random() * 2.5,
+      swayV: 2 + Math.random() * 2,
       scheme: Math.floor(Math.random() * CNY_SCHEMES.length),
       age: 0,
-      life: 1.3 + Math.random() * 0.5,
+      life: 1.6 + Math.random() * 0.6,
+      ay: -40 - Math.random() * 50,
+      drag: 1.8,
+      noFloor: true,
     })
   }
   if (particles.length > MAX_PARTICLES) particles.splice(0, particles.length - MAX_PARTICLES)
