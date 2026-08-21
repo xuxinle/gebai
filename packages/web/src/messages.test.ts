@@ -151,12 +151,12 @@ function fakeRun(overrides: Partial<RunState> = {}): RunState {
 describe("isBlockOnly (card.args=block 声明驱动，替代前端 BLOCK_ONLY_TOOLS 硬编码)", () => {
   test("follows server-declared card metadata", () => {
     __setToolCardMetaForTest([
-      ["draw", { args: "block" }],
+      ["show", { args: "block" }],
       ["write", { args: "code", codeField: "content" }],
       ["playwright_open", { args: "block" }],
     ])
     // block 声明命中
-    expect(isBlockOnly("draw")).toBe(true)
+    expect(isBlockOnly("show")).toBe(true)
     expect(isBlockOnly("playwright_open")).toBe(true) // 子 Agent 全名
     // 非 block 声明 / 未声明：false
     expect(isBlockOnly("write")).toBe(false)
@@ -167,7 +167,7 @@ describe("isBlockOnly (card.args=block 声明驱动，替代前端 BLOCK_ONLY_TO
 
   test("resets with empty cache (未声明回退默认渲染)", () => {
     __setToolCardMetaForTest([])
-    expect(isBlockOnly("draw")).toBe(false)
+    expect(isBlockOnly("show")).toBe(false)
   })
 })
 

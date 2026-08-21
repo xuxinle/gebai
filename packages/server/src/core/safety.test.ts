@@ -34,7 +34,7 @@ describe("安全模式判定", () => {
       expect(isRiskyToolName(n)).toBe(true)
     }
     for (const n of [
-      "read", "ls", "grep", "glob", "draw", "render_html", "fetch_url", "todo",
+      "read", "ls", "grep", "glob", "show", "fetch_url", "todo",
       "code_read", "code_glob", "code_git", "widgets_save", "widgets_get", "widgets_list", "fetch_doc",
     ]) {
       expect(isRiskyToolName(n)).toBe(false)

@@ -31,8 +31,8 @@ const bin = process.execPath // bun
 const SUB_AGENTS = ["code", "explore"]
 /** 预加载清单：启动即装载 code（浏览器打开即编码就绪）；explore 按需 agent_load。 */
 const PRELOAD = ["code"]
-/** 全局工具排除清单：编码场景用不到的能力——draw（图表渲染）/ render_html（HTML 预览）/ fetch_url（网页抓取）。 */
-const EXCLUDE_TOOLS = ["draw", "render_html", "fetch_url"]
+/** 全局工具排除清单：编码场景用不到的能力——show（内容展示：图表/HTML/文件）/ fetch_url（网页抓取）。 */
+const EXCLUDE_TOOLS = ["show", "fetch_url"]
 
 // 环境变量须先设置再跑生成脚本（子进程继承）
 process.env.GEBAI_BUILD_SUBAGENTS = SUB_AGENTS.join(",")
@@ -59,7 +59,7 @@ run(bin, ["run", join(serverDir, "scripts", "build-d2js.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-analyzer-wasm.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-driver-embed.ts")])
 
-// 3) 单文件编译（与 desktop server:build 同参数：--external @terrastruct/d2 为动态依赖，draw 未排除时亦可运行时装载）
+// 3) 单文件编译（与 desktop server:build 同参数：--external @terrastruct/d2 为动态依赖，show 未排除时亦可运行时装载）
 const outfile = join(serverDir, "dist", process.platform === "win32" ? "gebai-code.exe" : "gebai-code")
 run(bin, ["build", join(serverDir, "src", "index.ts"), "--compile", `--outfile=${outfile}`, "--external", "@terrastruct/d2"])
 

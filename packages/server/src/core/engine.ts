@@ -1446,6 +1446,8 @@ export class AgentEngine {
       authMode: this.opts.authMode,
       sessionId,
       workdir,
+      // 当前任务交互模式：show 等合并型工具按分支校验通道能力（HTML 预览仅 realtime 等）
+      interactionMode: this.tasks.get(sessionId)?.interactionMode,
       boundProjectRoot: resolveRoot,
       home: this.opts.config.gebaiHome,
       env,

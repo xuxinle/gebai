@@ -1157,10 +1157,10 @@ console.log("defined ok")`,
 
   test("tool result blocks are persisted to session message", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "draw"
+    s.provider.toolName = "show"
     s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
-    // draw 工具执行期间等待前端渲染回传：模拟前端渲染成功
+    // show 图表分支执行期间等待前端渲染回传：模拟前端渲染成功
     s.events.subscribe((e) => {
       if (e.type === "event.draw.render") void s.engine.decideDrawResult(session.id, String(e.payload.renderId), { ok: true })
     })
@@ -1420,9 +1420,9 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("draw tool blocks the loop until the frontend render result arrives (decideDrawResult resumes)", async () => {
+  test("show 图表分支 blocks the loop until the frontend render result arrives (decideDrawResult resumes)", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "draw"
+    s.provider.toolName = "show"
     s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     let renderId = ""
@@ -1430,7 +1430,7 @@ console.log("defined ok")`,
       if (e.type === "event.draw.render") renderId = String(e.payload.renderId)
     })
     const run = s.engine.run(session.id, "default", "draw a diagram")
-    // 等待 draw.render 发布（run 阻塞在 draw 工具等待渲染结果）
+    // 等待 draw.render 发布（run 阻塞在 show 图表分支等待渲染结果）
     const t0 = Date.now()
     while (!renderId) {
       if (Date.now() - t0 > 2000) throw new Error("draw.render not published")
@@ -1439,12 +1439,12 @@ console.log("defined ok")`,
     expect(renderId).toBeTruthy()
     // 任务仍挂起（渲染结果未回传前不继续）
     expect(s.engine.isRunning(session.id)).toBe(true)
-    // 前端渲染成功回传 → draw 工具返回成功 → 引擎继续下一轮
+    // 前端渲染成功回传 → show 图表分支返回成功 → 引擎继续下一轮
     await s.engine.decideDrawResult(session.id, renderId, { ok: true })
     await run
     expect(s.engine.isRunning(session.id)).toBe(false)
     const loaded = await s.store.load(session.id)
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "draw")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "show")
     expect(toolMsg?.content).toContain("渲染成功")
     // 产物落盘会话 tmp/（与工具描述一致），而非会话根
     const root = sessionPath(s.home, "default", session.id)
@@ -1468,9 +1468,9 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("draw tool returns render error and timeout message to the model", async () => {
+  test("show 图表分支 returns render error and timeout message to the model", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "draw"
+    s.provider.toolName = "show"
     s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     let renderId = ""
@@ -1487,7 +1487,7 @@ console.log("defined ok")`,
     await s.engine.decideDrawResult(session.id, renderId, { ok: false, error: "PlantUML 语法错误" })
     await run
     const loaded = await s.store.load(session.id)
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "draw")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "show")
     expect(toolMsg?.content).toContain("画图失败（渲染错误）")
     expect(toolMsg?.content).toContain("PlantUML 语法错误")
     cleanup(s.home)
@@ -1646,17 +1646,17 @@ console.log("defined ok")`,
 
   test("disabledTools filters schemas (channel-scoped tool removal) and blocks execution", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "render_html"
+    s.provider.toolName = "show"
     s.provider.toolArgs = { html: "<p>hi</p>" }
     const session = await s.store.createSession("default", "t")
-    await s.engine.run(session.id, "default", "render a page", { disabledTools: ["render_html", "fetch_url", "page_capture"] })
+    await s.engine.run(session.id, "default", "render a page", { disabledTools: ["show", "fetch_url", "page_capture"] })
     const loaded = await s.store.load(session.id)
     // 模型看到的 schema 已过滤（首轮即无禁用工具）
-    expect(s.provider.seenTools[0]).not.toContain("render_html")
+    expect(s.provider.seenTools[0]).not.toContain("show")
     expect(s.provider.seenTools[0]).not.toContain("fetch_url")
-    expect(s.provider.seenTools[0]).toContain("draw")
+    expect(s.provider.seenTools[0]).toContain("diff")
     // 模型仍调用禁用工具（假模型行为）→ 执行被阻止，返回说明消息，产物不落盘
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "render_html")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "show")
     expect(toolMsg?.content).toContain("当前通道不可用")
     const root = sessionPath(s.home, "default", session.id)
     expect(existsSync(join(root, "tmp", "page.html"))).toBe(false)
@@ -1837,15 +1837,16 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("interactionMode=none 禁用交互类工具（ask_user/draw 及实时前端工具），realtime 工具全禁用", async () => {
+  test("interactionMode=none 禁用交互类工具（ask_user 及实时前端工具）；show 不做工具级门控（分支内校验）", async () => {
     const s = await setup("interact")
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "ask something", { interactionMode: "none" })
     // schema 过滤：会话往返（session）与实时前端（realtime）工具均不在工具清单
     expect(s.provider.seenTools[0]).not.toContain("ask_user")
-    expect(s.provider.seenTools[0]).not.toContain("draw")
     expect(s.provider.seenTools[0]).not.toContain("page_capture")
-    expect(s.provider.seenTools[0]).not.toContain("render_html")
+    // show（合并型工具：图表/HTML/文件三分支）不做工具级门控：全模式可见，通道能力在分支内校验
+    //（html 分支非 realtime 报错、图表 frontend 无前端通道引导 render=backend）
+    expect(s.provider.seenTools[0]).toContain("show")
     // 普通工具（single 默认）可用
     expect(s.provider.seenTools[0]).toContain("read")
     // 执行阻止：模型仍尝试调用 ask_user → 通道不可用说明作为工具结果返回，任务正常完成
@@ -1858,17 +1859,16 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("interactionMode=multi_turn 保留多轮交互类工具（ask_user/draw），禁用实时前端工具", async () => {
+  test("interactionMode=multi_turn 保留多轮交互类工具（ask_user/show），禁用实时前端工具", async () => {
     const s = await setup("tool") // 第一轮调 ls（无交互），仅验证 schema 过滤
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "do a thing", { interactionMode: "multi_turn" })
     // 实时前端工具禁用（与飞书通道行为一致）
     expect(s.provider.seenTools[0]).not.toContain("page_capture")
-    expect(s.provider.seenTools[0]).not.toContain("render_html")
     expect(s.provider.seenTools[0]).not.toContain("ask_env")
-    // 会话类工具可用（飞书有按钮/后端渲染适配）
+    // 会话类工具可用（飞书有按钮/后端渲染适配）；show 图表分支经飞书渲染通道（分支门控放行 multi_turn）
     expect(s.provider.seenTools[0]).toContain("ask_user")
-    expect(s.provider.seenTools[0]).toContain("draw")
+    expect(s.provider.seenTools[0]).toContain("show")
     cleanup(s.home)
   })
 
@@ -2078,19 +2078,19 @@ console.log("defined ok")`,
 
   test("disabledTools does not leak across runs (per-task scope)", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "render_html"
+    s.provider.toolName = "show"
     s.provider.toolArgs = { html: "<p>hi</p>" }
     const session = await s.store.createSession("default", "t")
-    // 第一轮禁用 render_html
-    await s.engine.run(session.id, "default", "render a page", { disabledTools: ["render_html"] })
-    expect(s.provider.seenTools[0]).not.toContain("render_html")
-    // 第二轮未传 disabledTools：schema 恢复完整（render_html 再次可见可执行）
+    // 第一轮禁用 show
+    await s.engine.run(session.id, "default", "render a page", { disabledTools: ["show"] })
+    expect(s.provider.seenTools[0]).not.toContain("show")
+    // 第二轮未传 disabledTools：schema 恢复完整（show 再次可见可执行）
     s.provider.calls = 0
     s.provider.seenTools.length = 0
     await s.engine.run(session.id, "default", "render a page")
-    expect(s.provider.seenTools[0]).toContain("render_html")
+    expect(s.provider.seenTools[0]).toContain("show")
     const loaded = await s.store.load(session.id)
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "render_html" && m.content.includes("已生成"))
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "show" && m.content.includes("已生成"))
     expect(toolMsg).toBeDefined()
     cleanup(s.home)
   })
