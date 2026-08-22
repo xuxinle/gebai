@@ -20,14 +20,25 @@ use tao::{
 };
 use wry::{WebContext, WebViewBuilder};
 
-/// 内嵌的服务端二进制（Windows 形态；构建前须先执行 `bun run server:build` 产出 dist/gebai.exe）。
+/// 内嵌的服务端二进制（Windows 形态；路径由 build.rs 注入——完整构建 = dist/gebai.exe，
+/// 场景变体构建（如 build:tutor）经 GEBAI_LAUNCHER_SERVER_EXE 指向对应产物）。
 #[cfg(windows)]
-const SERVER_EXE: &[u8] = include_bytes!("../../dist/gebai.exe");
+const SERVER_EXE: &[u8] = include_bytes!(env!("GEBAI_EMBED_SERVER_EXE"));
 
 /// 32px 窗口图标原始 RGBA（scripts/gen-icon.ts 生成；tao 任务栏/标题栏图标用）。
 const ICON32_RGBA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../icons/icon32.rgba"));
 
-const LOADING_HTML: &str = "<html><body style=\"background:#1c1e22;color:#9aa0a6;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0\"><div>GEBAI starting...</div></body></html>";
+/// 应用标识（build.rs 注入，缺省 "gebai"）：物化数据目录名 / 非 Windows 同目录服务端文件名 / WebView 配置目录。
+const APP_NAME: &str = env!("GEBAI_APP_NAME");
+/// 窗口标题（build.rs 注入，缺省 "歌白"）。
+const APP_TITLE: &str = env!("GEBAI_APP_TITLE");
+/// 场景变体固定端口（build.rs 可选注入）：spawn 服务端时设 GEBAI_PORT——变体与完整桌面端
+/// 各占独立端口，互不冲突且 localStorage origin 各自稳定；缺省不指定（服务端默认 47896）。
+const APP_PORT: Option<&str> = option_env!("GEBAI_APP_PORT");
+
+fn loading_html() -> String {
+    format!("<html><body style=\"background:#1c1e22;color:#9aa0a6;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0\"><div>{APP_TITLE} starting...</div></body></html>")
+}
 
 enum LauncherEvent {
     ServerReady(u16),
@@ -38,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let data_dir = dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .ok_or("cannot locate user data directory")?
-        .join("gebai");
+        .join(APP_NAME);
     fs::create_dir_all(&data_dir)?;
 
     let server_exe = materialize_server(&data_dir)?;
@@ -49,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let icon = tao::window::Icon::from_rgba(ICON32_RGBA.to_vec(), 32, 32)?;
     let window = WindowBuilder::new()
-        .with_title("歌白")
+        .with_title(APP_TITLE)
         .with_window_icon(Some(icon))
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(480.0, 600.0))
@@ -57,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut web_context = WebContext::new(Some(data_dir.join("webview")));
     let webview = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_html(LOADING_HTML)
+        .with_html(&loading_html())
         .build(&window)?;
 
     let mut url: Option<String> = None;
@@ -124,11 +135,11 @@ fn materialize_server(data_dir: &PathBuf) -> Result<PathBuf, Box<dyn Error>> {
     }
     #[cfg(not(windows))]
     {
-        // 非 Windows 不内嵌：使用启动器同目录的 gebai 服务端二进制
+        // 非 Windows 不内嵌：使用启动器同目录的服务端二进制（文件名 = 应用标识）
         let _ = data_dir;
-        let sibling = std::env::current_exe()?.with_file_name("gebai");
+        let sibling = std::env::current_exe()?.with_file_name(APP_NAME);
         if !sibling.exists() {
-            return Err("gebai server binary not found next to gebai-desktop".into());
+            return Err(format!("{APP_NAME} server binary not found next to launcher").into());
         }
         Ok(sibling)
     }
@@ -163,8 +174,11 @@ fn spawn_server(
     ready: EventLoopProxy<LauncherEvent>,
 ) -> Result<Child, Box<dyn Error>> {
     let mut cmd = Command::new(exe);
-    cmd.env("GEBAI_NO_OPEN", "1")
-        .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
+    cmd.env("GEBAI_NO_OPEN", "1");
+    if let Some(port) = APP_PORT {
+        cmd.env("GEBAI_PORT", port);
+    }
+    cmd.current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
