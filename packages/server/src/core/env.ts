@@ -102,3 +102,23 @@ export class EnvManager {
     return out.sort((a, b) => a.name.localeCompare(b.name))
   }
 }
+
+/**
+ * 构建期内置环境变量默认值应用（`env-embedded.generated.ts` 烘焙的模型配置）：
+ * 仅填充目标环境中**未设置或为空串**的键——优先级：前端/任务级 env > 运行时环境变量 > 内置默认。
+ * 返回实际填充的变量名（供调用方按需统计；值一律不落日志）。
+ */
+export function applyEmbeddedEnvDefaults(
+  embedded: Record<string, string>,
+  target: Record<string, string | undefined> = process.env,
+): string[] {
+  const applied: string[] = []
+  for (const [k, v] of Object.entries(embedded)) {
+    if (!k || v === undefined) continue
+    if (target[k] === undefined || target[k] === "") {
+      target[k] = v
+      applied.push(k)
+    }
+  }
+  return applied
+}
