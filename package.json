@@ -14,7 +14,8 @@
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
-    "build:code": "bun run scripts/build-code-agent.ts"
+    "build:code": "bun run scripts/build-code-agent.ts",
+    "build:tutor": "bun run scripts/build-tutor-agent.ts"
   },
   "devDependencies": {
     "playwright": "^1.62.1",
