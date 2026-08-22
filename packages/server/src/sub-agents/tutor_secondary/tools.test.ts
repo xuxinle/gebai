@@ -43,7 +43,7 @@ function ctx(home: string): ToolContext {
   }
 }
 
-const EXPECTED_TOOLS = ["knowledge", "mistake_add", "mistake_list", "mistake_remove", "mistake_review", "profile"]
+const EXPECTED_TOOLS = ["demo", "knowledge", "mistake_add", "mistake_list", "mistake_remove", "mistake_review", "profile"]
 
 describe("createTutorTools（学段工厂）", () => {
   test("两学段工具集一致、审批声明一致、学科/年级注入学段配置", () => {
@@ -160,6 +160,30 @@ describe("createTutorTools（学段工厂）", () => {
 
       const removed = await tools.mistake_remove.execute({ id }, c)
       expect(removed.output).toContain("错题已删除")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("demo：模板渲染经 show 展示（html 内容块）；未知模板/参数错误给出引导", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tutor-tools-"))
+    try {
+      const c = ctx(home)
+      const { tools } = createTutorTools(SECONDARY_STAGE)
+      // quiz 模板闭环：返回 html 内容块 + 简短回执
+      const ok = await tools.demo.execute(
+        { template: "quiz", params: { title: "小测", questions: [{ q: "1+1", options: ["1", "2"], answer: "2" }] } },
+        c,
+      )
+      expect(ok.output).toContain("已生成并在聊天内展示")
+      expect(ok.blocks?.some((b) => (b as { type?: string }).type === "html")).toBe(true)
+      expect((ok.blocks?.[0] as { html?: string }).html).toContain("提交批改")
+      // 未知模板
+      const miss = await tools.demo.execute({ template: "nope" }, c)
+      expect(miss.output).toContain("未知模板")
+      // 参数校验错误（questions 空）
+      const bad = await tools.demo.execute({ template: "quiz", params: {} }, c)
+      expect(bad.output).toContain("参数错误")
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
