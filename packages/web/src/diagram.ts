@@ -8,7 +8,7 @@ import { injectPlantUmlLayout } from "./plantuml-layout"
 
 /* ---------- 图表渲染：四种图表语言本地引擎（PlantUML @plantuml/core / Mermaid mermaid / D2 @terrastruct/d2 / ECharts echarts），配色跟随 UI 主题 ---------- */
 
-/** 图表语言 → 产物文件扩展名（与 draw 工具落盘约定一致）。 */
+/** 图表语言 → 产物文件扩展名（与 show 图表分支落盘约定一致）。 */
 export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2", echarts: "echarts" }
 /** 图表语言展示名（源码查看器/导出用）。 */
 export const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }
@@ -412,7 +412,7 @@ function formatD2Error(msg: string): string {
 }
 
 /** D2 渲染串行队列：@terrastruct/d2 浏览器构建为单 Worker，主线程共享 currentResolve/currentReject，
- *  并发调用互相覆盖导致前序调用挂起直到超时（多图同时渲染/渲染与 draw 工具渲染并发时大量「编译超时」），必须一次一个。 */
+ *  并发调用互相覆盖导致前序调用挂起直到超时（多图同时渲染/渲染与 show 图表分支渲染并发时大量「编译超时」），必须一次一个。 */
 let d2Queue: Promise<unknown> = Promise.resolve()
 function enqueueD2<T>(task: () => Promise<T>): Promise<T> {
   const run = d2Queue.then(task, task)
@@ -562,7 +562,7 @@ function handleStaleChunk(err: unknown): void {
   }
 }
 
-/** 按图表语言分派渲染（draw 工具 event.draw.render 与内容块展示共用）；未知语言显式报错引导换通道，
+/** 按图表语言分派渲染（show 图表分支 event.draw.render 与内容块展示共用）；未知语言显式报错引导换通道，
  *  不静默回退 PlantUML——服务端新增图表语言而前端为旧版本时，回退会把源码当 PlantUML 渲染出误导性错误。 */
 export function renderDiagramSvg(format: DiagramFormat, code: string): Promise<string> {
   let p: Promise<string>
@@ -1111,7 +1111,7 @@ function downloadImageUrl(url: string, filename: string): void {
   a.click()
 }
 
-/** 图片全屏查看器（draw 工具 render=backend 产出的 PNG 图片块等）：与图表查看器同骨架，
+/** 图片全屏查看器（show 图表分支 render=backend 产出的 PNG 图片块等）：与图表查看器同骨架，
  *  图片直显 + 缩放/平移/复制/下载。 */
 export function openImageViewer(url: string, name: string) {
   const shell = viewerShell(name, {

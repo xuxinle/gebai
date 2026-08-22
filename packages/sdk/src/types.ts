@@ -32,7 +32,7 @@ export interface DiffLine {
   text: string
 }
 
-/** 图表语言（draw 工具四格式）：plantuml=UML 严谨建模 / mermaid=通用流程图时序图 / d2=美观架构图 / echarts=数据图表（JSON option）。 */
+/** 图表语言（show 图表分支四格式）：plantuml=UML 严谨建模 / mermaid=通用流程图时序图 / d2=美观架构图 / echarts=数据图表（JSON option）。 */
 export type DiagramFormat = "plantuml" | "mermaid" | "d2" | "echarts"
 
 /**
