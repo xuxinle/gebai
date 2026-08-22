@@ -141,7 +141,7 @@ export function ensureThemeSync(): void {
 /**
  * 沙箱预览 iframe：srcdoc 注入文档；allow-scripts 放开脚本，域隔离（opaque origin）防宿主访问。
  * data-html-frame 标记所有 HTML iframe（主题广播用）。
- * 宽度固定 100% 铺满消息流（不参与任何内容宽度反馈）；带显式尺寸（render_html width/height）
+ * 宽度固定 100% 铺满消息流（不参与任何内容宽度反馈）；带显式尺寸（show html 分支 width/height）
  * 时按指定值渲染。全屏查看器同样固定铺满视口。
  */
 function previewFrame(doc: string): HTMLIFrameElement {
@@ -318,7 +318,7 @@ export function renderHtmlBlock(container: HTMLElement, b: Extract<ContentBlock,
   const right = el("div", "html-head-right")
   right.append(toolbar, fullBtn)
   head.append(title, right)
-  // 显式尺寸（render_html 的 width/height 参数）：模型指定后按值渲染；
+  // 显式尺寸（show html 分支的 width/height 参数）：模型指定后按值渲染；
   // 未指定时 iframe 固定 100% 铺满消息流宽度（无任何内容宽度反馈）
   const explicitW = typeof b.width === "number" && b.width > 0 ? Math.round(b.width) : undefined
   const explicitH = typeof b.height === "number" && b.height > 0 ? Math.round(b.height) : undefined

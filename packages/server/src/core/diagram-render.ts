@@ -1,5 +1,5 @@
 /**
- * 后端图表渲染器（draw 工具 `render=backend` 与飞书通道共用）：四种图表语言 → SVG（本地引擎，零网络）→ PNG（@resvg/resvg-js）。
+ * 后端图表渲染器（show 图表分支 `render=backend` 与飞书通道共用）：四种图表语言 → SVG（本地引擎，零网络）→ PNG（@resvg/resvg-js）。
  * - **plantuml**：复用 `feishu-bot/plantuml.ts`（TeaVM 引擎 + DOM shim，浅色主题白底）。
  * - **mermaid**：`mermaid` npm 包 + happy-dom DOM 垫层——**垫层必须先在 mermaid 导入前安装**（mermaid 模块求值即建样式表）；
  *   固定浅色主题（`theme: "default"`）+ `htmlLabels: false`（resvg 不支持 foreignObject，纯 SVG 输出）。
