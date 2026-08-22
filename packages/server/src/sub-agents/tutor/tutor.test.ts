@@ -44,16 +44,57 @@ function ctx(home: string): ToolContext {
 }
 
 describe("tutor sub-agent", () => {
-  test("def 结构：tutor 工具（profile/mistake_add/mistake_list/mistake_review/mistake_remove）", () => {
+  test("def 结构：tutor 工具（profile/knowledge/mistake_add/mistake_list/mistake_review/mistake_remove）", () => {
     expect(def.name).toBe("tutor")
     expect(name).toBe("tutor")
-    expect(Object.keys(tools).sort()).toEqual(["mistake_add", "mistake_list", "mistake_remove", "mistake_review", "profile"])
+    expect(Object.keys(tools).sort()).toEqual([
+      "knowledge",
+      "mistake_add",
+      "mistake_list",
+      "mistake_remove",
+      "mistake_review",
+      "profile",
+    ])
     expect(def.preload).toBe(false)
     // 删除不可恢复，需审批；其余辅导流程工具免审批（用户自己的学习数据）
     expect(def.requiresApproval).toEqual({ mistake_remove: true })
     expect(tools.mistake_remove.requiresApproval).toBe(true)
     expect(tools.mistake_add.requiresApproval).toBeFalsy()
     expect(tools.profile.requiresApproval).toBeFalsy()
+    expect(tools.knowledge.requiresApproval).toBeFalsy()
+  })
+
+  test("knowledge：设置掌握度与轨迹、查询薄弱在前、max_mastery 过滤", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tutor-subagent-"))
+    try {
+      const c = ctx(home)
+      const empty = await tools.knowledge.execute({}, c)
+      expect(empty.output).toContain("暂无掌握度记录")
+
+      const set = await tools.knowledge.execute({ subject: "数学", topic: "一元二次方程", mastery: 2, evidence: "作业 4/5 对" }, c)
+      expect(set.output).toContain("掌握度已更新")
+      expect(set.output).toContain("一般（2/4）")
+      expect(set.output).toContain("设为 2 作业 4/5 对")
+
+      const down = await tools.knowledge.execute({ subject: "数学", topic: "一元二次方程", mastery: 1, evidence: "练习 3/5 对" }, c)
+      expect(down.output).toContain("2→1 练习 3/5 对")
+
+      await tools.knowledge.execute({ subject: "物理", topic: "浮力", mastery: 3 }, c)
+      const list = await tools.knowledge.execute({}, c)
+      expect(list.output).toContain("薄弱在前")
+      // 数学（薄弱）排在物理（良好）前
+      expect(list.output.indexOf("一元二次方程")).toBeLessThan(list.output.indexOf("浮力"))
+
+      const weak = await tools.knowledge.execute({ max_mastery: 2 }, c)
+      expect(weak.output).toContain("一元二次方程")
+      expect(weak.output).not.toContain("浮力")
+
+      const math = await tools.knowledge.execute({ subject: "数学" }, c)
+      expect(math.output).toContain("一元二次方程")
+      expect(math.output).not.toContain("浮力")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   test("profile：无参读取（未建档提示建档）、传参合并更新、回读", async () => {

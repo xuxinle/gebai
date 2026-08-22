@@ -1,7 +1,17 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { SubAgentDef, Tool, ToolResult } from "../../core/types"
-import { addMistake, listMistakes, loadProfile, removeMistake, reviewMistake, saveProfile } from "../../core/tutor"
+import {
+  addMistake,
+  listKnowledge,
+  listMistakes,
+  loadProfile,
+  removeMistake,
+  reviewMistake,
+  saveProfile,
+  upsertKnowledge,
+} from "../../core/tutor"
 import type { MistakeRecord, ReviewResult, TutorProfile } from "../../core/tutor"
+import { MASTERY_LABELS } from "../../core/tutor"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./tutor.md"
 
@@ -11,7 +21,7 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
 
 export const name = "tutor"
 export const description =
-  "中学（初中+高中）九科学习辅导：知识点讲解、作业与试题答疑（引导式解题）、出题练习与批改、错题本（登记后自动按 1/3/7/14/30 天间隔排期复习，按用户持久保存）、学习档案与备考复习规划。中学生本人或家长的学习辅导需求装载本子Agent。输入：问题/题目/学习需求；输出：引导讲解、练习与批改、错题与档案管理。"
+  "中学（初中+高中）九科学习辅导：引导式解题（先诊断卡点、四级提示逐步放手）、知识点讲解、出题练习与批改、知识点掌握度评估（0-4 级诊断图，按用户持久保存）、错题本（自动 1/3/7/14/30 天间隔复习）、学习档案与备考复习规划。中学生本人或家长的学习辅导需求装载本子Agent。输入：问题/题目/学习需求；输出：引导讲解、练习与批改、掌握度与错题管理。"
 export const systemPrompt = systemPromptBase
 
 function fmtDate(ts: number): string {
@@ -61,6 +71,45 @@ const profile: Tool = {
     }
     const p = await saveProfile(ctx.home, ctx.user, patch)
     return { output: `学习档案已更新。\n${formatProfile(p)}`, data: p }
+  },
+}
+
+const knowledge: Tool = {
+  name: "knowledge",
+  description:
+    "知识点掌握度评估图（按用户持久保存）：讲解/出题前查掌握度定切入深度，练习/复习后按表现更新。设置：传 subject+topic+mastery（+可选 evidence 评估依据，如「练习 3/5 对」）；查询：不传 mastery（可按 subject 过滤、max_mastery 只列薄弱项，规划时用）。掌握度是引导式教学的诊断依据——薄弱项优先讲练。",
+  card: { titleParams: ["subject", "topic"] },
+  parameters: schema({
+    subject: { type: "string", description: "学科（设置必填；查询时可单独传作过滤）" },
+    topic: { type: "string", description: "知识点（如 一元二次方程；设置必填，查询留空列整科）" },
+    mastery: { type: "number", description: "掌握度（设置必填）：0 未学 / 1 薄弱 / 2 一般 / 3 良好 / 4 掌握" },
+    evidence: { type: "string", description: "评估依据（如：练习 3/5 对、口答完整、月考失分、复习又错）" },
+    max_mastery: { type: "number", description: "查询过滤：只列掌握度 ≤ 该值的项（找薄弱点，如传 2）" },
+  }),
+  async execute(args, ctx): Promise<ToolResult> {
+    if (args.mastery != null) {
+      const k = await upsertKnowledge(ctx.home, ctx.user, {
+        subject: String(args.subject ?? ""),
+        topic: String(args.topic ?? ""),
+        mastery: Number(args.mastery),
+        evidence: args.evidence != null ? String(args.evidence) : undefined,
+      })
+      return {
+        output: `掌握度已更新：${k.subject}·${k.topic} → ${MASTERY_LABELS[k.mastery]}（${k.mastery}/4）${k.history[0] ? `\n轨迹: ${k.history.join("；")}` : ""}`,
+        data: k,
+      }
+    }
+    const list = await listKnowledge(ctx.home, ctx.user, {
+      subject: args.subject != null ? String(args.subject) : undefined,
+      maxMastery: args.max_mastery != null ? Number(args.max_mastery) : undefined,
+    })
+    if (!list.length) {
+      return { output: "暂无掌握度记录。讲解/练习后按表现评估登记（传 subject+topic+mastery）。", data: { items: [] } }
+    }
+    const lines = list.map(
+      (k) => `- ${k.subject}·${k.topic}：${MASTERY_LABELS[k.mastery]}（${k.mastery}/4）${k.history.length ? `，轨迹: ${k.history.join("；")}` : ""}`,
+    )
+    return { output: `共 ${list.length} 项掌握度（薄弱在前）：\n${lines.join("\n")}`, data: { items: list } }
   },
 }
 
@@ -189,6 +238,7 @@ const mistakeRemove: Tool = {
 
 export const tools: Record<string, Tool> = {
   profile,
+  knowledge,
   mistake_add: mistakeAdd,
   mistake_list: mistakeList,
   mistake_review: mistakeReview,

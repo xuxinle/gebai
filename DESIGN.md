@@ -31,8 +31,10 @@ GEBAI_HOME/
         │   └── {h0}/{h1}/{name}.json   # { name, html, scope:"private", createdAt, updatedAt }
         ├── tutor/         # 中学学习辅导数据（tutor 子Agent，按用户持久保存）
         │   ├── profile.json   # 学习档案（年级/教材/目标/薄弱点/考试日程/备注）
-        │   └── mistakes/      # 错题本（按错题 id 哈希分片）
-        │       └── {h0}/{h1}/{id}.json   # 错题记录（题目/答案/解析 + 间隔复习排期）
+        │   ├── mistakes/      # 错题本（按错题 id 哈希分片）
+        │   │   └── {h0}/{h1}/{id}.json   # 错题记录（题目/答案/解析 + 间隔复习排期）
+        │   └── knowledge/     # 知识点掌握度图（按 学科+知识点 哈希分片）
+        │       └── {h0}/{h1}/{key}.json  # 掌握度记录（0-4 级 + 评估轨迹）
         ├── sessions/      # 会话持久化（按会话隔离，多层分片）
         │   └── {s0}/{s1}/{session_id}/
         │       ├── chat.json        # 会话消息
@@ -55,6 +57,7 @@ GEBAI_HOME/
 | `trash/` | 归档日期 | `YYYY-MM-DD/` |
 | `tools/`（公用）/ `users/{user}/tools/`（私有） | 工具名（哈希） | 前 2 位 `{h0}` / 前 4 位 `{h1}` |
 | `users/{user}/tutor/mistakes/` | 错题 id（哈希） | 前 2 位 `{h0}` / 前 4 位 `{h1}` |
+| `users/{user}/tutor/knowledge/` | 学科+知识点（哈希） | 前 2 位 `{h0}` / 前 4 位 `{h1}` |
 
 - 截断文件（`tmp/truncated/`）在会话目录内，随会话分片；内容 SHA256 哈希命名去重（同内容不重复写入），会话内数量有限无需额外分片
 
@@ -818,16 +821,18 @@ export const preload = false
 
 实现于 `sub-agents/tutor/`（目录形式：`tutor.ts` 定义入口 + `tutor.md` 系统提示词 + `core/tutor.ts` 存储模块），面向中学生（本人或家长）的**九科全方位学习辅导**——知识点讲解、作业与试题答疑（引导式解题）、出题练习与批改、错题管理与间隔复习、备考复习规划。教学能力（引导优先、贴近年级教材、错因讲解）由提示词承载；工具提供**按用户持久保存的学习状态**，跨会话延续辅导进度：
 
-- **工具集**（5 个，命名空间内 `profile`/`mistake_add`/`mistake_list`/`mistake_review`/`mistake_remove`）：
+- **工具集**（6 个，命名空间内 `profile`/`knowledge`/`mistake_add`/`mistake_list`/`mistake_review`/`mistake_remove`）：
   - `profile`（学习档案）：无参调用 = 读取；传任意字段（`grade` 年级 / `textbook` 教材 / `goal` 目标 / `weaknesses` 薄弱点 / `exams` 考试日程 / `notes` 备注）= 合并更新（空串清除）——个性化辅导与跨会话跟进的依据
+  - `knowledge`（知识点掌握度评估图）：传 `subject`+`topic`+`mastery`（0 未学/1 薄弱/2 一般/3 良好/4 掌握，可附 `evidence` 评估依据）= 设置/更新（同学科同知识点 upsert，记录变化轨迹，最近 5 条）；不传 `mastery` = 查询（可按 `subject` 过滤、`max_mastery` 只列薄弱项）——引导式教学的诊断依据：讲/练前查掌握度定切入深度，练/评后按表现更新，排序薄弱在前
   - `mistake_add`（错题登记）：`subject`+`topic`+`question` 必填，可带学生答案/正确答案/错因解析/来源；登记即自动排期（次日首复）
   - `mistake_list`（错题清单）：默认列复习中错题（按下次复习时间升序，题头含到期标记与通过进度），可按学科/知识点（子串）过滤、`due=true` 只列到期、`status=mastered` 翻查已掌握、`full=true` 附完整题目与答案解析（复习出题前取全文）
   - `mistake_review`（复习汇报）：学生重做后按 `result` 汇报（`pass`/`fail`/`master`），自动推进间隔排期
   - `mistake_remove`（删除错题）：按 id 删除，**需审批**（不可恢复）；仅学生明确要求时使用，「做对了」走 `mistake_review` 掌握流程而非删除
 - **间隔复习（纯函数 `applyReview`）**：fail = 间隔重置 1 天；pass = 按连续通过次数递进 `1/3/7/14/30` 天，连续 5 次通过自动**掌握归档**（默认不再列出，可 `status=mastered` 翻查）；master = 直接归档；已掌握记录 fail 会重新回到复习
-- **存储**（`core/tutor.ts`，用户级持久化，随用户目录隔离）：档案 `users/{user}/tutor/profile.json`（单文件）；错题本 `users/{user}/tutor/mistakes/{h0}/{h1}/{id}.json`（按错题 id 哈希两层分片）；错题 id 白名单 `[a-z0-9]{6,32}`（生成式 id，防路径穿越）；字段长度上限（题目/答案/解析 4000、学科/知识点 120、档案字段 2000 字符）
-- **提示词要点**：引导优先（先问思路卡点、针对卡点提示，明确要答案/赶时间才给完整过程）；按年级与教材把握深度（初一不越阶用初三解法）；批改讲错因不只判对错；典型错题经学生认可登记（不全录不题海）；复习先重做再对答案；辅导思路而非代写署名作业；情绪困扰倾听但建议求助家长老师，不充当专业心理帮助；客观题练习可用全局 `show` 生成可交互练习页、计划可排表格展示
-- **审批**：仅 `mistake_remove` 需审批（不可恢复删除）；档案与错题登记/复习均为用户自己的学习数据，免审批不打断辅导流程
+- **引导式教学（提示词方法论）**：先让学生动（复述题目+说思路卡点，不直接开讲）→ 卡点四分类诊断（概念不清/方法不会/计算失误/审题失误，对症引导）→ **四级提示阶梯**（①方向提示→②关键提示→③演示一步→④完整过程，逐级放手、每级提示后把笔交回学生）→ 确认真懂（答对追问「为什么」防蒙对、解后费曼式复述）；引导 2~4 轮为宜，连续卡住就降级帮到位；掌握度与教学联动（讲前查定深度、练后评更新、错题 fail 联动降档薄弱、涨落频繁安排专项巩固）
+- **存储**（`core/tutor.ts`，用户级持久化，随用户目录隔离）：档案 `users/{user}/tutor/profile.json`（单文件）；错题本 `users/{user}/tutor/mistakes/{h0}/{h1}/{id}.json`（按错题 id 哈希两层分片）；掌握度 `users/{user}/tutor/knowledge/{h0}/{h1}/{key}.json`（`key` = sha256(学科+知识点) 前 16 位 hex，upsert 天然去重）；错题 id 白名单 `[a-z0-9]{6,32}`（生成式 id，防路径穿越）；字段长度上限（题目/答案/解析 4000、学科/知识点 120、档案字段 2000 字符）
+- **提示词要点**：按年级与教材把握深度（初一不越阶用初三解法）；批改讲错因不只判对错；典型错题经学生认可登记（不全录不题海）；复习先重做再对答案；规划输入 = 档案 + 掌握度薄弱清单（`max_mastery=2`）+ 错题分布，顺带传递可操作学习方法（点到即止不说教）；新会话开工汇报「档案要点+薄弱项+到期错题数」接续进度；辅导思路而非代写署名作业；情绪困扰倾听但建议求助家长老师，不充当专业心理帮助；客观题练习可用全局 `show` 生成可交互练习页、计划可排表格展示
+- **审批**：仅 `mistake_remove` 需审批（不可恢复删除）；档案/掌握度与错题登记、复习均为用户自己的学习数据，免审批不打断辅导流程
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
 
 
@@ -844,7 +849,7 @@ export const preload = false
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 浏览器自动化全套（同 playwright）+ http_request/fetch_url/capture_start/capture_stop/capture_clear/capture_list/read/write/agent_list/agent_load/agent_run | 浏览器交互类+http_request+write | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `cron` | add/list/update/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_remove`） | add+update+remove | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的无人值守任务、查看/修改/删除；仅 `GEBAI_CRON_ENABLED=true` 时注册，关闭时完全不可见） |
-| `tutor` | profile/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 中学学习全方位辅导（初中+高中九科：引导式答疑讲解、出题练习与批改、错题本自动间隔复习 1/3/7/14/30 天、学习档案与备考规划；学习档案与错题本按用户持久保存，跨会话延续） |
+| `tutor` | profile/knowledge/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 中学学习全方位辅导（初中+高中九科：引导式解题（先诊断卡点、四级提示阶梯逐级放手）、出题练习与批改、知识点掌握度评估图、错题本自动间隔复习 1/3/7/14/30 天、学习档案与备考规划；档案/掌握度/错题本按用户持久保存，跨会话延续） |
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 

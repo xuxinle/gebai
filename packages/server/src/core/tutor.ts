@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { shardPath, walkDir } from "./paths"
+import { sha256Hex, shardPath, walkDir } from "./paths"
 
 /* ---------- 中学学习辅导（tutor 子Agent）：学习档案 + 错题本（用户级持久化存储） ---------- */
 
@@ -261,4 +261,98 @@ export async function removeMistake(home: string, user: string, id: string): Pro
   }
   await rm(p, { force: true })
   return true
+}
+
+/* ---------- 知识点掌握度（引导式教学的诊断依据） ---------- */
+
+/** 掌握度分级：0 未学 / 1 薄弱 / 2 一般 / 3 良好 / 4 掌握。 */
+export const MASTERY_MIN = 0
+export const MASTERY_MAX = 4
+export const MASTERY_LABELS = ["未学", "薄弱", "一般", "良好", "掌握"] as const
+/** 掌握度变化轨迹保留条数（最近在前）。 */
+export const KNOWLEDGE_HISTORY_MAX = 5
+
+export interface KnowledgeRecord {
+  subject: string
+  topic: string
+  mastery: number
+  /** 评估轨迹（最近在前，上限 5 条）：变化「2→1 依据」/ 同级「1 依据」/ 新建「设为 2 依据」。 */
+  history: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+/** 学科+知识点 → 存储键（sha256 前 16 位 hex，upsert 天然去重）。 */
+export function knowledgeKey(subject: string, topic: string): string {
+  return sha256Hex(`${subject}\n${topic}`).slice(0, 16)
+}
+
+export function knowledgePath(home: string, user: string, subject: string, topic: string): string {
+  const key = knowledgeKey(subject, topic)
+  const [h0, h1] = shardPath(key, 2)
+  return join(tutorDir(home, user), "knowledge", h0, h1, `${key}.json`)
+}
+
+/** 设置/更新掌握度：同 subject+topic 覆盖更新（记录变化轨迹），返回更新后记录。 */
+export async function upsertKnowledge(
+  home: string,
+  user: string,
+  input: { subject: string; topic: string; mastery: number; evidence?: string; now?: number },
+): Promise<KnowledgeRecord> {
+  const subject = requiredField(input.subject, MISTAKE_MAX_SHORT, "学科")
+  const topic = requiredField(input.topic, MISTAKE_MAX_SHORT, "知识点")
+  const mastery = input.mastery
+  if (!Number.isInteger(mastery) || mastery < MASTERY_MIN || mastery > MASTERY_MAX) {
+    throw new Error(`掌握度须为 ${MASTERY_MIN}~${MASTERY_MAX} 整数（${MASTERY_LABELS.join("/")}）`)
+  }
+  const evidence = input.evidence != null ? capField(input.evidence, MISTAKE_MAX_SHORT * 2, "评估依据") : undefined
+  const now = input.now ?? Date.now()
+  const p = knowledgePath(home, user, subject, topic)
+  let existing: KnowledgeRecord | null = null
+  try {
+    existing = JSON.parse(await readFile(p, "utf8")) as KnowledgeRecord
+    if (!existing || typeof existing.subject !== "string") existing = null
+  } catch {
+    existing = null
+  }
+  const entry = existing
+    ? existing.mastery === mastery
+      ? `${mastery}${evidence ? ` ${evidence}` : ""}`
+      : `${existing.mastery}→${mastery}${evidence ? ` ${evidence}` : ""}`
+    : `设为 ${mastery}${evidence ? ` ${evidence}` : ""}`
+  const next: KnowledgeRecord = {
+    subject,
+    topic,
+    mastery,
+    history: [entry, ...(existing?.history ?? [])].slice(0, KNOWLEDGE_HISTORY_MAX),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  }
+  await mkdir(dirname(p), { recursive: true })
+  await writeFile(p, JSON.stringify(next))
+  return next
+}
+
+/** 列出掌握度记录（排序：掌握度升序（薄弱在前）→ 同级按更新时间降序）。 */
+export async function listKnowledge(
+  home: string,
+  user: string,
+  filter: { subject?: string; /** 只列掌握度 ≤ 该值的项（找薄弱点）。 */ maxMastery?: number } = {},
+): Promise<KnowledgeRecord[]> {
+  const out: KnowledgeRecord[] = []
+  await walkDir(join(tutorDir(home, user), "knowledge"), 2, async (p) => {
+    if (!p.endsWith(".json")) return
+    let k: KnowledgeRecord | null = null
+    try {
+      k = JSON.parse(await readFile(p, "utf8")) as KnowledgeRecord
+    } catch {
+      return
+    }
+    if (!k || typeof k.subject !== "string" || typeof k.mastery !== "number") return
+    if (filter.subject && k.subject !== filter.subject) return
+    if (filter.maxMastery != null && k.mastery > filter.maxMastery) return
+    out.push(k)
+  })
+  out.sort((a, b) => a.mastery - b.mastery || b.updatedAt - a.updatedAt)
+  return out
 }
