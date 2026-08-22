@@ -6,6 +6,7 @@ describe("tutor_primary sub-agent", () => {
     expect(def.name).toBe("tutor_primary")
     expect(name).toBe("tutor_primary")
     expect(Object.keys(tools).sort()).toEqual([
+      "demo",
       "knowledge",
       "mistake_add",
       "mistake_list",

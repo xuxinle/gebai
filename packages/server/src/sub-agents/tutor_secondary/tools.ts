@@ -1,5 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { Tool, ToolResult } from "../../core/types"
+import { showTool, isGlobalToolExcluded } from "../../core/tools"
 import {
   addMistake,
   listKnowledge,
@@ -12,6 +13,7 @@ import {
 } from "../../core/tutor"
 import type { MistakeRecord, ReviewResult, TutorProfile } from "../../core/tutor"
 import { MASTERY_LABELS } from "../../core/tutor"
+import { DEMO_TEMPLATES, DEMO_TEMPLATE_IDS } from "./demos"
 
 /* tutor_secondary / tutor_primary 共享工具工厂：工具逻辑与 schema 完全一致，
    学段差异仅注入学科清单/年级说明与文案前缀（教学行为差异在各学段系统提示词）。 */
@@ -254,8 +256,44 @@ export function createTutorTools(cfg: TutorStageConfig): { tools: Record<string,
     },
   }
 
+  const demo: Tool = {
+    name: "demo",
+    description:
+      "内置教学演示模板库——服务端模板渲染，只传 template+params（几十 token，勿手写 HTML），产物在聊天内直接展示（仅 Web 前端通道）。模板清单与参数（params 对象）：\n" +
+      DEMO_TEMPLATES.map((t) => `- ${t.id}：${t.usage}`).join("\n") +
+      "\n讲题配图、出题练习、演示优先本工具；模板未覆盖的场景再用 show 手写。",
+    card: { args: "block" },
+    parameters: schema(
+      {
+        template: { enum: DEMO_TEMPLATE_IDS, description: "演示模板（清单与参数见工具描述）" },
+        params: { type: "object", description: "模板参数对象（各模板参数见上方清单）" },
+        width: { type: "number", description: "预览宽度 px（可选）" },
+        height: { type: "number", description: "预览高度 px（可选）" },
+      },
+      ["template"],
+    ),
+    async execute(args, ctx): Promise<ToolResult> {
+      const id = String(args.template ?? "")
+      const tpl = DEMO_TEMPLATES.find((t) => t.id === id)
+      if (!tpl) return { output: `demo 失败：未知模板 "${id}"。可用模板：${DEMO_TEMPLATE_IDS.join(" / ")}。` }
+      let html: string
+      try {
+        html = tpl.render((args.params as Record<string, unknown>) ?? {})
+      } catch (err) {
+        return { output: `demo 失败（${id} 参数错误）：${err instanceof Error ? err.message : String(err)}` }
+      }
+      if (isGlobalToolExcluded("show")) return { output: "演示能力不可用：本构建未包含内容展示（show 被排除）。" }
+      const res = await showTool.execute({ html, name: `demo-${id}`, width: args.width, height: args.height }, ctx)
+      if (res.blocks?.length) {
+        // 成功回执压缩（省 token）；失败原样透传 show 的引导信息
+        return { ...res, output: `演示「${id}」已生成并在聊天内展示（服务端模板渲染，${html.length} 字符）。` }
+      }
+      return res
+    },
+  }
+
   return {
-    tools: { profile, knowledge, mistake_add: mistakeAdd, mistake_list: mistakeList, mistake_review: mistakeReview, mistake_remove: mistakeRemove },
+    tools: { profile, knowledge, demo, mistake_add: mistakeAdd, mistake_list: mistakeList, mistake_review: mistakeReview, mistake_remove: mistakeRemove },
     requiresApproval: { mistake_remove: true },
   }
 }
