@@ -28,7 +28,7 @@ const MAX_REPEAT_HITS = 3
 /** 重复中断上限：中断次数超过该值即终止工具循环（模型持续重复时防止无效空转）。 */
 const MAX_REPEAT_STALLS = 2
 const APPROVAL_TIMEOUT = 5 * 60 * 1000
-/** draw 工具：等待前端渲染结果的最长时间（超时返回「画图能力受限」）。 */
+/** show 图表分支：等待前端渲染结果的最长时间（超时返回「画图能力受限」）。 */
 const DRAW_TIMEOUT = 5000
 /** page_capture 工具：等待前端页面捕获结果的最长时间（超时返回「页面捕获失败」）。 */
 const CAPTURE_TIMEOUT = 30_000
@@ -146,7 +146,7 @@ interface Choice {
   timer: ReturnType<typeof setTimeout>
 }
 
-/** 前端渲染结果（draw 工具回传）。 */
+/** 前端渲染结果（show 图表分支回传）。 */
 interface DrawResult {
   ok: boolean
   error?: string
@@ -176,7 +176,7 @@ interface PendingCapture {
   ts: number
 }
 
-/** ask_env 工具：等待中的环境变量请求（envId → 变量名 + 回调）。 */
+/** ask 填值分支：等待中的环境变量请求（envId → 变量名 + 回调）。 */
 interface EnvWait {
   name: string
   resolve: (ok: boolean) => void
@@ -195,7 +195,7 @@ interface TaskState {
   choices: Map<string, Choice>
   /** 选择决策先于注册到达时排队。 */
   pendingChoices: Map<string, ChoiceResult>
-  /** draw 工具：renderId → 等待中的渲染回调。 */
+  /** show 图表分支：renderId → 等待中的渲染回调。 */
   draws: Map<string, DrawWait>
   /** 渲染结果先于注册到达时排队。 */
   pendingDraws: Map<string, DrawResult>
@@ -213,9 +213,9 @@ interface TaskState {
   role?: string
   /** 输出方式（final_only/streaming）：final_only 不推送文本增量与推理流（仅最终响应）。 */
   outputMode: OutputMode
-  /** 任务级环境变量（run 时组装快照的同一引用）：ask_env 用户填值后原地更新，工具后续读取立即生效。 */
+  /** 任务级环境变量（run 时组装快照的同一引用）：ask 填值后原地更新，工具后续读取立即生效。 */
   env: Record<string, string>
-  /** ask_env 工具：envId → 等待中的请求回调。 */
+  /** ask 填值分支：envId → 等待中的请求回调。 */
   envRequests: Map<string, EnvWait>
   /** 环境变量值先于注册到达时排队。 */
   pendingEnvRequests: Map<string, string>
@@ -482,7 +482,7 @@ export class AgentEngine {
     }
   }
 
-  /** 提交用户选择（ask_user 工具等待的选择）；null 表示拒绝，string 为单选（选项/自定义文本），string[] 为多选。 */
+  /** 提交用户选择（ask 选项询问分支等待的选择）；null 表示拒绝，string 为单选（选项/自定义文本），string[] 为多选。 */
   async decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void> {
     const task = this.tasks.get(sessionId)
     if (!task) return
@@ -503,7 +503,7 @@ export class AgentEngine {
     }
   }
 
-  /** 提交前端渲染结果（draw 工具等待的渲染回传）。 */
+  /** 提交前端渲染结果（show 图表分支等待的渲染回传）。 */
   async decideDrawResult(sessionId: string, renderId: string, result: DrawResult): Promise<void> {
     const task = this.tasks.get(sessionId)
     if (!task) return
@@ -519,7 +519,7 @@ export class AgentEngine {
   }
 
   /**
-   * 前端渲染图表并阻塞等待结果（draw 工具）。
+   * 前端渲染图表并阻塞等待结果（show 图表分支）。
    * 发布 event.draw.render（含 renderId/源码/图表语言供前端渲染），成功/失败经 decideDrawResult 回传；
    * 5 秒超时返回 null（画图能力受限）。
    */
@@ -635,7 +635,7 @@ export class AgentEngine {
   }
 
   /**
-   * 向用户提出选择并阻塞等待结果（ask_user 工具）。
+   * 向用户提出选择并阻塞等待结果（ask 选项询问分支）。
    * 发布 event.choice.request（含 choiceId/multi 供 UI 提交）；返回 ChoiceResult：
    * 单选/自定义文本为 { kind: "option" }，多选为 { kind: "multi" }，用户拒绝为 { kind: "refuse" }，超时（审批超时同值）为 null。
    */
@@ -667,7 +667,7 @@ export class AgentEngine {
     })
   }
 
-  /** ask_env 可设置的变量名校验：标识符格式 + 拒绝 __proto__（原型污染）+ 多用户模式拒绝审批跳过键
+  /** ask 填值分支可设置的变量名校验：标识符格式 + 拒绝 __proto__（原型污染）+ 多用户模式拒绝审批跳过键
    * （GEBAI_APPROVAL_SKIP 是模型驱动的第四通道，不得自设——用户本人经前端开关/env 接口/飞书命令设置，
    * 防提示词注入诱导模型请求开启审批跳过；本地/单用户模式不受限）。 */
   private isEnvNameAllowed(name: string): boolean {
@@ -676,7 +676,7 @@ export class AgentEngine {
     return true
   }
 
-  /** 提交用户填写的环境变量值（ask_env 工具等待的请求回传）：非空值写入任务 env（ctx 同引用，工具后续读取立即生效）。 */
+  /** 提交用户填写的环境变量值（ask 填值分支等待的请求回传）：非空值写入任务 env（ctx 同引用，工具后续读取立即生效）。 */
   async decideEnvResult(sessionId: string, envId: string, value: string | null): Promise<void> {
     const task = this.tasks.get(sessionId)
     if (!task) return
@@ -698,7 +698,7 @@ export class AgentEngine {
   }
 
   /**
-   * 向用户请求设置环境变量并阻塞等待（ask_env 工具）。
+   * 向用户请求设置环境变量并阻塞等待（ask 填值分支）。
    * 发布 event.env.request（含 envId/name/description/secret 供前端弹窗填值）；
    * 用户提交后值写入任务 env（本次任务后续工具立即生效）并返回 true；拒绝/超时（审批超时同值）返回 false。
    */
@@ -1020,7 +1020,7 @@ export class AgentEngine {
     try {
       // 浏览器本地环境变量（前端 localStorage）经 prompt 请求临时注入，仅本次任务生效，不持久化
       const env = { ...(await this.opts.env.resolve(sessionId, user)), ...(opts.envOverride || {}) }
-      // 任务级 env 引用：ask_env 用户填值后原地更新（ctx.env 同一引用，工具后续读取立即生效）
+      // 任务级 env 引用：ask 填值后原地更新（ctx.env 同一引用，工具后续读取立即生效）
       this.tasks.get(sessionId)!.env = env
       // 极简模式（DESIGN「极简模式」）：任务启动按 env 快照裁剪工具白名单（仅 sh/edit + full_mode 切换入口），
       // 系统提示词同步极简化（buildSystemPrompt 极简分支），下次任务起生效
@@ -1273,7 +1273,7 @@ export class AgentEngine {
       `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
       ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
-      `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 plan 制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需 plan，直接用 todo 跟踪即可。`,
+      `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
@@ -1509,7 +1509,7 @@ export class AgentEngine {
         await mkdir(dirname(p), { recursive: true })
         await writeFile(p, data)
       },
-      // 后端图表渲染（draw 工具 render=backend，三语言）：惰性加载组合渲染器
+      // 后端图表渲染（show 图表分支 render=backend，四语言）：惰性加载组合渲染器
       // （PlantUML TeaVM 引擎 / Mermaid + happy-dom / D2 WASM + @resvg/resvg-js），仅按需时加载，不拖慢启动/测试
       renderDiagram: async (code, opts) => {
         const { createDiagramRenderer } = await import("./diagram-render")

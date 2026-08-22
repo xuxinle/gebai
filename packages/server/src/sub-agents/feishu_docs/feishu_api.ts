@@ -115,7 +115,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     const appId = ctx.env.FEISHU_DOCS_APP_ID || ctx.env.GEBAI_FEISHU_APP_ID
     const appSecret = ctx.env.FEISHU_DOCS_APP_SECRET || ctx.env.GEBAI_FEISHU_APP_SECRET
     if (!appId || !appSecret) {
-      throw new Error(`缺少飞书应用凭证：请配置环境变量 FEISHU_DOCS_APP_ID 与 FEISHU_DOCS_APP_SECRET（或全局兼容的 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET）；可调用 ask_env 工具（name=FEISHU_DOCS_APP_ID，secret=true）请求用户直接填写`)
+      throw new Error(`缺少飞书应用凭证：请配置环境变量 FEISHU_DOCS_APP_ID 与 FEISHU_DOCS_APP_SECRET（或全局兼容的 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET）；可调用 ask 工具（name=FEISHU_DOCS_APP_ID，secret=true）请求用户直接填写`)
     }
     return { appId, appSecret }
   }

@@ -256,7 +256,7 @@ export async function handleWsMessage(
       return reply(true)
     }
     case "choice.decide": {
-      // 提交用户选择（ask_user 工具阻塞等待）；option 单选 / options 数组多选 / refuse=true（或均缺失）拒绝回答
+      // 提交用户选择（ask 选项询问分支阻塞等待）；option 单选 / options 数组多选 / refuse=true（或均缺失）拒绝回答
       const sessionId = String(p.id)
       const s = await d.store.load(sessionId, user.id)
       if (!s) return reply(false, undefined, "session not found")
@@ -266,7 +266,7 @@ export async function handleWsMessage(
       return reply(true)
     }
     case "env.decide": {
-      // 提交用户填写的环境变量值（ask_env 工具阻塞等待）；value 缺失视为拒绝
+      // 提交用户填写的环境变量值（ask 填值分支阻塞等待）；value 缺失视为拒绝
       const sessionId = String(p.id)
       const s = await d.store.load(sessionId, user.id)
       if (!s) return reply(false, undefined, "session not found")
@@ -275,7 +275,7 @@ export async function handleWsMessage(
       return reply(true)
     }
     case "draw.result": {
-      // 提交前端渲染结果（draw 工具阻塞等待）
+      // 提交前端渲染结果（show 图表分支阻塞等待）
       const sessionId = String(p.id)
       const s = await d.store.load(sessionId, user.id)
       if (!s) return reply(false, undefined, "session not found")

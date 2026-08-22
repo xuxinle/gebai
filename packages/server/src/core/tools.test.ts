@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, planTool, planFileName, buildPlanMarkdown } from "./tools"
+import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "./tools"
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -1121,7 +1121,7 @@ describe("global tools", () => {
     for (const n of [
       "read", "write", "ls", "grep", "glob", "file",
       "edit", "flow", "sh", "py", "show", "fetch_url",
-      "todo", "ask_user", "ask_env", "plan",
+      "todo", "ask",
       "agent_load", "agent_run",
     ]) {
       expect(tools[n]).toBeDefined()
@@ -1171,28 +1171,28 @@ describe("global tools", () => {
     expect(isGlobalToolExcluded("show")).toBe(false)
   })
 
-  test("ask_user tool blocks waiting for the user's choice (via waitForChoice)", async () => {
+  test("ask 选项询问分支：阻塞等待用户回应（via waitForChoice，五路结果）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-ask-user-"))
     const c = ctx(home)
     // 注入 waitForChoice：模拟用户选择「B」
     c.waitForChoice = async () => ({ kind: "option", value: "B" })
-    const r = await createGlobalTools().ask_user.execute({ prompt: "选择方案", options: ["A", "B", "C"] }, c)
+    const r = await createGlobalTools().ask.execute({ prompt: "选择方案", options: ["A", "B", "C"] }, c)
     expect(r.output).toContain("用户选择：B")
     // 自定义文本输入：用户直接输入不在选项中的答案
     c.waitForChoice = async () => ({ kind: "option", value: "自定义答案" })
-    const custom = await createGlobalTools().ask_user.execute({ prompt: "选择方案", options: ["A", "B"] }, c)
+    const custom = await createGlobalTools().ask.execute({ prompt: "选择方案", options: ["A", "B"] }, c)
     expect(custom.output).toContain("用户选择：自定义答案")
     // 拒绝回答：返回拒绝提示，模型停止询问自行决策
     c.waitForChoice = async () => ({ kind: "refuse" })
-    const refused = await createGlobalTools().ask_user.execute({ prompt: "选择方案", options: ["A", "B"] }, c)
+    const refused = await createGlobalTools().ask.execute({ prompt: "选择方案", options: ["A", "B"] }, c)
     expect(refused.output).toContain("拒绝")
     // 超时（返回 null）时降级提示
     c.waitForChoice = async () => null
-    const timedOut = await createGlobalTools().ask_user.execute({ prompt: "选择方案", options: ["A"] }, c)
+    const timedOut = await createGlobalTools().ask.execute({ prompt: "选择方案", options: ["A"] }, c)
     expect(timedOut.output).toContain("未在时限内")
     // 多选：multi=true 时多选结果以「、」连接返回
     c.waitForChoice = async () => ({ kind: "multi", values: ["A", "B"] })
-    const multi = await createGlobalTools().ask_user.execute({ prompt: "选择方案", options: ["A", "B", "C"], multi: true }, c)
+    const multi = await createGlobalTools().ask.execute({ prompt: "选择方案", options: ["A", "B", "C"], multi: true }, c)
     expect(multi.output).toContain("用户选择：A、B")
     // 复杂选项：{ title, description } 原样传递（提交值取 title），纯文本选项保持字符串
     let received: { prompt: string; options: unknown[]; multi: boolean } | undefined
@@ -1200,23 +1200,23 @@ describe("global tools", () => {
       received = { prompt, options: options as unknown[], multi: !!multi }
       return null
     }
-    await createGlobalTools().ask_user.execute(
+    await createGlobalTools().ask.execute(
       { prompt: "选择方案", options: [{ title: "方案A", description: "第一个方案" }, "方案B"], multi: true },
       c,
     )
     expect(received).toEqual({ prompt: "选择方案", options: [{ title: "方案A", description: "第一个方案" }, "方案B"], multi: true })
     // 无选项时报错
-    await expect(createGlobalTools().ask_user.execute({ prompt: "x", options: [] }, c)).rejects.toThrow(/至少一个选项/)
+    await expect(createGlobalTools().ask.execute({ prompt: "x", options: [] }, c)).rejects.toThrow(/至少一个选项/)
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("plan tool writes plan document to session tmp/plans/ and maps approval outcomes", async () => {
+  test("ask 计划审批分支：落盘 tmp/plans/ 并映射审批四路结果", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-plan-"))
     const c = ctx(home)
     const tools = createGlobalTools()
     // 批准执行：计划落盘 + 输出批准引导
     c.waitForChoice = async () => ({ kind: "option", value: "批准执行" })
-    const approved = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状", "拆分接口", "迁移数据"] }, c)
+    const approved = await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状", "拆分接口", "迁移数据"] }, c)
     expect(approved.output.startsWith("计划已批准")).toBe(true)
     expect(approved.output).toContain("tmp/plans/重构订单模块.md")
     expect(approved.data).toMatchObject({ status: "approved", title: "重构订单模块", path: "tmp/plans/重构订单模块.md" })
@@ -1225,22 +1225,22 @@ describe("global tools", () => {
     expect(await Bun.file(filePath).text()).toBe(buildPlanMarkdown("重构订单模块", ["梳理现状", "拆分接口", "迁移数据"]))
     // 拒绝执行（未附意见）：引导模型自省修订
     c.waitForChoice = async () => ({ kind: "option", value: "拒绝执行" })
-    const rejected = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    const rejected = await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
     expect(rejected.output.startsWith("计划已拒绝")).toBe(true)
     expect(rejected.data).toMatchObject({ status: "rejected", feedback: "" })
     // 自定义修改意见：作为拒绝反馈返回
     c.waitForChoice = async () => ({ kind: "option", value: "缺少回归测试步骤" })
-    const feedback = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    const feedback = await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
     expect(feedback.output).toContain("用户修改意见：缺少回归测试步骤")
     expect(feedback.data).toMatchObject({ status: "rejected", feedback: "缺少回归测试步骤" })
     // 用户拒绝回答：取消计划
     c.waitForChoice = async () => ({ kind: "refuse" })
-    const cancelled = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    const cancelled = await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
     expect(cancelled.output).toContain("用户拒绝审核计划")
     expect(cancelled.data).toMatchObject({ status: "cancelled" })
     // 超时：降级提示
     c.waitForChoice = async () => null
-    const timedOut = await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    const timedOut = await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
     expect(timedOut.output).toContain("审批超时")
     expect(timedOut.data).toMatchObject({ status: "timeout" })
     // 审批等待的 prompt 携带计划路径与选项
@@ -1249,21 +1249,21 @@ describe("global tools", () => {
       received = { prompt, options: options as unknown[] }
       return { kind: "option", value: "批准执行" }
     }
-    await tools.plan.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
+    await tools.ask.execute({ title: "重构订单模块", steps: ["梳理现状"] }, c)
     expect(received?.prompt).toContain("请审核计划「重构订单模块」")
     expect(received?.prompt).toContain("tmp/plans/重构订单模块.md")
     expect(received?.options).toEqual(["批准执行", "拒绝执行"])
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("plan tool: content 覆盖拼装、参数校验与文件名清洗", async () => {
+  test("ask 计划分支：content 覆盖拼装、参数校验与文件名清洗", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-plan2-"))
     const c = ctx(home)
     c.waitForChoice = async () => null
     const tools = createGlobalTools()
     // content 提供时原样落盘（覆盖 steps 自动拼装）
     const content = "# 迁移方案\n\n| 步骤 | 说明 |\n| --- | --- |\n| 1 | 冻结 |"
-    const r = await tools.plan.execute({ title: "数据库迁移", steps: ["无关步骤"], content }, c)
+    const r = await tools.ask.execute({ title: "数据库迁移", steps: ["无关步骤"], content }, c)
     expect(r.data).toMatchObject({ status: "timeout", path: "tmp/plans/数据库迁移.md" })
     expect(await Bun.file(join(c.workdir, "plans", "数据库迁移.md")).text()).toBe(content)
     // 文件名清洗：路径分隔符/斜杠等替换为 `-`，空标题回退 plan
@@ -1271,26 +1271,75 @@ describe("global tools", () => {
     expect(planFileName("   ")).toBe("plan.md")
     expect(planFileName("a".repeat(200))).toHaveLength(63) // 60 字符 + ".md"
     // 参数校验：无标题 / 无步骤且无内容
-    const noTitle = await tools.plan.execute({ steps: ["x"] }, c)
+    const noTitle = await tools.ask.execute({ steps: ["x"] }, c)
     expect(noTitle.output).toContain("需要指定计划标题")
-    const noSteps = await tools.plan.execute({ title: "x" }, c)
+    const noSteps = await tools.ask.execute({ title: "x" }, c)
     expect(noSteps.output).toContain("至少一个执行步骤")
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("plan tool 不注册为需审批工具（审批内置于 waitForChoice），写范围守卫命中时拒绝落盘", async () => {
+  test("ask 不注册为需审批工具（计划审批内置于 waitForChoice），写范围守卫命中时拒绝落盘", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-plan3-"))
     const c = ctx(home)
-    expect(planTool.requiresApproval).toBeUndefined()
-    expect(planTool.interaction).toBe("multi_turn")
+    expect(askTool.requiresApproval).toBeUndefined()
+    // 合并型工具不做工具级 interaction 声明（分支内按 ctx.interactionMode 门控）
+    expect(askTool.interaction).toBeUndefined()
     let guard: string | null = "拒绝写入 /repo/src/core/engine.ts：self_optimize 默认只读"
     c.writeGuard = async () => guard
-    const r = await planTool.execute({ title: "x", steps: ["y"] }, c)
+    const r = await askTool.execute({ title: "x", steps: ["y"] }, c)
     expect(r.output).toContain("计划文档未落盘")
     // 守卫放行时正常落盘
     guard = null
-    const ok = await planTool.execute({ title: "x", steps: ["y"] }, c)
+    const ok = await askTool.execute({ title: "x", steps: ["y"] }, c)
     expect(ok.output).toContain("审批超时")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("ask 填值分支：校验变量名并注入任务环境（waitForEnv）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-ask-env-"))
+    const c = ctx(home)
+    let received: { name: string; description: string; secret: boolean } | undefined
+    c.waitForEnv = async (name, description, secret) => {
+      received = { name, description: description ?? "", secret: !!secret }
+      return true
+    }
+    const ok = await askTool.execute({ name: "FEISHU_DOCS_APP_ID", description: "飞书应用凭证", secret: true }, c)
+    expect(ok.output).toContain("已由用户设置并注入本次任务")
+    expect(received).toEqual({ name: "FEISHU_DOCS_APP_ID", description: "飞书应用凭证", secret: true })
+    // 用户拒绝/超时 → 失败说明
+    c.waitForEnv = async () => false
+    const refused = await askTool.execute({ name: "MY_TOKEN" }, c)
+    expect(refused.output).toContain("未提供环境变量 MY_TOKEN")
+    // 非法变量名
+    const bad = await askTool.execute({ name: "1bad-name" }, c)
+    expect(bad.output).toContain("环境变量名非法")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("ask 分支门控：无交互模式拦截选择/计划分支，飞书通道拦截填值分支", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-ask-gate-"))
+    const c = ctx(home)
+    c.interactionMode = "none"
+    c.waitForChoice = async () => {
+      throw new Error("waitForChoice 不应被调用")
+    }
+    // 选择分支：无交互无人可答 → 明确报错（不空等 5 分钟超时）
+    const choice = await askTool.execute({ prompt: "选哪个", options: ["A", "B"] }, c)
+    expect(choice.output).toContain("无交互能力")
+    // 计划分支：同样拦截
+    const plan = await askTool.execute({ title: "x", steps: ["y"] }, c)
+    expect(plan.output).toContain("无交互能力")
+    // 填值分支：飞书多轮通道无弹窗 → 明确报错
+    c.interactionMode = "multi_turn"
+    const env = await askTool.execute({ name: "MY_TOKEN" }, c)
+    expect(env.output).toContain("不支持填值弹窗")
+    // 填值分支：实时通道正常；多轮/实时下选择分支放行（与飞书交互卡片适配一致）
+    c.interactionMode = "realtime"
+    c.waitForChoice = async () => ({ kind: "option", value: "A" })
+    const choiceOk = await askTool.execute({ prompt: "选哪个", options: ["A", "B"] }, c)
+    expect(choiceOk.output).toContain("用户选择：A")
+    // 缺内容源 → 三选一引导
+    expect((await askTool.execute({}, ctx(home))).output).toContain("三选一")
     rmSync(home, { recursive: true, force: true })
   })
 

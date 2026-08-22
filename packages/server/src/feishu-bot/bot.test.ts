@@ -690,7 +690,7 @@ describe("引擎事件推送", () => {
     expect(f.uploads).toHaveLength(0)
   })
 
-  test("ask_user 选择卡片：choice.request 发送交互式按钮卡片并记录待作答状态", async () => {
+  test("ask 选择卡片：choice.request 发送交互式按钮卡片并记录待作答状态", async () => {
     const f = makeBot({ hangRun: true })
     await f.bot.start()
     void f.bot.handleFeishuEvent(receiveEvent())

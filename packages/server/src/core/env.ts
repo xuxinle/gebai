@@ -40,7 +40,7 @@ export function validateEnvVars(vars: unknown): string | null {
 /**
  * 浏览器本地 env 注入过滤（宽容模式，prompt 临时注入通道专用）：
  * 丢弃不支持/非法的变量、保留其余继续执行——前端 localStorage 可能残留旧版目录外键
- * （如 ask_env 存过的目录外变量），拒绝整个任务会阻断正常使用；
+ * （如 ask 填值分支存过的目录外变量），拒绝整个任务会阻断正常使用；
  * 显式管理通道（session.env.set 等）走严格校验（validateEnvVars）。
  * 过滤规则：非 string 值/null、非法标识符名（含 __proto__）。
  */

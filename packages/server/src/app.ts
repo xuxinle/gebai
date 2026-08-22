@@ -535,7 +535,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     await d.engine.decideApproval(sessionId, toolCallId, approve)
     return c.json({ ok: true })
   })
-  // 选择决策（ask_user 工具等待的用户选择）；option 单选 / options 数组多选 / refuse=true 拒绝回答
+  // 选择决策（ask 选项询问分支等待的用户选择）；option 单选 / options 数组多选 / refuse=true 拒绝回答
   app.post("/api/v1/sessions/:id/choice", async (c) => {
     const user = await userOf(c)
     const sessionId = c.req.param("id")
@@ -548,7 +548,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     await d.engine.decideChoice(sessionId, choiceId, refuse === true ? null : multi ? options!.map(String) : String(option))
     return c.json({ ok: true })
   })
-  // 画图渲染结果回传（draw 工具等待的前端渲染结果）
+  // 画图渲染结果回传（show 图表分支等待的前端渲染结果）
   app.post("/api/v1/sessions/:id/draw", async (c) => {
     const user = await userOf(c)
     const sessionId = c.req.param("id")
@@ -711,8 +711,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         "/api/v1/sessions/{id}/attachments": { post: { summary: "上传附件（multipart）" } },
         "/api/v1/sessions/{id}/cancel": { post: { summary: "取消任务" } },
         "/api/v1/sessions/{id}/approval": { post: { summary: "审批决策" } },
-        "/api/v1/sessions/{id}/choice": { post: { summary: "选择决策（ask_user 工具）" } },
-        "/api/v1/sessions/{id}/draw": { post: { summary: "画图渲染结果回传（draw 工具）" } },
+        "/api/v1/sessions/{id}/choice": { post: { summary: "选择决策（ask 选项询问分支）" } },
+        "/api/v1/sessions/{id}/draw": { post: { summary: "画图渲染结果回传（show 图表分支）" } },
         "/api/v1/sessions/{id}/compact": { post: { summary: "主动压缩上下文" } },
         "/api/v1/sessions/{id}/truncate": { post: { summary: "截断会话消息" } },
         "/api/v1/sessions/{id}/env": { get: { summary: "会话环境变量" }, put: { summary: "设置会话环境变量" } },

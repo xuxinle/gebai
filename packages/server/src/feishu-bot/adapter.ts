@@ -11,7 +11,7 @@ import type { AgentEngine } from "../core/engine"
 export interface BotRunHandlers {
   /** 关键操作审批请求（requiresApproval 工具，多轮交互询问用户）。 */
   onApproval?(toolCallId: string, tool: string): void
-  /** 用户选择请求（ask_user）。 */
+  /** 用户选择请求（ask 选项询问分支）。 */
   onChoice?(choiceId: string, prompt: string, options: unknown[], multi: boolean): void
   /** 图表渲染请求（draw，飞书通道后端渲染成图片；format 图表语言，后端仅支持 plantuml）。 */
   onDraw?(renderId: string, code: string, name?: string, format?: string): void
