@@ -17,6 +17,11 @@
  *    保留 show（练习页/图表展示）、ask（询问/计划）、vision（作业拍照识别）、
  *    agent_load/agent_run（引擎机制）、full_mode（极简模式逃生口）。
  *
+ * 4. `GEBAI_BUILD_EMBED_ENV`（模型配置内置）——从仓库根 .env 烘焙 GEBAI_LLM_ 与 GEBAI_VISION_ 前缀
+ *    变量为启动默认值（接收方开箱即用；运行时环境变量与前端/任务级 env 仍可覆盖）。**密钥明文随二进制
+ *    分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key；编译后生成文件还原空态，
+ *    密钥绝不入库。
+ *
  * 产物（Windows 两个）：
  * - packages/desktop/dist/gebai-tutor[.exe]：浏览器形态（双击启动自动开浏览器）
  * - packages/desktop/dist/gebai-tutor-desktop[.exe]：原生 WebView 窗口形态（tao/wry 启动器内嵌
@@ -61,10 +66,12 @@ const run = (cmd: string, args: string[], cwd: string = repoRoot) => {
   }
 }
 
-// 环境变量须先设置再跑生成脚本（子进程继承）
+// 环境变量须先设置再跑生成脚本（子进程继承）；GEBAI_BUILD_EMBED_ENV=1 内置模型配置
+// （GEBAI_LLM_ 与 GEBAI_VISION_ 前缀，来源仓库根 .env）——接收方开箱即用，运行时同名变量仍可覆盖
 process.env.GEBAI_BUILD_SUBAGENTS = SUB_AGENTS.join(",")
 process.env.GEBAI_BUILD_PRELOAD = PRELOAD.join(",")
 process.env.GEBAI_BUILD_EXCLUDE_TOOLS = EXCLUDE_TOOLS.join(",")
+process.env.GEBAI_BUILD_EMBED_ENV = "1"
 
 // 1) Web UI 构建并内嵌（桌面端浏览器形态的前端）+ 应用图标
 run(bin, ["run", "--cwd", desktopDir, "scripts/gen-icon.ts"])
@@ -77,6 +84,7 @@ run(bin, ["run", join(serverDir, "scripts", "build-web-bundle.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-subagents.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-tools.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-d2js.ts")])
+run(bin, ["run", join(serverDir, "scripts", "build-env-embed.ts")])
 
 // 3) 单文件编译 desktop 入口（固定端口 47896 + 自动开浏览器；--external @terrastruct/d2 同完整桌面端）
 const exeName = process.platform === "win32" ? "gebai-tutor.exe" : "gebai-tutor"
@@ -116,12 +124,15 @@ if (process.platform === "win32") {
 }
 
 // 6) 还原生成文件为全量态（subagents.bundle / tools-excluded 裁剪态不留工作区；与 build:code 样例
-//    「下次常规构建自动恢复」不同，本脚本编译后立即还原，bun run test 等不受裁剪态影响）
+//    「下次常规构建自动恢复」不同，本脚本编译后立即还原，bun run test 等不受裁剪态影响）；
+//    env-embedded 还原为空态——**非空态含 .env 密钥明文，绝不允许残留/提交**
 delete process.env.GEBAI_BUILD_SUBAGENTS
 delete process.env.GEBAI_BUILD_PRELOAD
 delete process.env.GEBAI_BUILD_EXCLUDE_TOOLS
+delete process.env.GEBAI_BUILD_EMBED_ENV
 run(bin, ["run", join(serverDir, "scripts", "build-subagents.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-tools.ts")])
+run(bin, ["run", join(serverDir, "scripts", "build-env-embed.ts")])
 
 const size = statSync(outfile).size
 const launcherSize = launcherOut ? statSync(launcherOut).size : 0

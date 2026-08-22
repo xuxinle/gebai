@@ -7,7 +7,8 @@ import { SessionStore } from "./core/store"
 import { ToolRegistry } from "./core/registry"
 import { createGlobalTools, isGlobalToolExcluded } from "./core/tools"
 import { Sandbox } from "./core/sandbox"
-import { EnvManager, cleanupLegacyUserEnv } from "./core/env"
+import { EnvManager, applyEmbeddedEnvDefaults, cleanupLegacyUserEnv } from "./core/env"
+import { EMBEDDED_ENV_DEFAULTS } from "./core/env-embedded.generated"
 import { EventBus } from "./core/event-bus"
 import { AuthService, type AuthUser } from "./auth"
 import { SubAgentManager } from "./core/subagents"
@@ -126,6 +127,10 @@ function makeWsConn(ws: ServerWebSocket<unknown>, d: AppDeps, state: WsStateServ
 }
 
 export async function startServer(overrides: Partial<Parameters<typeof loadConfig>[0]> = {}): Promise<ServerHandle> {
+  // 构建期内置模型配置默认值（发行裁剪构建烘焙的 GEBAI_LLM_*/GEBAI_VISION_*）：仅填充未设置的键，
+  // 运行时环境变量与前端/任务级 env 优先；须在读 GEBAI_LLM_* 前应用
+  applyEmbeddedEnvDefaults(EMBEDDED_ENV_DEFAULTS)
+
   const config = loadConfig(overrides)
 
   const store = new SessionStore({ home: config.gebaiHome })
