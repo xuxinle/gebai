@@ -2,7 +2,7 @@ import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { sha256Hex, shardPath, walkDir } from "./paths"
 
-/* ---------- 中学学习辅导（tutor 子Agent）：学习档案 + 错题本（用户级持久化存储） ---------- */
+/* ---------- 中小学学习辅导（tutor_secondary / tutor_primary 子Agent 共享存储）：学习档案 + 错题本 + 知识点掌握度（用户级持久化） ---------- */
 
 /** 档案字段长度上限（字符）。 */
 export const PROFILE_MAX_FIELD = 2000
