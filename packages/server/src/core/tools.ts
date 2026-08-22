@@ -1340,13 +1340,18 @@ export const showTool: Tool = {
     if (SHOW_TEXT_EXT.has(abs.split(".").pop()?.toLowerCase() ?? "") && size <= SHOW_TEXT_DIRECT_BYTES) {
       const text = await readText()
       if (text.length <= SHOW_TEXT_MAX_CHARS) {
-        blocks.push({ type: "code", text, language: inferLang(display) || undefined })
+        blocks.push({ type: "code", text, language: inferLang(display) || undefined, path: logical, name: display })
         how = `内容内联展示（${text.length} 字符）`
       } else {
-        // 超长文本截断展示 + 附查看/下载卡片取全文
-        blocks.push({ type: "code", text: `${text.slice(0, SHOW_TEXT_MAX_CHARS)}\n…（文本过长已截断，全文 ${text.length} 字符见下方文件卡片）`, language: inferLang(display) || undefined })
-        blocks.push({ type: "file", path: logical, name: display, mime: mimeFor(abs) })
-        how = `内容截断内联展示（前 ${SHOW_TEXT_MAX_CHARS} 字符）+ 文件卡片取全文`
+        // 超长文本截断展示；全文经文件卡工具栏下载/「原文件」查看获取（files/content 按需加载），不再附独立 file 卡片
+        blocks.push({
+          type: "code",
+          text: `${text.slice(0, SHOW_TEXT_MAX_CHARS)}\n…（文本过长已截断，全文 ${text.length} 字符可下载或点「原文件」查看）`,
+          language: inferLang(display) || undefined,
+          path: logical,
+          name: display,
+        })
+        how = `内容截断内联展示（前 ${SHOW_TEXT_MAX_CHARS} 字符）`
       }
     } else {
       blocks.push({ type: "file", path: logical, name: display, mime: mimeFor(abs) })

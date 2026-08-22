@@ -144,7 +144,7 @@ export function ensureThemeSync(): void {
  * 宽度固定 100% 铺满消息流（不参与任何内容宽度反馈）；带显式尺寸（show html 分支 width/height）
  * 时按指定值渲染。全屏查看器同样固定铺满视口。
  */
-function previewFrame(doc: string): HTMLIFrameElement {
+export function previewFrame(doc: string): HTMLIFrameElement {
   const frame = document.createElement("iframe")
   frame.className = "html-frame"
   frame.setAttribute("sandbox", "allow-scripts")
@@ -163,13 +163,13 @@ function previewFrame(doc: string): HTMLIFrameElement {
 
 /* ---------- 工具栏图标（16px 线性 SVG，跟随 currentColor） ---------- */
 
-const ICON_FULLSCREEN = '<svg viewBox="0 0 16 16"><path d="M3 6.5V3h3.5M13 6.5V3H9.5M3 9.5V13h3.5M13 9.5V13H9.5"/></svg>'
-const ICON_SOURCE = '<svg viewBox="0 0 16 16"><path d="M6 3.5 2.5 8l3.5 4.5M10 3.5l3.5 4.5-3.5 4.5"/></svg>'
-const ICON_COPY = '<svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="8" height="8" rx="1.5"/><path d="M11.5 3.5h-6a1.5 1.5 0 0 0-1.5 1.5v6"/></svg>'
-const ICON_DOWNLOAD = '<svg viewBox="0 0 16 16"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13h10"/></svg>'
+export const ICON_FULLSCREEN = '<svg viewBox="0 0 16 16"><path d="M3 6.5V3h3.5M13 6.5V3H9.5M3 9.5V13h3.5M13 9.5V13H9.5"/></svg>'
+export const ICON_SOURCE = '<svg viewBox="0 0 16 16"><path d="M6 3.5 2.5 8l3.5 4.5M10 3.5l3.5 4.5-3.5 4.5"/></svg>'
+export const ICON_COPY = '<svg viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="8" height="8" rx="1.5"/><path d="M11.5 3.5h-6a1.5 1.5 0 0 0-1.5 1.5v6"/></svg>'
+export const ICON_DOWNLOAD = '<svg viewBox="0 0 16 16"><path d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13h10"/></svg>'
 
 /** 图标按钮：SVG 图标 + title 提示。 */
-function iconButton(title: string, icon: string): HTMLButtonElement {
+export function iconButton(title: string, icon: string): HTMLButtonElement {
   const btn = el("button")
   tip(btn, title)
   btn.innerHTML = icon
@@ -177,7 +177,7 @@ function iconButton(title: string, icon: string): HTMLButtonElement {
 }
 
 /** 按钮成功反馈：图标变 ✓ + 高亮，1.5s 后恢复。 */
-function flashButton(btn: HTMLButtonElement, label: string): void {
+export function flashButton(btn: HTMLButtonElement, label: string): void {
   const orig = btn.innerHTML
   const origTitle = btn.title
   btn.innerHTML = '<svg viewBox="0 0 16 16"><path d="M3 8.5l3.5 3.5L13 4.5"/></svg>'

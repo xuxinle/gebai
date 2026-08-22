@@ -563,16 +563,26 @@ export function toolBubbleFor(msg: Message, content: string): HTMLElement {
 /** ask 消息流问答卡片（展示态，不可交互）：问题 + 选项静态展示（禁用态按钮），
  *  带 answer（结果输出）时为问答记录卡：头部按结果文案更新并追加回答块；
  *  等待作答的交互由审批容器的选择卡片承载，消息流不再重复渲染问题预览。 */
+/** 从问答结果输出解析用户选中的选项值（「用户选择：A、B」→ [A,B]；拒绝/超时/自定义文本不命中选项则空集）。 */
+function parseChoicePicked(answer: string, multi: boolean): string[] {
+  if (!answer.startsWith("用户选择：")) return []
+  const rest = answer.slice("用户选择：".length)
+  return multi ? rest.split("、") : [rest]
+}
+
 export function askUserBubble(prompt: string, options: Array<string | Record<string, unknown>>, multi: boolean, answer?: string): HTMLElement {
   const bubble = el("div", "bubble")
   const head = el("div", "tool-head", multi ? "🧭 请选择（可多选）" : "🧭 请选择")
   bubble.appendChild(head)
   if (prompt) bubble.appendChild(el("div", "block-text", prompt))
   const opts = el("div", "choice-opts")
+  // 用户选中的选项高亮（selected 与交互卡同款选中态；自定义文本不命中选项则无高亮，回答块仍示原文）
+  const picked = parseChoicePicked(answer ?? "", multi)
   for (const o of normalizeChoiceOpts(options)) {
     const btn = el("button", "choice-opt", o.title)
     btn.disabled = true
     btn.title = "历史问答记录"
+    if (picked.includes(o.title)) btn.classList.add("selected")
     opts.appendChild(btn)
   }
   bubble.appendChild(opts)

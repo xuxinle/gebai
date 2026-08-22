@@ -609,15 +609,19 @@ describe("global tools", () => {
     expect(await Bun.file(join(sessionTmp, "shown", m![0].slice("tmp/shown/".length))).text()).toBe("a,b\n1,2\n")
     const r2 = await showTool.execute({ path: join(workspace, "数据.csv") }, c)
     expect(r2.output).toContain(m![0])
-    // 超长文本：截断 code 块 + file 卡片取全文
+    // 超长文本：截断 code 块（附带 path/name，全文经文件卡工具栏下载/原文件查看获取）
     const big = "x".repeat(45_000) + "\nEND"
     writeFileSync(join(workspace, "big.log"), big)
     const r3 = await showTool.execute({ path: join(workspace, "big.log") }, c)
-    expect(r3.blocks!.length).toBe(2)
-    expect((r3.blocks![0] as { type: string; text: string }).type).toBe("code")
-    expect((r3.blocks![0] as { text: string }).text.length).toBeLessThan(45_000)
-    expect((r3.blocks![0] as { text: string }).text).toContain("已截断")
-    expect((r3.blocks![1] as { type: string }).type).toBe("file")
+    expect(r3.blocks!.length).toBe(1)
+    const bigBlock = r3.blocks![0] as { type: string; text: string; path?: string; name?: string }
+    expect(bigBlock.type).toBe("code")
+    expect(bigBlock.text.length).toBeLessThan(45_000)
+    expect(bigBlock.text).toContain("已截断")
+    const m3 = r3.output.match(/tmp\/shown\/big-[0-9a-f]{8}\.log/)
+    expect(m3).toBeTruthy()
+    expect(bigBlock.path).toBe(m3![0])
+    expect(bigBlock.name).toBe("big.log")
     rmSync(home, { recursive: true, force: true })
   })
 

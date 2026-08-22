@@ -10,11 +10,30 @@ import typescript from "highlight.js/lib/languages/typescript"
 import css from "highlight.js/lib/languages/css"
 import xml from "highlight.js/lib/languages/xml"
 import markdown from "highlight.js/lib/languages/markdown"
+import scss from "highlight.js/lib/languages/scss"
+import less from "highlight.js/lib/languages/less"
+import go from "highlight.js/lib/languages/go"
+import rust from "highlight.js/lib/languages/rust"
+import java from "highlight.js/lib/languages/java"
+import kotlin from "highlight.js/lib/languages/kotlin"
+import ruby from "highlight.js/lib/languages/ruby"
+import c from "highlight.js/lib/languages/c"
+import cpp from "highlight.js/lib/languages/cpp"
+import csharp from "highlight.js/lib/languages/csharp"
+import php from "highlight.js/lib/languages/php"
+import sql from "highlight.js/lib/languages/sql"
+import lua from "highlight.js/lib/languages/lua"
+import swift from "highlight.js/lib/languages/swift"
+import dart from "highlight.js/lib/languages/dart"
 import { el } from "./state"
 import { copyText } from "./ui"
 import { isLowPower } from "./low-power"
 
-for (const [name, lang] of Object.entries({ bash, python, json, javascript, typescript, css, xml, markdown })) {
+// 语言集与 EXT_LANG（file-card.ts / 服务端 core/diff.ts）保持一致；未注册语言由 highlightAuto 兜底
+for (const [name, lang] of Object.entries({
+  bash, python, json, javascript, typescript, css, xml, markdown,
+  scss, less, go, rust, java, kotlin, ruby, c, cpp, csharp, php, sql, lua, swift, dart,
+})) {
   hljs.registerLanguage(name, lang)
 }
 

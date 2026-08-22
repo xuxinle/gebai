@@ -37,11 +37,11 @@ export type DiagramFormat = "plantuml" | "mermaid" | "d2" | "echarts"
 
 /**
  * Rich content blocks embedded in messages, rendered by the UI.
- * `image`/`file` `path` values are logical paths relative to the session tmp/ dir.
+ * `image`/`file`/`code`（`path` 可选，文件直显时携带）`path` values are logical paths relative to the session tmp/ dir.
  */
 export type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "code"; text: string; language?: string }
+  | { type: "code"; text: string; language?: string; path?: string; name?: string }
   | { type: "image"; path: string; name?: string; mime?: string }
   | { type: "file"; path: string; name: string; mime?: string }
   | { type: "diagram"; format: DiagramFormat; code: string; name?: string; version?: number }
