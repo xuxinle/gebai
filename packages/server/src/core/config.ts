@@ -151,7 +151,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     feishuBotEnabled: bool("GEBAI_FEISHU_BOT_ENABLED", false),
     feishuAppId: env("GEBAI_FEISHU_APP_ID") || undefined,
     feishuAppSecret: env("GEBAI_FEISHU_APP_SECRET") || undefined,
-    // 安全模式：仅启动时从环境变量加载，不进入会话 env（不可被 ask_env/前端 envOverride 修改）
+    // 安全模式：仅启动时从环境变量加载，不进入会话 env（不可被 ask 填值分支/前端 envOverride 修改）
     safeMode: bool("GEBAI_SAFE_MODE", false),
   }
   return { ...config, ...overrides }

@@ -2197,71 +2197,7 @@ export function makeTodoTool(): Tool {
   return tool
 }
 
-const askUserTool: Tool = {
-  name: "ask_user",
-  // 需至少多轮交互（前端选择卡片或飞书按钮作答），无交互模式禁用
-  interaction: "multi_turn",
-  description:
-    "向用户提出一组选项并**阻塞等待用户回应**（方案确认、方向决策等场景）。用户可点选选项（multi=true 时可多选）、输入自定义文本或拒绝回答，结果会作为本工具结果返回，据此继续执行。options 每项可为纯文本字符串，或复杂选项 { title, description }（UI 按标题+说明展示，返回值为 title）。",
-  parameters: schema(
-    {
-      prompt: { type: "string" },
-      options: {
-        type: "array",
-        items: {
-          anyOf: [
-            { type: "string" },
-            { type: "object", properties: { title: { type: "string" }, description: { type: "string" } }, required: ["title"] },
-          ],
-        },
-      },
-      multi: { type: "boolean" },
-    },
-    ["prompt", "options"],
-  ),
-  async execute(args, ctx) {
-    const prompt = String(args.prompt ?? "")
-    const multi = args.multi === true
-    const options = (Array.isArray(args.options) ? args.options : []).map(normalizeChoiceOption)
-    if (!options.length) throw new Error("ask_user 需要至少一个选项")
-    // 阻塞等待用户回应：事件推送由引擎 waitForChoice 发布（含 choiceId/multi），
-    // 用户经 UI/REST/WS 提交选项/自定义文本/拒绝后本工具才返回，模型据此继续
-    const choice = await ctx.waitForChoice(prompt, options, multi)
-    if (!choice) return { output: "用户未在时限内做出选择，已取消本次询问。请基于现有信息自行决策或换一种方式征询。" }
-    if (choice.kind === "refuse") {
-      return { output: "用户拒绝了本次询问。请停止继续询问，基于现有信息自行决策；如信息不足，说明所需信息并请用户另行补充。" }
-    }
-    if (choice.kind === "multi") return { output: `用户选择：${choice.values.join("、")}` }
-    return { output: `用户选择：${choice.value}` }
-  },
-}
-
-export const askEnvTool: Tool = {
-  name: "ask_env",
-  description:
-    "向用户请求设置一个环境变量并**阻塞等待**：前端弹出填值窗口，用户填写提交后值即注入本次任务环境（后续工具读取立即生效），同时保存到浏览器本地（后续任务自动生效）。用于工具缺少必需环境变量（API 密钥/Token/应用凭证等）时向用户索取——如 feishu_docs 缺少 FEISHU_DOCS_APP_ID 时可调用本工具。用户拒绝/超时返回失败，请改用其他方式或说明所需配置。",
-  // 需至少多轮交互（前端填值弹窗），无交互模式禁用
-  interaction: "realtime",
-  card: { titleParams: ["name"], args: "none" },
-  parameters: schema(
-    {
-      name: { type: "string", description: "要请求的环境变量名（如 FEISHU_DOCS_APP_ID，仅限字母/数字/下划线）" },
-      description: { type: "string", description: "变量用途说明（展示给用户，帮助其填写正确的值）" },
-      secret: { type: "boolean", description: "是否敏感值（密钥/Token 等，输入框掩码显示，默认 false）" },
-    },
-    ["name"],
-  ),
-  async execute(args, ctx) {
-    const name = String(args.name ?? "").trim()
-    if (!name) return { output: "ask_env 需要指定环境变量名（name）。" }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return { output: `环境变量名非法: ${name}（仅允许字母/数字/下划线，字母或下划线开头）。` }
-    const ok = await ctx.waitForEnv(name, String(args.description ?? ""), args.secret === true)
-    if (!ok) return { output: `用户未提供环境变量 ${name}（拒绝或超时）。请说明所需配置，或基于现有信息改用其他方式。` }
-    return { output: `环境变量 ${name} 已由用户设置并注入本次任务（后续工具读取立即生效，并已保存到浏览器本地，后续任务自动生效）。` }
-  },
-}
-
-/** 规范化 ask_user 选项：纯文本 → { title }，复杂选项原样。 */
+/** 规范化 ask 选项询问分支的选项：纯文本 → { title }，复杂选项原样。 */
 function normalizeChoiceOption(o: unknown): ChoiceOption {
   if (o && typeof o === "object") {
     const t = String((o as { title?: unknown }).title ?? "")
@@ -2269,7 +2205,6 @@ function normalizeChoiceOption(o: unknown): ChoiceOption {
   }
   return String(o ?? "")
 }
-export { askUserTool }
 
 /** 计划文档存储目录（会话 tmp/plans/，与其它文件工具同一路径基准，随会话文件面板可见）。 */
 export const PLAN_DIR = "plans"
@@ -2290,72 +2225,126 @@ export function buildPlanMarkdown(title: string, steps: string[], content?: stri
 }
 
 /**
- * 计划审批工具（全局）：为复杂/多步骤任务制定执行计划——把计划文档写入会话 tmp/plans/（前端消息流直接展示全文），
- * 然后阻塞等待用户审核：批准后模型按计划逐步执行；拒绝（可附修改意见）则修订后重新提交。
+ * ask：向用户询问并**阻塞等待回应**——统一入口（原 ask_user/ask_env/plan 三工具合并），分支按专属参数三选一：
+ * - 选项询问（options+prompt，原 ask_user）：用户点选/自定义文本/拒绝；multi=true 多选。
+ * - 环境变量填值（name，原 ask_env）：前端弹窗填值后注入本次任务环境。
+ * - 计划审批（title+steps/content，原 plan）：计划写入会话 tmp/plans/ 展示全文，批准/拒绝（附意见）。
+ * 结果文案前缀（「用户选择：」「计划已批准」等）与「请审核计划」prompt 前缀是前端卡片识别契约，勿改。
  */
-export const planTool: Tool = {
-  name: "plan",
-  // 需至少多轮交互（用户审批），无交互模式禁用（与 ask_user 同规则）
-  interaction: "multi_turn",
+export const askTool: Tool = {
+  name: "ask",
   description:
-    "为复杂/多步骤任务制定执行计划并提交用户审核：计划文档写入会话文件（tmp/plans/）并在聊天界面展示，**阻塞等待用户批准/拒绝**。批准后严格按计划逐步执行；拒绝（可附修改意见）则修订后重新提交；审批超时或用户拒绝审核时不再提交，基于现有信息直接回答。适用于多步骤、有风险、不可逆或需用户把关的任务；简单任务用 todo 跟踪即可。",
-  card: { titleParams: ["title"] },
+    "向用户询问并**阻塞等待回应**（统一入口，按参数三选一）：①选项询问——prompt + options（multi=true 可多选），用户点选/输入自定义文本/拒绝，结果返回后据此继续；适合方案确认、方向决策。②环境变量填值——name（+description 用途说明、secret 敏感掩码），前端弹窗填值后注入本次任务环境并保存浏览器本地；适合工具缺少必需凭证（API 密钥/Token 等）时向用户索取。③计划审批——title + steps（或 content 完整 Markdown），计划写入会话文件并在聊天界面展示全文，批准后严格按计划执行、拒绝可附修改意见修订重提；适合多步骤、有风险、需用户把关的任务（简单任务用 todo 跟踪即可）。",
+  card: { args: "none" },
   parameters: schema(
     {
-      title: { type: "string", description: "计划标题（简明概括任务目标，如「重构订单模块」）" },
-      steps: { type: "array", items: { type: "string" }, description: "执行步骤清单（按顺序，每步一句可执行动作；与 content 二选一）" },
-      content: { type: "string", description: "可选：完整计划 Markdown 正文（提供时覆盖 steps 的自动拼装，用于复杂嵌套/表格结构）" },
+      prompt: { type: "string", description: "选项询问的问题文本（与 options 搭配，用户按此作答）" },
+      options: {
+        type: "array",
+        description: "选项询问的选项清单（触发选项分支）：每项可为纯文本字符串，或复杂选项 { title, description }（UI 按标题+说明展示，返回值为 title）",
+        items: {
+          anyOf: [
+            { type: "string" },
+            { type: "object", properties: { title: { type: "string" }, description: { type: "string" } }, required: ["title"] },
+          ],
+        },
+      },
+      multi: { type: "boolean", description: "选项询问是否允许多选（默认单选）" },
+      name: { type: "string", description: "环境变量填值分支（触发填值分支）：要请求的环境变量名（如 FEISHU_DOCS_APP_ID，仅限字母/数字/下划线）" },
+      description: { type: "string", description: "（填值分支）变量用途说明（展示给用户，帮助其填写正确的值）" },
+      secret: { type: "boolean", description: "（填值分支）是否敏感值（密钥/Token 等，输入框掩码显示，默认 false）" },
+      title: { type: "string", description: "计划审批分支（触发计划分支）：计划标题（简明概括任务目标，如「重构订单模块」）" },
+      steps: { type: "array", items: { type: "string" }, description: "（计划分支）执行步骤清单（按顺序，每步一句可执行动作；与 content 二选一）" },
+      content: { type: "string", description: "（计划分支）可选：完整计划 Markdown 正文（提供时覆盖 steps 的自动拼装，用于复杂嵌套/表格结构）" },
     },
-    ["title"],
+    [],
   ),
   outputSchema: schema(
     {
-      status: { type: "string", description: "审批结果：approved/rejected/cancelled/timeout" },
-      title: { type: "string", description: "计划标题" },
-      path: { type: "string", description: "计划文档逻辑路径（tmp/plans/ 下，模型可经 read 读取）" },
-      feedback: { type: "string", description: "拒绝时的用户修改意见（无则空）" },
+      status: { type: "string", description: "（仅计划分支返回）审批结果：approved/rejected/cancelled/timeout" },
+      title: { type: "string", description: "（仅计划分支返回）计划标题" },
+      path: { type: "string", description: "（仅计划分支返回）计划文档逻辑路径（tmp/plans/ 下，模型可经 read 读取）" },
+      feedback: { type: "string", description: "（仅计划分支返回）拒绝时的用户修改意见（无则空）" },
     },
     ["status", "title", "path"],
   ),
   async execute(args, ctx) {
-    const title = String(args.title ?? "").trim()
-    const steps = (Array.isArray(args.steps) ? args.steps : []).map(String).filter(Boolean)
-    const content = args.content != null ? String(args.content) : ""
-    if (!title) return { output: "plan 需要指定计划标题（title）。" }
-    if (!steps.length && !content.trim()) return { output: "plan 需要至少一个执行步骤（steps）或完整计划内容（content）。" }
-    const md = buildPlanMarkdown(title, steps, content || undefined)
-    const logical = `tmp/${PLAN_DIR}/${planFileName(title)}`
-    const abs = ctx.resolvePath(logical)
-    // 写范围守卫（子Agent 声明，引擎注入）：命中则拒绝落盘（计划文档属会话产物，常规不命中）
-    const guardMsg = await ctx.writeGuard?.([abs])
-    if (guardMsg) return { output: `计划文档未落盘：${guardMsg}` }
-    try {
-      await ctx.writeFile(abs, md)
-    } catch (err) {
-      return { output: `计划文档保存失败：${(err as Error).message}。请检查会话目录权限后重试。` }
+    // 分支分派（专属参数）：options/multi → 选项询问；name → 填值；title/steps/content → 计划审批
+    if (args.options != null || args.multi === true) {
+      const options = (Array.isArray(args.options) ? args.options : []).map(normalizeChoiceOption)
+      if (!options.length) throw new Error("ask 选项询问需要至少一个选项（options）")
+      if (!String(args.prompt ?? "").trim()) return { output: "ask 失败：选项询问（options）需同时提供 prompt（问题文本）。" }
+      // 无交互模式无人可答：明确报错引导自行决策（不空等 5 分钟超时）
+      if (ctx.interactionMode === "none") {
+        return { output: "ask 失败：当前通道无交互能力（无交互调用），无法向用户询问。请基于现有信息自行决策，或在回复中说明选项供用户下次指示。" }
+      }
+      const prompt = String(args.prompt ?? "")
+      // 阻塞等待用户回应：事件推送由引擎 waitForChoice 发布（含 choiceId/multi），
+      // 用户经 UI/REST/WS 提交选项/自定义文本/拒绝后本工具才返回，模型据此继续
+      const choice = await ctx.waitForChoice(prompt, options, args.multi === true)
+      if (!choice) return { output: "用户未在时限内做出选择，已取消本次询问。请基于现有信息自行决策或换一种方式征询。" }
+      if (choice.kind === "refuse") {
+        return { output: "用户拒绝了本次询问。请停止继续询问，基于现有信息自行决策；如信息不足，说明所需信息并请用户另行补充。" }
+      }
+      if (choice.kind === "multi") return { output: `用户选择：${choice.values.join("、")}` }
+      return { output: `用户选择：${choice.value}` }
     }
-    // 阻塞等待用户审批：批准 → 模型继续按计划执行；拒绝（含自定义修改意见）→ 修订后重新提交
-    const choice = await ctx.waitForChoice(
-      `请审核计划「${title}」（已保存到会话文件 ${logical}）：批准后将按计划逐步执行；拒绝将返回模型修改；也可直接输入修改意见（视为拒绝）。`,
-      ["批准执行", "拒绝执行"],
-    )
-    const data = { status: "", title, path: logical }
-    if (!choice) {
-      return { output: `计划审批超时：「${title}」（5 分钟未响应）。请先向用户确认计划是否可执行；若继续执行，说明计划已提交过审批。`, data: { ...data, status: "timeout" } }
+    if (args.name != null) {
+      const name = String(args.name).trim()
+      if (!name) return { output: "ask 失败：填值分支需要指定环境变量名（name）。" }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return { output: `环境变量名非法: ${name}（仅允许字母/数字/下划线，字母或下划线开头）。` }
+      // 填值弹窗仅 Web 前端实时会话可用（飞书/无交互无弹窗通道）
+      if (ctx.interactionMode && ctx.interactionMode !== "realtime") {
+        return { output: "ask 失败：当前通道不支持填值弹窗（仅 Web 前端实时会话可用）。请说明所需配置引导用户在设置面板配置环境变量。" }
+      }
+      const ok = await ctx.waitForEnv(name, String(args.description ?? ""), args.secret === true)
+      if (!ok) return { output: `用户未提供环境变量 ${name}（拒绝或超时）。请说明所需配置，或基于现有信息改用其他方式。` }
+      return { output: `环境变量 ${name} 已由用户设置并注入本次任务（后续工具读取立即生效，并已保存到浏览器本地，后续任务自动生效）。` }
     }
-    if (choice.kind === "refuse") {
-      return { output: `用户拒绝审核计划「${title}」。请停止计划相关操作，基于现有信息直接回答用户或询问其需求。`, data: { ...data, status: "cancelled" } }
+    if (args.title != null || args.steps != null || args.content != null) {
+      const title = String(args.title ?? "").trim()
+      const steps = (Array.isArray(args.steps) ? args.steps : []).map(String).filter(Boolean)
+      const content = args.content != null ? String(args.content) : ""
+      if (!title) return { output: "ask 失败：计划审批分支需要指定计划标题（title）。" }
+      if (!steps.length && !content.trim()) return { output: "ask 失败：计划审批分支需要至少一个执行步骤（steps）或完整计划内容（content）。" }
+      if (ctx.interactionMode === "none") {
+        return { output: "ask 失败：当前通道无交互能力（无交互调用），无法提交计划审批。请基于现有信息直接执行，并在回复中说明计划要点。" }
+      }
+      const md = buildPlanMarkdown(title, steps, content || undefined)
+      const logical = `tmp/${PLAN_DIR}/${planFileName(title)}`
+      const abs = ctx.resolvePath(logical)
+      // 写范围守卫（子Agent 声明，引擎注入）：命中则拒绝落盘（计划文档属会话产物，常规不命中）
+      const guardMsg = await ctx.writeGuard?.([abs])
+      if (guardMsg) return { output: `计划文档未落盘：${guardMsg}` }
+      try {
+        await ctx.writeFile(abs, md)
+      } catch (err) {
+        return { output: `计划文档保存失败：${(err as Error).message}。请检查会话目录权限后重试。` }
+      }
+      // 阻塞等待用户审批：批准 → 模型继续按计划执行；拒绝（含自定义修改意见）→ 修订后重新提交
+      const choice = await ctx.waitForChoice(
+        `请审核计划「${title}」（已保存到会话文件 ${logical}）：批准后将按计划逐步执行；拒绝将返回模型修改；也可直接输入修改意见（视为拒绝）。`,
+        ["批准执行", "拒绝执行"],
+      )
+      const data = { status: "", title, path: logical }
+      if (!choice) {
+        return { output: `计划审批超时：「${title}」（5 分钟未响应）。请先向用户确认计划是否可执行；若继续执行，说明计划已提交过审批。`, data: { ...data, status: "timeout" } }
+      }
+      if (choice.kind === "refuse") {
+        return { output: `用户拒绝审核计划「${title}」。请停止计划相关操作，基于现有信息直接回答用户或询问其需求。`, data: { ...data, status: "cancelled" } }
+      }
+      const value = choice.kind === "multi" ? choice.values.join("、") : choice.value
+      if (value === "批准执行") {
+        return { output: `计划已批准：「${title}」。请严格按计划逐步执行（计划文档：${logical}，可用 read 读取），每完成一步用 todo 更新状态，关键节点向用户汇报。`, data: { ...data, status: "approved" } }
+      }
+      const feedback = value === "拒绝执行" ? "" : value
+      const reviseNote =
+        feedback === ""
+          ? "用户未附具体修改意见，请自行分析计划可能存在的不足（目标不清/步骤缺失/风险未评估等），修订后重新提交新版本。"
+          : `用户修改意见：${feedback}。请按意见修订计划后重新提交新版本。`
+      return { output: `计划已拒绝：「${title}」。${reviseNote}`, data: { ...data, status: "rejected", feedback } }
     }
-    const value = choice.kind === "multi" ? choice.values.join("、") : choice.value
-    if (value === "批准执行") {
-      return { output: `计划已批准：「${title}」。请严格按计划逐步执行（计划文档：${logical}，可用 read 读取），每完成一步用 todo 更新状态，关键节点向用户汇报。`, data: { ...data, status: "approved" } }
-    }
-    const feedback = value === "拒绝执行" ? "" : value
-    const reviseNote =
-      feedback === ""
-        ? "用户未附具体修改意见，请自行分析计划可能存在的不足（目标不清/步骤缺失/风险未评估等），修订后重新调用 plan 提交新版本。"
-        : `用户修改意见：${feedback}。请按意见修订计划后重新调用 plan 提交新版本。`
-    return { output: `计划已拒绝：「${title}」。${reviseNote}`, data: { ...data, status: "rejected", feedback } }
+    return { output: "ask 失败：缺少询问内容——prompt+options（选项询问）/ name（环境变量填值）/ title+steps 或 content（计划审批）三选一。" }
   },
 }
 
@@ -2722,9 +2711,7 @@ export function createAllGlobalTools(): Record<string, Tool> {
     // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）
     fetch_url: fetchUrlTool,
     todo: todoTool,
-    ask_user: askUserTool,
-    ask_env: askEnvTool,
-    plan: planTool,
+    ask: askTool,
     // current_time 已移除：时间获取用 sh/py/js 脚本（如 sh date）按需完成，不占全局工具位；
     // 刻意不注入时间相关提示词引导——模型自身知道如何用现有工具取时间
     // read_feedback 不注册进总Agent 全局工具集（读取用户反馈是自我优化专属输入通道，

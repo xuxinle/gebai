@@ -20,7 +20,7 @@ class FakeProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
   toolName = "ls"
-  /** 工具调用参数（除 ask_user 外的工具使用）。 */
+  /** 工具调用参数（除 ask 外的工具使用）。 */
   toolArgs: Record<string, unknown> = {}
   /** 每次 chat 调用收到的完整消息数组（子Agent 内部消息/工具结果断言用）。 */
   seenChats: MessageLike[][] = []
@@ -28,9 +28,9 @@ class FakeProvider implements LLMProvider {
   seenTools: string[][] = []
   /** 是否声明多模态能力（附件图片内联断言用）。 */
   multimodal = false
-  /** ask_user 是否带 multi=true 调用（多选场景断言用）。 */
+  /** ask 选项询问分支是否带 multi=true 调用（多选场景断言用）。 */
   askMulti = false
-  /** ask_env 请求的变量名（默认 MY_KEY；测试可改为敏感键验证拒绝）。 */
+  /** ask 填值分支请求的变量名（默认 MY_KEY；测试可改为敏感键验证拒绝）。 */
   askEnvName = "MY_KEY"
   /** askenv 第二轮工具（默认 sh 验证注入后可读；测试可换无需审批工具避免审批等待）。 */
   askEnvSecondTool = "sh"
@@ -219,15 +219,15 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // interact：模型第一轮尝试调用 ask_user（交互模式禁用验证用：schema 过滤 + 执行阻止）
+    // interact：模型第一轮尝试调用 ask 选项询问分支（无交互模式分支门控验证用）
     if (this.mode === "interact" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-i1", name: "ask_user", arguments: { prompt: "选择方案", options: ["方案A", "方案B"] } } }
+      yield { type: "tool_call", toolCall: { id: "tc-i1", name: "ask", arguments: { prompt: "选择方案", options: ["方案A", "方案B"] } } }
       yield { type: "done" }
       return
     }
-    // askenv：第一轮调 ask_env 请求环境变量，第二轮 sh echo $MY_KEY 验证注入后工具可读
+    // askenv：第一轮调 ask 填值分支请求环境变量，第二轮 sh echo $MY_KEY 验证注入后工具可读
     if (this.mode === "askenv" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-e1", name: "ask_env", arguments: { name: this.askEnvName, description: "测试密钥", secret: true } } }
+      yield { type: "tool_call", toolCall: { id: "tc-e1", name: "ask", arguments: { name: this.askEnvName, description: "测试密钥", secret: true } } }
       yield { type: "done" }
       return
     }
@@ -269,8 +269,8 @@ class FakeProvider implements LLMProvider {
     }
     if (this.calls === 1) {
       yield { type: "text", text: "using tool" }
-      // ask_user 工具需要有效参数（prompt + options），否则会因无选项抛错
-      const args = this.toolName === "ask_user" ? { prompt: "选择方案", options: ["方案A", "方案B"], ...(this.askMulti ? { multi: true } : {}) } : this.toolArgs
+      // ask 选项询问分支需要有效参数（prompt + options），否则会因无选项抛错
+      const args = this.toolName === "ask" ? { prompt: "选择方案", options: ["方案A", "方案B"], ...(this.askMulti ? { multi: true } : {}) } : this.toolArgs
       yield { type: "tool_call", toolCall: { id: "tc-1", name: this.toolName, arguments: args } }
       yield { type: "done" }
       return
@@ -691,7 +691,7 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("cancel during ask_user choice wait unwinds promptly", async () => {
+  test("cancel during ask choice wait unwinds promptly", async () => {
     const { home, engine, store, registry, provider } = await setup("tool")
     registry.register({
       name: "asker",
@@ -1318,16 +1318,16 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("ask_user tool blocks the loop until the user decides (decideChoice resumes)", async () => {
+  test("ask 选项询问分支 blocks the loop until the user decides (decideChoice resumes)", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "ask_user"
+    s.provider.toolName = "ask"
     const session = await s.store.createSession("default", "t")
     let choiceId = ""
     s.events.subscribe((e) => {
       if (e.type === "event.choice.request") choiceId = String(e.payload.choiceId)
     })
     const run = s.engine.run(session.id, "default", "ask me")
-    // 等待 choice.request 发布（run 阻塞在 ask_user 工具等待）
+    // 等待 choice.request 发布（run 阻塞在 ask 选项询问分支等待）
     const t0 = Date.now()
     while (!choiceId) {
       if (Date.now() - t0 > 2000) throw new Error("choice.request not published")
@@ -1336,20 +1336,20 @@ console.log("defined ok")`,
     expect(choiceId).toBeTruthy()
     // 任务仍挂起（未选择前不继续）
     expect(s.engine.isRunning(session.id)).toBe(true)
-    // 提交用户选择 → ask_user 工具返回 → 引擎继续下一轮
+    // 提交用户选择 → ask 选项询问分支返回 → 引擎继续下一轮
     await s.engine.decideChoice(session.id, choiceId, "方案B")
     await run
     expect(s.engine.isRunning(session.id)).toBe(false)
     const loaded = await s.store.load(session.id)
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ask_user")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ask")
     expect(toolMsg?.content).toContain("用户选择：方案B")
     cleanup(s.home)
   })
 
-  test("ask_user supports custom text input and refusal via decideChoice", async () => {
+  test("ask 选项询问分支支持自定义文本输入与拒绝（decideChoice）", async () => {
     // 自定义文本：用户直接输入不在选项中的答案
     const s = await setup("tool")
-    s.provider.toolName = "ask_user"
+    s.provider.toolName = "ask"
     const session = await s.store.createSession("default", "t")
     let choiceId = ""
     s.events.subscribe((e) => {
@@ -1364,13 +1364,13 @@ console.log("defined ok")`,
     await s.engine.decideChoice(session.id, choiceId, "自定义答案")
     await run
     const loaded = await s.store.load(session.id)
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ask_user")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ask")
     expect(toolMsg?.content).toContain("用户选择：自定义答案")
     cleanup(s.home)
 
-    // 拒绝回答：option 传 null → ask_user 返回拒绝提示，模型停止询问
+    // 拒绝回答：option 传 null → ask 选项询问分支返回拒绝提示，模型停止询问
     const s2 = await setup("tool")
-    s2.provider.toolName = "ask_user"
+    s2.provider.toolName = "ask"
     const session2 = await s2.store.createSession("default", "t")
     let choiceId2 = ""
     s2.events.subscribe((e) => {
@@ -1385,14 +1385,14 @@ console.log("defined ok")`,
     await s2.engine.decideChoice(session2.id, choiceId2, null)
     await run2
     const loaded2 = await s2.store.load(session2.id)
-    const refusedMsg = loaded2!.messages.find((m) => m.role === "tool" && m.name === "ask_user")
+    const refusedMsg = loaded2!.messages.find((m) => m.role === "tool" && m.name === "ask")
     expect(refusedMsg?.content).toContain("拒绝")
     cleanup(s2.home)
   })
 
-  test("ask_user multi-select joins choices (decideChoice with array)", async () => {
+  test("ask 选项询问分支多选结果以「、」连接（decideChoice 数组）", async () => {
     const s = await setup("tool")
-    s.provider.toolName = "ask_user"
+    s.provider.toolName = "ask"
     s.provider.askMulti = true
     const session = await s.store.createSession("default", "t")
     let choiceId = ""
@@ -1411,11 +1411,11 @@ console.log("defined ok")`,
     }
     // 事件携带 multi 标记（UI 据此渲染多选卡片）
     expect(multi).toBe(true)
-    // 提交多选集合 → ask_user 返回「、」连接的选择
+    // 提交多选集合 → ask 选项询问分支返回「、」连接的选择
     await s.engine.decideChoice(session.id, choiceId, ["方案A", "方案C"])
     await run
     const loaded = await s.store.load(session.id)
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ask_user")
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "ask")
     expect(toolMsg?.content).toContain("用户选择：方案A、方案C")
     cleanup(s.home)
   })
@@ -1837,21 +1837,21 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("interactionMode=none 禁用交互类工具（ask_user 及实时前端工具）；show 不做工具级门控（分支内校验）", async () => {
+  test("interactionMode=none 禁用实时前端工具；合并型工具（ask/show）不做工具级门控（分支内校验）", async () => {
     const s = await setup("interact")
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "ask something", { interactionMode: "none" })
-    // schema 过滤：会话往返（session）与实时前端（realtime）工具均不在工具清单
-    expect(s.provider.seenTools[0]).not.toContain("ask_user")
+    // schema 过滤：实时前端（realtime）工具不在工具清单
     expect(s.provider.seenTools[0]).not.toContain("page_capture")
-    // show（合并型工具：图表/HTML/文件三分支）不做工具级门控：全模式可见，通道能力在分支内校验
-    //（html 分支非 realtime 报错、图表 frontend 无前端通道引导 render=backend）
+    // 合并型工具不做工具级门控：全模式可见，通道能力在分支内校验
+    //（ask：选择/计划分支报「无交互能力」、填值分支引导设置面板；show：html 报错、图表引导 backend）
+    expect(s.provider.seenTools[0]).toContain("ask")
     expect(s.provider.seenTools[0]).toContain("show")
     // 普通工具（single 默认）可用
     expect(s.provider.seenTools[0]).toContain("read")
-    // 执行阻止：模型仍尝试调用 ask_user → 通道不可用说明作为工具结果返回，任务正常完成
+    // 分支门控：模型调用 ask 选项询问分支 → 无交互说明作为工具结果返回（不空等超时），任务正常完成
     const blocked = s.provider.seenChats.some((chat) =>
-      chat.some((m) => m.role === "tool" && String(m.content).includes("ask_user 在当前通道不可用")),
+      chat.some((m) => m.role === "tool" && String(m.content).includes("当前通道无交互能力")),
     )
     expect(blocked).toBe(true)
     const loaded = await s.store.load(session.id)
@@ -1859,15 +1859,14 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("interactionMode=multi_turn 保留多轮交互类工具（ask_user/show），禁用实时前端工具", async () => {
+  test("interactionMode=multi_turn 保留多轮交互类工具（ask/show），禁用实时前端工具", async () => {
     const s = await setup("tool") // 第一轮调 ls（无交互），仅验证 schema 过滤
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "do a thing", { interactionMode: "multi_turn" })
     // 实时前端工具禁用（与飞书通道行为一致）
     expect(s.provider.seenTools[0]).not.toContain("page_capture")
-    expect(s.provider.seenTools[0]).not.toContain("ask_env")
-    // 会话类工具可用（飞书有按钮/后端渲染适配）；show 图表分支经飞书渲染通道（分支门控放行 multi_turn）
-    expect(s.provider.seenTools[0]).toContain("ask_user")
+    // 合并型工具全模式可见：ask 选择/计划分支经飞书选择卡片（填值分支报错）、show 图表分支经飞书后端渲染
+    expect(s.provider.seenTools[0]).toContain("ask")
     expect(s.provider.seenTools[0]).toContain("show")
     cleanup(s.home)
   })
@@ -1950,8 +1949,8 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("multi-user ask_env cannot set GEBAI_APPROVAL_SKIP (fourth channel blocked)", async () => {
-    // ask_env 是模型驱动的 env 写入通道：多用户模式下不得借此设置审批跳过键
+  test("multi-user ask 填值分支 cannot set GEBAI_APPROVAL_SKIP (fourth channel blocked)", async () => {
+    // ask 填值分支是模型驱动的 env 写入通道：多用户模式下不得借此设置审批跳过键
     const s = await setup("askenv", false, "server")
     s.provider.askEnvName = "GEBAI_APPROVAL_SKIP"
     s.provider.askEnvSecondTool = "ls" // 第二轮换无需审批工具，避免审批等待
@@ -1961,10 +1960,10 @@ console.log("defined ok")`,
       if (e.type === "event.env.request") envReqs.push(String((e.payload as { name?: unknown }).name))
     })
     await s.engine.run(session.id, "default", "need env", { interactionMode: "realtime" })
-    // 不发布填值卡片（无 env.request 事件），ask_env 返回拒绝说明
+    // 不发布填值卡片（无 env.request 事件），ask 填值分支返回拒绝说明
     expect(envReqs).toEqual([])
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "ask_env" && String(m.content).includes("用户未提供环境变量 GEBAI_APPROVAL_SKIP"))).toBe(true)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "ask" && String(m.content).includes("用户未提供环境变量 GEBAI_APPROVAL_SKIP"))).toBe(true)
     cleanup(s.home)
   })
 
@@ -2014,7 +2013,7 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("ask_env requests env from frontend and injects value into task env for later tools", async () => {
+  test("ask 填值分支 requests env from frontend and injects value into task env for later tools", async () => {
     const s = await setup("askenv")
     const session = await s.store.createSession("default", "t")
     // sh 需审批，跳过
@@ -2037,13 +2036,13 @@ console.log("defined ok")`,
     await s.engine.decideEnvResult(session.id, envReqs[0].envId, "v1")
     await run
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "ask_env" && String(m.content).includes("已由用户设置"))).toBe(true)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "ask" && String(m.content).includes("已由用户设置"))).toBe(true)
     // 值注入生效：后续 sh 工具 echo $MY_KEY 输出 v1
     expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "sh" && String(m.content).includes("v1"))).toBe(true)
     cleanup(s.home)
   })
 
-  test("ask_env reports refusal when user declines", async () => {
+  test("ask 填值分支 reports refusal when user declines", async () => {
     const s = await setup("askenv")
     const session = await s.store.createSession("default", "t")
     await s.store.setEnv(session.id, "default", { GEBAI_APPROVAL_SKIP: "true" })
@@ -2057,7 +2056,7 @@ console.log("defined ok")`,
     await s.engine.decideEnvResult(session.id, envReqs[0].envId, null)
     await run
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "ask_env" && String(m.content).includes("用户未提供环境变量 MY_KEY"))).toBe(true)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "ask" && String(m.content).includes("用户未提供环境变量 MY_KEY"))).toBe(true)
     cleanup(s.home)
   })
 

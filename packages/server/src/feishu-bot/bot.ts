@@ -181,7 +181,7 @@ export function truncateForFeishu(text: string, limit = 12000): string {
   return `${text.slice(0, limit)}\n\n…（内容过长已截断，完整内容可在 Web UI 对应会话查看）`
 }
 
-/* ---------------- ask_user 选择卡片（后端实现：交互式卡片按钮，替代前端选择卡） ---------------- */
+/* ---------------- ask 选择卡片（后端实现：交互式卡片按钮，替代前端选择卡） ---------------- */
 
 /** 选项值 → 按钮文案（复杂选项取 title，截断防超卡片上限）。 */
 export function optionLabel(o: unknown, maxLen = 24): string {
@@ -202,7 +202,7 @@ export interface ChoiceCardState {
   selections: string[]
 }
 
-/** 构建 ask_user 选择交互卡片（按钮每行最多 5 个；多选模式含已选提示与「完成/放弃」，单选含「拒绝回答」）。 */
+/** 构建 ask 选择交互卡片（按钮每行最多 5 个；多选模式含已选提示与「完成/放弃」，单选含「拒绝回答」）。 */
 export function buildChoiceCard(state: ChoiceCardState): Record<string, unknown> {
   const valueOf = (act: string, v?: string) => (v !== undefined ? { choiceId: state.choiceId, act, v } : { choiceId: state.choiceId, act })
   const elements: Record<string, unknown>[] = [{ tag: "markdown", content: `**${state.prompt}**` }]
@@ -316,7 +316,7 @@ export interface FeishuBotOptions {
   api?: FeishuApiLike
   conn?: FeishuConnLike
   connOptions?: Omit<FeishuConnOptions, "appId" | "appSecret" | "onEvent" | "onCardAction">
-  /** 图表后端渲染器（draw 工具后端渲染成图片；三语言，测试注入 fake）。 */
+  /** 图表后端渲染器（show 图表分支后端渲染成图片；四语言，测试注入 fake）。 */
   renderer?: DiagramRenderer
   clock?: () => number
   log?: (msg: string) => void
@@ -352,7 +352,7 @@ export class FeishuBot {
   private userCache = new Map<string, { userId: string; at: number }>()
   /** 待审批（命令 /approve /reject 用）：chatId → { toolCallId, tool, sessionId, openId }。 */
   private pendingApprovals = new Map<string, { toolCallId: string; tool: string; sessionId: string; openId: string }>()
-  /** 待作答选择卡片（ask_user 交互卡片按钮用）：chatId → 状态。 */
+  /** 待作答选择卡片（ask 交互卡片按钮用）：chatId → 状态。 */
   private pendingChoices = new Map<string, PendingChoice>()
   /** 运行中任务的发起飞书用户（审批授权校验用：仅任务发起者可批准/拒绝）。 */
   private runOwners = new Map<string, string>()
@@ -672,7 +672,7 @@ export class FeishuBot {
   }
 
   /**
-   * draw 工具后端渲染（替代前端渲染链路）：图表源码（按 format）→ PNG → 落盘会话 tmp/ + 飞书图片消息，
+   * show 图表分支后端渲染（替代前端渲染链路）：图表源码（按 format）→ PNG → 落盘会话 tmp/ + 飞书图片消息，
    * 结果经 decideDrawResult 回传引擎（渲染成功工具才返回成功；失败把错误回传模型供修正）。
    * 三语言均支持：plantuml（TeaVM 引擎）、mermaid（mermaid + happy-dom）、d2（@terrastruct/d2 WASM），
    * 统一走组合渲染器 core/diagram-render.ts（浅色主题白底图）。
@@ -705,7 +705,7 @@ export class FeishuBot {
     }
   }
 
-  /** ask_user 选择卡片：发送交互式按钮卡片，记录待作答状态（卡片按钮回调经 handleCardAction 处理）。 */
+  /** ask 选择卡片：发送交互式按钮卡片，记录待作答状态（卡片按钮回调经 handleCardAction 处理）。 */
   private async handleChoiceRequest(chatId: string, sessionId: string, payload: Record<string, unknown>): Promise<void> {
     const choiceId = String(payload.choiceId ?? "")
     const prompt = String(payload.prompt ?? "")

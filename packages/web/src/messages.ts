@@ -77,7 +77,7 @@ function openFilePreview(sessionId: string, b: Extract<ContentBlock, { type: "fi
     return
   }
   if (mime === "application/pdf") {
-    // PDF：浏览器原生渲染内嵌查看（show_file 无法内联类型的兜底预览）
+    // PDF：浏览器原生渲染内嵌查看（show path 分支无法内联类型的兜底预览）
     const frame = document.createElement("iframe")
     frame.src = filesContent(sessionId, b.path)
     frame.title = b.name || "PDF 预览"
@@ -139,7 +139,7 @@ export function renderBlock(container: HTMLElement, b: ContentBlock, sessionId: 
       img.src = src
       img.alt = b.name || "image"
       img.className = "block-img"
-      // 点击进入全屏查看器（缩放/平移/复制/下载）：draw 工具 render=backend 产出的 PNG 与普通图片块同样可全屏查看
+      // 点击进入全屏查看器（缩放/平移/复制/下载）：show 图表分支 render=backend 产出的 PNG 与普通图片块同样可全屏查看
       img.onclick = () => openImageViewer(src, b.name || "image")
       tip(img, "点击查看大图")
       // 图片异步加载改变高度：粘底则跟随滚动到底（jump-bottom.ts 委托捕获阶段 load 统一处理，含 markdown 内嵌图片）
@@ -454,7 +454,7 @@ export function sealSessionSegment(sub: SessionRunState): void {
   sealTextState(sub)
 }
 
-/** 块级工具结果（draw/diff/render_html 等 card.args="block" 工具）封段：工具结果卡片追加前封存当前文本段
+/** 块级工具结果（show/diff 等 card.args="block" 工具）封段：工具结果卡片追加前封存当前文本段
  *  （含新会话执行容器内），使图表等块卡片独立展示、画图后的输出另起新卡片——防输出继续追加到图上方同一张卡片。 */
 export function sealBlockResultSegment(sessionId: string, runId?: string): void {
   if (runId) {
@@ -644,13 +644,13 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
     }
-    if (entry.kind === "ask_user") {
-      // ask_user：结果到达时消息流落问答记录卡（等待期交互由审批容器选择卡片承载，消息流不重复预览问题）
+    if (entry.kind === "ask_choice") {
+      // ask 选项询问分支：结果到达时消息流落问答记录卡（等待期交互由审批容器选择卡片承载，消息流不重复预览问题）
       appendAskUserRecord(entry.askArgs ?? { prompt: "", options: [] }, output, runId ? parent : undefined)
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
     }
-    if (entry.kind === "plan") {
+    if (entry.kind === "ask_plan") {
       // plan：计划卡片更新头部为审批结果并追加结果文本（审批由审批容器选择卡片承载）
       const head = entry.wrapper?.querySelector(".tool-head")
       if (head) head.textContent = planResultHead(output)
@@ -686,7 +686,7 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
   appendMsg({ id: uuid(), role: "tool", content: `✓ ${displayToolName(name)}${output ? `\n${output}` : ""}`, blocks, createdAt: Date.now() }, false, parent)
 }
 
-/** ask_user 问答记录卡（结果到达 appendToolResult / 历史回放 toolCard 渲染）：问题 + 选项展示态 + 回答结果，
+/** ask 问答记录卡（结果到达 appendToolResult / 历史回放 toolCard 渲染）：问题 + 选项展示态 + 回答结果，
  *  像内容块一样在消息流开启新输出卡片；等待作答期间消息流不渲染问题预览（交互作答由审批容器选择卡片承载，
  *  与展示卡上下堆叠会被视为重复卡片）；parent 指定容器内渲染目标（子Agent 过程）。 */
 export function appendAskUserRecord(args: { prompt: string; options: Array<string | Record<string, unknown>>; multi?: boolean }, output: string, parent?: HTMLElement): HTMLElement {
@@ -706,7 +706,7 @@ export function appendAskUserRecord(args: { prompt: string; options: Array<strin
   return wrapper
 }
 
-/** plan 计划卡片（消息流内展示计划全文，像 ask_user 一样开启新输出卡片；展示态，
+/** ask 计划卡片（消息流内展示计划全文，像选项询问分支一样开启新输出卡片；展示态，
  *  交互作答由审批容器选择卡片承载；结果到达后由 appendToolResult 更新头部并追加结果）。 */
 export function appendPlanCard(args: { title?: unknown; steps?: unknown; content?: unknown }, parent?: HTMLElement): HTMLElement {
   const wrapper = el("div", "msg tool")

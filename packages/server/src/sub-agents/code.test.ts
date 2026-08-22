@@ -57,7 +57,7 @@ describe("code sub-agent", () => {
       expect(names).toContain(t)
     }
     // 参考 opencode 补齐：文档查阅、方案确认、任务规划、浏览器端验证委托
-    for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
+    for (const t of ["fetch_url", "ask", "agent_run", "todo"]) {
       expect(names).toContain(t)
     }
     // sh 异步任务管理与会话项目设定（DESIGN「sh 异步执行」/「项目机制」）
@@ -105,7 +105,7 @@ describe("code sub-agent", () => {
       expect(codeDef.tools![t].requiresApproval).toBeUndefined()
     }
     // 无 project 参数：纯交互/全局类
-    for (const t of ["fetch_url", "ask_user", "agent_run", "todo"]) {
+    for (const t of ["fetch_url", "ask", "agent_run", "todo"]) {
       expect(codeDef.tools![t].requiresApproval).toBeUndefined()
       expect(codeDef.tools![t].parameters.properties).not.toHaveProperty("project")
     }
@@ -143,7 +143,7 @@ describe("code sub-agent", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("ask_user blocks for user choice (multi) via waitForChoice", async () => {
+  test("ask 选项询问分支 blocks for user choice (multi) via waitForChoice", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-code-"))
     const c = ctx(home, {
       waitForChoice: async (prompt, options, multi) => {
@@ -153,7 +153,7 @@ describe("code sub-agent", () => {
         return { kind: "multi", values: ["方案A"] }
       },
     })
-    const r = await codeDef.tools!.ask_user.execute({ prompt: "选择测试方案", options: [{ title: "方案A", description: "快" }, "方案B"], multi: true }, c)
+    const r = await codeDef.tools!.ask.execute({ prompt: "选择测试方案", options: [{ title: "方案A", description: "快" }, "方案B"], multi: true }, c)
     expect(r.output).toContain("方案A")
     rmSync(home, { recursive: true, force: true })
   })

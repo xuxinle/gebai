@@ -19,7 +19,7 @@ export function displayToolName(name: string): string {
   return agent ? `${agent} · ${tool}` : tool
 }
 
-/** 短工具名（不带 agent 前缀），用于行为判定（todo 系列 / ask_user / 脚本高亮）。 */
+/** 短工具名（不带 agent 前缀），用于行为判定（todo 系列 / ask 分支 / 脚本高亮）。 */
 export function shortToolName(name: string): string {
   return splitToolName(name).tool
 }
@@ -92,7 +92,7 @@ function metaOf(name: string): NonNullable<ToolInfo["card"]> | undefined {
   return toolCardMeta.get(name) ?? toolCardMeta.get(shortToolName(name))
 }
 
-/** 结果直出内容块型工具（card.args="block" 声明）：调用不显示通用卡片，结果直接渲染内容块（draw/diff/render_html）。 */
+/** 结果直出内容块型工具（card.args="block" 声明）：调用不显示通用卡片，结果直接渲染内容块（show/diff）。 */
 export function isBlockOnly(name: string): boolean {
   return metaOf(name)?.args === "block"
 }
@@ -420,7 +420,7 @@ export function choiceBubble(
   const submit = async (selection: string | string[] | null, btn: HTMLButtonElement) => {
     btn.disabled = true
     if (live) {
-      // 实时：提交选择决策，引擎的 ask_user 工具随即返回并继续；提交成功卡片立即关闭
+      // 实时：提交选择决策，引擎的 ask 选项询问分支随即返回并继续；提交成功卡片立即关闭
       try {
         await client.decideChoice(sessionId!, choiceId!, selection)
         settled = true
@@ -513,17 +513,18 @@ export function toolCard(msg: Message): HTMLElement {
     const cur = getCurrentSession()
     return todoBubble(todoState.get(cur?.id ?? "") ?? [])
   }
-  // ask_user 工具：带结果（content）渲染问答记录卡（问题 + 选项展示态 + 回答），
-  // 无结果的裸调用（异常中断）回退可交互选择卡兜底
-  if (short === "ask_user") {
+  // ask 选项询问分支：带结果（content）渲染问答记录卡
+  // （问题 + 选项展示态 + 回答），无结果的裸调用（异常中断）回退可交互选择卡兜底
+  if (short === "ask" && msg.arguments?.options != null) {
     const args = msg.arguments ?? {}
     const prompt = String(args.prompt ?? "")
     const options = Array.isArray(args.options) ? (args.options as Array<string | Record<string, unknown>>) : []
     if (msg.content) return askUserBubble(prompt, options, args.multi === true, msg.content)
     return choiceBubble(prompt, options, undefined, undefined, args.multi === true)
   }
-  // plan 工具：渲染计划卡片（标题 + 计划 Markdown 全文，展示态；历史消息带审批结果时头部更新为结果态并附结果文本）
-  if (short === "plan") {
+  // ask 计划审批分支：渲染计划卡片（标题 + 计划 Markdown 全文，展示态；
+  // 历史消息带审批结果时头部更新为结果态并附结果文本）
+  if (short === "ask" && msg.arguments?.title != null) {
     const args = msg.arguments ?? {}
     const title = String(args.title ?? "")
     const steps = Array.isArray(args.steps) ? args.steps.map(String) : []
@@ -559,7 +560,7 @@ export function toolBubbleFor(msg: Message, content: string): HTMLElement {
   return msg.name ? toolCard(msg) : toolBubble(content)
 }
 
-/** ask_user 消息流问答卡片（展示态，不可交互）：问题 + 选项静态展示（禁用态按钮），
+/** ask 消息流问答卡片（展示态，不可交互）：问题 + 选项静态展示（禁用态按钮），
  *  带 answer（结果输出）时为问答记录卡：头部按结果文案更新并追加回答块；
  *  等待作答的交互由审批容器的选择卡片承载，消息流不再重复渲染问题预览。 */
 export function askUserBubble(prompt: string, options: Array<string | Record<string, unknown>>, multi: boolean, answer?: string): HTMLElement {
@@ -582,7 +583,7 @@ export function askUserBubble(prompt: string, options: Array<string | Record<str
   return bubble
 }
 
-/** ask_user 结果头部状态（按输出前缀识别，与服务端 ask_user 输出文案一致）。 */
+/** ask 问答卡结果头部状态（按输出前缀识别，与服务端输出文案一致）。 */
 export function askUserResultHead(output: string): string {
   if (output.startsWith("用户选择")) return "✓ 用户回答"
   if (output.startsWith("用户拒绝")) return "✕ 用户拒绝"
@@ -590,7 +591,7 @@ export function askUserResultHead(output: string): string {
   return "✓ 用户回答"
 }
 
-/** ask_user 回答结果块（问答卡片完成态追加，与问题展示区分）。 */
+/** ask 问答卡回答结果块（完成态追加，与问题展示区分）。 */
 export function choiceAnswerBlock(output: string): HTMLElement {
   return el("div", "choice-answer", output)
 }
@@ -619,7 +620,7 @@ export function planResultHead(output: string): string {
   return "✓ 计划已处理"
 }
 
-/** 环境变量请求卡片（event.env.request 实时渲染）：展示变量名与说明，用户填值提交后保存到浏览器本地并回传引擎（ask_env 工具阻塞等待）。 */
+/** 环境变量请求卡片（event.env.request 实时渲染）：展示变量名与说明，用户填值提交后保存到浏览器本地并回传引擎（ask 填值分支阻塞等待）。 */
 export function envRequestBubble(name: string, description: string, secret: boolean, envId: string, sessionId: string): HTMLElement {
   const bubble = el("div", "bubble")
   bubble.appendChild(el("div", "tool-head", "🔑 环境变量请求"))

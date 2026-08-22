@@ -126,19 +126,19 @@ function onTodoUpdate(ev: { sessionId: string; todos: TodoItem[] }) {
   todoState.set(ev.sessionId, ev.todos ?? [])
 }
 function onChoiceRequest(ev: { sessionId: string; prompt: string; options: Array<string | Record<string, unknown>>; choiceId: string; multi?: boolean }) {
-  // 选择卡片：渲染到审批容器（随会话显示/隐藏，切走不丢、切回恢复），点击/输入/拒绝提交决策（ask_user 工具阻塞等待）
+  // 选择卡片：渲染到审批容器（随会话显示/隐藏，切走不丢、切回恢复），点击/输入/拒绝提交决策（ask 选项询问分支阻塞等待）
   touchRunActivity(ev.sessionId)
   noteIncoming()
   renderChoiceCard(String(ev.prompt ?? ""), ev.options ?? [], String(ev.choiceId ?? ""), ev.sessionId, ev.multi === true)
 }
 function onEnvRequest(ev: { sessionId: string; envId: string; name: string; description?: string; secret?: boolean }) {
-  // 环境变量填值卡片：渲染到审批容器（随会话显示/隐藏），用户填值提交后保存到浏览器本地并回传引擎（ask_env 工具阻塞等待）
+  // 环境变量填值卡片：渲染到审批容器（随会话显示/隐藏），用户填值提交后保存到浏览器本地并回传引擎（ask 填值分支阻塞等待）
   touchRunActivity(ev.sessionId)
   noteIncoming()
   renderEnvRequestCard(String(ev.name ?? ""), String(ev.description ?? ""), ev.secret === true, String(ev.envId ?? ""), ev.sessionId)
 }
 function onDrawRender(ev: { sessionId: string; renderId: string; code: string; format?: string }) {
-  // draw 工具执行中：前端按图表语言实时渲染（纯计算，不依赖当前会话视图，后台会话同样执行），成功才回传 ok
+  // show 图表分支执行中：前端按图表语言实时渲染（纯计算，不依赖当前会话视图，后台会话同样执行），成功才回传 ok
   touchRunActivity(ev.sessionId)
   noteIncoming()
   void (async () => {
@@ -173,10 +173,11 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
   const runId = ev.sessionRunId
   const short = shortToolName(String(ev.name ?? ""))
   const argsObj = ev.arguments as Record<string, unknown> | undefined
-  // ask_user：等待期只在审批容器渲染交互选择卡片（event.choice.request 承载），消息流不重复渲染
-  // 问题预览卡（上下两张同款卡片会被视为重复）；结果到达时 appendToolResult 落问答记录卡并封段当前文本；
-  // card.args="block" 工具（draw/diff/render_html）：内容块直接渲染，不显示工具卡片
-  if (short === "ask_user") {
+  // ask 选项询问分支：等待期只在审批容器渲染交互选择卡片
+  // （event.choice.request 承载），消息流不重复渲染问题预览卡（上下两张同款卡片会被视为重复）；
+  // 结果到达时 appendToolResult 落问答记录卡并封段当前文本；
+  // card.args="block" 工具（show/diff）：内容块直接渲染，不显示工具卡片
+  if (short === "ask" && argsObj?.options != null) {
     const args = (argsObj ?? {}) as { prompt?: unknown; options?: unknown; multi?: unknown }
     const prompt = String(args.prompt ?? "")
     const options = Array.isArray(args.options) ? (args.options as Array<string | Record<string, unknown>>) : []
@@ -189,16 +190,17 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
       const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
       if (!sub?.container.isConnected) return
       sealSessionSegment(sub) // 容器内文本分段：问答记录卡处截断当前文本段
-      pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_user", runId, askArgs })
+      pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_choice", runId, askArgs })
       scrollSessionSticky(sub.body)
       return
     }
     sealSegment(ev.sessionId) // 文本分段：问答记录卡处截断当前文本段
-    pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { session: ev.sessionId, kind: "ask_user", askArgs })
+    pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { session: ev.sessionId, kind: "ask_choice", askArgs })
     return
   }
-  // plan：像 ask_user 一样在消息流中开启计划卡片（展示态，交互作答由审批容器选择卡片承载）
-  if (short === "plan") {
+  // ask 计划审批分支：像选项询问一样在消息流中开启计划卡片
+  // （展示态，交互作答由审批容器选择卡片承载）；填值分支（name）无专属卡，走通用工具卡（元数据驱动）
+  if (short === "ask" && argsObj?.title != null) {
     const args = (argsObj ?? {}) as { title?: unknown; steps?: unknown; content?: unknown }
     const title = String(args.title ?? "").trim()
     if (!title) return
@@ -209,14 +211,14 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
       sealSessionSegment(sub) // 容器内文本分段：计划卡片处截断当前文本段
       const wrapper = appendPlanCard(args, sub.body)
       const body = wrapper.querySelector<HTMLElement>(".msg-body")
-      if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "plan", runId })
+      if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "ask_plan", runId })
       scrollSessionSticky(sub.body)
       return
     }
     sealSegment(ev.sessionId) // 文本分段：计划卡片处截断当前文本段
     const wrapper = appendPlanCard(args)
     const body = wrapper.querySelector<HTMLElement>(".msg-body")
-    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "plan" })
+    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "ask_plan" })
     return
   }
   if (isBlockOnly(String(ev.name ?? ""))) return
@@ -267,7 +269,7 @@ function onToolResult(ev: { sessionId: string; toolCallId: string; name: string;
   noteIncoming()
   const blocks = ev.blocks as ContentBlock[] | undefined
   if (isBlockOnly(name)) {
-    // draw/diff/render_html 等：不显示工具卡片，appendMsg 只渲染内容块（渲染失败/能力受限时显示输出文本）；
+    // show/diff 等（card.args="block"）：不显示工具卡片，appendMsg 只渲染内容块（渲染失败/能力受限时显示输出文本）；
     // 追加前封存当前文本段——图表卡片独立展示，画图后的输出另起新卡片（防输出追加到图上方同一张卡片）
     const runId = ev.sessionRunId
     const parent = runId ? runs.get(ev.sessionId)?.sessionRuns?.get(runId)?.body : undefined
@@ -278,7 +280,7 @@ function onToolResult(ev: { sessionId: string; toolCallId: string; name: string;
   const runId = ev.sessionRunId
   const sub = runId ? runs.get(ev.sessionId)?.sessionRuns?.get(runId) : undefined
   const parent = sub?.body
-  // ask_user：更新消息流中的问答卡片（头部完成态 + 回答；无配对时兜底独立结果消息）
+  // ask 选项询问分支：更新消息流中的问答卡片（头部完成态 + 回答；无配对时兜底独立结果消息）
   appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent)
   if (sub) scrollSessionSticky(sub.body)
 }

@@ -453,7 +453,7 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
   })
 })
 
-describe("ask_user 问答记录卡（等待期消息流不预览问题，结果到达落记录卡）", () => {
+describe("ask 问答记录卡（等待期消息流不预览问题，结果到达落记录卡）", () => {
   test("appendAskUserRecord 渲染问题 + 禁用选项 + 回答结果（头部按结果文案更新）", () => {
     const wrapper = appendAskUserRecord({ prompt: "选择方案", options: [{ title: "A", description: "方案A" }, "B"] }, "用户选择：A")
     expect(wrapper.className).toContain("msg")
@@ -474,12 +474,12 @@ describe("ask_user 问答记录卡（等待期消息流不预览问题，结果�
     expect(askUserResultHead("用户未在时限内做出选择，已取消本次询问。")).toBe("⏱ 选择超时")
   })
 
-  test("appendToolResult kind=ask_user 按登记参数落问答记录卡（无 wrapper：等待期未渲染预览）", () => {
+  test("appendToolResult kind=ask_choice 按登记参数落问答记录卡（无 wrapper：等待期未渲染预览）", () => {
     // approvalsEl/msgEl 为共享 mock 基座（跨文件注册表可能指向其他文件的 no-op stub）：
     // runId + 显式 parent 把记录卡落进本地容器断言，不依赖共享 DOM
     const parent = makeMockEl("div")
-    pendingTools.set(pendingToolsKey("s1", "tc1", "r1"), { session: "s1", kind: "ask_user", runId: "r1", askArgs: { prompt: "选择方案", options: ["A", "B"], multi: false } })
-    appendToolResult("s1", "tc1", "ask_user", "用户选择：A", undefined, "r1", parent as unknown as HTMLElement)
+    pendingTools.set(pendingToolsKey("s1", "tc1", "r1"), { session: "s1", kind: "ask_choice", runId: "r1", askArgs: { prompt: "选择方案", options: ["A", "B"], multi: false } })
+    appendToolResult("s1", "tc1", "ask", "用户选择：A", undefined, "r1", parent as unknown as HTMLElement)
     expect(pendingTools.has(pendingToolsKey("s1", "tc1", "r1"))).toBe(false)
     const answers = parent.querySelectorAll("div.choice-answer") as unknown as MockEl[]
     expect(answers.length).toBe(1)
@@ -488,11 +488,41 @@ describe("ask_user 问答记录卡（等待期消息流不预览问题，结果�
     pendingTools.clear()
   })
 
-  test("appendToolResult 无配对 ask_user 兜底独立结果消息（不抛错、不残留配对）", () => {
+  test("appendToolResult 无配对 ask 兜底独立结果消息（不抛错、不残留配对）", () => {
     // 无配对（切走/重载场景）：appendMsg 兜底独立结果消息，无 DOM 断言（测试进程内
     // msgEl 可能指向其他测试文件的 mock，跨文件共享模块注册表导致断言不可靠）
-    expect(() => appendToolResult("s1", "tc-unknown", "ask_user", "用户选择：B")).not.toThrow()
+    expect(() => appendToolResult("s1", "tc-unknown", "ask", "用户选择：B")).not.toThrow()
     expect(pendingTools.size).toBe(0)
+  })
+})
+
+describe("ask 卡片按参数形态分流（options → 问答记录卡 / title → 计划卡 / 其余 → 通用卡）", () => {
+  test("history card (toolCard): name=ask + options 参数渲染问答记录卡", () => {
+    const bubble = toolBubbleFor(
+      { id: "t1", role: "tool", name: "ask", content: "用户选择：B", arguments: { prompt: "选择方案", options: ["A", "B"] }, createdAt: 0 },
+      "用户选择：B",
+    )
+    expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
+    expect(bubble.querySelector("div.choice-answer")?.textContent).toBe("用户选择：B")
+  })
+
+  test("history card (toolCard): name=ask + title 参数渲染计划卡片", () => {
+    const bubble = toolBubbleFor(
+      { id: "t2", role: "tool", name: "ask", content: "计划已批准：「重构」。", arguments: { title: "重构", steps: ["a", "b"] }, createdAt: 0 },
+      "计划已批准",
+    )
+    expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 计划已批准")
+    expect(bubble.querySelector("div.markdown")).not.toBeNull()
+  })
+
+  test("history card (toolCard): name=ask + name 参数（填值分支）走通用工具卡不误判", () => {
+    const bubble = toolBubbleFor(
+      { id: "t3", role: "tool", name: "ask", content: "环境变量 MY_KEY 已由用户设置。", arguments: { name: "MY_KEY" }, createdAt: 0 },
+      "已设置",
+    )
+    // 通用卡：非问答/计划形态，不命中问答/计划分支
+    expect(bubble.querySelector("div.choice-answer")).toBeNull()
+    expect(bubble.querySelector("div.markdown")).toBeNull()
   })
 })
 
@@ -518,7 +548,7 @@ describe("选择卡片去重（同一 choiceId 重复推送替换旧卡，断线
   })
 })
 
-describe("plan 计划卡片（消息流展示计划全文 + 审批结果更新）", () => {
+describe("ask 计划卡片（消息流展示计划全文 + 审批结果更新）", () => {
   test("buildPlanMarkdown 与服务端同构：content 优先，否则 title + 勾选清单", () => {
     expect(buildPlanMarkdown("重构订单模块", ["梳理现状", "拆分接口"])).toBe(
       "# 重构订单模块\n\n## 执行计划\n\n- [ ] 梳理现状\n- [ ] 拆分接口",
@@ -538,16 +568,16 @@ describe("plan 计划卡片（消息流展示计划全文 + 审批结果更新�
     expect(wrapper.querySelector("div.markdown")).not.toBeNull()
   })
 
-  test("appendToolResult kind=plan 更新头部为审批结果并追加结果文本", () => {
+  test("appendToolResult kind=ask_plan 更新头部为审批结果并追加结果文本", () => {
     const wrapper = appendPlanCard({ title: "重构订单模块", steps: ["梳理现状"] })
     const body = wrapper.querySelector(".msg-body") as HTMLElement
-    pendingTools.set(pendingToolsKey("s1", "tc1"), { wrapper, body, session: "s1", kind: "plan" })
+    pendingTools.set(pendingToolsKey("s1", "tc1"), { wrapper, body, session: "s1", kind: "ask_plan" })
     appendToolResult("s1", "tc1", "plan", "计划已批准：「重构订单模块」。请严格按计划逐步执行。")
     expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✓ 计划已批准")
     expect(wrapper.querySelector("div.choice-answer")?.textContent).toContain("计划已批准")
     expect(pendingTools.has(pendingToolsKey("s1", "tc1"))).toBe(false)
     // 拒绝场景：头部与文本更新
-    pendingTools.set(pendingToolsKey("s1", "tc2"), { wrapper, body, session: "s1", kind: "plan" })
+    pendingTools.set(pendingToolsKey("s1", "tc2"), { wrapper, body, session: "s1", kind: "ask_plan" })
     appendToolResult("s1", "tc2", "plan", "计划已拒绝：「重构订单模块」。用户修改意见：缺少回归测试步骤。")
     expect(wrapper.querySelector("div.tool-head")?.textContent).toBe("✕ 计划已拒绝")
     pendingTools.clear()
@@ -561,9 +591,9 @@ describe("plan 计划卡片（消息流展示计划全文 + 审批结果更新�
     expect(planResultHead("计划文档保存失败：磁盘满")).toBe("✓ 计划已处理")
   })
 
-  test("history card (toolCard): plan 历史消息渲染计划卡片（带审批结果态与结果文本）", () => {
+  test("history card (toolCard): ask 计划分支历史消息渲染计划卡片（带审批结果态与结果文本）", () => {
     const bubble = toolBubbleFor(
-      { id: "t1", role: "tool", name: "plan", content: "计划已批准：「重构订单模块」。请严格按计划逐步执行。", arguments: { title: "重构订单模块", steps: ["梳理现状", "迁移数据"] }, createdAt: 0 },
+      { id: "t1", role: "tool", name: "ask", content: "计划已批准：「重构订单模块」。请严格按计划逐步执行。", arguments: { title: "重构订单模块", steps: ["梳理现状", "迁移数据"] }, createdAt: 0 },
       "计划已批准",
     )
     // 历史重载：头部直接呈现审批结果态，结果文本追加（与实时流一致）
@@ -573,9 +603,9 @@ describe("plan 计划卡片（消息流展示计划全文 + 审批结果更新�
     expect(bubble.querySelector("div.markdown")).not.toBeNull()
   })
 
-  test("history card (toolCard): plan 无结果文本（仅调用）时保持计划卡样式", () => {
+  test("history card (toolCard): ask 计划分支无结果文本（仅调用）时保持计划卡样式", () => {
     const bubble = toolBubbleFor(
-      { id: "t2", role: "tool", name: "plan", content: "", arguments: { title: "重构订单模块", steps: ["梳理现状"] }, createdAt: 0 },
+      { id: "t2", role: "tool", name: "ask", content: "", arguments: { title: "重构订单模块", steps: ["梳理现状"] }, createdAt: 0 },
       "",
     )
     expect(bubble.querySelector("div.tool-head")?.textContent).toBe("📋 计划 · 重构订单模块")
@@ -819,11 +849,11 @@ describe("code 参数折叠（write/patch/js 等长内容默认收起）", () =>
   })
 })
 
-describe("ask_user 历史回放（带结果渲染问答记录卡）", () => {
+describe("ask 历史回放（带结果渲染问答记录卡）", () => {
   test("带结果（content）渲染问答记录卡：头部结果态 + 回答块，选项禁用展示", () => {
     __setToolCardMetaForTest([])
     const bubble = toolBubbleFor(
-      { id: "ta1", role: "tool", name: "ask_user", content: "用户选择：A", arguments: { prompt: "选哪个方案", options: ["A", "B"] }, createdAt: 0 },
+      { id: "ta1", role: "tool", name: "ask", content: "用户选择：A", arguments: { prompt: "选哪个方案", options: ["A", "B"] }, createdAt: 0 },
       "",
     )
     expect(bubble.querySelector("div.tool-head")?.textContent).toBe("✓ 用户回答")
@@ -837,7 +867,7 @@ describe("ask_user 历史回放（带结果渲染问答记录卡）", () => {
   test("无结果的裸调用（异常中断）回退可交互选择卡", () => {
     __setToolCardMetaForTest([])
     const bubble = toolBubbleFor(
-      { id: "ta2", role: "tool", name: "ask_user", content: "", arguments: { prompt: "选哪个方案", options: ["A", "B"] }, createdAt: 0 },
+      { id: "ta2", role: "tool", name: "ask", content: "", arguments: { prompt: "选哪个方案", options: ["A", "B"] }, createdAt: 0 },
       "",
     )
     expect(bubble.querySelector("div.choice-custom")).not.toBeNull()

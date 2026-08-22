@@ -679,16 +679,16 @@ export class GebaiClient {
   decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void> {
     return this.request<void>("approval.decide", { id: sessionId, toolCallId, approve })
   }
-  /** 提交用户选择（ask_user 工具阻塞等待的选择）；字符串为单选，数组为多选，null 表示拒绝回答。 */
+  /** 提交用户选择（ask 选项询问分支阻塞等待的选择）；字符串为单选，数组为多选，null 表示拒绝回答。 */
   decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void> {
     const payload = selection == null ? { choiceId, refuse: true } : Array.isArray(selection) ? { choiceId, options: selection } : { choiceId, option: selection }
     return this.request<void>("choice.decide", { id: sessionId, ...payload })
   }
-  /** 提交用户填写的环境变量值（ask_env 工具阻塞等待）；value 为 null 表示拒绝提供。 */
+  /** 提交用户填写的环境变量值（ask 填值分支阻塞等待）；value 为 null 表示拒绝提供。 */
   decideEnv(sessionId: string, envId: string, value: string | null): Promise<void> {
     return this.request<void>("env.decide", { id: sessionId, envId, value })
   }
-  /** 提交前端渲染结果（draw 工具阻塞等待的渲染回传）。 */
+  /** 提交前端渲染结果（show 图表分支阻塞等待的渲染回传）。 */
   submitDrawResult(sessionId: string, renderId: string, ok: boolean, error?: string): Promise<void> {
     return this.request<void>("draw.result", { id: sessionId, renderId, ok, error })
   }

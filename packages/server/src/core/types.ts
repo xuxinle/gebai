@@ -20,12 +20,12 @@ export interface PresetProject {
 }
 
 /**
- * ask_user 选项：纯文本（`string`）或复杂选项（`{ title, description? }`，UI 按标题+说明展示，提交值取 title）。
+ * ask 选项询问分支的选项：纯文本（`string`）或复杂选项（`{ title, description? }`，UI 按标题+说明展示，提交值取 title）。
  */
 export type ChoiceOption = string | { title: string; description?: string }
 
 /**
- * ask_user 选择结果：
+ * ask 选择结果：
  * - `{ kind: "option"; value }`：单选（点选选项或输入的自定义文本）
  * - `{ kind: "multi"; values }`：多选（用户勾选的选项集合，可能含自定义文本）
  * - `{ kind: "refuse" }`：用户拒绝回答
@@ -57,7 +57,7 @@ export type ToolContext = {
   writeFile: (p: string, content: string) => Promise<void>
   /** 写入二进制文件原始字节（draw 后端渲染 PNG 落盘等，路径同样经 resolvePath/沙箱约束）。 */
   writeBinaryFile?: (p: string, data: Uint8Array) => Promise<void>
-  /** 后端渲染图表源码为 PNG 字节（draw 工具 render=backend 时用；format 缺省 plantuml；未注入时该模式不可用）。 */
+  /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用；format 缺省 plantuml；未注入时该模式不可用）。 */
   renderDiagram?: (code: string, opts?: { format?: import("@gebai/sdk").DiagramFormat; background?: string; maxWidth?: number; maxHeight?: number }) => Promise<Uint8Array>
   listFiles: (p?: string) => Promise<FileEntry[]>
   /** 列出单层目录内容（ls 工具用）。 */
@@ -113,15 +113,15 @@ export type ToolContext = {
   /** 执行新会话（agent_run 工具）：派生临时新会话、预加载指定子Agent 列表（完整系统提示词+工具）后阻塞执行任务，
    *  返回最终输出文本与完整执行存档（存档作为工具调用记录扩展字段落盘）。 */
   runNewSession: (agents: string[], input: string) => Promise<{ output: string; archive: import("@gebai/sdk").SessionRunArchive }>
-  /** 向用户提出选择并阻塞等待选择结果（ask_user 工具用）；multi=true 多选；超时返回 null。 */
+  /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>
   /**
-   * 请求用户设置环境变量并阻塞等待（ask_env 工具用）：发布 event.env.request 给前端弹窗填值，
+   * 请求用户设置环境变量并阻塞等待（ask 填值分支用）：发布 event.env.request 给前端弹窗填值，
    * 用户提交后值写入任务 env（本次任务后续工具读取立即生效）返回 true；拒绝/超时返回 false。
    */
   waitForEnv: (name: string, description?: string, secret?: boolean) => Promise<boolean>
   /**
-   * 前端渲染图表并等待渲染结果（draw 工具用）：发布 event.draw.render（含源码与图表语言 format）给前端，
+   * 前端渲染图表并等待渲染结果（show 图表分支用）：发布 event.draw.render（含源码与图表语言 format）给前端，
    * 前端渲染成功后回传结果本方法才返回；渲染错误回传 error；超时（5 秒）返回 null。
    */
   waitForDraw: (render: { code: string; name?: string; format?: import("@gebai/sdk").DiagramFormat }) => Promise<{ ok: boolean; error?: string } | null>
@@ -166,8 +166,8 @@ export interface Tool {
   requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => boolean | Promise<boolean>)
   /** 结构化输出（ToolResult.data）的 JSON Schema：经 tool_schemas 工具批量暴露给模型，供编排前理解输出结构。 */
   outputSchema?: ToolSchema
-  /** 最低可用交互模式（缺省 none=全模式可用）：realtime=仅实时前端（如 page_capture/ask_env）、
-   *  multi_turn=至少多轮交互（如 ask_user，飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。
+  /** 最低可用交互模式（缺省 none=全模式可用）：realtime=仅实时前端（如 page_capture）、
+   *  multi_turn=至少多轮交互（飞书已有按钮/后端渲染适配）。当前模式低于声明时工具被禁用（schema 过滤 + 执行阻止）。
    *  合并型工具（如 show）不做工具级门控，按 ctx.interactionMode 在分支内校验通道能力。 */
   interaction?: Exclude<InteractionMode, "none">
   /** 卡片展示元数据（注册时声明，前端按声明渲染卡片，不硬编码工具名）：
