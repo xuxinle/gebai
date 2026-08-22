@@ -17,15 +17,21 @@
  *    保留 show（练习页/图表展示）、ask（询问/计划）、vision（作业拍照识别）、
  *    agent_load/agent_run（引擎机制）、full_mode（极简模式逃生口）。
  *
- * 产物：packages/desktop/dist/gebai-tutor[.exe]（浏览器形态、内嵌 Web UI 与应用图标）。
- * 注意：与完整桌面端共用固定端口 47896 与 ~/.gebai 数据目录——两者不可同时运行，
+ * 产物（Windows 两个）：
+ * - packages/desktop/dist/gebai-tutor[.exe]：浏览器形态（双击启动自动开浏览器）
+ * - packages/desktop/dist/gebai-tutor-desktop[.exe]：原生 WebView 窗口形态（tao/wry 启动器内嵌
+ *   本产物；独立应用身份：物化数据目录 gebai-tutor、固定端口 47897、窗口标题「歌白教辅」——
+ *   与完整桌面端（gebai/47896）互不冲突可同时运行；launcher 变体参数见 launcher/build.rs）
+ *
+ * 注意：浏览器形态产物与完整桌面端共用固定端口 47896 与 ~/.gebai 数据目录——两者不可同时运行，
  * 教辅数据（档案/错题本/掌握度）与完整安装互通（用户=学习者模型）。
- * 生成文件（subagents.bundle / tools-excluded）在编译完成后**自动还原全量**，工作区不留裁剪态。
+ * 生成文件（subagents.bundle / tools-excluded）在编译完成后**自动还原全量**，工作区不留裁剪态；
+ * launcher 的 cargo target 同样还原为完整版内嵌（防后续 copy-launcher 误取变体产物）。
  *
  * 运行：bun run scripts/build-tutor-agent.ts（或 bun run build:tutor）
  */
 import { spawnSync } from "node:child_process"
-import { statSync } from "node:fs"
+import { copyFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
 const repoRoot = join(import.meta.dirname, "..")
@@ -85,7 +91,31 @@ if (process.platform === "win32") {
   run(bin, ["run", "--cwd", desktopDir, "scripts/embed-icon.ts", `dist/${exeName}`])
 }
 
-// 5) 还原生成文件为全量态（subagents.bundle / tools-excluded 裁剪态不留工作区；与 build:code 样例
+// 5) 原生 WebView 启动器（仅 Windows：变体参数经 launcher/build.rs 烘焙——内嵌本产物、
+//    独立应用身份 gebai-tutor（物化目录/WebView 配置隔离）、固定端口 47897、标题「歌白教辅」）
+let launcherOut: string | null = null
+if (process.platform === "win32") {
+  const cargoCheck = spawnSync("cargo", ["--version"], { stdio: "ignore" })
+  if (cargoCheck.status !== 0) {
+    console.error("[build-tutor-agent] 未找到 cargo（WebView 启动器为 Rust 构建）：请先安装 Rust 工具链")
+    process.exit(1)
+  }
+  const manifest = join(desktopDir, "launcher", "Cargo.toml")
+  process.env.GEBAI_LAUNCHER_SERVER_EXE = outfile
+  process.env.GEBAI_LAUNCHER_APP_NAME = "gebai-tutor"
+  process.env.GEBAI_LAUNCHER_TITLE = "歌白教辅"
+  process.env.GEBAI_LAUNCHER_PORT = "47897"
+  run("cargo", ["build", "--release", "--manifest-path", manifest])
+  launcherOut = join(desktopDir, "dist", "gebai-tutor-desktop.exe")
+  copyFileSync(join(desktopDir, "launcher", "target", "release", "gebai-desktop.exe"), launcherOut)
+  // 还原默认 launcher 构建（target 恢复完整版内嵌，防后续 copy-launcher 误取变体产物）
+  for (const key of ["GEBAI_LAUNCHER_SERVER_EXE", "GEBAI_LAUNCHER_APP_NAME", "GEBAI_LAUNCHER_TITLE", "GEBAI_LAUNCHER_PORT"]) {
+    delete process.env[key]
+  }
+  run("cargo", ["build", "--release", "--manifest-path", manifest])
+}
+
+// 6) 还原生成文件为全量态（subagents.bundle / tools-excluded 裁剪态不留工作区；与 build:code 样例
 //    「下次常规构建自动恢复」不同，本脚本编译后立即还原，bun run test 等不受裁剪态影响）
 delete process.env.GEBAI_BUILD_SUBAGENTS
 delete process.env.GEBAI_BUILD_PRELOAD
@@ -94,10 +124,12 @@ run(bin, ["run", join(serverDir, "scripts", "build-subagents.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-tools.ts")])
 
 const size = statSync(outfile).size
+const launcherSize = launcherOut ? statSync(launcherOut).size : 0
 console.log(
-  `\n[build-tutor-agent] 产物: ${outfile}（${(size / 1024 / 1024).toFixed(1)} MB）\n` +
-  `  子Agent: ${SUB_AGENTS.join(", ")}（预加载: ${PRELOAD.join(", ")}）｜排除全局工具: ${EXCLUDE_TOOLS.length} 个（文件/执行/编排/抓取/待办）\n` +
-  "  运行形态: 桌面端浏览器形态（双击启动，自动打开浏览器；GEBAI_NO_OPEN=1 关闭）；固定端口 47896；数据目录 ~/.gebai\n" +
-  "  注意: 与完整桌面端同端口同数据目录，不可同时运行；教辅数据与完整安装互通\n" +
-  "  已还原: 生成文件（subagents.bundle / tools-excluded）恢复全量态，工作区无裁剪残留",
+  `\n[build-tutor-agent] 产物: ${outfile}（${(size / 1024 / 1024).toFixed(1)} MB，浏览器形态）` +
+  (launcherOut ? `\n  产物: ${launcherOut}（${(launcherSize / 1024 / 1024).toFixed(1)} MB，WebView 窗口形态：独立身份 gebai-tutor、端口 47897、标题「歌白教辅」）` : "") +
+  `\n  子Agent: ${SUB_AGENTS.join(", ")}（预加载: ${PRELOAD.join(", ")}）｜排除全局工具: ${EXCLUDE_TOOLS.length} 个（文件/执行/编排/抓取/待办）\n` +
+  "  浏览器形态: 双击启动自动打开浏览器；固定端口 47896，与完整桌面端同端口同数据目录（~/.gebai）不可同时运行\n" +
+  "  WebView 形态: 独立端口 47897 与物化目录，可与完整桌面端同时运行；教辅数据与完整安装互通\n" +
+  "  已还原: 生成文件与 launcher cargo target 恢复全量/完整版态，工作区无裁剪残留",
 )
