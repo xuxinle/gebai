@@ -638,7 +638,7 @@ export const jsTool: Tool = {
     "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；flow/编排传入的 `input` 参数可直接引用（JSON 文本需自行 JSON.parse）。\n" +
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
     "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（默认 true 需审批，仅明确安全的只读/幂等工具传 false）。\n" +
-    "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。",
+    "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。**脚本进程 cwd 即会话 tmp/**：裸 fs/Bun.write 的相对路径直接用文件名（如 `a.txt`）——不要再带 `tmp/` 前缀（会多套一层写入 `tmp/tmp/…`）；工具函数（read/write 等）两种写法等价（`tmp/` 前缀自动剥离，仅工具参数层生效）。",
   // js 免审按词元扫描放行：纯数据加工/工具编排代码（无网络外发/进程/环境读取/Bun 写通道）免审生效，
   //  含上述通道的一律仍需审批（防提示词注入借免审标记外发数据或执行进程）。approval:false 参数
   //  另用于 execute 内部 approvalFree 语义（动态工具 RPC 分发层按剥离免审标记解析）

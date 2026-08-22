@@ -5,7 +5,6 @@ import {
   client,
   el,
   filesContent,
-  filesDownload,
   formatTime,
   getCurrentSession,
   input,
@@ -18,7 +17,8 @@ import {
   todoState,
   type SessionRunState,
 } from "./state"
-import { blockText, highlightedCode, markdownBlock } from "./markdown"
+import { blockText, markdownBlock } from "./markdown"
+import { renderCodeCard, renderFileCard } from "./file-card"
 import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
@@ -28,76 +28,6 @@ import { createStickyFollow, type StickyFollowHandle } from "./sticky-follow"
 import { addMsgNavSeg } from "./msg-nav"
 import { autosize } from "./composer"
 import { confirmDialog, copyText, tip, toast } from "./ui"
-
-/* ---------- 按文件名/扩展名推断语法高亮语言 ---------- */
-
-const EXT_LANG: Record<string, string> = {
-  ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript",
-  json: "json", py: "python", sh: "bash", bash: "bash", zsh: "bash", css: "css", html: "xml", htm: "xml",
-  xml: "xml", svg: "xml", md: "markdown", markdown: "markdown", yml: "markdown", yaml: "markdown",
-}
-
-function langForFile(name: string, mime: string): string {
-  const ext = name.split(".").pop()?.toLowerCase() ?? ""
-  if (!ext && mime.startsWith("text/")) return ""
-  return EXT_LANG[ext] ?? ""
-}
-
-/** 文件在线预览：图片直接展示，文本/代码语法高亮，其他提示下载。 */
-function openFilePreview(sessionId: string, b: Extract<ContentBlock, { type: "file" }>) {
-  const overlay = el("div", "preview-overlay")
-  const card = el("div", "preview-card")
-  const head = el("div", "preview-head")
-  const closeBtn = el("button", "preview-close", "✕")
-  closeBtn.onclick = closePreview
-  head.append(el("span", "preview-title", b.name || b.path), closeBtn)
-  const body = el("div", "preview-body")
-  card.append(head, body)
-  overlay.appendChild(card)
-  document.body.appendChild(overlay)
-
-  function closePreview() {
-    overlay.remove()
-    document.removeEventListener("keydown", onKey)
-  }
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closePreview()
-  }
-  document.addEventListener("keydown", onKey)
-  overlay.onclick = (e) => {
-    if (e.target === overlay) closePreview()
-  }
-
-  const mime = b.mime ?? ""
-  if (mime.startsWith("image/")) {
-    const img = document.createElement("img")
-    img.src = filesContent(sessionId, b.path)
-    img.alt = b.name || "preview"
-    body.appendChild(img)
-    return
-  }
-  if (mime === "application/pdf") {
-    // PDF：浏览器原生渲染内嵌查看（show path 分支无法内联类型的兜底预览）
-    const frame = document.createElement("iframe")
-    frame.src = filesContent(sessionId, b.path)
-    frame.title = b.name || "PDF 预览"
-    frame.style.cssText = "width:100%;height:72vh;border:0;border-radius:8px;background:#fff"
-    body.appendChild(frame)
-    return
-  }
-  void fetch(filesContent(sessionId, b.path))
-    .then(async (r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const text = await r.text()
-      const pre = el("pre")
-      pre.className = "preview-code"
-      pre.appendChild(highlightedCode(langForFile(b.name || b.path, mime), text))
-      body.appendChild(pre)
-    })
-    .catch((err) => {
-      body.appendChild(blockText(`无法预览该文件: ${(err as Error).message}。可点击「下载」查看。`))
-    })
-}
 
 /** 渲染一组内容块：连续的 diagram 块收进 `.diagram-row` 横排展示（节省纵向空间），其余块逐个渲染。 */
 export function renderBlocks(container: HTMLElement, blocks: ContentBlock[], sessionId: string) {
@@ -121,18 +51,10 @@ export function renderBlock(container: HTMLElement, b: ContentBlock, sessionId: 
     case "text":
       container.appendChild(blockText(b.text))
       break
-    case "code": {
-      const pre = el("pre", "code")
-      if (b.language) {
-        const lab = el("div", "code-label", b.language)
-        pre.appendChild(lab)
-      }
-      const code = el("code")
-      code.textContent = b.text
-      pre.appendChild(code)
-      container.appendChild(pre)
+    case "code":
+      // 文件内容卡：markdown 语言渲染 md、其余语法高亮；path 附带时提供复制/原文件/下载工具栏
+      renderCodeCard(container, b, sessionId)
       break
-    }
     case "image": {
       const img = document.createElement("img")
       const src = filesContent(sessionId, b.path)
@@ -146,25 +68,11 @@ export function renderBlock(container: HTMLElement, b: ContentBlock, sessionId: 
       container.appendChild(img)
       break
     }
-    case "file": {
-      const box = el("div", "file-box")
-      const a = document.createElement("a")
-      a.className = "file-link"
-      a.href = filesDownload(sessionId, b.path)
-      a.textContent = `📎 ${b.name || b.path}`
-      a.onclick = (e) => {
-        e.preventDefault()
-        openFilePreview(sessionId, b)
-      }
-      const dl = document.createElement("a")
-      dl.className = "file-dl"
-      dl.href = filesDownload(sessionId, b.path)
-      dl.download = b.name || "file"
-      dl.textContent = "下载"
-      box.append(a, dl)
-      container.appendChild(box)
+    case "file":
+      // 文件内容卡：按 mime/扩展分派（图片内联/PDF iframe/沙箱 html/md 渲染/文本高亮/二进制占位），
+      // 内容进入视口后按需加载；工具栏统一复制/原文件/下载
+      renderFileCard(container, b, sessionId)
       break
-    }
     case "diagram":
       void renderDiagram(container, b)
       break

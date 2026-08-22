@@ -261,6 +261,64 @@ describe("renderBlock image 块（点击进入全屏查看器）", () => {
   })
 })
 
+describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具栏）", () => {
+  test("code 块 markdown 语言：卡片容器 + markdown 渲染 + 复制/原文件/下载工具栏", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "code", text: "# 标题\n\n- 项", language: "markdown", path: "tmp/plans/重构.md", name: "重构.md" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    expect(card.className).toContain("file-card")
+    expect((card.querySelector("span.file-title") as unknown as { textContent?: string })?.textContent).toBe("重构.md")
+    // markdown 渲染容器（mock 选择器仅支持单段 tag.class，容器级查询断言）
+    expect(card.querySelector("div.markdown")).not.toBeNull()
+    // 工具栏：复制 + 原文件 + 下载（下载指向 files/download）
+    const dl = card.querySelector("a.file-dl-icon") as unknown as { href: string; download: string }
+    expect(dl).not.toBeNull()
+    expect(dl.href).toContain("files/download?path=tmp%2Fplans%2F")
+    expect(card.querySelectorAll("button").length).toBeGreaterThanOrEqual(2)
+  })
+
+  test("code 块源码语言：语法高亮 pre（file-code），语言作徽标", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "code", text: "const a = 1", language: "typescript", path: "tmp/a.ts", name: "a.ts" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    expect(card.querySelector("pre.file-code")).not.toBeNull()
+    expect((card.querySelector("span.file-badge") as unknown as { textContent?: string })?.textContent).toBe("typescript")
+  })
+
+  test("code 块无 path（防御降级）：仍渲染卡片与内容，无下载/原文件入口", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "code", text: "裸文本", language: "bash" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    expect(card.className).toContain("file-card")
+    expect(card.querySelector("a.file-dl-icon")).toBeNull()
+    expect(card.querySelector("pre.file-code")).not.toBeNull()
+  })
+
+  test("file 块图片类型：卡内 img 内联（src 指向会话文件）", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/shot.png", name: "shot.png", mime: "image/png" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    const img = card.querySelector("img.file-img") as unknown as { src: string }
+    expect(img).not.toBeNull()
+    expect(img.src).toContain("files/content?path=tmp%2Fshot.png")
+  })
+
+  test("file 块文本类型：进入视口按需 fetch 后语法高亮渲染（无 IntersectionObserver 环境立即加载）", async () => {
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () => new Response("console.log(1)")) as unknown as typeof fetch
+    try {
+      const container = makeMockEl("div")
+      renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/a.js", name: "a.js", mime: "text/javascript" }, "s1")
+      const card = container.children[0] as unknown as MockElWithQuery
+      await new Promise((r) => setTimeout(r, 10))
+      expect(card.querySelector("pre.file-code")).not.toBeNull()
+      expect(card.querySelector("a.file-dl-icon")).not.toBeNull()
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+})
+
 describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执行折叠容器）", () => {
   test("container renders input as param block, stays open while running, collapses with output summary when done", () => {
     const box = sessionRunBox({ runId: "r1", agents: ["code"], input: "改个文件" })
@@ -465,6 +523,21 @@ describe("ask 问答记录卡（等待期消息流不预览问题，结果到达
     expect(opts.length).toBe(2)
     for (const o of opts) expect((o as unknown as { disabled: boolean }).disabled).toBe(true)
     expect(wrapper.querySelector("div.choice-answer")?.textContent).toBe("用户选择：A")
+  })
+
+  test("appendAskUserRecord 选中选项高亮（selected）：多选命中全部标记，自定义文本不命中", () => {
+    const wrapper = appendAskUserRecord({ prompt: "选择方案", options: ["A", "B", "C"], multi: true }, "用户选择：A、C")
+    const opts = wrapper.querySelectorAll("button.choice-opt") as unknown as Array<{ classList: { contains(c: string): boolean } }>
+    expect(opts.length).toBe(3)
+    expect(opts[0].classList.contains("selected")).toBe(true)
+    expect(opts[1].classList.contains("selected")).toBe(false)
+    expect(opts[2].classList.contains("selected")).toBe(true)
+    // 自定义文本回答不命中任何选项：无高亮，回答块仍示原文
+    const custom = appendAskUserRecord({ prompt: "选", options: ["A", "B"] }, "用户选择：自己写的答案")
+    for (const o of custom.querySelectorAll("button.choice-opt") as unknown as Array<{ classList: { contains(c: string): boolean } }>) {
+      expect(o.classList.contains("selected")).toBe(false)
+    }
+    expect(custom.querySelector("div.choice-answer")?.textContent).toContain("自己写的答案")
   })
 
   test("askUserResultHead 按输出前缀识别结果态", () => {
