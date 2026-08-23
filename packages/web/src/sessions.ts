@@ -35,7 +35,7 @@ import { applyApprovalSkip } from "./approval-skip"
 import { applyMinimalMode } from "./minimal-mode"
 import { applyApprovalVisibility } from "./approvals"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
-import { autoHideScrollbar, confirmDialog, toast } from "./ui"
+import { autoHideScrollbar, confirmDialog, desktopDownloadHint, toast } from "./ui"
 import { renderShortcutButtons } from "./shortcuts"
 import { clearMsgNav, updateMsgNav } from "./msg-nav"
 import { renderAttachments } from "./attachments"
@@ -776,6 +776,7 @@ export async function exportSession(sessionId: string): Promise<void> {
     .replace(/^[.\s]+|[.\s]+$/g, "")
     .slice(0, 80)
   a.download = `${safeName || session.id}.md`
+  desktopDownloadHint(`${safeName || session.id}.md`)
   a.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

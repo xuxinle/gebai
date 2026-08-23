@@ -1,7 +1,7 @@
 import type { ContentBlock, DiagramFormat } from "@gebai/sdk"
 import DOMPurify from "dompurify"
 import { el } from "./state"
-import { copyText, toast, tip } from "./ui"
+import { copyText, desktopDownloadHint, toast, tip } from "./ui"
 import { isLowPower } from "./low-power"
 import { cssVarToHex } from "./css-color"
 import { injectPlantUmlLayout } from "./plantuml-layout"
@@ -632,6 +632,7 @@ function downloadBlob(blob: Blob, filename: string): void {
   const a = document.createElement("a")
   a.href = URL.createObjectURL(blob)
   a.download = filename
+  desktopDownloadHint(filename)
   a.click()
   setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
@@ -1108,6 +1109,7 @@ function downloadImageUrl(url: string, filename: string): void {
   const a = document.createElement("a")
   a.href = url
   a.download = filename
+  desktopDownloadHint(filename)
   a.click()
 }
 

@@ -3,7 +3,7 @@
  * 全部基于主题 CSS 变量自绘，样式见 overlays.css。
  */
 
-import { el } from "./state"
+import { el, isDesktopApp } from "./state"
 
 /* ---------- 剪贴板（复制） ---------- */
 
@@ -27,6 +27,12 @@ export async function copyText(text: string): Promise<void> {
   const ok = document.execCommand("copy")
   ta.remove()
   if (!ok) throw new Error("复制失败")
+}
+
+/** 桌面 WebView 形态下载提示：WebView 的下载指示不明显，toast 告知进度位置与保存位置（浏览器形态有自身下载指示，不提示）。 */
+export function desktopDownloadHint(name?: string): void {
+  if (!isDesktopApp) return
+  toast(`已开始下载${name ? `「${name}」` : ""}，进度见窗口右上角，完成后保存在系统「下载」文件夹`, "ok")
 }
 
 /* ---------- Toast（替换 alert） ---------- */

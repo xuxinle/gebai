@@ -6,7 +6,7 @@
  */
 import type { ContentBlock } from "@gebai/sdk"
 import { el, filesContent, filesDownload } from "./state"
-import { copyText } from "./ui"
+import { copyText, desktopDownloadHint } from "./ui"
 import { highlightedCode, markdownBlock, blockText } from "./markdown"
 import { openImageViewer } from "./diagram"
 import { previewFrame, sandboxedHtml, iconButton, flashButton, ICON_COPY, ICON_DOWNLOAD, ICON_FULLSCREEN } from "./html-view"
@@ -77,12 +77,14 @@ function fileToolbar(opts: { copy?: () => string; source?: () => void; download?
     bar.appendChild(btn)
   }
   if (opts.download) {
+    const dl = opts.download
     const a = document.createElement("a")
     a.className = "icon-btn file-dl-icon"
     a.title = "下载"
     a.innerHTML = ICON_DOWNLOAD
-    a.href = filesDownload(opts.download.sessionId, opts.download.path)
-    a.download = opts.download.name
+    a.href = filesDownload(dl.sessionId, dl.path)
+    a.download = dl.name
+    a.onclick = () => desktopDownloadHint(dl.name)
     bar.appendChild(a)
   }
   return {

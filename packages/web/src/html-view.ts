@@ -1,6 +1,6 @@
 import type { ContentBlock } from "@gebai/sdk"
 import { el } from "./state"
-import { copyText, toast, tip } from "./ui"
+import { copyText, desktopDownloadHint, toast, tip } from "./ui"
 
 /* ---------- HTML 内容块渲染：域隔离沙箱 iframe 直接渲染（脚本可执行，但隔离于宿主页面） ---------- */
 
@@ -194,7 +194,9 @@ export function flashButton(btn: HTMLButtonElement, label: string): void {
 export function downloadHtmlSource(code: string, name: string): void {
   const a = document.createElement("a")
   a.href = URL.createObjectURL(new Blob([code], { type: "text/html;charset=utf-8" }))
-  a.download = (name || "page").replace(/\.html?$/, "") + ".html"
+  const filename = (name || "page").replace(/\.html?$/, "") + ".html"
+  a.download = filename
+  desktopDownloadHint(filename)
   a.click()
   setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
