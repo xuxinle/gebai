@@ -68,6 +68,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut web_context = WebContext::new(Some(data_dir.join("webview")));
     let webview = WebViewBuilder::new_with_web_context(&mut web_context)
+        // 桌面形态标记：Web UI 据此在下载等场景补充 toast 提示（浏览器形态有自身下载指示）
+        .with_initialization_script("window.__GEBAI_DESKTOP__ = 1")
         .with_html(&loading_html())
         .build(&window)?;
 
