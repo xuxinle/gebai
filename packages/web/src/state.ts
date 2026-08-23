@@ -5,6 +5,9 @@ import type { SessionInfo, TodoItem } from "@gebai/sdk"
 
 export const client = new GebaiClient({ baseUrl: "" })
 
+/** 桌面 WebView（launcher）形态标记：launcher 初始化脚本注入 window.__GEBAI_DESKTOP__（浏览器形态无此标记）。 */
+export const isDesktopApp = !!(window as { __GEBAI_DESKTOP__?: boolean }).__GEBAI_DESKTOP__
+
 export const msgEl = document.getElementById("messages")!
 export const sessionList = document.getElementById("session-list")!
 export const composer = document.getElementById("composer") as HTMLFormElement
