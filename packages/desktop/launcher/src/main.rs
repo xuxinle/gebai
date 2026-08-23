@@ -21,7 +21,7 @@ use tao::{
 use wry::{WebContext, WebViewBuilder};
 
 /// 内嵌的服务端二进制（Windows 形态；路径由 build.rs 注入——完整构建 = dist/gebai.exe，
-/// 场景变体构建（如 build:tutor）经 GEBAI_LAUNCHER_SERVER_EXE 指向对应产物）。
+/// 场景变体构建经 GEBAI_LAUNCHER_SERVER_EXE 指向对应产物）。
 #[cfg(windows)]
 const SERVER_EXE: &[u8] = include_bytes!(env!("GEBAI_EMBED_SERVER_EXE"));
 
