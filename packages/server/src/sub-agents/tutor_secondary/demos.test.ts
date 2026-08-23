@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DEMO_TEMPLATES, DEMO_TEMPLATE_IDS, columnSteps } from "./demos"
+import { REF_ENTRIES } from "./reference-data"
 
 const render = (id: string, params: Record<string, unknown>): string => {
   const tpl = DEMO_TEMPLATES.find((t) => t.id === id)
@@ -170,5 +171,31 @@ describe("教学演示模板库（demos）", () => {
     // 无匹配：列出可用学科引导
     expect(() => render("reference", { subject: "体育" })).toThrow("没有匹配的条目")
     expect(() => render("reference", { id: "no-such-id" })).toThrow("未找到 id")
+  })
+
+  test("reference：空白页知识快捷入口全覆盖（各学段知识点的主题过滤均有内置条目）", () => {
+    // 与 packages/web/src/shortcuts.ts 的 39 个内置知识快捷对应——模型按快捷提示词中的
+    // 学科/主题关键词调用 reference，此表保证每个关键词都有内置演示兜底（无匹配会 throw）
+    const cases: Array<[subject: string, topic: string]> = [
+      // 小学
+      ["数学", "平面图形"], ["数学", "立体图形"], ["数学", "运算律"], ["数学", "分数与小数"],
+      ["数学", "竖式计算"], ["数学", "单位换算"], ["数学", "行程"], ["数学", "统计"],
+      // 初中
+      ["数学", "乘法公式"], ["数学", "因式分解"], ["数学", "二次根式"], ["数学", "分式"],
+      ["数学", "一元二次方程"], ["数学", "锐角三角函数"], ["数学", "三角形"], ["数学", "函数"], ["数学", "圆"],
+      ["物理", "力与运动"], ["物理", "光与声"], ["物理", "热学"], ["物理", "压强"],
+      ["物理", "功和能"], ["物理", "电学"],
+      ["化学", "金属"], ["化学", "方程式"], ["化学", "酸碱盐"], ["化学", "溶液"],
+      // 高中
+      ["数学", "三角函数"], ["数学", "解三角形"], ["数学", "数列"], ["数学", "不等式"],
+      ["数学", "导数"], ["数学", "解析几何"], ["数学", "立体几何"], ["数学", "概率"],
+      ["物理", "力学综合"], ["物理", "电磁学"],
+      ["化学", "物质的量"], ["化学", "有机"], ["化学", "守恒"],
+    ]
+    for (const [subject, topic] of cases) {
+      const html = render("reference", { subject, topic })
+      expect(html.length).toBeGreaterThan(600)
+    }
+    expect(REF_ENTRIES.length).toBeGreaterThanOrEqual(80)
   })
 })
