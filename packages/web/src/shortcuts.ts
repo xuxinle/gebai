@@ -15,15 +15,19 @@ export interface Shortcut {
 const SHORTCUTS_KEY = "gebai.ui.shortcuts"
 
 /** 内置快捷（与用户快捷同等待遇渲染，不可删除）：点击直接发送提示词，由模型编排工具作答。
- *  按学段分块（小学/初中/高中，各块内数→理→化排序），措辞与 tutor 内置公式定理速查库（demo reference 模板）的学科/主题对齐。 */
+ *  按学段分块（小学/初中/高中，各块内数→理→化排序），措辞与 tutor 内置公式定理速查库（demo reference 模板）的学科/主题对齐；
+ *  分组按当前构建注册的子Agent 过滤（小学版 exe 只显小学块、中学版只显初中/高中块，见 visibleGroups）。 */
 interface ShortcutGroup {
   label: string
+  /** 分组归属的子Agent：按 /api/v1/sub-agents 名单过滤；null = 恒可见。 */
+  agent: "tutor_primary" | "tutor_secondary" | null
   items: Shortcut[]
 }
 
 const BUILT_IN_GROUPS: ShortcutGroup[] = [
   {
     label: "小学",
+    agent: "tutor_primary",
     items: [
       {
         id: "__builtin_p_math_plane__",
@@ -77,6 +81,7 @@ const BUILT_IN_GROUPS: ShortcutGroup[] = [
   },
   {
     label: "初中",
+    agent: "tutor_secondary",
     items: [
       {
         id: "__builtin_j_math_formula__",
@@ -184,6 +189,7 @@ const BUILT_IN_GROUPS: ShortcutGroup[] = [
   },
   {
     label: "高中",
+    agent: "tutor_secondary",
     items: [
       {
         id: "__builtin_s_math_func__",
@@ -294,16 +300,53 @@ export function saveShortcuts(list: Shortcut[]): void {
   document.dispatchEvent(new CustomEvent("gebai:shortcuts-change"))
 }
 
+/* ---------- 分组可见性：按当前构建注册的子Agent 过滤（小学版/中学版专属产物） ---------- */
+
+/** 当前构建的子Agent名单（REST /api/v1/sub-agents，进程内拉取一次）。null = 未知（首帧全显兜底，名单到达后按需重渲染）。 */
+let agentNamesCache: string[] | null = null
+let agentNamesPromise: Promise<string[]> | null = null
+
+function fetchAgentNames(): Promise<string[]> {
+  if (agentNamesCache) return Promise.resolve(agentNamesCache)
+  if (!agentNamesPromise) {
+    agentNamesPromise = fetch("/api/v1/sub-agents")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Array<{ name?: string }>) => {
+        agentNamesCache = list.map((x) => x.name ?? "").filter(Boolean)
+        return agentNamesCache
+      })
+      .catch(() => {
+        agentNamesCache = []
+        return agentNamesCache
+      })
+  }
+  return agentNamesPromise
+}
+
+/** 可见分组：名单只含 tutor_primary → 仅小学块；只含 tutor_secondary → 仅初中/高中块；
+ *  名单未知/为空/两学段皆有/皆无（全量构建、非教辅环境、接口不可用）→ 全显兜底。 */
+function visibleGroups(names: string[] | null): ShortcutGroup[] {
+  if (!names || !names.length) return BUILT_IN_GROUPS
+  const hasP = names.includes("tutor_primary")
+  const hasS = names.includes("tutor_secondary")
+  if (hasP && hasS) return BUILT_IN_GROUPS
+  if (hasP) return BUILT_IN_GROUPS.filter((g) => !g.agent || g.agent === "tutor_primary")
+  if (hasS) return BUILT_IN_GROUPS.filter((g) => !g.agent || g.agent === "tutor_secondary")
+  return BUILT_IN_GROUPS
+}
+
 /**
  * 渲染空白页快捷按钮区（只替换 .es-shortcut / .es-shortcut-group / .es-shortcut-add 元素）：
- * 内置数理化知识快捷按学段分块（小学/初中/高中，分组标签独占一行），不可删；
+ * 内置数理化知识快捷按学段分块并按当前构建的子Agent过滤（小学版只显小学块、中学版只显初中/高中块；
+ * 名单未到位时首帧全显，REST 返回后可见块数变化则重渲染一次），不可删；
  * 用户快捷有则归入「自定义」块，点击直接发送（悬停可预览完整内容）、hover 显现 ✕ 删除（确认弹窗），
  * 末尾「＋ 添加」弹窗新增。
  */
 export function renderShortcutButtons(container: HTMLElement): void {
   container.querySelectorAll(".es-shortcut, .es-shortcut-group, .es-shortcut-add").forEach((b) => b.remove())
   const list = loadShortcuts()
-  for (const g of BUILT_IN_GROUPS) {
+  const groups = visibleGroups(agentNamesCache)
+  for (const g of groups) {
     container.appendChild(el("div", "es-shortcut-group", g.label))
     for (const s of g.items) renderPill(container, s, false)
   }
@@ -314,6 +357,13 @@ export function renderShortcutButtons(container: HTMLElement): void {
   const add = el("button", "es-shortcut-add", "＋ 添加")
   add.onclick = () => void addShortcutFlow(container)
   container.appendChild(add)
+  if (agentNamesCache === null) {
+    void fetchAgentNames().then(() => {
+      if (container.isConnected && visibleGroups(agentNamesCache).length !== groups.length) {
+        renderShortcutButtons(container)
+      }
+    })
+  }
 }
 
 function renderPill(container: HTMLElement, s: Shortcut, deletable: boolean): void {

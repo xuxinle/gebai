@@ -488,24 +488,24 @@ export function finishSessionRun(container: HTMLDetailsElement, outputEl: HTMLEl
   container.classList.add("done")
 }
 
-/** 推理块：assistant 消息内可折叠暗色「推理」卡片。流式推理过程中默认展开（推理内容实时可见），
- *  推理完成（正文开始/流结束）由 main.ts 自动折叠，用户仍可点 summary 手动展开。 */
+/** 思考块：assistant 消息内可折叠暗色「思考」卡片。流式思考过程中默认展开（思考内容实时可见），
+ *  思考完成（正文开始/流结束）由 main.ts 自动折叠，用户仍可点 summary 手动展开。 */
 export function reasoningBlock(): HTMLElement {
   const details = document.createElement("details")
   details.className = "reasoning"
   details.open = true
-  const summary = el("summary", undefined, "推理")
+  const summary = el("summary", undefined, "思考")
   summary.insertAdjacentHTML("afterbegin", ICON_REASONING)
   details.append(summary, el("div", "reasoning-body"))
   return details
 }
 
-/** 渲染带独立推理字段的 assistant 消息：推理折叠卡（默认收起，内容 markdown 渲染）+ 纯正文 markdown。 */
+/** 渲染带独立思考字段的 assistant 消息：思考折叠卡（默认收起，内容 markdown 渲染）+ 纯正文 markdown。 */
 export function assistantWithReasoning(reasoning: string, content: string): HTMLElement {
   const wrap = el("div")
   const think = document.createElement("details")
   think.className = "reasoning"
-  const summary = el("summary", undefined, "推理")
+  const summary = el("summary", undefined, "思考")
   summary.insertAdjacentHTML("afterbegin", ICON_REASONING)
   const rb = el("div", "reasoning-body")
   rb.appendChild(markdownBlock(reasoning))
@@ -515,8 +515,8 @@ export function assistantWithReasoning(reasoning: string, content: string): HTML
   return wrap
 }
 
-/** 渲染 assistant 正文：`<think>…</think>` 片段抽为暗色「推理」卡片（默认收起，内容 markdown 渲染），其余按 markdown 渲染。
- *  新版数据推理在独立字段（Message.reasoning，走 assistantWithReasoning），本函数仅服务流式正文与旧版 content 内嵌 think 块。 */
+/** 渲染 assistant 正文：`<think>…</think>` 片段抽为暗色「思考」卡片（默认收起，内容 markdown 渲染），其余按 markdown 渲染。
+ *  新版数据思考在独立字段（Message.reasoning，走 assistantWithReasoning），本函数仅服务流式正文与旧版 content 内嵌 think 块。 */
 export function assistantContent(content: string): HTMLElement {
   const re = /<think>([\s\S]*?)<\/think>/g
   if (!re.test(content)) return markdownBlock(content)
@@ -528,7 +528,7 @@ export function assistantContent(content: string): HTMLElement {
     if (m.index > last) wrap.appendChild(markdownBlock(content.slice(last, m.index)))
     const think = document.createElement("details")
     think.className = "reasoning"
-    const summary = el("summary", undefined, "推理")
+    const summary = el("summary", undefined, "思考")
     summary.insertAdjacentHTML("afterbegin", ICON_REASONING)
     const rb = el("div", "reasoning-body")
     rb.appendChild(markdownBlock(m[1].trim()))
