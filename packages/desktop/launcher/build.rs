@@ -4,7 +4,7 @@ fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // —— 场景变体参数（构建期环境变量注入，main.rs 经 rustc-env 消费；缺省值 = 完整桌面端，行为不变）——
-    // 内嵌服务端二进制（Windows include_bytes；变体构建如 build:tutor 指向 dist/gebai-tutor.exe）
+    // 内嵌服务端二进制（Windows include_bytes；缺省 dist/gebai.exe，变体构建指向对应产物）
     let desktop_dir = manifest.parent().unwrap().to_path_buf();
     let server_exe = std::env::var("GEBAI_LAUNCHER_SERVER_EXE")
         .map(PathBuf::from)

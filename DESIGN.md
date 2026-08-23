@@ -29,12 +29,6 @@ GEBAI_HOME/
     └── {user}/            # 每个用户独立的数据目录
         ├── tools/         # 用户私有 HTML 小工具（按名称哈希分片，仅本人可见）
         │   └── {h0}/{h1}/{name}.json   # { name, html, scope:"private", createdAt, updatedAt }
-        ├── tutor/         # 中小学学习辅导数据（tutor_secondary/tutor_primary 子Agent 共享存储，按用户持久保存；用户=学习者，小升初数据延续）
-        │   ├── profile.json   # 学习档案（年级/教材/目标/薄弱点/考试日程/备注）
-        │   ├── mistakes/      # 错题本（按错题 id 哈希分片）
-        │   │   └── {h0}/{h1}/{id}.json   # 错题记录（题目/答案/解析 + 间隔复习排期）
-        │   └── knowledge/     # 知识点掌握度图（按 学科+知识点 哈希分片）
-        │       └── {h0}/{h1}/{key}.json  # 掌握度记录（0-4 级 + 评估轨迹）
         ├── sessions/      # 会话持久化（按会话隔离，多层分片）
         │   └── {s0}/{s1}/{session_id}/
         │       ├── chat.json        # 会话消息
@@ -56,8 +50,6 @@ GEBAI_HOME/
 | `feedback/` | 反馈 ID（哈希） | 日期 + 前 2 位 `{h0}` / 前 4 位 `{h1}` |
 | `trash/` | 归档日期 | `YYYY-MM-DD/` |
 | `tools/`（公用）/ `users/{user}/tools/`（私有） | 工具名（哈希） | 前 2 位 `{h0}` / 前 4 位 `{h1}` |
-| `users/{user}/tutor/mistakes/` | 错题 id（哈希） | 前 2 位 `{h0}` / 前 4 位 `{h1}` |
-| `users/{user}/tutor/knowledge/` | 学科+知识点（哈希） | 前 2 位 `{h0}` / 前 4 位 `{h1}` |
 
 - 截断文件（`tmp/truncated/`）在会话目录内，随会话分片；内容 SHA256 哈希命名去重（同内容不重复写入），会话内数量有限无需额外分片
 
@@ -88,7 +80,7 @@ Monorepo 采用 Bun workspaces + Turborepo：
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/新会话执行、REST/WebSocket/Webhook 对外接口；**代码分两层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根，子Agent 位于 `src/sub-agents/` |
 | `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约 |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端 |
-| `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体，见「裁剪构建样例」build:tutor） |
+| `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体） |
 
 #### 仓库根目录
 
@@ -541,7 +533,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **零注册**：文件/目录即声明，运行时自动扫描收集（跳过 `*.test.ts` 与辅助文件，目录形式只认 `{dir}/{dir}.ts`），无需任何配置文件或代码注册
 - **打包闭环**：`bun build` 前由 `scripts/build-subagents.ts` 扫描 `src/sub-agents/` 生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**bundle 注册表缺失或加载失败必抛错（fail-fast），绝不静默降级为空子Agent 列表**——启动「成功」但没有任何子Agent 比启动失败更难排查。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，启动期解析失败会炸掉整个 bundle 注册表（服务启动即退出）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
 - **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（flow/tool_schemas/js）与 index.ts 的 vision 注册同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行），裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态）；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
-- **裁剪构建样例**（根 `scripts/` 目录，两个）：`bun run build:code`（`build-code-agent.ts`）产出 code 场景精简**服务端**单文件二进制（`packages/server/dist/gebai-code[.exe]`，浏览器形态、内嵌 Web UI）——三层裁剪组合示范：子Agent 包含清单（code+explore，体积收益主来源：未选子Agent 模块整体摇出产物）+ 预加载清单（code 开箱即用）+ 全局工具排除清单（show/fetch_url）；`bun run build:tutor`（`build-tutor-agent.ts`）产出**两份学段专属教辅桌面端**（`packages/desktop/dist/` 下每学段两个产物：`gebai-tutor-primary[.exe]`/`gebai-tutor-secondary[.exe]` 浏览器形态（编译 desktop 入口：固定端口 47896、启动自动开浏览器、内嵌应用图标）+ `gebai-tutor-{primary,secondary}-desktop.exe` WebView 窗口形态）——每版**只打包并预载本学段子Agent**（tutor_primary 或 tutor_secondary；另一学段不进二进制，零路由面与提示词冗余，上下文只含一套教学法；学生小升初换用另一版 exe，`~/.gebai` 数据共享延续档案/错题本/掌握度）+ 排除 19 个无关全局工具（文件/执行/编排/抓取/待办类与 agent_load/agent_run——唯一子Agent 已预载，装载/新会话执行无对象；保留 show/ask/vision/full_mode）+ 连带跳过重型内嵌产物（analyzer-wasm/driver/pwcore，对应子Agent 未打包）+ **内置模型配置**（`GEBAI_BUILD_EMBED_ENV=1`：从仓库根 .env 烘焙 `GEBAI_LLM_*`/`GEBAI_VISION_*` 为启动默认值，接收方开箱即用；密钥明文可被提取，仅限受信任分发，见「构建期裁剪与预加载指定」）；WebView 形态经 launcher 变体参数化内嵌本产物：独立应用身份（小学 `gebai-tutor-primary` 47897 / 中学 `gebai-tutor-secondary` 47898，物化目录与 WebView 配置隔离、origin 稳定，可与完整桌面端及另一学段同时运行），标题「歌白教辅·小学/中学」；与 build:code 不同，**全部产物编译完成后自动还原生成文件为全量态与 launcher cargo target 完整版内嵌**（工作区不留裁剪残留，测试不受影响，防 copy-launcher 误取变体）。两者共同作为其他场景裁剪构建的模板：复制脚本改清单即可（如 reverse_site 站点逆向、feishu 文档、只读分析）
+- **裁剪构建样例**（根 `scripts/` 目录）：`bun run build:code`（`build-code-agent.ts`）产出 code 场景精简**服务端**单文件二进制（`packages/server/dist/gebai-code[.exe]`，浏览器形态、内嵌 Web UI）——三层裁剪组合示范：子Agent 包含清单（code+explore，体积收益主来源：未选子Agent 模块整体摇出产物）+ 预加载清单（code 开箱即用）+ 全局工具排除清单（show/fetch_url）。可作为其他场景裁剪构建的模板：复制脚本改清单即可（如 reverse_site 站点逆向、feishu 文档、只读分析）
 - 命名规则：仅限小写字母、数字、下划线
 - 子Agent 定义的工具名无需关注前缀，总Agent 负责在其 schema 中添加 `{agent_name}_` 前缀（命名空间规则见「工具与命名空间」），以及工具调用时的路由和转发，对子Agent 完全透明
 - 环境变量作用域：子Agent 只能访问 `{AGENT_NAME_UPPER}_*` 前缀的变量
@@ -817,27 +809,6 @@ export const preload = false
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
 
 
-#### `tutor_secondary`（中学学习辅导）与 `tutor_primary`（小学学习辅导）
-
-按学段拆分的两个辅导子Agent 共享同一套能力底座——存储与纯函数在 `core/tutor.ts`，工具经共享工厂 `createTutorTools(stageConfig)` 构造（`tutor_secondary/tools.ts`，`tutor_primary` 复用；工具逻辑与 schema 完全一致，学段差异仅注入学科清单/年级说明与输出文案前缀），**学段教学差异全部承载在各自的系统提示词**。存储目录 `users/{user}/tutor/` 两段共享（用户=学习者模型：同一名学生小升初后数据延续；两名学生应使用不同账号）：
-
-- **实现**：`sub-agents/tutor_secondary/`（`tutor_secondary.ts` 入口 + `tutor_secondary.md` 提示词 + `tools.ts` 共享工具工厂，注入 `SECONDARY_STAGE`：九科/初一~高三）与 `sub-agents/tutor_primary/`（`tutor_primary.ts` 入口 + `tutor_primary.md` 提示词，注入 `PRIMARY_STAGE`：语数英科道法（低年级可为拼音/识字/口算）/小学一年级~六年级）；描述互指边界（中学段注明「小学辅导用 tutor_primary」、小学段注明「中学辅导用 tutor_secondary」）供总Agent 路由
-- **工具集**（两段各 7 个，命名空间 `tutor_secondary_*` / `tutor_primary_*`，全名最长 30 字符 ≤ 40）：
-  - `profile`（学习档案）：无参调用 = 读取；传任意字段（`grade` 年级 / `textbook` 教材 / `goal` 目标 / `weaknesses` 薄弱点 / `exams` 考试日程 / `notes` 备注）= 合并更新（空串清除）——个性化辅导与跨会话跟进的依据
-  - `knowledge`（知识点掌握度评估图）：传 `subject`+`topic`+`mastery`（0 未学/1 薄弱/2 一般/3 良好/4 掌握，可附 `evidence` 评估依据）= 设置/更新（同学科同知识点 upsert，记录变化轨迹，最近 5 条）；不传 `mastery` = 查询（可按 `subject` 过滤、`max_mastery` 只列薄弱项）——引导式教学的诊断依据：讲/练前查掌握度定切入深度，练/评后按表现更新，排序薄弱在前
-  - `demo`（**内置教学演示模板库**，实现于 `tutor_secondary/demos.ts` 纯函数渲染、两学段共享）：`template`+`params` 只传参数（几十 token），服务端模板渲染 HTML 经全局 `show` html 分支展示（复用实时通道门控/落盘/内容块）——**取代模型现场手写整页 HTML（数千 token、流式慢）**；8 个模板（**动态演示均带动画/交互**，页面内 JS 实现、脚本语法有编译级回归护栏测试）：`quiz`（可作答练习卷——自动批改/解析/得分）、`mental_math`（口算闯关——随机出题/计时/错题回顾）、`column`（竖式**分步动画**——下一步/自动播放、数位高亮、进位借位浮现、结果逐位揭示，步骤数据 `columnSteps` 纯函数导出可测）、`function_graph`（函数图像**滑块交互**——拖 a/b/c 实时重绘曲线与关键点标注）、`geometry`（几何**交互演示**——勾股定理拼图重排动画证明（CSS transform 过渡）、三角形的高拖顶点跟随、圆要素点击高亮、平行线滑块改角实时标值验证同位角）、`fraction`（分数可视化**可点击**——±调分子分母实时重绘、双分数对比、约分与百分数）、`flashcards`（记忆翻卡——**3D 翻转动画**、认识/需复习标记统计）、`reference`（**内置公式与定理速查库**——静态知识条目 `reference-data.ts` 36 条：小学数学平面/立体图形·运算律·单位换算，中学数学乘法公式·求根与韦达·均值不等式·函数·勾股/内角和/圆周角·解三角形·统计，物理速度密度·压强·浮力·功功率·杠杆·欧姆/电功率·热学·机械能，化学摩尔·溶液·常考方程式·质量守恒，英语五大时态；不传参 = 学科分组索引页、`subject`/`topic` 子串过滤 = 速查卡（公式大字+要点易错）、`id` = 单条大卡（定理带图示 SVG 与证明思路））；**参数化即动态调整与个性化**（难度/题量/数值范围/学生名/标题），模板清单与参数表由注册表组装进工具描述（单源），新增模板在 `DEMO_TEMPLATES` 注册、知识条目在 `REF_ENTRIES` 追加即可
-  - `mistake_add`（错题登记）：`subject`+`topic`+`question` 必填，可带学生答案/正确答案/错因解析（注明错因类型：概念混淆/方法不会/计算失误/审题失误/抄错题）/来源；登记即自动排期（次日首复）
-  - `mistake_list`（错题清单）：默认列复习中错题（按下次复习时间升序，题头含到期标记与通过进度），可按学科/知识点（子串）过滤、`due=true` 只列到期、`status=mastered` 翻查已掌握、`full=true` 附完整题目与答案解析（复习出题前取全文）
-  - `mistake_review`（复习汇报）：学生重做后按 `result` 汇报（`pass`/`fail`/`master`），自动推进间隔排期
-  - `mistake_remove`（删除错题）：按 id 删除，**需审批**（不可恢复）；仅学生明确要求时使用，「做对了」走 `mistake_review` 掌握流程而非删除
-- **间隔复习（纯函数 `applyReview`）**：fail = 间隔重置 1 天；pass = 按连续通过次数递进 `1/3/7/14/30` 天，连续 5 次通过自动**掌握归档**（默认不再列出，可 `status=mastered` 翻查）；master = 直接归档；已掌握记录 fail 会重新回到复习
-- **中学段教学（`tutor_secondary.md`）**：引导式解题——先让学生动（复述题目+说思路卡点，不直接开讲）→ 卡点四分类诊断（概念不清/方法不会/计算失误/审题失误，对症引导）→ **四级提示阶梯**（①方向提示→②关键提示→③演示一步→④完整过程，逐级放手、每级提示后把笔交回学生）→ 确认真懂（答对追问「为什么」防蒙对、解后费曼式复述）；引导 2~4 轮为宜，连续卡住就降级帮到位；掌握度与教学联动（讲前查定深度、练后评更新、错题 fail 联动降档薄弱、涨落频繁安排专项巩固）；备考规划输入 = 档案 + 掌握度薄弱清单（`max_mastery=2`）+ 错题分布，顺带传递学习方法（点到即止不说教）
-- **小学段教学（`tutor_primary.md`）**：针对小学生认知特点（具体形象思维、注意力短、识字量有限、趣味与成就感驱动）——**具象化优先**（实物类比/画图（线段图、圈一圈）/生活情境，语言短句化少术语、拟人比喻）、**读题先行**（低年级带读帮断句、生字拼音解释、圈关键词，让学生复述题意）、**小步引导**（一步一问，台阶比中学更细；计算竖式分步示范）、提示逐级放手（①图/实物提示→②关键一步→③带着做→④完整示范，卡住就换更简单同类题找回信心再回原题）、**趣味与鼓励**（故事/游戏情境包装练习、口算小挑战（show 交互页，题量小即时反馈）、鼓励高频具体、**连续错 2 次立即降难度**防挫败、低年级单次 15-25 分钟分段护眼）、粗心类错误（抄错题/漏进位）引导检查习惯不重复讲概念、**习惯培养与家长协同**（先复述题意再动笔/做完检查/专注计时；家长陪学建议：陪伴不代做、不打断、控情绪）、不激进抢跑（校内扎实+适度拓展）、背诵打卡不代做（可陪练陪背、听写报题）、厌学情绪多给成功体验
-- **存储**（`core/tutor.ts`，用户级持久化，随用户目录隔离）：档案 `users/{user}/tutor/profile.json`（单文件）；错题本 `users/{user}/tutor/mistakes/{h0}/{h1}/{id}.json`（按错题 id 哈希两层分片）；掌握度 `users/{user}/tutor/knowledge/{h0}/{h1}/{key}.json`（`key` = sha256(学科+知识点) 前 16 位 hex，upsert 天然去重）；错题 id 白名单 `[a-z0-9]{6,32}`（生成式 id，防路径穿越）；字段长度上限（题目/答案/解析 4000、学科/知识点 120、档案字段 2000 字符）
-- **审批**：仅 `mistake_remove` 需审批（不可恢复删除）；档案/掌握度与错题登记、复习均为用户自己的学习数据，免审批不打断辅导流程
-- **预加载**：两段均 `preload = false`，按需装载（与其余子Agent 一致）
-
-
 #### 命名与预加载总览
 
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
@@ -851,8 +822,6 @@ export const preload = false
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 浏览器自动化全套（同 playwright）+ http_request/fetch_url/capture_start/capture_stop/capture_clear/capture_list/read/write/agent_list/agent_load/agent_run | 浏览器交互类+http_request+write | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `cron` | add/list/update/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_remove`） | add+update+remove | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的无人值守任务、查看/修改/删除；仅 `GEBAI_CRON_ENABLED=true` 时注册，关闭时完全不可见） |
-| `tutor_secondary` | profile/knowledge/demo/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 中学学习全方位辅导（初中+高中九科：引导式解题（先诊断卡点、四级提示阶梯逐级放手）、出题练习与批改、知识点掌握度评估图、内置演示模板库（练习卷/函数图像/几何/竖式，服务端渲染省 token）、错题本自动间隔复习 1/3/7/14/30 天、学习档案与备考规划；档案/掌握度/错题本按用户持久保存，跨会话延续；与 tutor_primary 共享存储与工具工厂，学段差异在提示词） |
-| `tutor_primary` | profile/knowledge/demo/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 小学学习全方位辅导（1-6 年级语数英科道法：具象化引导解题（实物类比/画图/生活情境、小步引导、读题先行）、口算闯关与练习卷（内置模板）、看图写话与阅读、趣味练习与防挫败鼓励、错题本间隔复习、掌握度评估、学习习惯培养与家长陪学建议；低年级常由家长代述；与 tutor_secondary 共享存储与工具工厂，学段差异在提示词） |
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 
