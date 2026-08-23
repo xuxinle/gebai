@@ -57,9 +57,11 @@ describe("createTutorTools（学段工厂）", () => {
     expect(JSON.stringify(sec.tools.mistake_add.parameters)).toContain("物理")
     expect(JSON.stringify(pri.tools.mistake_add.parameters)).toContain("口算")
     expect(JSON.stringify(pri.tools.mistake_add.parameters)).not.toContain("物理")
-    // 年级说明注入 profile
+    // 年级说明注入 profile；身份 role 两学段一致（enum 白名单）
     expect(JSON.stringify(pri.tools.profile.parameters)).toContain("小学一年级")
     expect(JSON.stringify(sec.tools.profile.parameters)).toContain("初一")
+    expect(JSON.stringify(pri.tools.profile.parameters)).toContain('"parent"')
+    expect(JSON.stringify(sec.tools.profile.parameters)).toContain('"teacher"')
   })
 
   test("输出文案引用各学段命名空间前缀", async () => {
@@ -92,6 +94,15 @@ describe("createTutorTools（学段工厂）", () => {
       expect(read.output).toContain("目标: 中考 650")
       const cleared = await tools.profile.execute({ goal: "" }, c)
       expect(cleared.output).not.toContain("中考 650")
+      // role 身份：设置（输出含身份标签）、非法值拒绝、读取含身份、空串清除
+      const roleSet = await tools.profile.execute({ role: "parent" }, c)
+      expect(roleSet.output).toContain("身份: 家长（parent）")
+      const readRole = await tools.profile.execute({}, c)
+      expect(readRole.output).toContain("身份: 家长")
+      await expect(tools.profile.execute({ role: "boss" }, c)).rejects.toThrow("role")
+      const roleClear = await tools.profile.execute({ role: "" }, c)
+      expect(roleClear.output).not.toContain("身份:")
+      expect(roleClear.output).toContain("年级: 初三")
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

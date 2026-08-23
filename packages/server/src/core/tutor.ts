@@ -17,7 +17,14 @@ export const MISTAKE_ID_RE = /^[a-z0-9]{6,32}$/
 export const REVIEW_INTERVAL_DAYS = [1, 3, 7, 14, 30] as const
 const DAY_MS = 24 * 60 * 60 * 1000
 
+/** 用户身份白名单（档案 role 字段）：决定辅导模式，缺省 student。 */
+export const TUTOR_ROLES = ["student", "teacher", "parent"] as const
+export type TutorRole = (typeof TUTOR_ROLES)[number]
+export const TUTOR_ROLE_LABELS: Record<TutorRole, string> = { student: "学生", teacher: "教师", parent: "家长" }
+
 export interface TutorProfile {
+  /** 用户身份：student 学生本人（缺省）/ teacher 教师 / parent 家长——决定辅导模式。 */
+  role?: TutorRole
   /** 年级（初一~高三）。 */
   grade?: string
   /** 教材版本（如 人教版数学/北师大版物理）。 */
@@ -73,7 +80,7 @@ export interface MistakeFilter {
   dueBefore?: number
 }
 
-const PROFILE_FIELDS = ["grade", "textbook", "goal", "weaknesses", "exams", "notes"] as const
+const PROFILE_FIELDS = ["role", "grade", "textbook", "goal", "weaknesses", "exams", "notes"] as const
 type ProfileField = (typeof PROFILE_FIELDS)[number]
 
 export function tutorDir(home: string, user: string): string {
@@ -129,8 +136,18 @@ export async function saveProfile(
     const v = patch[key]
     if (v == null) continue
     const s = capField(v, PROFILE_MAX_FIELD, `档案字段 ${key}`)
-    if (s === "") delete next[key]
-    else next[key] = s
+    if (s === "") {
+      delete next[key]
+      continue
+    }
+    if (key === "role") {
+      if (!TUTOR_ROLES.includes(s as TutorRole)) {
+        throw new Error(`身份 role 须为 ${TUTOR_ROLES.join("/")}（学生/教师/家长）`)
+      }
+      next.role = s as TutorRole
+    } else {
+      next[key] = s
+    }
   }
   next.updatedAt = Date.now()
   const p = profilePath(home, user)

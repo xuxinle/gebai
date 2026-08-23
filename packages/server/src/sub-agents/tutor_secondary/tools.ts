@@ -12,7 +12,7 @@ import {
   upsertKnowledge,
 } from "../../core/tutor"
 import type { MistakeRecord, ReviewResult, TutorProfile } from "../../core/tutor"
-import { MASTERY_LABELS } from "../../core/tutor"
+import { MASTERY_LABELS, TUTOR_ROLE_LABELS, TUTOR_ROLES } from "../../core/tutor"
 import { DEMO_TEMPLATES, DEMO_TEMPLATE_IDS } from "./demos"
 
 /* tutor_secondary / tutor_primary 共享工具工厂：工具逻辑与 schema 完全一致，
@@ -57,9 +57,13 @@ const PROFILE_LABELS: Record<string, string> = {
 }
 
 function formatProfile(p: TutorProfile): string {
-  const lines = Object.entries(PROFILE_LABELS)
-    .filter(([k]) => p[k as keyof TutorProfile] != null)
-    .map(([k, label]) => `${label}: ${p[k as keyof TutorProfile]}`)
+  const lines: string[] = []
+  if (p.role != null) lines.push(`身份: ${TUTOR_ROLE_LABELS[p.role] ?? p.role}（${p.role}）`)
+  lines.push(
+    ...Object.entries(PROFILE_LABELS)
+      .filter(([k]) => p[k as keyof TutorProfile] != null)
+      .map(([k, label]) => `${label}: ${p[k as keyof TutorProfile]}`),
+  )
   return lines.length ? `学习档案（更新 ${fmtDate(p.updatedAt)}）：\n${lines.join("\n")}` : "学习档案为空。"
 }
 
@@ -73,9 +77,14 @@ export function createTutorTools(cfg: TutorStageConfig): { tools: Record<string,
   const profile: Tool = {
     name: "profile",
     description:
-      "读取/更新学习档案（按用户持久保存：年级、教材、目标、薄弱点、考试日程、教学偏好；跨会话延续辅导进度）。不带任何参数 = 读取当前档案；传任意字段 = 合并更新（传空串清除该字段）。",
+      "读取/更新学习档案（按用户持久保存：身份（学生/教师/家长，决定辅导模式）、年级、教材、目标、薄弱点、考试日程、教学偏好；跨会话延续辅导进度）。不带任何参数 = 读取当前档案；传任意字段 = 合并更新（传空串清除该字段）。",
     card: { titleParams: ["grade"] },
     parameters: schema({
+      role: {
+        type: "string",
+        enum: [...TUTOR_ROLES],
+        description: "用户身份：student=学生本人（缺省，引导式辅导）/ teacher=教师（备课组卷与课堂演示）/ parent=家长（陪学顾问与进度汇报）",
+      },
       grade: { type: "string", description: `年级（${cfg.grades}）` },
       textbook: { type: "string", description: "教材版本（如 人教版、北师大版，多科可分述）" },
       goal: { type: "string", description: "学习目标（如 成绩提升、期末数学上 90）" },
@@ -85,13 +94,13 @@ export function createTutorTools(cfg: TutorStageConfig): { tools: Record<string,
     }),
     async execute(args, ctx): Promise<ToolResult> {
       const patch: Record<string, string> = {}
-      for (const key of Object.keys(PROFILE_LABELS)) {
+      for (const key of ["role", ...Object.keys(PROFILE_LABELS)]) {
         if (args[key] != null) patch[key] = String(args[key])
       }
       if (!Object.keys(patch).length) {
         const p = await loadProfile(ctx.home, ctx.user)
         if (!p) {
-          return { output: "尚未建立学习档案。传任意字段即可建档；或先用 ask 询问学生年级/教材/目标后建档。", data: null }
+          return { output: "尚未建立学习档案。传任意字段即可建档（建议先确认身份 role 与年级）；或先用 ask 询问后建档。", data: null }
         }
         return { output: formatProfile(p), data: p }
       }
@@ -261,7 +270,7 @@ export function createTutorTools(cfg: TutorStageConfig): { tools: Record<string,
     description:
       "内置教学演示模板库——服务端模板渲染，只传 template+params（几十 token，勿手写 HTML），产物在聊天内直接展示（仅 Web 前端通道）。模板清单与参数（params 对象）：\n" +
       DEMO_TEMPLATES.map((t) => `- ${t.id}：${t.usage}`).join("\n") +
-      "\n讲题配图、出题练习、演示优先本工具；模板未覆盖的场景再用 show 手写。",
+      "\n讲题配图、演示与出题练习优先本工具（讲解抽象/图形内容时主动配演示，不等用户开口）；模板未覆盖的场景再用 show 手写。",
     card: { args: "block" },
     parameters: schema(
       {

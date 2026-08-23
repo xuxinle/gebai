@@ -92,6 +92,23 @@ describe("学习档案", () => {
       cleanup(home)
     }
   })
+  test("role 身份：白名单校验、空串清除、不影响其他字段", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tutor-"))
+    try {
+      const a = await saveProfile(home, "u1", { role: "parent", grade: "三年级" })
+      expect(a.role).toBe("parent")
+      expect((await loadProfile(home, "u1"))?.role).toBe("parent")
+      // 换身份与非法身份
+      await saveProfile(home, "u1", { role: "teacher" })
+      await expect(saveProfile(home, "u1", { role: "admin" })).rejects.toThrow("role")
+      // 空串清除（回退缺省学生），未传字段保留
+      const c = await saveProfile(home, "u1", { role: "" })
+      expect(c.role).toBeUndefined()
+      expect(c.grade).toBe("三年级")
+    } finally {
+      cleanup(home)
+    }
+  })
   test("字段超限拒绝", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tutor-"))
     try {

@@ -26,5 +26,11 @@ describe("tutor_primary sub-agent", () => {
     expect(def.systemPrompt).not.toContain("tutor_secondary_")
     // 路由描述含中学边界指引
     expect(def.description).toContain("tutor_secondary")
+    // 三种身份（学生/家长/教师）与主动拓展引导落地在提示词
+    expect(def.systemPrompt).toContain("身份适配")
+    expect(def.systemPrompt).toContain("主动拓展引导")
+    expect(def.systemPrompt).toContain("陪学顾问")
+    expect(def.systemPrompt).toContain("教学助手")
+    expect(def.description).toContain("三种身份")
   })
 })

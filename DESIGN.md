@@ -30,7 +30,7 @@ GEBAI_HOME/
         ├── tools/         # 用户私有 HTML 小工具（按名称哈希分片，仅本人可见）
         │   └── {h0}/{h1}/{name}.json   # { name, html, scope:"private", createdAt, updatedAt }
         ├── tutor/         # 中小学学习辅导数据（tutor_secondary/tutor_primary 子Agent 共享存储，按用户持久保存；用户=学习者，小升初数据延续）
-        │   ├── profile.json   # 学习档案（年级/教材/目标/薄弱点/考试日程/备注）
+        │   ├── profile.json   # 学习档案（身份 role 学生/教师/家长、年级/教材/目标/薄弱点/考试日程/备注）
         │   ├── mistakes/      # 错题本（按错题 id 哈希分片）
         │   │   └── {h0}/{h1}/{id}.json   # 错题记录（题目/答案/解析 + 间隔复习排期）
         │   └── knowledge/     # 知识点掌握度图（按 学科+知识点 哈希分片）
@@ -819,11 +819,11 @@ export const preload = false
 
 #### `tutor_secondary`（中学学习辅导）与 `tutor_primary`（小学学习辅导）
 
-按学段拆分的两个辅导子Agent 共享同一套能力底座——存储与纯函数在 `core/tutor.ts`，工具经共享工厂 `createTutorTools(stageConfig)` 构造（`tutor_secondary/tools.ts`，`tutor_primary` 复用；工具逻辑与 schema 完全一致，学段差异仅注入学科清单/年级说明与输出文案前缀），**学段教学差异全部承载在各自的系统提示词**。存储目录 `users/{user}/tutor/` 两段共享（用户=学习者模型：同一名学生小升初后数据延续；两名学生应使用不同账号）：
+按学段拆分的两个辅导子Agent 共享同一套能力底座——存储与纯函数在 `core/tutor.ts`，工具经共享工厂 `createTutorTools(stageConfig)` 构造（`tutor_secondary/tools.ts`，`tutor_primary` 复用；工具逻辑与 schema 完全一致，学段差异仅注入学科清单/年级说明与输出文案前缀），**学段教学差异全部承载在各自的系统提示词**。存储目录 `users/{user}/tutor/` 两段共享（账号数据归属学习者：学生/家长/教师身份共用该账号的学习数据，同一名学生小升初后数据延续；两名学生应使用不同账号）：
 
 - **实现**：`sub-agents/tutor_secondary/`（`tutor_secondary.ts` 入口 + `tutor_secondary.md` 提示词 + `tools.ts` 共享工具工厂，注入 `SECONDARY_STAGE`：九科/初一~高三）与 `sub-agents/tutor_primary/`（`tutor_primary.ts` 入口 + `tutor_primary.md` 提示词，注入 `PRIMARY_STAGE`：语数英科道法（低年级可为拼音/识字/口算）/小学一年级~六年级）；描述互指边界（中学段注明「小学辅导用 tutor_primary」、小学段注明「中学辅导用 tutor_secondary」）供总Agent 路由
 - **工具集**（两段各 7 个，命名空间 `tutor_secondary_*` / `tutor_primary_*`，全名最长 30 字符 ≤ 40）：
-  - `profile`（学习档案）：无参调用 = 读取；传任意字段（`grade` 年级 / `textbook` 教材 / `goal` 目标 / `weaknesses` 薄弱点 / `exams` 考试日程 / `notes` 备注）= 合并更新（空串清除）——个性化辅导与跨会话跟进的依据
+  - `profile`（学习档案）：无参调用 = 读取；传任意字段（`role` 身份（`student` 学生（缺省）/ `teacher` 教师 / `parent` 家长，白名单校验）/ `grade` 年级 / `textbook` 教材 / `goal` 目标 / `weaknesses` 薄弱点 / `exams` 考试日程 / `notes` 备注）= 合并更新（空串清除）——个性化辅导与跨会话跟进的依据
   - `knowledge`（知识点掌握度评估图）：传 `subject`+`topic`+`mastery`（0 未学/1 薄弱/2 一般/3 良好/4 掌握，可附 `evidence` 评估依据）= 设置/更新（同学科同知识点 upsert，记录变化轨迹，最近 5 条）；不传 `mastery` = 查询（可按 `subject` 过滤、`max_mastery` 只列薄弱项）——引导式教学的诊断依据：讲/练前查掌握度定切入深度，练/评后按表现更新，排序薄弱在前
   - `demo`（**内置教学演示模板库**，实现于 `tutor_secondary/demos.ts` 纯函数渲染、两学段共享）：`template`+`params` 只传参数（几十 token），服务端模板渲染 HTML 经全局 `show` html 分支展示（复用实时通道门控/落盘/内容块）——**取代模型现场手写整页 HTML（数千 token、流式慢）**；8 个模板（**动态演示均带动画/交互**，页面内 JS 实现、脚本语法有编译级回归护栏测试）：`quiz`（可作答练习卷——自动批改/解析/得分）、`mental_math`（口算闯关——随机出题/计时/错题回顾）、`column`（竖式**分步动画**——下一步/自动播放、数位高亮、进位借位浮现、结果逐位揭示，步骤数据 `columnSteps` 纯函数导出可测）、`function_graph`（函数图像**滑块交互**——拖 a/b/c 实时重绘曲线与关键点标注）、`geometry`（几何**交互演示**——勾股定理拼图重排动画证明（CSS transform 过渡）、三角形的高拖顶点跟随、圆要素点击高亮、平行线滑块改角实时标值验证同位角）、`fraction`（分数可视化**可点击**——±调分子分母实时重绘、双分数对比、约分与百分数）、`flashcards`（记忆翻卡——**3D 翻转动画**、认识/需复习标记统计）、`reference`（**内置公式与定理速查库**——静态知识条目 `reference-data.ts` 36 条：小学数学平面/立体图形·运算律·单位换算，中学数学乘法公式·求根与韦达·均值不等式·函数·勾股/内角和/圆周角·解三角形·统计，物理速度密度·压强·浮力·功功率·杠杆·欧姆/电功率·热学·机械能，化学摩尔·溶液·常考方程式·质量守恒，英语五大时态；不传参 = 学科分组索引页、`subject`/`topic` 子串过滤 = 速查卡（公式大字+要点易错）、`id` = 单条大卡（定理带图示 SVG 与证明思路））；**参数化即动态调整与个性化**（难度/题量/数值范围/学生名/标题），模板清单与参数表由注册表组装进工具描述（单源），新增模板在 `DEMO_TEMPLATES` 注册、知识条目在 `REF_ENTRIES` 追加即可
   - `mistake_add`（错题登记）：`subject`+`topic`+`question` 必填，可带学生答案/正确答案/错因解析（注明错因类型：概念混淆/方法不会/计算失误/审题失误/抄错题）/来源；登记即自动排期（次日首复）
@@ -833,7 +833,9 @@ export const preload = false
 - **间隔复习（纯函数 `applyReview`）**：fail = 间隔重置 1 天；pass = 按连续通过次数递进 `1/3/7/14/30` 天，连续 5 次通过自动**掌握归档**（默认不再列出，可 `status=mastered` 翻查）；master = 直接归档；已掌握记录 fail 会重新回到复习
 - **中学段教学（`tutor_secondary.md`）**：引导式解题——先让学生动（复述题目+说思路卡点，不直接开讲）→ 卡点四分类诊断（概念不清/方法不会/计算失误/审题失误，对症引导）→ **四级提示阶梯**（①方向提示→②关键提示→③演示一步→④完整过程，逐级放手、每级提示后把笔交回学生）→ 确认真懂（答对追问「为什么」防蒙对、解后费曼式复述）；引导 2~4 轮为宜，连续卡住就降级帮到位；掌握度与教学联动（讲前查定深度、练后评更新、错题 fail 联动降档薄弱、涨落频繁安排专项巩固）；备考规划输入 = 档案 + 掌握度薄弱清单（`max_mastery=2`）+ 错题分布，顺带传递学习方法（点到即止不说教）
 - **小学段教学（`tutor_primary.md`）**：针对小学生认知特点（具体形象思维、注意力短、识字量有限、趣味与成就感驱动）——**具象化优先**（实物类比/画图（线段图、圈一圈）/生活情境，语言短句化少术语、拟人比喻）、**读题先行**（低年级带读帮断句、生字拼音解释、圈关键词，让学生复述题意）、**小步引导**（一步一问，台阶比中学更细；计算竖式分步示范）、提示逐级放手（①图/实物提示→②关键一步→③带着做→④完整示范，卡住就换更简单同类题找回信心再回原题）、**趣味与鼓励**（故事/游戏情境包装练习、口算小挑战（show 交互页，题量小即时反馈）、鼓励高频具体、**连续错 2 次立即降难度**防挫败、低年级单次 15-25 分钟分段护眼）、粗心类错误（抄错题/漏进位）引导检查习惯不重复讲概念、**习惯培养与家长协同**（先复述题意再动笔/做完检查/专注计时；家长陪学建议：陪伴不代做、不打断、控情绪）、不激进抢跑（校内扎实+适度拓展）、背诵打卡不代做（可陪练陪背、听写报题）、厌学情绪多给成功体验
-- **存储**（`core/tutor.ts`，用户级持久化，随用户目录隔离）：档案 `users/{user}/tutor/profile.json`（单文件）；错题本 `users/{user}/tutor/mistakes/{h0}/{h1}/{id}.json`（按错题 id 哈希两层分片）；掌握度 `users/{user}/tutor/knowledge/{h0}/{h1}/{key}.json`（`key` = sha256(学科+知识点) 前 16 位 hex，upsert 天然去重）；错题 id 白名单 `[a-z0-9]{6,32}`（生成式 id，防路径穿越）；字段长度上限（题目/答案/解析 4000、学科/知识点 120、档案字段 2000 字符）
+- **三种用户身份**（档案 `role`，两段共享）：**学生**（`student`，缺省）= 学习者本人，走各学段引导式教学；**家长**（`parent`）= 陪学顾问——汇报孩子进度（掌握度薄弱项/错题分布/到期复习，表格呈现）、给可操作陪学方法（陪而不代做/提问引导/控情绪）、家长想先弄懂再教时按「讲给家长听」直接讲透（对成人不用提示阶梯放手），孩子的薄弱点与错题照常登记；**教师**（`teacher`）= 教学助手——备课（讲解框架/例题精选/易错点预设）、组卷出题（quiz 分层练习卷）、课堂演示（动态模板直接投屏）、分层练习与复习计划设计，对教师直接给专业内容不做引导式放手；开工先读 role，判断不出时 ask 确认后写入档案
+- **主动拓展引导**（两段共享方法论，提升引导性）：学生做对/讲透时**主动递进一步**——**深入**（为什么成立/变式题/一题多解比优劣）、**发散**（换情境应用/开放问题/逆向问题/让学生编题）、**关联**（查 `knowledge` 连已学知识、跨章节跨学科连线并顺带回顾旧知识）、**高级演示主动配**（讲抽象内容默认配可视化不等学生开口——function_graph 滑块/geometry 动画/统计图表，交互演示优于静态图，演示后追问「看到什么变了」把观察转化为理解）；分寸：一次只提一个方向一两句话、掌握度 ≤2 只巩固不拓展、学生不接不硬推
+- **存储**（`core/tutor.ts`，用户级持久化，随用户目录隔离）：档案 `users/{user}/tutor/profile.json`（单文件）；错题本 `users/{user}/tutor/mistakes/{h0}/{h1}/{id}.json`（按错题 id 哈希两层分片）；掌握度 `users/{user}/tutor/knowledge/{h0}/{h1}/{key}.json`（`key` = sha256(学科+知识点) 前 16 位 hex，upsert 天然去重）；错题 id 白名单 `[a-z0-9]{6,32}`（生成式 id，防路径穿越）；字段长度上限（题目/答案/解析 4000、学科/知识点 120、档案字段 2000 字符）；role 白名单 `student/teacher/parent`（`TUTOR_ROLES`，非法值拒绝）
 - **审批**：仅 `mistake_remove` 需审批（不可恢复删除）；档案/掌握度与错题登记、复习均为用户自己的学习数据，免审批不打断辅导流程
 - **预加载**：两段均 `preload = false`，按需装载（与其余子Agent 一致）
 
@@ -851,8 +853,8 @@ export const preload = false
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 浏览器自动化全套（同 playwright）+ http_request/fetch_url/capture_start/capture_stop/capture_clear/capture_list/read/write/agent_list/agent_load/agent_run | 浏览器交互类+http_request+write | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `cron` | add/list/update/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_remove`） | add+update+remove | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的无人值守任务、查看/修改/删除；仅 `GEBAI_CRON_ENABLED=true` 时注册，关闭时完全不可见） |
-| `tutor_secondary` | profile/knowledge/demo/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 中学学习全方位辅导（初中+高中九科：引导式解题（先诊断卡点、四级提示阶梯逐级放手）、出题练习与批改、知识点掌握度评估图、内置演示模板库（练习卷/函数图像/几何/竖式，服务端渲染省 token）、错题本自动间隔复习 1/3/7/14/30 天、学习档案与备考规划；档案/掌握度/错题本按用户持久保存，跨会话延续；与 tutor_primary 共享存储与工具工厂，学段差异在提示词） |
-| `tutor_primary` | profile/knowledge/demo/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 小学学习全方位辅导（1-6 年级语数英科道法：具象化引导解题（实物类比/画图/生活情境、小步引导、读题先行）、口算闯关与练习卷（内置模板）、看图写话与阅读、趣味练习与防挫败鼓励、错题本间隔复习、掌握度评估、学习习惯培养与家长陪学建议；低年级常由家长代述；与 tutor_secondary 共享存储与工具工厂，学段差异在提示词） |
+| `tutor_secondary` | profile/knowledge/demo/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 中学学习全方位辅导（初中+高中九科：引导式解题（先诊断卡点、四级提示阶梯逐级放手）、出题练习与批改、知识点掌握度评估图、内置演示模板库（练习卷/函数图像/几何/竖式，服务端渲染省 token）、错题本自动间隔复习 1/3/7/14/30 天、学习档案与备考规划；**三种身份**：学生（缺省）/家长（陪学汇报与陪学方法）/教师（备课组卷与课堂演示）；**主动拓展引导**：做对后主动递进深入/发散/关联并配交互演示；档案/掌握度/错题本按用户持久保存，跨会话延续；与 tutor_primary 共享存储与工具工厂，学段差异在提示词） |
+| `tutor_primary` | profile/knowledge/demo/mistake_add/mistake_list/mistake_review/mistake_remove | mistake_remove | ✗ | 小学学习全方位辅导（1-6 年级语数英科道法：具象化引导解题（实物类比/画图/生活情境、小步引导、读题先行）、口算闯关与练习卷（内置模板）、看图写话与阅读、趣味练习与防挫败鼓励、错题本间隔复习、掌握度评估、学习习惯培养与家长陪学建议；**三种身份**：学生（缺省）/家长（陪学汇报与陪学方法）/教师（备课与课堂投屏演示）；**主动拓展引导**：做对后顺势递进深入/发散/关联并配可动手的演示；低年级常由家长代述；与 tutor_secondary 共享存储与工具工厂，学段差异在提示词） |
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 
