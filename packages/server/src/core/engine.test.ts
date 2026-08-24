@@ -316,7 +316,7 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
   const provider = new FakeProvider(mode)
   if (mode === "approval" || mode === "approval2") provider.toolName = "sh"
   const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents, retryBackoffMs: 5, authMode, ...extraOpts })
-  // loadConfig 会显式加载项目根 .env（loadRootDotEnv，如 GEBAI_LLM_MODEL）注入 process.env，
+  // loadConfig 会显式加载项目根 .env（loadDotEnv，如 GEBAI_LLM_MODEL）注入 process.env，
   // 泄漏进 EnvManager.resolve 会污染「无覆盖沿用启动实例」类断言——此处（loadConfig 之后）统一清理
   for (const k of Object.keys(process.env)) {
     // 项目根 .env 的 LLM 与预置项目配置泄漏会污染断言（任务级模型覆盖/系统提示词清单），统一清理
@@ -328,7 +328,7 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
   return { home, store, registry, sandbox, auth, env, events, subAgents, engine, provider, config }
 }
 
-/** setup 清理掉的 process.env 键（cleanup 恢复）：loadConfig 显式加载项目根 .env（loadRootDotEnv）
+/** setup 清理掉的 process.env 键（cleanup 恢复）：loadConfig 显式加载项目根 .env（loadDotEnv）
  * 会把开发者真实配置（如 GEBAI_LLM_MODEL）注入 process.env，泄漏进测试断言。 */
 let savedEnv: Record<string, string | undefined> = {}
 

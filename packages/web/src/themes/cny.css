@@ -848,7 +848,7 @@
   70% { transform: scale(0.94, 1.08); }
   100% { transform: scale(1); }
 }
-/* 挥手手臂：绕肩关节小幅摆动（低性能模式被全局规则停用；减少动画偏好单独停用） */
+/* 挥手手臂：绕肩关节小幅摆动（低性能模式被全局规则停用） */
 #gb-cny-cat .cny-cat-arm {
   transform-box: view-box;
   transform-origin: 86px 66px;
@@ -857,8 +857,4 @@
 @keyframes cny-arm-wave {
   0%, 100% { transform: rotate(-5deg); }
   50% { transform: rotate(10deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  #gb-cny-cat .cny-cat-arm { animation: none; }
-  #gb-cny-cat.bounce { animation: none; }
 }
