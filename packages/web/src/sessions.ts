@@ -690,6 +690,7 @@ function showEmptyState() {
   const emptyState = el("div", "empty-state")
   setEmptyState(emptyState)
   emptyState.append(el("div", "es-slogan", "歌未竟 东方白"))
+  emptyState.append(el("div", "es-sub", "把题目打进来（可直接粘贴图片），或点下面的快捷入口开始学习"))
   const tips = el("div", "es-suggestions")
   renderShortcutButtons(tips)
   emptyState.appendChild(tips)

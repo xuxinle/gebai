@@ -54,7 +54,6 @@
   /* 字体：UI 元素 monospace,正文仍用 sans 保证可读性 */
   --font-ui: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, monospace;
-  --font-size: 13.5px;
   --transition: 0.12s steps(2, end);
 }
 

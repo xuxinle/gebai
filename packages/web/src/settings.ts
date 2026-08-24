@@ -2,6 +2,7 @@ import type { FeedbackInfo, UserInfo } from "@gebai/sdk"
 import { client, el, setConn, settingsBody, settingsBtn, settingsFoot, settingsOverlay, settingsTabs } from "./state"
 import { blockText } from "./markdown"
 import { isLowPower, setLowPowerSetting } from "./low-power"
+import { getFontSizeSetting, setFontSizeSetting, type FontSizeSetting } from "./font-size"
 import { isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
@@ -69,6 +70,39 @@ function settingsSection(title: string): HTMLElement {
 function renderSettingsAppearance() {
   const list = el("div", "settings-list")
 
+  // 界面字号：标准 / 大 / 特大 三档（正文与输入随 --font-size 缩放）
+  const fsRow = el("div", "settings-row")
+  const fsInfo = el("div", "settings-row-info")
+  const fsDesc = el("div", "settings-row-desc")
+  const fsBtns = el("div", "settings-seg")
+  const FS_OPTS: { id: FontSizeSetting; label: string }[] = [
+    { id: "std", label: "标准" },
+    { id: "lg", label: "大" },
+    { id: "xl", label: "特大" },
+  ]
+  const fsRefresh = () => {
+    const cur = getFontSizeSetting() // 跨标签同步：设置可能在别的标签被修改
+    for (const b of fsBtns.querySelectorAll<HTMLButtonElement>("button")) {
+      b.classList.toggle("on", b.dataset.fs === cur)
+    }
+    fsDesc.textContent =
+      cur === "std" ? "当前标准（16px）：默认可读字号" : cur === "lg" ? "当前大（18px）：正文字号放大一档" : "当前特大（20px）：正文字号放大两档"
+  }
+  for (const o of FS_OPTS) {
+    const b = el("button", "mini-btn")
+    b.type = "button"
+    b.dataset.fs = o.id
+    b.textContent = o.label
+    b.onclick = () => {
+      setFontSizeSetting(o.id)
+      fsRefresh()
+    }
+    fsBtns.appendChild(b)
+  }
+  fsInfo.append(el("div", "settings-row-name", "界面字号"), fsDesc)
+  fsRow.append(fsInfo, fsBtns)
+  list.appendChild(fsRow)
+
   // 低性能模式
   const row = el("div", "settings-row")
   const info = el("div", "settings-row-info")
@@ -107,6 +141,7 @@ function renderSettingsAppearance() {
 
   settingsBody.appendChild(list)
   appearanceRefresh = refreshDesc
+  fsRefresh()
   refreshDesc()
   ttRefreshDesc()
 }

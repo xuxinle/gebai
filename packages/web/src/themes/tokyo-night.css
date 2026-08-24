@@ -52,7 +52,6 @@
   /* 字体：等宽偏重（程序员感） */
   --font-ui: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-  --font-size: 13.5px;
   --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 

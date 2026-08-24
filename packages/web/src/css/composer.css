@@ -20,16 +20,16 @@
 @keyframes approval-in { from { opacity: 0; transform: translateY(-6px); } }
 .approval .approval-ico { font-size: 16px; }
 .approval .approval-txt { flex: 1; min-width: 0; }
-.approval .approval-txt .approval-title { font-weight: 600; font-size: 13px; }
+.approval .approval-txt .approval-title { font-weight: 600; font-size: 14px; }
 /* 工具名单行截断（title 悬浮可见全名），避免长工具名把卡片撑成长条 */
-.approval .approval-txt .approval-tool { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.approval .approval-txt .approval-tool { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .approval .approval-actions { display: flex; gap: 8px; flex: none; }
 .approval button {
   padding: 5px 16px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   border: none;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   transition: filter var(--transition), transform 0.06s ease;
 }
@@ -37,7 +37,7 @@
 .approval .yes { background: var(--success); color: #fff; }
 .approval .no { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); }
 /* 快捷键提示：按钮内弱化小字 */
-.approval .kbd-hint { opacity: 0.65; font-size: 11px; font-weight: 500; margin-left: 6px; }
+.approval .kbd-hint { opacity: 0.65; font-size: 12px; font-weight: 500; margin-left: 6px; }
 .approval .yes:hover { filter: brightness(1.1); }
 .approval .no:hover { filter: brightness(1.08); }
 
@@ -61,7 +61,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 4px 6px 4px 10px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
 }
 .attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -74,7 +74,7 @@
   cursor: pointer;
   padding: 2px 5px;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .attach-chip button:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
@@ -120,7 +120,7 @@
   border: none;
   padding: 8px 6px;
   font-family: inherit;
-  font-size: 14px;
+  font-size: var(--font-size); /* 输入字号随基础字号/字号档位缩放 */
   line-height: 1.5;
 }
 #input::placeholder { color: var(--text-faint); }
@@ -172,6 +172,12 @@
   opacity: 0.55;
   user-select: none;
 }
+/* 空态引导副标题：告诉学生怎么开始（第一次打开就知道能做什么） */
+.empty-state .es-sub {
+  font-size: 15px;
+  color: var(--text-muted);
+  margin: 0;
+}
 @keyframes slogan-flow { to { background-position: 300% 0; } }
 .es-suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 18px; }
 /* 快捷分组标签（小学/初中/高中/自定义）：flex-basis 100% 独占一行，其后胶囊自然换行成块 */
@@ -179,7 +185,7 @@
   flex-basis: 100%;
   margin: 10px 0 0;
   text-align: center;
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 4px;
   color: var(--text-faint);
   user-select: none;
@@ -191,7 +197,7 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 7px 14px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
   transition: border-color var(--transition), background var(--transition), color var(--transition);
 }
@@ -204,7 +210,7 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 7px 14px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
   transition: border-color var(--transition), background var(--transition), color var(--transition);
 }
@@ -255,11 +261,11 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
 }
 .queue-head .queue-title { font-weight: 600; }
-.queue-head .queue-hint { color: var(--text-faint); font-size: 11px; }
+.queue-head .queue-hint { color: var(--text-faint); font-size: 12px; }
 .queue-item {
   display: flex;
   align-items: center;
@@ -274,7 +280,7 @@
   flex: none;
   min-width: 18px;
   text-align: center;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
@@ -282,7 +288,7 @@
 .queue-text {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -291,7 +297,7 @@
   word-break: break-word;
   white-space: pre-wrap;
 }
-.queue-files { margin-left: 6px; color: var(--text-faint); font-size: 12px; }
+.queue-files { margin-left: 6px; color: var(--text-faint); font-size: 13px; }
 .queue-actions { display: flex; gap: 4px; flex: none; }
 .queue-act {
   width: 26px;
@@ -302,7 +308,7 @@
   border: none;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
 }
@@ -319,7 +325,7 @@
   border-radius: var(--radius-sm);
   color: var(--text);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   padding: 6px 8px;
 }
@@ -330,7 +336,7 @@
   border-radius: var(--radius-sm);
   border: none;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .queue-editor-actions .queue-save { background: var(--accent); color: var(--on-accent); }

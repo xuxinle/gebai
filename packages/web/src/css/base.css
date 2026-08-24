@@ -29,50 +29,56 @@
 }
 
 :root {
-  /* 颜色令牌 */
-  --bg: #0f1117;
-  --bg-elev: #161a24;
-  --bg-elev-2: #1a1f2c;
-  --bg-hover: #232a3d;
-  --bg-active: #2a3248;
-  --bg-inset: #0d1117;
-  --border: #262b3a;
-  --border-strong: #35405c;
-  --text: #e6e6e6;
-  --text-muted: #8a93a8;
-  --text-faint: #5c6478;
-  --accent: #3b82f6;
-  --accent-hover: #5a93f8;
-  --accent-soft: rgba(59, 130, 246, 0.14);
+  /* 颜色令牌——亮色（白）为全局默认：主题 CSS 加载失败时的兜底即白色，
+     与默认主题 acrylic 的亮色档一致（学生向默认白底大字） */
+  --bg: #f4f4f8;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #fafafd;
+  --bg-hover: rgba(0, 0, 0, 0.05);
+  --bg-active: rgba(0, 0, 0, 0.09);
+  --bg-inset: rgba(0, 0, 0, 0.045);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.18);
+  --text: #141418;
+  --text-muted: #4e4e5a;
+  --text-faint: #7a7a88;
+  --accent: #5566ee;
+  --accent-hover: #4355e8;
+  --accent-soft: rgba(85, 102, 238, 0.12);
   --on-accent: #ffffff;
-  --success: #3fb950;
-  --danger: #f85149;
-  --warning: #d29922;
-  --tool: #2dd4a7;
-  --user-grad: linear-gradient(135deg, #2b5cae, #4f9cf8);
-  --nav-active: #ff7a4d; /* 消息导航活动条强调色 */
+  --success: #1f9d5f;
+  --danger: #e5484d;
+  --warning: #b07f1e;
+  --tool: #6f6f7c;
+  --user-grad: linear-gradient(135deg, #58608c, #3c4060);
+  --nav-active: #5566ee; /* 消息导航活动条强调色 */
 
   /* 形状与效果 */
   --radius-sm: 7px;
   --radius-md: 12px;
   --radius-lg: 18px;
   --radius-msg: 14px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
-  --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.04) inset, 0 0 24px rgba(59, 130, 246, 0.08);
-  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.06) inset, 0 0 36px rgba(59, 130, 246, 0.14);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.04) inset;
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.16), 0 0 0 1px rgba(0, 0, 0, 0.05) inset;
   --glass: none;
-  --msg-shadow: 0 2px 6px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  --msg-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.03) inset;
 
   /* 字体与布局 */
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace;
-  --font-size: 14px;
+  --font-size: 16px; /* 基础字号（学生向放大）；主题不覆写本令牌，档位仅由基础样式掌控 */
   --header-h: 44px;
   --sidebar-w: 264px;
   --msg-max-w: 800px;
   --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   --msg-gap: 18px;
 }
+
+/* ---------- 字号档位（设置面板「外观」）：标准 16 / 大 18 / 特大 20 ----------
+   正文/输入/Markdown 等随 var(--font-size) 缩放；不存 = 标准 */
+:root[data-fontsize="lg"] { --font-size: 18px; }
+:root[data-fontsize="xl"] { --font-size: 20px; }
 
 /* ---------- Reset / 基础 ---------- */
 * { box-sizing: border-box; }
@@ -120,7 +126,7 @@ header {
   left: 50%;
   transform: translateX(-50%);
   max-width: 40%;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-muted);
   overflow: hidden;
@@ -133,7 +139,7 @@ header {
    胶囊徽章底色/内边距由 #conn（id 特异性）统一中和，各主题只接管圆点颜色/光晕 */
 .conn {
   flex: none;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--success);
   white-space: nowrap;
 }
@@ -253,7 +259,7 @@ aside {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   transition: border-color var(--transition);
 }
@@ -284,7 +290,7 @@ aside {
   align-items: center;
   gap: 6px;
   flex: none;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
   padding: 6px 2px 0;
 }
@@ -296,7 +302,7 @@ aside {
   border: none;
   border-radius: var(--radius-sm);
   padding: 4px 8px;
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
 }
@@ -413,7 +419,7 @@ aside {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+  font-size: 15px;
   color: var(--text);
 }
 /* 标题栏上下文占比（当前会话 ctxTokens / 模型窗口）：24px SVG 圆环 + 圆心信号灯（#conn），
@@ -444,7 +450,7 @@ aside {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-faint); /* <10s：极淡 */
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -512,7 +518,7 @@ aside {
   background: transparent;
   color: var(--text);
   text-align: left;
-  font-size: 13px;
+  font-size: 14px;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -528,7 +534,7 @@ aside {
   gap: 6px;
   padding: 8px 10px 2px;
   border: none;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.5px;
   color: var(--text-faint);
@@ -551,7 +557,7 @@ aside {
   color: var(--text);
   border: 1px solid var(--accent);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 14px;
   padding: 1px 5px;
   outline: none;
 }
@@ -633,13 +639,13 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 
 /* ---------- 超小屏（手机竖屏）---------- */
 @media (max-width: 480px) {
-  :root { --font-size: 13.5px; --msg-gap: 12px; }
+  :root { --font-size: 15px; --msg-gap: 12px; }
   header { padding: 0 10px; gap: 8px; }
   .icon-btn { font-size: 14px; }
   #messages { padding: 12px; }
-  .msg-name { font-size: 11px; }
+  .msg-name { font-size: 12px; }
   .msg-time { font-size: 10.5px; }
-  .markdown pre { font-size: 13px; padding: 10px 12px; }
+  .markdown pre { font-size: 14px; padding: 10px 12px; }
   .markdown code { font-size: 0.86em; }
   /* 输入区单行 */
   #input { min-height: 32px; }

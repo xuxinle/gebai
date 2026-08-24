@@ -52,7 +52,6 @@
   /* 字体 */
   --font-ui: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-  --font-size: 14px;
   --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
 }
 

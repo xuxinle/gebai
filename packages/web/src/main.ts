@@ -17,6 +17,7 @@ import { bindThemePop, initTheme } from "./theme"
 import { initThemeFx } from "./theme-fx"
 import { cnyCatTurnEnd, initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
+import { initFontSize } from "./font-size"
 import { initTurnTimer, isTurnTimerEnabled } from "./turn-timer"
 import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { addApproval, clearApprovals } from "./approvals"
@@ -846,6 +847,7 @@ function hideSplash(): void {
 
 async function init() {
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
+  initFontSize() // 字号档位：--font-size 就位后再渲染消息（首屏即按档位排版）
   initTurnTimer()
   initTheme()
   initThemeFx() // 各主题画布环境特效（随主题切换/低功耗启停）

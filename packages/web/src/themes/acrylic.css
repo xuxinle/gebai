@@ -1,7 +1,9 @@
 /* ============================================================
-   GEBAI 主题：acrylic — 黑色亚克力极简（默认主题）
+   GEBAI 主题：acrylic — 亚克力极简（默认主题）
    深黑半透明面板 + 毛玻璃（backdrop blur），会话元素零边框，
-   靠背景层次、圆角与细腻过渡区分，去装饰化
+   靠背景层次、圆角与细腻过渡区分，去装饰化。
+   默认亮（白）：根元素 data-acrylic-lt="light" 激活白色亚克力变量块
+   （theme.ts 解析默认即 light），data-acrylic-lt="dark" 为暗色档
    ============================================================ */
 
 [data-theme="acrylic"] {
@@ -63,7 +65,6 @@
   /* 字体 */
   --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --font-size: 14px;
   --transition: 0.12s ease;
 }
 

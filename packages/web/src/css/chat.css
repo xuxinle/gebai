@@ -72,7 +72,7 @@
   box-shadow: var(--shadow-pop);
   padding: 8px 12px;
   pointer-events: none;
-  font-size: 12.5px;
+  font-size: 13.5px;
   line-height: 1.5;
   /* 仅淡入、无位移：避免快速跨短横线切换时（隐藏→重显）产生滑动感 */
   animation: mn-tip-in 0.12s ease;
@@ -82,7 +82,7 @@
   to   { opacity: 1; }
 }
 .msg-nav-tip .mn-role {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
   letter-spacing: 0.06em;
@@ -166,14 +166,14 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 4px 0;
   min-height: 22px;
 }
 .msg.user .msg-meta { justify-content: flex-end; }
 .msg-time {
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0; /* 默认不展示，hover 消息时淡入（不占位变化，布局稳定） */
   transition: opacity 0.15s ease;
 }
@@ -203,7 +203,7 @@
   border-color: color-mix(in srgb, var(--tool) 30%, var(--border));
   border-left: 3px solid var(--tool);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 13.5px;
   padding: 8px 12px;
   color: var(--text);
   white-space: pre-wrap;
@@ -217,7 +217,7 @@
 .msg.tool .bubble .markdown {
   white-space: normal;
   font-family: var(--font-ui);
-  font-size: 13.5px;
+  font-size: 15px;
 }
 /* 消息称谓行操作按钮组（复制/撤回/重新生成）：hover 消息时显示（JS .show），不占空间不遮盖 */
 .msg-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; transition: opacity 0.12s ease; }
@@ -238,7 +238,7 @@
 .msg-act:hover { background: var(--bg-hover); color: var(--text); }
 .msg-act.done { color: var(--success); cursor: default; }
 .msg.tool { max-width: 100%; }
-.msg.tool .bubble .tool-head { font-family: var(--font-ui); font-weight: 600; font-size: 13px; color: var(--tool); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; min-width: 0; }
+.msg.tool .bubble .tool-head { font-family: var(--font-ui); font-weight: 600; font-size: 14px; color: var(--tool); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; min-width: 0; }
 .msg.tool .bubble .tool-head .tool-ico { flex: none; }
 .msg.tool .bubble .tool-head .tool-name { flex: none; white-space: nowrap; }
 /* 标题参数后缀：单行省略不撑爆卡片头（截断时悬浮 tooltip 见全文） */
@@ -249,7 +249,7 @@
 .msg.tool .bubble .tool-out, .msg.tool .bubble .tool-fold { margin-top: 6px; }
 .msg.tool .bubble .tool-out summary, .msg.tool .bubble .tool-fold summary {
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--tool);
   user-select: none;
   display: inline-block;
@@ -270,7 +270,7 @@
 }
 .msg.tool .bubble .tool-out code, .msg.tool .bubble .tool-fold code {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
@@ -278,13 +278,13 @@
 /* 键值行参数块：扁平参数的紧凑可读展示（参数名 + 值，值 pre-wrap 不截断） */
 .msg.tool .bubble .tool-kv { margin-top: 4px; display: flex; flex-direction: column; gap: 3px; }
 .msg.tool .bubble .tool-kv-row { display: flex; gap: 8px; align-items: baseline; }
-.msg.tool .bubble .tool-kv-key { flex: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-faint); }
+.msg.tool .bubble .tool-kv-key { flex: none; font-family: var(--font-ui); font-size: 12.5px; color: var(--text-faint); }
 .msg.tool .bubble .tool-kv-val { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg.tool .bubble .tool-fold .tool-kv { margin-top: 8px; }
 /* edits 参数块：每处修改旧（红）/ 新（绿）对比展示（edit 工具） */
 .msg.tool .bubble .tool-edits { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
-.msg.tool .bubble .tool-edit-idx { font-family: var(--font-ui); font-size: 11px; color: var(--text-faint); margin-top: 2px; }
-.msg.tool .bubble pre.tool-edit-old, .msg.tool .bubble pre.tool-edit-new { margin: 0; padding: 6px 10px; border-radius: var(--radius-sm); border-left: 3px solid; font-family: var(--font-mono); font-size: 13px; }
+.msg.tool .bubble .tool-edit-idx { font-family: var(--font-ui); font-size: 12px; color: var(--text-faint); margin-top: 2px; }
+.msg.tool .bubble pre.tool-edit-old, .msg.tool .bubble pre.tool-edit-new { margin: 0; padding: 6px 10px; border-radius: var(--radius-sm); border-left: 3px solid; font-family: var(--font-mono); font-size: 14px; }
 .msg.tool .bubble pre.tool-edit-old { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--bg-inset)); }
 .msg.tool .bubble pre.tool-edit-new { border-left-color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--bg-inset)); }
 /* 工具卡内所有代码块统一换行策略：长 token 强制断行，绝不横向溢出 */
@@ -297,7 +297,7 @@
 }
 .msg.tool .bubble pre code {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-all;
@@ -314,7 +314,7 @@
 .msg.tool .bubble .tool-rest {
   margin-top: 6px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -329,7 +329,7 @@
   padding: 8px 10px;
   overflow: visible;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -341,10 +341,10 @@
 
 /* 待办卡片 */
 .todo-item { display: flex; gap: 8px; padding: 3px 0; align-items: flex-start; }
-.todo-ico { flex: none; font-size: 13px; line-height: 1.5; }
+.todo-ico { flex: none; font-size: 14px; line-height: 1.5; }
 .todo-body { min-width: 0; flex: 1; }
-.todo-title { font-family: var(--font-ui); font-size: 13px; color: var(--text); line-height: 1.5; }
-.todo-meta { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
+.todo-title { font-family: var(--font-ui); font-size: 14px; color: var(--text); line-height: 1.5; }
+.todo-meta { font-size: 12px; color: var(--text-faint); margin-top: 1px; }
 /* 折叠行：过长清单中隐藏的已完成待办收敛为可点击展开/收起的按钮 */
 .todo-collapse {
   display: block;
@@ -354,7 +354,7 @@
   border-radius: 999px;
   background: var(--bg-inset);
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: 13px;
   font-family: var(--font-ui);
   cursor: pointer;
   transition: color var(--transition), border-color var(--transition);
@@ -372,7 +372,7 @@
   background: var(--bg-inset);
   border: 1px solid var(--border);
   font-family: var(--font-mono, monospace);
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--accent, var(--text));
   word-break: break-all;
 }
@@ -385,7 +385,7 @@
   border: 1px solid var(--border);
   background: var(--bg-inset);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--font-ui);
 }
 .env-req-field input:focus { outline: none; border-color: var(--accent, var(--border)); }
@@ -396,7 +396,7 @@
   color: var(--text);
   border-radius: 999px;
   padding: 6px 14px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
   font-family: var(--font-ui);
   transition: border-color var(--transition), background var(--transition), color var(--transition);
@@ -422,7 +422,7 @@
   color: var(--text);
   border-radius: 12px;
   padding: 8px 14px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
   font-family: var(--font-ui);
   text-align: left;
@@ -431,7 +431,7 @@
 .choice-opt-row:hover { border-color: var(--accent); background: var(--accent-soft); }
 .choice-opt-row:disabled { opacity: 0.55; cursor: default; }
 .choice-opt-title { font-weight: 600; color: inherit; line-height: 1.4; }
-.choice-opt-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+.choice-opt-desc { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
 /* ask_user 消息流问答卡片：回答结果块（完成态追加） */
 .choice-answer {
   margin-top: 10px;
@@ -439,7 +439,7 @@
   border-left: 3px solid var(--accent, var(--border));
   border-radius: 8px;
   background: var(--accent-soft, var(--bg-inset));
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text);
   line-height: 1.6;
   word-break: break-word;
@@ -454,7 +454,7 @@
   border: none;
   border-radius: 999px;
   padding: 7px 14px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
   font-family: var(--font-ui);
   transition: opacity var(--transition);
@@ -470,7 +470,7 @@
   color: var(--text);
   border-radius: 999px;
   padding: 6px 14px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-family: var(--font-ui);
   outline: none;
   transition: border-color var(--transition);
@@ -483,7 +483,7 @@
   background: none;
   border: none;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
   font-family: var(--font-ui);
   cursor: pointer;
   padding: 2px 4px;
@@ -510,7 +510,7 @@
 /* 推理块：暗色「推理」卡片头 + 暗色内容，区别于正式回答 */
 .reasoning {
   margin-bottom: 8px;
-  font-size: 13px;
+  font-size: 14px;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -520,7 +520,7 @@
   cursor: pointer;
   color: var(--text-faint);
   user-select: none;
-  font-size: 13px;
+  font-size: 14px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -572,7 +572,7 @@
   flex-wrap: wrap;
   gap: 2px 10px;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 14px;
   list-style: none;
 }
 .session-run > summary::-webkit-details-marker {
@@ -581,7 +581,7 @@
 .session-run > summary::before {
   content: "▸";
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: 12px;
   transition: transform var(--transition);
 }
 .session-run[open] > summary::before {
@@ -616,7 +616,7 @@
 }
 .session-run .msg .msg-meta {
   padding: 6px 0 2px;
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.75;
 }
 .session-run .msg .msg-meta .msg-time {
@@ -676,7 +676,7 @@
   overflow: auto;
   margin: 0.7em 0;
 }
-.markdown pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
+.markdown pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 14px; line-height: 1.6; }
 .copy-btn {
   position: absolute;
   top: 8px;
@@ -686,7 +686,7 @@
   color: var(--text-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  font-size: 11.5px;
+  font-size: 12.5px;
   padding: 3px 9px;
   cursor: pointer;
   transition: opacity var(--transition), color var(--transition);
@@ -721,7 +721,7 @@
   border-bottom: 1px solid var(--border);
 }
 .file-title {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
   font-weight: 600;
   min-width: 0;
@@ -732,7 +732,7 @@
 }
 .file-badge {
   flex-shrink: 0;
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--text-faint);
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -775,13 +775,13 @@
   min-height: 0;
 }
 .file-body pre.file-code { margin: 0; padding: 0; background: transparent; border: none; }
-.file-body pre.file-code code { display: block; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.file-body pre.file-code code { display: block; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .file-body .markdown:last-child { margin-top: 0; }
 .file-img { max-width: 100%; max-height: 440px; display: block; margin: 0 auto; border-radius: var(--radius-sm); cursor: zoom-in; background: var(--bg-elev); }
 .file-frame { width: 100%; height: 440px; border: 0; border-radius: var(--radius-sm); background: #fff; }
 .file-body .html-frame { height: 400px; }
-.file-pending { font-size: 12px; color: var(--text-faint); }
-.file-fallback { font-size: 12.5px; color: var(--text-muted); padding: 6px 0; }
+.file-pending { font-size: 13px; color: var(--text-faint); }
+.file-fallback { font-size: 13.5px; color: var(--text-muted); padding: 6px 0; }
 
 /* ---------- 文件在线预览 modal ---------- */
 .preview-overlay {
@@ -816,7 +816,7 @@
   margin-bottom: 8px;
 }
 .confirm-text {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
   line-height: 1.6;
   margin-bottom: 18px;
@@ -830,7 +830,7 @@
   background: var(--bg-inset);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 .confirm-text textarea {
   box-sizing: border-box;
@@ -840,7 +840,7 @@
   background: var(--bg-inset);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   resize: vertical;
   min-height: 68px;
 }
@@ -856,7 +856,7 @@
   gap: 3px;
 }
 .confirm-list-item {
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text);
   padding: 3px 8px;
   background: var(--bg-inset);
@@ -876,7 +876,7 @@
   border: 1px solid var(--border);
   background: var(--bg-active);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   transition: background var(--transition), border-color var(--transition), filter var(--transition);
 }
@@ -924,7 +924,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -954,7 +954,7 @@
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 .diagram-zoom-toolbar button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-.diagram-zoom-tip { margin-left: auto; font-size: 12px; color: var(--text-faint); }
+.diagram-zoom-tip { margin-left: auto; font-size: 13px; color: var(--text-faint); }
 /* overflow:hidden：缩放用 transform（视觉缩放），内容元素布局尺寸仍为原始 px，会溢出 zoom 盒并
    虚增 .preview-body 滚动区域（fitView 居中公式据此计算 → 图顶部被滚出视口）；裁在 zoom 内——
    transform 后视觉尺寸恰好等于 zoom 盒，不会裁到可见内容。min-height 供「渲染中…」空态占位，
@@ -987,7 +987,7 @@
 }
 .preview-title {
   flex: 1;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1013,12 +1013,12 @@
   overflow: auto;
   margin: 0;
 }
-.preview-code code { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); white-space: pre; }
+.preview-code code { font-family: var(--font-mono); font-size: 13.5px; color: var(--text); white-space: pre; }
 .diagram { background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; margin-top: 8px; }
 .diagram-card { display: flex; flex-direction: column; gap: 6px; }
-.diagram-error { font-size: 12px; color: var(--danger); padding: 4px 0; }
-.diagram-error pre { margin-top: 6px; font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); white-space: pre-wrap; overflow: auto; max-height: 200px; }
-.diagram-title { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; font-weight: 600; }
+.diagram-error { font-size: 13px; color: var(--danger); padding: 4px 0; }
+.diagram-error pre { margin-top: 6px; font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); white-space: pre-wrap; overflow: auto; max-height: 200px; }
+.diagram-title { font-size: 13px; color: var(--text-muted); margin-bottom: 8px; font-weight: 600; }
 .diagram-title.clickable { cursor: pointer; margin-bottom: 0; }
 .diagram-title.clickable:hover { color: var(--text); }
 /* 缩略图：无内框（背景/边框由外层 .diagram 卡片统一呈现，避免内外框叠加），铺满卡片宽度（保持宽高比；高图限 60vh 防撑爆消息流），点击进查看器 */
@@ -1071,11 +1071,11 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: 13.5px;
   transition: background var(--transition), border-color var(--transition);
 }
 .diagram-toolbar button:hover, .diagram-editor + button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-.diagram-editor { width: 100%; box-sizing: border-box; background: var(--bg-inset); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 12.5px; padding: 8px; margin-bottom: 8px; }
+.diagram-editor { width: 100%; box-sizing: border-box; background: var(--bg-inset); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 13.5px; padding: 8px; margin-bottom: 8px; }
 
 
 /* ---------- HTML 内容块（render_html 工具：沙箱 iframe 直接渲染预览） ---------- */
@@ -1104,7 +1104,7 @@
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
 }
-.html-title { font-size: 12px; color: var(--text-muted); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.html-title { font-size: 13px; color: var(--text-muted); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .html-title.clickable { cursor: zoom-in; }
 .html-title.clickable:hover { color: var(--text); }
 .html-toolbar { display: flex; gap: 2px; flex-shrink: 0; }
@@ -1185,7 +1185,7 @@
 }
 .html-card::-webkit-scrollbar-thumb:hover { background: var(--text-faint); border: 2px solid transparent; background-clip: content-box; }
 
-.html-error { font-size: 12px; color: var(--danger); padding: 12px; }
+.html-error { font-size: 13px; color: var(--danger); padding: 12px; }
 
 
 /* ---------- diff 文本对比视图（并排两栏，增删行着色，按语言语法高亮） ---------- */
@@ -1203,9 +1203,9 @@
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
-.diff-title { font-size: 12.5px; font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-title { font-size: 13.5px; font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diff-lang {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   background: var(--bg-hover);
   border: 1px solid var(--border);
@@ -1215,7 +1215,7 @@
 }
 .diff-panes { display: grid; grid-template-columns: 1fr 1fr; }
 .diff-pane-head {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-faint);
   padding: 4px 12px;
   background: var(--bg-elev);
@@ -1226,7 +1226,7 @@
   overflow: auto;
   max-height: 420px;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 13.5px;
   line-height: 1.55;
 }
 .diff-row { display: flex; min-width: max-content; }
@@ -1271,7 +1271,7 @@
   border-radius: 8px;
   background: color-mix(in srgb, var(--warning) 10%, transparent);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   animation: fade-in 0.15s ease-out;
 }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -1282,5 +1282,5 @@
   border-left: 3px solid var(--danger);
   border-radius: 6px;
   background: color-mix(in srgb, var(--danger) 8%, transparent);
-  font-size: 13px;
+  font-size: 14px;
 }

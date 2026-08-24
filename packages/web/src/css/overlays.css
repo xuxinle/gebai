@@ -132,7 +132,7 @@
 .theme-pop::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 .theme-pop[hidden] { display: none; }
 .theme-section-label {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text-faint);
   letter-spacing: 1.2px;
@@ -188,7 +188,7 @@
   background: none;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -210,7 +210,7 @@
   border: none;
   background: none;
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 15px;
   text-align: left;
   transition: background var(--transition);
 }
@@ -224,7 +224,7 @@
   border: 1px solid var(--border-strong);
 }
 .theme-opt .t-label { font-weight: 600; }
-.theme-opt .t-desc { display: block; font-size: 11.5px; color: var(--text-faint); font-weight: 400; }
+.theme-opt .t-desc { display: block; font-size: 12.5px; color: var(--text-faint); font-weight: 400; }
 
 /* ---------- 自研交互组件（Toast / Tooltip / 自绘 Select / 建议浮层） ---------- */
 .toast {
@@ -239,7 +239,7 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-pop);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   padding: 10px 16px;
   z-index: 300;
   display: flex;
@@ -268,7 +268,7 @@
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-pop);
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
   max-width: min(260px, calc(100vw - 24px));
   pointer-events: none;
@@ -287,7 +287,7 @@
   border-radius: var(--radius-sm);
   background: var(--bg-active);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
 }
@@ -329,7 +329,7 @@
   border: none;
   background: none;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -379,7 +379,7 @@
   box-shadow: var(--shadow-pop);
 }
 .login-brand { font-size: 26px; font-weight: 800; text-align: center; letter-spacing: 4px; }
-.login-sub { text-align: center; color: var(--text-muted); font-size: 12px; letter-spacing: 2px; margin-bottom: 10px; }
+.login-sub { text-align: center; color: var(--text-muted); font-size: 13px; letter-spacing: 2px; margin-bottom: 10px; }
 .login-card input {
   width: 100%;
   box-sizing: border-box;
@@ -406,13 +406,13 @@
   background: none;
   border: none;
   color: var(--text-muted);
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 .login-toggle:hover { color: var(--accent); }
-.login-err { color: var(--danger); font-size: 12.5px; text-align: center; }
+.login-err { color: var(--danger); font-size: 13.5px; text-align: center; }
 
 /* ---------- 设置抽屉 ---------- */
 .settings-overlay {
@@ -454,7 +454,7 @@
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -474,9 +474,9 @@
   border-top: 1px solid var(--border);
   background: var(--bg-elev);
 }
-.settings-foot-desc { flex: 1; min-width: 0; font-size: 12px; color: var(--text-muted); }
+.settings-foot-desc { flex: 1; min-width: 0; font-size: 13px; color: var(--text-muted); }
 .settings-section-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-faint);
   letter-spacing: 1px;
@@ -503,14 +503,14 @@
   background: var(--bg-inset);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   min-width: 0;
 }
 .settings-row > input:not([type="checkbox"]):focus { outline: none; border-color: var(--accent); }
 .settings-row > input:not([type="checkbox"])::placeholder { color: var(--text-faint); }
 .settings-row-info { flex: 1; min-width: 0; }
-.settings-row-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-row-desc { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-row-name { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-row-desc { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-form {
   display: flex;
   flex-direction: column;
@@ -521,7 +521,7 @@
   border: 1px solid var(--border);
   margin-bottom: 14px;
 }
-.settings-form-label { font-size: 11.5px; color: var(--text-faint); }
+.settings-form-label { font-size: 12.5px; color: var(--text-faint); }
 .settings-form input, .settings-form select {
   padding: 8px 10px;
   border-radius: var(--radius-sm);
@@ -529,7 +529,7 @@
   background: var(--bg-inset);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 .mini-btn {
   flex: none;
@@ -539,12 +539,23 @@
   background: var(--bg-hover);
   color: var(--text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13.5px;
   cursor: pointer;
 }
 .mini-btn:hover { background: var(--bg-active); }
 .mini-btn.danger { border-color: rgba(248, 81, 73, 0.5); color: var(--danger); }
 .mini-btn.danger:hover { background: rgba(248, 81, 73, 0.12); }
+/* 分段选择组（界面字号等互斥档位）：横向贴连，选中项 accent 高亮 */
+.settings-seg { display: inline-flex; flex: none; gap: 0; }
+.settings-seg .mini-btn { border-radius: 0; margin-left: -1px; }
+.settings-seg .mini-btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); margin-left: 0; }
+.settings-seg .mini-btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.settings-seg .mini-btn.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
 
 /* ---------- HTML 小工具：弹窗列表 ---------- */
 .mini-tools-pop {
@@ -576,13 +587,13 @@
   border-bottom: 1px solid var(--border);
   margin-bottom: 4px;
 }
-.mini-tools-pop-title { font-size: 12.5px; font-weight: 700; color: var(--text); }
+.mini-tools-pop-title { font-size: 13.5px; font-weight: 700; color: var(--text); }
 .mini-tools-refresh {
   border: none;
   background: none;
   color: var(--text-faint);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
@@ -601,7 +612,7 @@
   background: none;
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   transition: background var(--transition);
 }
@@ -616,7 +627,7 @@
   width: 18px;
   height: 18px;
   padding: 0;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
   border: none;
   border-radius: 4px;
@@ -641,7 +652,7 @@
 }
 .mini-tool-badge {
   flex: none;
-  font-size: 10.5px;
+  font-size: 11.5px;
   line-height: 1;
   padding: 3px 7px;
   border-radius: 999px;
@@ -659,7 +670,7 @@
 }
 .mini-tools-empty {
   padding: 12px 10px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-faint);
   line-height: 1.6;
 }
@@ -696,7 +707,7 @@
 .mini-tool-title {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -736,7 +747,7 @@
   flex: 1;
   display: grid;
   place-items: center;
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-faint);
 }
 .mini-tool-loading.error { color: var(--danger); }
@@ -746,11 +757,11 @@
   background: var(--bg-elev-2);
   border: 1px dashed var(--border-strong);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 14px;
   padding: 10px 14px;
 }
 .compact-title { font-weight: 600; color: var(--text); margin-bottom: 4px; }
-.compact-meta { font-size: 11.5px; color: var(--text-faint); margin-bottom: 4px; }
+.compact-meta { font-size: 12.5px; color: var(--text-faint); margin-bottom: 4px; }
 .compact-summary { white-space: pre-wrap; }
 
 /* ---------- 子Agent 装载提示 ---------- */
@@ -758,7 +769,7 @@
   background: var(--bg-elev-2);
   border: 1px dashed var(--border-strong);
   color: var(--text-muted);
-  font-size: 12.5px;
+  font-size: 13.5px;
   padding: 6px 12px;
 }
 .load-title { font-weight: 600; color: var(--text); }

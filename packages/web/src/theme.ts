@@ -48,10 +48,10 @@ export const CNY_SCHEMES = [
 
 export type CnySchemeId = (typeof CNY_SCHEMES)[number]["id"]
 
-/** 默认主题（acrylic）黑白切换（根元素 data-acrylic-lt），仅主题为 acrylic 时生效；null = 暗（默认） */
+/** 默认主题（acrylic）黑白切换（根元素 data-acrylic-lt），仅主题为 acrylic 时生效；默认亮（白） */
 export const ACRYLIC_LT_MODES = [
-  { id: "dark", label: "暗", desc: "黑色（默认）", swatch: "linear-gradient(135deg, #0c0c0e, #26262e)" },
-  { id: "light", label: "亮", desc: "白色", swatch: "linear-gradient(135deg, #f4f4f8, #c6c6d0)" },
+  { id: "light", label: "亮", desc: "白色（默认）", swatch: "linear-gradient(135deg, #f4f4f8, #c6c6d0)" },
+  { id: "dark", label: "暗", desc: "黑色", swatch: "linear-gradient(135deg, #0c0c0e, #26262e)" },
 ] as const
 
 export type AcrylicLtId = (typeof ACRYLIC_LT_MODES)[number]["id"]
@@ -143,15 +143,15 @@ export function resolveCnyScheme(): CnySchemeId | null {
   return null
 }
 
-/** 解析默认主题黑白切换：会话手动选择 → URL 参数 `?gb_acrylic_lt=<id>` → 用户持久化 → null（暗，默认）；显式重置（"reset"）跳过 URL 参数 */
-export function resolveAcrylicLt(): AcrylicLtId | null {
-  if (userAcrylicLt === "reset") return null
+/** 解析默认主题黑白切换：会话手动选择 → URL 参数 `?gb_acrylic_lt=<id>` → 用户持久化 → light（白，默认）；显式重置（"reset"）视为默认亮色 */
+export function resolveAcrylicLt(): AcrylicLtId {
+  if (userAcrylicLt === "reset") return "light"
   if (userAcrylicLt) return userAcrylicLt
   const fromUrl = new URLSearchParams(location.search).get("gb_acrylic_lt")
   if (fromUrl && isAcrylicLt(fromUrl)) return fromUrl
   const saved = localStorage.getItem(ACRYLIC_LT_KEY)
   if (saved && isAcrylicLt(saved)) return saved
-  return null
+  return "light"
 }
 
 /**
@@ -231,14 +231,14 @@ export function setCnyScheme(scheme: CnySchemeId | null): void {
   applyCnyScheme(scheme)
 }
 
-/** 应用默认主题黑白切换：设置/移除根元素 data-acrylic-lt（acrylic.css 亮色覆盖块据此生效）。 */
+/** 应用默认主题黑白切换：设置根元素 data-acrylic-lt（acrylic.css 的亮/暗变量块据此生效）；null 视为默认亮色。 */
 export function applyAcrylicLt(lt: AcrylicLtId | null): void {
   const el = document.documentElement
-  if (lt) el.dataset.acrylicLt = lt
-  else delete el.dataset.acrylicLt
+  const v = lt ?? "light"
+  el.dataset.acrylicLt = v
 }
 
-/** 用户手动切换黑白：立即生效 + 持久化（不重载主题）；传 null 表示显式重置为默认暗色。 */
+/** 用户手动切换黑白：立即生效 + 持久化（不重载主题）；传 null 表示显式重置为默认亮色（白）。 */
 export function setAcrylicLt(lt: AcrylicLtId | null): void {
   userAcrylicLt = lt ?? "reset"
   try {
@@ -271,7 +271,7 @@ function syncThemePop() {
   for (const btn of themePop.querySelectorAll<HTMLButtonElement>(".cny-opt")) {
     btn.classList.toggle("active", btn.dataset.cnySchemeId === activeScheme)
   }
-  const lt = resolveAcrylicLt() ?? "dark" // null（含显式重置）视为默认暗色
+  const lt = resolveAcrylicLt() // 默认 light（白）；显式重置同样解析为默认亮色
   for (const btn of themePop.querySelectorAll<HTMLButtonElement>(".acrylic-lt-opt")) {
     btn.classList.toggle("active", btn.dataset.acrylicLtId === lt)
   }
@@ -354,7 +354,7 @@ function renderThemePop() {
     const reset = document.createElement("button")
     reset.type = "button"
     reset.className = "accent-reset"
-    tip(reset, "重置为默认暗色")
+    tip(reset, "重置为默认亮色（白）")
     reset.textContent = "↺"
     reset.onclick = () => {
       setAcrylicLt(null)
