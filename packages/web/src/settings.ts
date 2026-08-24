@@ -1,7 +1,7 @@
 import type { FeedbackInfo, UserInfo } from "@gebai/sdk"
 import { client, el, setConn, settingsBody, settingsBtn, settingsFoot, settingsOverlay, settingsTabs } from "./state"
 import { blockText } from "./markdown"
-import { getLowPowerSetting, isLowPower, setLowPowerSetting } from "./low-power"
+import { isLowPower, setLowPowerSetting } from "./low-power"
 import { isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
@@ -75,13 +75,12 @@ function renderSettingsAppearance() {
   const desc = el("div", "settings-row-desc")
   const btn = el("button", "mini-btn")
   const refreshDesc = () => {
-    const forced = getLowPowerSetting() === "on" // 跨标签同步：设置可能在别的标签被修改
-    btn.textContent = forced ? "关闭" : "开启"
-    if (isLowPower()) desc.textContent = forced ? "已开启：关闭动画等特效" : "已自动开启（低配机器）：关闭动画等特效"
-    else desc.textContent = "未开启：使用完整动画与特效"
+    const on = isLowPower() // 跨标签同步：设置可能在别的标签被修改
+    btn.textContent = on ? "关闭" : "开启"
+    desc.textContent = on ? "已开启：关闭动画等特效" : "未开启：使用完整动画与特效"
   }
   btn.onclick = () => {
-    setLowPowerSetting(getLowPowerSetting() === "on" ? "off" : "on")
+    setLowPowerSetting(isLowPower() ? "off" : "on")
     refreshDesc() // 局部刷新说明，保持按钮可用
   }
   info.append(el("div", "settings-row-name", "低性能模式"), desc)

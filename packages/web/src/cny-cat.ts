@@ -3,7 +3,7 @@
  * - 拖动：沿指针撒金币 + 纸币混排轨迹；点击（位移未超阈值）：爆少量金币，900ms 内连续点击连击递增、越爆越多。
  * - 单轮任务完成时由 main.ts 调 `cnyCatTurnEnd(elapsedMs)`：从猫位置大量爆发，运行越久越多（封顶 230）。
  * - 仅 `data-theme=cny` 时挂载（监听 gebai:theme-change 同步增删）；核心定位样式内联，装饰动效在 cny.css。
- * - 位置持久化 localStorage `gebai.ui.cnyCat`（左上角 px，视口变化钳制）；低性能/减少动画时猫保留但粒子不发射。
+ * - 位置持久化 localStorage `gebai.ui.cnyCat`（左上角 px，视口变化钳制）；低性能时猫保留但粒子不发射。
  */
 import { burstMoney, popTrailMoney } from "./coin-fx"
 

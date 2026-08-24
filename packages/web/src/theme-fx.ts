@@ -5,7 +5,7 @@
  *   全部内容之下（主题 CSS 将 main 背景透明化以透出特效，同 aurora/synthwave 既有模式）；
  *   气泡/卡片自身背景保证正文可读
  * - 挂载模式同 cny-cat：监听 gebai:theme-change 按 data-theme 启停；
- *   低性能模式 / prefers-reduced-motion 整体停用（gebai:low-power-change 跟随启停）
+ *   低性能模式整体停用（gebai:low-power-change 跟随启停）
  * - 粒子量随视口面积缩放；rAF 循环 dt 钳制，标签页隐藏由浏览器自动暂停
  * - 各主题特效均为「环境层」：低透明度、不遮挡、不交互；默认主题（acrylic）不配环境特效
  *   （保持毛玻璃原味），cny 的招财猫/爆金币为独立交互层
@@ -522,9 +522,9 @@ let cleanup: Cleanup | null = null
 let resizeBound = false
 let inited = false
 
-/** 特效是否停用（低性能模式 / 减少动画偏好）。 */
+/** 特效是否停用（低性能模式）。 */
 function fxDisabled(): boolean {
-  return isLowPower() || (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches)
+  return isLowPower()
 }
 
 function resizeCanvas(): void {
