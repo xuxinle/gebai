@@ -7,7 +7,7 @@
  *   强空气阻力衰减到停，停留原位轻转渐隐（不上升不坠落，不与地面交互）。
  * - 性能：金币翻转帧与各面额纸币均**预渲染精灵**（离屏 canvas 2x 超采样），逐帧只做 transform + drawImage；
  *   canvas 懒创建、定位样式内联（不依赖主题 CSS 加载时序），粒子耗尽自动移除；rAF 仅在有粒子时运行。
- * - 降级：低性能模式 / prefers-reduced-motion 不发射（装饰性动画，遵循全局低功耗约定）。
+ * - 降级：低性能模式不发射（装饰性动画，遵循全局低功耗约定）。
  */
 import { CNY_SCHEMES } from "./theme"
 import { isLowPower } from "./low-power"
@@ -251,9 +251,9 @@ let lastTs = 0
 let particles: Particle[] = []
 let resizeBound = false
 
-/** 特效是否可用（低性能模式 / 减少动画偏好下不发射）。 */
+/** 特效是否可用（低性能模式下不发射）。 */
 export function coinFxDisabled(): boolean {
-  return isLowPower() || (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches)
+  return isLowPower()
 }
 
 /** 懒创建全屏画布（定位样式内联：不依赖主题 CSS 是否已加载）。 */

@@ -707,17 +707,7 @@ header, aside, #composer, .composer-row, .settings-panel, .login-card,
 }
 .bubble, .markdown pre { transition: background-color 0.32s, border-color 0.32s, box-shadow 0.32s, transform 0.32s; }
 
-/* 用户偏好：减少动效 */
-@media (prefers-reduced-motion: reduce) {
-  ::view-transition-old(root),
-  ::view-transition-new(root) {
-    animation-duration: 0.12s;
-  }
-  #gb-theme-sweep { display: none; }
-  body, .bubble, .markdown pre { transition: none; }
-}
-
-/* ---------- 低性能模式（无 GPU/低配机器自动开启，设置面板「外观」可手动覆盖） ---------- */
+/* ---------- 低性能模式（设置面板「外观」手动开关，不做硬件自动检测） ---------- */
 /* 关闭全部动画与过渡：主题呼吸/脉冲/流动渐变、入场动画、hover 过渡等不再持续占用 GPU/CPU */
 html[data-low-power="on"] *,
 html[data-low-power="on"] *::before,

@@ -8,13 +8,15 @@ export type SandboxMode = "auto" | "on" | "off"
 /**
  * In script-debug mode, Bun auto-loads `.env` from the process cwd, which depends
  * on how the server was launched. Load the repo-root `.env` explicitly so LLM /
- * server config works regardless of cwd. Binary mode ignores this (config comes
- * from real env vars).
+ * server config works regardless of cwd. Binary mode (incl. both desktop hosts)
+ * loads `{GEBAI_HOME}/.env` instead, so deployed binaries stay configurable via
+ * a file next to user data. Values already present in the real env always win.
  */
-function loadRootDotEnv() {
-  if (isBinaryMode()) return
-  const root = join(import.meta.dirname, "..", "..", "..", "..")
-  const p = join(root, ".env")
+function loadDotEnv() {
+  const base = isBinaryMode()
+    ? resolveGebaiHome()
+    : join(import.meta.dirname, "..", "..", "..", "..")
+  const p = join(base, ".env")
   try {
     const raw = readFileSync(p, "utf8")
     for (const line of raw.split("\n")) {
@@ -24,7 +26,7 @@ function loadRootDotEnv() {
       }
     }
   } catch {
-    /* no root .env; fine */
+    /* no .env; fine */
   }
 }
 
@@ -118,7 +120,7 @@ function resolveAuthMode(): AuthMode {
 }
 
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
-  loadRootDotEnv()
+  loadDotEnv()
   const defaultWebDist = join(import.meta.dirname, "..", "..", "..", "web", "dist")
   const config: ServerConfig = {
     host: env("GEBAI_HOST", "127.0.0.1"),
