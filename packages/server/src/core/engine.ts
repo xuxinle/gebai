@@ -2100,9 +2100,9 @@ export class AgentEngine {
           // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
           // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
           const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun, file: result.file }
+            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
             : result
-          await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun, file: safe.file })
+          await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun })
           this.publish(sessionId, "event.tool.result", {
             name: tc.name,
             toolCallId: tc.id,
@@ -2110,7 +2110,6 @@ export class AgentEngine {
             filePath: safe.filePath,
             output: safe.output,
             blocks: safe.blocks,
-            file: safe.file,
             sessionId,
           })
         }
@@ -2548,13 +2547,13 @@ export class AgentEngine {
         const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
         // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
         const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun, file: result.file }
+          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
           : result
         // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
         // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
         const nested = safe.sessionRun ? { sessionRun: safe.sessionRun } : {}
         const withNote = autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入本次执行、提示词已注入上下文）\n${safe.output}` : safe.output
-        await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, file: safe.file, ...nested })
+        await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
         messages.push({ role: "tool", content: withNote, toolCallId: tc.id, name: tc.name, ...nested })
         this.publish(sessionId, "event.tool.result", {
           name: tc.name,
@@ -2563,7 +2562,6 @@ export class AgentEngine {
           filePath: safe.filePath,
           output: safe.output,
           blocks: safe.blocks,
-          file: safe.file,
           session: true,
           sessionRunId: archive.runId,
           sessionId,

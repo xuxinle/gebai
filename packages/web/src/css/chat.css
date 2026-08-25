@@ -281,27 +281,27 @@
 .msg.tool .bubble .tool-kv-key { flex: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-faint); }
 .msg.tool .bubble .tool-kv-val { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg.tool .bubble .tool-fold .tool-kv { margin-top: 8px; }
-/* 文件链接 chip（「弹窗查看」模式下文件工具卡的统一文件入口）：图标 + 文件名 + 路径（弱化）+ 下载，
-   点击弹窗查看文件（会话相对与项目绝对路径均经 files/preview 取数） */
-.msg.tool .bubble .file-link {
+/* 文件链接 chip（「弹窗查看」模式下文件工具产物文件卡的替代渲染）：图标 + 文件名 + 路径（弱化）+ 下载，
+   点击弹窗查看文件（会话相对与项目绝对路径均经 files/preview 取数）；渲染于 .msg-body（工具卡下方产物块位置） */
+.file-link {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin-top: 4px;
+  margin: 4px 0;
   padding: 5px 9px;
   border: 1px solid color-mix(in srgb, var(--tool) 30%, transparent);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--tool) 6%, var(--bg-inset));
   cursor: pointer;
   min-width: 0;
+  max-width: 100%;
   transition: background var(--transition), border-color var(--transition);
 }
-.msg.tool .bubble .file-link:hover { background: color-mix(in srgb, var(--tool) 14%, var(--bg-inset)); border-color: color-mix(in srgb, var(--tool) 55%, transparent); }
-.msg.tool .bubble .file-link:focus-visible { outline: 2px solid var(--tool); outline-offset: 1px; }
-.msg.tool .bubble .file-link-ico { flex: none; }
-.msg.tool .bubble .file-link-name { flex: none; font-family: var(--font-ui); font-size: 13px; color: var(--tool); white-space: nowrap; }
-.msg.tool .bubble .file-link-path { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.msg.tool .bubble .file-link .file-dl-icon { flex: none; }
+.file-link:hover { background: color-mix(in srgb, var(--tool) 14%, var(--bg-inset)); border-color: color-mix(in srgb, var(--tool) 55%, transparent); }
+.file-link:focus-visible { outline: 2px solid var(--tool); outline-offset: 1px; }
+.file-link-ico { flex: none; }
+.file-link-name { flex: none; font-family: var(--font-ui); font-size: 13px; color: var(--tool); white-space: nowrap; }
+.file-link-path { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* edits 参数块：每处修改旧（红）/ 新（绿）对比展示（edit 工具） */
 .msg.tool .bubble .tool-edits { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .msg.tool .bubble .tool-edit-idx { font-family: var(--font-ui); font-size: 11px; color: var(--text-faint); margin-top: 2px; }
@@ -773,7 +773,7 @@
 @media (hover: none) {
   .file-toolbar { opacity: 1; pointer-events: auto; }
 }
-.file-toolbar button, .file-toolbar .file-dl-icon {
+.file-toolbar button {
   flex-shrink: 0;
   padding: 4px;
   background: transparent;
@@ -786,8 +786,25 @@
   justify-content: center;
   text-decoration: none;
 }
-.file-toolbar button:hover, .file-toolbar .file-dl-icon:hover { color: var(--text); background: var(--bg-hover); }
-.file-toolbar button svg, .file-toolbar .file-dl-icon svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.file-toolbar button:hover { color: var(--text); background: var(--bg-hover); }
+.file-toolbar button svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* 下载锚点：常驻文件卡头部（不随 hover 工具栏显隐），文件链接 chip / 弹窗共用；
+   描边图标（无描边时 SVG 渲染为不可辨认的填充块） */
+.file-dl-icon {
+  flex-shrink: 0;
+  padding: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+.file-dl-icon:hover { color: var(--text); background: var(--bg-hover); }
+.file-dl-icon svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 /* 内容区：高度上限 + 滚动（防巨长文本撑爆消息流；图片/PDF 各自限高） */
 .file-body {
   padding: 10px 12px;
@@ -1024,6 +1041,15 @@
   border-radius: 4px;
 }
 .preview-close:hover { color: var(--text); background: var(--bg-hover); }
+/* 弹窗标题栏下载（downloadAnchor + preview-dl 变体：与关闭同款交互，描边图标） */
+.preview-dl {
+  display: flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.preview-dl:hover { color: var(--text); background: var(--bg-hover); }
+.preview-dl svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .preview-body { flex: 1; overflow: auto; padding: 14px; }
 .preview-body img { max-width: 100%; border-radius: var(--radius-sm); }
 .preview-code {
@@ -1250,8 +1276,8 @@
   font-size: 12.5px;
   line-height: 1.55;
 }
-.diff-row { display: flex; min-width: max-content; }
-.diff-row > .diff-cell { flex: 1 1 50%; min-width: 300px; display: flex; align-items: stretch; }
+.diff-row { display: flex; min-width: 0; }
+.diff-row > .diff-cell { flex: 1 1 50%; min-width: 0; display: flex; align-items: stretch; }
 .diff-row > .diff-cell + .diff-cell { border-left: 1px solid var(--border); }
 .diff-ln {
   flex: none;
@@ -1267,7 +1293,10 @@
   min-width: 0;
   padding: 0 10px;
   color: var(--text);
-  white-space: pre;
+  /* 自动换行不横向溢出（与工具卡代码块同策略：长 token 强制断行） */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   font-family: inherit;
   font-size: inherit;
   background: transparent;
@@ -1278,8 +1307,8 @@
 .diff-del > .diff-cell:first-child { background: rgba(248, 81, 73, 0.13); }
 .diff-del > .diff-cell:first-child .diff-ln { background: rgba(248, 81, 73, 0.22); color: var(--danger); }
 .diff-placeholder { background: transparent; }
-/* 降级视图（无行级数据）：两侧代码块贴边 */
-.diff-panes .tool-code { margin: 0; border: none; border-radius: 0; }
+/* 降级视图（无行级数据）：两侧代码块贴边；同样自动换行不横向溢出 */
+.diff-panes .tool-code { margin: 0; border: none; border-radius: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .diff-panes .tool-code + .tool-code { border-left: 1px solid var(--border); }
 
 /* 模型服务异常瞬时提示（event.model.error：引擎自动重试期间显示，恢复输出即移除） */

@@ -1,7 +1,8 @@
 /**
- * 文件展示方式（read/write/edit/patch 等文件工具卡片，含 code 子Agent 同款工具）：
- * - inline 直接展示（默认，现状）：参数/输出/产物文件卡按原样内联渲染
- * - popup 弹窗查看：文件内容收敛为文件链接，点击弹窗查看（会话相对与项目绝对路径均经 files/preview 取数）
+ * 文件展示方式（read/write/edit/patch 等文件工具的**产物文件卡**，含 code 子Agent 同款工具）：
+ * - inline 嵌入展示（默认，现状）：产物 file 块渲染为文件内容卡（按需加载内容内联展示）
+ * - popup 弹窗查看：产物 file 块收敛为文件链接 chip，点击弹窗查看（会话相对与项目绝对路径均经 files/preview 取数）
+ * - 参数区与工具输出不受影响（只有下方产物文件卡在两种形态间切换）
  * - 手动设置：localStorage `gebai.ui.fileDisplay` = "popup"；不存/其它值 = inline
  * - 生效方式：渲染时经 isFilePopup() 读取；变更派发 `gebai:file-display-change`（main 重载当前会话消息）
  */

@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ChatChunk, ContentBlock, DiagramFormat, Message, PendingInteraction, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
+import type { ChatChunk, ContentBlock, DiagramFormat, PendingInteraction, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
@@ -258,7 +258,7 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
   const body = wrapper.querySelector<HTMLElement>(".msg-body")
   if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args })
 }
-function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string; file?: Message["file"] }) {
+function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string }) {
   const cur = getCurrentSession()
   if (ev.sessionId !== cur?.id) {
     // 切走会话时结果不渲染，但配对必须清理：残留会让切回时 loadMessages 按「未完成配对」
@@ -282,7 +282,7 @@ function onToolResult(ev: { sessionId: string; toolCallId: string; name: string;
   const sub = runId ? runs.get(ev.sessionId)?.sessionRuns?.get(runId) : undefined
   const parent = sub?.body
   // ask 选项询问分支：更新消息流中的问答卡片（头部完成态 + 回答；无配对时兜底独立结果消息）
-  appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent, ev.file)
+  appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent)
   if (sub) scrollSessionSticky(sub.body)
 }
 function onMessageCompact(ev: { sessionId: string; count: number; summary: string }) {
@@ -927,7 +927,7 @@ async function init() {
       // 长工具执行心跳：阻塞类工具（sh/py 长命令）执行期间无其他数据，据此刷新活跃，防空闲看门狗误取消
       touchRunActivity(ev.sessionId)
     } else if (ev.type === "event.tool.result") {
-      onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined, file: ev.payload.file as Message["file"] })
+      onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
     } else if (ev.type === "event.message.compact") {
       onMessageCompact({ sessionId: ev.sessionId, count: Number(ev.payload.count ?? 0), summary: String(ev.payload.summary ?? "") })
     } else if (ev.type === "event.session.ctx") {

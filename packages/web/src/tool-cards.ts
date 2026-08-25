@@ -3,7 +3,6 @@ import { client, composer, el, getCurrentSession, getSubAgentNames, input, todoS
 import { codeBlock, highlightedCode, markdownBlock } from "./markdown"
 import { loadLocalEnv, saveLocalEnv } from "./env-local"
 import { isFilePopup } from "./file-display"
-import { fileLinkChip } from "./file-link"
 
 /* ---------- 工具名解析：`{agent}_{tool}` → 子Agent 名 + 短工具名 ---------- */
 
@@ -104,14 +103,10 @@ function isFileCardTool(name: string, meta?: NonNullable<ToolInfo["card"]>): boo
   return !!(meta ?? metaOf(name))?.file
 }
 
-/** 弹窗查看模式下文件卡产物块抑制：read/write 的 file/image 产物块与文件链接重复，收敛为链接不重复渲染。 */
-export function fileBlocksSuppressed(name: string | undefined): boolean {
+/** 弹窗查看模式下文件工具产物块改为文件链接：参数区与输出不受影响，仅下方产物文件卡（file 块）
+ *  在「嵌入内容卡 ↔ 链接弹窗」间切换（DESIGN「文件展示方式」）。 */
+export function fileBlocksAsLinks(name: string | undefined): boolean {
   return !!name && isFilePopup() && isFileCardTool(name)
-}
-
-/** 弹窗查看模式下文件内容输出抑制（card.fileOutput + 已带解析后文件引用，如 read 成功读取）：输出即文件内容，收敛为链接。 */
-export function fileOutputSuppressed(name: string, file: unknown): boolean {
-  return isFilePopup() && !!file && !!metaOf(name)?.fileOutput
 }
 
 /* ---------- 卡片头部（图标 + 工具名 + 标题参数后缀，结构化灵活展示） ---------- */
@@ -254,10 +249,9 @@ function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["
 /** 参数区渲染：按服务端 card 声明——"none" 不展示；"code" 渲染 codeField 为代码块；"edits" 渲染 codeField 数组为旧/新对比块
  *  （其余参数键值行/JSON 附注；edit 工具无声明时按参数形态内建兜底同样渲染对比块）；"kv" 强制键值行；"json" 强制完整 JSON 高亮（不省略标题参数）；
  *  缺省自适应（扁平标量→键值行，嵌套→JSON 高亮）。
- *  弹窗查看模式 + 文件卡声明（card.file）：内容类参数收敛为文件链接 chip（file 优先用结果解析后的真实路径——
- *  会话相对与项目绝对路径；write 类 fileInline 携带待写入内容供弹窗内联渲染），其余标量参数键值行附注。
- *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长参数自动折叠。返回 null 表示无参数区。 */
-function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["card"]>, file?: Message["file"]): HTMLElement | null {
+ *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长参数自动折叠。返回 null 表示无参数区。
+ *  文件展示方式（嵌入/弹窗）不影响参数区与输出——只作用于下方产物文件卡（见 fileBlocksAsLinks）。 */
+function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["card"]>): HTMLElement | null {
   let obj: Record<string, unknown> | null = null
   try {
     obj = JSON.parse(args) as Record<string, unknown>
@@ -266,24 +260,6 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
   }
   if (meta?.args === "none") return null
   if (obj && !Object.keys(obj).length) return null
-  if (isFilePopup() && meta?.file && obj && typeof obj[meta.file] === "string" && obj[meta.file]) {
-    const rawPath = String(obj[meta.file])
-    const chipPath = file?.path ?? rawPath
-    const chipName = file?.name ?? rawPath.replace(/\\/g, "/").split("/").pop()!
-    // fileInline（write）：codeField 参数即文件全文，弹窗内联渲染（审批前落盘取数会看到旧内容）
-    const inlineContent =
-      meta.fileInline && meta.codeField && typeof obj[meta.codeField] === "string" ? (obj[meta.codeField] as string) : undefined
-    const wrap = el("div")
-    wrap.appendChild(fileLinkChip({ name: chipName, path: chipPath, content: inlineContent }))
-    const rest: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(obj)) {
-      if (k === meta.file || k === meta.codeField || meta.titleParams?.includes(k)) continue
-      rest[k] = v
-    }
-    if (Object.keys(rest).length && Object.values(rest).every(isScalar)) wrap.appendChild(kvArgsBlock(rest))
-    else if (Object.keys(rest).length) wrap.appendChild(el("div", "tool-rest", JSON.stringify(rest, null, 2)))
-    return wrap
-  }
   // 标题参数是否已入头部：是则参数区省略该键；否则（超长降级）以参数气泡形式在参数区展示全文
   const titleInHead = obj ? titleSuffixInfo(name, obj) !== null : false
   if (meta?.args === "code" && obj && meta.codeField) {
@@ -598,15 +574,14 @@ export function toolCard(msg: Message): HTMLElement {
   const meta = metaOf(msg.name ?? "")
   bubble.appendChild(toolHead("call", msg.name ?? "tool", msg.arguments ?? null))
   if (msg.arguments && Object.keys(msg.arguments).length) {
-    const ab = isAgentRun(msg.name ?? "") ? agentRunArgsBlock(JSON.stringify(msg.arguments, null, 2)) : toolArgsBlock(msg.name ?? "", JSON.stringify(msg.arguments, null, 2), meta, msg.file)
+    const ab = isAgentRun(msg.name ?? "") ? agentRunArgsBlock(JSON.stringify(msg.arguments, null, 2)) : toolArgsBlock(msg.name ?? "", JSON.stringify(msg.arguments, null, 2), meta)
     if (ab) bubble.appendChild(ab)
   }
   if (msg.content) {
     // agent_run 工具（携带 sessionRun 存档；旧版 agent_call 的 subAgentRun 兼容）：最终返回为 markdown 输出，直接渲染（与助手消息同构）
     if (msg.sessionRun || msg.subAgentRun) {
       bubble.appendChild(markdownBlock(msg.content))
-    } else if (!fileOutputSuppressed(msg.name ?? "", msg.file)) {
-      // 文件内容输出（card.fileOutput，如 read 成功读取）在弹窗查看模式下收敛为文件链接，不再直显
+    } else {
       bubble.appendChild(toolOutput(msg.content))
     }
   }

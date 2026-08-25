@@ -4,7 +4,7 @@ import { spawn } from "node:child_process"
 import { lookup } from "node:dns/promises"
 import { createServer, connect, type AddressInfo } from "node:net"
 import type { ContentBlock, DiagramFormat, FileEntry, TodoItem, ToolSchema } from "@gebai/sdk"
-import type { ChoiceOption, ResultFileRef, Tool, ToolContext, ToolResult } from "./types"
+import type { ChoiceOption, Tool, ToolContext, ToolResult } from "./types"
 import { truncatedPath, truncatedLogicalPath, sessionPath } from "./paths"
 import { randomUUID, createHash } from "node:crypto"
 import { isBinaryMode } from "./config"
@@ -194,12 +194,12 @@ function mimeFor(path: string): string | undefined {
   return mimes[ext]
 }
 
-/** 解析后绝对路径 → 前端文件引用（ResultFileRef，DESIGN「文件链接弹窗查看」）：在真实会话 `tmp/` 内
- *  → scope=session（`tmp/` 逻辑路径，files 接口直接解析）；其余（code 项目文件/本地绝对路径）→ scope=fs
- *  （绝对路径，files/preview 按用户隔离边界解析）。归属判定用会话 tmp 真实绝对路径（sessionPath 拼接——
- *  项目绑定工具的 workdir 是项目根，不能作判定依据）；会话 id 异常时退回 workdir 兜底（文件引用是展示
- *  辅助，绝不因基准缺失让工具执行失败）。 */
-export function fileRefFor(absPath: string, ctx: ToolContext): ResultFileRef {
+/** 解析后绝对路径 → 前端可解析的产物路径（DESIGN「文件链接弹窗查看」）：在真实会话 `tmp/` 内
+ *  → `tmp/` 逻辑路径（files 接口直接解析）；其余（code 项目文件/本地绝对路径）→ 绝对路径（files/preview
+ *  按用户隔离边界解析）。归属判定用会话 tmp 真实绝对路径（sessionPath 拼接——项目绑定工具的 workdir
+ *  是项目根，不能作判定依据）；会话 id 异常时退回 workdir 兜底（路径解析是展示辅助，绝不因基准缺失
+ *  让工具执行失败）。 */
+export function previewLogicalPath(absPath: string, ctx: ToolContext): string {
   let sessionTmp = ctx.workdir
   try {
     sessionTmp = join(sessionPath(ctx.home, ctx.user, ctx.sessionId), "tmp")
@@ -207,10 +207,8 @@ export function fileRefFor(absPath: string, ctx: ToolContext): ResultFileRef {
     /* 会话 id 异常：保持 workdir 兜底 */
   }
   const rel = relative(sessionTmp, absPath)
-  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
-    return { path: `tmp/${rel.split(sep).join("/")}`, scope: "session", name: baseName(absPath) || absPath }
-  }
-  return { path: absPath, scope: "fs", name: baseName(absPath) || absPath }
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return `tmp/${rel.split(sep).join("/")}`
+  return absPath
 }
 
 /** Build artifact content blocks from a logical path + optional content (for diagrams). */
@@ -317,7 +315,7 @@ export const readTool: Tool = {
   name: "read",
   description:
     "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
-  card: { titleParams: ["path"], file: "path", fileOutput: true },
+  card: { titleParams: ["path"], file: "path" },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
     offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
@@ -345,10 +343,9 @@ export const readTool: Tool = {
     const truncated = await truncate(body, "read", ctx)
     // 登记已读（write 防误覆盖守卫依据；读取失败抛错不登记）
     ctx.fileGuard?.markRead(path)
-    const file = fileRefFor(path, ctx)
     // 产物块路径用解析后的可预览路径（会话 tmp/ 逻辑路径或绝对路径——原始参数路径在项目工具下无法由 files 接口解析）
-    const blocks = artifactBlocks(file.path, content)
-    return { ...truncated, blocks, file }
+    const blocks = artifactBlocks(previewLogicalPath(path, ctx), content)
+    return { ...truncated, blocks }
   },
 }
 
@@ -356,7 +353,7 @@ export const writeTool: Tool = {
   name: "write",
   description:
     "写入文件（整体覆盖）。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。",
-  card: { titleParams: ["path"], args: "code", codeField: "content", file: "path", fileInline: true },
+  card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
   parameters: schema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
@@ -382,9 +379,8 @@ export const writeTool: Tool = {
     }
     await ctx.writeFile(path, String(args.content ?? ""))
     ctx.fileGuard?.markRead(path)
-    const file = fileRefFor(path, ctx)
-    const blocks = artifactBlocks(file.path, String(args.content ?? ""))
-    return { output: `已写入 ${args.path}（${String(args.content).length} 字符）`, blocks, file }
+    const blocks = artifactBlocks(previewLogicalPath(path, ctx), String(args.content ?? ""))
+    return { output: `已写入 ${args.path}（${String(args.content).length} 字符）`, blocks }
   },
 }
 
@@ -1517,7 +1513,9 @@ export const editTool: Tool = {
     await ctx.writeFile(path, content)
     // 修改后内容即已掌握（模型无需重读验证），登记已读
     ctx.fileGuard?.markRead(path)
-    return { output: `已对 ${args.path} 应用 ${edits.length} 处修改：${applied.join("；")}`, file: fileRefFor(path, ctx) }
+    // 产物块（与 read/write 同款）：修改后的文件内容卡（弹窗查看模式收敛为文件链接）
+    const blocks = artifactBlocks(previewLogicalPath(path, ctx), content)
+    return { output: `已对 ${args.path} 应用 ${edits.length} 处修改：${applied.join("；")}`, blocks }
   },
 }
 
@@ -1627,7 +1625,9 @@ export const patchTool: Tool = {
     await ctx.writeFile(abs, r.result)
     // 写入内容即已掌握，登记已读（write 防误覆盖守卫依据）
     ctx.fileGuard?.markRead(abs)
-    return { output: `patch 已写入 ${path}：${describeAppliedPatch(r.applied)}`, file: fileRefFor(abs, ctx) }
+    // 产物块（与 read/write 同款）：补丁应用后的文件内容卡（弹窗查看模式收敛为文件链接）
+    const blocks = artifactBlocks(previewLogicalPath(abs, ctx), r.result)
+    return { output: `patch 已写入 ${path}：${describeAppliedPatch(r.applied)}`, blocks }
   },
 }
 

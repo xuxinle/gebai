@@ -2372,16 +2372,13 @@ function cleanup(home: string) {
   rmSync(home, { recursive: true, force: true })
 }
 
-describe("文件引用（ResultFileRef：read/write/edit/patch 附带解析后真实路径，前端文件链接弹窗查看用）", () => {
-  test("read：会话内文件 → scope=session（tmp/ 逻辑路径），产物块路径同步", async () => {
+describe("产物块解析路径（read/write 产物 file 块携带可预览路径——前端「文件展示方式」弹窗查看用）", () => {
+  test("read：会话内文件 → tmp/ 逻辑路径（files 接口直接解析）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
     try {
       const c = ctx(home)
       await writeTool.execute({ path: "src/a.ts", content: "const a = 1\n" }, c)
       const r = await readTool.execute({ path: "src/a.ts" }, c)
-      expect(r.file?.scope).toBe("session")
-      expect(r.file?.path).toBe("tmp/src/a.ts")
-      expect(r.file?.name).toBe("a.ts")
       // 产物块路径用解析后的逻辑路径（原始参数路径在项目工具下无法由 files 接口解析）
       expect((r.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/src/a.ts")
     } finally {
@@ -2389,7 +2386,7 @@ describe("文件引用（ResultFileRef：read/write/edit/patch 附带解析后�
     }
   })
 
-  test("read 本地模式绝对路径（项目文件）→ scope=fs（files/preview 按用户隔离解析）", async () => {
+  test("read 本地模式绝对路径（项目文件）→ 产物块携带绝对路径（files/preview 按用户隔离解析）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
     try {
       const c = ctx(home)
@@ -2397,34 +2394,46 @@ describe("文件引用（ResultFileRef：read/write/edit/patch 附带解析后�
       mkdirSync(dirname(abs), { recursive: true })
       writeFileSync(abs, "export const b = 2\n")
       const r = await readTool.execute({ path: abs }, c)
-      expect(r.file?.scope).toBe("fs")
-      expect(r.file?.path).toBe(abs)
+      expect((r.blocks as Array<{ path?: string }>)[0]?.path).toBe(abs)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
   })
 
-  test("write/edit/patch：成功执行后附带文件引用（会话内 scope=session）", async () => {
+  test("write 产物块同样携带解析后路径", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
     try {
       const c = ctx(home)
       const w = await writeTool.execute({ path: "w.ts", content: "a\nb\nc\n" }, c)
-      expect(w.file).toEqual({ path: "tmp/w.ts", scope: "session", name: "w.ts" })
-      const e = await editTool.execute({ path: "w.ts", edits: [{ oldString: "b", newString: "B" }] }, c)
-      expect(e.file?.path).toBe("tmp/w.ts")
-      const p = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-a\n+A\n" }, c)
-      expect(p.file?.path).toBe("tmp/w.ts")
+      expect((w.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
   })
 
-  test("拒绝/失败路径不附带文件引用（守卫拦截为普通输出返回）", async () => {
+  test("edit/patch 产物块：修改后的文件内容卡（与 read/write 同款，弹窗查看模式收敛为文件链接）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
+    try {
+      const c = ctx(home)
+      await writeTool.execute({ path: "w.ts", content: "a\nb\nc\n" }, c)
+      const e = await editTool.execute({ path: "w.ts", edits: [{ oldString: "b", newString: "B" }] }, c)
+      expect((e.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
+      const p2 = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-a\n+A\n" }, c)
+      expect((p2.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
+      // dryRun 不落盘：无产物块
+      const dry = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-A\n+X\n", dryRun: true }, c)
+      expect(dry.blocks).toBeUndefined()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("拒绝/失败路径无产物块（守卫拦截为普通输出返回）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
     try {
       const c = ctx(home)
       await writeTool.execute({ path: "g.ts", content: "x\n" }, c)
-      // 防盲覆盖：已存在但本会话未读过 → write 拒绝（无 file；引擎注入的会话级已读追踪）。
+      // 防盲覆盖：已存在但本会话未读过 → write 拒绝（引擎注入的会话级已读追踪）。
       // 用绝对路径指向 c 会话内已写文件（c2 相对路径基准是自己的会话 tmp，文件不存在不触发守卫）
       const absG = resolve(join(sessionPath(home, "default", SID), "tmp", "g.ts"))
       const c2 = ctx(home, "abcdef02abcdef02abcdef02abcdef02")
@@ -2432,7 +2441,7 @@ describe("文件引用（ResultFileRef：read/write/edit/patch 附带解析后�
       c2.fileGuard = { markRead: (p) => readSet.add(p), hasRead: (p) => readSet.has(p) }
       const denied = await writeTool.execute({ path: absG, content: "y\n" }, c2)
       expect(denied.output).toContain("拒绝")
-      expect(denied.file).toBeUndefined()
+      expect(denied.blocks).toBeUndefined()
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
