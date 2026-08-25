@@ -50,8 +50,25 @@ function textBody(lang: string, text: string): HTMLElement {
   return pre
 }
 
-/** 工具栏（hover 渐显）：复制 / 原文件查看（弹窗）/ 下载。enableCopy 可后置回填（按需加载完成后）。 */
-function fileToolbar(opts: { copy?: () => string; source?: () => void; download?: { sessionId: string; path: string; name: string } }): {
+/** 下载锚点（文件卡头部/文件链接 chip/弹窗共用）：经 files/preview 附件形式获取
+ *  （会话相对与项目绝对路径统一入口），桌面 WebView 形态提示下载位置；stopPropagation 防触发
+ *  外层可点击容器（chip 弹窗）。 */
+export function downloadAnchor(sessionId: string, path: string, name: string): HTMLAnchorElement {
+  const a = document.createElement("a")
+  a.className = "file-dl-icon"
+  a.title = "下载"
+  a.innerHTML = ICON_DOWNLOAD
+  a.href = filesPreview(sessionId, path, true)
+  a.download = name
+  a.onclick = (e) => {
+    e.stopPropagation()
+    desktopDownloadHint(name)
+  }
+  return a
+}
+
+/** 工具栏（hover 渐显）：复制 / 原文件查看（弹窗）。enableCopy 可后置回填（按需加载完成后）。 */
+function fileToolbar(opts: { copy?: () => string; source?: () => void }): {
   el: HTMLElement
   enableCopy: (provider: () => string) => void
 } {
@@ -76,18 +93,6 @@ function fileToolbar(opts: { copy?: () => string; source?: () => void; download?
     btn.onclick = opts.source
     bar.appendChild(btn)
   }
-  if (opts.download) {
-    const dl = opts.download
-    const a = document.createElement("a")
-    a.className = "icon-btn file-dl-icon"
-    a.title = "下载"
-    a.innerHTML = ICON_DOWNLOAD
-    // 经 files/preview 附件形式获取（会话相对与项目绝对路径统一入口）
-    a.href = filesPreview(dl.sessionId, dl.path, true)
-    a.download = dl.name
-    a.onclick = () => desktopDownloadHint(dl.name)
-    bar.appendChild(a)
-  }
   return {
     el: bar,
     enableCopy: (provider) => {
@@ -106,25 +111,33 @@ function fileToolbar(opts: { copy?: () => string; source?: () => void; download?
   }
 }
 
-/** 文件卡容器：头部（标题 + 徽标 + 工具栏）+ 内容区。 */
-function fileCard(title: string, badge: string | undefined, toolbar: HTMLElement, body: HTMLElement): HTMLElement {
+/** 文件卡容器：头部（标题 + 徽标 + hover 工具栏 + **常驻下载**）+ 内容区。 */
+function fileCard(title: string, badge: string | undefined, toolbar: HTMLElement, body: HTMLElement, persistentDl?: HTMLElement): HTMLElement {
   const card = el("div", "file-card")
   const head = el("div", "file-head")
   const titleEl = el("span", "file-title", title)
   head.appendChild(titleEl)
   if (badge) head.appendChild(el("span", "file-badge", badge))
   head.appendChild(toolbar)
+  if (persistentDl) head.appendChild(persistentDl)
   card.append(head, body)
   return card
 }
 
-/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 关闭 + 内容区，Esc/点击遮罩关闭。 */
-function previewShell(name: string): { overlay: HTMLElement; body: HTMLElement } {
+/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 下载（可选，常驻标题栏）+ 关闭 + 内容区，
+ *  Esc/点击遮罩关闭。 */
+function previewShell(name: string, download?: { sessionId: string; path: string }): { overlay: HTMLElement; body: HTMLElement } {
   const overlay = el("div", "preview-overlay")
   const card = el("div", "preview-card")
   const head = el("div", "preview-head")
   const closeBtn = el("button", "preview-close", "✕")
-  head.append(el("span", "preview-title", name), closeBtn)
+  head.appendChild(el("span", "preview-title", name))
+  if (download) {
+    const dl = downloadAnchor(download.sessionId, download.path, name)
+    dl.classList.add("preview-dl")
+    head.appendChild(dl)
+  }
+  head.appendChild(closeBtn)
   const body = el("div", "preview-body")
   card.append(head, body)
   overlay.appendChild(card)
@@ -169,7 +182,15 @@ function whenVisible(target: HTMLElement, load: () => void): void {
   io.observe(target)
 }
 
-/** code 内容块 → 文件内容卡：markdown 语言渲染 md、其余语法高亮；path 附带时提供原文件/下载工具栏。 */
+/** 取数失败文案：404 = 历史卡片指向的文件已被删除/清理（如 agent 测试后清理临时文件），
+ *  不再引导下载（同样 404）；其余错误附下载引导（网络抖动等，文件可能仍在）。 */
+function fetchFailText(err: unknown, where: "card" | "popup"): string {
+  if ((err as Error).message.includes("404")) return "文件已不存在（可能已被删除或清理）。"
+  const hint = where === "card" ? "可点击卡片头部「下载」获取文件。" : "可点击标题栏「下载」获取文件。"
+  return `${where === "card" ? "内容加载失败" : "无法预览该文件"}: ${(err as Error).message}。${hint}`
+}
+
+/** code 内容块 → 文件内容卡：markdown 语言渲染 md、其余语法高亮；path 附带时提供原文件查看与常驻下载。 */
 export function renderCodeCard(container: HTMLElement, b: Extract<ContentBlock, { type: "code" }>, sessionId: string): void {
   const lang = b.language ?? ""
   const title = b.name || (lang && lang !== "markdown" ? `${lang} 代码` : "文本")
@@ -179,9 +200,10 @@ export function renderCodeCard(container: HTMLElement, b: Extract<ContentBlock, 
   const toolbar = fileToolbar({
     copy: () => b.text,
     source: hasPath ? () => openFilePreview(sessionId, b.name ?? "file", b.path!, mimeFor(b.name ?? "", "code")) : undefined,
-    download: b.path ? { sessionId, path: b.path, name: b.name ?? "file" } : undefined,
   })
-  container.appendChild(fileCard(title, lang && lang !== "markdown" ? lang : undefined, toolbar.el, body))
+  // 下载常驻文件卡头部（不随 hover 工具栏显隐）
+  const dl = b.path ? downloadAnchor(sessionId, b.path, b.name ?? "file") : undefined
+  container.appendChild(fileCard(title, lang && lang !== "markdown" ? lang : undefined, toolbar.el, body, dl))
 }
 
 /** file 内容块 → 文件内容卡：按 mime/扩展分派，内容进入视口后按需加载。 */
@@ -192,12 +214,11 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
   const body = el("div", "file-body")
   const toolbar = fileToolbar({
     source: () => openFilePreview(sessionId, name, b.path, mime),
-    download: { sessionId, path: b.path, name },
   })
-  const card = fileCard(name, kindBadge(kind), toolbar.el, body)
+  const card = fileCard(name, kindBadge(kind), toolbar.el, body, downloadAnchor(sessionId, b.path, name))
   container.appendChild(card)
 
-  const fail = (err: unknown) => body.appendChild(blockText(`内容加载失败：${(err as Error).message}。可点击工具栏「下载」获取文件。`))
+  const fail = (err: unknown) => body.appendChild(blockText(fetchFailText(err, "card")))
   if (kind === "image") {
     const img = document.createElement("img")
     img.src = filesPreview(sessionId, b.path)
@@ -221,8 +242,8 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
   whenVisible(card, () => {
     if (body.firstChild && (body.firstChild as HTMLElement).className === "file-pending") body.textContent = ""
     if (kind === "binary") {
-      // 二进制无内联形态：占位提示（下载入口在工具栏常驻）
-      body.appendChild(el("div", "file-fallback", "📦 该类型无内联预览，可点击工具栏「下载」获取文件"))
+      // 二进制无内联形态：占位提示（下载入口在卡片头部常驻）
+      body.appendChild(el("div", "file-fallback", "📦 该类型无内联预览，可点击卡片头部「下载」获取文件"))
       return
     }
     void fetch(filesPreview(sessionId, b.path))
@@ -255,10 +276,11 @@ function mimeFor(name: string, _origin: string): string {
   return "text/plain"
 }
 
-/** 原文件查看弹窗（工具栏「原文件」/ 文件链接点击入口）：图片直显 / PDF 内嵌 / md 渲染 / html 沙箱 iframe / 文本高亮。
+/** 原文件查看弹窗（工具栏「原文件」/ 文件链接点击入口）：标题栏含下载（经 files/preview 附件形式），
+ *  内容按类型分派——图片直显 / PDF 内嵌 / md 渲染 / html 沙箱 iframe / 文本高亮。
  *  取数统一经 files/preview（会话相对 tmp/ 路径与项目绝对路径均支持，服务端按用户隔离边界解析）。 */
 export function openFilePreview(sessionId: string, name: string, path: string, mime?: string): void {
-  const { body } = previewShell(name)
+  const { body } = previewShell(name, { sessionId, path })
 
   const kind = fileKind(name, mime ?? "")
   if (kind === "image") {
@@ -294,21 +316,6 @@ export function openFilePreview(sessionId: string, name: string, path: string, m
       body.appendChild(pre)
     })
     .catch((err) => {
-      body.appendChild(blockText(`无法预览该文件: ${(err as Error).message}。可点击「下载」查看。`))
+      body.appendChild(blockText(fetchFailText(err, "popup")))
     })
-}
-
-/** 内联内容弹窗（文件链接 chip 的 write 类入口——待写入内容直接渲染不取数）：md 按语言渲染、其余语法高亮。 */
-export function openTextPreview(name: string, text: string, lang?: string): void {
-  const { body } = previewShell(name)
-  const kind = fileKind(name, "")
-  const useLang = lang ?? langForFile(name, "")
-  if (kind === "markdown" || useLang === "markdown") {
-    body.appendChild(markdownBlock(text))
-    return
-  }
-  const pre = el("pre")
-  pre.className = "preview-code"
-  pre.appendChild(highlightedCode(useLang, text))
-  body.appendChild(pre)
 }

@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, dirname } from "node:path"
+import { join, dirname, resolve } from "node:path"
 import type { ToolContext } from "../core/types"
 import { def as codeDef, _resetSessionProjectRootsForTest } from "./code"
+import { SessionStore } from "../core/store"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   const tmp = join(home, "users", "default", "sessions", "s1", "tmp")
@@ -281,5 +282,63 @@ describe("code sub-agent", () => {
     const w = await codeDef.tools!.write.execute({ path: "out.txt", content: "hi" }, c)
     expect(w.output).toContain("已写入")
     rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("项目相对路径的产物块（文件卡/弹窗取数链路，DESIGN「文件预览」）", () => {
+  const SID = "abcdef01abcdef01abcdef01abcdef01"
+
+  test("粘性项目根（project use 设定当前项目）：不带 project 的相对路径 → 产物块携带项目内绝对路径，preview 端点可解析", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sticky-"))
+    try {
+      _resetSessionProjectRootsForTest()
+      const c = ctx(home, { sessionId: SID })
+      const projRoot = join(home, "myproj")
+      mkdirSync(join(projRoot, "src"), { recursive: true })
+      writeFileSync(join(projRoot, "src", "a.ts"), "export const a = 1\n")
+      // project 工具设定会话默认项目根（路径形态自由项目）——此后文件工具不必每次带 project
+      const use = await codeDef.tools!.project.execute({ action: "use", project: projRoot }, c)
+      expect(use.output).toContain("已设定会话默认项目根")
+      // read 相对路径（无 project 参数）：产物块路径为项目内绝对路径
+      const r = await codeDef.tools!.read.execute({ path: "src/a.ts" }, c)
+      const blockPath = (r.blocks as Array<{ path?: string }>)[0]?.path as string
+      expect(blockPath).toBe(join(projRoot, "src", "a.ts"))
+      // write/edit 同基准：产物块同样为项目内绝对路径
+      const w = await codeDef.tools!.write.execute({ path: "src/b.ts", content: "const b = 2\n" }, c)
+      expect((w.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "b.ts"))
+      const e = await codeDef.tools!.edit.execute({ path: "src/b.ts", edits: [{ oldString: "b = 2", newString: "b = 3" }] }, c)
+      expect((e.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "b.ts"))
+      // 块路径可由 files/preview 端点解析（本地模式绝对路径放行）
+      const store = new SessionStore({ home })
+      expect(store.resolvePreviewFile(SID, "default", blockPath!, false)).toBe(blockPath)
+    } finally {
+      _resetSessionProjectRootsForTest()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("沙箱模式：项目根映射进用户数据目录后 preview 边界放行；越界根被拒（工具与 preview 同一边界）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sticky-sb-"))
+    try {
+      _resetSessionProjectRootsForTest()
+      const c = ctx(home, { sessionId: SID, sandboxed: true })
+      // 沙箱下路径形态项目根映射进 users/{user}/（resolveInSandbox）
+      const mapped = join(home, "users", "default", "proj")
+      mkdirSync(join(mapped, "src"), { recursive: true })
+      writeFileSync(join(mapped, "src", "a.ts"), "x\n")
+      const use = await codeDef.tools!.project.execute({ action: "use", project: "./proj" }, c)
+      expect(use.output).toContain("已设定会话默认项目根")
+      const r = await codeDef.tools!.read.execute({ path: "src/a.ts" }, c)
+      const blockPath = (r.blocks as Array<{ path?: string }>)[0]?.path as string
+      expect(blockPath).toBe(join(mapped, "src", "a.ts"))
+      // preview 边界：用户数据目录内放行
+      const store = new SessionStore({ home })
+      expect(store.resolvePreviewFile(SID, "default", blockPath!, true)).toBe(blockPath)
+      // 沙箱外绝对路径（工具本身就够不到）preview 同样拒绝——边界与工具能力一致
+      expect(() => store.resolvePreviewFile(SID, "default", resolve(tmpdir(), "outside.ts"), true)).toThrow()
+    } finally {
+      _resetSessionProjectRootsForTest()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

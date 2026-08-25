@@ -319,6 +319,22 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
       globalThis.fetch = origFetch
     }
   })
+
+  test("file 块 404（历史卡片指向已删除文件，如 agent 测试后清理）：明确提示文件已不存在，不引导下载", async () => {
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch
+    try {
+      const container = makeMockEl("div")
+      renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/gone.ts", name: "gone.ts", mime: "text/plain" }, "s1")
+      const card = container.children[0] as unknown as MockElWithQuery
+      await new Promise((r) => setTimeout(r, 10))
+      expect(card.textContent).toContain("文件已不存在")
+      expect(card.textContent).toContain("已被删除或清理")
+      expect(card.textContent).not.toContain("下载")
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
 })
 
 describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执行折叠容器）", () => {
@@ -961,13 +977,12 @@ function setFileDisplayStub(v: "inline" | "popup") {
     removeItem: () => {},
   }
 }
-
-describe("文件展示方式（弹窗查看：card.file 文件卡收敛为文件链接）", () => {
+describe("文件展示方式（弹窗查看：文件工具产物 file 块收敛为文件链接，参数区与输出不受影响）", () => {
   afterEach(() => setFileDisplayStub("inline"))
 
-  test("read 弹窗模式：参数区文件链接 chip（解析后路径优先）+ 其余参数键值行，输出收敛不直显", () => {
+  test("read 弹窗模式：参数/输出照常渲染，产物 file 块 → 文件链接 chip（路径为解析后块路径）", () => {
     setFileDisplayStub("popup")
-    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path", fileOutput: true }]])
+    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path" }]])
     const bubble = toolBubbleFor(
       {
         id: "tp1",
@@ -975,119 +990,97 @@ describe("文件展示方式（弹窗查看：card.file 文件卡收敛为文件
         name: "read",
         content: "const a = 1\nconst b = 2",
         arguments: { path: "src/a.ts", offset: 2 },
-        file: { path: "tmp/src/a.ts", scope: "session", name: "a.ts" },
+        blocks: [{ type: "file", path: "tmp/src/a.ts", name: "a.ts", mime: "text/plain" }],
         createdAt: 0,
       },
       "",
     )
-    const chip = bubble.querySelector("div.file-link") as unknown as { dataset: Record<string, string>; textContent: string }
-    expect(chip).not.toBeNull()
-    // 解析后路径优先（msg.file），文件名取自引用
-    expect(chip.dataset.path).toBe("tmp/src/a.ts")
-    expect(chip.textContent).toContain("a.ts")
-    // 其余标量参数仍键值行展示（offset）
+    // 参数区不受影响：offset 键值行照常、头部路径后缀照常
     const rows = bubble.querySelectorAll("div.tool-kv-row")
     expect(rows.length).toBe(1)
     expect(rows[0]?.textContent).toContain("offset")
-    // fileOutput 输出（文件内容）收敛：不再直显输出块
-    expect(bubble.querySelector("pre.tool-code")).toBeNull()
-    expect(bubble.querySelector("details.tool-out")).toBeNull()
+    // 输出不受影响：文件内容文本照常直显
+    expect(bubble.textContent).toContain("const a = 1")
+    // 产物 file 块不在气泡内——由 appendMsg 层分流（此处断言气泡内无文件内容卡）
+    expect(bubble.querySelector("div.file-card")).toBeNull()
   })
 
-  test("read 弹窗模式无 file（失败/拒绝）：输出文本照常展示（错误信息不吞）", () => {
+  test("edit 弹窗模式：旧/新对比块照常渲染（参数区不受影响）", () => {
     setFileDisplayStub("popup")
-    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path", fileOutput: true }]])
+    __setToolCardMetaForTest([["edit", { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" }]])
     const bubble = toolBubbleFor(
-      { id: "tp2", role: "tool", name: "read", content: "read 失败：文件不存在", arguments: { path: "x.ts" }, createdAt: 0 },
+      { id: "tp2", role: "tool", name: "edit", content: "已对 a.ts 应用 1 处修改", arguments: { path: "a.ts", edits: [{ oldString: "foo", newString: "bar" }] }, createdAt: 0 },
       "",
     )
-    expect(bubble.querySelector("div.file-link")).not.toBeNull()
-    expect(bubble.textContent).toContain("read 失败")
+    expect(bubble.querySelector("pre.tool-edit-old")).not.toBeNull()
+    expect(bubble.textContent).toContain("已对 a.ts 应用")
+    expect(bubble.querySelector("div.file-link")).toBeNull()
   })
 
-  test("write 弹窗模式：chip 内联待写入内容（fileInline，审批审查参数内容本身），无代码块直显", () => {
+  test("弹窗模式分流（fileBlocksAsLinks）：文件工具 true，未声明/关闭模式 false", async () => {
+    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path" }]])
+    const { fileBlocksAsLinks } = await import("./tool-cards")
     setFileDisplayStub("popup")
-    __setToolCardMetaForTest([["write", { titleParams: ["path"], args: "code", codeField: "content", file: "path", fileInline: true }]])
-    const bubble = toolBubbleFor(
-      { id: "tp3", role: "tool", name: "write", content: "已写入 a.ts（12 字符）", arguments: { path: "a.ts", content: "const x = 1\n" }, createdAt: 0 },
-      "",
-    )
-    const chip = bubble.querySelector("div.file-link") as unknown as { dataset: Record<string, string> }
-    expect(chip).not.toBeNull()
-    expect(chip.dataset.inline).toBe("1")
-    // write 输出为摘要非文件内容（无 fileOutput）：照常展示
-    expect(bubble.textContent).toContain("已写入")
-  })
-
-  test("edit 弹窗模式：不渲染旧/新对比块，收敛为文件链接；直接展示模式对比块照常", () => {
-    const meta: Array<[string, NonNullable<ToolInfo["card"]>]> = [["edit", { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" }]]
-    const args = { path: "src/a.ts", edits: [{ oldString: "foo", newString: "bar" }] }
-    const mk = () => toolBubbleFor({ id: "tp4", role: "tool", name: "edit", content: "", arguments: args, createdAt: 0 }, "")
-    setFileDisplayStub("popup")
-    __setToolCardMetaForTest(meta)
-    const popupBubble = mk()
-    expect(popupBubble.querySelector("div.file-link")).not.toBeNull()
-    expect(popupBubble.querySelector("pre.tool-edit-old")).toBeNull()
+    expect(fileBlocksAsLinks("read")).toBe(true)
+    expect(fileBlocksAsLinks(undefined)).toBe(false)
+    expect(fileBlocksAsLinks("show")).toBe(false) // 非文件卡工具（show 为主动展示）不受影响
     setFileDisplayStub("inline")
-    __setToolCardMetaForTest(meta)
-    const inlineBubble = mk()
-    expect(inlineBubble.querySelector("div.file-link")).toBeNull()
-    expect(inlineBubble.querySelector("pre.tool-edit-old")).not.toBeNull()
+    expect(fileBlocksAsLinks("read")).toBe(false)
   })
 
-  test("产物块抑制（fileBlocksSuppressed）：弹窗模式文件工具的 file 块不再渲染（与 chip 重复）", async () => {
+  test("appendMsg 产物块分流：弹窗模式 file 块 → chip（图片等其余块照常），嵌入模式 → 文件内容卡", async () => {
+    const { appendMsg } = await import("./messages")
+    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path" }]])
+    const blocks = [
+      { type: "file", path: "tmp/src/a.ts", name: "a.ts", mime: "text/plain" },
+    ] as never
+    const mk = () => appendMsg({ id: "tp3", role: "tool", name: "read", content: "ok", arguments: { path: "src/a.ts" }, blocks, createdAt: 0 })
     setFileDisplayStub("popup")
-    __setToolCardMetaForTest([["read", { titleParams: ["path"], file: "path", fileOutput: true }]])
+    const popupWrap = mk()
+    const chip = popupWrap.querySelector(".file-link") as unknown as { dataset: Record<string, string>; textContent: string }
+    expect(chip).not.toBeNull()
+    expect(chip.dataset.path).toBe("tmp/src/a.ts")
+    expect(chip.textContent).toContain("a.ts")
+    expect(popupWrap.querySelector("div.file-card")).toBeNull()
+    setFileDisplayStub("inline")
+    const inlineWrap = mk()
+    expect(inlineWrap.querySelector("div.file-card")).not.toBeNull()
+    expect(inlineWrap.querySelector(".file-link")).toBeNull()
+  })
+
+  test("renderBlocksLinked：file 块 → chip，image 块照常内联渲染", async () => {
+    const { renderBlocksLinked } = await import("./file-link")
     const container = makeMockEl("div")
-    renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/a.js", name: "a.js", mime: "text/javascript" }, "s1")
-    // 直接 renderBlock 不做抑制（抑制在 appendMsg 层）：验证导出判定
-    const { fileBlocksSuppressed } = await import("./tool-cards")
-    expect(fileBlocksSuppressed("read")).toBe(true)
-    expect(fileBlocksSuppressed(undefined)).toBe(false)
-    setFileDisplayStub("inline")
-    expect(fileBlocksSuppressed("read")).toBe(false)
-  })
-
-  test("appendToolResult：结果到达升级 chip 为解析后真实路径（项目文件），fileOutput 输出收敛", () => {
-    setFileDisplayStub("popup")
-    __setToolCardMetaForTest([["code_read", { titleParams: ["path"], file: "path", fileOutput: true }]])
-    // 实时链路：调用卡（→ 文本渲染出 chip），结果到达升级
-    const wrapper = makeMockEl("div")
-    const body = makeMockEl("div")
-    wrapper.appendChild(body)
-    body.appendChild(toolBubbleFor({ id: "tw1", role: "tool", content: "" , createdAt: 0 }, `→ code_read ${JSON.stringify({ path: "packages/web/src/a.ts" }, null, 2)}`))
-    pendingTools.set(pendingToolsKey("s1", "tc1"), { wrapper: wrapper as unknown as HTMLElement, body: body as unknown as HTMLElement, session: "s1", kind: "tool", name: "code_read", argsText: "{}" })
-    appendToolResult(
+    renderBlocksLinked(
+      container as unknown as HTMLElement,
+      [
+        { type: "file", path: "tmp/a.ts", name: "a.ts" },
+        { type: "image", path: "tmp/b.png", name: "b.png", mime: "image/png" },
+      ],
+      (c, b) => {
+        const d = makeMockEl("div")
+        d.className = `rendered-${b.type}`
+        ;(c as unknown as MockEl).appendChild(d)
+      },
       "s1",
-      "tc1",
-      "code_read",
-      "import x from 'y'",
-      [{ type: "file", path: "C:/proj/packages/web/src/a.ts", name: "a.ts", mime: "text/plain" }],
-      undefined,
-      undefined,
-      { path: "C:/proj/packages/web/src/a.ts", scope: "fs", name: "a.ts" },
     )
-    const chip = wrapper.querySelector("div.file-link") as unknown as { dataset: Record<string, string> }
-    expect(chip).not.toBeNull()
-    expect(chip.dataset.path).toBe("C:/proj/packages/web/src/a.ts")
-    // 输出（文件内容）收敛 + 产物块抑制：无输出块、无文件卡（body 仅剩调用卡 bubble）
-    expect(wrapper.querySelector("details.tool-out")).toBeNull()
-    expect(wrapper.querySelector("div.file-card")).toBeNull()
-    pendingTools.clear()
+    expect(container.querySelector("div.file-link")).not.toBeNull()
+    expect(container.querySelector("div.rendered-image")).not.toBeNull()
+    expect(container.querySelector("div.rendered-file")).toBeNull()
   })
 })
 
-describe("文件链接升级（upgradeFileLinks：内联内容 chip 不升级）", () => {
-  test("升级替换路径与文件名；inline chip 保持原路径", async () => {
-    const { fileLinkChip, upgradeFileLinks } = await import("./file-link")
-    const plain = fileLinkChip({ name: "a.ts", path: "rel/a.ts" }) as unknown as { dataset: Record<string, string> }
-    const inline = fileLinkChip({ name: "b.ts", path: "rel/b.ts", content: "const b = 1\n" }) as unknown as { dataset: Record<string, string> }
-    const scope = makeMockEl("div")
-    scope.appendChild(plain)
-    scope.appendChild(inline)
-    upgradeFileLinks(scope as unknown as HTMLElement, { path: "C:/proj/abs/a.ts", name: "a.ts" })
-    expect(plain.dataset.path).toBe("C:/proj/abs/a.ts")
-    expect(inline.dataset.path).toBe("rel/b.ts")
-    expect(inline.dataset.inline).toBe("1")
+describe("原文件查看弹窗（previewShell：标题栏下载入口）", () => {
+  test("弹窗头部含下载按钮（files/preview 附件形式），图片类型不取数直接内联", async () => {
+    const { openFilePreview } = await import("./file-card")
+    openFilePreview("s1", "shot.png", "tmp/shot.png", "image/png")
+    const overlay = base.querySelector("div.preview-overlay") as unknown as MockElWithQuery
+    expect(overlay).not.toBeNull()
+    const dl = overlay.querySelector("a.preview-dl") as unknown as { href: string; download: string }
+    expect(dl).not.toBeNull()
+    expect(dl.href).toContain("files/preview?path=tmp%2Fshot.png")
+    expect(dl.href).toContain("download=1")
+    expect(dl.download).toBe("shot.png")
+    expect(overlay.querySelector("img")).not.toBeNull()
   })
 })

@@ -19,8 +19,8 @@ import {
 } from "./state"
 import { blockText, markdownBlock } from "./markdown"
 import { renderCodeCard, renderFileCard } from "./file-card"
-import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, fileBlocksSuppressed, fileOutputSuppressed, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
-import { upgradeFileLinks } from "./file-link"
+import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, fileBlocksAsLinks, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
+import { renderBlocksLinked } from "./file-link"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
 import { renderHtmlBlock } from "./html-view"
@@ -280,8 +280,9 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg)
 
   const cur = getCurrentSession()
-  // 弹窗查看模式下文件工具（card.file）的产物块与参数区文件链接重复，收敛为链接不重复渲染
-  if (!fileBlocksSuppressed(msg.name)) renderBlocks(body, msg.blocks ?? [], cur?.id || "")
+  // 弹窗查看模式下文件工具（card.file）的产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）
+  if (fileBlocksAsLinks(msg.name)) renderBlocksLinked(body, msg.blocks ?? [], renderBlock, cur?.id || "")
+  else renderBlocks(body, msg.blocks ?? [], cur?.id || "")
   for (const a of msg.attachments ?? []) {
     renderBlock(body, { type: a.mime?.startsWith("image/") ? "image" : "file", path: a.path, name: a.name, mime: a.mime }, cur?.id || "")
   }
@@ -425,7 +426,7 @@ export function renderSessionArchive(archive: SessionRunArchive, parent?: HTMLEl
       continue
     }
     appendMsg(
-      { id: uuid(), role: am.role, name: am.name, content: am.content, toolCalls: am.toolCalls, arguments: am.arguments, file: am.file, createdAt: Date.now() },
+      { id: uuid(), role: am.role, name: am.name, content: am.content, toolCalls: am.toolCalls, arguments: am.arguments, createdAt: Date.now() },
       false,
       box.body,
     )
@@ -544,19 +545,8 @@ export function assistantContent(content: string): HTMLElement {
 }
 
 /** 工具结果追加：同一卡片内更新头部为完成态，并追加输出区块。sessionId 绑定配对 key（跨会话隔离）；
- *  runId 区分主循环与新会话容器内调用，parent 指定容器内消息的渲染目标。
- *  file 为服务端解析后的文件引用（read/write/edit/patch）：文件链接 chip 升级为真实路径（项目文件），
- *  文件内容输出（card.fileOutput，如 read）在弹窗查看模式下收敛为链接不再直显。 */
-export function appendToolResult(
-  sessionId: string,
-  toolCallId: string,
-  name: string,
-  output: string,
-  blocks?: ContentBlock[],
-  runId?: string,
-  parent?: HTMLElement,
-  file?: Message["file"],
-) {
+ *  runId 区分主循环与新会话容器内调用，parent 指定容器内消息的渲染目标。 */
+export function appendToolResult(sessionId: string, toolCallId: string, name: string, output: string, blocks?: ContentBlock[], runId?: string, parent?: HTMLElement) {
   const entry = pendingTools.get(pendingToolsKey(sessionId, toolCallId, runId))
   if (entry) {
     if (entry.kind === "todo") {
@@ -594,16 +584,17 @@ export function appendToolResult(
       }
       head.replaceWith(toolHead("done", name, argsObj))
     }
-    // 文件链接 chip 升级为解析后真实路径（结果到达前项目相对路径无法由 files 接口解析）
-    if (file && entry.wrapper) upgradeFileLinks(entry.wrapper, file)
     const bubble = entry.wrapper?.querySelector(".bubble")
-    if (bubble && output && !fileOutputSuppressed(name, file)) {
+    if (bubble && output) {
       // agent_run：最终返回为 markdown 输出，直接渲染（与历史 toolCard 一致）
       if (shortToolName(name) === "agent_run") bubble.appendChild(markdownBlock(output))
       else bubble.appendChild(toolOutput(output))
     }
-    // 弹窗查看模式下文件工具产物块与文件链接重复，不重复渲染
-    if (blocks?.length && entry.body && !fileBlocksSuppressed(name)) renderBlocks(entry.body, blocks, entry.session)
+    // 弹窗查看模式下文件工具产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）
+    if (blocks?.length && entry.body) {
+      if (fileBlocksAsLinks(name)) renderBlocksLinked(entry.body, blocks, renderBlock, entry.session)
+      else renderBlocks(entry.body, blocks, entry.session)
+    }
     pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
     return
   }

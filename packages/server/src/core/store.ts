@@ -483,7 +483,7 @@ export class SessionStore {
   }
 
   /** 文件预览路径解析（files/preview 接口，DESIGN「文件链接弹窗查看」）：相对路径（含 `tmp/` 前缀）
-   *  与 resolveSessionTmpFile 同规则（会话 tmp/ 为根）；**绝对路径**（code 项目文件等 ResultFileRef scope=fs）
+   *  与 resolveSessionTmpFile 同规则（会话 tmp/ 为根）；**绝对路径**（code 项目文件等）
    *  按用户隔离边界放行——沙箱用户仅允许本用户数据目录（users/{user}/，与文件工具 project 参数经
    *  resolveInSandbox(root=users/{user}) 的可达范围一致，含符号链接逃逸检查），非沙箱（本地模式操作者
    *  本人，与文件工具能力对齐）放开绝对路径。 */

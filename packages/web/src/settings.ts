@@ -106,18 +106,19 @@ function renderSettingsAppearance() {
   ttRow.append(ttInfo, ttBtn)
   list.appendChild(ttRow)
 
-  // 文件展示方式：read/write/edit/patch 等文件工具卡（含 code 子Agent 同款工具）——
-  // 直接展示（现状：内容内联渲染）或弹窗查看（收敛为文件链接，点击弹窗查看；适配会话相对与项目路径）
+  // 文件展示方式：read/write/edit/patch 等文件工具（含 code 子Agent 同款工具）的**产物文件卡**——
+  // 嵌入（现状：卡片内联展示文件内容）或弹窗（收敛为文件链接，点击弹窗查看；适配会话相对与项目路径）；
+  // 参数区与输出不受影响
   const fdRow = el("div", "settings-row")
   const fdInfo = el("div", "settings-row-info")
   const fdDesc = el("div", "settings-row-desc")
   const fdBtn = el("button", "mini-btn")
   const fdRefreshDesc = () => {
     const popup = isFilePopup()
-    fdBtn.textContent = popup ? "改为直接展示" : "改为弹窗查看"
+    fdBtn.textContent = popup ? "改为嵌入展示" : "改为弹窗查看"
     fdDesc.textContent = popup
-      ? "弹窗查看：read/write/edit/patch 等文件卡片收敛为文件链接，点击弹窗查看内容（当前会话立即生效）"
-      : "直接展示：read/write/edit/patch 等文件内容在卡片内直接展示（现状）"
+      ? "弹窗查看：read/write 等文件工具的产物文件卡收敛为文件链接，点击弹窗查看内容（当前会话立即生效）"
+      : "嵌入展示：read/write 等文件工具的产物文件卡内联展示内容（现状）"
   }
   fdBtn.onclick = () => {
     setFileDisplaySetting(isFilePopup() ? "inline" : "popup")
