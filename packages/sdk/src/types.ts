@@ -183,6 +183,27 @@ export interface WsSnapshot {
   maxContextTokens?: number
 }
 
+/** 运行中会话的待决交互（session.attach 快照项）：事件已推送过、新页面收不到，前端凭此重渲染卡片继续作答。 */
+export type PendingInteraction =
+  | { type: "approval"; toolCallId: string; tool: string; retries: number }
+  | { type: "choice"; choiceId: string; prompt: string; options: Array<string | Record<string, unknown>>; multi: boolean }
+  | { type: "env"; envId: string; name: string; description: string; secret: boolean }
+  | { type: "draw"; renderId: string; code: string; name?: string; format?: string }
+  | { type: "capture"; captureId: string; fullPage: boolean; delay: number }
+
+/** 运行中会话附加快照（session.attach，DESIGN「运行中会话恢复」）：页面刷新/切换后恢复用。 */
+export interface AttachSnapshot {
+  running: boolean
+  /** 任务开始时刻（前端单轮计时器起点恢复用）。 */
+  startedAt?: number
+  /** 在途 assistant 回合的累积文本/推理（尚未持久化——刷新后从存储恢复不了的部分）。 */
+  stream?: { messageId: string; text: string; reasoning: string; session?: boolean; sessionRunId?: string }
+  /** 待决交互清单（审批/选择/填值/画图/捕获）。 */
+  pending: PendingInteraction[]
+  /** 快照反映到的事件日志 seq（attach 流据此过滤已含入快照的事件并重放缺口）。 */
+  lastSeq?: number
+}
+
 export interface SessionInfo {
   id: string
   name: string

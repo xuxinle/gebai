@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ChatChunk, ContentBlock, DiagramFormat, Message, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
+import type { ChatChunk, ContentBlock, DiagramFormat, Message, PendingInteraction, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
@@ -19,7 +19,7 @@ import { cnyCatTurnEnd, initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { initTurnTimer, isTurnTimerEnabled } from "./turn-timer"
 import { initFileDisplay } from "./file-display"
-import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
+import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, setRunningAttach, updateSessionCtx } from "./sessions"
 import { addApproval, clearApprovals } from "./approvals"
 import {
   addMetaActions,
@@ -578,8 +578,8 @@ function appendFinalNotice(sessionId: string, text: string): void {
  * 收尾后自动发送下一条排队输入（会话输入队列）。
  * makeSource 以运行态的 abort 信号构造流（信号由空闲超时兜底触发中止）。
  */
-async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) => AsyncIterable<ChatChunk>): Promise<void> {
-  const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), startedAt: Date.now(), abort: new AbortController() }
+async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) => AsyncIterable<ChatChunk>, opts?: { startedAt?: number }): Promise<void> {
+  const run: RunState = { sessionId, acc: "", el: null, reasoningAcc: "", reasoningEl: null, messageId: "", lastActivity: Date.now(), startedAt: opts?.startedAt ?? Date.now(), abort: new AbortController() }
   runs.set(sessionId, run)
   startTurnTimer(run) // 单轮计时器：本轮耗时实时显示（外观 tab 可关）
   syncConnThinking() // 运行开始：信号灯闪烁
@@ -677,9 +677,41 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
   }
 }
 
+/** 附加请求在途标记（防重复附加）。 */
+const attaching = new Set<string>()
+
+/** 待决交互卡片重建（attach 快照 → 既有渲染入口；替换式幂等——同 id 重复推送只保留一张）。 */
+function renderPendingInteraction(sessionId: string, it: PendingInteraction): void {
+  if (it.type === "approval") addApproval(sessionId, it.toolCallId, it.tool)
+  else if (it.type === "choice") renderChoiceCard(it.prompt, it.options, it.choiceId, sessionId, it.multi)
+  else if (it.type === "env") renderEnvRequestCard(it.name, it.description, it.secret, it.envId, sessionId)
+  else if (it.type === "draw") onDrawRender({ sessionId, renderId: it.renderId, code: it.code, format: it.format ?? "" })
+  else if (it.type === "capture") onCaptureRequest({ sessionId, captureId: it.captureId, fullPage: it.fullPage, delay: it.delay })
+}
+
+/** 附加运行中会话（DESIGN「运行中会话恢复」，loadMessages 尾部钩子调用）：
+ *  页面刷新/切换进入运行中会话时——快照（在途流 + 待决交互）→ 待决卡片重建（审批/选择/填值/
+ *  画图/捕获的事件已推送过、本页收不到，不重建则任务干等到超时）→ consumeTaskStream 接管
+ *  attachStream（在途文本种子 + 实时续流，与发起页同构渲染：流式消息/工具卡/信号灯/停止按钮/
+ *  单轮计时）。未运行或本页已接管（发起/附加过）时 no-op。 */
+async function attachRunningSession(sessionId: string): Promise<void> {
+  if (runs.has(sessionId) || attaching.has(sessionId)) return
+  attaching.add(sessionId)
+  try {
+    const snap = await client.attachSession(sessionId)
+    if (!snap?.running) return
+    for (const it of snap.pending ?? []) renderPendingInteraction(sessionId, it)
+    await consumeTaskStream(sessionId, (run) => client.attachStream(sessionId, { signal: run.abort.signal }), { startedAt: snap.startedAt })
+  } catch {
+    /* 附加失败（连接抖动等）：视图保持存储渲染，下次进入会话重试 */
+  } finally {
+    attaching.delete(sessionId)
+  }
+}
+setRunningAttach(attachRunningSession)
+
 /** 排队输入执行器（队列消化入口，init 注册）：渲染用户消息（同直接发送）并走同一 sendPrompt 任务流。 */
-setQueueExecutor(async (sessionId, item: QueuedInput) => {
-  if (getCurrentSession()?.id === sessionId) {
+setQueueExecutor(async (sessionId, item: QueuedInput) => {  if (getCurrentSession()?.id === sessionId) {
     lockToBottom() // 发送即锁定粘底（与直接发送一致）
     appendMsg({ id: item.messageId, role: "user", content: item.text, attachments: item.files as Array<{ path: string; mime: string; name: string; size: number }>, createdAt: item.createdAt })
     lockToBottom() // 消息上屏后再落底一次：新消息立即可见（与直接发送一致）

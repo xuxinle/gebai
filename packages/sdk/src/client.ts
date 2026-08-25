@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   AttachmentInfo,
   AttachmentInput,
+  AttachSnapshot,
   ChatChunk,
   ContentBlock,
   EnvVarSource,
@@ -1003,10 +1004,9 @@ export class GebaiClient {
         // 事件也由 dispatchEvent 的 seq 去重过滤（重放事件已在此前分发推进过 lastSeq）
         this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
         if (finished) return
-        // 实时事件中超出重放范围的（重放应答期间到达的）继续处理，避免重复
-        for (const ev of live) {
-          if (!ev.seq || ev.seq > r.lastSeq) processEvent(ev)
-        }
+        // 重放应答窗口内到达的实时事件全部补入 chunk 通道：与重放重叠的部分已被 seq 去重
+        // （dispatchEvent 先于此且 lastSeq 已被实时到达推进），不由此补上会丢该窗口内的文本
+        for (const ev of live) processEvent(ev)
       } catch (e) {
         // 恢复过程中连接再次断开：挂起等待下一次重连
         if (this.autoReconnecting() && !this.isConnected()) {
@@ -1036,6 +1036,136 @@ export class GebaiClient {
         }
         if (finished) return
         // 失败仅在任务未完成时抛出（done/error 已入队则正常结束）
+        if (fail) throw fail
+        await new Promise<void>((resolve) => waiters.push(resolve))
+      }
+    } finally {
+      unsub()
+      statusUnsub()
+      opts?.signal?.removeEventListener("abort", onAbort)
+    }
+  }
+
+  /** 运行中会话附加快照（session.attach，DESIGN「运行中会话恢复」）：running=false 表示未运行。 */
+  attachSession(sessionId: string): Promise<AttachSnapshot> {
+    return this.request<AttachSnapshot>("session.attach", { id: sessionId })
+  }
+
+  /**
+   * 附加到运行中会话的实时流（页面刷新/切换恢复，DESIGN「运行中会话恢复」）：
+   * 与 sendPrompt 同构的 ChatChunk 迭代（text/reasoning/session_start/done/error），但不发起任务——
+   * 订阅就位后请求 attach 快照（在途文本/推理作为种子 chunk 先行，快照反映到其 lastSeq 为止），
+   * 按 seq 重放快照之后的事件（与断线恢复同一套机制），此后实时续流直到任务结束。
+   * WS 断开时挂起，重连后重新附加（resume 重置渲染态 + 新快照重播种，防内容重复）；
+   * 任务已在附加前结束（running=false，附加竞态）时立即结束迭代（视图由存储恢复兜底）。
+   * signal：中止时结束迭代（调用方应同时 cancelTask 停止服务端任务）。
+   */
+  async *attachStream(sessionId: string, opts?: { signal?: AbortSignal }): AsyncIterable<ChatChunk> {
+    const queue: ChatChunk[] = []
+    const waiters: Array<() => void> = []
+    let finished = false
+    let fail: Error | null = null
+    let suspended = false
+    let resuming = false
+    let held: AgentEvent[] = []
+    let attached = false // 首次附加完成标记（重附先发 resume 重置渲染态）
+    const wake = () => waiters.shift()?.()
+    const push = (c: ChatChunk | null) => {
+      if (!c) return
+      queue.push(c)
+      wake()
+    }
+    const processEvent = (ev: AgentEvent) => {
+      if (ev.sessionId !== sessionId) return
+      if (resuming) {
+        held.push(ev)
+        return
+      }
+      push(wsEventToChunk(ev))
+      if (ev.type === "event.task.done" || ev.type === "event.task.error") {
+        finished = true
+        wake()
+      }
+    }
+    const unsub = this.onEvent(processEvent)
+    const statusUnsub = this.onStatusChange((status) => {
+      if (status === "disconnected") {
+        if (!this.autoReconnecting()) {
+          fail = new Error("WS 连接已关闭，附加流中断")
+          wake()
+          return
+        }
+        suspended = true
+      } else if (status === "connected" && suspended) {
+        suspended = false
+        void resume()
+      }
+    })
+    const onAbort = () => {
+      fail = new Error("aborted")
+      wake()
+    }
+    if (opts?.signal?.aborted) onAbort()
+    else opts?.signal?.addEventListener("abort", onAbort, { once: true })
+
+    /** 附加/重附：快照（在途文本种子）→ seq 缺口重放 → 实时续流。 */
+    const resume = async (): Promise<void> => {
+      if (resuming || finished) return
+      resuming = true
+      try {
+        if (attached) push({ kind: "resume" })
+        const snap = await this.attachSession(sessionId)
+        if (!snap.running) {
+          finished = true
+          wake()
+          return
+        }
+        attached = true
+        // 种子 chunk：在途推理先于正文（渲染顺序：推理块 prepend 于正文气泡）；session 标记路由到新会话容器
+        const sub = snap.stream?.session === true ? { session: true as const } : {}
+        const runId = snap.stream?.sessionRunId ? { sessionRunId: snap.stream.sessionRunId } : {}
+        if (snap.stream?.reasoning) push({ kind: "reasoning", text: snap.stream.reasoning, ...sub, ...runId })
+        if (snap.stream?.text) push({ kind: "text", text: snap.stream.text, messageId: snap.stream.messageId, ...sub, ...runId })
+        // 快照之后（订阅/请求期间到达）的事件按 seq 重放补入；缺口（overrun）放弃附加——存储恢复兜底
+        const r = await this.syncEvents(Number(snap.lastSeq ?? 0))
+        const live = held
+        held = []
+        if (r.overrun) {
+          this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
+          finished = true
+          wake()
+          return
+        }
+        for (const ev of r.events) this.dispatchEvent(ev)
+        this.lastSeq = Math.max(this.lastSeq, r.lastSeq)
+        if (finished) return
+        // 订阅期间到达的全部补入 chunk 通道：与重放重叠的部分已被 seq 去重（dispatchEvent 先于此），
+        // 不由此补上会丢文本（重放应答窗口内到达的 delta 既不在重放推送里、也被 drain 条件丢弃）
+        for (const ev of live) processEvent(ev)
+      } catch (e) {
+        // 恢复过程中连接再次断开：挂起等待下一次重连
+        if (this.autoReconnecting() && !this.isConnected()) {
+          suspended = true
+          return
+        }
+        fail = new Error(String((e as Error).message || e))
+        wake()
+      } finally {
+        resuming = false
+      }
+    }
+
+    try {
+      await this.connect()
+      await resume()
+      for (;;) {
+        if (queue.length) {
+          const c = queue.shift()!
+          yield c
+          if (c.kind === "done" || c.kind === "error") return
+          continue
+        }
+        if (finished) return
         if (fail) throw fail
         await new Promise<void>((resolve) => waiters.push(resolve))
       }
