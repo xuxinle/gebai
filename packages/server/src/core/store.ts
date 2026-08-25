@@ -1,7 +1,7 @@
 import { mkdir, writeFile, readFile, rm, readdir, stat, unlink, rename } from "node:fs/promises"
-import { join, resolve, sep } from "node:path"
+import { join, resolve, sep, isAbsolute, relative } from "node:path"
 import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
-import { isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "./paths"
+import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "./paths"
 import { randomUUID } from "node:crypto"
 
 const MAX_CACHE_MESSAGES = 300
@@ -480,6 +480,24 @@ export class SessionStore {
     const p = path.startsWith("tmp/") ? path.slice(4) : path
     if (sandboxEnabled) return resolveInSandbox(tmp, p)
     return resolve(tmp, p)
+  }
+
+  /** 文件预览路径解析（files/preview 接口，DESIGN「文件链接弹窗查看」）：相对路径（含 `tmp/` 前缀）
+   *  与 resolveSessionTmpFile 同规则（会话 tmp/ 为根）；**绝对路径**（code 项目文件等 ResultFileRef scope=fs）
+   *  按用户隔离边界放行——沙箱用户仅允许本用户数据目录（users/{user}/，与文件工具 project 参数经
+   *  resolveInSandbox(root=users/{user}) 的可达范围一致，含符号链接逃逸检查），非沙箱（本地模式操作者
+   *  本人，与文件工具能力对齐）放开绝对路径。 */
+  resolvePreviewFile(sessionId: string, userId: string, path: string, sandboxEnabled: boolean): string {
+    if (isAbsolute(path)) {
+      const abs = resolve(path)
+      if (!sandboxEnabled) return abs
+      const userRoot = join(this.opts.home, "users", userId)
+      const rel = relative(userRoot, abs)
+      if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`path outside user data: ${path}`)
+      assertNoSymlinkEscape(userRoot, abs, path)
+      return abs
+    }
+    return this.resolveSessionTmpFile(sessionId, userId, path, sandboxEnabled)
   }
 
   private async walkFiles(dir: string, prefix: string, out: FileEntry[]) {

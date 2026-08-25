@@ -75,6 +75,28 @@ describe("REST API", () => {
     expect(Buffer.from(body.subarray(0, 8)).toString("hex")).toBe("89504e470d0a1a0a")
   })
 
+  test("files/preview：会话相对路径以 tmp/ 为根，绝对路径（本地模式）放行，download=1 附件形式", async () => {
+    const created = await (await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "pv" }) })).json() as { id: string }
+    const dir = join(sessionPath(home, "admin", created.id), "tmp")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "a.ts"), "export const a = 1\n")
+    // 相对路径（tmp/ 前缀可省）
+    const rel = await fetch(`${base()}/api/v1/sessions/${created.id}/files/preview?path=${encodeURIComponent("tmp/a.ts")}`)
+    expect(rel.status).toBe(200)
+    expect(await rel.text()).toContain("export const a = 1")
+    // 绝对路径（本地模式操作者本人，与文件工具能力对齐——read 本地绝对路径场景）
+    const abs = await fetch(`${base()}/api/v1/sessions/${created.id}/files/preview?path=${encodeURIComponent(join(dir, "a.ts"))}`)
+    expect(abs.status).toBe(200)
+    expect(await abs.text()).toContain("export const a = 1")
+    // download=1 → Content-Disposition 附件（文件卡/chip 下载入口）
+    const dl = await fetch(`${base()}/api/v1/sessions/${created.id}/files/preview?path=${encodeURIComponent("tmp/a.ts")}&download=1`)
+    expect(dl.status).toBe(200)
+    expect(dl.headers.get("content-disposition")).toContain("attachment")
+    // 不存在的文件 → 404
+    const miss = await fetch(`${base()}/api/v1/sessions/${created.id}/files/preview?path=tmp/nope.ts`)
+    expect(miss.status).toBe(404)
+  })
+
   test("serves built web UI at / when present", async () => {
     const res = await fetch(`${base()}/`)
     if (res.status === 200) {

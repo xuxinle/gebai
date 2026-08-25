@@ -543,3 +543,35 @@ describe("SessionStore 装载提示词消息保护", () => {
     rmSync(home, { recursive: true, force: true })
   })
 })
+
+describe("resolvePreviewFile（files/preview 接口路径解析：会话相对 + 项目绝对路径，用户隔离）", () => {
+  const SID = "abcdef01abcdef01abcdef01abcdef01"
+  const home = mkdtempSync(join(tmpdir(), "gebai-preview-"))
+  const store = new SessionStore({ home })
+
+  test("相对路径与 resolveSessionTmpFile 同规则（会话 tmp/ 为根，兼容 tmp/ 前缀）", () => {
+    const a = store.resolvePreviewFile(SID, "u1", "tmp/a.txt", false)
+    const b = store.resolvePreviewFile(SID, "u1", "a.txt", false)
+    expect(a).toBe(b)
+    expect(a.startsWith(join(sessionPath(home, "u1", SID), "tmp"))).toBe(true)
+  })
+
+  test("沙箱用户：绝对路径仅允许本用户数据目录内（跨用户目录/数据根外拒绝）", () => {
+    const inside = store.resolvePreviewFile(SID, "u1", join(home, "users", "u1", "projects", "app", "a.ts"), true)
+    expect(inside).toBe(join(home, "users", "u1", "projects", "app", "a.ts"))
+    expect(() => store.resolvePreviewFile(SID, "u1", join(home, "users", "u2", "secret.txt"), true)).toThrow()
+    expect(() => store.resolvePreviewFile(SID, "u1", join(home, "config.json"), true)).toThrow()
+    expect(() => store.resolvePreviewFile(SID, "u1", resolve(join(tmpdir(), "gebai-outside.txt")), true)).toThrow()
+  })
+
+  test("非沙箱（本地模式操作者本人）：绝对路径放开（与文件工具能力对齐）", () => {
+    const abs = resolve(join(tmpdir(), "some-project", "src", "a.ts"))
+    expect(store.resolvePreviewFile(SID, "u1", abs, false)).toBe(abs)
+  })
+
+  test("沙箱用户相对路径仍拒绝穿越（../ 越界会话 tmp）", () => {
+    expect(() => store.resolvePreviewFile(SID, "u1", "../chat.json", true)).toThrow()
+  })
+
+  rmSync(home, { recursive: true, force: true })
+})

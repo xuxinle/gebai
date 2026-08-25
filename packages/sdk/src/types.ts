@@ -37,7 +37,8 @@ export type DiagramFormat = "plantuml" | "mermaid" | "d2" | "echarts"
 
 /**
  * Rich content blocks embedded in messages, rendered by the UI.
- * `image`/`file`/`code`（`path` 可选，文件直显时携带）`path` values are logical paths relative to the session tmp/ dir.
+ * `image`/`file`/`code`（`path` 可选，文件直显时携带）`path` values are logical paths relative to the session tmp/ dir,
+ * or absolute paths (project files, e.g. read via code sub-agent) resolved by `files/preview`.
  */
 export type ContentBlock =
   | { type: "text"; text: string }
@@ -62,6 +63,9 @@ export interface Message {
   name?: string
   /** 工具消息：调用参数（历史会话重载时用于渲染卡片，与实时一致） */
   arguments?: Record<string, unknown>
+  /** 工具消息：本结果涉及的文件引用（read/write/edit/patch 等成功执行后附带；前端「弹窗查看」模式下
+   *  渲染文件链接——scope=session 为会话 tmp/ 逻辑路径，scope=fs 为绝对路径经 files/preview 解析）。 */
+  file?: { path: string; scope: "session" | "fs"; name?: string }
   /** 子Agent 装载提示词消息标记（role=system）：装载（agent_load/启动预载/WS sub_agent.load）时写入会话记录，
    *  内容为子Agent 完整系统提示词；loadHistory 时按 system 角色透传进模型上下文，UI 渲染为简短装载提示。 */
   loadedAgent?: string
@@ -102,6 +106,8 @@ export interface SessionRunEntry {
   toolCallId?: string
   arguments?: Record<string, unknown>
   blocks?: ContentBlock[]
+  /** 工具条目：涉及的文件引用（同 Message.file，嵌套渲染文件链接用）。 */
+  file?: { path: string; scope: "session" | "fs"; name?: string }
   /** 嵌套 agent_run（新会话内再执行新会话）的存档递归携带。 */
   sessionRun?: SessionRunArchive
 }
@@ -268,7 +274,18 @@ export interface ToolInfo {
   group: "global" | string
   approvalRequired: boolean
   /** 卡片展示元数据（同服务端 Tool.card，前端渲染工具卡片用）。 */
-  card?: { titleParams?: string[]; args?: "json" | "kv" | "none" | "code" | "edits" | "block"; codeField?: string; codeLang?: string }
+  card?: {
+    titleParams?: string[]
+    args?: "json" | "kv" | "none" | "code" | "edits" | "block"
+    codeField?: string
+    codeLang?: string
+    /** 路径参数名（文件卡声明）：「弹窗查看」模式下参数/输出收敛为文件链接。 */
+    file?: string
+    /** output 即文件内容（如 read）：「弹窗查看」模式下输出同样收敛为文件链接。 */
+    fileOutput?: boolean
+    /** codeField 参数即文件全文（如 write 的 content）：链接弹窗内联渲染参数内容。 */
+    fileInline?: boolean
+  }
 }
 
 export interface SubAgentInfo {

@@ -1,5 +1,14 @@
 import type { AgentEvent, AttachmentRef, ContentBlock, FileEntry, ToolSchema } from "@gebai/sdk"
 
+/** 工具结果附带的文件引用（前端「文件链接弹窗查看」用）：path 为可解析的预览路径——scope=session 时为
+ *  会话 tmp/ 逻辑路径（`tmp/` 前缀，files 接口可直接解析），scope=fs 时为绝对路径（files/preview 接口
+ *  按用户隔离边界解析）。read/write/edit/patch 等文件工具成功执行后附带。 */
+export interface ResultFileRef {
+  path: string
+  scope: "session" | "fs"
+  name?: string
+}
+
 export interface ToolResult {
   output: string
   /** 结构化输出（DESIGN「工具双输出」）：供 flow 数据流编排引用/映射（`{{步骤id.data.xxx}}`），不进模型上下文（模型只见 output 文本）。
@@ -8,6 +17,8 @@ export interface ToolResult {
   blocks?: ContentBlock[]
   truncated?: boolean
   filePath?: string
+  /** 本结果涉及的文件（解析后的真实路径，见 ResultFileRef）：前端据此渲染文件链接（点击弹窗查看）。 */
+  file?: ResultFileRef
   /** agent_run（执行新会话）工具返回：新会话 run 完整存档（扩展字段落盘到工具调用记录，历史回放渲染用）。 */
   sessionRun?: import("@gebai/sdk").SessionRunArchive
 }
@@ -177,8 +188,20 @@ export interface Tool {
    *    "kv"（强制键值行，嵌套值紧凑 JSON）/ "none"（不展示参数区）/ "code"（codeField 参数渲染为代码块，其余参数键值行/JSON 附注）/
    *    "edits"（codeField 数组参数的 {oldString,newString} 项渲染为旧(红)/新(绿)对比块，如 edit 的 edits）/
    *    "block"（结果直出内容块，调用不显示通用卡片，如 show/diff）；超长参数区自动折叠；
-   *  codeField/codeLang：args="code"/"edits" 时对应的代码/修改数组字段名与语言（如 sh 的 command/bash、edit 的 edits）。 */
-  card?: { titleParams?: string[]; args?: "json" | "kv" | "none" | "code" | "edits" | "block"; codeField?: string; codeLang?: string }
+   *  codeField/codeLang：args="code"/"edits" 时对应的代码/修改数组字段名与语言（如 sh 的 command/bash、edit 的 edits）；
+   *  file：路径参数名（如 read/write/edit/patch 的 path）——声明本工具卡为文件卡，前端「弹窗查看」模式下参数/输出收敛为
+   *    文件链接（点击弹窗查看文件，含会话相对与项目绝对路径）；fileOutput=true 表示 output 即文件内容（如 read），
+   *    该模式下输出同样收敛为链接；fileInline=true 表示 codeField 参数即文件全文（如 write 的 content），
+   *    链接弹窗内联渲染该参数内容（审批前文件尚未落盘，取数会看到旧内容）。 */
+  card?: {
+    titleParams?: string[]
+    args?: "json" | "kv" | "none" | "code" | "edits" | "block"
+    codeField?: string
+    codeLang?: string
+    file?: string
+    fileOutput?: boolean
+    fileInline?: boolean
+  }
   /** 运行时定义工具标记（js 脚本 defineTool 注册）：js/动态工具子进程内禁止再调用（防递归嵌套子进程），
    *  RPC 分发层按本标记拦截。内置/子Agent 工具无此标记。 */
   runtimeDefined?: boolean
