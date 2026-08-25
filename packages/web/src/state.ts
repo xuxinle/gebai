@@ -228,12 +228,10 @@ export function syncConnThinking() {
   syncCtxSignal()
 }
 
-export function filesContent(sessionId: string, path: string): string {
-  return `/api/v1/sessions/${sessionId}/files/content?path=${encodeURIComponent(path)}`
-}
-
-export function filesDownload(sessionId: string, path: string): string {
-  return `/api/v1/sessions/${sessionId}/files/download?path=${encodeURIComponent(path)}`
+/** 文件预览取数（会话相对 tmp/ 路径与项目绝对路径统一入口，DESIGN「文件链接弹窗查看」）：
+ *  相对路径以会话 tmp/ 为根；绝对路径按用户隔离边界解析（沙箱用户限本用户数据目录内）。download=true 附件形式返回。 */
+export function filesPreview(sessionId: string, path: string, download = false): string {
+  return `/api/v1/sessions/${sessionId}/files/preview?path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`
 }
 
 export const ROLE_NAME: Record<string, string> = { user: "我", assistant: "歌白", tool: "工具" }

@@ -281,6 +281,27 @@
 .msg.tool .bubble .tool-kv-key { flex: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-faint); }
 .msg.tool .bubble .tool-kv-val { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg.tool .bubble .tool-fold .tool-kv { margin-top: 8px; }
+/* 文件链接 chip（「弹窗查看」模式下文件工具卡的统一文件入口）：图标 + 文件名 + 路径（弱化）+ 下载，
+   点击弹窗查看文件（会话相对与项目绝对路径均经 files/preview 取数） */
+.msg.tool .bubble .file-link {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--tool) 30%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--tool) 6%, var(--bg-inset));
+  cursor: pointer;
+  min-width: 0;
+  transition: background var(--transition), border-color var(--transition);
+}
+.msg.tool .bubble .file-link:hover { background: color-mix(in srgb, var(--tool) 14%, var(--bg-inset)); border-color: color-mix(in srgb, var(--tool) 55%, transparent); }
+.msg.tool .bubble .file-link:focus-visible { outline: 2px solid var(--tool); outline-offset: 1px; }
+.msg.tool .bubble .file-link-ico { flex: none; }
+.msg.tool .bubble .file-link-name { flex: none; font-family: var(--font-ui); font-size: 13px; color: var(--tool); white-space: nowrap; }
+.msg.tool .bubble .file-link-path { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg.tool .bubble .file-link .file-dl-icon { flex: none; }
 /* edits 参数块：每处修改旧（红）/ 新（绿）对比展示（edit 工具） */
 .msg.tool .bubble .tool-edits { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .msg.tool .bubble .tool-edit-idx { font-family: var(--font-ui); font-size: 11px; color: var(--text-faint); margin-top: 2px; }

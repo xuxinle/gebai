@@ -8,9 +8,12 @@ import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
 import type { ToolContext, Tool, ToolResult } from "./types"
 
-function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): ToolContext {
+/** 测试会话 id（合法 32 位 hex，与生产 randomUUID 形态一致——fileRefFor 等按 sessionPath 归属判定依赖格式白名单）。 */
+const SID = "abcdef01abcdef01abcdef01abcdef01"
+
+function ctx(home: string, sessionId = SID, env: Record<string, string> = {}): ToolContext {
   const base = home || tmpdir()
-  const tmp = join(base, "users", "default", "sessions", sessionId, "tmp")
+  const tmp = join(sessionPath(base, "default", sessionId), "tmp")
   mkdirSync(tmp, { recursive: true })
   return {
     user: "default",
@@ -75,7 +78,7 @@ function mkTool(name: string, execute: (args: Record<string, unknown>, ctx: Tool
 describe("global tools", () => {
   test("env_detect reports toolchain versions, unavailable markers and dedups PATH", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-envdetect-"))
-    const c = ctx(home, "s1", { PATH: "C:\\a;C:\\b;C:\\A;C:\\a;D:\\c" })
+    const c = ctx(home, SID, { PATH: "C:\\a;C:\\b;C:\\A;C:\\a;D:\\c" })
     c.runCommand = async (cmd) => {
       if (cmd.includes("node --version")) return { stdout: "v20.17.0\n", stderr: "", code: 0 }
       if (cmd.includes("cargo --version")) return { stdout: "", stderr: "cargo: command not found", code: 1 }
@@ -2208,7 +2211,7 @@ describe("patch tool", () => {
     const r = await patchTool.execute({ path: "src/a.ts", patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2,1 +2,1 @@\n-const b = 2\n+const b = 22\n" }, c)
     expect(r.output).toContain("已写入 src/a.ts")
     expect(r.output).toContain("1 处 hunk")
-    expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "src", "a.ts")).text()).toBe("const a = 1\nconst b = 22\nconst c = 3\n")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "src", "a.ts")).text()).toBe("const a = 1\nconst b = 22\nconst c = 3\n")
     cleanup(home)
   })
 
@@ -2219,7 +2222,7 @@ describe("patch tool", () => {
     const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-b\n+B\n", dryRun: true }, c)
     expect(r.output).toContain("预演")
     expect(r.output).toContain("未写入")
-    expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
     cleanup(home)
   })
 
@@ -2229,7 +2232,7 @@ describe("patch tool", () => {
     await writeTool.execute({ path: "a.ts", content: "a\nb\nc\n" }, c)
     const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-zzz\n+ZZZ\n" }, c)
     expect(r.output).toContain("未匹配")
-    expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
     cleanup(home)
   })
 
@@ -2238,7 +2241,7 @@ describe("patch tool", () => {
     const c = ctx(home)
     const r = await patchTool.execute({ path: "new.ts", patch: "--- /dev/null\n+++ b/new.ts\n@@ -0,0 +1,2 @@\n+export const x = 1\n+export const y = 2\n" }, c)
     expect(r.output).toContain("已写入 new.ts")
-    expect(await Bun.file(join(home, "users", "default", "sessions", "s1", "tmp", "new.ts")).text()).toBe("export const x = 1\nexport const y = 2\n")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "new.ts")).text()).toBe("export const x = 1\nexport const y = 2\n")
     cleanup(home)
   })
 
@@ -2263,7 +2266,7 @@ describe("git tool", () => {
       return { stdout: " M src/a.ts\n", stderr: "", code: 0 }
     }
     const r = await gitTool.execute({ action: "status", dir: "repo" }, c)
-    expect(seen).toEqual([{ cmd: "git status --short --branch", workdir: join(home, "users", "default", "sessions", "s1", "tmp", "repo") }])
+    expect(seen).toEqual([{ cmd: "git status --short --branch", workdir: join(sessionPath(home, "default", SID), "tmp", "repo") }])
     expect(r.output).toContain("M src/a.ts")
     cleanup(home)
   })
@@ -2368,3 +2371,70 @@ function pidAlive(pid: number): boolean {
 function cleanup(home: string) {
   rmSync(home, { recursive: true, force: true })
 }
+
+describe("文件引用（ResultFileRef：read/write/edit/patch 附带解析后真实路径，前端文件链接弹窗查看用）", () => {
+  test("read：会话内文件 → scope=session（tmp/ 逻辑路径），产物块路径同步", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
+    try {
+      const c = ctx(home)
+      await writeTool.execute({ path: "src/a.ts", content: "const a = 1\n" }, c)
+      const r = await readTool.execute({ path: "src/a.ts" }, c)
+      expect(r.file?.scope).toBe("session")
+      expect(r.file?.path).toBe("tmp/src/a.ts")
+      expect(r.file?.name).toBe("a.ts")
+      // 产物块路径用解析后的逻辑路径（原始参数路径在项目工具下无法由 files 接口解析）
+      expect((r.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/src/a.ts")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("read 本地模式绝对路径（项目文件）→ scope=fs（files/preview 按用户隔离解析）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
+    try {
+      const c = ctx(home)
+      const abs = join(home, "proj", "b.ts")
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, "export const b = 2\n")
+      const r = await readTool.execute({ path: abs }, c)
+      expect(r.file?.scope).toBe("fs")
+      expect(r.file?.path).toBe(abs)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("write/edit/patch：成功执行后附带文件引用（会话内 scope=session）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
+    try {
+      const c = ctx(home)
+      const w = await writeTool.execute({ path: "w.ts", content: "a\nb\nc\n" }, c)
+      expect(w.file).toEqual({ path: "tmp/w.ts", scope: "session", name: "w.ts" })
+      const e = await editTool.execute({ path: "w.ts", edits: [{ oldString: "b", newString: "B" }] }, c)
+      expect(e.file?.path).toBe("tmp/w.ts")
+      const p = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-a\n+A\n" }, c)
+      expect(p.file?.path).toBe("tmp/w.ts")
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("拒绝/失败路径不附带文件引用（守卫拦截为普通输出返回）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fileref-"))
+    try {
+      const c = ctx(home)
+      await writeTool.execute({ path: "g.ts", content: "x\n" }, c)
+      // 防盲覆盖：已存在但本会话未读过 → write 拒绝（无 file；引擎注入的会话级已读追踪）。
+      // 用绝对路径指向 c 会话内已写文件（c2 相对路径基准是自己的会话 tmp，文件不存在不触发守卫）
+      const absG = resolve(join(sessionPath(home, "default", SID), "tmp", "g.ts"))
+      const c2 = ctx(home, "abcdef02abcdef02abcdef02abcdef02")
+      const readSet = new Set<string>()
+      c2.fileGuard = { markRead: (p) => readSet.add(p), hasRead: (p) => readSet.has(p) }
+      const denied = await writeTool.execute({ path: absG, content: "y\n" }, c2)
+      expect(denied.output).toContain("拒绝")
+      expect(denied.file).toBeUndefined()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})

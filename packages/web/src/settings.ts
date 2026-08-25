@@ -3,6 +3,7 @@ import { client, el, setConn, settingsBody, settingsBtn, settingsFoot, settingsO
 import { blockText } from "./markdown"
 import { isLowPower, setLowPowerSetting } from "./low-power"
 import { isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
+import { isFilePopup, setFileDisplaySetting } from "./file-display"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
 import { confirmDialog, customSelect, toast } from "./ui"
 
@@ -105,10 +106,32 @@ function renderSettingsAppearance() {
   ttRow.append(ttInfo, ttBtn)
   list.appendChild(ttRow)
 
+  // 文件展示方式：read/write/edit/patch 等文件工具卡（含 code 子Agent 同款工具）——
+  // 直接展示（现状：内容内联渲染）或弹窗查看（收敛为文件链接，点击弹窗查看；适配会话相对与项目路径）
+  const fdRow = el("div", "settings-row")
+  const fdInfo = el("div", "settings-row-info")
+  const fdDesc = el("div", "settings-row-desc")
+  const fdBtn = el("button", "mini-btn")
+  const fdRefreshDesc = () => {
+    const popup = isFilePopup()
+    fdBtn.textContent = popup ? "改为直接展示" : "改为弹窗查看"
+    fdDesc.textContent = popup
+      ? "弹窗查看：read/write/edit/patch 等文件卡片收敛为文件链接，点击弹窗查看内容（当前会话立即生效）"
+      : "直接展示：read/write/edit/patch 等文件内容在卡片内直接展示（现状）"
+  }
+  fdBtn.onclick = () => {
+    setFileDisplaySetting(isFilePopup() ? "inline" : "popup")
+    fdRefreshDesc()
+  }
+  fdInfo.append(el("div", "settings-row-name", "文件展示方式"), fdDesc)
+  fdRow.append(fdInfo, fdBtn)
+  list.appendChild(fdRow)
+
   settingsBody.appendChild(list)
   appearanceRefresh = refreshDesc
   refreshDesc()
   ttRefreshDesc()
+  fdRefreshDesc()
 }
 
 async function renderSettingsEnv() {

@@ -5,7 +5,7 @@
  * 环境立即加载）；卡内文本渲染上限同 show 口径，超出截断引导「原文件」查看全文。
  */
 import type { ContentBlock } from "@gebai/sdk"
-import { el, filesContent, filesDownload } from "./state"
+import { el, filesPreview } from "./state"
 import { copyText, desktopDownloadHint } from "./ui"
 import { highlightedCode, markdownBlock, blockText } from "./markdown"
 import { openImageViewer } from "./diagram"
@@ -82,7 +82,8 @@ function fileToolbar(opts: { copy?: () => string; source?: () => void; download?
     a.className = "icon-btn file-dl-icon"
     a.title = "下载"
     a.innerHTML = ICON_DOWNLOAD
-    a.href = filesDownload(dl.sessionId, dl.path)
+    // 经 files/preview 附件形式获取（会话相对与项目绝对路径统一入口）
+    a.href = filesPreview(dl.sessionId, dl.path, true)
     a.download = dl.name
     a.onclick = () => desktopDownloadHint(dl.name)
     bar.appendChild(a)
@@ -115,6 +116,32 @@ function fileCard(title: string, badge: string | undefined, toolbar: HTMLElement
   head.appendChild(toolbar)
   card.append(head, body)
   return card
+}
+
+/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 关闭 + 内容区，Esc/点击遮罩关闭。 */
+function previewShell(name: string): { overlay: HTMLElement; body: HTMLElement } {
+  const overlay = el("div", "preview-overlay")
+  const card = el("div", "preview-card")
+  const head = el("div", "preview-head")
+  const closeBtn = el("button", "preview-close", "✕")
+  head.append(el("span", "preview-title", name), closeBtn)
+  const body = el("div", "preview-body")
+  card.append(head, body)
+  overlay.appendChild(card)
+  document.body.appendChild(overlay)
+  function closePreview() {
+    overlay.remove()
+    document.removeEventListener("keydown", onKey)
+  }
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") closePreview()
+  }
+  document.addEventListener("keydown", onKey)
+  overlay.onclick = (e) => {
+    if (e.target === overlay) closePreview()
+  }
+  closeBtn.onclick = closePreview
+  return { overlay, body }
 }
 
 /** 按文件名推断下载徽标（mime 缺省时的兜底展示）。 */
@@ -173,17 +200,17 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
   const fail = (err: unknown) => body.appendChild(blockText(`内容加载失败：${(err as Error).message}。可点击工具栏「下载」获取文件。`))
   if (kind === "image") {
     const img = document.createElement("img")
-    img.src = filesContent(sessionId, b.path)
+    img.src = filesPreview(sessionId, b.path)
     img.alt = name
     img.className = "file-img"
     img.loading = "lazy"
-    img.onclick = () => openImageViewer(filesContent(sessionId, b.path), name)
+    img.onclick = () => openImageViewer(filesPreview(sessionId, b.path), name)
     body.appendChild(img)
     return
   }
   if (kind === "pdf") {
     const frame = document.createElement("iframe")
-    frame.src = filesContent(sessionId, b.path)
+    frame.src = filesPreview(sessionId, b.path)
     frame.title = name
     frame.className = "file-frame"
     frame.loading = "lazy"
@@ -198,7 +225,7 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
       body.appendChild(el("div", "file-fallback", "📦 该类型无内联预览，可点击工具栏「下载」获取文件"))
       return
     }
-    void fetch(filesContent(sessionId, b.path))
+    void fetch(filesPreview(sessionId, b.path))
       .then(async (r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         const text = await r.text()
@@ -228,48 +255,28 @@ function mimeFor(name: string, _origin: string): string {
   return "text/plain"
 }
 
-/** 原文件查看弹窗（工具栏「原文件」入口）：图片直显 / PDF 内嵌 / md 渲染 / html 沙箱 iframe / 文本高亮。 */
+/** 原文件查看弹窗（工具栏「原文件」/ 文件链接点击入口）：图片直显 / PDF 内嵌 / md 渲染 / html 沙箱 iframe / 文本高亮。
+ *  取数统一经 files/preview（会话相对 tmp/ 路径与项目绝对路径均支持，服务端按用户隔离边界解析）。 */
 export function openFilePreview(sessionId: string, name: string, path: string, mime?: string): void {
-  const overlay = el("div", "preview-overlay")
-  const card = el("div", "preview-card")
-  const head = el("div", "preview-head")
-  const closeBtn = el("button", "preview-close", "✕")
-  head.append(el("span", "preview-title", name), closeBtn)
-  const body = el("div", "preview-body")
-  card.append(head, body)
-  overlay.appendChild(card)
-  document.body.appendChild(overlay)
-
-  function closePreview() {
-    overlay.remove()
-    document.removeEventListener("keydown", onKey)
-  }
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closePreview()
-  }
-  document.addEventListener("keydown", onKey)
-  overlay.onclick = (e) => {
-    if (e.target === overlay) closePreview()
-  }
-  closeBtn.onclick = closePreview
+  const { body } = previewShell(name)
 
   const kind = fileKind(name, mime ?? "")
   if (kind === "image") {
     const img = document.createElement("img")
-    img.src = filesContent(sessionId, path)
+    img.src = filesPreview(sessionId, path)
     img.alt = name
     body.appendChild(img)
     return
   }
   if (kind === "pdf") {
     const frame = document.createElement("iframe")
-    frame.src = filesContent(sessionId, path)
+    frame.src = filesPreview(sessionId, path)
     frame.title = name
     frame.style.cssText = "width:100%;height:72vh;border:0;border-radius:8px;background:#fff"
     body.appendChild(frame)
     return
   }
-  void fetch(filesContent(sessionId, path))
+  void fetch(filesPreview(sessionId, path))
     .then(async (r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const text = await r.text()
@@ -289,4 +296,19 @@ export function openFilePreview(sessionId: string, name: string, path: string, m
     .catch((err) => {
       body.appendChild(blockText(`无法预览该文件: ${(err as Error).message}。可点击「下载」查看。`))
     })
+}
+
+/** 内联内容弹窗（文件链接 chip 的 write 类入口——待写入内容直接渲染不取数）：md 按语言渲染、其余语法高亮。 */
+export function openTextPreview(name: string, text: string, lang?: string): void {
+  const { body } = previewShell(name)
+  const kind = fileKind(name, "")
+  const useLang = lang ?? langForFile(name, "")
+  if (kind === "markdown" || useLang === "markdown") {
+    body.appendChild(markdownBlock(text))
+    return
+  }
+  const pre = el("pre")
+  pre.className = "preview-code"
+  pre.appendChild(highlightedCode(useLang, text))
+  body.appendChild(pre)
 }

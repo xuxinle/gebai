@@ -115,8 +115,9 @@ export function resolveInSandbox(root: string, input: string): string {
   return abs
 }
 
-/** 符号链接逃逸检查：abs 及其祖先中任何指向沙箱外的符号链接都拒绝（DESIGN 路径沙箱）。 */
-function assertNoSymlinkEscape(root: string, abs: string, input: string): void {
+/** 符号链接逃逸检查：abs 及其祖先中任何指向沙箱外的符号链接都拒绝（DESIGN 路径沙箱）。
+ *  导出复用：files/preview 接口的绝对路径边界检查（用户数据目录内）与 resolveInSandbox 同规则。 */
+export function assertNoSymlinkEscape(root: string, abs: string, input: string): void {
   let cur = abs
   const seen = new Set<string>()
   while (cur !== root && !seen.has(cur)) {

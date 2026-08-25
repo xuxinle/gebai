@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ChatChunk, ContentBlock, DiagramFormat, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
+import type { ChatChunk, ContentBlock, DiagramFormat, Message, SessionInfo, SubAgentInfo, TodoItem } from "@gebai/sdk"
 import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
@@ -18,6 +18,7 @@ import { initThemeFx } from "./theme-fx"
 import { cnyCatTurnEnd, initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { initTurnTimer, isTurnTimerEnabled } from "./turn-timer"
+import { initFileDisplay } from "./file-display"
 import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { addApproval, clearApprovals } from "./approvals"
 import {
@@ -257,7 +258,7 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
   const body = wrapper.querySelector<HTMLElement>(".msg-body")
   if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args })
 }
-function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string }) {
+function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string; file?: Message["file"] }) {
   const cur = getCurrentSession()
   if (ev.sessionId !== cur?.id) {
     // 切走会话时结果不渲染，但配对必须清理：残留会让切回时 loadMessages 按「未完成配对」
@@ -281,7 +282,7 @@ function onToolResult(ev: { sessionId: string; toolCallId: string; name: string;
   const sub = runId ? runs.get(ev.sessionId)?.sessionRuns?.get(runId) : undefined
   const parent = sub?.body
   // ask 选项询问分支：更新消息流中的问答卡片（头部完成态 + 回答；无配对时兜底独立结果消息）
-  appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent)
+  appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent, ev.file)
   if (sub) scrollSessionSticky(sub.body)
 }
 function onMessageCompact(ev: { sessionId: string; count: number; summary: string }) {
@@ -847,6 +848,12 @@ function hideSplash(): void {
 async function init() {
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initTurnTimer()
+  initFileDisplay() // 文件展示方式（直显/弹窗）跨标签同步；变更时重载当前会话消息
+  document.addEventListener("gebai:file-display-change", () => {
+    // 渲染是结构性的（文件链接 chip ↔ 内联内容），切换后重载当前会话即时生效
+    const cur = getCurrentSession()
+    if (cur) void loadMessages(cur.id)
+  })
   initTheme()
   initThemeFx() // 各主题画布环境特效（随主题切换/低功耗启停）
   initCnyCat() // 招财猫（cny 主题专属，随主题切换挂载/卸载）
@@ -888,7 +895,7 @@ async function init() {
       // 长工具执行心跳：阻塞类工具（sh/py 长命令）执行期间无其他数据，据此刷新活跃，防空闲看门狗误取消
       touchRunActivity(ev.sessionId)
     } else if (ev.type === "event.tool.result") {
-      onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
+      onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined, file: ev.payload.file as Message["file"] })
     } else if (ev.type === "event.message.compact") {
       onMessageCompact({ sessionId: ev.sessionId, count: Number(ev.payload.count ?? 0), summary: String(ev.payload.summary ?? "") })
     } else if (ev.type === "event.session.ctx") {

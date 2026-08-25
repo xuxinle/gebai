@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import type { Context } from "hono"
 import { serveStatic } from "hono/bun"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { rename } from "node:fs/promises"
 import { join } from "node:path"
 import type { AttachmentInput, EnvVarSource, FeedbackInfo, FeedbackInput, FileEntry, TodoItem } from "@gebai/sdk"
@@ -471,6 +471,30 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     })
   })
 
+  // 文件预览（DESIGN「文件链接弹窗查看」）：read/write/edit/patch 等文件工具卡片链接的取数入口——
+  // 会话相对路径以 tmp/ 为根；绝对路径（code 项目文件）按用户隔离边界放行（沙箱用户限本用户数据目录内）。
+  // ?download=1 时以附件形式返回（文件卡工具栏下载对项目文件同样经此入口）。
+  app.get("/api/v1/sessions/:id/files/preview", async (c) => {
+    const user = await userOf(c)
+    const path = c.req.query("path") || ""
+    let safe: string
+    try {
+      safe = d.store.resolvePreviewFile(c.req.param("id"), user.id, path, d.sandbox.enforcedFor(user.id))
+    } catch (err) {
+      return c.json({ error: String((err as Error).message || err) }, 403)
+    }
+    let isFile = false
+    try {
+      isFile = statSync(safe).isFile()
+    } catch {
+      return c.json({ error: `file not found: ${path}` }, 404)
+    }
+    if (!isFile) return c.json({ error: `not a file: ${path}` }, 404)
+    const headers: Record<string, string> = {}
+    if (c.req.query("download") === "1") headers["Content-Disposition"] = `attachment; filename="${encodeURIComponent(path.replace(/\\/g, "/").split("/").pop() || "file")}"`
+    return new Response(Bun.file(safe), { headers })
+  })
+
   // Tools
   app.get("/api/v1/tools", async (c) => {
     return c.json(
@@ -720,6 +744,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         "/api/v1/sessions/{id}/files": { get: { summary: "会话临时文件列表" } },
         "/api/v1/sessions/{id}/files/content": { get: { summary: "读取文件内容" } },
         "/api/v1/sessions/{id}/files/download": { get: { summary: "下载单文件" }, post: { summary: "多选打包下载（zip）" } },
+        "/api/v1/sessions/{id}/files/preview": { get: { summary: "文件预览（会话相对/项目绝对路径，点击弹窗查看用）" } },
         "/api/v1/tools": { get: { summary: "工具集查询" }, patch: { summary: "工具启停" } },
         "/api/v1/sub-agents": { get: { summary: "子Agent 能力列表" } },
         "/api/v1/feedback": { get: { summary: "反馈查询（管理员可全部）" }, post: { summary: "提交反馈" } },
