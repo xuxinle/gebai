@@ -18,7 +18,7 @@ const wsLoginRateLimit = new TokenBucket(30, 1)
 const SESSION_ID_MSGS = new Set([
   "session.get", "session.delete", "session.rename", "session.switch", "session.compact",
   "session.prompt", "session.attachment.upload", "session.todo.get", "session.env.get", "session.env.set",
-  "session.files.list", "session.files.get", "session.cancel", "session.restore",
+  "session.files.list", "session.files.get", "session.cancel", "session.restore", "session.attach",
   "approval.decide", "choice.decide", "env.decide", "draw.result", "capture.result",
 ])
 
@@ -247,6 +247,16 @@ export async function handleWsMessage(
       if (!s) return reply(false, undefined, "session not found")
       d.engine.cancel(sessionId)
       return reply(true)
+    }
+    case "session.attach": {
+      // 运行中会话附加快照（DESIGN「运行中会话恢复」）：页面刷新/切换后前端恢复在途流与待决交互卡。
+      // 归属校验（仅所有者）；lastSeq 为该用户事件日志基线——快照反映到该 seq 为止，前端附加流据此
+      // 过滤已含入快照的事件并按 seq 重放缺口（与断线恢复同一套 seq 机制）
+      const sessionId = String(p.id)
+      const s = await d.store.load(sessionId, user.id)
+      if (!s) return reply(false, undefined, "session not found")
+      const snap = d.engine.attachSnapshot(sessionId)
+      return reply(true, { ...(snap ?? { running: false, pending: [] }), lastSeq: d.state ? d.state.journal(user.id).lastSeq() : 0 })
     }
     case "approval.decide": {
       const sessionId = String(p.id)

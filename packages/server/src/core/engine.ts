@@ -134,6 +134,8 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
 interface Approval {
   sessionId: string
   toolCallId: string
+  /** 工具名（attach 快照重渲染审批卡用）。 */
+  tool: string
   resolve: (verdict: ApprovalVerdict) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -142,6 +144,10 @@ interface Approval {
 type ApprovalVerdict = "approved" | "rejected" | "timeout"
 
 interface Choice {
+  /** 展示载荷（attach 快照重渲染选择卡用）。 */
+  prompt: string
+  options: ChoiceOption[]
+  multi: boolean
   resolve: (result: ChoiceResult) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -153,6 +159,8 @@ interface DrawResult {
 }
 
 interface DrawWait {
+  /** 展示载荷（attach 快照重渲染图表渲染请求用）。 */
+  render: { code: string; name?: string; format?: import("@gebai/sdk").DiagramFormat }
   resolve: (result: DrawResult | null) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -166,6 +174,8 @@ interface CaptureResult {
 }
 
 interface CaptureWait {
+  /** 展示载荷（attach 快照重渲染捕获请求用）。 */
+  opts: { fullPage: boolean; delayMs: number }
   resolve: (result: CaptureResult | null) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -179,12 +189,27 @@ interface PendingCapture {
 /** ask 填值分支：等待中的环境变量请求（envId → 变量名 + 回调）。 */
 interface EnvWait {
   name: string
+  /** 展示载荷（attach 快照重渲染填值卡用）。 */
+  description: string
+  secret: boolean
   resolve: (ok: boolean) => void
   timer: ReturnType<typeof setTimeout>
 }
 
+/** 运行中任务的流式快照（attach 用）：当前在途 assistant 回合的累积文本/推理（尚未持久化，
+ *  页面刷新后从存储恢复不了的部分）。 */
+interface StreamSnapshot {
+  messageId: string
+  text: string
+  reasoning: string
+  session?: boolean
+  sessionRunId?: string
+}
+
 interface TaskState {
   controller: AbortController
+  /** 任务开始时刻（Date.now()；attach 快照恢复前端单轮计时器起点用）。 */
+  startedAt: number
   /** 用户显式停止标记：取消 vs 显式拒绝审批的区分依据（拒绝需落盘，取消短路不落盘）。 */
   cancelled?: boolean
   approvals: Map<string, Approval>
@@ -209,7 +234,7 @@ interface TaskState {
   enabledTools?: string[]
   /** 交互模式（none/multi_turn/realtime，DESIGN「交互模式」）：工具声明的最低可用模式高于此值时被禁用。 */
   interactionMode: InteractionMode
-  /** 发起任务用户的角色（admin/user；公共资源权限判定用，如公共 mini-tool 仅管理员可写）。 */
+  /** 发起任务用户的角色（admin/user；公共资源权限判定用）。 */
   role?: string
   /** 输出方式（final_only/streaming）：final_only 不推送文本增量与推理流（仅最终响应）。 */
   outputMode: OutputMode
@@ -219,6 +244,9 @@ interface TaskState {
   envRequests: Map<string, EnvWait>
   /** 环境变量值先于注册到达时排队。 */
   pendingEnvRequests: Map<string, string>
+  /** 在途 assistant 回合流式累积（delta/reasoning 发布点更新，message.done 清空——已持久化部分
+   *  由存储恢复；页面刷新 attach 时据此重建未持久化的部分文本）。 */
+  stream?: StreamSnapshot
 }
 
 export interface AgentEngineOptions {
@@ -274,6 +302,31 @@ export class AgentEngine {
 
   isRunning(sessionId: string): boolean {
     return this.tasks.has(sessionId)
+  }
+
+  /** 运行中会话附加快照（session.attach，DESIGN「运行中会话恢复」）：页面刷新/切换后前端据此恢复——
+   *  在途流式累积（未持久化的部分文本/推理）+ 待决交互清单（审批/选择/填值/画图/捕获——事件已推送过、
+   *  新页面收不到，凭此重渲染卡片继续作答）。未运行返回 null。 */
+  attachSnapshot(sessionId: string): { running: true; startedAt: number; stream?: StreamSnapshot; pending: Array<Record<string, unknown>> } | null {
+    const task = this.tasks.get(sessionId)
+    if (!task) return null
+    const pending: Array<Record<string, unknown>> = []
+    for (const [toolCallId, a] of task.approvals) {
+      pending.push({ type: "approval", toolCallId, tool: a.tool, retries: task.retries.get(toolCallId) ?? 0 })
+    }
+    for (const [choiceId, c] of task.choices) {
+      pending.push({ type: "choice", choiceId, prompt: c.prompt, options: c.options, multi: c.multi })
+    }
+    for (const [envId, e] of task.envRequests) {
+      pending.push({ type: "env", envId, name: e.name, description: e.description, secret: e.secret })
+    }
+    for (const [renderId, d] of task.draws) {
+      pending.push({ type: "draw", renderId, code: d.render.code, name: d.render.name, format: d.render.format })
+    }
+    for (const [captureId, c] of task.captures) {
+      pending.push({ type: "capture", captureId, fullPage: c.opts.fullPage, delay: c.opts.delayMs })
+    }
+    return { running: true, startedAt: task.startedAt, stream: task.stream, pending }
   }
 
   /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务等）；幂等，供 REST/WS 删除会话入口调用。 */
@@ -546,7 +599,7 @@ export class AgentEngine {
       onAbort = () => done(null)
       timer = setTimeout(() => done(null), DRAW_TIMEOUT)
       signal?.addEventListener("abort", onAbort, { once: true })
-      task.draws.set(renderId, { resolve: done, timer })
+      task.draws.set(renderId, { render, resolve: done, timer })
     })
   }
 
@@ -630,7 +683,7 @@ export class AgentEngine {
       onAbort = () => done(null)
       timer = setTimeout(() => done(null), timeoutMs)
       signal?.addEventListener("abort", onAbort, { once: true })
-      task.captures.set(captureId, { resolve: done, timer })
+      task.captures.set(captureId, { opts: { fullPage: opts.fullPage === true, delayMs: opts.delayMs ?? 0 }, resolve: done, timer })
     })
   }
 
@@ -663,7 +716,7 @@ export class AgentEngine {
       onAbort = () => done(null)
       timer = setTimeout(() => done(null), APPROVAL_TIMEOUT)
       signal?.addEventListener("abort", onAbort, { once: true })
-      task.choices.set(choiceId, { resolve: done, timer })
+      task.choices.set(choiceId, { prompt, options, multi: multi === true, resolve: done, timer })
     })
   }
 
@@ -732,12 +785,31 @@ export class AgentEngine {
       onAbort = () => done(false)
       timer = setTimeout(() => done(false), APPROVAL_TIMEOUT)
       signal?.addEventListener("abort", onAbort, { once: true })
-      task.envRequests.set(envId, { name, resolve: done, timer })
+      task.envRequests.set(envId, { name, description, secret, resolve: done, timer })
     })
   }
 
   private publish(sessionId: string, type: string, payload: Record<string, unknown>) {
     this.opts.events.publish({ type, sessionId, payload, timestamp: Date.now() })
+  }
+
+  /** 在途流式快照累积（attach 用）：delta/reasoning 发布点同步更新（messageId 变化开启新快照）；
+   *  消息持久化点经 clearStream 清空（已持久化部分由存储恢复）。 */
+  private noteStream(sessionId: string, patch: { messageId?: string; text?: string; reasoning?: string; session?: boolean; sessionRunId?: string }): void {
+    const task = this.tasks.get(sessionId)
+    if (!task) return
+    if (patch.messageId !== undefined && patch.messageId !== task.stream?.messageId) {
+      task.stream = { messageId: patch.messageId, text: "", reasoning: "", session: patch.session, sessionRunId: patch.sessionRunId }
+    }
+    if (!task.stream) return
+    if (patch.text !== undefined) task.stream.text += patch.text
+    if (patch.reasoning !== undefined) task.stream.reasoning = patch.reasoning
+  }
+
+  /** 在途流式快照清空（消息已持久化，刷新恢复改由存储承担）。 */
+  private clearStream(sessionId: string): void {
+    const task = this.tasks.get(sessionId)
+    if (task) task.stream = undefined
   }
 
   /**
@@ -981,7 +1053,7 @@ export class AgentEngine {
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
     const controller = new AbortController()
-    const task: TaskState = { controller, approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
+    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
     this.tasks.set(sessionId, task)
     try {
       const session = await this.opts.store.load(sessionId, user)
@@ -1088,6 +1160,7 @@ export class AgentEngine {
             reasoning: res.reasoning.trim() ? res.reasoning.trim() : undefined,
             createdAt: Date.now(),
           }, user)
+          this.clearStream(sessionId) // 最终回复已持久化，在途快照清空
         }
         if (controller.signal.aborted) break
 
@@ -1868,9 +1941,11 @@ export class AgentEngine {
       const call = await this.callModelWithOverflowRecovery(sessionId, user, provider, messages, schemas, params.systemPrompt, signal, extraParams, ctxUsage, (chunk) => {
         // 输出方式：仅最终响应（final_only）不推送文本增量与推理流，流式输出（streaming）正常推送
         if (chunk.type === "text") {
+          this.noteStream(sessionId, { messageId: assistantMsgId, text: chunk.text })
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, sessionId })
         } else if (chunk.type === "reasoning" && chunk.text?.trim()) {
           reasoningAcc += chunk.text
+          this.noteStream(sessionId, { reasoning: reasoningAcc })
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, sessionId })
         }
       })
@@ -1900,6 +1975,7 @@ export class AgentEngine {
         createdAt: Date.now(),
       })
       messages.push({ role: "assistant", content: text, toolCalls })
+      this.clearStream(sessionId) // 本轮文本已随 assistant(toolCalls) 持久化，在途快照清空
 
       // 任务中途上下文腾挪（真实 usage 驱动）：本次调用返回的真实 input tokens 超过窗口阈值
       // （80%）时压缩最早历史，防止长任务继续膨胀——已持久化的 assistant 消息随 loadHistory
@@ -2360,9 +2436,11 @@ export class AgentEngine {
         if (chunk.type === "text") {
           // session 标记：区别于主循环推送，渠道层可据此识别「新会话执行过程」事件；
           // 仅最终响应（final_only）不推送新会话过程文本
+          this.noteStream(sessionId, { messageId: assistantMsgId, text: chunk.text, session: true, sessionRunId: archive.runId })
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, session: true, sessionRunId: archive.runId, sessionId })
         } else if (chunk.type === "reasoning" && chunk.text?.trim()) {
           reasoningAcc += chunk.text
+          this.noteStream(sessionId, { reasoning: reasoningAcc })
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, session: true, sessionRunId: archive.runId, messageId: assistantMsgId, sessionId })
         }
       }, extraParams, sessionId)
@@ -2373,12 +2451,14 @@ export class AgentEngine {
         if (text) {
           await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined })
         }
+        this.clearStream(sessionId)
         this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: text, sessionId })
         return text
       }
 
       await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined, toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })) })
       messages.push({ role: "assistant", content: text, toolCalls })
+      this.clearStream(sessionId) // 本轮文本已入存档，在途快照清空
       let stopped = false
       for (const tc of toolCalls) {
         if (activeSignal.aborted) throw new Error(abortReason())
@@ -2497,7 +2577,7 @@ export class AgentEngine {
     return lastText
   }
 
-  private waitApproval(sessionId: string, toolCallId: string, _tool: string, signal?: AbortSignal): Promise<ApprovalVerdict> {
+  private waitApproval(sessionId: string, toolCallId: string, tool: string, signal?: AbortSignal): Promise<ApprovalVerdict> {
     const task = this.tasks.get(sessionId)!
     const pre = task.pendingDecisions.get(toolCallId)
     if (pre !== undefined) {
@@ -2519,7 +2599,7 @@ export class AgentEngine {
       onAbort = () => done("timeout")
       timer = setTimeout(() => done("timeout"), APPROVAL_TIMEOUT)
       signal?.addEventListener("abort", onAbort, { once: true })
-      task.approvals.set(toolCallId, { sessionId, toolCallId, resolve: done, timer })
+      task.approvals.set(toolCallId, { sessionId, toolCallId, tool, resolve: done, timer })
     })
   }
 

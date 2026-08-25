@@ -34,11 +34,13 @@ class FakeProvider implements LLMProvider {
   askEnvName = "MY_KEY"
   /** askenv 第二轮工具（默认 sh 验证注入后可读；测试可换无需审批工具避免审批等待）。 */
   askEnvSecondTool = "sh"
+  /** streamwait 模式放行钩子（测试控制第一轮文本后的阻塞解除）。 */
+  release?: () => void
   /** 首次 chat 调用即抛此错（多模态图片降级场景用）。 */
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "streamwait" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -256,6 +258,15 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // streamwait：第一轮输出部分文本后阻塞（测试控制放行）——attachSnapshot 在途流断言用
+    if (this.mode === "streamwait" && this.calls === 1) {
+      yield { type: "text", text: "partial text" }
+      await new Promise<void>((resolve) => {
+        this.release = resolve
+      })
+      yield { type: "done" }
+      return
+    }
     // subautoload：新会话（combo_test 纯 md 组合，未预加载 code）内直接调用 code_ls（新会话循环路由自愈）
     if (this.mode === "subautoload" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-sa1", name: "agent_run", arguments: { agents: ["combo_test"], input: "list files" } } }
@@ -286,7 +297,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "streamwait" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -640,6 +651,44 @@ console.log("defined ok")`,
     await run
     const loaded = await store.load(session.id)
     expect(loaded!.messages.some((m) => m.role === "tool")).toBe(true)
+    cleanup(home)
+  })
+
+  test("attachSnapshot：审批等待中列出待决交互，任务结束后为 null", async () => {
+    const { home, engine, store } = await setup("approval")
+    const session = await store.createSession("default", "t")
+    // 未运行：null
+    expect(engine.attachSnapshot(session.id)).toBeNull()
+    const run = engine.run(session.id, "default", "run sh")
+    await new Promise((r) => setTimeout(r, 50))
+    // 审批等待中：running + 待决审批（工具名/重试计数载荷完整，前端重渲染审批卡用）
+    const snap = engine.attachSnapshot(session.id)
+    expect(snap).not.toBeNull()
+    expect(snap!.running).toBe(true)
+    expect(typeof snap!.startedAt).toBe("number")
+    expect(snap!.pending).toHaveLength(1)
+    expect(snap!.pending[0]).toMatchObject({ type: "approval", toolCallId: "tc-1", tool: "sh", retries: 0 })
+    await engine.decideApproval(session.id, "tc-1", true)
+    await run
+    expect(engine.attachSnapshot(session.id)).toBeNull()
+    cleanup(home)
+  })
+
+  test("attachSnapshot：在途流式累积（未持久化部分文本），回合持久化后清空", async () => {
+    const { home, engine, store, provider } = await setup("streamwait")
+    const session = await store.createSession("default", "t")
+    const run = engine.run(session.id, "default", "hello")
+    // 等待部分文本产出（provider 阻塞在 yield 之后）
+    for (let i = 0; i < 100 && !provider.release; i++) await new Promise((r) => setTimeout(r, 10))
+    const snap = engine.attachSnapshot(session.id)
+    expect(snap).not.toBeNull()
+    expect(snap!.stream?.text).toBe("partial text")
+    provider.release!()
+    await run
+    // 任务结束：快照为 null，全文已持久化（存储恢复承担）
+    expect(engine.attachSnapshot(session.id)).toBeNull()
+    const loaded = await store.load(session.id)
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "partial text")).toBe(true)
     cleanup(home)
   })
 

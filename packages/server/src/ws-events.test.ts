@@ -166,6 +166,74 @@ describe("WS event push", () => {
     expect(toolMsg?.blocks?.some((b) => b.type === "image")).toBe(true)
     ws.close()
   })
+
+  test("session.attach：运行中会话快照（在途流 + 日志基线 seq），任务结束后 running=false", async () => {
+    // 阻塞 provider：第一轮输出部分文本后挂起（测试控制放行）——attach 快照的 stream 断言用
+    class BlockingFake implements LLMProvider {
+      readonly id = "blocking"
+      release?: () => void
+      capabilities(): LLMCapabilities {
+        return { streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 1000 }
+      }
+      async *chat(_msgs: MessageLike[], _opts?: ChatOptions): AsyncIterable<LLMChunk> {
+        yield { type: "text", text: "partial " }
+        yield { type: "text", text: "text" }
+        await new Promise<void>((resolve) => {
+          this.release = resolve
+        })
+        yield { type: "done" }
+      }
+    }
+    const engine = handle.engine as unknown as { opts: { provider: LLMProvider } }
+    const orig = engine.opts.provider
+    const blocking = new BlockingFake()
+    engine.opts.provider = blocking
+    const s = (await (
+      await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
+    ).json()) as { id: string }
+
+    const ws = new WebSocket(`ws://127.0.0.1:${handle.server.port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve()
+      ws.onerror = () => reject(new Error("ws connect failed"))
+    })
+    const replyOf = (reqId: string) =>
+      new Promise<Record<string, unknown>>((resolve) => {
+        const onMsg = (m: MessageEvent) => {
+          const data = JSON.parse(String(m.data)) as { id?: string; ok?: boolean; payload?: Record<string, unknown> }
+          if (data.id === reqId) {
+            ws.removeEventListener("message", onMsg)
+            resolve({ ok: data.ok, ...(data.payload ?? {}) })
+          }
+        }
+        ws.addEventListener("message", onMsg)
+      })
+    // 未运行：running=false（刷新进入空闲会话的附加直接放弃）
+    const idleP = replyOf("r-attach-idle")
+    ws.send(JSON.stringify({ type: "session.attach", payload: { id: s.id }, id: "r-attach-idle" }))
+    expect((await idleP).running).toBe(false)
+    // 经 WS 发起任务（reply 即时确认，不等待任务完成；阻塞在部分文本后）
+    const promptP = replyOf("r-attach-prompt")
+    ws.send(JSON.stringify({ type: "session.prompt", payload: { id: s.id, prompt: "hello", stream: true }, id: "r-attach-prompt" }))
+    expect((await promptP).ok).toBe(true)
+    await waitFor(() => !!blocking.release)
+    const attachP = replyOf("r-attach-run")
+    ws.send(JSON.stringify({ type: "session.attach", payload: { id: s.id }, id: "r-attach-run" }))
+    const snap = (await attachP) as { running: boolean; stream?: { text: string }; lastSeq?: number; pending: unknown[] }
+    expect(snap.running).toBe(true)
+    expect(snap.stream?.text).toBe("partial text")
+    expect(typeof snap.lastSeq).toBe("number")
+    expect(Array.isArray(snap.pending)).toBe(true)
+    // 归属校验：不存在的会话拒绝
+    const missP = replyOf("r-attach-miss")
+    ws.send(JSON.stringify({ type: "session.attach", payload: { id: "0123456789abcdef0123456789abcdef" }, id: "r-attach-miss" }))
+    expect((await missP).ok).toBe(false)
+    // 放行收尾并还原 provider
+    blocking.release!()
+    await new Promise((r) => setTimeout(r, 150))
+    engine.opts.provider = orig
+    ws.close()
+  })
 })
 
 describe("SessionStore ownership", () => {

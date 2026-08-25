@@ -168,6 +168,8 @@ class GebaiClient {
   send(type: string, payload?: object, handlers?: { onOk?; onError?; timeoutMs?; queueOffline? }): () => void // 返回取消函数
   request<T>(type: string, payload?: object): Promise<T> // Promise 版 RPC
   sendPrompt(sessionId: string, prompt: string, opts?: { attachments?: AttachmentInput[]; messageId?; signal?; env? }): AsyncIterable<ChatChunk>
+  attachSession(sessionId: string): Promise<AttachSnapshot> // 运行中会话附加快照（session.attach）：running/stream（在途文本+推理）/pending（待决交互）/startedAt/lastSeq
+  attachStream(sessionId: string, opts?: { signal? }): AsyncIterable<ChatChunk> // 附加到运行中会话的实时流（页面刷新/切换恢复）：种子 chunk（快照在途文本）+ seq 缺口重放 + 实时续流；断线挂起重连后重新附加（resume 重置 + 重播种）
   // 附件（多模态）
   uploadAttachment(sessionId: string, file: Blob | Uint8Array, name: string): Promise<AttachmentInfo>
 }
@@ -1691,6 +1693,7 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 - **状态快照（`state.snapshot`）**：连接建立（本地模式）/登录成功（服务模式）后服务端自动推送，含当前会话/会话列表/运行中会话/日志基线 `lastSeq`/**模型上下文窗口 `maxContextTokens`**（engine `contextWindow()` 取自 provider capabilities，标题栏上下文占比显示用，0=未知）；客户端作为模型基线，也可主动请求（幂等）；**SDK 快照模型保留 `maxContextTokens` 字段**（重建快照不丢弃，标题栏占比显示的数据源）
 - **重连自动重新认证**：WS 连接无法携带 Header，SDK 持有令牌/API Key 时在每次建连后自动发送 `auth.login { token }` / `auth.login { apiKey }` 恢复用户上下文（服务模式重连不掉回未登录态）
 - **流式任务断线恢复**：`sendPrompt` 断线时**挂起**（不抛错），等待自动重连后按 `seq` 重放离线事件无缝续流；任务未确认接收时以快照判定（运行中→恢复；已跑完→从存储合成收尾；未开始→补发一次，遇协议错误码 `already_running` 视为已接受）；`overrun` 走全量重同步（`resume` 重置 + 存储内容重建）。**重放事件经全局 `onEvent` 分发**（与在线推送同通道）：离线期间的审批/选择/工具事件全局订阅者（前端卡片渲染）也能收到——重连后审批卡/工具卡可恢复，而非只进 `sendPrompt` 的 chunk 通道（此前离线窗口内的审批请求永远不渲染、任务卡死至超时）
+- **运行中会话恢复（页面刷新/切换，`session.attach`）**：断线恢复覆盖「连接断而页面在」，**页面刷新/切换进入运行中会话**是另一类恢复——页面内存态（运行态 runs、sendPrompt 流、待决交互卡片）全部丢失，事件早已推送过、重放基线（快照 lastSeq）也已越过。恢复链路：引擎在任务态上维护**附加快照**（`TaskState`：`startedAt` 任务开始时刻、`stream` 在途 assistant 回合的累积文本/推理——delta/reasoning 发布点同步累积、消息持久化点清空、含 session 标记路由到新会话容器；审批/选择/填值/画图/捕获的等待项保留**展示载荷**——工具名、prompt/options、env 名与说明、图表源码、捕获参数）→ `session.attach` 返回 `{ running, startedAt, stream, pending, lastSeq }`（归属校验同其余会话操作；lastSeq 为该用户日志基线）→ 前端 `loadMessages` 尾部触发附加：**待决交互卡片重建**（审批/选择/填值/画图/捕获走既有渲染入口，替换式幂等——不重建则任务干等到超时；审批锁输入随之恢复）→ `consumeTaskStream` 接管 SDK `attachStream`（与 `sendPrompt` 同构的 ChatChunk 迭代但不发起任务：订阅就位后请求快照，**在途文本/推理作为种子 chunk 先行**（session 标记路由到惰性重建的新会话折叠容器），按 seq 重放快照之后的事件（与断线恢复同一套机制，缺口 overrun 放弃附加由存储恢复兜底），此后实时续流到任务结束）——信号灯思考闪烁、停止按钮、单轮计时（起点用快照 startedAt）、空闲看门狗、收尾清理（审批卡/配对/自动标题）与发起页完全同构。附加期间再次断线：挂起重连后**重新附加**（`resume` 重置渲染态 + 新快照重播种，防内容重复）；附加竞态（任务已在附加前结束，running=false）立即结束迭代，视图由存储恢复兜底。防重：附加请求在途标记 + `runs` 已接管即跳过
 - **发送背压**：服务端所有 WS 发送经统一 sink（`makeWsSink`）——连接发送缓冲超 16MB 判定慢客户端，主动断开让其走自动重连 + seq 重放收敛（此前 `ws.send()` 返回值被忽略，慢客户端 + 高频流式下发送缓冲无界增长）
 
 WebSocket 消息格式（JSON）：
@@ -1729,6 +1732,7 @@ WebSocket 消息格式（JSON）：
 | `session.attachment.upload` | 上传附件（多模态，二进制分段或整体传输） |
 | `session.current` | 获取当前会话 |
 | `session.cancel` | 取消当前任务 |
+| `session.attach` | **运行中会话附加快照**（页面刷新/切换恢复用）：返回 `{ running, startedAt, stream, pending, lastSeq }`——在途流式累积（未持久化部分文本/推理 + messageId/session 标记）、待决交互清单（审批/选择/填值/画图/捕获，含重渲染所需全部载荷）、任务开始时刻与该用户事件日志基线 seq；`running=false` 表示未运行（前端放弃附加）；归属校验同其余会话操作 |
 | `session.compact` | 主动压缩会话上下文（支持范围参数，返回压缩条数与摘要） |
 | `session.prompt` | 发送对话消息（WS 通道发起任务，流式事件经 `event.*` 推送回流，reply 仅确认；payload 支持 `messageId` 可选字段，语义同 REST prompt） |
 | `session.attachment.upload` | 上传附件（WS 通道，base64 整体传输，返回会话内引用路径） |

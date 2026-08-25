@@ -266,6 +266,15 @@ export async function loadMessages(sessionId: string) {
   } else {
     lockToBottom()
   }
+  // 运行中会话附加（DESIGN「运行中会话恢复」）：页面刷新/切换进入运行中会话时恢复在途流与
+  // 待决交互卡。渲染完成后再附加（存储基线先上屏，在途文本作为流式消息续接其后）
+  void runningAttachHook?.(sessionId)
+}
+
+/** 运行中会话附加钩子（main.ts 注册实现；null 时无附加能力——单测环境等）。 */
+let runningAttachHook: ((sessionId: string) => Promise<void>) | null = null
+export function setRunningAttach(fn: (sessionId: string) => Promise<void>): void {
+  runningAttachHook = fn
 }
 
 /* ---------- 批量选择删除 ---------- */
