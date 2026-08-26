@@ -352,9 +352,13 @@ export const readTool: Tool = {
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件（整体覆盖）。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。",
+    "写入文件。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。默认整体覆盖；append:true 追加模式——内容接在文件末尾（文件不存在则新建）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写后续段（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
   card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
-  parameters: schema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
+  parameters: schema({
+    path: { type: "string" },
+    content: { type: "string" },
+    append: { type: "boolean", description: "追加模式：内容接在文件末尾（不存在则新建）；大文件分段续写用" },
+  }, ["path", "content"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
     // 安全模式：写入限定用户目录内（降级而非禁用）
@@ -363,24 +367,30 @@ export const writeTool: Tool = {
     // 写范围守卫（子Agent 声明，引擎注入）：拒绝则作为工具结果返回（不落盘）
     const guardMsg = await ctx.writeGuard?.([path])
     if (guardMsg) return { output: guardMsg }
-    // 防误覆盖守卫（ZCode Write 语义）：已存在但未读过 → 拒绝并引导先 read（模型下一轮自纠，一次往返）
-    if (ctx.fileGuard) {
-      let exists = true
-      try {
-        await ctx.readFile(path)
-      } catch {
-        exists = false
-      }
-      if (exists && !ctx.fileGuard.hasRead(path)) {
-        return {
-          output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
-        }
+    const append = args.append === true
+    let existing: string | null = null
+    try {
+      existing = await ctx.readFile(path)
+    } catch {
+      existing = null
+    }
+    // 防误覆盖守卫（ZCode Write 语义，覆盖/追加同规则）：已存在但未读过 → 拒绝并引导先 read（模型下一轮自纠，一次往返）
+    if (existing !== null && ctx.fileGuard && !ctx.fileGuard.hasRead(path)) {
+      return {
+        output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
       }
     }
-    await ctx.writeFile(path, String(args.content ?? ""))
+    const content = String(args.content ?? "")
+    const final = append && existing !== null ? existing + content : content
+    await ctx.writeFile(path, final)
     ctx.fileGuard?.markRead(path)
-    const blocks = artifactBlocks(previewLogicalPath(path, ctx), String(args.content ?? ""))
-    return { output: `已写入 ${args.path}（${String(args.content).length} 字符）`, blocks }
+    const blocks = artifactBlocks(previewLogicalPath(path, ctx), final)
+    return {
+      output: append && existing !== null
+        ? `已追加 ${content.length} 字符至 ${args.path}（现共 ${final.length} 字符）`
+        : `已写入 ${args.path}（${content.length} 字符）`,
+      blocks,
+    }
   },
 }
 

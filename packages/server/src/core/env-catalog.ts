@@ -26,6 +26,7 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "GEBAI_LLM_API_KEY", description: "LLM 接口密钥（敏感，仅本次任务临时注入，不落盘）" },
   { name: "GEBAI_LLM_API_KIND", description: "接口类型：openai（chat/completions）/ responses（OpenAI Responses）/ anthropic" },
   { name: "GEBAI_LLM_MAX_CONTEXT", description: "单次上下文最大 token 预算（数字，默认 128000）；覆盖服务端启动配置" },
+  { name: "GEBAI_LLM_MAX_OUTPUT_TOKENS", description: "单次响应输出 token 上限（数字）：大文件生成截断防护；Anthropic 接口必填（缺省 8192）" },
   { name: "GEBAI_LLM_EXTRA_PARAMS", description: "额外模型接口参数（JSON 对象，如 {\"reasoning_effort\":\"high\"}），每次请求顶层合并" },
   { name: "GEBAI_LLM_MULTIMODAL", description: "主模型多模态能力声明：true/false（true 时图片附件 base64 内联进消息）；覆盖服务端启动配置" },
   { name: "GEBAI_VISION_MODEL", description: "视觉（外挂多模态）模型名称；配置后 vision 工具使用独立视觉 Provider（本任务生效）" },

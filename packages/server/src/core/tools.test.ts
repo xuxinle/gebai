@@ -1097,6 +1097,32 @@ describe("global tools", () => {
     cleanup(home)
   })
 
+  test("write append 追加模式：新建等价写入、追加接在末尾、未读已存在文件同受守卫限制", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-write-append-"))
+    const c = ctx(home)
+    const read = new Set<string>()
+    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    // append 到不存在的文件 = 新建
+    const create = await writeTool.execute({ path: "big.txt", content: "part1\n", append: true }, c)
+    expect(create.output).toContain("已写入")
+    expect(await Bun.file(join(c.workdir, "big.txt")).text()).toBe("part1\n")
+    // append 接在已写内容末尾（write 成功即登记已读，追加放行）
+    const app = await writeTool.execute({ path: "big.txt", content: "part2\n", append: true }, c)
+    expect(app.output).toContain("已追加")
+    expect(await Bun.file(join(c.workdir, "big.txt")).text()).toBe("part1\npart2\n")
+    // 未读过的已存在文件 append 同样拒绝（防盲覆盖语义一致）
+    writeFileSync(join(c.workdir, "pre.txt"), "v1")
+    const blind = await writeTool.execute({ path: "pre.txt", content: "v2", append: true }, c)
+    expect(blind.output).toContain("防盲覆盖")
+    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("v1")
+    // 无 fileGuard 兼容放行（行为不变）
+    const c2 = ctx(mkdtempSync(join(tmpdir(), "gebai-write-append2-")))
+    await writeTool.execute({ path: "a.txt", content: "x" }, c2)
+    await writeTool.execute({ path: "a.txt", content: "y", append: true }, c2)
+    expect(await Bun.file(join(c2.workdir, "a.txt")).text()).toBe("xy")
+    cleanup(home)
+  })
+
   test("read lineNumbers=true 前缀真实行号（全文/offset 切片/尾部切片）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-read-ln-"))
     const c = ctx(home)

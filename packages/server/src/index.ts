@@ -148,6 +148,8 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
     apiKey,
     model,
     maxContextTokens: Number(process.env.GEBAI_LLM_MAX_CONTEXT || 128000),
+    // 单次响应输出 token 上限（大文件生成截断防护）：可选，未配置时 openai/responses 用服务端缺省、anthropic 用 8192
+    ...(process.env.GEBAI_LLM_MAX_OUTPUT_TOKENS ? { maxOutputTokens: Number(process.env.GEBAI_LLM_MAX_OUTPUT_TOKENS) } : {}),
     // 主模型多模态能力须显式声明（GEBAI_LLM_MULTIMODAL=true）：默认 false，
     // 避免纯文本模型谎报能力导致图片内联被接口拒绝；视觉能力请配置 GEBAI_VISION_* 外挂模型
     multimodal: process.env.GEBAI_LLM_MULTIMODAL === "true",

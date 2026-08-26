@@ -11,6 +11,7 @@ import { EnvManager } from "./env"
 import { EventBus } from "./event-bus"
 import { SubAgentManager } from "./subagents"
 import { AgentEngine } from "./engine"
+import { sessionPath } from "./paths"
 import type { LLMProvider, LLMChunk, ChatOptions } from "./llm"
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 
@@ -18,8 +19,8 @@ class HardenProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
   seen: MessageLike[][] = []
-  /** 每轮行为：{ mode: "text" | "tool" | "hang" | "badargs", tool?, argsError? }，按 calls 序号。 */
-  script: Array<{ mode: "text" | "tool" | "hang" | "badargs"; tool?: string; text?: string }> = []
+  /** 每轮行为：{ mode: "text" | "tool" | "hang" | "badargs" | "trunc", tool?, text?, raw?, stopReason? }，按 calls 序号。 */
+  script: Array<{ mode: "text" | "tool" | "hang" | "badargs" | "trunc"; tool?: string; text?: string; raw?: string; stopReason?: string }> = []
   maxCtx = 100000
   usageInput = 0
   capabilities(): LLMCapabilities {
@@ -43,6 +44,12 @@ class HardenProvider implements LLMProvider {
     if (step.mode === "badargs") {
       yield { type: "tool_call", toolCall: { id: `tc-bad-${this.calls}`, name: "read", arguments: {} }, toolArgsError: "{path: 非法JSON" }
       yield { type: "done" }
+      return
+    }
+    if (step.mode === "trunc") {
+      // 输出上限截断：参数 JSON 未生成完（raw 为截断前缀），finish_reason=length
+      yield { type: "tool_call", toolCall: { id: `tc-trunc-${this.calls}`, name: step.tool ?? "write", arguments: {}, ...(step.raw ? { raw: step.raw } : {}) }, toolArgsError: "{path: 截断" }
+      yield { type: "done", ...(step.stopReason ? { stopReason: step.stopReason } : {}) }
       return
     }
     yield { type: "text", text: step.text ?? `final ${this.calls}` }
@@ -107,6 +114,41 @@ describe("工具参数 JSON 畸形回传", () => {
     expect(tools.some((m) => m.content.includes("参数 JSON 解析失败"))).toBe(true)
     // read 工具未实际执行（无成功执行记录）；第二轮模型被引导后正常收尾
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "corrected")).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("大文件生成截断防护", () => {
+  test("write 参数被输出上限截断：抢救落盘已生成部分，回传 append 续写引导", async () => {
+    const provider = new HardenProvider()
+    // content 字符串中途截断（JSON 转义形态的换行，前缀可抢救）
+    const raw = '{"path":"big.txt","content":"' + "line\\n".repeat(10) + "partial"
+    provider.script = [{ mode: "trunc", raw, stopReason: "length" }, { mode: "text", text: "done" }]
+    const { home, store, engine } = await setupEngine(provider)
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    // 已生成部分先落盘（失败轮次转化为进度），完整内容 = 解码后的前缀
+    const saved = await Bun.file(join(sessionPath(home, "default", session.id), "tmp", "big.txt")).text()
+    expect(saved).toBe("line\n".repeat(10) + "partial")
+    // 工具结果引导 append 续写（不引导重新整体输出）
+    const salvagedLen = "line\n".repeat(10).length + "partial".length
+    const loaded = await store.load(session.id)
+    const tools = loaded!.messages.filter((m) => m.role === "tool")
+    expect(tools.some((m) => m.content.includes("append"))).toBe(true)
+    expect(tools.some((m) => m.content.includes(`前 ${salvagedLen} 字符`))).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("非 write 工具截断：无抢救，文案区分截断引导（拆小操作/分段写入），任务正常收尾", async () => {
+    const provider = new HardenProvider()
+    provider.script = [{ mode: "trunc", tool: "read", stopReason: "max_tokens" }, { mode: "text", text: "ok" }]
+    const { home, store, engine } = await setupEngine(provider)
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    const loaded = await store.load(session.id)
+    const tools = loaded!.messages.filter((m) => m.role === "tool")
+    expect(tools.some((m) => m.content.includes("输出上限"))).toBe(true)
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "ok")).toBe(true)
     rmSync(home, { recursive: true, force: true })
   })
 })

@@ -17,7 +17,7 @@ export interface LLMUsage {
 export interface LLMChunk {
   type: "text" | "reasoning" | "tool_call" | "done"
   text?: string
-  toolCall?: { id: string; name: string; arguments: Record<string, unknown> }
+  toolCall?: { id: string; name: string; arguments: Record<string, unknown>; raw?: string }
   /** 工具参数不是合法 JSON 时携带原始片段（引擎据此回传模型让其修正，而非静默以 {} 执行）。 */
   toolArgsError?: string
   stopReason?: string
@@ -59,6 +59,9 @@ export interface ProviderConfig {
   model: string
   maxContextTokens: number
   multimodal: boolean
+  /** 单次响应输出 token 上限（GEBAI_LLM_MAX_OUTPUT_TOKENS）：大文件生成截断防护；未配置走接口缺省
+   *  （Anthropic 强制要求 max_tokens，缺省 8192）。 */
+  maxOutputTokens?: number
   /** 每次请求固定的额外请求体参数（如 reasoning_effort），可被 ChatOptions.extraParams 覆盖。 */
   extraParams?: Record<string, unknown>
 }
@@ -331,6 +334,11 @@ export function modelEnvOverrides(env: Record<string, string> | undefined): Part
     out.maxContextTokens = maxCtx
     any = true
   }
+  const maxOut = Number(env.GEBAI_LLM_MAX_OUTPUT_TOKENS)
+  if (env.GEBAI_LLM_MAX_OUTPUT_TOKENS !== undefined && Number.isFinite(maxOut) && maxOut > 0) {
+    out.maxOutputTokens = maxOut
+    any = true
+  }
   if (env.GEBAI_LLM_MULTIMODAL !== undefined) {
     out.multimodal = env.GEBAI_LLM_MULTIMODAL === "true"
     any = true
@@ -395,7 +403,8 @@ class OpenAIProvider implements LLMProvider {
       stream_options: { include_usage: true },
     }
     if (opts.tools?.length) body.tools = opts.tools.map(openaiTool)
-    if (opts.maxTokens) body.max_tokens = opts.maxTokens
+    const maxOut = opts.maxTokens ?? this.config.maxOutputTokens
+    if (maxOut) body.max_tokens = maxOut
     // 额外模型接口参数：Provider 级固定参数 + 本次调用参数（后者优先），顶层合并进请求体
     Object.assign(body, this.config.extraParams, opts.extraParams)
     const res = await fetchRetry(`${this.config.apiBase}/chat/completions`, {
@@ -448,8 +457,8 @@ class OpenAIProvider implements LLMProvider {
           toolCallsByIndex.set(idx, cur)
         }
       }
-      if ((choice.finish_reason as string) === "stop" || (choice.finish_reason as string) === "tool_calls") {
-        pendingStop = choice.finish_reason as string
+      if (typeof choice.finish_reason === "string" && choice.finish_reason) {
+        pendingStop = choice.finish_reason
       }
     }
     if (pendingStop !== undefined) {
@@ -461,7 +470,7 @@ class OpenAIProvider implements LLMProvider {
     for (const tc of toolCallsByIndex.values()) {
       if (!tc.name) continue
       const pa = parseArgs(tc.args)
-      yield { type: "tool_call", toolCall: { id: tc.id, name: tc.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
+      yield { type: "tool_call", toolCall: { id: tc.id, name: tc.name, arguments: pa.args, ...(pa.error ? { raw: tc.args } : {}) }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
     }
   }
 }
@@ -482,7 +491,8 @@ class ResponsesProvider implements LLMProvider {
       stream: true,
     }
     if (opts.tools?.length) body.tools = opts.tools.map(responsesTool)
-    if (opts.maxTokens) body.max_output_tokens = opts.maxTokens
+    const maxOut = opts.maxTokens ?? this.config.maxOutputTokens
+    if (maxOut) body.max_output_tokens = maxOut
     // 额外模型接口参数：Provider 级固定参数 + 本次调用参数（后者优先），顶层合并进请求体
     Object.assign(body, this.config.extraParams, opts.extraParams)
     const base = this.config.apiBase.replace(/\/+$/, "")
@@ -520,7 +530,7 @@ class ResponsesProvider implements LLMProvider {
         if (cur) {
           if (typeof evt.arguments === "string") cur.args = evt.arguments
           const pa = parseArgs(cur.args)
-          yield { type: "tool_call", toolCall: { id: cur.callId, name: cur.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
+          yield { type: "tool_call", toolCall: { id: cur.callId, name: cur.name, arguments: pa.args, ...(pa.error ? { raw: cur.args } : {}) }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
           calls.delete(String(evt.item_id))
         }
       } else if (type === "response.output_text.delta") {
@@ -547,6 +557,11 @@ class ResponsesProvider implements LLMProvider {
         // usage 真值（input/output/total tokens）：与 stopReason 同挂 done chunk
         const usage = pickUsage(resp?.usage as Record<string, unknown> | undefined)
         yield { type: "done", stopReason, ...(usage ? { usage } : {}) }
+      } else if (type === "response.incomplete") {
+        // 输出上限截断（incomplete_details.reason=max_output_tokens 等）：与截断检测口径对齐（length）
+        const reason = (evt.response as Record<string, unknown> | undefined)?.incomplete_details as Record<string, unknown> | undefined
+        done = true
+        yield { type: "done", stopReason: reason?.reason === "max_output_tokens" ? "length" : String(reason?.reason ?? "length") }
       } else if (type === "response.failed" || type === "error") {
         const err = (evt.error as Record<string, unknown>) || evt
         throw new Error(`模型接口错误: ${String(err?.message ?? "流式响应失败")}`)
@@ -556,7 +571,7 @@ class ResponsesProvider implements LLMProvider {
     for (const c of calls.values()) {
       if (!c.name) continue
       const pa = parseArgs(c.args)
-      yield { type: "tool_call", toolCall: { id: c.callId, name: c.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
+      yield { type: "tool_call", toolCall: { id: c.callId, name: c.name, arguments: pa.args, ...(pa.error ? { raw: c.args } : {}) }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
     }
     if (!done) yield { type: "done", stopReason: "stop" }
   }
@@ -576,7 +591,8 @@ class AnthropicProvider implements LLMProvider {
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages: toAnthropicMessages(msgs),
-      max_tokens: opts.maxTokens || 4096,
+      // Anthropic 强制要求 max_tokens：大文件生成截断防护——配置上限优先，缺省 8192（现代 Claude 3.5+ 均支持）
+      max_tokens: opts.maxTokens || this.config.maxOutputTokens || 8192,
       stream: true,
     }
     if (system) body.system = system
@@ -629,7 +645,7 @@ class AnthropicProvider implements LLMProvider {
       } else if (type === "content_block_stop") {
         if (currentTool) {
           const pa = parseArgs(currentTool.args)
-          yield { type: "tool_call", toolCall: { id: currentTool.id, name: currentTool.name, arguments: pa.args }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
+          yield { type: "tool_call", toolCall: { id: currentTool.id, name: currentTool.name, arguments: pa.args, ...(pa.error ? { raw: currentTool.args } : {}) }, ...(pa.error ? { toolArgsError: pa.error } : {}) }
           currentTool = null
         }
       } else if (type === "message_delta") {
@@ -654,6 +670,84 @@ function parseArgs(raw: string): { args: Record<string, unknown>; error?: string
   } catch {
     return { args: {}, error: raw.slice(0, 500) }
   }
+}
+
+function skipWs(s: string, i: number): number {
+  while (i < s.length && (s[i] === " " || s[i] === "\n" || s[i] === "\t" || s[i] === "\r")) i++
+  return i
+}
+
+/** 容错扫描 JSON 字符串字面量：返回解码值与扫描终点；未遇闭合引号（截断）closed=false、
+ *  value 为已解码前缀（尾部不完整转义序列丢弃）；遇 JSON 不允许的裸控制字符视为字符串到此截断；
+ *  非法转义序列返回 null（整体放弃，防脏数据落盘）。 */
+function scanString(s: string, i: number): { value: string; end: number; closed: boolean } | null {
+  i++ // 跳过开头引号（调用方保证）
+  let out = ""
+  for (;;) {
+    if (i >= s.length) return { value: out, end: i, closed: false }
+    const ch = s[i]
+    if (ch === '"') return { value: out, end: i + 1, closed: true }
+    if (ch === "\\") {
+      if (i + 1 >= s.length) return { value: out, end: i, closed: false } // 尾部孤立反斜杠：丢弃
+      const e = s[i + 1]
+      if (e === "u") {
+        if (i + 6 > s.length) return { value: out, end: i, closed: false } // \u 转义不完整：丢弃
+        const hex = s.slice(i + 2, i + 6)
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null
+        out += String.fromCharCode(parseInt(hex, 16))
+        i += 6
+        continue
+      }
+      const dec: Record<string, string> = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }
+      if (!Object.prototype.hasOwnProperty.call(dec, e)) return null
+      out += dec[e]
+      i += 2
+      continue
+    }
+    if (ch.charCodeAt(0) < 0x20) return { value: out, end: i, closed: false }
+    out += ch
+    i++
+  }
+}
+
+/**
+ * 抢救解析被截断的 write 参数（大文件生成防护）：模型输出达到上限被截断时，工具参数 JSON
+ * 不完整（如 `{"path":"a.txt","content":"前半…`）——容错扫描前缀，提取完整生成的 path 与
+ * 已生成部分的 content（未闭合字符串取已解码前缀），引擎据此先把已生成内容落盘，模型下一轮
+ * append 续写即可（无需重新生成全量、避免再次截断）。path/content 缺失、前缀结构对不上或
+ * 含非法转义时返回 null（走普通错误引导）。
+ */
+export function salvageWriteArgs(raw: string): { path: string; content: string } | null {
+  let i = skipWs(raw, 0)
+  if (raw[i] !== "{") return null
+  i++
+  let path: string | undefined
+  let content: string | undefined
+  for (;;) {
+    i = skipWs(raw, i)
+    if (i >= raw.length || raw[i] === "}") break
+    if (raw[i] !== '"') return null
+    const key = scanString(raw, i)
+    if (!key || !key.closed) return null
+    i = skipWs(raw, key.end)
+    if (raw[i] !== ":") return null
+    i = skipWs(raw, i + 1)
+    if (raw[i] === '"') {
+      const val = scanString(raw, i)
+      if (!val) return null
+      if (key.value === "path") path = val.value
+      else if (key.value === "content") content = val.value
+      i = val.end
+    } else {
+      // 非字符串标量值（append:true 等）：跳过至 , 或 }（数值/布尔/null 不含这两字符）
+      while (i < raw.length && raw[i] !== "," && raw[i] !== "}") i++
+    }
+    i = skipWs(raw, i)
+    if (raw[i] === ",") i++
+    else break // } 或截断
+  }
+  if (!path || !content) return null
+  return { path, content }
 }
 
 /** 从接口返回的 usage 对象提取统一结构（OpenAI prompt_tokens/completion_tokens 与 Responses/Anthropic input_tokens/output_tokens 两种命名）。 */
