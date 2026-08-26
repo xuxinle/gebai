@@ -19,6 +19,8 @@ class HardenProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
   seen: MessageLike[][] = []
+  /** 每次模型调用的工具 schema 清单（name+parameters）：装载可见性/双胞胎合并断言用。 */
+  toolSchemas: Array<Array<{ name: string; parameters: Record<string, unknown> }>> = []
   /** 每轮行为：{ mode: "text" | "tool" | "hang" | "badargs" | "trunc", tool?, args?, text?, raw?, stopReason? }，按 calls 序号。 */
   script: Array<{ mode: "text" | "tool" | "hang" | "badargs" | "trunc"; tool?: string; args?: Record<string, unknown>; text?: string; raw?: string; stopReason?: string }> = []
   maxCtx = 100000
@@ -29,6 +31,7 @@ class HardenProvider implements LLMProvider {
   async *chat(msgs: MessageLike[], _opts?: ChatOptions): AsyncIterable<LLMChunk> {
     this.calls++
     this.seen.push(msgs)
+    this.toolSchemas.push(((_opts?.tools ?? []) as Array<{ name: string; parameters: Record<string, unknown> }>).map((t) => ({ name: t.name, parameters: t.parameters as Record<string, unknown> })))
     const step = this.script[Math.min(this.calls - 1, this.script.length - 1)] ?? { mode: "text" as const }
     if (step.mode === "hang") {
       yield { type: "text", text: "partial output" }
@@ -334,6 +337,93 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     await engine.run(s2.id, "default", "hi2")
     const msgs2 = (await store.load(s2.id, "default"))!.messages
     expect(msgs2.some((m) => m.role === "user" && m.content.includes("【验证提醒】"))).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("装载工具会话可见性与双胞胎合并", () => {
+  test("装载 code 的会话：同名工具合并为全局名（带 project 参数），独有工具前缀可见；未装载会话不见 code_* 且目录仍列出 code", async () => {
+    const provider = new HardenProvider()
+    provider.script = [{ mode: "text", text: "done" }]
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    const b = await store.createSession("default", "b")
+    await engine.loadAgentToSession(a.id, "default", "code")
+    await engine.run(a.id, "default", "hi")
+    // A：双胞胎合并——read 是全局名但 schema 为 code 版（带 project 参数）；code_read 不再单出；独有工具前缀可见
+    const sA = provider.toolSchemas[0]
+    const readA = sA.find((t) => t.name === "read")!
+    expect(readA).toBeTruthy()
+    expect((readA.parameters as { properties: Record<string, unknown> }).properties.project).toBeTruthy()
+    expect(sA.some((t) => t.name === "code_read")).toBe(false)
+    expect(sA.some((t) => t.name === "code_write")).toBe(false)
+    expect(sA.some((t) => t.name === "code_git")).toBe(true)
+    // A 的系统提示词目录不含 code（本会话已装载，完整提示词在会话记录里）
+    const sysA = String(provider.seen[0][0].content)
+    expect(sysA).not.toContain("- code:")
+    // B：未装载——无任何 code_* schema；read 无 project 参数；目录仍列出 code 供装载（跨会话不泄漏）
+    await engine.run(b.id, "default", "hi")
+    const sB = provider.toolSchemas[provider.toolSchemas.length - 1]
+    expect(sB.some((t) => t.name.startsWith("code_"))).toBe(false)
+    const readB = sB.find((t) => t.name === "read")!
+    expect((readB.parameters as { properties: Record<string, unknown> }).properties.project).toBeUndefined()
+    const sysB = String(provider.seen[provider.seen.length - 1][0].content)
+    expect(sysB).toContain("- code:")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("双胞胎别名兼容：装载会话内以 code_read 前缀名调用仍可执行（历史消息/子Agent 提示词引用不破）", async () => {
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "code_read", args: { path: "hello.txt" } },
+      { mode: "text", text: "done" },
+    ]
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    await engine.loadAgentToSession(a.id, "default", "code")
+    const ws = join(sessionPath(home, "default", a.id), "tmp")
+    mkdirSync(ws, { recursive: true })
+    writeFileSync(join(ws, "hello.txt"), "hello gebai\n")
+    await engine.run(a.id, "default", "hi")
+    const msgs = (await store.load(a.id, "default"))!.messages
+    const toolMsg = msgs.find((m) => m.role === "tool")
+    expect(toolMsg).toBeTruthy()
+    expect(toolMsg!.content).toContain("hello gebai")
+    expect(toolMsg!.content).not.toContain("未知工具")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("未装载会话调用 code_read：路由自愈按会话装载后经别名执行", async () => {
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "code_read", args: { path: "hello.txt" } },
+      { mode: "text", text: "done" },
+    ]
+    const { home, store, engine } = await setupEngine(provider)
+    const b = await store.createSession("default", "b")
+    const ws = join(sessionPath(home, "default", b.id), "tmp")
+    mkdirSync(ws, { recursive: true })
+    writeFileSync(join(ws, "hello.txt"), "self-heal\n")
+    await engine.run(b.id, "default", "hi")
+    const msgs = (await store.load(b.id, "default"))!.messages
+    const toolMsg = msgs.find((m) => m.role === "tool")
+    expect(toolMsg).toBeTruthy()
+    expect(toolMsg!.content).toContain("self-heal")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("预置项目保留名 tmp 在任务期被拒绝（前端注入 env 的兜底校验）", async () => {
+    const provider = new HardenProvider()
+    provider.script = [{ mode: "text", text: "done" }]
+    const { home, store, engine, events } = await setupEngine(provider)
+    const session = await store.createSession("default", "t")
+    const errs: string[] = []
+    const unsub = events.subscribe((e) => {
+      if (e.sessionId === session.id && e.type === "event.task.error") errs.push(String((e.payload as { error?: string }).error ?? ""))
+    })
+    await engine.run(session.id, "default", "hi", { envOverride: { CODE_PROJECTS: '[{"name":"tmp","path":"/srv/app"}]' } })
+    unsub()
+    expect(errs.some((m) => m.includes("保留名"))).toBe(true)
     rmSync(home, { recursive: true, force: true })
   })
 })

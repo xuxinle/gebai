@@ -247,6 +247,16 @@ export class SubAgentManager {
     return this.loaded.has(name)
   }
 
+  /** 子Agent 是否对某会话可见（装载工具会话可见性，DESIGN「装载工具会话可见性」）：
+   *  该会话装载过、或经全局装载（GLOBAL_OWNER：启动预载/admin 全局装载——设计上对所有会话生效）。
+   *  其他会话的装载不扩散——共享注册表里的 {agent}_* 工具对未装载会话不可见（防跨会话泄漏）。 */
+  visibleTo(name: string, owner: string): boolean {
+    if (!this.loaded.has(name)) return false
+    const owners = this.ownersByAgent.get(name)
+    if (!owners) return false
+    return owners.has(owner) || owners.has(SubAgentManager.GLOBAL_OWNER)
+  }
+
   getLoaded(): SubAgentDef[] {
     return [...this.loaded].map((n) => this.defs.get(n)!).filter(Boolean)
   }
@@ -267,10 +277,12 @@ export class SubAgentManager {
    *  loadHistory 透传进模型上下文），此处再注入会双份占用上下文；未装载的仅注入轻量列表（名称 + 描述），
    *  引导模型 agent_load 装载（工具注册进会话、提示词写入会话记录）或 agent_run 执行新会话。
    *  不展开工具列表——工具名已注册进工具集（schema 全名）。
-   *  describe：可选描述覆写（engine 用于在描述中动态体现预置项目清单，方便按项目名关联任务）。 */
-  systemPromptInjection(describe?: (d: SubAgentDef) => string): string {
+   *  describe：可选描述覆写（engine 用于在描述中动态体现预置项目清单，方便按项目名关联任务）。
+   *  visibleToOwner：可选会话过滤（会话 id）——按「对该会话可见」判定未装载（其他会话装载过的不算本会话已装载，
+   *  防跨会话泄漏：A 装载后 B 的目录仍应列出该子Agent 供 B 装载）；缺省按进程装载状态过滤（兼容旧语义）。 */
+  systemPromptInjection(describe?: (d: SubAgentDef) => string, visibleToOwner?: string): string {
     const lines: string[] = []
-    const unloaded = [...this.defs.values()].filter((d) => !this.loaded.has(d.name))
+    const unloaded = [...this.defs.values()].filter((d) => (visibleToOwner ? !this.visibleTo(d.name, visibleToOwner) : !this.loaded.has(d.name)))
     if (unloaded.length) {
       lines.push("可选子Agent（未装载）:")
       for (const d of unloaded) {

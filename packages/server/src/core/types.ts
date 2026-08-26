@@ -41,6 +41,9 @@ export type ToolContext = {
   authMode?: "local" | "server"
   sessionId: string
   workdir: string
+  /** 会话工作区绝对路径（引擎恒定注入，不随项目绑定/粘性根变化——workdir 在新会话绑定项目根时是项目根，
+   *  保留项目名 tmp（DESIGN「项目机制」）恒指本路径）。可选：测试桩未注入时回退 workdir。 */
+  sessionWorkdir?: string
   /** 子Agent 项目绑定根（{AGENT_NAME_UPPER}_PROJECT 解析结果，未绑定为空）：受限模式下未传 project 时允许在绑定根内操作。 */
   boundProjectRoot?: string
   /** GEBAI_HOME（截断文件/产物落盘基准，避免依赖进程 cwd）。 */

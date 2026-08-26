@@ -9,7 +9,7 @@ import {
   makeTodoTool,
 } from "../../core/tools"
 import { analyzeTool, searchSymbolsTool } from "../../core/analyzer"
-import { projectAware } from "../code"
+import { projectAware } from "../../core/projects"
 
 export const name = "explore"
 export const description =

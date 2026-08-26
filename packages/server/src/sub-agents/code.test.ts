@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import type { ToolContext } from "../core/types"
-import { def as codeDef, _resetSessionProjectRootsForTest } from "./code"
+import { def as codeDef } from "./code"
+import { _resetSessionProjectRootsForTest } from "../core/projects"
 import { SessionStore } from "../core/store"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {

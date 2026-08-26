@@ -12,6 +12,7 @@ import { EMBEDDED_ENV_DEFAULTS } from "./core/env-embedded.generated"
 import { EventBus } from "./core/event-bus"
 import { AuthService, type AuthUser } from "./auth"
 import { SubAgentManager } from "./core/subagents"
+import { RESERVED_PROJECT_TMP } from "./core/projects"
 import { AgentEngine } from "./core/engine"
 import { WebhookManager } from "./webhooks"
 import { createExternalAuthProvider } from "./external-auth"
@@ -224,6 +225,25 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   // 定时任务能力开关（GEBAI_CRON_ENABLED）：关闭时 cron 子Agent 不注册（agent_list/agent_load/agent_run
   // 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时 cron 子Agent 正常可见、按需装载
   if (!config.cronEnabled) subAgents.unregister("cron")
+  // 预置项目保留名防呆（DESIGN「项目机制」）：tmp 为会话工作区保留名——{AGENT}_PROJECTS 配了叫 tmp 的
+  // 项目在启动期拒绝（静默遮蔽保留名会在设定项目根后无法访问会话文件，难排查）；前端注入的任务级 env
+  // 由引擎 presetProjectsFor 同规则兜底。仅校验进程环境变量中已声明的清单（子Agent envVars 声明面）。
+  for (const d of subAgents.allDefs()) {
+    for (const v of d.envVars ?? []) {
+      if (!/_PROJECTS$/.test(v.name)) continue
+      const raw = process.env[v.name]
+      if (!raw) continue
+      try {
+        const list = JSON.parse(raw)
+        if (Array.isArray(list) && list.some((p) => p && typeof p === "object" && String((p as Record<string, unknown>).name ?? "").trim() === RESERVED_PROJECT_TMP)) {
+          throw new Error(`${v.name} 中的预置项目名 "${RESERVED_PROJECT_TMP}" 为保留名（会话工作区），请改名后重启`)
+        }
+      } catch (err) {
+        if (err instanceof SyntaxError) continue // 非法 JSON 由 presetProjectsFor 静默忽略（既有语义），此处只管保留名
+        throw err
+      }
+    }
+  }
 
   const engine = new AgentEngine({
     provider,
