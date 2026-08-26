@@ -34,6 +34,16 @@ export interface BotPromptAdapter {
   decideDrawResult(sessionId: string, renderId: string, result: { ok: boolean; error?: string }): Promise<void>
 }
 
+/** 飞书通道环境注记（注入系统提示词，模型据此感知对话宿主与能力边界）：
+ *  渲染形态（Markdown 卡片，2.0 组件支持标题/表格/代码块）、交互形态（审批/选择经卡片按钮、命令兜底）、
+ *  通道能力边界（依赖前端页面的工具不可用）、富媒体边界（图片可、其余不支持）。 */
+export const FEISHU_CHANNEL_NOTE =
+  "当前对话经飞书机器人通道进行：用户在飞书聊天中与你对话。" +
+  "回复以 Markdown 卡片渲染（支持标题/表格/代码块/列表/链接），超长内容会被截断——大段产物建议落盘文件并提示用户到 Web UI 对应会话查看；" +
+  "审批与选择询问经飞书卡片按钮作答，用户也可能回复 /approve、/reject 等文本命令；" +
+  "依赖前端页面的工具（page_capture、widgets 四工具、show 的 html 分支）在本通道不可用，调用会被拦截，请改用其他方案；" +
+  "图片消息会自动转为附件供你分析，其余富媒体消息类型暂不支持。"
+
 /** 引擎适配器：包 AgentEngine，按「多轮交互 + 仅最终回复」运行，事件流映射为语义回调。 */
 export class EngineBotAdapter implements BotPromptAdapter {
   constructor(
@@ -81,6 +91,8 @@ export class EngineBotAdapter implements BotPromptAdapter {
       await this.engine.run(sessionId, user, prompt, {
         attachments: opts.attachments,
         messageId: opts.messageId,
+        // 通道环境注记：模型感知飞书宿主（渲染/交互/能力边界），注入系统提示词
+        channelNote: FEISHU_CHANNEL_NOTE,
         // 多轮交互：关键操作（requiresApproval）询问用户，实时前端工具自动禁用
         interactionMode: "multi_turn",
         // 仅最终回复：不推送文本增量/推理流（对接接口层，非流式桥接）

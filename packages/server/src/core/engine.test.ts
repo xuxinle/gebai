@@ -2146,6 +2146,24 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
+  test("channelNote 通道环境注记注入系统提示词（未传时不注入）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    let sysPrompt = ""
+    s.provider.chat = async function* (msgs: import("@gebai/sdk").MessageLike[]) {
+      for (const m of msgs) if (m.role === "system") sysPrompt = String(m.content)
+      yield { type: "text", text: "ok" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    await s.engine.run(session.id, "default", "hi", { channelNote: "当前对话经飞书机器人通道进行：审批经卡片按钮作答。" })
+    expect(sysPrompt).toContain("当前对话经飞书机器人通道进行")
+    expect(sysPrompt).toContain("审批经卡片按钮作答")
+    // 未传时不注入（引擎通道无关，Web/REST 通道无注记）
+    await s.engine.run(session.id, "default", "hi")
+    expect(sysPrompt).not.toContain("当前对话经飞书机器人通道进行")
+    cleanup(s.home)
+  })
+
   test("main system prompt includes task-type routing guide (D1 子 Agent 自动推荐)", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
