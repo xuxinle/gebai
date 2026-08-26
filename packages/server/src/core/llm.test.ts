@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { MessageLike } from "@gebai/sdk"
-import { applyModelEnvOverrides, createProvider, modelEnvOverrides, parseSSE, parseExtraParams, imageMessageBlocks, resolveVisionProvider, type ProviderConfig, type LLMChunk } from "./llm"
+import { applyModelEnvOverrides, createProvider, modelEnvOverrides, parseSSE, parseExtraParams, imageMessageBlocks, resolveVisionProvider, salvageWriteArgs, type ProviderConfig, type LLMChunk } from "./llm"
 
 const BASE_CFG: ProviderConfig = { apiKind: "openai", apiBase: "https://api.test", apiKey: "k", model: "m", maxContextTokens: 10000, multimodal: false }
 
@@ -219,7 +219,7 @@ describe("extraParams 额外模型接口参数", () => {
       },
     )
     expect(body?.thinking).toEqual({ type: "enabled", budget_tokens: 2000 })
-    expect(body?.max_tokens).toBe(4096) // 默认值保留
+    expect(body?.max_tokens).toBe(8192) // 默认值保留（大文件生成截断防护缺省）
   })
 
   test("OpenAI：无 extraParams 时请求体不受影响", async () => {
@@ -486,6 +486,8 @@ describe("任务级模型配置覆盖（前端/会话 env → 实际使用模型
     expect(modelEnvOverrides({ GEBAI_LLM_API_KIND: "garbage" })).toBeNull()
     expect(modelEnvOverrides({ GEBAI_LLM_MAX_CONTEXT: "abc" })).toBeNull()
     expect(modelEnvOverrides({ GEBAI_LLM_MAX_CONTEXT: "-5" })).toBeNull()
+    expect(modelEnvOverrides({ GEBAI_LLM_MAX_OUTPUT_TOKENS: "16384" })).toEqual({ maxOutputTokens: 16384 })
+    expect(modelEnvOverrides({ GEBAI_LLM_MAX_OUTPUT_TOKENS: "abc" })).toBeNull()
     // MULTIMODAL 显式 false 也生效（关闭多模态内联）
     expect(modelEnvOverrides({ GEBAI_LLM_MULTIMODAL: "false" })).toEqual({ multimodal: false })
   })
@@ -558,5 +560,101 @@ describe("任务级模型配置覆盖（前端/会话 env → 实际使用模型
     )
     expect(url).toContain("https://base-vision") // 未覆盖的地址继承启动视觉配置
     expect(JSON.parse(body).model).toBe("v1") // 覆盖的模型生效
+  })
+})
+
+describe("大文件生成截断防护（输出上限截断与参数抢救）", () => {
+  test("salvageWriteArgs：截断的 write 参数前缀提取 path 与已生成 content", () => {
+    // content 字符串中途截断（未闭合），JSON 转义解码（源串含字面 \n 转义，期望值为真实换行）
+    expect(salvageWriteArgs('{"path":"a.txt","content":"line1\\nline2')).toEqual({ path: "a.txt", content: "line1\nline2" })
+    // 尾部不完整转义序列丢弃（孤立反斜杠 / 不完整 \uXXXX）
+    expect(salvageWriteArgs('{"path":"a.txt","content":"abc\\')).toEqual({ path: "a.txt", content: "abc" })
+    expect(salvageWriteArgs('{"path":"a.txt","content":"ab\\u12')).toEqual({ path: "a.txt", content: "ab" })
+    // 完整 \uXXXX 解码
+    expect(salvageWriteArgs('{"path":"a.txt","content":"\\u4f60\\u597d')).toEqual({ path: "a.txt", content: "你好" })
+    // 其他标量键（append:true）可跳过；path/content 顺序无关
+    expect(salvageWriteArgs('{"append":true,"path":"b.md","content":"# t')).toEqual({ path: "b.md", content: "# t" })
+    // content 后完整闭合再截断（值本身已完整）
+    expect(salvageWriteArgs('{"path":"c.txt","content":"done"')).toEqual({ path: "c.txt", content: "done" })
+  })
+
+  test("salvageWriteArgs：path 截断/缺 content/空 content/非法转义/非对象返回 null", () => {
+    expect(salvageWriteArgs('{"path":"a.t')).toBeNull() // path 值截断：目标不明确，不抢救
+    expect(salvageWriteArgs('{"path":"a.txt","con')).toBeNull() // content 键截断
+    expect(salvageWriteArgs('{"path":"a.txt","content":"')).toBeNull() // content 空（截断在内容起点，无可抢救内容）
+    expect(salvageWriteArgs('{"path":"a.txt","content":"a\\q')).toBeNull() // 非法转义：整体放弃防脏数据落盘
+    expect(salvageWriteArgs("content=abc")).toBeNull() // 非 JSON 对象前缀
+    expect(salvageWriteArgs('{"path":"only.txt"}')).toBeNull() // 缺 content
+  })
+
+  test("OpenAI：finish_reason=length 如实传出（不再吞为 stop）；截断参数携带原始全文 raw", async () => {
+    const stream = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"write","arguments":"{\\"path\\":\\"a.txt\\",\\"content\\":\\"abc"}}]}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+      "data: [DONE]",
+    ].join("\n\n")
+    const chunks: LLMChunk[] = []
+    await withFetch(
+      async () => new Response(stream, { status: 200 }),
+      async () => {
+        for await (const c of provider().chat([{ role: "user", content: "x" }])) chunks.push(c)
+      },
+    )
+    expect(chunks.find((c) => c.type === "done")?.stopReason).toBe("length")
+    const tc = chunks.find((c) => c.type === "tool_call")
+    expect(tc?.toolArgsError).toBeTruthy()
+    expect(tc?.toolCall?.raw).toBe('{"path":"a.txt","content":"abc')
+    expect(tc?.toolCall?.arguments).toEqual({})
+  })
+
+  test("Responses：response.incomplete（max_output_tokens）→ done stopReason=length", async () => {
+    const stream = 'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+    const chunks: LLMChunk[] = []
+    await withFetch(
+      async () => new Response(stream, { status: 200 }),
+      async () => {
+        for await (const c of responsesProvider().chat([{ role: "user", content: "x" }])) chunks.push(c)
+      },
+    )
+    const done = chunks.filter((c) => c.type === "done")
+    expect(done[0]?.stopReason).toBe("length")
+    expect(done).toHaveLength(1)
+  })
+
+  test("Anthropic：max_tokens 缺省 8192，配置 maxOutputTokens 优先，调用级覆盖最高", async () => {
+    let body: Record<string, unknown> = {}
+    const anthropic = (cfg?: Partial<ProviderConfig>) =>
+      createProvider({ apiKind: "anthropic", apiBase: "https://api.test", apiKey: "k", model: "m", maxContextTokens: 10000, multimodal: false, ...cfg })
+    const run = (cfg?: Partial<ProviderConfig>, opts?: { maxTokens?: number }) =>
+      withFetch(async (_u, init) => {
+        body = JSON.parse(String((init as RequestInit).body))
+        return new Response('data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n', { status: 200 })
+      }, async () => {
+        for await (const _ of anthropic(cfg).chat([{ role: "user", content: "x" }], opts)) void _
+      })
+    await run()
+    expect(body.max_tokens).toBe(8192)
+    await run({ maxOutputTokens: 32000 })
+    expect(body.max_tokens).toBe(32000)
+    await run({ maxOutputTokens: 32000 }, { maxTokens: 2048 })
+    expect(body.max_tokens).toBe(2048)
+  })
+
+  test("OpenAI/Responses：maxOutputTokens 配置作为 max_tokens/max_output_tokens 请求值", async () => {
+    let body: Record<string, unknown> = {}
+    await withFetch(async (_u, init) => {
+      body = JSON.parse(String((init as RequestInit).body))
+      return new Response(OK_STREAM, { status: 200 })
+    }, async () => {
+      for await (const _ of createProvider({ ...BASE_CFG, maxOutputTokens: 9000 }).chat([{ role: "user", content: "x" }])) void _
+    })
+    expect(body.max_tokens).toBe(9000)
+    await withFetch(async (_u, init) => {
+      body = JSON.parse(String((init as RequestInit).body))
+      return new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { status: 200 })
+    }, async () => {
+      for await (const _ of createProvider({ ...BASE_CFG, apiKind: "responses", maxOutputTokens: 9000 }).chat([{ role: "user", content: "x" }])) void _
+    })
+    expect(body.max_output_tokens).toBe(9000)
   })
 })

@@ -1,5 +1,5 @@
 import type { AttachmentInput, AttachmentRef, DiagramFormat, Message, MessageLike, SessionRunArchive, SessionRunEntry } from "@gebai/sdk"
-import { LLMConfigError, parseExtraParams, type LLMChunk, type LLMProvider, type LLMUsage } from "./llm"
+import { LLMConfigError, parseExtraParams, salvageWriteArgs, type LLMChunk, type LLMProvider, type LLMUsage } from "./llm"
 import { VISION_MAX_IMAGE_BYTES } from "./vision"
 import type { ToolRegistry } from "./registry"
 import type { SessionStore } from "./store"
@@ -1014,7 +1014,7 @@ export class AgentEngine {
     extraParams: Record<string, unknown> | undefined,
     ctxUsage: { ctxInputTokens?: number; ctxCountedLen: number },
     onChunk?: (chunk: LLMChunk) => void,
-  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }>; usage?: LLMUsage }> {
+  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string; raw?: string }>; usage?: LLMUsage; stopReason?: string }> {
     try {
       return await this.callModel(provider, messages, schemas, signal, onChunk, extraParams, sessionId)
     } catch (err) {
@@ -1803,8 +1803,8 @@ export class AgentEngine {
     onChunk?: (chunk: LLMChunk) => void,
     extraParams?: Record<string, unknown>,
     sessionId?: string,
-  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }>; usage?: LLMUsage }> {
-    const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string }> = []
+  ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string; raw?: string }>; usage?: LLMUsage; stopReason?: string }> {
+    const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string; raw?: string }> = []
     let text = ""
     let reasoningSeen = false
     let attempts = 0
@@ -1814,14 +1814,18 @@ export class AgentEngine {
     let degraded = false
     // 本次调用的 usage 真值（服务端不返回时保持 undefined → 调用方估算兜底）；每次尝试重制，仅最后一次成功尝试生效
     let usage: LLMUsage | undefined
+    // 最后一次成功尝试的结束原因（length/max_tokens = 输出上限截断，argsError 处理区分引导）
+    let stopReason: string | undefined
     for (;;) {
       const msgs = hint ? [...messages, { role: "user" as const, content: hint }] : messages
       try {
         usage = undefined
+        stopReason = undefined
         for await (const chunk of this.chatWithIdleTimeout(provider, msgs, schemas, signal, extraParams)) {
           if (chunk.type === "text") text += chunk.text
           else if (chunk.type === "reasoning" && chunk.text?.trim()) reasoningSeen = true
           else if (chunk.type === "tool_call" && chunk.toolCall) toolCalls.push({ ...chunk.toolCall, argsError: chunk.toolArgsError })
+          else if (chunk.type === "done" && chunk.stopReason) stopReason = chunk.stopReason
           if (chunk.usage) usage = chunk.usage
           onChunk?.(chunk)
         }
@@ -1866,7 +1870,7 @@ export class AgentEngine {
         }
         throw new Error(`模型未返回任何内容（已重试 ${attempts} 次）`)
       }
-      return { text, toolCalls, usage }
+      return { text, toolCalls, usage, stopReason }
     }
   }
 
@@ -1900,6 +1904,59 @@ export class AgentEngine {
     } finally {
       void iter.return?.().catch(() => {})
     }
+  }
+
+  /** 输出上限截断的结束原因（OpenAI `length` / Anthropic `max_tokens` / Responses incomplete 对齐为 `length`）。 */
+  private isTruncatedStop(stopReason: string | undefined): boolean {
+    return stopReason === "length" || stopReason === "max_tokens"
+  }
+
+  /** write 类工具判定（全局 write 与子Agent 命名空间 `{agent}_write`，同 schema 可抢救）。 */
+  private isWriteToolName(name: string): boolean {
+    return name === "write" || name.endsWith("_write")
+  }
+
+  /**
+   * 截断参数抢救落盘（大文件生成防护，DESIGN「大文件分段写入」）：write 类工具参数 JSON 未完整
+   * 生成（输出被截断/非法）时，容错解析原始前缀提取 path 与已生成 content，先把部分内容落盘并
+   * 登记已读——失败轮次转化为进度，模型下一轮 append 续写剩余部分即可（无需重新生成全量）。
+   * 目标文件已存在且本会话未读（防盲覆盖守卫同规则适用）或前缀提取/落盘失败时返回 null，走普通错误引导。
+   */
+  private async salvageWriteCall(
+    ctx: Pick<ToolContext, "resolvePath" | "readFile" | "writeFile" | "fileGuard">,
+    raw: string,
+  ): Promise<string | null> {
+    const salvaged = salvageWriteArgs(raw)
+    if (!salvaged) return null
+    let path: string
+    try {
+      path = ctx.resolvePath(salvaged.path)
+    } catch {
+      return null
+    }
+    let exists = true
+    try {
+      await ctx.readFile(path)
+    } catch {
+      exists = false
+    }
+    if (exists && ctx.fileGuard && !ctx.fileGuard.hasRead(path)) return null
+    try {
+      await ctx.writeFile(path, salvaged.content)
+    } catch {
+      return null
+    }
+    ctx.fileGuard?.markRead(path)
+    return `工具参数 JSON 未完整生成（本次输出疑似被截断）：已将已生成的前 ${salvaged.content.length} 字符写入 ${salvaged.path}。请用 write 的 append:true 模式续写剩余内容（从已写入内容之后继续，不要重复已写入部分）。`
+  }
+
+  /** 工具参数解析失败回传文案：截断（输出上限）与普通解析失败区分引导——截断场景重新整体输出只会再次截断，
+   *  引导拆小操作/分段写入。 */
+  private toolArgsErrorMsg(tc: { name: string; argsError?: string }, truncated: boolean): string {
+    if (truncated) {
+      return `工具参数 JSON 解析失败：本次模型输出达到输出上限被截断，重新整体输出仍会被截断。请把内容拆分为更小的多次操作（大文件用 write 分段写入：首段普通 write，后续段以 append:true 续写，每段约 200~300 行）。`
+    }
+    return `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`
   }
 
   private async runLoop(params: {
@@ -1949,7 +2006,7 @@ export class AgentEngine {
           if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, sessionId })
         }
       })
-      const { text, toolCalls, usage } = call
+      const { text, toolCalls, usage, stopReason } = call
       lastText = text
       lastReasoning = reasoningAcc
       if (usage?.inputTokens !== undefined) {
@@ -2026,9 +2083,12 @@ export class AgentEngine {
             await persistTool(tc, note)
             continue
           }
-          // 工具参数不是合法 JSON（接口聚合失败）：不执行（以 {} 执行会做出错误行为），回传原始片段让模型修正
+          // 工具参数不是合法 JSON（接口聚合失败/输出被截断）：不执行（以 {} 执行会做出错误行为）。
+          // write 类工具先尝试抢救落盘已生成内容（失败轮次变进度，模型 append 续写）；未抢救走错误引导
+          // （截断与普通解析失败区分文案）
           if (tc.argsError) {
-            await persistTool(tc, `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`)
+            const salvaged = this.isWriteToolName(tc.name) ? await this.salvageWriteCall(ctx, typeof tc.raw === "string" ? tc.raw : "") : null
+            await persistTool(tc, salvaged ?? this.toolArgsErrorMsg(tc, this.isTruncatedStop(stopReason)))
             continue
           }
           let rt = registry.resolve(tc.name)
@@ -2431,7 +2491,7 @@ export class AgentEngine {
       const assistantMsgId = crypto.randomUUID()
       // 执行过程：新会话的模型回复文本/推理实时推送到前端（与主循环同流显示，带 session 标记）
       let reasoningAcc = ""
-      const { text, toolCalls } = await this.callModel(taskProvider, messages, reg.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, reg.resolve(s.name)?.tool)), activeSignal, (chunk) => {
+      const { text, toolCalls, stopReason } = await this.callModel(taskProvider, messages, reg.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, reg.resolve(s.name)?.tool)), activeSignal, (chunk) => {
         if (chunk.type === "text") {
           // session 标记：区别于主循环推送，渠道层可据此识别「新会话执行过程」事件；
           // 仅最终响应（final_only）不推送新会话过程文本
@@ -2475,9 +2535,10 @@ export class AgentEngine {
           messages.push({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
           continue
         }
-        // 工具参数不是合法 JSON：与主循环一致，回传原始片段让模型修正（不执行）
+        // 工具参数不是合法 JSON：与主循环一致（截断先抢救落盘、未抢救区分引导），回传错误让模型修正（不执行）
         if (tc.argsError) {
-          const errMsg = `工具参数 JSON 解析失败：模型输出的参数不是合法 JSON。原始片段: ${tc.argsError}。请重新调用 ${tc.name} 并输出合法的 JSON 参数。`
+          const salvaged = this.isWriteToolName(tc.name) ? await this.salvageWriteCall(ctx, typeof tc.raw === "string" ? tc.raw : "") : null
+          const errMsg = salvaged ?? this.toolArgsErrorMsg(tc, this.isTruncatedStop(stopReason))
           await pushArchive({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           continue
