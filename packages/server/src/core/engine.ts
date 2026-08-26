@@ -2136,7 +2136,7 @@ export class AgentEngine {
           if (approvalRequired) {
             const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
             this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true })
-            this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries })
+            this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments })
             const verdict = await this.waitApproval(sessionId, tc.id, rt.name, signal)
             // 取消路径（用户停止，cancelled 标记）：等待被信号解开时立即中止，不写「用户拒绝」虚假记录；
             // 显式拒绝：落盘拒绝消息后由下一轮 abort/循环检查结束；超时：落盘超时提示，模型可继续调整
@@ -2589,7 +2589,7 @@ export class AgentEngine {
         if (requiresByArgs && !approvalSkipped) {
           const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
           this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true, session: true, sessionRunId: archive.runId })
-          this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, session: true, sessionRunId: archive.runId, sessionId })
+          this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments, session: true, sessionRunId: archive.runId, sessionId })
           const verdict = await this.waitApproval(sessionId, tc.id, rt.name, activeSignal)
           // 新会话内：取消/超时信号解开等待后立即中止（存档随 run 整体，取消由上层按已取消结果收尾）
           if (activeSignal.aborted) throw new Error(abortReason())

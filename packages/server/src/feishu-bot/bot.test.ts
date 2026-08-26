@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
 import type { SessionData } from "../core/types"
-import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu } from "./bot"
+import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs } from "./bot"
 
 /** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
 const funame = (openId: string) => `feishu_${createHash("sha256").update(openId).digest("hex").slice(0, 24)}`
@@ -236,7 +236,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
       const p = ev.payload as Record<string, unknown>
       switch (ev.type) {
         case "event.approval.request":
-          h.onApproval?.(String(p.toolCallId ?? ""), String(p.tool ?? ""))
+          h.onApproval?.(String(p.toolCallId ?? ""), String(p.tool ?? ""), (p.arguments ?? {}) as Record<string, unknown>, Number(p.retries ?? 0))
           break
         case "event.choice.request":
           h.onChoice?.(String(p.choiceId ?? ""), String(p.prompt ?? ""), Array.isArray(p.options) ? p.options : [], p.multi === true)
@@ -278,6 +278,20 @@ function receiveEvent(over: Record<string, unknown> = {}): Record<string, unknow
 }
 
 describe("纯函数", () => {
+  test("formatApprovalArgs：参数摘要格式化、长值/总长截断", () => {
+    expect(formatApprovalArgs({})).toBe("（无参数）")
+    expect(formatApprovalArgs({ command: "echo hi" })).toContain("**command**: echo hi")
+    // 对象值 JSON 序列化展示
+    expect(formatApprovalArgs({ data: { a: 1 } })).toContain('**data**: {"a":1}')
+    // 长值截断（单值超 200 字符）
+    expect(formatApprovalArgs({ content: "x".repeat(300) })).toContain("共 300 字符已截断")
+    // 总长兜底截断（大量参数时不超过上限 + 提示）
+    const many = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`k${i}`, "v".repeat(100)]))
+    const out = formatApprovalArgs(many)
+    expect(out.length).toBeLessThanOrEqual(1200 + 100)
+    expect(out).toContain("参数过长已截断")
+  })
+
   test("parseMessageContent: text/post/非法", () => {
     expect(parseMessageContent("text", '{"text":"hi"}')).toBe("hi")
     expect(parseMessageContent("post", '{"title":"标题","content":[[{"tag":"text","text":"段一"},{"tag":"a","text":"链接","href":"https://x"}],[{"tag":"text","text":"段二"}]]}')).toBe("标题\n段一链接(https://x)\n段二")
@@ -557,21 +571,85 @@ describe("引擎事件推送", () => {
     expect(f.reactionDeletes.some((d) => d.messageId === "om_msg12" && d.reactionId === "reaction_1")).toBe(true)
   })
 
-  test("审批：请求发提示，/approve 批准", async () => {
+  test("审批：请求发交互卡片（含参数摘要与重试提示），/approve 命令兜底批准并撤回卡片", async () => {
     const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc9", tool: "write" } })
-    await flush()
-    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("需要审批"))).toBe(true)
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc9", tool: "write", arguments: { path: "a.txt", content: "hello" }, retries: 1 } })
+    await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    const card = f.sent.find((s) => s.msgType === "interactive")!
+    const json = JSON.stringify(card.content)
+    expect(json).toContain("需要审批")
+    expect(json).toContain("write")
+    expect(json).toContain("a.txt")
+    expect(json).toContain("已被拒绝/超时 1 次")
+    expect(json).toContain('"approvalId":"tc9"')
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
     expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc9", approve: true }])
+    // 命令决策后撤回审批卡片（卡片按钮已失效，防误点）
+    expect(f.deletes).toContain(`om_sent_${f.sent.indexOf(card) + 1}`)
     // 无待审批时拒绝
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
     expect(f.approvals).toHaveLength(1)
+  })
+
+  test("审批卡片按钮：发起者批准/拒绝立即决策并回终态卡片；非发起者 toast 拒绝；重复点击忽略", async () => {
+    const f = makeBot({ hangRun: true })
+    await f.bot.start()
+    void f.bot.handleFeishuEvent(receiveEvent()) // ou_123 发起任务（挂起保持运行，runOwners 保留）
+    await waitUntil(() => f.runs.length === 1)
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc11", tool: "sh", arguments: { cmd: "echo hi" } } })
+    await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    const click = (approvalId: string, act: string, openId: string) => ({
+      event: {
+        operator: { operator_id: { open_id: openId } },
+        action: { value: { approvalId, act }, tag: "button" },
+        context: { open_message_id: "om_c11", open_chat_id: "oc_chat1" },
+      },
+    })
+    // 非发起者（ou_999）点击批准 → toast 拒绝，不决策
+    const denied = f.cardAction(click("tc11", "approve", "ou_999"))
+    expect(JSON.stringify(denied)).toContain("只有发起")
+    expect(f.approvals).toHaveLength(0)
+    // 发起者点「批准」→ 立即决策，ACK 响应为终态卡片
+    const ok = f.cardAction(click("tc11", "approve", "ou_123"))
+    expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc11", approve: true }])
+    expect(JSON.stringify(ok)).toContain("已批准")
+    // 已决策后再点（卡片未刷新场景）→ 忽略，不重复决策
+    expect(f.cardAction(click("tc11", "approve", "ou_123"))).toEqual({})
+    expect(f.approvals).toHaveLength(1)
+    // 拒绝按钮：新审批请求 → act=reject → approve:false
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc12", tool: "sh", arguments: { cmd: "ls" } } })
+    await flush()
+    const rej = f.cardAction(click("tc12", "reject", "ou_123"))
+    expect(f.approvals[1]).toEqual({ sessionId: sid(), toolCallId: "tc12", approve: false })
+    expect(JSON.stringify(rej)).toContain("已拒绝")
+    f.releaseRuns()
+  })
+
+  test("审批卡片：任务结束撤回待审批卡片；新审批覆盖旧待审批先撤旧卡", async () => {
+    const f = makeBot({ hangRun: true })
+    await f.bot.start()
+    void f.bot.handleFeishuEvent(receiveEvent())
+    await waitUntil(() => f.runs.length === 1)
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc13", tool: "write", arguments: { path: "x" } } })
+    await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    const card1 = f.sent.find((s) => s.msgType === "interactive")!
+    const card1Id = `om_sent_${f.sent.indexOf(card1) + 1}`
+    // 超时残留后被新审批覆盖 → 旧卡先撤回
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc14", tool: "write", arguments: { path: "y" } } })
+    await flush()
+    expect(f.deletes).toContain(card1Id)
+    // 任务结束（完成/出错）→ 撤回当前待审批卡片
+    const card2 = f.sent.filter((s) => s.msgType === "interactive").at(-1)!
+    const card2Id = `om_sent_${f.sent.indexOf(card2) + 1}`
+    f.emit({ type: "event.task.done", ...base, payload: {} })
+    await flush()
+    expect(f.deletes).toContain(card2Id)
+    f.releaseRuns()
   })
 
   test("审批授权：仅发起者可批准（他人 /approve 被拒）", async () => {
