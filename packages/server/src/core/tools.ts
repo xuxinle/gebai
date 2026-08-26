@@ -9,7 +9,7 @@ import { truncatedPath, truncatedLogicalPath, sessionPath } from "./paths"
 import { randomUUID, createHash } from "node:crypto"
 import { isBinaryMode } from "./config"
 import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from "./diff"
-import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS } from "./patch"
+import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS, type AppliedHunk } from "./patch"
 import { hostBlockReason } from "./ip"
 import { runFlow, scanFlowApprovals } from "./flow"
 import { jsTool, jsRuntimeCommand } from "./js-tool"
@@ -314,13 +314,13 @@ function withLineNumbers(text: string, startLine: number): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
+    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。默认每行前缀真实行号（cat -n 风格「行号→制表符」，定位/引用 文件:行号、构造 patch 补丁用；复制原文给 edit/patch 时须去掉行号前缀，不需要行号可传 lineNumbers:false）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
     offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
     limit: { type: "integer", description: "读取行数（正数取 offset 起 N 行；负数取末尾 N 行）" },
-    lineNumbers: { type: "boolean", description: "每行前缀真实行号（默认 false；定位/引用行号时开启）" },
+    lineNumbers: { type: "boolean", description: "每行前缀真实行号（默认 true；offset/limit 切片仍对应文件真实行号）" },
   }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
@@ -330,7 +330,7 @@ export const readTool: Tool = {
     const limit = args.limit == null ? undefined : Number(args.limit)
     const sliced = sliceLines(content, offset, limit)
     let body = sliced
-    if (args.lineNumbers === true) {
+    if (args.lineNumbers !== false) {
       // 切片首行的真实行号：offset 起 → offset；尾部切片（limit<0）按全文行数倒推
       let startLine = 1
       if (limit != null && limit < 0) {
@@ -339,6 +339,13 @@ export const readTool: Tool = {
         startLine = Math.max(1, total - shown + 1)
       } else if (offset != null && offset > 1) startLine = offset
       body = withLineNumbers(sliced, startLine)
+    }
+    // 分段读取（offset/limit）附位置注记：模型据此判断是否还有未读内容、推算下一段 offset（尾注不进文件本体）
+    if ((offset != null || limit != null) && sliced) {
+      const totalLines = content.split("\n").length - (content.endsWith("\n") ? 1 : 0)
+      const shownLines = sliced.split("\n").length - (sliced.endsWith("\n") ? 1 : 0)
+      const firstLine = limit != null && limit < 0 ? Math.max(1, totalLines - shownLines + 1) : Math.max(1, offset ?? 1)
+      body += `\n（第 ${firstLine}–${firstLine + shownLines - 1} 行，共 ${totalLines} 行）`
     }
     const truncated = await truncate(body, "read", ctx)
     // 登记已读（write 防误覆盖守卫依据；读取失败抛错不登记）
@@ -545,18 +552,21 @@ function looksBinary(buf: Buffer, bytesRead: number): boolean {
   return ctrl / Math.max(1, bytesRead) > 0.3
 }
 
+/** file copy 动作大小上限（二进制整读整写，防巨文件拖垮内存/磁盘；超限引导 sh 复制）。 */
+const FILE_COPY_MAX_BYTES = 100 * 1024 * 1024
+
 export const fileTool: Tool = {
   name: "file",
   description:
-    "文件管理（单工具多动作）：rename 重命名 / move 移动或跨目录改名 / delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
+    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 为目标路径含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
   card: { titleParams: ["action", "path"] },
   // delete 递归且不可恢复（能力上甚于一次 sh rm，sh 一律审批）：与审批矩阵对齐，delete 动态需审批
   requiresApproval: (args) => args.action === "delete",
   parameters: schema(
     {
-      action: { enum: ["rename", "move", "delete", "info"], description: "操作类型" },
-      path: { type: "string", description: "目标文件/目录路径（rename/move 的源路径，delete/info 的目标路径）" },
-      to: { type: "string", description: "move 目标路径（含目标文件名；父目录不存在时自动创建）" },
+      action: { enum: ["copy", "rename", "move", "mkdir", "delete", "info"], description: "操作类型" },
+      path: { type: "string", description: "目标文件/目录路径（copy/rename/move 的源路径，mkdir/delete/info 的目标路径）" },
+      to: { type: "string", description: "copy/move 目标路径（含目标文件名；父目录不存在时自动创建）" },
       newName: { type: "string", description: "rename 新名字（仅名字、不含路径分隔符；跨目录改名用 move）" },
     },
     ["action", "path"],
@@ -575,11 +585,38 @@ export const fileTool: Tool = {
   async execute(args, ctx) {
     const action = String(args.action ?? "")
     const path = ctx.resolvePath(String(args.path))
-    // 安全模式：变更动作（rename/move/delete）限定用户目录内；info 只读不限
+    // 安全模式：变更动作（copy/rename/move/mkdir/delete）限定用户目录内；info 只读不限
     if (ctx.safeMode && action !== "info") {
-      const targets = action === "move" ? [path, ctx.resolvePath(String(args.to ?? path))] : [path]
+      const targets = action === "copy" || action === "move" ? [path, ctx.resolvePath(String(args.to ?? path))] : [path]
       const safeMsg = safeModeWriteCheck(targets, ctx)
       if (safeMsg) return { output: safeMsg }
+    }
+    if (action === "copy") {
+      if (!args.to) return { output: "file 拒绝：copy 需要 to（目标路径，含目标文件名）。" }
+      const to = ctx.resolvePath(String(args.to))
+      const guardMsg = await ctx.writeGuard?.([path, to])
+      if (guardMsg) return { output: guardMsg }
+      try {
+        if (ctx.readBinaryFile && ctx.writeBinaryFile) {
+          const data = await ctx.readBinaryFile(path)
+          if (data.byteLength > FILE_COPY_MAX_BYTES) {
+            return { output: `file 拒绝：源文件过大（${data.byteLength} 字节，复制上限 ${FILE_COPY_MAX_BYTES}），请用 sh 命令复制。` }
+          }
+          await ctx.writeBinaryFile(to, data)
+        } else {
+          await ctx.writeFile(to, await ctx.readFile(path))
+        }
+      } catch (err) {
+        return { output: `file copy 失败：${err instanceof Error ? err.message : String(err)}（请确认源文件存在且可读）` }
+      }
+      return { output: `已复制 ${args.path} → ${args.to}` }
+    }
+    if (action === "mkdir") {
+      const guardMsg = await ctx.writeGuard?.([path])
+      if (guardMsg) return { output: guardMsg }
+      const { mkdir } = await import("node:fs/promises")
+      await mkdir(path, { recursive: true })
+      return { output: `已创建目录 ${args.path}（已存在时不报错、不改变现有内容）` }
     }
     if (action === "rename") {
       const newName = String(args.newName ?? "").trim()
@@ -681,7 +718,7 @@ export const fileTool: Tool = {
         },
       }
     }
-    return { output: `file: 未知 action「${action}」，支持 rename/move/delete/info。` }
+    return { output: `file: 未知 action「${action}」，支持 copy/rename/move/mkdir/delete/info。` }
   },
 }
 
@@ -735,16 +772,19 @@ export async function walkDirFiles(root: string, pathBase = ""): Promise<FileEnt
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。匹配上限 200 处。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
       pattern: { type: "string" },
       path: { type: "string", description: "搜索起点：目录（递归）或单个文件（直接内搜）（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
       ignoreCase: { type: "boolean" },
+      literal: { type: "boolean", description: "true 时 pattern 按字面字符串匹配（正则元字符自动转义），适合搜索含 .()[]* 等字符的代码片段（默认 false 正则）" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
       context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式）：匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔（同 grep -n -C）" },
-      include: { type: "string", description: "文件路径 glob 过滤（如 *.ts；** 跨目录、* 任意、? 单字符）" },
+      include: { type: "string", description: "文件路径 glob 过滤（如 *.ts、src/**、*.{ts,tsx}，逗号分隔多模式；** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
+      exclude: { type: "string", description: "排除的路径 glob（与 include 同语法，命中即排除；如 tests/**,*.{json,md}、dist——无 / 的模式按目录/文件名匹配任意层级）" },
+      head_limit: { type: "integer", description: "匹配上限（默认 200；先只看前面一部分时压低，达上限结果标记 truncated——files/count 模式的计数同口径截断）" },
     },
     ["pattern"],
   ),
@@ -753,7 +793,7 @@ export const grepTool: Tool = {
       mode: { type: "string", enum: ["content", "files", "count"], description: "本次结果形态" },
       matches: {
         type: "array",
-        description: "匹配列表（mode=content；按文件与行号顺序，上限 200）",
+        description: "匹配列表（mode=content；按文件与行号顺序，上限 head_limit/200）",
         items: schema({ file: { type: "string" }, line: { type: "integer", description: "行号（1 起始）" }, text: { type: "string", description: "匹配行（去除首尾空白，截取前 200 字符）" } }, ["file", "line", "text"]),
       },
       files: { type: "array", description: "命中文件列表（mode=files）", items: { type: "string" } },
@@ -763,15 +803,20 @@ export const grepTool: Tool = {
     ["mode"],
   ),
   async execute(args, ctx) {
+    // literal 固定字符串模式：正则元字符转义后按字面匹配（默认正则）
+    const pattern = args.literal === true ? String(args.pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : String(args.pattern)
     // 正则合法性预检（实际匹配在子进程，见 runGrepMatcher）
     try {
-      new RegExp(String(args.pattern), args.ignoreCase ? "i" : "")
+      new RegExp(pattern, args.ignoreCase ? "i" : "")
     } catch {
       return { output: `grep: 无效正则: ${args.pattern}` }
     }
     const mode = args.output === "files" || args.output === "count" ? args.output : "content"
     const context = Math.max(0, Math.min(10, Math.floor(Number(args.context) || 0)))
-    const includeRe = args.include ? globToRegExp(String(args.include)) : null
+    const maxMatches = Math.max(1, Math.min(GREP_MAX_MATCHES, Math.floor(Number(args.head_limit) || GREP_MAX_MATCHES)))
+    const includeRes = globFilters(args.include)
+    const includeRaw = args.include ? String(args.include) : ""
+    const excludeRes = globFilters(args.exclude)
     const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
     // path 统一经 resolvePath 解析归一化（同 glob：显式传 "." 与省略等价、tmp/ 前缀可省略）
     let relPath = ""
@@ -791,8 +836,16 @@ export const grepTool: Tool = {
     const listing = outside ?? (await ctx.listFiles())
     // path 精确命中单文件时直接内搜该文件（grep 传文件语义），否则按目录前缀过滤（范围外已按给定 path 定界）
     const exact = !outside && relPath ? listing.find((f) => !f.isDir && listPathCandidates(f.path).includes(relPath)) : undefined
-    const files = (exact ? [exact] : listing)
-      .filter((f) => !f.isDir && f.size <= GREP_MAX_FILE_BYTES && (!prefix || exact || listPathCandidates(f.path).some((c) => c.startsWith(prefix))) && (!includeRe || listPathCandidates(f.path).some((c) => includeRe.test(c))))
+    const files = (exact ? [exact] : listing).filter((f) => {
+      if (f.isDir || f.size > GREP_MAX_FILE_BYTES) return false
+      const cs = listPathCandidates(f.path)
+      if (prefix && !exact && !cs.some((c) => c.startsWith(prefix))) return false
+      if (includeRes && !globMatchAny(includeRes, cs)) return false
+      if (excludeRes && globMatchAny(excludeRes, cs)) return false
+      // 默认排除大型/生成目录（node_modules/.git/dist 等；include 原文显式点名该目录时不排除，单文件内搜不受限）
+      if (!exact && isDefaultExcluded(cs, includeRaw)) return false
+      return true
+    })
     if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
     // 分批读文件 → 行数据送子进程匹配（灾难性回溯防护，见 runGrepMatcher）→ 命中行号回父进程渲染。
     // 批大小上限控制 stdin 载荷与瞬时内存；命中文件的行保留用于上下文渲染（受匹配上限约束）
@@ -806,7 +859,7 @@ export const grepTool: Tool = {
     const flushBatch = async () => {
       if (!batch.length) return
       const sent = batch
-      const r = await runGrepMatcher({ pattern: String(args.pattern), flags: args.ignoreCase ? "i" : "", maxMatches: GREP_MAX_MATCHES, files: sent })
+      const r = await runGrepMatcher({ pattern, flags: args.ignoreCase ? "i" : "", maxMatches, files: sent })
       batch = []
       batchBytes = 0
       if (r.error) {
@@ -892,31 +945,115 @@ export const grepTool: Tool = {
   },
 }
 
-/** glob 模式转正则：`*`/`**` → 任意字符（跨目录层级，递归查找），`?` → 单字符。 */
-function globToRegExp(pattern: string): RegExp {
-  let out = ""
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]
-    if (c === "*") {
-      out += ".*"
-      if (pattern[i + 1] === "*") i++
-    } else if (c === "?") out += "."
-    else out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+/** 花括号展开（支持嵌套）：`*.{ts,tsx}` → [`*.ts`, `*.tsx`]；无花括号/不闭合原样返回。 */
+function expandBraces(pattern: string): string[] {
+  const start = pattern.indexOf("{")
+  if (start < 0) return [pattern]
+  let depth = 0
+  let end = -1
+  for (let i = start; i < pattern.length; i++) {
+    if (pattern[i] === "{") depth++
+    else if (pattern[i] === "}") {
+      if (--depth === 0) {
+        end = i
+        break
+      }
+    }
   }
-  return new RegExp(`^${out}$`)
+  if (end < 0) return [pattern]
+  // 顶层逗号分割（嵌套花括号内的逗号不分割）
+  const parts: string[] = []
+  let d = 0
+  let cur = ""
+  for (const ch of pattern.slice(start + 1, end)) {
+    if (ch === "{") d++
+    else if (ch === "}") d--
+    if (ch === "," && d === 0) {
+      parts.push(cur)
+      cur = ""
+      continue
+    }
+    cur += ch
+  }
+  parts.push(cur)
+  const out: string[] = []
+  for (const p of parts) out.push(...expandBraces(pattern.slice(0, start) + p + pattern.slice(end + 1)))
+  return out
+}
+
+/** glob 模式转正则：`*`/`**` → 任意字符（跨目录层级，递归查找），`?` → 单字符，`{a,b}` 花括号交替展开为多候选。 */
+function globToRegExp(pattern: string): RegExp {
+  const parts = expandBraces(pattern).map((v) => {
+    let out = ""
+    for (let i = 0; i < v.length; i++) {
+      const c = v[i]
+      if (c === "*") {
+        out += ".*"
+        if (v[i + 1] === "*") i++
+      } else if (c === "?") out += "."
+      else out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    }
+    return out
+  })
+  return new RegExp(`^(?:${parts.join("|")})$`)
+}
+
+/** include/exclude 过滤器列表（逗号分隔多模式 + 各自花括号展开，任一命中即匹配）；空/未传返回 null。 */
+function globFilters(v: unknown): RegExp[] | null {
+  const s = v == null ? "" : String(v).trim()
+  if (!s) return null
+  // 顶层逗号分割（花括号内的逗号是交替项不分割），再各自花括号展开
+  const pats: string[] = []
+  let d = 0
+  let cur = ""
+  for (const ch of s) {
+    if (ch === "{") d++
+    else if (ch === "}") d = Math.max(0, d - 1)
+    if (ch === "," && d === 0) {
+      pats.push(cur)
+      cur = ""
+      continue
+    }
+    cur += ch
+  }
+  pats.push(cur)
+  const out: RegExp[] = []
+  for (const p of pats.map((x) => x.trim()).filter(Boolean)) out.push(...expandBraces(p).map(globToRegExp))
+  return out.length ? out : null
+}
+
+/** glob 过滤匹配（include/exclude 共用）：候选相对路径整条或任一路径段（含文件名）命中任一模式即真
+ *  ——含 `/` 的模式只能整条命中（锚定正则含 / 不可能匹配单段），无 `/` 的模式（如 dist、*.log）按段命中（同 rg --glob 语义）。 */
+function globMatchAny(filters: RegExp[], candidates: string[]): boolean {
+  return candidates.some((c) => filters.some((re) => re.test(c) || c.split("/").some((seg) => re.test(seg))))
+}
+
+/** 默认排除判定：路径任一段命中 WALK_SKIP_DIRS（node_modules/.git/dist 等大型目录）且 include/pattern 原文未显式点名该目录。 */
+function isDefaultExcluded(candidates: string[], rawPattern: string): boolean {
+  return candidates.some((c) => c.split("/").some((seg) => WALK_SKIP_DIRS.has(seg) && !rawPattern.includes(seg)))
 }
 
 export const globTool: Tool = {
   name: "glob",
-  description: "按文件名模式（glob，如 *.ts、**/test/*.js）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。",
+  description:
+    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。exclude 可排除路径模式（如 tests/**,*.md）。",
   card: { titleParams: ["pattern"] },
-  parameters: schema({ pattern: { type: "string" }, path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" } }, ["pattern"]),
+  parameters: schema(
+    {
+      pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
+      path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
+      exclude: { type: "string", description: "排除的路径 glob（逗号分隔多模式；与 grep exclude 同语法——无 / 的模式按目录/文件名匹配任意层级）" },
+    },
+    ["pattern"],
+  ),
   outputSchema: schema({
     files: { type: "array", items: { type: "string" }, description: "匹配文件相对路径（最多 200 个）" },
     total: { type: "integer", description: "匹配总数（可能大于 files 长度）" },
   }, ["files", "total"]),
   async execute(args, ctx) {
-    const re = globToRegExp(String(args.pattern ?? ""))
+    const rawPattern = String(args.pattern ?? "")
+    const re = globToRegExp(rawPattern)
+    const excludeRes = globFilters(args.exclude)
     const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
     // path 统一经 resolvePath 解析（与 read/write/ls 一致：相对路径基于会话工作目录 tmp/，tmp/ 前缀可省略；
     // 项目上下文基于项目根），解析回基准相对逻辑路径后与列表坐标做前缀匹配（沙箱模式拒绝越界路径）
@@ -933,7 +1070,13 @@ export const globTool: Tool = {
     const files = (await ctx.listFiles())
       .filter((f) => !f.isDir)
       .map((f) => f.path)
-      .filter((p) => listPathCandidates(p).some((c) => (prefix ? c.startsWith(prefix) : true) && re.test(prefix ? c.slice(prefix.length) : c)))
+      .filter((p) => {
+        const cs = listPathCandidates(p)
+        return cs.some((c) => {
+          const rel = prefix ? c.slice(prefix.length) : c
+          return (prefix ? c.startsWith(prefix) : true) && re.test(rel)
+        }) && !(excludeRes && globMatchAny(excludeRes, cs)) && !isDefaultExcluded(cs, rawPattern)
+      })
     if (!files.length) return { output: "（无匹配文件）", data: { files: [] } }
     const listed = files.slice(0, 200)
     return { output: listed.join("\n"), data: { files: listed, total: files.length } }
@@ -1464,7 +1607,7 @@ function collapseWhitespace(s: string): string {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配）则整体不落盘。改动较多或行号容易偏移时改用 patch。修改前先 read 目标区域。",
+    "精确修改文件：基于 oldString → newString 定点替换，可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配）则整体不落盘。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write 守卫；read/edit/patch/write 成功过的文件视为已读）。oldString 须从文件当前内容精确复制（不含 read 输出的行号前缀）。改动较多或行号容易偏移时改用 patch。修改前先 read 目标区域。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" },
   parameters: schema(
     {
@@ -1493,6 +1636,12 @@ export const editTool: Tool = {
     if (guardMsg) return { output: guardMsg }
     await assertReadableSize(path, "edit", EDIT_MAX_FILE_BYTES)
     let content = await ctx.readFile(path)
+    // 防盲改守卫（与 write 防盲覆盖同规则）：已存在但本会话未 read 过 → 拒绝，防凭记忆/假设内容盲改（oldString 匹配失败白跑一轮）
+    if (ctx.fileGuard && !ctx.fileGuard.hasRead(path)) {
+      return {
+        output: `edit 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲改）。请先 read 该文件（或目标区域）确认当前内容后再 edit；read/edit/patch/write 成功过的文件视为已读。`,
+      }
+    }
     const edits = (args.edits as Array<{ oldString: string; newString: string; replaceAll?: boolean }>) || []
     const applied: string[] = []
     for (const [idx, e] of edits.entries()) {
@@ -1504,11 +1653,17 @@ export const editTool: Tool = {
       }
       const occ = findOccurrences(content, oldString)
       if (!occ.length) {
-        // 空白近似提示：归一化后可命中 → 大概率是缩进/空白复制不精确
+        // 空白近似提示：归一化后可命中 → 大概率是缩进/空白复制不精确；
+        // 行号泄漏提示：oldString 携带 read 输出的「行号→制表符」前缀 → 去掉前缀后可精确命中
         const near = collapseWhitespace(content).includes(collapseWhitespace(oldString))
-        throw new Error(
-          `修改失败: ${nth} oldString 未在文件中精确匹配: ${oldString.slice(0, 60)}${near ? "（检测到空白/缩进不一致的近似原文——请 read 后从原文逐字符复制 oldString）" : "（请先 read 当前文件核对最新内容）"}`,
-        )
+        const stripped = oldString.split("\n").map((l) => l.replace(/^\s*\d+\t/, "")).join("\n")
+        const lineNoLeak = stripped !== oldString && findOccurrences(content, stripped).length > 0
+        const hint = lineNoLeak
+          ? "（检测到 oldString 携带 read 输出的行号前缀——请去掉每行行号后重试）"
+          : near
+            ? "（检测到空白/缩进不一致的近似原文——请 read 后从原文逐字符复制 oldString）"
+            : "（请先 read 当前文件核对最新内容）"
+        throw new Error(`修改失败: ${nth} oldString 未在文件中精确匹配: ${oldString.slice(0, 60)}${hint}`)
       }
       if (occ.length > 1 && e.replaceAll !== true) {
         const lines = occ.slice(0, 8).map((i) => lineOfIndex(content, i)).join("、")
@@ -1594,50 +1749,98 @@ function describeAppliedPatch(applied: Array<{ line: number; delta: number }>): 
 export const patchTool: Tool = {
   name: "patch",
   description:
-    "应用 unified diff 补丁到文件（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造，---/+++ 文件头可省略），格式：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\n-旧行\n+新行）；全部 hunk 校验通过才整体落盘（原子），任一 hunk 不匹配整体失败不修改。单次仅处理一个文件（多文件补丁请分文件调用）。改动较多或行号容易偏移时优先于 edit 使用。",
+    "应用 unified diff 补丁（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造）：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。全部文件全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write/edit 守卫）。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff", file: "path" },
   parameters: schema(
     {
-      path: { type: "string", description: "目标文件路径" },
+      path: { type: "string", description: "目标文件路径（单文件补丁定位用；多文件补丁按文件头定位，可省略）" },
       patch: { type: "string", description: "unified diff 补丁文本" },
       dryRun: { type: "boolean", description: "true 时仅预演（校验并报告将应用的位置），不写入" },
     },
-    ["path", "patch"],
+    ["patch"],
   ),
   async execute(args, ctx) {
-    const path = String(args.path)
-    const files = parsePatch(String(args.patch ?? ""))
-    if (files.length === 0) return { output: "patch: 补丁未解析到任何 hunk（请提供含 @@ 头的 unified diff 文本，格式见 diff 工具输出）" }
-    if (files.length > 1) return { output: `patch: 补丁含 ${files.length} 个文件，请分文件调用（本次仅处理 ${path}）` }
-    const patch = files[0]
-    if (patch.hunks.length > PATCH_MAX_HUNKS) return { output: `patch: hunk 数超上限（${patch.hunks.length} > ${PATCH_MAX_HUNKS}），请拆分补丁` }
-    let content = ""
-    let exists = true
-    try {
-      content = await ctx.readFile(ctx.resolvePath(path))
-    } catch {
-      exists = false
+    const sections = parsePatch(String(args.patch ?? ""))
+    if (sections.length === 0) return { output: "patch: 补丁未解析到任何 hunk（请提供含 @@ 头的 unified diff 文本，格式见 diff 工具输出）" }
+    const argPath = args.path ? String(args.path) : ""
+    /** 文件头路径规范化：剥离 git 风格 a// b/ 前缀（/dev/null 与空值返回 undefined）。 */
+    const headerPath = (p?: string): string | undefined => (p && p !== "/dev/null" ? p.replace(/^[ab]\//, "") : undefined)
+    // 段落 → 目标路径：单文件补丁优先 path 参数（既有行为），多文件按各段文件头定位（无头段落回退 path）
+    const targets: string[] = []
+    for (const [i, s] of sections.entries()) {
+      const header = headerPath(s.newPath) ?? headerPath(s.oldPath)
+      const t = sections.length === 1 && argPath ? argPath : header ?? argPath
+      if (!t) return { output: `patch: 第 ${i + 1} 段无 ---/+++ 文件头且未传 path 参数，无法定位目标文件（多文件补丁须带文件头）` }
+      targets.push(t)
     }
-    if (exists && content.length > PATCH_MAX_FILE_BYTES) {
-      return { output: `patch: 文件过大（${content.length} 字符，上限 ${PATCH_MAX_FILE_BYTES}），请改用 edit 分段修改` }
+    // 同一目标的多个段落合并按序应用（去重保持顺序）
+    const order: string[] = []
+    const byTarget = new Map<string, typeof sections>()
+    for (const [i, t] of targets.entries()) {
+      if (!byTarget.has(t)) {
+        byTarget.set(t, [])
+        order.push(t)
+      }
+      byTarget.get(t)!.push(sections[i])
     }
-    const r = applyPatch(content, patch)
-    if (!r.ok) {
-      return { output: `patch: 第 ${r.hunkIndex + 1} 处 hunk 未匹配：${r.error}（请先 read 当前文件内容核对，或改用 edit 定点替换；dryRun=true 可预演）` }
-    }
-    if (args.dryRun === true) return { output: `patch 预演通过：${describeAppliedPatch(r.applied)}（dryRun，未写入）` }
-    const abs = ctx.resolvePath(path)
-    // 安全模式：修改限定用户目录内（降级而非禁用）
-    const safeMsg = ctx.safeMode ? safeModeWriteCheck([abs], ctx) : null
+    const absList = order.map((t) => ctx.resolvePath(t))
+    // 安全模式：修改限定用户目录内；写范围守卫：全部目标一次校验（任一命中整体拒绝）
+    const safeMsg = ctx.safeMode ? safeModeWriteCheck(absList, ctx) : null
     if (safeMsg) return { output: safeMsg }
-    const guardMsg = await ctx.writeGuard?.([abs])
+    const guardMsg = await ctx.writeGuard?.(absList)
     if (guardMsg) return { output: guardMsg }
-    await ctx.writeFile(abs, r.result)
-    // 写入内容即已掌握，登记已读（write 防误覆盖守卫依据）
-    ctx.fileGuard?.markRead(abs)
-    // 产物块（与 read/write 同款）：补丁应用后的文件内容卡（弹窗查看模式收敛为文件链接）
-    const blocks = artifactBlocks(previewLogicalPath(abs, ctx), r.result)
-    return { output: `patch 已写入 ${path}：${describeAppliedPatch(r.applied)}`, blocks }
+    // 预检 + 应用（内存中逐文件完成，全部通过才落盘——跨文件原子）
+    const planned: Array<{ target: string; abs: string; result: string; applied: AppliedHunk[] }> = []
+    for (const [ti, target] of order.entries()) {
+      const abs = absList[ti]
+      const parts = byTarget.get(target)!
+      if (parts.reduce((s, p) => s + p.hunks.length, 0) > PATCH_MAX_HUNKS) {
+        return { output: `patch: ${target} 的 hunk 数超上限（> ${PATCH_MAX_HUNKS}），请拆分补丁` }
+      }
+      let content = ""
+      let exists = true
+      try {
+        content = await ctx.readFile(abs)
+      } catch {
+        exists = false
+      }
+      if (exists && content.length > PATCH_MAX_FILE_BYTES) {
+        return { output: `patch: 文件过大（${target} ${content.length} 字符，上限 ${PATCH_MAX_FILE_BYTES}），请改用 edit 分段修改` }
+      }
+      // 防盲改守卫（与 write/edit 同规则）：已存在但未读过 → 拒绝，防凭记忆构造补丁盲改
+      if (exists && ctx.fileGuard && !ctx.fileGuard.hasRead(abs)) {
+        return { output: `patch 拒绝：${target} 已存在，但本会话尚未读取过其内容（防盲改）。请先 read 该文件确认当前内容后再打补丁；read/edit/patch/write 成功过的文件视为已读。` }
+      }
+      let applied: AppliedHunk[] = []
+      for (const [pi, part] of parts.entries()) {
+        const r = applyPatch(content, part)
+        if (!r.ok) {
+          return {
+            output: `patch: ${order.length > 1 ? `${target} ` : ""}第 ${r.hunkIndex + 1} 处 hunk 未匹配：${r.error}（请先 read 当前文件内容核对，或改用 edit 定点替换；dryRun=true 可预演）${parts.length > 1 ? `（${target} 第 ${pi + 1} 段）` : ""}`,
+          }
+        }
+        content = r.result
+        applied = applied.concat(r.applied)
+      }
+      planned.push({ target, abs, result: content, applied })
+    }
+    if (args.dryRun === true) {
+      const lines = planned.map((p) => `${p.target}：${describeAppliedPatch(p.applied)}`)
+      return { output: `patch 预演通过（${planned.length} 个文件，dryRun，未写入）：\n${lines.join("\n")}` }
+    }
+    // 落盘 + 登记已读 + 产物块
+    const blocks: ContentBlock[] = []
+    for (const p of planned) {
+      await ctx.writeFile(p.abs, p.result)
+      ctx.fileGuard?.markRead(p.abs)
+      blocks.push(...artifactBlocks(previewLogicalPath(p.abs, ctx), p.result))
+    }
+    if (planned.length === 1) {
+      const p = planned[0]
+      return { output: `patch 已写入 ${p.target}：${describeAppliedPatch(p.applied)}`, blocks }
+    }
+    const lines = planned.map((p) => `- ${p.target}：${describeAppliedPatch(p.applied)}`)
+    return { output: `patch 已写入 ${planned.length} 个文件：\n${lines.join("\n")}`, blocks }
   },
 }
 
@@ -1645,27 +1848,35 @@ export const patchTool: Tool = {
 const GIT_DEFAULT_LOG = 10
 const GIT_MAX_LOG = 50
 
+/** git 命令内嵌参数（ref/path）安全字符校验：拒绝 shell/cmd 元字符（引号拼接注入、& | 管道、% 变量展开、^ 转义等）。 */
+function safeGitArg(v: string): boolean {
+  return v.trim() !== "" && !/["&|<>^%`\r\n;]/.test(v)
+}
+
 export const gitTool: Tool = {
   name: "git",
   description:
-    "只读 Git 检查（仅 status/diff/log 三操作，不修改仓库；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh。",
+    "只读 Git 检查（status/diff/log/show/branch/ls-files 六操作，不修改仓库；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh。",
   card: { args: "none" },
   parameters: schema(
     {
-      action: { type: "string", enum: ["status", "diff", "log"], description: "status 工作区状态 / diff 变更内容 / log 提交历史" },
+      action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files"], description: "status 工作区状态 / diff 变更内容 / log 提交历史 / show 查看某提交或文件的完整内容（ref 默认 HEAD）/ branch 本地与远程分支列表 / ls-files 已跟踪文件清单（自动尊重 .gitignore，摸底项目结构快于 glob）" },
       dir: { type: "string", description: "Git 仓库目录（默认会话工作目录）" },
       staged: { type: "boolean", description: "diff 是否查看暂存区（--staged），默认否" },
       maxEntries: { type: "integer", description: "log 条数（默认 10，上限 50）" },
+      ref: { type: "string", description: "show 的目标：提交哈希/分支/tag/HEAD~n 等（默认 HEAD）" },
+      path: { type: "string", description: "ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts；可选）" },
     },
     ["action"],
   ),
   outputSchema: schema({
-    action: { type: "string", enum: ["status", "diff", "log"] },
+    action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files"] },
     branch: { type: "string", description: "当前分支（仅 status）" },
     ahead: { type: "integer", description: "领先远端提交数（仅 status，无则省略）" },
     behind: { type: "integer", description: "落后远端提交数（仅 status，无则省略）" },
     changes: { type: "array", description: "变更文件（仅 status）", items: schema({ status: { type: "string", description: "git 状态码（如 M/A/??）" }, path: { type: "string" } }, ["status", "path"]) },
     commits: { type: "array", description: "提交历史（仅 log）", items: schema({ hash: { type: "string" }, subject: { type: "string" } }, ["hash", "subject"]) },
+    files: { type: "array", description: "文件清单（仅 ls-files）", items: { type: "string" } },
   }, ["action"]),
   async execute(args, ctx) {
     const action = String(args.action)
@@ -1676,12 +1887,23 @@ export const gitTool: Tool = {
     else if (action === "log") {
       const n = Math.min(Math.max(Number(args.maxEntries ?? GIT_DEFAULT_LOG) || GIT_DEFAULT_LOG, 1), GIT_MAX_LOG)
       cmd = `git log --oneline -n ${n}`
-    } else return { output: `git: 未知操作: ${action}（status/diff/log）` }
+    } else if (action === "show") {
+      const ref = args.ref ? String(args.ref) : "HEAD"
+      if (!safeGitArg(ref)) return { output: `git: 非法 ref（含命令元字符）: ${ref}` }
+      cmd = `git show --no-color "${ref}"`
+    } else if (action === "branch") {
+      cmd = "git branch -a -v --no-color"
+    } else if (action === "ls-files") {
+      const path = args.path ? String(args.path) : ""
+      if (path && !safeGitArg(path)) return { output: `git: 非法 path（含命令元字符）: ${path}` }
+      cmd = path ? `git ls-files -- "${path}"` : "git ls-files"
+    } else return { output: `git: 未知操作: ${action}（status/diff/log/show/branch/ls-files）` }
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: dir })
     if (code !== 0) return { output: `git ${action} 失败（exit ${code}，目录 ${args.dir || "."} 可能不是 Git 仓库）:\n${stderr || stdout}` }
     if (!stdout.trim()) {
-      const empty = action === "diff" ? "（工作区无变更）" : action === "status" ? "（工作区干净）" : "（无提交记录）"
-      return { output: empty, data: { action, ...(action === "status" ? { changes: [] } : action === "log" ? { commits: [] } : {}) } }
+      const empty: Record<string, string> = { diff: "（工作区无变更）", status: "（工作区干净）", log: "（无提交记录）", show: "（无内容）", branch: "（无分支）", "ls-files": "（无跟踪文件）" }
+      const emptyData: Record<string, Record<string, unknown>> = { status: { changes: [] }, log: { commits: [] }, "ls-files": { files: [] } }
+      return { output: empty[action] ?? "（无输出）", data: { action, ...(emptyData[action] ?? {}) } }
     }
     if (action === "status") {
       const lines = stdout.split("\n").filter(Boolean)
@@ -1705,6 +1927,10 @@ export const gitTool: Tool = {
         return i < 0 ? { hash: l, subject: "" } : { hash: l.slice(0, i), subject: l.slice(i + 1) }
       })
       return { ...(await truncate(stdout, "git", ctx)), data: { action, commits } }
+    }
+    if (action === "ls-files") {
+      const files = stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+      return { ...(await truncate(files.join("\n"), "git", ctx)), data: { action, files: files.slice(0, 2000) } }
     }
     return { ...(await truncate(stdout, "git", ctx)), data: { action } }
   },
@@ -1765,12 +1991,13 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号语义以 cmd 为准。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 sh_task 回头查询/等待/终止。",
+  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号语义以 cmd 为准；指定工作目录用 workdir 参数（免 cd X && cmd 串联）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 sh_task 回头查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
     {
       command: { type: "string" },
+      workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析，绝对路径本地模式可用）——替代 cd X && cmd 串联（Windows cmd 下引号语义更稳），不传用默认工作目录" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540，超时进程被终止并返回超时结果；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
@@ -1782,6 +2009,7 @@ export const shTool: Tool = {
   outputSchema: scriptOutputSchema,
   async execute(args, ctx) {
     const input = scriptInput(args.input)
+    const workdir = args.workdir ? ctx.resolvePath(String(args.workdir)) : ctx.workdir
     // 安全模式：只读命令白名单 + 输出重定向限用户目录（降级而非禁用；解析 fail-closed）
     if (ctx.safeMode) {
       const deny = validateShCommandSafeMode(String(args.command), ctx)
@@ -1790,13 +2018,13 @@ export const shTool: Tool = {
     // 异步后台执行（DESIGN「sh 异步执行」）：spawn 进后台 + 落盘会话 tmp/sh-tasks/，立即返回 taskId
     if (args.async === true) {
       if (!ctx.shTasks) return { output: "当前环境不支持后台任务执行（shTasks 服务未注入）。" }
-      const rec = await ctx.shTasks.start(String(args.command), { cwd: ctx.workdir, env: ctx.env, input, maxMs: shTaskLifetimeMs(args.timeout) })
+      const rec = await ctx.shTasks.start(String(args.command), { cwd: workdir, env: ctx.env, input, maxMs: shTaskLifetimeMs(args.timeout) })
       return {
         output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 sh_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=kill 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
         data: { taskId: rec.id, pid: rec.pid },
       }
     }
-    const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir: ctx.workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
+    const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
     // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
     if (args.strict === true && code !== 0) {
       throw new Error(`命令执行失败（exit ${code}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)

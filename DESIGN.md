@@ -372,7 +372,7 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | 接口 | 职责 | 关键方法 |
 |------|------|---------|
 | `LLMProvider` | 三类接口统一抽象、多模态组装、流式解析；**多模态内容块转换**：统一内部图片块 `{type:"image", mime, data}`（base64）按接口规范转换（OpenAI 系 `image_url` data URL、Anthropic base64 `image` 块），`imageMessageBlocks()` 助手构造文本+图片消息；**Responses API**：消息转 `input`（assistant 工具调用拆独立 `function_call` item + `function_call_output`），工具扁平格式 `{type:"function",name,description,parameters}`，流式事件解析（`output_item.added`/`function_call_arguments.delta|done`/`output_text.delta`/`reasoning_*_text.delta`/`completed`，stop reason 取末条 message `finish_reason`）；**额外模型接口参数**：Provider 级（`GEBAI_LLM_EXTRA_PARAMS`）与调用级（`ChatOptions.extraParams`）请求体参数顶层合并（后者优先）；**接口健壮性**：fetch 层对网络错误/429/5xx 指数退避重试（2 次，500ms 基数，退避可被取消），4xx 与 AbortError 不重试，错误响应体截断 200 字符 | `chat(messages, opts): AsyncIterable<Chunk>`、`capabilities()` |
-| `AgentEngine` | 主循环状态机：工具循环/审批/重试/压缩/取消；**模型调用健壮性**：空响应（无文本且无工具调用，含只思考未输出）与无产出异常经 `callModel` 指数退避重试（2 次，800ms 基数，注入提示引导），已有产出后断流不重试（避免重复输出），耗尽抛中文错误；**重试过程前端可见**——每次将重试的模型服务异常推送 `event.model.error`（非终态瞬时提示，见「事件清单」）；**重复检测**：最近 8 次工具调用签名（工具名+参数 JSON）滚动窗口，相同签名第 3 次起中断执行并注入引导提示，中断超 2 次终止工具循环（避免模型无效重复）；待办续做回复与上轮完全相同（纯文本）时追加防复述提示；**会话级已读文件追踪**（fileGuard，write 防误覆盖守卫，见「write 防误覆盖守卫」） | `run(session, prompt, opts)`、`cancel(sessionId)` |
+| `AgentEngine` | 主循环状态机：工具循环/审批/重试/压缩/取消；**模型调用健壮性**：空响应（无文本且无工具调用，含只思考未输出）与无产出异常经 `callModel` 指数退避重试（2 次，800ms 基数，注入提示引导），已有产出后断流不重试（避免重复输出），耗尽抛中文错误；**重试过程前端可见**——每次将重试的模型服务异常推送 `event.model.error`（非终态瞬时提示，见「事件清单」）；**重复检测**：最近 8 次工具调用签名（工具名+参数 JSON）滚动窗口，相同签名第 3 次起中断执行并注入引导提示，中断超 2 次终止工具循环（避免模型无效重复）；待办续做回复与上轮完全相同（纯文本）时追加防复述提示；**会话级已读文件追踪**（fileGuard，防盲写守卫，见「防盲写守卫」） | `run(session, prompt, opts)`、`cancel(sessionId)` |
 | `ToolRegistry` | 工具注册/命名空间解析/启停/审批声明 | `register(tool)`、`resolve(name)`、`list()` |
 | `SessionStore` | 会话/消息/待办/附件持久化（分片路径） | `load(id)`、`save(session)`、`appendMessage()` |
 | `EnvManager` | 环境变量合并：全局（进程 env）+ 会话内存态（不落盘）；用户环境变量只存浏览器本地、随 prompt 任务级注入 | `resolve(sessionId): Record<string,string>` |
@@ -404,7 +404,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **重复检测**：模型连续/交替重复调用相同工具（工具名+参数相同，最近 8 次内第 3 次）时中断该次执行并注入引导提示（「不要重复相同操作，改用其他方法或直接给出最终回答」）；中断超过 2 次判定模型陷入重复，终止工具循环提前返回（仍返回最后产出文本，保持会话消息序列完整）；待办续做中模型回复与上上轮完全相同（纯文本）时，续做提醒追加「请勿复述」提示
 - **错误恢复**：LLM 请求失败/超时自动退避重试；工具执行失败将错误注入上下文，引导模型自行修正；**工具执行超时不结束任务**——脚本类工具先由脚本执行超时（`sh`/`py` 可经 `timeout` 参数（秒，默认 300、上限 540）调整个别执行超时，缺省 5 分钟）杀进程并返回超时结果，引擎层 9 分钟兜底（`TOOL_TIMEOUT_MS`）覆盖不响应超时的工具（如网络请求挂起），超时均作为工具结果返回给模型自行调整方案
 - **大文件分段写入与截断抢救**：生成大文件时模型被迫单次输出全部内容，易触发接口超时与输出上限截断（参数 JSON 不完整）。三层防护——①**分段写入载体**：`write` 支持 `append:true` 追加模式，工具描述与 code 子Agent 提示词内置指引（约 300 行以上分多段写，每段 200~300 行），单次响应短、不再超时；②**截断检测**：provider 如实传出结束原因（OpenAI `finish_reason=length`、Anthropic `max_tokens`、Responses `response.incomplete`→`length`，不再吞为正常 stop），解析失败的工具参数携带原始全文（`toolCall.raw`，原仅 500 字符片段）；③**抢救落盘**：引擎对 write 类工具（`write`/`{agent}_write`）容错解析原始参数前缀（`salvageWriteArgs`：提取完整 `path` 与已生成 `content` 前缀，尾部不完整转义丢弃、非法转义放弃），先把已生成部分落盘并登记已读，工具结果引导模型 `append:true` 续写剩余部分（从已写入之后继续，不重新生成全量）——失败轮次转化为进度；未抢救（非 write 工具/前缀解析失败/防盲覆盖守卫拒绝）时回传截断专属引导（拆小操作/分段写入），不再笼统提示「重新输出合法 JSON」（重新整体输出只会再次截断）。单次响应输出上限可配（`GEBAI_LLM_MAX_OUTPUT_TOKENS` 任务级覆盖，Anthropic 缺省 8192）
-- **防盲覆盖守卫**：`write` 覆盖「已存在但本会话未读过」的文件被拒绝（会话级 fileGuard 已读追踪，`read`/`edit`/`patch`/`write` 成功即登记），引导模型先 `read` 再覆盖——拒绝作为工具结果返回，模型一轮自愈，不中断任务（见「write 防误覆盖守卫」）
+- **防盲写守卫（已读追踪）**：`write` 覆盖/追加、`edit`、`patch` 修改「已存在但本会话未读过」的文件均被拒绝（会话级 fileGuard 已读追踪，`read`/`edit`/`patch`/`write` 成功即登记），引导模型先 `read` 再改——拒绝作为工具结果返回，模型一轮自愈，不中断任务（见「防盲写守卫」）
 - **上下文管理**：历史超出窗口阈值时自动压缩（工具输出截断 → 旧消息摘要 → 滚动裁剪，见「上下文保护」），也支持用户主动压缩
 - **审批超时**：审批请求超时（见常量参考）自动拒绝该次调用并提示模型调整，避免任务悬挂
 
@@ -684,7 +684,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 ```ts
 export const name = "code"
 export const description = "涉及代码编写与源码分析时装载本子Agent（不处理歌白自身代码，自我优化用 self_optimize）：新建/修改项目与功能实现、代码分析、问题定位修复；装载后按 探索→方案→修改→验证 流程执行，改动较多时优先 patch；写操作需审批。输入：需求/问题描述；输出：代码修改方案与验证结果。"
-export const systemPrompt = "你是源码分析与修改专家（工作流参考 opencode 编码助手）。工作流程：\n0) 环境确认：开工前先读本提示词开头注入的项目环境注记（项目根/工作目录、预置项目清单、受限模式说明）——目标代码所在项目与 project 参数取值由此确定；分析某系统/服务源码时，先在预置项目清单（名称/说明/路径）中定位系统本体，警惕与目标同名的 API 封装/适配层（网关封装 ≠ 被管理系统源码），不要在其上浪费时间；清单确无对应项目时用 project 参数直接传项目根路径（自由项目），或先用 project 工具（action=use）设定会话默认项目根——此后未传 project 的文件工具都以该根为基准，不必每次重复传长路径（预置清单/当前设定随时用 project action=list 查看）；\n1) 规划：多步骤任务先用 todo 建立待办清单（entries 一次可含 add/update/delete 多条，探索→定位→方案→修改→验证），eta 参数给出每步预计耗时（分钟）让用户有耗时预期；每完成一步用 todo 更新状态，返回的清单即最新全部待办，无需再查；\n2) 探索：grep（内容搜索）/glob（按文件名查找）/search_symbols（按符号名定位**定义**位置，跨文件；找**引用/调用点**用 grep）/ls（目录结构）/analyze（tree-sitter 结构概览）快速定位，再精确读取相关文件（大文件分段读，避免整读超长输出），不大范围逐行通读；grep 宽泛摸底先 output=files，锁定文件后再 content 模式；对独立的目标可一次发起多个并行工具调用；查阅第三方库/框架文档用 fetch_url；跨大量文件的摸底/架构梳理（只要结论不要过程）可 agent_run 委托 explore 子Agent（只读探索，返回结论与 文件:行号 清单，中间过程不占本会话上下文）；\n3) 定位：梳理问题/需求涉及的代码位置、调用链与依赖关系；\n4) 方案：输出改动点清单（文件、改动内容、预期效果与影响面）；方向有取舍时用 ask 提供选项向用户确认（如实现方案、测试框架、改动范围）；可用 diff 展示「修改前/后」对比供审查；\n5) 修改：先 read 目标区域确认当前内容，再动手；遵循项目既有约定——先看 README/package.json/AGENTS.md 与相邻文件，了解技术栈、风格与依赖，模仿现有写法（新代码的命名/注释密度/习惯与周围代码保持一致，不引入无关改动）；改动较多或行号容易偏移时优先 patch（上下文行给 2~4 行即可——过多易不匹配、过少定位不稳；一次补丁聚焦一个改动点，不相关的改动分批提交），小范围定点改动用 edit，write 仅用于新建/整体覆盖——新建大文件（约 300 行以上）分段写入：先 write 首段，再以 append:true 续写后续段（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时；edit/patch 成功即已按原文校验落盘，无需重读验证；补丁不匹配时先 read 当前文件内容核对再重试；不添加无关注释；不引入/提交密钥凭据；写操作（edit/write/patch/sh/py）需审批，修改前必须先给出方案；重复性/批量操作（批量替换、批量跑测试等）优先用 sh/py 脚本一次执行，避免大量单步工具调用；明确安全的只读命令（如 git status）与测试/静态检查类（bun test、pytest、tsc、eslint 等）可给 sh 传 approval:false 跳过本次审批（服务端按白名单强制校验，不满足仍弹审批），其余命令勿免审；py 的免审标记不生效（恒需审批），纯数据加工类 js 脚本可传 approval:false（含网络/进程/环境读取通道的代码除外）；长耗时命令（全量构建/测试/安装）可给 sh 传 async:true 后台执行（立即返回 taskId），期间继续其他工作，回头用 sh_task（action=wait/status）取结果——不必干等；\n6) 验证：先跑与改动相关的测试文件（如 bun test 指定文件），通过后再跑全量与类型检查/lint（bun run typecheck/bun run lint 等）确认无回归；失败先看错误信息定位（grep 错误关键字找断言/堆栈位置）再修复重测，不盲目重复执行；Python 项目用 py；Web 项目需要浏览器端验证时可 agent_run 委托 playwright 子Agent；服务端功能类改动可让用户用 preview_server 在临时新端口启动独立验证服务确认（不中断当前会话，验证完 action=stop 停止）；环境/依赖异常（工具链缺失、PATH 问题）用 env_detect 探测（平台/PATH/关键工具链版本/缺失组件），系统基础信息用 system_info；\n7) 收尾：用 git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件，不擅自 commit（add/commit 等写操作用 sh 且需审批；与本次任务无关的既有改动不要误动）；用 todo（空 entries 查询）核对全部待办后给出总结——**先结论后细节**（第一句话回答做了什么/结果如何），关键改动位置引用 文件:行号，改动理由与影响面随后展开；验证/测试未通过时如实说明并附关键错误输出，不粉饰、不略过失败项；\n项目与环境变量配置（项目相关配置经进程环境变量或前端本地注入进任务 env）：\n- CODE_PROJECTS：预置项目注册表（JSON 数组 [{name,path,description}]），文件工具用 project 参数传**项目名**（清单见本提示词开头「预置项目」注记；project 参数也接受项目根路径——自由项目，或先用 project 工具设定会话默认根）；\n- CODE_PROJECT：默认项目根绑定——未指定 project 时以该项目根为基准；\n- CODE_RESTRICT_PROJECTS：受限模式（true 开启）——仅允许操作预配置项目，自由路径（不带 project）被拒绝；\n未设置预置项目时直接用 path 参数传项目/文件路径（自由项目），或 project 工具设定会话默认根。"
+export const systemPrompt = "你是源码分析与修改专家（工作流参考 opencode 编码助手）。工作流程：\n0) 环境确认：开工前先读本提示词开头注入的项目环境注记（项目根/工作目录、预置项目清单、受限模式说明）——目标代码所在项目与 project 参数取值由此确定；分析某系统/服务源码时，先在预置项目清单（名称/说明/路径）中定位系统本体，警惕与目标同名的 API 封装/适配层（网关封装 ≠ 被管理系统源码），不要在其上浪费时间；清单确无对应项目时用 project 参数直接传项目根路径（自由项目），或先用 project 工具（action=use）设定会话默认项目根——此后未传 project 的文件工具都以该根为基准，不必每次重复传长路径（预置清单/当前设定随时用 project action=list 查看）；\n1) 规划：多步骤任务先用 todo 建立待办清单（entries 一次可含 add/update/delete 多条，探索→定位→方案→修改→验证），eta 参数给出每步预计耗时（分钟）让用户有耗时预期；每完成一步用 todo 更新状态，返回的清单即最新全部待办，无需再查；\n2) 探索：grep（内容搜索——含正则元字符的代码片段传 literal:true 按字面匹配；宽泛摸底先 output=files，锁定文件后再 content 模式；结果有噪声用 exclude 排除，如 tests/**,*.{json,md}）/glob（按文件名查找，支持 *.{ts,tsx} 花括号与 exclude 排除）/search_symbols（按符号名定位**定义**位置，跨文件；找**引用/调用点**用 grep）/ls（目录结构）/analyze（tree-sitter 结构概览）/git ls-files（Git 项目已跟踪文件清单，尊重 .gitignore，项目结构摸底快于 glob）快速定位，再精确读取相关文件（read 默认带行号可直接引用 文件:行号；大文件 offset/limit 分段读，尾部注记标明已读区段与全文行数），不大范围逐行通读；node_modules/.git/dist 等大型目录 grep/glob 默认跳过；对独立的目标可一次发起多个并行工具调用；查阅第三方库/框架文档用 fetch_url；跨大量文件的摸底/架构梳理（只要结论不要过程）可 agent_run 委托 explore 子Agent（只读探索，返回结论与 文件:行号 清单，中间过程不占本会话上下文）；\n3) 定位：梳理问题/需求涉及的代码位置、调用链与依赖关系；\n4) 方案：输出改动点清单（文件、改动内容、预期效果与影响面）；方向有取舍时用 ask 提供选项向用户确认（如实现方案、测试框架、改动范围）；可用 diff 展示「修改前/后」对比供审查；\n5) 修改：先 read 目标区域确认当前内容再动手（edit/patch/write 均有防盲改守卫：已存在但本会话未 read 过的文件会被拒绝，read/edit/patch/write 成功过即视为已读；从 read 输出复制原文给 edit 的 oldString 时须去掉行号前缀）；遵循项目既有约定——先看 README/package.json/AGENTS.md 与相邻文件，了解技术栈、风格与依赖，模仿现有写法（新代码的命名/注释密度/习惯与周围代码保持一致，不引入无关改动）；改动较多或行号容易偏移时优先 patch（上下文行给 2~4 行即可——过多易不匹配、过少定位不稳；一次补丁可跨多个相关文件——各文件段带 ---/+++ 头，全部校验通过才原子落盘；不相关的改动分批提交），小范围定点改动用 edit，write 仅用于新建/整体覆盖——新建大文件（约 300 行以上）分段写入：先 write 首段，再以 append:true 续写后续段（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时；edit/patch 成功即已按原文校验落盘，无需重读验证；补丁不匹配时先 read 当前文件内容核对再重试；不添加无关注释；不引入/提交密钥凭据；写操作（edit/write/patch/sh/py）需审批，修改前必须先给出方案；重复性/批量操作（批量替换、批量跑测试等）优先用 sh/py 脚本一次执行，避免大量单步工具调用；明确安全的只读命令（如 git status）与测试/静态检查类（bun test、pytest、tsc、eslint 等）可给 sh 传 approval:false 跳过本次审批（服务端按白名单强制校验，不满足仍弹审批），其余命令勿免审；指定命令工作目录用 sh 的 workdir 参数（免 cd 串联，Windows 下引号语义更稳）；py 的免审标记不生效（恒需审批），纯数据加工类 js 脚本可传 approval:false（含网络/进程/环境读取通道的代码除外）；长耗时命令（全量构建/测试/安装）可给 sh 传 async:true 后台执行（立即返回 taskId），期间继续其他工作，回头用 sh_task（action=wait/status）取结果——不必干等；\n6) 验证：先跑与改动相关的测试文件（如 bun test 指定文件），通过后再跑全量与类型检查/lint（bun run typecheck/bun run lint 等）确认无回归；失败先看错误信息定位（grep 错误关键字找断言/堆栈位置）再修复重测，不盲目重复执行；Python 项目用 py；Web 项目需要浏览器端验证时可 agent_run 委托 playwright 子Agent；服务端功能类改动可让用户用 preview_server 在临时新端口启动独立验证服务确认（不中断当前会话，验证完 action=stop 停止）；环境/依赖异常（工具链缺失、PATH 问题）用 env_detect 探测（平台/PATH/关键工具链版本/缺失组件），系统基础信息用 system_info；\n7) 收尾：用 git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件，不擅自 commit（add/commit 等写操作用 sh 且需审批；与本次任务无关的既有改动不要误动）；用 todo（空 entries 查询）核对全部待办后给出总结——**先结论后细节**（第一句话回答做了什么/结果如何），关键改动位置引用 文件:行号，改动理由与影响面随后展开；验证/测试未通过时如实说明并附关键错误输出，不粉饰、不略过失败项；\n项目与环境变量配置（项目相关配置经进程环境变量或前端本地注入进任务 env）：\n- CODE_PROJECTS：预置项目注册表（JSON 数组 [{name,path,description}]），文件工具用 project 参数传**项目名**（清单见本提示词开头「预置项目」注记；project 参数也接受项目根路径——自由项目，或先用 project 工具设定会话默认根）；\n- CODE_PROJECT：默认项目根绑定——未指定 project 时以该项目根为基准；\n- CODE_RESTRICT_PROJECTS：受限模式（true 开启）——仅允许操作预配置项目，自由路径（不带 project）被拒绝；\n未设置预置项目时直接用 path 参数传项目/文件路径（自由项目），或 project 工具设定会话默认根。"
 export const tools: ToolSet = { read, write, edit, patch, sh, sh_task, py, ls, grep, glob, search_symbols, file, diff, analyze, git, project, fetch_url, ask, agent_run, todo, preview_server, env_detect, system_info }
 export const requiresApproval = { edit: true, write: true, patch: true } // sh/py 走工具自身动态审批（默认需审批、approval 参数按次免审），不静态覆盖
 export const preload = false
@@ -692,9 +692,9 @@ export const preload = false
 
 要点：
 
-- **工作流（参考 opencode 编码助手）**：环境确认（先读提示词开头注入的项目环境注记——预置项目清单/项目根/受限模式，确定目标项目与 project 参数，警惕与目标同名的 API 封装/适配层）→ 规划（todo 待办跟踪）→ 探索（grep/glob/search_symbols/ls/analyze 先定位、并行调用；grep 宽泛摸底用 files 形态、锁定后 content+context 看语境；大范围摸底可 agent_run 委托 explore 只读探索，再精确读取）→ 定位 → 方案（改动点清单 + `ask` 方向确认 + `diff` 前后对比展示）→ 修改（遵循项目既有约定、与周围代码风格一致；改动多时 `patch` 补丁应用优先、`edit` 定点替换（唯一性校验）次之、`write` 仅新建/整体覆盖（未读守卫；新建大文件分段——首段 write、后续 append:true 续写），不添加无关注释/密钥，成功后无需重读验证）→ 验证（测试 + typecheck/lint，失败续修）→ 收尾（`git` 工具只读核对变更后只提交预期文件，不擅自 commit；总结先结论后细节、引用 文件:行号、失败如实报告）
-- **分析工具**：`read`（读源码，`lineNumbers=true` 行号定位）、`ls`（目录结构）、`grep`（内容搜索：files/count 形态摸底 + content/context 精读、include 过滤文件类型）、`glob`（文件名 glob 查找）、`search_symbols`（**跨文件符号定义定位**：tree-sitter 解析函数/类/方法/类型定义，返回 文件:行号: 类型 名称，精确匹配优先，比 grep 更精准）、`analyze`（tree-sitter 语法结构概览）、`diff`（修改前后/两文件对比，UI 并排高亮）、`fetch_url`（查阅第三方库/框架文档）、`sh`（运行测试）
-- **修改工具**：`patch`（**unified diff 补丁应用**：一次多 hunk、行号模糊容错、原子落盘、dryRun 预演，改动多/行号易偏移时优先）/`edit`（定点替换，小范围改动）/`write`（新建/整体覆盖）由 code 的 `requiresApproval` 声明审批；`sh`/`py`（Python 项目执行测试与脚本）走工具自身动态审批（默认需用户审批，复用统一审批流；`approval:false` 按次免审，见「工具审批」）；`sh_task`（sh 异步后台任务管理，`sh async:true` 启动的任务查询/等待/终止，见「sh 异步后台任务」）；`file` 文件管理（rename/move/delete/info 多动作）；`git`（**只读**：status/diff/log 免审批，写操作走 `sh`）
+- **工作流（参考 opencode 编码助手）**：环境确认（先读提示词开头注入的项目环境注记——预置项目清单/项目根/受限模式，确定目标项目与 project 参数，警惕与目标同名的 API 封装/适配层）→ 规划（todo 待办跟踪）→ 探索（grep/glob/search_symbols/ls/analyze/git ls-files 先定位、并行调用；grep 宽泛摸底用 files 形态、锁定后 content+context 看语境、exclude 排噪、literal 字面搜代码片段；大范围摸底可 agent_run 委托 explore 只读探索，再精确读取——read 默认带行号、分段读附位置注记）→ 定位 → 方案（改动点清单 + `ask` 方向确认 + `diff` 前后对比展示）→ 修改（遵循项目既有约定、与周围代码风格一致；改动多时 `patch` 补丁应用优先（可跨多文件，带 ---/+++ 头原子应用）、`edit` 定点替换（唯一性校验）次之、`write` 仅新建/整体覆盖（防盲写守卫统一覆盖 write/edit/patch；新建大文件分段——首段 write、后续 append:true 续写），不添加无关注释/密钥，成功后无需重读验证）→ 验证（测试 + typecheck/lint，失败续修）→ 收尾（`git` 工具只读核对变更后只提交预期文件，不擅自 commit；总结先结论后细节、引用 文件:行号、失败如实报告）
+- **分析工具**：`read`（读源码，默认带行号可直接引用 文件:行号）、`ls`（目录结构）、`grep`（内容搜索：files/count 形态摸底 + content/context 精读、include/exclude 过滤、literal 字面匹配代码片段、head_limit 压低上限）、`glob`（文件名 glob 查找，支持 `{a,b}` 花括号与 exclude 排除）、`search_symbols`（**跨文件符号定义定位**：tree-sitter 解析函数/类/方法/类型定义，返回 文件:行号: 类型 名称，精确匹配优先，比 grep 更精准）、`analyze`（tree-sitter 语法结构概览）、`diff`（修改前后/两文件对比，UI 并排高亮）、`fetch_url`（查阅第三方库/框架文档）、`sh`（运行测试）
+- **修改工具**：`patch`（**unified diff 补丁应用**：一次多 hunk、可跨多文件（---/+++ 头分组）、行号模糊容错、原子落盘、dryRun 预演，改动多/行号易偏移时优先）/`edit`（定点替换，小范围改动）/`write`（新建/整体覆盖）由 code 的 `requiresApproval` 声明审批（三者同受防盲写守卫约束）；`sh`/`py`（Python 项目执行测试与脚本）走工具自身动态审批（默认需用户审批，复用统一审批流；`approval:false` 按次免审，见「工具审批」；`sh` 的 `workdir` 参数指定命令工作目录）；`sh_task`（sh 异步后台任务管理，`sh async:true` 启动的任务查询/等待/终止，见「sh 异步后台任务」）；`file` 文件管理（copy/rename/move/mkdir/delete/info 多动作）；`git`（**只读**：status/diff/log/show/branch/ls-files 免审批，写操作走 `sh`）
 - **协作工具**：`ask`（需求澄清、方案取舍确认，阻塞等待用户回应）、`todo`（待办增删改查统一入口，entries 列表一次批量操作、空列表即查询，与会话待办联动）、`agent_run`（执行新会话委托其他子Agent——如 `playwright` 做 Web 项目浏览器端验证；**不得委托 `self_optimize`**，见「职责边界」）
 - **项目设定工具（`project`）**：预置项目与自由路径项目的统一入口——`action=use` 设定**会话粘性项目根**（project 参数形态：预置项目名或项目根路径），此后未传 `project` 的文件工具都以该根为基准（自由路径项目一次设定、免重复传长路径）；`list` 查看预置清单与当前设定；`clear` 清除。粘性根按 `user:sessionId` 记忆（含该会话派生的新会话执行——agent_run explore 等继承同一根）；受限模式下 `use` 仅接受预置项目名（与文件工具 project 参数同规则）
 - **验证/环境工具（自全局工具集下沉，全局集最小化）**：`preview_server`（临时新端口启动/停止一份独立进程的 GEBAI 服务，`action=start`/`stop`，供用户验证服务端类改动——不中断当前会话，启动返回 URL/PID/日志路径；经 `projectAware` 包装以 `{workdir:true}` 暴露——带 `project` 参数/粘性根时以项目根为启动目录）、`env_detect`（环境探测：平台/架构、PATH 去重、关键工具链版本 node/bun/python/git/cargo 等（缺失标记不可用）、Windows MSVC 与 WebView2 状态，指导安装缺失组件）、`system_info`（系统基础信息）——三者不注册为全局工具，以 `code_preview_server`/`code_env_detect`/`code_system_info` 命名空间暴露（`self_optimize` 经连带装载 code 一并获得），全部免审批
@@ -785,7 +785,7 @@ export const preload = false
 
 - **用途**：跨大量文件的代码摸底/架构梳理/多点位定位——`code`（或总Agent）经 `agent_run` 委托执行，广度优先搜索后返回**结论 + 文件:行号 引用清单**，中间搜索/读取过程留在新会话存档里，不占主上下文（防上下文膨胀的标准委托形态）
 - **硬约束（代码级）**：工具集**只有只读工具**（read/ls/grep/glob/search_symbols/analyze/git/fetch_url/todo，全部免审批）——没有 write/edit/patch/sh/py/file（含 delete/move 动作），探索不可能产生任何修改或命令执行；需要修改时装载/委托 `code`
-- **工作流（提示词内置）**：圈定范围（project 参数/任务给定根；ls/glob 看结构、grep output=files 宽泛定位）→ 抽查精读（关键文件 read 分段读、search_symbols 定位定义、grep 定位调用点、analyze 结构概览代替通读）→ 汇总结论（**先结论后细节**，关键位置给 文件:行号，未确认点明确标注不猜测）→ 规模纪律（命中面大先 output=count 估面再挑重点；只保留与目标相关的结论）
+- **工作流（提示词内置）**：圈定范围（project 参数/任务给定根；ls/glob（支持花括号与 exclude）看结构、Git 项目用 git ls-files 拿已跟踪文件清单（尊重 .gitignore）、grep 宽泛定位先 output=files（exclude 排噪、literal 字面搜代码片段））→ 抽查精读（关键文件 read 分段读（默认带行号，直接引用 文件:行号）、search_symbols 定位定义、grep 定位调用点、analyze 结构概览代替通读）→ 汇总结论（**先结论后细节**，关键位置给 文件:行号，未确认点明确标注不猜测）→ 规模纪律（命中面大先 output=count 估面再挑重点；只保留与目标相关的结论）
 - **项目路由**：文件工具经 `projectAware` 包装（复用 code 的实现，导出共享）——支持 `project` 参数按预置项目名路由，路径相对项目根解析；受限模式（CODE_RESTRICT_PROJECTS）同规则生效
 - 与 `code` 的分工：`code` 是「探索→方案→修改→验证」全流程执行者；`explore` 只做其中的「探索」段且产出为结论——大范围摸底先委托 explore 拿地图，再由 code 精确改动，两段各司其职
 
@@ -823,7 +823,7 @@ export const preload = false
 
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
 |---------|------|------|--------|------|
-| `code` | read/write/edit/patch/sh/py/ls/grep/glob/search_symbols/file/diff/analyze/git/fetch_url/ask/agent_run/todo/preview_server/env_detect/system_info | edit+write+patch+sh+py | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析、补丁应用、符号定位、git 只读核对、修改前后对比、文档查阅、待办规划、方案确认、Python 执行、浏览器端验证委托、项目内置、验证服务（自全局下沉 preview_server）与环境/工具链探测（env_detect/system_info）、文件管理（file：重命名/移动/删除/信息）） |
+| `code` | read/write/edit/patch/sh/py/ls/grep/glob/search_symbols/file/diff/analyze/git/fetch_url/ask/agent_run/todo/preview_server/env_detect/system_info | edit+write+patch+sh+py | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析、补丁应用（可跨多文件）、符号定位、git 只读核对（status/diff/log/show/branch/ls-files）、修改前后对比、文档查阅、待办规划、方案确认、Python 执行、浏览器端验证委托、项目内置、验证服务（自全局下沉 preview_server）与环境/工具链探测（env_detect/system_info）、文件管理（file：复制/重命名/移动/建目录/删除/信息）） |
 | `self_optimize` | 独有工具 read_feedback/run_tests/rollback/page_capture/vision；**通用工具与工作流直接复用 code**（装载/`agent_run` 预加载均连带 code——文件/分析/验证类操作用 `code_*` 工具（含 code_preview_server/code_file），code 工作流提示词随连带装载注入，不重复注册）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback（code_* 写类审批由 code 声明承接） | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经 code；特有：反馈读取、测试准入+回滚、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析、写范围守卫；**装载即连带装载 code**） |
 | `widgets` | save/list/get/delete | delete（公用/私有删除均需审批） | ✗ | HTML 小工具库增删改查（自全局 save_tool/delete_tool 下沉并补齐：保存/清单/读取源码/删除；四工具限实时前端 interaction=realtime；与模型工具语义区分——小工具是「小工具」面板加载的页面组件） |
 | `explore` | read/ls/grep/glob/search_symbols/analyze/git/fetch_url/todo（全部只读，支持 project 参数路由） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行，返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
@@ -1389,14 +1389,14 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 | 工具 | 功能 | 默认审批 |
 |------|------|---------|
-| `read` | 读取文件内容（相对路径以会话 `tmp/` 为基准，`tmp/` 前缀可省略；服务端部署受沙箱限制，桌面/本地浏览器不限制，见路径基准）；可选 `offset`（起始行号，1 起始）与 `limit`（行数，正数取 offset 起 N 行、负数取末尾 N 行），按行切片便于大文件分段阅读；`lineNumbers=true` 每行前缀真实行号（右对齐+制表符，切片后仍对应文件行号，规划修改/按 文件:行号 引用时推荐）；读取成功登记「本会话已读」（write 防误覆盖守卫依据，见「write 防误覆盖守卫」） | 否 |
-| `write` | 写入文件（默认整体覆盖；`append:true` 追加模式——内容接在文件末尾，不存在则新建）。相对路径以会话 `tmp/` 为基准（`tmp/` 前缀可省略，受沙箱限制）；目标文件**已存在且本会话未 read 过**时拒绝（防盲覆盖，先 read 再覆盖，覆盖/追加同规则，见「write 防误覆盖守卫」）；**大文件（约 300 行以上）分段写入**——首段普通 write、后续段 `append:true` 续写（每段 200~300 行），防单次模型输出过长被输出上限截断或接口超时（截断时引擎抢救落盘 + 引导续写，见「核心Agent流程」大文件分段写入与截断抢救） | 否 |
+| `read` | 读取文件内容（相对路径以会话 `tmp/` 为基准，`tmp/` 前缀可省略；服务端部署受沙箱限制，桌面/本地浏览器不限制，见路径基准）；可选 `offset`（起始行号，1 起始）与 `limit`（行数，正数取 offset 起 N 行、负数取末尾 N 行），按行切片便于大文件分段阅读；**默认每行前缀真实行号**（`lineNumbers` 默认 true——cat -n 风格右对齐+制表符，切片后仍对应文件行号，按 文件:行号 引用/构造补丁的定位基准；不需要可传 false；复制原文给 `edit` 的 oldString 时须去掉行号前缀——edit 检测到行号前缀误拷贝会给明确提示）；`offset`/`limit` 切片读取附尾部位置注记（`（第 X–Y 行，共 N 行）`），模型据此判断剩余内容与下一段 offset；读取成功登记「本会话已读」（防盲写守卫依据，见「防盲写守卫」） | 否 |
+| `write` | 写入文件（默认整体覆盖；`append:true` 追加模式——内容接在文件末尾，不存在则新建）。相对路径以会话 `tmp/` 为基准（`tmp/` 前缀可省略，受沙箱限制）；目标文件**已存在且本会话未 read 过**时拒绝（防盲覆盖，先 read 再覆盖，覆盖/追加同规则，见「防盲写守卫」）；**大文件（约 300 行以上）分段写入**——首段普通 write、后续段 `append:true` 续写（每段 200~300 行），防单次模型输出过长被输出上限截断或接口超时（截断时引擎抢救落盘 + 引导续写，见「核心Agent流程」大文件分段写入与截断抢救） | 否 |
 | `ls` | 列出目录内容（文件/子目录、大小） | 否 |
-| `grep` | 按正则表达式在会话工作目录（`tmp/`）中递归搜索文本内容（返回 文件:行号: 匹配行——路径带 `tmp/` 前缀可直接用于文件工具，限文件大小与匹配数）；`output` 三种结果形态（`content` 逐行内容 / `files` 仅命中文件清单——宽泛摸底定位优先 / `count` 每文件命中行数）、`context` 附匹配行前后上下文（格式同 `grep -n -C`：匹配行 `文件:行号:` 前缀、上下文行 `文件-行号-` 前缀、组间 `--` 分隔）、`include` 按文件路径 glob 过滤（如 `*.ts`）（见「grep 内容检索工具」） | 否 |
-| `glob` | 按文件名模式（glob：`*`/`**` 跨目录、`?` 单字符）在会话工作目录（`tmp/`）递归查找文件（path 可限定子目录，`tmp/` 前缀可省略，与 `read`/`write` 同一路径解析规则；返回路径带 `tmp/` 前缀，可直接用于文件工具） | 否 |
-| `file` | **文件管理（单工具多动作）**：`rename` 重命名（同目录改名，`newName` 仅名字不含路径——含分隔符拒绝防越界，跨目录用 move）/ `move` 移动或跨目录改名（`to` 含目标文件名，父目录不存在自动创建，与 `write` 一致）/ `delete` 删除文件或目录（递归，不可恢复）/ `info` 查看文件信息——**按内容探测**（类似 `file` 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite/Java class 等）、文本 vs 二进制判定（二进制勿盲 read）、编码检测（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**（`data.extMismatch`）；附人类可读大小与修改时间，目录附直接子条目数。写动作（rename/move/delete）走写范围守卫；与 `ls`（目录列表）分工——`ls` 单独保留 | 否 |
-| `edit` | **精确修改文件**：基于 `old_string` → `new_string` 替换（可多处），替换前校验原文匹配与**唯一性**（多处命中报错列出行号，或该项 `replaceAll: true` 全部替换），失败即报错不落盘；空 `oldString` 拒绝；成功回报各处应用行号（见「edit 修改工具」） | 否 |
-| `patch` | **应用 unified diff 补丁**：一次多 hunk、行号模糊容错（上下文裁剪重试），全部 hunk 校验通过才整体落盘（原子），`dryRun` 可预演不落盘；单次单文件（见「patch 补丁应用工具」） | 否 |
+| `grep` | 按正则表达式在会话工作目录（`tmp/`）中递归搜索文本内容（返回 文件:行号: 匹配行——路径带 `tmp/` 前缀可直接用于文件工具，限文件大小与匹配数）；`output` 三种结果形态（`content` 逐行内容 / `files` 仅命中文件清单——宽泛摸底定位优先 / `count` 每文件命中行数）、`context` 附匹配行前后上下文（格式同 `grep -n -C`：匹配行 `文件:行号:` 前缀、上下文行 `文件-行号-` 前缀、组间 `--` 分隔）、`literal:true` 按字面匹配（正则元字符自动转义——搜索 `foo.bar(` 类代码片段免转义）、`include`/`exclude` 按路径 glob 过滤/排除（逗号分隔多模式、`{a,b}` 花括号交替；无 `/` 的模式按目录/文件名匹配任意层级）、`head_limit` 压低匹配上限先看一部分；node_modules/.git/dist 等大型目录默认跳过（include 原文显式点名除外）（见「grep 内容检索工具」） | 否 |
+| `glob` | 按文件名模式（glob：`*`/`**` 跨目录、`?` 单字符、`{a,b}` 花括号交替）在会话工作目录（`tmp/`）递归查找文件（path 可限定子目录，`tmp/` 前缀可省略，与 `read`/`write` 同一路径解析规则；返回路径带 `tmp/` 前缀，可直接用于文件工具）；`exclude` 排除路径模式（与 grep 同语法）；node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外） | 否 |
+| `file` | **文件管理（单工具多动作）**：`copy` 复制文件（`to` 含目标文件名，二进制通道支持任意类型、父目录自动创建，≤100MB）/ `rename` 重命名（同目录改名，`newName` 仅名字不含路径——含分隔符拒绝防越界，跨目录用 move）/ `move` 移动或跨目录改名（`to` 含目标文件名，父目录不存在自动创建，与 `write` 一致）/ `mkdir` 新建目录（递归，已存在幂等不报错）/ `delete` 删除文件或目录（递归，不可恢复）/ `info` 查看文件信息——**按内容探测**（类似 `file` 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite/Java class 等）、文本 vs 二进制判定（二进制勿盲 read）、编码检测（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、shebang 解释器；**扩展名与实际内容不符时显式提示**（`data.extMismatch`）；附人类可读大小与修改时间，目录附直接子条目数。写动作（copy/rename/move/mkdir/delete）走写范围守卫；与 `ls`（目录列表）分工——`ls` 单独保留 | 否 |
+| `edit` | **精确修改文件**：基于 `old_string` → `new_string` 替换（可多处），替换前校验原文匹配与**唯一性**（多处命中报错列出行号，或该项 `replaceAll: true` 全部替换），失败即报错不落盘；空 `oldString` 拒绝；目标文件已存在但本会话未 read 过时拒绝（防盲改守卫，与 write 同规则）；匹配失败时检测两类常见误因并给明确提示——空白/缩进不一致的近似原文、`oldString` 误携 read 输出的行号前缀；成功回报各处应用行号（见「edit 修改工具」） | 否 |
+| `patch` | **应用 unified diff 补丁**：一次多 hunk、行号模糊容错（上下文裁剪重试），全部 hunk 校验通过才整体落盘（原子），`dryRun` 可预演不落盘；**多文件补丁**按 `---`/`+++` 文件头分组逐文件应用（`a/`/`b/` 前缀自动剥离，跨文件原子——任一文件任一 hunk 失败整体不落盘）；目标文件已存在但未 read 过时拒绝（防盲改守卫）（见「patch 补丁应用工具」） | 否 |
 | `diff` | **文本/文件对比**：对比两段文本或两个文件（旧 → 新），输出 unified diff 文本并返回 `diff` 内容块，UI 并排对比渲染、按文本类型语法高亮 | 否 |
 | `flow` | **数据流编排**（工具即函数、动态编程）：一次调用执行多步工具链——引用映射（`{{id.data.字段}}`，一对一/一对多/多对一）、`when` 条件分支、`foreach`/`while` 循环、`optional` 容错；旧版线性串联格式兼容（见「flow 数据流编排工具」） | **取决于内部工具**（动态审批） |
 | `tool_schemas` | **批量获取工具 schema**：按工具名列表返回输入参数与结构化输出（`data`）的 JSON Schema；省略时返回全部已启用工具的输出结构概要——编排（flow）前理解输出结构，避免逐个试调 | 否 |
@@ -1404,7 +1404,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `agent_load` | **装载**子Agent 能力模块（类比 import 子模块：工具并入当前工具集、**完整系统提示词作为 system 消息写入会话记录**（持久化，恢复会话自动还原），**不创建独立上下文**；默认使用方式：装载后直接用其工具，仅在需要干净上下文或防膨胀时才改用 `agent_run` 新会话执行；装载反馈**枚举实际并入的工具全名**（`{agent}_{tool}` 清单），模型无需猜测直接调用） | 否 |
 | `agent_run` | **执行新会话**（派生临时新会话，**无需装载**：预加载一个或多个子Agent（完整系统提示词拼接+工具并入）后阻塞执行一次并返回最终结果，中间过程/推理/内部工具不进主上下文，全程存档可回放；默认优先 `agent_load` 装载后直接用其工具，仅在需要干净上下文或防上下文膨胀时使用） | 否 |
 | `full_mode` | **切换完整模式**（**仅极简模式会话可见可用**，完整模式会话从 schema 移除）：极简下任务确需其他工具能力时调用，用户批准后解锁全部工具（本任务后续轮次 schema 立即全量下发）、系统提示词原地升级为完整版、会话极简标记清除并通知前端关闭开关；可选 `reason` 参数说明原因供审批参考（见「工具选择」极简模式） | **是** |
-| `sh` | 执行Shell命令（**Windows 下经 cmd.exe 执行：命令串联用 `&&`/`||`/换行，`;` 非分隔符会被并入参数，引号语义以 cmd 为准**；**`input` 参数**：stdin 输入，对象/数组自动序列化为 JSON 文本（双引号，脚本 `json.loads` 可解析）；**`timeout` 参数：执行超时秒数，默认 300、上限 540，超时按进程树终止并返回超时结果（`async:true` 时为任务生命周期上限：默认 1800、上限 3600）**；**`strict` 参数**：true 时非 0 退出码抛工具级错误（flow 编排「非 0 即中断」，默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出）；**`async` 参数**：true 后台异步执行——立即返回 taskId 不阻塞（长耗时构建/测试先做其他事再回头查询，见「sh 异步后台任务」）；**`approval` 参数**：本次调用是否需审批，默认 true，明确安全的只读/幂等命令可传 false 按次免审（见「工具审批」）；可运行 `bun run`/`node`；JS/TS 亦可通过内置运行时 `gebai exec` 自执行，见「脚本执行环境」） | **是**（默认；`approval:false` 按次免审） |
+| `sh` | 执行Shell命令（**Windows 下经 cmd.exe 执行：命令串联用 `&&`/`||`/换行，`;` 非分隔符会被并入参数，引号语义以 cmd 为准**；**`workdir` 参数**：命令工作目录（相对路径基于会话工作目录/项目根解析——免 `cd X && cmd` 串联，Windows 下引号语义更稳；async 后台任务同以该目录为 cwd）；**`input` 参数**：stdin 输入，对象/数组自动序列化为 JSON 文本（双引号，脚本 `json.loads` 可解析）；**`timeout` 参数：执行超时秒数，默认 300、上限 540，超时按进程树终止并返回超时结果（`async:true` 时为任务生命周期上限：默认 1800、上限 3600）**；**`strict` 参数**：true 时非 0 退出码抛工具级错误（flow 编排「非 0 即中断」，默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出）；**`async` 参数**：true 后台异步执行——立即返回 taskId 不阻塞（长耗时构建/测试先做其他事再回头查询，见「sh 异步后台任务」）；**`approval` 参数**：本次调用是否需审批，默认 true，明确安全的只读/幂等命令可传 false 按次免审（见「工具审批」）；可运行 `bun run`/`node`；JS/TS 亦可通过内置运行时 `gebai exec` 自执行，见「脚本执行环境」） | **是**（默认；`approval:false` 按次免审） |
 | `sh_task` | **管理 sh 异步后台任务**（`sh async:true` 启动并返回 taskId，见「sh 异步后台任务」）：`action=status` 立即返回任务状态与输出尾部 / `wait` 阻塞等待完成（`timeout` 秒内未完成返回当前状态，默认 60 上限 540——「先做别的再回头等结果」）/ `kill` 终止任务进程树 / `list` 列出本会话全部后台任务；输出为 stdout+stderr 合并日志尾部（`tail` 参数默认 4000 上限 20000 字符，完整日志 `tmp/sh-tasks/{id}.log`） | 否 |
 | `py` | 执行Python代码（**`input` 参数同 `sh`**；**`timeout` 参数同 `sh`**；**`strict` 参数同 `sh`**；**`approval` 参数同 `sh`**） | **是**（默认；`approval:false` 按次免审） |
 | `js` | **执行 JS/TS 脚本（工具动态编程）**：Bun 子进程运行，脚本内工具**像内置函数一样直接调用**——`await read(params)`（已启用工具名即顶层函数，动态名字 `tools.call`）+ `ctx` **注入会话上下文**（user/sessionId/workdir/home/sandboxed/env/projects/messages 最近消息快照）+ `input`（flow/编排传入）；console 输出即工具输出，`return` 值进 `data.result`；`timeout`/`strict`/`approval` 参数同 `sh`（见「js 脚本工具」） | **是**（默认；`approval:false` 按次免审） |
@@ -1427,7 +1427,8 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 - **参数**：`path`（目标文件）+ `edits: { oldString, newString, replaceAll? }[]`（可一次多处替换；`replaceAll` 缺省 false）
 - **唯一性校验（防误改）**：默认要求 `oldString` 在文件中**唯一命中**——多处命中时整体失败不落盘，错误信息列出各命中行号（至多 8 处）并给出两条出路：扩大 `oldString` 上下文使其唯一，或确认全部替换时该项传 `replaceAll: true`；避免「相同片段出现在多处时改错第一处」的静默误改
 - **安全校验**：替换前校验 `oldString` 在文件中**精确匹配**，不匹配则整体失败并报错，**不落盘**，避免模型基于过期内容误改；`oldString` 为空直接拒绝（空串匹配会静默插入文件头，显式报错引导新建文件用 `write`）
-- **近似匹配提示**：精确匹配失败但空白归一化后可命中时，错误信息提示「空白/缩进不一致的近似原文」——引导模型 `read` 后从原文逐字符复制（含缩进），常见于模型凭记忆写 `oldString` 忘记缩进的场景
+- **防盲改守卫（已读前置）**：目标文件已存在但本会话未 read 过时拒绝（与 `write` 防误覆盖同规则，见「防盲写守卫」）——防模型凭记忆/假设内容构造 `oldString` 盲改（匹配失败白跑一轮往返）；`read`/`edit`/`patch`/`write` 成功过的文件视为已读
+- **近似匹配提示（两类误因检测）**：精确匹配失败时检测两类常见误因并给明确提示——①**空白/缩进不一致的近似原文**（空白归一化后可命中）：引导模型 `read` 后从原文逐字符复制（含缩进）；②**行号前缀误拷贝**（`oldString` 携带 read 默认行号输出的「行号→制表符」前缀，去掉前缀后可精确命中）：提示去掉每行行号后重试——read 默认带行号后的配套防呆
 - **应用行号回报**：成功后输出每处修改的应用行号（如 `已对 a.ts 应用 2 处修改：1) 行 12；2) 行 40`），便于汇报与后续引用
 - **与 `write` 的关系**：`edit` 用于既有文件的定点修改（保留无关内容）；`write` 用于新建/整体覆盖（受防误覆盖守卫约束）；模型按需选择，`flow` 中可混用；改动较多或行号容易偏移时优先用 `patch` 应用 unified diff（见「patch 补丁应用工具」）
 - **审批**：默认无需审批（与 `write` 同级）；子Agent 可通过 `requiresApproval` 声明 `edit` 需审批
@@ -1437,7 +1438,10 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 按正则表达式递归搜索文本内容（`core/tools.ts` 纯实现，行级匹配），是编码探索的主定位工具：
 
-- **参数**：`pattern`（正则）+ 可选 `path`（搜索起点：目录（递归）或单个文件（直接内搜该文件，grep 传文件语义）；默认 `.`，显式传 `.` 与省略等价（经 `resolvePath` 归一化，与 `glob` 同一惯例），相对会话工作目录、`tmp/` 前缀可省略）/`ignoreCase`/`output`/`context`/`include`；返回路径带 `tmp/` 前缀（可直接用于 `read` 等文件工具）
+- **参数**：`pattern`（正则，或 `literal:true` 字面匹配）+ 可选 `path`（搜索起点：目录（递归）或单个文件（直接内搜该文件，grep 传文件语义）；默认 `.`，显式传 `.` 与省略等价（经 `resolvePath` 归一化，与 `glob` 同一惯例），相对会话工作目录、`tmp/` 前缀可省略）/`ignoreCase`/`output`/`context`/`include`/`exclude`/`head_limit`；返回路径带 `tmp/` 前缀（可直接用于 `read` 等文件工具）
+- **literal 固定字符串模式**：`literal:true` 时 `pattern` 按字面字符串匹配（正则元字符自动转义）——搜索含 `.`/`(`/`[` 等字符的代码片段（如 `foo.bar(`）免转义、防「点号通配造成的意外命中」；默认 false 正则模式
+- **文件过滤（`include`）与排除（`exclude`）**：按路径 glob 过滤/排除（`*.ts`、`src/**`、`tests/**,*.{json,md}`）——逗号分隔多模式 + `{a,b}` 花括号交替（花括号内的逗号是交替项不分割）；无 `/` 的模式（如 `dist`、`*.log`）按目录/文件名匹配**任意层级**路径段（同 `rg --glob` 语义），含 `/` 的模式按整条相对路径匹配；`exclude` 命中即剔除（优先于 include）
+- **默认跳过大型/生成目录**：node_modules/.git/dist/build/.next/.cache/__pycache__/.venv/venv/target/.idea/.vscode/coverage/.turbo（`WALK_SKIP_DIRS` 同源清单）默认不进结果——会话 `tmp/` 列表场景的防噪兜底（项目根遍历 `walkDirFiles` 本就跳过）；include 原文显式点名该目录（如 `node_modules/**`）时不排除（确需搜依赖时的显式通道）；单文件内搜（path 精确命中）不受限
 - **搜索范围**：默认会话 `tmp/` 子树（与文件面板一致）；`path` 指向 `tmp/`/项目根**外**时——本地模式（桌面/本地浏览器）与 `read` 同款自由度，按给定 path 前缀**实际遍历**目标搜索（`walkDirFiles`：跳过 node_modules/.git/dist 等大型/生成目录、深度上限 10，与 code/explore 项目遍历同一实现），结果路径带给定前缀可直接用于 `read`；沙箱部署模式仍拒绝越界（无匹配）；路径不存在**明确报错**（不再静默「无匹配文件」）
 - **二进制内容跳过**：文件内容含 NUL 字节视为二进制跳过（同 grep 二进制检测语义），防乱码匹配行刷进上下文；**不读 `.gitignore`**——忽略规则仅内置目录黑名单（node_modules/dist/.git/target 等），被 git 忽略的文件（如 `*.log`）仍会命中
 - **三种结果形态（`output`）**：
@@ -1445,21 +1449,21 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
   - `files`：仅命中文件清单（不刷内容）——**宽泛摸底定位优先用**（「哪些文件涉及 X」先看文件面，再对重点文件精读，避免大量匹配行灌进上下文）
   - `count`：每文件命中行数（按命中数降序）——快速评估命中面大小、决定深入策略
 - **上下文行（`context`，0-10，仅 content 模式）**：匹配行前后各附 N 行，格式同 `grep -n -C`——匹配行前缀 `文件:行号:`、上下文行前缀 `文件-行号-`、不相邻组之间 `--` 分隔；重叠区间自动合并，一次调用即可看清命中语境（免二次 `read`）
-- **文件过滤（`include`）**：按文件路径 glob 过滤（如 `*.ts`、`**/*.test.ts`；`*`/`**` 跨目录、`?` 单字符，与 `glob` 工具同一套语义）
-- **上限**：单文件 1MB、全局匹配 200 处（三种形态同一口径，达上限附「结果可能不完整」提示）；输出超长走统一截断保护
+- **上限**：单文件 1MB、全局匹配默认 200 处（三种形态同一口径，达上限附「结果可能不完整」提示；`head_limit` 参数可压低先看一部分——`data.truncated` 标记截断）；输出超长走统一截断保护
 - **正则匹配在独立子进程执行（灾难性回溯防护）**：模型提供的正则存在灾难性回溯形态（嵌套量词如 `(a+)+b` 配超长单行——同步匹配挂死 JS 事件循环且无中断手段，服务端全部会话冻结），匹配（行数据按 4MB 批量经 stdin 送子进程、命中行号回父进程渲染）在独立子进程执行，20 秒超时强杀（Unix 杀进程组/Windows `taskkill /T`）；超时返回「简化 pattern/缩小范围」引导而非回退进程内匹配（回退即重新暴露挂死面）
 - **结构化输出**：`data = { mode, matches?, files?, counts?, truncated? }`（按形态携带，`mode` 标明本次形态），供 flow 编排引用
 - **审批**：默认无需审批（纯读取）
 
-### `write` 防误覆盖守卫（已读追踪）
+### 防盲写守卫（已读追踪）
 
-防止模型**盲覆盖**未见过的文件内容（参照 ZCode Write 的「未读不许覆盖」设计）：
+防止模型对未见过的文件内容盲写（参照 ZCode 的「未读不许覆盖/修改」设计），覆盖 `write`（整体覆盖/追加）、`edit`（定点替换）与 `patch`（补丁应用）三个写通道，规则一致：
 
-- **守卫规则**：`write` 目标文件**已存在且本会话未读取过**时拒绝写入，返回引导信息（先 `read` 掌握现有内容，确认整体覆盖再 `write`；只改局部用 `edit`/`patch`）；**新建文件不受限**；`append:true` 追加模式同规则（追加不破坏已有内容，但同样要求先读——防对未见内容盲目拼接；截断抢救落盘亦受此守卫约束）
-- **已读登记（fileGuard）**：引擎维护会话级已读文件集合（`AgentEngine.readFiles`，sessionId → 已读绝对路径），经 `ToolContext.fileGuard`（`markRead`/`hasRead`）注入工具上下文；`read`/`edit`/`patch`/`write` 成功后自动登记——修改过的文件视为已掌握内容，后续 `write` 覆盖放行（迭代改写自身产物不受阻）
+- **守卫规则**：目标文件**已存在且本会话未读取过**时拒绝写入，返回引导信息（先 `read` 掌握现有内容再改——`write` 覆盖确认整体内容、`edit`/`patch` 基于当前原文构造修改）；**新建文件不受限**；`append:true` 追加模式同规则（追加不破坏已有内容，但同样要求先读——防对未见内容盲目拼接；截断抢救落盘亦受此守卫约束）
+- **edit/patch 纳入同一守卫（防盲改）**：两者虽天然带原文校验（幻觉内容匹配不上即失败），但「凭记忆构造 oldString/补丁 → 匹配失败白跑一轮往返」本身就是高频失败模式——未读前置把失败提前到写入口（一次往返引导 read，与匹配失败等价成本但引导更明确），且杜绝「碰巧匹配成功但模型并未见过全文」的盲改；`edit`/`patch`/`write` 成功即登记已读，迭代修改自身产物不受阻
+- **已读登记（fileGuard）**：引擎维护会话级已读文件集合（`AgentEngine.readFiles`，sessionId → 已读绝对路径），经 `ToolContext.fileGuard`（`markRead`/`hasRead`）注入工具上下文；`read`/`edit`/`patch`/`write` 成功后自动登记——修改过的文件视为已掌握内容，后续写入放行
 - **生命周期**：登记按会话隔离（`agent_run` 新会话有独立追踪）；REST/WS 删除会话时经 `engine.forgetSession` 释放；单会话登记上限 2000 条（`READ_TRACK_CAP`，超出整表重置——守卫降级为「需重读」，保护语义不破坏）；进程重启后登记为空（重新 read 即可，文件可能已变化，重读本身即正确行为）
 - **兼容性**：`fileGuard` 为可选注入——测试桩/无引擎环境不注入时守卫自动放行（行为与旧版一致）；`flow` 编排内的工具调用走同一 ctx，守卫同样生效
-- **设计动机**：`edit`/`patch` 天然带原文校验（幻觉内容匹配不上），而 `write` 整体覆盖**没有任何内容校验**——未读守卫补齐这一盲区；拒绝结果作为正常工具输出返回（模型下一轮自行 `read` 后重写，一次往返自愈，不中断任务）
+- **设计动机**：`write` 整体覆盖**没有任何内容校验**——未读守卫补齐这一盲区；拒绝结果作为正常工具输出返回（模型下一轮自行 `read` 后重写，一次往返自愈，不中断任务）
 
 ### `diff` 文本对比工具
 
@@ -1475,13 +1479,15 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 在 `edit`（定点替换）之外提供**整体补丁应用**能力，适合改动较多、行号容易偏移的代码修改：
 
-- **参数**：`path`（目标文件）+ `patch`（unified diff 文本）+ 可选 `dryRun`（仅预演校验，不写入）
-- **解析（`parsePatch`，纯函数实现于 `core/patch.ts`）**：支持 `---`/`+++` 文件头（可省略）、`@@ -l,c +l,c @@` hunk 头（容错省略 count 的形式）、上下文/新增/删除行、`\ No newline` 标记与 CRLF；git 风格元数据行（`diff --git`/`index`/`mode` 等）容忍跳过；多文件补丁报错提示分文件调用（单次仅一个文件）
+- **参数**：`patch`（unified diff 文本）+ `path`（目标文件——单文件补丁定位用，多文件补丁按文件头定位时可省略）+ 可选 `dryRun`（仅预演校验，不写入）
+- **多文件补丁**：含多组 `---`/`+++` 文件头的补丁按各文件头分组**逐文件应用**（`a/`/`b/` git 前缀自动剥离，`/dev/null` 旧侧即新建）；单文件补丁文件头可省略、以 `path` 参数定位（传了 `path` 时优先 `path`，兼容既有形态）；无头段落回退 `path` 参数，两者皆缺报错；同一文件多段按序累积应用；**跨文件原子**——全部文件全部 hunk 校验通过才整体落盘，任一失败整体不修改
+- **解析（`parsePatch`，纯函数实现于 `core/patch.ts`）**：支持 `---`/`+++` 文件头（可省略）、`@@ -l,c +l,c @@` hunk 头（容错省略 count 的形式）、上下文/新增/删除行、`\ No newline` 标记与 CRLF；git 风格元数据行（`diff --git`/`index`/`mode` 等）容忍跳过
 - **匹配与容错（`applyPatch`）**：含删除行的 hunk 以删除行作锚点在文件中整体匹配，上下文不符时**裁剪头/尾上下文各至多 3 行重试**（`PATCH_FUZZ_LINES`，只裁上下文、删除行必在匹配块内，防「应删未删」残留）；纯新增 hunk 按 `@@` 头行号（叠加先前 hunk 的行数偏移）定位插入，带上下文则同样校验
-- **原子性**：全部 hunk 校验通过才一次性写盘（与 `edit` 同语义——任一 hunk 不匹配整体失败不修改，返回失败 hunk 序号与原因，提示先 `read` 当前文件核对或改用 `edit`）
+- **原子性**：全部 hunk 校验通过才一次性写盘（与 `edit` 同语义——任一 hunk 不匹配整体失败不修改，返回失败文件与 hunk 序号及原因，提示先 `read` 当前文件核对或改用 `edit`）
+- **防盲改守卫**：目标文件已存在但本会话未 read 过时拒绝（与 `write`/`edit` 同规则，见「防盲写守卫」）——多文件补丁对**每个**已存在目标逐一校验
 - **新建文件**：`--- /dev/null` 头或目标文件不存在时按新建处理（仅允许新增行）；删除类补丁（全部删除行）自然清空文件
-- **与 `edit` 的关系**：改动多/跨多处/行号易偏移时 `patch` 一次提交全部改动（可基于 `diff` 工具输出构造补丁，`dryRun=true` 预演）；小范围定点改动用 `edit`；`write` 仅用于新建/整体覆盖
-- **上限**：hunk 数 ≤ 100（`PATCH_MAX_HUNKS`）、目标文件 ≤ 5MB（`PATCH_MAX_FILE_BYTES`，超出提示改用 `edit` 分段）
+- **与 `edit` 的关系**：改动多/跨多处/行号易偏移时 `patch` 一次提交全部改动（可跨多个相关文件；可基于 `diff` 工具输出构造补丁，`dryRun=true` 预演）；小范围定点改动用 `edit`；`write` 仅用于新建/整体覆盖
+- **上限**：单文件 hunk 数 ≤ 100（`PATCH_MAX_HUNKS`）、目标文件 ≤ 5MB（`PATCH_MAX_FILE_BYTES`，超出提示改用 `edit` 分段）
 - **审批**：默认无需审批（与 `edit` 同级）；`code`/`self_optimize` 子Agent 声明 `patch` 需审批（与 `edit`/`write` 同级，见下）
 - **路径限制**：与 `read`/`write` 同一路径沙箱
 
@@ -1489,8 +1495,8 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 将编码工作流收尾环节的 git 只读操作从 `sh`（每次需审批）独立出来，免审批直接查看变更。**不注册为全局工具**（全局集最小化，见功能列表注记）——经 `code`/`explore` 子Agent 以 `code_git`/`explore_git` 命名空间暴露（`self_optimize` 经连带装载 code 获得；写操作 add/commit 等在任何命名空间下仍走 `sh` 需审批）：
 
-- **参数**：`action`（`status` 工作区状态 / `diff` 变更内容 / `log` 最近提交）+ 可选 `dir`（仓库目录，默认会话工作目录，经路径沙箱约束）+ `staged`（diff 是否查看暂存区）+ `maxEntries`（log 条数，默认 10、上限 50）
-- **执行**：命令参数由 action 枚举构造（无用户字符串拼接注入），以 `dir` 为 cwd 执行 `git -C <dir> status --short --branch` / `git diff [--staged] --no-color` / `git log --oneline -n N`；非零退出码附 stderr（非仓库目录等可诊断信息）；输出走统一截断保护
+- **参数**：`action`（`status` 工作区状态 / `diff` 变更内容 / `log` 最近提交 / `show` 查看某提交或文件的完整内容（`ref` 默认 HEAD，支持哈希/分支/tag/HEAD~n）/ `branch` 本地与远程分支列表（附各分支最新提交）/ `ls-files` 已跟踪文件清单（**自动尊重 `.gitignore`**，项目结构摸底快于 glob；`path` 参数可按前缀/glob 过滤））+ 可选 `dir`（仓库目录，默认会话工作目录，经路径沙箱约束）+ `staged`（diff 是否查看暂存区）+ `maxEntries`（log 条数，默认 10、上限 50）
+- **执行**：命令参数由 action 枚举构造（status/diff/log/branch/ls-files 无用户字符串拼接）；`show`/`ls-files` 携带用户字符串（`ref`/`path`）——经元字符黑名单校验（拒绝 `"`/`&`/`|`/`<`/`>`/`^`/`%`/反引号等 cmd/shell 注入形态）后引号包裹拼入，`ls-files` 以 `--` 分隔防 pathspec 被解读为选项；以 `dir` 为 cwd 执行对应 git 命令；非零退出码附 stderr（非仓库目录等可诊断信息）；输出走统一截断保护，`ls-files` 附结构化 `data.files`
 - **只读安全边界**：不提供任何写操作（`add`/`commit`/`checkout` 等仍走 `sh`，需审批且受沙箱约束）——免审批仅限读操作，写操作权限不变
 - **审批**：默认无需审批；经 `code`/`explore` 子Agent 的 `projectAware` 包装暴露（`code_git`/`explore_git`，以项目根为工作目录，预置项目形态按项目根执行；`self_optimize` 经连带装载 code 获得）
 
@@ -2109,8 +2115,9 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 会话 env 内存缓存 | 256 会话 | `envCache` LRU 上限（命中刷新位置，防长生命周期进程无界增长） |
 | 先到决策/选择/环境值排队上限 | 64 条/任务 | `pendingDecisions`/`pendingChoices`/`pendingEnvRequests` 容量（随机 id 无界堆积的内存放大防护，`PENDING_QUEUE_LIMIT`） |
 | OAuth pending 授权有效期/上限 | 10 分钟 / 32 条 | 飞书 user_access_token 授权 state 的 TTL 与容量（未完成授权的条目含 appSecret 明文，按 TTL 惰性清理+超容量淘汰） |
-| grep 最大匹配行 | 200 行 | 达到即停止，返回结果附「已达匹配上限」提示（content/files/count 三形态同一口径）；`context` 参数 0-10 行 |
-| 已读登记上限 | 2000 条/会话 | write 防误覆盖守卫的会话级已读集合上限（`READ_TRACK_CAP`，超出整表重置——守卫降级为「需重读」）；会话删除时释放（`engine.forgetSession`） |
+| grep 最大匹配行 | 200 行 | 达到即停止，返回结果附「已达匹配上限」提示（content/files/count 三形态同一口径）；`head_limit` 参数可压低先看一部分（`data.truncated` 标记截断）；`context` 参数 0-10 行；`literal:true` 字面匹配（正则元字符自动转义）；`include`/`exclude` 支持逗号多模式与 `{a,b}` 花括号 |
+| grep/glob 默认排除目录 | `WALK_SKIP_DIRS` 14 项 | node_modules/.git/dist/build/.next/.cache/__pycache__/.venv/venv/target/.idea/.vscode/coverage/.turbo——grep/glob 结果默认跳过（与 `walkDirFiles` 目录遍历同一清单：会话 `tmp/` 列表场景的防噪兜底）；include/pattern 原文显式点名该目录时不排除 |
+| 已读登记上限 | 2000 条/会话 | 防盲写守卫（write/edit/patch）的会话级已读集合上限（`READ_TRACK_CAP`，超出整表重置——守卫降级为「需重读」）；会话删除时释放（`engine.forgetSession`） |
 | patch 行号容错 | 3 行 | 上下文裁剪重试上限（`PATCH_FUZZ_LINES`，只裁上下文、删除行必在匹配块内） |
 | patch hunk 上限 | 100 处 | 单次补丁 hunk 数上限（超出提示拆分补丁） |
 | patch 文件上限 | 5MB | 目标文件大小上限（超出提示改用 edit 分段修改） |
@@ -2118,6 +2125,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | search_symbols 扫描上限 | 500 个文件 | 最多扫描文件数（内容预筛后 tree-sitter 解析） |
 | search_symbols 匹配上限 | 50 条 | 达到即停止，精确匹配优先排序 |
 | git log 条数 | 10 条 / 50 条 | 默认条数 / 上限（`maxEntries` 参数可调） |
+| file copy 复制上限 | 100MB | `file` copy 动作的二进制整读整写上限（`FILE_COPY_MAX_BYTES`，超限引导用 sh 复制）；mkdir 递归创建、已存在幂等 |
 | URL 抓取响应上限 | 200KB | `fetch_url` 超出截断（含截断落盘），防内存膨胀 |
 | URL 抓取超时 | 15 秒 | `fetch_url` 单次请求上限 |
 | 重定向跳数上限 | 5 跳 | `fetch_url`/`http_request` 重定向逐跳校验的最大跟随次数（防重定向循环与跳板链） |
