@@ -824,6 +824,9 @@ export class FeishuBot {
     const chatId = sanitizeId(String(context.open_chat_id ?? ""))
     const openId = sanitizeId(String(operator.operator_id?.open_id ?? ""))
     if (!chatId) return {}
+    // 卡片更新响应包装（官方回调协议）：card 字段必须为 {type:"raw", data:卡片JSON}——
+    // 裸卡片 JSON 会被判 200672 响应体格式错误，客户端按钮转圈不消且回调失败重推
+    const cardUpdate = (card: Record<string, unknown>) => ({ type: "raw" as const, data: card })
     // 审批卡片按钮：批准/拒绝立即决策，卡片更新为终态（按钮不可再点）
     if (approvalId) {
       const pending = this.pendingApprovals.get(chatId)
@@ -834,13 +837,14 @@ export class FeishuBot {
       }
       const approve = act === "approve"
       this.pendingApprovals.delete(chatId)
+      this.log(`approval card decided: ${pending.tool} ${approve ? "approved" : "rejected"} (chat=${chatId})`)
       void this.opts.adapter.decideApproval(pending.sessionId, pending.toolCallId, approve)
       return {
-        card: {
+        card: cardUpdate({
           config: { wide_screen_mode: true },
           header: { title: { tag: "plain_text", content: "⚠️ 歌白需要审批" }, template: approve ? "green" : "grey" },
           elements: [{ tag: "markdown", content: `工具 \`${pending.tool}\`\n\n${approve ? "✅ 已批准，任务继续。" : "❌ 已拒绝，任务已取消。"}` }],
-        },
+        }),
       }
     }
     if (!choiceId) return {}
@@ -852,11 +856,11 @@ export class FeishuBot {
     }
     // 决策终态卡片（替换按钮，不可再交互）
     const finalCard = (text: string) => ({
-      card: {
+      card: cardUpdate({
         config: { wide_screen_mode: true },
         header: { title: { tag: "plain_text", content: "🤖 歌白需要确认" }, template: "blue" },
         elements: [{ tag: "markdown", content: `**${pending.prompt}**\n\n${text}` }],
-      },
+      }),
     })
     if (act === "refuse") {
       this.pendingChoices.delete(chatId)
@@ -880,7 +884,7 @@ export class FeishuBot {
     else pending.selections.push(v)
     return {
       toast: { type: "success", content: pending.selections.length ? `已选：${pending.selections.join("、")}` : "已取消选择" },
-      card: buildChoiceCard({ choiceId, prompt: pending.prompt, options: pending.options, multi: true, selections: pending.selections }),
+      card: cardUpdate(buildChoiceCard({ choiceId, prompt: pending.prompt, options: pending.options, multi: true, selections: pending.selections })),
     }
   }
 

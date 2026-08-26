@@ -233,6 +233,9 @@ export class FeishuConn {
     if (info.frame.method !== FRAME_DATA) return
     // 卡片交互帧（type="card"，card.action.trigger）：解析 → 回调 → 回 ACK（响应携带卡片回调返回体）
     if (info.type === "card") {
+      // 送达诊断：卡片按钮转圈不消时据此判断回调是否到达（未到达=开发者后台未订阅 card.action.trigger）
+      this.log("card action frame received")
+      if (!this.opts.onCardAction) this.log("card action dropped: no handler")
       void this.handleCardFrame(buf, info)
       return
     }
