@@ -245,6 +245,51 @@ export function buildChoiceCard(state: ChoiceCardState): Record<string, unknown>
   }
 }
 
+/* ---------------- 审批交互卡片（后端实现：参数摘要 + 批准/拒绝按钮，替代纯文本命令提示） ---------------- */
+
+/** 审批卡片参数摘要：每参数一行 `key: value`，长值截断（write content 等大参数防撑爆卡片），总长兜底截断。 */
+export function formatApprovalArgs(args: Record<string, unknown>, maxValueLen = 200, totalLimit = 1200): string {
+  const fmtVal = (v: unknown): string => {
+    const s = typeof v === "string" ? v : String(JSON.stringify(v) ?? v)
+    return s.length > maxValueLen ? `${s.slice(0, maxValueLen)}…（共 ${s.length} 字符已截断）` : s
+  }
+  const entries = Object.entries(args ?? {})
+  if (!entries.length) return "（无参数）"
+  const text = entries.map(([k, v]) => `- **${k}**: ${fmtVal(v)}`).join("\n")
+  return text.length > totalLimit ? `${text.slice(0, totalLimit)}\n…（参数过长已截断，完整参数可在 Web UI 对应会话查看）` : text
+}
+
+export interface ApprovalCardState {
+  toolCallId: string
+  tool: string
+  args: Record<string, unknown>
+  /** 重复请求计数（>0 时提示已被拒绝/超时过，模型再次请求）。 */
+  retries: number
+}
+
+/** 构建审批交互卡片（value 携带 approvalId+act，与选择卡片的 choiceId 区分路由）。 */
+export function buildApprovalCard(state: ApprovalCardState): Record<string, unknown> {
+  const retryNote = state.retries > 0 ? `\n\n⚠️ 该调用此前已被拒绝/超时 ${state.retries} 次，模型再次请求执行。` : ""
+  const elements: Record<string, unknown>[] = [
+    {
+      tag: "markdown",
+      content: `工具 \`${state.tool}\` 请求执行，参数：\n${formatApprovalArgs(state.args)}${retryNote}\n\n仅任务发起者可操作。`,
+    },
+  ]
+  const button = (label: string, act: string, type: string) => ({
+    tag: "button",
+    text: { tag: "plain_text", content: label },
+    type,
+    value: { approvalId: state.toolCallId, act },
+  })
+  elements.push({ tag: "action", actions: [button("✅ 批准", "approve", "primary"), button("❌ 拒绝", "reject", "danger")] })
+  return {
+    config: { wide_screen_mode: true },
+    header: { title: { tag: "plain_text", content: "⚠️ 歌白需要审批" }, template: "orange" },
+    elements,
+  }
+}
+
 /** 会话/用户 id 消毒：飞书 chat_id/open_id 为 `oc_`/`ou_` 前缀的字母数字下划线串。 */
 export function sanitizeId(raw: string): string | null {
   return /^[A-Za-z0-9_-]{1,64}$/.test(raw) ? raw : null
@@ -350,8 +395,8 @@ export class FeishuBot {
   private active = new Map<string, string>()
   private ensureLocks = new Map<string, Promise<string>>()
   private userCache = new Map<string, { userId: string; at: number }>()
-  /** 待审批（命令 /approve /reject 用）：chatId → { toolCallId, tool, sessionId, openId }。 */
-  private pendingApprovals = new Map<string, { toolCallId: string; tool: string; sessionId: string; openId: string }>()
+  /** 待审批（审批卡片按钮 / 命令 /approve /reject 用）：chatId → 状态。 */
+  private pendingApprovals = new Map<string, { toolCallId: string; tool: string; sessionId: string; openId: string; cardMessageId?: string }>()
   /** 待作答选择卡片（ask 交互卡片按钮用）：chatId → 状态。 */
   private pendingChoices = new Map<string, PendingChoice>()
   /** 运行中任务的发起飞书用户（审批授权校验用：仅任务发起者可批准/拒绝）。 */
@@ -612,10 +657,8 @@ export class FeishuBot {
           messageId: /^[A-Za-z0-9_-]{8,64}$/.test(messageId) ? messageId : undefined,
           attachments,
         }, {
-          onApproval: (toolCallId, tool) => {
-            if (!toolCallId) return
-            this.pendingApprovals.set(chatId, { toolCallId, tool, sessionId, openId: this.runOwners.get(sessionId) ?? "" })
-            this.outbox(chatId).sendText(`⚠️ 需要审批：工具 \`${tool}\` 请求执行。\n回复 /approve 批准，/reject 拒绝（仅任务发起者可操作）。`)
+          onApproval: (toolCallId, tool, args, retries) => {
+            void this.handleApprovalRequest(chatId, sessionId, { toolCallId, tool, args, retries })
           },
           onChoice: (choiceId, prompt, options, multi) => {
             void this.handleChoiceRequest(chatId, sessionId, { choiceId, prompt, options, multi })
@@ -635,6 +678,7 @@ export class FeishuBot {
             // 别的任务可能已接管绑定）
             this.outbox(chatId).taskDone(messageId)
             this.cleanupChoices(chatId)
+            this.cleanupApprovals(chatId)
             this.active.delete(sessionId)
             if (this.runOwners.get(sessionId) === openId) this.runOwners.delete(sessionId)
           },
@@ -705,6 +749,31 @@ export class FeishuBot {
     }
   }
 
+  /** 审批请求：发送交互审批卡片（工具名 + 参数摘要 + 批准/拒绝按钮），卡片发送失败回落文本命令指引；
+   *  覆盖旧待审批（超时残留等）时先撤回旧卡片——旧卡按钮指向已失效的 toolCallId，留着只会误导。 */
+  private async handleApprovalRequest(chatId: string, sessionId: string, payload: Record<string, unknown>): Promise<void> {
+    const toolCallId = String(payload.toolCallId ?? "")
+    const tool = String(payload.tool ?? "")
+    if (!toolCallId) return
+    const openId = this.runOwners.get(sessionId) ?? ""
+    const stale = this.pendingApprovals.get(chatId)
+    if (stale && stale.cardMessageId) void this.api.deleteMessage(stale.cardMessageId)
+    const retries = Number(payload.retries ?? 0)
+    try {
+      const cardMessageId = await this.api.sendMessage({
+        receiveId: chatId,
+        receiveIdType: "chat_id",
+        msgType: "interactive",
+        content: buildApprovalCard({ toolCallId, tool, args: (payload.args ?? {}) as Record<string, unknown>, retries }),
+      })
+      this.pendingApprovals.set(chatId, { toolCallId, tool, sessionId, openId, cardMessageId })
+    } catch (err) {
+      this.log(`approval card send failed: ${String((err as Error).message || err)}`)
+      this.pendingApprovals.set(chatId, { toolCallId, tool, sessionId, openId })
+      this.outbox(chatId).sendText(`⚠️ 需要审批：工具 \`${tool}\` 请求执行。\n回复 /approve 批准，/reject 拒绝（仅任务发起者可操作）。`)
+    }
+  }
+
   /** ask 选择卡片：发送交互式按钮卡片，记录待作答状态（卡片按钮回调经 handleCardAction 处理）。 */
   private async handleChoiceRequest(chatId: string, sessionId: string, payload: Record<string, unknown>): Promise<void> {
     const choiceId = String(payload.choiceId ?? "")
@@ -737,22 +806,44 @@ export class FeishuBot {
 
   /**
    * 卡片按钮回调（conn 的 card 帧 → card.action.trigger）：
-   * 解析 choiceId/选项，单选立即决策、多选切换勾选并回传更新后的卡片（ACK 响应卡片更新），拒绝/完成提交决策；
-   * 已决策的卡片更新为终态（「已选择」/「已放弃」），按钮不可再点。
-   * 授权校验：仅任务发起者可作答（与 /approve 一致，防群聊成员越权）。
+   * 审批卡片（value.approvalId）——批准/拒绝经 decideApproval 回传引擎，ACK 响应更新为终态卡片；
+   * 选择卡片（value.choiceId）——解析 choiceId/选项，单选立即决策、多选切换勾选并回传更新后的卡片（ACK 响应卡片更新），
+   * 拒绝/完成提交决策；已决策的卡片更新为终态（「已选择」/「已放弃」），按钮不可再点。
+   * 授权校验：仅任务发起者可操作（审批与作答一致，防群聊成员越权）。
    */
   handleCardAction(payload: Record<string, unknown>): Record<string, unknown> {
     const ev = (payload.event ?? payload) as Record<string, unknown>
     const action = (ev.action ?? {}) as { value?: Record<string, unknown>; tag?: string }
     const value = action.value ?? {}
     const choiceId = String(value.choiceId ?? "")
+    const approvalId = String(value.approvalId ?? "")
     const act = String(value.act ?? "")
     const v = value.v !== undefined ? String(value.v) : ""
     const context = (ev.context ?? {}) as { open_chat_id?: unknown }
     const operator = (ev.operator ?? {}) as { operator_id?: { open_id?: unknown } }
     const chatId = sanitizeId(String(context.open_chat_id ?? ""))
     const openId = sanitizeId(String(operator.operator_id?.open_id ?? ""))
-    if (!chatId || !choiceId) return {}
+    if (!chatId) return {}
+    // 审批卡片按钮：批准/拒绝立即决策，卡片更新为终态（按钮不可再点）
+    if (approvalId) {
+      const pending = this.pendingApprovals.get(chatId)
+      if (!pending || pending.toolCallId !== approvalId) return {}
+      if (pending.openId && pending.openId !== openId) {
+        this.log(`approval card denied: not the initiator (chat=${chatId})`)
+        return { toast: { type: "error", content: "只有发起该任务的用户可以审批" } }
+      }
+      const approve = act === "approve"
+      this.pendingApprovals.delete(chatId)
+      void this.opts.adapter.decideApproval(pending.sessionId, pending.toolCallId, approve)
+      return {
+        card: {
+          config: { wide_screen_mode: true },
+          header: { title: { tag: "plain_text", content: "⚠️ 歌白需要审批" }, template: approve ? "green" : "grey" },
+          elements: [{ tag: "markdown", content: `工具 \`${pending.tool}\`\n\n${approve ? "✅ 已批准，任务继续。" : "❌ 已拒绝，任务已取消。"}` }],
+        },
+      }
+    }
+    if (!choiceId) return {}
     const pending = this.pendingChoices.get(chatId)
     if (!pending || pending.choiceId !== choiceId) return {}
     if (pending.openId && pending.openId !== openId) {
@@ -801,6 +892,14 @@ export class FeishuBot {
     if (pending.cardMessageId) void this.api.deleteMessage(pending.cardMessageId)
   }
 
+  /** 任务结束清理：撤回待审批卡片（审批已失效，防按钮点击作用于过期 toolCallId）并清除状态。 */
+  private cleanupApprovals(chatId: string): void {
+    const pending = this.pendingApprovals.get(chatId)
+    if (!pending) return
+    this.pendingApprovals.delete(chatId)
+    if (pending.cardMessageId) void this.api.deleteMessage(pending.cardMessageId)
+  }
+
   /** 斜杠命令。 */
   private async handleCommand(raw: string, chatId: string, openId: string, sessionId: string): Promise<void> {
     const cmd = raw.toLowerCase().split(/\s+/)[0]
@@ -843,8 +942,8 @@ export class FeishuBot {
           this.chatOwners.set(chatId, owner)
           await this.saveOwners()
         }
-        this.pendingApprovals.delete(chatId)
         this.cleanupChoices(chatId)
+        this.cleanupApprovals(chatId)
         await this.opts.store.delete(sessionId, owner)
         this.active.delete(sessionId)
         this.runOwners.delete(sessionId)
@@ -897,6 +996,7 @@ export class FeishuBot {
           break
         }
         this.pendingApprovals.delete(chatId)
+        if (pending.cardMessageId) void this.api.deleteMessage(pending.cardMessageId)
         const approve = cmd === "/approve"
         await this.opts.adapter.decideApproval(pending.sessionId, pending.toolCallId, approve)
         outbox.sendText(approve ? `✅ 已批准 \`${pending.tool}\`，任务继续。` : `❌ 已拒绝 \`${pending.tool}\`，任务已取消。`)

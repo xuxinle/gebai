@@ -694,11 +694,12 @@ console.log("defined ok")`,
 
   test("approval-required tool rejected stops the session run", async () => {
     const { home, engine, store, provider, events } = await setup("approval")
+    provider.toolArgs = { command: "echo hello" }
     const session = await store.createSession("default", "t")
     // 等待审批请求发布后再拒绝（确定性同步：拒绝立即 abort，若早于循环启动会直接取消无产物）
-    let requested = false
+    let requested: Record<string, unknown> | null = null
     events.subscribe((e) => {
-      if (e.type === "event.approval.request" && e.sessionId === session.id) requested = true
+      if (e.type === "event.approval.request" && e.sessionId === session.id) requested = e.payload as Record<string, unknown>
     })
     const run = engine.run(session.id, "default", "run sh")
     const t0 = Date.now()
@@ -706,6 +707,8 @@ console.log("defined ok")`,
       if (Date.now() - t0 > 2000) throw new Error("approval.request not published")
       await new Promise((r) => setTimeout(r, 20))
     }
+    // 审批请求携带完整调用参数（飞书审批卡片据此展示参数摘要）
+    expect(requested).toMatchObject({ toolCallId: "tc-1", tool: "sh", arguments: { command: "echo hello" } })
     await engine.decideApproval(session.id, "tc-1", false)
     await run
     // 拒绝 = 停止会话：拒绝消息落盘，任务结束且不再发起后续模型调用

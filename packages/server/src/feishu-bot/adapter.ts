@@ -9,8 +9,9 @@ import type { AgentEngine } from "../core/engine"
 
 /** 任务运行期语义回调（引擎事件流映射；bot 只处理回调，不解析事件）。 */
 export interface BotRunHandlers {
-  /** 关键操作审批请求（requiresApproval 工具，多轮交互询问用户）。 */
-  onApproval?(toolCallId: string, tool: string): void
+  /** 关键操作审批请求（requiresApproval 工具，多轮交互询问用户；arguments 为本次调用参数——
+   *  飞书通道无消息流工具卡片，审批卡片需自行展示参数供用户判断）。 */
+  onApproval?(toolCallId: string, tool: string, args: Record<string, unknown>, retries: number): void
   /** 用户选择请求（ask 选项询问分支）。 */
   onChoice?(choiceId: string, prompt: string, options: unknown[], multi: boolean): void
   /** 图表渲染请求（draw，飞书通道后端渲染成图片；format 图表语言，后端仅支持 plantuml）。 */
@@ -55,7 +56,7 @@ export class EngineBotAdapter implements BotPromptAdapter {
       const p = ev.payload as Record<string, unknown>
       switch (ev.type) {
         case "event.approval.request":
-          handlers.onApproval?.(String(p.toolCallId ?? ""), String(p.tool ?? ""))
+          handlers.onApproval?.(String(p.toolCallId ?? ""), String(p.tool ?? ""), (p.arguments ?? {}) as Record<string, unknown>, Number(p.retries ?? 0))
           break
         case "event.choice.request":
           handlers.onChoice?.(String(p.choiceId ?? ""), String(p.prompt ?? ""), Array.isArray(p.options) ? p.options : [], p.multi === true)

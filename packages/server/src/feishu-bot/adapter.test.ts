@@ -44,7 +44,7 @@ describe("EngineBotAdapter（飞书接口层）", () => {
   test("事件流映射为语义回调：审批/选择/画图/最终回复/结束/错误", async () => {
     const called: string[] = []
     const handlers: BotRunHandlers = {
-      onApproval: (toolCallId, tool) => called.push(`approval:${toolCallId}:${tool}`),
+      onApproval: (toolCallId, tool, args, retries) => called.push(`approval:${toolCallId}:${tool}:${JSON.stringify(args)}:${retries}`),
       onChoice: (choiceId, prompt, options, multi) => called.push(`choice:${choiceId}:${String(prompt).slice(0, 6)}:${options.length}:${multi}`),
       onDraw: (renderId, _code, name) => called.push(`draw:${renderId}:${name ?? "unnamed"}`),
       onDone: (text) => called.push(`done:${text}`),
@@ -61,7 +61,7 @@ describe("EngineBotAdapter（飞书接口层）", () => {
     })
     const runPromise = adapter.run("s1", "u1", "hi", {}, handlers)
     // 事件推送（模拟引擎在任务运行中发布）
-    bus.push({ type: "event.approval.request", ...base, payload: { toolCallId: "tc1", tool: "sh" } })
+    bus.push({ type: "event.approval.request", ...base, payload: { toolCallId: "tc1", tool: "sh", arguments: { command: "ls" }, retries: 2 } })
     bus.push({ type: "event.choice.request", ...base, payload: { choiceId: "c1", prompt: "请选择", options: ["A", "B"], multi: false } })
     bus.push({ type: "event.draw.render", ...base, payload: { renderId: "r1", code: "@startuml", name: "flow" } })
     // 新会话过程 done（session 标记）不触发 onDone（仅最终回复）
@@ -69,7 +69,7 @@ describe("EngineBotAdapter（飞书接口层）", () => {
     bus.push({ type: "event.message.done", ...base, payload: { text: "最终回复" } })
     bus.push({ type: "event.task.done", ...base, payload: {} })
     expect(called).toEqual([
-      "approval:tc1:sh",
+      'approval:tc1:sh:{"command":"ls"}:2',
       "choice:c1:请选择:2:false",
       "draw:r1:flow",
       "done:最终回复",
