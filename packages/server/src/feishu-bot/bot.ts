@@ -212,6 +212,28 @@ export interface ChoiceCardState {
   selections: string[]
 }
 
+/** 2.0 交互按钮：回调经 behaviors（2.0 正式声明，`type:"callback"` 回传 value 到 card.action.trigger 的
+ *  action.value——与 1.0 顶层 value 同语义；type 枚举 primary/danger 在 2.0 仍有效）。 */
+function cardButton(label: string, value: Record<string, unknown>, type = "default"): Record<string, unknown> {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content: label },
+    type,
+    behaviors: [{ type: "callback", value }],
+  }
+}
+
+/** 2.0 按钮横排容器：action 组件在 2.0 已废弃（200861 unsupported tag action），改用 column_set
+ *  （flex_mode:"flow" 流式布局自动换行、列宽 auto 按内容收缩，还原 1.0 action 的按钮并排形态）。 */
+function buttonRow(buttons: Record<string, unknown>[]): Record<string, unknown> {
+  return {
+    tag: "column_set",
+    flex_mode: "flow",
+    background_style: "default",
+    columns: buttons.map((b) => ({ tag: "column", width: "auto", vertical_align: "top", elements: [b] })),
+  }
+}
+
 /** 构建 ask 选择交互卡片（按钮每行最多 5 个；多选模式含已选提示与「完成/放弃」，单选含「拒绝回答」）。 */
 export function buildChoiceCard(state: ChoiceCardState): Record<string, unknown> {
   const valueOf = (act: string, v?: string) => (v !== undefined ? { choiceId: state.choiceId, act, v } : { choiceId: state.choiceId, act })
@@ -219,33 +241,26 @@ export function buildChoiceCard(state: ChoiceCardState): Record<string, unknown>
   if (state.multi && state.selections.length) {
     elements.push({ tag: "markdown", content: `已选：${state.selections.join("、")}（可继续选择，点「完成」提交）` })
   }
-  const row = (actions: Record<string, unknown>[]) => ({ tag: "action", actions })
-  const button = (label: string, value: Record<string, unknown>, type = "default") => ({
-    tag: "button",
-    text: { tag: "plain_text", content: label },
-    type,
-    value,
-  })
   for (let i = 0; i < state.options.length; i += 5) {
     const chunk = state.options.slice(i, i + 5)
     elements.push(
-      row(
+      buttonRow(
         chunk.map((o) => {
           const v = optionLabel(o)
           const picked = state.multi && state.selections.includes(v)
-          return button(v, valueOf("pick", v), picked ? "primary" : "default")
+          return cardButton(v, valueOf("pick", v), picked ? "primary" : "default")
         }),
       ),
     )
   }
   elements.push(
-    row(
+    buttonRow(
       state.multi
         ? [
-            button("✅ 完成选择", valueOf("done"), "primary"),
-            button("❌ 放弃", valueOf("refuse"), "danger"),
+            cardButton("✅ 完成选择", valueOf("done"), "primary"),
+            cardButton("❌ 放弃", valueOf("refuse"), "danger"),
           ]
-        : [button("❌ 拒绝回答", valueOf("refuse"), "danger")],
+        : [cardButton("❌ 拒绝回答", valueOf("refuse"), "danger")],
     ),
   )
   return cardV2("🤖 歌白需要确认", "blue", elements)
@@ -282,13 +297,7 @@ export function buildApprovalCard(state: ApprovalCardState): Record<string, unkn
       content: `工具 \`${state.tool}\` 请求执行，参数：\n${formatApprovalArgs(state.args)}${retryNote}\n\n仅任务发起者可操作。`,
     },
   ]
-  const button = (label: string, act: string, type: string) => ({
-    tag: "button",
-    text: { tag: "plain_text", content: label },
-    type,
-    value: { approvalId: state.toolCallId, act },
-  })
-  elements.push({ tag: "action", actions: [button("✅ 批准", "approve", "primary"), button("❌ 拒绝", "reject", "danger")] })
+  elements.push(buttonRow([cardButton("✅ 批准", { approvalId: state.toolCallId, act: "approve" }, "primary"), cardButton("❌ 拒绝", { approvalId: state.toolCallId, act: "reject" }, "danger")]))
   return cardV2("⚠️ 歌白需要审批", "orange", elements)
 }
 

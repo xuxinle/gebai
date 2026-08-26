@@ -832,7 +832,9 @@ describe("引擎事件推送", () => {
     await waitUntil(() => f.sent.some((s) => s.msgType === "interactive" && JSON.stringify(s.content).includes("选择实现方案")))
     const card = f.sent.find((s) => s.msgType === "interactive" && JSON.stringify(s.content).includes("选择实现方案"))!
     const json = JSON.stringify(card.content)
-    // 按钮带 choiceId + 选项值
+    // 按钮带 choiceId + 选项值（2.0：column_set 横排容器 + behaviors callback 回传，action 组件已废弃）
+    expect(json).toContain('"tag":"column_set"')
+    expect(json).toContain('"behaviors"')
     expect(json).toContain('"choiceId":"c1"')
     expect(json).toContain("方案A")
     expect(json).toContain("方案B")
