@@ -420,6 +420,14 @@ export class FeishuBot {
       appId: opts.appId,
       appSecret: opts.appSecret,
       onEvent: (ev) => {
+        // 卡片回调事件：同步快速处理并返回响应体（conn 等待返回值封 ACK data 信封，3 秒时限内）；
+        // 其余事件 fire-and-forget（消息处理含完整任务运行，不能等它回 ACK）
+        if (((ev.header ?? {}) as { event_type?: string }).event_type === "card.action.trigger") {
+          return this.handleCardActionEvent(ev).catch((err) => {
+            this.log(`card action event failed: ${String((err as Error).message || err)}`)
+            return undefined
+          })
+        }
         // 事件处理异常必须捕获（async 回调的 rejection 无人接会成为 unhandled rejection）
         void this.handleFeishuEvent(ev).catch((err) => this.log(`event handler failed: ${String((err as Error).message || err)}`))
       },
@@ -442,21 +450,29 @@ export class FeishuBot {
   /** 已见 event_id（飞书重推去重）：Map 迭代序即插入序，超容量淘汰最旧。 */
   private seenEventIds = new Map<string, true>()
 
-  /** 飞书事件入口（im.message.receive_v1）。 */
-  async handleFeishuEvent(event: Record<string, unknown>): Promise<void> {
+  /** event_id 去重（ACK 前进程被杀/断连时飞书会重推同一事件——重复执行任务/重复消费审批）：
+   *  已见返回 true（调用方忽略），未见则登记后返回 false。 */
+  private dedupeEventId(eventId: string | undefined): boolean {
+    if (!eventId) return false
+    if (this.seenEventIds.has(eventId)) return true
+    if (this.seenEventIds.size >= 256) {
+      const oldest = this.seenEventIds.keys().next().value
+      if (oldest !== undefined) this.seenEventIds.delete(oldest)
+    }
+    this.seenEventIds.set(eventId, true)
+    return false
+  }
+
+  /** 飞书事件入口（im.message.receive_v1 消息 / card.action.trigger 卡片回调）。 */
+  async handleFeishuEvent(event: Record<string, unknown>): Promise<Record<string, unknown> | void> {
     if (event.schema !== "2.0") return
     const header = (event.header ?? {}) as { event_type?: string; event_id?: string }
+    // 卡片回调事件（新版卡片回调经事件帧下发，官方 SDK 的 type=card 帧路径已废弃）：返回卡片响应体（conn 封 ACK data 信封）
+    if (header.event_type === "card.action.trigger") return this.handleCardActionEvent(event)
     if (header.event_type !== "im.message.receive_v1") return
     // event_id 去重：ACK 前进程被杀/ACK 发送失败/断连时飞书会重推同一事件——重复执行任务
     // 意味着重复写文档/消费审批（官方 SDK 按 message_id 幂等，此处同语义）
-    if (header.event_id) {
-      if (this.seenEventIds.has(header.event_id)) return
-      if (this.seenEventIds.size >= 256) {
-        const oldest = this.seenEventIds.keys().next().value
-        if (oldest !== undefined) this.seenEventIds.delete(oldest)
-      }
-      this.seenEventIds.set(header.event_id, true)
-    }
+    if (this.dedupeEventId(header.event_id)) return
     const ev = (event.event ?? {}) as {
       sender?: { sender_id?: { open_id?: string }; sender_type?: string }
       message?: { message_id?: string; chat_id?: string; message_type?: string; content?: string; mentions?: Array<{ key?: string }> }
@@ -804,8 +820,16 @@ export class FeishuBot {
     }
   }
 
+  /** 卡片回调事件（card.action.trigger，新版卡片回调经事件帧下发）：event_id 去重后走卡片按钮处理，
+   *  返回卡片响应体（toast/card 终态更新）——conn 封 ACK data 信封回飞书。 */
+  private async handleCardActionEvent(event: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const header = (event.header ?? {}) as { event_id?: string }
+    if (this.dedupeEventId(header.event_id)) return {}
+    return this.handleCardAction(event)
+  }
+
   /**
-   * 卡片按钮回调（conn 的 card 帧 → card.action.trigger）：
+   * 卡片按钮回调（新版 card.action.trigger 事件 / 旧版 type=card 帧，殊途同归）：
    * 审批卡片（value.approvalId）——批准/拒绝经 decideApproval 回传引擎，ACK 响应更新为终态卡片；
    * 选择卡片（value.choiceId）——解析 choiceId/选项，单选立即决策、多选切换勾选并回传更新后的卡片（ACK 响应卡片更新），
    * 拒绝/完成提交决策；已决策的卡片更新为终态（「已选择」/「已放弃」），按钮不可再点。
@@ -820,9 +844,10 @@ export class FeishuBot {
     const act = String(value.act ?? "")
     const v = value.v !== undefined ? String(value.v) : ""
     const context = (ev.context ?? {}) as { open_chat_id?: unknown }
-    const operator = (ev.operator ?? {}) as { operator_id?: { open_id?: unknown } }
+    // operator 形态兼容：新版 card.action.trigger 事件为扁平 {open_id}，旧版 card 帧/旧事件为嵌套 {operator_id:{open_id}}
+    const operator = (ev.operator ?? {}) as { operator_id?: { open_id?: unknown }; open_id?: unknown }
     const chatId = sanitizeId(String(context.open_chat_id ?? ""))
-    const openId = sanitizeId(String(operator.operator_id?.open_id ?? ""))
+    const openId = sanitizeId(String(operator.operator_id?.open_id ?? operator.open_id ?? ""))
     if (!chatId) return {}
     // 卡片更新响应包装（官方回调协议）：card 字段必须为 {type:"raw", data:卡片JSON}——
     // 裸卡片 JSON 会被判 200672 响应体格式错误，客户端按钮转圈不消且回调失败重推
