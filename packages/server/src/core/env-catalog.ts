@@ -36,8 +36,6 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "GEBAI_VISION_MAX_CONTEXT", description: "视觉模型上下文 token 预算（数字，默认 128000）" },
   { name: "GEBAI_VISION_EXTRA_PARAMS", description: "视觉模型额外请求体参数（JSON 对象）" },
   { name: "GEBAI_APPROVAL_SKIP", description: "会话级审批跳过：true/false（用户本人会话生效；非管理员仍受沙箱约束）" },
-  { name: "GEBAI_SEARCH_PROVIDER", description: "web_search 工具的搜索服务：brave / serper / tavily（与 GEBAI_SEARCH_API_KEY 搭配）" },
-  { name: "GEBAI_SEARCH_API_KEY", description: "搜索服务 API Key（敏感，仅本次任务临时注入，不落盘）" },
   { name: "GEBAI_MINIMAL_MODE", description: "会话级极简模式：true/false（仅启用 sh 与 edit 工具，其余工具从 schema 移除）" },
   { name: "HTTP_PROXY", description: "HTTP 代理地址（脚本/网络工具使用）" },
   { name: "HTTPS_PROXY", description: "HTTPS 代理地址（脚本/网络工具使用）" },
