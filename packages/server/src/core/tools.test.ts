@@ -364,8 +364,10 @@ describe("global tools", () => {
     const c = ctx(home)
     const w = await writeTool.execute({ path: "a.txt", content: "hello" }, c)
     expect(w.blocks?.[0].type).toBe("file")
+    // read 默认带行号（cat -n 风格）；不需要可传 lineNumbers:false
     const r = await readTool.execute({ path: "a.txt" }, c)
-    expect(r.output).toBe("hello")
+    expect(r.output).toBe("1\thello")
+    expect((await readTool.execute({ path: "a.txt", lineNumbers: false }, c)).output).toBe("hello")
     cleanup(home)
   })
 
@@ -373,11 +375,14 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-"))
     const c = ctx(home)
     await writeTool.execute({ path: "m.txt", content: "l1\nl2\nl3\nl4\nl5\n" }, c)
-    expect((await readTool.execute({ path: "m.txt", offset: 3, limit: 2 }, c)).output).toBe("l3\nl4")
-    expect((await readTool.execute({ path: "m.txt", limit: 2 }, c)).output).toBe("l1\nl2")
-    expect((await readTool.execute({ path: "m.txt", limit: -2 }, c)).output).toBe("l4\nl5")
+    // 切片默认带行号（对应文件真实行号）+ 尾注标明已读区段与全文行数
+    expect((await readTool.execute({ path: "m.txt", offset: 3, limit: 2 }, c)).output).toBe("3\tl3\n4\tl4\n（第 3–4 行，共 5 行）")
+    expect((await readTool.execute({ path: "m.txt", limit: 2 }, c)).output).toBe("1\tl1\n2\tl2\n（第 1–2 行，共 5 行）")
+    expect((await readTool.execute({ path: "m.txt", limit: -2 }, c)).output).toBe("4\tl4\n5\tl5\n（第 4–5 行，共 5 行）")
     expect((await readTool.execute({ path: "m.txt", offset: 100, limit: 2 }, c)).output).toBe("")
-    expect((await readTool.execute({ path: "m.txt", offset: 1, limit: 5 }, c)).output).toBe("l1\nl2\nl3\nl4\nl5\n")
+    expect((await readTool.execute({ path: "m.txt", offset: 1, limit: 5 }, c)).output).toBe("1\tl1\n2\tl2\n3\tl3\n4\tl4\n5\tl5\n（第 1–5 行，共 5 行）")
+    // lineNumbers:false 切片：无行号但保留尾注
+    expect((await readTool.execute({ path: "m.txt", offset: 3, limit: 2, lineNumbers: false }, c)).output).toBe("l3\nl4\n（第 3–4 行，共 5 行）")
     // sliceLines 纯函数边界：无参数原样返回；无尾换行文件的末尾切片
     expect(sliceLines("a\nb", undefined, -1)).toBe("b")
     expect(sliceLines("x")).toBe("x")
@@ -878,7 +883,7 @@ describe("global tools", () => {
     expect(htmlBlock.path).toMatch(/^tmp\/capture\/page-\d+\.html$/)
     expect(imgBlock.mime).toBe("image/png")
     // 落盘校验（逻辑路径可经 read 读取）
-    expect(await readTool.execute({ path: htmlBlock.path }, c)).toMatchObject({ output: html })
+    expect(await readTool.execute({ path: htmlBlock.path, lineNumbers: false }, c)).toMatchObject({ output: html })
     const imgBytes = await Bun.file(join(c.workdir, ...stripTmpPrefix(imgBlock.path).split("/"))).arrayBuffer()
     expect(Buffer.from(imgBytes).toString()).toBe("fake-png-bytes")
     cleanup(home)
@@ -928,7 +933,7 @@ describe("global tools", () => {
     expect(block.name).toBe("report.html")
     expect(r.output).toContain("tmp/report.html")
     // 产物落盘会话 tmp/，模型可经 read 读同一逻辑路径
-    expect(await readTool.execute({ path: "tmp/report.html" }, c)).toMatchObject({ output: html })
+    expect(await readTool.execute({ path: "tmp/report.html", lineNumbers: false }, c)).toMatchObject({ output: html })
     expect(await Bun.file(join(c.workdir, "report.html")).text()).toBe(html)
     cleanup(home)
   })
@@ -1035,7 +1040,7 @@ describe("global tools", () => {
     await writeTool.execute({ path: "b.txt", content: "foo bar" }, c)
     await editTool.execute({ path: "b.txt", edits: [{ oldString: "foo", newString: "FOO" }] }, c)
     const r = await readTool.execute({ path: "b.txt" }, c)
-    expect(r.output).toBe("FOO bar")
+    expect(r.output).toBe("1\tFOO bar")
     cleanup(home)
   })
 
@@ -1123,25 +1128,95 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("read lineNumbers=true 前缀真实行号（全文/offset 切片/尾部切片）", async () => {
+  test("edit 防盲改守卫：未读过的已存在文件拒绝，read/write 后放行，新建文件不受限", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-guard-"))
+    const c = ctx(home)
+    const read = new Set<string>()
+    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    // 会话外预置的已存在文件：盲改被拒
+    writeFileSync(join(c.workdir, "pre.txt"), "v1 content\n")
+    const blind = await editTool.execute({ path: "pre.txt", edits: [{ oldString: "v1 content", newString: "v2 content" }] }, c)
+    expect(blind.output).toContain("防盲改")
+    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("v1 content\n")
+    // read 后放行
+    await readTool.execute({ path: "pre.txt" }, c)
+    const ok = await editTool.execute({ path: "pre.txt", edits: [{ oldString: "v1 content", newString: "v2 content" }] }, c)
+    expect(ok.output).toContain("已对 pre.txt")
+    // write 成功即登记已读：随后 edit 放行
+    await writeTool.execute({ path: "w2.txt", content: "abc\n" }, c)
+    const afterWrite = await editTool.execute({ path: "w2.txt", edits: [{ oldString: "abc", newString: "ABC" }] }, c)
+    expect(afterWrite.output).toContain("已对 w2.txt")
+    // 无 fileGuard（测试桩/未注入环境）：行为不变
+    const c2 = ctx(mkdtempSync(join(tmpdir(), "gebai-edit-guard2-")))
+    writeFileSync(join(c2.workdir, "p.txt"), "a")
+    expect((await editTool.execute({ path: "p.txt", edits: [{ oldString: "a", newString: "b" }] }, c2)).output).toContain("已对 p.txt")
+    cleanup(home)
+  })
+
+  test("edit 行号前缀误拷贝检测：oldString 携带 read 输出行号时给出明确提示", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-lnleak-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "e.txt", content: "alpha\nbeta\ngamma\n" }, c)
+    // 模型把 read 默认行号输出（1\talpha）整段复制进 oldString
+    await expect(
+      editTool.execute({ path: "e.txt", edits: [{ oldString: "1\talpha\n2\tbeta", newString: "x" }] }, c),
+    ).rejects.toThrow("行号前缀")
+    // 去掉行号后正常命中
+    const ok = await editTool.execute({ path: "e.txt", edits: [{ oldString: "alpha\nbeta", newString: "ALPHA\nBETA" }] }, c)
+    expect(ok.output).toContain("行 1")
+    cleanup(home)
+  })
+
+  test("read 默认带行号（cat -n 风格）；lineNumbers=false 关闭；切片行号对应真实文件行号", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-read-ln-"))
     const c = ctx(home)
     await writeTool.execute({ path: "n.txt", content: "a\nb\nc\nd\n" }, c)
     const r1 = await readTool.execute({ path: "n.txt", lineNumbers: true }, c)
     expect(r1.output).toBe("1\ta\n2\tb\n3\tc\n4\td")
     const r2 = await readTool.execute({ path: "n.txt", offset: 3, limit: 2, lineNumbers: true }, c)
-    expect(r2.output).toBe("3\tc\n4\td")
+    expect(r2.output).toBe("3\tc\n4\td\n（第 3–4 行，共 4 行）")
     const r3 = await readTool.execute({ path: "n.txt", limit: -2, lineNumbers: true }, c)
-    expect(r3.output).toBe("3\tc\n4\td")
-    // 默认不带行号（兼容既有行为；原样返回含尾换行）
+    expect(r3.output).toBe("3\tc\n4\td\n（第 3–4 行，共 4 行）")
+    // 默认即带行号（全文读无尾注）
     const r4 = await readTool.execute({ path: "n.txt" }, c)
-    expect(r4.output).toBe("a\nb\nc\nd\n")
+    expect(r4.output).toBe("1\ta\n2\tb\n3\tc\n4\td")
+    // 显式关闭：原样返回含尾换行
+    const r5 = await readTool.execute({ path: "n.txt", lineNumbers: false }, c)
+    expect(r5.output).toBe("a\nb\nc\nd\n")
     cleanup(home)
   })
 
   test("system_info returns platform info (current_time 已移除：时间经 sh/py/js 脚本获取)", async () => {
     const si = await systemInfoTool.execute({}, ctx(""))
     expect(JSON.parse(si.output).platform).toBe(process.platform)
+  })
+
+  test("sh workdir 参数：相对路径基于会话工作目录解析后作为命令 cwd（免 cd 串联）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-workdir-"))
+    const c = ctx(home)
+    mkdirSync(join(c.workdir, "pkg"), { recursive: true })
+    const seen: Array<string | undefined> = []
+    c.runCommand = async (_cmd, o) => {
+      seen.push(o?.workdir)
+      return { stdout: "ok", stderr: "", code: 0 }
+    }
+    await shTool.execute({ command: "pwd", workdir: "pkg" }, c)
+    await shTool.execute({ command: "pwd" }, c)
+    const abs = join(c.workdir, "pkg").replace(/\\/g, "/")
+    await shTool.execute({ command: "pwd", workdir: abs }, c)
+    expect(seen).toEqual([join(c.workdir, "pkg"), c.workdir, join(c.workdir, "pkg")])
+    // 异步后台任务同样以 workdir 为 cwd
+    const started: Array<string | undefined> = []
+    c.shTasks = {
+      start: async (_command, opts) => {
+        started.push(opts.cwd)
+        return { id: "twd1", command: _command, cwd: opts.cwd ?? "", pid: 1, startedAt: Date.now(), maxMs: 1000 }
+      },
+      refresh: async () => undefined, wait: async () => undefined, kill: async () => undefined, list: async () => [], readLog: async () => "",
+    }
+    await shTool.execute({ command: "bun test", async: true, workdir: "pkg" }, c)
+    expect(started).toEqual([join(c.workdir, "pkg")])
+    cleanup(home)
   })
 
   test("sh executes command", async () => {
@@ -1823,6 +1898,68 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep literal 按字面匹配正则元字符；head_limit 压低上限并标记 truncated", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-lit-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "a.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "b.ts", size: 10, modifiedAt: 0, isDir: false },
+    ]
+    c.readFile = async (p) => (p.endsWith("a.ts") ? "foo.bar(x)\ncall foo.bar(y)\nplain foo\n" : "fooXbar\n")
+    const tools = createGlobalTools()
+    // 正则模式：foo.bar( 的 . 与 ( 会被解释（fooXbar 不含括号不命中，foo.bar( 命中）
+    const re = await tools.grep.execute({ pattern: "foo\\.bar\\(", path: "a.ts" }, c)
+    expect(re.output).toContain("a.ts:1: foo.bar(x)")
+    // literal:true：按字面匹配（无需转义），fooXbar 因缺括号不命中
+    const lit = await tools.grep.execute({ pattern: "foo.bar(", path: "a.ts", literal: true }, c)
+    expect(lit.output).toContain("a.ts:1: foo.bar(x)")
+    expect(lit.output).toContain("a.ts:2: call foo.bar(y)")
+    expect(lit.output).not.toContain("fooXbar")
+    // literal 下非法正则形态（如裸 ( ）不再报无效正则（已转义）
+    const litParen = await tools.grep.execute({ pattern: "(", path: "a.ts", literal: true }, c)
+    expect(litParen.output).not.toContain("无效正则")
+    // head_limit：压低匹配上限，data 标记 truncated、输出附上限注记
+    const capped = await tools.grep.execute({ pattern: "foo", path: "a.ts", head_limit: 1 }, c)
+    expect((capped.data as { truncated?: boolean }).truncated).toBe(true)
+    expect((capped.data as { matches: unknown[] }).matches).toHaveLength(1)
+    expect(capped.output).toContain("已达匹配上限")
+    cleanup(home)
+  })
+
+  test("grep exclude 排除路径；include 花括号与逗号多模式；默认跳过大型目录（显式点名除外）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-exc-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "src/a.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "src/b.tsx", size: 10, modifiedAt: 0, isDir: false },
+      { path: "src/c.md", size: 10, modifiedAt: 0, isDir: false },
+      { path: "tests/d.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "node_modules/pkg/e.js", size: 10, modifiedAt: 0, isDir: false },
+      { path: "dist/f.js", size: 10, modifiedAt: 0, isDir: false },
+    ]
+    c.readFile = async () => "todo: hit\n"
+    const tools = createGlobalTools()
+    // 默认跳过 node_modules/dist（WALK_SKIP_DIRS 同源）
+    const base = await tools.grep.execute({ pattern: "todo", output: "files" }, c)
+    expect(base.output).not.toContain("node_modules")
+    expect(base.output).not.toContain("dist")
+    expect(base.output).toContain("src/a.ts")
+    // include 原文显式点名 node_modules 时不再默认排除
+    const named = await tools.grep.execute({ pattern: "todo", output: "files", include: "node_modules/**" }, c)
+    expect(named.output).toContain("node_modules/pkg/e.js")
+    // exclude：目录模式（无 / 按段匹配任意层级）+ 多模式
+    const excl = await tools.grep.execute({ pattern: "todo", output: "files", exclude: "tests" }, c)
+    expect(excl.output).not.toContain("tests/d.ts")
+    expect(excl.output).toContain("src/a.ts")
+    // include 花括号：*.{ts,tsx}；exclude 逗号多模式
+    const brace = await tools.grep.execute({ pattern: "todo", output: "files", include: "*.{ts,tsx}", exclude: "tests,c.md" }, c)
+    expect(brace.output).toContain("src/a.ts")
+    expect(brace.output).toContain("src/b.tsx")
+    expect(brace.output).not.toContain("src/c.md")
+    expect(brace.output).not.toContain("tests/d.ts")
+    cleanup(home)
+  })
+
   test("grep context 附上下文行（匹配行 : 前缀、上下文行 - 前缀、组间 -- 分隔）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-ctx-"))
     const c = ctx(home)
@@ -1863,6 +2000,34 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // path 指向会话外（本地模式放开沙箱）时无可列文件
     const outside = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "..", "outside") }, c)
     expect(outside.output).toBe("（无匹配文件）")
+    cleanup(home)
+  })
+
+  test("glob 花括号交替与 exclude 排除；默认跳过大型目录（模式显式点名除外）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-glob-exc-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "src/a.ts", size: 1, modifiedAt: 0, isDir: false },
+      { path: "src/b.tsx", size: 1, modifiedAt: 0, isDir: false },
+      { path: "src/c.md", size: 1, modifiedAt: 0, isDir: false },
+      { path: "docs/d.md", size: 1, modifiedAt: 0, isDir: false },
+      { path: "node_modules/pkg/e.js", size: 1, modifiedAt: 0, isDir: false },
+    ]
+    const tools = createGlobalTools()
+    // 花括号：*.{ts,tsx} 等价 *.ts 与 *.tsx 之并
+    const brace = await tools.glob.execute({ pattern: "*.{ts,tsx}" }, c)
+    expect(brace.output).toContain("src/a.ts")
+    expect(brace.output).toContain("src/b.tsx")
+    expect(brace.output).not.toContain("src/c.md")
+    // exclude：无 / 模式按目录/文件名匹配任意层级 + 逗号多模式
+    const excl = await tools.glob.execute({ pattern: "*.md", exclude: "docs" }, c)
+    expect(excl.output).toContain("src/c.md")
+    expect(excl.output).not.toContain("docs/d.md")
+    // 默认跳过 node_modules；模式原文显式点名时不排除
+    const skipped = await tools.glob.execute({ pattern: "**/*.js" }, c)
+    expect(skipped.output).not.toContain("node_modules")
+    const named = await tools.glob.execute({ pattern: "node_modules/**/*.js" }, c)
+    expect(named.output).toContain("node_modules/pkg/e.js")
     cleanup(home)
   })
 
@@ -1954,6 +2119,30 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // 沙箱部署模式：范围外路径仍拒绝（不遍历）
     const denied = await tools.grep.execute({ pattern: "todo", path: projPath }, { ...c, sandboxed: true })
     expect(denied.output).toBe("（无匹配文件）")
+    cleanup(home)
+  })
+
+  test("file copy 复制文件（二进制通道、目标父目录自动创建）；mkdir 递归建目录且幂等", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-fsop-copy-"))
+    const c = ctx(home)
+    const t = createGlobalTools().file
+    // copy：真实文件系统（ctx 默认 readBinaryFile/writeBinaryFile 桩）→ 新目录下副本
+    await c.writeFile(join(c.workdir, "src.txt"), "content-字节")
+    const cp = await t.execute({ action: "copy", path: "src.txt", to: "nested/dir/dst.txt" }, c)
+    expect(cp.output).toContain("已复制 src.txt → nested/dir/dst.txt")
+    expect(await Bun.file(join(c.workdir, "nested", "dir", "dst.txt")).text()).toBe("content-字节")
+    // copy 缺 to 拒绝
+    const noTo = await t.execute({ action: "copy", path: "src.txt" }, c)
+    expect(noTo.output).toContain("需要 to")
+    // 源不存在：可读错误
+    const missing = await t.execute({ action: "copy", path: "nope.txt", to: "x.txt" }, c)
+    expect(missing.output).toContain("copy 失败")
+    // mkdir：递归创建、已存在幂等
+    const mk = await t.execute({ action: "mkdir", path: "deep/inner/dir" }, c)
+    expect(mk.output).toContain("已创建目录")
+    expect(existsSync(join(c.workdir, "deep", "inner", "dir"))).toBe(true)
+    await t.execute({ action: "mkdir", path: "deep/inner/dir" }, c)
+    expect(existsSync(join(c.workdir, "deep", "inner", "dir"))).toBe(true)
     cleanup(home)
   })
 
@@ -2271,13 +2460,49 @@ describe("patch tool", () => {
     cleanup(home)
   })
 
-  test("multi-file patch rejected; empty patch reports no hunks", async () => {
+  test("多文件补丁按文件头逐文件应用（跨文件原子）；空补丁报无 hunk；无头多段缺 path 报错", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-multi-"))
     const c = ctx(home)
-    const multi = await patchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n-c\n+d\n" }, c)
+    await writeTool.execute({ path: "x.ts", content: "a\n" }, c)
+    await writeTool.execute({ path: "y.ts", content: "c\n" }, c)
+    const multi = await patchTool.execute({
+      patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n-c\n+d\n",
+    }, c)
     expect(multi.output).toContain("2 个文件")
+    expect(multi.output).toContain("x.ts")
+    expect(multi.output).toContain("y.ts")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "x.ts")).text()).toBe("b\n")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "y.ts")).text()).toBe("d\n")
+    // 任一文件不匹配整体失败（跨文件原子，两边都不落盘）
+    await writeTool.execute({ path: "z.ts", content: "keep\n" }, c)
+    const failMulti = await patchTool.execute({
+      patch: "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-b\n-B\n--- a/z.ts\n+++ b/z.ts\n@@ -1 +1 @@\n-nope\n+NOPE\n",
+    }, c)
+    expect(failMulti.output).toContain("未匹配")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "x.ts")).text()).toBe("b\n")
+    expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "z.ts")).text()).toBe("keep\n")
+    // 空补丁（无 hunk）报错
     const empty = await patchTool.execute({ path: "x.ts", patch: "--- a/x.ts\n+++ b/x.ts\n" }, c)
     expect(empty.output).toContain("未解析到任何 hunk")
+    // 多段但无文件头且未传 path：无法定位目标
+    const noTarget = await patchTool.execute({ patch: "@@ -1 +1 @@\n-a\n+b\n@@ -1 +1 @@\n-c\n+d\n" }, c)
+    expect(noTarget.output).toContain("文件头")
+    cleanup(home)
+  })
+
+  test("patch 防盲改守卫：未读过的已存在文件拒绝，read 后放行（与 write/edit 同规则）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-guard-"))
+    const c = ctx(home)
+    const read = new Set<string>()
+    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    writeFileSync(join(c.workdir, "pre.txt"), "a\n")
+    const blind = await patchTool.execute({ path: "pre.txt", patch: "@@ -1 +1 @@\n-a\n+b\n" }, c)
+    expect(blind.output).toContain("防盲改")
+    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("a\n")
+    await readTool.execute({ path: "pre.txt" }, c)
+    const ok = await patchTool.execute({ path: "pre.txt", patch: "@@ -1 +1 @@\n-a\n+b\n" }, c)
+    expect(ok.output).toContain("已写入")
+    expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("b\n")
     cleanup(home)
   })
 })
@@ -2322,6 +2547,40 @@ describe("git tool", () => {
     }
     await gitTool.execute({ action: "log", maxEntries: 999 }, c)
     expect(seen).toEqual(["git log --oneline -n 50"])
+    cleanup(home)
+  })
+
+  test("show/branch/ls-files 只读 action：命令形态、ref/path 注入防护与结构化输出", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-git-new-"))
+    const c = ctx(home)
+    const seen: string[] = []
+    c.runCommand = async (cmd) => {
+      seen.push(cmd)
+      if (cmd.startsWith("git show")) return { stdout: "commit abc\n\ndiff --git a/x b/x\n", stderr: "", code: 0 }
+      if (cmd.startsWith("git branch")) return { stdout: "* master  a1 fix\n  remotes/origin/main  b2 feat\n", stderr: "", code: 0 }
+      return { stdout: "src/a.ts\nsrc/b.ts\n", stderr: "", code: 0 }
+    }
+    // show：默认 HEAD，ref 内嵌命令经安全校验后引号包裹（git 不进全局工具表，直接用 gitTool）
+    const show = await gitTool.execute({ action: "show" }, c)
+    expect(seen[0]).toBe('git show --no-color "HEAD"')
+    expect(show.output).toContain("commit abc")
+    await gitTool.execute({ action: "show", ref: "HEAD~2" }, c)
+    expect(seen[1]).toBe('git show --no-color "HEAD~2"')
+    // 注入形态拒绝（引号/管道/& 等 cmd 元字符）
+    const evil = await gitTool.execute({ action: "show", ref: 'x" & del /f' }, c)
+    expect(evil.output).toContain("非法 ref")
+    // branch：本地+远程清单
+    const branch = await gitTool.execute({ action: "branch" }, c)
+    expect(seen[2]).toBe("git branch -a -v --no-color")
+    expect(branch.output).toContain("master")
+    // ls-files：无 path 与带 path（-- 分隔防选项注入）
+    const ls = await gitTool.execute({ action: "ls-files" }, c)
+    expect(ls.output).toContain("src/a.ts")
+    expect((ls.data as { files: string[] }).files).toEqual(["src/a.ts", "src/b.ts"])
+    await gitTool.execute({ action: "ls-files", path: "src/*.ts" }, c)
+    expect(seen[4]).toBe('git ls-files -- "src/*.ts"')
+    const evilPath = await gitTool.execute({ action: "ls-files", path: "a&b" }, c)
+    expect(evilPath.output).toContain("非法 path")
     cleanup(home)
   })
 
