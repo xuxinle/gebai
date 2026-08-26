@@ -39,6 +39,8 @@ describe("EngineBotAdapter（飞书接口层）", () => {
     expect(runOpts!.interactionMode).toBe("multi_turn")
     expect(runOpts!.outputMode).toBe("final_only")
     expect(runOpts!.messageId).toBe("mid-12345678")
+    // 通道环境注记：模型感知飞书宿主（渲染/交互/能力边界）
+    expect(String(runOpts!.channelNote)).toContain("飞书")
   })
 
   test("事件流映射为语义回调：审批/选择/画图/最终回复/结束/错误", async () => {

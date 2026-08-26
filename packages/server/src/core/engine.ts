@@ -246,6 +246,8 @@ interface TaskState {
   role?: string
   /** 输出方式（final_only/streaming）：final_only 不推送文本增量与推理流（仅最终响应）。 */
   outputMode: OutputMode
+  /** 通道环境注记（引擎通道无关，由桥接层注入——如飞书：告知模型当前对话的宿主/渲染/能力边界）。 */
+  channelNote?: string
   /** 任务级环境变量（run 时组装快照的同一引用）：ask 填值后原地更新，工具后续读取立即生效。 */
   env: Record<string, string>
   /** ask 填值分支：envId → 等待中的请求回调。 */
@@ -1059,6 +1061,8 @@ export class AgentEngine {
       outputMode?: OutputMode
       /** 发起任务用户的角色（admin/user；公共资源权限判定用，如公共 mini-tool 仅管理员可写）。 */
       role?: string
+      /** 通道环境注记（通道无关，注入系统提示词——飞书桥接等外部通道告知模型对话宿主/渲染/能力边界）。 */
+      channelNote?: string
     } = {},
   ): Promise<void> {
     if (this.tasks.has(sessionId)) throw new Error(`会话 ${sessionId} 已有任务在运行`)
@@ -1066,7 +1070,7 @@ export class AgentEngine {
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
     const controller = new AbortController()
-    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
+    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
     this.tasks.set(sessionId, task)
     // 收尾验证提醒数据（本任务范围）：修改的代码文件 + 是否运行过测试/检查类命令（runToolInterruptible 收集）
     this.taskMods.set(sessionId, { files: new Set(), verified: false })
@@ -1368,6 +1372,7 @@ export class AgentEngine {
 
   private buildSystemPrompt(sessionId: string, user: string, env: Record<string, string>): string {
     const workdir = sessionPath(this.opts.config.gebaiHome, user, sessionId)
+    const channelNote = this.tasks.get(sessionId)?.channelNote
     const sandboxNote = this.opts.sandbox.enforcedFor(user)
       ? `（文件读写限定在此目录内，禁止越界）`
       : `（本地模式：不限制文件目录，可访问本机任意路径）`
@@ -1379,6 +1384,7 @@ export class AgentEngine {
         `当前会话工作目录: ${workdir}/tmp（sh 命令与 edit 等文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
         `当前会话处于极简模式：仅启用 sh、edit 与 full_mode 三个工具（其余工具均不可用）。查看/读取文件请用 sh 执行命令（cat、ls、find 等），修改文件请用 edit 工具；若任务确需其他工具能力，调用 full_mode 工具（需用户批准）切换到完整模式，批准后全部工具与完整说明立即生效。`,
         ...(this.opts.config.safeMode ? [`安全模式已启用：sh 仅允许只读命令白名单、edit 限定用户目录内修改。`] : []),
+        ...(channelNote ? [channelNote] : []),
       ].join("\n")
     }
     const safeModeNote = this.opts.config.safeMode
@@ -1387,6 +1393,7 @@ export class AgentEngine {
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
       `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
+      ...(channelNote ? [channelNote] : []),
       ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
