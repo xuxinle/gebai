@@ -314,18 +314,44 @@ function withLineNumbers(text: string, startLine: number): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。默认每行前缀真实行号（cat -n 风格「行号→制表符」，定位/引用 文件:行号、构造 patch 补丁用；复制原文给 edit/patch 时须去掉行号前缀，不需要行号可传 lineNumbers:false）。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
+    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。默认每行前缀真实行号（cat -n 风格「行号→制表符」，定位/引用 文件:行号、构造 patch 补丁用；复制原文给 edit/patch 时须去掉行号前缀，不需要行号可传 lineNumbers:false）。非 UTF-8 编码（file info 探测的 GBK 等）传 encoding 按指定编码解码读取。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
     offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
     limit: { type: "integer", description: "读取行数（正数取 offset 起 N 行；负数取末尾 N 行）" },
     lineNumbers: { type: "boolean", description: "每行前缀真实行号（默认 true；offset/limit 切片仍对应文件真实行号）" },
+    encoding: { type: "string", description: "可选：按指定编码解码读取（如 gbk——file info 探测为 GBK 时用，缺省 UTF-8；支持 TextDecoder 编码名）。仅解码读取，需转码改写文件用 py 脚本处理" },
   }, ["path"]),
   async execute(args, ctx) {
     const path = ctx.resolvePath(String(args.path))
     await assertReadableSize(path, "read", READ_MAX_FILE_BYTES)
-    const content = await ctx.readFile(path)
+    // 编码指定读取：按原始字节解码（非 UTF-8 文件——file info 探测为 GBK 等场景）；目录在此一并给出可读引导
+    let content: string
+    try {
+      if (args.encoding) {
+        const enc = String(args.encoding)
+        const bytes = await ctx.readBinaryFile(path)
+        try {
+          // @types/node 的 Encoding 枚举不含任意标签（运行时支持），断言绕过类型限制（同 sniffGbk 惯例）
+          content = new TextDecoder(enc as never, { fatal: true }).decode(bytes)
+        } catch {
+          return { output: `read 失败：按 ${enc} 解码失败（编码名非法或内容不是该编码）——可先用 file 工具（action=info）探测实际编码。` }
+        }
+      } else {
+        content = await ctx.readFile(path)
+      }
+    } catch (err) {
+      try {
+        const { stat } = await import("node:fs/promises")
+        if ((await stat(path)).isDirectory()) {
+          return { output: `read 拒绝：${args.path} 是目录——请用 ls 列出内容后选择具体文件（或 glob 按文件名模式查找）。` }
+        }
+      } catch {
+        /* 保持原错误 */
+      }
+      throw err
+    }
     const offset = args.offset == null ? undefined : Number(args.offset)
     const limit = args.limit == null ? undefined : Number(args.limit)
     const sliced = sliceLines(content, offset, limit)
@@ -558,7 +584,7 @@ const FILE_COPY_MAX_BYTES = 100 * 1024 * 1024
 export const fileTool: Tool = {
   name: "file",
   description:
-    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 为目标路径含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 直接 read 会乱码）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
+    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 为目标路径含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，谨慎）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（UTF-8/BOM/UTF-16/疑似 GBK——GBK 用 read 的 encoding=gbk 读取）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。路径与 read/write 同一解析规则。",
   card: { titleParams: ["action", "path"] },
   // delete 递归且不可恢复（能力上甚于一次 sh rm，sh 一律审批）：与审批矩阵对齐，delete 动态需审批
   requiresApproval: (args) => args.action === "delete",
@@ -700,7 +726,7 @@ export const fileTool: Tool = {
         } else if (sniffGbk(buf, bytesRead)) {
           kind = "text"
           encoding = "gbk"
-          type = extLabel ? `${extLabel}（疑似 GBK/ANSI 编码，非 UTF-8——直接 read 会乱码）` : "文本（疑似 GBK/ANSI 编码，非 UTF-8——直接 read 会乱码）"
+          type = extLabel ? `${extLabel}（疑似 GBK/ANSI 编码，非 UTF-8——read 传 encoding=gbk 读取）` : "文本（疑似 GBK/ANSI 编码，非 UTF-8——read 传 encoding=gbk 读取）"
         } else {
           kind = "binary"
           type = extLabel ? `${extLabel}（二进制内容）` : looksBinary(buf, bytesRead) ? "二进制文件（未知格式）" : "未知格式（非 UTF-8，且无法识别魔数）"
@@ -781,7 +807,9 @@ export const grepTool: Tool = {
       ignoreCase: { type: "boolean" },
       literal: { type: "boolean", description: "true 时 pattern 按字面字符串匹配（正则元字符自动转义），适合搜索含 .()[]* 等字符的代码片段（默认 false 正则）" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
-      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式）：匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔（同 grep -n -C）" },
+      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式）：匹配行前缀 文件:行号:、上下文行前缀 文件-行号-，组间 -- 分隔（同 grep -n -C）；contextBefore/contextAfter 指定时覆盖对应侧" },
+      contextBefore: { type: "integer", description: "匹配行**前**附上下文行数（0-10，仅 content 模式；与 context 独立指定非对称上下文，如同 grep -B）" },
+      contextAfter: { type: "integer", description: "匹配行**后**附上下文行数（0-10，仅 content 模式；与 context 独立指定非对称上下文，如同 grep -A——看定义后的实现体常用）" },
       include: { type: "string", description: "文件路径 glob 过滤（如 *.ts、src/**、*.{ts,tsx}，逗号分隔多模式；** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
       exclude: { type: "string", description: "排除的路径 glob（与 include 同语法，命中即排除；如 tests/**,*.{json,md}、dist——无 / 的模式按目录/文件名匹配任意层级）" },
       head_limit: { type: "integer", description: "匹配上限（默认 200；先只看前面一部分时压低，达上限结果标记 truncated——files/count 模式的计数同口径截断）" },
@@ -812,7 +840,11 @@ export const grepTool: Tool = {
       return { output: `grep: 无效正则: ${args.pattern}` }
     }
     const mode = args.output === "files" || args.output === "count" ? args.output : "content"
-    const context = Math.max(0, Math.min(10, Math.floor(Number(args.context) || 0)))
+    const ctxLine = (v: unknown): number | null => (v == null ? null : Math.max(0, Math.min(10, Math.floor(Number(v) || 0))))
+    const context = ctxLine(args.context) ?? 0
+    // 非对称上下文（-B/-A）：指定时覆盖 context 的对应侧
+    const before = ctxLine(args.contextBefore) ?? context
+    const after = ctxLine(args.contextAfter) ?? context
     const maxMatches = Math.max(1, Math.min(GREP_MAX_MATCHES, Math.floor(Number(args.head_limit) || GREP_MAX_MATCHES)))
     const includeRes = globFilters(args.include)
     const includeRaw = args.include ? String(args.include) : ""
@@ -906,12 +938,12 @@ export const grepTool: Tool = {
         fileCounts.push({ file: f.display, count: f.hitIdx.length })
         continue
       }
-      if (context > 0) {
-        // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔）
+      if (before > 0 || after > 0) {
+        // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔；before/after 可非对称）
         const ranges: Array<[number, number]> = []
         for (const i of f.hitIdx) {
-          const s = Math.max(0, i - context)
-          const e = Math.min(f.lines.length - 1, i + context)
+          const s = Math.max(0, i - before)
+          const e = Math.min(f.lines.length - 1, i + after)
           const last = ranges[ranges.length - 1]
           if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
           else ranges.push([s, e])
@@ -1140,6 +1172,104 @@ export const fetchUrlTool: Tool = {
       text = await res.text()
     }
     return { ...(await truncate(text.slice(0, FETCH_URL_MAX_BYTES), "fetch_url", ctx)), data: { ok: true, status: res.status, contentType: ct } }
+  },
+}
+
+/** web_search：请求/结果条数默认与上限；超时。 */
+const WEB_SEARCH_COUNT_DEFAULT = 8
+const WEB_SEARCH_COUNT_MAX = 10
+const WEB_SEARCH_TIMEOUT = 15000
+
+export const webSearchTool: Tool = {
+  name: "web_search",
+  description:
+    "联网搜索网页（查第三方库文档/报错信息/技术方案/库选型等）。返回 标题+URL+摘要 清单，抓取具体页面全文用 fetch_url。需配置搜索服务：GEBAI_SEARCH_PROVIDER（brave / serper / tavily）+ GEBAI_SEARCH_API_KEY（前端设置面板或环境变量，未配置时返回配置引导）。",
+  card: { titleParams: ["query"] },
+  parameters: schema({
+    query: { type: "string", description: "搜索关键词（中英文均可，多用专有名词/报错原文提高命中）" },
+    count: { type: "integer", description: `结果条数（默认 ${WEB_SEARCH_COUNT_DEFAULT}，上限 ${WEB_SEARCH_COUNT_MAX}）` },
+  }, ["query"]),
+  outputSchema: schema({
+    results: {
+      type: "array",
+      description: "搜索结果（按相关性排序）",
+      items: schema({ title: { type: "string" }, url: { type: "string" }, snippet: { type: "string", description: "摘要" } }, ["title", "url"]),
+    },
+  }, ["results"]),
+  async execute(args, ctx) {
+    const provider = String(ctx.env.GEBAI_SEARCH_PROVIDER || process.env.GEBAI_SEARCH_PROVIDER || "").trim().toLowerCase()
+    const apiKey = String(ctx.env.GEBAI_SEARCH_API_KEY || process.env.GEBAI_SEARCH_API_KEY || "").trim()
+    if (!provider || !apiKey) {
+      return {
+        output:
+          "web_search 不可用：未配置搜索服务。请配置 GEBAI_SEARCH_PROVIDER（brave / serper / tavily）与 GEBAI_SEARCH_API_KEY（前端设置面板的环境变量，或用 ask 向用户索取后重试）；未配置时可改用 fetch_url 直接抓取已知网址。",
+        data: { results: [] },
+      }
+    }
+    const query = String(args.query ?? "").trim()
+    if (!query) return { output: "web_search 失败：缺少 query（搜索关键词）。", data: { results: [] } }
+    const count = Math.min(Math.max(Math.floor(Number(args.count) || WEB_SEARCH_COUNT_DEFAULT), 1), WEB_SEARCH_COUNT_MAX)
+    // 三家搜索 API 均为固定公网端点（无用户可控 URL，无 SSRF 面），统一 15s 超时
+    let res: Response
+    let pick: (j: Record<string, unknown>) => Array<{ title: string; url: string; snippet: string }>
+    try {
+      if (provider === "brave") {
+        res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`, {
+          headers: { Accept: "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": apiKey },
+          signal: AbortSignal.timeout(WEB_SEARCH_TIMEOUT),
+        })
+        pick = (j) =>
+          ((j.web as { results?: Array<{ title?: string; url?: string; description?: string }> } | undefined)?.results ?? []).map((r) => ({
+            title: r.title ?? "",
+            url: r.url ?? "",
+            snippet: r.description ?? "",
+          }))
+      } else if (provider === "serper") {
+        res = await fetch("https://google.serper.dev/search", {
+          method: "POST",
+          headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify({ q: query, num: count }),
+          signal: AbortSignal.timeout(WEB_SEARCH_TIMEOUT),
+        })
+        pick = (j) =>
+          ((j.organic as Array<{ title?: string; link?: string; snippet?: string }> | undefined) ?? []).map((r) => ({
+            title: r.title ?? "",
+            url: r.link ?? "",
+            snippet: r.snippet ?? "",
+          }))
+      } else if (provider === "tavily") {
+        res = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: apiKey, query, max_results: count }),
+          signal: AbortSignal.timeout(WEB_SEARCH_TIMEOUT),
+        })
+        pick = (j) =>
+          ((j.results as Array<{ title?: string; url?: string; content?: string }> | undefined) ?? []).map((r) => ({
+            title: r.title ?? "",
+            url: r.url ?? "",
+            snippet: r.content ?? "",
+          }))
+      } else {
+        return { output: `web_search 失败：不支持的 GEBAI_SEARCH_PROVIDER「${provider}」（支持 brave / serper / tavily）。`, data: { results: [] } }
+      }
+    } catch (err) {
+      return { output: `web_search 失败：${(err as Error).message}（网络异常或超时，可稍后重试）`, data: { results: [] } }
+    }
+    if (!res.ok) {
+      // 不回显响应体（可能含 key 相关诊断）；按状态码给常见病因
+      const hint = res.status === 401 || res.status === 403 ? "（API Key 无效或额度用尽，请检查 GEBAI_SEARCH_API_KEY）" : res.status === 429 ? "（限频，稍后重试）" : ""
+      return { output: `web_search 失败：HTTP ${res.status} ${res.statusText}${hint}`, data: { results: [] } }
+    }
+    let results: Array<{ title: string; url: string; snippet: string }>
+    try {
+      results = pick((await res.json()) as Record<string, unknown>)
+    } catch {
+      return { output: "web_search 失败：响应解析异常（非 JSON）。", data: { results: [] } }
+    }
+    if (!results.length) return { output: `（无搜索结果：${query}）`, data: { results: [] } }
+    const text = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ""}`).join("\n")
+    return { ...(await truncate(text, "web_search", ctx)), data: { results } }
   },
 }
 
@@ -1853,24 +1983,31 @@ function safeGitArg(v: string): boolean {
   return v.trim() !== "" && !/["&|<>^%`\r\n;]/.test(v)
 }
 
+/** git grep pattern 安全校验：双引号内 cmd/shell 活动元字符黑名单（`"` 断引号、`%` 变量展开、`$`/反引号 sh 展开）；
+ *  `&`/`|`/`<`/`>` 在双引号内为字面量**放行**——正则交替 `a|b` 等语法需要。 */
+function safeGitPattern(v: string): boolean {
+  return v.trim() !== "" && !/["%$`\r\n]/.test(v)
+}
+
 export const gitTool: Tool = {
   name: "git",
   description:
-    "只读 Git 检查（status/diff/log/show/branch/ls-files 六操作，不修改仓库；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh。",
+    "只读 Git 检查（status/diff/log/show/branch/ls-files/grep 七操作，不修改仓库；各操作说明见 action 参数）。写操作（add/commit 等）请用 sh。",
   card: { args: "none" },
   parameters: schema(
     {
-      action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files"], description: "status 工作区状态 / diff 变更内容 / log 提交历史 / show 查看某提交或文件的完整内容（ref 默认 HEAD）/ branch 本地与远程分支列表 / ls-files 已跟踪文件清单（自动尊重 .gitignore，摸底项目结构快于 glob）" },
+      action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files", "grep"], description: "status 工作区状态 / diff 变更内容 / log 提交历史 / show 查看某提交或文件的完整内容（ref 默认 HEAD）/ branch 本地与远程分支列表 / ls-files 已跟踪文件清单（自动尊重 .gitignore，摸底项目结构快于 glob）/ grep 在**已跟踪文件**中内容搜索（自动尊重 .gitignore——grep 工具不读 .gitignore 的补口；basic 正则语法；未 add 的新文件不在结果）" },
       dir: { type: "string", description: "Git 仓库目录（默认会话工作目录）" },
       staged: { type: "boolean", description: "diff 是否查看暂存区（--staged），默认否" },
       maxEntries: { type: "integer", description: "log 条数（默认 10，上限 50）" },
       ref: { type: "string", description: "show 的目标：提交哈希/分支/tag/HEAD~n 等（默认 HEAD）" },
-      path: { type: "string", description: "ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts；可选）" },
+      path: { type: "string", description: "ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts）；grep 的搜索范围限定（可选）" },
+      pattern: { type: "string", description: "grep 的搜索模式（basic 正则，如 foo\\.bar、error|warn）" },
     },
     ["action"],
   ),
   outputSchema: schema({
-    action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files"] },
+    action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files", "grep"] },
     branch: { type: "string", description: "当前分支（仅 status）" },
     ahead: { type: "integer", description: "领先远端提交数（仅 status，无则省略）" },
     behind: { type: "integer", description: "落后远端提交数（仅 status，无则省略）" },
@@ -1897,11 +2034,18 @@ export const gitTool: Tool = {
       const path = args.path ? String(args.path) : ""
       if (path && !safeGitArg(path)) return { output: `git: 非法 path（含命令元字符）: ${path}` }
       cmd = path ? `git ls-files -- "${path}"` : "git ls-files"
-    } else return { output: `git: 未知操作: ${action}（status/diff/log/show/branch/ls-files）` }
+    } else if (action === "grep") {
+      const pattern = args.pattern ? String(args.pattern) : ""
+      if (!pattern.trim()) return { output: "git: grep 需要 pattern（basic 正则搜索模式）。" }
+      if (!safeGitPattern(pattern)) return { output: `git: 非法 pattern（含引号内活动元字符 " % $ 反引号——请改写模式或用 grep 工具）: ${pattern.slice(0, 60)}` }
+      const path = args.path ? String(args.path) : ""
+      if (path && !safeGitArg(path)) return { output: `git: 非法 path（含命令元字符）: ${path}` }
+      cmd = `git grep -n -I --no-color -e "${pattern}"${path ? ` -- "${path}"` : ""}`
+    } else return { output: `git: 未知操作: ${action}（status/diff/log/show/branch/ls-files/grep）` }
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: dir })
     if (code !== 0) return { output: `git ${action} 失败（exit ${code}，目录 ${args.dir || "."} 可能不是 Git 仓库）:\n${stderr || stdout}` }
     if (!stdout.trim()) {
-      const empty: Record<string, string> = { diff: "（工作区无变更）", status: "（工作区干净）", log: "（无提交记录）", show: "（无内容）", branch: "（无分支）", "ls-files": "（无跟踪文件）" }
+      const empty: Record<string, string> = { diff: "（工作区无变更）", status: "（工作区干净）", log: "（无提交记录）", show: "（无内容）", branch: "（无分支）", "ls-files": "（无跟踪文件）", grep: "（无匹配）" }
       const emptyData: Record<string, Record<string, unknown>> = { status: { changes: [] }, log: { commits: [] }, "ls-files": { files: [] } }
       return { output: empty[action] ?? "（无输出）", data: { action, ...(emptyData[action] ?? {}) } }
     }
@@ -2975,6 +3119,7 @@ export function createAllGlobalTools(): Record<string, Tool> {
     show: showTool,
     // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）
     fetch_url: fetchUrlTool,
+    web_search: webSearchTool,
     todo: todoTool,
     ask: askTool,
     // current_time 已移除：时间获取用 sh/py/js 脚本（如 sh date）按需完成，不占全局工具位；
