@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
-import { createWriteStream } from "node:fs"
-import { join, resolve } from "node:path"
+import { createWriteStream, mkdirSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
 import { sessionPath } from "./paths"
 import { resolveInSandbox, stripTmpPrefix } from "./paths"
 import { isSensitive } from "./env"
@@ -66,6 +66,14 @@ export class Sandbox {
     return join(sessionPath(this.opts.home, user, sessionId), "tmp")
   }
 
+  /** 保证 cwd 存在（会话 tmp/ 等目录并非必然存在——纯命令会话无附件/写文件时从未创建，
+   *  spawn 对缺失 cwd 直接 ENOENT，sh/py/js/ls 全体报「找不到路径」）；尽力而为，失败按原样 spawn 报错。 */
+  private async ensureCwd(cwd?: string): Promise<void> {
+    if (!cwd) return
+    const { mkdir } = await import("node:fs/promises")
+    await mkdir(cwd, { recursive: true }).catch(() => {})
+  }
+
   exec(
     cmd: string,
     opts: {
@@ -80,7 +88,10 @@ export class Sandbox {
       user?: string
     } = {},
   ): Promise<{ stdout: string; stderr: string; code: number }> {
-    return new Promise((resolve) => {
+    // cwd 保证存在后再 spawn（缺失目录 spawn 直接 ENOENT）
+    return this.ensureCwd(opts.cwd).then(
+      () =>
+        new Promise((resolve) => {
       const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000
       // 沙箱（服务端部署）模式下脚本子进程环境剔除敏感变量（*_KEY/*_TOKEN/*_SECRET/PASSWORD 等）：
       // 脚本（sh/py/cron）是可任意执行的代码，若继承服务端全局密钥（如 OPENAI_API_KEY），
@@ -173,7 +184,8 @@ export class Sandbox {
         opts.signal?.removeEventListener("abort", onAbort)
         resolve({ stdout: decodeOutput(Buffer.concat(stdoutChunks)), stderr: decodeOutput(Buffer.concat(stderrChunks)), code: code ?? 1 })
       })
-    })
+        }),
+    )
   }
 
   /**
@@ -192,6 +204,13 @@ export class Sandbox {
       user?: string
     },
   ): { pid: number | null; exited: Promise<number>; kill: () => void } {
+    // cwd/logPath 父目录保证存在（同步句柄无法 await；与 exec 的 ensureCwd 同语义，缺失目录 spawn 直接 ENOENT）
+    try {
+      mkdirSync(opts.cwd ?? dirname(opts.logPath), { recursive: true })
+      mkdirSync(dirname(opts.logPath), { recursive: true })
+    } catch {
+      /* 尽力而为：失败按原样 spawn 报错 */
+    }
     const merged = { ...process.env, ...opts.env }
     const stripSensitive = this.opts.enabled && (opts.user == null || !this.isExempt(opts.user))
     const env = stripSensitive ? Object.fromEntries(Object.entries(merged).filter(([k]) => !isSensitive(k))) : merged

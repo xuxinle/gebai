@@ -1072,6 +1072,9 @@ export class AgentEngine {
     this.taskMods.set(sessionId, { files: new Set(), verified: false })
     // 子Agent 热加载检查（目录签名变化即重扫）：每个新任务以最新定义构建系统提示词与路由
     await this.opts.subAgents.refreshIfChanged().catch(() => {})
+    // 会话工作目录保证存在（纯命令会话无附件/写文件时 tmp/ 从未创建，sh/py/js/ls 相对路径全体 ENOENT）
+    const { mkdir } = await import("node:fs/promises")
+    await mkdir(this.opts.sandbox.workdir(user, sessionId), { recursive: true }).catch(() => {})
     try {
       const session = await this.opts.store.load(sessionId, user)
       if (!session) throw new Error(`会话不存在: ${sessionId}`)

@@ -81,6 +81,26 @@ describe("Sandbox.exec (Windows 编码)", () => {
     }
   })
 
+  test("exec: cwd 不存在时自动创建（会话 tmp/ 缺失不再全体 ENOENT）；spawnBackground 同语义", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sandbox-cwd-"))
+    const sb = new Sandbox({ home, enabled: false })
+    const sid = "0123456789abcdef0123456789abcdef"
+    const cwd = sb.workdir("default", sid) // 从未创建的会话 tmp 目录
+    try {
+      const r = await sb.exec("echo ok", { cwd })
+      expect(r.code).toBe(0)
+      expect(r.stdout.trim()).toBe("ok")
+      // 后台任务：cwd 与 logPath 父目录缺失同样自动创建
+      const { existsSync } = await import("node:fs")
+      const logPath = join(cwd, "sh-tasks", "t1.log")
+      const h = sb.spawnBackground("echo bg", { cwd, logPath })
+      await h.exited
+      expect(existsSync(logPath)).toBe(true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test("node --version output is captured (not swallowed)", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sandbox-"))
     const sb = new Sandbox({ home, enabled: false })
