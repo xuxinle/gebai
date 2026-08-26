@@ -695,6 +695,46 @@ describe("引擎事件推送", () => {
     f.releaseRuns()
   })
 
+  test("卡片回调事件（card.action.trigger 事件帧）：路由审批决策并返回响应体；重推去重；operator 兼容扁平/嵌套", async () => {
+    const f = makeBot({ hangRun: true })
+    await f.bot.start()
+    void f.bot.handleFeishuEvent(receiveEvent()) // ou_123 发起任务（挂起保持运行，runOwners 保留）
+    await waitUntil(() => f.runs.length === 1)
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc20", tool: "sh", arguments: { cmd: "ls" } } })
+    await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    // 新版 card.action.trigger：事件帧下发、operator 为扁平 {open_id}
+    const cardEvent = {
+      schema: "2.0",
+      header: { event_type: "card.action.trigger", event_id: "ev_card1" },
+      event: {
+        operator: { open_id: "ou_123" },
+        action: { value: { approvalId: "tc20", act: "approve" }, tag: "button" },
+        context: { open_message_id: "om_c20", open_chat_id: "oc_chat1" },
+      },
+    }
+    const resp = await f.bot.handleFeishuEvent(cardEvent)
+    expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc20", approve: true }])
+    expect(resp).toMatchObject({ card: { type: "raw" } })
+    // 同一 event_id 重推：忽略（不重复决策），回空响应体
+    expect(await f.bot.handleFeishuEvent(cardEvent)).toEqual({})
+    expect(f.approvals).toHaveLength(1)
+    // 旧版嵌套 operator 形态（operator_id.open_id）同样支持
+    f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc21", tool: "sh", arguments: { cmd: "ls" } } })
+    await flush()
+    const resp2 = await f.bot.handleFeishuEvent({
+      schema: "2.0",
+      header: { event_type: "card.action.trigger", event_id: "ev_card2" },
+      event: {
+        operator: { operator_id: { open_id: "ou_123" } },
+        action: { value: { approvalId: "tc21", act: "reject" }, tag: "button" },
+        context: { open_message_id: "om_c21", open_chat_id: "oc_chat1" },
+      },
+    })
+    expect(f.approvals[1]).toEqual({ sessionId: sid(), toolCallId: "tc21", approve: false })
+    expect(JSON.stringify(resp2)).toContain("已拒绝")
+    f.releaseRuns()
+  })
+
   test("任务完成兜底与清理", async () => {
     const f = makeBot()
     await f.bot.start()

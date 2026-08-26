@@ -60,7 +60,9 @@ function makeConn() {
   const conn = new FeishuConn({
     appId: "cli_a",
     appSecret: "sec",
-    onEvent: (ev) => events.push(ev),
+    onEvent: (ev) => {
+      events.push(ev)
+    },
     fetchImpl,
     wsFactory,
     clock: () => 1000,
@@ -136,6 +138,37 @@ describe("FeishuConn", () => {
     expect(dec.headers).toContainEqual({ key: "message_id", value: "om_1" })
     expect(dec.headers).toContainEqual({ key: "biz_rt", value: "0" })
     expect(JSON.parse(new TextDecoder().decode(dec.payload!))).toEqual({ code: 200 })
+    conn.stop()
+  })
+
+  test("事件帧：回调返回响应体（卡片回调）→ ACK 封 {code:200,data:base64} 信封", async () => {
+    const wsList: FakeWs[] = []
+    const conn = new FeishuConn({
+      appId: "cli_a",
+      appSecret: "sec",
+      onEvent: (ev) => {
+        if (((ev.header ?? {}) as { event_type?: string }).event_type === "card.action.trigger") {
+          return Promise.resolve({ card: { type: "raw", data: { elements: [] } } })
+        }
+      },
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ code: 0, data: { URL: "wss://x/connect?device_id=d&service_id=1" } }) }),
+      wsFactory: { connect: () => { const w = new FakeWs(); wsList.push(w); return w } },
+      log: () => {},
+      intervals: { reconnectInterval: 10 },
+    })
+    const p = conn.start()
+    const ws = await waitWs(wsList)
+    ws.open()
+    await p
+    ws.receive(eventFrame({ schema: "2.0", header: { event_type: "card.action.trigger" }, event: {} }, 1, { message_id: "om_c1", sum: "1", seq: "0" }))
+    await new Promise((r) => setTimeout(r, 10))
+    const { decodeFrame } = await import("./pb")
+    const ack = ws.sent[ws.sent.length - 1] as Uint8Array
+    const dec = decodeFrame(ack)
+    const body = JSON.parse(new TextDecoder().decode(dec.payload!)) as { code: number; data?: string }
+    expect(body.code).toBe(200)
+    // 响应体 base64 编码进 data（lark_oapi ws/client.py 同构）
+    expect(JSON.parse(Buffer.from(body.data!, "base64").toString())).toEqual({ card: { type: "raw", data: { elements: [] } } })
     conn.stop()
   })
 
@@ -215,7 +248,9 @@ describe("FeishuConn", () => {
     const conn = new FeishuConn({
       appId: "cli_a",
       appSecret: "sec",
-      onEvent: (ev) => events.push(ev),
+      onEvent: (ev) => {
+      events.push(ev)
+    },
       onCardAction: async (payload) => {
         cardActions.push(payload)
         return { toast: { type: "success", content: "已选择" }, card: { config: { wide_screen_mode: true } } }

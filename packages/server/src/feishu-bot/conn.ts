@@ -30,8 +30,13 @@ export const bunWsFactory: WsFactory = {
   },
 }
 
-/** 事件回调（payload 为 schema 2.0 事件 JSON）。 */
-export type FeishuEventHandler = (event: Record<string, unknown>) => void
+/** 事件回调（payload 为 schema 2.0 事件 JSON）。
+ *  返回值：普通事件不返回（void，立即回 `{"code":200}` ACK）；卡片回调事件（card.action.trigger）
+ *  返回卡片响应体（toast/card）——ACK 封官方信封 `{"code":200,"data":"<base64(响应JSON)>"}`（lark_oapi ws/client.py 同构）。
+ *  返回 Promise 时 conn 等待其落定后再回 ACK（卡片处理快，3 秒时限内）。 */
+export type FeishuEventHandler = (
+  event: Record<string, unknown>,
+) => void | Record<string, unknown> | Promise<void | Record<string, unknown>>
 
 /** 卡片交互回调（type="card" 帧，card.action.trigger）：返回响应 JSON（可含 card 更新/toast；缺省 `{}`）。 */
 export type FeishuCardActionHandler = (payload: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
@@ -239,21 +244,42 @@ export class FeishuConn {
       void this.handleCardFrame(buf, info)
       return
     }
-    // 事件帧（im.message.receive_v1 等）：回 {"code":200} ACK
+    // 事件帧（im.message.receive_v1 / card.action.trigger 等）：回 ACK（回调返回响应体时封 data 信封）
     if (info.type !== "event") return
     const payload = this.assembler.push(info)
     if (!payload) return
     const event = parseEventPayload(payload)
     if (!event) return
     const start = this.clock()
+    let result: void | Record<string, unknown> | Promise<void | Record<string, unknown>>
     try {
-      this.opts.onEvent(event)
+      result = this.opts.onEvent(event)
     } catch {
       /* 事件处理异常仍回 200 ACK，避免飞书重推 */
+      this.sendEventAck(buf, this.elapsedMs(start))
+      return
     }
-    const elapsed = this.clock() - start
+    // 异步回调（卡片事件）：等待响应体回 ACK（普通消息事件 fire-and-forget 立即 ACK）
+    if (result && typeof (result as Promise<unknown>).then === "function") {
+      void (result as Promise<void | Record<string, unknown>>).then(
+        (resp) => this.sendEventAck(buf, this.elapsedMs(start), resp),
+        () => this.sendEventAck(buf, this.elapsedMs(start)),
+      )
+      return
+    }
+    this.sendEventAck(buf, this.elapsedMs(start), result as void | Record<string, unknown>)
+  }
+
+  private elapsedMs(start: number): number {
+    return this.clock() - start
+  }
+
+  /** 事件 ACK：回调返回响应体（卡片回调）时封官方信封 `{"code":200,"data":"<base64(JSON)>"}`。 */
+  private sendEventAck(buf: Uint8Array, bizMs: number, resp?: Record<string, unknown> | void): void {
+    const responseJson =
+      resp && typeof resp === "object" ? `{"code":200,"data":${JSON.stringify(Buffer.from(JSON.stringify(resp)).toString("base64"))}}` : '{"code":200}'
     try {
-      this.ws?.send(buildAckFrame(buf, elapsed))
+      this.ws?.send(buildAckFrame(buf, bizMs, responseJson))
     } catch {
       /* ACK 发送失败忽略（连接关闭时） */
     }
