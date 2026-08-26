@@ -24,7 +24,11 @@ function ctx(home: string, sessionId = SID, env: Record<string, string> = {}): T
     sandboxed: false,
     // 与真实引擎（沙箱关闭）一致：绝对路径直接采用，相对路径基于会话 tmp/ 解析（tmp/ 前缀剥离兼容）
     resolvePath: (p) => resolve(tmp, stripTmpPrefix(p)),
-    readFile: async (p) => await Bun.file(p).text(),
+    // 与真实引擎一致：node utf8 读取（保留 UTF-8 BOM——Bun.file().text() 会剥离；BOM 处理在工具层）
+    readFile: async (p) => {
+      const { readFile } = await import("node:fs/promises")
+      return readFile(p, "utf8")
+    },
     readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
     writeFile: async (p, content) => {
       const { mkdir, writeFile } = await import("node:fs/promises")
@@ -386,6 +390,35 @@ describe("global tools", () => {
     // sliceLines 纯函数边界：无参数原样返回；无尾换行文件的末尾切片
     expect(sliceLines("a\nb", undefined, -1)).toBe("b")
     expect(sliceLines("x")).toBe("x")
+    cleanup(home)
+  })
+
+  test("BOM 感知：read 显示去 BOM、edit/patch/write 保留回写（首行匹配不再静默失败）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-bom-"))
+    const c = ctx(home)
+    const BOM = "\uFEFF"
+    // 校验读取用 node utf8（Bun.file().text() 会剥 BOM，测不出文件头是否保留）
+    const rawText = async (p: string) => (await import("node:fs/promises")).readFile(p, "utf8")
+    // read：BOM 不进输出（首行行号干净）
+    await c.writeFile(join(c.workdir, "b1.ts"), BOM + "const a = 1\nconst b = 2\n")
+    const r = await readTool.execute({ path: "b1.ts", lineNumbers: false }, c)
+    expect(r.output.startsWith("const a = 1")).toBe(true)
+    // edit：oldString 无需含 BOM 即可命中首行；写回后文件仍保留 BOM
+    await editTool.execute({ path: "b1.ts", edits: [{ oldString: "const a = 1", newString: "const A = 1" }] }, c)
+    const afterEdit = await rawText(join(c.workdir, "b1.ts"))
+    expect(afterEdit.startsWith(BOM)).toBe(true)
+    expect(afterEdit).toContain("const A = 1")
+    // patch：同样去 BOM 匹配/写回补 BOM
+    const p2 = await patchTool.execute({ path: "b1.ts", patch: "@@ -2,1 +2,1 @@\n-const b = 2\n+const b = 22\n" }, c)
+    expect(p2.output).toContain("已写入")
+    const afterPatch = await rawText(join(c.workdir, "b1.ts"))
+    expect(afterPatch.startsWith(BOM)).toBe(true)
+    expect(afterPatch).toContain("const b = 22")
+    // write 覆盖：原 BOM 文件覆盖写后 BOM 保留（内容前缀 BOM 不重复）
+    await readTool.execute({ path: "b1.ts" }, c)
+    await writeTool.execute({ path: "b1.ts", content: "const x = 9\n" }, c)
+    const afterWrite = await rawText(join(c.workdir, "b1.ts"))
+    expect(afterWrite).toBe(BOM + "const x = 9\n")
     cleanup(home)
   })
 

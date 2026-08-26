@@ -311,6 +311,12 @@ function withLineNumbers(text: string, startLine: number): string {
   return lines.map((l, i) => `${String(startLine + i).padStart(width)}\t${l}`).join("\n")
 }
 
+/** 剥离 UTF-8 BOM（文件头 \uFEFF）：read 展示与 edit/patch 匹配用干净正文（BOM 会让文件首行的
+ *  oldString 精确匹配静默失败——Windows 工具生成的文件常见）；写回时按原文件有无 BOM 补回（edit/patch/write）。 */
+function stripBom(s: string): string {
+  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s
+}
+
 export const readTool: Tool = {
   name: "read",
   description:
@@ -352,6 +358,7 @@ export const readTool: Tool = {
       }
       throw err
     }
+    content = stripBom(content)
     const offset = args.offset == null ? undefined : Number(args.offset)
     const limit = args.limit == null ? undefined : Number(args.limit)
     const sliced = sliceLines(content, offset, limit)
@@ -413,8 +420,11 @@ export const writeTool: Tool = {
         output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
       }
     }
-    const content = String(args.content ?? "")
-    const final = append && existing !== null ? existing + content : content
+    const content = stripBom(String(args.content ?? ""))
+    // 覆盖写保留原文件的 UTF-8 BOM（read 展示的是去 BOM 正文，模型意图即正文；BOM 丢失会改变文件字节内容）；
+    // 追加模式接在 existing 之后不动文件头
+    const bom = existing !== null && existing.startsWith("\uFEFF") ? "\uFEFF" : ""
+    const final = append && existing !== null ? existing + content : bom + content
     await ctx.writeFile(path, final)
     ctx.fileGuard?.markRead(path)
     const blocks = artifactBlocks(previewLogicalPath(path, ctx), final)
@@ -1668,6 +1678,9 @@ export const editTool: Tool = {
     if (guardMsg) return { output: guardMsg }
     await assertReadableSize(path, "edit", EDIT_MAX_FILE_BYTES)
     let content = await ctx.readFile(path)
+    // BOM 感知：匹配用去 BOM 正文（BOM 会让首行 oldString 精确匹配失败），写回按原文件补回
+    const hadBom = content.startsWith("\uFEFF")
+    if (hadBom) content = content.slice(1)
     // 防盲改守卫（与 write 防盲覆盖同规则）：已存在但本会话未 read 过 → 拒绝，防凭记忆/假设内容盲改（oldString 匹配失败白跑一轮）
     if (ctx.fileGuard && !ctx.fileGuard.hasRead(path)) {
       return {
@@ -1707,7 +1720,7 @@ export const editTool: Tool = {
       content = e.replaceAll === true ? content.split(oldString).join(newString) : content.replace(oldString, newString)
       applied.push(`${idx + 1}) 行 ${shown.join("、")}${lineNos.length > 8 ? `（共 ${lineNos.length} 处）` : ""}`)
     }
-    await ctx.writeFile(path, content)
+    await ctx.writeFile(path, (hadBom ? "\uFEFF" : "") + content)
     // 修改后内容即已掌握（模型无需重读验证），登记已读
     ctx.fileGuard?.markRead(path)
     // 产物块（与 read/write 同款）：修改后的文件内容卡（弹窗查看模式收敛为文件链接）
@@ -1822,7 +1835,7 @@ export const patchTool: Tool = {
     const guardMsg = await ctx.writeGuard?.(absList)
     if (guardMsg) return { output: guardMsg }
     // 预检 + 应用（内存中逐文件完成，全部通过才落盘——跨文件原子）
-    const planned: Array<{ target: string; abs: string; result: string; applied: AppliedHunk[] }> = []
+    const planned: Array<{ target: string; abs: string; result: string; applied: AppliedHunk[]; bom: boolean }> = []
     for (const [ti, target] of order.entries()) {
       const abs = absList[ti]
       const parts = byTarget.get(target)!
@@ -1836,6 +1849,9 @@ export const patchTool: Tool = {
       } catch {
         exists = false
       }
+      // BOM 感知：匹配用去 BOM 正文（同 edit），写回按原文件补回
+      const bom = exists && content.startsWith("\uFEFF")
+      if (bom) content = content.slice(1)
       if (exists && content.length > PATCH_MAX_FILE_BYTES) {
         return { output: `patch: 文件过大（${target} ${content.length} 字符，上限 ${PATCH_MAX_FILE_BYTES}），请改用 edit 分段修改` }
       }
@@ -1854,7 +1870,7 @@ export const patchTool: Tool = {
         content = r.result
         applied = applied.concat(r.applied)
       }
-      planned.push({ target, abs, result: content, applied })
+      planned.push({ target, abs, result: content, applied, bom })
     }
     if (args.dryRun === true) {
       const lines = planned.map((p) => `${p.target}：${describeAppliedPatch(p.applied)}`)
@@ -1863,7 +1879,7 @@ export const patchTool: Tool = {
     // 落盘 + 登记已读 + 产物块
     const blocks: ContentBlock[] = []
     for (const p of planned) {
-      await ctx.writeFile(p.abs, p.result)
+      await ctx.writeFile(p.abs, (p.bom ? "\uFEFF" : "") + p.result)
       ctx.fileGuard?.markRead(p.abs)
       blocks.push(...artifactBlocks(previewLogicalPath(p.abs, ctx), p.result))
     }
