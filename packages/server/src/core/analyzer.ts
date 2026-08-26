@@ -200,6 +200,79 @@ export interface SymbolHit {
   name: string
 }
 
+export interface ReferenceHit {
+  path: string
+  line: number
+  text: string
+}
+
+/**
+ * 跨文件引用/调用点搜索：tree-sitter 解析后按**叶子节点文本**精确等于 symbol 收集出现位置——
+ * 注释/字符串是独立节点类型天然不参与（比 grep 文本匹配少了注释/字符串误报）；节点是其父声明的
+ * name 字段（函数/类/变量/方法定义名）时排除（那是定义本身）。语言无关：不枚举各语言的
+ * identifier 节点类型，以「无具名子节点的节点」近似叶子标识符集合（跳过 comment/string 类节点）。
+ */
+export async function findReferences(
+  files: Array<{ path: string; size: number }>,
+  readFn: (p: string) => Promise<string>,
+  symbol: string,
+): Promise<{ hits: ReferenceHit[]; scanned: number; parsed: number }> {
+  const hits: ReferenceHit[] = []
+  const seen = new Set<string>()
+  let scanned = 0
+  let parsed = 0
+  for (const f of files) {
+    if (hits.length >= SYMBOL_MAX_MATCHES || scanned >= SYMBOL_MAX_FILES) break
+    if (f.size > SYMBOL_MAX_FILE_BYTES) continue
+    const ext = f.path.split(".").pop()?.toLowerCase() ?? ""
+    if (!LANG_WASM[ext]) continue
+    scanned++
+    let content: string
+    try {
+      content = await readFn(f.path)
+    } catch {
+      continue
+    }
+    if (!content.includes(symbol)) continue // 预筛：不含符号名则跳过解析（快路径）
+    const parser = await parserFor(ext)
+    if (!parser) continue
+    parsed++
+    const tree = parser.parse(content)
+    if (!tree) continue
+    const lines = content.split("\n")
+    let visited = 0
+    try {
+      const walk = (node: import("web-tree-sitter").Node): void => {
+        if (hits.length >= SYMBOL_MAX_MATCHES || visited > 200_000) return
+        visited++
+        const named = node.namedChildren
+        if (named.length === 0) {
+          // 叶子节点：跳过注释/字符串类节点（不同语法命名不一，按类型名包含判定）
+          if (node.type.includes("comment") || node.type.includes("string")) return
+          if (node.text !== symbol) return
+          // 排除定义名：节点是父声明的 name 字段（function/class/变量/方法定义名）
+          const parent = node.parent
+          if (parent && parent.childForFieldName("name")?.id === node.id) return
+          const line = node.startPosition.row + 1
+          const key = `${f.path}:${line}`
+          if (seen.has(key)) return
+          seen.add(key)
+          hits.push({ path: f.path, line, text: lines[node.startPosition.row]?.trim().slice(0, 200) ?? "" })
+          return
+        }
+        for (const c of node.children ?? []) {
+          if (c) walk(c)
+        }
+      }
+      walk(tree.rootNode)
+    } finally {
+      tree.delete?.() // wasm 原生内存显式释放（同 analyze）
+    }
+  }
+  hits.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line)
+  return { hits, scanned, parsed }
+}
+
 /**
  * 跨文件符号定义搜索：内容预筛（includes 快路径，避免全量解析）→ tree-sitter 解析 →
  * 收集名称含 symbol 的结构定义条目（精确匹配优先）。files 为候选文件列表（size 用于预筛）。
@@ -251,14 +324,15 @@ export async function searchSymbols(
 export const searchSymbolsTool: Tool = {
   name: "search_symbols",
   description:
-    "按符号名搜索代码定义位置（tree-sitter 解析：函数/类/方法/接口/类型定义），返回 文件:行号: 类型 名称，精确匹配优先。找**定义**比 grep 精准；找**引用/调用点**用 grep。",
+    "按符号名搜索代码位置（tree-sitter 解析）：mode=definitions（默认）找**定义**（函数/类/方法/接口/类型），返回 文件:行号: 类型 名称，精确匹配优先；mode=references 找**引用/调用点**——比 grep 精准（注释/字符串中的同名文本不误报，定义名本身已排除），适合梳理调用链/影响面。",
   card: { titleParams: ["symbol"] },
   parameters: {
     type: "object",
     properties: {
-      symbol: { type: "string", description: "符号名（如函数名 handleRequest、类名 Engine；精确或名称包含匹配）" },
+      symbol: { type: "string", description: "符号名（如函数名 handleRequest、类名 Engine；definitions 精确或名称包含匹配，references 全词精确匹配）" },
+      mode: { type: "string", enum: ["definitions", "references"], description: "definitions=定义位置（默认）；references=引用/调用点（排除定义本身与注释/字符串中的同名文本）" },
       path: { type: "string", description: "搜索起点（默认 .）" },
-      kind: { type: "string", description: "可选：定义类型过滤（function/class/method/interface/type 等，按类型名包含匹配）" },
+      kind: { type: "string", description: "可选（仅 definitions 模式）：定义类型过滤（function/class/method/interface/type 等，按类型名包含匹配）" },
     },
     required: ["symbol"],
   },
@@ -267,6 +341,16 @@ export const searchSymbolsTool: Tool = {
     const path = args.path ? String(args.path) : ""
     const prefix = path ? `${path.replace(/\/+$/, "")}/` : ""
     const files = (await ctx.listFiles()).filter((f) => !f.isDir && (prefix ? f.path.startsWith(prefix) : true))
+    if (args.mode === "references") {
+      const { hits, scanned, parsed } = await findReferences(files, (p) => ctx.readFile(ctx.resolvePath(p)), symbol)
+      if (!hits.length) {
+        const scannedNote = files.length === 0 ? "（无可扫描文件）" : `（扫描 ${Math.min(scanned, files.length)}/${files.length} 个文件）`
+        return { output: `search_symbols: 未找到「${symbol}」的引用/调用点${scannedNote}——符号可能未被使用，或定义不存在（先查定义用默认模式）。` }
+      }
+      const lines = hits.map((h) => `${h.path}:${h.line}: ${h.text}`)
+      const result = `找到 ${hits.length} 处引用/调用点（扫描 ${Math.min(scanned, files.length)} 个文件，解析 ${parsed} 个；已排除定义名/注释/字符串）:\n${lines.join("\n")}`
+      return truncate(result, "search_symbols", ctx)
+    }
     const { hits, scanned, parsed } = await searchSymbols(files, (p) => ctx.readFile(ctx.resolvePath(p)), symbol, args.kind ? String(args.kind) : undefined)
     if (!hits.length) {
       const scannedNote = files.length === 0 ? "（无可扫描文件）" : `（扫描 ${Math.min(scanned, files.length)}/${files.length} 个文件）`

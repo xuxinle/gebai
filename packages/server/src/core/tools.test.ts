@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "./tools"
+import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown, webSearchTool } from "./tools"
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -1960,6 +1960,93 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep 非对称上下文（contextBefore/contextAfter 覆盖对应侧，同 grep -B/-A）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-ba-"))
+    const c = ctx(home)
+    c.listFiles = async () => [{ path: "a.ts", size: 10, modifiedAt: 0, isDir: false }]
+    c.readFile = async () => "l1\nl2 todo\nl3\nl4\nl5 todo\nl6\nl7\nl8\n"
+    const tools = createGlobalTools()
+    // contextAfter=2（-A）：命中行后 2 行、前 0 行（l1 不出现）
+    const after = await tools.grep.execute({ pattern: "todo", contextAfter: 2 }, c)
+    expect(after.output).toContain("a.ts:2: l2 todo")
+    expect(after.output).toContain("a.ts-3- l3")
+    expect(after.output).toContain("a.ts-4- l4")
+    expect(after.output).not.toContain("a.ts-1-")
+    // contextBefore=1（-B）：命中行前 1 行、后 0 行（l3/l4 不出现）
+    const before = await tools.grep.execute({ pattern: "todo", contextBefore: 1 }, c)
+    expect(before.output).toContain("a.ts-1- l1")
+    expect(before.output).toContain("a.ts:2: l2 todo")
+    expect(before.output).not.toContain("a.ts-3-")
+    // context + 单侧覆盖：context=1 但 after=0
+    const mixed = await tools.grep.execute({ pattern: "todo", context: 1, contextAfter: 0 }, c)
+    expect(mixed.output).toContain("a.ts-1- l1")
+    expect(mixed.output).not.toContain("a.ts-3-")
+    cleanup(home)
+  })
+
+  test("read 指定编码解码（GBK）；解码失败/目录给出可读错误", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-read-enc-"))
+    const c = ctx(home)
+    // 「中」的 GBK 编码字节 D6 D0
+    writeFileSync(join(c.workdir, "gbk.txt"), Buffer.from([0xd6, 0xd0, 0x0a]))
+    const r = await readTool.execute({ path: "gbk.txt", encoding: "gbk" }, c)
+    expect(r.output).toBe("1\t中")
+    // 非法编码名/内容非该编码（0xFF 0xFF 不是合法 GBK）→ 明确报错
+    writeFileSync(join(c.workdir, "bad.bin"), Buffer.from([0xff, 0xff]))
+    const bad = await readTool.execute({ path: "bad.bin", encoding: "gbk" }, c)
+    expect(bad.output).toContain("解码失败")
+    const badEnc = await readTool.execute({ path: "gbk.txt", encoding: "no-such-enc" }, c)
+    expect(badEnc.output).toContain("解码失败")
+    // 目录：可读引导（用 ls/glob），不再抛原始 EISDIR
+    mkdirSync(join(c.workdir, "adir"))
+    const dir = await readTool.execute({ path: "adir" }, c)
+    expect(dir.output).toContain("是目录")
+    cleanup(home)
+  })
+
+  test("web_search：未配置给引导；brave/serper/tavily 三家解析与错误形态", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-ws-"))
+    const c = ctx(home)
+    // 未配置：返回配置引导（不改写 env 的 ctx）
+    const noCfg = await webSearchTool.execute({ query: "bun docs" }, c)
+    expect(noCfg.output).toContain("未配置搜索服务")
+    expect(noCfg.output).toContain("GEBAI_SEARCH_PROVIDER")
+    // fetch 桩：按 URL 分发三家响应
+    const realFetch = globalThis.fetch
+    const calls: string[] = []
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url)
+      calls.push(`${init?.method ?? "GET"} ${u}${init?.headers ? ` ${JSON.stringify(init?.headers)}` : ""}`)
+      const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+      if (u.includes("q=deny")) return new Response("{}", { status: 401, statusText: "Unauthorized" })
+      if (u.includes("brave")) return json({ web: { results: [{ title: "Bun Docs", url: "https://bun.com/docs", description: "Bun 官方文档" }] } })
+      if (u.includes("serper")) return json({ organic: [{ title: "Serper 结果", link: "https://example.com/s", snippet: "摘要" }] })
+      if (u.includes("tavily")) return json({ results: [{ title: "Tavily 结果", url: "https://example.com/t", content: "内容" }] })
+      return new Response("{}", { status: 401, statusText: "Unauthorized" })
+    }) as typeof fetch
+    try {
+      const brave = await webSearchTool.execute({ query: "bun" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "brave", GEBAI_SEARCH_API_KEY: "k1" }))
+      expect(brave.output).toContain("1. Bun Docs")
+      expect(brave.output).toContain("https://bun.com/docs")
+      expect((brave.data as { results: Array<{ url: string }> }).results[0].url).toBe("https://bun.com/docs")
+      expect(calls[0]).toContain("api.search.brave.com")
+      const serper = await webSearchTool.execute({ query: "x" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "serper", GEBAI_SEARCH_API_KEY: "k2" }))
+      expect(serper.output).toContain("Serper 结果")
+      expect(calls[1]).toContain("google.serper.dev")
+      const tavily = await webSearchTool.execute({ query: "x" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "tavily", GEBAI_SEARCH_API_KEY: "k3" }))
+      expect(tavily.output).toContain("Tavily 结果")
+      // 不支持的 provider / HTTP 401 提示（不回显响应体）
+      const unknown = await webSearchTool.execute({ query: "x" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "bing", GEBAI_SEARCH_API_KEY: "k" }))
+      expect(unknown.output).toContain("不支持的")
+      const denied = await webSearchTool.execute({ query: "deny" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "brave", GEBAI_SEARCH_API_KEY: "bad" }))
+      expect(denied.output).toContain("401")
+      expect(denied.output).toContain("API Key")
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    cleanup(home)
+  })
+
   test("grep context 附上下文行（匹配行 : 前缀、上下文行 - 前缀、组间 -- 分隔）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-ctx-"))
     const c = ctx(home)
@@ -2584,6 +2671,36 @@ describe("git tool", () => {
     cleanup(home)
   })
 
+  test("git grep：已跟踪文件内容搜索（-e 定界 + -- pathspec）；正则元字符放行、注入字符拒绝；无匹配文案", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-git-grep-"))
+    const c = ctx(home)
+    const seen: string[] = []
+    c.runCommand = async (cmd) => {
+      seen.push(cmd)
+      return { stdout: "src/a.ts:12: todo: fix\n", stderr: "", code: 0 }
+    }
+    const r = await gitTool.execute({ action: "grep", pattern: "todo|fix" }, c)
+    expect(seen).toEqual(['git grep -n -I --no-color -e "todo|fix"'])
+    expect(r.output).toContain("src/a.ts:12: todo: fix")
+    // pathspec 限定范围
+    await gitTool.execute({ action: "grep", pattern: "todo", path: "src/*.ts" }, c)
+    expect(seen[1]).toBe('git grep -n -I --no-color -e "todo" -- "src/*.ts"')
+    // 正则元字符（| & ^）放行；引号内活动元字符（" % $ 反引号）拒绝
+    await gitTool.execute({ action: "grep", pattern: "a&b^c" }, c)
+    expect(seen[2]).toContain('a&b^c"')
+    const q = await gitTool.execute({ action: "grep", pattern: 'x" & del' }, c)
+    expect(q.output).toContain("非法 pattern")
+    const dollar = await gitTool.execute({ action: "grep", pattern: "$(boom)" }, c)
+    expect(dollar.output).toContain("非法 pattern")
+    // 缺 pattern / 无匹配文案
+    const noPat = await gitTool.execute({ action: "grep" }, c)
+    expect(noPat.output).toContain("需要 pattern")
+    c.runCommand = async () => ({ stdout: "", stderr: "", code: 0 })
+    const empty = await gitTool.execute({ action: "grep", pattern: "zzz" }, c)
+    expect(empty.output).toContain("（无匹配）")
+    cleanup(home)
+  })
+
   test("non-zero exit reports failure with stderr", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-git-err-"))
     const c = ctx(home)
@@ -2629,6 +2746,35 @@ describe("search_symbols tool", () => {
     const f = await searchSymbolsTool.execute({ symbol: "runner", kind: "function" }, c)
     expect(f.output).toContain("function_declaration runner")
     expect(f.output).not.toContain("class_declaration")
+    cleanup(home)
+  })
+
+  test("references 模式：命中调用点，排除定义名/注释/字符串中的同名文本", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sym-refs-"))
+    const c = ctx(home)
+    const content = [
+      "export function foo(n: number) { return n + 1 }",
+      "const a = foo(1)",
+      "// foo in comment",
+      'const s = "foo"',
+      "foo(a)",
+      "export class Bar { run() { return foo(2) } }",
+      "",
+    ].join("\n")
+    await writeTool.execute({ path: "a.ts", content }, c)
+    c.listFiles = async () => [{ path: "a.ts", size: content.length, modifiedAt: 0, isDir: false }]
+    const r = await searchSymbolsTool.execute({ symbol: "foo", mode: "references" }, c)
+    expect(r.output).toContain("找到 3 处引用/调用点")
+    expect(r.output).toContain("a.ts:2: const a = foo(1)")
+    expect(r.output).toContain("a.ts:5: foo(a)")
+    expect(r.output).toContain("a.ts:6")
+    // 定义行（第 1 行）、注释与字符串中的同名文本不进结果
+    expect(r.output).not.toContain("export function foo")
+    expect(r.output).not.toContain("in comment")
+    expect(r.output).not.toContain('const s = "foo"')
+    // 未命中：引导（可能未被使用或定义不存在）
+    const none = await searchSymbolsTool.execute({ symbol: "nope", mode: "references" }, c)
+    expect(none.output).toContain("未找到")
     cleanup(home)
   })
 
