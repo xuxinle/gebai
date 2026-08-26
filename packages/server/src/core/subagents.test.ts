@@ -164,3 +164,39 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
     expect(m.def("code")).toBeDefined()
   })
 })
+
+describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () => {
+  test("会话级装载不扩散：其他会话不可见，目录对未装载会话仍列出该子Agent", async () => {
+    const mgr = makeManager()
+    await mgr.load("code", "s1")
+    expect(mgr.visibleTo("code", "s1")).toBe(true)
+    expect(mgr.visibleTo("code", "s2")).toBe(false)
+    expect(mgr.visibleTo("writer", "s1")).toBe(false) // 从未装载
+    // 目录：s1 的提示词不含 code（会话记录承载），s2 的仍列出 code 供装载（跨会话不泄漏）
+    expect(mgr.systemPromptInjection(undefined, "s1")).not.toContain("- code:")
+    expect(mgr.systemPromptInjection(undefined, "s2")).toContain("- code:")
+  })
+
+  test("全局装载（admin/启动预载）对所有会话可见；会话卸载解引用不砍全局", async () => {
+    const mgr = makeManager()
+    await mgr.load("code", "s1")
+    await mgr.load("code") // 全局装载（GLOBAL_OWNER）
+    expect(mgr.visibleTo("code", "s2")).toBe(true)
+    expect(mgr.systemPromptInjection(undefined, "s2")).not.toContain("- code:")
+    // 会话 s1 卸载：全局引用仍在，工具注册保留（其他会话仍可见）
+    mgr.unload("code", "s1")
+    expect(mgr.visibleTo("code", "s1")).toBe(true)
+    expect(mgr.visibleTo("code", "s2")).toBe(true)
+    // 全局卸载后全部不可见
+    mgr.unload("code")
+    expect(mgr.visibleTo("code", "s1")).toBe(false)
+    expect(mgr.visibleTo("code", "s2")).toBe(false)
+  })
+
+  test("无第二参数时保持进程级旧语义（未装载即列出）", async () => {
+    const mgr = makeManager()
+    await mgr.load("code", "s1")
+    // 不传会话过滤：按进程装载状态（兼容旧调用方/测试桩）
+    expect(mgr.systemPromptInjection()).not.toContain("- code:")
+  })
+})

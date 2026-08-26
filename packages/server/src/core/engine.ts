@@ -14,6 +14,7 @@ import { ToolRegistry as BaseToolRegistry } from "./registry"
 import { agentListTool, agentLoadTool, agentRunTool, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
+import { clearSessionProjectRoots, RESERVED_PROJECT_TMP } from "./projects"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "./safety"
@@ -344,36 +345,98 @@ export class AgentEngine {
     return { running: true, startedAt: task.startedAt, stream: task.stream, pending }
   }
 
-  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务等）；幂等，供 REST/WS 删除会话入口调用。 */
+  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务/会话粘性项目根）；幂等，供 REST/WS 删除会话入口调用。 */
   forgetSession(sessionId: string): void {
     this.readFiles.delete(sessionId)
     this.dynamicTools.delete(sessionId)
     for (const key of this.shTaskServices.keys()) {
       if (key.endsWith(`:${sessionId}`)) this.shTaskServices.delete(key)
     }
+    clearSessionProjectRoots(sessionId)
   }
 
-  /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层）：runLoop/buildContext 经此解析，
-   *  动态工具定义后同任务后续轮次 schema 立即可见、脚本内可直接按名调用。 */
+  /** 会话工具叠加层（装载工具会话可见性 + 双胞胎合并，DESIGN「装载工具会话可见性」）：每次取用现算
+   *  （任务中途装载下一轮 schema/解析即时生效）。visible：对本会话可见的子Agent 名集合（本会话装载或全局装载，
+   *  其他会话的装载不扩散）；twinMerge：全局工具名 → 子Agent 版 Tool（projectAware 包装——带 project 参数、
+   *  粘性根生效，含 def.requiresApproval 覆写）——装载子Agent 与全局同名的「双胞胎」合并为全局名下的一份，
+   *  schema 与 resolve(全局名) 均用子Agent 版；alias：{agent}_{short} → 全局名（resolve 别名——历史消息与
+   *  子Agent 提示词中的前缀名引用保持可用）。多子Agent 装载时同名工具按注册表发现顺序首个生效。 */
+  private sessionToolOverlay(sessionId: string): {
+    visible: Set<string>
+    twinMerge: Map<string, Tool>
+    alias: Map<string, string>
+  } {
+    const visible = new Set<string>()
+    for (const d of this.opts.subAgents.list()) {
+      if (this.opts.subAgents.visibleTo(d.name, sessionId)) visible.add(d.name)
+    }
+    const globalNames = new Set<string>()
+    for (const rt of this.opts.registry.list()) {
+      if (!rt.agent) globalNames.add(rt.name)
+    }
+    const twinMerge = new Map<string, Tool>()
+    const alias = new Map<string, string>()
+    for (const agent of visible) {
+      const def = this.opts.subAgents.def(agent)
+      if (!def?.tools) continue
+      for (const [short, tool] of Object.entries(def.tools)) {
+        if (!globalNames.has(short)) continue // 独有工具：{agent}_ 前缀原样注册可见，不参与合并
+        alias.set(`${agent}_${short}`, short)
+        if (!twinMerge.has(short)) {
+          const ra = def.requiresApproval?.[short]
+          twinMerge.set(short, ra === undefined ? tool : { ...tool, requiresApproval: ra })
+        }
+      }
+    }
+    return { visible, twinMerge, alias }
+  }
+
+  /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层 + 装载工具会话可见性过滤）：runLoop/buildContext 经此解析。
+   *  {agent}_* 工具仅对本会话可见（其他会话装载不扩散，全局装载/启动预载对所有会话可见）；
+   *  双胞胎合并后 schema 只出全局名一份（子Agent 版工具带 project 参数）；动态工具定义后同任务后续轮次
+   *  schema 立即可见、脚本内可直接按名调用。 */
   private sessionRegistry(sessionId: string): Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames"> {
     const base = this.opts.registry
     const self = this
     return {
       schemas: (enabledOnly = true) => {
+        const ov = self.sessionToolOverlay(sessionId)
         const dyn = [...(self.dynamicTools.get(sessionId)?.values() ?? [])].map(({ tool }) => ({
           name: tool.name,
           description: tool.description,
           parameters: tool.parameters as unknown as Record<string, unknown>,
         }))
-        return [...dyn, ...base.schemas(enabledOnly)]
+        const out = [...dyn]
+        for (const rt of base.list(enabledOnly)) {
+          if (rt.agent) {
+            if (!ov.visible.has(rt.agent)) continue // 其他会话装载的子Agent 工具：本会话不可见（未装载时路由自愈接管）
+            if (ov.alias.has(rt.name)) continue // 双胞胎：schema 只出全局名那份（twinMerge 版）
+            out.push({ name: rt.name, description: rt.tool.description, parameters: rt.tool.parameters as unknown as Record<string, unknown> })
+          } else {
+            const merged = ov.twinMerge.get(rt.name)
+            const tool = merged ?? rt.tool
+            out.push({ name: rt.name, description: tool.description, parameters: tool.parameters as unknown as Record<string, unknown> })
+          }
+        }
+        return out
       },
       resolve: (name: string) => {
         const dyn = self.dynamicTools.get(sessionId)?.get(name.replace(/[-.:]/g, "_"))
         if (dyn) return { name: dyn.tool.name, tool: dyn.tool, enabled: true }
+        const ov = self.sessionToolOverlay(sessionId)
+        // 双胞胎别名（code_read 等前缀名）：解析到合并后的全局名工具（历史消息/子Agent 提示词引用兼容）
+        const short = ov.alias.get(name)
+        if (short) {
+          const merged = ov.twinMerge.get(short)
+          if (merged) return { name, tool: merged, enabled: true }
+        }
         const rt = base.resolve(name)
-        return rt ? { name: rt.name, tool: rt.tool, agent: rt.agent, enabled: rt.enabled } : undefined
+        if (!rt) return undefined
+        if (rt.agent && !ov.visible.has(rt.agent)) return undefined // 本会话未装载：交路由自愈按需装载
+        const merged = !rt.agent ? ov.twinMerge.get(rt.name) : undefined
+        return merged ? { name: rt.name, tool: merged, enabled: rt.enabled } : { name: rt.name, tool: rt.tool, agent: rt.agent, enabled: rt.enabled }
       },
-      getAgentNames: () => base.getAgentNames(),
+      getAgentNames: () => [...self.sessionToolOverlay(sessionId).visible],
     }
   }
 
@@ -1401,7 +1464,9 @@ export class AgentEngine {
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
       this.subAgentProjectNote(user, env),
-      this.opts.subAgents.systemPromptInjection((d) => this.agentDescription({ name: d.name, description: d.description, tools: Object.keys(d.tools ?? {}) }, user, env)),
+      // 会话级过滤（DESIGN「装载工具会话可见性」）：目录按「对本会话可见」判定未装载——其他会话装载过
+      // 不代表本会话已装载（防跨会话泄漏：A 装载后 B 的目录仍应列出该子Agent 供 B 装载）
+      this.opts.subAgents.systemPromptInjection((d) => this.agentDescription({ name: d.name, description: d.description, tools: Object.keys(d.tools ?? {}) }, user, env), sessionId),
     ]
     return parts.filter(Boolean).join("\n")
   }
@@ -1474,7 +1539,7 @@ export class AgentEngine {
     if (projects.length) parts.push(`预置项目：${projects.map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`).join("、")}`)
     const tools = d.tools ?? []
     if (tools.length) {
-      parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}（以 ${d.name}_ 前缀调用）`)
+      parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}（新会话执行以 ${d.name}_ 前缀调用；装载到主会话后与全局同名的工具直接用全局名——已并入 project 参数，独有工具以 ${d.name}_ 前缀调用）`)
     }
     return parts.join(" ")
   }
@@ -1558,7 +1623,9 @@ export class AgentEngine {
     const store = this.opts.store
     const sandbox = this.opts.sandbox
     const self = this
-    const workdir = opts?.workdir ?? sandbox.workdir(user, sessionId)
+    // 会话工作区（保留项目名 tmp 的解析目标）：恒定注入——workdir 可被项目绑定改写为项目根，tmp 不随之变化
+    const sessionWorkdir = sandbox.workdir(user, sessionId)
+    const workdir = opts?.workdir ?? sessionWorkdir
     const resolveRoot = opts?.resolveBase
     const projects = opts?.projects ?? []
     // 子进程取消信号：任务取消统一生效（子Agent 不设独立超时，无额外信号源）
@@ -1569,6 +1636,7 @@ export class AgentEngine {
       authMode: this.opts.authMode,
       sessionId,
       workdir,
+      sessionWorkdir,
       // 当前任务交互模式：show 等合并型工具按分支校验通道能力（HTML 预览仅 realtime 等）
       interactionMode: this.tasks.get(sessionId)?.interactionMode,
       boundProjectRoot: resolveRoot,
@@ -2510,6 +2578,8 @@ export class AgentEngine {
       const name = typeof p.name === "string" ? p.name.trim() : ""
       const path = typeof p.path === "string" ? p.path.trim() : ""
       if (!name || !path || seen.has(name)) continue
+      // 保留名冲突防呆（DESIGN「项目机制」）：启动校验覆盖进程环境变量，此处兜底前端注入的任务级 env
+      if (name === RESERVED_PROJECT_TMP) throw new Error(`预置项目名 "${RESERVED_PROJECT_TMP}" 为保留名（会话工作区），请改名（${key} 配置项）`)
       let root: string
       try {
         root = this.resolveAgentProjectRoot(user, path)
