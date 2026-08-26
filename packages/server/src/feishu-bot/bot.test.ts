@@ -618,6 +618,9 @@ describe("引擎事件推送", () => {
     const ok = f.cardAction(click("tc11", "approve", "ou_123"))
     expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc11", approve: true }])
     expect(JSON.stringify(ok)).toContain("已批准")
+    // 卡片更新响应必须为 {type:"raw", data:卡片} 包装（裸卡片 JSON 判 200672，按钮转圈不消）
+    expect(ok.card).toMatchObject({ type: "raw" })
+    expect(JSON.stringify((ok.card as Record<string, unknown>).data)).toContain("已批准")
     // 已决策后再点（卡片未刷新场景）→ 忽略，不重复决策
     expect(f.cardAction(click("tc11", "approve", "ou_123"))).toEqual({})
     expect(f.approvals).toHaveLength(1)
@@ -801,8 +804,9 @@ describe("引擎事件推送", () => {
       },
     })
     expect(f.choices).toEqual([{ sessionId: sid(), choiceId: "c1", selection: "B" }])
-    // 决策后卡片更新为终态（「已选择」文案，按钮不可再点）
+    // 决策后卡片更新为终态（「已选择」文案，按钮不可再点；card 字段为 type:"raw"+data 官方包装）
     expect(JSON.stringify(resp)).toContain("已选择：B")
+    expect(resp.card).toMatchObject({ type: "raw" })
     // 再发一次选择卡并拒绝
     f.emit({ type: "event.choice.request", ...base, payload: { choiceId: "c2", prompt: "再选", options: ["A"], multi: false } })
     await waitUntil(() => f.sent.filter((s) => String(JSON.stringify(s.content)).includes("再选")).length >= 1)
@@ -831,9 +835,10 @@ describe("引擎事件推送", () => {
         context: { open_message_id: "om_c3", open_chat_id: "oc_chat1" },
       },
     })
-    // 勾选 React → 响应携带更新后的卡片（含「完成选择」按钮），未决策
+    // 勾选 React → 响应携带更新后的卡片（含「完成选择」按钮，type:"raw" 包装），未决策
     const resp1 = f.cardAction(action("React"))
     expect(f.choices).toHaveLength(0)
+    expect(resp1.card).toMatchObject({ type: "raw" })
     expect(JSON.stringify(resp1.card)).toContain("已选：React")
     expect(JSON.stringify(resp1.card)).toContain("完成选择")
     // 勾选 Vue、再取消 React
