@@ -1175,104 +1175,6 @@ export const fetchUrlTool: Tool = {
   },
 }
 
-/** web_search：请求/结果条数默认与上限；超时。 */
-const WEB_SEARCH_COUNT_DEFAULT = 8
-const WEB_SEARCH_COUNT_MAX = 10
-const WEB_SEARCH_TIMEOUT = 15000
-
-export const webSearchTool: Tool = {
-  name: "web_search",
-  description:
-    "联网搜索网页（查第三方库文档/报错信息/技术方案/库选型等）。返回 标题+URL+摘要 清单，抓取具体页面全文用 fetch_url。需配置搜索服务：GEBAI_SEARCH_PROVIDER（brave / serper / tavily）+ GEBAI_SEARCH_API_KEY（前端设置面板或环境变量，未配置时返回配置引导）。",
-  card: { titleParams: ["query"] },
-  parameters: schema({
-    query: { type: "string", description: "搜索关键词（中英文均可，多用专有名词/报错原文提高命中）" },
-    count: { type: "integer", description: `结果条数（默认 ${WEB_SEARCH_COUNT_DEFAULT}，上限 ${WEB_SEARCH_COUNT_MAX}）` },
-  }, ["query"]),
-  outputSchema: schema({
-    results: {
-      type: "array",
-      description: "搜索结果（按相关性排序）",
-      items: schema({ title: { type: "string" }, url: { type: "string" }, snippet: { type: "string", description: "摘要" } }, ["title", "url"]),
-    },
-  }, ["results"]),
-  async execute(args, ctx) {
-    const provider = String(ctx.env.GEBAI_SEARCH_PROVIDER || process.env.GEBAI_SEARCH_PROVIDER || "").trim().toLowerCase()
-    const apiKey = String(ctx.env.GEBAI_SEARCH_API_KEY || process.env.GEBAI_SEARCH_API_KEY || "").trim()
-    if (!provider || !apiKey) {
-      return {
-        output:
-          "web_search 不可用：未配置搜索服务。请配置 GEBAI_SEARCH_PROVIDER（brave / serper / tavily）与 GEBAI_SEARCH_API_KEY（前端设置面板的环境变量，或用 ask 向用户索取后重试）；未配置时可改用 fetch_url 直接抓取已知网址。",
-        data: { results: [] },
-      }
-    }
-    const query = String(args.query ?? "").trim()
-    if (!query) return { output: "web_search 失败：缺少 query（搜索关键词）。", data: { results: [] } }
-    const count = Math.min(Math.max(Math.floor(Number(args.count) || WEB_SEARCH_COUNT_DEFAULT), 1), WEB_SEARCH_COUNT_MAX)
-    // 三家搜索 API 均为固定公网端点（无用户可控 URL，无 SSRF 面），统一 15s 超时
-    let res: Response
-    let pick: (j: Record<string, unknown>) => Array<{ title: string; url: string; snippet: string }>
-    try {
-      if (provider === "brave") {
-        res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`, {
-          headers: { Accept: "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": apiKey },
-          signal: AbortSignal.timeout(WEB_SEARCH_TIMEOUT),
-        })
-        pick = (j) =>
-          ((j.web as { results?: Array<{ title?: string; url?: string; description?: string }> } | undefined)?.results ?? []).map((r) => ({
-            title: r.title ?? "",
-            url: r.url ?? "",
-            snippet: r.description ?? "",
-          }))
-      } else if (provider === "serper") {
-        res = await fetch("https://google.serper.dev/search", {
-          method: "POST",
-          headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
-          body: JSON.stringify({ q: query, num: count }),
-          signal: AbortSignal.timeout(WEB_SEARCH_TIMEOUT),
-        })
-        pick = (j) =>
-          ((j.organic as Array<{ title?: string; link?: string; snippet?: string }> | undefined) ?? []).map((r) => ({
-            title: r.title ?? "",
-            url: r.link ?? "",
-            snippet: r.snippet ?? "",
-          }))
-      } else if (provider === "tavily") {
-        res = await fetch("https://api.tavily.com/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ api_key: apiKey, query, max_results: count }),
-          signal: AbortSignal.timeout(WEB_SEARCH_TIMEOUT),
-        })
-        pick = (j) =>
-          ((j.results as Array<{ title?: string; url?: string; content?: string }> | undefined) ?? []).map((r) => ({
-            title: r.title ?? "",
-            url: r.url ?? "",
-            snippet: r.content ?? "",
-          }))
-      } else {
-        return { output: `web_search 失败：不支持的 GEBAI_SEARCH_PROVIDER「${provider}」（支持 brave / serper / tavily）。`, data: { results: [] } }
-      }
-    } catch (err) {
-      return { output: `web_search 失败：${(err as Error).message}（网络异常或超时，可稍后重试）`, data: { results: [] } }
-    }
-    if (!res.ok) {
-      // 不回显响应体（可能含 key 相关诊断）；按状态码给常见病因
-      const hint = res.status === 401 || res.status === 403 ? "（API Key 无效或额度用尽，请检查 GEBAI_SEARCH_API_KEY）" : res.status === 429 ? "（限频，稍后重试）" : ""
-      return { output: `web_search 失败：HTTP ${res.status} ${res.statusText}${hint}`, data: { results: [] } }
-    }
-    let results: Array<{ title: string; url: string; snippet: string }>
-    try {
-      results = pick((await res.json()) as Record<string, unknown>)
-    } catch {
-      return { output: "web_search 失败：响应解析异常（非 JSON）。", data: { results: [] } }
-    }
-    if (!results.length) return { output: `（无搜索结果：${query}）`, data: { results: [] } }
-    const text = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ""}`).join("\n")
-    return { ...(await truncate(text, "web_search", ctx)), data: { results } }
-  },
-}
-
 /** 重定向跳数上限（防重定向循环与超长跳板链）。 */
 const REDIRECT_MAX_HOPS = 5
 
@@ -3119,7 +3021,6 @@ export function createAllGlobalTools(): Record<string, Tool> {
     show: showTool,
     // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）
     fetch_url: fetchUrlTool,
-    web_search: webSearchTool,
     todo: todoTool,
     ask: askTool,
     // current_time 已移除：时间获取用 sh/py/js 脚本（如 sh date）按需完成，不占全局工具位；

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown, webSearchTool } from "./tools"
+import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "./tools"
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -2001,49 +2001,6 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     mkdirSync(join(c.workdir, "adir"))
     const dir = await readTool.execute({ path: "adir" }, c)
     expect(dir.output).toContain("是目录")
-    cleanup(home)
-  })
-
-  test("web_search：未配置给引导；brave/serper/tavily 三家解析与错误形态", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-ws-"))
-    const c = ctx(home)
-    // 未配置：返回配置引导（不改写 env 的 ctx）
-    const noCfg = await webSearchTool.execute({ query: "bun docs" }, c)
-    expect(noCfg.output).toContain("未配置搜索服务")
-    expect(noCfg.output).toContain("GEBAI_SEARCH_PROVIDER")
-    // fetch 桩：按 URL 分发三家响应
-    const realFetch = globalThis.fetch
-    const calls: string[] = []
-    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
-      const u = String(url)
-      calls.push(`${init?.method ?? "GET"} ${u}${init?.headers ? ` ${JSON.stringify(init?.headers)}` : ""}`)
-      const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
-      if (u.includes("q=deny")) return new Response("{}", { status: 401, statusText: "Unauthorized" })
-      if (u.includes("brave")) return json({ web: { results: [{ title: "Bun Docs", url: "https://bun.com/docs", description: "Bun 官方文档" }] } })
-      if (u.includes("serper")) return json({ organic: [{ title: "Serper 结果", link: "https://example.com/s", snippet: "摘要" }] })
-      if (u.includes("tavily")) return json({ results: [{ title: "Tavily 结果", url: "https://example.com/t", content: "内容" }] })
-      return new Response("{}", { status: 401, statusText: "Unauthorized" })
-    }) as typeof fetch
-    try {
-      const brave = await webSearchTool.execute({ query: "bun" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "brave", GEBAI_SEARCH_API_KEY: "k1" }))
-      expect(brave.output).toContain("1. Bun Docs")
-      expect(brave.output).toContain("https://bun.com/docs")
-      expect((brave.data as { results: Array<{ url: string }> }).results[0].url).toBe("https://bun.com/docs")
-      expect(calls[0]).toContain("api.search.brave.com")
-      const serper = await webSearchTool.execute({ query: "x" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "serper", GEBAI_SEARCH_API_KEY: "k2" }))
-      expect(serper.output).toContain("Serper 结果")
-      expect(calls[1]).toContain("google.serper.dev")
-      const tavily = await webSearchTool.execute({ query: "x" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "tavily", GEBAI_SEARCH_API_KEY: "k3" }))
-      expect(tavily.output).toContain("Tavily 结果")
-      // 不支持的 provider / HTTP 401 提示（不回显响应体）
-      const unknown = await webSearchTool.execute({ query: "x" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "bing", GEBAI_SEARCH_API_KEY: "k" }))
-      expect(unknown.output).toContain("不支持的")
-      const denied = await webSearchTool.execute({ query: "deny" }, ctx(home, SID, { GEBAI_SEARCH_PROVIDER: "brave", GEBAI_SEARCH_API_KEY: "bad" }))
-      expect(denied.output).toContain("401")
-      expect(denied.output).toContain("API Key")
-    } finally {
-      globalThis.fetch = realFetch
-    }
     cleanup(home)
   })
 
