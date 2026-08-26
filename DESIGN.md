@@ -540,6 +540,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - 定义形式二选一：**单文件** `sub-agents/{name}.ts`，或**目录** `sub-agents/{name}/{name}.ts`（入口文件）+ 可选 `{name}.md`（系统提示词拆分维护）；作为服务端代码放在 `packages/server/src/sub-agents/` 下
 - 目录形式下，系统提示词 md 由入口 ts 文件**导入并修饰**（见「子Agent文件格式」）：`import systemPrompt from "./{name}.md"`（Bun 原生文本导入，构建时随 ts 一起内联进产物）
 - **零注册**：文件/目录即声明，运行时自动扫描收集（跳过 `*.test.ts` 与辅助文件，目录形式只认 `{dir}/{dir}.ts`），无需任何配置文件或代码注册
+- **热加载（目录签名失效缓存，DESIGN「子Agent 热加载」）**：`sub-agents/` 目录的**新增/修改/删除**在下一次装载（`agent_load`/路由自愈/`agent_run` 预加载，`load()` 前检查）或新任务（`run()` 前）自动生效，无需重启——`refreshIfChanged()` 比对目录签名（递归 `路径:mtime`，~30 次 stat 可忽略），变化即重扫：TS 入口带 `?t={mtime}` 查询参数 import **绕过模块缓存**（修改过的文件拿到新代码；新文件本就不在缓存）；**已装载会话沿用旧定义**（工具注册与注入会话记录的提示词保持稳定，不迁移——防运行中会话行为漂移），新定义对未装载与新会话生效；运行期显式 `unregister` 的子Agent（如 cron 关关）重扫后保持移除（`removedDefs` 过滤，防「复活」）；二进制 bundle 形态源码目录不存在、注册表不可变，无热加载。价值：self_optimize 生成/修改子Agent 后**当会话内即可 agent_run 验证成果**，自我优化闭环不再依赖重启
 - **打包闭环**：`bun build` 前由 `scripts/build-subagents.ts` 扫描 `src/sub-agents/` 生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**bundle 注册表缺失或加载失败必抛错（fail-fast），绝不静默降级为空子Agent 列表**——启动「成功」但没有任何子Agent 比启动失败更难排查。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，启动期解析失败会炸掉整个 bundle 注册表（服务启动即退出）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
 - **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（flow/tool_schemas/js）与 index.ts 的 vision 注册同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行），裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > `{GEBAI_HOME}/.env` > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态）；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
 - **裁剪构建样例**（根 `scripts/` 目录）：`bun run build:code`（`build-code-agent.ts`）产出 code 场景精简**服务端**单文件二进制（`packages/server/dist/gebai-code[.exe]`，浏览器形态、内嵌 Web UI）——三层裁剪组合示范：子Agent 包含清单（code+explore，体积收益主来源：未选子Agent 模块整体摇出产物）+ 预加载清单（code 开箱即用）+ 全局工具排除清单（show/fetch_url）。可作为其他场景裁剪构建的模板：复制脚本改清单即可（如 reverse_site 站点逆向、feishu 文档、只读分析）
@@ -904,8 +905,8 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 - **改进点来源**：用户反馈（见「用户反馈」）、审批拒绝原因、工具执行失败、任务超时/中断日志、用户显式指令（如「你下次不要再…」）
 - **变更管理**：每次自我修改生成补丁记录（改动前/后、原因、验证结果），可查看、可回滚；代码版本控制（git）即优化历史
 - **生效方式**：
-  - 脚本调试模式：修改源码后**重启进程生效**（子Agent 启动时扫描发现，无运行期热加载）
-  - 二进制模式：修改后的代码进入下次构建；运行期通过环境变量覆盖提示词/配置（会话级）实现即时调优
+  - 脚本调试模式：**子Agent 定义热加载**（见「子Agent 热加载」）——新增/修改/删除子Agent 文件在下一次装载/新任务前即时生效（self_optimize 改完子 Agent 后当会话内即可 `agent_run` 验证成果）；核心引擎源码修改仍需重启进程生效
+  - 二进制模式：无源码目录，热加载不适用（bundle 注册表不可变）；修改后的代码进入下次构建；运行期通过环境变量覆盖提示词/配置（会话级）实现即时调优
 - **安全约束**：自我修改走统一审批流（写操作逐次审批）；修改范围由**写保护闸门代码级强制**——默认只读模式仅限子Agent 目录与仓库级文档/配置，核心引擎源码默认只读（`GEBAI_SELF_MODIFY=true` 显式开启，见「写保护闸门」）
 - **测试门槛**：任何自我修改必须通过相关测试（`run_tests`）才能视为完成，防止退化；测试失败用 `rollback` 回滚本次改动（测试策略与覆盖率门槛见「测试策略」）
 - **用户验证**：修改通过测试后，`self_optimize` 用 `ask` 询问用户是否启动验证服务（`preview_server`，临时新端口独立进程，不中断当前会话），确认后启动并告知访问 URL；验证结束（或用户拒绝）即停止，避免残留进程
@@ -1088,6 +1089,7 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 - **与审批联动**：审批请求可关联待办项，拒绝/通过后对应待办状态联动更新
 - **失败恢复**：任务中断后基于待办清单继续执行，跳过已 `completed` 项，从剩余项恢复
 - **待办续做**：每轮会话完成（模型给出最终回复）后，引擎自动检查待办清单——仍有 `pending`/`in_progress` 项时，追加一条「【待办续做】…请继续执行，直至全部完成」消息并再次进入工具调用循环继续会话，直至待办全部完成或达到续做轮次上限（见常量参考，默认 3 轮）；`completed`/`cancelled`/`failed` 项视为已了结不再续做；续做消息持久化进会话历史（用户可见），并推送 `event.todo.continue` 事件
+- **收尾验证提醒**：与待办续做同机制的兜底纪律——任务结束（无未完成待办）时若**本任务修改过代码文件（write/edit/patch 命中代码扩展名且成功落盘）但全程未运行任何测试/检查类命令**（sh/py 的 command 命中测试/lint/typecheck 关键词、或 `run_tests` 工具），追加一条「【验证提醒】…请先运行相关测试或检查确认无回归，再给出最终回复；确不适用请说明」消息再续跑一轮（模型跑验证后正常收尾，或说明原因），上限 1 轮防反复打扰；拒绝/安全模式拦截与 dryRun 不计入修改，md 等非代码文件不触发
 
 #### 用户询问（`ask`）
 
@@ -1389,7 +1391,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 | 工具 | 功能 | 默认审批 |
 |------|------|---------|
-| `read` | 读取文件内容（相对路径以会话 `tmp/` 为基准，`tmp/` 前缀可省略；服务端部署受沙箱限制，桌面/本地浏览器不限制，见路径基准）；可选 `offset`（起始行号，1 起始）与 `limit`（行数，正数取 offset 起 N 行、负数取末尾 N 行），按行切片便于大文件分段阅读；**默认每行前缀真实行号**（`lineNumbers` 默认 true——cat -n 风格右对齐+制表符，切片后仍对应文件行号，按 文件:行号 引用/构造补丁的定位基准；不需要可传 false；复制原文给 `edit` 的 oldString 时须去掉行号前缀——edit 检测到行号前缀误拷贝会给明确提示）；`offset`/`limit` 切片读取附尾部位置注记（`（第 X–Y 行，共 N 行）`），模型据此判断剩余内容与下一段 offset；**`encoding` 指定编码解码读取**（如 `gbk`——file info 探测为非 UTF-8 时用，fatal 解码失败给明确报错；仅解码读取，转码改写用 `py`）；读目录给出可读引导（用 `ls`/`glob`，不再抛原始 EISDIR）；读取成功登记「本会话已读」（防盲写守卫依据，见「防盲写守卫」） | 否 |
+| `read` | 读取文件内容（相对路径以会话 `tmp/` 为基准，`tmp/` 前缀可省略；服务端部署受沙箱限制，桌面/本地浏览器不限制，见路径基准）；可选 `offset`（起始行号，1 起始）与 `limit`（行数，正数取 offset 起 N 行、负数取末尾 N 行），按行切片便于大文件分段阅读；**默认每行前缀真实行号**（`lineNumbers` 默认 true——cat -n 风格右对齐+制表符，切片后仍对应文件行号，按 文件:行号 引用/构造补丁的定位基准；不需要可传 false；复制原文给 `edit` 的 oldString 时须去掉行号前缀——edit 检测到行号前缀误拷贝会给明确提示）；`offset`/`limit` 切片读取附尾部位置注记（`（第 X–Y 行，共 N 行）`），模型据此判断剩余内容与下一段 offset；**`encoding` 指定编码解码读取**（如 `gbk`——file info 探测为非 UTF-8 时用，fatal 解码失败给明确报错；仅解码读取，转码改写用 `py`）；**UTF-8 BOM 不进输出**（底层 readFile 用 node utf8 保留 BOM、`Bun.file().text()` 会剥离，工具层统一 `stripBom` 去除——`edit`/`patch` 匹配用干净正文（BOM 会让首行 oldString 匹配失败）、写回时按原文件有无 BOM 补回，`write` 覆盖写同样保留——BOM 文件（Windows 工具生成常见）往返编辑不丢头）；读目录给出可读引导（用 `ls`/`glob`，不再抛原始 EISDIR）；读取成功登记「本会话已读」（防盲写守卫依据，见「防盲写守卫」） | 否 |
 | `write` | 写入文件（默认整体覆盖；`append:true` 追加模式——内容接在文件末尾，不存在则新建）。相对路径以会话 `tmp/` 为基准（`tmp/` 前缀可省略，受沙箱限制）；目标文件**已存在且本会话未 read 过**时拒绝（防盲覆盖，先 read 再覆盖，覆盖/追加同规则，见「防盲写守卫」）；**大文件（约 300 行以上）分段写入**——首段普通 write、后续段 `append:true` 续写（每段 200~300 行），防单次模型输出过长被输出上限截断或接口超时（截断时引擎抢救落盘 + 引导续写，见「核心Agent流程」大文件分段写入与截断抢救） | 否 |
 | `ls` | 列出目录内容（文件/子目录、大小） | 否 |
 | `grep` | 按正则表达式在会话工作目录（`tmp/`）中递归搜索文本内容（返回 文件:行号: 匹配行——路径带 `tmp/` 前缀可直接用于文件工具，限文件大小与匹配数）；`output` 三种结果形态（`content` 逐行内容 / `files` 仅命中文件清单——宽泛摸底定位优先 / `count` 每文件命中行数）、`context` 附匹配行前后上下文（格式同 `grep -n -C`：匹配行 `文件:行号:` 前缀、上下文行 `文件-行号-` 前缀、组间 `--` 分隔；`contextBefore`/`contextAfter` 可指定**非对称**上下文（同 `-B`/`-A`——看定义后的实现体常用），指定时覆盖 `context` 对应侧）、`literal:true` 按字面匹配（正则元字符自动转义——搜索 `foo.bar(` 类代码片段免转义）、`include`/`exclude` 按路径 glob 过滤/排除（逗号分隔多模式、`{a,b}` 花括号交替；无 `/` 的模式按目录/文件名匹配任意层级）、`head_limit` 压低匹配上限先看一部分；node_modules/.git/dist 等大型目录默认跳过（include 原文显式点名除外）（见「grep 内容检索工具」） | 否 |
@@ -2016,7 +2018,6 @@ bun run --cwd packages/server build:win --exclude-sub-agents x
 | 待实现项 | 现状与影响 | 计划方案 |
 |---------|-----------|----------|
 | 前端消息虚拟化/分页 | 会话消息全量加载 + 全量渲染（`session.get` 返回全部消息，`loadMessages` 重建全部 DOM，逐条重跑 markdown 解析与代码高亮）；数千条消息的会话切回时开销显著。已缓解项：流式渲染 120ms 尾沿节流全模式统一（消除流式期间 O(n²) 重解析，历史全量重建开销仍在） | 分两步：① 服务端按游标分页 + 前端只渲染最近 N 条、上滚加载更早（半虚拟化，改动集中在 `sessions.ts`/`messages.ts`）；② 视口窗口虚拟化（与粘底滚动/消息导航/跨会话滚动位置记忆协同，需回归验证） |
-| 子 Agent 运行期热加载 | `discover()` 仅启动时扫描一次，新增/修改子 Agent 必须重启进程生效（DESIGN 已如实标注「重启生效」）；self_optimize 改完子 Agent 后当前进程内无法验证成果 | dev 模式 fs watch → 绕过模块缓存重载 → registry 增量 diff + 会话内已装载提示词的迁移策略 + 失败保留旧版本回退；二进制模式无源码目录不适用 |
 
 ## 测试策略
 
@@ -2033,7 +2034,7 @@ bun run --cwd packages/sdk test
 
 - **server 分片并行**：`packages/server` 的 `"test"` 脚本走 `scripts/test-parallel.ts`——全部 `*.test.ts` 排序后按轮转分成 N 个分片并行启动 `bun test` 子进程（bun test 单进程内测试文件串行执行，是全套件耗时主因；各文件相互独立、端口/临时目录均动态分配，并行安全）。默认 `min(8, max(2, CPU 核数))` 分片，`--shards=N` 参数或 `GEBAI_TEST_SHARDS` 环境变量覆盖；带文件路径/`-t`/`--coverage` 等参数时自动退回单进程透传（定向运行分片无收益）。输出逐行加 `[i/N]` 前缀流式透传，任一分片失败即非零退出。`test:serial` 保留串行入口
 - **turbo `test` 不依赖 `^build`**：各包 `main` 均指向 `src/*.ts`（bun 直接执行 TS 源码），测试无需先构建依赖包——冷缓存/改动后跑测试不再先付 vite 构建 + wasm 内嵌 + `bun build --compile` 的构建成本
-- **子Agent 发现进程级缓存**：`SubAgentManager.discover()` 首次扫描 `sub-agents/` 后缓存定义列表（目录内容进程内不变），测试中每个用例新建 manager 重复 discover 时跳过目录扫描/动态 import；运行期改动子Agent 源码经重启生效，行为不变
+- **子Agent 发现进程级缓存（目录签名校验）**：`SubAgentManager.discover()` 首次扫描 `sub-agents/` 后缓存定义列表与**目录签名**（递归 `路径:mtime` 拼接，~30 次 stat），测试中每个用例新建 manager 重复 discover 时签名未变直接水合缓存、跳过目录扫描/动态 import；签名变化（新增/修改/删除子Agent 文件）即失效重扫（热加载，见「子Agent 热加载」）
 
 ### 测试分层
 
@@ -2150,6 +2151,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 子Agent 调用超时 | 不设 | 子Agent 调用不设整体超时（执行进度实时可见，中止仅由父任务取消传播；`SUBAGENT_TIMEOUT` 已移除） |
 | 子Agent 递归深度 | 3 层 | 子Agent 嵌套调用最大深度 |
 | 待办续做轮次上限 | 3 轮 | 会话完成时仍有 `pending`/`in_progress` 待办，追加提醒继续会话的轮次上限（`MAX_TODO_CONTINUE`，达到即停止本轮任务） |
+| 收尾验证提醒轮次上限 | 1 轮 | 任务修改了代码文件但未运行测试/检查时，结束注入验证提醒的轮次上限（`MAX_VERIFY_NUDGE`，防反复打扰）；代码文件按扩展名判定、测试/检查命令按关键词宽匹配（宁漏勿紧） |
 | 预览服务就绪超时 | 15 秒 | `preview_server` 启动后 TCP 就绪探测总时限（超时即终止并回显日志尾部） |
 | 预览服务轮询间隔 | 300ms | 就绪探测轮询间隔 |
 | 预览服务日志/状态 | `os.tmpdir()/gebai-preview-{port}.log`、`gebai-preview.json` | 独立进程 stdout/stderr 日志与运行状态（port/pid/url），状态文件按 PID 存活清理 |

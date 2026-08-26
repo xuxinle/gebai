@@ -21,6 +21,14 @@ import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } f
 const MAX_TOOL_ROUNDS = 200
 /** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。 */
 const MAX_TODO_CONTINUE = 3
+/** 收尾验证提醒轮次上限：改了代码文件但全程未跑测试/检查的任务，结束时最多注入一次提醒（防反复打扰）。 */
+const MAX_VERIFY_NUDGE = 1
+/** 收尾验证提醒——代码文件判定（write/edit/patch 命中这些扩展名的 path 才计入；md/txt 等文档不触发）。 */
+const VERIFY_CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|c|h|cpp|hpp|cc|cs|rb|php|swift|scala|vue|svelte|dart|lua|sh|bash|sql)$/i
+/** 收尾验证提醒——测试/检查类命令判定（sh/py 的 command 文本匹配；宽匹配宁漏勿紧：误判已验证只少一次提醒）。 */
+const VERIFY_CMD_RE = /\b(bun test|bun run test|npm test|npm run test|yarn test|pnpm test|pytest|vitest|jest|go test|cargo test|deno test|gradle test|gradlew\s+\S*test|mvn test|tsc|typecheck|type-check|eslint|biome check|ruff|mypy|flake8|clang-tidy|lint)\b/i
+/** 收尾验证提醒——写类工具的拒绝形态（守卫/安全模式拦截未落盘，不计入修改文件）。 */
+const MOD_REJECTED_RE = /^(write|edit|patch) 拒绝|安全模式|受限模式/
 /** 重复检测滚动窗口：记录最近 N 次工具调用签名（工具名+参数），窗口内相同签名出现 ≥MAX_REPEAT_HITS 次判定为无效重复。 */
 const MAX_REPEAT_WINDOW = 8
 /** 重复检测命中阈值：相同签名（工具+参数）在窗口内出现第 MAX_REPEAT_HITS 次时中断该次执行并注入引导提示。 */
@@ -280,6 +288,11 @@ export interface AgentEngineOptions {
 
 export class AgentEngine {
   private tasks = new Map<string, TaskState>()
+
+  /** 任务级「收尾验证提醒」数据（DESIGN「收尾验证提醒」）：sessionId → { 修改的代码文件, 是否已运行测试/检查类命令 }。
+   *  run() 开始置位、runToolInterruptible 收集（write/edit/patch 成功改代码文件、sh/py 执行测试/检查命令）、
+   *  任务结束清理——与待办续做同机制的兜底：模型改了代码却全程没跑验证时注入一次提醒。 */
+  private taskMods = new Map<string, { files: Set<string>; verified: boolean }>()
 
   /** 会话级已读文件追踪（fileGuard 防误覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → 已读绝对路径集合。
    *  read/edit/patch/write 成功后登记，write 整体覆盖「已存在但未读过」的文件前据此拦截；
@@ -1055,6 +1068,10 @@ export class AgentEngine {
     const controller = new AbortController()
     const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
     this.tasks.set(sessionId, task)
+    // 收尾验证提醒数据（本任务范围）：修改的代码文件 + 是否运行过测试/检查类命令（runToolInterruptible 收集）
+    this.taskMods.set(sessionId, { files: new Set(), verified: false })
+    // 子Agent 热加载检查（目录签名变化即重扫）：每个新任务以最新定义构建系统提示词与路由
+    await this.opts.subAgents.refreshIfChanged().catch(() => {})
     try {
       const session = await this.opts.store.load(sessionId, user)
       if (!session) throw new Error(`会话不存在: ${sessionId}`)
@@ -1065,6 +1082,7 @@ export class AgentEngine {
       await this.hydrateDynamicTools(sessionId, session)
     } catch (err) {
       this.tasks.delete(sessionId)
+      this.taskMods.delete(sessionId)
       throw err
     }
 
@@ -1133,6 +1151,7 @@ export class AgentEngine {
       // 待办续做：每轮会话完成（模型给出最终回复）后检查待办，pending/in_progress 未完成则
       // 追加提醒消息继续会话，直至全部完成或达到续做轮次上限（DESIGN「待办续做」）
       let continueRound = 0
+      let verifyRound = 0
       let finalText = ""
       let lastFinalText = ""
       let res: { text: string; reasoning: string; ctxInputTokens?: number; ctxCountedLen: number } | undefined
@@ -1166,7 +1185,27 @@ export class AgentEngine {
 
         const todos = await this.opts.store.getTodos(sessionId, user)
         const pending = todos.filter((t) => t.status === "pending" || t.status === "in_progress")
-        if (!pending.length) break
+        if (!pending.length) {
+          // 收尾验证提醒（DESIGN「收尾验证提醒」，与待办续做同机制）：任务修改了代码文件但全程未运行
+          // 任何测试/检查类命令——注入一次提醒让模型先验证再收尾（或说明不适用原因），上限 MAX_VERIFY_NUDGE 轮
+          const mods = this.taskMods.get(sessionId)
+          if (mods && mods.files.size > 0 && !mods.verified && verifyRound < MAX_VERIFY_NUDGE) {
+            const list = [...mods.files].slice(0, 5).map((f) => `- ${f}`).join("\n")
+            const more = mods.files.size > 5 ? `\n…（共 ${mods.files.size} 个文件）` : ""
+            const verifyMsg = `【验证提醒】本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
+            messages.push({ role: "assistant", content: finalText })
+            messages.push({ role: "user", content: verifyMsg })
+            await this.opts.store.appendMessage(sessionId, {
+              id: crypto.randomUUID(),
+              role: "user",
+              content: verifyMsg,
+              createdAt: Date.now(),
+            }, user)
+            verifyRound++
+            continue
+          }
+          break
+        }
         if (continueRound >= MAX_TODO_CONTINUE) break
 
         const titleList = pending.map((t) => `- ${t.title}`).join("\n")
@@ -1214,6 +1253,7 @@ export class AgentEngine {
       for (const a of task.approvals.values()) clearTimeout(a.timer)
       for (const ch of task.choices.values()) clearTimeout(ch.timer)
       this.tasks.delete(sessionId)
+      this.taskMods.delete(sessionId)
     }
   }
 
@@ -1568,7 +1608,12 @@ export class AgentEngine {
         if (resolveRoot) return sandbox.enforcedFor(user) ? resolveInSandbox(resolveRoot, p) : resolve(resolveRoot, p)
         return sandbox.resolvePath(user, sessionId, p)
       },
-      readFile: async (p) => (await Bun.file(p).text()),
+      // node utf8 读取保留 UTF-8 BOM（Bun.file().text() 会剥离）——read 展示/edit 匹配在工具层统一
+      // stripBom 去除、edit/patch/write 写回时按原文件补回（BOM 文件往返编辑不丢头，见 DESIGN「BOM 感知」）
+      readFile: async (p) => {
+        const { readFile } = await import("node:fs/promises")
+        return readFile(p, "utf8")
+      },
       readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
       writeFile: async (p, content) => {
         const { mkdir, writeFile } = await import("node:fs/promises")
@@ -2273,10 +2318,31 @@ export class AgentEngine {
         this.opts.toolTimeoutMs ?? TOOL_TIMEOUT_MS,
       )
       tool.execute(args, ctx).then(
-        (r) => finish(r),
+        (r) => {
+          this.trackTaskMods(sessionId, name, args, r)
+          finish(r)
+        },
         (err) => finish({ output: `工具执行失败: ${(err as Error).message}` }),
       )
     })
+  }
+
+  /** 收尾验证提醒数据收集：write/edit/patch 成功修改代码文件（拒绝/安全模式拦截与 dryRun 不计）记入文件清单；
+   *  sh/py 执行测试/检查类命令、run_tests 工具调用即标记已验证。名称取命名空间短名（code_write 等同权）。 */
+  private trackTaskMods(sessionId: string, name: string, args: Record<string, unknown>, result: ToolResult): void {
+    const mods = this.taskMods.get(sessionId)
+    if (!mods) return
+    const short = name.includes("_") ? name.slice(name.lastIndexOf("_") + 1) : name
+    if (short === "write" || short === "edit" || short === "patch") {
+      if (typeof args.path !== "string") return
+      if (args.dryRun === true || result.output.includes("预演")) return
+      if (MOD_REJECTED_RE.test(result.output)) return
+      if (VERIFY_CODE_FILE_RE.test(args.path)) mods.files.add(args.path)
+    } else if (short === "sh" || short === "py") {
+      if (VERIFY_CMD_RE.test(String(args.command ?? ""))) mods.verified = true
+    } else if (short === "run_tests") {
+      mods.verified = true
+    }
   }
 
   /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，

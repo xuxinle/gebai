@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { ToolRegistry } from "./registry"
 import { SubAgentManager } from "./subagents"
 import type { SubAgentDef } from "./types"
@@ -117,5 +119,48 @@ describe("self_optimize cascade load", () => {
     await mgr.load("self_optimize")
     expect(registry.resolve("self_optimize_read")).toBeDefined()
     expect(registry.resolve("self_optimize_page_capture")).toBeDefined()
+  })
+})
+
+describe("子Agent 热加载（目录签名失效缓存）", () => {
+  const dir = join(import.meta.dirname, "..", "sub-agents")
+  test("新增/删除 md 子Agent 目录即时生效（无需重启进程）", async () => {
+    const name = "zz_hotreload_tmp"
+    const agentDir = join(dir, name)
+    rmSync(agentDir, { recursive: true, force: true })
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, `${name}.md`), "---\ndescription: 热加载临时子Agent\n---\n你是热加载临时助手。")
+    try {
+      // 新增目录：签名变化 → 重新扫描 → 新子Agent 可见
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover()
+      expect(m.def(name)?.description).toBe("热加载临时子Agent")
+      expect(m.list().some((d) => d.name === name)).toBe(true)
+      // 删除目录：签名变化 → 新实例 discover 重扫后不再可见；refreshIfChanged 幂等（未变化零操作）
+      rmSync(agentDir, { recursive: true, force: true })
+      const m2 = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m2.discover()
+      expect(m2.def(name)).toBeUndefined()
+      await m2.refreshIfChanged()
+      expect(m2.def(name)).toBeUndefined()
+    } finally {
+      rmSync(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test("unregister 的子Agent 在重扫/缓存水合后保持移除（cron 开关语义不因热加载复活）", async () => {
+    const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+    await m.discover()
+    if (!m.def("cron")) return test.skip("cron 未打包", () => {})
+    m.unregister("cron")
+    expect(m.def("cron")).toBeUndefined()
+    // 触发重扫（touch code.ts 改变目录签名），removedDefs 过滤使其保持移除
+    const probe = join(dir, "code.ts")
+    const st = statSync(probe)
+    utimesSync(probe, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
+    await m.refreshIfChanged()
+    expect(m.def("cron")).toBeUndefined()
+    // 基础定义不受影响
+    expect(m.def("code")).toBeDefined()
   })
 })

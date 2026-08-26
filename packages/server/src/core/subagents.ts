@@ -1,4 +1,4 @@
-import { readdir, access } from "node:fs/promises"
+import { readdir, access, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { SubAgentDef } from "./types"
 import type { ToolRegistry } from "./registry"
@@ -11,10 +11,37 @@ export interface SubAgentManagerOptions {
   bundledNames?: string[]
 }
 
-/** 源码目录扫描结果缓存（进程级）：目录内容在进程内不变（运行期改动经重启生效），
- *  服务端每进程只 discover 一次；测试中每个用例新建 SubAgentManager 再 discover 时
- *  跳过重复的目录扫描/动态 import，只做本实例的注册与预载。 */
+/** 源码目录扫描结果缓存（进程级）：与目录签名（`discoveredSigCache`）配套——签名未变直接复用首次扫描的
+ *  定义（def 为纯数据 + 工具函数引用，跨实例共享安全；测试中每个用例新建 SubAgentManager 再 discover
+ *  时跳过重复的目录扫描/动态 import，只做本实例的注册与预载）；签名变化（新增/修改/删除子Agent 文件）
+ *  即失效重新扫描（DESIGN「子Agent 热加载」）——self_optimize 生成新子Agent 后当会话可用，无需重启。 */
 let discoveredDefsCache: SubAgentDef[] | null = null
+let discoveredSigCache: string | null = null
+
+/** 计算子Agent 目录签名：递归收集 .ts/.md 文件（排除 .test.ts）的 路径:mtimeMs 排序拼接——
+ *  任何新增/修改/删除都改变签名；目录不存在（dist/二进制 bundled 形态）返回 null（bundle 注册表不可变）。
+ *  成本约一次目录遍历（~30 次 stat，可忽略），供每次 load/run 前的热加载检查。 */
+async function subagentsDirSignature(dir: string): Promise<string | null> {
+  const parts: string[] = []
+  const walk = async (d: string, prefix: string, depth: number): Promise<void> => {
+    if (depth > 2) return
+    let entries
+    try {
+      entries = await readdir(d, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) await walk(join(d, e.name), `${prefix}${e.name}/`, depth + 1)
+      else if (e.isFile() && (e.name.endsWith(".ts") || e.name.endsWith(".md")) && !e.name.endsWith(".test.ts")) {
+        const st = await stat(join(d, e.name)).catch(() => null)
+        if (st) parts.push(`${prefix}${e.name}:${st.mtimeMs}`)
+      }
+    }
+  }
+  await walk(dir, "", 0)
+  return parts.length ? parts.sort().join("|") : null
+}
 
 export class SubAgentManager {
   private defs = new Map<string, SubAgentDef>()
@@ -22,6 +49,9 @@ export class SubAgentManager {
   private registry: ToolRegistry
   private preloadOverride?: string[]
   private bundledNames: Set<string>
+  /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
+   *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
+  private removedDefs = new Set<string>()
 
   constructor(opts: SubAgentManagerOptions) {
     this.registry = opts.registry
@@ -30,19 +60,19 @@ export class SubAgentManager {
   }
 
   async discover(): Promise<void> {
-    // 命中缓存：直接复用首次扫描的定义（def 为纯数据 + 工具函数引用，跨实例共享安全）
-    if (discoveredDefsCache) {
+    const dir = join(import.meta.dirname, "..", "sub-agents")
+    const sig = await subagentsDirSignature(dir)
+    // 命中缓存（签名未变，或 bundled 形态注册表不可变）：直接复用扫描结果
+    if (discoveredDefsCache && sig === discoveredSigCache) {
+      this.defs.clear()
       for (const def of discoveredDefsCache) this.defs.set(def.name, def)
+      for (const n of this.removedDefs) this.defs.delete(n)
       await this.preload()
       return
     }
-    // core/ 下一级为 src/sub-agents（dev 模式）；dist/二进制模式下目录不存在，回退到构建时生成的 bundle 注册表
-    const dir = join(import.meta.dirname, "..", "sub-agents")
-    let entries
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      // dist/二进制模式：源码目录不存在，回退到构建时生成的 bundle 注册表
+    if (sig === null) {
+      // dist/二进制模式：源码目录不存在，回退到构建时生成的 bundle 注册表（不可变，写入缓存）
+      this.defs.clear()
       try {
         const { bundledDefs } = await import("./subagents.bundle.generated")
         for (const def of bundledDefs) this.defs.set(def.name, def)
@@ -53,15 +83,23 @@ export class SubAgentManager {
           `[subagents] bundle 注册表缺失或加载失败（构建时先运行 scripts/build-subagents.ts）: ${err instanceof Error ? err.message : err}`,
         )
       }
+      for (const n of this.removedDefs) this.defs.delete(n)
+      discoveredDefsCache = [...this.defs.values()]
+      discoveredSigCache = null
       await this.preload()
       return
     }
+    // 全量扫描（首次或目录签名变化——热加载）：重扫前清空（删除的文件不再保留旧定义）
+    this.defs.clear()
+    const entries = await readdir(dir, { withFileTypes: true })
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
         const base = e.name.slice(0, -3)
         if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则校验（DESIGN：子Agent 名 [a-z0-9_]+）
         try {
-          const mod = await import(`../sub-agents/${base}`)
+          // mtime 查询参数绕过模块缓存：修改过的 TS 文件重新 import 拿到新代码（Bun 按完整 specifier 缓存模块）
+          const mtime = (await stat(join(dir, e.name)).catch(() => null))?.mtimeMs ?? 0
+          const mod = await import(`../sub-agents/${base}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
           if (def) this.defs.set(def.name, def)
           else console.warn(`[subagents] ${base}.ts 未导出 def，已跳过`)
@@ -76,7 +114,8 @@ export class SubAgentManager {
         const tsEntry = join(dir, base, `${base}.ts`)
         if (await access(tsEntry).then(() => true, () => false)) {
           try {
-            const mod = await import(`../sub-agents/${base}/${base}`)
+            const mtime = (await stat(tsEntry).catch(() => null))?.mtimeMs ?? 0
+            const mod = await import(`../sub-agents/${base}/${base}?t=${mtime}`)
             const def = mod.def as SubAgentDef | undefined
             if (def) this.defs.set(def.name, def)
             else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
@@ -88,8 +127,22 @@ export class SubAgentManager {
         }
       }
     }
+    for (const n of this.removedDefs) this.defs.delete(n)
     discoveredDefsCache = [...this.defs.values()]
+    discoveredSigCache = sig
     await this.preload()
+  }
+
+  /** 热加载检查：目录签名变化时重新扫描（幂等、未变化时零成本目录遍历）。装载/新任务前调用——
+   *  已装载会话沿用旧定义（工具注册与注入的提示词保持稳定），新定义对未装载与新会话生效。
+   *  仅校验既有扫描结果（进程内从未 discover 过时不主动发起首次扫描——生产由启动 discover 负责，
+   *  测试桩手工 register 的管理器不因 load 意外扫入真实子Agent）。 */
+  async refreshIfChanged(): Promise<void> {
+    if (!discoveredDefsCache) return
+    const dir = join(import.meta.dirname, "..", "sub-agents")
+    const sig = await subagentsDirSignature(dir)
+    if (sig === null || sig === discoveredSigCache) return
+    await this.discover()
   }
 
   /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description）。 */
@@ -123,6 +176,9 @@ export class SubAgentManager {
    *  owner：装载者（会话 id / agent_run 共享标记 / 缺省全局），unload 按其解引用。
    *  返回本次实际装载的名字列表（幂等跳过的不计入；self_optimize 连带装载 code 时两者都计入）。 */
   async load(name: string, owner: string = SubAgentManager.GLOBAL_OWNER): Promise<string[]> {
+    // 热加载检查（目录签名变化即重扫）：agent_load/路由自愈/agent_run 预加载前拿到最新定义
+    // （如 self_optimize 刚生成的子Agent 文件）；签名未变时零成本（一次目录遍历）
+    await this.refreshIfChanged()
     const def = this.defs.get(name)
     if (!def) throw new Error(`unknown sub-agent: ${name}`)
     const track = (n: string) => {
@@ -180,10 +236,11 @@ export class SubAgentManager {
   }
 
   /** 撤销子Agent 定义（能力开关关闭时隐藏，如 GEBAI_CRON_ENABLED=false 移除 cron）：未装载直接删除定义；
-   *  已装载则先注销其工具（注册表残留工具不清理会让模型可见但引擎不可用）。 */
+   *  已装载则先注销其工具（注册表残留工具不清理会让模型可见但引擎不可用）；热加载重扫后仍保持移除。 */
   unregister(name: string): void {
     if (this.loaded.has(name)) this.unload(name)
     this.defs.delete(name)
+    this.removedDefs.add(name)
   }
 
   isLoaded(name: string): boolean {

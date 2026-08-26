@@ -19,8 +19,8 @@ class HardenProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
   seen: MessageLike[][] = []
-  /** 每轮行为：{ mode: "text" | "tool" | "hang" | "badargs" | "trunc", tool?, text?, raw?, stopReason? }，按 calls 序号。 */
-  script: Array<{ mode: "text" | "tool" | "hang" | "badargs" | "trunc"; tool?: string; text?: string; raw?: string; stopReason?: string }> = []
+  /** 每轮行为：{ mode: "text" | "tool" | "hang" | "badargs" | "trunc", tool?, args?, text?, raw?, stopReason? }，按 calls 序号。 */
+  script: Array<{ mode: "text" | "tool" | "hang" | "badargs" | "trunc"; tool?: string; args?: Record<string, unknown>; text?: string; raw?: string; stopReason?: string }> = []
   maxCtx = 100000
   usageInput = 0
   capabilities(): LLMCapabilities {
@@ -37,7 +37,7 @@ class HardenProvider implements LLMProvider {
     }
     if (step.mode === "tool") {
       // offset 随轮次变化：read 参数签名不同（重复检测不会中断连续读同一文件）
-      yield { type: "tool_call", toolCall: { id: `tc-${this.calls}`, name: step.tool ?? "read", arguments: { path: "tmp/x.txt", offset: this.calls } } }
+      yield { type: "tool_call", toolCall: { id: `tc-${this.calls}`, name: step.tool ?? "read", arguments: step.args ?? { path: "tmp/x.txt", offset: this.calls } } }
       yield { type: "done", usage: { inputTokens: this.usageInput } }
       return
     }
@@ -285,6 +285,55 @@ describe("历史图片内联窗口", () => {
     }
     // 5 条历史 + 1 条新输入 = 6 组图片，仅最近 3 组内联
     expect(imageBlocks).toBe(3)
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("收尾验证提醒（改代码未跑测试的任务结束注入一次提醒）", () => {
+  test("改了代码文件但未跑测试：任务结束注入一次验证提醒并续跑一轮（模型说明后收尾）", async () => {
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "write", args: { path: "src/a.ts", content: "const x = 1\n" } },
+      { mode: "text", text: "改完了" },
+      { mode: "text", text: "好的，该改动不涉及行为" },
+    ]
+    const { home, store, engine } = await setupEngine(provider)
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    const msgs = (await store.load(session.id, "default"))!.messages
+    const nudge = msgs.find((m) => m.role === "user" && m.content.includes("【验证提醒】"))
+    expect(nudge).toBeDefined()
+    expect(nudge!.content).toContain("src/a.ts")
+    expect(provider.calls).toBe(3) // 提醒额外触发一轮模型调用
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("已运行测试命令（sh 白名单免审形态）或仅改非代码文件：不触发提醒", async () => {
+    // 用假 sh 工具替代真实执行：只需 command 文本命中验证判定（bun test），不真正跑命令
+    const fakeRegistry = new ToolRegistry()
+    for (const [n, t] of Object.entries(createGlobalTools())) if (n !== "sh") fakeRegistry.register(t)
+    fakeRegistry.register({ name: "sh", description: "fake sh", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "ok" }) })
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "write", args: { path: "src/a.ts", content: "const x = 1\n" } },
+      { mode: "tool", tool: "sh", args: { command: "bun test src/a.test.ts", approval: false } },
+      { mode: "text", text: "完成并已验证" },
+    ]
+    const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    const msgs1 = (await store.load(session.id, "default"))!.messages
+    expect(msgs1.some((m) => m.role === "user" && m.content.includes("【验证提醒】"))).toBe(false)
+    // 仅文档文件（report.md）：不计入代码文件，不触发
+    const provider2 = new HardenProvider()
+    provider2.script = [
+      { mode: "tool", tool: "write", args: { path: "report.md", content: "说明文档" } },
+      { mode: "text", text: "完成" },
+    ]
+    const s2 = await store.createSession("default", "t2")
+    await engine.run(s2.id, "default", "hi2")
+    const msgs2 = (await store.load(s2.id, "default"))!.messages
+    expect(msgs2.some((m) => m.role === "user" && m.content.includes("【验证提醒】"))).toBe(false)
     rmSync(home, { recursive: true, force: true })
   })
 })
