@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
 import type { SessionData } from "../core/types"
-import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs } from "./bot"
+import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard } from "./bot"
 
 /** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
 const funame = (openId: string) => `feishu_${createHash("sha256").update(openId).digest("hex").slice(0, 24)}`
@@ -290,6 +290,18 @@ describe("纯函数", () => {
     const out = formatApprovalArgs(many)
     expect(out.length).toBeLessThanOrEqual(1200 + 100)
     expect(out).toContain("参数过长已截断")
+  })
+
+  test("回复卡片 JSON 2.0：schema/body 结构，Markdown 原样透传（标题/表格由 2.0 组件渲染，不做降级转换）", () => {
+    const md = "# 标题\n\n| 工具 | 结果 |\n| --- | --- |\n| sh | ✅ |\n\n```js\ncode()\n```"
+    const card = buildReplyCard(md)
+    expect(card.schema).toBe("2.0")
+    expect(card.config).toEqual({ update_multi: true })
+    expect(card.header).toBeUndefined()
+    const el = (card.body as { elements: Array<{ tag: string; content: string }> }).elements[0]
+    expect(el.tag).toBe("markdown")
+    expect(el.content).toContain("| 工具 | 结果 |")
+    expect(el.content).toContain("# 标题")
   })
 
   test("parseMessageContent: text/post/非法", () => {

@@ -167,12 +167,22 @@ class ChatOutbox {
   }
 }
 
-/** 最终回复卡片（lark_md 渲染 Markdown；无头部，仅内容）。 */
-export function buildReplyCard(markdown: string): Record<string, unknown> {
+/** JSON 2.0 卡片骨架：schema 必须显式声明 "2.0"（默认 1.0），elements 包裹在 body 内；
+ *  2.0 的 markdown 组件支持完整语法（1–6 级标题/GFM 表格/代码块/引用/分割线），lark_md（1.0）
+ *  不支持标题与表格——回复 Markdown 无需降级转换；update_multi 允许卡片多次更新（多选卡逐次回包依赖）。
+ *  回调更新卡必须与原卡同结构（1.0/2.0 混用报 200830）——全部卡片统一 2.0。 */
+export function cardV2(title: string | null, template: string, elements: Record<string, unknown>[]): Record<string, unknown> {
   return {
-    config: { wide_screen_mode: true },
-    elements: [{ tag: "markdown", content: truncateForFeishu(markdown) }],
+    schema: "2.0",
+    config: { update_multi: true },
+    ...(title ? { header: { title: { tag: "plain_text", content: title }, template } } : {}),
+    body: { elements },
   }
+}
+
+/** 最终回复卡片（2.0 markdown 组件渲染完整 Markdown；无头部，仅内容）。 */
+export function buildReplyCard(markdown: string): Record<string, unknown> {
+  return cardV2(null, "blue", [{ tag: "markdown", content: truncateForFeishu(markdown) }])
 }
 
 /** 超长内容截断（卡片渲染上限保护）。 */
@@ -238,11 +248,7 @@ export function buildChoiceCard(state: ChoiceCardState): Record<string, unknown>
         : [button("❌ 拒绝回答", valueOf("refuse"), "danger")],
     ),
   )
-  return {
-    config: { wide_screen_mode: true },
-    header: { title: { tag: "plain_text", content: "🤖 歌白需要确认" }, template: "blue" },
-    elements,
-  }
+  return cardV2("🤖 歌白需要确认", "blue", elements)
 }
 
 /* ---------------- 审批交互卡片（后端实现：参数摘要 + 批准/拒绝按钮，替代纯文本命令提示） ---------------- */
@@ -283,11 +289,7 @@ export function buildApprovalCard(state: ApprovalCardState): Record<string, unkn
     value: { approvalId: state.toolCallId, act },
   })
   elements.push({ tag: "action", actions: [button("✅ 批准", "approve", "primary"), button("❌ 拒绝", "reject", "danger")] })
-  return {
-    config: { wide_screen_mode: true },
-    header: { title: { tag: "plain_text", content: "⚠️ 歌白需要审批" }, template: "orange" },
-    elements,
-  }
+  return cardV2("⚠️ 歌白需要审批", "orange", elements)
 }
 
 /** 会话/用户 id 消毒：飞书 chat_id/open_id 为 `oc_`/`ou_` 前缀的字母数字下划线串。 */
@@ -865,11 +867,11 @@ export class FeishuBot {
       this.log(`approval card decided: ${pending.tool} ${approve ? "approved" : "rejected"} (chat=${chatId})`)
       void this.opts.adapter.decideApproval(pending.sessionId, pending.toolCallId, approve)
       return {
-        card: cardUpdate({
-          config: { wide_screen_mode: true },
-          header: { title: { tag: "plain_text", content: "⚠️ 歌白需要审批" }, template: approve ? "green" : "grey" },
-          elements: [{ tag: "markdown", content: `工具 \`${pending.tool}\`\n\n${approve ? "✅ 已批准，任务继续。" : "❌ 已拒绝，任务已取消。"}` }],
-        }),
+        card: cardUpdate(
+          cardV2("⚠️ 歌白需要审批", approve ? "green" : "grey", [
+            { tag: "markdown", content: `工具 \`${pending.tool}\`\n\n${approve ? "✅ 已批准，任务继续。" : "❌ 已拒绝，任务已取消。"}` },
+          ]),
+        ),
       }
     }
     if (!choiceId) return {}
@@ -881,11 +883,11 @@ export class FeishuBot {
     }
     // 决策终态卡片（替换按钮，不可再交互）
     const finalCard = (text: string) => ({
-      card: cardUpdate({
-        config: { wide_screen_mode: true },
-        header: { title: { tag: "plain_text", content: "🤖 歌白需要确认" }, template: "blue" },
-        elements: [{ tag: "markdown", content: `**${pending.prompt}**\n\n${text}` }],
-      }),
+      card: cardUpdate(
+        cardV2("🤖 歌白需要确认", "blue", [
+          { tag: "markdown", content: `**${pending.prompt}**\n\n${text}` },
+        ]),
+      ),
     })
     if (act === "refuse") {
       this.pendingChoices.delete(chatId)
