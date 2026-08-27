@@ -19,7 +19,7 @@ class HardenProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
   seen: MessageLike[][] = []
-  /** 每次模型调用的工具 schema 清单（name+parameters）：装载可见性/双胞胎合并断言用。 */
+  /** 每次模型调用的工具 schema 清单（name+parameters）：装载可见性/全局工具继承断言用。 */
   toolSchemas: Array<Array<{ name: string; parameters: Record<string, unknown> }>> = []
   /** 每轮行为：{ mode: "text" | "tool" | "hang" | "badargs" | "trunc", tool?, args?, text?, raw?, stopReason? }，按 calls 序号。 */
   script: Array<{ mode: "text" | "tool" | "hang" | "badargs" | "trunc"; tool?: string; args?: Record<string, unknown>; text?: string; raw?: string; stopReason?: string }> = []
@@ -341,8 +341,8 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
   })
 })
 
-describe("装载工具会话可见性与双胞胎合并", () => {
-  test("装载 code 的会话：同名工具合并为全局名（带 project 参数），独有工具前缀可见；未装载会话不见 code_* 且目录仍列出 code", async () => {
+describe("装载工具会话可见性与全局工具复用", () => {
+  test("装载 code 的会话：独有工具前缀可见、重复工具不再注册（全局名直接用）；未装载会话不见 code_* 且目录仍列出 code", async () => {
     const provider = new HardenProvider()
     provider.script = [{ mode: "text", text: "done" }]
     const { home, store, engine } = await setupEngine(provider)
@@ -350,29 +350,31 @@ describe("装载工具会话可见性与双胞胎合并", () => {
     const b = await store.createSession("default", "b")
     await engine.loadAgentToSession(a.id, "default", "code")
     await engine.run(a.id, "default", "hi")
-    // A：双胞胎合并——read 是全局名但 schema 为 code 版（带 project 参数）；code_read 不再单出；独有工具前缀可见
+    // A：独有工具前缀可见；code 不再定义 read/write 等重复工具（code_read/code_write 不存在）
     const sA = provider.toolSchemas[0]
     const readA = sA.find((t) => t.name === "read")!
     expect(readA).toBeTruthy()
+    // 全局文件工具自带 project 参数（默认会话相对路径，项目相对须指定项目名/路径）
     expect((readA.parameters as { properties: Record<string, unknown> }).properties.project).toBeTruthy()
     expect(sA.some((t) => t.name === "code_read")).toBe(false)
     expect(sA.some((t) => t.name === "code_write")).toBe(false)
     expect(sA.some((t) => t.name === "code_git")).toBe(true)
+    expect(sA.some((t) => t.name === "code_search_symbols")).toBe(true)
     // A 的系统提示词目录不含 code（本会话已装载，完整提示词在会话记录里）
     const sysA = String(provider.seen[0][0].content)
     expect(sysA).not.toContain("- code:")
-    // B：未装载——无任何 code_* schema；read 无 project 参数；目录仍列出 code 供装载（跨会话不泄漏）
+    // B：未装载——无任何 code_* schema；全局 read 同样带 project 参数；目录仍列出 code 供装载（跨会话不泄漏）
     await engine.run(b.id, "default", "hi")
     const sB = provider.toolSchemas[provider.toolSchemas.length - 1]
     expect(sB.some((t) => t.name.startsWith("code_"))).toBe(false)
     const readB = sB.find((t) => t.name === "read")!
-    expect((readB.parameters as { properties: Record<string, unknown> }).properties.project).toBeUndefined()
+    expect((readB.parameters as { properties: Record<string, unknown> }).properties.project).toBeTruthy()
     const sysB = String(provider.seen[provider.seen.length - 1][0].content)
     expect(sysB).toContain("- code:")
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("双胞胎别名兼容：装载会话内以 code_read 前缀名调用仍可执行（历史消息/子Agent 提示词引用不破）", async () => {
+  test("code_read 前缀名已废除：装载会话内调用报未知工具并列出 code 的可用工具（自愈装载后仍不可解析）", async () => {
     const provider = new HardenProvider()
     provider.script = [
       { mode: "tool", tool: "code_read", args: { path: "hello.txt" } },
@@ -381,35 +383,59 @@ describe("装载工具会话可见性与双胞胎合并", () => {
     const { home, store, engine } = await setupEngine(provider)
     const a = await store.createSession("default", "a")
     await engine.loadAgentToSession(a.id, "default", "code")
-    const ws = join(sessionPath(home, "default", a.id), "tmp")
-    mkdirSync(ws, { recursive: true })
-    writeFileSync(join(ws, "hello.txt"), "hello gebai\n")
     await engine.run(a.id, "default", "hi")
     const msgs = (await store.load(a.id, "default"))!.messages
     const toolMsg = msgs.find((m) => m.role === "tool")
     expect(toolMsg).toBeTruthy()
-    expect(toolMsg!.content).toContain("hello gebai")
-    expect(toolMsg!.content).not.toContain("未知工具")
+    expect(toolMsg!.content).toContain("未知工具")
+    // 恢复面：错误信息附 code 的可用工具全名清单（独有工具），引导改用全局 read
+    expect(toolMsg!.content).toContain("code_search_symbols")
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("未装载会话调用 code_read：路由自愈按会话装载后经别名执行", async () => {
+  test("agent_run 全局工具继承：默认继承（新会话可直接用全局 write），inherit_global_tools=false 时不继承", async () => {
     const provider = new HardenProvider()
     provider.script = [
-      { mode: "tool", tool: "code_read", args: { path: "hello.txt" } },
-      { mode: "text", text: "done" },
+      // 主会话：agent_run 预加载 code（默认继承全局工具）
+      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "write a file" } },
+      // 新会话：直接调用全局 write（继承形态）后收尾
+      { mode: "tool", tool: "write", args: { path: "inherited.txt", content: "from child" } },
+      { mode: "text", text: "child done" },
+      { mode: "text", text: "main done" },
     ]
     const { home, store, engine } = await setupEngine(provider)
-    const b = await store.createSession("default", "b")
-    const ws = join(sessionPath(home, "default", b.id), "tmp")
-    mkdirSync(ws, { recursive: true })
-    writeFileSync(join(ws, "hello.txt"), "self-heal\n")
-    await engine.run(b.id, "default", "hi")
-    const msgs = (await store.load(b.id, "default"))!.messages
-    const toolMsg = msgs.find((m) => m.role === "tool")
-    expect(toolMsg).toBeTruthy()
-    expect(toolMsg!.content).toContain("self-heal")
+    const a = await store.createSession("default", "a")
+    await engine.run(a.id, "default", "hi")
+    // 新会话内全局 write 已执行（写入会话工作区——agent_run 新会话与主会话共用 sessionId 工作区）
+    const ws = join(sessionPath(home, "default", a.id), "tmp")
+    expect(await Bun.file(join(ws, "inherited.txt")).text()).toBe("from child")
+    // 新会话 schema：全局工具齐全 + code 独有工具前缀（第二次模型调用的 schema 清单）
+    const childSchemas = provider.toolSchemas[1]
+    expect(childSchemas.some((t) => t.name === "write")).toBe(true)
+    expect(childSchemas.some((t) => t.name === "grep")).toBe(true)
+    expect(childSchemas.some((t) => t.name === "code_search_symbols")).toBe(true)
+    // 关闭继承：新会话仅剩子Agent 独有工具 + 内建编排，全局 write 不可见（调用报未知工具）
+    const provider2 = new HardenProvider()
+    provider2.script = [
+      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "write a file", inherit_global_tools: false } },
+      { mode: "tool", tool: "write", args: { path: "no-inherit.txt", content: "x" } },
+      { mode: "text", text: "child done" },
+      { mode: "text", text: "main done" },
+    ]
+    const { home: home2, store: store2, engine: engine2 } = await setupEngine(provider2)
+    const b = await store2.createSession("default", "b")
+    await engine2.run(b.id, "default", "hi")
+    const ws2 = join(sessionPath(home2, "default", b.id), "tmp")
+    expect(await Bun.file(join(ws2, "no-inherit.txt")).exists()).toBe(false)
+    const childSchemas2 = provider2.toolSchemas[1]
+    expect(childSchemas2.some((t) => t.name === "write")).toBe(false)
+    expect(childSchemas2.some((t) => t.name === "code_search_symbols")).toBe(true)
+    // 未继承时全局 write 调用报未知工具（模型在下一轮收尾）
+    const msgs2 = (await store2.load(b.id, "default"))!.messages
+    const callMsg = msgs2.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    expect(callMsg!.sessionRun!.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(true)
     rmSync(home, { recursive: true, force: true })
+    rmSync(home2, { recursive: true, force: true })
   })
 
   test("预置项目保留名 tmp 在任务期被拒绝（前端注入 env 的兜底校验）", async () => {

@@ -15,6 +15,7 @@ import { runFlow, scanFlowApprovals } from "./flow"
 import { jsTool, jsRuntimeCommand } from "./js-tool"
 import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, shApprovalFreeAllowed, validateShCommandSafeMode } from "./safety"
 import { shTaskLifetimeMs, shTaskStatus, type ShTaskRecord } from "./sh-tasks"
+import { projectAware } from "./projects"
 import { EXCLUDED_GLOBAL_TOOLS } from "./tools-excluded.generated"
 
 export const TRUNCATE_THRESHOLD = 12000
@@ -2053,7 +2054,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号语义以 cmd 为准；指定工作目录用 workdir 参数（免 cd X && cmd 串联）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 sh_task 回头查询/等待/终止。",
+  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号与变量展开以 cmd 为准（无 $? / $VAR，环境变量用 %VAR%）；退出码直接读返回结果的 exitCode 字段（无需 echo $? / %errorlevel%）。指定工作目录用 workdir 参数（免 cd X && cmd 串联）或 project 参数（项目根为工作目录；非默认工作目录时输出末尾标注实际目录）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 sh_task 回头查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -2072,6 +2073,9 @@ export const shTool: Tool = {
   async execute(args, ctx) {
     const input = scriptInput(args.input)
     const workdir = args.workdir ? ctx.resolvePath(String(args.workdir)) : ctx.workdir
+    // 工作目录注记：执行目录非会话默认目录（workdir 参数 / project 参数路由 / 项目绑定会话）时标注——
+    // 「命令在哪个目录执行」一目了然（bun test 等按 cwd 发现目标的工具，目录不对是最常见根因）
+    const cwdNote = workdir !== (ctx.sessionWorkdir ?? workdir) ? `\n（工作目录: ${workdir}）` : ""
     // 安全模式：只读命令白名单 + 输出重定向限用户目录（降级而非禁用；解析 fail-closed）
     if (ctx.safeMode) {
       const deny = validateShCommandSafeMode(String(args.command), ctx)
@@ -2082,7 +2086,7 @@ export const shTool: Tool = {
       if (!ctx.shTasks) return { output: "当前环境不支持后台任务执行（shTasks 服务未注入）。" }
       const rec = await ctx.shTasks.start(String(args.command), { cwd: workdir, env: ctx.env, input, maxMs: shTaskLifetimeMs(args.timeout) })
       return {
-        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 sh_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=kill 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
+        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}${cwdNote}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 sh_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=kill 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
         data: { taskId: rec.id, pid: rec.pid },
       }
     }
@@ -2094,7 +2098,7 @@ export const shTool: Tool = {
     const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
     // 成功但无输出：明确提示（区分「命令成功无输出」与「输出捕获失败/静默吞掉」）
     const final = code === 0 && !stdout.trim() ? "（命令执行成功，无输出）" : out
-    return { ...(await truncate(final, "sh", ctx)), data: scriptData(stdout, stderr, code) }
+    return { ...(await truncate(final + cwdNote, "sh", ctx)), data: scriptData(stdout, stderr, code) }
   },
 }
 
@@ -2238,8 +2242,10 @@ export const pyTool: Tool = {
         throw new Error(`程序执行失败（exit ${exit}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
       }
       const out = exit === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${exit}]`
-      // 成功但无输出：明确提示（区分「程序成功无输出」与「stdout 捕获失败」）
-      const final = exit === 0 && !stdout.trim() ? "（程序执行成功，无输出）" : out
+      // 成功但无输出：明确提示（区分「程序成功无输出」与「stdout 捕获失败」）；
+      // 工作目录注记（与 sh 同规则）：project 参数路由/项目绑定时标注实际执行目录
+      const cwdNote = ctx.workdir !== (ctx.sessionWorkdir ?? ctx.workdir) ? `\n（工作目录: ${ctx.workdir}）` : ""
+      const final = exit === 0 && !stdout.trim() ? `（程序执行成功，无输出）${cwdNote}` : out + cwdNote
       return { ...(await truncate(final, "py", ctx)), data: scriptData(stdout, stderr, exit) }
     } finally {
       await rm(scriptPath, { force: true }).catch(() => {})
@@ -2979,19 +2985,20 @@ export const agentLoadTool: Tool = {
 
 export const agentRunTool: Tool = {
   name: "agent_run",
-  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与工具进入新会话），阻塞执行任务直到结束，只返回最终结果文本；执行过程全程存档供历史回放。",
+  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与工具进入新会话），阻塞执行任务直到结束，只返回最终结果文本；执行过程全程存档供历史回放。默认继承全部全局工具（read/write/sh/grep 等，与主会话同名同参）进新会话——子Agent 只需提供独有能力（如 code 的 search_symbols/analyze/git），文件读写查询统一用全局工具。",
   card: { titleParams: ["agents"] },
   parameters: schema(
     {
       agents: { type: "array", items: { type: "string" }, description: "预加载进新会话的子Agent 名称列表（一个或多个，如 [\"code\", \"playwright\"]）" },
       input: { type: "string", description: "任务指令（新会话的初始消息）" },
+      inherit_global_tools: { type: "boolean", description: "是否继承全局工具进新会话（默认 true——新会话与主会话同构的完整工具面；false = 仅预加载子Agent 的工具，依赖全局文件工具的子Agent（如 code）将无法读写文件，慎用）" },
     },
     ["agents", "input"],
   ),
   async execute(args, ctx) {
     const agents = Array.isArray(args.agents) ? args.agents.map(String) : []
     if (!agents.length) return { output: "参数 agents 必须为非空子Agent 名称列表。" }
-    const result = await ctx.runNewSession(agents, String(args.input))
+    const result = await ctx.runNewSession(agents, String(args.input), { inheritGlobalTools: args.inherit_global_tools !== false })
     // 最终返回超长时截断（与其余工具一致）；新会话完整存档原样挂到调用记录（截断只影响主上下文可见的结果文本）
     const safe = !result.output || result.output.length <= TRUNCATE_THRESHOLD ? { output: result.output } : await truncate(result.output, `session_${agents[0]}`, ctx)
     return { output: safe.output, sessionRun: result.archive }
@@ -3015,24 +3022,27 @@ export const fullModeTool: Tool = {
 }
 
 /** 全量全局工具表（不经构建期排除过滤）：构建脚本校验清单用（`scripts/build-tools.ts` 须对全量名单校验，
- *  否则连续两次不同排除清单的构建会误拒上次被排除的名字）。 */
+ *  否则连续两次不同排除清单的构建会误拒上次被排除的名字）。
+ *  文件/路径类工具统一经 projectAware 包装（DESIGN「项目机制」）：默认会话相对路径，project 参数
+ *  （预置项目名/项目根路径/保留名 tmp）切换解析基准——code/explore 等编码类子Agent 不再重复定义文件工具，
+ *  装载与新会话执行直接复用全局同名工具。 */
 export function createAllGlobalTools(): Record<string, Tool> {
   const todoTool = makeTodoTool()
   return {
-    read: readTool,
-    write: writeTool,
-    ls: lsTool,
-    grep: grepTool,
-    glob: globTool,
-    file: fileTool,
-    edit: editTool,
-    patch: patchTool,
-    diff: diffTool,
+    read: projectAware(readTool),
+    write: projectAware(writeTool),
+    ls: projectAware(lsTool),
+    grep: projectAware(grepTool),
+    glob: projectAware(globTool),
+    file: projectAware(fileTool),
+    edit: projectAware(editTool),
+    patch: projectAware(patchTool),
+    diff: projectAware(diffTool),
     flow: makeFlowTool(),
     tool_schemas: toolSchemasTool,
-    sh: shTool,
+    sh: projectAware(shTool, { workdir: true }),
     sh_task: shTaskTool,
-    py: pyTool,
+    py: projectAware(pyTool, { workdir: true }),
     js: jsTool,
     show: showTool,
     // save_tool/delete_tool（HTML 小工具库）不注册为全局工具：由 widgets 子Agent 命名空间暴露（增删改查补齐）

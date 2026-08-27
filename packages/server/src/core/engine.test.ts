@@ -40,7 +40,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "streamwait" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -74,7 +74,7 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "subwrite" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-sub2", name: "code_write", arguments: { path: "out.txt", content: "hi" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sub2", name: "write", arguments: { path: "out.txt", content: "hi" } } }
       yield { type: "done" }
       return
     }
@@ -85,7 +85,7 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "subproj" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-sub2", name: "code_write", arguments: this.toolArgs } }
+      yield { type: "tool_call", toolCall: { id: "tc-sub2", name: "write", arguments: this.toolArgs } }
       yield { type: "done" }
       return
     }
@@ -96,7 +96,7 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "subgrep" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-g2", name: "code_grep", arguments: this.toolArgs } }
+      yield { type: "tool_call", toolCall: { id: "tc-g2", name: "grep", arguments: this.toolArgs } }
       yield { type: "done" }
       return
     }
@@ -127,7 +127,7 @@ class FakeProvider implements LLMProvider {
     if (this.mode === "substream" && this.calls === 2) {
       yield { type: "reasoning", text: "子代理推理过程" }
       yield { type: "text", text: "子代理开始分析" }
-      yield { type: "tool_call", toolCall: { id: "tc-s2", name: "code_todo", arguments: { entries: [] } } }
+      yield { type: "tool_call", toolCall: { id: "tc-s2", name: "todo", arguments: { entries: [] } } }
       yield { type: "done" }
       return
     }
@@ -172,19 +172,19 @@ class FakeProvider implements LLMProvider {
     if (this.mode === "subpipe" && this.calls === 2) {
       yield {
         type: "tool_call",
-        toolCall: { id: "tc-p2", name: "flow", arguments: { steps: [{ id: "q", tool: "code_todo", params: { entries: [] } }] } },
+        toolCall: { id: "tc-p2", name: "flow", arguments: { steps: [{ id: "q", tool: "todo", params: { entries: [] } }] } },
       }
       yield { type: "done" }
       return
     }
-    // loadproj：装载模式（agent_load 后直接用 code_read）下预置项目 project 参数路由验证用
+    // loadproj：装载模式（agent_load 后直接用全局 read）下预置项目 project 参数路由验证用
     if (this.mode === "loadproj" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-l1", name: "agent_load", arguments: { name: "code" } } }
       yield { type: "done" }
       return
     }
     if (this.mode === "loadproj" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-l2", name: "code_read", arguments: this.toolArgs } }
+      yield { type: "tool_call", toolCall: { id: "tc-l2", name: "read", arguments: this.toolArgs } }
       yield { type: "done" }
       return
     }
@@ -196,12 +196,12 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "subself" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-so2", name: "code_write", arguments: { path: "packages/server/src/core/engine.ts", content: "x" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-so2", name: "write", arguments: { path: "packages/server/src/core/engine.ts", content: "x" } } }
       yield { type: "done" }
       return
     }
     if (this.mode === "subself" && this.calls === 3) {
-      yield { type: "tool_call", toolCall: { id: "tc-so3", name: "code_write", arguments: { path: "packages/server/src/sub-agents/new_agent.ts", content: "x" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-so3", name: "write", arguments: { path: "packages/server/src/sub-agents/new_agent.ts", content: "x" } } }
       yield { type: "done" }
       return
     }
@@ -252,9 +252,9 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // autoload：总Agent 未装载 code 直接调用 code_ls（主循环路由自愈：自动装载后执行）
+    // autoload：总Agent 未装载 code 直接调用 code_system_info（主循环路由自愈：自动装载后执行）
     if (this.mode === "autoload" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-al1", name: "code_ls", arguments: { path: "." } } }
+      yield { type: "tool_call", toolCall: { id: "tc-al1", name: "code_system_info", arguments: {} } }
       yield { type: "done" }
       return
     }
@@ -267,14 +267,26 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subautoload：新会话（combo_test 纯 md 组合，未预加载 code）内直接调用 code_ls（新会话循环路由自愈）
+    // subautoload：新会话（combo_test 纯 md 组合，未预加载 code）内直接调用 code_system_info（新会话循环路由自愈）
     if (this.mode === "subautoload" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-sa1", name: "agent_run", arguments: { agents: ["combo_test"], input: "list files" } } }
       yield { type: "done" }
       return
     }
     if (this.mode === "subautoload" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-sa2", name: "code_ls", arguments: { path: "." } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sa2", name: "code_system_info", arguments: {} } }
+      yield { type: "done" }
+      return
+    }
+    // subrisky：安全模式注册期过滤验证——新会话预加载 risky_test（其工具短名 delete 命中风险规则），
+    // 调用 risky_test_delete 报未知工具
+    if (this.mode === "subrisky" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-sr1", name: "agent_run", arguments: { agents: ["risky_test"], input: "delete something" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subrisky" && this.calls === 2) {
+      yield { type: "tool_call", toolCall: { id: "tc-sr2", name: "risky_test_delete", arguments: {} } }
       yield { type: "done" }
       return
     }
@@ -297,7 +309,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "streamwait" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -325,7 +337,10 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
     systemPrompt: "你是测试组合编排 Agent。",
   })
   const provider = new FakeProvider(mode)
-  if (mode === "approval" || mode === "approval2") provider.toolName = "sh"
+  if (mode === "approval" || mode === "approval2") {
+    provider.toolName = "sh"
+    provider.toolArgs = { command: "echo hi" } // 合法参数：缺参调用会被引擎必填校验拦截、到不了审批门
+  }
   const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents, retryBackoffMs: 5, authMode, ...extraOpts })
   // loadConfig 会显式加载项目根 .env（loadDotEnv，如 GEBAI_LLM_MODEL）注入 process.env，
   // 泄漏进 EnvManager.resolve 会污染「无覆盖沿用启动实例」类断言——此处（loadConfig 之后）统一清理
@@ -470,6 +485,25 @@ describe("AgentEngine", () => {
     expect(toolMsg!.toolCallId).toBe("tc-1")
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(home)
+  })
+
+  test("必填参数缺失校验：edit 漏传 path 不执行、明确报缺参（旧版报 tmp\\undefined 类无关 ENOENT 无法自愈）", async () => {
+    const s = await setup("tool")
+    s.provider.toolName = "edit"
+    s.provider.toolArgs = { edits: [{ oldString: "export function sortTodos", newString: "export function sortTodos" }] } // 漏传 path
+    const session = await s.store.createSession("default", "t")
+    await s.engine.run(session.id, "default", "edit it")
+    const loaded = await s.store.load(session.id)
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "edit")
+    expect(toolMsg).toBeDefined()
+    expect(toolMsg!.content).toContain("缺少必填参数")
+    expect(toolMsg!.content).toContain("path")
+    // 旧缺陷形态不再出现：缺失参数被 String() 成字面量 undefined 落进路径解析 → 无关 ENOENT
+    expect(toolMsg!.content).not.toContain("undefined")
+    expect(toolMsg!.content).not.toContain("ENOENT")
+    // 工具未执行（无落盘副作用），模型下一轮补参后正常收尾
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
+    cleanup(s.home)
   })
 
   test("engine fallback truncates oversized tool output (not relying on tool self-truncate)", async () => {
@@ -1004,13 +1038,13 @@ console.log("defined ok")`,
     expect(texts).toContain("子代理完成分析")
     // 新会话最终轮推送 done（仅一条 session 标记的 done：中间工具轮不推 done）
     expect(got.filter((e) => e.type === "event.message.done" && e.session).map((e) => e.text)).toEqual(["子代理完成分析"])
-    // 新会话的推理与工具调用全程推送（与主循环一致）：reasoning 带 session 标记，工具含主循环 agent_run 与新会话内 code_todo
+    // 新会话的推理与工具调用全程推送（与主循环一致）：reasoning 带 session 标记，工具含主循环 agent_run 与新会话内 todo（全局工具继承）
     const reasonings = got.filter((e) => e.type === "event.message.reasoning")
     expect(reasonings.map((e) => e.text)).toEqual(["子代理推理过程"])
     expect(reasonings.every((e) => e.session === true)).toBe(true)
     expect(got.filter((e) => e.type === "event.tool.call").map((e) => [e.name, e.session])).toEqual([
       ["agent_run", undefined],
-      ["code_todo", true],
+      ["todo", true],
     ])
     // 新会话 run 起止事件：start 携带 agents/input（每轮重推、同 runId 幂等，前端容器重建兜底），done 携带最终输出（前端折叠容器标题用）
     const starts = got.filter((e) => e.type === "event.session.start")
@@ -1031,8 +1065,8 @@ console.log("defined ok")`,
     expect(archive.input).toBe("check something")
     expect(archive.output).toBe("子代理完成分析")
     expect(archive.messages[0]).toMatchObject({ role: "user", content: "check something" })
-    expect(archive.messages.some((m) => m.role === "assistant" && m.content.includes("子代理开始分析") && m.toolCalls?.[0]?.name === "code_todo")).toBe(true)
-    expect(archive.messages.some((m) => m.role === "tool" && m.name === "code_todo")).toBe(true)
+    expect(archive.messages.some((m) => m.role === "assistant" && m.content.includes("子代理开始分析") && m.toolCalls?.[0]?.name === "todo")).toBe(true)
+    expect(archive.messages.some((m) => m.role === "tool" && m.name === "todo")).toBe(true)
     expect(archive.messages.some((m) => m.role === "assistant" && m.content.includes("子代理完成分析"))).toBe(true)
     // 存档条目推理独立字段（SessionRunEntry.reasoning，与主循环同规则）：content 纯正文、推理字段携带、无推理轮省略
     expect(archive.messages.find((m) => m.role === "assistant" && m.content.includes("子代理开始分析"))?.reasoning).toBe("子代理推理过程")
@@ -1045,7 +1079,8 @@ console.log("defined ok")`,
     const joined = JSON.stringify(lastChat)
     expect(joined).not.toContain("子代理推理过程")
     expect(joined).not.toContain("子代理开始分析")
-    expect(joined).not.toContain("code_todo")
+    // 新会话内 todo（全局工具继承）的执行结果（查询待办清单文本）不进主上下文
+    expect(joined).not.toContain("待办")
     expect(joined).toContain("agent_run")
     expect(joined).toContain("子代理完成分析")
     cleanup(home)
@@ -1110,8 +1145,8 @@ console.log("defined ok")`,
     const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
     expect(callMsg).toBeDefined()
     const archive = callMsg!.sessionRun!
-    // 新会话内 flow 执行成功：子Agent 工具（code_todo）经会话注册表解析、无「未知工具」错误
-    expect(archive.messages.some((m) => m.role === "tool" && m.name === "flow" && m.content.includes("code_todo"))).toBe(true)
+    // 新会话内 flow 执行成功：全局工具（todo，继承注册）经会话注册表解析、无「未知工具」错误
+    expect(archive.messages.some((m) => m.role === "tool" && m.name === "flow" && m.content.includes("todo"))).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
     cleanup(home)
   })
@@ -1137,12 +1172,12 @@ console.log("defined ok")`,
     const { home, engine, store, provider, subAgents } = await setup("subautoload")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "delegate")
-    // 新会话内 code_ls 经自愈装载执行：无「未知工具」，后续轮次 schema 已含 code_ls、上下文拼接 code 提示词段
+    // 新会话内 code_system_info 经自愈装载执行：无「未知工具」，后续轮次 schema 已含、上下文拼接 code 提示词段
     const callMsg = (await store.load(session.id))!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
     const archive = callMsg!.sessionRun!
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("自动装载子Agent code"))).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
-    expect(provider.seenTools[2]).toContain("code_ls")
+    expect(provider.seenTools[2]).toContain("code_system_info")
     expect(provider.seenChats[2].some((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("源码分析与修改专家"))).toBe(true)
     // 隔离语义：不写全局注册表、不落盘父会话装载记录
     expect(subAgents.isLoaded("code")).toBe(false)
@@ -1833,17 +1868,34 @@ console.log("defined ok")`,
   })
 
   test("safe mode: risky-named sub-agent tools are not registered (unknown tool on call, no side effect)", async () => {
-    const s = await setup("subwrite", false, "local", true) // safeMode=true；子Agent 内调 code_write 写文件
+    const s = await setup("subrisky", false, "local", true) // safeMode=true；新会话预加载 risky_test 并调用其 delete 工具
+    // 动态注册测试子Agent：工具短名 delete 命中安全模式风险规则（注册期过滤），执行体带副作用标记
+    let sideEffect = false
+    s.subAgents.register({
+      name: "risky_test",
+      description: "风险工具测试",
+      systemPrompt: "你是风险工具测试 Agent。",
+      tools: {
+        delete: {
+          name: "delete",
+          description: "删除",
+          parameters: { type: "object", properties: {}, required: [] },
+          execute: async () => {
+            sideEffect = true
+            return { output: "deleted" }
+          },
+        },
+      },
+    })
     const session = await s.store.createSession("default", "t")
-    await s.engine.run(session.id, "default", "write file")
+    await s.engine.run(session.id, "default", "delete file")
     const loaded = await s.store.load(session.id)
-    // 子Agent 风险短名工具（code_write）注册期被 Tool.safeMode 规则过滤：schema 不下发，调用报未知工具
+    // 子Agent 风险短名工具（risky_test_delete）注册期被 Tool.safeMode 规则过滤：schema 不下发，调用报未知工具
     const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
     expect(callMsg).toBeDefined()
-    const subToolMsg = callMsg!.sessionRun!.messages.find((m) => m.role === "tool" && m.name === "code_write")
+    const subToolMsg = callMsg!.sessionRun!.messages.find((m) => m.role === "tool" && m.name === "risky_test_delete")
     expect(subToolMsg?.content).toContain("未知工具")
-    const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "tmp", "out.txt"))).toBe(false)
+    expect(sideEffect).toBe(false)
     // 子Agent 收到未知工具说明后调整（最终正常返回，主循环收尾）
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(s.home)
@@ -2112,16 +2164,16 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
-  test("disabledTools blocks namespaced sub-agent tools ({agent}_{tool})", async () => {
+  test("disabledTools blocks tools in new sessions too (inherited globals filtered)", async () => {
     const s = await setup("subwrite")
-    // 子Agent code 内的 write 工具（code_write）：禁用 write 对命名空间工具同样生效
+    // 新会话继承的全局 write：禁用 write 对新会话同样生效
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "ask code agent to write", { disabledTools: ["write"] })
-    // 子Agent 内的 schema 过滤（code_write 不出现在子Agent 模型调用的工具列表，seenTools[1] 为子Agent 首轮）
-    expect(s.provider.seenTools[1]).not.toContain("code_write")
-    // 子Agent 循环内被调用时阻止执行（禁用说明作为工具结果返回给子Agent 模型）
+    // 新会话内的 schema 过滤（write 不出现在子Agent 模型调用的工具列表，seenTools[1] 为子Agent 首轮）
+    expect(s.provider.seenTools[1]).not.toContain("write")
+    // 新会话循环内被调用时阻止执行（禁用说明作为工具结果返回给子Agent 模型）
     const disabledMsgs = s.provider.seenChats.some((chat) =>
-      chat.some((m) => m.role === "tool" && m.name === "code_write" && String(m.content).includes("当前通道不可用")),
+      chat.some((m) => m.role === "tool" && m.name === "write" && String(m.content).includes("当前通道不可用")),
     )
     expect(disabledMsgs).toBe(true)
     cleanup(s.home)
@@ -2592,11 +2644,13 @@ describe("context compaction", () => {
     expect(sys).toContain("源码分析与修改专家")
     expect(sys).toContain("### self_optimize（")
     expect(sys).toContain("自我优化专家")
-    // 新会话工具集：code_* 通用工具 + self_optimize_* 独有工具并存（不重复注册）
-    expect(s.provider.seenTools[1]).toContain("code_read")
-    expect(s.provider.seenTools[1]).toContain("code_write")
+    // 新会话工具集：继承的全局工具（read/write）+ code_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
+    expect(s.provider.seenTools[1]).toContain("read")
+    expect(s.provider.seenTools[1]).toContain("write")
+    expect(s.provider.seenTools[1]).toContain("code_search_symbols")
     expect(s.provider.seenTools[1]).toContain("self_optimize_run_tests")
     expect(s.provider.seenTools[1]).not.toContain("self_optimize_write")
+    expect(s.provider.seenTools[1]).not.toContain("code_read")
     // 写范围守卫：核心引擎源码被拒（未写入），子Agent 目录放行
     expect(existsSync(join(repo, "packages", "server", "src", "core", "engine.ts"))).toBe(false)
     expect(await Bun.file(join(repo, "packages", "server", "src", "sub-agents", "new_agent.ts")).text()).toBe("x")
@@ -2665,13 +2719,13 @@ describe("context compaction", () => {
     const written = await Bun.file(join(projA, "out.txt")).text()
     expect(written).toBe("hi")
     // 子Agent 系统提示词注入预置项目清单（名称 + 说明 + 路径）
-    const subPrompt = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("预置项目（文件工具可用 project 参数指定")))
+    const subPrompt = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("预置项目（全局文件工具用 project 参数指定项目名")))
     expect(subPrompt).toBeDefined()
     const sysContent = String(subPrompt!.find((m) => m.role === "system")!.content)
     expect(sysContent).toContain("- app: 主业务应用（")
     expect(sysContent).toContain(`- lib（${projB}）`)
     // 环境注记前置：预置项目清单位于静态提示词（工作流）之前，模型开工先读环境
-    const noteIdx = sysContent.indexOf("预置项目（文件工具可用 project 参数指定")
+    const noteIdx = sysContent.indexOf("预置项目（全局文件工具用 project 参数指定项目名")
     const staticIdx = sysContent.indexOf("你是源码分析与修改专家")
     expect(noteIdx).toBeGreaterThanOrEqual(0)
     expect(staticIdx).toBeGreaterThan(noteIdx)
@@ -2693,10 +2747,10 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "analyze project")
     // 总Agent 系统提示词：未装载 code 的描述体现预置项目（名称/说明/路径），但不含子Agent 专属完整注记
     const sys = String(s.provider.seenChats[0].find((m) => m.role === "system")!.content)
-    expect(sys).not.toContain("预置项目（文件工具可用 project 参数指定")
+    expect(sys).not.toContain("预置项目（全局文件工具用 project 参数指定项目名")
     expect(sys).toContain("主业务应用")
     expect(sys).toContain(projA)
-    // 装载后直接用 code_read + project 参数：路由到预置项目根读取文件
+    // 装载后直接用全局 read + project 参数：路由到预置项目根读取文件
     const readChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && typeof m.content === "string" && m.content.includes("# app readme")))
     expect(readChat).toBeDefined()
     rmSync(projA, { recursive: true, force: true })
@@ -2746,8 +2800,8 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "modify file")
     // 非法 JSON 未注入清单；自由路径模式正常写入会话 tmp
     const sysMsgs = s.provider.seenChats.flatMap((msgs) => msgs.map((m) => String(m.content)))
-    expect(sysMsgs.some((c) => c.includes("预置项目（文件工具可用 project 参数指定"))).toBe(false)
-    const writeChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && m.name === "code_write" && typeof m.content === "string" && m.content.includes("已写入")))
+    expect(sysMsgs.some((c) => c.includes("预置项目（全局文件工具用 project 参数指定项目名"))).toBe(false)
+    const writeChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && m.name === "write" && typeof m.content === "string" && m.content.includes("已写入")))
     expect(writeChat).toBeDefined()
     cleanup(s.home)
   })
@@ -2952,7 +3006,7 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     expect(note!.role).toBe("system")
     expect(note!.content).toContain("### code（")
     expect(note!.content).toContain("你是源码分析与修改专家")
-    expect(registry.resolve("code_read")).toBeDefined()
+    expect(registry.resolve("code_search_symbols")).toBeDefined()
     cleanup(home)
   })
 
@@ -2966,7 +3020,7 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     const loaded = await store.load(session.id)
     const note = loaded!.messages.find((m) => m.loadedAgent === "code")
     // 装载模式提示词动态附带预置项目清单（模型按名使用 project 参数，不再盲区）
-    expect(note!.content).toContain("预置项目（文件工具可用 project 参数指定")
+    expect(note!.content).toContain("预置项目（全局文件工具用 project 参数指定项目名")
     expect(note!.content).toContain(`- app: 测试项目（${proj}）`)
     rmSync(proj, { recursive: true, force: true })
     cleanup(home)
@@ -3051,7 +3105,7 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     const engine2 = new AgentEngine({ provider: provider2, registry: registry2, store, env, sandbox, events, config, subAgents: subAgents2, retryBackoffMs: 5, authMode: "local" })
     // 重启后恢复会话：工具注册还原 + 提示词消息透传进模型上下文
     await engine2.run(session.id, "default", "continue")
-    expect(registry2.resolve("code_read")).toBeDefined()
+    expect(registry2.resolve("code_search_symbols")).toBeDefined()
     const first = provider2.seenChats[0]
     expect(first!.some((m) => m.role === "system" && String(m.content).includes("你是源码分析与修改专家"))).toBe(true)
     cleanup(home)
