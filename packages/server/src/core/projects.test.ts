@@ -101,6 +101,21 @@ describe("项目机制（core/projects，全局工具 project 参数）", () => 
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("projectAware 把 project 并入卡片头 titleParams：传 project 时「操作哪个项目」卡片头可见", () => {
+    const mk = (card?: Tool["card"]): Tool => ({ name: "t", description: "", parameters: { type: "object", properties: {} }, ...(card ? { card } : {}), execute: async () => ({ output: "" }) })
+    // 带 titleParams 的 card：前插 project、其余字段保留
+    const withCard = projectAware(mk({ titleParams: ["path"], file: "path" }))
+    expect(withCard.card?.titleParams).toEqual(["project", "path"])
+    expect(withCard.card?.file).toBe("path")
+    // 无 titleParams 的 card：获得仅含 project 的 titleParams（未传 project 时卡片头不变）
+    const bareCard = projectAware(mk({ args: "code", codeField: "command" }))
+    expect(bareCard.card?.titleParams).toEqual(["project"])
+    expect(bareCard.card?.codeField).toBe("command")
+    // 无 card：不新增；titleParams 已含 project：不重复插入
+    expect(projectAware(mk()).card).toBeUndefined()
+    expect(projectAware(mk({ titleParams: ["project", "path"] })).card?.titleParams).toEqual(["project", "path"])
+  })
+
   test("会话工作区真实读写经保留名 tmp 打通（绑定项目根的会话内附件/中间文件仍可操作）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
     const bound = join(home, "proj-root")

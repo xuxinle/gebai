@@ -38,9 +38,16 @@ export function resolveProjectRoot(project: string, ctx: ToolContext): string {
  */
 export function projectAware(tool: Tool, opts: { workdir?: boolean } = {}): Tool {
   const parameters = { ...tool.parameters, properties: { ...tool.parameters.properties, ...PROJECT_PARAM } }
+  // 卡片头并入 project 参数（带 card 的工具在 titleParams 前插 project）：传了 project 时工具卡片头显示
+  // project=… · path=…——「这次操作的是哪个项目」一眼可见（相对路径不再缺上下文）；未传时前端跳过
+  // 缺失参数、按实际存在的单值裸显，卡片头形态不变
+  const card = tool.card && !tool.card.titleParams?.includes("project")
+    ? { ...tool.card, titleParams: ["project", ...(tool.card.titleParams ?? [])] }
+    : tool.card
   return {
     ...tool,
     parameters,
+    card,
     async execute(args, ctx) {
       const project = args.project ? String(args.project) : ""
       // 受限模式（CODE_RESTRICT_PROJECTS=true）：仅允许操作预配置项目——未传 project 且无绑定根时，

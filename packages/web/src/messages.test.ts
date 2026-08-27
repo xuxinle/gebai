@@ -769,6 +769,22 @@ describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式�
     expect(head?.textContent).toContain("b=x")
   })
 
+  test("project 参数入卡片头：传了显示 project=… · path=…（相对路径不再缺项目上下文），未传保持单值裸显", () => {
+    __setToolCardMetaForTest([["read", { titleParams: ["project", "path"] }]])
+    const withProj = toolBubbleFor({ id: "tp1", role: "tool", name: "read", content: "", arguments: { project: "todo-app", path: "src/main.ts" }, createdAt: 0 }, "")
+    const head1 = withProj.querySelector("div.tool-head")
+    expect(head1?.textContent).toContain("project=todo-app")
+    expect(head1?.textContent).toContain("path=src/main.ts")
+    // project 已入头部：参数区不重复展示（无键值行）
+    expect(withProj.querySelectorAll("div.tool-kv-row").length).toBe(0)
+    // 未传 project：实际存在的参数仅 path 一个 → 裸值显示（不出现 path= 前缀），与既有形态一致
+    const noProj = toolBubbleFor({ id: "tp2", role: "tool", name: "read", content: "", arguments: { path: "src/main.ts" }, createdAt: 0 }, "")
+    const head2 = noProj.querySelector("div.tool-head")
+    expect(head2?.textContent).toContain("src/main.ts")
+    expect(head2?.textContent).not.toContain("path=")
+    expect(head2?.textContent).not.toContain("project")
+  })
+
   test("超长标题参数智能截断入头部：路径型保留尾部，悬浮 title 见全文，参数区不重复", () => {
     const long = `very/long/path/${"nested/".repeat(20)}file.ts`
     __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])
