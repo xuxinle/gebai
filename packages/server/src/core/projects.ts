@@ -7,7 +7,7 @@ import { resolveInSandbox } from "./paths"
 export const RESERVED_PROJECT_TMP = "tmp"
 
 export const PROJECT_PARAM = {
-  project: { type: "string", description: `项目名（预置清单项）、项目根路径（自由项目，绝对/相对均可）或保留名 ${RESERVED_PROJECT_TMP}（会话工作区）；传入时路径参数相对所选根解析（沙箱模式限定该根内），未传时相对会话工作目录` },
+  project: { type: "string", description: `项目根：预置项目名/项目根路径/保留名 ${RESERVED_PROJECT_TMP}（会话工作区）——传入后相对路径与工作目录按此根解析` },
 }
 
 /** project 参数值是否为路径形态（区别于预置项目名）：绝对路径或含路径分隔/以 . ~ 开头的相对路径。 */
