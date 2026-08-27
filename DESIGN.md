@@ -847,6 +847,7 @@ export const preload = false
   - `word_append`：**原 XML 拼接**——原文档格式/样式/图片原样保留，新内容以直接格式化 XML 插入 body 级 `sectPr` 之前（fflate 解包 → 生成片段 → 图片/超链接补 `document.xml.rels` 关系、媒体入包、`[Content_Types].xml` 补扩展声明 → 重打包；**写前回读校验**，失败不落盘防损坏用户文档）
   - `excel_write` / `excel_read` / `excel_edit`：全量建表（多工作表；单元格标量或 `{value, bold, italic, color, fill, fontSize, align, wrap, numberFormat, border}`；`=` 开头字符串自动按公式；列宽/合并/冻结 `A2`/自动筛选）；读取（不传 sheet 返回概览；markdown（默认）/json（rows 入 data 供 flow 编排）/csv 三种输出；`range`（A1:D20 或 A:D）/`maxRows`/`formulas`；.csv/.tsv 文本表格兼容）；ops 批量编辑（`set` 设值设样式 / 行列增删 / `add_sheet`·`rename_sheet`·`delete_sheet` / `merge`·`unmerge` / `col_width`·`row_height` / `freeze`·`autofilter`，各项可带 sheet 指定目标表；改完回读校验）
   - `ppt_create` / `ppt_read`：简式页（title/subtitle/bullets/notes/background）与自由元素版式（`elements`：text 文本框/image 嵌图（会话/项目内路径，自动探测像素尺寸）/table 表格/chart 图表（bar/hbar/line/area/pie/doughnut/scatter，data `[{name, labels, values}]`）/shape 形状，坐标英寸）；layout wide（16:9 13.33×7.5 默认）/4x3/自定义尺寸，theme 全局字体字号色；读取回每页文本（首个文本框按标题标记）/表格/备注（剔除页码占位符）/图表与图片计数
+- **阅读视图预览（前端内联渲染）**：docx/xlsx/xlsm/pptx 的文件卡与「原文件」弹窗不再是二进制占位——前端按 office 类型取数 `files/preview?path=…&render=office`（服务端 `wps/preview.ts` 复用读取模型渲染结构化 HTML：Word 标题/列表/表格/图片按出现顺序 data URI 内嵌（单图 ≤2MB、总量 ≤8MB 超额降级为标记）、Excel 按工作表出带样式表格（字体/底色/对齐、合并单元格 rowspan/colspan，500 行 × 64 列截断）、PPT 逐页大纲（标题/表格/图表标记/备注）），沙箱 iframe 承载（同 html 分支）；内容全量 HTML 转义，**不还原精确分页与版式**（阅读视图口径，头部 meta 行明示）；渲染失败（损坏文件/非 office 扩展名 → 422）回退二进制占位与下载引导；渲染器在 app 层**惰性引入**（解析较重不拖启动），解析单一真相源仍在 wps
 - **审批与安全**：全部免审批（本地文件产物无外部副作用，与全局文件工具姿态一致）；**防盲覆盖守卫在工具体内**（目标已存在且本会话未读取过 → 拒绝；读取类工具与全局 read 共享会话已读追踪 `fileGuard`，exceljs 类修改工具天然先读后写）；写类工具显式 `safeMode: false`（安全模式不提供——文档生成必然落盘），读类工具默认注册（实现只读）；路径经 `resolvePath` 沙箱约束、写前经 `writeGuard`（self_optimize 等装载期写范围政策同规则生效）
 - **工作流（提示词内置）**：明确需求（素材先浏览，不编造）→ 大纲先行（正式/大型文档 ask 确认）→ 分段生成（超长 Word 先 create 后 append，避免单次输出截断）→ 读回校验 → 交付路径与摘要；排版规范内置（Word 标题不超三级、Excel 首行表头+冻结+筛选、PPT 一页一主题 3~5 要点、图表选型指引）；数据类需求先 py/js 加工再写入
 - **限制**：旧版二进制格式 .doc/.xls/.ppt 不支持（提示在 Office/WPS 另存为 OOXML）；PDF 导出经 sh 检测并调用 LibreOffice `soffice --headless --convert-to pdf`（宿主机存在时）；exceljs 不计算公式——读取时无缓存值回显公式原文
@@ -1027,12 +1028,13 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 - **安全边界**：文件操作严格限定在会话 `tmp/` 内，路径解析复用路径沙箱（拒绝 `../`、绝对路径、符号链接），仅会话所有者可访问；**列表仅暴露 `tmp/` 子树**（`chat.json`/`cron.json`/`todo.json` 等会话数据文件不列出），REST/WS 文件接口的路径解析统一以 `tmp/` 为根并兼容 `tmp/` 前缀（旧附件/截断引用路径）
 - **文件预览（`files/preview`，文件卡/文件链接取数入口）**：`read`/`write` 产物 file 块的路径为**服务端解析后的真实路径**（工具执行时按会话 `tmp/` 真实绝对路径（`sessionPath` 拼接——项目绑定工具的 workdir 是项目根不能作判定依据）归属判定：会话内 → `tmp/` 逻辑路径，code 项目文件（project 参数/预置项目解析后）→ 绝对路径），前端「文件展示方式=弹窗查看」时产物 file 块收敛为**文件链接 chip**（点击弹窗查看）、嵌入模式下文件内容卡取数同样可用（原始参数路径在项目工具下无法由 files 接口解析的 404 缺陷由此修复）；取数统一走 `GET /sessions/:id/files/preview?path=`：**相对路径以会话 `tmp/` 为根**（与 content 同规则），**绝对路径按用户隔离边界放行**——沙箱用户仅允许本用户数据目录（`users/{user}/`，与文件工具 project 参数经 `resolveInSandbox(root=users/{user})` 的可达范围一致，含符号链接逃逸检查），非沙箱（本地模式操作者本人，与文件工具能力对齐）放开；`?download=1` 以附件形式返回（文件卡/chip 的下载入口），前端不猜测路径解析
 - **与截断内容联动**：上下文保护落盘的截断文件也可在 UI 中直接查看/下载
+- **Office 阅读视图（`?render=office`）**：docx/xlsx/xlsm/pptx 的文件卡/弹窗内联渲染——前端按 office 类型在 preview URL 上追加 `render=office`，服务端经 wps 子Agent 的读取模型输出结构化 HTML（沙箱 iframe 承载，详见「`wps`（Office 文档处理）」章节「阅读视图预览」条目）；非 office 扩展名或损坏文件返回 422，前端回退二进制占位与下载引导
 - **用途**：用户随时检视 Agent 工作产物（生成的报告、脚本、数据文件），无需进入文件系统
 
 #### 接口
 
 - WS：`session.files.list` / `session.files.get`
-- REST：`GET /api/v1/sessions/:id/files`、`/files/content`（?path=）、`/files/download`（?path= 单文件 / POST body {paths} 多选 zip 打包）、`/files/preview`（?path= &download= 文件预览：会话相对/项目绝对路径统一入口，点击弹窗查看用）
+- REST：`GET /api/v1/sessions/:id/files`、`/files/content`（?path=）、`/files/download`（?path= 单文件 / POST body {paths} 多选 zip 打包）、`/files/preview`（?path= &download= &render=office 文件预览：会话相对/项目绝对路径统一入口，点击弹窗查看用；render=office 返回 docx/xlsx/xlsm/pptx 阅读视图 HTML）
 - SDK：`listSessionFiles(sessionId)` / `readSessionFile(sessionId, path)` / `downloadSessionFile(sessionId, path)` / `downloadFilesZip(sessionId, paths)`
 
 ### 日志系统

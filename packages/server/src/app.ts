@@ -490,6 +490,18 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
       return c.json({ error: `file not found: ${path}` }, 404)
     }
     if (!isFile) return c.json({ error: `not a file: ${path}` }, 404)
+    // Office 阅读视图（wps 文档预览，DESIGN「文件链接弹窗查看」）：docx/xlsx/xlsm/pptx 按本参数返回
+    // 结构化 HTML（前端文件卡/弹窗 iframe 渲染）；渲染器惰性引入（exceljs/docx 解析较重，不拖启动），
+    // 解析单一真相源在 wps 子Agent。非法/损坏文件 422（前端回退二进制占位与下载引导）。
+    if (c.req.query("render") === "office") {
+      const { renderOfficeReadingView } = await import("./sub-agents/wps/preview")
+      try {
+        const html = await renderOfficeReadingView(safe)
+        return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
+      } catch (err) {
+        return c.json({ error: `office 阅读视图渲染失败: ${(err as Error).message}` }, 422)
+      }
+    }
     const headers: Record<string, string> = {}
     if (c.req.query("download") === "1") headers["Content-Disposition"] = `attachment; filename="${encodeURIComponent(path.replace(/\\/g, "/").split("/").pop() || "file")}"`
     return new Response(Bun.file(safe), { headers })
@@ -744,7 +756,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
         "/api/v1/sessions/{id}/files": { get: { summary: "会话临时文件列表" } },
         "/api/v1/sessions/{id}/files/content": { get: { summary: "读取文件内容" } },
         "/api/v1/sessions/{id}/files/download": { get: { summary: "下载单文件" }, post: { summary: "多选打包下载（zip）" } },
-        "/api/v1/sessions/{id}/files/preview": { get: { summary: "文件预览（会话相对/项目绝对路径，点击弹窗查看用）" } },
+        "/api/v1/sessions/{id}/files/preview": { get: { summary: "文件预览（会话相对/项目绝对路径，点击弹窗查看用；?render=office 返回 docx/xlsx/xlsm/pptx 阅读视图 HTML）" } },
         "/api/v1/tools": { get: { summary: "工具集查询" }, patch: { summary: "工具启停" } },
         "/api/v1/sub-agents": { get: { summary: "子Agent 能力列表" } },
         "/api/v1/feedback": { get: { summary: "反馈查询（管理员可全部）" }, post: { summary: "提交反馈" } },

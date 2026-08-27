@@ -97,6 +97,29 @@ describe("REST API", () => {
     expect(miss.status).toBe(404)
   })
 
+  test("files/preview render=office：docx 返回阅读视图 HTML（text/html），非 office 类型 422", async () => {
+    const created = await (await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "off" }) })).json() as { id: string }
+    const dir = join(sessionPath(home, "admin", created.id), "tmp")
+    mkdirSync(dir, { recursive: true })
+    const { Document, Packer, Paragraph, HeadingLevel } = await import("docx")
+    const doc = new Document({
+      sections: [{ children: [new Paragraph({ text: "集成阅读视图标题", heading: HeadingLevel.HEADING_1 }), new Paragraph("正文段落")] }],
+    })
+    writeFileSync(join(dir, "r.docx"), await Packer.toBuffer(doc))
+    writeFileSync(join(dir, "t.txt"), "plain")
+    const res = await fetch(`${base()}/api/v1/sessions/${created.id}/files/preview?path=${encodeURIComponent("tmp/r.docx")}&render=office`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("text/html")
+    const html = await res.text()
+    expect(html).toContain("<h1>")
+    expect(html).toContain("集成阅读视图标题")
+    expect(html).toContain("正文段落")
+    expect(html).toContain("阅读视图")
+    // 非 office 扩展名：文件存在但无阅读视图形态 → 422（前端回退二进制占位）
+    const bad = await fetch(`${base()}/api/v1/sessions/${created.id}/files/preview?path=${encodeURIComponent("tmp/t.txt")}&render=office`)
+    expect(bad.status).toBe(422)
+  })
+
   test("serves built web UI at / when present", async () => {
     const res = await fetch(`${base()}/`)
     if (res.status === 200) {

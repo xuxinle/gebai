@@ -105,7 +105,8 @@ function fmtScalar(v: unknown): string {
   return String(v)
 }
 
-function cellText(cell: Cell, formulas: boolean): string {
+/** 单元格值 → 展示文本（读取与阅读视图预览共用：公式默认显示计算值、无缓存值回显公式原文）。 */
+export function cellText(cell: Cell, formulas: boolean): string {
   const v: unknown = cell.value
   if (v == null || v === "") return ""
   if (v instanceof Date) return fmtScalar(v)

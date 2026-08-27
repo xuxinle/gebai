@@ -31,10 +31,12 @@ export function langForFile(name: string, mime: string): string {
 /** 卡内文本渲染上限（与服务端 SHOW_TEXT_MAX_CHARS 同口径；超出截断 + 引导原文件查看）。 */
 const CARD_TEXT_MAX_CHARS = 40_000
 
-/** 文件渲染形态分类（卡内与「原文件」弹窗共用分派）。 */
-function fileKind(name: string, mime: string): "image" | "pdf" | "html" | "markdown" | "text" | "binary" {
+/** 文件渲染形态分类（卡内与「原文件」弹窗共用分派）。office = docx/xlsx/pptx 阅读视图
+ *  （服务端 files/preview?render=office 输出结构化 HTML，前端沙箱 iframe 渲染）。 */
+function fileKind(name: string, mime: string): "image" | "pdf" | "html" | "markdown" | "text" | "office" | "binary" {
   if (mime.startsWith("image/")) return "image"
   if (mime === "application/pdf") return "pdf"
+  if (mime.startsWith("application/vnd.openxmlformats-officedocument") || /\.(docx|xlsx|xlsm|pptx)$/i.test(name)) return "office"
   if (mime === "text/html" || /\.html?$/i.test(name)) return "html"
   const lang = langForFile(name, mime)
   if (lang === "markdown") return "markdown"
@@ -157,6 +159,17 @@ function previewShell(name: string, download?: { sessionId: string; path: string
   return { overlay, body }
 }
 
+/** 拉取 Office 阅读视图 HTML（files/preview?render=office）：失败返回 null（调用方回退占位提示）。 */
+async function fetchOfficeView(sessionId: string, path: string): Promise<string | null> {
+  try {
+    const r = await fetch(`${filesPreview(sessionId, path)}&render=office`)
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    return await r.text()
+  } catch {
+    return null
+  }
+}
+
 /** 按文件名推断下载徽标（mime 缺省时的兜底展示）。 */
 function kindBadge(kind: ReturnType<typeof fileKind>): string | undefined {
   if (kind === "pdf") return "PDF"
@@ -241,6 +254,17 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
   // 其余形态需 fetch：进入视口后按需加载（历史长会话不产生全量请求）
   whenVisible(card, () => {
     if (body.firstChild && (body.firstChild as HTMLElement).className === "file-pending") body.textContent = ""
+    if (kind === "office") {
+      // Office 阅读视图（服务端渲染 HTML）：失败回退占位提示（下载入口在卡片头部常驻）
+      void fetchOfficeView(sessionId, b.path).then((html) => {
+        if (html === null) {
+          body.appendChild(el("div", "file-fallback", "📦 该文档无法渲染为阅读视图（可能已损坏），可点击卡片头部「下载」获取文件"))
+          return
+        }
+        body.appendChild(previewFrame(sandboxedHtml(html)))
+      })
+      return
+    }
     if (kind === "binary") {
       // 二进制无内联形态：占位提示（下载入口在卡片头部常驻）
       body.appendChild(el("div", "file-fallback", "📦 该类型无内联预览，可点击卡片头部「下载」获取文件"))
@@ -296,6 +320,17 @@ export function openFilePreview(sessionId: string, name: string, path: string, m
     frame.title = name
     frame.style.cssText = "width:100%;height:72vh;border:0;border-radius:8px;background:#fff"
     body.appendChild(frame)
+    return
+  }
+  if (kind === "office") {
+    // Office 阅读视图：服务端渲染的结构化 HTML（标题/表格/图片/幻灯片大纲），沙箱 iframe 承载
+    void fetchOfficeView(sessionId, path).then((html) => {
+      if (html === null) {
+        body.appendChild(blockText("该文档无法渲染为阅读视图（可能已损坏），可点击标题栏「下载」获取文件。"))
+        return
+      }
+      body.appendChild(previewFrame(sandboxedHtml(html)))
+    })
     return
   }
   void fetch(filesPreview(sessionId, path))
