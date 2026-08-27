@@ -1919,8 +1919,8 @@ export const gitTool: Tool = {
       dir: { type: "string", description: "Git 仓库目录（默认会话工作目录）" },
       staged: { type: "boolean", description: "diff 是否查看暂存区（--staged），默认否" },
       maxEntries: { type: "integer", description: "log 条数（默认 10，上限 50）" },
-      ref: { type: "string", description: "show 的目标：提交哈希/分支/tag/HEAD~n 等（默认 HEAD）" },
-      path: { type: "string", description: "ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts）；grep 的搜索范围限定（可选）" },
+      ref: { type: "string", description: "diff/log/show 的 Git 引用：提交哈希/分支/tag/HEAD~n/范围（main..dev）等（show 默认 HEAD；diff/log 不传则工作区/当前分支）" },
+      path: { type: "string", description: "路径过滤（可带目录/文件前缀）：diff/log/show 限定该路径的变更（-- <path>）；ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts）；grep 的搜索范围限定（可选）" },
       pattern: { type: "string", description: "grep 的搜索模式（basic 正则，如 foo\\.bar、error|warn）" },
     },
     ["action"],
@@ -1937,29 +1937,30 @@ export const gitTool: Tool = {
   async execute(args, ctx) {
     const action = String(args.action)
     const dir = ctx.resolvePath(args.dir ? String(args.dir) : ".")
+    // ref/path 内嵌参数（引号拼接）：safeGitArg 元字符校验后拼入命令（path 在 diff/log/show/ls-files/grep 通用）
+    const ref = args.ref ? String(args.ref) : ""
+    const path = args.path ? String(args.path) : ""
+    if (ref && !safeGitArg(ref)) return { output: `git: 非法 ref（含命令元字符）: ${ref}` }
+    if (path && !safeGitArg(path)) return { output: `git: 非法 path（含命令元字符）: ${path}` }
+    const pathSuffix = path ? ` -- "${path}"` : ""
+    const refPart = ref ? ` "${ref}"` : ""
     let cmd = ""
     if (action === "status") cmd = "git status --short --branch"
-    else if (action === "diff") cmd = args.staged === true ? "git diff --staged --no-color" : "git diff --no-color"
+    else if (action === "diff") cmd = `git diff${args.staged === true ? " --staged" : ""} --no-color${refPart}${pathSuffix}`
     else if (action === "log") {
       const n = Math.min(Math.max(Number(args.maxEntries ?? GIT_DEFAULT_LOG) || GIT_DEFAULT_LOG, 1), GIT_MAX_LOG)
-      cmd = `git log --oneline -n ${n}`
+      cmd = `git log --oneline -n ${n}${refPart}${pathSuffix}`
     } else if (action === "show") {
-      const ref = args.ref ? String(args.ref) : "HEAD"
-      if (!safeGitArg(ref)) return { output: `git: 非法 ref（含命令元字符）: ${ref}` }
-      cmd = `git show --no-color "${ref}"`
+      cmd = `git show --no-color "${ref || "HEAD"}"${pathSuffix}`
     } else if (action === "branch") {
       cmd = "git branch -a -v --no-color"
     } else if (action === "ls-files") {
-      const path = args.path ? String(args.path) : ""
-      if (path && !safeGitArg(path)) return { output: `git: 非法 path（含命令元字符）: ${path}` }
       cmd = path ? `git ls-files -- "${path}"` : "git ls-files"
     } else if (action === "grep") {
       const pattern = args.pattern ? String(args.pattern) : ""
       if (!pattern.trim()) return { output: "git: grep 需要 pattern（basic 正则搜索模式）。" }
       if (!safeGitPattern(pattern)) return { output: `git: 非法 pattern（含引号内活动元字符 " % $ 反引号——请改写模式或用 grep 工具）: ${pattern.slice(0, 60)}` }
-      const path = args.path ? String(args.path) : ""
-      if (path && !safeGitArg(path)) return { output: `git: 非法 path（含命令元字符）: ${path}` }
-      cmd = `git grep -n -I --no-color -e "${pattern}"${path ? ` -- "${path}"` : ""}`
+      cmd = `git grep -n -I --no-color -e "${pattern}"${pathSuffix}`
     } else return { output: `git: 未知操作: ${action}（status/diff/log/show/branch/ls-files/grep）` }
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: dir })
     if (code !== 0) return { output: `git ${action} 失败（exit ${code}，目录 ${args.dir || "."} 可能不是 Git 仓库）:\n${stderr || stdout}` }
@@ -2992,13 +2993,17 @@ export const agentRunTool: Tool = {
       agents: { type: "array", items: { type: "string" }, description: "预加载进新会话的子Agent 名称列表（一个或多个，如 [\"code\", \"playwright\"]）" },
       input: { type: "string", description: "任务指令（新会话的初始消息）" },
       inherit_global_tools: { type: "boolean", description: "是否继承全局工具进新会话（默认 true——新会话与主会话同构的完整工具面；false = 仅预加载子Agent 的工具，依赖全局文件工具的子Agent（如 code）将无法读写文件，慎用）" },
+      inherit_global_prompt: { type: "boolean", description: "是否注入总Agent 全局系统提示词进新会话（默认 false——仅子Agent 提示词，上下文最省；true = 主会话身份/行为约定/编排指引随提示词带入，适合需要子Agent 遵循主会话行为约定的复合任务）" },
     },
     ["agents", "input"],
   ),
   async execute(args, ctx) {
     const agents = Array.isArray(args.agents) ? args.agents.map(String) : []
     if (!agents.length) return { output: "参数 agents 必须为非空子Agent 名称列表。" }
-    const result = await ctx.runNewSession(agents, String(args.input), { inheritGlobalTools: args.inherit_global_tools !== false })
+    const result = await ctx.runNewSession(agents, String(args.input), {
+      inheritGlobalTools: args.inherit_global_tools !== false,
+      inheritGlobalPrompt: args.inherit_global_prompt === true,
+    })
     // 最终返回超长时截断（与其余工具一致）；新会话完整存档原样挂到调用记录（截断只影响主上下文可见的结果文本）
     const safe = !result.output || result.output.length <= TRUNCATE_THRESHOLD ? { output: result.output } : await truncate(result.output, `session_${agents[0]}`, ctx)
     return { output: safe.output, sessionRun: result.archive }

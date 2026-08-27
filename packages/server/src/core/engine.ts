@@ -11,7 +11,7 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
 import { RESERVED_PROJECT_TMP } from "./projects"
@@ -1683,7 +1683,9 @@ export class AgentEngine {
         const { createDiagramRenderer } = await import("./diagram-render")
         return createDiagramRenderer().renderPng(code, { format: opts?.format, background: opts?.background, maxWidth: opts?.maxWidth, maxHeight: opts?.maxHeight })
       },
-      listFiles: () => store.listSessionFiles(sessionId, user),
+      // 文件清单基准与路径解析基准一致：绑定项目根（agent_run 新会话 {AGENT}_PROJECT）时列出项目文件树
+      // （search_symbols 等以 listFiles 为扫描清单的工具随项目根生效）；默认列出会话 tmp 子树
+      listFiles: () => (resolveRoot ? walkDirFiles(resolveRoot) : store.listSessionFiles(sessionId, user)),
       listDir: async (p) => {
         const { readdir, stat } = await import("node:fs/promises")
         const entries = await readdir(p, { withFileTypes: true })
@@ -1769,7 +1771,8 @@ export class AgentEngine {
         if (opts?.loadIntoRegistry) self.registerIntoRegistry(opts.loadIntoRegistry, String(name))
       },
       // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；
-      // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；深度 +1 限制递归嵌套
+      // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；inheritGlobalPrompt（默认 false）= 总Agent
+      // 全局提示词注入新会话；深度 +1 限制递归嵌套
       runNewSession: (agents, input, opts) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1, opts),
       // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
       // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
@@ -2405,7 +2408,10 @@ export class AgentEngine {
   /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，
    *  模块语义的「装载」在独立上下文生效）后执行任务，阻塞返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。
    *  inheritGlobalTools（默认 true）：全局工具一并注册进新会话——与主会话同构的完整工具面（文件读写查询
-   *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）。 */
+   *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）。
+   *  inheritGlobalPrompt（默认 false）：总Agent 全局系统提示词（buildSystemPrompt——身份/行为约定/编排指引）
+   *  作为新会话系统提示词前缀注入，适合需要子Agent 遵循主会话行为约定的复合任务；提示词中的路径/工具
+   *  可用性描述以新会话实际为准（附注说明）。 */
   private async runNewSession(
     sessionId: string,
     user: string,
@@ -2414,7 +2420,7 @@ export class AgentEngine {
     input: string,
     signal: AbortSignal,
     depth = 0,
-    opts: { inheritGlobalTools?: boolean } = {},
+    opts: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean } = {},
   ): Promise<{ output: string; archive: SessionRunArchive }> {
     // 加固：去重 + 数量上限（异常/恶意调用拼装超大提示词会撑爆上下文）
     agents = [...new Set(agents)]
@@ -2489,10 +2495,15 @@ export class AgentEngine {
     const globalsNote = inheritGlobals
       ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/diff/sh/py/fetch_url/todo/ask/agent_run 等，与主会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
       : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（flow/tool_schemas/js）。`
+    // 全局提示词注入（inherit_global_prompt=true）：总Agent 主系统提示词作为前缀（单源复用 buildSystemPrompt，
+    // 不复刻）；其中路径基准/工具清单等环境描述以本新会话实际为准，附注消歧
+    const globalPromptPart = opts.inheritGlobalPrompt
+      ? `以下为总Agent 全局系统提示词（主会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
+      : ""
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n${globalsNote}\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n${globalsNote}\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${globalPromptPart}${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]

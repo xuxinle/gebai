@@ -2630,11 +2630,21 @@ describe("git tool", () => {
     const plain = await gitTool.execute({ action: "diff" }, c)
     expect(plain.output).toContain("无变更")
     await gitTool.execute({ action: "diff", staged: true }, c)
-    expect(seen).toEqual(["git diff --no-color", "git diff --staged --no-color"])
+    // ref+path 组合：`git diff <ref> -- <path>` 限定范围（含 staged 组合）
+    await gitTool.execute({ action: "diff", ref: "HEAD~2", path: "src/a.ts" }, c)
+    await gitTool.execute({ action: "diff", staged: true, ref: "main", path: "src/" }, c)
+    const evilDiff = await gitTool.execute({ action: "diff", ref: 'x" && del' }, c)
+    expect(seen).toEqual([
+      "git diff --no-color",
+      "git diff --staged --no-color",
+      'git diff --no-color "HEAD~2" -- "src/a.ts"',
+      'git diff --staged --no-color "main" -- "src/"',
+    ])
+    expect(evilDiff.output).toContain("非法 ref")
     cleanup(home)
   })
 
-  test("log caps maxEntries at 50", async () => {
+  test("log caps maxEntries at 50; ref+path 限定范围", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-git-log-"))
     const c = ctx(home)
     const seen: string[] = []
@@ -2643,7 +2653,8 @@ describe("git tool", () => {
       return { stdout: "a1 commit1\n", stderr: "", code: 0 }
     }
     await gitTool.execute({ action: "log", maxEntries: 999 }, c)
-    expect(seen).toEqual(["git log --oneline -n 50"])
+    await gitTool.execute({ action: "log", ref: "main..dev", path: "packages/server/" }, c)
+    expect(seen).toEqual(["git log --oneline -n 50", 'git log --oneline -n 10 "main..dev" -- "packages/server/"'])
     cleanup(home)
   })
 
@@ -2663,19 +2674,22 @@ describe("git tool", () => {
     expect(show.output).toContain("commit abc")
     await gitTool.execute({ action: "show", ref: "HEAD~2" }, c)
     expect(seen[1]).toBe('git show --no-color "HEAD~2"')
+    // ref+path 组合：某提交限定路径的变更（git show <ref> -- <path>）
+    await gitTool.execute({ action: "show", ref: "abc123", path: "src/a.ts" }, c)
+    expect(seen[2]).toBe('git show --no-color "abc123" -- "src/a.ts"')
     // 注入形态拒绝（引号/管道/& 等 cmd 元字符）
     const evil = await gitTool.execute({ action: "show", ref: 'x" & del /f' }, c)
     expect(evil.output).toContain("非法 ref")
     // branch：本地+远程清单
     const branch = await gitTool.execute({ action: "branch" }, c)
-    expect(seen[2]).toBe("git branch -a -v --no-color")
+    expect(seen[3]).toBe("git branch -a -v --no-color")
     expect(branch.output).toContain("master")
     // ls-files：无 path 与带 path（-- 分隔防选项注入）
     const ls = await gitTool.execute({ action: "ls-files" }, c)
     expect(ls.output).toContain("src/a.ts")
     expect((ls.data as { files: string[] }).files).toEqual(["src/a.ts", "src/b.ts"])
     await gitTool.execute({ action: "ls-files", path: "src/*.ts" }, c)
-    expect(seen[4]).toBe('git ls-files -- "src/*.ts"')
+    expect(seen[5]).toBe('git ls-files -- "src/*.ts"')
     const evilPath = await gitTool.execute({ action: "ls-files", path: "a&b" }, c)
     expect(evilPath.output).toContain("非法 path")
     cleanup(home)

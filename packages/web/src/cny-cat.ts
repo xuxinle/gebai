@@ -12,8 +12,9 @@ const CAT_HEIGHT = 95
 const POS_KEY = "gebai.ui.cnyCat"
 /** 点击/拖动判定阈值（px 累计位移）：超过视为拖动，未超过视为点击。 */
 const MOVE_THRESHOLD = 6
-/** 拖动轨迹撒币间隔（ms）：每拍一枚小金币 + 半数概率一张小纸币。 */
-const TRAIL_INTERVAL = 30
+/** 拖动轨迹撒币间距（px 累计位移）：每挪动一程撒一枚小金币 + 半数概率一张小纸币——按距离而非
+ *  时间节流，拖快拖慢撒币密度恒定（按时间会在快速拖动时稀稀拉拉）。 */
+const TRAIL_DISTANCE = 18
 /** 连击窗口（ms）：窗口内再次点击连击 +1，越爆越多。 */
 const COMBO_WINDOW = 900
 
@@ -143,7 +144,7 @@ function mount(): void {
   let movedDist = 0
   let lastX = 0
   let lastY = 0
-  let lastTrail = 0
+  let trailAcc = 0
   let activeId = -1
 
   catEl.addEventListener("pointerdown", (e) => {
@@ -151,6 +152,7 @@ function mount(): void {
     pressed = true
     dragging = false
     movedDist = 0
+    trailAcc = 0
     lastX = e.clientX
     lastY = e.clientY
     activeId = e.pointerId
@@ -170,11 +172,9 @@ function mount(): void {
     if (!dragging) return
     pos = clampPos({ x: pos.x + dx, y: pos.y + dy })
     applyPos()
-    const now = performance.now()
-    if (now - lastTrail > TRAIL_INTERVAL) {
-      lastTrail = now
-      popTrailMoney(e.clientX, e.clientY)
-    }
+    // 按累计位移撒币（取余保留余量，长距离快速甩动密度仍与距离成正比；单事件至多一枚防同点堆叠）
+    trailAcc = (trailAcc + Math.hypot(dx, dy)) % TRAIL_DISTANCE
+    if (trailAcc < Math.hypot(dx, dy)) popTrailMoney(e.clientX, e.clientY)
   })
   const release = (e: PointerEvent) => {
     if (!pressed || e.pointerId !== activeId) return
