@@ -44,6 +44,13 @@ export type ApiKind = "openai" | "responses" | "anthropic"
 /** 模型接口未配置错误（apiBase 缺失）：配置类错误无需重试，引擎据此直接失败并给出配置入口指引。 */
 export class LLMConfigError extends Error {}
 
+/** 拼接接口请求地址：apiBase 剥尾部斜杠后追加 endpoint；apiBase 已以 endpoint 结尾（用户直接粘贴
+ *  完整接口地址，如 https://open.bigmodel.cn/api/paas/v4/chat/completions）时原样使用，避免双拼 404。 */
+export function endpointUrl(apiBase: string, endpoint: string): string {
+  const base = apiBase.replace(/\/+$/, "")
+  return base.endsWith(endpoint) ? base : `${base}${endpoint}`
+}
+
 function assertApiConfigured(config: ProviderConfig): void {
   if (!config.apiBase) {
     throw new LLMConfigError(
@@ -407,7 +414,7 @@ class OpenAIProvider implements LLMProvider {
     if (maxOut) body.max_tokens = maxOut
     // 额外模型接口参数：Provider 级固定参数 + 本次调用参数（后者优先），顶层合并进请求体
     Object.assign(body, this.config.extraParams, opts.extraParams)
-    const res = await fetchRetry(`${this.config.apiBase}/chat/completions`, {
+    const res = await fetchRetry(endpointUrl(this.config.apiBase, "/chat/completions"), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.config.apiKey}` },
       body: JSON.stringify(body),
@@ -495,8 +502,7 @@ class ResponsesProvider implements LLMProvider {
     if (maxOut) body.max_output_tokens = maxOut
     // 额外模型接口参数：Provider 级固定参数 + 本次调用参数（后者优先），顶层合并进请求体
     Object.assign(body, this.config.extraParams, opts.extraParams)
-    const base = this.config.apiBase.replace(/\/+$/, "")
-    const res = await fetchRetry(`${base}/responses`, {
+    const res = await fetchRetry(endpointUrl(this.config.apiBase, "/responses"), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.config.apiKey}` },
       body: JSON.stringify(body),
@@ -599,8 +605,7 @@ class AnthropicProvider implements LLMProvider {
     if (opts.tools?.length) body.tools = opts.tools.map(anthropicTool)
     // 额外模型接口参数：Provider 级固定参数 + 本次调用参数（后者优先），顶层合并进请求体
     Object.assign(body, this.config.extraParams, opts.extraParams)
-    const base = this.config.apiBase.replace(/\/+$/, "")
-    const res = await fetchRetry(`${base}/v1/messages`, {
+    const res = await fetchRetry(endpointUrl(this.config.apiBase, "/v1/messages"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

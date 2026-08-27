@@ -41,7 +41,7 @@ export type ToolContext = {
   authMode?: "local" | "server"
   sessionId: string
   workdir: string
-  /** 会话工作区绝对路径（引擎恒定注入，不随项目绑定/粘性根变化——workdir 在新会话绑定项目根时是项目根，
+  /** 会话工作区绝对路径（引擎恒定注入，不随项目绑定变化——workdir 在新会话绑定项目根时是项目根，
    *  保留项目名 tmp（DESIGN「项目机制」）恒指本路径）。可选：测试桩未注入时回退 workdir。 */
   sessionWorkdir?: string
   /** 子Agent 项目绑定根（{AGENT_NAME_UPPER}_PROJECT 解析结果，未绑定为空）：受限模式下未传 project 时允许在绑定根内操作。 */
@@ -114,8 +114,9 @@ export type ToolContext = {
   /** 装载子Agent 能力模块（agent_load 工具）：其工具并入当前工具集、能力描述注入系统提示词；不创建新上下文、无独立执行（DESIGN「装载 vs 新会话执行」）。 */
   loadSubAgent: (name: string) => Promise<void>
   /** 执行新会话（agent_run 工具）：派生临时新会话、预加载指定子Agent 列表（完整系统提示词+工具）后阻塞执行任务，
-   *  返回最终输出文本与完整执行存档（存档作为工具调用记录扩展字段落盘）。 */
-  runNewSession: (agents: string[], input: string) => Promise<{ output: string; archive: import("@gebai/sdk").SessionRunArchive }>
+   *  返回最终输出文本与完整执行存档（存档作为工具调用记录扩展字段落盘）。opts.inheritGlobalTools
+   *  （默认 true）：全局工具是否一并注册进新会话（DESIGN「新会话执行的上下文隔离」）。 */
+  runNewSession: (agents: string[], input: string, opts?: { inheritGlobalTools?: boolean }) => Promise<{ output: string; archive: import("@gebai/sdk").SessionRunArchive }>
   /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>
   /**

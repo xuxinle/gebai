@@ -11,10 +11,10 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
-import { clearSessionProjectRoots, RESERVED_PROJECT_TMP } from "./projects"
+import { RESERVED_PROJECT_TMP } from "./projects"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "./safety"
@@ -123,6 +123,20 @@ async function toolRequiresApproval(tool: Tool, args: Record<string, unknown>, c
   } catch {
     return true
   }
+}
+
+/** 必填参数缺失校验（模型漏传参数的防御，两循环共用）：schema `required` 声明的键在调用参数中
+ *  缺失/null 时返回缺失清单——工具不执行、回传明确错误引导模型补参重试。缺失参数若直接进工具会被
+ *  `String(undefined)` 成字面量 "undefined" 落进路径解析，报出与真实原因无关的 ENOENT（如
+ *  edit 漏传 path → `tmp\undefined`），模型无法从报错定位到「少传了参数」。 */
+function missingRequiredArgs(tool: Tool, args: Record<string, unknown>): string[] {
+  const required = (tool.parameters as { required?: string[] }).required ?? []
+  return required.filter((k) => args[k] === undefined || args[k] === null)
+}
+
+/** 必填参数缺失的错误文案（作为工具结果回传，模型下一轮自纠）。 */
+function missingArgsMsg(name: string, missing: string[]): string {
+  return `工具 ${name} 缺少必填参数: ${missing.join("、")}——本次调用未执行，请补齐参数后重试（各参数含义见工具描述）。`
 }
 
 function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
@@ -345,62 +359,35 @@ export class AgentEngine {
     return { running: true, startedAt: task.startedAt, stream: task.stream, pending }
   }
 
-  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务/会话粘性项目根）；幂等，供 REST/WS 删除会话入口调用。 */
+  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务）；幂等，供 REST/WS 删除会话入口调用。 */
   forgetSession(sessionId: string): void {
     this.readFiles.delete(sessionId)
     this.dynamicTools.delete(sessionId)
     for (const key of this.shTaskServices.keys()) {
       if (key.endsWith(`:${sessionId}`)) this.shTaskServices.delete(key)
     }
-    clearSessionProjectRoots(sessionId)
   }
 
-  /** 会话工具叠加层（装载工具会话可见性 + 双胞胎合并，DESIGN「装载工具会话可见性」）：每次取用现算
-   *  （任务中途装载下一轮 schema/解析即时生效）。visible：对本会话可见的子Agent 名集合（本会话装载或全局装载，
-   *  其他会话的装载不扩散）；twinMerge：全局工具名 → 子Agent 版 Tool（projectAware 包装——带 project 参数、
-   *  粘性根生效，含 def.requiresApproval 覆写）——装载子Agent 与全局同名的「双胞胎」合并为全局名下的一份，
-   *  schema 与 resolve(全局名) 均用子Agent 版；alias：{agent}_{short} → 全局名（resolve 别名——历史消息与
-   *  子Agent 提示词中的前缀名引用保持可用）。多子Agent 装载时同名工具按注册表发现顺序首个生效。 */
-  private sessionToolOverlay(sessionId: string): {
-    visible: Set<string>
-    twinMerge: Map<string, Tool>
-    alias: Map<string, string>
-  } {
+  /** 对本会话可见的子Agent 名集合（装载工具会话可见性，DESIGN「装载工具会话可见性」）：每次取用现算
+   *  （任务中途装载下一轮 schema/解析即时生效）。本会话装载或全局装载（启动预载/admin 全局装载），
+   *  其他会话的装载不扩散。 */
+  private sessionVisibleAgents(sessionId: string): Set<string> {
     const visible = new Set<string>()
     for (const d of this.opts.subAgents.list()) {
       if (this.opts.subAgents.visibleTo(d.name, sessionId)) visible.add(d.name)
     }
-    const globalNames = new Set<string>()
-    for (const rt of this.opts.registry.list()) {
-      if (!rt.agent) globalNames.add(rt.name)
-    }
-    const twinMerge = new Map<string, Tool>()
-    const alias = new Map<string, string>()
-    for (const agent of visible) {
-      const def = this.opts.subAgents.def(agent)
-      if (!def?.tools) continue
-      for (const [short, tool] of Object.entries(def.tools)) {
-        if (!globalNames.has(short)) continue // 独有工具：{agent}_ 前缀原样注册可见，不参与合并
-        alias.set(`${agent}_${short}`, short)
-        if (!twinMerge.has(short)) {
-          const ra = def.requiresApproval?.[short]
-          twinMerge.set(short, ra === undefined ? tool : { ...tool, requiresApproval: ra })
-        }
-      }
-    }
-    return { visible, twinMerge, alias }
+    return visible
   }
 
   /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层 + 装载工具会话可见性过滤）：runLoop/buildContext 经此解析。
    *  {agent}_* 工具仅对本会话可见（其他会话装载不扩散，全局装载/启动预载对所有会话可见）；
-   *  双胞胎合并后 schema 只出全局名一份（子Agent 版工具带 project 参数）；动态工具定义后同任务后续轮次
-   *  schema 立即可见、脚本内可直接按名调用。 */
+   *  动态工具定义后同任务后续轮次 schema 立即可见、脚本内可直接按名调用。 */
   private sessionRegistry(sessionId: string): Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames"> {
     const base = this.opts.registry
     const self = this
     return {
       schemas: (enabledOnly = true) => {
-        const ov = self.sessionToolOverlay(sessionId)
+        const visible = self.sessionVisibleAgents(sessionId)
         const dyn = [...(self.dynamicTools.get(sessionId)?.values() ?? [])].map(({ tool }) => ({
           name: tool.name,
           description: tool.description,
@@ -408,35 +395,20 @@ export class AgentEngine {
         }))
         const out = [...dyn]
         for (const rt of base.list(enabledOnly)) {
-          if (rt.agent) {
-            if (!ov.visible.has(rt.agent)) continue // 其他会话装载的子Agent 工具：本会话不可见（未装载时路由自愈接管）
-            if (ov.alias.has(rt.name)) continue // 双胞胎：schema 只出全局名那份（twinMerge 版）
-            out.push({ name: rt.name, description: rt.tool.description, parameters: rt.tool.parameters as unknown as Record<string, unknown> })
-          } else {
-            const merged = ov.twinMerge.get(rt.name)
-            const tool = merged ?? rt.tool
-            out.push({ name: rt.name, description: tool.description, parameters: tool.parameters as unknown as Record<string, unknown> })
-          }
+          if (rt.agent && !visible.has(rt.agent)) continue // 其他会话装载的子Agent 工具：本会话不可见（未装载时路由自愈接管）
+          out.push({ name: rt.name, description: rt.tool.description, parameters: rt.tool.parameters as unknown as Record<string, unknown> })
         }
         return out
       },
       resolve: (name: string) => {
         const dyn = self.dynamicTools.get(sessionId)?.get(name.replace(/[-.:]/g, "_"))
         if (dyn) return { name: dyn.tool.name, tool: dyn.tool, enabled: true }
-        const ov = self.sessionToolOverlay(sessionId)
-        // 双胞胎别名（code_read 等前缀名）：解析到合并后的全局名工具（历史消息/子Agent 提示词引用兼容）
-        const short = ov.alias.get(name)
-        if (short) {
-          const merged = ov.twinMerge.get(short)
-          if (merged) return { name, tool: merged, enabled: true }
-        }
         const rt = base.resolve(name)
         if (!rt) return undefined
-        if (rt.agent && !ov.visible.has(rt.agent)) return undefined // 本会话未装载：交路由自愈按需装载
-        const merged = !rt.agent ? ov.twinMerge.get(rt.name) : undefined
-        return merged ? { name: rt.name, tool: merged, enabled: rt.enabled } : { name: rt.name, tool: rt.tool, agent: rt.agent, enabled: rt.enabled }
+        if (rt.agent && !self.sessionVisibleAgents(sessionId).has(rt.agent)) return undefined // 本会话未装载：交路由自愈按需装载
+        return { name: rt.name, tool: rt.tool, agent: rt.agent, enabled: rt.enabled }
       },
-      getAgentNames: () => [...self.sessionToolOverlay(sessionId).visible],
+      getAgentNames: () => [...self.sessionVisibleAgents(sessionId)],
     }
   }
 
@@ -1455,7 +1427,7 @@ export class AgentEngine {
       : ""
     const parts = [
       `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
-      `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
+      `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略；操作项目文件用文件工具的 project 参数——项目名或项目根路径，路径即相对所选项目根解析）${sandboxNote}`,
       ...(channelNote ? [channelNote] : []),
       ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
@@ -1523,9 +1495,9 @@ export class AgentEngine {
   }
 
   /** 预置项目清单注记（子Agent 提示词开头动态追加：名称/说明/路径，供模型按名使用 project 参数）。 */
-  private buildPresetNote(agentName: string, projectRoot: string | undefined, presetProjects: PresetProject[]): string {
+  private buildPresetNote(_agentName: string, projectRoot: string | undefined, presetProjects: PresetProject[]): string {
     if (!presetProjects.length) return ""
-    return `\n预置项目（文件工具可用 project 参数指定，路径参数相对所选项目根；未指定时默认 ${projectRoot ? `${agentName.toUpperCase()}_PROJECT 项目根` : "工作目录"}）:\n${presetProjects
+    return `\n预置项目（全局文件工具用 project 参数指定项目名，路径参数相对所选项目根解析；未传 project 时相对路径以${projectRoot ? "项目根" : "会话工作目录"}为基准）:\n${presetProjects
       .map((p) => `- ${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`)
       .join("\n")}`
   }
@@ -1539,7 +1511,7 @@ export class AgentEngine {
     if (projects.length) parts.push(`预置项目：${projects.map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`).join("、")}`)
     const tools = d.tools ?? []
     if (tools.length) {
-      parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}（新会话执行以 ${d.name}_ 前缀调用；装载到主会话后与全局同名的工具直接用全局名——已并入 project 参数，独有工具以 ${d.name}_ 前缀调用）`)
+      parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}（以 ${d.name}_ 前缀调用；文件读写查询等通用工具为全局工具，直接用全局名）`)
     }
     return parts.join(" ")
   }
@@ -1796,8 +1768,9 @@ export class AgentEngine {
         // 模型装载后立即调用会「未知工具」
         if (opts?.loadIntoRegistry) self.registerIntoRegistry(opts.loadIntoRegistry, String(name))
       },
-      // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；深度 +1 限制递归嵌套
-      runNewSession: (agents, input) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1),
+      // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；
+      // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；深度 +1 限制递归嵌套
+      runNewSession: (agents, input, opts) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1, opts),
       // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
       // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
       defineDynamicTool: opts?.registerDynamic,
@@ -2231,6 +2204,12 @@ export class AgentEngine {
             await persistTool(tc, this.unknownToolMsg(tc.name))
             continue
           }
+          const missing = missingRequiredArgs(rt.tool, tc.arguments)
+          if (missing.length) {
+            // 必填参数缺失（模型漏传）：不执行，明确报缺什么参数（防缺失值进工具被解析成字面量 "undefined"）
+            await persistTool(tc, missingArgsMsg(rt.name, missing))
+            continue
+          }
           if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {
             // 通道禁用工具（DESIGN「飞书机器人集成」）：模型不应调用，被调用时阻止执行并说明原因
             const disabledMsg = this.toolDisabledMsg(sessionId, rt.name)
@@ -2424,7 +2403,9 @@ export class AgentEngine {
   }
 
   /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，
-   *  模块语义的「装载」在独立上下文生效）后执行任务，阻塞返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。 */
+   *  模块语义的「装载」在独立上下文生效）后执行任务，阻塞返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。
+   *  inheritGlobalTools（默认 true）：全局工具一并注册进新会话——与主会话同构的完整工具面（文件读写查询
+   *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）。 */
   private async runNewSession(
     sessionId: string,
     user: string,
@@ -2433,12 +2414,13 @@ export class AgentEngine {
     input: string,
     signal: AbortSignal,
     depth = 0,
+    opts: { inheritGlobalTools?: boolean } = {},
   ): Promise<{ output: string; archive: SessionRunArchive }> {
     // 加固：去重 + 数量上限（异常/恶意调用拼装超大提示词会撑爆上下文）
     agents = [...new Set(agents)]
     // self_optimize 复用 code 的通用能力（def 只声明独有工具，提示词不复刻 code 工作流）：
     // 预加载 self_optimize 时自动连带预加载 code（与装载模式 SubAgentManager.load 的连带装载同规则），
-    // 文件/分析类工具与通用工作流提示词由 code 提供——不重复定义
+    // 独有分析/验证工具与通用工作流提示词由 code 提供——不重复定义
     if (agents.includes("self_optimize") && this.opts.subAgents.def("code") && !agents.includes("code")) {
       agents = ["code", ...agents]
     }
@@ -2449,7 +2431,8 @@ export class AgentEngine {
       return def
     })
     if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${agents.join(",")}`)
-    // 新会话工具注册：每个预加载子Agent 的工具以 {agent}_ 命名空间并入（装载语义）；
+    const inheritGlobals = opts.inheritGlobalTools !== false
+    // 新会话工具注册：每个预加载子Agent 的独有工具以 {agent}_ 命名空间并入（装载语义）；
     // 安全模式与主注册表同规则（Tool.safeMode 自主声明过滤，引擎构造期常量）
     const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
     let orchestrationInjected = false
@@ -2471,6 +2454,15 @@ export class AgentEngine {
     if (!isGlobalToolExcluded("flow")) reg.register(makeFlowTool())
     if (!isGlobalToolExcluded("tool_schemas")) reg.register(toolSchemasTool)
     if (!isGlobalToolExcluded("js")) reg.register(jsTool)
+    // 全局工具继承（默认开启，DESIGN「新会话执行的上下文隔离」）：read/write/grep/sh 等全局工具（含
+    // project 参数路由）一并注册——子Agent 不再重复定义文件工具，新会话与主会话工具面同构；
+    // 已注册的名字跳过（子Agent 独有工具的 {agent}_ 前缀名与全局名不冲突，防御性去重）
+    if (inheritGlobals) {
+      for (const tool of Object.values(createGlobalTools())) {
+        if (reg.resolve(tool.name)) continue
+        reg.register(tool)
+      }
+    }
 
     // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；
     // 每个子Agent 前加职责分隔头（名称 + 能力描述），明确各段提示词对应的工具命名空间与职责域，多 Agent 预加载时不混淆
@@ -2494,10 +2486,13 @@ export class AgentEngine {
     const safeNote = this.opts.config.safeMode
       ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用；部分子Agent 风险工具未注册。`
       : ""
+    const globalsNote = inheritGlobals
+      ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/diff/sh/py/fetch_url/todo/ask/agent_run 等，与主会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
+      : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（flow/tool_schemas/js）。`
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n${globalsNote}\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]
@@ -2705,6 +2700,14 @@ export class AgentEngine {
           const errMsg = this.unknownToolMsg(tc.name)
           await pushArchive({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
           messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
+          continue
+        }
+        const missing = missingRequiredArgs(rt.tool, tc.arguments)
+        if (missing.length) {
+          // 必填参数缺失（模型漏传，与主循环同规则）：不执行，明确报缺什么参数
+          const missMsg = missingArgsMsg(rt.name, missing)
+          await pushArchive({ role: "tool", content: missMsg, toolCallId: tc.id, name: tc.name })
+          messages.push({ role: "tool", content: missMsg, toolCallId: tc.id, name: tc.name })
           continue
         }
         if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {

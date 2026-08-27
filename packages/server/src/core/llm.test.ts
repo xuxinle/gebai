@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { MessageLike } from "@gebai/sdk"
-import { applyModelEnvOverrides, createProvider, modelEnvOverrides, parseSSE, parseExtraParams, imageMessageBlocks, resolveVisionProvider, salvageWriteArgs, type ProviderConfig, type LLMChunk } from "./llm"
+import { applyModelEnvOverrides, createProvider, endpointUrl, modelEnvOverrides, parseSSE, parseExtraParams, imageMessageBlocks, resolveVisionProvider, salvageWriteArgs, type ProviderConfig, type LLMChunk } from "./llm"
 
 const BASE_CFG: ProviderConfig = { apiKind: "openai", apiBase: "https://api.test", apiKey: "k", model: "m", maxContextTokens: 10000, multimodal: false }
 
@@ -255,6 +255,65 @@ describe("extraParams 额外模型接口参数", () => {
     )
     const done = chunks.filter((c) => c.type === "done")
     expect(done[0]?.usage).toEqual({ inputTokens: 200, outputTokens: 5 })
+  })
+})
+
+describe("接口地址拼接（apiBase 支持服务根地址与完整 endpoint 两种写法）", () => {
+  test("endpointUrl：根地址追加 endpoint、尾部斜杠剥净、完整 endpoint 原样使用", () => {
+    expect(endpointUrl("https://open.bigmodel.cn/api/paas/v4", "/chat/completions")).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    expect(endpointUrl("https://open.bigmodel.cn/api/paas/v4/", "/chat/completions")).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    expect(endpointUrl("https://open.bigmodel.cn/api/paas/v4//", "/chat/completions")).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    // 用户直接粘贴完整接口地址（文档给到的形态）：不再双拼 /chat/completions
+    expect(endpointUrl("https://open.bigmodel.cn/api/paas/v4/chat/completions", "/chat/completions")).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    expect(endpointUrl("https://api.anthropic.com/v1/messages", "/v1/messages")).toBe("https://api.anthropic.com/v1/messages")
+    expect(endpointUrl("https://api.anthropic.com", "/v1/messages")).toBe("https://api.anthropic.com/v1/messages")
+  })
+
+  test("OpenAI 兼容：apiBase 配完整 endpoint（智谱示例）时请求地址原样、不双拼", async () => {
+    const full = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    const p = createProvider({ ...BASE_CFG, apiBase: full })
+    let hitUrl = ""
+    await withFetch(
+      async (url) => {
+        hitUrl = String(url)
+        return new Response(OK_STREAM, { status: 200 })
+      },
+      async () => {
+        for await (const _ of p.chat([{ role: "user", content: "x" }])) void _
+      },
+    )
+    expect(hitUrl).toBe(full)
+  })
+
+  test("OpenAI 兼容：apiBase 配服务根地址时追加 /chat/completions（含尾部斜杠归一）", async () => {
+    const p = createProvider({ ...BASE_CFG, apiBase: "https://open.bigmodel.cn/api/paas/v4/" })
+    let hitUrl = ""
+    await withFetch(
+      async (url) => {
+        hitUrl = String(url)
+        return new Response(OK_STREAM, { status: 200 })
+      },
+      async () => {
+        for await (const _ of p.chat([{ role: "user", content: "x" }])) void _
+      },
+    )
+    expect(hitUrl).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+  })
+
+  test("Anthropic：apiBase 配完整 /v1/messages 时原样使用", async () => {
+    const full = "https://api.anthropic.com/v1/messages"
+    const p = createProvider({ apiKind: "anthropic", apiBase: full, apiKey: "k", model: "m", maxContextTokens: 10000, multimodal: false })
+    let hitUrl = ""
+    await withFetch(
+      async (url) => {
+        hitUrl = String(url)
+        return new Response('data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n', { status: 200 })
+      },
+      async () => {
+        for await (const _ of p.chat([{ role: "user", content: "x" }])) void _
+      },
+    )
+    expect(hitUrl).toBe(full)
   })
 })
 

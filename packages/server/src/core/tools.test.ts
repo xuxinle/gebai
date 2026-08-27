@@ -111,6 +111,26 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("sh 工作目录标注：非默认目录（workdir 参数/project 路由）时输出附实际目录，默认目录不标注", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-cwd-"))
+    const c = ctx(home)
+    c.runCommand = async () => ({ stdout: "ok", stderr: "", code: 0 })
+    const base = { ...c, sessionWorkdir: c.workdir }
+    // 默认（会话工作目录）：不标注
+    expect((await shTool.execute({ command: "echo hi" }, base)).output).toBe("ok")
+    // workdir 参数指向子目录：标注实际执行目录（bun test 等按 cwd 发现目标的工具排障依据）
+    mkdirSync(join(c.workdir, "sub"), { recursive: true })
+    const r2 = await shTool.execute({ command: "echo hi", workdir: "sub" }, base)
+    expect(r2.output).toContain("ok")
+    expect(r2.output).toContain(`（工作目录: ${join(c.workdir, "sub")}）`)
+    // project 参数路由（全局注册形态）：cwd 切到项目根并标注
+    const proj = join(home, "proj")
+    mkdirSync(proj, { recursive: true })
+    const r3 = await createGlobalTools().sh.execute({ command: "echo hi", project: proj }, base)
+    expect(r3.output).toContain(`（工作目录: ${proj}）`)
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("sh strict: non-zero exit throws tool-level error; default returns result with exitCode", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sh-strict-"))
     const c = ctx(home)

@@ -8,7 +8,7 @@ export const name = "self_optimize"
 export const description =
   "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 self_optimize_read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具）并同步 DESIGN.md，测试失败可 rollback 回滚。不处理外部项目（外部代码用 code）。"
 export const systemPrompt =
-  "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内），文件与分析类工具由 code 提供（主会话装载时与全局同名工具合并为全局名——已并入 project 参数，code_* 前缀名同样可用；新会话执行时为 code_* 前缀）；本提示词只补充自我优化特有的流程与约束：\n" +
+  "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内）；文件读写查询（read/write/edit/patch/grep/sh 等）为全局工具直接用全局名（带 project 参数路由项目），分析/验证类工具由 code 提供（search_symbols/analyze/git/preview_server，以 code_ 前缀调用）；本提示词只补充自我优化特有的流程与约束：\n" +
   "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；\n" +
   "2) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；\n" +
   "3) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；\n" +
@@ -116,10 +116,10 @@ function schema(properties: Record<string, unknown>, required: string[] = []): i
 }
 
 /**
- * 工具集只含 code 通用能力**没有的**独有工具（工具与提示词均不复刻 code）：
- * 装载/预加载 self_optimize 时系统连带装载 code——文件/分析类工具由 code 提供（主会话装载时
- * 与全局同名工具合并为全局名并并入 project 参数，code_* 前缀名同样可用；新会话执行时为 code_* 前缀），
- * 通用编码工作流遵循 code 提示词；本 Agent 只声明自优化专属能力与写范围守卫。
+ * 工具集只含自优化专属工具（工具与提示词均不复刻 code）：
+ * 装载/预加载 self_optimize 时系统连带装载 code——文件读写查询为全局工具（直接全局名），
+ * 分析/验证类工具由 code 提供（code_ 前缀），通用编码工作流遵循 code 提示词；
+ * 本 Agent 只声明自优化专属能力与写范围守卫。
  */
 export const tools = {
   read_feedback: readFeedbackTool,

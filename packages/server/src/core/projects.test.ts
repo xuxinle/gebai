@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Tool, ToolContext } from "./types"
-import { _resetSessionProjectRootsForTest, clearSessionProjectRoots, projectAware, projectTool, resolveProjectRoot } from "./projects"
+import { projectAware, resolveProjectRoot } from "./projects"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   const workspace = join(home, "users", "default", "sessions", "s1", "tmp")
@@ -32,9 +32,10 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     runCommand: async () => ({ stdout: "", stderr: "", code: 0 }),
     uploadAttachment: (r) => Promise.resolve(r.path),
     publish: () => {},
-    projects: [],
-    resolveProjectPath: () => {
-      throw new Error("未知预置项目")
+    projects: [{ name: "app", path: "", description: "测试项目" }],
+    resolveProjectPath: (name) => {
+      if (name !== "app") throw new Error(`未知预置项目: ${name}`)
+      return join(home, "proj")
     },
     getTodos: async () => [],
     setTodos: async () => {},
@@ -50,19 +51,19 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   return { ...base, ...overrides }
 }
 
-/** 探针工具：回显路径解析结果（projectAware 包装后观察解析根切换）。 */
+/** 探针工具：回显路径解析结果与 workdir（projectAware 包装后观察解析根切换）。 */
 function probeTool(): Tool {
   return {
     name: "probe",
     description: "探针",
     parameters: { type: "object", properties: {}, required: [] },
     async execute(args, c) {
-      return { output: c.resolvePath(String(args.path ?? "x")) }
+      return { output: `${c.resolvePath(String(args.path ?? "x"))}|${c.workdir}` }
     },
   }
 }
 
-describe("项目机制（core/projects）", () => {
+describe("项目机制（core/projects，全局工具 project 参数）", () => {
   test("保留名 tmp 解析到会话工作区：sessionWorkdir 优先于 workdir（新会话绑定项目根时两者不同）", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
     const workspace = join(home, "ws")
@@ -73,37 +74,40 @@ describe("项目机制（core/projects）", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("projectAware：project 参数逐次选根——tmp 访问会话工作区，路径形态切项目根，未传走粘性根", async () => {
-    _resetSessionProjectRootsForTest()
+  test("projectAware：project 参数逐次选根——未传走会话工作目录，预置名/路径形态切项目根，tmp 访问会话工作区", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
     const c = ctx(home)
     const proj = join(home, "myproj")
     mkdirSync(proj, { recursive: true })
     const tool = projectAware(probeTool())
-    // 粘性根未设 + 未传 project：原样（会话工作区基准）
-    expect((await tool.execute({ path: "a.txt" }, c)).output).toBe(join(c.workdir, "a.txt"))
-    // 粘性根 = 项目根（project 工具 use 设定）
-    await projectTool.execute({ action: "use", project: proj }, c)
-    expect((await tool.execute({ path: "src/b.ts" }, c)).output).toBe(join(proj, "src", "b.ts"))
-    // 保留名 tmp：逐次切回会话工作区（粘性根已设仍可访问）
-    expect((await tool.execute({ path: "c.txt", project: "tmp" }, c)).output).toBe(join(c.workdir, "c.txt"))
-    // project use tmp：粘性根切回会话工作区（≡ 回到默认基准）
-    await projectTool.execute({ action: "use", project: "tmp" }, c)
-    expect((await tool.execute({ path: "d.txt" }, c)).output).toBe(join(c.workdir, "d.txt"))
-    // list 注记保留名
-    const list = await projectTool.execute({ action: "list" }, c)
-    expect(list.output).toContain("保留项目名: tmp")
-    _resetSessionProjectRootsForTest()
+    // 未传 project：会话工作目录基准（相对路径不漂移）
+    expect(String((await tool.execute({ path: "a.txt" }, c)).output).split("|")[0]).toBe(join(c.workdir, "a.txt"))
+    // 预置项目名：切到预置根
+    expect((await tool.execute({ path: "b.txt", project: "app" }, c)).output.split("|")[0]).toBe(join(home, "proj", "b.txt"))
+    // 路径形态（自由项目）：切到该根
+    expect(String((await tool.execute({ path: "src/c.ts", project: proj }, c)).output).split("|")[0]).toBe(join(proj, "src", "c.ts"))
+    // 保留名 tmp：切回会话工作区
+    expect((await tool.execute({ path: "d.txt", project: "tmp" }, c)).output.split("|")[0]).toBe(join(c.workdir, "d.txt"))
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("会话工作区真实读写经保留名 tmp 打通（设定项目根后附件/中间文件仍可操作）", async () => {
-    _resetSessionProjectRootsForTest()
+  test("workdir 类工具（sh/py/git）：project 参数把 workdir 一并切到项目根", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
     const c = ctx(home)
+    const proj = join(home, "myproj")
+    mkdirSync(proj, { recursive: true })
+    const tool = projectAware(probeTool(), { workdir: true })
+    expect((await tool.execute({ path: ".", project: proj }, c)).output.split("|")[1]).toBe(proj)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("会话工作区真实读写经保留名 tmp 打通（绑定项目根的会话内附件/中间文件仍可操作）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
+    const bound = join(home, "proj-root")
+    const c = ctx(home, { workdir: bound, resolvePath: (p) => join(bound, p) })
     const proj = join(home, "proj")
     mkdirSync(proj, { recursive: true })
-    writeFileSync(join(c.workdir, "note.txt"), "workspace file\n")
+    writeFileSync(join(c.sessionWorkdir!, "note.txt"), "workspace file\n")
     const tool = projectAware({
       name: "readish",
       description: "读",
@@ -116,32 +120,40 @@ describe("项目机制（core/projects）", () => {
         }
       },
     })
-    await projectTool.execute({ action: "use", project: proj }, c)
-    // 未传 project：粘性根（项目根）——找不到会话文件
+    // 未传 project：绑定根基准（workdir = 项目根）——找不到会话文件
     const miss = await tool.execute({ path: "note.txt" }, c)
     expect(miss.output).not.toContain("workspace file")
     // project:tmp：读到会话工作区文件
     const hit = await tool.execute({ path: "note.txt", project: "tmp" }, c)
     expect(hit.output).toContain("workspace file")
-    _resetSessionProjectRootsForTest()
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("clearSessionProjectRoots 按会话后缀清理粘性根（会话删除释放）", async () => {
-    _resetSessionProjectRootsForTest()
+  test("受限模式（CODE_RESTRICT_PROJECTS=true）：未传 project 的自由路径被拒绝，带 project/绑定根放行", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
-    const c1 = ctx(home)
-    const c2 = { ...ctx(home), sessionId: "s2" }
-    const proj = join(home, "p1")
-    mkdirSync(proj, { recursive: true })
-    await projectTool.execute({ action: "use", project: proj }, c1)
-    await projectTool.execute({ action: "use", project: proj }, c2)
-    clearSessionProjectRoots("s1")
-    const l1 = await projectTool.execute({ action: "list" }, c1)
-    const l2 = await projectTool.execute({ action: "list" }, c2)
-    expect(String((l1.data as { current: string | null }).current)).toBe("null")
-    expect(String((l2.data as { current: string | null }).current)).toBe(proj)
-    _resetSessionProjectRootsForTest()
+    const c = ctx(home, { env: { CODE_RESTRICT_PROJECTS: "true" } })
+    const tool = projectAware(probeTool())
+    const denied = await tool.execute({ path: "a.txt" }, c)
+    expect(denied.output).toContain("受限模式")
+    expect(denied.output).toContain("project 参数")
+    const ok = await tool.execute({ path: "a.txt", project: "app" }, c)
+    expect(ok.output).toContain(join(home, "proj"))
+    // 绑定根会话（新会话执行模式）：未传 project 放行（路径基准即绑定根）
+    const bound = join(home, "bound")
+    mkdirSync(bound, { recursive: true })
+    const c2 = ctx(home, { env: { CODE_RESTRICT_PROJECTS: "true" }, workdir: bound, boundProjectRoot: bound, resolvePath: (p) => join(bound, p) })
+    const r2 = await tool.execute({ path: "a.txt" }, c2)
+    expect(r2.output).toContain(bound)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("沙箱模式：project 参数路径形态映射进用户数据目录（与预置项目同边界）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-proj-"))
+    const c = ctx(home, { sandboxed: true })
+    const tool = projectAware(probeTool())
+    const mapped = join(home, "users", "default", "proj")
+    mkdirSync(mapped, { recursive: true })
+    expect((await tool.execute({ path: "a.ts", project: "./proj" }, c)).output.split("|")[0]).toBe(join(mapped, "a.ts"))
     rmSync(home, { recursive: true, force: true })
   })
 })
