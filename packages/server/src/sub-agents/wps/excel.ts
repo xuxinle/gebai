@@ -112,8 +112,10 @@ export function cellText(cell: Cell, formulas: boolean): string {
   if (v instanceof Date) return fmtScalar(v)
   if (typeof v === "object") {
     const o = v as Record<string, unknown>
-    if ("formula" in o && o.formula) return formulas ? `=${o.formula}` : o.result != null ? fmtScalar(o.result) : `=${o.formula}`
-    if ("sharedFormula" in o && o.sharedFormula) return formulas ? `=${o.sharedFormula}` : o.result != null ? fmtScalar(o.result) : ""
+    // 计算值模式：有公式无缓存值（本工具写入的公式在 Office 打开重算前）→ 回显公式原文并标注，
+    // 防调用方误当字符串值（写入侧不计算——错误缓存值比无缓存值更误导）
+    if ("formula" in o && o.formula) return formulas ? `=${o.formula}` : o.result != null ? fmtScalar(o.result) : `=${o.formula}（未计算）`
+    if ("sharedFormula" in o && o.sharedFormula) return formulas ? `=${o.sharedFormula}` : o.result != null ? fmtScalar(o.result) : `=${o.sharedFormula}（未计算）`
     if ("richText" in o && Array.isArray(o.richText)) return o.richText.map((t) => (t as { text: string }).text).join("")
     if ("hyperlink" in o) return String(o.text ?? o.hyperlink ?? "")
     if ("error" in o) return String(o.error)
@@ -189,7 +191,7 @@ function parseDelimited(text: string, delim: string): string[][] {
 export const excelReadTool: Tool = {
   name: "excel_read",
   description:
-    "读取 Excel 为 markdown 表格（.xlsx/.xlsm；.csv/.tsv 文本表格也支持）。不传 sheet 返回工作簿概览（各表名/行列数/前 3 行预览）；传 sheet（表名或 1 起始序号）读取该表。range（A1:D20 或 A:D 列区间）截取区域，maxRows（默认 200）限行，formulas:true 显示公式原文（默认显示计算值），format: markdown|json|csv。空单元格为空串。",
+    "读取 Excel 为 markdown 表格（.xlsx/.xlsm；.csv/.tsv 文本表格也支持）。不传 sheet 返回工作簿概览（各表名/行列数/前 3 行预览）；传 sheet（表名或 1 起始序号）读取该表。range（A1:D20 或 A:D 列区间）截取区域，maxRows（默认 200）限行，formulas:true 显示公式原文，format: markdown|json|csv。默认显示计算值——本工具/excel_write 写入的公式不带缓存计算值（Office 打开重算前），此时回显公式原文并标注（未计算），不会误当字符串值。空单元格为空串。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema(
     {
@@ -307,7 +309,7 @@ async function renderRows(
 export const excelWriteTool: Tool = {
   name: "excel_write",
   description:
-    "创建 .xlsx 工作簿（覆盖整簿——已有文件本会话未读取过时拒绝，防盲覆盖；改局部用 excel_edit）。sheets 数组每项：{name, rows, colWidths, merges, freeze, autofilter}；单元格为标量或 {value, bold, italic, color(字色 RRGGBB), fill(底色), fontSize, align, valign, wrap, numberFormat, border, hyperlink}；字符串 = 开头自动按公式写入（如 =SUM(B2:B10)）。常用 numberFormat：#,##0 / 0.00% / yyyy-mm-dd。freeze 传 \"A2\" 冻结首行；autofilter:true 自动筛选（或直接传区域）。",
+    "创建 .xlsx 工作簿（覆盖整簿——已有文件本会话未读取过时拒绝，防盲覆盖；改局部用 excel_edit）。sheets 数组每项：{name, rows, colWidths, merges, freeze, autofilter}；单元格为标量或 {value, bold, italic, color(字色 RRGGBB), fill(底色), fontSize, align, valign, wrap, numberFormat, border, hyperlink}；字符串 = 开头自动按公式写入（如 =SUM(B2:B10)，公式不含缓存计算值——Office 打开时自动重算）。单格行可直接传对象/标量（不包数组，输出会提示）。常用 numberFormat：#,##0 / 0.00% / yyyy-mm-dd。freeze 传 \"A2\" 冻结首行；autofilter:true 自动筛选（或直接传区域）。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema(
     {
@@ -332,6 +334,7 @@ export const excelWriteTool: Tool = {
     wb.creator = "GEBAI"
     const used = new Set<string>()
     const parts: string[] = []
+    const warnings: string[] = []
     for (const raw of args.sheets) {
       if (!raw || typeof raw !== "object") continue
       const s = raw as Record<string, unknown>
@@ -340,20 +343,15 @@ export const excelWriteTool: Tool = {
       while (used.has(name)) name = `${name.slice(0, 29)}_${used.size + 1}`
       used.add(name)
       const ws = wb.addWorksheet(name)
-      const rowCount = Array.isArray(s.rows) ? s.rows.length : 0
+      const rows = normalizeRows(s.rows, name, warnings)
+      const rowCount = rows.length
       let maxCol = 0
-      if (Array.isArray(s.rows)) {
-        s.rows.forEach((row, ri) => {
-          if (!Array.isArray(row)) return
-          row.forEach((cv, ci) => {
-            const spec = cellSpec(cv)
-            const cell = ws.getCell(ri + 1, ci + 1)
-            if (spec.hasValue) assignCellValue(cell, spec.value)
-            applyCellStyle(cell, spec.style)
-          })
-          maxCol = Math.max(maxCol, row.length)
+      rows.forEach((row, ri) => {
+        row.forEach((cv, ci) => {
+          writeCell(ws.getCell(ri + 1, ci + 1), cv)
         })
-      }
+        maxCol = Math.max(maxCol, row.length)
+      })
       if (Array.isArray(s.colWidths)) s.colWidths.forEach((w, i) => (ws.getColumn(i + 1).width = asNum(w, 0) || undefined))
       if (Array.isArray(s.merges)) for (const mr of s.merges) if (typeof mr === "string") ws.mergeCells(mr)
       if (typeof s.freeze === "string") {
@@ -361,8 +359,7 @@ export const excelWriteTool: Tool = {
         if (ref) ws.views = [{ state: "frozen", xSplit: ref.col - 1, ySplit: ref.row - 1 }]
       }
       if (s.autofilter != null) {
-        const rows = Array.isArray(s.rows) ? s.rows.filter(Array.isArray).length : 0
-        const last = `${colNumToLetter(Math.max(1, maxCol))}${Math.max(1, rows)}`
+        const last = `${colNumToLetter(Math.max(1, maxCol))}${Math.max(1, rowCount)}`
         ws.autoFilter = s.autofilter === true ? `A1:${last}` : typeof s.autofilter === "string" ? s.autofilter : undefined
       }
       parts.push(`${name}（${rowCount} 行 × ${maxCol} 列）`)
@@ -370,8 +367,34 @@ export const excelWriteTool: Tool = {
     if (!wb.worksheets.length) return { output: "sheets 参数中没有有效工作表。" }
     await writeWorkbookBytes(wb, abs, ctx)
     ctx.fileGuard?.markRead(abs)
-    return { output: `已创建 ${args.path}：${parts.join("、")}——前端文件面板可下载。`, blocks: fileBlocks(abs, ctx) }
+    return {
+      output: `已创建 ${args.path}：${parts.join("、")}——前端文件面板可下载。${warnings.length ? `\n注意：\n- ${warnings.join("\n- ")}` : ""}`,
+      blocks: fileBlocks(abs, ctx),
+    }
   },
+}
+
+/** 单元格写入（excel_write / excel_edit add_sheet 共用）：值 + 超链接 + 样式一次落位。
+ *  hyperlink 为值形态（exceljs {text, hyperlink}），混在样式对象里——在此统一取出处理。 */
+function writeCell(cell: Cell, cv: unknown): void {
+  const spec = cellSpec(cv)
+  const link = typeof spec.style.hyperlink === "string" ? spec.style.hyperlink : null
+  if (link) {
+    cell.value = { text: spec.value != null && spec.value !== "" ? String(spec.value) : link, hyperlink: link }
+  } else if (spec.hasValue) {
+    assignCellValue(cell, spec.value)
+  }
+  applyCellStyle(cell, spec.style)
+}
+
+/** rows 数组归一：非数组行（单格对象/标量——模型常见写法）收敛为单格行并回报 warning，不静默丢弃。 */
+function normalizeRows(rows: unknown, sheetName: string, warnings: string[]): unknown[][] {
+  if (!Array.isArray(rows)) return []
+  return rows.map((row, ri) => {
+    if (Array.isArray(row)) return row
+    warnings.push(`${sheetName} 第 ${ri + 1} 行不是数组（对象/标量按单格行处理——整行多格请用数组）`)
+    return [row]
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +434,7 @@ export const excelEditTool: Tool = {
 
     const applied: string[] = []
     const failed: string[] = []
+    const rowWarnings: string[] = []
     for (const raw of args.edits) {
       if (!raw || typeof raw !== "object") continue
       const op = raw as Record<string, unknown>
@@ -429,13 +453,7 @@ export const excelEditTool: Tool = {
                 failed.push(`set：无效单元格引用 ${String(spec.ref)}`)
                 continue
               }
-              const cell = ws.getCell(ref.row, ref.col)
-              if (typeof spec.hyperlink === "string") {
-                cell.value = { text: String(spec.value ?? spec.hyperlink), hyperlink: spec.hyperlink }
-              } else if (spec.value !== undefined) {
-                assignCellValue(cell, spec.value)
-              }
-              applyCellStyle(cell, spec)
+              writeCell(ws.getCell(ref.row, ref.col), spec)
               n++
             }
             applied.push(`set ${n} 格`)
@@ -444,20 +462,15 @@ export const excelEditTool: Tool = {
           case "add_sheet": {
             const name = String(op.name ?? `Sheet${wb.worksheets.length + 1}`).replace(/[\\/*?:[\]]/g, "_").slice(0, 31)
             const nws = wb.addWorksheet(name)
-            const rowCount = Array.isArray(op.rows) ? op.rows.length : 0
+            const rows = normalizeRows(op.rows, name, rowWarnings)
+            const rowCount = rows.length
             let maxCol = 0
-            if (Array.isArray(op.rows)) {
-              op.rows.forEach((row: unknown, ri: number) => {
-                if (!Array.isArray(row)) return
-                row.forEach((cv, ci) => {
-                  const spec = cellSpec(cv)
-                  const cell = nws.getCell(ri + 1, ci + 1)
-                  if (spec.hasValue) assignCellValue(cell, spec.value)
-                  applyCellStyle(cell, spec.style)
-                })
-                maxCol = Math.max(maxCol, row.length)
+            rows.forEach((row: unknown[], ri: number) => {
+              row.forEach((cv, ci) => {
+                writeCell(nws.getCell(ri + 1, ci + 1), cv)
               })
-            }
+              maxCol = Math.max(maxCol, row.length)
+            })
             applied.push(`add_sheet ${name}（${rowCount} 行 × ${maxCol} 列）`)
             break
           }
@@ -568,7 +581,7 @@ export const excelEditTool: Tool = {
     await ctx.writeBinaryFile!(abs, u8)
     ctx.fileGuard?.markRead(abs)
     return {
-      output: `已应用 ${applied.length} 项修改至 ${args.path}：${applied.join("、")}${failed.length ? `\n未成功：\n- ${failed.join("\n- ")}` : ""}`,
+      output: `已应用 ${applied.length} 项修改至 ${args.path}：${applied.join("、")}${failed.length ? `\n未成功：\n- ${failed.join("\n- ")}` : ""}${rowWarnings.length ? `\n注意：\n- ${rowWarnings.join("\n- ")}` : ""}`,
       blocks: fileBlocks(abs, ctx),
     }
   },

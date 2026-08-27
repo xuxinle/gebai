@@ -44,7 +44,10 @@ describe("excel_write / excel_read（xlsx 往返）", () => {
     const sheet = await excelReadTool.execute({ path: "data.xlsx", sheet: "销售" }, ctx)
     expect(sheet.output).toContain("华东")
     expect(sheet.output).toContain("合计")
-    expect(sheet.output).toContain("=B2+C2") // 无缓存计算值时回显公式原文
+    expect(sheet.output).toContain("=B2+C2（未计算）") // 无缓存值公式回显并标注，防误当字符串值
+    const formulasMode = await excelReadTool.execute({ path: "data.xlsx", sheet: "销售", formulas: true }, ctx)
+    expect(formulasMode.output).toContain("=B2+C2")
+    expect(formulasMode.output).not.toContain("（未计算）")
     const byIndex = await excelReadTool.execute({ path: "data.xlsx", sheet: 2 }, ctx)
     expect(byIndex.output).toContain("示例")
     rmSync(home, { recursive: true, force: true })
@@ -98,6 +101,45 @@ describe("excel_write / excel_read（xlsx 往返）", () => {
     await excelReadTool.execute({ path: "g.xlsx" }, fresh)
     const allowed = await excelWriteTool.execute({ path: "g.xlsx", sheets: [{ name: "S", rows: [[2]] }] }, fresh)
     expect(allowed.output).toContain("已创建")
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("excel_write 输入容错（缺陷回归：对象形式整行/超链接）", () => {
+  test("单格行以对象/标量直传：收敛为单格行写入并提示，不再静默丢弃", async () => {
+    const home = setup()
+    const { ctx } = makeCtx(home)
+    const r = await excelWriteTool.execute(
+      {
+        path: "mini.xlsx",
+        sheets: [{ name: "说明", rows: [{ value: "季度统计", bold: true, fontSize: 14 }, ["区域", "值"], ["华东", 100]] }],
+      },
+      ctx,
+    )
+    expect(r.output).toContain("第 1 行不是数组")
+    expect(r.output).toContain("单格行处理")
+    const read = await excelReadTool.execute({ path: "mini.xlsx", sheet: "说明" }, ctx)
+    expect(read.output).toContain("季度统计")
+    expect(read.output).toContain("华东")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("单元格 hyperlink 写入（值形态 {text, hyperlink} 落盘可读回）", async () => {
+    const home = setup()
+    const { ctx } = makeCtx(home)
+    await excelWriteTool.execute(
+      { path: "link.xlsx", sheets: [{ name: "S", rows: [["官网", { value: "GEBAI", hyperlink: "https://gebai.dev" }]] }] },
+      ctx,
+    )
+    const read = await excelReadTool.execute({ path: "link.xlsx", sheet: "S" }, ctx)
+    expect(read.output).toContain("GEBAI")
+    // 直接验证包内超链接部件存在（缺陷 ② 的回归口径：此前 hyperlink 静默丢失）
+    const { unzipFiles } = await import("./ooxml")
+    const files = unzipFiles(new Uint8Array(await Bun.file(join(ctx.workdir, "link.xlsx")).arrayBuffer()))
+    const relsEntry = Object.entries(files).find(([k, v]) => k.includes("worksheets/_rels") && !k.endsWith("/") && v.length > 0)
+    expect(relsEntry).toBeDefined()
+    expect(Buffer.from(relsEntry![1]).toString("utf-8")).toContain("hyperlink")
+    expect(Buffer.from(relsEntry![1]).toString("utf-8")).toContain("gebai.dev")
     rmSync(home, { recursive: true, force: true })
   })
 })
