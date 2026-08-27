@@ -72,6 +72,8 @@ GEBAI_HOME/
   - **接口地址（`GEBAI_LLM_API_BASE`）两种写法均可**（`endpointUrl` 助手统一拼接）：服务**根地址**（自动追加接口路径，尾部斜杠剥净，如 `https://api.deepseek.com`、`https://open.bigmodel.cn/api/paas/v4`）或**完整接口地址**（文档/控制台直接复制的形态，如 `https://open.bigmodel.cn/api/paas/v4/chat/completions`——已以接口路径结尾则原样使用，不重复拼接）；视觉模型 `GEBAI_VISION_API_BASE` 同规则（复用同一 Provider 实现）
 - **前端**: Web (Vite 构建)，桌面端由原生 WebView 启动器（tao/wry）或系统浏览器加载同一套 Web UI
 - **语法分析**: tree-sitter（wasm，`web-tree-sitter` + `tree-sitter-wasms`），供 code 的 `analyze` 工具做代码结构概览；非 AI 依赖，不影响「不引入第三方 AI SDK」原则；**语法 wasm 构建期内嵌**（`scripts/build-analyzer-wasm.ts` 生成 gzip+base64 注册表，二进制打包模式回退内嵌产物，dev 模式读 node_modules）
+- **文档处理**: `docx`（Word 生成）/ `exceljs`（Excel 读写）/ `pptxgenjs`（PPT 生成）/ `fflate`（OOXML ZIP 解包，docx/pptx 读取与追加重打包），供 `wps` 子Agent 做文档读写排版；非 AI 依赖。复用既有 `happy-dom`（`DOMParser` 以 `text/xml` 模式解析 OOXML 部件——支持命名空间前缀标签查询，注意其 `Element.children` 为 `HTMLCollection` 须转真数组后用数组方法）
+- **依赖版本钉死**: `@plantuml/core` 钉精确版本 `1.2026.6`（lockfile 不入库，caret 范围会解析到 1.2026.7——该版在 feishu-bot 渲染路径上 TeaVM 崩溃 `createProcessingInstruction`，时序图渲染必现失败）
 
 ## 软件包结构
 
@@ -833,6 +835,24 @@ export const preload = false
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
 
 
+#### `wps`（Office 文档处理）
+
+实现于 `sub-agents/wps/`（目录形式：`wps.ts` 定义入口 + `wps.md` 系统提示词 + 按格式拆分的工具 `word.ts`/`excel.ts`/`ppt.ts` + 共享基础 `ooxml.ts`/`markdown.ts`/`shared.ts`），Word/Excel/PowerPoint（Office Open XML：.docx/.xlsx/.pptx）的创建/读取/追加/编辑与富排版：
+
+- **文档库**（非 AI 依赖）：`docx`（Word 生成——标题样式/编号列表/表格/图片/页眉页脚/目录域）、`exceljs`（Excel 读写——公式/样式/合并/冻结/筛选）、`pptxgenjs`（PPT 生成——版式/图表/表格/形状/备注；**Bun 严格模式下文本数组必须归一为 `{text, options}` 对象形态**，裸字符串数组触发只读属性赋值错误）、`fflate`（ZIP 解包——docx/pptx 是 ZIP 容器，读取与 word_append 重打包共用）；XML 部件解析复用 `happy-dom` 的 `DOMParser`（`text/xml` 模式）
+- **正文输入双形态**（word_create/word_append 共用，`markdown.ts` 迷你解析器自实现——文档生成只需受控子集，不引入 markdown 库）：markdown 文本（`#` 标题/行内样式（`**粗** *斜* ~~删~~ \`码\`）/`[链接](url)`/有序无序列表（缩进分级）/表格（对齐）/引用/围栏代码块/`![图](路径)` 嵌入/`<!--pagebreak-->` 分页/`<!--toc-->` 目录）或 blocks JSON（结构化块数组，逐 run 样式与图片定宽）
+- **工具集**（八工具，均 `projectAware` 包装——project 参数路由项目内文件）：
+  - `word_create`：富排版建 .docx；`style` 调页面（A4/letter、横竖向、页边距 cm）与正文（字体/字号，默认微软雅黑 10.5pt）、页眉页脚（`{page}`/`{pages}` 页码占位）、文档属性（title）
+  - `word_read`：解析回 markdown（标题→`#`、编号/列表、表格、内嵌图片 `[图片]` 占位；首行块数/图片数/页面尺寸摘要；`offset`/`limit` 按块分页读长文档）
+  - `word_append`：**原 XML 拼接**——原文档格式/样式/图片原样保留，新内容以直接格式化 XML 插入 body 级 `sectPr` 之前（fflate 解包 → 生成片段 → 图片/超链接补 `document.xml.rels` 关系、媒体入包、`[Content_Types].xml` 补扩展声明 → 重打包；**写前回读校验**，失败不落盘防损坏用户文档）
+  - `excel_write` / `excel_read` / `excel_edit`：全量建表（多工作表；单元格标量或 `{value, bold, italic, color, fill, fontSize, align, wrap, numberFormat, border}`；`=` 开头字符串自动按公式；列宽/合并/冻结 `A2`/自动筛选）；读取（不传 sheet 返回概览；markdown（默认）/json（rows 入 data 供 flow 编排）/csv 三种输出；`range`（A1:D20 或 A:D）/`maxRows`/`formulas`；.csv/.tsv 文本表格兼容）；ops 批量编辑（`set` 设值设样式 / 行列增删 / `add_sheet`·`rename_sheet`·`delete_sheet` / `merge`·`unmerge` / `col_width`·`row_height` / `freeze`·`autofilter`，各项可带 sheet 指定目标表；改完回读校验）
+  - `ppt_create` / `ppt_read`：简式页（title/subtitle/bullets/notes/background）与自由元素版式（`elements`：text 文本框/image 嵌图（会话/项目内路径，自动探测像素尺寸）/table 表格/chart 图表（bar/hbar/line/area/pie/doughnut/scatter，data `[{name, labels, values}]`）/shape 形状，坐标英寸）；layout wide（16:9 13.33×7.5 默认）/4x3/自定义尺寸，theme 全局字体字号色；读取回每页文本（首个文本框按标题标记）/表格/备注（剔除页码占位符）/图表与图片计数
+- **审批与安全**：全部免审批（本地文件产物无外部副作用，与全局文件工具姿态一致）；**防盲覆盖守卫在工具体内**（目标已存在且本会话未读取过 → 拒绝；读取类工具与全局 read 共享会话已读追踪 `fileGuard`，exceljs 类修改工具天然先读后写）；写类工具显式 `safeMode: false`（安全模式不提供——文档生成必然落盘），读类工具默认注册（实现只读）；路径经 `resolvePath` 沙箱约束、写前经 `writeGuard`（self_optimize 等装载期写范围政策同规则生效）
+- **工作流（提示词内置）**：明确需求（素材先浏览，不编造）→ 大纲先行（正式/大型文档 ask 确认）→ 分段生成（超长 Word 先 create 后 append，避免单次输出截断）→ 读回校验 → 交付路径与摘要；排版规范内置（Word 标题不超三级、Excel 首行表头+冻结+筛选、PPT 一页一主题 3~5 要点、图表选型指引）；数据类需求先 py/js 加工再写入
+- **限制**：旧版二进制格式 .doc/.xls/.ppt 不支持（提示在 Office/WPS 另存为 OOXML）；PDF 导出经 sh 检测并调用 LibreOffice `soffice --headless --convert-to pdf`（宿主机存在时）；exceljs 不计算公式——读取时无缓存值回显公式原文
+- **预加载**：`preload = false`，按需装载
+
+
 #### 命名与预加载总览
 
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
@@ -846,6 +866,7 @@ export const preload = false
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 浏览器自动化全套（同 playwright）+ http_request/fetch_url/capture_start/capture_stop/capture_clear/capture_list/read/write/agent_list/agent_load/agent_run | 浏览器交互类+http_request+write | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `cron` | add/list/update/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_remove`） | add+update+remove | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的无人值守任务、查看/修改/删除；仅 `GEBAI_CRON_ENABLED=true` 时注册，关闭时完全不可见） |
+| `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；旧版二进制格式 .doc/.xls/.ppt 不支持） |
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 
