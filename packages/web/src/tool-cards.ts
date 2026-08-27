@@ -137,17 +137,17 @@ function clipTitleValue(v: string): string {
  *  多参数 `key=value`（`·` 连接）。超长单值智能截断（悬浮见全文），标题参数始终入头部（不再降级参数气泡）。 */
 function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Record<string, unknown> | null): TitleSuffixInfo | null {
   if (!meta?.titleParams?.length || !args) return null
-  const single = meta.titleParams.length === 1
-  const parts: string[] = []
-  const fullParts: string[] = []
+  const present: Array<{ k: string; raw: string }> = []
   for (const k of meta.titleParams) {
     const v = args[k]
     if (v === undefined || v === null || v === "") continue
-    const raw = String(v)
-    parts.push(single ? clipTitleValue(raw) : `${k}=${clipTitleValue(raw)}`)
-    fullParts.push(single ? raw : `${k}=${raw}`)
+    present.push({ k, raw: String(v) })
   }
-  if (!parts.length) return null
+  if (!present.length) return null
+  // 单值裸显按「实际存在」的参数数决定：声明多个但本次只传一个（如 project 参数未传的文件工具）时仅显示值
+  const single = present.length === 1
+  const parts = present.map((p) => (single ? clipTitleValue(p.raw) : `${p.k}=${clipTitleValue(p.raw)}`))
+  const fullParts = present.map((p) => (single ? p.raw : `${p.k}=${p.raw}`))
   const text = `· ${parts.join(" · ")}`
   const full = `· ${fullParts.join(" · ")}`
   return { text, full: full === text ? undefined : full }
