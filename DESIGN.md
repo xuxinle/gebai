@@ -1591,6 +1591,8 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 - 模型可见 `output`：逐步报告（`### id · 工具（✓/跳过/受限/失败）` + 摘要，循环分组逐轮摘要）
 - 结构化 `data`：`{ steps: [{id, tool, status, runs, data}] }`（编排结果自身也走双输出）
+- **blocks 透传**（与 js 编排一致）：内部工具产生的图片/图表/文件块去重（`type:path`）限量（10 个，`FLOW_BLOCKS_CAP` 与 `JS_BLOCKS_CAP` 对齐）透传到 flow 结果——编排 show/read 图片/vision/产物类工具时富内容直达 UI/模型，不再丢失；`timeout` 超时返回已执行部分时同样透传
+- **`agent_run` 存档透传**：步骤为 `agent_run` 时新会话完整存档（`sessionRun`）透传到 flow 工具调用记录（历史回放不丢）；多个 `agent_run` 步骤保留最后一个
 
 #### 模型引导（系统提示词）
 
@@ -1670,6 +1672,7 @@ await defineTool({
 - 模型可见 `output`：console 输出汇总（warn/error 加前缀）+ `[返回值]` 预览（2000 字符，完整值在 data；返回值须为纯 JSON 结构——Map/Set/Date 经 JSON 序列化会变形或丢失）
 - 结构化 `data`：`{ exitCode, logs, result, calls: [{name, ok, error?}], timedOut?, interrupted? }`（logs/result 截断至 100k 字符）
 - **blocks 透传**：内部工具产生的图片/图表/文件块去重（`type:path`）限量（10 个）透传到 js 结果——编排 read 图片/产物类工具时图像块直达 UI/模型，不再丢失
+- **`agent_run` 存档透传**：脚本内调用 `agent_run` 时新会话完整存档（`sessionRun`）透传到 js 工具调用记录（历史回放不丢；脚本侧返回值同样携带）；多个调用取最后一个
 
 ```
 // 动态编程示例：读文件 → 按内容分支重试 → 聚合返回（工具像内置函数一样直接调用）

@@ -392,6 +392,20 @@ return r.output` },
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("agent_run 新会话存档透传到 js 结果（历史回放不丢）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-run-"))
+    const c = ctxWithTools(home)
+    const ar: Tool = mkTool("agent_run", async () => ({
+      output: "done",
+      sessionRun: { runId: "r9", agents: ["x"], input: "", output: "done", messages: [] },
+    }))
+    c.registry.resolve = (name: string) => (name === "agent_run" ? { name, tool: ar } : undefined)
+    c.registry.schemas = () => [{ name: "agent_run", description: "", parameters: {} }]
+    const r = await jsTool.execute({ code: `const a = await agent_run({}); return a.sessionRun.runId` }, c)
+    expect((r.sessionRun as { runId: string } | undefined)?.runId).toBe("r9")
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("toolFnDecls：JS 全局名（fetch/JSON 等）不生成内置函数声明（防模块作用域遮蔽全局）", () => {
     const decls = toolFnDecls(["fetch", "read", "JSON"])
     expect(decls).toContain("async function read(")

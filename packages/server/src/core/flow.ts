@@ -6,6 +6,7 @@
  * 表达式求值器为纯函数（无 eval/Function），可独立单测。
  */
 import type { ToolContext, ToolResult } from "./types"
+import type { ContentBlock } from "@gebai/sdk"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg } from "./safety"
 
 /** 单次 flow 执行的工具调用总数上限（含循环迭代展开）。 */
@@ -21,6 +22,8 @@ export const FLOW_MAX_DEPTH = 4
 export const FLOW_REPORT_STEP_CHARS = 2000
 /** 报告中单轮（循环迭代）输出保留字符数。 */
 export const FLOW_REPORT_ROUND_CHARS = 500
+/** 内层工具 blocks 透传上限（去重后；与 js 编排 JS_BLOCKS_CAP 对齐，防巨量重内容块撑爆结果）。 */
+export const FLOW_BLOCKS_CAP = 10
 
 /** flow 整体超时（timeout 参数，秒）预算耗尽信号：在步骤边界/循环轮首抛出，由 runFlow 捕获转为部分结果（不中断任务）。 */
 export class FlowTimeoutError extends Error {
@@ -418,6 +421,11 @@ interface FlowState {
   executed: number
   /** 总时间预算截止（timeout 参数解析，毫秒时间戳；undefined = 不限制）。 */
   deadline?: number
+  /** 内层工具 blocks 汇集（去重限量，FLOW_BLOCKS_CAP 封顶）——透传到 flow 结果供 UI/模型消费（与 js 编排一致）。 */
+  blocks: ContentBlock[]
+  seenBlockKeys: Set<string>
+  /** agent_run 步骤存档透传（多个 agent_run 步骤保留最后一个，历史回放用）。 */
+  sessionRun?: ToolResult["sessionRun"]
 }
 
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -471,6 +479,17 @@ export function normalizeSteps(raw: unknown): FlowStep[] {
 
 function capReport(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}\n…（已截断，完整内容见本步 data/截断文件）` : text
+}
+
+/** 内层工具 blocks 汇集（去重限量）：编排 show/read/图片类工具时产物块透传到 flow 结果（与 js 编排一致）。 */
+function collectBlocks(state: FlowState, blocks: ContentBlock[] | undefined): void {
+  for (const b of blocks ?? []) {
+    if (state.seenBlockKeys.size >= FLOW_BLOCKS_CAP) return
+    const key = `${b.type}:${(b as { path?: string; name?: string }).path ?? (b as { name?: string }).name ?? ""}`
+    if (state.seenBlockKeys.has(key)) continue
+    state.seenBlockKeys.add(key)
+    state.blocks.push(b)
+  }
 }
 
 const STATUS_LABEL: Record<FlowStepResult["status"], string> = { done: "✓", skipped: "跳过", blocked: "受限", error: "失败" }
@@ -584,6 +603,9 @@ async function runToolStep(
     if (soft) return soft
     throw new Error(`flow: 步骤 ${id}（${step.tool}）失败: ${msg}`)
   }
+  // 富内容块/新会话存档透传（与 js 编排一致）：编排 show/图片类/agent_run 工具时产物直达 UI/模型
+  collectBlocks(state, result.blocks)
+  if (result.sessionRun) state.sessionRun = result.sessionRun
   return { id, tool: step.tool, kind: "tool", status: "done", output: result.output, data: result.data }
 }
 
@@ -739,7 +761,7 @@ export async function runFlow(args: { steps: unknown; input?: unknown; timeout?:
   const steps = normalizeSteps(args.steps)
   // timeout（秒）：合法正数生效（步骤间累计预算），非法/缺省不限制
   const timeoutMs = parseTimeoutMs(args.timeout)
-  const state: FlowState = { ctx, results: new Map(), order: [], executed: 0, deadline: timeoutMs !== undefined ? Date.now() + timeoutMs : undefined }
+  const state: FlowState = { ctx, results: new Map(), order: [], executed: 0, deadline: timeoutMs !== undefined ? Date.now() + timeoutMs : undefined, blocks: [], seenBlockKeys: new Set() }
   const scope: ExprScope = { input: args.input }
   const report: string[] = []
   try {
@@ -757,6 +779,9 @@ export async function runFlow(args: { steps: unknown; input?: unknown; timeout?:
           timedOut: true,
           executed: timedOut,
         },
+        // 已执行步骤的产物同样透传（部分结果不丢富内容/存档）
+        ...(state.blocks.length ? { blocks: state.blocks } : {}),
+        ...(state.sessionRun ? { sessionRun: state.sessionRun } : {}),
       }
     }
     // 步骤失败附加已执行清单：已执行步骤的副作用（写文件/发请求等）真实存在，模型需要知道
@@ -771,6 +796,9 @@ export async function runFlow(args: { steps: unknown; input?: unknown; timeout?:
     data: {
       steps: state.order.map((r) => ({ id: r.id, tool: r.tool, status: r.status, runs: r.runs, data: r.data ?? null })),
     },
+    // 内层工具富内容块/agent_run 存档透传（与 js 编排一致）
+    ...(state.blocks.length ? { blocks: state.blocks } : {}),
+    ...(state.sessionRun ? { sessionRun: state.sessionRun } : {}),
   }
 }
 

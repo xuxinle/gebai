@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { evalExpr, parseExpr, resolveTemplate, runFlow, scanFlowApprovals, normalizeSteps, FLOW_FOREACH_MAX, FLOW_WHILE_HARD_MAX } from "./flow"
-import type { Tool, ToolContext } from "./types"
+import { evalExpr, parseExpr, resolveTemplate, runFlow, scanFlowApprovals, normalizeSteps, FLOW_FOREACH_MAX, FLOW_WHILE_HARD_MAX, FLOW_BLOCKS_CAP } from "./flow"
+import type { Tool, ToolContext, ToolResult } from "./types"
 import { createGlobalTools, shTool } from "./tools"
 
 function baseCtx(home: string): ToolContext {
@@ -650,6 +650,59 @@ describe("runFlow 数据流编排", () => {
     await runFlow({ steps: [{ tool: "t" }], timeout: "abc" }, c)
     await runFlow({ steps: [{ tool: "t" }] }, c)
     expect(calls.length).toBe(5)
+  })
+
+  test("内部工具 blocks 去重限量透传到 flow 结果（与 js 编排一致）", async () => {
+    const mk = (name: string, result: Partial<ToolResult>): Tool => ({
+      name,
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { output: name, ...result }
+      },
+    })
+    const img = mk("img", {
+      blocks: [
+        { type: "image", path: "tmp/a.png", name: "a.png", mime: "image/png" },
+        { type: "image", path: "tmp/a.png", name: "a.png", mime: "image/png" },
+      ],
+    })
+    const many = mk("many", {
+      blocks: Array.from({ length: FLOW_BLOCKS_CAP + 5 }, (_, i) => ({ type: "image", path: `tmp/${i}.png`, name: `${i}.png`, mime: "image/png" })),
+    })
+    const none = mk("none", {})
+    const c = flowCtx({ img, many, none })
+    const r = await runFlow({ steps: [{ id: "a", tool: "img" }, { tool: "img" }, { tool: "none" }] }, c)
+    // 同 path 去重：两次调用各两个块 → 结果仅 1 个
+    expect(r.blocks).toHaveLength(1)
+    expect((r.blocks as Array<{ type: string; path: string }>)[0]).toMatchObject({ type: "image", path: "tmp/a.png" })
+    // 全部步骤无块时不携带 blocks 字段
+    const r2 = await runFlow({ steps: [{ tool: "none" }] }, c)
+    expect(r2.blocks).toBeUndefined()
+    // 超量封顶：单步 15 个块 → 结果 10 个
+    const r3 = await runFlow({ steps: [{ tool: "many" }] }, c)
+    expect(r3.blocks).toHaveLength(FLOW_BLOCKS_CAP)
+  })
+
+  test("agent_run 步骤 sessionRun 存档透传（多个取最后一个）", async () => {
+    const mkRun = (runId: string): Tool => ({
+      name: "agent_run",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { output: `done:${runId}`, sessionRun: { runId, agents: ["x"], input: "", output: "ok", messages: [] } }
+      },
+    })
+    const c = flowCtx({ agent_run: mkRun("r1") })
+    const r = await runFlow({ steps: [{ tool: "agent_run" }] }, c)
+    expect((r.sessionRun as { runId: string }).runId).toBe("r1")
+    // 两步 agent_run：保留最后一个；无 agent_run 步骤时不携带
+    const c2 = flowCtx({ agent_run: mkRun("r2") })
+    const r2 = await runFlow({ steps: [{ tool: "agent_run" }, { tool: "agent_run" }] }, c2)
+    expect((r2.sessionRun as { runId: string }).runId).toBe("r2")
+    const c3 = flowCtx({ t: tool("t", () => "x") })
+    const r3 = await runFlow({ steps: [{ tool: "t" }] }, c3)
+    expect(r3.sessionRun).toBeUndefined()
   })
 })
 
