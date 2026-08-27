@@ -81,8 +81,10 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
 
   let followRaf = false
   function contentChanged() {
-    lastInternalAt = now()
+    // 仅跟随中刷新静默窗口：未跟随时持续的内容变更（流式每 120ms 重解析）会让窗口永不关闭，
+    // 非滚轮类滚动输入（中键自动滚动/查找定位/覆盖式滚动条）无法归因、每滚一下都被回正拽底——「滚动卡死」
     if (!following) return
+    lastInternalAt = now()
     if (followRaf) return
     followRaf = true
     requestAnimationFrame(() => {
