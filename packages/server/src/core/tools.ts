@@ -1915,13 +1915,13 @@ export const gitTool: Tool = {
   card: { args: "none" },
   parameters: schema(
     {
-      action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files", "grep"], description: "status 工作区状态 / diff 变更内容 / log 提交历史 / show 查看某提交或文件的完整内容（ref 默认 HEAD）/ branch 本地与远程分支列表 / ls-files 已跟踪文件清单（自动尊重 .gitignore，摸底项目结构快于 glob）/ grep 在**已跟踪文件**中内容搜索（自动尊重 .gitignore——grep 工具不读 .gitignore 的补口；basic 正则语法；未 add 的新文件不在结果）" },
+      action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files", "grep"], description: "status 工作区状态 / diff 变更内容 / log 提交历史 / show 查看某提交或文件的完整内容（ref 默认 HEAD）/ branch 本地与远程分支列表 / ls-files 已跟踪文件清单（自动尊重 .gitignore，摸底项目结构快于 glob）/ grep 在**已跟踪文件**中内容搜索（自动尊重 .gitignore——grep 工具不读 .gitignore 的补口；扩展正则 ERE；未 add 的新文件不在结果）" },
       dir: { type: "string", description: "Git 仓库目录（默认会话工作目录）" },
       staged: { type: "boolean", description: "diff 是否查看暂存区（--staged），默认否" },
       maxEntries: { type: "integer", description: "log 条数（默认 10，上限 50）" },
       ref: { type: "string", description: "diff/log/show 的 Git 引用：提交哈希/分支/tag/HEAD~n/范围（main..dev）等（show 默认 HEAD；diff/log 不传则工作区/当前分支）" },
       path: { type: "string", description: "路径过滤（可带目录/文件前缀）：diff/log/show 限定该路径的变更（-- <path>）；ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts）；grep 的搜索范围限定（可选）" },
-      pattern: { type: "string", description: "grep 的搜索模式（basic 正则，如 foo\\.bar、error|warn）" },
+      pattern: { type: "string", description: "grep 的搜索模式（扩展正则 ERE，如 error|warn、foo\\.bar）" },
     },
     ["action"],
   ),
@@ -1958,9 +1958,9 @@ export const gitTool: Tool = {
       cmd = path ? `git ls-files -- "${path}"` : "git ls-files"
     } else if (action === "grep") {
       const pattern = args.pattern ? String(args.pattern) : ""
-      if (!pattern.trim()) return { output: "git: grep 需要 pattern（basic 正则搜索模式）。" }
+      if (!pattern.trim()) return { output: "git: grep 需要 pattern（扩展正则 ERE 搜索模式）。" }
       if (!safeGitPattern(pattern)) return { output: `git: 非法 pattern（含引号内活动元字符 " % $ 反引号——请改写模式或用 grep 工具）: ${pattern.slice(0, 60)}` }
-      cmd = `git grep -n -I --no-color -e "${pattern}"${pathSuffix}`
+      cmd = `git grep -n -I --no-color -E -e "${pattern}"${pathSuffix}`
     } else return { output: `git: 未知操作: ${action}（status/diff/log/show/branch/ls-files/grep）` }
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: dir })
     if (code !== 0) return { output: `git ${action} 失败（exit ${code}，目录 ${args.dir || "."} 可能不是 Git 仓库）:\n${stderr || stdout}` }
