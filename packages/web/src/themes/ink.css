@@ -131,7 +131,6 @@
    ============================================================ */
 [data-theme="ink"] header,
 [data-theme="ink"] aside,
-[data-theme="ink"] #composer,
 [data-theme="ink"] .settings-panel,
 [data-theme="ink"] .login-card,
 [data-theme="ink"] .theme-pop,
@@ -140,6 +139,8 @@
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
 }
+/* 输入区不进面板组：去外框去底色，输入行自身胶囊悬浮在纸面上 */
+[data-theme="ink"] #composer { background: transparent; }
 [data-theme="ink"] header { border-radius: 0; border-top: 0; border-left: 0; border-right: 0; }
 [data-theme="ink"] aside { border-radius: 0; border-top: 0; border-bottom: 0; border-left: 0; }
 
@@ -248,17 +249,20 @@
 /* ============================================================
    composer
    ============================================================ */
+/* 输入行：胶囊悬浮——无外框，宣纸底 + 墨晕浮起投影；聚焦加深投影带朱砂微光（无描边环） */
 [data-theme="ink"] .composer-row {
-  background: #fdfbf5;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  transition: all var(--transition);
+  background: rgba(253, 251, 245, 0.92);
+  border: none;
+  border-radius: 999px;
+  padding: 6px 10px;
+  box-shadow: 0 6px 22px rgba(60, 50, 30, 0.16), 0 1px 4px rgba(60, 50, 30, 0.1);
+  transition: box-shadow var(--transition), background var(--transition);
 }
 [data-theme="ink"] .composer-row:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 2px 10px rgba(176, 58, 46, 0.1);
+  background: #fdfbf5;
+  box-shadow: 0 8px 28px rgba(176, 58, 46, 0.16), 0 2px 6px rgba(60, 50, 30, 0.12);
 }
-[data-theme="ink"] #attach-btn { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="ink"] #attach-btn { color: var(--text-muted); border-radius: 50%; }
 [data-theme="ink"] #attach-btn:hover { background: var(--bg-hover); color: var(--accent); }
 [data-theme="ink"] #input { color: var(--text); caret-color: var(--accent); }
 [data-theme="ink"] #input::placeholder { color: var(--text-faint); }

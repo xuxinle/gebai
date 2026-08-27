@@ -438,6 +438,61 @@ describe("装载工具会话可见性与全局工具复用", () => {
     rmSync(home2, { recursive: true, force: true })
   })
 
+  test("agent_run 全局提示词注入：默认不注入（新会话系统提示词仅子Agent 段），inherit_global_prompt=true 时总Agent 提示词作为前缀", async () => {
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do" } },
+      { mode: "text", text: "child done" },
+      { mode: "text", text: "main done" },
+    ]
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    await engine.run(a.id, "default", "hi")
+    const sysDefault = String(provider.seen[1][0].content)
+    expect(sysDefault).toContain("已预加载子Agent")
+    expect(sysDefault).not.toContain("总Agent 全局系统提示词")
+    expect(sysDefault).not.toContain("任务类型路由")
+
+    const provider2 = new HardenProvider()
+    provider2.script = [
+      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do", inherit_global_prompt: true } },
+      { mode: "text", text: "child done" },
+      { mode: "text", text: "main done" },
+    ]
+    const { home: home2, store: store2, engine: engine2 } = await setupEngine(provider2)
+    const b = await store2.createSession("default", "b")
+    await engine2.run(b.id, "default", "hi")
+    const sysInjected = String(provider2.seen[1][0].content)
+    // 单源复用 buildSystemPrompt：主提示词身份/路由段整体带入，且位于子Agent 段之前
+    expect(sysInjected).toContain("总Agent 全局系统提示词")
+    expect(sysInjected).toContain("任务类型路由")
+    expect(sysInjected.indexOf("总Agent 全局系统提示词")).toBeLessThan(sysInjected.indexOf("### code"))
+    rmSync(home, { recursive: true, force: true })
+    rmSync(home2, { recursive: true, force: true })
+  })
+
+  test("agent_run 绑定项目根的新会话：search_symbols 扫描项目文件树（listFiles 随 resolveBase 切换），而非仅会话 tmp", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "gebai-harden-proj-"))
+    writeFileSync(join(projectRoot, "app.ts"), "export function findMeInProject() {\n  return 1\n}\n")
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "search" } },
+      { mode: "tool", tool: "code_search_symbols", args: { symbol: "findMeInProject" } },
+      { mode: "text", text: "child done" },
+      { mode: "text", text: "main done" },
+    ]
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    await engine.run(a.id, "default", "hi", { envOverride: { CODE_PROJECT: projectRoot } })
+    const msgs = (await store.load(a.id, "default"))!.messages
+    const callMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)!
+    const sym = callMsg.sessionRun!.messages.find((m) => m.role === "tool" && m.content.includes("findMeInProject"))
+    expect(sym).toBeTruthy()
+    expect(sym!.content).toContain("app.ts")
+    rmSync(projectRoot, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("预置项目保留名 tmp 在任务期被拒绝（前端注入 env 的兜底校验）", async () => {
     const provider = new HardenProvider()
     provider.script = [{ mode: "text", text: "done" }]

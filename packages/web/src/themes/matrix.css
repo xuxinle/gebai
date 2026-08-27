@@ -336,13 +336,6 @@
    消息气泡 — 终端窗口
    ============================================================ */
 
-/* 角标（top:-10px 外凸出气泡顶边）须落在 .msg 盒内：低性能模式 .msg 的
-   content-visibility: auto 携带 paint 包含、新会话容器 .session-body 是滚动容器，
-   伸出 .msg 盒外的部分必被裁掉（只剩下半截）——消息体顶部预留角标高度，
-   同时收紧消息间距保持视觉间隔不变（预留 11px + 间距 ≈ 原 --msg-gap） */
-[data-theme="matrix"] .msg .msg-body { padding-top: 11px; }
-[data-theme="matrix"] #messages { gap: calc(var(--msg-gap) - 11px); }
-
 /* assistant 气泡：黑底 + 实线绿边 + [ASSISTANT] 角标 */
 [data-theme="matrix"] .msg.assistant .bubble {
   background: var(--bg-elev);
@@ -1209,6 +1202,8 @@
 
 /* ============================================================
    动效 — 终端光标闪烁 + 字符雨缓动
+   （不做整页周期性闪烁：body 级 flicker 会牵动全部内容的重绘与观感，
+   闪烁仅保留元素级指示——连接灯/流式光标/激活项）
    ============================================================ */
 @keyframes matrix-blink {
   0%, 50% { opacity: 1; }
@@ -1217,15 +1212,6 @@
 @keyframes matrix-scan {
   0% { transform: translateY(0); }
   100% { transform: translateY(3px); }
-}
-@keyframes matrix-flicker {
-  0%, 92%, 100% { opacity: 1; }
-  93% { opacity: 0.85; }
-  95% { opacity: 0.92; }
-  97% { opacity: 0.8; }
-}
-[data-theme="matrix"] body {
-  animation: matrix-flicker 8s steps(40, end) infinite;
 }
 
 /* 响应式：移动端减负（去掉顶部装饰条 + 对应 padding） */
