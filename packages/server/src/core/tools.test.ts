@@ -2695,7 +2695,7 @@ describe("git tool", () => {
     cleanup(home)
   })
 
-  test("git grep：已跟踪文件内容搜索（-e 定界 + -- pathspec）；正则元字符放行、注入字符拒绝；无匹配文案", async () => {
+  test("git grep：已跟踪文件内容搜索（-E 扩展正则 + -e 定界 + -- pathspec）；正则元字符放行、注入字符拒绝；无匹配文案", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-git-grep-"))
     const c = ctx(home)
     const seen: string[] = []
@@ -2704,11 +2704,11 @@ describe("git tool", () => {
       return { stdout: "src/a.ts:12: todo: fix\n", stderr: "", code: 0 }
     }
     const r = await gitTool.execute({ action: "grep", pattern: "todo|fix" }, c)
-    expect(seen).toEqual(['git grep -n -I --no-color -e "todo|fix"'])
+    expect(seen).toEqual(['git grep -n -I --no-color -E -e "todo|fix"'])
     expect(r.output).toContain("src/a.ts:12: todo: fix")
     // pathspec 限定范围
     await gitTool.execute({ action: "grep", pattern: "todo", path: "src/*.ts" }, c)
-    expect(seen[1]).toBe('git grep -n -I --no-color -e "todo" -- "src/*.ts"')
+    expect(seen[1]).toBe('git grep -n -I --no-color -E -e "todo" -- "src/*.ts"')
     // 正则元字符（| & ^）放行；引号内活动元字符（" % $ 反引号）拒绝
     await gitTool.execute({ action: "grep", pattern: "a&b^c" }, c)
     expect(seen[2]).toContain('a&b^c"')
