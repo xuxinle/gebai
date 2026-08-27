@@ -320,6 +320,30 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
     }
   })
 
+  test("file 块 office 类型（docx/xlsx/pptx）：render=office 取数后沙箱 iframe 渲染阅读视图，下载常驻", async () => {
+    const origFetch = globalThis.fetch
+    let calledUrl = ""
+    globalThis.fetch = (async (url: unknown) => {
+      calledUrl = String(url)
+      return new Response('<!doctype html><html><head></head><body><main>office-view-marker</main></body></html>')
+    }) as unknown as typeof fetch
+    try {
+      const container = makeMockEl("div")
+      renderBlock(container as unknown as HTMLElement, { type: "file", path: "tmp/r.docx", name: "r.docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }, "s1")
+      const card = container.children[0] as unknown as MockElWithQuery
+      await new Promise((r) => setTimeout(r, 10))
+      // 取数带 render=office（服务端阅读视图分支）
+      expect(calledUrl).toContain("files/preview")
+      expect(calledUrl).toContain("render=office")
+      const frame = card.querySelector("iframe.html-frame") as unknown as { srcdoc: string } | null
+      expect(frame).not.toBeNull()
+      expect(frame!.srcdoc).toContain("office-view-marker")
+      expect(card.querySelector("a.file-dl-icon")).not.toBeNull()
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+
   test("file 块 404（历史卡片指向已删除文件，如 agent 测试后清理）：明确提示文件已不存在，不引导下载", async () => {
     const origFetch = globalThis.fetch
     globalThis.fetch = (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch
