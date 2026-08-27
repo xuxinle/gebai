@@ -67,6 +67,65 @@ describe("ppt_create / ppt_read（pptx 往返）", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("输入容错：页级元素对象包裹 + 元素 type 缺失按字段推断（均回报提示）", async () => {
+    const home = setup()
+    const { ctx } = makeCtx(home)
+    const r = await pptCreateTool.execute(
+      {
+        path: "tol.pptx",
+        slides: [
+          // ① 页级直接传元素对象（带 type）→ 单元素页
+          { type: "text", text: "页级文本", x: 1, y: 1, w: 8, h: 1 },
+          // ② 元素漏 type：path → 推断 image；chartType+data → 推断 chart；rows → 推断 table
+          {
+            title: "容错页",
+            elements: [
+              { path: "dot.png", x: 1, y: 2, w: 1, h: 1 },
+              { chartType: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [1, 2] }], x: 4, y: 2, w: 5, h: 3 },
+              { rows: [["列A"], ["1"]], x: 1, y: 4, w: 2 },
+              { type: "shape", fill: "4472C4", text: "默认形状", x: 1, y: 6, w: 2, h: 0.6 },
+            ],
+          },
+        ],
+      },
+      ctx,
+    )
+    expect(r.output).toContain("附加元素处理")
+    expect(r.output).toContain("按字段推断为 image")
+    expect(r.output).toContain("按字段推断为 chart")
+    expect(r.output).toContain("按字段推断为 table")
+
+    const read = await pptReadTool.execute({ path: "tol.pptx" }, ctx)
+    expect(read.output).toContain("页级文本")
+    expect(read.output).toContain("容错页")
+    expect(read.output).toContain("列A")
+    expect(read.output).toContain("图表")
+    expect(read.output).toContain("2 页")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("输入容错：页级 chart 字段未包 elements → 附加元素处理（图表不丢失 + 提示）", async () => {
+    const home = setup()
+    const { ctx } = makeCtx(home)
+    const r = await pptCreateTool.execute(
+      {
+        path: "t2.pptx",
+        slides: [
+          { title: "季度页", chartType: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [3, 6] }] },
+          { title: "正常页", bullets: ["要点"] },
+        ],
+      },
+      ctx,
+    )
+    expect(r.output).toContain("图表×1") // 图表未因漏包 elements 丢失
+    expect(r.output).toContain("附加元素处理")
+    expect(r.output).toContain("elements")
+    const read = await pptReadTool.execute({ path: "t2.pptx" }, ctx)
+    expect(read.output).toContain("季度页")
+    expect(read.output).toContain("图表")
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("防盲覆盖 + 文件不存在/非法 pptx 错误 + slides 空数组", async () => {
     const home = setup()
     const { ctx } = makeCtx(home)

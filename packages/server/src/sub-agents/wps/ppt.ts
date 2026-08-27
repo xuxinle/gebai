@@ -31,6 +31,19 @@ const SHAPES: Record<string, string> = {
   arrow: "line",
 }
 
+const ELEMENT_TYPES = new Set(["text", "image", "table", "chart", "shape"])
+
+/** 元素 type 缺失/未知时按字段签名推断（容错层，推断均回报 warning 引导显式声明）。 */
+function inferElementType(e: Record<string, unknown>): string | null {
+  if (typeof e.type === "string" && SHAPES[e.type.toLowerCase()]) return "shape"
+  if (typeof e.path === "string" && e.chartType == null && !Array.isArray(e.rows)) return "image"
+  if (e.chartType != null || Array.isArray(e.data)) return "chart"
+  if (Array.isArray(e.rows)) return "table"
+  if (e.shape != null || e.fill != null || e.lineWidth != null) return "shape"
+  if (e.text != null || e.runs != null) return "text"
+  return null
+}
+
 function color(v: unknown, def: string): string {
   return normColor(v) ?? def
 }
@@ -79,7 +92,7 @@ function boxOpts(o: Record<string, unknown>, base: Record<string, unknown>): Rec
 export const pptCreateTool: Tool = {
   name: "ppt_create",
   description:
-    "创建 .pptx 演示文稿。slides 数组每页两种写法：简式 {title, subtitle?, bullets?: [文本或 {text,level,bold,color}], notes?, background?}（标题顶部+要点正文的标准版式）或全式 {elements: [...]} 自由布局（坐标英寸）。元素 type：text（text/runs + 样式）、image（path 嵌入会话/项目内图片）、table（rows 二维表，首行默认加粗底纹）、chart（chartType: bar/hbar/line/area/pie/doughnut/scatter + data: [{name,labels,values}]）、shape（rect/roundRect/ellipse/line/arrow + fill/line/text）。layout: wide（默认 16:9 13.33×7.5）/ 4x3 / {width,height}；theme 调全局字体字号（默认微软雅黑，标题 30/正文 18）。已有文件本会话未读取过时拒绝（防盲覆盖）。旧版 .ppt 不支持。",
+    "创建 .pptx 演示文稿。slides 数组每页两种写法：简式 {title, subtitle?, bullets?: [文本或 {text,level,bold,color}], notes?, background?}（标题顶部+要点正文的标准版式）或全式 {elements: [...]} 自由布局（坐标英寸）。元素 type：text（text/runs + 样式）、image（path 嵌入会话/项目内图片）、table（rows 二维表，首行默认加粗底纹）、chart（chartType: bar/hbar/line/area/pie/doughnut/scatter + data: [{name,labels,values}]）、shape（shape: rect（默认）/roundRect/ellipse/line/arrow + fill/line/text）。type 缺失或无法识别时按字段推断（path→image、chartType/data→chart、rows→table、形状名/fill→shape、text→text）并在输出提示；页级误传元素对象、或携带元素级字段（chartType/data/rows/path）未包 elements 数组时自动按附加元素处理并提示。layout: wide（默认 16:9 13.33×7.5）/ 4x3 / {width,height}；theme 调全局字体字号（默认微软雅黑，标题 30/正文 18）。已有文件本会话未读取过时拒绝（防盲覆盖）。旧版 .ppt 不支持。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema(
     {
@@ -139,7 +152,13 @@ export const pptCreateTool: Tool = {
 
     for (const raw of args.slides) {
       if (!raw || typeof raw !== "object") continue
-      const s = raw as Record<string, unknown>
+      let s = raw as Record<string, unknown>
+      // 容错：页级直接传了元素形态——带 type 字段，或携带元素级字段签名（chartType/data/rows/path 等）
+      // 但未包 elements 数组——按单元素/附加元素页包裹处理（页对象没有这些字段，出现即误传；不静默吞掉）
+      if (!Array.isArray(s.elements) && (typeof s.type === "string" || inferElementType(s))) {
+        warnings.push("页对象携带元素级字段但未包 elements 数组——已按附加元素处理，建议包进 {elements: [...]}")
+        s = { ...s, elements: [s] }
+      }
       const slide = pptx.addSlide()
       slideCount++
       if (s.background && typeof s.background === "object") {
@@ -180,7 +199,19 @@ export const pptCreateTool: Tool = {
         if (!el || typeof el !== "object") continue
         const e = el as Record<string, unknown>
         try {
-          const type = String(e.type ?? "")
+          // 容错：type 缺失/无法识别时按字段签名推断（path→image、chartType/data→chart、rows→table、
+          // shape/fill/line→shape、text/runs→text），推断成功回报提示而非静默跳过
+          let type = String(e.type ?? "")
+          if (!ELEMENT_TYPES.has(type)) {
+            const inferred = inferElementType(e)
+            if (inferred) {
+              warnings.push(`元素 type "${type || "缺失"}" 无法识别，按字段推断为 ${inferred}（建议显式声明 type）`)
+              type = inferred
+            } else {
+              warnings.push(`未知元素 type: ${type || "(空)"}（支持 text/image/table/chart/shape）`)
+              continue
+            }
+          }
           if (type === "text") {
             const base = boxOpts(e, { fontSize: theme.bodyFontSize, color: theme.bodyColor, fontFace: theme.fontFace })
             if (e.bullet === true) base.bullet = true
