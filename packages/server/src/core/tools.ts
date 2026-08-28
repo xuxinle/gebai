@@ -15,6 +15,7 @@ import { runFlow, scanFlowApprovals } from "./flow"
 import { jsTool, jsRuntimeCommand } from "./js-tool"
 import { PY_SAFE_BOOTSTRAP, safeModeWriteCheck, shApprovalFreeAllowed, validateShCommandSafeMode } from "./safety"
 import { shTaskLifetimeMs, shTaskStatus, type ShTaskRecord } from "./sh-tasks"
+import type { SessionRunRecord } from "./session-runs"
 import { projectAware } from "./projects"
 import { EXCLUDED_GLOBAL_TOOLS } from "./tools-excluded.generated"
 
@@ -2969,45 +2970,158 @@ export const agentListTool: Tool = {
 
 export const agentLoadTool: Tool = {
   name: "agent_load",
-  description: "装载指定子Agent 能力模块（类比 import 子模块）：其工具立即并入当前工具集（以 {agent}_ 前缀调用）、完整系统提示词注入当前上下文。不创建新上下文、无独立执行——装载后直接调用其工具，全程在当前会话内完成；重复装载幂等跳过。",
+  description: "装载指定子Agent 能力模块（类比 import 子模块）：其工具立即并入当前工具集（以 {agent}_ 前缀调用，schema 直接可见）、完整系统提示词注入当前上下文。不创建新上下文、无独立执行——装载后直接调用其工具，全程在当前会话内完成；重复装载幂等跳过。",
   card: { titleParams: ["name"], args: "none" },
   parameters: schema({ name: { type: "string" } }, ["name"]),
   async execute(args, ctx) {
     const name = String(args.name)
     await ctx.loadSubAgent(name)
-    // 装载反馈枚举实际并入的工具全名（模型无需猜测 {agent}_* 的具体形态，直接调用即可）
-    const tools = ctx.listSubAgentDefs().find((d) => d.name === name)?.tools ?? []
-    const names = tools.map((t) => `${name}_${t}`)
-    const toolNote = names.length
-      ? `已并入工具（${names.length} 个）: ${names.join("、")}，直接调用即可`
-      : `其能力以系统提示词形式注入（无自有工具）`
-    return { output: `子Agent ${name} 已装载（${toolNote}）。`, data: { loaded: name, tools: names } }
+    // 装载反馈不枚举工具清单：{agent}_* 工具 schema 已注册进工具集（下一轮请求即全量下发），再列一遍是冗余
+    return {
+      output: `子Agent ${name} 已装载：独有工具（如有）以 ${name}_ 前缀并入当前工具集（schema 直接可见）、完整系统提示词已注入上下文，直接调用其工具即可。`,
+      data: { loaded: name },
+    }
   },
 }
 
 export const agentRunTool: Tool = {
   name: "agent_run",
-  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与工具进入新会话），阻塞执行任务直到结束，只返回最终结果文本；执行过程全程存档供历史回放。默认继承全部全局工具（read/write/sh/grep 等，与主会话同名同参）进新会话——子Agent 只需提供独有能力（如 code 的 search_symbols/analyze/git），文件读写查询统一用全局工具。",
+  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与独有工具进入新会话）并执行任务，只返回最终结果文本；执行过程全程存档供历史回放。默认与主会话同构——全局工具（read/write/sh/grep 等，同名同参）与总Agent 全局系统提示词一并继承，子Agent 只需提供独有能力（如 code 的 search_symbols/analyze/git）。async:true 时后台异步执行——立即返回 runId 不阻塞（适合长任务），期间可处理其他任务；之后用 agent_task（action=status/wait/cancel/list）查询进度、等待结果或主动终止。",
   card: { titleParams: ["agents"] },
   parameters: schema(
     {
       agents: { type: "array", items: { type: "string" }, description: "预加载进新会话的子Agent 名称列表（一个或多个，如 [\"code\", \"playwright\"]）" },
       input: { type: "string", description: "任务指令（新会话的初始消息）" },
+      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 runId 不等待完成（适合长任务，期间可处理其他任务）；后续用 agent_task（status/wait/cancel/list）查询进度、等待结果或终止" },
       inherit_global_tools: { type: "boolean", description: "是否继承全局工具进新会话（默认 true——新会话与主会话同构的完整工具面；false = 仅预加载子Agent 的工具，依赖全局文件工具的子Agent（如 code）将无法读写文件，慎用）" },
-      inherit_global_prompt: { type: "boolean", description: "是否注入总Agent 全局系统提示词进新会话（默认 false——仅子Agent 提示词，上下文最省；true = 主会话身份/行为约定/编排指引随提示词带入，适合需要子Agent 遵循主会话行为约定的复合任务）" },
+      inherit_global_prompt: { type: "boolean", description: "是否注入总Agent 全局系统提示词进新会话（默认 true——与全局工具继承一致，新会话与主会话行为约定同构；false = 仅子Agent 提示词，上下文最省）" },
     },
     ["agents", "input"],
   ),
   async execute(args, ctx) {
     const agents = Array.isArray(args.agents) ? args.agents.map(String) : []
     if (!agents.length) return { output: "参数 agents 必须为非空子Agent 名称列表。" }
-    const result = await ctx.runNewSession(agents, String(args.input), {
+    const input = String(args.input)
+    const opts = {
       inheritGlobalTools: args.inherit_global_tools !== false,
-      inheritGlobalPrompt: args.inherit_global_prompt === true,
-    })
+      inheritGlobalPrompt: args.inherit_global_prompt !== false,
+    }
+    // 异步后台执行（DESIGN「新会话执行的异步运行」）：立即返回 runId，agent_task 管理进度/结果/终止
+    if (args.async === true) {
+      if (!ctx.sessionRuns) return { output: "当前环境不支持异步子Agent 运行（sessionRuns 服务未注入）。" }
+      const rec = await ctx.sessionRuns.start(agents, input, opts)
+      return {
+        output: `[后台子Agent 运行已启动] runId: ${rec.runId}\n子Agent: ${rec.agents.join(", ")}\n任务: ${input.slice(0, 500)}${input.length > 500 ? "…" : ""}\n（后台执行不阻塞会话——执行过程实时推送到前端；之后用 agent_task action=status id=${rec.runId} 查询进度，action=wait 等待完成并取回结果，action=cancel 主动终止）`,
+        data: { runId: rec.runId, agents: rec.agents },
+      }
+    }
+    const result = await ctx.runNewSession(agents, input, opts)
     // 最终返回超长时截断（与其余工具一致）；新会话完整存档原样挂到调用记录（截断只影响主上下文可见的结果文本）
     const safe = !result.output || result.output.length <= TRUNCATE_THRESHOLD ? { output: result.output } : await truncate(result.output, `session_${agents[0]}`, ctx)
     return { output: safe.output, sessionRun: result.archive }
+  },
+}
+
+/** agent_task wait 默认等待秒数（上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底；与 sh_task 同口径）。 */
+const AGENT_TASK_WAIT_DEFAULT_S = 60
+const AGENT_TASK_WAIT_MAX_S = 540
+
+function agentTaskWaitMs(v: unknown): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return AGENT_TASK_WAIT_DEFAULT_S * 1000
+  return Math.min(n, AGENT_TASK_WAIT_MAX_S) * 1000
+}
+
+function agentTaskElapsed(r: { startedAt: number; endedAt?: number }, now = Date.now()): number {
+  return Math.round(((r.endedAt ?? now) - r.startedAt) / 1000)
+}
+
+/** agent_task 运行状态行（status/wait/cancel/list 共用；进度含轮次/工具调用/最近活动）。 */
+function agentTaskLine(r: SessionRunRecord): string {
+  const head = `runId ${r.runId} [${r.status}] ${agentTaskElapsed(r)}s — ${r.agents.join(", ")}`
+  if (r.status === "running") {
+    const progress = `已 ${r.rounds} 轮回复、${r.toolCalls} 次工具调用${r.last ? `，最近: ${r.last}` : ""}`
+    return `${head}（${progress}）`
+  }
+  const suffix = r.status === "cancelled" ? "（已主动终止）" : r.status === "failed" ? `（失败: ${r.error ?? "未知原因"}）` : "（已完成）"
+  return `${head} ${suffix}`
+}
+
+/** agent_run 异步后台运行管理（DESIGN「新会话执行的异步运行」）：查询（status，含实时进度）/等待（wait，
+ *  阻塞至完成并取回结果与完整存档）/终止（cancel，主动终止执行、已执行过程保留在存档）/清单（list）。
+ *  运行由 agent_run async:true 启动（返回 runId）；会话级服务由引擎注入（跨工具调用可见，重启即中断）。 */
+export const agentTaskTool: Tool = {
+  name: "agent_task",
+  description: "管理 agent_run 异步后台运行（agent_run async:true 启动并返回 runId）。action=status 立即返回运行状态与进度（已执行轮次/工具调用/最近活动；已结束含最终结果）；action=wait 阻塞等待完成并取回最终结果与完整存档（timeout 秒内未完成返回当前进度，可再次 wait）；action=cancel 主动终止运行（终止前的执行过程保留在存档）；action=list 列出本会话全部后台运行。",
+  card: { titleParams: ["action", "id"] },
+  parameters: schema(
+    {
+      action: { type: "string", enum: ["status", "wait", "cancel", "list"], description: "操作（必填）" },
+      id: { type: "string", description: "运行 runId（action=list 可省略）" },
+      timeout: { type: "number", description: "wait 操作等待秒数（默认 60，上限 540）" },
+    },
+    ["action"],
+  ),
+  outputSchema: schema(
+    {
+      runId: { type: "string", description: "运行 id（list 为空）" },
+      status: { type: "string", description: "running/done/failed/cancelled" },
+      rounds: { type: "integer", description: "已执行模型回复轮次" },
+      toolCalls: { type: "integer", description: "已执行工具调用次数" },
+      output: { type: "string", description: "最终结果文本（done 时）" },
+      runs: { type: "array", description: "list 的运行概要", items: schema({ runId: { type: "string" }, status: { type: "string" }, agents: { type: "array", items: { type: "string" } } }, ["runId", "status", "agents"]) },
+    },
+    [],
+  ),
+  async execute(args, ctx) {
+    if (!ctx.sessionRuns) return { output: "当前环境不支持异步子Agent 运行（sessionRuns 服务未注入）。" }
+    const runs = ctx.sessionRuns
+    const action = String(args.action ?? "status")
+    if (action === "list") {
+      const all = runs.list()
+      if (!all.length) return { output: "本会话暂无后台子Agent 运行（用 agent_run async:true 启动）。", data: { runs: [] } }
+      return {
+        output: `本会话后台运行（${all.length} 个，按启动顺序）:\n${all.map((r) => agentTaskLine(r)).join("\n")}`,
+        data: { runs: all.map((r) => ({ runId: r.runId, status: r.status, agents: r.agents, rounds: r.rounds, toolCalls: r.toolCalls })) },
+      }
+    }
+    const id = String(args.id ?? "")
+    if (!id) return { output: "缺少 runId（status/wait/cancel 需要传 agent_run async:true 返回的 runId；列清单用 action=list）。" }
+    if (action === "cancel") {
+      const rec = await runs.cancel(id)
+      if (!rec) return { output: `未找到后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
+      if (rec.status === "running") {
+        return { output: `${agentTaskLine(rec)}\n（终止指令已下达，执行循环仍在收尾——稍后用 action=status 确认。）`, data: { runId: id, status: rec.status } }
+      }
+      const res = runs.result(id)
+      const text = `后台运行 ${id} 已终止（终止前 ${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用，过程保留在存档可回放）。`
+      return { output: text, sessionRun: res?.archive, data: { runId: id, status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls } }
+    }
+    if (action === "wait") {
+      const rec = await runs.wait(id, agentTaskWaitMs(args.timeout))
+      if (!rec) return { output: `未找到后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
+      if (rec.status === "running") {
+        // 等待超时仍在运行：返回当前进度，模型可再次 wait、用 status 查询或 cancel 终止
+        return {
+          output: `${agentTaskLine(rec)}\n（等待超时仍在运行；可再次 wait、用 status 查询进度，或 cancel 终止。）`,
+          data: { runId: id, status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls },
+        }
+      }
+      const res = runs.result(id)
+      const text = rec.status === "done"
+        ? `后台运行 ${id} 已完成（${agentTaskElapsed(rec)}s，${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用）。\n最终结果:\n${rec.output || "（无输出文本）"}`
+        : `后台运行 ${id} ${rec.status === "cancelled" ? "已被终止" : "执行失败"}（${agentTaskElapsed(rec)}s，终止/失败前 ${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用）${rec.error ? `: ${rec.error}` : ""}。`
+      return { ...(await truncate(text, "agent_task", ctx)), sessionRun: res?.archive, data: { runId: id, status: rec.status, output: rec.output } }
+    }
+    // status
+    const rec = runs.get(id)
+    if (!rec) return { output: `未找到后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
+    const text = rec.status === "done"
+      ? `${agentTaskLine(rec)}\n最终结果:\n${rec.output || "（无输出文本）"}`
+      : rec.status === "running"
+        ? `${agentTaskLine(rec)}\n（执行中——可 wait 等待完成、status 跟踪进度或 cancel 终止。）`
+        : agentTaskLine(rec)
+    return { ...(await truncate(text, "agent_task", ctx)), data: { runId: id, status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls, output: rec.output } }
   },
 }
 
@@ -3065,9 +3179,11 @@ export function createAllGlobalTools(): Record<string, Tool> {
     // 由 code 子Agent 以 code_ 命名空间暴露；self_optimize 经连带装载 code 一并获得）
     // agent_list 不注册进总Agent 全局工具集：未装载子Agent 清单已由 systemPromptInjection 注入提示词
     // （模型上下文已有，工具调用冗余且干扰工具选择）；agent_list 仅在新会话执行（组合子Agent 编排环境）
-    // 注入——runNewSession 对纯 md 组合式子Agent 自动注入 agent_list/agent_load/agent_run
+    // 注入——runNewSession 对纯 md 组合式子Agent 自动注入 agent_list/agent_load/agent_run/agent_task
     agent_load: agentLoadTool,
     agent_run: agentRunTool,
+    // agent_task（agent_run 异步后台运行管理，DESIGN「新会话执行的异步运行」）：与 agent_run 配对注册
+    agent_task: agentTaskTool,
     // full_mode（极简模式切换完整模式）注册进全局工具集，但仅极简会话可见可用（引擎按任务白名单过滤 schema，
     // 完整模式会话从 schema 移除，防冗余工具干扰选择）
     full_mode: fullModeTool,

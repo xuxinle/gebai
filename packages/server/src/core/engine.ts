@@ -11,9 +11,10 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, agentTaskTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
+import { SessionRunRegistry, type SessionRunHandle } from "./session-runs"
 import { RESERVED_PROJECT_TMP } from "./projects"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
@@ -327,6 +328,10 @@ export class AgentEngine {
 
   /** 会话级 sh 异步后台任务服务（会话 tmp/sh-tasks/ 落盘，跨调用/跨重启可见）：user:sessionId → runner。 */
   private shTaskServices = new Map<string, ShTaskRunner>()
+
+  /** agent_run 异步后台运行句柄（进程内，引擎级共享：runId → handle；DESIGN「新会话执行的异步运行」）。
+   *  运行存活与本进程绑定（重启即中断，不落盘恢复）；SessionRunRegistry 为按会话过滤的薄视图。 */
+  private sessionRunStore = new Map<string, SessionRunHandle>()
 
   constructor(private opts: AgentEngineOptions) {}
 
@@ -1432,7 +1437,7 @@ export class AgentEngine {
       ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
-      `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）或防止上下文膨胀（中间过程多、输出大）时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
+      `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果，长任务传 async:true 后台执行、agent_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
       this.subAgentProjectNote(user, env),
@@ -1771,9 +1776,18 @@ export class AgentEngine {
         if (opts?.loadIntoRegistry) self.registerIntoRegistry(opts.loadIntoRegistry, String(name))
       },
       // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；
-      // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；inheritGlobalPrompt（默认 false）= 总Agent
+      // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；inheritGlobalPrompt（默认 true）= 总Agent
       // 全局提示词注入新会话；深度 +1 限制递归嵌套
       runNewSession: (agents, input, opts) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1, opts),
+      // agent_run 异步后台运行服务（agent_run async:true 启动、agent_task 查询/等待/终止；DESIGN「新会话执行的异步运行」）：
+      // 句柄存引擎级共享表，本实例为按会话过滤视图；父任务取消信号传播进后台运行（用户停止连带终止）
+      sessionRuns: new SessionRunRegistry({
+        sessionId,
+        store: self.sessionRunStore,
+        parentSignal: signal,
+        validate: (agents) => self.normalizeRunAgents(agents, depth + 1),
+        runner: (agents, input, runSignal, runOpts) => self.runNewSession(sessionId, user, env, agents, input, runSignal, depth + 1, runOpts),
+      }),
       // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
       // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
       defineDynamicTool: opts?.registerDynamic,
@@ -2405,13 +2419,32 @@ export class AgentEngine {
     }
   }
 
+  /** agent_run 预加载清单校验与规范化：去重、self_optimize 连带 code（复用其通用能力，与装载模式
+   *  SubAgentManager.load 的连带装载同规则）、数量与深度上限、未知名检查。同步（runNewSession）与
+   *  异步（SessionRunRegistry.start）启动共用——异步启动在登记句柄前同步校验，未知名等错误立即抛给模型。 */
+  private normalizeRunAgents(agents: string[], depth: number): string[] {
+    agents = [...new Set(agents)]
+    // self_optimize 复用 code 的通用能力（def 只声明独有工具，提示词不复刻 code 工作流）：
+    // 预加载 self_optimize 时自动连带预加载 code——独有分析/验证工具与通用工作流提示词由 code 提供，不重复定义
+    if (agents.includes("self_optimize") && this.opts.subAgents.def("code") && !agents.includes("code")) {
+      agents = ["code", ...agents]
+    }
+    if (agents.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${agents.length} > ${MAX_AGENTS_PER_RUN}）`)
+    for (const name of agents) {
+      if (!this.opts.subAgents.def(name)) throw new Error(`未知子Agent: ${name}`)
+    }
+    if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${agents.join(",")}`)
+    return agents
+  }
+
   /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，
-   *  模块语义的「装载」在独立上下文生效）后执行任务，阻塞返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。
+   *  模块语义的「装载」在独立上下文生效）后执行任务，返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。
    *  inheritGlobalTools（默认 true）：全局工具一并注册进新会话——与主会话同构的完整工具面（文件读写查询
    *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）。
-   *  inheritGlobalPrompt（默认 false）：总Agent 全局系统提示词（buildSystemPrompt——身份/行为约定/编排指引）
-   *  作为新会话系统提示词前缀注入，适合需要子Agent 遵循主会话行为约定的复合任务；提示词中的路径/工具
-   *  可用性描述以新会话实际为准（附注说明）。 */
+   *  inheritGlobalPrompt（默认 true）：总Agent 全局系统提示词（buildSystemPrompt——身份/行为约定/编排指引）
+   *  作为新会话系统提示词前缀注入——与全局工具继承默认一致，新会话与主会话同构；关闭时仅子Agent 提示词
+   *  （上下文最省）。提示词中的路径/工具可用性描述以新会话实际为准（附注说明）。
+   *  onArchive：存档创建即回调（异步运行 registry 持活引用推导进度；同步路径不传）。 */
   private async runNewSession(
     sessionId: string,
     user: string,
@@ -2420,23 +2453,10 @@ export class AgentEngine {
     input: string,
     signal: AbortSignal,
     depth = 0,
-    opts: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean } = {},
+    opts: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean; onArchive?: (archive: SessionRunArchive) => void } = {},
   ): Promise<{ output: string; archive: SessionRunArchive }> {
-    // 加固：去重 + 数量上限（异常/恶意调用拼装超大提示词会撑爆上下文）
-    agents = [...new Set(agents)]
-    // self_optimize 复用 code 的通用能力（def 只声明独有工具，提示词不复刻 code 工作流）：
-    // 预加载 self_optimize 时自动连带预加载 code（与装载模式 SubAgentManager.load 的连带装载同规则），
-    // 独有分析/验证工具与通用工作流提示词由 code 提供——不重复定义
-    if (agents.includes("self_optimize") && this.opts.subAgents.def("code") && !agents.includes("code")) {
-      agents = ["code", ...agents]
-    }
-    if (agents.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${agents.length} > ${MAX_AGENTS_PER_RUN}）`)
-    const defs = agents.map((name) => {
-      const def = this.opts.subAgents.def(name)
-      if (!def) throw new Error(`未知子Agent: ${name}`)
-      return def
-    })
-    if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${agents.join(",")}`)
+    agents = this.normalizeRunAgents(agents, depth)
+    const defs = agents.map((name) => this.opts.subAgents.def(name)!)
     const inheritGlobals = opts.inheritGlobalTools !== false
     // 新会话工具注册：每个预加载子Agent 的独有工具以 {agent}_ 命名空间并入（装载语义）；
     // 安全模式与主注册表同规则（Tool.safeMode 自主声明过滤，引擎构造期常量）
@@ -2445,12 +2465,13 @@ export class AgentEngine {
     for (const def of defs) {
       reg.registerSubAgentTools(def.name, def.tools ?? {}, def.requiresApproval)
       // 简化定义（无工具，含纯 md 定义）：注入编排工具（原名暴露，无 {agent}_ 前缀，多 Agent 时仅注入一次）
-      // ——支持组合式子 Agent 通过 agent_run/agent_list/agent_load 编排其他子 Agent
+      // ——支持组合式子 Agent 通过 agent_run/agent_task/agent_list/agent_load 编排其他子 Agent
       if (!def.tools || Object.keys(def.tools).length === 0) {
         if (!orchestrationInjected) {
           reg.register(agentListTool)
           reg.register(agentLoadTool)
           reg.register(agentRunTool)
+          reg.register(agentTaskTool)
           orchestrationInjected = true
         }
       }
@@ -2495,9 +2516,9 @@ export class AgentEngine {
     const globalsNote = inheritGlobals
       ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/diff/sh/py/fetch_url/todo/ask/agent_run 等，与主会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
       : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（flow/tool_schemas/js）。`
-    // 全局提示词注入（inherit_global_prompt=true）：总Agent 主系统提示词作为前缀（单源复用 buildSystemPrompt，
-    // 不复刻）；其中路径基准/工具清单等环境描述以本新会话实际为准，附注消歧
-    const globalPromptPart = opts.inheritGlobalPrompt
+    // 全局提示词注入（默认开启，与 inherit_global_tools 默认一致）：总Agent 主系统提示词作为前缀（单源复用
+    // buildSystemPrompt，不复刻）；其中路径基准/工具清单等环境描述以本新会话实际为准，附注消歧
+    const globalPromptPart = opts.inheritGlobalPrompt !== false
       ? `以下为总Agent 全局系统提示词（主会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
       : ""
     const messages: MessageLike[] = [
@@ -2515,6 +2536,8 @@ export class AgentEngine {
     // 由 agent_run 工具作为调用记录的扩展字段落盘（不逐条写会话消息）——仅存档与前端回放，
     // loadHistory 不受影响（不进入主 LLM 上下文）
     const archive: SessionRunArchive = { runId, agents, input, output: "", messages: [{ role: "user", content: input }] }
+    // 存档创建即回调（异步运行 registry 持活引用，进度快照随执行实时推导；同步路径不传）
+    opts.onArchive?.(archive)
     this.publish(sessionId, "event.session.start", { runId, agents, input, depth, sessionId })
     try {
       const output = await this.runNewSessionLoop(sessionId, user, env, agents, input, messages, reg, signal, depth, archive, { workdir: baseProjectRoot ?? undefined, resolveBase: baseProjectRoot, projects: mergedPresets })
@@ -2646,13 +2669,14 @@ export class AgentEngine {
       const { text, toolCalls, stopReason } = await this.callModel(taskProvider, messages, reg.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, reg.resolve(s.name)?.tool)), activeSignal, (chunk) => {
         if (chunk.type === "text") {
           // session 标记：区别于主循环推送，渠道层可据此识别「新会话执行过程」事件；
-          // 仅最终响应（final_only）不推送新会话过程文本
+          // 仅最终响应（final_only）不推送新会话过程文本；异步后台运行在发起任务结束后仍照常推送
+          // （任务已不在 tasks 表，缺省视为 streaming——final_only 会话仅在任务存续期内可判定）
           this.noteStream(sessionId, { messageId: assistantMsgId, text: chunk.text, session: true, sessionRunId: archive.runId })
-          if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, session: true, sessionRunId: archive.runId, sessionId })
+          if ((this.tasks.get(sessionId)?.outputMode ?? "streaming") === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, session: true, sessionRunId: archive.runId, sessionId })
         } else if (chunk.type === "reasoning" && chunk.text?.trim()) {
           reasoningAcc += chunk.text
           this.noteStream(sessionId, { reasoning: reasoningAcc })
-          if (this.tasks.get(sessionId)?.outputMode === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, session: true, sessionRunId: archive.runId, messageId: assistantMsgId, sessionId })
+          if ((this.tasks.get(sessionId)?.outputMode ?? "streaming") === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, session: true, sessionRunId: archive.runId, messageId: assistantMsgId, sessionId })
         }
       }, extraParams, sessionId)
       lastText = text

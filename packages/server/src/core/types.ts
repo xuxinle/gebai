@@ -115,9 +115,12 @@ export type ToolContext = {
   loadSubAgent: (name: string) => Promise<void>
   /** 执行新会话（agent_run 工具）：派生临时新会话、预加载指定子Agent 列表（完整系统提示词+工具）后阻塞执行任务，
    *  返回最终输出文本与完整执行存档（存档作为工具调用记录扩展字段落盘）。opts.inheritGlobalTools
-   *  （默认 true）：全局工具是否一并注册进新会话；opts.inheritGlobalPrompt（默认 false）：总Agent
-   *  全局系统提示词是否注入新会话（主会话行为约定/全局工具用法随提示词带入，DESIGN「新会话执行的上下文隔离」）。 */
+   *  （默认 true）与 opts.inheritGlobalPrompt（默认 true）分别控制全局工具注册与总Agent 全局系统提示词
+   *  注入——两者默认一致，新会话与主会话同构（DESIGN「新会话执行的上下文隔离」）。 */
   runNewSession: (agents: string[], input: string, opts?: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean }) => Promise<{ output: string; archive: import("@gebai/sdk").SessionRunArchive }>
+  /** agent_run 异步后台运行服务（agent_run async:true 启动、agent_task 查询/等待/终止；引擎按会话注入）。
+   *  可选：测试桩/无引擎环境不注入时 agent_run async 与 agent_task 返回不可用说明。 */
+  sessionRuns?: import("./session-runs").SessionRunService
   /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>
   /**
