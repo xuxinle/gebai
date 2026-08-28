@@ -505,6 +505,100 @@ function inkFx(ctx: CanvasRenderingContext2D): Cleanup {
 
 /* ---------------- 画布与启停引擎 ---------------- */
 
+/** 云气祥纹（qinhan）：汉代卷云线描——递减半圆链螺旋收心 + 贝塞尔云尾挑出（与 qinhan.css 云气纹底饰同构），
+ *  鎏金为主、朱砂点衬，缓移缓旋、透明度呼吸；伴鎏金微尘上浮（香炉金屑，正弦横摆）。 */
+function qinhanFx(ctx: CanvasRenderingContext2D): Cleanup {
+  const GOLD = "#d0a13f"
+  const ZHU = "#c2452f"
+  const HAN_ZI = "#9c7bd4" // 汉紫（兵马俑彩绘矿物颜料，稀有衬色）
+  type Cloud = {
+    x: number
+    y: number
+    s: number
+    rot: number
+    vr: number
+    vx: number
+    vy: number
+    alpha: number
+    phase: number
+    pv: number
+    color: string
+  }
+  const cloudColor = () => {
+    const r = Math.random()
+    return r < 0.68 ? GOLD : r < 0.88 ? ZHU : HAN_ZI
+  }
+  const clouds: Cloud[] = Array.from({ length: density(9) }, () => ({
+    x: rand(0, window.innerWidth),
+    y: rand(0, window.innerHeight),
+    s: rand(0.8, 2.1),
+    rot: rand(0, Math.PI * 2),
+    vr: rand(0.03, 0.09) * (Math.random() < 0.5 ? -1 : 1),
+    vx: rand(3, 9) * (Math.random() < 0.5 ? -1 : 1),
+    vy: rand(-3, 4),
+    alpha: rand(0.09, 0.16),
+    phase: rand(0, Math.PI * 2),
+    pv: rand(0.12, 0.3),
+    color: cloudColor(),
+  }))
+  type Dust = { x: number; y: number; vy: number; sway: number; ph: number; r: number; a: number }
+  const dust: Dust[] = Array.from({ length: density(26) }, () => ({
+    x: rand(0, window.innerWidth),
+    y: rand(0, window.innerHeight),
+    vy: rand(3.5, 9),
+    sway: rand(6, 16),
+    ph: rand(0, Math.PI * 2),
+    r: rand(1, 2.1),
+    a: rand(0.08, 0.18),
+  }))
+  const drawCloud = (x: number, y: number, s: number, rot: number, color: string, a: number) => {
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.rotate(rot)
+    ctx.scale(s, s)
+    ctx.strokeStyle = hexA(color, a)
+    ctx.lineWidth = 1.7 / s
+    ctx.lineCap = "round"
+    ctx.beginPath()
+    ctx.moveTo(26, 0)
+    ctx.bezierCurveTo(44, -9, 60, -6, 76, 6) // 云尾：自螺旋外缘挑出
+    ctx.moveTo(26, 0)
+    ctx.arc(0, 0, 26, 0, Math.PI, true) // 递减半圆链：上半圈 → 下半圈交替收心成螺旋
+    ctx.arc(-8, 0, 18, Math.PI, 0, true)
+    ctx.arc(0, 0, 10, 0, Math.PI, true)
+    ctx.arc(-5, 0, 5, Math.PI, 0, true)
+    ctx.stroke()
+    ctx.restore()
+  }
+  const stop = runLoop((dt, t) => {
+    const w = window.innerWidth
+    const h = window.innerHeight
+    ctx.clearRect(0, 0, w, h)
+    for (const c of clouds) {
+      c.x += c.vx * dt
+      c.y += c.vy * dt
+      c.rot += c.vr * dt
+      c.phase += c.pv * dt
+      const m = 110 * c.s // 出界回绕余量（云体宽约 ±80×s）
+      if (c.vx > 0 && c.x > w + m) c.x = -m
+      if (c.vx < 0 && c.x < -m) c.x = w + m
+      if (c.y > h + m) c.y = -m
+      if (c.y < -m) c.y = h + m
+      drawCloud(c.x, c.y, c.s, c.rot, c.color, c.alpha * (0.7 + 0.3 * Math.sin(c.phase)))
+    }
+    for (const d of dust) {
+      d.y -= d.vy * dt
+      if (d.y < -6) {
+        d.y = h + 6
+        d.x = rand(0, w)
+      }
+      const x = d.x + Math.sin(t * 0.7 + d.ph) * d.sway
+      glowDot(ctx, x, d.y, d.r * 3.2, GOLD, d.a, true)
+    }
+  })
+  return stop
+}
+
 const EFFECTS: Partial<Record<ThemeId, Effect>> = {
   matrix: matrixFx,
   "tokyo-night": tokyoNightFx,
@@ -513,6 +607,7 @@ const EFFECTS: Partial<Record<ThemeId, Effect>> = {
   aether: aetherFx,
   aurora: auroraFx,
   ink: inkFx,
+  qinhan: qinhanFx,
 }
 
 let canvas: HTMLCanvasElement | null = null
