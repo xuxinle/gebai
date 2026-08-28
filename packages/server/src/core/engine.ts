@@ -364,12 +364,19 @@ export class AgentEngine {
     return { running: true, startedAt: task.startedAt, stream: task.stream, pending }
   }
 
-  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务）；幂等，供 REST/WS 删除会话入口调用。 */
+  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务/异步运行句柄）；幂等，供 REST/WS 删除会话入口调用。 */
   forgetSession(sessionId: string): void {
     this.readFiles.delete(sessionId)
     this.dynamicTools.delete(sessionId)
     for (const key of this.shTaskServices.keys()) {
       if (key.endsWith(`:${sessionId}`)) this.shTaskServices.delete(key)
+    }
+    // 异步后台运行（agent_run async:true）：运行中的先终止（孤儿运行无消费者、句柄含全量存档，滞留即泄漏），
+    // 该会话全部句柄移除（终态记录 prune 只在同会话新运行结束时触发，删除场景须显式清理）
+    for (const [runId, h] of this.sessionRunStore) {
+      if (h.sessionId !== sessionId) continue
+      if (h.status === "running") h.controller.abort(new Error("会话已删除"))
+      this.sessionRunStore.delete(runId)
     }
   }
 
@@ -849,10 +856,15 @@ export class AgentEngine {
   }
 
   /** 在途流式快照累积（attach 用）：delta/reasoning 发布点同步更新（messageId 变化开启新快照）；
-   *  消息持久化点经 clearStream 清空（已持久化部分由存储恢复）。 */
+   *  消息持久化点经 clearStream 清空（已持久化部分由存储恢复）。
+   *  session 标记（新会话执行过程）在主任务快照流式期间不写入——异步后台运行与主任务真正并行
+   *  （同步 agent_run 期间主任务在等工具、不流式，无此交错）：按 messageId 开新快照会互相整体替换，
+   *  attach 恢复可能把后台运行文本渲染进主任务气泡；后台进度已有 event 推送（sessionRunId 路由），
+   *  快照仅为 attach 兜底，主任务流式期间以主任务为准。 */
   private noteStream(sessionId: string, patch: { messageId?: string; text?: string; reasoning?: string; session?: boolean; sessionRunId?: string }): void {
     const task = this.tasks.get(sessionId)
     if (!task) return
+    if (patch.session && task.stream && !task.stream.session) return
     if (patch.messageId !== undefined && patch.messageId !== task.stream?.messageId) {
       task.stream = { messageId: patch.messageId, text: "", reasoning: "", session: patch.session, sessionRunId: patch.sessionRunId }
     }
@@ -861,10 +873,13 @@ export class AgentEngine {
     if (patch.reasoning !== undefined) task.stream.reasoning = patch.reasoning
   }
 
-  /** 在途流式快照清空（消息已持久化，刷新恢复改由存储承担）。 */
-  private clearStream(sessionId: string): void {
+  /** 在途流式快照清空（消息已持久化，刷新恢复改由存储承担）。sessionRunId 指定时只清属于该运行的
+   *  session 快照（新会话循环轮末用——异步运行不误清正在流式的主任务快照）；缺省无条件清（主循环）。 */
+  private clearStream(sessionId: string, sessionRunId?: string): void {
     const task = this.tasks.get(sessionId)
-    if (task) task.stream = undefined
+    if (!task?.stream) return
+    if (sessionRunId !== undefined && (!task.stream.session || task.stream.sessionRunId !== sessionRunId)) return
+    task.stream = undefined
   }
 
   /**
@@ -2686,14 +2701,14 @@ export class AgentEngine {
         if (text) {
           await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined })
         }
-        this.clearStream(sessionId)
+        this.clearStream(sessionId, archive.runId)
         this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: text, sessionId })
         return text
       }
 
       await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined, toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })) })
       messages.push({ role: "assistant", content: text, toolCalls })
-      this.clearStream(sessionId) // 本轮文本已入存档，在途快照清空
+      this.clearStream(sessionId, archive.runId) // 本轮文本已入存档，在途快照清空（只清本 run 的，不误清并行主任务快照）
       let stopped = false
       for (const tc of toolCalls) {
         if (activeSignal.aborted) throw new Error(abortReason())

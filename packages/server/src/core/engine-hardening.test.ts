@@ -651,4 +651,55 @@ describe("agent_run 异步后台运行（async:true + agent_task）", () => {
     await waitFor(() => provider.childAborted)
     rmSync(home, { recursive: true, force: true })
   })
+
+  test("异步运行与主任务并行流式：session 快照不覆盖主任务在途快照，clearStream 只清本 run", async () => {
+    // 主任务挂起存活（hangMain）+ 后台运行执行中 = 真正并行形态；快照隔离语义用引擎私有方法直调验证
+    const provider = new AsyncRunProvider()
+    provider.hangMain = true
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    const runPromise = engine.run(a.id, "default", "hi")
+    // 后台运行已启动（子会话首轮模型调用完成、其 session 快照可能已建）后，注入主任务流式快照
+    await waitFor(() => provider.childCalls >= 1)
+    const internals = engine as unknown as {
+      noteStream: (sid: string, patch: { messageId?: string; text?: string; reasoning?: string; session?: boolean; sessionRunId?: string }) => void
+      clearStream: (sid: string, sessionRunId?: string) => void
+    }
+    internals.noteStream(a.id, { messageId: "main-msg", text: "主任务流式文本" })
+    // 后台运行的 session delta 不覆盖主任务快照（并行保护）
+    internals.noteStream(a.id, { messageId: "bg-msg", text: "后台运行文本", session: true, sessionRunId: "r-bg" })
+    internals.noteStream(a.id, { messageId: "main-msg", text: "继续" })
+    const snap = engine.attachSnapshot(a.id)
+    expect(snap!.stream!.text).toBe("主任务流式文本继续")
+    expect(snap!.stream!.session).toBeFalsy()
+    // 后台运行的轮末清空不误清主任务快照（只清属于该 run 的 session 快照）
+    internals.clearStream(a.id, "r-bg")
+    expect(engine.attachSnapshot(a.id)!.stream).toBeTruthy()
+    // 主任务自己的清空语义不变
+    internals.clearStream(a.id)
+    expect(engine.attachSnapshot(a.id)!.stream).toBeUndefined()
+    engine.cancel(a.id)
+    await runPromise
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("forgetSession 清理异步运行句柄：运行中的被终止、全部句柄移除（无泄漏）", async () => {
+    const provider = new AsyncRunProvider()
+    provider.hangChild = true
+    provider.hangMain = true
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    const runPromise = engine.run(a.id, "default", "hi")
+    await waitFor(() => provider.childCalls >= 1)
+    const storeMap = (engine as unknown as { sessionRunStore: Map<string, { sessionId: string; status: string }> }).sessionRunStore
+    expect(storeMap.size).toBeGreaterThan(0)
+    expect([...storeMap.values()].every((h) => h.sessionId === a.id)).toBe(true)
+    engine.forgetSession(a.id)
+    expect(storeMap.size).toBe(0)
+    // 运行中的后台运行被终止（子会话挂起的模型调用收到中止）
+    await waitFor(() => provider.childAborted)
+    engine.cancel(a.id)
+    await runPromise
+    rmSync(home, { recursive: true, force: true })
+  })
 })
