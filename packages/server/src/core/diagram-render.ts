@@ -368,9 +368,115 @@ export interface EchartsInput {
   height: number
 }
 
+/* ---------------- echarts 标题/图例防重叠（与前端 diagram.ts 同规则，改一处须同步另一处） ---------------- */
+
+/** 图例与标题/绘图区的纵向间距（px）。 */
+const ECHARTS_LEGEND_GAP = 6
+
+/** 纵向定位 → 像素：数值原样、'top'→0、百分比按画布高；'middle'/'center'/'bottom' 等其余值返回 null。 */
+function echartsTopPx(v: unknown, height: number): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v
+  if (v === "top") return 0
+  if (typeof v === "string" && /^-?[\d.]+%$/.test(v)) return (height * parseFloat(v)) / 100
+  return null
+}
+
+/** 上下 padding 合计（echarts padding 格式：数值 | 数组 [上,右,下,左]，少于 4 位按 CSS 展开）。 */
+function echartsPadV(v: unknown, dflt: number): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v * 2
+  if (Array.isArray(v) && v.length) {
+    const n = v.map((x) => (typeof x === "number" && Number.isFinite(x) ? x : 0))
+    return n.length === 1 ? n[0] * 2 : n[0] + (n[2] ?? n[0])
+  }
+  return dflt * 2
+}
+
+/** 标题条目的纵向占带 [top, bottom]（echarts 6 默认：top=15、padding=5、主/副标题字号 18/12、itemGap=10，行高按字号 ×1.2
+ *  估算，实测默认标题带 15–46.6）。不在顶部区域（middle/bottom、隐藏、无文本）返回 null。 */
+function echartsTitleBand(t: Record<string, unknown>, height: number): [number, number] | null {
+  if (t.show === false || (!t.text && !t.subtext)) return null
+  const top = t.top === undefined ? 15 : echartsTopPx(t.top, height)
+  if (top === null) return null
+  const style = (t.textStyle ?? {}) as Record<string, unknown>
+  const fs = typeof style.fontSize === "number" && Number.isFinite(style.fontSize) ? style.fontSize : 18
+  const lh = typeof style.lineHeight === "number" && Number.isFinite(style.lineHeight) ? style.lineHeight : fs * 1.2
+  let h = echartsPadV(t.padding, 5) + lh
+  if (t.subtext) {
+    const sub = (t.subtextStyle ?? {}) as Record<string, unknown>
+    const sfs = typeof sub.fontSize === "number" && Number.isFinite(sub.fontSize) ? sub.fontSize : 12
+    h += (typeof t.itemGap === "number" && Number.isFinite(t.itemGap) ? t.itemGap : 10) + sfs * 1.2
+  }
+  return [top, top + h]
+}
+
+/** 图例高度估算（px）：单行 ≈ 30（padding 10 + 行高 20）；条目总宽（图标 25 + 图标文本距 10 + 文本宽 + 项间距 8，
+ *  文本宽沿用全角 1em / 半角 0.6em 估算）超出画布宽按折行数每行加 28（行高 20 + 行距 8）；滚动型恒单行。
+ *  条目名缺省取 series 名。 */
+function echartsLegendHeight(lg: Record<string, unknown>, option: Record<string, unknown>, width: number): number {
+  if (lg.type === "scroll") return 30
+  let names: unknown[] = Array.isArray(lg.data) ? lg.data : []
+  if (!names.length && Array.isArray(option.series)) names = option.series.map((s) => (s as Record<string, unknown> | null)?.name)
+  const labels = names
+    .map((d) => (typeof d === "string" ? d : ((d as Record<string, unknown> | null)?.name as unknown)))
+    .filter((s): s is string => typeof s === "string" && !!s)
+  if (!labels.length) return 30
+  const style = (lg.textStyle ?? {}) as Record<string, unknown>
+  const fs = typeof style.fontSize === "number" && Number.isFinite(style.fontSize) ? style.fontSize : 12
+  const textW = (s: string): number => textWidthEstimate(s, fs)
+  const total = labels.reduce((a, s) => a + 25 + 10 + textW(s) + 8, 0) + 20
+  const rows = Math.max(1, Math.ceil(total / Math.max(1, width)))
+  return 10 + 20 + (rows - 1) * 28
+}
+
+/**
+ * 标题/图例防重叠：echarts 6 的 legend 默认在底部，但模型常按 v5 习惯显式写 `legend.top: 0/'top'/小数值`——
+ * 置顶图例与顶部标题（默认占带 15–46.6）纵向冲突时必然压字。冲突时把图例下移到冲突标题底边之下；下移后图例
+ * 底边越过 grid 顶边（默认 65）时联动下调未显式设置的 grid.top（显式 grid.top/height 不动）。
+ * 不干预：图例 top 未设置（v6 默认底部）或非顶部区域（middle/bottom）、标题不在顶部、二者水平分居左右两侧、图例隐藏。
+ * 直接修改传入 option（解析自模型 JSON，无共享引用）。
+ */
+export function fixEchartsLegendOverlap(option: Record<string, unknown>, width: number, height: number): void {
+  const objEntries = (v: unknown): Record<string, unknown>[] =>
+    (Array.isArray(v) ? v : [v]).filter((t): t is Record<string, unknown> => !!t && typeof t === "object" && !Array.isArray(t))
+  const titles = objEntries(option.title)
+  const legends = objEntries(option.legend)
+  if (!titles.length || !legends.length) return
+  const side = (o: Record<string, unknown>): "left" | "right" | "mid" =>
+    o.left === "left" || o.left === 0 ? "left" : o.left === "right" || (o.left === undefined && o.right !== undefined) ? "right" : "mid"
+  let legendBottomMax: number | null = null
+  for (const lg of legends) {
+    if (lg.show === false) continue
+    const lt = echartsTopPx(lg.top, height)
+    if (lt === null) continue
+    const lh = echartsLegendHeight(lg, option, width)
+    const ls = side(lg)
+    let below = 0
+    for (const t of titles) {
+      const band = echartsTitleBand(t, height)
+      if (!band) continue
+      const ts = side(t)
+      if ((ts === "left" && ls === "right") || (ts === "right" && ls === "left")) continue
+      if (band[0] < lt + lh && lt < band[1] + ECHARTS_LEGEND_GAP) below = Math.max(below, band[1])
+    }
+    if (!below) continue
+    const newTop = Math.ceil(below) + ECHARTS_LEGEND_GAP
+    lg.top = newTop
+    legendBottomMax = Math.max(legendBottomMax ?? 0, newTop + lh)
+  }
+  if (legendBottomMax === null) return
+  const g = option.grid
+  if (g !== undefined && (typeof g !== "object" || g === null)) return
+  const grid = (g ?? {}) as Record<string, unknown>
+  if (grid.top === undefined && grid.height === undefined && grid.show !== false) {
+    const need = Math.ceil(legendBottomMax + ECHARTS_LEGEND_GAP)
+    if (need > 65) option.grid = { ...grid, top: need }
+  }
+}
+
 /**
  * 解析 echarts 源码为渲染输入：整个 JSON 对象即 option，或 `{"option": {...}, "width": 960, "height": 600}` 信封指定画布尺寸
- * （尺寸钳制 200-4000）。注入 `animation: false`（SSR 静态输出必须）；`darkMode` 缺省取参数（后端固定浅色，前端按主题传入）。
+ * （尺寸钳制 200-4000）。注入 `animation: false`（SSR 静态输出必须）；`darkMode` 缺省取参数（后端固定浅色，前端按主题传入）；
+ * 标题/图例防重叠修正（见 fixEchartsLegendOverlap）。
  */
 export function parseEchartsInput(code: string, dark = false): EchartsInput {
   let obj: unknown
@@ -395,11 +501,9 @@ export function parseEchartsInput(code: string, dark = false): EchartsInput {
     width = clampSize(record.width) ?? width
     height = clampSize(record.height) ?? height
   }
-  return {
-    option: { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark },
-    width,
-    height,
-  }
+  const merged: Record<string, unknown> = { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark }
+  fixEchartsLegendOverlap(merged, width, height)
+  return { option: merged, width, height }
 }
 
 /** 渲染 ECharts JSON option 为 SVG（SSR 模式，浅色；白底由栅格化兜底）；option 非法抛错（供回传模型修正）。 */

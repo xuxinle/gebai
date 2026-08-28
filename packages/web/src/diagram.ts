@@ -487,7 +487,121 @@ function lenientJsonParse(code: string): unknown {
   return JSON.parse(stripped)
 }
 
-/** 解析 ECharts 源码（JSON option 或 {"option":…,"width":…,"height":…} 信封）：注入 animation:false 与 darkMode（按当前 UI 明暗）。 */
+/* ---------- ECharts 标题/图例防重叠（与 packages/server/src/core/diagram-render.ts 同规则，改一处须同步另一处） ---------- */
+
+/** 图例与标题/绘图区的纵向间距（px）。 */
+const ECHARTS_LEGEND_GAP = 6
+
+/** 文本宽度估算：全角（CJK/假名/谚文/CJK 标点/全角形式）≈ 1.0em，其余 ≈ 0.6em（与服务端 textWidthEstimate 同公式）。 */
+function estimateTextWidth(text: string, fontSize: number): number {
+  let width = 0
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0
+    const fullWidth =
+      (cp >= 0x2e80 && cp <= 0x9fff) || (cp >= 0xac00 && cp <= 0xd7af) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0x3000 && cp <= 0x303f) || (cp >= 0xff00 && cp <= 0xffef)
+    width += fullWidth ? fontSize : fontSize * 0.6
+  }
+  return width
+}
+
+/** 纵向定位 → 像素：数值原样、'top'→0、百分比按画布高；'middle'/'center'/'bottom' 等其余值返回 null。 */
+function echartsTopPx(v: unknown, height: number): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v
+  if (v === "top") return 0
+  if (typeof v === "string" && /^-?[\d.]+%$/.test(v)) return (height * parseFloat(v)) / 100
+  return null
+}
+
+/** 上下 padding 合计（echarts padding 格式：数值 | 数组 [上,右,下,左]，少于 4 位按 CSS 展开）。 */
+function echartsPadV(v: unknown, dflt: number): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v * 2
+  if (Array.isArray(v) && v.length) {
+    const n = v.map((x) => (typeof x === "number" && Number.isFinite(x) ? x : 0))
+    return n.length === 1 ? n[0] * 2 : n[0] + (n[2] ?? n[0])
+  }
+  return dflt * 2
+}
+
+/** 标题条目的纵向占带 [top, bottom]（echarts 6 默认：top=15、padding=5、主/副标题字号 18/12、itemGap=10，行高按字号 ×1.2
+ *  估算，实测默认标题带 15–46.6）。不在顶部区域（middle/bottom、隐藏、无文本）返回 null。 */
+function echartsTitleBand(t: Record<string, unknown>, height: number): [number, number] | null {
+  if (t.show === false || (!t.text && !t.subtext)) return null
+  const top = t.top === undefined ? 15 : echartsTopPx(t.top, height)
+  if (top === null) return null
+  const style = (t.textStyle ?? {}) as Record<string, unknown>
+  const fs = typeof style.fontSize === "number" && Number.isFinite(style.fontSize) ? style.fontSize : 18
+  const lh = typeof style.lineHeight === "number" && Number.isFinite(style.lineHeight) ? style.lineHeight : fs * 1.2
+  let h = echartsPadV(t.padding, 5) + lh
+  if (t.subtext) {
+    const sub = (t.subtextStyle ?? {}) as Record<string, unknown>
+    const sfs = typeof sub.fontSize === "number" && Number.isFinite(sub.fontSize) ? sub.fontSize : 12
+    h += (typeof t.itemGap === "number" && Number.isFinite(t.itemGap) ? t.itemGap : 10) + sfs * 1.2
+  }
+  return [top, top + h]
+}
+
+/** 图例高度估算（px）：单行 ≈ 30（padding 10 + 行高 20）；条目总宽（图标 25 + 图标文本距 10 + 文本宽 + 项间距 8）超出画布宽
+ *  按折行数每行加 28（行高 20 + 行距 8）；滚动型恒单行。条目名缺省取 series 名。 */
+function echartsLegendHeight(lg: Record<string, unknown>, option: Record<string, unknown>, width: number): number {
+  if (lg.type === "scroll") return 30
+  let names: unknown[] = Array.isArray(lg.data) ? lg.data : []
+  if (!names.length && Array.isArray(option.series)) names = option.series.map((s) => (s as Record<string, unknown> | null)?.name)
+  const labels = names
+    .map((d) => (typeof d === "string" ? d : ((d as Record<string, unknown> | null)?.name as unknown)))
+    .filter((s): s is string => typeof s === "string" && !!s)
+  if (!labels.length) return 30
+  const style = (lg.textStyle ?? {}) as Record<string, unknown>
+  const fs = typeof style.fontSize === "number" && Number.isFinite(style.fontSize) ? style.fontSize : 12
+  const total = labels.reduce((a, s) => a + 25 + 10 + estimateTextWidth(s, fs) + 8, 0) + 20
+  const rows = Math.max(1, Math.ceil(total / Math.max(1, width)))
+  return 10 + 20 + (rows - 1) * 28
+}
+
+/**
+ * 标题/图例防重叠：echarts 6 的 legend 默认在底部，但模型常按 v5 习惯显式写 `legend.top: 0/'top'/小数值`——
+ * 置顶图例与顶部标题（默认占带 15–46.6）纵向冲突时必然压字。冲突时把图例下移到冲突标题底边之下；下移后图例
+ * 底边越过 grid 顶边（默认 65）时联动下调未显式设置的 grid.top（显式 grid.top/height 不动）。
+ * 不干预：图例 top 未设置（v6 默认底部）或非顶部区域（middle/bottom）、标题不在顶部、二者水平分居左右两侧、图例隐藏。
+ */
+function fixEchartsLegendOverlap(option: Record<string, unknown>, width: number, height: number): void {
+  const objEntries = (v: unknown): Record<string, unknown>[] =>
+    (Array.isArray(v) ? v : [v]).filter((t): t is Record<string, unknown> => !!t && typeof t === "object" && !Array.isArray(t))
+  const titles = objEntries(option.title)
+  const legends = objEntries(option.legend)
+  if (!titles.length || !legends.length) return
+  const side = (o: Record<string, unknown>): "left" | "right" | "mid" =>
+    o.left === "left" || o.left === 0 ? "left" : o.left === "right" || (o.left === undefined && o.right !== undefined) ? "right" : "mid"
+  let legendBottomMax: number | null = null
+  for (const lg of legends) {
+    if (lg.show === false) continue
+    const lt = echartsTopPx(lg.top, height)
+    if (lt === null) continue
+    const lh = echartsLegendHeight(lg, option, width)
+    const ls = side(lg)
+    let below = 0
+    for (const t of titles) {
+      const band = echartsTitleBand(t, height)
+      if (!band) continue
+      const ts = side(t)
+      if ((ts === "left" && ls === "right") || (ts === "right" && ls === "left")) continue
+      if (band[0] < lt + lh && lt < band[1] + ECHARTS_LEGEND_GAP) below = Math.max(below, band[1])
+    }
+    if (!below) continue
+    const newTop = Math.ceil(below) + ECHARTS_LEGEND_GAP
+    lg.top = newTop
+    legendBottomMax = Math.max(legendBottomMax ?? 0, newTop + lh)
+  }
+  if (legendBottomMax === null) return
+  const g = option.grid
+  if (g !== undefined && (typeof g !== "object" || g === null)) return
+  const grid = (g ?? {}) as Record<string, unknown>
+  if (grid.top === undefined && grid.height === undefined && grid.show !== false) {
+    const need = Math.ceil(legendBottomMax + ECHARTS_LEGEND_GAP)
+    if (need > 65) option.grid = { ...grid, top: need }
+  }
+}
+
+/** 解析 ECharts 源码（JSON option 或 {"option":…,"width":…,"height":…} 信封）：注入 animation:false 与 darkMode（按当前 UI 明暗）；标题/图例防重叠修正。 */
 function parseEchartsOption(code: string, dark: boolean): { option: Record<string, unknown>; width: number; height: number } {
   let obj: unknown
   try {
@@ -509,11 +623,9 @@ function parseEchartsOption(code: string, dark: boolean): { option: Record<strin
     width = clampSize(record.width) ?? width
     height = clampSize(record.height) ?? height
   }
-  return {
-    option: { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark },
-    width,
-    height,
-  }
+  const merged: Record<string, unknown> = { ...option, animation: false, darkMode: (option.darkMode as boolean | undefined) ?? dark }
+  fixEchartsLegendOverlap(merged, width, height)
+  return { option: merged, width, height }
 }
 
 /** ECharts 渲染缓存（key 含主题明暗，主题切换后失效）。 */
@@ -939,7 +1051,10 @@ function viewerShell(name: string, actions: { copy: () => void; download: () => 
 }
 
 /** 查看器画布缩放控制器：内容元素（svg/img）transform 视觉缩放 + zoom 容器撑开滚动区域；
- *  滚轮以光标为锚点缩放、鼠标拖拽平移、按钮以图中心为锚点缩放。 */
+ *  滚轮以光标为锚点缩放、鼠标拖拽平移、按钮以视口中心为锚点缩放。
+ *  锚点经量测 zoom 盒实际屏幕位置推导（getBoundingClientRect）——flex 居中 margin/padding 下
+ *  滚动几何原点与视口原点不重合，按 scrollLeft+视口偏移推锚点在「居中适应 → 溢出可滚动」
+ *  过渡时会跳（指针下的内容点漂移），量测式任意阶段严格锚定。 */
 function bindViewerZoom(body: HTMLElement, zoom: HTMLElement) {
   let scale = 1
   let baseW = 0 // 内容原始显示尺寸（缩放基准，不随 transform 变化）
@@ -955,18 +1070,29 @@ function bindViewerZoom(body: HTMLElement, zoom: HTMLElement) {
     zoom.style.height = `${baseH * scale}px`
   }
 
-  /** 以内容坐标 (cx, cy) 为锚点缩放（缩放前后该内容点保持在容器内同一位置）。 */
-  const zoomAt = (next: number, cx: number, cy: number) => {
-    const ratio = next / scale
-    applyScale(next)
-    body.scrollLeft = cx * ratio - (cx - body.scrollLeft)
-    body.scrollTop = cy * ratio - (cy - body.scrollTop)
+  /** 视口坐标 (vx, vy) → 内容基准坐标（内容元素 transform-origin 0 0 铺满 zoom 盒，除以当前 scale）。 */
+  const contentPoint = (vx: number, vy: number): [number, number] => {
+    const zr = zoom.getBoundingClientRect()
+    return [(vx - zr.left) / scale, (vy - zr.top) / scale]
   }
 
-  /** 按钮缩放：以图中心为锚点。 */
+  /** 以内容基准坐标 (px, py) 为锚点缩放到 next：该点保持在视口 (vx, vy) 处。
+   *  applyScale 后量测 zoom 盒新位置（flex 居中 margin 随溢出重新分布），锚点偏移转滚动量；
+   *  无滚动余量的轴自然钳制（未溢出时保持居中）。 */
+  const zoomAtPoint = (next: number, px: number, py: number, vx: number, vy: number) => {
+    applyScale(next)
+    const zr = zoom.getBoundingClientRect()
+    body.scrollLeft = Math.max(0, Math.min(body.scrollWidth - body.clientWidth, body.scrollLeft + (zr.left + px * scale - vx)))
+    body.scrollTop = Math.max(0, Math.min(body.scrollHeight - body.clientHeight, body.scrollTop + (zr.top + py * scale - vy)))
+  }
+
+  /** 按钮缩放：以视口中心为锚点。 */
   const centerZoom = (factor: number) => {
-    const rect = body.getBoundingClientRect()
-    zoomAt(scale * factor, body.scrollLeft + rect.width / 2, body.scrollTop + rect.height / 2)
+    const br = body.getBoundingClientRect()
+    const vx = br.left + br.width / 2
+    const vy = br.top + br.height / 2
+    const [px, py] = contentPoint(vx, vy)
+    zoomAtPoint(scale * factor, px, py, vx, vy)
   }
 
   /** 自动适应视口：初始状态放大到 125%（小图更清晰、不超屏），并居中显示。 */
@@ -1002,11 +1128,9 @@ function bindViewerZoom(body: HTMLElement, zoom: HTMLElement) {
     "wheel",
     (e) => {
       e.preventDefault()
-      // 以光标位置为锚点缩放
-      const rect = body.getBoundingClientRect()
-      const cx = body.scrollLeft + (e.clientX - rect.left)
-      const cy = body.scrollTop + (e.clientY - rect.top)
-      zoomAt(scale * (e.deltaY < 0 ? 1.1 : 0.9), cx, cy)
+      // 以光标位置为锚点缩放（量测式：任意缩放阶段指针下的内容点严格不动）
+      const [px, py] = contentPoint(e.clientX, e.clientY)
+      zoomAtPoint(scale * (e.deltaY < 0 ? 1.1 : 0.9), px, py, e.clientX, e.clientY)
     },
     { passive: false },
   )

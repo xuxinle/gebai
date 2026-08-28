@@ -211,6 +211,43 @@ describe("diagram-render（后端四语言图表渲染）", () => {
     expect(() => parseEchartsInput('"str"')).toThrow("JSON 对象")
   })
 
+  test("parseEchartsInput: 标题/图例防重叠（置顶图例与顶部标题冲突时下移 + grid.top 联动，其余不干预）", () => {
+    const opt = (code: string) => parseEchartsInput(code).option as Record<string, any>
+    // v5 习惯 legend.top:0 与顶部标题（默认带 15–46.6）冲突 → 下移至 53，grid.top 由默认 65 联动下调至 89
+    const fixed = opt('{"title":{"text":"周报"},"legend":{"top":0},"series":[{"name":"a","type":"bar"}]}')
+    expect(fixed.legend.top).toBe(53)
+    expect(fixed.grid.top).toBe(89)
+    // 显式小数值仍冲突（30 < 46.6+6）→ 同样下移；title.top:0 显式时标题带更浅（0–31.6）→ 下移至 38、grid 74
+    expect(opt('{"title":{"text":"周报"},"legend":{"top":30}}').legend.top).toBe(53)
+    const t0 = opt('{"title":{"text":"周报","top":0},"legend":{"top":0}}')
+    expect(t0.legend.top).toBe(38)
+    expect(t0.grid.top).toBe(74)
+    // 副标题加高标题带（15–71）→ 下移至 77、grid 113
+    const sub = opt('{"title":{"text":"周报","subtext":"本周"},"legend":{"top":0}}')
+    expect(sub.legend.top).toBe(77)
+    expect(sub.grid.top).toBe(113)
+    // 不干预：图例 top 未设置（echarts 6 默认底部）/bottom/middle/已避开标题（60 ≥ 46.6+6）
+    for (const lg of ['{}', '{"top":"bottom"}', '{"top":"middle"}', '{"top":60}']) {
+      const o = opt(`{"title":{"text":"周报"},"legend":${lg}}`)
+      expect(o.legend).toEqual(JSON.parse(lg))
+      expect(o.grid).toBeUndefined()
+    }
+    // 不干预：标题不在顶部 / 图例隐藏 / 二者水平分居两侧
+    expect(opt('{"title":{"text":"周报","top":"bottom"},"legend":{"top":0}}').legend.top).toBe(0)
+    expect(opt('{"title":{"text":"周报"},"legend":{"top":0,"show":false}}').legend.top).toBe(0)
+    expect(opt('{"title":{"text":"周报","left":"left"},"legend":{"top":0,"left":"right"}}').legend.top).toBe(0)
+    // 尊重显式 grid 布局：grid.top/height 已设置时不联动下调
+    expect(opt('{"title":{"text":"周报"},"legend":{"top":0},"grid":{"top":80}}').grid.top).toBe(80)
+    const gh = opt('{"title":{"text":"周报"},"legend":{"top":0},"grid":{"height":400}}')
+    expect(gh.grid.height).toBe(400)
+    expect(gh.grid.top).toBeUndefined()
+    // 标题为数组（多标题）取冲突条目最大底边
+    expect(opt('{"title":[{"text":"a","top":0},{"text":"b"}],"legend":{"top":0}}').legend.top).toBe(53)
+    // 图例条目名缺省取 series 名，折行估算加高（窄画布 300 宽 → 两行 → grid 下调更深）
+    const wide = opt('{"option":{"title":{"text":"周报"},"legend":{"top":0},"series":[{"name":"每日任务执行量统计"},{"name":"模拟数据完成数汇总"},{"name":"第三季度累计口径"}]},"width":300}')
+    expect(wide.grid.top).toBe(117)
+  })
+
   test("createDiagramRenderer: echarts 走注入引擎并栅格化，错误带 ECharts 前缀", async () => {
     const calls: string[] = []
     const renderer = createDiagramRenderer({

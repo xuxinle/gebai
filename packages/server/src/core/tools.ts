@@ -1482,7 +1482,7 @@ export const showTool: Tool = {
           "【mermaid】流程图/时序图/状态图/甘特图/用户旅程、Markdown 文档嵌入、简单架构；语法最简。\n" +
           "【plantuml】类图/组件图/部署图/用例图/活动图/ER 图等标准 UML 与严谨建模，功能最全。\n" +
           "【d2】系统架构/云架构/网络拓扑/微服务等对外展示场景（PPT/汇报），默认布局最现代。\n" +
-          "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等数据可视化与统计图表；code 传 option 的严格 JSON（键名与字符串一律双引号，值禁止函数），可选信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸（默认 960×600）。\n" +
+          "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等数据可视化与统计图表；code 传 option 的严格 JSON（键名与字符串一律双引号，值禁止函数），可选信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸（默认 960×600）；图例默认在画布底部，与标题同顶冲突时渲染器自动下移避让，无需手动设置 legend.top。\n" +
           "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图；数据分析=echarts 统计图表。",
       },
       render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（默认 frontend，首选前端渲染降低服务端负载）：frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销）/ backend（服务端渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用，四语言均支持；前端渲染不可用（收到「画图能力受限」）时改用 backend 重试）" },
