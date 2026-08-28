@@ -11,7 +11,7 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, agentTaskTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
 import { SessionRunRegistry, type SessionRunHandle } from "./session-runs"
@@ -1452,7 +1452,7 @@ export class AgentEngine {
       ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
-      `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果，长任务传 async:true 后台执行、agent_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
+      `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
       this.subAgentProjectNote(user, env),
@@ -1794,7 +1794,7 @@ export class AgentEngine {
       // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；inheritGlobalPrompt（默认 true）= 总Agent
       // 全局提示词注入新会话；深度 +1 限制递归嵌套
       runNewSession: (agents, input, opts) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1, opts),
-      // agent_run 异步后台运行服务（agent_run async:true 启动、agent_task 查询/等待/终止；DESIGN「新会话执行的异步运行」）：
+      // agent_run 异步后台运行服务（agent_run async:true 启动、bg_task 查询/等待/终止；DESIGN「新会话执行的异步运行」）：
       // 句柄存引擎级共享表，本实例为按会话过滤视图；父任务取消信号传播进后台运行（用户停止连带终止）
       sessionRuns: new SessionRunRegistry({
         sessionId,
@@ -2480,13 +2480,13 @@ export class AgentEngine {
     for (const def of defs) {
       reg.registerSubAgentTools(def.name, def.tools ?? {}, def.requiresApproval)
       // 简化定义（无工具，含纯 md 定义）：注入编排工具（原名暴露，无 {agent}_ 前缀，多 Agent 时仅注入一次）
-      // ——支持组合式子 Agent 通过 agent_run/agent_task/agent_list/agent_load 编排其他子 Agent
+      // ——支持组合式子 Agent 通过 agent_run/bg_task/agent_list/agent_load 编排其他子 Agent
       if (!def.tools || Object.keys(def.tools).length === 0) {
         if (!orchestrationInjected) {
           reg.register(agentListTool)
           reg.register(agentLoadTool)
           reg.register(agentRunTool)
-          reg.register(agentTaskTool)
+          reg.register(bgTaskTool)
           orchestrationInjected = true
         }
       }
