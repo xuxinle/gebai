@@ -32,6 +32,7 @@ export const THEMES = [
   { id: "aurora", label: "极光", desc: "青绿紫", swatch: "#2dd4bf", group: "氛围风" },
   { id: "ink", label: "水墨", desc: "宣纸墨韵", swatch: "linear-gradient(135deg, #f6f1e7, #cfc6b2)", group: "氛围风" },
   { id: "cny", label: "人民币", desc: "中国红", swatch: "linear-gradient(135deg, #d92d3a, #e8a33d)", group: "特色" },
+  { id: "qinhan", label: "秦汉", desc: "玄朱鎏金", swatch: "linear-gradient(135deg, #171009, #b2452f 55%, #d0a13f)", group: "特色" },
 ] as const satisfies readonly ThemeDef[]
 
 export type ThemeId = (typeof THEMES)[number]["id"]

@@ -1,0 +1,769 @@
+/* ============================================================
+   GEBAI 主题：qinhan — 秦汉彩绘（玄漆 · 朱砂 · 鎏金）
+   秦尚黑（水德）、汉尚赤（火德）：玄漆黑底 + 朱红彩绘 + 鎏金勾边，
+   配色取自秦兵马俑彩绘与汉漆器（黑漆底朱绘鎏金铜饰），
+   辅色石青/石绿/赭石皆矿物颜料色。
+   纹饰：云气纹底饰（卷云线描暗纹）+ 标题栏回纹边带 +
+   顶部鎏金/朱砂双钩线 + 漆器双线面板（金外线朱内线）。
+   气魄：小圆角方正庄重、宋体碑刻标题、鎏金光晕。
+   ============================================================ */
+
+[data-theme="qinhan"] {
+  /* 朱红/鎏金 RGB 三元组（光晕/阴影统一引用） */
+  --zhu-rgb: 194, 69, 47;
+  --jin-rgb: 208, 161, 63;
+
+  /* 玄漆黑底色系（暖调漆木黑） */
+  --bg: #171009;
+  --bg-elev: #201710;
+  --bg-elev-2: #291d14;
+  --bg-hover: #312216;
+  --bg-active: #3d2b1c;
+  --bg-inset: #110b07;
+
+  /* 暗金褐描边 */
+  --border: #3c2c1a;
+  --border-strong: #5c4526;
+
+  /* 暖白文字 */
+  --text: #ede1cc;
+  --text-muted: #bfa98c;
+  --text-faint: #8d7659;
+
+  /* 朱红主色（汉漆器朱）+ 鎏金点缀 */
+  --accent: #c2452f;
+  --accent-hover: #d95f44;
+  --accent-soft: rgba(194, 69, 47, 0.14);
+  --on-accent: #f9f0dd;
+  --gold: #d0a13f;
+  --gold-hover: #e8c268;
+  --success: #5a9e6f;
+  --danger: #e05545;
+  --warning: #c98a3d;
+  --tool: #6a9ab8;
+  --user-grad: linear-gradient(135deg, #6d1d13, #b03a28 55%, #d0a13f);
+  --nav-active: #e8c268;
+
+  /* 形状：小圆角方正庄重（皇家规制） */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-msg: 6px;
+
+  /* 阴影：暖黑沉底 + 朱/金微晕 */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(var(--jin-rgb), 0.06) inset;
+  --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.5), 0 0 24px rgba(var(--zhu-rgb), 0.09), 0 0 0 1px rgba(var(--jin-rgb), 0.07) inset;
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 36px rgba(var(--jin-rgb), 0.11), 0 0 0 1px rgba(var(--jin-rgb), 0.08) inset;
+  --shadow-glow: 0 0 12px rgba(var(--jin-rgb), 0.35), 0 0 24px rgba(var(--zhu-rgb), 0.18);
+  --glass: none;
+  --msg-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 12px rgba(var(--jin-rgb), 0.05);
+
+  /* 字体：正文现代 sans，标题用宋体碑刻（--font-seal） */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-seal: "Songti SC", "STSong", "SimSun", "Noto Serif SC", serif;
+  --font-size: 14px;
+  --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================
+   玄漆背景：暖黑 + 云气纹暗饰（卷云线描，与主题特效同构）+ 四域微晕
+   ============================================================ */
+[data-theme="qinhan"] body {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 1000px 480px at 90% -10%, rgba(var(--zhu-rgb), 0.1), transparent 58%),
+    radial-gradient(ellipse 900px 460px at -8% 112%, rgba(var(--jin-rgb), 0.07), transparent 55%),
+    radial-gradient(ellipse 700px 360px at 50% 50%, rgba(var(--zhu-rgb), 0.04), transparent 60%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='150'%3E%3Cg fill='none' stroke-linecap='round'%3E%3Cpath transform='translate(58,48) rotate(-18) scale(0.85)' stroke='%23d0a13f' stroke-opacity='0.085' stroke-width='2.4' d='M74 4C58 -8 40 -10 26 0A26 26 0 0 0 -26 0A18 18 0 0 0 10 0A10 10 0 0 0 -10 0A5 5 0 0 0 0 0'/%3E%3Cpath transform='translate(168,86) rotate(152) scale(0.85)' stroke='%23c2452f' stroke-opacity='0.075' stroke-width='2.4' d='M74 4C58 -8 40 -10 26 0A26 26 0 0 0 -26 0A18 18 0 0 0 10 0A10 10 0 0 0 -10 0A5 5 0 0 0 0 0'/%3E%3Cpath transform='translate(112,116) rotate(28) scale(0.6)' stroke='%23d0a13f' stroke-opacity='0.065' stroke-width='2.8' d='M74 4C58 -8 40 -10 26 0A26 26 0 0 0 -26 0A18 18 0 0 0 10 0A10 10 0 0 0 -10 0A5 5 0 0 0 0 0'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: auto, auto, auto, 264px 165px;
+  background-attachment: fixed;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 顶部鎏金/朱砂双钩线（金线在上、朱线在下，两缘渐隐——帝王章服缘边） */
+[data-theme="qinhan"] body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(
+    180deg,
+    rgba(var(--jin-rgb), 0.85) 0 1px,
+    transparent 1px 2px,
+    rgba(var(--zhu-rgb), 0.6) 2px 3px
+  );
+  -webkit-mask-image: linear-gradient(90deg, transparent 2%, #000 20%, #000 80%, transparent 98%);
+  mask-image: linear-gradient(90deg, transparent 2%, #000 20%, #000 80%, transparent 98%);
+  z-index: 50;
+  pointer-events: none;
+}
+
+/* 内容层置于背景装饰之上：main 背景透明以透出环境特效（theme-fx 画布），气泡/卡片自身背景保证可读 */
+[data-theme="qinhan"] main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+/* ============================================================
+   全局元素
+   ============================================================ */
+[data-theme="qinhan"] ::selection { background: rgba(var(--zhu-rgb), 0.55); color: var(--text); }
+[data-theme="qinhan"] a {
+  color: var(--gold);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(var(--jin-rgb), 0.4);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] a:hover { color: var(--gold-hover); text-shadow: 0 0 8px rgba(var(--jin-rgb), 0.45); border-bottom-color: var(--gold); }
+
+[data-theme="qinhan"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-theme="qinhan"] ::-webkit-scrollbar-thumb {
+  background: rgba(var(--jin-rgb), 0.28);
+  border-radius: 8px;
+  border: 2px solid var(--bg);
+}
+[data-theme="qinhan"] ::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+[data-theme="qinhan"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   面板：漆器双线（鎏金外线 + 朱砂内线的复合描边，金器包边）
+   ============================================================ */
+[data-theme="qinhan"] header,
+[data-theme="qinhan"] aside,
+[data-theme="qinhan"] .settings-panel,
+[data-theme="qinhan"] .login-card,
+[data-theme="qinhan"] .theme-pop,
+[data-theme="qinhan"] .preview-card {
+  background: var(--bg-elev);
+  border: 1px solid rgba(var(--jin-rgb), 0.32);
+  box-shadow: var(--shadow-md), inset 0 0 0 1px rgba(var(--zhu-rgb), 0.14);
+}
+[data-theme="qinhan"] header { border-radius: 0; border-top: 0; border-left: 0; border-right: 0; border-bottom-color: rgba(var(--jin-rgb), 0.4); }
+[data-theme="qinhan"] aside { border-radius: 0; border-top: 0; border-bottom: 0; border-left: 0; border-right-color: rgba(var(--jin-rgb), 0.3); }
+
+/* 标题栏底缘边饰：锯齿纹带（漆篋边带）+ 回纹带（青铜器/汉锦边饰语汇），两缘渐隐 */
+[data-theme="qinhan"] header::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 11px;
+  height: 5px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='5'%3E%3Cpath d='M0 0H10L5 5Z' fill='%23c2452f' fill-opacity='0.35'/%3E%3C/svg%3E") repeat-x center / 10px 5px;
+  -webkit-mask-image: linear-gradient(90deg, transparent 1%, #000 8%, #000 92%, transparent 99%);
+  mask-image: linear-gradient(90deg, transparent 1%, #000 8%, #000 92%, transparent 99%);
+  pointer-events: none;
+}
+[data-theme="qinhan"] header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  height: 9px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='14'%3E%3Cg fill='none' stroke='%23d0a13f' stroke-opacity='0.6' stroke-width='1.5'%3E%3Cpath d='M3 12V3H12V9H6V6'/%3E%3C/g%3E%3C/svg%3E") repeat-x center / 13px 9px;
+  -webkit-mask-image: linear-gradient(90deg, transparent 1%, #000 8%, #000 92%, transparent 99%);
+  mask-image: linear-gradient(90deg, transparent 1%, #000 8%, #000 92%, transparent 99%);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* ============================================================
+   icon-btn
+   ============================================================ */
+[data-theme="qinhan"] .icon-btn {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .icon-btn:hover {
+  background: rgba(var(--jin-rgb), 0.1);
+  border-color: rgba(var(--jin-rgb), 0.35);
+  color: var(--gold);
+  box-shadow: 0 0 10px rgba(var(--jin-rgb), 0.15);
+}
+[data-theme="qinhan"] .icon-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+  box-shadow: var(--shadow-glow);
+}
+
+/* ============================================================
+   新会话按钮：朱红鎏金渐变 + 金边
+   ============================================================ */
+[data-theme="qinhan"] #new-session {
+  background: var(--user-grad);
+  color: var(--on-accent);
+  border: 1px solid rgba(var(--jin-rgb), 0.5);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(var(--zhu-rgb), 0.35);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] #new-session:hover {
+  box-shadow: 0 8px 24px rgba(var(--zhu-rgb), 0.5), 0 0 8px rgba(var(--jin-rgb), 0.4) inset;
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+
+/* ============================================================
+   会话列表
+   ============================================================ */
+[data-theme="qinhan"] #session-list li {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] #session-list li:hover {
+  background: rgba(var(--jin-rgb), 0.06);
+  border-color: rgba(var(--jin-rgb), 0.2);
+  transform: translateX(2px);
+}
+[data-theme="qinhan"] #session-list li.active {
+  background: linear-gradient(90deg, rgba(var(--zhu-rgb), 0.18), rgba(var(--jin-rgb), 0.07) 80%, transparent);
+  border-color: rgba(var(--zhu-rgb), 0.6);
+  box-shadow: inset 2px 0 0 var(--gold), inset 0 0 0 1px rgba(var(--jin-rgb), 0.12);
+}
+[data-theme="qinhan"] #session-list li.active .session-name { color: var(--text); }
+[data-theme="qinhan"] .session-name { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   消息气泡：漆盒描边（金外线朱内线）+ 朱砂流式光标
+   ============================================================ */
+[data-theme="qinhan"] .msg-name { color: var(--gold); font-size: 12px; font-weight: 600; }
+[data-theme="qinhan"] .msg-time { color: var(--text-faint); font-size: 11px; }
+[data-theme="qinhan"] .msg-act {
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .msg-act:hover {
+  color: var(--gold);
+  background: rgba(var(--jin-rgb), 0.08);
+  border-color: rgba(var(--jin-rgb), 0.3);
+}
+
+/* assistant 气泡：玄漆浮盒，金线描边 + 朱砂内衬（漆器双钩）+ 四角金角花（函套角）；overflow 裁齐圆角 */
+[data-theme="qinhan"] .msg.assistant .bubble {
+  background-color: var(--bg-elev);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M9 1H2.5Q1 1 1 2.5V9' fill='none' stroke='%23d0a13f' stroke-opacity='0.45' stroke-width='1.3'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M9 1H2.5Q1 1 1 2.5V9' fill='none' stroke='%23d0a13f' stroke-opacity='0.45' stroke-width='1.3' transform='rotate(90 5 5)'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M9 1H2.5Q1 1 1 2.5V9' fill='none' stroke='%23d0a13f' stroke-opacity='0.45' stroke-width='1.3' transform='rotate(180 5 5)'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M9 1H2.5Q1 1 1 2.5V9' fill='none' stroke='%23d0a13f' stroke-opacity='0.45' stroke-width='1.3' transform='rotate(270 5 5)'/%3E%3C/svg%3E");
+  background-position: left 4px top 4px, right 4px top 4px, right 4px bottom 4px, left 4px bottom 4px;
+  background-repeat: no-repeat;
+  border: 1px solid rgba(var(--jin-rgb), 0.32);
+  border-radius: var(--radius-msg);
+  box-shadow: var(--msg-shadow), inset 0 0 0 1px rgba(var(--zhu-rgb), 0.16);
+  position: relative;
+  overflow: hidden;
+}
+[data-theme="qinhan"] .msg.assistant:hover .bubble {
+  border-color: rgba(var(--jin-rgb), 0.55);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(var(--jin-rgb), 0.18) inset, inset 0 0 0 1px rgba(var(--zhu-rgb), 0.24);
+}
+
+/* user 气泡：朱红鎏金渐变 + 金缘内衬，右下小圆角 */
+[data-theme="qinhan"] .msg.user .bubble {
+  background: var(--user-grad);
+  color: var(--on-accent);
+  border: 1px solid rgba(var(--jin-rgb), 0.45);
+  border-radius: var(--radius-msg) var(--radius-msg) 3px var(--radius-msg);
+  box-shadow: 0 4px 18px rgba(var(--zhu-rgb), 0.32), inset 0 0 0 1px rgba(var(--jin-rgb), 0.22);
+}
+
+/* tool 气泡：石青左线 */
+[data-theme="qinhan"] .msg.tool .bubble {
+  background: linear-gradient(180deg, rgba(var(--jin-rgb), 0.05), rgba(var(--zhu-rgb), 0.03));
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--tool);
+  border-radius: var(--radius-msg);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+[data-theme="qinhan"] .msg.tool .tool-head { color: var(--tool); font-weight: 600; }
+[data-theme="qinhan"] .msg.tool .tool-out { color: var(--text-muted); font-family: var(--font-mono); font-size: 12.5px; }
+
+/* 流式光标：朱砂闪烁 */
+[data-theme="qinhan"] .msg.streaming .bubble::after {
+  content: "▍";
+  color: var(--accent-hover);
+  background: none;
+  -webkit-text-fill-color: var(--accent-hover);
+  text-shadow: 0 0 8px rgba(var(--zhu-rgb), 0.6);
+  margin-left: 2px;
+  animation: qh-blink 1s steps(2, start) infinite;
+}
+@keyframes qh-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ============================================================
+   composer
+   ============================================================ */
+[data-theme="qinhan"] .composer-row {
+  background: var(--bg-inset);
+  border: 1px solid rgba(var(--jin-rgb), 0.4);
+  border-radius: var(--radius-md);
+  padding: 4px 8px;
+  box-shadow: inset 0 0 0 1px rgba(var(--zhu-rgb), 0.16), 0 2px 10px rgba(0, 0, 0, 0.3);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .composer-row:focus-within {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold), 0 0 14px rgba(var(--jin-rgb), 0.2), inset 0 0 0 1px rgba(var(--zhu-rgb), 0.16);
+}
+[data-theme="qinhan"] #attach-btn { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="qinhan"] #attach-btn:hover {
+  background: rgba(var(--jin-rgb), 0.1);
+  color: var(--gold);
+  box-shadow: 0 0 6px rgba(var(--jin-rgb), 0.2);
+}
+[data-theme="qinhan"] #input { color: var(--text); caret-color: var(--gold); }
+[data-theme="qinhan"] #input::placeholder { color: var(--text-faint); }
+
+/* 发送按钮：朱红鎏金渐变圆钮 */
+[data-theme="qinhan"] #send {
+  background: var(--user-grad);
+  color: var(--on-accent);
+  border: 1px solid rgba(var(--jin-rgb), 0.5);
+  border-radius: 50%;
+  box-shadow: 0 4px 16px rgba(var(--zhu-rgb), 0.4);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] #send:hover {
+  box-shadow: 0 6px 20px rgba(var(--zhu-rgb), 0.55), 0 0 8px rgba(var(--jin-rgb), 0.4) inset;
+  transform: scale(1.05);
+}
+[data-theme="qinhan"] #send:active { transform: scale(0.95); }
+[data-theme="qinhan"] #send.stopping { background: var(--danger); border-color: var(--danger); box-shadow: 0 4px 16px rgba(224, 85, 69, 0.4); }
+
+/* ============================================================
+   审批卡片
+   ============================================================ */
+[data-theme="qinhan"] .approval {
+  background: rgba(201, 138, 61, 0.08);
+  border: 1px solid rgba(201, 138, 61, 0.4);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-md);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+[data-theme="qinhan"] .approval .yes {
+  background: var(--user-grad);
+  color: var(--on-accent);
+  border: 1px solid rgba(var(--jin-rgb), 0.5);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(var(--zhu-rgb), 0.35);
+}
+[data-theme="qinhan"] .approval .yes:hover { filter: brightness(1.08); box-shadow: 0 0 16px rgba(var(--zhu-rgb), 0.5); }
+[data-theme="qinhan"] .approval .no {
+  background: rgba(224, 85, 69, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(224, 85, 69, 0.4);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+[data-theme="qinhan"] .approval .no:hover { background: rgba(224, 85, 69, 0.18); }
+
+/* ============================================================
+   Markdown：宋体碑刻标题 + 玄漆代码块
+   ============================================================ */
+[data-theme="qinhan"] .markdown h1,
+[data-theme="qinhan"] .markdown h2,
+[data-theme="qinhan"] .markdown h3 {
+  color: var(--text);
+  font-family: var(--font-seal);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+[data-theme="qinhan"] .markdown h2 {
+  border-bottom: 1px solid rgba(var(--jin-rgb), 0.3);
+  padding-bottom: 4px;
+}
+[data-theme="qinhan"] .markdown a {
+  color: var(--gold);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(var(--jin-rgb), 0.4);
+}
+[data-theme="qinhan"] .markdown a:hover { color: var(--gold-hover); border-bottom-color: var(--gold); }
+[data-theme="qinhan"] .markdown code {
+  font-family: var(--font-mono);
+  background: rgba(var(--jin-rgb), 0.08);
+  border: 1px solid rgba(var(--jin-rgb), 0.2);
+  color: var(--gold);
+  border-radius: var(--radius-sm);
+  padding: 0.12em 0.5em;
+  font-size: 0.9em;
+}
+[data-theme="qinhan"] .markdown pre {
+  background: #0d0805;
+  border: 1px solid var(--border-strong);
+  border-left: 2px solid rgba(var(--jin-rgb), 0.45);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+[data-theme="qinhan"] .markdown pre code { background: none; border: none; padding: 0; color: #e6dcc8; font-size: 13px; }
+[data-theme="qinhan"] .markdown blockquote {
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(90deg, rgba(var(--zhu-rgb), 0.07), transparent);
+  color: var(--text-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+[data-theme="qinhan"] .markdown table { border-color: var(--border); }
+[data-theme="qinhan"] .markdown th {
+  background: rgba(var(--jin-rgb), 0.08);
+  color: var(--gold);
+  font-family: var(--font-seal);
+  border-color: var(--border);
+}
+[data-theme="qinhan"] .markdown td { border-color: var(--border); }
+[data-theme="qinhan"] .markdown tr:hover td { background: rgba(var(--jin-rgb), 0.04); }
+[data-theme="qinhan"] .markdown hr { border-top: 1px dashed var(--border-strong); }
+[data-theme="qinhan"] .markdown ul li::marker, [data-theme="qinhan"] .markdown ol li::marker { color: var(--accent-hover); }
+[data-theme="qinhan"] .copy-btn {
+  background: var(--bg-elev-2);
+  color: var(--gold);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+[data-theme="qinhan"] .copy-btn:hover {
+  background: var(--gold);
+  color: #241505;
+  border-color: var(--gold);
+  box-shadow: 0 0 10px rgba(var(--jin-rgb), 0.4);
+}
+[data-theme="qinhan"] .reasoning .reasoning-body {
+  background: linear-gradient(90deg, rgba(var(--zhu-rgb), 0.05), transparent);
+  border-left: 2px solid rgba(var(--zhu-rgb), 0.45);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* ============================================================
+   主题选择气泡
+   ============================================================ */
+[data-theme="qinhan"] .theme-pop { box-shadow: var(--shadow-pop); }
+[data-theme="qinhan"] .theme-section-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  padding: 8px 10px 4px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+[data-theme="qinhan"] .accent-opt {
+  border: 2px solid var(--border);
+  background: var(--bg-elev-2);
+  border-radius: 50%;
+  position: relative;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4) inset;
+}
+[data-theme="qinhan"] .accent-opt::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--swatch);
+}
+[data-theme="qinhan"] .accent-opt:hover { border-color: var(--gold); transform: scale(1.1); }
+[data-theme="qinhan"] .accent-opt.active {
+  border-color: var(--gold);
+  background: rgba(var(--jin-rgb), 0.15);
+  box-shadow: 0 0 0 2px var(--gold), 0 0 12px rgba(var(--jin-rgb), 0.35);
+}
+[data-theme="qinhan"] .accent-reset {
+  color: var(--text-muted);
+  border: 1px dashed var(--border-strong);
+  background: var(--bg-elev-2);
+  border-radius: 50%;
+}
+[data-theme="qinhan"] .accent-reset:hover { color: var(--gold); border-color: var(--gold); background: rgba(var(--jin-rgb), 0.08); }
+[data-theme="qinhan"] .theme-opt {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .theme-opt:hover {
+  background: rgba(var(--jin-rgb), 0.07);
+  border-color: rgba(var(--jin-rgb), 0.25);
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+[data-theme="qinhan"] .theme-opt.active {
+  background: linear-gradient(90deg, rgba(var(--zhu-rgb), 0.14), rgba(var(--jin-rgb), 0.05) 80%, transparent);
+  border-color: rgba(var(--zhu-rgb), 0.55);
+  box-shadow: inset 2px 0 0 var(--gold), 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+[data-theme="qinhan"] .theme-opt .swatch { border-radius: var(--radius-sm); border: 1px solid var(--border-strong); }
+[data-theme="qinhan"] .theme-opt .t-label { color: var(--text); font-weight: 600; }
+[data-theme="qinhan"] .theme-opt .t-desc { color: var(--text-faint); font-size: 10.5px; }
+
+/* ============================================================
+   设置抽屉
+   ============================================================ */
+[data-theme="qinhan"] .settings-overlay { background: rgba(8, 5, 2, 0.7); backdrop-filter: blur(4px); }
+[data-theme="qinhan"] .settings-head { border-bottom: 1px solid var(--border); }
+[data-theme="qinhan"] .settings-tabs { border-bottom: 1px solid var(--border); background: var(--bg); }
+[data-theme="qinhan"] .settings-tabs button { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="qinhan"] .settings-tabs button:hover { background: rgba(var(--jin-rgb), 0.08); color: var(--gold); }
+[data-theme="qinhan"] .settings-tabs button.active {
+  background: rgba(var(--zhu-rgb), 0.13);
+  color: var(--gold);
+  border-bottom: 2px solid var(--gold);
+  box-shadow: 0 -2px 8px rgba(var(--jin-rgb), 0.15) inset;
+}
+[data-theme="qinhan"] .settings-row {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .settings-row:hover {
+  border-color: var(--gold);
+  background: rgba(var(--jin-rgb), 0.03);
+  box-shadow: 0 0 6px rgba(var(--jin-rgb), 0.1) inset;
+}
+[data-theme="qinhan"] .settings-form { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="qinhan"] .settings-form label { color: var(--text-muted); font-size: 12px; }
+[data-theme="qinhan"] .settings-form input,
+[data-theme="qinhan"] .settings-form select,
+[data-theme="qinhan"] .settings-form textarea {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .settings-form input:focus,
+[data-theme="qinhan"] .settings-form select:focus,
+[data-theme="qinhan"] .settings-form textarea:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold), 0 0 8px rgba(var(--jin-rgb), 0.25);
+  outline: none;
+}
+[data-theme="qinhan"] .mini-btn {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--gold);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .mini-btn:hover {
+  background: var(--gold);
+  color: #241505;
+  border-color: var(--gold);
+  box-shadow: 0 0 10px rgba(var(--jin-rgb), 0.35);
+}
+[data-theme="qinhan"] .mini-btn.danger { color: var(--danger); border-color: rgba(224, 85, 69, 0.4); }
+[data-theme="qinhan"] .mini-btn.danger:hover { background: var(--danger); color: var(--on-accent); border-color: var(--danger); box-shadow: 0 0 8px rgba(224, 85, 69, 0.5); }
+[data-theme="qinhan"] .settings-group-name { color: var(--gold); font-weight: 600; font-size: 12px; letter-spacing: 0.05em; }
+
+/* ============================================================
+   登录卡片：宋体鎏金榜书
+   ============================================================ */
+[data-theme="qinhan"] .login-overlay {
+  background:
+    radial-gradient(ellipse 1000px 500px at 50% 30%, rgba(var(--jin-rgb), 0.1), transparent 60%),
+    radial-gradient(ellipse 1000px 500px at 50% 100%, rgba(var(--zhu-rgb), 0.12), transparent 60%),
+    var(--bg);
+}
+[data-theme="qinhan"] .login-card { border-color: rgba(var(--jin-rgb), 0.35); box-shadow: var(--shadow-pop); }
+[data-theme="qinhan"] .login-brand {
+  background: linear-gradient(135deg, #e8c268, #d0a13f 45%, #c2452f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-family: var(--font-seal);
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  filter: drop-shadow(0 0 12px rgba(var(--jin-rgb), 0.35));
+}
+[data-theme="qinhan"] .login-sub { color: var(--text-muted); letter-spacing: 0.2em; font-size: 11px; }
+[data-theme="qinhan"] .login-card input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  caret-color: var(--gold);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .login-card input:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px var(--gold), 0 0 12px rgba(var(--jin-rgb), 0.25);
+  outline: none;
+}
+[data-theme="qinhan"] .login-submit {
+  background: var(--user-grad);
+  color: var(--on-accent);
+  border: 1px solid rgba(var(--jin-rgb), 0.5);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  box-shadow: 0 4px 16px rgba(var(--zhu-rgb), 0.4);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .login-submit:hover { filter: brightness(1.08); box-shadow: var(--shadow-glow); transform: translateY(-1px); }
+
+/* ============================================================
+   空状态：朱雀瓦当徽章 + 宋体鎏金匾额 + 四角函套金饰 + 菱纹分隔
+   ============================================================ */
+[data-theme="qinhan"] .empty-state { position: relative; }
+/* 朱雀瓦当：双圈轮界 + 回首凤鸟剪影（S 形一笔身 + 卷云式三股尾羽），鎏金线描 */
+[data-theme="qinhan"] .empty-state::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 44%;
+  width: 380px;
+  height: 380px;
+  transform: translate(-50%, -50%);
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cg fill='none' stroke='%23d0a13f' stroke-linecap='round'%3E%3Ccircle cx='120' cy='120' r='114' stroke-width='2.5'/%3E%3Ccircle cx='120' cy='120' r='105' stroke-width='1'/%3E%3Cg stroke-width='3'%3E%3Cpath d='M99 66 C95 53 103 44 114 48 C107 52 105 57 107 64'/%3E%3Cpath d='M72 71 L89 65 L91 78 Z' stroke='none' fill='%23d0a13f'/%3E%3Ccircle cx='97' cy='72' r='6'/%3E%3Ccircle cx='95' cy='71' r='1.3' stroke='none' fill='%23d0a13f'/%3E%3Cpath d='M101 77 C106 84 106 92 112 100 C120 110 136 113 149 109'/%3E%3Cpath d='M112 92 C122 78 139 73 151 80 C144 84 142 89 144 95'/%3E%3Cpath d='M124 112 L122 138 M137 114 L139 138'/%3E%3Cpath d='M122 138 l-9 6 M122 138 l0 9 M122 138 l9 6'/%3E%3Cpath d='M139 138 l-9 6 M139 138 l0 9 M139 138 l9 6'/%3E%3C/g%3E%3Cg stroke-width='2.6'%3E%3Cpath transform='translate(152,106) rotate(-18) scale(0.62)' d='M74 4C58 -8 40 -10 26 0A26 26 0 0 0 -26 0A18 18 0 0 0 10 0A10 10 0 0 0 -10 0A5 5 0 0 0 0 0'/%3E%3Cpath transform='translate(148,118) rotate(22) scale(0.55)' d='M74 4C58 -8 40 -10 26 0A26 26 0 0 0 -26 0A18 18 0 0 0 10 0A10 10 0 0 0 -10 0A5 5 0 0 0 0 0'/%3E%3Cpath transform='translate(146,130) rotate(62) scale(0.45)' d='M74 4C58 -8 40 -10 26 0A26 26 0 0 0 -26 0A18 18 0 0 0 10 0A10 10 0 0 0 -10 0A5 5 0 0 0 0 0'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 0.4;
+  pointer-events: none;
+}
+/* 四角函套金饰（双钩角花） */
+[data-theme="qinhan"] .empty-state::after {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Cg fill='none' stroke='%23d0a13f'%3E%3Cpath d='M25 1H7Q1 1 1 7V25' stroke-opacity='0.6' stroke-width='1.6'/%3E%3Cpath d='M25 6H11Q6 6 6 11V25' stroke-opacity='0.3' stroke-width='1'/%3E%3C/g%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Cg fill='none' stroke='%23d0a13f'%3E%3Cpath d='M25 1H7Q1 1 1 7V25' stroke-opacity='0.6' stroke-width='1.6' transform='rotate(90 13 13)'/%3E%3Cpath d='M25 6H11Q6 6 6 11V25' stroke-opacity='0.3' stroke-width='1' transform='rotate(90 13 13)'/%3E%3C/g%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Cg fill='none' stroke='%23d0a13f'%3E%3Cpath d='M25 1H7Q1 1 1 7V25' stroke-opacity='0.6' stroke-width='1.6' transform='rotate(180 13 13)'/%3E%3Cpath d='M25 6H11Q6 6 6 11V25' stroke-opacity='0.3' stroke-width='1' transform='rotate(180 13 13)'/%3E%3C/g%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Cg fill='none' stroke='%23d0a13f'%3E%3Cpath d='M25 1H7Q1 1 1 7V25' stroke-opacity='0.6' stroke-width='1.6' transform='rotate(270 13 13)'/%3E%3Cpath d='M25 6H11Q6 6 6 11V25' stroke-opacity='0.3' stroke-width='1' transform='rotate(270 13 13)'/%3E%3C/g%3E%3C/svg%3E");
+  background-position: left top, right top, right bottom, left bottom;
+  background-repeat: no-repeat;
+}
+[data-theme="qinhan"] .empty-state .es-slogan {
+  background: linear-gradient(135deg, #e8c268, #d0a13f 45%, #c2452f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  font-family: var(--font-seal);
+  font-weight: 300;
+  letter-spacing: 0.4em;
+  opacity: 1;
+  filter: drop-shadow(0 0 20px rgba(var(--jin-rgb), 0.3));
+  position: relative;
+}
+/* 建议按钮上方：菱纹金分隔线（—— ◆ ——） */
+[data-theme="qinhan"] .es-suggestions::before {
+  content: "";
+  flex: 0 0 100%;
+  height: 10px;
+  margin-bottom: 4px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='10'%3E%3Cg fill='none' stroke='%23d0a13f' stroke-opacity='0.55'%3E%3Cpath d='M0 5H64 M96 5H160'/%3E%3C/g%3E%3Cpath d='M80 1l4 4-4 4-4-4z' fill='%23d0a13f' fill-opacity='0.75'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+/* 建议按钮：金边方章 */
+[data-theme="qinhan"] .es-suggestions button {
+  background: var(--bg-elev);
+  border: 1px solid rgba(var(--jin-rgb), 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(var(--zhu-rgb), 0.14);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .es-suggestions button:hover {
+  background: rgba(var(--jin-rgb), 0.08);
+  border-color: var(--gold);
+  color: var(--gold);
+  box-shadow: 0 0 12px rgba(var(--jin-rgb), 0.2);
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   选择卡片 / 待办 / 压缩 / 附件 / 预览
+   ============================================================ */
+[data-theme="qinhan"] .choice-opt {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .choice-opt:hover {
+  background: rgba(var(--jin-rgb), 0.08);
+  border-color: var(--gold);
+  color: var(--gold);
+  box-shadow: 0 0 12px rgba(var(--jin-rgb), 0.2);
+  transform: translateY(-2px);
+}
+[data-theme="qinhan"] .todo-ico { color: var(--gold); }
+[data-theme="qinhan"] .bubble.compact-notice {
+  background: rgba(var(--jin-rgb), 0.05);
+  border: 1px dashed rgba(var(--jin-rgb), 0.35);
+  color: var(--text-muted);
+}
+[data-theme="qinhan"] .attach-chip {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  color: var(--gold);
+  border-radius: var(--radius-sm);
+}
+[data-theme="qinhan"] .attach-chip:hover { background: rgba(var(--jin-rgb), 0.1); box-shadow: 0 0 6px rgba(var(--jin-rgb), 0.2); }
+[data-theme="qinhan"] .preview-overlay { background: rgba(8, 5, 2, 0.85); backdrop-filter: blur(4px); }
+[data-theme="qinhan"] .preview-head { border-bottom: 1px solid var(--border); }
+[data-theme="qinhan"] .preview-close { color: var(--text-muted); border-radius: var(--radius-sm); }
+[data-theme="qinhan"] .preview-close:hover { color: var(--danger); background: rgba(224, 85, 69, 0.1); border: 1px solid var(--danger); }
+
+/* ============================================================
+   跳到最新按钮
+   ============================================================ */
+[data-theme="qinhan"] .jump-bottom {
+  background: var(--bg-elev);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  border-radius: 50%;
+  box-shadow: var(--shadow-glow);
+  transition: all var(--transition);
+}
+[data-theme="qinhan"] .jump-bottom:hover {
+  background: var(--gold);
+  color: #241505;
+  box-shadow: 0 0 16px rgba(var(--jin-rgb), 0.5);
+  transform: translateY(-2px);
+}
+
+/* ============================================================
+   diagram
+   ============================================================ */
+[data-theme="qinhan"] .diagram { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+[data-theme="qinhan"] .diagram-editor { background: var(--bg-inset); border: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); border-radius: var(--radius-sm); }
+
+/* ============================================================
+   矿物彩语法高亮（玄漆底 · 鎏金/朱砂/石青/石绿/赭石）
+   ============================================================ */
+[data-theme="qinhan"] .hljs { color: #e6dcc8; background: transparent; }
+[data-theme="qinhan"] .hljs-comment, [data-theme="qinhan"] .hljs-quote { color: #8d7659; font-style: italic; }
+[data-theme="qinhan"] .hljs-keyword, [data-theme="qinhan"] .hljs-selector-tag, [data-theme="qinhan"] .hljs-literal, [data-theme="qinhan"] .hljs-type { color: #e8c268; font-weight: 600; }
+[data-theme="qinhan"] .hljs-string, [data-theme="qinhan"] .hljs-regexp, [data-theme="qinhan"] .hljs-addition { color: #8fbf8a; }
+[data-theme="qinhan"] .hljs-number, [data-theme="qinhan"] .hljs-symbol, [data-theme="qinhan"] .hljs-bullet { color: #d98e5f; }
+[data-theme="qinhan"] .hljs-title, [data-theme="qinhan"] .hljs-section, [data-theme="qinhan"] .hljs-selector-id { color: #7ab8d8; }
+[data-theme="qinhan"] .hljs-attr, [data-theme="qinhan"] .hljs-attribute, [data-theme="qinhan"] .hljs-variable, [data-theme="qinhan"] .hljs-template-variable { color: #c8a87a; }
+[data-theme="qinhan"] .hljs-built_in, [data-theme="qinhan"] .hljs-builtin-name { color: #d4907e; }
+[data-theme="qinhan"] .hljs-meta, [data-theme="qinhan"] .hljs-doctag { color: #a08c6e; }
+[data-theme="qinhan"] .hljs-tag, [data-theme="qinhan"] .hljs-name { color: #d4907e; }
+[data-theme="qinhan"] .hljs-emphasis { font-style: italic; }
+[data-theme="qinhan"] .hljs-strong { font-weight: 700; }
+
+/* 响应式：保持细节 */
+@media (max-width: 860px) {
+  [data-theme="qinhan"] aside { background: var(--bg-elev) !important; }
+}
