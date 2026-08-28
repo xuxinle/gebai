@@ -490,13 +490,13 @@ function formatTurnDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
 }
 
-/** 单轮计时器：标题栏右侧、上下文占比左侧常驻显示。运行中实时走（图标呼吸），
- *  运行结束不清除（定格保留），下次运行重启归零；多会话并发时由最近一次开始的运行接管显示。
+/** 单轮计时器：标题栏右侧、上下文占比左侧常驻显示，**随会话视图切换**——当前会话运行中实时走
+ *  （图标呼吸），切走不打扰其他会话视图、切回续走；非运行会话显示该会话最后定格时长，无记录隐藏。
+ *  运行结束不清除（定格保留），下次运行重启归零。
  *  时长分级变色（<1min 中性 / 1-5min 主题色 / ≥5min 警告色，与上下文圆环分级着色语言一致）；
- *  hover 显示总运行时——每轮净耗时累加（不含轮间空闲），而非距第一条消息的墙钟时间。 */
-let activeTimerRun: RunState | null = null
-/** 已完成轮次的净耗时累计（页面生命周期内，每轮收尾累加）。 */
-let totalRunMs = 0
+ *  hover 显示总运行时——该会话每轮净耗时累加（不含轮间空闲），而非距第一条消息的墙钟时间。 */
+/** 各会话计时状态：累计净耗时（总运行时 tip）与最后定格时长（切回该会话时恢复显示）。 */
+const sessionTimers = new Map<string, { totalMs: number; lastElapsed: number }>()
 
 /** 时长分级（颜色渐进，冷→暖）：<10s 极淡 / 10-30s 中性 / 30s-1m 工具青绿 / 1-3m 主题色 / 3-5m 警告 / ≥5m 危险。 */
 function turnDurLevel(ms: number): 0 | 1 | 2 | 3 | 4 | 5 {
@@ -528,16 +528,16 @@ function turnTimerTick(run: RunState): void {
     }
     return
   }
-  if (run !== activeTimerRun) return // 显示已被更新的运行接管：空转，interval 随收尾清理
+  // 显示跟随当前会话：后台会话运行不打扰当前视图（interval 空转，切回时接管显示）
+  if (getCurrentSession()?.id !== run.sessionId) return
   const elapsed = Date.now() - run.startedAt
   turnTimerEl.hidden = false
   renderTurnTimer(elapsed, true)
-  turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration(totalRunMs + elapsed)}` // 含进行中这轮
+  turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration((sessionTimers.get(run.sessionId)?.totalMs ?? 0) + elapsed)}` // 含进行中这轮
 }
 
 function startTurnTimer(run: RunState): void {
   if (!isTurnTimerEnabled()) return
-  activeTimerRun = run
   turnTimerTick(run)
   run.timerInterval = setInterval(() => turnTimerTick(run), 250)
 }
@@ -547,13 +547,47 @@ function stopTurnTimer(run: RunState): void {
     clearInterval(run.timerInterval)
     run.timerInterval = undefined
   }
-  if (run !== activeTimerRun) return
-  activeTimerRun = null
   const elapsed = Date.now() - run.startedAt
-  totalRunMs += elapsed // 每段累加：总运行时 = 各轮净耗时之和（不含轮间空闲）
-  renderTurnTimer(elapsed, false) // 结束不清除：定格保留
-  turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration(totalRunMs)}`
+  const st = sessionTimers.get(run.sessionId) ?? { totalMs: 0, lastElapsed: 0 }
+  st.totalMs += elapsed // 每段累加：总运行时 = 该会话各轮净耗时之和（不含轮间空闲）
+  st.lastElapsed = elapsed
+  sessionTimers.set(run.sessionId, st)
+  // 定格仅在当前会话显示（切走会话的定格不覆盖当前视图，切回时经 sessionTimers 恢复）
+  if (getCurrentSession()?.id === run.sessionId) {
+    renderTurnTimer(elapsed, false) // 结束不清除：定格保留
+    turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration(st.totalMs)}`
+  }
 }
+
+/** 会话视图切换联动（gebai:session-view）：计时显示随会话切换——当前会话运行中续走（interval
+ *  到点接管刷新，此处先行渲染一帧），非运行会话恢复该会话定格时长，无记录隐藏。 */
+function syncTurnTimerView(): void {
+  if (!isTurnTimerEnabled()) return // CSS data-turn-timer="off" 隐藏全部计时元素，无需渲染
+  const cur = getCurrentSession()
+  if (!cur) {
+    turnTimerEl.hidden = true // 草稿页（无会话）：无计时展示
+    if (headerCtxEl) delete headerCtxEl.dataset.dur
+    return
+  }
+  const run = runs.get(cur.id)
+  if (run) {
+    const elapsed = Date.now() - run.startedAt
+    turnTimerEl.hidden = false
+    renderTurnTimer(elapsed, true)
+    turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration((sessionTimers.get(cur.id)?.totalMs ?? 0) + elapsed)}`
+    return
+  }
+  const st = sessionTimers.get(cur.id)
+  if (st) {
+    turnTimerEl.hidden = false
+    renderTurnTimer(st.lastElapsed, false)
+    turnTimerEl.dataset.tip = `总运行 ${formatTurnDuration(st.totalMs)}`
+  } else {
+    turnTimerEl.hidden = true
+    if (headerCtxEl) delete headerCtxEl.dataset.dur // 清运行态闪烁分级残留
+  }
+}
+document.addEventListener("gebai:session-view", syncTurnTimerView)
 
 /** 空闲超时兜底（无数据视为挂起的判定窗口，毫秒）：高于服务端 LLM 读空闲超时（120s）——
  *  模型调用假死先由服务端超时上报明确错误（「模型接口读超时」），前端看门狗只兜底
