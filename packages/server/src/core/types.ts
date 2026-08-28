@@ -70,8 +70,8 @@ export type ToolContext = {
   /** 移动/重命名文件（file 工具 move/rename 动作用）。 */
   moveFile: (from: string, to: string) => Promise<void>
   runCommand: (cmd: string, opts?: { shell?: string; workdir?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string; code: number }>
-  /** sh 异步后台任务服务（引擎按会话注入，会话 tmp/sh-tasks/ 落盘）：sh async:true 启动、sh_task 查询/等待/终止。
-   *  可选：测试桩/无引擎环境不注入时 sh async 与 sh_task 返回不可用说明。 */
+  /** sh 异步后台任务服务（引擎按会话注入，会话 tmp/sh-tasks/ 落盘）：sh async:true 启动、bg_task 统一管理（查询/等待/终止）。
+   *  可选：测试桩/无引擎环境不注入时 sh async 返回不可用说明。 */
   shTasks?: import("./sh-tasks").ShTaskService
   uploadAttachment: (ref: AttachmentRef) => Promise<string>
   publish: (type: string, payload: Record<string, unknown>) => void
@@ -118,8 +118,8 @@ export type ToolContext = {
    *  （默认 true）与 opts.inheritGlobalPrompt（默认 true）分别控制全局工具注册与总Agent 全局系统提示词
    *  注入——两者默认一致，新会话与主会话同构（DESIGN「新会话执行的上下文隔离」）。 */
   runNewSession: (agents: string[], input: string, opts?: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean }) => Promise<{ output: string; archive: import("@gebai/sdk").SessionRunArchive }>
-  /** agent_run 异步后台运行服务（agent_run async:true 启动、agent_task 查询/等待/终止；引擎按会话注入）。
-   *  可选：测试桩/无引擎环境不注入时 agent_run async 与 agent_task 返回不可用说明。 */
+  /** agent_run 异步后台运行服务（agent_run async:true 启动、bg_task 统一管理；引擎按会话注入）。
+   *  可选：测试桩/无引擎环境不注入时 agent_run async 返回不可用说明。 */
   sessionRuns?: import("./session-runs").SessionRunService
   /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>

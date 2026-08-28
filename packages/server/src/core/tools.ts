@@ -2056,7 +2056,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号与变量展开以 cmd 为准（无 $? / $VAR，环境变量用 %VAR%）；退出码直接读返回结果的 exitCode 字段（无需 echo $? / %errorlevel%）。指定工作目录用 workdir 参数（免 cd X && cmd 串联）或 project 参数（项目根为工作目录；非默认工作目录时输出末尾标注实际目录）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 sh_task 回头查询/等待/终止。",
+  description: "执行 Shell 命令，输出以 stdout 为准。Windows 下经 cmd.exe 执行：命令串联用 &&/||/换行（; 非分隔符会被并入参数），引号与变量展开以 cmd 为准（无 $? / $VAR，环境变量用 %VAR%）；退出码直接读返回结果的 exitCode 字段（无需 echo $? / %errorlevel%）。指定工作目录用 workdir 参数（免 cd X && cmd 串联）或 project 参数（项目根为工作目录；非默认工作目录时输出末尾标注实际目录）。安全模式下降级为只读命令白名单（cat/grep/find/git 读类等），输出重定向限定用户目录内。长耗时命令（构建/测试/安装等）可传 async:true 后台执行——立即返回 taskId，先做其他事再用 bg_task 回头查询/等待/终止。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -2066,7 +2066,7 @@ export const shTool: Tool = {
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540，超时进程被终止并返回超时结果；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
-      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId 不等待完成（适合构建/测试等长命令，期间可处理其他任务）；后续用 sh_task（action=status/wait/kill/list）查询输出、等待完成或终止" },
+      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId 不等待完成（适合构建/测试等长命令，期间可处理其他任务）；后续用 bg_task（action=status/wait/stop/list）查询输出、等待完成或终止" },
       ...SCRIPT_APPROVAL_PARAM,
     },
     ["command"],
@@ -2083,12 +2083,12 @@ export const shTool: Tool = {
       const deny = validateShCommandSafeMode(String(args.command), ctx)
       if (deny) return { output: deny }
     }
-    // 异步后台执行（DESIGN「sh 异步执行」）：spawn 进后台 + 落盘会话 tmp/sh-tasks/，立即返回 taskId
+    // 异步后台执行（DESIGN「sh 异步后台任务」）：spawn 进后台 + 落盘会话 tmp/sh-tasks/，立即返回 taskId
     if (args.async === true) {
       if (!ctx.shTasks) return { output: "当前环境不支持后台任务执行（shTasks 服务未注入）。" }
       const rec = await ctx.shTasks.start(String(args.command), { cwd: workdir, env: ctx.env, input, maxMs: shTaskLifetimeMs(args.timeout) })
       return {
-        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}${cwdNote}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 sh_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=kill 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
+        output: `[后台任务已启动] taskId: ${rec.id}\n命令: ${args.command}${cwdNote}\n（后台执行中不阻塞会话——可先处理其他任务，之后用 bg_task action=status id=${rec.id} 查询输出，action=wait 阻塞等待完成，action=stop 终止；输出日志 tmp/sh-tasks/${rec.id}.log）`,
         data: { taskId: rec.id, pid: rec.pid },
       }
     }
@@ -2104,10 +2104,10 @@ export const shTool: Tool = {
   },
 }
 
-/** sh_task 输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
+/** bg_task 命令任务（sh async:true）输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
 const SH_TASK_TAIL_DEFAULT = 4000
 const SH_TASK_TAIL_MAX = 20000
-/** wait 默认等待秒数（上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底）。 */
+/** bg_task wait 默认等待秒数（上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底；命令任务与子Agent 运行同口径）。 */
 const SH_TASK_WAIT_DEFAULT_S = 60
 const SH_TASK_WAIT_MAX_S = 540
 
@@ -2127,7 +2127,7 @@ function shTaskElapsed(r: { startedAt: number; endedAt?: number }, now = Date.no
   return Math.round(((r.endedAt ?? now) - r.startedAt) / 1000)
 }
 
-/** sh 异步后台任务状态行（status/wait/kill 单任务 + list 每行共用）。 */
+/** 命令任务状态行（bg_task status/wait/stop 单任务 + list 每行共用）。 */
 function shTaskLine(r: ShTaskRecord, label?: string): string {
   const status = shTaskStatus(r)
   const head = `${label ?? ""}taskId ${r.id} [${status}] ${shTaskElapsed(r)}s`
@@ -2135,57 +2135,6 @@ function shTaskLine(r: ShTaskRecord, label?: string): string {
   const exit = r.exitCode === undefined ? "（退出码未知）" : `（exit ${r.exitCode}）`
   const suffix = r.timedOut ? " [生命周期超时已终止]" : r.killed ? " [已手动终止]" : r.lost ? " [进程已结束，服务可能重启过]" : r.spawnError ? ` [启动失败: ${r.spawnError.slice(0, 200)}]` : ""
   return `${head}${exit}${suffix} — ${r.command}`
-}
-
-/** sh 异步后台任务管理：查询（status）/等待（wait，阻塞至完成或超时）/终止（kill，进程树）/清单（list）。
- *  任务由 sh async:true 启动（返回 taskId）；输出为 stdout+stderr 合并日志尾部（完整日志在 tmp/sh-tasks/{id}.log）。 */
-export const shTaskTool: Tool = {
-  name: "sh_task",
-  description: "管理 sh 异步后台任务（sh async:true 启动并返回 taskId）。action=status 立即返回任务状态与输出尾部；action=wait 阻塞等待完成（timeout 秒内未完成返回当前状态，适合「先做别的再回头等结果」）；action=kill 终止任务进程树；action=list 列出本会话全部后台任务。",
-  card: { titleParams: ["action", "id"] },
-  parameters: schema(
-    {
-      action: { type: "string", enum: ["status", "wait", "kill", "list"], description: "操作（必填）" },
-      id: { type: "string", description: "任务 taskId（action=list 可省略）" },
-      timeout: { type: "number", description: "wait 操作等待秒数（默认 60，上限 540）" },
-      tail: { type: "number", description: "返回输出尾部字符数（默认 4000，上限 20000）" },
-    },
-    ["action"],
-  ),
-  outputSchema: schema(
-    {
-      id: { type: "string", description: "任务 id（list 为空）" },
-      status: { type: "string", description: "running/done/failed/killed/timed_out/lost" },
-      exitCode: { type: "integer", description: "退出码（未知为 null）" },
-      output: { type: "string", description: "输出尾部（stdout+stderr 合并）" },
-      tasks: { type: "array", description: "list 的任务概要", items: schema({ id: { type: "string" }, status: { type: "string" }, command: { type: "string" } }, ["id", "status"]) },
-    },
-    [],
-  ),
-  async execute(args, ctx) {
-    if (!ctx.shTasks) return { output: "当前环境不支持后台任务（shTasks 服务未注入）。" }
-    const action = String(args.action ?? "status")
-    const tail = shTaskTailChars(args.tail)
-    if (action === "list") {
-      const tasks = await ctx.shTasks.list()
-      if (!tasks.length) return { output: "本会话暂无后台任务（用 sh async:true 启动）。", data: { tasks: [] } }
-      const lines = tasks.map((r) => shTaskLine(r))
-      return { output: `本会话后台任务（${tasks.length} 个，按启动顺序）:\n${lines.join("\n")}`, data: { tasks: tasks.map((r) => ({ id: r.id, status: shTaskStatus(r), command: r.command })) } }
-    }
-    const id = String(args.id ?? "")
-    if (!id) return { output: "缺少任务 id（status/wait/kill 需要传 sh async:true 返回的 taskId；列清单用 action=list）。" }
-    let rec = action === "wait" ? await ctx.shTasks.wait(id, shTaskWaitMs(args.timeout)) : action === "kill" ? await ctx.shTasks.kill(id) : await ctx.shTasks.refresh(id)
-    if (!rec) return { output: `未找到后台任务: ${id}（taskId 以 sh async:true 的返回为准；查现有任务用 action=list）。` }
-    if (action === "wait" && !rec.endedAt) {
-      // 等待超时仍在运行：返回当前状态与已有输出，模型可再次 wait 或继续其他工作
-      const out = await ctx.shTasks.readLog(id, tail)
-      const text = `${shTaskLine(rec, "")}\n（等待超时仍在运行；可再次 wait、用 status 查询，或 kill 终止）\n已产出输出（尾部 ${Math.min(out.length, tail)} 字符）:\n${out || "（暂无输出）"}`
-      return { ...(await truncate(text, "sh_task", ctx)), data: { id, status: shTaskStatus(rec), exitCode: null, output: out } }
-    }
-    const out = await ctx.shTasks.readLog(id, tail)
-    const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，完整日志 tmp/sh-tasks/${id}.log）:\n${out}` : "\n（无输出）"}`
-    return { ...(await truncate(text, "sh_task", ctx)), data: { id, status: shTaskStatus(rec), exitCode: rec.exitCode ?? null, output: out } }
-  },
 }
 
 /** python 可执行文件探测缓存：undefined=未探测，null=已探测但未命中候选。 */
@@ -2986,13 +2935,13 @@ export const agentLoadTool: Tool = {
 
 export const agentRunTool: Tool = {
   name: "agent_run",
-  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与独有工具进入新会话）并执行任务，只返回最终结果文本；执行过程全程存档供历史回放。默认与主会话同构——全局工具（read/write/sh/grep 等，同名同参）与总Agent 全局系统提示词一并继承，子Agent 只需提供独有能力（如 code 的 search_symbols/analyze/git）。async:true 时后台异步执行——立即返回 runId 不阻塞（适合长任务），期间可处理其他任务；之后用 agent_task（action=status/wait/cancel/list）查询进度、等待结果或主动终止。",
+  description: "执行新会话：派生临时新会话（独立上下文，与主会话完全隔离），预加载指定子Agent 列表（可多个，其完整系统提示词与独有工具进入新会话）并执行任务，只返回最终结果文本；执行过程全程存档供历史回放。默认与主会话同构——全局工具（read/write/sh/grep 等，同名同参）与总Agent 全局系统提示词一并继承，子Agent 只需提供独有能力（如 code 的 search_symbols/analyze/git）。async:true 时后台异步执行——立即返回 runId 不阻塞（适合长任务），期间可处理其他任务；之后用 bg_task（action=status/wait/stop/list）查询进度、等待结果或主动终止。",
   card: { titleParams: ["agents"] },
   parameters: schema(
     {
       agents: { type: "array", items: { type: "string" }, description: "预加载进新会话的子Agent 名称列表（一个或多个，如 [\"code\", \"playwright\"]）" },
       input: { type: "string", description: "任务指令（新会话的初始消息）" },
-      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 runId 不等待完成（适合长任务，期间可处理其他任务）；后续用 agent_task（status/wait/cancel/list）查询进度、等待结果或终止" },
+      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 runId 不等待完成（适合长任务，期间可处理其他任务）；后续用 bg_task（action=status/wait/stop/list）查询进度、等待结果或终止" },
       inherit_global_tools: { type: "boolean", description: "是否继承全局工具进新会话（默认 true——新会话与主会话同构的完整工具面；false = 仅预加载子Agent 的工具，依赖全局文件工具的子Agent（如 code）将无法读写文件，慎用）" },
       inherit_global_prompt: { type: "boolean", description: "是否注入总Agent 全局系统提示词进新会话（默认 true——与全局工具继承一致，新会话与主会话行为约定同构；false = 仅子Agent 提示词，上下文最省）" },
     },
@@ -3006,12 +2955,12 @@ export const agentRunTool: Tool = {
       inheritGlobalTools: args.inherit_global_tools !== false,
       inheritGlobalPrompt: args.inherit_global_prompt !== false,
     }
-    // 异步后台执行（DESIGN「新会话执行的异步运行」）：立即返回 runId，agent_task 管理进度/结果/终止
+    // 异步后台执行（DESIGN「新会话执行的异步运行」）：立即返回 runId，bg_task 管理进度/结果/终止
     if (args.async === true) {
       if (!ctx.sessionRuns) return { output: "当前环境不支持异步子Agent 运行（sessionRuns 服务未注入）。" }
       const rec = await ctx.sessionRuns.start(agents, input, opts)
       return {
-        output: `[后台子Agent 运行已启动] runId: ${rec.runId}\n子Agent: ${rec.agents.join(", ")}\n任务: ${input.slice(0, 500)}${input.length > 500 ? "…" : ""}\n（后台执行不阻塞会话——执行过程实时推送到前端；之后用 agent_task action=status id=${rec.runId} 查询进度，action=wait 等待完成并取回结果，action=cancel 主动终止）`,
+        output: `[后台子Agent 运行已启动] runId: ${rec.runId}\n子Agent: ${rec.agents.join(", ")}\n任务: ${input.slice(0, 500)}${input.length > 500 ? "…" : ""}\n（后台执行不阻塞会话——执行过程实时推送到前端；之后用 bg_task action=status id=${rec.runId} 查询进度，action=wait 等待完成并取回结果，action=stop 主动终止）`,
         data: { runId: rec.runId, agents: rec.agents },
       }
     }
@@ -3022,21 +2971,11 @@ export const agentRunTool: Tool = {
   },
 }
 
-/** agent_task wait 默认等待秒数（上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底；与 sh_task 同口径）。 */
-const AGENT_TASK_WAIT_DEFAULT_S = 60
-const AGENT_TASK_WAIT_MAX_S = 540
-
-function agentTaskWaitMs(v: unknown): number {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n <= 0) return AGENT_TASK_WAIT_DEFAULT_S * 1000
-  return Math.min(n, AGENT_TASK_WAIT_MAX_S) * 1000
-}
-
 function agentTaskElapsed(r: { startedAt: number; endedAt?: number }, now = Date.now()): number {
   return Math.round(((r.endedAt ?? now) - r.startedAt) / 1000)
 }
 
-/** agent_task 运行状态行（status/wait/cancel/list 共用；进度含轮次/工具调用/最近活动）。 */
+/** 子Agent 运行状态行（bg_task status/wait/stop 单任务 + list 每行共用；进度含轮次/工具调用/最近活动）。 */
 function agentTaskLine(r: SessionRunRecord): string {
   const head = `runId ${r.runId} [${r.status}] ${agentTaskElapsed(r)}s — ${r.agents.join(", ")}`
   if (r.status === "running") {
@@ -3047,81 +2986,115 @@ function agentTaskLine(r: SessionRunRecord): string {
   return `${head} ${suffix}`
 }
 
-/** agent_run 异步后台运行管理（DESIGN「新会话执行的异步运行」）：查询（status，含实时进度）/等待（wait，
- *  阻塞至完成并取回结果与完整存档）/终止（cancel，主动终止执行、已执行过程保留在存档）/清单（list）。
- *  运行由 agent_run async:true 启动（返回 runId）；会话级服务由引擎注入（跨工具调用可见，重启即中断）。 */
-export const agentTaskTool: Tool = {
-  name: "agent_task",
-  description: "管理 agent_run 异步后台运行（agent_run async:true 启动并返回 runId）。action=status 立即返回运行状态与进度（已执行轮次/工具调用/最近活动；已结束含最终结果）；action=wait 阻塞等待完成并取回最终结果与完整存档（timeout 秒内未完成返回当前进度，可再次 wait）；action=cancel 主动终止运行（终止前的执行过程保留在存档）；action=list 列出本会话全部后台运行。",
+/** 后台异步任务统一管理（DESIGN「sh 异步后台任务」「新会话执行的异步运行」）：两类任务同构管理面，
+ *  按 id 前缀自动识别——命令任务（sh async:true 启动，id 形如 tXXXXXXXX：status/wait 附输出尾部，
+ *  stop 杀进程树，磁盘落盘跨重启可见（lost 判定））与子Agent 运行（agent_run async:true 启动，id 形如
+ *  rXXXXXXXX：status/wait 附进度/最终结果与完整存档，stop 协作中止，进程内随服务重启中断）。
+ *  action=status 立即返回状态 / wait 阻塞等待完成（timeout 秒内未完成返回当前状态可再次 wait）/
+ *  stop 终止 / list 列出本会话全部后台任务（两类合并）。管理动作免审批。 */
+export const bgTaskTool: Tool = {
+  name: "bg_task",
+  description: "统一管理后台异步任务（按 id 前缀自动识别两类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）与子Agent 运行（agent_run async:true 启动，runId 形如 rXXXXXXXX）。action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 tmp/sh-tasks/{id}.log），运行附进度（已执行轮次/工具调用/最近活动，已结束含最终结果）；action=wait 阻塞等待完成并取回结果（运行完成时附完整存档供回放；timeout 秒内未完成返回当前状态，适合「先做别的再回头等结果」）；action=stop 终止（命令任务杀进程树、运行协作中止，运行已执行过程保留在存档）；action=list 列出本会话全部后台任务。",
   card: { titleParams: ["action", "id"] },
   parameters: schema(
     {
-      action: { type: "string", enum: ["status", "wait", "cancel", "list"], description: "操作（必填）" },
-      id: { type: "string", description: "运行 runId（action=list 可省略）" },
+      action: { type: "string", enum: ["status", "wait", "stop", "list"], description: "操作（必填）" },
+      id: { type: "string", description: "任务 id——命令任务 taskId（t 开头）或运行 runId（r 开头），action=list 可省略" },
       timeout: { type: "number", description: "wait 操作等待秒数（默认 60，上限 540）" },
+      tail: { type: "number", description: "命令任务返回输出尾部字符数（默认 4000，上限 20000）" },
     },
     ["action"],
   ),
   outputSchema: schema(
     {
-      runId: { type: "string", description: "运行 id（list 为空）" },
-      status: { type: "string", description: "running/done/failed/cancelled" },
-      rounds: { type: "integer", description: "已执行模型回复轮次" },
-      toolCalls: { type: "integer", description: "已执行工具调用次数" },
-      output: { type: "string", description: "最终结果文本（done 时）" },
-      runs: { type: "array", description: "list 的运行概要", items: schema({ runId: { type: "string" }, status: { type: "string" }, agents: { type: "array", items: { type: "string" } } }, ["runId", "status", "agents"]) },
+      id: { type: "string", description: "任务 id（list 为空）" },
+      kind: { type: "string", description: "sh=命令任务 / agent=子Agent 运行" },
+      status: { type: "string", description: "命令任务：running/done/failed/killed/timed_out/lost；运行：running/done/failed/cancelled" },
+      exitCode: { type: "integer", description: "命令任务退出码（未知为 null）" },
+      rounds: { type: "integer", description: "运行：已执行模型回复轮次" },
+      toolCalls: { type: "integer", description: "运行：已执行工具调用次数" },
+      output: { type: "string", description: "命令任务输出尾部 / 运行最终结果文本（done 时）" },
+      tasks: { type: "array", description: "list 的任务概要（两类合并，按启动顺序）", items: schema({ id: { type: "string" }, kind: { type: "string", description: "sh/agent" }, status: { type: "string" }, detail: { type: "string", description: "命令或子Agent 名单" } }, ["id", "kind", "status"]) },
     },
     [],
   ),
   async execute(args, ctx) {
-    if (!ctx.sessionRuns) return { output: "当前环境不支持异步子Agent 运行（sessionRuns 服务未注入）。" }
-    const runs = ctx.sessionRuns
     const action = String(args.action ?? "status")
     if (action === "list") {
-      const all = runs.list()
-      if (!all.length) return { output: "本会话暂无后台子Agent 运行（用 agent_run async:true 启动）。", data: { runs: [] } }
+      const shList = ctx.shTasks ? await ctx.shTasks.list() : []
+      const runList = ctx.sessionRuns ? ctx.sessionRuns.list() : []
+      const merged = [
+        ...shList.map((r) => ({ startedAt: r.startedAt, line: shTaskLine(r), data: { id: r.id, kind: "sh" as const, status: shTaskStatus(r), detail: r.command } })),
+        ...runList.map((r) => ({ startedAt: r.startedAt, line: agentTaskLine(r), data: { id: r.runId, kind: "agent" as const, status: r.status, detail: r.agents.join("+") } })),
+      ].sort((a, b) => a.startedAt - b.startedAt)
+      if (!merged.length) return { output: "本会话暂无后台任务（用 sh async:true 或 agent_run async:true 启动）。", data: { tasks: [] } }
       return {
-        output: `本会话后台运行（${all.length} 个，按启动顺序）:\n${all.map((r) => agentTaskLine(r)).join("\n")}`,
-        data: { runs: all.map((r) => ({ runId: r.runId, status: r.status, agents: r.agents, rounds: r.rounds, toolCalls: r.toolCalls })) },
+        output: `本会话后台任务（${merged.length} 个，按启动顺序——t 开头为命令任务、r 开头为子Agent 运行）:\n${merged.map((t) => t.line).join("\n")}`,
+        data: { tasks: merged.map((t) => t.data) },
       }
     }
     const id = String(args.id ?? "")
-    if (!id) return { output: "缺少 runId（status/wait/cancel 需要传 agent_run async:true 返回的 runId；列清单用 action=list）。" }
-    if (action === "cancel") {
-      const rec = await runs.cancel(id)
-      if (!rec) return { output: `未找到后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
-      if (rec.status === "running") {
-        return { output: `${agentTaskLine(rec)}\n（终止指令已下达，执行循环仍在收尾——稍后用 action=status 确认。）`, data: { runId: id, status: rec.status } }
+    if (!id) return { output: "缺少任务 id（status/wait/stop 需要传启动时返回的 taskId/runId；列清单用 action=list）。" }
+
+    // 命令任务分支（id 前缀 t）：状态/输出尾部/进程树终止，磁盘落盘跨重启可见
+    if (id.startsWith("t")) {
+      if (!ctx.shTasks) return { output: "当前环境不支持命令后台任务（shTasks 服务未注入）。" }
+      const tail = shTaskTailChars(args.tail)
+      let rec = action === "wait" ? await ctx.shTasks.wait(id, shTaskWaitMs(args.timeout)) : action === "stop" ? await ctx.shTasks.kill(id) : await ctx.shTasks.refresh(id)
+      if (!rec) return { output: `未找到命令后台任务: ${id}（taskId 以 sh async:true 的返回为准；查现有任务用 action=list）。` }
+      if (action === "wait" && !rec.endedAt) {
+        // 等待超时仍在运行：返回当前状态与已有输出，模型可再次 wait 或继续其他工作
+        const out = await ctx.shTasks.readLog(id, tail)
+        const text = `${shTaskLine(rec, "")}\n（等待超时仍在运行；可再次 wait、用 status 查询，或 stop 终止）\n已产出输出（尾部 ${Math.min(out.length, tail)} 字符）:\n${out || "（暂无输出）"}`
+        return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "sh", status: shTaskStatus(rec), exitCode: null, output: out } }
       }
-      const res = runs.result(id)
-      const text = `后台运行 ${id} 已终止（终止前 ${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用，过程保留在存档可回放）。`
-      return { output: text, sessionRun: res?.archive, data: { runId: id, status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls } }
+      const out = await ctx.shTasks.readLog(id, tail)
+      const text = `${shTaskLine(rec)}${out ? `\n输出（尾部 ${Math.min(out.length, tail)} 字符，完整日志 tmp/sh-tasks/${id}.log）:\n${out}` : "\n（无输出）"}`
+      return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "sh", status: shTaskStatus(rec), exitCode: rec.exitCode ?? null, output: out } }
     }
-    if (action === "wait") {
-      const rec = await runs.wait(id, agentTaskWaitMs(args.timeout))
-      if (!rec) return { output: `未找到后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
-      if (rec.status === "running") {
-        // 等待超时仍在运行：返回当前进度，模型可再次 wait、用 status 查询或 cancel 终止
-        return {
-          output: `${agentTaskLine(rec)}\n（等待超时仍在运行；可再次 wait、用 status 查询进度，或 cancel 终止。）`,
-          data: { runId: id, status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls },
+
+    // 子Agent 运行分支（id 前缀 r）：进度/最终结果与完整存档/协作中止，进程内随服务重启中断
+    if (id.startsWith("r")) {
+      if (!ctx.sessionRuns) return { output: "当前环境不支持异步子Agent 运行（sessionRuns 服务未注入）。" }
+      const runs = ctx.sessionRuns
+      if (action === "stop") {
+        const rec = await runs.cancel(id)
+        if (!rec) return { output: `未找到子Agent 后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
+        if (rec.status === "running") {
+          return { output: `${agentTaskLine(rec)}\n（终止指令已下达，执行循环仍在收尾——稍后用 action=status 确认。）`, data: { id, kind: "agent", status: rec.status } }
         }
+        const res = runs.result(id)
+        const text = `子Agent 后台运行 ${id} 已终止（终止前 ${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用，过程保留在存档可回放）。`
+        return { output: text, sessionRun: res?.archive, data: { id, kind: "agent", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls } }
       }
-      const res = runs.result(id)
+      if (action === "wait") {
+        const rec = await runs.wait(id, shTaskWaitMs(args.timeout))
+        if (!rec) return { output: `未找到子Agent 后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
+        if (rec.status === "running") {
+          // 等待超时仍在运行：返回当前进度，模型可再次 wait、用 status 查询或 stop 终止
+          return {
+            output: `${agentTaskLine(rec)}\n（等待超时仍在运行；可再次 wait、用 status 查询进度，或 stop 终止。）`,
+            data: { id, kind: "agent", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls },
+          }
+        }
+        const res = runs.result(id)
+        const text = rec.status === "done"
+          ? `子Agent 后台运行 ${id} 已完成（${agentTaskElapsed(rec)}s，${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用）。\n最终结果:\n${rec.output || "（无输出文本）"}`
+          : `子Agent 后台运行 ${id} ${rec.status === "cancelled" ? "已被终止" : "执行失败"}（${agentTaskElapsed(rec)}s，终止/失败前 ${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用）${rec.error ? `: ${rec.error}` : ""}。`
+        return { ...(await truncate(text, "bg_task", ctx)), sessionRun: res?.archive, data: { id, kind: "agent", status: rec.status, output: rec.output } }
+      }
+      // status
+      const rec = runs.get(id)
+      if (!rec) return { output: `未找到子Agent 后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
       const text = rec.status === "done"
-        ? `后台运行 ${id} 已完成（${agentTaskElapsed(rec)}s，${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用）。\n最终结果:\n${rec.output || "（无输出文本）"}`
-        : `后台运行 ${id} ${rec.status === "cancelled" ? "已被终止" : "执行失败"}（${agentTaskElapsed(rec)}s，终止/失败前 ${rec.rounds} 轮回复、${rec.toolCalls} 次工具调用）${rec.error ? `: ${rec.error}` : ""}。`
-      return { ...(await truncate(text, "agent_task", ctx)), sessionRun: res?.archive, data: { runId: id, status: rec.status, output: rec.output } }
+        ? `${agentTaskLine(rec)}\n最终结果:\n${rec.output || "（无输出文本）"}`
+        : rec.status === "running"
+          ? `${agentTaskLine(rec)}\n（执行中——可 wait 等待完成、status 跟踪进度或 stop 终止。）`
+          : agentTaskLine(rec)
+      return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "agent", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls, output: rec.output } }
     }
-    // status
-    const rec = runs.get(id)
-    if (!rec) return { output: `未找到后台运行: ${id}（runId 以 agent_run async:true 的返回为准；查现有运行用 action=list）。` }
-    const text = rec.status === "done"
-      ? `${agentTaskLine(rec)}\n最终结果:\n${rec.output || "（无输出文本）"}`
-      : rec.status === "running"
-        ? `${agentTaskLine(rec)}\n（执行中——可 wait 等待完成、status 跟踪进度或 cancel 终止。）`
-        : agentTaskLine(rec)
-    return { ...(await truncate(text, "agent_task", ctx)), data: { runId: id, status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls, output: rec.output } }
+
+    return { output: `未找到后台任务: ${id}（命令任务 taskId 以 sh async:true 返回为准（t 开头）、子Agent 运行 runId 以 agent_run async:true 返回为准（r 开头）；查现有任务用 action=list）。` }
   },
 }
 
@@ -3161,7 +3134,6 @@ export function createAllGlobalTools(): Record<string, Tool> {
     flow: makeFlowTool(),
     tool_schemas: toolSchemasTool,
     sh: projectAware(shTool, { workdir: true }),
-    sh_task: shTaskTool,
     py: projectAware(pyTool, { workdir: true }),
     js: jsTool,
     show: showTool,
@@ -3179,11 +3151,12 @@ export function createAllGlobalTools(): Record<string, Tool> {
     // 由 code 子Agent 以 code_ 命名空间暴露；self_optimize 经连带装载 code 一并获得）
     // agent_list 不注册进总Agent 全局工具集：未装载子Agent 清单已由 systemPromptInjection 注入提示词
     // （模型上下文已有，工具调用冗余且干扰工具选择）；agent_list 仅在新会话执行（组合子Agent 编排环境）
-    // 注入——runNewSession 对纯 md 组合式子Agent 自动注入 agent_list/agent_load/agent_run/agent_task
+    // 注入——runNewSession 对纯 md 组合式子Agent 自动注入 agent_list/agent_load/agent_run/bg_task
     agent_load: agentLoadTool,
     agent_run: agentRunTool,
-    // agent_task（agent_run 异步后台运行管理，DESIGN「新会话执行的异步运行」）：与 agent_run 配对注册
-    agent_task: agentTaskTool,
+    // bg_task（后台异步任务统一管理，DESIGN「sh 异步后台任务」「新会话执行的异步运行」）：
+    // 命令任务与子Agent 运行按 id 前缀分发，取代旧 sh_task/agent_task 两个同构管理工具
+    bg_task: bgTaskTool,
     // full_mode（极简模式切换完整模式）注册进全局工具集，但仅极简会话可见可用（引擎按任务白名单过滤 schema，
     // 完整模式会话从 schema 移除，防冗余工具干扰选择）
     full_mode: fullModeTool,

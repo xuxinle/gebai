@@ -511,9 +511,9 @@ describe("装载工具会话可见性与全局工具复用", () => {
   })
 })
 
-describe("agent_run 异步后台运行（async:true + agent_task）", () => {
+describe("agent_run 异步后台运行（async:true + bg_task）", () => {
   /** 主/子会话双形态假模型：系统提示词含「临时新会话」判定子会话；主会话按 calls 序号走
-   *  agent_run(async) → agent_task（id 从上一轮 agent_run 工具结果文本提取）→ 收尾。 */
+   *  agent_run(async) → bg_task（id 从上一轮 agent_run 工具结果文本提取）→ 收尾。 */
   class AsyncRunProvider implements LLMProvider {
     readonly id = "fake"
     calls = 0
@@ -525,8 +525,8 @@ describe("agent_run 异步后台运行（async:true + agent_task）", () => {
     hangMain = false
     /** 子会话挂起调用收到中止信号（父任务停止传播的观测点）。 */
     childAborted = false
-    /** 主会话第二轮 agent_task 动作（wait/cancel）。 */
-    waitAction: "wait" | "cancel" = "wait"
+    /** 主会话第二轮 bg_task 动作（wait/stop）。 */
+    waitAction: "wait" | "stop" = "wait"
     capabilities(): LLMCapabilities {
       return { streaming: true, toolCalling: true, multimodal: true, maxContextTokens: 100000 }
     }
@@ -574,7 +574,7 @@ describe("agent_run 异步后台运行（async:true + agent_task）", () => {
         }
         const toolMsgs = msgs.filter((m) => m.role === "tool")
         const runId = String(toolMsgs[toolMsgs.length - 1]?.content ?? "").match(/runId: (r[0-9a-f]+)/)?.[1] ?? "r-none"
-        yield { type: "tool_call", toolCall: { id: `tc-manage-${this.calls}`, name: "agent_task", arguments: { action: this.waitAction, id: runId, timeout: 20 } } }
+        yield { type: "tool_call", toolCall: { id: `tc-manage-${this.calls}`, name: "bg_task", arguments: { action: this.waitAction, id: runId, timeout: 20 } } }
         yield { type: "done" }
         return
       }
@@ -592,7 +592,7 @@ describe("agent_run 异步后台运行（async:true + agent_task）", () => {
     }
   }
 
-  test("async:true 立即返回 runId 不阻塞；agent_task wait 取回最终结果与完整存档（回放扩展字段）", async () => {
+  test("async:true 立即返回 runId 不阻塞；bg_task wait 取回最终结果与完整存档（回放扩展字段）", async () => {
     const provider = new AsyncRunProvider()
     const { home, store, engine } = await setupEngine(provider)
     const a = await store.createSession("default", "a")
@@ -606,8 +606,8 @@ describe("agent_run 异步后台运行（async:true + agent_task）", () => {
     expect(startMsg!.content).toContain("后台子Agent 运行已启动")
     expect(startMsg!.content).toMatch(/runId: r[0-9a-f]+/)
     expect(startMsg!.sessionRun).toBeUndefined()
-    // agent_task wait 终态记录：取回最终结果 + 完整存档（历史回放扩展字段）
-    const waitMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_task")!
+    // bg_task wait 终态记录：取回最终结果 + 完整存档（历史回放扩展字段）
+    const waitMsg = msgs.find((m) => m.role === "tool" && m.name === "bg_task")!
     expect(waitMsg.content).toContain("后台运行")
     expect(waitMsg.content).toContain("child finished")
     expect(waitMsg.sessionRun).toBeTruthy()
@@ -616,15 +616,15 @@ describe("agent_run 异步后台运行（async:true + agent_task）", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("agent_task cancel 主动终止运行中的后台任务：状态落定 cancelled、存档保留供回放", async () => {
+  test("bg_task stop 主动终止运行中的后台任务：状态落定 cancelled、存档保留供回放", async () => {
     const provider = new AsyncRunProvider()
     provider.hangChild = true
-    provider.waitAction = "cancel"
+    provider.waitAction = "stop"
     const { home, store, engine } = await setupEngine(provider)
     const a = await store.createSession("default", "a")
     await engine.run(a.id, "default", "hi")
     const msgs = (await store.load(a.id, "default"))!.messages
-    const cancelMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_task")!
+    const cancelMsg = msgs.find((m) => m.role === "tool" && m.name === "bg_task")!
     expect(cancelMsg.content).toContain("已终止")
     // 取消发生在子会话首个模型调用期间（存档仅含初始输入），存档仍随终止结果回传（过程保留语义）
     expect(cancelMsg.sessionRun).toBeTruthy()

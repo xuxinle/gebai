@@ -3,8 +3,8 @@ import type { SessionRunArchive } from "@gebai/sdk"
 
 /**
  * agent_run 异步后台运行（DESIGN「新会话执行的异步运行」）：`agent_run async:true` 启动新会话执行进
- * 后台并立即返回 runId，模型可先处理其他任务，之后经 `agent_task`（status/wait/cancel/list）查询进度、
- * 等待结果或主动终止。
+ * 后台并立即返回 runId，模型可先处理其他任务，之后经 `bg_task`（status/wait/stop/list，与 sh 异步
+ * 命令任务统一管理面）查询进度、等待结果或主动终止。
  *
  * 与 sh 异步任务（sh-tasks，子进程 + 磁盘落盘）不同：运行是**进程内异步任务**（引擎 runNewSession），
  * 存活与本进程绑定（服务重启即中断，不落盘不恢复）；执行过程事件（session:true + sessionRunId）照常
@@ -12,10 +12,10 @@ import type { SessionRunArchive } from "@gebai/sdk"
  * 过滤的薄视图（buildContext 每次构建新实例，共享同一 store）。
  */
 
-/** 运行状态：running 执行中 / done 正常完成 / failed 执行异常 / cancelled 被终止（agent_task cancel 或父任务停止）。 */
+/** 运行状态：running 执行中 / done 正常完成 / failed 执行异常 / cancelled 被终止（bg_task stop 或父任务停止）。 */
 export type SessionRunStatus = "running" | "done" | "failed" | "cancelled"
 
-/** 运行记录（agent_task 返回给模型的快照形态；rounds/toolCalls/last 为从存档推导的进度快照）。 */
+/** 运行记录（bg_task 返回给模型的快照形态；rounds/toolCalls/last 为从存档推导的进度快照）。 */
 export interface SessionRunRecord {
   runId: string
   sessionId: string
@@ -48,7 +48,7 @@ export interface SessionRunHandle {
   output?: string
   error?: string
   controller: AbortController
-  /** agent_task cancel 显式终止标记（与父任务停止传播区分）。 */
+  /** bg_task stop 显式终止标记（与父任务停止传播区分）。 */
   cancelRequested?: boolean
   archive?: SessionRunArchive
   /** 运行结束 promise（完成/失败/终止均 settle；wait/cancel 用它精确唤醒）。 */
@@ -87,7 +87,7 @@ export interface SessionRunService {
 export const SESSION_RUN_MAX_CONCURRENT = 8
 /** 单会话保留的终态运行记录上限（超出淘汰最旧；运行中不淘汰）。 */
 export const SESSION_RUN_KEEP = 20
-/** wait 默认等待秒数 / 上限（与 sh_task 同口径：上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底）。 */
+/** wait 默认等待秒数 / 上限（与 bg_task 命令任务同口径：上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底）。 */
 export const SESSION_RUN_WAIT_DEFAULT_S = 60
 export const SESSION_RUN_WAIT_MAX_S = 540
 /** cancel 后等待执行循环收尾的宽限毫秒（abort 异步传播，短暂等待让状态落定为终止）。 */
@@ -161,7 +161,7 @@ export class SessionRunRegistry implements SessionRunService {
     const normalized = this.validate(agents)
     const running = [...this.store.values()].filter((h) => h.sessionId === this.sessionId && h.status === "running").length
     if (running >= SESSION_RUN_MAX_CONCURRENT) {
-      throw new Error(`并发后台运行超限（≥${SESSION_RUN_MAX_CONCURRENT}）：请先用 agent_task（action=cancel/list）终止或等待运行中的任务完成。`)
+      throw new Error(`并发后台运行超限（≥${SESSION_RUN_MAX_CONCURRENT}）：请先用 bg_task（action=stop/list）终止或等待运行中的任务完成。`)
     }
     const runId = `r${randomUUID().replace(/-/g, "").slice(0, 8)}`
     const controller = new AbortController()
@@ -232,7 +232,7 @@ export class SessionRunRegistry implements SessionRunService {
     if (!h) return undefined
     if (h.status !== "running") return this.record(h)
     h.cancelRequested = true
-    h.controller.abort(new Error("用户主动终止（agent_task cancel）"))
+    h.controller.abort(new Error("用户主动终止（bg_task stop）"))
     // abort 异步传播进执行循环：短暂等待收尾，让返回状态落定为 cancelled（超宽限期则如实报告仍在收尾）
     await Promise.race([h.done, sleep(SESSION_RUN_CANCEL_GRACE_MS)])
     return this.record(h)

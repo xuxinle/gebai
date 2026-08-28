@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, shTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "./tools"
+import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "./tools"
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "./tools"
 import { searchSymbolsTool } from "./analyzer"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "./paths"
@@ -179,7 +179,7 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("sh async:true returns taskId immediately without waiting; sh_task wait/list manage it", async () => {
+  test("sh async:true returns taskId immediately without waiting; bg_task wait/stop/list manage it", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sh-async-"))
     const c = ctx(home)
     // shTasks 服务桩：模拟一个很快以退出码 0 结束、日志含构建输出的后台任务
@@ -204,36 +204,41 @@ describe("global tools", () => {
     const start = await shTool.execute({ command: "bun run build", async: true, timeout: 600 }, c)
     expect(start.output).toContain("[后台任务已启动]")
     expect(start.output).toContain("tabc1234")
+    expect(start.output).toContain("bg_task")
     expect((start.data as { taskId: string }).taskId).toBe("tabc1234")
     expect(started).toEqual([{ command: "bun run build", cwd: c.workdir, maxMs: 600_000 }])
-    // sh_task wait：等待完成返回终态与输出尾部
-    const waited = await shTaskTool.execute({ action: "wait", id: "tabc1234" }, c)
+    // bg_task wait（t 前缀 → 命令任务分支）：等待完成返回终态与输出尾部
+    const waited = await bgTaskTool.execute({ action: "wait", id: "tabc1234" }, c)
     expect(waited.output).toContain("[done]")
     expect(waited.output).toContain("build ok")
     expect((waited.data as { status: string }).status).toBe("done")
+    expect((waited.data as { kind: string }).kind).toBe("sh")
     expect((waited.data as { exitCode: number | null }).exitCode).toBe(0)
-    // sh_task list
-    const listed = await shTaskTool.execute({ action: "list" }, c)
+    // bg_task stop（杀进程树终态记录）
+    const killed = await bgTaskTool.execute({ action: "stop", id: "tabc1234" }, c)
+    expect(killed.output).toContain("[killed]")
+    // bg_task list（无 sessionRuns 服务时仅列命令任务）
+    const listed = await bgTaskTool.execute({ action: "list" }, c)
     expect(listed.output).toContain("tabc1234")
     expect(listed.output).toContain("bun run build")
-    // sh_task kill（终态记录）
-    const killed = await shTaskTool.execute({ action: "kill", id: "tabc1234" }, c)
-    expect(killed.output).toContain("[killed]")
     // 缺 id / 未知 id 的引导信息
-    const noId = await shTaskTool.execute({ action: "status" }, c)
+    const noId = await bgTaskTool.execute({ action: "status" }, c)
     expect(noId.output).toContain("缺少任务 id")
-    const unknown = await shTaskTool.execute({ action: "status", id: "nope" }, c)
+    const unknown = await bgTaskTool.execute({ action: "status", id: "nope" }, c)
     expect(unknown.output).toContain("未找到后台任务")
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("sh async/sh_task 在无 shTasks 服务时返回不可用说明", async () => {
+  test("sh async/bg_task 在无 shTasks 服务时返回不可用说明", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sh-async-none-"))
     const c = ctx(home)
     const start = await shTool.execute({ command: "x", async: true }, c)
     expect(start.output).toContain("不支持后台任务")
-    const q = await shTaskTool.execute({ action: "list" }, c)
-    expect(q.output).toContain("不支持后台任务")
+    const q = await bgTaskTool.execute({ action: "status", id: "tabc1234" }, c)
+    expect(q.output).toContain("不支持命令后台任务")
+    // r 前缀（子Agent 运行）无 sessionRuns 服务：另一形态的不可用说明
+    const r = await bgTaskTool.execute({ action: "status", id: "rabc1234" }, c)
+    expect(r.output).toContain("不支持异步子Agent 运行")
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -1283,12 +1288,15 @@ describe("global tools", () => {
       "read", "write", "ls", "grep", "glob", "file",
       "edit", "flow", "sh", "py", "show", "fetch_url",
       "todo", "ask",
-      "agent_load", "agent_run", "agent_task",
+      "agent_load", "agent_run", "bg_task",
     ]) {
       expect(tools[n]).toBeDefined()
     }
     // agent_list 不注册进总Agent 全局工具集（未装载清单已注入提示词，避免冗余；仅新会话组合编排环境注入）
     expect(tools.agent_list).toBeUndefined()
+    // sh_task/agent_task 已合并为 bg_task（后台异步任务统一管理，按 id 前缀分发）
+    expect(tools.sh_task).toBeUndefined()
+    expect(tools.agent_task).toBeUndefined()
     // preview_server/env_detect/system_info 下沉 code 子Agent（开发验证/环境探测属编码工作流，code_ 命名空间暴露）
     expect(tools.preview_server).toBeUndefined()
     expect(tools.env_detect).toBeUndefined()

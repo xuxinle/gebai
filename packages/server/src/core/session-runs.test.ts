@@ -92,7 +92,7 @@ describe("SessionRunRegistry（agent_run 异步后台运行）", () => {
     const cancelled = await reg.cancel(rec.runId)
     expect(aborted).toBe(true)
     expect(cancelled!.status).toBe("cancelled")
-    expect(cancelled!.error).toContain("agent_task cancel")
+    expect(cancelled!.error).toContain("bg_task stop")
     expect(reg.result(rec.runId)?.archive).toBeTruthy()
     // 已结束再 cancel：原样返回快照（幂等）
     expect((await reg.cancel(rec.runId))!.status).toBe("cancelled")

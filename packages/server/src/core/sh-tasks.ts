@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
 
 /**
- * sh 异步后台任务（DESIGN「sh 异步执行」）：`sh async:true` 启动命令进后台并立即返回 taskId，
- * 模型可先处理其他任务，之后经 `sh_task`（status/wait/kill/list）回头查询/等待/终止。
+ * sh 异步后台任务（DESIGN「sh 异步后台任务」）：`sh async:true` 启动命令进后台并立即返回 taskId，
+ * 模型可先处理其他任务，之后经 `bg_task`（status/wait/stop/list，与子Agent 运行统一管理面）回头查询/等待/终止。
  *
  * 状态落盘在会话 tmp/sh-tasks/（tasks.json 记录 + {id}.log 合并输出日志），跨工具调用与服务重启可见：
  * - 进程退出码由启动时注册的 exited 回调回写（同进程内准确）；
@@ -175,7 +175,7 @@ export class ShTaskRunner implements ShTaskService {
   async start(command: string, opts: { cwd?: string; env?: Record<string, string>; input?: string; maxMs?: number }): Promise<ShTaskRecord> {
     const records = await this.refreshAll()
     if (records.filter((r) => !r.endedAt).length >= SH_TASK_MAX_CONCURRENT) {
-      throw new Error(`并发后台任务超限（≥${SH_TASK_MAX_CONCURRENT}）：请先用 sh_task（action=kill/status）清理已完成的任务再启动。`)
+      throw new Error(`并发后台任务超限（≥${SH_TASK_MAX_CONCURRENT}）：请先用 bg_task（action=stop/status）清理已完成的任务再启动。`)
     }
     const id = `t${randomUUID().replace(/-/g, "").slice(0, 8)}`
     await mkdir(this.dir, { recursive: true })
