@@ -1283,7 +1283,7 @@ describe("global tools", () => {
       "read", "write", "ls", "grep", "glob", "file",
       "edit", "flow", "sh", "py", "show", "fetch_url",
       "todo", "ask",
-      "agent_load", "agent_run",
+      "agent_load", "agent_run", "agent_task",
     ]) {
       expect(tools[n]).toBeDefined()
     }
@@ -2421,17 +2421,20 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     expect(list.output).not.toContain("工具")
     const load = await agentLoadTool.execute({ name: "writer" }, c)
     expect(load.output).toContain("已装载")
-    // 装载反馈枚举实际并入的工具全名（{agent}_{tool}，模型直接调用即可）
-    expect(load.output).toContain("writer_draft、writer_polish")
-    expect((load.data as { tools: string[] }).tools).toEqual(["writer_draft", "writer_polish"])
-    // 无自有工具的纯提示词子Agent：说明能力以提示词注入
+    // 装载反馈不再枚举工具清单：工具 schema 已注册进工具集（下一轮请求即全量下发），列表是冗余
+    expect(load.output).not.toContain("writer_draft")
+    expect(load.output).not.toContain("writer_polish")
+    expect((load.data as { loaded: string }).loaded).toBe("writer")
+    expect((load.data as { tools?: string[] }).tools).toBeUndefined()
+    // 无自有工具的纯提示词子Agent：同一形态反馈（工具清单不出现，能力以提示词注入）
     const c2: ToolContext = {
       ...c,
       listSubAgentDefs: () => [{ name: "combo", description: "组合", preload: false, loaded: false }],
       loadSubAgent: async () => {},
     }
     const load2 = await agentLoadTool.execute({ name: "combo" }, c2)
-    expect(load2.output).toContain("系统提示词形式注入")
+    expect(load2.output).toContain("已装载")
+    expect(load2.output).toContain("系统提示词已注入")
     cleanup(home)
   })
 

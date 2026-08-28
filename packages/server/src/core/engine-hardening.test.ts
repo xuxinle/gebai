@@ -60,7 +60,7 @@ class HardenProvider implements LLMProvider {
   }
 }
 
-async function setupEngine(provider: HardenProvider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
+async function setupEngine(provider: LLMProvider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-harden-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: [], binaryMode: false })
@@ -438,7 +438,7 @@ describe("装载工具会话可见性与全局工具复用", () => {
     rmSync(home2, { recursive: true, force: true })
   })
 
-  test("agent_run 全局提示词注入：默认不注入（新会话系统提示词仅子Agent 段），inherit_global_prompt=true 时总Agent 提示词作为前缀", async () => {
+  test("agent_run 全局提示词注入：默认注入（与全局工具继承一致，新会话与主会话同构），inherit_global_prompt=false 时仅子Agent 段", async () => {
     const provider = new HardenProvider()
     provider.script = [
       { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do" } },
@@ -449,24 +449,26 @@ describe("装载工具会话可见性与全局工具复用", () => {
     const a = await store.createSession("default", "a")
     await engine.run(a.id, "default", "hi")
     const sysDefault = String(provider.seen[1][0].content)
+    // 默认（inherit_global_prompt 缺省）：总Agent 提示词单源复用 buildSystemPrompt，位于子Agent 段之前
     expect(sysDefault).toContain("已预加载子Agent")
-    expect(sysDefault).not.toContain("总Agent 全局系统提示词")
-    expect(sysDefault).not.toContain("任务类型路由")
+    expect(sysDefault).toContain("总Agent 全局系统提示词")
+    expect(sysDefault).toContain("任务类型路由")
+    expect(sysDefault.indexOf("总Agent 全局系统提示词")).toBeLessThan(sysDefault.indexOf("### code"))
 
     const provider2 = new HardenProvider()
     provider2.script = [
-      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do", inherit_global_prompt: true } },
+      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do", inherit_global_prompt: false } },
       { mode: "text", text: "child done" },
       { mode: "text", text: "main done" },
     ]
     const { home: home2, store: store2, engine: engine2 } = await setupEngine(provider2)
     const b = await store2.createSession("default", "b")
     await engine2.run(b.id, "default", "hi")
-    const sysInjected = String(provider2.seen[1][0].content)
-    // 单源复用 buildSystemPrompt：主提示词身份/路由段整体带入，且位于子Agent 段之前
-    expect(sysInjected).toContain("总Agent 全局系统提示词")
-    expect(sysInjected).toContain("任务类型路由")
-    expect(sysInjected.indexOf("总Agent 全局系统提示词")).toBeLessThan(sysInjected.indexOf("### code"))
+    const sysOff = String(provider2.seen[1][0].content)
+    // 显式关闭：仅子Agent 提示词（上下文最省）
+    expect(sysOff).toContain("已预加载子Agent")
+    expect(sysOff).not.toContain("总Agent 全局系统提示词")
+    expect(sysOff).not.toContain("任务类型路由")
     rmSync(home, { recursive: true, force: true })
     rmSync(home2, { recursive: true, force: true })
   })
@@ -505,6 +507,148 @@ describe("装载工具会话可见性与全局工具复用", () => {
     await engine.run(session.id, "default", "hi", { envOverride: { CODE_PROJECTS: '[{"name":"tmp","path":"/srv/app"}]' } })
     unsub()
     expect(errs.some((m) => m.includes("保留名"))).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("agent_run 异步后台运行（async:true + agent_task）", () => {
+  /** 主/子会话双形态假模型：系统提示词含「临时新会话」判定子会话；主会话按 calls 序号走
+   *  agent_run(async) → agent_task（id 从上一轮 agent_run 工具结果文本提取）→ 收尾。 */
+  class AsyncRunProvider implements LLMProvider {
+    readonly id = "fake"
+    calls = 0
+    childCalls = 0
+    seen: MessageLike[][] = []
+    /** 子会话首个模型调用挂起（直到取消信号），模拟长任务。 */
+    hangChild = false
+    /** 主会话第二个模型调用挂起（直到取消信号）——保持发起任务存活，测停止传播。 */
+    hangMain = false
+    /** 子会话挂起调用收到中止信号（父任务停止传播的观测点）。 */
+    childAborted = false
+    /** 主会话第二轮 agent_task 动作（wait/cancel）。 */
+    waitAction: "wait" | "cancel" = "wait"
+    capabilities(): LLMCapabilities {
+      return { streaming: true, toolCalling: true, multimodal: true, maxContextTokens: 100000 }
+    }
+    async *chat(msgs: MessageLike[], opts?: ChatOptions): AsyncIterable<LLMChunk> {
+      this.seen.push(msgs)
+      // 子会话系统提示词以固定句式开头（主会话提示词的子Agent 目录也可能含「临时新会话」字样，不能 includes）
+      const isChild = String(msgs[0]?.content ?? "").startsWith("你正在一个临时新会话中执行任务")
+      if (isChild) {
+        this.childCalls++
+        if (this.childCalls === 1 && this.hangChild) {
+          yield { type: "text", text: "child starting" }
+          await new Promise<never>((_, reject) => {
+            const t = setTimeout(() => reject(new Error("hang-release")), 10000)
+            opts?.signal?.addEventListener("abort", () => {
+              clearTimeout(t)
+              this.childAborted = true
+              reject(opts.signal!.reason instanceof Error ? opts.signal!.reason : new Error("cancelled"))
+            }, { once: true })
+          })
+        }
+        if (this.childCalls === 1) {
+          yield { type: "tool_call", toolCall: { id: `child-tc-${this.childCalls}`, name: "write", arguments: { path: "async-proof.txt", content: "child was here" } } }
+          yield { type: "done" }
+          return
+        }
+        yield { type: "text", text: "child finished" }
+        yield { type: "done" }
+        return
+      }
+      this.calls++
+      if (this.calls === 1) {
+        yield { type: "tool_call", toolCall: { id: "tc-start", name: "agent_run", arguments: { agents: ["code"], input: "long job", async: true } } }
+        yield { type: "done" }
+        return
+      }
+      if (this.calls === 2) {
+        if (this.hangMain) {
+          await new Promise<never>((_, reject) => {
+            const t = setTimeout(() => reject(new Error("hang-release")), 10000)
+            opts?.signal?.addEventListener("abort", () => {
+              clearTimeout(t)
+              reject(opts.signal!.reason instanceof Error ? opts.signal!.reason : new Error("cancelled"))
+            }, { once: true })
+          })
+        }
+        const toolMsgs = msgs.filter((m) => m.role === "tool")
+        const runId = String(toolMsgs[toolMsgs.length - 1]?.content ?? "").match(/runId: (r[0-9a-f]+)/)?.[1] ?? "r-none"
+        yield { type: "tool_call", toolCall: { id: `tc-manage-${this.calls}`, name: "agent_task", arguments: { action: this.waitAction, id: runId, timeout: 20 } } }
+        yield { type: "done" }
+        return
+      }
+      yield { type: "text", text: "main done" }
+      yield { type: "done" }
+    }
+  }
+
+  /** 轮询等待条件成立（后台运行跨任务异步推进，无法单点 await）。 */
+  async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!cond()) {
+      if (Date.now() >= deadline) throw new Error("waitFor 超时")
+      await new Promise((r) => setTimeout(r, 25))
+    }
+  }
+
+  test("async:true 立即返回 runId 不阻塞；agent_task wait 取回最终结果与完整存档（回放扩展字段）", async () => {
+    const provider = new AsyncRunProvider()
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    await engine.run(a.id, "default", "hi")
+    // 子会话在新会话共享工作区完成 write（后台运行真实执行）
+    const ws = join(sessionPath(home, "default", a.id), "tmp")
+    expect(await Bun.file(join(ws, "async-proof.txt")).text()).toBe("child was here")
+    const msgs = (await store.load(a.id, "default"))!.messages
+    // agent_run 异步启动记录（立即返回，不携带存档）
+    const startMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_run")
+    expect(startMsg!.content).toContain("后台子Agent 运行已启动")
+    expect(startMsg!.content).toMatch(/runId: r[0-9a-f]+/)
+    expect(startMsg!.sessionRun).toBeUndefined()
+    // agent_task wait 终态记录：取回最终结果 + 完整存档（历史回放扩展字段）
+    const waitMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_task")!
+    expect(waitMsg.content).toContain("后台运行")
+    expect(waitMsg.content).toContain("child finished")
+    expect(waitMsg.sessionRun).toBeTruthy()
+    expect(waitMsg.sessionRun!.output).toBe("child finished")
+    expect(waitMsg.sessionRun!.messages.some((m) => m.role === "tool" && m.content.includes("async-proof.txt"))).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("agent_task cancel 主动终止运行中的后台任务：状态落定 cancelled、存档保留供回放", async () => {
+    const provider = new AsyncRunProvider()
+    provider.hangChild = true
+    provider.waitAction = "cancel"
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    await engine.run(a.id, "default", "hi")
+    const msgs = (await store.load(a.id, "default"))!.messages
+    const cancelMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_task")!
+    expect(cancelMsg.content).toContain("已终止")
+    // 取消发生在子会话首个模型调用期间（存档仅含初始输入），存档仍随终止结果回传（过程保留语义）
+    expect(cancelMsg.sessionRun).toBeTruthy()
+    expect(cancelMsg.sessionRun!.input).toBe("long job")
+    expect(cancelMsg.sessionRun!.messages[0].role).toBe("user")
+    // write 未执行（任务被拦截在模型调用阶段）
+    const ws = join(sessionPath(home, "default", a.id), "tmp")
+    expect(await Bun.file(join(ws, "async-proof.txt")).exists()).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("用户停止发起任务连带终止后台运行（父任务取消信号传播）", async () => {
+    const provider = new AsyncRunProvider()
+    provider.hangChild = true
+    provider.hangMain = true // 发起任务在启动后台运行后持续存活（第二个模型调用挂起）
+    const { home, store, engine } = await setupEngine(provider)
+    const a = await store.createSession("default", "a")
+    const runPromise = engine.run(a.id, "default", "hi")
+    // 后台运行已启动（子会话首个模型调用挂起中）
+    await waitFor(() => provider.childCalls >= 1)
+    engine.cancel(a.id) // 用户停止
+    await runPromise
+    // 父任务取消信号传播：后台运行连带终止（子会话挂起的模型调用收到中止）
+    await waitFor(() => provider.childAborted)
     rmSync(home, { recursive: true, force: true })
   })
 })

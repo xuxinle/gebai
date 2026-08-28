@@ -510,7 +510,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 ### 总Agent
 - 系统提示词中注入：**未装载**子Agent 的轻量引导列表（名称 + 描述），引导模型通过 `agent_load` 装载后使用（装载 = 工具注册 + 完整提示词写入会话记录）或直接 `agent_run` 执行新会话（无需装载）。**已装载子Agent 的完整系统提示词不注入总层提示词**——装载时已作为 system 消息写入会话记录（`loadedAgent` 标记，`loadHistory` 透传进模型上下文），此处再注入会双份占用上下文。**不展开工具 schema**——工具名已注册进工具集；但未装载清单的描述**附工具摘要**（`agentDescription` 追加「装载后工具：a、b、c…（以 {agent}_ 前缀调用）」，超出 10 个截断计数）——未装载的工具名不在 schema 里，摘要是装载前的路由匹配面（`agent_list` 同样不列工具 schema，描述同样携带摘要）
-- 系统提示词内置**任务类型路由引导**：总层只给「装载 vs 新会话语义」机制说明 + 「按任务类型从下方可选子Agent 清单选用（描述即触发场景）」引导；**具体任务→子Agent 映射不硬编码**——由 `systemPromptInjection` 注入的未装载子Agent description（触发场景 + 职责边界）承载（code/self_optimize 互指边界：不处理歌白自身代码/不处理外部项目），新增子Agent 零改动自动进入路由信息（纯文本问答不装载）。**选用原则：默认 `agent_load` 装载（模块语义，工具与完整系统提示词写入当前会话记录、不创建独立执行）后直接用其工具**，仅在需要干净上下文（子任务结果隔离、不污染主上下文）或防止上下文膨胀（子任务中间过程多、输出大）时才用 `agent_run` 执行新会话（会话语义，**无需装载**：派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后阻塞执行，只返回最终结果）；执行过程子Agent 的模型回复、推理与工具调用全程实时推送前端
+- 系统提示词内置**任务类型路由引导**：总层只给「装载 vs 新会话语义」机制说明 + 「按任务类型从下方可选子Agent 清单选用（描述即触发场景）」引导；**具体任务→子Agent 映射不硬编码**——由 `systemPromptInjection` 注入的未装载子Agent description（触发场景 + 职责边界）承载（code/self_optimize 互指边界：不处理歌白自身代码/不处理外部项目），新增子Agent 零改动自动进入路由信息（纯文本问答不装载）。**选用原则：默认 `agent_load` 装载（模块语义，工具与完整系统提示词写入当前会话记录、不创建独立执行）后直接用其工具**，仅在需要干净上下文（子任务结果隔离、不污染主上下文）、防止上下文膨胀（子任务中间过程多、输出大）或长任务并行（`async:true` 后台执行）时才用 `agent_run` 执行新会话（会话语义，**无需装载**：派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果）；执行过程子Agent 的模型回复、推理与工具调用全程实时推送前端
 - 桌面/浏览器子Agent 系统提示词内置**验证多通道降级策略**：截图黑屏/失败时切换 DOM/content、窗口状态、数据文件等通道，任一失效立即降级并告知用户，不盲目重试单一通道
 - **系统提示词中声明会话工作目录**（会话 `tmp/`，如 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/tmp/`）并说明**所有文件工具的相对路径以此为基准（`tmp/` 前缀可省略）**；服务端部署模式下大模型读写限定在该目录，桌面/本地浏览器模式不限制目录（同路径沙箱规则）
 - 系统提示词中引导模型：复杂操作应编写脚本（`sh`/`py`）一次执行，避免大量单步工具调用
@@ -563,15 +563,15 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 | 类比 | import 子模块 / 静态链接 | 派生新会话 / 独立执行体 |
 | 前置条件 | 无 | 无（**无需先装载**，两种操作互相独立） |
 | 上下文 | **不创建新上下文**：并入主上下文 | **新建独立上下文**：独立消息历史 + 独立系统提示词 + 独立工具循环 |
-| 效果 | 工具以 `{agent}_` schema 全名注册进当前工具集（编码类子Agent 只声明独有工具——文件读写查询直接用全局工具，见「装载工具会话可见性」）、**完整系统提示词作为 system 消息写入会话记录**（`loadedAgent` 标记持久化，`loadHistory` 时按 system 角色**前置**进模型上下文——统一置于历史最前，保持 `assistant(tool_calls)` 与其 `tool` 结果相邻，避免装载消息夹在中间被模型接口校验拒绝（实测 DeepSeek 400「tool_calls 后必须紧跟 tool 响应」）） | 派生临时新会话，**预加载一个或多个子Agent**（完整系统提示词拼接+独有工具并入；**默认继承全部全局工具**——`inherit_global_tools=false` 可关闭；`inherit_global_prompt=true` 可另注入总Agent 全局提示词）后阻塞执行，只返回最终结果文本 |
+| 效果 | 工具以 `{agent}_` schema 全名注册进当前工具集（编码类子Agent 只声明独有工具——文件读写查询直接用全局工具，见「装载工具会话可见性」）、**完整系统提示词作为 system 消息写入会话记录**（`loadedAgent` 标记持久化，`loadHistory` 时按 system 角色**前置**进模型上下文——统一置于历史最前，保持 `assistant(tool_calls)` 与其 `tool` 结果相邻，避免装载消息夹在中间被模型接口校验拒绝（实测 DeepSeek 400「tool_calls 后必须紧跟 tool 响应」）） | 派生临时新会话，**预加载一个或多个子Agent**（完整系统提示词拼接+独有工具并入；**默认继承全部全局工具与总Agent 全局提示词**——`inherit_global_tools=false`/`inherit_global_prompt=false` 可分别关闭）后执行，只返回最终结果文本；默认阻塞执行，`async:true` 转后台异步执行（`agent_task` 查询进度/等待结果/主动终止，见「新会话执行的异步运行」） |
 | 隔离/存档 | 无隔离、无存档（全程在主上下文，模型可见每一步） | 完全隔离（中间过程/推理/内部工具不进主上下文）+ `SessionRunArchive` 完整存档 |
 | 幂等 | 幂等（重复装载跳过） | 每次执行 = 一次新会话 |
 | 生命周期 | 装载/卸载（`sub_agent.load`/`agent_load`/预加载，会话级持久） | 一次执行即结束（run 生命周期） |
 
 - **装载（模块）**：类比 import 子模块——子Agent 的工具注册进当前工具集（`{agent}_` 前缀）、**完整系统提示词作为 system 消息写入会话记录**（`loadedAgent` 标记，chat.json 持久化；装载后当次会话后续轮次立即进入上下文，恢复历史会话时从会话记录透传），装载后直接调用其 `{agent}_` 工具，全程在主循环/主上下文内完成，无独立执行过程。**会话记录 `loadedSubAgents` 保存已装载名单**：恢复历史会话时引擎自动按名单重新注册工具（`engine.ensureSessionAgents`，幂等），实现「会话按保存的文件完全恢复状态」。预加载（`preload`/`GEBAI_PRELOAD_SUB_AGENTS`）即装载的启动期形态——启动预载的子Agent 在每个**新会话创建时自动写入**提示词消息与工具
-- **新会话执行（会话）**：类比派生新会话——`agent_run` 派生一个临时新会话（独立上下文），把指定的一个或多个子Agent **预加载**进该会话（各自完整系统提示词拼接为系统提示词、独有工具以 `{agent}_` 命名空间并入工具集；**全局工具默认一并继承**——`inherit_global_tools` 参数默认 true，新会话与主会话工具面同构（read/write/grep/sh 等直接用全局名，文件工具带 `project` 参数路由项目），false 时仅预加载子Agent 工具 + 内建编排 flow/tool_schemas/js；`inherit_global_prompt` 默认 false，true 时总Agent 全局提示词注入新会话），阻塞执行任务到结束，只把最终结果带回主会话；上下文隔离、全程存档，详见「新会话执行的上下文隔离」
+- **新会话执行（会话）**：类比派生新会话——`agent_run` 派生一个临时新会话（独立上下文），把指定的一个或多个子Agent **预加载**进该会话（各自完整系统提示词拼接为系统提示词、独有工具以 `{agent}_` 命名空间并入工具集；**全局工具与总Agent 全局提示词默认一并继承**——`inherit_global_tools` 与 `inherit_global_prompt` 参数默认均为 true，新会话与主会话**工具面、行为约定同构**（read/write/grep/sh 等直接用全局名，文件工具带 `project` 参数路由项目），false 时分别关闭（仅预加载子Agent 工具 + 内建编排 flow/tool_schemas/js / 仅子Agent 提示词上下文最省）），执行任务到结束只把最终结果带回主会话，默认阻塞执行、`async:true` 后台异步执行；上下文隔离、全程存档，详见「新会话执行的上下文隔离」「新会话执行的异步运行」
 - **多 Agent 预加载**：`agents` 参数支持列表（如 `["code", "playwright"]`）——多个子Agent 的能力同时进入新会话（提示词拼接、工具集叠加）；每个子Agent 提示词前加**职责分隔头**（`### {name}（{description}）`）明确各自职责域与工具命名空间；各自的项目绑定/预置项目注记分别注入，工作目录取首个含项目绑定的 Agent，预置项目全量合并（同名去重）
-- **代码对应**：装载 = `SubAgentManager.load`（返回本次实际装载集合，含 `self_optimize` 连带 `code`）/ `ToolContext.loadSubAgent` / `engine.loadAgentToSession`（装载并写入会话记录）；新会话执行 = `engine.runNewSession` / `ToolContext.runNewSession`（原名 `dispatchSubAgent`/`subAgentRunner` 已更名）
+- **代码对应**：装载 = `SubAgentManager.load`（返回本次实际装载集合，含 `self_optimize` 连带 `code`）/ `ToolContext.loadSubAgent` / `engine.loadAgentToSession`（装载并写入会话记录）；新会话执行 = `engine.runNewSession` / `ToolContext.runNewSession`（原名 `dispatchSubAgent`/`subAgentRunner` 已更名）；异步运行 = `core/session-runs.ts`（`SessionRunRegistry`）/ `ToolContext.sessionRuns`（见「新会话执行的异步运行」）
 - **模型侧引导**：`agent_load`/`agent_run` 工具描述、系统提示词注入均按上述语义措辞，默认引导「装载后用其工具」，仅在需要干净上下文或防上下文膨胀时用 `agent_run` 执行新会话
 
 #### 装载工具会话可见性
@@ -579,7 +579,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 装载的工具注册进**进程共享**的 `ToolRegistry`（卸载按 owner 解引用需要全局注册），但可见性按**会话**建模——引擎主循环不直连共享注册表，经 `sessionRegistry` 会话视图解析（每轮现算，任务中途装载下一轮 schema 即生效）：
 
 - **会话级可见性**：`{agent}_*` 工具仅对**装载过该子Agent 的会话**可见（`SubAgentManager.visibleTo`，owner = 会话 id）；**全局装载**（启动预载/admin `sub_agent.load` 不带 sessionId，owner = `GLOBAL_OWNER`）对所有会话可见。其他会话的装载不扩散——修复跨会话泄漏：旧版任一会话装载 code 后，所有会话的请求都背上全部子Agent 工具 schema、且系统提示词目录里 code 凭空消失（`systemPromptInjection` 按进程装载状态过滤，未装载会话既无提示词也无目录引导）。目录注入同步会话化：按「对本会话可见」判定未装载，A 装载后 B 的目录仍列出 code 供 B 装载
-- **子Agent 只声明独有工具（重复工具彻底删除）**：文件读写查询类工具（read/write/edit/patch/ls/grep/glob/file/diff/sh/py）与交互编排类工具（fetch_url/todo/ask/agent_run）为**全局工具**——code/explore 等编码类子Agent 不再以 `projectAware` 双胞胎形态重复定义同款，只声明全局集没有的独有工具（code：search_symbols/analyze/git/preview_server/env_detect/system_info；explore：search_symbols/analyze/git）。装载与新会话执行（全局工具默认继承）均直接用全局名，`{agent}_` 前缀名只有独有工具一种形态。**取代旧版「双胞胎合并」机制**：此前子Agent 版与全局版同名共存（code_read 与 read），主会话经会话视图把同名校并为子Agent 版一份、前缀名留作解析别名——工具删重后该合并层（twinMerge/alias）整体移除，历史消息中的 `code_read` 等前缀名调用按未知工具处理（错误信息附该子Agent 可用工具清单，一步引导改用全局名）
+- **子Agent 只声明独有工具（重复工具彻底删除）**：文件读写查询类工具（read/write/edit/patch/ls/grep/glob/file/diff/sh/py）与交互编排类工具（fetch_url/todo/ask/agent_run/agent_task）为**全局工具**——code/explore 等编码类子Agent 不再以 `projectAware` 双胞胎形态重复定义同款，只声明全局集没有的独有工具（code：search_symbols/analyze/git/preview_server/env_detect/system_info；explore：search_symbols/analyze/git）。装载与新会话执行（全局工具默认继承）均直接用全局名，`{agent}_` 前缀名只有独有工具一种形态。**取代旧版「双胞胎合并」机制**：此前子Agent 版与全局版同名共存（code_read 与 read），主会话经会话视图把同名校并为子Agent 版一份、前缀名留作解析别名——工具删重后该合并层（twinMerge/alias）整体移除，历史消息中的 `code_read` 等前缀名调用按未知工具处理（错误信息附该子Agent 可用工具清单，一步引导改用全局名）
 - **全局文件工具带 `project` 参数**（`core/projects.ts` 的 `projectAware` 在全局注册处统一包装）：默认会话相对路径（行为不变），操作项目须显式指定——`project` 参数传**预置项目名**或**项目根路径**（自由项目），路径即相对所选根解析（沙箱模式限定该根内）；保留名 `tmp` = 会话工作区。code/explore 的独有工具同规则包装。受限模式（`CODE_RESTRICT_PROJECTS=true`）下未传 project 的自由路径被拒绝（预置项目/绑定根放行）
 - **审批姿态归一**：子Agent 不再覆写与全局同名工具的审批（旧版双胞胎合并按子Agent `requiresApproval` 收紧 write/edit/patch）——全局 write/edit/patch 维持「默认无需审批」（与总Agent 既有姿态一致，防盲写守卫约束写入安全）；子Agent `requiresApproval` 只对**独有工具**生效
 
@@ -617,14 +617,15 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 #### 选用原则：默认「装载」而非「新会话执行」
 
-**选用原则：默认「装载」而非「新会话执行」。** 默认用 `agent_load` 把子Agent 装载进总Agent（工具注册进工具集、完整系统提示词注入当前上下文，模块语义、无独立执行），总Agent 直接使用其 `{agent}_` 工具，过程全程可见、无结果截断损失；`agent_run`（无需装载，仅阻塞执行返回一种方式，会话语义）仅在两类场景使用：
+**选用原则：默认「装载」而非「新会话执行」。** 默认用 `agent_load` 把子Agent 装载进总Agent（工具注册进工具集、完整系统提示词注入当前上下文，模块语义、无独立执行），总Agent 直接使用其 `{agent}_` 工具，过程全程可见、无结果截断损失；`agent_run`（无需装载，会话语义）仅在两类场景使用：
 
 | 场景 | 原因 |
 |------|------|
 | **需要干净上下文** | 子任务结果隔离：独立执行、只返回最终结果，中间过程与工具调用不进入主上下文，避免污染主 Agent 的推理链 |
 | **防止上下文膨胀** | 子任务中间过程多、输出大：独立上下文执行并自行截断（结果超阈值按上下文保护规则落盘），主上下文只保留最终结果摘要 |
+| **长任务并行** | 构建/批量分析等长任务不阻塞主会话：`agent_run async:true` 后台执行先做别的，`agent_task` 回头收结果（见「新会话执行的异步运行」） |
 
-`agent_run` 只支持一种执行方式——**阻塞执行返回**（无 `mode` 参数，`delegate` 委托模式已移除）：执行时**无需先 `agent_load` 装载**，新会话（预加载子Agent 列表 + **默认继承全局工具**，`inherit_global_tools=false` 可裁剪为仅子Agent 工具，`inherit_global_prompt=true` 可注入总Agent 全局提示词）在独立上下文执行任务，执行完毕返回最终结果给总Agent，总Agent 继续主导。
+`agent_run` 支持**阻塞执行返回**（默认）与**后台异步执行**（`async:true`）两种方式：执行时**无需先 `agent_load` 装载**，新会话（预加载子Agent 列表 + **默认继承全局工具与总Agent 全局提示词**——`inherit_global_tools=false`/`inherit_global_prompt=false` 可分别裁剪）在独立上下文执行任务，执行完毕返回最终结果给总Agent，总Agent 继续主导。
 
 #### 新会话执行的上下文隔离
 
@@ -632,10 +633,20 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - 执行时传入的参数（`input`）作为新会话的初始消息；返回的结果作为一条消息注入总Agent
 - 新会话内部工具调用不暴露给总Agent 上下文，仅返回最终结果（及可选的完整过程摘要）
 - **全局工具默认继承（`inherit_global_tools`，默认 true）**：`runNewSession` 把全局工具表（`createGlobalTools()`，构建期排除清单同规则过滤）注册进新会话 per-run 注册表——与主会话同构的完整工具面（read/write/grep/sh 等直接用全局名、文件工具带 `project` 参数），子Agent 只需提供独有工具（`{agent}_` 前缀），不再重复定义文件工具；系统提示词首段说明继承形态。`inherit_global_tools=false` 关闭继承：仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）——依赖全局文件工具的子Agent（code）将无法读写文件，仅适合自足型/纯编排型子Agent。既有门禁对继承工具同样生效（安全模式风险拦截、通道禁用、极简白名单）
-- **全局提示词可选注入（`inherit_global_prompt`，默认 false）**：总Agent 全局系统提示词（`buildSystemPrompt`——身份/行为约定/编排指引/任务路由）**单源复用**作为新会话系统提示词前缀注入（附注说明路径基准与工具可用性以新会话实际为准），位于各子Agent 提示词段之前；适合需要子Agent 遵循主会话行为约定（计划审批习惯、编排偏好等）的复合任务。默认关闭——常规子Agent 任务上下文最省，子Agent 自有提示词即足
+- **全局提示词默认注入（`inherit_global_prompt`，默认 true——与全局工具继承默认一致，新会话与主会话同构）**：总Agent 全局系统提示词（`buildSystemPrompt`——身份/行为约定/编排指引/任务路由）**单源复用**作为新会话系统提示词前缀注入（附注说明路径基准与工具可用性以新会话实际为准），位于各子Agent 提示词段之前——子Agent 遵循主会话行为约定（计划审批习惯、编排偏好等）。`inherit_global_prompt=false` 关闭注入：仅子Agent 提示词（上下文最省，适合自足型子任务）。两个继承开关默认一致，模型无需记忆非对称默认
 - **执行过程完整可见（含推理/工具）**：`agent_run` 执行过程中，新会话的推理、每轮模型回复文本、工具调用与结果**全部实时推送到前端**（与主循环同构渲染——推理折叠块、工具卡片、流式文本），推送事件（`delta`/`reasoning`/`tool.call`/`tool.result`/`approval`）携带 `session: true` + `sessionRunId` 标记；另推送 `event.session.start`（run 开始，含 agents/input；**每轮重推、同 runId 幂等**，前端容器重建兜底）与 `event.session.done`（run 结束，含最终输出）。渠道层可据此区分「新会话执行过程」事件（如飞书渠道对新会话的 `done` 不触发最终卡片——任务结束以 `event.task.done` 为准）
 - **前端折叠容器**：新会话执行过程渲染进 `details.session-run` 折叠容器——**执行中展开并滚动到可见**（完整过程实时展示，容器内限高 45vh 独立滚动 + 粘底自动跟随（sticky-follow 意图驱动核心，同主聊天区），用户上翻停止跟随），**执行结束后自动折叠，只显示输入与最终返回**（点 summary 可展开查看完整过程）；历史会话回放渲染同样的折叠容器（默认折叠）；嵌套执行（新会话内再 agent_run）在回放时递归渲染进外层容器 body
 - **新会话执行存档（执行记录扩展字段）**：执行过程的**全部内容（输入/每轮回复/推理/工具调用与结果，含嵌套执行存档）**收集为 `SessionRunArchive`（`runId`/`agents`/`input`/`output`/`messages`），由 `agent_run` 工具作为**执行记录的扩展字段**（`Message.sessionRun`）随工具结果一起落盘——不再逐条写独立消息：会话文件只有一条 `agent_run` 工具消息即携带完整执行过程，历史回放据此渲染折叠容器（agent_run 结果卡片输出按 **markdown 渲染**；工具卡片气泡对 markdown 容器恢复 `white-space: normal`——气泡的 pre-wrap 面向纯文本参数/输出，markdown 软换行已是 `<br>`，markdown-it 在 `<br>` 后保留的源换行若再按 pre-wrap 折行，每行之间会多出一个空行）；仅存档与前端回放：`loadHistory` 跳过（**不进入主 LLM 上下文**，上下文隔离不变）、上下文压缩与 ctxTokens 估算同样排除（压缩时带存档的工具消息原位保留，存档不随压缩丢失）；主循环的 `agent_run` 执行卡片与最终结果仍属主上下文（模型可见执行与最终返回）；旧版逐条 `subAgent` 存档消息与 `agent_call` 时代存档（`SubAgentRunArchive` 单 Agent 形态）仍兼容回放（历史会话不受影响）
+
+#### 新会话执行的异步运行（`async:true` + `agent_task`）
+
+长耗时子任务（批量分析/多轮构建验证）同步 `agent_run` 会占死一轮工具调用，`agent_run` 传 `async: true` 转**后台异步执行**——立即返回 `runId`（结构化 `data.runId`），模型先处理其他任务，之后经 `agent_task` 回头处理。与 sh 异步任务（`sh async:true` + `sh_task`，子进程 + 磁盘落盘）同构的管理面：
+
+- **启动**（`agent_run async:true`）：预加载清单**同步校验**（去重/`self_optimize` 连带 `code`/数量与深度上限/未知名检查，`engine.normalizeRunAgents`，同步/异步启动共用——未知名等错误立即抛给模型而非留下幽灵运行），通过后登记句柄并立即返回；执行过程事件（`session: true` + `sessionRunId`）照常实时推送前端（发起任务结束后 delta 推送不中断——任务已不在 tasks 表时缺省视为 streaming）
+- **查询/等待/终止/清单**（`agent_task`）：`status` 立即返回运行状态与**进度快照**（已执行模型回复轮次/工具调用次数/最近一条存档条目尾部——从存档活引用实时推导，`agent_run` 存档创建即经 `onArchive` 回调交注册表持有）；`wait` 阻塞等待完成并取回最终结果与**完整存档**（挂到 `agent_task` 执行记录扩展字段供历史回放；timeout 秒内未完成返回当前进度可再次 wait，默认 60 秒、上限 540——不晚于引擎 9 分钟工具兜底）；`cancel` **主动终止**（abort 传播进执行循环，终止前的执行过程保留在存档可回放）；`list` 列出本会话全部运行
+- **状态机**：`running`（执行中）→ `done`（正常完成）/ `failed`（执行异常）/ `cancelled`（被终止——`agent_task cancel` 显式终止，或发起任务被用户停止/审批拒绝时**父任务取消信号连带终止**；运行结束后解除信号监听，防监听器泄漏）
+- **实现与生命周期**：运行是**进程内异步任务**（`core/session-runs.ts` 的 `SessionRunRegistry`，引擎级共享句柄表 + 按会话过滤的薄视图，`buildContext` 注入 `ctx.sessionRuns`），跨工具调用可见、随进程存活——服务重启即中断（不落盘恢复，与 sh 任务的 `lost` 判定哲学一致）；跨任务可见（上一任务启动的后台运行，后续任务可 `agent_task` 查询/等待/终止）；终态记录按会话保留最近 20 条（超出淘汰最旧）
+- **门禁**：单会话并发后台运行上限 8（超限拒绝新运行并引导清理）；预加载清单与深度限制同同步路径；`agent_task` 管理动作免审批（查询/等待/终止本会话运行）
 
 #### 工具与命名空间
 
@@ -683,16 +694,17 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
   - `args`：参数区模式——**缺省自适应**（扁平标量参数渲染为**键值行**：参数名 + 值 pre-wrap 展示，比 JSON 块更可读；嵌套结构回退 JSON 语法高亮）/ `"json"`（强制完整 JSON 高亮，标题参数不省略）/ `"kv"`（强制键值行，嵌套值紧凑 JSON 单行展示）/ `"none"`（不展示参数区，如 `env_detect`）/ `"code"`（`codeField` 参数渲染为语法高亮代码块，其余参数键值行/JSON 附注，如 `sh` 的 command；**超长内容同样先渲染后自动折叠**，不整块直显）/ `"edits"`（`codeField` 数组参数的 `{oldString,newString}` 项渲染为**旧（红）/新（绿）对比块**——多处修改编号「修改 i/n」，空串侧省略（纯新增/纯删除），形态不符回退自适应渲染；`edit` 工具因此不再显示 JSON；**edit 工具 card 声明不可用时（工具清单拉取失败/旧服务端未声明）前端按参数形态内建兜底同样渲染对比块**，长短修改一律先渲染后按阈值折叠，不回退直显 JSON）/ `"block"`（**结果直出内容块**：调用不显示通用工具卡片，结果直接渲染 blocks 内容块，如 `show`/`diff`）
   - `file`（文件卡声明，「文件展示方式」设置的**弹窗查看**模式据此渲染）：路径参数名（如 read/write/edit/patch 的 `path`，code 子Agent 同款包装自动继承）——声明本工具的**产物 file 块**（下方文件内容卡）在弹窗查看模式下收敛为**文件链接 chip**（图标 + 文件名 + 路径 + 下载，点击弹窗查看文件）；**参数区与输出不受影响**（write 的 content 代码块、edit 的旧/新对比块、patch 的 diff 块、read 的输出照常渲染），图片/图表等视觉产物块照常内联（仅 file 块切换形态）；块路径为服务端解析后的真实路径（会话 `tmp/` 逻辑或项目绝对路径，见「文件预览」）
   - **标题参数不在参数区重复展示**（titleParams 已入标题的键从参数区省略，如 `read` 参数区只显示 offset/limit；全部参数入标题时无参数区）；**超长参数区自动折叠**（>800 字符默认收起为「查看参数（N 字符）」，点击展开，与输出折叠同款交互）
-  - 已声明示例：全局 `sh`/`py`/`write`（code 模式 + 文件卡）、`edit`（edits 模式 + 文件卡）、`read`（文件卡）、`fetch_url`/`agent_load`/`agent_run`/`ls`/`grep`/`glob`/`file`（标题参数）、`patch`（code 模式 + 标题参数 path + 文件卡）、`show`/`diff`（block 模式）；code `search_symbols`/`analyze`（标题参数）、`env_detect`/`system_info`（无参数区）；widgets `save`/`get`/`delete`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
+  - 已声明示例：全局 `sh`/`py`/`write`（code 模式 + 文件卡）、`edit`（edits 模式 + 文件卡）、`read`（文件卡）、`fetch_url`/`agent_load`/`agent_run`/`agent_task`/`ls`/`grep`/`glob`/`file`（标题参数）、`patch`（code 模式 + 标题参数 path + 文件卡）、`show`/`diff`（block 模式）；code `search_symbols`/`analyze`（标题参数）、`env_detect`/`system_info`（无参数区）；widgets `save`/`get`/`delete`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
   - **`agent_run` 专用卡片**：卡片头部直接列出**全部预加载子Agent 名**（`🛠 agent_run · code + playwright`，以 `+` 连接、不截断、省略 `key=` 前缀——后缀 span 带 `wrap` 标记允许多行完整展示）；参数区**只显示输入提示词**（任务指令全文、pre-wrap 展示，不参与自动折叠）；实时卡片完成态（`✓`）保留标题后缀，参数区不因执行完成而消失（执行中与完成后均可见）
   - 元数据拉取失败或未声明时按默认渲染（标题仅工具名、参数区按缺省自适应规则），不影响功能
 
 #### 新会话执行安全限制
 
-- **递归深度上限**：新会话内再执行新会话的嵌套深度受限（默认 3 层），防止无限递归
-- **不设执行超时**：`agent_run` 执行不设置整体超时——执行过程新会话回复实时推送到前端（进度可见，无「无反馈空转」问题），中止仅由父任务取消（用户停止）传播；挂起工具仍受工具级超时兜底（`TOOL_TIMEOUT_MS`）保护
+- **递归深度上限**：新会话内再执行新会话的嵌套深度受限（默认 3 层），防止无限递归；异步后台运行同规则（启动前同步校验）
+- **不设执行超时**：`agent_run` 执行不设置整体超时——执行过程新会话回复实时推送到前端（进度可见，无「无反馈空转」问题），中止由父任务取消（用户停止）传播（异步运行连带终止）或 `agent_task action=cancel` 主动终止；挂起工具仍受工具级超时兜底（`TOOL_TIMEOUT_MS`）保护
 - **轮次上限**：新会话内部工具调用轮次受限（与主循环同一常量），防止失控循环
 - **结果大小限制**：新会话返回结果超过截断阈值时按上下文保护规则处理
+- **异步运行并发上限**：单会话并发后台运行 ≤ 8（`SESSION_RUN_MAX_CONCURRENT`，超限拒绝新运行并引导清理）；终态记录保留最近 20 条（`SESSION_RUN_KEEP`）
 
 ### 内置子Agent 示例：通用源码分析/修改（`code`）
 
@@ -708,7 +720,7 @@ export const preload = false
 
 要点：
 
-- **工具集定位（只声明独有工具）**：code 的工具集只含全局集没有的编码专属工具（search_symbols/analyze/git/preview_server/env_detect/system_info）；文件读写查询（read/write/edit/patch/ls/grep/glob/file/diff/sh/py/sh_task）与交互编排（fetch_url/todo/ask/agent_run）复用**全局工具**——装载到主会话与 agent_run 新会话执行（全局工具默认继承）均直接用全局名调用，不再重复注册 `{agent}_` 同款（重复工具已彻底删除，见「装载工具会话可见性」）
+- **工具集定位（只声明独有工具）**：code 的工具集只含全局集没有的编码专属工具（search_symbols/analyze/git/preview_server/env_detect/system_info）；文件读写查询（read/write/edit/patch/ls/grep/glob/file/diff/sh/py/sh_task）与交互编排（fetch_url/todo/ask/agent_run/agent_task）复用**全局工具**——装载到主会话与 agent_run 新会话执行（全局工具默认继承）均直接用全局名调用，不再重复注册 `{agent}_` 同款（重复工具已彻底删除，见「装载工具会话可见性」）
 - **工作流（参考 opencode 编码助手）**：环境确认（先读提示词开头注入的项目环境注记——预置项目清单/项目根/受限模式，确定目标项目与 project 参数，警惕与目标同名的 API 封装/适配层）→ 规划（todo 待办跟踪）→ 探索（grep/glob/search_symbols/ls/analyze/git ls-files 先定位、并行调用；grep 宽泛摸底用 files 形态、锁定后 content+context 看语境、exclude 排噪、literal 字面搜代码片段；大范围摸底可 agent_run 委托 explore 只读探索，再精确读取——read 默认带行号、分段读附位置注记）→ 定位 → 方案（改动点清单 + `ask` 方向确认 + `diff` 前后对比展示）→ 修改（遵循项目既有约定、与周围代码风格一致；改动多时 `patch` 补丁应用优先（可跨多文件，带 ---/+++ 头原子应用）、`edit` 定点替换（唯一性校验）次之、`write` 仅新建/整体覆盖（防盲写守卫统一覆盖 write/edit/patch；新建大文件分段——首段 write、后续 append:true 续写），不添加无关注释/密钥，成功后无需重读验证）→ 验证（测试 + typecheck/lint，失败续修）→ 收尾（`git` 工具只读核对变更后只提交预期文件，不擅自 commit；总结先结论后细节、引用 文件:行号、失败如实报告）
 - **分析工具（全局 + 独有分层）**：`read`/`ls`/`grep`/`glob`/`diff`/`fetch_url` 为全局工具（描述见功能列表；grep files/count 摸底 + content/context 精读、include/exclude 过滤、literal 字面匹配、head_limit 压低上限）；独有：`search_symbols`（tree-sitter 符号搜索双模式：**定义**定位——解析函数/类/方法/类型定义，返回 文件:行号: 类型 名称，精确匹配优先；`mode=references` **引用/调用点**——叶子节点精确匹配 + 排除定义名与注释/字符串（比 grep 文本匹配少误报），梳理调用链/影响面用）、`analyze`（tree-sitter 语法结构概览）、`git`（只读 Git 检查，见「git 版本控制工具」）
 - **修改工具（全部为全局工具）**：`patch`（**unified diff 补丁应用**：一次多 hunk、可跨多文件（---/+++ 头分组）、行号模糊容错、原子落盘、dryRun 预演，改动多/行号易偏移时优先）/`edit`（定点替换，小范围改动）/`write`（新建/整体覆盖）三者同受防盲写守卫约束、默认无需审批（与总Agent 既有姿态一致；旧版由 code `requiresApproval` 收紧审批的双胞胎覆写已随工具删重移除）；`sh`/`py`（Python 项目执行测试与脚本）走工具自身动态审批（默认需用户审批，复用统一审批流；`approval:false` 按次免审，见「工具审批」；`sh` 的 `workdir` 参数或 `project` 参数指定命令工作目录）；`sh_task`（sh 异步后台任务管理，见「sh 异步后台任务」）；`file` 文件管理（copy/rename/move/mkdir/delete/info 多动作，delete 动态需审批）
@@ -1441,8 +1453,9 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `flow` | **数据流编排**（工具即函数、动态编程）：一次调用执行多步工具链——引用映射（`{{id.data.字段}}`，一对一/一对多/多对一）、`when` 条件分支、`foreach`/`while` 循环、`optional` 容错；旧版线性串联格式兼容（见「flow 数据流编排工具」） | **取决于内部工具**（动态审批） |
 | `tool_schemas` | **批量获取工具 schema**：按工具名列表返回输入参数与结构化输出（`data`）的 JSON Schema；省略时返回全部已启用工具的输出结构概要——编排（flow）前理解输出结构，避免逐个试调 | 否 |
 | `agent_list` | 列出可用子Agent（名称/描述/是否已装载；**不列工具名**，工具名以注册的工具集为准）。**不注册进总Agent 全局工具集**——未装载清单已由 `systemPromptInjection` 注入提示词（模型上下文已有，工具冗余且干扰工具选择）；仅在新会话执行环境注入（纯 md 组合子Agent 自动注入编排工具时，见「子Agent文件格式」） | 否 |
-| `agent_load` | **装载**子Agent 能力模块（类比 import 子模块：工具并入当前工具集、**完整系统提示词作为 system 消息写入会话记录**（持久化，恢复会话自动还原），**不创建独立上下文**；默认使用方式：装载后直接用其工具，仅在需要干净上下文或防膨胀时才改用 `agent_run` 新会话执行；装载反馈**枚举实际并入的工具全名**（`{agent}_{tool}` 清单），模型无需猜测直接调用） | 否 |
-| `agent_run` | **执行新会话**（派生临时新会话，**无需装载**：预加载一个或多个子Agent（完整系统提示词拼接+独有工具并入）后阻塞执行一次并返回最终结果，中间过程/推理/内部工具不进主上下文，全程存档可回放；**`inherit_global_tools` 参数默认 true**——全局工具一并注册进新会话（与主会话同名同参，子Agent 只提供独有能力；false 时仅子Agent 工具 + 内建编排，依赖全局文件工具的子Agent 将无法读写文件）；**`inherit_global_prompt` 参数默认 false**——true 时总Agent 全局系统提示词作为新会话提示词前缀注入（行为约定/编排指引随提示词带入，见「新会话执行的上下文隔离」）；默认优先 `agent_load` 装载后直接用其工具，仅在需要干净上下文或防上下文膨胀时使用） | 否 |
+| `agent_load` | **装载**子Agent 能力模块（类比 import 子模块：工具并入当前工具集、**完整系统提示词作为 system 消息写入会话记录**（持久化，恢复会话自动还原），**不创建独立上下文**；默认使用方式：装载后直接用其工具，仅在需要干净上下文或防膨胀时才改用 `agent_run` 新会话执行；装载反馈**不枚举工具清单**——`{agent}_*` 工具 schema 已注册进工具集（下一轮请求即全量下发），再列一遍是冗余） | 否 |
+| `agent_run` | **执行新会话**（派生临时新会话，**无需装载**：预加载一个或多个子Agent（完整系统提示词拼接+独有工具并入）后执行一次并返回最终结果，中间过程/推理/内部工具不进主上下文，全程存档可回放；**默认与主会话同构**——`inherit_global_tools` 与 `inherit_global_prompt` 默认均为 true（全局工具同名同参注册 + 总Agent 全局系统提示词前缀注入，子Agent 只提供独有能力；false 分别裁剪）；**`async` 参数**：true 后台异步执行——立即返回 runId 不阻塞（长任务先做别的，见「新会话执行的异步运行」）；默认优先 `agent_load` 装载后直接用其工具，仅在需要干净上下文、防上下文膨胀或长任务并行时使用） | 否 |
+| `agent_task` | **管理 agent_run 异步后台运行**（`agent_run async:true` 启动并返回 runId，见「新会话执行的异步运行」）：`action=status` 立即返回运行状态与进度（已执行轮次/工具调用/最近活动；已结束含最终结果）/ `wait` 阻塞等待完成并取回最终结果与完整存档（`timeout` 秒内未完成返回当前进度，默认 60 上限 540）/ `cancel` 主动终止运行（已执行过程保留在存档）/ `list` 列出本会话全部后台运行 | 否 |
 | `full_mode` | **切换完整模式**（**仅极简模式会话可见可用**，完整模式会话从 schema 移除）：极简下任务确需其他工具能力时调用，用户批准后解锁全部工具（本任务后续轮次 schema 立即全量下发）、系统提示词原地升级为完整版、会话极简标记清除并通知前端关闭开关；可选 `reason` 参数说明原因供审批参考（见「工具选择」极简模式） | **是** |
 | `sh` | 执行Shell命令（**Windows 下经 cmd.exe 执行：命令串联用 `&&`/`||`/换行，`;` 非分隔符会被并入参数，引号与变量展开以 cmd 为准（无 `$?`/`$VAR`，环境变量用 `%VAR%`）；退出码直接读返回结果的 `exitCode` 字段，无需 `echo $?`/`%errorlevel%`**；**`workdir` 参数**：命令工作目录（相对路径基于会话工作目录/项目根解析——免 `cd X && cmd` 串联，Windows 下引号语义更稳；async 后台任务同以该目录为 cwd；非默认工作目录执行时输出末尾标注「（工作目录: …）」）；**`input` 参数**：stdin 输入，对象/数组自动序列化为 JSON 文本（双引号，脚本 `json.loads` 可解析）；**`timeout` 参数：执行超时秒数，默认 300、上限 540，超时按进程树终止并返回超时结果（`async:true` 时为任务生命周期上限：默认 1800、上限 3600）**；**`strict` 参数**：true 时非 0 退出码抛工具级错误（flow 编排「非 0 即中断」，默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出）；**`async` 参数**：true 后台异步执行——立即返回 taskId 不阻塞（长耗时构建/测试先做其他事再回头查询，见「sh 异步后台任务」）；**`approval` 参数**：本次调用是否需审批，默认 true，明确安全的只读/幂等命令可传 false 按次免审（见「工具审批」）；可运行 `bun run`/`node`；JS/TS 亦可通过内置运行时 `gebai exec` 自执行，见「脚本执行环境」） | **是**（默认；`approval:false` 按次免审） |
 | `sh_task` | **管理 sh 异步后台任务**（`sh async:true` 启动并返回 taskId，见「sh 异步后台任务」）：`action=status` 立即返回任务状态与输出尾部 / `wait` 阻塞等待完成（`timeout` 秒内未完成返回当前状态，默认 60 上限 540——「先做别的再回头等结果」）/ `kill` 终止任务进程树 / `list` 列出本会话全部后台任务；输出为 stdout+stderr 合并日志尾部（`tail` 参数默认 4000 上限 20000 字符，完整日志 `tmp/sh-tasks/{id}.log`） | 否 |
@@ -1948,7 +1961,7 @@ export const systemPrompt = systemPromptBase
 - `description`：总Agent 根据描述判断何时调用该子Agent，是子Agent 能力被发现的关键
 - `preload`：声明该子Agent 默认预加载（模块语义，属「装载」的启动期形态：工具与能力描述立即注入总Agent）；未声明者通过 `agent_load` 按需装载，也可用 `GEBAI_PRELOAD_SUB_AGENTS` 统一声明
 - 工具的返回类型（text/json）在 `toolSchemas()` 中声明，通过 schema 的 `returns` 字段体现，不单独导出 `returnFormats`
-- `agent_run` 执行新会话：输入为 `agents`（子Agent 列表）+ `input`（任务文本），返回为 `output`（文本），新会话（预加载子Agent）自行规划执行（仅阻塞执行返回一种方式）
+- `agent_run` 执行新会话：输入为 `agents`（子Agent 列表）+ `input`（任务文本），返回为 `output`（文本），新会话（预加载子Agent）自行规划执行（默认阻塞执行返回；`async:true` 后台异步执行，`agent_task` 管理，见「新会话执行的异步运行」）
 - 子Agent 内无全局可变量，工具函数体为纯函数或依赖注入工厂，天然支持并发加载
 - 子Agent 可复用全局工具能力：`tools` 中可直接引用全局工具实现（如 `read`/`write`/`sh`），引用时以自身命名空间暴露（`{agent}_read` 等），路由由总Agent 转发
 - 示例：内置 `desktop` 即目录形式（`sub-agents/desktop/desktop.ts` + `desktop_tools.ts`）
@@ -1963,7 +1976,7 @@ description: 一句话能力描述（可选；缺省取正文首行）
 ```
 
 - 目录内无同名 `{name}.ts` 时，加载器直接由 md 构成定义（`name`=目录名）；可选 frontmatter 仅识别 `description`
-- 无工具的简化定义在新会话运行环境**自动注入编排工具**（`agent_list`/`agent_load`/`agent_run`，原名暴露、无 `{agent}_` 前缀），支持组合式子Agent 编排装载/执行新会话其他子Agent（受递归深度 3 层限制）
+- 无工具的简化定义在新会话运行环境**自动注入编排工具**（`agent_list`/`agent_load`/`agent_run`/`agent_task`，原名暴露、无 `{agent}_` 前缀），支持组合式子Agent 编排装载/执行新会话其他子Agent（受递归深度 3 层限制）
 - 有工具的子Agent 需要编排能力时，可显式引用导出的 `agentListTool`/`agentLoadTool`/`agentCallTool`（`core/tools.ts`），注册为 `{agent}_agent_run` 等带前缀形态
 - 示例：纯 md 组合子Agent 即 `sub-agents/{name}/{name}.md`（零 TS），编排其他子Agent 产出完整链路的组合能力可由此模式定义
 
@@ -2189,6 +2202,9 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | sh 异步任务存储 | `tmp/sh-tasks/` | 记录 `tasks.json`（原子写）+ 每任务 `{id}.log` 合并输出（stdout+stderr）；任务 id 形如 `t` + 8 位 hex |
 | sh_task 输出尾部 | 默认 4000 / 上限 20000 字符 | status/wait 返回的日志尾部字符数（`tail` 参数可调，完整日志 `tmp/sh-tasks/{id}.log`） |
 | sh_task 等待默认/上限 | 60 / 540 秒 | `action=wait` 阻塞等待上限（轮询 300ms，不晚于引擎工具超时兜底） |
+| 子Agent 异步运行并发上限 | 8 个/会话 | 同时运行的 agent_run 后台运行数上限（`SESSION_RUN_MAX_CONCURRENT`，超限拒绝新运行并引导清理） |
+| 子Agent 异步运行终态保留 | 最近 20 条/会话 | 已结束运行的记录保留上限（`SESSION_RUN_KEEP`，超出淘汰最旧；运行中不淘汰；进程内不落盘，重启即中断） |
+| agent_task 等待默认/上限 | 60 / 540 秒 | `agent_task action=wait` 阻塞等待上限（轮询 300ms，不晚于引擎工具超时兜底） |
 | 工具执行超时兜底 | 9 分钟 | 引擎层兜底（`TOOL_TIMEOUT_MS`，可注入）：覆盖不响应超时的工具（如网络请求挂起）；超时不结束任务，结果作为「执行超时」返回模型自行调整（子Agent 内挂起工具同样受此保护） |
 | 长工具执行心跳 | 25 秒 | 工具执行期间周期发布 `event.tool.alive` 刷新前端空闲看门狗（`TOOL_HEARTBEAT_MS`，测试可注入 `heartbeatMs`；见「等待期不误判挂起」） |
 | 子Agent 调用超时 | 不设 | 子Agent 调用不设整体超时（执行进度实时可见，中止仅由父任务取消传播；`SUBAGENT_TIMEOUT` 已移除） |
