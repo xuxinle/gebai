@@ -1000,9 +1000,11 @@
 .diagram-zoom { min-height: 240px; cursor: grab; overflow: hidden; }
 .diagram-zoom svg { display: block; max-width: none; height: auto; }
 .diagram-zoom img { display: block; max-width: none; }
-/* 图表查看器：图默认居中（小于视口时完全居中，溢出时左上可滚动） */
+/* 图表查看器：图默认居中（小于视口时完全居中，溢出时左上可滚动）。
+   flex:none 必需——preview-body 为 flex 行容器，flex 子项默认可收缩：放大后 zoom 盒宽被
+   压回容器宽，水平滚动区消失且放大溢出被 overflow:hidden 裁掉（只能缩放无法左右拖动）。 */
 .preview-overlay .preview-card.diagram-preview .preview-body { display: flex; }
-.preview-overlay .preview-card.diagram-preview .diagram-zoom { margin: auto; }
+.preview-overlay .preview-card.diagram-preview .diagram-zoom { margin: auto; flex: none; }
 /* 拖拽平移中：抓取光标 + 禁止文本选中 */
 .preview-body.panning { cursor: grabbing; user-select: none; }
 .preview-card {

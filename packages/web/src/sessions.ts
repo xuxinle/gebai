@@ -10,6 +10,7 @@ import {
   getCurrentSession,
   getEmptyState,
   input,
+  isDraftView,
   msgEl,
   newSessionBtn,
   pendingFiles,
@@ -836,13 +837,16 @@ export function bindSessionActions() {
   })
   document.addEventListener("scroll", () => closeSessionMenu(), true)
   window.addEventListener("resize", () => closeSessionMenu())
-  newSessionBtn.onclick = () => {
-    // 草稿态：不立即创建会话（避免落盘大量空会话），首条消息发送时才真正创建
+  // 新会话：进入空白草稿页（不立即创建会话——避免落盘大量空会话，首条消息发送时才真正创建）；
+  // 已处于草稿页时无操作（防误触快捷键清掉正在输入的草稿）
+  const newSessionView = () => {
+    if (isDraftView()) return
     const prev = getCurrentSession()
     if (prev) saveSessionViewState(prev.id)
     enterDraftView()
     void refreshSessions() // 清除列表中旧会话的激活高亮
   }
+  newSessionBtn.onclick = newSessionView
   // 整栏折叠：桌面端（>860px）折叠隐藏侧栏（主区占满，状态持久化）；窄屏保持滑动抽屉行为
   const SIDEBAR_KEY = "gebai.ui.sidebarCollapsed"
   const narrowScreen = () => window.matchMedia("(max-width: 860px)").matches
@@ -865,11 +869,18 @@ export function bindSessionActions() {
     }
   }
   sidebarToggle.onclick = toggleSidebar
-  // Ctrl+B 快捷键切换会话列表（拦截浏览器默认书签行为；任意焦点状态可用）
+  // 全局快捷键（任意焦点可用，均拦截默认行为）：
+  // Ctrl+B 切换会话列表；新会话双绑定 Ctrl+N / Ctrl+Shift+O（批量模式下新会话按钮禁用，快捷键随按钮态失效；
+  // 浏览器形态 Ctrl+N 为浏览器保留键（新窗口）无法拦截——Ctrl+Shift+O 兜底，桌面 WebView 形态两者均生效）
   document.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+    if (!e.ctrlKey || e.altKey) return
+    const k = e.key.toLowerCase()
+    if (!e.shiftKey && k === "b") {
       e.preventDefault()
       toggleSidebar()
+    } else if (!newSessionBtn.disabled && ((!e.shiftKey && k === "n") || (e.shiftKey && k === "o"))) {
+      e.preventDefault()
+      newSessionView()
     }
   })
 }

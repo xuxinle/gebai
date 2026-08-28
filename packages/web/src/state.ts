@@ -60,6 +60,9 @@ const SESSION_KEY = "gebai.ui.session"
 export function setCurrentSession(s: SessionInfo | null): void {
   currentSession = s
   draftView = s === null
+  syncConnThinking() // 信号灯随视图切换：当前会话运行中才闪烁（后台会话不打扰）
+  // 会话视图切换联动（gebai:session-view）：标题栏随件（单轮计时等，main.ts 监听）跟随当前会话
+  document.dispatchEvent(new CustomEvent("gebai:session-view"))
   if (s) {
     try {
       localStorage.setItem(SESSION_KEY, s.id)
@@ -222,9 +225,10 @@ export function setConn(text: string, ok = true) {
   syncCtxSignal()
 }
 
-/** 思考信号：任意会话运行（流式生成）中信号灯闪烁；运行结束恢复常亮。 */
+/** 思考信号：仅当前会话运行（流式生成）中信号灯闪烁——后台会话运行的信号不打扰当前视图，
+ *  切换会话经 setCurrentSession 联动刷新；运行结束恢复常亮。 */
 export function syncConnThinking() {
-  connEl.classList.toggle("thinking", runs.size > 0)
+  connEl.classList.toggle("thinking", currentSession !== null && runs.has(currentSession.id))
   syncCtxSignal()
 }
 
