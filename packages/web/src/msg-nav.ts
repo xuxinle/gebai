@@ -1,17 +1,75 @@
 import { msgEl, msgNav, ROLE_NAME } from "./state"
 import { stopFollowing } from "./jump-bottom"
+import { createPressGesture } from "./press-gesture"
 
 /* ---------- 会话内消息导航 ----------
  * 右侧窄导航列：每条消息一个短横线，等间距集中展示在导航列中部（不按消息实际距离分布），
  * 静止态固定 1px 细线（任何 DPR/缩放下渲染厚度恒定，不出现 2/3px 交替），活动/悬停加粗变亮（hover 3px）。
  * 悬停：在导航条左侧浮出消息预览气泡（角色 + 截断文本；用户消息省略"我"的称谓标签）。
- * 点击：滚动到对应消息；按住拖动可"搓"过消息列。
+ * 点击：滚动到对应消息（按下未拖动 = 明确点击，位移超阈值才进入拖动，防右缘扫过误触即跳）；
+ * 按住拖动可"搓"过消息列（接管指针连续跳转）。
+ * 短横线命中带上的滚轮转发给消息列（msg-nav 不在 #messages 滚动链上，默认滚轮无滚动目标）。
  * 设计参考 DESIGN.md「Web UI · 聊天页」。 */
 
 const NAV_PAD = 10 // 与 chat-wrap 顶/底的留白
 const SEG_H = 2 // 布局间距基准（短横线静止高 1px，间距按 2px 高度计算预留）
 const SEG_GAP = 16 // 固定垂直间距：短横线紧凑聚在一起展示（间距宽松）
 const TOOLTIP_MAX = 6 // 预览气泡最多展示行数
+/** 按下后位移超过该值才进入拖动搓动（小于视为点击）：短横线 ::before 扩展命中区连成竖带，
+ *  指针扫过右缘时轻触即跳 + 立即 pointer capture 会劫持后续拖动（「一碰就跳顶、滚轮失灵」的放大器）。 */
+const DRAG_SLOP = 6
+
+/** 按压周期内的 pointerId（手势状态机回调里接管/释放 capture 用）。 */
+let pressId = -1
+
+const gesture = createPressGesture({
+  slop: DRAG_SLOP,
+  onDragStart() {
+    if (pressId >= 0) {
+      try { msgNav.setPointerCapture(pressId) } catch { /* 已失活 */ }
+    }
+    msgNav.classList.add("dragging")
+  },
+  onDrag(p) {
+    const idx = idxFromClientY(p.y)
+    if (idx >= 0) jumpToIdx(idx)
+  },
+  onClick(p) {
+    // 明确点击：命中带内按 Y 比例定位目标条（等距布局下比例最近 = 点击的那条）
+    const idx = idxFromClientY(p.y)
+    if (idx >= 0) jumpToIdx(idx)
+  },
+})
+
+function onPointerDown(e: PointerEvent) {
+  if (!segs.length) return
+  pressId = e.pointerId
+  gesture.down({ x: e.clientX, y: e.clientY })
+  e.preventDefault()
+}
+
+function onPointerMove(e: PointerEvent) {
+  gesture.move({ x: e.clientX, y: e.clientY })
+}
+
+function onPointerUp(e: PointerEvent) {
+  if (gesture.isDragging()) {
+    try { msgNav.releasePointerCapture(e.pointerId) } catch { /* 已被释放 */ }
+    msgNav.classList.remove("dragging")
+  }
+  pressId = -1
+  gesture.up({ x: e.clientX, y: e.clientY })
+}
+
+/** 系统取消手势（窗口失焦/触控打断）：只清理状态，不触发点击跳转。 */
+function onPointerCancel(e: PointerEvent) {
+  if (gesture.isDragging()) {
+    try { msgNav.releasePointerCapture(e.pointerId) } catch { /* 已被释放 */ }
+    msgNav.classList.remove("dragging")
+  }
+  pressId = -1
+  gesture.cancel()
+}
 
 interface Seg {
   bar: HTMLElement
@@ -23,7 +81,6 @@ interface Seg {
 
 let segs: Seg[] = []
 let tooltip: HTMLElement | null = null
-let dragging = false
 let rafPending = false
 let activeIdx = -1 // 当前位置高亮的短横线索引（-1 = 无）
 
@@ -194,7 +251,7 @@ function jumpToIdx(idx: number) {
   if (!seg) return
   stopFollowing() // 用户导航：解除粘底跟随，平滑滚动过程不被跟随循环拽回底部
   const top = seg.msg.offsetTop - 12
-  msgEl.scrollTo({ top, behavior: dragging ? "auto" : "smooth" })
+  msgEl.scrollTo({ top, behavior: gesture.isDragging() ? "auto" : "smooth" })
 }
 
 /** 根据指针 Y 坐标找最近的短横线（拖动 / 直接点击导航条空白处时用）。 */
@@ -217,29 +274,6 @@ function idxFromClientY(clientY: number): number {
   return best
 }
 
-function onPointerDown(e: PointerEvent) {
-  if (!segs.length) return
-  dragging = true
-  msgNav.setPointerCapture(e.pointerId)
-  msgNav.classList.add("dragging")
-  const idx = idxFromClientY(e.clientY)
-  if (idx >= 0) jumpToIdx(idx)
-  e.preventDefault()
-}
-
-function onPointerMove(e: PointerEvent) {
-  if (!dragging) return
-  const idx = idxFromClientY(e.clientY)
-  if (idx >= 0) jumpToIdx(idx)
-}
-
-function onPointerUp(e: PointerEvent) {
-  if (!dragging) return
-  dragging = false
-  try { msgNav.releasePointerCapture(e.pointerId) } catch { /* 已被释放 */ }
-  msgNav.classList.remove("dragging")
-}
-
 function onScroll() {
   // 条位置由消息位置决定、滚动不变，无需重排；仅跟随当前位置高亮
   scheduleActiveUpdate()
@@ -259,20 +293,9 @@ function bindBars() {
     if (bar && msgNav.contains(bar)) hideTooltip()
   })
   msgNav.addEventListener("pointermove", (e) => {
-    if (dragging) return
+    if (gesture.isDragging()) return
     const bar = (e.target as HTMLElement).closest(".msg-nav-seg")
     if (bar && msgNav.contains(bar)) positionTooltip(bar as HTMLElement)
-  })
-  msgNav.addEventListener("click", (e) => {
-    const bar = (e.target as HTMLElement).closest(".msg-nav-seg") as HTMLElement | null
-    if (bar && msgNav.contains(bar)) {
-      const idx = segs.findIndex((s) => s.bar === bar)
-      if (idx >= 0) jumpToIdx(idx)
-    } else {
-      // 点空白处：跳到最近一条
-      const idx = idxFromClientY(e.clientY)
-      if (idx >= 0) jumpToIdx(idx)
-    }
   })
   // 键盘：↑/↓ 切换 focus 条，Enter 跳到当前 focus 条
   msgNav.addEventListener("keydown", (e) => {
@@ -311,9 +334,26 @@ export function bindMsgNav() {
   msgNav.addEventListener("pointerdown", onPointerDown)
   msgNav.addEventListener("pointermove", onPointerMove)
   msgNav.addEventListener("pointerup", onPointerUp)
-  msgNav.addEventListener("pointercancel", onPointerUp)
+  msgNav.addEventListener("pointercancel", onPointerCancel)
   msgNav.addEventListener("scroll", onScroll) // 自带滚动条时同步活动条
   msgEl.addEventListener("scroll", onScroll, { passive: true })
+  // 短横线命中带（::before 扩展成 40×18 连续竖带）悬停时滚轮转发给消息列：
+  // msg-nav 是 #messages 的兄弟元素、不在其滚动链上，默认滚轮在此无任何滚动目标
+  // （「滚轮失灵」根因）；上滚同步解除粘底跟随——与 #messages 自身 wheel 监听同语义，
+  // 否则流式静默窗口会把手动落位归因为内部动作而拽回底部。
+  msgNav.addEventListener(
+    "wheel",
+    (e) => {
+      const ev = e as WheelEvent
+      let dy = ev.deltaY
+      if (ev.deltaMode === 1) dy *= 16 // 行
+      else if (ev.deltaMode === 2) dy *= msgEl.clientHeight // 页
+      if (!dy) return
+      if (dy < 0) stopFollowing()
+      msgEl.scrollTop += dy
+    },
+    { passive: true },
+  )
   // 容器尺寸 / 消息内容变化时重算位置
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => updateMsgNav())
