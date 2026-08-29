@@ -2925,35 +2925,45 @@ describe("context compaction", () => {
   })
 
   test("agent_run 预加载 self_optimize 连带预载 code（工具与提示词复用）+ 写范围守卫生效", async () => {
-    const s = await setup("subself")
-    // 临时歌白仓库结构（SELF_OPTIMIZE_PROJECT 指向它，守卫按它界定仓库边界）
-    const repo = mkdtempSync(join(tmpdir(), "gebai-selfopt-repo-"))
-    mkdirSync(join(repo, "packages", "server", "src", "sub-agents"), { recursive: true })
-    mkdirSync(join(repo, "packages", "server", "src", "core"), { recursive: true })
-    const session = await s.store.createSession("default", "t")
-    await s.store.setEnv(session.id, "default", { SELF_OPTIMIZE_PROJECT: repo, GEBAI_APPROVAL_SKIP: "true" })
-    await s.engine.run(session.id, "default", "optimize gebai")
-    // 新会话系统消息：连带预载 code（两段职责提示词都在，通用工作流来自 code）
-    const sys = String(s.provider.seenChats[1][0].content)
-    expect(sys).toContain("已预加载子Agent: code, self_optimize")
-    expect(sys).toContain("### code（")
-    expect(sys).toContain("源码分析与修改专家")
-    expect(sys).toContain("### self_optimize（")
-    expect(sys).toContain("自我优化专家")
-    // 新会话工具集：继承的全局工具（read/write）+ code_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
-    expect(s.provider.seenTools[1]).toContain("read")
-    expect(s.provider.seenTools[1]).toContain("write")
-    expect(s.provider.seenTools[1]).toContain("code_search_symbols")
-    expect(s.provider.seenTools[1]).toContain("self_optimize_run_tests")
-    expect(s.provider.seenTools[1]).not.toContain("self_optimize_write")
-    expect(s.provider.seenTools[1]).not.toContain("code_read")
-    // 写范围守卫：核心引擎源码被拒（未写入），子Agent 目录放行
-    expect(existsSync(join(repo, "packages", "server", "src", "core", "engine.ts"))).toBe(false)
-    expect(await Bun.file(join(repo, "packages", "server", "src", "sub-agents", "new_agent.ts")).text()).toBe("x")
-    const chats = JSON.stringify(s.provider.seenChats)
-    expect(chats).toContain("拒绝写入")
-    rmSync(repo, { recursive: true, force: true })
-    cleanup(s.home)
+    // 环境隔离：selfModifyEnabled 直读 process.env，宿主 .env 配置 GEBAI_SELF_MODIFY=true 会整体放开写
+    // 范围守卫——本测试验证默认只读路径。清空必须置空串而非 delete：config 的 .env 注入只跳过非 undefined
+    // 键（delete 后 setup() 会从 .env 回填 true），而 selfModifyEnabled 仅认 "true"/"1"（空串=关闭）
+    const savedSelfModify = process.env.GEBAI_SELF_MODIFY
+    process.env.GEBAI_SELF_MODIFY = ""
+    try {
+      const s = await setup("subself")
+      // 临时歌白仓库结构（SELF_OPTIMIZE_PROJECT 指向它，守卫按它界定仓库边界）
+      const repo = mkdtempSync(join(tmpdir(), "gebai-selfopt-repo-"))
+      mkdirSync(join(repo, "packages", "server", "src", "sub-agents"), { recursive: true })
+      mkdirSync(join(repo, "packages", "server", "src", "core"), { recursive: true })
+      const session = await s.store.createSession("default", "t")
+      await s.store.setEnv(session.id, "default", { SELF_OPTIMIZE_PROJECT: repo, GEBAI_APPROVAL_SKIP: "true" })
+      await s.engine.run(session.id, "default", "optimize gebai")
+      // 新会话系统消息：连带预载 code（两段职责提示词都在，通用工作流来自 code）
+      const sys = String(s.provider.seenChats[1][0].content)
+      expect(sys).toContain("已预加载子Agent: code, self_optimize")
+      expect(sys).toContain("### code（")
+      expect(sys).toContain("源码分析与修改专家")
+      expect(sys).toContain("### self_optimize（")
+      expect(sys).toContain("自我优化专家")
+      // 新会话工具集：继承的全局工具（read/write）+ code_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
+      expect(s.provider.seenTools[1]).toContain("read")
+      expect(s.provider.seenTools[1]).toContain("write")
+      expect(s.provider.seenTools[1]).toContain("code_search_symbols")
+      expect(s.provider.seenTools[1]).toContain("self_optimize_run_tests")
+      expect(s.provider.seenTools[1]).not.toContain("self_optimize_write")
+      expect(s.provider.seenTools[1]).not.toContain("code_read")
+      // 写范围守卫：核心引擎源码被拒（未写入），子Agent 目录放行
+      expect(existsSync(join(repo, "packages", "server", "src", "core", "engine.ts"))).toBe(false)
+      expect(await Bun.file(join(repo, "packages", "server", "src", "sub-agents", "new_agent.ts")).text()).toBe("x")
+      const chats = JSON.stringify(s.provider.seenChats)
+      expect(chats).toContain("拒绝写入")
+      rmSync(repo, { recursive: true, force: true })
+      cleanup(s.home)
+    } finally {
+      if (savedSelfModify === undefined) delete process.env.GEBAI_SELF_MODIFY
+      else process.env.GEBAI_SELF_MODIFY = savedSelfModify
+    }
   })
 
   test("sub-agent project AGENTS.md is injected into system prompt", async () => {
