@@ -38,8 +38,8 @@ class FakeProvider implements LLMProvider {
   release?: () => void
   /** 首次 chat 调用即抛此错（多模态图片降级场景用）。 */
   failFirstError: Error | null = null
-  /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
-  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
+  /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens，含缓存命中 cachedTokens）；undefined = 不返回（估算兜底路径）。 */
+  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
   constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
@@ -1063,27 +1063,34 @@ console.log("defined ok")`,
 
   test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 input tokens 为基线（估算只补增量）", async () => {
     const { home, engine, store, events, provider } = await setup("tool")
-    provider.usage = { inputTokens: 3000, outputTokens: 7, totalTokens: 3007 }
+    provider.usage = { inputTokens: 3000, outputTokens: 7, totalTokens: 3007, cachedTokens: 2000 }
     const session = await store.createSession("default", "t")
     const pushed: number[] = []
+    const pushedCached: Array<number | undefined> = []
     events.subscribe((e) => {
-      if (e.type === "event.session.ctx" && e.sessionId === session.id) pushed.push(Number((e.payload as { ctxTokens?: number }).ctxTokens ?? 0))
+      if (e.type === "event.session.ctx" && e.sessionId === session.id) {
+        pushed.push(Number((e.payload as { ctxTokens?: number }).ctxTokens ?? 0))
+        pushedCached.push((e.payload as { ctxCachedTokens?: number }).ctxCachedTokens)
+      }
     })
     await engine.run(session.id, "default", "what time is it")
     // 每轮调用返回相同 usage 真值；调用后尚未追加消息 → 增量估算为 0，推送值即真值
     expect(pushed.length).toBeGreaterThanOrEqual(2)
     expect(pushed.every((n) => n === 3000)).toBe(true)
+    // 缓存命中随事件同点位推送（接口返回缓存字段时）
+    expect(pushedCached.every((n) => n === 2000)).toBe(true)
     // 持久化基线：ctxInputTokens = 真值；ctxTokens（展示）= 真值 + 基线后增量（最终回复）估算
     const loaded = await store.load(session.id)
     expect(loaded!.ctxInputTokens).toBe(3000)
     expect(loaded!.ctxAtMessage).toBeGreaterThan(0)
     expect(loaded!.ctxTokens).toBeGreaterThanOrEqual(3000)
+    expect(loaded!.ctxCachedTokens).toBe(2000)
     cleanup(home)
   })
 
   test("无 usage 真值时回退估算：持久化基线清除、ctxTokens 走估算", async () => {
     const { home, engine, store, provider } = await setup("text")
-    provider.usage = { inputTokens: 500, outputTokens: 1, totalTokens: 501 }
+    provider.usage = { inputTokens: 500, outputTokens: 1, totalTokens: 501, cachedTokens: 400 }
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "hi") // 首轮写入基线
     // 第二轮换无 usage 的 provider：基线被清除，展示回退估算（与 toSessionInfo 兜底同口径）
@@ -1101,6 +1108,7 @@ console.log("defined ok")`,
     const loaded = await store.load(session.id)
     expect(loaded!.ctxInputTokens).toBeUndefined()
     expect(loaded!.ctxAtMessage).toBeUndefined()
+    expect(loaded!.ctxCachedTokens).toBeUndefined()
     expect(loaded!.ctxTokens).toBeGreaterThan(0)
     cleanup(home)
   })

@@ -481,14 +481,19 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
 }
 
 /** 运行中上下文大小实时更新（标题栏展示）：更新内存快照；当前会话时刷新标题栏（事件每轮推送）。
+ *  ctxCachedTokens（提示词缓存命中，接口返回缓存字段才有值）同点位更新，undefined 清除防陈旧。
  *  注意 currentSession 与 lastSessions 可能是不同对象引用（切换会话后 refreshSessions 重建列表），
  *  两者都需同步，否则 renderHeaderCtx 读到的 currentSession.ctxTokens 停留在切换时的旧值。 */
-export function updateSessionCtx(sessionId: string, ctxTokens: number): void {
+export function updateSessionCtx(sessionId: string, ctxTokens: number, ctxCachedTokens?: number): void {
   const s = (lastSessions ?? []).find((x) => x.id === sessionId)
-  if (s) s.ctxTokens = ctxTokens
+  if (s) {
+    s.ctxTokens = ctxTokens
+    s.ctxCachedTokens = ctxCachedTokens
+  }
   const cur = getCurrentSession()
   if (cur?.id === sessionId) {
     cur.ctxTokens = ctxTokens
+    cur.ctxCachedTokens = ctxCachedTokens
     renderHeaderCtx()
   }
 }

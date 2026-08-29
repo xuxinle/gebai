@@ -276,6 +276,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 多行 tip（文本含 \n 时由 bindTooltips 挂类）：按行原样展示不折行——宽度随最长行撑开，解除 260px 上限 */
+.tip.multiline {
+  white-space: pre;
+  max-width: none;
+  width: max-content;
+}
 /* 自绘下拉选择 */
 .sel { display: inline-block; }
 .sel-btn {

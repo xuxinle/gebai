@@ -193,6 +193,8 @@ function showTooltip(host: HTMLElement): void {
   tooltipHost = host
   tooltipEl = el("div", "tip")
   tooltipEl.textContent = text
+  // 多行 tip（\n 分行）：按行原样展示（不折行，宽度随最长行撑开），脱离单行 nowrap/ellipsis 截断
+  if (text.includes("\n")) tooltipEl.classList.add("multiline")
   document.body.appendChild(tooltipEl)
   positionTooltip(host, tooltipEl)
 }
