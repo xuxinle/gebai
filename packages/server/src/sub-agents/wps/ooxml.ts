@@ -11,7 +11,16 @@ import { strFromU8, unzipSync, zipSync } from "fflate"
 const domWindow = new Window()
 
 export function parseXml(text: string): Document {
-  return new domWindow.DOMParser().parseFromString(text, "text/xml")
+  // 兼容性规范化：python-docx 等库写出的 XML 声明用单引号（<?xml version='1.0' ...?>），
+  // happy-dom 的 text/xml 解析器不识别，会静默降级为 HTML 解析（根元素变 HTML/BODY），
+  // 导致所有按命名空间前缀的标签查询落空。解析前统一把声明改为双引号形式。
+  const normalized = text.replace(/^\s*(<\?xml[\s\S]*?\?>)/, (decl) => decl.replace(/'/g, '"'))
+  const doc = new domWindow.DOMParser().parseFromString(normalized, "text/xml")
+  // 防静默降级兜底：输入是 XML 却解析出 HTML 根元素 → 显式报错，避免下游误诊为「文件损坏/需另存」
+  if (/^\s*<\?xml/.test(text) && doc.documentElement?.tagName === "HTML") {
+    throw new Error(`XML 解析失败（解析器降级为 HTML）：${text.slice(0, 120)}`)
+  }
+  return doc
 }
 
 export function unzipFiles(bytes: Uint8Array): Record<string, Uint8Array> {

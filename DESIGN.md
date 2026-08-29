@@ -72,7 +72,7 @@ GEBAI_HOME/
   - **接口地址（`GEBAI_LLM_API_BASE`）两种写法均可**（`endpointUrl` 助手统一拼接）：服务**根地址**（自动追加接口路径，尾部斜杠剥净，如 `https://api.deepseek.com`、`https://open.bigmodel.cn/api/paas/v4`）或**完整接口地址**（文档/控制台直接复制的形态，如 `https://open.bigmodel.cn/api/paas/v4/chat/completions`——已以接口路径结尾则原样使用，不重复拼接）；视觉模型 `GEBAI_VISION_API_BASE` 同规则（复用同一 Provider 实现）
 - **前端**: Web (Vite 构建)，桌面端由原生 WebView 启动器（tao/wry）或系统浏览器加载同一套 Web UI
 - **语法分析**: tree-sitter（wasm，`web-tree-sitter` + `tree-sitter-wasms`），供 code 的 `analyze` 工具做代码结构概览；非 AI 依赖，不影响「不引入第三方 AI SDK」原则；**语法 wasm 构建期内嵌**（`scripts/build-analyzer-wasm.ts` 生成 gzip+base64 注册表，二进制打包模式回退内嵌产物，dev 模式读 node_modules）
-- **文档处理**: `docx`（Word 生成）/ `exceljs`（Excel 读写）/ `pptxgenjs`（PPT 生成）/ `fflate`（OOXML ZIP 解包，docx/pptx 读取与追加重打包），供 `wps` 子Agent 做文档读写排版；非 AI 依赖。复用既有 `happy-dom`（`DOMParser` 以 `text/xml` 模式解析 OOXML 部件——支持命名空间前缀标签查询，注意其 `Element.children` 为 `HTMLCollection` 须转真数组后用数组方法）
+- **文档处理**: `docx`（Word 生成）/ `exceljs`（Excel 读写）/ `pptxgenjs`（PPT 生成）/ `fflate`（OOXML ZIP 解包，docx/pptx 读取与追加重打包），供 `wps` 子Agent 做文档读写排版；非 AI 依赖。复用既有 `happy-dom`（`DOMParser` 以 `text/xml` 模式解析 OOXML 部件——支持命名空间前缀标签查询，注意其 `Element.children` 为 `HTMLCollection` 须转真数组后用数组方法；`parseXml` 入口统一做 XML 声明规范化——python-docx 等第三方库写出的单引号声明 `<?xml version='1.0' …?>` 会使 happy-dom 静默降级为 HTML 解析、`w:`/`p:` 前缀查询全部落空，并对降级显式报错防误诊「文件损坏」）
 - **依赖版本钉死**: `@plantuml/core` 钉精确版本 `1.2026.6`（lockfile 不入库，caret 范围会解析到 1.2026.7——该版在 feishu-bot 渲染路径上 TeaVM 崩溃 `createProcessingInstruction`，时序图渲染必现失败）
 
 ## 软件包结构
