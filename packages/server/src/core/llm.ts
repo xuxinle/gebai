@@ -360,6 +360,61 @@ export function applyModelEnvOverrides(base: ProviderConfig, env: Record<string,
 }
 
 /**
+ * 命名模型路由（`GEBAI_LLM_ROUTES`，DESIGN「会话分支运行与合并」多路接口）：JSON 对象
+ * `{ "<路由名>": { "model": "...", "api_base"?: "...", "api_key"?: "...", "api_kind"?: "openai|responses|anthropic", "max_context"?: 400000 } }`。
+ * 分支运行按路由名解析各自 Provider——多端点/多模型并行分摊单路限流，摆脱单轮串行速度限制。
+ * 非法 JSON/非对象/字段缺失的条目静默忽略；未配置返回空表。
+ */
+export function parseModelRoutes(env: Record<string, string> | undefined): Record<string, { model: string; apiBase?: string; apiKey?: string; apiKind?: ApiKind; maxContextTokens?: number }> {
+  const raw = env?.GEBAI_LLM_ROUTES
+  if (!raw) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+  const out: Record<string, { model: string; apiBase?: string; apiKey?: string; apiKind?: ApiKind; maxContextTokens?: number }> = {}
+  for (const [name, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(name) || !v || typeof v !== "object") continue
+    const r = v as Record<string, unknown>
+    if (typeof r.model !== "string" || !r.model.trim()) continue
+    const maxCtx = Number(r.max_context)
+    out[name] = {
+      model: r.model.trim(),
+      ...(typeof r.api_base === "string" && r.api_base.trim() ? { apiBase: r.api_base.trim() } : {}),
+      ...(typeof r.api_key === "string" && r.api_key ? { apiKey: r.api_key } : {}),
+      ...(typeof r.api_kind === "string" && API_KINDS.includes(r.api_kind as ApiKind) ? { apiKind: r.api_kind as ApiKind } : {}),
+      ...(r.max_context !== undefined && Number.isFinite(maxCtx) && maxCtx > 0 ? { maxContextTokens: maxCtx } : {}),
+    }
+  }
+  return out
+}
+
+/**
+ * 按名解析分支运行 Provider（branch_run 的 model 参数）：命中 `GEBAI_LLM_ROUTES` 路由名 →
+ * 路由配置合并启动配置构建独立 Provider（未指定的项沿用任务级合并基准）；未命中路由名 →
+ * 视为字面模型名覆盖；name 为空返回 undefined（沿用任务级 Provider）。
+ */
+export function resolveModelRouteProvider(base: ProviderConfig, env: Record<string, string> | undefined, name: string): LLMProvider | undefined {
+  if (!name.trim()) return undefined
+  const mergedBase = applyModelEnvOverrides(base, env)
+  const route = parseModelRoutes(env)[name]
+  if (route) {
+    return createProvider({
+      ...mergedBase,
+      model: route.model,
+      ...(route.apiBase !== undefined ? { apiBase: route.apiBase } : {}),
+      ...(route.apiKey !== undefined ? { apiKey: route.apiKey } : {}),
+      ...(route.apiKind !== undefined ? { apiKind: route.apiKind } : {}),
+      ...(route.maxContextTokens !== undefined ? { maxContextTokens: route.maxContextTokens } : {}),
+    })
+  }
+  return createProvider({ ...mergedBase, model: name })
+}
+
+/**
  * 任务级视觉（多模态）Provider 解析：`GEBAI_VISION_*` env 覆盖启动视觉配置；
  * 未配置视觉模型时回落到声明多模态能力的主模型（含任务级 `GEBAI_LLM_MULTIMODAL` 覆盖）。
  * 返回 null 表示视觉不可用。

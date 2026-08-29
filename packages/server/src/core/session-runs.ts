@@ -87,18 +87,8 @@ export interface SessionRunService {
 export const SESSION_RUN_MAX_CONCURRENT = 8
 /** 单会话保留的终态运行记录上限（超出淘汰最旧；运行中不淘汰）。 */
 export const SESSION_RUN_KEEP = 20
-/** wait 默认等待秒数 / 上限（与 bg_task 命令任务同口径：上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底）。 */
-export const SESSION_RUN_WAIT_DEFAULT_S = 60
-export const SESSION_RUN_WAIT_MAX_S = 540
 /** cancel 后等待执行循环收尾的宽限毫秒（abort 异步传播，短暂等待让状态落定为终止）。 */
 const SESSION_RUN_CANCEL_GRACE_MS = 5000
-
-/** wait 秒数解析（默认 60，上限 540）。 */
-export function sessionRunWaitMs(v: unknown): number {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n <= 0) return SESSION_RUN_WAIT_DEFAULT_S * 1000
-  return Math.min(n, SESSION_RUN_WAIT_MAX_S) * 1000
-}
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms))
 

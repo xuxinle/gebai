@@ -30,6 +30,25 @@ export function isAgentRun(name: string): boolean {
   return shortToolName(name) === "agent_run"
 }
 
+/** branch_run 工具判定：分支运行卡片（头部列出各分支名，参数区按分支渲染任务指令块）。 */
+export function isBranchRun(name: string): boolean {
+  return shortToolName(name) === "branch_run"
+}
+
+/** branch_run 分支清单解析：{name?, prompt, model?} 项 → 头部标签（缺省名按服务端规则 b1..bN 补）。 */
+function branchLabels(v: unknown): Array<{ label: string; prompt: string }> {
+  if (!Array.isArray(v)) return []
+  const out: Array<{ label: string; prompt: string }> = []
+  v.forEach((item, i) => {
+    if (!item || typeof item !== "object") return
+    const r = item as Record<string, unknown>
+    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : `b${i + 1}`
+    const model = typeof r.model === "string" && r.model.trim() ? `（${r.model.trim()}）` : ""
+    out.push({ label: `${name}${model}`, prompt: typeof r.prompt === "string" ? r.prompt : "" })
+  })
+  return out
+}
+
 /* ---------- 工具卡片渲染（toolBubble / toolCard / 待办 / 选择） ---------- */
 
 /** 解析工具调用卡片文本 `→ name {args}`，返回 null 表示普通内容。 */
@@ -153,11 +172,16 @@ function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Reco
   return { text, full: full === text ? undefined : full }
 }
 
-/** 标题后缀统一入口：agent_run 专用（头部直接列出全部预加载子Agent 名，`+` 连接、不截断、允许多行）；其余按 titleParams 声明。 */
+/** 标题后缀统一入口：agent_run 专用（头部直接列出全部预加载子Agent 名，`+` 连接、不截断、允许多行）；
+ *  branch_run 专用（头部列出各分支名，带模型路由后缀，`+` 连接、允许多行）；其余按 titleParams 声明。 */
 function titleSuffixInfo(name: string, args: Record<string, unknown> | null): TitleSuffixInfo | null {
   if (isAgentRun(name)) {
     const agents = Array.isArray(args?.agents) ? args.agents.map(String).filter(Boolean) : []
     return agents.length ? { text: `· ${agents.join(" + ")}`, wrap: true } : null
+  }
+  if (isBranchRun(name)) {
+    const labels = branchLabels(args?.branches).map((b) => b.label)
+    return labels.length ? { text: `· ${labels.join(" + ")}`, wrap: true } : null
   }
   return titleSuffix(metaOf(name), args)
 }
@@ -186,6 +210,31 @@ function agentRunArgsBlock(args: string): HTMLElement | null {
   }
   if (!obj || typeof obj.input !== "string" || !obj.input.trim()) return null
   return el("div", "agent-run-input", obj.input)
+}
+
+/** branch_run 参数区：每分支一个小节（头部「🌿 名（模型路由）」+ 任务指令块，指令块与 agent_run 输入同款）；
+ *  async 后台执行附一行提示。分支名已在卡片头部列出，此处小节头保留模型路由等上下文。 */
+function branchRunArgsBlock(args: string): HTMLElement | null {
+  let obj: Record<string, unknown> | null = null
+  try {
+    obj = JSON.parse(args) as Record<string, unknown>
+  } catch {
+    return null
+  }
+  if (!obj) return null
+  const branches = branchLabels(obj.branches)
+  if (!branches.length) return null
+  const wrap = el("div", "branch-args")
+  for (const b of branches) {
+    if (!b.prompt.trim()) continue
+    const sec = el("div", "branch-args-item")
+    sec.appendChild(el("div", "branch-args-head", `🌿 ${b.label}`))
+    sec.appendChild(el("div", "agent-run-input", b.prompt))
+    wrap.appendChild(sec)
+  }
+  if (!wrap.children.length) return null
+  if (obj.async === true) wrap.appendChild(el("div", "branch-args-async", "⏳ async 后台执行——完成自动合入，bg_task 管理"))
+  return wrap
 }
 
 /* ---------- 参数区（键值行 / JSON 高亮 / 代码块，超长自动折叠） ---------- */
@@ -335,7 +384,11 @@ function toolBubble(content: string): HTMLElement {
     }
     bubble.appendChild(toolHead("call", parsed.name, argsObj))
     if (parsed.args) {
-      const ab = isAgentRun(parsed.name) ? agentRunArgsBlock(parsed.args) : toolArgsBlock(parsed.name, parsed.args, metaOf(parsed.name))
+      const ab = isAgentRun(parsed.name)
+        ? agentRunArgsBlock(parsed.args)
+        : isBranchRun(parsed.name)
+          ? branchRunArgsBlock(parsed.args)
+          : toolArgsBlock(parsed.name, parsed.args, metaOf(parsed.name))
       if (ab) bubble.appendChild(ab)
     }
     return bubble
@@ -349,14 +402,26 @@ function toolBubble(content: string): HTMLElement {
 const TODO_COLLAPSE_THRESHOLD = 8
 const TODO_KEEP_COMPLETED = 3
 
-/** 待办行：状态图标 + 标题 + 元信息。 */
+/** 待办状态图标：内联 SVG 描边风格（16×16、stroke currentColor，与全站图标语言一致、随主题着色），
+ *  label 为中文状态标签（悬浮提示，替代元信息行中的状态词）。 */
+const TODO_STATUS_ICONS: Record<TodoItem["status"], { svg: string; label: string }> = {
+  pending: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>', label: "待处理" },
+  in_progress: { svg: '<svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 1.5v3h-3"/></svg>', label: "进行中" },
+  completed: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M5.3 8.4l1.9 1.9 3.5-4.3"/></svg>', label: "已完成" },
+  failed: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6 6l4 4M10 6l-4 4"/></svg>', label: "已失败" },
+  cancelled: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M3.8 3.8l8.4 8.4"/></svg>', label: "已取消" },
+}
+
+/** 待办行：状态图标（st-{status} 类驱动语义色）+ 标题 + 元信息（优先级/进度/备注，状态由图标承载）。 */
 function todoRow(t: TodoItem): HTMLElement {
   const row = el("div", "todo-item")
-  const ico = t.status === "completed" ? "✅" : t.status === "in_progress" ? "🔄" : t.status === "failed" ? "❌" : t.status === "cancelled" ? "🚫" : "⬜"
-  row.appendChild(el("span", "todo-ico", ico))
+  const ico = el("span", `todo-ico st-${t.status}`)
+  ico.innerHTML = TODO_STATUS_ICONS[t.status].svg
+  ico.title = TODO_STATUS_ICONS[t.status].label
+  row.appendChild(ico)
   const body = el("div", "todo-body")
   body.appendChild(el("div", "todo-title", t.title))
-  const meta = [t.status, t.priority, t.progress != null ? `${t.progress}%` : undefined, t.note].filter(Boolean).join(" · ")
+  const meta = [t.priority, t.progress != null ? `${t.progress}%` : undefined, t.note].filter(Boolean).join(" · ")
   if (meta) body.appendChild(el("div", "todo-meta", meta))
   row.appendChild(body)
   return row
@@ -574,7 +639,12 @@ export function toolCard(msg: Message): HTMLElement {
   const meta = metaOf(msg.name ?? "")
   bubble.appendChild(toolHead("call", msg.name ?? "tool", msg.arguments ?? null))
   if (msg.arguments && Object.keys(msg.arguments).length) {
-    const ab = isAgentRun(msg.name ?? "") ? agentRunArgsBlock(JSON.stringify(msg.arguments, null, 2)) : toolArgsBlock(msg.name ?? "", JSON.stringify(msg.arguments, null, 2), meta)
+    const argsJson = JSON.stringify(msg.arguments, null, 2)
+    const ab = isAgentRun(msg.name ?? "")
+      ? agentRunArgsBlock(argsJson)
+      : isBranchRun(msg.name ?? "")
+        ? branchRunArgsBlock(argsJson)
+        : toolArgsBlock(msg.name ?? "", argsJson, meta)
     if (ab) bubble.appendChild(ab)
   }
   if (msg.content) {

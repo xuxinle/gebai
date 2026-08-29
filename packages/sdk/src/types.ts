@@ -79,8 +79,13 @@ export interface Message {
   /**
    * 新会话执行完整存档（agent_run 工具调用记录的扩展字段）：该次执行的全部内容
    * （输入/每轮回复/推理/工具调用与结果），历史会话回放据此渲染折叠容器。
+   * 分支运行（branch_run）同样以本形态存档（branch 字段标识）。
    */
   sessionRun?: SessionRunArchive
+  /** 分支运行合并消息标记（role=assistant，DESIGN「会话分支运行与合并」）：branch_run 分支最终报告
+   *  合入主上下文的消息携带；随消息落盘，loadHistory 按普通 assistant 消息进上下文（内容自带分支头行），
+   *  UI 据此渲染分支合并样式，sessionRun 字段携带分支过程存档供回放。 */
+  branchMeta?: { branchId: string; name: string; model?: string }
   /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
   subAgent?: boolean
   /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
@@ -116,6 +121,8 @@ export interface SessionRunArchive {
   /** 最终返回文本（容器折叠后摘要展示；异常/取消为空串）。 */
   output: string
   messages: SessionRunEntry[]
+  /** 分支运行（branch_run）标识：分支存档携带（agents 为空数组），前端容器标题按分支名渲染。 */
+  branch?: { name: string; model?: string }
 }
 
 /** 旧版（agent_call 时代）子Agent run 存档：结构同 SessionRunArchive 但 agent 为单值，仅历史会话兼容回放。 */
@@ -146,8 +153,9 @@ export interface ChatChunk {
   session?: boolean
   /** 新会话执行 run 标识：同一次 agent_run 的执行过程事件共享（前端按此分组渲染）。 */
   sessionRunId?: string
-  /** 新会话执行 run 元信息：session_start 携带 agents/input，session_done 携带 agents/output（前端折叠容器标题用）。 */
-  sessionMeta?: { agents: string[]; input?: string; output?: string }
+  /** 新会话执行 run 元信息：session_start 携带 agents/input，session_done 携带 agents/output（前端折叠容器标题用）；
+   *  分支运行（branch_run）的 start/done 携带 branch（分支名）与 model（模型路由名，未指定缺省）。 */
+  sessionMeta?: { agents: string[]; input?: string; output?: string; branch?: string; model?: string }
   text?: string
   toolCall?: ToolCall
   approval?: { toolCallId: string; retries: number; tool: string }

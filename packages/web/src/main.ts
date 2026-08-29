@@ -322,7 +322,8 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
       let sub = run.sessionRuns?.get(runId)
       if (!sub) {
         // 容器缺失（重连全量重同步清空 sessionRuns 后服务端不重推 start——事件已在断线前投递）：
-        // 惰性重建容器兜底，否则该 run 后续输出静默丢弃、容器永久停留旧状态
+        // 惰性重建容器兜底，否则该 run 后续输出静默丢弃、容器永久停留旧状态（分支标题等元信息
+        // 随 sessionRuns 一并丢失，下一轮 start 重推时容器已存在会被忽略——可接受的降级）
         run.sessionRuns ??= new Map()
         const box = sessionRunBox({ runId, agents: [], input: "" })
         sub = { runId, agents: [], input: "", container: box.container, body: box.body, outputEl: box.outputEl, acc: "", el: null, messageId: "", reasoningAcc: "", reasoningEl: null }
@@ -420,16 +421,19 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     }
   } else if (chunk.kind === "session_start") {
     // 新会话 run 开始：创建折叠容器（执行中展开并滚动到可见；服务端每轮重推同 runId start，已存在则忽略）
+    // 分支运行（branch_run）容器标题带分支名/模型路由（sessionMeta.branch/model）
     const runId = chunk.sessionRunId ?? ""
     if (!runId || getCurrentSession()?.id !== sessionId) return
     sealSegment(sessionId) // 新会话开始：主文本段在此分段
     run.sessionRuns ??= new Map()
     if (run.sessionRuns.get(runId)?.container.isConnected) return
-    const box = sessionRunBox({ runId, agents: chunk.sessionMeta?.agents ?? [], input: chunk.sessionMeta?.input ?? "" })
+    const branch = chunk.sessionMeta?.branch ? { name: chunk.sessionMeta.branch, model: chunk.sessionMeta.model } : undefined
+    const box = sessionRunBox({ runId, agents: chunk.sessionMeta?.agents ?? [], input: chunk.sessionMeta?.input ?? "", branch })
     run.sessionRuns.set(runId, {
       runId,
       agents: chunk.sessionMeta?.agents ?? [],
       input: chunk.sessionMeta?.input ?? "",
+      branch,
       container: box.container,
       body: box.body,
       outputEl: box.outputEl,
@@ -970,6 +974,24 @@ async function init() {
     } else if (ev.type === "event.session.minimal") {
       // 任务中模型经 full_mode 工具（用户批准）切换到完整模式：本地极简开关随之关闭
       if (ev.payload.enabled === false) syncMinimalModeFromServer(false)
+    } else if (ev.type === "event.branch.merged") {
+      // 分支报告合入主上下文（DESIGN「会话分支运行与合并」）：实时渲染合并气泡（分支过程在折叠容器，
+      // 报告气泡即时可见；历史回放由存储中的合并消息承担，含过程存档容器）
+      if (getCurrentSession()?.id !== ev.sessionId) return
+      sealSegment(ev.sessionId) // 合并消息独立成段（不并入主线在途流式文本）
+      appendMsg({
+        id: String(ev.payload.messageId ?? uuid()),
+        role: "assistant",
+        content: String(ev.payload.text ?? ""),
+        branchMeta: {
+          branchId: String(ev.payload.branchId ?? ""),
+          name: String(ev.payload.name ?? ""),
+          ...(ev.payload.model ? { model: String(ev.payload.model) } : {}),
+        },
+        createdAt: Date.now(),
+      })
+      scrollIfSticky()
+      refreshJumpBottom()
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流
