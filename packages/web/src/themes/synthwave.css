@@ -751,7 +751,7 @@ background: rgba(26, 10, 46, 0.7) !important;
   box-shadow: 0 0 16px rgba(0, 212, 255, 0.2);
   transform: translateY(-1px);
 }
-[data-theme="synthwave"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(255, 110, 199, 0.4); }
+[data-theme="synthwave"] .todo-ico { color: var(--accent); filter: drop-shadow(0 0 4px rgba(255, 110, 199, 0.4)); }
 [data-theme="synthwave"] .bubble.compact-notice {
   background: rgba(192, 132, 252, 0.06);
   border: 1px dashed rgba(192, 132, 252, 0.3);

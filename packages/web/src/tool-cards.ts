@@ -412,6 +412,15 @@ const TODO_STATUS_ICONS: Record<TodoItem["status"], { svg: string; label: string
   cancelled: { svg: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M3.8 3.8l8.4 8.4"/></svg>', label: "已取消" },
 }
 
+/** 待办优先级中文标签（元信息行展示）。 */
+const TODO_PRIORITY_LABELS: Record<NonNullable<TodoItem["priority"]>, string> = { high: "高", medium: "中", low: "低" }
+
+/** 待办行元信息：优先级（中文标签）· 进度 · 备注，纯文本弱化展示（不做视觉区分）。 */
+function todoMeta(t: TodoItem): HTMLElement | null {
+  const meta = [t.priority ? TODO_PRIORITY_LABELS[t.priority] : undefined, t.progress != null ? `${t.progress}%` : undefined, t.note].filter(Boolean).join(" · ")
+  return meta ? el("div", "todo-meta", meta) : null
+}
+
 /** 待办行：状态图标（st-{status} 类驱动语义色）+ 标题 + 元信息（优先级/进度/备注，状态由图标承载）。 */
 function todoRow(t: TodoItem): HTMLElement {
   const row = el("div", "todo-item")
@@ -421,8 +430,8 @@ function todoRow(t: TodoItem): HTMLElement {
   row.appendChild(ico)
   const body = el("div", "todo-body")
   body.appendChild(el("div", "todo-title", t.title))
-  const meta = [t.priority, t.progress != null ? `${t.progress}%` : undefined, t.note].filter(Boolean).join(" · ")
-  if (meta) body.appendChild(el("div", "todo-meta", meta))
+  const meta = todoMeta(t)
+  if (meta) body.appendChild(meta)
   row.appendChild(body)
   return row
 }

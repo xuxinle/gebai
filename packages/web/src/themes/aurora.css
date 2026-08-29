@@ -740,7 +740,7 @@
   box-shadow: 0 0 16px rgba(45, 212, 191, 0.2);
   transform: translateY(-1px);
 }
-[data-theme="aurora"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(45, 212, 191, 0.4); }
+[data-theme="aurora"] .todo-ico { color: var(--accent); filter: drop-shadow(0 0 4px rgba(45, 212, 191, 0.4)); }
 [data-theme="aurora"] .bubble.compact-notice {
   background: rgba(139, 92, 246, 0.06);
   border: 1px dashed rgba(139, 92, 246, 0.3);

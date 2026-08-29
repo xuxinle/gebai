@@ -738,7 +738,7 @@
   color: var(--accent-2);
   box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
 }
-[data-theme="cyberpunk"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(255, 45, 120, 0.4); }
+[data-theme="cyberpunk"] .todo-ico { color: var(--accent); filter: drop-shadow(0 0 4px rgba(255, 45, 120, 0.4)); }
 [data-theme="cyberpunk"] .bubble.compact-notice {
   background: rgba(168, 85, 247, 0.05);
   border: 1px dashed rgba(168, 85, 247, 0.4);

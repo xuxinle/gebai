@@ -1087,7 +1087,7 @@
 /* ============================================================
    待办、压缩、附件、预览
    ============================================================ */
-[data-theme="matrix"] .todo-ico { color: var(--accent); text-shadow: 0 0 4px rgba(0, 255, 65, 0.5); }
+[data-theme="matrix"] .todo-ico { color: var(--accent); filter: drop-shadow(0 0 4px rgba(0, 255, 65, 0.5)); }
 [data-theme="matrix"] .bubble.compact-notice {
   background: rgba(255, 176, 0, 0.06);
   border: 1px dashed rgba(255, 176, 0, 0.4);
