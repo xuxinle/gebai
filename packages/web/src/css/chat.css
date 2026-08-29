@@ -37,11 +37,13 @@
   width: 20px;
   opacity: 1;
 }
-/* 扩大 hover/点击命中区（视觉不变）：上下 8px、左右 12px */
+/* 扩大 hover/点击命中区（视觉不变）：上下 3px、左右 4px——只补足 2px 细线的可点性，
+ * 不与相邻短横线（步长 18px）连成竖带：连绵命中带会把右缘扫过/拖滚动条误触变成
+ * 「按下即跳 + pointer capture 劫持」（配合 press-gesture 阈值双重防护） */
 .msg-nav-seg::before {
   content: "";
   position: absolute;
-  inset: -8px -12px;
+  inset: -3px -4px;
 }
 /* hover/focus：加粗拉长变亮（静止态始终 1px 恒定，无粗细交替） */
 .msg-nav-seg:hover,
