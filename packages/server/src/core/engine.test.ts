@@ -40,7 +40,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -246,8 +246,13 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "approval2" && this.calls === 1) {
-      // 第一轮连续两个需审批工具：验证「运行中开启自动审批」对后续审批即时生效
+      // 两轮各一个需审批工具：验证「运行中开启自动审批」对后续（下一轮）审批即时生效。
+      // 同批多调用并行门控（同批共享门控时刻，中途改 env 不再影响同批后续项），跨轮才保留该时序
       yield { type: "tool_call", toolCall: { id: "tc-1", name: "sh", arguments: { command: "echo a" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "approval2" && this.calls === 2) {
       yield { type: "tool_call", toolCall: { id: "tc-2", name: "sh", arguments: { command: "echo b" } } }
       yield { type: "done" }
       return
@@ -290,6 +295,40 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // 同批多工具并行执行（DESIGN「同批工具并行执行」）：单次响应返回多个 tool_call
+    // （须置于下方 calls===1 兜底分支之前）
+    if (this.mode === "parallel" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-pp1", name: "slowecho", arguments: { tag: "a" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-pp2", name: "slowecho", arguments: { tag: "b" } } }
+      yield { type: "done" }
+      return
+    }
+    // 混合批次：需审批工具 + 免审批工具同批（免审批项不等待审批项）
+    if (this.mode === "mixapprove" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-ma1", name: "sh", arguments: { command: "echo hi" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-ma2", name: "slowecho", arguments: { tag: "free" } } }
+      yield { type: "done" }
+      return
+    }
+    // 混合批次：缺参调用 + 正常调用同批（门控说明性结果与执行项共存）
+    if (this.mode === "mixmissing" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-mm1", name: "slowecho", arguments: {} } }
+      yield { type: "tool_call", toolCall: { id: "tc-mm2", name: "slowecho", arguments: { tag: "ok" } } }
+      yield { type: "done" }
+      return
+    }
+    // 新会话内同批并行：外层 agent_run，子会话单批两个 tool_call（工具来自测试子Agent para_test_slow）
+    if (this.mode === "subparallel" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-spr1", name: "agent_run", arguments: { agents: ["para_test"], input: "run parallel" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subparallel" && this.calls === 2) {
+      yield { type: "tool_call", toolCall: { id: "tc-spr2", name: "para_test_slow", arguments: { tag: "n1" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-spr3", name: "para_test_slow", arguments: { tag: "n2" } } }
+      yield { type: "done" }
+      return
+    }
     if (this.calls === 1) {
       yield { type: "text", text: "using tool" }
       // ask 选项询问分支需要有效参数（prompt + options），否则会因无选项抛错
@@ -309,7 +348,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -367,6 +406,34 @@ function cleanup(home: string) {
   savedEnv = {}
 }
 
+/** 同批并行测试载体：慢速工具记录并发重叠（active 计数峰值），输出 `done:{tag}`。 */
+function registerSlowEcho(registry: ToolRegistry, ms = 120): { maxActive: () => number } {
+  let active = 0
+  let max = 0
+  registry.register({
+    name: "slowecho",
+    description: "test slow tool (parallel batch)",
+    parameters: { type: "object", properties: { tag: { type: "string" } }, required: ["tag"] },
+    async execute(args: Record<string, unknown>) {
+      active++
+      max = Math.max(max, active)
+      await new Promise((r) => setTimeout(r, ms))
+      active--
+      return { output: `done:${String(args.tag)}` }
+    },
+  })
+  return { maxActive: () => max }
+}
+
+/** 轮询等待会话消息满足条件（审批等待期间断言「免审批工具已完成」用）。 */
+async function waitForStore(store: SessionStore, sessionId: string, pred: (msgs: Array<{ role: string; content: string }>) => boolean, timeout = 3000): Promise<void> {
+  const t0 = Date.now()
+  while (!pred((await store.load(sessionId))?.messages ?? [])) {
+    if (Date.now() - t0 > timeout) throw new Error("timeout waiting store condition")
+    await new Promise((r) => setTimeout(r, 15))
+  }
+}
+
 describe("AgentEngine", () => {
   test("runs a plain text turn and persists assistant reply", async () => {
     const { home, engine, store } = await setup("text")
@@ -375,6 +442,155 @@ describe("AgentEngine", () => {
     const loaded = await store.load(session.id)
     expect(loaded!.messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true)
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "hello from fake")).toBe(true)
+    cleanup(home)
+  })
+
+  test("final assistant reply is persisted with the streamed messageId (撤回对刚完成的回复立即生效)", async () => {
+    const { home, engine, store, events } = await setup("text")
+    const session = await store.createSession("default", "t")
+    let streamedId: string | undefined
+    events.subscribe((e) => {
+      if (e.type === "event.message.delta" && e.sessionId === session.id) streamedId = (e.payload as Record<string, unknown>).messageId as string
+    })
+    await engine.run(session.id, "default", "hi")
+    const loaded = await store.load(session.id)
+    const final = loaded!.messages.find((m) => m.role === "assistant" && m.content === "hello from fake")
+    expect(final).toBeDefined()
+    expect(streamedId).toBeDefined()
+    expect(final!.id).toBe(streamedId!)
+    // 按该 id 撤回（truncate）立即命中：最终消息与其后续一并删除
+    await store.truncateMessages(session.id, "default", final!.id)
+    const after = await store.load(session.id)
+    expect(after!.messages.some((m) => m.id === final!.id)).toBe(false)
+    cleanup(home)
+  })
+
+  test("truncating a mid-turn assistant(toolCalls) message removes its tool results (助手消息撤回语义)", async () => {
+    const { home, engine, store } = await setup("tool")
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    const loaded = await store.load(session.id)
+    const mid = loaded!.messages.find((m) => m.role === "assistant" && m.toolCalls?.length)
+    expect(mid).toBeDefined()
+    await store.truncateMessages(session.id, "default", mid!.id)
+    const after = await store.load(session.id)
+    // 中途 assistant(toolCalls)、其 tool 结果与最终回复一并删除，只保留用户输入
+    expect(after!.messages.every((m) => m.role === "user")).toBe(true)
+    cleanup(home)
+  })
+
+  test("same-batch tool calls execute in parallel (同批工具并行执行)", async () => {
+    const { home, engine, store, registry, provider } = await setup("parallel")
+    const probe = registerSlowEcho(registry)
+    const session = await store.createSession("default", "t")
+    const t0 = Date.now()
+    await engine.run(session.id, "default", "run both")
+    const elapsed = Date.now() - t0
+    // 两个调用重叠执行（并行），总耗时接近单次（串行 ≥ 2×120ms）
+    expect(probe.maxActive()).toBeGreaterThanOrEqual(2)
+    expect(elapsed).toBeLessThan(230)
+    // 两条结果均落盘并按 toolCallId 配对完整；下一轮模型调用可见全部结果
+    const loaded = await store.load(session.id)
+    const round = loaded!.messages.find((m) => m.role === "assistant" && m.toolCalls?.length)!
+    expect(round.toolCalls!.length).toBe(2)
+    const results = loaded!.messages.filter((m) => m.role === "tool")
+    expect(results.length).toBe(2)
+    const ids = new Set(round.toolCalls!.map((tc) => tc.id))
+    for (const r of results) expect(ids.has(r.toolCallId!)).toBe(true)
+    const second = provider.seenChats[1]
+    expect(JSON.stringify(second)).toContain("done:a")
+    expect(JSON.stringify(second)).toContain("done:b")
+    cleanup(home)
+  })
+
+  test("free tool in same batch does not wait for approval-gated sibling (审批等待不阻塞同批免审批工具)", async () => {
+    const { home, engine, store, registry, events } = await setup("mixapprove")
+    registerSlowEcho(registry)
+    const session = await store.createSession("default", "t")
+    let approvalSeen = false
+    events.subscribe((e) => {
+      if (e.type === "event.approval.request" && e.sessionId === session.id) approvalSeen = true
+    })
+    const run = engine.run(session.id, "default", "run mixed batch")
+    // 免审批工具在审批等待期间已完成并落盘（任务仍在运行）
+    await waitForStore(store, session.id, (msgs) => msgs.some((m) => m.role === "tool" && m.content === "done:free"))
+    expect(approvalSeen).toBe(true)
+    expect(engine.isRunning(session.id)).toBe(true)
+    await engine.decideApproval(session.id, "tc-ma1", true)
+    await run
+    const loaded = await store.load(session.id)
+    const results = loaded!.messages.filter((m) => m.role === "tool").map((m) => m.content)
+    expect(results).toContain("done:free")
+    expect(results.some((c) => c.includes("hi"))).toBe(true) // 审批通过后 sh 执行
+    cleanup(home)
+  })
+
+  test("gating notes and executable calls coexist in one batch (缺参门控结果与执行项共存)", async () => {
+    const { home, engine, store, registry, provider, events } = await setup("mixmissing")
+    registerSlowEcho(registry)
+    const session = await store.createSession("default", "t")
+    // 门控说明性结果同样推送 call+result 事件对：前端实时建卡（不依赖刷新），与落盘一致
+    const callEvents: string[] = []
+    const resultEvents: string[] = []
+    events.subscribe((e) => {
+      if (e.sessionId !== session.id) return
+      if (e.type === "event.tool.call") callEvents.push(String((e.payload as Record<string, unknown>).toolCallId))
+      if (e.type === "event.tool.result") resultEvents.push(String((e.payload as Record<string, unknown>).toolCallId))
+    })
+    await engine.run(session.id, "default", "run mixed")
+    const loaded = await store.load(session.id)
+    const results = loaded!.messages.filter((m) => m.role === "tool")
+    expect(results.length).toBe(2)
+    // 缺参调用：门控说明性结果（不执行）；正常调用：执行结果——同批共存、配对完整
+    expect(results.some((m) => m.content.includes("缺少必填参数"))).toBe(true)
+    expect(results.some((m) => m.content === "done:ok")).toBe(true)
+    const second = provider.seenChats[1]
+    expect(JSON.stringify(second)).toContain("done:ok")
+    expect(JSON.stringify(second)).toContain("缺少必填参数")
+    // 事件对齐落盘：缺参门控项与执行项都有 call+result 事件（运行时卡片可见）
+    expect(callEvents).toContain("tc-mm1")
+    expect(callEvents).toContain("tc-mm2")
+    expect(resultEvents).toContain("tc-mm1")
+    expect(resultEvents).toContain("tc-mm2")
+    cleanup(home)
+  })
+
+  test("new-session loop runs same-batch tools in parallel (新会话循环同批并行，存档完整)", async () => {
+    const { home, engine, store, subAgents } = await setup("subparallel")
+    // 工具经测试子Agent 提供（新会话继承全局工具走 createGlobalTools 工厂全集，不含主注册表临时注册项）
+    let active = 0
+    let max = 0
+    subAgents.register({
+      name: "para_test",
+      description: "并行批次测试 Agent",
+      systemPrompt: "你是并行测试 Agent。",
+      tools: {
+        slow: {
+          name: "slow",
+          description: "慢速工具",
+          parameters: { type: "object", properties: { tag: { type: "string" } }, required: ["tag"] },
+          execute: async (args: Record<string, unknown>) => {
+            active++
+            max = Math.max(max, active)
+            await new Promise((r) => setTimeout(r, 120))
+            active--
+            return { output: `done:${String(args.tag)}` }
+          },
+        },
+      },
+    })
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "delegate")
+    expect(max).toBeGreaterThanOrEqual(2)
+    // 存档（agent_run 工具消息扩展字段）包含两个并行调用的结果条目
+    const loaded = await store.load(session.id)
+    const runToolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run")!
+    const archive = (runToolMsg as unknown as { sessionRun?: { messages: Array<{ role: string; content: string }> } }).sessionRun
+    expect(archive).toBeDefined()
+    const toolEntries = archive!.messages.filter((m) => m.role === "tool")
+    expect(toolEntries.length).toBe(2)
+    expect(toolEntries.some((m) => m.content === "done:n1")).toBe(true)
+    expect(toolEntries.some((m) => m.content === "done:n2")).toBe(true)
     cleanup(home)
   })
 
@@ -732,8 +948,11 @@ console.log("defined ok")`,
     const session = await store.createSession("default", "t")
     // 等待审批请求发布后再拒绝（确定性同步：拒绝立即 abort，若早于循环启动会直接取消无产物）
     let requested: Record<string, unknown> | null = null
+    const resultEvents: string[] = []
     events.subscribe((e) => {
-      if (e.type === "event.approval.request" && e.sessionId === session.id) requested = e.payload as Record<string, unknown>
+      if (e.sessionId !== session.id) return
+      if (e.type === "event.approval.request") requested = e.payload as Record<string, unknown>
+      if (e.type === "event.tool.result") resultEvents.push(String((e.payload as Record<string, unknown>).toolCallId))
     })
     const run = engine.run(session.id, "default", "run sh")
     const t0 = Date.now()
@@ -751,6 +970,8 @@ console.log("defined ok")`,
     expect(toolMsg!.content).toContain("拒绝")
     expect(provider.calls).toBe(1)
     expect(engine.isRunning(session.id)).toBe(false)
+    // 拒绝结果同样推送 tool.result 事件：实时卡片落终态（不依赖刷新）
+    expect(resultEvents).toContain("tc-1")
     cleanup(home)
   })
 
@@ -964,15 +1185,17 @@ console.log("defined ok")`,
       if (ev.type === "event.approval.request") requested.push((ev.payload as { toolCallId: string }).toolCallId)
     })
     const run = engine.run(session.id, "default", "run two tools")
-    await new Promise((r) => setTimeout(r, 50)) // tc-1 审批等待中
+    // tc-1 审批等待中（轮询等待审批请求发布——引擎门控与并行池启动存在毫秒级开销，固定 sleep 在慢环境下会错过）
+    const t0 = Date.now()
+    while (!requested.length && Date.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 10))
     expect(requested).toEqual(["tc-1"])
     // 会话运行中开启自动审批（会话 env 实时写入），已等待中的 tc-1 手动通过
     await store.setEnv(session.id, "default", { GEBAI_APPROVAL_SKIP: "true" })
     await engine.decideApproval(session.id, "tc-1", true)
     await run
-    // tc-2 的审批被实时判定跳过：全程仅 tc-1 一次审批请求，两轮 chat 后正常完成
+    // tc-2 的审批被实时判定跳过：全程仅 tc-1 一次审批请求，两轮工具 + 最终回复共三次 chat 后正常完成
     expect(requested).toEqual(["tc-1"])
-    expect(provider.calls).toBe(2)
+    expect(provider.calls).toBe(3)
     expect(engine.isRunning(session.id)).toBe(false)
     cleanup(home)
   })
@@ -2393,6 +2616,71 @@ console.log("defined ok")`,
     const interr = loaded!.messages.filter((m) => m.role === "tool" && String(m.content).includes("已中断重复的工具调用"))
     expect(interr.length).toBe(3)
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "round 5")).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("same-batch identical calls are deliberate fan-out: all execute, no repeat interrupt (同批重复签名只计一次)", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    let calls = 0
+    s.provider.chat = async function* () {
+      calls++
+      if (calls === 1) {
+        // 同批三个完全相同的调用（有意扇出：发出时尚未见任何结果）
+        yield { type: "tool_call", toolCall: { id: "tc-f1", name: "ls", arguments: {} } }
+        yield { type: "tool_call", toolCall: { id: "tc-f2", name: "ls", arguments: {} } }
+        yield { type: "tool_call", toolCall: { id: "tc-f3", name: "ls", arguments: {} } }
+        yield { type: "done", stopReason: "tool_calls" }
+        return
+      }
+      yield { type: "text", text: "fan-out done" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    await s.engine.run(session.id, "default", "fan out")
+    const loaded = await s.store.load(session.id)
+    const toolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.name === "ls")
+    // 三个相同调用全部执行（无重复中断），三条结果均落盘（第二轮模型可见）
+    expect(toolMsgs.length).toBe(3)
+    expect(toolMsgs.some((m) => String(m.content).includes("已中断重复的工具调用"))).toBe(false)
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "fan-out done")).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("cross-round repetition still interrupted after same-batch fan-out (跨轮重复照常累积判定)", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    let calls = 0
+    s.provider.chat = async function* () {
+      calls++
+      if (calls === 1) {
+        // 第一轮同批两个相同调用（扇出，各记录一次签名）
+        yield { type: "tool_call", toolCall: { id: "tc-c1", name: "ls", arguments: {} } }
+        yield { type: "tool_call", toolCall: { id: "tc-c2", name: "ls", arguments: {} } }
+        yield { type: "done", stopReason: "tool_calls" }
+        return
+      }
+      if (calls === 2) {
+        // 第二轮再见结果后重发同签名：为窗口内第 2 次记录，尚不触发
+        yield { type: "tool_call", toolCall: { id: "tc-c3", name: "ls", arguments: {} } }
+        yield { type: "done", stopReason: "tool_calls" }
+        return
+      }
+      if (calls === 3) {
+        // 第三轮仍重发同签名：窗口第 3 次记录命中阈值，被中断（注入引导提示）
+        yield { type: "tool_call", toolCall: { id: "tc-c4", name: "ls", arguments: {} } }
+        yield { type: "done", stopReason: "tool_calls" }
+        return
+      }
+      yield { type: "text", text: "stopped repeating" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    await s.engine.run(session.id, "default", "repeat")
+    const loaded = await s.store.load(session.id)
+    const toolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.name === "ls")
+    // 第一轮 2 个执行（扇出各记录一次）+ 第二轮 1 个执行（第 2 次记录），第三轮重发被中断（第 3 次记录命中）
+    expect(toolMsgs.filter((m) => String(m.content).includes("已中断重复的工具调用")).length).toBe(1)
+    expect(toolMsgs.filter((m) => !String(m.content).includes("已中断重复的工具调用")).length).toBe(3)
+    expect(calls).toBe(4)
     cleanup(s.home)
   })
 })

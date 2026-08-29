@@ -14,6 +14,7 @@ interface MockEl {
   tagName: string
   textContent: string
   append(...nodes: unknown[]): void
+  prepend(...nodes: unknown[]): void
   appendChild(n: unknown): void
   remove(): void
 }
@@ -38,6 +39,15 @@ function makeMockEl(tag = "div"): MockElWithQuery {
         if (n && typeof n === "object") {
           ;(n as MockEl & { parentRef?: MockEl }).parentRef = el
           el.children.push(n as MockEl)
+        }
+      }
+    },
+    // 用户消息操作组经 meta.prepend 挂载（称谓行左侧），mock 需真实插入否则元素被静默丢弃
+    prepend(...nodes: unknown[]) {
+      for (const n of [...nodes].reverse()) {
+        if (n && typeof n === "object") {
+          ;(n as MockEl & { parentRef?: MockEl }).parentRef = el
+          el.children.unshift(n as MockEl)
         }
       }
     },
@@ -130,7 +140,7 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard } = await import("./messages")
+const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead } = await import("./tool-cards")
 
@@ -147,6 +157,64 @@ function fakeRun(overrides: Partial<RunState> = {}): RunState {
     ...overrides,
   } as RunState
 }
+
+describe("消息撤回按钮（用户与助手消息；容器内消息与运行中会话抑制）", () => {
+  /** 按悬浮提示找按钮（msg-act 无区分类名，tip 写入 dataset.tip）。 */
+  function findByTip(host: MockElWithQuery, tipText: string): MockElWithQuery | undefined {
+    return (host.querySelectorAll("button") as unknown as MockElWithQuery[]).find((b) => (b as unknown as { dataset: Record<string, string> }).dataset.tip === tipText)
+  }
+  /** 组装最小消息骨架并绑定操作按钮（不经 appendMsg 顶层路径——msg-nav 的 msgEl 由更早的
+   *  测试文件（markdown.test.ts）以无 getBoundingClientRect 的 mock 捕获，顶层用户消息会触发导航重算）。 */
+  function bindActions(msg: { role: "user" | "assistant"; content: string; id: string }, opts?: { noRevoke?: boolean }): MockElWithQuery {
+    const meta = makeMockEl("div")
+    addMetaActions(meta as unknown as HTMLElement, makeMockEl("div") as unknown as HTMLElement, makeMockEl("div") as unknown as HTMLElement, msg, opts)
+    return meta
+  }
+
+  test("助手消息渲染撤回按钮（撤回该回复及其后续），用户消息保持原提示", () => {
+    const userMeta = bindActions({ role: "user", content: "hi", id: "u1" })
+    expect(findByTip(userMeta, "撤回该消息及其后续")).toBeTruthy()
+    const asstMeta = bindActions({ role: "assistant", content: "回答", id: "a1" })
+    const revoke = findByTip(asstMeta, "撤回该回复及其后续")
+    expect(revoke).toBeTruthy()
+    expect(typeof (revoke as unknown as { onclick?: unknown }).onclick).toBe("function")
+  })
+
+  test("新会话容器内回放消息不提供撤回（id 为本地生成，无服务端落点）", () => {
+    const parent = makeMockEl("div")
+    // 容器内消息：appendMsg 以 parent 渲染，撤回按钮被抑制
+    const wrapper = appendMsg({ id: "ephemeral", role: "assistant", content: "容器内回复", createdAt: 1 }, false, parent as unknown as HTMLElement) as unknown as MockElWithQuery
+    expect(findByTip(wrapper, "撤回该回复及其后续")).toBeUndefined()
+    // 复制/反馈照常（只抑制撤回）
+    expect((wrapper.querySelectorAll("button") as unknown as MockElWithQuery[]).length).toBeGreaterThanOrEqual(3)
+  })
+
+  test("addMetaActions noRevoke 直接抑制（本地收尾说明气泡等非持久化消息）", () => {
+    const meta = bindActions({ role: "assistant", content: "本地气泡", id: "x" }, { noRevoke: true })
+    expect(findByTip(meta, "撤回该回复及其后续")).toBeUndefined()
+  })
+
+  test("运行中会话点击撤回被拦截：不进入确认对话框（onclick 快速返回）", async () => {
+    const { getCurrentSession, setCurrentSession } = await import("./state")
+    setCurrentSession({ id: "s1" } as unknown as import("@gebai/sdk").SessionInfo)
+    runs.set("s1", fakeRun())
+    try {
+      const meta = bindActions({ role: "assistant", content: "回答", id: "a2" })
+      const revoke = findByTip(meta, "撤回该回复及其后续") as unknown as { onclick?: () => Promise<void> }
+      expect(revoke).toBeTruthy()
+      // 守卫路径立即返回；若误入 confirmDialog（mock DOM 无按钮可点）则挂起超时
+      const settled = await Promise.race([
+        revoke.onclick!().then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 200)),
+      ])
+      expect(settled).toBe(true)
+      expect(getCurrentSession()?.id).toBe("s1")
+    } finally {
+      runs.clear()
+      setCurrentSession(null)
+    }
+  })
+})
 
 describe("isBlockOnly (card.args=block 声明驱动，替代前端 BLOCK_ONLY_TOOLS 硬编码)", () => {
   test("follows server-declared card metadata", () => {

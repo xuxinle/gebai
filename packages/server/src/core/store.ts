@@ -371,13 +371,18 @@ export class SessionStore {
     await this.save(session)
   }
 
-  /** 截断会话消息：删除 beforeMsgId 及之后的所有消息（撤回该消息及其后续）。 */
+  /** 截断会话消息：删除 beforeMsgId 及之后的所有消息（撤回该消息及其后续，用户/助手消息均可）。
+   *  后缀删除不破坏 assistant(toolCalls)/tool 配对（工具结果恒在其发起消息之后，随之一并删除）。 */
   async truncateMessages(sessionId: string, userId: string, beforeMsgId: string): Promise<void> {
     const session = await this.load(sessionId, userId)
     if (!session) throw new Error(`session not found: ${sessionId}`)
     const idx = session.messages.findIndex((m) => m.id === beforeMsgId)
     if (idx === -1) throw new Error(`message not found: ${beforeMsgId}`)
     session.messages = session.messages.slice(0, idx)
+    // 真实 usage 基线的索引锚点随删除错位（与压缩同因）：清除基线回退估算，下次真实调用重建
+    session.ctxInputTokens = undefined
+    session.ctxAtMessage = undefined
+    session.ctxTokens = estimateCtxTokens(session.messages)
     await this.save(session)
   }
 
