@@ -121,6 +121,14 @@ export type ToolContext = {
   /** agent_run 异步后台运行服务（agent_run async:true 启动、bg_task 统一管理；引擎按会话注入）。
    *  可选：测试桩/无引擎环境不注入时 agent_run async 返回不可用说明。 */
   sessionRuns?: import("./session-runs").SessionRunService
+  /** 会话分支运行服务（branch_run 工具，DESIGN「会话分支运行与合并」；引擎仅主循环注入——分支内/新会话
+   *  执行内不可再分支）。可选：未注入（子Agent 运行环境/测试桩）时 branch_run 返回不可用说明。 */
+  branchRuns?: import("./branch-runs").BranchRunService
+  /** 分支与主干双向同步（branch_sync 工具，DESIGN「会话分支运行与合并」互相感知，分支唯一同步工具）：
+   *  传 content = 交出阶段性成果立即合入主上下文（主线与其他并行分支下一轮可见，分支继续执行）；
+   *  不传 = 纯拉取。均返回主干自 fork/上次同步以来的增量（主线输入/回复、其他分支合入全文、主线工具摘要）。
+   *  可选：仅分支运行上下文注入——未注入时 branch_sync 返回不可用说明。 */
+  branchSync?: (content?: string) => Promise<string>
   /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>
   /**

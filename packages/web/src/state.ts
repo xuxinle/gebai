@@ -111,12 +111,14 @@ export function getEmptyState(): HTMLElement | null {
   return emptyState
 }
 
-/** 新会话 run 折叠容器状态（agent_run 执行过程）：同 runId 事件共享，执行中展开、结束后折叠只显示输入与最终返回。 */
+/** 新会话 run 折叠容器状态（agent_run 执行过程/branch_run 分支运行）：同 runId 事件共享，执行中展开、结束后折叠只显示输入与最终返回。 */
 export interface SessionRunState {
   runId: string
   /** 预加载进新会话的子Agent 列表。 */
   agents: string[]
   input: string
+  /** 分支运行（branch_run）标识：容器标题「🌿 分支 · name(model)」用；新会话执行无此字段。 */
+  branch?: { name: string; model?: string }
   /** details.session-run 折叠容器（summary=标题+输入/返回摘要，body=执行过程消息区）。 */
   container: HTMLDetailsElement
   /** 容器内消息追加区（.session-body）。 */

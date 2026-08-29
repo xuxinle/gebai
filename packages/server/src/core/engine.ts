@@ -11,10 +11,11 @@ import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
-import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
+import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
 import { SessionRunRegistry, type SessionRunHandle } from "./session-runs"
+import { BranchRunRegistry, type BranchRunHandle, type BranchSpec, BRANCH_MERGE_MAX_CHARS, branchNoticeHead } from "./branch-runs"
 import { RESERVED_PROJECT_TMP } from "./projects"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
@@ -280,6 +281,9 @@ export interface AgentEngineOptions {
   /** 任务级主模型 Provider 解析：env 配置 GEBAI_LLM_* 时返回重建的 Provider（覆盖启动配置）；
    *  无覆盖返回 undefined（调用方沿用 opts.provider 实例）。 */
   resolveProvider?: (env: Record<string, string>) => LLMProvider | undefined
+  /** 分支运行模型路由解析（DESIGN「会话分支运行与合并」多路接口）：按名（GEBAI_LLM_ROUTES 路由名或
+   *  字面模型名）返回独立 Provider；未注入或名字为空返回 undefined（分支沿用任务级 Provider）。 */
+  resolveModelProvider?: (env: Record<string, string>, name: string) => LLMProvider | undefined
   registry: ToolRegistry
   store: SessionStore
   env: EnvManager
@@ -333,6 +337,15 @@ export class AgentEngine {
    *  运行存活与本进程绑定（重启即中断，不落盘恢复）；SessionRunRegistry 为按会话过滤的薄视图。 */
   private sessionRunStore = new Map<string, SessionRunHandle>()
 
+  /** 会话分支运行句柄（进程内，引擎级共享：branchId → handle；DESIGN「会话分支运行与合并」）。
+   *  同 session-runs 哲学：随进程存活、重启即中断；BranchRunRegistry 为按会话过滤的薄视图。 */
+  private branchRunStore = new Map<string, BranchRunHandle>()
+
+  /** 分支合并队列（DESIGN「会话分支运行与合并」）：sessionId → 待合入主上下文的分支报告消息。
+   *  分支完成时入队；runLoop 在工具批处理边界排空（tool 结果之后追加，保持 tool_calls 配对完整，
+   *  主线下轮模型调用即见）；任务结束（run finally）冲刷落盘（异步分支结果不因任务收尾丢失）。 */
+  private branchMerges = new Map<string, Message[]>()
+
   constructor(private opts: AgentEngineOptions) {}
 
   isRunning(sessionId: string): boolean {
@@ -378,6 +391,13 @@ export class AgentEngine {
       if (h.status === "running") h.controller.abort(new Error("会话已删除"))
       this.sessionRunStore.delete(runId)
     }
+    // 分支运行（branch_run）同规则清理；合并队列一并丢弃（目标会话已不存在）
+    for (const [branchId, h] of this.branchRunStore) {
+      if (h.sessionId !== sessionId) continue
+      if (h.status === "running") h.controller.abort(new Error("会话已删除"))
+      this.branchRunStore.delete(branchId)
+    }
+    this.branchMerges.delete(sessionId)
   }
 
   /** 对本会话可见的子Agent 名集合（装载工具会话可见性，DESIGN「装载工具会话可见性」）：每次取用现算
@@ -1242,6 +1262,11 @@ export class AgentEngine {
             createdAt: Date.now(),
           }, user)
           this.clearStream(sessionId) // 最终回复已持久化，在途快照清空
+          // 主线进展广播（分支互相感知，DESIGN「会话分支运行与合并」）：异步分支运行中主线每轮最终回复
+          // 通知各分支（同步 fan-out 期间主线阻塞在 branch_run 工具内，无此交错）——分支据此感知主线决策
+          if ([...this.branchRunStore.values()].some((h) => h.sessionId === sessionId && h.status === "running")) {
+            this.relayToBranches(sessionId, undefined, `【主线进展】主线回复:\n${branchNoticeHead(finalText)}`)
+          }
         }
         if (controller.signal.aborted) break
 
@@ -1316,6 +1341,9 @@ export class AgentEngine {
       for (const ch of task.choices.values()) clearTimeout(ch.timer)
       this.tasks.delete(sessionId)
       this.taskMods.delete(sessionId)
+      // 分支合并队列冲刷（仅落盘；上下文随任务结束，下次 run 经 loadHistory 进上下文）：置于 tasks.delete
+      // 之后——其后完成的分支经 trunkMerge 判定无任务直接落盘，无入队/漏排空竞态
+      await this.drainBranchMerges(sessionId, user).catch(() => {})
     }
   }
 
@@ -1453,6 +1481,7 @@ export class AgentEngine {
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
+      `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 branch_run 会话分支运行——从当前上下文 fork 多分支同时执行（各分支掌握主线全部背景与工具，可各自传 model 走不同模型接口并行更快），分支最终报告自动合入主上下文；长耗时分支传 async:true 后台执行（bg_task 管理），可不断分支合并像 git 一样推进——并行多线是摆脱单轮串行等待、加速大体量任务的主要手段。`,
       // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
       // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
       this.subAgentProjectNote(user, env),
@@ -1609,7 +1638,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; branchSync?: (content?: string) => Promise<string> },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1803,6 +1832,23 @@ export class AgentEngine {
         validate: (agents) => self.normalizeRunAgents(agents, depth + 1),
         runner: (agents, input, runSignal, runOpts) => self.runNewSession(sessionId, user, env, agents, input, runSignal, depth + 1, runOpts),
       }),
+      // 会话分支运行服务（branch_run 工具，DESIGN「会话分支运行与合并」）：仅主循环（depth 0）注入——
+      // 分支内/新会话执行内不可再分支（防递归扇出爆炸，分支是主上下文派生语义）。fork 源绑定本上下文
+      // live messages（分支 fork 主线当前上下文快照，start 同步切片）；分支完成经 onDone 走引擎合并
+      // 队列自动合入主上下文。
+      branchRuns: depth === 0 && opts?.messages
+        ? new BranchRunRegistry({
+            sessionId,
+            store: self.branchRunStore,
+            runner: (spec, branchSignal, forkMessages) => self.runBranch(sessionId, user, env, spec, branchSignal, forkMessages),
+            forkSource: opts.messages,
+            parentSignal: signal,
+            onDone: (handle) => self.trunkMerge(sessionId, user, handle, { final: true, content: handle.output ?? "" }),
+          })
+        : undefined,
+      // 分支与主干双向同步（branch_sync 工具，DESIGN「会话分支运行与合并」互相感知）：仅分支运行上下文
+      // 注入（runBranch 绑定分支身份回调——传 content 先合入再统一返回主干增量）；主会话/新会话执行未注入
+      branchSync: opts?.branchSync,
       // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
       // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
       defineDynamicTool: opts?.registerDynamic,
@@ -2312,6 +2358,9 @@ export class AgentEngine {
         await fillMissingToolResults("任务中断：该工具调用未执行完成。")
         throw err
       }
+      // 分支合并排空（DESIGN「会话分支运行与合并」）：本轮工具结果落盘后追加已完成分支的报告——
+      // 位于 tool 消息之后（tool_calls 配对完整），主线下轮模型调用即见合并内容
+      await this.drainBranchMerges(sessionId, user, persist, messages)
       rounds++
       if (stopped) break
     }
@@ -2565,6 +2614,203 @@ export class AgentEngine {
     }
   }
 
+  /**
+   * 分支运行（branch_run 工具，DESIGN「会话分支运行与合并」）：从主会话**当前上下文** fork 派生分支——
+   * 同一系统提示词（+分支附注）、同一消息历史（fork 快照）、同一工具面（会话注册表视图快照，含已装载
+   * 子Agent 与动态工具），独立 LLM 循环并行执行（复用 runNewSessionLoop：审批/重复检测/存档/流式推送同构）。
+   * spec.model 命中模型路由（resolveModelProvider，GEBAI_LLM_ROUTES 多路接口）时走独立 Provider——
+   * 多分支多端点并行，摆脱单轮串行的模型服务速度限制。完成后报告经注册表 onDone（trunkMerge 最终合并）
+   * 自动合入主上下文；本方法只负责执行与存档。
+   */
+  private async runBranch(
+    sessionId: string,
+    user: string,
+    env: Record<string, string>,
+    spec: BranchSpec & { branchId: string },
+    signal: AbortSignal,
+    forkMessages: MessageLike[],
+  ): Promise<{ output: string; archive: SessionRunArchive }> {
+    // 工具面快照：主会话当前注册表视图逐项注册进本次分支注册表（分支内装载子Agent 只进本分支——
+    // loadAgentIntoRun 隔离语义，不写主会话记录/全局注册表；禁用态工具不进快照）；
+    // 另注册 branch_sync（分支与主干双向同步的唯一工具，DESIGN「会话分支运行与合并」互相感知）——仅分支上下文可见
+    const view = this.sessionRegistry(sessionId)
+    const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
+    for (const s of view.schemas(false)) {
+      const rt = view.resolve(s.name)
+      if (rt && rt.enabled !== false) reg.register(rt.tool, (rt as { agent?: string }).agent)
+    }
+    reg.register(branchSyncTool)
+    // fork 点主干水位（branch_sync 增量基准）：以存储消息数为准——runLoop 边落盘边推进，
+    // 此刻存储尾部即 fork 快照的持久化等价（在途 tool 结果尚未落盘，不属主干可见内容）。首个 await 后
+    // 句柄必已登记（registry.start 在启动 runner 后同步 store.set）
+    const forkSession = await this.opts.store.load(sessionId, user)
+    const forkHandle = this.branchRunStore.get(spec.branchId)
+    if (forkHandle) forkHandle.forkAt = forkSession?.messages.length ?? 0
+    // fork 快照补齐：主线在 branch_run 工具调用内派生——快照尾部带尚未应答的 assistant(toolCalls)
+    // （本轮工具批处理进行中）。严格校验的接口（tool_calls 后必须紧跟 tool 响应）会 400，
+    // 为悬空 toolCall 合成占位结果（紧随已有 tool 结果之后，配对完整）
+    const fork = [...forkMessages]
+    const lastToolCalls = [...fork].reverse().find((m) => m.role === "assistant" && m.toolCalls?.length)
+    if (lastToolCalls?.toolCalls?.length) {
+      const answered = new Set(fork.filter((m) => m.role === "tool").map((m) => m.toolCallId))
+      for (const tc of lastToolCalls.toolCalls) {
+        if (!answered.has(tc.id)) fork.push({ role: "tool", content: "（主线已派生并行分支，该工具调用结果不在本分支上下文中）", toolCallId: tc.id, name: tc.name })
+      }
+    }
+    // 分支系统提示词：主会话同一系统提示词（单源复用 buildSystemPrompt）+ 分支附注（并行职责/并发写提醒/
+    // 双向同步与互相感知——branch_sync 交出阶段性成果/拉取主干增量，主干与其他分支的进展以通知注入本上下文）
+    const modelNote = spec.model ? `，模型路由 ${spec.model}` : ""
+    const branchAddendum = `\n\n【并行分支运行】你是主会话当前上下文派生的并行分支「${spec.name}」${modelNote}，与其他分支、主线同时执行。请专注完成本分支任务，可使用全部工具；其他分支可能并行修改同一文件，写入前先读取最新内容。分支内不要向用户提问（ask 类交互不适用分支），需审批的工具照常走审批。协作感知（唯一工具 branch_sync，双向）：传 content 即交出阶段性成果（立即合入主干并广播其他分支，本分支继续执行，可多次）；不传即拉取主干完整增量（主线输入/回复、其他分支合入全文）；两种用法都返回主干新进展——合入通知（【分支感知】/【主线进展】）只是摘要，需要完整内容时就调 branch_sync；收到进展后据此调整分工，避免重复工作或冲突。完成后直接输出最终报告（结论/产物/关键发现），报告将合并回主会话主线——不要输出与分支任务无关的内容。`
+    const messages: MessageLike[] = [
+      { role: "system", content: `${this.buildSystemPrompt(sessionId, user, env)}${branchAddendum}` },
+      ...fork.slice(1),
+      { role: "user", content: spec.prompt },
+    ]
+    // 模型路由（多路接口）：spec.model 命中路由走独立 Provider（resolveModelProvider 未注入/未命中回落任务级）
+    const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
+    const provider = spec.model ? (this.opts.resolveModelProvider?.(env, spec.model) ?? taskProvider) : taskProvider
+    // 分支存档（SessionRunArchive，branch 字段标识；runId = branchId——事件路由/存档关联/bg_task 一致）
+    const archive: SessionRunArchive = {
+      runId: spec.branchId,
+      agents: [],
+      input: spec.prompt,
+      output: "",
+      messages: [{ role: "user", content: spec.prompt }],
+      branch: { name: spec.name, ...(spec.model ? { model: spec.model } : {}) },
+    }
+    this.publish(sessionId, "event.session.start", { runId: spec.branchId, agents: [], input: spec.prompt, depth: 1, branch: spec.name, ...(spec.model ? { model: spec.model } : {}), sessionId })
+    try {
+      const output = await this.runNewSessionLoop(sessionId, user, env, [], spec.prompt, messages, reg, signal, 1, archive, {
+        provider,
+        branch: archive.branch,
+        // 主干通知收件箱（句柄惰性查找——回调每轮调用时句柄必已在引擎级表登记）
+        drainInbox: () => {
+          const h = this.branchRunStore.get(spec.branchId)
+          const out = h?.inbox ?? []
+          if (h) h.inbox = []
+          return out
+        },
+        // 分支与主干双向同步（branch_sync 工具 → ctx.branchSync，分支唯一同步工具）：传 content 先合入
+        // 主干（trunkMerge 阶段性路径），随后统一返回主干增量快照（合入与拉取同径，天然合入即感知）
+        branchSync: async (content) => {
+          if (content !== undefined) {
+            const h = this.branchRunStore.get(spec.branchId)
+            if (h) this.trunkMerge(sessionId, user, h, { final: false, content })
+          }
+          return await this.trunkSnapshot(sessionId, user, spec.branchId)
+        },
+      })
+      archive.output = output
+      return { output, archive }
+    } catch (err) {
+      this.publish(sessionId, "event.session.done", { runId: spec.branchId, agents: [], output: "", error: String((err as Error).message || err), branch: spec.name, sessionId })
+      throw err
+    }
+  }
+
+  /** 分支报告合入主上下文（DESIGN「会话分支运行与合并」）：最终合并（注册表 onDone）与阶段性合入
+   *  （branch_sync 传 content）的统一实现——构造合并消息（assistant，内容带分支头行自描述 + branchMeta；
+   *  最终合并携带完整过程存档 sessionRun，阶段性不带——分支仍在执行、存档为活引用）入主干、推送
+   *  event.branch.merged（前端实时渲染合并气泡）、广播通知其他运行中分支（互相感知）。
+   *  final=true 标记句柄已合入（bg_task 状态展示）；interimNote 供阶段性通知文案。 */
+  private trunkMerge(sessionId: string, user: string, handle: BranchRunHandle, opts: { final: boolean; content: string }): void {
+    if (opts.final) handle.merged = true
+    const raw = opts.content.trim() || "（分支已完成，无最终文本输出）"
+    // 长度保护（分支输出无落盘兜底，纯上下文保护）：超限保留头尾 + 省略说明
+    const kind = opts.final ? "分支报告" : "阶段性成果"
+    const content = raw.length > BRANCH_MERGE_MAX_CHARS
+      ? `${raw.slice(0, Math.floor(BRANCH_MERGE_MAX_CHARS * 0.7))}\n…（${kind}过长，中间省略约 ${raw.length - BRANCH_MERGE_MAX_CHARS} 字符）\n${raw.slice(-Math.floor(BRANCH_MERGE_MAX_CHARS * 0.3))}`
+      : raw
+    const header = opts.final ? "已合并" : "阶段性合入"
+    const msg: Message = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: `【并行分支「${handle.name}」${header}】\n${content}`,
+      createdAt: Date.now(),
+      branchMeta: { branchId: handle.branchId, name: handle.name, ...(handle.model ? { model: handle.model } : {}) },
+      ...(opts.final && handle.archive ? { sessionRun: handle.archive } : {}),
+    }
+    this.enqueueTrunkMerge(sessionId, user, msg)
+    this.publish(sessionId, "event.branch.merged", { messageId: msg.id, branchId: handle.branchId, name: handle.name, ...(handle.model ? { model: handle.model } : {}), text: msg.content, sessionId })
+    const noticeLead = opts.final ? "已完成并合入主干（最终报告）" : "阶段性合入主干"
+    this.relayToBranches(sessionId, handle.branchId, `【分支感知】分支「${handle.name}」${noticeLead}:\n${branchNoticeHead(content)}`)
+  }
+
+  /** 合并消息入主干（最终/阶段性共用）：任务运行中入合并队列（runLoop 工具批处理边界排空），否则直接落盘。 */
+  private enqueueTrunkMerge(sessionId: string, user: string, msg: Message): void {
+    if (this.tasks.has(sessionId)) {
+      const q = this.branchMerges.get(sessionId) ?? []
+      q.push(msg)
+      this.branchMerges.set(sessionId, q)
+    } else {
+      void this.opts.store.appendMessage(sessionId, msg, user).catch(() => {})
+    }
+  }
+
+  /** 主干通知广播（互相感知）：把通知压入本会话其他运行中分支的收件箱（分支执行循环轮首排空注入）。 */
+  private relayToBranches(sessionId: string, exceptBranchId: string | undefined, notice: string): void {
+    for (const h of this.branchRunStore.values()) {
+      if (h.sessionId !== sessionId || h.status !== "running" || h.branchId === exceptBranchId) continue
+      ;(h.inbox ??= []).push(notice)
+    }
+  }
+
+  /**
+   * 主干增量快照（branch_sync 工具返回体，DESIGN「会话分支运行与合并」互相感知）：返回主干自
+   * fork/上次同步以来的全部新消息——主线用户输入/回复、其他分支合入全文、主线工具结果摘要。
+   * 水位推进至当前存储尾部；合并队列中尚未落盘的合入（同步 fan-out 期间）一并回显并登记已投递 id
+   * （防其落盘后在下次增量中重复出现）；本分支自己的合入跳过（内容自产，无需回显）。
+   */
+  private async trunkSnapshot(sessionId: string, user: string, branchId: string): Promise<string> {
+    const h = this.branchRunStore.get(branchId)
+    if (!h || h.status !== "running") return "（分支已结束，无法同步主干）"
+    const session = await this.opts.store.load(sessionId, user)
+    const msgs = session?.messages ?? []
+    const from = Math.min(h.syncedAt ?? h.forkAt ?? msgs.length, msgs.length)
+    const delivered = (h.deliveredMergeIds ??= new Set<string>())
+    const perMsg = 1200
+    const head = (t: string, max: number) => {
+      const flat = t.trim()
+      return flat.length <= max ? flat : `${flat.slice(0, max)}\n…（该消息过长已截断）`
+    }
+    const lines: string[] = []
+    for (const m of msgs.slice(from)) {
+      if (delivered.has(m.id)) continue
+      if (m.branchMeta?.branchId === branchId) continue // 本分支自己的合入：内容自产
+      if (m.role === "user") lines.push(`【主线用户】${head(m.content, perMsg)}`)
+      else if (m.role === "assistant" && m.branchMeta) lines.push(`【合并·${m.branchMeta.name}】${head(m.content, perMsg)}`)
+      else if (m.role === "assistant") lines.push(`【主线回复】${head(m.content, perMsg)}`)
+      else if (m.role === "tool") lines.push(`【主线工具·${m.name ?? "?"}】${head(m.content, 600)}`)
+      // system（装载提示词/压缩摘要）：fork 后新增的装载提示词对分支无操作意义，跳过
+    }
+    // 合并队列中未落盘的合入（同步 fan-out 期间其他分支的合入在队列、落盘在工具批处理边界）
+    for (const q of this.branchMerges.get(sessionId) ?? []) {
+      if (delivered.has(q.id) || q.branchMeta?.branchId === branchId) continue
+      delivered.add(q.id)
+      lines.push(`【合并·${q.branchMeta?.name ?? "?"}】${head(q.content, perMsg)}`)
+    }
+    h.syncedAt = msgs.length
+    return lines.length ? lines.join("\n\n") : "（主干自 fork/上次同步以来暂无新消息）"
+  }
+
+  /** 分支合并队列排空：把已完成分支的合并消息追加进存储与当前任务上下文（位于本轮 tool 结果之后——
+   *  assistant(toolCalls)→tool 配对完整，主线下轮模型调用即见合并内容）。runLoop 工具批处理边界调用；
+   *  任务收尾（run finally）仅落盘冲刷（上下文随任务结束，下次 run 经 loadHistory 进上下文）。 */
+  private async drainBranchMerges(sessionId: string, user: string, persist?: (msg: Message) => Promise<void>, messages?: MessageLike[]): Promise<void> {
+    const q = this.branchMerges.get(sessionId)
+    if (!q?.length) return
+    this.branchMerges.delete(sessionId)
+    for (const msg of q) {
+      try {
+        if (persist) await persist(msg)
+        else await this.opts.store.appendMessage(sessionId, msg, user)
+        messages?.push({ role: "assistant", content: msg.content })
+      } catch {
+        /* 落盘失败不阻断任务收尾（与中断补写同策略） */
+      }
+    }
+  }
+
   /** 解析子Agent 项目根（{AGENT_NAME_UPPER}_PROJECT 环境变量）：沙箱模式限定用户数据目录内，本地模式放开。 */
   private resolveSubAgentProject(user: string, env: Record<string, string>, agentName: string): string | undefined {
     const key = `${agentName.toUpperCase().replace(/-/g, "_")}_PROJECT`
@@ -2647,7 +2893,7 @@ export class AgentEngine {
     signal: AbortSignal,
     depth: number,
     archive: SessionRunArchive,
-    ctxOpts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[] },
+    ctxOpts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; provider?: LLMProvider; branch?: { name: string; model?: string }; drainInbox?: () => string[]; branchSync?: (content?: string) => Promise<string> },
   ): Promise<string> {
     let rounds = 0
     let lastText = ""
@@ -2663,8 +2909,9 @@ export class AgentEngine {
     // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄主会话）；
     // 安全模式拒绝（与主会话 registerDynamicTool 同规则，js 工具已拦截，此为纵深防御）
     const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, loadIntoRegistry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) } }, depth)
-    // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）
-    const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
+    // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）；
+    // 分支运行（ctxOpts.provider）按模型路由解析的独立 Provider 优先——多路接口并行
+    const taskProvider = ctxOpts?.provider ?? this.opts.resolveProvider?.(env) ?? this.opts.provider
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
     const extraParams = parseExtraParamsSafe(env.GEBAI_LLM_EXTRA_PARAMS)
     // 存档收集（替代原逐条落盘）：执行过程消息追加进 archive.messages，最终由 agent_run 扩展字段落盘
@@ -2675,9 +2922,15 @@ export class AgentEngine {
 
     while (rounds < MAX_TOOL_ROUNDS) {
       if (activeSignal.aborted) throw new Error(abortReason())
+      // 主干通知注入（分支互相感知，DESIGN「会话分支运行与合并」）：其他分支合入/主线进展的通知
+      // 在轮首排空注入——位于上一轮 tool 结果之后（tool_calls 配对完整），分支下轮模型调用即见
+      for (const notice of ctxOpts?.drainInbox?.() ?? []) {
+        await pushArchive({ role: "user", content: notice })
+        messages.push({ role: "user", content: notice })
+      }
       // 每轮重推 start 事件（同 runId 幂等，前端容器已存在时忽略）：前端容器随消息重载丢失
-      // （切走会话/断线重连）后，新一轮 delta 前可据此重建折叠容器
-      this.publish(sessionId, "event.session.start", { runId: archive.runId, agents, input, depth, sessionId })
+      // （切走会话/断线重连）后，新一轮 delta 前可据此重建折叠容器；分支运行携带 branch/model 标识
+      this.publish(sessionId, "event.session.start", { runId: archive.runId, agents, input, depth, ...(ctxOpts?.branch ? { branch: ctxOpts.branch.name, ...(ctxOpts.branch.model ? { model: ctxOpts.branch.model } : {}) } : {}), sessionId })
       const assistantMsgId = crypto.randomUUID()
       // 执行过程：新会话的模型回复文本/推理实时推送到前端（与主循环同流显示，带 session 标记）
       let reasoningAcc = ""
@@ -2702,7 +2955,7 @@ export class AgentEngine {
           await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined })
         }
         this.clearStream(sessionId, archive.runId)
-        this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: text, sessionId })
+        this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: text, ...(ctxOpts?.branch ? { branch: ctxOpts.branch.name } : {}), sessionId })
         return text
       }
 
@@ -2831,12 +3084,15 @@ export class AgentEngine {
       if (stopped) break
     }
     // 循环上限退出（重复调用风暴终止）：同样推送 done 事件折叠容器
-    this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: lastText, sessionId })
+    this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: lastText, ...(ctxOpts?.branch ? { branch: ctxOpts.branch.name } : {}), sessionId })
     return lastText
   }
 
   private waitApproval(sessionId: string, toolCallId: string, tool: string, signal?: AbortSignal): Promise<ApprovalVerdict> {
-    const task = this.tasks.get(sessionId)!
+    const task = this.tasks.get(sessionId)
+    // 任务已结束（异步分支/后台运行晚于主线完成时触发审批）：无人可审批，按超时跳过——
+    // 缺任务直接访问 task.approvals 会抛错使运行整体失败
+    if (!task) return Promise.resolve("timeout")
     const pre = task.pendingDecisions.get(toolCallId)
     if (pre !== undefined) {
       task.pendingDecisions.delete(toolCallId)

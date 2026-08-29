@@ -766,6 +766,63 @@ describe("agent_run 工具卡片（头部列全部预加载子Agent 名，参数
   })
 })
 
+describe("branch_run 工具卡片（头部列各分支名，参数区按分支渲染指令块）", () => {
+  test("history card (toolCard): 头部列分支名（带模型路由），参数区每分支一小节", () => {
+    const bubble = toolBubbleFor(
+      {
+        id: "b1",
+        role: "tool",
+        name: "branch_run",
+        content: "结果",
+        arguments: {
+          branches: [
+            { name: "左路", prompt: "调研方案A" },
+            { name: "右路", prompt: "调研方案B", model: "fast" },
+          ],
+        },
+        createdAt: 0,
+      },
+      "结果",
+    )
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("branch_run")
+    expect(head?.textContent).toContain("左路 + 右路（fast）")
+    expect(head?.textContent).not.toContain("[object Object]")
+    // 参数区：每分支一小节（🌿 名头 + 指令块），无 JSON 块
+    const items = bubble.querySelectorAll("div.branch-args-item")
+    expect(items.length).toBe(2)
+    expect(items[0]?.textContent).toContain("🌿 左路")
+    expect(items[0]?.textContent).toContain("调研方案A")
+    expect(items[1]?.textContent).toContain("🌿 右路（fast）")
+    expect(items[1]?.textContent).toContain("调研方案B")
+    // 参数区无通用 JSON/键值渲染（分支小节已完整表达）
+    expect(bubble.querySelector("div.tool-kv")).toBeNull()
+    expect(bubble.querySelectorAll("div.branch-args-item").length).toBe(2)
+  })
+
+  test("realtime card (toolBubble): → branch_run 调用同样渲染，缺省名 b1..bN、async 附提示行", () => {
+    const bubble = toolBubbleFor(
+      { id: "b2", role: "tool", content: "", createdAt: 0 },
+      `→ branch_run {"branches":[{"name":"左路","prompt":"调研A"},{"prompt":"调研B"}],"async":true}`,
+    )
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("左路 + b2")
+    const items = bubble.querySelectorAll("div.branch-args-item")
+    expect(items.length).toBe(2)
+    expect(items[1]?.textContent).toContain("🌿 b2")
+    expect(bubble.querySelector("div.branch-args-async")?.textContent).toContain("async")
+  })
+
+  test("空 branches 不渲染参数区，仅工具名头部", () => {
+    const bubble = toolBubbleFor(
+      { id: "b3", role: "tool", name: "branch_run", content: "", arguments: { branches: [] }, createdAt: 0 },
+      "",
+    )
+    expect(bubble.querySelector("div.branch-args-item")).toBeNull()
+    expect(bubble.querySelector("div.tool-head")?.textContent).toContain("branch_run")
+  })
+})
+
 describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式）", () => {
   test("单标题参数仅显示值（省略 key= 前缀），标题参数不在参数区重复", () => {
     __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])

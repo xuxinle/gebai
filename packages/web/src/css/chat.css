@@ -360,9 +360,21 @@
   margin: 6px 0 8px;
 }
 
+/* branch_run 分支参数块：每分支一个小节（「🌿 名（模型路由）」头 + 任务指令块，指令块复用 agent-run-input） */
+.branch-args-item { margin: 0 0 8px; }
+.branch-args-item:last-child { margin-bottom: 0; }
+.branch-args-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.branch-args-async { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+
 /* 待办卡片 */
 .todo-item { display: flex; gap: 8px; padding: 3px 0; align-items: flex-start; }
-.todo-ico { flex: none; font-size: 13px; line-height: 1.5; }
+.todo-ico { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--accent); }
+.todo-ico svg { width: 100%; height: 100%; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* 状态语义色：进行中沿用主题强调色（.todo-ico 基色/主题覆写）；.todo-item 前缀提升优先级压过主题 .todo-ico 覆写 */
+.todo-item .todo-ico.st-pending { color: var(--text-muted); }
+.todo-item .todo-ico.st-completed { color: var(--success); }
+.todo-item .todo-ico.st-failed { color: var(--danger); }
+.todo-item .todo-ico.st-cancelled { color: var(--text-faint); }
 .todo-body { min-width: 0; flex: 1; }
 .todo-title { font-family: var(--font-ui); font-size: 13px; color: var(--text); line-height: 1.5; }
 .todo-meta { font-size: 11px; color: var(--text-faint); margin-top: 1px; }

@@ -1192,7 +1192,12 @@ export function wsEventToChunk(ev: AgentEvent): ChatChunk | null {
         kind: "session_start",
         session: true,
         sessionRunId: String(p.runId ?? ""),
-        sessionMeta: { agents: Array.isArray(p.agents) ? p.agents.map(String) : [], input: String(p.input ?? "") },
+        sessionMeta: {
+          agents: Array.isArray(p.agents) ? p.agents.map(String) : [],
+          input: String(p.input ?? ""),
+          ...(typeof p.branch === "string" && p.branch ? { branch: p.branch } : {}),
+          ...(typeof p.model === "string" && p.model ? { model: p.model } : {}),
+        },
       }
     case "event.session.done":
       return {
@@ -1200,7 +1205,11 @@ export function wsEventToChunk(ev: AgentEvent): ChatChunk | null {
         session: true,
         sessionRunId: String(p.runId ?? ""),
         // 异常/取消路径：output 为空时携带 error 说明（前端折叠容器显示中断原因）
-        sessionMeta: { agents: Array.isArray(p.agents) ? p.agents.map(String) : [], output: String((p.output as string) || (p.error ? `（已中断: ${String(p.error)}）` : "")) },
+        sessionMeta: {
+          agents: Array.isArray(p.agents) ? p.agents.map(String) : [],
+          output: String((p.output as string) || (p.error ? `（已中断: ${String(p.error)}）` : "")),
+          ...(typeof p.branch === "string" && p.branch ? { branch: p.branch } : {}),
+        },
       }
     case "event.message.delta": {
       const chunk: ChatChunk = { kind: "text", text: String(p.text ?? ""), messageId: p.messageId as string | undefined }

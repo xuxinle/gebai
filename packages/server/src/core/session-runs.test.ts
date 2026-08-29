@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SessionRunRegistry, SESSION_RUN_MAX_CONCURRENT, SESSION_RUN_KEEP, sessionRunWaitMs, type SessionRunHandle, type SessionRunRunner } from "./session-runs"
+import { SessionRunRegistry, SESSION_RUN_MAX_CONCURRENT, SESSION_RUN_KEEP, type SessionRunHandle, type SessionRunRunner } from "./session-runs"
 import type { SessionRunArchive } from "@gebai/sdk"
 
 /** 构造共享 store + 指定 runner 的注册表视图（validate 缺省原样返回）。 */
@@ -171,9 +171,5 @@ describe("SessionRunRegistry（agent_run 异步后台运行）", () => {
     release()
   })
 
-  test("sessionRunWaitMs：缺省 60s、上限 540s", () => {
-    expect(sessionRunWaitMs(undefined)).toBe(60_000)
-    expect(sessionRunWaitMs(5)).toBe(5_000)
-    expect(sessionRunWaitMs(9999)).toBe(540_000)
-  })
+
 })

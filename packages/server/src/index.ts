@@ -16,7 +16,7 @@ import { RESERVED_PROJECT_TMP } from "./core/projects"
 import { AgentEngine } from "./core/engine"
 import { WebhookManager } from "./webhooks"
 import { createExternalAuthProvider } from "./external-auth"
-import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveVisionProvider, type ApiKind, type ProviderConfig } from "./core/llm"
+import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "./core/llm"
 import { makeVisionTool, setVisionProviderGetter, getVisionProvider } from "./core/vision"
 import { scheduleGC } from "./core/gc"
 import { CronManager } from "./core/cron"
@@ -264,6 +264,9 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       // 引用比较会把「无实际覆盖」误判为重建（每次任务新建 Provider + 测试注入的 fake 被绕过）
       return JSON.stringify(cfg) === JSON.stringify(mainConfig) ? undefined : createProvider(cfg)
     },
+    // 分支运行模型路由（DESIGN「会话分支运行与合并」多路接口）：GEBAI_LLM_ROUTES 路由名命中走
+    // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
+    resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
   })
   // 定时任务：GEBAI_CRON_ENABLED=true 时启动调度器（工具注册见上，关闭时完全不注册）
   let cron: CronManager | null = null

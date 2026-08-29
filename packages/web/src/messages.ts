@@ -374,16 +374,25 @@ function inlineSnippet(text: string, max = 60): string {
 
 /**
  * 新会话 run 折叠容器（details.session-run）：summary 显示「🚀 新会话 · 预加载 agents · 执行中/→ 返回: …」，
+ * 分支运行（branch_run，DESIGN「会话分支运行与合并」）显示「🌿 分支 · name(model)」，
  * body 渲染完整执行过程（输入块/推理/工具卡片/回复）。
  * - 执行中（output 未提供）：默认展开（过程实时可见，main.ts 配合滚动）
  * - 已结束（output 提供，可为空串表示无返回）：默认折叠，只显示最终返回（点 summary 展开看过程，输入以块展示）
  */
-export function sessionRunBox(opts: { runId: string; agents: string[]; input: string; output?: string }, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
+export function sessionRunBox(opts: { runId: string; agents: string[]; input: string; output?: string; branch?: { name: string; model?: string } }, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
   const container = document.createElement("details")
   container.className = "session-run"
   container.dataset.runId = opts.runId
   const summary = el("summary", "session-summary")
-  summary.append(el("span", "session-title", `🚀 新会话${opts.agents.length ? ` · ${opts.agents.join(" + ")}` : ""}`))
+  summary.append(
+    el(
+      "span",
+      "session-title",
+      opts.branch
+        ? `🌿 分支 · ${opts.branch.name}${opts.branch.model ? `（${opts.branch.model}）` : ""}`
+        : `🚀 新会话${opts.agents.length ? ` · ${opts.agents.join(" + ")}` : ""}`,
+    ),
+  )
   const outputEl = el("span", "session-output")
   summary.appendChild(outputEl)
   const body = el("div", "session-body")
@@ -407,7 +416,7 @@ export function sessionRunBox(opts: { runId: string; agents: string[]; input: st
  * 递归渲染嵌套执行（新会话内再 agent_run 的存档挂在工具消息上）；parent 指定时嵌套进外层容器 body。
  */
 export function renderSessionArchive(archive: SessionRunArchive, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
-  const box = sessionRunBox({ runId: archive.runId, agents: archive.agents, input: archive.input, output: archive.output }, parent)
+  const box = sessionRunBox({ runId: archive.runId, agents: archive.agents, input: archive.input, output: archive.output, branch: archive.branch }, parent)
   for (const am of archive.messages) {
     if (am.sessionRun) {
       renderSessionArchive(am.sessionRun, box.body)
