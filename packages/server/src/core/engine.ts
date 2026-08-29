@@ -1081,7 +1081,7 @@ export class AgentEngine {
     provider: LLMProvider,
     messages: MessageLike[],
     systemPrompt: string,
-    ctx: { ctxInputTokens?: number; ctxCountedLen: number },
+    ctx: { ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number },
   ): Promise<boolean> {
     const { compacted } = await this.compactSession(sessionId, user, undefined, provider, { internal: true })
     if (compacted === 0) {
@@ -1091,6 +1091,7 @@ export class AgentEngine {
     messages.length = 0
     messages.push({ role: "system", content: systemPrompt }, ...fresh)
     ctx.ctxInputTokens = undefined
+    ctx.ctxCachedTokens = undefined
     ctx.ctxCountedLen = 0
     return true
   }
@@ -1110,7 +1111,7 @@ export class AgentEngine {
     systemPrompt: string,
     signal: AbortSignal,
     extraParams: Record<string, unknown> | undefined,
-    ctxUsage: { ctxInputTokens?: number; ctxCountedLen: number },
+    ctxUsage: { ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number },
     onChunk?: (chunk: LLMChunk) => void,
   ): Promise<{ text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; argsError?: string; raw?: string }>; usage?: LLMUsage; stopReason?: string }> {
     try {
@@ -1244,7 +1245,7 @@ export class AgentEngine {
       let verifyRound = 0
       let finalText = ""
       let lastFinalText = ""
-      let res: { text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCountedLen: number } | undefined
+      let res: { text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number } | undefined
       for (;;) {
         res = await this.runLoop({
           sessionId,
@@ -1324,7 +1325,8 @@ export class AgentEngine {
       // 上下文大小与真实 usage 基线持久化（历史会话列表展示 + 下次 run 压缩判定基线）：
       // ctxInputTokens = 最近一次调用的真实 input tokens（含 system 与工具 schema）；ctxAtMessage = 那次调用
       // 已覆盖的历史消息条数（loadHistory 坐标，下次 run 以 history.slice 估算基线后的增量）；
-      // ctxTokens（列表展示）= 真实基线 + 未发送增量估算；无真值（接口不返回 usage）时估算兜底（与 toSessionInfo 同口径）
+      // ctxTokens（列表展示）= 真实基线 + 未发送增量估算；ctxCachedTokens（上下文悬浮命中率展示）= 同一
+      // 次调用的提示词缓存命中（接口不返回缓存字段时 undefined）；无真值（接口不返回 usage）时估算兜底（与 toSessionInfo 同口径）
       if (finalText) messages.push({ role: "assistant", content: finalText }) // 最终回复也在基线之后，计入增量估算
       const saved = await this.opts.store.load(sessionId, user)
       if (saved && res) {
@@ -1332,10 +1334,12 @@ export class AgentEngine {
           saved.ctxInputTokens = res.ctxInputTokens
           saved.ctxAtMessage = Math.max(0, res.ctxCountedLen - 1)
           saved.ctxTokens = res.ctxInputTokens + estimateTokens(messages.slice(res.ctxCountedLen))
+          saved.ctxCachedTokens = res.ctxCachedTokens
         } else {
           saved.ctxInputTokens = undefined
           saved.ctxAtMessage = undefined
           saved.ctxTokens = estimateCtxTokens(saved.messages)
+          saved.ctxCachedTokens = undefined
         }
         await this.opts.store.save(saved)
       }
@@ -2154,7 +2158,7 @@ export class AgentEngine {
     provider: LLMProvider
     extraParams?: Record<string, unknown>
     persist: (msg: Message) => Promise<void>
-  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCountedLen: number }> {
+  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number }> {
     const { sessionId, user, messages, registry, signal, env, provider, extraParams, persist } = params
     let rounds = 0
     let lastText = ""
@@ -2163,7 +2167,7 @@ export class AgentEngine {
     // 真实 input tokens（含 system 与工具 schema）；ctxCountedLen = 那次调用时 messages 长度（已被真值覆盖的部分），
     // 其后的消息（增量）尚未发送，用 estimateTokens 估算补足——下一次真实调用会用真值接管；
     // 压缩重建消息后锚点失效（makeContextRoom 原地清除），真实值由下一次调用重新建立
-    const ctxUsage: { ctxInputTokens?: number; ctxCountedLen: number } = { ctxCountedLen: 0 }
+    const ctxUsage: { ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number } = { ctxCountedLen: 0 }
     // 重复检测（DESIGN「重复检测」）：最近 MAX_REPEAT_WINDOW 次工具调用签名窗口，
     // 相同签名（工具+参数）出现 ≥MAX_REPEAT_HITS 次判定为无效重复 → 中断该次执行并注入引导提示；
     // 连续中断超过 MAX_REPEAT_STALLS 次终止循环，避免无效空转
@@ -2198,12 +2202,15 @@ export class AgentEngine {
       lastReasoning = reasoningAcc
       if (usage?.inputTokens !== undefined) {
         ctxUsage.ctxInputTokens = usage.inputTokens
+        ctxUsage.ctxCachedTokens = usage.cachedTokens
         ctxUsage.ctxCountedLen = messages.length
       }
-      // 上下文大小实时推送（前端会话列表展示，单位 k）：真实 usage 基准 + 未发送增量估算
+      // 上下文大小实时推送（前端会话列表展示，单位 k）：真实 usage 基准 + 未发送增量估算；
+      // ctxCachedTokens = 同一次调用的提示词缓存命中（前端上下文圆环悬浮展示命中率，接口不返回时缺省）
       this.publish(sessionId, "event.session.ctx", {
         ctxTokens:
           ctxUsage.ctxInputTokens !== undefined ? ctxUsage.ctxInputTokens + estimateTokens(messages.slice(ctxUsage.ctxCountedLen)) : estimateTokens(messages),
+        ...(ctxUsage.ctxInputTokens !== undefined ? { ctxCachedTokens: ctxUsage.ctxCachedTokens } : {}),
       })
       if (!toolCalls.length) {
         this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, sessionId })
@@ -2416,7 +2423,7 @@ export class AgentEngine {
       rounds++
       if (stopped) break
     }
-    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCountedLen: ctxUsage.ctxCountedLen }
+    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCachedTokens: ctxUsage.ctxCachedTokens, ctxCountedLen: ctxUsage.ctxCountedLen }
   }
 
   /**

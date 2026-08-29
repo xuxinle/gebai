@@ -12,6 +12,10 @@ export interface LLMUsage {
   inputTokens?: number
   outputTokens?: number
   totalTokens?: number
+  /** 本次 input 中命中提示词缓存的 tokens（统一口径为 inputTokens 的一部分）：OpenAI chat/responses 的
+   *  *_tokens_details.cached_tokens 已含在 prompt/input_tokens 内；Anthropic 的 cache_read_input_tokens
+   *  是 input_tokens 之外的额外量，pickUsage 折算并入 inputTokens。接口不返回缓存字段时 undefined。 */
+  cachedTokens?: number
 }
 
 export interface LLMChunk {
@@ -676,8 +680,10 @@ class AnthropicProvider implements LLMProvider {
     }
     let currentTool: { id: string; name: string; args: string } | null = null
     let doneYielded = false
-    // usage 真值：message_start 的 input_tokens（含 system 与工具 schema，即「真上下文」）+ message_delta 的 output_tokens
+    // usage 真值：message_start 的 input_tokens（含 system 与工具 schema，即「真上下文」）+ message_delta 的 output_tokens；
+    // cache_read 折算后的 cachedTokens 一并自 message_start 携带（done 时并入最终 usage）
     let inputTokens: number | undefined
+    let cachedTokens: number | undefined
     for await (const data of parseSSE(res.body, opts.signal)) {
       let evt: Record<string, unknown>
       try {
@@ -689,6 +695,7 @@ class AnthropicProvider implements LLMProvider {
       if (type === "message_start") {
         const u = pickUsage((evt.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined)
         if (u?.inputTokens !== undefined) inputTokens = u.inputTokens
+        if (u?.cachedTokens !== undefined) cachedTokens = u.cachedTokens
       } else if (type === "content_block_start") {
         const block = evt.content_block as Record<string, unknown> | undefined
         if (block?.type === "tool_use") {
@@ -711,7 +718,7 @@ class AnthropicProvider implements LLMProvider {
       } else if (type === "message_delta") {
         const delta = evt.delta as Record<string, unknown> | undefined
         const out = pickUsage(evt.usage as Record<string, unknown> | undefined)?.outputTokens
-        const usage = inputTokens !== undefined || out !== undefined ? { inputTokens, outputTokens: out } : undefined
+        const usage = inputTokens !== undefined || out !== undefined ? { inputTokens, outputTokens: out, cachedTokens } : undefined
         if (delta?.stop_reason) {
           doneYielded = true
           yield { type: "done", stopReason: delta.stop_reason as string, ...(usage ? { usage } : {}) }
@@ -814,11 +821,17 @@ export function salvageWriteArgs(raw: string): { path: string; content: string }
 function pickUsage(u: Record<string, unknown> | undefined): LLMUsage | undefined {
   if (!u) return undefined
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined)
-  const inputTokens = num(u.input_tokens) ?? num(u.prompt_tokens)
+  // 提示词缓存命中：OpenAI chat（prompt_tokens_details）与 Responses（input_tokens_details）的 cached_tokens
+  // 已含在 prompt/input_tokens 内；Anthropic 的 cache_read_input_tokens 在 input_tokens 之外，折算并入统一「cached ⊆ input」
+  const details = (u.prompt_tokens_details ?? u.input_tokens_details) as Record<string, unknown> | undefined
+  const cacheRead = num(u.cache_read_input_tokens)
+  const cachedTokens = num(details?.cached_tokens) ?? cacheRead
+  let inputTokens = num(u.input_tokens) ?? num(u.prompt_tokens)
+  if (cacheRead !== undefined && inputTokens !== undefined) inputTokens += cacheRead
   const outputTokens = num(u.output_tokens) ?? num(u.completion_tokens)
   const totalTokens = num(u.total_tokens)
-  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return undefined
-  return { inputTokens, outputTokens, totalTokens }
+  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined && cachedTokens === undefined) return undefined
+  return { inputTokens, outputTokens, totalTokens, cachedTokens }
 }
 
 /** 图片扩展名 → MIME（视觉/多模态图片支持白名单，Anthropic 仅接受 png/jpeg/gif/webp）。 */

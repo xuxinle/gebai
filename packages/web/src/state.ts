@@ -325,8 +325,13 @@ export function renderHeaderCtx(): void {
   ctxFillEl.style.strokeDashoffset = String(100 - pct)
   headerCtxEl.classList.toggle("warn", hasCtx && pct >= 50 && pct < 80)
   headerCtxEl.classList.toggle("danger", hasCtx && pct >= 80)
-  if (hasCtx) headerCtxEl.dataset.tip = `上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）`
-  else delete headerCtxEl.dataset.tip
+  if (hasCtx) {
+    // 缓存命中行（接口返回缓存字段才有值，0 也是有效测量）：cached 为同一次调用的提示词缓存命中，
+    // used = 真值基线 + 基线后未发送增量估算，占比为近似口径
+    const cached = currentSession?.ctxCachedTokens
+    const cacheLine = cached !== undefined ? `\n缓存命中 ${cached.toLocaleString()} tokens（${Math.min(100, Math.round((cached / used) * 100))}%）` : ""
+    headerCtxEl.dataset.tip = `上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）${cacheLine}`
+  } else delete headerCtxEl.dataset.tip
   syncCtxSignal()
 }
 

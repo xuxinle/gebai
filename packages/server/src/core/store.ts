@@ -35,6 +35,9 @@ export interface SessionData {
   /** 最近一次模型调用的真实 input tokens（服务端 usage 真值，含 system 提示词与工具 schema）：
    *  跨 run 上下文压缩判定基线；未定义 = 无真值（老会话/接口不返回 usage/压缩后锚点失效），压缩判定与显示走估算兜底。 */
   ctxInputTokens?: number
+  /** 同一次调用的提示词缓存命中 tokens（ctxInputTokens 的一部分，接口返回 cached_tokens/cache_read 才有值）：
+   *  纯展示口径（前端上下文圆环悬浮命中率），随 usage 基线同点位建立/清除。 */
+  ctxCachedTokens?: number
   /** 建立 ctxInputTokens 基线那次调用已覆盖的历史消息条数（loadHistory 坐标）：下次 run 以
    *  history.slice(ctxAtMessage) 估算基线之后的增量（下一次真实调用会用真值接管并重建基线）。 */
   ctxAtMessage?: number
@@ -52,6 +55,7 @@ export function toSessionInfo(s: SessionData): SessionInfo {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     ctxTokens: s.ctxTokens ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
+    ctxCachedTokens: s.ctxCachedTokens,
   }
 }
 
@@ -381,6 +385,7 @@ export class SessionStore {
     session.messages = session.messages.slice(0, idx)
     // 真实 usage 基线的索引锚点随删除错位（与压缩同因）：清除基线回退估算，下次真实调用重建
     session.ctxInputTokens = undefined
+    session.ctxCachedTokens = undefined
     session.ctxAtMessage = undefined
     session.ctxTokens = estimateCtxTokens(session.messages)
     await this.save(session)
@@ -421,6 +426,7 @@ export class SessionStore {
     // 消息被摘要替换后，真实 usage 基线的索引锚点（ctxAtMessage）错位：清除基线，
     // 压缩判定回退估算，直至下一次真实模型调用重建基线（DESIGN「上下文保护」）
     session.ctxInputTokens = undefined
+    session.ctxCachedTokens = undefined
     session.ctxAtMessage = undefined
     await this.save(session)
     return session.messages

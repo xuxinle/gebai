@@ -144,6 +144,21 @@ describe("provider robustness", () => {
     expect(chunks.find((c) => c.type === "done")?.usage).toEqual({ inputTokens: 120, outputTokens: 3, totalTokens: 123 })
   })
 
+  test("OpenAI 兼容流：usage 携带 prompt_tokens_details.cached_tokens 时提取缓存命中（含在 input 内）", async () => {
+    const chunks: LLMChunk[] = []
+    await withFetch(
+      async () =>
+        new Response(
+          'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":3,"total_tokens":123,"prompt_tokens_details":{"cached_tokens":100}}}\n\ndata: [DONE]\n\n',
+          { status: 200 },
+        ),
+      async () => {
+        for await (const c of provider().chat([{ role: "user", content: "x" }])) chunks.push(c)
+      },
+    )
+    expect(chunks.find((c) => c.type === "done")?.usage).toEqual({ inputTokens: 120, outputTokens: 3, totalTokens: 123, cachedTokens: 100 })
+  })
+
   test("OpenAI 兼容流：服务端不返回 usage 时 done 不带 usage（估算兜底）", async () => {
     const chunks: LLMChunk[] = []
     await withFetch(
@@ -255,6 +270,23 @@ describe("extraParams 额外模型接口参数", () => {
     )
     const done = chunks.filter((c) => c.type === "done")
     expect(done[0]?.usage).toEqual({ inputTokens: 200, outputTokens: 5 })
+  })
+
+  test("Anthropic：cache_read_input_tokens 折算并入 inputTokens（cached ⊆ input 统一口径）", async () => {
+    const p = createProvider({ apiKind: "anthropic", apiBase: "https://api.test", apiKey: "k", model: "m", maxContextTokens: 10000, multimodal: false })
+    const stream = [
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":200,"cache_read_input_tokens":800,"cache_creation_input_tokens":50}}}',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}',
+    ].join("\n\n")
+    const chunks: LLMChunk[] = []
+    await withFetch(
+      async () => new Response(stream, { status: 200 }),
+      async () => {
+        for await (const c of p.chat([{ role: "user", content: "x" }])) chunks.push(c)
+      },
+    )
+    const done = chunks.filter((c) => c.type === "done")
+    expect(done[0]?.usage).toEqual({ inputTokens: 1000, outputTokens: 5, cachedTokens: 800 })
   })
 })
 
@@ -463,6 +495,19 @@ describe("OpenAI Responses Provider", () => {
     )
     const done = chunks.find((c) => c.type === "done")
     expect(done?.usage).toEqual({ inputTokens: 80, outputTokens: 4, totalTokens: 84 })
+  })
+
+  test("usage 真值：input_tokens_details.cached_tokens 提取缓存命中（含在 input 内）", async () => {
+    const stream = 'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":80,"output_tokens":4,"total_tokens":84,"input_tokens_details":{"cached_tokens":64}}}}\n\n'
+    const chunks: LLMChunk[] = []
+    await withFetch(
+      async () => new Response(stream, { status: 200 }),
+      async () => {
+        for await (const c of responsesProvider().chat([{ role: "user", content: "x" }])) chunks.push(c)
+      },
+    )
+    const done = chunks.find((c) => c.type === "done")
+    expect(done?.usage).toEqual({ inputTokens: 80, outputTokens: 4, totalTokens: 84, cachedTokens: 64 })
   })
 
   test("多模态：统一 image 块转为 image_url data URL", async () => {

@@ -970,8 +970,8 @@ async function init() {
     } else if (ev.type === "event.message.compact") {
       onMessageCompact({ sessionId: ev.sessionId, count: Number(ev.payload.count ?? 0), summary: String(ev.payload.summary ?? "") })
     } else if (ev.type === "event.session.ctx") {
-      // 运行中上下文大小实时更新（会话列表 k 显示）
-      updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0))
+      // 运行中上下文大小实时更新（会话列表 k 显示）；缓存命中（接口返回时）随同更新（圆环悬浮展示）
+      updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0), ev.payload.ctxCachedTokens === undefined ? undefined : Number(ev.payload.ctxCachedTokens))
     } else if (ev.type === "event.session.minimal") {
       // 任务中模型经 full_mode 工具（用户批准）切换到完整模式：本地极简开关随之关闭
       if (ev.payload.enabled === false) syncMinimalModeFromServer(false)

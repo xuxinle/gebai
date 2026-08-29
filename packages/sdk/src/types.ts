@@ -215,6 +215,9 @@ export interface SessionInfo {
   updatedAt: number
   /** 上下文 token 估算（chars/4，会话列表展示用，单位 k）。 */
   ctxTokens?: number
+  /** 同一次调用的提示词缓存命中 tokens（ctxTokens 真值基线的一部分，接口返回缓存字段才有值；
+   *  上下文圆环悬浮命中率展示用，运行中随 event.session.ctx 实时更新）。 */
+  ctxCachedTokens?: number
 }
 
 export interface SessionDetail extends SessionInfo {
