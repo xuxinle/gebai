@@ -264,6 +264,45 @@ describe("SessionStore ownership", () => {
     await expect(store.truncateMessages(s.id, "bob", "m1")).rejects.toThrow()
     rmSync(home, { recursive: true, force: true })
   })
+
+  test("truncateMessages from assistant(toolCalls) removes its tool results too (助手消息撤回语义)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-store-"))
+    const store = new SessionStore({ home })
+    const s = await store.createSession("alice")
+    await store.appendMessage(s.id, { id: "u1", role: "user", content: "hi", createdAt: 1 })
+    await store.appendMessage(s.id, { id: "a1", role: "assistant", content: "", toolCalls: [{ id: "t1", name: "ls", arguments: {} }], createdAt: 2 })
+    await store.appendMessage(s.id, { id: "r1", role: "tool", content: "out", toolCallId: "t1", name: "ls", createdAt: 3 })
+    await store.appendMessage(s.id, { id: "a2", role: "assistant", content: "final", createdAt: 4 })
+    // 撤回中途 assistant(toolCalls)：其 tool 结果与最终回复一并删除，前缀配对不受影响
+    await store.truncateMessages(s.id, "alice", "a1")
+    expect((await store.load(s.id, "alice"))!.messages.map((m) => m.id)).toEqual(["u1"])
+    // 撤回最终 assistant：保留 assistant(toolCalls)+tool 配对（历史尾部为 tool 结果合法，下次 user 输入可续）
+    await store.appendMessage(s.id, { id: "a1b", role: "assistant", content: "", toolCalls: [{ id: "t1b", name: "ls", arguments: {} }], createdAt: 5 })
+    await store.appendMessage(s.id, { id: "r1b", role: "tool", content: "out2", toolCallId: "t1b", name: "ls", createdAt: 6 })
+    await store.appendMessage(s.id, { id: "a2b", role: "assistant", content: "final2", createdAt: 7 })
+    await store.truncateMessages(s.id, "alice", "a2b")
+    expect((await store.load(s.id, "alice"))!.messages.map((m) => m.id)).toEqual(["u1", "a1b", "r1b"])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("truncateMessages clears usage baseline anchors (索引随删除错位，防压缩误判)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-store-"))
+    const store = new SessionStore({ home })
+    const s = await store.createSession("alice")
+    await store.appendMessage(s.id, { id: "m1", role: "user", content: "a", createdAt: 1 })
+    await store.appendMessage(s.id, { id: "m2", role: "assistant", content: "b", createdAt: 2 })
+    const seeded = await store.load(s.id, "alice")
+    seeded!.ctxInputTokens = 500
+    seeded!.ctxAtMessage = 2
+    seeded!.ctxTokens = 600
+    await store.save(seeded!)
+    await store.truncateMessages(s.id, "alice", "m2")
+    const loaded = await store.load(s.id, "alice")
+    expect(loaded!.ctxInputTokens).toBeUndefined()
+    expect(loaded!.ctxAtMessage).toBeUndefined()
+    expect(loaded!.ctxTokens).toBeGreaterThan(0) // 列表展示口径回退估算
+    rmSync(home, { recursive: true, force: true })
+  })
 })
 
 describe("WS event push (multi-user isolation)", () => {
@@ -322,5 +361,59 @@ describe("WS event push (multi-user isolation)", () => {
     await new Promise((r) => setTimeout(r, 200))
     expect(bobEvents).toHaveLength(0)
     ws.close()
+  })
+})
+
+describe("truncate route (消息撤回)", () => {
+  test("running task rejects truncate with 409; after completion truncate succeeds", async () => {
+    // 阻塞模型调用：任务保持运行态，截断请求期间不结束
+    const engine = handle.engine as unknown as { opts: { provider: LLMProvider }; isRunning(id: string): boolean }
+    const orig = engine.opts.provider
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    engine.opts.provider = {
+      id: "blocking",
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 1000 }),
+      async *chat() {
+        await gate
+        yield { type: "text", text: "done" }
+        yield { type: "done" }
+      },
+    }
+    try {
+      const s = (await (
+        await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
+      ).json()) as { id: string }
+      const promptPromise = fetch(`${base()}/api/v1/sessions/${s.id}/prompt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      }).then((r) => r.text())
+      await waitFor(() => engine.isRunning(s.id))
+      // 运行中撤回被拒（任务持有自己的上下文快照，中途截断会产生交错历史）
+      const denied = await fetch(`${base()}/api/v1/sessions/${s.id}/truncate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ before: "whatever" }),
+      })
+      expect(denied.status).toBe(409)
+      release()
+      await promptPromise
+      await waitFor(() => !engine.isRunning(s.id))
+      // 任务结束后撤回正常（最终 assistant 消息按流式 messageId 定位）
+      const loaded = await handle.store.load(s.id)
+      const final = loaded!.messages.find((m) => m.role === "assistant" && m.content === "done")
+      expect(final).toBeDefined()
+      const ok = await fetch(`${base()}/api/v1/sessions/${s.id}/truncate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ before: final!.id }),
+      })
+      expect(ok.status).toBe(200)
+      const after = await handle.store.load(s.id)
+      expect(after!.messages.some((m) => m.id === final!.id)).toBe(false)
+    } finally {
+      engine.opts.provider = orig
+    }
   })
 })

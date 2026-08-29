@@ -38,6 +38,9 @@ const MAX_REPEAT_WINDOW = 8
 const MAX_REPEAT_HITS = 3
 /** 重复中断上限：中断次数超过该值即终止工具循环（模型持续重复时防止无效空转）。 */
 const MAX_REPEAT_STALLS = 2
+/** 同批工具并行执行上限（DESIGN「同批工具并行执行」）：单次模型响应返回的多个工具调用并行执行，
+ *  此为并发护栏（进程/文件句柄等资源保护），超出按调用顺序排队；需严格串行的操作由模型用 js/flow 编排。 */
+const MAX_PARALLEL_TOOLS = 8
 const APPROVAL_TIMEOUT = 5 * 60 * 1000
 /** show 图表分支：等待前端渲染结果的最长时间（超时返回「画图能力受限」）。 */
 const DRAW_TIMEOUT = 5000
@@ -139,6 +142,11 @@ function missingRequiredArgs(tool: Tool, args: Record<string, unknown>): string[
 /** 必填参数缺失的错误文案（作为工具结果回传，模型下一轮自纠）。 */
 function missingArgsMsg(name: string, missing: string[]): string {
   return `工具 ${name} 缺少必填参数: ${missing.join("、")}——本次调用未执行，请补齐参数后重试（各参数含义见工具描述）。`
+}
+
+/** 工具调用签名（重复检测滚动窗口的记录单元）：工具名 + 参数 JSON。 */
+function toolCallSignature(name: string, toolArguments: Record<string, unknown>): string {
+  return `${name}:${JSON.stringify(toolArguments ?? {})}`
 }
 
 function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
@@ -1236,7 +1244,7 @@ export class AgentEngine {
       let verifyRound = 0
       let finalText = ""
       let lastFinalText = ""
-      let res: { text: string; reasoning: string; ctxInputTokens?: number; ctxCountedLen: number } | undefined
+      let res: { text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCountedLen: number } | undefined
       for (;;) {
         res = await this.runLoop({
           sessionId,
@@ -1255,7 +1263,8 @@ export class AgentEngine {
 
         if (finalText) {
           await this.opts.store.appendMessage(sessionId, {
-            id: crypto.randomUUID(),
+            // 最终轮的流式 messageId（撤回/反馈定位对刚完成的回复立即生效）；无最终轮（重复终止/轮次上限）时生成
+            id: res.lastMessageId ?? crypto.randomUUID(),
             role: "assistant",
             content: finalText,
             reasoning: res.reasoning.trim() ? res.reasoning.trim() : undefined,
@@ -1479,6 +1488,7 @@ export class AgentEngine {
       ...(channelNote ? [channelNote] : []),
       ...(safeModeNote ? [safeModeNote] : []),
       `复杂/多步操作优先编排一次执行，避免大量单步工具调用浪费往返与词元：固定流程用 flow（引用映射/分支/循环，语法见其工具描述，编排前可用 tool_schemas 查询输出结构；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）一律用 js 脚本动态编程，不要在 flow 里硬凑复杂表达式；纯系统操作用 sh/py 脚本。`,
+      `同一次回复返回的多个工具调用会并行执行（互不等待）：互不依赖的操作放进同批调用可显著加速（多文件读取/多路查询/独立子任务等尽量同批发出）；有先后依赖、需严格串行的操作不要同批发出——用 js 脚本按序编排（await 前一步结果再决定下一步）或 flow 管道表达依赖，或拆分到多轮逐步执行；对同一文件的写/改尤其必须串行编排（并行修改会相互覆盖）。`,
       `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
       `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
       `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 branch_run 会话分支运行——从当前上下文 fork 多分支同时执行（各分支掌握主线全部背景与工具，可各自传 model 走不同模型接口并行更快），分支最终报告自动合入主上下文；长耗时分支传 async:true 后台执行（bg_task 管理），可不断分支合并像 git 一样推进——并行多线是摆脱单轮串行等待、加速大体量任务的主要手段。`,
@@ -2144,7 +2154,7 @@ export class AgentEngine {
     provider: LLMProvider
     extraParams?: Record<string, unknown>
     persist: (msg: Message) => Promise<void>
-  }): Promise<{ text: string; reasoning: string; ctxInputTokens?: number; ctxCountedLen: number }> {
+  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCountedLen: number }> {
     const { sessionId, user, messages, registry, signal, env, provider, extraParams, persist } = params
     let rounds = 0
     let lastText = ""
@@ -2159,6 +2169,9 @@ export class AgentEngine {
     // 连续中断超过 MAX_REPEAT_STALLS 次终止循环，避免无效空转
     const recentCalls: string[] = []
     let repeatStalls = 0
+    // 最终轮（无 toolCalls）的 assistantMsgId：本轮消息不在此持久化（由 run() 收口落盘），
+    // 回传给 run() 用同一 id 落盘——流式增量已按该 id 推送前端，撤回/反馈对刚完成的回复立即生效
+    let lastMessageId: string | undefined
     const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages, registry, registerDynamic: (def) => this.registerDynamicTool(sessionId, user, def) }, 0)
 
     while (rounds < MAX_TOOL_ROUNDS) {
@@ -2194,6 +2207,7 @@ export class AgentEngine {
       })
       if (!toolCalls.length) {
         this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, sessionId })
+        lastMessageId = assistantMsgId
         break
       }
 
@@ -2223,8 +2237,13 @@ export class AgentEngine {
       // toolCalls 补齐 tool 结果（含占位说明），否则历史留下未应答 toolCalls——严格校验的 LLM 接口
       // （OpenAI tool_calls/tool 配对）会让该会话后续每次请求都被 400 拒绝
       const toolCallDone = new Set<string>()
+      // 同批并行执行的结果按完成先后落盘：appendMessage（load→push→save 共享缓存会话对象）不容忍并发
+      // 调用（save 交错可能以旧覆新），promise 链串行化每次落盘；顺序不影响接口合法性（配对按 toolCallId）
+      let persistChain = Promise.resolve()
       const persistTool = async (tc: { id: string; name: string }, content: string, extra: Partial<Message> = {}) => {
-        await persist({ id: crypto.randomUUID(), role: "tool", content, toolCallId: tc.id, name: tc.name, createdAt: Date.now(), ...extra })
+        const write = persistChain.then(() => persist({ id: crypto.randomUUID(), role: "tool", content, toolCallId: tc.id, name: tc.name, createdAt: Date.now(), ...extra }))
+        persistChain = write.catch(() => {})
+        await write
         toolCallDone.add(tc.id)
         messages.push({ role: "tool", content, toolCallId: tc.id, name: tc.name })
       }
@@ -2233,36 +2252,56 @@ export class AgentEngine {
           if (toolCallDone.has(rest.id)) continue
           try {
             await persistTool(rest, note)
+            // 补写占位同样推送结果事件：实时卡片从「执行中」落为终态（无配对调用由前端兜底独立结果卡）
+            this.publish(sessionId, "event.tool.result", { name: rest.name, toolCallId: rest.id, output: note, sessionId })
           } catch {
             /* 补写失败不掩盖原错误 */
           }
         }
       }
+      // 门控说明性结果（不执行）同样推送 call+result 事件对：前端实时建卡，与落盘历史一致——
+      // 否则该调用只在刷新后可见（历史有落盘、运行时无事件），并行批次下门控结果与执行结果混排时缺卡明显
+      const persistGatedNote = async (tc: (typeof toolCalls)[number], note: string) => {
+        this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id })
+        await persistTool(tc, note)
+        this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: note, sessionId })
+      }
       try {
+        if (signal.aborted) {
+          // 取消路径：为尚未执行的调用补写终止记录后中止（保持 assistant/tool 配对完整）
+          await fillMissingToolResults("任务已取消：该工具调用未执行。")
+          throw new Error("cancelled")
+        }
+        // ── 门控阶段（按调用顺序串行）：重复检测/参数抢救/路由解析（含自动装载）/审批姿态等判定
+        //    全部先行完成。说明性结果（缺参引导/未知工具/禁用/安全拦截/无交互拒绝）在此直接落盘；
+        //    校验点在审批门之前（坏调用不打扰用户审批）。可执行项收集进入并行阶段
+        const pending: Array<{ tc: (typeof toolCalls)[number]; rt: NonNullable<ReturnType<ToolRegistry["resolve"]>>; autoLoaded: string; approvalRequired: boolean }> = []
+        // 同批重复签名只检测/记录一次（DESIGN「同批工具并行执行」）：同批并行发出相同调用是有意扇出
+        // ——发出时尚未见任何结果，不存在「无视结果重试」；跨轮重复（已见过结果仍重发同签名）照常累积判定
+        const batchSignatures = new Set<string>()
         for (const tc of toolCalls) {
-          if (signal.aborted) {
-            // 取消路径：为尚未执行的调用补写终止记录后中止（保持 assistant/tool 配对完整）
-            await fillMissingToolResults("任务已取消：该工具调用未执行。")
-            throw new Error("cancelled")
-          }
           if (stopped) {
-            await persistTool(tc, "任务已中止：模型持续重复相同工具调用。")
+            await persistGatedNote(tc, "任务已中止：模型持续重复相同工具调用。")
             continue
           }
-          if (this.repeatedCall(recentCalls, tc.name, tc.arguments)) {
-            // 相同工具+相同参数已执行 ≥MAX_REPEAT_HITS 次：中断执行（结果必然相同），注入提示引导模型换方向
-            repeatStalls++
-            const note = `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`
-            if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
-            await persistTool(tc, note)
-            continue
+          const signature = toolCallSignature(tc.name, tc.arguments)
+          if (!batchSignatures.has(signature)) {
+            batchSignatures.add(signature)
+            if (this.repeatedCall(recentCalls, tc.name, tc.arguments)) {
+              // 相同工具+相同参数已执行 ≥MAX_REPEAT_HITS 次：中断执行（结果必然相同），注入提示引导模型换方向
+              repeatStalls++
+              const note = `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`
+              if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
+              await persistGatedNote(tc, note)
+              continue
+            }
           }
           // 工具参数不是合法 JSON（接口聚合失败/输出被截断）：不执行（以 {} 执行会做出错误行为）。
           // write 类工具先尝试抢救落盘已生成内容（失败轮次变进度，模型 append 续写）；未抢救走错误引导
           // （截断与普通解析失败区分文案）
           if (tc.argsError) {
             const salvaged = this.isWriteToolName(tc.name) ? await this.salvageWriteCall(ctx, typeof tc.raw === "string" ? tc.raw : "") : null
-            await persistTool(tc, salvaged ?? this.toolArgsErrorMsg(tc, this.isTruncatedStop(stopReason)))
+            await persistGatedNote(tc, salvaged ?? this.toolArgsErrorMsg(tc, this.isTruncatedStop(stopReason)))
             continue
           }
           let rt = registry.resolve(tc.name)
@@ -2279,26 +2318,24 @@ export class AgentEngine {
             }
           }
           if (!rt) {
-            await persistTool(tc, this.unknownToolMsg(tc.name))
+            await persistGatedNote(tc, this.unknownToolMsg(tc.name))
             continue
           }
           const missing = missingRequiredArgs(rt.tool, tc.arguments)
           if (missing.length) {
             // 必填参数缺失（模型漏传）：不执行，明确报缺什么参数（防缺失值进工具被解析成字面量 "undefined"）
-            await persistTool(tc, missingArgsMsg(rt.name, missing))
+            await persistGatedNote(tc, missingArgsMsg(rt.name, missing))
             continue
           }
           if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {
             // 通道禁用工具（DESIGN「飞书机器人集成」）：模型不应调用，被调用时阻止执行并说明原因
-            const disabledMsg = this.toolDisabledMsg(sessionId, rt.name)
-            await persistTool(tc, disabledMsg)
+            await persistGatedNote(tc, this.toolDisabledMsg(sessionId, rt.name))
             continue
           }
           if (this.isRiskyInSafeMode(rt.name)) {
             // 安全模式（DESIGN「安全模式」）：风险工具（命令执行/写删文件/定时任务调度）不执行、不弹审批，
             // 直接返回限制信息给模型（模型仍可见 schema，可据此改用只读方案）
-            const safeMsg = safeModeRestrictionMsg(rt.name)
-            await persistTool(tc, safeMsg)
+            await persistGatedNote(tc, safeModeRestrictionMsg(rt.name))
             continue
           }
           const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
@@ -2309,50 +2346,65 @@ export class AgentEngine {
             this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
             (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
           ) {
-            await persistTool(tc, this.noInteractionDenied(rt.name))
+            await persistGatedNote(tc, this.noInteractionDenied(rt.name))
             continue
           }
-          const approvalRequired = requiresByArgs && !approvalSkipped
-          if (approvalRequired) {
-            const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
-            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true })
-            this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments })
-            const verdict = await this.waitApproval(sessionId, tc.id, rt.name, signal)
-            // 取消路径（用户停止，cancelled 标记）：等待被信号解开时立即中止，不写「用户拒绝」虚假记录；
-            // 显式拒绝：落盘拒绝消息后由下一轮 abort/循环检查结束；超时：落盘超时提示，模型可继续调整
-            if (signal.aborted && this.tasks.get(sessionId)?.cancelled) throw new Error("cancelled")
-            if (verdict !== "approved") {
-              this.tasks.get(sessionId)?.retries.set(tc.id, retries + 1)
-              const denied =
-                verdict === "timeout"
-                  ? `工具调用 ${tc.name} 审批等待超时（5 分钟未响应），已跳过该调用。请调整方案，或先向用户说明需要审批的操作。`
-                  : `工具调用 ${tc.name} 已被用户拒绝。请调整方案后重试，或改用其他方法。`
-              await persistTool(tc, denied)
-              continue
-            }
-          } else {
-            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id })
-          }
-
-          this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id })
-          // 取消/超时统一收口：停止按钮中断执行（脚本进程同步被杀），超时作为结果返回模型不结束任务
-          const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, signal, rt.name, sessionId, tc.id)
-          // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
-          // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
-          const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
-            : result
-          await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun })
-          this.publish(sessionId, "event.tool.result", {
-            name: tc.name,
-            toolCallId: tc.id,
-            truncated: !!safe.truncated,
-            filePath: safe.filePath,
-            output: safe.output,
-            blocks: safe.blocks,
-            sessionId,
-          })
+          pending.push({ tc, rt, autoLoaded, approvalRequired: requiresByArgs && !approvalSkipped })
         }
+        // ── 执行阶段（同批工具并行执行，DESIGN「同批工具并行执行」）：每个调用独立走「审批等待 →
+        //    执行 → 落盘 → 事件推送」，互不阻塞（免审批工具不等待同批审批项）；并发上限
+        //    MAX_PARALLEL_TOOLS，超出按序排队。单个调用出错不中断其他调用（取消/异常由 firstError
+        //    收口，池排空后统一补齐占位再上抛，与原串行语义一致）
+        let firstError: unknown
+        await runToolPool(pending, MAX_PARALLEL_TOOLS, async ({ tc, rt, autoLoaded, approvalRequired }) => {
+          try {
+            if (signal.aborted) return // 未及启动即取消：占位由收口补写
+            if (approvalRequired) {
+              const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
+              this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true })
+              this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments })
+              const verdict = await this.waitApproval(sessionId, tc.id, rt.name, signal)
+              // 取消路径（用户停止，cancelled 标记）：等待被信号解开时立即中止，不写「用户拒绝」虚假记录；
+              // 显式拒绝：落盘拒绝消息后由下一轮 abort/循环检查结束；超时：落盘超时提示，模型可继续调整
+              if (signal.aborted && this.tasks.get(sessionId)?.cancelled) throw new Error("cancelled")
+              if (verdict !== "approved") {
+                this.tasks.get(sessionId)?.retries.set(tc.id, retries + 1)
+                const denied =
+                  verdict === "timeout"
+                    ? `工具调用 ${tc.name} 审批等待超时（5 分钟未响应），已跳过该调用。请调整方案，或先向用户说明需要审批的操作。`
+                    : `工具调用 ${tc.name} 已被用户拒绝。请调整方案后重试，或改用其他方法。`
+                await persistTool(tc, denied)
+                // 拒绝/超时同样推送结果事件：实时卡片落终态（tool.call 已随审批请求发出，卡片已存在）
+                this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: denied, sessionId })
+                return
+              }
+            } else {
+              this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id })
+            }
+
+            this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id })
+            // 取消/超时统一收口：停止按钮中断执行（脚本进程同步被杀），超时作为结果返回模型不结束任务
+            const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, signal, rt.name, sessionId, tc.id)
+            // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
+            // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
+            const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
+              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
+              : result
+            await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun })
+            this.publish(sessionId, "event.tool.result", {
+              name: tc.name,
+              toolCallId: tc.id,
+              truncated: !!safe.truncated,
+              filePath: safe.filePath,
+              output: safe.output,
+              blocks: safe.blocks,
+              sessionId,
+            })
+          } catch (err) {
+            if (firstError === undefined) firstError = err
+          }
+        })
+        if (firstError !== undefined) throw firstError
       } catch (err) {
         // 中断兜底：为本轮缺失结果的 toolCalls 补占位（幂等——已写过的由 toolCallDone 跳过）
         await fillMissingToolResults("任务中断：该工具调用未执行完成。")
@@ -2364,14 +2416,16 @@ export class AgentEngine {
       rounds++
       if (stopped) break
     }
-    return { text: lastText, reasoning: lastReasoning, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCountedLen: ctxUsage.ctxCountedLen }
+    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCountedLen: ctxUsage.ctxCountedLen }
   }
 
   /**
    * 重复调用检测（DESIGN「重复检测」）：将本次工具调用签名（工具名+参数 JSON）记入滚动窗口，
    * 窗口内相同签名已出现 MAX_REPEAT_HITS-1 次（本次为第 MAX_REPEAT_HITS 次）时判定为重复。
+   * 调用方负责同批去重（同批重复签名只检测/记录一次——同批并行发出相同调用是有意扇出，见「同批工具并行执行」）。
    */
-  private repeatedCall(window: string[], name: string, toolArguments: Record<string, unknown>): boolean {    const sig = `${name}:${JSON.stringify(toolArguments ?? {})}`
+  private repeatedCall(window: string[], name: string, toolArguments: Record<string, unknown>): boolean {
+    const sig = toolCallSignature(name, toolArguments)
     const hits = window.filter((s) => s === sig).length
     window.push(sig)
     if (window.length > MAX_REPEAT_WINDOW) window.shift()
@@ -2963,28 +3017,37 @@ export class AgentEngine {
       messages.push({ role: "assistant", content: text, toolCalls })
       this.clearStream(sessionId, archive.runId) // 本轮文本已入存档，在途快照清空（只清本 run 的，不误清并行主任务快照）
       let stopped = false
+      // 门控阶段（按调用顺序串行，与主循环同构）：判定全部先行完成，说明性结果直接入存档；
+      // 可执行项进入并行阶段（同批工具并行执行，DESIGN「同批工具并行执行」）
+      // 同批重复签名只检测/记录一次（与主循环同因）：同批并行发出相同调用是有意扇出，跨轮重复才累积判定
+      const batchSignatures = new Set<string>()
+      const pending: Array<{ tc: (typeof toolCalls)[number]; rt: NonNullable<ReturnType<ToolRegistry["resolve"]>>; autoLoaded: string; approvalRequired: boolean }> = []
+      // 门控说明性结果（不执行）同样推送 call+result 事件对（与主循环同因）：前端实时建卡，与存档回放一致
+      const gatedNote = async (tc: (typeof toolCalls)[number], note: string) => {
+        this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
+        await pushArchive({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
+        messages.push({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
+        this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: note, session: true, sessionRunId: archive.runId, sessionId })
+      }
       for (const tc of toolCalls) {
-        if (activeSignal.aborted) throw new Error(abortReason())
         if (stopped) {
-          const abortNote = "任务已中止：模型持续重复相同工具调用。"
-          await pushArchive({ role: "tool", content: abortNote, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: abortNote, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, "任务已中止：模型持续重复相同工具调用。")
           continue
         }
-        if (this.repeatedCall(recentCalls, tc.name, tc.arguments)) {
-          repeatStalls++
-          if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
-          const note = `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`
-          await pushArchive({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
-          continue
+        const signature = toolCallSignature(tc.name, tc.arguments)
+        if (!batchSignatures.has(signature)) {
+          batchSignatures.add(signature)
+          if (this.repeatedCall(recentCalls, tc.name, tc.arguments)) {
+            repeatStalls++
+            if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
+            await gatedNote(tc, `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`)
+            continue
+          }
         }
         // 工具参数不是合法 JSON：与主循环一致（截断先抢救落盘、未抢救区分引导），回传错误让模型修正（不执行）
         if (tc.argsError) {
           const salvaged = this.isWriteToolName(tc.name) ? await this.salvageWriteCall(ctx, typeof tc.raw === "string" ? tc.raw : "") : null
-          const errMsg = salvaged ?? this.toolArgsErrorMsg(tc, this.isTruncatedStop(stopReason))
-          await pushArchive({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, salvaged ?? this.toolArgsErrorMsg(tc, this.isTruncatedStop(stopReason)))
           continue
         }
         let rt = reg.resolve(tc.name)
@@ -3000,30 +3063,22 @@ export class AgentEngine {
           }
         }
         if (!rt) {
-          const errMsg = this.unknownToolMsg(tc.name)
-          await pushArchive({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: errMsg, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, this.unknownToolMsg(tc.name))
           continue
         }
         const missing = missingRequiredArgs(rt.tool, tc.arguments)
         if (missing.length) {
           // 必填参数缺失（模型漏传，与主循环同规则）：不执行，明确报缺什么参数
-          const missMsg = missingArgsMsg(rt.name, missing)
-          await pushArchive({ role: "tool", content: missMsg, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: missMsg, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, missingArgsMsg(rt.name, missing))
           continue
         }
         if (this.isToolDisabled(sessionId, rt.name, rt.tool)) {
-          const disabledMsg = this.toolDisabledMsg(sessionId, rt.name)
-          await pushArchive({ role: "tool", content: disabledMsg, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: disabledMsg, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, this.toolDisabledMsg(sessionId, rt.name))
           continue
         }
         if (this.isRiskyInSafeMode(rt.name)) {
           // 安全模式：子Agent 内风险工具同样拦截（与主循环一致），返回限制信息供子Agent 调整方案
-          const safeMsg = safeModeRestrictionMsg(rt.name)
-          await pushArchive({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: safeMsg, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, safeModeRestrictionMsg(rt.name))
           continue
         }
         const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
@@ -3033,53 +3088,65 @@ export class AgentEngine {
           this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
           (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
         ) {
-          const denied = this.noInteractionDenied(rt.name)
-          await pushArchive({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
-          messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
+          await gatedNote(tc, this.noInteractionDenied(rt.name))
           continue
         }
-        if (requiresByArgs && !approvalSkipped) {
-          const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
-          this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true, session: true, sessionRunId: archive.runId })
-          this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments, session: true, sessionRunId: archive.runId, sessionId })
-          const verdict = await this.waitApproval(sessionId, tc.id, rt.name, activeSignal)
-          // 新会话内：取消/超时信号解开等待后立即中止（存档随 run 整体，取消由上层按已取消结果收尾）
-          if (activeSignal.aborted) throw new Error(abortReason())
-          if (verdict !== "approved") {
-            this.tasks.get(sessionId)?.retries.set(tc.id, retries + 1)
-            const denied = verdict === "timeout" ? `工具调用 ${rt.name} 审批等待超时，已跳过。` : `工具调用 ${rt.name} 已被用户拒绝。请调整方案。`
-            await pushArchive({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
-            messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
-            continue
-          }
-        } else {
-          this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
-        }
-        // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
-        this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
-        const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
-        // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
-        const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-          ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
-          : result
-        // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
-        // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
-        const nested = safe.sessionRun ? { sessionRun: safe.sessionRun } : {}
-        const withNote = autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入本次执行、提示词已注入上下文）\n${safe.output}` : safe.output
-        await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
-        messages.push({ role: "tool", content: withNote, toolCallId: tc.id, name: tc.name, ...nested })
-        this.publish(sessionId, "event.tool.result", {
-          name: tc.name,
-          toolCallId: tc.id,
-          truncated: !!safe.truncated,
-          filePath: safe.filePath,
-          output: safe.output,
-          blocks: safe.blocks,
-          session: true,
-          sessionRunId: archive.runId,
-          sessionId,
-        })
+        pending.push({ tc, rt, autoLoaded, approvalRequired: requiresByArgs && !approvalSkipped })
       }
+      // 执行阶段（并行，与主循环同构）：审批等待 → 执行 → 存档 → 事件；存档条目按完成先后追加
+      // （仅前端回放顺序，不进 LLM 上下文）；单个调用出错不中断其他调用，池排空后上抛首个错误
+      let firstError: unknown
+      await runToolPool(pending, MAX_PARALLEL_TOOLS, async ({ tc, rt, autoLoaded, approvalRequired }) => {
+        try {
+          if (activeSignal.aborted) throw new Error(abortReason())
+          if (approvalRequired) {
+            const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
+            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true, session: true, sessionRunId: archive.runId })
+            this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments, session: true, sessionRunId: archive.runId, sessionId })
+            const verdict = await this.waitApproval(sessionId, tc.id, rt.name, activeSignal)
+            // 新会话内：取消/超时信号解开等待后立即中止（存档随 run 整体，取消由上层按已取消结果收尾）
+            if (activeSignal.aborted) throw new Error(abortReason())
+            if (verdict !== "approved") {
+              this.tasks.get(sessionId)?.retries.set(tc.id, retries + 1)
+              const denied = verdict === "timeout" ? `工具调用 ${rt.name} 审批等待超时，已跳过。` : `工具调用 ${rt.name} 已被用户拒绝。请调整方案。`
+              await pushArchive({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
+              messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
+              // 拒绝/超时同样推送结果事件（与主循环同因）：实时卡片落终态
+              this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: denied, session: true, sessionRunId: archive.runId, sessionId })
+              return
+            }
+          } else {
+            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
+          }
+          // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
+          this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
+          const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
+          // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
+          const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
+            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
+            : result
+          // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
+          // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
+          const nested = safe.sessionRun ? { sessionRun: safe.sessionRun } : {}
+          const withNote = autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入本次执行、提示词已注入上下文）\n${safe.output}` : safe.output
+          await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
+          messages.push({ role: "tool", content: withNote, toolCallId: tc.id, name: tc.name, ...nested })
+          this.publish(sessionId, "event.tool.result", {
+            name: tc.name,
+            toolCallId: tc.id,
+            truncated: !!safe.truncated,
+            filePath: safe.filePath,
+            output: safe.output,
+            blocks: safe.blocks,
+            session: true,
+            sessionRunId: archive.runId,
+            sessionId,
+          })
+        } catch (err) {
+          if (firstError === undefined) firstError = err
+        }
+      })
+      if (firstError !== undefined) throw firstError
       rounds++
       if (stopped) break
     }
@@ -3161,4 +3228,22 @@ export class AgentEngine {
  *  新版推理为独立字段 reasoning，content 已是纯正文）；历史回放给 LLM 时防推理泄漏进上下文。 */
 export function stripThinkTags(content: string): string {
   return content.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
+}
+
+/** 有界并行池（同批工具并行执行的并发护栏，DESIGN「同批工具并行执行」）：items 最多 limit 个同时执行，
+ *  超出按序排队（worker 循环取件）。fn 必须自行捕获错误——单个失败不中断池（错误由调用方闭包收集）。 */
+export async function runToolPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0
+  const workers: Promise<void>[] = []
+  for (let w = 0; w < Math.min(Math.max(1, limit), items.length); w++) {
+    workers.push(
+      (async () => {
+        while (cursor < items.length) {
+          const item = items[cursor++]
+          await fn(item)
+        }
+      })(),
+    )
+  }
+  await Promise.all(workers)
 }

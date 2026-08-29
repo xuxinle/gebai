@@ -112,9 +112,10 @@ function submitFeedback(type: "thumbs_up" | "thumbs_down", btn: HTMLElement, msg
     })
 }
 
-/** 消息称谓行操作按钮组：复制（全部消息）/ 撤回（用户消息）/ 重新生成（助手消息）。
- *  悬浮于消息上显示（JS 控制 .show），不占空间、不遮盖内容。 */
-function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLElement, msg: Pick<Message, "role" | "content" | "id">) {
+/** 消息称谓行操作按钮组：复制（全部消息）/ 撤回（用户与助手消息）/ 重新生成（助手消息）。
+ *  悬浮于消息上显示（JS 控制 .show），不占空间、不遮盖内容。noRevoke 抑制撤回按钮（新会话容器内
+ *  回放消息/本地收尾说明气泡等非持久化消息，撤回按 id 找不到落点）。 */
+function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLElement, msg: Pick<Message, "role" | "content" | "id">, opts: { noRevoke?: boolean } = {}) {
   if (meta.querySelector(".msg-actions")) return
   const actions = el("div", "msg-actions")
   const copyBtn = el("button", "msg-act", "")
@@ -146,25 +147,33 @@ function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLEle
     actions.append(fbUp, fbDown)
   }
 
-  if (msg.role === "user") {
+  if ((msg.role === "user" || msg.role === "assistant") && !opts.noRevoke) {
+    const isUser = msg.role === "user"
     const revokeBtn = el("button", "msg-act", "")
-    tip(revokeBtn, "撤回该消息及其后续")
+    tip(revokeBtn, isUser ? "撤回该消息及其后续" : "撤回该回复及其后续")
     revokeBtn.innerHTML = ICON_REVOKE
     revokeBtn.onclick = async () => {
       const cur = getCurrentSession()
       if (!cur || !msg.id) return
-      if (!(await confirmDialog({ title: "撤回消息", text: "撤回这条消息及其后续内容？" }))) return
+      // 运行中任务持有自己的上下文并继续追加消息，中途截断会产生交错历史（服务端同样 409 拒绝）
+      if (runs.has(cur.id)) {
+        toast("任务运行中，暂不能撤回；请先停止或等待任务完成", "error")
+        return
+      }
+      const text = isUser ? "撤回这条消息及其后续内容？" : "撤回这条助手消息及其后续内容？撤回后可输入新的指导修正。"
+      if (!(await confirmDialog({ title: "撤回消息", text }))) return
       try {
         await client.truncateSession(cur.id, msg.id)
         // 确认期间用户可能已切到其他会话：视图/输入框只操作原会话，不打断当前浏览
         if (getCurrentSession()?.id !== cur.id) return
         await loadMessages(cur.id)
-        // 回滚：将该用户消息内容填充到输入框，便于重新编辑/发送
-        if (msg.content) {
+        if (isUser && msg.content) {
+          // 回滚：将该用户消息内容填充到输入框，便于重新编辑/发送
           input.value = msg.content
           autosize()
-          focusInput()
         }
+        // 助手消息撤回不回填内容：聚焦输入框直接输入修正指导
+        focusInput()
       } catch (err) {
         // 撤回失败（消息 id 不匹配/服务端拒绝等）：明确提示，避免静默失败
         toast(`撤回失败: ${(err as Error).message}`, "error")
@@ -264,8 +273,9 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   const hasBody = (msg.role === "assistant" && stream) || (bubble?.childNodes.length ?? 0) > 0 || msg.blocks?.length || msg.attachments?.length
   if (hasBody && bubble) body.appendChild(bubble)
 
-  // 头部行复制按钮（hover 显示，不占气泡空间）；助手消息复制 markdown 源文
-  if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg)
+  // 头部行复制按钮（hover 显示，不占气泡空间）；助手消息复制 markdown 源文；
+  // 容器内消息（子Agent 执行过程回放，id 为本地生成）不提供撤回
+  if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg, { noRevoke: !!parent })
 
   const cur = getCurrentSession()
   // 弹窗查看模式下文件工具（card.file）的产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）

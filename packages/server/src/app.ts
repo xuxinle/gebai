@@ -534,9 +534,14 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // Attachments
   app.post("/api/v1/sessions/:id/truncate", async (c) => {
     const user = await userOf(c)
+    const sessionId = c.req.param("id")
+    const s = await d.store.load(sessionId, user.id)
+    if (!s) return c.json({ error: "not found" }, 404)
+    // 运行中任务持有自己的上下文快照并继续追加消息，中途截断会产生交错历史：拒绝，先停止或等任务完成
+    if (d.engine.isRunning(sessionId)) return c.json({ error: "task already running" }, 409)
     const body = await c.req.json<{ before: string }>()
     if (!body.before) return c.json({ error: "before required" }, 400)
-    await d.store.truncateMessages(c.req.param("id"), user.id, body.before)
+    await d.store.truncateMessages(sessionId, user.id, body.before)
     return c.json({ ok: true })
   })
   app.post("/api/v1/sessions/:id/attachments", async (c) => {

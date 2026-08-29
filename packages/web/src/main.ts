@@ -453,7 +453,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
       if (sub.el?.isConnected) {
         sub.el.classList.remove("streaming")
         const bubble = sub.el.querySelector<HTMLElement>(".msg-body .bubble")
-        if (bubble) addMetaActions(sub.el.querySelector<HTMLElement>(".msg-meta") ?? sub.el, sub.el, bubble, { role: "assistant", content: sub.acc, id: sub.messageId })
+        if (bubble) addMetaActions(sub.el.querySelector<HTMLElement>(".msg-meta") ?? sub.el, sub.el, bubble, { role: "assistant", content: sub.acc, id: sub.messageId }, { noRevoke: true })
       }
       sealSessionSegment(sub)
       finishSessionRun(sub.container, sub.outputEl, chunk.sessionMeta?.output ?? "")
@@ -606,7 +606,7 @@ function appendFinalNotice(sessionId: string, text: string): void {
   const bubble = wrapper.querySelector<HTMLElement>(".msg-body .bubble")
   if (bubble) {
     bubble.appendChild(blockText(text))
-    addMetaActions(wrapper.querySelector<HTMLElement>(".msg-meta") ?? wrapper, wrapper, bubble, { role: "assistant", content: text, id: uuid() })
+    addMetaActions(wrapper.querySelector<HTMLElement>(".msg-meta") ?? wrapper, wrapper, bubble, { role: "assistant", content: text, id: uuid() }, { noRevoke: true })
   }
 }
 
@@ -683,7 +683,8 @@ async function consumeTaskStream(sessionId: string, makeSource: (run: RunState) 
             bubble.innerHTML = ""
             bubble.appendChild(blockText(msg))
           }
-          addMetaActions(run.el.querySelector<HTMLElement>(".msg-meta") ?? run.el, run.el, bubble, { role: "assistant", content: run.acc || msg, id: run.messageId })
+          // 错误路径的部分输出未持久化（无落点消息），不提供撤回
+          addMetaActions(run.el.querySelector<HTMLElement>(".msg-meta") ?? run.el, run.el, bubble, { role: "assistant", content: run.acc || msg, id: run.messageId }, { noRevoke: true })
         }
       }
     } else {
