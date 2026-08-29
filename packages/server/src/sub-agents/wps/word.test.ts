@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { strToU8, unzipSync, zipSync } from "fflate"
 import { wordAppendTool, wordCreateTool, wordReadTool } from "./word"
+import { parseXml } from "./ooxml"
 import { makeCtx, png1px } from "./test-ctx"
 
 const MD = `# 项目报告
@@ -115,6 +117,34 @@ describe("word_create / word_read（markdown → docx → markdown 往返）", (
     writeFileSync(join(ctx.workdir, "bad.docx"), "not a zip")
     const bad = await wordReadTool.execute({ path: "bad.docx" }, ctx)
     expect(bad.output).toContain("word_read 失败")
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("第三方 docx 兼容性（python-docx 生成的单引号 XML 声明）", () => {
+  test("parseXml 对单/双引号 XML 声明均可正确解析为 XML（不降级为 HTML）", () => {
+    const xmlBody = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>'
+    for (const quote of ["'", '"']) {
+      const doc = parseXml(`<?xml version=${quote}1.0${quote} encoding=${quote}UTF-8${quote} standalone=${quote}yes${quote}?>${xmlBody}`)
+      expect(doc.getElementsByTagName("w:body").length).toBe(1)
+    }
+  })
+
+  test("word_read 可直接读取 python-docx 生成的文件（曾误报「缺少 w:body」）", async () => {
+    const home = setup()
+    const { ctx } = makeCtx(home)
+    // 先生成一份基座 docx，再把 document.xml 换成 python-docx 形态（单引号声明 + 无缓存值占位标签）
+    await wordCreateTool.execute({ path: "ref.docx", markdown: "# 占位" }, ctx)
+    const fxml = '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\'?>'
+    const documentXml = `${fxml}<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`
+      + `<w:p><w:r><w:t>第三方库生成的标题段落</w:t></w:r></w:p>`
+      + `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>`
+    const files = unzipSync(readFileSync(join(ctx.workdir, "ref.docx")))
+    files["word/document.xml"] = strToU8(documentXml)
+    writeFileSync(join(ctx.workdir, "ref.docx"), zipSync(files))
+    const read = await wordReadTool.execute({ path: "ref.docx" }, ctx)
+    expect(read.output).toContain("第三方库生成的标题段落")
+    expect(read.output).not.toContain("缺少 w:body")
     rmSync(home, { recursive: true, force: true })
   })
 })
