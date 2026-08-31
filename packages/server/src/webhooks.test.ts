@@ -53,6 +53,24 @@ describe("WebhookManager", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("of() returns raw config by id including secret (cron notify reference resolution)", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const home = mkdtempSync(join(tmpdir(), "gebai-wh-of-"))
+    try {
+      const mgr = new WebhookManager({ home, deliver: async () => ({ ok: true, status: 200 }) })
+      await mgr.start(new (await import("./core/event-bus")).EventBus())
+      const cfg = await mgr.register({ url: "https://example.com/h", secret: "s1" }, "alice")
+      // list 视图脱敏；of() 原样返回（含 secret 与归属）供内部解析
+      expect(mgr.list("alice")[0].secret).toBe("***")
+      expect(mgr.of(cfg.id)).toMatchObject({ id: cfg.id, url: "https://example.com/h", secret: "s1", userId: "alice" })
+      expect(mgr.of("missing")).toBeUndefined()
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test("rejects non-http(s) urls", async () => {
     const { mgr } = await setup()
     await expect(mgr.register({ url: "ftp://x" })).rejects.toThrow(/invalid webhook url/)

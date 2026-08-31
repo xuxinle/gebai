@@ -269,9 +269,14 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
   })
+  // 事件 Webhook（REST /api/v1/webhooks 注册面）先行构建：定时任务通知的 webhookId 引用解析依赖它
+  const webhooks = new WebhookManager({ home: config.gebaiHome })
+  webhooks.ownerOf = async (sessionId: string) => store.ownerOf(sessionId)
+  await webhooks.start(events)
   // 定时任务（GEBAI_CRON_ENABLED，默认开启）：通知通道含飞书应用消息（feishu_chat）——复用全局飞书
   // 应用凭证（GEBAI_FEISHU_APP_ID/SECRET，与机器人桥接/云文档共用）构建发送器；agents 预载名单合法性
-  // 由 subAgents.def 探测；关闭时调度器不启动（工具注册见上）
+  // 由 subAgents.def 探测；webhookId 引用解析——具名注册（userId 记录）仅本人任务可引用，全局注册
+  // （admin，userId 未记录=部署方集成通道）人人可引用；关闭时调度器不启动（工具注册见上）
   let cron: CronManager | null = null
   if (config.cronEnabled) {
     const feishuApi = config.feishuAppId && config.feishuAppSecret ? createFeishuApi({ appId: config.feishuAppId, appSecret: config.feishuAppSecret }) : undefined
@@ -291,6 +296,12 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
           }
         : undefined,
       agentExists: (name) => subAgents.def(name) !== undefined,
+      resolveWebhook: (id, user) => {
+        const cfg = webhooks.of(id)
+        if (!cfg) return null
+        if (cfg.userId && cfg.userId !== user) return null
+        return { url: cfg.url, secret: cfg.secret }
+      },
     })
     cron.attach(engine)
     await cron.start()
@@ -302,9 +313,6 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
         // 归档后失效会话缓存，防止缓存命中后 save() 在 sessions/ 重建已归档目录
         onArchive: (sessionId) => store.evict(sessionId),
       })
-  const webhooks = new WebhookManager({ home: config.gebaiHome })
-  webhooks.ownerOf = async (sessionId: string) => store.ownerOf(sessionId)
-  await webhooks.start(events)
   // 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true）：长连接订阅消息事件，回推 Agent 回复
   let feishuBot: FeishuBot | null = null
   if (config.feishuBotEnabled) {

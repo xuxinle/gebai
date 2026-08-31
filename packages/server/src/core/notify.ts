@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto"
 import { checkWebhookUrl } from "../webhooks"
 import { fetchWithRedirectGuard } from "./tools"
+import { hmacHex } from "./paths"
 
 /** 通知正文在通道消息中的保留长度（卡片 lark_md 内容限 4000 字符）。 */
 export const NOTIFY_TEXT_MAX = 2000
@@ -19,11 +20,14 @@ export interface FeishuAtTarget {
 /** 定时任务通知通道（任务内嵌配置，可配多条）。 */
 export interface CronNotifyChannel {
   type: CronNotifyType
-  /** webhook/feishu：http(s) URL（feishu 须为 open.feishu.cn 群机器人 webhook）；feishu_chat：群 chat_id。 */
-  target: string
-  /** feishu 加签密钥（可选，群机器人安全设置「签名校验」）。 */
+  /** webhook/feishu：http(s) URL（feishu 须为 open.feishu.cn 群机器人 webhook）；feishu_chat：群 chat_id。
+   *  type=webhook 时可与 webhookId 二选一（引用已注册事件 Webhook，投递时解析其 URL 与签名密钥）。 */
+  target?: string
+  /** 引用 REST /api/v1/webhooks 注册的事件 Webhook（type=webhook；须本人注册或全局注册，创建时校验）。 */
+  webhookId?: string
+  /** feishu 加签密钥（可选，群机器人安全设置「签名校验」）；webhook 直配 URL 时为 HMAC 签名密钥（X-Gebai-Signature）。 */
   secret?: string
-  /** @ 人名单（仅 feishu/feishu_chat 通道；卡片内以 lark_md at 标签渲染）。 */
+  /** @ 人名单（feishu/feishu_chat 渲染进卡片；webhook 随 JSON 载荷 at 字段携带，供接收方解析 @ 人）。 */
   at?: FeishuAtTarget[]
 }
 
@@ -76,21 +80,26 @@ export function normalizeAtList(raw: unknown): FeishuAtTarget[] | undefined {
   return out.length ? out : undefined
 }
 
-/** 校验通知通道配置（创建/修改时即拒绝非法配置）。 */
+/** 校验通知通道配置（创建/修改时即拒绝非法配置；webhookId 的存在性/归属由 CronManager 注入的解析器校验）。 */
 export function validateNotifyChannel(ch: CronNotifyChannel): void {
   if (ch.type !== "webhook" && ch.type !== "feishu" && ch.type !== "feishu_chat") {
     throw new Error(`无效的通知通道类型: ${String(ch.type)}`)
   }
   const target = String(ch.target ?? "").trim()
-  if (!target) throw new Error("通知通道缺少 target")
-  if (ch.at !== undefined && ch.at.length > 0 && ch.type === "webhook") {
-    throw new Error("at @ 人配置仅支持飞书通道（feishu/feishu_chat）")
-  }
+  const webhookId = String(ch.webhookId ?? "").trim()
+  if (!target && !webhookId) throw new Error("通知通道缺少 target（webhook 可用 webhookId 引用已注册事件 Webhook）")
+  if (webhookId && ch.type !== "webhook") throw new Error("webhookId 仅支持 webhook 通道")
+  if (webhookId && !/^[a-f0-9]{32}$/.test(webhookId)) throw new Error(`无效的 webhookId: ${webhookId}（32 位 hex，REST /api/v1/webhooks 注册返回）`)
   if (ch.at !== undefined) normalizeAtList(ch.at)
   if (ch.type === "feishu_chat") {
+    if (!target) throw new Error("feishu_chat 通道需要 target（群 chat_id）")
     if (!/^(oc_[a-f0-9]+|[0-9a-f-]{16,})$/i.test(target)) throw new Error(`无效的飞书 chat_id: ${target}`)
     return
   }
+  if (ch.type === "feishu") {
+    if (!target) throw new Error("feishu 通道需要 target（群机器人 webhook 地址）")
+  }
+  if (webhookId && !target) return // 引用形态：URL 在投递时解析（解析器注册期已过 SSRF 校验）
   let url: URL
   try {
     url = new URL(target)
@@ -165,10 +174,13 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
   const now = deps.now ?? Date.now
   if (ch.type === "feishu_chat") {
     if (!deps.feishuSend) throw new Error("飞书应用通知未配置（需 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET）")
-    await deps.feishuSend(ch.target, buildFeishuCard(n, ch.at))
+    const chatId = String(ch.target ?? "").trim()
+    if (!chatId) throw new Error("feishu_chat 通道缺少 target（群 chat_id）")
+    await deps.feishuSend(chatId, buildFeishuCard(n, ch.at))
     return
   }
-  const url = String(ch.target).trim()
+  const url = String(ch.target ?? "").trim()
+  if (!url) throw new Error("webhook 引用未解析（webhookId 须由调度器在投递前解析为具体 URL）")
   const fetchImpl =
     deps.fetchImpl ??
     (async (u: string, init: RequestInit) => {
@@ -176,6 +188,7 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
       return { ok: res.ok, status: res.status }
     })
   let body: Record<string, unknown>
+  let headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8" }
   if (ch.type === "feishu") {
     const payload: Record<string, unknown> = { msg_type: "interactive", card: buildFeishuCard(n, ch.at) }
     if (ch.secret) {
@@ -185,11 +198,14 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
     }
     body = payload
   } else {
-    body = n as unknown as Record<string, unknown>
+    // 通用 webhook：载荷随通道 at 名单携带（接收方据此渲染 @ 人）；配 secret（直配或 webhookId 引用解析）
+    // 时附 X-Gebai-Signature（与事件 Webhook 投递同款 sha256 HMAC，接收方一套校验通吃）
+    body = { ...n, at: ch.at } as unknown as Record<string, unknown>
+    if (ch.secret) headers["X-Gebai-Signature"] = `sha256=${hmacHex(ch.secret, JSON.stringify(body))}`
   }
   const res = await fetchImpl(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
   })
