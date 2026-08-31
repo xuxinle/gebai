@@ -329,6 +329,61 @@ describe("branch_run 集成", () => {
     }
   })
 
+  test("merge=summary 摘要合入：长报告压缩为要点进主线（全文留过程存档），短报告低于阈值原文合入", async () => {
+    const longReport = `调研结论开始。${"细节内容占位。".repeat(300)}`
+    expect(longReport.length).toBeGreaterThan(1500)
+    const h = await setupBranch(async (msgs) => {
+      if (h.provider.calls === 1) {
+        return [
+          {
+            type: "tool_call",
+            toolCall: {
+              id: "tc-ms",
+              name: "branch_run",
+              arguments: { branches: [{ name: "摘要路", prompt: "长报告任务" }, { name: "短路", prompt: "短报告任务" }], merge: "summary" },
+            },
+          } as LLMChunk,
+          { type: "done" } as LLMChunk,
+        ]
+      }
+      // 摘要调用（completeText：system 为报告压缩器提示词，区别于分支/主线调用）
+      const sys = msgs[0]?.role === "system" ? String(msgs[0].content) : ""
+      if (sys.includes("并行分支报告压缩器")) {
+        return [{ type: "text", text: "要点：方案A可行，产物 a.ts；建议采纳A。" }, { type: "done" }] as LLMChunk[]
+      }
+      const last = lastUserText(msgs)
+      if (last === "长报告任务") return [{ type: "text", text: longReport }, { type: "done" }] as LLMChunk[]
+      if (last === "短报告任务") return [{ type: "text", text: "短报告：直接结论。" }, { type: "done" }] as LLMChunk[]
+      return [{ type: "text", text: "主线总结完成" }, { type: "done" }] as LLMChunk[]
+    })
+    try {
+      const session = await h.store.createSession("default", "t")
+      await h.engine.run(session.id, "default", "两个分支")
+      const msgs = (await h.store.load(session.id, "default"))!.messages
+      // 长报告：摘要合入（头行带标记、正文为要点、不含长文细节），全文保留在过程存档
+      const mergedLong = msgs.find((m) => m.branchMeta?.name === "摘要路")
+      expect(mergedLong).toBeDefined()
+      expect(mergedLong!.content).toContain("已合并（摘要合入）")
+      expect(mergedLong!.content).toContain("要点：方案A可行")
+      expect(mergedLong!.content).not.toContain("细节内容占位")
+      expect(mergedLong!.content).toContain("报告全文见分支过程存档")
+      expect(mergedLong!.sessionRun?.output).toContain("细节内容占位")
+      // 短报告：低于摘要阈值原文合入（无摘要标记、不触发摘要调用）
+      const mergedShort = msgs.find((m) => m.branchMeta?.name === "短路")
+      expect(mergedShort!.content).toContain("短报告：直接结论。")
+      expect(mergedShort!.content).not.toContain("摘要合入")
+      // 主线最终回复那轮上下文：只见摘要要点，不见长文全文（主线上下文预算保护生效）
+      const finalChat = h.provider.seenChats[h.provider.seenChats.length - 1]
+      const joined = JSON.stringify(finalChat)
+      expect(joined).toContain("要点：方案A可行")
+      expect(joined).not.toContain("细节内容占位")
+      // 摘要调用恰好一次（仅长报告触发）
+      expect(h.provider.seenChats.filter((m) => String(m[0]?.content ?? "").includes("并行分支报告压缩器")).length).toBe(1)
+    } finally {
+      h.cleanup()
+    }
+  })
+
   test("异步分支：主线先结束，分支完成后直接落盘合入，bg_task 可查", async () => {
     const h = await setupBranch(async (msgs, call) => {
       const last = lastUserText(msgs)

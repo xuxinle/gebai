@@ -15,11 +15,19 @@ import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool,
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
 import { SessionRunRegistry, type SessionRunHandle } from "./session-runs"
-import { BranchRunRegistry, type BranchRunHandle, type BranchSpec, BRANCH_MERGE_MAX_CHARS, branchNoticeHead } from "./branch-runs"
+import { BranchRunRegistry, type BranchRunHandle, type BranchSpec, BRANCH_MERGE_MAX_CHARS, BRANCH_MERGE_SUMMARY_SKIP_CHARS, branchNoticeHead } from "./branch-runs"
 import { RESERVED_PROJECT_TMP } from "./projects"
 import { basenameName, resolveInSandbox, sessionPath } from "./paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "./safety"
+import { createHash } from "node:crypto"
+
+/** 文件内容指纹（fileGuard 防陈旧覆盖）：BOM 无关（去 \uFEFF 前缀后哈希——read 登记去 BOM 正文、
+ *  write 比对含 BOM 原文，边界归一后一致），sha256 十六进制前 16 位（非加密用途，防撞足够）。 */
+function fingerprint(content: string): string {
+  const body = content.startsWith("\uFEFF") ? content.slice(1) : content
+  return createHash("sha256").update(body).digest("hex").slice(0, 16)
+}
 
 const MAX_TOOL_ROUNDS = 200
 /** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。 */
@@ -324,10 +332,12 @@ export class AgentEngine {
    *  任务结束清理——与待办续做同机制的兜底：模型改了代码却全程没跑验证时注入一次提醒。 */
   private taskMods = new Map<string, { files: Set<string>; verified: boolean }>()
 
-  /** 会话级已读文件追踪（fileGuard 防误覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → 已读绝对路径集合。
-   *  read/edit/patch/write 成功后登记，write 整体覆盖「已存在但未读过」的文件前据此拦截；
+  /** 会话级已读文件追踪（fileGuard 防误覆盖/防陈旧覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → (已读绝对路径 →
+   *  读取/写入时内容指纹)。read/edit/patch/write 成功后登记（含指纹），write/edit/patch 写前按「未读 → 防盲写、
+   *  指纹漂移 → 防陈旧覆盖」两档拦截（并行分支/主线/脚本命令/外部编辑改动均会漂移指纹）；
+   *  分支运行 fork 独立快照（runBranch 拷贝本表——分支已读基线 = fork 点主线可见内容，互不串扰）；
    *  会话删除经 forgetSession 释放（进程内无界增长防护）。 */
-  private readFiles = new Map<string, Set<string>>()
+  private readFiles = new Map<string, Map<string, string | null>>()
   /** 单会话已读登记上限（防长会话无界增长；超出整表重置——守卫降级为「需重读」，保护语义不破坏）。 */
   private static readonly READ_TRACK_CAP = 2000
 
@@ -509,21 +519,20 @@ export class AgentEngine {
     if (m.size) this.dynamicTools.set(sessionId, m)
   }
 
-  /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件（绝对路径）。 */
-  private fileGuardFor(sessionId: string): NonNullable<ToolContext["fileGuard"]> {
-    let set = this.readFiles.get(sessionId)
-    if (!set) {
-      set = new Set<string>()
-      this.readFiles.set(sessionId, set)
-    }
-    const tracked = set
+  /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件与内容指纹（BOM 无关——read 登记去 BOM 正文、
+   *  write 比对含 BOM 原文，指纹在边界统一归一）。分支运行传入 fork 快照副本（与主线/兄弟分支隔离）。 */
+  private fileGuardFor(tracked: Map<string, string | null>): NonNullable<ToolContext["fileGuard"]> {
     return {
-      markRead(absPath: string) {
+      markRead(absPath: string, content?: string) {
         if (tracked.size >= AgentEngine.READ_TRACK_CAP) tracked.clear()
-        tracked.add(absPath)
+        tracked.set(absPath, content === undefined ? null : fingerprint(content))
       },
       hasRead(absPath: string) {
         return tracked.has(absPath)
+      },
+      staleSinceRead(absPath: string, currentContent: string) {
+        const fp = tracked.get(absPath)
+        return fp !== undefined && fp !== null && fp !== fingerprint(currentContent)
       },
     }
   }
@@ -1039,29 +1048,53 @@ export class AgentEngine {
         },
         { role: "user", content: text },
       ]
-      let summary = ""
-      const idleMs = this.opts.llmIdleTimeoutMs ?? LLM_IDLE_TIMEOUT_MS
-      const iter = provider.chat(msgs, { signal })[Symbol.asyncIterator]()
-      try {
-        for (;;) {
-          let timer: ReturnType<typeof setTimeout> | undefined
-          const timedOut = new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`模型接口读超时（${Math.round(idleMs / 1000)} 秒无数据），判定接口假死`)), idleMs)
-          })
-          const next = await Promise.race([iter.next(), timedOut])
-          if (timer) clearTimeout(timer)
-          if (next.done) break
-          if (next.value.type === "text") summary += next.value.text
-        }
-      } finally {
-        void iter.return?.().catch(() => {})
-      }
-      const trimmed = summary.trim()
-      if (!trimmed) throw new Error("摘要为空")
-      return trimmed.slice(0, SUMMARY_OUTPUT_LIMIT)
+      const summary = await this.completeText(msgs, provider, signal)
+      if (!summary) throw new Error("摘要为空")
+      return summary.slice(0, SUMMARY_OUTPUT_LIMIT)
     } catch {
       // 摘要失败（含读超时/取消）降级为滚动裁剪：仅丢弃，占位文本向模型说明历史已被裁剪
       return "[上下文已裁剪：历史消息过多，已丢弃最早部分。如需详情可查看会话文件。]"
+    }
+  }
+
+  /** 单轮文本补全（压缩/分支报告摘要共用核心）：流式收集文本 chunk，读空闲超时防接口假死（与 callModel 同防护——
+   *  无超时防护时接口假死会把调用方（任务内压缩/合入流程）永久挂死）。 */
+  private async completeText(msgs: MessageLike[], provider: LLMProvider, signal?: AbortSignal): Promise<string> {
+    const idleMs = this.opts.llmIdleTimeoutMs ?? LLM_IDLE_TIMEOUT_MS
+    const iter = provider.chat(msgs, { signal })[Symbol.asyncIterator]()
+    let text = ""
+    try {
+      for (;;) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timedOut = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`模型接口读超时（${Math.round(idleMs / 1000)} 秒无数据），判定接口假死`)), idleMs)
+        })
+        const next = await Promise.race([iter.next(), timedOut])
+        if (timer) clearTimeout(timer)
+        if (next.done) break
+        if (next.value.type === "text") text += next.value.text
+      }
+    } finally {
+      void iter.return?.().catch(() => {})
+    }
+    return text.trim()
+  }
+
+  /** 分支报告摘要（merge=summary 合入粒度，DESIGN「会话分支运行与合并」）：任务级模型压缩为「结论+要点」，
+   *  失败/空结果返回 undefined——调用方全文兜底（合入不因摘要失败而丢失）。 */
+  private async summarizeBranchReport(content: string, env: Record<string, string>): Promise<string | undefined> {
+    try {
+      const provider = this.opts.resolveProvider?.(env) ?? this.opts.provider
+      const out = await this.completeText(
+        [
+          { role: "system", content: "你是并行分支报告压缩器。把分支执行报告压缩为给主线决策用的要点：保留结论、关键发现、产物文件路径、给主线的建议与未尽事项；舍弃过程叙述与客套话。直接输出要点正文（可分条），不超过 400 字。" },
+          { role: "user", content: content.slice(0, SUMMARY_INPUT_LIMIT) },
+        ],
+        provider,
+      )
+      return out ? out.slice(0, SUMMARY_OUTPUT_LIMIT) : undefined
+    } catch {
+      return undefined
     }
   }
 
@@ -1658,7 +1691,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; branchSync?: (content?: string) => Promise<string> },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; branchSync?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null> },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1671,6 +1704,13 @@ export class AgentEngine {
     const projects = opts?.projects ?? []
     // 子进程取消信号：任务取消统一生效（子Agent 不设独立超时，无额外信号源）
     const execSignal = signal
+    // 已读追踪表：缺省按会话（主循环/agent_run 新会话共用会话级表）；分支运行传 fork 快照副本（隔离，防跨流串扰）
+    let sessionReads = this.readFiles.get(sessionId)
+    if (!sessionReads) {
+      sessionReads = new Map()
+      this.readFiles.set(sessionId, sessionReads)
+    }
+    const guardMap = opts?.fileGuardMap ?? sessionReads
     return {
       user,
       userRole: opts?.role,
@@ -1700,7 +1740,7 @@ export class AgentEngine {
               .filter((m) => m.content.trim().length > 0)
         : undefined,
       safeMode: this.opts.config.safeMode,
-      fileGuard: this.fileGuardFor(sessionId),
+      fileGuard: this.fileGuardFor(guardMap),
       // 写范围守卫：显式传入（新会话模式：预加载子Agent 名单静态已知）或按会话装载名单动态收集（装载模式）
       writeGuard: opts?.writeGuard ?? ((absPaths: string[]) => this.sessionWriteGuard(sessionId, user, env, absPaths)),
       // 退出极简模式（full_mode 工具，DESIGN「极简模式」）：清会话极简标记（任务 env 快照 + 会话内存 env）并
@@ -1863,7 +1903,7 @@ export class AgentEngine {
             runner: (spec, branchSignal, forkMessages) => self.runBranch(sessionId, user, env, spec, branchSignal, forkMessages),
             forkSource: opts.messages,
             parentSignal: signal,
-            onDone: (handle) => self.trunkMerge(sessionId, user, handle, { final: true, content: handle.output ?? "" }),
+            onDone: (handle) => self.trunkMerge(sessionId, user, env, handle, { final: true, content: handle.output ?? "" }),
           })
         : undefined,
       // 分支与主干双向同步（branch_sync 工具，DESIGN「会话分支运行与合并」互相感知）：仅分支运行上下文
@@ -2140,7 +2180,7 @@ export class AgentEngine {
     } catch {
       return null
     }
-    ctx.fileGuard?.markRead(path)
+    ctx.fileGuard?.markRead(path, salvaged.content)
     return `工具参数 JSON 未完整生成（本次输出疑似被截断）：已将已生成的前 ${salvaged.content.length} 字符写入 ${salvaged.path}。请用 write 的 append:true 模式续写剩余内容（从已写入内容之后继续，不要重复已写入部分）。`
   }
 
@@ -2707,6 +2747,10 @@ export class AgentEngine {
       if (rt && rt.enabled !== false) reg.register(rt.tool, (rt as { agent?: string }).agent)
     }
     reg.register(branchSyncTool)
+    // 已读追踪 fork 快照（防误覆盖/防陈旧覆盖的分支隔离）：拷贝 fork 点会话级已读表——分支已读基线 =
+    // fork 时主线可见内容；此后主线/兄弟分支的读写互不串扰（跨流盲写/陈旧覆盖由指纹漂移拦截，
+    // fork 后他人读过的文件不视为本分支已读）。须在任何 await 前拷贝（fork 点同步语义）
+    const branchReads = new Map(this.readFiles.get(sessionId) ?? [])
     // fork 点主干水位（branch_sync 增量基准）：以存储消息数为准——runLoop 边落盘边推进，
     // 此刻存储尾部即 fork 快照的持久化等价（在途 tool 结果尚未落盘，不属主干可见内容）。首个 await 后
     // 句柄必已登记（registry.start 在启动 runner 后同步 store.set）
@@ -2750,6 +2794,7 @@ export class AgentEngine {
       const output = await this.runNewSessionLoop(sessionId, user, env, [], spec.prompt, messages, reg, signal, 1, archive, {
         provider,
         branch: archive.branch,
+        fileGuardMap: branchReads,
         // 主干通知收件箱（句柄惰性查找——回调每轮调用时句柄必已在引擎级表登记）
         drainInbox: () => {
           const h = this.branchRunStore.get(spec.branchId)
@@ -2762,7 +2807,7 @@ export class AgentEngine {
         branchSync: async (content) => {
           if (content !== undefined) {
             const h = this.branchRunStore.get(spec.branchId)
-            if (h) this.trunkMerge(sessionId, user, h, { final: false, content })
+            if (h) await this.trunkMerge(sessionId, user, env, h, { final: false, content })
           }
           return await this.trunkSnapshot(sessionId, user, spec.branchId)
         },
@@ -2779,20 +2824,31 @@ export class AgentEngine {
    *  （branch_sync 传 content）的统一实现——构造合并消息（assistant，内容带分支头行自描述 + branchMeta；
    *  最终合并携带完整过程存档 sessionRun，阶段性不带——分支仍在执行、存档为活引用）入主干、推送
    *  event.branch.merged（前端实时渲染合并气泡）、广播通知其他运行中分支（互相感知）。
-   *  final=true 标记句柄已合入（bg_task 状态展示）；interimNote 供阶段性通知文案。 */
-  private trunkMerge(sessionId: string, user: string, handle: BranchRunHandle, opts: { final: boolean; content: string }): void {
+   *  final=true 标记句柄已合入（bg_task 状态展示）；interimNote 供阶段性通知文案。
+   *  merge=summary（合入粒度）：超阈值报告先经任务级模型摘要（summarizeBranchReport）再合入——失败全文兜底；
+   *  异步方法（摘要含模型调用），同步 fan-out 经注册表 done promise 等待合入完成（结果前排空）。 */
+  private async trunkMerge(sessionId: string, user: string, env: Record<string, string>, handle: BranchRunHandle, opts: { final: boolean; content: string }): Promise<void> {
     if (opts.final) handle.merged = true
-    const raw = opts.content.trim() || "（分支已完成，无最终文本输出）"
+    let raw = opts.content.trim() || "（分支已完成，无最终文本输出）"
+    // 摘要合入（merge=summary）：短报告不值得一次模型调用，原文合入；全文保留在分支过程存档/bg_task
+    let summarized = false
+    if (handle.mergeMode === "summary" && raw.length > BRANCH_MERGE_SUMMARY_SKIP_CHARS) {
+      const summary = await this.summarizeBranchReport(raw, env)
+      if (summary && summary.length < raw.length) {
+        raw = summary
+        summarized = true
+      }
+    }
     // 长度保护（分支输出无落盘兜底，纯上下文保护）：超限保留头尾 + 省略说明
     const kind = opts.final ? "分支报告" : "阶段性成果"
     const content = raw.length > BRANCH_MERGE_MAX_CHARS
       ? `${raw.slice(0, Math.floor(BRANCH_MERGE_MAX_CHARS * 0.7))}\n…（${kind}过长，中间省略约 ${raw.length - BRANCH_MERGE_MAX_CHARS} 字符）\n${raw.slice(-Math.floor(BRANCH_MERGE_MAX_CHARS * 0.3))}`
       : raw
-    const header = opts.final ? "已合并" : "阶段性合入"
+    const header = opts.final ? (summarized ? "已合并（摘要合入）" : "已合并") : summarized ? "阶段性合入（摘要）" : "阶段性合入"
     const msg: Message = {
       id: crypto.randomUUID(),
       role: "assistant",
-      content: `【并行分支「${handle.name}」${header}】\n${content}`,
+      content: `【并行分支「${handle.name}」${header}】\n${content}${summarized ? "\n（报告全文见分支过程存档，bg_task wait 可取回）" : ""}`,
       createdAt: Date.now(),
       branchMeta: { branchId: handle.branchId, name: handle.name, ...(handle.model ? { model: handle.model } : {}) },
       ...(opts.final && handle.archive ? { sessionRun: handle.archive } : {}),
@@ -2960,7 +3016,7 @@ export class AgentEngine {
     signal: AbortSignal,
     depth: number,
     archive: SessionRunArchive,
-    ctxOpts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; provider?: LLMProvider; branch?: { name: string; model?: string }; drainInbox?: () => string[]; branchSync?: (content?: string) => Promise<string> },
+    ctxOpts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; provider?: LLMProvider; branch?: { name: string; model?: string }; drainInbox?: () => string[]; branchSync?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null> },
   ): Promise<string> {
     let rounds = 0
     let lastText = ""

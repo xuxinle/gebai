@@ -234,6 +234,7 @@ function branchRunArgsBlock(args: string): HTMLElement | null {
   }
   if (!wrap.children.length) return null
   if (obj.async === true) wrap.appendChild(el("div", "branch-args-async", "⏳ async 后台执行——完成自动合入，bg_task 管理"))
+  if (obj.merge === "summary") wrap.appendChild(el("div", "branch-args-async", "📄 merge 摘要合入——长报告压成要点进主线，全文在过程存档"))
   return wrap
 }
 

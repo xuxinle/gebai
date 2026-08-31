@@ -384,8 +384,8 @@ export const readTool: Tool = {
       body += `\n（第 ${firstLine}–${firstLine + shownLines - 1} 行，共 ${totalLines} 行）`
     }
     const truncated = await truncate(body, "read", ctx)
-    // 登记已读（write 防误覆盖守卫依据；读取失败抛错不登记）
-    ctx.fileGuard?.markRead(path)
+    // 登记已读与内容指纹（write 防误覆盖/防陈旧覆盖守卫依据；读取失败抛错不登记）
+    ctx.fileGuard?.markRead(path, content)
     // 产物块路径用解析后的可预览路径（会话 tmp/ 逻辑路径或绝对路径——原始参数路径在项目工具下无法由 files 接口解析）
     const blocks = artifactBlocks(previewLogicalPath(path, ctx), content)
     return { ...truncated, blocks }
@@ -395,7 +395,7 @@ export const readTool: Tool = {
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。默认整体覆盖；append:true 追加模式——内容接在文件末尾（文件不存在则新建）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写后续段（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
+    "写入文件。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略，受沙箱限制）。默认整体覆盖；append:true 追加模式——内容接在文件末尾（文件不存在则新建）。目标文件**已存在且本会话未 read 过**时拒绝写入（防盲覆盖：先 read 掌握现有内容，确认整体覆盖后再 write；新建文件不受限）；**已存在但内容自上次读取/写入后被修改过**（并行分支、脚本命令、外部编辑）同样拒绝（防陈旧覆盖：重新 read 后再写）。read/edit/patch/write 成功过的文件视为已读；只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写后续段（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
   card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
   parameters: schema({
     path: { type: "string" },
@@ -423,13 +423,20 @@ export const writeTool: Tool = {
         output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
       }
     }
+    // 防陈旧覆盖守卫：内容自本会话上次读取/写入后已漂移（并行分支/主线/脚本命令/外部编辑）→ 拒绝并引导重读，
+    // 防基于旧认知静默覆盖他人改动
+    if (existing !== null && ctx.fileGuard?.staleSinceRead(path, existing)) {
+      return {
+        output: `write 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再写，避免覆盖他人的改动；确认要覆盖时在 read 之后立即 write。`,
+      }
+    }
     const content = stripBom(String(args.content ?? ""))
     // 覆盖写保留原文件的 UTF-8 BOM（read 展示的是去 BOM 正文，模型意图即正文；BOM 丢失会改变文件字节内容）；
     // 追加模式接在 existing 之后不动文件头
     const bom = existing !== null && existing.startsWith("\uFEFF") ? "\uFEFF" : ""
     const final = append && existing !== null ? existing + content : bom + content
     await ctx.writeFile(path, final)
-    ctx.fileGuard?.markRead(path)
+    ctx.fileGuard?.markRead(path, final)
     const blocks = artifactBlocks(previewLogicalPath(path, ctx), final)
     return {
       output: append && existing !== null
@@ -1690,6 +1697,14 @@ export const editTool: Tool = {
         output: `edit 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲改）。请先 read 该文件（或目标区域）确认当前内容后再 edit；read/edit/patch/write 成功过的文件视为已读。`,
       }
     }
+    // 防陈旧改守卫（与 write 防陈旧覆盖同规则）：内容自本会话上次读取/写入后已漂移 → 拒绝并引导重读——
+    // patch 的行号模糊容错可对漂移内容误命中，edit 的唯一性匹配失败提示也远不如陈旧提示直接
+    // （指纹边界 BOM 无关，此处传去 BOM 正文即可）
+    if (ctx.fileGuard?.staleSinceRead(path, content)) {
+      return {
+        output: `edit 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再修改。`,
+      }
+    }
     const edits = (args.edits as Array<{ oldString: string; newString: string; replaceAll?: boolean }>) || []
     const applied: string[] = []
     for (const [idx, e] of edits.entries()) {
@@ -1724,8 +1739,8 @@ export const editTool: Tool = {
       applied.push(`${idx + 1}) 行 ${shown.join("、")}${lineNos.length > 8 ? `（共 ${lineNos.length} 处）` : ""}`)
     }
     await ctx.writeFile(path, (hadBom ? "\uFEFF" : "") + content)
-    // 修改后内容即已掌握（模型无需重读验证），登记已读
-    ctx.fileGuard?.markRead(path)
+    // 修改后内容即已掌握（模型无需重读验证），登记已读（指纹边界 BOM 无关，传去 BOM 正文即可）
+    ctx.fileGuard?.markRead(path, content)
     // 产物块（与 read/write 同款）：修改后的文件内容卡（弹窗查看模式收敛为文件链接）
     const blocks = artifactBlocks(previewLogicalPath(path, ctx), content)
     return { output: `已对 ${args.path} 应用 ${edits.length} 处修改：${applied.join("；")}`, blocks }
@@ -1862,6 +1877,11 @@ export const patchTool: Tool = {
       if (exists && ctx.fileGuard && !ctx.fileGuard.hasRead(abs)) {
         return { output: `patch 拒绝：${target} 已存在，但本会话尚未读取过其内容（防盲改）。请先 read 该文件确认当前内容后再打补丁；read/edit/patch/write 成功过的文件视为已读。` }
       }
+      // 防陈旧改守卫（与 write/edit 同规则）：内容自本会话上次读取/写入后已漂移 → 拒绝并引导重读——
+      // 行号模糊容错可对漂移内容误命中错位应用（指纹边界 BOM 无关，传去 BOM 正文即可）
+      if (exists && ctx.fileGuard?.staleSinceRead(abs, content)) {
+        return { output: `patch 拒绝：${target} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再打补丁。` }
+      }
       let applied: AppliedHunk[] = []
       for (const [pi, part] of parts.entries()) {
         const r = applyPatch(content, part)
@@ -1883,7 +1903,7 @@ export const patchTool: Tool = {
     const blocks: ContentBlock[] = []
     for (const p of planned) {
       await ctx.writeFile(p.abs, (p.bom ? "\uFEFF" : "") + p.result)
-      ctx.fileGuard?.markRead(p.abs)
+      ctx.fileGuard?.markRead(p.abs, p.result)
       blocks.push(...artifactBlocks(previewLogicalPath(p.abs, ctx), p.result))
     }
     if (planned.length === 1) {
@@ -3010,7 +3030,7 @@ function branchTaskLine(r: BranchRunRecord): string {
  *  （同一历史/系统提示词/工具面）——适合同一任务的并行多路探索与执行，摆脱单轮串行的模型服务速度限制。 */
 export const branchRunTool: Tool = {
   name: "branch_run",
-  description: "会话分支运行（git 式并发）：从主会话当前上下文 fork 出多个并行分支，各分支带独立任务指令同时执行（独立模型循环，同一上下文快照与工具面），分支最终报告完成后自动合入主上下文——像 git 一样不停分支合并，多分支并行摆脱单轮串行的模型服务速度限制。与 agent_run 不同：分支继承主会话全部历史与系统提示词（fork 而非隔离），适合同一任务的并行多路探索/执行（如多方案对比、多文件并行修改、多角度调研）；agent_run 适合委派独立子任务给子Agent。branches 为分支清单（每项 name 可选默认 b1..bN、prompt 必填、model 可选——GEBAI_LLM_ROUTES 配置的路由名或字面模型名，多分支走不同模型/端点并行更快）。默认阻塞等全部分支完成（结果已合入，随后的合并消息可见全文）；async:true 后台执行——立即返回 branchId，完成自动合入，用 bg_task（action=status/wait/stop/list，id b 开头）管理。",
+  description: "会话分支运行（git 式并发）：从主会话当前上下文 fork 出多个并行分支，各分支带独立任务指令同时执行（独立模型循环，同一上下文快照与工具面），分支最终报告完成后自动合入主上下文——像 git 一样不停分支合并，多分支并行摆脱单轮串行的模型服务速度限制。与 agent_run 不同：分支继承主会话全部历史与系统提示词（fork 而非隔离），适合同一任务的并行多路探索/执行（如多方案对比、多文件并行修改、多角度调研）；agent_run 适合委派独立子任务给子Agent。branches 为分支清单（每项 name 可选默认 b1..bN、prompt 必填、model 可选——GEBAI_LLM_ROUTES 配置的路由名或字面模型名，多分支走不同模型/端点并行更快）。merge 可选合入粒度（默认 full 全文合入；summary 摘要合入——长报告压成结论要点进主线、全文留过程存档，分支多/报告长时保上下文预算）。默认阻塞等全部分支完成（结果已合入，随后的合并消息可见全文）；async:true 后台执行——立即返回 branchId，完成自动合入，用 bg_task（action=status/wait/stop/list，id b 开头）管理。",
   parameters: schema(
     {
       branches: {
@@ -3026,6 +3046,7 @@ export const branchRunTool: Tool = {
         },
       },
       async: { type: "boolean", description: "可选：true 后台并行执行——立即返回 branchId 不等待（主线继续其他工作，分支完成自动合入主上下文并推送前端）；用 bg_task（id b 开头）查询/等待/终止" },
+      merge: { type: "string", enum: ["full", "summary"], description: "可选：报告合入粒度，默认 full 全文合入；summary 摘要合入——超阈值的长报告经模型压缩为「结论+关键发现+产物清单+建议」进主线上下文（报告全文保留在过程存档，bg_task wait 可取回），分支多/报告长时用，保主线上下文预算" },
     },
     ["branches"],
   ),
@@ -3051,7 +3072,9 @@ export const branchRunTool: Tool = {
   ),
   async execute(args, ctx) {
     if (!ctx.branchRuns) return { output: "当前环境不支持会话分支运行（branchRuns 服务未注入——分支内/新会话执行内不可再分支，仅主会话主循环可用）。" }
-    const specs = normalizeBranchSpecs(args.branches)
+    // 合入粒度（调用级，统一盖章到各分支规格）：非法值按 full 处理（缺省语义）
+    const merge: "full" | "summary" = args.merge === "summary" ? "summary" : "full"
+    const specs = normalizeBranchSpecs(args.branches).map((s) => ({ ...s, merge }))
     // fork 点 = 当前上下文：注册表构造时绑定本上下文 live messages（buildContext 注入），
     // start 同步切片快照——工具层无 live messages 访问权
     const started = await ctx.branchRuns.start(specs)

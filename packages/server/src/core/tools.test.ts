@@ -11,6 +11,20 @@ import type { ToolContext, Tool, ToolResult } from "./types"
 /** 测试会话 id（合法 32 位 hex，与生产 randomUUID 形态一致——fileRefFor 等按 sessionPath 归属判定依赖格式白名单）。 */
 const SID = "abcdef01abcdef01abcdef01abcdef01"
 
+/** fileGuard 测试桩（与引擎真实语义同构：已读集合 + 内容指纹陈旧比对；直接比字符串即等价指纹）。 */
+function fakeGuard(): NonNullable<ToolContext["fileGuard"]> & { reads: Map<string, string | null> } {
+  const reads = new Map<string, string | null>()
+  return {
+    reads,
+    markRead: (p, content) => reads.set(p, content ?? null),
+    hasRead: (p) => reads.has(p),
+    staleSinceRead: (p, cur) => {
+      const fp = reads.get(p)
+      return fp !== undefined && fp !== null && fp !== cur
+    },
+  }
+}
+
 function ctx(home: string, sessionId = SID, env: Record<string, string> = {}): ToolContext {
   const base = home || tmpdir()
   const tmp = join(sessionPath(base, "default", sessionId), "tmp")
@@ -1139,8 +1153,7 @@ describe("global tools", () => {
   test("write 防误覆盖守卫：未读过的已存在文件拒绝，read 后放行，新建不受限，无 fileGuard 兼容放行", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-write-guard-"))
     const c = ctx(home)
-    const read = new Set<string>()
-    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    c.fileGuard = fakeGuard()
     // 会话外预置的已存在文件（未经 read/write/edit/patch）：盲覆盖被拒
     writeFileSync(join(c.workdir, "pre.txt"), "v1")
     const blind = await writeTool.execute({ path: "pre.txt", content: "v2" }, c)
@@ -1160,11 +1173,71 @@ describe("global tools", () => {
     cleanup(home)
   })
 
+  test("write 防陈旧覆盖守卫：读后被外部/并行改动拒绝，重读后放行；append 同规则；edit/patch 同拦截", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-write-stale-"))
+    const c = ctx(home)
+    const guard = fakeGuard()
+    c.fileGuard = guard
+    writeFileSync(join(c.workdir, "s.txt"), "v1")
+    await readTool.execute({ path: "s.txt" }, c)
+    // 读后被外部改动（模拟并行分支/脚本命令/编辑器保存）：基于旧认知的覆盖被拒
+    writeFileSync(join(c.workdir, "s.txt"), "v1 改")
+    const stale = await writeTool.execute({ path: "s.txt", content: "v2" }, c)
+    expect(stale.output).toContain("已被修改")
+    expect(await Bun.file(join(c.workdir, "s.txt")).text()).toBe("v1 改")
+    // append 同规则（陈旧追加同样拒绝，防基于旧内容拼出错误结果）
+    const staleAppend = await writeTool.execute({ path: "s.txt", content: "x", append: true }, c)
+    expect(staleAppend.output).toContain("已被修改")
+    // edit/patch 同拦截（patch 行号模糊容错可对漂移内容误命中，前置陈旧拦截更直接）
+    const staleEdit = await editTool.execute({ path: "s.txt", edits: [{ oldString: "v1", newString: "X" }] }, c)
+    expect(staleEdit.output).toContain("已被修改")
+    const stalePatch = await patchTool.execute({ path: "s.txt", patch: "@@ -1,1 +1,1 @@\n-v1 改\n+X\n" }, c)
+    expect(stalePatch.output).toContain("已被修改")
+    // 重新 read 后放行
+    await readTool.execute({ path: "s.txt" }, c)
+    const ok = await writeTool.execute({ path: "s.txt", content: "v2" }, c)
+    expect(ok.output).toContain("已写入")
+    // 写后未再改动：连续 write/edit/patch 放行（写后内容即已掌握，指纹随写刷新）
+    const again = await writeTool.execute({ path: "s.txt", content: "v3", append: true }, c)
+    expect(again.output).toContain("已追加")
+    const editOk = await editTool.execute({ path: "s.txt", edits: [{ oldString: "v2v3", newString: "V" }] }, c)
+    expect(editOk.output).toContain("已对 s.txt")
+    cleanup(home)
+  })
+
+  test("跨执行流隔离（分支 fork 语义）：共享守卫下他人读不解锁我写，独立快照互不串扰", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-write-stream-"))
+    const c1 = ctx(home)
+    const c2 = ctx(home, "abcdef02abcdef02abcdef02abcdef02")
+    writeFileSync(join(c1.workdir, "shared.txt"), "base")
+    // 主线 read 登记（会话级表）
+    const mainGuard = fakeGuard()
+    c1.fileGuard = mainGuard
+    await readTool.execute({ path: "shared.txt" }, c1)
+    // 分支 fork 快照：拷贝主线已读（fork 后分支「知道」fork 前读过的内容）
+    const branchReads = new Map(mainGuard.reads)
+    const branchGuard = fakeGuard()
+    branchGuard.reads.clear()
+    for (const [k, v] of branchReads) branchGuard.reads.set(k, v)
+    c2.fileGuard = branchGuard
+    // 分支写 fork 前已读的文件：放行（fork 语义——读结果在分支上下文内可见）
+    const ok = await writeTool.execute({ path: join(c1.workdir, "shared.txt"), content: "branch 版" }, c2)
+    expect(ok.output).toContain("已写入")
+    // 分支写完后主线再写：指纹漂移（分支的写入不在主线登记）→ 防陈旧覆盖拦截
+    const staleMain = await writeTool.execute({ path: "shared.txt", content: "main 版" }, c1)
+    expect(staleMain.output).toContain("已被修改")
+    // fork 之后主线的读不串扰进分支：主线 read 新文件，分支对其盲写仍被拒
+    writeFileSync(join(c1.workdir, "later.txt"), "x")
+    await readTool.execute({ path: "later.txt" }, c1)
+    const blindBranch = await writeTool.execute({ path: join(c1.workdir, "later.txt"), content: "y" }, c2)
+    expect(blindBranch.output).toContain("防盲覆盖")
+    cleanup(home)
+  })
+
   test("write append 追加模式：新建等价写入、追加接在末尾、未读已存在文件同受守卫限制", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-write-append-"))
     const c = ctx(home)
-    const read = new Set<string>()
-    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    c.fileGuard = fakeGuard()
     // append 到不存在的文件 = 新建
     const create = await writeTool.execute({ path: "big.txt", content: "part1\n", append: true }, c)
     expect(create.output).toContain("已写入")
@@ -1189,8 +1262,7 @@ describe("global tools", () => {
   test("edit 防盲改守卫：未读过的已存在文件拒绝，read/write 后放行，新建文件不受限", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-guard-"))
     const c = ctx(home)
-    const read = new Set<string>()
-    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    c.fileGuard = fakeGuard()
     // 会话外预置的已存在文件：盲改被拒
     writeFileSync(join(c.workdir, "pre.txt"), "v1 content\n")
     const blind = await editTool.execute({ path: "pre.txt", edits: [{ oldString: "v1 content", newString: "v2 content" }] }, c)
@@ -2601,8 +2673,7 @@ describe("patch tool", () => {
   test("patch 防盲改守卫：未读过的已存在文件拒绝，read 后放行（与 write/edit 同规则）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-guard-"))
     const c = ctx(home)
-    const read = new Set<string>()
-    c.fileGuard = { markRead: (p) => read.add(p), hasRead: (p) => read.has(p) }
+    c.fileGuard = fakeGuard()
     writeFileSync(join(c.workdir, "pre.txt"), "a\n")
     const blind = await patchTool.execute({ path: "pre.txt", patch: "@@ -1 +1 @@\n-a\n+b\n" }, c)
     expect(blind.output).toContain("防盲改")
@@ -2903,8 +2974,7 @@ describe("产物块解析路径（read/write 产物 file 块携带可预览路�
       // 用绝对路径指向 c 会话内已写文件（c2 相对路径基准是自己的会话 tmp，文件不存在不触发守卫）
       const absG = resolve(join(sessionPath(home, "default", SID), "tmp", "g.ts"))
       const c2 = ctx(home, "abcdef02abcdef02abcdef02abcdef02")
-      const readSet = new Set<string>()
-      c2.fileGuard = { markRead: (p) => readSet.add(p), hasRead: (p) => readSet.has(p) }
+      c2.fileGuard = fakeGuard()
       const denied = await writeTool.execute({ path: absG, content: "y\n" }, c2)
       expect(denied.output).toContain("拒绝")
       expect(denied.blocks).toBeUndefined()
