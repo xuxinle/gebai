@@ -232,7 +232,15 @@ export function bindTooltips(): void {
     const host = (e.target as HTMLElement).closest<HTMLElement>("[data-tip]")
     if (host && tooltipHost === host) hideTooltip()
   })
-  document.addEventListener("scroll", hideTooltip, true)
+  // 滚动隐藏收窄为「滚动容器包含宿主（或页面级滚动）」：tooltip 为 fixed 定位，只会随宿主
+  // 自身漂移。此前任意滚动一律隐藏——生成中消息流 sticky-follow 自动滚动等无关容器的程序
+  // 滚动会把标题栏上下文圆环的悬浮刚显示即冲掉（光标未动不重触发 pointerover，提示消失，
+  // 表现为「信号灯闪烁期间悬浮失效」）
+  document.addEventListener("scroll", (e) => {
+    if (!tooltipHost) return
+    const t = e.target as Node
+    if (t === document || (t && typeof t.contains === "function" && t.contains(tooltipHost))) hideTooltip()
+  }, true)
 }
 
 /* ---------- 自绘下拉选择（替换 <select>） ---------- */
