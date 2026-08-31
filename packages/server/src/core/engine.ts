@@ -2690,13 +2690,19 @@ export class AgentEngine {
       : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（flow/tool_schemas/js）。`
     // 全局提示词注入（默认开启，与 inherit_global_tools 默认一致）：总Agent 主系统提示词作为前缀（单源复用
     // buildSystemPrompt，不复刻）；其中路径基准/工具清单等环境描述以本新会话实际为准，附注消歧
-    const globalPromptPart = opts.inheritGlobalPrompt !== false
+    const inheritGlobalPrompt = opts.inheritGlobalPrompt !== false
+    const globalPromptPart = inheritGlobalPrompt
       ? `以下为总Agent 全局系统提示词（主会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
       : ""
+    // 编排指引（flow/js 优先）防重复注入：注入全局提示词时其编排段已含同款内容，开场白不再复述；
+    // 仅 inherit_global_prompt=false（新会话无 buildSystemPrompt）时保留兜底版
+    const orchestrationNote = inheritGlobalPrompt
+      ? ""
+      : "可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。"
     const messages: MessageLike[] = [
       {
         role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n${globalsNote}\n可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。${safeNote}\n\n${globalPromptPart}${systemParts.join("\n\n")}`,
+        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n${globalsNote}${orchestrationNote ? `\n${orchestrationNote}` : ""}${safeNote}\n\n${globalPromptPart}${systemParts.join("\n\n")}`,
       },
       { role: "user", content: input },
     ]
