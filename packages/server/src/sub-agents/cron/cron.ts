@@ -13,7 +13,7 @@ export const systemPrompt =
   "你是定时任务管理助手。定时任务 = 用户级无人值守任务（持久化于用户目录 cron.json，与会话生命周期解耦——会话删除后任务仍按期执行），到点自动执行。工具经本子Agent 命名空间暴露：cron_add 创建、cron_list 查看、cron_update 修改、cron_trigger 手动触发、cron_remove 删除。工作要点：\n" +
   "1) 创建（cron_add，需审批）：type 二选一——script（脚本运行：shell 命令在任务专属工作目录以用户环境执行，结果写入任务历史并可选通知）或 prompt（提示词运行 agent：以指定提示词触发一次完整 Agent 会话）。schedule 支持 5 段 cron（分 时 日 月 周，如 0 9 * * * 每天 9:00）、@every 30m、@daily/@hourly/@weekly/@monthly、@at 2026-09-01T09:00（一次性，触发后自动停用）；可配 timezone（IANA 名如 Asia/Shanghai，缺省服务器本地时区）；非法表达式创建即拒绝；\n" +
   "2) prompt 型执行目标 target：ephemeral（缺省，每次触发新建独立会话，上下文不累积——例行检查/报告首选）、sticky（专用会话跨次复用，上下文延续——需要延续记忆的任务用）、session（绑定既有会话执行，缺省为创建任务时的当前会话）；ephemeral/sticky 可配 agents 预载子Agent 名单；\n" +
-  "3) 通知 notify（强烈建议为无人值守任务配置）：通道数组，每条 {type,target,secret,at}——type=webhook（任意 http(s) 回调，POST JSON）、feishu（飞书群自定义机器人 webhook 地址，secret 为加签密钥可选）、feishu_chat（飞书应用消息，target 填群 chat_id，需服务端配置飞书应用凭证）；飞书通知以 **markdown 卡片**发送（状态着色头部 + 粗体字段 + 输出摘要），可配 at 名单 @ 人（open_id 或 \"all\" @所有人，条目字符串或 {id,name}）；notifyOn=always（缺省每次通知）/error（仅失败）；运行结果/超时/自动停用会推送到全部通道，通知失败不影响任务执行；\n" +
+  "3) 通知 notify（强烈建议为无人值守任务配置）：通道数组，每条 {type,target,webhookId,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhookId 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名，注册侧改动即时生效）、feishu（飞书群自定义机器人 webhook 地址，secret 为加签密钥可选）、feishu_chat（飞书应用消息，target 填群 chat_id，需服务端配置飞书应用凭证）；飞书通知以 **markdown 卡片**发送（状态着色头部 + 粗体字段 + 输出摘要），可配 at 名单 @ 人（open_id 或 \"all\" @所有人）；webhook 通道的 at 名单随 JSON 载荷 at 字段携带（接收方系统据此渲染 @ 人），配 secret 时载荷带 HMAC 签名；notifyOn=always（缺省每次通知）/error（仅失败）；运行结果/超时/自动停用会推送到全部通道，通知失败不影响任务执行；\n" +
   "4) 可靠性参数：misfire=skip（缺省，停机错过即跳过）/run（启动后立即补跑一次）；timeoutMs 单次执行超时（缺省脚本 5 分钟、提示词 30 分钟，到时终止）；maxConsecutiveErrors 连续失败 N 次自动停用（防错误任务无限重试刷屏，建议通知类任务配置如 5）；\n" +
   "5) 查看（cron_list）：列出当前用户全部任务（ID/名称/类型/周期/目标/启用状态/上次与下次执行/次数/最近错误/最近运行历史）；\n" +
   "6) 修改（cron_update，需审批）：按 id 改启用状态/周期/类型/内容/目标/通知等，改后自动重算下次执行时间；\n" +
@@ -25,20 +25,21 @@ function notifyParam(): Record<string, unknown> {
   return {
     type: "array",
     description:
-      "通知通道数组（可选）：每条 {type,target,secret,at}——webhook（http(s) 回调 URL）/ feishu（飞书群自定义机器人 webhook 地址）/ feishu_chat（飞书 chat_id，需服务端飞书应用凭证）；secret 为 feishu 加签密钥（可选）；at 为 @ 人名单（仅飞书通道，可选——open_id 字符串或 {id,name} 对象，\"all\"=@所有人），通知以 markdown 卡片发送并 @ 指定人",
+      "通知通道数组（可选）：每条 {type,target,webhookId,secret,at}——webhook（http(s) 回调 URL，或 webhookId 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带其 HMAC 签名，二选一）/ feishu（飞书群自定义机器人 webhook 地址）/ feishu_chat（飞书 chat_id，需服务端飞书应用凭证）；secret 为密钥（feishu 加签 / webhook 直配时 HMAC 签名）；at 为 @ 人名单（飞书渲染进卡片；webhook 随 JSON 载荷 at 字段携带供接收方解析），通知以 markdown 卡片发送（webhook 为 JSON）",
     items: {
       type: "object",
       properties: {
         type: { enum: ["webhook", "feishu", "feishu_chat"], description: "通道类型" },
-        target: { type: "string", description: "webhook/feishu=URL；feishu_chat=群 chat_id" },
-        secret: { type: "string", description: "feishu 加签密钥（可选；修改时传 *** 表示保持不变）" },
+        target: { type: "string", description: "webhook/feishu=URL；feishu_chat=群 chat_id；webhook 用 webhookId 引用时可省略" },
+        webhookId: { type: "string", description: "引用 REST /api/v1/webhooks 注册的事件 Webhook id（仅 webhook 通道，与 target 二选一，投递带注册密钥的 X-Gebai-Signature 签名）" },
+        secret: { type: "string", description: "密钥（可选；feishu 加签 / webhook 直配 URL 时 HMAC 签名；修改时传 *** 表示保持不变）" },
         at: {
           type: "array",
-          description: "@ 人名单（仅飞书通道）：open_id（ou_/un_/on_ 前缀）或 \"all\"（@所有人），条目可为字符串或 {id,name}",
+          description: "@ 人名单（可选）：open_id（ou_/un_/on_ 前缀）或 \"all\"（@所有人），条目可为字符串或 {id,name}；飞书通道渲染进卡片，webhook 通道随载荷携带",
           items: { type: ["string", "object"], properties: { id: { type: "string", description: "open_id 或 all" }, name: { type: "string", description: "展示名（可选，缺省解析真实姓名）" } }, required: ["id"] },
         },
       },
-      required: ["type", "target"],
+      required: ["type"],
     },
   }
 }
@@ -51,6 +52,7 @@ function parseNotify(raw: unknown): CronNotifyChannel[] | undefined {
     return {
       type: String(c.type),
       target: String(c.target ?? ""),
+      webhookId: c.webhookId != null ? String(c.webhookId) : undefined,
       secret: c.secret != null ? String(c.secret) : undefined,
       at: c.at,
     } as CronNotifyChannel

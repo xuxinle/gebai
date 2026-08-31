@@ -116,6 +116,9 @@ describe("notify", () => {
     expect(() => validateNotifyChannel({ type: "webhook", target: "https://example.com/hook" })).not.toThrow()
     expect(() => validateNotifyChannel({ type: "webhook", target: "file:///etc/passwd" })).toThrow()
     expect(() => validateNotifyChannel({ type: "webhook", target: "http://127.0.0.1/x" })).toThrow() // SSRF：回环拒绝
+    expect(() => validateNotifyChannel({ type: "webhook", webhookId: "a".repeat(32) })).not.toThrow() // 引用形态无 target 合法
+    expect(() => validateNotifyChannel({ type: "webhook", webhookId: "not-hex" })).toThrow(/webhookId/)
+    expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", webhookId: "a".repeat(32) })).toThrow(/仅支持 webhook/)
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc" })).not.toThrow()
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://evil.com/open-apis/bot/v2/hook/abc" })).toThrow()
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/other" })).toThrow()
@@ -129,7 +132,7 @@ describe("notify", () => {
     expect(() => validateNotifyChannel({ type: "feishu_chat", target: "oc_abcdef1234567890abcdef", at: [{ id: "ou_xxx", name: "张三" }] })).not.toThrow()
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", at: [{ id: "张三" }] })).toThrow(/open_id/)
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", at: [{}] as never })).toThrow(/id/)
-    expect(() => validateNotifyChannel({ type: "webhook", target: "https://example.com/hook", at: [{ id: "all" }] })).toThrow(/仅支持飞书/)
+    expect(() => validateNotifyChannel({ type: "webhook", target: "https://example.com/hook", at: [{ id: "all" }] })).not.toThrow() // at 随 webhook 载荷携带
     // normalizeAtList：字符串/对象混输入归一 + 去重
     expect(normalizeAtList(["all", { id: "ou_abc", name: "李四" }, "all"])).toEqual([{ id: "all" }, { id: "ou_abc", name: "李四" }])
     expect(normalizeAtList([])).toBeUndefined()
@@ -185,6 +188,26 @@ describe("notify", () => {
     expect(md2).not.toContain('<at user_id="all">假@</at>')
     expect(md2).toContain("＜at")
 
+    // webhook 通道：载荷携带 at 名单（接收方据此 @ 人）+ secret 产生 X-Gebai-Signature HMAC 签名头
+    const hookPosts: Array<{ headers: Record<string, string>; body: Record<string, unknown> }> = []
+    await sendCronNotification(
+      { type: "webhook", target: "https://example.com/hook", secret: "hk", at: [{ id: "all" }] },
+      { event: "cron.result", task: { id: "t2", name: "w", type: "script", schedule: "@daily", user: "u" }, ok: true, status: "success", at: 1700000000000, output: "fine" },
+      {
+        fetchImpl: async (_u, init) => {
+          hookPosts.push({ headers: init.headers as Record<string, string>, body: JSON.parse(String(init.body)) })
+          return { ok: true, status: 200 }
+        },
+      },
+    )
+    expect(hookPosts).toHaveLength(1)
+    expect(hookPosts[0].body.event).toBe("cron.result")
+    expect(hookPosts[0].body.at).toEqual([{ id: "all" }])
+    expect(hookPosts[0].body.output).toContain("fine")
+    const { createHmac } = await import("node:crypto")
+    const expectedSig = `sha256=${createHmac("sha256", "hk").update(JSON.stringify(hookPosts[0].body)).digest("hex")}`
+    expect(hookPosts[0].headers["X-Gebai-Signature"]).toBe(expectedSig)
+
     // 非 2xx（HTTP 500）抛错
     await expect(
       sendCronNotification(
@@ -223,9 +246,11 @@ interface Harness {
   cancelCalls: string[]
   running: boolean
   runHang: boolean
-  notifyPosts: Array<{ url: string; body: unknown }>
+  notifyPosts: Array<{ url: string; body: unknown; headers?: Record<string, string> }>
   feishuSent: Array<Record<string, unknown>>
   agentNames: string[]
+  /** 已注册事件 Webhook 模拟注册表（webhookId 引用解析）：id → {url,secret,owner}。 */
+  webhookRegistry: Map<string, { url: string; secret?: string; owner?: string }>
 }
 
 function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = false) {
@@ -251,6 +276,7 @@ function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = fa
     notifyPosts: [],
     feishuSent: [],
     agentNames: ["explore", "code"],
+    webhookRegistry: new Map(),
   }
   const runResolvers: Array<() => void> = []
   const fakeEngine = {
@@ -277,12 +303,18 @@ function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = fa
     safeMode,
     notify: {
       fetchImpl: async (url, init) => {
-        h.notifyPosts.push({ url, body: JSON.parse(String(init.body)) })
+        h.notifyPosts.push({ url, body: JSON.parse(String(init.body)), headers: init.headers as Record<string, string> })
         return { ok: true, status: 200 }
       },
       feishuSend: async (_chatId, card) => void h.feishuSent.push(card),
     },
     agentExists: (name) => h.agentNames.includes(name),
+    resolveWebhook: (id, user) => {
+      const cfg = h.webhookRegistry.get(id)
+      if (!cfg) return null
+      if (cfg.owner && cfg.owner !== user) return null
+      return { url: cfg.url, secret: cfg.secret }
+    },
   })
   return h
 }
@@ -813,6 +845,58 @@ describe("CronManager", () => {
       const entry = internal(h, task)
       expect(entry.lastStatus).toBe("success")
       expect(entry.lastNotifyError).toContain("503")
+    } finally {
+      cleanup(h)
+    }
+  })
+
+  test("webhookId 引用注册 Webhook：创建校验归属、投递解析 URL 并签名、引用失效容错", async () => {
+    const h = setup()
+    try {
+      const { user } = await createSession(h)
+      h.sandbox.exec = async () => ({ stdout: "via-ref", stderr: "", code: 0 })
+      const mine = "c".repeat(32)
+      const global = "d".repeat(32)
+      h.webhookRegistry.set(mine, { url: "https://example.com/mine", secret: "mk", owner: "default" })
+      h.webhookRegistry.set(global, { url: "https://example.com/global" }) // 全局注册（无 owner）
+      // 不存在 / 他人注册（归属校验）创建即拒
+      await expect(h.cron.add(user, { type: "script", schedule: "@every 30m", script: "x", notify: [{ type: "webhook", webhookId: "e".repeat(32) }] })).rejects.toThrow(/无权引用|不存在/)
+      h.webhookRegistry.set("f".repeat(32), { url: "https://example.com/other", owner: "someone" })
+      await expect(h.cron.add(user, { type: "script", schedule: "@every 30m", script: "x", notify: [{ type: "webhook", webhookId: "f".repeat(32) }] })).rejects.toThrow(/无权引用|不存在/)
+      // webhookId 与 target 二选一
+      await expect(h.cron.add(user, { type: "script", schedule: "@every 30m", script: "x", notify: [{ type: "webhook", webhookId: mine, target: "https://example.com/hook" }] })).rejects.toThrow(/二选一/)
+      // 本人注册 + 全局注册均可引用（at 随载荷携带）
+      const task = await h.cron.add(user, {
+        type: "script",
+        schedule: "@every 30m",
+        script: "echo ref",
+        notify: [
+          { type: "webhook", webhookId: mine, at: ["all"] },
+          { type: "webhook", webhookId: global },
+        ],
+      })
+      expect(internal(h, task).notify![0].webhookId).toBe(mine)
+      await due(h, task)
+      await h.cron.tick()
+      // 投递解析到注册 URL；具名注册带签名（全局无 secret 不带）；载荷含 at
+      expect(h.notifyPosts.map((p) => p.url).sort()).toEqual(["https://example.com/global", "https://example.com/mine"])
+      const minePost = h.notifyPosts.find((p) => p.url === "https://example.com/mine")!
+      const globalPost = h.notifyPosts.find((p) => p.url === "https://example.com/global")!
+      // 具名注册的 secret → X-Gebai-Signature HMAC（与事件 Webhook 投递同款）；全局注册无 secret 无签名头
+      const { createHmac } = await import("node:crypto")
+      expect(minePost.headers?.["X-Gebai-Signature"]).toBe(`sha256=${createHmac("sha256", "mk").update(JSON.stringify(minePost.body)).digest("hex")}`)
+      expect(globalPost.headers?.["X-Gebai-Signature"]).toBeUndefined()
+      expect((minePost.body as { at?: unknown }).at).toEqual([{ id: "all" }])
+      expect((minePost.body as { output?: string }).output).toContain("via-ref")
+      expect((globalPost.body as { at?: unknown }).at).toBeUndefined()
+      // 投递前引用被删（注册消失）：记通知错误、不影响任务执行
+      h.webhookRegistry.delete(mine)
+      await due(h, task)
+      await h.cron.tick()
+      const entry = internal(h, task)
+      expect(entry.runCount).toBe(2)
+      expect(entry.lastStatus).toBe("success")
+      expect(entry.lastNotifyError).toContain("引用不可用")
     } finally {
       cleanup(h)
     }

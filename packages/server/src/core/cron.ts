@@ -378,6 +378,9 @@ export interface CronManagerDeps {
   notify?: NotifyDeps
   /** 子Agent 名校验器（agents 预载名单合法性；生产接线注入 subAgents.def 探测）。 */
   agentExists?: (name: string) => boolean
+  /** webhookId 引用解析器（notify 通道引用 REST 注册的事件 Webhook：返回其 URL 与签名密钥；
+   *  归属校验由接线方完成——具名注册仅本人可引用，全局注册（admin，userId 未记录）人人可引用；不存在返回 null）。 */
+  resolveWebhook?: (id: string, user: string) => { url: string; secret?: string } | null
 }
 
 export class CronManager {
@@ -502,7 +505,7 @@ export class CronManager {
     const target = this.validateTarget(input.type, input.target)
     const sessionId = target === "session" && input.sessionId ? String(input.sessionId).trim() : undefined
     const agents = this.validateAgents(input.agents)
-    const notify = this.validateNotify(input.notify)
+    const notify = this.validateNotify(input.notify, undefined, user)
     const timeoutMs = this.validateTimeout(input.timeoutMs)
     const misfire = input.misfire === "run" ? "run" : input.misfire === "skip" ? "skip" : undefined
     const entry: CronTask = {
@@ -567,7 +570,7 @@ export class CronManager {
     if (patch.agents !== undefined) entry.agents = entry.type === "prompt" ? this.validateAgents(patch.agents) : undefined
     if (patch.misfire !== undefined) entry.misfire = patch.misfire === "run" ? "run" : "skip"
     if (patch.timeoutMs !== undefined) entry.timeoutMs = this.validateTimeout(patch.timeoutMs)
-    if (patch.notify !== undefined) entry.notify = this.validateNotify(patch.notify, entry.notify)
+    if (patch.notify !== undefined) entry.notify = this.validateNotify(patch.notify, entry.notify, user)
     if (patch.notifyOn !== undefined) entry.notifyOn = patch.notifyOn === "error" ? "error" : "always"
     if (patch.maxConsecutiveErrors !== undefined) entry.maxConsecutiveErrors = this.validateMaxConsecutiveErrors(patch.maxConsecutiveErrors)
     if (patch.enabled !== undefined) {
@@ -660,7 +663,7 @@ export class CronManager {
     return out.length ? out : undefined
   }
 
-  private validateNotify(notify: unknown, prev?: CronNotifyChannel[]): CronNotifyChannel[] | undefined {
+  private validateNotify(notify: unknown, prev: CronNotifyChannel[] | undefined, user: string): CronNotifyChannel[] | undefined {
     if (notify === undefined || notify === null) return undefined
     if (!Array.isArray(notify)) throw new Error("notify 须为通知通道数组")
     if (!notify.length) return undefined
@@ -668,13 +671,18 @@ export class CronManager {
     for (const raw of notify) {
       if (!raw || typeof raw !== "object") throw new Error("通知通道须为 {type,target,secret} 对象")
       const ch = raw as CronNotifyChannel
+      const webhookId = ch.webhookId != null ? String(ch.webhookId).trim() : undefined
+      if (webhookId && String(ch.target ?? "").trim()) throw new Error("webhook 通道的 webhookId 与 target 二选一（引用已注册 Webhook 或直配 URL）")
       const entry: CronNotifyChannel = {
         type: ch.type,
         target: String(ch.target ?? "").trim(),
+        webhookId,
         secret: ch.secret && ch.secret !== "***" ? String(ch.secret) : undefined,
         // at 名单归一（字符串 id 或 {id,name} → {id,name?}，非法 id 拒绝）
         at: normalizeAtList((ch as { at?: unknown }).at),
       }
+      // 引用形态：创建/修改时即校验存在性与归属（接线方注入的解析器；未注入解析器时引用即拒）
+      if (webhookId && !this.deps.resolveWebhook?.(webhookId, user)) throw new Error(`webhook 不存在或无权引用: ${webhookId}（REST /api/v1/webhooks 注册后以返回 id 引用）`)
       // 掩码 secret（列表回显）视为「保持原值」：按位置回填旧通道密钥
       if (!entry.secret && ch.secret === "***" && prev) {
         const idx = out.length
@@ -950,7 +958,15 @@ export class CronManager {
     const errors: string[] = []
     for (const ch of entry.notify) {
       try {
-        await sendCronNotification(ch, n, this.deps.notify)
+        // webhookId 引用形态：投递时解析注册 Webhook 的 URL 与签名密钥（注册侧改 URL/密钥即时生效；
+        // 引用消失（被删除/失去归属）记通知错误跳过，不影响其余通道与任务）
+        let effective = ch
+        if (ch.webhookId) {
+          const resolved = this.deps.resolveWebhook?.(ch.webhookId, entry.user)
+          if (!resolved) throw new Error(`webhook 引用不可用: ${ch.webhookId}`)
+          effective = { ...ch, target: resolved.url, secret: resolved.secret ?? ch.secret }
+        }
+        await sendCronNotification(effective, n, this.deps.notify)
       } catch (err) {
         errors.push(`${ch.type}: ${String((err as Error).message || err).slice(0, 200)}`)
       }
