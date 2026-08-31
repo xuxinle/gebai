@@ -217,14 +217,17 @@ export function getSubAgentNames(): string[] {
 
 /* ---------- 基础工具函数 ---------- */
 
+/** 断开/异常文案（置圆环悬浮首行展示；#conn 铺满圆环仅作状态载体，不挂 data-tip——
+ *  否则断开态其 tip 会遮蔽整个圆环区域的上下文数值悬浮）。 */
+let connMsg: string | null = null
+
 export function setConn(text: string, ok = true) {
   // 信号灯居于上下文圆环圆心：正常仅圆点（空闲隐藏/思考闪烁，CSS 渲染）；
-  // 断开/异常：红点常亮，具体信息走 data-tip（圆心放不下原文字徽章）
+  // 断开/异常：红点常亮，原因并入圆环悬浮（整个圆环区域均为悬浮区）
   connEl.textContent = ""
   connEl.classList.toggle("bad", !ok)
-  if (ok) delete connEl.dataset.tip
-  else connEl.dataset.tip = text
-  syncCtxSignal()
+  connMsg = ok ? null : text
+  renderHeaderCtx()
 }
 
 /** 思考信号：仅当前会话运行（流式生成）中信号灯闪烁——后台会话运行的信号不打扰当前视图，
@@ -272,7 +275,6 @@ export function focusInput() {
 const headerTitleEl = document.getElementById("header-title")
 /** 上下文占比容器：信号灯闪烁分级（data-dur → --conn-blink）的变量挂载点（SVG 圆点继承）。 */
 export const headerCtxEl = document.getElementById("header-ctx")
-const ctxFillEl = document.querySelector<SVGCircleElement>("#header-ctx .ctx-fill")
 
 /** 浏览器 tab 标题固定为「歌白」（不拼接会话名）；标题栏居中会话标题跟随当前会话。 */
 export function updateTitle() {
@@ -313,10 +315,14 @@ export function setMaxCtxTokens(v: number): void {
 
 /**
  * 标题栏上下文占比显示：当前会话 ctxTokens / 模型窗口（SVG 圆环弧线），圆心为连接信号灯（#conn），
- * 具体数值 hover 经 data-tip 展示；切换会话时随 updateTitle 联动；运行中由 event.session.ctx 实时更新。
+ * 具体数值 hover 经 data-tip 展示（整个圆环区域均为悬浮区，圆心信号灯不遮蔽；断开/异常时首行为
+ * 断开原因）；切换会话时随 updateTitle 联动；运行中由 event.session.ctx 实时更新。
  * 弧线比例分级着色：<50% 主题色、50-80% 警告色、≥80% 危险色；pathLength=100 下 dashoffset 直接用 100-占比。
  */
 export function renderHeaderCtx(): void {
+  // ctx-fill 调用时解析（非模块级常量）：bun test 全仓单进程共享模块缓存，先加载本模块的
+  // 测试文件以各自 mock 的 document 固化过模块级引用；真实 DOM 每轮更新查一次开销可忽略
+  const ctxFillEl = document.querySelector<SVGCircleElement>("#header-ctx .ctx-fill")
   if (!headerCtxEl || !ctxFillEl) return
   const used = currentSession?.ctxTokens ?? 0
   const hasCtx = used > 0 && maxCtxTokens > 0
@@ -325,12 +331,17 @@ export function renderHeaderCtx(): void {
   ctxFillEl.style.strokeDashoffset = String(100 - pct)
   headerCtxEl.classList.toggle("warn", hasCtx && pct >= 50 && pct < 80)
   headerCtxEl.classList.toggle("danger", hasCtx && pct >= 80)
-  if (hasCtx) {
+  if (connMsg || hasCtx) {
     // 缓存命中行（接口返回缓存字段才有值，0 也是有效测量）：cached 为同一次调用的提示词缓存命中，
     // used = 真值基线 + 基线后未发送增量估算，占比为近似口径
     const cached = currentSession?.ctxCachedTokens
-    const cacheLine = cached !== undefined ? `\n缓存命中 ${cached.toLocaleString()} tokens（${Math.min(100, Math.round((cached / used) * 100))}%）` : ""
-    headerCtxEl.dataset.tip = `上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）${cacheLine}`
+    const lines: string[] = []
+    if (connMsg) lines.push(connMsg) // 断开/异常原因置首（最紧要）
+    if (hasCtx) {
+      lines.push(`上下文 ${used.toLocaleString()} / ${maxCtxTokens.toLocaleString()} tokens（${pct}%）`)
+      if (cached !== undefined) lines.push(`缓存命中 ${cached.toLocaleString()} tokens（${Math.min(100, Math.round((cached / used) * 100))}%）`)
+    }
+    headerCtxEl.dataset.tip = lines.join("\n")
   } else delete headerCtxEl.dataset.tip
   syncCtxSignal()
 }

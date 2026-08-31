@@ -27,7 +27,8 @@ const base = {
 const doc = {
   getElementById: () => base,
   createElement: () => base,
-  querySelector: () => null,
+  // renderHeaderCtx（setConn 联动）取 #header-ctx .ctx-fill：返回 base（style/dataset 可写）
+  querySelector: (sel: string) => (sel === "#header-ctx .ctx-fill" ? base : null),
   querySelectorAll: () => [],
   addEventListener() {},
   body: base,
@@ -45,7 +46,9 @@ const doc = {
 ;(globalThis as Record<string, unknown>).navigator = { onLine: true }
 ;(globalThis as Record<string, unknown>).location = { protocol: "http:", host: "localhost" }
 
-const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView } = await import("./state")
+// headerCtxEl 经导入断言（bun test 全仓单进程共享模块缓存：state.ts 可能已被更早的测试文件以其
+// mock 的 document 先加载，模块级 DOM 引用固定为那份数据集——断言必须落在模块实际持有的元素上）
+const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, setConn, setMaxCtxTokens, headerCtxEl } = await import("./state")
 
 function entry(sessionId: string, _toolCallId: string) {
   return { wrapper: base as unknown as HTMLElement, body: base as unknown as HTMLElement, session: sessionId, kind: "tool" as const, name: "sh" }
@@ -89,5 +92,37 @@ describe("pendingTools（会话隔离工具调用配对）", () => {
     clearPendingTools("bbb")
     expect(pendingTools.size).toBe(0)
     pendingTools.clear()
+  })
+})
+
+describe("上下文圆环悬浮文案（#conn 纯状态载体，整个圆环区域悬浮）", () => {
+  const fmt = (n: number) => n.toLocaleString()
+  /** #header-ctx 的 data-tip 读取（模块持有的 DOM 引用在 mock 环境下经 unknown 取 dataset）。 */
+  const tip = (): string | undefined => (headerCtxEl as unknown as { dataset: { tip?: string } }).dataset.tip
+
+  test("已连接：上下文数值 + 缓存行；断开：首行断开原因、数值保留；恢复：原因移除", () => {
+    setMaxCtxTokens(100000)
+    setCurrentSession({ id: "ctx1", name: "会话", userId: "admin", createdAt: 0, updatedAt: 0, ctxTokens: 50000, ctxCachedTokens: 10000 })
+    setConn("已连接")
+    const ok = tip() as string
+    expect(ok.startsWith(`上下文 ${fmt(50000)} / ${fmt(100000)} tokens（50%）`)).toBe(true)
+    expect(ok).toContain(`缓存命中 ${fmt(10000)} tokens（20%）`)
+    // 断开：原因置首行，上下文数值仍可见（#conn 铺满圆环但不以自有 tip 遮蔽整环悬浮）
+    setConn("已断开，自动重连中…", false)
+    const bad = tip() as string
+    expect(bad.split("\n")[0]).toBe("已断开，自动重连中…")
+    expect(bad).toContain(`上下文 ${fmt(50000)} / ${fmt(100000)} tokens（50%）`)
+    // 恢复连接：断开原因移除，数值悬浮如常
+    setConn("已连接")
+    expect(tip()!.startsWith("上下文")).toBe(true)
+    setCurrentSession(null)
+  })
+
+  test("无上下文数据 + 断开：悬浮仅剩断开原因；恢复且无数据：无悬浮", () => {
+    setCurrentSession(null) // 草稿/无会话 → 无 ctx 数据
+    setConn("连接失败: timeout", false)
+    expect(tip()).toBe("连接失败: timeout")
+    setConn("已连接")
+    expect(tip()).toBeUndefined()
   })
 })

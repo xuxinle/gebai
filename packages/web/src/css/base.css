@@ -157,7 +157,9 @@ header {
 /* 圆点改绘于 ctx-ring SVG 内（.conn-dot，见下方 ctx 区块）：与圆环同一坐标系同一栅格化管线，
    任何 DPI/主题下严格同心——原 DOM ::before 圆点在分数布局原点（44px 头部 - 1px 边框 = 43px
    内容盒）上光栅化，100% 缩放下恒偏半像素。::before 整体隐藏（同时中和各主题遗留的徽章式
-   绝对定位/脉冲动画），#conn 保留为状态载体（thinking/bad 类、data-tip hover、:has() 锚点） */
+   绝对定位/脉冲动画），#conn 保留为状态载体（thinking/bad 类、:has() 锚点；不挂 data-tip——
+   其铺满圆环，若自带 tip 会遮蔽整个圆环区域的上下文数值悬浮，断开原因由 #header-ctx 的
+   tip 首行承载） */
 #conn::before { display: none; }
 /* 已连接且空闲：隐藏信号灯（仅剩圆环）；思考/生成中：圆点显示并快速闪烁（绘制见 .conn-dot） */
 #conn:not(.bad) { display: none; }
@@ -170,7 +172,8 @@ header {
   filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 60%, transparent));
   animation: conn-thinking var(--conn-blink, 0.25s) ease-in-out infinite;
 }
-/* 断开/异常：红点常亮（圆心放不下文字徽章，具体信息 hover 圆点经 data-tip 展示；currentColor 取红色，
+/* 断开/异常：红点常亮（圆心放不下文字徽章，具体信息悬浮整个圆环区域经 #header-ctx data-tip
+   展示——首行断开原因、次行上下文数值；currentColor 取红色，
    主题 .conn.bad 仍可覆写配色） */
 #header-ctx:has(#conn.bad) .conn-dot {
   fill: var(--danger);
@@ -194,7 +197,7 @@ header {
 #header-ctx[data-dur="3"] { --conn-blink: 0.25s; } /* 1-3m（原速） */
 #header-ctx[data-dur="4"] { --conn-blink: 0.4s; }  /* 3-5m */
 #header-ctx[data-dur="5"] { --conn-blink: 0.6s; }  /* ≥5m：缓慢（执行得慢） */
-/* 断开/异常：红点常亮（圆心放不下文字徽章，具体信息 hover 圆点经 data-tip 展示；currentColor 取红色，
+/* 断开/异常：红点常亮（具体信息悬浮整个圆环区域经 #header-ctx data-tip 展示；currentColor 取红色，
    主题 .conn.bad / .conn.bad::before 仍可覆写底色与光晕） */
 .conn.bad { color: var(--danger); }
 

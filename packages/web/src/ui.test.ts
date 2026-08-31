@@ -1,6 +1,26 @@
 import { describe, expect, test } from "bun:test"
 
-// state.ts 模块加载期访问 document（ui.ts → state.ts）：mock 最小 DOM（同 state.test.ts 模式）
+// state.ts 模块加载期访问 document（ui.ts → state.ts）：mock 最小 DOM（同 state.test.ts 模式）。
+// createElement 每次返回独立可追踪节点（tooltip 移除观察用）；document 监听器记录供测试触发。
+const createdNodes: Array<{ removed: boolean }> = []
+function makeTipNode(): { removed: boolean } & Record<string, unknown> {
+  const node = {
+    classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
+    style: {},
+    dataset: {},
+    textContent: "",
+    removed: false,
+    offsetWidth: 100,
+    offsetHeight: 30,
+    appendChild() {},
+    remove() {
+      node.removed = true
+    },
+  }
+  createdNodes.push(node)
+  return node as { removed: boolean } & Record<string, unknown>
+}
+const docListeners: Array<{ type: string; cb: (e: never) => void }> = []
 const base = {
   classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
   style: {},
@@ -26,10 +46,12 @@ const base = {
 }
 const doc = {
   getElementById: () => base,
-  createElement: () => base,
+  createElement: () => makeTipNode(),
   querySelector: () => null,
   querySelectorAll: () => [],
-  addEventListener() {},
+  addEventListener(type: string, cb: (e: never) => void) {
+    docListeners.push({ type, cb })
+  },
   body: base,
   documentElement: base,
   currentScript: null,
@@ -45,7 +67,27 @@ const doc = {
 ;(globalThis as Record<string, unknown>).navigator = { onLine: true }
 ;(globalThis as Record<string, unknown>).location = { protocol: "http:", host: "localhost" }
 
-const { autoHideScrollbar } = await import("./ui")
+const { autoHideScrollbar, bindTooltips } = await import("./ui")
+
+/** 触发 bindTooltips 注册在 document 上的监听器。 */
+function fireDoc(type: string, e: { target: unknown }): void {
+  for (const l of docListeners) if (l.type === type) l.cb(e as never)
+}
+
+/** 悬浮宿主 fake：自身携带 data-tip（closest 命中自身）。 */
+function makeTipHost(): Record<string, unknown> {
+  const host: Record<string, unknown> = {
+    dataset: { tip: "上下文 50,000 / 100,000 tokens（50%）" },
+    getBoundingClientRect: () => ({ top: 12, left: 400, width: 24, height: 24, bottom: 36 }),
+  }
+  host.closest = (sel: string) => (sel === "[data-tip]" ? host : null)
+  return host
+}
+
+/** 滚动容器 fake：contains 仅对传入宿主返回 true（host 为 null 表示不含任何宿主）。 */
+function makeScroller(host: unknown): { contains: (n: unknown) => boolean } {
+  return { contains: (n: unknown) => host !== null && n === host }
+}
 
 /** 容器 fake：捕获 scroll 监听 + 真实语义 classList（Set 增删查）。 */
 function makeEl() {
@@ -94,5 +136,32 @@ describe("autoHideScrollbar（滚动条自动显隐）", () => {
     autoHideScrollbar(el as unknown as HTMLElement)
     el.emitScroll()
     expect(el.classList.contains("scrolling")).toBe(true)
+  })
+})
+
+describe("bindTooltips 滚动隐藏收窄（无关容器的滚动不打断悬浮）", () => {
+  test("悬浮宿主所在容器滚动：隐藏（原语义保留）", () => {
+    bindTooltips()
+    const host = makeTipHost()
+    fireDoc("pointerover", { target: host })
+    const tip = createdNodes[createdNodes.length - 1]
+    expect(tip.removed).toBe(false)
+    // 宿主所在滚动容器（如会话列表）滚动 → tooltip 随宿主漂移，隐藏
+    fireDoc("scroll", { target: makeScroller(host) })
+    expect(tip.removed).toBe(true)
+  })
+
+  test("无关容器滚动（生成中消息流自动滚动 vs 标题栏圆环）：不隐藏", () => {
+    bindTooltips() // 单测过滤运行时自足注册（重复注册幂等：同宿主 showTooltip 早退、hideTooltip 空安全）
+    const host = makeTipHost()
+    fireDoc("pointerover", { target: host })
+    const tip = createdNodes[createdNodes.length - 1]
+    // 其它容器滚动（不含宿主）：此前一律隐藏导致「信号灯闪烁（生成）期间悬浮刚出现即被冲掉」
+    fireDoc("scroll", { target: makeScroller(null) })
+    fireDoc("scroll", { target: makeScroller({}) })
+    expect(tip.removed).toBe(false)
+    // 页面级滚动（target 为 document）：保守保留原隐藏语义
+    fireDoc("scroll", { target: document })
+    expect(tip.removed).toBe(true)
   })
 })
