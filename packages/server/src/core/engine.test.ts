@@ -3228,7 +3228,7 @@ describe("AgentEngine cron integration", () => {
     const sandbox = new Sandbox({ home, enabled: false })
     const env = new EnvManager(store)
     const events = new EventBus()
-    // cron 子Agent：discover 注册定义 + 预载装载（cron_add/list/update/remove 命名空间工具进入注册表）
+    // cron 子Agent：discover 注册定义 + 预载装载（cron_add/list/update/trigger/remove 命名空间工具进入注册表）
     const subAgents = new SubAgentManager({ registry, preloadOverride: ["cron"] })
     await subAgents.discover()
     expect(registry.resolve("cron_add")).toBeDefined()
@@ -3244,7 +3244,7 @@ describe("AgentEngine cron integration", () => {
       await new Promise((r) => setTimeout(r, 50))
       await engine.decideApproval(session.id, "tc-1", true)
       await runPromise
-      const tasks = await cron.list(session.id, "default")
+      const tasks = await cron.list("default")
       expect(tasks).toHaveLength(1)
       expect(tasks[0].name).toBe("daily-backup")
       expect(tasks[0].type).toBe("script")
@@ -3288,7 +3288,7 @@ describe("AgentEngine cron integration", () => {
         if (ev.type === "event.approval.request") void engine.decideApproval(session.id, String(ev.payload.toolCallId), true)
       })
       await engine.run(session.id, "default", "创建定时任务")
-      const tasks = await cron.list(session.id, "default")
+      const tasks = await cron.list("default")
       expect(tasks).toHaveLength(1)
       expect(tasks[0].name).toBe("hourly-report")
       const loaded = await store.load(session.id)

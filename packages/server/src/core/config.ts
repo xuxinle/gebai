@@ -55,7 +55,8 @@ export interface ServerConfig {
   signupMode: "open" | "approval"
   /** 关闭数据生命周期 GC 清理任务（默认开启）。 */
   gcDisabled: boolean
-  /** 是否启用定时任务能力（GEBAI_CRON_ENABLED=true 时注册 cron 子Agent（cron_* 工具）并启动调度器；关闭时完全不可见）。 */
+  /** 是否启用定时任务能力（GEBAI_CRON_ENABLED，默认 true：注册 cron 子Agent（cron_* 工具）并启动调度器；
+   *  显式 false 时完全不可见）。 */
   cronEnabled: boolean
   /** 外部身份扩展点：HMAC 共享密钥（GEBAI_EXTERNAL_AUTH_SECRET，与 GEBAI_EXTERNAL_AUTH_URL 互斥）。 */
   externalAuthSecret?: string
@@ -142,7 +143,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     adminPasswordHash: env("GEBAI_ADMIN_PASSWORD_HASH") || undefined,
     signupMode: env("GEBAI_SIGNUP_MODE") === "approval" ? "approval" : "open",
     gcDisabled: bool("GEBAI_GC_DISABLED", false),
-    cronEnabled: bool("GEBAI_CRON_ENABLED", false),
+    cronEnabled: bool("GEBAI_CRON_ENABLED", true),
     externalAuthSecret: env("GEBAI_EXTERNAL_AUTH_SECRET") || undefined,
     externalAuthUrl: env("GEBAI_EXTERNAL_AUTH_URL") || undefined,
     externalAuthAutocreate: bool("GEBAI_EXTERNAL_AUTH_AUTOCREATE", true),

@@ -27,6 +27,7 @@ import { handleWsMessage, type WsConn, type WsSink } from "./ws"
 import { WsStateService } from "./ws-state"
 import { FeishuBot } from "./feishu-bot/bot"
 import { EngineBotAdapter } from "./feishu-bot/adapter"
+import { createFeishuApi } from "./feishu-bot/api"
 
 export interface ServerHandle {
   server: ReturnType<typeof Bun.serve>
@@ -41,7 +42,7 @@ export interface ServerHandle {
   deps: AppDeps
   /** 数据生命周期 GC 清理任务句柄（GEBAI_GC_DISABLED=1 时为 null）。 */
   gc: { stop: () => void } | null
-  /** 定时任务调度器（GEBAI_CRON_ENABLED=true 时启用，否则 null）。 */
+  /** 定时任务调度器（GEBAI_CRON_ENABLED 默认 true；显式 false 时为 null）。 */
   cron: CronManager | null
   /** 开发模式热刷新管理器（--reload / GEBAI_DEV_RELOAD=1 时启用，否则 null）。 */
   devReload: DevReloadManager | null
@@ -222,8 +223,8 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   const events = new EventBus()
   const subAgents = new SubAgentManager({ registry, preloadOverride: config.preloadSubAgents })
   await subAgents.discover()
-  // 定时任务能力开关（GEBAI_CRON_ENABLED）：关闭时 cron 子Agent 不注册（agent_list/agent_load/agent_run
-  // 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时 cron 子Agent 正常可见、按需装载
+  // 定时任务能力开关（GEBAI_CRON_ENABLED，默认 true）：关闭时 cron 子Agent 不注册（agent_list/agent_load/
+  // agent_run 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/cron 可管
   if (!config.cronEnabled) subAgents.unregister("cron")
   // 预置项目保留名防呆（DESIGN「项目机制」）：tmp 为会话工作区保留名——{AGENT}_PROJECTS 配了叫 tmp 的
   // 项目在启动期拒绝（静默遮蔽保留名会在设定项目根后无法访问会话文件，难排查）；前端注入的任务级 env
@@ -268,10 +269,28 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
   })
-  // 定时任务：GEBAI_CRON_ENABLED=true 时启动调度器（工具注册见上，关闭时完全不注册）
+  // 定时任务（GEBAI_CRON_ENABLED，默认开启）：通知通道含飞书应用消息（feishu_chat）——复用全局飞书
+  // 应用凭证（GEBAI_FEISHU_APP_ID/SECRET，与机器人桥接/云文档共用）构建发送器；agents 预载名单合法性
+  // 由 subAgents.def 探测；关闭时调度器不启动（工具注册见上）
   let cron: CronManager | null = null
   if (config.cronEnabled) {
-    cron = new CronManager({ home: config.gebaiHome, store, env, sandbox, events, safeMode: config.safeMode })
+    const feishuApi = config.feishuAppId && config.feishuAppSecret ? createFeishuApi({ appId: config.feishuAppId, appSecret: config.feishuAppSecret }) : undefined
+    cron = new CronManager({
+      home: config.gebaiHome,
+      store,
+      env,
+      sandbox,
+      events,
+      safeMode: config.safeMode,
+      notify: feishuApi
+        ? {
+            feishuSend: async (chatId, text) => {
+              await feishuApi.sendMessage({ receiveId: chatId, receiveIdType: "chat_id", msgType: "text", content: { text } })
+            },
+          }
+        : undefined,
+      agentExists: (name) => subAgents.def(name) !== undefined,
+    })
     cron.attach(engine)
     await cron.start()
   }
@@ -307,7 +326,7 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   const externalAuth = createExternalAuthProvider(config)
   // WS 状态服务（MVC 模型层）：每用户事件日志（断线可重放）+ 连接状态持久化 + 快照；
   // state 自持 deps 前身（不递归引用自身）
-  const baseDeps: AppDeps = { config, store, env, sandbox, registry, engine, auth, events, subAgents, webhooks, externalAuth }
+  const baseDeps: AppDeps = { config, store, env, sandbox, registry, engine, auth, events, subAgents, webhooks, externalAuth, cron }
   const state = new WsStateService(config.gebaiHome, baseDeps)
   const deps: AppDeps = { ...baseDeps, state }
   const app = createApp(deps)

@@ -5,7 +5,7 @@
  *   子进程运行时 shim（Bun 写/进程/网络 API 屏蔽，仅保留文件读取）
  * - `py`：子进程内 sys.addaudithook 审计钩子（PY_SAFE_BOOTSTRAP）：写模式 open、进程/网络/文件变更系统调用全部拒绝
  * - `write`/`edit`/`patch`/`file`：限定安全写范围内（safeModeWriteCheck）
- * - 定时任务调度（cron_add/update/remove）：维持硬阻断（定时任务延迟触发任意执行，无法降级）
+ * - 定时任务调度（cron_add/update/remove/trigger）：维持硬阻断（定时/立即触发任意执行，无法降级）
  * - 子Agent 工具：自主声明 `Tool.safeMode`（true=作者判定可提供 / false=判定不提供），未声明按短名风险规则默认
  *
  * 引擎主/子循环、flow step 层与 js 脚本工具 RPC 分发层共用 isToolBlockedInSafeMode（三者直接/间接执行工具，拦截规则须一致）。
@@ -14,8 +14,8 @@
 import { homedir } from "node:os"
 import { join, resolve, sep } from "node:path"
 
-/** 安全模式下硬阻断的工具（无法降级）：定时任务调度可延迟触发任意 shell/js 执行。 */
-export const SAFE_MODE_BLOCKED_TOOLS = new Set(["cron_add", "cron_update", "cron_remove"])
+/** 安全模式下硬阻断的工具（无法降级）：定时任务调度/手动触发可立即或延迟触发任意 shell/js 执行。 */
+export const SAFE_MODE_BLOCKED_TOOLS = new Set(["cron_add", "cron_update", "cron_remove", "cron_trigger"])
 
 /** 工具是否被安全模式硬阻断（精确名或子Agent 命名空间前缀命中，如 my_cron_add）：引擎/flow step 层/js RPC 分发层共用。 */
 export function isToolBlockedInSafeMode(name: string): boolean {
@@ -29,7 +29,7 @@ export function isToolBlockedInSafeMode(name: string): boolean {
  *  命令执行（sh/py/js）/写删文件/定时任务调度的短名视为默认不提供。 */
 export const SAFE_MODE_RISKY_TOOLS = new Set([
   "sh", "py", "js", "write", "edit", "patch", "file", "delete",
-  "cron_add", "cron_update", "cron_remove",
+  "cron_add", "cron_update", "cron_remove", "cron_trigger",
 ])
 
 /** 子Agent 工具短名是否命中默认风险规则（如 code_sh → sh、widgets_delete → delete、my_cron_add → cron_add）。

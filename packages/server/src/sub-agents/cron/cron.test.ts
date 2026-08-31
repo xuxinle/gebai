@@ -48,13 +48,14 @@ describe("cron sub-agent", () => {
   test("def 结构与命名空间：cron_* 工具（add/list/update/remove）", () => {
     expect(def.name).toBe("cron")
     expect(name).toBe("cron")
-    expect(Object.keys(tools).sort()).toEqual(["add", "list", "remove", "update"])
+    expect(Object.keys(tools).sort()).toEqual(["add", "list", "remove", "trigger", "update"])
     expect(def.preload).toBe(false)
     // 定时任务 = 无人值守的任意命令/会话执行：创建/修改/删除均需审批（防多用户模式绕过审批边界）
-    expect(def.requiresApproval).toEqual({ add: true, update: true, remove: true })
+    expect(def.requiresApproval).toEqual({ add: true, update: true, remove: true, trigger: true })
     expect(tools.add.requiresApproval).toBe(true)
     expect(tools.update.requiresApproval).toBe(true)
     expect(tools.remove.requiresApproval).toBe(true)
+    expect(tools.trigger.requiresApproval).toBe(true)
     expect(tools.list.requiresApproval).toBeFalsy()
   })
 
@@ -74,6 +75,7 @@ describe("cron sub-agent", () => {
         list: async () => [added],
         remove: async (id) => id === "t1",
         update: async (id, patch) => (id === "t1" ? { ...added, ...patch } : null),
+        trigger: async (id) => (id === "t1" ? { ...added, runs: [{ id: "r1", at: 1, endedAt: 2, status: "success", durationMs: 1 }] } : null),
       }
       const r = await tools.add.execute({ name: "daily", schedule: "0 9 * * *", type: "script", script: "echo hi" }, c)
       expect(r.output).toContain("t1")
@@ -85,6 +87,11 @@ describe("cron sub-agent", () => {
 
       const updated = await tools.update.execute({ id: "t1", enabled: false }, c)
       expect(updated.output).toContain("已更新")
+
+      const trig = await tools.trigger.execute({ id: "t1" }, c)
+      expect(trig.output).toContain("手动执行")
+      const trigMissing = await tools.trigger.execute({ id: "nope" }, c)
+      expect(trigMissing.output).toContain("不存在")
 
       const removed = await tools.remove.execute({ id: "t1" }, c)
       expect(removed.output).toContain("已删除")
