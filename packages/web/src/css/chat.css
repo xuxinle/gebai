@@ -644,6 +644,11 @@
   max-height: 45vh;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* flex 列：内部消息（.msg.user align-self: flex-end 右对齐等）依赖 flex 布局；
+     此前靠 base.css 会话列表 .session-body 同名类的全局规则意外供 flex，
+     该规则已收窄作用域，此处显式声明（同名类职责分离） */
+  display: flex;
+  flex-direction: column;
 }
 /* 容器内消息（执行过程）：meta 紧凑展示（隐藏重复时间），气泡间距收紧 */
 .session-run .msg {
