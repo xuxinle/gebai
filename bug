@@ -1,0 +1,5 @@
+根因：index.ts:248 构造 AgentEngine 时漏传 cron，而 CronManager.attach() 只单向注入、不回填 → 引擎侧 opts.cron 恒为 undefined → cron_* 工具永远报“未启用”（与您的环境变量配置无关，配得没错）
+修复（3 处小改动）：
+engine.ts:360 新增 setCron() 方法
+cron.ts:210 attach() 双向回填 engine.setCron(this)
+DESIGN.md:1227 同步「定时任务·注入链路」设计说明
