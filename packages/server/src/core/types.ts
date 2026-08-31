@@ -88,12 +88,16 @@ export type ToolContext = {
   /** js RPC 桥标记（js-tool 分发层注入，仅 js-tool 内部使用）：本 ctx 正在 js/动态工具子进程桥内执行工具——
    *  js 与动态工具的 execute 见标记即拒，封死 js→flow→js 交替递归与桥内失控子进程。 */
   fromJsBridge?: boolean
-  /** 会话级已读文件追踪（防误覆盖，引擎按会话注入）：read/write/edit/patch 成功后登记已读绝对路径，
-   *  write 整体覆盖「已存在但本会话未读过」的文件前据此拦截（模型须先 read 掌握原文再覆盖）。
+  /** 会话级已读文件追踪（防误覆盖/防陈旧覆盖，引擎按会话注入，分支运行 fork 独立快照）：
+   *  read/write/edit/patch 成功后登记已读绝对路径与内容指纹（BOM 无关），write/edit/patch 写前据两项拦截——
+   *  「已存在但本会话未读过」防盲写；「读过但内容自登记后被改动」（并行分支/主线/脚本命令/外部编辑）防陈旧覆盖。
    *  可选：测试桩/无引擎环境不注入时相关守卫自动放行（不改变行为）。 */
   fileGuard?: {
-    markRead(absPath: string): void
+    /** 登记已读与读取时内容指纹（写入成功后同登记——写后内容即已掌握）；content 缺省仅登记已读（不参与陈旧比对）。 */
+    markRead(absPath: string, content?: string): void
     hasRead(absPath: string): boolean
+    /** 内容自本会话最后登记以来是否被改动（未登记或无指纹返回 false）：写入前以当前内容比对，命中即陈旧。 */
+    staleSinceRead(absPath: string, currentContent: string): boolean
   }
   /** 写范围守卫（子Agent 声明、引擎按「会话已装载/新会话预加载的子Agent」注入）：文件写类工具
    *  （write/edit/patch/file（rename/move/delete））写入前以**解析后的绝对路径**调用，

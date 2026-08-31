@@ -868,17 +868,19 @@ describe("branch_run 工具卡片（头部列各分支名，参数区按分支�
     expect(bubble.querySelectorAll("div.branch-args-item").length).toBe(2)
   })
 
-  test("realtime card (toolBubble): → branch_run 调用同样渲染，缺省名 b1..bN、async 附提示行", () => {
+  test("realtime card (toolBubble): → branch_run 调用同样渲染，缺省名 b1..bN、async/merge 附提示行", () => {
     const bubble = toolBubbleFor(
       { id: "b2", role: "tool", content: "", createdAt: 0 },
-      `→ branch_run {"branches":[{"name":"左路","prompt":"调研A"},{"prompt":"调研B"}],"async":true}`,
+      `→ branch_run {"branches":[{"name":"左路","prompt":"调研A"},{"prompt":"调研B"}],"async":true,"merge":"summary"}`,
     )
     const head = bubble.querySelector("div.tool-head")
     expect(head?.textContent).toContain("左路 + b2")
     const items = bubble.querySelectorAll("div.branch-args-item")
     expect(items.length).toBe(2)
     expect(items[1]?.textContent).toContain("🌿 b2")
-    expect(bubble.querySelector("div.branch-args-async")?.textContent).toContain("async")
+    const hints = [...bubble.querySelectorAll("div.branch-args-async")].map((n) => n.textContent ?? "")
+    expect(hints.some((t) => t.includes("async"))).toBe(true)
+    expect(hints.some((t) => t.includes("merge 摘要合入"))).toBe(true)
   })
 
   test("空 branches 不渲染参数区，仅工具名头部", () => {

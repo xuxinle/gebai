@@ -49,7 +49,7 @@ export function makeCtx(home: string): { ctx: ToolContext; readSet: Set<string> 
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
     waitForCapture: async () => null,
-    fileGuard: { markRead: (p) => readSet.add(p), hasRead: (p) => readSet.has(p) },
+    fileGuard: { markRead: (p) => readSet.add(p), hasRead: (p) => readSet.has(p), staleSinceRead: () => false },
   }
   return { ctx, readSet }
 }

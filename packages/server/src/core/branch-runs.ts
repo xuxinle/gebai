@@ -23,6 +23,9 @@ export interface BranchSpec {
   prompt: string
   /** 模型路由名或字面模型名（GEBAI_LLM_ROUTES 命中走独立 Provider，多路接口）；缺省沿用任务级模型。 */
   model?: string
+  /** 合入粒度（调用级参数由工具统一盖章到各分支）：full=报告全文合入（缺省）；summary=超阈值的报告经
+   *  模型压成「结论+要点」合入（全文保留在过程存档/bg_task，主线只进摘要——保主线上下文预算）。 */
+  merge?: "full" | "summary"
 }
 
 /** 分支运行快照（bg_task 返回给模型的形态；rounds/toolCalls/last 从存档实时推导）。 */
@@ -63,6 +66,8 @@ export interface BranchRunHandle {
   error?: string
   /** 报告已合入主上下文标记（引擎合并回调置位，bg_task 状态展示用）。 */
   merged?: boolean
+  /** 合入粒度（BranchSpec.merge 传入）：summary 时超阈值报告经模型摘要后合入（全文在存档）。 */
+  mergeMode?: "full" | "summary"
   /** 主干通知收件箱（互相感知，DESIGN「会话分支运行与合并」）：其他分支合入/主线进展的通知积压于此，
    *  分支执行循环每轮轮首排空注入（注入点在上一轮 tool 结果之后，tool_calls 配对不破坏）。 */
   inbox?: string[]
@@ -111,6 +116,8 @@ export const BRANCH_RUN_MAX_CONCURRENT = 8
 export const BRANCH_RUN_KEEP = 20
 /** 分支报告合入主上下文的长度上限（超出保留头尾+省略说明——分支输出不落盘兜底，纯上下文保护）。 */
 export const BRANCH_MERGE_MAX_CHARS = 16000
+/** 摘要合入（merge=summary）的触发阈值：报告短于该值不值得一次模型调用，原文合入。 */
+export const BRANCH_MERGE_SUMMARY_SKIP_CHARS = 1500
 /** 主干通知（分支互相感知注入）长度上限：通知是注入其他分支上下文的信号，保持紧凑。 */
 export const BRANCH_NOTICE_MAX_CHARS = 2000
 
@@ -164,9 +171,9 @@ export class BranchRunRegistry implements BranchRunService {
   private runner: BranchRunner
   private forkSource: MessageLike[]
   private parentSignal?: AbortSignal
-  private onDone?: (handle: BranchRunHandle) => void
+  private onDone?: (handle: BranchRunHandle) => void | Promise<void>
 
-  constructor(opts: { sessionId: string; store: Map<string, BranchRunHandle>; runner: BranchRunner; forkSource: MessageLike[]; parentSignal?: AbortSignal; onDone?: (handle: BranchRunHandle) => void }) {
+  constructor(opts: { sessionId: string; store: Map<string, BranchRunHandle>; runner: BranchRunner; forkSource: MessageLike[]; parentSignal?: AbortSignal; onDone?: (handle: BranchRunHandle) => void | Promise<void> }) {
     this.store = opts.store
     this.sessionId = opts.sessionId
     this.runner = opts.runner
@@ -228,6 +235,7 @@ export class BranchRunRegistry implements BranchRunService {
         name: spec.name,
         prompt: spec.prompt,
         ...(spec.model ? { model: spec.model } : {}),
+        ...(spec.merge ? { mergeMode: spec.merge } : {}),
         startedAt: Date.now(),
         status: "running",
         controller,
@@ -238,11 +246,17 @@ export class BranchRunRegistry implements BranchRunService {
       if (this.parentSignal?.aborted) onParentAbort()
       else this.parentSignal?.addEventListener("abort", onParentAbort, { once: true })
       void this.runner({ ...spec, branchId }, controller.signal, fork).then(
-        (res) => {
+        async (res) => {
           handle.status = "done"
           handle.output = res.output
           handle.archive = res.archive
-          this.onDone?.(handle)
+          // 合入回调 await 后才 settle done（摘要合入含模型调用）：同步 fan-out 的 wait 返回时合并消息
+          // 必已入队（结果前排空，主线下一轮即见）；合入异常不影响分支终态（done 已定，吞掉防误标 failed）
+          try {
+            await this.onDone?.(handle)
+          } catch {
+            /* 合入失败：全文兜底路径在 trunkMerge 内部，此处仅为防线 */
+          }
         },
         (err) => {
           handle.status = handle.cancelRequested || controller.signal.aborted ? "cancelled" : "failed"
