@@ -71,10 +71,10 @@ describe("cron sub-agent", () => {
       // 启用：add 透传并格式化输出
       const added: CronTask = { id: "t1", sessionId: "s1", user: "default", name: "daily", type: "script", schedule: "0 9 * * *", script: "echo hi", enabled: true, createdAt: 1, updatedAt: 1, nextRunAt: 2, runCount: 0 }
       c.cron = {
-        add: async (input) => ({ ...added, ...input, id: "t1" }),
+        add: async (input) => ({ ...added, ...input, id: "t1" } as typeof added),
         list: async () => [added],
         remove: async (id) => id === "t1",
-        update: async (id, patch) => (id === "t1" ? { ...added, ...patch } : null),
+        update: async (id, patch) => (id === "t1" ? ({ ...added, ...patch } as typeof added) : null),
         trigger: async (id) => (id === "t1" ? { ...added, runs: [{ id: "r1", at: 1, endedAt: 2, status: "success", durationMs: 1 }] } : null),
       }
       const r = await tools.add.execute({ name: "daily", schedule: "0 9 * * *", type: "script", script: "echo hi" }, c)

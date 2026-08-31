@@ -284,8 +284,9 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       safeMode: config.safeMode,
       notify: feishuApi
         ? {
-            feishuSend: async (chatId, text) => {
-              await feishuApi.sendMessage({ receiveId: chatId, receiveIdType: "chat_id", msgType: "text", content: { text } })
+            // 飞书应用消息走 markdown 卡片（msg_type=interactive），与群机器人 webhook 同卡片结构
+            feishuSend: async (chatId, card) => {
+              await feishuApi.sendMessage({ receiveId: chatId, receiveIdType: "chat_id", msgType: "interactive", content: card })
             },
           }
         : undefined,

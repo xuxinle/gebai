@@ -1223,11 +1223,12 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 - **运行历史**：每任务环形保留最近 10 次运行记录（`runs`：触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记），落盘 cron.json，`cron_list` 与 REST 可查
 - **通知通道（`notify`，任务内嵌数组可配多条）**——无人值守任务的送达手段（`core/notify.ts`）：
   - `webhook`：任意 http(s) 回调，POST JSON（载荷即 `cron.result` 事件形态：任务信息/状态/输出摘要/耗时/执行会话/停用标记）；URL 经事件 Webhook 同规则 SSRF 校验（回环/链路本地/元数据地址默认拒绝，注册与投递逐跳共用）
-  - `feishu`：飞书**群自定义机器人** webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`，域名与路径强校验）；可选 `secret` 加签（`sign = base64(HMAC-SHA256(key=timestamp+\n+secret, msg=""))`）；消息为格式化文本（状态图标/任务名/周期/时间/耗时/错误与输出摘要）
-  - `feishu_chat`：飞书**应用消息**（`target` 为群 chat_id），复用全局 `GEBAI_FEISHU_APP_ID/SECRET` 凭证（与机器人桥接/云文档共用）经 tenant api 发送；未配置凭证时创建即拒绝
+  - `feishu`：飞书**群自定义机器人** webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`，域名与路径强校验）；可选 `secret` 加签（`sign = base64(HMAC-SHA256(key=timestamp+\n+secret, msg=""))`）；消息为 **markdown 卡片**（`msg_type=interactive`：头部按状态着色 green/red/orange/grey + 任务名，正文 `lark_md`——`**粗体**` 字段行（状态/周期/时间/耗时/错误/输出摘要/执行会话/停用标记）+ note 脚注）
+  - `feishu_chat`：飞书**应用消息**（`target` 为群 chat_id），复用全局 `GEBAI_FEISHU_APP_ID/SECRET` 凭证（与机器人桥接/云文档共用）经 tenant api 以 `msg_type=interactive` 发送**同一卡片结构**；未配置凭证时创建即拒绝
+  - `at` **@ 人名单**（仅飞书通道，可选）：条目为 open_id（`ou_`/`un_`/`on_` 前缀）或 `"all"`（@所有人），字符串或 `{id,name}` 形态（name 为展示名，缺省由客户端解析真实姓名），存储归一为 `{id,name?}` 并去重；渲染为 lark_md `<at user_id="…">` 标签置于卡片正文首行；webhook 通道配 `at` 创建即拒绝（仅飞书支持）；正文输出/错误的尖括号全角化净化，防任务输出注入 `<at>`/`<a>` 标签（@ 与链接仅由通道配置产生）
   - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `cron_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
 - **工具**（`cron` 子Agent 命名空间暴露 `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`；装载 cron 子Agent 后可用）：
-  - `cron_add`：创建任务（`type`+`schedule` 必填，`script`/`prompt` 按类型必填，可选 `name`/`target`/`sessionId`/`agents`/`timezone`/`misfire`/`timeoutMs`/`notify`/`notifyOn`/`maxConsecutiveErrors`/`enabled`），返回任务 ID 与下次执行时间
+  - `cron_add`：创建任务（`type`+`schedule` 必填，`script`/`prompt` 按类型必填，可选 `name`/`target`/`sessionId`/`agents`/`timezone`/`misfire`/`timeoutMs`/`notify`（含飞书 `at` @ 人名单）/`notifyOn`/`maxConsecutiveErrors`/`enabled`），返回任务 ID 与下次执行时间
   - `cron_list`：查看当前用户全部任务（含目标/时区/补跑/超时/停用阈值/通知通道/最近运行历史）
   - `cron_update`：按 id 修改（全部可变字段），修改后重算下次执行时间
   - `cron_trigger`：手动立即执行一次（不改动既定调度节奏——`nextRunAt` 不变；用于验证配置；一次性任务触发后仍自动停用）
@@ -2313,7 +2314,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 定时任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
 | 定时任务运行历史 | 每任务 10 条 | 最近运行记录环形保留（`CRON_RUNS_HISTORY`：触发/结束时间/状态/耗时/输出摘要/执行会话/手动标记） |
 | 定时任务名长度上限 | 100 字符 | `CRON_NAME_MAX` |
-| 定时通知正文/投递 | 2000 字符 / 10 秒 | 通知文本中输出与错误的保留长度（`NOTIFY_TEXT_MAX`）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
+| 定时通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片正文中输出与错误的保留长度（`NOTIFY_TEXT_MAX`，lark_md 内容整体限 4000）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
 | 小工具 HTML 上限 | 200KB | `widgets_save` 单次保存的 HTML 源码大小上限（超限报错提示精简） |
 | 小工具名称规则 | `[a-zA-Z0-9_\u4e00-\u9fff]{1,40}` | 工具名即文件名（分片键），不含 `.`/`/` 等路径分隔符 |
 | show html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |

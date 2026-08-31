@@ -8,8 +8,8 @@ import type { SessionStore } from "./store"
 import type { EnvManager } from "./env"
 import type { Sandbox } from "./sandbox"
 import type { EventBus } from "./event-bus"
-import type { CronNotifyChannel, CronResultNotification, NotifyDeps } from "./notify"
-import { validateNotifyChannel, sendCronNotification } from "./notify"
+import type { CronNotifyChannel, CronResultNotification, FeishuAtTarget, NotifyDeps } from "./notify"
+import { validateNotifyChannel, sendCronNotification, normalizeAtList } from "./notify"
 import { sessionPath, walkDir } from "./paths"
 
 /** 定时任务调度器 tick 周期（DESIGN「常量参考」）。 */
@@ -105,6 +105,9 @@ export interface CronTask {
   lastNotifyError?: string
 }
 
+/** 通知通道输入形态（at 允许字符串 open_id/"all" 或 {id,name}，创建/修改时归一为 {id,name?}）。 */
+export type CronNotifyInput = Omit<CronNotifyChannel, "at"> & { at?: Array<string | FeishuAtTarget> }
+
 export interface CronCreateInput {
   name?: string
   type: CronTaskType
@@ -117,7 +120,7 @@ export interface CronCreateInput {
   timezone?: string
   misfire?: CronMisfire
   timeoutMs?: number
-  notify?: CronNotifyChannel[]
+  notify?: CronNotifyInput[]
   notifyOn?: "always" | "error"
   maxConsecutiveErrors?: number
   enabled?: boolean
@@ -135,7 +138,7 @@ export interface CronUpdateInput {
   timezone?: string
   misfire?: CronMisfire
   timeoutMs?: number
-  notify?: CronNotifyChannel[]
+  notify?: CronNotifyInput[]
   notifyOn?: "always" | "error"
   maxConsecutiveErrors?: number
   enabled?: boolean
@@ -669,6 +672,8 @@ export class CronManager {
         type: ch.type,
         target: String(ch.target ?? "").trim(),
         secret: ch.secret && ch.secret !== "***" ? String(ch.secret) : undefined,
+        // at 名单归一（字符串 id 或 {id,name} → {id,name?}，非法 id 拒绝）
+        at: normalizeAtList((ch as { at?: unknown }).at),
       }
       // 掩码 secret（列表回显）视为「保持原值」：按位置回填旧通道密钥
       if (!entry.secret && ch.secret === "***" && prev) {
