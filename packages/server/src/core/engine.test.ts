@@ -3260,6 +3260,45 @@ describe("AgentEngine cron integration", () => {
     }
   })
 
+  test("cron scheduler attached after engine construction backfills opts.cron (production wiring)", async () => {
+    const { CronManager } = await import("./cron")
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-attach-"))
+    mkdirSync(join(home, "users", "default"), { recursive: true })
+    const config = loadConfig({ gebaiHome: home, auth: "local", sandbox: "off", preloadSubAgents: [], binaryMode: false })
+    const store = new SessionStore({ home })
+    const registry = new ToolRegistry()
+    for (const tool of Object.values(createGlobalTools())) registry.register(tool)
+    const sandbox = new Sandbox({ home, enabled: false })
+    const env = new EnvManager(store)
+    const events = new EventBus()
+    const subAgents = new SubAgentManager({ registry, preloadOverride: ["cron"] })
+    await subAgents.discover()
+    const provider = new FakeProvider("tool")
+    provider.toolName = "cron_add"
+    provider.toolArgs = { name: "hourly-report", schedule: "@hourly", type: "script", script: "echo report" }
+    const cron = new CronManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000 })
+    try {
+      // 生产接线（index.ts）：engine 先构造（不带 cron）、CronManager 后建经 attach 双向绑定；
+      // 修复前 attach 单向注入，opts.cron 恒空 → cron_add 报「能力未启用」、任务不落调度器
+      const engine = new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents })
+      cron.attach(engine)
+      const session = await store.createSession("default", "t")
+      // cron_add 声明 requiresApproval：审批请求到达即批准（事件驱动，免固定等待的时序竞态）
+      events.subscribe((ev) => {
+        if (ev.type === "event.approval.request") void engine.decideApproval(session.id, String(ev.payload.toolCallId), true)
+      })
+      await engine.run(session.id, "default", "创建定时任务")
+      const tasks = await cron.list(session.id, "default")
+      expect(tasks).toHaveLength(1)
+      expect(tasks[0].name).toBe("hourly-report")
+      const loaded = await store.load(session.id)
+      expect(loaded!.messages.some((m) => String(m.content).includes("能力未启用"))).toBe(false)
+    } finally {
+      cron.stop()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test("cron tools absent without a scheduler (capability fully hidden)", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-off-"))
     mkdirSync(join(home, "users", "default"), { recursive: true })
