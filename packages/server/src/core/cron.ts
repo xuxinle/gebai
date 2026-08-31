@@ -204,9 +204,11 @@ export class CronManager {
     this.now = deps.now ?? (() => Date.now())
   }
 
-  /** 注入 AgentEngine（prompt 型任务执行器；构造期缺省时调用）。 */
+  /** 注入 AgentEngine（prompt 型任务执行器；构造期缺省时调用）。双向绑定：同时回填引擎侧
+   *  opts.cron（cron_* 工具的 ToolContext 绑定源），单向注入会使工具恒报「能力未启用」。 */
   attach(engine: AgentEngine): void {
     this.engine = engine
+    engine.setCron(this)
   }
 
   /** 扫描全部用户会话加载 cron.json 并启动 tick 循环。停机期间错过的触发不补跑（下次从当前时间重算）。 */

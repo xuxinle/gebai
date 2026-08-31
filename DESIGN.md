@@ -1217,6 +1217,7 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 - **存储**：会话级 `cron.json`（`sessions/{s0}/{s1}/{session_id}/cron.json`），随会话分片与清理（会话删除/过期即消失），服务端重启时扫描加载
 - **安全**：`cron_add`/`cron_update`/`cron_remove` **默认需审批**（定时任务 = 无人值守的任意命令/会话执行，创建/修改/删除均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`cron_list` 免审批）；脚本触发时以会话所属用户身份、会话 `tmp/` 工作目录与会话环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；能力整体由 `GEBAI_CRON_ENABLED` 开关管控（关闭时完全不可见）
 - **事件**：触发时推送 `event.cron.run`（任务 ID/类型/名称）；脚本型执行结束推送 `event.cron.result`（成功/失败与输出；prompt 型结果经消息流呈现）
+- **注入链路**：构造顺序为 `AgentEngine` 先建、`CronManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `cron_*` 工具，避免循环构造依赖）——`cron.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.cron` 经 `setCron()` 回填（`cron_*` 工具的 ToolContext 绑定源；单向注入不回填会使 `GEBAI_CRON_ENABLED=true` 下工具仍恒报「能力未启用」，测试亦按此生产接线覆盖）
 
 ### 工具执行与渲染
 - 工具调用时在 UI 中打印工具名和参数，参数以 JSON 格式展示（脚本类工具渲染为语法高亮代码块）

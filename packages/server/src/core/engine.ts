@@ -356,6 +356,12 @@ export class AgentEngine {
 
   constructor(private opts: AgentEngineOptions) {}
 
+  /** 后挂定时任务调度器（生产接线：engine 先构造、CronManager 后建经 attach 回填——cron_* 工具的
+   *  ToolContext 绑定读 opts.cron，不回填则 GEBAI_CRON_ENABLED=true 下工具仍恒报「能力未启用」）。 */
+  setCron(cron: import("./cron").CronManager): void {
+    this.opts.cron = cron
+  }
+
   isRunning(sessionId: string): boolean {
     return this.tasks.has(sessionId)
   }
