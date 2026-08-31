@@ -120,6 +120,8 @@ describe("notify", () => {
     expect(() => validateNotifyChannel({ type: "webhook", webhookId: "not-hex" })).toThrow(/webhookId/)
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", webhookId: "a".repeat(32) })).toThrow(/仅支持 webhook/)
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc" })).not.toThrow()
+    // feishu 双形态：target 亦可为群 chat_id（应用消息推送指定群）
+    expect(() => validateNotifyChannel({ type: "feishu", target: "oc_abcdef1234567890abcdef" })).not.toThrow()
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://evil.com/open-apis/bot/v2/hook/abc" })).toThrow()
     expect(() => validateNotifyChannel({ type: "feishu", target: "https://open.feishu.cn/other" })).toThrow()
     expect(() => validateNotifyChannel({ type: "feishu_chat", target: "oc_abcdef1234567890abcdef" })).not.toThrow()
@@ -246,6 +248,10 @@ describe("notify", () => {
     const md = (sent[1].content.elements as Array<{ tag: string; text?: { content: string } }>).find((e) => e.tag === "div")!.text!.content
     expect(md).toContain("成功")
     expect(md).toContain('<at user_id="ou_abc"></at>')
+    // feishu 通道 target 为群 chat_id 时同样走应用消息（指定群推送）
+    await send({ type: "feishu", target: "oc_123", at: [{ id: "ou_abc" }] })
+    expect(sent[2].msgType).toBe("interactive")
+    expect((sent[2].content.elements as Array<{ tag: string; text?: { content: string } }>).find((e) => e.tag === "div")!.text!.content).toContain('<at user_id="ou_abc"></at>')
     // 未注入飞书应用凭证时明确报错
     await expect(sendCronNotification({ type: "feishu_chat", target: "oc_123" }, n, {})).rejects.toThrow(/未配置/)
   })
@@ -916,6 +922,36 @@ describe("CronManager", () => {
       expect(entry.runCount).toBe(2)
       expect(entry.lastStatus).toBe("success")
       expect(entry.lastNotifyError).toContain("引用不可用")
+    } finally {
+      cleanup(h)
+    }
+  })
+
+  test("feishu 通道指定群 chat_id：无凭证创建即拒、有凭证经应用消息推送该群", async () => {
+    const h = setup()
+    try {
+      const { user } = await createSession(h)
+      h.sandbox.exec = async () => ({ stdout: "to-group", stderr: "", code: 0 })
+      const withChatId = [{ type: "feishu", target: "oc_0123456789abcdef", at: ["all"] }]
+      // 凭证注入存在（setup 默认）：创建成功
+      const task = await h.cron.add(user, { type: "script", schedule: "@every 30m", script: "echo g", notify: withChatId as never })
+      await due(h, task)
+      await h.cron.tick()
+      // 投递走应用消息（feishuSend）而非 HTTP webhook；at 含 all → text 形态
+      expect(h.notifyPosts).toHaveLength(0)
+      expect(h.feishuSent).toHaveLength(1)
+      expect(h.feishuSent[0].msgType).toBe("text")
+      expect(String((h.feishuSent[0].content as { text: string }).text)).toContain('<at user_id="all">所有人</at>')
+      expect(String((h.feishuSent[0].content as { text: string }).text)).toContain("to-group")
+      // 无凭证（feishuSend 未注入）：创建即拒并给出可读引导
+      const prev = h.cron["deps"].notify
+      h.cron["deps"].notify = undefined
+      try {
+        await expect(h.cron.add(user, { type: "script", schedule: "@every 30m", script: "x", notify: [{ type: "feishu", target: "oc_0123456789abcdef" }] as never })).rejects.toThrow(/飞书应用凭证/)
+        await expect(h.cron.add(user, { type: "script", schedule: "@every 30m", script: "x", notify: [{ type: "feishu_chat", target: "oc_0123456789abcdef" }] as never })).rejects.toThrow(/飞书应用凭证/)
+      } finally {
+        h.cron["deps"].notify = prev
+      }
     } finally {
       cleanup(h)
     }

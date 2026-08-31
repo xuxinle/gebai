@@ -20,7 +20,7 @@ export interface FeishuAtTarget {
 /** 定时任务通知通道（任务内嵌配置，可配多条）。 */
 export interface CronNotifyChannel {
   type: CronNotifyType
-  /** webhook/feishu：http(s) URL（feishu 须为 open.feishu.cn 群机器人 webhook）；feishu_chat：群 chat_id。
+  /** webhook/feishu：webhook=http(s) URL；feishu=群机器人 webhook URL 或群 chat_id（oc_ 前缀，应用消息推送）；feishu_chat：群 chat_id。
    *  type=webhook 时可与 webhookId 二选一（引用已注册事件 Webhook，投递时解析其 URL 与签名密钥）。 */
   target?: string
   /** 引用 REST /api/v1/webhooks 注册的事件 Webhook（type=webhook；须本人注册或全局注册，创建时校验）。 */
@@ -80,6 +80,11 @@ export function normalizeAtList(raw: unknown): FeishuAtTarget[] | undefined {
   return out.length ? out : undefined
 }
 
+/** 飞书群 chat_id 形态（oc_ 前缀或纯 id）：feishu 通道以此为 target 时走应用消息推送（需应用凭证）。 */
+export function isFeishuChatId(target: string): boolean {
+  return /^(oc_[a-f0-9]+|[0-9a-f-]{16,})$/i.test(target.trim())
+}
+
 /** 校验通知通道配置（创建/修改时即拒绝非法配置；webhookId 的存在性/归属由 CronManager 注入的解析器校验）。 */
 export function validateNotifyChannel(ch: CronNotifyChannel): void {
   if (ch.type !== "webhook" && ch.type !== "feishu" && ch.type !== "feishu_chat") {
@@ -87,19 +92,17 @@ export function validateNotifyChannel(ch: CronNotifyChannel): void {
   }
   const target = String(ch.target ?? "").trim()
   const webhookId = String(ch.webhookId ?? "").trim()
-  if (!target && !webhookId) throw new Error("通知通道缺少 target（webhook 可用 webhookId 引用已注册事件 Webhook）")
+  if (!target && !webhookId) throw new Error("通知通道缺少 target（webhook 可用 webhookId 引用已注册事件 Webhook；feishu 可填群机器人 webhook 或群 chat_id）")
   if (webhookId && ch.type !== "webhook") throw new Error("webhookId 仅支持 webhook 通道")
   if (webhookId && !/^[a-f0-9]{32}$/.test(webhookId)) throw new Error(`无效的 webhookId: ${webhookId}（32 位 hex，REST /api/v1/webhooks 注册返回）`)
   if (ch.at !== undefined) normalizeAtList(ch.at)
   if (ch.type === "feishu_chat") {
     if (!target) throw new Error("feishu_chat 通道需要 target（群 chat_id）")
-    if (!/^(oc_[a-f0-9]+|[0-9a-f-]{16,})$/i.test(target)) throw new Error(`无效的飞书 chat_id: ${target}`)
+    if (!isFeishuChatId(target)) throw new Error(`无效的飞书 chat_id: ${target}`)
     return
   }
-  if (ch.type === "feishu") {
-    if (!target) throw new Error("feishu 通道需要 target（群机器人 webhook 地址）")
-  }
   if (webhookId && !target) return // 引用形态：URL 在投递时解析（解析器注册期已过 SSRF 校验）
+  if (ch.type === "feishu" && isFeishuChatId(target)) return // feishu 群 chat_id 形态：应用消息推送（投递需应用凭证）
   let url: URL
   try {
     url = new URL(target)
@@ -109,7 +112,7 @@ export function validateNotifyChannel(ch: CronNotifyChannel): void {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`通知 URL 仅支持 http(s): ${target}`)
   if (ch.type === "feishu") {
     if (url.hostname !== "open.feishu.cn" || !/^\/open-apis\/bot\/v2\/hook\//.test(url.pathname)) {
-      throw new Error(`飞书群机器人通知地址须为 open.feishu.cn 的 /open-apis/bot/v2/hook/… webhook: ${target}`)
+      throw new Error(`飞书通知地址须为 open.feishu.cn 的 /open-apis/bot/v2/hook/… webhook，或直接填群 chat_id（oc_ 前缀）: ${target}`)
     }
     return
   }
@@ -192,14 +195,16 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
   // at 含 "all"（@所有人）时降级为 text 消息：卡片 lark_md 对 user_id="all" 静默忽略（实测），
   // text 正文 <at user_id="all"> 生效；仅 @ 具体 open_id 时保持 markdown 卡片（卡片支持具体人 at）
   const atAll = ch.at?.some((a) => a.id === "all") === true
-  if (ch.type === "feishu_chat") {
+  // 飞书应用消息形态：feishu_chat，或 feishu 通道 target 为群 chat_id（指定群以应用身份推送）
+  const target = String(ch.target ?? "").trim()
+  const viaApp = ch.type === "feishu_chat" || (ch.type === "feishu" && isFeishuChatId(target))
+  if (viaApp) {
     if (!deps.feishuSend) throw new Error("飞书应用通知未配置（需 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET）")
-    const chatId = String(ch.target ?? "").trim()
-    if (!chatId) throw new Error("feishu_chat 通道缺少 target（群 chat_id）")
-    await deps.feishuSend(chatId, atAll ? "text" : "interactive", atAll ? { text: formatNotificationText(n, ch.at) } : buildFeishuCard(n, ch.at))
+    if (!target) throw new Error("feishu 应用消息通道缺少 target（群 chat_id）")
+    await deps.feishuSend(target, atAll ? "text" : "interactive", atAll ? { text: formatNotificationText(n, ch.at) } : buildFeishuCard(n, ch.at))
     return
   }
-  const url = String(ch.target ?? "").trim()
+  const url = target
   if (!url) throw new Error("webhook 引用未解析（webhookId 须由调度器在投递前解析为具体 URL）")
   const fetchImpl =
     deps.fetchImpl ??
