@@ -147,25 +147,38 @@ describe("notify", () => {
     expect(feishuBotSign("1700000001", "test-secret")).not.toBe(sign)
   })
 
-  test("sendCronNotification posts feishu markdown card with signature and at tags", async () => {
+  test("sendCronNotification posts feishu card (specific at) and text fallback (at all)", async () => {
     const posts: Array<{ url: string; body: Record<string, unknown> }> = []
+    const fetchPost = async (url: string, init: RequestInit) => {
+      posts.push({ url, body: JSON.parse(String(init.body)) })
+      return { ok: true, status: 200 }
+    }
     const res = await sendCronNotification(
       { type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", secret: "s3cret", at: [{ id: "all" }, { id: "ou_abc123", name: "张三" }] },
       { event: "cron.result", task: { id: "t1", name: "n", type: "script", schedule: "@daily", user: "u" }, ok: false, status: "error", at: 1700000000000, error: "boom" },
-      {
-        now: () => 1700000000000,
-        fetchImpl: async (url, init) => {
-          posts.push({ url, body: JSON.parse(String(init.body)) })
-          return { ok: true, status: 200 }
-        },
-      },
+      { now: () => 1700000000000, fetchImpl: fetchPost },
     )
     expect(res).toBeUndefined()
     expect(posts).toHaveLength(1)
     expect(posts[0].url).toContain("open.feishu.cn/open-apis/bot/v2/hook/abc")
-    // markdown 卡片（interactive）：状态着色头部 + lark_md 正文 + at 标签 + 加签
-    expect(posts[0].body.msg_type).toBe("interactive")
-    const card = posts[0].body.card as { header: { template: string; title: { content: string } }; elements: Array<{ tag: string; text?: { tag: string; content: string } }> }
+    // at 含 "all" → 降级 text 消息（卡片 lark_md 的 <at user_id="all"> 被飞书静默忽略，text 正文生效）；
+    // 具体 open_id 的 at 标签在 text 正文同样生效；加签字段不变
+    expect(posts[0].body.msg_type).toBe("text")
+    const text = (posts[0].body.content as { text: string }).text
+    expect(text).toContain('<at user_id="all">所有人</at>')
+    expect(text).toContain('<at user_id="ou_abc123">张三</at>')
+    expect(text).toContain("失败")
+    expect(text).toContain("错误: boom")
+    expect(posts[0].body.timestamp).toBe("1700000000")
+    expect(posts[0].body.sign).toBe(feishuBotSign("1700000000", "s3cret"))
+    // 仅 @ 具体 open_id（无 all）→ 保持 markdown 卡片：着色头部 + lark_md + at 标签
+    await sendCronNotification(
+      { type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", at: [{ id: "ou_abc123", name: "张三" }] },
+      { event: "cron.result", task: { id: "t1", name: "n", type: "script", schedule: "@daily", user: "u" }, ok: false, status: "error", at: 1700000000000, error: "boom" },
+      { now: () => 1700000000000, fetchImpl: fetchPost },
+    )
+    expect(posts[1].body.msg_type).toBe("interactive")
+    const card = posts[1].body.card as { header: { template: string; title: { content: string } }; elements: Array<{ tag: string; text?: { tag: string; content: string } }> }
     expect(card.header.template).toBe("red")
     expect(card.header.title.content).toContain("「n」")
     const md = card.elements.find((e) => e.tag === "div")!.text!
@@ -173,10 +186,7 @@ describe("notify", () => {
     expect(md.content).toContain("**状态：**")
     expect(md.content).toContain("失败")
     expect(md.content).toContain('**错误：**boom')
-    expect(md.content).toContain('<at user_id="all">所有人</at>')
     expect(md.content).toContain('<at user_id="ou_abc123">张三</at>')
-    expect(posts[0].body.timestamp).toBe("1700000000")
-    expect(posts[0].body.sign).toBe(feishuBotSign("1700000000", "s3cret"))
     // 任务输出中的尖括号净化（防输出注入 at/链接标签）
     const injected = await sendCronNotification(
       { type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc" },
@@ -184,7 +194,7 @@ describe("notify", () => {
       { fetchImpl: async (_u, init) => { posts.push({ url: _u, body: JSON.parse(String(init.body)) }); return { ok: true, status: 200 } } },
     )
     expect(injected).toBeUndefined()
-    const md2 = ((posts[1].body.card as { elements: Array<{ tag: string; text?: { content: string } }> }).elements.find((e) => e.tag === "div")!.text!).content
+    const md2 = ((posts[2].body.card as { elements: Array<{ tag: string; text?: { content: string } }> }).elements.find((e) => e.tag === "div")!.text!).content
     expect(md2).not.toContain('<at user_id="all">假@</at>')
     expect(md2).toContain("＜at")
 
@@ -218,16 +228,24 @@ describe("notify", () => {
     ).rejects.toThrow(/500/)
   })
 
-  test("sendCronNotification feishu_chat goes through injected sender with card", async () => {
-    const sent: Array<{ chatId: string; card: Record<string, unknown> }> = []
+  test("sendCronNotification feishu_chat goes through injected sender (text on at-all, card otherwise)", async () => {
+    const sent: Array<{ chatId: string; msgType: string; content: Record<string, unknown> }> = []
     const n: CronResultNotification = { event: "cron.result", task: { id: "t", name: "x", type: "script", schedule: "@daily", user: "u" }, ok: true, status: "success", at: 0 }
-    await sendCronNotification({ type: "feishu_chat", target: "oc_123", at: [{ id: "all" }] }, n, { feishuSend: async (chatId, card) => void sent.push({ chatId, card }) })
+    const send = async (ch: Parameters<typeof sendCronNotification>[0]) => {
+      await sendCronNotification(ch, n, { feishuSend: async (chatId, msgType, content) => void sent.push({ chatId, msgType, content }) })
+    }
+    // at 含 all → text 消息（@所有人 生效）
+    await send({ type: "feishu_chat", target: "oc_123", at: [{ id: "all" }] })
     expect(sent).toHaveLength(1)
-    expect(sent[0].chatId).toBe("oc_123")
-    expect((sent[0].card.header as { template: string }).template).toBe("green")
-    const md = (sent[0].card.elements as Array<{ tag: string; text?: { content: string } }>).find((e) => e.tag === "div")!.text!.content
+    expect(sent[0]).toMatchObject({ chatId: "oc_123", msgType: "text" })
+    expect(String((sent[0].content as { text: string }).text)).toContain('<at user_id="all">所有人</at>')
+    // 仅具体 open_id → markdown 卡片
+    await send({ type: "feishu_chat", target: "oc_123", at: [{ id: "ou_abc" }] })
+    expect(sent[1].msgType).toBe("interactive")
+    expect((sent[1].content.header as { template: string }).template).toBe("green")
+    const md = (sent[1].content.elements as Array<{ tag: string; text?: { content: string } }>).find((e) => e.tag === "div")!.text!.content
     expect(md).toContain("成功")
-    expect(md).toContain('<at user_id="all">所有人</at>')
+    expect(md).toContain('<at user_id="ou_abc"></at>')
     // 未注入飞书应用凭证时明确报错
     await expect(sendCronNotification({ type: "feishu_chat", target: "oc_123" }, n, {})).rejects.toThrow(/未配置/)
   })
@@ -247,7 +265,7 @@ interface Harness {
   running: boolean
   runHang: boolean
   notifyPosts: Array<{ url: string; body: unknown; headers?: Record<string, string> }>
-  feishuSent: Array<Record<string, unknown>>
+  feishuSent: Array<{ msgType: string; content: Record<string, unknown> }>
   agentNames: string[]
   /** 已注册事件 Webhook 模拟注册表（webhookId 引用解析）：id → {url,secret,owner}。 */
   webhookRegistry: Map<string, { url: string; secret?: string; owner?: string }>
@@ -306,7 +324,7 @@ function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = fa
         h.notifyPosts.push({ url, body: JSON.parse(String(init.body)), headers: init.headers as Record<string, string> })
         return { ok: true, status: 200 }
       },
-      feishuSend: async (_chatId, card) => void h.feishuSent.push(card),
+      feishuSend: async (_chatId, msgType, content) => void h.feishuSent.push({ msgType, content }),
     },
     agentExists: (name) => h.agentNames.includes(name),
     resolveWebhook: (id, user) => {
@@ -802,15 +820,16 @@ describe("CronManager", () => {
       expect(hookBody.event).toBe("cron.result")
       expect(hookBody.ok).toBe(true)
       expect(hookBody.output).toContain("ok-out")
-      const feishuBody = h.notifyPosts[1].body as { msg_type: string; card: { header: { template: string }; elements: Array<{ tag: string; text?: { content: string } }> } }
-      expect(feishuBody.msg_type).toBe("interactive")
-      expect(feishuBody.card.header.template).toBe("green")
-      const feishuMd = feishuBody.card.elements.find((e) => e.tag === "div")!.text!.content
-      expect(feishuMd).toContain('<at user_id="all">所有人</at>')
-      expect(feishuMd).toContain('<at user_id="ou_abc123">张三</at>')
-      expect(feishuMd).toContain("ok-out")
+      // at 含 all → 飞书通道自动降级 text 消息（卡片 @所有人 被飞书忽略，text 正文生效）
+      const feishuBody = h.notifyPosts[1].body as { msg_type: string; content: { text: string } }
+      expect(feishuBody.msg_type).toBe("text")
+      expect(feishuBody.content.text).toContain('<at user_id="all">所有人</at>')
+      expect(feishuBody.content.text).toContain('<at user_id="ou_abc123">张三</at>')
+      expect(feishuBody.content.text).toContain("ok-out")
+      // feishu_chat 通道（无 at）仍为 markdown 卡片
       expect(h.feishuSent).toHaveLength(1)
-      expect((h.feishuSent[0].header as { template: string }).template).toBe("green")
+      expect(h.feishuSent[0].msgType).toBe("interactive")
+      expect((h.feishuSent[0].content.header as { template: string }).template).toBe("green")
       expect(internal(h, task).lastNotifyError).toBeUndefined()
       // notifyOn=error：成功运行不再投递
       await h.cron.update(user, task.id, { notifyOn: "error" })
