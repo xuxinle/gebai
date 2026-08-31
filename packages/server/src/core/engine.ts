@@ -1918,10 +1918,11 @@ export class AgentEngine {
       waitForCapture: (opts) => self.waitForCapture(sessionId, opts, execSignal),
       cron: self.opts.cron
         ? {
-            add: (input) => self.opts.cron!.add(sessionId, user, input),
-            list: () => self.opts.cron!.list(sessionId, user),
-            remove: (id) => self.opts.cron!.remove(sessionId, user, id),
-            update: (id, patch) => self.opts.cron!.update(sessionId, user, id, patch),
+            add: (input, originSessionId) => self.opts.cron!.add(user, input, originSessionId ?? sessionId),
+            list: () => self.opts.cron!.list(user),
+            remove: (id) => self.opts.cron!.remove(user, id),
+            update: (id, patch) => self.opts.cron!.update(user, id, patch),
+            trigger: (id) => self.opts.cron!.trigger(user, id),
           }
         : undefined,
     }

@@ -158,13 +158,14 @@ export type ToolContext = {
    */
   exitMinimalMode?: () => void | Promise<void>
   /**
-   * 定时任务（cron_* 工具用，按当前会话绑定；服务端未启用定时任务能力时为空）。
+   * 定时任务（cron_* 工具用，按当前用户绑定——用户级资源与会话解耦；服务端未启用定时任务能力时为空）。
    */
   cron?: {
-    add: (input: import("./cron").CronCreateInput) => Promise<import("./cron").CronTask>
+    add: (input: import("./cron").CronCreateInput, originSessionId?: string) => Promise<import("./cron").CronTask>
     list: () => Promise<import("./cron").CronTask[]>
     remove: (id: string) => Promise<boolean>
     update: (id: string, patch: import("./cron").CronUpdateInput) => Promise<import("./cron").CronTask | null>
+    trigger: (id: string) => Promise<import("./cron").CronTask | null>
   }
 }
 
