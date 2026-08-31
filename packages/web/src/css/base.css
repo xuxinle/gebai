@@ -408,7 +408,11 @@ aside {
 /* 会话图标：冗余（每个会话前面都是同一个 💬，无辨识度）—— 直接隐藏，节省空间 */
 .session-ico { display: none; }
 #session-list li.active .session-ico { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
-.session-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* 会话列表条目正文（名称容器）。作用域限定 #session-list：messages.ts 的 agent_run
+   折叠容器正文是同名类 .session-body（.session-run .session-body）——此前全局规则把
+   display:flex 意外供给它（其内部消息对齐实际依赖 flex 列，chat.css 中已显式声明），
+   两个不相干模块靠同名类意外耦合，任何一侧改动都会悄悄影响另一侧，故收窄隔离 */
+#session-list .session-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .session-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -573,6 +577,14 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   flex-direction: column;
   gap: var(--msg-gap);
 }
+/* 消息子项禁止 flex 收缩（滚动正确性的关键）：flex 列滚动容器中，子项的自动最小高度
+   （min-height: auto）仅在 overflow 可见时等于内容高度；overflow ≠ visible 的子项
+   （agent_run 执行容器 .session-run 圆角裁剪用 overflow: hidden）自动最小高度为 0——
+   会话内容超过一屏后 flex 收缩把这些子项压到近 0 高（实测 1px），正文整段被裁剪不可见、
+   scrollHeight 塌缩至视口（滚动条近乎满比例、长内容滚不到，「生成中滚动卡死」；
+   历史回放渲染为折叠态不触发，故刷新后现象消失）。flex-shrink: 0 令所有子项保持
+   内容高度，溢出全部进入滚动区。 */
+#messages > * { flex-shrink: 0; }
 #messages:hover,
 #messages.scrolling {
   scrollbar-color: var(--border-strong) transparent;
