@@ -32,112 +32,14 @@ import type { Tool, ToolContext } from "../../core/types"
 import { truncate } from "../../core/tools"
 import { escapeXml, readDocx, unzipFiles, xmlStr, zipFiles } from "./ooxml"
 import type { MdBlock, MdRun } from "./markdown"
-import { parseMarkdown } from "./markdown"
-import { asNum, blindOverwriteGuard, fileBlocks, fitImage, normColor, readImage, schema, writeGuards } from "./shared"
-
-// ---------------------------------------------------------------------------
-// 输入归一化：markdown 文本或 blocks JSON → MdBlock[]
-// ---------------------------------------------------------------------------
-
-type Norm = { blocks: MdBlock[]; warnings: string[] }
-
-function toRuns(v: unknown): MdRun[] {
-  if (typeof v === "string") return v ? [{ text: v }] : []
-  if (Array.isArray(v)) {
-    return v.flatMap((r) => {
-      if (typeof r === "string") return r ? [{ text: r }] : []
-      if (r && typeof r === "object") {
-        const o = r as Record<string, unknown>
-        if (!o.text && !o.br) return []
-        const run: MdRun = { text: String(o.text ?? "") }
-        for (const k of ["bold", "italic", "strike", "code"] as const) if (o[k] === true) run[k] = true
-        if (typeof o.href === "string") run.href = o.href
-        if (o.size != null) run.size = asNum(o.size, 10.5)
-        const c = normColor(o.color)
-        if (c) run.color = c
-        if (o.br === true) run.br = true
-        return [run]
-      }
-      return []
-    })
-  }
-  return []
-}
+import { bodyInput } from "./markdown"
+import { asNum, blindOverwriteGuard, fileBlocks, fitImage, readImage, schema, writeGuards } from "./shared"
 
 const ALIGN: Record<string, (typeof AlignmentType)[keyof typeof AlignmentType]> = {
   left: AlignmentType.LEFT,
   center: AlignmentType.CENTER,
   right: AlignmentType.RIGHT,
   justify: AlignmentType.JUSTIFIED,
-}
-
-/** blocks JSON → MdBlock[]：type/kind 均接受，字段宽松归一；未知类型记 warning 跳过。 */
-function normalizeBlocks(input: unknown): Norm {
-  const warnings: string[] = []
-  if (!Array.isArray(input)) return { blocks: [], warnings: ["blocks 参数须为数组"] }
-  const blocks: MdBlock[] = []
-  for (const raw of input) {
-    if (!raw || typeof raw !== "object") continue
-    const b = raw as Record<string, unknown>
-    const kind = String(b.kind ?? b.type ?? "")
-    switch (kind) {
-      case "heading": {
-        const level = Math.max(1, Math.min(9, Math.round(asNum(b.level, 2))))
-        blocks.push({ kind: "heading", level, runs: toRuns(b.runs ?? b.text) })
-        break
-      }
-      case "paragraph":
-        blocks.push({ kind: "paragraph", runs: toRuns(b.runs ?? b.text) })
-        break
-      case "list": {
-        const items = Array.isArray(b.items)
-          ? b.items.map((it) => (typeof it === "string" ? { runs: toRuns(it), level: 0 } : { runs: toRuns((it as Record<string, unknown>)?.runs ?? (it as Record<string, unknown>)?.text), level: Math.max(0, Math.min(3, Math.round(asNum((it as Record<string, unknown>)?.level, 0)))) }))
-          : []
-        blocks.push({ kind: "list", ordered: b.ordered === true, items })
-        break
-      }
-      case "table": {
-        const header = Array.isArray(b.header) ? b.header.map((c) => String(typeof c === "object" && c ? (c as Record<string, unknown>).text ?? "" : c)) : []
-        const rows = Array.isArray(b.rows) ? b.rows.map((r) => (Array.isArray(r) ? r.map((c) => toRuns(c)) : [])) : []
-        const aligns = Array.isArray(b.aligns)
-          ? b.aligns.filter((a): a is "left" | "center" | "right" => a === "left" || a === "center" || a === "right")
-          : undefined
-        const widths = Array.isArray(b.widths) ? b.widths.map((w) => asNum(w, 0)).filter((w) => w > 0) : undefined
-        blocks.push({ kind: "table", header, rows, aligns, widths })
-        break
-      }
-      case "image":
-        if (typeof b.path === "string") {
-          const img: MdBlock = { kind: "image", path: b.path }
-          if (typeof b.alt === "string") img.alt = b.alt
-          if (b.width != null) img.width = asNum(b.width, 0)
-          if (b.height != null) img.height = asNum(b.height, 0)
-          blocks.push(img)
-        } else warnings.push("image 块缺少 path，已跳过")
-        break
-      case "code":
-        blocks.push({ kind: "code", text: String(b.text ?? ""), lang: typeof b.lang === "string" ? b.lang : undefined })
-        break
-      case "quote":
-        blocks.push({ kind: "quote", runs: toRuns(b.runs ?? b.text) })
-        break
-      case "pagebreak":
-        blocks.push({ kind: "pagebreak" })
-        break
-      case "toc":
-        blocks.push({ kind: "toc" })
-        break
-      default:
-        warnings.push(`未知块类型 ${kind || "(空)"}，已跳过（支持 heading/paragraph/list/table/image/code/quote/pagebreak/toc）`)
-    }
-  }
-  return { blocks, warnings }
-}
-
-function bodyInput(args: Record<string, unknown>): Norm {
-  if (typeof args.markdown === "string" && args.markdown.trim()) return parseMarkdown(args.markdown)
-  if (args.blocks != null) return normalizeBlocks(args.blocks)
-  return { blocks: [], warnings: [] }
 }
 
 // ---------------------------------------------------------------------------

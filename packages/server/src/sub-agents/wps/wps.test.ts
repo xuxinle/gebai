@@ -1,10 +1,24 @@
 import { describe, expect, test } from "bun:test"
 import { def } from "./wps"
 
-describe("wps 子Agent（Office 文档处理）", () => {
-  test("八工具齐备：word/excel/ppt 读写全覆盖，均经 projectAware 包装（project 参数）", () => {
+describe("wps 子Agent（Office/PDF 文档处理）", () => {
+  test("十三工具齐备：word/excel/ppt/pdf 读写全覆盖，均经 projectAware 包装（project 参数）", () => {
     const names = Object.keys(def.tools!)
-    expect(names.sort()).toEqual(["excel_edit", "excel_read", "excel_write", "ppt_create", "ppt_read", "word_append", "word_create", "word_read"])
+    expect(names.sort()).toEqual([
+      "excel_edit",
+      "excel_read",
+      "excel_write",
+      "pdf_create",
+      "pdf_edit",
+      "pdf_merge",
+      "pdf_read",
+      "pdf_split",
+      "ppt_create",
+      "ppt_read",
+      "word_append",
+      "word_create",
+      "word_read",
+    ])
     for (const n of names) {
       expect(def.tools![n].parameters.properties).toHaveProperty("project")
       // 卡片头声明 path 参数（project 由 projectAware 自动前插）
@@ -13,10 +27,10 @@ describe("wps 子Agent（Office 文档处理）", () => {
   })
 
   test("安全模式姿态：写工具显式不提供（safeMode:false），读工具免声明（默认注册，实现只读）", () => {
-    for (const n of ["word_create", "word_append", "excel_write", "excel_edit", "ppt_create"]) {
+    for (const n of ["word_create", "word_append", "excel_write", "excel_edit", "ppt_create", "pdf_create", "pdf_merge", "pdf_split", "pdf_edit"]) {
       expect(def.tools![n].safeMode).toBe(false)
     }
-    for (const n of ["word_read", "excel_read", "ppt_read"]) {
+    for (const n of ["word_read", "excel_read", "ppt_read", "pdf_read"]) {
       expect(def.tools![n].safeMode).toBeUndefined()
     }
   })
@@ -26,6 +40,7 @@ describe("wps 子Agent（Office 文档处理）", () => {
     for (const n of Object.keys(def.tools!)) expect(def.tools![n].requiresApproval).toBeUndefined()
     expect(def.preload).toBe(false)
     expect(def.systemPrompt).toContain("word_create")
+    expect(def.systemPrompt).toContain("pdf_create")
     expect(def.systemPrompt).toContain(".docx")
   })
 })

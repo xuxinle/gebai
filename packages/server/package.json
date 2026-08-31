@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@gebai/sdk": "workspace:*",
+    "@pdf-lib/fontkit": "^1.1.1",
     "@plantuml/core": "1.2026.6",
     "@resvg/resvg-js": "^2.6.2",
     "@terrastruct/d2": "^0.1.33",
@@ -28,9 +29,11 @@
     "happy-dom": "^20.11.2",
     "hono": "^4.6.0",
     "mermaid": "^11.16.1",
+    "pdf-lib": "^1.17.1",
     "playwright": "^1.62.1",
     "pptxgenjs": "^4.0.1",
     "tree-sitter-wasms": "^0.1.13",
+    "unpdf": "^1.8.1",
     "web-tree-sitter": "0.25.10"
   },
   "devDependencies": {
