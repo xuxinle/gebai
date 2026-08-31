@@ -52,8 +52,8 @@ export interface CronResultNotification {
 export interface NotifyDeps {
   /** 注入 HTTP 客户端（默认全局 fetch；测试用）。 */
   fetchImpl?: (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number }>
-  /** 飞书开放平台消息发送（feishu_chat 通道用；未配置时该通道报错）。 */
-  feishuSend?: (chatId: string, card: Record<string, unknown>) => Promise<void>
+  /** 飞书开放平台消息发送（feishu_chat 通道用；未配置时该通道报错）。at 含 "all" 时 msgType=text，否则卡片。 */
+  feishuSend?: (chatId: string, msgType: "interactive" | "text", content: Record<string, unknown>) => Promise<void>
   /** 时钟（加签时间戳用，可注入）。 */
   now?: () => number
 }
@@ -169,14 +169,34 @@ export function buildFeishuCard(n: CronResultNotification, at?: FeishuAtTarget[]
   }
 }
 
+/** 飞书 text 消息正文（at 含 "all" 时的降级形态——卡片 lark_md 的 `<at user_id="all">` 被飞书
+ *  静默忽略（无报错、无 @所有人 提醒），@所有人 仅 text 消息正文标签生效）。 */
+export function formatNotificationText(n: CronResultNotification, at?: FeishuAtTarget[]): string {
+  const status = n.ok ? "成功" : n.status === "skipped" ? "跳过" : n.status === "timeout" ? "超时" : "失败"
+  const lines: string[] = []
+  const tags = atTags(at)
+  if (tags) lines.push(tags)
+  lines.push(`⏰ 歌白·定时任务${n.task.name ? `「${sanitizeLarkMd(n.task.name)}」` : `（${n.task.id.slice(0, 8)}）`}`)
+  lines.push(`状态: ${status}  周期: ${sanitizeLarkMd(n.task.schedule)}`)
+  lines.push(`时间: ${new Date(n.at).toLocaleString("zh-CN")}${n.durationMs !== undefined ? `  耗时: ${Math.round(n.durationMs / 100) / 10}s` : ""}${n.manual ? "（手动触发）" : ""}`)
+  if (n.error) lines.push(`错误: ${sanitizeLarkMd(n.error.slice(0, NOTIFY_TEXT_MAX))}`)
+  if (n.output) lines.push(`输出:\n${sanitizeLarkMd(n.output.slice(0, NOTIFY_TEXT_MAX))}`)
+  if (n.sessionId) lines.push(`执行会话: ${n.sessionId}`)
+  if (n.disabled) lines.push(`⚠️ 任务已自动停用${n.manual ? "" : "（如需继续请重新启用）"}`)
+  return lines.join("\n").slice(0, 4000)
+}
+
 /** 投递单条通知（尽力而为：失败抛错由调用方记录，不影响任务执行结果）。 */
 export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultNotification, deps: NotifyDeps = {}): Promise<void> {
   const now = deps.now ?? Date.now
+  // at 含 "all"（@所有人）时降级为 text 消息：卡片 lark_md 对 user_id="all" 静默忽略（实测），
+  // text 正文 <at user_id="all"> 生效；仅 @ 具体 open_id 时保持 markdown 卡片（卡片支持具体人 at）
+  const atAll = ch.at?.some((a) => a.id === "all") === true
   if (ch.type === "feishu_chat") {
     if (!deps.feishuSend) throw new Error("飞书应用通知未配置（需 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET）")
     const chatId = String(ch.target ?? "").trim()
     if (!chatId) throw new Error("feishu_chat 通道缺少 target（群 chat_id）")
-    await deps.feishuSend(chatId, buildFeishuCard(n, ch.at))
+    await deps.feishuSend(chatId, atAll ? "text" : "interactive", atAll ? { text: formatNotificationText(n, ch.at) } : buildFeishuCard(n, ch.at))
     return
   }
   const url = String(ch.target ?? "").trim()
@@ -190,7 +210,9 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
   let body: Record<string, unknown>
   let headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8" }
   if (ch.type === "feishu") {
-    const payload: Record<string, unknown> = { msg_type: "interactive", card: buildFeishuCard(n, ch.at) }
+    const payload: Record<string, unknown> = atAll
+      ? { msg_type: "text", content: { text: formatNotificationText(n, ch.at) } }
+      : { msg_type: "interactive", card: buildFeishuCard(n, ch.at) }
     if (ch.secret) {
       const ts = Math.floor(now() / 1000).toString()
       payload.timestamp = ts

@@ -289,9 +289,10 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       safeMode: config.safeMode,
       notify: feishuApi
         ? {
-            // 飞书应用消息走 markdown 卡片（msg_type=interactive），与群机器人 webhook 同卡片结构
-            feishuSend: async (chatId, card) => {
-              await feishuApi.sendMessage({ receiveId: chatId, receiveIdType: "chat_id", msgType: "interactive", content: card })
+            // 飞书应用消息：markdown 卡片；at 含 "all"（@所有人）时降级 text 消息（卡片 lark_md 对
+            // user_id="all" 静默忽略，text 正文 <at user_id="all"> 生效——与群机器人 webhook 同规则）
+            feishuSend: async (chatId, msgType, content) => {
+              await feishuApi.sendMessage({ receiveId: chatId, receiveIdType: "chat_id", msgType, content })
             },
           }
         : undefined,
