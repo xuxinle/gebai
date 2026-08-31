@@ -9,7 +9,7 @@ import type { EnvManager } from "./env"
 import type { Sandbox } from "./sandbox"
 import type { EventBus } from "./event-bus"
 import type { CronNotifyChannel, CronResultNotification, FeishuAtTarget, NotifyDeps } from "./notify"
-import { validateNotifyChannel, sendCronNotification, normalizeAtList } from "./notify"
+import { validateNotifyChannel, sendCronNotification, normalizeAtList, isFeishuChatId } from "./notify"
 import { sessionPath, walkDir } from "./paths"
 
 /** 定时任务调度器 tick 周期（DESIGN「常量参考」）。 */
@@ -683,6 +683,10 @@ export class CronManager {
       }
       // 引用形态：创建/修改时即校验存在性与归属（接线方注入的解析器；未注入解析器时引用即拒）
       if (webhookId && !this.deps.resolveWebhook?.(webhookId, user)) throw new Error(`webhook 不存在或无权引用: ${webhookId}（REST /api/v1/webhooks 注册后以返回 id 引用）`)
+      // 飞书应用消息形态（feishu_chat，或 feishu 通道 target 为群 chat_id）：需服务端飞书应用凭证，创建即拒
+      if (entry.type === "feishu_chat" || (entry.type === "feishu" && isFeishuChatId(entry.target ?? ""))) {
+        if (!this.deps.notify?.feishuSend) throw new Error("指定飞书群 chat_id 推送需服务端配置飞书应用凭证（GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET），或改用群机器人 webhook 地址")
+      }
       // 掩码 secret（列表回显）视为「保持原值」：按位置回填旧通道密钥
       if (!entry.secret && ch.secret === "***" && prev) {
         const idx = out.length

@@ -309,7 +309,7 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error` | `info` |
 | `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具） | 空（全部启用） |
 | `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具） | 空 |
-| `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs` 子Agent 的全局兜底 + 机器人桥接凭证）、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）** | 不启用 |
+| `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs`/`feishu_group` 子Agent 的全局兜底 + 机器人桥接凭证 + 定时任务飞书应用消息通知（指定群 chat_id 推送/@人））、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）**；`feishu_group` 专属前缀 `FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET` 可独立配置 | 不启用 |
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
 | `GEBAI_SAFE_MODE` | 安全模式（**仅启动时从 .env/环境变量加载，不可在会话/任务级修改**）：风险能力**降级而非禁用**——`sh` 只读命令白名单 + 重定向限用户目录、`py`/`js` 只读运行时（写/进程/网络屏蔽，仅保留文件读取）、`write`/`edit`/`patch`/`file` 限定用户目录内、`cron_*` 调度类硬阻断、子Agent 工具按 `Tool.safeMode` 自主声明过滤注册（详见「安全模型 → 安全模式」） | `false` |
@@ -866,6 +866,19 @@ export const preload = false
 - **预加载**：`preload = false`，按需装载
 
 
+#### `feishu_group`（飞书群基础能力）
+
+实现于 `sub-agents/feishu_group/feishu_group.ts`，以应用身份（tenant_access_token）操作飞书群基础能力——群查询、群维护与定时任务通知的取材（@ 人 open_id / 群 chat_id）：
+
+- **工具集**（十工具，`feishu_group_` 前缀）：
+  - 查询类（免审批）：`chats_list`（机器人所在群分页列表——chat_id/名称/描述）；`chat_info`（群详情：名称/描述/群主/成员数）；`members_list`（群成员分页列表：open_id+姓名+成员类型——**@特定人的 open_id 来源**）；`user_info`（按 open_id 查用户姓名等信息——核对 at 名单）
+  - 写操作（需审批）：`message_send`（向群发文本，正文支持 `<at user_id="open_id">` @特定人与 `<at user_id="all">` @所有人——验证通知效果/直接推送）；`chat_create`（建群：名称/描述/初始成员）；`chat_update`（改群名/描述）；`chat_members_add`（拉人，open_id 列表，失败项逐条给原因）；`chat_members_remove`（移出成员）；`chat_disband`（解散群，不可恢复）
+- **凭证**：`FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET`（子Agent 前缀），缺省回落全局 `GEBAI_FEISHU_APP_ID/SECRET`（与机器人桥接/云文档共用）；机器人须已入群；token 缓存复用 feishu_docs 同款机制（提前 200s 刷新）
+- **与定时任务通知联动**（高频场景）：`chats_list` 查到的群 chat_id 直接填 cron 通知 `feishu` 通道 `target`（指定群以应用身份推送）；`members_list` 查到的 open_id 直接填 `at` 名单（@特定人）
+- **权限提示**：查询需 `im:chat:readonly`（或 `im:chat`），写操作需 `im:chat`，发消息需 `im:message:send_as_bot`，用户信息需 `contact:user.base:readonly`——权限不足的错误附开发者后台开通引导
+- **预加载**：`preload = false`，按需装载
+
+
 #### `cron`（定时任务管理）
 
 实现于 `sub-agents/cron/cron.ts`，由原全局工具 `cron_add`/`cron_list`/`cron_update`/`cron_remove` **下沉为子Agent**（工具名经命名空间保持 `cron_*` 不变，`cron_list` 对应命名空间内 `list` 等单字工具）：创建/查看/修改/手动触发/删除**用户级**定时任务——无人值守的周期性脚本与 Agent 任务（能力实现见「定时任务」）：
@@ -918,6 +931,7 @@ export const preload = false
 | `feishu_docs` | auth_status/auth_user_authorize/auth_user_token/auth_user_status/auth_user_clear/create_doc/get_doc_meta/get_doc_text/get_doc_blocks/list_blocks/find_blocks/add_blocks/update_block/delete_blocks/import_markdown/export_doc/list_files/create_folder/get_file_meta/upload_file/download_file/delete_file/search/create_sheet/get_sheet_meta/read_sheet/write_sheet/append_sheet/create_bitable/list_bitable_tables/list_bitable_records/add_bitable_records/update_bitable_record/delete_bitable_records/list_wiki_spaces/create_wiki_node/get_wiki_node/get_board/add_permission/api_call | 写操作全部（创建/修改/删除/上传/授权） | ✗ | 飞书云文档（文档/表格/多维表格/知识库/云空间/搜索/权限/思维导图画板；**可配置 user_access_token 以用户身份操作、创建用户所有权资源**；需配置 `FEISHU_DOCS_*` 或全局 `GEBAI_FEISHU_*` 凭证） |
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 浏览器自动化全套（同 playwright）+ http_request/fetch_url/capture_start/capture_stop/capture_clear/capture_list/read/write/agent_list/agent_load/agent_run | 浏览器交互类+http_request+write | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
+| `feishu_group` | chats_list/chat_info/members_list/user_info/message_send/chat_create/chat_update/chat_members_add/chat_members_remove/chat_disband | 写操作全部（发消息/建群/改群/拉人/移人/解散） | ✗ | 飞书群基础能力（群列表/详情/成员查询（open_id+姓名——@特定人与 cron 通知 at 名单取材）/用户信息/群内发消息（at 标签）/建群改群/成员增删/解散；需 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_* 凭证） |
 | `cron` | add/list/update/trigger/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`） | add+update+remove+trigger | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
 
@@ -1223,9 +1237,9 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
 - **运行历史**：每任务环形保留最近 10 次运行记录（`runs`：触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记），落盘 cron.json，`cron_list` 与 REST 可查
 - **通知通道（`notify`，任务内嵌数组可配多条）**——无人值守任务的送达手段（`core/notify.ts`）：
   - `webhook`：任意 http(s) 回调，POST JSON（载荷即 `cron.result` 事件形态 + 通道 `at` 名单：任务信息/状态/输出摘要/耗时/执行会话/停用标记/@ 人名单，接收方系统可据此渲染提及）；URL 直配时经事件 Webhook 同规则 SSRF 校验（回环/链路本地/元数据地址默认拒绝，注册与投递逐跳共用），可选 `secret` 附 `X-Gebai-Signature: sha256=HMAC` 签名头（与事件 Webhook 投递同款，接收方一套校验通吃）；亦可 `webhookId` **引用 REST `/api/v1/webhooks` 注册的事件 Webhook**（与 `target` 二选一，创建时校验存在性与归属——具名注册仅本人任务可引用、全局注册（admin，`userId` 未记录=部署方集成通道）人人可引用；投递时经注入的解析器（`WebhookManager.of`）解析其 URL 与签名密钥——注册侧改 URL/密钥即时生效，引用消失记 `lastNotifyError` 跳过不影响任务）
-  - `feishu`：飞书**群自定义机器人** webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`，域名与路径强校验）；可选 `secret` 加签（`sign = base64(HMAC-SHA256(key=timestamp+\n+secret, msg=""))`）；消息形态随 `at` 名单自动选择——默认 **markdown 卡片**（`msg_type=interactive`：头部按状态着色 green/red/orange/grey + 任务名，正文 `lark_md`——`**粗体**` 字段行（状态/周期/时间/耗时/错误/输出摘要/执行会话/停用标记）+ note 脚注），`at` 含 `"all"` 时降级 **text 消息**（见 `at` 名单条目）
+  - `feishu`：飞书通知通道，`target` **双形态**——群自定义机器人 webhook（`https://open.feishu.cn/open-apis/bot/v2/hook/…`，域名与路径强校验）或**群 chat_id**（`oc_` 前缀——以应用身份向指定群推送，走 `feishu_chat` 同款应用消息，需服务端配置飞书应用凭证，未配置时创建即拒；chat_id 可经 `feishu_group` 子Agent `chats_list` 查询）；webhook 形态可选 `secret` 加签（`sign = base64(HMAC-SHA256(key=timestamp+\n+secret, msg=""))`）；消息形态随 `at` 名单自动选择——默认 **markdown 卡片**（`msg_type=interactive`：头部按状态着色 green/red/orange/grey + 任务名，正文 `lark_md`——`**粗体**` 字段行（状态/周期/时间/耗时/错误/输出摘要/执行会话/停用标记）+ note 脚注），`at` 含 `"all"` 时降级 **text 消息**（见 `at` 名单条目）
   - `feishu_chat`：飞书**应用消息**（`target` 为群 chat_id），复用全局 `GEBAI_FEISHU_APP_ID/SECRET` 凭证（与机器人桥接/云文档共用）经 tenant api 发送，消息形态与 `at` 规则同 `feishu`（默认卡片、含 `"all"` 降级 text）；未配置凭证时创建即拒绝
-  - `at` **@ 人名单**（可选，全通道）：条目为 open_id（`ou_`/`un_`/`on_` 前缀）或 `"all"`（@所有人），字符串或 `{id,name}` 形态（name 为展示名，缺省由客户端解析真实姓名），存储归一为 `{id,name?}` 并去重；webhook 通道随 JSON 载荷 `at` 字段携带（供接收方解析提及）；飞书通道按名单自动选择消息形态——**仅 @ 具体 open_id 时 markdown 卡片**（lark_md `<at user_id="…">` 置于正文首行），**含 `"all"` 时自动降级 text 消息**（卡片 lark_md 的 `<at user_id="all">` 被飞书静默忽略——无报错、无 @所有人 提醒，`text` 正文标签实测生效；降级后格式化为纯文本多行正文，具体 open_id 的 at 标签在 text 中同样生效，群机器人 webhook 与应用消息同规则）；飞书正文输出/错误的尖括号全角化净化（卡片与 text 两形态同规则），防任务输出注入 `<at>`/`<a>` 标签（@ 与链接仅由通道配置产生）
+  - `at` **@ 人名单**（可选，全通道）：条目为 open_id（`ou_`/`un_`/`on_` 前缀）或 `"all"`（@所有人），字符串或 `{id,name}` 形态（name 为展示名，缺省由客户端解析真实姓名），存储归一为 `{id,name?}` 并去重（**@特定人**：open_id 不知道时可装载 `feishu_group` 子Agent 用 `members_list` 按姓名查询）；webhook 通道随 JSON 载荷 `at` 字段携带（供接收方解析提及）；飞书通道按名单自动选择消息形态——**仅 @ 具体 open_id 时 markdown 卡片**（lark_md `<at user_id="…">` 置于正文首行），**含 `"all"` 时自动降级 text 消息**（卡片 lark_md 的 `<at user_id="all">` 被飞书静默忽略——无报错、无 @所有人 提醒，`text` 正文标签实测生效；降级后格式化为纯文本多行正文，具体 open_id 的 at 标签在 text 中同样生效，群机器人 webhook 与应用消息同规则）；飞书正文输出/错误的尖括号全角化净化（卡片与 text 两形态同规则），防任务输出注入 `<at>`/`<a>` 标签（@ 与链接仅由通道配置产生）
   - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `cron_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
 - **工具**（`cron` 子Agent 命名空间暴露 `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`；装载 cron 子Agent 后可用）：
   - `cron_add`：创建任务（`type`+`schedule` 必填，`script`/`prompt` 按类型必填，可选 `name`/`target`/`sessionId`/`agents`/`timezone`/`misfire`/`timeoutMs`/`notify`（webhook 支持直配 URL/`webhookId` 引用注册通道，含全通道 `at` @ 人名单）/`notifyOn`/`maxConsecutiveErrors`/`enabled`），返回任务 ID 与下次执行时间
