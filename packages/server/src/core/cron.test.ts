@@ -8,6 +8,7 @@ import { Sandbox } from "./sandbox"
 import { EnvManager } from "./env"
 import { EventBus } from "./event-bus"
 import type { AgentEngine } from "./engine"
+import type { CronNotifyChannel } from "./notify"
 import { feishuBotSign, validateNotifyChannel, sendCronNotification, normalizeAtList, type CronResultNotification } from "./notify"
 
 function localDate(ms: number | string): Date {
@@ -277,7 +278,7 @@ interface Harness {
   webhookRegistry: Map<string, { url: string; secret?: string; owner?: string }>
 }
 
-function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = false) {
+function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = false, defaultNotify?: CronNotifyChannel[]) {
   const home = mkdtempSync(join(tmpdir(), "gebai-cron-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const store = new SessionStore({ home })
@@ -339,6 +340,7 @@ function setup(now = 1_780_000_000_000, tickIntervalMs = 3600_000, safeMode = fa
       if (cfg.owner && cfg.owner !== user) return null
       return { url: cfg.url, secret: cfg.secret }
     },
+    defaultNotify,
   })
   return h
 }
@@ -852,6 +854,42 @@ describe("CronManager", () => {
       })
       expect(internal(h, task).notify![1].secret).toBe("s3cret")
       expect(kept?.notify![1].secret).toBe("***")
+    } finally {
+      cleanup(h)
+    }
+  })
+
+  test("全局默认通知通道：未配 notify 的任务走全局，自配任务不叠加，notifyOn=error 过滤成功", async () => {
+    const h = setup(1_780_000_000_000, 3600_000, false, [
+      { type: "webhook", target: "https://global.example.com/hook" },
+      { type: "feishu", target: "oc_0123456789abcdef", at: [{ id: "all" }] },
+    ])
+    try {
+      const { user } = await createSession(h)
+      h.sandbox.exec = async () => ({ stdout: "via-default", stderr: "", code: 0 })
+      // 未配 notify 的任务：全局默认通道兜底（webhook POST + 飞书应用消息 text（at 含 all））
+      const bare = await h.cron.add(user, { type: "script", schedule: "@every 30m", script: "echo d" })
+      expect(bare.notify).toBeUndefined()
+      await due(h, bare)
+      await h.cron.tick()
+      expect(h.notifyPosts.map((p) => p.url)).toEqual(["https://global.example.com/hook"])
+      expect(h.feishuSent).toHaveLength(1)
+      expect(h.feishuSent[0].msgType).toBe("text")
+      expect(String((h.feishuSent[0].content as { text: string }).text)).toContain('<at user_id="all">所有人</at>')
+      // 自配 notify 的任务：只走任务自己的通道（不与全局叠加，防重复推送）
+      const own = await h.cron.add(user, { type: "script", schedule: "@every 30m", script: "echo o", notify: [{ type: "webhook", target: "https://own.example.com/hook" }] })
+      await due(h, own)
+      await h.cron.tick()
+      expect(h.notifyPosts.map((p) => p.url)).toEqual(["https://global.example.com/hook", "https://own.example.com/hook"])
+      expect(h.feishuSent).toHaveLength(1)
+      // notifyOn=error：清空自配通道（回落全局默认）后按任务时机过滤（成功不打扰）
+      await h.cron.update(user, own.id, { notify: [] })
+      await h.cron.update(user, own.id, { notifyOn: "error" })
+      const before = h.notifyPosts.length
+      await due(h, own)
+      await h.cron.tick()
+      expect(h.notifyPosts.length).toBe(before)
+      expect(h.feishuSent).toHaveLength(1)
     } finally {
       cleanup(h)
     }

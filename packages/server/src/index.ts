@@ -20,6 +20,7 @@ import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelR
 import { makeVisionTool, setVisionProviderGetter, getVisionProvider } from "./core/vision"
 import { scheduleGC } from "./core/gc"
 import { CronManager } from "./core/cron"
+import { isFeishuChatId, validateNotifyChannel } from "./core/notify"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
 import { DevReloadManager, webRootOf } from "./dev-reload"
 import type { ServerWebSocket } from "bun"
@@ -280,6 +281,23 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   let cron: CronManager | null = null
   if (config.cronEnabled) {
     const feishuApi = config.feishuAppId && config.feishuAppSecret ? createFeishuApi({ appId: config.feishuAppId, appSecret: config.feishuAppSecret }) : undefined
+    // 全局默认通知通道（GEBAI_CRON_NOTIFY_WEBHOOK / GEBAI_CRON_NOTIFY_FEISHU）：任务未配 notify 时兜底推送。
+    // 构建期逐条校验（SSRF/域名/chat_id 形态），非法配置告警跳过不阻断启动；chat_id 形态需飞书应用凭证
+    const defaultNotify: import("./core/notify").CronNotifyChannel[] = []
+    for (const [label, type, raw] of [
+      ["GEBAI_CRON_NOTIFY_WEBHOOK", "webhook", config.cronNotifyWebhook],
+      ["GEBAI_CRON_NOTIFY_FEISHU", "feishu", config.cronNotifyFeishu],
+    ] as const) {
+      if (!raw) continue
+      const ch = { type, target: raw } as import("./core/notify").CronNotifyChannel
+      try {
+        validateNotifyChannel(ch)
+        if (type === "feishu" && isFeishuChatId(raw) && !feishuApi) throw new Error("chat_id 形态需配置 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET")
+        defaultNotify.push(ch)
+      } catch (err) {
+        console.warn(`[gebai] 全局定时通知 ${label} 配置无效，已忽略: ${(err as Error).message}`)
+      }
+    }
     cron = new CronManager({
       home: config.gebaiHome,
       store,
@@ -303,6 +321,7 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
         if (cfg.userId && cfg.userId !== user) return null
         return { url: cfg.url, secret: cfg.secret }
       },
+      defaultNotify,
     })
     cron.attach(engine)
     await cron.start()

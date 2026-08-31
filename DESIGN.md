@@ -329,6 +329,8 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
 | `GEBAI_MINIMAL_MODE` | 会话级极简模式（`true` 仅启用 `sh` 与 `edit` 工具（外加 `full_mode` 切换入口），其余工具从 schema 移除且调用被阻止，系统提示词同步极简化；前端「极简模式」开关同步写入，见「工具选择」） | 空 |
 | `GEBAI_CRON_ENABLED` | 是否启用定时任务能力（注册 `cron` 子Agent（`cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove` 工具）、启动调度器并开放 REST `/api/v1/cron` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
+| `GEBAI_CRON_NOTIFY_WEBHOOK` | 定时任务**全局默认通知 webhook**（http(s) 回调 URL）：任务未配置自己的 `notify` 时自动经该通道推送（任务自配则不叠加）；启动时校验（SSRF 同规则），非法配置告警忽略 | 不设置 |
+| `GEBAI_CRON_NOTIFY_FEISHU` | 定时任务**全局默认飞书通知**：群 chat_id（`oc_` 前缀，以应用身份推送——需 `GEBAI_FEISHU_APP_ID/SECRET`）或群机器人 webhook URL，语义同 `feishu` 通道双形态；任务未配置 `notify` 时自动生效 | 不设置 |
 | `GEBAI_EXTERNAL_AUTH_SECRET` | 外部身份扩展点：HMAC 共享密钥（与 `GEBAI_EXTERNAL_AUTH_URL` 互斥，同设启动报错）；网站用密钥对「用户名.过期时间戳」签名（HMAC-SHA256，hex），凭证格式 `{exp}.{sig}`，exp 为毫秒时间戳，±10 分钟有效窗口防重放 | 空（不启用） |
 | `GEBAI_EXTERNAL_AUTH_URL` | 外部身份扩展点：HTTP 回调验证 URL（与 `GEBAI_EXTERNAL_AUTH_SECRET` 互斥，同设启动报错；**必须 HTTPS**，localhost/127.0.0.1 例外防中间人伪造）；GEBAI 把 `{username, credential}` POST 给回调（5s 超时），业务系统自行校验（如查自己 localStorage 对应的服务端态），**必须核验 username 与凭证归属一致**，响应 2xx 且 `{"ok":true}` 即通过，可用 `username` 字段覆盖映射（仅应在明确校验后使用） | 空（不启用） |
 | `GEBAI_EXTERNAL_AUTH_AUTOCREATE` | 外部用户名不存在时自动创建 GEBAI 用户（普通角色、随机密码不可密码登录）；`false` 时仅允许管理员预建的同名用户 | `true` |
@@ -1241,6 +1243,7 @@ export const writeGuard = (env, absPaths) => string | null   // 写范围守卫�
   - `feishu_chat`：飞书**应用消息**（`target` 为群 chat_id），复用全局 `GEBAI_FEISHU_APP_ID/SECRET` 凭证（与机器人桥接/云文档共用）经 tenant api 发送，消息形态与 `at` 规则同 `feishu`（默认卡片、含 `"all"` 降级 text）；未配置凭证时创建即拒绝
   - `at` **@ 人名单**（可选，全通道）：条目为 open_id（`ou_`/`un_`/`on_` 前缀）或 `"all"`（@所有人），字符串或 `{id,name}` 形态（name 为展示名，缺省由客户端解析真实姓名），存储归一为 `{id,name?}` 并去重（**@特定人**：open_id 不知道时可装载 `feishu_group` 子Agent 用 `members_list` 按姓名查询）；webhook 通道随 JSON 载荷 `at` 字段携带（供接收方解析提及）；飞书通道按名单自动选择消息形态——**仅 @ 具体 open_id 时 markdown 卡片**（lark_md `<at user_id="…">` 置于正文首行），**含 `"all"` 时自动降级 text 消息**（卡片 lark_md 的 `<at user_id="all">` 被飞书静默忽略——无报错、无 @所有人 提醒，`text` 正文标签实测生效；降级后格式化为纯文本多行正文，具体 open_id 的 at 标签在 text 中同样生效，群机器人 webhook 与应用消息同规则）；飞书正文输出/错误的尖括号全角化净化（卡片与 text 两形态同规则），防任务输出注入 `<at>`/`<a>` 标签（@ 与链接仅由通道配置产生）
   - `notifyOn` 通知时机：`always`（缺省，每次执行）/ `error`（仅失败与自动停用）；投递**尽力而为**——失败记 `lastNotifyError` 不影响执行结果与调度，成功清除；通知密钥在 `cron_list`/REST 回显中脱敏（`***`），修改时传 `***` 保持原值；安全模式下通知投递（外发网络）跳过
+  - **全局默认通道**（环境变量 `GEBAI_CRON_NOTIFY_WEBHOOK` / `GEBAI_CRON_NOTIFY_FEISHU`）：任务未配置自己的 `notify` 时自动经全局通道推送（运营兜底——无人值守任务忘配通知不至失联）；**任务自配 `notify` 则只走任务自己的通道、不与全局叠加**（防重复推送）；全局通道在**投递时**解析（不写入任务数据，环境变量改动重启后即时生效），`notifyOn` 过滤（含任务级 `error` 时机）与 at/卡片形态规则同款；启动构建期逐条校验（SSRF/域名/chat_id 形态、chat_id 形态需飞书应用凭证），非法配置告警忽略不阻断启动
 - **工具**（`cron` 子Agent 命名空间暴露 `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`；装载 cron 子Agent 后可用）：
   - `cron_add`：创建任务（`type`+`schedule` 必填，`script`/`prompt` 按类型必填，可选 `name`/`target`/`sessionId`/`agents`/`timezone`/`misfire`/`timeoutMs`/`notify`（webhook 支持直配 URL/`webhookId` 引用注册通道，含全通道 `at` @ 人名单）/`notifyOn`/`maxConsecutiveErrors`/`enabled`），返回任务 ID 与下次执行时间
   - `cron_list`：查看当前用户全部任务（含目标/时区/补跑/超时/停用阈值/通知通道/最近运行历史）
