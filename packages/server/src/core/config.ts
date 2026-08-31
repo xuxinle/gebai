@@ -58,6 +58,11 @@ export interface ServerConfig {
   /** 是否启用定时任务能力（GEBAI_CRON_ENABLED，默认 true：注册 cron 子Agent（cron_* 工具）并启动调度器；
    *  显式 false 时完全不可见）。 */
   cronEnabled: boolean
+  /** 定时任务全局默认通知 webhook（GEBAI_CRON_NOTIFY_WEBHOOK）：任务未配 notify 时自动追加该通道。 */
+  cronNotifyWebhook?: string
+  /** 定时任务全局默认飞书通知（GEBAI_CRON_NOTIFY_FEISHU）：群 chat_id（oc_ 前缀，应用身份推送）或群机器人
+   *  webhook URL；任务未配 notify 时自动追加该通道。 */
+  cronNotifyFeishu?: string
   /** 外部身份扩展点：HMAC 共享密钥（GEBAI_EXTERNAL_AUTH_SECRET，与 GEBAI_EXTERNAL_AUTH_URL 互斥）。 */
   externalAuthSecret?: string
   /** 外部身份扩展点：HTTP 回调验证 URL（GEBAI_EXTERNAL_AUTH_URL，与 GEBAI_EXTERNAL_AUTH_SECRET 互斥）。 */
@@ -144,6 +149,8 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     signupMode: env("GEBAI_SIGNUP_MODE") === "approval" ? "approval" : "open",
     gcDisabled: bool("GEBAI_GC_DISABLED", false),
     cronEnabled: bool("GEBAI_CRON_ENABLED", true),
+    cronNotifyWebhook: env("GEBAI_CRON_NOTIFY_WEBHOOK").trim() || undefined,
+    cronNotifyFeishu: env("GEBAI_CRON_NOTIFY_FEISHU").trim() || undefined,
     externalAuthSecret: env("GEBAI_EXTERNAL_AUTH_SECRET") || undefined,
     externalAuthUrl: env("GEBAI_EXTERNAL_AUTH_URL") || undefined,
     externalAuthAutocreate: bool("GEBAI_EXTERNAL_AUTH_AUTOCREATE", true),

@@ -381,6 +381,9 @@ export interface CronManagerDeps {
   /** webhookId 引用解析器（notify 通道引用 REST 注册的事件 Webhook：返回其 URL 与签名密钥；
    *  归属校验由接线方完成——具名注册仅本人可引用，全局注册（admin，userId 未记录）人人可引用；不存在返回 null）。 */
   resolveWebhook?: (id: string, user: string) => { url: string; secret?: string } | null
+  /** 全局默认通知通道（GEBAI_CRON_NOTIFY_WEBHOOK / GEBAI_CRON_NOTIFY_FEISHU 构建注入）：
+   *  任务未配置自己的 notify 时投递使用——不写入任务数据（环境变量改动即时生效），任务自配通道则不叠加（防重复推送）。 */
+  defaultNotify?: CronNotifyChannel[]
 }
 
 export class CronManager {
@@ -947,9 +950,11 @@ export class CronManager {
     )
   }
 
-  /** 通知投递（尽力而为：按 notifyOn 过滤；失败记 lastNotifyError，不影响执行结果与调度）。 */
+  /** 通知投递（尽力而为：按 notifyOn 过滤；失败记 lastNotifyError，不影响执行结果与调度）。
+   *  任务未配自己的 notify 时回落全局默认通道（环境变量配置，不写入任务数据）。 */
   private async dispatchNotify(entry: CronTask, n: CronResultNotification): Promise<void> {
-    if (!entry.notify?.length) return
+    const channels = entry.notify?.length ? entry.notify : this.deps.defaultNotify
+    if (!channels?.length) return
     const ok = n.ok
     if (entry.notifyOn === "error" && ok && !n.disabled) {
       entry.lastNotifyError = undefined
@@ -960,7 +965,7 @@ export class CronManager {
       return
     }
     const errors: string[] = []
-    for (const ch of entry.notify) {
+    for (const ch of channels) {
       try {
         // webhookId 引用形态：投递时解析注册 Webhook 的 URL 与签名密钥（注册侧改 URL/密钥即时生效；
         // 引用消失（被删除/失去归属）记通知错误跳过，不影响其余通道与任务）

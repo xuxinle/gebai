@@ -2,6 +2,28 @@ import { describe, expect, test } from "bun:test"
 import { loadConfig } from "./config"
 
 describe("loadConfig 模式与密钥解析", () => {
+  test("定时任务全局默认通知通道环境变量解析", () => {
+    const prevW = process.env.GEBAI_CRON_NOTIFY_WEBHOOK
+    const prevF = process.env.GEBAI_CRON_NOTIFY_FEISHU
+    try {
+      delete process.env.GEBAI_CRON_NOTIFY_WEBHOOK
+      delete process.env.GEBAI_CRON_NOTIFY_FEISHU
+      const off = loadConfig()
+      expect(off.cronNotifyWebhook).toBeUndefined()
+      expect(off.cronNotifyFeishu).toBeUndefined()
+      process.env.GEBAI_CRON_NOTIFY_WEBHOOK = "https://hooks.example.com/cron"
+      process.env.GEBAI_CRON_NOTIFY_FEISHU = "oc_0123456789abcdef"
+      const on = loadConfig()
+      expect(on.cronNotifyWebhook).toBe("https://hooks.example.com/cron")
+      expect(on.cronNotifyFeishu).toBe("oc_0123456789abcdef")
+    } finally {
+      for (const [k, v] of [["GEBAI_CRON_NOTIFY_WEBHOOK", prevW], ["GEBAI_CRON_NOTIFY_FEISHU", prevF]] as const) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("GEBAI_CRON_ENABLED 默认开启，显式 false 关闭", () => {
     const prev = process.env.GEBAI_CRON_ENABLED
     try {
