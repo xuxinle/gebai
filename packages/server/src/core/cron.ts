@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { join, dirname, relative, sep } from "node:path"
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import type { AgentEvent } from "@gebai/sdk"
 import type { AgentEngine } from "./engine"
 import type { SessionStore } from "./store"
@@ -84,7 +84,7 @@ export interface CronTask {
   notifyOn?: "always" | "error"
   /** 连续失败自动停用阈值（缺省 0=不停用）。 */
   maxConsecutiveErrors?: number
-  /** 创建来源会话（仅记录：脚本结果消息写回 + 兼容旧版会话绑定任务）。 */
+  /** 创建来源会话（脚本结果消息写回目标；target=session 未显式指定 sessionId 时的缺省绑定会话）。 */
   originSessionId?: string
   /** target=sticky 的专用会话 id（跨次复用）。 */
   stickySessionId?: string
@@ -417,48 +417,26 @@ export class CronManager {
     return join(this.deps.home, "users", entry.user, "cron-workspace", entry.id)
   }
 
-  /** 扫描加载用户级任务 + 迁移旧版会话级 cron.json，并启动 tick 循环。 */
+  /** 扫描加载用户级任务，并启动 tick 循环（旧版会话级 cron.json 不再支持，遇之忽略）。 */
   async start(): Promise<void> {
     const now = this.now()
     const base = join(this.deps.home, "users")
-    const touchedUsers = new Set<string>()
     await walkDir(base, 5, async (p) => {
       if (!p.endsWith("cron.json")) return
       const rel = relative(base, p).split(sep)
+      if (rel.length !== 2 || rel[1] !== "cron.json") return
       try {
-        if (rel.length === 2 && rel[1] === "cron.json") {
-          // 用户级存储：users/{user}/cron.json（条目自身携带 user 归属）
-          const tasks = JSON.parse(await readFile(p, "utf8"))
-          if (!Array.isArray(tasks)) return
-          for (const t of tasks) {
-            const entry = this.normalizeLoaded(t, now)
-            if (entry) this.entries.set(entry.id, entry)
-          }
-        } else if (rel.length === 6 && rel[1] === "sessions" && rel[5] === "cron.json") {
-          // 旧版会话级存储：users/{user}/sessions/{s0}/{s1}/{sessionId}/cron.json —— 迁移进用户级后改名
-          const user = rel[0]
-          const sessionId = rel[4]
-          const tasks = JSON.parse(await readFile(p, "utf8"))
-          if (!Array.isArray(tasks)) return
-          let migrated = 0
-          for (const t of tasks) {
-            const entry = this.normalizeLoaded(t, now)
-            if (!entry || this.entries.has(entry.id)) continue
-            // 旧版任务与会话强绑定：prompt 保持原会话执行（target=session），脚本改用户级工作目录
-            entry.originSessionId = entry.sessionId ?? sessionId
-            entry.sessionId = undefined
-            entry.target = "session"
-            this.entries.set(entry.id, entry)
-            migrated++
-          }
-          if (migrated > 0) touchedUsers.add(user)
-          await rename(p, `${p}.migrated`).catch(() => {})
+        // 用户级存储：users/{user}/cron.json（条目自身携带 user 归属）
+        const tasks = JSON.parse(await readFile(p, "utf8"))
+        if (!Array.isArray(tasks)) return
+        for (const t of tasks) {
+          const entry = this.normalizeLoaded(t, now)
+          if (entry) this.entries.set(entry.id, entry)
         }
       } catch {
         /* 跳过损坏文件 */
       }
     })
-    for (const user of touchedUsers) await this.saveUserEntries(user)
     if (this.timer) return
     this.timer = setInterval(() => void this.tick(), this.deps.tickIntervalMs ?? CRON_TICK_INTERVAL_MS)
     this.timer.unref?.()

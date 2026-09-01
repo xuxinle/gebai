@@ -721,11 +721,11 @@ describe("CronManager", () => {
     }
   })
 
-  test("legacy session cron.json migrated to user store and renamed", async () => {
+  test("legacy session-level cron.json ignored: no migration, no load, file untouched", async () => {
     const h = setup()
     try {
       const { id, user } = await createSession(h)
-      // 旧版布局：sessions/{s0}/{s1}/{id}/cron.json
+      // 旧版布局：sessions/{s0}/{s1}/{id}/cron.json —— 会话内保存定时任务的能力已移除，启动遇之忽略
       const legacy = join(h.home, "users", user, "sessions", id.slice(0, 2), id.slice(2, 4), id, "cron.json")
       mkdirSync(join(legacy, ".."), { recursive: true })
       const t = {
@@ -743,17 +743,13 @@ describe("CronManager", () => {
       }
       writeFileSync(legacy, JSON.stringify([t]))
       const store = new SessionStore({ home: h.home })
-      const cron2 = new CronManager({ home: h.home, store, env: new EnvManager(store), sandbox: h.sandbox, events: new EventBus(), engine: { isRunning: () => false, run: async () => {} } as unknown as AgentEngine, now: () => h.cron["now"](), tickIntervalMs: 3600_000 })
+      const cron2 = new CronManager({ home: h.home, store, env: new EnvManager(store), sandbox: h.sandbox, events: new EventBus(), now: () => h.cron["now"](), tickIntervalMs: 3600_000 })
       await cron2.start()
-      const listed = await cron2.list(user)
-      expect(listed).toHaveLength(1)
-      expect(listed[0].target).toBe("session")
-      expect(listed[0].originSessionId).toBe(id)
-      expect(existsSync(`${legacy}.migrated`)).toBe(true)
-      expect(existsSync(legacy)).toBe(false)
-      // 用户级存储已包含迁移任务
-      const raw = JSON.parse(readFileSync(join(h.home, "users", user, "cron.json"), "utf8")) as CronTask[]
-      expect(raw).toHaveLength(1)
+      // 旧布局任务不加载、不迁移改名、不落用户级存储
+      expect(await cron2.list(user)).toHaveLength(0)
+      expect(existsSync(legacy)).toBe(true)
+      expect(existsSync(`${legacy}.migrated`)).toBe(false)
+      expect(existsSync(join(h.home, "users", user, "cron.json"))).toBe(false)
       cron2.stop()
     } finally {
       cleanup(h)
