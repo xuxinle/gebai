@@ -12,6 +12,7 @@ import type { SubAgentManager } from "./subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
 import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
+import { makeVisionTool, getVisionProvider } from "./vision"
 import { jsTool, makeDynamicTool } from "./js-tool"
 import { ShTaskRunner } from "./sh-tasks"
 import { SessionRunRegistry, type SessionRunHandle } from "./session-runs"
@@ -2677,6 +2678,9 @@ export class AgentEngine {
         if (reg.resolve(tool.name)) continue
         reg.register(tool)
       }
+      // vision 同为全局工具但不在 createGlobalTools 内（vision→tools 的 truncate 依赖会成环，注册在 index.ts）：
+      // 新会话继承全局工具时一并注册，与主注册表同源同款（裁剪排除/已注册跳过同规则）
+      if (!isGlobalToolExcluded("vision") && !reg.resolve("vision")) reg.register(makeVisionTool({ vision: getVisionProvider }))
     }
 
     // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；

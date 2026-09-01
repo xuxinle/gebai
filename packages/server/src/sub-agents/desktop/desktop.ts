@@ -11,7 +11,6 @@ import {
   clipboardReadTool,
   screenInfoTool,
 } from "./desktop_tools"
-import { agentRunTool } from "../../core/tools"
 
 export const name = "desktop"
 export const description =
@@ -35,7 +34,8 @@ export const tools = {
   mouse_click: mouseClickTool,
   clipboard_read: clipboardReadTool,
   screen_info: screenInfoTool,
-  agent_run: agentRunTool,
+  // 编排（agent_run 委托 code 验证等）用全局工具 agent_run（主会话恒有，新会话默认继承）——
+  // 子Agent 只声明独有工具，不复刻全局编排工具
 }
 export const requiresApproval = {
   window_focus: true,

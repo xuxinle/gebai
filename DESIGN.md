@@ -453,7 +453,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 #### 视觉工具 `vision`
 
-全局工具（主 Agent），把会话内图片文件交给多模态（视觉）模型分析（适合主模型无多模态能力或需要更强视觉模型时）；子Agent 定义（如 `self_optimize`）可经 `makeVisionTool` + 组装层 provider 注册点（`setVisionProviderGetter`）复用同一解析逻辑：
+全局工具（主 Agent），把会话内图片文件交给多模态（视觉）模型分析（适合主模型无多模态能力或需要更强视觉模型时）。注册形态：`index.ts` 组装层注册（不在 `createGlobalTools()` 内——`vision.ts` 依赖 `tools.ts` 的 `truncate`，放进工具表会成环）；provider 经组装层 `setVisionProviderGetter` 注入（`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落）。**可用面**：主会话恒有；`agent_run` 新会话随全局工具继承（`runNewSession` 的 `inherit_global_tools` 块与主注册表同源注册，裁剪排除同规则）；子Agent（如 self_optimize 的页面截图分析）直接用全局名 `vision`，不在 def 中复刻（旧 `self_optimize_vision` 独立副本已删——同一能力两个 schema 双份占上下文）：
 
 - **参数**：`target`（目标：要查看/识别/描述的内容，必填）+ `image`（图片文件路径，相对会话工作目录——`tmp/` 前缀可省略——或绝对路径，受路径沙箱约束，支持 png/jpg/jpeg/gif/webp）
 - **模型选择**：配置 `GEBAI_VISION_MODEL` 后使用独立视觉 Provider（`GEBAI_VISION_*`，接口地址/密钥/类型缺省继承主模型）；未配置时回落到主模型（须显式声明多模态能力，`GEBAI_LLM_MULTIMODAL=true`，默认 false），两者皆不可用则返回配置提示
@@ -659,7 +659,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - 新会话拥有独立的对话上下文（独立消息历史与系统提示词），不污染总Agent 上下文
 - 执行时传入的参数（`input`）作为新会话的初始消息；返回的结果作为一条消息注入总Agent
 - 新会话内部工具调用不暴露给总Agent 上下文，仅返回最终结果（及可选的完整过程摘要）
-- **全局工具默认继承（`inherit_global_tools`，默认 true）**：`runNewSession` 把全局工具表（`createGlobalTools()`，构建期排除清单同规则过滤）注册进新会话 per-run 注册表——与主会话同构的完整工具面（read/write/grep/sh 等直接用全局名、文件工具带 `project` 参数），子Agent 只需提供独有工具（`{agent}_` 前缀），不再重复定义文件工具；系统提示词首段说明继承形态。`inherit_global_tools=false` 关闭继承：仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）——依赖全局文件工具的子Agent（code）将无法读写文件，仅适合自足型/纯编排型子Agent。既有门禁对继承工具同样生效（安全模式风险拦截、通道禁用、极简白名单）
+- **全局工具默认继承（`inherit_global_tools`，默认 true）**：`runNewSession` 把全局工具表（`createGlobalTools()`，构建期排除清单同规则过滤）注册进新会话 per-run 注册表——与主会话同构的完整工具面（read/write/grep/sh 等直接用全局名、文件工具带 `project` 参数），子Agent 只需提供独有工具（`{agent}_` 前缀），不再重复定义文件工具；系统提示词首段说明继承形态。`vision` 全局工具同块一并注册（不在 `createGlobalTools()` 内——与 `tools.ts` 成环，主注册表由 index.ts 注册，新会话在此同源同款补注册）。`inherit_global_tools=false` 关闭继承：仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）——依赖全局文件工具的子Agent（code）将无法读写文件，仅适合自足型/纯编排型子Agent。既有门禁对继承工具同样生效（安全模式风险拦截、通道禁用、极简白名单）
 - **全局提示词默认注入（`inherit_global_prompt`，默认 true——与全局工具继承默认一致，新会话与主会话同构）**：总Agent 全局系统提示词（`buildSystemPrompt`——身份/行为约定/编排指引/任务路由）**单源复用**作为新会话系统提示词前缀注入（附注说明路径基准与工具可用性以新会话实际为准），位于各子Agent 提示词段之前——子Agent 遵循主会话行为约定（计划审批习惯、编排偏好等）。开场白**不复述编排指引**（flow/js 优先段与注入提示词的编排段同款，重复注入纯耗上下文；flow/js 语法细节本就在工具描述中）；`inherit_global_prompt=false` 关闭注入：仅子Agent 提示词 + 开场白保留编排指引兜底版（上下文最省，适合自足型子任务）。两个继承开关默认一致，模型无需记忆非对称默认
 - **执行过程完整可见（含推理/工具）**：`agent_run` 执行过程中，新会话的推理、每轮模型回复文本、工具调用与结果**全部实时推送到前端**（与主循环同构渲染——推理折叠块、工具卡片、流式文本），推送事件（`delta`/`reasoning`/`tool.call`/`tool.result`/`approval`）携带 `session: true` + `sessionRunId` 标记；另推送 `event.session.start`（run 开始，含 agents/input；**每轮重推、同 runId 幂等**，前端容器重建兜底）与 `event.session.done`（run 结束，含最终输出）。渠道层可据此区分「新会话执行过程」事件（如飞书渠道对新会话的 `done` 不触发最终卡片——任务结束以 `event.task.done` 为准）
 - **前端折叠容器**：新会话执行过程渲染进 `details.session-run` 折叠容器——**执行中展开并滚动到可见**（完整过程实时展示，容器内限高 45vh 独立滚动 + 粘底自动跟随（sticky-follow 意图驱动核心，同主聊天区），用户上翻停止跟随），**执行结束后自动折叠，只显示输入与最终返回**（点 summary 可展开查看完整过程）；历史会话回放渲染同样的折叠容器（默认折叠）；嵌套执行（新会话内再 agent_run）在回放时递归渲染进外层容器 body。容器是 `#messages` 的直接 flex 子项且自带 `overflow: hidden`（圆角裁剪），曾因此在会话超一屏时被 flex 压缩到 1px（正文整段裁剪不可见、scrollHeight 塌缩——「生成中滚动卡死」，见低性能模式「消息渲染不降级」的 flex-shrink 修复）；容器正文 `.session-run .session-body` 显式 `display: flex; flex-direction: column`（内部消息 `align-self` 对齐依赖，此前靠会话列表同名类的全局规则意外供给，该规则已收窄作用域）
@@ -819,7 +819,7 @@ export const requiresApproval = { window_focus: true, window_move: true, type_te
 export const preload = false
 ```
 
-- 实现于 `sub-agents/desktop/` 目录（`desktop.ts` 定义 + `desktop_tools.ts` 工具集 + `desktop_tools.test.ts` 测试），工具不注册为全局工具，仅经子Agent 命名空间暴露（另含 `agent_run` 编排工具：验证多通道委托 code 子Agent 读取应用数据文件断言结果）
+- 实现于 `sub-agents/desktop/` 目录（`desktop.ts` 定义 + `desktop_tools.ts` 工具集 + `desktop_tools.test.ts` 测试），工具不注册为全局工具，仅经子Agent 命名空间暴露（只声明桌面操控独有工具；验证多通道经全局 `agent_run` 委托 code 子Agent 读取应用数据文件断言结果——编排用全局名，def 不复刻全局工具）
 - 跨平台：Windows 走内置 PowerShell（截图/窗口/输入，无外部依赖）；macOS 走 `screencapture` + `osascript`（鼠标需额外 `cliclick`）；Linux 依赖 `xdotool`/`wmctrl`/`scrot`（缺失时明确报错）
 - 截图返回 `image` 内容块实时展示，并**自动做黑帧/纯色检测**（平均亮度极低提示显示器休眠/锁屏，暗色单色提示非真实画面）与**尺寸元数据**（`STAT` 行 / sips / ImageMagick）；`screen_info` 列出全部显示器（分辨率/位置/主屏）供 region 与坐标参考；文本输入默认剪贴板粘贴法（中文/符号可靠，**输入前备份、输入后恢复**，Windows try/finally、macOS 容错恢复），`mode="keys"` 纯按键模式（绕剪贴板，仅 ASCII）；`type_text`/`clipboard_read` 输入或读取前自动做**敏感值扫描**（`sk-`/超长串/KEY=值/Bearer 令牌），命中即中止/告警防密钥泄漏；**服务端部署（沙箱启用）下所有工具拒绝执行**
 
@@ -946,7 +946,7 @@ export const preload = false
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
 |---------|------|------|--------|------|
 | `code` | 独有工具 search_symbols/analyze/git/preview_server/env_detect/system_info（文件读写查询与交互编排复用**全局工具**——read/write/edit/patch/sh/py/ls/grep/glob/file/diff/fetch_url/ask/todo/agent_run，带 project 参数路由项目，不重复注册） | 无（全局工具维持自身姿态） | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析与符号双模式搜索（定义 + 引用/调用点）、git 只读核对（status/diff/log/show/branch/ls-files/grep）、浏览器端验证委托、项目内置、验证服务（自全局下沉 preview_server）与环境/工具链探测（env_detect/system_info）；文件读写/补丁应用/待办规划/方案确认经全局工具完成） |
-| `self_optimize` | 独有工具 read_feedback/run_tests/rollback/journal/page_capture/vision；**通用工具与工作流直接复用**（装载/`agent_run` 预加载均连带 code——文件读写用全局工具、分析/验证类操作用 `code_*` 独有工具（含 code_preview_server），code 工作流提示词随连带装载注入，不重复注册）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经全局工具与 code；特有：反馈读取、测试准入（test/typecheck/lint 三件套）+回滚（含新建文件清理）、优化日志跨会话沉淀、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析、写范围守卫；**装载即连带装载 code**） |
+| `self_optimize` | 独有工具 read_feedback/run_tests/rollback/journal/page_capture；**通用工具与工作流直接复用**（装载/`agent_run` 预加载均连带 code——文件读写用全局工具、分析/验证类操作用 `code_*` 独有工具（含 code_preview_server），code 工作流提示词随连带装载注入，不重复注册；视觉分析用全局 `vision`——主会话恒有、新会话随全局工具继承，def 不复刻）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经全局工具与 code；特有：反馈读取、测试准入（test/typecheck/lint 三件套）+回滚（含新建文件清理）、优化日志跨会话沉淀、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析（全局 vision）、写范围守卫；**装载即连带装载 code**） |
 | `widgets` | save/list/get/delete | delete（公用/私有删除均需审批） | ✗ | HTML 小工具库增删改查（自全局 save_tool/delete_tool 下沉并补齐：保存/清单/读取源码/删除；四工具限实时前端 interaction=realtime；与模型工具语义区分——小工具是「小工具」面板加载的页面组件） |
 | `explore` | 独有工具 search_symbols/analyze/git（全部只读，支持 project 参数路由；文件读取检索复用全局只读工具） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行（默认继承全局工具），返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
 | `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_read/screen_info | window_*+type/key/mouse | ✗ | 桌面控制（截图/窗口/输入/剪贴板/屏幕信息，仅本地模式） |
@@ -1000,12 +1000,12 @@ Agent 通过修改**自身代码**来持续改进自己，不使用记忆（memo
 
 #### `self_optimize` 专用子Agent
 
-自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 声明 `dependencies: ["code"]`（依赖自动装载，见「子Agent 依赖与自动装载」），只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、优化日志、页面捕获、视觉分析），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**：
+自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 声明 `dependencies: ["code"]`（依赖自动装载，见「子Agent 依赖与自动装载」），只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、优化日志、页面捕获），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**；视觉分析用全局 `vision`（主会话恒有、新会话随全局工具继承，def 不复刻）：
 
 ```ts
 export const name = "self_optimize"
 export const description = "优化歌白自身（……测试是准入凭证，run_tests 工具支持 test/typecheck/lint 三件套……测试失败可 rollback 回滚（含新建文件清理），优化历史经 self_optimize_journal 跨会话沉淀……）"
-export const tools: ToolSet = { read_feedback, run_tests, rollback, journal, page_capture, vision }
+export const tools: ToolSet = { read_feedback, run_tests, rollback, journal, page_capture }
 export const requiresApproval = { run_tests: true, rollback: true }
 export const preload = false          // 按需装载，非默认注入
 export const dependencies = ["code"]  // 依赖自动装载：装载/预加载时连带装载 code（工具与工作流提示词复用）
@@ -1020,7 +1020,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **项目名称与项目根（内置）**：静态提示词**内置项目名称「歌白（GEBAI Agent）」**并指明「项目根以系统提示词动态注记『项目根:』为准」——具体目录由引擎按绑定动态注入，**装载与新会话两种形态均注入**（装载段落 `loadAgentsForSession` 与 `agent_run` 的 `buildAgentSection` workNote 同款语义；装载形态附相对路径限定语）；项目根解析三态：`SELF_OPTIMIZE_PROJECT` 环境变量 > dev 模式 `projectRoot` 兜底（按模块路径自动推导源码仓库根，与写范围守卫/`run_tests`/`rollback` 同源）> 二进制模式无兜底（按用户给定路径处理）——**dev 模式无需任何配置提示词即携带仓库根目录**，绑定同时使 agent_run 新会话以仓库根为工作目录、自动注入仓库 AGENTS.md（沙箱模式同规则拒绝，回退工作目录）
 - **反馈读取（`self_optimize_read_feedback`）**：自全局工具集下沉（全局不再注册 `read_feedback`，自我优化为唯一消费方）——按用户反馈按时间倒序读取，声明进 def 同时覆盖装载模式（`self_optimize_read_feedback` 命名空间）与新会话执行环境（全局工具不在注册表，def 声明保证可用）；反馈是自我优化的核心输入通道
 - **页面捕获（`page_capture`）**：仿 show 图表分支的前端配合链路——引擎发布 `event.capture.request`（含 captureId + fullPage + delay）→ 前端捕获**当前浏览器页面**（渲染后 DOM html 截断 300KB + modern-screenshot 截图，png/jpeg，体积压缩 ≤2MB；fullPage=true 截整页，高度上限 12000px，缺省视口；**delay 为捕获前等待毫秒数**（UI 操作/动画/异步渲染完成后截图，上限 10 秒，前端 sleep 后统一捕获 html 与截图））经 WS `capture.result` 回传 → 服务端落盘会话 `tmp/capture/`（`page-<ts>.html` + `page-<ts>.png|jpg`）并返回文件/图片内容块；模型用 `read`（code_*）读取实际渲染 html、用 `vision` 分析截图——**UI 修改后模型直接看到真实渲染效果**（dev 模式修改后自动热更新，捕获前提示用户刷新页面；30 秒超时返回失败提示）
-- **视觉分析（`vision`）**：与主 Agent 同一 provider 解析逻辑——组装层（`index.ts`）注册 `setVisionProviderGetter`，`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落；子Agent 定义经 `getVisionProvider` 构造工具
+- **视觉分析（全局 `vision`，def 不复刻）**：与主 Agent 同一 provider 解析逻辑——组装层（`index.ts`）注册 `setVisionProviderGetter`，`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落；主会话经全局 `vision` 工具使用，`agent_run` 新会话随全局工具继承获得（旧 `self_optimize_vision` def 副本已删——同一能力两个 schema 双份占上下文，见「视觉工具 vision」）
 - **写范围守卫（`SubAgentDef.writeGuard`，代码级强制而非仅提示词）**：def 声明 `writeGuard(env, absPaths)`，引擎注入 `ToolContext.writeGuard`——文件写类工具（`write`/`edit`/`patch`/`file`（rename/move/delete 动作，move/rename 校验源与目标两路径））写入前以**解析后的绝对路径**调用，返回非空字符串即拒绝（作为工具结果返回引导模型调整，不抛错不落盘）。**装载模式按会话装载名单动态收集**（`sessionWriteGuard`：调用时点读会话 `loadedSubAgents`，任务中途 `agent_load` 装载后立即生效）、**新会话模式按预加载名单静态组合**（`defsWriteGuard`）——两个路径一致生效（旧实现仅新会话路径有守卫，装载路径因工具去重丢失守卫副本，现已修复）。政策内容：**默认只读模式仅允许写入 子Agent 目录（`packages/server/src/sub-agents/`）与仓库级文档/配置（`DESIGN.md`/`AGENTS.md`/`.env.example`/`README.md`/`kilo.json`）**，核心引擎源码（`core/`/`app`/`ws` 等）拒绝写入（返回拒绝说明引导改用子Agent 扩展或开启开关）；`GEBAI_SELF_MODIFY=true`（启动级环境变量）放开到仓库内任意路径；仓库根解析：`SELF_OPTIMIZE_PROJECT` 优先，dev 模式按模块路径推导，二进制模式必须显式配置；**守卫只保护歌白仓库**——仓库根之外的常规写入（会话 `tmp/` 产物等）不受限（守卫目的是保护服务端源码，不约束无关产物）。**边界（脚本通道不拦）**：守卫拦截的是文件写类工具，`sh`/`py` 脚本内的重定向/写文件不经守卫——防线为「sh 写类命令默认需审批（免审白名单仅只读/测试类，见「工具审批」）+ 提示词明令禁止经脚本写仓库文件」；`GEBAI_APPROVAL_SKIP=true` 跳过审批时仅剩提示词约束（操作者自担）
 - **测试准入 + 回滚工具**：`run_tests`（在仓库根执行验证，需审批）——**`checks` 参数选择检查项**（`["test"]` 缺省：`bun test` 指定文件或 `bun run test` 全量；`["test","typecheck","lint"]` 三件套与 AGENTS.md 提交准入一致，**一次审批跑全**，按序执行首项失败即停，超时 10 分钟）；输出**始终合并 stdout+stderr**（bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然），只取 stdout 会丢失「跑了哪些用例、几个 pass」——准入判定看 exit code，明细供人核验）；`rollback`（恢复被修改的 tracked 文件 + **删除新建的 untracked 文件**，需审批）——新文件是自我修改的主要产物（如新建子Agent），`git checkout` 只恢复 tracked、残留会被热加载注册为破损 Agent，故先 `git clean -nd` dry-run 列出将删除的新建文件（输出如实展示）再 `git clean -fd` 清理；checkout 对新建文件本就无可恢复（pathspec 不匹配属预期，不报错）；两者 files/paths 路径参数**校验前置**（含引号/shell 元字符/百分号的条目直接拒绝——审批界面展示的是参数而非拼好的命令，不设防的拼接会把注入带过审批门），合法条目双引号包裹拼入命令（空格路径保持单参数）；文件写入经全局 write/edit/patch（默认免审批，受防盲写守卫约束），sh/py 走工具自身动态审批（默认需审批、`approval` 参数按次免审，见「工具审批」）
 - **优化日志（`self_optimize_journal`，跨会话优化记忆）**：`append` 记录一次优化（title 必填 + changes 改动清单 + verification 验证方式与结果 + outcome applied/reverted/failed + lessons 经验教训）、`list` 读最近记录（limit 默认 10，新→旧）——**变更管理的补丁记录落地**：git 历史只记代码变更，journal 补「为什么改 + 验证结果 + 教训」，后续优化任务开工先查历史不重复踩坑（提示词固定引导：开工 list、收尾 append）；存储 `users/{user}/self-optimize-journal.json`（与 ws-journal 同位的 gitignored 运行时数据），环形保留最近 100 条，损坏/首次从空开始

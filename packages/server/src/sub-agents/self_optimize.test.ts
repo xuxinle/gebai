@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:
 import { tmpdir } from "node:os"
 import { join, dirname, isAbsolute, resolve } from "node:path"
 import type { ToolContext } from "../core/types"
-import { setVisionProviderGetter } from "../core/vision"
+import { makeVisionTool, getVisionProvider, setVisionProviderGetter } from "../core/vision"
 import { writeTool } from "../core/tools"
 import { def as selfOptimizeDef } from "./self_optimize"
 import { def as codeDef } from "./code"
@@ -58,10 +58,12 @@ function cleanup(home: string) {
 describe("self_optimize sub-agent", () => {
   test("工具集只含 code 没有的独有工具（复用 code 通用能力，不重复注册）", () => {
     const names = Object.keys(selfOptimizeDef.tools!)
-    // 独有能力：反馈读取、测试准入、回滚、页面捕获、视觉分析（preview_server 已并入 code，随连带装载获得）
-    for (const t of ["read_feedback", "run_tests", "rollback", "page_capture", "vision"]) {
+    // 独有能力：反馈读取、测试准入、回滚、页面捕获（preview_server 已并入 code 随连带装载获得；
+    // 视觉分析为全局工具 vision——index.ts 注册、新会话随全局工具继承，def 不复刻）
+    for (const t of ["read_feedback", "run_tests", "rollback", "page_capture"]) {
       expect(names).toContain(t)
     }
+    expect(names).not.toContain("vision")
     // 不复刻 code 的通用工具（装载/预加载时连带装载 code，文件/分析类直接用 code_* 命名空间）
     for (const t of Object.keys(codeDef.tools!)) {
       expect(names).not.toContain(t)
@@ -87,8 +89,8 @@ describe("self_optimize sub-agent", () => {
     // 模块级 vision provider 可能被其他测试（如 integration 启动真实服务）注册污染：
     // 该用例语义即「未注册时降级」，显式清空后断言（测试环境本就期望 null）
     setVisionProviderGetter(null)
-    // 测试环境未注册视觉 provider → 返回配置提示而非抛异常
-    const r = await selfOptimizeDef.tools!.vision.execute({ target: "描述页面", image: "tmp/capture/page-1.png" }, c)
+    // vision 已是全局工具（def 不复刻）：按 index.ts 的注册方式构造同款实例验证降级提示
+    const r = await makeVisionTool({ vision: getVisionProvider }).execute({ target: "描述页面", image: "tmp/capture/page-1.png" }, c)
     expect(r.output).toContain("视觉能力不可用")
     expect(r.output).toContain("GEBAI_VISION_MODEL")
     cleanup(home)
