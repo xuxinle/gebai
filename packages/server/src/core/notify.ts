@@ -5,7 +5,7 @@ import { hmacHex } from "./paths"
 
 /** 通知正文单字段（错误/输出摘要）保留长度。 */
 export const NOTIFY_TEXT_MAX = 2000
-/** 通知卡片整体保留长度（2.0 markdown 组件上限，与对话桥接 truncateForFeishu 同额）。 */
+/** 通知卡片整体保留长度（1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 truncateForFeishu 同额）。 */
 export const NOTIFY_CARD_MAX = 12000
 /** 通知投递超时。 */
 export const NOTIFY_TIMEOUT_MS = 10_000
@@ -52,8 +52,8 @@ export interface CronResultNotification {
 }
 
 export interface NotifyDeps {
-  /** 注入 HTTP 客户端（默认全局 fetch；测试用）。 */
-  fetchImpl?: (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number }>
+  /** 注入 HTTP 客户端（默认全局 fetch；测试用）。body 为响应体文本（默认实现读取，供飞书业务 code 校验）。 */
+  fetchImpl?: (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; body?: string }>
   /** 飞书开放平台消息发送（feishu_chat 通道用；未配置时该通道报错）。at 含 "all" 时 msgType=text，否则卡片。 */
   feishuSend?: (chatId: string, msgType: "interactive" | "text", content: Record<string, unknown>) => Promise<void>
   /** 时钟（加签时间戳用，可注入）。 */
@@ -156,10 +156,8 @@ function cardTemplate(n: CronResultNotification): string {
   return "red"
 }
 
-/** 飞书通知卡片（msg_type=interactive，JSON 2.0 结构体——与对话桥接同款新版本接口）：头部按状态着色，
- *  正文 markdown 组件（2.0 富文本支持完整 Markdown：标题/表格/代码块等，@ 人用 `<at id=…>` 标签）+ note 脚注。
- *  自定义机器人 webhook（body.card）与应用消息（sendMessage content）共用同一卡片结构。 */
-export function buildFeishuCard(n: CronResultNotification, at?: FeishuAtTarget[]): Record<string, unknown> {
+/** 通知卡片正文 markdown（1.0 lark_md 与 2.0 markdown 组件共用正文：@ 人标签首行 + 状态/周期/时间/耗时/错误/输出/会话/停用）。 */
+function cardMarkdown(n: CronResultNotification, at?: FeishuAtTarget[]): string {
   const status = n.ok ? "✅ 成功" : n.status === "skipped" ? "⏭️ 跳过" : n.status === "timeout" ? "⏱️ 超时" : "❌ 失败"
   const lines: string[] = []
   const tags = atTagsMd(at)
@@ -170,6 +168,13 @@ export function buildFeishuCard(n: CronResultNotification, at?: FeishuAtTarget[]
   if (n.output) lines.push(`**输出：**\n${sanitizeMd(n.output.slice(0, NOTIFY_TEXT_MAX))}`)
   if (n.sessionId) lines.push(`**执行会话：**${n.sessionId}`)
   if (n.disabled) lines.push(`⚠️ **任务已自动停用**${n.manual ? "" : "（如需继续请重新启用）"}`)
+  return lines.join("\n").slice(0, NOTIFY_CARD_MAX)
+}
+
+/** 飞书通知卡片 2.0 结构体（msg_type=interactive——**应用消息接口专用**，与对话桥接同款新版本接口）：头部按状态着色，
+ *  正文 markdown 组件（2.0 富文本支持完整 Markdown：标题/表格/代码块等，@ 人用 `<at id=…>` 标签）+ note 脚注。
+ *  自定义机器人 webhook **不支持** 2.0 卡片（schema V2 + note 组件实测被拒 code=11246），webhook 投递用 buildFeishuCardV1。 */
+export function buildFeishuCard(n: CronResultNotification, at?: FeishuAtTarget[]): Record<string, unknown> {
   return {
     schema: "2.0",
     header: {
@@ -178,10 +183,28 @@ export function buildFeishuCard(n: CronResultNotification, at?: FeishuAtTarget[]
     },
     body: {
       elements: [
-        { tag: "markdown", content: lines.join("\n").slice(0, NOTIFY_CARD_MAX) },
+        { tag: "markdown", content: cardMarkdown(n, at) },
         { tag: "note", elements: [{ tag: "plain_text", content: "GEBAI 定时任务 · cron.result" }] },
       ],
     },
+  }
+}
+
+/** 飞书通知卡片 1.0 结构体（msg_type=interactive——**自定义机器人 webhook 专用**）：webhook 不支持 2.0 卡片
+ *  （schema V2 实测被拒 code=11246「cards of schema V2 no longer support this capability; unsupported tag note」，
+ *  2.0 卡片仅应用消息接口 im/v1/messages 支持），故 webhook 投递发 1.0 卡片保留卡片形态：
+ *  config.wide_screen_mode + 着色 header + div/lark_md 正文（@ 人语法同 2.0 的 `<at id=…>`）+ note 脚注。 */
+export function buildFeishuCardV1(n: CronResultNotification, at?: FeishuAtTarget[]): Record<string, unknown> {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: cardTemplate(n),
+      title: { tag: "plain_text", content: `⏰ 歌白·定时任务${n.task.name ? `「${sanitizeMd(n.task.name)}」` : `（${n.task.id.slice(0, 8)}）`}` },
+    },
+    elements: [
+      { tag: "div", text: { tag: "lark_md", content: cardMarkdown(n, at) } },
+      { tag: "note", elements: [{ tag: "plain_text", content: "GEBAI 定时任务 · cron.result" }] },
+    ],
   }
 }
 
@@ -225,14 +248,16 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
     deps.fetchImpl ??
     (async (u: string, init: RequestInit) => {
       const res = await fetchWithRedirectGuard(u, init, checkWebhookUrl)
-      return { ok: res.ok, status: res.status }
+      return { ok: res.ok, status: res.status, body: await res.text() }
     })
   let body: Record<string, unknown>
   let headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8" }
   if (ch.type === "feishu") {
+    // webhook 通道发 1.0 卡片（自定义机器人 webhook 不支持 2.0 卡片，schema V2 实测被拒 code=11246；
+    // 2.0 卡片仅应用消息接口支持）；at 含 "all" 时维持 text 降级（@所有人 提及通知以 text 正文标签为可靠路径）
     const payload: Record<string, unknown> = atAll
       ? { msg_type: "text", content: { text: formatNotificationText(n, ch.at) } }
-      : { msg_type: "interactive", card: buildFeishuCard(n, ch.at) }
+      : { msg_type: "interactive", card: buildFeishuCardV1(n, ch.at) }
     if (ch.secret) {
       const ts = Math.floor(now() / 1000).toString()
       payload.timestamp = ts
@@ -252,4 +277,18 @@ export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultN
     signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
   })
   if (!res.ok) throw new Error(`通知投递失败: HTTP ${res.status}`)
+  // 飞书群机器人 webhook：业务失败时 HTTP 仍返回 200（如 2.0 卡片被拒 code=11246），须解析响应 JSON 的
+  // 业务 code——code !== 0 即失败（否则任务显示 success 但群内无通知的静默失败，由调用方记 lastNotifyError）；
+  // 响应体缺失/非 JSON（注入形态或无业务码可判）按 HTTP 成功处理；通用 webhook 通道不校验（无统一业务码约定）
+  if (ch.type === "feishu" && res.body) {
+    let biz: { code?: unknown; msg?: unknown } | null = null
+    try {
+      biz = JSON.parse(res.body) as { code?: unknown; msg?: unknown }
+    } catch {
+      biz = null
+    }
+    if (biz && typeof biz === "object" && biz.code !== 0) {
+      throw new Error(`通知投递失败: 飞书业务错误 code=${String(biz.code)}${biz.msg ? ` (${String(biz.msg)})` : ""}`)
+    }
+  }
 }
