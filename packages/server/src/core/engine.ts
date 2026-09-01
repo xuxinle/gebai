@@ -1545,19 +1545,16 @@ export class AgentEngine {
     return parts.filter(Boolean).join("\n")
   }
 
-  /** 项目绑定注入总Agent 系统提示词（{AGENT_NAME_UPPER}_PROJECT 环境变量，DESIGN「项目内置」）；预置项目说明与受限模式说明（{AGENT_NAME_UPPER}_PROJECTS / CODE_RESTRICT_PROJECTS）属 code 子Agent 行为约束，只注入子Agent 系统提示词（agent_run 执行新会话时），不注入总Agent 系统提示词。 */
+  /** 项目绑定注入总Agent 系统提示词（{AGENT_NAME_UPPER}_PROJECT 环境变量，DESIGN「项目内置」；
+   *  SubAgentDef.projectRoot 兜底（环境变量未配置时的默认项目根，如 self_optimize 脚本调试模式自动
+   *  推导歌白仓库根）同规则注入）；预置项目说明与受限模式说明（{AGENT_NAME_UPPER}_PROJECTS /
+   *  CODE_RESTRICT_PROJECTS）属 code 子Agent 行为约束，只注入子Agent 系统提示词（agent_run 执行新会话时），
+   *  不注入总Agent 系统提示词。 */
   private subAgentProjectNote(user: string, env: Record<string, string>): string {
     const lines: string[] = []
     for (const d of this.opts.subAgents.list()) {
-      const key = `${d.name.toUpperCase().replace(/-/g, "_")}_PROJECT`
-      const raw = env[key]
-      if (!raw) continue
-      let root: string
-      try {
-        root = this.resolveAgentProjectRoot(user, raw)
-      } catch {
-        continue // 沙箱拒绝越界/绝对路径绑定：静默跳过（与非法 JSON 忽略一致）
-      }
+      const root = this.resolveSubAgentProject(user, env, d.name)
+      if (!root) continue
       // 仅声明绑定与根路径（agent_run 新会话执行该子Agent 时以其为项目根；装载模式下路径基准仍是会话目录，
       // 访问项目请用预置项目 project 参数或绝对路径，不宣称工作目录已切换）
       lines.push(`${d.name} 子Agent 项目绑定：${root}（agent_run 新会话执行该子Agent 时以其为项目根；装载模式下路径基准为会话目录，访问项目用 project 参数或绝对路径）`)
@@ -2941,15 +2938,25 @@ export class AgentEngine {
     }
   }
 
-  /** 解析子Agent 项目根（{AGENT_NAME_UPPER}_PROJECT 环境变量）：沙箱模式限定用户数据目录内，本地模式放开。 */
+  /** 解析子Agent 项目根（{AGENT_NAME_UPPER}_PROJECT 环境变量，未配置时回落 SubAgentDef.projectRoot
+   *  默认项目根——如 self_optimize 脚本调试模式自动推导歌白仓库根）：沙箱模式限定用户数据目录内
+   *  （默认根同样拒绝——仓库根在用户目录外），本地模式放开。 */
   private resolveSubAgentProject(user: string, env: Record<string, string>, agentName: string): string | undefined {
     const key = `${agentName.toUpperCase().replace(/-/g, "_")}_PROJECT`
     const raw = env[key]
-    if (!raw) return undefined
+    if (raw) {
+      try {
+        return this.resolveAgentProjectRoot(user, raw)
+      } catch {
+        return undefined // 沙箱拒绝越界/绝对路径绑定：回退工作目录
+      }
+    }
+    const fallback = this.opts.subAgents.def(agentName)?.projectRoot?.(env)
+    if (!fallback) return undefined
     try {
-      return this.resolveAgentProjectRoot(user, raw)
+      return this.resolveAgentProjectRoot(user, fallback)
     } catch {
-      return undefined // 沙箱拒绝越界/绝对路径绑定：回退工作目录
+      return undefined // 沙箱拒绝默认根（仓库根在用户目录外）：回退工作目录
     }
   }
 

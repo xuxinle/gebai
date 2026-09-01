@@ -3,8 +3,10 @@ import { checkWebhookUrl } from "../webhooks"
 import { fetchWithRedirectGuard } from "./tools"
 import { hmacHex } from "./paths"
 
-/** 通知正文在通道消息中的保留长度（卡片 lark_md 内容限 4000 字符）。 */
+/** 通知正文单字段（错误/输出摘要）保留长度。 */
 export const NOTIFY_TEXT_MAX = 2000
+/** 通知卡片整体保留长度（2.0 markdown 组件上限，与对话桥接 truncateForFeishu 同额）。 */
+export const NOTIFY_CARD_MAX = 12000
 /** 通知投递超时。 */
 export const NOTIFY_TIMEOUT_MS = 10_000
 
@@ -125,16 +127,24 @@ export function feishuBotSign(timestamp: string, secret: string): string {
   return createHmac("sha256", `${timestamp}\n${secret}`).update("").digest("base64")
 }
 
-/** lark_md 内容净化：输出/错误中的尖括号全角化，防任务输出注入 `<at>`/`<a>` 等标签（@ 人/链接仅由配置产生）。 */
-function sanitizeLarkMd(text: string): string {
+/** markdown 内容净化：输出/错误中的尖括号全角化，防任务输出注入 `<at>`/`<a>`/`<img>` 等标签（@ 人/链接仅由配置产生）。 */
+function sanitizeMd(text: string): string {
   return text.replace(/</g, "＜")
 }
 
-/** @ 人 lark_md 标签（"all" 缺省展示「所有人」；open_id 无 name 时空内文由客户端解析真实姓名）。 */
+/** @ 人 text 正文标签（text 消息语法 `<at user_id=…>`；"all" 缺省展示「所有人」，open_id 无 name 时空内文由客户端解析真实姓名）。 */
 function atTags(at: FeishuAtTarget[] | undefined): string {
   if (!at?.length) return ""
   return at
     .map((a) => (a.id === "all" ? `<at user_id="all">${a.name ?? "所有人"}</at>` : `<at user_id="${a.id}">${a.name ?? ""}</at>`))
+    .join(" ")
+}
+
+/** @ 人 2.0 markdown 组件标签（语法 `<at id=…>`，与 1.0 lark_md 的 user_id 属性不同；被 @ 用户收到提及通知）。 */
+function atTagsMd(at: FeishuAtTarget[] | undefined): string {
+  if (!at?.length) return ""
+  return at
+    .map((a) => (a.id === "all" ? `<at id=all>${a.name ?? "所有人"}</at>` : `<at id=${a.id}>${a.name ?? ""}</at>`))
     .join(" ")
 }
 
@@ -146,54 +156,59 @@ function cardTemplate(n: CronResultNotification): string {
   return "red"
 }
 
-/** 飞书 markdown 卡片（msg_type=interactive）：头部按状态着色，正文 lark_md（**粗体** 标签行 + at 标签 + 输出摘要）。
+/** 飞书通知卡片（msg_type=interactive，JSON 2.0 结构体——与对话桥接同款新版本接口）：头部按状态着色，
+ *  正文 markdown 组件（2.0 富文本支持完整 Markdown：标题/表格/代码块等，@ 人用 `<at id=…>` 标签）+ note 脚注。
  *  自定义机器人 webhook（body.card）与应用消息（sendMessage content）共用同一卡片结构。 */
 export function buildFeishuCard(n: CronResultNotification, at?: FeishuAtTarget[]): Record<string, unknown> {
   const status = n.ok ? "✅ 成功" : n.status === "skipped" ? "⏭️ 跳过" : n.status === "timeout" ? "⏱️ 超时" : "❌ 失败"
   const lines: string[] = []
-  const tags = atTags(at)
+  const tags = atTagsMd(at)
   if (tags) lines.push(tags)
-  lines.push(`**状态：**${status}　**周期：**${sanitizeLarkMd(n.task.schedule)}`)
+  lines.push(`**状态：**${status}　**周期：**${sanitizeMd(n.task.schedule)}`)
   lines.push(`**时间：**${new Date(n.at).toLocaleString("zh-CN")}${n.durationMs !== undefined ? `　**耗时：**${Math.round(n.durationMs / 100) / 10}s` : ""}${n.manual ? "　**（手动触发）**" : ""}`)
-  if (n.error) lines.push(`**错误：**${sanitizeLarkMd(n.error.slice(0, NOTIFY_TEXT_MAX))}`)
-  if (n.output) lines.push(`**输出：**\n${sanitizeLarkMd(n.output.slice(0, NOTIFY_TEXT_MAX))}`)
+  if (n.error) lines.push(`**错误：**${sanitizeMd(n.error.slice(0, NOTIFY_TEXT_MAX))}`)
+  if (n.output) lines.push(`**输出：**\n${sanitizeMd(n.output.slice(0, NOTIFY_TEXT_MAX))}`)
   if (n.sessionId) lines.push(`**执行会话：**${n.sessionId}`)
   if (n.disabled) lines.push(`⚠️ **任务已自动停用**${n.manual ? "" : "（如需继续请重新启用）"}`)
   return {
-    config: { wide_screen_mode: true },
+    schema: "2.0",
     header: {
       template: cardTemplate(n),
-      title: { tag: "plain_text", content: `⏰ 歌白·定时任务${n.task.name ? `「${sanitizeLarkMd(n.task.name)}」` : `（${n.task.id.slice(0, 8)}）`}` },
+      title: { tag: "plain_text", content: `⏰ 歌白·定时任务${n.task.name ? `「${sanitizeMd(n.task.name)}」` : `（${n.task.id.slice(0, 8)}）`}` },
     },
-    elements: [
-      { tag: "div", text: { tag: "lark_md", content: lines.join("\n").slice(0, 4000) } },
-      { tag: "note", elements: [{ tag: "plain_text", content: "GEBAI 定时任务 · cron.result" }] },
-    ],
+    body: {
+      elements: [
+        { tag: "markdown", content: lines.join("\n").slice(0, NOTIFY_CARD_MAX) },
+        { tag: "note", elements: [{ tag: "plain_text", content: "GEBAI 定时任务 · cron.result" }] },
+      ],
+    },
   }
 }
 
-/** 飞书 text 消息正文（at 含 "all" 时的降级形态——卡片 lark_md 的 `<at user_id="all">` 被飞书
- *  静默忽略（无报错、无 @所有人 提醒），@所有人 仅 text 消息正文标签生效）。 */
+/** 飞书 text 消息正文（at 含 "all" 时的降级形态——text 正文 `<at user_id="all">` 是 @所有人 提及通知
+ *  长期验证的可靠路径；卡片内 @所有人 在 1.0 lark_md 被静默忽略（实测），2.0 markdown 组件虽支持
+ *  `<at id=all>` 但提及权限因应用配置而异，通知场景求稳不冒险）。 */
 export function formatNotificationText(n: CronResultNotification, at?: FeishuAtTarget[]): string {
   const status = n.ok ? "成功" : n.status === "skipped" ? "跳过" : n.status === "timeout" ? "超时" : "失败"
   const lines: string[] = []
   const tags = atTags(at)
   if (tags) lines.push(tags)
-  lines.push(`⏰ 歌白·定时任务${n.task.name ? `「${sanitizeLarkMd(n.task.name)}」` : `（${n.task.id.slice(0, 8)}）`}`)
-  lines.push(`状态: ${status}  周期: ${sanitizeLarkMd(n.task.schedule)}`)
+  lines.push(`⏰ 歌白·定时任务${n.task.name ? `「${sanitizeMd(n.task.name)}」` : `（${n.task.id.slice(0, 8)}）`}`)
+  lines.push(`状态: ${status}  周期: ${sanitizeMd(n.task.schedule)}`)
   lines.push(`时间: ${new Date(n.at).toLocaleString("zh-CN")}${n.durationMs !== undefined ? `  耗时: ${Math.round(n.durationMs / 100) / 10}s` : ""}${n.manual ? "（手动触发）" : ""}`)
-  if (n.error) lines.push(`错误: ${sanitizeLarkMd(n.error.slice(0, NOTIFY_TEXT_MAX))}`)
-  if (n.output) lines.push(`输出:\n${sanitizeLarkMd(n.output.slice(0, NOTIFY_TEXT_MAX))}`)
+  if (n.error) lines.push(`错误: ${sanitizeMd(n.error.slice(0, NOTIFY_TEXT_MAX))}`)
+  if (n.output) lines.push(`输出:\n${sanitizeMd(n.output.slice(0, NOTIFY_TEXT_MAX))}`)
   if (n.sessionId) lines.push(`执行会话: ${n.sessionId}`)
   if (n.disabled) lines.push(`⚠️ 任务已自动停用${n.manual ? "" : "（如需继续请重新启用）"}`)
-  return lines.join("\n").slice(0, 4000)
+  return lines.join("\n").slice(0, NOTIFY_CARD_MAX)
 }
 
 /** 投递单条通知（尽力而为：失败抛错由调用方记录，不影响任务执行结果）。 */
 export async function sendCronNotification(ch: CronNotifyChannel, n: CronResultNotification, deps: NotifyDeps = {}): Promise<void> {
   const now = deps.now ?? Date.now
-  // at 含 "all"（@所有人）时降级为 text 消息：卡片 lark_md 对 user_id="all" 静默忽略（实测），
-  // text 正文 <at user_id="all"> 生效；仅 @ 具体 open_id 时保持 markdown 卡片（卡片支持具体人 at）
+  // at 含 "all"（@所有人）时降级为 text 消息：@所有人 的提及通知以 text 正文标签为可靠路径（卡片内
+  // @所有人 1.0 时代被静默忽略，2.0 markdown 组件 `<at id=all>` 权限因应用而异）；仅 @ 具体 open_id 时
+  // 走 2.0 markdown 卡片（markdown 组件 `<at id=…>` 支持 @ 指定人并触发提及通知）
   const atAll = ch.at?.some((a) => a.id === "all") === true
   // 飞书应用消息形态：feishu_chat，或 feishu 通道 target 为群 chat_id（指定群以应用身份推送）
   const target = String(ch.target ?? "").trim()

@@ -243,6 +243,34 @@ export class SubAgentManager {
     this.removedDefs.add(name)
   }
 
+  /** 按启停名单收敛子Agent 集（GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单，
+   *  启动 discover 后调用一次）：enable 非空 = 白名单（未列出的全部 unregister）；disable = 黑名单；
+   *  两者同时配置先白后黑（黑名单最终生效）。unregister 含工具注销、已预载卸载与热加载防复活
+   *  （removedDefs），agent_list/系统提示词注入/agent_run 校验随之完全不可见；名单中的未知名告警忽略
+   *  （防拼写错误静默失效，不阻断启动——与选择性打包不同，运行态名单以实际发现的子Agent 为准）。 */
+  applyEnableDisable(enable: string[] = [], disable: string[] = []): void {
+    const preloaded = [...this.loaded] // 过滤前已预载的名单（def.preload 与 GEBAI_PRELOAD_SUB_AGENTS），用于移除告警
+    if (enable.length) {
+      const whitelist = new Set(enable)
+      for (const name of [...this.defs.keys()]) {
+        if (!whitelist.has(name)) this.unregister(name)
+      }
+      for (const name of whitelist) {
+        if (!this.defs.has(name)) console.warn(`[subagents] GEBAI_SUB_AGENTS_ENABLE 中的子Agent 不存在: ${name}`)
+      }
+    }
+    for (const name of disable) {
+      if (!this.defs.has(name)) {
+        console.warn(`[subagents] GEBAI_SUB_AGENTS_DISABLE 中的子Agent 不存在: ${name}`)
+        continue
+      }
+      this.unregister(name)
+    }
+    for (const name of preloaded) {
+      if (!this.defs.has(name)) console.warn(`[subagents] 预载的子Agent ${name} 已被启停名单移除（不再预载）`)
+    }
+  }
+
   isLoaded(name: string): boolean {
     return this.loaded.has(name)
   }
