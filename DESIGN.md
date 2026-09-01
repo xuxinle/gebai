@@ -525,7 +525,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **系统提示词中声明会话工作目录**（会话 `tmp/`，如 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/tmp/`）并说明**所有文件工具的相对路径以此为基准（`tmp/` 前缀可省略）**；服务端部署模式下大模型读写限定在该目录，桌面/本地浏览器模式不限制目录（同路径沙箱规则）
 - 系统提示词中引导模型：复杂操作应编写脚本（`sh`/`py`）一次执行，避免大量单步工具调用
 - 系统提示词中引导模型：**重大任务（多步骤/有风险/不可逆/用户需要把关）先制定计划**——调用 `ask` 的计划审批分支（title+steps）把计划文档写入会话文件并在界面展示，阻塞等待用户批准后再执行（被拒绝则按修改意见修订后重新提交）；简单任务无需计划审批，`todo` 跟踪即可
-- 子Agent 装载后，系统提示词实时更新；**`self_optimize` 装载即连带装载 `code`**（`SubAgentManager.load` 幂等，WS `sub_agent.load`/`agent_load`/预加载所有装载路径均生效）；**`agent_run` 预加载 `self_optimize` 时同样连带预加载 `code`**（`runNewSession` 同规则——self_optimize 的 def 只声明独有工具，通用工具与工作流提示词由 code 提供，不重复注册，见「self_optimize」章节）
+- 子Agent 装载后，系统提示词实时更新；**声明依赖的子Agent 装载即连带装载其依赖**（`def.dependencies` 驱动的级联，`SubAgentManager.load` 幂等，WS `sub_agent.load`/`agent_load`/预加载所有装载路径均生效，如 `self_optimize`→`code`、`reverse_site`→`playwright`，见「子Agent 依赖与自动装载」）；**`agent_run` 预加载时同样连带预加载依赖**（`normalizeRunAgents` 同规则展开——装载方 def 只声明独有工具，依赖的工具与工作流提示词由依赖方 def 提供，不重复注册）
 - **提示词分层职责（严格划分，防止职责越界与重复）**：
    - **总Agent 系统提示词**（`buildSystemPrompt`）只承载：身份、环境边界（工作区/沙箱）、执行策略、任务类型→子Agent 路由（紧凑映射 + 装载/新会话语义）、子Agent 能力注册表（`systemPromptInjection`：仅未装载轻量列表——**按会话判定未装载**（其他会话装载过不算本会话已装载，见「装载工具会话可见性」），已装载的完整提示词在会话记录的 `loadedAgent` 消息里）、`{AGENT}_PROJECT` 项目绑定声明（路由信息）。**不注入**子Agent 动态项目注记（预置项目清单、受限模式说明、项目根——属运行期上下文，随子Agent 提示词注入：`agent_run` 新会话执行与装载写会话记录均注入）；唯一例外：**子Agent 描述动态体现预置项目摘要**（未装载清单/`agent_list` 中，`{AGENT}_PROJECTS` 配置时描述附「预置项目：名称: 说明（路径）」摘要，方便总Agent 按项目名关联任务与代码位置，完整清单注记仍只在子Agent 提示词）
    - **子Agent 新会话系统提示词**（`runNewSession`）只承载：新会话隔离声明、各预加载子Agent 的完整系统提示词（自包含）+ 职责分隔头（`### {name}（{description}）`，多 Agent 预加载时明确各段提示词对应的工具命名空间与职责域）+ 动态项目上下文（项目根/工作目录、预置项目清单、受限状态、AGENTS.md）；**动态环境注记置于职责分隔头之后、静态提示词之前**（配置信息前置——模型开工先读环境注记确定目标项目与 project 参数，再读工作流）
@@ -557,7 +557,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **零注册**：文件/目录即声明，运行时自动扫描收集（跳过 `*.test.ts` 与辅助文件，目录形式只认 `{dir}/{dir}.ts`），无需任何配置文件或代码注册
 - **热加载（目录签名失效缓存，DESIGN「子Agent 热加载」）**：`sub-agents/` 目录的**新增/修改/删除**在下一次装载（`agent_load`/路由自愈/`agent_run` 预加载，`load()` 前检查）或新任务（`run()` 前）自动生效，无需重启——`refreshIfChanged()` 比对目录签名（递归 `路径:mtime`，~30 次 stat 可忽略），变化即重扫：TS 入口带 `?t={mtime}` 查询参数 import **绕过模块缓存**（修改过的文件拿到新代码；新文件本就不在缓存）；**`agent_run` 校验前置重扫**（`runNewSession` 与异步启动 `SessionRunRegistry.start` 的 validate 在名单校验前先 `refreshIfChanged`）——刚写入/修好的子Agent 文件**首次调用即被看见**（不重扫会以旧缓存误报无附言的「未知子Agent」或沿用修复前旧定义）；**已装载会话沿用旧定义**（工具注册与注入会话记录的提示词保持稳定，不迁移——防运行中会话行为漂移），新定义对未装载与新会话生效；运行期显式 `unregister` 的子Agent（如 cron 关关）重扫后保持移除（`removedDefs` 过滤，防「复活」）；二进制 bundle 形态源码目录不存在、注册表不可变，无热加载。**加载失败错误透出**：扫描中 import 抛错/缺 `def` 导出/md 解析失败的子Agent 记入 `loadErrors`（随 defs 一同进程级缓存），`agent_load` 与 `agent_run` 校验的「未知子Agent」错误**附加载失败原因**（模型可见根因——self_optimize 写错文件当场定位修复而非面对无解释的未知名，修复文件后 mtime 变化触发重扫自动恢复注册）；**`agent_load` 装载失败真实报错**（`ctx.loadSubAgent` 装载后仍未注册即抛 `unknownAgentError`——含附因；幂等重装已装载者仍成功，`loadAgentsForSession` 的单失败跳过容错仅用于会话恢复路径）。价值：self_optimize 生成/修改子Agent 后**当会话内即可 agent_run 验证成果**，自我优化闭环不再依赖重启
 - **打包闭环**：`bun build` 前由 `scripts/build-subagents.ts` 扫描 `src/sub-agents/` 生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**bundle 注册表缺失或加载失败必抛错（fail-fast），绝不静默降级为空子Agent 列表**——启动「成功」但没有任何子Agent 比启动失败更难排查。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，启动期解析失败会炸掉整个 bundle 注册表（服务启动即退出）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
-- **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（flow/tool_schemas/js）与 index.ts 的 vision 注册同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行），裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > `{GEBAI_HOME}/.env` > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态）；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
+- **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制——**包含清单经依赖闭包自动展开**（include reverse_site 自动带上其 `dependencies` 声明的 playwright——运行时依赖自动装载要求依赖方在产物中存在，漏列会产出能力残缺的二进制；构建脚本动态 import 各 def 读取 `dependencies` 递归补入，依赖指向不存在的名字直接构建失败）；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（flow/tool_schemas/js）与 index.ts 的 vision 注册同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行），裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > `{GEBAI_HOME}/.env` > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态）；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
 - **裁剪构建样例**（根 `scripts/` 目录）：`bun run build:code`（`build-code-agent.ts`）产出 code 场景精简**服务端**单文件二进制（`packages/server/dist/gebai-code[.exe]`，浏览器形态、内嵌 Web UI）——三层裁剪组合示范：子Agent 包含清单（code+explore，体积收益主来源：未选子Agent 模块整体摇出产物）+ 预加载清单（code 开箱即用）+ 全局工具排除清单（show/fetch_url）。可作为其他场景裁剪构建的模板：复制脚本改清单即可（如 reverse_site 站点逆向、feishu 文档、只读分析）
 - 命名规则：仅限小写字母、数字、下划线
 - 子Agent 定义的工具名无需关注前缀，总Agent 负责在其 schema 中添加 `{agent_name}_` 前缀（命名空间规则见「工具与命名空间」），以及工具调用时的路由和转发，对子Agent 完全透明
@@ -581,7 +581,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **装载（模块）**：类比 import 子模块——子Agent 的工具注册进当前工具集（`{agent}_` 前缀）、**完整系统提示词作为 system 消息写入会话记录**（`loadedAgent` 标记，chat.json 持久化；装载后当次会话后续轮次立即进入上下文，恢复历史会话时从会话记录透传），装载后直接调用其 `{agent}_` 工具，全程在主循环/主上下文内完成，无独立执行过程。装载段落的动态环境注记与 `agent_run` 形态对齐：项目绑定存在时注入「项目根: <根>（访问项目用 project 参数传该根或绝对路径；相对路径仍以会话工作目录为基准）」（限定语必要——装载模式相对路径基准仍是会话目录，不宣称工作目录已切换），无绑定时注入「工作目录: <会话 tmp>」；预置项目清单注记同款注入。**会话记录 `loadedSubAgents` 保存已装载名单**：恢复历史会话时引擎自动按名单重新注册工具（`engine.ensureSessionAgents`，幂等），实现「会话按保存的文件完全恢复状态」。预加载（`preload`/`GEBAI_PRELOAD_SUB_AGENTS`）即装载的启动期形态——启动预载的子Agent 在每个**新会话创建时自动写入**提示词消息与工具
 - **新会话执行（会话）**：类比派生新会话——`agent_run` 派生一个临时新会话（独立上下文），把指定的一个或多个子Agent **预加载**进该会话（各自完整系统提示词拼接为系统提示词、独有工具以 `{agent}_` 命名空间并入工具集；**全局工具与总Agent 全局提示词默认一并继承**——`inherit_global_tools` 与 `inherit_global_prompt` 参数默认均为 true，新会话与主会话**工具面、行为约定同构**（read/write/grep/sh 等直接用全局名，文件工具带 `project` 参数路由项目），false 时分别关闭（仅预加载子Agent 工具 + 内建编排 flow/tool_schemas/js / 仅子Agent 提示词上下文最省）），执行任务到结束只把最终结果带回主会话，默认阻塞执行、`async:true` 后台异步执行；上下文隔离、全程存档，详见「新会话执行的上下文隔离」「新会话执行的异步运行」
 - **多 Agent 预加载**：`agents` 参数支持列表（如 `["code", "playwright"]`）——多个子Agent 的能力同时进入新会话（提示词拼接、工具集叠加）；每个子Agent 提示词前加**职责分隔头**（`### {name}（{description}）`）明确各自职责域与工具命名空间；各自的项目绑定/预置项目注记分别注入，工作目录取首个含项目绑定的 Agent，预置项目全量合并（同名去重）
-- **代码对应**：装载 = `SubAgentManager.load`（返回本次实际装载集合，含 `self_optimize` 连带 `code`）/ `ToolContext.loadSubAgent` / `engine.loadAgentToSession`（装载并写入会话记录）；新会话执行 = `engine.runNewSession` / `ToolContext.runNewSession`（原名 `dispatchSubAgent`/`subAgentRunner` 已更名）；异步运行 = `core/session-runs.ts`（`SessionRunRegistry`）/ `ToolContext.sessionRuns`（见「新会话执行的异步运行」）
+- **代码对应**：装载 = `SubAgentManager.load`（返回本次实际装载集合，依赖经 `cascade` 级连带装载，如 self_optimize 连带 code）/ `ToolContext.loadSubAgent` / `engine.loadAgentToSession`（装载并写入会话记录）；新会话执行 = `engine.runNewSession` / `ToolContext.runNewSession`（原名 `dispatchSubAgent`/`subAgentRunner` 已更名）；异步运行 = `core/session-runs.ts`（`SessionRunRegistry`）/ `ToolContext.sessionRuns`（见「新会话执行的异步运行」）
 - **模型侧引导**：`agent_load`/`agent_run` 工具描述、系统提示词注入均按上述语义措辞，默认引导「装载后用其工具」，仅在需要干净上下文或防上下文膨胀时用 `agent_run` 执行新会话
 
 #### 装载工具会话可见性
@@ -592,6 +592,16 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **子Agent 只声明独有工具（重复工具彻底删除）**：文件读写查询类工具（read/write/edit/patch/ls/grep/glob/file/diff/sh/py）与交互编排类工具（fetch_url/todo/ask/agent_run/bg_task）为**全局工具**——code/explore 等编码类子Agent 不再以 `projectAware` 双胞胎形态重复定义同款，只声明全局集没有的独有工具（code：search_symbols/analyze/git/preview_server/env_detect/system_info；explore：search_symbols/analyze/git）。装载与新会话执行（全局工具默认继承）均直接用全局名，`{agent}_` 前缀名只有独有工具一种形态。**取代旧版「双胞胎合并」机制**：此前子Agent 版与全局版同名共存（code_read 与 read），主会话经会话视图把同名校并为子Agent 版一份、前缀名留作解析别名——工具删重后该合并层（twinMerge/alias）整体移除，历史消息中的 `code_read` 等前缀名调用按未知工具处理（错误信息附该子Agent 可用工具清单，一步引导改用全局名）
 - **全局文件工具带 `project` 参数**（`core/projects.ts` 的 `projectAware` 在全局注册处统一包装）：默认会话相对路径（行为不变），操作项目须显式指定——`project` 参数传**预置项目名**或**项目根路径**（自由项目），路径即相对所选根解析（沙箱模式限定该根内）；保留名 `tmp` = 会话工作区。code/explore 的独有工具同规则包装。受限模式（`CODE_RESTRICT_PROJECTS=true`）下未传 project 的自由路径被拒绝（预置项目/绑定根放行）
 - **审批姿态归一**：子Agent 不再覆写与全局同名工具的审批（旧版双胞胎合并按子Agent `requiresApproval` 收紧 write/edit/patch）——全局 write/edit/patch 维持「默认无需审批」（与总Agent 既有姿态一致，防盲写守卫约束写入安全）；子Agent `requiresApproval` 只对**独有工具**生效
+
+#### 子Agent 依赖与自动装载（`dependencies`）
+
+子Agent 间复用能力走**依赖声明**而非把依赖方的工具展开进自己的 def（旧版 `reverse_site` 静态导入 `createPlaywrightTools` 展开全套浏览器工具并复刻审批映射，`self_optimize`→`code` 是三处硬编码特例——现统一为声明式机制，def 声明、引擎执行）：
+
+- **声明**：`SubAgentDef.dependencies?: string[]`（TS 定义导出 `dependencies`；纯 md 简化定义经 frontmatter `dependencies: a, b` 逗号分隔声明，条目须符合子Agent 命名规则 `[a-z0-9_]+`）。依赖方 def 只声明独有工具；依赖的工具由依赖方 def 以**其自身命名空间**注册（`{dep}_` 前缀）、`requiresApproval`/`safeMode`/`envVars` 等亦由依赖方 def 单源维护——装载方不复制任何依赖方定义
+- **级联展开（`SubAgentManager.cascade`）**：返回装载某子Agent 需要的完整名单——**依赖在前、自身在后**（依赖先注册工具、先注入提示词），传递依赖递归展开，共享依赖去重；**循环依赖（含自依赖）抛错**（`子Agent 依赖循环: a → b → a`，定义缺陷暴露给模型/self_optimize 修复）；**依赖缺失跳过并告警**（被启停名单移除/构建裁剪的依赖不阻断装载方——其自身工具照常可用，仅失去该依赖能力，与旧 `self_optimize`→`code` 的 `defs.has` 守卫同语义）
+- **生效路径（四条全走 cascade，语义一致）**：装载（`load`——`agent_load`/WS `sub_agent.load`/预加载/路由自愈统一入口，逐个幂等装载并返回实际装载集合，`loadAgentsForSession` 为每个连带装载的依赖同样写入提示词 system 消息）、`agent_run` 预加载校验（`normalizeRunAgents`——同步 `runNewSession` 与异步 `SessionRunRegistry.start` 的 validate 共用，展开后名单上限检查按展开后计）、新会话循环内装载（`registerIntoRegistry`——路由自愈/显式 `agent_load` 的注册路径）、构建期包含清单（`build-subagents.ts` 依赖闭包展开，见「选择性打包」）
+- **引用计数语义**：级联装载的依赖以**装载方同一 owner** 记入引用表（会话 A 装载 `reverse_site` ⇒ A 隐式引用 `playwright`）——卸载装载方**不连带卸载依赖**（A 卸载 reverse_site 后 playwright 的 A 引用仍在，直至显式卸载）；依赖被多方装载时工具注册按 owner 解引用保留（与装载工具会话可见性同机制）
+- **文件读写等全局工具不构成依赖**：全局工具对所有会话恒可用（`agent_run` 默认继承），无需也不应声明为依赖；依赖机制用于**子Agent 独有能力**的复用（如 reverse_site 复用 playwright 的浏览器操控）
 
 #### 路由自愈（未装载命名空间工具自动装载）
 
@@ -845,11 +855,12 @@ export const preload = false
 
 实现于 `sub-agents/reverse_site/`（目录形式：`reverse_site.ts` 定义入口 + `reverse_site.md` 系统提示词 + `reverse_site_tools.ts` 工具集 + `reverse_site_tools.test.ts` 测试），面向「逆向网站与接口」场景——摸清站点结构、还原接口契约、产出分析文档，并可与 `self_optimize` 联动把逆向结果转化为新的子Agent：
 
-- **工具集**（22 个）：浏览器自动化全套（复用 playwright 的 `open`/`content`/`screenshot`/`click`/`fill`/`press`/`select`/`check`/`wait_for`/`evaluate`/`pages`/`new_page`/`switch_page`/`close_page`/`close`，与 capture_* 共享同一桥接进程与浏览器会话）+ 接口逆向专属 + 编排工具
-- **接口捕获**（`capture_start`/`capture_stop`/`capture_clear`/`capture_list`）：录制浏览器网络请求还原接口——浏览前 `capture_start`，浏览/操作页面让 XHR/fetch 自然发生，`capture_list` 分析（默认摘要，`detail=true` 含请求头/体与响应头/体预览，可按 method/url/status 过滤，`file` 参数把完整记录导出会话 `tmp/` JSON）；录制在 driver 侧完成（见 playwright 网络录制），**敏感字段（cookie/token/密码等）自动脱敏**
+- **依赖 playwright（`dependencies: ["playwright"]`，装载/预加载自动连带，见「子Agent 依赖与自动装载」）**：浏览器自动化全套由 playwright def 提供（`playwright_` 前缀：open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir，审批映射亦由 playwright def 单源维护）——本 def 不复刻任何浏览器工具；capture_* 经共享桥接单例（`createLazyBridge` 全进程共享）与 playwright 操作**同一浏览器会话**，页面操作与网络录制天然一致；playwright 被启停名单移除/构建裁剪时跳过（本 Agent 仅剩接口直连探测）
+- **工具集**（5 个，全部 `reverse_site_` 前缀）＝ 接口捕获（`capture_start`/`capture_stop`/`capture_clear`/`capture_list`）+ 接口探测（`http_request`）；文件读写与编排（write/read/fetch_url/agent_run）为全局工具直接用全局名（提示词开头列明三段命名空间映射）
+- **接口捕获**（`capture_*`）：录制浏览器网络请求还原接口——浏览前 `capture_start`，浏览/操作页面让 XHR/fetch 自然发生，`capture_list` 分析（默认摘要，`detail=true` 含请求头/体与响应头/体预览，可按 method/url/status 过滤，`file` 参数把完整记录导出会话 `tmp/` JSON）；录制在 driver 侧完成（见 playwright 网络录制），**敏感字段（cookie/token/密码等）自动脱敏**
 - **接口探测**（`http_request`）：直接发送 HTTP 请求验证逆向出的接口（任意方法/请求头/请求体/查询参数），返回状态码、响应头（敏感字段脱敏）与响应体（50KB 内截断展示，超长走截断保护）；服务端部署限公网地址（复用 `assertPublicHttpUrl` 防 SSRF，默认路径另带重定向逐跳校验）；fetch 可注入（测试替身）；默认需审批
-- **编排闭环**：内置 `agent_run`/`agent_list`/`agent_load`（子Agent 有工具时不自动注入，此处显式声明），分析文档写会话 `tmp/`（`site_map.md` + `api_docs.md`/`api_docs.json`）后经 `agent_run` 把文档交给 `self_optimize`，由 `self_optimize` 生成/修改子Agent 定义文件（`sub-agents/{name}.ts` + 可选 `{name}.md`）并通过测试验证——「网站 → 逆向文档 → 新子Agent」全链路
-- **审批**：浏览器交互类（同 playwright）与 `http_request`/`write` 默认需审批，防 SSRF、防越权探测、防写操作；只读类（`capture_*`/`fetch_url`/`read`）免审批
+- **编排闭环**：分析文档写会话 `tmp/`（`site_map.md` + `api_docs.md`/`api_docs.json`）后经全局 `agent_run` 把文档交给 `self_optimize`，由 `self_optimize` 生成/修改子Agent 定义文件（`sub-agents/{name}.ts` + 可选 `{name}.md`）并通过测试验证——「网站 → 逆向文档 → 新子Agent」全链路
+- **审批**：`http_request` 默认需审批（防 SSRF、防越权探测）；浏览器交互类的审批随 playwright def（连带装载生效）；`capture_*` 只读免审批
 - **提示词约束**：只逆向用户授权/自有网站，敏感信息不扩散，不爆破/不拖库/不高频恶意请求；`capture_list` 先摘要定位候选再 `detail=true` 细看（超长记录 `file` 导出后 `read` 分块分析）；验证多通道——截图/读取失效切 evaluate/capture_list/http_request，失效即切换并告知用户
 
 #### `explore`（只读代码探索）
@@ -941,7 +952,7 @@ export const preload = false
 | `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_read/screen_info | window_*+type/key/mouse | ✗ | 桌面控制（截图/窗口/输入/剪贴板/屏幕信息，仅本地模式） |
 | `feishu_docs` | auth_status/auth_user_authorize/auth_user_token/auth_user_status/auth_user_clear/create_doc/get_doc_meta/get_doc_text/get_doc_blocks/list_blocks/find_blocks/add_blocks/update_block/delete_blocks/import_markdown/export_doc/list_files/create_folder/get_file_meta/upload_file/download_file/delete_file/search/create_sheet/get_sheet_meta/read_sheet/write_sheet/append_sheet/create_bitable/list_bitable_tables/list_bitable_records/add_bitable_records/update_bitable_record/delete_bitable_records/list_wiki_spaces/create_wiki_node/get_wiki_node/get_board/add_permission/api_call | 写操作全部（创建/修改/删除/上传/授权） | ✗ | 飞书云文档（文档/表格/多维表格/知识库/云空间/搜索/权限/思维导图画板；**可配置 user_access_token 以用户身份操作、创建用户所有权资源**；需配置 `FEISHU_DOCS_*` 或全局 `GEBAI_FEISHU_*` 凭证） |
 | `playwright` | open/content/screenshot/click/fill/press/select/check/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir | open+click+fill+press+select+check+evaluate+new_page+serve_dir | ✗ | 浏览器自动化（无头 Chromium，node 桥接；需宿主机 node + playwright 包 + 浏览器） |
-| `reverse_site` | 浏览器自动化全套（同 playwright）+ http_request/fetch_url/capture_start/capture_stop/capture_clear/capture_list/read/write/agent_list/agent_load/agent_run | 浏览器交互类+http_request+write | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
+| `reverse_site` | 独有工具 capture_start/capture_stop/capture_clear/capture_list/http_request；**依赖 playwright（`dependencies` 自动连带装载——浏览器自动化全套与审批映射复用 `playwright_` 命名空间，共享同一浏览器会话）**，文件读写与编排走全局工具 | http_request（浏览器交互类随 playwright def） | ✗ | 网站/接口逆向（浏览器网络录制还原接口、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
 | `feishu_group` | chats_list/chat_info/members_list/user_info/message_send/chat_create/chat_update/chat_members_add/chat_members_remove/chat_disband | 写操作全部（发消息/建群/改群/拉人/移人/解散） | ✗ | 飞书群基础能力（群列表/详情/成员查询（open_id+姓名——@特定人与 cron 通知 at 名单取材）/用户信息/群内发消息（at 标签）/建群改群/成员增删/解散；需 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_* 凭证） |
 | `cron` | add/list/update/trigger/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`） | add+update+remove+trigger | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
@@ -989,7 +1000,7 @@ Agent 通过修改**自身代码**来持续改进自己，不使用记忆（memo
 
 #### `self_optimize` 专用子Agent
 
-自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、优化日志、页面捕获、视觉分析），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**：
+自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 声明 `dependencies: ["code"]`（依赖自动装载，见「子Agent 依赖与自动装载」），只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、优化日志、页面捕获、视觉分析），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**：
 
 ```ts
 export const name = "self_optimize"
@@ -997,13 +1008,14 @@ export const description = "优化歌白自身（……测试是准入凭证，r
 export const tools: ToolSet = { read_feedback, run_tests, rollback, journal, page_capture, vision }
 export const requiresApproval = { run_tests: true, rollback: true }
 export const preload = false          // 按需装载，非默认注入
+export const dependencies = ["code"]  // 依赖自动装载：装载/预加载时连带装载 code（工具与工作流提示词复用）
 export const writeGuard = (env, absPaths) => string | null   // 写范围守卫声明（见下「写范围守卫」）
 export const projectRoot = (env) => string | undefined        // 默认项目根兜底（见下「项目名称与项目根」）
 ```
 
-- **复用 code 与全局工具（两种路径同规则）**：
+- **复用 code 与全局工具（两种路径同规则，`dependencies` 声明驱动级联）**：
   - **装载模式**：装载 `self_optimize` 时 `SubAgentManager.load` **连带装载 `code`**（幂等，WS `sub_agent.load`/`agent_load`/预加载所有装载路径均生效）——code 完整提示词写入会话记录；文件读写查询用**全局工具**（read/write/edit/patch/grep/sh 等，带 project 参数可按名操作预置项目），分析/验证类操作用 code 独有工具（`code_search_symbols`/`code_analyze`/`code_git`/`code_preview_server` 等 `code_*` 前缀）
-  - **新会话执行（`agent_run`）**：`runNewSession` 预加载 `self_optimize` 时**自动连带预加载 `code`**（code 前置，系统提示词含两段职责分隔头——code 的通用工作流在前，self_optimize 的特有流程与约束在后），新会话工具集为**继承的全局工具** + `code_*` 独有工具 + `self_optimize_*` 独有工具（全局工具默认继承，见「新会话执行的上下文隔离」）
+  - **新会话执行（`agent_run`）**：`normalizeRunAgents` 依赖展开**自动连带预加载 `code`**（code 前置，系统提示词含两段职责分隔头——code 的通用工作流在前，self_optimize 的特有流程与约束在后），新会话工具集为**继承的全局工具** + `code_*` 独有工具 + `self_optimize_*` 独有工具（全局工具默认继承，见「新会话执行的上下文隔离」）
   - 提示词分层：self_optimize 静态提示词**只承载自我优化特有内容**（反馈输入、写范围、设计同步铁律、测试准入/回滚、用户验证、git 收尾），通用工作流以「直接遵循 code 子Agent 提示词」引用（两种路径下 code 提示词均在上下文内）——符合「子Agent 静态提示词不复刻其他子Agent 内容」的分层原则
 - **项目名称与项目根（内置）**：静态提示词**内置项目名称「歌白（GEBAI Agent）」**并指明「项目根以系统提示词动态注记『项目根:』为准」——具体目录由引擎按绑定动态注入，**装载与新会话两种形态均注入**（装载段落 `loadAgentsForSession` 与 `agent_run` 的 `buildAgentSection` workNote 同款语义；装载形态附相对路径限定语）；项目根解析三态：`SELF_OPTIMIZE_PROJECT` 环境变量 > dev 模式 `projectRoot` 兜底（按模块路径自动推导源码仓库根，与写范围守卫/`run_tests`/`rollback` 同源）> 二进制模式无兜底（按用户给定路径处理）——**dev 模式无需任何配置提示词即携带仓库根目录**，绑定同时使 agent_run 新会话以仓库根为工作目录、自动注入仓库 AGENTS.md（沙箱模式同规则拒绝，回退工作目录）
 - **反馈读取（`self_optimize_read_feedback`）**：自全局工具集下沉（全局不再注册 `read_feedback`，自我优化为唯一消费方）——按用户反馈按时间倒序读取，声明进 def 同时覆盖装载模式（`self_optimize_read_feedback` 命名空间）与新会话执行环境（全局工具不在注册表，def 声明保证可用）；反馈是自我优化的核心输入通道
@@ -2033,6 +2045,8 @@ export const tools: ToolSet               // 子Agent 自有工具（注册为 {
 export function toolSchemas(): ToolSet
 export const requiresApproval?: Record<string, boolean>
 export const preload?: boolean            // 是否预加载（默认 false，按需装载）
+export const dependencies?: string[]     // 依赖的其他子Agent 名单（装载/预加载/agent_run 自动连带装载，
+                                         // 工具与提示词按依赖方自身命名空间复用，见「子Agent 依赖与自动装载」）
 // 工具级安全模式自主声明（Tool.safeMode，写在各工具定义上）：
 //   true  = 作者判定安全模式下可提供（即使短名风险如 xxx_sh——须自行保证实现只读或体内按 ctx.safeMode 校验）
 //   false = 作者判定安全模式下不提供（即使名字无风险命中，如内部写文件/外发请求的工具）
@@ -2062,7 +2076,7 @@ export const systemPrompt = systemPromptBase
 - 工具的返回类型（text/json）在 `toolSchemas()` 中声明，通过 schema 的 `returns` 字段体现，不单独导出 `returnFormats`
 - `agent_run` 执行新会话：输入为 `agents`（子Agent 列表）+ `input`（任务文本），返回为 `output`（文本），新会话（预加载子Agent）自行规划执行（默认阻塞执行返回；`async:true` 后台异步执行，`bg_task` 管理，见「新会话执行的异步运行」）
 - 子Agent 内无全局可变量，工具函数体为纯函数或依赖注入工厂，天然支持并发加载
-- 子Agent 可复用全局工具能力：`tools` 中可直接引用全局工具实现（如 `read`/`write`/`sh`），引用时以自身命名空间暴露（`{agent}_read` 等），路由由总Agent 转发
+- **复用其他子Agent 的能力用 `dependencies` 声明**（装载/预加载自动连带，工具以依赖方 `{dep}_` 命名空间注册——如 reverse_site 依赖 playwright、self_optimize 依赖 code），不在 `tools` 中展开依赖方的工具实现（旧形态会产生重复注册与审批映射复刻）；机制上 `tools` 仍可直接引用全局工具实现（如 `read`/`write`/`sh`，以 `{agent}_` 前缀暴露），但按「子Agent 只声明独有工具」约定应直接用全局名，不重复声明
 - 示例：内置 `desktop` 即目录形式（`sub-agents/desktop/desktop.ts` + `desktop_tools.ts`）
 
 **纯提示词简化定义**（`sub-agents/{name}/{name}.md` 单独存在，零 TS）：用于简单子Agent 与组合式子Agent
@@ -2070,11 +2084,12 @@ export const systemPrompt = systemPromptBase
 ```md
 ---
 description: 一句话能力描述（可选；缺省取正文首行）
+dependencies: playwright, code（可选；依赖的子Agent 名，逗号分隔——装载/预加载自动连带装载）
 ---
 系统提示词正文（说明编排策略/角色职责等）
 ```
 
-- 目录内无同名 `{name}.ts` 时，加载器直接由 md 构成定义（`name`=目录名）；可选 frontmatter 仅识别 `description`
+- 目录内无同名 `{name}.ts` 时，加载器直接由 md 构成定义（`name`=目录名）；可选 frontmatter 识别 `description` 与 `dependencies`（条目须符合命名规则 `[a-z0-9_]+`，非法条目过滤）——组合式子Agent 声明依赖后编排提示词可直接引用依赖方 `{dep}_` 工具，无需运行时先 `agent_load`
 - 无工具的简化定义在新会话运行环境**自动注入编排工具**（`agent_list`/`agent_load`/`agent_run`/`bg_task`，原名暴露、无 `{agent}_` 前缀），支持组合式子Agent 编排装载/执行新会话其他子Agent（受递归深度 3 层限制）
 - 有工具的子Agent 需要编排能力时，可显式引用导出的 `agentListTool`/`agentLoadTool`/`agentCallTool`（`core/tools.ts`），注册为 `{agent}_agent_run` 等带前缀形态
 - 示例：纯 md 组合子Agent 即 `sub-agents/{name}/{name}.md`（零 TS），编排其他子Agent 产出完整链路的组合能力可由此模式定义

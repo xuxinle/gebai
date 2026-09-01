@@ -96,8 +96,8 @@ bun run lint
 
 ## 如何新增子 Agent
 
-1. 在 `packages/server/src/sub-agents/` 下新增**单文件** `{name}.ts`（导出 `name`、`description`、`systemPrompt`、`tools`、可选 `requiresApproval`/`preload`/`envVars`——`envVars` 为该子Agent 可配置环境变量声明（`{AGENT_NAME_UPPER}_` 前缀），自动汇总进前端环境变量面板白名单）或**目录** `{name}/{name}.ts`（系统提示词可拆 `{name}.md` 由 ts 导入并修饰），模板见 `DESIGN.md`「子Agent文件格式」。
-2. **纯提示词简化定义**：仅需系统提示词的简单/组合式子Agent 可直接放 `{name}/{name}.md`（零 TS，可选 frontmatter `description`）；无工具定义会自动获得编排工具（`agent_run`/`agent_list`/`agent_load`），组合式子Agent 在提示词中说明编排策略即可。
+1. 在 `packages/server/src/sub-agents/` 下新增**单文件** `{name}.ts`（导出 `name`、`description`、`systemPrompt`、`tools`、可选 `requiresApproval`/`preload`/`dependencies`/`envVars`——`dependencies` 为依赖的其他子Agent 名单（装载/预加载/`agent_run` 自动连带装载，工具与提示词按依赖方自身命名空间复用，不在本 def 重复声明）；`envVars` 为该子Agent 可配置环境变量声明（`{AGENT_NAME_UPPER}_` 前缀），自动汇总进前端环境变量面板白名单）或**目录** `{name}/{name}.ts`（系统提示词可拆 `{name}.md` 由 ts 导入并修饰），模板见 `DESIGN.md`「子Agent文件格式」。
+2. **纯提示词简化定义**：仅需系统提示词的简单/组合式子Agent 可直接放 `{name}/{name}.md`（零 TS，可选 frontmatter `description`/`dependencies`）；无工具定义会自动获得编排工具（`agent_run`/`agent_list`/`agent_load`），组合式子Agent 在提示词中说明编排策略即可。
 3. 命名符合规则；工具名无需关注前缀，总 Agent 自动加 `{agent}_` 命名空间。
 4. 构建时自动扫描收集（零注册）；可按需选择性打包。
 5. 同步在 `DESIGN.md` 中补充该子 Agent 的说明与总览表。

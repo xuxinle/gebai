@@ -1616,7 +1616,7 @@ export class AgentEngine {
   }
 
   /**
-   * 装载子Agent 到会话：逐个 subAgents.load（幂等注册工具，返回本次实际装载集合含 self_optimize 连带 code），
+   * 装载子Agent 到会话：逐个 subAgents.load（幂等注册工具，返回本次实际装载集合——依赖自动连带装载时依赖也计入），
    * 为每个新装载的子Agent 生成提示词 system 消息（### name（description）头 + 完整系统提示词 + 预置项目清单注记，
    * loadedAgent 标记）追加进会话 messages 并记录 loadedSubAgents（调用方负责 save）。已装载且提示词消息已存在的跳过（恢复场景幂等）。
    */
@@ -1969,10 +1969,10 @@ export class AgentEngine {
   }
 
   /** 工具注册进指定注册表（幂等：任一工具已可解析则视为已注册；纯提示词子Agent 补注入编排工具；
-   *  self_optimize 连带 code 同规则级联）。新会话循环内装载（路由自愈/显式 agent_load）用。 */
+   *  依赖级联同规则展开（cascade：依赖在前，reverse_site 连带 playwright、self_optimize 连带 code 等））。
+   *  新会话循环内装载（路由自愈/显式 agent_load）用。 */
   private registerIntoRegistry(reg: ToolRegistry, name: string): void {
-    const cascade = name === "self_optimize" && this.opts.subAgents.def("code") ? ["code", name] : [name]
-    for (const n of cascade) {
+    for (const n of this.opts.subAgents.cascade(name)) {
       const def = this.opts.subAgents.def(n)
       if (!def) continue
       const keys = Object.keys(def.tools ?? {})
@@ -2601,23 +2601,24 @@ export class AgentEngine {
     }
   }
 
-  /** agent_run 预加载清单校验与规范化：去重、self_optimize 连带 code（复用其通用能力，与装载模式
-   *  SubAgentManager.load 的连带装载同规则）、数量与深度上限、未知名检查。同步（runNewSession）与
-   *  异步（SessionRunRegistry.start）启动共用——异步启动在登记句柄前同步校验，未知名等错误立即抛给模型。 */
+  /** agent_run 预加载清单校验与规范化：去重、依赖级联展开（cascade：依赖在前，与装载模式
+   *  SubAgentManager.load 的依赖自动装载同规则——reverse_site 连带 playwright、self_optimize 连带 code 等）、
+   *  数量与深度上限、未知名检查。同步（runNewSession）与异步（SessionRunRegistry.start）启动共用——
+   *  异步启动在登记句柄前同步校验，未知名等错误立即抛给模型。 */
   private normalizeRunAgents(agents: string[], depth: number): string[] {
-    agents = [...new Set(agents)]
-    // self_optimize 复用 code 的通用能力（def 只声明独有工具，提示词不复刻 code 工作流）：
-    // 预加载 self_optimize 时自动连带预加载 code——独有分析/验证工具与通用工作流提示词由 code 提供，不重复定义
-    if (agents.includes("self_optimize") && this.opts.subAgents.def("code") && !agents.includes("code")) {
-      agents = ["code", ...agents]
-    }
-    if (agents.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${agents.length} > ${MAX_AGENTS_PER_RUN}）`)
-    for (const name of agents) {
+    const requested = [...new Set(agents)]
+    // 未知名检查针对用户给定名单（依赖展开会跳过缺失依赖——用户名单错字仍须报错而非静默丢失）
+    for (const name of requested) {
       // 未知子Agent 附加载失败原因（有文件但 import 抛错/缺 def 导出时引导精确修复——self_optimize 自修复闭环）
       if (!this.opts.subAgents.def(name)) throw new Error(`未知子Agent: ${name}${this.opts.subAgents.loadError(name) ? `（其文件加载失败: ${this.opts.subAgents.loadError(name)}——修复该文件后即可执行）` : ""}`)
     }
-    if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${agents.join(",")}`)
-    return agents
+    const out: string[] = []
+    for (const name of requested) {
+      for (const n of this.opts.subAgents.cascade(name)) if (!out.includes(n)) out.push(n)
+    }
+    if (out.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${out.length} > ${MAX_AGENTS_PER_RUN}）`)
+    if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${out.join(",")}`)
+    return out
   }
 
   /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，

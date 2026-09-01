@@ -40,7 +40,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens，含缓存命中 cachedTokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -232,6 +232,17 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
+    // subrev：agent_run 预加载 reverse_site——依赖自动连带预载 playwright（新会话双命名空间工具与提示词）
+    if (this.mode === "subrev" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-rv1", name: "agent_run", arguments: { agents: ["reverse_site"], input: "analyze site" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subrev" && this.calls === 2) {
+      yield { type: "text", text: "reverse done" }
+      yield { type: "done" }
+      return
+    }
     // interact：模型第一轮尝试调用 ask 选项询问分支（无交互模式分支门控验证用）
     if (this.mode === "interact" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-i1", name: "ask", arguments: { prompt: "选择方案", options: ["方案A", "方案B"] } } }
@@ -359,7 +370,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -2975,6 +2986,31 @@ describe("context compaction", () => {
       if (savedSelfModify === undefined) delete process.env.GEBAI_SELF_MODIFY
       else process.env.GEBAI_SELF_MODIFY = savedSelfModify
     }
+  })
+
+  test("agent_run 预加载 reverse_site 依赖自动连带 playwright（双命名空间工具与提示词，不重复注册）", async () => {
+    const s = await setup("subrev")
+    if (!s.subAgents.def("reverse_site") || !s.subAgents.def("playwright")) return test.skip("reverse_site/playwright 未打包", () => {})
+    // cascade 展开顺序：依赖在前、自身在后
+    expect(s.subAgents.cascade("reverse_site")).toEqual(["playwright", "reverse_site"])
+    const session = await s.store.createSession("default", "t")
+    await s.engine.run(session.id, "default", "go")
+    // 新会话系统消息：连带预载 playwright（两段职责提示词都在，浏览器工具来自 playwright 命名空间）
+    const sys = String(s.provider.seenChats[1][0].content)
+    expect(sys).toContain("已预加载子Agent: playwright, reverse_site")
+    expect(sys).toContain("### playwright（")
+    expect(sys).toContain("网页浏览")
+    expect(sys).toContain("### reverse_site（")
+    expect(sys).toContain("网站与接口逆向分析专家")
+    // 新会话工具集：playwright_*（依赖）与 reverse_site_*（capture/http_request 独有）并存；
+    // 浏览器/文件/编排工具不再注册进 reverse_site_ 命名空间（def 不复刻依赖方与全局工具）
+    expect(s.provider.seenTools[1]).toContain("playwright_open")
+    expect(s.provider.seenTools[1]).toContain("reverse_site_capture_start")
+    expect(s.provider.seenTools[1]).toContain("reverse_site_http_request")
+    expect(s.provider.seenTools[1]).not.toContain("reverse_site_open")
+    expect(s.provider.seenTools[1]).not.toContain("reverse_site_write")
+    expect(s.provider.seenTools[1]).not.toContain("reverse_site_agent_run")
+    cleanup(s.home)
   })
 
   test("agent_run 前置热加载重扫 + agent_load 失败暴露：刚写入的破损子Agent 即时报附因错误", async () => {

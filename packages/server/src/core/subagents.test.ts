@@ -42,11 +42,11 @@ describe("SubAgentManager systemPromptInjection", () => {
     expect(out).toContain("- writer: 文档撰写")
   })
 
-  test("load returns names actually loaded this call (idempotent skips; self_optimize cascades code)", async () => {
+  test("load returns names actually loaded this call (idempotent skips; dependencies cascade)", async () => {
     const mgr = makeManager()
     expect(await mgr.load("code")).toEqual(["code"])
     expect(await mgr.load("code")).toEqual([]) // 幂等跳过
-    // self_optimize 连带装载 code：两者都计入（code 已装载时仅 self_optimize）
+    // 依赖自动连带装载（def.dependencies 声明）：依赖与自身都计入（依赖已装载时仅自身）
     const { mgr: mgr2 } = makeSelfOptimizeManager()
     expect(await mgr2.load("self_optimize")).toEqual(["code", "self_optimize"])
     expect(await mgr2.load("self_optimize")).toEqual([])
@@ -65,7 +65,8 @@ describe("SubAgentManager systemPromptInjection", () => {
   })
 })
 
-/** self_optimize 连带加载测试：def 只声明独有工具（page_capture），通用工具由 code 提供。 */
+/** self_optimize 依赖连带加载测试：def 声明 dependencies: ["code"]，工具只含独有能力（page_capture），
+ *  通用工具由 code 提供（依赖方各自命名空间注册，不重复定义）。 */
 function makeSelfOptimizeManager(): { mgr: SubAgentManager; registry: ToolRegistry } {
   const registry = new ToolRegistry()
   const mgr = new SubAgentManager({ registry, preloadOverride: [] })
@@ -74,6 +75,7 @@ function makeSelfOptimizeManager(): { mgr: SubAgentManager; registry: ToolRegist
     name: "self_optimize",
     description: "优化自身",
     systemPrompt: "你是 self_optimize。",
+    dependencies: ["code"],
     tools: {
       page_capture: { name: "page_capture", description: "捕获页面", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "ok" }) },
     },
@@ -81,7 +83,7 @@ function makeSelfOptimizeManager(): { mgr: SubAgentManager; registry: ToolRegist
   return { mgr, registry }
 }
 
-describe("self_optimize cascade load", () => {
+describe("self_optimize cascade load（依赖声明驱动）", () => {
   test("loading self_optimize auto-loads code (通用能力复用：工具与提示词不重复注册)", async () => {
     const { mgr, registry } = makeSelfOptimizeManager()
     await mgr.load("self_optimize")
@@ -103,22 +105,88 @@ describe("self_optimize cascade load", () => {
     expect(registry.resolve("self_optimize_page_capture")).toBeDefined()
   })
 
-  test("self_optimize registers own toolset as declared when code is absent", async () => {
+  test("registers own toolset as declared when dependency code is absent (依赖缺失跳过不阻断)", async () => {
     const registry = new ToolRegistry()
     const mgr = new SubAgentManager({ registry, preloadOverride: [] })
     mgr.register({
       name: "self_optimize",
       description: "优化自身",
       systemPrompt: "你是 self_optimize。",
+      dependencies: ["code"], // code def 不存在（启停名单移除/构建裁剪形态）
       tools: {
         read: { name: "read", description: "读文件", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "x" }) },
         page_capture: { name: "page_capture", description: "捕获页面", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "ok" }) },
       },
     })
-    // code 不存在时无连带：按 def 声明原样注册（不做隐式去重——去重由「def 不声明重叠工具」这一约定承担）
+    // 依赖缺失跳过：按 def 声明原样注册自身（不做隐式去重——去重由「def 不声明重叠工具」这一约定承担）
     await mgr.load("self_optimize")
     expect(registry.resolve("self_optimize_read")).toBeDefined()
     expect(registry.resolve("self_optimize_page_capture")).toBeDefined()
+  })
+})
+
+/** 通用依赖机制测试载体：dep_top → dep_mid → dep_base 传递依赖，dep_top 同时直依赖 dep_base（去重验证）。 */
+function makeDepsManager(): { mgr: SubAgentManager; registry: ToolRegistry } {
+  const registry = new ToolRegistry()
+  const mgr = new SubAgentManager({ registry, preloadOverride: [] })
+  const mk = (name: string, short: string, extra: Partial<SubAgentDef> = {}): SubAgentDef => ({
+    name,
+    description: name,
+    systemPrompt: `你是 ${name}。`,
+    tools: { [short]: { name: short, description: name, parameters: { type: "object", properties: {} }, execute: async () => ({ output: name }) } },
+    ...extra,
+  })
+  mgr.register(mk("dep_base", "base", { requiresApproval: { base: true } }))
+  mgr.register(mk("dep_mid", "mid", { dependencies: ["dep_base"] }))
+  mgr.register(mk("dep_top", "top", { dependencies: ["dep_mid", "dep_base"] }))
+  return { mgr, registry }
+}
+
+describe("子Agent 依赖与自动装载（dependencies 级联，DESIGN「子Agent 依赖与自动装载」）", () => {
+  test("cascade：传递依赖递归展开（依赖在前、自身在后，共享依赖去重）", () => {
+    const { mgr } = makeDepsManager()
+    expect(mgr.cascade("dep_top")).toEqual(["dep_base", "dep_mid", "dep_top"])
+    expect(mgr.cascade("dep_base")).toEqual(["dep_base"])
+    expect(mgr.cascade("nonexistent")).toEqual([]) // 未知名不展开（load 层报 unknown 错）
+  })
+
+  test("load：依赖自动连带装载（各自命名空间注册，装载方不重复注册依赖工具）", async () => {
+    const { mgr, registry } = makeDepsManager()
+    expect(await mgr.load("dep_top")).toEqual(["dep_base", "dep_mid", "dep_top"])
+    expect(registry.resolve("dep_base_base")).toBeDefined()
+    expect(registry.resolve("dep_mid_mid")).toBeDefined()
+    expect(registry.resolve("dep_top_top")).toBeDefined()
+    expect(registry.resolve("dep_top_base")).toBeUndefined() // 依赖工具只在依赖方命名空间
+    expect(mgr.isLoaded("dep_base")).toBe(true)
+    expect(mgr.getLoaded().map((d) => d.name).sort()).toEqual(["dep_base", "dep_mid", "dep_top"])
+  })
+
+  test("循环依赖报错（定义缺陷暴露给模型修复；自依赖同判）", () => {
+    const mgr = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+    mgr.register({ name: "ca", description: "x", systemPrompt: "y", dependencies: ["cb"] })
+    mgr.register({ name: "cb", description: "x", systemPrompt: "y", dependencies: ["ca"] })
+    expect(() => mgr.cascade("ca")).toThrow("依赖循环: ca → cb → ca")
+    mgr.register({ name: "cs", description: "x", systemPrompt: "y", dependencies: ["cs"] })
+    expect(() => mgr.cascade("cs")).toThrow("依赖循环: cs → cs")
+  })
+
+  test("未知依赖跳过不阻断（告警，自身照常装载——启停名单移除/构建裁剪形态）", () => {
+    const mgr = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+    mgr.register({ name: "orphan", description: "x", systemPrompt: "y", dependencies: ["ghost"] })
+    expect(mgr.cascade("orphan")).toEqual(["orphan"])
+  })
+
+  test("卸载装载方不连带卸载依赖（级联装载的隐式引用同样按 owner 计数）", async () => {
+    const { mgr, registry } = makeDepsManager()
+    await mgr.load("dep_mid", "sessionA") // 连带装载 dep_base（owner=sessionA 记隐式引用）
+    await mgr.load("dep_base", "sessionB") // 幂等跳过注册，追加 sessionB 引用
+    mgr.unload("dep_mid", "sessionA") // 卸载装载方：不连带卸载依赖
+    expect(registry.resolve("dep_base_base")).toBeDefined()
+    expect(registry.resolve("dep_mid_mid")).toBeUndefined()
+    mgr.unload("dep_base", "sessionB") // sessionA 的隐式引用仍在（装载 dep_mid 时连带计入）
+    expect(registry.resolve("dep_base_base")).toBeDefined()
+    mgr.unload("dep_base", "sessionA") // 最后一个引用解除才注销工具
+    expect(registry.resolve("dep_base_base")).toBeUndefined()
   })
 })
 
