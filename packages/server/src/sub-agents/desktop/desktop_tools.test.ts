@@ -401,12 +401,10 @@ describe("desktop definition", () => {
     expect(desktopDef.requiresApproval?.window_list).toBeFalsy()
   })
 
-  test("preload off and tools registered", () => {
+  test("preload off and tools registered (独有工具 only——编排用全局 agent_run，不复刻)", () => {
     expect(desktopDef.preload).toBe(false)
     expect(Object.keys(desktopDef.tools ?? {}).sort()).toEqual(
-      ["agent_run", "clipboard_read", "key_press", "mouse_click", "mouse_move", "screen_info", "screenshot", "type_text", "window_focus", "window_list", "window_move"].sort(),
+      ["clipboard_read", "key_press", "mouse_click", "mouse_move", "screen_info", "screenshot", "type_text", "window_focus", "window_list", "window_move"].sort(),
     )
-    // 编排工具 agent_run（验证多通道委托 code 读应用数据文件）：只读免审批
-    expect(desktopDef.tools!.agent_run.requiresApproval).toBeFalsy()
   })
 })

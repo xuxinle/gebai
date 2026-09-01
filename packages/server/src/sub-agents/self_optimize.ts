@@ -1,7 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { SubAgentDef } from "../core/types"
 import { readFeedbackTool, pageCaptureTool, truncate } from "../core/tools"
-import { makeVisionTool, getVisionProvider } from "../core/vision"
 import { isBinaryMode } from "../core/config"
 
 export const name = "self_optimize"
@@ -237,9 +236,10 @@ function schema(properties: Record<string, unknown>, required: string[] = []): i
 }
 
 /**
- * 工具集只含自优化专属工具（工具与提示词均不复刻 code）：
+ * 工具集只含自优化专属工具（工具与提示词均不复刻 code，亦不复刻全局工具）：
  * 装载/预加载 self_optimize 时系统连带装载 code——文件读写查询为全局工具（直接全局名），
  * 分析/验证类工具由 code 提供（code_ 前缀），通用编码工作流遵循 code 提示词；
+ * 视觉分析（vision）为全局工具（index.ts 注册，agent_run 新会话随全局工具继承），直接用全局名；
  * 本 Agent 只声明自优化专属能力与写范围守卫。
  */
 export const tools = {
@@ -248,7 +248,6 @@ export const tools = {
   rollback: rollbackTool,
   journal: journalTool,
   page_capture: pageCaptureTool,
-  vision: makeVisionTool({ vision: getVisionProvider }),
 }
 export const requiresApproval = { run_tests: true, rollback: true }
 export const preload = false
