@@ -233,6 +233,12 @@ export interface SubAgentDef {
   name: string
   description: string
   systemPrompt: string
+  /** 依赖的其他子Agent 名单（依赖自动装载）：装载/预加载/agent_run 预执行本子Agent 时自动连带
+   *  装载全部依赖（工具按各自 {agent}_ 命名空间注册、提示词一并注入，不重复定义）——子Agent 间
+   *  复用能力走依赖声明而非把依赖方的工具展开进自己的 def。依赖缺失（被启停名单移除/构建裁剪）时
+   *  跳过不阻断；循环依赖在装载时报错（cascade 展开检测）。如 reverse_site 依赖 playwright、
+   *  self_optimize 依赖 code。 */
+  dependencies?: string[]
   /** 子Agent 自有工具（注册为 {agent}_{tool}）。可省略：纯提示词子 Agent（简单/组合式），
    *  省略时子 Agent 运行环境自动注入编排工具（agent_list/agent_load/agent_run）。 */
   tools?: ToolSet

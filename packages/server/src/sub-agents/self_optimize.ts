@@ -264,6 +264,9 @@ export const def: SubAgentDef = {
   preload,
   envVars,
   writeGuard,
+  // 依赖自动装载（DESIGN「子Agent 依赖与自动装载」）：装载/预加载 self_optimize 时系统连带装载 code——
+  // 文件/分析类工具直接用 code_* 命名空间，通用编码工作流提示词由 code 提供，不重复定义
+  dependencies: ["code"],
   // 默认项目根兜底（{AGENT}_PROJECT 未配置时）：dev 模式自动推导歌白仓库根——提示词「项目根」注记、
   // agent_run 新会话工作目录与项目 AGENTS.md 注入随绑定生效（二进制模式无兜底，须显式配置）
   projectRoot: (env) => selfOptimizeRoot(env) ?? undefined,

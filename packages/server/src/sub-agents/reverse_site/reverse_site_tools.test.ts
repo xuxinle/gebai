@@ -224,11 +224,17 @@ describe("reverse_site def", () => {
       expect(`${reverseSiteDef.name}_${t}`.length).toBeLessThanOrEqual(40)
     }
   })
-  test("includes capture/http/browser/orchestrator tools", () => {
+  test("依赖 playwright（自动连带装载）：只声明接口逆向独有工具，不复刻 playwright/全局工具", () => {
     const names = Object.keys(reverseSiteDef.tools ?? {})
-    for (const t of ["http_request", "capture_start", "capture_stop", "capture_clear", "capture_list", "open", "content", "evaluate", "fetch_url", "read", "write", "agent_run"]) {
+    for (const t of ["http_request", "capture_start", "capture_stop", "capture_clear", "capture_list"]) {
       expect(names).toContain(t)
     }
-    expect(reverseSiteDef.requiresApproval).toMatchObject({ http_request: true, open: true, write: true })
+    // 浏览器自动化全套经 dependencies 连带装载（playwright_ 命名空间）；文件/编排工具走全局名——本 def 不重复声明
+    for (const t of ["open", "content", "evaluate", "screenshot", "fetch_url", "read", "write", "agent_run", "agent_list", "agent_load"]) {
+      expect(names).not.toContain(t)
+    }
+    expect(reverseSiteDef.dependencies).toEqual(["playwright"])
+    expect(reverseSiteDef.requiresApproval).toMatchObject({ http_request: true })
+    expect(reverseSiteDef.requiresApproval?.open).toBeUndefined() // 审批映射由 playwright def 单源维护
   })
 })

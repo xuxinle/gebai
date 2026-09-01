@@ -51,4 +51,18 @@ description: 组合 Agent：编排多个子 Agent
     expect(r.description).toBe("---")
     expect(r.systemPrompt).toBe("---\n这不是 frontmatter\n正文")
   })
+
+  test("parses frontmatter dependencies (逗号分隔，装载时自动连带装载)", () => {
+    const md = "---\ndescription: 站点逆向组合\ndependencies: playwright, code\n---\n你是组合专家。"
+    const r = parseSubAgentMd("revcombo", md)
+    expect(r.dependencies).toEqual(["playwright", "code"])
+    expect(r.description).toBe("站点逆向组合")
+  })
+
+  test("dependencies 过滤非法条目（命名规则 [a-z0-9_]+）；未声明为 undefined", () => {
+    const md = "---\ndependencies: playwright, Bad-Name, ,9x\n---\n正文"
+    const r = parseSubAgentMd("pick", md)
+    expect(r.dependencies).toEqual(["playwright", "9x"])
+    expect(parseSubAgentMd("none", "正文").dependencies).toBeUndefined()
+  })
 })

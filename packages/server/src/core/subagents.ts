@@ -162,13 +162,13 @@ export class SubAgentManager {
     await this.discover()
   }
 
-  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description）。
+  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description/dependencies）。
    *  加载失败记入 loadErrors（模型侧可见根因）。 */
   private async loadMdOnly(base: string, dir: string): Promise<void> {
     try {
       const md = await Bun.file(join(dir, base, `${base}.md`)).text()
-      const { description, systemPrompt } = parseSubAgentMd(base, md)
-      this.defs.set(base, { name: base, description, systemPrompt })
+      const { description, systemPrompt, dependencies } = parseSubAgentMd(base, md)
+      this.defs.set(base, dependencies?.length ? { name: base, description, systemPrompt, dependencies } : { name: base, description, systemPrompt })
     } catch (err) {
       const msg = `加载 ${base}/${base}.md 失败: ${String((err as Error).message || err)}`
       console.warn(`[subagents] ${msg}`)
@@ -190,11 +190,39 @@ export class SubAgentManager {
   private static readonly GLOBAL_OWNER = "*global*"
   private ownersByAgent = new Map<string, Map<string, true>>()
 
+  /** 依赖级联展开（DESIGN「子Agent 依赖与自动装载」）：返回装载本子Agent 需要的完整名单——
+   *  依赖在前、自身在后（依赖先注册工具先注入提示词），传递依赖递归展开，去重。
+   *  循环依赖抛错（定义缺陷须暴露给模型修复）；依赖缺失（被启停名单移除/构建裁剪）跳过并告警，
+   *  不阻断装载方（自身工具照常可用，仅失去该依赖能力——与旧 self_optimize→code 的 defs.has 守卫同语义）。 */
+  cascade(name: string): string[] {
+    const out: string[] = []
+    const state = new Map<string, "visiting" | "done">()
+    const visit = (n: string, path: string[]): void => {
+      const st = state.get(n)
+      if (st === "done") return
+      if (st === "visiting") throw new Error(`子Agent 依赖循环: ${[...path, n].join(" → ")}`)
+      const def = this.defs.get(n)
+      if (!def) {
+        if (path.length) console.warn(`[subagents] ${path[path.length - 1]} 依赖的子Agent ${n} 不存在（可能被启停名单移除或构建裁剪），已跳过`)
+        state.set(n, "done")
+        return
+      }
+      state.set(n, "visiting")
+      for (const dep of def.dependencies ?? []) visit(dep, [...path, n])
+      state.set(n, "done")
+      out.push(n)
+    }
+    visit(name, [])
+    return out
+  }
+
   /** 装载子Agent 能力模块（agent_load 工具 / WS sub_agent.load / 预加载的统一入口，幂等）：
    *  模块语义（DESIGN「装载 vs 新会话执行」）——工具并入当前工具集（{agent}_ 命名空间注册）、完整系统提示词由调用方写入会话记录，
    *  不创建新上下文、无独立执行；与新会话执行（agent_run，派生临时新会话执行）是两种不同概念。
    *  owner：装载者（会话 id / agent_run 共享标记 / 缺省全局），unload 按其解引用。
-   *  返回本次实际装载的名字列表（幂等跳过的不计入；self_optimize 连带装载 code 时两者都计入）。 */
+   *  依赖自动装载：cascade 展开的名单逐个幂等装载（依赖方只注册 def 声明的独有工具，依赖的工具由
+   *  依赖方 def 以其自身命名空间注册，不重复定义——如 reverse_site 复用 playwright_*、self_optimize 复用 code_*）。
+   *  返回本次实际装载的名字列表（幂等跳过的不计入；连带装载依赖时依赖也计入）。 */
   async load(name: string, owner: string = SubAgentManager.GLOBAL_OWNER): Promise<string[]> {
     // 热加载检查（目录签名变化即重扫）：agent_load/路由自愈/agent_run 预加载前拿到最新定义
     // （如 self_optimize 刚生成的子Agent 文件）；签名未变时零成本（一次目录遍历）
@@ -209,24 +237,19 @@ export class SubAgentManager {
       }
       owners.set(owner, true)
     }
-    if (this.loaded.has(name)) {
-      track(name) // 已注册（他方装载）：幂等跳过注册，但记入本装载者引用
-      return []
+    const added: string[] = []
+    for (const n of this.cascade(name)) {
+      if (this.loaded.has(n)) {
+        track(n) // 已注册（他方/依赖连带装载）：幂等跳过注册，但记入本装载者引用
+        continue
+      }
+      const d = n === name ? def : this.defs.get(n)!
+      this.registry.registerSubAgentTools(n, d.tools ?? {}, d.requiresApproval)
+      this.loaded.add(n)
+      track(n)
+      added.push(n)
     }
-    // self_optimize 复用 code 的通用能力（其 def 只声明 code 没有的独有工具，提示词亦不复刻 code 工作流）：
-    // 装载 self_optimize 时连带装载 code——文件/分析类工具直接用 code_* 命名空间，无需重复注册。
-    // load 幂等（loaded 去重）：code 已装载则跳过，不重复注册工具。
-    if (name === "self_optimize" && this.defs.has("code")) {
-      const loadedNow = await this.load("code", owner)
-      this.registry.registerSubAgentTools(name, def.tools ?? {}, def.requiresApproval)
-      this.loaded.add(name)
-      track(name)
-      return [...loadedNow, name]
-    }
-    this.registry.registerSubAgentTools(name, def.tools ?? {}, def.requiresApproval)
-    this.loaded.add(name)
-    track(name)
-    return [name]
+    return added
   }
 
   /** 卸载（解引用）：仅当无其他装载者时才注销工具注册（owner 缺省为全局卸载）。 */
