@@ -6,15 +6,15 @@ import { isBinaryMode } from "../core/config"
 
 export const name = "self_optimize"
 export const description =
-  "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 self_optimize_read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具）并同步 DESIGN.md，测试失败可 rollback 回滚。不处理外部项目（外部代码用 code）。"
+  "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 self_optimize_read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具支持 test/typecheck/lint 三件套）并同步 DESIGN.md，测试失败可 rollback 回滚（含新建文件清理），优化历史经 self_optimize_journal 跨会话沉淀。不处理外部项目（外部代码用 code）。"
 export const systemPrompt =
   "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内）；文件读写查询（read/write/edit/patch/grep/sh 等）为全局工具直接用全局名（带 project 参数路由项目），分析/验证类工具由 code 提供（search_symbols/analyze/git/preview_server，以 code_ 前缀调用）；本提示词只补充自我优化特有的流程与约束：\n" +
-  "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；\n" +
-  "2) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；\n" +
+  "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；开工先用 self_optimize_journal action=list 查相关历史与教训（跨会话优化记忆，不重复踩坑）；\n" +
+  "2) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；写仓库文件一律用 write/edit/patch 文件工具（写范围守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（守卫不拦脚本通道，绕行属违规且绕开防盲写保护）；新建/修改子Agent 文件后立即验证注册（agent_run 试跑或 agent_list 查看——注册失败会直接返回文件加载错误原因，据因修复后再验）；\n" +
   "3) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；\n" +
-  "4) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认后 all=true 跑全量），失败则修复或 self_optimize_rollback 回滚（按路径回滚工作区改动；失败先看错误信息定位再修复重测，不盲目重复执行）；再运行 bun run typecheck/bun run lint 确认无回归（sh 工具，需审批）；\n" +
+  "4) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
   "5) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision 分析截图，确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
-  "6) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
+  "6) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal 记录本次优化（title/changes/verification/outcome/lessons——优化历史跨会话沉淀）；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
   "项目名称：歌白（GEBAI Agent）。项目范围：项目根以系统提示词动态注记「项目根:」为准——设置了 SELF_OPTIMIZE_PROJECT 环境变量时即该路径（服务端部署限定项目内，本地模式不限制目录）；未设置时脚本调试（dev）模式自动推导为歌白源码仓库根（与 run_tests/rollback 工作目录及写范围守卫同源，提示词注记给出具体路径）；二进制模式未配置且无注记时按用户给定的路径处理。"
 
 /** 默认只读模式下允许写入的仓库级文件（根一级）。 */
@@ -73,39 +73,60 @@ function safePathArgs(paths: string[]): string | null {
   return bad === undefined ? null : `路径参数含非法字符（引号/shell 元字符）: ${bad}`
 }
 
-/** run_tests：在歌白仓库根执行测试（指定测试文件或全量）——测试是自我修改的唯一准入凭证。 */
+/** run_tests：在歌白仓库根执行验证（指定测试文件/全量 + 可选 typecheck/lint——AGENTS.md 准入三件套）：
+ *  测试是自我修改的唯一准入凭证。 */
 const runTestsTool: import("../core/types").Tool = {
   name: "run_tests",
   description:
-    "在歌白仓库根执行测试（测试是自我修改的唯一准入凭证）：files 传相关测试文件（相对仓库根，可多个），确认无回归后 all=true 跑全量。输出测试结果（失败需修复或 rollback 回滚）。需审批。",
+    "在歌白仓库根执行验证（自我修改的唯一准入凭证）：checks 选择检查项（默认 [\"test\"]；修改确认后、收尾前用 [\"test\",\"typecheck\",\"lint\"] 三件套——与 AGENTS.md 提交准入一致，一次审批跑全）；test 时 files 传相关测试文件（相对仓库根，可多个），all=true 跑全量。按序执行、首项失败即停。输出各项结果（失败需修复或 rollback 回滚）。需审批。",
   requiresApproval: true,
   parameters: schema({
     files: { type: "array", items: { type: "string" }, description: "测试文件列表（相对仓库根；如 [\"src/core/engine.test.ts\"]）" },
     all: { type: "boolean", description: "true 跑全量测试（bun run test，忽略 files）" },
+    checks: { type: "array", items: { type: "string", enum: ["test", "typecheck", "lint"] }, description: "检查项列表（默认 [\"test\"]；[\"test\",\"typecheck\",\"lint\"] 为提交前三件套）" },
   }),
   async execute(args, ctx) {
     const root = selfOptimizeRoot(ctx.env)
     if (!root) return { output: "无法定位歌白仓库根：请设置 SELF_OPTIMIZE_PROJECT 环境变量。" }
     const files = (Array.isArray(args.files) ? args.files : []).map(String).filter(Boolean)
-    if (args.all !== true && !files.length) return { output: "run_tests 需要 files 参数（相关测试文件）或 all=true（全量测试）。" }
+    const rawChecks = (Array.isArray(args.checks) ? args.checks : []).map(String)
+    const checks = [...new Set(rawChecks.length ? rawChecks : ["test"])]
+    const invalid = checks.find((c) => c !== "test" && c !== "typecheck" && c !== "lint")
+    if (invalid) return { output: `无效的检查项: ${invalid}（仅支持 test/typecheck/lint）。` }
+    if (checks.includes("test") && args.all !== true && !files.length) {
+      return { output: "run_tests 需要 files 参数（相关测试文件）或 all=true（全量测试）。" }
+    }
     const unsafe = safePathArgs(files)
     if (unsafe) return { output: unsafe }
-    const cmd = args.all === true ? "bun run test" : `bun test ${files.map((f) => `"${f}"`).join(" ")}`
-    const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: root, timeoutMs: 5 * 60 * 1000 })
-    const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
-    return truncate(out, "run_tests", ctx)
+    const sections: string[] = []
+    for (const check of checks) {
+      const cmd =
+        check === "test"
+          ? args.all === true
+            ? "bun run test"
+            : `bun test ${files.map((f) => `"${f}"`).join(" ")}`
+          : check === "typecheck"
+            ? "bun run typecheck"
+            : "bun run lint"
+      const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: root, timeoutMs: 10 * 60 * 1000 })
+      sections.push(`—— ${check}（${cmd}）${code === 0 ? " ✅" : ` ❌ exit ${code}`} ——\n${code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`}`)
+      if (code !== 0) break // 首项失败即停：后续检查基于未通过代码无意义
+    }
+    return truncate(sections.join("\n\n"), "run_tests", ctx)
   },
 }
 
-/** rollback：回滚工作区改动（测试失败时的恢复路径——git checkout -- 指定路径或全部）。 */
+/** rollback：回滚工作区未提交改动（测试失败时的恢复路径）——恢复被修改的 tracked 文件 + 删除新建的
+ *  untracked 文件（git checkout 只恢复 tracked；新文件是自我修改的主要产物（如新建子Agent），残留会被
+ *  热加载注册为破损 Agent，必须一并清理；先 dry-run 列出将删除的新建文件再执行，输出如实展示）。 */
 const rollbackTool: import("../core/types").Tool = {
   name: "rollback",
   description:
-    "回滚工作区未提交改动（测试失败后的恢复路径）：paths 传要回滚的文件/目录（相对仓库根，可多个），all=true 回滚全部未提交改动。**注意：会丢弃未提交的修改**——仅用于撤销本次失败的自我修改；工作区若有与本次任务无关的既有改动，请用 paths 精确指定而非 all。需审批。",
+    "回滚工作区未提交改动（测试失败后的恢复路径）：paths 传要回滚的文件/目录（相对仓库根，可多个——恢复其内修改并删除其内新建文件），all=true 回滚全部未提交改动。**注意：会丢弃未提交的修改与新建文件**——仅用于撤销本次失败的自我修改；工作区若有与本次任务无关的既有改动，请用 paths 精确指定而非 all。需审批。",
   requiresApproval: true,
   parameters: schema({
-    paths: { type: "array", items: { type: "string" }, description: "回滚文件/目录列表（相对仓库根）" },
-    all: { type: "boolean", description: "true 回滚全部未提交改动（git checkout -- .）" },
+    paths: { type: "array", items: { type: "string" }, description: "回滚文件/目录列表（相对仓库根；恢复修改 + 删除其内新建文件）" },
+    all: { type: "boolean", description: "true 回滚全部未提交改动（git checkout -- . + git clean -fd）" },
   }),
   async execute(args, ctx) {
     const root = selfOptimizeRoot(ctx.env)
@@ -114,12 +135,97 @@ const rollbackTool: import("../core/types").Tool = {
     if (args.all !== true && !paths.length) return { output: "rollback 需要 paths 参数或 all=true。" }
     const unsafe = safePathArgs(paths)
     if (unsafe) return { output: unsafe }
-    const cmd = args.all === true ? "git checkout -- ." : `git checkout -- ${paths.map((p) => `"${p}"`).join(" ")}`
-    const r = await ctx.runCommand(cmd, { workdir: root })
-    if (r.code !== 0) return { output: `rollback 失败：\n${r.stdout}\n${r.stderr}\n[exit ${r.code}]` }
+    const targets = args.all === true ? ["."] : paths
+    const q = (p: string) => `"${p}"`
+    // dry-run 先列出将删除的新建文件（untracked）——checkout 对其本就无可恢复（pathspec 不匹配属预期）
+    const dry = await ctx.runCommand(`git clean -nd ${targets.map(q).join(" ")}`, { workdir: root })
+    let coErr = ""
+    for (const t of targets) {
+      const r = await ctx.runCommand(`git checkout -- ${q(t)}`, { workdir: root })
+      if (r.code !== 0 && !dry.stdout.includes(t)) coErr += `${r.stderr.trim()}\n`
+    }
+    const clean = await ctx.runCommand(`git clean -fd ${targets.map(q).join(" ")}`, { workdir: root })
     const status = await ctx.runCommand("git status --short", { workdir: root })
-    const out = `已回滚。当前工作区状态：\n${status.stdout.trim() || "（干净）"}`
-    return truncate(out, "rollback", ctx)
+    if (coErr || clean.code !== 0) {
+      return truncate(`rollback 失败：\n${coErr}${clean.stdout}\n${clean.stderr}\n[exit clean ${clean.code}]\n当前工作区状态：\n${status.stdout.trim() || "（干净）"}`, "rollback", ctx)
+    }
+    const removed = dry.stdout.trim()
+    return truncate(`已回滚。${removed ? `删除的新建文件：\n${removed}\n` : ""}当前工作区状态：\n${status.stdout.trim() || "（干净）"}`, "rollback", ctx)
+  },
+}
+
+/** 优化日志条目（跨会话优化记忆，DESIGN「变更管理」的补丁记录落地）。 */
+interface OptimizeJournalEntry {
+  at: number
+  title: string
+  changes?: string[]
+  verification?: string
+  outcome?: "applied" | "reverted" | "failed"
+  lessons?: string
+}
+
+/** 优化日志存储：users/{user}/self-optimize-journal.json（与 ws-journal 同位，gitignored 运行时数据），
+ *  环形保留最近 100 条。 */
+const JOURNAL_FILE = "self-optimize-journal.json"
+const JOURNAL_MAX_ENTRIES = 100
+
+/** journal：自我优化日志（append 记录一次优化 / list 读最近记录）——跨会话优化记忆：失败的尝试与教训
+ *  沉淀后，后续优化任务开工先查历史避免重复踩坑；git 历史只记代码变更，这里补「为什么改 + 验证结果」。 */
+const journalTool: import("../core/types").Tool = {
+  name: "journal",
+  description:
+    "自我优化日志（跨会话优化记忆）：action=append 记录一次优化（title 必填；changes 改动清单（文件:摘要）；verification 验证方式与结果（如 run_tests 三件套/用户确认）；outcome applied=已落地/reverted=已回滚/failed=验证未通过；lessons 经验教训）；action=list 读最近记录（limit 默认 10，新→旧）。接到优化任务时先 list 了解相关历史与教训，收尾时必 append 记录本次。",
+  parameters: schema({
+    action: { type: "string", enum: ["append", "list"], description: "append=记录一次优化；list=读取最近记录" },
+    title: { type: "string", description: "优化标题（append 必填，一句话说清做了什么）" },
+    changes: { type: "array", items: { type: "string" }, description: "改动清单（文件路径: 改动摘要，可多条）" },
+    verification: { type: "string", description: "验证方式与结果" },
+    outcome: { type: "string", enum: ["applied", "reverted", "failed"], description: "结果（默认 applied）" },
+    lessons: { type: "string", description: "经验教训（失败原因/坑/下次怎么做得更好）" },
+    limit: { type: "number", description: "list 返回条数（默认 10，新→旧）" },
+  }),
+  async execute(args, ctx) {
+    const { join, dirname } = await import("node:path")
+    const { mkdir } = await import("node:fs/promises")
+    const file = join(ctx.home, "users", ctx.user, JOURNAL_FILE)
+    let entries: OptimizeJournalEntry[] = []
+    try {
+      const parsed = JSON.parse(await Bun.file(file).text())
+      if (Array.isArray(parsed)) entries = parsed.filter((e) => e && typeof e === "object" && typeof e.title === "string")
+    } catch {
+      /* 首次记录或文件损坏：从空开始 */
+    }
+    const action = String(args.action ?? "list")
+    if (action === "append") {
+      const title = String(args.title ?? "").trim()
+      if (!title) return { output: "journal append 需要 title（一句话说清本次优化）。" }
+      const entry: OptimizeJournalEntry = { at: Date.now(), title }
+      const changes = (Array.isArray(args.changes) ? args.changes : []).map(String).filter(Boolean)
+      if (changes.length) entry.changes = changes
+      const verification = String(args.verification ?? "").trim()
+      if (verification) entry.verification = verification
+      const outcome = String(args.outcome ?? "")
+      if (outcome === "applied" || outcome === "reverted" || outcome === "failed") entry.outcome = outcome
+      const lessons = String(args.lessons ?? "").trim()
+      if (lessons) entry.lessons = lessons
+      entries.push(entry)
+      if (entries.length > JOURNAL_MAX_ENTRIES) entries = entries.slice(-JOURNAL_MAX_ENTRIES)
+      await mkdir(dirname(file), { recursive: true })
+      await Bun.write(file, JSON.stringify(entries, null, 2))
+      return { output: `已记录（累计 ${entries.length} 条）：${title}` }
+    }
+    if (action !== "list") return { output: `无效的 action: ${action}（仅支持 append/list）。` }
+    const limit = Math.max(1, Math.min(50, Number(args.limit) || 10))
+    const list = entries.slice(-limit).reverse()
+    if (!list.length) return { output: "（暂无优化记录）" }
+    const fmt = (e: OptimizeJournalEntry) => {
+      const lines = [`[${new Date(e.at).toLocaleString("zh-CN")}] ${e.title}${e.outcome ? `（${e.outcome}）` : ""}`]
+      for (const c of e.changes ?? []) lines.push(`  改动: ${c}`)
+      if (e.verification) lines.push(`  验证: ${e.verification}`)
+      if (e.lessons) lines.push(`  教训: ${e.lessons}`)
+      return lines.join("\n")
+    }
+    return { output: `优化记录（新→旧，共 ${list.length} 条）:\n\n${list.map(fmt).join("\n\n")}` }
   },
 }
 
@@ -137,6 +243,7 @@ export const tools = {
   read_feedback: readFeedbackTool,
   run_tests: runTestsTool,
   rollback: rollbackTool,
+  journal: journalTool,
   page_capture: pageCaptureTool,
   vision: makeVisionTool({ vision: getVisionProvider }),
 }

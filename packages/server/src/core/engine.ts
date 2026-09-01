@@ -2600,7 +2600,8 @@ export class AgentEngine {
     }
     if (agents.length > MAX_AGENTS_PER_RUN) throw new Error(`子Agent 数量超限（${agents.length} > ${MAX_AGENTS_PER_RUN}）`)
     for (const name of agents) {
-      if (!this.opts.subAgents.def(name)) throw new Error(`未知子Agent: ${name}`)
+      // 未知子Agent 附加载失败原因（有文件但 import 抛错/缺 def 导出时引导精确修复——self_optimize 自修复闭环）
+      if (!this.opts.subAgents.def(name)) throw new Error(`未知子Agent: ${name}${this.opts.subAgents.loadError(name) ? `（其文件加载失败: ${this.opts.subAgents.loadError(name)}——修复该文件后即可执行）` : ""}`)
     }
     if (depth >= SUBAGENT_DEPTH) throw new Error(`子Agent 递归深度超限: ${agents.join(",")}`)
     return agents

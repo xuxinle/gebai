@@ -17,6 +17,9 @@ export interface SubAgentManagerOptions {
  *  即失效重新扫描（DESIGN「子Agent 热加载」）——self_optimize 生成新子Agent 后当会话可用，无需重启。 */
 let discoveredDefsCache: SubAgentDef[] | null = null
 let discoveredSigCache: string | null = null
+/** 首次扫描的加载错误缓存（与 defs 缓存配套，跨实例水合同源）：name → 失败原因（import 抛错/
+ *  缺 def 导出等）。签名未变的后续 discover 直接复用；self_optimize 修复文件后 mtime 变化触发重扫更新。 */
+let discoveredErrorsCache: Map<string, string> | null = null
 
 /** 计算子Agent 目录签名：递归收集 .ts/.md 文件（排除 .test.ts）的 路径:mtimeMs 排序拼接——
  *  任何新增/修改/删除都改变签名；目录不存在（dist/二进制 bundled 形态）返回 null（bundle 注册表不可变）。
@@ -52,6 +55,10 @@ export class SubAgentManager {
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
+  /** 最近一次扫描中加载失败的子Agent（name → 失败原因）：模型侧可见（load/agent_run 的未知子Agent
+   *  错误附原因），self_optimize 写错文件（import 抛错/缺 def 导出）能立即看到根因并修复——
+   *  仅 console.warn 时模型不可见，自修复闭环断在「未知子Agent」无解释。 */
+  private loadErrors = new Map<string, string>()
 
   constructor(opts: SubAgentManagerOptions) {
     this.registry = opts.registry
@@ -67,6 +74,7 @@ export class SubAgentManager {
       this.defs.clear()
       for (const def of discoveredDefsCache) this.defs.set(def.name, def)
       for (const n of this.removedDefs) this.defs.delete(n)
+      this.loadErrors = new Map(discoveredErrorsCache ?? [])
       await this.preload()
       return
     }
@@ -91,6 +99,7 @@ export class SubAgentManager {
     }
     // 全量扫描（首次或目录签名变化——热加载）：重扫前清空（删除的文件不再保留旧定义）
     this.defs.clear()
+    this.loadErrors.clear()
     const entries = await readdir(dir, { withFileTypes: true })
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
@@ -102,9 +111,15 @@ export class SubAgentManager {
           const mod = await import(`../sub-agents/${base}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
           if (def) this.defs.set(def.name, def)
-          else console.warn(`[subagents] ${base}.ts 未导出 def，已跳过`)
+          else {
+            const msg = `${base}.ts 未导出 def（须 export const def: SubAgentDef）`
+            console.warn(`[subagents] ${msg}，已跳过`)
+            this.loadErrors.set(base, msg)
+          }
         } catch (err) {
-          console.warn(`[subagents] 加载 ${base}.ts 失败: ${(err as Error).message}`)
+          const msg = `加载 ${base}.ts 失败: ${(err as Error).message}`
+          console.warn(`[subagents] ${msg}`)
+          this.loadErrors.set(base, String((err as Error).message || err))
         }
       } else if (e.isDirectory()) {
         // 目录形式：{dir}/{dir}.ts 为定义入口；系统提示词可拆 {dir}.md 由入口文件导入并修饰。
@@ -121,6 +136,7 @@ export class SubAgentManager {
             else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
           } catch (err) {
             console.warn(`[subagents] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
+            this.loadErrors.set(base, `${base}/${base}.ts 加载失败: ${String((err as Error).message || err)}`)
           }
         } else {
           await this.loadMdOnly(base, dir)
@@ -130,6 +146,7 @@ export class SubAgentManager {
     for (const n of this.removedDefs) this.defs.delete(n)
     discoveredDefsCache = [...this.defs.values()]
     discoveredSigCache = sig
+    discoveredErrorsCache = new Map(this.loadErrors)
     await this.preload()
   }
 
@@ -145,14 +162,17 @@ export class SubAgentManager {
     await this.discover()
   }
 
-  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description）。 */
+  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description）。
+   *  加载失败记入 loadErrors（模型侧可见根因）。 */
   private async loadMdOnly(base: string, dir: string): Promise<void> {
     try {
       const md = await Bun.file(join(dir, base, `${base}.md`)).text()
       const { description, systemPrompt } = parseSubAgentMd(base, md)
       this.defs.set(base, { name: base, description, systemPrompt })
     } catch (err) {
-      console.warn(`[subagents] 加载 ${base}/${base}.md 失败: ${(err as Error).message}`)
+      const msg = `加载 ${base}/${base}.md 失败: ${String((err as Error).message || err)}`
+      console.warn(`[subagents] ${msg}`)
+      this.loadErrors.set(base, msg)
     }
   }
 
@@ -180,7 +200,7 @@ export class SubAgentManager {
     // （如 self_optimize 刚生成的子Agent 文件）；签名未变时零成本（一次目录遍历）
     await this.refreshIfChanged()
     const def = this.defs.get(name)
-    if (!def) throw new Error(`unknown sub-agent: ${name}`)
+    if (!def) throw new Error(this.unknownAgentError(name))
     const track = (n: string) => {
       let owners = this.ownersByAgent.get(n)
       if (!owners) {
@@ -223,6 +243,19 @@ export class SubAgentManager {
 
   def(name: string): SubAgentDef | undefined {
     return this.defs.get(name)
+  }
+
+  /** 最近一次扫描中该子Agent 的加载失败原因（无失败/未知返回 undefined）：未知子Agent 错误附因，
+   *  self_optimize 写错文件（import 抛错/缺 def 导出）当场可见根因。 */
+  loadError(name: string): string | undefined {
+    return this.loadErrors.get(name)
+  }
+
+  /** 未知子Agent 错误信息（agent_load/agent_run 校验共用）：命中加载失败记录时附原因——
+   *  文件存在但加载失败（语法错误/缺导出/缺依赖）与名字拼错是两类问题，附因引导精确修复。 */
+  unknownAgentError(name: string): string {
+    const err = this.loadErrors.get(name)
+    return err ? `unknown sub-agent: ${name}（其文件加载失败: ${err}——修复该文件后即可装载）` : `unknown sub-agent: ${name}`
   }
 
   /** 全部子Agent 定义（含 envVars 声明；环境变量目录等消费方）。 */
