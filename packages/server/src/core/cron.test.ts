@@ -174,23 +174,27 @@ describe("notify", () => {
     expect(text).toContain("错误: boom")
     expect(posts[0].body.timestamp).toBe("1700000000")
     expect(posts[0].body.sign).toBe(feishuBotSign("1700000000", "s3cret"))
-    // 仅 @ 具体 open_id（无 all）→ 2.0 markdown 卡片（与对话桥接同款新版本接口）：schema 2.0 + 着色头部 + markdown 组件 + at 标签
+    // 仅 @ 具体 open_id（无 all）→ 1.0 卡片（自定义机器人 webhook 不支持 2.0 卡片——schema V2 + note 实测被拒
+    // code=11246）：config.wide_screen_mode + 着色头部 + div/lark_md 正文 + note 脚注，无 schema 字段
     await sendCronNotification(
       { type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc", at: [{ id: "ou_abc123", name: "张三" }] },
       { event: "cron.result", task: { id: "t1", name: "n", type: "script", schedule: "@daily", user: "u" }, ok: false, status: "error", at: 1700000000000, error: "boom" },
       { now: () => 1700000000000, fetchImpl: fetchPost },
     )
     expect(posts[1].body.msg_type).toBe("interactive")
-    const card = posts[1].body.card as { schema: string; header: { template: string; title: { content: string } }; body: { elements: Array<{ tag: string; content?: string }> } }
-    expect(card.schema).toBe("2.0")
+    const card = posts[1].body.card as { schema?: string; config?: { wide_screen_mode?: boolean }; header: { template: string; title: { content: string } }; elements: Array<{ tag: string; text?: { tag: string; content?: string }; elements?: Array<{ tag: string; content?: string }> }> }
+    expect(card.schema).toBeUndefined() // 1.0 卡片无 schema 字段
+    expect(card.config?.wide_screen_mode).toBe(true)
     expect(card.header.template).toBe("red")
     expect(card.header.title.content).toContain("「n」")
-    const md = card.body.elements.find((e) => e.tag === "markdown")!
+    const md = card.elements.find((e) => e.tag === "div")!.text!
+    expect(md.tag).toBe("lark_md")
     expect(md.content).toContain("**状态：**")
     expect(md.content).toContain("失败")
-    expect(md.content).toContain('**错误：**boom')
-    // 2.0 markdown 组件 at 语法为 <at id=…>（不同于 text 消息的 user_id 属性）
+    expect(md.content).toContain("**错误：**boom")
+    // 1.0 lark_md 的 @ 语法同样为 <at id=…>（与 2.0 markdown 组件一致；text 消息才是 user_id 属性）
     expect(md.content).toContain('<at id=ou_abc123>张三</at>')
+    expect(card.elements.some((e) => e.tag === "note")).toBe(true)
     // 任务输出中的尖括号净化（防输出注入 at/链接标签）
     const injected = await sendCronNotification(
       { type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc" },
@@ -198,7 +202,7 @@ describe("notify", () => {
       { fetchImpl: async (_u, init) => { posts.push({ url: _u, body: JSON.parse(String(init.body)) }); return { ok: true, status: 200 } } },
     )
     expect(injected).toBeUndefined()
-    const md2 = ((posts[2].body.card as { body: { elements: Array<{ tag: string; content?: string }> } }).body.elements.find((e) => e.tag === "markdown")!).content
+    const md2 = ((posts[2].body.card as { elements: Array<{ tag: string; text?: { content?: string } }> }).elements.find((e) => e.tag === "div")!.text!.content)!
     expect(md2).not.toContain('<at user_id="all">假@</at>')
     expect(md2).toContain("＜at")
 
@@ -259,6 +263,45 @@ describe("notify", () => {
     expect(md2).toContain('<at id=ou_abc></at>')
     // 未注入飞书应用凭证时明确报错
     await expect(sendCronNotification({ type: "feishu_chat", target: "oc_123" }, n, {})).rejects.toThrow(/未配置/)
+  })
+
+  test("sendCronNotification feishu webhook: 业务 code 非 0 视为失败（HTTP 200 静默失败防护）", async () => {
+    const n: CronResultNotification = { event: "cron.result", task: { id: "t", name: "x", type: "script", schedule: "@daily", user: "u" }, ok: true, status: "success", at: 0 }
+    const ch: Parameters<typeof sendCronNotification>[0] = { type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/abc" }
+    // code=0 → 投递成功
+    await expect(sendCronNotification(ch, n, { fetchImpl: async () => ({ ok: true, status: 200, body: JSON.stringify({ code: 0, msg: "success" }) }) })).resolves.toBeUndefined()
+    // 业务 code 非 0（如 2.0 卡片被拒的 11246）→ 抛错（HTTP 200 但投递实际失败）
+    await expect(
+      sendCronNotification(ch, n, { fetchImpl: async () => ({ ok: true, status: 200, body: JSON.stringify({ code: 11246, msg: "unsupported tag note" }) }) }),
+    ).rejects.toThrow(/11246/)
+    // 响应体缺失（注入形态不提供 body）→ 无业务码可判，按 HTTP 成功处理
+    await expect(sendCronNotification(ch, n, { fetchImpl: async () => ({ ok: true, status: 200 }) })).resolves.toBeUndefined()
+    // 响应体非 JSON → 同样按成功处理
+    await expect(sendCronNotification(ch, n, { fetchImpl: async () => ({ ok: true, status: 200, body: "<html>gateway</html>" }) })).resolves.toBeUndefined()
+    // 通用 webhook 通道不校验业务码（保持行为不变）
+    await expect(
+      sendCronNotification({ type: "webhook", target: "https://example.com/hook" }, n, { fetchImpl: async () => ({ ok: true, status: 200, body: JSON.stringify({ code: 999 }) }) }),
+    ).resolves.toBeUndefined()
+    // 业务码校验不影响签名字段（加签载荷照常携带）
+    const posts: Array<{ body: Record<string, unknown> }> = []
+    await sendCronNotification(
+      { ...ch, secret: "s3cret" },
+      n,
+      {
+        now: () => 1700000000000,
+        fetchImpl: async (_u, init) => {
+          posts.push({ body: JSON.parse(String(init.body)) })
+          return { ok: true, status: 200, body: JSON.stringify({ code: 0, msg: "success" }) }
+        },
+      },
+    )
+    expect(posts[0].body.timestamp).toBe("1700000000")
+    expect(posts[0].body.sign).toBe(feishuBotSign("1700000000", "s3cret"))
+    // 1.0 卡片 payload：msg_type=interactive + card 无 schema 字段（webhook 兼容形态）
+    const cardBody = posts[0].body.card as { schema?: string; elements: Array<{ tag: string }> }
+    expect(posts[0].body.msg_type).toBe("interactive")
+    expect(cardBody.schema).toBeUndefined()
+    expect(cardBody.elements.map((e) => e.tag)).toEqual(["div", "note"])
   })
 })
 
