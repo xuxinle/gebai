@@ -204,19 +204,21 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     cleanup(home)
   })
 
-  test("run_tests checks 三件套：按序执行 test/typecheck/lint，首项失败即停", async () => {
+  test("run_tests checks 三件套：按序执行 test/typecheck/lint，首项失败即停（成功亦合并 stderr 明细）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-checks-"))
     const cmds: string[] = []
     const ok = ctx(home, {
       env: { SELF_OPTIMIZE_PROJECT: home },
       runCommand: async (cmd: string) => {
         cmds.push(cmd)
-        return { stdout: "", stderr: "", code: 0 }
+        // Windows 下 bun test 把用例明细/汇总写 stderr（exit 0 亦然）——成功时也必须并入输出
+        return { stdout: "", stderr: cmd.startsWith("bun test") ? "13 pass\n0 fail" : "", code: 0 }
       },
     })
     const r = await selfOptimizeDef.tools!.run_tests.execute({ checks: ["test", "typecheck", "lint"], files: ["src/a.test.ts"] }, ok)
     expect(cmds).toEqual(['bun test "src/a.test.ts"', "bun run typecheck", "bun run lint"])
     expect(r.output).toContain("test（bun test")
+    expect(r.output).toContain("13 pass") // stderr 明细不丢
     expect(r.output).toContain("typecheck（bun run typecheck） ✅")
     expect(r.output).toContain("lint（bun run lint） ✅")
     // 失败即停：test 失败后不再执行 typecheck/lint
