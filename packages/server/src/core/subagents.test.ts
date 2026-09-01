@@ -163,6 +163,34 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
     // 基础定义不受影响
     expect(m.def("code")).toBeDefined()
   })
+
+  test("加载失败的子Agent：错误原因记录并在 load/未知错误中透出（模型可见根因），修复后热加载恢复", async () => {
+    const name = "zz_broken_tmp"
+    const file = join(dir, `${name}.ts`)
+    writeFileSync(file, `import "./nonexistent-module-xyz"\nexport const def = { name: "${name}", description: "x", systemPrompt: "y" }\n`)
+    const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+    try {
+      await m.discover()
+      // 文件存在但 import 失败：def 不注册，失败原因记录（不再只进 console.warn）
+      expect(m.def(name)).toBeUndefined()
+      expect(m.loadError(name)).toBeTruthy()
+      expect(m.unknownAgentError(name)).toContain("加载失败")
+      await expect(m.load(name)).rejects.toThrow(/加载失败/)
+      // 修复文件（改为合法定义）：mtime 变化触发重扫 → 注册恢复、错误清除
+      writeFileSync(file, `export const def = { name: "${name}", description: "修好了", systemPrompt: "y" }\n`)
+      const st = statSync(file)
+      utimesSync(file, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
+      await m.refreshIfChanged()
+      expect(m.def(name)?.description).toBe("修好了")
+      expect(m.loadError(name)).toBeUndefined()
+      expect(await m.load(name)).toEqual([name])
+    } finally {
+      rmSync(file, { force: true })
+      // 删除后立即重扫一次：进程级缓存签名回到干净态——否则后续用例 load() 内的 refreshIfChanged
+      // 会触发重扫清掉其手工注册的测试 defs（缓存签名停留在「含本文件」状态）
+      await m.discover()
+    }
+  })
 })
 
 describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单）", () => {

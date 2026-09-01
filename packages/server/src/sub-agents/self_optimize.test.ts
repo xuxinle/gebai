@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, isAbsolute, resolve } from "node:path"
 import type { ToolContext } from "../core/types"
@@ -201,6 +201,93 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     // 合法含空格路径：双引号包裹保持单参数
     await selfOptimizeDef.tools!.run_tests.execute({ files: ["src/my dir/a.test.ts"] }, c)
     expect(cmds[0]).toBe('bun test "src/my dir/a.test.ts"')
+    cleanup(home)
+  })
+
+  test("run_tests checks 三件套：按序执行 test/typecheck/lint，首项失败即停", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-checks-"))
+    const cmds: string[] = []
+    const ok = ctx(home, {
+      env: { SELF_OPTIMIZE_PROJECT: home },
+      runCommand: async (cmd: string) => {
+        cmds.push(cmd)
+        return { stdout: "", stderr: "", code: 0 }
+      },
+    })
+    const r = await selfOptimizeDef.tools!.run_tests.execute({ checks: ["test", "typecheck", "lint"], files: ["src/a.test.ts"] }, ok)
+    expect(cmds).toEqual(['bun test "src/a.test.ts"', "bun run typecheck", "bun run lint"])
+    expect(r.output).toContain("test（bun test")
+    expect(r.output).toContain("typecheck（bun run typecheck） ✅")
+    expect(r.output).toContain("lint（bun run lint） ✅")
+    // 失败即停：test 失败后不再执行 typecheck/lint
+    const cmds2: string[] = []
+    const fail = ctx(home, {
+      env: { SELF_OPTIMIZE_PROJECT: home },
+      runCommand: async (cmd: string) => {
+        cmds2.push(cmd)
+        return cmds2.length === 1 ? { stdout: "", stderr: "boom", code: 1 } : { stdout: "", stderr: "", code: 0 }
+      },
+    })
+    const r2 = await selfOptimizeDef.tools!.run_tests.execute({ checks: ["test", "typecheck", "lint"], files: ["src/a.test.ts"] }, fail)
+    expect(cmds2).toEqual(['bun test "src/a.test.ts"'])
+    expect(r2.output).toContain("❌ exit 1")
+    expect(r2.output).toContain("boom")
+    // 非法检查项与缺参提示
+    const bad = await selfOptimizeDef.tools!.run_tests.execute({ checks: ["fmt"] as never, files: ["a.test.ts"] }, ok)
+    expect(bad.output).toContain("无效的检查项")
+    cleanup(home)
+  })
+
+  test("rollback 清理新建（untracked）文件：恢复修改 + 删除新建，输出列出删除清单（真实 git 仓库）", async () => {
+    const { exec } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const run = promisify(exec)
+    const repo = mkdtempSync(join(tmpdir(), "gebai-selfopt-git-"))
+    await run("git init -q", { cwd: repo })
+    await run("git config user.email t@t.local && git config user.name t", { cwd: repo })
+    writeFileSync(join(repo, "tracked.txt"), "v1")
+    mkdirSync(join(repo, "packages", "server", "src", "sub-agents"), { recursive: true })
+    writeFileSync(join(repo, "packages", "server", "src", "sub-agents", "keeper.ts"), "export const keeper = 1\n")
+    await run("git add -A && git commit -qm init", { cwd: repo })
+    // 模拟失败的自我修改：改 tracked + 新建 untracked（新子Agent 文件形态）
+    writeFileSync(join(repo, "tracked.txt"), "v2-broken")
+    const newFile = join(repo, "packages", "server", "src", "sub-agents", "bad_agent.ts")
+    writeFileSync(newFile, "export const broken = true\n")
+    const realRun = (cmd: string, opts?: { workdir?: string }) =>
+      new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
+        exec(cmd, { cwd: opts?.workdir }, (err, stdout, stderr) => resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), code: err ? 1 : 0 }))
+      })
+    const c = ctx(repo, { env: { SELF_OPTIMIZE_PROJECT: repo }, runCommand: realRun })
+    const r = await selfOptimizeDef.tools!.rollback.execute({ all: true }, c)
+    expect(r.output).toContain("已回滚")
+    expect(r.output).toContain("bad_agent.ts")
+    expect(await Bun.file(join(repo, "tracked.txt")).text()).toBe("v1") // 修改恢复
+    expect(existsSync(newFile)).toBe(false) // 新建文件被清理
+    rmSync(repo, { recursive: true, force: true })
+  })
+
+  test("journal 优化日志：append 持久化（环形上限）与 list 读取（新→旧）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-jrnl-"))
+    const c = ctx(home)
+    const empty = await selfOptimizeDef.tools!.journal.execute({ action: "list" }, c)
+    expect(empty.output).toContain("暂无优化记录")
+    const r1 = await selfOptimizeDef.tools!.journal.execute(
+      { action: "append", title: "修复 cron 通知卡片", changes: ["core/notify.ts: 卡片迁移 2.0"], verification: "run_tests 三件套通过", outcome: "applied", lessons: "2.0 at 语法用 id 属性" },
+      c,
+    )
+    expect(r1.output).toContain("已记录")
+    await selfOptimizeDef.tools!.journal.execute({ action: "append", title: "尝试改 engine 被守卫拒", outcome: "reverted", lessons: "核心源码需 GEBAI_SELF_MODIFY" }, c)
+    const list = await selfOptimizeDef.tools!.journal.execute({ action: "list" }, c)
+    expect(list.output).toContain("修复 cron 通知卡片")
+    expect(list.output).toContain("core/notify.ts: 卡片迁移 2.0")
+    expect(list.output).toContain("尝试改 engine 被守卫拒")
+    // 新→旧：后 append 的在前
+    expect(list.output!.indexOf("尝试改 engine")).toBeLessThan(list.output!.indexOf("修复 cron"))
+    // 落盘位置：users/{user}/self-optimize-journal.json（与 ws-journal 同位）
+    expect(existsSync(join(home, "users", "default", "self-optimize-journal.json"))).toBe(true)
+    // 缺 title 拒绝
+    const noTitle = await selfOptimizeDef.tools!.journal.execute({ action: "append" }, c)
+    expect(noTitle.output).toContain("需要 title")
     cleanup(home)
   })
 })
