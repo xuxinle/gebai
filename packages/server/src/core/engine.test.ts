@@ -40,7 +40,7 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens，含缓存命中 cachedTokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
-  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" = "tool") {}
+  constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
   }
@@ -64,6 +64,17 @@ class FakeProvider implements LLMProvider {
     }
     if (this.mode === "sub" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-sub", name: "agent_run", arguments: { agents: ["code"], input: "modify a file" } } }
+      yield { type: "done" }
+      return
+    }
+    // subunknown：刚写入的破损子Agent 文件——agent_run 校验前置重扫（错误附因）+ agent_load 失败真实暴露
+    if (this.mode === "subunknown" && this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-su1", name: "agent_run", arguments: { agents: ["zz_probe_fresh"], input: "hi" } } }
+      yield { type: "done" }
+      return
+    }
+    if (this.mode === "subunknown" && this.calls === 2) {
+      yield { type: "tool_call", toolCall: { id: "tc-su2", name: "agent_load", arguments: { name: "zz_probe_fresh" } } }
       yield { type: "done" }
       return
     }
@@ -348,7 +359,7 @@ class FakeProvider implements LLMProvider {
   }
 }
 
-async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
+async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" = "tool", sandboxEnabled = false, authMode: "local" | "server" = "local", safeMode = false, extraOpts: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "gebai-test-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const config = loadConfig({
@@ -2964,6 +2975,41 @@ describe("context compaction", () => {
       if (savedSelfModify === undefined) delete process.env.GEBAI_SELF_MODIFY
       else process.env.GEBAI_SELF_MODIFY = savedSelfModify
     }
+  })
+
+  test("agent_run 前置热加载重扫 + agent_load 失败暴露：刚写入的破损子Agent 即时报附因错误", async () => {
+    const s = await setup("subunknown")
+    const file = join(import.meta.dirname, "..", "sub-agents", "zz_probe_fresh.ts")
+    writeFileSync(file, `import "./nonexistent-xyz"\nexport const def = { name: "zz_probe_fresh", description: "x", systemPrompt: "y" }`)
+    try {
+      const session = await s.store.createSession("default", "t")
+      await s.engine.run(session.id, "default", "go")
+      const chats = JSON.stringify(s.provider.seenChats)
+      // agent_run：runNewSession 前置重扫后校验——错误附带载失败原因（不重扫则以旧缓存报无附言的裸「未知子Agent」）
+      expect(chats).toContain("未知子Agent: zz_probe_fresh")
+      expect(chats).toContain("其文件加载失败")
+      // agent_load：装载失败真实暴露（loadSubAgent 装载后仍未注册即抛，原先固定返回成功模板）
+      expect(chats).toContain("unknown sub-agent: zz_probe_fresh")
+    } finally {
+      rmSync(file, { force: true })
+      // 进程级签名缓存回到干净态（防后续用例水合到含本文件的 defs）
+      await s.subAgents.discover()
+    }
+  })
+
+  test("loaded-mode: 装载段落注入「项目根」注记（dev 自动推导，与 agent_run 形态对齐；附相对路径限定语）", async () => {
+    const s = await setup("text")
+    if (!s.subAgents.def("self_optimize")) return test.skip("self_optimize 未打包", () => {})
+    const session = await s.store.createSession("default", "t")
+    await s.engine.loadAgentToSession(session.id, "default", "self_optimize")
+    const msg = (await s.store.load(session.id))!.messages.find((m) => m.loadedAgent === "self_optimize")
+    expect(msg).toBeDefined()
+    const content = String(msg!.content)
+    expect(content).toContain("项目根:")
+    expect(content).toContain(join(import.meta.dirname, "..", "..", "..", ".."))
+    // 装载模式相对路径基准仍是会话目录：注记附限定语（不宣称工作目录已切换）
+    expect(content).toContain("相对路径仍以会话工作目录为基准")
+    cleanup(s.home)
   })
 
   test("sub-agent project AGENTS.md is injected into system prompt", async () => {

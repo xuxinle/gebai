@@ -109,7 +109,10 @@ const runTestsTool: import("../core/types").Tool = {
             ? "bun run typecheck"
             : "bun run lint"
       const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: root, timeoutMs: 10 * 60 * 1000 })
-      sections.push(`—— ${check}（${cmd}）${code === 0 ? " ✅" : ` ❌ exit ${code}`} ——\n${code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`}`)
+      // 始终合并 stderr：bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然），只取 stdout 会让
+      // 用户看不到「跑了哪些用例、几个 pass」——准入判定看 exit code，明细供人核验
+      const text = [stdout, stderr].filter(Boolean).join("\n")
+      sections.push(`—— ${check}（${cmd}）${code === 0 ? " ✅" : ` ❌ exit ${code}`} ——\n${code === 0 ? text : `${text}\n[exit ${code}]`}`)
       if (code !== 0) break // 首项失败即停：后续检查基于未通过代码无意义
     }
     return truncate(sections.join("\n\n"), "run_tests", ctx)

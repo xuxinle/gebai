@@ -104,10 +104,11 @@ export class SessionRunRegistry implements SessionRunService {
   private sessionId: string
   private runner: SessionRunRunner
   private parentSignal?: AbortSignal
-  /** 预加载清单校验与规范化（引擎注入 normalizeRunAgents：去重/连带/上限/未知名检查，非法即抛）。 */
-  private validate: (agents: string[]) => string[]
+  /** 预加载清单校验与规范化（引擎注入 normalizeRunAgents：去重/连带/上限/未知名检查，非法即抛；
+   *  可异步——引擎在异步启动路径前置热加载重扫，新写/新修的子Agent 文件即时可见）。 */
+  private validate: (agents: string[]) => string[] | Promise<string[]>
 
-  constructor(opts: { sessionId: string; store: Map<string, SessionRunHandle>; runner: SessionRunRunner; validate: (agents: string[]) => string[]; parentSignal?: AbortSignal }) {
+  constructor(opts: { sessionId: string; store: Map<string, SessionRunHandle>; runner: SessionRunRunner; validate: (agents: string[]) => string[] | Promise<string[]>; parentSignal?: AbortSignal }) {
     this.store = opts.store
     this.sessionId = opts.sessionId
     this.runner = opts.runner
@@ -148,7 +149,7 @@ export class SessionRunRegistry implements SessionRunService {
   }
 
   async start(agents: string[], input: string, opts?: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean }): Promise<SessionRunRecord> {
-    const normalized = this.validate(agents)
+    const normalized = await this.validate(agents)
     const running = [...this.store.values()].filter((h) => h.sessionId === this.sessionId && h.status === "running").length
     if (running >= SESSION_RUN_MAX_CONCURRENT) {
       throw new Error(`并发后台运行超限（≥${SESSION_RUN_MAX_CONCURRENT}）：请先用 bg_task（action=stop/list）终止或等待运行中的任务完成。`)

@@ -1634,14 +1634,19 @@ export class AgentEngine {
         if (session.messages.some((m) => m.loadedAgent === n)) continue // 提示词消息已持久化（恢复场景）
         const def = this.opts.subAgents.def(n)
         if (!def) continue
-        // 预置项目清单动态注入（装载模式闭环：模型按名使用 project 参数；与 runNewSession 的 presetNote 一致）
+        // 预置项目清单动态注入（装载模式闭环：模型按名使用 project 参数；与 runNewSession 的 presetNote 一致）；
+        // 项目根注记与 agent_run 形态（buildAgentSection）对齐——装载模式下相对路径基准仍是会话目录，
+        // 注记附限定语防误导（不宣称工作目录已切换，访问项目用 project 参数或绝对路径）
         const projectRoot = this.resolveSubAgentProject(session.userId, env, n)
+        const workNote = projectRoot
+          ? `\n项目根: ${projectRoot}（访问项目用 project 参数传该根或绝对路径；相对路径仍以会话工作目录为基准）`
+          : `\n工作目录: ${sessionPath(this.opts.config.gebaiHome, session.userId, session.id)}/tmp`
         const presetNote = this.buildPresetNote(n, projectRoot, this.presetProjectsFor(session.userId, env, n))
         session.messages.push({
           id: crypto.randomUUID().replace(/-/g, ""),
           role: "system",
           loadedAgent: n,
-          content: `### ${n}（${def.description}）\n${presetNote}${def.systemPrompt}`,
+          content: `### ${n}（${def.description}）\n${workNote}${presetNote}${def.systemPrompt}`,
           createdAt: Date.now(),
         })
         added.push(n)
@@ -1872,9 +1877,13 @@ export class AgentEngine {
           await self.opts.subAgents.load(String(name), "agent_run").catch(() => {})
         }
         // 新会话执行形态的双注册（DESIGN「子Agent 路由」）：ctx 处于 per-run 注册表环境（loadIntoRegistry 注入）时，
-        // 工具须同时注册进本次运行注册表——仅注册进全局注册表对新会话循环不可见（reg.resolve 查不到），
+        // 工具须同时注册进本次运行注册表——仅注册进全局注册表对新会话循环不可见（reg.resolve 查不上），
         // 模型装载后立即调用会「未知工具」
         if (opts?.loadIntoRegistry) self.registerIntoRegistry(opts.loadIntoRegistry, String(name))
+        // 装载结果外露（agent_load 工具的失败通道）：装载后仍未注册 = 未知名或其文件加载失败——
+        // loadAgentsForSession 对单个失败是 warn+跳过（会话恢复容错语义），agent_load 语义需要真实失败
+        // 原因（含 loadErrors 附因）；已装载（幂等重装）视为成功不抛
+        if (!self.opts.subAgents.isLoaded(String(name))) throw new Error(self.opts.subAgents.unknownAgentError(String(name)))
       },
       // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；
       // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；inheritGlobalPrompt（默认 true）= 总Agent
@@ -1886,7 +1895,11 @@ export class AgentEngine {
         sessionId,
         store: self.sessionRunStore,
         parentSignal: signal,
-        validate: (agents) => self.normalizeRunAgents(agents, depth + 1),
+        // 异步启动校验前置热加载重扫（与 runNewSession 同规则）：新写/新修的子Agent 文件即时可见
+        validate: async (agents) => {
+          await self.opts.subAgents.refreshIfChanged().catch(() => {})
+          return self.normalizeRunAgents(agents, depth + 1)
+        },
         runner: (agents, input, runSignal, runOpts) => self.runNewSession(sessionId, user, env, agents, input, runSignal, depth + 1, runOpts),
       }),
       // 会话分支运行服务（branch_run 工具，DESIGN「会话分支运行与合并」）：仅主循环（depth 0）注入——
@@ -2625,6 +2638,10 @@ export class AgentEngine {
     depth = 0,
     opts: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean; onArchive?: (archive: SessionRunArchive) => void } = {},
   ): Promise<{ output: string; archive: SessionRunArchive }> {
+    // 前置热加载重扫（与 load() 同规则）：self_optimize 刚写完/修好子Agent 文件即 agent_run——
+    // 校验（normalizeRunAgents）只读当前注册表，不重扫会以旧缓存误报「未知子Agent」（无加载失败附言）
+    // 或沿用修复前的旧定义
+    await this.opts.subAgents.refreshIfChanged().catch(() => {})
     agents = this.normalizeRunAgents(agents, depth)
     const defs = agents.map((name) => this.opts.subAgents.def(name)!)
     const inheritGlobals = opts.inheritGlobalTools !== false
