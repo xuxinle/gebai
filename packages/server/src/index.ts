@@ -227,6 +227,10 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
   // 定时任务能力开关（GEBAI_CRON_ENABLED，默认 true）：关闭时 cron 子Agent 不注册（agent_list/agent_load/
   // agent_run 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/cron 可管
   if (!config.cronEnabled) subAgents.unregister("cron")
+  // 子Agent 启停名单（GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单）：enable 非空仅保留
+  // 名单内，disable 移除名单内（先白后黑）；unregister 后 agent_list/装载/新会话执行/系统提示词注入均不可见
+  // 且热加载不复活；未知名告警不阻断启动
+  subAgents.applyEnableDisable(config.subAgentsEnable, config.subAgentsDisable)
   // 预置项目保留名防呆（DESIGN「项目机制」）：tmp 为会话工作区保留名——{AGENT}_PROJECTS 配了叫 tmp 的
   // 项目在启动期拒绝（静默遮蔽保留名会在设定项目根后无法访问会话文件，难排查）；前端注入的任务级 env
   // 由引擎 presetProjectsFor 同规则兜底。仅校验进程环境变量中已声明的清单（子Agent envVars 声明面）。
@@ -307,8 +311,8 @@ export async function startServer(overrides: Partial<Parameters<typeof loadConfi
       safeMode: config.safeMode,
       notify: feishuApi
         ? {
-            // 飞书应用消息：markdown 卡片；at 含 "all"（@所有人）时降级 text 消息（卡片 lark_md 对
-            // user_id="all" 静默忽略，text 正文 <at user_id="all"> 生效——与群机器人 webhook 同规则）
+            // 飞书应用消息：2.0 markdown 卡片（与对话桥接同款新版本接口）；at 含 "all"（@所有人）时降级
+            // text 消息（@所有人 提及通知以 text 正文标签为可靠路径——与群机器人 webhook 同规则）
             feishuSend: async (chatId, msgType, content) => {
               await feishuApi.sendMessage({ receiveId: chatId, receiveIdType: "chat_id", msgType, content })
             },

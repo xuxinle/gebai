@@ -37,6 +37,31 @@ describe("loadConfig 模式与密钥解析", () => {
     }
   })
 
+  test("子Agent 启停名单环境变量解析（GEBAI_SUB_AGENTS_ENABLE / GEBAI_SUB_AGENTS_DISABLE）", () => {
+    const prevE = process.env.GEBAI_SUB_AGENTS_ENABLE
+    const prevD = process.env.GEBAI_SUB_AGENTS_DISABLE
+    try {
+      delete process.env.GEBAI_SUB_AGENTS_ENABLE
+      delete process.env.GEBAI_SUB_AGENTS_DISABLE
+      const off = loadConfig()
+      expect(off.subAgentsEnable).toEqual([])
+      expect(off.subAgentsDisable).toEqual([])
+      process.env.GEBAI_SUB_AGENTS_ENABLE = "code, self_optimize"
+      process.env.GEBAI_SUB_AGENTS_DISABLE = "cron, feishu_group"
+      const on = loadConfig()
+      expect(on.subAgentsEnable).toEqual(["code", "self_optimize"])
+      expect(on.subAgentsDisable).toEqual(["cron", "feishu_group"])
+    } finally {
+      for (const [k, v] of [
+        ["GEBAI_SUB_AGENTS_ENABLE", prevE],
+        ["GEBAI_SUB_AGENTS_DISABLE", prevD],
+      ] as const) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("运行形态：默认 local，GEBAI_MODE=server 开启服务模式，兼容旧 GEBAI_AUTH", () => {
     const saved = { ...process.env }
     delete process.env.GEBAI_MODE

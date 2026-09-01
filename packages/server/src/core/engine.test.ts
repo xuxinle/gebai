@@ -3077,6 +3077,18 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
+  test("loaded-mode: self_optimize 默认项目根（dev 模式自动推导）注入主提示词，无需 SELF_OPTIMIZE_PROJECT", async () => {
+    const s = await setup("text")
+    if (!s.subAgents.def("self_optimize")) return test.skip("self_optimize 未打包", () => {})
+    const session = await s.store.createSession("default", "t")
+    // 不设任何环境变量：dev 模式（源码检出）下 def.projectRoot 兜底自动绑定歌白仓库根
+    await s.engine.run(session.id, "default", "hi")
+    const sys = String(s.provider.seenChats[0].find((m) => m.role === "system")!.content)
+    expect(sys).toContain("self_optimize 子Agent 项目绑定")
+    expect(sys).toContain(join(import.meta.dirname, "..", "..", "..", ".."))
+    cleanup(s.home)
+  })
+
   test("preset projects: unknown project name yields tool error", async () => {
     const s = await setup("subproj")
     const projA = mkdtempSync(join(tmpdir(), "gebai-pa2-"))

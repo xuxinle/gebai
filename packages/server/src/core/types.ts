@@ -240,6 +240,10 @@ export interface SubAgentDef {
   preload?: boolean
   /** 子Agent 可配置环境变量声明（`{AGENT_NAME_UPPER}_*` 前缀）；汇总进环境变量目录（前端面板白名单）。 */
   envVars?: EnvCatalogVar[]
+  /** 默认项目根兜底解析（`{AGENT_NAME_UPPER}_PROJECT` 环境变量未配置时生效）：返回绝对路径即视为项目
+   *  绑定（提示词注入「项目根」注记、agent_run 新会话以其为工作目录、加载项目 AGENTS.md——与显式
+   *  绑定同语义，沙箱模式同规则拒绝）。如 self_optimize 在脚本调试模式下按模块路径自动推导歌白仓库根。 */
+  projectRoot?: (env: Record<string, string>) => string | undefined
   /** 写范围守卫声明：会话装载本子Agent（或新会话预加载）后，本政策注入 ToolContext.writeGuard——
    *  文件写类工具写入前以解析后的绝对路径调用，返回非空字符串 = 拒绝写入。用于 self_optimize 的
    *  「核心引擎源码默认只读」代码级强制（工具与提示词复用 code，写范围政策独立声明）。 */

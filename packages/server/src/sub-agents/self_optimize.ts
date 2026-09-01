@@ -12,10 +12,10 @@ export const systemPrompt =
   "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；\n" +
   "2) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；\n" +
   "3) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；\n" +
-  "4) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认后 all=true 跑全量），失败则修复或 rollback 回滚（rollback 按路径回滚工作区改动；失败先看错误信息定位再修复重测，不盲目重复执行）；再运行 bun run typecheck/bun run lint 确认无回归（sh 工具，需审批）；\n" +
+  "4) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认后 all=true 跑全量），失败则修复或 self_optimize_rollback 回滚（按路径回滚工作区改动；失败先看错误信息定位再修复重测，不盲目重复执行）；再运行 bun run typecheck/bun run lint 确认无回归（sh 工具，需审批）；\n" +
   "5) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision 分析截图，确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
   "6) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
-  "项目范围：若会话设置了 SELF_OPTIMIZE_PROJECT 环境变量，则工作目录即 歌白仓库根，文件操作以项目根为基准（服务端部署限定项目内，本地模式不限制目录）；未设置时按用户给定的路径处理。"
+  "项目名称：歌白（GEBAI Agent）。项目范围：项目根以系统提示词动态注记「项目根:」为准——设置了 SELF_OPTIMIZE_PROJECT 环境变量时即该路径（服务端部署限定项目内，本地模式不限制目录）；未设置时脚本调试（dev）模式自动推导为歌白源码仓库根（与 run_tests/rollback 工作目录及写范围守卫同源，提示词注记给出具体路径）；二进制模式未配置且无注记时按用户给定的路径处理。"
 
 /** 默认只读模式下允许写入的仓库级文件（根一级）。 */
 const WRITABLE_ROOT_FILES = new Set(["DESIGN.md", "AGENTS.md", "AGENT.md", ".env.example", "README.md", "kilo.json"])
@@ -65,6 +65,14 @@ export const writeGuard = (env: Record<string, string>, absPaths: string[]): str
   return null
 }
 
+/** 路径参数注入防护：条目含引号/shell 元字符/百分号即拒绝（这些字符不可能合法出现在测试文件/回滚
+ *  路径中；审批界面展示的是 files/paths 参数而非拼好的命令，不设防的拼接会把注入带过审批门）。
+ *  通过校验的条目仍以双引号包裹拼入命令（空格路径保持单参数）。 */
+function safePathArgs(paths: string[]): string | null {
+  const bad = paths.find((p) => /["'`$%&|<>^();!]/.test(p))
+  return bad === undefined ? null : `路径参数含非法字符（引号/shell 元字符）: ${bad}`
+}
+
 /** run_tests：在歌白仓库根执行测试（指定测试文件或全量）——测试是自我修改的唯一准入凭证。 */
 const runTestsTool: import("../core/types").Tool = {
   name: "run_tests",
@@ -80,7 +88,9 @@ const runTestsTool: import("../core/types").Tool = {
     if (!root) return { output: "无法定位歌白仓库根：请设置 SELF_OPTIMIZE_PROJECT 环境变量。" }
     const files = (Array.isArray(args.files) ? args.files : []).map(String).filter(Boolean)
     if (args.all !== true && !files.length) return { output: "run_tests 需要 files 参数（相关测试文件）或 all=true（全量测试）。" }
-    const cmd = args.all === true ? "bun run test" : `bun test ${files.join(" ")}`
+    const unsafe = safePathArgs(files)
+    if (unsafe) return { output: unsafe }
+    const cmd = args.all === true ? "bun run test" : `bun test ${files.map((f) => `"${f}"`).join(" ")}`
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: root, timeoutMs: 5 * 60 * 1000 })
     const out = code === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${code}]`
     return truncate(out, "run_tests", ctx)
@@ -102,7 +112,9 @@ const rollbackTool: import("../core/types").Tool = {
     if (!root) return { output: "无法定位歌白仓库根：请设置 SELF_OPTIMIZE_PROJECT 环境变量。" }
     const paths = (Array.isArray(args.paths) ? args.paths : []).map(String).filter(Boolean)
     if (args.all !== true && !paths.length) return { output: "rollback 需要 paths 参数或 all=true。" }
-    const cmd = args.all === true ? "git checkout -- ." : `git checkout -- ${paths.join(" ")}`
+    const unsafe = safePathArgs(paths)
+    if (unsafe) return { output: unsafe }
+    const cmd = args.all === true ? "git checkout -- ." : `git checkout -- ${paths.map((p) => `"${p}"`).join(" ")}`
     const r = await ctx.runCommand(cmd, { workdir: root })
     if (r.code !== 0) return { output: `rollback 失败：\n${r.stdout}\n${r.stderr}\n[exit ${r.code}]` }
     const status = await ctx.runCommand("git status --short", { workdir: root })
@@ -131,6 +143,18 @@ export const tools = {
 export const requiresApproval = { run_tests: true, rollback: true }
 export const preload = false
 export const envVars = [
-  { name: "SELF_OPTIMIZE_PROJECT", description: "优化工作根：歌白仓库根路径，自我优化（self_optimize）文件操作以它为基准（写范围守卫亦按它界定仓库边界）" },
+  { name: "SELF_OPTIMIZE_PROJECT", description: "优化工作根：歌白仓库根路径，自我优化（self_optimize）文件操作以它为基准（写范围守卫亦按它界定仓库边界）；未设置时脚本调试（dev）模式自动推导源码仓库根（提示词「项目根」注记同步注入），二进制模式须显式配置" },
 ]
-export const def: SubAgentDef = { name, description, systemPrompt, tools, requiresApproval, preload, envVars, writeGuard }
+export const def: SubAgentDef = {
+  name,
+  description,
+  systemPrompt,
+  tools,
+  requiresApproval,
+  preload,
+  envVars,
+  writeGuard,
+  // 默认项目根兜底（{AGENT}_PROJECT 未配置时）：dev 模式自动推导歌白仓库根——提示词「项目根」注记、
+  // agent_run 新会话工作目录与项目 AGENTS.md 注入随绑定生效（二进制模式无兜底，须显式配置）
+  projectRoot: (env) => selfOptimizeRoot(env) ?? undefined,
+}

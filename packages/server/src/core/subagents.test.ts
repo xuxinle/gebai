@@ -165,6 +165,56 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
   })
 })
 
+describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单）", () => {
+  test("enable 白名单：仅保留名单内（未列出的 unregister——已装载的连带卸载工具，目录同步隐藏）", async () => {
+    const registry = new ToolRegistry()
+    const mgr = new SubAgentManager({ registry, preloadOverride: [] })
+    mgr.register(loadedDef)
+    mgr.register(unloadedDef)
+    await mgr.load("code")
+    expect(registry.resolve("code_read")).toBeDefined()
+    mgr.applyEnableDisable(["writer"], [])
+    expect(mgr.def("code")).toBeUndefined()
+    expect(mgr.def("writer")).toBeDefined()
+    expect(mgr.list().map((d) => d.name)).toEqual(["writer"])
+    expect(registry.resolve("code_read")).toBeUndefined() // unregister 连带卸载工具注册
+  })
+
+  test("disable 黑名单移除名单内；与 enable 同时配置先白后黑（黑名单最终生效）", () => {
+    const mgr = makeManager()
+    mgr.applyEnableDisable([], ["writer"])
+    expect(mgr.def("writer")).toBeUndefined()
+    expect(mgr.def("code")).toBeDefined()
+    const mgr2 = makeManager()
+    mgr2.applyEnableDisable(["code", "writer"], ["code"])
+    expect(mgr2.def("code")).toBeUndefined()
+    expect(mgr2.def("writer")).toBeDefined()
+  })
+
+  test("名单未知名告警忽略不阻断（防拼写错误静默失效，白名单语义按名单精确匹配）", () => {
+    const mgr = makeManager()
+    expect(() => mgr.applyEnableDisable(["code", "ghost"], ["phantom"])).not.toThrow()
+    expect(mgr.def("code")).toBeDefined()
+    // 白名单不含 writer：被移除是名单语义而非报错；ghost/phantom 不存在仅告警
+    expect(mgr.def("writer")).toBeUndefined()
+  })
+
+  test("热加载重扫后启停名单效果保持（removedDefs 防复活，与 cron 开关同机制）", async () => {
+    const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+    await m.discover()
+    if (!m.def("code")) return test.skip("code 未打包", () => {})
+    m.applyEnableDisable([], ["code"])
+    expect(m.def("code")).toBeUndefined()
+    // 触发重扫（touch cron 目录内文件改变签名）后移除保持
+    const probe = join(import.meta.dirname, "..", "sub-agents", "code.ts")
+    const st = statSync(probe)
+    utimesSync(probe, new Date(st.atimeMs + 5000), new Date(st.mtimeMs + 5000))
+    await m.refreshIfChanged()
+    expect(m.def("code")).toBeUndefined()
+    expect(m.def("cron")).toBeDefined()
+  })
+})
+
 describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () => {
   test("会话级装载不扩散：其他会话不可见，目录对未装载会话仍列出该子Agent", async () => {
     const mgr = makeManager()

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, dirname, isAbsolute } from "node:path"
+import { join, dirname, isAbsolute, resolve } from "node:path"
 import type { ToolContext } from "../core/types"
 import { setVisionProviderGetter } from "../core/vision"
 import { writeTool } from "../core/tools"
@@ -93,6 +93,22 @@ describe("self_optimize sub-agent", () => {
     expect(r.output).toContain("GEBAI_VISION_MODEL")
     cleanup(home)
   })
+
+  test("默认项目根兜底（def.projectRoot）：SELF_OPTIMIZE_PROJECT 优先，未配置时 dev 模式自动推导源码仓库根", () => {
+    // 显式配置优先（引擎在环境变量命中时不会走兜底，此处验证解析器自身语义）
+    const explicit = join(tmpdir(), "gebai-selfopt-explicit-")
+    expect(selfOptimizeDef.projectRoot!({ SELF_OPTIMIZE_PROJECT: explicit })).toBe(explicit)
+    // 未配置：脚本调试（dev）模式按模块路径推导歌白仓库根（与写范围守卫/run_tests 同源）——
+    // 测试环境即源码检出形态；二进制模式此兜底返回 undefined（须显式配置）
+    const auto = selfOptimizeDef.projectRoot!({})
+    expect(auto).toBe(resolve(import.meta.dirname, "..", "..", "..", ".."))
+  })
+
+  test("系统提示词内置项目名称与项目根指引（注记「项目根:」由引擎动态注入）", () => {
+    expect(selfOptimizeDef.systemPrompt).toContain("项目名称：歌白（GEBAI Agent）")
+    expect(selfOptimizeDef.systemPrompt).toContain("项目根以系统提示词动态注记「项目根:」为准")
+    expect(selfOptimizeDef.systemPrompt).toContain("SELF_OPTIMIZE_PROJECT")
+  })
 })
 
 describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强制而非仅提示词）", () => {
@@ -164,5 +180,27 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     expect(selfOptimizeDef.tools!.rollback).toBeTruthy()
     expect(selfOptimizeDef.requiresApproval!.run_tests).toBe(true)
     expect(selfOptimizeDef.requiresApproval!.rollback).toBe(true)
+  })
+
+  test("run_tests/rollback 路径参数注入防护：引号/shell 元字符条目拒绝且不触命令，合法含空格路径引号包裹", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-inj-"))
+    const cmds: string[] = []
+    const c = ctx(home, {
+      env: { SELF_OPTIMIZE_PROJECT: home },
+      runCommand: async (cmd: string) => {
+        cmds.push(cmd)
+        return { stdout: "", stderr: "", code: 0 }
+      },
+    })
+    // 审批界面展示的是 files/paths 参数而非拼好的命令：元字符条目必须校验前置直接拒绝
+    const r1 = await selfOptimizeDef.tools!.run_tests.execute({ files: ["src/a.test.ts; echo pwned"] }, c)
+    expect(r1.output).toContain("非法字符")
+    const r2 = await selfOptimizeDef.tools!.rollback.execute({ paths: ['x" && curl evil'] }, c)
+    expect(r2.output).toContain("非法字符")
+    expect(cmds).toHaveLength(0)
+    // 合法含空格路径：双引号包裹保持单参数
+    await selfOptimizeDef.tools!.run_tests.execute({ files: ["src/my dir/a.test.ts"] }, c)
+    expect(cmds[0]).toBe('bun test "src/my dir/a.test.ts"')
+    cleanup(home)
   })
 })

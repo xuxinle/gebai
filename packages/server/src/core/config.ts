@@ -40,6 +40,13 @@ export interface ServerConfig {
   trustProxy: boolean
   sandbox: SandboxMode
   preloadSubAgents: string[]
+  /** 子Agent 白名单（GEBAI_SUB_AGENTS_ENABLE，逗号分隔）：非空时仅保留名单内的子Agent（其余全部
+   *  unregister——agent_list/agent_load/agent_run/系统提示词注入均不可见）；与黑名单同时配置时先白后黑
+   *  （黑名单最终生效）。 */
+  subAgentsEnable?: string[]
+  /** 子Agent 黑名单（GEBAI_SUB_AGENTS_DISABLE，逗号分隔）：名单内的子Agent unregister（运行时开关，
+   *  与构建期选择性打包 GEBAI_BUILD_SUBAGENTS 互补——不改产物按部署裁剪能力面）。 */
+  subAgentsDisable?: string[]
   uiStyle: string
   logLevel: "debug" | "info" | "warn" | "error"
   toolEnable?: string[]
@@ -137,6 +144,8 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     trustProxy: bool("GEBAI_TRUST_PROXY", false),
     sandbox: env("GEBAI_SANDBOX", "auto") as SandboxMode,
     preloadSubAgents: splitList(env("GEBAI_PRELOAD_SUB_AGENTS")),
+    subAgentsEnable: splitList(env("GEBAI_SUB_AGENTS_ENABLE")),
+    subAgentsDisable: splitList(env("GEBAI_SUB_AGENTS_DISABLE")),
     uiStyle: env("GEBAI_UI_STYLE", "acrylic"),
     logLevel: env("GEBAI_LOG_LEVEL", "info") as ServerConfig["logLevel"],
     toolEnable: splitList(env("GEBAI_TOOL_ENABLE")),
