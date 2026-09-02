@@ -61,6 +61,10 @@ export interface Message {
   toolCalls?: ToolCall[]
   toolCallId?: string
   name?: string
+  /** 工具消息：多模态图片引用（read 等工具读取的图片文件，`ToolResult.images` 落盘形态）：`path` 为
+   *  解析后绝对路径、`display` 为模型可见的原始参数路径。loadHistory 在主模型声明多模态且处于最近
+   *  内联窗口时按 `path` 重读 base64 内联进上下文（统一 image 块）；非多模态/超出窗口降级为文本说明。 */
+  images?: Array<{ path: string; display?: string; mime: string }>
   /** 工具消息：调用参数（历史会话重载时用于渲染卡片，与实时一致） */
   arguments?: Record<string, unknown>
   /** 子Agent 装载提示词消息标记（role=system）：装载（agent_load/启动预载/WS sub_agent.load）时写入会话记录，
@@ -186,10 +190,19 @@ export interface WsSnapshot {
   maxContextTokens?: number
 }
 
+/** 计划审批选择请求携带的计划载荷（ask 计划分支，`event.choice.request` / attach 快照）：
+ *  前端选择卡内嵌计划全文——审批时直接可见，不依赖消息流位置与滚动状态。 */
+export interface ChoicePlanPayload {
+  title: string
+  content: string
+  /** 计划文档逻辑路径（tmp/plans/ 下）。 */
+  path: string
+}
+
 /** 运行中会话的待决交互（session.attach 快照项）：事件已推送过、新页面收不到，前端凭此重渲染卡片继续作答。 */
 export type PendingInteraction =
   | { type: "approval"; toolCallId: string; tool: string; retries: number }
-  | { type: "choice"; choiceId: string; prompt: string; options: Array<string | Record<string, unknown>>; multi: boolean }
+  | { type: "choice"; choiceId: string; prompt: string; options: Array<string | Record<string, unknown>>; multi: boolean; plan?: ChoicePlanPayload }
   | { type: "env"; envId: string; name: string; description: string; secret: boolean }
   | { type: "draw"; renderId: string; code: string; name?: string; format?: string }
   | { type: "capture"; captureId: string; fullPage: boolean; delay: number }

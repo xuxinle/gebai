@@ -190,7 +190,13 @@ function toOpenAIMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
   for (const m of repairToolPairing(msgs, { flushTail: true })) {
     if (m.role === "tool") {
-      const msg: Record<string, unknown> = { role: "tool", tool_call_id: m.toolCallId, content: typeof m.content === "string" ? m.content : "" }
+      // 工具结果多模态（DESIGN「多模态支持」read 图片内联）：块数组映射为内容部件（text/image_url）；
+      // 纯字符串保持原样（绝大多数工具结果零开销直传）
+      const msg: Record<string, unknown> = {
+        role: "tool",
+        tool_call_id: m.toolCallId,
+        content: typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.map(toOpenAIContentBlock) : ""),
+      }
       if (m.name) msg.name = m.name
       out.push(msg)
     } else if (m.role === "assistant" && m.toolCalls) {
@@ -224,7 +230,8 @@ function toAnthropicMessages(msgs: MessageLike[]): Array<Record<string, unknown>
   const out: Array<Record<string, unknown>> = []
   for (const m of repairToolPairing(msgs, { flushTail: true })) {
     if (m.role === "tool") {
-      out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: typeof m.content === "string" ? m.content : "" }] })
+      // 工具结果多模态：tool_result 内容支持块数组（text + image，Anthropic 官方形态——read 图片内联）
+      out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.map(toAnthropicContentBlock) : "") }] })
     } else if (m.role === "assistant" && m.toolCalls) {
       out.push({
         role: "assistant",
@@ -281,7 +288,16 @@ function toResponsesInput(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
   for (const m of repairToolPairing(msgs, { flushTail: true })) {
     if (m.role === "tool") {
-      out.push({ type: "function_call_output", call_id: m.toolCallId, output: typeof m.content === "string" ? m.content : "" })
+      // function_call_output 仅接受字符串：文本块拼为输出，图片块转紧随的 user 消息内容部件
+      // （Responses 输入项顺序合法，模型同轮可见——工具结果多模态 read 图片内联）
+      const output = typeof m.content === "string"
+        ? m.content
+        : (Array.isArray(m.content) ? m.content.filter((b) => b.type === "text").map((b) => String((b as { text?: unknown }).text ?? "")).join("\n") : "")
+      out.push({ type: "function_call_output", call_id: m.toolCallId, output })
+      if (Array.isArray(m.content)) {
+        const imgs = m.content.filter((b) => b.type === "image")
+        if (imgs.length) out.push({ role: "user", content: imgs.map(toOpenAIContentBlock) })
+      }
     } else if (m.role === "assistant" && m.toolCalls) {
       const content =
         typeof m.content === "string" ? (m.content || "") : (Array.isArray(m.content) ? m.content.map(toOpenAIContentBlock) : "")

@@ -353,8 +353,11 @@ class FakeProvider implements LLMProvider {
     }
     if (this.calls === 1) {
       yield { type: "text", text: "using tool" }
-      // ask 选项询问分支需要有效参数（prompt + options），否则会因无选项抛错
-      const args = this.toolName === "ask" ? { prompt: "选择方案", options: ["方案A", "方案B"], ...(this.askMulti ? { multi: true } : {}) } : this.toolArgs
+      // ask 选项询问分支需要有效参数（prompt + options），否则会因无选项抛错；
+      // 测试显式设置 toolArgs 时优先（计划审批分支等携带专属参数的用例）
+      const args = this.toolName === "ask" && Object.keys(this.toolArgs).length === 0
+        ? { prompt: "选择方案", options: ["方案A", "方案B"], ...(this.askMulti ? { multi: true } : {}) }
+        : this.toolArgs
       yield { type: "tool_call", toolCall: { id: "tc-1", name: this.toolName, arguments: args } }
       yield { type: "done" }
       return
@@ -1611,6 +1614,91 @@ console.log("defined ok")`,
       { type: "text", text: "describe" },
       { type: "image", mime: "image/png", data: Buffer.from(png).toString("base64"), path: "tmp/a.png", name: "a.png", size: 7 },
     ])
+    cleanup(s.home)
+  })
+
+  test("multimodal provider inlines read image results as tool message image blocks", async () => {
+    const s = await setup("tool")
+    s.provider.multimodal = true
+    s.provider.toolName = "read"
+    s.provider.toolArgs = { path: "shot.png" }
+    const session = await s.store.createSession("default", "t")
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 9, 8, 7])
+    const tmp = s.store.getTmpDir(session.id, "default")
+    mkdirSync(tmp, { recursive: true })
+    writeFileSync(join(tmp, "shot.png"), png)
+    await s.engine.run(session.id, "default", "看图")
+    // 工具轮后的模型调用：tool 消息 content 为 [text, image] 块数组（read 图片内联）
+    const toolMsg = s.provider.seenChats[1]!.find((m) => m.role === "tool")!
+    expect(Array.isArray(toolMsg.content)).toBe(true)
+    const blocks = toolMsg.content as Array<Record<string, unknown>>
+    expect(String((blocks[0] as { text?: string }).text)).toContain("多模态内容附加")
+    expect(blocks[1]).toMatchObject({ type: "image", mime: "image/png", data: Buffer.from(png).toString("base64"), path: "shot.png", name: "shot.png", source: "tool" })
+    // 落盘为轻量引用（不含 base64），content 保持纯字符串
+    const persisted = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool" && m.name === "read")!
+    expect(typeof persisted.content).toBe("string")
+    expect(persisted.images).toEqual([{ path: join(tmp, "shot.png"), display: "shot.png", mime: "image/png" }])
+    cleanup(s.home)
+  })
+
+  test("read image refs re-inline from history on the next run (recent window)", async () => {
+    const s = await setup("tool")
+    s.provider.multimodal = true
+    s.provider.toolName = "read"
+    s.provider.toolArgs = { path: "shot.png" }
+    const session = await s.store.createSession("default", "t")
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 4, 5, 6])
+    const tmp = s.store.getTmpDir(session.id, "default")
+    mkdirSync(tmp, { recursive: true })
+    writeFileSync(join(tmp, "shot.png"), png)
+    await s.engine.run(session.id, "default", "看图")
+    // 第二次 run（provider.calls 已过工具轮，直接文本收尾）：loadHistory 重建的 tool 消息按引用重读内联
+    await s.engine.run(session.id, "default", "继续")
+    const toolMsg = s.provider.seenChats[2]!.find((m) => m.role === "tool")!
+    expect(Array.isArray(toolMsg.content)).toBe(true)
+    const blocks = toolMsg.content as Array<Record<string, unknown>>
+    expect(blocks[1]).toMatchObject({ type: "image", mime: "image/png", data: Buffer.from(png).toString("base64"), source: "tool" })
+    cleanup(s.home)
+  })
+
+  test("non-multimodal provider keeps read image tool result as plain text note", async () => {
+    const s = await setup("tool")
+    s.provider.toolName = "read"
+    s.provider.toolArgs = { path: "shot.png" }
+    const session = await s.store.createSession("default", "t")
+    const tmp = s.store.getTmpDir(session.id, "default")
+    mkdirSync(tmp, { recursive: true })
+    writeFileSync(join(tmp, "shot.png"), new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1]))
+    await s.engine.run(session.id, "default", "看图")
+    const toolMsg = s.provider.seenChats[1]!.find((m) => m.role === "tool")!
+    expect(typeof toolMsg.content).toBe("string")
+    expect(toolMsg.content).toContain("vision 工具")
+    cleanup(s.home)
+  })
+
+  test("ask 计划审批分支：choice.request 携带 plan 载荷（选择卡内嵌计划全文）", async () => {
+    const s = await setup("tool")
+    s.provider.toolName = "ask"
+    s.provider.toolArgs = { title: "重构订单模块", steps: ["梳理现状", "写测试", "迁移实现"] }
+    const session = await s.store.createSession("default", "t")
+    let payload: Record<string, unknown> | null = null
+    s.events.subscribe((e) => {
+      if (e.type === "event.choice.request") payload = e.payload
+    })
+    const run = s.engine.run(session.id, "default", "plan it")
+    const t0 = Date.now()
+    while (!payload) {
+      if (Date.now() - t0 > 2000) throw new Error("choice.request not published")
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    const plan = (payload as Record<string, unknown>).plan as { title: string; content: string; path: string }
+    expect(plan.title).toBe("重构订单模块")
+    expect(plan.path).toContain("tmp/plans/")
+    expect(plan.content).toContain("- [ ] 梳理现状")
+    await s.engine.decideChoice(session.id, String((payload as Record<string, unknown>).choiceId), "批准执行")
+    await run
+    const loaded = await s.store.load(session.id)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.content.includes("计划已批准"))).toBe(true)
     cleanup(s.home)
   })
 

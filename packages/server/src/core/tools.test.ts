@@ -471,6 +471,77 @@ describe("global tools", () => {
     cleanup(home)
   })
 
+  test("read image（多模态）：二进制读入 ToolResult.images，说明引导直接查看（非文本乱码）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-img-mm-"))
+    const c = ctx(home)
+    c.multimodal = true
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
+    writeFileSync(c.resolvePath("shot.png"), png)
+    const r = await readTool.execute({ path: "shot.png" }, c)
+    expect(r.output).toContain("多模态内容附加")
+    expect(r.output).not.toContain("vision")
+    expect(r.images).toHaveLength(1)
+    expect(r.images![0]).toMatchObject({ mime: "image/png", display: "shot.png", data: Buffer.from(png).toString("base64") })
+    expect(r.blocks![0].type).toBe("image")
+    cleanup(home)
+  })
+
+  test("read image（非多模态）：返回 vision 指引说明，images 仍供引擎按能力决定内联", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-img-nomm-"))
+    const c = ctx(home)
+    writeFileSync(c.resolvePath("shot.jpg"), new Uint8Array([0xff, 0xd8, 0xff, 1]))
+    const r = await readTool.execute({ path: "shot.jpg" }, c)
+    expect(r.output).toContain("vision 工具")
+    expect(r.output).toContain("image/jpeg")
+    expect(r.images).toHaveLength(1)
+    // 不带行号/截断包装（说明文本直出）
+    expect(r.truncated).toBeFalsy()
+    cleanup(home)
+  })
+
+  test("read svg 按文本正常读取、bmp 给转换引导", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-img-ext-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "icon.svg", content: "<svg><rect/></svg>" }, c)
+    const svg = await readTool.execute({ path: "icon.svg", lineNumbers: false }, c)
+    expect(svg.output).toContain("<svg>")
+    expect(svg.images).toBeUndefined()
+    writeFileSync(c.resolvePath("x.bmp"), new Uint8Array([0x42, 0x4d, 1]))
+    const bmp = await readTool.execute({ path: "x.bmp" }, c)
+    expect(bmp.output).toContain("bmp 图片")
+    expect(bmp.output).toContain("不在多模态支持格式")
+    cleanup(home)
+  })
+
+  test("ask 计划审批分支 waitForChoice 收到 plan 载荷（标题/全文/文档路径）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-plan-"))
+    let got: { prompt: string; options: unknown[]; multi?: boolean; plan?: { title?: string; content?: string; path?: string } } | null = null
+    const c = ctx(home)
+    const withChoice: ToolContext = {
+      ...c,
+      waitForChoice: async (prompt, options, multi, plan) => {
+        got = { prompt, options: [...options], multi, plan }
+        return { kind: "option", value: "批准执行" }
+      },
+    }
+    const r = await askTool.execute({ title: "重构订单模块", steps: ["梳理现状", "写测试"] }, withChoice)
+    // 先捕获载荷原始值再断言（bun toMatchObject 的非对称匹配器会污染被断言对象，事后不可再取值）
+    const plan = got!.plan!
+    const planTitle = String(plan.title ?? "")
+    const planContent = String(plan.content ?? "")
+    const planPath = String(plan.path ?? "")
+    expect(planTitle).toBe("重构订单模块")
+    expect(planPath).toContain("tmp/plans/")
+    expect(planContent).toContain("- [ ] 梳理现状")
+    expect(planContent).toContain("- [ ] 写测试")
+    expect(got!.prompt).toContain("请审核计划「重构订单模块」")
+    expect(r.output).toContain("计划已批准")
+    // 计划文档落盘与载荷正文同构
+    const abs = withChoice.resolvePath(planPath)
+    expect((await withChoice.readFile(abs))).toBe(planContent)
+    cleanup(home)
+  })
+
   test("normalizePlantUml handles @startmindmap/@startwbs and fills missing @end", () => {
     // 无包裹 → 自动补全 @startuml/@enduml
     expect(normalizePlantUml("Alice -> Bob")).toBe("@startuml\nAlice -> Bob\n@enduml")
@@ -949,6 +1020,13 @@ describe("global tools", () => {
     expect(r.output).toContain("tmp/capture/page-")
     expect(r.output).toContain("可用 read 读取完整内容")
     expect(r.output).toContain("可用 vision 工具分析图片内容")
+    // 多模态主模型：截图引导分流为 read 直读（图片内联），不再指 vision
+    const cmm = ctx(home)
+    cmm.multimodal = true
+    cmm.waitForCapture = async () => ({ html, imageBase64: png })
+    const rmm = await pageCaptureTool.execute({}, cmm)
+    expect(rmm.output).toContain("可用 read 直接查看（多模态内联）")
+    expect(rmm.output).not.toContain("vision 工具")
     // blocks：html 文件块 + image 截图块
     const htmlBlock = r.blocks!.find((b) => b.type === "file") as { path: string; name: string }
     const imgBlock = r.blocks!.find((b) => b.type === "image") as { path: string; mime: string }

@@ -6,10 +6,23 @@ export interface ToolResult {
    *  与 output 相互独立——output 面向模型分析，data 面向编排消费；无结构化语义的工具可省略。 */
   data?: unknown
   blocks?: ContentBlock[]
+  /** 多模态图片（read 等工具读取图片文件，DESIGN「多模态支持」）：引擎在主模型声明多模态时内联进
+   *  工具结果消息（统一 image 块，模型直接可见）；非多模态不内联（output 文本自带 vision 指引）。
+   *  轻量引用随工具消息落盘（Message.images），历史重建按需重读；不进事件推送与 UI 块（UI 走 blocks）。 */
+  images?: ToolResultImage[]
   truncated?: boolean
   filePath?: string
   /** agent_run（执行新会话）工具返回：新会话 run 完整存档（扩展字段落盘到工具调用记录，历史回放渲染用）。 */
   sessionRun?: import("@gebai/sdk").SessionRunArchive
+}
+
+/** 工具结果携带的多模态图片：`path` 为解析后绝对路径（引擎按需读取内联、落盘引用），`display` 为
+ *  模型可见的原始参数路径（降级文本说明用），`data` 为 base64（工具已读取时直传，缺省引擎按 path 读取）。 */
+export interface ToolResultImage {
+  path: string
+  display?: string
+  mime: string
+  data?: string
 }
 
 /** 预置项目（来自 {AGENT_NAME_UPPER}_PROJECTS 环境变量的 JSON 数组项）。 */
@@ -23,6 +36,14 @@ export interface PresetProject {
  * ask 选项询问分支的选项：纯文本（`string`）或复杂选项（`{ title, description? }`，UI 按标题+说明展示，提交值取 title）。
  */
 export type ChoiceOption = string | { title: string; description?: string }
+
+/** 选择请求携带的计划审批载荷（ask 计划分支）：前端选择卡内嵌计划全文，审批时直接可见。 */
+export interface ChoicePlan {
+  title: string
+  content: string
+  /** 计划文档逻辑路径（tmp/plans/ 下）。 */
+  path: string
+}
 
 /**
  * ask 选择结果：
@@ -53,6 +74,9 @@ export type ToolContext = {
   /** 当前任务交互模式（引擎按任务注入）：show 等合并型工具按分支校验通道能力（如 HTML 预览仅 realtime）。
    *  可选：测试桩/无引擎环境不注入时不做分支门控（保持全通道行为）。 */
   interactionMode?: InteractionMode
+  /** 当前任务主模型的多模态能力（引擎按任务 Provider 注入）：read 等工具据此决定图片文件的处理形态
+   *  （多模态=内联进上下文，非多模态=返回说明 + vision 工具指引）。可选：测试桩/无引擎环境未注入时按 false。 */
+  multimodal?: boolean
   resolvePath: (p: string) => string
   readFile: (p: string) => Promise<string>
   /** 读取二进制文件原始字节（vision 等工具用，路径同样经 resolvePath/沙箱约束）。 */
@@ -133,8 +157,10 @@ export type ToolContext = {
    *  不传 = 纯拉取。均返回主干自 fork/上次同步以来的增量（主线输入/回复、其他分支合入全文、主线工具摘要）。
    *  可选：仅分支运行上下文注入——未注入时 branch_sync 返回不可用说明。 */
   branchSync?: (content?: string) => Promise<string>
-  /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。 */
-  waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean) => Promise<ChoiceResult>
+  /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。
+   *  plan 为计划审批分支附加载荷（标题/正文/文档路径），随事件与 attach 快照到达前端——选择卡内嵌
+   *  计划全文，审批时直接可见（不依赖消息流位置）。 */
+  waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean, plan?: ChoicePlan) => Promise<ChoiceResult>
   /**
    * 请求用户设置环境变量并阻塞等待（ask 填值分支用）：发布 event.env.request 给前端弹窗填值，
    * 用户提交后值写入任务 env（本次任务后续工具读取立即生效）返回 true；拒绝/超时返回 false。

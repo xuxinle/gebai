@@ -400,6 +400,58 @@ describe("多模态图片内容块转换", () => {
     )
     expect((body?.messages as Array<Record<string, unknown>>)[0].content).toEqual([{ type: "text", text: "你好" }])
   })
+
+  test("OpenAI：tool 消息内容块数组（read 图片内联）映射为 text + image_url 部件", async () => {
+    let body: Record<string, unknown> = {}
+    await withFetch(
+      async (_url, init) => {
+        body = JSON.parse(String((init as RequestInit).body))
+        return new Response(OK_STREAM, { status: 200 })
+      },
+      async () => {
+        const msgs: MessageLike[] = [
+          { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "read", arguments: {} }] },
+          { role: "tool", toolCallId: "c1", name: "read", content: [{ type: "text", text: "已读取图片文件" }, { type: "image", mime: "image/png", data: "QUJD", path: "a.png", name: "a.png", source: "tool" }] },
+        ]
+        for await (const _ of provider().chat(msgs)) void _
+      },
+    )
+    const toolMsg = (body?.messages as Array<Record<string, unknown>>).find((m) => m.role === "tool")!
+    expect(toolMsg.tool_call_id).toBe("c1")
+    expect(toolMsg.content).toEqual([
+      { type: "text", text: "已读取图片文件" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+    ])
+  })
+
+  test("Anthropic：tool_result 内容块数组（read 图片内联）映射为 text + image 块", async () => {
+    const p = createProvider({ apiKind: "anthropic", apiBase: "https://api.test", apiKey: "k", model: "m", maxContextTokens: 10000, multimodal: false })
+    let body: Record<string, unknown> = {}
+    await withFetch(
+      async (_url, init) => {
+        body = JSON.parse(String((init as RequestInit).body))
+        return new Response('data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n', { status: 200 })
+      },
+      async () => {
+        const msgs: MessageLike[] = [
+          { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "read", arguments: {} }] },
+          { role: "tool", toolCallId: "c1", name: "read", content: [{ type: "text", text: "已读取图片文件" }, { type: "image", mime: "image/png", data: "QUJD" }] },
+        ]
+        for await (const _ of p.chat(msgs)) void _
+      },
+    )
+    const userMsg = (body?.messages as Array<Record<string, unknown>>).find((m) => m.role === "user")!
+    expect(userMsg.content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "c1",
+        content: [
+          { type: "text", text: "已读取图片文件" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+        ],
+      },
+    ])
+  })
 })
 
 function responsesProvider() {
@@ -440,6 +492,29 @@ describe("OpenAI Responses Provider", () => {
       { role: "assistant", content: "" },
       { type: "function_call", call_id: "call_1", name: "get_weather", arguments: '{"city":"北京"}' },
       { type: "function_call_output", call_id: "call_1", output: "晴" },
+    ])
+  })
+
+  test("tool 消息内容块数组（read 图片内联）：文本进 function_call_output、图片转紧随 user 消息", async () => {
+    let body: Record<string, unknown> = {}
+    await withFetch(
+      async (_url, init) => {
+        body = JSON.parse(String((init as RequestInit).body))
+        return new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { status: 200 })
+      },
+      async () => {
+        const msgs: MessageLike[] = [
+          { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "read", arguments: {} }] },
+          { role: "tool", toolCallId: "call_1", name: "read", content: [{ type: "text", text: "已读取图片文件" }, { type: "image", mime: "image/png", data: "QUJD" }] },
+        ]
+        for await (const _ of responsesProvider().chat(msgs)) void _
+      },
+    )
+    expect(body?.input).toEqual([
+      { role: "assistant", content: "" },
+      { type: "function_call", call_id: "call_1", name: "read", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_1", output: "已读取图片文件" },
+      { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }] },
     ])
   })
 

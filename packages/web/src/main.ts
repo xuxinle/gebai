@@ -25,7 +25,6 @@ import {
   addMetaActions,
   appendCompactNotice,
   appendMsg,
-  appendPlanCard,
   appendTodoCard,
   appendToolResult,
   assistantContent,
@@ -126,11 +125,16 @@ function onTodoUpdate(ev: { sessionId: string; todos: TodoItem[] }) {
   // 待办状态更新（任意会话，后台也记录）
   todoState.set(ev.sessionId, ev.todos ?? [])
 }
-function onChoiceRequest(ev: { sessionId: string; prompt: string; options: Array<string | Record<string, unknown>>; choiceId: string; multi?: boolean }) {
-  // 选择卡片：渲染到审批容器（随会话显示/隐藏，切走不丢、切回恢复），点击/输入/拒绝提交决策（ask 选项询问分支阻塞等待）
+function onChoiceRequest(ev: { sessionId: string; prompt: string; options: Array<string | Record<string, unknown>>; choiceId: string; multi?: boolean; plan?: { title?: unknown; content?: unknown; path?: unknown } }) {
+  // 选择卡片：渲染到审批容器（随会话显示/隐藏，切走不丢、切回恢复），点击/输入/拒绝提交决策（ask 选项询问分支阻塞等待）；
+  // plan（计划审批分支）：选择卡内嵌计划全文——审批时直接可见，不依赖消息流位置与滚动状态
   touchRunActivity(ev.sessionId)
   noteIncoming()
-  renderChoiceCard(String(ev.prompt ?? ""), ev.options ?? [], String(ev.choiceId ?? ""), ev.sessionId, ev.multi === true)
+  const plan =
+    ev.plan && typeof ev.plan === "object"
+      ? { title: String(ev.plan.title ?? ""), content: String(ev.plan.content ?? ""), path: String(ev.plan.path ?? "") }
+      : undefined
+  renderChoiceCard(String(ev.prompt ?? ""), ev.options ?? [], String(ev.choiceId ?? ""), ev.sessionId, ev.multi === true, plan)
 }
 function onEnvRequest(ev: { sessionId: string; envId: string; name: string; description?: string; secret?: boolean }) {
   // 环境变量填值卡片：渲染到审批容器（随会话显示/隐藏），用户填值提交后保存到浏览器本地并回传引擎（ask 填值分支阻塞等待）
@@ -199,8 +203,9 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
     pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { session: ev.sessionId, kind: "ask_choice", askArgs })
     return
   }
-  // ask 计划审批分支：像选项询问一样在消息流中开启计划卡片
-  // （展示态，交互作答由审批容器选择卡片承载）；填值分支（name）无专属卡，走通用工具卡（元数据驱动）
+  // ask 计划审批分支：等待期不渲染消息流计划卡——计划全文由审批容器选择卡内嵌承载
+  // （choice.request 携带 plan 载荷；上下两张同款计划卡会被视为重复）；结果到达时
+  // appendToolResult 落计划卡（审批结果态，与历史回放同构）；填值分支（name）无专属卡，走通用工具卡（元数据驱动）
   if (short === "ask" && argsObj?.title != null) {
     const args = (argsObj ?? {}) as { title?: unknown; steps?: unknown; content?: unknown }
     const title = String(args.title ?? "").trim()
@@ -209,17 +214,13 @@ function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; a
     if (runId) {
       const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
       if (!sub?.container.isConnected) return
-      sealSessionSegment(sub) // 容器内文本分段：计划卡片处截断当前文本段
-      const wrapper = appendPlanCard(args, sub.body)
-      const body = wrapper.querySelector<HTMLElement>(".msg-body")
-      if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { wrapper, body, session: ev.sessionId, kind: "ask_plan", runId })
+      sealSessionSegment(sub) // 容器内文本分段：后续计划卡处截断当前文本段
+      pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_plan", runId, planArgs: args })
       scrollSessionSticky(sub.body)
       return
     }
-    sealSegment(ev.sessionId) // 文本分段：计划卡片处截断当前文本段
-    const wrapper = appendPlanCard(args)
-    const body = wrapper.querySelector<HTMLElement>(".msg-body")
-    if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "ask_plan" })
+    sealSegment(ev.sessionId) // 文本分段：后续计划卡处截断当前文本段
+    pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { session: ev.sessionId, kind: "ask_plan", planArgs: args })
     return
   }
   if (isBlockOnly(String(ev.name ?? ""))) return
@@ -722,7 +723,7 @@ const attaching = new Set<string>()
 /** 待决交互卡片重建（attach 快照 → 既有渲染入口；替换式幂等——同 id 重复推送只保留一张）。 */
 function renderPendingInteraction(sessionId: string, it: PendingInteraction): void {
   if (it.type === "approval") addApproval(sessionId, it.toolCallId, it.tool)
-  else if (it.type === "choice") renderChoiceCard(it.prompt, it.options, it.choiceId, sessionId, it.multi)
+  else if (it.type === "choice") renderChoiceCard(it.prompt, it.options, it.choiceId, sessionId, it.multi, it.plan ? { title: it.plan.title, content: it.plan.content, path: it.plan.path } : undefined)
   else if (it.type === "env") renderEnvRequestCard(it.name, it.description, it.secret, it.envId, sessionId)
   else if (it.type === "draw") onDrawRender({ sessionId, renderId: it.renderId, code: it.code, format: it.format ?? "" })
   else if (it.type === "capture") onCaptureRequest({ sessionId, captureId: it.captureId, fullPage: it.fullPage, delay: it.delay })
@@ -953,7 +954,7 @@ async function init() {
     } else if (ev.type === "event.todo.update") {
       onTodoUpdate({ sessionId: ev.sessionId, todos: (ev.payload.todos as TodoItem[]) ?? [] })
     } else if (ev.type === "event.choice.request") {
-      onChoiceRequest({ sessionId: ev.sessionId, prompt: String(ev.payload.prompt ?? ""), options: (Array.isArray(ev.payload.options) ? ev.payload.options : []) as Array<string | Record<string, unknown>>, choiceId: String(ev.payload.choiceId ?? ""), multi: ev.payload.multi === true })
+      onChoiceRequest({ sessionId: ev.sessionId, prompt: String(ev.payload.prompt ?? ""), options: (Array.isArray(ev.payload.options) ? ev.payload.options : []) as Array<string | Record<string, unknown>>, choiceId: String(ev.payload.choiceId ?? ""), multi: ev.payload.multi === true, plan: ev.payload.plan as { title?: unknown; content?: unknown; path?: unknown } | undefined })
     } else if (ev.type === "event.env.request") {
       onEnvRequest({ sessionId: ev.sessionId, envId: String(ev.payload.envId ?? ""), name: String(ev.payload.name ?? ""), description: String(ev.payload.description ?? ""), secret: ev.payload.secret === true })
     } else if (ev.type === "event.draw.render") {

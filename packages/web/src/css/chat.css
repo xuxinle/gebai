@@ -398,6 +398,13 @@
 
 /* 选择卡片 */
 .choice-opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+/* 选择卡内嵌计划全文（ask 计划审批分支）：审批时直接可见，限高滚动防长计划撑爆审批容器 */
+.choice-plan {
+  max-height: 40vh;
+  overflow: auto;
+  margin-bottom: 4px;
+  border-radius: 10px;
+}
 /* 环境变量请求卡片（ask_env 工具）：变量名 + 输入框 + 确定/取消 */
 .env-req-name {
   display: inline-block;
