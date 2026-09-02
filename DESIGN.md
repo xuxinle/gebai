@@ -174,6 +174,7 @@ class GebaiClient {
   send(type: string, payload?: object, handlers?: { onOk?; onError?; timeoutMs?; queueOffline? }): () => void // 返回取消函数
   request<T>(type: string, payload?: object): Promise<T> // Promise 版 RPC
   sendPrompt(sessionId: string, prompt: string, opts?: { attachments?: AttachmentInput[]; messageId?; signal?; env? }): AsyncIterable<ChatChunk>
+  chat(prompt: string, opts?: { sessionId?; name?; autoApprove?; env?; messageId? }): Promise<{ sessionId: string; message: { id; content; createdAt } | null; error?: string }> // 单 HTTP 一站式对话（REST /api/v1/chat）：同步阻塞至任务完成；sessionId 缺省自动建会话、带 id 续聊；autoApprove 审批姿态（true 自动通过/false 无交互拒绝/缺省通道默认）；无需 WS 连接
   attachSession(sessionId: string): Promise<AttachSnapshot> // 运行中会话附加快照（session.attach）：running/stream（在途文本+推理）/pending（待决交互）/startedAt/lastSeq
   attachStream(sessionId: string, opts?: { signal? }): AsyncIterable<ChatChunk> // 附加到运行中会话的实时流（页面刷新/切换恢复）：种子 chunk（快照在途文本）+ seq 缺口重放 + 实时续流；断线挂起重连后重新附加（resume 重置 + 重播种）
   // 附件（多模态）
@@ -1200,6 +1201,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - 子Agent工具：通过 `requiresApproval` 声明（仅对**独有工具**生效——编码类子Agent 不再重复定义文件工具，全局 write/edit/patch 维持默认免审批姿态；静态 `true` 会覆盖工具自身的函数形态声明，须保留动态判定的工具不要静态声明）；`cron` 子Agent 的 `cron_add`/`cron_update`/`cron_remove` 默认需要审批（定时任务 = 无人值守执行，见「定时任务」）
 ^- `flow`：是否需要审批取决于编排内调用的工具（**动态审批机制**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（函数异常按需审批 fail-safe）；flow 的函数递归扫描全部步骤，任一工具需审批则整个 flow 提交一次审批，见「flow 数据流编排工具」；步骤 params 中的 `approval: false` 同样生效——全部步骤免审时 flow 整体免审）
 - 会话级跳过：`/approval-skip` 命令；**会话运行中开启即时生效**——引擎审批点实时判定（任务 env 快照或会话内存态 env 任一为 `true` 即跳过，前端开启时自动通过当前等待中的审批卡片，后续审批直接跳过；关闭需下次任务生效）；**用户本人可设置自己的会话**（`GEBAI_APPROVAL_SKIP` 写入会话内存态 env，不落盘——非管理员仍受路径/脚本/网络沙箱完整约束；ask 填值分支模型驱动通道服务模式下一律拒绝）
+- 请求级跳过/收紧（REST `prompt`/`chat` body 的 `autoApprove` 布尔，任务级生效不持久化）：`true` 映射任务级 `approvalPolicy=auto`（需审批工具自动通过，含服务模式——调用方即用户本人，与会话级跳过同一授权面）；`false` 映射 `deny`（无交互通道下需审批工具直接拒绝，本地模式同样生效，不空等超时）；见「交互模式 → 审批策略按模式分级」
 - 同一消息最多重试 10 次
 
 ### 工具选择
@@ -1231,9 +1233,9 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | `realtime`（**实时交互**） | 实时流式交互：完整前端，关键操作询问用户 | WebSocket（Web UI，默认） | 全部 |
 
 - **工具声明**（`interaction: "realtime"` 仅实时前端）：`page_capture` 与 widgets 四工具（`save`/`list`/`get`/`delete`，依赖前端页面配合）；`interaction: "multi_turn"`（至少多轮交互）：无（原 ask_user/plan 的飞书适配由 ask 分支承接）；其余工具缺省 `none`；**合并型工具不做工具级声明**——`show`（图表/HTML/文件三分支）与 `ask`（选择/填值/计划三分支）全模式可见，按 `ctx.interactionMode` 在分支内校验通道能力（show：html 分支仅 realtime、图表分支 none 下引导 `render=backend`；ask：填值分支仅 realtime、选择/计划分支 none 下报「无交互能力」），见「内容展示」/「用户询问」
-- **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/定时任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书审批交互卡片，见「飞书机器人集成 → 审批交互卡片」），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
+- **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/定时任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行）；**请求级 `autoApprove` 显式覆盖**（REST `prompt`/`chat` body 布尔字段，映射引擎任务级 `approvalPolicy`）：`true` = 需审批工具自动通过（**含服务模式**——调用方即用户本人，等价其自设 `GEBAI_APPROVAL_SKIP` 会话 env，模型驱动的 ask 填值通道仍拒绝该键，防提示词注入）；`false` = 无交互通道下需审批工具直接拒绝（**本地模式同样生效**——单次调用无人可审批，不空等 5 分钟超时）；缺省 = 通道默认姿态（本地自动/服务拒绝）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书审批交互卡片，见「飞书机器人集成 → 审批交互卡片」），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
 - **飞书通道** = `interactionMode: "multi_turn"`：realtime 声明的工具（`page_capture`/widgets 四工具）自动禁用（原 `FEISHU_DISABLED_TOOLS` 名单已移除，由声明统一驱动）；`ask`/`show` 不做工具级禁用（ask 选择/计划分支经飞书选择卡片作答、填值分支明确报错；show html 分支明确报错、图表分支经飞书后端渲染出图），关键操作经审批卡片询问
-- **REST 通道** = `interactionMode: "none"`：实时前端工具自动禁用，不再等待至超时；`ask`/`show` 不做工具级禁用（ask 选择/计划分支报「无交互能力」、填值分支引导设置面板；show html 分支明确报错、图表分支直接引导 `render=backend`，均不空等超时）；本地模式需审批工具自动通过，**服务模式需审批工具直接拒绝**（防免审批执行）；需要完整交互能力请走 WS 通道
+- **REST 通道** = `interactionMode: "none"`：实时前端工具自动禁用，不再等待至超时；`ask`/`show` 不做工具级禁用（ask 选择/计划分支报「无交互能力」、填值分支引导设置面板；show html 分支明确报错、图表分支直接引导 `render=backend`，均不空等超时）；本地模式需审批工具自动通过，**服务模式需审批工具直接拒绝**（防免审批执行）；审批姿态可经请求级 `autoApprove` 显式覆盖（见上方「审批策略按模式分级」）；需要完整交互能力请走 WS 通道
 - 禁用判定同时匹配子Agent 命名空间工具（`{agent}_page_capture` 等同名工具同样禁用）；与 `disabledTools` 名单（部署方可另行指定）叠加生效
 
 #### 输出方式（与交互模式正交，同样请求层配置）
@@ -2007,7 +2009,8 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/users/:id` | PATCH/DELETE | 用户启用/禁用/删除（管理员） |
 | `/api/v1/sessions` | GET/POST | 会话列表/创建 |
 | `/api/v1/sessions/:id` | GET/DELETE/PATCH | 会话详情/删除/重命名 |
-| `/api/v1/sessions/:id/prompt` | POST | 发送消息，**非流式 JSON 返回**（同步等待任务完成，`{ message: 最终 assistant 消息, error?: 任务错误 }`）；body 支持附件引用、`env`（浏览器本地环境变量，临时注入仅本次任务生效，不持久化）与 `messageId`（可选：客户端生成的用户消息 id，撤回/反馈定位用；非法格式服务端回退自动生成）；**流式输出请走 WebSocket（`/ws`）** |
+| `/api/v1/sessions/:id/prompt` | POST | 发送消息，**非流式 JSON 返回**（同步等待任务完成，`{ message: 最终 assistant 消息, error?: 任务错误 }`）；body 支持附件引用、`env`（浏览器本地环境变量，临时注入仅本次任务生效，不持久化）、`messageId`（可选：客户端生成的用户消息 id，撤回/反馈定位用；非法格式服务端回退自动生成）、`interactionMode`（默认 `none`）与 `stream`（默认 `false` 仅最终响应）、`autoApprove`（可选布尔：`true` 需审批工具自动通过/`false` 无交互通道下直接拒绝，缺省通道默认姿态——本地自动通过、服务模式拒绝，见「交互模式」）；缺 `prompt` 返回 400；**流式输出请走 WebSocket（`/ws`）** |
+| `/api/v1/chat` | POST | **单 HTTP 一站式调用**：一次请求完成「建会话（`sessionId` 缺省自动创建，`name` 可选命名）→ 执行任务 → 返回最终回复」，返回 `{ sessionId, message: 最终 assistant 消息, error? }`（`sessionId` 供后续请求续聊多轮）；带 `sessionId` 在既有会话续聊（id 白名单校验 400 / 不存在或非本人 404）；`interactionMode` 固定 `none`，body 其余字段（`prompt` 必填 400、附件/env/messageId/stream）与 `prompt` 端点同规则，`autoApprove` 支持自动审批（与 `prompt` 端点同语义）；与 `prompt` 共用每用户速率限制桶 |
 | `/api/v1/sessions/:id/attachments` | POST | 上传附件（multipart，多模态内容），返回会话内引用路径 |
 | `/api/v1/auth/me` | GET | 当前登录用户信息（服务模式；本地模式为 admin 用户） |
 | `/api/v1/auth/exchange` | POST | **外部身份兑换**（服务模式 + 已配置验证器；body `{username, credential}`）：网站本地登录态 → GEBAI 令牌；400 缺参 / 401 验证失败 / 404 未启用 |

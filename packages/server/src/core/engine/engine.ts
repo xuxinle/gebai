@@ -664,17 +664,30 @@ export class AgentEngine {
    */
   /** 自动审批实时判定：任务 env 快照（含浏览器本地注入）或会话内存态 env 任一为 true 即跳过审批——会话运行中开启自动审批即时生效（关闭需下次任务；会话 env 不落盘，重启后由前端重新同步）。 */
   private async isApprovalSkipped(sessionId: string, user: string, env: Record<string, string>): Promise<boolean> {
+    const task = this.tasks.get(sessionId)
+    // 请求级审批策略优先（REST prompt/chat 的 autoApprove）：auto 显式自动通过（含服务模式——调用方
+    // 即用户本人，等价其自设 GEBAI_APPROVAL_SKIP）；deny 显式不跳过（配合下方无交互硬门槛直接拒绝）
+    if (task?.approvalPolicy === "auto") return true
+    if (task?.approvalPolicy === "deny") return false
     // 无交互模式（REST 等单次请求通道）：单用户本地模式无人可询问，需审批工具自动通过；
     // 多用户隔离模式下不允许自动通过——普通用户不得经 REST 免审批执行敏感工具（见审批点拒绝逻辑）
-    if (this.tasks.get(sessionId)?.interactionMode === "none" && this.opts.authMode !== "server") return true
+    if (task?.interactionMode === "none" && this.opts.authMode !== "server") return true
     if (env.GEBAI_APPROVAL_SKIP === "true") return true
     const sessionEnv = await this.opts.store.getEnv(sessionId, user)
     return sessionEnv.GEBAI_APPROVAL_SKIP === "true"
   }
 
-  /** 多用户 + 无交互通道下的需审批工具：不进入等待（无人可审批），直接返回拒绝文案。 */
+  /** 无交互通道硬门槛生效判定（需审批工具直接拒绝，不进入等待）：服务模式默认开启（普通用户免审批防线）；
+   *  请求级 autoApprove=false 显式收紧（本地模式同样拒绝——单次调用通道无人可审批，不空等超时）。 */
+  private noInteractionHardGate(sessionId: string): boolean {
+    if (this.tasks.get(sessionId)?.approvalPolicy === "deny") return true
+    return this.opts.authMode === "server"
+  }
+
+  /** 无交互通道下的需审批工具：不进入等待（无人可审批），直接返回拒绝文案。触发来源两态——
+   *  服务模式默认防线（防普通用户经 REST 免审批执行敏感工具）与请求级 autoApprove=false 显式收紧。 */
   private noInteractionDenied(toolName: string): string {
-    return `工具调用 ${toolName} 需要审批，但当前通道为无交互模式（多用户服务端部署），无法向用户确认，已拒绝执行。请调整方案，改用无需审批的操作，或通过 Web UI（WS 通道）执行。`
+    return `工具调用 ${toolName} 需要审批，但当前通道为无交互模式，无法向用户确认，已拒绝执行。请调整方案，改用无需审批的操作；如确需执行可在请求中传 autoApprove=true（由调用方担保审批），或经 Web UI（WS 通道）交互执行。`
   }
 
 
@@ -737,6 +750,10 @@ export class AgentEngine {
       role?: string
       /** 通道环境注记（通道无关，注入系统提示词——飞书桥接等外部通道告知模型对话宿主/渲染/能力边界）。 */
       channelNote?: string
+      /** 请求级审批策略（REST prompt/autoApprove 映射）：true 需审批工具自动通过（含服务模式——
+       *  调用方即用户本人，等价其自设 GEBAI_APPROVAL_SKIP）；false 无交互通道下需审批工具直接拒绝
+       *  （本地模式同样生效，不空等超时）；缺省 = 通道默认姿态。 */
+      autoApprove?: boolean
     } = {},
   ): Promise<void> {
     if (this.tasks.has(sessionId)) throw new Error(`会话 ${sessionId} 已有任务在运行`)
@@ -744,7 +761,7 @@ export class AgentEngine {
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
     const controller = new AbortController()
-    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map() }
+    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }) }
     this.tasks.set(sessionId, task)
     // 收尾验证提醒数据（本任务范围）：修改的代码文件 + 是否运行过测试/检查类命令（runToolInterruptible 收集）
     this.taskMods.set(sessionId, { files: new Set(), verified: false })
@@ -1892,10 +1909,11 @@ export class AgentEngine {
           }
           const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
           const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
-          // 多用户隔离 + 无交互通道（REST）：无人可审批，默认需审批的工具直接拒绝（防普通用户经 REST 免审批执行敏感工具）；
-          // approval:false 只放宽交互审批——硬门槛按剥离免审标记后的审批姿态解析（flow 嵌套步骤同规则），防模型自行声明免审绕过
+          // 无交互通道硬门槛（服务模式默认 / 请求级 autoApprove=false）：无人可审批，默认需审批的工具
+          // 直接拒绝（防普通用户经 REST 免审批执行敏感工具）；approval:false 只放宽交互审批——硬门槛按
+          // 剥离免审标记后的审批姿态解析（flow 嵌套步骤同规则），防模型自行声明免审绕过
           if (
-            this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
+            this.noInteractionHardGate(sessionId) && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
             (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
           ) {
             await persistGatedNote(tc, this.noInteractionDenied(rt.name))
@@ -2681,9 +2699,10 @@ export class AgentEngine {
         }
         const requiresByArgs = await toolRequiresApproval(rt.tool, tc.arguments, ctx)
         const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
-        // 与主循环一致：服务模式 + 无交互通道按默认审批姿态拒绝（approval:false 免审标记剥离后解析，防绕过）
+        // 与主循环一致：无交互通道硬门槛（服务模式默认 / 请求级 autoApprove=false）按默认审批姿态拒绝
+        //（approval:false 免审标记剥离后解析，防绕过）
         if (
-          this.opts.authMode === "server" && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
+          this.noInteractionHardGate(sessionId) && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
           (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
         ) {
           await gatedNote(tc, this.noInteractionDenied(rt.name))
