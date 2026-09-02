@@ -189,57 +189,111 @@ export function registerSessionRoutes(rc: RouteCtx): void {
     return c.json(result)
   })
 
-  // Prompt (SSE)
-  /** 每用户 prompt 速率限制（容量 60 突发、30/秒补充；防单用户刷 LLM 配额，与 WS 同规则）。 */
+  // Prompt（同步 JSON）与 Chat（单 HTTP 一站式）
+  /** 每用户 prompt 速率限制（容量 60 突发、30/秒补充；防单用户刷 LLM 配额，与 WS 同规则；
+   *  prompt 与 chat 同桶共用——防双端点交替绕限）。 */
   const promptRateLimit = new TokenBucket(60, 30)
-  app.post("/api/v1/sessions/:id/prompt", async (c) => {
-    const user = await userOf(c)
-    // 每用户消息速率限制（防高频 prompt 消耗 LLM 配额/资源）
-    if (!promptRateLimit.allow(user.id)) return c.json({ error: "rate limited: too many requests" }, 429)
-    const sessionId = c.req.param("id")
-    const body = await c.req.json<{ prompt: string; attachments?: Array<{ name: string; mime?: string; path?: string; data?: number[] }>; env?: Record<string, string | null>; messageId?: string; interactionMode?: string; stream?: boolean }>()
-    if (d.engine.isRunning(sessionId)) return c.json({ error: "task already running" }, 409)
-    // 请求层交互模式与输出方式配置（服务端全部支持，接入方按需选择）：
-    // interactionMode 默认 none（无交互）；stream=false（默认）仅最终响应，true 流式输出（经 WS 事件订阅消费）
-    const interactionMode = body.interactionMode ?? "none"
-    if (!["none", "multi_turn", "realtime"].includes(interactionMode)) return c.json({ error: `interactionMode 非法: ${interactionMode}（可选 none/multi_turn/realtime）` }, 400)
 
-    const attachments: AttachmentInput[] | undefined = body.attachments?.map((a) => ({
-      name: a.name,
-      mime: a.mime,
-      path: a.path,
-      data: a.data ? new Uint8Array(a.data) : undefined,
-    }))
-    // 浏览器本地环境变量注入（与 WS prompt 同规则）：不支持/非法的变量直接跳过（宽容过滤，
-    // 防 localStorage 残留旧版目录外键阻断整个任务），其余随任务临时生效、不持久化
-    const envOverride: Record<string, string> | undefined = body.env
-      ? filterEnvInjection(body.env)
-      : undefined
-
-    // 同步等待任务完成，返回最终 assistant 消息；任务错误（LLM 失败等）经 event.task.error 捕获返回。
-    // 交互模式与输出方式均为请求层配置（服务端全部支持）：默认无交互 + 仅最终响应——
-    // 依赖前端/多轮交互的工具（声明 interaction 高于 none）由引擎自动禁用，需审批工具自动通过（无人可询问）；
-    // stream=true 时推送流式事件（event.message.delta 等，接入方经 WS 事件订阅消费）；需要完整交互能力请使用 WS 通道（/ws）。
+  /** 同步等待任务完成并取最终 assistant 消息（prompt 与 chat 共用）：订阅任务错误（LLM 失败等经
+   *  event.task.error 发布）；引擎级错误（会话不存在/任务冲突）同样归一为 error 字段。
+   *  交互模式与输出方式均为请求层配置：依赖前端/多轮交互的工具（声明 interaction 高于所选模式）由引擎
+   *  自动禁用；autoApprove 控制审批姿态（见 engine.run）；stream=true 时推送流式事件（event.message.delta
+   *  等，接入方经 WS 事件订阅消费）；需要完整交互能力请使用 WS 通道（/ws）。 */
+  const runPromptTask = async (
+    sessionId: string,
+    user: { id: string; role: string },
+    prompt: string,
+    opts: { attachments?: AttachmentInput[]; envOverride?: Record<string, string>; messageId?: string; autoApprove?: boolean; outputMode?: "final_only" | "streaming"; interactionMode?: "none" | "multi_turn" | "realtime" },
+  ): Promise<{ message: { id: string; content: string; createdAt: number } | null; error?: string }> => {
     let taskError: string | null = null
     const unsub = d.events.subscribe((ev) => {
       if (ev.sessionId !== sessionId || ev.type !== "event.task.error") return
       taskError = String(ev.payload.error ?? "unknown error")
     })
     try {
-      await d.engine.run(sessionId, user.id, body.prompt, { attachments, envOverride, messageId: body.messageId, interactionMode: interactionMode as "none" | "multi_turn" | "realtime", outputMode: body.stream === true ? "streaming" : "final_only", role: user.role })
+      await d.engine.run(sessionId, user.id, prompt, {
+        attachments: opts.attachments,
+        envOverride: opts.envOverride,
+        messageId: opts.messageId,
+        autoApprove: opts.autoApprove,
+        interactionMode: opts.interactionMode ?? "none",
+        outputMode: opts.outputMode,
+        role: user.role,
+      })
     } catch (e) {
-      // 会话不存在/任务冲突等引擎级错误：与任务错误同一返回形态（200 + error 字段）
-      return c.json({ error: String((e as Error).message || e) })
+      // 会话不存在/任务冲突等引擎级错误：与任务错误同一返回形态（error 字段）
+      return { message: null, error: String((e as Error).message || e) }
     } finally {
       unsub()
     }
     const session = await d.store.load(sessionId, user.id)
     const last = session ? [...session.messages].reverse().find((m) => m.role === "assistant") : undefined
-    return c.json({
+    return {
       message: last
         ? { id: last.id, content: typeof last.content === "string" ? last.content : "", createdAt: last.createdAt }
         : null,
       ...(taskError ? { error: taskError } : {}),
-    })
+    }
+  }
+
+  /** prompt 请求体公共解析：附件/浏览器本地 env 注入（宽容过滤，与 WS prompt 同规则）/messageId/autoApprove。 */
+  const parsePromptBody = (body: { attachments?: Array<{ name: string; mime?: string; path?: string; data?: number[] }>; env?: Record<string, string | null>; messageId?: string; autoApprove?: unknown }) => {
+    const attachments: AttachmentInput[] | undefined = body.attachments?.map((a) => ({
+      name: a.name,
+      mime: a.mime,
+      path: a.path,
+      data: a.data ? new Uint8Array(a.data) : undefined,
+    }))
+    const envOverride: Record<string, string> | undefined = body.env ? filterEnvInjection(body.env) : undefined
+    return {
+      attachments,
+      envOverride,
+      messageId: body.messageId != null ? String(body.messageId) : undefined,
+      autoApprove: typeof body.autoApprove === "boolean" ? body.autoApprove : undefined,
+    }
+  }
+
+  app.post("/api/v1/sessions/:id/prompt", async (c) => {
+    const user = await userOf(c)
+    // 每用户消息速率限制（防高频 prompt 消耗 LLM 配额/资源）
+    if (!promptRateLimit.allow(user.id)) return c.json({ error: "rate limited: too many requests" }, 429)
+    const sessionId = c.req.param("id")
+    const body = await c.req.json<{ prompt: string; attachments?: Array<{ name: string; mime?: string; path?: string; data?: number[] }>; env?: Record<string, string | null>; messageId?: string; interactionMode?: string; stream?: boolean; autoApprove?: unknown }>()
+    if (typeof body.prompt !== "string" || !body.prompt) return c.json({ error: "prompt required" }, 400)
+    if (d.engine.isRunning(sessionId)) return c.json({ error: "task already running" }, 409)
+    // 请求层交互模式与输出方式配置（服务端全部支持，接入方按需选择）：
+    // interactionMode 默认 none（无交互）；stream=false（默认）仅最终响应，true 流式输出（经 WS 事件订阅消费）
+    const interactionMode = body.interactionMode ?? "none"
+    if (!["none", "multi_turn", "realtime"].includes(interactionMode)) return c.json({ error: `interactionMode 非法: ${interactionMode}（可选 none/multi_turn/realtime）` }, 400)
+    const parsed = parsePromptBody(body)
+    const result = await runPromptTask(sessionId, user, body.prompt, { ...parsed, outputMode: body.stream === true ? "streaming" : "final_only", interactionMode: interactionMode as "none" | "multi_turn" | "realtime" })
+    return c.json(result)
+  })
+
+  // 单 HTTP 一站式调用（DESIGN「REST HTTP（同步通道）」）：一次请求完成「建会话（缺省自动）→ 执行任务 →
+  // 返回最终回复」；带 sessionId 则在既有会话续聊（多轮上下文延续）。interactionMode 固定 none（单次调用
+  // 无交互往返），审批姿态经 autoApprove 显式控制（true 自动通过 / false 需审批工具直接拒绝 / 缺省通道默认）。
+  app.post("/api/v1/chat", async (c) => {
+    const user = await userOf(c)
+    if (!promptRateLimit.allow(user.id)) return c.json({ error: "rate limited: too many requests" }, 429)
+    const body = (await c.req.json<{ prompt?: string; sessionId?: string; name?: string; attachments?: Array<{ name: string; mime?: string; path?: string; data?: number[] }>; env?: Record<string, string | null>; messageId?: string; autoApprove?: unknown; stream?: boolean }>().catch(() => ({}))) as { prompt?: string; sessionId?: string; name?: string; attachments?: Array<{ name: string; mime?: string; path?: string; data?: number[] }>; env?: Record<string, string | null>; messageId?: string; autoApprove?: unknown; stream?: boolean }
+    if (typeof body.prompt !== "string" || !body.prompt) return c.json({ error: "prompt required" }, 400)
+    let sessionId: string
+    if (body.sessionId != null) {
+      // 既有会话续聊：id 白名单（与 :id 路径段同规则）+ 归属校验（不存在/非本人同一 404，不泄露存在性）
+      const id = String(body.sessionId)
+      if (!isValidSessionId(id)) return c.json({ error: `invalid session id: ${id}` }, 400)
+      const existing = await d.store.load(id, user.id)
+      if (!existing) return c.json({ error: "session not found" }, 404)
+      sessionId = id
+    } else {
+      const session = await d.store.createSession(user.id, body.name)
+      sessionId = session.id
+    }
+    if (d.engine.isRunning(sessionId)) return c.json({ error: "task already running" }, 409)
+    const parsed = parsePromptBody(body)
+    const result = await runPromptTask(sessionId, user, body.prompt, { ...parsed, outputMode: body.stream === true ? "streaming" : "final_only" })
+    // sessionId 一并返回：自动建会话的调用方凭此续聊（后续请求带 sessionId）
+    return c.json({ sessionId, ...result })
   })
 }

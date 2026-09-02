@@ -830,6 +830,21 @@ export class GebaiClient {
   }
 
   /**
+   * 单 HTTP 一站式对话（REST `/api/v1/chat`，DESIGN「REST HTTP（同步通道）」）：一次请求完成
+   * 「建会话（sessionId 缺省自动创建，name 可选命名）→ 执行任务 → 返回最终回复」，无需 WS 连接，
+   * 适合服务端/脚本等同步集成场景；返回 sessionId 供后续请求续聊（多轮上下文延续）。
+   * autoApprove：审批姿态显式控制——true 需审批工具自动通过（含服务模式）、false 无交互通道下
+   * 直接拒绝（不空等超时）、缺省通道默认姿态（本地自动通过/服务模式拒绝）。
+   * env：浏览器本地环境变量，随请求临时注入，服务端不持久化。同步阻塞至任务完成。
+   */
+  chat(
+    prompt: string,
+    opts: { sessionId?: string; name?: string; autoApprove?: boolean; env?: Record<string, string | null>; messageId?: string } = {},
+  ): Promise<{ sessionId: string; message: { id: string; content: string; createdAt: number } | null; error?: string }> {
+    return this.post("/api/v1/chat", { prompt, ...opts })
+  }
+
+  /**
    * 发送消息（WebSocket 通道）。任务经 WS `session.prompt` 发起，流式输出由 WS 事件推送
    * （event.message.delta/reasoning、event.tool.call/result、event.approval.request、
    * event.task.done/error）转换为 ChatChunk 迭代返回。

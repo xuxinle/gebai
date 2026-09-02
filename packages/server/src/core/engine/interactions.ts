@@ -121,6 +121,10 @@ export interface TaskState {
   enabledTools?: string[]
   /** 交互模式（none/multi_turn/realtime，DESIGN「交互模式」）：工具声明的最低可用模式高于此值时被禁用。 */
   interactionMode: InteractionMode
+  /** 请求级审批策略（REST prompt/chat 的 autoApprove 映射）：auto=需审批工具自动通过（含服务模式）；
+   *  deny=无交互通道下需审批工具直接拒绝（本地模式同样生效）。缺省 = 通道默认姿态
+   *  （本地无交互自动通过 / 服务模式拒绝）。 */
+  approvalPolicy?: "auto" | "deny"
   /** 发起任务用户的角色（admin/user；公共资源权限判定用）。 */
   role?: string
   /** 输出方式（final_only/streaming）：final_only 不推送文本增量与推理流（仅最终响应）。 */

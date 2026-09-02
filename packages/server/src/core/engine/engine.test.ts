@@ -2377,6 +2377,45 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
+  test("autoApprove:true 服务模式无交互通道自动通过需审批工具（请求级显式开启）", async () => {
+    // 调用方（用户本人）显式 autoApprove=true：等价自设 GEBAI_APPROVAL_SKIP——服务模式无交互通道
+    // 也不拒绝，需审批工具自动通过执行（不弹审批卡、不等待）
+    const s = await setup("approval", false, "server")
+    s.provider.toolName = "sh"
+    s.provider.toolArgs = { command: "echo granted" }
+    const session = await s.store.createSession("default", "t")
+    const approvals: string[] = []
+    s.events.subscribe((e) => {
+      if (e.type === "event.approval.request") approvals.push(String((e.payload as { tool?: unknown }).tool))
+    })
+    await s.engine.run(session.id, "default", "run tool", { interactionMode: "none", autoApprove: true })
+    expect(approvals).toEqual([])
+    const loaded = await s.store.load(session.id)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "sh" && String(m.content).includes("granted"))).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("autoApprove:false 本地模式无交互通道需审批工具直接拒绝（不空等超时）", async () => {
+    // 本地模式默认自动通过；显式 autoApprove=false 收紧为拒绝——单次调用通道无人可审批，
+    // 硬门槛直接拒绝（与服务模式默认同姿态），不进入 5 分钟审批等待
+    const s = await setup("approval")
+    s.provider.toolName = "sh"
+    s.provider.toolArgs = { command: "echo blocked" }
+    const session = await s.store.createSession("default", "t")
+    const approvals: string[] = []
+    s.events.subscribe((e) => {
+      if (e.type === "event.approval.request") approvals.push(String((e.payload as { tool?: unknown }).tool))
+    })
+    await s.engine.run(session.id, "default", "run tool", { interactionMode: "none", autoApprove: false })
+    expect(approvals).toEqual([])
+    const loaded = await s.store.load(session.id)
+    const denied = loaded!.messages.find((m) => m.role === "tool" && m.name === "sh")
+    expect(denied).toBeDefined()
+    expect(String(denied!.content)).toContain("需要审批")
+    expect(String(denied!.content)).not.toContain("blocked")
+    cleanup(s.home)
+  })
+
   test("realtime: sh approval:false skips the approval card and executes directly", async () => {
     // 交互通道：模型声明免审（明确安全命令）时不弹审批卡，直接执行
     const s = await setup("approval")

@@ -24,6 +24,25 @@ class SseFake implements LLMProvider {
   }
 }
 
+/** sh 审批姿态验证用 fake：第一轮调 sh（默认需审批），随后收尾文本。 */
+class ShFake implements LLMProvider {
+  readonly id = "fake-sh"
+  calls = 0
+  capabilities(): LLMCapabilities {
+    return { streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 1000 }
+  }
+  async *chat(_msgs: MessageLike[], _opts?: ChatOptions): AsyncIterable<LLMChunk> {
+    this.calls++
+    if (this.calls === 1) {
+      yield { type: "tool_call", toolCall: { id: "tc-sh", name: "sh", arguments: { command: "echo flag-probe" } } }
+      yield { type: "done" }
+      return
+    }
+    yield { type: "text", text: "sh 已处理" }
+    yield { type: "done" }
+  }
+}
+
 const home = mkdtempSync(join(tmpdir(), "gebai-sse-"))
 let handle: ServerHandle
 
@@ -148,5 +167,89 @@ describe("prompt REST contract（非流式 JSON）", () => {
     })
     expect(bad.status).toBe(400)
     expect(((await bad.json()) as { error?: string }).error).toContain("interactionMode 非法")
+  })
+})
+
+describe("chat REST contract（单 HTTP 一站式调用）", () => {
+  test("缺省 sessionId 自动建会话并返回最终回复（一次请求完成全流程）", async () => {
+    const res = await fetch(`${base()}/api/v1/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "what time is it", name: "一站式测试" }),
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { sessionId: string; message: { content: string } | null; error?: string }
+    expect(body.error).toBeUndefined()
+    expect(body.sessionId).toMatch(/^[0-9a-f]{32}$/)
+    expect(body.message?.content).toContain("已获取时间")
+    // 会话真实落盘（自动创建 + 消息持久化），可经详情接口访问
+    const detail = (await (await fetch(`${base()}/api/v1/sessions/${body.sessionId}`)).json()) as { name: string; messages: Array<{ role: string; content: string }> }
+    expect(detail.name).toBe("一站式测试")
+    expect(detail.messages[detail.messages.length - 1].role).toBe("assistant")
+  })
+
+  test("带 sessionId 在既有会话续聊（多轮上下文延续）", async () => {
+    const first = (await (await fetch(`${base()}/api/v1/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "what time is it" }),
+    })).json()) as { sessionId: string }
+    const second = (await (await fetch(`${base()}/api/v1/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "again please", sessionId: first.sessionId }),
+    })).json()) as { sessionId: string; message: { content: string } | null; error?: string }
+    expect(second.error).toBeUndefined()
+    expect(second.sessionId).toBe(first.sessionId)
+    const detail = (await (await fetch(`${base()}/api/v1/sessions/${first.sessionId}`)).json()) as { messages: Array<{ role: string }> }
+    // 两次问答均落同一会话（用户/助手消息成对出现两轮）
+    expect(detail.messages.filter((m) => m.role === "user").length).toBe(2)
+    expect(detail.messages.filter((m) => m.role === "assistant").length).toBe(2)
+  })
+
+  test("错误路径：缺 prompt 400 / 非法 sessionId 400 / 会话不存在 404", async () => {
+    const noPrompt = await fetch(`${base()}/api/v1/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
+    expect(noPrompt.status).toBe(400)
+    const badId = await fetch(`${base()}/api/v1/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: "hi", sessionId: "../escape" }) })
+    expect(badId.status).toBe(400)
+    const missing = await fetch(`${base()}/api/v1/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: "hi", sessionId: "00000000000000000000000000000000" }) })
+    expect(missing.status).toBe(404)
+  })
+
+  test("autoApprove 管道：true 需审批工具（sh）自动通过执行 / false 直接拒绝", async () => {
+    const engine = handle.engine as unknown as { opts: { provider: LLMProvider } }
+    const prev = engine.opts.provider
+    const shFake = new ShFake()
+    engine.opts.provider = shFake
+    try {
+      // true：sh（默认需审批）自动通过——工具结果含命令输出（本地模式缺省亦自动，此处验证标志位管道成立）
+      shFake.calls = 0
+      const ok = (await (await fetch(`${base()}/api/v1/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "run sh", autoApprove: true }),
+      })).json()) as { sessionId: string; error?: string }
+      expect(ok.error).toBeUndefined()
+      let detail = (await (await fetch(`${base()}/api/v1/sessions/${ok.sessionId}`)).json()) as { messages: Array<{ role: string; name?: string; content: string }> }
+      const executed = detail.messages.find((m) => m.role === "tool" && m.name === "sh")
+      expect(executed).toBeDefined()
+      expect(executed!.content).toContain("flag-probe")
+
+      // false：本地模式默认自动通过被显式收紧为拒绝——工具结果为「需要审批」说明，命令未执行
+      shFake.calls = 0
+      const denied = (await (await fetch(`${base()}/api/v1/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "run sh", autoApprove: false }),
+      })).json()) as { sessionId: string; error?: string }
+      expect(denied.error).toBeUndefined()
+      detail = (await (await fetch(`${base()}/api/v1/sessions/${denied.sessionId}`)).json()) as { messages: Array<{ role: string; name?: string; content: string }> }
+      const blocked = detail.messages.find((m) => m.role === "tool" && m.name === "sh")
+      expect(blocked).toBeDefined()
+      expect(blocked!.content).toContain("需要审批")
+      expect(blocked!.content).not.toContain("flag-probe")
+    } finally {
+      engine.opts.provider = prev
+    }
   })
 })
