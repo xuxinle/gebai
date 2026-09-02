@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { ToolContext } from "../../core/types"
-import { getMiniTool } from "../../core/mini-tools"
+import type { ToolContext } from "../../core/base/types"
+import { getMiniTool } from "../../core/widgets/mini-tools"
 import { def } from "./widgets"
 
 function ctx(home: string): ToolContext {

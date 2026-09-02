@@ -12,7 +12,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { gzipSync } from "node:zlib"
-import { LANG_WASM } from "../src/core/analyzer"
+import { LANG_WASM } from "../src/core/support/analyzer"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const wasmDir = join(root, "node_modules", "tree-sitter-wasms", "out")

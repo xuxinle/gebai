@@ -1,4 +1,4 @@
-import type { SubAgentDef } from "../../core/types"
+import type { SubAgentDef } from "../../core/base/types"
 import { createFeishuTools } from "./feishu_api"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./feishu_docs.md"

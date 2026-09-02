@@ -1,7 +1,7 @@
-import type { SubAgentDef } from "../core/types"
-import { analyzeTool, searchSymbolsTool } from "../core/analyzer"
+import type { SubAgentDef } from "../core/base/types"
+import { analyzeTool, searchSymbolsTool } from "../core/support/analyzer"
 import { gitTool, makePreviewServerTool, envDetectTool, systemInfoTool } from "../core/tools"
-import { projectAware } from "../core/projects"
+import { projectAware } from "../core/tools/projects"
 
 export const name = "code"
 export const description =

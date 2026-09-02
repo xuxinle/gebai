@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
-import type { LLMProvider, LLMChunk, ChatOptions } from "./core/llm"
+import type { LLMProvider, LLMChunk, ChatOptions } from "./core/llm/llm"
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 
 class SseFake implements LLMProvider {

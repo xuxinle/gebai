@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs"
 import { join, dirname } from "node:path"
-import type { ToolContext } from "../../core/types"
+import type { ToolContext } from "../../core/base/types"
 
 /** wps 测试用 ToolContext：真实文件系统（mkdtemp home）+ 会话已读追踪桩（防盲覆盖守卫依据）。 */
 export function makeCtx(home: string): { ctx: ToolContext; readSet: Set<string> } {

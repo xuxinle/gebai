@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { EventBus } from "./core/event-bus"
+import { EventBus } from "./core/base/event-bus"
 import { WebhookManager, type WebhookConfig } from "./webhooks"
 import type { AgentEvent } from "@gebai/sdk"
 
@@ -60,7 +60,7 @@ describe("WebhookManager", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-wh-of-"))
     try {
       const mgr = new WebhookManager({ home, deliver: async () => ({ ok: true, status: 200 }) })
-      await mgr.start(new (await import("./core/event-bus")).EventBus())
+      await mgr.start(new (await import("./core/base/event-bus")).EventBus())
       const cfg = await mgr.register({ url: "https://example.com/h", secret: "s1" }, "alice")
       // list 视图脱敏；of() 原样返回（含 secret 与归属）供内部解析
       expect(mgr.list("alice")[0].secret).toBe("***")

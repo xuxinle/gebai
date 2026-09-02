@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { startServer, type ServerHandle } from "./index"
 import { GebaiClient } from "@gebai/sdk"
-import type { LLMProvider, LLMChunk, ChatOptions } from "./core/llm"
+import type { LLMProvider, LLMChunk, ChatOptions } from "./core/llm/llm"
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 
 class ReasoningFake implements LLMProvider {

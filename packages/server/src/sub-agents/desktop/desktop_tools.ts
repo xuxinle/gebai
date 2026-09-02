@@ -1,4 +1,4 @@
-import type { Tool, ToolContext, ToolResult } from "../../core/types"
+import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { artifactBlocks } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
 

@@ -64,6 +64,13 @@ bun run lint
 - **不要添加无关注释**：除非必要，代码注释从简；遵循文件内既有风格。
 - **环境变量示例同步**：任何新增/变更的环境变量都必须同步写入根目录 `.env.example`（含注释说明与示例值）；`.env` 不入版本库，示例文件是唯一文档来源。
 
+### 模块分层与自动扩展
+
+- **服务端目录按领域分层**（详见 `DESIGN.md`「服务端目录结构」）：`routes/`（REST 按域）、`ws-handlers/`（WS 消息按域）、`boot/`（compose/serve/cli）、`core/{base,llm,engine,tools,support,session,schedule,exec,security,agents,widgets}`——core 根目录只放构建生成物，禁止往根平铺新源码文件。
+- **依赖单向**：`base` ← `support`/`security` ← 各领域 ← `engine` ← 传输层 ← `boot`；`core/` 内部模块**禁止 import `core/tools` 聚合 barrel**（其目录扫描顶层 await 会因反向依赖成环产生未初始化绑定）——共用能力直引 `core/support/*`、`core/security/*` 叶子模块。
+- **全局工具零注册**：新增全局工具 = 在 `packages/server/src/core/tools/` 新建导出 `export const globalTools: GlobalToolEntry[]` 的文件（契约见 `tools/shared.ts`），不改任何中央注册表——与子 Agent 同款「丢文件即注册」扩展模型。
+- **REST 路由 / WS 处理器按域新增**：新路由域在 `routes/` 新建 `register{Domain}Routes`（经 `routes/context.ts` 的 RouteCtx）并在 `app.ts` 装配；新 WS 消息类型在 `ws-handlers/` 对应域文件加 handler（入口守卫在 `ws.ts` 统一）。
+
 ### 命名与命名空间
 
 - **子 Agent 概念术语（消除模型误解的关键）**：`agent_load` = **装载**（模块语义，类比 import 子模块：工具并入当前工具集，无独立上下文）；`agent_run` = **新会话执行**（会话语义：派生临时新会话，预加载一个或多个子 Agent（完整提示词+工具）后阻塞执行，只返回最终结果）。代码/注释/系统提示词/文档一律用「装载/新会话执行」，不用「加载/调用子Agent」。详见 `DESIGN.md`「装载 vs 新会话执行（概念模型）」。
@@ -101,6 +108,14 @@ bun run lint
 3. 命名符合规则；工具名无需关注前缀，总 Agent 自动加 `{agent}_` 命名空间。
 4. 构建时自动扫描收集（零注册）；可按需选择性打包。
 5. 同步在 `DESIGN.md` 中补充该子 Agent 的说明与总览表。
+
+## 如何新增全局工具
+
+1. 在 `packages/server/src/core/tools/` 下新建文件（或并入既有域文件），导出 `export const globalTools: GlobalToolEntry[] = [{ name, tool, project? }]`——`project` 声明 `projectAware` 包装（`true` 默认 / `"workdir"` 附工作目录参数）。
+2. 工具名符合全局工具命名规则（`[a-z][a-z0-9_]*`）；重名在聚合时抛错。
+3. dev 形态重启进程即生效；二进制形态由 `scripts/build-tools.ts` 构建时自动收进 bundle 注册表。
+4. 命名空间专属工具（不进全局表）放 `tools/extras.ts`，由子 Agent def 以 `{agent}_{tool}` 引用。
+5. 同步在 `DESIGN.md`「总Agent全局工具」补条目。
 
 ## 提交 / 验证
 

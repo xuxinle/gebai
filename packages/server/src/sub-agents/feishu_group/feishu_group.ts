@@ -1,5 +1,5 @@
 import type { ToolSchema } from "@gebai/sdk"
-import type { SubAgentDef, Tool, ToolContext } from "../../core/types"
+import type { SubAgentDef, Tool, ToolContext } from "../../core/base/types"
 import { feishuFetch } from "../../feishu-bot/tls"
 
 /**

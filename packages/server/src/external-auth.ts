@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto"
-import type { ServerConfig } from "./core/config"
+import type { ServerConfig } from "./core/base/config"
 
 /**
  * 外部身份扩展点：网站（同源部署）把本地登录态作为用户身份兑换歌白令牌，免二次登录。

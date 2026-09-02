@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { ToolContext } from "../../core/types"
+import type { ToolContext } from "../../core/base/types"
 import { createFeishuGroupTools, def, envVars, name, requiresApproval, tools as defTools } from "./feishu_group"
 
 type Req = { url: string; init?: RequestInit }

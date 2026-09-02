@@ -1,5 +1,5 @@
-import type { SubAgentDef } from "../../core/types"
-import { projectAware } from "../../core/projects"
+import type { SubAgentDef } from "../../core/base/types"
+import { projectAware } from "../../core/tools/projects"
 import { wordAppendTool, wordCreateTool, wordReadTool } from "./word"
 import { excelEditTool, excelReadTool, excelWriteTool } from "./excel"
 import { pptCreateTool, pptReadTool } from "./ppt"

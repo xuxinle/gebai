@@ -5,7 +5,7 @@
  *   文本仅最终回复（无流式增量预览），任务内其他过程事件（工具调用/推理）不暴露
  */
 import type { AgentEvent, AttachmentInput } from "@gebai/sdk"
-import type { AgentEngine } from "../core/engine"
+import type { AgentEngine } from "../core/engine/engine"
 
 /** 任务运行期语义回调（引擎事件流映射；bot 只处理回调，不解析事件）。 */
 export interface BotRunHandlers {

@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import type { ToolContext } from "../../core/types"
-import type { CronTask } from "../../core/cron"
+import type { ToolContext } from "../../core/base/types"
+import type { CronTask } from "../../core/schedule/cron"
 import { def, name, tools } from "./cron"
 
 function ctx(home: string): ToolContext {

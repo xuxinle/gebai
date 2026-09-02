@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
-import type { ToolContext } from "../../core/types"
+import type { ToolContext } from "../../core/base/types"
 import { createCaptureTools, createHttpRequestTool, formatHttpResult, parseJsonObject, redactHeaders, type CapturedRequest, type FetchLike } from "./reverse_site_tools"
 import type { BridgeLike } from "../playwright/playwright_tools"
 import { def as reverseSiteDef } from "./reverse_site"

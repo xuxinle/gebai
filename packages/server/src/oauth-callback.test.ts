@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
-import type { ServerConfig } from "./core/config"
-import { sessionPath } from "./core/paths"
+import type { ServerConfig } from "./core/base/config"
+import { sessionPath } from "./core/base/paths"
 import { registerPendingAuth, getPendingAuth, USER_TOKEN_FILE } from "./sub-agents/feishu_docs/oauth"
 
 /** 最小 deps：回调端点只依赖 config.gebaiHome 与 events.publish。 */

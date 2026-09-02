@@ -6,7 +6,7 @@
  */
 import { Workbook } from "exceljs"
 import type { Cell, Worksheet } from "exceljs"
-import type { Tool, ToolContext } from "../../core/types"
+import type { Tool, ToolContext } from "../../core/base/types"
 import { truncate } from "../../core/tools"
 import { asNum, blindOverwriteGuard, fileBlocks, normColor, schema, writeGuards } from "./shared"
 

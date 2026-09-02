@@ -1,4 +1,4 @@
-import type { Tool, ToolContext, ToolResult } from "../../core/types"
+import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { truncate } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
 import { feishuFetch } from "../../feishu-bot/tls"

@@ -12,10 +12,10 @@ import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import type { AuthService } from "../auth"
-import type { SessionStore } from "../core/store"
+import type { SessionStore } from "../core/session/store"
 import { createFeishuApi, type FeishuApiLike } from "./api"
 import { FeishuConn, type FeishuConnOptions } from "./conn"
-import { createDiagramRenderer, type DiagramRenderer } from "../core/diagram-render"
+import { createDiagramRenderer, type DiagramRenderer } from "../core/support/diagram-render"
 import type { BotPromptAdapter } from "./adapter"
 
 /** 桥接用到的依赖子集（Pick 结构类型，便于测试注入 fake）。 */

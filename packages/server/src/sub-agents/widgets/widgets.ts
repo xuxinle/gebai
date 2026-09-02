@@ -1,6 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
-import type { SubAgentDef, Tool } from "../../core/types"
-import { saveMiniTool, deleteMiniTool, listMiniTools, getMiniTool } from "../../core/mini-tools"
+import type { SubAgentDef, Tool } from "../../core/base/types"
+import { saveMiniTool, deleteMiniTool, listMiniTools, getMiniTool } from "../../core/widgets/mini-tools"
 
 function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
   return { type: "object", properties, required }

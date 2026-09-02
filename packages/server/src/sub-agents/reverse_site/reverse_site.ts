@@ -1,4 +1,4 @@
-import type { SubAgentDef } from "../../core/types"
+import type { SubAgentDef } from "../../core/base/types"
 import { createCaptureTools, createHttpRequestTool } from "./reverse_site_tools"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./reverse_site.md"

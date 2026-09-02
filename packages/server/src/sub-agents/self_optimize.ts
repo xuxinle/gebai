@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
-import type { SubAgentDef } from "../core/types"
+import type { SubAgentDef } from "../core/base/types"
 import { readFeedbackTool, pageCaptureTool, truncate } from "../core/tools"
-import { isBinaryMode } from "../core/config"
+import { isBinaryMode } from "../core/base/config"
 
 export const name = "self_optimize"
 export const description =
@@ -74,7 +74,7 @@ function safePathArgs(paths: string[]): string | null {
 
 /** run_tests：在歌白仓库根执行验证（指定测试文件/全量 + 可选 typecheck/lint——AGENTS.md 准入三件套）：
  *  测试是自我修改的唯一准入凭证。 */
-const runTestsTool: import("../core/types").Tool = {
+const runTestsTool: import("../core/base/types").Tool = {
   name: "run_tests",
   description:
     "在歌白仓库根执行验证（自我修改的唯一准入凭证）：checks 选择检查项（默认 [\"test\"]；修改确认后、收尾前用 [\"test\",\"typecheck\",\"lint\"] 三件套——与 AGENTS.md 提交准入一致，一次审批跑全）；test 时 files 传相关测试文件（相对仓库根，可多个），all=true 跑全量。按序执行、首项失败即停。输出各项结果（失败需修复或 rollback 回滚）。需审批。",
@@ -121,7 +121,7 @@ const runTestsTool: import("../core/types").Tool = {
 /** rollback：回滚工作区未提交改动（测试失败时的恢复路径）——恢复被修改的 tracked 文件 + 删除新建的
  *  untracked 文件（git checkout 只恢复 tracked；新文件是自我修改的主要产物（如新建子Agent），残留会被
  *  热加载注册为破损 Agent，必须一并清理；先 dry-run 列出将删除的新建文件再执行，输出如实展示）。 */
-const rollbackTool: import("../core/types").Tool = {
+const rollbackTool: import("../core/base/types").Tool = {
   name: "rollback",
   description:
     "回滚工作区未提交改动（测试失败后的恢复路径）：paths 传要回滚的文件/目录（相对仓库根，可多个——恢复其内修改并删除其内新建文件），all=true 回滚全部未提交改动。**注意：会丢弃未提交的修改与新建文件**——仅用于撤销本次失败的自我修改；工作区若有与本次任务无关的既有改动，请用 paths 精确指定而非 all。需审批。",
@@ -173,7 +173,7 @@ const JOURNAL_MAX_ENTRIES = 100
 
 /** journal：自我优化日志（append 记录一次优化 / list 读最近记录）——跨会话优化记忆：失败的尝试与教训
  *  沉淀后，后续优化任务开工先查历史避免重复踩坑；git 历史只记代码变更，这里补「为什么改 + 验证结果」。 */
-const journalTool: import("../core/types").Tool = {
+const journalTool: import("../core/base/types").Tool = {
   name: "journal",
   description:
     "自我优化日志（跨会话优化记忆）：action=append 记录一次优化（title 必填；changes 改动清单（文件:摘要）；verification 验证方式与结果（如 run_tests 三件套/用户确认）；outcome applied=已落地/reverted=已回滚/failed=验证未通过；lessons 经验教训）；action=list 读最近记录（limit 默认 10，新→旧）。接到优化任务时先 list 了解相关历史与教训，收尾时必 append 记录本次。",
