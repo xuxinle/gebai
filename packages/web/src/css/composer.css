@@ -6,6 +6,11 @@
 /* 交互卡片（选择/环境变量填值，多会话并行：随会话显示/隐藏） */
 .interaction-card[hidden] { display: none; }
 #approvals .interaction-card { align-self: stretch; max-width: 760px; }
+/* 计划审批选择卡：内嵌计划全文时跟随内容区宽度——.msg 的 width:fit-content 按最长行收缩，
+   计划行偏短时卡片被挤成窄条；msg-body 以 flex:1 撑满（同 html-card 先例，否则 flex item 仍按
+   内容 max-content 计算宽度而压窄） */
+#approvals .interaction-card.has-plan { width: 100%; }
+#approvals .interaction-card.has-plan .msg-body { flex: 1; }
 .approval {
   display: flex;
   align-items: center;

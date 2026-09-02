@@ -50,7 +50,7 @@ const doc = {
   disconnect() {}
 }
 
-const { applyLinkTargetRule } = await import("./markdown")
+const { applyLinkTargetRule, applyTaskLists } = await import("./markdown")
 
 /** 与 markdown.ts 同配置实例化并应用链接规则（不含 DOMPurify，避免无 DOM 环境 sanitize 不可用）。 */
 function render(text: string): string {
@@ -103,5 +103,29 @@ describe("applyLinkTargetRule（markdown 链接一律新标签页打开）", () 
     const out = render('<a href="https://evil.example">x</a>')
     expect(out).not.toContain('<a href="https://evil.example">') // 原始标签未透传
     expect(out).toContain("&lt;a") // 已转义为纯文本
+  })
+})
+
+describe("applyTaskLists（GFM 任务列表勾选框，- [ ] 不再泄漏字面 []）", () => {
+  test("未勾选/已勾选转勾选框，普通列表项不受影响", () => {
+    const out = applyTaskLists(render("- [ ] 待办\n- [x] 已完成\n- 普通项"))
+    expect(out).toContain('<li class="task-item"><span class="task-box" aria-hidden="true"></span> 待办</li>')
+    expect(out).toContain('<span class="task-box done" aria-hidden="true"></span> 已完成')
+    expect(out).toContain("<li>普通项</li>")
+    expect(out).not.toContain("[]")
+  })
+
+  test("松散列表（<li><p> 包裹）与有序列表任务项同样转换", () => {
+    const loose = applyTaskLists(render("- [ ] 待办\n\n- [x] 完成"))
+    expect(loose).toContain('<li class="task-item">')
+    expect(loose).toContain('<p><span class="task-box')
+    expect(loose).not.toContain("[ ]")
+    const ordered = applyTaskLists(render("1. [ ] 第一步"))
+    expect(ordered).toContain('<li class="task-item"><span class="task-box"')
+  })
+
+  test("正文中的 [ ] 非行首占位不误转（仅列表项行首转换）", () => {
+    const out = applyTaskLists(render("说明 [ ] 见列表"))
+    expect(out).toContain("说明 [ ] 见列表")
   })
 })
