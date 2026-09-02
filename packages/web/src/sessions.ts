@@ -256,6 +256,9 @@ export async function loadMessages(sessionId: string) {
   updateTitle()
   focusInput()
   syncSendButton() // 按钮跟随当前会话：切到运行中的会话显示「停止」，空闲会话显示「发送」
+  // 排队条跟随当前会话重渲染（队列数据本就按会话隔离，缺此重渲时排队条停留旧会话内容、
+  // 后台队列事件触发重渲后又整体消失——切回会话的排队项不可见）
+  renderQueue()
   updateMsgNav() // 全部消息挂上后再定位
   // 滚动位置恢复：离开时未粘底（阅读历史中）→ 恢复原位置；否则（或新会话）落底。
   // restoreScroll 同步按落位刷新锁定状态并使未决跟随回调（flushMsgBatch 排期的 rAF /

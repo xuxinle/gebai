@@ -570,10 +570,13 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
       return
     }
     if (entry.kind === "ask_plan") {
-      // plan：计划卡片更新头部为审批结果并追加结果文本（审批由审批容器选择卡片承载）
-      const head = entry.wrapper?.querySelector(".tool-head")
+      // ask 计划审批分支：等待期计划全文只在审批容器选择卡内展示（消息流不重复预览计划卡）；
+      // 结果到达时落计划卡并更新头部为审批结果态、追加结果文本（与历史回放 toolCard 同构）
+      let wrapper = entry.wrapper
+      if (!wrapper) wrapper = appendPlanCard(entry.planArgs ?? { title: "" }, runId ? parent : undefined)
+      const head = wrapper.querySelector(".tool-head")
       if (head) head.textContent = planResultHead(output)
-      const bubble = entry.wrapper?.querySelector(".bubble")
+      const bubble = wrapper.querySelector(".bubble")
       if (bubble && output) bubble.appendChild(choiceAnswerBlock(output))
       pendingTools.delete(pendingToolsKey(sessionId, toolCallId, runId))
       return
@@ -674,13 +677,16 @@ export function appendTodoCard(sessionId: string, parent?: HTMLElement): HTMLEle
 
 /** 选择卡片（event.choice.request 实时渲染，绑定 choiceId 提交决策；支持复杂选项与多选）。
  * 渲染到审批容器（独立于消息流）：切走隐藏、切回恢复，不随消息重载丢失；任务结束随审批一并清理。
- * 同一 choiceId 重复推送（断线重连事件重放）时替换旧卡，避免选择卡片重复堆叠。 */
+ * 同一 choiceId 重复推送（断线重连事件重放）时替换旧卡，避免选择卡片重复堆叠。
+ * plan（计划审批分支）：卡内顶部内嵌计划全文（限高滚动）——审批时直接可见，
+ * 不依赖消息流的计划展示卡位置（用户可能正上翻阅读历史）与刷新后的历史重载。 */
 export function renderChoiceCard(
   prompt: string,
   options: Array<string | Record<string, unknown>>,
   choiceId: string,
   sessionId: string,
   multi = false,
+  plan?: { title: string; content: string; path: string },
 ) {
   for (const old of approvalsEl.querySelectorAll<HTMLElement>(".interaction-card")) {
     if (old.dataset.reqId === choiceId) old.remove()
@@ -693,14 +699,19 @@ export function renderChoiceCard(
   const meta = el("div", "msg-meta")
   meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))
   body.appendChild(meta)
+  if (plan && (plan.content || plan.title)) {
+    // 计划全文内嵌：复用消息流计划卡的渲染（标题 + Markdown 正文），限高滚动防长计划撑爆审批容器
+    const planWrap = el("div", "choice-plan")
+    planWrap.appendChild(planBubble(plan.title, [], plan.content))
+    body.appendChild(planWrap)
+  }
   const bubble = choiceBubble(prompt, options, choiceId, sessionId, multi)
   body.appendChild(bubble)
   wrapper.appendChild(body)
   approvalsEl.appendChild(wrapper)
   applyInteractionVisibility()
-  // 计划审批（服务端 plan 工具提示词前缀「请审核计划」）：计划全文卡片在消息流底部，
-  // 用户可能正上翻阅读历史——滚动到底把计划展示出来再作审批决策（选择卡片本身在
-  // 消息流下方常驻可见，缺的是消息流里的计划内容）
+  // 计划审批（服务端 plan 工具提示词前缀「请审核计划」）：计划全文已在卡内可见；消息流底部的
+  // 展示卡可能仍在视口外（用户上翻阅读历史）——滚动到底把审批卡带进视野再作决策
   if (prompt.startsWith("请审核计划") && getCurrentSession()?.id === sessionId) lockToBottom()
 }
 

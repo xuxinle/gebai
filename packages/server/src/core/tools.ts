@@ -5,6 +5,7 @@ import { lookup } from "node:dns/promises"
 import { createServer, connect, type AddressInfo } from "node:net"
 import type { ContentBlock, DiagramFormat, FileEntry, TodoItem, ToolSchema } from "@gebai/sdk"
 import type { ChoiceOption, Tool, ToolContext, ToolResult } from "./types"
+import { VISION_IMAGE_MIME } from "./llm"
 import { truncatedPath, truncatedLogicalPath, sessionPath } from "./paths"
 import { randomUUID, createHash } from "node:crypto"
 import { isBinaryMode } from "./config"
@@ -323,7 +324,7 @@ function stripBom(s: string): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。默认每行前缀真实行号（cat -n 风格「行号→制表符」，定位/引用 文件:行号、构造 patch 补丁用；复制原文给 edit/patch 时须去掉行号前缀，不需要行号可传 lineNumbers:false）。非 UTF-8 编码（file info 探测的 GBK 等）传 encoding 按指定编码解码读取。图片/图表等二进制或结构化文件会返回对应内容块供 UI 展示。",
+    "读取文件内容。相对路径以会话工作目录（tmp/）为基准（tmp/ 前缀可省略），本地模式支持绝对路径（服务端部署受沙箱限制）。默认每行前缀真实行号（cat -n 风格「行号→制表符」，定位/引用 文件:行号、构造 patch 补丁用；复制原文给 edit/patch 时须去掉行号前缀，不需要行号可传 lineNumbers:false）。非 UTF-8 编码（file info 探测的 GBK 等）传 encoding 按指定编码解码读取。图片文件（png/jpg/jpeg/gif/webp）不以文本读取：主模型多模态时图片直接内联进上下文（无需 vision 等其他工具），非多模态返回说明与 vision 指引；svg 为文本按正常读取。图片/图表等二进制或结构化文件另返回对应内容块供 UI 展示。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
@@ -338,6 +339,26 @@ export const readTool: Tool = {
     // 编码指定读取：按原始字节解码（非 UTF-8 文件——file info 探测为 GBK 等场景）；目录在此一并给出可读引导
     let content: string
     try {
+      // 多模态图片读取（DESIGN「多模态支持」）：白名单图片（png/jpg/jpeg/gif/webp）不按文本解码（乱码无意义）——
+      // 二进制读入后经 ToolResult.images 交引擎内联进工具结果消息（主模型多模态时模型直接可见，无需 vision）；
+      // 非多模态（ctx.multimodal 未注入/为 false）返回说明 + vision 指引。encoding 显式指定时按文本解码（模型明确要原始字节内容）
+      const ext = path.split(".").pop()?.toLowerCase() ?? ""
+      const imageMime = VISION_IMAGE_MIME[ext]
+      if (imageMime && !args.encoding) {
+        const buf = await ctx.readBinaryFile(path)
+        const size = humanSize(buf.byteLength)
+        ctx.fileGuard?.markRead(path)
+        return {
+          output: ctx.multimodal
+            ? `已读取图片文件 ${args.path}（${imageMime}，${size}）——图片已作为多模态内容附加在本结果中，可直接查看分析，无需调用其他工具。`
+            : `已读取图片文件 ${args.path}（${imageMime}，${size}）：当前主模型未声明多模态能力（GEBAI_LLM_MULTIMODAL），图片内容未注入上下文。如需查看图片内容，请调用 vision 工具（image 参数传该路径）。`,
+          images: [{ path, display: String(args.path), mime: imageMime, data: Buffer.from(buf).toString("base64") }],
+          blocks: artifactBlocks(previewLogicalPath(path, ctx)),
+        }
+      }
+      if (ext === "bmp") {
+        return { output: `read 拒绝：${args.path} 是 bmp 图片，不在多模态支持格式内（png/jpg/jpeg/gif/webp）。请先转换为支持格式（如 sh/py 脚本或 draw 工具）后读取。` }
+      }
       if (args.encoding) {
         const enc = String(args.encoding)
         const bytes = await ctx.readBinaryFile(path)
@@ -1592,7 +1613,7 @@ export const pageCaptureTool: Tool = {
   // 仅实时前端可用（请求当前页面捕获并由前端回传），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。",
+    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 read 直接查看（主模型多模态时图片内联进上下文）或 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。",
   parameters: schema({
     fullPage: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，大页面截图较慢）" },
     delay: { type: "number", description: "捕获前等待毫秒数（默认 0；UI 操作/动画/异步渲染完成后截图，上限 10000）" },
@@ -1623,7 +1644,7 @@ export const pageCaptureTool: Tool = {
       }
     }
     return {
-      output: `已捕获当前页面: ${htmlRel}（${cap.html.length} 字符，可用 read 读取完整内容）${imgRel ? `；截图 ${imgRel}（可用 vision 工具分析图片内容）` : "；前端未返回截图"}`,
+      output: `已捕获当前页面: ${htmlRel}（${cap.html.length} 字符，可用 read 读取完整内容）${imgRel ? `；截图 ${imgRel}（${ctx.multimodal ? "可用 read 直接查看（多模态内联）" : "可用 vision 工具分析图片内容"}）` : "；前端未返回截图"}`,
       blocks,
     }
   },
@@ -2626,10 +2647,13 @@ export const askTool: Tool = {
       } catch (err) {
         return { output: `计划文档保存失败：${(err as Error).message}。请检查会话目录权限后重试。` }
       }
-      // 阻塞等待用户审批：批准 → 模型继续按计划执行；拒绝（含自定义修改意见）→ 修订后重新提交
+      // 阻塞等待用户审批：批准 → 模型继续按计划执行；拒绝（含自定义修改意见）→ 修订后重新提交。
+      // plan 载荷（标题/正文/文档路径）随事件到达前端——选择卡内嵌计划全文，审批时直接可见
       const choice = await ctx.waitForChoice(
         `请审核计划「${title}」（已保存到会话文件 ${logical}）：批准后将按计划逐步执行；拒绝将返回模型修改；也可直接输入修改意见（视为拒绝）。`,
         ["批准执行", "拒绝执行"],
+        false,
+        { title, content: md, path: logical },
       )
       const data = { status: "", title, path: logical }
       if (!choice) {

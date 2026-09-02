@@ -9,7 +9,7 @@ import type { Sandbox } from "./sandbox"
 import type { EventBus } from "./event-bus"
 import type { ServerConfig } from "./config"
 import type { SubAgentManager } from "./subagents"
-import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef } from "./types"
+import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage } from "./types"
 import { ToolRegistry as BaseToolRegistry } from "./registry"
 import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "./tools"
 import { makeVisionTool, getVisionProvider } from "./vision"
@@ -101,6 +101,11 @@ function attachmentNote(ref: { name: string; path: string; mime: string; size: n
   return `[用户附件${isImage ? "图片" : "文件"}: ${ref.name}（${ref.mime}，${attachmentSizeText(ref.size)}，会话路径 ${ref.path}）${vision}]`
 }
 
+/** 工具结果图片块降级文本（read 等读取的图片未内联时：接口拒绝图片/溢出护栏降级）。 */
+function toolImageNote(b: { path?: unknown; name?: unknown; mime?: unknown }): string {
+  return `[图片文件 ${String(b.name ?? b.path ?? "")}（${String(b.mime ?? "")}）未内联：模型接口不支持图片内容。可用 vision 工具查看（image 参数传 ${String(b.path ?? "")}）]`
+}
+
 /** 粗略估算消息 token 数（CJK 感知，见 store.estimateCharsTokens）。
  *  仅用于估算「真实 usage 基线之外尚未发送的增量」与无 usage 真值时的兜底（全量）。 */
 function estimateTokens(msgs: MessageLike[]): number {
@@ -190,6 +195,8 @@ interface Choice {
   prompt: string
   options: ChoiceOption[]
   multi: boolean
+  /** 计划审批载荷（ask 计划分支）：选择卡内嵌计划全文，刷新/切回后凭 attach 快照恢复。 */
+  plan?: ChoicePlan
   resolve: (result: ChoiceResult) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -388,7 +395,7 @@ export class AgentEngine {
       pending.push({ type: "approval", toolCallId, tool: a.tool, retries: task.retries.get(toolCallId) ?? 0 })
     }
     for (const [choiceId, c] of task.choices) {
-      pending.push({ type: "choice", choiceId, prompt: c.prompt, options: c.options, multi: c.multi })
+      pending.push({ type: "choice", choiceId, prompt: c.prompt, options: c.options, multi: c.multi, ...(c.plan ? { plan: c.plan } : {}) })
     }
     for (const [envId, e] of task.envRequests) {
       pending.push({ type: "env", envId, name: e.name, description: e.description, secret: e.secret })
@@ -798,10 +805,10 @@ export class AgentEngine {
    * 发布 event.choice.request（含 choiceId/multi 供 UI 提交）；返回 ChoiceResult：
    * 单选/自定义文本为 { kind: "option" }，多选为 { kind: "multi" }，用户拒绝为 { kind: "refuse" }，超时（审批超时同值）为 null。
    */
-  private async waitForChoice(sessionId: string, prompt: string, options: ChoiceOption[], multi?: boolean, signal?: AbortSignal): Promise<ChoiceResult> {
+  private async waitForChoice(sessionId: string, prompt: string, options: ChoiceOption[], multi?: boolean, signal?: AbortSignal, plan?: ChoicePlan): Promise<ChoiceResult> {
     const task = this.tasks.get(sessionId)!
     const choiceId = crypto.randomUUID().replace(/-/g, "")
-    this.publish(sessionId, "event.choice.request", { choiceId, prompt, options, multi: !!multi, sessionId })
+    this.publish(sessionId, "event.choice.request", { choiceId, prompt, options, multi: !!multi, ...(plan ? { plan } : {}), sessionId })
     // 先消费提前到达的决策
     const pre = task.pendingChoices.get(choiceId)
     if (pre !== undefined) {
@@ -822,7 +829,7 @@ export class AgentEngine {
       onAbort = () => done(null)
       timer = setTimeout(() => done(null), APPROVAL_TIMEOUT)
       signal?.addEventListener("abort", onAbort, { once: true })
-      task.choices.set(choiceId, { prompt, options, multi: multi === true, resolve: done, timer })
+      task.choices.set(choiceId, { prompt, options, multi: multi === true, ...(plan ? { plan } : {}), resolve: done, timer })
     })
   }
 
@@ -1003,10 +1010,20 @@ export class AgentEngine {
         break
       }
     }
-    // 1) 图片附件降级（从最旧开始，一次降级一条消息的全部图片附件）
+    // 1) 图片降级（从最旧开始，一次降级一条消息的全部图片）：用户消息的图片附件与工具消息的
+    //    图片引用（read 读取的图片）同规则让路
     for (let i = 0; i < session.messages.length; i++) {
       if (i === lastUserIdx) continue
       const m = session.messages[i]
+      if (m.role === "tool" && m.images?.length) {
+        const imgCount = m.images.length
+        const note = m.images.map((img) => `[历史图片已降级为路径说明: ${img.display ?? img.path}，可用 vision/read 工具按需查看]`).join(" ")
+        m.content = `${note}\n${m.content}`
+        delete m.images
+        console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧工具消息的 ${imgCount} 张图片降级为文本说明`)
+        await this.opts.store.save(session)
+        return true
+      }
       if (m.role !== "user" || !m.attachments?.length) continue
       const images = m.attachments.filter((a) => VISION_MIME_SET.has(a.mime))
       if (!images.length) continue
@@ -1408,15 +1425,17 @@ export class AgentEngine {
     // 装载发生在会话中途，若按原位透传会夹在 assistant(tool_calls) 与 tool 结果之间，
     // 接口校验失败（assistant tool_calls 后必须紧跟 tool 响应消息），装载后会话即无法继续
     const agentSystems: MessageLike[] = []
-    // 历史图片内联窗口（从后往前数第几组图片附件）：超过窗口的降级为文本说明——
-    // 图片永久占据上下文且不参与压缩，长会话会被历史图片占死窗口
+    // 历史图片内联窗口（从后往前数第几组图片）：超过窗口的降级为文本说明——
+    // 图片永久占据上下文且不参与压缩，长会话会被历史图片占死窗口；
+    // 用户附件图片与工具结果图片（read 读取的图片引用）同窗口计数
     let recentImageGroups = 0
     // 先确定哪些位置的图片允许内联（从最新往回数 INLINE_IMAGE_RECENT 组）
     const msgs = session?.messages ?? []
     const inlineAllowed = new Array<boolean>(msgs.length).fill(false)
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]
-      if (m.role !== "user" || !m.attachments?.some((a) => VISION_MIME_SET.has(a.mime))) continue
+      const hasImages = (m.role === "user" && m.attachments?.some((a) => VISION_MIME_SET.has(a.mime))) || (m.role === "tool" && m.images?.length)
+      if (!hasImages) continue
       if (recentImageGroups >= INLINE_IMAGE_RECENT) break
       inlineAllowed[i] = true
       recentImageGroups++
@@ -1454,7 +1473,14 @@ export class AgentEngine {
           out.push({ role: "assistant", content })
         }
       } else if (m.role === "tool") {
-        out.push({ role: "tool", toolCallId: m.toolCallId, content: m.content, name: m.name })
+        // 工具结果图片（read 等读取的图片引用，Message.images）：多模态且在最近内联窗口时按引用重读内联
+        const imgBlocks = inlineMultimodal && allowInline && m.images?.length ? await this.toolImageBlocks(m.images) : []
+        out.push({
+          role: "tool",
+          toolCallId: m.toolCallId,
+          content: imgBlocks.length ? [{ type: "text", text: m.content }, ...imgBlocks] : m.content,
+          name: m.name,
+        })
       }
     }
     return [...agentSystems, ...out]
@@ -1489,7 +1515,8 @@ export class AgentEngine {
     return blocks
   }
 
-  /** 将消息中的内联图片块降级为文本说明（返回是否发生降级）。 */
+  /** 将消息中的内联图片块降级为文本说明（返回是否发生降级）：附件块（source 缺省）与工具结果图片块
+   *  （source="tool"，read 等读取的图片）分别用对应说明文案。 */
   private degradeImageBlocks(messages: MessageLike[]): boolean {
     let changed = false
     for (const m of messages) {
@@ -1498,12 +1525,37 @@ export class AgentEngine {
       for (const b of m.content) {
         if (b.type !== "image" || typeof b.path !== "string" || typeof b.name !== "string" || typeof b.mime !== "string") continue
         next ??= [...m.content]
-        next[m.content.indexOf(b)] = { type: "text", text: attachmentNote({ path: b.path, name: b.name, mime: b.mime, size: Number(b.size ?? 0) }, true) }
+        next[m.content.indexOf(b)] =
+          b.source === "tool"
+            ? { type: "text", text: toolImageNote(b) }
+            : { type: "text", text: attachmentNote({ path: b.path, name: b.name, mime: b.mime, size: Number(b.size ?? 0) }, true) }
         changed = true
       }
       if (next) m.content = next
     }
     return changed
+  }
+
+  /** 工具结果图片引用 → 统一 image 块（多模态内联，DESIGN「多模态支持」read 图片内联）：
+   *  data 缺省时按绝对路径重读（历史重建的落盘引用形态）；读取失败/超限（8MB）跳过该图——
+   *  工具结果文本自带说明兜底，不阻塞结果入上下文。块携带 source="tool" 供接口拒绝时降级为工具图片说明。 */
+  private async toolImageBlocks(images: ToolResultImage[]): Promise<Array<Record<string, unknown>>> {
+    const blocks: Array<Record<string, unknown>> = []
+    for (const img of images) {
+      try {
+        let data = img.data
+        if (!data) {
+          const buf = await Bun.file(img.path).arrayBuffer()
+          if (buf.byteLength <= 0 || buf.byteLength > ATTACHMENT_INLINE_LIMIT) continue
+          data = Buffer.from(buf).toString("base64")
+        }
+        const display = img.display ?? img.path
+        blocks.push({ type: "image", mime: img.mime, data, path: display, name: basenameName(display) || display, source: "tool" })
+      } catch {
+        /* 文件缺失/不可读：跳过（文本说明兜底） */
+      }
+    }
+    return blocks
   }
 
   private buildSystemPrompt(sessionId: string, user: string, env: Record<string, string>): string {
@@ -1694,7 +1746,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; branchSync?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null> },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; branchSync?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null>; multimodal?: boolean },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1727,6 +1779,8 @@ export class AgentEngine {
       home: this.opts.config.gebaiHome,
       env,
       sandboxed: sandbox.enforcedFor(user),
+      // 任务级主模型多模态能力：read 等工具据此决定图片文件的处理形态（多模态=内联，非多模态=vision 指引）
+      multimodal: opts?.multimodal,
       // 任务取消信号：js 脚本工具等监听中止并终止子进程（sh/py 经 runCommand 默认注入 execSignal）
       signal,
       // 会话上下文快照（js 脚本工具 ctx.messages 注入源）：live messages 数组按需取值，
@@ -1923,7 +1977,7 @@ export class AgentEngine {
       // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
       // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
       defineDynamicTool: opts?.registerDynamic,
-      waitForChoice: (prompt, options, multi) => self.waitForChoice(sessionId, prompt, options, multi, execSignal),
+      waitForChoice: (prompt, options, multi, plan) => self.waitForChoice(sessionId, prompt, options, multi, execSignal, plan),
       waitForEnv: (name, description, secret) => self.waitForEnv(sessionId, name, description ?? "", secret === true, execSignal),
       waitForDraw: (render) => self.waitForDraw(sessionId, render, execSignal),
       waitForCapture: (opts) => self.waitForCapture(sessionId, opts, execSignal),
@@ -2234,7 +2288,7 @@ export class AgentEngine {
     // 最终轮（无 toolCalls）的 assistantMsgId：本轮消息不在此持久化（由 run() 收口落盘），
     // 回传给 run() 用同一 id 落盘——流式增量已按该 id 推送前端，撤回/反馈对刚完成的回复立即生效
     let lastMessageId: string | undefined
-    const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages, registry, registerDynamic: (def) => this.registerDynamicTool(sessionId, user, def) }, 0)
+    const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages, registry, registerDynamic: (def) => this.registerDynamicTool(sessionId, user, def), multimodal: provider.capabilities().multimodal }, 0)
 
     while (rounds < MAX_TOOL_ROUNDS) {
       if (signal.aborted) throw new Error("cancelled")
@@ -2305,12 +2359,13 @@ export class AgentEngine {
       // 同批并行执行的结果按完成先后落盘：appendMessage（load→push→save 共享缓存会话对象）不容忍并发
       // 调用（save 交错可能以旧覆新），promise 链串行化每次落盘；顺序不影响接口合法性（配对按 toolCallId）
       let persistChain = Promise.resolve()
-      const persistTool = async (tc: { id: string; name: string }, content: string, extra: Partial<Message> = {}) => {
+      const persistTool = async (tc: { id: string; name: string }, content: string, extra: Partial<Message> = {}, imageBlocks?: Array<Record<string, unknown>>) => {
         const write = persistChain.then(() => persist({ id: crypto.randomUUID(), role: "tool", content, toolCallId: tc.id, name: tc.name, createdAt: Date.now(), ...extra }))
         persistChain = write.catch(() => {})
         await write
         toolCallDone.add(tc.id)
-        messages.push({ role: "tool", content, toolCallId: tc.id, name: tc.name })
+        // 多模态工具结果（read 图片内联）：图片块随文本块并入 tool 消息内容数组（provider 序列化为对应形态）
+        messages.push({ role: "tool", content: imageBlocks?.length ? [{ type: "text", text: content }, ...imageBlocks] : content, toolCallId: tc.id, name: tc.name })
       }
       const fillMissingToolResults = async (note: string) => {
         for (const rest of toolCalls) {
@@ -2453,9 +2508,13 @@ export class AgentEngine {
             // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
             // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
             const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
+              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun, images: result.images }
               : result
-            await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun })
+            // 多模态工具结果图片（read 等读取的图片）：主模型多模态时内联进 tool 消息；轻量引用
+            // （path/display/mime，不含 base64）随消息落盘，loadHistory 历史重建按引用重读内联
+            const imageBlocks = provider.capabilities().multimodal && safe.images?.length ? await this.toolImageBlocks(safe.images) : []
+            const imageRefs = safe.images?.length ? { images: safe.images.map(({ path, display, mime }) => ({ path, ...(display ? { display } : {}), mime })) } : {}
+            await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun, ...imageRefs }, imageBlocks)
             this.publish(sessionId, "event.tool.result", {
               name: tc.name,
               toolCallId: tc.id,
@@ -3068,10 +3127,11 @@ export class AgentEngine {
     // 会话上下文注入：messages 透传 buildContext（js 脚本工具 ctx.messages 快照源）；
     // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄主会话）；
     // 安全模式拒绝（与主会话 registerDynamicTool 同规则，js 工具已拦截，此为纵深防御）
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, loadIntoRegistry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) } }, depth)
     // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）；
     // 分支运行（ctxOpts.provider）按模型路由解析的独立 Provider 优先——多路接口并行
+    // （先于 ctx 解析：ctx.multimodal 按任务级 Provider 能力注入，read 等工具据此决定图片处理形态）
     const taskProvider = ctxOpts?.provider ?? this.opts.resolveProvider?.(env) ?? this.opts.provider
+    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, loadIntoRegistry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) }, multimodal: taskProvider.capabilities().multimodal }, depth)
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
     const extraParams = parseExtraParamsSafe(env.GEBAI_LLM_EXTRA_PARAMS)
     // 存档收集（替代原逐条落盘）：执行过程消息追加进 archive.messages，最终由 agent_run 扩展字段落盘
@@ -3225,18 +3285,21 @@ export class AgentEngine {
             this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
           }
           // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
-          this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
+          this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId, sessionId })
           const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
           // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
           const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun }
+            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun, images: result.images }
             : result
           // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
           // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
           const nested = safe.sessionRun ? { sessionRun: safe.sessionRun } : {}
           const withNote = autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入本次执行、提示词已注入上下文）\n${safe.output}` : safe.output
+          // 多模态工具结果图片（read 等读取的图片）：主模型多模态时内联进本次运行的 tool 消息
+          // （新会话执行为内存态，无落盘引用——随运行结束释放，不进存档/UI 走 blocks）
+          const imageBlocks = taskProvider.capabilities().multimodal && safe.images?.length ? await this.toolImageBlocks(safe.images) : []
           await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
-          messages.push({ role: "tool", content: withNote, toolCallId: tc.id, name: tc.name, ...nested })
+          messages.push({ role: "tool", content: imageBlocks.length ? [{ type: "text", text: withNote }, ...imageBlocks] : withNote, toolCallId: tc.id, name: tc.name, ...nested })
           this.publish(sessionId, "event.tool.result", {
             name: tc.name,
             toolCallId: tc.id,
