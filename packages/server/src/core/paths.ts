@@ -6,8 +6,9 @@ import { join, relative, isAbsolute, resolve, sep, dirname } from "node:path"
 /**
  * Sharding helpers per DESIGN.md.
  * Base 256 per layer (16x16). Paths are built from hex hash prefixes.
+ * 会话/反馈等 hex ID 的分片段直接取 ID 自身前缀（肉眼可从 ID 推目录）；
+ * 本函数供非 hex 键（如小工具名）做哈希分片。
  */
-
 export function sha256Hex(input: string): string {
   return createHash("sha256").update(input).digest("hex")
 }
@@ -23,6 +24,12 @@ export function shardPath(key: string, layers = 2): string[] {
   return parts
 }
 
+/** ID 自身 hex 前缀分片段（每层 2 位 = 256 路）：ID 已过格式白名单（32 位小写 hex，随机均匀分布），
+ *  分片段与 ID 前缀一致——从会话/反馈 ID 可直接目视定位目录，无需计算哈希。 */
+function idPrefixShards(id: string): string[] {
+  return [id.slice(0, 2), id.slice(2, 4)]
+}
+
 /** 会话 ID 格式白名单：32 位小写 hex（randomUUID 去连字符）。任何外部输入的 id 必须先过此校验，
  * 防止 `a/../../../` 等路径穿越串经 sessionPath 拼出 GEBAI_HOME 外/他人用户目录（多用户隔离防线）。 */
 export function isValidSessionId(id: string): boolean {
@@ -31,7 +38,7 @@ export function isValidSessionId(id: string): boolean {
 
 export function sessionPath(home: string, user: string, sessionId: string): string {
   if (!isValidSessionId(sessionId)) throw new Error(`invalid session id: ${sessionId}`)
-  const [s0, s1] = shardPath(sessionId, 2)
+  const [s0, s1] = idPrefixShards(sessionId)
   return join(home, "users", user, "sessions", s0, s1, sessionId)
 }
 
@@ -70,9 +77,11 @@ export function truncatedPath(home: string, user: string, sessionId: string, too
 }
 
 export function feedbackPath(home: string, user: string, feedbackId: string): string {
-  const hash = sha256Hex(feedbackId)
+  // 分片段直接取反馈 ID 自身前缀（ID 为服务端生成的 32 位小写 hex）；格式白名单防路径穿越
+  // （哈希分片时代由哈希保证安全，前缀分片必须显式校验）
+  if (!isValidSessionId(feedbackId)) throw new Error(`invalid feedback id: ${feedbackId}`)
   const date = new Date().toISOString().slice(0, 10)
-  const [h0, h1] = shardPath(hash, 2)
+  const [h0, h1] = idPrefixShards(feedbackId)
   return join(home, "users", user, "feedback", date, h0, h1, `${feedbackId}.json`)
 }
 

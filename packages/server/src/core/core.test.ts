@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join, resolve, sep } from "node:path"
 import { ToolRegistry } from "./registry"
 import { shardPath, sessionPath, resolveInSandbox, sha256Hex } from "./paths"
 import { EnvManager, isSensitive, filterEnvInjection, cleanupLegacyUserEnv } from "./env"
@@ -95,12 +95,12 @@ describe("sharding and sandbox", () => {
     expect(s1).toMatch(/^[0-9a-f]{2}$/)
   })
 
-  test("sessionPath embeds user and shards", () => {
+  test("sessionPath embeds user and shards（分片段=ID 自身前缀，肉眼可推路径）", () => {
     const p = sessionPath("/home", "alice", "0123456789abcdef0123456789abcdef")
     expect(p).toContain("users")
     expect(p).toContain("alice")
     expect(p).toContain("sessions")
-    expect(p).toContain("0123456789abcdef0123456789abcdef")
+    expect(p).toContain("sessions" + sep + "01" + sep + "23" + sep + "0123456789abcdef0123456789abcdef")
   })
 
   test("sessionPath rejects invalid ids (traversal / malformed)", () => {
