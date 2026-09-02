@@ -204,6 +204,8 @@ export function clearPendingTools(sessionId: string): void {
 
 /** 会话待办状态（event.todo.update 维护，渲染待办卡片用）。 */
 export const todoState = new Map<string, TodoItem[]>()
+/** attach 恢复进行中的会话集合（防重入，attach.ts 用）。 */
+export const attaching = new Set<string>()
 
 /** 已自动命名过的会话（避免重复改名）。 */
 export const autoNamed = new Set<string>()

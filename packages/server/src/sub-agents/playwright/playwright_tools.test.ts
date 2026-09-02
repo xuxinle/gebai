@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
-import type { ToolContext } from "../../core/types"
+import type { ToolContext } from "../../core/base/types"
 import { createPlaywrightTools, Bridge, createLazyBridge, lazyBridge, materializePwCore, resolveChannel, type BridgeLike } from "./playwright_tools"
 import { def as playwrightDef } from "./playwright"
 

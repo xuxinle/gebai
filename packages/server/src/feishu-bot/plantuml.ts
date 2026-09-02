@@ -15,8 +15,8 @@ import * as vizGlobal from "@plantuml/core/viz-global.js"
 ;(globalThis as Record<string, unknown>).Viz ??= (vizGlobal as { default?: unknown }).default ?? vizGlobal
 // 3) TeaVM 引擎（浏览器 DOM API 运行时读取上述全局）
 import { renderToString } from "@plantuml/core"
-import { svgRasterize } from "../core/diagram-render"
-import { normalizePlantUml } from "../core/tools"
+import { svgRasterize } from "../core/support/diagram-render"
+import { normalizePlantUml } from "../core/support/artifacts"
 import { applyPlantUmlDomShim } from "./plantuml-dom-shim"
 
 /** 渲染器接口（bot 依赖注入，测试可伪造）。 */

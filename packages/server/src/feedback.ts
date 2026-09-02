@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { FeedbackInfo, FeedbackInput } from "@gebai/sdk"
-import { feedbackPath, walkDir } from "./core/paths"
+import { feedbackPath, walkDir } from "./core/base/paths"
 
 /** 递归扫描反馈分片目录，返回该用户全部反馈（按时间倒序）。 */
 export async function readFeedback(home: string, userId: string): Promise<FeedbackInfo[]> {

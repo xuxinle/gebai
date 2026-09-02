@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
-import { SessionStore } from "./core/store"
-import type { LLMProvider, LLMChunk, ChatOptions } from "./core/llm"
+import { SessionStore } from "./core/session/store"
+import type { LLMProvider, LLMChunk, ChatOptions } from "./core/llm/llm"
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 
 class WsFake implements LLMProvider {

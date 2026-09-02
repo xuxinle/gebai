@@ -1,4 +1,4 @@
-import type { SubAgentDef } from "../../core/types"
+import type { SubAgentDef } from "../../core/base/types"
 import {
   screenshotTool,
   windowListTool,

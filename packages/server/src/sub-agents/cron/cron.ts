@@ -1,6 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
-import type { SubAgentDef, Tool } from "../../core/types"
-import type { CronNotifyChannel } from "../../core/notify"
+import type { SubAgentDef, Tool } from "../../core/base/types"
+import type { CronNotifyChannel } from "../../core/schedule/notify"
 
 function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
   return { type: "object", properties, required }

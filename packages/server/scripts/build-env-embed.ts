@@ -20,7 +20,7 @@ import { join } from "node:path"
 
 const serverRoot = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const repoRoot = join(serverRoot, "..", "..")
-const outFile = join(serverRoot, "src", "core", "env-embedded.generated.ts")
+const outFile = join(serverRoot, "src", "core", "session", "env-embedded.generated.ts")
 const envFile = join(repoRoot, ".env")
 
 /** 内置范围：仅模型配置前缀（GEBAI_LLM_ 与 GEBAI_VISION_ 前缀），不内置端口/沙箱/项目路径等部署配置。 */

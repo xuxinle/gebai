@@ -3,7 +3,7 @@ import { join, dirname } from "node:path"
 import type { AgentEvent, SessionInfo } from "@gebai/sdk"
 import type { AppDeps } from "./app"
 import type { WsConn, WsSink } from "./ws"
-import { toSessionInfo } from "./core/store"
+import { toSessionInfo } from "./core/session/store"
 
 /**
  * WS 状态服务（MVC 模型层）：把连接级状态从传输层（ws.data）提升为

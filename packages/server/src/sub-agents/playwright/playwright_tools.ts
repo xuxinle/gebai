@@ -1,10 +1,10 @@
-import type { ToolContext, ToolResult, ToolSet } from "../../core/types"
+import type { ToolContext, ToolResult, ToolSet } from "../../core/base/types"
 import { artifactBlocks, truncate } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
 import { pathToFileURL } from "node:url"
 import { dirname, isAbsolute, join, normalize, sep } from "node:path"
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { isBinaryMode, resolveGebaiHome } from "../../core/config"
+import { isBinaryMode, resolveGebaiHome } from "../../core/base/config"
 
 /**
  * playwright 子Agent 工具集：浏览器自动化（打开页面/读取内容/截图/交互/JS 执行）。

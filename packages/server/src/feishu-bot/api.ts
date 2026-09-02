@@ -3,7 +3,7 @@
  * tenant_access_token 获取与缓存、消息发送/撤回、图片资源下载、会话信息查询。
  * 全部依赖注入（fetch 可伪造），不依赖官方 SDK。
  */
-import { hmacHex } from "../core/paths"
+import { hmacHex } from "../core/base/paths"
 import { feishuFetch } from "./tls"
 
 export const FEISHU_BASE = "https://open.feishu.cn"

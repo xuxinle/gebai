@@ -28,7 +28,7 @@ import {
   convertMillimetersToTwip,
 } from "docx"
 import { strToU8 } from "fflate"
-import type { Tool, ToolContext } from "../../core/types"
+import type { Tool, ToolContext } from "../../core/base/types"
 import { truncate } from "../../core/tools"
 import { escapeXml, readDocx, unzipFiles, xmlStr, zipFiles } from "./ooxml"
 import type { MdBlock, MdRun } from "./markdown"

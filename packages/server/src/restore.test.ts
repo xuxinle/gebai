@@ -4,7 +4,7 @@ import { rename } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
-import { sessionPath } from "./core/paths"
+import { sessionPath } from "./core/base/paths"
 
 const home = mkdtempSync(join(tmpdir(), "gebai-restore-"))
 let handle: ServerHandle

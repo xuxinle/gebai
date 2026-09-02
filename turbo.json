@@ -7,7 +7,7 @@
     },
     "@gebai/desktop#build": {
       "outputs": ["dist/**"],
-      "inputs": ["src/**", "scripts/**", "launcher/**", "package.json", "../../packages/server/src/sub-agents/**", "../../packages/server/scripts/**"]
+      "inputs": ["src/**", "scripts/**", "launcher/**", "package.json", "../../packages/server/src/**", "../../packages/server/scripts/**", "../../packages/web/src/**", "../../packages/web/package.json"]
     },
     "dev": {
       "cache": false,

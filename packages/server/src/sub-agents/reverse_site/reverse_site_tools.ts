@@ -1,5 +1,5 @@
 import type { ToolSchema } from "@gebai/sdk"
-import type { Tool, ToolResult, ToolSet } from "../../core/types"
+import type { Tool, ToolResult, ToolSet } from "../../core/base/types"
 import { truncate, assertPublicHttpUrl, fetchWithRedirectGuard } from "../../core/tools"
 import { createLazyBridge, type BridgeLike } from "../playwright/playwright_tools"
 

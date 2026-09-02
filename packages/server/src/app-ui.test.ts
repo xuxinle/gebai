@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createApp, SERVICE_USER, type AppDeps } from "./app"
-import type { ServerConfig } from "./core/config"
+import type { ServerConfig } from "./core/base/config"
 
 /** 最小 deps：UI 路由只依赖 config 与 auth.defaultUser（auth=none），其余字段运行时不触碰。 */
 function makeDeps(overrides: Partial<ServerConfig> = {}): AppDeps {

@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import type { ToolContext } from "../core/types"
+import type { ToolContext } from "../core/base/types"
 import { def as codeDef } from "./code"
 import { createGlobalTools } from "../core/tools"
-import { SessionStore } from "../core/store"
+import { SessionStore } from "../core/session/store"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   const tmp = join(home, "users", "default", "sessions", "s1", "tmp")

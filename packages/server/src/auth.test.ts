@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AuthService, normalizeUsername } from "./auth"
-import { EnvManager } from "./core/env"
-import { SessionStore } from "./core/store"
+import { EnvManager } from "./core/session/env"
+import { SessionStore } from "./core/session/store"
 
 describe("AuthService", () => {
   test("create + login + authorize roundtrip", async () => {

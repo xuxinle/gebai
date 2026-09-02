@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
-import type { SessionData } from "../core/types"
+import type { SessionData } from "../core/base/types"
 import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard } from "./bot"
 
 /** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
@@ -1105,7 +1105,7 @@ describe("启动/停止", () => {
 
 describe("真实存储集成", () => {
   test("派生会话 id 满足存储层白名单：真实 SessionStore 下创建/加载/运行全链路可用", async () => {
-    const { SessionStore } = await import("../core/store")
+    const { SessionStore } = await import("../core/session/store")
     const home = mkdtempSync(join(tmpdir(), "feishu-real-store-"))
     const store = new SessionStore({ home })
     const sessions: SessionData[] = []

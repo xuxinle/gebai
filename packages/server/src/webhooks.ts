@@ -1,10 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { AgentEvent } from "@gebai/sdk"
-import type { EventBus } from "./core/event-bus"
-import { hmacHex } from "./core/paths"
-import { hostBlockReason } from "./core/ip"
-import { fetchWithRedirectGuard } from "./core/tools"
+import type { EventBus } from "./core/base/event-bus"
+import { hmacHex } from "./core/base/paths"
+import { checkWebhookUrl, fetchWithRedirectGuard } from "./core/security/fetch-guard"
 
 export interface WebhookConfig {
   id: string
@@ -31,27 +30,6 @@ export interface WebhookManagerOptions {
 
 const DEFAULT_EVENTS = ["event.task.done", "event.approval.request", "event.task.error"]
 const MAX_RETRIES = 3
-
-/** 是否放行内网/私网 Webhook 地址（默认拒绝回环与链路本地；SSRF 防护）。 */
-const ALLOW_PRIVATE = process.env.GEBAI_WEBHOOK_ALLOW_PRIVATE === "true"
-
-/** Webhook URL 校验：必须 http(s)，默认拒绝回环/链路本地/云元数据地址（SSRF 防护）。
- * 主机名判定统一走 `core/ip.ts`（覆盖 IPv4-mapped IPv6、尾点 FQDN、规范化 IPv4 字面量等
- * 绕过形式）；私网（10.x/192.168.x/172.16-31.x/ULA）默认放行——内网回调是 webhook 的
- * 常见合法场景，需全私网拒绝时使用 `GEBAI_WEBHOOK_ALLOW_PRIVATE=true` 之外另行网关管控。
- * 注册与投递逐跳共用（防「注册公网 URL → 302 内网」跳板绕过）。 */
-export function checkWebhookUrl(raw: string): void {
-  let url: URL
-  try {
-    url = new URL(raw)
-  } catch {
-    throw new Error(`invalid webhook url: ${raw}`)
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`invalid webhook url: ${raw}`)
-  if (ALLOW_PRIVATE) return
-  const reason = hostBlockReason(url.hostname, { blockPrivate: false })
-  if (reason) throw new Error(`webhook url not allowed: ${raw}`)
-}
 
 type DeliverFn = (url: string, body: unknown, headers: Record<string, string>) => Promise<{ ok: boolean; status: number }>
 

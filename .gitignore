@@ -44,6 +44,8 @@ packages/web/public/mobile-mock.html
 *.exe
 # 构建时生成的子 Agent bundle 注册表（由 scripts/build-subagents.ts 生成）
 packages/server/src/core/subagents.bundle.generated.ts
+# 构建时生成的全局工具 bundle 注册表（由 scripts/build-tools.ts 生成）
+packages/server/src/core/tools/bundle.generated.ts
 # 构建时生成的 Web UI bundle 注册表（由 scripts/build-web-bundle.ts 生成）
 packages/server/src/core/web.bundle.generated.ts
 # 构建时生成的 D2.js 内嵌产物注册表（由 scripts/build-d2js.ts 生成）

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { loadConfig } from "./core/config"
+import { loadConfig } from "./core/base/config"
 import { DevReloadManager } from "./dev-reload"
 
 /** 模拟构建进程：输出 "built" 行（stdout），delayMs = 本行输出前等待（行间隔）。 */

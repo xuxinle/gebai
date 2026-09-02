@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
-import type { ToolContext } from "../../core/types"
+import type { ToolContext } from "../../core/base/types"
 import { def as exploreDef } from "./explore"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {

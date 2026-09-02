@@ -4,7 +4,7 @@
  * 注意 pptxgenjs 在 Bun 下的严格模式限制：文本数组一律归一为 {text, options} 对象形态（不传裸字符串数组）。
  */
 import PptxGenJS from "pptxgenjs"
-import type { Tool } from "../../core/types"
+import type { Tool } from "../../core/base/types"
 import { truncate } from "../../core/tools"
 import { readPptx, unzipFiles } from "./ooxml"
 import { asNum, blindOverwriteGuard, fileBlocks, fitImage, normColor, readImage, schema, writeGuards } from "./shared"

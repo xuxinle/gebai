@@ -1,6 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
 import { artifactBlocks, previewLogicalPath } from "../../core/tools"
-import type { ToolContext } from "../../core/types"
+import type { ToolContext } from "../../core/base/types"
 
 export function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
   return { type: "object", properties, required }
