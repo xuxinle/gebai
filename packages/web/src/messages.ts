@@ -692,6 +692,9 @@ export function renderChoiceCard(
     if (old.dataset.reqId === choiceId) old.remove()
   }
   const wrapper = el("div", "msg tool interaction-card")
+  // 计划内嵌卡跟随内容区宽度（CSS .has-plan：.msg 的 width:fit-content 会按最短计划行收缩成窄条）
+  const showPlan = !!(plan && (plan.content || plan.title))
+  if (showPlan) wrapper.classList.add("has-plan")
   wrapper.dataset.session = sessionId
   wrapper.dataset.kind = "choice"
   wrapper.dataset.reqId = choiceId
@@ -699,10 +702,10 @@ export function renderChoiceCard(
   const meta = el("div", "msg-meta")
   meta.append(el("span", "msg-name", "工具"), el("span", "msg-time", formatTime(Date.now())))
   body.appendChild(meta)
-  if (plan && (plan.content || plan.title)) {
+  if (showPlan) {
     // 计划全文内嵌：复用消息流计划卡的渲染（标题 + Markdown 正文），限高滚动防长计划撑爆审批容器
     const planWrap = el("div", "choice-plan")
-    planWrap.appendChild(planBubble(plan.title, [], plan.content))
+    planWrap.appendChild(planBubble(plan!.title, [], plan!.content))
     body.appendChild(planWrap)
   }
   const bubble = choiceBubble(prompt, options, choiceId, sessionId, multi)

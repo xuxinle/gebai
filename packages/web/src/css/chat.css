@@ -694,6 +694,30 @@
 .markdown p { margin: 0.55em 0; }
 .markdown ul, .markdown ol { margin: 0.55em 0; padding-left: 1.5em; }
 .markdown li { margin: 0.22em 0; }
+/* GFM 任务列表项（- [ ] / - [x]，applyTaskLists 转换）：去圆点由勾选框替代标记位 */
+.markdown li.task-item { list-style: none; }
+.task-box {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-inset);
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+.task-box.done { border-color: var(--success); background: var(--success); position: relative; }
+.task-box.done::after {
+  content: "✓";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+}
 .markdown a { color: var(--accent); text-decoration: none; }
 .markdown a:hover { text-decoration: underline; }
 .markdown strong { font-weight: 650; }

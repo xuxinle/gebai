@@ -87,10 +87,19 @@ export function applyLinkTargetRule(md: MarkdownItInstance): void {
 
 applyLinkTargetRule(md)
 
+/** GFM 任务列表项（`- [ ]` / `- [x]`）：markdown-it 无内置支持，`[ ]` 会泄漏为列表项字面文本——
+ *  渲染后把列表项行首的 `[ ]`/`[x]` 占位转为勾选框 span（紧凑 `<li>` 与松散 `<li><p>` 两种形态；
+ *  作用于 renderMarkdown 全量输出，计划审批勾选清单与模型输出中的任务列表一并生效）。 */
+export function applyTaskLists(html: string): string {
+  return html.replace(/(<li>)(\s*(?:<p>)?)\[( |x|X)\] /g, (_m, _li: string, prefix: string, mark: string) => {
+    return `<li class="task-item">${prefix}<span class="task-box${mark.trim() ? " done" : ""}" aria-hidden="true"></span> `
+  })
+}
+
 export function renderMarkdown(text: string): string {
   // ADD_ATTR: ["target"] —— target 不在 DOMPurify 默认允许属性列表，需显式放行
   // （rel 在默认列表内；html:false + 渲染器统一注入，无其他 target 来源，无注入面）
-  return DOMPurify.sanitize(md.render(text), { ADD_ATTR: ["target"] })
+  return DOMPurify.sanitize(applyTaskLists(md.render(text)), { ADD_ATTR: ["target"] })
 }
 
 export function blockText(text: string): HTMLElement {
