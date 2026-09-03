@@ -18,7 +18,7 @@ import { initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { initTurnTimer } from "./turn-timer"
 import { initFileDisplay } from "./file-display"
-import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, refreshSessions, updateSessionCtx } from "./sessions"
+import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
@@ -127,6 +127,8 @@ composer.addEventListener("submit", async (e) => {
   // 纯附件消息补默认提示词，避免空 prompt 交给 LLM
   const prompt = text || (attachments.length ? "请查看我发送的附件并处理。" : "")
   if (!prompt) return
+  // 发送即自动命名（不等首答完成）：长任务运行期间侧栏/标题栏即可见会话标题
+  void maybeAutoTitle(sessionId)
   // env：浏览器本地环境变量（localStorage），随请求临时注入，仅本次任务生效
   await consumeTaskStream(sessionId, (run) => client.sendPrompt(sessionId, prompt, { attachments, env: loadLocalEnv(), messageId: msgId, signal: run.abort.signal }))
 })

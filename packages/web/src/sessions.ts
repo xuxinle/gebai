@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ContentBlock, SessionInfo } from "@gebai/sdk"
+import type { ContentBlock, SessionDetail, SessionInfo } from "@gebai/sdk"
 import {
   aside,
   autoNamed,
@@ -728,18 +728,19 @@ document.addEventListener("gebai:shortcuts-change", () => {
 /** 供 main 组装（发送消息时隐藏空状态）。 */
 export { hideEmptyState }
 
-/* ---------- 自动标题：第一条回答完成后，用第一个输入生成会话标题 ---------- */
+/* ---------- 自动标题：首条消息发送即以其输入命名（main 发送时点触发，任务结束兜底重试） ---------- */
 
 export async function maybeAutoTitle(sessionId: string) {
   if (autoNamed.has(sessionId)) return
   // 名称判定优先走快照（避免为取标题全量拉取会话消息）；快照无此会话时才回退 getSession
   const snapInfo = client.getSnapshot().sessions.find((s) => s.id === sessionId)
+  let session: SessionDetail | null = null
   if (snapInfo && snapInfo.name !== "新会话") {
     autoNamed.add(sessionId)
     return
   }
   if (!snapInfo) {
-    const session = await client.getSession(sessionId).catch(() => null)
+    session = await client.getSession(sessionId).catch(() => null)
     if (!session) return
     if (session.name !== "新会话") {
       // 已自定义标题（如创建时指定），不再自动命名
@@ -747,10 +748,14 @@ export async function maybeAutoTitle(sessionId: string) {
       return
     }
   }
-  const first = firstInputOf(sessionId)
+  // 首条输入优先取内存记录（发送时点即有，零额外请求）；缺失（页面刷新后补命名）时回退历史首条用户消息（子会话执行存档不算）
+  const first =
+    firstInputOf(sessionId) ??
+    (session ?? (await client.getSession(sessionId).catch(() => null)))?.messages?.find((m) => m.role === "user" && !m.session && m.content?.trim())?.content
   if (!first) return
   const compact = first.replace(/\s+/g, " ").trim()
-  const title = compact.slice(0, 24) + (compact.length > 24 ? "…" : "")
+  // 落盘标题截 50 字符（超出省略号）：侧栏/标题栏按容器宽度自行省略，此处只防超长输入整段入库
+  const title = compact.slice(0, 50) + (compact.length > 50 ? "…" : "")
   try {
     await client.renameSession(sessionId, title)
     autoNamed.add(sessionId)
@@ -761,7 +766,7 @@ export async function maybeAutoTitle(sessionId: string) {
     }
     await refreshSessions()
   } catch {
-    /* 改名失败（如会话已删除）静默忽略 */
+    /* 改名失败（如会话已删除）静默忽略；不标记 autoNamed，任务结束兜底重试 */
   }
 }
 
