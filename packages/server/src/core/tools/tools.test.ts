@@ -407,10 +407,10 @@ describe("global tools", () => {
     const c = ctx(home)
     const w = await writeTool.execute({ path: "a.txt", content: "hello" }, c)
     expect(w.blocks?.[0].type).toBe("file")
-    // read 默认带行号（cat -n 风格）；不需要可传 lineNumbers:false
+    // read 默认带行号（cat -n 风格）；不需要可传 line_numbers:false
     const r = await readTool.execute({ path: "a.txt" }, c)
     expect(r.output).toBe("1\thello")
-    expect((await readTool.execute({ path: "a.txt", lineNumbers: false }, c)).output).toBe("hello")
+    expect((await readTool.execute({ path: "a.txt", line_numbers: false }, c)).output).toBe("hello")
     cleanup(home)
   })
 
@@ -424,8 +424,8 @@ describe("global tools", () => {
     expect((await readTool.execute({ path: "m.txt", limit: -2 }, c)).output).toBe("4\tl4\n5\tl5\n（第 4–5 行，共 5 行）")
     expect((await readTool.execute({ path: "m.txt", offset: 100, limit: 2 }, c)).output).toBe("")
     expect((await readTool.execute({ path: "m.txt", offset: 1, limit: 5 }, c)).output).toBe("1\tl1\n2\tl2\n3\tl3\n4\tl4\n5\tl5\n（第 1–5 行，共 5 行）")
-    // lineNumbers:false 切片：无行号但保留尾注
-    expect((await readTool.execute({ path: "m.txt", offset: 3, limit: 2, lineNumbers: false }, c)).output).toBe("l3\nl4\n（第 3–4 行，共 5 行）")
+    // line_numbers:false 切片：无行号但保留尾注
+    expect((await readTool.execute({ path: "m.txt", offset: 3, limit: 2, line_numbers: false }, c)).output).toBe("l3\nl4\n（第 3–4 行，共 5 行）")
     // sliceLines 纯函数边界：无参数原样返回；无尾换行文件的末尾切片
     expect(sliceLines("a\nb", undefined, -1)).toBe("b")
     expect(sliceLines("x")).toBe("x")
@@ -440,10 +440,10 @@ describe("global tools", () => {
     const rawText = async (p: string) => (await import("node:fs/promises")).readFile(p, "utf8")
     // read：BOM 不进输出（首行行号干净）
     await c.writeFile(join(c.workdir, "b1.ts"), BOM + "const a = 1\nconst b = 2\n")
-    const r = await readTool.execute({ path: "b1.ts", lineNumbers: false }, c)
+    const r = await readTool.execute({ path: "b1.ts", line_numbers: false }, c)
     expect(r.output.startsWith("const a = 1")).toBe(true)
-    // edit：oldString 无需含 BOM 即可命中首行；写回后文件仍保留 BOM
-    await editTool.execute({ path: "b1.ts", edits: [{ oldString: "const a = 1", newString: "const A = 1" }] }, c)
+    // edit：old_string 无需含 BOM 即可命中首行；写回后文件仍保留 BOM
+    await editTool.execute({ path: "b1.ts", edits: [{ old_string: "const a = 1", new_string: "const A = 1" }] }, c)
     const afterEdit = await rawText(join(c.workdir, "b1.ts"))
     expect(afterEdit.startsWith(BOM)).toBe(true)
     expect(afterEdit).toContain("const A = 1")
@@ -503,7 +503,7 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-img-ext-"))
     const c = ctx(home)
     await writeTool.execute({ path: "icon.svg", content: "<svg><rect/></svg>" }, c)
-    const svg = await readTool.execute({ path: "icon.svg", lineNumbers: false }, c)
+    const svg = await readTool.execute({ path: "icon.svg", line_numbers: false }, c)
     expect(svg.output).toContain("<svg>")
     expect(svg.images).toBeUndefined()
     writeFileSync(c.resolvePath("x.bmp"), new Uint8Array([0x42, 0x4d, 1]))
@@ -999,7 +999,7 @@ describe("global tools", () => {
     const c = ctx(home)
     const html = "<!doctype html><html><body><h1>渲染后页面</h1></body></html>"
     const png = "data:image/png;base64," + Buffer.from("fake-png-bytes").toString("base64")
-    // 缺省 fullPage=false；fullPage=true 透传给前端
+    // 缺省 full_page=false；full_page=true 透传给前端（前端捕获契约载荷键仍为 fullPage）
     let gotOpts: { fullPage?: boolean; delayMs?: number } | undefined
     c.waitForCapture = async (opts) => {
       gotOpts = opts
@@ -1007,7 +1007,7 @@ describe("global tools", () => {
     }
     const r = await pageCaptureTool.execute({}, c)
     expect(gotOpts?.fullPage).toBeFalsy()
-    const full = await pageCaptureTool.execute({ fullPage: true }, c)
+    const full = await pageCaptureTool.execute({ full_page: true }, c)
     expect(gotOpts?.fullPage).toBe(true)
     // delay 透传并 clamp 到 [0, 10000]
     await pageCaptureTool.execute({ delay: 1500 }, c)
@@ -1033,7 +1033,7 @@ describe("global tools", () => {
     expect(htmlBlock.path).toMatch(/^tmp\/capture\/page-\d+\.html$/)
     expect(imgBlock.mime).toBe("image/png")
     // 落盘校验（逻辑路径可经 read 读取）
-    expect(await readTool.execute({ path: htmlBlock.path, lineNumbers: false }, c)).toMatchObject({ output: html })
+    expect(await readTool.execute({ path: htmlBlock.path, line_numbers: false }, c)).toMatchObject({ output: html })
     const imgBytes = await Bun.file(join(c.workdir, ...stripTmpPrefix(imgBlock.path).split("/"))).arrayBuffer()
     expect(Buffer.from(imgBytes).toString()).toBe("fake-png-bytes")
     cleanup(home)
@@ -1083,7 +1083,7 @@ describe("global tools", () => {
     expect(block.name).toBe("report.html")
     expect(r.output).toContain("tmp/report.html")
     // 产物落盘会话 tmp/，模型可经 read 读同一逻辑路径
-    expect(await readTool.execute({ path: "tmp/report.html", lineNumbers: false }, c)).toMatchObject({ output: html })
+    expect(await readTool.execute({ path: "tmp/report.html", line_numbers: false }, c)).toMatchObject({ output: html })
     expect(await Bun.file(join(c.workdir, "report.html")).text()).toBe(html)
     cleanup(home)
   })
@@ -1188,41 +1188,41 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools2-"))
     const c = ctx(home)
     await writeTool.execute({ path: "b.txt", content: "foo bar" }, c)
-    await editTool.execute({ path: "b.txt", edits: [{ oldString: "foo", newString: "FOO" }] }, c)
+    await editTool.execute({ path: "b.txt", edits: [{ old_string: "foo", new_string: "FOO" }] }, c)
     const r = await readTool.execute({ path: "b.txt" }, c)
     expect(r.output).toBe("1\tFOO bar")
     cleanup(home)
   })
 
-  test("edit fails on non-matching oldString", async () => {
+  test("edit fails on non-matching old_string", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools3-"))
     const c = ctx(home)
     await writeTool.execute({ path: "c.txt", content: "abc" }, c)
-    await expect(editTool.execute({ path: "c.txt", edits: [{ oldString: "zzz", newString: "x" }] }, c)).rejects.toThrow()
+    await expect(editTool.execute({ path: "c.txt", edits: [{ old_string: "zzz", new_string: "x" }] }, c)).rejects.toThrow()
     cleanup(home)
   })
 
-  test("edit 多处匹配整体失败不落盘并列出行号；replaceAll 替换全部", async () => {
+  test("edit 多处匹配整体失败不落盘并列出行号；replace_all 替换全部", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-multi-"))
     const c = ctx(home)
     await writeTool.execute({ path: "m.txt", content: "x\nfoo\ny\nfoo\n" }, c)
-    await expect(editTool.execute({ path: "m.txt", edits: [{ oldString: "foo", newString: "bar" }] }, c)).rejects.toThrow("匹配 2 处")
-    await expect(editTool.execute({ path: "m.txt", edits: [{ oldString: "foo", newString: "bar" }] }, c)).rejects.toThrow("replaceAll")
+    await expect(editTool.execute({ path: "m.txt", edits: [{ old_string: "foo", new_string: "bar" }] }, c)).rejects.toThrow("匹配 2 处")
+    await expect(editTool.execute({ path: "m.txt", edits: [{ old_string: "foo", new_string: "bar" }] }, c)).rejects.toThrow("replace_all")
     // 整体失败不落盘
     expect(await Bun.file(join(c.workdir, "m.txt")).text()).toBe("x\nfoo\ny\nfoo\n")
-    const r = await editTool.execute({ path: "m.txt", edits: [{ oldString: "foo", newString: "bar", replaceAll: true }] }, c)
+    const r = await editTool.execute({ path: "m.txt", edits: [{ old_string: "foo", new_string: "bar", replace_all: true }] }, c)
     expect(r.output).toContain("行 2、4")
     expect(await Bun.file(join(c.workdir, "m.txt")).text()).toBe("x\nbar\ny\nbar\n")
     cleanup(home)
   })
 
-  test("edit 拒绝空 oldString；空白近似命中给出提示；成功回报应用行号", async () => {
+  test("edit 拒绝空 old_string；空白近似命中给出提示；成功回报应用行号", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-hint-"))
     const c = ctx(home)
     await writeTool.execute({ path: "e.txt", content: "line1\n  indented foo\nline3\n" }, c)
-    await expect(editTool.execute({ path: "e.txt", edits: [{ oldString: "", newString: "x" }] }, c)).rejects.toThrow("为空")
-    await expect(editTool.execute({ path: "e.txt", edits: [{ oldString: "indented  foo", newString: "x" }] }, c)).rejects.toThrow("空白")
-    const r = await editTool.execute({ path: "e.txt", edits: [{ oldString: "line3", newString: "LINE3" }] }, c)
+    await expect(editTool.execute({ path: "e.txt", edits: [{ old_string: "", new_string: "x" }] }, c)).rejects.toThrow("为空")
+    await expect(editTool.execute({ path: "e.txt", edits: [{ old_string: "indented  foo", new_string: "x" }] }, c)).rejects.toThrow("空白")
+    const r = await editTool.execute({ path: "e.txt", edits: [{ old_string: "line3", new_string: "LINE3" }] }, c)
     expect(r.output).toContain("行 3")
     expect(await Bun.file(join(c.workdir, "e.txt")).text()).toContain("LINE3")
     cleanup(home)
@@ -1267,7 +1267,7 @@ describe("global tools", () => {
     const staleAppend = await writeTool.execute({ path: "s.txt", content: "x", append: true }, c)
     expect(staleAppend.output).toContain("已被修改")
     // edit/patch 同拦截（patch 行号模糊容错可对漂移内容误命中，前置陈旧拦截更直接）
-    const staleEdit = await editTool.execute({ path: "s.txt", edits: [{ oldString: "v1", newString: "X" }] }, c)
+    const staleEdit = await editTool.execute({ path: "s.txt", edits: [{ old_string: "v1", new_string: "X" }] }, c)
     expect(staleEdit.output).toContain("已被修改")
     const stalePatch = await patchTool.execute({ path: "s.txt", patch: "@@ -1,1 +1,1 @@\n-v1 改\n+X\n" }, c)
     expect(stalePatch.output).toContain("已被修改")
@@ -1278,7 +1278,7 @@ describe("global tools", () => {
     // 写后未再改动：连续 write/edit/patch 放行（写后内容即已掌握，指纹随写刷新）
     const again = await writeTool.execute({ path: "s.txt", content: "v3", append: true }, c)
     expect(again.output).toContain("已追加")
-    const editOk = await editTool.execute({ path: "s.txt", edits: [{ oldString: "v2v3", newString: "V" }] }, c)
+    const editOk = await editTool.execute({ path: "s.txt", edits: [{ old_string: "v2v3", new_string: "V" }] }, c)
     expect(editOk.output).toContain("已对 s.txt")
     cleanup(home)
   })
@@ -1343,53 +1343,53 @@ describe("global tools", () => {
     c.fileGuard = fakeGuard()
     // 会话外预置的已存在文件：盲改被拒
     writeFileSync(join(c.workdir, "pre.txt"), "v1 content\n")
-    const blind = await editTool.execute({ path: "pre.txt", edits: [{ oldString: "v1 content", newString: "v2 content" }] }, c)
+    const blind = await editTool.execute({ path: "pre.txt", edits: [{ old_string: "v1 content", new_string: "v2 content" }] }, c)
     expect(blind.output).toContain("防盲改")
     expect(await Bun.file(join(c.workdir, "pre.txt")).text()).toBe("v1 content\n")
     // read 后放行
     await readTool.execute({ path: "pre.txt" }, c)
-    const ok = await editTool.execute({ path: "pre.txt", edits: [{ oldString: "v1 content", newString: "v2 content" }] }, c)
+    const ok = await editTool.execute({ path: "pre.txt", edits: [{ old_string: "v1 content", new_string: "v2 content" }] }, c)
     expect(ok.output).toContain("已对 pre.txt")
     // write 成功即登记已读：随后 edit 放行
     await writeTool.execute({ path: "w2.txt", content: "abc\n" }, c)
-    const afterWrite = await editTool.execute({ path: "w2.txt", edits: [{ oldString: "abc", newString: "ABC" }] }, c)
+    const afterWrite = await editTool.execute({ path: "w2.txt", edits: [{ old_string: "abc", new_string: "ABC" }] }, c)
     expect(afterWrite.output).toContain("已对 w2.txt")
     // 无 fileGuard（测试桩/未注入环境）：行为不变
     const c2 = ctx(mkdtempSync(join(tmpdir(), "gebai-edit-guard2-")))
     writeFileSync(join(c2.workdir, "p.txt"), "a")
-    expect((await editTool.execute({ path: "p.txt", edits: [{ oldString: "a", newString: "b" }] }, c2)).output).toContain("已对 p.txt")
+    expect((await editTool.execute({ path: "p.txt", edits: [{ old_string: "a", new_string: "b" }] }, c2)).output).toContain("已对 p.txt")
     cleanup(home)
   })
 
-  test("edit 行号前缀误拷贝检测：oldString 携带 read 输出行号时给出明确提示", async () => {
+  test("edit 行号前缀误拷贝检测：old_string 携带 read 输出行号时给出明确提示", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-lnleak-"))
     const c = ctx(home)
     await writeTool.execute({ path: "e.txt", content: "alpha\nbeta\ngamma\n" }, c)
-    // 模型把 read 默认行号输出（1\talpha）整段复制进 oldString
+    // 模型把 read 默认行号输出（1\talpha）整段复制进 old_string
     await expect(
-      editTool.execute({ path: "e.txt", edits: [{ oldString: "1\talpha\n2\tbeta", newString: "x" }] }, c),
+      editTool.execute({ path: "e.txt", edits: [{ old_string: "1\talpha\n2\tbeta", new_string: "x" }] }, c),
     ).rejects.toThrow("行号前缀")
     // 去掉行号后正常命中
-    const ok = await editTool.execute({ path: "e.txt", edits: [{ oldString: "alpha\nbeta", newString: "ALPHA\nBETA" }] }, c)
+    const ok = await editTool.execute({ path: "e.txt", edits: [{ old_string: "alpha\nbeta", new_string: "ALPHA\nBETA" }] }, c)
     expect(ok.output).toContain("行 1")
     cleanup(home)
   })
 
-  test("read 默认带行号（cat -n 风格）；lineNumbers=false 关闭；切片行号对应真实文件行号", async () => {
+  test("read 默认带行号（cat -n 风格）；line_numbers=false 关闭；切片行号对应真实文件行号", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-read-ln-"))
     const c = ctx(home)
     await writeTool.execute({ path: "n.txt", content: "a\nb\nc\nd\n" }, c)
-    const r1 = await readTool.execute({ path: "n.txt", lineNumbers: true }, c)
+    const r1 = await readTool.execute({ path: "n.txt", line_numbers: true }, c)
     expect(r1.output).toBe("1\ta\n2\tb\n3\tc\n4\td")
-    const r2 = await readTool.execute({ path: "n.txt", offset: 3, limit: 2, lineNumbers: true }, c)
+    const r2 = await readTool.execute({ path: "n.txt", offset: 3, limit: 2, line_numbers: true }, c)
     expect(r2.output).toBe("3\tc\n4\td\n（第 3–4 行，共 4 行）")
-    const r3 = await readTool.execute({ path: "n.txt", limit: -2, lineNumbers: true }, c)
+    const r3 = await readTool.execute({ path: "n.txt", limit: -2, line_numbers: true }, c)
     expect(r3.output).toBe("3\tc\n4\td\n（第 3–4 行，共 4 行）")
     // 默认即带行号（全文读无尾注）
     const r4 = await readTool.execute({ path: "n.txt" }, c)
     expect(r4.output).toBe("1\ta\n2\tb\n3\tc\n4\td")
     // 显式关闭：原样返回含尾换行
-    const r5 = await readTool.execute({ path: "n.txt", lineNumbers: false }, c)
+    const r5 = await readTool.execute({ path: "n.txt", line_numbers: false }, c)
     expect(r5.output).toBe("a\nb\nc\nd\n")
     cleanup(home)
   })
@@ -1436,7 +1436,7 @@ describe("global tools", () => {
     const tools = createGlobalTools()
     for (const n of [
       "read", "write", "ls", "grep", "glob", "file",
-      "edit", "flow", "sh", "py", "show", "fetch_url",
+      "edit", "sh", "py", "show", "fetch_url",
       "todo", "ask",
       "agent_load", "agent_run", "bg_task",
     ]) {
@@ -1825,138 +1825,6 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
   })
 })
 
-  test("flow chains tools passing previous output as input", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-flow-"))
-    const calls: Array<Record<string, unknown>> = []
-    const mockTool: import("../base/types").Tool = {
-      name: "echo_input",
-      description: "",
-      parameters: { type: "object", properties: {} },
-      async execute(args) {
-        calls.push(args)
-        return { output: `out:${args.input ?? ""}` }
-      },
-    }
-    const c: ToolContext = {
-      ...ctx(home),
-      registry: {
-        schemas: () => [],
-        resolve: (name) => (name === "echo_input" ? { name, tool: mockTool } : undefined),
-        getAgentNames: () => [],
-      },
-    }
-    const r = await createGlobalTools().flow.execute({ steps: [{ tool: "echo_input" }, { tool: "echo_input" }] }, c)
-    expect(r.output).toContain("out:out:")
-    expect(calls[1].input).toBe("out:")
-    // 未知工具报错
-    await expect(createGlobalTools().flow.execute({ steps: [{ tool: "nope" }] }, c)).rejects.toThrow(/未知工具/)
-    cleanup(home)
-  })
-
-  test("flow passes previous output to script tools (sh/py) via stdin input param", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-flow-stdin-"))
-    const calls: Array<Record<string, unknown>> = []
-    const shMock: import("../base/types").Tool = {
-      name: "sh",
-      description: "",
-      parameters: { type: "object", properties: {} },
-      async execute(args) {
-        calls.push(args)
-        return { output: `cmd:${args.command ?? ""}:in:${args.input ?? ""}` }
-      },
-    }
-    const c: ToolContext = {
-      ...ctx(home),
-      registry: {
-        schemas: () => [],
-        resolve: (name) => (name === "sh" ? { name, tool: shMock } : undefined),
-        getAgentNames: () => [],
-      },
-    }
-    const r = await createGlobalTools().flow.execute(
-      { steps: [{ tool: "sh", params: { command: "echo a" } }, { tool: "sh", params: { command: "cat" } }] },
-      c,
-    )
-    // 第二步 sh 收到上一步输出作为 stdin（input 参数）
-    expect(calls[1].input).toBe("cmd:echo a:in:")
-    expect(r.output).toContain("in:cmd:echo a:in:")
-    cleanup(home)
-  })
-
-  test("flow maps JSON output fields into next tool params by schema", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-flow-map-"))
-    const seen: Array<Record<string, unknown>> = []
-    const producer: import("../base/types").Tool = {
-      name: "producer",
-      description: "",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return { output: JSON.stringify({ path: "data.json", extra: 1 }) }
-      },
-    }
-    const mapper: import("../base/types").Tool = {
-      name: "mapper",
-      description: "",
-      parameters: { type: "object", properties: { path: { type: "string" } } },
-      async execute(args) {
-        seen.push(args)
-        return { output: "mapped" }
-      },
-    }
-    const c: ToolContext = {
-      ...ctx(home),
-      registry: {
-        schemas: () => [],
-        resolve: (name) => (name === "producer" ? { name, tool: producer } : name === "mapper" ? { name, tool: mapper } : undefined),
-        getAgentNames: () => [],
-      },
-    }
-    await createGlobalTools().flow.execute({ steps: [{ tool: "producer" }, { tool: "mapper" }] }, c)
-    // JSON 字段 path 按 schema 映射注入；extra 不在 schema 中不注入
-    expect(seen[0].path).toBe("data.json")
-    expect(seen[0].extra).toBeUndefined()
-    cleanup(home)
-  })
-
-  test("flow dataflow: branch/loop/mapping with structured data", async () => {
-    const home = mkdtempSync(join(tmpdir(), "gebai-flow-flow-"))
-    const calls: Array<{ name: string; params: Record<string, unknown> }> = []
-    const list = mkTool("list", async () => ({ output: "3 files", data: { files: [{ path: "a.md" }, { path: "b.md" }] } }))
-    const read = mkTool("read", async (a) => ({ output: `content of ${a.path}`, data: { path: a.path } }))
-    const write = mkTool("write", async (a) => ({ output: `wrote ${a.path}` }))
-    const c: ToolContext = {
-      ...ctx(home),
-      registry: {
-        schemas: () => [],
-        resolve: (name) =>
-          name === "list" ? { name, tool: list } : name === "read" ? { name, tool: read } : name === "write" ? { name, tool: write } : undefined,
-        getAgentNames: () => [],
-      },
-    }
-    for (const t of [list, read, write]) {
-      const orig = t.execute
-      t.execute = async (args, cc) => {
-        calls.push({ name: t.name, params: args })
-        return orig(args, cc)
-      }
-    }
-    const r = await createGlobalTools().flow.execute(
-      {
-        steps: [
-          { id: "list", tool: "list" },
-          { id: "batch", foreach: "{{list.data.files}}", steps: [{ tool: "read", input: { path: "{{item.path}}" } }] },
-          { tool: "write", when: "len(list.data.files) > 1", input: { path: "merged.md", content: "{{batch.data[0].path}}" } },
-        ],
-      },
-      c,
-    )
-    expect(calls.map((x) => `${x.name}:${x.params.path ?? ""}`)).toEqual(["list:", "read:a.md", "read:b.md", "write:merged.md"])
-    expect(r.output).toContain("merged.md")
-    const steps = (r.data as { steps: Array<{ id: string; status: string; runs?: number }> }).steps
-    expect(steps.find((s) => s.id === "batch")?.runs).toBe(2)
-    cleanup(home)
-  })
-
   test("tool_schemas batch fetches input and output schemas", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-toolschemas-"))
     const probe = mkTool("probe", async () => ({ output: "ok" }))
@@ -2171,25 +2039,25 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
-  test("grep 非对称上下文（contextBefore/contextAfter 覆盖对应侧，同 grep -B/-A）", async () => {
+  test("grep 非对称上下文（context_before/context_after 覆盖对应侧，同 grep -B/-A）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-ba-"))
     const c = ctx(home)
     c.listFiles = async () => [{ path: "a.ts", size: 10, modifiedAt: 0, isDir: false }]
     c.readFile = async () => "l1\nl2 todo\nl3\nl4\nl5 todo\nl6\nl7\nl8\n"
     const tools = createGlobalTools()
-    // contextAfter=2（-A）：命中行后 2 行、前 0 行（l1 不出现）
-    const after = await tools.grep.execute({ pattern: "todo", contextAfter: 2 }, c)
+    // context_after=2（-A）：命中行后 2 行、前 0 行（l1 不出现）
+    const after = await tools.grep.execute({ pattern: "todo", context_after: 2 }, c)
     expect(after.output).toContain("a.ts:2: l2 todo")
     expect(after.output).toContain("a.ts-3- l3")
     expect(after.output).toContain("a.ts-4- l4")
     expect(after.output).not.toContain("a.ts-1-")
-    // contextBefore=1（-B）：命中行前 1 行、后 0 行（l3/l4 不出现）
-    const before = await tools.grep.execute({ pattern: "todo", contextBefore: 1 }, c)
+    // context_before=1（-B）：命中行前 1 行、后 0 行（l3/l4 不出现）
+    const before = await tools.grep.execute({ pattern: "todo", context_before: 1 }, c)
     expect(before.output).toContain("a.ts-1- l1")
     expect(before.output).toContain("a.ts:2: l2 todo")
     expect(before.output).not.toContain("a.ts-3-")
     // context + 单侧覆盖：context=1 但 after=0
-    const mixed = await tools.grep.execute({ pattern: "todo", context: 1, contextAfter: 0 }, c)
+    const mixed = await tools.grep.execute({ pattern: "todo", context: 1, context_after: 0 }, c)
     expect(mixed.output).toContain("a.ts-1- l1")
     expect(mixed.output).not.toContain("a.ts-3-")
     cleanup(home)
@@ -2413,10 +2281,10 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     expect(deleted).toEqual([join(c.workdir, "old.txt")])
     await t.execute({ action: "move", path: "a.txt", to: "b.txt" }, c)
     expect(moved).toEqual([[join(c.workdir, "a.txt"), join(c.workdir, "b.txt")]])
-    await t.execute({ action: "rename", path: "a.txt", newName: "renamed.txt" }, c)
+    await t.execute({ action: "rename", path: "a.txt", new_name: "renamed.txt" }, c)
     expect(moved[1]).toEqual([join(c.workdir, "a.txt"), join(c.workdir, "renamed.txt")])
-    // rename 拒绝含路径分隔符的 newName（防越界改写，跨目录应走 move）
-    const bad = await t.execute({ action: "rename", path: "a.txt", newName: "../evil.txt" }, c)
+    // rename 拒绝含路径分隔符的 new_name（防越界改写，跨目录应走 move）
+    const bad = await t.execute({ action: "rename", path: "a.txt", new_name: "../evil.txt" }, c)
     expect(bad.output).toContain("file 拒绝")
     // info：内容探测（UTF-8 文本 + 扩展名标签；非扩展名推断）
     writeFileSync(join(c.workdir, "note.md"), "# hi")
@@ -2688,11 +2556,11 @@ describe("patch tool", () => {
     cleanup(home)
   })
 
-  test("dryRun validates without writing", async () => {
+  test("dry_run validates without writing", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-applypatch-dry-"))
     const c = ctx(home)
     await writeTool.execute({ path: "a.ts", content: "a\nb\nc\n" }, c)
-    const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-b\n+B\n", dryRun: true }, c)
+    const r = await patchTool.execute({ path: "a.ts", patch: "@@ -2,1 +2,1 @@\n-b\n+B\n", dry_run: true }, c)
     expect(r.output).toContain("预演")
     expect(r.output).toContain("未写入")
     expect(await Bun.file(join(sessionPath(home, "default", SID), "tmp", "a.ts")).text()).toBe("a\nb\nc\n")
@@ -2804,7 +2672,7 @@ describe("git tool", () => {
     cleanup(home)
   })
 
-  test("log caps maxEntries at 50; ref+path 限定范围", async () => {
+  test("log caps max_entries at 50; ref+path 限定范围", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-git-log-"))
     const c = ctx(home)
     const seen: string[] = []
@@ -2812,7 +2680,7 @@ describe("git tool", () => {
       seen.push(cmd)
       return { stdout: "a1 commit1\n", stderr: "", code: 0 }
     }
-    await gitTool.execute({ action: "log", maxEntries: 999 }, c)
+    await gitTool.execute({ action: "log", max_entries: 999 }, c)
     await gitTool.execute({ action: "log", ref: "main..dev", path: "packages/server/" }, c)
     expect(seen).toEqual(["git log --oneline -n 50", 'git log --oneline -n 10 "main..dev" -- "packages/server/"'])
     cleanup(home)
@@ -3031,12 +2899,12 @@ describe("产物块解析路径（read/write 产物 file 块携带可预览路�
     try {
       const c = ctx(home)
       await writeTool.execute({ path: "w.ts", content: "a\nb\nc\n" }, c)
-      const e = await editTool.execute({ path: "w.ts", edits: [{ oldString: "b", newString: "B" }] }, c)
+      const e = await editTool.execute({ path: "w.ts", edits: [{ old_string: "b", new_string: "B" }] }, c)
       expect((e.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
       const p2 = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-a\n+A\n" }, c)
       expect((p2.blocks as Array<{ path?: string }>)[0]?.path).toBe("tmp/w.ts")
-      // dryRun 不落盘：无产物块
-      const dry = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-A\n+X\n", dryRun: true }, c)
+      // dry_run 不落盘：无产物块
+      const dry = await patchTool.execute({ path: "w.ts", patch: "@@ -1,1 +1,1 @@\n-A\n+X\n", dry_run: true }, c)
       expect(dry.blocks).toBeUndefined()
     } finally {
       rmSync(home, { recursive: true, force: true })

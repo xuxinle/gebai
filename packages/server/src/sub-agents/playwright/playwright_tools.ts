@@ -371,7 +371,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
       parameters: schema(
         {
           url: { type: "string", description: "要打开的 http(s) 或 file:// 地址" },
-          waitUntil: { type: "string", description: "等待加载完成的条件：load/domcontentloaded/networkidle/commit（默认 load）" },
+          wait_until: { type: "string", description: "等待加载完成的条件：load/domcontentloaded/networkidle/commit（默认 load）" },
           timeout: { type: "number", description: "超时毫秒（默认 30000，上限 120000）" },
         },
         ["url"]
@@ -379,7 +379,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
       async execute(args, ctx) {
         const r = await request(ctx.sessionId, "open", {
           url: String(args.url ?? "").trim(),
-          waitUntil: String(args.waitUntil ?? "load"),
+          waitUntil: String(args.wait_until ?? "load"),
           timeout: num(args.timeout, 30_000),
         })
         const info = r as { url: string; title: string }
@@ -413,10 +413,10 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
     screenshot: {
       name: "screenshot",
       description:
-        "对当前页面（或指定元素）截图，保存 PNG 到会话 tmp/ 并返回图片。fullPage 截整页、selector 指定元素区域。",
+        "对当前页面（或指定元素）截图，保存 PNG 到会话 tmp/ 并返回图片。full_page 截整页、selector 指定元素区域。",
       card: { titleParams: ["selector"], args: "none" },
       parameters: schema({
-        fullPage: { type: "boolean", description: "是否整页截图（默认 false）" },
+        full_page: { type: "boolean", description: "是否整页截图（默认 false）" },
         selector: { type: "string", description: "可选：CSS 选择器，只截该元素" },
         index: { type: "number", description: "可选：标签页序号（默认当前页）" },
       }),
@@ -426,7 +426,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
         try {
           await request(ctx.sessionId, "screenshot", {
             path: abs,
-            fullPage: !!args.fullPage,
+            fullPage: !!args.full_page,
             selector: args.selector === undefined ? "" : String(args.selector),
             index: args.index,
           })
@@ -530,7 +530,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
         selector: { type: "string", description: "等待出现的 CSS 选择器" },
         state: { type: "string", description: "selector 的等待状态（visible/attached/hidden/detached，默认 visible）" },
         url: { type: "string", description: "等待 URL 匹配（glob 模式，如 **/order/*）" },
-        loadState: { type: "string", description: "load | domcontentloaded | networkidle" },
+        load_state: { type: "string", description: "load | domcontentloaded | networkidle" },
         timeout: { type: "number", description: "超时毫秒（默认 30000）" },
       }),
       async execute(args, ctx) {
@@ -538,7 +538,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
           selector: args.selector === undefined ? "" : String(args.selector),
           state: String(args.state ?? "visible"),
           url: args.url === undefined ? "" : String(args.url),
-          loadState: args.loadState === undefined ? "" : String(args.loadState),
+          loadState: args.load_state === undefined ? "" : String(args.load_state),
           timeout: num(args.timeout, 30_000),
         }, "等待完成")
       },
@@ -589,14 +589,14 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
       card: { titleParams: ["url"], args: "none" },
       parameters: schema({
         url: { type: "string", description: "可选：新标签页打开的地址" },
-        waitUntil: { type: "string", description: "等待加载完成的条件（默认 load）" },
+        wait_until: { type: "string", description: "等待加载完成的条件（默认 load）" },
         timeout: { type: "number", description: "超时毫秒（默认 30000）" },
       }),
       async execute(args, ctx) {
         try {
           const r = (await request(ctx.sessionId, "new_page", {
             url: String(args.url ?? "").trim(),
-            waitUntil: String(args.waitUntil ?? "load"),
+            waitUntil: String(args.wait_until ?? "load"),
             timeout: num(args.timeout, 30_000),
           })) as { index: number; url: string; title: string }
           return { output: `新标签页 [${r.index}]: ${r.title || "(无标题)"}\n${r.url || "(空白页)"}` }

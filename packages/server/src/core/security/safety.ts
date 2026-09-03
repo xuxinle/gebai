@@ -8,7 +8,7 @@
  * - 定时任务调度（cron_add/update/remove/trigger）：维持硬阻断（定时/立即触发任意执行，无法降级）
  * - 子Agent 工具：自主声明 `Tool.safeMode`（true=作者判定可提供 / false=判定不提供），未声明按短名风险规则默认
  *
- * 引擎主/子循环、flow step 层与 js 脚本工具 RPC 分发层共用 isToolBlockedInSafeMode（三者直接/间接执行工具，拦截规则须一致）。
+ * 引擎主/子循环与 js 脚本工具 RPC 分发层共用 isToolBlockedInSafeMode（两者直接/间接执行工具，拦截规则须一致）。
  * 「安全写范围」：沙箱模式=用户数据根（users/{user}，会话 tmp 已在其中）；本地模式=OS 用户主目录 + GEBAI_HOME + 会话工作目录。
  */
 import { homedir } from "node:os"
@@ -17,7 +17,7 @@ import { join, resolve, sep } from "node:path"
 /** 安全模式下硬阻断的工具（无法降级）：定时任务调度/手动触发可立即或延迟触发任意 shell/js 执行。 */
 export const SAFE_MODE_BLOCKED_TOOLS = new Set(["cron_add", "cron_update", "cron_remove", "cron_trigger"])
 
-/** 工具是否被安全模式硬阻断（精确名或子Agent 命名空间前缀命中，如 my_cron_add）：引擎/flow step 层/js RPC 分发层共用。 */
+/** 工具是否被安全模式硬阻断（精确名或子Agent 命名空间前缀命中，如 my_cron_add）：引擎/js RPC 分发层共用。 */
 export function isToolBlockedInSafeMode(name: string): boolean {
   for (const b of SAFE_MODE_BLOCKED_TOOLS) {
     if (name === b || name.endsWith(`_${b}`)) return true
@@ -41,7 +41,7 @@ export function isRiskyToolName(name: string): boolean {
   return false
 }
 
-/** 安全模式硬阻断的限制信息（引擎与 flow 工具共用，措辞一致）。 */
+/** 安全模式硬阻断的限制信息（引擎与 js 工具共用，措辞一致）。 */
 export function safeModeRestrictionMsg(name: string): string {
   return `安全模式：工具 ${name} 已限制（定时任务调度类无法降级为只读，安全模式下不提供）。请改用只读方式（如 read/grep/fetch_url），或直接给出分析与建议。`
 }

@@ -46,7 +46,7 @@ export {
 } from "./extras"
 export { makeTodoTool, askTool, fullModeTool } from "./interact"
 export { agentListTool, agentLoadTool, agentRunTool, branchRunTool, branchSyncTool, bgTaskTool } from "./agent"
-export { makeFlowTool, toolSchemasTool } from "./flow"
+export { toolSchemasTool } from "./schemas"
 
 // ---- 目录扫描（dev）→ bundle 回退（dist/--compile），模块初始化一次成形 ----
 let allEntries: GlobalToolEntry[] | null = null
@@ -98,7 +98,7 @@ export function _setExcludedGlobalToolsForTest(names: string[]): void {
   for (const n of names) excludedGlobalTools.add(n)
 }
 
-/** 工具是否被构建期排除：index.ts 注册（含 vision）、engine agent_run 新会话内建编排工具（flow/tool_schemas/js）
+/** 工具是否被构建期排除：index.ts 注册（含 vision）、engine agent_run 新会话内建编排工具（tool_schemas/js）
  *  注入共用——排除 = 不注册不暴露（schema 不可见、调用报未知工具）。 */
 export function isGlobalToolExcluded(name: string): boolean {
   return excludedGlobalTools.has(name)

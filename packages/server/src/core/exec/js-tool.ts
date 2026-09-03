@@ -2,7 +2,7 @@
  * js 脚本工具（DESIGN「js 脚本工具：工具动态编程」）：以 Bun 子进程执行 JS/TS 代码，
  * 进程内注入 tools 工具调用桥（直接调用会话注册表中任意工具）与会话上下文 ctx
  * （user/sessionId/workdir/env/projects/messages），把「工具即函数」升级为真正的动态编程——
- * 完整语言能力（变量/函数/循环/条件/字符串处理/await）编排工具链，弥补 flow 声明式
+ * 完整语言能力（变量/函数/循环/条件/字符串处理/await）编排工具链（数据流编排的唯一内建方式），
  * 表达式语言的表达力上限。
  *
  * 执行模型：生成脚本文件（运行时桥前导 + 用户代码）→ 子进程运行（脚本调试 = bun 直跑，
@@ -14,7 +14,7 @@
  * - 免审拦截：免审运行（approval:false / 免审动态工具）时内部调用需审批的工具按剥离免审标记后的
  *   审批姿态拒绝（与引擎无交互硬门槛同规则）；默认审批运行的 js 一次审批覆盖内部调用。
  * - 嵌套封死：RPC 执行工具统一携带 fromJsBridge 标记，js/动态工具 execute 见标记即拒——
- *   js→flow→js 交替递归无通道；动态工具运行器（depth 1）内不可再 defineTool。
+ *   js→动态工具→js 交替递归无通道；动态工具运行器（depth 1）内不可再 defineTool。
  * - env 不落盘：ctx.env 改为子进程内运行时引用 process.env（spawn 已传同源环境），
  *   脚本文件不再明文嵌入密钥；messages 等会话数据仍嵌入（任务数据契约）。
  */
@@ -27,10 +27,11 @@ import { isSensitive } from "../session/env"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, scanJsReadOnly, stripApprovalFlags } from "../security/safety"
 import type { ContentBlock, SessionRunArchive } from "@gebai/sdk"
 import { isBinaryMode } from "../base/config"
+import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
 import { truncate } from "../support/truncate"
 import { scriptTimeoutMs } from "../support/exec-opts"
 
-/** 单次脚本执行内工具调用总数上限（与 flow FLOW_MAX_STEPS 对齐）。 */
+/** 单次脚本执行内工具调用总数上限。 */
 export const JS_TOOL_MAX_CALLS = 100
 /** 动态工具 execute 源码长度上限（防巨源码撑爆 chat.json——源码随会话持久化）。 */
 export const JS_DYNAMIC_SOURCE_CAP = 100_000
@@ -457,8 +458,10 @@ async function runJsScript(
       return
     }
     if (msg.t === "call") {
-      const name = String(msg.name ?? "")
-      const params = (msg.params && typeof msg.params === "object" ? msg.params : {}) as Record<string, unknown>
+      // 工具名/参数键容错（与引擎派发同规则，core/base/tool-args）：分隔符/驼峰偏差归一蛇形后解析，
+      // 模型在脚本里写 agent.run/agentRun、旧风格参数键（oldString）不因风格误差报未知工具/缺参
+      const name = tolerantToolName(String(msg.name ?? ""))
+      const rawParams = (msg.params && typeof msg.params === "object" ? msg.params : {}) as Record<string, unknown>
       // 防嵌套：js 内不能再起 js（嵌套 RPC 桥子进程失控风险）；动态工具仅 depth 0 可调用（防递归子进程）
       if (name === "js" || name.endsWith("_js")) {
         out.calls.push({ name, ok: false, error: "嵌套 js 不可用" })
@@ -466,6 +469,7 @@ async function runJsScript(
         return
       }
       const rt = ctx.registry.resolve(name)
+      const params = rt ? normalizeToolArgs(rt.tool, rawParams) : rawParams
       if (!rt) {
         out.calls.push({ name, ok: false, error: `未知工具 ${name}` })
         respond(false, `未知工具: ${name}`)
@@ -476,7 +480,7 @@ async function runJsScript(
         respond(false, `动态工具 ${rt.name} 不能在 js/动态工具内调用（防递归嵌套子进程）`)
         return
       }
-      // 安全模式：硬阻断工具（cron 调度类）在 RPC 分发层同规则拦截（与 flow step 层/引擎一致，无绕过通道）；
+      // 安全模式：硬阻断工具（cron 调度类）在 RPC 分发层同规则拦截（与引擎一致，无绕过通道）；
       // sh/py/write 等风险工具不再拦截——各自在 execute 内降级（白名单/审计钩子/写范围）
       if (ctx.safeMode && isToolBlockedInSafeMode(rt.name)) {
         const msg2 = safeModeRestrictionMsg(rt.name)
@@ -520,7 +524,7 @@ async function runJsScript(
         }
       }
       try {
-        // fromJsBridge 标记：js/动态工具 execute 见标记即拒——封死经 flow 等直执行工具回到 js 的所有嵌套路径
+        // fromJsBridge 标记：js/动态工具 execute 见标记即拒——封死经直执行工具回到 js 的所有嵌套路径
         const r = await rt.tool.execute(params, { ...ctx, fromJsBridge: true })
         const cap = (s: unknown): string | null => {
           const t = s == null ? "" : String(s)
@@ -639,9 +643,9 @@ function jsApprovalFreeAllowed(code: string): boolean {
 export const jsTool: Tool = {
   name: "js",
   description:
-    "执行 JS/TS 脚本（Bun 运行时，支持 TS/await/fetch/Bun API），可直接调用其他工具并注入会话上下文——完整语言能力（变量/函数/循环/条件/异常处理）编排工具链，表达 flow 声明式编排写不出的逻辑（复杂变换/动态参数/错误分支重试/跨步骤聚合）。\n" +
+    "执行 JS/TS 脚本（Bun 运行时，支持 TS/await/fetch/Bun API），可直接调用其他工具并注入会话上下文——完整语言能力（变量/函数/循环/条件/异常处理）编排工具链，数据流编排的首选方式（复杂变换/动态参数/错误分支重试/跨步骤聚合均可表达）。\n" +
     "- **工具即内置函数**：`const r = await read({ path: \"a.txt\" })`（当前已启用的每个工具名都是一个可直接 await 的函数，无需前缀）；动态名字用 `await tools.call(name, params)` 或 `await tools.xxx(params)`。返回 `{ output, data, blocks, truncated, filePath }`（data 为结构化输出，结构可先用 tool_schemas 查询）；工具抛错 = Promise reject（可 try/catch 容错）。并行用 `Promise.all`；调用总数上限 100 次。内部工具产生的图片/图表/文件块与 agent_run 的新会话存档透传到 js 结果（UI 可见、历史回放不丢）。\n" +
-    "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；flow/编排传入的 `input` 参数可直接引用（JSON 文本需自行 JSON.parse）。\n" +
+    "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；编排传入的 `input` 参数可直接引用（JSON 文本需自行 JSON.parse）。\n" +
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
     "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（默认 true 需审批，仅明确安全的只读/幂等工具传 false）。\n" +
     "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。**脚本进程 cwd 即会话 tmp/**：裸 fs/Bun.write 的相对路径直接用文件名（如 `a.txt`）——不要再带 `tmp/` 前缀（会多套一层写入 `tmp/tmp/…`）；工具函数（read/write 等）两种写法等价（`tmp/` 前缀自动剥离，仅工具参数层生效）。",
@@ -654,9 +658,9 @@ export const jsTool: Tool = {
     type: "object",
     properties: {
       code: { type: "string", description: "JS/TS 脚本源码（顶层 await 可用；return 返回值进 data.result）" },
-      input: { description: "可选：任意输入（flow/编排传入），脚本内经 input 引用" },
+      input: { description: "可选：任意输入，脚本内经 input 引用" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540）" },
-      strict: { type: "boolean", description: "可选：true 时脚本失败抛工具级错误（flow 编排「失败即中断」）；默认 false 失败作为正常结果返回" },
+      strict: { type: "boolean", description: "可选：true 时脚本失败抛工具级错误（编排「失败即中断」）；默认 false 失败作为正常结果返回" },
       approval: { type: "boolean", description: "可选：本次调用是否需要用户审批（默认 true 需审批）；仅对明确安全的只读/幂等脚本可设 false" },
     },
     required: ["code"],
@@ -682,10 +686,10 @@ export const jsTool: Tool = {
   async execute(args, ctx) {
     const userCode = String(args.code ?? "")
     if (!userCode.trim()) return { output: "js 拒绝：code 不能为空。" }
-    // 嵌套守卫（一刀切）：经 js RPC 桥执行的任何工具（flow 步骤、编排工具等）再调 js 时携带 fromJsBridge
-    // 标记——见标记即拒，封死 js→flow→js→… 交替递归与桥内失控子进程（直呼 js 已在 RPC 分发层拦截）
+    // 嵌套守卫（一刀切）：经 js RPC 桥执行的任何工具再调 js 时携带 fromJsBridge
+    // 标记——见标记即拒，封死 js→（直执行工具）→js 交替递归与桥内失控子进程（直呼 js 已在 RPC 分发层拦截）
     if (ctx.fromJsBridge) {
-      return { output: "js 拒绝：不能在经 js 桥调用的工具（如 flow 步骤）内嵌套执行 js（防递归子进程）。请把编排逻辑写进当前脚本，或在顶层会话直接调用 js。" }
+      return { output: "js 拒绝：不能在经 js 桥调用的工具内嵌套执行 js（防递归子进程）。请把编排逻辑写进当前脚本，或在顶层会话直接调用 js。" }
     }
     // 安全模式：静态扫描（动态加载/字符串代码执行通道 shim 拦不住，前置拒绝）+ 子进程只读 shim
     if (ctx.safeMode) {
@@ -791,7 +795,7 @@ export function makeDynamicTool(def: DynamicToolDefInput): Tool {
     async execute(args, ctx) {
       // 嵌套守卫说明：动态工具**不经** fromJsBridge 标记拒绝——depth 0（js 脚本内调用，含 defineTool 后
       // 同脚本立即调用）是合法路径，动态嵌套由 RPC 分发层 depth 守卫拦截（depth>0 拒调动态工具）；
-      // js→flow→dyn 至多一层动态子进程（runJsScript depth:1），无递归通道；js 重入由 jsTool.execute 的
+      // js→dyn 至多一层动态子进程（runJsScript depth:1），无递归通道；js 重入由 jsTool.execute 的
       // 标记拒绝封死。
       // 安全模式：动态工具与 js 同规则降级（源码静态扫描 + 子进程只读 shim），而非整体禁用——
       // 持久化的只读动态工具（数据处理/查询类）在安全模式下保持可用

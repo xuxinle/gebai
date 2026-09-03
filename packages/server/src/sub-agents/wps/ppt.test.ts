@@ -27,7 +27,7 @@ describe("ppt_create / ppt_read（pptx 往返）", () => {
             title: "数据页",
             bullets: ["要点一", "要点二"],
             elements: [
-              { type: "chart", chartType: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [10, 20] }], x: 6.5, y: 1.8, w: 6, h: 4, title: "季度销量" },
+              { type: "chart", chart_type: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [10, 20] }], x: 6.5, y: 1.8, w: 6, h: 4, title: "季度销量" },
               { type: "image", path: "dot.png", x: 1, y: 4, w: 1, h: 1 },
               { type: "table", rows: [["名称", "值"], ["甲", 1]], x: 1, y: 1.8, w: 4 },
               { type: "shape", shape: "roundRect", x: 5, y: 6, w: 2, h: 0.8, fill: "4472C4", text: "形状文本" },
@@ -76,12 +76,12 @@ describe("ppt_create / ppt_read（pptx 往返）", () => {
         slides: [
           // ① 页级直接传元素对象（带 type）→ 单元素页
           { type: "text", text: "页级文本", x: 1, y: 1, w: 8, h: 1 },
-          // ② 元素漏 type：path → 推断 image；chartType+data → 推断 chart；rows → 推断 table
+          // ② 元素漏 type：path → 推断 image；chart_type+data → 推断 chart；rows → 推断 table
           {
             title: "容错页",
             elements: [
               { path: "dot.png", x: 1, y: 2, w: 1, h: 1 },
-              { chartType: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [1, 2] }], x: 4, y: 2, w: 5, h: 3 },
+              { chart_type: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [1, 2] }], x: 4, y: 2, w: 5, h: 3 },
               { rows: [["列A"], ["1"]], x: 1, y: 4, w: 2 },
               { type: "shape", fill: "4472C4", text: "默认形状", x: 1, y: 6, w: 2, h: 0.6 },
             ],
@@ -111,7 +111,7 @@ describe("ppt_create / ppt_read（pptx 往返）", () => {
       {
         path: "t2.pptx",
         slides: [
-          { title: "季度页", chartType: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [3, 6] }] },
+          { title: "季度页", chart_type: "bar", data: [{ name: "销量", labels: ["Q1", "Q2"], values: [3, 6] }] },
           { title: "正常页", bullets: ["要点"] },
         ],
       },

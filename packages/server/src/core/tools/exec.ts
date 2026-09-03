@@ -60,7 +60,7 @@ export const shTool: Tool = {
       workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析，绝对路径本地模式可用）——替代 cd X && cmd 串联（Windows cmd 下引号语义更稳），不传用默认工作目录" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（同步默认 300、上限 540，超时进程被终止并返回超时结果；async:true 时为任务生命周期上限，默认 1800、上限 3600）" },
-      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
+      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」语义）；默认 false 非 0 退出作为正常结果返回" },
       async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId 不等待完成（适合构建/测试等长命令，期间可处理其他任务）；后续用 bg_task（action=status/wait/stop/list）查询输出、等待完成或终止" },
       ...SCRIPT_APPROVAL_PARAM,
     },
@@ -88,7 +88,7 @@ export const shTool: Tool = {
       }
     }
     const { stdout, stderr, code } = await ctx.runCommand(String(args.command), { workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
-    // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
+    // strict：非 0 退出码转工具级异常（js 编排内未捕获即中断整个脚本，try/catch 可容错继续）
     if (args.strict === true && code !== 0) {
       throw new Error(`命令执行失败（exit ${code}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
     }
@@ -131,7 +131,7 @@ export const pyTool: Tool = {
       code: { type: "string", description: "Python 程序源码" },
       input: { type: "string", description: "可选：作为程序 stdin 的输入数据" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
-      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（flow 编排「非 0 即中断」；配合 optional 容错）；默认 false 非 0 退出作为正常结果返回" },
+      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」语义）；默认 false 非 0 退出作为正常结果返回" },
       approval: { type: "boolean", description: "兼容参数：py 的 code 为任意代码、无法静态判定安全性，免审标记不生效（默认且恒需审批）" },
     },
     ["code"],
@@ -150,7 +150,7 @@ export const pyTool: Tool = {
       // -X utf8 / PYTHONUTF8=1：强制 UTF-8 输出（Windows 默认 GBK 会造成乱码）
       const py = await resolvePythonCmd(ctx)
       const { stdout, stderr, code: exit } = await ctx.runCommand(`${py} -X utf8 "${scriptPath}"`, { workdir: ctx.workdir, env: { ...ctx.env, PYTHONUTF8: "1" }, input, timeoutMs: scriptTimeoutMs(args.timeout) })
-      // strict：非 0 退出码转工具级异常（flow 中未声明 optional 时中断整个编排，声明则容错继续）
+      // strict：非 0 退出码转工具级异常（js 编排内未捕获即中断整个脚本，try/catch 可容错继续）
       if (args.strict === true && exit !== 0) {
         throw new Error(`程序执行失败（exit ${exit}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
       }

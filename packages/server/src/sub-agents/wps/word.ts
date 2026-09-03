@@ -59,11 +59,13 @@ interface WordStyle {
 
 function normalizeStyle(v: unknown): WordStyle {
   const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {}
+  // 输入键蛇形（page_size/base_font/base_size），旧驼峰兜底读（模型风格误差容错）
+  const g = <T,>(snake: string, camel: string): T | undefined => (o[snake] !== undefined ? (o[snake] as T) : (o[camel] as T))
   const s: WordStyle = {
-    pageSize: o.pageSize === "letter" ? "letter" : "a4",
+    pageSize: g<string>("page_size", "pageSize") === "letter" ? "letter" : "a4",
     orientation: o.orientation === "landscape" ? "landscape" : "portrait",
-    baseFont: typeof o.baseFont === "string" && o.baseFont.trim() ? o.baseFont.trim() : "Microsoft YaHei",
-    baseSize: asNum(o.baseSize, 10.5),
+    baseFont: typeof g<string>("base_font", "baseFont") === "string" && String(g<string>("base_font", "baseFont")).trim() ? String(g<string>("base_font", "baseFont")).trim() : "Microsoft YaHei",
+    baseSize: asNum(g("base_size", "baseSize"), 10.5),
   }
   if (typeof o.title === "string" && o.title.trim()) s.title = o.title.trim()
   if (typeof o.header === "string" && o.header.trim()) s.header = o.header.trim()
@@ -257,7 +259,7 @@ export const wordCreateTool: Tool = {
       blocks: { type: "array", description: "结构化块数组（与 markdown 二选一）：[{type:heading|paragraph|list|table|image|code|quote|pagebreak|toc, ...}]" },
       style: {
         type: "object",
-        description: "文档级排版：{title, pageSize:a4|letter, orientation:portrait|landscape, margins:{top,right,bottom,left}(cm), baseFont, baseSize(pt), header, footer({page}/{pages} 页码)}",
+        description: "文档级排版：{title, page_size:a4|letter, orientation:portrait|landscape, margins:{top,right,bottom,left}(cm), base_font, base_size(pt), header, footer({page}/{pages} 页码)}",
       },
     },
     ["path"],

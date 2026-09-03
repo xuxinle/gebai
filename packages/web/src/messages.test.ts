@@ -1017,7 +1017,7 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
         role: "tool",
         name: "edit",
         content: "",
-        arguments: { path: "src/a.ts", edits: [{ oldString: "foo", newString: "bar" }, { oldString: "x", newString: "y" }] },
+        arguments: { path: "src/a.ts", edits: [{ old_string: "foo", new_string: "bar" }, { old_string: "x", new_string: "y" }] },
         createdAt: 0,
       },
       "",
@@ -1041,7 +1041,7 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
   test("单处修改无编号；纯新增只显示新块", () => {
     __setToolCardMetaForTest(meta)
     const bubble = toolBubbleFor(
-      { id: "te2", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ oldString: "", newString: "added" }] }, createdAt: 0 },
+      { id: "te2", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ old_string: "", new_string: "added" }] }, createdAt: 0 },
       "",
     )
     expect(bubble.querySelector("div.tool-edit-idx")).toBeNull()
@@ -1059,7 +1059,7 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
   test("超长修改内容自动折叠", () => {
     __setToolCardMetaForTest(meta)
     const bubble = toolBubbleFor(
-      { id: "te4", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ oldString: "o".repeat(500), newString: "n".repeat(500) }] }, createdAt: 0 },
+      { id: "te4", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ old_string: "o".repeat(500), new_string: "n".repeat(500) }] }, createdAt: 0 },
       "",
     )
     const fold = bubble.querySelector("details.tool-fold")
@@ -1072,7 +1072,7 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
   test("card 声明缺失（清单拉取失败/旧服务端）按参数形态兜底渲染对比块，不直显 JSON", () => {
     __setToolCardMetaForTest([])
     const bubble = toolBubbleFor(
-      { id: "te5", role: "tool", name: "edit", content: "", arguments: { path: "src/a.ts", edits: [{ oldString: "foo", newString: "bar" }] }, createdAt: 0 },
+      { id: "te5", role: "tool", name: "edit", content: "", arguments: { path: "src/a.ts", edits: [{ old_string: "foo", new_string: "bar" }] }, createdAt: 0 },
       "",
     )
     expect(bubble.querySelector("div.tool-edits")).not.toBeNull()
@@ -1085,7 +1085,7 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
   test("兜底渲染的超长修改同样先渲染后折叠", () => {
     __setToolCardMetaForTest([])
     const bubble = toolBubbleFor(
-      { id: "te6", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ oldString: "o".repeat(600), newString: "n".repeat(600) }] }, createdAt: 0 },
+      { id: "te6", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ old_string: "o".repeat(600), new_string: "n".repeat(600) }] }, createdAt: 0 },
       "",
     )
     const fold = bubble.querySelector("details.tool-fold")
@@ -1176,7 +1176,7 @@ describe("文件展示方式（弹窗查看：文件工具产物 file 块收敛�
     setFileDisplayStub("popup")
     __setToolCardMetaForTest([["edit", { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" }]])
     const bubble = toolBubbleFor(
-      { id: "tp2", role: "tool", name: "edit", content: "已对 a.ts 应用 1 处修改", arguments: { path: "a.ts", edits: [{ oldString: "foo", newString: "bar" }] }, createdAt: 0 },
+      { id: "tp2", role: "tool", name: "edit", content: "已对 a.ts 应用 1 处修改", arguments: { path: "a.ts", edits: [{ old_string: "foo", new_string: "bar" }] }, createdAt: 0 },
       "",
     )
     expect(bubble.querySelector("pre.tool-edit-old")).not.toBeNull()

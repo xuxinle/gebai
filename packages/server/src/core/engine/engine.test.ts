@@ -173,8 +173,8 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subpipe：总Agent 调 code 执行新会话；新会话内调用 flow（内部编排 code 子Agent 工具），
-    // 验证数据流编排能力（flow/tool_schemas）在新会话环境注册且经会话注册表解析子Agent 工具
+    // subpipe：总Agent 调 code 执行新会话；新会话内调用 tool_schemas（编排支持工具），
+    // 验证编排能力（tool_schemas/js）在新会话环境注册且经会话注册表解析全局工具
     if (this.mode === "subpipe" && this.calls === 1) {
       yield { type: "tool_call", toolCall: { id: "tc-p1", name: "agent_run", arguments: { agents: ["code"], input: "batch task" } } }
       yield { type: "done" }
@@ -183,7 +183,7 @@ class FakeProvider implements LLMProvider {
     if (this.mode === "subpipe" && this.calls === 2) {
       yield {
         type: "tool_call",
-        toolCall: { id: "tc-p2", name: "flow", arguments: { steps: [{ id: "q", tool: "todo", params: { entries: [] } }] } },
+        toolCall: { id: "tc-p2", name: "tool_schemas", arguments: { tools: ["todo"] } },
       }
       yield { type: "done" }
       return
@@ -731,7 +731,7 @@ describe("AgentEngine", () => {
   test("必填参数缺失校验：edit 漏传 path 不执行、明确报缺参（旧版报 tmp\\undefined 类无关 ENOENT 无法自愈）", async () => {
     const s = await setup("tool")
     s.provider.toolName = "edit"
-    s.provider.toolArgs = { edits: [{ oldString: "export function sortTodos", newString: "export function sortTodos" }] } // 漏传 path
+    s.provider.toolArgs = { edits: [{ old_string: "export function sortTodos", new_string: "export function sortTodos" }] } // 漏传 path
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "edit it")
     const loaded = await s.store.load(session.id)
@@ -1393,7 +1393,7 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("agent_run environment provides flow dataflow orchestration (sub-agent tools resolvable inside flow)", async () => {
+  test("agent_run environment provides tool_schemas orchestration support (global tools resolvable)", async () => {
     const { home, engine, store } = await setup("subpipe")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "run pipeline")
@@ -1401,10 +1401,41 @@ console.log("defined ok")`,
     const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
     expect(callMsg).toBeDefined()
     const archive = callMsg!.sessionRun!
-    // 新会话内 flow 执行成功：全局工具（todo，继承注册）经会话注册表解析、无「未知工具」错误
-    expect(archive.messages.some((m) => m.role === "tool" && m.name === "flow" && m.content.includes("todo"))).toBe(true)
+    // 新会话内 tool_schemas 执行成功：全局工具（todo，继承注册）经会话注册表解析、无「未知工具」错误
+    expect(archive.messages.some((m) => m.role === "tool" && m.name === "tool_schemas" && m.content.includes("todo"))).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
     cleanup(home)
+  })
+
+  test("工具名容错（模型误差自适应）：agent.load 分隔符偏差归一 agent_load 执行，落盘为规范名", async () => {
+    const s = await setup("tool")
+    s.provider.toolName = "agent.load"
+    s.provider.toolArgs = { name: "code" }
+    const session = await s.store.createSession("default", "t")
+    await s.engine.run(session.id, "default", "load code agent")
+    const loaded = await s.store.load(session.id)
+    // 归一后执行成功：无「未知工具」，结果以规范名 agent_load 落盘（历史/事件/执行同用规范名）
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.name === "agent_load")).toBe(true)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
+    expect(s.subAgents.isLoaded("code")).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("参数键容错（模型误差自适应）：驼峰参数键归一蛇形后执行（read 的 lineNumbers→line_numbers）", async () => {
+    const s = await setup("tool")
+    const session = await s.store.createSession("default", "t")
+    const root = sessionPath(s.home, "default", session.id)
+    mkdirSync(join(root, "tmp"), { recursive: true })
+    writeFileSync(join(root, "tmp", "f.txt"), "raw line one\nraw line two\n")
+    s.provider.toolName = "read"
+    s.provider.toolArgs = { path: "f.txt", lineNumbers: false }
+    await s.engine.run(session.id, "default", "read file")
+    const loaded = await s.store.load(session.id)
+    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "read")
+    expect(toolMsg).toBeDefined()
+    // 驼峰 lineNumbers 被归一为 line_numbers：读取不带行号前缀
+    expect(toolMsg!.content.startsWith("raw line one")).toBe(true)
+    cleanup(s.home)
   })
 
   test("路由自愈（主循环）：未装载子Agent 的 {agent}_* 调用自动装载后执行", async () => {
@@ -1519,7 +1550,7 @@ console.log("defined ok")`,
   test("diff tool block is persisted to session message", async () => {
     const s = await setup("tool")
     s.provider.toolName = "diff"
-    s.provider.toolArgs = { oldText: "const a = 1\n", newText: "const a = 2\n", language: "typescript" }
+    s.provider.toolArgs = { old_text: "const a = 1\n", new_text: "const a = 2\n", language: "typescript" }
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "diff something")
     const loaded = await s.store.load(session.id)
@@ -2252,22 +2283,6 @@ console.log("defined ok")`,
     expect(toolMsg).toBeDefined()
     expect(toolMsg?.content).not.toContain("安全模式")
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
-    cleanup(s.home)
-  })
-
-  test("safe mode degrades risky tools inside flow (sh whitelist executes, write scoped to user dir)", async () => {
-    const s = await setup("tool", false, "local", true) // safeMode=true；flow 内嵌 sh/write（降级执行）
-    s.provider.toolName = "flow"
-    s.provider.toolArgs = { steps: [{ tool: "sh", params: { command: "echo pwned", approval: false } }, { tool: "write", params: { path: "x.txt", content: "x" } }] }
-    const session = await s.store.createSession("default", "t")
-    await s.engine.run(session.id, "default", "flow it")
-    const loaded = await s.store.load(session.id)
-    // flow step 层不再一刀切拦截（仅 cron 调度类硬阻断）：sh 白名单命令执行、write 限用户目录内落盘
-    const toolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "flow")
-    expect(toolMsg?.content).toContain("pwned")
-    expect(toolMsg?.content).not.toContain("安全模式")
-    const root = sessionPath(s.home, "default", session.id)
-    expect(existsSync(join(root, "tmp", "x.txt"))).toBe(true) // 会话 tmp 在用户目录内 → 放行
     cleanup(s.home)
   })
 

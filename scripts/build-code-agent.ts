@@ -9,7 +9,7 @@
  *    生成注册表不 import 未选子Agent，playwright/feishu_docs/widgets 等模块整体摇出产物；
  * 2. `GEBAI_BUILD_PRELOAD`（预加载清单）——烘焙 preload=true，启动即装载，用户开箱即用；
  * 3. `GEBAI_BUILD_EXCLUDE_TOOLS`（全局工具排除清单）——场景用不到的全局工具不注册不暴露
- *    （schema 不可见、调用报未知工具；agent_run 内建编排工具 flow/tool_schemas/js 与 vision 同规则）。
+ *    （schema 不可见、调用报未知工具；agent_run 内建编排工具 tool_schemas/js 与 vision 同规则）。
  *    语义注意：全局工具排除是**能力裁剪**——实现与工具表同模块仍会打包（无法摇树）。
  *
  * 产物：packages/server/dist/gebai-code[.exe]。生成文件（subagents.bundle / tools-excluded /

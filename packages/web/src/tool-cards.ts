@@ -269,20 +269,20 @@ function foldArgsBlock(inner: HTMLElement, chars: number): HTMLElement {
   return details
 }
 
-/** edits 参数项判定：{ oldString, newString } 字符串对。 */
-function isEditPair(v: unknown): v is { oldString: string; newString: string } {
-  return !!v && typeof v === "object" && typeof (v as { oldString?: unknown }).oldString === "string" && typeof (v as { newString?: unknown }).newString === "string"
+/** edits 参数项判定：{ old_string, new_string } 字符串对（参数一律蛇形，兼容归一在后端派发点）。 */
+function isEditPair(v: unknown): v is { old_string: string; new_string: string; replace_all?: boolean } {
+  return !!v && typeof v === "object" && typeof (v as { old_string?: unknown }).old_string === "string" && typeof (v as { new_string?: unknown }).new_string === "string"
 }
 
 /** edits 参数块：每处修改渲染为旧（红）/ 新（绿）对比块（多处编号），比 JSON 数组直观；空串侧省略（纯新增/纯删除）。 */
-function editsArgsBlock(list: Array<{ oldString: string; newString: string }>): HTMLElement {
+function editsArgsBlock(list: Array<{ old_string: string; new_string: string; replace_all?: boolean }>): HTMLElement {
   const wrap = el("div", "tool-edits")
   list.forEach((e, i) => {
     if (list.length > 1) wrap.appendChild(el("div", "tool-edit-idx", `修改 ${i + 1}/${list.length}`))
-    // replaceAll 标记：该项替换全部匹配（审批时可见替换范围）
-    if ((e as { replaceAll?: unknown }).replaceAll === true) wrap.appendChild(el("div", "tool-edit-idx", "replaceAll（替换全部匹配）"))
-    if (e.oldString) wrap.appendChild(el("pre", "tool-edit-old", e.oldString))
-    if (e.newString) wrap.appendChild(el("pre", "tool-edit-new", e.newString))
+    // replace_all 标记：该项替换全部匹配（审批时可见替换范围）
+    if (e.replace_all === true) wrap.appendChild(el("div", "tool-edit-idx", "replace_all（替换全部匹配）"))
+    if (e.old_string) wrap.appendChild(el("pre", "tool-edit-old", e.old_string))
+    if (e.new_string) wrap.appendChild(el("pre", "tool-edit-new", e.new_string))
   })
   return wrap
 }
@@ -337,7 +337,7 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
         // 兜底无声明：其余参数（path 等）键值行展示
         wrap.appendChild(kvArgsBlock(Object.fromEntries(Object.entries(obj).filter(([k]) => k !== editsField))))
       }
-      const chars = list.reduce((n, e) => n + e.oldString.length + e.newString.length, 0)
+      const chars = list.reduce((n, e) => n + e.old_string.length + e.new_string.length, 0)
       return foldArgsBlock(wrap, chars)
     }
     /* 形态不符（非 edits 数组）：回退自适应渲染 */

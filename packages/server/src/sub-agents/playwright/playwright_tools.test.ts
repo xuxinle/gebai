@@ -98,15 +98,15 @@ rl.on("line", (line) => {
 }
 
 describe("playwright tools", () => {
-  test("open sends url/waitUntil/timeout and reports title", async () => {
+  test("open sends url/wait_until/timeout and reports title", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
     const { bridge, calls } = recordingBridge()
     const tools = createPlaywrightTools({ bridge })
-    const r = await tools.open.execute({ url: "https://example.com", waitUntil: "domcontentloaded", timeout: 5000 }, ctx(home))
+    const r = await tools.open.execute({ url: "https://example.com", wait_until: "domcontentloaded", timeout: 5000 }, ctx(home))
     expect(r.output).toContain("https://example.com/")
     expect(r.output).toContain("Example")
     expect(calls[0].op).toBe("open")
-    expect(calls[0].args).toMatchObject({ url: "https://example.com", waitUntil: "domcontentloaded", timeout: 5000 })
+    expect(calls[0].args).toMatchObject({ url: "https://example.com", waitUntil: "domcontentloaded", timeout: 5000 }) // 桥协议键驼峰（driver 契约）
     // 会话 id 自动附带
     expect(calls[0].args.sessionId).toBe("0123456789abcdef0123456789abcdef")
   })
@@ -146,11 +146,11 @@ describe("playwright tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
     const { bridge, calls } = recordingBridge()
     const tools = createPlaywrightTools({ bridge })
-    const r = await tools.screenshot.execute({ fullPage: true }, ctx(home))
+    const r = await tools.screenshot.execute({ full_page: true }, ctx(home))
     expect(r.output).toMatch(/已截图: tmp\/playwright_\d+\.png/)
     expect(r.output).toContain("绝对路径")
     expect(r.blocks?.[0]?.type).toBe("image")
-    expect(calls[0].args).toMatchObject({ fullPage: true })
+    expect(calls[0].args).toMatchObject({ fullPage: true }) // 桥协议键驼峰（driver 契约）
     expect(String(calls[0].args.path)).toContain(join("users", "default", "sessions", "0123456789abcdef0123456789abcdef", "tmp"))
   })
 

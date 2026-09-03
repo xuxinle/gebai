@@ -33,11 +33,17 @@ const SHAPES: Record<string, string> = {
 
 const ELEMENT_TYPES = new Set(["text", "image", "table", "chart", "shape"])
 
+/** 嵌套字段蛇形取值（模型风格误差容错）：蛇形键优先，旧驼峰兜底（chart_type ?? chartType）。 */
+function snakeVal<T>(o: Record<string, unknown>, snake: string, camel: string): T | undefined {
+  const v = o[snake] !== undefined ? o[snake] : o[camel]
+  return v === undefined ? undefined : (v as T)
+}
+
 /** 元素 type 缺失/未知时按字段签名推断（容错层，推断均回报 warning 引导显式声明）。 */
 function inferElementType(e: Record<string, unknown>): string | null {
   if (typeof e.type === "string" && SHAPES[e.type.toLowerCase()]) return "shape"
-  if (typeof e.path === "string" && e.chartType == null && !Array.isArray(e.rows)) return "image"
-  if (e.chartType != null || Array.isArray(e.data)) return "chart"
+  if (typeof e.path === "string" && snakeVal(e, "chart_type", "chartType") == null && !Array.isArray(e.rows)) return "image"
+  if (snakeVal(e, "chart_type", "chartType") != null || Array.isArray(e.data)) return "chart"
   if (Array.isArray(e.rows)) return "table"
   if (e.shape != null || e.fill != null || e.lineWidth != null) return "shape"
   if (e.text != null || e.runs != null) return "text"
@@ -63,7 +69,7 @@ function toTextItems(v: unknown, base: Record<string, unknown>): Array<{ text: s
     const opts: Record<string, unknown> = { ...base }
     if (o.bold === true) opts.bold = true
     if (o.italic === true) opts.italic = true
-    if (o.fontSize != null) opts.fontSize = asNum(o.fontSize, 18)
+    if (snakeVal(o, "font_size", "fontSize") != null) opts.fontSize = asNum(snakeVal(o, "font_size", "fontSize")!, 18)
     const c = normColor(o.color)
     if (c) opts.color = c
     if (o.href) opts.hyperlink = { url: String(o.href) }
@@ -76,7 +82,7 @@ function toTextItems(v: unknown, base: Record<string, unknown>): Array<{ text: s
 function boxOpts(o: Record<string, unknown>, base: Record<string, unknown>): Record<string, unknown> {
   const opts: Record<string, unknown> = { ...base }
   for (const k of ["x", "y", "w", "h"]) if (o[k] != null) opts[k] = asNum(o[k], 1)
-  if (o.fontSize != null) opts.fontSize = asNum(o.fontSize, 18)
+  if (snakeVal(o, "font_size", "fontSize") != null) opts.fontSize = asNum(snakeVal(o, "font_size", "fontSize")!, 18)
   if (o.bold === true) opts.bold = true
   if (o.italic === true) opts.italic = true
   const c = normColor(o.color)
@@ -92,14 +98,14 @@ function boxOpts(o: Record<string, unknown>, base: Record<string, unknown>): Rec
 export const pptCreateTool: Tool = {
   name: "ppt_create",
   description:
-    "创建 .pptx 演示文稿。slides 数组每页两种写法：简式 {title, subtitle?, bullets?: [文本或 {text,level,bold,color}], notes?, background?}（标题顶部+要点正文的标准版式）或全式 {elements: [...]} 自由布局（坐标英寸）。元素 type：text（text/runs + 样式）、image（path 嵌入会话/项目内图片）、table（rows 二维表，首行默认加粗底纹）、chart（chartType: bar/hbar/line/area/pie/doughnut/scatter + data: [{name,labels,values}]）、shape（shape: rect（默认）/roundRect/ellipse/line/arrow + fill/line/text）。type 缺失或无法识别时按字段推断（path→image、chartType/data→chart、rows→table、形状名/fill→shape、text→text）并在输出提示；页级误传元素对象、或携带元素级字段（chartType/data/rows/path）未包 elements 数组时自动按附加元素处理并提示。layout: wide（默认 16:9 13.33×7.5）/ 4x3 / {width,height}；theme 调全局字体字号（默认微软雅黑，标题 30/正文 18）。已有文件本会话未读取过时拒绝（防盲覆盖）。旧版 .ppt 不支持。",
+    "创建 .pptx 演示文稿。slides 数组每页两种写法：简式 {title, subtitle?, bullets?: [文本或 {text,level,bold,color}], notes?, background?}（标题顶部+要点正文的标准版式）或全式 {elements: [...]} 自由布局（坐标英寸）。元素 type：text（text/runs + 样式）、image（path 嵌入会话/项目内图片）、table（rows 二维表，首行默认加粗底纹）、chart（chart_type: bar/hbar/line/area/pie/doughnut/scatter + data: [{name,labels,values}]）、shape（shape: rect（默认）/roundRect/ellipse/line/arrow + fill/line/text）。type 缺失或无法识别时按字段推断（path→image、chart_type/data→chart、rows→table、形状名/fill→shape、text→text）并在输出提示；页级误传元素对象、或携带元素级字段（chart_type/data/rows/path）未包 elements 数组时自动按附加元素处理并提示。layout: wide（默认 16:9 13.33×7.5）/ 4x3 / {width,height}；theme 调全局字体字号（默认微软雅黑，标题 30/正文 18）。已有文件本会话未读取过时拒绝（防盲覆盖）。旧版 .ppt 不支持。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema(
     {
       path: { type: "string", description: "输出路径（.pptx）" },
       slides: { type: "array", description: "幻灯片数组：[{title, subtitle, bullets, notes, background, elements}]，详见工具描述" },
       layout: { type: "string", description: "页面布局：wide（默认，16:9 13.33×7.5 英寸）/ 4x3，或传 {width,height} 对象（英寸）" },
-      theme: { type: "object", description: "全局主题：{fontFace, titleFontSize, bodyFontSize, titleColor, bodyColor}" },
+      theme: { type: "object", description: "全局主题：{font_face, title_font_size, body_font_size, title_color, body_color}" },
       meta: { type: "object", description: "文档属性：{title, author, company, subject}" },
     },
     ["path", "slides"],
@@ -115,11 +121,11 @@ export const pptCreateTool: Tool = {
 
     const themeRaw = args.theme && typeof args.theme === "object" ? (args.theme as Record<string, unknown>) : {}
     const theme = {
-      fontFace: typeof themeRaw.fontFace === "string" && themeRaw.fontFace.trim() ? themeRaw.fontFace.trim() : "Microsoft YaHei",
-      titleFontSize: asNum(themeRaw.titleFontSize, 30),
-      bodyFontSize: asNum(themeRaw.bodyFontSize, 18),
-      titleColor: color(themeRaw.titleColor, "1F3864"),
-      bodyColor: color(themeRaw.bodyColor, "333333"),
+      fontFace: typeof snakeVal<string>(themeRaw, "font_face", "fontFace") === "string" && String(snakeVal<string>(themeRaw, "font_face", "fontFace")).trim() ? String(snakeVal<string>(themeRaw, "font_face", "fontFace")).trim() : "Microsoft YaHei",
+      titleFontSize: asNum(snakeVal(themeRaw, "title_font_size", "titleFontSize"), 30),
+      bodyFontSize: asNum(snakeVal(themeRaw, "body_font_size", "bodyFontSize"), 18),
+      titleColor: color(snakeVal(themeRaw, "title_color", "titleColor"), "1F3864"),
+      bodyColor: color(snakeVal(themeRaw, "body_color", "bodyColor"), "333333"),
     }
     const meta = args.meta && typeof args.meta === "object" ? (args.meta as Record<string, unknown>) : {}
 
@@ -246,14 +252,14 @@ export const pptCreateTool: Tool = {
                 return { text: String(c ?? ""), options: ri === 0 && headerBold ? { bold: true, fill: { color: "EEF2F8" } } : {} }
               }),
             )
-            const opts: Record<string, unknown> = { x: asNum(e.x, 1), y: asNum(e.y, 1), fontSize: asNum(e.fontSize, 12), border: { pt: 0.5, color: "C9C9C9" }, fontFace: theme.fontFace, color: theme.bodyColor }
+            const opts: Record<string, unknown> = { x: asNum(e.x, 1), y: asNum(e.y, 1), fontSize: asNum(snakeVal(e, "font_size", "fontSize"), 12), border: { pt: 0.5, color: "C9C9C9" }, fontFace: theme.fontFace, color: theme.bodyColor }
             if (e.w != null) opts.w = asNum(e.w, 8)
             if (e.h != null) opts.h = asNum(e.h, 3)
             if (Array.isArray(e.colW)) opts.colW = e.colW.map((w: unknown) => asNum(w, 1))
             slide.addTable(rows as never, opts as never)
           } else if (type === "chart") {
-            const ct = CHART_TYPES[String(e.chartType ?? "bar").toLowerCase()]
-            if (!ct) throw new Error(`未知 chartType: ${String(e.chartType)}（支持 bar/hbar/line/area/pie/doughnut/scatter）`)
+            const ct = CHART_TYPES[String(snakeVal(e, "chart_type", "chartType") ?? "bar").toLowerCase()]
+            if (!ct) throw new Error(`未知 chart_type: ${String(snakeVal(e, "chart_type", "chartType"))}（支持 bar/hbar/line/area/pie/doughnut/scatter）`)
             const dataRaw = Array.isArray(e.data) ? e.data : []
             const data = dataRaw.map((d: unknown) => {
               const o = d && typeof d === "object" ? (d as Record<string, unknown>) : {}
@@ -275,7 +281,7 @@ export const pptCreateTool: Tool = {
             if (typeof e.title === "string" && e.title.trim()) opts.title = e.title
             if (e.catAxisTitle) opts.catAxisTitle = String(e.catAxisTitle)
             if (e.valAxisTitle) opts.valAxisTitle = String(e.valAxisTitle)
-            if (ct === "bar" && String(e.chartType).toLowerCase() === "hbar") opts.barDir = "bar"
+            if (ct === "bar" && String(snakeVal(e, "chart_type", "chartType")).toLowerCase() === "hbar") opts.barDir = "bar"
             const chartData = ct === "scatter" ? [{ name: "X", values: data[0].labels.length ? data[0].labels.map(Number) : data[0].values.map((_, i) => i + 1) }, ...data] : data
             slide.addChart(ct as never, chartData as never, opts as never)
           } else if (type === "shape") {
@@ -293,7 +299,7 @@ export const pptCreateTool: Tool = {
                 ...opts,
                 align: "center",
                 valign: "middle",
-                fontSize: asNum(e.fontSize, theme.bodyFontSize),
+                fontSize: asNum(snakeVal(e, "font_size", "fontSize"), theme.bodyFontSize),
                 color: e.textColor != null ? color(e.textColor, "FFFFFF") : "FFFFFF",
                 fontFace: theme.fontFace,
               } as never)
@@ -334,7 +340,7 @@ export const pptReadTool: Tool = {
   parameters: schema(
     {
       path: { type: "string", description: "演示文稿路径（.pptx）" },
-      maxSlides: { type: "integer", description: "最多读取页数（默认 40）" },
+      max_slides: { type: "integer", description: "最多读取页数（默认 40）" },
     },
     ["path"],
   ),
@@ -354,7 +360,7 @@ export const pptReadTool: Tool = {
     }
     ctx.fileGuard?.markRead(abs)
 
-    const maxSlides = Math.max(1, Math.round(asNum(args.maxSlides, 40)))
+    const maxSlides = Math.max(1, Math.round(asNum(args.max_slides, 40)))
     const total = read.slides.length
     const chartTotal = read.slides.filter((s) => s.hasChart).length
     const imageTotal = read.slides.reduce((n, s) => n + s.imageCount, 0)

@@ -831,13 +831,15 @@ interface PdfStyle {
 
 function normalizePdfStyle(v: unknown): PdfStyle {
   const o = v && typeof v === "object" ? (v as Record<string, unknown>) : {}
+  // 输入键蛇形（page_size/base_font/base_size/subset_font），旧驼峰兜底读（模型风格误差容错）
+  const g = <T,>(snake: string, camel: string): T | undefined => (o[snake] !== undefined ? (o[snake] as T) : (o[camel] as T))
   const s: PdfStyle = {
-    pageSize: o.pageSize === "letter" ? "letter" : "a4",
+    pageSize: g<string>("page_size", "pageSize") === "letter" ? "letter" : "a4",
     orientation: o.orientation === "landscape" ? "landscape" : "portrait",
     margins: { top: 2.54, right: 3.18, bottom: 2.54, left: 3.18 },
-    baseFontRaw: typeof o.baseFont === "string" && o.baseFont.trim() ? o.baseFont.trim() : undefined,
-    baseSize: asNum(o.baseSize, 10.5),
-    subsetFont: o.subsetFont !== false,
+    baseFontRaw: typeof g<string>("base_font", "baseFont") === "string" && String(g<string>("base_font", "baseFont")).trim() ? String(g<string>("base_font", "baseFont")).trim() : undefined,
+    baseSize: asNum(g("base_size", "baseSize"), 10.5),
+    subsetFont: g("subset_font", "subsetFont") !== false,
   }
   if (typeof o.title === "string" && o.title.trim()) s.title = o.title.trim()
   if (typeof o.header === "string" && o.header.trim()) s.header = o.header.trim()
@@ -868,7 +870,7 @@ export const pdfCreateTool: Tool = {
       blocks: { type: "array", description: "结构化块数组（与 markdown 二选一），块语法同 word_create" },
       style: {
         type: "object",
-        description: "排版：{title, pageSize:a4|letter, orientation:portrait|landscape, margins:{top,right,bottom,left}(cm), baseFont, baseSize(pt), subsetFont(默认true), header, footer({page}/{pages})}",
+        description: "排版：{title, page_size:a4|letter, orientation:portrait|landscape, margins:{top,right,bottom,left}(cm), base_font, base_size(pt), subset_font(默认true), header, footer({page}/{pages})}",
       },
     },
     ["path"],
@@ -908,7 +910,7 @@ export const pdfCreateTool: Tool = {
       if (!custom) {
         return {
           output:
-            `未找到可用的 CJK 字体（已扫描系统字体目录），无法生成含中文的 PDF。请安装常见中文字体（微软雅黑/思源黑体/Noto CJK 等），或在 style.baseFont 传字体文件路径（.ttf/.otf/.ttc，会话/项目内路径均可）。`,
+            `未找到可用的 CJK 字体（已扫描系统字体目录），无法生成含中文的 PDF。请安装常见中文字体（微软雅黑/思源黑体/Noto CJK 等），或在 style.base_font 传字体文件路径（.ttf/.otf/.ttc，会话/项目内路径均可）。`,
         }
       }
     } else {
@@ -917,7 +919,7 @@ export const pdfCreateTool: Tool = {
         probe.encodeText(allText)
       } catch {
         custom = await resolveCustomFont(undefined, ctx, warnings)
-        if (!custom) return { output: `正文含标准字体无法编码的字符（非 WinAnsi 范围）且未找到可嵌入的系统字体——可在 style.baseFont 指定字体文件路径。` }
+        if (!custom) return { output: `正文含标准字体无法编码的字符（非 WinAnsi 范围）且未找到可嵌入的系统字体——可在 style.base_font 指定字体文件路径。` }
       }
     }
     const fonts = await embedFontSet(doc, custom, style.subsetFont)
@@ -1028,7 +1030,7 @@ export const pdfReadTool: Tool = {
     {
       path: { type: "string", description: "PDF 路径" },
       pages: { type: "string", description: '页码区间（"1-3,5,8-"，默认全部）' },
-      maxPages: { type: "integer", description: "最多读取页数（默认 30）" },
+      max_pages: { type: "integer", description: "最多读取页数（默认 30）" },
       password: { type: "string", description: "加密 PDF 的打开密码" },
     },
     ["path"],
@@ -1059,7 +1061,7 @@ export const pdfReadTool: Tool = {
     } catch (err) {
       return { output: `pdf_read 失败：${(err as Error).message}` }
     }
-    const maxPages = Math.max(1, Math.round(asNum(args.maxPages, 30)))
+    const maxPages = Math.max(1, Math.round(asNum(args.max_pages, 30)))
     const capped = selected.slice(0, maxPages)
 
     let metaNote = ""
@@ -1293,7 +1295,7 @@ export const pdfEditTool: Tool = {
       ops: {
         type: "array",
         description:
-          '操作数组：[{op:"delete", pages:"2,5-6"}, {op:"rotate", pages:"1-3", degrees:90}, {op:"move", from:5, to:2}, {op:"metadata", title:"…", author:"…"}, {op:"watermark", text:"草稿", fontSize:52, color:"888888", opacity:0.15, angle:45, pages:"1-3"}]',
+          '操作数组：[{op:"delete", pages:"2,5-6"}, {op:"rotate", pages:"1-3", degrees:90}, {op:"move", from:5, to:2}, {op:"metadata", title:"…", author:"…"}, {op:"watermark", text:"草稿", font_size:52, color:"888888", opacity:0.15, angle:45, pages:"1-3"}]',
       },
     },
     ["path", "ops"],
@@ -1360,7 +1362,7 @@ export const pdfEditTool: Tool = {
         } else if (kind === "watermark") {
           const text = typeof op.text === "string" ? op.text.trim() : ""
           if (!text) throw new Error("watermark 需要 text")
-          const size = Math.max(8, Math.min(200, asNum(op.fontSize, 52)))
+          const size = Math.max(8, Math.min(200, asNum(op.font_size ?? op.fontSize, 52)))
           const color = normColor(op.color) ?? "888888"
           const opacity = Math.max(0.02, Math.min(1, asNum(op.opacity, 0.15)))
           const angle = asNum(op.angle, 45)

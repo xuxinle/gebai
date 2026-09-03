@@ -17,7 +17,7 @@ Excel（excel_read / excel_write / excel_edit）：
 - 结构先行：首行表头、一列一义、数据区不合并单元格（合并只用于展示层标题）；表头建议加粗+底色+冻结（freeze "A2"）+自动筛选；
 - excel_write 全量建表：单元格 {value, bold, italic, color, fill, fontSize, align, wrap, numberFormat, border}；"=SUM(B2:B10)" 等字符串自动按公式写入；常用 numberFormat：#,##0（千分位）、0.00%（百分比）、yyyy-mm-dd（日期——日期值传 ISO 字符串并配此格式）；colWidths 列宽、merges 合并；
 - 修改既有表格用 excel_edit（ops 批量一次提交：set 设值设样式 / insert_rows、delete_rows、insert_cols、delete_cols / add_sheet、rename_sheet、delete_sheet / merge、unmerge / col_width、row_height / freeze、autofilter；各项可带 sheet 指定目标表，缺省第一个）；
-- excel_read：先不传 sheet 看概览（表名/行列数），再传 sheet 读取；大表用 range（A1:D20 或 A:D）与 maxRows 分段；formulas:true 看公式原文；csv/tsv 也可读。
+- excel_read：先不传 sheet 看概览（表名/行列数），再传 sheet 读取；大表用 range（A1:D20 或 A:D）与 max_rows 分段；formulas:true 看公式原文；csv/tsv 也可读。
 
 PPT（ppt_create / ppt_read）：
 - 一页一主题：页标题 + 3~5 条要点（短语，不写长句），正文默认 18pt 起；先在回复里列分页大纲再生成；
@@ -27,7 +27,7 @@ PPT（ppt_create / ppt_read）：
 
 PDF（pdf_create / pdf_read / pdf_merge / pdf_split / pdf_edit）：
 - pdf_create：markdown/blocks 生成排版 PDF（语法同 word_create，含表格/图片/代码块/<!--toc--> 目录真实页码/<!--pagebreak-->）；中文自动嵌入系统字体（子集化产物小），style.baseFont 可指定字体族或 .ttf/.ttc 字体文件路径（须 TrueType 轮廓）；footer 支持 {page}/{pages} 页码；图片仅 png/jpg；
-- pdf_read：逐页提取文本层（pages 选页、maxPages 限长）；空白页 = 扫描件/图片型 PDF（文本层为空，需截图转图后视觉读取）；加密文件传 password；
+- pdf_read：逐页提取文本层（pages 选页、max_pages 限长）；空白页 = 扫描件/图片型 PDF（文本层为空，需截图转图后视觉读取）；加密文件传 password；
 - pdf_merge：多文件合并（inputs 可按 pages 抽取部分页）；pdf_split：按区间/每 N 页/单页拆分；pdf_edit：delete/rotate/move 页面操作 + metadata 元数据 + watermark 水印（ops 按序执行）；
 - Word/Excel/PPT 转 PDF：宿主机装有 LibreOffice 时用 sh 执行 `soffice --headless --convert-to pdf --outdir <目录> <文件>`（需审批），无则用 word_read 读回内容后 pdf_create 重建。
 

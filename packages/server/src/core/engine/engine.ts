@@ -11,7 +11,8 @@ import type { ServerConfig } from "../base/config"
 import type { SubAgentManager } from "../agents/subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage } from "../base/types"
 import { ToolRegistry as BaseToolRegistry } from "../base/registry"
-import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, makeFlowTool, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
+import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
+import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
 import { makeVisionTool, getVisionProvider } from "../tools/vision"
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
@@ -75,7 +76,7 @@ const MAX_REPEAT_HITS = 3
 /** 重复中断上限：中断次数超过该值即终止工具循环（模型持续重复时防止无效空转）。 */
 const MAX_REPEAT_STALLS = 2
 /** 同批工具并行执行上限（DESIGN「同批工具并行执行」）：单次模型响应返回的多个工具调用并行执行，
- *  此为并发护栏（进程/文件句柄等资源保护），超出按调用顺序排队；需严格串行的操作由模型用 js/flow 编排。 */
+ *  此为并发护栏（进程/文件句柄等资源保护），超出按调用顺序排队；需严格串行的操作由模型用 js 脚本编排。 */
 const MAX_PARALLEL_TOOLS = 8
 /** 工具执行超时兜底（毫秒）：脚本类工具由 sandbox 自身 timeoutMs（默认 5 分钟）先杀进程并返回超时结果；
  * 此兜底覆盖不响应超时的工具（如网络请求挂起）。超时不结束任务——结果作为「执行超时」返回给模型继续。 */
@@ -144,7 +145,7 @@ function parseExtraParamsSafe(raw: string | undefined): Record<string, unknown> 
 }
 
 /** 解析工具审批要求（DESIGN「工具审批」）：布尔静态声明，或函数按调用参数动态判定
- *  （flow 等编排工具据此实现「内部任一工具需审批则整体审批」）；函数异常按需审批处理（fail-safe）。 */
+ *  （js 等编排工具据此实现「内部调用覆盖审批」）；函数异常按需审批处理（fail-safe）。 */
 async function toolRequiresApproval(tool: Tool, args: Record<string, unknown>, ctx: ToolContext): Promise<boolean> {
   const ra = tool.requiresApproval
   if (typeof ra !== "function") return !!ra
@@ -167,6 +168,19 @@ function missingRequiredArgs(tool: Tool, args: Record<string, unknown>): string[
 /** 必填参数缺失的错误文案（作为工具结果回传，模型下一轮自纠）。 */
 function missingArgsMsg(name: string, missing: string[]): string {
   return `工具 ${name} 缺少必填参数: ${missing.join("、")}——本次调用未执行，请补齐参数后重试（各参数含义见工具描述）。`
+}
+
+/** 工具调用容错（模型误差自适应，两循环共用）：工具名与参数键归一到蛇形契约——
+ *  tolerantToolName 把分隔符/驼峰偏差（agent.run/agentRun）归一蛇形；参数键按已解析工具的 schema
+ *  做指纹归一（oldString→old_string）。在 assistant(toolCalls) 落盘/入上下文前执行，历史记录、事件
+ *  推送与实际执行同用规范名；未知名（无 schema 可依）只归一名、参数原样，门控阶段照常报未知工具。 */
+function normalizeToolCalls(registry: Pick<ToolRegistry, "resolve">, toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>): void {
+  for (const tc of toolCalls) {
+    const fixed = tolerantToolName(tc.name)
+    if (fixed !== tc.name) tc.name = fixed
+    const rt = registry.resolve(tc.name)
+    if (rt && tc.arguments && typeof tc.arguments === "object") tc.arguments = normalizeToolArgs(rt.tool, tc.arguments)
+  }
 }
 
 /** 工具调用签名（重复检测滚动窗口的记录单元）：工具名 + 参数 JSON。 */
@@ -1779,6 +1793,7 @@ export class AgentEngine {
         break
       }
 
+      normalizeToolCalls(registry, toolCalls)
       await persist({
         id: assistantMsgId,
         role: "assistant",
@@ -1911,7 +1926,7 @@ export class AgentEngine {
           const approvalSkipped = await this.isApprovalSkipped(sessionId, user, env)
           // 无交互通道硬门槛（服务模式默认 / 请求级 autoApprove=false）：无人可审批，默认需审批的工具
           // 直接拒绝（防普通用户经 REST 免审批执行敏感工具）；approval:false 只放宽交互审批——硬门槛按
-          // 剥离免审标记后的审批姿态解析（flow 嵌套步骤同规则），防模型自行声明免审绕过
+          // 剥离免审标记后的审批姿态解析（js 嵌套调用同规则），防模型自行声明免审绕过
           if (
             this.noInteractionHardGate(sessionId) && this.tasks.get(sessionId)?.interactionMode === "none" && !approvalSkipped &&
             (requiresByArgs || (await toolRequiresApproval(rt.tool, stripApprovalFlags(tc.arguments) as Record<string, unknown>, ctx)))
@@ -2101,7 +2116,7 @@ export class AgentEngine {
     const short = name.includes("_") ? name.slice(name.lastIndexOf("_") + 1) : name
     if (short === "write" || short === "edit" || short === "patch") {
       if (typeof args.path !== "string") return
-      if (args.dryRun === true || result.output.includes("预演")) return
+      if (args.dry_run === true || args.dryRun === true || result.output.includes("预演")) return
       if (MOD_REJECTED_RE.test(result.output)) return
       if (VERIFY_CODE_FILE_RE.test(args.path)) mods.files.add(args.path)
     } else if (short === "sh" || short === "py") {
@@ -2134,7 +2149,7 @@ export class AgentEngine {
   /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，
    *  模块语义的「装载」在独立上下文生效）后执行任务，返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。
    *  inheritGlobalTools（默认 true）：全局工具一并注册进新会话——与主会话同构的完整工具面（文件读写查询
-   *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（flow/tool_schemas/js）。
+   *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（tool_schemas/js）。
    *  inheritGlobalPrompt（默认 true）：总Agent 全局系统提示词（buildSystemPrompt——身份/行为约定/编排指引）
    *  作为新会话系统提示词前缀注入——与全局工具继承默认一致，新会话与主会话同构；关闭时仅子Agent 提示词
    *  （上下文最省）。提示词中的路径/工具可用性描述以新会话实际为准（附注说明）。
@@ -2174,9 +2189,8 @@ export class AgentEngine {
         }
       }
     }
-    // 数据流编排能力（与总Agent 主循环一致）：新会话内同样可用 flow 一次编排多步、tool_schemas 批量查询输出结构、
+    // 编排能力（与总Agent 主循环一致）：新会话内同样可用 tool_schemas 批量查询工具输出结构、
     // js 脚本动态编程（直接调用工具 + 会话上下文注入）——构建期排除清单（GEBAI_BUILD_EXCLUDE_TOOLS）同规则生效
-    if (!isGlobalToolExcluded("flow")) reg.register(makeFlowTool())
     if (!isGlobalToolExcluded("tool_schemas")) reg.register(toolSchemasTool)
     if (!isGlobalToolExcluded("js")) reg.register(jsTool)
     // 全局工具继承（默认开启，DESIGN「新会话执行的上下文隔离」）：read/write/grep/sh 等全局工具（含
@@ -2216,18 +2230,18 @@ export class AgentEngine {
       : ""
     const globalsNote = inheritGlobals
       ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/diff/sh/py/fetch_url/todo/ask/agent_run 等，与主会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
-      : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（flow/tool_schemas/js）。`
+      : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（tool_schemas/js）。`
     // 全局提示词注入（默认开启，与 inherit_global_tools 默认一致）：总Agent 主系统提示词作为前缀（单源复用
     // buildSystemPrompt，不复刻）；其中路径基准/工具清单等环境描述以本新会话实际为准，附注消歧
     const inheritGlobalPrompt = opts.inheritGlobalPrompt !== false
     const globalPromptPart = inheritGlobalPrompt
       ? `以下为总Agent 全局系统提示词（主会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
       : ""
-    // 编排指引（flow/js 优先）防重复注入：注入全局提示词时其编排段已含同款内容，开场白不再复述；
+    // 编排指引（js 优先）防重复注入：注入全局提示词时其编排段已含同款内容，开场白不再复述；
     // 仅 inherit_global_prompt=false（新会话无 buildSystemPrompt）时保留兜底版
     const orchestrationNote = inheritGlobalPrompt
       ? ""
-      : "可预判的多步固定流程优先用 flow 数据流编排一次执行（引用映射/分支/循环，编排前可用 tool_schemas 批量查询工具输出结构，语法详见 flow 工具描述；flow 是声明式管道，保持步骤简单）；表达式写不出的高阶逻辑（复杂变换/动态参数计算/错误捕获分支/条件重试/跨步骤聚合）用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，详见 js 工具描述），不要在 flow 里硬凑复杂表达式；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。"
+      : "可预判的多步固定流程优先用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，可用 tool_schemas 批量查询工具输出结构，语法详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。"
     const messages: MessageLike[] = [
       {
         role: "system",
@@ -2629,6 +2643,7 @@ export class AgentEngine {
         return text
       }
 
+      normalizeToolCalls(reg, toolCalls)
       await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined, toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })) })
       messages.push({ role: "assistant", content: text, toolCalls })
       this.clearStream(sessionId, archive.runId) // 本轮文本已入存档，在途快照清空（只清本 run 的，不误清并行主任务快照）

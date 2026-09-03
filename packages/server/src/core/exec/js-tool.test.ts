@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { jsTool, buildChildScript, scriptSessionContext, jsRuntimeCommand, JS_TOOL_MAX_CALLS, makeDynamicTool, toolFnDecls } from "./js-tool"
-import { makeFlowTool, writeTool } from "../tools"
+import { writeTool } from "../tools"
 import type { ToolContext, Tool, ToolResult } from "../base/types"
 
 function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): ToolContext {
@@ -334,7 +334,7 @@ return { errs, ro: ro.output }`,
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("嵌套守卫：fromJsBridge 标记下 js/动态工具拒绝；js→flow→js 通道封死", async () => {
+  test("嵌套守卫：fromJsBridge 标记下 js/动态工具拒绝；js→直执行工具→js 通道封死", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-nest2-"))
     // 标记直拒（js 工具）
     const cMarked = ctxWithTools(home)
@@ -343,15 +343,16 @@ return { errs, ro: ro.output }`,
     expect(refused.output).toContain("嵌套")
     // 动态工具不经 marker 拒绝（depth 0 同脚本调用是合法路径，动态嵌套由 depth 守卫拦截——见 defineTool 系列测试）
     const c = ctxWithTools(home)
-    // 集成：js 调 flow、flow 步骤再调 js → 步骤得到拒绝说明（不再起嵌套子进程）
+    // 集成：js 调直执行透传工具（原 flow 同款通道——工具内部以桥传入的 ctx 再执行 js）→ 得到拒绝说明（不再起嵌套子进程）
+    const passthrough: Tool = mkTool("passthrough", async (args, c2) => jsTool.execute((args as { params: { code: string } }).params, c2))
     c.registry.resolve = (name: string) =>
-      name === "flow" ? { name, tool: makeFlowTool() } : name === "js" ? { name, tool: jsTool } : undefined
+      name === "passthrough" ? { name, tool: passthrough } : name === "js" ? { name, tool: jsTool } : undefined
     c.registry.schemas = () => [
-      { name: "flow", description: "", parameters: {} },
+      { name: "passthrough", description: "", parameters: {} },
       { name: "js", description: "", parameters: {} },
     ]
     const r = await jsTool.execute(
-      { code: `const r = await tools.call("flow", { steps: [{ id: "s1", tool: "js", params: { code: "return 1" } }] })
+      { code: `const r = await tools.call("passthrough", { params: { code: "return 1" } })
 return r.output` },
       c,
     )
@@ -716,7 +717,7 @@ return "done"`,
     rmSync(home, { recursive: true, force: true })
   }, 60000)
 
-  test("动态工具执行失败抛工具级错误（引擎/flow 语义）", async () => {
+  test("动态工具执行失败抛工具级错误（引擎语义）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-def5-"))
     const { c, defined } = ctxWithDefine(home)
     await c.defineDynamicTool!({
