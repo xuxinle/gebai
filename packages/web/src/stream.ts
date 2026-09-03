@@ -314,7 +314,7 @@ export async function consumeTaskStream(sessionId: string, makeSource: (run: Run
     clearPendingTools(sessionId) // 任务结束：工具调用配对清理（结果已落盘历史）
     syncConnThinking() // 运行结束：信号灯恢复常亮
     syncSendButton()
-    void maybeAutoTitle(sessionId)
+    void maybeAutoTitle(sessionId) // 兜底重试：发送时点自动命名失败（未标记 autoNamed）时补一次，已命名空转
     // 队列继续：任务收尾（完成/取消/出错）后自动发送下一条排队输入（运行中为空转）
     drainQueue(sessionId)
     // 焦点守卫：仅当用户仍在发起会话（未切走）时恢复输入焦点，避免后台流结束抢走当前会话光标
