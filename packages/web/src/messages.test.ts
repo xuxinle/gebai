@@ -141,7 +141,7 @@ const doc = {
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
 const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions } = await import("./messages")
-const { runs, pendingTools, pendingToolsKey, approvalsEl } = await import("./state")
+const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead } = await import("./tool-cards")
 
 function fakeRun(overrides: Partial<RunState> = {}): RunState {
@@ -211,6 +211,103 @@ describe("消息撤回按钮（用户与助手消息；容器内消息与运行�
       expect(getCurrentSession()?.id).toBe("s1")
     } finally {
       runs.clear()
+      setCurrentSession(null)
+    }
+  })
+})
+
+describe("质量反馈弹层（👍/👎 → 原因标签 + 补充说明 → 提交，关联 label/text）", () => {
+  function findByTip2(host: MockElWithQuery, tipText: string): MockElWithQuery | undefined {
+    return (host.querySelectorAll("button") as unknown as MockElWithQuery[]).find((b) => (b as unknown as { dataset: Record<string, string> }).dataset.tip === tipText)
+  }
+  function bindAsstMsg(id: string): MockElWithQuery {
+    const meta = makeMockEl("div")
+    addMetaActions(meta as unknown as HTMLElement, makeMockEl("div") as unknown as HTMLElement, makeMockEl("div") as unknown as HTMLElement, { role: "assistant", content: "回答", id })
+    return meta
+  }
+  /** 桩掉 client.submitFeedback 记录载荷，返回 [还原, 载荷列表]。 */
+  function stubSubmit(): [() => void, Array<Record<string, unknown>>] {
+    const calls: Array<Record<string, unknown>> = []
+    const orig = client.submitFeedback.bind(client)
+    client.submitFeedback = (async (fb: Record<string, unknown>) => {
+      calls.push(fb)
+    }) as never
+    return [() => (client.submitFeedback = orig as never), calls]
+  }
+
+  test("点击 👍/👎 打开弹层（分型标签 + 补充说明 + 提交/取消），取消关闭不提交", () => {
+    const meta = bindAsstMsg("a1")
+    const up = findByTip2(meta, "反馈：回答有用")!
+    ;(up as unknown as { onclick: () => void }).onclick()
+    const pop = meta.querySelector("div.fb-popover") as unknown as MockElWithQuery
+    expect(pop).toBeTruthy()
+    const chips = pop.querySelectorAll("button.fb-chip") as unknown as MockEl[]
+    expect(chips.map((c) => c.textContent)).toEqual(["优秀", "有用", "完整"])
+    expect(pop.querySelector("textarea.fb-text")).toBeTruthy()
+    expect(pop.querySelectorAll("button.fb-submit").length).toBe(1)
+    // 取消：弹层关闭，可重新打开（未提交）
+    ;(pop.querySelector("button.fb-cancel") as unknown as { onclick: () => void }).onclick()
+    expect(meta.querySelector("div.fb-popover")).toBeNull()
+    ;(up as unknown as { onclick: () => void }).onclick()
+    expect(meta.querySelector("div.fb-popover")).toBeTruthy()
+  })
+
+  test("👎 选标签 + 补充说明提交：payload 携带 label/text，成功后 👍/👎 禁用防重复", async () => {
+    setCurrentSession({ id: "s9" } as unknown as import("@gebai/sdk").SessionInfo)
+    const [restore, calls] = stubSubmit()
+    try {
+      const meta = bindAsstMsg("a2")
+      // 提交前捕获按钮引用（成功后 tip 文案被更新为「已反馈」，按旧文案找不到）
+      const btns = ["反馈：回答有用", "反馈：回答不佳"].map((t) => findByTip2(meta, t)!) as unknown as Array<{ disabled: boolean; classList: { contains(c: string): boolean } }>
+      ;(btns[1] as unknown as { onclick: () => void }).onclick()
+      const pop = meta.querySelector("div.fb-popover") as unknown as MockElWithQuery
+      const chips = pop.querySelectorAll("button.fb-chip") as unknown as Array<MockElWithQuery & { classList: { contains(c: string): boolean } }>
+      ;(chips[0] as unknown as { onclick: () => void }).onclick() // 错误
+      expect(chips[0].classList.contains("selected")).toBe(true)
+      const text = pop.querySelector("textarea.fb-text") as unknown as { value: string }
+      text.value = "答案引用了错误版本的 API"
+      ;(pop.querySelector("button.fb-submit") as unknown as { onclick: () => void }).onclick()
+      expect(calls).toEqual([{ messageId: "a2", sessionId: "s9", type: "thumbs_down", label: "错误", text: "答案引用了错误版本的 API" }])
+      expect(meta.querySelector("div.fb-popover")).toBeNull() // 提交即关闭
+      for (const b of btns) {
+        expect(b.disabled).toBe(true)
+        expect(b.classList.contains("done")).toBe(true)
+      }
+    } finally {
+      restore()
+      setCurrentSession(null)
+    }
+  })
+
+  test("不选标签不填文字：payload 仅基础字段（无 label/text 键）；提交失败恢复可重试", async () => {
+    setCurrentSession({ id: "s9" } as unknown as import("@gebai/sdk").SessionInfo)
+    const calls: Array<Record<string, unknown>> = []
+    const orig = client.submitFeedback.bind(client)
+    client.submitFeedback = (async () => {
+      throw new Error("network down")
+    }) as never
+    try {
+      const meta = bindAsstMsg("a3")
+      ;(findByTip2(meta, "反馈：回答有用") as unknown as { onclick: () => void }).onclick()
+      const pop = meta.querySelector("div.fb-popover") as unknown as MockElWithQuery
+      // mock 元素无初始 value（真实 DOM textarea 初始为 ""），显式对齐再走空值路径
+      ;(pop.querySelector("textarea.fb-text") as unknown as { value: string }).value = ""
+      ;(pop.querySelector("button.fb-submit") as unknown as { onclick: () => void }).onclick()
+      await new Promise((r) => setTimeout(r, 0))
+      // 失败恢复：按钮重新可用
+      const up = findByTip2(meta, "反馈：回答有用") as unknown as { disabled: boolean; onclick: () => void }
+      expect(up.disabled).toBe(false)
+      // 失败路径完成后换成功桩重试一次，验证恢复后的完整提交
+      client.submitFeedback = (async (fb: Record<string, unknown>) => {
+        calls.push(fb)
+      }) as never
+      up.onclick()
+      const pop2 = meta.querySelector("div.fb-popover") as unknown as MockElWithQuery
+      ;(pop2.querySelector("textarea.fb-text") as unknown as { value: string }).value = ""
+      ;(pop2.querySelector("button.fb-submit") as unknown as { onclick: () => void }).onclick()
+      expect(calls).toEqual([{ messageId: "a3", sessionId: "s9", type: "thumbs_up" }])
+    } finally {
+      client.submitFeedback = orig as never
       setCurrentSession(null)
     }
   })

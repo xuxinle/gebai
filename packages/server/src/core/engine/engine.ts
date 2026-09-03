@@ -890,6 +890,7 @@ export class AgentEngine {
             role: "assistant",
             content: finalText,
             reasoning: res.reasoning.trim() ? res.reasoning.trim() : undefined,
+            model: taskProvider.capabilities().model,
             createdAt: Date.now(),
           }, user)
           this.clearStream(sessionId) // 最终回复已持久化，在途快照清空
@@ -1799,6 +1800,7 @@ export class AgentEngine {
         role: "assistant",
         content: text,
         reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined,
+        model: provider.capabilities().model,
         toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments })),
         createdAt: Date.now(),
       })

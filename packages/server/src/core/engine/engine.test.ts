@@ -28,6 +28,8 @@ class FakeProvider implements LLMProvider {
   seenTools: string[][] = []
   /** 是否声明多模态能力（附件图片内联断言用）。 */
   multimodal = false
+  /** capabilities 声明的模型名（assistant 消息落盘携带 model 断言用；缺省不携带）。 */
+  model: string | undefined = undefined
   /** ask 选项询问分支是否带 multi=true 调用（多选场景断言用）。 */
   askMulti = false
   /** ask 填值分支请求的变量名（默认 MY_KEY；测试可改为敏感键验证拒绝）。 */
@@ -42,7 +44,7 @@ class FakeProvider implements LLMProvider {
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
   constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" = "tool") {}
   capabilities(): LLMCapabilities {
-    return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000 }
+    return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000, ...(this.model ? { model: this.model } : {}) }
   }
   async *chat(_msgs: MessageLike[], _opts?: ChatOptions): AsyncIterable<LLMChunk> {
     this.calls++
@@ -467,6 +469,17 @@ describe("AgentEngine", () => {
     const loaded = await store.load(session.id)
     expect(loaded!.messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true)
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "hello from fake")).toBe(true)
+    cleanup(home)
+  })
+
+  test("assistant 消息落盘携带 model（provider capabilities.model → 用户反馈关联数据源）", async () => {
+    const { home, engine, store, provider } = await setup("text")
+    provider.model = "test-model-x"
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    const loaded = await store.load(session.id)
+    const final = loaded!.messages.find((m) => m.role === "assistant" && m.content === "hello from fake")
+    expect(final?.model).toBe("test-model-x")
     cleanup(home)
   })
 

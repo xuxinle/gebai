@@ -302,7 +302,6 @@ async function renderSettingsUsers() {
 
 async function renderSettingsFeedback() {
   settingsBody.appendChild(settingsSection("反馈列表（管理员）"))
-  const list = el("div", "settings-list")
   let feedback: FeedbackInfo[] = []
   try {
     feedback = (await client.listFeedback()) ?? []
@@ -310,12 +309,26 @@ async function renderSettingsFeedback() {
     settingsBody.appendChild(blockText(`加载失败: ${(err as Error).message}`))
     return
   }
+  // 导出 JSON（管理员分析用，DESIGN「用户反馈」：可导出分析）
+  const bar = el("div", "settings-toolbar")
+  const exportBtn = el("button", "mini-btn", "导出 JSON")
+  exportBtn.onclick = () => {
+    const blob = new Blob([JSON.stringify(feedback, null, 2)], { type: "application/json" })
+    const a = document.createElement("a")
+    a.href = URL.createObjectURL(blob)
+    a.download = `gebai-feedback-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+  bar.appendChild(exportBtn)
+  settingsBody.appendChild(bar)
+  const list = el("div", "settings-list")
   for (const f of feedback) {
     const row = el("div", "settings-row")
     const info = el("div", "settings-row-info")
     info.append(
       el("div", "settings-row-name", `${f.type}${f.label ? ` · ${f.label}` : ""} · ${new Date(f.createdAt).toLocaleString()}`),
-      el("div", "settings-row-desc", `用户 ${f.userId} · 会话 ${f.sessionId?.slice(0, 8)} · 消息 ${f.messageId?.slice(0, 8)}${f.text ? `\n${f.text}` : ""}`),
+      el("div", "settings-row-desc", `用户 ${f.userId} · 会话 ${f.sessionId?.slice(0, 8)} · 消息 ${f.messageId?.slice(0, 8)}${f.model ? ` · 模型 ${f.model}` : ""}${f.subAgent ? ` · 子Agent ${f.subAgent}` : ""}${f.text ? `\n${f.text}` : ""}`),
     )
     row.appendChild(info)
     list.appendChild(row)

@@ -56,6 +56,9 @@ export interface Message {
   /** 推理内容（reasoning_content/thinking）独立字段：assistant 消息持久化时写入，content 保持纯正文；
    *  回放给 LLM 时（loadHistory）不携带——推理绝不进模型上下文；UI 历史渲染为折叠推理卡。 */
   reasoning?: string
+  /** 生成该回复的模型名（assistant 消息落盘时由 provider capabilities 携带；仅存储/UI 展示用——
+   *  loadHistory 回放不携带给模型，用户反馈（FeedbackInfo.model）据此自动关联）。 */
+  model?: string
   blocks?: ContentBlock[]
   attachments?: AttachmentRef[]
   toolCalls?: ToolCall[]
@@ -261,7 +264,6 @@ export interface FeedbackInput {
   type: "thumbs_up" | "thumbs_down" | "text" | "suggestion"
   text?: string
   label?: string
-  anonymous?: boolean
 }
 
 export interface FeedbackFilter {
@@ -353,6 +355,8 @@ export interface LLMCapabilities {
   toolCalling: boolean
   multimodal: boolean
   maxContextTokens: number
+  /** 模型名（ProviderConfig.model；assistant 消息落盘携带供反馈关联，测试替身可缺省）。 */
+  model?: string
 }
 
 export interface ToolSchema {

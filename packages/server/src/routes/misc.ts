@@ -1,7 +1,7 @@
 /** 反馈 / Webhook / HTML 小工具三组小域路由（各自独立、无共享逻辑，合并一个文件避免碎文件）。 */
 import type { RouteCtx } from "./context"
 import type { FeedbackInfo, FeedbackInput } from "@gebai/sdk"
-import { readFeedback, writeFeedback } from "../feedback"
+import { feedbackContext, readFeedback, writeFeedback } from "../feedback"
 import { SERVICE_USER } from "../app"
 import { deleteMiniTool, getMiniTool, listMiniTools } from "../core/widgets/mini-tools"
 
@@ -12,7 +12,8 @@ export function registerFeedbackRoutes(rc: RouteCtx): void {
   app.post("/api/v1/feedback", async (c) => {
     const user = await userOf(c)
     const fb = await c.req.json<FeedbackInput>()
-    const id = await writeFeedback(d.config.gebaiHome, user.id, fb)
+    // 上下文关联（model/subAgent）：按会话记录尽力关联，不阻断提交
+    const id = await writeFeedback(d.config.gebaiHome, user.id, fb, await feedbackContext(d.store, user.id, fb))
     return c.json({ ok: true, id })
   })
   app.get("/api/v1/feedback", async (c) => {
