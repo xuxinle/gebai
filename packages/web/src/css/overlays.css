@@ -501,6 +501,8 @@
   cursor: pointer;
 }
 .settings-row:hover { border-color: var(--border-strong); }
+/* 设置面板工具条（反馈页导出等操作，右对齐） */
+.settings-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .settings-row input[type="checkbox"] { flex: none; width: 15px; height: 15px; accent-color: var(--accent); }
 .settings-row > input:not([type="checkbox"]) {
   padding: 7px 10px;

@@ -95,21 +95,76 @@ const ICON_THUMBS_DOWN = `<svg viewBox="0 0 24 24" width="14" height="14" aria-h
 /** 推理块图标：大脑（线性描边，随 summary 文字颜色，样式见 chat.css .reasoning summary svg）。 */
 const ICON_REASONING = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>`
 
-/** 提交质量反馈（👍/👎）：写入用户反馈存储，设置面板「反馈」页可见。成功后禁用防重复提交。 */
-function submitFeedback(type: "thumbs_up" | "thumbs_down", btn: HTMLElement, msg: Pick<Message, "id">) {
-  const cur = getCurrentSession()
-  if (!cur || !msg.id) return
-  btn.classList.add("done")
-  tip(btn, "已反馈，谢谢")
-  ;(btn as HTMLButtonElement).disabled = true
-  void client
-    .submitFeedback({ messageId: msg.id, sessionId: cur.id, type })
-    .catch(() => {
-      // 失败恢复可重试
-      btn.classList.remove("done")
-      tip(btn, type === "thumbs_up" ? "反馈：回答有用" : "反馈：回答不佳")
-      ;(btn as HTMLButtonElement).disabled = false
-    })
+/** 点赞/点踩原因标签（DESIGN「用户反馈」：附可选原因标签；单选、可反选）。 */
+const FB_LABELS: Record<"thumbs_up" | "thumbs_down", string[]> = {
+  thumbs_up: ["优秀", "有用", "完整"],
+  thumbs_down: ["错误", "不完整", "不符合预期"],
+}
+
+/** 当前打开的反馈弹层（同一时刻至多一个：再次打开先关旧的）。 */
+let fbPopover: HTMLElement | null = null
+function closeFeedbackPopover() {
+  fbPopover?.remove()
+  fbPopover = null
+}
+
+/** 打开质量反馈弹层（👍/👎 → 原因标签 + 补充说明 → 提交）：写入用户反馈存储，设置面板「反馈」页可见。
+ *  提交成功后禁用该消息的 👍/👎 防重复提交。 */
+function openFeedbackPopover(type: "thumbs_up" | "thumbs_down", host: HTMLElement, msg: Pick<Message, "id">, buttons: HTMLElement[]) {
+  closeFeedbackPopover()
+  const pop = el("div", "fb-popover")
+  pop.addEventListener("click", (e) => e.stopPropagation()) // 弹层内点击不冒泡到外部关闭
+  const labels = el("div", "fb-labels")
+  let selected = ""
+  for (const label of FB_LABELS[type]) {
+    const chip = el("button", "fb-chip", label)
+    chip.onclick = () => {
+      selected = selected === label ? "" : label
+      for (const c of labels.querySelectorAll(".fb-chip")) {
+        c.classList[(c as HTMLElement).textContent === selected ? "add" : "remove"]("selected")
+      }
+    }
+    labels.appendChild(chip)
+  }
+  const text = el("textarea", "fb-text") as HTMLTextAreaElement
+  text.rows = 2
+  text.placeholder = "补充说明（可选）"
+  const row = el("div", "fb-row")
+  const cancel = el("button", "fb-cancel", "取消")
+  cancel.onclick = closeFeedbackPopover
+  const submit = el("button", "fb-submit", type === "thumbs_up" ? "👍 提交" : "👎 提交")
+  submit.onclick = () => {
+    const cur = getCurrentSession()
+    if (!cur || !msg.id) return closeFeedbackPopover()
+    for (const b of buttons) {
+      ;(b as HTMLButtonElement).disabled = true
+      b.classList.add("done")
+    }
+    tip(buttons[0], "已反馈，谢谢")
+    closeFeedbackPopover()
+    void client
+      .submitFeedback({
+        messageId: msg.id,
+        sessionId: cur.id,
+        type,
+        ...(selected ? { label: selected } : {}),
+        ...(text.value.trim() ? { text: text.value.trim() } : {}),
+      })
+      .catch(() => {
+        // 失败恢复可重试
+        for (const b of buttons) {
+          ;(b as HTMLButtonElement).disabled = false
+          b.classList.remove("done")
+        }
+        tip(buttons[0], type === "thumbs_up" ? "反馈：回答有用" : "反馈：回答不佳")
+      })
+  }
+  row.append(cancel, submit)
+  pop.append(labels, text, row)
+  host.appendChild(pop)
+  fbPopover = pop
+  // 点击弹层外部关闭（延后绑定，避开本次打开按钮的点击冒泡）
+  setTimeout(() => document.addEventListener("click", closeFeedbackPopover, { once: true }), 0)
 }
 
 /** 消息称谓行操作按钮组：复制（全部消息）/ 撤回（用户与助手消息）/ 重新生成（助手消息）。
@@ -135,15 +190,15 @@ function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLEle
   actions.appendChild(copyBtn)
 
   if (msg.role === "assistant" && msg.id) {
-    // 质量反馈：👍/👎 提交到用户反馈（设置面板「反馈」页可见）；无稳定消息 id 时（异常流）不渲染
+    // 质量反馈：👍/👎 打开弹层提交（原因标签+补充说明，写入用户反馈，设置面板「反馈」页可见）；无稳定消息 id 时（异常流）不渲染
     const fbUp = el("button", "msg-act", "")
     tip(fbUp, "反馈：回答有用")
     fbUp.innerHTML = ICON_THUMBS_UP
-    fbUp.onclick = () => submitFeedback("thumbs_up", fbUp, msg)
+    fbUp.onclick = () => openFeedbackPopover("thumbs_up", actions, msg, [fbUp, fbDown])
     const fbDown = el("button", "msg-act", "")
     tip(fbDown, "反馈：回答不佳")
     fbDown.innerHTML = ICON_THUMBS_DOWN
-    fbDown.onclick = () => submitFeedback("thumbs_down", fbDown, msg)
+    fbDown.onclick = () => openFeedbackPopover("thumbs_down", actions, msg, [fbUp, fbDown])
     actions.append(fbUp, fbDown)
   }
 

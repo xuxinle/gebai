@@ -1116,14 +1116,13 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 用户可对任意 Agent 回复（总Agent/子Agent 消息）提交反馈，用于质量追踪与改进：
 
 - **反馈类型**：
-  - **点赞/点踩**：对单条回复快速评价，附可选原因标签（错误/不完整/不符合预期/优秀等）
-  - **文字反馈**：附带详细说明，如指出错误、期望的修正、补充背景
-  - **建议改进**：对功能/产品层面的建议（新工具、子Agent 需求等）
-- **关联上下文**：反馈自动关联所属会话、消息 ID、使用的模型与子Agent，便于定位问题
+  - **点赞/点踩**：对单条回复快速评价，前端弹层附**可选原因标签**（👍 优秀/有用/完整，👎 错误/不完整/不符合预期）与**补充说明文字**
+  - **文字反馈**：附带详细说明，如指出错误、期望的修正、补充背景（类型保留，经 API 提交）
+  - **建议改进**：对功能/产品层面的建议（新工具、子Agent 需求等）（类型保留，经 API 提交）
+- **关联上下文**：反馈自动关联所属会话与消息 ID；落盘时服务端按会话记录**自动补 model**（assistant 消息落盘携带的模型名，见「消息模型与数据结构」）与 **subAgent**（会话当前装载的子Agent 名单，逗号连接）——尽力关联不阻断提交（会话不存在/读取异常时反馈照常写入，仅缺关联字段）
 - **存储**：持久化到 `{GEBAI_HOME}/users/{user}/feedback/YYYY-MM-DD/{h0}/{h1}/{feedback_id}.json`（按日期 + ID 自身前缀分片，见目录结构），仅本人可见（服务模式）
-- **前端**：消息内反馈按钮（👍/👎）已移除；反馈数据经后端 API 写入，管理员可在设置面板查看/导出
-- **用途**：反馈数据供改进系统提示词、评估模型表现、排查工具问题；可导出分析（管理员）
-- **匿名选项**：服务模式下提交时可选择匿名（仅保留反馈内容与时间，不关联用户）
+- **前端**：助手消息操作组内 👍/👎 按钮（与复制/撤回/重新生成同排）点击打开弹层（标签单选可反选 + 补充说明，提交成功禁用防重复、失败恢复可重试）；管理员可在设置面板「反馈」页查看（含模型/子Agent 关联信息）并**导出 JSON**
+- **用途**：反馈数据供改进系统提示词、评估模型表现、排查工具问题（`self_optimize_read_feedback` 读取进入自我优化闭环，见「自我优化」）；管理员可导出分析
 
 ### 环境变量配置
 
@@ -1530,6 +1529,7 @@ interface Message {
   content: string
   reasoning?: string                   // 推理内容（reasoning_content/thinking）独立字段：assistant 消息持久化时写入，content 保持纯正文；
                                        // 回放给 LLM 时（loadHistory）不携带——推理绝不进模型上下文；UI 历史渲染为折叠推理卡；旧版数据推理内嵌 content 的 <think> 块（兼容展示/剥离）
+  model?: string                       // 生成该回复的模型名（assistant 消息落盘时由 provider capabilities 携带；仅存储/UI 展示用，loadHistory 不回放给模型；用户反馈 FeedbackInfo.model 据此自动关联，见「用户反馈」）
   blocks?: ContentBlock[]              // 富内容块（文本/代码/图片/文件/图表），随消息持久化
   attachments?: AttachmentRef[]        // 多模态引用
   toolCalls?: ToolCall[]               // assistant 的工具调用请求
@@ -1906,7 +1906,7 @@ WebSocket 消息格式（JSON）：
 | `feedback.list` | 查询反馈（管理员可查全部用户，普通用户仅本人；支持 messageId/sessionId/type 过滤） |
 | `user.list` / `user.create` / `user.update` / `user.delete` | 用户管理（服务模式，仅管理员） |
 | `approval.decide` | 审批决策（通过/拒绝，对应待审批的工具调用） |
-| `feedback.submit` | 提交反馈（点赞/点踩/文字，关联会话与消息） |
+| `feedback.submit` | 提交反馈（点赞/点踩/文字，关联会话与消息；服务端自动补 model/subAgent 关联，见「用户反馈」） |
 | `state.snapshot` | 获取状态快照（主动请求，幂等；与自动推送 payload 一致） |
 | `sync.request` | 断线补偿：按 `lastSeq` 请求重放离线期间错过的日志事件；`sync.replay`（`{events, lastSeq}`，seq 严格递增、payload 含 sessionId）或 `overrun`（`{events:null, overrun:true, lastSeq}`，缺口→客户端全量重同步） |
 | `auth.login` | 登录支持两种形式：`{username, password}`（密码）与 `{token}`（已有令牌，SDK 重连自动重新认证用）；成功后连接级事件订阅自动重绑到新用户并推送状态快照 |
@@ -1960,7 +1960,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/sessions/:id/approval` | POST | 审批决策（通过/拒绝） |
 | `/api/v1/sessions/:id/choice` | POST | 选择决策（ask 选项询问分支等待的用户回应，body: choiceId + option 单选 / options 数组多选 / refuse=true 拒绝，option、options、refuse 至少其一，options 不得为空） |
 | `/api/v1/sessions/:id/draw` | POST | 画图渲染结果回传（show 图表分支等待的前端渲染结果，body: renderId + ok + error） |
-| `/api/v1/feedback` | POST/GET | 提交/查询反馈（管理员可导出） |
+| `/api/v1/feedback` | POST/GET | 提交/查询反馈（提交自动补 model/subAgent 关联；管理员 GET 可查全部用户并导出分析） |
 | `/api/v1/sessions/:id/env` | GET/PUT | 获取/设置会话环境变量（内存态，不落盘） |
 | `/api/v1/sessions/:id/compact` | POST | 主动压缩会话上下文（body 可指定范围） |
 | `/api/v1/sessions/:id/todos` | GET | 获取会话待办清单 |

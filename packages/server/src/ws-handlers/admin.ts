@@ -2,7 +2,7 @@
 import type { WsHandler } from "./context"
 import type { FeedbackInfo, FeedbackInput, UserPatch } from "@gebai/sdk"
 import { SERVICE_USER } from "../app"
-import { readFeedback, writeFeedback } from "../feedback"
+import { feedbackContext, readFeedback, writeFeedback } from "../feedback"
 import { isValidSessionId } from "../core/base/paths"
 
 export const userHandlers: Record<string, WsHandler> = {
@@ -31,7 +31,8 @@ export const userHandlers: Record<string, WsHandler> = {
 export const feedbackHandlers: Record<string, WsHandler> = {
   "feedback.submit": async ({ d, user, p, reply }) => {
     const fb = p.feedback as FeedbackInput
-    const id = await writeFeedback(d.config.gebaiHome, user.id, fb)
+    // 上下文关联（model/subAgent）：按会话记录尽力关联，不阻断提交
+    const id = await writeFeedback(d.config.gebaiHome, user.id, fb, await feedbackContext(d.store, user.id, fb))
     return reply(true, { id })
   },
   "feedback.list": async ({ d, user, p, reply }) => {

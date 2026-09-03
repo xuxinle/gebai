@@ -221,8 +221,9 @@
   font-family: var(--font-ui);
   font-size: 13.5px;
 }
-/* 消息称谓行操作按钮组（复制/撤回/重新生成）：hover 消息时显示（JS .show），不占空间不遮盖 */
-.msg-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; transition: opacity 0.12s ease; }
+/* 消息称谓行操作按钮组（复制/撤回/重新生成）：hover 消息时显示（JS .show），不占空间不遮盖；
+   position:relative 为反馈弹层（.fb-popover）提供定位锚点 */
+.msg-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; transition: opacity 0.12s ease; position: relative; }
 .msg-actions.show { opacity: 1; }
 .msg-act {
   display: grid;
@@ -239,6 +240,53 @@
 }
 .msg-act:hover { background: var(--bg-hover); color: var(--text); }
 .msg-act.done { color: var(--success); cursor: default; }
+/* 质量反馈弹层（👍/👎 → 原因标签 + 补充说明） */
+.fb-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 224px;
+  padding: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 18%);
+}
+.fb-labels { display: flex; flex-wrap: wrap; gap: 4px; }
+.fb-chip {
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.fb-chip:hover { color: var(--text); }
+.fb-chip.selected { border-color: var(--accent); color: var(--accent); }
+.fb-text {
+  width: 100%;
+  resize: vertical;
+  font-size: 12.5px;
+  font-family: var(--font-ui);
+  padding: 6px 8px;
+  box-sizing: border-box;
+}
+.fb-row { display: flex; justify-content: flex-end; gap: 6px; }
+.fb-row button {
+  padding: 3px 12px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fb-submit { border: 1px solid var(--accent); color: var(--accent); background: transparent; }
+.fb-cancel { border: 1px solid var(--border); color: var(--text-muted); background: transparent; }
 .msg.tool { max-width: 100%; }
 .msg.tool .bubble .tool-head { font-family: var(--font-ui); font-weight: 600; font-size: 13px; color: var(--tool); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; min-width: 0; }
 .msg.tool .bubble .tool-head .tool-ico { flex: none; }
