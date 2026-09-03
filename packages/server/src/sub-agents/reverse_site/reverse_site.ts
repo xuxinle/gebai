@@ -1,23 +1,27 @@
 import type { SubAgentDef } from "../../core/base/types"
 import { createCaptureTools, createHttpRequestTool } from "./reverse_site_tools"
+import { createNetTools } from "./reverse_site_net_tools"
 // 系统提示词拆为独立 md 维护（目录形式约定：{dir}/{dir}.md）。
 import systemPromptBase from "./reverse_site.md"
 
 export const name = "reverse_site"
 export const description =
-  "涉及网站/接口逆向时装载本子Agent：分析站点结构、捕获网络请求还原接口、探测验证，输出站点地图与 API 文档（可转交 self_optimize 生成子Agent）；依赖 playwright（装载时自动连带装载，浏览器自动化工具以 playwright_ 前缀复用，与接口录制共享同一浏览器会话）；仅限授权站点，浏览器交互与接口探测需审批。输入：目标 URL 与逆向目标；输出：分析文档与接口清单。"
+  "涉及网站/接口逆向时装载本子Agent：分析站点结构、捕获网络请求（含 WebSocket 帧）还原接口、拦截/mock 验证、带登录态改参重放，输出站点地图与 API 文档（可转交 self_optimize 生成子Agent）；依赖 playwright（装载时自动连带装载，浏览器自动化工具以 playwright_ 前缀复用，与接口录制共享同一浏览器会话）；仅限授权站点，浏览器交互与接口探测需审批。输入：目标 URL 与逆向目标；输出：分析文档与接口清单。"
 export const systemPrompt = systemPromptBase
 
-// 工具集只含接口逆向专属工具（capture_* 经 createLazyBridge 共享 playwright 的同一桥接进程与
-// 浏览器会话——页面操作与网络录制天然一致）；浏览器自动化全套由依赖 playwright 提供（dependencies
-// 自动装载，playwright_ 命名空间注册），文件读写与编排（read/write/fetch_url/agent_*）为全局工具
-// 直接用全局名——本 def 不重复声明任何依赖方或全局已有工具。
+// 工具集只含接口逆向专属工具（capture_* / route 经 createLazyBridge 共享 playwright 的同一桥接
+// 进程与浏览器会话——页面操作与网络录制天然一致）；浏览器自动化全套由依赖 playwright 提供
+// （dependencies 自动装载，playwright_ 命名空间注册），文件读写与编排（read/write/fetch_url/agent_*）
+// 为全局工具直接用全局名——本 def 不重复声明任何依赖方或全局已有工具。
 export const tools = {
   ...createCaptureTools(),
+  ...createNetTools(),
   http_request: createHttpRequestTool(),
 }
 export const requiresApproval = {
   http_request: true,
+  capture_replay: true,
+  capture_curl: true,
 }
 export const preload = false
 

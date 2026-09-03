@@ -1,6 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { Tool, ToolResult, ToolSet } from "../../core/base/types"
-import { truncate, assertPublicHttpUrl, fetchWithRedirectGuard } from "../../core/tools"
+import { truncate, artifactBlocks, assertPublicHttpUrl, fetchWithRedirectGuard } from "../../core/tools"
 import { createLazyBridge, type BridgeLike } from "../playwright/playwright_tools"
 
 /**
@@ -10,7 +10,8 @@ import { createLazyBridge, type BridgeLike } from "../playwright/playwright_tool
  *   返回状态码、响应头（敏感字段脱敏）与响应体（超长截断）；服务端部署限公网地址（防 SSRF）。
  * - `capture_*`：浏览器网络请求录制（start/stop/clear/list），与 playwright 工具共享
  *   同一桥接进程与浏览器会话——录制接口驱动侧实现（driver.mjs network_* 操作），
- *   请求头/体与响应体预览在录制时自动脱敏。
+ *   请求头/体与响应体预览在录制时自动脱敏；`capture_body`（完整响应体）、`capture_replay`
+ *   （带浏览器登录态一键改参重放）、`capture_curl`（生成可运行的重放命令，审批暴露真实凭证）。
  */
 
 const HTTP_BODY_CAP = 50_000 // http_request 响应体展示上限（字符）
@@ -54,6 +55,40 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(headers)) out[k] = SENSITIVE_HEADERS.has(k.toLowerCase()) ? "***" : v
   return out
+}
+
+/** shell 单引号转义（curl 命令参数用）。 */
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+/** 把请求（method/url/headers/postData）生成为可直接运行的重放命令。lang：curl/fetch/python。纯函数，可单测。 */
+export function buildReplayCommand(lang: string, method: string, url: string, headers: Record<string, string>, postData: string): string {
+  if (lang === "fetch") {
+    const lines = [
+      `fetch(${JSON.stringify(url)}, {`,
+      `  method: ${JSON.stringify(method)},`,
+      `  headers: ${JSON.stringify(headers)},`,
+    ]
+    if (postData) lines.push(`  body: ${JSON.stringify(postData)},`)
+    lines.push(`}).then(r => r.text()).then(console.log)`)
+    return lines.join("\n")
+  }
+  if (lang === "python") {
+    const lines = ["import requests", "", "resp = requests.request("]
+    lines.push(`    ${JSON.stringify(method)},`)
+    lines.push(`    ${JSON.stringify(url)},`)
+    lines.push(`    headers=${JSON.stringify(headers)},`)
+    if (postData) lines.push(`    data=${JSON.stringify(postData)},`)
+    lines.push(")")
+    lines.push("print(resp.status_code, resp.text[:2000])")
+    return lines.join("\n")
+  }
+  // curl（默认）
+  const parts = [`curl -X ${method} ${shQuote(url)}`]
+  for (const [k, v] of Object.entries(headers)) parts.push(`  -H ${shQuote(`${k}: ${v}`)}`)
+  if (postData) parts.push(`  -d ${shQuote(postData)}`)
+  return parts.join(" \\\n")
 }
 
 /** 格式化 http_request 结果（状态行 + 响应头 + 响应体）。纯函数，可单测。 */
@@ -252,6 +287,133 @@ export function createCaptureTools(deps: { bridge?: BridgeLike } = {}): ToolSet 
           return truncate(output, "capture_list", ctx)
         } catch (err) {
           return { output: `读取失败: ${err instanceof Error ? err.message : String(err)}` }
+        }
+      },
+    },
+
+    capture_body: {
+      name: "capture_body",
+      description:
+        "获取指定录制请求的完整响应体（capture_list 摘要里的 [id]）。文本类直接返回（超长截断）；二进制或需要全文时传 file 参数保存为文件（会话相对路径）再用相应工具处理。",
+      parameters: schema(
+        {
+          id: { type: "number", description: "capture_list 返回的请求序号 [id]" },
+          file: { type: "string", description: "可选：完整响应体保存为会话相对路径文件（二进制响应必传）" },
+        },
+        ["id"]
+      ),
+      async execute(args, ctx) {
+        const id = Number(args.id)
+        if (!Number.isFinite(id)) return { output: "缺少 id 参数（capture_list 返回的 [id]）" }
+        const file = String(args.file ?? "").trim()
+        try {
+          const r = (await request(ctx.sessionId, "network_body", { id, path: file ? ctx.resolvePath(file) : "" })) as {
+            body?: string
+            size?: number
+            contentType?: string
+            hint?: string
+            truncated?: boolean
+          }
+          if (file) return { output: `响应体已保存: ${file}（${r.size ?? "?"} 字节）`, blocks: artifactBlocks(file) }
+          if (r.hint) return { output: `${r.hint}` }
+          return truncate(r.body ?? "(空响应体)", "capture_body", ctx)
+        } catch (err) {
+          return { output: `获取响应体失败: ${err instanceof Error ? err.message : String(err)}` }
+        }
+      },
+    },
+
+    capture_replay: {
+      name: "capture_replay",
+      description:
+        "一键重放录制的请求并改参验证：以浏览器登录态（cookie/存储状态）直发——可重放需登录的接口（http_request 做不到）。method/url/headers/body/params 为覆盖项，未提供部分沿用录制的原始请求（headers 覆盖合并、params 合并进 URL 查询串）。返回与 http_request 同格式（响应头脱敏）。",
+      parameters: schema(
+        {
+          id: { type: "number", description: "capture_list 返回的请求序号 [id]" },
+          url: { type: "string", description: "覆盖请求地址（默认用录制的原始 URL）" },
+          method: { type: "string", description: "覆盖请求方法（默认沿用录制值）" },
+          headers: { type: "string", description: '覆盖请求头 JSON 对象字符串（合并覆盖原始请求头），如 {"x-page":"2"}' },
+          body: { type: "string", description: "覆盖请求体（默认沿用录制的原始请求体）" },
+          params: { type: "string", description: '查询参数 JSON 对象字符串（合并进 URL 查询串），如 {"page":"3"}' },
+          timeout: { type: "number", description: "超时毫秒（默认 30000）" },
+        },
+        ["id"]
+      ),
+      async execute(args, ctx) {
+        const id = Number(args.id)
+        if (!Number.isFinite(id)) return { output: "缺少 id 参数（capture_list 返回的 [id]）" }
+        let headers: Record<string, string> | undefined
+        let params: Record<string, string> | undefined
+        try {
+          headers = parseJsonObject(args.headers) ?? undefined
+          params = parseJsonObject(args.params) ?? undefined
+        } catch (err) {
+          return { output: (err as Error).message }
+        }
+        // 沙箱模式：重放目标 URL（覆盖值优先）须过公网校验；且不自动跟随重定向（3xx 返回 Location 逐跳重放，防跳板绕过）
+        if (ctx.sandboxed) {
+          let checkUrl = String(args.url ?? "").trim()
+          if (!checkUrl) {
+            try {
+              const r = (await request(ctx.sessionId, "network_list", {})) as { entries: CapturedRequest[] }
+              checkUrl = r.entries.find((e) => e.id === id)?.url ?? ""
+            } catch {
+              checkUrl = ""
+            }
+          }
+          if (!checkUrl) return { output: `找不到录制记录 id=${id}，请先用 capture_list 查看现有 id` }
+          try {
+            await assertPublicHttpUrl(checkUrl)
+          } catch (err) {
+            return { output: `capture_replay 失败: ${(err as Error).message}` }
+          }
+        }
+        try {
+          const r = (await request(ctx.sessionId, "network_replay", {
+            id,
+            url: args.url === undefined ? "" : String(args.url),
+            method: args.method === undefined ? "" : String(args.method),
+            headers,
+            params,
+            body: args.body === undefined ? undefined : String(args.body),
+            timeout: num(args.timeout, 30_000),
+            followRedirects: !ctx.sandboxed,
+          })) as { status: number; headers: Record<string, string>; location?: string; body: string }
+          let out = `（以浏览器登录态直发）\n${formatHttpResult(r.status, "", r.headers ?? {}, r.body ?? "")}`
+          if (r.location) out += `\n\n重定向 Location: ${r.location}（沙箱模式不自动跟随重定向，继续验证请以该地址再 replay）`
+          return truncate(out, "capture_replay", ctx)
+        } catch (err) {
+          return { output: `capture_replay 失败: ${err instanceof Error ? err.message : String(err)}` }
+        }
+      },
+    },
+
+    capture_curl: {
+      name: "capture_curl",
+      description:
+        "把录制的请求生成为可直接运行的重放命令（lang：curl/fetch/python，默认 curl）——基于原始未脱敏请求（含 cookie 等真实凭证，与 http_request 免密直连互补），输出可直接在终端/脚本中执行验证接口。",
+      parameters: schema(
+        {
+          id: { type: "number", description: "capture_list 返回的请求序号 [id]" },
+          lang: { type: "string", description: "命令形态：curl（默认）/ fetch / python" },
+        },
+        ["id"]
+      ),
+      async execute(args, ctx) {
+        const id = Number(args.id)
+        if (!Number.isFinite(id)) return { output: "缺少 id 参数（capture_list 返回的 [id]）" }
+        const lang = String(args.lang ?? "curl")
+        if (!["curl", "fetch", "python"].includes(lang)) return { output: `lang 必须是 curl/fetch/python: ${lang}` }
+        try {
+          const r = (await request(ctx.sessionId, "network_raw", { id })) as {
+            method: string
+            url: string
+            headers: Record<string, string>
+            postData: string
+          }
+          return truncate(buildReplayCommand(lang, r.method, r.url, r.headers ?? {}, r.postData ?? ""), "capture_curl", ctx)
+        } catch (err) {
+          return { output: `生成重放命令失败: ${err instanceof Error ? err.message : String(err)}` }
         }
       },
     },
