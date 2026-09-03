@@ -17,10 +17,19 @@
  */
 import { createInterface } from "node:readline"
 import { fileURLToPath } from "node:url"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000 // 会话浏览器上下文空闲回收阈值
 const RESULT_LIMIT = 200_000 // 单次结果最大字符数（超出截断并标记 truncated）
+const WS_MAX_FRAMES = 300 // 单会话 WebSocket 帧记录上限（超出丢弃最旧）
+const WS_FRAME_PREVIEW = 4_000 // 单帧 payload 预览上限（字符）
+const ROUTES_MAX = 32 // 单会话请求拦截规则上限
+const DIALOGS_MAX = 100 // 单会话对话框记录上限
+const DOWNLOADS_MAX = 100 // 单会话下载记录上限（文件保留在磁盘，仅记录淘汰）
+const REPLAY_BODY_PREVIEW = 50_000 // network_replay 响应体预览上限（字符）
+const BODY_FILE_MAX = 20_000_000 // network_body 响应体落盘上限（字节）
 
 /* ---------------- 网络录制（reverse_site 子Agent 接口逆向用） ---------------- */
 
@@ -91,6 +100,15 @@ async function captureResponseBody(entry, resp) {
   } catch { /* 捕获失败忽略 */ }
 }
 
+/** 按录制 id 查找 entry（找不到给出可操作提示）。 */
+function findEntry(s, id) {
+  const n = Number(id)
+  if (!s || !s.network || s.network.length === 0) throw new Error("当前会话没有录制数据，请先 capture_start 并浏览页面")
+  const entry = s.network.find((e) => e.id === n)
+  if (!entry) throw new Error(`找不到录制记录 id=${id}，请用 capture_list 查看现有 id`)
+  return entry
+}
+
 /** 为会话上下文挂接网络录制监听（request/response/requestfailed）。 */
 function attachNetworkListeners(s) {
   s.context.on("request", (req) => {
@@ -127,8 +145,97 @@ function attachNetworkListeners(s) {
     if (!entry) return
     entry.status = resp.status()
     entry.responseHeaders = redactHeaders(resp.headers())
+    entry.resp = resp // 保留响应对象（network_body 完整响应体用）
     captureResponseBody(entry, resp)
   })
+}
+
+/** 为页面挂接对话框/下载/WebSocket 帧监听（context.on("page") 时对新页面调用）。 */
+function attachPageListeners(s, page) {
+  // 对话框（alert/confirm/prompt/beforeunload）：有监听器时必须 accept/dismiss，否则页面冻结；
+  // 无自动应答配置时默认 dismiss 并记录，供 dialog_list 查看
+  page.on("dialog", (d) => {
+    void (async () => {
+      const rec = { type: d.type(), message: d.message(), defaultText: d.defaultValue() ?? "", time: Date.now() }
+      if (s.dialogs.length >= DIALOGS_MAX) s.dialogs.shift()
+      s.dialogs.push(rec)
+      try {
+        const auto = s.dialogAuto
+        if (auto && auto.mode === "accept") await d.accept(d.type() === "prompt" ? auto.promptText : undefined)
+        else await d.dismiss()
+        rec.handled = auto && auto.mode === "accept" ? "accept" : "dismiss"
+      } catch { try { await d.dismiss() } catch { /* 已处理 */ } }
+    })()
+  })
+  // 下载：保存到系统临时目录（宿主侧 downloads 工具负责复制进会话沙箱）
+  page.on("download", (dl) => {
+    void (async () => {
+      try {
+        const dir = join(tmpdir(), "gebai-dl", s.id)
+        mkdirSync(dir, { recursive: true })
+        const base = dl.suggestedFilename() || `download-${Date.now()}`
+        let name = base
+        let n = 1
+        while (existsSync(join(dir, name))) name = `${n++}-${base}`
+        const path = join(dir, name)
+        await dl.saveAs(path)
+        if (s.downloads.length >= DOWNLOADS_MAX) s.downloads.shift()
+        s.downloads.push({ filename: name, path, url: dl.url(), time: Date.now() })
+      } catch { /* 保存失败忽略（不出现在列表中） */ }
+    })()
+  })
+  // WebSocket 帧录制（随网络录制开关 s.recording 联动）
+  page.on("websocket", (ws) => {
+    const url = ws.url()
+    const push = (dir, payload) => {
+      if (!s.recording) return
+      if (s.ws.length >= WS_MAX_FRAMES) s.ws.shift()
+      let text = typeof payload === "string" ? payload : Buffer.from(payload).toString("utf8")
+      if (text.length > WS_FRAME_PREVIEW) text = text.slice(0, WS_FRAME_PREVIEW) + "…[帧已截断]"
+      s.ws.push({ id: s.wsId++, time: Date.now(), dir, url, payload: text })
+    }
+    ws.on("framesent", (f) => push("sent", f.payload))
+    ws.on("framereceived", (f) => push("recv", f.payload))
+  })
+}
+
+/** 请求拦截规则处理函数（block=中止 / mock=伪造响应 / modify=改写请求头后放行）。 */
+function makeRouteHandler(spec) {
+  return async (route) => {
+    try {
+      if (spec.mode === "block") return await route.abort()
+      if (spec.mode === "mock") {
+        return await route.fulfill({
+          status: spec.status ?? 200,
+          contentType: spec.contentType ?? "application/json",
+          body: spec.body ?? "",
+        })
+      }
+      const headers = { ...route.request().headers(), ...(spec.headers || {}) }
+      return await route.continue({ headers })
+    } catch { try { await route.continue() } catch { /* 路由已处理 */ } }
+  }
+}
+
+/** 重建上下文后恢复拦截规则（规则挂在 context 上，随上下文销毁丢失）。 */
+async function applyRoutes(s) {
+  for (const spec of s.routes) {
+    try { await s.context.route(spec.pattern, makeRouteHandler(spec)) } catch { /* 规则失效忽略 */ }
+  }
+}
+
+/** 选择器目标解析：支持 `iframe选择器 >> 子iframe选择器 >> 目标选择器` 逐级穿透 iframe
+ *  （Locator.contentFrame 链）；无 `>>` 时等价 page.locator。CSS 引擎天然穿透开放 shadow DOM。 */
+function resolveTarget(page, selector) {
+  const raw = String(selector)
+  const parts = raw.split(">>").map((p) => p.trim()).filter(Boolean)
+  if (parts.length <= 1) return page.locator(raw)
+  let frame = null
+  for (let i = 0; i < parts.length - 1; i++) {
+    const loc = frame ? frame.locator(parts[i]) : page.locator(parts[i])
+    frame = loc.contentFrame()
+  }
+  return frame.locator(parts[parts.length - 1])
 }
 
 /** 惰性加载的 playwright 模块（init 时注入路径，规避 node 侧模块解析问题）。 */
@@ -197,18 +304,39 @@ async function ensureSession(sessionId) {
   const b = await ensureBrowser()
   let s = sessions.get(sessionId)
   if (!s) {
-    s = { context: null, lastUsed: Date.now(), activePageIndex: 0, recording: false, network: [], netMap: new Map(), netId: 0 }
+    s = {
+      id: sessionId,
+      context: null,
+      lastUsed: Date.now(),
+      activePageIndex: 0,
+      recording: false,
+      network: [],
+      netMap: new Map(),
+      netId: 0,
+      emu: null, // 仿真档案（userAgent/locale/timezoneId/viewport/isMobile/hasTouch），newContext 时生效
+      ws: [], // WebSocket 帧记录（随录制开关）
+      wsId: 0,
+      routes: [], // 请求拦截规则（重建上下文后重挂）
+      dialogs: [], // 对话框记录
+      dialogAuto: null, // 自动应答配置 { mode, promptText }
+      downloads: [], // 已保存的下载记录
+    }
     sessions.set(sessionId, s)
   }
   if (!s.context) {
-    s.context = await b.newContext()
+    s.context = await b.newContext({ acceptDownloads: true, ...(s.emu || {}) })
     s.activePageIndex = 0
-    // 上下文重建时重置网络录制状态（旧状态随旧上下文销毁）
+    // 上下文重建时重置网络录制与 WS 帧状态（旧状态随旧上下文销毁）；拦截规则/对话框/下载记录保留
     s.recording = false
     s.network = []
     s.netMap = new Map()
     s.netId = 0
+    s.ws = []
+    s.wsId = 0
     attachNetworkListeners(s)
+    s.context.on("page", (p) => attachPageListeners(s, p))
+    for (const p of s.context.pages()) attachPageListeners(s, p)
+    await applyRoutes(s)
   }
   s.lastUsed = Date.now()
   return s
@@ -294,7 +422,7 @@ const ops = {
     const page = activePage(s, args.index)
     const mode = str(args.mode, "html")
     const selector = str(args.selector)
-    const target = selector ? page.locator(selector) : page
+    const target = selector ? resolveTarget(page, selector) : page
     const out = {}
     if (mode === "html" || mode === "both") out.html = selector ? await target.innerHTML() : await page.content()
     if (mode === "text" || mode === "both") out.text = selector ? await target.innerText() : await page.evaluate(() => document.body ? document.body.innerText : "")
@@ -307,7 +435,7 @@ const ops = {
     const path = str(args.path)
     if (!path) throw new Error("缺少 path 参数（截图落盘位置）")
     const selector = str(args.selector)
-    if (selector) await page.locator(selector).screenshot({ path, timeout: opTimeout(args.timeout) })
+    if (selector) await resolveTarget(page, selector).screenshot({ path, timeout: opTimeout(args.timeout) })
     else await page.screenshot({ path, fullPage: !!args.fullPage, timeout: opTimeout(args.timeout) })
     return { path }
   },
@@ -317,7 +445,7 @@ const ops = {
     const page = activePage(s, args.index)
     const selector = str(args.selector)
     if (!selector) throw new Error("缺少 selector 参数")
-    await page.click(selector, { timeout: opTimeout(args.timeout) })
+    await resolveTarget(page, selector).click({ timeout: opTimeout(args.timeout) })
     return { clicked: selector }
   },
 
@@ -326,7 +454,7 @@ const ops = {
     const page = activePage(s, args.index)
     const selector = str(args.selector)
     if (!selector) throw new Error("缺少 selector 参数")
-    await page.fill(selector, str(args.value), { timeout: opTimeout(args.timeout) })
+    await resolveTarget(page, selector).fill(str(args.value), { timeout: opTimeout(args.timeout) })
     return { filled: selector }
   },
 
@@ -335,7 +463,7 @@ const ops = {
     const page = activePage(s, args.index)
     const key = str(args.key)
     if (!key) throw new Error("缺少 key 参数（如 Enter/Tab/Control+a）")
-    if (args.selector) await page.press(str(args.selector), key, { timeout: opTimeout(args.timeout) })
+    if (args.selector) await resolveTarget(page, str(args.selector)).press(key, { timeout: opTimeout(args.timeout) })
     else await page.keyboard.press(key)
     return { pressed: key }
   },
@@ -349,7 +477,7 @@ const ops = {
       : args.label ? { label: str(args.label) }
       : null
     if (!value) throw new Error("value 与 label 至少提供一个")
-    await page.selectOption(selector, value, { timeout: opTimeout(args.timeout) })
+    await resolveTarget(page, selector).selectOption(value, { timeout: opTimeout(args.timeout) })
     return { selected: selector }
   },
 
@@ -358,9 +486,51 @@ const ops = {
     const page = activePage(s, args.index)
     const selector = str(args.selector)
     if (!selector) throw new Error("缺少 selector 参数")
-    if (args.checked === false) await page.uncheck(selector, { timeout: opTimeout(args.timeout) })
-    else await page.check(selector, { timeout: opTimeout(args.timeout) })
+    if (args.checked === false) await resolveTarget(page, selector).uncheck({ timeout: opTimeout(args.timeout) })
+    else await resolveTarget(page, selector).check({ timeout: opTimeout(args.timeout) })
     return { checked: selector, state: args.checked === false ? "unchecked" : "checked" }
+  },
+
+  async hover(args) {
+    const s = await ensureSession(args.sessionId)
+    const page = activePage(s, args.index)
+    const selector = str(args.selector)
+    if (!selector) throw new Error("缺少 selector 参数")
+    await resolveTarget(page, selector).hover({ timeout: opTimeout(args.timeout) })
+    return { hovered: selector }
+  },
+
+  async dblclick(args) {
+    const s = await ensureSession(args.sessionId)
+    const page = activePage(s, args.index)
+    const selector = str(args.selector)
+    if (!selector) throw new Error("缺少 selector 参数")
+    await resolveTarget(page, selector).dblclick({ timeout: opTimeout(args.timeout) })
+    return { dblclicked: selector }
+  },
+
+  async drag(args) {
+    const s = await ensureSession(args.sessionId)
+    const page = activePage(s, args.index)
+    const source = str(args.source)
+    const target = str(args.target)
+    if (!source || !target) throw new Error("缺少 source/target 参数")
+    await resolveTarget(page, source).dragTo(resolveTarget(page, target), { timeout: opTimeout(args.timeout) })
+    return { dragged: `${source} -> ${target}` }
+  },
+
+  async upload(args) {
+    const s = await ensureSession(args.sessionId)
+    const page = activePage(s, args.index)
+    const selector = str(args.selector)
+    if (!selector) throw new Error("缺少 selector 参数")
+    const paths = Array.isArray(args.paths) ? args.paths.map((p) => str(p)).filter(Boolean) : [str(args.paths)].filter(Boolean)
+    if (paths.length === 0) throw new Error("缺少 paths 参数（要上传的文件绝对路径）")
+    for (const p of paths) {
+      if (!existsSync(p)) throw new Error(`文件不存在: ${p}`)
+    }
+    await resolveTarget(page, selector).setInputFiles(paths, { timeout: opTimeout(args.timeout) })
+    return { uploaded: paths }
   },
 
   async wait_for(args) {
@@ -439,6 +609,153 @@ const ops = {
     return { closed: true }
   },
 
+  /* ---------------- 会话工具（存储/仿真/下载/对话框/导出） ---------------- */
+
+  async pdf(args) {
+    const s = await ensureSession(args.sessionId)
+    const page = activePage(s, args.index)
+    const path = str(args.path)
+    if (!path) throw new Error("缺少 path 参数（PDF 落盘位置）")
+    const format = str(args.format, "A4")
+    if (!/^(A[0-5]|Legal|Letter|Tabloid)$/.test(format)) throw new Error(`format 必须是 A1-A5/Legal/Letter/Tabloid: ${format}`)
+    await page.pdf({ path, format, landscape: !!args.landscape, printBackground: true })
+    return { path }
+  },
+
+  /** 仿真档案（UA/locale/timezoneId/viewport/isMobile/hasTouch）——上下文级选项只在创建时生效，
+   *  存在即重建上下文应用（页面/cookie/录制状态随之清空，拦截规则自动重挂）。reset 清档回默认。 */
+  async emulate(args) {
+    const s = await ensureSession(args.sessionId)
+    if (args.reset) {
+      s.emu = null
+    } else {
+      s.emu = s.emu ? { ...s.emu } : {}
+      if (args.userAgent) s.emu.userAgent = str(args.userAgent)
+      if (args.locale) s.emu.locale = str(args.locale)
+      if (args.timezoneId) s.emu.timezoneId = str(args.timezoneId)
+      const w = num(args.width, 0)
+      const h = num(args.height, 0)
+      if (w && h) s.emu.viewport = { width: Math.round(w), height: Math.round(h) }
+      if (args.mobile !== undefined) {
+        s.emu.isMobile = !!args.mobile
+        s.emu.hasTouch = !!args.mobile
+      }
+    }
+    if (s.context) {
+      await s.context.close().catch(() => {})
+      s.context = null
+      await ensureSession(args.sessionId)
+    }
+    return { emulated: s.emu ? { ...s.emu } : null }
+  },
+
+  async cookies_get(args) {
+    const s = await ensureSession(args.sessionId)
+    const urls = Array.isArray(args.urls) ? args.urls.map((u) => str(u)) : args.urls ? [str(args.urls)] : undefined
+    const cookies = await s.context.cookies(urls)
+    return { cookies }
+  },
+
+  async cookies_set(args) {
+    const s = await ensureSession(args.sessionId)
+    const cookies = Array.isArray(args.cookies) ? args.cookies : []
+    if (cookies.length === 0) throw new Error("缺少 cookies 参数（cookie 对象数组）")
+    await s.context.addCookies(cookies)
+    return { set: cookies.length }
+  },
+
+  async cookies_clear(args) {
+    const s = await ensureSession(args.sessionId)
+    await s.context.clearCookies()
+    return { cleared: true }
+  },
+
+  /** 当前页面 origin 的 localStorage 读写（定式 evaluate，key/value 由参数传入而非任意脚本）。 */
+  async local_storage(args) {
+    const s = await ensureSession(args.sessionId)
+    const page = activePage(s, args.index)
+    const action = str(args.action, "list")
+    if (action === "list") return { items: await page.evaluate(() => ({ ...localStorage })) }
+    const key = str(args.key)
+    if (!key) throw new Error("缺少 key 参数")
+    if (action === "get") return { value: await page.evaluate((k) => localStorage.getItem(k), key) }
+    if (action === "set") {
+      if (args.value === undefined) throw new Error("缺少 value 参数")
+      await page.evaluate(([k, v]) => localStorage.setItem(k, v), [key, str(args.value)])
+      return { set: key }
+    }
+    if (action === "remove") {
+      await page.evaluate((k) => localStorage.removeItem(k), key)
+      return { removed: key }
+    }
+    if (action === "clear") {
+      await page.evaluate(() => localStorage.clear())
+      return { cleared: true }
+    }
+    throw new Error(`action 必须是 list/get/set/remove/clear: ${action}`)
+  },
+
+  /** 登录态快照（playwright storageState 格式：cookies + 各 origin 的 localStorage）。 */
+  async storage_save(args) {
+    const s = await ensureSession(args.sessionId)
+    const state = await s.context.storageState()
+    return { state, cookies: state.cookies?.length ?? 0, origins: state.origins?.length ?? 0 }
+  },
+
+  /** 恢复登录态：cookies 直接注入；localStorage 逐 origin 开临时页导航写入（不可达 origin 告警不中断）。 */
+  async storage_apply(args) {
+    const s = await ensureSession(args.sessionId)
+    const state = args.state
+    if (!state || typeof state !== "object" || !Array.isArray(state.cookies)) {
+      throw new Error("缺少 state 参数（storageState 对象）")
+    }
+    const warnings = []
+    if (state.cookies.length > 0) await s.context.addCookies(state.cookies)
+    for (const o of Array.isArray(state.origins) ? state.origins : []) {
+      if (!Array.isArray(o.localStorage) || o.localStorage.length === 0) continue
+      let page = null
+      try {
+        page = await s.context.newPage()
+        await page.goto(o.origin, { waitUntil: "domcontentloaded", timeout: 15_000 })
+        await page.evaluate((items) => { for (const it of items) localStorage.setItem(it.name, it.value) }, o.localStorage)
+      } catch {
+        warnings.push(`origin 恢复失败（不可达或写入失败）: ${o.origin}`)
+      } finally {
+        await page?.close().catch(() => {})
+      }
+    }
+    return { cookies: state.cookies.length, origins: state.origins?.length ?? 0, warnings }
+  },
+
+  async downloads_list(args) {
+    const s = sessions.get(args.sessionId)
+    return { downloads: s ? s.downloads.slice(-100) : [] }
+  },
+
+  async dialog_list(args) {
+    const s = sessions.get(args.sessionId)
+    return { dialogs: s ? s.dialogs.slice(-50) : [], auto: s?.dialogAuto ?? null }
+  },
+
+  async dialog_auto(args) {
+    const s = await ensureSession(args.sessionId)
+    if (args.mode) {
+      const mode = str(args.mode)
+      if (!["accept", "dismiss"].includes(mode)) throw new Error("mode 必须是 accept/dismiss")
+      s.dialogAuto = { mode, promptText: str(args.promptText) }
+    } else {
+      s.dialogAuto = null
+    }
+    return { auto: s.dialogAuto }
+  },
+
+  async dialog_clear(args) {
+    const s = sessions.get(args.sessionId)
+    const n = s ? s.dialogs.length : 0
+    if (s) s.dialogs = []
+    return { cleared: n }
+  },
+
   /* ---------------- 网络录制（接口逆向） ---------------- */
 
   async network_start(args) {
@@ -478,7 +795,8 @@ const ops = {
     const status = Number(args.status)
     if (Number.isFinite(status) && status > 0) entries = entries.filter((e) => e.status === status)
     const detail = !!args.detail
-    const out = entries.slice(-200).map((e) => {
+    const limit = Math.min(Math.max(1, num(args.limit, 200)), NETWORK_MAX_ENTRIES)
+    const out = entries.slice(-limit).map((e) => {
       const base = { id: e.id, time: e.time, method: e.method, url: e.url, resourceType: e.resourceType, status: e.status, error: e.error }
       if (detail) {
         base.requestHeaders = e.requestHeaders
@@ -489,6 +807,122 @@ const ops = {
       return base
     })
     return { entries: out, captured: s.network.length, recording: s.recording }
+  },
+
+  /** 指定录制请求的完整响应体：传 path 直接落盘（支持二进制与大文件）；不传则返回文本预览。 */
+  async network_body(args) {
+    const s = sessions.get(args.sessionId)
+    const entry = findEntry(s, args.id)
+    if (!entry.resp) throw new Error("该记录没有响应对象（请求失败或上下文已重建），请重新录制")
+    const buf = await entry.resp.body()
+    if (buf.length > BODY_FILE_MAX) throw new Error(`响应体过大（${buf.length} 字节，上限 ${BODY_FILE_MAX}）`)
+    const path = str(args.path)
+    if (path) {
+      writeFileSync(path, buf)
+      return { path, size: buf.length }
+    }
+    const ct = entry.responseHeaders?.["content-type"] ?? ""
+    if (!/json|text|xml|javascript|html|form/i.test(ct)) {
+      return { size: buf.length, contentType: ct || "未知类型", hint: "非文本响应体，请传 file 参数保存为文件" }
+    }
+    const text = buf.toString("utf8")
+    return {
+      body: text.length > NETWORK_BODY_MAX ? text.slice(0, NETWORK_BODY_MAX) + "\n…[响应体已截断，完整内容用 file 参数落盘]" : text,
+      size: buf.length,
+      truncated: text.length > NETWORK_BODY_MAX,
+    }
+  },
+
+  /** 原始（未脱敏）请求信息——重放命令生成用，宿主侧以审批工具暴露。 */
+  async network_raw(args) {
+    const entry = findEntry(sessions.get(args.sessionId), args.id)
+    return {
+      method: entry.req.method(),
+      url: entry.req.url(),
+      headers: entry.req.headers(),
+      postData: entry.req.postData() ?? "",
+    }
+  },
+
+  /** 一键重放录制请求（context.request 与浏览器共享 cookie/存储状态，可重放需登录接口）：
+   *  method/url/headers/body/params 为覆盖项（headers 覆盖合并，params 合并进 URL 查询串）；
+   *  followRedirects=false 时不自动跟随重定向（宿主侧沙箱模式逐跳校验防 SSRF）。 */
+  async network_replay(args) {
+    const s = sessions.get(args.sessionId)
+    const entry = findEntry(s, args.id)
+    if (!s.context) throw new Error("会话上下文不存在（可能已 close），请先 open 页面")
+    const method = str(args.method) || entry.req.method()
+    let url = str(args.url) || entry.req.url()
+    if (args.params && typeof args.params === "object") {
+      try {
+        const u = new URL(url)
+        for (const [k, v] of Object.entries(args.params)) u.searchParams.set(k, String(v))
+        url = u.toString()
+      } catch { /* URL 无效保持原样，由 fetch 报错 */ }
+    }
+    const headers = { ...entry.req.headers(), ...(args.headers || {}) }
+    const data = args.body !== undefined ? str(args.body) : entry.req.postData() ?? undefined
+    const init = { method, headers, data, timeout: opTimeout(args.timeout, 30_000) }
+    if (args.followRedirects === false) init.maxRedirects = 0
+    const res = await s.context.request.fetch(url, init)
+    const ct = res.headers()["content-type"] || ""
+    let body = ""
+    if (/json|text|xml|javascript|html|form/i.test(ct)) {
+      const text = await res.text()
+      body = text.length > REPLAY_BODY_PREVIEW ? text.slice(0, REPLAY_BODY_PREVIEW) + "\n…[响应体已截断]" : text
+    } else {
+      body = `(非文本响应体: ${ct || "未知类型"}，已跳过)`
+    }
+    return { status: res.status(), headers: redactHeaders(res.headers()), location: res.headers()["location"] || "", body }
+  },
+
+  /** WebSocket 帧记录列表（录制开关联动）。 */
+  async network_ws_list(args) {
+    const s = sessions.get(args.sessionId)
+    if (!s) return { frames: [], total: 0, recording: false }
+    let frames = s.ws
+    if (args.url) {
+      const sub = str(args.url)
+      frames = frames.filter((f) => f.url.includes(sub))
+    }
+    const last = Math.min(Math.max(1, num(args.last, 100)), 300)
+    return { frames: frames.slice(-last), total: s.ws.length, recording: s.recording }
+  },
+
+  async route_add(args) {
+    const s = await ensureSession(args.sessionId)
+    if (s.routes.length >= ROUTES_MAX) throw new Error(`拦截规则已达上限 ${ROUTES_MAX}，请先 route clear 清理`)
+    const pattern = str(args.pattern)
+    if (!pattern) throw new Error("缺少 pattern 参数（glob，如 **/api/**）")
+    const mode = str(args.mode, "block")
+    if (!["block", "mock", "modify"].includes(mode)) throw new Error("mode 必须是 block/mock/modify")
+    const spec = {
+      pattern,
+      mode,
+      status: args.status,
+      contentType: args.contentType || undefined,
+      body: args.body || undefined,
+      headers: args.headers && typeof args.headers === "object" ? args.headers : null,
+    }
+    await s.context.route(pattern, makeRouteHandler(spec))
+    s.routes.push(spec)
+    return { added: pattern, mode, total: s.routes.length }
+  },
+
+  async route_clear(args) {
+    const s = sessions.get(args.sessionId)
+    if (!s) return { cleared: 0 }
+    const n = s.routes.length
+    if (s.context) {
+      for (const spec of s.routes) await s.context.unroute(spec.pattern).catch(() => {})
+    }
+    s.routes = []
+    return { cleared: n }
+  },
+
+  async route_list(args) {
+    const s = sessions.get(args.sessionId)
+    return { routes: s ? s.routes.map(({ pattern, mode, status, contentType, headers }) => ({ pattern, mode, status, contentType, headers })) : [] }
   },
 
   async ping() {

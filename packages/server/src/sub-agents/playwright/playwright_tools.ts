@@ -316,7 +316,7 @@ export function createLazyBridge(): BridgeLike {
 
 /** 同一会话的浏览器操作串行执行，避免并发操作同一页面互相干扰。 */
 const sessionLocks = new Map<string, Promise<unknown>>()
-function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+export function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
   const prev = sessionLocks.get(sessionId) ?? Promise.resolve()
   const next = prev.then(fn, fn)
   sessionLocks.set(sessionId, next.catch(() => {}))
@@ -439,7 +439,7 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
 
     click: {
       name: "click",
-      description: "点击页面元素（CSS 选择器）。点击前建议先用 content/pages 确认目标存在。",
+      description: "点击页面元素（CSS 选择器；支持 `iframe选择器 >> 目标选择器` 穿透 iframe，多级 iframe 用多个 >> 链接）。点击前建议先用 content/pages 确认目标存在。",
       parameters: schema(
         {
           selector: { type: "string", description: "CSS 选择器" },
@@ -519,6 +519,73 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
       ),
       async execute(args, ctx) {
         return run(ctx, "check", { selector: String(args.selector), checked: args.checked !== false, timeout: num(args.timeout, 30_000) }, `已${args.checked === false ? "取消勾选" : "勾选"}: ${args.selector}`)
+      },
+    },
+
+    hover: {
+      name: "hover",
+      description: "悬停在页面元素上（展开下拉菜单/触发 hover 显示的内容）。",
+      parameters: schema(
+        {
+          selector: { type: "string", description: "CSS 选择器" },
+          timeout: { type: "number", description: "超时毫秒（默认 30000）" },
+        },
+        ["selector"]
+      ),
+      async execute(args, ctx) {
+        return run(ctx, "hover", { selector: String(args.selector), timeout: num(args.timeout, 30_000) }, `已悬停: ${args.selector}`)
+      },
+    },
+
+    dblclick: {
+      name: "dblclick",
+      description: "双击页面元素（文本编辑/行内改名等双击语义交互）。",
+      parameters: schema(
+        {
+          selector: { type: "string", description: "CSS 选择器" },
+          timeout: { type: "number", description: "超时毫秒（默认 30000）" },
+        },
+        ["selector"]
+      ),
+      async execute(args, ctx) {
+        return run(ctx, "dblclick", { selector: String(args.selector), timeout: num(args.timeout, 30_000) }, `已双击: ${args.selector}`)
+      },
+    },
+
+    drag: {
+      name: "drag",
+      description: "把 source 元素拖拽到 target 元素（排序/看板/滑块类交互）。",
+      parameters: schema(
+        {
+          source: { type: "string", description: "拖拽起点的 CSS 选择器" },
+          target: { type: "string", description: "拖拽目标的 CSS 选择器" },
+          timeout: { type: "number", description: "超时毫秒（默认 30000）" },
+        },
+        ["source", "target"]
+      ),
+      async execute(args, ctx) {
+        return run(ctx, "drag", { source: String(args.source), target: String(args.target), timeout: num(args.timeout, 30_000) }, `已拖拽: ${args.source} → ${args.target}`)
+      },
+    },
+
+    upload: {
+      name: "upload",
+      description: "向文件上传控件（input[type=file]）设置本地文件（可多选）。files 为相对会话工作区的路径或绝对路径。",
+      parameters: schema(
+        {
+          selector: { type: "string", description: "文件输入框的 CSS 选择器" },
+          files: { type: "array", items: { type: "string" }, description: "要上传的文件路径（字符串数组，单文件传一项）" },
+          timeout: { type: "number", description: "超时毫秒（默认 30000）" },
+        },
+        ["selector", "files"]
+      ),
+      async execute(args, ctx) {
+        const selector = String(args.selector ?? "")
+        if (!selector) return { output: "缺少 selector 参数" }
+        const raw = Array.isArray(args.files) ? args.files : [args.files]
+        const paths = raw.filter((f) => f !== undefined && f !== null && String(f).trim() !== "").map((f) => ctx.resolvePath(String(f)))
+        if (paths.length === 0) return { output: "缺少 files 参数（要上传的文件路径）" }
+        return run(ctx, "upload", { selector, paths, timeout: num(args.timeout, 30_000) }, `已设置上传文件（${paths.length} 个）: ${selector}`)
       },
     },
 

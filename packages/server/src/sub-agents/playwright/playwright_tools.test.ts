@@ -171,6 +171,30 @@ describe("playwright tools", () => {
     expect(ok.output).toBe("标签页已关闭")
   })
 
+  test("hover/dblclick/drag forward selectors to bridge", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    const { bridge, calls } = recordingBridge()
+    const tools = createPlaywrightTools({ bridge })
+    await tools.hover.execute({ selector: "#menu", timeout: 5000 }, ctx(home))
+    await tools.dblclick.execute({ selector: "td.name" }, ctx(home))
+    await tools.drag.execute({ source: "#item", target: "#drop" }, ctx(home))
+    expect(calls[0]).toMatchObject({ op: "hover", args: { selector: "#menu", timeout: 5000 } })
+    expect(calls[1]).toMatchObject({ op: "dblclick", args: { selector: "td.name" } })
+    expect(calls[2]).toMatchObject({ op: "drag", args: { source: "#item", target: "#drop" } })
+  })
+
+  test("upload resolves file paths via ctx and forwards list", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    const { bridge, calls } = recordingBridge()
+    const tools = createPlaywrightTools({ bridge })
+    const r = await tools.upload.execute({ selector: "input[type=file]", files: ["a.png", "b.png"] }, ctx(home))
+    expect(r.output).toContain("已设置上传文件（2 个）")
+    expect(calls[0].op).toBe("upload")
+    expect((calls[0].args.paths as string[]).every((p) => p.includes(join(home, "users", "default", "sessions")))).toBe(true)
+    const empty = await tools.upload.execute({ selector: "input", files: [] }, ctx(home))
+    expect(empty.output).toContain("缺少 files")
+  })
+
   test("evaluate returns serialized JSON", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
     const { bridge, calls } = recordingBridge()
@@ -290,11 +314,11 @@ describe("playwright tools", () => {
     await Promise.all([p1, p2])
   })
 
-  test("requiresApproval covers navigation/interaction/script ops only", () => {
-    for (const op of ["open", "click", "fill", "press", "select", "check", "evaluate", "new_page", "serve_dir"]) {
+  test("requiresApproval covers navigation/interaction/script/credential ops only", () => {
+    for (const op of ["open", "click", "fill", "press", "select", "check", "hover", "dblclick", "drag", "upload", "evaluate", "new_page", "serve_dir", "emulate", "cookies", "local_storage", "storage_state"]) {
       expect(playwrightDef.requiresApproval?.[op]).toBe(true)
     }
-    for (const op of ["content", "screenshot", "pages", "wait_for", "switch_page", "close_page", "close"]) {
+    for (const op of ["content", "screenshot", "pdf", "downloads", "dialogs", "pages", "wait_for", "switch_page", "close_page", "close"]) {
       expect(playwrightDef.requiresApproval?.[op]).toBeFalsy()
     }
   })
@@ -304,7 +328,11 @@ describe("playwright tools", () => {
     expect(playwrightDef.description.length).toBeGreaterThan(20)
     expect(playwrightDef.systemPrompt).toContain("浏览器自动化")
     expect(playwrightDef.preload).toBe(false)
-    const expected = ["open", "content", "screenshot", "click", "fill", "press", "select", "check", "wait_for", "evaluate", "pages", "new_page", "switch_page", "close_page", "close", "serve_dir"]
+    const expected = [
+      "open", "content", "screenshot", "click", "fill", "press", "select", "check", "hover", "dblclick", "drag", "upload",
+      "wait_for", "evaluate", "pages", "new_page", "switch_page", "close_page", "close", "serve_dir",
+      "pdf", "downloads", "dialogs", "emulate", "cookies", "local_storage", "storage_state",
+    ]
     for (const t of expected) {
       expect(playwrightDef.tools?.[t]).toBeDefined()
       expect(playwrightDef.tools?.[t].name).toBe(t)

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import type { ToolContext } from "../../core/base/types"
-import { createCaptureTools, createHttpRequestTool, formatHttpResult, parseJsonObject, redactHeaders, type CapturedRequest, type FetchLike } from "./reverse_site_tools"
+import { createCaptureTools, createHttpRequestTool, formatHttpResult, parseJsonObject, redactHeaders, buildReplayCommand, type CapturedRequest, type FetchLike } from "./reverse_site_tools"
 import type { BridgeLike } from "../playwright/playwright_tools"
 import { def as reverseSiteDef } from "./reverse_site"
 
@@ -216,6 +216,94 @@ describe("capture tools", () => {
   })
 })
 
+describe("buildReplayCommand", () => {
+  test("curl command with headers, body and shell escaping", () => {
+    const cmd = buildReplayCommand("curl", "POST", "https://a.com/x?b=1", { "content-type": "application/json", cookie: "sid=1; x='q'" }, '{"k":"v"}')
+    expect(cmd).toContain("curl -X POST 'https://a.com/x?b=1'")
+    expect(cmd).toContain("-H 'content-type: application/json'")
+    expect(cmd).toContain(`-H 'cookie: sid=1; x='\\''q'\\'''`)
+    expect(cmd).toContain(`-d '{"k":"v"}'`)
+  })
+  test("fetch and python variants", () => {
+    const fetch = buildReplayCommand("fetch", "GET", "https://a.com", { accept: "application/json" }, "")
+    expect(fetch).toContain(`fetch("https://a.com"`)
+    expect(fetch).not.toContain("body")
+    const py = buildReplayCommand("python", "POST", "https://a.com", { "content-type": "application/json" }, '{"k":"v"}')
+    expect(py).toContain("import requests")
+    expect(py).toContain('data="{\\"k\\":\\"v\\"}"')
+  })
+})
+
+describe("capture body/replay/curl", () => {
+  test("capture_body passes id and resolved file path, returns artifact", async () => {
+    const home = "/tmp/gebai-cap5"
+    const { bridge, calls } = recordingBridge({ network_body: { path: "/x", size: 12 } })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_body.execute({ id: 3, file: "resp.json" }, ctx(home))
+    expect(r.output).toContain("resp.json")
+    expect(r.blocks?.[0]?.type).toBe("file")
+    expect(calls[0].op).toBe("network_body")
+    expect(calls[0].args.id).toBe(3)
+    expect(String(calls[0].args.path)).toContain(join("s1", "tmp", "resp.json"))
+  })
+  test("capture_body returns text preview without file", async () => {
+    const { bridge, calls } = recordingBridge({ network_body: { body: "{\"items\":[]}", size: 12 } })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_body.execute({ id: 3 }, ctx("/tmp/gebai-cap6"))
+    expect(r.output).toContain("{\"items\":[]}")
+    expect(calls[0].args.path).toBe("")
+  })
+  test("capture_body hint for non-text bodies", async () => {
+    const { bridge } = recordingBridge({ network_body: { size: 4096, contentType: "image/png", hint: "非文本响应体，请传 file 参数保存为文件" } })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_body.execute({ id: 3 }, ctx("/tmp/gebai-cap7"))
+    expect(r.output).toContain("非文本响应体")
+  })
+
+  test("capture_replay forwards overrides and follows redirects in local mode", async () => {
+    const { bridge, calls } = recordingBridge({ network_replay: { status: 200, headers: { "content-type": "application/json" }, location: "", body: "[]" } })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_replay.execute({ id: 7, params: '{"page":"3"}', headers: '{"x-page":"3"}', body: '{"k":"v"}' }, ctx("/tmp/gebai-cap8"))
+    expect(r.output).toContain("HTTP 200")
+    expect(r.output).toContain("登录态")
+    expect(calls[0].op).toBe("network_replay")
+    expect(calls[0].args).toMatchObject({ id: 7, headers: { "x-page": "3" }, params: { page: "3" }, body: '{"k":"v"}', followRedirects: true })
+  })
+  test("capture_replay rejects private url when sandboxed (guard before dispatch)", async () => {
+    const { bridge, calls } = recordingBridge({
+      network_list: { entries: [{ id: 9, time: Date.now(), method: "GET", url: "http://192.168.1.1/api", status: 200 }], captured: 1, recording: false },
+    })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_replay.execute({ id: 9 }, ctx("/tmp/gebai-cap9", { sandboxed: true }))
+    expect(r.output).toContain("URL 不允许")
+    expect(calls.some((c) => c.op === "network_replay")).toBe(false)
+  })
+  test("capture_replay disables redirect following and surfaces Location when sandboxed", async () => {
+    const { bridge, calls } = recordingBridge({
+      network_list: { entries: [{ id: 5, time: Date.now(), method: "GET", url: "https://api.example.com/a", status: 200 }], captured: 1, recording: false },
+      network_replay: { status: 302, headers: { location: "https://api.example.com/b" }, location: "https://api.example.com/b", body: "" },
+    })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_replay.execute({ id: 5 }, ctx("/tmp/gebai-cap10", { sandboxed: true }))
+    expect(r.output).toContain("Location: https://api.example.com/b")
+    expect(calls.at(-1)?.args.followRedirects).toBe(false)
+  })
+
+  test("capture_curl builds command from raw request", async () => {
+    const { bridge, calls } = recordingBridge({ network_raw: { method: "POST", url: "https://a.com/x", headers: { "content-type": "application/json" }, postData: "{}" } })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_curl.execute({ id: 2, lang: "python" }, ctx("/tmp/gebai-cap11"))
+    expect(r.output).toContain("import requests")
+    expect(calls[0]).toMatchObject({ op: "network_raw", args: { id: 2 } })
+  })
+  test("capture_curl validates lang", async () => {
+    const { bridge } = recordingBridge({ network_raw: {} })
+    const tools = createCaptureTools({ bridge })
+    const r = await tools.capture_curl.execute({ id: 2, lang: "wget" }, ctx("/tmp/gebai-cap12"))
+    expect(r.output).toContain("curl/fetch/python")
+  })
+})
+
 describe("reverse_site def", () => {
   test("name/tools conform to namespace rules", () => {
     expect(reverseSiteDef.name).toMatch(/^[a-z0-9_]+$/)
@@ -226,7 +314,7 @@ describe("reverse_site def", () => {
   })
   test("依赖 playwright（自动连带装载）：只声明接口逆向独有工具，不复刻 playwright/全局工具", () => {
     const names = Object.keys(reverseSiteDef.tools ?? {})
-    for (const t of ["http_request", "capture_start", "capture_stop", "capture_clear", "capture_list"]) {
+    for (const t of ["http_request", "capture_start", "capture_stop", "capture_clear", "capture_list", "capture_body", "capture_replay", "capture_curl", "capture_har", "capture_ws", "route"]) {
       expect(names).toContain(t)
     }
     // 浏览器自动化全套经 dependencies 连带装载（playwright_ 命名空间）；文件/编排工具走全局名——本 def 不重复声明
@@ -234,7 +322,10 @@ describe("reverse_site def", () => {
       expect(names).not.toContain(t)
     }
     expect(reverseSiteDef.dependencies).toEqual(["playwright"])
-    expect(reverseSiteDef.requiresApproval).toMatchObject({ http_request: true })
+    // 真实凭证/直连探测类需审批；capture_body/har/ws/route(list/clear) 只读免审批
+    expect(reverseSiteDef.requiresApproval).toMatchObject({ http_request: true, capture_replay: true, capture_curl: true })
     expect(reverseSiteDef.requiresApproval?.open).toBeUndefined() // 审批映射由 playwright def 单源维护
+    expect((reverseSiteDef.tools?.route.requiresApproval as (args: Record<string, unknown>) => boolean)({ action: "add", pattern: "**" })).toBe(true)
+    expect((reverseSiteDef.tools?.route.requiresApproval as (args: Record<string, unknown>) => boolean)({ action: "list" })).toBe(false)
   })
 })
