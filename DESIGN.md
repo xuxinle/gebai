@@ -1005,7 +1005,7 @@ export const preload = false
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
 |---------|------|------|--------|------|
 | `code` | 独有工具 search_symbols/analyze/git/preview_server/env_detect/system_info（文件读写查询与交互编排复用**全局工具**——read/write/edit/patch/sh/py/ls/grep/glob/file/diff/fetch_url/ask/todo/agent_run，带 project 参数路由项目，不重复注册） | 无（全局工具维持自身姿态） | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析与符号双模式搜索（定义 + 引用/调用点）、git 只读核对（status/diff/log/show/branch/ls-files/grep）、浏览器端验证委托、项目内置、验证服务（自全局下沉 preview_server）与环境/工具链探测（env_detect/system_info）；文件读写/补丁应用/待办规划/方案确认经全局工具完成） |
-| `self_optimize` | 独有工具 read_feedback/run_tests/rollback/journal/page_capture；**通用工具与工作流直接复用**（装载/`agent_run` 预加载均连带 code——文件读写用全局工具、分析/验证类操作用 `code_*` 独有工具（含 code_preview_server），code 工作流提示词随连带装载注入，不重复注册；视觉分析用全局 `vision`——主会话恒有、新会话随全局工具继承，def 不复刻）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经全局工具与 code；特有：反馈读取、测试准入（test/typecheck/lint 三件套）+回滚（含新建文件清理）、优化日志跨会话沉淀、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析（全局 vision）、写范围守卫；**装载即连带装载 code**） |
+| `self_optimize` | 独有工具 read_feedback/run_tests/rollback/journal/backlog/page_capture；**通用工具与工作流直接复用**（装载/`agent_run` 预加载均连带 code——文件读写用全局工具、分析/验证类操作用 `code_*` 独有工具（含 code_preview_server），code 工作流提示词随连带装载注入，不重复注册；视觉分析用全局 `vision`——主会话恒有、新会话随全局工具继承，def 不复刻）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经全局工具与 code；特有：反馈读取、测试准入（test/typecheck/lint 三件套）+回滚（含新建文件清理）、优化日志跨会话沉淀、待优化项暂存与集中全面优化（backlog 离线优化——知识/工具不足导致重复试错时先暂存后集中处理）、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析（全局 vision）、写范围守卫；**装载即连带装载 code**） |
 | `widgets` | save/list/get/delete | delete（公用/私有删除均需审批） | ✗ | HTML 小工具库增删改查（自全局 save_tool/delete_tool 下沉并补齐：保存/清单/读取源码/删除；四工具限实时前端 interaction=realtime；与模型工具语义区分——小工具是「小工具」面板加载的页面组件） |
 | `explore` | 独有工具 search_symbols/analyze/git（全部只读，支持 project 参数路由；文件读取检索复用全局只读工具） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行（默认继承全局工具），返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
 | `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_read/screen_info | window_*+type/key/mouse | ✗ | 桌面控制（截图/窗口/输入/剪贴板/屏幕信息，仅本地模式） |
@@ -1041,7 +1041,9 @@ Agent 通过修改**自身代码**来持续改进自己，不使用记忆（memo
 #### 优化闭环
 
 ```
-发现改进点（用户反馈/失败案例/日志分析/自身复盘；开工先 self_optimize_journal 查历史避坑）
+发现改进点（用户反馈/失败案例/日志分析/自身复盘；任务执行中重复试错低效而不便立即优化的，
+    先 self_optimize_backlog add 暂存问题+方向（自动记会话ID），后续 list 取清单集中全面优化；
+    开工先 self_optimize_journal 查历史避坑）
     → 生成修改方案（改动点清单 + 预期效果）
     → 审批（需用户确认，高风险改动用/approval）
     → 由 self_optimize 子Agent 修改代码（专用子Agent，见下；新建/修改子Agent 后立即验证注册——
@@ -1059,12 +1061,12 @@ Agent 通过修改**自身代码**来持续改进自己，不使用记忆（memo
 
 #### `self_optimize` 专用子Agent
 
-自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 声明 `dependencies: ["code"]`（依赖自动装载，见「子Agent 依赖与自动装载」），只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、优化日志、页面捕获），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**；视觉分析用全局 `vision`（主会话恒有、新会话随全局工具继承，def 不复刻）：
+自我优化由独立子Agent `self_optimize` 承担（与 `code` 拆分，见「职责边界」）。**工具与提示词直接复用 `code`**——def 声明 `dependencies: ["code"]`（依赖自动装载，见「子Agent 依赖与自动装载」），只声明 `code` 没有的独有能力（反馈读取、测试准入、回滚、优化日志、待优化暂存、页面捕获），通用编码能力（文件/分析/修改/验证工具与「规划→探索→定位→方案→修改→验证→收尾」工作流）由连带装载/预加载的 `code` 提供（验证服务 `preview_server` 亦经 code 的 `code_preview_server` 获得），**不重复注册工具、不复刻提示词**；视觉分析用全局 `vision`（主会话恒有、新会话随全局工具继承，def 不复刻）：
 
 ```ts
 export const name = "self_optimize"
-export const description = "优化歌白自身（……测试是准入凭证，run_tests 工具支持 test/typecheck/lint 三件套……测试失败可 rollback 回滚（含新建文件清理），优化历史经 self_optimize_journal 跨会话沉淀……）"
-export const tools: ToolSet = { read_feedback, run_tests, rollback, journal, page_capture }
+export const description = "优化歌白自身（自身代码/子Agent/提示词/配置；外部项目用 code）……知识/工具不足或错误重复试错、低效时也装载：不便立即优化先 self_optimize_backlog add 暂存，后续集中全面优化……修改须过测试（run_tests）并同步 DESIGN.md，失败可 rollback 回滚，优化历史经 self_optimize_journal 沉淀。"
+export const tools: ToolSet = { read_feedback, run_tests, rollback, journal, backlog, page_capture }
 export const requiresApproval = { run_tests: true, rollback: true }
 export const preload = false          // 按需装载，非默认注入
 export const dependencies = ["code"]  // 依赖自动装载：装载/预加载时连带装载 code（工具与工作流提示词复用）
@@ -1083,15 +1085,16 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **写范围守卫（`SubAgentDef.writeGuard`，代码级强制而非仅提示词）**：def 声明 `writeGuard(env, absPaths)`，引擎注入 `ToolContext.writeGuard`——文件写类工具（`write`/`edit`/`patch`/`file`（rename/move/delete 动作，move/rename 校验源与目标两路径））写入前以**解析后的绝对路径**调用，返回非空字符串即拒绝（作为工具结果返回引导模型调整，不抛错不落盘）。**装载模式按会话装载名单动态收集**（`sessionWriteGuard`：调用时点读会话 `loadedSubAgents`，任务中途 `agent_load` 装载后立即生效）、**新会话模式按预加载名单静态组合**（`defsWriteGuard`）——两个路径一致生效（旧实现仅新会话路径有守卫，装载路径因工具去重丢失守卫副本，现已修复）。政策内容：**默认只读模式仅允许写入 子Agent 目录（`packages/server/src/sub-agents/`）与仓库级文档/配置（`DESIGN.md`/`AGENTS.md`/`.env.example`/`README.md`/`kilo.json`）**，核心引擎源码（`core/`/`app`/`ws` 等）拒绝写入（返回拒绝说明引导改用子Agent 扩展或开启开关）；`GEBAI_SELF_MODIFY=true`（启动级环境变量）放开到仓库内任意路径；仓库根解析：`SELF_OPTIMIZE_PROJECT` 优先，dev 模式按模块路径推导，二进制模式必须显式配置；**守卫只保护歌白仓库**——仓库根之外的常规写入（会话 `tmp/` 产物等）不受限（守卫目的是保护服务端源码，不约束无关产物）。**边界（脚本通道不拦）**：守卫拦截的是文件写类工具，`sh`/`py` 脚本内的重定向/写文件不经守卫——防线为「sh 写类命令默认需审批（免审白名单仅只读/测试类，见「工具审批」）+ 提示词明令禁止经脚本写仓库文件」；`GEBAI_APPROVAL_SKIP=true` 跳过审批时仅剩提示词约束（操作者自担）
 - **测试准入 + 回滚工具**：`run_tests`（在仓库根执行验证，需审批）——**`checks` 参数选择检查项**（`["test"]` 缺省：`bun test` 指定文件或 `bun run test` 全量；`["test","typecheck","lint"]` 三件套与 AGENTS.md 提交准入一致，**一次审批跑全**，按序执行首项失败即停，超时 10 分钟）；输出**始终合并 stdout+stderr**（bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然），只取 stdout 会丢失「跑了哪些用例、几个 pass」——准入判定看 exit code，明细供人核验）；`rollback`（恢复被修改的 tracked 文件 + **删除新建的 untracked 文件**，需审批）——新文件是自我修改的主要产物（如新建子Agent），`git checkout` 只恢复 tracked、残留会被热加载注册为破损 Agent，故先 `git clean -nd` dry-run 列出将删除的新建文件（输出如实展示）再 `git clean -fd` 清理；checkout 对新建文件本就无可恢复（pathspec 不匹配属预期，不报错）；两者 files/paths 路径参数**校验前置**（含引号/shell 元字符/百分号的条目直接拒绝——审批界面展示的是参数而非拼好的命令，不设防的拼接会把注入带过审批门），合法条目双引号包裹拼入命令（空格路径保持单参数）；文件写入经全局 write/edit/patch（默认免审批，受防盲写守卫约束），sh/py 走工具自身动态审批（默认需审批、`approval` 参数按次免审，见「工具审批」）
 - **优化日志（`self_optimize_journal`，跨会话优化记忆）**：`append` 记录一次优化（title 必填 + changes 改动清单 + verification 验证方式与结果 + outcome applied/reverted/failed + lessons 经验教训）、`list` 读最近记录（limit 默认 10，新→旧）——**变更管理的补丁记录落地**：git 历史只记代码变更，journal 补「为什么改 + 验证结果 + 教训」，后续优化任务开工先查历史不重复踩坑（提示词固定引导：开工 list、收尾 append）；存储 `users/{user}/self-optimize-journal.json`（与 ws-journal 同位的 gitignored 运行时数据），环形保留最近 100 条，损坏/首次从空开始
+- **待优化暂存清单（`self_optimize_backlog`，离线优化）**：任务执行中因自身知识/工具不足或错误导致重复试错、低效，而不便中断当前任务深入优化时 `add` 暂存（problem 问题现象必填 + direction 优化方向；session_id 缺省自动记当前会话，供后续回溯完整上下文）——**优化时机后移、证据先落盘，不打断当前任务**；后续执行全面优化时 `list` 取待优化项清单（旧→新）按主题归并逐项处理（需更多上下文可读来源会话记录 `users/{user}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json`——本地模式可读，沙箱部署模式会话文件不可读时以暂存文本为准），完成后 `resolve ids=[…]` 移除（优化记录本身仍由 journal append 承载）；存储 `users/{user}/self-optimize-backlog.json`（与 journal 同位的 gitignored 运行时数据），解决即移除、**不设环形上限**（暂存项是待办不是历史，静默淘汰会丢待办）；触发引导内置于 def description——总Agent 任务执行中重复试错低效时装载 self_optimize 暂存或直接优化
 - **验证服务（`preview_server`，经 code 命名空间 `code_preview_server` 使用）**：临时新端口独立进程（不中断当前会话），用于服务端功能类修改的验证；UI/前端类修改优先走 `page_capture` 当前页面验证
-- **工作流**：通用段（规划→探索→定位→方案→修改→验证→收尾）直接遵循 code 提示词（探索段 grep/analyze/search_symbols 分工、修改段 patch 优先等见「code」章节）；特有段：反馈输入（`self_optimize_read_feedback`）+ 开工查优化日志（`self_optimize_journal list` 相关历史与教训）→ **设计同步铁律**（任何行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 `DESIGN.md` 对应章节）→ 修改（范围由写范围守卫代码级强制；**仓库写入一律用 write/edit/patch 文件工具，禁止经 sh/py 脚本绕过守卫**；新建/修改子Agent 后立即验证注册——失败错误附带载原因）→ 验证（`run_tests` 测试准入，确认后 checks 三件套，失败 `rollback` 回滚（恢复修改 + 删除新建文件））→ 用户验证（UI 类 `page_capture`、服务端类 `preview_server`）→ 收尾（`git` 只读核对、不擅自 commit、`self_optimize_journal append` 记录、总结先结论后细节）
+- **工作流**：通用段（规划→探索→定位→方案→修改→验证→收尾）直接遵循 code 提示词（探索段 grep/analyze/search_symbols 分工、修改段 patch 优先等见「code」章节）；特有段：反馈输入（`self_optimize_read_feedback`）+ 开工查优化日志（`self_optimize_journal list` 相关历史与教训）与待优化清单（`self_optimize_backlog list`——有积压且本次目标就是优化时以此为工作清单）+ 离线优化（任务执行中重复试错低效不便立即优化的先 `backlog add` 暂存，后续集中全面优化）→ **设计同步铁律**（任何行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 `DESIGN.md` 对应章节）→ 修改（范围由写范围守卫代码级强制；**仓库写入一律用 write/edit/patch 文件工具，禁止经 sh/py 脚本绕过守卫**；新建/修改子Agent 后立即验证注册——失败错误附带载原因）→ 验证（`run_tests` 测试准入，确认后 checks 三件套，失败 `rollback` 回滚（恢复修改 + 删除新建文件））→ 用户验证（UI 类 `page_capture`、服务端类 `preview_server`）→ 收尾（`git` 只读核对、不擅自 commit、`self_optimize_journal append` 记录、解决了待优化项的 `self_optimize_backlog resolve` 移除、总结先结论后细节）
 - **与 `code` 的差异**：
   - 工作区：服务端源码（`packages/server/src/sub-agents/` 等，`GEBAI_SELF_MODIFY` 开启时更宽） vs 会话 `tmp/` 外部项目
   - 审批：自我优化改动影响所有用户，默认更严格（改动子Agent 定义即影响全局能力）
   - 预加载：`preload = false`，避免普通对话中总Agent 误用自我修改能力
 - **协作边界**：`self_optimize` 可经 `agent_run` 委托 `playwright` 做外部 URL（如 `preview_server` 页面）的浏览器验证；`code` 不得反向委托 `self_optimize`（防经子Agent 链间接获得服务端修改能力），**写权限仅限服务端允许范围**
 
-- **改进点来源**：用户反馈（见「用户反馈」）、审批拒绝原因、工具执行失败、任务超时/中断日志、用户显式指令（如「你下次不要再…」）
+- **改进点来源**：用户反馈（见「用户反馈」）、审批拒绝原因、工具执行失败、任务超时/中断日志、用户显式指令（如「你下次不要再…」）、任务执行中自身重复试错（知识/工具不足或错误导致的低效——description 引导总Agent 装载 self_optimize 直接优化，不便立即优化的先 `self_optimize_backlog add` 暂存）
 - **变更管理**：每次自我修改经 `self_optimize_journal` 生成补丁记录（title/changes/verification/outcome/lessons，`users/{user}/self-optimize-journal.json` 环形 100 条，可 list 查看）；回滚走 `rollback` 工具（恢复修改 + 删除新建文件）；代码版本控制（git）即代码层优化历史，journal 补「为什么改 + 验证结果 + 教训」的决策层历史
 - **生效方式**：
   - 脚本调试模式：**子Agent 定义热加载**（见「子Agent 热加载」）——新增/修改/删除子Agent 文件在下一次装载/新任务前即时生效（self_optimize 改完子 Agent 后当会话内即可 `agent_run` 验证成果）；核心引擎源码修改仍需重启进程生效

@@ -5,15 +5,16 @@ import { isBinaryMode } from "../core/base/config"
 
 export const name = "self_optimize"
 export const description =
-  "优化歌白自身（涉及本 Agent 自身代码/子Agent/提示词/配置时加载）：改进定义、修复缺陷、验证修改。输入：改进点/失败案例/反馈（可经 self_optimize_read_feedback 工具读取用户反馈）；输出：代码修改方案与验证结果；修改必须通过相关测试（测试是准入凭证，run_tests 工具支持 test/typecheck/lint 三件套）并同步 DESIGN.md，测试失败可 rollback 回滚（含新建文件清理），优化历史经 self_optimize_journal 跨会话沉淀。不处理外部项目（外部代码用 code）。"
+  "优化歌白自身（自身代码/子Agent/提示词/配置；外部项目用 code）：改进定义、修复缺陷、验证修改。任务中因知识/工具不足或错误重复试错、低效时也装载：不便立即优化的先 self_optimize_backlog add 暂存问题与方向，后续集中全面优化。输入：改进点/失败案例/用户反馈（self_optimize_read_feedback）；修改须过测试（run_tests）并同步 DESIGN.md，失败可 rollback 回滚，优化历史经 self_optimize_journal 沉淀。"
 export const systemPrompt =
   "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内）；文件读写查询（read/write/edit/patch/grep/sh 等）为全局工具直接用全局名（带 project 参数路由项目），分析/验证类工具由 code 提供（search_symbols/analyze/git/preview_server，以 code_ 前缀调用）；本提示词只补充自我优化特有的流程与约束：\n" +
-  "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；开工先用 self_optimize_journal action=list 查相关历史与教训（跨会话优化记忆，不重复踩坑）；\n" +
-  "2) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；写仓库文件一律用 write/edit/patch 文件工具（写范围守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（守卫不拦脚本通道，绕行属违规且绕开防盲写保护）；新建/修改子Agent 文件后立即验证注册（agent_run 试跑或 agent_list 查看——注册失败会直接返回文件加载错误原因，据因修复后再验）；\n" +
-  "3) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；\n" +
-  "4) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
-  "5) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision 分析截图，确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
-  "6) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal 记录本次优化（title/changes/verification/outcome/lessons——优化历史跨会话沉淀）；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
+  "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；开工先用 self_optimize_journal action=list 查相关历史与教训（跨会话优化记忆，不重复踩坑），并 self_optimize_backlog action=list 查待优化暂存项（任务执行中暂存的改进点——有积压且本次目标就是优化时以此为工作清单，见 2)）；\n" +
+  "2) 离线优化（暂存 → 集中全面优化）：任务执行中因自身知识/工具不足或错误导致重复试错、低效（多次失败重试、工具用法反复出错、缺关键工具/子Agent），而当前任务不便中断深入优化时——先把问题暂存：self_optimize_backlog action=add（problem 问题现象 + direction 优化方向，会话ID自动记录供回溯），随即继续当前任务；后续执行全面优化时 action=list 取待优化项清单，按主题归并逐项优化（需更多上下文可读来源会话记录 {GEBAI_HOME}/users/{用户}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json——本地模式可读；沙箱部署模式会话文件不可读时以暂存的问题/方向文本为准），每项优化完成后 journal append 记录、backlog action=resolve ids=[编号] 移除；\n" +
+  "3) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；写仓库文件一律用 write/edit/patch 文件工具（写范围守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（守卫不拦脚本通道，绕行属违规且绕开防盲写保护）；新建/修改子Agent 文件后立即验证注册（agent_run 试跑或 agent_list 查看——注册失败会直接返回文件加载错误原因，据因修复后再验）；\n" +
+  "4) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；\n" +
+  "5) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
+  "6) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision 分析截图，确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
+  "7) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal 记录本次优化（title/changes/verification/outcome/lessons——优化历史跨会话沉淀）；本次解决了待优化项的，self_optimize_backlog action=resolve ids=[编号] 一并移除；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
   "项目名称：歌白（GEBAI Agent）。项目范围：项目根以系统提示词动态注记「项目根:」为准——设置了 SELF_OPTIMIZE_PROJECT 环境变量时即该路径（服务端部署限定项目内，本地模式不限制目录）；未设置时脚本调试（dev）模式自动推导为歌白源码仓库根（与 run_tests/rollback 工作目录及写范围守卫同源，提示词注记给出具体路径）；二进制模式未配置且无注记时按用户给定的路径处理。"
 
 /** 默认只读模式下允许写入的仓库级文件（根一级）。 */
@@ -231,6 +232,86 @@ const journalTool: import("../core/base/types").Tool = {
   },
 }
 
+/** 待优化暂存条目（离线优化暂存态：问题 + 方向 + 来源会话，解决即移除——优化记录由 journal 承载）。 */
+interface OptimizeBacklogItem {
+  id: number
+  at: number
+  problem: string
+  direction?: string
+  session: string
+}
+
+/** 待优化暂存清单存储：users/{user}/self-optimize-backlog.json（与 journal 同位的 gitignored 运行时数据）。
+ *  条目解决即移除、不设环形上限——暂存项是待办不是历史，静默淘汰会丢待办。 */
+const BACKLOG_FILE = "self-optimize-backlog.json"
+
+/** backlog：待优化项暂存清单（离线优化）——任务执行中因知识/工具不足或错误导致重复试错、低效而不便
+ *  立即中断当前任务时，先把问题与优化方向暂存（会话ID自动记录，供后续回溯完整上下文），优化时机后移、
+ *  证据先落盘；后续集中查看待优化项执行全面优化，解决后 resolve 移除。 */
+const backlogTool: import("../core/base/types").Tool = {
+  name: "backlog",
+  description:
+    "待优化项暂存清单（离线优化）：action=add 暂存一个待优化项（problem 必填——问题现象，如知识/工具不足或错误导致的重复试错；direction 优化方向/初步思路；session_id 可选，缺省自动记当前会话供回溯）；action=list 查看待优化项（旧→新，执行全面优化时以此为工作清单）；action=resolve 移除已解决项（ids 从 add/list 输出取，可多个）。任务执行中不便立即优化时先暂存不打断当前任务，后续集中全面优化。",
+  parameters: schema({
+    action: { type: "string", enum: ["add", "list", "resolve"], description: "add=暂存待优化项；list=查看待优化项；resolve=移除已解决项" },
+    problem: { type: "string", description: "问题现象（add 必填：什么知识/工具不足或错误导致了什么低效，如工具用法反复出错重试多次、缺关键工具）" },
+    direction: { type: "string", description: "优化方向（初步思路：改哪个子Agent/提示词/工具、怎么改）" },
+    session_id: { type: "string", description: "问题来源会话 ID（缺省自动取当前会话，供后续回溯完整上下文）" },
+    ids: { type: "array", items: { type: "number" }, description: "resolve 要移除的待优化项编号列表（从 add/list 输出取）" },
+  }),
+  async execute(args, ctx) {
+    const { join, dirname } = await import("node:path")
+    const { mkdir } = await import("node:fs/promises")
+    const file = join(ctx.home, "users", ctx.user, BACKLOG_FILE)
+    let items: OptimizeBacklogItem[] = []
+    try {
+      const parsed = JSON.parse(await Bun.file(file).text())
+      if (Array.isArray(parsed)) items = parsed.filter((e) => e && typeof e === "object" && typeof e.problem === "string")
+    } catch {
+      /* 首次暂存或文件损坏：从空开始 */
+    }
+    const action = String(args.action ?? "list")
+    if (action === "add") {
+      const problem = String(args.problem ?? "").trim()
+      if (!problem) return { output: "backlog add 需要 problem（说清问题现象：什么知识/工具不足或错误导致了什么低效）。" }
+      const id = items.reduce((max, e) => Math.max(max, e.id || 0), 0) + 1
+      const item: OptimizeBacklogItem = { id, at: Date.now(), problem, session: String(args.session_id ?? ctx.sessionId ?? "") }
+      const direction = String(args.direction ?? "").trim()
+      if (direction) item.direction = direction
+      items.push(item)
+      await mkdir(dirname(file), { recursive: true })
+      await Bun.write(file, JSON.stringify(items, null, 2))
+      return {
+        output:
+          `已暂存待优化项 #${id}（共 ${items.length} 项待处理）：${problem}${direction ? `（方向：${direction}）` : ""}\n` +
+          `不打断当前任务继续执行；后续 self_optimize_backlog action=list 查看全部待优化项，集中执行全面优化。`,
+      }
+    }
+    if (action === "resolve") {
+      const ids = new Set((Array.isArray(args.ids) ? args.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0))
+      if (!ids.size) return { output: "backlog resolve 需要 ids（要移除的待优化项编号，从 add/list 输出取，可多个）。" }
+      const kept = items.filter((e) => !ids.has(e.id))
+      const resolved = items.length - kept.length
+      if (!resolved) return { output: `未找到编号 ${[...ids].join("/")} 对应的待优化项（action=list 查看当前清单）。` }
+      await Bun.write(file, JSON.stringify(kept, null, 2))
+      return { output: `已移除 ${resolved} 项已解决的待优化项，剩余 ${kept.length} 项待处理。优化过程请同步 self_optimize_journal append 记录。` }
+    }
+    if (action !== "list") return { output: `无效的 action: ${action}（仅支持 add/list/resolve）。` }
+    if (!items.length) return { output: "（暂无待优化项）" }
+    const fmt = (e: OptimizeBacklogItem) => {
+      const lines = [`#${e.id} [${new Date(e.at).toLocaleString("zh-CN")}] ${e.problem}`]
+      if (e.direction) lines.push(`  方向: ${e.direction}`)
+      if (e.session) lines.push(`  会话: ${e.session}`)
+      return lines.join("\n")
+    }
+    return {
+      output:
+        `待优化项（旧→新，共 ${items.length} 项）:\n\n${items.map(fmt).join("\n\n")}\n\n` +
+        `执行全面优化：按主题归并逐项处理，完成后 action=resolve ids=[编号] 移除。`,
+    }
+  },
+}
+
 function schema(properties: Record<string, unknown>, required: string[] = []): import("@gebai/sdk").ToolSchema {
   return { type: "object", properties, required }
 }
@@ -247,6 +328,7 @@ export const tools = {
   run_tests: runTestsTool,
   rollback: rollbackTool,
   journal: journalTool,
+  backlog: backlogTool,
   page_capture: pageCaptureTool,
 }
 export const requiresApproval = { run_tests: true, rollback: true }

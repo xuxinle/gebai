@@ -58,9 +58,9 @@ function cleanup(home: string) {
 describe("self_optimize sub-agent", () => {
   test("工具集只含 code 没有的独有工具（复用 code 通用能力，不重复注册）", () => {
     const names = Object.keys(selfOptimizeDef.tools!)
-    // 独有能力：反馈读取、测试准入、回滚、页面捕获（preview_server 已并入 code 随连带装载获得；
+    // 独有能力：反馈读取、测试准入、回滚、待优化暂存、页面捕获（preview_server 已并入 code 随连带装载获得；
     // 视觉分析为全局工具 vision——index.ts 注册、新会话随全局工具继承，def 不复刻）
-    for (const t of ["read_feedback", "run_tests", "rollback", "page_capture"]) {
+    for (const t of ["read_feedback", "run_tests", "rollback", "backlog", "page_capture"]) {
       expect(names).toContain(t)
     }
     expect(names).not.toContain("vision")
@@ -292,6 +292,53 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     // 缺 title 拒绝
     const noTitle = await selfOptimizeDef.tools!.journal.execute({ action: "append" }, c)
     expect(noTitle.output).toContain("需要 title")
+    cleanup(home)
+  })
+
+  test("backlog 待优化暂存清单（离线优化）：add 暂存（会话ID自动记/可覆盖）→ list 查看 → resolve 移除", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-backlog-"))
+    const c = ctx(home) // ctx 的 sessionId 为 "s1"
+    const empty = await selfOptimizeDef.tools!.backlog.execute({ action: "list" }, c)
+    expect(empty.output).toContain("暂无待优化项")
+    // add：problem 必填 + direction 可选 + 会话ID 缺省自动取当前会话
+    const r1 = await selfOptimizeDef.tools!.backlog.execute(
+      { action: "add", problem: "playwright 选择器用法反复出错重试 5 次", direction: "提示词补选择器规范" },
+      c,
+    )
+    expect(r1.output).toContain("已暂存待优化项 #1")
+    expect(r1.output).toContain("共 1 项待处理")
+    // session_id 显式覆盖（问题来源会话与当前会话不同的场景）
+    await selfOptimizeDef.tools!.backlog.execute({ action: "add", problem: "缺 PDF 合并工具", session_id: "ab12cd34" }, c)
+    const list = await selfOptimizeDef.tools!.backlog.execute({ action: "list" }, c)
+    expect(list.output).toContain("共 2 项")
+    expect(list.output).toContain("选择器用法反复出错重试 5 次")
+    expect(list.output).toContain("方向: 提示词补选择器规范")
+    expect(list.output).toContain("会话: s1") // 自动记录
+    expect(list.output).toContain("会话: ab12cd34") // 显式覆盖
+    // 落盘位置：users/{user}/self-optimize-backlog.json（与 journal 同位）
+    expect(existsSync(join(home, "users", "default", "self-optimize-backlog.json"))).toBe(true)
+    // resolve：移除指定编号，剩余保留
+    const done = await selfOptimizeDef.tools!.backlog.execute({ action: "resolve", ids: [1] }, c)
+    expect(done.output).toContain("已移除 1 项")
+    const after = await selfOptimizeDef.tools!.backlog.execute({ action: "list" }, c)
+    expect(after.output).toContain("共 1 项")
+    expect(after.output).not.toContain("选择器用法反复出错")
+    expect(after.output).toContain("缺 PDF 合并工具")
+    // resolve 不存在的编号：无匹配不动清单
+    const miss = await selfOptimizeDef.tools!.backlog.execute({ action: "resolve", ids: [99] }, c)
+    expect(miss.output).toContain("未找到编号 99")
+    // 缺参与无效 action
+    const noProblem = await selfOptimizeDef.tools!.backlog.execute({ action: "add" }, c)
+    expect(noProblem.output).toContain("需要 problem")
+    const noIds = await selfOptimizeDef.tools!.backlog.execute({ action: "resolve" }, c)
+    expect(noIds.output).toContain("需要 ids")
+    const bad = await selfOptimizeDef.tools!.backlog.execute({ action: "xx" }, c)
+    expect(bad.output).toContain("无效的 action")
+    // 描述与提示词含离线优化引导（触发场景 + 暂存→全面优化流程）
+    expect(selfOptimizeDef.description).toContain("重复试错")
+    expect(selfOptimizeDef.description).toContain("self_optimize_backlog")
+    expect(selfOptimizeDef.systemPrompt).toContain("离线优化（暂存 → 集中全面优化）")
+    expect(selfOptimizeDef.systemPrompt).toContain("action=resolve")
     cleanup(home)
   })
 })
