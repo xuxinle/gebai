@@ -69,6 +69,13 @@ export function setCurrentSession(s: SessionInfo | null): void {
     } catch {
       /* 存储不可用（隐私模式/配额满）时静默忽略，不中断会话切换 */
     }
+  } else {
+    // 草稿态（进入空白页/登出）清除记忆的会话：刷新后保持空白草稿页，而非跳回进入草稿前的旧会话
+    try {
+      localStorage.removeItem(SESSION_KEY)
+    } catch {
+      /* 同上：存储不可用静默忽略 */
+    }
   }
 }
 /** 上次浏览的会话 id（刷新恢复用；会话可能已删除，调用方需回退）。 */

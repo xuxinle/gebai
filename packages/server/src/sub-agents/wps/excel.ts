@@ -73,12 +73,12 @@ function assignCellValue(cell: Cell, v: unknown): void {
   cell.value = v as string | number | boolean | Date
 }
 
-/** 单元格样式：bold/italic/fontSize/color（字色）/fill（底色）/align/valign/wrap/numberFormat/border。 */
+/** 单元格样式：bold/italic/font_size/color（字色）/fill（底色）/align/valign/wrap/number_format/border（驼峰兜底读）。 */
 function applyCellStyle(cell: Cell, s: Record<string, unknown>): void {
   const font: Record<string, unknown> = {}
   if (s.bold === true) font.bold = true
   if (s.italic === true) font.italic = true
-  if (s.fontSize != null) font.size = asNum(s.fontSize, 11)
+  if (s.font_size != null || s.fontSize != null) font.size = asNum(s.font_size ?? s.fontSize, 11)
   const color = normColor(s.color)
   if (color) font.color = { argb: `FF${color}` }
   if (Object.keys(font).length) cell.font = font
@@ -89,7 +89,8 @@ function applyCellStyle(cell: Cell, s: Record<string, unknown>): void {
   if (s.valign === "top" || s.valign === "middle" || s.valign === "bottom") align.vertical = s.valign
   if (s.wrap === true) align.wrapText = true
   if (Object.keys(align).length) cell.alignment = align
-  if (typeof s.numberFormat === "string" && s.numberFormat) cell.numFmt = s.numberFormat
+  const numberFormat = (s.number_format ?? s.numberFormat) as unknown
+  if (typeof numberFormat === "string" && numberFormat) cell.numFmt = numberFormat
   if (s.border === true) cell.border = { top: THIN_BORDER, left: THIN_BORDER, bottom: THIN_BORDER, right: THIN_BORDER }
 }
 
@@ -198,9 +199,9 @@ export const excelReadTool: Tool = {
       path: { type: "string", description: "表格路径（.xlsx/.csv/.tsv）" },
       sheet: { type: "string", description: "工作表名或 1 起始序号（缺省返回概览）" },
       range: { type: "string", description: "区域裁剪：A1:D20 或 A:D（列区间）" },
-      maxRows: { type: "integer", description: "最多读取行数（默认 200，截断时尾部有提示）" },
+      max_rows: { type: "integer", description: "最多读取行数（默认 200，截断时尾部有提示）" },
       formulas: { type: "boolean", description: "true 显示公式原文（=SUM(...)），默认显示计算值" },
-      format: { type: "string", description: "输出格式 markdown（默认）/json（rows 数组入 data，供 flow 编排）/csv" },
+      format: { type: "string", description: "输出格式 markdown（默认）/json（rows 数组入 data，供 js 编排）/csv" },
     },
     ["path"],
   ),
@@ -215,7 +216,7 @@ export const excelReadTool: Tool = {
     const ext = /\.([a-z0-9]+)$/i.exec(abs)?.[1].toLowerCase() ?? ""
     const format = args.format === "json" || args.format === "csv" ? args.format : "markdown"
     const formulas = args.formulas === true
-    const maxRows = Math.max(1, Math.round(asNum(args.maxRows, 200)))
+    const maxRows = Math.max(1, Math.round(asNum(args.max_rows, 200)))
 
     if (ext === "csv" || ext === "tsv") {
       const text = new TextDecoder("utf-8").decode(bytes)
@@ -309,14 +310,14 @@ async function renderRows(
 export const excelWriteTool: Tool = {
   name: "excel_write",
   description:
-    "创建 .xlsx 工作簿（覆盖整簿——已有文件本会话未读取过时拒绝，防盲覆盖；改局部用 excel_edit）。sheets 数组每项：{name, rows, colWidths, merges, freeze, autofilter}；单元格为标量或 {value, bold, italic, color(字色 RRGGBB), fill(底色), fontSize, align, valign, wrap, numberFormat, border, hyperlink}；字符串 = 开头自动按公式写入（如 =SUM(B2:B10)，公式不含缓存计算值——Office 打开时自动重算）。单格行可直接传对象/标量（不包数组，输出会提示）。常用 numberFormat：#,##0 / 0.00% / yyyy-mm-dd。freeze 传 \"A2\" 冻结首行；autofilter:true 自动筛选（或直接传区域）。",
+    "创建 .xlsx 工作簿（覆盖整簿——已有文件本会话未读取过时拒绝，防盲覆盖；改局部用 excel_edit）。sheets 数组每项：{name, rows, col_widths, merges, freeze, autofilter}；单元格为标量或 {value, bold, italic, color(字色 RRGGBB), fill(底色), font_size, align, valign, wrap, number_format, border, hyperlink}；字符串 = 开头自动按公式写入（如 =SUM(B2:B10)，公式不含缓存计算值——Office 打开时自动重算）。单格行可直接传对象/标量（不包数组，输出会提示）。常用 number_format：#,##0 / 0.00% / yyyy-mm-dd。freeze 传 \"A2\" 冻结首行；autofilter:true 自动筛选（或直接传区域）。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema(
     {
       path: { type: "string", description: "输出路径（.xlsx）" },
       sheets: {
         type: "array",
-        description: "工作表数组：[{name, rows: [[单元格,…],…], colWidths: [20,12], merges: [\"A1:B1\"], freeze: \"A2\", autofilter: true}]；单元格=标量或 {value, …样式}",
+        description: "工作表数组：[{name, rows: [[单元格,…],…], col_widths: [20,12], merges: [\"A1:B1\"], freeze: \"A2\", autofilter: true}]；单元格=标量或 {value, …样式}",
       },
     },
     ["path", "sheets"],
@@ -352,7 +353,8 @@ export const excelWriteTool: Tool = {
         })
         maxCol = Math.max(maxCol, row.length)
       })
-      if (Array.isArray(s.colWidths)) s.colWidths.forEach((w, i) => (ws.getColumn(i + 1).width = asNum(w, 0) || undefined))
+      const colWidths = (s.col_widths ?? s.colWidths) as unknown
+      if (Array.isArray(colWidths)) colWidths.forEach((w, i) => (ws.getColumn(i + 1).width = asNum(w, 0) || undefined))
       if (Array.isArray(s.merges)) for (const mr of s.merges) if (typeof mr === "string") ws.mergeCells(mr)
       if (typeof s.freeze === "string") {
         const ref = parseCellRef(s.freeze)

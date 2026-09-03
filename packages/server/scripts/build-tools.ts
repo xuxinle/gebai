@@ -10,7 +10,7 @@
  * 2. 生成构建期排除清单（`src/core/tools-excluded.generated.ts`）：
  *    - `GEBAI_BUILD_EXCLUDE_TOOLS`：逗号分隔的全局工具名排除清单（缺省 = 空清单，全部注册）。
  *      被排除的工具不注册进总Agent 全局工具集（schema 不可见、调用报未知工具）；agent_run 新会话
- *      内建编排工具（flow/tool_schemas/js）与 index.ts 的 vision 注册同规则过滤（isGlobalToolExcluded）。
+ *      内建编排工具（tool_schemas/js）与 index.ts 的 vision 注册同规则过滤（isGlobalToolExcluded）。
  *      语义注意：这是**能力裁剪**——工具实现与注册条目同模块，代码仍会打包（无法摇树）；体积裁剪
  *      主要来自子Agent 包含清单（GEBAI_BUILD_SUBAGENTS）与内嵌产物跳过。
  *    - 清单中的未知名字直接报错退出（防构建产物静默缺失），并列出可用名单辅助修正。

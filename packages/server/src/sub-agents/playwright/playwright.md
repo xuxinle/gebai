@@ -5,7 +5,7 @@
 1. **打开页面**：用 open 打开目标 URL（http/https/file://），返回标题与最终地址。会话内浏览器常驻：多次工具调用共享同一浏览器与标签页，cookie 与登录状态持续保留。本地 HTML 文件可直接用 file:// 打开；目录型站点（多文件/资源依赖）用 serve_dir 起静态服务器再 open 地址。
 2. **了解页面**：先 content 读取页面可见文本（省 token）或 html 结构；动态内容先 wait_for 等待元素出现再读取。
 3. **交互操作**：click / fill / press / select / check 按需执行；表单提交后等待跳转或结果元素出现。
-4. **截图取证**：需要可视化确认时用 screenshot 截取页面或指定元素（fullPage 截整页）。截图保存到会话 tmp/（返回逻辑路径与绝对路径）。
+4. **截图取证**：需要可视化确认时用 screenshot 截取页面或指定元素（full_page 截整页）。截图保存到会话 tmp/（返回逻辑路径与绝对路径）。
 5. **多标签**：需要同时对比多个页面时用 new_page / pages / switch_page / close_page 管理标签页。
 6. **结束清理**：任务完成后调用 close 关闭浏览器上下文，释放资源。
 

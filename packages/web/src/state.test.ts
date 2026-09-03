@@ -45,10 +45,20 @@ const doc = {
 ;(globalThis as Record<string, unknown>).window = globalThis
 ;(globalThis as Record<string, unknown>).navigator = { onLine: true }
 ;(globalThis as Record<string, unknown>).location = { protocol: "http:", host: "localhost" }
+// bun test 无 localStorage 全局：内存版 mock（setCurrentSession 的会话记忆读写用）
+{
+  const store = new Map<string, string>()
+  ;(globalThis as Record<string, unknown>).localStorage = {
+    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+  }
+}
 
 // headerCtxEl 经导入断言（bun test 全仓单进程共享模块缓存：state.ts 可能已被更早的测试文件以其
 // mock 的 document 先加载，模块级 DOM 引用固定为那份数据集——断言必须落在模块实际持有的元素上）
-const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, setConn, setMaxCtxTokens, headerCtxEl } = await import("./state")
+const { pendingTools, pendingToolsKey, clearPendingTools, setCurrentSession, getCurrentSession, isDraftView, lastSessionId, setConn, setMaxCtxTokens, headerCtxEl } = await import("./state")
 
 function entry(sessionId: string, _toolCallId: string) {
   return { wrapper: base as unknown as HTMLElement, body: base as unknown as HTMLElement, session: sessionId, kind: "tool" as const, name: "sh" }
@@ -68,6 +78,19 @@ describe("草稿态标志（新会话懒创建）", () => {
     setCurrentSession({ ...s, id: "def456" })
     expect(isDraftView()).toBe(false)
     setCurrentSession(null)
+  })
+
+  test("草稿态清除记忆的会话：刷新后保持空白草稿页，而非跳回旧会话", () => {
+    setCurrentSession({ id: "sess1", name: "会话", userId: "admin", createdAt: 0, updatedAt: 0 })
+    expect(lastSessionId()).toBe("sess1")
+    // 进入草稿页：清除当前会话记忆（init 刷新恢复读到空 → enterDraftView，草稿跨刷新保持）
+    setCurrentSession(null)
+    expect(lastSessionId()).toBeNull()
+    // 切换到会话重新记忆；再进草稿再清除
+    setCurrentSession({ id: "sess2", name: "会话2", userId: "admin", createdAt: 0, updatedAt: 0 })
+    expect(lastSessionId()).toBe("sess2")
+    setCurrentSession(null)
+    expect(lastSessionId()).toBeNull()
   })
 })
 

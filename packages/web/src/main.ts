@@ -29,6 +29,9 @@ import { client, compactBtn, composer, exportBtn, getCurrentSession, input, isDr
 import { onApprovalRequest, onTodoUpdate, onChoiceRequest, onEnvRequest, onDrawRender, onCaptureRequest, onToolCall, onToolResult, onMessageCompact, touchRunActivity } from "./events"
 import { consumeTaskStream } from "./stream"
 import { bindTooltips, confirmDialog } from "./ui"
+// 副作用导入（勿删）：attach.ts 向 sessions.ts 注册运行中会话附加钩子（setRunningAttach）——
+// 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
+import "./attach"
 
 /* ---------- 压缩入口 ---------- */
 

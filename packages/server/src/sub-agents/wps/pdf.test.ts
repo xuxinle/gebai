@@ -9,7 +9,7 @@ import { makeCtx, png1px } from "./test-ctx"
 /** 测试 CJK 字体 fixture：Noto Sans SC（Google Fonts TTF 版，TrueType 轮廓；SIL OFL 可再分发——许可证见 test-cjk-font.OFL.txt）经
  * 实例化常规字重 + pyftsubset 子集到测试字符集。pdf-lib 对 OTF/CFF 字体按 TrueType 位置嵌入致渲染空白，
  * 自定义字体仅支持 TrueType 轮廓（pdf.ts 检测 sfnt 版本拒绝 OTTO），fixture 须用 TTF 版。该类子集字体再经 pdf-lib 二次子集化会损坏字形（渲染空白、文本层完好），
- * 故测试统一 subsetFont:false 整字嵌入（该路径渲染/提取均正常，生产系统字体默认子集化亦经像素验证）。 */
+ * 故测试统一 subset_font:false 整字嵌入（该路径渲染/提取均正常，生产系统字体默认子集化亦经像素验证）。 */
 const MD = `# 项目报告
 
 这是**关键**段落内容，包含中文与 English 混排。
@@ -56,7 +56,7 @@ describe("pdf_create / pdf_read（markdown → PDF → 文本提取往返）", (
     const home = setup()
     const { ctx } = makeCtx(home)
     const created = await pdfCreateTool.execute(
-      { path: "report.pdf", markdown: MD, style: { baseFont: "cjk.ttf", subsetFont: false, footer: "第 {page} 页 / 共 {pages} 页", title: "测试报告" } },
+      { path: "report.pdf", markdown: MD, style: { base_font: "cjk.ttf", subset_font: false, footer: "第 {page} 页 / 共 {pages} 页", title: "测试报告" } },
       ctx,
     )
     expect(created.output).toContain("已创建")
@@ -95,7 +95,7 @@ describe("pdf_create / pdf_read（markdown → PDF → 文本提取往返）", (
 # 数据汇总
 
 汇总内容。`
-    const created = await pdfCreateTool.execute({ path: "toc.pdf", markdown: md, style: { baseFont: "cjk.ttf", subsetFont: false } }, ctx)
+    const created = await pdfCreateTool.execute({ path: "toc.pdf", markdown: md, style: { base_font: "cjk.ttf", subset_font: false } }, ctx)
     expect(created.output).toContain("已创建")
     expect(created.output).toContain("目录×1")
 
@@ -123,7 +123,7 @@ describe("pdf_create / pdf_read（markdown → PDF → 文本提取往返）", (
           { type: "table", header: ["名称", "数值"], rows: [[{ text: "合计" }], [{ text: "金额", color: "FF0000" }]], aligns: ["left", "center"], widths: [60, 40] },
           { type: "image", path: "dot.png", width: 100, height: 60 },
         ],
-        style: { baseFont: "cjk.ttf", subsetFont: false },
+        style: { base_font: "cjk.ttf", subset_font: false },
       },
       ctx,
     )
@@ -151,12 +151,12 @@ describe("pdf_create / pdf_read（markdown → PDF → 文本提取往返）", (
   test("防盲覆盖：已存在未读取时拒绝，读后放行", async () => {
     const home = setup()
     const { ctx, readSet } = makeCtx(home)
-    await pdfCreateTool.execute({ path: "guard.pdf", markdown: "# 标题内容", style: { baseFont: "cjk.ttf", subsetFont: false } }, ctx)
+    await pdfCreateTool.execute({ path: "guard.pdf", markdown: "# 标题内容", style: { base_font: "cjk.ttf", subset_font: false } }, ctx)
     readSet.clear() // 写入成功的 markRead 视为「已读」，须清空后才能验证盲覆盖拦截
-    const blind = await pdfCreateTool.execute({ path: "guard.pdf", markdown: "# 覆盖内容", style: { baseFont: "cjk.ttf", subsetFont: false } }, ctx)
+    const blind = await pdfCreateTool.execute({ path: "guard.pdf", markdown: "# 覆盖内容", style: { base_font: "cjk.ttf", subset_font: false } }, ctx)
     expect(blind.output).toContain("防盲覆盖")
     await pdfReadTool.execute({ path: "guard.pdf" }, ctx)
-    const ok = await pdfCreateTool.execute({ path: "guard.pdf", markdown: "# 覆盖内容", style: { baseFont: "cjk.ttf", subsetFont: false } }, ctx)
+    const ok = await pdfCreateTool.execute({ path: "guard.pdf", markdown: "# 覆盖内容", style: { base_font: "cjk.ttf", subset_font: false } }, ctx)
     expect(ok.output).toContain("已创建")
     const read = await pdfReadTool.execute({ path: "guard.pdf" }, ctx)
     expect(read.output).toContain("覆盖内容")
@@ -166,7 +166,7 @@ describe("pdf_create / pdf_read（markdown → PDF → 文本提取往返）", (
   test("空正文与非 CJK 字体缺失引导", async () => {
     const home = setup()
     const { ctx } = makeCtx(home)
-    const empty = await pdfCreateTool.execute({ path: "empty.pdf", style: { baseFont: "cjk.ttf", subsetFont: false } }, ctx)
+    const empty = await pdfCreateTool.execute({ path: "empty.pdf", style: { base_font: "cjk.ttf", subset_font: false } }, ctx)
     expect(empty.output).toContain("正文为空")
     const css = await pdfCreateTool.execute({ path: "x.pdf", markdown: "# 标题" }, ctx)
     // 有系统 CJK 字体则创建成功；无字体环境返回安装引导（均合法，不崩溃）
@@ -176,15 +176,15 @@ describe("pdf_create / pdf_read（markdown → PDF → 文本提取往返）", (
 })
 
 describe("pdf_read（选页/上限/错误形态）", () => {
-  test("pages 区间选页与 maxPages 截断提示", async () => {
+  test("pages 区间选页与 max_pages 截断提示", async () => {
     const home = setup()
     const { ctx } = makeCtx(home)
-    await pdfCreateTool.execute({ path: "multi.pdf", markdown: "# 第一页\n\n<!--pagebreak-->\n\n第二页内容。\n\n<!--pagebreak-->\n\n第三页内容。", style: { baseFont: "cjk.ttf", subsetFont: false } }, ctx)
+    await pdfCreateTool.execute({ path: "multi.pdf", markdown: "# 第一页\n\n<!--pagebreak-->\n\n第二页内容。\n\n<!--pagebreak-->\n\n第三页内容。", style: { base_font: "cjk.ttf", subset_font: false } }, ctx)
     const p2 = await pdfReadTool.execute({ path: "multi.pdf", pages: "2" }, ctx)
     expect(p2.output).toContain("## 第 2 页")
     expect(p2.output).not.toContain("## 第 1 页")
     expect(p2.output).toContain("第二页内容")
-    const cap = await pdfReadTool.execute({ path: "multi.pdf", maxPages: 2 }, ctx)
+    const cap = await pdfReadTool.execute({ path: "multi.pdf", max_pages: 2 }, ctx)
     expect(cap.output).toContain("已读前 2 页")
     const bad = await pdfReadTool.execute({ path: "multi.pdf", pages: "1-9" }, ctx)
     expect(bad.output).toContain("超出范围")
@@ -206,7 +206,7 @@ describe("pdf_read（选页/上限/错误形态）", () => {
 describe("pdf_merge / pdf_split", () => {
   async function make3(ctx: ReturnType<typeof makeCtx>["ctx"], path: string): Promise<void> {
     await pdfCreateTool.execute(
-      { path, markdown: "# 第一页\n\n<!--pagebreak-->\n\n第二页内容。\n\n<!--pagebreak-->\n\n第三页内容。", style: { baseFont: "cjk.ttf", subsetFont: false } },
+      { path, markdown: "# 第一页\n\n<!--pagebreak-->\n\n第二页内容。\n\n<!--pagebreak-->\n\n第三页内容。", style: { base_font: "cjk.ttf", subset_font: false } },
       ctx,
     )
   }
@@ -255,7 +255,7 @@ describe("pdf_merge / pdf_split", () => {
 describe("pdf_edit（页面操作/元数据/水印）", () => {
   async function make3(ctx: ReturnType<typeof makeCtx>["ctx"], path: string): Promise<void> {
     await pdfCreateTool.execute(
-      { path, markdown: "# 第一页\n\n<!--pagebreak-->\n\n第二页内容。\n\n<!--pagebreak-->\n\n第三页内容。", style: { baseFont: "cjk.ttf", subsetFont: false } },
+      { path, markdown: "# 第一页\n\n<!--pagebreak-->\n\n第二页内容。\n\n<!--pagebreak-->\n\n第三页内容。", style: { base_font: "cjk.ttf", subset_font: false } },
       ctx,
     )
   }

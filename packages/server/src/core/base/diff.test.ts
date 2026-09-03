@@ -206,7 +206,7 @@ function ctx(home: string, sessionId = "s1"): ToolContext {
 describe("diff tool", () => {
   test("text diff returns unified output + diff block with lines", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-diff-"))
-    const r = await diffTool.execute({ oldText: "a\nb\nc", newText: "a\nB\nc", language: "typescript", name: "重构", oldName: "重构前", newName: "重构后" }, ctx(home))
+    const r = await diffTool.execute({ old_text: "a\nb\nc", new_text: "a\nB\nc", language: "typescript", name: "重构", old_name: "重构前", new_name: "重构后" }, ctx(home))
     expect(r.output).toContain("--- old")
     expect(r.output).toContain("@@")
     expect(r.blocks?.[0].type).toBe("diff")
@@ -226,7 +226,7 @@ describe("diff tool", () => {
     const c = ctx(home)
     await writeTool.execute({ path: "src/old.ts", content: "const x = 1" }, c)
     await writeTool.execute({ path: "src/new.ts", content: "const x = 2" }, c)
-    const r = await diffTool.execute({ oldPath: "src/old.ts", newPath: "src/new.ts" }, c)
+    const r = await diffTool.execute({ old_path: "src/old.ts", new_path: "src/new.ts" }, c)
     expect(r.output).toContain("--- src/old.ts")
     expect(r.output).toContain("+++ src/new.ts")
     const b = r.blocks![0]
@@ -247,7 +247,7 @@ describe("diff tool", () => {
 
   test("mixing paths and texts reports error", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-diff-mix-"))
-    const r = await diffTool.execute({ oldText: "a", newPath: "b.ts" }, ctx(home))
+    const r = await diffTool.execute({ old_text: "a", new_path: "b.ts" }, ctx(home))
     expect(r.output).toContain("混用")
     cleanup(home)
   })
@@ -255,14 +255,14 @@ describe("diff tool", () => {
   test("oversize text reports error", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-diff-big-"))
     const big = "x\n".repeat(DIFF_MAX_LINES + 10)
-    const r = await diffTool.execute({ oldText: big, newText: "y" }, ctx(home))
+    const r = await diffTool.execute({ old_text: big, new_text: "y" }, ctx(home))
     expect(r.output).toContain("文本过大")
     cleanup(home)
   })
 
   test("missing file read propagates error", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-diff-nofile-"))
-    expect(diffTool.execute({ oldPath: "nope.txt", newPath: "nope2.txt" }, ctx(home))).rejects.toThrow()
+    expect(diffTool.execute({ old_path: "nope.txt", new_path: "nope2.txt" }, ctx(home))).rejects.toThrow()
     cleanup(home)
   })
 })

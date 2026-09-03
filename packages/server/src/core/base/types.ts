@@ -2,7 +2,7 @@ import type { AgentEvent, AttachmentRef, ContentBlock, FileEntry, ToolSchema } f
 
 export interface ToolResult {
   output: string
-  /** 结构化输出（DESIGN「工具双输出」）：供 flow 数据流编排引用/映射（`{{步骤id.data.xxx}}`），不进模型上下文（模型只见 output 文本）。
+  /** 结构化输出（DESIGN「工具双输出」）：供 js 编排引用/映射（工具函数返回值的 data 字段），不进模型上下文（模型只见 output 文本）。
    *  与 output 相互独立——output 面向模型分析，data 面向编排消费；无结构化语义的工具可省略。 */
   data?: unknown
   blocks?: ContentBlock[]
@@ -107,10 +107,10 @@ export type ToolContext = {
   /** 运行时工具定义（js 脚本 defineTool 用）：校验并注册会话级动态工具（引擎注入——主会话进会话覆盖层并
    *  随会话落盘、新会话执行进本次运行注册表）。可选：未注入（测试桩/无引擎环境）时 defineTool 返回不可用错误。 */
   defineDynamicTool?: (def: DynamicToolDef) => Promise<void>
-  /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：flow 等工具内直接执行工具的工具需按同规则拦截。 */
+  /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：js 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
   /** js RPC 桥标记（js-tool 分发层注入，仅 js-tool 内部使用）：本 ctx 正在 js/动态工具子进程桥内执行工具——
-   *  js 与动态工具的 execute 见标记即拒，封死 js→flow→js 交替递归与桥内失控子进程。 */
+   *  js 与动态工具的 execute 见标记即拒，封死 js→（直执行工具）→js 交替递归与桥内失控子进程。 */
   fromJsBridge?: boolean
   /** 会话级已读文件追踪（防误覆盖/防陈旧覆盖，引擎按会话注入，分支运行 fork 独立快照）：
    *  read/write/edit/patch 成功后登记已读绝对路径与内容指纹（BOM 无关），write/edit/patch 写前据两项拦截——
@@ -208,7 +208,7 @@ export interface Tool {
   name: string
   description: string
   parameters: ToolSchema
-  /** 是否需审批：布尔静态声明，或函数按调用参数动态判定（flow 等编排工具据此实现「内部任一工具需审批则整体审批」，
+  /** 是否需审批：布尔静态声明，或函数按调用参数动态判定（js 等编排工具据此实现「一次审批覆盖内部全部调用」，
    *  引擎在审批点解析两种形态；函数异常按需审批处理）。 */
   requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => boolean | Promise<boolean>)
   /** 结构化输出（ToolResult.data）的 JSON Schema：经 tool_schemas 工具批量暴露给模型，供编排前理解输出结构。 */

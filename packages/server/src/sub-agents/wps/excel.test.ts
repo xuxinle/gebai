@@ -24,7 +24,7 @@ describe("excel_write / excel_read（xlsx 往返）", () => {
               ["华东", 120, 150, { value: "=B2+C2", bold: true }],
               ["华南", 80, 95, { value: "=B3+C3" }],
             ],
-            colWidths: [12, 10, 10, 12],
+            col_widths: [12, 10, 10, 12],
             freeze: "A2",
             autofilter: true,
           },
@@ -53,7 +53,7 @@ describe("excel_write / excel_read（xlsx 往返）", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("range 区域裁剪 + formulas 公式模式 + maxRows 截断提示 + json 输出", async () => {
+  test("range 区域裁剪 + formulas 公式模式 + max_rows 截断提示 + json 输出", async () => {
     const home = setup()
     const { ctx } = makeCtx(home)
     const rows = [["H1", "H2"], ...Array.from({ length: 5 }, (_, i) => [`a${i}`, `b${i}`])]
@@ -63,7 +63,7 @@ describe("excel_write / excel_read（xlsx 往返）", () => {
     expect(clipped.output).toContain("a0")
     expect(clipped.output).not.toContain("H1")
 
-    const limited = await excelReadTool.execute({ path: "r.xlsx", sheet: "S", maxRows: 3 }, ctx)
+    const limited = await excelReadTool.execute({ path: "r.xlsx", sheet: "S", max_rows: 3 }, ctx)
     expect(limited.output).toContain("共 6 行")
 
     const json = await excelReadTool.execute({ path: "r.xlsx", sheet: "S", format: "json" }, ctx)
@@ -112,7 +112,7 @@ describe("excel_write 输入容错（缺陷回归：对象形式整行/超链接
     const r = await excelWriteTool.execute(
       {
         path: "mini.xlsx",
-        sheets: [{ name: "说明", rows: [{ value: "季度统计", bold: true, fontSize: 14 }, ["区域", "值"], ["华东", 100]] }],
+        sheets: [{ name: "说明", rows: [{ value: "季度统计", bold: true, font_size: 14 }, ["区域", "值"], ["华东", 100]] }],
       },
       ctx,
     )
@@ -159,7 +159,7 @@ describe("excel_edit（ops 批量修改）", () => {
       {
         path: "e.xlsx",
         edits: [
-          { op: "set", sheet: "主表", cells: [{ ref: "C1", value: "C 列", bold: true, fill: "FFEEAA" }, { ref: "C2", value: "=A2&B2" }, { ref: "B3", value: 666, numberFormat: "#,##0" }] },
+          { op: "set", sheet: "主表", cells: [{ ref: "C1", value: "C 列", bold: true, fill: "FFEEAA" }, { ref: "C2", value: "=A2&B2" }, { ref: "B3", value: 666, number_format: "#,##0" }] },
           { op: "add_sheet", name: "新表", rows: [["k", "v"], ["a", 1]] },
           { op: "rename_sheet", from: "新表", to: "改名表" },
           { op: "insert_rows", sheet: "主表", start: 2, count: 1 },

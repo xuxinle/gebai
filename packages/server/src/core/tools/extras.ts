@@ -20,12 +20,13 @@ export const pageCaptureTool: Tool = {
   description:
     "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 read 直接查看（主模型多模态时图片内联进上下文）或 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。",
   parameters: schema({
-    fullPage: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，大页面截图较慢）" },
+    full_page: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，大页面截图较慢）" },
     delay: { type: "number", description: "捕获前等待毫秒数（默认 0；UI 操作/动画/异步渲染完成后截图，上限 10000）" },
   }),
   async execute(args, ctx) {
     const delayMs = Math.max(0, Math.min(10000, Number(args.delay) || 0))
-    const cap = await ctx.waitForCapture({ fullPage: args.fullPage === true, delayMs })
+    // full_page 入参 → 前端捕获契约载荷键 fullPage（WS 协议字段，两端契约不动）
+    const cap = await ctx.waitForCapture({ fullPage: args.full_page === true, delayMs })
     if (!cap) return { output: "页面捕获失败：前端未能在限定时间内完成捕获（前端离线或捕获超时）。请确认浏览器页面已打开后重试。" }
     if (cap.error) return { output: `页面捕获失败: ${cap.error}` }
     const ts = Date.now()
@@ -83,7 +84,7 @@ export const gitTool: Tool = {
       action: { type: "string", enum: ["status", "diff", "log", "show", "branch", "ls-files", "grep"], description: "status 工作区状态 / diff 变更内容 / log 提交历史 / show 查看某提交或文件的完整内容（ref 默认 HEAD）/ branch 本地与远程分支列表 / ls-files 已跟踪文件清单（自动尊重 .gitignore，摸底项目结构快于 glob）/ grep 在**已跟踪文件**中内容搜索（自动尊重 .gitignore——grep 工具不读 .gitignore 的补口；扩展正则 ERE；未 add 的新文件不在结果）" },
       dir: { type: "string", description: "Git 仓库目录（默认会话工作目录）" },
       staged: { type: "boolean", description: "diff 是否查看暂存区（--staged），默认否" },
-      maxEntries: { type: "integer", description: "log 条数（默认 10，上限 50）" },
+      max_entries: { type: "integer", description: "log 条数（默认 10，上限 50）" },
       ref: { type: "string", description: "diff/log/show 的 Git 引用：提交哈希/分支/tag/HEAD~n/范围（main..dev）等（show 默认 HEAD；diff/log 不传则工作区/当前分支）" },
       path: { type: "string", description: "路径过滤（可带目录/文件前缀）：diff/log/show 限定该路径的变更（-- <path>）；ls-files 的路径过滤（前缀或 glob，如 src/、*.test.ts）；grep 的搜索范围限定（可选）" },
       pattern: { type: "string", description: "grep 的搜索模式（扩展正则 ERE，如 error|warn、foo\\.bar）" },
@@ -113,7 +114,7 @@ export const gitTool: Tool = {
     if (action === "status") cmd = "git status --short --branch"
     else if (action === "diff") cmd = `git diff${args.staged === true ? " --staged" : ""} --no-color${refPart}${pathSuffix}`
     else if (action === "log") {
-      const n = Math.min(Math.max(Number(args.maxEntries ?? GIT_DEFAULT_LOG) || GIT_DEFAULT_LOG, 1), GIT_MAX_LOG)
+      const n = Math.min(Math.max(Number(args.max_entries ?? GIT_DEFAULT_LOG) || GIT_DEFAULT_LOG, 1), GIT_MAX_LOG)
       cmd = `git log --oneline -n ${n}${refPart}${pathSuffix}`
     } else if (action === "show") {
       cmd = `git show --no-color "${ref || "HEAD"}"${pathSuffix}`
@@ -173,7 +174,7 @@ export const readFeedbackTool: Tool = {
   parameters: schema(
     {
       limit: { type: "integer", description: "返回条数（默认 10，上限 50）" },
-      sessionId: { type: "string", description: "可选：仅返回该会话的反馈" },
+      session_id: { type: "string", description: "可选：仅返回该会话的反馈" },
     },
   ),
   outputSchema: schema({
@@ -194,14 +195,14 @@ export const readFeedbackTool: Tool = {
   async execute(args, ctx) {
     const { readFeedback } = await import("../../feedback")
     const list = await readFeedback(ctx.home, ctx.user)
-    const filtered = args.sessionId ? list.filter((f) => f.sessionId === String(args.sessionId)) : list
+    const filtered = args.session_id ? list.filter((f) => f.sessionId === String(args.session_id)) : list
     const n = Math.min(Math.max(Number(args.limit ?? 10) || 10, 1), 50)
     const items = filtered.slice(0, n)
-    if (!items.length) return { output: args.sessionId ? `该会话暂无反馈记录。` : "暂无反馈记录。", data: { items: [] } }
+    if (!items.length) return { output: args.session_id ? `该会话暂无反馈记录。` : "暂无反馈记录。", data: { items: [] } }
     const label = (t: string) => (t === "thumbs_up" ? "👍" : t === "thumbs_down" ? "👎" : t === "suggestion" ? "建议" : "文字")
     return {
       output:
-        `用户反馈（最近 ${items.length} 条${args.sessionId ? `，会话 ${String(args.sessionId)}` : ""}）：\n` +
+        `用户反馈（最近 ${items.length} 条${args.session_id ? `，会话 ${String(args.session_id)}` : ""}）：\n` +
         items
           .map((f) => {
             const parts = [

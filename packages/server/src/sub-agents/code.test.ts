@@ -155,7 +155,7 @@ describe("全局文件工具 project 参数（注册表形态，code 复用的�
       // write/edit 同基准：产物块同样为项目内绝对路径
       const w = await tools.write.execute({ project: projRoot, path: "src/b.ts", content: "const b = 2\n" }, c)
       expect((w.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "b.ts"))
-      const e = await tools.edit.execute({ project: projRoot, path: "src/b.ts", edits: [{ oldString: "b = 2", newString: "b = 3" }] }, c)
+      const e = await tools.edit.execute({ project: projRoot, path: "src/b.ts", edits: [{ old_string: "b = 2", new_string: "b = 3" }] }, c)
       expect((e.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "b.ts"))
       // 未传 project：相对路径以会话工作目录为基准（默认语义不变）
       const s = await tools.write.execute({ path: "sess.txt", content: "x" }, c)

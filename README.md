@@ -200,7 +200,6 @@ The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playw
 ### ⚙️ 面向工程的能力
 
 - **审批流**：命令行式人机协作——工具级审批、`plan` 计划审批、`ask_user` 选择、`ask_env` 填值，键盘 Y/N 快捷键
-- **flow 数据流编排**：一次调用编排多步工具链（引用映射 / 条件分支 / foreach/while 循环），把多轮往返压成一次
 - **js 动态编程**：脚本内把工具当函数直接调用（`await read(...)`），`defineTool` 可把能力固化为会话级新工具
 - **待办跟踪**：Todo 拆解 → 执行 → 失败恢复续做
 - **定时任务**：`cron_add` 创建无人值守的周期脚本/ Agent 任务
@@ -211,7 +210,6 @@ The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playw
 **English.**
 
 - **Approval flows**: CLI-style human-in-the-loop — per-tool approval, `plan` approval, `ask_user` choices, `ask_env` prompts, with Y/N keyboard shortcuts
-- **flow orchestration**: compose multi-step tool chains in a single call (reference mapping / conditional branches / foreach-while loops), collapsing multiple round trips into one
 - **js dynamic programming**: call tools as plain functions inside scripts (`await read(...)`); `defineTool` freezes a capability into a session-scoped new tool
 - **Todo tracking**: break down → execute → resume after failure
 - **Cron tasks**: `cron_add` creates unattended recurring script/agent jobs
