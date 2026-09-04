@@ -1,7 +1,7 @@
 import type { ToolContext, ToolSet } from "../../core/base/types"
 import { truncate, artifactBlocks } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
-import { createLazyBridge, withSessionLock, type BridgeLike } from "../playwright/playwright_tools"
+import { createLazyBridge, withSessionLock, type BridgeLike } from "../../core/browser/bridge"
 import { parseJsonObject, type CapturedRequest } from "./reverse_site_tools"
 
 /**

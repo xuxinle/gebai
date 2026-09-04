@@ -66,7 +66,7 @@ bun run lint
 
 ### 模块分层与自动扩展
 
-- **服务端目录按领域分层**（详见 `DESIGN.md`「服务端目录结构」）：`routes/`（REST 按域）、`ws-handlers/`（WS 消息按域）、`boot/`（compose/serve/cli）、`core/{base,llm,engine,tools,support,session,schedule,exec,security,agents,widgets}`——core 根目录只放构建生成物，禁止往根平铺新源码文件。
+- **服务端目录按领域分层**（详见 `DESIGN.md`「服务端目录结构」）：`routes/`（REST 按域）、`ws-handlers/`（WS 消息按域）、`boot/`（compose/serve/cli）、`core/{base,llm,engine,tools,support,session,schedule,exec,browser,security,agents,widgets}`——core 根目录只放构建生成物，禁止往根平铺新源码文件。
 - **依赖单向**：`base` ← `support`/`security` ← 各领域 ← `engine` ← 传输层 ← `boot`；`core/` 内部模块**禁止 import `core/tools` 聚合 barrel**（其目录扫描顶层 await 会因反向依赖成环产生未初始化绑定）——共用能力直引 `core/support/*`、`core/security/*` 叶子模块。
 - **全局工具零注册**：新增全局工具 = 在 `packages/server/src/core/tools/` 新建导出 `export const globalTools: GlobalToolEntry[]` 的文件（契约见 `tools/shared.ts`），不改任何中央注册表——与子 Agent 同款「丢文件即注册」扩展模型。
 - **REST 路由 / WS 处理器按域新增**：新路由域在 `routes/` 新建 `register{Domain}Routes`（经 `routes/context.ts` 的 RouteCtx）并在 `app.ts` 装配；新 WS 消息类型在 `ws-handlers/` 对应域文件加 handler（入口守卫在 `ws.ts` 统一）。

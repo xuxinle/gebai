@@ -22,6 +22,7 @@ import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
+import { runInToolFetchScope } from "../support/fetch-scope"
 import { createHash } from "node:crypto"
 import { ContextCompressor } from "./compressor"
 import {
@@ -2105,7 +2106,9 @@ export class AgentEngine {
         () => finish({ output: `工具 ${name} 执行超时（超过 ${Math.round((this.opts.toolTimeoutMs ?? TOOL_TIMEOUT_MS) / 1000)} 秒）已终止。请分析原因（死循环/等待外部资源等）后调整方案，或拆分为更小步骤重试。` }),
         this.opts.toolTimeoutMs ?? TOOL_TIMEOUT_MS,
       )
-      tool.execute(args, ctx).then(
+      // 工具执行进入 fetch 代理作用域（透明浏览器代理判定用，见 core/support/fetch-scope.ts）；
+      // trackTaskMods 等后续处理留在作用域外
+      runInToolFetchScope(sessionId, () => tool.execute(args, ctx)).then(
         (r) => {
           this.trackTaskMods(sessionId, name, args, r)
           finish(r)

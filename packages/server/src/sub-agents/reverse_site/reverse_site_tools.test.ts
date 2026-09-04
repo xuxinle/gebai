@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import type { ToolContext } from "../../core/base/types"
 import { createCaptureTools, createHttpRequestTool, formatHttpResult, parseJsonObject, redactHeaders, buildReplayCommand, type CapturedRequest, type FetchLike } from "./reverse_site_tools"
-import type { BridgeLike } from "../playwright/playwright_tools"
+import type { BridgeLike } from "../../core/browser/bridge"
 import { def as reverseSiteDef } from "./reverse_site"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {

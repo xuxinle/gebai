@@ -1,5 +1,6 @@
 /**
- * playwright 子Agent 的 node 桥接驱动（常驻进程，由 Bun 侧 playwright_tools.ts spawn）。
+ * 浏览器桥接驱动（node 常驻进程，由 core/browser/bridge.ts spawn）——playwright/reverse_site
+ * 子Agent 的浏览器自动化与透明浏览器代理（fetch-proxy 的 http_fetch 通道）共用。
  *
  * 为什么需要桥接：Bun 运行时与 playwright 的 driver 子进程 pipe 通信存在兼容问题
  * （实测 chromium.launch 超时），而 node 环境完全正常。因此真实浏览器操作全部在
@@ -75,6 +76,20 @@ function redactPostData(data) {
     }
     return data
   }
+}
+
+/** APIResponse 统一塑形（network_replay / http_fetch 共用）：状态、脱敏响应头、Location（沙箱
+ *  逐跳重放用）与文本响应体预览（REPLAY_BODY_PREVIEW 截断；非文本跳过）。 */
+async function shapeApiResponse(res) {
+  const ct = res.headers()["content-type"] || ""
+  let body = ""
+  if (/json|text|xml|javascript|html|form/i.test(ct)) {
+    const text = await res.text()
+    body = text.length > REPLAY_BODY_PREVIEW ? text.slice(0, REPLAY_BODY_PREVIEW) + "\n…[响应体已截断]" : text
+  } else {
+    body = `(非文本响应体: ${ct || "未知类型"}，已跳过)`
+  }
+  return { status: res.status(), headers: redactHeaders(res.headers()), location: res.headers()["location"] || "", body }
 }
 
 /** 响应体捕获（异步，随响应到达补齐）：仅文本类且大小受限，预览上限截断。 */
@@ -865,15 +880,40 @@ const ops = {
     const init = { method, headers, data, timeout: opTimeout(args.timeout, 30_000) }
     if (args.followRedirects === false) init.maxRedirects = 0
     const res = await s.context.request.fetch(url, init)
-    const ct = res.headers()["content-type"] || ""
-    let body = ""
-    if (/json|text|xml|javascript|html|form/i.test(ct)) {
-      const text = await res.text()
-      body = text.length > REPLAY_BODY_PREVIEW ? text.slice(0, REPLAY_BODY_PREVIEW) + "\n…[响应体已截断]" : text
-    } else {
-      body = `(非文本响应体: ${ct || "未知类型"}，已跳过)`
+    return shapeApiResponse(res)
+  },
+
+  /** 任意请求经浏览器上下文直发（http_fetch）：与浏览器共享网络栈（UA/TLS 指纹）与 cookie/存储
+   *  状态——透明浏览器代理（GEBAI_BROWSER_PROXY，宿主侧 fetch 垫片调用）的请求通道，不依赖录制
+   *  记录。outPath 指定时响应体原样落盘（二进制安全，绕开桥接结果上限），返回**未脱敏**响应头
+   *  （垫片构造 Response 供工具代码消费，模型可见输出的脱敏由工具层自行负责）；
+   *  followRedirects=false 时不自动跟随重定向（对应 fetch redirect:"manual"）。 */
+  async http_fetch(args) {
+    const s = await ensureSession(args.sessionId)
+    const method = str(args.method, "GET").toUpperCase()
+    const url = str(args.url)
+    if (!/^https?:\/\//i.test(url)) throw new Error(`url 必须是 http(s) 地址: ${url}`)
+    const init = {
+      method,
+      headers: args.headers && typeof args.headers === "object" ? args.headers : undefined,
+      data: typeof args.body === "string" && args.body !== "" ? args.body : undefined,
+      timeout: opTimeout(args.timeout, 110_000),
     }
-    return { status: res.status(), headers: redactHeaders(res.headers()), location: res.headers()["location"] || "", body }
+    if (args.followRedirects === false) init.maxRedirects = 0
+    const res = await s.context.request.fetch(url, init)
+    const headers = res.headers()
+    const out = { status: res.status(), headers, contentType: headers["content-type"] || "", location: headers["location"] || "" }
+    const outPath = str(args.outPath)
+    if (outPath) {
+      const buf = await res.body()
+      if (buf.length > BODY_FILE_MAX) throw new Error(`响应体过大（${buf.length} 字节，上限 ${BODY_FILE_MAX}）`)
+      writeFileSync(outPath, buf)
+      out.path = outPath
+      out.size = buf.length
+      return out
+    }
+    // 未指定落盘路径：文本预览（诊断用途；透明代理路径恒带 outPath）
+    return { ...out, ...(await shapeApiResponse(res)) }
   },
 
   /** WebSocket 帧记录列表（录制开关联动）。 */

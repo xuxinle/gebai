@@ -31,6 +31,7 @@ import { FeishuBot } from "../feishu-bot/bot"
 import { EngineBotAdapter } from "../feishu-bot/adapter"
 import { createFeishuApi } from "../feishu-bot/api"
 import { makeWsSink } from "./serve"
+import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
 
 /** 组合产物：全部组件实例 + 监听所需的依赖包（serve.ts 消费）。 */
 export interface Composed {
@@ -61,6 +62,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   applyEmbeddedEnvDefaults(EMBEDDED_ENV_DEFAULTS)
 
   const config = loadConfig(overrides)
+
+  // 透明浏览器代理（GEBAI_BROWSER_PROXY=1，重启生效）：服务启动即安装 fetch 垫片——平台级
+  // 能力，不依赖任何子Agent 的装载/裁剪（桥接基建在 core/browser，见 DESIGN「透明浏览器代理」）
+  installBrowserFetchProxy()
 
   const store = new SessionStore({ home: config.gebaiHome })
 

@@ -154,17 +154,17 @@ console.log(
 )
 
 /**
- * 子Agent 运行时资源复制：playwright 子Agent 的 node 桥接驱动（driver.mjs）不能被
- * bun build 内联（需保持独立文件供 node 子进程运行），构建时复制到 dist/ 与产物同目录。
- * 幂等：typecheck 等场景下 dist/ 不存在也会创建（产物目录已 gitignore）。
+ * 运行时资源复制：浏览器桥接驱动（core/browser/driver.mjs，playwright/reverse_site 子Agent
+ * 与透明浏览器代理共用）不能被 bun build 内联（需保持独立文件供 node 子进程运行），构建时
+ * 复制到 dist/ 与产物同目录。幂等：typecheck 等场景下 dist/ 不存在也会创建（产物目录已 gitignore）。
  */
-const driverSrc = join(srcDir, "playwright", "driver.mjs")
+const driverSrc = join(root, "src", "core", "browser", "driver.mjs")
 const distDir = join(root, "dist")
 try {
   const { copyFile, mkdir } = await import("node:fs/promises")
   await mkdir(distDir, { recursive: true })
   await copyFile(driverSrc, join(distDir, "driver.mjs"))
-  console.log(`[build-subagents] copied playwright driver -> ${join(distDir, "driver.mjs")}`)
+  console.log(`[build-subagents] copied browser driver -> ${join(distDir, "driver.mjs")}`)
 } catch (err) {
-  console.warn(`[build-subagents] playwright driver 复制失败（playwright 子Agent 在 dist 模式将不可用）: ${err instanceof Error ? err.message : err}`)
+  console.warn(`[build-subagents] 浏览器桥接驱动复制失败（dist 模式下浏览器能力将不可用）: ${err instanceof Error ? err.message : err}`)
 }

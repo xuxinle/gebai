@@ -4,7 +4,7 @@ import { join } from "node:path"
 import type { ToolContext } from "../../core/base/types"
 import { buildHar, createNetTools } from "./reverse_site_net_tools"
 import type { CapturedRequest } from "./reverse_site_tools"
-import type { BridgeLike } from "../playwright/playwright_tools"
+import type { BridgeLike } from "../../core/browser/bridge"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   const tmp = join(home, "users", "default", "sessions", "s1", "tmp")

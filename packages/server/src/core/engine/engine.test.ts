@@ -5,6 +5,7 @@ import { join } from "node:path"
 import type { ContentBlock, LLMCapabilities, MessageLike } from "@gebai/sdk"
 import type { LLMChunk, LLMProvider, ChatOptions } from "../llm/llm"
 import { AgentEngine, stripThinkTags } from "./engine"
+import { currentToolFetchSession } from "../support/fetch-scope"
 import { SessionStore } from "../session/store"
 import { ToolRegistry } from "../base/registry"
 import { createGlobalTools, pageCaptureTool, TRUNCATE_THRESHOLD } from "../tools"
@@ -738,6 +739,28 @@ describe("AgentEngine", () => {
     expect(toolMsg).toBeDefined()
     expect(toolMsg!.toolCallId).toBe("tc-1")
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
+    cleanup(home)
+  })
+
+  test("工具执行处于 fetch 代理作用域内（透明浏览器代理判定用，携带 sessionId）", async () => {
+    const { home, engine, store, registry, provider } = await setup("tool")
+    const seen: Array<string | undefined> = []
+    registry.register({
+      name: "fetch_probe",
+      description: "records fetch proxy scope during execution",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        seen.push(currentToolFetchSession())
+        return { output: "probed" }
+      },
+    })
+    provider.toolName = "fetch_probe"
+    provider.toolArgs = {}
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "probe")
+    expect(seen).toEqual([session.id])
+    // 工具回合结束后作用域不泄漏到顶层异步上下文
+    expect(currentToolFetchSession()).toBeUndefined()
     cleanup(home)
   })
 
