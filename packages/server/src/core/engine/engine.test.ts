@@ -2769,7 +2769,7 @@ console.log("defined ok")`,
         yield { type: "done", stopReason: "tool_calls" }
         return
       }
-      // 第 3 次相同调用被中断（未执行），模型收到引导提示后换方向给出纯文本回复
+      // 第 3 次连续相同调用（其间无任何其他操作）被中断（未执行），模型收到引导提示后换方向给出纯文本回复
       yield { type: "text", text: "换用其他方案" }
       yield { type: "done", stopReason: "stop" }
     }
@@ -2845,13 +2845,13 @@ console.log("defined ok")`,
         return
       }
       if (calls === 2) {
-        // 第二轮再见结果后重发同签名：为窗口内第 2 次记录，尚不触发
+        // 第二轮再见结果后重发同签名：为连续第 2 次记录，尚不触发（重发一次确认结果合法）
         yield { type: "tool_call", toolCall: { id: "tc-c3", name: "ls", arguments: {} } }
         yield { type: "done", stopReason: "tool_calls" }
         return
       }
       if (calls === 3) {
-        // 第三轮仍重发同签名：窗口第 3 次记录命中阈值，被中断（注入引导提示）
+        // 第三轮仍背靠背重发同签名：连续第 3 次记录命中阈值，被中断（注入引导提示）
         yield { type: "tool_call", toolCall: { id: "tc-c4", name: "ls", arguments: {} } }
         yield { type: "done", stopReason: "tool_calls" }
         return
@@ -2862,10 +2862,45 @@ console.log("defined ok")`,
     await s.engine.run(session.id, "default", "repeat")
     const loaded = await s.store.load(session.id)
     const toolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.name === "ls")
-    // 第一轮 2 个执行（扇出各记录一次）+ 第二轮 1 个执行（第 2 次记录），第三轮重发被中断（第 3 次记录命中）
+    // 第一轮 2 个执行（扇出各记录一次）+ 第二轮 1 个执行（连续第 2 次记录），第三轮背靠背重发被中断（连续第 3 次命中）
     expect(toolMsgs.filter((m) => String(m.content).includes("已中断重复的工具调用")).length).toBe(1)
     expect(toolMsgs.filter((m) => !String(m.content).includes("已中断重复的工具调用")).length).toBe(3)
     expect(calls).toBe(4)
+    cleanup(s.home)
+  })
+
+  test("re-execution with intervening calls is confirmation, not a repeat (改动后复查不误判)", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    // 间隔工具载体：与被复查调用不同签名，模拟「改文件 → 重跑同一命令确认结果」的交替序列
+    s.registry.register({
+      name: "touchfile",
+      description: "test intervening tool",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { output: "touched" }
+      },
+    })
+    let calls = 0
+    s.provider.chat = async function* () {
+      calls++
+      if (calls <= 5) {
+        // ls → touchfile → ls → touchfile → ls：ls 三次同签名，但每次间隔其他调用（复查而非盲重发）
+        yield { type: "tool_call", toolCall: { id: `tc-i${calls}`, name: calls % 2 === 1 ? "ls" : "touchfile", arguments: {} } }
+        yield { type: "done", stopReason: "tool_calls" }
+        return
+      }
+      yield { type: "text", text: "confirmed" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    await s.engine.run(session.id, "default", "verify")
+    const loaded = await s.store.load(session.id)
+    const lsMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.name === "ls")
+    // 三次 ls 全部执行：间隔其他调用的重发是「改完再确认」（结果可能已变化），不判重复
+    expect(lsMsgs.length).toBe(3)
+    expect(lsMsgs.some((m) => String(m.content).includes("已中断重复的工具调用"))).toBe(false)
+    expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "confirmed")).toBe(true)
+    expect(calls).toBe(6)
     cleanup(s.home)
   })
 })

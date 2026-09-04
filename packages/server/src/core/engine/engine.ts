@@ -69,9 +69,9 @@ const VERIFY_CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|c|h|c
 const VERIFY_CMD_RE = /\b(bun test|bun run test|npm test|npm run test|yarn test|pnpm test|pytest|vitest|jest|go test|cargo test|deno test|gradle test|gradlew\s+\S*test|mvn test|tsc|typecheck|type-check|eslint|biome check|ruff|mypy|flake8|clang-tidy|lint)\b/i
 /** 收尾验证提醒——写类工具的拒绝形态（守卫/安全模式拦截未落盘，不计入修改文件）。 */
 const MOD_REJECTED_RE = /^(write|edit|patch) 拒绝|安全模式|受限模式/
-/** 重复检测滚动窗口：记录最近 N 次工具调用签名（工具名+参数），窗口内相同签名出现 ≥MAX_REPEAT_HITS 次判定为无效重复。 */
+/** 重复检测滚动窗口：记录最近 N 次工具调用签名（工具名+参数 JSON），窗口尾部连续相同签名达到阈值判定为无效重复。 */
 const MAX_REPEAT_WINDOW = 8
-/** 重复检测命中阈值：相同签名（工具+参数）在窗口内出现第 MAX_REPEAT_HITS 次时中断该次执行并注入引导提示。 */
+/** 重复检测命中阈值：相同签名（工具+参数）在窗口尾部连续出现第 MAX_REPEAT_HITS 次（其间无任何其他调用）时中断该次执行并注入引导提示。 */
 const MAX_REPEAT_HITS = 3
 /** 重复中断上限：中断次数超过该值即终止工具循环（模型持续重复时防止无效空转）。 */
 const MAX_REPEAT_STALLS = 2
@@ -1745,7 +1745,8 @@ export class AgentEngine {
     // 压缩重建消息后锚点失效（makeContextRoom 原地清除），真实值由下一次调用重新建立
     const ctxUsage: { ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number } = { ctxCountedLen: 0 }
     // 重复检测（DESIGN「重复检测」）：最近 MAX_REPEAT_WINDOW 次工具调用签名窗口，
-    // 相同签名（工具+参数）出现 ≥MAX_REPEAT_HITS 次判定为无效重复 → 中断该次执行并注入引导提示；
+    // 相同签名（工具+参数）在窗口尾部连续出现 ≥MAX_REPEAT_HITS 次（其间无任何其他调用——
+    // 结果不会变化）判定为无效重复 → 中断该次执行并注入引导提示；
     // 连续中断超过 MAX_REPEAT_STALLS 次终止循环，避免无效空转
     const recentCalls: string[] = []
     let repeatStalls = 0
@@ -1863,7 +1864,7 @@ export class AgentEngine {
         //    校验点在审批门之前（坏调用不打扰用户审批）。可执行项收集进入并行阶段
         const pending: Array<{ tc: (typeof toolCalls)[number]; rt: NonNullable<ReturnType<ToolRegistry["resolve"]>>; autoLoaded: string; approvalRequired: boolean }> = []
         // 同批重复签名只检测/记录一次（DESIGN「同批工具并行执行」）：同批并行发出相同调用是有意扇出
-        // ——发出时尚未见任何结果，不存在「无视结果重试」；跨轮重复（已见过结果仍重发同签名）照常累积判定
+        // ——发出时尚未见任何结果，不存在「无视结果重试」；跨轮连续重发（其间无任何其他调用）照常累积判定
         const batchSignatures = new Set<string>()
         for (const tc of toolCalls) {
           if (stopped) {
@@ -1874,9 +1875,10 @@ export class AgentEngine {
           if (!batchSignatures.has(signature)) {
             batchSignatures.add(signature)
             if (this.repeatedCall(recentCalls, tc.name, tc.arguments)) {
-              // 相同工具+相同参数已执行 ≥MAX_REPEAT_HITS 次：中断执行（结果必然相同），注入提示引导模型换方向
+              // 相同工具+参数连续第 MAX_REPEAT_HITS 次重发（其间无任何其他调用，结果不会变化）：
+              // 中断执行，注入提示引导模型换方向
               repeatStalls++
-              const note = `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`
+              const note = `已中断重复的工具调用 ${tc.name}：参数与上一次完全相同，且其间没有任何其他操作，直接重发只会得到相同结果。若在等待外部状态变化（如服务启动/构建完成），请把等待与重试并入同一次调用（如脚本内轮询）；否则请分析原因、改用其他方法，或直接给出最终回答。`
               if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
               await persistGatedNote(tc, note)
               continue
@@ -2012,15 +2014,18 @@ export class AgentEngine {
 
   /**
    * 重复调用检测（DESIGN「重复检测」）：将本次工具调用签名（工具名+参数 JSON）记入滚动窗口，
-   * 窗口内相同签名已出现 MAX_REPEAT_HITS-1 次（本次为第 MAX_REPEAT_HITS 次）时判定为重复。
+   * 窗口尾部连续出现相同签名 MAX_REPEAT_HITS-1 次（本次为连续第 MAX_REPEAT_HITS 次）时判定为重复。
+   * 只计连续段——其间发生过任何其他调用（如改完文件后重跑同一命令复查结果）说明模型在响应结果，
+   * 不判重复；纯背靠背重发（未做任何其他操作）结果不会变化，才判无效重复。
    * 调用方负责同批去重（同批重复签名只检测/记录一次——同批并行发出相同调用是有意扇出，见「同批工具并行执行」）。
    */
   private repeatedCall(window: string[], name: string, toolArguments: Record<string, unknown>): boolean {
     const sig = toolCallSignature(name, toolArguments)
-    const hits = window.filter((s) => s === sig).length
+    let run = 0
+    for (let i = window.length - 1; i >= 0 && window[i] === sig; i--) run++
     window.push(sig)
     if (window.length > MAX_REPEAT_WINDOW) window.shift()
-    return hits >= MAX_REPEAT_HITS - 1
+    return run >= MAX_REPEAT_HITS - 1
   }
 
   /**
@@ -2584,7 +2589,7 @@ export class AgentEngine {
     let lastText = ""
     void agents
     void input
-    // 重复检测（与主循环一致，DESIGN「重复检测」）：相同工具+参数重复调用中断并注入引导提示，超限终止
+    // 重复检测（与主循环一致，DESIGN「重复检测」）：相同工具+参数连续重发（其间无其他调用）中断并注入引导提示，超限终止
     const recentCalls: string[] = []
     let repeatStalls = 0
     // 取消中止判定：新会话执行不设独立超时，中止仅由父任务取消传播（报「已取消」）
@@ -2652,7 +2657,7 @@ export class AgentEngine {
       let stopped = false
       // 门控阶段（按调用顺序串行，与主循环同构）：判定全部先行完成，说明性结果直接入存档；
       // 可执行项进入并行阶段（同批工具并行执行，DESIGN「同批工具并行执行」）
-      // 同批重复签名只检测/记录一次（与主循环同因）：同批并行发出相同调用是有意扇出，跨轮重复才累积判定
+      // 同批重复签名只检测/记录一次（与主循环同因）：同批并行发出相同调用是有意扇出，跨轮连续重发（其间无其他调用）照常累积判定
       const batchSignatures = new Set<string>()
       const pending: Array<{ tc: (typeof toolCalls)[number]; rt: NonNullable<ReturnType<ToolRegistry["resolve"]>>; autoLoaded: string; approvalRequired: boolean }> = []
       // 门控说明性结果（不执行）同样推送 call+result 事件对（与主循环同因）：前端实时建卡，与存档回放一致
@@ -2673,7 +2678,7 @@ export class AgentEngine {
           if (this.repeatedCall(recentCalls, tc.name, tc.arguments)) {
             repeatStalls++
             if (repeatStalls > MAX_REPEAT_STALLS) stopped = true
-            await gatedNote(tc, `已中断重复的工具调用 ${tc.name}：参数与之前完全相同，重复执行只会得到相同结果。请分析原因、改用其他方法，或直接给出最终回答，不要重复相同操作。`)
+            await gatedNote(tc, `已中断重复的工具调用 ${tc.name}：参数与上一次完全相同，且其间没有任何其他操作，直接重发只会得到相同结果。若在等待外部状态变化（如服务启动/构建完成），请把等待与重试并入同一次调用（如脚本内轮询）；否则请分析原因、改用其他方法，或直接给出最终回答。`)
             continue
           }
         }
