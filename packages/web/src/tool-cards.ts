@@ -240,7 +240,8 @@ function branchRunArgsBlock(args: string): HTMLElement | null {
 
 /* ---------- 参数区（键值行 / JSON 高亮 / 代码块，超长自动折叠） ---------- */
 
-/** 参数区超长折叠阈值（字符数）：超出后默认收起为「查看参数」折叠块（与输出折叠同款交互）。 */
+/** 参数区超长折叠阈值（字符数）：超出后收敛为「查看参数」折叠块（与输出折叠同款交互）。
+ *  折叠只发生在完成态与历史回放——执行/审批等待期完整直显，结果到达时由 appendToolResult 收敛。 */
 const ARGS_FOLD_CHARS = 800
 
 /** 参数值标量判定：标量走键值行，嵌套结构回退 JSON 高亮。 */
@@ -299,9 +300,13 @@ function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["
 /** 参数区渲染：按服务端 card 声明——"none" 不展示；"code" 渲染 codeField 为代码块；"edits" 渲染 codeField 数组为旧/新对比块
  *  （其余参数键值行/JSON 附注；edit 工具无声明时按参数形态内建兜底同样渲染对比块）；"kv" 强制键值行；"json" 强制完整 JSON 高亮（不省略标题参数）；
  *  缺省自适应（扁平标量→键值行，嵌套→JSON 高亮）。
- *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长参数自动折叠。返回 null 表示无参数区。
+ *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长参数按阈值折叠。
+ *  fold=false（执行/审批等待期实时卡）超长参数不折叠、完整直显，结果到达时经 renderToolArgsDone 收敛。
+ *  返回 null 表示无参数区。
  *  文件展示方式（嵌入/弹窗）不影响参数区与输出——只作用于下方产物文件卡（见 fileBlocksAsLinks）。 */
-function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["card"]>): HTMLElement | null {
+function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["card"]>, fold = true): HTMLElement | null {
+  // 执行/审批等待期完整直显；完成态与历史回放按阈值收敛为折叠块
+  const foldIfNeeded = fold ? foldArgsBlock : (inner: HTMLElement): HTMLElement => inner
   let obj: Record<string, unknown> | null = null
   try {
     obj = JSON.parse(args) as Record<string, unknown>
@@ -319,7 +324,7 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
       wrap.appendChild(codeBlock(meta.codeLang ?? "", codeText))
       const note = restArgsNote(obj, meta, titleInHead)
       if (note) wrap.appendChild(note)
-      return foldArgsBlock(wrap, codeText.length)
+      return foldIfNeeded(wrap, codeText.length)
     }
   }
   // edits 形态内建兜底：edit 工具 card 声明不可用（工具清单拉取失败/旧服务端未声明）时
@@ -338,7 +343,7 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
         wrap.appendChild(kvArgsBlock(Object.fromEntries(Object.entries(obj).filter(([k]) => k !== editsField))))
       }
       const chars = list.reduce((n, e) => n + e.old_string.length + e.new_string.length, 0)
-      return foldArgsBlock(wrap, chars)
+      return foldIfNeeded(wrap, chars)
     }
     /* 形态不符（非 edits 数组）：回退自适应渲染 */
   }
@@ -350,14 +355,22 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
   if (shown && !Object.keys(shown).length) return null
   // 键值行：显式 "kv" 声明，或缺省自适应（扁平标量参数）
   if (shown && (meta?.args === "kv" || (meta?.args !== "json" && Object.values(shown).every(isScalar)))) {
-    return foldArgsBlock(kvArgsBlock(shown), JSON.stringify(shown).length)
+    return foldIfNeeded(kvArgsBlock(shown), JSON.stringify(shown).length)
   }
   // JSON 语法高亮：嵌套结构 / 显式 "json" / 非 JSON 纯文本
   const text = shown ? JSON.stringify(shown, null, 2) : args
   const pre = el("pre")
   pre.className = "tool-code"
   pre.appendChild(highlightedCode("json", text))
-  return foldArgsBlock(pre, text.length)
+  return foldIfNeeded(pre, text.length)
+}
+
+/** 完成态参数区重渲染（结果到达 appendToolResult 调用）：执行/审批等待期完整直显的超长参数此时收敛为
+ *  折叠块，与历史回放同构；agent_run/branch_run 专用参数块不参与折叠、无 tool-args 标记，不会进入本路径。 */
+export function renderToolArgsDone(name: string, args: string): HTMLElement | null {
+  const ab = toolArgsBlock(name, args, metaOf(name))
+  ab?.classList.add("tool-args")
+  return ab
 }
 
 function toolBubble(content: string): HTMLElement {
@@ -385,11 +398,14 @@ function toolBubble(content: string): HTMLElement {
     }
     bubble.appendChild(toolHead("call", parsed.name, argsObj))
     if (parsed.args) {
-      const ab = isAgentRun(parsed.name)
-        ? agentRunArgsBlock(parsed.args)
-        : isBranchRun(parsed.name)
-          ? branchRunArgsBlock(parsed.args)
-          : toolArgsBlock(parsed.name, parsed.args, metaOf(parsed.name))
+      // 实时执行中卡（含等待审批）：超长参数完整直显（fold=false），结果到达时由 appendToolResult 收敛为折叠块
+      let ab: HTMLElement | null
+      if (isAgentRun(parsed.name)) ab = agentRunArgsBlock(parsed.args)
+      else if (isBranchRun(parsed.name)) ab = branchRunArgsBlock(parsed.args)
+      else {
+        ab = toolArgsBlock(parsed.name, parsed.args, metaOf(parsed.name), false)
+        ab?.classList.add("tool-args")
+      }
       if (ab) bubble.appendChild(ab)
     }
     return bubble
@@ -650,11 +666,14 @@ export function toolCard(msg: Message): HTMLElement {
   bubble.appendChild(toolHead("call", msg.name ?? "tool", msg.arguments ?? null))
   if (msg.arguments && Object.keys(msg.arguments).length) {
     const argsJson = JSON.stringify(msg.arguments, null, 2)
-    const ab = isAgentRun(msg.name ?? "")
-      ? agentRunArgsBlock(argsJson)
-      : isBranchRun(msg.name ?? "")
-        ? branchRunArgsBlock(argsJson)
-        : toolArgsBlock(msg.name ?? "", argsJson, meta)
+    // 历史回放=已完成的调用：超长参数按阈值折叠（与实时卡完成态收敛同构）
+    let ab: HTMLElement | null
+    if (isAgentRun(msg.name ?? "")) ab = agentRunArgsBlock(argsJson)
+    else if (isBranchRun(msg.name ?? "")) ab = branchRunArgsBlock(argsJson)
+    else {
+      ab = toolArgsBlock(msg.name ?? "", argsJson, meta)
+      ab?.classList.add("tool-args")
+    }
     if (ab) bubble.appendChild(ab)
   }
   if (msg.content) {
