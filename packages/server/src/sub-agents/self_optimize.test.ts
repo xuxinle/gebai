@@ -111,6 +111,12 @@ describe("self_optimize sub-agent", () => {
     expect(selfOptimizeDef.systemPrompt).toContain("项目根以系统提示词动态注记「项目根:」为准")
     expect(selfOptimizeDef.systemPrompt).toContain("SELF_OPTIMIZE_PROJECT")
   })
+
+  test("系统提示词含产物纯净原则（产物只述当前能力与限制，历史注记归 journal/git）", () => {
+    expect(selfOptimizeDef.systemPrompt).toContain("产物纯净")
+    expect(selfOptimizeDef.systemPrompt).toContain("只描述当前完整的能力与限制")
+    expect(selfOptimizeDef.systemPrompt).toContain("不留历史痕迹")
+  })
 })
 
 describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强制而非仅提示词）", () => {
