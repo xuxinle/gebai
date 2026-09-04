@@ -19,7 +19,7 @@ import {
 } from "./state"
 import { blockText, markdownBlock } from "./markdown"
 import { renderCodeCard, renderFileCard } from "./file-card"
-import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, fileBlocksAsLinks, isBlockOnly, planBubble, planResultHead, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
+import { askUserBubble, choiceAnswerBlock, choiceBubble, displayToolName, envRequestBubble, fileBlocksAsLinks, isBlockOnly, planBubble, planResultHead, renderToolArgsDone, shortToolName, todoBubble, toolBubbleFor, toolHead, toolOutput } from "./tool-cards"
 import { renderBlocksLinked } from "./file-link"
 import { openImageViewer, renderDiagram } from "./diagram"
 import { renderDiffBlock } from "./diff"
@@ -650,6 +650,10 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
       head.replaceWith(toolHead("done", name, argsObj))
     }
     const bubble = entry.wrapper?.querySelector(".bubble")
+    // 超长参数收敛：执行/审批等待期完整直显，结果到达（完成态）收敛为折叠块（与历史回放同构；
+    // agent_run/branch_run 专用参数块无 tool-args 标记，天然跳过）
+    const argsEl = bubble?.querySelector<HTMLElement>(".tool-args")
+    if (argsEl && entry.argsText) argsEl.replaceWith(renderToolArgsDone(name, entry.argsText) ?? argsEl)
     if (bubble && output) {
       // agent_run：最终返回为 markdown 输出，直接渲染（与历史 toolCard 一致）
       if (shortToolName(name) === "agent_run") bubble.appendChild(markdownBlock(output))

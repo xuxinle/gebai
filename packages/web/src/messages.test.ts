@@ -17,6 +17,8 @@ interface MockEl {
   prepend(...nodes: unknown[]): void
   appendChild(n: unknown): void
   remove(): void
+  replaceWith(node: unknown): void
+  readonly childNodes: MockEl[]
 }
 /** MockEl + 查询能力（由 Proxy 陷阱提供，类型上补齐声明）。 */
 type MockElWithQuery = MockEl & { querySelector(sel: string): unknown; querySelectorAll(sel: string): unknown[] }
@@ -61,6 +63,21 @@ function makeMockEl(tag = "div"): MockElWithQuery {
       const p = (el as MockEl & { parentRef?: MockEl }).parentRef
       const self = (el as unknown as { selfProxy?: MockEl }).selfProxy ?? el
       if (p) p.children = p.children.filter((c) => c !== self)
+    },
+    // 父 children 原位替换（appendToolResult 完成态头部/参数区 replaceWith 断言用，与真实 DOM 语义一致）
+    replaceWith(node: unknown) {
+      const p = (el as MockEl & { parentRef?: MockEl }).parentRef
+      const self = (el as unknown as { selfProxy?: MockEl }).selfProxy ?? el
+      if (!p || !node || typeof node !== "object") return
+      const i = p.children.indexOf(self)
+      if (i < 0) return
+      p.children.splice(i, 1, node as MockEl)
+      ;(node as MockEl & { parentRef?: MockEl }).parentRef = p
+    },
+    // appendMsg hasBody 判定读 childNodes.length（真实 DOM 与 children 同源；缺失时代理兜底为
+    // no-op 函数令 length=0，气泡被判无内容丢弃——工具卡/正文均不上屏）
+    get childNodes(): MockEl[] {
+      return el.children
     },
   }
   // classList 直接操作 className（与真实 DOM 语义一致：属性赋值与 classList 增删互不覆盖）
@@ -142,7 +159,7 @@ const doc = {
 // 动态 import：mock 之后加载依赖 DOM 的模块
 const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
-const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead } = await import("./tool-cards")
+const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead, renderToolArgsDone } = await import("./tool-cards")
 
 function fakeRun(overrides: Partial<RunState> = {}): RunState {
   return {
@@ -1202,6 +1219,65 @@ describe("code 参数折叠（write/patch/js 等长内容默认收起）", () =>
     __setToolCardMetaForTest([["write", { titleParams: ["path"], args: "code", codeField: "content" }]])
     const bubble = toolBubbleFor({ id: "tc2", role: "tool", name: "write", content: "", arguments: { path: "a.ts", content: "short" }, createdAt: 0 }, "")
     expect(bubble.querySelector("details.tool-fold")).toBeNull()
+  })
+})
+
+describe("超长参数折叠时机（执行/审批等待期完整直显，结果到达收敛折叠）", () => {
+  const longArgs = JSON.stringify({ cfg: { text: "x".repeat(1000) } }, null, 2)
+
+  test("实时调用卡（→ 文本路径）：超长参数完整直显，不折叠", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor({ id: "tf1", role: "tool", content: "", createdAt: 0 }, `→ some_tool ${longArgs}`)
+    expect(bubble.querySelector("details.tool-fold")).toBeNull()
+    // 参数完整展示（JSON 高亮块）且带完成态替换定位标记（tool-args）
+    expect(bubble.querySelector("pre.tool-code")).not.toBeNull()
+    expect(bubble.querySelector("pre.tool-args")).not.toBeNull()
+  })
+
+  test("历史回放卡（结构化路径）为已完成态：超长参数照常折叠", () => {
+    __setToolCardMetaForTest([])
+    const bubble = toolBubbleFor({ id: "tf2", role: "tool", name: "some_tool", content: "", arguments: { cfg: { text: "x".repeat(1000) } }, createdAt: 0 }, "")
+    expect(bubble.querySelector("details.tool-fold")).not.toBeNull()
+  })
+
+  test("完成态重渲染（renderToolArgsDone）：收敛为「查看参数」折叠块", () => {
+    __setToolCardMetaForTest([])
+    const done = renderToolArgsDone("some_tool", longArgs)
+    expect(done?.tagName).toBe("DETAILS")
+    expect(done?.className.split(" ")).toContain("tool-fold")
+    expect(done?.textContent).toContain("查看参数")
+  })
+
+  test("短参数执行中直显与完成态重渲染均不折叠（不引入多余折叠块）", () => {
+    __setToolCardMetaForTest([])
+    const shortArgs = JSON.stringify({ text: "hi" }, null, 2)
+    const bubble = toolBubbleFor({ id: "tf3", role: "tool", content: "", createdAt: 0 }, `→ some_tool ${shortArgs}`)
+    expect(bubble.querySelector("details.tool-fold")).toBeNull()
+    expect(renderToolArgsDone("some_tool", shortArgs)?.tagName).not.toBe("DETAILS")
+  })
+
+  test("结果到达 appendToolResult：参数区收敛为折叠块、头部完成态、配对清理", () => {
+    __setToolCardMetaForTest([])
+    const parent = makeMockEl("div")
+    const wrapper = appendMsg({ id: "tf4", role: "tool", content: `→ some_tool ${longArgs}`, createdAt: 0 }, false, parent as unknown as HTMLElement) as unknown as MockElWithQuery
+    const body = wrapper.querySelector("div.msg-body")
+    pendingTools.set(pendingToolsKey("s1", "tc-fold"), {
+      session: "s1",
+      kind: "tool",
+      name: "some_tool",
+      argsText: longArgs,
+      wrapper: wrapper as unknown as HTMLElement,
+      body: body as unknown as HTMLElement,
+    })
+    appendToolResult("s1", "tc-fold", "some_tool", "ok")
+    const bubble = wrapper.querySelector("div.bubble") as unknown as MockElWithQuery | null
+    // 执行中直显的参数被收敛为折叠块，头部更新为完成态
+    const fold = bubble?.querySelector("details.tool-fold") as unknown as MockElWithQuery | null | undefined
+    expect(fold).not.toBeNull()
+    expect(fold?.textContent).toContain("查看参数")
+    const head = bubble?.querySelector("div.tool-head") as unknown as MockElWithQuery | null | undefined
+    expect(head?.textContent).toContain("✓")
+    expect(pendingTools.get(pendingToolsKey("s1", "tc-fold"))).toBeUndefined()
   })
 })
 
