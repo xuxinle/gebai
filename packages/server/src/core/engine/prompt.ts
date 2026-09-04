@@ -42,7 +42,9 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用。`
     : ""
   const parts = [
-    `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
+    // 智能与智体概念模型（DESIGN「定位」）：行为化措辞（状态落盘、调用担责），非装饰性身份说明；
+    // 极简模式按提示词极简化原则不注入
+    `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体。你是智体：智能（模型）负责思考、无状态、可替换，记忆与责任都长在智体——需跨轮次/跨会话保留的结论与状态写入文件或会话记录；你的每次工具调用都是智体的行为，经审批执行、留痕可审计`,
     `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略；操作项目文件用文件工具的 project 参数——项目名或项目根路径，路径即相对所选项目根解析）${sandboxNote}`,
     ...(channelNote ? [channelNote] : []),
     ...(safeModeNote ? [safeModeNote] : []),
