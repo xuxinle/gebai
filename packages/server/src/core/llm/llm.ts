@@ -1,5 +1,6 @@
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 import { repairToolPairing } from "../session/store"
+import { runWithoutFetchProxy } from "../support/fetch-scope"
 
 export interface LLMToolDef {
   name: string
@@ -138,7 +139,9 @@ async function fetchRetry(url: string, init: RequestInit, retries = 2): Promise<
   for (let attempt = 0; ; attempt++) {
     let res: Response
     try {
-      res = await fetch(url, init)
+      // LLM 请求恒直连：豁免工具执行作用域的透明浏览器代理（agent_run 嵌套引擎的 SSE 流式
+      // 不可经浏览器中转缓冲），见 core/support/fetch-scope.ts
+      res = await runWithoutFetchProxy(() => fetch(url, init))
     } catch (err) {
       if ((err as Error).name === "AbortError") throw err
       if (attempt >= retries) throw err

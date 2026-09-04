@@ -3,7 +3,7 @@ import { artifactBlocks, truncate, assertPublicHttpUrl } from "../../core/tools"
 import type { ToolSchema } from "@gebai/sdk"
 import { copyFile, mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
-import { createLazyBridge, withSessionLock, type BridgeLike } from "./playwright_tools"
+import { createLazyBridge, withSessionLock, type BridgeLike } from "../../core/browser/bridge"
 
 /**
  * playwright 子Agent 会话类工具集：存储/仿真/下载/对话框/导出。

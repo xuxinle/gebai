@@ -3,7 +3,7 @@
  *
  * 背景：bun --compile 单二进制形态在用户机器上不可依赖 node_modules（`Bun.resolveSync`
  * 锚定真实 CWD 的可达性），playwright 模块须随产物内嵌。浏览器本体不内嵌：Windows 默认
- * 经 channel=msedge 驱动系统自带 Edge（见 playwright_tools.ts resolveChannel），Linux
+ * 经 channel=msedge 驱动系统自带 Edge（见 core/browser/bridge.ts resolveChannel），Linux
  * 服务端部署走 node_modules 的 playwright 包 + 已安装 chromium（回退路径）。
  * playwright-core 是多文件包树（无法像 driver.mjs/d2js 那样单文件内联），故整树按文件
  * gzip base64 内嵌，运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（与 d2js 同思路

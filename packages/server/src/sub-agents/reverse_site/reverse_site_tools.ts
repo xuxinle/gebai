@@ -1,7 +1,7 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { Tool, ToolResult, ToolSet } from "../../core/base/types"
 import { truncate, artifactBlocks, assertPublicHttpUrl, fetchWithRedirectGuard } from "../../core/tools"
-import { createLazyBridge, type BridgeLike } from "../playwright/playwright_tools"
+import { createLazyBridge, type BridgeLike } from "../../core/browser/bridge"
 
 /**
  * reverse_site 子Agent 工具集：接口逆向。

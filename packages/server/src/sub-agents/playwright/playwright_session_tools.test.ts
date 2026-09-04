@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "../../core/base/types"
 import { createPlaywrightSessionTools } from "./playwright_session_tools"
-import type { BridgeLike } from "./playwright_tools"
+import type { BridgeLike } from "../../core/browser/bridge"
 
 function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   const sid = "0123456789abcdef0123456789abcdef"
