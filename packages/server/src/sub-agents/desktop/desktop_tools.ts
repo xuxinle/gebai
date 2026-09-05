@@ -1,5 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { artifactBlocks } from "../../core/tools"
+import { parseRegion } from "../../core/tools/shared"
 import type { ToolSchema } from "@gebai/sdk"
 
 /**
@@ -74,14 +75,6 @@ function sendKeysEscape(s: string): string {
 function num(v: unknown, dflt: number): number {
   const n = Number(v)
   return Number.isFinite(n) ? n : dflt
-}
-
-/** region 参数校验：'x,y,w,h'，x/y 可为负（副屏在主屏左侧/上方时坐标为负），w/h 非负。desktop_cv_tools 复用。 */
-export function parseRegion(region: string): { x: number; y: number; w: number; h: number } | null {
-  const m = /^(-?\d+),(-?\d+),(\d+),(\d+)$/.exec(region.trim())
-  if (!m) return null
-  const [, x, y, w, h] = m
-  return { x: Number(x), y: Number(y), w: Number(w), h: Number(h) }
 }
 
 async function run(ctx: ToolContext, cmd: string, timeoutMs = 20000): Promise<ToolResult> {

@@ -297,7 +297,7 @@ describe("playwright tools", () => {
     for (const op of ["open", "click", "fill", "press", "select", "check", "hover", "dblclick", "drag", "upload", "evaluate", "new_page", "serve_dir", "emulate", "cookies", "local_storage", "storage_state"]) {
       expect(playwrightDef.requiresApproval?.[op]).toBe(true)
     }
-    for (const op of ["content", "screenshot", "pdf", "downloads", "dialogs", "pages", "wait_for", "switch_page", "close_page", "close"]) {
+    for (const op of ["content", "screenshot", "pdf", "downloads", "dialogs", "pages", "wait_for", "switch_page", "close_page", "close", "ocr", "locate", "locate_image"]) {
       expect(playwrightDef.requiresApproval?.[op]).toBeFalsy()
     }
   })
@@ -311,6 +311,7 @@ describe("playwright tools", () => {
       "open", "content", "screenshot", "click", "fill", "press", "select", "check", "hover", "dblclick", "drag", "upload",
       "wait_for", "evaluate", "pages", "new_page", "switch_page", "close_page", "close", "serve_dir",
       "pdf", "downloads", "dialogs", "emulate", "cookies", "local_storage", "storage_state",
+      "ocr", "locate", "locate_image",
     ]
     for (const t of expected) {
       expect(playwrightDef.tools?.[t]).toBeDefined()
