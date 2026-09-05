@@ -340,11 +340,15 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     expect(noIds.output).toContain("需要 ids")
     const bad = await selfOptimizeDef.tools!.backlog.execute({ action: "xx" }, c)
     expect(bad.output).toContain("无效的 action")
-    // 描述与提示词含离线优化引导（触发场景 + 暂存→全面优化流程）
+    // 描述与提示词含离线优化引导（触发场景 + 暂存→ask 确认时机→全面优化流程）
     expect(selfOptimizeDef.description).toContain("重复试错")
     expect(selfOptimizeDef.description).toContain("self_optimize_backlog")
     expect(selfOptimizeDef.systemPrompt).toContain("离线优化（暂存 → 集中全面优化）")
     expect(selfOptimizeDef.systemPrompt).toContain("action=resolve")
+    expect(selfOptimizeDef.systemPrompt).toContain("当场修复")
+    // add 输出引导 ask 确认处理时机（当场修复/后续集中）
+    expect(r1.output).toContain("当场修复")
+    expect(r1.output).toContain("后续集中全面优化")
     cleanup(home)
   })
 })
