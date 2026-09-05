@@ -6,7 +6,7 @@ import { deflateSync } from "node:zlib"
 import type { ToolContext } from "../../core/base/types"
 import type { RgbaImage } from "../../core/cv/image"
 import { setCvRunnerFactory, type CvRunner } from "../../core/cv/cv"
-import { ocrTool, locateTool, detectTool } from "./desktop_cv_tools"
+import { ocrTool, locateTool, locateImageTool, detectTool, waitForTool } from "./desktop_cv_tools"
 
 const ORIGINAL_PLATFORM = process.platform
 beforeAll(() => {
@@ -24,16 +24,74 @@ function chunk(type: string, data: number[]): number[] {
   return [...len, ...Array.from(type, (c) => c.charCodeAt(0)), ...data, 0, 0, 0, 0]
 }
 
-function pngBytes(w: number, h: number): Uint8Array {
+/** encodeRgba：RGBA 图 → PNG 字节；pngBytes(w,h)：统一灰；pngBytes(w,h,fill)：逐像素填充。 */
+function encodeRgba(img: RgbaImage): Uint8Array {
   const be32 = (v: number) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]
-  const ihdr = [...be32(w), ...be32(h), 8, 6, 0, 0, 0]
+  const ihdr = [...be32(img.width), ...be32(img.height), 8, 6, 0, 0, 0]
   const raw: number[] = []
-  for (let y = 0; y < h; y++) {
+  for (let y = 0; y < img.height; y++) {
     raw.push(0) // filter none
-    for (let x = 0; x < w; x++) raw.push(120, 120, 120, 255)
+    for (let x = 0; x < img.width; x++) {
+      const o = (y * img.width + x) * 4
+      raw.push(img.data[o], img.data[o + 1], img.data[o + 2], img.data[o + 3])
+    }
   }
   const idat = Array.from(deflateSync(Buffer.from(raw)))
   return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, ...chunk("IHDR", ihdr), ...chunk("IDAT", idat), ...chunk("IEND", [])])
+}
+
+function pngBytes(w: number, h: number, gray = 120): Uint8Array {
+  return encodeRgba({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4).fill(gray, 0, w * h * 4).map((v, i) => ((i & 3) === 3 ? 255 : v)) })
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** 渐变背景 + 伪随机纹理 patch 的合成搜索图（供模板匹配用例）。 */
+function makeSearchWithPatch(w: number, h: number, patch: RgbaImage, px: number, py: number, seed = 42): RgbaImage {
+  const rnd = mulberry32(seed)
+  const data = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const base = 60 + (x * 120) / w + (y * 40) / h + rnd() * 8
+      const o = (y * w + x) * 4
+      data[o] = base
+      data[o + 1] = base * 0.8 + rnd() * 6
+      data[o + 2] = 160 - base * 0.5
+      data[o + 3] = 255
+    }
+  }
+  for (let y = 0; y < patch.height; y++) {
+    for (let x = 0; x < patch.width; x++) {
+      const d = (py + y) * w + px + x
+      const s = y * patch.width + x
+      data[d * 4] = patch.data[s * 4]
+      data[d * 4 + 1] = patch.data[s * 4 + 1]
+      data[d * 4 + 2] = patch.data[s * 4 + 2]
+    }
+  }
+  return { width: w, height: h, data }
+}
+
+function makePatch(size: number, seed: number): RgbaImage {
+  const rnd = mulberry32(seed)
+  const data = new Uint8ClampedArray(size * size * 4)
+  for (let i = 0; i < size * size; i++) {
+    const v = 40 + rnd() * 200
+    data[i * 4] = v
+    data[i * 4 + 1] = 200 - v * 0.7
+    data[i * 4 + 2] = v * 0.5 + 30
+    data[i * 4 + 3] = 255
+  }
+  return { width: size, height: size, data }
 }
 
 /* ---------- ctx 工厂与假 runner ---------- */
@@ -151,7 +209,32 @@ describe("desktop cv tools", () => {
     expect(r.output).not.toContain("取消")
   })
 
-  test("ocr：现截全屏（runCommand 落盘 PNG）", async () => {
+  test("ocr：现截全屏（runCommand 落盘 PNG，固定文件名复用 + 虚拟屏幕 CAP 原点）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    let seenScript = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        if (cmd.includes("powershell")) {
+          const script = decodeCmd(cmd)
+          seenScript = script
+          const m = script.match(/'([^']+\.png)'/)
+          if (m) await Bun.write(m[1], pngBytes(300, 200))
+        }
+        return { stdout: "CAP 0,0", stderr: "", code: 0 }
+      },
+    })
+    const r = await ocrTool.execute({}, c)
+    // 固定文件名复用（不再 cv_capture_<时间戳> 只增不减）；全屏=虚拟屏幕 + DPI 感知
+    expect(seenScript).toContain("cv_capture.png")
+    expect(seenScript).not.toMatch(/cv_capture_\d+/)
+    expect(seenScript).toContain("VirtualScreen")
+    expect(seenScript).toContain("SetProcessDPIAware")
+    expect(r.output).toContain("全屏=虚拟屏幕")
+    expect(seen.img?.width).toBe(300)
+    expect((r.data as { lines: unknown[] }).lines.length).toBe(3)
+  })
+
+  test("ocr：现截全屏 CAP 负原点 → 坐标映射回主屏原点（副屏负坐标）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
     const c = ctx(home, {
       runCommand: async (cmd) => {
@@ -159,13 +242,45 @@ describe("desktop cv tools", () => {
           const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
           if (m) await Bun.write(m[1], pngBytes(300, 200))
         }
-        return { stdout: "OK", stderr: "", code: 0 }
+        return { stdout: "CAP -2560,0", stderr: "", code: 0 }
       },
     })
     const r = await ocrTool.execute({}, c)
-    expect(r.output).toContain("当前屏幕（全屏）")
-    expect(seen.img?.width).toBe(300)
-    expect((r.data as { lines: unknown[] }).lines.length).toBe(3)
+    const data = r.data as { lines: Array<{ x: number; y: number }> }
+    // 虚拟屏幕原点 (-2560,0)：PNG 内 (10,20) 的行映射回主屏原点坐标 (-2550, 20)
+    expect(data.lines[0].x).toBe(-2550)
+    expect(data.lines[0].y).toBe(20)
+  })
+
+  test("ocr：现截 + region 不双重裁剪（区域截图直接使用，坐标偏移=区域原点）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        if (cmd.includes("powershell")) {
+          const script = decodeCmd(cmd)
+          const m = script.match(/'([^']+\.png)'/)
+          // 模拟区域截图：落盘的 PNG 就是区域尺寸（100x60），不应再被裁小
+          if (m) await Bun.write(m[1], pngBytes(100, 60))
+        }
+        return { stdout: "CAP 50,40", stderr: "", code: 0 }
+      },
+    })
+    const r = await ocrTool.execute({ region: "50,40,100,60" }, c)
+    expect(seen.img?.width).toBe(100)
+    expect(seen.img?.height).toBe(60)
+    const data = r.data as { lines: Array<{ x: number; y: number }> }
+    expect(data.lines[0].x).toBe(60) // 10 + 50（区域原点偏移）
+    expect(data.lines[0].y).toBe(60) // 20 + 40
+  })
+
+  test("ocr：region 支持负坐标（副屏区域）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home)
+    await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
+    const r = await ocrTool.execute({ image: "shot.png", region: "-100,0,200,100" }, c)
+    expect(r.output).toContain("区域 -100,0,200,100")
+    const data = r.data as { lines: Array<{ x: number }> }
+    expect(data.lines[0].x).toBe(-90) // 10 + (-100)
   })
 
   test("ocr：超过 200 行截断提示", async () => {
@@ -249,5 +364,145 @@ describe("desktop cv tools", () => {
     const data = r.data as { objects: Array<{ label: string; x: number }> }
     expect(data.objects[0].label).toBe("icon_save")
     expect(data.objects[0].x).toBe(12)
+  })
+
+  test("locate_image：template PNG 路径定位图标，返回中心坐标", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home)
+    const patch = makePatch(24, 99)
+    await Bun.write(join(c.workdir!, "shot.png"), encodeRgba(makeSearchWithPatch(200, 100, patch, 60, 40)))
+    await Bun.write(join(c.workdir!, "icon.png"), encodeRgba(patch))
+    const r = await locateImageTool.execute({ template: "icon.png", image: "shot.png" }, c)
+    expect(r.output).toContain("中心 (72,52)") // 60+12, 40+12
+    expect(r.output).toContain("mouse_click(72, 52)")
+    const data = r.data as { found: boolean; best: { center: number[]; score: number } }
+    expect(data.found).toBe(true)
+    expect(data.best.center).toEqual([72, 52])
+    expect(data.best.score).toBeGreaterThan(0.9)
+  })
+
+  test("locate_image：template_region 在搜索图内取模板 + region 偏移映射", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home)
+    const patch = makePatch(24, 55)
+    // patch 贴在全图 (60,40)；搜索 region "50,0,150,100" 裁剪后 patch 在裁剪系 (10,40)
+    await Bun.write(join(c.workdir!, "shot.png"), encodeRgba(makeSearchWithPatch(200, 100, patch, 60, 40)))
+    const r = await locateImageTool.execute({ template_region: "10,40,24,24", image: "shot.png", region: "50,0,150,100" }, c)
+    expect(r.output).toContain("中心 (72,52)") // 10+12+50（region 原点偏移）, 40+12
+    const data = r.data as { found: boolean }
+    expect(data.found).toBe(true)
+  })
+
+  test("locate_image：模板与 template_region 二选一必填；越界报错；未找到给建议", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home)
+    await Bun.write(join(c.workdir!, "shot.png"), encodeRgba(makeSearchWithPatch(200, 100, makePatch(24, 1), 60, 40)))
+    let r = await locateImageTool.execute({ image: "shot.png" }, c)
+    expect(r.output).toContain("二者之一")
+    r = await locateImageTool.execute({ template_region: "180,80,24,24", image: "shot.png" }, c)
+    expect(r.output).toContain("超出搜索图范围")
+    // 不存在的模板：独立随机 patch（与搜索图内容无关）→ 未找到给建议
+    await Bun.write(join(c.workdir!, "absent.png"), encodeRgba(makePatch(24, 777)))
+    r = await locateImageTool.execute({ template: "absent.png", image: "shot.png" }, c)
+    expect(r.output).toContain("未找到")
+    expect(r.output).toContain("desktop_locate")
+  })
+
+  test("wait_for：text 模式轮询至文字出现", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    let calls = 0
+    setCvRunnerFactory(() => ({
+      ocr: async () => {
+        calls++
+        return calls <= 1
+          ? [{ text: "加载中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
+          : [{ text: "完成", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
+      },
+      detect: async () => [],
+    }))
+    try {
+      const c = ctx(home, {
+        runCommand: async (cmd) => {
+          if (cmd.includes("powershell")) {
+            const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+            if (m) await Bun.write(m[1], pngBytes(300, 200))
+          }
+          return { stdout: "CAP 0,0", stderr: "", code: 0 }
+        },
+      })
+      const r = await waitForTool.execute({ mode: "text", text: "完成", interval_s: 0.5, timeout_s: 10 }, c)
+      expect(r.output).toContain("已满足")
+      expect(r.output).toContain("「完成」")
+      expect(r.output).toContain("次轮询")
+    } finally {
+      installDefaultFake()
+    }
+  })
+
+  test("wait_for：text_gone 等待文字消失；缺 text 报错", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    let calls = 0
+    setCvRunnerFactory(() => ({
+      ocr: async () => {
+        calls++
+        return calls <= 1 ? [{ text: "保存中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }] : []
+      },
+      detect: async () => [],
+    }))
+    try {
+      const c = ctx(home, {
+        runCommand: async (cmd) => {
+          if (cmd.includes("powershell")) {
+            const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+            if (m) await Bun.write(m[1], pngBytes(300, 200))
+          }
+          return { stdout: "CAP 0,0", stderr: "", code: 0 }
+        },
+      })
+      const r = await waitForTool.execute({ mode: "text_gone", text: "保存中", interval_s: 0.5, timeout_s: 10 }, c)
+      expect(r.output).toContain("已消失")
+      const bad = await waitForTool.execute({ mode: "text" }, ctx(home))
+      expect(bad.output).toContain("text 参数")
+    } finally {
+      installDefaultFake()
+    }
+  })
+
+  test("wait_for：超时返回最后观察状态（不视为错误）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    setCvRunnerFactory(() => fakeRunner([{ text: "加载中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]))
+    try {
+      const c = ctx(home, {
+        runCommand: async (cmd) => {
+          if (cmd.includes("powershell")) {
+            const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+            if (m) await Bun.write(m[1], pngBytes(300, 200))
+          }
+          return { stdout: "CAP 0,0", stderr: "", code: 0 }
+        },
+      })
+      const r = await waitForTool.execute({ mode: "text", text: "完成", interval_s: 0.5, timeout_s: 1 }, c)
+      expect(r.output).toContain("等待超时")
+      expect(r.output).toContain("不在当前画面中")
+    } finally {
+      installDefaultFake()
+    }
+  })
+
+  test("wait_for：change 模式检测画面变化（灰度采样差）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    let captures = 0
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        if (cmd.includes("powershell")) {
+          const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+          if (m) await Bun.write(m[1], pngBytes(300, 200, ++captures <= 2 ? 120 : 200))
+        }
+        return { stdout: "CAP 0,0", stderr: "", code: 0 }
+      },
+    })
+    const r = await waitForTool.execute({ mode: "change", interval_s: 0.5, timeout_s: 10 }, c)
+    expect(r.output).toContain("已满足")
+    expect(r.output).toContain("画面已变化")
   })
 })

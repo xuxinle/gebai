@@ -7,10 +7,14 @@ import {
   screenshotTool,
   windowListTool,
   windowFocusTool,
+  windowStateTool,
   typeTextTool,
   keyPressTool,
   mouseClickTool,
+  mouseScrollTool,
+  mouseDragTool,
   clipboardReadTool,
+  clipboardWriteTool,
   screenInfoTool,
   detectSensitive,
 } from "./desktop_tools"
@@ -96,8 +100,10 @@ describe("desktop tools", () => {
     const r = await screenshotTool.execute({}, c)
     expect(seenCmd).toContain("powershell")
     expect(seenCmd).toContain("-EncodedCommand")
-    // 全屏 bounds 必须带 Screen 类限定符（裸 PrimaryScreen.Bounds 不是可调用的命令）
-    expect(decodeCmd(seenCmd)).toContain("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds")
+    const script = decodeCmd(seenCmd)
+    // 全屏 = 虚拟屏幕（覆盖所有显示器，副屏可为负坐标）；脚本声明 DPI 感知（物理像素坐标）
+    expect(script).toContain("[System.Windows.Forms.SystemInformation]::VirtualScreen")
+    expect(script).toContain("SetProcessDPIAware")
     expect(r.blocks?.[0]).toMatchObject({ type: "image", name: expect.stringMatching(/^screenshot_\d+\.png$/) })
     // 文件已落盘
     const { readdir } = await import("node:fs/promises")
@@ -111,6 +117,24 @@ describe("desktop tools", () => {
     expect(r.output).toContain("region 格式错误")
   })
 
+  test("screenshot accepts negative-coordinate region (副屏)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        if (cmd.includes("powershell")) seenCmd = cmd
+        const script = decodeCmd(cmd)
+        const m = script.match(/'([^']+\.png)'/)
+        if (m) await c.writeFile(m[1], "")
+        return { stdout: "STAT -2560,0 2560x1440 mean=60.0 colors=500", stderr: "", code: 0 }
+      },
+    })
+    const r = await screenshotTool.execute({ region: "-2560,0,2560,1440" }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain("New-Object System.Drawing.Rectangle(-2560, 0, 2560, 1440)")
+    expect(r.output).toContain("原点 (-2560,0)")
+  })
+
   test("screenshot with region uses Rectangle bounds", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
     let seenCmd = ""
@@ -120,22 +144,29 @@ describe("desktop tools", () => {
         const script = decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
-        return { stdout: "STAT 800x600 mean=60.0 colors=500", stderr: "", code: 0 }
+        return { stdout: "STAT 10,20 800x600 mean=60.0 colors=500", stderr: "", code: 0 }
       },
     })
     await screenshotTool.execute({ region: "10,20,800,600" }, c)
     expect(decodeCmd(seenCmd)).toContain("New-Object System.Drawing.Rectangle(10, 20, 800, 600)")
   })
 
-  test("window_list parses TSV output into aligned table", async () => {
+  test("window_list parses TSV output into aligned table with foreground marker and bounds", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
     const c = ctx(home, {
-      runCommand: async () => ({ stdout: "1234\tnotepad\t无标题 - 记事本\n5678\tchrome\tGitHub - 工作", stderr: "", code: 0 }),
+      runCommand: async () => ({
+        stdout: "1234\tnotepad\t*\t100,100,800,600\t无标题 - 记事本\n5678\tchrome\t\t1920,0,1200,900\tGitHub - 工作",
+        stderr: "",
+        code: 0,
+      }),
     })
     const r = await windowListTool.execute({}, c)
     expect(r.output).toContain("共 2 个窗口")
     expect(r.output).toContain("notepad")
     expect(r.output).toContain("chrome")
+    // 前台标记解析：* 行进程进入「当前前台」行；bounds 列原样保留
+    expect(r.output).toContain("当前前台: notepad")
+    expect(r.output).toContain("100,100,800,600")
   })
 
   test("window_focus requires pid or title", async () => {
@@ -282,7 +313,7 @@ describe("desktop tools", () => {
         const script = decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
-        return { stdout: "STAT 1920x1080 mean=3.2 colors=4", stderr: "", code: 0 }
+        return { stdout: "STAT 0,0 1920x1080 mean=3.2 colors=4", stderr: "", code: 0 }
       },
     })
     const r = await screenshotTool.execute({}, c)
@@ -298,7 +329,7 @@ describe("desktop tools", () => {
         const script = decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
-        return { stdout: "STAT 800x600 mean=25.0 colors=3", stderr: "", code: 0 }
+        return { stdout: "STAT 0,0 800x600 mean=25.0 colors=3", stderr: "", code: 0 }
       },
     })
     const r = await screenshotTool.execute({}, c)
@@ -312,7 +343,7 @@ describe("desktop tools", () => {
         const script = decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
-        return { stdout: "STAT 1920x1080 mean=128.4 colors=2000", stderr: "", code: 0 }
+        return { stdout: "STAT 0,0 1920x1080 mean=128.4 colors=2000", stderr: "", code: 0 }
       },
     })
     const r = await screenshotTool.execute({}, c)
@@ -342,6 +373,15 @@ describe("desktop tools", () => {
     expect(detectSensitive("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")).not.toBeNull()
     expect(detectSensitive("今天天气不错")).toBeNull()
     expect(detectSensitive("Hello world 123")).toBeNull()
+  })
+
+  test("detectSensitive long-token heuristic: 40+ 混合非纯hex 才命中", () => {
+    // 40+ 字母数字混合且非纯十六进制 → 命中（疑似随机令牌）
+    expect(detectSensitive("ghp_Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78")).not.toBeNull()
+    // 纯十六进制 40 位（git commit sha）→ 不命中
+    expect(detectSensitive("commit 14d529dfafa48fdbf1a0e3f2c4a5b6c7d8e9f0a1")).toBeNull()
+    // 40+ 纯字母（英文长句片段，无数字混排）→ 不命中
+    expect(detectSensitive("thequickbrownfoxjumpsoverthelazydogandrunsaway")).toBeNull()
   })
 
   test("key_press sends SendKeys command", async () => {
@@ -459,6 +499,98 @@ describe("desktop tools", () => {
       Object.defineProperty(process, "platform", { value: original })
     }
   })
+
+  test("mouse_scroll sends wheel event with signed units and direction mapping", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已向下滚动 3 格 (100, 200)", stderr: "", code: 0 }
+      },
+    })
+    await mouseScrollTool.execute({ x: 100, y: 200, direction: "down", amount: 3 }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain("SetCursorPos(100, 200)")
+    expect(script).toContain("mouse_event(0x0800, 0, 0, -360") // 垂直滚轮 flag + 向下负值（每格 120）
+    // 水平向右：HWHEEL flag + 正值
+    await mouseScrollTool.execute({ x: 1, y: 2, direction: "right", amount: 2 }, c)
+    expect(decodeCmd(seenCmd)).toContain("mouse_event(0x1000, 0, 0, 240")
+  })
+
+  test("mouse_drag presses, interpolates and releases between endpoints", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已拖拽 (10, 20) → (110, 220)", stderr: "", code: 0 }
+      },
+    })
+    const r = await mouseDragTool.execute({ from_x: 10, from_y: 20, to_x: 110, to_y: 220 }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain("mouse_event(0x0002") // 左键按下
+    expect(script).toContain("mouse_event(0x0004") // 左键抬起
+    expect(script).toContain("$steps = 12") // 插值移动（适配依赖真实轨迹的目标）
+    expect(r.output).toContain("(10, 20) → (110, 220)")
+  })
+
+  test("window_state maps actions to ShowWindow codes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已最小化: notepad (PID 1234) - 无标题", stderr: "", code: 0 }
+      },
+    })
+    await windowStateTool.execute({ action: "minimize", pid: 1234 }, c)
+    expect(decodeCmd(seenCmd)).toContain("ShowWindow($p.MainWindowHandle, 6)")
+    await windowStateTool.execute({ action: "close", pid: 1234 }, c)
+    expect(decodeCmd(seenCmd)).toContain("ShowWindow($p.MainWindowHandle, 0)") // SW_CLOSE → WM_CLOSE 优雅关闭
+    const r = await windowStateTool.execute({ action: "restore" }, ctx(home))
+    expect(r.output).toContain("pid 或 title")
+  })
+
+  test("clipboard_write verifies write-back and previews content", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已写入", stderr: "", code: 0 }
+      },
+    })
+    const r = await clipboardWriteTool.execute({ text: "给用户复制的内容" }, c)
+    const script = decodeCmd(seenCmd)
+    expect(script).toContain("Set-Clipboard -Value $want")
+    expect(script).toContain("-ceq $want") // 写入回验（剪贴板管理软件拦截防护）
+    expect(r.output).toContain("已写入 8 字符")
+    expect(r.output).toContain("给用户复制的内容")
+    expect(r.output).not.toContain("⚠️")
+  })
+
+  test("clipboard_write warns (not aborts) on sensitive content and surfaces failure", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已写入", stderr: "", code: 0 }
+      },
+    })
+    // 写剪贴板是「交给用户粘贴」的场景：敏感值告警但不中止（与 type_text 拦截不同）
+    const r = await clipboardWriteTool.execute({ text: "sk-abcdef0123456789" }, c)
+    expect(seenCmd).not.toBe("")
+    expect(r.output).toContain("⚠️ 内容含疑似敏感信息")
+    // 写入未生效诚实上报
+    const fail = ctx(home, {
+      runCommand: async () => ({ stdout: "写入失败: 剪贴板写入未生效（可能被剪贴板管理软件拦截），原剪贴板可能已被部分修改", stderr: "", code: 0 }),
+    })
+    const r2 = await clipboardWriteTool.execute({ text: "x" }, fail)
+    expect(r2.output).toContain("写入失败")
+    expect(r2.output).not.toContain("内容预览")
+  })
 })
 
 describe("desktop definition", () => {
@@ -475,16 +607,53 @@ describe("desktop definition", () => {
       type_text: true,
       key_press: true,
       mouse_click: true,
+      mouse_scroll: true,
+      mouse_drag: true,
       window_focus: true,
+      window_state: true,
+      clipboard_write: true,
     })
     expect(desktopDef.requiresApproval?.screenshot).toBeFalsy()
     expect(desktopDef.requiresApproval?.window_list).toBeFalsy()
+    expect(desktopDef.requiresApproval?.locate_image).toBeFalsy()
+    expect(desktopDef.requiresApproval?.wait_for).toBeFalsy()
+  })
+
+  test("systemPrompt 覆盖新能力与多显示器语义", () => {
+    const p = desktopDef.systemPrompt
+    expect(p).toContain("desktop_locate_image")
+    expect(p).toContain("desktop_wait_for")
+    expect(p).toContain("mouse_scroll")
+    expect(p).toContain("mouse_drag")
+    expect(p).toContain("window_state")
+    expect(p).toContain("虚拟屏幕")
+    expect(p).toContain("clipboard_write")
   })
 
   test("preload off and tools registered (独有工具 only——编排用全局 agent_run，不复刻)", () => {
     expect(desktopDef.preload).toBe(false)
     expect(Object.keys(desktopDef.tools ?? {}).sort()).toEqual(
-      ["clipboard_read", "detect", "key_press", "locate", "mouse_click", "mouse_move", "ocr", "screen_info", "screenshot", "type_text", "window_focus", "window_list", "window_move"].sort(),
+      [
+        "clipboard_read",
+        "clipboard_write",
+        "detect",
+        "key_press",
+        "locate",
+        "locate_image",
+        "mouse_click",
+        "mouse_drag",
+        "mouse_move",
+        "mouse_scroll",
+        "ocr",
+        "screen_info",
+        "screenshot",
+        "type_text",
+        "wait_for",
+        "window_focus",
+        "window_list",
+        "window_move",
+        "window_state",
+      ].sort(),
     )
   })
 })
