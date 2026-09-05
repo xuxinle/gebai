@@ -33,6 +33,10 @@ export const sessionHandlers: Record<string, WsHandler> = {
     await d.store.rename(String(p.id), String(p.name), user.id)
     return reply(true)
   },
+  "session.pin": async ({ d, user, p, reply }) => {
+    await d.store.setPinned(String(p.id), p.pinned === true, user.id)
+    return reply(true)
+  },
   "session.switch": async ({ d, user, p, conn, reply }) => {
     // 切换连接级当前会话（校验归属；当前会话持久化到每用户状态，重连/重启自动恢复）
     const s = await d.store.load(String(p.id), user.id)

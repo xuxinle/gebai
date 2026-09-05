@@ -215,6 +215,52 @@ describe("SessionStore context tokens", () => {
   })
 })
 
+describe("SessionStore pinned", () => {
+  test("setPinned 持久化且不刷新 updatedAt；取消置顶清字段；toSessionInfo 归一为 boolean", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pin-"))
+    const store = new SessionStore({ home })
+    const session = await store.createSession("default")
+    const ts0 = session.updatedAt
+    await new Promise((r) => setTimeout(r, 5)) // 保证与 Date.now() 有区分度（touch 回归可被捕获）
+    await store.setPinned(session.id, true, "default")
+    // 新实例读盘验证持久化（绕过内存缓存）
+    const store2 = new SessionStore({ home })
+    const pinned = await store2.load(session.id, "default")
+    expect(pinned!.pinned).toBe(true)
+    expect(pinned!.updatedAt).toBe(ts0) // 置顶是元数据操作，不动排序基线
+    expect(toSessionInfo(pinned!).pinned).toBe(true)
+    // 取消置顶：字段清除（落盘干净），updatedAt 依旧不动
+    await store.setPinned(session.id, false, "default")
+    const store3 = new SessionStore({ home })
+    const unpinned = await store3.load(session.id, "default")
+    expect(unpinned!.pinned).toBeUndefined()
+    expect(unpinned!.updatedAt).toBe(ts0)
+    expect(toSessionInfo(unpinned!).pinned).toBe(false)
+    cleanup(home)
+  })
+
+  test("listSessions 置顶优先（置顶的旧会话排在未置顶的新会话前）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pin2-"))
+    const store = new SessionStore({ home })
+    const old = await store.createSession("default", "old")
+    await new Promise((r) => setTimeout(r, 5))
+    const fresh = await store.createSession("default", "fresh")
+    await store.setPinned(old.id, true, "default")
+    const list = await store.listSessions("default")
+    expect(list[0].id).toBe(old.id)
+    expect(list[1].id).toBe(fresh.id)
+    cleanup(home)
+  })
+
+  test("setPinned 归属校验：跨用户操作抛 session not found", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pin3-"))
+    const store = new SessionStore({ home })
+    const session = await store.createSession("alice")
+    await expect(store.setPinned(session.id, true, "bob")).rejects.toThrow("session not found")
+    cleanup(home)
+  })
+})
+
 describe("EnvManager precedence", () => {
   test("session（内存态）> global，会话 env 零落盘（服务端不留存）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-env-"))

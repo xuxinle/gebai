@@ -146,6 +146,7 @@ class GebaiClient {
   getSession(id: string): Promise<SessionInfo>
   deleteSession(id: string): Promise<void>
   renameSession(id: string, name: string): Promise<void>
+  pinSession(id: string, pinned: boolean): Promise<void> // 置顶/取消置顶（不刷新 updatedAt）
   switchSession(id: string): Promise<void>
   getCurrentSession(): Promise<SessionInfo | null>
   // 环境变量（会话内存态，不落盘；用户环境变量只存浏览器本地）
@@ -1151,7 +1152,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **会话记录保存子Agent 装载状态**：`loadedSubAgents` 字段（已装载名单）+ `loadedAgent` 标记的 system 消息（完整提示词，UI 渲染为简短装载提示）；恢复历史会话时引擎自动按名单重新注册工具（`ensureSessionAgents`，幂等）——会话按保存的文件完全恢复状态；新会话首次运行按启动预载名单（`GEBAI_PRELOAD_SUB_AGENTS`）初始化，未配置默认不预载任何子Agent
 - 会话归属校验：仅会话所有者可访问（服务模式）
 - 列表查询时基于消息内容的哈希去重
-- 支持会话创建、切换、重命名、删除
+- 支持会话创建、切换、重命名、置顶、删除
+- **会话置顶**：`pinned` 字段（chat.json 持久化，未定义 = 未置顶，旧格式天然兼容）标记重要会话；列表查询置顶优先、组内按更新时间倒序；置顶/取消为元数据操作，**不刷新 `updatedAt`**（不动排序基线，旧会话置顶不会跳入时间分组）；前端「置顶」独立分组脱离时间分组展示
 - 支持会话级的审批跳过（`/approval-skip`）
 
 ### 用户反馈
@@ -1924,6 +1926,7 @@ WebSocket 消息格式（JSON）：
 | `session.get` | 获取会话详情 |
 | `session.delete` | 删除会话 |
 | `session.rename` | 重命名会话 |
+| `session.pin` | 置顶/取消置顶会话（`pinned` 布尔；元数据操作不刷新 `updatedAt`） |
 | `session.switch` | 切换当前会话 |
 | `session.env.get` | 获取会话环境变量（内存态，含来源层级） |
 | `session.env.set` | 设置/覆盖/删除会话环境变量（内存写入，不落盘） |
@@ -1991,7 +1994,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/users` | GET/POST | 用户列表/创建（服务模式，管理员） |
 | `/api/v1/users/:id` | PATCH/DELETE | 用户启用/禁用/删除（管理员） |
 | `/api/v1/sessions` | GET/POST | 会话列表/创建 |
-| `/api/v1/sessions/:id` | GET/DELETE/PATCH | 会话详情/删除/重命名 |
+| `/api/v1/sessions/:id` | GET/DELETE/PATCH | 会话详情/删除/重命名与置顶（PATCH body：`name` / `pinned`） |
 | `/api/v1/sessions/:id/prompt` | POST | 发送消息，**非流式 JSON 返回**（同步等待任务完成，`{ message: 最终 assistant 消息, error?: 任务错误 }`）；body 支持附件引用、`env`（浏览器本地环境变量，临时注入仅本次任务生效，不持久化）、`messageId`（可选：客户端生成的用户消息 id，撤回/反馈定位用；非法格式服务端回退自动生成）、`interactionMode`（默认 `none`）与 `stream`（默认 `false` 仅最终响应）、`autoApprove`（可选布尔：`true` 需审批工具自动通过/`false` 无交互通道下直接拒绝，缺省通道默认姿态——本地自动通过、服务模式拒绝，见「交互模式」）；缺 `prompt` 返回 400；**流式输出请走 WebSocket（`/ws`）** |
 | `/api/v1/chat` | POST | **单 HTTP 一站式调用**：一次请求完成「建会话（`sessionId` 缺省自动创建，`name` 可选命名）→ 执行任务 → 返回最终回复」，返回 `{ sessionId, message: 最终 assistant 消息, error? }`（`sessionId` 供后续请求续聊多轮）；带 `sessionId` 在既有会话续聊（id 白名单校验 400 / 不存在或非本人 404）；`interactionMode` 固定 `none`，body 其余字段（`prompt` 必填 400、附件/env/messageId/stream）与 `prompt` 端点同规则，`autoApprove` 支持自动审批（与 `prompt` 端点同语义）；与 `prompt` 共用每用户速率限制桶 |
 | `/api/v1/sessions/:id/attachments` | POST | 上传附件（multipart，多模态内容），返回会话内引用路径 |

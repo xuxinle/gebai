@@ -43,6 +43,9 @@ export interface SessionData {
   ctxAtMessage?: number
   /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
   dynamicTools?: import("../base/types").DynamicToolDef[]
+  /** 会话置顶标记（chat.json 持久化）：置顶会话在列表置顶分组置前展示；
+   *  未定义 = 未置顶（旧格式天然兼容）。置顶/取消不刷新 updatedAt（元数据操作不动排序基线）。 */
+  pinned?: boolean
 }
 
 /** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。 */
@@ -56,6 +59,7 @@ export function toSessionInfo(s: SessionData): SessionInfo {
     updatedAt: s.updatedAt,
     ctxTokens: s.ctxTokens ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
     ctxCachedTokens: s.ctxCachedTokens,
+    pinned: s.pinned ?? false,
   }
 }
 
@@ -291,7 +295,8 @@ export class SessionStore {
       }
     })
     this.indexedPathsByUser.set(userId, index)
-    return out.sort((a, b) => b.updatedAt - a.updatedAt)
+    // 置顶优先，组内按更新时间倒序
+    return out.sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false) || b.updatedAt - a.updatedAt)
   }
 
   /**
@@ -317,8 +322,9 @@ export class SessionStore {
     }
   }
 
-  async save(session: SessionData): Promise<void> {
-    session.updatedAt = Date.now()
+  /** touch: false 跳过 updatedAt 刷新（置顶等元数据操作专用——不动排序基线，旧会话置顶不跳组）。 */
+  async save(session: SessionData, opts: { touch?: boolean } = {}): Promise<void> {
+    if (opts.touch !== false) session.updatedAt = Date.now()
     const dir = this.dir(session.userId, session.id)
     await this.ensureDir(dir)
     // 原子写（tmp + rename）：每条消息都全量重写 chat.json，进程崩溃/断电/磁盘满中断在写入中途
@@ -449,6 +455,14 @@ export class SessionStore {
     if (!session) throw new Error(`session not found: ${sessionId}`)
     session.name = name
     await this.save(session)
+  }
+
+  /** 置顶/取消置顶（元数据操作）：不刷新 updatedAt，取消时清字段保持落盘干净。 */
+  async setPinned(sessionId: string, pinned: boolean, userId?: string): Promise<void> {
+    const session = await this.load(sessionId, userId)
+    if (!session) throw new Error(`session not found: ${sessionId}`)
+    session.pinned = pinned || undefined
+    await this.save(session, { touch: false })
   }
 
   async delete(sessionId: string, userId?: string): Promise<void> {

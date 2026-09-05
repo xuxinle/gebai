@@ -411,6 +411,8 @@ aside {
 /* 会话图标：冗余（每个会话前面都是同一个 💬，无辨识度）—— 直接隐藏，节省空间 */
 .session-ico { display: none; }
 #session-list li.active .session-ico { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+/* 会话置顶标识（📌 行首）：字号收敛不抢名称焦点 */
+.session-pin { flex: none; font-size: 11px; opacity: .9; }
 /* 会话列表条目正文（名称容器）。作用域限定 #session-list：messages.ts 的 agent_run
    折叠容器正文是同名类 .session-body（.session-run .session-body）——此前全局规则把
    display:flex 意外供给它（其内部消息对齐实际依赖 flex 列，chat.css 中已显式声明），

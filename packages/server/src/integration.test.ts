@@ -59,6 +59,18 @@ describe("REST API", () => {
     expect(del.status).toBe(200)
   })
 
+  test("session patch pinned（置顶/取消，列表归一返回）", async () => {
+    const created = await (await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "pin" }) })).json() as { id: string }
+    const res = await fetch(`${base()}/api/v1/sessions/${created.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pinned: true }) })
+    expect(res.status).toBe(200)
+    const list = await (await fetch(`${base()}/api/v1/sessions`)).json() as Array<{ id: string; pinned?: boolean }>
+    expect(list.find((s) => s.id === created.id)?.pinned).toBe(true)
+    await fetch(`${base()}/api/v1/sessions/${created.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pinned: false }) })
+    const list2 = await (await fetch(`${base()}/api/v1/sessions`)).json() as Array<{ id: string; pinned?: boolean }>
+    expect(list2.find((s) => s.id === created.id)?.pinned).toBe(false)
+    await fetch(`${base()}/api/v1/sessions/${created.id}`, { method: "DELETE" })
+  })
+
   test("files/content serves binary files intact (PNG bytes + image/png)", async () => {
     const created = await (await fetch(`${base()}/api/v1/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "img" }) })).json() as { id: string }
     // 1x1 红色 PNG：验证二进制不被 text() 解码损坏（曾导致前端 <img> 无法显示）
