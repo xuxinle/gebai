@@ -101,7 +101,7 @@ export const screenshotTool: Tool = {
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      let bounds = "PrimaryScreen.Bounds"
+      let bounds = "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds"
       if (region) {
         const [x, y, w, h] = region.split(",").map(Number)
         bounds = `New-Object System.Drawing.Rectangle(${x}, ${y}, ${w}, ${h})`
