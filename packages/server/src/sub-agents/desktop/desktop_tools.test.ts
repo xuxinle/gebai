@@ -96,6 +96,8 @@ describe("desktop tools", () => {
     const r = await screenshotTool.execute({}, c)
     expect(seenCmd).toContain("powershell")
     expect(seenCmd).toContain("-EncodedCommand")
+    // 全屏 bounds 必须带 Screen 类限定符（裸 PrimaryScreen.Bounds 不是可调用的命令）
+    expect(decodeCmd(seenCmd)).toContain("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds")
     expect(r.blocks?.[0]).toMatchObject({ type: "image", name: expect.stringMatching(/^screenshot_\d+\.png$/) })
     // 文件已落盘
     const { readdir } = await import("node:fs/promises")
@@ -107,6 +109,22 @@ describe("desktop tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
     const r = await screenshotTool.execute({ region: "abc" }, ctx(home))
     expect(r.output).toContain("region 格式错误")
+  })
+
+  test("screenshot with region uses Rectangle bounds", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        if (cmd.includes("powershell")) seenCmd = cmd
+        const script = decodeCmd(cmd)
+        const m = script.match(/'([^']+\.png)'/)
+        if (m) await c.writeFile(m[1], "")
+        return { stdout: "STAT 800x600 mean=60.0 colors=500", stderr: "", code: 0 }
+      },
+    })
+    await screenshotTool.execute({ region: "10,20,800,600" }, c)
+    expect(decodeCmd(seenCmd)).toContain("New-Object System.Drawing.Rectangle(10, 20, 800, 600)")
   })
 
   test("window_list parses TSV output into aligned table", async () => {
