@@ -150,18 +150,57 @@ describe("desktop tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         seenCmd = cmd
-        return { stdout: "已输入 3 字符", stderr: "", code: 0 }
+        return { stdout: "已输入 3 字符（剪贴板已恢复原内容）", stderr: "", code: 0 }
       },
     })
     const r = await typeTextTool.execute({ text: "你好GEBAI" }, c)
     expect(r.output).toContain("已输入")
     expect(r.output).toContain("内容预览")
     expect(seenCmd).toContain("powershell")
-    // 脚本内通过 base64 注入文本，避免引号转义；剪贴板先备份后恢复
+    // 脚本内通过 base64 注入文本，避免引号转义；剪贴板写入回验重试、粘贴后延时恢复
     const script = decodeCmd(seenCmd)
     expect(script).toContain(Buffer.from("你好GEBAI", "utf8").toString("base64"))
     expect(script).toContain("Get-Clipboard -Raw")
     expect(script).toContain("finally")
+  })
+
+  test("type_text clipboard verifies write-back and delays restore before paste", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已输入 3 字符（剪贴板已恢复原内容）", stderr: "", code: 0 }
+      },
+    })
+    await typeTextTool.execute({ text: "测试文本" }, c)
+    const script = decodeCmd(seenCmd)
+    // 写入回验：Set-Clipboard 后读回比对（剪贴板管理软件拦截写入时静默失败防护）
+    expect(script).toContain("$setOk")
+    expect(script).toContain("-ceq $wantN")
+    // 粘贴后延时恢复：目标应用异步消费剪贴板，立即恢复会粘出旧内容
+    const pasteIdx = script.indexOf("SendWait")
+    const restoreIdx = script.indexOf("Set-Clipboard -Value $old")
+    const sleepBetween = script.slice(pasteIdx).match(/Start-Sleep -Milliseconds (\d+)/)
+    expect(pasteIdx).toBeGreaterThan(-1)
+    expect(restoreIdx).toBeGreaterThan(pasteIdx)
+    expect(Number(sleepBetween?.[1])).toBeGreaterThanOrEqual(500)
+  })
+
+  test("type_text clipboard surfaces write failure instead of fake success", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, {
+      runCommand: async () => ({
+        stdout: "输入失败: 剪贴板写入未生效（可能被剪贴板管理软件拦截），未执行粘贴，原剪贴板未被修改",
+        stderr: "",
+        code: 0,
+      }),
+    })
+    const r = await typeTextTool.execute({ text: "测试文本" }, c)
+    // 失败必须诚实上报，不追加成功语义文案（已输入/内容预览）
+    expect(r.output).toContain("输入失败")
+    expect(r.output).not.toContain("已输入")
+    expect(r.output).not.toContain("内容预览")
   })
 
   test("type_text aborts on sensitive key patterns (密钥泄漏防护)", async () => {
@@ -359,6 +398,29 @@ describe("desktop tools", () => {
     // 标题以 base64 注入脚本内解码后匹配
     expect(script).toContain(Buffer.from("$(Start-Process calc)", "utf8").toString("base64"))
     expect(script).toContain("MainWindowTitle.Contains($t)")
+  })
+
+  test("window_focus verifies foreground and surfaces activation failure honestly", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return {
+          stdout: "激活失败: Windows 前台锁定拦截（后台进程禁止夺取焦点）。请手动点击一次目标窗口后重试，或改用其他验证通道确认窗口状态",
+          stderr: "",
+          code: 0,
+        }
+      },
+    })
+    const r = await windowFocusTool.execute({ pid: 999 }, c)
+    const script = decodeCmd(seenCmd)
+    // 激活后复核前台窗口（GetForegroundWindow 比对），Alt 击键缓解重试一次
+    expect(script).toContain("GetForegroundWindow")
+    expect(script).toContain("keybd_event(0x12")
+    // 失败诚实上报：不虚报「已激活」
+    expect(r.output).toContain("激活失败")
+    expect(r.output).not.toContain("已激活")
   })
 
   test("mouse_click double uses the defined Add-Type class", async () => {
