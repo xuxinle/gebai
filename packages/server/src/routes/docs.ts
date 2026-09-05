@@ -16,7 +16,7 @@ export function registerDocsRoutes(rc: RouteCtx): void {
         "/api/v1/auth/external-config": { get: { summary: "外部身份扩展点探测", responses: { "200": { description: "enabled/storageKey/autocreate" } } } },
         "/api/v1/users": { get: { summary: "用户列表（管理员）" }, post: { summary: "创建用户（管理员）" } },
         "/api/v1/sessions": { get: { summary: "会话列表" }, post: { summary: "创建会话" } },
-        "/api/v1/sessions/{id}": { get: { summary: "会话详情" }, delete: { summary: "删除会话" }, patch: { summary: "重命名会话" } },
+        "/api/v1/sessions/{id}": { get: { summary: "会话详情" }, delete: { summary: "删除会话" }, patch: { summary: "重命名/置顶会话" } },
         "/api/v1/sessions/{id}/restore": { post: { summary: "从回收站恢复会话（GC 归档保留期内）" } },
         "/api/v1/sessions/{id}/prompt": { post: { summary: "发送消息（同步 JSON：等待任务完成返回最终回复；autoApprove 控制审批姿态）" } },
         "/api/v1/chat": { post: { summary: "单 HTTP 一站式对话（缺省自动建会话，带 sessionId 续聊；返回 sessionId+最终回复；autoApprove 支持自动审批）" } },

@@ -655,6 +655,10 @@ export class GebaiClient {
   renameSession(id: string, name: string): Promise<void> {
     return this.request<void>("session.rename", { id, name })
   }
+  /** 置顶/取消置顶会话（元数据操作，不刷新 updatedAt）。 */
+  pinSession(id: string, pinned: boolean): Promise<void> {
+    return this.request<void>("session.pin", { id, pinned })
+  }
   switchSession(id: string): Promise<void> {
     return this.request<void>("session.switch", { id })
   }

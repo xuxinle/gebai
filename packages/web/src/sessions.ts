@@ -348,10 +348,14 @@ let lastSessions: SessionInfo[] | null = null
 
 /* ---------- 会话列表分组（今天/昨天/近7天/更早，组可折叠，状态本地记忆） ---------- */
 
-const GROUP_ORDER = ["today", "yesterday", "week", "older"] as const
+const GROUP_ORDER = ["pinned", "today", "yesterday", "week", "older"] as const
 type GroupKey = (typeof GROUP_ORDER)[number]
-const GROUP_LABEL: Record<GroupKey, string> = { today: "今天", yesterday: "昨天", week: "近7天", older: "更早" }
+const GROUP_LABEL: Record<GroupKey, string> = { pinned: "置顶", today: "今天", yesterday: "昨天", week: "近7天", older: "更早" }
 const GROUP_KEY = "gebai.ui.sessionsCollapsed"
+
+/** 列表排序：置顶优先，组内按更新时间倒序（与服务端 listSessions 同口径）。 */
+const byPinnedThenUpdated = (a: SessionInfo, b: SessionInfo) =>
+  Number(b.pinned ?? false) - Number(a.pinned ?? false) || b.updatedAt - a.updatedAt
 
 function sessionGroup(ts: number): GroupKey {
   const now = new Date()
@@ -478,6 +482,8 @@ function appendSessionLi(s: SessionInfo, groupKey = ""): void {
     toggleSelect(s.id, li)
   }
   body.append(nameEl)
+  // 置顶标识（独立于 .session-name，不受重命名内联编辑替换影响；session-ico 为隐藏的 💬 占位）
+  if (s.pinned) li.append(el("span", "session-pin", "📌"))
   // 选中按钮直接挂行尾（原时间行已移除）
   li.append(ico, body, box)
   sessionList.appendChild(li)
@@ -510,14 +516,15 @@ export async function refreshSessions(preloaded?: SessionInfo[]) {
   sessionList.innerHTML = ""
   const shown = searchQuery ? sessions.filter((s) => s.name.toLowerCase().includes(searchQuery)) : sessions
   if (searchQuery) {
-    // 搜索态：平铺列表（不分组，聚焦过滤结果）
-    for (const s of shown) appendSessionLi(s)
+    // 搜索态：平铺列表（不分组，聚焦过滤结果；置顶项仍置前）
+    for (const s of [...shown].sort(byPinnedThenUpdated)) appendSessionLi(s)
   } else {
-    // 按更新时间倒序分组（今天/昨天/近7天/更早）；折叠组不渲染成员，批量模式强制全展开
-    const sorted = [...shown].sort((a, b) => b.updatedAt - a.updatedAt)
+    // 置顶项脱离时间分组单列「置顶」组；其余按更新时间倒序分组（今天/昨天/近7天/更早）；
+    // 折叠组不渲染成员，批量模式强制全展开
+    const sorted = [...shown].sort(byPinnedThenUpdated)
     const groups = new Map<GroupKey, SessionInfo[]>()
     for (const s of sorted) {
-      const key = sessionGroup(s.updatedAt)
+      const key: GroupKey = s.pinned ? "pinned" : sessionGroup(s.updatedAt)
       const arr = groups.get(key) ?? []
       arr.push(s)
       groups.set(key, arr)
@@ -575,6 +582,18 @@ function startRename(s: SessionInfo, nameEl: HTMLElement) {
     }
   }
   inputEl.onblur = () => void finish(true)
+}
+
+/** 置顶/取消置顶：成功后刷新列表（置顶组置前）；非破坏性操作无确认框，失败静默（与重命名一致）。 */
+function togglePin(s: SessionInfo) {
+  void (async () => {
+    try {
+      await client.pinSession(s.id, !s.pinned)
+      await refreshSessions()
+    } catch {
+      /* 忽略 */
+    }
+  })()
 }
 
 /** 删除会话后，若当前会话被删则切到剩余第一个，没有则进入空白草稿页。 */
@@ -657,6 +676,7 @@ function openSessionMenu(e: MouseEvent, s: SessionInfo, li: HTMLElement): void {
   items.push(
     // 复制会话 ID（定位问题/反馈用）：任意条目可复制，不限于当前会话
     { label: "复制会话 ID", action: () => { void copyTextToClipboard(s.id).then((ok) => toast(ok ? `已复制会话 ID: ${s.id}` : "复制失败", ok ? "ok" : "error")) } },
+    { label: s.pinned ? "取消置顶" : "置顶", action: () => togglePin(s) },
     { label: "重命名", action: () => startRename(s, li.querySelector<HTMLElement>(".session-name")!) },
     { label: "删除", danger: true, action: () => showDeleteConfirm(s.id, s.name) },
   )

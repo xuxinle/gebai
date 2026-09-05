@@ -70,8 +70,9 @@ export function registerSessionRoutes(rc: RouteCtx): void {
   })
   app.patch("/api/v1/sessions/:id", async (c) => {
     const user = await userOf(c)
-    const body = await c.req.json<{ name?: string }>()
+    const body = await c.req.json<{ name?: string; pinned?: boolean }>()
     if (body.name) await d.store.rename(c.req.param("id"), body.name, user.id)
+    if (typeof body.pinned === "boolean") await d.store.setPinned(c.req.param("id"), body.pinned, user.id)
     return c.json({ ok: true })
   })
 

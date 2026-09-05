@@ -23,7 +23,7 @@ const handlers: Record<string, WsHandler> = {
 
 /** 需要合法会话 ID 的 WS 消息类型（入口统一校验，防 sessionId 路径穿越）。 */
 const SESSION_ID_MSGS = new Set([
-  "session.get", "session.delete", "session.rename", "session.switch", "session.compact",
+  "session.get", "session.delete", "session.rename", "session.pin", "session.switch", "session.compact",
   "session.prompt", "session.attachment.upload", "session.todo.get", "session.env.get", "session.env.set",
   "session.files.list", "session.files.get", "session.cancel", "session.restore", "session.attach",
   "approval.decide", "choice.decide", "env.decide", "draw.result", "capture.result",

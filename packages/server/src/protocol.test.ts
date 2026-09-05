@@ -123,6 +123,25 @@ describe("WS state model (MVC 一致性)", () => {
     expect(cur2.payload?.session).toBeNull()
   })
 
+  test("session.pin 置顶/取消置顶（session.list 返回归一 pinned；畸形 id 白名单拒绝）", async () => {
+    const created = (await (await fetch(`${base(single)}/api/v1/sessions`, { method: "POST" })).json()) as { id: string }
+    const pin = await wsCall(single, "session.pin", { id: created.id, pinned: true })
+    expect(pin.ok).toBe(true)
+    const list = await wsCall(single, "session.list")
+    expect(list.ok).toBe(true)
+    const sessions = (list.payload as { sessions: Array<{ id: string; pinned?: boolean }> }).sessions
+    expect(sessions.find((s) => s.id === created.id)?.pinned).toBe(true)
+    const unpin = await wsCall(single, "session.pin", { id: created.id, pinned: false })
+    expect(unpin.ok).toBe(true)
+    const list2 = await wsCall(single, "session.list")
+    const sessions2 = (list2.payload as { sessions: Array<{ id: string; pinned?: boolean }> }).sessions
+    expect(sessions2.find((s) => s.id === created.id)?.pinned).toBe(false)
+    // 畸形 id：入口白名单拒绝（防路径穿越）
+    const bad = await wsCall(single, "session.pin", { id: "../escape", pinned: true })
+    expect(bad.ok).toBe(false)
+    await wsCall(single, "session.delete", { id: created.id })
+  })
+
   test("sync.request replays journal events missed while offline (跨连接)", async () => {
     ;(single.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()
     const created = (await (await fetch(`${base(single)}/api/v1/sessions`, { method: "POST" })).json()) as { id: string }
