@@ -35,7 +35,7 @@ export function makeTodoTool(): Tool {
   const tool: Tool = {
     name: "todo",
     description:
-      "待办管理（统一入口）：entries 为操作列表，每项 op=add/update/delete。省略 entries 或传空数组 = 查询（清单含 id）。返回操作摘要与当前全部待办状态。",
+      "待办管理（统一入口）：entries 为操作列表，每项 op=add/update/delete。省略 entries 或传空数组 = 查询（清单含 id）。返回操作摘要与当前全部待办状态。新增待办开启新任务时，及时 delete 清理与当前任务无关的历史残留待办——待办只跟踪当前任务，陈旧条目徒增干扰与 token 浪费。",
     parameters: schema({
       entries: {
         type: "array",
