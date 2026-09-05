@@ -23,20 +23,46 @@ function ps(script: string): string {
   return `powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`
 }
 
+/**
+ * PowerShell DPI 感知声明（脚本头片段）：每个 PowerShell 进程独立声明，
+ * 使屏幕/窗口/鼠标坐标统一为物理像素——否则高 DPI 缩放（如 150%）下
+ * Screen.Bounds/CopyFromScreen 落入逻辑像素空间，与 OCR/点击坐标错位。
+ * desktop_cv_tools 复用（截图脚本同需求）。
+ */
+export const PS_DPI_AWARE = `Add-Type @"
+using System.Runtime.InteropServices;
+public class GebaiDpi {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+"@
+[GebaiDpi]::SetProcessDPIAware() | Out-Null`
+
 /** 任意文本以 base64 注入 PowerShell 脚本（规避引号/特殊字符）。 */
 function psLiteral(text: string): string {
   return `[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${Buffer.from(text, "utf8").toString("base64")}"))`
 }
 
-/** 敏感值模式：sk- 前缀密钥、超长 base64 风格串、KEY/SECRET/TOKEN 赋值、Bearer 令牌。 */
+/** 敏感值模式：sk- 前缀密钥、KEY/SECRET/TOKEN 赋值、Bearer 令牌。
+ *  泛型长串分支独立为 longTokenHit 启发式（40+ 且字母数字混合、非纯十六进制——
+ *  纯英文词/纯 hex（git commit sha）等正常长串不误判）。 */
 const SENSITIVE_VALUE_RE =
-  /(sk-[A-Za-z0-9_\-]{10,}|[A-Za-z0-9_\-]{32,}|(?:secret|token|password|passwd|api[_-]?key|app[_-]?secret|access[_-]?key|private[_-]?key)\s*[=:：]\s*[^\s,;，。]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{20,})/i
+  /(sk-[A-Za-z0-9_\-]{10,}|(?:secret|token|password|passwd|api[_-]?key|app[_-]?secret|access[_-]?key|private[_-]?key)\s*[=:：]\s*[^\s,;，。]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{20,})/i
+
+/** 长令牌启发式：40+ 连续字母数字下划线连字符，含字母且含数字，非纯十六进制。 */
+function longTokenHit(text: string): string | null {
+  for (const m of text.matchAll(/[A-Za-z0-9_\-]{40,}/g)) {
+    const t = m[0]
+    if (/^[0-9a-fA-F]+$/.test(t)) continue
+    if (/[0-9]/.test(t) && /[A-Za-z]/.test(t)) return t
+  }
+  return null
+}
 
 /** 敏感模式检测：命中返回脱敏后的命中片段（首 4 + **** + 尾 4），否则 null。 */
 export function detectSensitive(text: string): string | null {
   const m = SENSITIVE_VALUE_RE.exec(text)
-  if (!m) return null
-  const hit = m[0]
+  const hit = m?.[0] ?? longTokenHit(text)
+  if (!hit) return null
   return hit.length > 8 ? `${hit.slice(0, 4)}****${hit.slice(-4)}` : hit
 }
 
@@ -48,6 +74,14 @@ function sendKeysEscape(s: string): string {
 function num(v: unknown, dflt: number): number {
   const n = Number(v)
   return Number.isFinite(n) ? n : dflt
+}
+
+/** region 参数校验：'x,y,w,h'，x/y 可为负（副屏在主屏左侧/上方时坐标为负），w/h 非负。desktop_cv_tools 复用。 */
+export function parseRegion(region: string): { x: number; y: number; w: number; h: number } | null {
+  const m = /^(-?\d+),(-?\d+),(\d+),(\d+)$/.exec(region.trim())
+  if (!m) return null
+  const [, x, y, w, h] = m
+  return { x: Number(x), y: Number(y), w: Number(w), h: Number(h) }
 }
 
 async function run(ctx: ToolContext, cmd: string, timeoutMs = 20000): Promise<ToolResult> {
@@ -82,10 +116,10 @@ function blackFrameWarn(mean: number | null, colors: number | null): string | nu
 export const screenshotTool: Tool = {
   name: "screenshot",
   description:
-    "截取屏幕（全屏或指定区域），保存 PNG 到会话 tmp/ 并返回图片供 UI 展示。region 参数指定截取区域（相对主屏左上角，省略则全屏）。返回尺寸元数据并自动检测黑屏/纯色帧（显示器休眠/锁屏时主动提示）。平台：Windows/macOS 内置支持；Linux 需 scrot 或 ImageMagick import。",
+    "截取屏幕（全屏或指定区域），保存 PNG 到会话 tmp/ 并返回图片供 UI 展示。全屏覆盖所有显示器的虚拟屏幕（多显示器含负坐标副屏）；region 参数指定截取区域（相对主屏左上角，x/y 可为负以覆盖副屏，省略则全屏）。返回尺寸/原点元数据并自动检测黑屏/纯色帧（显示器休眠/锁屏时主动提示）。平台：Windows/macOS 内置支持；Linux 需 scrot 或 ImageMagick import。",
   card: { titleParams: ["region"], args: "none" },
   parameters: schema({
-    region: { type: "string", description: "可选：截取区域 'x,y,w,h'（像素，省略则全屏）" },
+    region: { type: "string", description: "可选：截取区域 'x,y,w,h'（像素，相对主屏左上角，x/y 可为负；省略则全屏=虚拟屏幕）" },
     name: { type: "string", description: "可选：文件名（不含扩展名，默认 screenshot_<时间戳>）" },
   }),
   async execute(args, ctx) {
@@ -94,20 +128,22 @@ export const screenshotTool: Tool = {
     const nameBase = String(args.name ?? "").trim().replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60)
     const rel = `${nameBase || `screenshot_${Date.now()}`}.png`
     const path = ctx.resolvePath(rel)
-    const region = String(args.region ?? "").trim()
-    if (region && !/^\d+,\d+,\d+,\d+$/.test(region)) {
-      return { output: `region 格式错误: ${region}（应为 x,y,w,h）` }
+    const regionRaw = String(args.region ?? "").trim()
+    const region = parseRegion(regionRaw)
+    if (regionRaw && !region) {
+      return { output: `region 格式错误: ${regionRaw}（应为 x,y,w,h）` }
     }
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      let bounds = "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds"
+      // 全屏 = 虚拟屏幕（覆盖所有显示器，副屏可为负坐标）；区域截图 Rectangle 原点即 region 原点
+      let bounds = "[System.Windows.Forms.SystemInformation]::VirtualScreen"
       if (region) {
-        const [x, y, w, h] = region.split(",").map(Number)
-        bounds = `New-Object System.Drawing.Rectangle(${x}, ${y}, ${w}, ${h})`
+        bounds = `New-Object System.Drawing.Rectangle(${region.x}, ${region.y}, ${region.w}, ${region.h})`
       }
       // 截图后抽样统计：平均亮度 + 采样色数（A1 黑帧检测），输出 STAT 行供解析
       cmd = ps(`
+${PS_DPI_AWARE}
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 $b = ${bounds}
@@ -125,12 +161,12 @@ for ($x = 0; $x -lt $bmp.Width; $x += $step) {
     [void]$colors.Add((($p.R -shl 16) -bor ($p.G -shl 8)) -bor $p.B)
   }
 }
-"STAT $($bmp.Width)x$($bmp.Height) mean=$([Math]::Round($sum / $n, 1)) colors=$($colors.Count)"
+"STAT $($b.X),$($b.Y) $($bmp.Width)x$($bmp.Height) mean=$([Math]::Round($sum / $n, 1)) colors=$($colors.Count)"
 $g.Dispose(); $bmp.Dispose()
 `)
     } else if (plat === "darwin") {
-      cmd = region
-        ? `screencapture -x -R ${region} '${path}'`
+      cmd = regionRaw
+        ? `screencapture -x -R ${regionRaw} '${path}'`
         : `screencapture -x '${path}'`
     } else {
       const probe = await ctx.runCommand("command -v scrot || command -v import || true", { timeoutMs: 5000 })
@@ -141,10 +177,12 @@ $g.Dispose(); $bmp.Dispose()
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 30000 })
     if (code !== 0) return { output: `截图失败 [exit ${code}]:\n${stderr || stdout}` }
     // 质量统计解析：win32 内置 STAT 行；macOS/Linux 用平台工具补取尺寸/亮度
-    const m = stdout.match(/STAT (\d+)x(\d+) mean=([\d.]+) colors=(\d+)/)
-    let size = m ? `${m[1]}x${m[2]}` : ""
-    let mean: number | null = m ? Number(m[3]) : null
-    let colors: number | null = m ? Number(m[4]) : null
+    const m = stdout.match(/STAT (-?\d+),(-?\d+) (\d+)x(\d+) mean=([\d.]+) colors=(\d+)/)
+    let size = m ? `${m[3]}x${m[4]}` : ""
+    let origin = m ? `${m[1]},${m[2]}` : ""
+    let mean: number | null = m ? Number(m[5]) : null
+    let colors: number | null = m ? Number(m[6]) : null
+    if (region && regionRaw) origin = `${region.x},${region.y}`
     if (!m) {
       if (plat === "darwin") {
         const s = await ctx.runCommand(`sips -g pixelWidth -g pixelHeight '${path}'`, { timeoutMs: 10000 })
@@ -165,8 +203,12 @@ $g.Dispose(); $bmp.Dispose()
       }
     }
     const warn = blackFrameWarn(mean, colors)
-    const meta = size ? `（尺寸 ${size}${mean !== null ? `，平均亮度 ${mean}/255` : ""}）` : ""
-    return { output: `已截图: ${rel}${meta}${warn ? `\n${warn}` : ""}`, blocks: artifactBlocks(rel) }
+    const meta =
+      (size ? `尺寸 ${size}` : "") +
+      (origin ? `，原点 (${origin})——图片坐标加原点即屏幕坐标` : "") +
+      (mean !== null ? `，平均亮度 ${mean}/255` : "")
+    const scope = !regionRaw && plat === "win32" ? "（全屏=虚拟屏幕，覆盖所有显示器）" : ""
+    return { output: `已截图: ${rel}${meta ? `（${meta}）` : ""}${scope}${warn ? `\n${warn}` : ""}`, blocks: artifactBlocks(rel) }
   },
 }
 
@@ -183,6 +225,7 @@ export const screenInfoTool: Tool = {
     let cmd: string
     if (plat === "win32") {
       cmd = ps(`
+${PS_DPI_AWARE}
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { @($_.DeviceName, $_.Bounds.X, $_.Bounds.Y, $_.Bounds.Width, $_.Bounds.Height, $_.Primary) -join [char]9 }
 `)
@@ -209,7 +252,8 @@ Add-Type -AssemblyName System.Windows.Forms
 
 export const windowListTool: Tool = {
   name: "window_list",
-  description: "列出当前可见窗口（PID、进程名、标题），供定位目标窗口。只读操作。",
+  description:
+    "列出当前可见窗口（PID、进程名、前台标记*、窗口位置 x,y,w,h、标题），供定位目标窗口与确认前台窗口。只读操作。",
   card: { args: "none" },
   parameters: schema({}),
   async execute(_args, ctx) {
@@ -217,8 +261,25 @@ export const windowListTool: Tool = {
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
+      // 前台标记（GetForegroundWindow 比对）+ 窗口 bounds（GetWindowRect，物理像素）
       cmd = ps(`
-Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessName | ForEach-Object { @($_.Id, $_.ProcessName, $_.MainWindowTitle) -join [char]9 }
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct GebaiRect3 { public int Left, Top, Right, Bottom; }
+public class GebaiWinList {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out GebaiRect3 r);
+}
+"@
+$fg = [GebaiWinList]::GetForegroundWindow()
+Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessName | ForEach-Object {
+  $r = New-Object GebaiRect3
+  [GebaiWinList]::GetWindowRect($_.MainWindowHandle, [ref]$r) | Out-Null
+  $mark = if ($_.MainWindowHandle -eq $fg) { "*" } else { "" }
+  @($_.Id, $_.ProcessName, $mark, "$($r.Left),$($r.Top),$($r.Right - $r.Left),$($r.Bottom - $r.Top)", $_.MainWindowTitle) -join [char]9
+}
 `)
     } else if (plat === "darwin") {
       cmd = `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`
@@ -229,13 +290,18 @@ Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessNa
     }
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 15000 })
     if (code !== 0) return { output: `窗口列表获取失败 [exit ${code}]:\n${stderr || stdout}` }
-    // Windows TSV → 对齐文本
+    // Windows TSV → 对齐文本（PID/进程名/前台标记/窗口位置/标题）
     if (plat === "win32" && stdout.trim()) {
       const rows = stdout.trim().split("\n").map((l) => l.split("\t"))
       const pidW = Math.max(...rows.map((r) => r[0]?.length ?? 0), 3)
       const nameW = Math.max(...rows.map((r) => r[1]?.length ?? 0), 4)
-      const lines = rows.map((r) => `${r[0]?.padEnd(pidW)}  ${r[1]?.padEnd(nameW)}  ${r[2] ?? ""}`)
-      return { output: `共 ${rows.length} 个窗口：\n${lines.join("\n")}` }
+      const lines = rows.map((r) => `${(r[2] === "*" ? "*" : " ") + (r[0] ?? "").padEnd(pidW)}  ${(r[1] ?? "").padEnd(nameW)}  ${r[3] ?? ""}  ${r[4] ?? ""}`)
+      const fg = rows.filter((r) => r[2] === "*").map((r) => r[1]).join(", ")
+      return {
+        output:
+          `共 ${rows.length} 个窗口（* = 当前前台；第 4 列为窗口位置 x,y,w,h 屏幕像素）：\n${lines.join("\n")}` +
+          (fg ? `\n当前前台: ${fg}` : "\n（无前台窗口标记——可能焦点在无主窗口的进程）"),
+      }
     }
     return { output: stdout.trim() || "（无可见窗口）" }
   },
@@ -328,6 +394,7 @@ export const windowMoveTool: Tool = {
       const w = args.width != null ? String(num(args.width, 0)) : ""
       const h = args.height != null ? String(num(args.height, 0)) : ""
       cmd = ps(`
+${PS_DPI_AWARE}
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -541,6 +608,7 @@ export const mouseMoveTool: Tool = {
     let cmd: string
     if (plat === "win32") {
       cmd = ps(`
+${PS_DPI_AWARE}
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -584,6 +652,7 @@ export const mouseClickTool: Tool = {
         ? "\n  [GebaiMouse2]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); [GebaiMouse2]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)"
         : ""
       cmd = ps(`
+${PS_DPI_AWARE}
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -606,5 +675,222 @@ public class GebaiMouse2 {
       cmd = `xdotool mousemove ${x} ${y} click ${btnArg}`
     }
     return run(ctx, cmd)
+  },
+}
+
+/* ---------- 滚动 / 拖拽 ---------- */
+
+export const mouseScrollTool: Tool = {
+  name: "mouse_scroll",
+  description:
+    "移动鼠标到指定坐标并滚动滚轮（direction: down/up=垂直（默认 down），left/right=水平；amount 滚动格数默认 3，每格约 3 行）。用于滚动列表/页面/画布。",
+  parameters: schema(
+    {
+      x: { type: "number" },
+      y: { type: "number" },
+      direction: { enum: ["down", "up", "left", "right"], description: "可选：滚动方向（默认 down）" },
+      amount: { type: "number", description: "可选：滚动格数（默认 3，范围 1-30）" },
+    },
+    ["x", "y"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const x = num(args.x, 0)
+    const y = num(args.y, 0)
+    const dir = String(args.direction ?? "down")
+    const amount = Math.max(1, Math.min(30, Math.round(num(args.amount, 3))))
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // wheel 正值向上、负值向下；hwheel 正值向右、负值向左；每格 120 单位（dwData 以带符号解释）
+      const units = amount * 120
+      const flag = dir === "left" || dir === "right" ? "0x1000" : "0x0800"
+      const data = dir === "down" || dir === "left" ? -units : units
+      cmd = ps(`
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiMouse3 {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, int d, UIntPtr e);
+}
+"@
+[GebaiMouse3]::SetCursorPos(${x}, ${y}) | Out-Null
+[GebaiMouse3]::mouse_event(${flag}, 0, 0, ${data}, [UIntPtr]::Zero)
+"已向${dir}滚动 ${amount} 格 (${x}, ${y})"
+`)
+    } else if (plat === "darwin") {
+      return { output: "mouse_scroll 当前仅实现 Windows（macOS/Linux 暂未支持）" }
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
+      // xdotool 按键号：4=上 5=下 6=左 7=右
+      const btn = { up: "4", down: "5", left: "6", right: "7" }[dir] ?? "5"
+      cmd = `xdotool mousemove ${x} ${y} click --repeat ${amount} ${btn}`
+    }
+    return run(ctx, cmd)
+  },
+}
+
+export const mouseDragTool: Tool = {
+  name: "mouse_drag",
+  description:
+    "按住左键从 (from_x,from_y) 拖拽到 (to_x,to_y)（插值移动模拟真实轨迹，适配依赖鼠标移动事件的目标）。用于文件拖放、滑块调整、选区。",
+  parameters: schema(
+    {
+      from_x: { type: "number" },
+      from_y: { type: "number" },
+      to_x: { type: "number" },
+      to_y: { type: "number" },
+    },
+    ["from_x", "from_y", "to_x", "to_y"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const fx = num(args.from_x, 0)
+    const fy = num(args.from_y, 0)
+    const tx = num(args.to_x, 0)
+    const ty = num(args.to_y, 0)
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      cmd = ps(`
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiMouse4 {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+}
+"@
+[GebaiMouse4]::SetCursorPos(${fx}, ${fy}) | Out-Null
+Start-Sleep -Milliseconds 60
+[GebaiMouse4]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+$steps = 12
+for ($i = 1; $i -le $steps; $i++) {
+  $nx = ${fx} + [int]((${tx} - ${fx}) * $i / $steps)
+  $ny = ${fy} + [int]((${ty} - ${fy}) * $i / $steps)
+  [GebaiMouse4]::SetCursorPos($nx, $ny) | Out-Null
+  Start-Sleep -Milliseconds 12
+}
+[GebaiMouse4]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+"已拖拽 (${fx}, ${fy}) → (${tx}, ${ty})"
+`)
+    } else if (plat === "darwin") {
+      return { output: "mouse_drag 当前仅实现 Windows（macOS/Linux 暂未支持）" }
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
+      cmd = `xdotool mousemove ${fx} ${fy} mousedown 1 mousemove ${tx} ${ty} mouseup 1`
+    }
+    return run(ctx, cmd)
+  },
+}
+
+/* ---------- 窗口状态 ---------- */
+
+export const windowStateTool: Tool = {
+  name: "window_state",
+  description:
+    "调整窗口状态（action: minimize=最小化 / maximize=最大化 / restore=还原 / close=关闭）。按 pid 或 title 定位窗口（同 window_focus）。close 经 WM_CLOSE 优雅关闭（应用可弹保存确认）。",
+  card: { titleParams: ["action", "pid", "title"], args: "none" },
+  parameters: schema(
+    {
+      action: { enum: ["minimize", "maximize", "restore", "close"], description: "目标状态" },
+      pid: { type: "number", description: "可选：目标窗口的 PID（window_list 结果第一列）" },
+      title: { type: "string", description: "可选：按标题模糊匹配窗口（pid 未提供时）" },
+    },
+    ["action"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const action = String(args.action ?? "")
+    const pid = num(args.pid, 0)
+    const title = String(args.title ?? "")
+    if (!pid && !title) return { output: "请提供 pid 或 title" }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // ShowWindow：SW_CLOSE=0（发 WM_CLOSE 优雅关闭）/ SW_MAXIMIZE=3 / SW_MINIMIZE=6 / SW_RESTORE=9
+      const sw = { close: "0", maximize: "3", minimize: "6", restore: "9" }[action]
+      const verb = { close: "已发送关闭指令", maximize: "已最大化", minimize: "已最小化", restore: "已还原" }[action]
+      if (sw === undefined) return { output: `未知 action: ${action}` }
+      cmd = ps(`
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiWinState {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+}
+"@
+${procFilter(pid, title)} | Select-Object -First 1
+if ($p -and $p.MainWindowHandle -ne 0) {
+  [GebaiWinState]::ShowWindow($p.MainWindowHandle, ${sw}) | Out-Null
+  "${verb}: $($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)"
+} else { "未找到匹配窗口" }
+`)
+    } else if (plat === "darwin") {
+      return { output: "window_state 当前仅实现 Windows（macOS/Linux 暂未支持）" }
+    } else {
+      const probe = await ctx.runCommand("command -v wmctrl || command -v xdotool || true", { timeoutMs: 5000 })
+      const t = probe.stdout.split("\n").find(Boolean)?.split("/").pop() ?? ""
+      if (!t) return { output: "Linux 窗口控制需要安装 wmctrl 或 xdotool" }
+      const target = title ? `'${sq(title)}'` : ""
+      if (t === "wmctrl") {
+        const prop = { minimize: "add,hidden", maximize: "add,maximized_vert,maximized_horz", restore: "remove,maximized_vert,maximized_horz" }[action]
+        if (action === "close") return { output: "Linux 下关闭窗口请用 wmctrl -c（或 xdotool key alt+F4），本工具暂未封装" }
+        cmd = `wmctrl -r ${target} -b ${prop}`
+      } else {
+        const op = { minimize: "windowminimize", maximize: "windowsize 100% 100%", restore: "windowsize 50% 50%", close: "key alt+F4" }[action]
+        cmd = `xdotool search --name ${target} ${op}`
+      }
+    }
+    return run(ctx, cmd)
+  },
+}
+
+/* ---------- 剪贴板写入 ---------- */
+
+export const clipboardWriteTool: Tool = {
+  name: "clipboard_write",
+  description:
+    "写入文本到系统剪贴板（覆盖原内容，写入回验重试——剪贴板管理软件拦截时明确报错）。用于把内容交给用户手动粘贴。检测到疑似敏感值时告警但不中止（复制密钥供本人粘贴是常见需求）。",
+  parameters: schema({ text: { type: "string", description: "要写入的文本" } }, ["text"]),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const text = String(args.text ?? "")
+    if (!text) return { output: "text 不能为空" }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      cmd = ps(`
+Add-Type -AssemblyName System.Windows.Forms
+$want = ${psLiteral(text)}
+$setOk = $false
+foreach ($i in 1..3) {
+  try { Set-Clipboard -Value $want } catch {}
+  Start-Sleep -Milliseconds 80
+  try { if ((Get-Clipboard -Raw) -ceq $want) { $setOk = $true; break } } catch {}
+}
+if ($setOk) { "已写入" } else { "写入失败: 剪贴板写入未生效（可能被剪贴板管理软件拦截），原剪贴板可能已被部分修改" }
+`)
+    } else if (plat === "darwin") {
+      cmd = `osascript -e 'set the clipboard to ${sq(JSON.stringify(text))}'`
+    } else {
+      const probe = await ctx.runCommand("command -v xclip || command -v xsel || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 剪贴板需要安装 xclip 或 xsel" }
+      cmd = probe.stdout.includes("xclip")
+        ? `printf '%s' ${sq(text)} | xclip -selection clipboard`
+        : `printf '%s' ${sq(text)} | xsel -b -i`
+    }
+    const r = await run(ctx, cmd)
+    if (r.output.startsWith("写入失败")) return { output: r.output }
+    const preview = text.length > 40 ? `${text.slice(0, 40)}…（共 ${text.length} 字符）` : text
+    const sensitive = detectSensitive(text)
+    const warn = sensitive ? `\n\n⚠️ 内容含疑似敏感信息（${sensitive}），已按原样写入——请勿粘贴到非信任位置。` : ""
+    return { output: `${r.output} ${text.length} 字符（内容预览：${preview}）${warn}` }
   },
 }
