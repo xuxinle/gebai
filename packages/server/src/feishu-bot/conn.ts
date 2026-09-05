@@ -53,22 +53,27 @@ export interface FeishuConnOptions {
   wsFactory?: WsFactory
   clock?: () => number
   /** 心跳/重连间隔覆盖（测试用）。 */
-  intervals?: { reconnectNonce?: number; reconnectInterval?: number; pingInterval?: number }
+  intervals?: { reconnectNonce?: number; reconnectInterval?: number; pingInterval?: number; handshakeTimeoutMs?: number; fastRetryMs?: number }
 }
 
-const DEFAULTS = { reconnectInterval: 120_000, pingInterval: 120_000 }
+const DEFAULTS = { reconnectInterval: 120_000, pingInterval: 120_000, handshakeTimeoutMs: 15_000, fastRetryMs: 5_000 }
+
+/** 重连失败后的快速重试次数（网络闪断秒级恢复，之后才按服务端 ReconnectInterval）。 */
+const FAST_RETRY_ATTEMPTS = 3
 
 export class FeishuConn {
   private ws: WsLike | null = null
   private serviceId = 0
   private pingTimer: ReturnType<typeof setTimeout> | null = null
-  /** 最近 pong 时间（静默死链检测，见 startPing）。 */
-  private lastPongAt = 0
+  /** 最近收到服务端帧的时间（任意帧均视为链路活跃，静默死链检测见 startPing）。 */
+  private lastAliveAt = 0
+  /** 本次连接建立时间（断连日志统计存活时长）。 */
+  private connectedAt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private stopped = false
   private assembler: FrameAssembler
   private log: (msg: string) => void
-  private cfg: { reconnectCount: number; reconnectInterval: number; reconnectNonce: number; pingInterval: number }
+  private cfg: { reconnectCount: number; reconnectInterval: number; reconnectNonce: number; pingInterval: number; handshakeTimeoutMs: number; fastRetryMs: number }
   private fetchImpl: NonNullable<FeishuConnOptions["fetchImpl"]>
   private wsFactory: WsFactory
   private clock: () => number
@@ -90,6 +95,8 @@ export class FeishuConn {
       reconnectInterval: iv.reconnectInterval ?? DEFAULTS.reconnectInterval,
       reconnectNonce: iv.reconnectNonce ?? 0,
       pingInterval: iv.pingInterval ?? DEFAULTS.pingInterval,
+      handshakeTimeoutMs: iv.handshakeTimeoutMs ?? DEFAULTS.handshakeTimeoutMs,
+      fastRetryMs: iv.fastRetryMs ?? DEFAULTS.fastRetryMs,
     }
   }
 
@@ -150,7 +157,13 @@ export class FeishuConn {
     this.log(`connecting (device_id=${deviceId.slice(0, 8)}…, service=${serviceId})`)
     const ws = this.wsFactory.connect(url)
     this.ws = ws
+    // 握手超时：防火墙/代理黑洞下 open/error/close 均不触发，无超时会永久挂起且不再重连
     await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup()
+        try { ws.close() } catch { /* 已死 */ }
+        reject(new Error(`websocket 握手超时 (${Math.round(this.cfg.handshakeTimeoutMs / 1000)}s)`))
+      }, this.cfg.handshakeTimeoutMs)
       const onOpen = () => {
         cleanup()
         resolve()
@@ -160,21 +173,24 @@ export class FeishuConn {
         ws.close()
         reject(new Error("websocket 握手失败"))
       }
+      const onClose = () => {
+        cleanup()
+        reject(new Error("websocket 连接关闭"))
+      }
       const cleanup = () => {
+        clearTimeout(timer)
         ws.onopen = undefined
         ws.onerror = undefined
+        ws.onclose = undefined
       }
       ws.onopen = onOpen
       ws.onerror = onError
-      ws.onclose = () => {
-        cleanup()
-        ws.close()
-        reject(new Error("websocket 连接关闭"))
-      }
+      ws.onclose = onClose
     })
     this.log("connected")
+    this.connectedAt = Date.now()
     ws.onmessage = (ev) => this.handleMessage(ev.data)
-    ws.onclose = () => this.handleClose()
+    ws.onclose = (ev) => this.handleClose(ev.code, ev.reason)
     ws.onerror = () => {
       /* 错误由 onclose 触发重连 */
     }
@@ -183,14 +199,13 @@ export class FeishuConn {
 
   private startPing(): void {
     if (this.pingTimer) clearInterval(this.pingTimer)
-    this.lastPongAt = Date.now()
+    this.lastAliveAt = Date.now()
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === 1) {
-        // pong 超时检测：NAT 超时/网络切换/半开 TCP 下 onclose 不触发、ping 写入死 socket 不报错，
-        // 连接实际已死却"在线"——连续 pingInterval*3 无 pong 主动断开走重连
-        if (Date.now() - this.lastPongAt > this.cfg.pingInterval * 3) {
-          this.log("pong timeout, forcing reconnect")
-          try { this.ws.close() } catch { /* 已死 */ }
+        // 静默死链检测：NAT 超时/网络切换/半开 TCP 下 onclose 不触发、ping 写入死 socket 不报错，
+        // 连接实际已死却"在线"——连续 pingInterval*3 无任何服务端帧主动断开走重连
+        if (Date.now() - this.lastAliveAt > this.cfg.pingInterval * 3) {
+          this.forceReconnect(`server silent for ${Math.round((Date.now() - this.lastAliveAt) / 1000)}s (>3x ping interval), forcing reconnect`)
           return
         }
         try {
@@ -200,6 +215,20 @@ export class FeishuConn {
         }
       }
     }, this.cfg.pingInterval)
+  }
+
+  /** 判死主动重连：不依赖 onclose 回调（半开 socket close 可能无回调），直接清理并排重连（handleClose 幂等跳过）。 */
+  private forceReconnect(reason: string): void {
+    const ws = this.ws
+    this.ws = null
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer)
+      this.pingTimer = null
+    }
+    this.log(reason)
+    try { ws?.close() } catch { /* 已死 */ }
+    if (this.stopped) return
+    this.scheduleReconnect(this.cfg.reconnectNonce)
   }
 
   private handleMessage(data: unknown): void {
@@ -216,6 +245,8 @@ export class FeishuConn {
     } else {
       return
     }
+    // 任何服务端帧（pong/事件/配置推送）都证明链路活着——不只 pong，防 pong 丢失被误判死链
+    this.lastAliveAt = Date.now()
     try {
       this.dispatch(buf)
     } catch (err) {
@@ -226,12 +257,9 @@ export class FeishuConn {
   private dispatch(buf: Uint8Array): void {
     const info = parseDataFrame(buf)
     if (info.frame.method === FRAME_CONTROL) {
-      if (info.type === "pong") {
-        this.lastPongAt = Date.now()
-        if (info.payload.length > 0) {
-          const conf = parseClientConfig(info.payload)
-          if (conf) this.applyConfig(conf)
-        }
+      if (info.type === "pong" && info.payload.length > 0) {
+        const conf = parseClientConfig(info.payload)
+        if (conf) this.applyConfig(conf)
       }
       return
     }
@@ -316,14 +344,17 @@ export class FeishuConn {
     }
   }
 
-  private handleClose(): void {
+  private handleClose(code?: number, reason?: string): void {
+    // forceReconnect 已置空 ws（主动判死路径），close 回调至此直接跳过，防双重排重连
+    if (!this.ws) return
     this.ws = null
     if (this.pingTimer) {
       clearInterval(this.pingTimer)
       this.pingTimer = null
     }
     if (this.stopped) return
-    this.log("connection closed, reconnecting…")
+    const aliveSec = this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) : 0
+    this.log(`connection closed (code=${code ?? "?"}${reason ? ` ${reason}` : ""}, alive ${aliveSec}s), reconnecting…`)
     this.scheduleReconnect(this.cfg.reconnectNonce)
   }
 
@@ -350,7 +381,11 @@ export class FeishuConn {
         this.scheduleReconnect(60_000, 0)
         return
       }
-      this.scheduleReconnect(this.cfg.reconnectInterval, attempt + 1)
+      // 前几次快速重试（网络闪断秒级恢复，不干等服务端 ReconnectInterval——常下发 60s+），
+      // 仍失败再按服务端间隔，避免持续轰炸网关
+      const delay =
+        attempt < FAST_RETRY_ATTEMPTS ? Math.min(this.cfg.reconnectInterval, this.cfg.fastRetryMs) : this.cfg.reconnectInterval
+      this.scheduleReconnect(delay, attempt + 1)
     }
   }
 }

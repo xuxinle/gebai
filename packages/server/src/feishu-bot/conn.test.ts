@@ -13,9 +13,9 @@ class FakeWs implements WsLike {
   send(d: string | ArrayBuffer | Uint8Array): void {
     this.sent.push(d)
   }
-  close(): void {
+  close(code?: number, reason?: string): void {
     this.readyState = 3
-    this.onclose?.({ code: 1000 })
+    this.onclose?.({ code, reason })
   }
   open(): void {
     this.readyState = 1
@@ -38,16 +38,20 @@ function eventFrame(payload: object, method = 1, headers: Record<string, string>
   return encodeFrame(frame)
 }
 
-function makeConn() {
+function makeConn(
+  intervalsOverride?: { reconnectNonce?: number; reconnectInterval?: number; pingInterval?: number; handshakeTimeoutMs?: number; fastRetryMs?: number },
+  endpointConfig: Record<string, number> | null = { PingInterval: 30, ReconnectInterval: 60 },
+) {
   const wsList: FakeWs[] = []
   const events: Record<string, unknown>[] = []
   const endpointCalls: string[] = []
+  const logs: string[] = []
   const fetchImpl = async (url: string, _init: RequestInit) => {
     endpointCalls.push(url)
     return {
       ok: true,
       status: 200,
-      json: async () => ({ code: 0, msg: "ok", data: { URL: "wss://example.com/connect?device_id=dev1&service_id=7", ClientConfig: { PingInterval: 30, ReconnectInterval: 60 } } }),
+      json: async () => ({ code: 0, msg: "ok", data: { URL: "wss://example.com/connect?device_id=dev1&service_id=7", ClientConfig: endpointConfig ?? {} } }),
     }
   }
   const wsFactory = {
@@ -66,10 +70,12 @@ function makeConn() {
     fetchImpl,
     wsFactory,
     clock: () => 1000,
-    intervals: { reconnectNonce: 0, reconnectInterval: 50, pingInterval: 60_000 },
-    log: () => {},
+    intervals: { reconnectNonce: 0, reconnectInterval: 50, pingInterval: 60_000, handshakeTimeoutMs: 30, ...intervalsOverride },
+    log: (m) => {
+      logs.push(m)
+    },
   })
-  return { conn, wsList, events, endpointCalls, get ws() { return wsList[wsList.length - 1] } }
+  return { conn, wsList, events, endpointCalls, logs, get ws() { return wsList[wsList.length - 1] } }
 }
 
 /** 等待 conn.start() 创建 WS 实例（discoverEndpoint 为异步链）。 */
@@ -349,5 +355,70 @@ describe("FeishuConn", () => {
     const calls = endpointCalls.length
     await new Promise((r) => setTimeout(r, 120))
     expect(endpointCalls.length).toBe(calls)
+  })
+
+  test("服务端静默超时：3x ping 间隔无任何帧，强制断开重连（不依赖 onclose）", async () => {
+    // endpoint 不下发配置：pingInterval 保持注入的 40ms（3x=120ms 判死）
+    const { conn, wsList, endpointCalls } = makeConn({ reconnectNonce: 0, reconnectInterval: 50, pingInterval: 40 }, null)
+    const p = conn.start()
+    const ws = await waitWs(wsList)
+    ws.open()
+    await p
+    await new Promise((r) => setTimeout(r, 300))
+    expect(ws.readyState).toBe(3) // 旧连接被主动关闭
+    expect(endpointCalls.length).toBeGreaterThanOrEqual(2) // 已重新 endpoint 发现
+    conn.stop()
+  })
+
+  test("任意服务端帧均刷新判活时钟（事件帧持续到达不触发死链误判）", async () => {
+    const { conn, wsList, endpointCalls } = makeConn({ reconnectNonce: 0, reconnectInterval: 50, pingInterval: 40 }, null)
+    const p = conn.start()
+    const ws = await waitWs(wsList)
+    ws.open()
+    await p
+    // 每 30ms 发一个事件帧（非 pong），持续 300ms——若只认 pong，120ms 即判死断连
+    const frame = eventFrame({ schema: "2.0", header: { event_type: "x" }, event: {} }, 1, { message_id: "om_alive", sum: "1", seq: "0" })
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 30))
+      ws.receive(frame)
+    }
+    expect(endpointCalls).toHaveLength(1)
+    expect(wsList).toHaveLength(1)
+    conn.stop()
+  })
+
+  test("握手超时：黑洞连接（无 open/error/close）按超时失败进入重连", async () => {
+    const { conn, wsList, endpointCalls } = makeConn({ reconnectNonce: 0, reconnectInterval: 50, handshakeTimeoutMs: 40 }, null)
+    const p = conn.start()
+    await waitWs(wsList) // 不 open：模拟防火墙黑洞
+    await p // start 应正常返回（进入重连流程而非永久挂起）
+    await new Promise((r) => setTimeout(r, 100))
+    expect(endpointCalls.length).toBeGreaterThanOrEqual(2)
+    conn.stop()
+  })
+
+  test("重连失败先快速重试（min(interval, fastRetry)），不干等服务端长间隔", async () => {
+    // 服务端 interval 若生效为 60s，第二次失败重试要等 60s；快速重试应秒级连续尝试
+    const { conn, wsList, endpointCalls } = makeConn({ reconnectNonce: 0, reconnectInterval: 60_000, handshakeTimeoutMs: 30, fastRetryMs: 40 }, null)
+    const p = conn.start()
+    const ws = await waitWs(wsList)
+    ws.open()
+    await p
+    ws.close() // 断线 → 立即重连（ws#2 握手超时失败）→ fastRetry 40ms 后再试（ws#3 …）
+    await new Promise((r) => setTimeout(r, 250))
+    expect(endpointCalls.length).toBeGreaterThanOrEqual(3)
+    conn.stop()
+  })
+
+  test("断连日志携带 close code/reason 与存活时长", async () => {
+    const { conn, wsList, logs } = makeConn()
+    const p = conn.start()
+    const ws = await waitWs(wsList)
+    ws.open()
+    await p
+    ws.close(1006, "abnormal closure")
+    await new Promise((r) => setTimeout(r, 20))
+    expect(logs.some((l) => l.includes("code=1006") && l.includes("abnormal closure") && l.includes("alive"))).toBe(true)
+    conn.stop()
   })
 })
