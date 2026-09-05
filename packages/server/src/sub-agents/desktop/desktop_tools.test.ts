@@ -404,7 +404,7 @@ describe("desktop definition", () => {
   test("preload off and tools registered (独有工具 only——编排用全局 agent_run，不复刻)", () => {
     expect(desktopDef.preload).toBe(false)
     expect(Object.keys(desktopDef.tools ?? {}).sort()).toEqual(
-      ["clipboard_read", "key_press", "mouse_click", "mouse_move", "screen_info", "screenshot", "type_text", "window_focus", "window_list", "window_move"].sort(),
+      ["clipboard_read", "detect", "key_press", "locate", "mouse_click", "mouse_move", "ocr", "screen_info", "screenshot", "type_text", "window_focus", "window_list", "window_move"].sort(),
     )
   })
 })
