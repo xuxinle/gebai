@@ -1,23 +1,20 @@
 /**
- * 桌面本地识别工具集（desktop 专用）：本地小模型图像识别——OCR 文本读取/定位与自备
- * YOLO 目标检测（core/cv 域，onnxruntime-web wasm 进程内推理，离线运行不耗模型配额）。
- * 全部只读操作（不点击/不输入），坐标返回相对（截图区域/图像）原点的像素值，
- * 供 mouse_click 直接使用；识别在裁剪/缩放后的图像上进行，坐标一律映射回原始像素系。
+ * 桌面本地识别工具集（desktop 专用）：ocr/locate/locate_image 三工具复用共享工厂
+ * core/tools/cv-analysis（core/cv 域本地小模型推理的消费层——onnxruntime-web wasm 进程内
+ * 推理，离线运行不耗模型配额），本文件注入 desktop 的缺省图像源（现截宿主机屏幕）与本地
+ * 模式闸门；desktop 独有的 detect（自备 YOLO 检测）与 wait_for（屏幕条件轮询）仍在此处。
+ * 全部只读操作（不点击/不输入），坐标返回映射回主屏原点像素系的像素值，供 mouse_click
+ * 直接使用；识别在裁剪/缩放后的图像上进行，坐标一律映射回原始像素系。
  */
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
-import type { ToolSchema } from "@gebai/sdk"
 import { getCvRunner } from "../../core/cv/cv"
-import { cropImage, decodePng, type RgbaImage } from "../../core/cv/image"
-import { matchTemplate, type TemplateMatch } from "../../core/cv/template"
-import { VISION_MAX_IMAGE_BYTES } from "../../core/tools/vision"
-import { PS_DPI_AWARE, parseRegion } from "./desktop_tools"
+import { decodePng, type RgbaImage } from "../../core/cv/image"
+import { createCvAnalysisTools, loadAnalysisSource, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
+import { parseRegion, schema } from "../../core/tools/shared"
+import { PS_DPI_AWARE } from "./desktop_tools"
 
 function desktopGate(ctx: ToolContext): void {
   if (ctx.sandboxed) throw new Error("桌面控制仅在本地/桌面模式可用（服务端部署已禁用）")
-}
-
-function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
-  return { type: "object", properties, required }
 }
 
 /** PowerShell 脚本 → 命令串：UTF-16LE base64 避免引号转义（cmd 兼容）。 */
@@ -26,75 +23,7 @@ function ps(script: string): string {
   return `powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`
 }
 
-/** OCR 结果行数上限（超出截断提示用 desktop_ocr 的 find 过滤收窄）。 */
-const OCR_LINE_LIMIT = 200
-
-interface LineOut {
-  text: string
-  score: number
-  x: number
-  y: number
-  w: number
-  h: number
-}
-
-/** 载入待识别图像：image 参数优先（PNG），省略则现截一张（region 可限定区域，坐标可为负覆盖副屏）。
- *  返回图像与坐标偏移——region 截图偏移为 region 原点，全屏截图偏移为捕获原点
- *  （Windows 全屏=虚拟屏幕，原点可为负）；坐标输出一律映射回主屏原点像素系。 */
-async function loadOrCapture(
-  ctx: ToolContext,
-  image: string,
-  region: string,
-): Promise<{ img: RgbaImage; offX: number; offY: number; sourceDesc: string } | { error: string }> {
-  const parsed = region ? parseRegion(region) : null
-  if (region && !parsed) {
-    return { error: `region 格式错误: ${region}（应为 x,y,w,h）` }
-  }
-  let img: RgbaImage
-  let offX = 0
-  let offY = 0
-  let sourceDesc: string
-  if (image) {
-    const path = ctx.resolvePath(image)
-    if (!path.toLowerCase().endsWith(".png")) {
-      return { error: `本地识别仅支持 PNG（当前 ${image}）——JPEG 等格式请先转换，或直接省略 image 现截屏幕` }
-    }
-    const bytes = await ctx.readBinaryFile(path)
-    if (bytes.byteLength > VISION_MAX_IMAGE_BYTES) {
-      return { error: `图片过大（${(bytes.byteLength / 1024 / 1024).toFixed(1)}MB，上限 8MB）` }
-    }
-    try {
-      img = decodePng(bytes)
-    } catch (e) {
-      return { error: `PNG 解码失败: ${e instanceof Error ? e.message : e}` }
-    }
-    sourceDesc = `图像 ${image}`
-    if (parsed) {
-      // image 是完整图：region 在图内裁剪（坐标为图片内坐标）
-      img = cropImage(img, parsed)
-      offX = parsed.x
-      offY = parsed.y
-      sourceDesc = `图像 ${image}（区域 ${region}）`
-    }
-  } else {
-    // 固定文件名复用：每次现截覆盖同一文件，避免会话内 cv_capture_*.png 只增不减。
-    // 有 region 时 captureTo 直接按区域截取（不再二次裁剪），无 region 截全屏虚拟屏幕。
-    const path = ctx.resolvePath("cv_capture.png")
-    const cap = await captureTo(ctx, path, region)
-    if ("error" in cap) return cap
-    offX = cap.offX
-    offY = cap.offY
-    try {
-      img = decodePng(await ctx.readBinaryFile(path))
-    } catch (e) {
-      return { error: `截图解码失败: ${e instanceof Error ? e.message : e}` }
-    }
-    sourceDesc = region
-      ? `当前屏幕（区域 ${region}，原点即区域原点）`
-      : `当前屏幕（全屏=虚拟屏幕，原点 (${offX},${offY})）`
-  }
-  return { img, offX, offY, sourceDesc }
-}
+/* ---------- 缺省图像源：现截宿主机屏幕 ---------- */
 
 /** 平台截图命令（无统计——cv 场景不需要黑帧检测）；返回捕获原点（虚拟屏幕语义）。 */
 async function captureTo(
@@ -136,211 +65,64 @@ $g.Dispose(); $bmp.Dispose()
   return { ok: true, offX: reg ? reg.x : cap ? Number(cap[1]) : 0, offY: reg ? reg.y : cap ? Number(cap[2]) : 0 }
 }
 
-function mapLines(lines: Array<{ text: string; score: number; box: { x: number; y: number; w: number; h: number } }>, offX: number, offY: number): LineOut[] {
-  return lines.map((l) => ({
-    text: l.text,
-    score: l.score,
-    x: Math.round(l.box.x + offX),
-    y: Math.round(l.box.y + offY),
-    w: Math.round(l.box.w),
-    h: Math.round(l.box.h),
-  }))
+/** desktop 缺省识别源：固定文件名 cv_capture.png 覆盖复用（不随调用累积），有 region 时
+ *  captureTo 直接按区域截取（不再二次裁剪），无 region 截全屏虚拟屏幕。坐标偏移=捕获原点。 */
+async function captureScreen(ctx: ToolContext, region: string): Promise<CvSource | { error: string }> {
+  const path = ctx.resolvePath("cv_capture.png")
+  const cap = await captureTo(ctx, path, region)
+  if ("error" in cap) return cap
+  let img: RgbaImage
+  try {
+    img = decodePng(await ctx.readBinaryFile(path))
+  } catch (e) {
+    return { error: `截图解码失败: ${e instanceof Error ? e.message : e}` }
+  }
+  return {
+    img,
+    offX: cap.offX,
+    offY: cap.offY,
+    sourceDesc: region
+      ? `当前屏幕（区域 ${region}，原点即区域原点）`
+      : `当前屏幕（全屏=虚拟屏幕，原点 (${cap.offX},${cap.offY})）`,
+  }
 }
 
-function formatLine(l: LineOut): string {
-  const cx = Math.round(l.x + l.w / 2)
-  const cy = Math.round(l.y + l.h / 2)
-  return `${l.text}  [${l.x},${l.y},${l.w},${l.h}] → 中心 (${cx},${cy})  置信度 ${l.score.toFixed(2)}`
-}
+/** detect 复用的图像装载约定（与三工具同一缺省源）。 */
+const screenLoader: CvSourceLoader = { captureDefault: captureScreen, pngOnlyTail: "，或直接省略 image 现截屏幕" }
 
-/* ---------- desktop_ocr ---------- */
+/* ---------- desktop_ocr / desktop_locate / desktop_locate_image（共享工厂，desktop 文案） ---------- */
 
-export const ocrTool: Tool = {
-  name: "ocr",
-  description:
-    "本地 OCR 识别屏幕/图片文字（PP-OCR 中英文小模型，离线运行、快、带精确像素坐标）。image 省略则现截全屏；region 限定区域（'x,y,w,h'）；find 关键词过滤。返回坐标相对（截图区域/图像）原点，可直接用于 mouse_click。读屏文字优先用本工具，语义理解/非文字内容才用 vision。",
-  card: { titleParams: ["find", "region"], args: "none" },
-  parameters: schema({
-    image: { type: "string", description: "可选：PNG 图片路径（相对会话工作目录，省略则现截全屏）" },
-    region: { type: "string", description: "可选：识别区域 'x,y,w,h'（像素；现截时为屏幕坐标，image 时为图片内坐标）" },
-    find: { type: "string", description: "可选：关键词过滤，只返回包含该关键词的文本行" },
-  }),
-  async execute(args, ctx): Promise<ToolResult> {
-    desktopGate(ctx)
-    const loaded = await loadOrCapture(ctx, String(args.image ?? "").trim(), String(args.region ?? "").trim())
-    if ("error" in loaded) return { output: loaded.error }
-    const find = String(args.find ?? "").trim().toLowerCase()
-    let lines: LineOut[]
-    try {
-      const raw = await getCvRunner().ocr(loaded.img, { env: ctx.env })
-      lines = mapLines(raw, loaded.offX, loaded.offY)
-    } catch (e) {
-      return { output: `本地识别失败: ${e instanceof Error ? e.message : e}` }
-    }
-    if (find) lines = lines.filter((l) => l.text.toLowerCase().includes(find))
-    const capped = lines.length > OCR_LINE_LIMIT
-    const shown = lines.slice(0, OCR_LINE_LIMIT)
-    const head = `识别到 ${lines.length} 行（${loaded.sourceDesc}，坐标相对其原点）${find ? `，过滤「${args.find}」` : ""}：`
-    const body = shown.map(formatLine).join("\n")
-    const tail = capped ? `\n…（共 ${lines.length} 行，仅显示前 ${OCR_LINE_LIMIT} 行；可用 find 参数过滤收窄）` : ""
-    return {
-      output: lines.length ? `${head}\n${body}${tail}` : `${head}\n（无${find ? "匹配" : "识别到"}文本——可能是图形界面无文字、分辨率过低，或需用 vision 工具做语义分析）`,
-      data: { source: loaded.sourceDesc, find: args.find ?? null, lines },
-    }
-  },
-}
-
-/* ---------- desktop_locate ---------- */
-
-function normText(s: string): string {
-  return s.trim().toLowerCase()
-}
-
-/** 匹配分级：2=完全相等，1=行包含目标，0=目标包含行（≥2 字），-1=不匹配。 */
-function matchRank(line: string, target: string): number {
-  const l = normText(line)
-  const t = normText(target)
-  if (!l || !t) return -1
-  if (l === t) return 2
-  if (l.includes(t)) return 1
-  if (t.includes(l) && l.length >= 2) return 0
-  return -1
-}
-
-export const locateTool: Tool = {
-  name: "locate",
-  description:
-    "在屏幕/图片中定位目标文字的精确像素坐标（本地 OCR，比视觉模型估坐标可靠）。target 为要找的文字（如按钮/菜单/链接文字）；返回最佳匹配的中心坐标（可直接 mouse_click）与全部候选。image 省略则现截全屏；region 限定搜索区域。",
-  card: { titleParams: ["target", "region"], args: "none" },
-  parameters: schema(
-    {
-      target: { type: "string", description: "要定位的目标文字（如「保存」「确定」）" },
-      image: { type: "string", description: "可选：PNG 图片路径（省略则现截全屏）" },
-      region: { type: "string", description: "可选：搜索区域 'x,y,w,h'（像素）" },
+const analysis = createCvAnalysisTools({
+  gate: desktopGate,
+  ...screenLoader,
+  wording: {
+    descriptions: {
+      ocr: "本地 OCR 识别屏幕/图片文字（PP-OCR 中英文小模型，离线运行、快、带精确像素坐标）。image 省略则现截全屏；region 限定区域（'x,y,w,h'）；find 关键词过滤。返回坐标相对（截图区域/图像）原点，可直接用于 mouse_click。读屏文字优先用本工具，语义理解/非文字内容才用 vision。",
+      locate: "在屏幕/图片中定位目标文字的精确像素坐标（本地 OCR，比视觉模型估坐标可靠）。target 为要找的文字（如按钮/菜单/链接文字）；返回最佳匹配的中心坐标（可直接 mouse_click）与全部候选。image 省略则现截全屏；region 限定搜索区域。",
+      locateImage: "在屏幕/图片中按模板定位图标/图形元素（本地模板匹配，零训练——补「文字走 desktop_locate、检测需自训 YOLO」之间的空白）。template 为模板 PNG 路径，或 template_region 从搜索图坐标内取模板区域；返回最佳匹配中心坐标（可直接 mouse_click）与候选。同尺寸匹配（模板需与目标显示尺寸一致——同一显示环境截图裁剪），threshold 相似度阈值默认 0.8。image 省略则现截全屏；region 限定搜索区域。",
     },
-    ["target"],
-  ),
-  async execute(args, ctx): Promise<ToolResult> {
-    desktopGate(ctx)
-    const target = String(args.target ?? "").trim()
-    if (!target) return { output: "target 不能为空" }
-    const loaded = await loadOrCapture(ctx, String(args.image ?? "").trim(), String(args.region ?? "").trim())
-    if ("error" in loaded) return { output: loaded.error }
-    let lines: LineOut[]
-    try {
-      lines = mapLines(await getCvRunner().ocr(loaded.img, { env: ctx.env }), loaded.offX, loaded.offY)
-    } catch (e) {
-      return { output: `本地识别失败: ${e instanceof Error ? e.message : e}` }
-    }
-    const candidates = lines
-      .map((l) => ({ line: l, rank: matchRank(l.text, target) }))
-      .filter((c) => c.rank >= 0)
-      .sort((a, b) => b.rank - a.rank || b.line.score - a.line.score)
-      .map((c) => c.line)
-    if (!candidates.length) {
-      return {
-        output:
-          `未找到目标文字「${target}」（${loaded.sourceDesc}）。建议：1) 用 desktop_ocr 读取全部文本确认实际措辞；` +
-          "2) 文字可能是图标/图形（无文字），改用 desktop_detect（需自备模型）或 vision 工具语义分析；3) 目标可能不在当前屏幕/区域内，检查窗口是否在前台。",
-        data: { target, found: false },
-      }
-    }
-    const best = candidates[0]
-    const cx = Math.round(best.x + best.w / 2)
-    const cy = Math.round(best.y + best.h / 2)
-    const rest = candidates.slice(1, 11).map(formatLine)
-    const output =
-      `找到「${best.text}」（${loaded.sourceDesc}）：中心 (${cx},${cy})，框 [${best.x},${best.y},${best.w},${best.h}]，置信度 ${best.score.toFixed(2)}\n` +
-      `可直接 mouse_click(${cx}, ${cy})。${rest.length ? `\n其余候选：\n${rest.join("\n")}` : ""}`
-    return { output, data: { target, found: true, best: { ...best, center: [cx, cy] }, candidates } }
-  },
-}
-
-/* ---------- desktop_locate_image（模板匹配） ---------- */
-
-export const locateImageTool: Tool = {
-  name: "locate_image",
-  description:
-    "在屏幕/图片中按模板定位图标/图形元素（本地模板匹配，零训练——补「文字走 desktop_locate、检测需自训 YOLO」之间的空白）。template 为模板 PNG 路径，或 template_region 从搜索图坐标内取模板区域；返回最佳匹配中心坐标（可直接 mouse_click）与候选。同尺寸匹配（模板需与目标显示尺寸一致——同一显示环境截图裁剪），threshold 相似度阈值默认 0.8。image 省略则现截全屏；region 限定搜索区域。",
-  card: { titleParams: ["template", "template_region", "region"], args: "none" },
-  parameters: schema(
-    {
-      template: { type: "string", description: "可选：模板 PNG 路径（相对会话工作目录）" },
-      template_region: { type: "string", description: "可选：'x,y,w,h' 在搜索图坐标系内取模板区域（与 template 二选一；坐标系同 desktop_ocr 对同一 image/region 的输出）" },
-      image: { type: "string", description: "可选：PNG 搜索图路径（省略则现截全屏）" },
-      region: { type: "string", description: "可选：搜索区域 'x,y,w,h'（像素）" },
-      threshold: { type: "number", description: "可选：相似度阈值 0-1（默认 0.8，降低可放宽匹配）" },
+    imageParam: {
+      ocr: "可选：PNG 图片路径（相对会话工作目录，省略则现截全屏）",
+      locate: "可选：PNG 图片路径（省略则现截全屏）",
+      locateImage: "可选：PNG 搜索图路径（省略则现截全屏）",
     },
-    [],
-  ),
-  async execute(args, ctx): Promise<ToolResult> {
-    desktopGate(ctx)
-    const templatePath = String(args.template ?? "").trim()
-    const templateRegionRaw = String(args.template_region ?? "").trim()
-    if (!templatePath && !templateRegionRaw) {
-      return { output: "请提供 template（模板 PNG 路径）或 template_region（搜索图内模板区域）二者之一" }
-    }
-    const loaded = await loadOrCapture(ctx, String(args.image ?? "").trim(), String(args.region ?? "").trim())
-    if ("error" in loaded) return { output: loaded.error }
-    let tpl: RgbaImage
-    if (templatePath) {
-      const path = ctx.resolvePath(templatePath)
-      if (!path.toLowerCase().endsWith(".png")) {
-        return { output: `模板仅支持 PNG（当前 ${templatePath}）` }
-      }
-      const bytes = await ctx.readBinaryFile(path)
-      if (bytes.byteLength > VISION_MAX_IMAGE_BYTES) {
-        return { output: `模板过大（${(bytes.byteLength / 1024 / 1024).toFixed(1)}MB，上限 8MB）` }
-      }
-      try {
-        tpl = decodePng(bytes)
-      } catch (e) {
-        return { output: `模板 PNG 解码失败: ${e instanceof Error ? e.message : e}` }
-      }
-    } else {
-      const box = parseRegion(templateRegionRaw)
-      if (!box) return { output: `template_region 格式错误: ${templateRegionRaw}（应为 x,y,w,h）` }
-      if (box.x < 0 || box.y < 0 || box.x + box.w > loaded.img.width || box.y + box.h > loaded.img.height) {
-        return { output: `template_region 超出搜索图范围（图 ${loaded.img.width}x${loaded.img.height}，区域 ${templateRegionRaw}）` }
-      }
-      tpl = cropImage(loaded.img, box)
-    }
-    const threshold = Number(args.threshold)
-    let matches: TemplateMatch[]
-    try {
-      matches = matchTemplate(loaded.img, tpl, {
-        threshold: Number.isFinite(threshold) && threshold > 0 && threshold < 1 ? threshold : 0.8,
-      })
-    } catch (e) {
-      return { output: `模板匹配失败: ${e instanceof Error ? e.message : e}` }
-    }
-    if (!matches.length) {
-      return {
-        output:
-          `未找到匹配的模板图形（${loaded.sourceDesc}）。建议：1) 降低 threshold（如 0.7）放宽匹配；` +
-          "2) 确认模板与目标为同一显示环境同尺寸截图（本工具不做缩放匹配）；3) 目标可能是文字——改用 desktop_locate；4) 用 vision 工具对截图做语义分析。",
-        data: { found: false },
-      }
-    }
-    const withOffset = (m: TemplateMatch) => ({
-      ...m,
-      x: m.x + loaded.offX,
-      y: m.y + loaded.offY,
-      center: [Math.round(m.x + loaded.offX + m.w / 2), Math.round(m.y + loaded.offY + m.h / 2)] as [number, number],
-    })
-    const best = withOffset(matches[0])
-    const rest = matches.slice(1, 6).map((m) => {
-      const o = withOffset(m)
-      return `相似度 ${o.score.toFixed(2)}  [${o.x},${o.y},${o.w},${o.h}] → 中心 (${o.center[0]},${o.center[1]})`
-    })
-    return {
-      output:
-        `找到模板匹配（${loaded.sourceDesc}）：中心 (${best.center[0]},${best.center[1]})，框 [${best.x},${best.y},${best.w},${best.h}]，相似度 ${best.score.toFixed(2)}\n` +
-        `可直接 mouse_click(${best.center[0]}, ${best.center[1]})。${rest.length ? `\n其余候选：\n${rest.join("\n")}` : ""}`,
-      data: { found: true, best, candidates: matches.slice(1, 6).map(withOffset) },
-    }
+    regionParam: {
+      ocr: "可选：识别区域 'x,y,w,h'（像素；现截时为屏幕坐标，image 时为图片内坐标）",
+      locate: "可选：搜索区域 'x,y,w,h'（像素）",
+      locateImage: "可选：搜索区域 'x,y,w,h'（像素）",
+    },
+    templateRegionParam: "可选：'x,y,w,h' 在搜索图坐标系内取模板区域（与 template 二选一；坐标系同 desktop_ocr 对同一 image/region 的输出）",
+    clickHint: (cx, cy) => `可直接 mouse_click(${cx}, ${cy})`,
+    locateNotFound:
+      "1) 用 desktop_ocr 读取全部文本确认实际措辞；2) 文字可能是图标/图形（无文字），改用 desktop_detect（需自备模型）或 vision 工具语义分析；3) 目标可能不在当前屏幕/区域内，检查窗口是否在前台。",
+    locateImageNotFound:
+      "2) 确认模板与目标为同一显示环境同尺寸截图（本工具不做缩放匹配）；3) 目标可能是文字——改用 desktop_locate；4) 用 vision 工具对截图做语义分析。",
   },
-}
+})
+
+export const ocrTool = analysis.ocr
+export const locateTool = analysis.locate
+export const locateImageTool = analysis.locate_image
 
 /* ---------- desktop_wait_for（等待界面条件） ---------- */
 
@@ -464,7 +246,7 @@ export const detectTool: Tool = {
   }),
   async execute(args, ctx): Promise<ToolResult> {
     desktopGate(ctx)
-    const loaded = await loadOrCapture(ctx, String(args.image ?? "").trim(), String(args.region ?? "").trim())
+    const loaded = await loadAnalysisSource(ctx, screenLoader, String(args.image ?? "").trim(), String(args.region ?? "").trim())
     if ("error" in loaded) return { output: loaded.error }
     const conf = Number(args.conf)
     let objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>
@@ -487,7 +269,13 @@ export const detectTool: Tool = {
     if (!objects.length) {
       return { output: `未检测到目标对象（${loaded.sourceDesc}）。可尝试降低 conf 阈值，或确认模型/标签与场景匹配。`, data: { objects } }
     }
-    const body = objects.map((o) => formatLine({ ...o, text: o.label })).join("\n")
+    const body = objects
+      .map((o) => {
+        const cx = Math.round(o.x + o.w / 2)
+        const cy = Math.round(o.y + o.h / 2)
+        return `${o.label}  [${o.x},${o.y},${o.w},${o.h}] → 中心 (${cx},${cy})  置信度 ${o.score.toFixed(2)}`
+      })
+      .join("\n")
     return {
       output: `检测到 ${objects.length} 个对象（${loaded.sourceDesc}，坐标相对其原点）：\n${body}`,
       data: { source: loaded.sourceDesc, objects },
