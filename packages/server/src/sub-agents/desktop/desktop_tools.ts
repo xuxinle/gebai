@@ -243,7 +243,7 @@ Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessNa
 
 export const windowFocusTool: Tool = {
   name: "window_focus",
-  description: "激活指定窗口到前台（按 PID 或标题匹配），必要时先 window_list 定位。",
+  description: "激活指定窗口到前台（按 PID 或标题匹配），激活后复核前台窗口确认生效；Windows 前台锁定拦截时经 Alt 键缓解重试，仍失败明确报错（请手动点击目标窗口后重试）。必要时先 window_list 定位。",
   card: { titleParams: ["pid", "title"], args: "none" },
   parameters: schema({
     pid: { type: "number", description: "可选：目标窗口的 PID（window_list 结果第一列）" },
@@ -264,13 +264,27 @@ using System.Runtime.InteropServices;
 public class GebaiWin {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
 }
 "@
 ${procFilter(pid, title)} | Select-Object -First 1
 if ($p -and $p.MainWindowHandle -ne 0) {
-  [GebaiWin]::ShowWindow($p.MainWindowHandle, 9) | Out-Null
-  [GebaiWin]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-  "已激活: $($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)"
+  $h = $p.MainWindowHandle
+  [GebaiWin]::ShowWindow($h, 9) | Out-Null
+  $ok = [GebaiWin]::SetForegroundWindow($h)
+  if (-not $ok -or [GebaiWin]::GetForegroundWindow() -ne $h) {
+    # Windows 前台锁定缓解：模拟 Alt 键击键使本进程获得前台权限后重试
+    [GebaiWin]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    [GebaiWin]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 60
+    $ok = [GebaiWin]::SetForegroundWindow($h)
+  }
+  if ($ok -and [GebaiWin]::GetForegroundWindow() -eq $h) {
+    "已激活: $($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)"
+  } else {
+    "激活失败: Windows 前台锁定拦截（后台进程禁止夺取焦点）。请手动点击一次目标窗口后重试，或改用其他验证通道确认窗口状态"
+  }
 } else { "未找到匹配窗口" }
 `)
     } else if (plat === "darwin") {
@@ -356,11 +370,11 @@ if ($p -and $p.MainWindowHandle -ne 0) {
 export const typeTextTool: Tool = {
   name: "type_text",
   description:
-    "向当前聚焦窗口输入文本。默认 clipboard 模式（剪贴板粘贴法，中文/符号可靠：输入前备份、输入后恢复剪贴板；输入前自动做敏感信息检测并预览内容），keys 模式为纯按键逐字符输入（绕开剪贴板，仅支持 ASCII，见 mode 参数描述）。先确保目标窗口已聚焦（window_focus）。",
+    "向当前聚焦窗口输入文本。默认 clipboard 模式（剪贴板粘贴法，中文/符号可靠：写入回验重试、粘贴后延时恢复剪贴板，写入未生效时明确报错不粘贴；输入前自动做敏感信息检测并预览内容），keys 模式为纯按键逐字符输入（绕开剪贴板，仅 ASCII；中文 IME 激活时部分标点可能丢失）。先确保目标窗口已聚焦（window_focus）。",
   parameters: schema(
     {
       text: { type: "string", description: "要输入的文本" },
-      mode: { enum: ["clipboard", "keys"], description: "可选：clipboard=剪贴板粘贴法（默认）；keys=纯按键逐字符输入（仅 ASCII，绕开剪贴板）" },
+      mode: { enum: ["clipboard", "keys"], description: "可选：clipboard=剪贴板粘贴法（默认，写入回验）；keys=纯按键逐字符输入（仅 ASCII，IME 激活时标点可能丢失）" },
     },
     ["text"],
   ),
@@ -402,32 +416,47 @@ Add-Type -AssemblyName System.Windows.Forms
       const r = await run(ctx, cmd)
       return { output: `${r.output}（内容预览：${preview}；keys 模式）` }
     }
-    // clipboard 模式：剪贴板粘贴法，输入前备份、输入后恢复（Windows try/finally 保证恢复，macOS 容错恢复）
+    // clipboard 模式：剪贴板粘贴法。写入回验重试（剪贴板管理软件可能拦截/覆盖写入，未生效即报错不粘贴），
+    // 粘贴后延时恢复（目标应用异步消费剪贴板，立即恢复会粘出旧内容）
     if (plat === "win32") {
       cmd = ps(`
 Add-Type -AssemblyName System.Windows.Forms
 $old = $null; $oldOk = $false
 try { $old = Get-Clipboard -Raw; $oldOk = $true } catch {}
-try {
-  Set-Clipboard -Value ${psLiteral(text)}
-  [System.Windows.Forms.SendKeys]::SendWait("^v")
-  Start-Sleep -Milliseconds 200
-} finally {
-  if ($oldOk) { Set-Clipboard -Value $old } else { "警告: 原剪贴板备份失败，未恢复" }
+$cr = [string][char]13; $lf = [string][char]10
+$want = ${psLiteral(text)}
+$wantN = $want.Replace($cr + $lf, $lf).Replace($cr, $lf)
+$setOk = $false
+foreach ($i in 1..3) {
+  try { Set-Clipboard -Value $want } catch {}
+  Start-Sleep -Milliseconds 80
+  try { if (((Get-Clipboard -Raw).Replace($cr + $lf, $lf).Replace($cr, $lf)) -ceq $wantN) { $setOk = $true; break } } catch {}
 }
-"已输入 ${text.length} 字符"
+if (-not $setOk) {
+  "输入失败: 剪贴板写入未生效（可能被剪贴板管理软件拦截），未执行粘贴，原剪贴板未被修改"
+} else {
+  try {
+    [System.Windows.Forms.SendKeys]::SendWait("^v")
+    Start-Sleep -Milliseconds 1000
+  } finally {
+    if ($oldOk) { try { Set-Clipboard -Value $old } catch { "警告: 原剪贴板恢复失败" } } else { "警告: 原剪贴板备份失败，未恢复" }
+    Start-Sleep -Milliseconds 150
+  }
+  "已输入 ${text.length} 字符（剪贴板已恢复原内容）"
+}
 `)
     } else if (plat === "darwin") {
       cmd =
         `osascript -e 'try' -e 'set oldClip to the clipboard as text' -e 'on error' -e 'set oldClip to missing value' -e 'end try' ` +
         `-e 'set the clipboard to ${sq(JSON.stringify(text))}' -e 'tell application "System Events" to keystroke "v" using command down' ` +
-        `-e 'delay 0.2' -e 'if oldClip is not missing value then set the clipboard to oldClip'`
+        `-e 'delay 1' -e 'if oldClip is not missing value then set the clipboard to oldClip'`
     } else {
       const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
       if (!probe.stdout.trim()) return { output: "Linux 输入需要安装 xdotool" }
       cmd = `xdotool type --delay 15 '${sq(text)}'`
     }
     const r = await run(ctx, cmd)
+    if (r.output.startsWith("输入失败")) return { output: r.output }
     return { output: `${r.output}（内容预览：${preview}；剪贴板模式）` }
   },
 }
