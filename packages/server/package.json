@@ -29,6 +29,7 @@
     "happy-dom": "^20.11.2",
     "hono": "^4.6.0",
     "mermaid": "^11.16.1",
+    "onnxruntime-web": "^1.29.0",
     "pdf-lib": "^1.17.1",
     "playwright": "^1.62.1",
     "pptxgenjs": "^4.0.1",

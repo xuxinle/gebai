@@ -96,6 +96,7 @@ GEBAI_HOME/
   - **接口地址（`GEBAI_LLM_API_BASE`）两种写法均可**（`endpointUrl` 助手统一拼接）：服务**根地址**（自动追加接口路径，尾部斜杠剥净，如 `https://api.deepseek.com`、`https://open.bigmodel.cn/api/paas/v4`）或**完整接口地址**（文档/控制台直接复制的形态，如 `https://open.bigmodel.cn/api/paas/v4/chat/completions`——已以接口路径结尾则原样使用，不重复拼接）；视觉模型 `GEBAI_VISION_API_BASE` 同规则（复用同一 Provider 实现）
 - **前端**: Web (Vite 构建)，桌面端由原生 WebView 启动器（tao/wry）或系统浏览器加载同一套 Web UI
 - **语法分析**: tree-sitter（wasm，`web-tree-sitter` + `tree-sitter-wasms`），供 code 的 `analyze` 工具做代码结构概览；非 AI 依赖，不影响「不引入第三方 AI SDK」原则；**语法 wasm 构建期内嵌**（`scripts/build-analyzer-wasm.ts` 生成 gzip+base64 注册表，二进制打包模式回退内嵌产物，dev 模式读 node_modules）
+- **本地 CV 推理**: onnxruntime-web（wasm，单线程）+ PP-OCRv4 mobile ONNX 模型，供 desktop 子Agent 的 `desktop_ocr`/`desktop_locate`/`desktop_detect` 做本地小模型图像识别（中英文 OCR 文字定位 / 自备 YOLO 检测）；非 LLM 依赖、进程内推理不涉模型服务，不影响「不引入第三方 AI SDK」原则（该原则约束 LLM 请求与流解析自行实现）；运行时 dist 入口动态加载（不进 bundle 图）+ 二进制形态整包内嵌（见「小模型识别」）
 - **文档处理**: `docx`（Word 生成）/ `exceljs`（Excel 读写）/ `pptxgenjs`（PPT 生成）/ `fflate`（OOXML ZIP 解包，docx/pptx 读取与追加重打包）/ `pdf-lib`+`@pdf-lib/fontkit`（PDF 生成与页面编辑——TTC 需抽取子字体重建独立 TTF 后 embedFont，`removePage` 不失效 pageCache 混用 getPages 会取幽灵页）/ `unpdf`（PDF 文本提取——内嵌 pdf.js；其 `extractText` 走 worker postMessage 在 Bun 下 DataCloneError，须用 `getDocumentProxy` 低层 API），供 `wps` 子Agent 做文档读写排版；非 AI 依赖。复用既有 `happy-dom`（`DOMParser` 以 `text/xml` 模式解析 OOXML 部件——支持命名空间前缀标签查询，注意其 `Element.children` 为 `HTMLCollection` 须转真数组后用数组方法；`parseXml` 入口统一做 XML 声明规范化——python-docx 等第三方库写出的单引号声明 `<?xml version='1.0' …?>` 会使 happy-dom 静默降级为 HTML 解析、`w:`/`p:` 前缀查询全部落空，并对降级显式报错防误诊「文件损坏」）
 - **依赖版本钉死**: `@plantuml/core` 钉精确版本 `1.2026.6`（lockfile 不入库，caret 范围会解析到 1.2026.7——该版在 feishu-bot 渲染路径上 TeaVM 崩溃 `createProcessingInstruction`，时序图渲染必现失败）
 
@@ -352,6 +353,9 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_VISION_API_KIND` | 视觉模型接口类型：`openai`（兼容）/ `responses` / `anthropic` | 同主模型 |
 | `GEBAI_VISION_MAX_CONTEXT` | 视觉模型上下文 token 预算 | `128000` |
 | `GEBAI_VISION_EXTRA_PARAMS` | 视觉模型额外请求体参数（JSON 对象，同 `GEBAI_LLM_EXTRA_PARAMS` 语义） | 空 |
+| `GEBAI_CV_MODELS_DIR` | 本地 CV（`desktop_ocr`/`desktop_locate`）模型目录：含 `det.onnx`/`rec.onnx`/`dict.txt`（PP-OCR 中英文）三件套；任务级 env 可覆盖；未设置时按 二进制内嵌物化 → 源码 assets 目录 解析（见「小模型识别」） | 空 |
+| `GEBAI_CV_MAX_SIDE` | 本地 CV 输入图像降采样上限（像素长边，超过等比缩小后识别；坐标仍映射回原始像素系） | `1280` |
+| `GEBAI_CV_DETECT_MODEL` / `GEBAI_CV_DETECT_LABELS` | `desktop_detect` 自备 YOLO ONNX 模型路径与标签文件路径（每行一个类别；模型不内嵌，COCO 类别对 UI 无意义，需自训练） | 空 |
 | `GEBAI_SIGNUP_MODE` | 注册审批模式：`open`（默认，注册即用）/ `approval`（注册待 admin 审批——用户置 `disabled+pending` 待审、不可登录，admin 在用户管理页批准/拒绝） | `open` |
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
 | `GEBAI_MINIMAL_MODE` | 会话级极简模式（`true` 仅启用 `sh` 与 `edit` 工具（外加 `full_mode` 切换入口），其余工具从 schema 移除且调用被阻止，系统提示词同步极简化；前端「极简模式」开关同步写入，见「工具选择」） | 空 |
@@ -440,6 +444,7 @@ src/
     schedule/       #   定时任务：cron + notify（通知通道）
     exec/           #   脚本执行：js-tool/sh-tasks
     browser/        #   浏览器桥接基建：bridge（node driver.mjs JSON-RPC 桥/playwright 模块与 channel 解析/惰性共享单例/会话锁）+ driver.mjs + fetch-proxy（透明浏览器代理垫片）——playwright/reverse_site 子Agent 与浏览器代理共用的平台级底座，不依赖子Agent 定义存在
+    cv/             #   本地 CV 推理基建：ort-loader（onnxruntime-web wasm 运行时动态解析与内嵌物化）+ cv（惰性单例/模型目录解析/session 缓存/推理串行）+ image/ocr/detect（前后处理纯函数）——desktop 子Agent 小模型识别的底座，不依赖子Agent 定义存在
     security/       #   安全：sandbox/safety/ip/fetch-guard（SSRF 防护，webhook 校验共用）/ratelimit
     agents/         #   子Agent 装载器：subagents（扫描/热加载）/sub-agent-md/env-catalog
     widgets/        #   HTML 小工具库存储
@@ -526,6 +531,17 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **模型选择**：配置 `GEBAI_VISION_MODEL` 后使用独立视觉 Provider（`GEBAI_VISION_*`，接口地址/密钥/类型缺省继承主模型）；未配置时回落到主模型（须显式声明多模态能力，`GEBAI_LLM_MULTIMODAL=true`，默认 false），两者皆不可用则返回配置提示
 - **传输**：图片以 base64 内联（统一内部图片块 → OpenAI `image_url` data URL / Anthropic base64 `image` 块）随文本目标一起调用视觉模型，单图上限见常量参考；返回分析文本（超长走截断保护），并携带 `image` 内容块供 UI 展示图片
 - **审批**：默认无需审批（纯读取/外部模型调用）
+
+#### 小模型识别（本地 CV 推理，core/cv）
+
+与 `vision`（外部视觉模型服务）互补的**本地小模型图像识别**：非模型服务的 ONNX 推理（PP-OCR 中英文 OCR 为主力，可选自备 YOLO 检测），onnxruntime-web **wasm 进程内**运行——离线可用、不耗模型配额、毫秒~秒级延迟，且能给出**精确像素坐标**（LLM 视觉估坐标不准，这是桌面自动化的刚需）。desktop 子Agent 经 `desktop_ocr`/`desktop_locate`/`desktop_detect` 三个只读工具消费（见 desktop 小节）；基建在 `core/cv/` 域，不依赖子Agent 定义存在。
+
+- **运行时加载（不进 bundle 图）**：onnxruntime-web 经运行时动态 import dist 入口（拼接包名 + `Bun.resolveSync` + file URL，与 playwright 模块同款规避——bundle 注册表启动安全；裸导入在 node 条件下会指向 onnxruntime-node 原生绑定，故必须走 dist 文件直连）；单线程 wasm（`numThreads=1`，无 SharedArrayBuffer/worker 依赖）。单二进制形态从内嵌产物（`core/cv.embedded.generated.json`，构建脚本 `scripts/build-cv-embed.ts` 生成）物化到 `{GEBAI_HOME}/vendor/cv/`（版本 marker 整目录重建 + 防穿越 + 并发共享，与 pwcore 同思路）；源码/部署形态解析 node_modules
+- **模型交付**：构建时下载 PP-OCRv4 mobile（det ~4.7MB + rec ~10.9MB，onnxruntime-web Apache-2.0/MIT 许可）内嵌进产物——下载源 `GEBAI_CV_MODEL_BASE` 可覆写（内网镜像），`packages/server/assets/cv-models/` 已有文件跳过下载（离线自备）；字典从 rec 模型内嵌的 `character` 元数据提取（RapidOCR 约定）。下载失败生成空清单——构建不失败，运行时给配置指引。运行时模型目录解析：`GEBAI_CV_MODELS_DIR`（任务级 env 可覆盖）→ 二进制物化目录 → 源码形态 assets 目录；目录内固定三件套 `det.onnx`/`rec.onnx`/`dict.txt`
+- **推理形态**：惰性共享单例（首次调用初始化 ort + 加载模型，~1-3s）；session 按模型文件路径+大小缓存（文件变更自动重建）；**全进程推理串行**（Promise 链互斥，防同批扇出并发争抢）。wasm CPU 推理同步阻塞事件循环（单次约 0.5-2s）——仅 desktop（本地模式、单管理员）消费可接受；若未来进入多租户场景，抽 node sidecar（bridge 模式）承载
+- **前后处理（纯函数，`image.ts`/`ocr.ts`/`detect.ts`）**：PNG 解码自研（node:zlib inflate + 逆滤波，覆盖 8-bit 非隔行灰度/RGB/调色板/带 alpha——截图场景全覆盖，16-bit/隔行/JPEG 明确报错）；det 前处理等比缩放（长边 ≤960）+ 32 倍数零填充，DB 后处理（阈值 0.3 → 3x3 膨胀合并碎片 → 8-连通域 → 框内核心像素均值置信度 → unclip 外扩 → 阅读序排序）；rec 前处理 48 高等比缩放 + 320 宽零填充，CTC 贪心解码（blank=index 0，字典 = `[blank] + 6623 字符 + 空格`，对齐 RapidOCR 的 PP-OCR ONNX 部署约定）；YOLO letterbox（640、114 灰）+ NMS（IoU 0.45），兼容 v8 `[1,4+nc,N]` 与 v5 `[1,N,5+nc]` 两种输出形态（按形状自动识别）；**坐标一律还原到输入图像原始像素系**（region 偏移 + 缩放比例），供 `mouse_click` 直接使用
+- **目标检测（`desktop_detect`）**：模型不内嵌——`GEBAI_CV_DETECT_MODEL`（YOLO ONNX 路径）+ `GEBAI_CV_DETECT_LABELS`（每行一类别）自备；COCO 预训练类别对 UI 操作无意义，面向自训练图标/控件模型
+
 
 ### 多用户隔离与安全
 
@@ -798,7 +814,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
   - `args`：参数区模式——**缺省自适应**（扁平标量参数渲染为**键值行**：参数名 + 值 pre-wrap 展示，比 JSON 块更可读；嵌套结构回退 JSON 语法高亮）/ `"json"`（强制完整 JSON 高亮，标题参数不省略）/ `"kv"`（强制键值行，嵌套值紧凑 JSON 单行展示）/ `"none"`（不展示参数区，如 `env_detect`）/ `"code"`（`codeField` 参数渲染为语法高亮代码块，其余参数键值行/JSON 附注，如 `sh` 的 command；**超长内容同样先渲染后自动折叠**，不整块直显）/ `"edits"`（`codeField` 数组参数的 `{old_string,new_string}` 项渲染为**旧（红）/新（绿）对比块**；前端只读蛇形键，风格兼容统一收敛在后端归一层——多处修改编号「修改 i/n」，空串侧省略（纯新增/纯删除），形态不符回退自适应渲染；`edit` 工具因此不再显示 JSON；**edit 工具 card 声明不可用时（工具清单拉取失败/旧服务端未声明）前端按参数形态内建兜底同样渲染对比块**，长短修改一律先渲染后按阈值折叠，不回退直显 JSON）/ `"block"`（**结果直出内容块**：调用不显示通用工具卡片，结果直接渲染 blocks 内容块，如 `show`/`diff`）
   - `file`（文件卡声明，「文件展示方式」设置的**弹窗查看**模式据此渲染）：路径参数名（如 read/write/edit/patch 的 `path`，code 子Agent 同款包装自动继承）——声明本工具的**产物 file 块**（下方文件内容卡）在弹窗查看模式下收敛为**文件链接 chip**（图标 + 文件名 + 路径 + 下载，点击弹窗查看文件）；**参数区与输出不受影响**（write 的 content 代码块、edit 的旧/新对比块、patch 的 diff 块、read 的输出照常渲染），图片/图表等视觉产物块照常内联（仅 file 块切换形态）；块路径为服务端解析后的真实路径（会话 `tmp/` 逻辑或项目绝对路径，见「文件预览」）
   - **标题参数不在参数区重复展示**（titleParams 已入标题的键从参数区省略，如 `read` 参数区只显示 offset/limit；全部参数入标题时无参数区）；**超长参数区折叠只发生在完成态**（>800 字符收敛为「查看参数（N 字符）」折叠块，默认收起，点击展开，与输出折叠同款交互）——**执行/审批等待期完整直显不折叠**（实时调用卡 `🛠` 态带全量参数，执行与审批时可查看全貌），结果到达（`✓` 完成态，appendToolResult）时收敛为折叠块，与历史回放同构；agent_run/branch_run 专用参数块不参与折叠
-  - 已声明示例：全局 `sh`/`py`/`write`（code 模式 + 文件卡）、`edit`（edits 模式 + 文件卡）、`read`（文件卡）、`fetch_url`/`agent_load`/`agent_run`/`bg_task`/`ls`/`grep`/`glob`/`file`（标题参数）、`patch`（code 模式 + 标题参数 path + 文件卡）、`show`/`diff`（block 模式）；code `search_symbols`/`analyze`（标题参数）、`env_detect`/`system_info`（无参数区）；widgets `save`/`get`/`delete`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
+  - 已声明示例：全局 `sh`/`py`/`write`（code 模式 + 文件卡）、`edit`（edits 模式 + 文件卡）、`read`（文件卡）、`fetch_url`/`agent_load`/`agent_run`/`bg_task`/`ls`/`grep`/`glob`/`file`（标题参数）、`patch`（code 模式 + 标题参数 path + 文件卡）、`show`/`diff`（block 模式）；code `search_symbols`/`analyze`（标题参数）、`env_detect`/`system_info`（无参数区）；widgets `save`/`get`/`delete`（标题参数）；desktop `screenshot`/`window_focus`/`key_press`/`window_list`/`clipboard_read`/`screen_info`/`ocr`/`locate`/`detect`；playwright `open`/`new_page`/`serve_dir`/`switch_page`/`close_page`/`press`/`pages`/`close`
   - **`agent_run` 专用卡片**：卡片头部直接列出**全部预加载子Agent 名**（`🛠 agent_run · code + playwright`，以 `+` 连接、不截断、省略 `key=` 前缀——后缀 span 带 `wrap` 标记允许多行完整展示）；参数区**只显示输入提示词**（任务指令全文、pre-wrap 展示，不参与自动折叠）；实时卡片完成态（`✓`）保留标题后缀，参数区不因执行完成而消失（执行中与完成后均可见）
   - **`branch_run` 专用卡片**：卡片头部直接列出**各分支名**（`🛠 branch_run · 左路 + 右路（fast）`，`+` 连接、带模型路由后缀、wrap 多行；缺省名按服务端规则 `b1..bN` 补，与合并消息命名一致）；参数区**按分支渲染小节**（每节「🌿 名（模型路由）」头 + 任务指令块，指令块复用 agent_run 输入样式）；`async:true` 附一行后台执行提示、`merge:"summary"` 附一行摘要合入提示（复用同款提示行样式）；**不声明 card 元数据**——`branches` 为对象数组，通用 titleParams 路径会渲染 `[object Object]`，专用卡片由前端全权接管（同 agent_run 的前端特判先例，工具卡片测试覆盖实时/历史/空清单三态）
   - 元数据拉取失败或未声明时按默认渲染（标题仅工具名、参数区按缺省自适应规则），不影响功能
@@ -888,16 +904,17 @@ export const preload = false
 
 ```ts
 export const name = "desktop"
-export const description = "涉及宿主机桌面操作时装载本子Agent（仅本地模式，服务端部署不可用）：截图、窗口控制、键盘鼠标输入与剪贴板；窗口优先 PID 定位，输入/点击类操作需审批。输入：操作目标；输出：操作结果与屏幕图片。"
-export const systemPrompt = "你是桌面控制助手，直接操作宿主机桌面（仅本地模式；服务端部署下所有工具拒绝执行）。工作流程：1) 明确目标：先 window_list 确认目标窗口（PID/进程名/标题；窗口优先用 PID 定位——标题可能重复），截图前先说明截图用途；2) 准备：截图/坐标操作前先 screen_info 确认显示器分辨率与主屏原点（主屏左上角为坐标原点），避免 region/坐标错位；3) 执行：输入/点击/窗口控制类操作（window_focus/window_move/type_text/key_press/mouse_move/mouse_click）需审批，操作前先说明操作意图与目标窗口；执行前必须先用 window_focus 确认目标窗口已激活，避免输入到错误窗口；只读类（screenshot/window_list/screen_info/clipboard_read）免审批可直接执行；4) 反馈：执行后反馈结果——截图返回图片，mouse_click 坐标基于截图实际尺寸判断，说明截图位置与关键结论；5) 约束：只执行用户明确要求的操作，不做额外破坏性动作（不改系统设置、不删除文件、不触发危险快捷键）。验证多通道：不依赖单一验证通道——截图黑屏/纯色（工具会主动提示）时立即切换通道，不要反复重试截图：用 window_list 确认窗口是否在前台、用 clipboard_read 验证剪贴板状态，或经 agent_run 委托 code 子Agent 读取应用数据文件断言结果；任何通道失效即降级并明确告知用户当前采用的验证方式。"
-export const tools: ToolSet = { screenshot, window_list, window_focus, window_move, type_text, key_press, mouse_move, mouse_click, clipboard_read, screen_info }
+export const description = "涉及宿主机桌面操作时装载本子Agent（仅本地模式，服务端部署不可用）：截图、本地 OCR 识别与文字定位（小模型离线推理）、窗口控制、键盘鼠标输入与剪贴板；窗口优先 PID 定位，输入/点击类操作需审批。输入：操作目标；输出：操作结果、屏幕文字坐标与屏幕图片。"
+export const systemPrompt = "你是桌面控制助手，直接操作宿主机桌面（仅本地模式；服务端部署下所有工具拒绝执行）。工作流程：1) 明确目标：先 window_list 确认目标窗口（PID/进程名/标题；窗口优先用 PID 定位——标题可能重复），截图前先说明截图用途；2) 准备：截图/坐标操作前先 screen_info 确认显示器分辨率与主屏原点（主屏左上角为坐标原点），避免 region/坐标错位；3) 定位：点击屏幕元素（按钮/菜单/链接/输入框）优先用 desktop_locate 按目标文字取精确坐标再 mouse_click——比视觉模型估坐标可靠；读取屏幕文字用 desktop_ocr（本地小模型，快且带精确坐标，离线不耗配额），仅语义理解/非文字内容才用 vision 工具分析截图；图标/图形元素定位用 desktop_detect（需自备模型）；4) 执行：输入/点击/窗口控制类操作（window_focus/window_move/type_text/key_press/mouse_move/mouse_click）需审批，操作前先说明操作意图与目标窗口；执行前必须先用 window_focus 确认目标窗口已激活，避免输入到错误窗口；只读类（screenshot/window_list/screen_info/clipboard_read/desktop_ocr/desktop_locate/desktop_detect）免审批可直接执行；5) 反馈：执行后反馈结果——截图返回图片，mouse_click 坐标基于截图实际尺寸判断（desktop_locate 返回的坐标已相对屏幕原点，可直接使用），说明截图位置与关键结论；6) 约束：只执行用户明确要求的操作，不做额外破坏性动作（不改系统设置、不删除文件、不触发危险快捷键）。验证多通道：不依赖单一验证通道——截图黑屏/纯色（工具会主动提示）时立即切换通道，不要反复重试截图：用 window_list 确认窗口是否在前台、用 desktop_ocr/clipboard_read 验证界面文本与剪贴板状态，或经 agent_run 委托 code 子Agent 读取应用数据文件断言结果；任何通道失效即降级并明确告知用户当前采用的验证方式。"
+export const tools: ToolSet = { screenshot, window_list, window_focus, window_move, type_text, key_press, mouse_move, mouse_click, clipboard_read, screen_info, ocr, locate, detect }
 export const requiresApproval = { window_focus: true, window_move: true, type_text: true, key_press: true, mouse_move: true, mouse_click: true }
 export const preload = false
 ```
 
-- 实现于 `sub-agents/desktop/` 目录（`desktop.ts` 定义 + `desktop_tools.ts` 工具集 + `desktop_tools.test.ts` 测试），工具不注册为全局工具，仅经子Agent 命名空间暴露（只声明桌面操控独有工具；验证多通道经全局 `agent_run` 委托 code 子Agent 读取应用数据文件断言结果——编排用全局名，def 不复刻全局工具）
+- 实现于 `sub-agents/desktop/` 目录（`desktop.ts` 定义 + `desktop_tools.ts` 工具集 + `desktop_cv_tools.ts` 本地识别工具集 + 各自 `*.test.ts` 测试），工具不注册为全局工具，仅经子Agent 命名空间暴露（只声明桌面操控独有工具；验证多通道经全局 `agent_run` 委托 code 子Agent 读取应用数据文件断言结果——编排用全局名，def 不复刻全局工具）
 - 跨平台：Windows 走内置 PowerShell（截图/窗口/输入，无外部依赖）；macOS 走 `screencapture` + `osascript`（鼠标需额外 `cliclick`）；Linux 依赖 `xdotool`/`wmctrl`/`scrot`（缺失时明确报错）
 - 截图返回 `image` 内容块实时展示，并**自动做黑帧/纯色检测**（平均亮度极低提示显示器休眠/锁屏，暗色单色提示非真实画面）与**尺寸元数据**（`STAT` 行 / sips / ImageMagick）；`screen_info` 列出全部显示器（分辨率/位置/主屏）供 region 与坐标参考；文本输入默认剪贴板粘贴法（中文/符号可靠，**输入前备份、输入后恢复**，Windows try/finally、macOS 容错恢复），`mode="keys"` 纯按键模式（绕剪贴板，仅 ASCII）；`type_text`/`clipboard_read` 输入或读取前自动做**敏感值扫描**（`sk-`/超长串/KEY=值/Bearer 令牌），命中即中止/告警防密钥泄漏；**服务端部署（沙箱启用）下所有工具拒绝执行**
+- **本地识别三工具（只读免审批，`desktop_cv_tools.ts`，基建见「小模型识别」）**：`desktop_ocr`（读屏幕/图片文字：image 省略现截全屏、region 限定区域、find 关键词过滤；返回行文本+框+中心坐标+置信度，超 200 行截断提示收窄；data 携带结构化 lines）、`desktop_locate`（按目标文字定位：匹配分级 完全相等 > 行包含目标 > 目标包含行，返回最佳匹配中心坐标（直接可 `mouse_click`）+ 候选清单；未找到时给出多通道建议）、`desktop_detect`（自备 YOLO 检测，`GEBAI_CV_DETECT_MODEL`/`GEBAI_CV_DETECT_LABELS` 配置，未配置返回指引）；坐标一律**映射回原始像素系**（region 偏移 + 缩放还原——识别在降采样图像上进行，返回坐标对准原截图）；输入图仅支持 PNG（desktop/playwright 截图生态一致，其他格式明确报错）；模型/运行时缺失时错误输出为中文配置指引（不中断会话）
 
 #### `feishu_docs`（飞书云文档）
 
@@ -1032,7 +1049,7 @@ export const preload = false
 | `self_optimize` | 独有工具 read_feedback/run_tests/rollback/journal/backlog/page_capture；**通用工具与工作流直接复用**（装载/`agent_run` 预加载均连带 code——文件读写用全局工具、分析/验证类操作用 `code_*` 独有工具（含 code_preview_server），code 工作流提示词随连带装载注入，不重复注册；视觉分析用全局 `vision`——主会话恒有、新会话随全局工具继承，def 不复刻）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经全局工具与 code；特有：反馈读取、测试准入（test/typecheck/lint 三件套）+回滚（含新建文件清理）、优化日志跨会话沉淀、待优化项暂存与集中全面优化（backlog 离线优化——知识/工具不足导致重复试错时先暂存后集中处理）、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析（全局 vision）、写范围守卫；**装载即连带装载 code**） |
 | `widgets` | save/list/get/delete | delete（公用/私有删除均需审批） | ✗ | HTML 小工具库增删改查（自全局 save_tool/delete_tool 下沉并补齐：保存/清单/读取源码/删除；四工具限实时前端 interaction=realtime；与模型工具语义区分——小工具是「小工具」面板加载的页面组件） |
 | `explore` | 独有工具 search_symbols/analyze/git（全部只读，支持 project 参数路由；文件读取检索复用全局只读工具） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行（默认继承全局工具），返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
-| `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_read/screen_info | window_*+type/key/mouse | ✗ | 桌面控制（截图/窗口/输入/剪贴板/屏幕信息，仅本地模式） |
+| `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_read/screen_info/ocr/locate/detect | window_*+type/key/mouse | ✗ | 桌面控制（截图/本地 OCR 识别定位/窗口/输入/剪贴板/屏幕信息，仅本地模式） |
 | `feishu_docs` | auth_status/auth_user_authorize/auth_user_token/auth_user_status/auth_user_clear/create_doc/get_doc_meta/get_doc_text/get_doc_blocks/list_blocks/find_blocks/add_blocks/update_block/delete_blocks/import_markdown/export_doc/list_files/create_folder/get_file_meta/upload_file/download_file/delete_file/search/create_sheet/get_sheet_meta/read_sheet/write_sheet/append_sheet/create_bitable/list_bitable_tables/list_bitable_records/add_bitable_records/update_bitable_record/delete_bitable_records/list_wiki_spaces/create_wiki_node/get_wiki_node/get_board/add_permission/api_call | 写操作全部（创建/修改/删除/上传/授权） | ✗ | 飞书云文档（文档/表格/多维表格/知识库/云空间/搜索/权限/思维导图画板；**可配置 user_access_token 以用户身份操作、创建用户所有权资源**；需配置 `FEISHU_DOCS_*` 或全局 `GEBAI_FEISHU_*` 凭证） |
 | `playwright` | open/content/screenshot/click/fill/press/select/check/hover/dblclick/drag/upload/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir + pdf/downloads/dialogs/emulate/cookies/local_storage/storage_state | open+click+fill+press+select+check+hover+dblclick+drag+upload+evaluate+new_page+serve_dir+emulate+cookies+local_storage+storage_state（凭证类与 evaluate 同级） | ✗ | 浏览器自动化（无头 Chromium，node 桥接；选择器 `>>` 穿透 iframe；下载/对话框/仿真/登录态管理；需宿主机 node + playwright 包 + 浏览器） |
 | `reverse_site` | 独有工具 capture_start/capture_stop/capture_clear/capture_list/capture_body/capture_replay/capture_curl/capture_har/capture_ws/route/http_request；**依赖 playwright（`dependencies` 自动连带装载——浏览器自动化全套与审批映射复用 `playwright_` 命名空间，共享同一浏览器会话）**，文件读写与编排走全局工具 | http_request+capture_replay+capture_curl（route add 工具级函数按 action；浏览器交互类随 playwright def） | ✗ | 网站/接口逆向（网络录制+WebSocket 帧还原接口、带登录态改参重放、重放命令生成、HAR 导出、请求拦截 block/mock/modify、直连探测验证、产出 API 文档；可联动 self_optimize 转新子Agent；需宿主机 node + playwright 包 + 浏览器） |
@@ -2119,11 +2136,12 @@ dependencies: playwright, code（可选；依赖的子Agent 名，逗号分隔�
 
 ### 构建与产物
 
-- 构建链：`bun run --cwd packages/desktop build` → `server:build`（图标生成 → web 构建 → web bundle → 子Agent bundle → D2.js 内嵌 → driver 内嵌 → playwright-core 内嵌 → `--compile` 产出 `dist/gebai.exe`）→ `launcher:build`（cargo release 编译 `launcher/` 并复制为 `dist/gebai-desktop.exe`）
+- 构建链：`bun run --cwd packages/desktop build` → `server:build`（图标生成 → web 构建 → web bundle → 子Agent bundle → D2.js 内嵌 → driver 内嵌 → playwright-core 内嵌 → CV 运行时与模型内嵌 → `--compile` 产出 `dist/gebai.exe`）→ `launcher:build`（cargo release 编译 `launcher/` 并复制为 `dist/gebai-desktop.exe`）
 - **品牌图标管线**：canonical 源为 `packages/web/public/favicon.svg`（大脑造型）；`scripts/gen-icon.ts` 用 resvg 渲染多尺寸打包为 `icons/icon.ico`（gitignore，16–128 无压缩 BMP + 256 PNG），并回写 `packages/web/index.html` 的内联 favicon data URI。exe 嵌入**不走 bun `--windows-icon`**（其会改动像素/alpha，与 rcedit 同样不可用）：`gebai.exe` 由 `scripts/embed-icon.ts` 经 kernel32 `UpdateResource`（bun:ffi）原样写入 RT_GROUP_ICON+RT_ICON 资源（32px 条目排首位，兼容简化提取器）；`gebai-desktop.exe` 经 `winresource`（`launcher/build.rs`，`rerun-if-changed` 聟动重建）——网页 favicon 与两个 exe 图标同源。**运行时窗口图标**（任务栏/标题栏）不属于 exe 资源，需窗口类显式设置：gen-icon 同时产出 `icons/icon32.rgba`（32px 原始 RGBA），launcher `include_bytes` 内嵌后经 tao `with_window_icon` 挂到窗口
 - 产物：`packages/desktop/dist/gebai.exe` 与 `packages/desktop/dist/gebai-desktop.exe`（`launcher:build` 依赖 `dist/gebai.exe` 已存在，故构建顺序固定）
 - 要求：Rust 工具链（仅启动器需要）、WebView2 运行时（Windows 自带）；`gebai.exe` 单独分发时无需任何 Rust 依赖
 - 浏览器桥接驱动 `core/browser/driver.mjs`（playwright/reverse_site 子Agent 与透明浏览器代理共用）：服务端 dist（非编译）形态由 `scripts/build-subagents.ts` 复制到 dist/ 与入口同目录；二进制形态由 `scripts/build-driver-embed.ts` 生成内嵌产物 `driver.embedded.generated.json`（gzip base64），运行时物化到 `{GEBAI_HOME}/vendor/playwright/driver.mjs`（桥接仍需运行机器具备 node；playwright 模块源码/部署形态解析 node_modules，二进制形态用内嵌 pwcore 产物）
+- 本地 CV 运行时与模型 `core/cv.embedded.generated.json`（desktop 子Agent 小模型识别）：`scripts/build-cv-embed.ts` 把 onnxruntime-web dist 两文件（入口 mjs + wasm 本体）与 PP-OCR 模型三件套（det/rec ONNX + 字典，构建时从 `GEBAI_CV_MODEL_BASE` 下载或取 assets/cv-models 自备）整包 gzip base64 内嵌，运行时物化到 `{GEBAI_HOME}/vendor/cv/`（单二进制形态下 ort 与模型均不可依赖 node_modules，必须内嵌；源码/部署形态 ort 解析 node_modules、模型走 assets 或 `GEBAI_CV_MODELS_DIR`；下载失败生成空清单不阻断构建，运行时给配置指引）
 
 ### 启动方式
 
@@ -2363,6 +2381,12 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 整页截图高度上限 | 12000px | fullPage 截图最大高度（canvas 尺寸上限保护，超出截取顶部） |
 | 附件图片内联上限 | 8MB | 主模型多模态内联附件图片的 base64 大小上限（超出降级为文本说明） |
 | 历史图片内联窗口 | 最近 3 组 | 仅最近 3 组含图片的消息（用户图片附件与工具结果图片——read 读取的图片引用）内联进上下文，更早的降级为路径说明（图片不参与压缩，长会话防图片占死窗口；`INLINE_IMAGE_RECENT`） |
+| CV 输入图像上限 | 8MB | 本地识别工具（desktop_ocr/locate/detect）输入 PNG 大小上限（同附件内联上限，超出报错引导压缩） |
+| CV 输入降采样上限 | 长边 1280px | `GEBAI_CV_MAX_SIDE` 可调；超过等比缩小后识别，坐标仍映射回原始像素系 |
+| OCR det 输入上限 | 长边 960（32 倍数） | det 前处理等比缩放 + 零填充（`DET_MAX_SIDE`，wasm CPU 亚秒级） |
+| OCR rec 输入尺寸 | 48 高 × 320 宽 | rec 前处理等比缩放到 48 高、右侧零填充至 320 宽（`REC_HEIGHT`/`REC_WIDTH`，CTC 忽略尾部填充时间步） |
+| OCR 输出行数上限 | 200 行 | desktop_ocr 输出超过截断，提示 find 参数过滤收窄 |
+| YOLO letterbox / NMS | 640 边、IoU 0.45、conf 0.25 | desktop_detect 前处理边长 / NMS 阈值 / 置信度下限（conf 参数可调） |
 | LLM 流式读空闲超时 | 120 秒 | SSE 建立后连续无 chunk 判定接口假死中止本次调用（`LLM_IDLE_TIMEOUT_MS`，测试可注入 `llmIdleTimeoutMs`） |
 | 模型单次响应输出上限 | anthropic 缺省 8192 / 其余接口缺省 | 单次响应输出 token 上限（`GEBAI_LLM_MAX_OUTPUT_TOKENS` 启动/任务级可配）：输出超限截断由引擎检测（`length`/`max_tokens`/Responses `incomplete`）并抢救落盘 + 引导 `write append` 分段续写（见「核心Agent流程」大文件分段写入与截断抢救）；Anthropic 接口强制要求 `max_tokens` 故有内置缺省 |
 | 溢出护栏裁剪下限 | 500 字符 | 用户消息超过该长度才可被护栏裁剪为占位（短消息裁剪无收益；最新一条用户消息永不裁剪） |
