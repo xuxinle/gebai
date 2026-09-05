@@ -9,7 +9,7 @@ export const description =
 export const systemPrompt =
   "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内）；文件读写查询（read/write/edit/patch/grep/sh 等）为全局工具直接用全局名（带 project 参数路由项目），分析/验证类工具由 code 提供（search_symbols/analyze/git/preview_server，以 code_ 前缀调用）；本提示词只补充自我优化特有的流程与约束：\n" +
   "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；开工先用 self_optimize_journal action=list 查相关历史与教训（跨会话优化记忆，不重复踩坑），并 self_optimize_backlog action=list 查待优化暂存项（任务执行中暂存的改进点——有积压且本次目标就是优化时以此为工作清单，见 2)）；\n" +
-  "2) 离线优化（暂存 → 集中全面优化）：任务执行中因自身知识/工具不足或错误导致重复试错、低效（多次失败重试、工具用法反复出错、缺关键工具/子Agent），而当前任务不便中断深入优化时——先把问题暂存：self_optimize_backlog action=add（problem 问题现象 + direction 优化方向，会话ID自动记录供回溯），随即继续当前任务；后续执行全面优化时 action=list 取待优化项清单，按主题归并逐项优化（需更多上下文可读来源会话记录 {GEBAI_HOME}/users/{用户}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json——本地模式可读；沙箱部署模式会话文件不可读时以暂存的问题/方向文本为准），每项优化完成后 journal append 记录、backlog action=resolve ids=[编号] 移除；\n" +
+  "2) 离线优化（暂存 → 集中全面优化）：任务执行中因自身知识/工具不足或错误导致重复试错、低效（多次失败重试、工具用法反复出错、缺关键工具/子Agent），而当前任务不便中断深入优化时——先把问题暂存：self_optimize_backlog action=add（problem 问题现象 + direction 优化方向，会话ID自动记录供回溯），随即继续当前任务；暂存后用 ask 向用户确认处理时机（当场修复 / 留待后续集中全面优化，用户不选则默认后续）；后续执行全面优化时 action=list 取待优化项清单，按主题归并逐项优化（需更多上下文可读来源会话记录 {GEBAI_HOME}/users/{用户}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json——本地模式可读；沙箱部署模式会话文件不可读时以暂存的问题/方向文本为准），每项优化完成后 journal append 记录、backlog action=resolve ids=[编号] 移除；\n" +
   "3) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；写仓库文件一律用 write/edit/patch 文件工具（写范围守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（守卫不拦脚本通道，绕行属违规且绕开防盲写保护）；新建/修改子Agent 文件后立即验证注册（agent_run 试跑或 agent_list 查看——注册失败会直接返回文件加载错误原因，据因修复后再验）；\n" +
   "4) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；**产物纯净**：写出的代码/子Agent 提示词/文档只描述当前完整的能力与限制，不留历史痕迹——不写「何时发现/修复了什么问题」「为何改成现在这样」等变更缘由（缘由归 git 提交说明与 self_optimize_journal，历史有专门载体、不进产物），代码注释同理只述当前约束；遇到既有历史注记（时间/问题描述/修复记录）顺手清除；\n" +
   "5) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
@@ -251,7 +251,7 @@ const BACKLOG_FILE = "self-optimize-backlog.json"
 const backlogTool: import("../core/base/types").Tool = {
   name: "backlog",
   description:
-    "待优化项暂存清单（离线优化）：action=add 暂存一个待优化项（problem 必填——问题现象，如知识/工具不足或错误导致的重复试错；direction 优化方向/初步思路；session_id 可选，缺省自动记当前会话供回溯）；action=list 查看待优化项（旧→新，执行全面优化时以此为工作清单）；action=resolve 移除已解决项（ids 从 add/list 输出取，可多个）。任务执行中不便立即优化时先暂存不打断当前任务，后续集中全面优化。",
+    "待优化项暂存清单（离线优化）：action=add 暂存一个待优化项（problem 必填——问题现象，如知识/工具不足或错误导致的重复试错；direction 优化方向/初步思路；session_id 可选，缺省自动记当前会话供回溯）；action=list 查看待优化项（旧→新，执行全面优化时以此为工作清单）；action=resolve 移除已解决项（ids 从 add/list 输出取，可多个）。任务执行中不便立即优化时先暂存不打断当前任务，暂存后 ask 向用户确认处理时机（当场修复/后续集中全面优化）。",
   parameters: schema({
     action: { type: "string", enum: ["add", "list", "resolve"], description: "add=暂存待优化项；list=查看待优化项；resolve=移除已解决项" },
     problem: { type: "string", description: "问题现象（add 必填：什么知识/工具不足或错误导致了什么低效，如工具用法反复出错重试多次、缺关键工具）" },
@@ -284,7 +284,7 @@ const backlogTool: import("../core/base/types").Tool = {
       return {
         output:
           `已暂存待优化项 #${id}（共 ${items.length} 项待处理）：${problem}${direction ? `（方向：${direction}）` : ""}\n` +
-          `不打断当前任务继续执行；后续 self_optimize_backlog action=list 查看全部待优化项，集中执行全面优化。`,
+          `不打断当前任务继续执行；暂存后需用 ask 向用户确认处理时机——当场修复或留待后续集中全面优化（用户不选则默认后续；后续 self_optimize_backlog action=list 取清单执行）。`,
       }
     }
     if (action === "resolve") {
