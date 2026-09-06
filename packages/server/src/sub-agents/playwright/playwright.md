@@ -12,6 +12,10 @@
 8. **环境仿真**：emulate 设置视口/UA/语言/时区/移动端模式（移动端页面、时区敏感逻辑测试）。注意会重建浏览器上下文（页面/Cookie 清空）——先 storage_state save 再 emulate。
 9. **结束清理**：任务完成后调用 close 关闭浏览器上下文，释放资源。
 
+## js 编排（多步默认）
+
+多步页面操作（打开→等待→读取→交互→验证，含条件分支或失败重试）默认用全局 `js` 工具写成一段脚本执行——脚本内工具像函数一样直接 `await`（按当前注册名，如 `playwright_open`/`playwright_wait_for`/`playwright_click`），按中间结果分支与重试，不要逐步工具调用往返（每轮往返都耗一次模型思考）；编排模板：`open` → `wait_for` 目标条件 → `content`（先 text 省 token）或 `ocr`（DOM 读不到的兑底）→ `click`/`fill` → `wait_for` 结果 → `content` 断言，失败分支在脚本内换选择器/加大 timeout 重试，不盲目重复同一操作。js 保持默认审批（一次审批覆盖脚本内全部工具调用，含导航/交互/evaluate 类），不要传 `approval:false`（免审运行时内部需审批工具会被拒绝）；脚本开头用注释写明操作序列与目标站点，便于用户审批审阅。单步操作直接调用工具即可，不必编排。
+
 ## 规范
 
 - **选择器**：优先用稳定且语义化的选择器——`data-testid` / `role`（如 `role=button[name="提交"]`） / `placeholder` / `label` 文本 / 唯一 id；避免脆弱的层级路径。**iframe 内元素用 `iframe选择器 >> 目标选择器` 穿透**（多级 iframe 用多个 `>>` 链接，如 `#frame >> .inner >> button`），所有带 selector 的工具均支持；CSS 引擎天然穿透开放 shadow DOM。定位失败时先用 content 或 evaluate 观察页面结构。
