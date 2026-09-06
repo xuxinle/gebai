@@ -152,8 +152,9 @@ export class CvSidecar {
     return { dims: (r.result as { dims: number[] }).dims, data: new Float32Array(u8.buffer) }
   }
 
-  /** 检测推理（会话按模型路径+大小缓存；进程重启自动重建）。 */
-  async detectRun(opts: {
+  /** 模型推理（会话按模型键缓存；进程重启自动重建）——通用 ONNX 会话运行入口，
+   *  检测与 OCR（det/rec）共用；modelKey 建议含文件大小（模型变更自动重建会话）。 */
+  async runModel(opts: {
     modelKey: string
     modelPath: string
     ep: string

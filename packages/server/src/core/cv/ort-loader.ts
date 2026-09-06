@@ -73,36 +73,41 @@ export async function loadEmbeddedCvAssets(): Promise<EmbeddedCvAssets | null> {
   return embedded
 }
 
+/** CV 资产目录解析（不加载 ort 模块——sidecar 推理路径解析模型路径时用，避免强制加载
+ *  onnxruntime-web）：二进制形态物化内嵌产物；源码/部署形态解析 node_modules 的 dist；
+ *  不可得返回 null（模型目录解析随后回落 环境变量 → 源码 assets）。 */
+export async function resolveCvAssetsDir(): Promise<string | null> {
+  if (isBinaryMode()) {
+    const embedded = await loadEmbeddedCvAssets()
+    if (!embedded) return null
+    return await materializeCvAssets(embedded)
+  }
+  try {
+    // 拼接规避 bundler 对字面量的静态解析（onnxruntime-web 不打包进产物，运行时按需加载）
+    const name = "onnxruntime-" + "web"
+    const resolved = Bun.resolveSync(name, import.meta.dir)
+    const candidates = [dirname(resolved), dirname(dirname(resolved))]
+    const dir = candidates.find((c) => existsSync(join(c, "dist", ORT_ENTRY)))
+    return dir ? join(dir, "dist") : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * 加载 ort 模块（惰性、全进程共享）：二进制形态物化内嵌产物后从 vendor 目录动态 import；
  * 源码/部署形态解析 node_modules 的 onnxruntime-web/dist。返回 ort 命名空间与资产目录
  * （二进制形态 = vendor/cv；源码形态 = null，模型走 assets 目录或环境变量指定）。
  */
 export async function loadOrtModule(): Promise<{ ort: OrtModule; assetsDir: string | null }> {
-  let dir: string | null = null
-  if (isBinaryMode()) {
-    const embedded = await loadEmbeddedCvAssets()
-    if (!embedded) {
-      throw new Error(
-        "本地识别运行时缺失：单二进制形态未内嵌 CV 资产（构建时运行 scripts/build-cv-embed.ts），" +
-          "或设置 GEBAI_CV_MODELS_DIR 指向含 det.onnx/rec.onnx/dict.txt 的目录",
-      )
-    }
-    dir = await materializeCvAssets(embedded)
-  } else {
-    // 拼接规避 bundler 对字面量的静态解析（onnxruntime-web 不打包进产物，运行时按需加载）
-    const name = "onnxruntime-" + "web"
-    const resolved = Bun.resolveSync(name, import.meta.dir)
-    // 解析结果可能是包入口文件或包目录：向上一层探查 dist 目录
-    const candidates = [dirname(resolved), dirname(dirname(resolved))]
-    dir = candidates.find((c) => existsSync(join(c, "dist", ORT_ENTRY))) ?? ""
-    if (!dir) {
-      throw new Error(
-        `onnxruntime-web 解析失败（源码/部署形态需安装依赖）：${resolved}。` +
-          "若为裁剪部署，请设置 GEBAI_CV_MODELS_DIR 并安装依赖后重试",
-      )
-    }
-    dir = join(dir, "dist")
+  const dir = await resolveCvAssetsDir()
+  if (!dir) {
+    throw new Error(
+      isBinaryMode()
+        ? "本地识别运行时缺失：单二进制形态未内嵌 CV 资产（构建时运行 scripts/build-cv-embed.ts），" +
+            "或设置 GEBAI_CV_MODELS_DIR 指向含 det.onnx/rec.onnx/dict.txt 的目录"
+        : `onnxruntime-web 解析失败（源码/部署形态需安装依赖）。若为裁剪部署，请设置 GEBAI_CV_MODELS_DIR 并安装依赖后重试`,
+    )
   }
   const ort = (await import(pathToFileURL(join(dir, ORT_ENTRY)).href)) as OrtModule
   ort.env.wasm.numThreads = 1 // 单线程（无 SharedArrayBuffer/worker 依赖，Bun 进程内稳定）

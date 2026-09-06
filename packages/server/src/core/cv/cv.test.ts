@@ -87,7 +87,7 @@ afterAll(() => {
 
 describe("cv runner 注入", () => {
   test("setCvRunnerFactory 替身优先", () => {
-    const fake = { ocr: async () => [], detect: async () => ({ objects: [], backend: "wasm-cpu" }) }
+    const fake = { ocr: async () => ({ lines: [], backend: "wasm-cpu" }), detect: async () => ({ objects: [], backend: "wasm-cpu" }) }
     setCvRunnerFactory(() => fake)
     expect(getCvRunner()).toBe(fake)
     setCvRunnerFactory(null)
@@ -107,11 +107,12 @@ describe("real runner（假 ort 层）", () => {
 
   test("OCR 全链路：det 整图框 → rec 解码出字典字符，box 覆盖图像", async () => {
     const r = await getCvRunner().ocr(solid(64, 32), { env: { GEBAI_CV_MODELS_DIR: modelDir() } })
-    expect(r.length).toBe(1)
-    expect(r[0].text).toBe("存")
-    expect(r[0].score).toBeGreaterThan(0.8)
-    expect(r[0].box.w).toBeGreaterThan(50)
-    expect(r[0].box.h).toBeGreaterThan(20)
+    expect(r.backend).toBe("wasm-cpu")
+    expect(r.lines.length).toBe(1)
+    expect(r.lines[0].text).toBe("存")
+    expect(r.lines[0].score).toBeGreaterThan(0.8)
+    expect(r.lines[0].box.w).toBeGreaterThan(50)
+    expect(r.lines[0].box.h).toBeGreaterThan(20)
   })
 
   test("det 无命中（全低概率）→ 空行列表", async () => {
@@ -119,7 +120,7 @@ describe("real runner（假 ort 层）", () => {
     detProbFactory = (h, w) => ({ data: new Float32Array(h * w).fill(0.1), dims: [1, 1, h, w] })
     try {
       const r = await getCvRunner().ocr(solid(64, 32), { env: { GEBAI_CV_MODELS_DIR: modelDir() } })
-      expect(r.length).toBe(0)
+      expect(r.lines.length).toBe(0)
     } finally {
       detProbFactory = original
     }
@@ -128,8 +129,8 @@ describe("real runner（假 ort 层）", () => {
   test("并发两次 OCR 不死锁（串行互斥链）", async () => {
     const env = { GEBAI_CV_MODELS_DIR: modelDir() }
     const [a, b] = await Promise.all([getCvRunner().ocr(solid(64, 32), { env }), getCvRunner().ocr(solid(64, 32), { env })])
-    expect(a.length).toBe(1)
-    expect(b.length).toBe(1)
+    expect(a.lines.length).toBe(1)
+    expect(b.lines.length).toBe(1)
   })
 
   test("detect 未配置 → 指引错误", async () => {
@@ -205,16 +206,83 @@ describe("real runner（假 ort 层）", () => {
   })
 })
 
+/** sidecar 替身（仅 runModel 语义；impl 可按 modelKey 分流 det/rec/检测模型）。 */
+const fakeSidecar = (impl: (m: { modelKey: string; dims: readonly number[] }) => Promise<{ ep: string; dims: number[]; data: Float32Array }>) =>
+  ({ runModel: impl }) as unknown as CvSidecar
+
+describe("OCR 分层后端（sidecar ↔ wasm）", () => {
+  test("sidecar 可用即优先：det/rec 两模型经 runModel 推理，backend 如实上报", async () => {
+    const dir = modelDir()
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async (m) => {
+        if (m.modelKey.includes("det.onnx")) {
+          const h = m.dims[2] ?? 1
+          const w = m.dims[3] ?? 1
+          return { ep: "dml", dims: [1, 1, h, w], data: new Float32Array(h * w).fill(0.9) } // 整图文本框
+        }
+        return { ep: "dml", dims: [1, 2, 4], data: new Float32Array([0.1, 0.9, 0, 0, 0.1, 0.9, 0, 0]) } // rec → 字典字符
+      }),
+    )
+    try {
+      const r = await getCvRunner().ocr(solid(64, 32), { env: { GEBAI_CV_MODELS_DIR: dir } })
+      expect(r.backend).toBe("sidecar:dml")
+      expect(r.lines.length).toBe(1)
+      expect(r.lines[0].text).toBe("存")
+    } finally {
+      resetCvSidecarForTests()
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+
+  test("auto：sidecar 失败回落 wasm 且毒化（后续调用不再走 sidecar）", async () => {
+    const dir = modelDir()
+    let sidecarCalls = 0
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async () => {
+        sidecarCalls++
+        throw new Error("驱动崩溃")
+      }),
+    )
+    try {
+      const r = await getCvRunner().ocr(solid(64, 32), { env: { GEBAI_CV_MODELS_DIR: dir } })
+      expect(r.backend).toBe("wasm-cpu")
+      expect(r.lines.length).toBe(1) // wasm 全链路照常
+      const again = await getCvRunner().ocr(solid(64, 32), { env: { GEBAI_CV_MODELS_DIR: dir } })
+      expect(again.backend).toBe("wasm-cpu")
+      expect(sidecarCalls).toBeGreaterThanOrEqual(1) // 毒化后不再重试（第二次调用不再触发）
+      expect(sidecarCalls).toBeLessThanOrEqual(2)
+    } finally {
+      resetCvSidecarForTests()
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+
+  test("GEBAI_CV_OCR_BACKEND=wasm：忽略可用 sidecar，直接进程内推理", async () => {
+    const dir = modelDir()
+    let sidecarCalls = 0
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async () => {
+        sidecarCalls++
+        return { ep: "dml", dims: [1, 1, 1, 1], data: new Float32Array(1) }
+      }),
+    )
+    try {
+      const r = await getCvRunner().ocr(solid(64, 32), { env: { GEBAI_CV_MODELS_DIR: dir, GEBAI_CV_OCR_BACKEND: "wasm" } })
+      expect(r.backend).toBe("wasm-cpu")
+      expect(sidecarCalls).toBe(0)
+    } finally {
+      resetCvSidecarForTests()
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+})
+
 describe("detect 分层后端（sidecar ↔ wasm）", () => {
   const modelEnv = (dir: string) => {
     writeFileSync(join(dir, "model.onnx"), Buffer.from([9]))
     writeFileSync(join(dir, "labels.txt"), "btn\nicon\n")
     return { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx"), GEBAI_CV_DETECT_LABELS: join(dir, "labels.txt") }
   }
-
-  /** sidecar 替身（仅 detectRun 语义）。 */
-  const fakeSidecar = (impl: () => Promise<{ ep: string; dims: number[]; data: Float32Array }>) =>
-    ({ detectRun: impl }) as unknown as CvSidecar
 
   test("sidecar 可用即优先：backend 如实上报实际 EP", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-cv-sc-"))

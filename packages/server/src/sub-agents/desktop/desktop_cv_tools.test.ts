@@ -146,7 +146,7 @@ function fakeRunner(
   return {
     ocr: async (img) => {
       seen.img = img
-      return lines
+      return { lines, backend: "wasm-cpu" }
     },
     detect: async (img, opts) => {
       seen.img = img
@@ -470,9 +470,12 @@ describe("desktop cv tools", () => {
     setCvRunnerFactory(() => ({
       ocr: async () => {
         calls++
-        return calls <= 1
-          ? [{ text: "加载中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
-          : [{ text: "完成", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
+        return {
+          lines: calls <= 1
+            ? [{ text: "加载中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
+            : [{ text: "完成", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }],
+          backend: "wasm-cpu",
+        }
       },
       detect: async () => ({ objects: [], backend: "wasm-cpu" }),
     }))
@@ -501,7 +504,7 @@ describe("desktop cv tools", () => {
     setCvRunnerFactory(() => ({
       ocr: async () => {
         calls++
-        return calls <= 1 ? [{ text: "保存中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }] : []
+        return { lines: calls <= 1 ? [{ text: "保存中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }] : [], backend: "wasm-cpu" }
       },
       detect: async () => ({ objects: [], backend: "wasm-cpu" }),
     }))

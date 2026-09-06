@@ -145,21 +145,23 @@ export function createCvAnalysisTools(opts: CvAnalysisOptions): { ocr: Tool; loc
       if ("error" in loaded) return { output: loaded.error }
       const find = String(args.find ?? "").trim().toLowerCase()
       let lines: LineOut[]
+      let backend = ""
       try {
         const raw = await getCvRunner().ocr(loaded.img, { env: ctx.env })
-        lines = mapLines(raw, loaded.offX, loaded.offY)
+        lines = mapLines(raw.lines, loaded.offX, loaded.offY)
+        backend = raw.backend
       } catch (e) {
         return { output: `本地识别失败: ${e instanceof Error ? e.message : e}` }
       }
       if (find) lines = lines.filter((l) => l.text.toLowerCase().includes(find))
       const capped = lines.length > OCR_LINE_LIMIT
       const shown = lines.slice(0, OCR_LINE_LIMIT)
-      const head = `识别到 ${lines.length} 行（${loaded.sourceDesc}，坐标相对其原点）${find ? `，过滤「${args.find}」` : ""}：`
+      const head = `识别到 ${lines.length} 行（${loaded.sourceDesc}，坐标相对其原点；后端 ${backend}）${find ? `，过滤「${args.find}」` : ""}：`
       const body = shown.map(formatLine).join("\n")
       const tail = capped ? `\n…（共 ${lines.length} 行，仅显示前 ${OCR_LINE_LIMIT} 行；可用 find 参数过滤收窄）` : ""
       return {
         output: lines.length ? `${head}\n${body}${tail}` : `${head}\n（无${find ? "匹配" : "识别到"}文本——可能是图形界面无文字、分辨率过低，或需用 vision 工具做语义分析）`,
-        data: { source: loaded.sourceDesc, find: args.find ?? null, lines },
+        data: { source: loaded.sourceDesc, backend, find: args.find ?? null, lines },
       }
     },
   }
@@ -184,7 +186,7 @@ export function createCvAnalysisTools(opts: CvAnalysisOptions): { ocr: Tool; loc
       if ("error" in loaded) return { output: loaded.error }
       let lines: LineOut[]
       try {
-        lines = mapLines(await getCvRunner().ocr(loaded.img, { env: ctx.env }), loaded.offX, loaded.offY)
+        lines = mapLines((await getCvRunner().ocr(loaded.img, { env: ctx.env })).lines, loaded.offX, loaded.offY)
       } catch (e) {
         return { output: `本地识别失败: ${e instanceof Error ? e.message : e}` }
       }
