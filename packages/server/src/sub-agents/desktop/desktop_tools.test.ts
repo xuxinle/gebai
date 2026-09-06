@@ -4,8 +4,11 @@ import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import type { ToolContext } from "../../core/base/types"
 import {
+  parseVkCombo,
+  parseModifiers,
   screenshotTool,
   windowListTool,
+  windowMoveTool,
   windowFocusTool,
   windowStateTool,
   typeTextTool,
@@ -545,11 +548,17 @@ describe("desktop tools", () => {
       },
     })
     await windowStateTool.execute({ action: "minimize", pid: 1234 }, c)
-    expect(decodeCmd(seenCmd)).toContain("ShowWindow($p.MainWindowHandle, 6)")
+    expect(decodeCmd(seenCmd)).toContain("ShowWindow($h, 6)") // winLocate 统一 $h（hwnd 优先，pid 回落主窗口）
     await windowStateTool.execute({ action: "close", pid: 1234 }, c)
-    expect(decodeCmd(seenCmd)).toContain("ShowWindow($p.MainWindowHandle, 0)") // SW_CLOSE → WM_CLOSE 优雅关闭
+    expect(decodeCmd(seenCmd)).toContain("ShowWindow($h, 0)") // SW_CLOSE → WM_CLOSE 优雅关闭
     const r = await windowStateTool.execute({ action: "restore" }, ctx(home))
-    expect(r.output).toContain("pid 或 title")
+    expect(r.output).toContain("hwnd、pid 或 title")
+    // topmost/notopmost 走 SetWindowPos HWND_TOPMOST/NOTOPMOST
+    await windowStateTool.execute({ action: "topmost", pid: 1234 }, c)
+    expect(decodeCmd(seenCmd)).toContain("SetWindowPos($h, [IntPtr](-1)")
+    await windowStateTool.execute({ action: "notopmost", hwnd: 987654 }, c)
+    expect(decodeCmd(seenCmd)).toContain("SetWindowPos($h, [IntPtr](-2)")
+    expect(decodeCmd(seenCmd)).toContain("[IntPtr]987654")
   })
 
   test("clipboard_write verifies write-back and previews content", async () => {
@@ -658,6 +667,7 @@ describe("desktop definition", () => {
         "screen_info",
         "screenshot",
         "type_text",
+        "uia_inspect",
         "wait_for",
         "window_focus",
         "window_list",
@@ -665,5 +675,113 @@ describe("desktop definition", () => {
         "window_state",
       ].sort(),
     )
+  })
+})
+
+
+describe("vk 解析与修饰键（Windows 增强能力）", () => {
+  test("parseVkCombo：win 组合=修饰键、媒体/音量单键、vk_ctrl 组合、hex 扫描码", async () => {
+    expect(parseVkCombo("win+r")).toEqual({ mods: [0x5b], main: 0x52 }) // Win 是修饰键，r→VK_R=0x52
+    expect(parseVkCombo("volume_mute")).toEqual({ mods: [], main: 0xad })
+    expect(parseVkCombo("media_next")).toEqual({ mods: [], main: 0xb0 })
+    expect(parseVkCombo("vk_ctrl+vk_left")).toEqual({ mods: [0x11], main: 0x25 })
+    expect(parseVkCombo("vk_1e")).toEqual({ mods: [], main: 0x1e }) // hex 扫描码直通
+    expect(parseVkCombo("ctrl+a")).toEqual({ mods: [0x11], main: 0x41 }) // 裸字母主键 a→VK_A=0x41
+    expect(parseVkCombo("vk_shift")).toEqual({ mods: [0x10], main: -1 }) // 纯修饰键（按住/抬起用）
+    expect(parseVkCombo("hello")).toBeNull() // 非 vk 组合 → SendKeys 路径
+    expect(parseVkCombo("shift")).toBeNull() // 裸名 shift 不走 vk 路径（SendKeys + 语义）
+    expect(parseVkCombo("win+r+f")).toBeNull() // 双主键不支持
+  })
+
+  test("parseModifiers：合法组合/重复拒绝/非法 token 拒绝", async () => {
+    expect(parseModifiers("")).toEqual([])
+    expect(parseModifiers("ctrl")).toEqual([0x11])
+    expect(parseModifiers("ctrl+shift")).toEqual([0x11, 0x10])
+    expect(parseModifiers("CTRL+ALT")).toEqual([0x11, 0x12]) // 大小写不敏感
+    expect(parseModifiers("ctrl+ctrl")).toBeNull() // 重复拒绝
+    expect(parseModifiers("ctrl+win")).toBeNull() // win 不是 mouse 修饰键
+    expect(parseModifiers("meta")).toBeNull()
+  })
+
+  test("key_press action=down/up 走 vk 路径；SendKeys 语法不带 action 走原路径", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已按住: vk_shift", stderr: "", code: 0 }
+      },
+    })
+    const r1 = await keyPressTool.execute({ keys: "vk_shift", action: "down" }, c)
+    expect(decodeCmd(seenCmd)).toContain("keybd_event(0x10, 0, 0")
+    expect(r1.output).toContain("已按住")
+    const r2 = await keyPressTool.execute({ keys: "^c", action: "down" }, ctx(home))
+    expect(r2.output).toContain("仅支持 vk 虚拟键路径")
+    await keyPressTool.execute({ keys: "{F5}" }, c)
+    expect(decodeCmd(seenCmd)).toContain("SendWait") // 原 SendKeys 路径不变
+  })
+
+  test("mouse_click modifiers 注入修饰键按下/逆序抬起；middle/triple 时序", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已单击 (1, 2)", stderr: "", code: 0 }
+      },
+    })
+    await mouseClickTool.execute({ x: 1, y: 2, modifiers: "ctrl+shift" }, c)
+    const d = decodeCmd(seenCmd)
+    expect(d).toContain("keybd_event(0x11, 0, 0") // ctrl down
+    expect(d).toContain("keybd_event(0x10, 0, 0") // shift down
+    expect(d.indexOf("keybd_event(0x10, 0, 2") < d.indexOf("keybd_event(0x11, 0, 2")) // 逆序抬起
+    await mouseClickTool.execute({ x: 1, y: 2, button: "triple" }, c)
+    expect(decodeCmd(seenCmd).match(/mouse_event\(0x0002/g)?.length).toBe(3) // 三击=3 组 down
+    await mouseClickTool.execute({ x: 1, y: 2, button: "middle" }, c)
+    expect(decodeCmd(seenCmd)).toContain("mouse_event(0x0020") // 中键
+    const bad = await mouseClickTool.execute({ x: 1, y: 2, modifiers: "meta" }, ctx(home))
+    expect(bad.output).toContain("modifiers 非法")
+  })
+})
+
+
+describe("winLocate 与 hwnd 路径（EnumWindows 时代窗口精确指向）", () => {
+  test("hwnd 优先：$h 直取句柄 + $true 字面量条件（PS5.1 下裸 true 走命令调用=else 陷阱）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已置顶: HWND 65834", stderr: "", code: 0 }
+      },
+    })
+    await windowStateTool.execute({ action: "topmost", hwnd: 65834 }, c)
+    const d = decodeCmd(seenCmd)
+    expect(d).toContain("$h = [IntPtr]65834")
+    expect(d).toContain("if ($true)") // 裸 true 在 PS5.1 是命令调用→恒 else——必须 $true
+    expect(d).toContain("SetWindowPos($h, [IntPtr](-1)")
+    // pid 回归：winLocate 回落 procFilter 路径
+    await windowStateTool.execute({ action: "minimize", pid: 1234 }, c)
+    const d2 = decodeCmd(seenCmd)
+    expect(d2).toContain("Get-Process -Id 1234")
+    expect(d2).toContain("if (($p -and $p.MainWindowHandle -ne 0))") // cond 被模板包一层括号
+    expect(d2).toContain("ShowWindow($h, 6)")
+  })
+
+  test("window_focus/move 同样支持 hwnd（winLocate 共用）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    let seenCmd = ""
+    const c = ctx(home, {
+      runCommand: async (cmd) => {
+        seenCmd = cmd
+        return { stdout: "已激活: HWND 100", stderr: "", code: 0 }
+      },
+    })
+    await windowFocusTool.execute({ hwnd: 100 }, c)
+    expect(decodeCmd(seenCmd)).toContain("$h = [IntPtr]100")
+    await windowMoveTool.execute({ hwnd: 100, x: 5, y: 6 }, c)
+    const d = decodeCmd(seenCmd)
+    expect(d).toContain("$h = [IntPtr]100")
+    expect(d).toContain("SetWindowPos($h, [IntPtr]::Zero, 5, 6")
   })
 })

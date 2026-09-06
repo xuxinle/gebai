@@ -88,6 +88,20 @@ function sq(s: string): string {
   return s.replace(/'/g, `'\\''`)
 }
 
+/** 窗口定位脚本片段（hwnd 优先）：hwnd 直取句柄；否则 procFilter 找进程主窗口。
+ *  EnumWindows 全量枚举后，同进程多窗口场景 hwnd 是唯一精确指向——focus/move/state 共用。 */
+function winLocate(hwnd: number, pid: number, title: string): { head: string; cond: string; assign: string; label: string } {
+  if (hwnd) {
+    return { head: `$h = [IntPtr]${hwnd}`, cond: "$true", assign: "", label: `HWND ${hwnd}` }
+  }
+  return {
+    head: procFilter(pid, title) + " | Select-Object -First 1",
+    cond: "($p -and $p.MainWindowHandle -ne 0)",
+    assign: "$h = $p.MainWindowHandle",
+    label: "$($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)",
+  }
+}
+
 /** 进程查找：pid 优先，其次按标题匹配。title 经 base64 注入脚本内解码后 .Contains 匹配（无 PowerShell 插值面）。 */
 function procFilter(pid?: number, title?: string): string {
   if (pid) return `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`
@@ -232,7 +246,7 @@ Add-Type -AssemblyName System.Windows.Forms
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 15000 })
     if (code !== 0) return { output: `屏幕信息获取失败 [exit ${code}]:\n${stderr || stdout}` }
     if (plat === "win32" && stdout.trim()) {
-      const rows = stdout.trim().split("\n").map((l) => l.split("\t"))
+      const rows = stdout.trim().split(/\r?\n/).map((l) => l.split("\t").map((f) => f.replace(/\r$/, "")))
       const lines = rows.map((r) => `${r[0]} 位置(${r[1]},${r[2]}) ${r[3]}x${r[4]}${r[5] === "True" ? "（主屏）" : ""}`)
       return { output: `共 ${rows.length} 个显示器：\n${lines.join("\n")}` }
     }
@@ -246,7 +260,7 @@ Add-Type -AssemblyName System.Windows.Forms
 export const windowListTool: Tool = {
   name: "window_list",
   description:
-    "列出当前可见窗口（PID、进程名、前台标记*、窗口位置 x,y,w,h、标题），供定位目标窗口与确认前台窗口。只读操作。",
+    "列出当前全部顶层可见窗口（PID、进程名、前台标记*、窗口位置 x,y,w,h、标题、HWND）。EnumWindows 全量枚举——同进程多窗口（浏览器多窗口/多开应用）逐个可见；窗口操作工具（focus/move/state）可传 hwnd 精确指向具体窗口。只读操作。",
   card: { args: "none" },
   parameters: schema({}),
   async execute(_args, ctx) {
@@ -254,24 +268,48 @@ export const windowListTool: Tool = {
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      // 前台标记（GetForegroundWindow 比对）+ 窗口 bounds（GetWindowRect，物理像素）
+      // EnumWindows 枚举全部顶层可见窗口（替代 Get-Process MainWindowHandle——后者每进程只见一个主窗口，
+      // 浏览器多窗口/多开应用漏窗口）；前台标记（GetForegroundWindow 比对）+ bounds（物理像素）+ HWND
       cmd = ps(`
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public struct GebaiRect3 { public int Left, Top, Right, Bottom; }
 public class GebaiWinList {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out GebaiRect3 r);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder t, int max);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 }
 "@
-$fg = [GebaiWinList]::GetForegroundWindow()
-Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessName | ForEach-Object {
+$rows = New-Object System.Collections.Generic.List[object]
+$cb = [GebaiWinList+EnumProc]{ param($h, $l)
+  if (-not [GebaiWinList]::IsWindowVisible($h)) { return $true }
+  $sb = New-Object System.Text.StringBuilder 512
+  [void][GebaiWinList]::GetWindowText($h, $sb, 512)
+  $title = $sb.ToString()
+  if (-not $title) { return $true }
   $r = New-Object GebaiRect3
-  [GebaiWinList]::GetWindowRect($_.MainWindowHandle, [ref]$r) | Out-Null
-  $mark = if ($_.MainWindowHandle -eq $fg) { "*" } else { "" }
-  @($_.Id, $_.ProcessName, $mark, "$($r.Left),$($r.Top),$($r.Right - $r.Left),$($r.Bottom - $r.Top)", $_.MainWindowTitle) -join [char]9
+  [void][GebaiWinList]::GetWindowRect($h, [ref]$r)
+  $w = $r.Right - $r.Left; $ht = $r.Bottom - $r.Top
+  if ($w -le 0 -or $ht -le 0) { return $true }
+  $outPid = [uint32]0
+  [void][GebaiWinList]::GetWindowThreadProcessId($h, [ref]$outPid)
+  $proc = ""
+  try { $proc = (Get-Process -Id $outPid -ErrorAction SilentlyContinue).ProcessName } catch {}
+  $rows.Add([pscustomobject]@{ Hwnd = $h.ToInt64(); Pid = $outPid; Proc = $proc; Title = $title; Bounds = "$($r.Left),$($r.Top),$w,$ht" })
+  return $true
+}
+[void][GebaiWinList]::EnumWindows($cb, [IntPtr]::Zero)
+$fg = [GebaiWinList]::GetForegroundWindow()
+$rows | Sort-Object Proc | ForEach-Object {
+  $mark = if ([IntPtr]$_.Hwnd -eq $fg) { "*" } else { "" }
+  @($_.Pid, $_.Proc, $mark, $_.Bounds, $_.Title, $_.Hwnd) -join [char]9
 }
 `)
     } else if (plat === "darwin") {
@@ -288,11 +326,11 @@ Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object ProcessNa
       const rows = stdout.trim().split("\n").map((l) => l.split("\t"))
       const pidW = Math.max(...rows.map((r) => r[0]?.length ?? 0), 3)
       const nameW = Math.max(...rows.map((r) => r[1]?.length ?? 0), 4)
-      const lines = rows.map((r) => `${(r[2] === "*" ? "*" : " ") + (r[0] ?? "").padEnd(pidW)}  ${(r[1] ?? "").padEnd(nameW)}  ${r[3] ?? ""}  ${r[4] ?? ""}`)
+      const lines = rows.map((r) => `${(r[2] === "*" ? "*" : " ") + (r[0] ?? "").padEnd(pidW)}  ${(r[1] ?? "").padEnd(nameW)}  ${r[3] ?? ""}  ${r[4] ?? ""}  [${r[5] ?? ""}]`)
       const fg = rows.filter((r) => r[2] === "*").map((r) => r[1]).join(", ")
       return {
         output:
-          `共 ${rows.length} 个窗口（* = 当前前台；第 4 列为窗口位置 x,y,w,h 屏幕像素）：\n${lines.join("\n")}` +
+          `共 ${rows.length} 个窗口（* = 当前前台；列：PID/进程/位置 x,y,w,h/标题/HWND——窗口操作工具可传 hwnd 精确指向多窗口进程中的具体窗口）：\n${lines.join("\n")}` +
           (fg ? `\n当前前台: ${fg}` : "\n（无前台窗口标记——可能焦点在无主窗口的进程）"),
       }
     }
@@ -307,15 +345,18 @@ export const windowFocusTool: Tool = {
   parameters: schema({
     pid: { type: "number", description: "可选：目标窗口的 PID（window_list 结果第一列）" },
     title: { type: "string", description: "可选：按标题模糊匹配窗口（pid 未提供时）" },
+    hwnd: { type: "number", description: "可选：window_list 最后列 HWND——同进程多窗口时精确指向具体窗口（优先于 pid/title）" },
   }),
   async execute(args, ctx) {
     desktopGate(ctx)
     const pid = num(args.pid, 0)
     const title = String(args.title ?? "")
-    if (!pid && !title) return { output: "请提供 pid 或 title" }
+    const hwnd = num(args.hwnd, 0)
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd、pid 或 title" }
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
+      const loc = winLocate(hwnd, pid, title)
       cmd = ps(`
 Add-Type @"
 using System;
@@ -327,9 +368,9 @@ public class GebaiWin {
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
 }
 "@
-${procFilter(pid, title)} | Select-Object -First 1
-if ($p -and $p.MainWindowHandle -ne 0) {
-  $h = $p.MainWindowHandle
+${loc.head}
+if (${loc.cond}) {
+  ${loc.assign}
   [GebaiWin]::ShowWindow($h, 9) | Out-Null
   $ok = [GebaiWin]::SetForegroundWindow($h)
   if (-not $ok -or [GebaiWin]::GetForegroundWindow() -ne $h) {
@@ -340,11 +381,11 @@ if ($p -and $p.MainWindowHandle -ne 0) {
     $ok = [GebaiWin]::SetForegroundWindow($h)
   }
   if ($ok -and [GebaiWin]::GetForegroundWindow() -eq $h) {
-    "已激活: $($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)"
+    "已激活: ${loc.label}"
   } else {
     "激活失败: Windows 前台锁定拦截（后台进程禁止夺取焦点）。请手动点击一次目标窗口后重试，或改用其他验证通道确认窗口状态"
   }
-} else { "未找到匹配窗口" }
+} else { "未找到匹配窗口（hwnd 无效或窗口已关闭——用 window_list 重新获取）" }
 `)
     } else if (plat === "darwin") {
       // PID 优先（unix id），否则按标题
@@ -371,6 +412,7 @@ export const windowMoveTool: Tool = {
       height: { type: "number", description: "可选：目标高度" },
       pid: { type: "number", description: "目标窗口 PID" },
       title: { type: "string", description: "或按标题匹配" },
+      hwnd: { type: "number", description: "可选：window_list 最后列 HWND（优先于 pid/title，多窗口进程精确指向）" },
     },
     ["x", "y"],
   ),
@@ -380,12 +422,14 @@ export const windowMoveTool: Tool = {
     const y = num(args.y, 0)
     const pid = num(args.pid, 0)
     const title = String(args.title ?? "")
-    if (!pid && !title) return { output: "请提供 pid 或 title" }
+    const hwnd = num(args.hwnd, 0)
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd、pid 或 title" }
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
       const w = args.width != null ? String(num(args.width, 0)) : ""
       const h = args.height != null ? String(num(args.height, 0)) : ""
+      const loc = winLocate(hwnd, pid, title)
       cmd = ps(`
 ${PS_DPI_AWARE}
 Add-Type @"
@@ -397,14 +441,15 @@ public class GebaiWin2 {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out GebaiRect r);
 }
 "@
-${procFilter(pid, title)} | Select-Object -First 1
-if ($p -and $p.MainWindowHandle -ne 0) {
+${loc.head}
+if (${loc.cond}) {
+  ${loc.assign}
   $r = New-Object GebaiRect
-  [GebaiWin2]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+  [GebaiWin2]::GetWindowRect($h, [ref]$r) | Out-Null
   $w = ${w || `($r.Right - $r.Left)`}
   $h = ${h || `($r.Bottom - $r.Top)`}
-  [GebaiWin2]::SetWindowPos($p.MainWindowHandle, [IntPtr]::Zero, ${x}, ${y}, $w, $h, 0x0040) | Out-Null
-  "已移动: $($p.ProcessName) → (${x}, ${y}) ${w}x${h}"
+  [GebaiWin2]::SetWindowPos($h, [IntPtr]::Zero, ${x}, ${y}, $w, $h, 0x0040) | Out-Null
+  "已移动: ${loc.label} → (${x}, ${y}) ${w}x${h}"
 } else { "未找到匹配窗口" }
 `)
     } else if (plat === "darwin") {
@@ -556,24 +601,156 @@ export const clipboardReadTool: Tool = {
   },
 }
 
+/** 虚拟键别名 → keybd_event 扫描码：SendKeys 语法覆盖不了的系统键（win/vk_ 前缀统一）。
+ *  单键：win lwin rwin apps volume_up volume_down volume_mute
+ *  媒体：media_play media_pause media_play_pause media_stop media_next media_prev
+ *  mouse 类：vk_left vk_right vk_up vk_down（箭头键，SendKeys 也支持但别名统一入口）
+ *  其他：vk_add vk_subtract vk_multiply vk_divide vk_decimal（小键盘）vk_numlock vk_scroll vk_snapshot(print screen) vk_sleep */
+const VK_CODES: Record<string, number> = {
+  win: 0x5b, lwin: 0x5b, rwin: 0x5c, apps: 0x5d,
+  shift: 0x10, ctrl: 0x11, control: 0x11, alt: 0x12,
+  volume_up: 0xaf, volume_down: 0xae, volume_mute: 0xad,
+  media_play: 0xb3, media_pause: 0xb3, media_play_pause: 0xb3, media_stop: 0xb2, media_next: 0xb0, media_prev: 0xb1,
+  left: 0x25, up: 0x26, right: 0x27, down: 0x28,
+  add: 0x6b, subtract: 0x6d, multiply: 0x6a, divide: 0x6f, decimal: 0x6e,
+  numlock: 0x90, scroll: 0x91, snapshot: 0x2c, sleep: 0x5f,
+  esc: 0x1b, space: 0x20, tab: 0x09, backspace: 0x08, del: 0x2e, insert: 0x2d, home: 0x24, end: 0x23,
+  pgup: 0x21, pgdn: 0x22, capslock: 0x14, printscreen: 0x2c,
+}
+
+/** 解析虚拟键 token："vk" / "vk_" / 裸名（VK_CODES 键）或 "vk_XX" 十六进制扫描码 → keybd_event 码。
+ *  返回 null = 不是虚拟键（走 SendKeys）。修饰键仅认 vk 前缀（ctrl/shift/alt 裸名会与 SendKeys 语义冲突）。 */
+export function vkCode(token: string): number | null {
+  const t = token.toLowerCase()
+  if (t.startsWith("vk_")) {
+    const rest = t.slice(3)
+    if (/^[0-9a-f]{2}$/.test(rest)) return parseInt(rest, 16)
+    return VK_CODES[rest] ?? null
+  }
+  if (t === "win" || t.startsWith("media_") || t.startsWith("volume_")) {
+    return VK_CODES[t] ?? null
+  }
+  return null
+}
+
+/** 修饰键 vk 名：Ctrl=0x11 Shift=0x10 Alt=0x12（Win 作为主键单独处理）。 */
+function vkModifier(token: string): number | null {
+  let t = token.toLowerCase()
+  if (t.startsWith("vk_")) t = t.slice(3)
+  if (t === "ctrl" || t === "control") return 0x11
+  if (t === "shift") return 0x10
+  if (t === "alt") return 0x12
+  return null
+}
+
+/** 解析虚拟键组合串："win+r" / "media_next" / "vk_ctrl+vk_left" → { mods, main }；null = 非 vk 组合。
+ *  校验全部 token（任一不认识即 null 交回 SendKeys 路径报错，不静默半解析）。 */
+/** 主键解析：vk 名优先；单字母 a-z / 数字 0-9 映射 VK 码（vk 组合内的裸字母，如 win+r）。 */
+function vkMain(token: string): number | null {
+  const t = token.toLowerCase()
+  if (t.length === 1 && t >= "a" && t <= "z") return t.charCodeAt(0) - 0x20 // VK_A..VK_Z = 大写 ASCII（r→0x52）
+  if (t.length === 1 && t >= "0" && t <= "9") return t.charCodeAt(0) // VK_0..VK_9 = 0x30-0x39 即字符码
+  return vkCode(t)
+}
+
+export function parseVkCombo(keys: string): { mods: number[]; main: number } | null {
+  const parts = keys.toLowerCase().split("+").map((s) => s.trim()).filter(Boolean)
+  if (!parts.length) return null
+  let main = -1
+  const mods: number[] = []
+  for (const p of parts) {
+    // win 在组合中是修饰键（Win+R = 按住 Win 敲 R）；单独一个 "win" 才是主键（弹开始菜单）
+    if (parts.length > 1 && (p === "win" || p === "lwin")) { mods.push(0x5b); continue }
+    if (vkModifier(p) !== null) { mods.push(vkModifier(p)!); continue }
+    const c = vkMain(p)
+    if (c === null) return null
+    if (main !== -1) return null // 两个主键（如 win+r+f）——不支持的组合
+    main = c
+  }
+  // 纯修饰键组合（vk_shift / vk_ctrl+vk_shift）：main=-1——仅 down/up 有意义（按住/抬起修饰键）。
+  // 限定全部 token 带 vk_/win 前缀形态：裸 "shift"（单修饰键）走 SendKeys（+ 语义），防歧义
+  if (main === -1) {
+    const allPrefixed = parts.every((t) => t.startsWith("vk_"))
+    if (!allPrefixed) return null
+  }
+  return { mods, main }
+}
+
+/** keybd_event 脚本生成（按住/抬起分离 + 修饰键链 + 可选按住时长）。
+ *  flags: 0=按下 2=抬起（KEYEVENTF_KEYUP）；仅虚拟键路径使用（SendKeys 路径无法分离）。 */
+function vkScript(combo: { mods: number[]; main: number }, action: "press" | "down" | "up", holdMs: number): string {
+  const lines: string[] = []
+  const kb = (code: number, flags: number) => lines.push(`[GebaiKbd]::keybd_event(0x${code.toString(16)}, 0, ${flags}, [UIntPtr]::Zero)`)
+  const sleep = (ms: number) => lines.push(`Start-Sleep -Milliseconds ${ms}`)
+  if (action === "down") {
+    for (const m of combo.mods) kb(m, 0)
+    if (combo.main >= 0) kb(combo.main, 0)
+  } else if (action === "up") {
+    // 抬起序：主键先抬，修饰键逆序抬（与按下对称）；纯修饰键（main=-1）只抬修饰键
+    if (combo.main >= 0) kb(combo.main, 2)
+    for (let i = combo.mods.length - 1; i >= 0; i--) kb(combo.mods[i], 2)
+  } else {
+    // press：修饰键按下 → 主键按下 →（按住 hold_ms）→ 主键抬起 → 修饰键逆序抬起
+    for (const m of combo.mods) kb(m, 0)
+    if (combo.main >= 0) {
+      kb(combo.main, 0)
+      if (holdMs > 0) sleep(holdMs)
+      kb(combo.main, 2)
+    }
+    for (let i = combo.mods.length - 1; i >= 0; i--) kb(combo.mods[i], 2)
+  }
+  return lines.join("\n")
+}
+
 export const keyPressTool: Tool = {
   name: "key_press",
   description:
-    "发送按键/组合键到当前聚焦窗口。keys 使用 SendKeys 语法：{ENTER} {TAB} {ESC} {F5}，^c=Ctrl+C，%{F4}=Alt+F4，+{TAB}=Shift+Tab。macOS 用 osascript 语法（如 \"c\" using command down）。",
-  card: { titleParams: ["keys"], args: "none" },
-  parameters: schema({ keys: { type: "string", description: "按键/组合键" } }, ["keys"]),
+    '发送按键/组合键到当前聚焦窗口。keys 使用 SendKeys 语法：{ENTER} {TAB} {ESC} {F5}，^c=Ctrl+C，%{F4}=Alt+F4，+{TAB}=Shift+Tab。系统级虚拟键用 vk 名：win+r（Win+R）、volume_up/volume_down/volume_mute（音量）、media_play_pause/media_next/media_prev/media_stop（媒体）、vk_left/vk_up（箭头）、vk_XX（任意十六进制扫描码）、vk_ctrl+vk_left（修饰键组合）。action：press（默认，完整点击）/ down（按住不抬）/ up（抬起）——按住/抬起分离支持「按住 Shift 点选」「按住 W 前进」等场景（仅 vk 与单修饰键路径；SendKeys 语法不含分离）。hold_ms：press 模式按住时长（默认 0 即即按即抬，长按场景如文件属性 Alt+Enter 查看用 500+）。macOS 用 osascript 语法（如 "c" using command down）。',
+  card: { titleParams: ["keys", "action"], args: "none" },
+  parameters: schema(
+    {
+      keys: { type: "string", description: "按键/组合键（SendKeys 语法或 vk 虚拟键名）" },
+      action: { enum: ["press", "down", "up"], description: "可选：press=完整点击（默认）/ down=按住不抬 / up=抬起（按住/抬起分离，仅 vk 路径）" },
+      hold_ms: { type: "number", description: "可选：press 模式按住毫秒数（默认 0 即即按即抬）" },
+    },
+    ["keys"],
+  ),
   async execute(args, ctx) {
     desktopGate(ctx)
     const keys = String(args.keys ?? "")
     if (!keys) return { output: "keys 不能为空" }
+    const action = String(args.action ?? "press")
+    if (!["press", "down", "up"].includes(action)) return { output: `未知 action: ${action}` }
+    const holdMs = Math.max(0, Math.min(10000, num(args.hold_ms, 0)))
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      cmd = ps(`
+      const combo = parseVkCombo(keys)
+      if (combo) {
+        // 虚拟键路径：keybd_event 直发扫描码（媒体键/Win 键/箭头/任意 vk_XX）+ 按住/抬起分离
+        cmd = ps(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiKbd {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+${vkScript(combo, action as "press" | "down" | "up", holdMs)}
+"已${action === "press" ? "发送" : action === "down" ? "按住" : "抬起"}: ${keys}"
+`)
+      } else if (action !== "press") {
+        return {
+          output:
+            `action=${action} 仅支持 vk 虚拟键路径（当前 keys: ${keys}）。按住/抬起分离请用 vk 名，如 "vk_shift"（按住 Shift）、"w"→"vk_w"；SendKeys 语法不支持 down/up。`,
+        }
+      } else {
+        cmd = ps(`
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait(${psLiteral(keys)})
 "已发送: ${keys}"
 `)
+      }
     } else if (plat === "darwin") {
       cmd = `osascript -e 'tell application "System Events" to keystroke ${sq(JSON.stringify(keys))}'`
     } else {
@@ -623,27 +800,55 @@ public class GebaiMouse {
   },
 }
 
+/** 修饰键组合解析："ctrl+shift" 等 → keybd_event 码数组；非法/重复 token 返回 null。 */
+export function parseModifiers(mods: string): number[] | null {
+  if (!mods) return []
+  const out: number[] = []
+  for (const part of mods
+    .toLowerCase()
+    .split("+")
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    const c = vkModifier(part)
+    if (c === null || out.includes(c)) return null
+    out.push(c)
+  }
+  return out
+}
+
 export const mouseClickTool: Tool = {
   name: "mouse_click",
-  description: "移动鼠标到指定坐标并点击（button: left/right/double，默认 left）。",
-  parameters: schema({
-    x: { type: "number" },
-    y: { type: "number" },
-    button: { enum: ["left", "right", "double"] },
-  }, ["x", "y"]),
+  description:
+    '移动鼠标到指定坐标并点击。button: left（默认）/right/middle（中键）/double（双击）/triple（三击，段落全选）；双击/三击以 50ms 间隔连发（小于系统双击判定时间，应用可识别为多击）。modifiers: 修饰键（如 "ctrl"、"ctrl+shift"）按住期间点击——Ctrl+点击多选、Shift+扩展选区。',
+  parameters: schema(
+    {
+      x: { type: "number" },
+      y: { type: "number" },
+      button: { enum: ["left", "right", "middle", "double", "triple"] },
+      modifiers: { type: "string", description: '可选："ctrl"/"shift"/"alt" 以 + 组合（如 "ctrl+shift"）' },
+    },
+    ["x", "y"],
+  ),
   async execute(args, ctx) {
     desktopGate(ctx)
     const x = num(args.x, 0)
     const y = num(args.y, 0)
     const btn = String(args.button ?? "left")
+    const mods = parseModifiers(String(args.modifiers ?? ""))
+    if (mods === null) return { output: `modifiers 非法（仅支持 ctrl/shift/alt 以 + 组合）：${args.modifiers}` }
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      const press = btn === "right" ? "0x0008" : "0x0002"
-      const release = btn === "right" ? "0x0010" : "0x0004"
-      const double = btn === "double"
-        ? "\n  [GebaiMouse2]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); [GebaiMouse2]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)"
-        : ""
+      // mouse_event：LEFTDOWN 0x2/UP 0x4，RIGHT 0x8/0x10，MIDDLE 0x20/0x40；修饰键 keybd_event 按下→点击→逆序抬起
+      const [down, up] = btn === "right" ? ["0x0008", "0x0010"] : btn === "middle" ? ["0x0020", "0x0040"] : ["0x0002", "0x0004"]
+      const clicks = btn === "double" ? 2 : btn === "triple" ? 3 : 1
+      const label = { left: "单击", right: "右击", middle: "中键点击", double: "双击", triple: "三击" }[btn] ?? "点击"
+      const modDown = mods.map((m) => `[GebaiMouse2]::keybd_event(0x${m.toString(16)}, 0, 0, [UIntPtr]::Zero)`)
+      const modUp = [...mods].reverse().map((m) => `[GebaiMouse2]::keybd_event(0x${m.toString(16)}, 0, 2, [UIntPtr]::Zero)`)
+      const clickBlock = Array.from({ length: clicks }, (_, i) =>
+        `[GebaiMouse2]::mouse_event(${down}, 0, 0, 0, [UIntPtr]::Zero)
+[GebaiMouse2]::mouse_event(${up}, 0, 0, 0, [UIntPtr]::Zero)${i < clicks - 1 ? "\nStart-Sleep -Milliseconds 50" : ""}`,
+      ).join("\n")
       cmd = ps(`
 ${PS_DPI_AWARE}
 Add-Type @"
@@ -652,22 +857,25 @@ using System.Runtime.InteropServices;
 public class GebaiMouse2 {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 }
 "@
 [GebaiMouse2]::SetCursorPos(${x}, ${y}) | Out-Null
-[GebaiMouse2]::mouse_event(${press}, 0, 0, 0, [UIntPtr]::Zero)
-[GebaiMouse2]::mouse_event(${release}, 0, 0, 0, [UIntPtr]::Zero)${double}
-"已${btn}点击 (${x}, ${y})"
+${[...modDown, clickBlock, ...modUp].join("\n")}
+"已${label} (${x}, ${y})${mods.length ? `（修饰键 ${args.modifiers}）` : ""}"
 `)
     } else if (plat === "darwin") {
       return { output: "macOS 鼠标控制需要安装 cliclick（brew install cliclick），当前未集成" }
     } else {
       const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
       if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
-      const btnArg = btn === "right" ? "3" : btn === "double" ? "--repeat 2 1" : "1"
+      // xdotool 按键号：1=左 2=中 3=右；双击/三击 --repeat；modifiers 仅 Windows 支持
+      const btnArg = btn === "right" ? "3" : btn === "middle" ? "2" : btn === "double" ? "--repeat 2 1" : btn === "triple" ? "--repeat 3 1" : "1"
       cmd = `xdotool mousemove ${x} ${y} click ${btnArg}`
     }
-    return run(ctx, cmd)
+    const r = await run(ctx, cmd)
+    if (plat !== "win32" && mods.length) return { output: `${r.output}（注意：modifiers 仅 Windows 支持，本次未按修饰键）` }
+    return r
   },
 }
 
@@ -729,13 +937,14 @@ public class GebaiMouse3 {
 export const mouseDragTool: Tool = {
   name: "mouse_drag",
   description:
-    "按住左键从 (from_x,from_y) 拖拽到 (to_x,to_y)（插值移动模拟真实轨迹，适配依赖鼠标移动事件的目标）。用于文件拖放、滑块调整、选区。",
+    '按住左键从 (from_x,from_y) 拖拽到 (to_x,to_y)（插值移动模拟真实轨迹，适配依赖鼠标移动事件的目标）。modifiers: 拖拽期间按住的修饰键（如 "ctrl"——Ctrl+拖拽复制文件、"shift"——约束轴/加速选中）。用于文件拖放、滑块调整、选区。',
   parameters: schema(
     {
       from_x: { type: "number" },
       from_y: { type: "number" },
       to_x: { type: "number" },
       to_y: { type: "number" },
+      modifiers: { type: "string", description: '可选："ctrl"/"shift"/"alt" 以 + 组合（拖拽期间按住）' },
     },
     ["from_x", "from_y", "to_x", "to_y"],
   ),
@@ -745,9 +954,13 @@ export const mouseDragTool: Tool = {
     const fy = num(args.from_y, 0)
     const tx = num(args.to_x, 0)
     const ty = num(args.to_y, 0)
+    const mods = parseModifiers(String(args.modifiers ?? ""))
+    if (mods === null) return { output: `modifiers 非法（仅支持 ctrl/shift/alt 以 + 组合）：${args.modifiers}` }
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
+      const modDown = mods.map((m) => `[GebaiMouse4]::keybd_event(0x${m.toString(16)}, 0, 0, [UIntPtr]::Zero)`)
+      const modUp = [...mods].reverse().map((m) => `[GebaiMouse4]::keybd_event(0x${m.toString(16)}, 0, 2, [UIntPtr]::Zero)`)
       cmd = ps(`
 ${PS_DPI_AWARE}
 Add-Type @"
@@ -756,10 +969,12 @@ using System.Runtime.InteropServices;
 public class GebaiMouse4 {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 }
 "@
 [GebaiMouse4]::SetCursorPos(${fx}, ${fy}) | Out-Null
 Start-Sleep -Milliseconds 60
+${modDown.join("\n")}
 [GebaiMouse4]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
 $steps = 12
 for ($i = 1; $i -le $steps; $i++) {
@@ -769,7 +984,8 @@ for ($i = 1; $i -le $steps; $i++) {
   Start-Sleep -Milliseconds 12
 }
 [GebaiMouse4]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-"已拖拽 (${fx}, ${fy}) → (${tx}, ${ty})"
+${modUp.join("\n")}
+"已拖拽 (${fx}, ${fy}) → (${tx}, ${ty})${mods.length ? `（修饰键 ${args.modifiers}）` : ""}"
 `)
     } else if (plat === "darwin") {
       return { output: "mouse_drag 当前仅实现 Windows（macOS/Linux 暂未支持）" }
@@ -778,7 +994,9 @@ for ($i = 1; $i -le $steps; $i++) {
       if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
       cmd = `xdotool mousemove ${fx} ${fy} mousedown 1 mousemove ${tx} ${ty} mouseup 1`
     }
-    return run(ctx, cmd)
+    const r = await run(ctx, cmd)
+    if (plat !== "win32" && mods.length) return { output: `${r.output}（注意：modifiers 仅 Windows 支持，本次未按修饰键）` }
+    return r
   },
 }
 
@@ -787,13 +1005,14 @@ for ($i = 1; $i -le $steps; $i++) {
 export const windowStateTool: Tool = {
   name: "window_state",
   description:
-    "调整窗口状态（action: minimize=最小化 / maximize=最大化 / restore=还原 / close=关闭）。按 pid 或 title 定位窗口（同 window_focus）。close 经 WM_CLOSE 优雅关闭（应用可弹保存确认）。",
-  card: { titleParams: ["action", "pid", "title"], args: "none" },
+    "调整窗口状态（action: minimize=最小化 / maximize=最大化 / restore=还原 / close=优雅关闭（WM_CLOSE，可弹保存确认）/ topmost=置顶 / notopmost=取消置顶）。按 hwnd（多窗口进程精确指向）、pid 或 title 定位窗口（同 window_focus）。",
+  card: { titleParams: ["action", "pid", "title", "hwnd"], args: "none" },
   parameters: schema(
     {
-      action: { enum: ["minimize", "maximize", "restore", "close"], description: "目标状态" },
+      action: { enum: ["minimize", "maximize", "restore", "close", "topmost", "notopmost"], description: "目标状态" },
       pid: { type: "number", description: "可选：目标窗口的 PID（window_list 结果第一列）" },
       title: { type: "string", description: "可选：按标题模糊匹配窗口（pid 未提供时）" },
+      hwnd: { type: "number", description: "可选：window_list 最后列 HWND（优先于 pid/title，多窗口进程精确指向）" },
     },
     ["action"],
   ),
@@ -802,14 +1021,19 @@ export const windowStateTool: Tool = {
     const action = String(args.action ?? "")
     const pid = num(args.pid, 0)
     const title = String(args.title ?? "")
-    if (!pid && !title) return { output: "请提供 pid 或 title" }
+    const hwnd = num(args.hwnd, 0)
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd、pid 或 title" }
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      // ShowWindow：SW_CLOSE=0（发 WM_CLOSE 优雅关闭）/ SW_MAXIMIZE=3 / SW_MINIMIZE=6 / SW_RESTORE=9
+      // ShowWindow：SW_CLOSE=0（发 WM_CLOSE 优雅关闭）/ SW_MAXIMIZE=3 / SW_MINIMIZE=6 / SW_RESTORE=9；
+      // topmost/notopmost 走 SetWindowPos HWND_TOPMOST(-1)/HWND_NOTOPMOST(-2) + SWP_NOMOVE|SWP_NOSIZE(0x0003)
+      const verb = { close: "已发送关闭指令", maximize: "已最大化", minimize: "已最小化", restore: "已还原", topmost: "已置顶", notopmost: "已取消置顶" }[action]
+      if (!verb) return { output: `未知 action: ${action}` }
       const sw = { close: "0", maximize: "3", minimize: "6", restore: "9" }[action]
-      const verb = { close: "已发送关闭指令", maximize: "已最大化", minimize: "已最小化", restore: "已还原" }[action]
-      if (sw === undefined) return { output: `未知 action: ${action}` }
+      const pos = action === "topmost" ? "[IntPtr](-1)" : action === "notopmost" ? "[IntPtr](-2)" : ""
+      const act = pos ? `[GebaiWinState]::SetWindowPos($h, ${pos}, 0, 0, 0, 0, 0x0003) | Out-Null` : `[GebaiWinState]::ShowWindow($h, ${sw}) | Out-Null`
+      const loc = winLocate(hwnd, pid, title)
       cmd = ps(`
 ${PS_DPI_AWARE}
 Add-Type @"
@@ -817,12 +1041,14 @@ using System;
 using System.Runtime.InteropServices;
 public class GebaiWinState {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
 }
 "@
-${procFilter(pid, title)} | Select-Object -First 1
-if ($p -and $p.MainWindowHandle -ne 0) {
-  [GebaiWinState]::ShowWindow($p.MainWindowHandle, ${sw}) | Out-Null
-  "${verb}: $($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)"
+${loc.head}
+if (${loc.cond}) {
+  ${loc.assign}
+  ${act}
+  "${verb}: ${loc.label}"
 } else { "未找到匹配窗口" }
 `)
     } else if (plat === "darwin") {
@@ -850,14 +1076,56 @@ if ($p -and $p.MainWindowHandle -ne 0) {
 export const clipboardWriteTool: Tool = {
   name: "clipboard_write",
   description:
-    "写入文本到系统剪贴板（覆盖原内容，写入回验重试——剪贴板管理软件拦截时明确报错）。用于把内容交给用户手动粘贴。检测到疑似敏感值时告警但不中止（复制密钥供本人粘贴是常见需求）。",
-  parameters: schema({ text: { type: "string", description: "要写入的文本" } }, ["text"]),
+    "写入文本或图片到系统剪贴板（覆盖原内容，写入回验重试——剪贴板管理软件拦截时明确报错）。text 写入文本；image 写入 PNG 图片（相对会话工作目录，位图格式可直接粘贴到聊天/文档应用——截图交给用户手动粘贴的高频路径）——二选一。检测到疑似敏感值时告警但不中止（复制密钥供本人粘贴是常见需求）。",
+  card: { titleParams: ["image", "text"], args: "none" },
+  parameters: schema(
+    {
+      text: { type: "string", description: "可选：要写入的文本（与 image 二选一）" },
+      image: { type: "string", description: "可选：PNG 图片路径（相对会话工作目录，与 text 二选一，写入为位图）" },
+    },
+    [],
+  ),
   async execute(args, ctx) {
     desktopGate(ctx)
     const text = String(args.text ?? "")
-    if (!text) return { output: "text 不能为空" }
+    const image = String(args.image ?? "").trim()
+    if (text && image) return { output: "text 与 image 二选一（同时指定无法确定目标）" }
+    if (!text && !image) return { output: "请提供 text 或 image 参数" }
     const plat = process.platform
     let cmd: string
+    // 图片模式：PNG → 剪贴板位图（写入 + 回验尺寸一致）。OLE 剪贴板要求 STA——
+    // powershell.exe 默认 MTA，但 -STA 自 3.0 起为默认线程模型；runCommand 侧统一
+    // powershell -NoProfile -NonInteractive（Windows PowerShell 5.1 默认 STA）可直接 SetImage。
+    if (image) {
+      if (!image.toLowerCase().endsWith(".png")) return { output: `图片仅支持 PNG（当前 ${image}）` }
+      const imgPath = ctx.resolvePath(image).replace(/'/g, "''")
+      if (plat !== "win32") return { output: "图片写入剪贴板仅支持 Windows（macOS/Linux 暂未支持）" }
+      cmd = ps(`
+$ErrorActionPreference = 'Stop'
+try {
+  Add-Type -AssemblyName System.Drawing
+  Add-Type -AssemblyName System.Windows.Forms
+  $imgPath = '${imgPath}'
+  # FromFile 保持文件句柄至 Dispose（FromStream+::new 内联在 PS5.1 有类型解析陷阱）
+  $b = [System.Drawing.Image]::FromFile($imgPath)
+  try {
+    [System.Windows.Forms.Clipboard]::SetImage($b)
+    Start-Sleep -Milliseconds 150
+    $cb = [System.Windows.Forms.Clipboard]::GetImage()
+    if ($cb -and $cb.Width -eq $b.Width -and $cb.Height -eq $b.Height) { "IMGOK $($b.Width)x$($b.Height)" } else { "IMGFAIL 回验失败（剪贴板可能被管理软件拦截）" }
+  } finally { $b.Dispose() }
+} catch {
+  "IMGFAIL " + $_.Exception.Message
+}
+`)
+      const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 20000 })
+      const out = (stdout || stderr).trim()
+      if (out.startsWith("IMGOK")) {
+        const dim = out.slice(6).trim()
+        return { output: `已写入图片到剪贴板（${image}，${dim}）——可到目标应用 Ctrl+V 粘贴` }
+      }
+      return { output: `图片写入剪贴板失败: ${out || `exit ${code}`}（确认 PNG 存在且剪贴板未被管理软件拦截）` }
+    }
     if (plat === "win32") {
       cmd = ps(`
 Add-Type -AssemblyName System.Windows.Forms

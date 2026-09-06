@@ -9,6 +9,7 @@
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { getCvRunner } from "../../core/cv/cv"
 import { decodePng, type RgbaImage } from "../../core/cv/image"
+import { matchTemplate } from "../../core/cv/template"
 import { createCvAnalysisTools, createDetectTool, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
 import { parseRegion, schema } from "../../core/tools/shared"
 import { PS_DPI_AWARE } from "./desktop_tools"
@@ -173,12 +174,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 export const waitForTool: Tool = {
   name: "wait_for",
   description:
-    "等待屏幕满足条件后返回（只读，轮询截图判断，省去反复手动截图轮询）：mode=text 等待指定文字出现（本地 OCR）；text_gone 等待文字消失；change 等待区域内画面发生变化（相对首次截图）。timeout_s 默认 20（上限 120），interval_s 轮询间隔默认 2。超时不视为错误，返回当前最后观察状态。",
-  card: { titleParams: ["text", "mode", "region"], args: "none" },
+    "等待屏幕满足条件后返回（只读，轮询截图判断，省去反复手动截图轮询）：mode=text 等待指定文字出现（本地 OCR）；text_gone 等待文字消失；image 等待模板图像出现；image_gone 等待模板消失（加载动画/图标等非文字元素）；change 等待区域内画面发生变化（相对首次截图）。timeout_s 默认 20（上限 120），interval_s 轮询间隔默认 2。超时不视为错误，返回当前最后观察状态。",
+  card: { titleParams: ["text", "template", "mode", "region"], args: "none" },
   parameters: schema(
     {
-      mode: { enum: ["text", "text_gone", "change"], description: "可选：等待条件（默认 text）" },
+      mode: { enum: ["text", "text_gone", "image", "image_gone", "change"], description: "可选：等待条件（默认 text）" },
       text: { type: "string", description: "text/text_gone 模式的目标文字（必填）" },
+      template: { type: "string", description: "image/image_gone 模式的模板 PNG 路径（必填，与 desktop_locate_image 同模板约定：同尺寸 NCC 匹配）" },
+      threshold: { type: "number", description: "可选：image 模式匹配阈值 0-1（默认 0.8，降低可放宽）" },
       timeout_s: { type: "number", description: "可选：超时秒数（默认 20，上限 120）" },
       interval_s: { type: "number", description: "可选：轮询间隔秒（默认 2，范围 0.5-10）" },
       region: { type: "string", description: "可选：限定区域 'x,y,w,h'（小区域轮询更快）" },
@@ -193,8 +196,23 @@ export const waitForTool: Tool = {
     const intervalS = Math.max(0.5, Math.min(10, num2(args.interval_s, 2)))
     const region = String(args.region ?? "").trim()
     if (region && !parseRegion(region)) return { output: `region 格式错误: ${region}（应为 x,y,w,h）` }
-    if (mode !== "change" && !text) return { output: `mode=${mode} 需要提供 text 参数` }
+    const isImageMode = mode === "image" || mode === "image_gone"
+    if (!isImageMode && mode !== "change" && !text) return { output: `mode=${mode} 需要提供 text 参数` }
     const path = ctx.resolvePath("cv_capture.png")
+    // image/image_gone 模式：预载模板（循环外一次），轮询内 NCC 匹配（与 locate_image 同基建）
+    let tpl: RgbaImage | null = null
+    const thresholdNum = Number(args.threshold)
+    const threshold = Number.isFinite(thresholdNum) && thresholdNum > 0 && thresholdNum < 1 ? thresholdNum : 0.8
+    if (isImageMode) {
+      const tp = String(args.template ?? "").trim()
+      if (!tp) return { output: `mode=${mode} 需要提供 template 参数（模板 PNG 路径）` }
+      if (!tp.toLowerCase().endsWith(".png")) return { output: `模板仅支持 PNG（当前 ${tp}）` }
+      try {
+        tpl = decodePng(await ctx.readBinaryFile(ctx.resolvePath(tp)))
+      } catch (e) {
+        return { output: `模板装载失败: ${e instanceof Error ? e.message : e}` }
+      }
+    }
     const start = Date.now()
     let baseline: Float32Array | null = null
     let lastDesc = "尚未观察"
@@ -221,6 +239,21 @@ export const waitForTool: Tool = {
             return { output: `已满足：画面已变化（平均差异 ${diff.toFixed(1)}/255 > ${CHANGE_DIFF_THRESHOLD}；等待 ${((Date.now() - start) / 1000).toFixed(1)}s，共 ${polls} 次轮询）` }
           }
         }
+      } else if (isImageMode && tpl) {
+        // 模板匹配（matchTemplate 内部校验模板尺寸，报错则描述）
+        try {
+          const hits = matchTemplate(img, tpl, { threshold })
+          const hit = hits.length > 0
+          lastDesc = `模板（${tpl.width}x${tpl.height}，阈值 ${threshold}）${hit ? `在当前画面中（最佳相似度 ${hits[0].score.toFixed(2)}）` : "不在当前画面中"}`
+          if (mode === "image" && hit) {
+            return { output: `已满足：${lastDesc}（等待 ${((Date.now() - start) / 1000).toFixed(1)}s，共 ${polls} 次轮询）` }
+          }
+          if (mode === "image_gone" && !hit) {
+            return { output: `已满足：模板已从画面消失（等待 ${((Date.now() - start) / 1000).toFixed(1)}s，共 ${polls} 次轮询）` }
+          }
+        } catch (e) {
+          return { output: `模板匹配失败: ${e instanceof Error ? e.message : e}` }
+        }
       } else {
         let lines: Array<{ text: string }>
         try {
@@ -239,7 +272,7 @@ export const waitForTool: Tool = {
       }
       const elapsed = Date.now() - start
       if (elapsed + intervalS * 1000 > timeoutS * 1000) {
-        return { output: `等待超时（${timeoutS}s，共 ${polls} 次轮询）：${lastDesc}。可增大 timeout_s 或改用其他验证通道（desktop_ocr/screenshot）。` }
+        return { output: `等待超时（${timeoutS}s，共 ${polls} 次轮询）：${lastDesc}。可增大 timeout_s、降低 threshold（image 模式）或改用其他验证通道（desktop_ocr/screenshot）。` }
       }
       await sleep(intervalS * 1000)
     }
