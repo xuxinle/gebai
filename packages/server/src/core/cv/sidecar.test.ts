@@ -151,7 +151,7 @@ describe("CvSidecar 协议", () => {
     const out = new Float32Array([1.5, -2.25, 3.75, 4.5])
     fake.behavior.runOutput = () => ({ dims: [1, 2, 2], data: out })
     const sc = client(fake)
-    const r = await sc.detectRun({ modelKey: "m:960", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 4, 4], data: new Float32Array(48) })
+    const r = await sc.runModel({ modelKey: "m:960", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 4, 4], data: new Float32Array(48) })
     expect(r.ep).toBe("dml")
     expect(Array.from(r.data)).toEqual(Array.from(out))
     expect(r.dims).toEqual([1, 2, 2])
@@ -169,8 +169,8 @@ describe("CvSidecar 协议", () => {
     const fake = new FakeSidecar()
     const sc = client(fake)
     const dims = { modelKey: "m:640", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2] as const, data: new Float32Array(12) }
-    await sc.detectRun(dims)
-    await sc.detectRun(dims)
+    await sc.runModel(dims)
+    await sc.runModel(dims)
     expect(fake.requests.filter((r) => r.op === "session.create").length).toBe(1)
     expect(fake.requests.filter((r) => r.op === "session.run").length).toBe(2)
   })
@@ -179,7 +179,7 @@ describe("CvSidecar 协议", () => {
     const fake = new FakeSidecar()
     fake.behavior.failRun = "驱动报错：EP 不可用"
     const sc = client(fake)
-    await expect(sc.detectRun({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })).rejects.toThrow(/EP 不可用/)
+    await expect(sc.runModel({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })).rejects.toThrow(/EP 不可用/)
   })
 
   test("响应字节帧按 3 字节分片下发仍正确解析", async () => {
@@ -188,7 +188,7 @@ describe("CvSidecar 协议", () => {
     const out = new Float32Array([0.25, 0.5, 0.75, 1, 1.25, 1.5])
     fake.behavior.runOutput = () => ({ dims: [1, 2, 3], data: out })
     const sc = client(fake)
-    const r = await sc.detectRun({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })
+    const r = await sc.runModel({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })
     expect(Array.from(r.data)).toEqual(Array.from(out))
   })
 
@@ -196,11 +196,11 @@ describe("CvSidecar 协议", () => {
     const fake = new FakeSidecar()
     fake.behavior.hangRun = true
     const sc = client(fake, { timeoutMs: 150 })
-    await expect(sc.detectRun({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })).rejects.toThrow(/超时/)
+    await expect(sc.runModel({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })).rejects.toThrow(/超时/)
     expect(fake.procs[0].proc.killed).toBe(true)
     // 重启：下一次调用重新 spawn（会话缓存已随进程退出清空）
     fake.behavior.hangRun = false
-    const r = await sc.detectRun({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })
+    const r = await sc.runModel({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })
     expect(r.ep).toBe("dml")
     expect(fake.procs.length).toBe(2)
   })
@@ -209,6 +209,6 @@ describe("CvSidecar 协议", () => {
     const fake = new FakeSidecar()
     fake.behavior.initOk = false
     const sc = client(fake)
-    await expect(sc.detectRun({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })).rejects.toThrow(/onnxruntime-node 加载失败/)
+    await expect(sc.runModel({ modelKey: "m", modelPath: "m.onnx", ep: "auto", dims: [1, 3, 2, 2], data: new Float32Array(12) })).rejects.toThrow(/onnxruntime-node 加载失败/)
   })
 })

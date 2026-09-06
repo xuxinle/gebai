@@ -206,7 +206,7 @@ export const waitForTool: Tool = {
       } else {
         let lines: Array<{ text: string }>
         try {
-          lines = await getCvRunner().ocr(img, { env: ctx.env })
+          lines = (await getCvRunner().ocr(img, { env: ctx.env })).lines
         } catch (e) {
           return { output: `等待失败（本地 OCR 不可用）: ${e instanceof Error ? e.message : e}` }
         }
@@ -271,7 +271,7 @@ export const detectTool: Tool = {
     let pairedTexts: Array<string | undefined> = outcome.objects.map(() => undefined)
     if (args.pair_text !== false && outcome.objects.length) {
       try {
-        const lines = await getCvRunner().ocr(loaded.img, { env: ctx.env })
+        const lines = (await getCvRunner().ocr(loaded.img, { env: ctx.env })).lines
         pairedTexts = pairObjectsWithText(outcome.objects, lines.map((l) => ({ text: l.text, ...l.box }))).map((o) => o.text)
       } catch { /* OCR 模型未配置等——跳过配对，仅输出检测框 */ }
     }

@@ -162,7 +162,7 @@ function installFake(lines = DEFAULT_LINES): void {
     (): CvRunner => ({
       ocr: async (img) => {
         seen.img = img
-        return lines
+        return { lines, backend: "wasm-cpu" }
       },
       detect: async () => ({ objects: [], backend: "wasm-cpu" }),
     }),
