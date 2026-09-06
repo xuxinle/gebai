@@ -8,6 +8,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../base/types"
 import { getCvRunner } from "../cv/cv"
+import { pairObjectsWithText } from "../cv/detect"
 import { cropImage, decodePng, type RgbaImage } from "../cv/image"
 import { matchTemplate, type TemplateMatch } from "../cv/template"
 import { parseRegion, schema } from "./shared"
@@ -126,6 +127,100 @@ function matchRank(line: string, target: string): number {
   return -1
 }
 
+/** detect 共享工厂注入文案：描述/参数描述与坐标语义按消费方（缺省源坐标系）定制。 */
+export interface CvDetectWording {
+  /** 工具描述（YOLO 自备模型/推理分层与通用说明不变，缺省源描述在此定制）。 */
+  description: string
+  /** image 参数描述（缺省源语义定制，如「省略则现截全屏」/「必填」）。 */
+  imageParam: string
+  /** 未检到时的建议尾巴（消费方坐标系与替代通道）。 */
+  notFoundTail: string
+}
+
+/** detect 共享工厂入参：CvSourceLoader（缺省图像源）+ gate（入口守卫）+ wording（文案）。
+ *  image 可选性由消费方定义：desktop=省略现截全屏，vision 子代理=image 必填。 */
+export interface CvDetectOptions extends CvSourceLoader {
+  gate?: (ctx: ToolContext) => void
+  wording: CvDetectWording
+}
+
+/** 本地目标检测（YOLO ONNX）+ OCR 配对工具共享工厂：核心/cv 推理（getCvRunner().detect +
+ *  pairObjectsWithText 配对补齐语义）、坐标偏移回加与输出格式化统一在此，消费方（desktop 域内
+ *  缺省源=现截屏幕、vision 子代理通用图片）注入图像源/闸门/文案——识别能力复用，坐标语义各归其域。 */
+export function createDetectTool(opts: CvDetectOptions): Tool {
+  const { gate, wording } = opts
+  const requireImage = !wording.imageParam.includes("可选")
+  return {
+    name: "detect",
+    description: wording.description,
+    card: { titleParams: ["image", "region"], args: "none" },
+    parameters: schema(
+      {
+        image: { type: "string", description: wording.imageParam },
+        region: { type: "string", description: "可选：检测区域 'x,y,w,h'（像素，相对 image 图片/缺省源坐标系）" },
+        conf: { type: "number", description: "可选：置信度阈值（默认 0.25）" },
+        iou: { type: "number", description: "可选：NMS IoU 阈值（默认 0.45；密集小控件/重叠元素场景调低至 0.1）" },
+        pair_text: { type: "boolean", description: "可选：检测框与 OCR 文本配对输出「类别+文本」（默认 true；纯检测提速可关）" },
+      },
+      requireImage ? ["image"] : [],
+    ),
+    async execute(args, ctx): Promise<ToolResult> {
+      gate?.(ctx)
+      const image = String(args.image ?? "").trim()
+      if (requireImage && !image) return { output: "缺少 image 参数（待检测图片路径，PNG——本工具无缺省图像源，需显式指定）" }
+      const loaded = await loadAnalysisSource(ctx, opts, image, String(args.region ?? "").trim())
+      if ("error" in loaded) return { output: loaded.error }
+      const conf = Number(args.conf)
+      const iou = Number(args.iou)
+      let outcome: { objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; backend: string }
+      try {
+        outcome = await getCvRunner().detect(loaded.img, {
+          env: ctx.env,
+          conf: Number.isFinite(conf) && conf > 0 && conf < 1 ? conf : 0.25,
+          iou: Number.isFinite(iou) && iou > 0 && iou < 1 ? iou : undefined,
+        })
+      } catch (e) {
+        return { output: `目标检测失败: ${e instanceof Error ? e.message : e}` }
+      }
+      // 检测框 × OCR 行配对（配对在图像像素系进行，再统一加偏移）：检测只给组件类别，
+      // 配对文本补齐「哪一个按钮/输入框」的语义（完整屏幕解析的本地拼装）
+      let pairedTexts: Array<string | undefined> = outcome.objects.map(() => undefined)
+      if (args.pair_text !== false && outcome.objects.length) {
+        try {
+          const lines = (await getCvRunner().ocr(loaded.img, { env: ctx.env })).lines
+          pairedTexts = pairObjectsWithText(outcome.objects, lines.map((l) => ({ text: l.text, ...l.box }))).map((o) => o.text)
+        } catch { /* OCR 模型未配置等——跳过配对，仅输出检测框 */ }
+      }
+      const objects = outcome.objects.map((o, i) => ({
+        label: o.label,
+        score: o.score,
+        x: Math.round(o.x + loaded.offX),
+        y: Math.round(o.y + loaded.offY),
+        w: Math.round(o.w),
+        h: Math.round(o.h),
+        text: pairedTexts[i],
+      }))
+      if (!objects.length) {
+        return {
+          output: `未检测到目标对象（${loaded.sourceDesc}）。${wording.notFoundTail}`,
+          data: { objects, backend: outcome.backend },
+        }
+      }
+      const body = objects
+        .map((o) => {
+          const cx = Math.round(o.x + o.w / 2)
+          const cy = Math.round(o.y + o.h / 2)
+          return `${o.label}  [${o.x},${o.y},${o.w},${o.h}] → 中心 (${cx},${cy})  置信度 ${o.score.toFixed(2)}${o.text ? `  文本: ${o.text}` : ""}`
+        })
+        .join("\n")
+      return {
+        output: `检测到 ${objects.length} 个对象（${loaded.sourceDesc}，坐标相对其原点；后端 ${outcome.backend}）：\n${body}`,
+        data: { source: loaded.sourceDesc, backend: outcome.backend, objects },
+      }
+    },
+  }
+}
+
 export function createCvAnalysisTools(opts: CvAnalysisOptions): { ocr: Tool; locate: Tool; locate_image: Tool } {
   const { gate, wording } = opts
   const load = (ctx: ToolContext, image: string, region: string) => loadAnalysisSource(ctx, opts, image, region)
@@ -160,7 +255,7 @@ export function createCvAnalysisTools(opts: CvAnalysisOptions): { ocr: Tool; loc
       const body = shown.map(formatLine).join("\n")
       const tail = capped ? `\n…（共 ${lines.length} 行，仅显示前 ${OCR_LINE_LIMIT} 行；可用 find 参数过滤收窄）` : ""
       return {
-        output: lines.length ? `${head}\n${body}${tail}` : `${head}\n（无${find ? "匹配" : "识别到"}文本——可能是图形界面无文字、分辨率过低，或需用 vision 工具做语义分析）`,
+        output: lines.length ? `${head}\n${body}${tail}` : `${head}\n（无${find ? "匹配" : "识别到"}文本——可能是图形界面无文字、分辨率过低，或需用视觉子代理（vision_analyze）做语义分析）`,
         data: { source: loaded.sourceDesc, backend, find: args.find ?? null, lines },
       }
     },

@@ -1,16 +1,15 @@
-/**
- * 桌面本地识别工具集（desktop 专用）：ocr/locate/locate_image 三工具复用共享工厂
+﻿/**
+ * 桌面本地识别工具集（desktop 专用）：ocr/locate/locate_image/detect 四工具复用共享工厂
  * core/tools/cv-analysis（core/cv 域本地小模型推理的消费层——onnxruntime-web wasm 进程内
  * 推理，离线运行不耗模型配额），本文件注入 desktop 的缺省图像源（现截宿主机屏幕）与本地
- * 模式闸门；desktop 独有的 detect（自备 YOLO 检测）与 wait_for（屏幕条件轮询）仍在此处。
+ * 模式闸门——环境耦合的缺省源便利留在域内，识别实现与 vision 子代理共用（DESIGN「视觉能力分层与子代理复用边界」）；desktop 独有的 wait_for（屏幕条件轮询）仍在此处。
  * 全部只读操作（不点击/不输入），坐标返回映射回主屏原点像素系的像素值，供 mouse_click
  * 直接使用；识别在裁剪/缩放后的图像上进行，坐标一律映射回原始像素系。
  */
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { getCvRunner } from "../../core/cv/cv"
-import { pairObjectsWithText } from "../../core/cv/detect"
 import { decodePng, type RgbaImage } from "../../core/cv/image"
-import { createCvAnalysisTools, loadAnalysisSource, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
+import { createCvAnalysisTools, createDetectTool, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
 import { parseRegion, schema } from "../../core/tools/shared"
 import { PS_DPI_AWARE } from "./desktop_tools"
 
@@ -98,9 +97,9 @@ const analysis = createCvAnalysisTools({
   ...screenLoader,
   wording: {
     descriptions: {
-      ocr: "本地 OCR 识别屏幕/图片文字（PP-OCR 中英文小模型，离线运行、快、带精确像素坐标）。image 省略则现截全屏；region 限定区域（'x,y,w,h'）；find 关键词过滤。返回坐标相对（截图区域/图像）原点，可直接用于 mouse_click。读屏文字优先用本工具，语义理解/非文字内容才用 vision。",
+      ocr: "本地 OCR 识别屏幕/图片文字（PP-OCR 中英文小模型，离线运行、快、带精确像素坐标）。image 省略则现截全屏；region 限定区域（'x,y,w,h'）；find 关键词过滤。返回坐标相对（截图区域/图像）原点，可直接用于 mouse_click。",
       locate: "在屏幕/图片中定位目标文字的精确像素坐标（本地 OCR，比视觉模型估坐标可靠）。target 为要找的文字（如按钮/菜单/链接文字）；返回最佳匹配的中心坐标（可直接 mouse_click）与全部候选。image 省略则现截全屏；region 限定搜索区域。",
-      locateImage: "在屏幕/图片中按模板定位图标/图形元素（本地模板匹配，零训练——补「文字走 desktop_locate、检测需自训 YOLO」之间的空白）。template 为模板 PNG 路径，或 template_region 从搜索图坐标内取模板区域；返回最佳匹配中心坐标（可直接 mouse_click）与候选。同尺寸匹配（模板需与目标显示尺寸一致——同一显示环境截图裁剪），threshold 相似度阈值默认 0.8。image 省略则现截全屏；region 限定搜索区域。",
+      locateImage: "在屏幕/图片中按模板定位图标/图形元素（本地模板匹配，零训练——补「文字走 desktop_locate、检测需自训 YOLO」之间的空白）。template 为模板 PNG 路径，或 template_region 从搜索图坐标内取模板区域；返回最佳匹配中心坐标（可直接 mouse_click）与候选。同尺寸匹配（模板需与目标显示尺寸一致——同一显示环境截图裁剪）。image 省略则现截全屏；region 限定搜索区域。",
     },
     imageParam: {
       ocr: "可选：PNG 图片路径（相对会话工作目录，省略则现截全屏）",
@@ -115,9 +114,9 @@ const analysis = createCvAnalysisTools({
     templateRegionParam: "可选：'x,y,w,h' 在搜索图坐标系内取模板区域（与 template 二选一；坐标系同 desktop_ocr 对同一 image/region 的输出）",
     clickHint: (cx, cy) => `可直接 mouse_click(${cx}, ${cy})`,
     locateNotFound:
-      "1) 用 desktop_ocr 读取全部文本确认实际措辞；2) 文字可能是图标/图形（无文字），改用 desktop_detect（需自备模型）或 vision 工具语义分析；3) 目标可能不在当前屏幕/区域内，检查窗口是否在前台。",
+      "1) 用 desktop_ocr 读取全部文本确认实际措辞；2) 文字可能是图标/图形（无文字），改用 desktop_detect（需自备模型）或 vision 子代理（vision_analyze）语义分析；3) 目标可能不在当前屏幕/区域内，检查窗口是否在前台。",
     locateImageNotFound:
-      "2) 确认模板与目标为同一显示环境同尺寸截图（本工具不做缩放匹配）；3) 目标可能是文字——改用 desktop_locate；4) 用 vision 工具对截图做语义分析。",
+      "2) 确认模板与目标为同一显示环境同尺寸截图（本工具不做缩放匹配）；3) 目标可能是文字——改用 desktop_locate；4) 用 vision 子代理（vision_analyze）对截图做语义分析。",
   },
 })
 
@@ -125,7 +124,26 @@ export const ocrTool = analysis.ocr
 export const locateTool = analysis.locate
 export const locateImageTool = analysis.locate_image
 
-/* ---------- desktop_wait_for（等待界面条件） ---------- */
+/* ---------- desktop_detect（共享工厂，desktop 缺省源+本地模式闸门） ---------- */
+
+export const detectTool = createDetectTool({
+  gate: desktopGate,
+  ...screenLoader,
+  wording: {
+    description:
+      "本地目标检测（自备 YOLO ONNX 模型：GEBAI_CV_DETECT_MODEL 指定，或放入 {GEBAI_HOME}/models/detect/ 唯一 .onnx 自动生效；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）——组件类别不含语义，找特定文字按钮仍以 desktop_locate 为主，本工具适合结构感知与无文字元素定位。推理分层：GPU sidecar（GEBAI_CV_DETECT_BACKEND，Windows DirectML/任意 DX12 显卡、CUDA、macOS CoreML）不可用时自动回落 wasm CPU。image 省略则现截全屏；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
+    imageParam: "可选：PNG 图片路径（相对会话工作目录，省略则现截全屏）",
+    notFoundTail: "可尝试降低 conf 阈值，或确认模型/标签与场景匹配。",
+  },
+})
+
+/* ---------- desktop_wait_for（等待界面条件，desktop 独有） ---------- */
+
+function num2(v: unknown, dflt: number): number {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : dflt
+}
+
 
 /** change 模式判定：灰度采样平均绝对差（0-255 尺度）超过该值视为画面变化。 */
 const CHANGE_DIFF_THRESHOLD = 2
@@ -224,82 +242,6 @@ export const waitForTool: Tool = {
         return { output: `等待超时（${timeoutS}s，共 ${polls} 次轮询）：${lastDesc}。可增大 timeout_s 或改用其他验证通道（desktop_ocr/screenshot）。` }
       }
       await sleep(intervalS * 1000)
-    }
-  },
-}
-
-function num2(v: unknown, dflt: number): number {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : dflt
-}
-
-/* ---------- desktop_detect ---------- */
-
-export const detectTool: Tool = {
-  name: "detect",
-  description:
-    "本地目标检测（自备 YOLO ONNX 模型：GEBAI_CV_DETECT_MODEL 指定，或放入 {GEBAI_HOME}/models/detect/ 唯一 .onnx 自动生效；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）——组件类别不含语义，找特定文字按钮仍以 desktop_locate 为主，本工具适合结构感知与无文字元素定位。推理分层：GPU sidecar（GEBAI_CV_DETECT_BACKEND，Windows DirectML/任意 DX12 显卡、CUDA、macOS CoreML）不可用时自动回落 wasm CPU。image 省略则现截全屏；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
-  card: { titleParams: ["region"], args: "none" },
-  parameters: schema(
-    {
-      image: { type: "string", description: "可选：PNG 图片路径（省略则现截全屏）" },
-      region: { type: "string", description: "可选：检测区域 'x,y,w,h'（像素）" },
-      conf: { type: "number", description: "可选：置信度阈值（默认 0.25）" },
-      iou: { type: "number", description: "可选：NMS IoU 阈值（默认 0.45；密集小控件/重叠元素场景调低至 0.1）" },
-      pair_text: { type: "boolean", description: "可选：检测框与 OCR 文本配对输出「类别+文本」（默认 true；纯检测提速可关）" },
-    },
-    [],
-  ),
-  async execute(args, ctx): Promise<ToolResult> {
-    desktopGate(ctx)
-    const loaded = await loadAnalysisSource(ctx, screenLoader, String(args.image ?? "").trim(), String(args.region ?? "").trim())
-    if ("error" in loaded) return { output: loaded.error }
-    const conf = Number(args.conf)
-    const iou = Number(args.iou)
-    let outcome: { objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; backend: string }
-    try {
-      outcome = await getCvRunner().detect(loaded.img, {
-        env: ctx.env,
-        conf: Number.isFinite(conf) && conf > 0 && conf < 1 ? conf : 0.25,
-        iou: Number.isFinite(iou) && iou > 0 && iou < 1 ? iou : undefined,
-      })
-    } catch (e) {
-      return { output: `目标检测失败: ${e instanceof Error ? e.message : e}` }
-    }
-    // 检测框 × OCR 行配对（配对在图像像素系进行，再统一加偏移）：检测只给组件类别，
-    // 配对文本补齐「哪一个按钮/输入框」的语义（完整屏幕解析的本地拼装）
-    let pairedTexts: Array<string | undefined> = outcome.objects.map(() => undefined)
-    if (args.pair_text !== false && outcome.objects.length) {
-      try {
-        const lines = (await getCvRunner().ocr(loaded.img, { env: ctx.env })).lines
-        pairedTexts = pairObjectsWithText(outcome.objects, lines.map((l) => ({ text: l.text, ...l.box }))).map((o) => o.text)
-      } catch { /* OCR 模型未配置等——跳过配对，仅输出检测框 */ }
-    }
-    const objects = outcome.objects.map((o, i) => ({
-      label: o.label,
-      score: o.score,
-      x: Math.round(o.x + loaded.offX),
-      y: Math.round(o.y + loaded.offY),
-      w: Math.round(o.w),
-      h: Math.round(o.h),
-      text: pairedTexts[i],
-    }))
-    if (!objects.length) {
-      return {
-        output: `未检测到目标对象（${loaded.sourceDesc}）。可尝试降低 conf 阈值，或确认模型/标签与场景匹配。`,
-        data: { objects, backend: outcome.backend },
-      }
-    }
-    const body = objects
-      .map((o) => {
-        const cx = Math.round(o.x + o.w / 2)
-        const cy = Math.round(o.y + o.h / 2)
-        return `${o.label}  [${o.x},${o.y},${o.w},${o.h}] → 中心 (${cx},${cy})  置信度 ${o.score.toFixed(2)}${o.text ? `  文本: ${o.text}` : ""}`
-      })
-      .join("\n")
-    return {
-      output: `检测到 ${objects.length} 个对象（${loaded.sourceDesc}，坐标相对其原点；后端 ${outcome.backend}）：\n${body}`,
-      data: { source: loaded.sourceDesc, backend: outcome.backend, objects },
     }
   },
 }

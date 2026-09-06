@@ -13,7 +13,6 @@ import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, Choice
 import { ToolRegistry as BaseToolRegistry } from "../base/registry"
 import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
 import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
-import { makeVisionTool, getVisionProvider } from "../tools/vision"
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
 import { SessionRunRegistry, type SessionRunHandle } from "../session/session-runs"
@@ -91,7 +90,7 @@ const LLM_RETRY_COUNT = 2
 const LLM_RETRY_BACKOFF_MS = 800
 /** 上下文压缩阈值：窗口的 80%（DESIGN「常量参考」）。 */
 const COMPACT_RATIO = 0.8
-/** 附件图片内联上限（与 vision 工具一致）：超出不内联，降级为文本说明。 */
+/** 附件图片内联上限（与 vision 子代理 analyze 一致）：超出不内联，降级为文本说明。 */
 const ATTACHMENT_INLINE_LIMIT = VISION_MAX_IMAGE_BYTES
 /** 历史图片内联窗口：仅最近 N 条含图片的用户消息内联进上下文，更早的降级为文本说明
  *  （图片永久占据上下文且不受压缩保护，长会话会被历史图片占死窗口）。 */
@@ -108,15 +107,15 @@ function attachmentSizeText(n: number): string {
   return `${n}B`
 }
 
-/** 附件文本说明（模型可见：路径/MIME/大小；图片另附 vision 工具指引）。 */
+/** 附件文本说明（模型可见：路径/MIME/大小；图片另附视觉子代理指引）。 */
 function attachmentNote(ref: { name: string; path: string; mime: string; size: number }, isImage: boolean): string {
-  const vision = isImage ? "。如需查看图片内容，请调用 vision 工具（image 参数传该路径）" : ""
+  const vision = isImage ? "。如需查看图片内容，请调用 vision_analyze（vision 子代理，装载 vision 后 image 参数传该路径）" : ""
   return `[用户附件${isImage ? "图片" : "文件"}: ${ref.name}（${ref.mime}，${attachmentSizeText(ref.size)}，会话路径 ${ref.path}）${vision}]`
 }
 
 /** 工具结果图片块降级文本（read 等读取的图片未内联时：接口拒绝图片/溢出护栏降级）。 */
 function toolImageNote(b: { path?: unknown; name?: unknown; mime?: unknown }): string {
-  return `[图片文件 ${String(b.name ?? b.path ?? "")}（${String(b.mime ?? "")}）未内联：模型接口不支持图片内容。可用 vision 工具查看（image 参数传 ${String(b.path ?? "")}）]`
+  return `[图片文件 ${String(b.name ?? b.path ?? "")}（${String(b.mime ?? "")}）未内联：模型接口不支持图片内容。可用 vision_analyze 查看（vision 子代理，image 参数传 ${String(b.path ?? "")}）]`
 }
 
 /** 粗略估算消息 token 数（CJK 感知，见 store.estimateCharsTokens）。
@@ -1056,8 +1055,8 @@ export class AgentEngine {
    * 用户消息附件 → LLM 内容块（DESIGN「多模态支持」）：
    * - 图片附件且主模型声明多模态能力且 ≤8MB：base64 内联为统一 `image` 块（携带 path/name/size
    *   元数据，供接口拒绝图片时自动降级还原为文本说明）
-   * - 其余（非图片/超限/文件缺失/模型无多模态能力）：文本说明（路径 + MIME + 大小 + vision 工具指引），
-   *   由模型决定用 vision（外挂视觉模型）/read 等工具处理
+   * - 其余（非图片/超限/文件缺失/模型无多模态能力）：文本说明（路径 + MIME + 大小 + 视觉子代理指引），
+   *   由模型决定用 vision 子代理（vision_analyze）/read 等工具处理
    */
   private async userAttachmentBlocks(sessionId: string, user: string, prompt: string, refs: AttachmentRef[], inlineImages = this.opts.provider.capabilities().multimodal): Promise<Array<Record<string, unknown>>> {
     const blocks: Array<Record<string, unknown>> = [{ type: "text", text: prompt }]
@@ -1258,7 +1257,7 @@ export class AgentEngine {
       home: this.opts.config.gebaiHome,
       env,
       sandboxed: sandbox.enforcedFor(user),
-      // 任务级主模型多模态能力：read 等工具据此决定图片文件的处理形态（多模态=内联，非多模态=vision 指引）
+      // 任务级主模型多模态能力：read 等工具据此决定图片文件的处理形态（多模态=内联，非多模态=视觉子代理指引）
       multimodal: opts?.multimodal,
       // 任务取消信号：js 脚本工具等监听中止并终止子进程（sh/py 经 runCommand 默认注入 execSignal）
       signal,
@@ -1599,7 +1598,7 @@ export class AgentEngine {
         // 配置类错误（模型接口地址未配置）：重试无意义，直接失败并保留指引文案
         if (err instanceof LLMConfigError) throw err
         // 图片块被接口拒绝（HTTP 4xx，如模型实际不支持 image_url）：一次性降级为文本说明后重试，
-        // 模型可改走 vision 工具（外挂视觉模型路径），实现「无多模态能力自动降级」
+        // 模型可改走 vision 子代理（vision_analyze 外挂视觉模型路径），实现「无多模态能力自动降级」
         if (
           !text && !toolCalls.length && !reasoningSeen && !degraded &&
           /^模型接口错误（HTTP 4\d\d）/.test((err as Error).message) &&
@@ -2211,9 +2210,9 @@ export class AgentEngine {
         if (reg.resolve(tool.name)) continue
         reg.register(tool)
       }
-      // vision 同为全局工具但不在 createGlobalTools 内（vision→tools 的 truncate 依赖会成环，注册在 index.ts）：
-      // 新会话继承全局工具时一并注册，与主注册表同源同款（裁剪排除/已注册跳过同规则）
-      if (!isGlobalToolExcluded("vision") && !reg.resolve("vision")) reg.register(makeVisionTool({ vision: getVisionProvider }))
+      // 视觉能力不在全局工具表（全局 vision 工具已移除，统一经 vision 子代理）：需要视觉的预加载名单
+      // 经 dependencies 声明连带装载（如 self_optimize→vision），未声明的子Agent 新会话确需视觉时
+      // 由模型经 agent_load 装载 vision（主会话路由自愈同款机制）
     }
 
     // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；

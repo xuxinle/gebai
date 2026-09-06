@@ -1661,12 +1661,12 @@ console.log("defined ok")`,
     const loaded = await s.store.load(session.id)
     const um = loaded!.messages.find((m) => m.role === "user")!
     expect(um.attachments?.[0]).toMatchObject({ name: "shot.png", mime: "image/png", path: "tmp/shot.png", size: 9 })
-    // 非多模态主模型：模型收到的用户消息为文本说明（路径 + MIME + vision 工具指引）
+    // 非多模态主模型：模型收到的用户消息为文本说明（路径 + MIME + 视觉子代理指引）
     const userMsg = s.provider.seenChats[0]!.find((m) => m.role === "user")!
     const texts = (userMsg.content as Array<Record<string, unknown>>).map((b) => String((b as { text?: string }).text ?? ""))
     expect(texts[0]).toBe("look at this")
     expect(texts[1]).toContain("[用户附件图片: shot.png（image/png，9B，会话路径 tmp/shot.png）")
-    expect(texts[1]).toContain("vision 工具")
+    expect(texts[1]).toContain("vision_analyze")
     cleanup(s.home)
   })
 
@@ -1739,7 +1739,7 @@ console.log("defined ok")`,
     await s.engine.run(session.id, "default", "看图")
     const toolMsg = s.provider.seenChats[1]!.find((m) => m.role === "tool")!
     expect(typeof toolMsg.content).toBe("string")
-    expect(toolMsg.content).toContain("vision 工具")
+    expect(toolMsg.content).toContain("vision_analyze")
     cleanup(s.home)
   })
 
@@ -1790,7 +1790,7 @@ console.log("defined ok")`,
     expect((first.content as Array<Record<string, unknown>>).some((b) => b.type === "image")).toBe(true)
     const retry = s.provider.seenChats[1]!.find((m) => m.role === "user")!
     expect((retry.content as Array<Record<string, unknown>>).some((b) => b.type === "image")).toBe(false)
-    expect((retry.content as Array<Record<string, unknown>>).some((b) => b.type === "text" && String(b.text).includes("vision 工具"))).toBe(true)
+    expect((retry.content as Array<Record<string, unknown>>).some((b) => b.type === "text" && String(b.text).includes("vision_analyze"))).toBe(true)
     const loaded = await s.store.load(session.id)
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "hello from fake")).toBe(true)
     cleanup(s.home)
@@ -3159,7 +3159,7 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("agent_run 预加载 self_optimize 连带预载 code（工具与提示词复用）+ 写范围守卫生效", async () => {
+  test("agent_run 预加载 self_optimize 连带预载 code 与 vision（工具与提示词复用）+ 写范围守卫生效", async () => {
     // 环境隔离：selfModifyEnabled 直读 process.env，宿主 .env 配置 GEBAI_SELF_MODIFY=true 会整体放开写
     // 范围守卫——本测试验证默认只读路径。清空必须置空串而非 delete：config 的 .env 注入只跳过非 undefined
     // 键（delete 后 setup() 会从 .env 回填 true），而 selfModifyEnabled 仅认 "true"/"1"（空串=关闭）
@@ -3174,17 +3174,20 @@ describe("context compaction", () => {
       const session = await s.store.createSession("default", "t")
       await s.store.setEnv(session.id, "default", { SELF_OPTIMIZE_PROJECT: repo, GEBAI_APPROVAL_SKIP: "true" })
       await s.engine.run(session.id, "default", "optimize gebai")
-      // 新会话系统消息：连带预载 code（两段职责提示词都在，通用工作流来自 code）
+      // 新会话系统消息：连带预载 code 与 vision（三段职责提示词都在，通用工作流来自 code）
       const sys = String(s.provider.seenChats[1][0].content)
-      expect(sys).toContain("已预加载子Agent: code, self_optimize")
+      expect(sys).toContain("已预加载子Agent: code, vision, self_optimize")
       expect(sys).toContain("### code（")
       expect(sys).toContain("源码分析与修改专家")
+      expect(sys).toContain("### vision（")
+      expect(sys).toContain("视觉分析助手")
       expect(sys).toContain("### self_optimize（")
       expect(sys).toContain("自我优化专家")
-      // 新会话工具集：继承的全局工具（read/write）+ code_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
+      // 新会话工具集：继承的全局工具（read/write）+ code_*/vision_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
       expect(s.provider.seenTools[1]).toContain("read")
       expect(s.provider.seenTools[1]).toContain("write")
       expect(s.provider.seenTools[1]).toContain("code_search_symbols")
+      expect(s.provider.seenTools[1]).toContain("vision_analyze")
       expect(s.provider.seenTools[1]).toContain("self_optimize_run_tests")
       expect(s.provider.seenTools[1]).not.toContain("self_optimize_write")
       expect(s.provider.seenTools[1]).not.toContain("code_read")
