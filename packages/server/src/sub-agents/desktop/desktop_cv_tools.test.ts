@@ -175,9 +175,10 @@ function installDefaultFake(): void {
 beforeAll(() => installDefaultFake())
 
 describe("detect 工具描述契约", () => {
-  test("覆盖元数据自适应 / 分层后端 / iou / pair_text / 定位纪律", () => {
+  test("覆盖元数据自适应 / 分层后端 / iou / pair_text / 定位纪律 / drop-in 约定", () => {
     const d = detectTool.description ?? ""
     expect(d).toContain("GEBAI_CV_DETECT_MODEL")
+    expect(d).toContain("models/detect") // 约定目录 drop-in 自动发现
     expect(d).toContain("ultralytics") // 导出 ONNX 即插即用（元数据自适应）
     expect(d).toContain("GEBAI_CV_DETECT_BACKEND") // 分层后端入口
     expect(d).toContain("sidecar")

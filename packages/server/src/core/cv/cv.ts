@@ -7,9 +7,9 @@
  * 元数据自适应，见 onnx-meta.ts）。测试注入点：setCvRunnerFactory 整体替身
  * （desktop 工具测试）/ setCvOrtLoader ort 层替身。
  */
-import { existsSync, readFileSync, statSync } from "node:fs"
-import { join } from "node:path"
-import { isBinaryMode } from "../base/config"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { basename, join } from "node:path"
+import { isBinaryMode, resolveGebaiHome } from "../base/config"
 import { cropImage, type RgbaImage } from "./image"
 import { ctcDecode, dbPostprocess, detPreprocess, recPreprocess, type OcrLine } from "./ocr"
 import { letterbox, yoloPostprocess, type DetectObject } from "./detect"
@@ -28,9 +28,10 @@ const MODEL_DIR_GUIDE =
   " packages/server/assets/cv-models/；单二进制形态需构建时内嵌（scripts/build-cv-embed.ts）"
 
 const DETECT_MODEL_GUIDE =
-  "目标检测未配置：需设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径）。模型不随构建内嵌，请自备" +
-  "（ultralytics YOLO 导出的 ONNX 自动读取内嵌 imgsz/names 元数据——免标签文件与尺寸配置；" +
-  "其他来源需设 GEBAI_CV_DETECT_LABELS，每行一个类别）"
+  "目标检测未配置：设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径），或把模型放入 " +
+  "{GEBAI_HOME}/models/detect/（唯一 .onnx 自动生效——资源仓库整体放入 models/ 即零配置可用）。" +
+  "模型不随构建内嵌，请自备（ultralytics YOLO 导出的 ONNX 自动读取内嵌 imgsz/names 元数据——" +
+  "免标签文件与尺寸配置；其他来源需设 GEBAI_CV_DETECT_LABELS，每行一个类别）"
 
 export interface DetectOutcome {
   objects: DetectObject[]
@@ -148,6 +149,38 @@ function ocrStateFor(env: Record<string, string>): Promise<OcrState> {
 
 /* ---------------- 检测配置（模型路径 / 标签 / 输入尺寸） ---------------- */
 
+/** 检测模型约定发现目录（drop-in 即用）：{GEBAI_HOME}/models/detect/。 */
+let detectDirOverride: string | false | undefined
+/** 测试注入：false = 视为不存在（保证「未配置→指引」用例确定性，防本机真模型干扰）。 */
+export function setCvDetectDirForTests(dir: string | false | undefined): void {
+  detectDirOverride = dir
+}
+
+function discoverDetectModel(): { path: string } | { multiple: string[] } | null {
+  let dir: string | null
+  if (detectDirOverride === false) return null
+  if (detectDirOverride !== undefined) dir = detectDirOverride
+  else {
+    try {
+      dir = join(resolveGebaiHome(), "models", "detect")
+    } catch {
+      return null
+    }
+  }
+  let onnx: string[]
+  try {
+    onnx = readdirSync(dir)
+      .filter((f) => f.toLowerCase().endsWith(".onnx"))
+      .sort()
+      .map((f) => join(dir!, f))
+  } catch {
+    return null
+  }
+  if (onnx.length === 1) return { path: onnx[0] }
+  if (onnx.length > 1) return { multiple: onnx }
+  return null
+}
+
 interface DetectConfig {
   modelPath: string
   labels: string[]
@@ -159,7 +192,20 @@ interface DetectConfig {
 const detectConfigs = new Map<string, Promise<DetectConfig>>()
 
 function detectConfigFor(env: Record<string, string>): Promise<DetectConfig> {
-  const modelPath = String(env.GEBAI_CV_DETECT_MODEL ?? "").trim()
+  let modelPath = String(env.GEBAI_CV_DETECT_MODEL ?? "").trim()
+  if (!modelPath) {
+    // 约定目录自动发现（env 显式指定优先）：models/detect/ 唯一 .onnx 即生效，多个列出候选
+    const found = discoverDetectModel()
+    if (found && "multiple" in found) {
+      return Promise.reject(
+        new Error(
+          `models/detect/ 下有 ${found.multiple.length} 个 ONNX 检测模型，无法自动选择：` +
+            `${found.multiple.map((p) => basename(p)).join("、")}。设置 GEBAI_CV_DETECT_MODEL 指定其一，或目录内只保留一个 .onnx`,
+        ),
+      )
+    }
+    if (found) modelPath = found.path
+  }
   if (!modelPath) return Promise.reject(new Error(DETECT_MODEL_GUIDE))
   if (!existsSync(modelPath)) return Promise.reject(new Error(`目标检测模型文件不存在: ${modelPath}`))
   const labelsPath = String(env.GEBAI_CV_DETECT_LABELS ?? "").trim()
