@@ -238,7 +238,7 @@ function num2(v: unknown, dflt: number): number {
 export const detectTool: Tool = {
   name: "detect",
   description:
-    "本地目标检测（自备 YOLO ONNX 模型，GEBAI_CV_DETECT_MODEL 指定；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）——组件类别不含语义，找特定文字按钮仍以 desktop_locate 为主，本工具适合结构感知与无文字元素定位。推理分层：GPU sidecar（GEBAI_CV_DETECT_BACKEND，Windows DirectML/任意 DX12 显卡、CUDA、macOS CoreML）不可用时自动回落 wasm CPU。image 省略则现截全屏；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
+    "本地目标检测（自备 YOLO ONNX 模型：GEBAI_CV_DETECT_MODEL 指定，或放入 {GEBAI_HOME}/models/detect/ 唯一 .onnx 自动生效；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）——组件类别不含语义，找特定文字按钮仍以 desktop_locate 为主，本工具适合结构感知与无文字元素定位。推理分层：GPU sidecar（GEBAI_CV_DETECT_BACKEND，Windows DirectML/任意 DX12 显卡、CUDA、macOS CoreML）不可用时自动回落 wasm CPU。image 省略则现截全屏；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
   card: { titleParams: ["region"], args: "none" },
   parameters: schema(
     {

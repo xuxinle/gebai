@@ -2,7 +2,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { getCvRunner, setCvDevAssetsDirForTests, setCvOrtLoader, setCvRunnerFactory } from "./cv"
+import { getCvRunner, setCvDetectDirForTests, setCvDevAssetsDirForTests, setCvOrtLoader, setCvRunnerFactory } from "./cv"
 import { resetCvSidecarForTests, setCvSidecarFactoryForTests, type CvSidecar } from "./sidecar"
 import type { OrtModule, OrtSession, OrtTensorLike } from "./ort-loader"
 import type { RgbaImage } from "./image"
@@ -71,6 +71,8 @@ beforeAll(() => {
   setCvOrtLoader(() => Promise.resolve({ ort, assetsDir: null }))
   // 屏蔽 dev 资产目录回退（本机可能已下载真模型），保证「未配置→指引」用例确定性
   setCvDevAssetsDirForTests(false)
+  // 屏蔽检测模型约定目录发现（本机 models/detect 可能有真模型），自动发现用例内按需指向临时目录
+  setCvDetectDirForTests(false)
   // sidecar 恒不可用（分层后端用例内按需注入替身）——保证缺省走 wasm 路径的确定性
   setCvSidecarFactoryForTests(() => null)
 })
@@ -78,6 +80,7 @@ beforeAll(() => {
 afterAll(() => {
   setCvOrtLoader(null)
   setCvDevAssetsDirForTests(undefined)
+  setCvDetectDirForTests(undefined)
   setCvRunnerFactory(null)
   resetCvSidecarForTests()
 })
@@ -315,33 +318,104 @@ describe("detect 分层后端（sidecar ↔ wasm）", () => {
   })
 })
 
-describe("detect 模型元数据自适应（ultralytics ONNX）", () => {
-  /** 微型 ONNX 编码：field 14 metadata_props（imgsz/names）。 */
-  function metaModel(entries: string[]): Buffer {
-    const varint = (v: number): number[] => {
-      const out: number[] = []
-      let n = v
-      for (;;) {
-        const b = n & 0x7f
-        n = Math.floor(n / 128)
-        out.push(n > 0 ? b | 0x80 : b)
-        if (n === 0) return out
-      }
+/** 微型 ONNX 编码：field 14 metadata_props（imgsz/names）——元数据与自动发现用例共用。 */
+function metaModel(entries: string[]): Buffer {
+  const varint = (v: number): number[] => {
+    const out: number[] = []
+    let n = v
+    for (;;) {
+      const b = n & 0x7f
+      n = Math.floor(n / 128)
+      out.push(n > 0 ? b | 0x80 : b)
+      if (n === 0) return out
     }
-    const ld = (field: number, payload: number[]): number[] => [...varint((field << 3) | 2), ...varint(payload.length), ...payload]
-    const str = (s: string): number[] => Array.from(new TextEncoder().encode(s))
-    const entry = (k: string, v: string): number[] => ld(14, [...ld(1, str(k)), ...ld(2, str(v))])
-    const parts: number[][] = [ld(7, new Array(64).fill(1))]
-    for (let i = 0; i + 1 < entries.length; i += 2) parts.push(entry(entries[i], entries[i + 1]))
-    const total = parts.reduce((n, p) => n + p.length, 0)
-    const out = new Uint8Array(total)
-    let off = 0
-    for (const p of parts) {
-      out.set(p, off)
-      off += p.length
-    }
-    return Buffer.from(out)
   }
+  const ld = (field: number, payload: number[]): number[] => [...varint((field << 3) | 2), ...varint(payload.length), ...payload]
+  const str = (s: string): number[] => Array.from(new TextEncoder().encode(s))
+  const entry = (k: string, v: string): number[] => ld(14, [...ld(1, str(k)), ...ld(2, str(v))])
+  const parts: number[][] = [ld(7, new Array(64).fill(1))]
+  for (let i = 0; i + 1 < entries.length; i += 2) parts.push(entry(entries[i], entries[i + 1]))
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return Buffer.from(out)
+}
+
+describe("detect 模型约定目录自动发现（models/detect drop-in 即用）", () => {
+  test("目录内唯一 .onnx 自动生效（免 GEBAI_CV_DETECT_MODEL）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-disc-"))
+    writeFileSync(join(dir, "a.onnx"), metaModel(["imgsz", "[640, 640]", "names", '{"0":"btn"}']))
+    setCvDetectDirForTests(dir)
+    const n = 8
+    const out = new Float32Array(5 * n)
+    out[0 * n] = 320
+    out[1 * n] = 320
+    out[2 * n] = 640
+    out[3 * n] = 640
+    out[4 * n] = 0.9
+    detectOut = { data: out, dims: [1, 5, n] }
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 }) // env 完全为空
+      expect(r.objects.length).toBe(1)
+      expect(r.objects[0].label).toBe("btn") // 标签亦来自元数据——全链路零配置
+    } finally {
+      detectOut = null
+      setCvDetectDirForTests(false)
+    }
+  })
+
+  test("多个 .onnx → 列出候选要求显式指定", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-disc2-"))
+    writeFileSync(join(dir, "a.onnx"), metaModel(["names", '{"0":"a"}']))
+    writeFileSync(join(dir, "b.onnx"), metaModel(["names", '{"0":"b"}']))
+    setCvDetectDirForTests(dir)
+    try {
+      await expect(getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 })).rejects.toThrow(/a\.onnx、b\.onnx/)
+    } finally {
+      setCvDetectDirForTests(false)
+    }
+  })
+
+  test("GEBAI_CV_DETECT_MODEL 显式指定优先于约定目录", async () => {
+    const discDir = mkdtempSync(join(tmpdir(), "gebai-cv-disc3-"))
+    writeFileSync(join(discDir, "auto.onnx"), metaModel(["names", '{"0":"auto"}']))
+    const explicitDir = mkdtempSync(join(tmpdir(), "gebai-cv-disc4-"))
+    writeFileSync(join(explicitDir, "explicit.onnx"), metaModel(["names", '{"0":"explicit"}']))
+    setCvDetectDirForTests(discDir)
+    const n = 8
+    const out = new Float32Array(5 * n)
+    out[4 * n] = 0.9
+    out[2 * n] = 640
+    out[3 * n] = 640
+    detectOut = { data: out, dims: [1, 5, n] }
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), {
+        env: { GEBAI_CV_DETECT_MODEL: join(explicitDir, "explicit.onnx") },
+        conf: 0.25,
+      })
+      expect(r.objects[0].label).toBe("explicit")
+    } finally {
+      detectOut = null
+      setCvDetectDirForTests(false)
+    }
+  })
+
+  test("目录不存在 / 为空 → 仍走未配置指引", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-disc5-"))
+    setCvDetectDirForTests(dir) // 空目录
+    try {
+      await expect(getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 })).rejects.toThrow(/GEBAI_CV_DETECT_MODEL/)
+    } finally {
+      setCvDetectDirForTests(false)
+    }
+  })
+})
+
+describe("detect 模型元数据自适应（ultralytics ONNX）", () => {
 
   test("无标签文件时 names/imgsz 元数据驱动类别与输入尺寸（960 letterbox）", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-cv-meta-"))
