@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { getCvRunner, setCvDevAssetsDirForTests, setCvOrtLoader, setCvRunnerFactory } from "./cv"
+import { resetCvSidecarForTests, setCvSidecarFactoryForTests, type CvSidecar } from "./sidecar"
 import type { OrtModule, OrtSession, OrtTensorLike } from "./ort-loader"
 import type { RgbaImage } from "./image"
 
@@ -70,17 +71,20 @@ beforeAll(() => {
   setCvOrtLoader(() => Promise.resolve({ ort, assetsDir: null }))
   // 屏蔽 dev 资产目录回退（本机可能已下载真模型），保证「未配置→指引」用例确定性
   setCvDevAssetsDirForTests(false)
+  // sidecar 恒不可用（分层后端用例内按需注入替身）——保证缺省走 wasm 路径的确定性
+  setCvSidecarFactoryForTests(() => null)
 })
 
 afterAll(() => {
   setCvOrtLoader(null)
   setCvDevAssetsDirForTests(undefined)
   setCvRunnerFactory(null)
+  resetCvSidecarForTests()
 })
 
 describe("cv runner 注入", () => {
   test("setCvRunnerFactory 替身优先", () => {
-    const fake = { ocr: async () => [], detect: async () => [] }
+    const fake = { ocr: async () => [], detect: async () => ({ objects: [], backend: "wasm-cpu" }) }
     setCvRunnerFactory(() => fake)
     expect(getCvRunner()).toBe(fake)
     setCvRunnerFactory(null)
@@ -129,6 +133,14 @@ describe("real runner（假 ort 层）", () => {
     await expect(getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 })).rejects.toThrow(/GEBAI_CV_DETECT_MODEL/)
   })
 
+  test("detect 类别未配置（无标签文件且模型无元数据）→ 指引", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-nolabel-"))
+    writeFileSync(join(dir, "model.onnx"), Buffer.from([9]))
+    await expect(
+      getCvRunner().detect(solid(64, 64), { env: { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx") }, conf: 0.25 }),
+    ).rejects.toThrow(/GEBAI_CV_DETECT_LABELS/)
+  })
+
   test("detect 全链路：v8 形态输出 → 标签与坐标还原", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-cv-det-"))
     writeFileSync(join(dir, "model.onnx"), Buffer.from([9]))
@@ -143,17 +155,249 @@ describe("real runner（假 ort 层）", () => {
     out[(4 + 1) * n] = 0.9
     detectOut = { data: out, dims: [1, 6, n] }
     try {
-      const objs = await getCvRunner().detect(solid(64, 64), {
+      const r = await getCvRunner().detect(solid(64, 64), {
         env: { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx"), GEBAI_CV_DETECT_LABELS: join(dir, "labels.txt") },
         conf: 0.25,
       })
-      expect(objs.length).toBe(1)
-      expect(objs[0].label).toBe("icon")
-      expect(objs[0].score).toBeCloseTo(0.9, 5)
-      expect(objs[0].x).toBeCloseTo(27, 4)
-      expect(objs[0].y).toBeCloseTo(17.5, 4)
-      expect(objs[0].w).toBeCloseTo(10, 4)
-      expect(objs[0].h).toBeCloseTo(5, 4)
+      expect(r.backend).toBe("wasm-cpu")
+      expect(r.objects.length).toBe(1)
+      expect(r.objects[0].label).toBe("icon")
+      expect(r.objects[0].score).toBeCloseTo(0.9, 5)
+      expect(r.objects[0].x).toBeCloseTo(27, 4)
+      expect(r.objects[0].y).toBeCloseTo(17.5, 4)
+      expect(r.objects[0].w).toBeCloseTo(10, 4)
+      expect(r.objects[0].h).toBeCloseTo(5, 4)
+    } finally {
+      detectOut = null
+    }
+  })
+
+  test("detect iou 透传：调低后中等重叠同类框被 NMS 抑制", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-det-iou-"))
+    writeFileSync(join(dir, "model.onnx"), Buffer.from([9]))
+    writeFileSync(join(dir, "labels.txt"), "btn\n")
+    const n = 8
+    const out = new Float32Array(5 * n)
+    const env = { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx"), GEBAI_CV_DETECT_LABELS: join(dir, "labels.txt") }
+    // scale=1 无 padding：框 [0,0,64,64] 与 [0,32,64,64]，IoU ≈ 0.333
+    out[0 * n] = 32
+    out[1 * n] = 32
+    out[2 * n] = 64
+    out[3 * n] = 64
+    out[4 * n] = 0.9
+    out[0 * n + 1] = 32
+    out[1 * n + 1] = 64
+    out[2 * n + 1] = 64
+    out[3 * n + 1] = 64
+    out[4 * n + 1] = 0.8
+    detectOut = { data: out, dims: [1, 5, n] }
+    try {
+      const keep = await getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })
+      const suppress = await getCvRunner().detect(solid(64, 64), { env, conf: 0.25, iou: 0.1 })
+      expect(keep.objects.length).toBe(2)
+      expect(suppress.objects.length).toBe(1)
+    } finally {
+      detectOut = null
+    }
+  })
+})
+
+describe("detect 分层后端（sidecar ↔ wasm）", () => {
+  const modelEnv = (dir: string) => {
+    writeFileSync(join(dir, "model.onnx"), Buffer.from([9]))
+    writeFileSync(join(dir, "labels.txt"), "btn\nicon\n")
+    return { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx"), GEBAI_CV_DETECT_LABELS: join(dir, "labels.txt") }
+  }
+
+  /** sidecar 替身（仅 detectRun 语义）。 */
+  const fakeSidecar = (impl: () => Promise<{ ep: string; dims: number[]; data: Float32Array }>) =>
+    ({ detectRun: impl }) as unknown as CvSidecar
+
+  test("sidecar 可用即优先：backend 如实上报实际 EP", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-sc-"))
+    const env = modelEnv(dir)
+    const n = 8
+    const out = new Float32Array(6 * n)
+    out[0 * n] = 320
+    out[1 * n] = 200
+    out[2 * n] = 100
+    out[3 * n] = 50
+    out[(4 + 1) * n] = 0.9
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async () => ({ ep: "dml", dims: [1, 6, n], data: out })),
+    )
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })
+      expect(r.backend).toBe("sidecar:dml")
+      expect(r.objects.length).toBe(1)
+      expect(r.objects[0].label).toBe("icon") // 后处理与 wasm 同一条路径（输出张量同一解码）
+    } finally {
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+
+  test("auto：sidecar 失败回落 wasm 且毒化（后续调用不再走 sidecar）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-sc2-"))
+    const env = modelEnv(dir)
+    const n = 8
+    const out = new Float32Array(6 * n)
+    // 整图框：cx=320,cy=320,w=640,h=640 → 原图 (0,0,64,64)
+    out[0 * n] = 320
+    out[1 * n] = 320
+    out[2 * n] = 640
+    out[3 * n] = 640
+    out[4 * n] = 0.9
+    detectOut = { data: out, dims: [1, 6, n] }
+    let sidecarCalls = 0
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async () => {
+        sidecarCalls++
+        throw new Error("驱动崩溃")
+      }),
+    )
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })
+      expect(r.backend).toBe("wasm-cpu")
+      expect(r.objects.length).toBe(1) // box [0,0,64,64]（letterbox 全幅）
+      const again = await getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })
+      expect(again.backend).toBe("wasm-cpu")
+      expect(sidecarCalls).toBe(1) // 毒化后不再重试 sidecar
+    } finally {
+      detectOut = null
+      resetCvSidecarForTests()
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+
+  test("显式 sidecar：失败不回落，错误如实上抛", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-sc3-"))
+    const env = { ...modelEnv(dir), GEBAI_CV_DETECT_BACKEND: "sidecar" }
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async () => {
+        throw new Error("GPU 内存不足")
+      }),
+    )
+    try {
+      await expect(getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })).rejects.toThrow(/不回落/)
+    } finally {
+      resetCvSidecarForTests()
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+
+  test("显式 sidecar 但 sidecar 不可用 → 引导错误（不回落）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-sc4-"))
+    const env = { ...modelEnv(dir), GEBAI_CV_DETECT_BACKEND: "sidecar" }
+    await expect(getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })).rejects.toThrow(/GEBAI_CV_ORT_NODE_DIR/)
+  })
+
+  test("显式 wasm：忽略可用 sidecar，直接进程内推理", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-sc5-"))
+    const env = { ...modelEnv(dir), GEBAI_CV_DETECT_BACKEND: "wasm" }
+    const n = 8
+    detectOut = { data: new Float32Array(6 * n), dims: [1, 6, n] }
+    let sidecarCalls = 0
+    setCvSidecarFactoryForTests(() =>
+      fakeSidecar(async () => {
+        sidecarCalls++
+        return { ep: "dml", dims: [1, 6, n], data: new Float32Array(6 * n) }
+      }),
+    )
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), { env, conf: 0.25 })
+      expect(r.backend).toBe("wasm-cpu")
+      expect(sidecarCalls).toBe(0)
+    } finally {
+      detectOut = null
+      resetCvSidecarForTests()
+      setCvSidecarFactoryForTests(() => null)
+    }
+  })
+})
+
+describe("detect 模型元数据自适应（ultralytics ONNX）", () => {
+  /** 微型 ONNX 编码：field 14 metadata_props（imgsz/names）。 */
+  function metaModel(entries: string[]): Buffer {
+    const varint = (v: number): number[] => {
+      const out: number[] = []
+      let n = v
+      for (;;) {
+        const b = n & 0x7f
+        n = Math.floor(n / 128)
+        out.push(n > 0 ? b | 0x80 : b)
+        if (n === 0) return out
+      }
+    }
+    const ld = (field: number, payload: number[]): number[] => [...varint((field << 3) | 2), ...varint(payload.length), ...payload]
+    const str = (s: string): number[] => Array.from(new TextEncoder().encode(s))
+    const entry = (k: string, v: string): number[] => ld(14, [...ld(1, str(k)), ...ld(2, str(v))])
+    const parts: number[][] = [ld(7, new Array(64).fill(1))]
+    for (let i = 0; i + 1 < entries.length; i += 2) parts.push(entry(entries[i], entries[i + 1]))
+    const total = parts.reduce((n, p) => n + p.length, 0)
+    const out = new Uint8Array(total)
+    let off = 0
+    for (const p of parts) {
+      out.set(p, off)
+      off += p.length
+    }
+    return Buffer.from(out)
+  }
+
+  test("无标签文件时 names/imgsz 元数据驱动类别与输入尺寸（960 letterbox）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-meta-"))
+    writeFileSync(
+      join(dir, "model.onnx"),
+      metaModel(["imgsz", "[960, 960]", "names", '{"0":"button","1":"icon"}']),
+    )
+    const n = 8
+    const out = new Float32Array(6 * n)
+    // letterbox 960：64x64 图 → scale 15 全幅无 padding；cx=480,cy=300,w=150,h=75 → 原图 (27,17.5,10,5)
+    out[0 * n] = 480
+    out[1 * n] = 300
+    out[2 * n] = 150
+    out[3 * n] = 75
+    out[(4 + 1) * n] = 0.9
+    detectOut = { data: out, dims: [1, 6, n] }
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), {
+        env: { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx") }, // 不设 LABELS——走 names 元数据
+        conf: 0.25,
+      })
+      expect(r.objects.length).toBe(1)
+      expect(r.objects[0].label).toBe("icon")
+      expect(r.objects[0].x).toBeCloseTo(27, 4)
+      expect(r.objects[0].y).toBeCloseTo(17.5, 4)
+      expect(r.objects[0].w).toBeCloseTo(10, 4)
+      expect(r.objects[0].h).toBeCloseTo(5, 4)
+    } finally {
+      detectOut = null
+    }
+  })
+
+  test("GEBAI_CV_DETECT_SIZE 覆盖元数据尺寸；GEBAI_CV_DETECT_LABELS 覆盖元数据类别", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-meta2-"))
+    writeFileSync(join(dir, "model.onnx"), metaModel(["imgsz", "[960, 960]", "names", '{"0":"meta_a","1":"meta_b"}']))
+    writeFileSync(join(dir, "labels.txt"), "file_a\nfile_b\n")
+    const n = 8
+    const out = new Float32Array(6 * n)
+    out[0 * n] = 320
+    out[1 * n] = 200
+    out[2 * n] = 100
+    out[3 * n] = 50
+    out[(4 + 1) * n] = 0.9
+    detectOut = { data: out, dims: [1, 6, n] }
+    try {
+      // SIZE=640：scale 10 → cx=320,cy=200,w=100,h=50 → 原图 (27,17.5,10,5)（960 元数据被覆盖）
+      const r = await getCvRunner().detect(solid(64, 64), {
+        env: {
+          GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx"),
+          GEBAI_CV_DETECT_LABELS: join(dir, "labels.txt"),
+          GEBAI_CV_DETECT_SIZE: "640",
+        },
+        conf: 0.25,
+      })
+      expect(r.objects[0].label).toBe("file_b")
+      expect(r.objects[0].x).toBeCloseTo(27, 4)
     } finally {
       detectOut = null
     }

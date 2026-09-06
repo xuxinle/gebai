@@ -1,7 +1,8 @@
 /**
- * YOLO（ONNX 导出）前后处理纯函数：letterbox 前处理（等比缩放 + 居中填充）与
- * NMS 后处理。兼容 v8 系输出 [1, C, N]（框坐标 + 逐类得分，无 obj）与 v5 系输出
- * [1, N, 5+C]（x,y,w,h,obj + 逐类得分）两种形态，按形状自动识别。
+ * YOLO（ONNX 导出）前后处理纯函数：letterbox 前处理（等比缩放 + 居中填充，尺寸可配——
+ * ultralytics 导出元数据自适应）与 NMS 后处理（IoU 阈值可配）。兼容 v8 系输出 [1, C, N]
+ * （框坐标 + 逐类得分，无 obj）与 v5 系输出 [1, N, 5+C]（x,y,w,h,obj + 逐类得分）两种形态，
+ * 按形状自动识别。另含检测框×OCR 行配对（结构化「组件类型 + 文本」输出）。
  */
 import { type Box, type RgbaImage, resizeBilinear, rgbaToCHW } from "./image"
 
@@ -47,13 +48,14 @@ export function letterbox(
 /**
  * YOLO 后处理：output 展平数组，dims 为模型输出形状 [1, a, b]。
  * v8 系 [1, 4+nc, N]（列为主序）；v5 系 [1, N, 5+nc]（行为主序，含 obj 分支）。
- * 返回坐标已还原到原图像素系的检测结果（按得分降序）。
+ * 返回坐标已还原到原图像素系的检测结果（按得分降序）；iou 为 NMS 阈值（缺省 0.45，
+ * 密集小控件场景可调低至 0.1）。
  */
 export function yoloPostprocess(
   output: Float32Array,
   dims: readonly number[],
   labels: string[],
-  params: { srcW: number; srcH: number; scale: number; padX: number; padY: number; conf: number },
+  params: { srcW: number; srcH: number; scale: number; padX: number; padY: number; conf: number; iou?: number },
 ): DetectObject[] {
   const [a, b] = [dims[1] ?? 0, dims[2] ?? 0]
   if (a < 1 || b < 1) throw new Error(`YOLO 输出形状非法: [${dims.join(",")}]`)
@@ -108,13 +110,14 @@ export function yoloPostprocess(
     candidates.push({ box: { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }, label: labels[bestCls] ?? `class_${bestCls}`, score: bestScore })
   }
   candidates.sort((p, q) => q.score - p.score)
-  // 按类别分组 NMS（同类重叠去重，跨类保留）
+  // 按类别分组 NMS（同类重叠去重，跨类保留）；iou 阈值可配（密集 UI 控件场景调低）
+  const nmsIou = params.iou ?? NMS_IOU
   const out: DetectObject[] = []
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i]
     let suppressed = false
     for (const kept of out) {
-      if (kept.label === c.label && iou(kept, c.box) > NMS_IOU) {
+      if (kept.label === c.label && iou(kept, c.box) > nmsIou) {
         suppressed = true
         break
       }
@@ -122,6 +125,32 @@ export function yoloPostprocess(
     if (!suppressed) out.push({ ...c, ...c.box })
   }
   return out
+}
+
+/** 检测框×OCR 行配对的文本行输入（OcrLine 结构子集）。 */
+export interface PairedTextLine extends Box {
+  text: string
+}
+
+/**
+ * 检测框与 OCR 行几何配对（同一像素系下）：行中心落在检测框内即归属该框，
+ * 多行按阅读序（y 后 x）以空格拼接为框文本——检测器只给组件类别（Button/Icon…），
+ * 配对后输出「类型 + 文本」的结构化元素表（完整屏幕解析的本地拼装：检测器 + OCR 两件基建）。
+ * 未命中任何行的框原样返回（无 text 字段）。
+ */
+export function pairObjectsWithText<T extends Box>(objects: T[], lines: PairedTextLine[]): Array<T & { text?: string }> {
+  const sorted = [...lines].sort((a, b) => a.y - b.y || a.x - b.x)
+  return objects.map((o) => {
+    const texts = sorted
+      .filter((l) => {
+        const cx = l.x + l.w / 2
+        const cy = l.y + l.h / 2
+        return cx >= o.x && cx <= o.x + o.w && cy >= o.y && cy <= o.y + o.h
+      })
+      .map((l) => l.text.trim())
+      .filter(Boolean)
+    return texts.length ? { ...o, text: texts.join(" ") } : o
+  })
 }
 
 /** IoU（两轴对齐框交并比）。 */

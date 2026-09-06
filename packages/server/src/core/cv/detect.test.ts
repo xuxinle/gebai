@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { DETECT_SIZE, letterbox, yoloPostprocess } from "./detect"
+import { DETECT_SIZE, letterbox, pairObjectsWithText, yoloPostprocess } from "./detect"
 import type { RgbaImage } from "./image"
 
 function solidImage(w: number, h: number, fill: [number, number, number]): RgbaImage {
@@ -97,6 +97,43 @@ describe("yoloPostprocess", () => {
   test("类别数超过标签行数报错", () => {
     const out = new Float32Array(6 * N)
     expect(() => yoloPostprocess(out, [1, 6, N], ["only-one"], params)).toThrow(/标签文件/)
+  })
+
+  test("iou 阈值可配：调低后中等重叠同类框被抑制（密集 UI 场景）", () => {
+    const out = new Float32Array(6 * N)
+    const set = (i: number, cx: number, cy: number, w: number, h: number, s: number) => {
+      out[0 * N + i] = cx
+      out[1 * N + i] = cy
+      out[2 * N + i] = w
+      out[3 * N + i] = h
+      out[(4 + 0) * N + i] = s
+    }
+    // scale=1 无 padding：框 A [0,0,100,50]、框 B [0,25,100,50]（中心 cy=50），IoU = 2500/7500 ≈ 0.333
+    const plain = { srcW: 100, srcH: 100, scale: 1, padX: 0, padY: 0, conf: 0.25 }
+    set(0, 50, 25, 100, 50, 0.9)
+    set(1, 50, 50, 100, 50, 0.8)
+    expect(yoloPostprocess(out, [1, 6, N], labels, plain).length).toBe(2) // 缺省 0.45：0.333 不抑制
+    expect(yoloPostprocess(out, [1, 6, N], labels, { ...plain, iou: 0.1 }).length).toBe(1) // 0.1：抑制
+  })
+})
+
+describe("pairObjectsWithText", () => {
+  test("行中心落在框内即归属，多行按阅读序（y 后 x）拼接", () => {
+    const objects = [{ x: 0, y: 0, w: 100, h: 50, label: "button" }]
+    const lines = [
+      { text: "右", x: 60, y: 10, w: 20, h: 10 }, // 中心 (70,15) 在框内
+      { text: "左", x: 10, y: 10, w: 20, h: 10 }, // 中心 (20,15) 在框内，x 更小应排前
+      { text: "外", x: 10, y: 80, w: 20, h: 10 }, // 中心 y=85 越界
+    ]
+    const paired = pairObjectsWithText(objects, lines)
+    expect(paired[0].text).toBe("左 右")
+  })
+
+  test("无命中行的框不带 text 字段；空行列表原样返回", () => {
+    const objects = [{ x: 0, y: 0, w: 10, h: 10 }]
+    expect(pairObjectsWithText(objects, [])[0]).not.toHaveProperty("text")
+    const far = [{ text: "远", x: 500, y: 500, w: 10, h: 10 }]
+    expect(pairObjectsWithText(objects, far)[0]).not.toHaveProperty("text")
   })
 })
 

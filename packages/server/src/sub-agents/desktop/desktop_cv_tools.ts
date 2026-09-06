@@ -8,6 +8,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { getCvRunner } from "../../core/cv/cv"
+import { pairObjectsWithText } from "../../core/cv/detect"
 import { decodePng, type RgbaImage } from "../../core/cv/image"
 import { createCvAnalysisTools, loadAnalysisSource, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
 import { parseRegion, schema } from "../../core/tools/shared"
@@ -237,48 +238,68 @@ function num2(v: unknown, dflt: number): number {
 export const detectTool: Tool = {
   name: "detect",
   description:
-    "本地目标检测（自备 YOLO ONNX 模型，GEBAI_CV_DETECT_MODEL / GEBAI_CV_DETECT_LABELS 环境变量指定；模型不随构建内嵌，COCO 预训练类别对 UI 无意义，需自训练图标/控件模型）。返回检测对象标签与像素坐标。image 省略则现截全屏；conf 置信度阈值（默认 0.25）。",
+    "本地目标检测（自备 YOLO ONNX 模型，GEBAI_CV_DETECT_MODEL 指定；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）——组件类别不含语义，找特定文字按钮仍以 desktop_locate 为主，本工具适合结构感知与无文字元素定位。推理分层：GPU sidecar（GEBAI_CV_DETECT_BACKEND，Windows DirectML/任意 DX12 显卡、CUDA、macOS CoreML）不可用时自动回落 wasm CPU。image 省略则现截全屏；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
   card: { titleParams: ["region"], args: "none" },
-  parameters: schema({
-    image: { type: "string", description: "可选：PNG 图片路径（省略则现截全屏）" },
-    region: { type: "string", description: "可选：检测区域 'x,y,w,h'（像素）" },
-    conf: { type: "number", description: "可选：置信度阈值（默认 0.25）" },
-  }),
+  parameters: schema(
+    {
+      image: { type: "string", description: "可选：PNG 图片路径（省略则现截全屏）" },
+      region: { type: "string", description: "可选：检测区域 'x,y,w,h'（像素）" },
+      conf: { type: "number", description: "可选：置信度阈值（默认 0.25）" },
+      iou: { type: "number", description: "可选：NMS IoU 阈值（默认 0.45；密集小控件/重叠元素场景调低至 0.1）" },
+      pair_text: { type: "boolean", description: "可选：检测框与 OCR 文本配对输出「类别+文本」（默认 true；纯检测提速可关）" },
+    },
+    [],
+  ),
   async execute(args, ctx): Promise<ToolResult> {
     desktopGate(ctx)
     const loaded = await loadAnalysisSource(ctx, screenLoader, String(args.image ?? "").trim(), String(args.region ?? "").trim())
     if ("error" in loaded) return { output: loaded.error }
     const conf = Number(args.conf)
-    let objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>
+    const iou = Number(args.iou)
+    let outcome: { objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; backend: string }
     try {
-      const raw = await getCvRunner().detect(loaded.img, {
+      outcome = await getCvRunner().detect(loaded.img, {
         env: ctx.env,
         conf: Number.isFinite(conf) && conf > 0 && conf < 1 ? conf : 0.25,
+        iou: Number.isFinite(iou) && iou > 0 && iou < 1 ? iou : undefined,
       })
-      objects = raw.map((o) => ({
-        label: o.label,
-        score: o.score,
-        x: Math.round(o.x + loaded.offX),
-        y: Math.round(o.y + loaded.offY),
-        w: Math.round(o.w),
-        h: Math.round(o.h),
-      }))
     } catch (e) {
       return { output: `目标检测失败: ${e instanceof Error ? e.message : e}` }
     }
+    // 检测框 × OCR 行配对（配对在图像像素系进行，再统一加偏移）：检测只给组件类别，
+    // 配对文本补齐「哪一个按钮/输入框」的语义（完整屏幕解析的本地拼装）
+    let pairedTexts: Array<string | undefined> = outcome.objects.map(() => undefined)
+    if (args.pair_text !== false && outcome.objects.length) {
+      try {
+        const lines = await getCvRunner().ocr(loaded.img, { env: ctx.env })
+        pairedTexts = pairObjectsWithText(outcome.objects, lines.map((l) => ({ text: l.text, ...l.box }))).map((o) => o.text)
+      } catch { /* OCR 模型未配置等——跳过配对，仅输出检测框 */ }
+    }
+    const objects = outcome.objects.map((o, i) => ({
+      label: o.label,
+      score: o.score,
+      x: Math.round(o.x + loaded.offX),
+      y: Math.round(o.y + loaded.offY),
+      w: Math.round(o.w),
+      h: Math.round(o.h),
+      text: pairedTexts[i],
+    }))
     if (!objects.length) {
-      return { output: `未检测到目标对象（${loaded.sourceDesc}）。可尝试降低 conf 阈值，或确认模型/标签与场景匹配。`, data: { objects } }
+      return {
+        output: `未检测到目标对象（${loaded.sourceDesc}）。可尝试降低 conf 阈值，或确认模型/标签与场景匹配。`,
+        data: { objects, backend: outcome.backend },
+      }
     }
     const body = objects
       .map((o) => {
         const cx = Math.round(o.x + o.w / 2)
         const cy = Math.round(o.y + o.h / 2)
-        return `${o.label}  [${o.x},${o.y},${o.w},${o.h}] → 中心 (${cx},${cy})  置信度 ${o.score.toFixed(2)}`
+        return `${o.label}  [${o.x},${o.y},${o.w},${o.h}] → 中心 (${cx},${cy})  置信度 ${o.score.toFixed(2)}${o.text ? `  文本: ${o.text}` : ""}`
       })
       .join("\n")
     return {
-      output: `检测到 ${objects.length} 个对象（${loaded.sourceDesc}，坐标相对其原点）：\n${body}`,
-      data: { source: loaded.sourceDesc, objects },
+      output: `检测到 ${objects.length} 个对象（${loaded.sourceDesc}，坐标相对其原点；后端 ${outcome.backend}）：\n${body}`,
+      data: { source: loaded.sourceDesc, backend: outcome.backend, objects },
     }
   },
 }

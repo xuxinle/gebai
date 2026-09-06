@@ -58,6 +58,7 @@ run(bin, ["run", join(serverDir, "scripts", "build-tools.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-d2js.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-analyzer-wasm.ts")])
 run(bin, ["run", join(serverDir, "scripts", "build-driver-embed.ts")])
+run(bin, ["run", join(serverDir, "scripts", "build-cvdriver-embed.ts")])
 
 // 3) 单文件编译（与 desktop server:build 同参数：--external @terrastruct/d2 为动态依赖，show 未排除时亦可运行时装载）
 const outfile = join(serverDir, "dist", process.platform === "win32" ? "gebai-code.exe" : "gebai-code")

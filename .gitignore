@@ -72,3 +72,7 @@ packages/desktop/launcher/target/
 
 # bun lockfile（不提交，bun install 时本地生成）
 bun.lock
+packages/server/src/core/cv/cvdriver.embedded.generated.json
+
+# 资源子仓库（模型/原生依赖，独立 git 仓库管理——见 models/README.md）
+/models/
