@@ -127,6 +127,7 @@ export class CvSidecar {
   private stderrTail = ""
   private starting: Promise<void> | null = null
   private sessions = new Map<string, { sessionId: number; ep: string }>()
+  private exitHookInstalled = false
 
   constructor(opts: { spawn?: SidecarSpawn; driverPath?: string; ortNodeDir?: string | null; requestTimeoutMs?: number } = {}) {
     this.opts = {
@@ -215,6 +216,16 @@ export class CvSidecar {
     this.initialized = false
     this.stderrTail = ""
     this.stdin = proc.stdin
+    // 父进程退出时杀子进程：process.exit 不保证关闭 stdio 管道（驱动侧 stdin EOF 兜底
+    // 因此失效），一次性脚本/异常退出会留下孤儿 node 进程（实测 ~600MB/个持 GPU 会话）
+    if (!this.exitHookInstalled) {
+      this.exitHookInstalled = true
+      process.on("exit", () => {
+        try {
+          this.proc?.kill()
+        } catch { /* 已退出 */ }
+      })
+    }
     const procLocal = proc
     let buf = Buffer.alloc(0)
     let frame: { header: { id: number; result: unknown; outBytes: number }; parts: Buffer[] } | null = null
