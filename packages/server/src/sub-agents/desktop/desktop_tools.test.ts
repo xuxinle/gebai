@@ -630,13 +630,14 @@ describe("desktop definition", () => {
     expect(p).toContain("clipboard_write")
   })
 
-  test("systemPrompt 覆盖检测分层后端与配对语义（detect 条目）", () => {
+  test("systemPrompt 覆盖检测定位纪律（detect 条目）；模型/后端细节归工具描述（不重复）", () => {
     const p = desktopDef.systemPrompt
-    expect(p).toContain("ultralytics YOLO ONNX") // 即插即用（元数据自适应）
-    expect(p).toContain("自动读模型元数据")
-    expect(p).toContain("sidecar") // GPU 分层后端
+    expect(p).toContain("YOLO") // 自备模型定位（ultralytics/元数据/sidecar 细节归 detect 工具描述）
     expect(p).toContain("配对 OCR 文本") // 检测×OCR 配对输出
     expect(p).toContain("desktop_locate 为主") // 定位纪律：检测给类型不给语义
+    // 提示词不复述工具 schema 细节
+    expect(p).not.toContain("ultralytics")
+    expect(p).not.toContain("自动读模型元数据")
   })
 
   test("preload off and tools registered (独有工具 only——编排用全局 agent_run，不复刻)", () => {

@@ -47,9 +47,9 @@ export function createPlaywrightCvTools(deps: { bridge?: BridgeLike } = {}): Too
     pngOnlyTail: "，或直接省略 image 截取当前页面",
     wording: {
       descriptions: {
-        ocr: "本地 OCR 识别当前页面/图片文字（PP-OCR 中英文小模型，离线运行、快、带精确视口坐标、不耗模型配额）。image 省略则截取当前页面（视口）；region 限定区域（'x,y,w,h'）；find 关键词过滤。canvas/WebGL 渲染文字、图片化文字/验证码等 DOM 读不到的内容用本工具（普通文本优先 content）；需整页时先 screenshot full_page 再传 image。",
+        ocr: "本地 OCR 识别当前页面/图片文字（PP-OCR 中英文小模型，离线运行、快、带精确视口坐标、不耗模型配额）。image 省略则截取当前页面（视口）；region 限定区域（'x,y,w,h'）；find 关键词过滤。canvas/WebGL 渲染文字、图片化文字/验证码等 DOM 读不到的内容用本工具；需整页时先 screenshot full_page 再传 image。",
         locate: "在页面截图/图片中定位目标文字的精确像素坐标（本地 OCR——canvas 等无 DOM 文本、选择器够不到时的兜底）。target 为要找的文字；返回最佳匹配的中心坐标（视口像素系）与全部候选。image 省略则截取当前页面（视口）；region 限定搜索区域。",
-        locateImage: "在页面截图/图片中按模板定位图标/图形元素（本地模板匹配，零训练——验证图标/logo 是否真实渲染等）。template 为模板 PNG 路径，或 template_region 从搜索图坐标内取模板区域；返回最佳匹配中心坐标（视口像素系）与候选。同尺寸匹配（模板需与目标显示尺寸一致——宜从同一页面环境截图裁剪），threshold 相似度阈值默认 0.8。image 省略则截取当前页面（视口）；region 限定搜索区域。",
+        locateImage: "在页面截图/图片中按模板定位图标/图形元素（本地模板匹配，零训练——验证图标/logo 是否真实渲染等）。template 为模板 PNG 路径，或 template_region 从搜索图坐标内取模板区域；返回最佳匹配中心坐标（视口像素系）与候选。同尺寸匹配（模板需与目标显示尺寸一致——宜从同一页面环境截图裁剪）。image 省略则截取当前页面（视口）；region 限定搜索区域。",
       },
       imageParam: {
         ocr: "可选：PNG 图片路径（相对会话工作目录，省略则截取当前页面）",
@@ -64,9 +64,9 @@ export function createPlaywrightCvTools(deps: { bridge?: BridgeLike } = {}): Too
       templateRegionParam: "可选：'x,y,w,h' 在搜索图坐标系内取模板区域（与 template 二选一；坐标系同 playwright_ocr 对同一 image/region 的输出）",
       clickHint: (cx, cy) => `可经 evaluate 用 document.elementFromPoint(${cx}, ${cy}) 定位元素后操作（坐标为视口像素）`,
       locateNotFound:
-        "1) 用 playwright_ocr 读取页面截图全部文字确认实际措辞；2) DOM 可达时优先 content/evaluate 按选择器或文本定位（更可靠）；3) 文字可能是图标/图形，改用 playwright_locate_image（模板匹配）或 vision 工具语义分析。",
+        "1) 用 playwright_ocr 读取页面截图全部文字确认实际措辞；2) DOM 可达时优先 content/evaluate 按选择器或文本定位（更可靠）；3) 文字可能是图标/图形，改用 playwright_locate_image（模板匹配）或装载 vision 子代理（vision_analyze）语义分析。",
       locateImageNotFound:
-        "2) 确认模板与目标同尺寸（本工具不做缩放匹配，模板宜从同一页面环境截图裁剪）；3) 目标可能是文字——改用 playwright_locate；4) 用 vision 工具对截图做语义分析。",
+        "2) 确认模板与目标同尺寸（本工具不做缩放匹配，模板宜从同一页面环境截图裁剪）；3) 目标可能是文字——改用 playwright_locate；4) 装载 vision 子代理（vision_analyze）对截图做语义分析。",
     },
   })
 }

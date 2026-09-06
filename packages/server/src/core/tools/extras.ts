@@ -18,7 +18,7 @@ export const pageCaptureTool: Tool = {
   // 仅实时前端可用（请求当前页面捕获并由前端回传），多轮交互/无交互模式禁用
   interaction: "realtime",
   description:
-    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 read 直接查看（主模型多模态时图片内联进上下文）或 vision 工具分析视觉效果。前端离线或 30 秒未响应时返回失败。",
+    "请求前端（当前浏览器页面）捕获实际渲染结果：读取渲染后的 DOM html 与页面截图，产物落盘会话 tmp/capture/。适合验证 Web UI 修改后的真实效果——页面即当前打开的 歌白界面（dev 模式修改后自动热更新，捕获前可提示用户刷新页面）；html 用 read 读取完整内容，截图用 read 直接查看（主模型多模态时图片内联进上下文）或 vision 子代理（vision_analyze）分析视觉效果。前端离线或 30 秒未响应时返回失败。",
   parameters: schema({
     full_page: { type: "boolean", description: "是否截整页（默认 false 截视口首屏；整页含全部滚动内容，大页面截图较慢）" },
     delay: { type: "number", description: "捕获前等待毫秒数（默认 0；UI 操作/动画/异步渲染完成后截图，上限 10000）" },
@@ -50,7 +50,7 @@ export const pageCaptureTool: Tool = {
       }
     }
     return {
-      output: `已捕获当前页面: ${htmlRel}（${cap.html.length} 字符，可用 read 读取完整内容）${imgRel ? `；截图 ${imgRel}（${ctx.multimodal ? "可用 read 直接查看（多模态内联）" : "可用 vision 工具分析图片内容"}）` : "；前端未返回截图"}`,
+      output: `已捕获当前页面: ${htmlRel}（${cap.html.length} 字符，可用 read 读取完整内容）${imgRel ? `；截图 ${imgRel}（${ctx.multimodal ? "可用 read 直接查看（多模态内联）" : "可用 vision_analyze 分析图片内容（vision 子代理）"}）` : "；前端未返回截图"}`,
       blocks,
     }
   },

@@ -486,12 +486,12 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("read image（非多模态）：返回 vision 指引说明，images 仍供引擎按能力决定内联", async () => {
+  test("read image（非多模态）：返回视觉子代理指引说明，images 仍供引擎按能力决定内联", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-img-nomm-"))
     const c = ctx(home)
     writeFileSync(c.resolvePath("shot.jpg"), new Uint8Array([0xff, 0xd8, 0xff, 1]))
     const r = await readTool.execute({ path: "shot.jpg" }, c)
-    expect(r.output).toContain("vision 工具")
+    expect(r.output).toContain("vision_analyze")
     expect(r.output).toContain("image/jpeg")
     expect(r.images).toHaveLength(1)
     // 不带行号/截断包装（说明文本直出）
@@ -1019,14 +1019,14 @@ describe("global tools", () => {
     expect(full.output).toContain("已捕获当前页面")
     expect(r.output).toContain("tmp/capture/page-")
     expect(r.output).toContain("可用 read 读取完整内容")
-    expect(r.output).toContain("可用 vision 工具分析图片内容")
-    // 多模态主模型：截图引导分流为 read 直读（图片内联），不再指 vision
+    expect(r.output).toContain("可用 vision_analyze 分析图片内容（vision 子代理）")
+    // 多模态主模型：截图引导分流为 read 直读（图片内联），不再指视觉子代理
     const cmm = ctx(home)
     cmm.multimodal = true
     cmm.waitForCapture = async () => ({ html, imageBase64: png })
     const rmm = await pageCaptureTool.execute({}, cmm)
     expect(rmm.output).toContain("可用 read 直接查看（多模态内联）")
-    expect(rmm.output).not.toContain("vision 工具")
+    expect(rmm.output).not.toContain("vision_analyze")
     // blocks：html 文件块 + image 截图块
     const htmlBlock = r.blocks!.find((b) => b.type === "file") as { path: string; name: string }
     const imgBlock = r.blocks!.find((b) => b.type === "image") as { path: string; mime: string }

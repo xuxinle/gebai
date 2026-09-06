@@ -143,8 +143,8 @@ export const readTool: Tool = {
     let content: string
     try {
       // 多模态图片读取（DESIGN「多模态支持」）：白名单图片（png/jpg/jpeg/gif/webp）不按文本解码（乱码无意义）——
-      // 二进制读入后经 ToolResult.images 交引擎内联进工具结果消息（主模型多模态时模型直接可见，无需 vision）；
-      // 非多模态（ctx.multimodal 未注入/为 false）返回说明 + vision 指引。encoding 显式指定时按文本解码（模型明确要原始字节内容）
+      // 二进制读入后经 ToolResult.images 交引擎内联进工具结果消息（主模型多模态时模型直接可见，无需视觉工具）；
+      // 非多模态（ctx.multimodal 未注入/为 false）返回说明 + 视觉子代理指引。encoding 显式指定时按文本解码（模型明确要原始字节内容）
       const ext = path.split(".").pop()?.toLowerCase() ?? ""
       const imageMime = VISION_IMAGE_MIME[ext]
       if (imageMime && !args.encoding) {
@@ -154,7 +154,7 @@ export const readTool: Tool = {
         return {
           output: ctx.multimodal
             ? `已读取图片文件 ${args.path}（${imageMime}，${size}）——图片已作为多模态内容附加在本结果中，可直接查看分析，无需调用其他工具。`
-            : `已读取图片文件 ${args.path}（${imageMime}，${size}）：当前主模型未声明多模态能力（GEBAI_LLM_MULTIMODAL），图片内容未注入上下文。如需查看图片内容，请调用 vision 工具（image 参数传该路径）。`,
+            : `已读取图片文件 ${args.path}（${imageMime}，${size}）：当前主模型未声明多模态能力（GEBAI_LLM_MULTIMODAL），图片内容未注入上下文。如需查看图片内容，请调用 vision_analyze（vision 子代理，装载 vision 后 image 参数传该路径）。`,
           images: [{ path, display: String(args.path), mime: imageMime, data: Buffer.from(buf).toString("base64") }],
           blocks: artifactBlocks(previewLogicalPath(path, ctx)),
         }

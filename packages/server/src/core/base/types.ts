@@ -7,7 +7,7 @@ export interface ToolResult {
   data?: unknown
   blocks?: ContentBlock[]
   /** 多模态图片（read 等工具读取图片文件，DESIGN「多模态支持」）：引擎在主模型声明多模态时内联进
-   *  工具结果消息（统一 image 块，模型直接可见）；非多模态不内联（output 文本自带 vision 指引）。
+   *  工具结果消息（统一 image 块，模型直接可见）；非多模态不内联（output 文本自带视觉子代理指引）。
    *  轻量引用随工具消息落盘（Message.images），历史重建按需重读；不进事件推送与 UI 块（UI 走 blocks）。 */
   images?: ToolResultImage[]
   truncated?: boolean
@@ -75,7 +75,7 @@ export type ToolContext = {
    *  可选：测试桩/无引擎环境不注入时不做分支门控（保持全通道行为）。 */
   interactionMode?: InteractionMode
   /** 当前任务主模型的多模态能力（引擎按任务 Provider 注入）：read 等工具据此决定图片文件的处理形态
-   *  （多模态=内联进上下文，非多模态=返回说明 + vision 工具指引）。可选：测试桩/无引擎环境未注入时按 false。 */
+   *  （多模态=内联进上下文，非多模态=返回说明 + 视觉子代理指引）。可选：测试桩/无引擎环境未注入时按 false。 */
   multimodal?: boolean
   resolvePath: (p: string) => string
   readFile: (p: string) => Promise<string>

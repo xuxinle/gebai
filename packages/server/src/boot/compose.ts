@@ -8,7 +8,7 @@ import type { ServerWebSocket } from "bun"
 import { loadConfig } from "../core/base/config"
 import { SessionStore } from "../core/session/store"
 import { ToolRegistry } from "../core/base/registry"
-import { createGlobalTools, isGlobalToolExcluded } from "../core/tools"
+import { createGlobalTools } from "../core/tools"
 import { Sandbox } from "../core/security/sandbox"
 import { EnvManager, applyEmbeddedEnvDefaults, cleanupLegacyUserEnv } from "../core/session/env"
 import { EMBEDDED_ENV_DEFAULTS } from "../core/session/env-embedded.generated"
@@ -20,7 +20,7 @@ import { AgentEngine } from "../core/engine/engine"
 import { WebhookManager } from "../webhooks"
 import { createExternalAuthProvider } from "../external-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
-import { makeVisionTool, setVisionProviderGetter, getVisionProvider } from "../core/tools/vision"
+import { setVisionProviderGetter } from "../core/tools/vision"
 import { scheduleGC } from "../core/session/gc"
 import { CronManager } from "../core/schedule/cron"
 import { isFeishuChatId, validateNotifyChannel } from "../core/schedule/notify"
@@ -91,8 +91,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   }
   const provider = createProvider(mainConfig)
 
-  // 额外多模态（视觉）模型：GEBAI_VISION_MODEL 配置后启用独立视觉 Provider（vision 工具使用），
-  // 接口地址/密钥/类型缺省时继承主模型配置；未配置时 vision 工具回落到主模型（须声明多模态能力）
+  // 额外多模态（视觉）模型：GEBAI_VISION_MODEL 配置后启用独立视觉 Provider（vision 子代理 analyze 使用），
+  // 接口地址/密钥/类型缺省时继承主模型配置；未配置时回落到主模型（须声明多模态能力）
   const visionConfig: ProviderConfig | null = process.env.GEBAI_VISION_MODEL
     ? {
         apiKind: (process.env.GEBAI_VISION_API_KIND as ApiKind) || apiKind,
@@ -108,11 +108,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 安全模式：子Agent 工具按 Tool.safeMode 自主声明过滤（全局风险工具内置降级，不过滤）
   const registry = new ToolRegistry({ safeMode: config.safeMode })
   for (const tool of Object.values(createGlobalTools())) registry.register(tool)
-  // 视觉 provider 提供者注册（子Agent 定义如 self_optimize 的 vision 工具经 getVisionProvider 复用同一解析逻辑）；
-  // 任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider
+  // 视觉 provider 提供者注册（视觉能力统一经 vision 子代理——其 def 的 analyze 工具经 getVisionProvider
+  // 复用同一解析逻辑）；任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider。
+  // 全局 vision 工具已移除（架构决策：视觉相关统一走子代理，主会话需视觉时 agent_load 装载或路由自愈，见 DESIGN「视觉工具 vision」）
   setVisionProviderGetter((env) => resolveVisionProvider(mainConfig, visionConfig, env))
-  // 构建期排除清单（GEBAI_BUILD_EXCLUDE_TOOLS）同规则生效（与全局工具表一致：不注册不暴露）
-  if (!isGlobalToolExcluded("vision")) registry.register(makeVisionTool({ vision: getVisionProvider }))
   registry.enableSet(config.toolEnable, config.toolDisable)
 
   // 沙箱 auto 判定（DESIGN「GEBAI_SANDBOX」）：只看运行形态，不判定监听 IP——

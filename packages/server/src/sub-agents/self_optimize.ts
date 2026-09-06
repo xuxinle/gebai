@@ -13,7 +13,7 @@ export const systemPrompt =
   "3) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 目录（packages/server/src/sub-agents/）与仓库级文档/配置（DESIGN.md/AGENTS.md/.env.example/README.md/kilo.json），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；写仓库文件一律用 write/edit/patch 文件工具（写范围守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（守卫不拦脚本通道，绕行属违规且绕开防盲写保护）；新建/修改子Agent 文件后立即验证注册（agent_run 试跑或 agent_list 查看——注册失败会直接返回文件加载错误原因，据因修复后再验）；\n" +
   "4) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；**产物纯净**：写出的代码/子Agent 提示词/文档只描述当前完整的能力与限制，不留历史痕迹——不写「何时发现/修复了什么问题」「为何改成现在这样」等变更缘由（缘由归 git 提交说明与 self_optimize_journal，历史有专门载体、不进产物），代码注释同理只述当前约束；遇到既有历史注记（时间/问题描述/修复记录）顺手清除；\n" +
   "5) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
-  "6) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision 分析截图，确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
+  "6) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision_analyze 分析截图（vision 子代理已连带装载；读图文字用 vision_ocr），确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
   "7) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal 记录本次优化（title/changes/verification/outcome/lessons——优化历史跨会话沉淀）；本次解决了待优化项的，self_optimize_backlog action=resolve ids=[编号] 一并移除；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
   "项目名称：歌白（GEBAI Agent）。项目范围：项目根以系统提示词动态注记「项目根:」为准——设置了 SELF_OPTIMIZE_PROJECT 环境变量时即该路径（服务端部署限定项目内，本地模式不限制目录）；未设置时脚本调试（dev）模式自动推导为歌白源码仓库根（与 run_tests/rollback 工作目录及写范围守卫同源，提示词注记给出具体路径）；二进制模式未配置且无注记时按用户给定的路径处理。"
 
@@ -318,9 +318,10 @@ function schema(properties: Record<string, unknown>, required: string[] = []): i
 
 /**
  * 工具集只含自优化专属工具（工具与提示词均不复刻 code，亦不复刻全局工具）：
- * 装载/预加载 self_optimize 时系统连带装载 code——文件读写查询为全局工具（直接全局名），
+ * 装载/预加载 self_optimize 时系统连带装载 code 与 vision——文件读写查询为全局工具（直接全局名），
  * 分析/验证类工具由 code 提供（code_ 前缀），通用编码工作流遵循 code 提示词；
- * 视觉分析（vision）为全局工具（index.ts 注册，agent_run 新会话随全局工具继承），直接用全局名；
+ * 视觉能力由 vision 子代理提供（vision_analyze 语义分析截图等，vision_ocr 读图）——依赖声明
+ * 复用（agent_run 新会话即使不继承全局工具也有视觉能力）；
  * 本 Agent 只声明自优化专属能力与写范围守卫。
  */
 export const tools = {
@@ -345,9 +346,10 @@ export const def: SubAgentDef = {
   preload,
   envVars,
   writeGuard,
-  // 依赖自动装载（DESIGN「子Agent 依赖与自动装载」）：装载/预加载 self_optimize 时系统连带装载 code——
-  // 文件/分析类工具直接用 code_* 命名空间，通用编码工作流提示词由 code 提供，不重复定义
-  dependencies: ["code"],
+  // 依赖自动装载（DESIGN「子Agent 依赖与自动装载」）：装载/预加载 self_optimize 时系统连带装载
+  // code 与 vision——文件/分析类工具直接用 code_* 命名空间，通用编码工作流提示词由 code 提供，
+  // 不重复定义；视觉能力用 vision_*（截图语义分析/读图——新会话不继承全局工具时仍可用）
+  dependencies: ["code", "vision"],
   // 默认项目根兜底（{AGENT}_PROJECT 未配置时）：dev 模式自动推导歌白仓库根——提示词「项目根」注记、
   // agent_run 新会话工作目录与项目 AGENTS.md 注入随绑定生效（二进制模式无兜底，须显式配置）
   projectRoot: (env) => selfOptimizeRoot(env) ?? undefined,
