@@ -2,7 +2,10 @@
  * 本地 CV 推理入口（core/cv）：惰性共享单例——ort 模块加载、模型目录解析（环境变量
  * GEBAI_CV_MODELS_DIR → 二进制物化目录 → 源码形态 assets/cv-models）、session 缓存
  * （模型文件路径+大小键控）与全进程推理串行（wasm CPU 推理互斥，防同批扇出并发争抢）。
- * 测试注入点：setCvRunnerFactory 整体替身（desktop 工具测试）/ setCvOrtLoader ort 层替身。
+ * 检测（detect）另走分层后端：GPU sidecar（node + onnxruntime-node，见 sidecar.ts）→
+ * wasm 进程内兜底（GEBAI_CV_DETECT_BACKEND 控制；标签/输入尺寸支持 ultralytics ONNX
+ * 元数据自适应，见 onnx-meta.ts）。测试注入点：setCvRunnerFactory 整体替身
+ * （desktop 工具测试）/ setCvOrtLoader ort 层替身。
  */
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
@@ -10,6 +13,8 @@ import { isBinaryMode } from "../base/config"
 import { cropImage, type RgbaImage } from "./image"
 import { ctcDecode, dbPostprocess, detPreprocess, recPreprocess, type OcrLine } from "./ocr"
 import { letterbox, yoloPostprocess, type DetectObject } from "./detect"
+import { parseOnnxMetadata, ultralyticsMeta } from "./onnx-meta"
+import { cvSidecarClient, poisonCvSidecar } from "./sidecar"
 import { loadOrtModule, type OrtModule, type OrtSession } from "./ort-loader"
 
 /** OCR 模型三件套（模型目录内固定文件名）。 */
@@ -22,11 +27,23 @@ const MODEL_DIR_GUIDE =
   "（PP-OCR 中英文 det/rec ONNX 与字典）的目录；源码形态可运行 scripts/build-cv-embed.ts 下载到" +
   " packages/server/assets/cv-models/；单二进制形态需构建时内嵌（scripts/build-cv-embed.ts）"
 
+const DETECT_MODEL_GUIDE =
+  "目标检测未配置：需设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径）。模型不随构建内嵌，请自备" +
+  "（ultralytics YOLO 导出的 ONNX 自动读取内嵌 imgsz/names 元数据——免标签文件与尺寸配置；" +
+  "其他来源需设 GEBAI_CV_DETECT_LABELS，每行一个类别）"
+
+export interface DetectOutcome {
+  objects: DetectObject[]
+  /** 实际推理后端：sidecar:dml/cuda/coreml/cpu（node 原生，GPU 优先）或 wasm-cpu（含回落注记）。 */
+  backend: string
+}
+
 export interface CvRunner {
   /** OCR：返回文本行（box 坐标相对传入图像的像素系）。 */
   ocr(img: RgbaImage, opts?: { maxSide?: number; env?: Record<string, string> }): Promise<OcrLine[]>
-  /** YOLO 检测：modelPath/labelsPath 来自环境变量（GEBAI_CV_DETECT_MODEL / GEBAI_CV_DETECT_LABELS）。 */
-  detect(img: RgbaImage, opts: { env: Record<string, string>; conf: number }): Promise<DetectObject[]>
+  /** YOLO 检测：modelPath/labels 来自环境变量（GEBAI_CV_DETECT_MODEL；标签/尺寸可从 ONNX 元数据自适应）；
+   *  iou 为 NMS 阈值（缺省 0.45，密集 UI 控件可调低）。 */
+  detect(img: RgbaImage, opts: { env: Record<string, string>; conf: number; iou?: number }): Promise<DetectOutcome>
 }
 
 /* ---------------- 测试注入 ---------------- */
@@ -129,6 +146,54 @@ function ocrStateFor(env: Record<string, string>): Promise<OcrState> {
   })
 }
 
+/* ---------------- 检测配置（模型路径 / 标签 / 输入尺寸） ---------------- */
+
+interface DetectConfig {
+  modelPath: string
+  labels: string[]
+  /** letterbox 目标边长（环境变量 GEBAI_CV_DETECT_SIZE > ONNX 元数据 imgsz > 640）。 */
+  size: number
+  labelsFromMeta: boolean
+}
+
+const detectConfigs = new Map<string, Promise<DetectConfig>>()
+
+function detectConfigFor(env: Record<string, string>): Promise<DetectConfig> {
+  const modelPath = String(env.GEBAI_CV_DETECT_MODEL ?? "").trim()
+  if (!modelPath) return Promise.reject(new Error(DETECT_MODEL_GUIDE))
+  if (!existsSync(modelPath)) return Promise.reject(new Error(`目标检测模型文件不存在: ${modelPath}`))
+  const labelsPath = String(env.GEBAI_CV_DETECT_LABELS ?? "").trim()
+  const envSize = Number(env.GEBAI_CV_DETECT_SIZE)
+  const sizeOverride = Number.isFinite(envSize) && envSize >= 320 && envSize <= 4096 ? Math.round(envSize) : 0
+  const key = `${modelPath}:${statSync(modelPath).size}:${labelsPath}:${sizeOverride}`
+  const cached = detectConfigs.get(key)
+  if (cached) return cached
+  const cfg = (async (): Promise<DetectConfig> => {
+    // 元数据从模型字节直接解析（与推理后端无关，wasm/sidecar 同一口径）
+    const meta = ultralyticsMeta(parseOnnxMetadata(new Uint8Array(readFileSync(modelPath))))
+    let labels: string[] | null = null
+    let labelsFromMeta = false
+    if (labelsPath) {
+      const list = readFileSync(labelsPath, "utf8").split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+      if (list.length) labels = list
+    }
+    if (!labels && meta.names) {
+      labels = meta.names
+      labelsFromMeta = true
+    }
+    if (!labels) {
+      throw new Error(
+        `目标检测类别未配置：设置 GEBAI_CV_DETECT_LABELS（标签文件，每行一个类别），` +
+          `或改用 ultralytics 导出的 ONNX（内嵌 names 元数据自动读取）: ${modelPath}`,
+      )
+    }
+    return { modelPath, labels, size: sizeOverride || meta.imgsz || 640, labelsFromMeta }
+  })()
+  detectConfigs.set(key, cfg)
+  cfg.catch(() => detectConfigs.delete(key))
+  return cfg
+}
+
 /* ---------------- 真实 runner ---------------- */
 
 const realRunner: CvRunner = {
@@ -170,32 +235,66 @@ const realRunner: CvRunner = {
   },
 
   async detect(img, opts) {
-    const modelPath = String(opts.env.GEBAI_CV_DETECT_MODEL ?? "").trim()
-    const labelsPath = String(opts.env.GEBAI_CV_DETECT_LABELS ?? "").trim()
-    if (!modelPath || !labelsPath) {
-      throw new Error(
-        "目标检测未配置：需设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径）与 GEBAI_CV_DETECT_LABELS" +
-          "（标签文件路径，每行一个类别）。模型不随构建内嵌，请自备训练好的模型（COCO 预训练类别对 UI 操作无意义）",
-      )
+    const cfg = await detectConfigFor(opts.env)
+    const pre = letterbox(img, cfg.size)
+    const backendEnv = String(opts.env.GEBAI_CV_DETECT_BACKEND ?? "").trim().toLowerCase()
+    const mode = backendEnv === "sidecar" || backendEnv === "wasm" ? backendEnv : "auto"
+    const ep = String(opts.env.GEBAI_CV_DETECT_EP ?? "").trim() || "auto"
+    // GPU sidecar（node 原生推理）：auto 时失败回落 wasm 并毒化（后续调用不再重试，
+    // 避免每次检测都等一遍超时）；sidecar 显式指定时不回落、错误如实上抛
+    if (mode !== "wasm") {
+      const sidecar = cvSidecarClient()
+      if (sidecar) {
+        try {
+          const run = await sidecar.detectRun({
+            modelKey: `${cfg.modelPath}:${cfg.size}`,
+            modelPath: cfg.modelPath,
+            ep,
+            dims: [1, 3, pre.size, pre.size],
+            data: pre.data,
+          })
+          const objects = yoloPostprocess(run.data, run.dims, cfg.labels, {
+            srcW: img.width,
+            srcH: img.height,
+            scale: pre.scale,
+            padX: pre.padX,
+            padY: pre.padY,
+            conf: opts.conf,
+            iou: opts.iou,
+          })
+          return { objects, backend: `sidecar:${run.ep}` }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (mode === "sidecar") {
+            throw new Error(`GPU sidecar 检测失败（GEBAI_CV_DETECT_BACKEND=sidecar 不回落；改 auto/wasm 可切换）: ${msg}`)
+          }
+          poisonCvSidecar(msg)
+        }
+      } else if (mode === "sidecar") {
+        throw new Error(
+          "CV sidecar 不可用：onnxruntime-node 未解析到（安装该依赖或设 GEBAI_CV_ORT_NODE_DIR 指向其目录）；" +
+            "GEBAI_CV_DETECT_BACKEND=sidecar 不回落，改 auto/wasm 可切换",
+        )
+      }
     }
+    // wasm 进程内兜底（推理串行互斥）
     return serialize(async () => {
       const { ort } = await loadOrt()
-      const session = await sessionFor(ort, modelPath)
-      const labels = readFileSync(labelsPath, "utf8").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)
-      if (!labels.length) throw new Error(`标签文件为空: ${labelsPath}`)
-      const pre = letterbox(img)
+      const session = await sessionFor(ort, cfg.modelPath)
       const out = await session.run({
         [session.inputNames[0]]: new ort.Tensor("float32", pre.data, [1, 3, pre.size, pre.size]),
       })
       const res = firstOutput(out)
-      return yoloPostprocess(res.data, res.dims, labels, {
+      const objects = yoloPostprocess(res.data, res.dims, cfg.labels, {
         srcW: img.width,
         srcH: img.height,
         scale: pre.scale,
         padX: pre.padX,
         padY: pre.padY,
         conf: opts.conf,
+        iou: opts.iou,
       })
+      return { objects, backend: "wasm-cpu" }
     })
   },
 }

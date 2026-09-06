@@ -137,15 +137,22 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   return { ...base, ...overrides }
 }
 
-const seen: { img?: RgbaImage } = {}
+const seen: { img?: RgbaImage; detectOpts?: { conf: number; iou?: number } } = {}
 
-function fakeRunner(lines: Array<{ text: string; score: number; box: { x: number; y: number; w: number; h: number } }>, objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }> = []): CvRunner {
+function fakeRunner(
+  lines: Array<{ text: string; score: number; box: { x: number; y: number; w: number; h: number } }>,
+  objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }> = [],
+): CvRunner {
   return {
     ocr: async (img) => {
       seen.img = img
       return lines
     },
-    detect: async () => objects,
+    detect: async (img, opts) => {
+      seen.img = img
+      seen.detectOpts = opts
+      return { objects, backend: "wasm-cpu" }
+    },
   }
 }
 
@@ -166,6 +173,19 @@ function installDefaultFake(): void {
 }
 
 beforeAll(() => installDefaultFake())
+
+describe("detect 工具描述契约", () => {
+  test("覆盖元数据自适应 / 分层后端 / iou / pair_text / 定位纪律", () => {
+    const d = detectTool.description ?? ""
+    expect(d).toContain("GEBAI_CV_DETECT_MODEL")
+    expect(d).toContain("ultralytics") // 导出 ONNX 即插即用（元数据自适应）
+    expect(d).toContain("GEBAI_CV_DETECT_BACKEND") // 分层后端入口
+    expect(d).toContain("sidecar")
+    expect(d).toContain("pair_text") // 检测×OCR 配对开关
+    expect(d).toContain("iou") // NMS 阈值可调（密集 UI 场景）
+    expect(d).toContain("desktop_locate") // 找特定文字按钮的定位纪律
+  })
+})
 
 describe("desktop cv tools", () => {
   test("沙箱模式拒绝", async () => {
@@ -344,26 +364,61 @@ describe("desktop cv tools", () => {
     expect((r.data as { found: boolean }).found).toBe(false)
   })
 
-  test("detect：未配置环境变量 → 指引；配置后返回对象", async () => {
+  test("detect：未配置环境变量 → 指引；配置后返回对象（默认配对 OCR 文本 + 后端标注）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
     setCvRunnerFactory(() => ({
       ocr: async () => { throw new Error("未配置") },
-      detect: async () => { throw new Error("目标检测未配置：需设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径）与 GEBAI_CV_DETECT_LABELS") },
+      detect: async () => { throw new Error("目标检测未配置：需设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径）") },
     }))
     let c = ctx(home)
     await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
     let r = await detectTool.execute({ image: "shot.png" }, c)
     expect(r.output).toContain("GEBAI_CV_DETECT_MODEL")
-    // 配置后（fake runner 正常返回）
-    setCvRunnerFactory(() => fakeRunner([], [{ label: "icon_save", score: 0.88, x: 12, y: 22, w: 56, h: 20 }]))
+    // 配置后（fake runner 正常返回；icon_save 框 [12,22,56,20] 与 OCR 行「保存」中心 (40,32) 命中配对）
+    setCvRunnerFactory(() => fakeRunner(DEFAULT_LINES, [{ label: "icon_save", score: 0.88, x: 12, y: 22, w: 56, h: 20 }]))
     c = ctx(home)
     await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
     r = await detectTool.execute({ image: "shot.png" }, c)
     expect(r.output).toContain("icon_save")
     expect(r.output).toContain("1 个对象")
-    const data = r.data as { objects: Array<{ label: string; x: number }> }
+    expect(r.output).toContain("后端 wasm-cpu")
+    expect(r.output).toContain("文本: 保存") // 「取消」(130,32)、「保存全部」(55,72) 不在框内
+    const data = r.data as { backend: string; objects: Array<{ label: string; x: number; text?: string }> }
+    expect(data.backend).toBe("wasm-cpu")
     expect(data.objects[0].label).toBe("icon_save")
     expect(data.objects[0].x).toBe(12)
+    expect(data.objects[0].text).toBe("保存")
+  })
+
+  test("detect：pair_text=false 跳过配对；conf/iou 透传（非法值取缺省）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home)
+    await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
+    let r = await detectTool.execute({ image: "shot.png", pair_text: false, conf: 0.1, iou: 0.15 }, c)
+    expect(r.output).not.toContain("文本:")
+    expect(seen.detectOpts?.conf).toBe(0.1)
+    expect(seen.detectOpts?.iou).toBe(0.15)
+    r = await detectTool.execute({ image: "shot.png", conf: 2, iou: -1 }, c)
+    expect(seen.detectOpts?.conf).toBe(0.25)
+    expect(seen.detectOpts?.iou).toBeUndefined()
+  })
+
+  test("detect：OCR 不可用时跳过配对不报错（仅检测框）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    setCvRunnerFactory(() => ({
+      ocr: async () => { throw new Error("本地识别模型未配置：请设置 GEBAI_CV_MODELS_DIR") },
+      detect: async () => ({ objects: [{ label: "icon", score: 0.9, x: 0, y: 0, w: 10, h: 10 }], backend: "sidecar:dml" }),
+    }))
+    try {
+      const c = ctx(home)
+      await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
+      const r = await detectTool.execute({ image: "shot.png" }, c)
+      expect(r.output).toContain("icon")
+      expect(r.output).not.toContain("文本:")
+      expect(r.output).toContain("sidecar:dml")
+    } finally {
+      installDefaultFake()
+    }
   })
 
   test("locate_image：template PNG 路径定位图标，返回中心坐标", async () => {
@@ -418,7 +473,7 @@ describe("desktop cv tools", () => {
           ? [{ text: "加载中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
           : [{ text: "完成", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }]
       },
-      detect: async () => [],
+      detect: async () => ({ objects: [], backend: "wasm-cpu" }),
     }))
     try {
       const c = ctx(home, {
@@ -447,7 +502,7 @@ describe("desktop cv tools", () => {
         calls++
         return calls <= 1 ? [{ text: "保存中", score: 0.9, box: { x: 0, y: 0, w: 50, h: 10 } }] : []
       },
-      detect: async () => [],
+      detect: async () => ({ objects: [], backend: "wasm-cpu" }),
     }))
     try {
       const c = ctx(home, {

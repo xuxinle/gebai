@@ -164,7 +164,7 @@ function installFake(lines = DEFAULT_LINES): void {
         seen.img = img
         return lines
       },
-      detect: async () => [],
+      detect: async () => ({ objects: [], backend: "wasm-cpu" }),
     }),
   )
 }
