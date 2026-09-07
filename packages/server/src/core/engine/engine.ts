@@ -1,6 +1,7 @@
 import type { AttachmentInput, AttachmentRef, DiagramFormat, Message, MessageLike, SessionRunArchive, SessionRunEntry } from "@gebai/sdk"
 import { LLMConfigError, parseExtraParams, salvageWriteArgs, type LLMChunk, type LLMProvider, type LLMUsage } from "../llm/llm"
 import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "../tools/vision"
+import { resizeForVision, resizeNote } from "../support/image-resize"
 import type { ToolRegistry } from "../base/registry"
 import type { SessionStore } from "../session/store"
 import { estimateCtxTokens, estimateCharsTokens } from "../session/store"
@@ -1061,8 +1062,9 @@ export class AgentEngine {
 
   /**
    * 用户消息附件 → LLM 内容块（DESIGN「多模态支持」）：
-   * - 图片附件且主模型声明多模态能力且 ≤8MB：base64 内联为统一 `image` 块（携带 path/name/size
-   *   元数据，供接口拒绝图片时自动降级还原为文本说明）
+   * - 图片附件且主模型声明多模态能力且 ≤8MB：压缩（原图不动，仅传输用）后 base64 内联为统一 `image` 块
+   *   （携带 path/name/size 元数据，供接口拒绝图片时自动降级还原为文本说明），图片块后附尺寸说明 text 块
+   *   （原始/压缩后尺寸与体积——模型感知精度与坐标缩放比）
    * - 其余（非图片/超限/文件缺失/模型无多模态能力）：文本说明（路径 + MIME + 大小 + 视觉子代理指引），
    *   由模型决定用 vision 子代理（vision_analyze）/read 等工具处理
    */
@@ -1076,7 +1078,10 @@ export class AgentEngine {
           const abs = this.opts.sandbox.resolvePath(user, sessionId, ref.path)
           const buf = await Bun.file(abs).arrayBuffer()
           if (buf.byteLength > 0 && buf.byteLength <= ATTACHMENT_INLINE_LIMIT) {
-            blocks.push({ type: "image", mime: ref.mime, data: Buffer.from(buf).toString("base64"), path: ref.path, name: ref.name, size: ref.size })
+            // 发送给模型前才压缩（原图保留在会话 tmp/），尺寸说明随图片告知模型
+            const rz = await resizeForVision(new Uint8Array(buf), ref.mime)
+            blocks.push({ type: "image", mime: ref.mime, data: rz.buf.toString("base64"), path: ref.path, name: ref.name, size: ref.size })
+            blocks.push({ type: "text", text: resizeNote(rz) })
             continue
           }
         } catch {
@@ -1117,13 +1122,18 @@ export class AgentEngine {
     for (const img of images) {
       try {
         let data = img.data
+        let note = ""
         if (!data) {
           const buf = await Bun.file(img.path).arrayBuffer()
           if (buf.byteLength <= 0 || buf.byteLength > ATTACHMENT_INLINE_LIMIT) continue
-          data = Buffer.from(buf).toString("base64")
+          // 发送给模型前才压缩（原图不动，仅传输用），尺寸说明随图片告知模型
+          const rz = await resizeForVision(new Uint8Array(buf), img.mime)
+          data = rz.buf.toString("base64")
+          note = resizeNote(rz)
         }
         const display = img.display ?? img.path
         blocks.push({ type: "image", mime: img.mime, data, path: display, name: basenameName(display) || display, source: "tool" })
+        if (note) blocks.push({ type: "text", text: note })
       } catch {
         /* 文件缺失/不可读：跳过（文本说明兜底） */
       }

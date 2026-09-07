@@ -106,9 +106,13 @@ describe("vision 子代理 def 契约（视觉能力收拢与复用边界，DESI
     expect(def.preload).toBe(false)
   })
 
-  test("系统提示词：硬性决策序（OCR 先行禁用 analyze 回答可 OCR 问题）与被依赖方职责（不复述工具 schema 细节）", () => {
+  test("系统提示词：硬性决策序按性能排序（本地优先、analyze 兜底）与被依赖方职责（不复述工具 schema 细节）", () => {
     const p = def.systemPrompt
-    expect(p).toContain("禁止用 analyze 回答 ocr 能答的问题")
+    // 按性能从高到低的硬性决策序：本地识别（ocr/locate → locate_image → detect）在前，analyze 兜底
+    expect(p).toContain("按性能从高到低")
+    expect(p).toContain("禁止用慢工具回答快工具能答的问题")
+    expect(p.indexOf("ocr")).toBeLessThan(p.lastIndexOf("analyze"))
+    expect(p).toContain("超时或模型迟缓时不重复原样重试，先回到 1~3")
     expect(p).toContain("被依赖方")
     expect(p).toContain("图片像素系")
     // 提示词不重复工具 schema 已有的参数级细节（PNG/threshold 等——模型可见工具描述）

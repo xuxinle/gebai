@@ -5,77 +5,12 @@ import { syncSendButton } from "./composer"
 
 /* ---------- 附件 ---------- */
 
-/** 图片压缩上限（DESIGN 常量参考）：长边或体积超限时 canvas 重采样。 */
-const IMG_MAX_EDGE = 1280
-const IMG_MAX_BYTES = 2 * 1024 * 1024
-const IMG_QUALITY = 0.85
-
-function loadImage(f: File): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(f)
-    const img = new Image()
-    img.onload = () => {
-      URL.revokeObjectURL(url)
-      resolve(img)
-    }
-    img.onerror = () => {
-      URL.revokeObjectURL(url)
-      reject(new Error("图片解码失败"))
-    }
-    img.src = url
-  })
-}
-
-function canvasToBlob(canvas: HTMLCanvasElement, mime: string): Promise<Blob | null> {
-  return new Promise((resolve) => canvas.toBlob(resolve, mime, IMG_QUALITY))
-}
-
-/**
- * 图片自动压缩重采样（DESIGN「多模态支持」）：PNG/JPEG 长边 >1280px 或体积 >2MB 时
- * canvas 缩放重编码；PNG 优先保留透明通道（仅当缩放后体积仍超限才转 JPEG，白色底）；
- * 转 JPEG 时同步修正扩展名（vision 工具按扩展名判 MIME）。GIF 等跳过。
- */
-async function compressImage(f: File): Promise<File> {
-  if (!["image/png", "image/jpeg"].includes(f.type)) return f
-  let img: HTMLImageElement
-  try {
-    img = await loadImage(f)
-  } catch {
-    return f
-  }
-  const scale = Math.min(1, IMG_MAX_EDGE / Math.max(img.width, img.height))
-  if (scale >= 1 && f.size <= IMG_MAX_BYTES) return f
-  const w = Math.max(1, Math.round(img.width * scale))
-  const h = Math.max(1, Math.round(img.height * scale))
-  const canvas = document.createElement("canvas")
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext("2d")
-  if (!ctx) return f
-  let outMime = f.type
-  if (outMime === "image/jpeg") ctx.fillStyle = "#fff"
-  if (outMime === "image/jpeg") ctx.fillRect(0, 0, w, h)
-  ctx.drawImage(img, 0, 0, w, h)
-  let blob = await canvasToBlob(canvas, outMime)
-  // PNG 缩放后仍超限才转 JPEG（透明通道丢失，白底兜底）
-  if (outMime === "image/png" && (!blob || blob.size > IMG_MAX_BYTES)) {
-    const jpg = await canvasToBlob(canvas, "image/jpeg")
-    if (jpg) {
-      blob = jpg
-      outMime = "image/jpeg"
-    }
-  }
-  if (!blob || blob.size >= f.size) return f
-  const name = outMime === f.type ? f.name : f.name.replace(/\.(png|jpe?g)$/i, outMime === "image/jpeg" ? ".jpg" : ".png")
-  return new File([blob], name, { type: outMime })
-}
-
+/** 图片按原图保存（会话 tmp/ 留无损原图供模型/工具/用户取用）；发送给大模型前的压缩在服务端进行。 */
 export async function addPendingFiles(files: FileList | File[]) {
   let added = 0
   for (const f of Array.from(files)) {
-    const ef = await compressImage(f)
-    if (pendingFiles.some((p) => p.name === ef.name && p.size === ef.size)) continue
-    setPendingFiles([...pendingFiles, { name: ef.name, mime: ef.type || "application/octet-stream", size: ef.size, blob: ef }])
+    if (pendingFiles.some((p) => p.name === f.name && p.size === f.size)) continue
+    setPendingFiles([...pendingFiles, { name: f.name, mime: f.type || "application/octet-stream", size: f.size, blob: f }])
     added++
   }
   if (added) renderAttachments()

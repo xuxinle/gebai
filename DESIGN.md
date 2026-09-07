@@ -445,7 +445,7 @@ src/
     llm/            #   LLM 接入（Provider 工厂与三接口实现）+ 多模态解析
     engine/         #   引擎：engine.ts（主循环）+ interactions.ts（五种阻塞交互的等待/决策）+ compressor.ts（上下文压缩/溢出恢复）+ prompt.ts（系统提示词构建）
     tools/          #   全局工具域：注册文件（fs/exec/show/agent/interact/schemas/extras）+ shared.ts（GlobalToolEntry 契约与 schema/parseRegion 助手）+ cv-analysis.ts（本地识别三工具共享工厂，desktop/playwright 复用）+ index.ts（聚合器/barrel）+ projects.ts/vision.ts
-    support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/analyzer/diagram-render
+    support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/analyzer/diagram-render/image-resize（视觉传输压缩）
     session/        #   会话域：store（持久化）/env/branch-runs/session-runs/gc
     schedule/       #   定时任务：cron + notify（通知通道）
     exec/           #   脚本执行：js-tool/sh-tasks
@@ -515,14 +515,14 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 用户可在会话中发送或引用多模态内容（图片、音频、视频、文档），模型视能力理解处理：
 
 - **消息附件**：`session.prompt` 支持携带附件（图片/音频/视频/PDF 等），附件先上传到会话 `tmp/`，消息中携带引用路径与 MIME 类型（`AttachmentRef.path` 为**会话根相对逻辑路径**，如 `tmp/foo.png`，模型/工具/前端统一按此解析；历史兼容绝对路径附件——沙箱拒绝解析时自动降级为文本说明）
-- **附件 → 模型内容**（`AgentEngine.loadHistory` 重建）：图片附件（png/jpeg/gif/webp）且主模型声明多模态能力（`GEBAI_LLM_MULTIMODAL=true`）且 ≤8MB 时 base64 内联为统一 `image` 块（携带 `path/name/size` 元数据）；其余（非图片/超限/文件缺失/模型无多模态）降级为文本说明（路径 + MIME + 大小 + 视觉子代理指引），由模型决定装载 vision 子代理（`vision_analyze`）/`read` 等工具处理
+- **附件 → 模型内容**（`AgentEngine.loadHistory` 重建）：图片附件（png/jpeg/gif/webp）且主模型声明多模态能力（`GEBAI_LLM_MULTIMODAL=true`）且 ≤8MB 时**压缩后**（见「图片压缩时序」）base64 内联为统一 `image` 块（携带 `path/name/size` 元数据，size 为原始体积），图片块后附尺寸说明 text 块（原始/压缩后尺寸与体积）；其余（非图片/超限/文件缺失/模型无多模态）降级为文本说明（路径 + MIME + 大小 + 视觉子代理指引），由模型决定装载 vision 子代理（`vision_analyze`）/`read` 等工具处理
 - **工具结果图片内联（`read` 图片直读）**：`read` 读取白名单图片（png/jpg/jpeg/gif/webp）**不按文本解码**（乱码无意义）——二进制读入后经 `ToolResult.images` 交引擎处理：主模型多模态时图片以统一 `image` 块**内联进工具结果消息**（模型直接可见，无需 vision 等其他工具），轻量引用（`Message.images`：绝对路径/原始路径/MIME，不含 base64）随工具消息落盘、`loadHistory` 历史重建按引用重读内联；非多模态不内联，工具返回说明 + 视觉子代理指引。svg 为文本按正常读取；bmp 不在白名单（返回转换引导）。**序列化**：OpenAI 兼容 `role:"tool"` 的 content 为块数组（text + `image_url`）；Anthropic `tool_result` content 为块数组（text + image，官方形态）；Responses 的 `function_call_output` 仅接受字符串——文本拼入输出，图片块转为紧随的 user 消息内容部件（同轮可见）
 - **接口拒绝自动降级**：主模型声明多模态但接口实际拒绝图片块（HTTP 4xx）时，引擎将图片块一次性降级为文本说明后重试（附件图片与工具结果图片同路径降级，说明文案区分来源；模型可改走 `vision` 工具），实现「无多模态能力自动降级」兜底
-- **图片自动压缩**：Web 端上传前 canvas 重采样（长边 ≤1280px、体积 ≤2MB，JPEG 质量 0.85）；PNG 优先保留透明通道（仅当缩放后体积仍超限才转 JPEG，白底兜底），转 JPEG 时同步修正扩展名（视觉分析按扩展名判 MIME）；GIF 跳过
+- **图片压缩时序（原图保存、发送时压缩）**：粘贴/上传/URL 引用一律按**原图**存入会话 `tmp/`（无损保留，模型/本地 CV 工具/用户取用的都是原图）；仅在**发送给大模型前**由服务端压缩（`core/support/image-resize.ts`，Bun.Image 原生编解码）：非 GIF 且长边 >1280px 或体积 >2MB 时等比缩放（长边 1280，体积仍超限按 0.8 倍迭代，下限 0.25 倍）后**同格式**重编码（JPEG/WebP 质量 0.85，PNG 保持 PNG）；未超限/解码失败原样发送。压缩不回写文件（原图不动），并随图片附尺寸说明（`[图片已压缩: 原始 W×H X → w×h x（坐标/细节按比例对应原图）]`，未压缩标注 `[图片 W×H x，未压缩]`）——多模态内联（引擎附件/工具结果图片）与 vision 子代理 analyze 同源共用。GIF 为动画帧格式不压缩
 - **多模态消息格式**：统一内部消息模型（文本 + 内容块数组），`provider.chat()` 按接口规范转换：
   - OpenAI 兼容：`content` 为 `[{ type: "text" | "image_url", ... }]` 结构（user/assistant 消息与 tool 结果消息同构）
   - Anthropic：`content` 为 `[{ type: "text" | "image" | "document", ... }]` 结构（`tool_result` 内容同为块数组）
-- **图片**：支持本地上传/粘贴/URL 引用，传输时自动压缩重采样（尺寸与大小上限，见常量参考），按 Provider 要求编码（base64 data URL 或外链）
+- **图片**：支持本地上传/粘贴/URL 引用，原图保存到会话 `tmp/`（不压缩），发送给大模型前服务端压缩（见「图片压缩时序」），按 Provider 要求编码（base64 data URL 或外链）
 - **音频/视频**：上传到会话 `tmp/` 并转为可引用文件；Provider 不支持直接理解时降级为「附文件路径 + 文件名」文本提示（由工具/脚本代处理，如转写）
 - **文档（PDF/Office）**：上传后可经工具（如 `read`/脚本）抽取文本喂给模型，或按 Provider 原生 `document` 块传递（能力自动探测）
 - **能力探测**：模型声明 `multimodal` 能力（`GEBAI_LLM_MULTIMODAL=true` 显式声明，默认 false），无多模态能力的模型收到附件时提示用户或自动降级（文本说明 + 视觉子代理指引）
@@ -537,7 +537,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 - **provider 解析**：组装层 `setVisionProviderGetter` 注入（`boot/compose.ts`，`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落；任务级 env 覆盖生效）
 - **模型选择**：配置 `GEBAI_VISION_MODEL` 后使用独立视觉 Provider（`GEBAI_VISION_*`，接口地址/密钥/类型缺省继承主模型）；未配置时回落到主模型（须显式声明多模态能力，`GEBAI_LLM_MULTIMODAL=true`，默认 false），两者皆不可用则返回配置提示
-- **传输**：图片以 base64 内联（统一内部图片块 → OpenAI `image_url` data URL / Anthropic base64 `image` 块）随文本目标一起调用视觉模型，单图上限见常量参考；返回分析文本（超长走截断保护），并携带 `image` 内容块供 UI 展示
+- **传输**：图片以 base64 内联（统一内部图片块 → OpenAI `image_url` data URL / Anthropic base64 `image` 块）随文本目标一起调用视觉模型，单图上限见常量参考；**发送前服务端压缩**（见「图片压缩时序」，原图不动）并把原始/压缩尺寸写入文本目标一并告知模型；**超时控制**（`timeout` 参数，默认 30 秒、钳制 1~300）：手动定时器 + AbortSignal 与用户取消信号合并，超时返回提示引导改用本地视觉工具（ocr/locate/locate_image/detect），用户取消原样上抛；返回分析文本（超长走截断保护），并携带 `image` 内容块供 UI 展示
 - **降级指引**：图片附件/工具图片块未内联时（模型无多模态能力、接口拒绝图片、超限），文本说明指引模型走 `vision_analyze`（vision 子代理）——engine 的附件说明、read 非多模态分支、图片块降级重试同此措辞
 
 #### 小模型识别（本地 CV 推理，core/cv）
@@ -920,7 +920,7 @@ export const preload = false
 
 - **工具集**（五工具，全部只读免审批、无环境闸门（沙箱可用）、零依赖）：`analyze`（多模态模型语义分析——理解图像内容/布局含义/非文字元素，支持 png/jpg/jpeg/gif/webp；复用 `makeVisionTool` 工厂注入 `getVisionProvider`（同一 provider 解析：GEBAI_VISION_* 外挂 → 多模态主模型回落））、`ocr`（本地 OCR 读文字带图片像素坐标）、`locate`（定位文字坐标）、`locate_image`（模板匹配定位图标/图形）、`detect`（自备 YOLO 目标检测，默认配对 OCR 文本）——后四者复用 `createCvAnalysisTools`/`createDetectTool` 共享工厂，注入「无缺省源（image 必填）+ 无闸门」形态
 - **边界（不截图）**：输入一律为图片文件路径（PNG；analyze 另支持 jpg/jpeg/gif/webp）——本子Agent 不提供缺省图像源，需要现截屏幕/页面由 desktop/playwright 子代理完成；坐标为图片像素系，消费方自行映射到目标环境（屏幕加窗口原点、页面用 elementFromPoint）
-- **决策序（硬性，与 desktop 同源纪律）**：读文字/找文字/判断可 OCR 状态一律 ocr/locate 先行（毫秒~秒级、精确坐标、离线不耗配额），禁止用 analyze 回答 ocr 能答的问题；仅需语义理解（图像内容/布局含义/非文字元素）或本地识别无结果时才 analyze（外部多模态模型，秒级延迟且耗配额）
+- **决策序（硬性，按性能从高到低）**：①读文字/找文字/判断可 OCR 状态 → `ocr`/`locate`（本地 OCR，毫秒~秒级、精确坐标、离线不耗配额）——禁止用 analyze 回答 ocr 能答的问题；②找图标/图形/UI 元素 → `locate_image`（本地模板匹配）；③找对象/框目标 → `detect`（本地 YOLO）；④`analyze`（外部多模态模型，秒级延迟、耗配额、可能超时）仅语义理解（图像内容/布局含义/非文字元素）或 1~3 无结果时兜底——超时不原样重试，先回到 1~3
 - **依赖复用（方式一消费方）**：`self_optimize` 声明 `dependencies: ["code", "vision"]`——agent_run 新会话即使不继承全局工具也有视觉能力（page_capture 截图后 `vision_analyze` 分析、`vision_ocr` 读图文字）；desktop/playwright 不依赖（域内已有全套 CV，语义分析兜底按需 agent_load 装载 vision——不引入 4 个重叠的 image-必填工具常驻上下文）；全局 `vision` 工具已移除（降级指引文案统一改指 vision_analyze）
 
 #### `desktop`（桌面控制）
@@ -2406,7 +2406,8 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 桌面固定端口 | 47896 | 桌面形态默认监听端口（`DESKTOP_PORT`，见「端口固定」） |
 | Session 缓存 LRU | 10 个 | 会话列表 LRU 驱逐上限 |
 | 截断内容哈希 | SHA256 | 基于完整返回内容计算，用于去重和文件命名 |
-| 图片压缩上限 | 1280px / 2MB | 多模态图片自动压缩重采样的尺寸与大小上限（Web 端 canvas 重采样，JPEG 质量 0.85） |
+| 图片压缩上限 | 1280px / 2MB | 发送给大模型前的服务端压缩阈值（`core/support/image-resize.ts`，长边/体积超限等比缩放后同格式重编码，JPEG/WebP 质量 0.85；原图保存不压缩，见「图片压缩时序」） |
+| analyze 超时 | 30 秒（钳制 1~300） | vision 子代理 `analyze` 的 `timeout` 参数默认值；超时返回提示引导改用本地视觉工具 |
 | 视觉工具图片上限 | 8MB | 视觉分析（vision_analyze）单张图片大小上限（超出提示压缩后重试） |
 | 页面捕获等待超时 | 30 秒 | `page_capture` 工具等待前端捕获回传的最长时间（超时返回「页面捕获失败」提示） |
 | 页面捕获 html 上限 | 300KB | 前端捕获 DOM html 的传输/落盘截断长度（超出截取首部，完整结构可用 `read` 分文件读取） |

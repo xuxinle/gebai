@@ -473,6 +473,42 @@ async function waitForStore(store: SessionStore, sessionId: string, pred: (msgs:
   }
 }
 
+/** 构造渐变 PNG（可压缩，宽高可控）：IHDR/IDAT/IEND 手工拼装 + zlib 存储（与 image-resize.test 同构）。 */
+function makeGradientPng(width: number, height: number): Buffer {
+  const { deflateSync } = require("node:zlib")
+  const crc32 = (buf: Buffer) => {
+    let c = ~0
+    for (const b of buf) {
+      c ^= b
+      for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1))
+    }
+    return ~c >>> 0
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4)
+    len.writeUInt32BE(data.length)
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data])
+    const crc = Buffer.alloc(4)
+    crc.writeUInt32BE(crc32(body))
+    return Buffer.concat([len, body, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8
+  ihdr[9] = 2
+  const raw = Buffer.alloc((width * 3 + 1) * height)
+  for (let y = 0; y < height; y++) {
+    const off = y * (width * 3 + 1) + 1
+    for (let x = 0; x < width; x++) {
+      raw[off + x * 3] = Math.round((x * 255) / Math.max(1, width - 1))
+      raw[off + x * 3 + 1] = Math.round((y * 255) / Math.max(1, height - 1))
+      raw[off + x * 3 + 2] = 128
+    }
+  }
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))])
+}
+
 describe("AgentEngine", () => {
   test("runs a plain text turn and persists assistant reply", async () => {
     const { home, engine, store } = await setup("text")
@@ -1691,6 +1727,8 @@ console.log("defined ok")`,
     expect(userMsg.content).toEqual([
       { type: "text", text: "describe" },
       { type: "image", mime: "image/png", data: Buffer.from(png).toString("base64"), path: "tmp/a.png", name: "a.png", size: 7 },
+      // 发送给模型前压缩（未超限则原样）+ 尺寸说明块（非法 PNG 解码不出尺寸 → 仅体积）
+      { type: "text", text: expect.stringContaining("[图片 7 B，未压缩]") },
     ])
     cleanup(s.home)
   })
@@ -1716,6 +1754,29 @@ console.log("defined ok")`,
     const persisted = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool" && m.name === "read")!
     expect(typeof persisted.content).toBe("string")
     expect(persisted.images).toEqual([{ path: join(tmp, "shot.png"), display: "shot.png", mime: "image/png" }])
+    cleanup(s.home)
+  })
+
+  test("multimodal inlining compresses oversized images before sending (原图不动，仅传输用)", async () => {
+    const s = await setup("text")
+    s.provider.multimodal = true
+    const session = await s.store.createSession("default", "t")
+    // 2000×1000 水平渐变 PNG（长边超 1280 → 压缩到 1280×640），原始体积不超 2MB 证明按尺寸触发
+    const png = makeGradientPng(2000, 1000)
+    await s.engine.run(session.id, "default", "describe", { attachments: [{ name: "big.png", mime: "image/png", data: png }] })
+    const userMsg = s.provider.seenChats[0]!.find((m) => m.role === "user")!
+    const blocks = userMsg.content as Array<Record<string, unknown>>
+    const imgBlock = blocks.find((b) => b.type === "image") as { data?: string }
+    const sent = Buffer.from(String(imgBlock.data), "base64")
+    expect(sent.length).toBeLessThan(png.length) // 发送的是压缩后图片
+    // 尺寸说明块：原始 2000×1000 → 1280×640
+    const noteBlock = blocks.find((b) => b.type === "text" && String((b as { text?: string }).text).includes("图片已压缩")) as { text?: string }
+    expect(String(noteBlock.text)).toContain("原始 2000×1000")
+    expect(String(noteBlock.text)).toContain("→ 1280×640")
+    // 原图未被动过：会话 tmp 里的附件仍是原始字节
+    const tmp = s.store.getTmpDir(session.id, "default")
+    const stored = new Uint8Array(await Bun.file(join(tmp, "big.png")).arrayBuffer())
+    expect(Buffer.from(stored).equals(Buffer.from(png))).toBe(true)
     cleanup(s.home)
   })
 
