@@ -1,4 +1,4 @@
-/** 脚本执行类全局工具（sh/py；js 见 core/js-tool.ts，本文件一并登记注册条目）——自 core/tools.ts 按域拆分。 */
+/** 脚本执行类全局工具（sh/py；js 见 core/exec/js-tool.ts，本文件一并登记注册条目）——自 core/tools.ts 按域拆分。 */
 import { randomUUID } from "node:crypto"
 import type { Tool, ToolContext } from "../base/types"
 import { jsTool } from "../exec/js-tool"
