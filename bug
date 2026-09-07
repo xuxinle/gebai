@@ -159,3 +159,36 @@ ultralytics export 时自带元数据）。
 3. 依赖层：onnxruntime-web 安装 → 模型三件套（按 §问题二内网镜像或自备）→ LFS 指针检查
    （问题三，134B 特征值直接判）。
 4. 全部打通后再碰 GPU sidecar（可选优化），勿把它的报错当成主链路故障。
+
+## DLL 问题（WinError 1114）：从现象到解决
+
+### 现象
+歌白 CV GPU sidecar 加载 `onnxruntime-node` 的原生绑定即崩：node 报「DLL 初始化例程失败」(1114)，bun 直接段错误，python ctypes 同样 1114。所有 GPU 检测回落 wasm。
+
+### 排查中排除的假设（每个都有实证）
+| 假设 | 反证 |
+|---|---|
+| VC 运行库太旧 | 系统已是 14.32；三个前置 DLL 单独加载全 OK |
+| 版本不匹配 | 1.29 / 1.23.2 跨版本一致复现 |
+| 文件损坏/依赖缺失 | 签名 Microsoft Valid×3、51 项静态导入逐个试载全通、LoadLibraryEx DATAFILE 模式（不执行 DllMain）成功 |
+| 缺深层组件 | 事件日志无 SideBySide 投诉 |
+
+### 关键取证
+- **VEH 异常处理器**抓第一现场：ACCESS_VIOLATION，故障地址不在仓库 DLL 内；
+- **跨渠道交叉验证**（决定性）：pip 装 python 官方 `onnxruntime-directml` —— 同样 1114。npm/node/py 三条独立发行渠道全灭 = **机器级环境因素**；
+- **进程注入扫描**：explorer/chrome/python 全被 DSOC 管控软件注入同组 hook DLL（DGCore64/XGKernel64 等 6~9 个/进程）。
+
+### 根因定案
+DSOC 对全系统进程无差别 DLL 注入 → 新 PE 映射/初始化时介入检查 → 与 onnxruntime 静态初始化的敏感路径相撞触发访问违例 → Windows loader 回滚抛 1114。这解释了为何换版本、换渠道、装运行库全都无效。
+
+### 解决（绕行而非硬刚）
+深挖发现两个关键破绽：
+1. **ORT 主核心 ≤1.22 在本机能正常初始化**（1.23+ 才崩）——新版不是必要条件；
+2. binding 在 node.exe 宿主下 require **能活**（python 宿主的结论不可外推）。
+
+→ vendor 整包降版至 **onnxruntime-node@1.19.2 + common@1.19.2**（纯 CPU EP），sidecar 布局零改动接入；另发现 auto 模式的 DML 探测在本机会无限挂起，故 `resolveEp` 缺省改 `cpu`。
+实测 screenparser@1280²：**1.0~1.6 秒/帧 vs wasm 数十秒 ≈ 20~30 倍提速**，cv/desktop 测试全绿。
+
+
+### 遗留
+GPU/DirectML 本体解法只剩一条：向 IT 申请歌白相关进程（node.exe/bun 子进程）的 DSOC 注入豁免——放行后用一行 ctypes 试载看 winerror 是否脱离 1114 即可复核。
