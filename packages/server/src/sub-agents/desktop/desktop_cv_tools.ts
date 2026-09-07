@@ -12,17 +12,13 @@ import { decodePng, type RgbaImage } from "../../core/cv/image"
 import { matchTemplate } from "../../core/cv/template"
 import { createCvAnalysisTools, createDetectTool, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
 import { parseRegion, schema } from "../../core/tools/shared"
-import { PS_DPI_AWARE } from "./desktop_tools"
+import { PS_DPI_AWARE, psCmd } from "./desktop_tools"
 
 function desktopGate(ctx: ToolContext): void {
   if (ctx.sandboxed) throw new Error("桌面控制仅在本地/桌面模式可用（服务端部署已禁用）")
 }
 
-/** PowerShell 脚本 → 命令串：UTF-16LE base64 避免引号转义（cmd 兼容）。 */
-function ps(script: string): string {
-  const b64 = Buffer.from(script, "utf16le").toString("base64")
-  return `powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`
-}
+
 
 /* ---------- 缺省图像源：现截宿主机屏幕 ---------- */
 
@@ -39,7 +35,7 @@ async function captureTo(
     const bounds = region
       ? `New-Object System.Drawing.Rectangle(${region.split(",").join(", ")})`
       : "[System.Windows.Forms.SystemInformation]::VirtualScreen"
-    cmd = ps(`
+    cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms

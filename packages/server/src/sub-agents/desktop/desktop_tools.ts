@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
 import { artifactBlocks } from "../../core/tools"
 import { parseRegion } from "../../core/tools/shared"
@@ -18,10 +19,38 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
   return { type: "object", properties, required }
 }
 
-/** PowerShell 脚本 → 命令串：UTF-16LE base64 避免引号转义（cmd 兼容）。 */
-function ps(script: string): string {
+/** PowerShell 脚本 → 命令串（旧通道，EncodedCommand 内联）：仅作 psCmd 文件写入失败时的兜底。 */
+function psEncoded(script: string): string {
   const b64 = Buffer.from(script, "utf16le").toString("base64")
   return `powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`
+}
+
+/**
+ * Windows PowerShell 执行通道（临时 .ps1 文件 + -File 执行，desktop 三工具文件共用）：
+ * - 旧 -EncodedCommand 把整个脚本 base64 内联进命令行，受 cmd 单条命令行 8191 字符上限约束
+ *   （截图/UIA 类长脚本必超——实测 ≥4KB 脚本即「command line is too long」exit 1 且无输出），
+ *   且企业管控软件会静默拦截长内联命令（exit 1 无任何 stdout/stderr）；
+ * - 脚本写入会话 tmp/ps-scripts/ 下临时 .ps1，UTF-8 带 BOM——PS 5.1 对无 BOM 文件按 ANSI
+ *   解码，中文注释/字符串必乱码；
+ * - -File 路径必须双引号包装：Windows 参数解析不认单引号，单引号混入路径致 -File 打开失败，
+ *   PS 回退交互模式打印横幅后随管道关闭静默退出，stdout 还会被横幅污染；内嵌双引号反引号转义；
+ * - 执行中的 .ps1 被 Windows 锁定，删除延迟 60s（unref 不阻塞进程退出）；删除失败留在会话目录无害；
+ * - ctx.writeFile 不可用/失败时兜底回 EncodedCommand 内联（短脚本仍可用，行为同旧通道）。
+ */
+export async function psCmd(ctx: ToolContext, script: string): Promise<string> {
+  try {
+    const base = ctx.sessionWorkdir ?? ctx.workdir
+    const dir = join(base, "ps-scripts")
+    const file = join(dir, `gebai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`)
+    await ctx.writeFile(file, `\uFEFF${script}`)
+    const t = setTimeout(() => {
+      ctx.deleteFile(file).catch(() => {})
+    }, 60_000)
+    t.unref?.()
+    return `powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "${file.replace(/"/g, '`"')}"`
+  } catch {
+    return psEncoded(script)
+  }
 }
 
 /**
@@ -79,7 +108,11 @@ function num(v: unknown, dflt: number): number {
 
 async function run(ctx: ToolContext, cmd: string, timeoutMs = 20000): Promise<ToolResult> {
   const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs })
-  if (code !== 0) return { output: `执行失败 [exit ${code}]:\n${stderr || stdout}` }
+  if (code !== 0) {
+    // stderr+stdout 合并展示（原来只显示其一，排障信息丢失）
+    const detail = [stderr?.trim(), stdout?.trim()].filter(Boolean).join("\n")
+    return { output: `执行失败 [exit ${code}]:${detail ? `\n${detail}` : "（无输出）"}` }
+  }
   return { output: stdout.trim() || "(无输出)" }
 }
 
@@ -149,7 +182,7 @@ export const screenshotTool: Tool = {
         bounds = `New-Object System.Drawing.Rectangle(${region.x}, ${region.y}, ${region.w}, ${region.h})`
       }
       // 截图后抽样统计：平均亮度 + 采样色数（A1 黑帧检测），输出 STAT 行供解析
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -231,7 +264,7 @@ export const screenInfoTool: Tool = {
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { @($_.DeviceName, $_.Bounds.X, $_.Bounds.Y, $_.Bounds.Width, $_.Bounds.Height, $_.Primary) -join [char]9 }
@@ -270,7 +303,7 @@ export const windowListTool: Tool = {
     if (plat === "win32") {
       // EnumWindows 枚举全部顶层可见窗口（替代 Get-Process MainWindowHandle——后者每进程只见一个主窗口，
       // 浏览器多窗口/多开应用漏窗口）；前台标记（GetForegroundWindow 比对）+ bounds（物理像素）+ HWND
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -357,7 +390,7 @@ export const windowFocusTool: Tool = {
     let cmd: string
     if (plat === "win32") {
       const loc = winLocate(hwnd, pid, title)
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -430,7 +463,7 @@ export const windowMoveTool: Tool = {
       const w = args.width != null ? String(num(args.width, 0)) : ""
       const h = args.height != null ? String(num(args.height, 0)) : ""
       const loc = winLocate(hwnd, pid, title)
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -506,7 +539,7 @@ export const typeTextTool: Tool = {
         return { output: `mode="keys" 仅支持 ASCII 可打印字符（当前含非 ASCII，如：${text.slice(0, 20)}…）。中文/符号请用默认 clipboard 模式。` }
       }
       if (plat === "win32") {
-        cmd = ps(`
+        cmd = await psCmd(ctx, `
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait(${psLiteral(sendKeysEscape(text))})
 "已输入 ${text.length} 字符（keys 模式）"
@@ -524,7 +557,7 @@ Add-Type -AssemblyName System.Windows.Forms
     // clipboard 模式：剪贴板粘贴法。写入回验重试（剪贴板管理软件可能拦截/覆盖写入，未生效即报错不粘贴），
     // 粘贴后延时恢复（目标应用异步消费剪贴板，立即恢复会粘出旧内容）
     if (plat === "win32") {
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 Add-Type -AssemblyName System.Windows.Forms
 $old = $null; $oldOk = $false
 try { $old = Get-Clipboard -Raw; $oldOk = $true } catch {}
@@ -577,7 +610,7 @@ export const clipboardReadTool: Tool = {
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      cmd = ps(`$c = Get-Clipboard -Raw -ErrorAction SilentlyContinue; if ($null -eq $c) { "（剪贴板为空）" } else { $c }`)
+      cmd = await psCmd(ctx, `$c = Get-Clipboard -Raw -ErrorAction SilentlyContinue; if ($null -eq $c) { "（剪贴板为空）" } else { $c }`)
     } else if (plat === "darwin") {
       cmd =
         `osascript -e 'try' -e 'set c to the clipboard as text' -e 'return c' -e 'on error' ` +
@@ -728,7 +761,7 @@ export const keyPressTool: Tool = {
       const combo = parseVkCombo(keys)
       if (combo) {
         // 虚拟键路径：keybd_event 直发扫描码（媒体键/Win 键/箭头/任意 vk_XX）+ 按住/抬起分离
-        cmd = ps(`
+        cmd = await psCmd(ctx, `
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -745,7 +778,7 @@ ${vkScript(combo, action as "press" | "down" | "up", holdMs)}
             `action=${action} 仅支持 vk 虚拟键路径（当前 keys: ${keys}）。按住/抬起分离请用 vk 名，如 "vk_shift"（按住 Shift）、"w"→"vk_w"；SendKeys 语法不支持 down/up。`,
         }
       } else {
-        cmd = ps(`
+        cmd = await psCmd(ctx, `
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.SendKeys]::SendWait(${psLiteral(keys)})
 "已发送: ${keys}"
@@ -777,7 +810,7 @@ export const mouseMoveTool: Tool = {
     const plat = process.platform
     let cmd: string
     if (plat === "win32") {
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -849,7 +882,7 @@ export const mouseClickTool: Tool = {
         `[GebaiMouse2]::mouse_event(${down}, 0, 0, 0, [UIntPtr]::Zero)
 [GebaiMouse2]::mouse_event(${up}, 0, 0, 0, [UIntPtr]::Zero)${i < clicks - 1 ? "\nStart-Sleep -Milliseconds 50" : ""}`,
       ).join("\n")
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -907,7 +940,7 @@ export const mouseScrollTool: Tool = {
       const units = amount * 120
       const flag = dir === "left" || dir === "right" ? "0x1000" : "0x0800"
       const data = dir === "down" || dir === "left" ? -units : units
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -961,7 +994,7 @@ export const mouseDragTool: Tool = {
     if (plat === "win32") {
       const modDown = mods.map((m) => `[GebaiMouse4]::keybd_event(0x${m.toString(16)}, 0, 0, [UIntPtr]::Zero)`)
       const modUp = [...mods].reverse().map((m) => `[GebaiMouse4]::keybd_event(0x${m.toString(16)}, 0, 2, [UIntPtr]::Zero)`)
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -1034,7 +1067,7 @@ export const windowStateTool: Tool = {
       const pos = action === "topmost" ? "[IntPtr](-1)" : action === "notopmost" ? "[IntPtr](-2)" : ""
       const act = pos ? `[GebaiWinState]::SetWindowPos($h, ${pos}, 0, 0, 0, 0, 0x0003) | Out-Null` : `[GebaiWinState]::ShowWindow($h, ${sw}) | Out-Null`
       const loc = winLocate(hwnd, pid, title)
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 ${PS_DPI_AWARE}
 Add-Type @"
 using System;
@@ -1100,7 +1133,7 @@ export const clipboardWriteTool: Tool = {
       if (!image.toLowerCase().endsWith(".png")) return { output: `图片仅支持 PNG（当前 ${image}）` }
       const imgPath = ctx.resolvePath(image).replace(/'/g, "''")
       if (plat !== "win32") return { output: "图片写入剪贴板仅支持 Windows（macOS/Linux 暂未支持）" }
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 $ErrorActionPreference = 'Stop'
 try {
   Add-Type -AssemblyName System.Drawing
@@ -1127,7 +1160,7 @@ try {
       return { output: `图片写入剪贴板失败: ${out || `exit ${code}`}（确认 PNG 存在且剪贴板未被管理软件拦截）` }
     }
     if (plat === "win32") {
-      cmd = ps(`
+      cmd = await psCmd(ctx, `
 Add-Type -AssemblyName System.Windows.Forms
 $want = ${psLiteral(text)}
 $setOk = $false

@@ -156,7 +156,12 @@ function fakeRunner(
   }
 }
 
-function decodeCmd(cmd: string): string {
+async function decodeCmd(cmd: string): Promise<string> {
+  const mf = cmd.match(/-File "([^"]+)"/)
+  if (mf) {
+    const raw = await Bun.file(mf[1]).text()
+    return raw.startsWith("\uFEFF") ? raw.slice(1) : raw
+  }
   const m = cmd.match(/-EncodedCommand (\S+)/)
   return m ? Buffer.from(m[1], "base64").toString("utf16le") : cmd
 }
@@ -236,7 +241,7 @@ describe("desktop cv tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         if (cmd.includes("powershell")) {
-          const script = decodeCmd(cmd)
+          const script = await decodeCmd(cmd)
           seenScript = script
           const m = script.match(/'([^']+\.png)'/)
           if (m) await Bun.write(m[1], pngBytes(300, 200))
@@ -260,7 +265,7 @@ describe("desktop cv tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         if (cmd.includes("powershell")) {
-          const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+          const m = (await decodeCmd(cmd)).match(/'([^']+\.png)'/)
           if (m) await Bun.write(m[1], pngBytes(300, 200))
         }
         return { stdout: "CAP -2560,0", stderr: "", code: 0 }
@@ -278,7 +283,7 @@ describe("desktop cv tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         if (cmd.includes("powershell")) {
-          const script = decodeCmd(cmd)
+          const script = await decodeCmd(cmd)
           const m = script.match(/'([^']+\.png)'/)
           // 模拟区域截图：落盘的 PNG 就是区域尺寸（100x60），不应再被裁小
           if (m) await Bun.write(m[1], pngBytes(100, 60))
@@ -483,7 +488,7 @@ describe("desktop cv tools", () => {
       const c = ctx(home, {
         runCommand: async (cmd) => {
           if (cmd.includes("powershell")) {
-            const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+            const m = (await decodeCmd(cmd)).match(/'([^']+\.png)'/)
             if (m) await Bun.write(m[1], pngBytes(300, 200))
           }
           return { stdout: "CAP 0,0", stderr: "", code: 0 }
@@ -512,7 +517,7 @@ describe("desktop cv tools", () => {
       const c = ctx(home, {
         runCommand: async (cmd) => {
           if (cmd.includes("powershell")) {
-            const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+            const m = (await decodeCmd(cmd)).match(/'([^']+\.png)'/)
             if (m) await Bun.write(m[1], pngBytes(300, 200))
           }
           return { stdout: "CAP 0,0", stderr: "", code: 0 }
@@ -534,7 +539,7 @@ describe("desktop cv tools", () => {
       const c = ctx(home, {
         runCommand: async (cmd) => {
           if (cmd.includes("powershell")) {
-            const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+            const m = (await decodeCmd(cmd)).match(/'([^']+\.png)'/)
             if (m) await Bun.write(m[1], pngBytes(300, 200))
           }
           return { stdout: "CAP 0,0", stderr: "", code: 0 }
@@ -554,7 +559,7 @@ describe("desktop cv tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         if (cmd.includes("powershell")) {
-          const m = decodeCmd(cmd).match(/'([^']+\.png)'/)
+          const m = (await decodeCmd(cmd)).match(/'([^']+\.png)'/)
           if (m) await Bun.write(m[1], pngBytes(300, 200, ++captures <= 2 ? 120 : 200))
         }
         return { stdout: "CAP 0,0", stderr: "", code: 0 }

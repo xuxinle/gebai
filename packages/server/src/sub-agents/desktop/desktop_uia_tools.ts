@@ -8,6 +8,7 @@
  */
 import type { Tool, ToolResult } from "../../core/base/types"
 import { schema } from "../../core/tools/shared"
+import { psCmd } from "./desktop_tools"
 
 function desktopGate(ctx: { sandboxed?: boolean }): void {
   if ((ctx as { sandboxed?: boolean }).sandboxed) throw new Error("桌面控制仅在本地/桌面模式可用（服务端部署已禁用）")
@@ -117,8 +118,9 @@ if ($rows.Count -eq 0 -and $script:total -le 1) {
   $json
 }
 `
-    const b64 = Buffer.from(psScript, "utf16le").toString("base64")
-    const { stdout, stderr, code } = await ctx.runCommand(`powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`, { timeoutMs: 60000 })
+    // 临时 .ps1 文件通道（UIA 脚本长，EncodedCommand 内联必超 cmd 8191 命令行上限）
+    const cmd = await psCmd(ctx, psScript)
+    const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 60000 })
     if (code !== 0) return { output: `UIA 枚举失败 [exit ${code}]: ${(stderr || stdout).slice(0, 500)}` }
     const text = stdout.trim()
     if (text.startsWith("NOTFOUND")) return { output: `未找到匹配窗口（pid=${pid}${title ? ` title~${title}` : ""}）——用 window_list 确认目标存在` }

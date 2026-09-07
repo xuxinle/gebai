@@ -74,8 +74,14 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
   return { ...base, ...overrides }
 }
 
-/** 解码 PowerShell -EncodedCommand，便于断言脚本内容。 */
-function decodeCmd(cmd: string): string {
+/** 取出命令行里的 PowerShell 脚本内容，便于断言：
+ *  -File 模式（现行通道）：读临时 .ps1 文件（BOM 去除）；EncodedCommand 模式（兜底）：base64 解码。 */
+async function decodeCmd(cmd: string): Promise<string> {
+  const mf = cmd.match(/-File "([^"]+)"/)
+  if (mf) {
+    const raw = await Bun.file(mf[1]).text()
+    return raw.startsWith("\uFEFF") ? raw.slice(1) : raw
+  }
   const m = cmd.match(/-EncodedCommand (\S+)/)
   return m ? Buffer.from(m[1], "base64").toString("utf16le") : cmd
 }
@@ -94,7 +100,7 @@ describe("desktop tools", () => {
       runCommand: async (cmd) => {
         // 只记录主截图命令（探测命令 identify/convert 忽略，不影响断言）
         if (cmd.includes("powershell")) seenCmd = cmd
-        const script = decodeCmd(cmd)
+        const script = await decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
         return { stdout: "", stderr: "", code: 0 }
@@ -102,8 +108,9 @@ describe("desktop tools", () => {
     })
     const r = await screenshotTool.execute({}, c)
     expect(seenCmd).toContain("powershell")
-    expect(seenCmd).toContain("-EncodedCommand")
-    const script = decodeCmd(seenCmd)
+    expect(seenCmd).toContain('-File "')
+    expect(seenCmd).toContain("-ExecutionPolicy Bypass")
+    const script = await decodeCmd(seenCmd)
     // 全屏 = 虚拟屏幕（覆盖所有显示器，副屏可为负坐标）；脚本声明 DPI 感知（物理像素坐标）
     expect(script).toContain("[System.Windows.Forms.SystemInformation]::VirtualScreen")
     expect(script).toContain("SetProcessDPIAware")
@@ -126,14 +133,14 @@ describe("desktop tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         if (cmd.includes("powershell")) seenCmd = cmd
-        const script = decodeCmd(cmd)
+        const script = await decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
         return { stdout: "STAT -2560,0 2560x1440 mean=60.0 colors=500", stderr: "", code: 0 }
       },
     })
     const r = await screenshotTool.execute({ region: "-2560,0,2560,1440" }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain("New-Object System.Drawing.Rectangle(-2560, 0, 2560, 1440)")
     expect(r.output).toContain("原点 (-2560,0)")
   })
@@ -144,14 +151,14 @@ describe("desktop tools", () => {
     const c = ctx(home, {
       runCommand: async (cmd) => {
         if (cmd.includes("powershell")) seenCmd = cmd
-        const script = decodeCmd(cmd)
+        const script = await decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
         return { stdout: "STAT 10,20 800x600 mean=60.0 colors=500", stderr: "", code: 0 }
       },
     })
     await screenshotTool.execute({ region: "10,20,800,600" }, c)
-    expect(decodeCmd(seenCmd)).toContain("New-Object System.Drawing.Rectangle(10, 20, 800, 600)")
+    expect(await decodeCmd(seenCmd)).toContain("New-Object System.Drawing.Rectangle(10, 20, 800, 600)")
   })
 
   test("window_list parses TSV output into aligned table with foreground marker and bounds", async () => {
@@ -192,7 +199,7 @@ describe("desktop tools", () => {
     expect(r.output).toContain("内容预览")
     expect(seenCmd).toContain("powershell")
     // 脚本内通过 base64 注入文本，避免引号转义；剪贴板写入回验重试、粘贴后延时恢复
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain(Buffer.from("你好GEBAI", "utf8").toString("base64"))
     expect(script).toContain("Get-Clipboard -Raw")
     expect(script).toContain("finally")
@@ -208,7 +215,7 @@ describe("desktop tools", () => {
       },
     })
     await typeTextTool.execute({ text: "测试文本" }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     // 写入回验：Set-Clipboard 后读回比对（剪贴板管理软件拦截写入时静默失败防护）
     expect(script).toContain("$setOk")
     expect(script).toContain("-ceq $wantN")
@@ -262,7 +269,7 @@ describe("desktop tools", () => {
       },
     })
     const r = await typeTextTool.execute({ text: "a+b%c", mode: "keys" }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain("SendWait")
     expect(script).not.toContain("Get-Clipboard")
     // 特殊字符逐字符 {} 转义（+ 和 % 不会被解释为修饰键）
@@ -294,7 +301,7 @@ describe("desktop tools", () => {
       },
     })
     const r = await clipboardReadTool.execute({}, c)
-    expect(decodeCmd(seenCmd)).toContain("Get-Clipboard")
+    expect(await decodeCmd(seenCmd)).toContain("Get-Clipboard")
     expect(r.output).toContain("剪贴板内容")
     expect(r.output).toContain("⚠️ 检测到疑似敏感信息")
   })
@@ -313,7 +320,7 @@ describe("desktop tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
     const c = ctx(home, {
       runCommand: async (cmd) => {
-        const script = decodeCmd(cmd)
+        const script = await decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
         return { stdout: "STAT 0,0 1920x1080 mean=3.2 colors=4", stderr: "", code: 0 }
@@ -329,7 +336,7 @@ describe("desktop tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
     const c = ctx(home, {
       runCommand: async (cmd) => {
-        const script = decodeCmd(cmd)
+        const script = await decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
         return { stdout: "STAT 0,0 800x600 mean=25.0 colors=3", stderr: "", code: 0 }
@@ -343,7 +350,7 @@ describe("desktop tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
     const c = ctx(home, {
       runCommand: async (cmd) => {
-        const script = decodeCmd(cmd)
+        const script = await decodeCmd(cmd)
         const m = script.match(/'([^']+\.png)'/)
         if (m) await c.writeFile(m[1], "")
         return { stdout: "STAT 0,0 1920x1080 mean=128.4 colors=2000", stderr: "", code: 0 }
@@ -397,8 +404,8 @@ describe("desktop tools", () => {
       },
     })
     await keyPressTool.execute({ keys: "^c" }, c)
-    expect(decodeCmd(seenCmd)).toContain("SendWait")
-    expect(decodeCmd(seenCmd)).toContain(Buffer.from("^c", "utf8").toString("base64"))
+    expect(await decodeCmd(seenCmd)).toContain("SendWait")
+    expect(await decodeCmd(seenCmd)).toContain(Buffer.from("^c", "utf8").toString("base64"))
   })
 
   test("mouse_click builds click command", async () => {
@@ -412,7 +419,7 @@ describe("desktop tools", () => {
     })
     const r = await mouseClickTool.execute({ x: 100, y: 200 }, c)
     expect(r.output).toContain("(100, 200)")
-    expect(decodeCmd(seenCmd)).toContain("SetCursorPos(100, 200)")
+    expect(await decodeCmd(seenCmd)).toContain("SetCursorPos(100, 200)")
   })
 
   test("command failure surfaces stderr", async () => {
@@ -436,7 +443,7 @@ describe("desktop tools", () => {
     })
     // 恶意 title：若裸插值会执行 calc
     await windowFocusTool.execute({ title: "$(Start-Process calc)" }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).not.toContain("Start-Process calc")
     // 标题以 base64 注入脚本内解码后匹配
     expect(script).toContain(Buffer.from("$(Start-Process calc)", "utf8").toString("base64"))
@@ -457,7 +464,7 @@ describe("desktop tools", () => {
       },
     })
     const r = await windowFocusTool.execute({ pid: 999 }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     // 激活后复核前台窗口（GetForegroundWindow 比对），Alt 击键缓解重试一次
     expect(script).toContain("GetForegroundWindow")
     expect(script).toContain("keybd_event(0x12")
@@ -476,7 +483,7 @@ describe("desktop tools", () => {
       },
     })
     const r = await mouseClickTool.execute({ x: 1, y: 2, button: "double" }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain("GebaiMouse2")
     expect(script).not.toContain("[GebaiMouse]::")
     expect(r.output).toContain("double")
@@ -513,12 +520,12 @@ describe("desktop tools", () => {
       },
     })
     await mouseScrollTool.execute({ x: 100, y: 200, direction: "down", amount: 3 }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain("SetCursorPos(100, 200)")
     expect(script).toContain("mouse_event(0x0800, 0, 0, -360") // 垂直滚轮 flag + 向下负值（每格 120）
     // 水平向右：HWHEEL flag + 正值
     await mouseScrollTool.execute({ x: 1, y: 2, direction: "right", amount: 2 }, c)
-    expect(decodeCmd(seenCmd)).toContain("mouse_event(0x1000, 0, 0, 240")
+    expect(await decodeCmd(seenCmd)).toContain("mouse_event(0x1000, 0, 0, 240")
   })
 
   test("mouse_drag presses, interpolates and releases between endpoints", async () => {
@@ -531,7 +538,7 @@ describe("desktop tools", () => {
       },
     })
     const r = await mouseDragTool.execute({ from_x: 10, from_y: 20, to_x: 110, to_y: 220 }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain("mouse_event(0x0002") // 左键按下
     expect(script).toContain("mouse_event(0x0004") // 左键抬起
     expect(script).toContain("$steps = 12") // 插值移动（适配依赖真实轨迹的目标）
@@ -548,17 +555,17 @@ describe("desktop tools", () => {
       },
     })
     await windowStateTool.execute({ action: "minimize", pid: 1234 }, c)
-    expect(decodeCmd(seenCmd)).toContain("ShowWindow($h, 6)") // winLocate 统一 $h（hwnd 优先，pid 回落主窗口）
+    expect(await decodeCmd(seenCmd)).toContain("ShowWindow($h, 6)") // winLocate 统一 $h（hwnd 优先，pid 回落主窗口）
     await windowStateTool.execute({ action: "close", pid: 1234 }, c)
-    expect(decodeCmd(seenCmd)).toContain("ShowWindow($h, 0)") // SW_CLOSE → WM_CLOSE 优雅关闭
+    expect(await decodeCmd(seenCmd)).toContain("ShowWindow($h, 0)") // SW_CLOSE → WM_CLOSE 优雅关闭
     const r = await windowStateTool.execute({ action: "restore" }, ctx(home))
     expect(r.output).toContain("hwnd、pid 或 title")
     // topmost/notopmost 走 SetWindowPos HWND_TOPMOST/NOTOPMOST
     await windowStateTool.execute({ action: "topmost", pid: 1234 }, c)
-    expect(decodeCmd(seenCmd)).toContain("SetWindowPos($h, [IntPtr](-1)")
+    expect(await decodeCmd(seenCmd)).toContain("SetWindowPos($h, [IntPtr](-1)")
     await windowStateTool.execute({ action: "notopmost", hwnd: 987654 }, c)
-    expect(decodeCmd(seenCmd)).toContain("SetWindowPos($h, [IntPtr](-2)")
-    expect(decodeCmd(seenCmd)).toContain("[IntPtr]987654")
+    expect(await decodeCmd(seenCmd)).toContain("SetWindowPos($h, [IntPtr](-2)")
+    expect(await decodeCmd(seenCmd)).toContain("[IntPtr]987654")
   })
 
   test("clipboard_write verifies write-back and previews content", async () => {
@@ -571,7 +578,7 @@ describe("desktop tools", () => {
       },
     })
     const r = await clipboardWriteTool.execute({ text: "给用户复制的内容" }, c)
-    const script = decodeCmd(seenCmd)
+    const script = await decodeCmd(seenCmd)
     expect(script).toContain("Set-Clipboard -Value $want")
     expect(script).toContain("-ceq $want") // 写入回验（剪贴板管理软件拦截防护）
     expect(r.output).toContain("已写入 8 字符")
@@ -713,12 +720,12 @@ describe("vk 解析与修饰键（Windows 增强能力）", () => {
       },
     })
     const r1 = await keyPressTool.execute({ keys: "vk_shift", action: "down" }, c)
-    expect(decodeCmd(seenCmd)).toContain("keybd_event(0x10, 0, 0")
+    expect(await decodeCmd(seenCmd)).toContain("keybd_event(0x10, 0, 0")
     expect(r1.output).toContain("已按住")
     const r2 = await keyPressTool.execute({ keys: "^c", action: "down" }, ctx(home))
     expect(r2.output).toContain("仅支持 vk 虚拟键路径")
     await keyPressTool.execute({ keys: "{F5}" }, c)
-    expect(decodeCmd(seenCmd)).toContain("SendWait") // 原 SendKeys 路径不变
+    expect(await decodeCmd(seenCmd)).toContain("SendWait") // 原 SendKeys 路径不变
   })
 
   test("mouse_click modifiers 注入修饰键按下/逆序抬起；middle/triple 时序", async () => {
@@ -731,14 +738,14 @@ describe("vk 解析与修饰键（Windows 增强能力）", () => {
       },
     })
     await mouseClickTool.execute({ x: 1, y: 2, modifiers: "ctrl+shift" }, c)
-    const d = decodeCmd(seenCmd)
+    const d = await decodeCmd(seenCmd)
     expect(d).toContain("keybd_event(0x11, 0, 0") // ctrl down
     expect(d).toContain("keybd_event(0x10, 0, 0") // shift down
     expect(d.indexOf("keybd_event(0x10, 0, 2") < d.indexOf("keybd_event(0x11, 0, 2")) // 逆序抬起
     await mouseClickTool.execute({ x: 1, y: 2, button: "triple" }, c)
-    expect(decodeCmd(seenCmd).match(/mouse_event\(0x0002/g)?.length).toBe(3) // 三击=3 组 down
+    expect((await decodeCmd(seenCmd)).match(/mouse_event\(0x0002/g)?.length).toBe(3) // 三击=3 组 down
     await mouseClickTool.execute({ x: 1, y: 2, button: "middle" }, c)
-    expect(decodeCmd(seenCmd)).toContain("mouse_event(0x0020") // 中键
+    expect(await decodeCmd(seenCmd)).toContain("mouse_event(0x0020") // 中键
     const bad = await mouseClickTool.execute({ x: 1, y: 2, modifiers: "meta" }, ctx(home))
     expect(bad.output).toContain("modifiers 非法")
   })
@@ -756,13 +763,13 @@ describe("winLocate 与 hwnd 路径（EnumWindows 时代窗口精确指向）", 
       },
     })
     await windowStateTool.execute({ action: "topmost", hwnd: 65834 }, c)
-    const d = decodeCmd(seenCmd)
+    const d = await decodeCmd(seenCmd)
     expect(d).toContain("$h = [IntPtr]65834")
     expect(d).toContain("if ($true)") // 裸 true 在 PS5.1 是命令调用→恒 else——必须 $true
     expect(d).toContain("SetWindowPos($h, [IntPtr](-1)")
     // pid 回归：winLocate 回落 procFilter 路径
     await windowStateTool.execute({ action: "minimize", pid: 1234 }, c)
-    const d2 = decodeCmd(seenCmd)
+    const d2 = await decodeCmd(seenCmd)
     expect(d2).toContain("Get-Process -Id 1234")
     expect(d2).toContain("if (($p -and $p.MainWindowHandle -ne 0))") // cond 被模板包一层括号
     expect(d2).toContain("ShowWindow($h, 6)")
@@ -778,10 +785,45 @@ describe("winLocate 与 hwnd 路径（EnumWindows 时代窗口精确指向）", 
       },
     })
     await windowFocusTool.execute({ hwnd: 100 }, c)
-    expect(decodeCmd(seenCmd)).toContain("$h = [IntPtr]100")
+    expect(await decodeCmd(seenCmd)).toContain("$h = [IntPtr]100")
     await windowMoveTool.execute({ hwnd: 100, x: 5, y: 6 }, c)
-    const d = decodeCmd(seenCmd)
+    const d = await decodeCmd(seenCmd)
     expect(d).toContain("$h = [IntPtr]100")
     expect(d).toContain("SetWindowPos($h, [IntPtr]::Zero, 5, 6")
   })
 })
+
+describe("PowerShell 执行通道（临时 .ps1 文件 + -File）", () => {
+  test("长脚本：命令行不超 cmd 8191 上限、.ps1 带 BOM 落盘、-File 路径双引号包裹", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home)
+    // 构造超长脚本（6KB，旧 EncodedCommand 通道必超 8191 命令行上限）
+    const filler = "#".repeat(6 * 1024)
+    const cmd = await (await import("./desktop_tools")).psCmd(c, filler + "\nWrite-Output ok")
+    expect(cmd).toContain('-File "')
+    expect(cmd).toContain("-ExecutionPolicy Bypass")
+    expect(cmd.length).toBeLessThan(8191) // 通道核心保障：命令行长度与脚本体量解耦
+    expect(cmd).not.toContain("-EncodedCommand")
+    // .ps1 真实落盘且带 BOM（PS 5.1 无 BOM 按 ANSI 解码中文必乱码）
+    const mf = cmd.match(/-File "([^"]+)"/)
+    expect(mf).not.toBeNull()
+    const raw = new Uint8Array(await Bun.file(mf![1]).arrayBuffer())
+    expect(raw[0]).toBe(0xef); expect(raw[1]).toBe(0xbb); expect(raw[2]).toBe(0xbf)
+    const text = new TextDecoder().decode(raw)
+    expect(text.slice(1)).toContain(filler.slice(0, 100))
+    // 脚本落点在会话 tmp/ps-scripts/ 下（会话生命周期内，可清理）
+    expect(mf![1]).toContain("ps-scripts")
+  })
+
+  test("writeFile 失败时兜底回 EncodedCommand（短脚本行为同旧通道）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-desktop-"))
+    const c = ctx(home, { writeFile: async () => { throw new Error("disk full") } })
+    const cmd = await (await import("./desktop_tools")).psCmd(c, 'Write-Output "hello"')
+    expect(cmd).toContain("-EncodedCommand")
+    expect(cmd).not.toContain("-File")
+    // 兜底仍可解码出脚本内容
+    const m = cmd.match(/-EncodedCommand (\S+)/)
+    expect(Buffer.from(m![1], "base64").toString("utf16le")).toContain("hello")
+  })
+})
+
