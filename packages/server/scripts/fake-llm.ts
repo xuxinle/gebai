@@ -71,6 +71,14 @@ const SCENARIOS: Record<string, Step[]> = {
     { text: "分析结论：\n第一行结论\n第二行结论\n第三行结论" },
     { text: "主会话最终回复。" },
   ],
+  // native python 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：python_run 两次调用
+  // （常驻状态跨调用保持）→ 收尾。审批需免审批环境（GEBAI_APPROVAL_SKIP 会话 env）。注意引擎
+  // 路由自愈：python_run 首调自动装载子Agent，无需 agent_load 步骤
+  python: [
+    { toolCall: { id: "c1", name: "python_run", args: { code: "import math\nX = math.pi\nX" } } },
+    { toolCall: { id: "c2", name: "python_run", args: { code: "round(X * 2, 4)" } } },
+    { text: "python 链路验证完成：pi 已算出并加倍。" },
+  ],
   plan: [
     { delayMs: 4000, toolCall: { id: "c1", name: "plan", args: { title: "演示计划", steps: ["第一步：分析", "第二步：执行", "第三步：验证"] } } },
     { text: "计划已批准，开始执行。" },
@@ -122,7 +130,13 @@ Bun.serve({
     if (url.pathname === "/probe") {
       return new Response(PROBE_HTML, { status: 200, headers: { "Content-Type": "text/html" } })
     }
+    // 场景计数重置（e2e 反复跑用）：GET /__reset 归零调用序号（幂等）
+    if (url.pathname === "/__reset") {
+      calls = 0
+      return new Response(JSON.stringify({ ok: true, calls }), { headers: { "Content-Type": "application/json" } })
+    }
     if (url.pathname.endsWith("/chat/completions")) {
+      // 场景计数重置探针（e2e 脚本反复跑同一 fake-llm 实例用）：GET/POST /__reset 归零
       if (SCENARIO === "error") {
         console.log(`[fake-llm] call ${calls + 1} -> HTTP 500`)
         return new Response("fake model failure", { status: 500 })

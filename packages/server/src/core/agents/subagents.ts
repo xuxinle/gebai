@@ -4,6 +4,7 @@ import type { SubAgentDef } from "../base/types"
 import type { ToolRegistry } from "../base/registry"
 import type { SubAgentInfo } from "@gebai/sdk"
 import { parseSubAgentMd } from "./sub-agent-md"
+import { discoverNativeAgents, disposeNativeAgentsNotIn, nativeAgentsEnabled, nativeAgentRoots, nativeAgentsSignature } from "./native-agents"
 
 export interface SubAgentManagerOptions {
   registry: ToolRegistry
@@ -19,6 +20,8 @@ export interface SubAgentManagerOptions {
  *  过滤态入缓存会让一个实例的启停策略泄漏给同进程所有后续实例（跨实例污染）。 */
 let discoveredDefsCache: SubAgentDef[] | null = null
 let discoveredSigCache: string | null = null
+/** native（多语言）子代理目录签名缓存（与 TS 子代理目录签名拼为一套热加载判定）。 */
+let nativeSigCache: string | null = null
 /** 首次扫描的加载错误缓存（与 defs 缓存配套，跨实例水合同源）：name → 失败原因（import 抛错/
  *  缺 def 导出等）。签名未变的后续 discover 直接复用；self_optimize 修复文件后 mtime 变化触发重扫更新。 */
 let discoveredErrorsCache: Map<string, string> | null = null
@@ -54,6 +57,14 @@ export class SubAgentManager {
   private registry: ToolRegistry
   private preloadOverride?: string[]
   private bundledNames: Set<string>
+  /** native（多语言）子代理发现选项（boot 接线注入；测试缺省 undefined——本地形态且非 off 才启用）。
+   *  null = 显式禁用（沙箱模式/GEBAI_NATIVE_AGENTS=off）。 */
+  private nativeAgentsOpts: { spawn?: import("./sidecar").SidecarSpawnFn } | null | undefined
+
+  /** 注入 native 子代理发现选项（boot/compose 接线）。 */
+  setNativeAgentsOpts(opts: { spawn?: import("./sidecar").SidecarSpawnFn } | null): void {
+    this.nativeAgentsOpts = opts
+  }
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
@@ -77,6 +88,7 @@ export class SubAgentManager {
       for (const def of discoveredDefsCache) this.defs.set(def.name, def)
       for (const n of this.removedDefs) this.defs.delete(n)
       this.loadErrors = new Map(discoveredErrorsCache ?? [])
+      await this.discoverNativeIfChanged()
       await this.preload()
       return
     }
@@ -98,6 +110,7 @@ export class SubAgentManager {
       discoveredDefsCache = [...this.defs.values()]
       discoveredSigCache = null
       for (const n of this.removedDefs) this.defs.delete(n)
+      await this.discoverNativeIfChanged()
       await this.preload()
       return
     }
@@ -152,7 +165,35 @@ export class SubAgentManager {
     discoveredSigCache = sig
     discoveredErrorsCache = new Map(this.loadErrors)
     for (const n of this.removedDefs) this.defs.delete(n)
+    await this.discoverNativeIfChanged()
     await this.preload()
+  }
+
+  /** native（多语言）子代理发现（discover 尾部调用）：仅 boot 显式接线（setNativeAgentsOpts）且
+   *  本地形态（非沙箱部署、GEBAI_NATIVE_AGENTS≠off）时启用——测试不注入选项即零影响；
+   *  目录签名变化才重拉起（含进程级边车注册表对账回收）；同名覆盖 TS 子代理（用户自建优先）。
+   *  失败安全：单项启动/握手失败记 loadErrors（模型可见根因）不阻断，整体失败静默跳过。 */
+  private async discoverNativeIfChanged(): Promise<void> {
+    if (this.nativeAgentsOpts == null || !nativeAgentsEnabled()) return
+    const roots = nativeAgentRoots()
+    const nativeSig = await nativeAgentsSignature(roots)
+    if (nativeSigCache !== null && nativeSig === nativeSigCache) return // 未变化：零成本跳过
+    try {
+      const { defs: nativeDefs, errors } = await discoverNativeAgents(this.nativeAgentsOpts ?? {})
+      for (const d of nativeDefs) this.defs.set(d.name, d)
+      for (const [name, err] of errors) this.loadErrors.set(name, err)
+      // 缓存全集同步含 native defs（跨实例水合复用时同样可见）
+      if (discoveredDefsCache) {
+        for (const d of nativeDefs) discoveredDefsCache = [...discoveredDefsCache.filter((x) => x.name !== d.name), d]
+      }
+      if (discoveredErrorsCache) {
+        for (const [name, err] of errors) discoveredErrorsCache.set(name, err)
+      }
+      disposeNativeAgentsNotIn(nativeDefs.map((d) => d.name))
+      nativeSigCache = nativeSig
+    } catch (err) {
+      console.warn(`[subagents] native 子代理发现失败（已跳过）: ${(err as Error).message}`)
+    }
   }
 
   /** 热加载检查：目录签名变化时重新扫描（幂等、未变化时零成本目录遍历）。装载/新任务前调用——

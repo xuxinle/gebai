@@ -157,15 +157,18 @@ console.log(
  * 运行时资源复制：浏览器桥接驱动（core/browser/driver.mjs，playwright/reverse_site 子Agent
  * 与透明浏览器代理共用）与 CV GPU sidecar 驱动（core/cv/cv-driver.mjs，检测重模型的原生推理
  * 子进程）不能被 bun build 内联（需保持独立文件供 node 子进程运行），构建时复制到 dist/
- * 与产物同目录。幂等：typecheck 等场景下 dist/ 不存在也会创建（产物目录已 gitignore）。
+ * 与产物同目录；多语言子代理源（native-agents/ 整树：manifest + 任意语言驱动脚本 + 提示词）
+ * 同理不能内联，整树复制到 dist/native-agents/。幂等：typecheck 等场景下 dist/ 不存在也会创建
+ * （产物目录已 gitignore）。
  */
 const distDir = join(root, "dist")
 try {
-  const { copyFile, mkdir } = await import("node:fs/promises")
+  const { copyFile, mkdir, cp } = await import("node:fs/promises")
   await mkdir(distDir, { recursive: true })
   await copyFile(join(root, "src", "core", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
   await copyFile(join(root, "src", "core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
-  console.log(`[build-subagents] copied browser driver + cv sidecar driver -> ${distDir}`)
+  await cp(join(root, "native-agents"), join(distDir, "native-agents"), { recursive: true })
+  console.log(`[build-subagents] copied browser driver + cv sidecar driver + native-agents -> ${distDir}`)
 } catch (err) {
   console.warn(`[build-subagents] 驱动复制失败（dist 模式下对应能力将不可用）: ${err instanceof Error ? err.message : err}`)
 }

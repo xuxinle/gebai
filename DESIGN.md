@@ -46,6 +46,11 @@ GEBAI_HOME/
 ├── conn-state.json        # WS 连接状态（每用户当前会话，防抖落盘；重连/重启后恢复，见「WebSocket」）
 ├── tools/                 # 公用 HTML 小工具（widgets 子Agent 保存，全局共享，按名称哈希分片）
 │   └── {h0}/{h1}/{name}.json   # { name, html, scope:"public", owner, createdAt, updatedAt }
+├── agents/                # 用户自建多语言子代理（放置即发现；同名覆盖内置，见「多语言子代理」）
+│   └── {name}/            # agent.json + 任意语言驱动脚本 + PROMPT.md
+├── vendor/native-agents/  # 内置多语言子代理源（仅二进制形态：安装包预置物化；源码/dist 形态用仓库内目录）
+├── venv/                  # Python 虚拟环境（python 子代理 python_pip 自动创建，解释器解析优先）
+├── requirements.txt       # Python 依赖清单（python_pip install/freeze 维护）
 └── users/                 # 用户数据目录（多用户安全隔离）
     ├── registry.json      # 用户注册表（服务模式）：用户名 → 加盐哈希/角色/状态
     └── {user}/            # 每个用户独立的数据目录
@@ -362,6 +367,8 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_CV_DETECT_BACKEND` / `GEBAI_CV_OCR_BACKEND` | 细分覆盖（优先于全局）：检测/OCR 各自独立选择后端，取值同 `GEBAI_CV_BACKEND` | 空 |
 | `GEBAI_CV_EP` | GPU sidecar 执行提供者（全部 CV 推理共用）：`auto`（默认，Windows dml→cuda / macOS coreml→cuda 逐级探测、全失败 native cpu 兜底并如实上报）/ `dml` / `cuda` / `coreml` / `cpu`（`GEBAI_CV_DETECT_EP` 为早期别名兼容） | `auto` |
 | `GEBAI_CV_ORT_NODE_DIR` | onnxruntime-node 解析目录（包根或其父目录；缺省按 `{GEBAI_HOME}/vendor/onnxruntime-node` → `{GEBAI_HOME}/models/vendor/node_modules/onnxruntime-node`（**资源子仓库约定位置，放入即生效**，模型/原生依赖集中存放于独立 git 仓库 `models/`，见其 README）→ node_modules 解析；不可用时检测自动回落 wasm，见「小模型识别」检测分层后端） | 空 |
+| `GEBAI_NATIVE_AGENTS` | 多语言子代理总开关：`off`/`false`/`0` 显式禁用（发现器整体不启动，native 子代理完全不可见）；沙箱启用（服务端部署形态）同样自动禁用——多语言子代理仅限本地使用（见「多语言子代理」） | 空（本地形态默认启用） |
+| `GEBAI_PYTHON_DIR` | 内置 python 子代理的 `{python}` 占位解析优先项（目录含解释器）；缺省按 `{GEBAI_HOME}/venv` → 系统 PATH 顺序解析 | 空 |
 | `GEBAI_SIGNUP_MODE` | 注册审批模式：`open`（默认，注册即用）/ `approval`（注册待 admin 审批——用户置 `disabled+pending` 待审、不可登录，admin 在用户管理页批准/拒绝） | `open` |
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
 | `GEBAI_MINIMAL_MODE` | 会话级极简模式（`true` 仅启用 `sh` 与 `edit` 工具（外加 `full_mode` 切换入口），其余工具从 schema 移除且调用被阻止，系统提示词同步极简化；前端「极简模式」开关同步写入，见「工具选择」） | 空 |
@@ -1085,6 +1092,18 @@ export const preload = false
 | `feishu_group` | chats_list/chat_info/members_list/user_info/message_send/chat_create/chat_update/chat_members_add/chat_members_remove/chat_disband | 写操作全部（发消息/建群/改群/拉人/移人/解散） | ✗ | 飞书群基础能力（群列表/详情/成员查询（open_id+姓名——@特定人与 cron 通知 at 名单取材）/用户信息/群内发消息（at 标签）/建群改群/成员增删/解散；需 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_* 凭证） |
 | `cron` | add/list/update/trigger/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`） | add+update+remove+trigger | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
+| `python`（native） | run/pip/status（→ `python_run`/`python_pip`/`python_status`；边车常驻进程动态上报） | 全部 | ✗ | 多语言子代理首个内置：Python 生态接入（常驻命名空间执行——import 一次多次复用，AI 库秒级导入成本只付一次；venv 落 `{GEBAI_HOME}/venv` + requirements.txt 依赖管理；协议层纯标准库；见「多语言子代理」） |
+
+#### 多语言子代理（native agents：边车协议 + 自动发现启动注册）
+
+任意语言（Python/C++/Go/…）实现的子代理：**放置即自动发现 → 启动边车进程 → 握手拉取工具清单 → 注册为标准子代理**（`agent_list` 可见、`agent_load` 装载、`agent_run` 委派——与 TS 子代理完全同构）。
+
+- **manifest 发现**（`core/agents/native-agents.ts`）：扫描内置源 `native-agents/`（dist 构建时由 build-subagents 整树复制；二进制形态物化 `{GEBAI_HOME}/vendor/native-agents/`）与用户自建 `{GEBAI_HOME}/agents/{name}/agent.json`（同名覆盖内置）；manifest 字段/占位符（`{python}`/`{driver}`/`{GEBAI_HOME}`）见 `native-agents/README.md` 协议规范
+- **边车协议 v1**（语言无关，NDJSON over stdio）：`init`（上报 name/protocol，须与 manifest 一致）→ `tools.list`（工具清单：裸名 + JSON Schema 原样透传）→ `tool.call`（驱动侧执行返回 `{output, data?}`）；stdout 只写协议行、stderr 自由排障、stdin EOF 即退出防孤儿
+- **边车宿主**（`core/agents/sidecar.ts`，进程管理对齐 CV sidecar）：惰性启动/启动串行化/请求 id 配对并发复用；请求超时杀进程重启；**崩溃自愈**（意外退出自动重启一次 + 在途请求重发一次；连续快速退出 3 次放弃自动重启防抖动风暴，下次调用再拉起）；exit hook + 驱动 EOF 双保险；stderr 环形缓冲
+- **生命周期集成**：`SubAgentManager.discover()` 尾部并行启动（boot 显式接线后生效——`setNativeAgentsOpts`，测试不注入零影响）；manifest/驱动/提示词文件变化纳入热加载签名（重扫重注册，进程级边车注册表对账回收旧进程）；pip 安装成功后驱动主动退出 → 宿主自愈重启 → 命令工厂重新解析占位符（venv 创建后自动切换 venv 解释器，无需重启服务）
+- **门控与边界**：仅本地形态（沙箱启用即禁用；`GEBAI_NATIVE_AGENTS=off` 显式关闭）；边车工具恒需审批；单项失败（manifest 损坏/启动/握手失败）记 loadErrors 模型可见根因，不阻断其他子代理；工具名驱动侧为裸名（注册表自动加 `{agent}_` 前缀）
+- **内置 Python 子代理**（`native-agents/python/`）：`python_run`（常驻命名空间 REPL：末行独立表达式求值 repr 回显，session 键隔离命名空间，stdout/stderr 捕获，timeout 秒默认 300）、`python_pip`（install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载；freeze 快照写回；status 查看）、`python_status`（边车/venv/包状态）；解释器解析 `GEBAI_PYTHON_DIR` → `{GEBAI_HOME}/venv` → 系统 PATH；系统提示词（PROMPT.md，frontmatter 剥离）引导 AI 库使用
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 

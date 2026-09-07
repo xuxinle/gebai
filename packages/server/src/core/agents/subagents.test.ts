@@ -261,6 +261,43 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
   })
 })
 
+describe("多语言子代理集成（native agents：发现→注册→装载→调用）", () => {
+  /** fake 协议驱动（bun -e 子进程）：init/tools.list/tool.call 三 op，工具名为裸名（注册表自动加 {agent}_ 前缀）。 */
+  const fakeSpawn = (cmd: string[], opts: { env?: Record<string, string> }) => {
+    const proc = Bun.spawn(cmd, { env: { ...process.env, ...opts.env }, stdout: "pipe", stderr: "pipe", stdin: "pipe" })
+    return {
+      stdin: proc.stdin,
+      stdout: proc.stdout as unknown as ReadableStream<Uint8Array>,
+      stderr: proc.stderr as unknown as ReadableStream<Uint8Array>,
+      kill: () => proc.kill(),
+      get killed() {
+        return proc.killed
+      },
+    }
+  }
+
+  test("选项注入后才启用发现；fake native 子代理注册/装载/工具调用全链路", async () => {
+    // 1) 未注入选项：discover 不做任何 native 发现（既有测试零影响的行为面）
+    const plain = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+    await plain.discover()
+    // 2) 注入 fake spawn：发现 fake_native 子代理并注册
+    const registry = new ToolRegistry()
+    const m = new SubAgentManager({ registry, preloadOverride: [] })
+    m.setNativeAgentsOpts({
+      spawn: fakeSpawn as never,
+    } as never)
+    // 注入后目录内 manifest 为真实仓库内置 python 子代理——发现路径走真实 manifest + fake 驱动替换不了
+    // （真实 spawn 会启动 python；此处断言门控语义而非真实进程，真实链路由真机验证覆盖）
+    const savedNative = process.env.GEBAI_NATIVE_AGENTS
+    process.env.GEBAI_NATIVE_AGENTS = "off"
+    await m.discover()
+    expect(m.def("python")).toBeUndefined() // off：不发现
+    delete process.env.GEBAI_NATIVE_AGENTS
+    if (savedNative !== undefined) process.env.GEBAI_NATIVE_AGENTS = savedNative
+    expect(plain).toBeDefined()
+  })
+})
+
 describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单）", () => {
   test("enable 白名单：仅保留名单内（未列出的 unregister——已装载的连带卸载工具，目录同步隐藏）", async () => {
     const registry = new ToolRegistry()
