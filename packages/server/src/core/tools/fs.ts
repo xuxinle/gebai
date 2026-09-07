@@ -980,17 +980,26 @@ export const editTool: Tool = {
     }
     // 防陈旧改守卫（与 write 防陈旧覆盖同规则）：内容自本会话上次读取/写入后已漂移 → 拒绝并引导重读——
     // patch 的行号模糊容错可对漂移内容误命中，edit 的唯一性匹配失败提示也远不如陈旧提示直接
-    // （指纹边界 BOM 无关，此处传去 BOM 正文即可）
+    // （指纹边界 BOM 无关，此处传去 BOM 正文——行尾归一在守卫之后，比对用磁盘原始行尾）
     if (ctx.fileGuard?.staleSinceRead(path, content)) {
       return {
         output: `edit 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再修改。`,
       }
     }
+    // 行尾感知（与 BOM 感知同构，置于守卫后——指纹比对用磁盘原始行尾）：Windows 检出文件多为 CRLF，
+    // 而模型提供的 old_string/new_string 几乎恒为 LF——多行片段精确匹配必失配。
+    // 匹配在 LF 归一空间进行，写回按原文件主导行尾还原（新内容保持与文件一致的行尾风格）。
+    const crlfCount = (content.match(/\r\n/g) || []).length
+    const lfOnlyCount = (content.match(/(?<!\r)\n/g) || []).length
+    const hadCrlf = crlfCount > 0 && crlfCount >= lfOnlyCount
+    if (hadCrlf) content = content.replace(/\r\n/g, "\n")
     const edits = (args.edits as Array<{ old_string: string; new_string: string; replace_all?: boolean }>) || []
     const applied: string[] = []
     for (const [idx, e] of edits.entries()) {
-      const old_string = String(e.old_string ?? "")
-      const new_string = String(e.new_string ?? "")
+      // 行尾归一（匹配空间统一 LF）：模型给的 old/new_string 可能是 LF（常见）或 CRLF（少见），
+      // 与文件归一后的 LF 空间对齐——两个方向的自适应都成立；写回时按文件原行尾还原
+      const old_string = String(e.old_string ?? "").replace(/\r\n/g, "\n")
+      const new_string = String(e.new_string ?? "").replace(/\r\n/g, "\n")
       const nth = `第 ${idx + 1} 项`
       if (!old_string) {
         throw new Error(`修改失败: ${nth} old_string 为空（old_string 必须是文件中的非空原文片段；新建文件用 write）`)
@@ -1019,11 +1028,12 @@ export const editTool: Tool = {
       content = e.replace_all === true ? content.split(old_string).join(new_string) : content.replace(old_string, new_string)
       applied.push(`${idx + 1}) 行 ${shown.join("、")}${lineNos.length > 8 ? `（共 ${lineNos.length} 处）` : ""}`)
     }
-    await ctx.writeFile(path, (hadBom ? "\uFEFF" : "") + content)
-    // 修改后内容即已掌握（模型无需重读验证），登记已读（指纹边界 BOM 无关，传去 BOM 正文即可）
-    ctx.fileGuard?.markRead(path, content)
+    const finalContent = hadCrlf ? content.replace(/\n/g, "\r\n") : content
+    await ctx.writeFile(path, (hadBom ? "\uFEFF" : "") + finalContent)
+    // 修改后内容即已掌握（模型无需重读验证），登记已读（指纹按落盘内容登记——行尾还原后与磁盘一致）
+    ctx.fileGuard?.markRead(path, finalContent)
     // 产物块（与 read/write 同款）：修改后的文件内容卡（弹窗查看模式收敛为文件链接）
-    const blocks = artifactBlocks(previewLogicalPath(path, ctx), content)
+    const blocks = artifactBlocks(previewLogicalPath(path, ctx), finalContent)
     return { output: `已对 ${args.path} 应用 ${edits.length} 处修改：${applied.join("；")}`, blocks }
   },
 }
@@ -1126,7 +1136,7 @@ export const patchTool: Tool = {
     const guardMsg = await ctx.writeGuard?.(absList)
     if (guardMsg) return { output: guardMsg }
     // 预检 + 应用（内存中逐文件完成，全部通过才落盘——跨文件原子）
-    const planned: Array<{ target: string; abs: string; result: string; applied: AppliedHunk[]; bom: boolean }> = []
+    const planned: Array<{ target: string; abs: string; result: string; applied: AppliedHunk[]; bom: boolean; crlf: boolean }> = []
     for (const [ti, target] of order.entries()) {
       const abs = absList[ti]
       const parts = byTarget.get(target)!
@@ -1151,10 +1161,16 @@ export const patchTool: Tool = {
         return { output: `patch 拒绝：${target} 已存在，但本会话尚未读取过其内容（防盲改）。请先 read 该文件确认当前内容后再打补丁；read/edit/patch/write 成功过的文件视为已读。` }
       }
       // 防陈旧改守卫（与 write/edit 同规则）：内容自本会话上次读取/写入后已漂移 → 拒绝并引导重读——
-      // 行号模糊容错可对漂移内容误命中错位应用（指纹边界 BOM 无关，传去 BOM 正文即可）
+      // 行号模糊容错可对漂移内容误命中错位应用（指纹边界 BOM 无关，传去 BOM 正文——行尾归一在守卫后）
       if (exists && ctx.fileGuard?.staleSinceRead(abs, content)) {
         return { output: `patch 拒绝：${target} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再打补丁。` }
       }
+      // 行尾感知（与 edit 同构）：补丁行经 parsePatch 已 strip \r，CRLF 文件行内带 \r 永远失配——
+      // 匹配在 LF 归一空间进行，写回按原文件主导行尾还原
+      const crlfCount = (content.match(/\r\n/g) || []).length
+      const lfOnlyCount = (content.match(/(?<!\r)\n/g) || []).length
+      const crlf = crlfCount > 0 && crlfCount >= lfOnlyCount
+      if (crlf) content = content.replace(/\r\n/g, "\n")
       let applied: AppliedHunk[] = []
       for (const [pi, part] of parts.entries()) {
         const r = applyPatch(content, part)
@@ -1166,7 +1182,7 @@ export const patchTool: Tool = {
         content = r.result
         applied = applied.concat(r.applied)
       }
-      planned.push({ target, abs, result: content, applied, bom })
+      planned.push({ target, abs, result: crlf ? content.replace(/\n/g, "\r\n") : content, applied, bom, crlf })
     }
     if (args.dry_run === true) {
       const lines = planned.map((p) => `${p.target}：${describeAppliedPatch(p.applied)}`)

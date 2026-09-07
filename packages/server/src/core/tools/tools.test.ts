@@ -2929,3 +2929,42 @@ describe("产物块解析路径（read/write 产物 file 块携带可预览路�
     }
   })
 })
+
+test("edit/patch 行尾自适应：CRLF 文件 × LF old_string/补丁——匹配成功、行尾保持、守卫不误判", async () => {
+  const home = mkdtempSync(join(tmpdir(), "gebai-eol-"))
+  const c = ctx(home)
+  const rawText = async (p: string) => (await import("node:fs/promises")).readFile(p, "utf8")
+  // CRLF 文件（Windows 检出常态）
+  writeFileSync(join(c.workdir, "crlf.txt"), "alpha\r\nbeta\r\ngamma\r\n")
+  await readTool.execute({ path: "crlf.txt" }, c)
+  // edit：LF old_string 匹配 CRLF 文件（修复前必失败——「空白/缩进不一致」误提示）
+  const r1 = await editTool.execute({ path: "crlf.txt", edits: [{ old_string: "beta\ngamma", new_string: "BETA\nGAMMA" }] }, c)
+  expect(r1.output).toContain("已对 crlf.txt")
+  const after1 = await rawText(join(c.workdir, "crlf.txt"))
+  expect(after1).toBe("alpha\r\nBETA\r\nGAMMA\r\n") // 行尾保持 CRLF（不混入 LF）
+  // edit 后守卫不误判陈旧（指纹按落盘内容登记）：紧接着再 edit 一次
+  const r2 = await editTool.execute({ path: "crlf.txt", edits: [{ old_string: "alpha\r\nBETA", new_string: "ALPHA\r\nBETA" }] }, c)
+  expect(r2.output).toContain("已对 crlf.txt") // 修复前此处会误报「内容已被修改」
+  // CRLF old_string 同样可用（双向自适应：精确匹配兜底优先）
+  // patch：LF 补丁打 CRLF 文件（修复前 hunk 必不匹配 + 行尾被写坏为 LF）
+  writeFileSync(join(c.workdir, "crlf2.txt"), "line1\r\nline2\r\nline3\r\n")
+  await readTool.execute({ path: "crlf2.txt" }, c)
+  const r3 = await patchTool.execute({ path: "crlf2.txt", patch: "@@ -2,1 +2,1 @@\n-line2\n+LINE2\n" }, c)
+  expect(r3.output).toContain("patch 已写入")
+  const after3 = await rawText(join(c.workdir, "crlf2.txt"))
+  expect(after3).toBe("line1\r\nLINE2\r\nline3\r\n")
+  // LF 文件不受影响（回归：无 CRLF 时不做任何变换）
+  await writeTool.execute({ path: "lf.txt", content: "a\nb\n" }, c)
+  const r4 = await editTool.execute({ path: "lf.txt", edits: [{ old_string: "a\nb", new_string: "A\nB" }] }, c)
+  expect(r4.output).toContain("已对 lf.txt")
+  expect(await rawText(join(c.workdir, "lf.txt"))).toBe("A\nB\n")
+  // BOM + CRLF 叠加：两者同时保留
+  writeFileSync(join(c.workdir, "bom-crlf.txt"), "\uFEFFheader\r\nbody\r\n")
+  await readTool.execute({ path: "bom-crlf.txt" }, c)
+  const r5 = await editTool.execute({ path: "bom-crlf.txt", edits: [{ old_string: "header\nbody", new_string: "HEADER\nBODY" }] }, c)
+  expect(r5.output).toContain("已对 bom-crlf.txt")
+  const after5 = await rawText(join(c.workdir, "bom-crlf.txt"))
+  expect(after5).toBe("\uFEFFHEADER\r\nBODY\r\n")
+  cleanup(home)
+})
+
