@@ -4,7 +4,7 @@ import type { SubAgentDef } from "../base/types"
 import type { ToolRegistry } from "../base/registry"
 import type { SubAgentInfo } from "@gebai/sdk"
 import { parseSubAgentMd } from "./sub-agent-md"
-import { discoverNativeAgents, disposeNativeAgentsNotIn, nativeAgentsEnabled, nativeAgentRoots, nativeAgentsSignature } from "./native-agents"
+import { discoverNativeAgents, disposeNativeAgentsNotIn, nativeAgentsEnabled, nativeAgentRoots, nativeAgentsSignature, type NativeAgentRunnerOptions } from "./native-agents"
 
 export interface SubAgentManagerOptions {
   registry: ToolRegistry
@@ -59,15 +59,18 @@ export class SubAgentManager {
   private bundledNames: Set<string>
   /** native（多语言）子代理发现选项（boot 接线注入；测试缺省 undefined——本地形态且非 off 才启用）。
    *  null = 显式禁用（沙箱模式/GEBAI_NATIVE_AGENTS=off）。 */
-  private nativeAgentsOpts: { spawn?: import("./sidecar").SidecarSpawnFn } | null | undefined
+  private nativeAgentsOpts: NativeAgentRunnerOptions | null | undefined
 
-  /** 注入 native 子代理发现选项（boot/compose 接线）。 */
-  setNativeAgentsOpts(opts: { spawn?: import("./sidecar").SidecarSpawnFn } | null): void {
+  /** 注入 native 子代理发现选项（boot/compose 接线；roots 覆盖发现根目录供测试隔离）。 */
+  setNativeAgentsOpts(opts: NativeAgentRunnerOptions | null): void {
     this.nativeAgentsOpts = opts
   }
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
+  /** 上一次 native 发现扫描的名单（对账基线：本次消失的从中移除——目录删除即失效）。 */
+  private lastNativeNames: Set<string> | null = null
+  private lastNativeNamesPrev: Set<string> | null = null
   /** 最近一次扫描中加载失败的子Agent（name → 失败原因）：模型侧可见（load/agent_run 的未知子Agent
    *  错误附原因），self_optimize 写错文件（import 抛错/缺 def 导出）能立即看到根因并修复——
    *  仅 console.warn 时模型不可见，自修复闭环断在「未知子Agent」无解释。 */
@@ -175,17 +178,27 @@ export class SubAgentManager {
    *  失败安全：单项启动/握手失败记 loadErrors（模型可见根因）不阻断，整体失败静默跳过。 */
   private async discoverNativeIfChanged(): Promise<void> {
     if (this.nativeAgentsOpts == null || !nativeAgentsEnabled()) return
-    const roots = nativeAgentRoots()
+    const roots = this.nativeAgentsOpts.roots ?? nativeAgentRoots()
     const nativeSig = await nativeAgentsSignature(roots)
     if (nativeSigCache !== null && nativeSig === nativeSigCache) return // 未变化：零成本跳过
     try {
       const { defs: nativeDefs, errors } = await discoverNativeAgents(this.nativeAgentsOpts ?? {})
+      // 对账：上次存在、本次消失的 native 子代理从 defs 移除（目录删除即失效；边车由 disposeNativeAgentsNotIn 回收）。
+      // 仅移除「本管理器上一次发现的 native 名单」里的名字——不碰 TS 子代理与测试桩手工 register 的定义
+      const keep = new Set(nativeDefs.map((d) => d.name))
+      for (const n of this.lastNativeNames ?? []) {
+        if (!keep.has(n)) this.defs.delete(n)
+      }
+      this.lastNativeNames = keep
       for (const d of nativeDefs) this.defs.set(d.name, d)
       for (const [name, err] of errors) this.loadErrors.set(name, err)
-      // 缓存全集同步含 native defs（跨实例水合复用时同样可见）
+      // 缓存全集同步含 native defs（跨实例水合复用时同样可见）：先移除消失项再合入新名单
       if (discoveredDefsCache) {
         for (const d of nativeDefs) discoveredDefsCache = [...discoveredDefsCache.filter((x) => x.name !== d.name), d]
+        const nk = keep
+        discoveredDefsCache = discoveredDefsCache.filter((x) => !(this.lastNativeNamesPrev?.has(x.name) && !nk.has(x.name)))
       }
+      this.lastNativeNamesPrev = new Set(keep)
       if (discoveredErrorsCache) {
         for (const [name, err] of errors) discoveredErrorsCache.set(name, err)
       }
@@ -199,13 +212,17 @@ export class SubAgentManager {
   /** 热加载检查：目录签名变化时重新扫描（幂等、未变化时零成本目录遍历）。装载/新任务前调用——
    *  已装载会话沿用旧定义（工具注册与注入的提示词保持稳定），新定义对未装载与新会话生效。
    *  仅校验既有扫描结果（进程内从未 discover 过时不主动发起首次扫描——生产由启动 discover 负责，
-   *  测试桩手工 register 的管理器不因 load 意外扫入真实子Agent）。 */
+   *  测试桩手工 register 的管理器不因 load 意外扫入真实子Agent）。TS 签名与 native 签名各自判定：
+   *  TS 变化走全量 discover（尾部含 native 检查），仅 native 变化只重拉 native（幂等跳过 TS 扫描）。 */
   async refreshIfChanged(): Promise<void> {
     if (!discoveredDefsCache) return
     const dir = join(import.meta.dirname, "..", "..", "sub-agents")
     const sig = await subagentsDirSignature(dir)
-    if (sig === null || sig === discoveredSigCache) return
-    await this.discover()
+    if (sig !== null && sig !== discoveredSigCache) {
+      await this.discover()
+      return
+    }
+    await this.discoverNativeIfChanged()
   }
 
   /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description/dependencies）。

@@ -24,6 +24,9 @@ export function registerToolRoutes(rc: RouteCtx): void {
     return c.json({ ok: true })
   })
 
-  // Sub-agents
-  app.get("/api/v1/sub-agents", async (c) => c.json(d.subAgents.list()))
+  // Sub-agents：响应前惰性热加载检查（目录签名未变时零成本 stat；放置新 native 子代理目录后无需重启即可出现）
+  app.get("/api/v1/sub-agents", async (c) => {
+    await d.subAgents.refreshIfChanged()
+    return c.json(d.subAgents.list())
+  })
 }

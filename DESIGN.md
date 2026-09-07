@@ -1099,9 +1099,10 @@ export const preload = false
 任意语言（Python/C++/Go/…）实现的子代理：**放置即自动发现 → 启动边车进程 → 握手拉取工具清单 → 注册为标准子代理**（`agent_list` 可见、`agent_load` 装载、`agent_run` 委派——与 TS 子代理完全同构）。
 
 - **manifest 发现**（`core/agents/native-agents.ts`）：扫描内置源 `native-agents/`（dist 构建时由 build-subagents 整树复制；二进制形态物化 `{GEBAI_HOME}/vendor/native-agents/`）与用户自建 `{GEBAI_HOME}/agents/{name}/agent.json`（同名覆盖内置）；manifest 字段/占位符（`{python}`/`{driver}`/`{GEBAI_HOME}`）见 `native-agents/README.md` 协议规范
-- **边车协议 v1**（语言无关，NDJSON over stdio）：`init`（上报 name/protocol，须与 manifest 一致）→ `tools.list`（工具清单：裸名 + JSON Schema 原样透传）→ `tool.call`（驱动侧执行返回 `{output, data?}`）；stdout 只写协议行、stderr 自由排障、stdin EOF 即退出防孤儿
+- **边车协议 v1**（语言无关，NDJSON over stdio）：`init`（上报 name/protocol，须与 manifest 一致）→ `tools.list`（工具清单：裸名 + JSON Schema 原样透传）→ `tool.call`（驱动侧执行返回 `{output, data?}`）；stdout 只写协议行、stderr 自由排障、stdin EOF 即退出防孤儿；**行尾容忍 CRLF**（Windows 驱动 text-mode stdout 默认翻译 `\n` 为 `\r\n`，宿主行解析剥尾部 `\r`——跨语言驱动不因平台换行约定挂起）
 - **边车宿主**（`core/agents/sidecar.ts`，进程管理对齐 CV sidecar）：惰性启动/启动串行化/请求 id 配对并发复用；请求超时杀进程重启；**崩溃自愈**（意外退出自动重启一次 + 在途请求重发一次；连续快速退出 3 次放弃自动重启防抖动风暴，下次调用再拉起）；exit hook + 驱动 EOF 双保险；stderr 环形缓冲
-- **生命周期集成**：`SubAgentManager.discover()` 尾部并行启动（boot 显式接线后生效——`setNativeAgentsOpts`，测试不注入零影响）；manifest/驱动/提示词文件变化纳入热加载签名（重扫重注册，进程级边车注册表对账回收旧进程）；pip 安装成功后驱动主动退出 → 宿主自愈重启 → 命令工厂重新解析占位符（venv 创建后自动切换 venv 解释器，无需重启服务）
+- **生命周期集成**：`SubAgentManager.discover()` 尾部并行启动（boot 显式接线后生效——`setNativeAgentsOpts`，测试不注入零影响；`roots` 选项可覆盖发现根供测试隔离）；manifest/驱动/提示词文件变化纳入热加载签名（重扫重注册，**目录删除对账回收**——上次名单中本次消失的从 defs 移除，进程级边车注册表同步回收旧进程）；**TS 签名与 native 签名各自判定**——TS 目录未变而仅 native 变化时 `refreshIfChanged` 只重拉 native（幂等跳过 TS 扫描），REST `GET /api/v1/sub-agents` 响应前惰性调用 `refreshIfChanged`（放置新目录即出现在列表，无需重启）；pip 安装成功后驱动主动退出 → 宿主自愈重启 → 命令工厂重新解析占位符（venv 创建后自动切换 venv 解释器，无需重启服务）
+- **边车环境**：基于宿主进程 env 继承基础变量（PATH/SYSTEMROOT 等——Windows 下 python 编码/subprocess 初始化依赖 SYSTEMROOT，极小 env 会启动即卡死无报错）+ `GEBAI_HOME` + manifest env 覆盖同名项
 - **门控与边界**：仅本地形态（沙箱启用即禁用；`GEBAI_NATIVE_AGENTS=off` 显式关闭）；边车工具恒需审批；单项失败（manifest 损坏/启动/握手失败）记 loadErrors 模型可见根因，不阻断其他子代理；工具名驱动侧为裸名（注册表自动加 `{agent}_` 前缀）
 - **内置 Python 子代理**（`native-agents/python/`）：`python_run`（常驻命名空间 REPL：末行独立表达式求值 repr 回显，session 键隔离命名空间，stdout/stderr 捕获，timeout 秒默认 300）、`python_pip`（install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载；freeze 快照写回；status 查看）、`python_status`（边车/venv/包状态）；解释器解析 `GEBAI_PYTHON_DIR` → `{GEBAI_HOME}/venv` → 系统 PATH；系统提示词（PROMPT.md，frontmatter 剥离）引导 AI 库使用
 

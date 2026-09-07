@@ -147,6 +147,8 @@ export interface NativeAgentRunnerOptions {
   resolvePython?: () => string[] | null
   /** 跳过边车启动握手（单测：只验证 manifest 解析与 def 构造）。 */
   skipHandshake?: boolean
+  /** 覆盖发现根目录（测试隔离；缺省 nativeAgentRoots()——内置 + {GEBAI_HOME}/agents）。 */
+  roots?: string[]
   env?: Record<string, string>
 }
 
@@ -173,7 +175,9 @@ export async function launchNativeAgent(
     systemPrompt = `你是多语言子代理 ${manifest.name}。${manifest.description}`
   }
   const cwd = manifest.cwd ? manifest.cwd.replace(/\{GEBAI_HOME\}/g, home) : dir
-  const sidecarEnv: Record<string, string> = { GEBAI_HOME: home, ...(manifest.env ?? {}) }
+  // 基础环境继承：保留 PATH/SYSTEMROOT 等进程基础变量（Windows 下 python 编解码/subprocess 初始化依赖
+  // SYSTEMROOT；极小 env 会让驱动启动即卡死无报错），manifest env 覆盖同名项
+  const sidecarEnv: Record<string, string> = { ...process.env, GEBAI_HOME: home, ...(manifest.env ?? {}) }
   const sidecar = new AgentSidecar({
     command: () => {
       // 每次启动重新解析占位符（venv 创建后边车重启自动切换解释器）
@@ -250,7 +254,7 @@ export function nativeAgentsEnabled(): boolean {
 export async function discoverNativeAgents(
   opts: NativeAgentRunnerOptions = {},
 ): Promise<{ defs: SubAgentDef[]; errors: Array<[string, string]> }> {
-  const roots = nativeAgentRoots()
+  const roots = opts.roots ?? nativeAgentRoots()
   const found = await scanManifestDirs(roots)
   const byName = new Map<string, { dir: string; raw: string }>()
   const parsed: Array<{ dir: string; raw: string; name: string }> = []

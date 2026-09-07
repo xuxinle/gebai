@@ -382,4 +382,81 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
     // 不传会话过滤：按进程装载状态（兼容旧调用方/测试桩）
     expect(mgr.systemPromptInjection()).not.toContain("- code:")
   })
+
+  test("native 目录热加载：refreshIfChanged 在 TS 签名未变时也检查 native 签名（放置新目录即生效，无需重启）", async () => {
+    // fake spawn（bun -e 驱动，协议同 native-agents/README）：两个同语言子代理先后放置，
+    // 验证 ①多子代理并存注册 ②后放置的目录经 refreshIfChanged 被发现（修复前 TS 签名未变直接 return，
+    // native 永不重扫）③对账回收（目录删除后 dispose）
+    const fakeSpawn = (cmd: string[], opts: { env?: Record<string, string> }) => {
+      const proc = Bun.spawn(cmd, { env: { ...process.env, ...opts.env }, stdout: "pipe", stderr: "pipe", stdin: "pipe" })
+      return {
+        stdin: proc.stdin,
+        stdout: proc.stdout as unknown as ReadableStream<Uint8Array>,
+        stderr: proc.stderr as unknown as ReadableStream<Uint8Array>,
+        kill: () => proc.kill(),
+        get killed() {
+          return proc.killed
+        },
+      }
+    }
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    const { tmpdir } = await import("node:os")
+    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-native-hot-"))
+    // fake 驱动：python 脚本（与官方驱动同进程模式，避免 bun-on-bun 边车组合的平台差异）
+    const driver = join(fakeRoot, "drv.py")
+    writeFileSync(
+      driver,
+      [
+        "import json, os, sys",
+        "sys.stdout.reconfigure(encoding=\"utf-8\", newline=chr(10))",
+        "sys.stdin.reconfigure(encoding=\"utf-8\")",
+        "TOOLS = [{\"name\": \"foo\", \"description\": \"echo\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}]",
+        "def send(o):",
+        "    sys.stdout.write(json.dumps(o) + chr(10))",
+        "    sys.stdout.flush()",
+        "send({\"op\": \"init\", \"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1, \"tools\": TOOLS})",
+        "for line in sys.stdin:",
+        "    req = json.loads(line)",
+        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1}})",
+        "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
+        "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"hello from \" + os.environ[\"FAKE_NAME\"]}})",
+      ].join(String.fromCharCode(10)) + String.fromCharCode(10),
+    )
+    const py = process.platform === "win32" ? "python" : "python3"
+    const mk = (name: string) => {
+      const d = join(fakeRoot, name)
+      mkdirSync(d, { recursive: true })
+      writeFileSync(
+        join(d, "agent.json"),
+        JSON.stringify({ name, description: name + " 热加载验证", protocol: 1, command: [py, driver], env: { FAKE_NAME: name } }),
+      )
+    }
+    try {
+      mk("hot_one")
+      const registry = new ToolRegistry()
+      const m = new SubAgentManager({ registry, preloadOverride: [] })
+      m.setNativeAgentsOpts({ roots: [fakeRoot], spawn: fakeSpawn as never } as never)
+      await m.discover()
+      const mgrAny = m as unknown as { loadErrors?: Map<string, string> }
+      console.log("discover loadErrors:", JSON.stringify([...(mgrAny.loadErrors?.entries() ?? [])]))
+      expect(m.def("hot_one")).toBeDefined() // 首扫发现
+      // 后放置第二个目录：TS 签名未变，native 签名变化 → refreshIfChanged 应发现
+      mk("hot_two")
+      await m.refreshIfChanged()
+      expect(m.def("hot_two")).toBeDefined() // 修复前这里失败（永不重扫 native）
+      // 同语言多子代理并存：两个 fake（同 bun 驱动）均注册且工具各自独立
+      expect(m.list().map((d) => d.name)).toContain("hot_one")
+      expect(m.list().map((d) => d.name)).toContain("hot_two")
+      await m.load("hot_two")
+      expect(registry.resolve("hot_two_foo")).toBeDefined()
+      // 目录删除 → 对账回收（边车 dispose，defs 移除）
+      rmSync(join(fakeRoot, "hot_one"), { recursive: true, force: true })
+      await m.refreshIfChanged()
+      expect(m.def("hot_one")).toBeUndefined()
+      expect(m.def("hot_two")).toBeDefined() // 其余不受影响
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true })
+    }
+  })
 })

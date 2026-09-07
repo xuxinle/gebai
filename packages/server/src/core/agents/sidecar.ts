@@ -207,7 +207,7 @@ export class AgentSidecar {
               if (this.buf.length > LINE_LIMIT) this.buf = ""
               break
             }
-            const lineText = this.buf.slice(0, nl)
+            const lineText = this.buf.slice(0, nl).replace(/\r$/, "") // 容忍 CRLF 行尾（Windows 驱动 text-mode stdout 默认翻译；协议健壮性）
             this.buf = this.buf.slice(nl + 1)
             if (!lineText.trim()) continue
             try {
