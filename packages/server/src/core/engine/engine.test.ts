@@ -39,6 +39,10 @@ class FakeProvider implements LLMProvider {
   askEnvSecondTool = "sh"
   /** streamwait 模式放行钩子（测试控制第一轮文本后的阻塞解除）。 */
   release?: () => void
+  /** 每轮持续调工具不收尾（待办续做轮次上限用：提醒后模型持续行动，不纯文本收尾）。 */
+  alwaysTool = false
+  /** alwaysTool 模式的回复文本（防复述提示用：固定文本使多轮回复完全相同）。 */
+  replyText: string | undefined = undefined
   /** 首次 chat 调用即抛此错（多模态图片降级场景用）。 */
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens，含缓存命中 cachedTokens）；undefined = 不返回（估算兜底路径）。 */
@@ -362,6 +366,13 @@ class FakeProvider implements LLMProvider {
         ? { prompt: "选择方案", options: ["方案A", "方案B"], ...(this.askMulti ? { multi: true } : {}) }
         : this.toolArgs
       yield { type: "tool_call", toolCall: { id: "tc-1", name: this.toolName, arguments: args } }
+      yield { type: "done" }
+      return
+    }
+    // 每轮持续调工具不收尾（待办续做轮次上限用：提醒后模型持续行动，不纯文本收尾）
+    if (this.alwaysTool) {
+      yield { type: "text", text: this.replyText ?? `acting round ${this.calls}` }
+      yield { type: "tool_call", toolCall: { id: `tc-always-${this.calls}`, name: this.toolName, arguments: this.toolArgs } }
       yield { type: "done" }
       return
     }
@@ -3473,37 +3484,74 @@ describe("context compaction", () => {
     // 待办完成后不再续做：总模型调用 = 工具轮 + 收尾轮
     expect(s.provider.calls).toBe(2)
     const msgs = loaded!.messages.map((m) => String(m.content))
-    expect(msgs.some((c) => c.includes("【待办续做】"))).toBe(false)
+    expect(msgs.some((c) => c.includes("【待办提醒】"))).toBe(false)
     cleanup(s.home)
   })
 
-  test("todo continuation: stuck incomplete todos re-prompt up to the round cap", async () => {
+  test("todo continuation: 提示为 assistant 软性提醒，纯文本回应即停（模型决策收尾）", async () => {
     const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
+    await s.engine.run(session.id, "default", "hi")
+    // 软性提醒 + 纯文本回应即停：初始 1 轮 + 提醒 1 次（模型未再行动，视为已决定收尾）
+    expect(s.provider.calls).toBe(2)
+    const loaded = await s.store.load(session.id)
+    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    expect(contMsgs.length).toBe(1)
+    // 提醒携带未完成清单；事件携带 messageId/text 载荷（前端实时渲染）
+    expect(String(contMsgs[0].content)).toContain("任务A")
+    expect(String(contMsgs[0].content)).toContain("请自行决策")
+    cleanup(s.home)
+  })
+
+  test("todo continuation: 提醒后行动一轮再纯文本回应，仅再提醒一次后停止", async () => {
+    // tool 模式：首轮工具 → 提醒① → 纯文本回应（本轮未行动）→ 决策收尾停止
+    const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
     const events: string[] = []
     const unsub = s.events.subscribe((ev) => events.push(ev.type))
+    s.provider.toolName = "todo"
+    s.provider.toolArgs = {}
     await s.engine.run(session.id, "default", "hi")
     unsub()
-    // 纯文本模式永不完成待办：初始 1 轮 + 续做上限 3 轮
-    expect(s.provider.calls).toBe(4)
+    expect(s.provider.calls).toBe(3)
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => String(m.content).includes("【待办续做】"))
+    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    expect(contMsgs.length).toBe(1)
+    expect(events.filter((t) => t === "event.todo.continue").length).toBe(1)
+    cleanup(s.home)
+  })
+
+  test("todo continuation: 持续行动但从不收尾达到轮次上限后停止", async () => {
+    // alwaysTool（每轮持续调工具）：提醒后模型持续行动不纯文本收尾，达到轮次上限停止
+    const s = await setup("tool")
+    const session = await s.store.createSession("default", "t")
+    await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
+    s.provider.alwaysTool = true
+    s.provider.toolName = "todo"
+    s.provider.toolArgs = {}
+    await s.engine.run(session.id, "default", "hi")
+    const loaded = await s.store.load(session.id)
+    // 每次提醒后均继续行动（未纯文本收尾）：提醒注入至轮次上限 3 次
+    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
     expect(contMsgs.length).toBe(3)
-    // 续做提醒携带未完成清单；事件推送可见
-    expect(String(contMsgs[0].content)).toContain("任务A")
-    expect(events.filter((t) => t === "event.todo.continue").length).toBe(3)
     cleanup(s.home)
   })
 
   test("todo continuation: identical repeated replies get an anti-repetition hint", async () => {
-    const s = await setup("text")
+    // 行动轮回复完全相同（每次提醒后都调工具且文本一致）：第 2 次提醒起携带防复述提示
+    const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
+    s.provider.alwaysTool = true
+    s.provider.toolName = "todo"
+    s.provider.toolArgs = {}
+    s.provider.replyText = "正在处理"
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => String(m.content).includes("【待办续做】"))
-    // 纯文本模式回复完全相同：首轮无提示（无前文可比较），第 2/3 轮提醒携带防复述提示
+    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    // 首次提醒无前文可比较；第 2/3 次提醒携带防复述提示
     expect(contMsgs.length).toBe(3)
     expect(String(contMsgs[0].content)).not.toContain("完全相同")
     expect(String(contMsgs[1].content)).toContain("完全相同")
@@ -3521,7 +3569,7 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "hi")
     expect(s.provider.calls).toBe(1)
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.some((m) => String(m.content).includes("【待办续做】"))).toBe(false)
+    expect(loaded!.messages.some((m) => String(m.content).includes("【待办提醒】"))).toBe(false)
     cleanup(s.home)
   })
 })

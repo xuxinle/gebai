@@ -227,6 +227,19 @@ async function init() {
       })
       scrollIfSticky()
       refreshJumpBottom()
+    } else if (ev.type === "event.todo.continue" || ev.type === "event.verify.nudge") {
+      // 引擎收尾提示实时可见（DESIGN「待办续做」「收尾验证提醒」）：提示以普通助手消息落盘，
+      // 此处按同款形态实时渲染；非当前会话由历史回放兑底
+      if (getCurrentSession()?.id !== ev.sessionId) return
+      sealSegment(ev.sessionId)
+      appendMsg({
+        id: String(ev.payload.messageId ?? uuid()),
+        role: "assistant",
+        content: String(ev.payload.text ?? ""),
+        createdAt: Date.now(),
+      })
+      scrollIfSticky()
+      refreshJumpBottom()
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流

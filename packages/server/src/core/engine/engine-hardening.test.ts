@@ -304,7 +304,7 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "hi")
     const msgs = (await store.load(session.id, "default"))!.messages
-    const nudge = msgs.find((m) => m.role === "user" && m.content.includes("【验证提醒】"))
+    const nudge = msgs.find((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))
     expect(nudge).toBeDefined()
     expect(nudge!.content).toContain("src/a.ts")
     expect(provider.calls).toBe(3) // 提醒额外触发一轮模型调用
@@ -326,7 +326,7 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "hi")
     const msgs1 = (await store.load(session.id, "default"))!.messages
-    expect(msgs1.some((m) => m.role === "user" && m.content.includes("【验证提醒】"))).toBe(false)
+    expect(msgs1.some((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))).toBe(false)
     // 仅文档文件（report.md）：不计入代码文件，不触发
     const provider2 = new HardenProvider()
     provider2.script = [
@@ -336,7 +336,7 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const s2 = await store.createSession("default", "t2")
     await engine.run(s2.id, "default", "hi2")
     const msgs2 = (await store.load(s2.id, "default"))!.messages
-    expect(msgs2.some((m) => m.role === "user" && m.content.includes("【验证提醒】"))).toBe(false)
+    expect(msgs2.some((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))).toBe(false)
     rmSync(home, { recursive: true, force: true })
   })
 })

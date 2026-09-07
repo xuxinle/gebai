@@ -861,12 +861,14 @@ export class AgentEngine {
       const messages: MessageLike[] = [{ role: "system", content: systemPrompt }, ...history]
 
       // 待办续做：每轮会话完成（模型给出最终回复）后检查待办，pending/in_progress 未完成则
-      // 追加提醒消息继续会话，直至全部完成或达到续做轮次上限（DESIGN「待办续做」）
+      // 追加提示消息继续会话，直至全部完成或达到续做轮次上限（DESIGN「待办续做」）。
+      // 提示为 assistant 角色的软性提醒（仅陈述未完成事实，继续执行还是直接收尾由模型自行决策）；
+      // 模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入
       let continueRound = 0
       let verifyRound = 0
       let finalText = ""
       let lastFinalText = ""
-      let res: { text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number } | undefined
+      let res: Awaited<ReturnType<AgentEngine["runLoop"]>> | undefined
       for (;;) {
         res = await this.runLoop({
           sessionId,
@@ -913,35 +915,41 @@ export class AgentEngine {
             const more = mods.files.size > 5 ? `\n…（共 ${mods.files.size} 个文件）` : ""
             const verifyMsg = `【验证提醒】本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
             messages.push({ role: "assistant", content: finalText })
-            messages.push({ role: "user", content: verifyMsg })
+            messages.push({ role: "assistant", content: verifyMsg })
+            const verifyMsgId = crypto.randomUUID()
             await this.opts.store.appendMessage(sessionId, {
-              id: crypto.randomUUID(),
-              role: "user",
+              id: verifyMsgId,
+              role: "assistant",
               content: verifyMsg,
               createdAt: Date.now(),
             }, user)
+            this.publish(sessionId, "event.verify.nudge", { messageId: verifyMsgId, text: verifyMsg, sessionId })
             verifyRound++
             continue
           }
           break
         }
         if (continueRound >= MAX_TODO_CONTINUE) break
+        // 模型对上一次提醒的回应为纯文本（未执行任何工具）：视为已决定收尾，不再打扰；
+        // 仅对提醒后的回应判定（初始回复未见过提醒，首次提醒仍注入）
+        if (continueRound > 0 && res && res.toolRounds === 0) break
 
         const titleList = pending.map((t) => `- ${t.title}`).join("\n")
         // 文本重复检测：回复与上上轮完全相同 → 追加提醒，避免待办续做空转复述（DESIGN「重复检测」）
         const repeated = finalText !== "" && finalText === lastFinalText
-        const contMsg = `【待办续做】当前会话仍有未完成的待办：\n${titleList}\n请继续执行，直至全部完成后再给出最终回复。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述，直接继续执行未完成的待办。" : ""}`
+        const contMsg = `【待办提醒】当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
+        const contMsgId = crypto.randomUUID()
         messages.push({ role: "assistant", content: finalText })
-        messages.push({ role: "user", content: contMsg })
+        messages.push({ role: "assistant", content: contMsg })
         await this.opts.store.appendMessage(sessionId, {
-          id: crypto.randomUUID(),
-          role: "user",
+          id: contMsgId,
+          role: "assistant",
           content: contMsg,
           createdAt: Date.now(),
         }, user)
         lastFinalText = finalText
         continueRound++
-        this.publish(sessionId, "event.todo.continue", { round: continueRound, remaining: pending.length, sessionId })
+        this.publish(sessionId, "event.todo.continue", { round: continueRound, remaining: pending.length, messageId: contMsgId, text: contMsg, sessionId })
       }
 
       // 上下文大小与真实 usage 基线持久化（历史会话列表展示 + 下次 run 压缩判定基线）：
@@ -1734,7 +1742,7 @@ export class AgentEngine {
     provider: LLMProvider
     extraParams?: Record<string, unknown>
     persist: (msg: Message) => Promise<void>
-  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number }> {
+  }): Promise<{ text: string; reasoning: string; lastMessageId?: string; ctxInputTokens?: number; ctxCachedTokens?: number; ctxCountedLen: number; toolRounds: number }> {
     const { sessionId, user, messages, registry, signal, env, provider, extraParams, persist } = params
     let rounds = 0
     let lastText = ""
@@ -2009,7 +2017,7 @@ export class AgentEngine {
       rounds++
       if (stopped) break
     }
-    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCachedTokens: ctxUsage.ctxCachedTokens, ctxCountedLen: ctxUsage.ctxCountedLen }
+    return { text: lastText, reasoning: lastReasoning, lastMessageId, ctxInputTokens: ctxUsage.ctxInputTokens, ctxCachedTokens: ctxUsage.ctxCachedTokens, ctxCountedLen: ctxUsage.ctxCountedLen, toolRounds: rounds }
   }
 
   /**
