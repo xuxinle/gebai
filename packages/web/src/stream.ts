@@ -34,6 +34,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
   if (chunk.kind === "text") {
     // 模型恢复输出：移除模型服务异常瞬时提示
     if (run.modelErrorEl?.isConnected) clearModelErrorNotice(run)
+    const prevMsgId = run.messageId // 轮界检测用前值（messageId 随后刷新，见下方 text 分支）
     if (chunk.messageId) run.messageId = chunk.messageId
     const runId = chunk.sessionRunId
     if (runId) {
@@ -74,6 +75,15 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
       const kindChanged = run.lastTextKind !== (isSub ? "sub" : "main")
       const subRoundChanged = isSub && !!run.lastTextMsgId && !!chunk.messageId && run.lastTextMsgId !== chunk.messageId
       if (kindChanged || subRoundChanged) sealSegment(sessionId)
+    }
+    // 主循环轮界：messageId 变化 = 新一轮回复，清空累积后新文本另起气泡。前台本在工具
+    // 调用处封段（onToolCall），但后台会话工具事件不渲染卡片直接丢弃，累积从前只增不减——
+    // 切回时整任务多轮文本渲染进同一张流式卡片（新回复追加在前面的卡片内）。
+    // 前值含子会话最后消息 id（runId 分支已早退，此处仅主循环文本到达）：子会话结束后主循环
+    // 新轮 id 必异于子会话尾轮 id，同样正确触发轮界重置
+    if (chunk.messageId && prevMsgId && chunk.messageId !== prevMsgId) {
+      if (run.lastTextKind === "sub") sealSegment(sessionId)
+      run.acc = ""
     }
     run.lastTextKind = isSub ? "sub" : "main"
     if (chunk.messageId) run.lastTextMsgId = chunk.messageId
