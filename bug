@@ -1,0 +1,161 @@
+# 歌白桌面子代理本机失效问题 —— 完整修复记录（供公开库复现）
+
+> 环境：Windows  / 企业管控内网（DSOC/云枢）/ 源码形态部署
+> 症状：桌面子代理所有工具一律失败——基础类 `exit 1` 无任何输出；识别类报 onnxruntime/模型缺失。
+> 最终状态：**全部功能可用**（仅 GPU 加速优化项遗留，见 §5）。
+
+---
+
+## 问题一：PowerShell 执行通道被企业管控静默拦截（根因，影响全部工具）
+
+### 现象与诊断
+
+- 所有 desktop 工具统一 `[exit 1]` 且 **stdout/stderr 全空**——不是工具逻辑错误。
+- 关键对照实验（长度梯度）：短 PowerShell 内联命令能跑、长命令必挂 → 分离出「命令体量」变量。
+- 直接用 node/Bun 调 CreateProcess 复现 `WinError 786`（进程创建被策略拦截的显式信号）；
+  cmd 包装后变成静默 exit 1——管控软件对「长 base64 内联命令行」按体量拦截面不同。
+- 根因：原实现用 `powershell -EncodedCommand <base64>` 把整个 PS 脚本内联进命令行，
+  ① 企业管控（本次环境为 DSOC 链）会静默拦截长内联命令（尤其 base64 大块），② 受 cmd 单条
+  命令行 8191 字符上限约束（截图/UIA 类脚本 base64 后极易超限）。
+
+### 修复方案（已落地在代码里，可整体参考）
+
+改为「**临时脚本文件 + `-File` 执行**」通道，核心助手 `psCmd()` 位于
+`packages/server/src/sub-agents/desktop/desktop_tools.ts:30`：
+
+```
+1. 脚本写入会话目录临时 .ps1，UTF-8 带 BOM（\uFEFF 前缀）
+   —— PS 5.1 对无 BOM 文件按 ANSI 解码，中文注释/字符串必乱码
+2. powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "<绝对路径>"
+   —— 路径必须【双引号】包装：Windows 参数解析不认单引号，单引号混入路径致 -File 打开失败
+     （此时 PS 回退交互模式打印横幅、随管道关闭静默退出，stdout 还会被横幅污染）
+3. 延迟 60s 删除临时文件（执行中的 .ps1 被 Windows 锁定；删除失败留在会话目录无害）
+4. 工具 run() 失败输出改 stderr+stdout 合并展示（原来只显示其一，排障信息丢失）
+```
+
+三个文件共用此通道：`desktop_toolsR …」。模型获取管线：
+`scripts/build-cv-embed.ts` 缺省从 hf-mirror 下载，但本机管控拦截公网直连。
+
+
+
+```bash
+# 方式 A：给构建脚本喂镜像基址（GEBAI_CVR …」。模型获取管线：
+`scripts/build-cv-embed.ts` 缺省从 hf-mirror 下载，但本机管控拦截公网直连。
+
+
+
+```bash
+# 方式 A：给构建脚本喂镜像基址（GEBAI_CVR …」。模型获取管线：
+`scripts/build-cv-embed.ts` 缺省从 hf-mirror 下载，但本机管控拦截公网直连。
+
+
+
+```bash
+# 方式 A：给构建脚本喂镜像基址（GEBAI_CV_MODEL_BASE）
+# 注意 cmd 下 set 变量 && 连用时值尾不能带空格（会拼进 URL 导致 404）
+set GEBAI_CV_MODEL_BASE
+
+# 方式 B：手动 curl 两件再跑脚本提取字典（本次实际走的路，稳）
+  # 发现 assets 已有模型 → 自动从 rec 元数据提取 dict.txt 并生成内嵌清单
+```
+
+产出核验：`assets/cv-models/` 三件齐（det ≈4.7MB / rec ≈10.9MB / dict ≈26KB），
+`cv.embedded.generated.json` 显示 embedded ort + models (5 files)。
+`.env.example` 已补内网镜像地址注释供后续用户参考。
+
+通用经验：**类似 HF 管控内网先找内部镜像反代**，
+resolve 下载路由通常可用而 api/搜索路由不一定，探测方式 = HEAD 任一已知仓库名看是否 200。
+
+---
+
+## 问题三：检测模型 screenparser-best.onnx 是 Git LFS 指针文件
+
+### 现象
+
+`models/detect/screenparser-best.onnx` 仅 134 字节；python onnx.load 报
+"Wire format was corrupt"。鉴别方法：文件头 ASCII 读出
+`version https://git-lfs.github.com/spec/v1` 即指针文件；且该 models 目录**无 `.git`**
+（嵌套独立仓库未克隆，只是文件拷贝）→ 本地无法 `git lfs pull`。
+
+### 解决
+
+用户自行拿到真身（102MB ONNX / 153MB PT）放入 `models/detect/`。`desktop_detect` 因
+ONNX 内嵌 ultralytics names 元数据自动读取类别，免标签文件直接生效（这是设计好的约定：
+ultralytics export 时自带元数据）。
+
+若走公开替代路线（当时预案）：HF 的 `microsoft/OmniParser-v2.0/icon_detect/model.pt`
+经镜像 200 可达，pip 装 `ultralytics onnx onnxslim` 后
+`yolo export model.pt format=onnx` 即得等价物（OmniParser 也是 UI 检测用途）。
+
+### 实测结果
+
+区域限定（如 0,0,2048,1126）下检出 22 个组件框：Text/App Icon 类别 + OCR 配对文本正确
+（「算力审核平台」「训练任务详情」等中英文）；全屏 4480×1811 只出小目标——**YOLO@1280 输入
+对全屏图降采样严重，实践上优先传 region**。后端标注 wasm-cpu（GPU 见问题五）。
+
+---
+
+## 问题四：服务进程内代码不随磁盘刷新（验证阶段的隐形坑）
+
+- 改的是源码文件，但**服务端进程启动时已把子代理代码打包载入内存**——dev 不带 --watch，
+  不重启永远测旧逻辑。改完代码必须重启歌白客户端才生效。
+- `agent_run` 派生新会话 ≠ 新代码：同进程内派生的会话依旧用启动时装入的工具代码。
+- 不重启做集成的替代招：写一次性脚本进程外加载磁盘最新源码 + 真实 Sandbox.exec
+  （`new Sandbox({home, enabled:false}).exec(...)` 组 ToolContext mock）→ 可提前验证新链路
+  是否真闭环（本轮就靠它抓出了下面的单引号 bug）。
+- 教训：stash push 与 pop 必须同一命令上下文完整执行（cmd 里 `;` 不是分隔符，链式
+  `push … ; pop` 会漏掉 pop → 改动滞留 stash、工作区看着干净实则修改全部失踪）。
+
+---
+
+## 附生 bug：powershell -File 单引号包路径（实施新通道时引入）
+
+现象：screen_info 输出「共 4 个显示器」但全是 PowerShell 启动横幅行（undefinedxundefined）。
+原因：`-File '<path>'` 单引号在 Windows 参数解析里是字面字符，路径解析失败 → PS 回退交互模式。
+修复：双引号包装 + 反引号转义（`replace(/"/g, '`"')`）。这条写在 psCmd 注释里了。
+
+---
+
+## 问题五（遗留，纯性能不影响功能）：GPU sidecar DLL 初始化失败
+
+- 现象：检测后端始终回落 wasm-cpu。sidecar 应从 `{GEBAI_HOME}/models/vendor/node_modules`
+  解析 onnxruntime-node（本机 dev 形态 = 项目根 models/，包本体存在含 DirectML.dll 全套）。
+- 直接 require 复现：`Error: A dynamic link library (DLL) initialization routine failed`
+  （binding.node 加载即挂）。分层排除：
+  - VC 运行库 msvcp140 = 14.32（2022 版）——起初怀疑过旧，但从 npm 内网镜像拉 1.23.2 版本
+    包 ctypes 直载 onnxruntime.dll **同样 winerror 1114**，跨版本一致 → 排除单纯版本兼容；
+  - dxil/dxcompiler/DirectML 三个前置 DLL ctypes 全 OK，唯 onnxruntime.dll 本体 DllMain 失败；
+  - 1114（DllMain 失败）≠126（找不到模块）→ 不是缺依赖路径问题，指向**管控软件拦截新编译
+    未签名原生模块初始化**或深层运行库缺失。
+- 影响评估：仅速度——wasm 单线程 YOLO11-L@1280 数十秒级 vs GPU 亚秒级；功能完全正常。
+- 待办方向（已记 self_optimize_backlog）：①装新版 vc_redist.x64.exe（aka.ms 被拦，需 IT 渠道
+  取包/放行）后重验；②降版本矩阵测试（找初始化成功的最早 ORT 版本）；③IT 放行签名校验例外。
+- 快速复核命令：`py` 里 ctypes.WinDLL 那两个文件看 winerror 是否从 1114 变化。
+
+---
+
+## 最终验证快照（重启后真实进程内实测）
+
+| 工具 | 结果 |
+|---|---|
+| window_list | ✅ 28 窗口，前台标记/HWND 正确 |
+| screen_info | ✅ 双屏 2560×1440 主 + 1920×1080 副 |
+| screenshot | ✅ 虚拟屏幕全屏 4480×1811，亮度统计/image 块正常 |
+| ocr / locate | ✅ 真实识别屏幕文字（置信度 0.84） |
+| detect | ✅ 22 组件框 + 配对文本（wasm 后端；GPU 待问题五） |
+| uia_inspect | ✅ Chrome 语义树枚举（浅树按设计提示回落像素通道） |
+| clipboard_read/write | ✅（本次顺带验证 read） |
+
+改动文件清单（主仓库）：
+`sub-agents/desktop/{desktop_tools,cv_tools,uia_tools}.ts` + 两个 test + `DESIGN.md`（§940
+新增「Windows PowerShell 执行通道」设计描述）+ `.env.example`（内网镜像注释）。
+另有资源侧：`packages/server/assets/cv-models/*`（三件套）+ 重生成的内嵌清单 json。
+
+## 给 agent 的操作顺序建议（公开库环境复现时）
+
+1. 先跑任一只读工具（window_list/screen_info）定性：exit 1 空输出 → 走问题一（替换执行通道）；
+   有输出的继续往下。
+2. 验证字符编码：让 OCR 类工具对着带中文的窗口试——BOM 缺失会在这一步暴露。
+3. 依赖层：onnxruntime-web 安装 → 模型三件套（按 §问题二内网镜像或自备）→ LFS 指针检查
+   （问题三，134B 特征值直接判）。
+4. 全部打通后再碰 GPU sidecar（可选优化），勿把它的报错当成主链路故障。
