@@ -1,7 +1,8 @@
 /**
  * 真机端到端验证脚本（bun 运行，非测试）：多语言子代理全链路——
- * 真实 python 驱动、真实 spawn、真实 SubAgentManager/ToolRegistry。
- * 验证：发现注册 python 子代理 → 工具名带前缀 → python_run 常驻状态保持 → 崩溃自愈 → pip status。
+ * 真实驱动（python/cpp/rust）、真实 spawn、真实 SubAgentManager/ToolRegistry。
+ * 验证：发现注册 → 工具名带前缀 → 常驻状态保持 → 崩溃自愈 → pip status →
+ * 构建引导（cpp/rust 可执行体缺失时自动编译）→ 三语言工具真机调用。
  */
 import { SubAgentManager } from "../src/core/agents/subagents"
 import { ToolRegistry } from "../src/core/base/registry"
@@ -12,16 +13,21 @@ const m = new SubAgentManager({ registry, preloadOverride: [] })
 m.setNativeAgentsOpts({}) // 本地形态默认启用
 await m.discover()
 
-// 收尾时回收边车进程（防孤儿 python 残留）
+// 收尾时回收边车进程（防孤儿残留）
 process.on("exit", () => disposeAllNativeAgents())
 
-const py = m.def("python")
-if (!py) {
-  console.error("FAIL: python 子代理未注册")
-  console.error("loadErrors:", m.loadError("python"))
-  process.exit(1)
+const expectAgent = (name: string) => {
+  const def = m.def(name)
+  if (!def) {
+    console.error(`FAIL: ${name} 子代理未注册`)
+    console.error("loadErrors:", m.loadError(name))
+    process.exit(1)
+  }
+  console.log(`PASS: ${name} 子代理已注册，工具:`, Object.keys(def.tools ?? {}))
+  return def
 }
-console.log("PASS: python 子代理已注册，工具:", Object.keys(py.tools ?? {}))
+
+const py = expectAgent("python")
 console.log("提示词前 80 字:", py.systemPrompt.slice(0, 80).replace(/\n/g, " "))
 
 // 装载（agent_load 等价入口）
@@ -95,23 +101,15 @@ if (!r4.output.includes("venv:")) {
 }
 console.log("PASS: python_pip status 报告")
 
-// 4) 崩溃自愈：驱动内 os._exit(1)（真实崩溃）→ 宿主重启重发 → 本次响应丢失但下次调用新进程成功
-const r5 = await runTool.tool.execute({ code: "import os\nos._exit(1)", session: "crash" }, fakeCtx).catch((e: Error) => `ERR:${e.message}`)
-console.log("run#5 崩溃调用返回:", String(r5).slice(0, 120))
-const r6 = await runTool.tool.execute({ code: "'alive-after-crash'", session: "crash2" }, fakeCtx)
-if (!r6.output.includes("alive-after-crash")) {
-  console.error("FAIL: 崩溃后新进程未恢复:", r6.output)
-  process.exit(1)
-}
-console.log("PASS: 崩溃自愈（真实 os._exit → 重启 → 新进程可用）")
-
-// 5) venv 全链路：pip install（无 venv 自动创建 → 装完驱动退出 → 宿主自愈重启 → 命令工厂切 venv 解释器）
+// 4) venv 全链路：pip install（装完驱动退出 → 宿主自愈重启 → 命令工厂切 venv 解释器）。
+//    注：放在崩溃测试之前——pip 主动退出是首次退出，自动重启+在途重发机制正常接管；
+//    若在崩溃测试后 10s 内连发会触发「连续 3 次快速退出」防抖放弃重启（设计行为）。
 const r7 = await pipTool.tool.execute({ action: "install", packages: "six", timeout: 240 }, fakeCtx)
 console.log("pip install six 返回前 2 行:", r7.output.split("\n").slice(0, 2).join(" | "))
 if (!/exit 0|Successfully/.test(r7.output)) {
   console.error("WARN: pip install six 未成功（网络受限环境可跳过后续 venv 断言）:", r7.output.slice(0, 400))
 } else {
-  // 边车已重启：status 上报的解释器应为 venv 内 python
+  // 边车已重启：status 上报的解释器应为 venv 内 python（主动退出后自愈重启，在途请求自动重发）
   const statusTool = registry.resolve("python_status")!
   const r8 = await statusTool.tool.execute({}, fakeCtx)
   console.log("重启后 executable:", (r8.data as { executable?: string })?.executable)
@@ -130,6 +128,69 @@ if (!/exit 0|Successfully/.test(r7.output)) {
   console.log("PASS: venv 依赖可用")
 }
 
-console.log("\n=== 真机端到端全部通过 ===")
-disposeAllNativeAgents() // 显式回收后再退出（exit hook 兄弟保险，防孤儿 python）
+// 5) 崩溃自愈：驱动内 os._exit(1)（真实崩溃）→ 宿主重启重发 → 本次响应丢失但下次调用新进程成功
+const r5 = await runTool.tool.execute({ code: "import os\nos._exit(1)", session: "crash" }, fakeCtx).catch((e: Error) => `ERR:${e.message}`)
+console.log("run#5 崩溃调用返回:", String(r5).slice(0, 120))
+const r6 = await runTool.tool.execute({ code: "'alive-after-crash'", session: "crash2" }, fakeCtx)
+if (!r6.output.includes("alive-after-crash")) {
+  console.error("FAIL: 崩溃后新进程未恢复:", r6.output)
+  process.exit(1)
+}
+console.log("PASS: 崩溃自愈（真实 os._exit → 重启 → 新进程可用）")
+
+console.log("\n=== python 段全部通过 ===")
+
+// ---------------- cpp/rust：构建引导 + 真机工具调用 ----------------
+const fakeCtx2 = { ...fakeCtx }
+
+// mathx（C++）：eval/eval_batch/stats（装载后工具才进注册表）
+const mathx = expectAgent("mathx")
+await m.load("mathx")
+const mathxEval = registry.resolve("mathx_eval")
+if (!mathxEval) {
+  console.error("FAIL: mathx_eval 未在注册表")
+  process.exit(1)
+}
+const c1 = await mathxEval.tool.execute({ expression: "sqrt(x^2+y^2)", vars: { x: 3, y: 4 } }, fakeCtx2)
+console.log("mathx_eval:", c1.output)
+if (c1.output.trim() !== "5") {
+  console.error("FAIL: mathx_eval 应为 5")
+  process.exit(1)
+}
+const c2 = await registry.resolve("mathx_stats")!.tool.execute({ values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] }, fakeCtx2)
+if (!c2.output.includes("mean: 5.5")) {
+  console.error("FAIL: mathx_stats mean 应为 5.5:", c2.output)
+  process.exit(1)
+}
+console.log("PASS: mathx（C++）eval 变量代入 + stats")
+
+// codec（Rust）：b64/crc32
+expectAgent("codec")
+await m.load("codec")
+const e1 = await registry.resolve("codec_b64_encode")!.tool.execute({ text: "gebai 三语言" }, fakeCtx2)
+const d1 = await registry.resolve("codec_b64_decode")!.tool.execute({ text: (e1.data as { encoded?: string }).encoded ?? "" }, fakeCtx2)
+if (d1.output !== "gebai 三语言") {
+  console.error("FAIL: codec base64 往返:", d1.output)
+  process.exit(1)
+}
+const k1 = await registry.resolve("codec_crc32")!.tool.execute({ text: "hello gebai" }, fakeCtx2)
+if ((k1.data as { crc32?: string }).crc32 !== "d52ec7e3") {
+  console.error("FAIL: codec crc32:", k1.output)
+  process.exit(1)
+}
+console.log("PASS: codec（Rust）base64 往返 + crc32")
+
+// pyregex（Python tools.py 合并）：match/findall
+expectAgent("pyregex")
+await m.load("pyregex")
+const re1 = await registry.resolve("pyregex_match")!.tool.execute(
+  { pattern: "(?P<year>\\d{4})-(?P<mo>\\d{2})", text: "发布 2026-07 版" }, fakeCtx2)
+if (!re1.output.includes("year='2026'")) {
+  console.error("FAIL: pyregex 命名分组:", re1.output)
+  process.exit(1)
+}
+console.log("PASS: pyregex（Python tools.py 合并）命名分组")
+
+console.log("\n=== 真机端到端全部通过（python + cpp + rust 三语言）===")
+disposeAllNativeAgents() // 显式回收后再退出（exit hook 兄弟保险，防孤儿进程）
 process.exit(0)

@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Python 子代理边车（歌白多语言子代理协议 v1，见 native-agents/README.md）。
+"""Python 语言基础框架驱动（歌白多语言子代理协议 v1，见 native-agents/README.md）。
+
+语言目录 native-agents/python/ 下共享：本驱动 + venv + requirements.txt；每个子代理项目
+（语言目录下的二级目录，manifest agent.json 所在处）可选携带 tools.py 声明专属工具，
+加载后与基础工具合并（同名覆盖基础工具）——一种语言派生任意多个子代理，实现语言对模型
+透明（模型只看到工具与提示词）。
 
 纯标准库实现（3.9+）：协议层不依赖任何 pip 包；AI 库（numpy/torch/…）只是
-requirements.txt 层的可选依赖，由 python_pip 工具按需安装进 {GEBAI_HOME}/venv。
+requirements.txt 层的可选依赖，由 python_pip 工具按需安装进语言目录 venv。
 
 协议（stdin/stdout 各一行一个 JSON，UTF-8）：
   {"id":1,"op":"init"}                → {"id":1,"ok":true,"result":{"name":"python","protocol":1,...}}
@@ -11,10 +16,15 @@ requirements.txt 层的可选依赖，由 python_pip 工具按需安装进 {GEBA
                                       → {"id":3,"ok":true,"result":{"output":"...","data":{...}}}
 约定：stdout 只写协议行（print 全部重定向捕获）；stderr 自由文本（宿主环形缓冲排障）；
 stdin EOF → 立即退出（父进程已死，防孤儿）。
+
+宿主注入的运行上下文（环境变量）：
+  GEBAI_HOME      数据根（状态展示/兼容路径）
+  GEBAI_AGENT_DIR 子代理项目目录（{agent_dir}/tools.py 存在时合并专属工具）
 """
 
 import ast
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -24,10 +34,10 @@ import time
 import traceback
 
 PROTOCOL = 1
-AGENT_NAME = "python"
 
-# 宿主注入的运行上下文（环境变量）：
-#   GEBAI_HOME  数据根（venv/requirements.txt 所在）；GEBAI_PYTHON_DIR 显式解释器目录。
+# 语言目录（本驱动所在目录）：venv 与 requirements.txt 的归属地
+LANG_DIR = os.path.dirname(os.path.abspath(__file__))
+
 VENVS = {}  # 每个 session 一个命名空间（常驻状态）
 
 
@@ -35,8 +45,20 @@ def gebai_home():
     return os.environ.get("GEBAI_HOME") or os.path.expanduser("~/.gebai")
 
 
+def agent_dir():
+    """子代理项目目录（manifest 所在处；驱动从语言目录共享，项目资产从这里取）。"""
+    return os.environ.get("GEBAI_AGENT_DIR") or LANG_DIR
+
+
+# 子代理项目名：manifest 所在目录名（宿主要求 init.name 与 manifest.name 一致；
+# 项目 tools.py 可覆盖 AGENT_NAME——load_project_tools 在模块级后置处理）
+_adir = agent_dir()
+AGENT_NAME = os.path.basename(os.path.normpath(_adir)) if os.path.isfile(os.path.join(_adir, "agent.json")) else "python"
+
+
 def venv_dir():
-    return os.path.join(gebai_home(), "venv")
+    """语言目录 venv（源码形态随仓库；服务部署形态宿主负责预置）。"""
+    return os.path.join(LANG_DIR, "venv")
 
 
 def venv_python():
@@ -47,6 +69,18 @@ def venv_python():
         else os.path.join(venv_dir(), "bin", "python")
     )
     return cand if os.path.isfile(cand) else None
+
+
+def requirements_path():
+    """依赖清单：优先语言目录 requirements.txt（与 venv 同居），历史位置 {GEBAI_HOME}/requirements.txt
+    存在且语言目录无时兼容使用（freeze 统一写回语言目录）。"""
+    lang = os.path.join(LANG_DIR, "requirements.txt")
+    if os.path.isfile(lang):
+        return lang
+    legacy = os.path.join(gebai_home(), "requirements.txt")
+    if os.path.isfile(legacy):
+        return legacy
+    return lang
 
 
 def split_last_expression(code):
@@ -189,6 +223,7 @@ def tool_pip(args):
         code, out = run_pip(vexe, ["freeze"], 120)
         if code != 0:
             return {"output": f"pip freeze 失败（exit {code}）:\n{out[-2000:]}", "data": {"ok": False}}
+        req = os.path.join(LANG_DIR, "requirements.txt")  # 统一写回语言目录
         with open(req, "w", encoding="utf-8", newline="\n") as f:
             f.write(out)
         pkgs = [l for l in out.splitlines() if l.strip()]
@@ -203,6 +238,8 @@ def tool_status(_args):
     info = {
         "driverPython": sys.version.split()[0],
         "executable": sys.executable,
+        "langDir": LANG_DIR,
+        "agentDir": agent_dir(),
         "venvDir": venv_dir(),
         "venvActive": bool(vexe),
         "venvPython": vexe or "（未创建）",
@@ -231,7 +268,7 @@ TOOLS = [
     },
     {
         "name": "pip",
-        "description": "Python 依赖管理（venv 位于 {GEBAI_HOME}/venv，requirements.txt 位于 {GEBAI_HOME}/requirements.txt）。action=install 安装（packages 指定包名列表/空格分隔字符串；缺省则 -r requirements.txt；venv 不存在自动创建；装完边车自动重启加载新依赖）action=freeze 快照当前依赖写回 requirements.txt；action=status 查看 venv/已装包。",
+        "description": "Python 依赖管理（venv 与 requirements.txt 位于 Python 语言目录 native-agents/python/）。action=install 安装（packages 指定包名列表/空格分隔字符串；缺省则 -r requirements.txt；venv 不存在自动创建；装完边车自动重启加载新依赖）action=freeze 快照当前依赖写回 requirements.txt；action=status 查看 venv/已装包。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -244,12 +281,41 @@ TOOLS = [
     },
     {
         "name": "status",
-        "description": "查看 Python 边车状态：驱动进程解释器版本/可执行路径、venv 位置与激活状态、活跃命名空间列表。",
+        "description": "查看 Python 边车状态：驱动进程解释器版本/可执行路径、语言目录/venv 位置与激活状态、活跃命名空间列表。",
         "parameters": {"type": "object", "properties": {}},
     },
 ]
 
 TOOL_IMPLS = {"run": tool_run, "pip": tool_pip, "status": tool_status}
+
+
+def load_project_tools():
+    """加载子代理项目专属工具（{agent_dir}/tools.py）：导出 AGENT_NAME + TOOLS + TOOL_IMPLS
+    时与基础工具合并（同名覆盖）——同语言框架派生多个子代理的扩展点；加载失败记 stderr
+    并回退基础工具集（失败安全：不影响基础工具可用）。"""
+    global AGENT_NAME, TOOLS, TOOL_IMPLS
+    path = os.path.join(agent_dir(), "tools.py")
+    if not os.path.isfile(path):
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("project_tools", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.stderr.write("[driver] 项目 tools.py 加载失败，回退基础工具集:\n" + traceback.format_exc(limit=8) + "\n")
+        return
+    if hasattr(mod, "AGENT_NAME"):
+        AGENT_NAME = str(mod.AGENT_NAME)
+    tools_extra = getattr(mod, "TOOLS", None) or []
+    impls_extra = getattr(mod, "TOOL_IMPLS", None) or {}
+    for t in tools_extra:
+        name = t.get("name")
+        if name and name in impls_extra:
+            TOOLS = [x for x in TOOLS if x["name"] != name] + [t]
+            TOOL_IMPLS[name] = impls_extra[name]
+
+
+load_project_tools()
 
 
 def handle(op, args):

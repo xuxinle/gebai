@@ -27,9 +27,16 @@ gebai.log
 users/
 tmp/
 feishu/
-# python 子代理 venv 与依赖清单（dev 模式 GEBAI_HOME=仓库根，python_pip 自动创建/维护）
-venv/
-requirements.txt
+# Python 语言目录 venv 与依赖清单（native-agents/python/，python_pip 自动创建/维护）
+native-agents/python/venv/
+native-agents/python/requirements.txt
+__pycache__/
+# C++ 语言目录编译产物（构建引导/手动编译生成）
+native-agents/cpp/objs/
+native-agents/cpp/**/driver*.exe
+# Rust 语言目录编译产物
+native-agents/rust/**/driver*.exe
+native-agents/rust/**/driver*.pdb
 
 # OS
 .DS_Store

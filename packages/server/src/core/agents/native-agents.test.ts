@@ -7,7 +7,7 @@ import { test, expect } from "bun:test"
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { parseManifest, expandCommand, scanManifestDirs, discoverNativeAgents, nativeAgentsEnabled, resolvePythonCommand } from "./native-agents"
+import { parseManifest, expandCommand, scanManifestDirs, discoverNativeAgents, nativeAgentsEnabled, resolvePythonCommand, ensureBuilt } from "./native-agents"
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "gebai-native-agents-"))
 after: {
@@ -25,6 +25,20 @@ test("parseManifest：合法/非法清单", () => {
   expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 2, command: ["x"] }), "t").error).toContain("协议版本")
   expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 1, command: [] }), "t").error).toContain("command")
   expect(parseManifest(JSON.stringify({ name: "a", protocol: 1, command: ["x"] }), "t").error).toContain("description")
+  // build 字段解析：合法保留、非法项忽略
+  const withBuild = parseManifest(
+    JSON.stringify({
+      name: "mathx",
+      description: "d",
+      protocol: 1,
+      command: ["{agent_dir}/driver{exe}"],
+      build: { command: ["rustc", "-o", "{agent_dir}/driver{exe}"], windows: "not-array", unix: ["", "x"] },
+    }),
+    "t",
+  )
+  expect(withBuild.manifest?.build?.command).toEqual(["rustc", "-o", "{agent_dir}/driver{exe}"])
+  expect(withBuild.manifest?.build?.windows).toBeUndefined()
+  expect(withBuild.manifest?.build?.unix).toBeUndefined()
 })
 
 test("expandCommand：{driver}/{python}/{GEBAI_HOME} 占位与错误", () => {
@@ -47,12 +61,31 @@ test("expandCommand：{driver}/{python}/{GEBAI_HOME} 占位与错误", () => {
   expect(r4.command[2]).not.toContain("{GEBAI_HOME}")
 })
 
-test("scanManifestDirs：仅含 agent.json 的子目录入表；无 manifest 目录跳过", async () => {
+test("expandCommand：{agent_dir}/{lang_dir}/{agent_name}/{exe} 占位", () => {
+  const langDir = join(tmpRoot, "cpp")
+  const agentDir = join(langDir, "mathx")
+  mkdirSync(agentDir, { recursive: true })
+  const r = expandCommand(["{agent_dir}/driver{exe}", "--name", "{agent_name}", "--lang", "{lang_dir}"], agentDir, { name: "mathx" }, null)
+  expect(r.error).toBeUndefined()
+  const exeSuffix = process.platform === "win32" ? ".exe" : ""
+  expect(r.command[0]).toBe(join(agentDir, "driver" + exeSuffix))
+  expect(r.command[2]).toBe("mathx")
+  expect(r.command[4]).toBe(langDir)
+  // manifest 无 name 时回退目录名
+  const r2 = expandCommand(["x", "{agent_name}"], agentDir, {}, null)
+  expect(r2.command[1]).toBe("mathx")
+})
+
+test("scanManifestDirs：仅含 agent.json 的子目录入表；无 manifest 目录与 venv/__pycache__/objs 跳过", async () => {
   const root = join(tmpRoot, "scan")
   mkdirSync(join(root, "alpha"), { recursive: true })
   writeFileSync(join(root, "alpha", "agent.json"), JSON.stringify({ name: "alpha", description: "d", protocol: 1, command: ["x"] }))
   mkdirSync(join(root, "no-manifest"), { recursive: true })
   writeFileSync(join(root, "no-manifest", "readme.txt"), "not an agent")
+  for (const skip of ["venv", "__pycache__", "objs"]) {
+    mkdirSync(join(root, skip), { recursive: true })
+    writeFileSync(join(root, skip, "agent.json"), JSON.stringify({ name: skip, description: "d", protocol: 1, command: ["x"] }))
+  }
   const found = await scanManifestDirs([root])
   expect(found.length).toBe(1)
   expect(found[0]!.dir).toBe(join(root, "alpha"))
@@ -95,4 +128,55 @@ test("resolvePythonCommand：GEBAI_PYTHON_DIR 显式优先", () => {
   const r = resolvePythonCommand({ GEBAI_PYTHON_DIR: "" })
   expect(Array.isArray(r) || r === null).toBe(true)
   if (saved !== undefined) process.env.GEBAI_PYTHON_DIR = saved
+})
+
+test("ensureBuilt：可执行体缺失时执行 build、已存在/无 build 跳过、失败抛错", async () => {
+  const langDir = join(tmpRoot, "rustb")
+  const agentDir = join(langDir, "codec")
+  mkdirSync(agentDir, { recursive: true })
+  const manifest = parseManifest(
+    JSON.stringify({
+      name: "codec",
+      description: "d",
+      protocol: 1,
+      command: ["{agent_dir}/driver{exe}"],
+      build: { command: ["{agent_dir}/mkbinary.sh"] },
+    }),
+    agentDir,
+  )!.manifest!
+  // spawn 替身：模拟构建脚本产出目标文件（完整 SidecarProc 形态）
+  const fakeSpawn = (cmd: string[]): import("./sidecar").SidecarProc => ({
+    stdout: new Blob([""]).stream() as ReadableStream<Uint8Array>,
+    stderr: new Blob([""]).stream() as ReadableStream<Uint8Array>,
+    exitCode: Promise.resolve(cmd.length && cmd[0]!.endsWith("mkbinary.sh") ? 2 : 0),
+    stdin: { write: () => undefined },
+    kill: () => undefined,
+    killed: false,
+  })
+  // 1) 无 build 声明：跳过返回 null
+  const none = await ensureBuilt(agentDir, { ...manifest, build: undefined })
+  expect(none).toBeNull()
+  // 2) 目标已存在：跳过（不执行构建）
+  const exeSuffix = process.platform === "win32" ? ".exe" : ""
+  writeFileSync(join(agentDir, "driver" + exeSuffix), "binary")
+  const exists = await ensureBuilt(agentDir, manifest)
+  expect(exists).toBe(join(agentDir, "driver" + exeSuffix))
+  // 3) 目标缺失 + 构建成功：产出目标文件
+  rmSync(join(agentDir, "driver" + exeSuffix))
+  const built = await ensureBuilt(agentDir, manifest, {
+    spawn: (cmd) => {
+      // 替身：直接写目标文件模拟编译产出
+      const target = cmd[0]!.endsWith("mkbinary.sh") ? join(agentDir, "driver" + exeSuffix) : ""
+      if (target) writeFileSync(target, "built")
+      return fakeSpawn(cmd)
+    },
+  })
+  expect(built).toBe(join(agentDir, "driver" + exeSuffix))
+  // 4) 目标缺失 + 构建失败（无产出）：抛错（loadErrors 可见）
+  rmSync(join(agentDir, "driver" + exeSuffix))
+  await expect(
+    ensureBuilt(agentDir, manifest, {
+      spawn: () => fakeSpawn([]),
+    }),
+  ).rejects.toThrow("构建引导失败")
 })

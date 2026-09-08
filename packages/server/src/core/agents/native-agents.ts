@@ -3,9 +3,13 @@
  * 边车进程 → init/tools.list 握手 → 构造标准 SubAgentDef 注册进 SubAgentManager。
  *
  * 发现范围（后者同名覆盖前者）：
- *   1. 内置源 native-agents/（源码形态为仓库内目录，dist 形态产物同目录，二进制形态
- *      {GEBAI_HOME}/vendor/native-agents/——安装包预置物化）
+ *   1. 内置源 native-agents/（仓库根，按实现语言分目录：python/cpp/rust/…——语言目录下共享
+ *      基础框架驱动，每个二级目录一个子代理项目；dist 形态产物同构、二进制形态物化
+ *      {GEBAI_HOME}/vendor/native-agents/——安装包预置物化；构建时过滤 venv/编译产物）
  *   2. 用户自建 {GEBAI_HOME}/agents/{name}/agent.json（放一个目录即成一个子代理，任意语言）
+ *
+ * 设计原则：实现语言对模型透明——子代理 = 工具 + 提示词（能力导向命名与描述），语言仅是
+ * 工程组织维度；一种语言可派生任意多个子代理项目（manifest 可选 build 声明编译引导）。
  *
  * manifest（agent.json）字段：
  *   name*         子代理名（[a-z0-9_]+，即 agent_list/agent_load 名；目录名不必相同）
@@ -16,6 +20,8 @@
  *   prompt        系统提示词文件名（相对 manifest 目录，缺省 PROMPT.md）
  *   cwd           工作目录（缺省 manifest 目录；占位 {GEBAI_HOME}）
  *   env           附加环境变量（值支持 {GEBAI_HOME} 占位）
+ *   build         编译型语言构建引导（command/windows/unix 平台分支）：command 首元素指向的
+ *                可执行文件不存在时先执行（占位符同 command，cwd 为 manifest 目录）
  *
  * 生命周期：进程管理全部委托 AgentSidecar（惰性启动/超时杀进程重启/崩溃自愈/退出清理）。
  * 门控（DESIGN「多语言子代理」）：仅本地形态启用——沙箱启用（服务端部署）或 GEBAI_NATIVE_AGENTS=off
@@ -23,15 +29,16 @@
  * 失败安全：manifest 损坏/边车启动失败/握手失败 → 该项跳过并记入 loadErrors（模型经
  * unknownAgentError 可见根因），绝不阻断启动与其他子代理。
  */
-import { existsSync, readFileSync, statSync } from "node:fs"
-import { isAbsolute, join } from "node:path"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
+import { basename, dirname, isAbsolute, join } from "node:path"
 import { resolveGebaiHome } from "../base/config"
 import type { SubAgentDef, Tool } from "../base/types"
-import { AgentSidecar, nativeAgentsSourceDir, type SidecarSpawnFn } from "./sidecar"
+import { AgentSidecar, defaultSpawn, nativeAgentsSourceDir, type SidecarSpawnFn } from "./sidecar"
 
 /** 解释器解析（{python} 占位，其他语言 manifest 直接写可执行体路径/命令名）：
  *  GEBAI_PYTHON_DIR（解释器目录或可执行体完整路径；目录时补拼 python.exe/python）
- *  → {GEBAI_HOME}/venv → PATH（python3/python/py，Bun.which）。 */
+ *  → 仓库根 native-agents/python/venv（语言目录 venv，源码形态）→ {GEBAI_HOME}/venv
+ *  （历史位置兼容）→ PATH（python3/python/py，Bun.which）。 */
 export function resolvePythonCommand(env: Record<string, string> = process.env as Record<string, string>): string[] | null {
   const home = resolveGebaiHome()
   const explicit = String(env.GEBAI_PYTHON_DIR ?? "").trim()
@@ -41,7 +48,10 @@ export function resolvePythonCommand(env: Record<string, string> = process.env a
     if (/\.(exe|cmd|bat)$/i.test(explicit) || !existsSync(explicit) || statSync(explicit).isFile()) absolute.push(explicit)
     else absolute.push(join(explicit, process.platform === "win32" ? "python.exe" : "python"))
   }
-  absolute.push(process.platform === "win32" ? join(home, "venv", "Scripts", "python.exe") : join(home, "venv", "bin", "python"))
+  for (const vdir of [sourceTreeVenv(), join(home, "venv")]) {
+    if (!vdir) continue
+    absolute.push(process.platform === "win32" ? join(vdir, "Scripts", "python.exe") : join(vdir, "bin", "python"))
+  }
   for (const c of absolute) {
     if (c && isAbsolute(c) && existsSync(c)) return [c]
   }
@@ -50,6 +60,13 @@ export function resolvePythonCommand(env: Record<string, string> = process.env a
     if (found) return [found]
   }
   return null
+}
+
+/** 仓库根语言目录下的 venv（源码形态）：packages/server/src/core/agents → 仓库根
+ *  native-agents/python/venv；目录不存在返回 null（dist/二进制形态不用源码树 venv）。 */
+function sourceTreeVenv(): string | null {
+  const dir = join(import.meta.dirname, "..", "..", "..", "..", "..", "native-agents", "python", "venv")
+  return existsSync(dir) ? dir : null
 }
 
 export interface NativeAgentManifest {
@@ -61,6 +78,16 @@ export interface NativeAgentManifest {
   prompt?: string
   cwd?: string
   env?: Record<string, string>
+  /** 编译型语言构建引导：command 首元素指向的可执行文件不存在时先执行（占位符同 command），
+   *  产物落盘后正常启动——缺编译器的环境记 loadErrors 不阻断其他子代理。 */
+  build?: NativeAgentBuild
+}
+
+export interface NativeAgentBuild {
+  /** 构建命令（优先于平台分支；缺省取 windows/unix 对应平台项）。 */
+  command?: string[]
+  windows?: string[]
+  unix?: string[]
 }
 
 /** 解析并校验 manifest（缺必填字段/非法名/坏 JSON 返回错误文本）。 */
@@ -89,18 +116,38 @@ export function parseManifest(raw: string, source: string): { manifest?: NativeA
       prompt: typeof json.prompt === "string" ? json.prompt : undefined,
       cwd: typeof json.cwd === "string" ? json.cwd : undefined,
       env: typeof json.env === "object" && json.env !== null ? Object.fromEntries(Object.entries(json.env as Record<string, string>).map(([k, v]) => [k, String(v)])) : undefined,
+      build: typeof json.build === "object" && json.build !== null ? parseBuild(json.build as Record<string, unknown>) : undefined,
     },
   }
 }
 
-/** 占位符解析：{python}（解释器命令，数组展开）/{driver}（脚本绝对路径）/{GEBAI_HOME}。 */
+/** build 字段解析：command/windows/unix 均须为非空字符串数组（非法项静默忽略）。 */
+function parseBuild(b: Record<string, unknown>): NativeAgentBuild {
+  const arr = (v: unknown): string[] | undefined => {
+    if (!Array.isArray(v) || !v.length || v.some((c) => typeof c !== "string" || !String(c).trim())) return undefined
+    return v.map((c) => String(c))
+  }
+  const build: NativeAgentBuild = {}
+  const command = arr(b.command)
+  const windows = arr(b.windows)
+  const unix = arr(b.unix)
+  if (command) build.command = command
+  if (windows) build.windows = windows
+  if (unix) build.unix = unix
+  return build
+}
+
+/** 占位符解析：{python}（解释器命令，数组展开）/{driver}（脚本绝对路径）/{agent_dir}
+ *  （manifest 目录）/{lang_dir}（语言目录，即 agent_dir 上一级）/{agent_name}（manifest
+ *  name）/{exe}（Windows ".exe"，其余平台空串——跨平台可执行体引用）/{GEBAI_HOME}。 */
 export function expandCommand(
   command: string[],
   dir: string,
-  manifest: { driver?: string },
+  manifest: { driver?: string; name?: string },
   pythonCmd: string[] | null,
 ): { command: string[]; error?: string } {
   const home = resolveGebaiHome()
+  const exeSuffix = process.platform === "win32" ? ".exe" : ""
   const out: string[] = []
   for (const part of command) {
     if (part.includes("{driver}")) {
@@ -110,13 +157,104 @@ export function expandCommand(
       }
       out.push(part.replace(/\{driver\}/g, driverFile))
     } else if (part === "{python}") {
-      if (!pythonCmd) return { command: [], error: "command 引用 {python} 但解释器不可解析（GEBAI_PYTHON_DIR / {GEBAI_HOME}/venv / 系统 PATH 均无 python）" }
+      if (!pythonCmd) return { command: [], error: "command 引用 {python} 但解释器不可解析（GEBAI_PYTHON_DIR / 语言目录 venv / 系统 PATH 均无 python）" }
       out.push(...pythonCmd)
     } else {
-      out.push(part.replace(/\{GEBAI_HOME\}/g, home))
+      // 路径类占位（agent_dir/lang_dir）替换后统一为平台分隔符（字符串 replace 保留原文风格，
+      // 测试断言与跨平台可执行体引用都需归一化）
+      out.push(
+        normalizePath(
+          part
+            .replace(/\{GEBAI_HOME\}/g, home)
+            .replace(/\{agent_dir\}/g, dir)
+            .replace(/\{agent_name\}/g, manifest.name ?? basename(dir))
+            .replace(/\{lang_dir\}/g, dirname(dir))
+            .replace(/\{exe\}/g, exeSuffix),
+        ),
+      )
     }
   }
   return { command: out }
+}
+
+/** 平台分隔符归一（占位替换后的路径风格统一；非路径 token 不受影响——纯单词/选项不含 / 与 \）。 */
+function normalizePath(p: string): string {
+  return process.platform === "win32" ? p.replace(/\//g, "\\") : p.replace(/\\/g, "/")
+}
+
+/** 平台构建命令选取：command 优先 → windows/unix 对应平台分支 → 无（不构建）。 */
+function pickBuildCommand(build?: NativeAgentBuild): string[] | null {
+  if (!build) return null
+  if (build.command?.length) return build.command
+  if (process.platform === "win32" && build.windows?.length) return build.windows
+  if (process.platform !== "win32" && build.unix?.length) return build.unix
+  return null
+}
+
+/** 构建目标：command 首元素展开占位（不含 {python}/{driver}）后为绝对路径时才引导构建
+ *  （相对首元素/解释器命令无构建语义）。 */
+function resolveCommandTarget(command: string[], dir: string, name?: string): string | undefined {
+  const first = command[0] ?? ""
+  const expanded = normalizePath(
+    first
+      .replace(/\{GEBAI_HOME\}/g, resolveGebaiHome())
+      .replace(/\{agent_dir\}/g, dir)
+      .replace(/\{agent_name\}/g, name ?? basename(dir))
+      .replace(/\{lang_dir\}/g, dirname(dir))
+      .replace(/\{exe\}/g, process.platform === "win32" ? ".exe" : ""),
+  )
+  return isAbsolute(expanded) ? expanded : undefined
+}
+
+/** 构建引导超时（编译型语言冷编译：cl/rustc/g++ 均远低于此）。 */
+const BUILD_TIMEOUT_MS = 300_000
+
+/** 构建引导：command 首元素指向的可执行文件不存在时执行 manifest.build 编译命令（cwd 为
+ *  manifest 目录，占位符同 command），产物落盘后返回目标路径；可执行文件已存在/无 build
+ *  声明 → 跳过；构建失败抛错（launchNativeAgent 记入 loadErrors，不阻断其他子代理）。 */
+export async function ensureBuilt(
+  dir: string,
+  manifest: NativeAgentManifest,
+  opts: { spawn?: SidecarSpawnFn; env?: Record<string, string> } = {},
+): Promise<string | null> {
+  const buildCmd = pickBuildCommand(manifest.build)
+  if (!buildCmd) return null
+  const target = resolveCommandTarget(manifest.command, dir, manifest.name)
+  if (!target || existsSync(target)) return target ?? null
+  const expanded = expandCommand(buildCmd, dir, manifest, null)
+  if (expanded.error) throw new Error(`build 命令占位解析失败: ${expanded.error}`)
+  const spawn = opts.spawn ?? defaultSpawn
+  // process.env 值可 undefined：过滤后拼接（Bun.spawn env 类型要求全 string）
+  const proc = spawn(expanded.command, {
+    cwd: dir,
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][]), ...(opts.env ?? {}) },
+  })
+  let out = ""
+  const decoder = new TextDecoder()
+  const drain = async (stream: ReadableStream<Uint8Array> | undefined) => {
+    if (!stream) return
+    try {
+      const reader = stream.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        out += decoder.decode(value, { stream: true })
+        if (out.length > 200_000) out = out.slice(-100_000)
+      }
+    } catch { /* 已关闭 */ }
+  }
+  const timer = setTimeout(() => {
+    try {
+      proc.kill()
+    } catch { /* 已退出 */ }
+  }, BUILD_TIMEOUT_MS)
+  const codeP = (proc.exitCode ?? Promise.resolve<number | null>(null)) as Promise<number | null>
+  const [code] = await Promise.all([codeP, drain(proc.stdout), drain(proc.stderr)]).finally(() => clearTimeout(timer))
+  if (!existsSync(target)) {
+    const tail = out.split("\n").slice(-30).join("\n")
+    throw new Error(`构建引导失败：${expanded.command.join(" ")}（exit ${code ?? "?"}）未产出 ${target}${tail ? `:\n${tail}` : "（无输出）"}`)
+  }
+  return target
 }
 
 /** 边车工具 → 标准 Tool（execute 桥到 sidecar.toolCall；parameters 为驱动侧上报的 JSON Schema
@@ -162,6 +300,9 @@ export async function launchNativeAgent(
 ): Promise<{ def: SubAgentDef; sidecar: AgentSidecar }> {
   const home = resolveGebaiHome()
   const pythonCmd = opts.resolvePython ? opts.resolvePython() : resolvePythonCommand(opts.env)
+  // 编译型语言构建引导：可执行体缺失时先执行 manifest.build（如 rustc 直编 / cl 编译），
+  // 产物落盘后正常启动；失败抛错记 loadErrors，不阻断其他子代理
+  await ensureBuilt(dir, manifest, { spawn: opts.spawn, env: { GEBAI_HOME: home, ...(manifest.env ?? {}) } })
   const expanded = expandCommand(manifest.command, dir, manifest, pythonCmd)
   if (expanded.error) throw new Error(expanded.error)
   const promptFile = manifest.prompt ? join(dir, manifest.prompt) : join(dir, "PROMPT.md")
@@ -176,8 +317,9 @@ export async function launchNativeAgent(
   }
   const cwd = manifest.cwd ? manifest.cwd.replace(/\{GEBAI_HOME\}/g, home) : dir
   // 基础环境继承：保留 PATH/SYSTEMROOT 等进程基础变量（Windows 下 python 编解码/subprocess 初始化依赖
-  // SYSTEMROOT；极小 env 会让驱动启动即卡死无报错），manifest env 覆盖同名项
-  const sidecarEnv: Record<string, string> = { ...process.env, GEBAI_HOME: home, ...(manifest.env ?? {}) }
+  // SYSTEMROOT；极小 env 会让驱动启动即卡死无报错），manifest env 覆盖同名项；GEBAI_AGENT_DIR
+  // 供驱动定位子代理项目专属资产（如 python 驱动加载 {agent_dir}/tools.py 合并专属工具）
+  const sidecarEnv: Record<string, string> = { ...process.env, GEBAI_HOME: home, GEBAI_AGENT_DIR: dir, ...(manifest.env ?? {}) }
   const sidecar = new AgentSidecar({
     command: () => {
       // 每次启动重新解析占位符（venv 创建后边车重启自动切换解释器）
@@ -220,6 +362,7 @@ export async function scanManifestDirs(roots: string[]): Promise<Array<{ dir: st
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue
+      if (e.name === "venv" || e.name === "__pycache__" || e.name === "objs") continue
       const manifestPath = join(root, e.name, "agent.json")
       try {
         out.push({ dir: join(root, e.name), raw: readFileSync(manifestPath, "utf8") })
@@ -231,9 +374,20 @@ export async function scanManifestDirs(roots: string[]): Promise<Array<{ dir: st
   return out
 }
 
-/** native-agents 源目录们（内置 + 用户自建；供发现器与目录签名共用）。 */
+/** native-agents 源目录们（供发现器与目录签名共用）：内置源按实现语言展开（每个语言目录一个
+ *  扫描根——语言目录下二级目录即子代理项目）+ 用户自建 {GEBAI_HOME}/agents。 */
 export function nativeAgentRoots(): string[] {
-  return [nativeAgentsSourceDir(), join(resolveGebaiHome(), "agents")]
+  const roots: string[] = []
+  const src = nativeAgentsSourceDir()
+  try {
+    for (const e of readdirSync(src, { withFileTypes: true })) {
+      if (e.isDirectory()) roots.push(join(src, e.name))
+    }
+  } catch {
+    // 源目录不存在（如二进制形态未物化）：只剩用户自建根
+  }
+  roots.push(join(resolveGebaiHome(), "agents"))
+  return roots
 }
 
 /** 进程级边车注册表：name → 运行中的 AgentSidecar。 */
@@ -312,8 +466,10 @@ export function disposeAllNativeAgents(): void {
   }
 }
 
-/** native 目录签名（热加载）：各根目录子目录内全部文件（递归 1 层）的 路径:mtime 拼接——
- *  manifest/驱动脚本/提示词任一变化即变化；根全不存在返回空串（与 sub-agents 签名拼接后仍稳定）。 */
+/** native 目录签名（热加载）：各根目录（语言目录）子目录（子代理项目）内全部文件（递归 1 层）
+ *  的 路径:mtime 拼接——manifest/驱动脚本/提示词任一变化即变化；跳过 venv/__pycache__/objs
+ *  与编译产物（driver*.exe）——运行时数据不触发重扫；根全不存在返回空串（与 sub-agents 签名
+ *  拼接后仍稳定）。 */
 export async function nativeAgentsSignature(roots: string[]): Promise<string> {
   const { readdir, stat } = await import("node:fs/promises")
   const parts: string[] = []
@@ -326,6 +482,7 @@ export async function nativeAgentsSignature(roots: string[]): Promise<string> {
     }
     for (const e of dirs) {
       if (!e.isDirectory()) continue
+      if (e.name === "venv" || e.name === "__pycache__" || e.name === "objs") continue
       const sub = join(root, e.name)
       let files
       try {
@@ -335,6 +492,7 @@ export async function nativeAgentsSignature(roots: string[]): Promise<string> {
       }
       for (const f of files) {
         if (!f.isFile()) continue
+        if (/^driver.*\.exe$/.test(f.name)) continue
         const st = await stat(join(sub, f.name)).catch(() => null)
         if (st) parts.push(`${e.name}/${f.name}:${st.mtimeMs}`)
       }

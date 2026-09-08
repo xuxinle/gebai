@@ -35,11 +35,14 @@ export interface SidecarProc {
   stderr: ReadableStream<Uint8Array>
   kill(): void
   readonly killed: boolean
+  /** 退出码（可选：构建引导判定成败用；Bun.spawn 的 exited，测试替身可省略）。 */
+  readonly exitCode?: Promise<number | null>
 }
 
 export type SidecarSpawnFn = (cmd: string[], opts: { cwd?: string; env?: Record<string, string> }) => SidecarProc
 
-const defaultSpawn: SidecarSpawnFn = (cmd, opts) => {
+/** 默认 spawn（Bun.spawn；导出供构建引导等复用同一进程抽象）。 */
+export const defaultSpawn: SidecarSpawnFn = (cmd, opts) => {
   const proc = Bun.spawn(cmd, {
     cwd: opts.cwd,
     env: opts.env ?? process.env,
@@ -55,6 +58,7 @@ const defaultSpawn: SidecarSpawnFn = (cmd, opts) => {
     get killed() {
       return proc.killed
     },
+    exitCode: proc.exited as Promise<number | null>,
   }
 }
 
@@ -326,13 +330,14 @@ export class AgentSidecar {
   }
 }
 
-/** 内置多语言子代理源目录解析：源码形态 src/core/agents → 仓库内 native-agents/（与 src 同级）；
- *  dist 形态（bun build 产物，模块位于 dist 根）→ 同目录 native-agents/（build-subagents 构建
- *  时整树复制）；二进制形态（bun --compile 单文件）→ {GEBAI_HOME}/vendor/native-agents/
- *  （安装包模式预置物化）。 */
+/** 内置多语言子代理源目录解析：源码形态 src/core/agents → 仓库根 native-agents/（按实现语言
+ *  分目录：python/cpp/rust/…，语言目录下共享基础框架驱动，每个二级目录一个子代理项目）；
+ *  dist 形态（bun build 产物，模块位于 dist 根）→ 仓库根命中失败时 dist/native-agents/
+ *  （build-subagents 构建时复制，供独立部署的 dist 树发现）；二进制形态（bun --compile 单
+ *  文件）→ {GEBAI_HOME}/vendor/native-agents/（安装包模式预置物化）。 */
 export function nativeAgentsSourceDir(): string {
   if (isBinaryMode()) return join(resolveGebaiHome(), "vendor", "native-agents")
-  const srcForm = join(import.meta.dirname, "..", "..", "..", "native-agents")
+  const srcForm = join(import.meta.dirname, "..", "..", "..", "..", "..", "native-agents")
   if (existsSync(srcForm)) return srcForm
   return join(import.meta.dirname, "native-agents")
 }

@@ -1,0 +1,6 @@
+{
+  "name": "pyregex",
+  "description": "正则工具子代理（边车常驻进程）：pyregex_match 匹配测试（分组/命名分组）、pyregex_findall 批量提取、pyregex_sub 替换（反向引用）——反复调试正则零编译开销",
+  "protocol": "1",
+  "command": ["{python}", "-X", "utf8", "{lang_dir}/driver.py"]
+}

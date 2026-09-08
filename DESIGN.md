@@ -48,9 +48,7 @@ GEBAI_HOME/
 │   └── {h0}/{h1}/{name}.json   # { name, html, scope:"public", owner, createdAt, updatedAt }
 ├── agents/                # 用户自建多语言子代理（放置即发现；同名覆盖内置，见「多语言子代理」）
 │   └── {name}/            # agent.json + 任意语言驱动脚本 + PROMPT.md
-├── vendor/native-agents/  # 内置多语言子代理源（仅二进制形态：安装包预置物化；源码/dist 形态用仓库内目录）
-├── venv/                  # Python 虚拟环境（python 子代理 python_pip 自动创建，解释器解析优先）
-├── requirements.txt       # Python 依赖清单（python_pip install/freeze 维护）
+├── vendor/native-agents/  # 内置多语言子代理源（仅二进制形态：安装包预置物化；源码/dist 形态用仓库根目录）
 └── users/                 # 用户数据目录（多用户安全隔离）
     ├── registry.json      # 用户注册表（服务模式）：用户名 → 加盐哈希/角色/状态
     └── {user}/            # 每个用户独立的数据目录
@@ -1092,19 +1090,24 @@ export const preload = false
 | `feishu_group` | chats_list/chat_info/members_list/user_info/message_send/chat_create/chat_update/chat_members_add/chat_members_remove/chat_disband | 写操作全部（发消息/建群/改群/拉人/移人/解散） | ✗ | 飞书群基础能力（群列表/详情/成员查询（open_id+姓名——@特定人与 cron 通知 at 名单取材）/用户信息/群内发消息（at 标签）/建群改群/成员增删/解散；需 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_* 凭证） |
 | `cron` | add/list/update/trigger/remove（→ `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove`） | add+update+remove+trigger | ✗ | 定时任务管理（自全局 cron_* 下沉：创建脚本运行/提示词运行 agent 的用户级无人值守任务、查看/修改/手动触发/删除，支持执行目标（独立新会话/专用会话/绑定会话）、时区、@at 一次性、错过补跑、飞书群/webhook 通知、连续失败自动停用；`GEBAI_CRON_ENABLED` 默认 true，显式 false 时完全不可见） |
 | `wps` | word_create/word_read/word_append、excel_read/excel_write/excel_edit、ppt_create/ppt_read、pdf_create/pdf_read/pdf_merge/pdf_split/pdf_edit（projectAware 项目路由；文件浏览与交互编排复用全局工具） | 无（防盲覆盖守卫在工具体内，与全局 write 同语义） | ✗ | Office/PDF 文档处理（.docx/.xlsx/.pptx 读写与富排版：markdown/块结构生成 Word、原 XML 追加保留原文档格式、Excel 多表公式样式与 ops 批量编辑、PPT 版式/图表/图片/备注，csv/tsv 读取；PDF 生成（中文字体自动嵌入子集化）/逐页文本提取/合并/拆分/页面编辑与水印；旧版二进制格式 .doc/.xls/.ppt 不支持） |
-| `python`（native） | run/pip/status（→ `python_run`/`python_pip`/`python_status`；边车常驻进程动态上报） | 全部 | ✗ | 多语言子代理首个内置：Python 生态接入（常驻命名空间执行——import 一次多次复用，AI 库秒级导入成本只付一次；venv 落 `{GEBAI_HOME}/venv` + requirements.txt 依赖管理；协议层纯标准库；见「多语言子代理」） |
+| `python`（native） | run/pip/status（→ `python_run`/`python_pip`/`python_status`；边车常驻进程动态上报） | 全部 | ✗ | 多语言子代理内置：Python 生态接入（常驻命名空间执行——import 一次多次复用，AI 库秒级导入成本只付一次；venv 落语言目录 `native-agents/python/`；协议层纯标准库；见「多语言子代理」） |
+| `pyregex`（native） | match/findall/sub（→ `pyregex_match`/`pyregex_findall`/`pyregex_sub`；与基础 run/pip/status 合并上报） | 全部 | ✗ | 正则工具（Python tools.py 合并模式示例：常驻进程反复调试正则零编译开销，命名分组/批量提取/反向引用替换） |
+| `mathx`（native） | eval/eval_batch/stats（→ `mathx_eval`/`mathx_eval_batch`/`mathx_stats`） | 全部 | ✗ | 高性能数学计算（C++ 示例：递归下降表达式求值器——变量代入/内置函数/批量求值/统计，构建引导自动编译） |
+| `codec`（native） | b64_encode/b64_decode/crc32（→ `codec_b64_encode`/`codec_b64_decode`/`codec_crc32`） | 全部 | ✗ | 编解码工具（Rust 示例：base64 编解码 + CRC-32，rustc 直编零依赖） |
 
 #### 多语言子代理（native agents：边车协议 + 自动发现启动注册）
 
-任意语言（Python/C++/Go/…）实现的子代理：**放置即自动发现 → 启动边车进程 → 握手拉取工具清单 → 注册为标准子代理**（`agent_list` 可见、`agent_load` 装载、`agent_run` 委派——与 TS 子代理完全同构）。
+任意语言（Python/C++/Go/…）实现的子代理：**放置即自动发现 → 启动边车进程 → 握手拉取工具清单 → 注册为标准子代理**（`agent_list` 可见、`agent_load` 装载、`agent_run` 委派——与 TS 子代理完全同构）。设计原则：**实现语言对模型透明**——子代理 = 工具 + 提示词（能力导向命名与描述），语言仅是工程组织维度。
 
-- **manifest 发现**（`core/agents/native-agents.ts`）：扫描内置源 `native-agents/`（dist 构建时由 build-subagents 整树复制；二进制形态物化 `{GEBAI_HOME}/vendor/native-agents/`）与用户自建 `{GEBAI_HOME}/agents/{name}/agent.json`（同名覆盖内置）；manifest 字段/占位符（`{python}`/`{driver}`/`{GEBAI_HOME}`）见 `native-agents/README.md` 协议规范
+- **按语言组织**（仓库根 `native-agents/{lang}/`）：语言目录下共享基础框架驱动（协议实现 + 语言生态工具）与运行时资产（venv/构建脚本），每个二级目录一个子代理项目（manifest + 提示词 + 专属工具）——一种语言派生任意多个子代理；发现根即各语言目录（每个语言目录一个扫描根，二级目录即子代理项目），用户自建 `{GEBAI_HOME}/agents/{name}/` 同构（同名覆盖内置）
+- **manifest 发现**（`core/agents/native-agents.ts`）：扫描内置源 `native-agents/`（dist 构建时由 build-subagents 整树复制——过滤 venv/__pycache__/编译产物；二进制形态物化 `{GEBAI_HOME}/vendor/native-agents/`）；manifest 字段/占位符（`{python}`/`{driver}`/`{agent_dir}`/`{lang_dir}`/`{agent_name}`/`{exe}`/`{GEBAI_HOME}`）见 `native-agents/README.md` 协议规范
+- **构建引导**（编译型语言开箱即用）：manifest `build` 字段（`command`/`windows`/`unix` 平台分支）声明编译命令，command 首元素指向的可执行文件不存在时自动执行（占位符同 command，cwd 为 manifest 目录）——C++ 经 `build.bat`（vswhere 定位 MSVC）/Rust 经 `rustc` 直编；缺编译器/构建失败记 loadErrors（模型可见根因），不阻断其他子代理；可执行体已存在则跳过（增量）
 - **边车协议 v1**（语言无关，NDJSON over stdio）：`init`（上报 name/protocol，须与 manifest 一致）→ `tools.list`（工具清单：裸名 + JSON Schema 原样透传）→ `tool.call`（驱动侧执行返回 `{output, data?}`）；stdout 只写协议行、stderr 自由排障、stdin EOF 即退出防孤儿；**行尾容忍 CRLF**（Windows 驱动 text-mode stdout 默认翻译 `\n` 为 `\r\n`，宿主行解析剥尾部 `\r`——跨语言驱动不因平台换行约定挂起）
 - **边车宿主**（`core/agents/sidecar.ts`，进程管理对齐 CV sidecar）：惰性启动/启动串行化/请求 id 配对并发复用；请求超时杀进程重启；**崩溃自愈**（意外退出自动重启一次 + 在途请求重发一次；连续快速退出 3 次放弃自动重启防抖动风暴，下次调用再拉起）；exit hook + 驱动 EOF 双保险；stderr 环形缓冲
 - **生命周期集成**：`SubAgentManager.discover()` 尾部并行启动（boot 显式接线后生效——`setNativeAgentsOpts`，测试不注入零影响；`roots` 选项可覆盖发现根供测试隔离）；manifest/驱动/提示词文件变化纳入热加载签名（重扫重注册，**目录删除对账回收**——上次名单中本次消失的从 defs 移除，进程级边车注册表同步回收旧进程）；**TS 签名与 native 签名各自判定**——TS 目录未变而仅 native 变化时 `refreshIfChanged` 只重拉 native（幂等跳过 TS 扫描），REST `GET /api/v1/sub-agents` 响应前惰性调用 `refreshIfChanged`（放置新目录即出现在列表，无需重启）；pip 安装成功后驱动主动退出 → 宿主自愈重启 → 命令工厂重新解析占位符（venv 创建后自动切换 venv 解释器，无需重启服务）
-- **边车环境**：基于宿主进程 env 继承基础变量（PATH/SYSTEMROOT 等——Windows 下 python 编码/subprocess 初始化依赖 SYSTEMROOT，极小 env 会启动即卡死无报错）+ `GEBAI_HOME` + manifest env 覆盖同名项
+- **边车环境**：基于宿主进程 env 继承基础变量（PATH/SYSTEMROOT 等——Windows 下 python 编码/subprocess 初始化依赖 SYSTEMROOT，极小 env 会启动即卡死无报错）+ `GEBAI_HOME` + `GEBAI_AGENT_DIR`（驱动定位子代理项目专属资产，如 Python 驱动加载 `{agent_dir}/tools.py`）+ manifest env 覆盖同名项
 - **门控与边界**：仅本地形态（沙箱启用即禁用；`GEBAI_NATIVE_AGENTS=off` 显式关闭）；边车工具恒需审批；单项失败（manifest 损坏/启动/握手失败）记 loadErrors 模型可见根因，不阻断其他子代理；工具名驱动侧为裸名（注册表自动加 `{agent}_` 前缀）
-- **内置 Python 子代理**（`native-agents/python/`）：`python_run`（常驻命名空间 REPL：末行独立表达式求值 repr 回显，session 键隔离命名空间，stdout/stderr 捕获，timeout 秒默认 300）、`python_pip`（install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载；freeze 快照写回；status 查看）、`python_status`（边车/venv/包状态）；解释器解析 `GEBAI_PYTHON_DIR` → `{GEBAI_HOME}/venv` → 系统 PATH；系统提示词（PROMPT.md，frontmatter 剥离）引导 AI 库使用
+- **内置四个子代理**（`native-agents/{python,cpp,rust}/`）：`python`（`python_run` 常驻命名空间 REPL：末行独立表达式求值 repr 回显，session 键隔离命名空间，stdout/stderr 捕获，timeout 秒默认 300；`python_pip` install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载，freeze 快照写回；`python_status` 边车/venv/包状态）；`pyregex`（Python `tools.py` 合并模式：match/findall/sub 正则工具 + 基础工具）；`mathx`（C++：eval/eval_batch/stats 递归下降表达式求值）；`codec`（Rust：b64_encode/b64_decode/crc32）；解释器解析 `GEBAI_PYTHON_DIR` → 语言目录 venv（`native-agents/python/venv`）→ `{GEBAI_HOME}/venv`（历史兼容）→ 系统 PATH；三语言基础框架（共享驱动 + 项目扩展点）见 `native-agents/README.md`
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 
