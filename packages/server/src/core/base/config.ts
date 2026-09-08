@@ -82,6 +82,12 @@ export interface ServerConfig {
   devReload: boolean
   /** 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true 时启用长连接事件订阅）。 */
   feishuBotEnabled: boolean
+  /** 飞书机器人行为配置（GEBAI_FEISHU_BOT_*）：工具调用过程推送（滚动状态消息）。 */
+  feishuBotNotifyTools: boolean
+  /** 助手中间轮文本推送（预览消息；引擎 notifyIntermediate 事件）。 */
+  feishuBotNotifyAssistant: boolean
+  /** 自动审批（需审批工具自动通过——部署方为飞书通道整体担责；审批卡片不再弹出）。 */
+  feishuBotAutoApprove: boolean
   /** 飞书应用 App ID（GEBAI_FEISHU_APP_ID；feishu_docs 子 Agent 与机器人桥接共用）。 */
   feishuAppId?: string
   /** 飞书应用 App Secret（GEBAI_FEISHU_APP_SECRET）。 */
@@ -168,6 +174,10 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     devReload: process.argv.includes("--reload") || env("GEBAI_DEV_RELOAD") === "1",
     // 飞书机器人对话桥接（长连接模式）：需同时配置 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET
     feishuBotEnabled: bool("GEBAI_FEISHU_BOT_ENABLED", false),
+    // 飞书机器人行为配置（均默认 false 保持现状）：过程推送两类 + 自动审批
+    feishuBotNotifyTools: bool("GEBAI_FEISHU_BOT_NOTIFY_TOOLS", false),
+    feishuBotNotifyAssistant: bool("GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT", false),
+    feishuBotAutoApprove: bool("GEBAI_FEISHU_BOT_AUTO_APPROVE", false),
     feishuAppId: env("GEBAI_FEISHU_APP_ID") || undefined,
     feishuAppSecret: env("GEBAI_FEISHU_APP_SECRET") || undefined,
     // 安全模式：仅启动时从环境变量加载，不进入会话 env（不可被 ask 填值分支/前端 envOverride 修改）

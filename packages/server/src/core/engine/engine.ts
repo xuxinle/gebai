@@ -771,6 +771,10 @@ export class AgentEngine {
        *  调用方即用户本人，等价其自设 GEBAI_APPROVAL_SKIP）；false 无交互通道下需审批工具直接拒绝
        *  （本地模式同样生效，不空等超时）；缺省 = 通道默认姿态。 */
       autoApprove?: boolean
+      /** 中间轮文本过程推送（飞书通道 GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：开启后带工具调用的中间轮
+       *  文本（模型的过程陈述/阶段结论）随 event.message.intermediate 发布——仅最终回复通道也可感知
+       *  助手过程（未开启时中间轮文本只随 assistant(toolCalls) 消息落盘，不单独推送）。 */
+      notifyIntermediate?: boolean
     } = {},
   ): Promise<void> {
     if (this.tasks.has(sessionId)) throw new Error(`会话 ${sessionId} 已有任务在运行`)
@@ -778,7 +782,7 @@ export class AgentEngine {
     // 会双双通过检查导致同会话双任务——消息交错持久化、tasks 注册互相覆盖、先结束任务的 finally
     // 删掉后者的注册（isRunning 归假而任务仍在跑）。先注册再异步校验，准备失败同步回滚。
     const controller = new AbortController()
-    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }) }
+    const task: TaskState = { controller, startedAt: Date.now(), approvals: new Map(), pendingDecisions: new Map(), retries: new Map(), choices: new Map(), pendingChoices: new Map(), draws: new Map(), pendingDraws: new Map(), captures: new Map(), pendingCaptures: new Map(), disabledTools: opts.disabledTools ?? [], interactionMode: opts.interactionMode ?? "realtime", outputMode: opts.outputMode ?? "streaming", role: opts.role, channelNote: opts.channelNote, env: {}, envRequests: new Map(), pendingEnvRequests: new Map(), ...(opts.autoApprove === undefined ? {} : { approvalPolicy: opts.autoApprove ? ("auto" as const) : ("deny" as const) }), ...(opts.notifyIntermediate ? { notifyIntermediate: true } : {}) }
     this.tasks.set(sessionId, task)
     // 收尾验证提醒数据（本任务范围）：修改的代码文件 + 是否运行过测试/检查类命令（runToolInterruptible 收集）
     this.taskMods.set(sessionId, { files: new Set(), verified: false })
@@ -1816,6 +1820,12 @@ export class AgentEngine {
       }
 
       normalizeToolCalls(registry, toolCalls)
+      // 中间轮文本过程推送（飞书通道 GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：带工具调用的中间轮文本
+      // （模型的过程陈述/阶段结论）在持久化后单独发布——与 outputMode 正交（final_only 通道也可订阅感知）。
+      // 仅非空文本发布，避免空轮（纯工具调用无陈述）噪音
+      if (text.trim() && this.tasks.get(sessionId)?.notifyIntermediate) {
+        this.publish(sessionId, "event.message.intermediate", { text, messageId: assistantMsgId, toolCalls: toolCalls.length, sessionId })
+      }
       await persist({
         id: assistantMsgId,
         role: "assistant",

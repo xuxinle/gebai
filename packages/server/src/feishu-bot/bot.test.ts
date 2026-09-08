@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
 import type { SessionData } from "../core/base/types"
-import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard } from "./bot"
+import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard, formatToolNote } from "./bot"
 
 /** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
 const funame = (openId: string) => `feishu_${createHash("sha256").update(openId).digest("hex").slice(0, 24)}`
@@ -44,6 +44,8 @@ interface Fakes {
   /** 表情反应调用记录（add：messageId+emoji；delete：messageId+reactionId）。 */
   reactions: Array<{ messageId: string; emoji: string }>
   reactionDeletes: Array<{ messageId: string; reactionId: string }>
+  /** 消息原地更新调用记录（PATCH：滚动状态消息用）。 */
+  patches: Array<{ messageId: string; msgType: string; content: unknown }>
   cancels: string[]
   connCalls: string[]
   running: Set<string>
@@ -57,6 +59,7 @@ interface Fakes {
     downloadResource(id: string, key: string, type: string): Promise<Uint8Array>
     uploadImage(data: Uint8Array, mime: string, fileName?: string): Promise<string>
     getChatName(id: string): Promise<string | null>
+    patchMessage(messageId: string, msgType: string, content: unknown): Promise<boolean>
   }
   emit(ev: AgentEvent): void
   /** 触发卡片按钮回调（模拟 conn 的 card 帧）。 */
@@ -65,7 +68,7 @@ interface Fakes {
   releaseRuns: () => void
 }
 
-function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: number; flushMinChars: number; home: string; hangRun: boolean; renderError: string | null }> = {}): Fakes {
+function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: number; flushMinChars: number; home: string; hangRun: boolean; renderError: string | null; notify: { tools?: boolean; assistant?: boolean } }> = {}): Fakes {
   // 归属映射（feishu/chat-owners.json）写入真实临时目录；共享 home 可测「重启恢复」
   const home = opts.home ?? mkdtempSync(join(tmpdir(), "feishu-bot-test-"))
   const sessions = new Map<string, SessionData>()
@@ -82,6 +85,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
   const deletes: string[] = []
   const reactions: Fakes["reactions"] = []
   const reactionDeletes: Fakes["reactionDeletes"] = []
+  const patches: Fakes["patches"] = []
   const cancels: string[] = []
   const connCalls: string[] = []
   const running = new Set<string>()
@@ -149,6 +153,10 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
       sent.push(o)
       return `om_sent_${sent.length}`
     },
+    patchMessage: async (messageId, msgType, content) => {
+      patches.push({ messageId, msgType, content })
+      return true
+    },
     replyMessage: async (messageId, msgType, content) => {
       sent.push({ receiveId: messageId, receiveIdType: "reply", msgType, content })
       return `om_rep_${sent.length}`
@@ -204,6 +212,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
     clock: Date.now,
     flushIntervalMs: opts.flushIntervalMs ?? 1500,
     flushMinChars: opts.flushMinChars ?? 60,
+    notify: opts.notify,
   })
   return {
     bot,
@@ -225,6 +234,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
     deletes,
     reactions,
     reactionDeletes,
+    patches,
     cancels,
     connCalls,
     running,
@@ -246,6 +256,15 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
           break
         case "event.message.done":
           if (p.session !== true) h.onDone?.(String(p.text ?? ""))
+          break
+        case "event.message.intermediate":
+          h.onIntermediate?.(String(p.text ?? ""))
+          break
+        case "event.tool.call":
+          h.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""))
+          break
+        case "event.tool.result":
+          h.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true)
           break
         case "event.task.done":
           h.onEnd?.()
@@ -482,6 +501,55 @@ describe("身份映射", () => {
     expect(f2.sessions.get(sid())!.userId).toBe(`uid_${funame("ou_123")}`)
     expect(f2.runs[0].user).toBe(`uid_${funame("ou_123")}`)
   })
+
+  test("本地模式旧 default 归属迁移：归属表/会话目录/chat.json 统一改到 admin", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feishu-bot-migrate-"))
+    // 田旧状态：归属表记 default + 会话目录在 users/default 下（chat.json userId=default）
+    mkdirSync(join(home, "feishu"), { recursive: true })
+    writeFileSync(join(home, "feishu", "chat-owners.json"), JSON.stringify({ oc_chat1: "default" }))
+    const sidOld = sid()
+    const sessDir = join(home, "users", "default", "sessions", sidOld.slice(0, 2), sidOld.slice(2, 4), sidOld)
+    mkdirSync(sessDir, { recursive: true })
+    writeFileSync(join(sessDir, "chat.json"), JSON.stringify({ id: sidOld, name: "飞书会话", userId: "default", messages: [], todos: [], createdAt: 1, updatedAt: 1 }, null, 2))
+    // 触发装载（loadOwners 幂等仅首次）：启动后首次交互即迁移
+    const f = makeBot({ home }) // 本地模式，默认用户 admin
+    await f.bot.start()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    // 引擎身份已是 admin（归属表改写）
+    expect(f.runs[0].user).toBe("admin")
+    // 会话目录已搬到 users/admin 下，旧目录不复存在
+    expect(existsSync(join(home, "users", "admin", "sessions", sidOld.slice(0, 2), sidOld.slice(2, 4), sidOld, "chat.json"))).toBe(true)
+    expect(existsSync(join(sessDir, "chat.json"))).toBe(false)
+    // chat.json userId 已改写
+    const migrated = JSON.parse(readFileSync(join(home, "users", "admin", "sessions", sidOld.slice(0, 2), sidOld.slice(2, 4), sidOld, "chat.json"), "utf8")) as { userId: string }
+    expect(migrated.userId).toBe("admin")
+    // 归属表持久化已改写（saveOwners 新格式 {user}；重启后不再迁移）
+    const owners = JSON.parse(readFileSync(join(home, "feishu", "chat-owners.json"), "utf8")) as Record<string, { user: string }>
+    expect(owners.oc_chat1.user).toBe("admin")
+    // 幂等：重启（新实例同 home）不重复迁移、归属仍 admin
+    const f2 = makeBot({ home })
+    await f2.bot.start()
+    await f2.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_m2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "再问" }) } }))
+    await flush()
+    expect(f2.runs[0].user).toBe("admin")
+    expect(existsSync(join(home, "users", "admin", "sessions", sidOld.slice(0, 2), sidOld.slice(2, 4), sidOld, "chat.json"))).toBe(true)
+  })
+
+  test("服务模式不迁移 default 归属（多用户隔离，映射用户不变）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "feishu-bot-nomigrate-"))
+    mkdirSync(join(home, "feishu"), { recursive: true })
+    // 旧数据异常形态：服务模式下归属表混入 default（历史遗留）——多用户模式下不得自动改为 admin
+    writeFileSync(join(home, "feishu", "chat-owners.json"), JSON.stringify({ oc_chat1: "default" }))
+    const f = makeBot({ authMode: "server", home })
+    await f.bot.start()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    expect(f.runs[0].user).toBe("default") // 归属表沿用（不迁移）
+    // 归属文件保持原样（旧字符串格式，服务模式无人重写）
+    const owners = JSON.parse(readFileSync(join(home, "feishu", "chat-owners.json"), "utf8")) as Record<string, unknown>
+    expect(owners.oc_chat1).toBe("default")
+  })
 })
 
 describe("引擎事件推送", () => {
@@ -583,7 +651,7 @@ describe("引擎事件推送", () => {
     expect(f.reactionDeletes.some((d) => d.messageId === "om_msg12" && d.reactionId === "reaction_1")).toBe(true)
   })
 
-  test("审批：请求发交互卡片（含参数摘要与重试提示），/approve 命令兜底批准并撤回卡片", async () => {
+  test("审批：请求发交互卡片（含参数摘要与重试提示），/approve 命令兜底批准（卡片保留不撤回）", async () => {
     const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
@@ -600,8 +668,8 @@ describe("引擎事件推送", () => {
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
     expect(f.approvals).toEqual([{ sessionId: sid(), toolCallId: "tc9", approve: true }])
-    // 命令决策后撤回审批卡片（卡片按钮已失效，防误点）
-    expect(f.deletes).toContain(`om_sent_${f.sent.indexOf(card) + 1}`)
+    // 消息一律保留不撤回：审批卡片留痕，无 deleteMessage 调用
+    expect(f.deletes).toHaveLength(0)
     // 无待审批时拒绝
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_ap2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/approve" }) } }))
     await flush()
@@ -645,7 +713,7 @@ describe("引擎事件推送", () => {
     f.releaseRuns()
   })
 
-  test("审批卡片：任务结束撤回待审批卡片；新审批覆盖旧待审批先撤旧卡", async () => {
+  test("审批卡片：任务结束与新审批覆盖均不撤回卡片（消息留痕，状态映射清理）", async () => {
     const f = makeBot({ hangRun: true })
     await f.bot.start()
     void f.bot.handleFeishuEvent(receiveEvent())
@@ -653,17 +721,15 @@ describe("引擎事件推送", () => {
     f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc13", tool: "write", arguments: { path: "x" } } })
     await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
     const card1 = f.sent.find((s) => s.msgType === "interactive")!
-    const card1Id = `om_sent_${f.sent.indexOf(card1) + 1}`
-    // 超时残留后被新审批覆盖 → 旧卡先撤回
+    void card1
+    // 超时残留后被新审批覆盖 → 旧卡保留（消息不撤回），仅替换状态映射
     f.emit({ type: "event.approval.request", ...base, payload: { toolCallId: "tc14", tool: "write", arguments: { path: "y" } } })
     await flush()
-    expect(f.deletes).toContain(card1Id)
-    // 任务结束（完成/出错）→ 撤回当前待审批卡片
-    const card2 = f.sent.filter((s) => s.msgType === "interactive").at(-1)!
-    const card2Id = `om_sent_${f.sent.indexOf(card2) + 1}`
+    expect(f.deletes).toHaveLength(0)
+    // 任务结束（完成/出错）→ 卡片保留（状态清理后按钮回调不再决策）
     f.emit({ type: "event.task.done", ...base, payload: {} })
     await flush()
-    expect(f.deletes).toContain(card2Id)
+    expect(f.deletes).toHaveLength(0)
     f.releaseRuns()
   })
 
@@ -929,7 +995,7 @@ describe("引擎事件推送", () => {
     f.releaseRuns()
   })
 
-  test("任务结束撤回待作答选择卡片并清理状态", async () => {
+  test("任务结束不撤回待作答选择卡片（状态清理后回调不决策）", async () => {
     const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
@@ -938,10 +1004,10 @@ describe("引擎事件推送", () => {
     await waitUntil(() => f.sent.some((s) => String(JSON.stringify(s.content)).includes('"choiceId":"c5"')))
     const cardMsgId = f.sent.find((s) => String(JSON.stringify(s.content)).includes('"choiceId":"c5"'))!.content
     void cardMsgId
-    // 任务完成：卡片消息被撤回（deleteMessage 调用），状态清理后点击回调不决策
+    // 任务完成：卡片保留（无 deleteMessage），状态清理后点击回调不决策
     f.emit({ type: "event.task.done", ...base, payload: {} })
     await flush()
-    expect(f.deletes.length).toBeGreaterThanOrEqual(1)
+    expect(f.deletes).toHaveLength(0)
     const resp = f.cardAction({
       event: {
         operator: { operator_id: { open_id: "ou_123" } },
@@ -994,6 +1060,94 @@ describe("引擎事件推送", () => {
     f.emit({ type: "event.task.error", sessionId: "other", timestamp: 0, payload: { error: "x" } })
     await flush()
     expect(f.sent).toHaveLength(0)
+  })
+})
+
+describe("过程推送配置（GEBAI_FEISHU_BOT_NOTIFY_*）", () => {
+  const base = { sessionId: sid(), timestamp: 0 }
+
+  test("notifyTools：工具调用滚动状态消息（发一条原地更新，消息保留不撤回）", async () => {
+    const f = makeBot({ notify: { tools: true } })
+    await f.bot.start()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    f.emit({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1" } })
+    await flush()
+    // 首个工具调用：发一条滚动状态消息
+    expect(f.sent.filter((s) => String(JSON.stringify(s.content)).includes("🔧")).length).toBe(1)
+    f.emit({ type: "event.tool.call", ...base, payload: { name: "write", toolCallId: "tc2" } })
+    await flush()
+    // 第二个工具调用：原地更新同一条消息（PATCH，不发新）
+    expect(f.patches.length).toBe(1)
+    expect(String(JSON.stringify(f.patches[0].content))).toContain("write")
+    expect(f.sent.filter((s) => String(JSON.stringify(s.content)).includes("🔧")).length).toBe(1)
+    // 工具完成：标记完成位（✔）仍原地更新
+    f.emit({ type: "event.tool.result", ...base, payload: { name: "read", toolCallId: "tc1" } })
+    await flush()
+    expect(f.patches.length).toBe(2)
+    expect(String(JSON.stringify(f.patches[1].content))).toContain("✔ read")
+    // 最终回复：滚动状态消息保留不撤回，发最终卡片
+    f.emit({ type: "event.message.done", ...base, payload: { text: "完成" } })
+    await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    await flush()
+    const noteId = f.sent.find((s) => String(JSON.stringify(s.content)).includes("🔧"))
+    expect(noteId).toBeDefined()
+    expect(f.deletes).toHaveLength(0)
+  })
+
+  test("notifyTools 关闭（默认）：工具调用不推送任何消息", async () => {
+    const f = makeBot()
+    await f.bot.start()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    f.emit({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1" } })
+    f.emit({ type: "event.tool.result", ...base, payload: { name: "read", toolCallId: "tc1" } })
+    await flush()
+    expect(f.sent.filter((s) => String(JSON.stringify(s.content)).includes("🔧")).length).toBe(0)
+    expect(f.patches.length).toBe(0)
+  })
+
+  test("notifyAssistant：助手中间轮文本发预览消息（预览保留不撤回）", async () => {
+    const f = makeBot({ notify: { assistant: true }, flushIntervalMs: 0, flushMinChars: 1 })
+    await f.bot.start()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    f.emit({ type: "event.message.intermediate", ...base, payload: { text: "我先查一下文件。" } })
+    await flush()
+    await new Promise((r) => setTimeout(r, 20)) // 预览节流冲刷
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("✍️") && String(JSON.stringify(s.content)).includes("我先查一下文件"))).toBe(true)
+    // 最终回复：预览消息保留 + 发最终卡片
+    f.emit({ type: "event.message.done", ...base, payload: { text: "最终结论" } })
+    await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    await flush()
+    const preview = f.sent.find((s) => String(JSON.stringify(s.content)).includes("✍️"))
+    expect(preview).toBeDefined()
+    expect(f.deletes).toHaveLength(0)
+  })
+
+  test("notifyAssistant 关闭（默认）：中间轮文本不推送", async () => {
+    const f = makeBot({ flushIntervalMs: 0, flushMinChars: 1 })
+    await f.bot.start()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    f.emit({ type: "event.message.intermediate", ...base, payload: { text: "过程陈述" } })
+    await flush()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("✍️"))).toBe(false)
+  })
+
+  test("formatToolNote：滚动文案格式（已完成在前/未完成在后/超限截尾）", () => {
+    const items = Array.from({ length: 15 }, (_, i) => ({ name: `tool_${i}`, done: i < 10 }))
+    const note = formatToolNote(items, 6)
+    expect(note).toContain("已完成 10/15")
+    expect(note).toContain("✔ tool_9")
+    expect(note).not.toContain("tool_0、") // 超限截尾：最早的完成项被截（仅保留最近 6 项）
+    expect(note).toContain("🔧 tool_14…")
+    // 默认 max=12：15 项全显不截尾
+    const full = formatToolNote(items)
+    expect(full).toContain("tool_0、")
+    // 空列表返回空串（不发送）
+    expect(formatToolNote([])).toBe("")
   })
 })
 
@@ -1141,6 +1295,7 @@ describe("真实存储集成", () => {
         downloadResource: async () => new Uint8Array(),
         uploadImage: async () => "img",
         getChatName: async () => "测试群",
+        patchMessage: async () => true,
       },
       conn: { start: async () => {}, stop: () => {} },
     })
@@ -1200,6 +1355,7 @@ describe("真实存储集成", () => {
         downloadResource: async () => new Uint8Array(),
         uploadImage: async () => "img",
         getChatName: async () => "测试群",
+        patchMessage: async () => true,
       },
       conn: { start: async () => {}, stop: () => {} },
     })

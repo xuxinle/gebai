@@ -22,6 +22,12 @@ export interface BotRunHandlers {
   onError?(error: string): void
   /** 任务结束（完成/出错，收尾清理用）。 */
   onEnd?(): void
+  /** 工具调用开始（notifyTools 开启时推送；主循环与子会话/分支过程均含）。 */
+  onToolCall?(name: string, toolCallId: string): void
+  /** 工具调用结果（notifyTools 开启时推送；session 标记子会话/分支过程）。 */
+  onToolResult?(name: string, output: string, session: boolean): void
+  /** 助手中间轮文本（notifyAssistant 开启时推送：带工具调用的中间轮过程陈述/阶段结论）。 */
+  onIntermediate?(text: string): void
 }
 
 /** 飞书桥接依赖的最小引擎接口。 */
@@ -44,11 +50,17 @@ export const FEISHU_CHANNEL_NOTE =
   "依赖前端页面的工具（page_capture、widgets 四工具、show 的 html 分支）在本通道不可用，调用会被拦截，请改用其他方案；" +
   "图片消息会自动转为附件供你分析，其余富媒体消息类型暂不支持。"
 
-/** 引擎适配器：包 AgentEngine，按「多轮交互 + 仅最终回复」运行，事件流映射为语义回调。 */
+/** 引擎适配器：包 AgentEngine，按「多轮交互 + 仅最终回复」运行，事件流映射为语义回调。
+ *  通道行为选项（构造注入，环境变量解析见 boot/compose）：
+ *  - notifyTools：推送工具调用过程（onToolCall/onToolResult 回调）
+ *  - notifyAssistant：推送助手中间轮文本（引擎 notifyIntermediate + onIntermediate 回调）
+ *  - autoApprove：需审批工具自动通过（引擎任务级 approvalPolicy=auto——等价部署方为飞书通道
+ *    统一开启审批跳过；审批卡片不再弹出） */
 export class EngineBotAdapter implements BotPromptAdapter {
   constructor(
     private engine: AgentEngine,
     private events: { subscribe(fn: (e: AgentEvent) => void): () => void },
+    private channel: { notifyTools?: boolean; notifyAssistant?: boolean; autoApprove?: boolean } = {},
   ) {}
 
   isRunning(sessionId: string): boolean {
@@ -74,6 +86,17 @@ export class EngineBotAdapter implements BotPromptAdapter {
         case "event.draw.render":
           handlers.onDraw?.(String(p.renderId ?? ""), String(p.code ?? ""), p.name != null ? String(p.name) : undefined, p.format != null ? String(p.format) : undefined)
           break
+        // 工具过程事件（工具调用/结果不受 outputMode 限制，始终发布）：按 notifyTools 开关转发
+        case "event.tool.call":
+          if (this.channel.notifyTools) handlers.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""))
+          break
+        case "event.tool.result":
+          if (this.channel.notifyTools) handlers.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true)
+          break
+        // 助手中间轮文本（notifyAssistant 开启 → 引擎 notifyIntermediate 发布）：过程陈述/阶段结论
+        case "event.message.intermediate":
+          if (this.channel.notifyAssistant) handlers.onIntermediate?.(String(p.text ?? ""))
+          break
         case "event.message.done":
           // 仅最终回复：非子Agent 的 done 即最终文本（final_only 无 delta，done 是唯一文本信号）
           if (p.session !== true) handlers.onDone?.(String(p.text ?? ""))
@@ -97,6 +120,12 @@ export class EngineBotAdapter implements BotPromptAdapter {
         interactionMode: "multi_turn",
         // 仅最终回复：不推送文本增量/推理流（对接接口层，非流式桥接）
         outputMode: "final_only",
+        // 助手中间轮文本推送（GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：开启后带工具调用的中间轮过程陈述
+        // 陚 event.message.intermediate 发布（与 final_only 正交，仅影响过程推送）
+        ...(this.channel.notifyAssistant ? { notifyIntermediate: true } : {}),
+        // 自动审批（GEBAI_FEISHU_BOT_AUTO_APPROVE）：需审批工具自动通过（审批卡片不再弹出；
+        // 含服务模式——部署方为飞书通道整体担责，与映射用户自设审批跳过等价）
+        ...(this.channel.autoApprove ? { autoApprove: true } : {}),
       })
     } finally {
       unsub()

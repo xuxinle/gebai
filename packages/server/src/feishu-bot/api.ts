@@ -36,6 +36,9 @@ export interface FeishuApiLike {
   uploadImage(data: Uint8Array, mime: string, fileName?: string): Promise<string>
   /** 查询会话信息（群名/单聊对象名）；失败返回 null。 */
   getChatName(chatId: string): Promise<string | null>
+  /** 更新已发送消息内容（PATCH /im/v1/messages/{id}；仅同类型可更新）：工具过程滚动状态消息用。
+   *  失败返回 false 不抛错（上层回落发新撤旧）。 */
+  patchMessage(messageId: string, msgType: string, content: unknown): Promise<boolean>
 }
 
 type FetchLike = NonNullable<FeishuApiOptions["fetchImpl"]>
@@ -237,7 +240,27 @@ export function createFeishuApi(opts: FeishuApiOptions): FeishuApiLike {
     return key
   }
 
-  return { getTenantToken, sendMessage, replyMessage, deleteMessage, addMessageReaction, deleteMessageReaction, downloadResource, uploadImage, getChatName }
+  /** 更新已发送消息内容（PATCH /im/v1/messages/{id}；仅同类型可更新）：工具过程滚动状态消息用
+   *  （发一条持续原地更新，避免逐工具刷屏）。失败返回 false 不抛错（滚动提示为尽力而为，
+   *  失败时上层回落发新撤旧）。 */
+  async function patchMessage(messageId: string, msgType: string, content: unknown): Promise<boolean> {
+    try {
+      const token = await getTenantToken()
+      await request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
+        method: "PATCH",
+        headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${token}` } as Record<string, string>,
+        body: JSON.stringify({
+          msg_type: msgType,
+          content: typeof content === "string" ? content : JSON.stringify(content),
+        }),
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  return { getTenantToken, sendMessage, replyMessage, deleteMessage, addMessageReaction, deleteMessageReaction, downloadResource, uploadImage, getChatName, patchMessage }
 }
 
 /** 事件订阅回调的飞书签名校验（Webhook 模式预留；本期长连接不使用）。 */

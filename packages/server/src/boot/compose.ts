@@ -282,9 +282,15 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       authMode: config.auth,
       home: config.gebaiHome,
       store,
-      // 接口层：多轮交互 + 仅最终回复桥接（bot 不直接接触引擎/事件总线）
-      adapter: new EngineBotAdapter(engine, events),
+      // 接口层：多轮交互 + 仅最终回复桥接（bot 不直接接触引擎/事件总线）；
+      // 通道行为开关（GEBAI_FEISHU_BOT_*）：工具过程/助手中间轮推送 + 自动审批（部署方整体担责）
+      adapter: new EngineBotAdapter(engine, events, {
+        notifyTools: config.feishuBotNotifyTools,
+        notifyAssistant: config.feishuBotNotifyAssistant,
+        autoApprove: config.feishuBotAutoApprove,
+      }),
       auth,
+      notify: { tools: config.feishuBotNotifyTools, assistant: config.feishuBotNotifyAssistant },
     })
     await feishuBot.start()
   }

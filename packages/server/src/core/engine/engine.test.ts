@@ -2620,6 +2620,40 @@ console.log("defined ok")`,
     cleanup(s.home)
   })
 
+  test("notifyIntermediate 开启后中间轮文本随 event.message.intermediate 发布（默认不发布）", async () => {
+    // 第一轮 text "using tool" + tool_call ls；中间轮文本即 "using tool"（带工具调用）
+    // FakeProvider.calls 跨 run 递增（第二次 run 首轮即收尾分支），两段分别独立 setup
+    {
+      const s = await setup("tool")
+      s.provider.toolName = "ls"
+      const session = await s.store.createSession("default", "t")
+      const inter: unknown[] = []
+      s.events.subscribe((e) => {
+        if (e.type === "event.message.intermediate") inter.push(e.payload)
+      })
+      // 默认（未开启）：不发布
+      await s.engine.run(session.id, "default", "do a thing", { outputMode: "final_only" })
+      expect(inter).toEqual([])
+      cleanup(s.home)
+    }
+    {
+      const s = await setup("tool")
+      s.provider.toolName = "ls"
+      const session = await s.store.createSession("default", "t")
+      const inter: Array<{ text: string; toolCalls: number }> = []
+      s.events.subscribe((e) => {
+        if (e.type === "event.message.intermediate") {
+          const p = e.payload as { text?: unknown; toolCalls?: unknown }
+          inter.push({ text: String(p.text), toolCalls: Number(p.toolCalls ?? 0) })
+        }
+      })
+      // 开启：中间轮文本发布（含本轮工具调用数）；与 final_only 正交
+      await s.engine.run(session.id, "default", "do a thing", { outputMode: "final_only", notifyIntermediate: true })
+      expect(inter).toEqual([{ text: "using tool", toolCalls: 1 }])
+      cleanup(s.home)
+    }
+  })
+
   test("ask 填值分支 requests env from frontend and injects value into task env for later tools", async () => {
     const s = await setup("askenv")
     const session = await s.store.createSession("default", "t")

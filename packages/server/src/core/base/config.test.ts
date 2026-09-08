@@ -62,6 +62,30 @@ describe("loadConfig 模式与密钥解析", () => {
     }
   })
 
+  test("飞书机器人行为开关环境变量解析（GEBAI_FEISHU_BOT_*，默认全关）", () => {
+    const keys = ["GEBAI_FEISHU_BOT_NOTIFY_TOOLS", "GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT", "GEBAI_FEISHU_BOT_AUTO_APPROVE"] as const
+    const prev = keys.map((k) => [k, process.env[k]] as const)
+    try {
+      for (const k of keys) delete process.env[k]
+      const off = loadConfig()
+      expect(off.feishuBotNotifyTools).toBe(false)
+      expect(off.feishuBotNotifyAssistant).toBe(false)
+      expect(off.feishuBotAutoApprove).toBe(false)
+      process.env.GEBAI_FEISHU_BOT_NOTIFY_TOOLS = "true"
+      process.env.GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT = "1"
+      process.env.GEBAI_FEISHU_BOT_AUTO_APPROVE = "true"
+      const on = loadConfig()
+      expect(on.feishuBotNotifyTools).toBe(true)
+      expect(on.feishuBotNotifyAssistant).toBe(true)
+      expect(on.feishuBotAutoApprove).toBe(true)
+    } finally {
+      for (const [k, v] of prev) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   test("运行形态：默认 local，GEBAI_MODE=server 开启服务模式，兼容旧 GEBAI_AUTH", () => {
     const saved = { ...process.env }
     delete process.env.GEBAI_MODE

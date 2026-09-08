@@ -131,6 +131,10 @@ export interface TaskState {
   outputMode: OutputMode
   /** 通道环境注记（引擎通道无关，由桥接层注入——如飞书：告知模型当前对话的宿主/渲染/能力边界）。 */
   channelNote?: string
+  /** 中间轮文本过程推送（飞书通道 GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：开启后带工具调用的中间轮文本
+   *  （模型的过程陈述/阶段结论）随 event.message.intermediate 发布（与 outputMode 正交，仅最终回复
+   *  通道也可感知助手过程）。 */
+  notifyIntermediate?: boolean
   /** 任务级环境变量（run 时组装快照的同一引用）：ask 填值后原地更新，工具后续读取立即生效。 */
   env: Record<string, string>
   /** ask 填值分支：envId → 等待中的请求回调。 */

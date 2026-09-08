@@ -9,8 +9,9 @@
  * 依赖全部注入（store/adapter/auth/api/conn），可独立单测。
  */
 import { createHash } from "node:crypto"
-import { join } from "node:path"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { join, dirname } from "node:path"
+import { mkdir, readFile, writeFile, rename } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import type { AuthService } from "../auth"
 import type { SessionStore } from "../core/session/store"
 import { createFeishuApi, type FeishuApiLike } from "./api"
@@ -31,8 +32,11 @@ export interface FeishuConnLike {
 /** 发送队列：同一会话的消息严格串行（飞书发送限流友好）。 */
 class ChatOutbox {
   private queue: Promise<unknown> = Promise.resolve()
-  private previewMsgId: string | null = null
   private statusMsgId: string | null = null
+  /** 工具过程滚动状态消息（发一条原地更新；无更新能力时发新撤旧）。 */
+  private toolNoteMsgId: string | null = null
+  private toolNoteContent = ""
+  private toolNotePatchable = true
   private deltaBuf = ""
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private lastFlush = 0
@@ -76,7 +80,24 @@ class ChatOutbox {
     })
   }
 
-  /** 增量文本：累积并按（字符阈值/时间阈值）触发预览消息（发新撤旧）。 */
+  /** 工具过程滚动状态（GEBAI_FEISHU_BOT_NOTIFY_TOOLS）：同一任务单条消息原地更新（PATCH），
+   *  更新接口不可用时发新消息（消息一律保留不撤回）。 */
+  toolNote(text: string): void {
+    if (!text.trim()) return
+    if (this.toolNoteMsgId !== null && this.toolNoteContent === text) return // 内容未变不重复更新
+    this.toolNoteContent = text
+    this.enqueue(async () => {
+      if (this.toolNoteMsgId !== null && this.toolNotePatchable) {
+        // 原地更新（免刷屏；内容同型 text→text）
+        const ok = await this.api.patchMessage(this.toolNoteMsgId, "text", { text })
+        if (ok) return
+        this.toolNotePatchable = false // 无更新能力（权限/旧接口）：后续每次发新消息（不撤旧）
+      }
+      this.toolNoteMsgId = await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text } })
+    })
+  }
+
+  /** 增量文本：累积并按（字符阈值/时间阈值）触发预览消息（均保留不撤回）。 */
   feedDelta(text: string): void {
     this.deltaBuf += text
     const now = this.clock()
@@ -102,41 +123,32 @@ class ChatOutbox {
     this.deltaBuf = ""
     if (!text) return
     this.lastFlush = this.clock()
-    const prevId = this.previewMsgId
     this.enqueue(async () => {
-      const id = await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text: `✍️ ${text}` } })
-      this.previewMsgId = id
-      if (prevId) void this.api.deleteMessage(prevId)
+      await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text: `✍️ ${text}` } })
     })
   }
 
-  /** 最终回复（卡片）：撤销预览/状态消息后发送（引用原消息）。 */
+  /** 最终回复（卡片，引用原消息）：过程消息（预览/状态/工具滚动）一律保留不撤回。 */
   final(text: string, replyTo?: string): void {
     this.clearTransient()
-    const previewId = this.previewMsgId
-    const statusId = this.statusMsgId
-    this.previewMsgId = null
     this.statusMsgId = null
+    this.toolNoteMsgId = null
+    this.toolNoteContent = ""
     this.enqueue(async () => {
       const card = buildReplyCard(text)
       await this.post("interactive", card, replyTo)
       this.finalSent = true
-      if (previewId) void this.api.deleteMessage(previewId)
-      if (statusId) void this.api.deleteMessage(statusId)
     })
   }
 
-  /** 错误回复：清理瞬态消息后发送错误文本（引用原消息）。 */
+  /** 错误回复（引用原消息）：过程消息一律保留不撤回。 */
   error(text: string, replyTo?: string): void {
     this.clearTransient()
-    const previewId = this.previewMsgId
-    const statusId = this.statusMsgId
-    this.previewMsgId = null
     this.statusMsgId = null
+    this.toolNoteMsgId = null
+    this.toolNoteContent = ""
     this.enqueue(async () => {
       await this.post("text", { text: `❌ ${text}` }, replyTo)
-      if (previewId) void this.api.deleteMessage(previewId)
-      if (statusId) void this.api.deleteMessage(statusId)
     })
   }
 
@@ -146,15 +158,15 @@ class ChatOutbox {
     this.finalSent = false
   }
 
-  /** 任务完成兜底：最终回复未发出时补一条完成提示并撤回状态消息（finalSent 检查在队列内，避免与 final 竞态）。 */
+  /** 任务完成兜底：最终回复未发出时补一条完成提示（消息一律保留不撤回；finalSent 检查在队列内，避免与 final 竞态）。 */
   taskDone(replyTo?: string): void {
     this.clearTransient()
-    const statusId = this.statusMsgId
     this.statusMsgId = null
+    this.toolNoteMsgId = null
+    this.toolNoteContent = ""
     this.enqueue(async () => {
       if (this.finalSent) return
       await this.post("text", { text: "✅ 任务完成" }, replyTo)
-      if (statusId) void this.api.deleteMessage(statusId)
     })
   }
 
@@ -312,6 +324,22 @@ export function sessionIdForChat(chatId: string): string {
   return createHash("sha256").update(`feishu:${chatId}`).digest("hex").slice(0, 32)
 }
 
+/** 工具过程滚动文案（notifyTools）：已完成在前（✔）、未完成在后（🔧，末项加「…」），
+ *  超限截尾（保留最新项，防刷屏）。 */
+export function formatToolNote(items: Array<{ name: string; done: boolean }>, max = 12): string {
+  const done = items.filter((it) => it.done)
+  const todo = items.filter((it) => !it.done)
+  const lines: string[] = []
+  if (done.length) {
+    lines.push(done.slice(-max).map((it) => `✔ ${it.name}`).join("、"))
+  }
+  if (todo.length) {
+    const shown = todo.slice(-max)
+    lines.push(shown.map((it, i) => `🔧 ${it.name}${i === shown.length - 1 ? "…" : ""}`).join("、"))
+  }
+  return lines.length ? `🔧 工具调用（已完成 ${done.length}/${items.length}）：\n${lines.join("\n")}` : ""
+}
+
 /** 解析消息 content（JSON 字符串）为文本；非文本类型返回 null。 */
 export function parseMessageContent(messageType: string, content: string): string | null {
   try {
@@ -379,6 +407,11 @@ export interface FeishuBotOptions {
   /** 预览刷新窗口（测试注入）。 */
   flushIntervalMs?: number
   flushMinChars?: number
+  /** 通道行为开关（环境变量解析见 boot/compose；均默认 false 保持现状）：
+   *  - notifyTools：推送工具调用过程（滚动状态消息「🔧 调用 xxx」）
+   *  - notifyAssistant：推送助手中间轮文本（预览消息，发新撤旧）
+   *  （自动审批在接口层 EngineBotAdapter 构造注入，不经过 bot——bot 仅感知审批卡片不再到达） */
+  notify?: { tools?: boolean; assistant?: boolean }
 }
 
 /** 待处理的选择卡片（chatId → 状态；卡片按钮回调解析用）。 */
@@ -389,7 +422,7 @@ interface PendingChoice {
   prompt: string
   options: unknown[]
   selections: string[]
-  /** 卡片消息 id（任务结束时撤回清理）。 */
+  /** 卡片消息 id（留痕用；任务结束不撤回，仅清除状态映射）。 */
   cardMessageId: string
   /** 任务发起者 open_id（授权校验：仅发起者可作答，防群聊成员越权）。 */
   openId: string
@@ -406,6 +439,9 @@ export class FeishuBot {
   private active = new Map<string, string>()
   private ensureLocks = new Map<string, Promise<string>>()
   private userCache = new Map<string, { userId: string; at: number }>()
+  /** 工具过程滚动状态（notifyTools 开启时维护）：sessionId → 工具调用序列（name + 完成标记，
+   *  toolNote 滚动全量文案用；任务结束清理）。 */
+  private toolProgress = new Map<string, Array<{ name: string; done: boolean }>>()
   /** 待审批（审批卡片按钮 / 命令 /approve /reject 用）：chatId → 状态。 */
   private pendingApprovals = new Map<string, { toolCallId: string; tool: string; sessionId: string; openId: string; cardMessageId?: string }>()
   /** 待作答选择卡片（ask 交互卡片按钮用）：chatId → 状态。 */
@@ -600,6 +636,55 @@ export class FeishuBot {
     } catch {
       /* 首次运行/文件损坏：空表 */
     }
+    // 本地模式旧归属迁移：早期版本本地模式默认用户为 default（现 admin），旧映射与旧会话目录滞留
+    // default 名下（compose 的 users/default→users/admin 目录迁移因 admin 目录已存在而跳过，飞书
+    // 会话落在 default 用户目录）。启动时统一改为当前默认用户：归属表改写 + 会话目录搬迁 + chat.json
+    // userId 改写，幂等（已是默认用户无动作）；失败仅记日志不阻断（下次启动重试）
+    if (this.opts.authMode === "local") {
+      const target = this.opts.auth.defaultUser().id
+      const stale = [...this.chatOwners.entries()].filter(([, u]) => u === "default")
+      for (const [chatId] of stale) {
+        this.chatOwners.set(chatId, target)
+        this.log(`chat owner migrated: default -> ${target} (chat=${chatId})`)
+      }
+      if (stale.length) {
+        await this.migrateLegacyDefaultSessions(target)
+        await this.saveOwners()
+      }
+    }
+  }
+
+  /** 旧 default 用户会话目录搬迁：逐会话迁移到目标用户名下（会话 id 派生自 chatId，目标路径确定）。
+   *  目录已存在（半迁移残留）时跳过搬迁仅改写 chat.json；任何失败记日志不抛出（下次启动重试）。
+   *  注：不用 store.load/save——无 user 上下文的 load 可能查不到新目录，直接读写 chat.json 更稳。 */
+  private async migrateLegacyDefaultSessions(target: string): Promise<void> {
+    for (const chatId of this.chatOwners.keys()) {
+      const sessionId = sessionIdForChat(chatId)
+      const from = join(this.opts.home, "users", "default", "sessions", sessionId.slice(0, 2), sessionId.slice(2, 4), sessionId)
+      if (!existsSync(join(from, "chat.json"))) continue
+      const to = join(this.opts.home, "users", target, "sessions", sessionId.slice(0, 2), sessionId.slice(2, 4), sessionId)
+      try {
+        if (!existsSync(to)) {
+          // 目标直接父目录必须预建（Windows/Bun rename 目标父目录不存在时 ENOENT）
+          await mkdir(dirname(to), { recursive: true })
+          await rename(from, to)
+          this.log(`session dir migrated: default -> ${target} (session=${sessionId})`)
+        }
+        // chat.json userId 改写（目标目录已存在/搬迁后均需）：目录在目标名下但归属字段仍是 default 时纠正
+        try {
+          const raw = JSON.parse(await readFile(join(to, "chat.json"), "utf8")) as { userId?: string }
+          if (raw.userId === "default") {
+            raw.userId = target
+            await writeFile(join(to, "chat.json"), JSON.stringify(raw, null, 2))
+            this.log(`session owner migrated: default -> ${target} (session=${sessionId})`)
+          }
+        } catch {
+          /* chat.json 读取/解析失败：目录已搬迁，归属改写下次启动重试 */
+        }
+      } catch (err) {
+        this.log(`session migrate failed (will retry next start): ${String((err as Error).message || err)}`)
+      }
+    }
   }
 
   private saveOwners(): Promise<void> {
@@ -693,6 +778,33 @@ export class FeishuBot {
           onDraw: (renderId, code, name, format) => {
             void this.handleDrawRender(sessionId, chatId, { renderId, code, name, format })
           },
+          // 工具过程推送（GEBAI_FEISHU_BOT_NOTIFY_TOOLS）：滚动状态消息（发一条原地更新，消息保留不撤回）。
+          // 完成标记列表（与发起序列同序）：未完成「🔧 name」在后，已完成「✔ name」在前，尾部截断防刷屏
+          onToolCall: this.opts.notify?.tools
+            ? (name) => {
+                const list = this.toolProgress.get(sessionId) ?? []
+                list.push({ name, done: false })
+                this.toolProgress.set(sessionId, list)
+                this.outbox(chatId).toolNote(formatToolNote(list))
+              }
+            : undefined,
+          onToolResult: this.opts.notify?.tools
+            ? (name) => {
+                const list = this.toolProgress.get(sessionId) ?? []
+                // 标记最早一个同名未完成为完成（并行同批同名工具调用无法按 id 精确区分——
+                // 滚动提示无需精确会计，完成计数正确即可）；列表无记录（如任务开始前的残留）时忽略
+                const idx = list.findIndex((it) => it.name === name && !it.done)
+                if (idx < 0) return
+                list[idx] = { ...list[idx], done: true }
+                this.outbox(chatId).toolNote(formatToolNote(list))
+              }
+            : undefined,
+          // 助手中间轮文本（GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：预览消息（消息保留不撤回）
+          onIntermediate: this.opts.notify?.assistant
+            ? (text) => {
+                this.outbox(chatId).feedDelta(text)
+              }
+            : undefined,
           onDone: (text) => {
             // 仅最终回复：直接发最终消息（引用原消息，无流式预览）
             if (text.trim()) this.outbox(chatId).final(text, messageId)
@@ -706,6 +818,7 @@ export class FeishuBot {
             this.outbox(chatId).taskDone(messageId)
             this.cleanupChoices(chatId)
             this.cleanupApprovals(chatId)
+            this.toolProgress.delete(sessionId)
             this.active.delete(sessionId)
             if (this.runOwners.get(sessionId) === openId) this.runOwners.delete(sessionId)
           },
@@ -713,7 +826,7 @@ export class FeishuBot {
       } catch (err) {
         this.outbox(chatId).error(String((err as Error).message || err))
       } finally {
-        // 输出完成（成功/出错/兜底）：撤回「Typing」正在输入表情
+        // 输出完成（成功/出错/兜底）：移除「Typing」正在输入表情反应（非消息本体，保留策略不涉及）
         if (reactionId && /^[A-Za-z0-9_-]{8,64}$/.test(messageId)) {
           void this.api.deleteMessageReaction(messageId, reactionId)
         }
@@ -776,15 +889,13 @@ export class FeishuBot {
     }
   }
 
-  /** 审批请求：发送交互审批卡片（工具名 + 参数摘要 + 批准/拒绝按钮），卡片发送失败回落文本命令指引；
-   *  覆盖旧待审批（超时残留等）时先撤回旧卡片——旧卡按钮指向已失效的 toolCallId，留着只会误导。 */
+  /** 审批请求：发送交互审批卡片（工具名 + 参数摘要 + 批准/拒绝按钮），卡片发送失败回落文本命令指引。
+   *  消息一律保留不撤回（覆盖旧待审批仅替换状态映射，旧卡片留痕）。 */
   private async handleApprovalRequest(chatId: string, sessionId: string, payload: Record<string, unknown>): Promise<void> {
     const toolCallId = String(payload.toolCallId ?? "")
     const tool = String(payload.tool ?? "")
     if (!toolCallId) return
     const openId = this.runOwners.get(sessionId) ?? ""
-    const stale = this.pendingApprovals.get(chatId)
-    if (stale && stale.cardMessageId) void this.api.deleteMessage(stale.cardMessageId)
     const retries = Number(payload.retries ?? 0)
     try {
       const cardMessageId = await this.api.sendMessage({
@@ -924,20 +1035,18 @@ export class FeishuBot {
     }
   }
 
-  /** 任务结束清理：撤回待作答选择卡片（尽力而为）并清除状态。 */
+  /** 任务结束清理：清除待作答状态（卡片消息保留不撤回；状态清除后按钮回调不再决策）。 */
   private cleanupChoices(chatId: string): void {
     const pending = this.pendingChoices.get(chatId)
     if (!pending) return
     this.pendingChoices.delete(chatId)
-    if (pending.cardMessageId) void this.api.deleteMessage(pending.cardMessageId)
   }
 
-  /** 任务结束清理：撤回待审批卡片（审批已失效，防按钮点击作用于过期 toolCallId）并清除状态。 */
+  /** 任务结束清理：清除待审批状态（卡片消息保留不撤回；审批已失效，按钮回调经状态映射不再决策）。 */
   private cleanupApprovals(chatId: string): void {
     const pending = this.pendingApprovals.get(chatId)
     if (!pending) return
     this.pendingApprovals.delete(chatId)
-    if (pending.cardMessageId) void this.api.deleteMessage(pending.cardMessageId)
   }
 
   /** 斜杠命令。 */
@@ -1036,7 +1145,6 @@ export class FeishuBot {
           break
         }
         this.pendingApprovals.delete(chatId)
-        if (pending.cardMessageId) void this.api.deleteMessage(pending.cardMessageId)
         const approve = cmd === "/approve"
         await this.opts.adapter.decideApproval(pending.sessionId, pending.toolCallId, approve)
         outbox.sendText(approve ? `✅ 已批准 \`${pending.tool}\`，任务继续。` : `❌ 已拒绝 \`${pending.tool}\`，任务已取消。`)
