@@ -37,10 +37,9 @@ import { AgentSidecar, defaultSpawn, nativeAgentsSourceDir, type SidecarSpawnFn 
 
 /** 解释器解析（{python} 占位，其他语言 manifest 直接写可执行体路径/命令名）：
  *  GEBAI_PYTHON_DIR（解释器目录或可执行体完整路径；目录时补拼 python.exe/python）
- *  → 仓库根 native-agents/python/venv（语言目录 venv，源码形态）→ {GEBAI_HOME}/venv
- *  （历史位置兼容）→ PATH（python3/python/py，Bun.which）。 */
+ *  → 仓库根 native-agents/python/venv（语言目录 venv，源码形态）→ PATH（python3/python/py，
+ *  Bun.which）。 */
 export function resolvePythonCommand(env: Record<string, string> = process.env as Record<string, string>): string[] | null {
-  const home = resolveGebaiHome()
   const explicit = String(env.GEBAI_PYTHON_DIR ?? "").trim()
   const absolute: string[] = []
   if (explicit) {
@@ -48,7 +47,7 @@ export function resolvePythonCommand(env: Record<string, string> = process.env a
     if (/\.(exe|cmd|bat)$/i.test(explicit) || !existsSync(explicit) || statSync(explicit).isFile()) absolute.push(explicit)
     else absolute.push(join(explicit, process.platform === "win32" ? "python.exe" : "python"))
   }
-  for (const vdir of [sourceTreeVenv(), join(home, "venv")]) {
+  for (const vdir of [sourceTreeVenv()]) {
     if (!vdir) continue
     absolute.push(process.platform === "win32" ? join(vdir, "Scripts", "python.exe") : join(vdir, "bin", "python"))
   }

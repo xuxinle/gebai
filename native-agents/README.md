@@ -48,7 +48,7 @@ native-agents/                    # 仓库根（构建复制到 dist/，二进�
 
 | 占位符 | 展开 |
 |--------|------|
-| `{python}` | 解释器命令（`GEBAI_PYTHON_DIR` → `native-agents/python/venv` → `{GEBAI_HOME}/venv`（历史位置）→ 系统 PATH） |
+| `{python}` | 解释器命令（`GEBAI_PYTHON_DIR` → `native-agents/python/venv` → 系统 PATH） |
 | `{driver}` | driver 字段声明的脚本绝对路径 |
 | `{agent_dir}` | manifest 所在目录（子代理项目目录） |
 | `{lang_dir}` | 语言目录（agent_dir 上一级——基础框架驱动所在） |
@@ -152,6 +152,6 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 
 Python venv 与 requirements.txt 原位于 `{GEBAI_HOME}/venv`（dev 模式即仓库根），现归位语言目录 `native-agents/python/`（与驱动同居）：
 
-- 解释器解析顺序：`GEBAI_PYTHON_DIR` → 语言目录 venv → `{GEBAI_HOME}/venv`（历史兼容）→ PATH
+- 解释器解析顺序：`GEBAI_PYTHON_DIR` → 语言目录 venv（`native-agents/python/venv`）→ PATH
 - `python_pip` install/freeze 均操作语言目录（freeze 统一写回 `native-agents/python/requirements.txt`）
 - 构建复制 dist 时过滤 venv/__pycache__/编译产物——部署产物只带源码与 manifest
