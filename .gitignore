@@ -31,13 +31,15 @@ feishu/
 native-agents/python/venv/
 native-agents/python/requirements.txt
 __pycache__/
-# C++/Rust 语言目录编译产物（Windows driver.exe/pdb；Linux/macOS 无后缀 driver）与 cargo 构建目录
+# C++/Rust/Go 语言目录编译产物（Windows driver.exe/pdb；Linux/macOS 无后缀 driver）与 cargo/go 构建目录
 native-agents/cpp/**/driver*.exe
 native-agents/cpp/**/driver
 native-agents/rust/**/driver*.exe
 native-agents/rust/**/driver
 native-agents/rust/**/driver*.pdb
 native-agents/rust/target/
+native-agents/go/**/driver*.exe
+native-agents/go/**/driver
 Cargo.lock
 
 # OS
@@ -88,3 +90,4 @@ packages/server/src/core/cv/cvdriver.embedded.generated.json
 
 # 资源子仓库（模型/原生依赖，独立 git 仓库管理——见 models/README.md）
 /models/
+"go.zip"  

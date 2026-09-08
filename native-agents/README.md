@@ -19,9 +19,22 @@ native-agents/                    # 仓库根（构建复制到 dist/，二进�
 │   ├── framework.hpp             # 基础框架：头文件式（协议 + 迷你 JSON + 工具注册表）
 │   ├── build.bat / build.sh      # 构建脚本（vswhere→cl / g++）
 │   └── mathx/                    # 子代理项目：数学表达式求值（main.cpp + agent.json + PROMPT.md）
-└── rust/                         # Rust 语言目录
-    ├── framework.rs              # 基础框架：单文件零依赖（协议 + 迷你 JSON + 注册表）
-    └── codec/                    # 子代理项目：base64/CRC-32 编解码（main.rs + agent.json + PROMPT.md）
+├── rust/                         # Rust 语言目录（cargo workspace 统一管理）
+│   ├── Cargo.toml                # workspace 根（members: framework, codec, …）
+│   ├── framework/               # 库 crate gebai-native-framework（协议实现共享）
+│   │   └── src/lib.rs
+│   └── codec/                    # bin crate 子代理项目：编解码（base64/CRC-32）
+│       ├── Cargo.toml
+│       ├── agent.json            # command → {lang_dir}/target/release/codec{exe}
+│       ├── PROMPT.md
+│       └── src/main.rs           # 只写工具逻辑（依赖 framework crate）
+└── go/                           # Go 语言目录（go module 统一管理）
+    ├── go.mod                    # module gebai/native-framework
+    ├── framework/framework.go    # 基础框架包（标准库 encoding/json，零手写 JSON）
+    └── gotime/                   # 子代理项目：时间日期工具（now/parse/duration）
+        ├── agent.json            # command → {agent_dir}/driver{exe}；build → go build
+        ├── PROMPT.md
+        └── main.go               # import fw "gebai/native-framework/framework"
 
 {GEBAI_HOME}/agents/               # 用户自建（放置即生效；同名覆盖内置）
 └── my-agent/
@@ -115,7 +128,7 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 - **失败安全**：manifest 损坏/边车启动失败/握手失败/构建失败 → 该项记入 loadErrors（模型可见根因），不影响其他子代理与主流程
 - 工具调用恒需审批（任意代码执行面）
 
-## 内置子代理（4 个）
+## 内置子代理（5 个）
 
 | 子代理 | 语言 | 工具 |
 |--------|------|------|
@@ -123,8 +136,9 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 | `pyregex` | Python | `pyregex_match` / `pyregex_findall` / `pyregex_sub`（+ 基础 run/pip/status，tools.py 合并） |
 | `mathx` | C++ | `mathx_eval`（表达式求值）/ `mathx_eval_batch` / `mathx_stats` |
 | `codec` | Rust | `codec_b64_encode` / `codec_b64_decode` / `codec_crc32` |
+| `gotime` | Go | `gotime_now`（当前时间，时区/格式化）/ `gotime_parse`（时间解析→unix）/ `gotime_duration`（时长全单位换算） |
 
-## 三语言基础框架
+## 四语言基础框架
 
 ### Python（native-agents/python/driver.py）
 
@@ -134,9 +148,13 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 
 头文件式框架：手写迷你 JSON（解析/序列化，含 `\uXXXX` 与代理对）、NDJSON 行循环、工具注册表。子代理项目 `#include "../framework.hpp"`，工具写普通函数后 `main()` 前集中注册（`REGISTER_TOOL` 宏对含逗号的 schema/lambda 有预处理器拆参陷阱，集中注册最稳）。构建：Windows 用 `build.bat`（vswhere 定位 MSVC）/ unix 用 `build.sh`（g++/clang++）。
 
-### Rust（native-agents/rust/framework.rs）
+### Rust（native-agents/rust/——cargo workspace）
 
-单文件零依赖（纯标准库）：迷你 JSON（char 流解析，代理对支持）、`register_tool` 注册（Mutex 内部可变性）、NDJSON 行循环。子代理项目 `#[path = "../framework.rs"] mod framework;` 引入。构建：`rustc --edition 2021 -O` 直编（无需 cargo 工程）。
+语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-native-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`codec/` 等，`src/main.rs` 只写工具逻辑，依赖 `gebai-native-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。零第三方依赖（纯标准库，rustc/cargo 直编）。
+
+### Go（native-agents/go/——go module）
+
+语言目录即一个 go module（`gebai/native-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`gotime/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} {agent_dir}/main.go`）；新增子代理 = 新目录 + agent.json（module 内多 main 包用文件级构建，互不干扰）。
 
 ## 任意语言接入示例（Go 心算代理）
 

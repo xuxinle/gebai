@@ -191,6 +191,26 @@ if (!re1.output.includes("year='2026'")) {
 }
 console.log("PASS: pyregex（Python tools.py 合并）命名分组")
 
-console.log("\n=== 真机端到端全部通过（python + cpp + rust 三语言）===")
+// gotime（Go）：now/parse/duration
+expectAgent("gotime")
+await m.load("gotime")
+const t1 = await registry.resolve("gotime_now")!.tool.execute({ tz: "Asia/Shanghai", format: "date" }, fakeCtx2)
+if (!/^\d{4}-\d{2}-\d{2}$/.test(t1.output.trim())) {
+  console.error("FAIL: gotime now 日期格式:", t1.output)
+  process.exit(1)
+}
+const t2 = await registry.resolve("gotime_parse")!.tool.execute({ text: "2026-07-14 08:30:00" }, fakeCtx2)
+if (!(t2.data as { unix?: number })?.unix) {
+  console.error("FAIL: gotime parse unix:", t2.output)
+  process.exit(1)
+}
+const t3 = await registry.resolve("gotime_duration")!.tool.execute({ text: "1h30m" }, fakeCtx2)
+if (!t3.output.includes("s=5400") && !t3.output.includes("s=5400 ")) {
+  console.error("FAIL: gotime duration 1h30m 应含 s=5400:", t3.output)
+  process.exit(1)
+}
+console.log("PASS: gotime（Go）now/parse/duration")
+
+console.log("\n=== 真机端到端全部通过（python + cpp + rust + go 四语言）===")
 disposeAllNativeAgents() // 显式回收后再退出（exit hook 兄弟保险，防孤儿进程）
 process.exit(0)

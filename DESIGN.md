@@ -1093,7 +1093,8 @@ export const preload = false
 | `python`（native） | run/pip/status（→ `python_run`/`python_pip`/`python_status`；边车常驻进程动态上报） | 全部 | ✗ | 多语言子代理内置：Python 生态接入（常驻命名空间执行——import 一次多次复用，AI 库秒级导入成本只付一次；venv 落语言目录 `native-agents/python/`；协议层纯标准库；见「多语言子代理」） |
 | `pyregex`（native） | match/findall/sub（→ `pyregex_match`/`pyregex_findall`/`pyregex_sub`；与基础 run/pip/status 合并上报） | 全部 | ✗ | 正则工具（Python tools.py 合并模式示例：常驻进程反复调试正则零编译开销，命名分组/批量提取/反向引用替换） |
 | `mathx`（native） | eval/eval_batch/stats（→ `mathx_eval`/`mathx_eval_batch`/`mathx_stats`） | 全部 | ✗ | 高性能数学计算（C++ 示例：递归下降表达式求值器——变量代入/内置函数/批量求值/统计，构建引导自动编译） |
-| `codec`（native） | b64_encode/b64_decode/crc32（→ `codec_b64_encode`/`codec_b64_decode`/`codec_crc32`） | 全部 | ✗ | 编解码工具（Rust 示例：base64 编解码 + CRC-32，rustc 直编零依赖） |
+| `codec`（native） | b64_encode/b64_decode/crc32（→ `codec_b64_encode`/`codec_b64_decode`/`codec_crc32`） | 全部 | ✗ | 编解码工具（Rust 示例：base64 编解码 + CRC-32，cargo workspace 统一管理） |
+| `gotime`（native） | now/parse/duration（→ `gotime_now`/`gotime_parse`/`gotime_duration`） | 全部 | ✗ | 时间日期工具（Go 示例：当前时间（多时区/多格式）、时间文本解析→unix 时间戳、时长全单位换算；go module 统一管理） |
 
 #### 多语言子代理（native agents：边车协议 + 自动发现启动注册）
 
@@ -1107,7 +1108,7 @@ export const preload = false
 - **生命周期集成**：`SubAgentManager.discover()` 尾部并行启动（boot 显式接线后生效——`setNativeAgentsOpts`，测试不注入零影响；`roots` 选项可覆盖发现根供测试隔离）；manifest/驱动/提示词文件变化纳入热加载签名（重扫重注册，**目录删除对账回收**——上次名单中本次消失的从 defs 移除，进程级边车注册表同步回收旧进程）；**TS 签名与 native 签名各自判定**——TS 目录未变而仅 native 变化时 `refreshIfChanged` 只重拉 native（幂等跳过 TS 扫描），REST `GET /api/v1/sub-agents` 响应前惰性调用 `refreshIfChanged`（放置新目录即出现在列表，无需重启）；pip 安装成功后驱动主动退出 → 宿主自愈重启 → 命令工厂重新解析占位符（venv 创建后自动切换 venv 解释器，无需重启服务）
 - **边车环境**：基于宿主进程 env 继承基础变量（PATH/SYSTEMROOT 等——Windows 下 python 编码/subprocess 初始化依赖 SYSTEMROOT，极小 env 会启动即卡死无报错）+ `GEBAI_HOME` + `GEBAI_AGENT_DIR`（驱动定位子代理项目专属资产，如 Python 驱动加载 `{agent_dir}/tools.py`）+ manifest env 覆盖同名项
 - **门控与边界**：仅本地形态（沙箱启用即禁用；`GEBAI_NATIVE_AGENTS=off` 显式关闭）；边车工具恒需审批；单项失败（manifest 损坏/启动/握手失败）记 loadErrors 模型可见根因，不阻断其他子代理；工具名驱动侧为裸名（注册表自动加 `{agent}_` 前缀）
-- **内置四个子代理**（`native-agents/{python,cpp,rust}/`）：`python`（`python_run` 常驻命名空间 REPL：末行独立表达式求值 repr 回显，session 键隔离命名空间，stdout/stderr 捕获，timeout 秒默认 300；`python_pip` install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载，freeze 快照写回；`python_status` 边车/venv/包状态）；`pyregex`（Python `tools.py` 合并模式：match/findall/sub 正则工具 + 基础工具）；`mathx`（C++：eval/eval_batch/stats 递归下降表达式求值）；`codec`（Rust：b64_encode/b64_decode/crc32）；解释器解析 `GEBAI_PYTHON_DIR` → 语言目录 venv（`native-agents/python/venv`）→ 系统 PATH；三语言基础框架（共享驱动 + 项目扩展点）见 `native-agents/README.md`
+- **内置五个子代理**（`native-agents/{python,cpp,rust,go}/`）：`python`（`python_run` 常驻命名空间 REPL：末行独立表达式求值 repr 回显，session 键隔离命名空间，stdout/stderr 捕获，timeout 秒默认 300；`python_pip` install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载，freeze 快照写回；`python_status` 边车/venv/包状态）；`pyregex`（Python `tools.py` 合并模式：match/findall/sub 正则工具 + 基础工具）；`mathx`（C++：eval/eval_batch/stats 递归下降表达式求值）；`codec`（Rust：b64_encode/b64_decode/crc32，cargo workspace 管理）；`gotime`（Go：now/parse/duration 时间日期工具，go module 管理）；解释器解析 `GEBAI_PYTHON_DIR` → 语言目录 venv（`native-agents/python/venv`）→ 系统 PATH；四语言基础框架（Python 共享驱动 + C++ 头文件 + Rust cargo workspace + Go module）见 `native-agents/README.md`
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 

@@ -1,0 +1,9 @@
+{
+  "name": "gotime",
+  "description": "时间日期子代理（Go 边车常驻进程）：gotime_now 当前时间（时区/格式化）、gotime_parse 时间解析为时间戳、gotime_duration 时长换算",
+  "protocol": "1",
+  "command": ["{agent_dir}/driver{exe}"],
+  "build": {
+    "command": ["go", "build", "-o", "{agent_dir}/driver{exe}", "{agent_dir}/main.go"]
+  }
+}
