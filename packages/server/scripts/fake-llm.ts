@@ -71,13 +71,13 @@ const SCENARIOS: Record<string, Step[]> = {
     { text: "分析结论：\n第一行结论\n第二行结论\n第三行结论" },
     { text: "主会话最终回复。" },
   ],
-  // native python 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：python_run 两次调用
-  // （常驻状态跨调用保持）→ 收尾。审批需免审批环境（GEBAI_APPROVAL_SKIP 会话 env）。注意引擎
-  // 路由自愈：python_run 首调自动装载子Agent，无需 agent_load 步骤
+  // native docqa 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：docqa_index 建索引
+  // → docqa_query 检索（常驻边车复用索引）→ 收尾。审批需免审批环境（GEBAI_APPROVAL_SKIP 会话 env）。
+  // 注意引擎路由自愈：docqa_index 首调自动装载子Agent，无需 agent_load 步骤
   python: [
-    { toolCall: { id: "c1", name: "python_run", args: { code: "import math\nX = math.pi\nX" } } },
-    { toolCall: { id: "c2", name: "python_run", args: { code: "round(X * 2, 4)" } } },
-    { text: "python 链路验证完成：pi 已算出并加倍。" },
+    { toolCall: { id: "c1", name: "docqa_index", args: { dir: "native-agents/python/docqa/corpus" } } },
+    { toolCall: { id: "c2", name: "docqa_query", args: { query: "边车协议 超时", top_k: 2 } } },
+    { text: "docqa 链路验证完成：索引已建、检索命中片段已返回。" },
   ],
   plan: [
     { delayMs: 4000, toolCall: { id: "c1", name: "plan", args: { title: "演示计划", steps: ["第一步：分析", "第二步：执行", "第三步：验证"] } } },

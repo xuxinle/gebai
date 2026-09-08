@@ -11,27 +11,31 @@ native-agents/                    # 仓库根（构建复制到 dist/，二进�
 ├── README.md
 ├── python/                       # Python 语言目录
 │   ├── driver.py                 # 基础框架：协议 v1 + REPL 引擎 + pip + tools.py 合并
-│   ├── venv/                     # 语言 venv（python_pip 自动创建/维护；gitignore）
+│   ├── venv/                     # 语言 venv（docqa_pip 自动创建/维护；gitignore）
 │   ├── requirements.txt          # 依赖清单（pip freeze 维护；gitignore）
-│   ├── python/                   # 子代理项目：Python 生态执行（run/pip/status）
-│   └── pyregex/                  # 子代理项目：正则工具（tools.py 合并示例：run/pip/status + match/findall/sub）
+│   └── docqa/                    # 子代理项目：本地文档问答（tools.py 合并模式：index/query/status + 基础 run/pip/status）
+│       ├── agent.json
+│       ├── PROMPT.md
+│       ├── tools.py              # BM25 索引/检索（纯标准库）
+│       └── corpus/               # 示例语料（索引验证用）
 ├── cpp/                          # C++ 语言目录
 │   ├── framework.hpp             # 基础框架：头文件式（协议 + 迷你 JSON + 工具注册表）
-│   ├── build.bat / build.sh      # 构建脚本（vswhere→cl / g++）
-│   └── mathx/                    # 子代理项目：数学表达式求值（main.cpp + agent.json + PROMPT.md）
+│   ├── build.bat / build.sh      # 构建脚本（vswhere→cl / g++；带 stb include 路径）
+│   ├── stb/                      # stb 单头库 vendor（stb_image / stb_image_write / stb_image_resize2）
+│   └── imgproc/                  # 子代理项目：图像处理（info/grayscale/resize/stats）
 ├── rust/                         # Rust 语言目录（cargo workspace 统一管理）
-│   ├── Cargo.toml                # workspace 根（members: framework, codec, …）
+│   ├── Cargo.toml                # workspace 根（members: framework, hsh, …）
 │   ├── framework/               # 库 crate gebai-native-framework（协议实现共享）
 │   │   └── src/lib.rs
-│   └── codec/                    # bin crate 子代理项目：编解码（base64/CRC-32）
+│   └── hsh/                      # bin crate 子代理项目：哈希校验（sha256/sha1/md5/hmac/verify）
 │       ├── Cargo.toml
-│       ├── agent.json            # command → {lang_dir}/target/release/codec{exe}
+│       ├── agent.json            # command → {lang_dir}/target/release/hsh{exe}
 │       ├── PROMPT.md
 │       └── src/main.rs           # 只写工具逻辑（依赖 framework crate）
 └── go/                           # Go 语言目录（go module 统一管理）
     ├── go.mod                    # module gebai/native-framework
     ├── framework/framework.go    # 基础框架包（标准库 encoding/json，零手写 JSON）
-    └── gotime/                   # 子代理项目：时间日期工具（now/parse/duration）
+    └── dirs/                     # 子代理项目：目录空间分析（tree/du/top/depth）
         ├── agent.json            # command → {agent_dir}/driver{exe}；build → go build
         ├── PROMPT.md
         └── main.go               # import fw "gebai/native-framework/framework"
@@ -128,33 +132,34 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 - **失败安全**：manifest 损坏/边车启动失败/握手失败/构建失败 → 该项记入 loadErrors（模型可见根因），不影响其他子代理与主流程
 - 工具调用恒需审批（任意代码执行面）
 
-## 内置子代理（5 个）
+## 内置子代理（4 个——每个语言一个典型场景）
 
-| 子代理 | 语言 | 工具 |
-|--------|------|------|
-| `python` | Python | `python_run`（常驻命名空间 REPL）/ `python_pip`（依赖管理）/ `python_status` |
-| `pyregex` | Python | `pyregex_match` / `pyregex_findall` / `pyregex_sub`（+ 基础 run/pip/status，tools.py 合并） |
-| `mathx` | C++ | `mathx_eval`（表达式求值）/ `mathx_eval_batch` / `mathx_stats` |
-| `codec` | Rust | `codec_b64_encode` / `codec_b64_decode` / `codec_crc32` |
-| `gotime` | Go | `gotime_now`（当前时间，时区/格式化）/ `gotime_parse`（时间解析→unix）/ `gotime_duration`（时长全单位换算） |
+| 子代理 | 语言 | 工具 | 典型场景 |
+|--------|------|------|----------|
+| `docqa` | Python | `docqa_index`（BM25 索引）/ `docqa_query`（检索+高亮）/ `docqa_status`（+ 基础 run/pip/status，tools.py 合并） | 本地文档问答（RAG 检索层） |
+| `imgproc` | C++ | `imgproc_info` / `imgproc_grayscale` / `imgproc_resize` / `imgproc_stats` | 图像处理（stb 单头库） |
+| `hsh` | Rust | `hsh_sha256` / `hsh_sha1` / `hsh_md5` / `hsh_hmac_sha256` / `hsh_verify` | 哈希校验（文件/文本完整性） |
+| `dirs` | Go | `dirs_tree` / `dirs_du` / `dirs_top` / `dirs_depth` | 目录空间分析（并发遍历） |
+
+Python 语言目录只保留 `docqa` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`docqa_run`/`docqa_pip`/`docqa_status`）。
 
 ## 四语言基础框架
 
 ### Python（native-agents/python/driver.py）
 
-语言目录共享驱动：协议 + REPL 引擎（末行表达式求值 repr 回显、session 命名空间保持）+ pip 工具（venv/requirements 落语言目录）。子代理项目可选携带 `tools.py`（导出 `AGENT_NAME` + `TOOLS` + `TOOL_IMPLS`），启动时自动加载与基础工具合并（同名覆盖）——pyregex 即此模式。
+语言目录共享驱动：协议 + REPL 引擎（末行表达式求值 repr 回显、session 命名空间保持）+ pip 工具（venv/requirements 落语言目录）。子代理项目可选携带 `tools.py`（导出 `AGENT_NAME` + `TOOLS` + `TOOL_IMPLS`），启动时自动加载与基础工具合并（同名覆盖）——`docqa` 即此模式（项目工具 + 基础 run/pip/status 共存于一个子代理）。
 
 ### C++（native-agents/cpp/framework.hpp）
 
-头文件式框架：手写迷你 JSON（解析/序列化，含 `\uXXXX` 与代理对）、NDJSON 行循环、工具注册表。子代理项目 `#include "../framework.hpp"`，工具写普通函数后 `main()` 前集中注册（`REGISTER_TOOL` 宏对含逗号的 schema/lambda 有预处理器拆参陷阱，集中注册最稳）。构建：Windows 用 `build.bat`（vswhere 定位 MSVC）/ unix 用 `build.sh`（g++/clang++）。
+头文件式框架：手写迷你 JSON（解析/序列化，含 `\uXXXX` 与代理对）、NDJSON 行循环、工具注册表。子代理项目 `#include "../framework.hpp"`，工具写普通函数后 `main()` 前集中注册（`REGISTER_TOOL` 宏对含逗号的 schema/lambda 有预处理器拆参陷阱，集中注册最稳）。构建：Windows 用 `build.bat`（vswhere 定位 MSVC）/ unix 用 `build.sh`（g++/clang++）——两者均带 `stb` 头文件 include 路径（`cpp/stb/`，`imgproc` 的单头库依赖）。
 
 ### Rust（native-agents/rust/——cargo workspace）
 
-语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-native-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`codec/` 等，`src/main.rs` 只写工具逻辑，依赖 `gebai-native-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。零第三方依赖（纯标准库，rustc/cargo 直编）。
+语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-native-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`hsh/` 等，`src/main.rs` 只写工具逻辑，依赖 `gebai-native-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。零第三方依赖（纯标准库，rustc/cargo 直编）。
 
 ### Go（native-agents/go/——go module）
 
-语言目录即一个 go module（`gebai/native-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`gotime/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} {agent_dir}/main.go`）；新增子代理 = 新目录 + agent.json（module 内多 main 包用文件级构建，互不干扰）。
+语言目录即一个 go module（`gebai/native-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`dirs/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} {agent_dir}/main.go`）；新增子代理 = 新目录 + agent.json（module 内多 main 包用文件级构建，互不干扰）。
 
 ## 任意语言接入示例（Go 心算代理）
 
@@ -171,5 +176,5 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 Python venv 与 requirements.txt 原位于 `{GEBAI_HOME}/venv`（dev 模式即仓库根），现归位语言目录 `native-agents/python/`（与驱动同居）：
 
 - 解释器解析顺序：`GEBAI_PYTHON_DIR` → 语言目录 venv（`native-agents/python/venv`）→ PATH
-- `python_pip` install/freeze 均操作语言目录（freeze 统一写回 `native-agents/python/requirements.txt`）
+- `docqa_pip` install/freeze 均操作语言目录（freeze 统一写回 `native-agents/python/requirements.txt`）
 - 构建复制 dist 时过滤 venv/__pycache__/编译产物——部署产物只带源码与 manifest

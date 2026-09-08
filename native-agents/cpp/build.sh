@@ -28,7 +28,7 @@ for p in $TARGETS; do
     continue
   fi
   echo "[build.sh] 编译 $p ..."
-  ( cd "$LANGDIR/$p" && "$CXX" -std=c++17 -O2 -o driver main.cpp ) || {
+  ( cd "$LANGDIR/$p" && "$CXX" -std=c++17 -O2 -I"$LANGDIR/stb" -o driver main.cpp ) || {
     FAIL=1
     echo "[build.sh] $p 编译失败" >&2
     continue

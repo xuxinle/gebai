@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["framework", "codec"]
+members = ["framework", "hsh"]
 
 # Rust 语言目录 cargo workspace：框架库 crate（framework，协议实现——语言目录共享）
 # + 子代理 bin crate（codec 等，一个二级目录一个 crate——只写工具逻辑）。

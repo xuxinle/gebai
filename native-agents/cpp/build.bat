@@ -44,7 +44,7 @@ if not exist "%LANGDIR%%PROJ%\main.cpp" (
 )
 echo [build.bat] compiling %PROJ% ...
 pushd "%LANGDIR%%PROJ%"
-cl /nologo /utf-8 /O2 /EHsc /std:c++17 main.cpp /Fe:driver.exe /Fo:driver.obj
+cl /nologo /utf-8 /O2 /EHsc /std:c++17 /I"%LANGDIR%stb" main.cpp /Fe:driver.exe /Fo:driver.obj
 if errorlevel 1 (
   popd
   set "FAIL=1"

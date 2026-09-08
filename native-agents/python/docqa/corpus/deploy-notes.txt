@@ -1,0 +1,7 @@
+部署清单备忘
+
+1. 安装包形态：native-agents 随 dist 整树复制（过滤 venv/__pycache__/编译产物），
+   二进制形态物化到 {GEBAI_HOME}/vendor/native-agents。
+2. 沙箱启用（服务端部署）或多语言子代理总开关关闭时，native 子代理整体不可见。
+3. 边车工具调用恒需审批（任意代码执行面）。
+4. 用户自建子代理放置 {GEBAI_HOME}/agents/{name}/，同名覆盖内置。

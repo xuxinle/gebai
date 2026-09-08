@@ -1,6 +1,0 @@
-{
-  "name": "python",
-  "description": "Python 生态子代理（边车常驻进程）：python_run 常驻命名空间执行（import 一次多次复用，接入 numpy/torch/transformers 等 AI 库）、python_pip 依赖管理（venv 与 requirements.txt 落语言目录）、python_status 状态报告",
-  "protocol": "1",
-  "command": ["{python}", "-X", "utf8", "{lang_dir}/driver.py"]
-}

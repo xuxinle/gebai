@@ -1,12 +1,15 @@
 /**
  * 真机端到端验证脚本（bun 运行，非测试）：多语言子代理全链路——
- * 真实驱动（python/cpp/rust）、真实 spawn、真实 SubAgentManager/ToolRegistry。
+ * 真实驱动（python/cpp/rust/go）、真实 spawn、真实 SubAgentManager/ToolRegistry。
  * 验证：发现注册 → 工具名带前缀 → 常驻状态保持 → 崩溃自愈 → pip status →
- * 构建引导（cpp/rust 可执行体缺失时自动编译）→ 三语言工具真机调用。
+ * 构建引导（cpp/rust/go 可执行体缺失时自动编译）→ 四语言典型场景工具真机调用
+ * （docqa 文档问答 / imgproc 图像处理 / hsh 哈希校验 / dirs 目录分析）。
  */
 import { SubAgentManager } from "../src/core/agents/subagents"
 import { ToolRegistry } from "../src/core/base/registry"
 import { disposeAllNativeAgents } from "../src/core/agents/native-agents"
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs"
+import { join } from "node:path"
 
 const registry = new ToolRegistry()
 const m = new SubAgentManager({ registry, preloadOverride: [] })
@@ -26,22 +29,6 @@ const expectAgent = (name: string) => {
   console.log(`PASS: ${name} 子代理已注册，工具:`, Object.keys(def.tools ?? {}))
   return def
 }
-
-const py = expectAgent("python")
-console.log("提示词前 80 字:", py.systemPrompt.slice(0, 80).replace(/\n/g, " "))
-
-// 装载（agent_load 等价入口）
-const loaded = await m.load("python")
-console.log("PASS: 装载", loaded)
-
-// 解析注册后的工具（python_run / python_pip / python_status）
-const runTool = registry.resolve("python_run")
-const pipTool = registry.resolve("python_pip")
-if (!runTool || !pipTool) {
-  console.error("FAIL: python_run/python_pip 未在注册表", runTool, pipTool)
-  process.exit(1)
-}
-console.log("PASS: 注册表解析 python_run/python_pip OK")
 
 const fakeCtx = {
   user: "admin",
@@ -63,153 +50,190 @@ const fakeCtx = {
   resolveProjectPath: (n: string) => n,
   getTodos: async () => [],
   setTodos: async () => {},
-  registry: { schemas: () => [], resolve: (n: string) => ({ name: n, tool: runTool.tool }), getAgentNames: () => ["python"] },
+  registry: { schemas: () => [], resolve: (n: string) => ({ name: n, tool: null }), getAgentNames: () => [] },
   listSubAgentDefs: () => [],
   loadSubAgent: async () => {},
 } as never
 
-// 1) 常驻状态：两次调用同一 session，变量保持
-const r1 = await runTool.tool.execute({ code: "import math\nval = math.pi\nval", session: "e2e" }, fakeCtx)
-console.log("run#1:", r1.output)
-if (!r1.output.includes("3.14")) {
-  console.error("FAIL: 首次执行应回显 math.pi")
+// ---------------- docqa（Python）：文档问答全链路 ----------------
+const docqa = expectAgent("docqa")
+console.log("提示词前 80 字:", docqa.systemPrompt.slice(0, 80).replace(/\n/g, " "))
+await m.load("docqa")
+
+const indexTool = registry.resolve("docqa_index")
+const queryTool = registry.resolve("docqa_query")
+if (!indexTool || !queryTool) {
+  console.error("FAIL: docqa_index/docqa_query 未在注册表")
   process.exit(1)
 }
-const r2 = await runTool.tool.execute({ code: "round(val * 2, 4)", session: "e2e" }, fakeCtx)
-console.log("run#2（常驻状态跨调用保持）:", r2.output)
-if (r2.output.trim() !== "6.2832") {
-  console.error("FAIL: 常驻状态丢失（val 未保持）")
+
+// 构造临时语料（验证索引/检索/高亮全链路）
+const corpus = join(process.cwd(), "tmp-e2e-docqa")
+rmSync(corpus, { recursive: true, force: true })
+mkdirSync(corpus, { recursive: true })
+writeFileSync(join(corpus, "a.md"), "# 边车协议\n\n宿主与驱动通过 stdin/stdout 交换 NDJSON。超时由宿主控制，默认 120 秒。\n")
+writeFileSync(join(corpus, "b.md"), "# 索引设计\n\nBM25 是经典词法检索排序函数，k1 控制词频饱和，b 控制长度归一化。\n")
+writeFileSync(join(corpus, "c.txt"), "无关内容：部署清单与沙箱开关说明。\n")
+
+const r1 = await indexTool.tool.execute({ dir: corpus }, fakeCtx)
+console.log("docqa_index:", r1.output.split("\n")[0])
+if (!/索引完成: 3 个文档/.test(r1.output)) {
+  console.error("FAIL: docqa 索引应含 3 个文档:", r1.output)
   process.exit(1)
 }
-console.log("PASS: 常驻命名空间状态保持")
-
-// 2) stderr 捕获 + 错误回显
-const r3 = await runTool.tool.execute({ code: "import sys\nsys.stderr.write('warn-note\\n')\n1/0", session: "e2e" }, fakeCtx)
-console.log("run#3 错误捕获（含 ZeroDivisionError）:", r3.output.includes("ZeroDivisionError") ? "OK" : r3.output)
-if (!r3.output.includes("ZeroDivisionError")) {
-  console.error("FAIL: 异常栈未回显")
+// 检索命中（中文二元分词 + 高亮）
+const r2 = await queryTool.tool.execute({ query: "边车 超时", dir: corpus, top_k: 2 }, fakeCtx)
+console.log("docqa_query 首行:", r2.output.split("\n")[0])
+if (!r2.output.includes("a.md") || !r2.output.includes("【")) {
+  console.error("FAIL: docqa 检索未命中 a.md 或未高亮:", r2.output)
   process.exit(1)
 }
-console.log("PASS: 异常栈如实回显")
-
-// 3) pip status（真实 subprocess，不动 venv）
-const r4 = await pipTool.tool.execute({ action: "status" }, fakeCtx)
-console.log("pip status 输出前 3 行:", r4.output.split("\n").slice(0, 3).join(" | "))
-if (!r4.output.includes("venv:")) {
-  console.error("FAIL: pip status 无 venv 报告")
+// 增量索引复用（mtime/size 未变 → 复用旧词条）
+const r3 = await indexTool.tool.execute({ dir: corpus }, fakeCtx)
+if (!/索引完成: 3 个文档/.test(r3.output)) {
+  console.error("FAIL: docqa 增量索引:", r3.output)
   process.exit(1)
 }
-console.log("PASS: python_pip status 报告")
+console.log("PASS: docqa（Python）索引 + BM25 检索 + 高亮 + 增量复用")
 
-// 4) venv 全链路：pip install（装完驱动退出 → 宿主自愈重启 → 命令工厂切 venv 解释器）。
-//    注：放在崩溃测试之前——pip 主动退出是首次退出，自动重启+在途重发机制正常接管；
-//    若在崩溃测试后 10s 内连发会触发「连续 3 次快速退出」防抖放弃重启（设计行为）。
-const r7 = await pipTool.tool.execute({ action: "install", packages: "six", timeout: 240 }, fakeCtx)
-console.log("pip install six 返回前 2 行:", r7.output.split("\n").slice(0, 2).join(" | "))
-if (!/exit 0|Successfully/.test(r7.output)) {
-  console.error("WARN: pip install six 未成功（网络受限环境可跳过后续 venv 断言）:", r7.output.slice(0, 400))
-} else {
-  // 边车已重启：status 上报的解释器应为 venv 内 python（主动退出后自愈重启，在途请求自动重发）
-  const statusTool = registry.resolve("python_status")!
-  const r8 = await statusTool.tool.execute({}, fakeCtx)
-  console.log("重启后 executable:", (r8.data as { executable?: string })?.executable)
-  if (!(r8.data as { executable?: string })?.executable?.includes("venv")) {
-    console.error("FAIL: 边车重启后未切换到 venv 解释器:", JSON.stringify(r8.data))
-    process.exit(1)
-  }
-  console.log("PASS: venv 自动创建 + 边车重启切换解释器")
-  // venv 内 import 验证（six 装在 venv）
-  const r9 = await runTool.tool.execute({ code: "import six\nsix.__version__", session: "postvenv" }, fakeCtx)
-  console.log("venv 内 import six:", r9.output.slice(0, 80))
-  if (/ModuleNotFoundError|ImportError/.test(r9.output)) {
-    console.error("FAIL: venv 内 six 不可用")
-    process.exit(1)
-  }
-  console.log("PASS: venv 依赖可用")
+// Python 基础工具（driver.py 框架能力仍可用：run/pip/status 合并上报）
+const runTool = registry.resolve("docqa_run")
+if (!runTool) {
+  console.error("FAIL: docqa 未合并基础 run 工具")
+  process.exit(1)
 }
+// 常驻命名空间状态保持
+const p1 = await runTool.tool.execute({ code: "import math\nval = math.pi\nval", session: "e2e" }, fakeCtx)
+if (!p1.output.includes("3.14")) {
+  console.error("FAIL: 首次执行应回显 math.pi:", p1.output)
+  process.exit(1)
+}
+const p2 = await runTool.tool.execute({ code: "round(val * 2, 4)", session: "e2e" }, fakeCtx)
+if (p2.output.trim() !== "6.2832") {
+  console.error("FAIL: 常驻状态丢失:", p2.output)
+  process.exit(1)
+}
+console.log("PASS: docqa 常驻命名空间状态保持（tools.py 合并基础工具）")
 
-// 5) 崩溃自愈：驱动内 os._exit(1)（真实崩溃）→ 宿主重启重发 → 本次响应丢失但下次调用新进程成功
-const r5 = await runTool.tool.execute({ code: "import os\nos._exit(1)", session: "crash" }, fakeCtx).catch((e: Error) => `ERR:${e.message}`)
-console.log("run#5 崩溃调用返回:", String(r5).slice(0, 120))
-const r6 = await runTool.tool.execute({ code: "'alive-after-crash'", session: "crash2" }, fakeCtx)
-if (!r6.output.includes("alive-after-crash")) {
-  console.error("FAIL: 崩溃后新进程未恢复:", r6.output)
+// pip status
+const pipTool = registry.resolve("docqa_pip")!
+const p3 = await pipTool.tool.execute({ action: "status" }, fakeCtx)
+if (!p3.output.includes("venv:")) {
+  console.error("FAIL: docqa_pip status 无 venv 报告:", p3.output)
+  process.exit(1)
+}
+console.log("PASS: docqa_pip status 报告")
+
+// 崩溃自愈：驱动内 os._exit(1) → 宿主重启 → 下次调用新进程成功
+await runTool.tool.execute({ code: "import os\nos._exit(1)", session: "crash" }, fakeCtx).catch(() => "")
+const p4 = await runTool.tool.execute({ code: "'alive-after-crash'", session: "crash2" }, fakeCtx)
+if (!p4.output.includes("alive-after-crash")) {
+  console.error("FAIL: 崩溃后新进程未恢复:", p4.output)
   process.exit(1)
 }
 console.log("PASS: 崩溃自愈（真实 os._exit → 重启 → 新进程可用）")
 
-console.log("\n=== python 段全部通过 ===")
+rmSync(corpus, { recursive: true, force: true })
+console.log("\n=== docqa（Python）段全部通过 ===")
 
-// ---------------- cpp/rust：构建引导 + 真机工具调用 ----------------
-const fakeCtx2 = { ...fakeCtx }
+// ---------------- imgproc（C++）：图像处理 ----------------
+expectAgent("imgproc")
+await m.load("imgproc")
+// 1x1 红色 PNG（手写最小合法 PNG 字节）——不依赖外部图片资产
+const pngPath = join(process.cwd(), "tmp-e2e-imgproc.png")
+const pngB64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+writeFileSync(pngPath, Buffer.from(pngB64, "base64"))
 
-// mathx（C++）：eval/eval_batch/stats（装载后工具才进注册表）
-const mathx = expectAgent("mathx")
-await m.load("mathx")
-const mathxEval = registry.resolve("mathx_eval")
-if (!mathxEval) {
-  console.error("FAIL: mathx_eval 未在注册表")
+const infoTool = registry.resolve("imgproc_info")!
+const grayTool = registry.resolve("imgproc_grayscale")!
+const resizeTool = registry.resolve("imgproc_resize")!
+const statsTool = registry.resolve("imgproc_stats")!
+const i1 = await infoTool.tool.execute({ path: pngPath }, fakeCtx)
+console.log("imgproc_info:", i1.output.replace(/\n/g, " | "))
+if (!i1.output.includes("1x1")) {
+  console.error("FAIL: imgproc_info 应为 1x1:", i1.output)
   process.exit(1)
 }
-const c1 = await mathxEval.tool.execute({ expression: "sqrt(x^2+y^2)", vars: { x: 3, y: 4 } }, fakeCtx2)
-console.log("mathx_eval:", c1.output)
-if (c1.output.trim() !== "5") {
-  console.error("FAIL: mathx_eval 应为 5")
+const i2 = await resizeTool.tool.execute({ path: pngPath, width: 8, output: join(process.cwd(), "tmp-e2e-imgproc-8.png") }, fakeCtx)
+if (!i2.output.includes("1x1 -> 8x8")) {
+  console.error("FAIL: imgproc_resize 等比缩放:", i2.output)
   process.exit(1)
 }
-const c2 = await registry.resolve("mathx_stats")!.tool.execute({ values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] }, fakeCtx2)
-if (!c2.output.includes("mean: 5.5")) {
-  console.error("FAIL: mathx_stats mean 应为 5.5:", c2.output)
+const i3 = await grayTool.tool.execute({ path: pngPath }, fakeCtx)
+if (!existsSync(join(process.cwd(), "tmp-e2e-imgproc.png.gray.png"))) {
+  console.error("FAIL: imgproc_grayscale 未产出文件:", i3.output)
   process.exit(1)
 }
-console.log("PASS: mathx（C++）eval 变量代入 + stats")
+const i4 = await statsTool.tool.execute({ path: pngPath }, fakeCtx)
+if (!i4.output.includes("Otsu")) {
+  console.error("FAIL: imgproc_stats 无 Otsu:", i4.output)
+  process.exit(1)
+}
+// 清理测试产物
+for (const f of [pngPath, join(process.cwd(), "tmp-e2e-imgproc-8.png"), join(process.cwd(), "tmp-e2e-imgproc.png.gray.png")]) {
+  rmSync(f, { force: true })
+}
+console.log("PASS: imgproc（C++ + stb）info/grayscale/resize/stats")
 
-// codec（Rust）：b64/crc32
-expectAgent("codec")
-await m.load("codec")
-const e1 = await registry.resolve("codec_b64_encode")!.tool.execute({ text: "gebai 三语言" }, fakeCtx2)
-const d1 = await registry.resolve("codec_b64_decode")!.tool.execute({ text: (e1.data as { encoded?: string }).encoded ?? "" }, fakeCtx2)
-if (d1.output !== "gebai 三语言") {
-  console.error("FAIL: codec base64 往返:", d1.output)
+// ---------------- hsh（Rust）：哈希校验（RFC 官方向量）----------------
+expectAgent("hsh")
+await m.load("hsh")
+const sha256Tool = registry.resolve("hsh_sha256")!
+const h1 = await sha256Tool.tool.execute({ text: "abc" }, fakeCtx)
+if ((h1.data as { digest?: string })?.digest !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
+  console.error("FAIL: hsh_sha256('abc') 不符 RFC 向量:", h1.output)
   process.exit(1)
 }
-const k1 = await registry.resolve("codec_crc32")!.tool.execute({ text: "hello gebai" }, fakeCtx2)
-if ((k1.data as { crc32?: string }).crc32 !== "d52ec7e3") {
-  console.error("FAIL: codec crc32:", k1.output)
+const hmacTool = registry.resolve("hsh_hmac_sha256")!
+const h2 = await hmacTool.tool.execute({ key: "Jefe", text: "what do ya want for nothing?" }, fakeCtx)
+if (!h2.output.includes("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")) {
+  console.error("FAIL: hsh_hmac_sha256 不符 RFC 4231 向量:", h2.output)
   process.exit(1)
 }
-console.log("PASS: codec（Rust）base64 往返 + crc32")
+const verifyTool = registry.resolve("hsh_verify")!
+const h3 = await verifyTool.tool.execute({ text: "abc", sha256: "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD" }, fakeCtx)
+if (!h3.output.includes("校验通过")) {
+  console.error("FAIL: hsh_verify 大写 hex 应通过:", h3.output)
+  process.exit(1)
+}
+const h4 = await verifyTool.tool.execute({ text: "abc", md5: "deadbeef" }, fakeCtx)
+if (!h4.output.includes("校验失败")) {
+  console.error("FAIL: hsh_verify 错误值应失败:", h4.output)
+  process.exit(1)
+}
+console.log("PASS: hsh（Rust）SHA-256/HMAC RFC 向量 + verify 双向判定")
 
-// pyregex（Python tools.py 合并）：match/findall
-expectAgent("pyregex")
-await m.load("pyregex")
-const re1 = await registry.resolve("pyregex_match")!.tool.execute(
-  { pattern: "(?P<year>\\d{4})-(?P<mo>\\d{2})", text: "发布 2026-07 版" }, fakeCtx2)
-if (!re1.output.includes("year='2026'")) {
-  console.error("FAIL: pyregex 命名分组:", re1.output)
+// ---------------- dirs（Go）：目录空间分析 ----------------
+expectAgent("dirs")
+await m.load("dirs")
+const duTool = registry.resolve("dirs_du")!
+const depthTool = registry.resolve("dirs_depth")!
+const topTool = registry.resolve("dirs_top")!
+const treeTool = registry.resolve("dirs_tree")!
+const goDir = join(process.cwd(), "..", "..", "native-agents", "go")
+const d1 = await duTool.tool.execute({ dir: goDir, depth: 1, top_k: 5 }, fakeCtx)
+console.log("dirs_du:", d1.output.split("\n").slice(0, 3).join(" | "))
+if (!d1.output.includes("占用排行")) {
+  console.error("FAIL: dirs_du:", d1.output)
   process.exit(1)
 }
-console.log("PASS: pyregex（Python tools.py 合并）命名分组")
-
-// gotime（Go）：now/parse/duration
-expectAgent("gotime")
-await m.load("gotime")
-const t1 = await registry.resolve("gotime_now")!.tool.execute({ tz: "Asia/Shanghai", format: "date" }, fakeCtx2)
-if (!/^\d{4}-\d{2}-\d{2}$/.test(t1.output.trim())) {
-  console.error("FAIL: gotime now 日期格式:", t1.output)
+const d2 = await depthTool.tool.execute({ dir: goDir }, fakeCtx)
+if (!/文件: \d+/.test(d2.output) || !/最大深度/.test(d2.output)) {
+  console.error("FAIL: dirs_depth:", d2.output)
   process.exit(1)
 }
-const t2 = await registry.resolve("gotime_parse")!.tool.execute({ text: "2026-07-14 08:30:00" }, fakeCtx2)
-if (!(t2.data as { unix?: number })?.unix) {
-  console.error("FAIL: gotime parse unix:", t2.output)
+const d3 = await topTool.tool.execute({ dir: goDir, top_k: 3 }, fakeCtx)
+if (!d3.output.includes("最大文件排行")) {
+  console.error("FAIL: dirs_top:", d3.output)
   process.exit(1)
 }
-const t3 = await registry.resolve("gotime_duration")!.tool.execute({ text: "1h30m" }, fakeCtx2)
-if (!t3.output.includes("s=5400") && !t3.output.includes("s=5400 ")) {
-  console.error("FAIL: gotime duration 1h30m 应含 s=5400:", t3.output)
+const d4 = await treeTool.tool.execute({ dir: goDir, max_depth: 2 }, fakeCtx)
+if (!d4.output.includes("项）")) {
+  console.error("FAIL: dirs_tree:", d4.output)
   process.exit(1)
 }
-console.log("PASS: gotime（Go）now/parse/duration")
+console.log("PASS: dirs（Go）tree/du/top/depth（并发遍历）")
 
 console.log("\n=== 真机端到端全部通过（python + cpp + rust + go 四语言）===")
 disposeAllNativeAgents() // 显式回收后再退出（exit hook 兄弟保险，防孤儿进程）
