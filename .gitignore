@@ -31,12 +31,14 @@ feishu/
 native-agents/python/venv/
 native-agents/python/requirements.txt
 __pycache__/
-# C++/Rust 语言目录编译产物（Windows driver.exe/pdb；Linux/macOS 无后缀 driver）
+# C++/Rust 语言目录编译产物（Windows driver.exe/pdb；Linux/macOS 无后缀 driver）与 cargo 构建目录
 native-agents/cpp/**/driver*.exe
 native-agents/cpp/**/driver
 native-agents/rust/**/driver*.exe
 native-agents/rust/**/driver
 native-agents/rust/**/driver*.pdb
+native-agents/rust/target/
+Cargo.lock
 
 # OS
 .DS_Store

@@ -2,8 +2,8 @@
   "name": "codec",
   "description": "高性能编解码子代理（Rust 边车常驻进程）：codec_b64_encode base64 编码、codec_b64_decode base64 解码（UTF-8 文本或 hex 字节）、codec_crc32 校验和（与 zlib/png 一致）",
   "protocol": "1",
-  "command": ["{agent_dir}/driver{exe}"],
+  "command": ["{lang_dir}/target/release/codec{exe}"],
   "build": {
-    "command": ["rustc", "--edition", "2021", "-O", "-o", "{agent_dir}/driver{exe}", "{agent_dir}/main.rs"]
+    "command": ["cargo", "build", "--release", "--manifest-path", "{lang_dir}/Cargo.toml"]
   }
 }

@@ -173,10 +173,12 @@ try {
   // driver.exe / Linux 与 macOS 无后缀 driver（含中间产物 driver.obj/pdb 等）
   const nativeFilter = (src: string) => {
     const base = basename(src)
+    // 运行时/构建资产目录：venv/__pycache__/objs（Python、C++）与 target（cargo）
     return !(
       base === "venv" ||
       base === "__pycache__" ||
       base === "objs" ||
+      base === "target" ||
       /^driver(\.(exe|pdb|obj|o|d|out|bin|so|dylib))?$/.test(base)
     )
   }

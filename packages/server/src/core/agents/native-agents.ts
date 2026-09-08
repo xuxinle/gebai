@@ -348,7 +348,10 @@ export async function launchNativeAgent(
   return { def, sidecar }
 }
 
-/** 扫描目录下全部子目录的 agent.json（返回 dir → raw 内容），目录不存在返回空。 */
+/** 扫描目录下全部子目录的 agent.json（返回 dir → raw 内容），目录不存在返回空。
+ *  跳过语言目录运行时/构建资产：venv/__pycache__（Python）、objs/target（编译中间产物）；
+ *  framework 类无 manifest 的共享库目录（如 rust cargo workspace 的 framework crate）自然跳过
+ *  （子目录无 agent.json）。 */
 export async function scanManifestDirs(roots: string[]): Promise<Array<{ dir: string; raw: string }>> {
   const { readdir } = await import("node:fs/promises")
   const out: Array<{ dir: string; raw: string }> = []
@@ -361,12 +364,12 @@ export async function scanManifestDirs(roots: string[]): Promise<Array<{ dir: st
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue
-      if (e.name === "venv" || e.name === "__pycache__" || e.name === "objs") continue
+      if (["venv", "__pycache__", "objs", "target", ".git"].includes(e.name)) continue
       const manifestPath = join(root, e.name, "agent.json")
       try {
         out.push({ dir: join(root, e.name), raw: readFileSync(manifestPath, "utf8") })
       } catch {
-        continue // 子目录无 agent.json：跳过（目录里可能有别的资产）
+        continue // 子目录无 agent.json：跳过（共享库 crate/其他资产目录）
       }
     }
   }
@@ -465,13 +468,32 @@ export function disposeAllNativeAgents(): void {
   }
 }
 
-/** native 目录签名（热加载）：各根目录（语言目录）子目录（子代理项目）内全部文件（递归 1 层）
- *  的 路径:mtime 拼接——manifest/驱动脚本/提示词任一变化即变化；跳过 venv/__pycache__/objs
- *  与编译产物（driver*.exe）——运行时数据不触发重扫；根全不存在返回空串（与 sub-agents 签名
- *  拼接后仍稳定）。 */
+/** native 目录签名（热加载）：各根目录（语言目录）子目录（子代理项目）内全部文件（递归 2 层
+ *  ——兼容 cargo/gradle 等标准工程布局 src/*.rs）的 路径:mtime 拼接——manifest/驱动脚本/提示词
+ *  任一变化即变化；跳过 venv/__pycache__/objs/target 与编译产物（driver 可执行体及中间产物）
+ *  ——运行时数据不触发重扫；根全不存在返回空串（与 sub-agents 签名拼接后仍稳定）。 */
 export async function nativeAgentsSignature(roots: string[]): Promise<string> {
   const { readdir, stat } = await import("node:fs/promises")
+  const SKIP_DIRS = ["venv", "__pycache__", "objs", "target", ".git"]
   const parts: string[] = []
+  const walk = async (rel: string, abs: string, depth: number): Promise<void> => {
+    let entries
+    try {
+      entries = await readdir(abs, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const f of entries) {
+      if (f.isFile()) {
+        // 编译产物跨平台形态：Windows driver.exe / Linux 与 macOS 无后缀 driver（含中间产物）
+        if (/^driver(\.(exe|pdb|obj|o|d|out|bin|so|dylib))?$/.test(f.name)) continue
+        const st = await stat(join(abs, f.name)).catch(() => null)
+        if (st) parts.push(`${rel}/${f.name}:${st.mtimeMs}`)
+      } else if (f.isDirectory() && depth > 0 && !SKIP_DIRS.includes(f.name)) {
+        await walk(`${rel}/${f.name}`, join(abs, f.name), depth - 1)
+      }
+    }
+  }
   for (const root of roots) {
     let dirs
     try {
@@ -481,21 +503,8 @@ export async function nativeAgentsSignature(roots: string[]): Promise<string> {
     }
     for (const e of dirs) {
       if (!e.isDirectory()) continue
-      if (e.name === "venv" || e.name === "__pycache__" || e.name === "objs") continue
-      const sub = join(root, e.name)
-      let files
-      try {
-        files = await readdir(sub, { withFileTypes: true })
-      } catch {
-        continue
-      }
-      for (const f of files) {
-        if (!f.isFile()) continue
-        // 编译产物跨平台形态：Windows driver.exe / Linux 与 macOS 无后缀 driver（含中间产物 driver.obj/pdb）
-        if (/^driver(\.(exe|pdb|obj|o|d|out|bin|so|dylib))?$/.test(f.name)) continue
-        const st = await stat(join(sub, f.name)).catch(() => null)
-        if (st) parts.push(`${e.name}/${f.name}:${st.mtimeMs}`)
-      }
+      if (SKIP_DIRS.includes(e.name)) continue
+      await walk(e.name, join(root, e.name), 2)
     }
   }
   return parts.sort().join("|")

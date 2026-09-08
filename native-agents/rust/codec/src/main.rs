@@ -1,10 +1,8 @@
 // codec 子代理项目：高性能编解码工具（Rust 实现，边车常驻进程）。
-// 基于语言目录共享基础框架（native-agents/rust/framework.rs），本文件只写工具逻辑——
-// 框架处理协议（init/tools.list/tool.call + NDJSON 行循环）。
+// 基于语言目录共享基础框架（cargo workspace 库 crate gebai-native-framework），本文件只写
+// 工具逻辑——框架处理协议（init/tools.list/tool.call + NDJSON 行循环）。
+// 构建：cargo build --release（workspace 根或本 crate 目录均可），产物 target/release/codec{exe}。
 #![allow(static_mut_refs)]
-
-#[path = "../framework.rs"]
-mod framework;
 
 use framework::{schema, tool_err, tool_ok, Json, ToolDef};
 

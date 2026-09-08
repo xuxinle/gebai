@@ -1,0 +1,12 @@
+[package]
+name = "codec"
+version = "0.1.0"
+edition = "2021"
+description = "codec 子代理：高性能编解码工具（base64/CRC-32，边车常驻进程）"
+
+[dependencies]
+gebai-native-framework = { path = "../framework" }
+
+[[bin]]
+name = "codec"
+path = "src/main.rs"

@@ -1,0 +1,9 @@
+[package]
+name = "gebai-native-framework"
+version = "0.1.0"
+edition = "2021"
+description = "歌白多语言子代理 Rust 基础框架：边车协议 v1（NDJSON over stdio）+ 迷你 JSON + 工具注册表"
+
+[lib]
+name = "framework"
+path = "src/lib.rs"
