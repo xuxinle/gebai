@@ -59,7 +59,9 @@ function fingerprint(content: string): string {
   return createHash("sha256").update(body).digest("hex").slice(0, 16)
 }
 
-const MAX_TOOL_ROUNDS = 200
+/** 工具调用轮次上限：不限制（超长任务不截停）。失控防线独立存在：重复检测终止（MAX_REPEAT_STALLS）、
+ *  用户取消、上下文压缩、模型自然收尾；rounds 仅作计数回传（toolRounds）。 */
+const MAX_TOOL_ROUNDS = Number.POSITIVE_INFINITY
 /** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。 */
 const MAX_TODO_CONTINUE = 3
 /** 收尾验证提醒轮次上限：改了代码文件但全程未跑测试/检查的任务，结束时最多注入一次提醒（防反复打扰）。 */
@@ -888,7 +890,7 @@ export class AgentEngine {
 
         if (finalText) {
           await this.opts.store.appendMessage(sessionId, {
-            // 最终轮的流式 messageId（撤回/反馈定位对刚完成的回复立即生效）；无最终轮（重复终止/轮次上限）时生成
+            // 最终轮的流式 messageId（撤回/反馈定位对刚完成的回复立即生效）；无最终轮（重复终止等循环中途退出）时生成
             id: res.lastMessageId ?? crypto.randomUUID(),
             role: "assistant",
             content: finalText,

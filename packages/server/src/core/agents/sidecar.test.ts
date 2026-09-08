@@ -3,7 +3,7 @@
  * 用 Node/Bun 子进程实现 fake 协议驱动（无 python 依赖），验证
  * init/tools.list/tool.call 协议往返、超时杀进程重启、崩溃自愈重发、dispose、命令工厂解析。
  */
-import { test } from "bun:test"
+import { test, afterAll } from "bun:test"
 import { AgentSidecar, type SidecarProc, type SidecarSpawnFn } from "./sidecar"
 
 /** fake 驱动源码：按行为开关响应协议。 */
@@ -79,6 +79,12 @@ const flagFile = `${import.meta.dir}/.sidecar-test-flag`
 try {
   require("node:fs").rmSync(flagFile, { force: true })
 } catch { /* 首次不存在 */ }
+afterAll(() => {
+  // 结束清理标记文件（崩溃用例写入的工作文件，不留未跟踪残留）
+  try {
+    require("node:fs").rmSync(flagFile, { force: true })
+  } catch { /* 忽略 */ }
+})
 
 const BUN = [process.execPath, "-e", FAKE_DRIVER]
 
