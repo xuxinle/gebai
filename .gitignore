@@ -31,11 +31,11 @@ feishu/
 native-agents/python/venv/
 native-agents/python/requirements.txt
 __pycache__/
-# C++ 语言目录编译产物（构建引导/手动编译生成）
-native-agents/cpp/objs/
+# C++/Rust 语言目录编译产物（Windows driver.exe/pdb；Linux/macOS 无后缀 driver）
 native-agents/cpp/**/driver*.exe
-# Rust 语言目录编译产物
+native-agents/cpp/**/driver
 native-agents/rust/**/driver*.exe
+native-agents/rust/**/driver
 native-agents/rust/**/driver*.pdb
 
 # OS

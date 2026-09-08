@@ -169,10 +169,16 @@ try {
   await copyFile(join(root, "src", "core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
   // 多语言子代理源（仓库根 native-agents/，按语言分目录）→ dist/native-agents/（独立部署的
   // dist 树发现兕底）；过滤运行时数据（venv/__pycache__）与编译产物（driver*.exe/objs）——
-  // 只带源码与 manifest，可执行体由目标机构建引导按需生成
+  // 只带源码与 manifest，可执行体由目标机构建引导按需生成；driver 跨平台形态：Windows
+  // driver.exe / Linux 与 macOS 无后缀 driver（含中间产物 driver.obj/pdb 等）
   const nativeFilter = (src: string) => {
     const base = basename(src)
-    return !(base === "venv" || base === "__pycache__" || base === "objs" || /^driver.*\.exe$/.test(base))
+    return !(
+      base === "venv" ||
+      base === "__pycache__" ||
+      base === "objs" ||
+      /^driver(\.(exe|pdb|obj|o|d|out|bin|so|dylib))?$/.test(base)
+    )
   }
   await cp(join(root, "..", "..", "native-agents"), join(distDir, "native-agents"), { recursive: true, filter: nativeFilter })
   console.log(`[build-subagents] copied browser driver + cv sidecar driver + native-agents -> ${distDir}`)

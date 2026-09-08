@@ -491,7 +491,8 @@ export async function nativeAgentsSignature(roots: string[]): Promise<string> {
       }
       for (const f of files) {
         if (!f.isFile()) continue
-        if (/^driver.*\.exe$/.test(f.name)) continue
+        // 编译产物跨平台形态：Windows driver.exe / Linux 与 macOS 无后缀 driver（含中间产物 driver.obj/pdb）
+        if (/^driver(\.(exe|pdb|obj|o|d|out|bin|so|dylib))?$/.test(f.name)) continue
         const st = await stat(join(sub, f.name)).catch(() => null)
         if (st) parts.push(`${e.name}/${f.name}:${st.mtimeMs}`)
       }
