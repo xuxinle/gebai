@@ -3,7 +3,7 @@
  * RGBA→CHW float 张量。全部纯函数、零外部依赖，供本地 CV 推理（OCR/YOLO）前处理使用。
  * 覆盖截图场景的 PNG 子集：8-bit、非隔行、灰度/RGB/调色板/带 alpha 变体。
  */
-import { inflateSync } from "node:zlib"
+import { deflateSync, inflateSync } from "node:zlib"
 
 export interface RgbaImage {
   width: number
@@ -150,6 +150,60 @@ function paeth(a: number, b: number, c: number): number {
   const pb = Math.abs(p - b)
   const pc = Math.abs(p - c)
   return pa <= pb && pa <= pc ? a : pb <= pc ? b : c
+}
+
+/* ---------------- PNG 编码（与 decodePng 对称，供跨进程传输图像） ---------------- */
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    t[n] = c >>> 0
+  }
+  return t
+})()
+
+function crc32(bytes: Uint8Array): number {
+  let c = 0xffffffff
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8)
+  return (c ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length)
+  new DataView(out.buffer).setUint32(0, data.length)
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i)
+  out.set(data, 8)
+  new DataView(out.buffer).setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)))
+  return out
+}
+
+/** RGBA 图 → PNG 字节（8-bit RGBA，filter 0，zlib 压缩）——写盘交给跨进程消费（如 vision 边车）。 */
+export function encodePng(img: RgbaImage): Uint8Array {
+  const raw = new Uint8Array(img.height * (1 + img.width * 4))
+  let o = 0
+  for (let y = 0; y < img.height; y++) {
+    raw[o++] = 0 // filter none
+    raw.set(img.data.subarray(y * img.width * 4, (y + 1) * img.width * 4), o)
+    o += img.width * 4
+  }
+  const ihdr = new Uint8Array(13)
+  const dv = new DataView(ihdr.buffer)
+  dv.setUint32(0, img.width)
+  dv.setUint32(4, img.height)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 6 // color type RGBA
+  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+  const parts = [signature, pngChunk("IHDR", ihdr), pngChunk("IDAT", new Uint8Array(deflateSync(raw))), pngChunk("IEND", new Uint8Array(0))]
+  const total = parts.reduce((s, p) => s + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return out
 }
 
 /** 裁剪（越界部分被钳制到图像边界，w/h 钳制非负）。 */

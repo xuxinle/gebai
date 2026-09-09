@@ -9,10 +9,90 @@
 import type { Tool, ToolContext, ToolResult } from "../base/types"
 import { getCvRunner } from "../cv/cv"
 import { pairObjectsWithText } from "../cv/detect"
-import { cropImage, decodePng, type RgbaImage } from "../cv/image"
+import { cropImage, decodePng, encodePng, type RgbaImage } from "../cv/image"
 import { matchTemplate, type TemplateMatch } from "../cv/template"
 import { parseRegion, schema } from "./shared"
 import { VISION_MAX_IMAGE_BYTES } from "./vision"
+
+/* ---------------- 边车推理委托（sidecar-first + wasm 回落） ----------------
+ * desktop/playwright 的 ocr/locate/detect 推理优先委托 vision Python 边车（onnxruntime
+ * 原生推理，进程级模型缓存），不可用（未装载/沙箱/边车报错）时回落进程内 wasm——消费层
+ * 无感：同一 RgbaImage 输入、同一坐标语义（边车返回坐标相对传入 PNG，即裁剪后图像像素系，
+ * 与 wasm 路径完全同构，offX/offY 回加逻辑不变）。经 ToolContext.registry 工具调用而非
+ * 直连边车进程：复用注册表的装载门控/审批策略/ctx 组装（sidecarTool 从 ctx 组装请求级
+ * ctx，会话工作区/env 随调用传递），不绕过任何治理层。 */
+
+/** 跨进程图像传递临时文件（会话工作区内，覆盖复用不累积）。 */
+const SIDECAR_TMP = "tmp/cv_sidecar_in.png"
+
+interface SidecarOcrLine {
+  text: string
+  score: number
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** 写入图像并调用注册表中的 vision 边车工具；返回 data（无 data/报错时抛）。 */
+async function callVisionSidecar<T>(
+  ctx: ToolContext,
+  img: RgbaImage,
+  args: Record<string, unknown>,
+): Promise<T> {
+  const tool = `vision_${String(args.__tool)}`
+  delete args.__tool
+  const registered = ctx.registry.resolve(tool)
+  if (!registered) throw new Error("vision 边车未装载")
+  const bytes = encodePng(img)
+  if (bytes.byteLength > VISION_MAX_IMAGE_BYTES) throw new Error(`图像编码后过大（${(bytes.byteLength / 1024 / 1024).toFixed(1)}MB，上限 8MB）`)
+  const path = ctx.resolvePath(SIDECAR_TMP)
+  if (!ctx.writeBinaryFile) throw new Error("ToolContext 缺 writeBinaryFile（边车图像落盘不可用）")
+  await ctx.writeBinaryFile(path, bytes)
+  const { output, data } = await registered.tool.execute({ ...args, image: SIDECAR_TMP }, ctx)
+  if (!data || typeof data !== "object") throw new Error(`vision 边车无结构化返回: ${String(output).slice(0, 120)}`)
+  return data as T
+}
+
+/** OCR 推理（sidecar-first）：优先 vision 边车，未装载/报错回落进程内 wasm。
+ *  导出供 desktop_wait_for 等工厂外消费方复用（同一委托/回落语义）。 */
+export async function ocrInfer(
+  ctx: ToolContext,
+  img: RgbaImage,
+): Promise<{ lines: Array<{ text: string; score: number; box: { x: number; y: number; w: number; h: number } }>; backend: string }> {
+  try {
+    const data = await callVisionSidecar<{ lines: SidecarOcrLine[] }>(ctx, img, { __tool: "ocr" })
+    if (!Array.isArray(data.lines)) throw new Error("边车返回 lines 非数组")
+    return {
+      lines: data.lines.map((l) => ({ text: l.text, score: l.score, box: { x: l.x, y: l.y, w: l.w, h: l.h } })),
+      backend: "sidecar:onnxruntime",
+    }
+  } catch {
+    // 回落 wasm（模型未配置等错误由 wasm 路径给出统一指引）
+  }
+  return getCvRunner().ocr(img, { env: ctx.env })
+}
+
+/** YOLO 检测推理（sidecar-first，回退同上）。 */
+async function detectInfer(
+  ctx: ToolContext,
+  img: RgbaImage,
+  opts: { conf: number; iou?: number },
+): Promise<{ objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; backend: string }> {
+  try {
+    const data = await callVisionSidecar<{ objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }> }>(ctx, img, {
+      __tool: "detect",
+      conf: opts.conf,
+      ...(opts.iou !== undefined ? { iou: opts.iou } : {}),
+      pair_text: false, // 配对由消费层在同一像素系完成（与 wasm 路径同构）
+    })
+    if (!Array.isArray(data.objects)) throw new Error("边车返回 objects 非数组")
+    return { objects: data.objects, backend: "sidecar:onnxruntime" }
+  } catch {
+    // 回落 wasm
+  }
+  return getCvRunner().detect(img, { env: ctx.env, conf: opts.conf, iou: opts.iou })
+}
 
 /** 识别图像源：img 为待识别图（region 场景为裁剪后），offX/offY 为坐标映射回原始像素系的偏移。 */
 export interface CvSource {
@@ -174,8 +254,7 @@ export function createDetectTool(opts: CvDetectOptions): Tool {
       const iou = Number(args.iou)
       let outcome: { objects: Array<{ label: string; score: number; x: number; y: number; w: number; h: number }>; backend: string }
       try {
-        outcome = await getCvRunner().detect(loaded.img, {
-          env: ctx.env,
+        outcome = await detectInfer(ctx, loaded.img, {
           conf: Number.isFinite(conf) && conf > 0 && conf < 1 ? conf : 0.25,
           iou: Number.isFinite(iou) && iou > 0 && iou < 1 ? iou : undefined,
         })
@@ -187,7 +266,7 @@ export function createDetectTool(opts: CvDetectOptions): Tool {
       let pairedTexts: Array<string | undefined> = outcome.objects.map(() => undefined)
       if (args.pair_text !== false && outcome.objects.length) {
         try {
-          const lines = (await getCvRunner().ocr(loaded.img, { env: ctx.env })).lines
+          const lines = (await ocrInfer(ctx, loaded.img)).lines
           pairedTexts = pairObjectsWithText(outcome.objects, lines.map((l) => ({ text: l.text, ...l.box }))).map((o) => o.text)
         } catch { /* OCR 模型未配置等——跳过配对，仅输出检测框 */ }
       }
@@ -242,7 +321,7 @@ export function createCvAnalysisTools(opts: CvAnalysisOptions): { ocr: Tool; loc
       let lines: LineOut[]
       let backend = ""
       try {
-        const raw = await getCvRunner().ocr(loaded.img, { env: ctx.env })
+        const raw = await ocrInfer(ctx, loaded.img)
         lines = mapLines(raw.lines, loaded.offX, loaded.offY)
         backend = raw.backend
       } catch (e) {
@@ -281,7 +360,7 @@ export function createCvAnalysisTools(opts: CvAnalysisOptions): { ocr: Tool; loc
       if ("error" in loaded) return { output: loaded.error }
       let lines: LineOut[]
       try {
-        lines = mapLines((await getCvRunner().ocr(loaded.img, { env: ctx.env })).lines, loaded.offX, loaded.offY)
+        lines = mapLines((await ocrInfer(ctx, loaded.img)).lines, loaded.offX, loaded.offY)
       } catch (e) {
         return { output: `本地识别失败: ${e instanceof Error ? e.message : e}` }
       }

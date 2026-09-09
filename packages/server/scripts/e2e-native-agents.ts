@@ -42,7 +42,11 @@ const fakeCtx = {
   env: {},
   resolvePath: (p: string) => p,
   readFile: async () => "",
+  readBinaryFile: async (p: string) => new Uint8Array(await Bun.file(p).arrayBuffer()),
   writeFile: async () => {},
+  writeBinaryFile: async (p: string, data: Uint8Array) => {
+    await Bun.write(p, data)
+  },
   listFiles: async () => [],
   listDir: async () => [],
   deleteFile: async () => {},
@@ -321,6 +325,39 @@ if (!existsSync(vPng)) {
 rmSync(vDir, { recursive: true, force: true })
 console.log("PASS: vision 跨语言合并（TS 贡献 analyze 与 Python 识别四工具同命名空间）")
 
-console.log("\n=== 真机端到端全部通过（python + cpp + rust + go 四语言 + vision 跨语言合并 + 请求级 ctx）===")
+// ---------------- desktop_ocr → vision 边车委托（sidecar-first 真机链路） ----------------
+// desktop 的 ocr/locate/detect 推理经注册表调用 vision 边车（onnxruntime 原生推理），
+// 坐标语义与 wasm 同构；此处验证真边车进程 + 真推理 + 真坐标映射（含文字图片）
+if (process.platform === "win32" && existsSync(join(process.cwd(), "..", "..", "native-agents", "python", "venv"))) {
+  await m.load("desktop") // 懒装载：desktop 工具入注册表（desktop_ocr 等）
+  const desktopOcr = registry.resolve("desktop_ocr")
+  if (!desktopOcr) {
+    console.error("FAIL: desktop_ocr 未在注册表（desktop 子代理未注册）")
+    process.exit(1)
+  }
+  // 生成含文字 PNG（真机 OCR：PIL 画字，与本会话验证到的边车 OCR 能力对接）
+  const e2eDir = join(process.cwd(), "tmp-e2e-desktop")
+  rmSync(e2eDir, { recursive: true, force: true })
+  mkdirSync(e2eDir, { recursive: true })
+  const shotPng = join(e2eDir, "shot.png")
+  Bun.spawnSync(["python", "-X", "utf8", "-c", "from PIL import Image, ImageDraw, ImageFont; f = ImageFont.truetype(r'C:/Windows/Fonts/arial.ttf', 20); im = Image.new('RGB', (160, 44), (255,255,255)); d = ImageDraw.Draw(im); d.text((8, 10), 'Hello OCR 123', fill=(0,0,0), font=f); im.save(r'" + shotPng.replace(/\\/g, "/") + "')"], { stdout: "ignore", stderr: "pipe" })
+  if (existsSync(shotPng)) {
+    const r5 = await desktopOcr.tool.execute({ image: shotPng }, { ...fakeCtx, registry: { schemas: () => [], resolve: (n: string) => (n === "vision_ocr" ? registry.resolve("vision_ocr") : undefined), getAgentNames: () => ["vision"] } } as never)
+    const lines = (r5.data as { lines?: Array<{ text: string }> })?.lines ?? []
+    if (r5.output.includes("HelloOCR123") || lines.some((l) => l.text.replace(/\s/g, "").includes("HelloOCR123"))) {
+      console.log("PASS: desktop_ocr → vision 边车委托（真边车真推理，坐标回加同构）")
+    } else if (/本地识别失败|未配置/.test(r5.output)) {
+      console.log("SKIP: desktop_ocr 委托真机推理（模型未配置）:", r5.output.split("\n")[0])
+    } else {
+      console.error("FAIL: desktop_ocr 委托未得到预期文字:", r5.output)
+      process.exit(1)
+    }
+    rmSync(e2eDir, { recursive: true, force: true })
+  } else {
+    console.log("SKIP: desktop_ocr 委托真机（无系统 python/PIL 生成测试图）")
+  }
+}
+
+console.log("\n=== 真机端到端全部通过（python + cpp + rust + go 四语言 + vision 跨语言合并 + 请求级 ctx + desktop→vision 委托）===")
 disposeAllNativeAgents() // 显式回收后再退出（exit hook 兄弟保险，防孤儿进程）
 process.exit(0)

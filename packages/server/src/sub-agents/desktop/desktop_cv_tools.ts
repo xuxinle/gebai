@@ -7,7 +7,7 @@
  * 直接使用；识别在裁剪/缩放后的图像上进行，坐标一律映射回原始像素系。
  */
 import type { Tool, ToolContext, ToolResult } from "../../core/base/types"
-import { getCvRunner } from "../../core/cv/cv"
+import { ocrInfer } from "../../core/tools/cv-analysis"
 import { decodePng, type RgbaImage } from "../../core/cv/image"
 import { matchTemplate } from "../../core/cv/template"
 import { createCvAnalysisTools, createDetectTool, type CvSource, type CvSourceLoader } from "../../core/tools/cv-analysis"
@@ -253,7 +253,7 @@ export const waitForTool: Tool = {
       } else {
         let lines: Array<{ text: string }>
         try {
-          lines = (await getCvRunner().ocr(img, { env: ctx.env })).lines
+          lines = (await ocrInfer(ctx, img)).lines
         } catch (e) {
           return { output: `等待失败（本地 OCR 不可用）: ${e instanceof Error ? e.message : e}` }
         }

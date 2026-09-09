@@ -6,6 +6,7 @@ import { deflateSync } from "node:zlib"
 import type { ToolContext } from "../../core/base/types"
 import type { RgbaImage } from "../../core/cv/image"
 import { setCvRunnerFactory, type CvRunner } from "../../core/cv/cv"
+import { decodePng } from "../../core/cv/image"
 import { ocrTool, locateTool, locateImageTool, detectTool, waitForTool } from "./desktop_cv_tools"
 
 const ORIGINAL_PLATFORM = process.platform
@@ -113,6 +114,11 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
       const { mkdir, writeFile } = await import("node:fs/promises")
       await mkdir(dirname(p), { recursive: true })
       await writeFile(p, content)
+    },
+    writeBinaryFile: async (p, data) => {
+      const { mkdir, writeFile } = await import("node:fs/promises")
+      await mkdir(dirname(p), { recursive: true })
+      await writeFile(p, data)
     },
     listFiles: async () => [],
     listDir: async () => [],
@@ -233,6 +239,82 @@ describe("desktop cv tools", () => {
     const r = await ocrTool.execute({ image: "shot.png", find: "保存" }, c)
     expect(r.output).toContain("保存")
     expect(r.output).not.toContain("取消")
+  })
+
+  test("ocr：vision 边车已装载时推理委托边车（sidecar-first，坐标系同构回加偏移）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const sidecarCalls: Array<{ image: string; width: number }> = []
+    let wasmSeen = false
+    const c = ctx(home, {
+      registry: {
+        schemas: () => [],
+        getAgentNames: () => ["vision"],
+        resolve: (name) =>
+          name === "vision_ocr"
+            ? {
+                name,
+                tool: {
+                  name,
+                  description: "",
+                  parameters: { type: "object", properties: {} },
+                  execute: async (args: Record<string, unknown>) => {
+                    const img = decodePng(new Uint8Array(await Bun.file(join(c.workdir!, String(args.image))).arrayBuffer()))
+                    sidecarCalls.push({ image: String(args.image), width: img.width })
+                    // 边车返回坐标相对传入 PNG（裁剪后图像像素系）——与 wasm 同构
+                    return {
+                      output: "ok",
+                      data: { lines: [{ text: "边车行", score: 0.9, x: 10, y: 20, w: 30, h: 12 }] },
+                    }
+                  },
+                },
+              }
+            : undefined,
+      },
+    })
+    // 本用例注入专属 runner：若被调用即记录（验证 wasm 未被走到）
+    setCvRunnerFactory(() => ({
+      ocr: async (img) => {
+        wasmSeen = true
+        return { lines: [{ text: "wasm行", score: 1, box: { x: 0, y: 0, w: 10, h: 10 } }], backend: "wasm-cpu" }
+      },
+      detect: async () => ({ objects: [], backend: "wasm-cpu" }),
+    }))
+    await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
+    const r = await ocrTool.execute({ image: "shot.png", region: "50,40,100,60" }, c)
+    // 委托发生：临时文件写入 + 传入裁剪后尺寸；wasm 未被调用
+    expect(sidecarCalls.length).toBe(1)
+    expect(sidecarCalls[0].image).toContain("cv_sidecar_in.png")
+    expect(sidecarCalls[0].width).toBe(100)
+    expect(wasmSeen).toBe(false)
+    // 坐标回加 region 偏移 + 后端标记
+    const data = r.data as { lines: Array<{ x: number; y: number }>; backend: string }
+    expect(data.lines[0].x).toBe(60)
+    expect(data.lines[0].y).toBe(60)
+    expect(data.backend).toContain("sidecar")
+    expect(r.output).toContain("中心 (75,66)") // (10+30/2)+50, (20+12/2)+40
+    expect(r.output).toContain("边车行")
+    installDefaultFake() // 恢复默认 fake
+  })
+
+  test("ocr：边车报错时回落进程内 wasm（消费层无感）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-dcv-"))
+    const c = ctx(home, {
+      registry: {
+        schemas: () => [],
+        getAgentNames: () => ["vision"],
+        resolve: (name) =>
+          name === "vision_ocr"
+            ? { name, tool: { name, description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "边车内部错误：依赖缺失" }) } }
+            : undefined,
+      },
+    })
+    await Bun.write(join(c.workdir!, "shot.png"), pngBytes(200, 100))
+    const r = await ocrTool.execute({ image: "shot.png" }, c)
+    // 回落 wasm（fake runner 收到图，输出 wasm 结果）
+    expect(seen.img?.width).toBe(200)
+    expect(r.output).toContain("保存")
+    expect((r.data as { backend: string }).backend).toBe("wasm-cpu")
+    seen.img = undefined
   })
 
   test("ocr：现截全屏（runCommand 落盘 PNG，固定文件名复用 + 虚拟屏幕 CAP 原点）", async () => {
