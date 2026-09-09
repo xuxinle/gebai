@@ -28,6 +28,22 @@ const LINE_LIMIT = 1 << 24
  *  （防抖动风暴；稳定运行后的单次崩溃总是自愈重发）。 */
 const RESTART_BACKOFF_MS = 10_000
 
+/** 边车协议版本（协议 v2：tool.call 携带请求级 ctx 载荷，见 native-agents/README.md）。 */
+export const SIDECAR_PROTOCOL = 2
+
+/** 请求级上下文（协议 v2）：宿主每次 tool.call 组装发送——边车为进程单例、跨会话共享，
+ *  会话工作目录/任务环境变量/会话标识只能随请求传递；env 为任务级覆盖（先查它、再回落进程 env），
+ *  禁止驱动侧写入 os.environ（并发请求不同会话会互踩）。 */
+export interface SidecarCtx {
+  sessionId: string
+  user: string
+  /** 会话工作区绝对路径（相对路径解析基准）。 */
+  cwd: string
+  /** 任务级环境变量覆盖（随消息变、随调用传——不用陈旧的 spawn 时快照）。 */
+  env: Record<string, string>
+  sandboxed: boolean
+}
+
 /** 子进程抽象（Bun.spawn 子集，测试可注入替身）。 */
 export interface SidecarProc {
   stdin: { write(data: string): unknown; end?(): unknown }
@@ -111,12 +127,16 @@ export class AgentSidecar {
     }
   }
 
-  /** 握手 + 工具清单拉取（发现器启动阶段用）。 */
+  /** 握手 + 工具清单拉取（发现器启动阶段用）。校验驱动上报 protocol 与宿主一致（锁步升级，
+   *  不做历史兼容——不匹配即失败，模型可见根因）。 */
   async init(): Promise<{ name: string; protocol: number; [k: string]: unknown }> {
     const r = await this.request("init", {}, HANDSHAKE_TIMEOUT_MS)
     const info = (r.result ?? {}) as { name?: string; protocol?: number }
     if (!info.name || typeof info.protocol !== "number") {
       throw new Error(`边车 init 响应缺 name/protocol: ${JSON.stringify(r).slice(0, 300)}`)
+    }
+    if (info.protocol !== SIDECAR_PROTOCOL) {
+      throw new Error(`边车协议版本不匹配：驱动上报 v${info.protocol}，宿主要求 v${SIDECAR_PROTOCOL}（tool.call 请求级 ctx；请同步升级驱动侧框架）`)
     }
     return info as { name: string; protocol: number }
   }
@@ -133,20 +153,22 @@ export class AgentSidecar {
     return tools as Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   }
 
-  /** 工具调用（驱动侧执行自定义工具并返回 {output, data?}）。 */
-  async toolCall(tool: string, args: Record<string, unknown>, timeoutMs?: number): Promise<{ output: string; data?: unknown; error?: string }> {
-    const r = await this.request("tool.call", { tool, args }, timeoutMs)
+  /** 工具调用（驱动侧执行自定义工具并返回 {output, data?}）；ctx 为请求级上下文（协议 v2 必携带）。 */
+  async toolCall(tool: string, args: Record<string, unknown>, ctx: SidecarCtx, timeoutMs?: number): Promise<{ output: string; data?: unknown; error?: string }> {
+    const r = await this.request("tool.call", {}, timeoutMs, { tool, args, ctx })
     if (!r.ok) return { output: "", error: r.error || "边车工具调用失败" }
     const result = (r.result ?? {}) as { output?: string; data?: unknown }
     return { output: typeof result.output === "string" ? result.output : JSON.stringify(result), data: result.data }
   }
 
   /** 发送单行请求并等待配对响应。超时：杀进程重启 + 拒绝本次（下次调用拿新进程）。 */
-  private async request(op: string, args: Record<string, unknown>, timeoutMs?: number): Promise<SidecarResponse> {
+  /** 发送单行请求并等待配对响应。超时：杀进程重启 + 拒绝本次（下次调用拿新进程）。
+   *  extra 为请求体顶级扩展字段（协议 v2：tool.call 的 tool/args/ctx 与 op 平级，不在 args 内）。 */
+  private async request(op: string, args: Record<string, unknown>, timeoutMs?: number, extra?: Record<string, unknown>): Promise<SidecarResponse> {
     if (this.disposed) throw new Error("边车已销毁")
     await this.ensureStarted()
     const id = this.nextId++
-    const line = JSON.stringify({ id, op, args }) + "\n"
+    const line = JSON.stringify({ id, op, ...args, ...extra }) + "\n"
     return new Promise<SidecarResponse>((resolve, reject) => {
       const ms = timeoutMs ?? this.opts.requestTimeoutMs
       const timer = setTimeout(() => {

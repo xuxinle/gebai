@@ -1,12 +1,13 @@
 /**
  * 多语言子代理边车宿主测试（core/agents/sidecar.ts）：
  * 用 Node/Bun 子进程实现 fake 协议驱动（无 python 依赖），验证
- * init/tools.list/tool.call 协议往返、超时杀进程重启、崩溃自愈重发、dispose、命令工厂解析。
+ * init/tools.list/tool.call 协议往返（v2 请求级 ctx）、超时杀进程重启、崩溃自愈重发、
+ * dispose、命令工厂解析、协议版本不匹配拒绝。
  */
-import { test, afterAll } from "bun:test"
-import { AgentSidecar, type SidecarProc, type SidecarSpawnFn } from "./sidecar"
+import { test, afterAll, expect } from "bun:test"
+import { AgentSidecar, SIDECAR_PROTOCOL, type SidecarCtx, type SidecarProc, type SidecarSpawnFn } from "./sidecar"
 
-/** fake 驱动源码：按行为开关响应协议。 */
+/** fake 驱动源码：按行为开关响应协议（v2——tool.call 请求体顶级 tool/args/ctx，回显 ctx 供断言）。 */
 const FAKE_DRIVER = `
 const behavior = process.env.FAKE_BEHAVIOR || "ok"
 const lines = []
@@ -23,7 +24,7 @@ process.stdin.on("data", (d) => {
   }
 })
 function handle(req) {
-  const { id, op, args } = req
+  const { id, op, tool, args, ctx } = req
   if (behavior === "crash-once" && op === "tool.call" && globalThis.crashed !== true) {
     globalThis.crashed = true
     send({ id, ok: true, result: { output: "pre-crash" } })  // 先响应再死（不触发重发路径）
@@ -45,9 +46,9 @@ function handle(req) {
     // 启动即死：抖动风暴路径（不自动重启）
     process.exit(1)
   }
-  if (op === "init") send({ id, ok: true, result: { name: "fake", protocol: 1 } })
+  if (op === "init") send({ id, ok: true, result: { name: "fake", protocol: 2 } })
   else if (op === "tools.list") send({ id, ok: true, result: [{ name: "echo", description: "d", parameters: { type: "object", properties: {} } }] })
-  else if (op === "tool.call") send({ id, ok: true, result: { output: "echo:" + JSON.stringify(args), data: { fine: true } } })
+  else if (op === "tool.call") send({ id, ok: true, result: { output: "echo:" + JSON.stringify({ tool, args, ctx }), data: { fine: true } } })
   else send({ id, ok: false, error: "unknown op " + op })
 }
 process.stdin.on("end", () => process.exit(0))
@@ -88,17 +89,26 @@ afterAll(() => {
 
 const BUN = [process.execPath, "-e", FAKE_DRIVER]
 
-test("协议往返：init/tools.list/tool.call", async () => {
+/** 测试用 ctx（协议 v2 必携带）。 */
+const CTX: SidecarCtx = { sessionId: "s-test", user: "tester", cwd: "C:/tmp/s-test", env: { K: "V" }, sandboxed: false }
+
+test("协议往返（v2）：init/tools.list/tool.call 携带请求级 ctx", async () => {
   const sc = new AgentSidecar({ command: BUN, spawn: fakeSpawn("ok") })
   const info = await sc.init()
   expect(info.name).toBe("fake")
-  expect(info.protocol).toBe(1)
+  expect(info.protocol).toBe(SIDECAR_PROTOCOL)
   const tools = await sc.toolsList()
   expect(tools.length).toBe(1)
   expect(tools[0]!.name).toBe("echo")
-  const r = await sc.toolCall("echo", { x: 1 })
-  expect(r.output).toContain("echo:")
+  const r = await sc.toolCall("echo", { x: 1 }, CTX)
   expect(r.error).toBeUndefined()
+  // 驱动回显请求体：ctx 原样到达（进程单例跨会话共享，会话上下文随请求传递）
+  const echoed = JSON.parse(r.output.slice("echo:".length)) as { tool: string; args: Record<string, unknown>; ctx: SidecarCtx }
+  expect(echoed.tool).toBe("echo")
+  expect(echoed.args).toEqual({ x: 1 })
+  expect(echoed.ctx.sessionId).toBe("s-test")
+  expect(echoed.ctx.cwd).toBe("C:/tmp/s-test")
+  expect(echoed.ctx.env).toEqual({ K: "V" })
   sc.dispose("test-done")
 })
 
@@ -119,14 +129,32 @@ test("init 响应缺 name/protocol 拒绝", async () => {
   sc.dispose("test-done")
 })
 
-test("崩溃自愈：进程静默死亡后请求重发一次成功", async () => {
+test("协议版本不匹配拒绝（v1 驱动上报被拒）", async () => {
+  const v1Driver = `
+  process.stdout.write(JSON.stringify({ id: 1, ok: true, result: { name: "fake", protocol: 1 } }) + "\\n")
+  setTimeout(() => process.exit(0), 5000)
+  `
+  const sc = new AgentSidecar({ command: [process.execPath, "-e", v1Driver], spawn: fakeSpawn("ok") })
+  let err = ""
+  try {
+    await sc.init()
+  } catch (e) {
+    err = (e as Error).message
+  }
+  expect(err).toContain("协议版本不匹配")
+  expect(err).toContain("v1")
+  sc.dispose("test-done")
+})
+
+test("崩溃自愈：进程静默死亡后请求重发一次成功（重发携带原 ctx）", async () => {
   const sc = new AgentSidecar({ command: BUN, spawn: fakeSpawn("crash-once-silent") })
   const info = await sc.init() // 第一次进程正常握手
   expect(info.name).toBe("fake")
   // 第一次 tool.call：驱动静默死亡 → 宿主重启进程 → 重发该请求 → 新进程响应
-  const r = await sc.toolCall("echo", { retry: true })
-  expect(r.output).toContain("echo:")
+  const r = await sc.toolCall("echo", { retry: true }, CTX)
   expect(r.error).toBeUndefined()
+  const echoed = JSON.parse(r.output.slice("echo:".length)) as { ctx: SidecarCtx }
+  expect(echoed.ctx.sessionId).toBe("s-test") // 重发请求原样重写请求行，ctx 不丢
   sc.dispose("test-done")
 })
 
@@ -135,14 +163,14 @@ test("请求超时：杀进程重启，该次拒绝，下次调用用新进程�
   await sc.init()
   let err = ""
   try {
-    await sc.toolCall("echo", {})
+    await sc.toolCall("echo", {}, CTX)
   } catch (e) {
     err = (e as Error).message
   }
   expect(err).toContain("超时")
   // 超时后进程被杀重启：换回 ok 行为验证新进程可用
   ;(sc as unknown as { opts: { spawn: SidecarSpawnFn } }).opts.spawn = fakeSpawn("ok")
-  const r = await sc.toolCall("echo", { after: "timeout" })
+  const r = await sc.toolCall("echo", { after: "timeout" }, CTX)
   expect(r.output).toContain("echo:")
   sc.dispose("test-done")
 })
@@ -166,7 +194,7 @@ test("dispose 后请求拒绝", async () => {
   sc.dispose("done")
   let err = ""
   try {
-    await sc.toolCall("echo", {})
+    await sc.toolCall("echo", {}, CTX)
   } catch (e) {
     err = (e as Error).message
   }
@@ -201,7 +229,7 @@ test("命令工厂：每次启动重新解析（模拟 venv 创建后切换解�
   })
   await slowSc.init().catch(() => {})
   try {
-    await slowSc.toolCall("echo", {})
+    await slowSc.toolCall("echo", {}, CTX)
   } catch {
     /* 超时预期 */
   }
@@ -210,6 +238,3 @@ test("命令工厂：每次启动重新解析（模拟 venv 创建后切换解�
   sc.dispose("done")
   slowSc.dispose("done")
 })
-
-/** Bun:test 兼容的 expect 断言（避免引入额外依赖；bun:test 自带 expect）。 */
-import { expect } from "bun:test"

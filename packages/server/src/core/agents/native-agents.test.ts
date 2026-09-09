@@ -16,26 +16,30 @@ after: {
 
 test("parseManifest：合法/非法清单", () => {
   const ok = parseManifest(
-    JSON.stringify({ name: "myagent", description: "d", protocol: 1, command: ["{python}", "{driver}"] }),
+    JSON.stringify({ name: "myagent", description: "d", protocol: 2, command: ["{python}", "{driver}"] }),
     "test",
   )
   expect(ok.manifest?.name).toBe("myagent")
+  // requiresApproval 声明解析：缺省 undefined（恒需审批）、false 保留
+  expect(ok.manifest?.requiresApproval).toBeUndefined()
+  const ro = parseManifest(JSON.stringify({ name: "ro_agent", protocol: 2, command: ["x"], requiresApproval: false }), "t")
+  expect(ro.manifest?.requiresApproval).toBe(false)
   expect(parseManifest("{bad json", "test").error).toContain("非法 JSON")
-  expect(parseManifest(JSON.stringify({ name: "Bad", description: "d", protocol: 1, command: ["x"] }), "t").error).toContain("name 非法")
-  expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 2, command: ["x"] }), "t").error).toContain("协议版本")
-  expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 1, command: [] }), "t").error).toContain("command")
+  expect(parseManifest(JSON.stringify({ name: "Bad", description: "d", protocol: 2, command: ["x"] }), "t").error).toContain("name 非法")
+  expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 1, command: ["x"] }), "t").error).toContain("协议版本")
+  expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 2, command: [] }), "t").error).toContain("command")
   // description 可省略/留空：留空即本侧不贡献（交由跨语言合并层或 mergeSubAgentDefs 兜底），不再报错
-  const noDesc = parseManifest(JSON.stringify({ name: "a", protocol: 1, command: ["x"] }), "t")
+  const noDesc = parseManifest(JSON.stringify({ name: "a", protocol: 2, command: ["x"] }), "t")
   expect(noDesc.error).toBeUndefined()
   expect(noDesc.manifest?.description).toBe("")
-  const blankDesc = parseManifest(JSON.stringify({ name: "a", description: "   ", protocol: 1, command: ["x"] }), "t")
+  const blankDesc = parseManifest(JSON.stringify({ name: "a", description: "   ", protocol: 2, command: ["x"] }), "t")
   expect(blankDesc.manifest?.description).toBe("")
   // build 字段解析：合法保留、非法项忽略
   const withBuild = parseManifest(
     JSON.stringify({
       name: "mathx",
       description: "d",
-      protocol: 1,
+      protocol: 2,
       command: ["{agent_dir}/driver{exe}"],
       build: { command: ["rustc", "-o", "{agent_dir}/driver{exe}"], windows: "not-array", unix: ["", "x"] },
     }),
@@ -84,12 +88,12 @@ test("expandCommand：{agent_dir}/{lang_dir}/{agent_name}/{exe} 占位", () => {
 test("scanManifestDirs：仅含 agent.json 的子目录入表；无 manifest 目录与 venv/__pycache__/objs 跳过", async () => {
   const root = join(tmpRoot, "scan")
   mkdirSync(join(root, "alpha"), { recursive: true })
-  writeFileSync(join(root, "alpha", "agent.json"), JSON.stringify({ name: "alpha", description: "d", protocol: 1, command: ["x"] }))
+  writeFileSync(join(root, "alpha", "agent.json"), JSON.stringify({ name: "alpha", description: "d", protocol: 2, command: ["x"] }))
   mkdirSync(join(root, "no-manifest"), { recursive: true })
   writeFileSync(join(root, "no-manifest", "readme.txt"), "not an agent")
   for (const skip of ["venv", "__pycache__", "objs"]) {
     mkdirSync(join(root, skip), { recursive: true })
-    writeFileSync(join(root, skip, "agent.json"), JSON.stringify({ name: skip, description: "d", protocol: 1, command: ["x"] }))
+    writeFileSync(join(root, skip, "agent.json"), JSON.stringify({ name: skip, description: "d", protocol: 2, command: ["x"] }))
   }
   const found = await scanManifestDirs([root])
   expect(found.length).toBe(1)
@@ -102,7 +106,7 @@ test("discoverNativeAgents：坏驱动握手失败记入 errors 不抛出；无 
   mkdirSync(join(root, "badagent"))
   writeFileSync(
     join(root, "badagent", "agent.json"),
-    JSON.stringify({ name: "badagent", description: "d", protocol: 1, command: ["{python}", "{driver}"], driver: "main.py" }),
+    JSON.stringify({ name: "badagent", description: "d", protocol: 2, command: ["{python}", "{driver}"], driver: "main.py" }),
   )
   // main.py 不是协议驱动（启动后立即退出）：握手失败 → errors
   writeFileSync(join(root, "badagent", "main.py"), "import sys\nsys.exit(3)\n")
@@ -143,7 +147,7 @@ test("ensureBuilt：可执行体缺失时执行 build、已存在/无 build 跳�
     JSON.stringify({
       name: "codec",
       description: "d",
-      protocol: 1,
+      protocol: 2,
       command: ["{agent_dir}/driver{exe}"],
       build: { command: ["{agent_dir}/mkbinary.sh"] },
     }),

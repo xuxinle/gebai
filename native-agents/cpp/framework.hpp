@@ -9,14 +9,16 @@
 // 数值/布尔/null，\uXXXX 转义解码），NDJSON 行循环。
 //
 // 协议（stdin/stdout 各一行一个 JSON，UTF-8）：
-//   {"id":1,"op":"init"}       → {"id":1,"ok":true,"result":{"name":"<项目目录名>","protocol":1,...}}
+//   {"id":1,"op":"init"}       → {"id":1,"ok":true,"result":{"name":"<项目目录名>","protocol":2,...}}
 //   {"id":2,"op":"tools.list"} → {"id":2,"ok":true,"result":[{name,description,parameters},...]}
-//   {"id":3,"op":"tool.call","args":{"tool":"eval","args":{...}}}
+//   {"id":3,"op":"tool.call","tool":"eval","args":{...},"ctx":{sessionId,user,cwd,env,sandboxed}}
 //                              → {"id":3,"ok":true,"result":{"output":"...","data":{...}}}
 // 约定：stdout 只写协议行（printf/cout 全部禁用或重定向）；stderr 自由文本（宿主环形缓冲排障）；
 // stdin EOF → 立即退出（父进程已死，防孤儿）。
 //
-// 宿主注入的运行上下文（环境变量）：GEBAI_HOME（数据根）、GEBAI_AGENT_DIR（子代理项目目录）。
+// 宿主注入的运行上下文：环境变量 GEBAI_HOME（数据根）/GEBAI_AGENT_DIR（子代理项目目录，驱动
+// 自身资产定位）；**请求级 ctx 随每次 tool.call 传递**（边车为进程单例跨会话共享，会话 cwd/env/
+// 标识只能随请求走——用 ctx()/ctxEnv()/ctxResolve() 读取，禁止写环境变量：并发请求不同会话互踩）。
 #pragma once
 
 #include <algorithm>
@@ -27,6 +29,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#if defined(_WIN32)
+#include <direct.h>
+#endif
 #include <map>
 #include <memory>
 #include <sstream>
@@ -66,6 +71,7 @@ struct Json {
     bool isNum() const { return type == Type::Num; }
     bool isObj() const { return type == Type::Obj; }
     bool isArr() const { return type == Type::Arr; }
+    bool isBool() const { return type == Type::Bool; }
 
     // 对象取值（无该键返回 null）
     const Json* get(const std::string& key) const {
@@ -381,6 +387,73 @@ inline ToolRegistry& registry() {
         return true;                                                                      \
     }()
 
+// ---------------- 请求级上下文（协议 v2） ----------------
+
+/** 请求级 ctx：边车为进程单例跨会话共享，宿主每次 tool.call 携带——会话工作目录（相对路径
+ *  解析基准）、任务级 env 覆盖、会话标识。分发循环串行执行，当前请求 ctx 在工具 handler
+ *  运行前设置（g_currentCtx）。 */
+struct SidecarCtx {
+    std::string sessionId;
+    std::string user;
+    std::string cwd;
+    std::map<std::string, std::string> env;
+    bool sandboxed = false;
+};
+
+inline SidecarCtx g_currentCtx;
+inline bool g_hasCtx = false;
+
+inline SidecarCtx ctx() { return g_currentCtx; }
+
+/** 请求级环境变量：先查任务 env 覆盖，再回落进程 env。禁止写 setenv/putenv（并发请求不同
+ *  会话互踩，进程全局态承载不了请求级数据）。 */
+inline std::string ctxEnv(const std::string& key, const std::string& fallback = "") {
+    auto it = g_currentCtx.env.find(key);
+    if (g_hasCtx && it != g_currentCtx.env.end()) return it->second;
+    const char* v = std::getenv(key.c_str());
+    return v ? v : fallback;
+}
+
+/** 路径解析：绝对路径原样；相对路径基准=当前请求 ctx.cwd（会话工作区）；无请求 ctx 时
+ *  回落进程工作目录。 */
+inline std::string ctxResolve(const std::string& p) {
+    if (p.empty()) return p;
+    bool abs = !p.empty() && (p[0] == '/' || p[0] == '\\' || (p.size() > 2 && p[1] == ':' && (p[2] == '/' || p[2] == '\\')));
+    if (abs) return p;
+    std::string base = g_hasCtx ? g_currentCtx.cwd : "";
+    if (base.empty()) {
+        char wd[4096];
+#ifdef _WIN32
+        if (_getcwd(wd, sizeof(wd))) base = wd;
+#else
+        if (getcwd(wd, sizeof(wd))) base = wd;
+#endif
+    }
+    if (base.empty()) return p;
+    while (!base.empty() && (base.back() == '/' || base.back() == '\\')) base.pop_back();
+    char sep = base.find('\\') != std::string::npos ? '\\' : '/';
+    std::string rel = p;
+    while (!rel.empty() && (rel.front() == '/' || rel.front() == '\\')) rel.erase(rel.begin());
+    return base + sep + rel;
+}
+
+inline SidecarCtx parseCtx(const Json* j) {
+    SidecarCtx c;
+    if (!j) return c;
+    c.sessionId = j->getStr("sessionId");
+    c.user = j->getStr("user");
+    c.cwd = j->getStr("cwd");
+    if (const Json* v = j->get("sandboxed")) c.sandboxed = v->isBool() && v->b;
+    if (const Json* v = j->get("env")) {
+        if (v->isObj()) {
+            for (const auto& kv : v->obj) {
+                if (kv.second.isStr()) c.env[kv.first] = kv.second.str;
+            }
+        }
+    }
+    return c;
+}
+
 // ---------------- 协议主循环 ----------------
 
 namespace protocol {
@@ -407,16 +480,16 @@ inline Json toolsListJson(const ToolRegistry& reg) {
     return arr;
 }
 
-inline Json toolCall(const ToolRegistry& reg, const Json& args) {
-    std::string tool = args.getStr("tool");
-    const Json* toolArgs = args.get("args");
-    Json callArgs = toolArgs ? *toolArgs : Json();
+inline Json toolCall(const ToolRegistry& reg, const std::string& tool, const Json& callArgs, const Json* ctxJson) {
     const ToolDef* def = reg.find(tool);
     if (!def) {
         Json err = Json::makeObj();
         err.set("error", Json::makeStr("未知工具: " + tool));
         return err;
     }
+    // 请求级 ctx（协议 v2）：串行分发循环内设置，工具 handler 经 ctx()/ctxEnv()/ctxResolve() 读取
+    g_currentCtx = parseCtx(ctxJson);
+    g_hasCtx = ctxJson != nullptr;
     ToolResult r;
     try {
         r = def->handler(callArgs);
@@ -429,6 +502,7 @@ inline Json toolCall(const ToolRegistry& reg, const Json& args) {
         r.ok = false;
         r.output = "工具异常: 未知错误";
     }
+    g_hasCtx = false;
     Json result = Json::makeObj();
     result.set("output", Json::makeStr(r.output));
     if (r.ok && !r.data.isNull()) result.set("data", r.data);
@@ -480,14 +554,16 @@ inline void run() {
         long long id = req.getNum("id", -1);
         std::string op = req.getStr("op");
         resp.set("id", id >= 0 ? Json::makeNum(double(id)) : Json());
+        std::string tool = req.getStr("tool");
         const Json* args = req.get("args");
         Json callArgs = args ? *args : Json();
+        const Json* ctxJson = req.get("ctx");
         bool isErr = false;
         Json result;
         if (op == "init") {
             Json info = Json::makeObj();
             info.set("name", Json::makeStr(agentName()));
-            info.set("protocol", Json::makeNum(1));
+            info.set("protocol", Json::makeNum(2));
             info.set("lang", Json::makeStr("cpp"));
 #ifdef _WIN32
             info.set("platform", Json::makeStr("win32"));
@@ -498,7 +574,7 @@ inline void run() {
         } else if (op == "tools.list") {
             result = toolsListJson(registry());
         } else if (op == "tool.call") {
-            result = toolCall(registry(), callArgs);
+            result = toolCall(registry(), tool, callArgs, ctxJson);
             if (result.get("error")) isErr = true;
         } else {
             isErr = true;

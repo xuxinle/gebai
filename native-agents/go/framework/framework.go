@@ -1,4 +1,4 @@
-// Package framework —— 歌白多语言子代理 Rust/Go 系基础框架（协议 v1，见 native-agents/README.md）。
+// Package framework —— 歌白多语言子代理 Rust/Go 系基础框架（协议 v2，见 native-agents/README.md）。
 //
 // Go 语言目录 native-agents/go/ 下共享本包；每个子代理项目（语言目录下的二级目录）一个
 // main.go —— import "gebai/native-framework/framework" 后用 RegisterTool 注册专属工具 +
@@ -7,15 +7,17 @@
 //
 // 协议（stdin/stdout 各一行一个 JSON，UTF-8）：
 //
-//	{"id":1,"op":"init"}       → {"id":1,"ok":true,"result":{"name":"<项目目录名>","protocol":1,...}}
+//	{"id":1,"op":"init"}       → {"id":1,"ok":true,"result":{"name":"<项目目录名>","protocol":2,...}}
 //	{"id":2,"op":"tools.list"} → {"id":2,"ok":true,"result":[{name,description,parameters},...]}
-//	{"id":3,"op":"tool.call","args":{"tool":"now","args":{...}}}
+//	{"id":3,"op":"tool.call","tool":"now","args":{...},"ctx":{sessionId,user,cwd,env,sandboxed}}
 //	                           → {"id":3,"ok":true,"result":{"output":"...","data":{...}}}
 //
 // 约定：stdout 只写协议行（fmt.Println 全部禁用，调试输出用 os.Stderr）；stdin EOF → 立即
 // 退出（父进程已死，防孤儿进程）。
 //
-// 宿主注入的运行上下文（环境变量）：GEBAI_HOME（数据根）、GEBAI_AGENT_DIR（子代理项目目录）。
+// 宿主注入的运行上下文：环境变量 GEBAI_HOME（数据根）/GEBAI_AGENT_DIR（子代理项目目录，驱动
+// 自身资产定位）；**请求级 ctx 随每次 tool.call 传递**（边车为进程单例跨会话共享，会话 cwd/env/
+// 标识只能随请求走——用 Ctx()/CtxEnv()/CtxResolve() 读取，禁止写 os.Setenv：并发请求不同会话互踩）。
 package framework
 
 import (
@@ -42,6 +44,63 @@ type ToolDef struct {
 type ToolResult struct {
 	Output string
 	Data   any
+}
+
+// CtxInfo —— 请求级上下文（协议 v2）：边车为进程单例跨会话共享，宿主每次 tool.call 携带——
+// 会话工作目录（相对路径解析基准）、任务级 env 覆盖、会话标识。分发循环串行执行，当前请求
+// 的 ctx 在工具 Execute 运行前设置（Ctx() 读取）。
+type CtxInfo struct {
+	SessionID string            `json:"sessionId"`
+	User      string            `json:"user"`
+	Cwd       string            `json:"cwd"`
+	Env       map[string]string `json:"env"`
+	Sandboxed bool              `json:"sandboxed"`
+}
+
+// currentCtx —— 当前请求 ctx（分发循环串行设置；nil = 无请求上下文，如启动阶段）。
+var currentCtx *CtxInfo
+
+// Ctx —— 当前请求上下文（无请求时返回零值 CtxInfo）。
+func Ctx() CtxInfo {
+	if currentCtx != nil {
+		return *currentCtx
+	}
+	return CtxInfo{}
+}
+
+// CtxEnv —— 请求级环境变量：先查任务 env 覆盖，再回落进程 env。禁止写 os.Setenv（并发请求
+// 不同会话互踩，进程全局态承载不了请求级数据）。
+func CtxEnv(key string) string {
+	if c := currentCtx; c != nil && c.Env != nil {
+		if v, ok := c.Env[key]; ok {
+			return v
+		}
+	}
+	return os.Getenv(key)
+}
+
+// CtxResolve —— 路径解析：绝对路径原样；相对路径基准=当前请求 ctx.cwd（会话工作区）；
+// 无请求 ctx 时回落进程工作目录。
+func CtxResolve(p string) string {
+	if p == "" {
+		return p
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	base := ""
+	if c := currentCtx; c != nil {
+		base = c.Cwd
+	}
+	if base == "" {
+		if wd, err := os.Getwd(); err == nil {
+			base = wd
+		}
+	}
+	if base == "" {
+		return p
+	}
+	return filepath.Join(base, p)
 }
 
 // ToolOk / ToolErr —— 结果构造器。
@@ -106,7 +165,9 @@ func dispatch(line string) map[string]any {
 	var req struct {
 		ID   any            `json:"id"`
 		Op   string         `json:"op"`
+		Tool string         `json:"tool"`
 		Args map[string]any `json:"args"`
+		Ctx  *CtxInfo       `json:"ctx"`
 	}
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
 		return map[string]any{"id": nil, "ok": false, "error": "请求解析失败: " + err.Error()}
@@ -124,7 +185,7 @@ func dispatch(line string) map[string]any {
 	case "init":
 		return mk(true, map[string]any{
 			"name":     AgentName(),
-			"protocol": 1,
+			"protocol": 2,
 			"lang":     "go",
 			"platform": runtimeGOOS(),
 			"go":       runtimeVersion(),
@@ -143,7 +204,12 @@ func dispatch(line string) map[string]any {
 		}
 		return mk(true, list, "")
 	case "tool.call":
-		name, _ := req.Args["tool"].(string)
+		// 请求级 ctx（协议 v2）：串行分发循环内设置，工具 Execute 经 Ctx()/CtxEnv()/CtxResolve() 读取
+		currentCtx = req.Ctx
+		name := req.Tool
+		if name == "" {
+			name, _ = req.Args["tool"].(string)
+		}
 		mu.Lock()
 		t := tools[name]
 		mu.Unlock()

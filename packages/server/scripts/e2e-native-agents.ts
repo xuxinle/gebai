@@ -4,7 +4,9 @@
  * 验证：发现注册 → 工具名带前缀 → 常驻状态保持 → 崩溃自愈 → pip status →
  * 构建引导（cpp/rust/go 可执行体缺失时自动编译）→ 四语言典型场景工具真机调用
  * （docqa 文档问答 / imgproc 图像处理 / hsh 哈希校验 / dirs 目录分析）→
- * hsh 跨语言合并（TS 侧 crc32 与 Rust 侧工具同子代理）。
+ * hsh 跨语言合并（TS 侧 crc32 与 Rust 侧工具同子代理）→
+ * vision 跨语言合并（TS 侧 analyze + Python 侧识别四工具，依赖就绪时）→
+ * 请求级 ctx（协议 v2：docqa_run 无 session 参数时 REPL 命名空间按 ctx.sessionId 隔离）。
  */
 import { SubAgentManager } from "../src/core/agents/subagents"
 import { ToolRegistry } from "../src/core/base/registry"
@@ -33,6 +35,7 @@ const expectAgent = (name: string) => {
 
 const fakeCtx = {
   user: "admin",
+  sessionId: "e2e-session",
   workdir: process.cwd(),
   sessionWorkdir: process.cwd(),
   home: process.cwd(),
@@ -115,6 +118,26 @@ if (p2.output.trim() !== "6.2832") {
   process.exit(1)
 }
 console.log("PASS: docqa 常驻命名空间状态保持（tools.py 合并基础工具）")
+
+// 请求级 ctx（协议 v2）：无 session 参数时 REPL 命名空间缺省按 ctx.sessionId 隔离——
+// 不同会话（sessionId 不同）互不可见，同会话共享
+const c1 = await runTool.tool.execute({ code: "ctx_val = 42\nctx_val" }, fakeCtx)
+if (!c1.output.includes("42")) {
+  console.error("FAIL: ctx 缺省命名空间执行:", c1.output)
+  process.exit(1)
+}
+const otherCtx = { ...(fakeCtx as Record<string, unknown>), sessionId: "e2e-other-session" } as never
+const c2 = await runTool.tool.execute({ code: "'ctx_val' in dir()" }, otherCtx)
+if (c2.output.includes("True")) {
+  console.error("FAIL: 跨会话命名空间应隔离（ctx.sessionId 分桶）:", c2.output)
+  process.exit(1)
+}
+const c3 = await runTool.tool.execute({ code: "ctx_val" }, fakeCtx)
+if (!c3.output.includes("42")) {
+  console.error("FAIL: 同会话命名空间应共享:", c3.output)
+  process.exit(1)
+}
+console.log("PASS: 请求级 ctx（协议 v2）REPL 命名空间按 sessionId 隔离（跨会话互不可见）")
 
 // pip status
 const pipTool = registry.resolve("docqa_pip")!
@@ -252,6 +275,52 @@ if (!d4.output.includes("项）")) {
 }
 console.log("PASS: dirs（Go）tree/du/top/depth（并发遍历）")
 
-console.log("\n=== 真机端到端全部通过（python + cpp + rust + go 四语言）===")
+// ---------------- vision（Python + TS 跨语言合并）：识别四工具 + analyze ----------------
+const visionDef = expectAgent("vision")
+// 跨语言合并：TS 侧贡献 analyze（描述留空），Python 侧贡献 ocr/locate/locate_image/detect
+if (!("analyze" in (visionDef.tools ?? {})) || !("ocr" in (visionDef.tools ?? {}))) {
+  console.error("FAIL: vision 应同时含 TS 贡献 analyze 与 native 贡献 ocr:", Object.keys(visionDef.tools ?? {}))
+  process.exit(1)
+}
+if (!visionDef.description || !visionDef.description.includes("本地")) {
+  console.error("FAIL: vision 描述应由 native 侧贡献（TS 留空不拼接空串）:", visionDef.description)
+  process.exit(1)
+}
+await m.load("vision")
+const ocrTool = registry.resolve("vision_ocr")!
+// 依赖/模型就绪时真机 OCR（生成含文字 PNG 不现实，用空图验证链路与错误引导）；
+// 依赖缺失时验证安装提示而非栈追踪
+const vDir = join(process.cwd(), "tmp-e2e-vision")
+rmSync(vDir, { recursive: true, force: true })
+mkdirSync(vDir, { recursive: true })
+const vPng = join(vDir, "blank.png")
+// 纯白 64x32 PNG（用系统 python + PIL 生成真实可解码文件；PIL 严格校验 CRC，手写最小编码会被拒）
+Bun.spawnSync(["python", "-X", "utf8", "-c", "from PIL import Image; Image.new('RGB', (64, 32), (255,255,255)).save(r'" + vPng.replace(/\\/g, "/") + "')"], { stdout: "ignore", stderr: "pipe" })
+if (!existsSync(vPng)) {
+  console.log("SKIP: vision 真机 OCR（无系统 python/PIL 生成测试图）")
+} else {
+  const v1 = await ocrTool.tool.execute({ image: vPng }, fakeCtx)
+  if (/Traceback|ImportError|ModuleNotFoundError/.test(v1.output)) {
+    console.error("FAIL: vision_ocr 依赖缺失应给安装提示而非栈:", v1.output)
+    process.exit(1)
+  }
+  const missingDeps = /依赖缺失/.test(v1.output)
+  const missingModels = /模型未配置/.test(v1.output)
+  if (missingDeps || missingModels) {
+    console.log(`SKIP: vision 真机 OCR（${missingDeps ? "依赖未装" : "模型未配置"}）——链路与引导文案验证通过:`)
+    console.log("  ", v1.output.split("\n")[0])
+  } else {
+    // 依赖与模型就绪：纯白空图应正常返回「未识别到文字」引导
+    if (!v1.output.includes("未识别到文字")) {
+      console.error("FAIL: vision_ocr 空图应返回未识别引导:", v1.output)
+      process.exit(1)
+    }
+    console.log("PASS: vision 真机 OCR（onnxruntime 原生推理）空图引导")
+  }
+}
+rmSync(vDir, { recursive: true, force: true })
+console.log("PASS: vision 跨语言合并（TS 贡献 analyze 与 Python 识别四工具同命名空间）")
+
+console.log("\n=== 真机端到端全部通过（python + cpp + rust + go 四语言 + vision 跨语言合并 + 请求级 ctx）===")
 disposeAllNativeAgents() // 显式回收后再退出（exit hook 兄弟保险，防孤儿进程）
 process.exit(0)

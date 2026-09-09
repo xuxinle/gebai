@@ -1,7 +1,7 @@
 {
   "name": "dirs",
   "description": "目录空间分析子代理（Go 边车常驻进程）：dirs_tree 目录树概览、dirs_du 空间占用排行、dirs_top 大文件排行、dirs_depth 结构统计——并发遍历，磁盘分析一键定位",
-  "protocol": "1",
+  "protocol": "2",
   "command": ["{agent_dir}/driver{exe}"],
   "build": {
     "command": ["go", "build", "-o", "{agent_dir}/driver{exe}", "{agent_dir}/main.go"]

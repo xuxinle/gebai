@@ -1,0 +1,7 @@
+{
+  "name": "vision",
+  "description": "视觉能力（图片分析型，其他子代理可依赖）：本地小模型识别（onnxruntime 原生推理）——OCR 读文字带精确坐标（ocr）、定位文字位置（locate）、图标/图形模板匹配（locate_image）、YOLO 目标检测（detect）；输入一律为图片文件路径（png），无缺省图像源、不截图（现截屏幕/页面用 desktop/playwright）。依赖缺失时用 vision_pip 安装（onnxruntime numpy pillow）。",
+  "protocol": "2",
+  "requiresApproval": false,
+  "command": ["{python}", "-X", "utf8", "{lang_dir}/driver.py"]
+}

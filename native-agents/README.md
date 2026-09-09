@@ -53,13 +53,14 @@ native-agents/                    # 仓库根（构建复制到 dist/，二进�
 |------|------|------|
 | `name` | ✓ | 子代理名（`[a-z0-9_]+`，工具注册为 `{name}_{tool}`） |
 | `description` | | 一句话能力描述（agent_list/系统提示词注入用；能力导向，语言仅作次要说明）。**可省略/留空**：留空即「本侧不贡献」，与同名 TS 子代理跨语言合并时由另一侧提供或合并层兜底 |
-| `protocol` | ✓ | 协议版本（当前 `1`） |
+| `protocol` | ✓ | 协议版本（当前 `2`——tool.call 携带请求级 ctx） |
 | `command` | ✓ | 启动命令（字符串数组；占位符见下表） |
 | `driver` | | command 引用的驱动脚本文件名（相对 manifest 目录；`{driver}` 占位解析用） |
 | `prompt` | | 系统提示词文件名（缺省 `PROMPT.md`；正文注入子代理系统提示词，frontmatter 剥离；**缺失/留空即本侧不贡献**，与 description 同语义——交给合并层兜底） |
 | `cwd` | | 工作目录（缺省 manifest 目录；支持 `{GEBAI_HOME}` 占位） |
 | `env` | | 附加环境变量（值支持 `{GEBAI_HOME}` 占位；`GEBAI_HOME`/`GEBAI_AGENT_DIR` 总是注入） |
 | `build` | | 编译型语言构建引导（见下节） |
+| `requiresApproval` | | 全部工具审批策略：缺省 `true`（任意代码执行面恒需审批）；只读识别类子代理可声明 `false`（如 vision） |
 
 ### command 占位符
 
@@ -91,18 +92,19 @@ manifest `build` 字段声明编译命令，command 首元素指向的可执行�
 - 构建超时 300s；失败如实报错（含编译输出尾部 30 行）
 - 可执行体已存在则跳过构建（增量：改源码需手动删可执行体或重跑构建脚本）
 
-## 边车协议 v1（NDJSON over stdio）
+## 边车协议 v2（NDJSON over stdio）
 
 stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**（程序自身的 print 全部捕获，不得直写 stdout）；stderr 自由文本（宿主环形缓冲，排障用）；**stdin EOF → 立即退出**（父进程已死，防孤儿进程）。
 
 ```
 → {"id":1,"op":"init"}
-← {"id":1,"ok":true,"result":{"name":"myagent","protocol":1, ...自由扩展字段}}
+← {"id":1,"ok":true,"result":{"name":"myagent","protocol":2, ...自由扩展字段}}
 
 → {"id":2,"op":"tools.list"}
 ← {"id":2,"ok":true,"result":[{"name":"echo","description":"回显","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}
 
-→ {"id":3,"op":"tool.call","args":{"tool":"echo","args":{"text":"hi"}}}
+→ {"id":3,"op":"tool.call","tool":"echo","args":{"text":"hi"},
+   "ctx":{"sessionId":"a1b2","user":"admin","cwd":"C:/…/session/tmp","env":{"GEBAI_VISION_MODEL":"…"},"sandboxed":false}}
 ← {"id":3,"ok":true,"result":{"output":"回显：hi","data":{...可选结构化...}}}
 
 错误：← {"id":3,"ok":false,"error":"原因文本"}
@@ -110,11 +112,16 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 
 约定：
 
-- `init` 的 `result.name` 必须与 manifest `name` 一致（不一致拒绝注册）
+- `init` 的 `result.name` 必须与 manifest `name` 一致，`result.protocol` 必须与宿主一致（当前 `2`；锁步升级不做历史兼容，不匹配即注册失败记 loadErrors）
+- **请求级 ctx（v2 核心）**：边车为**进程单例、跨会话共享**，会话上下文只能随 `tool.call` 请求传递：
+  - `ctx.cwd`：会话工作区绝对路径——驱动内相对路径的解析基准（框架提供 `ctx_resolve(path)` 助手；宿主发来的路径参数通常已解析为绝对路径，直接用即可）
+  - `ctx.env`：任务级环境变量覆盖（随消息变、随调用传）——框架提供 `ctx_env(key)` 助手（先查它、再回落进程 env）；**禁止写入 os.environ**（并发请求不同会话会互踩，进程全局态承载不了请求级数据）
+  - `ctx.sessionId` / `ctx.user` / `ctx.sandboxed`：会话标识（会话态隔离键，如 REPL 命名空间分桶）、用户、沙箱标记
+  - 分发循环串行执行，框架在循环内设「当前请求 ctx」供工具函数读取
 - 工具名为**裸名**（无 `{agent}_` 前缀——注册表注册时自动加前缀）
 - `parameters` 为 JSON Schema（`type`/`properties`/`required`），原样透传给模型
 - `tool.call` 的 `result.output` 为给模型看的文本；`data` 可选结构化输出
-- 不设内部超时（宿主侧超时：默认 120s，tool.call 可按调用参数 `timeout` 秒延长）
+- 不设内部超时（宿主侧超时：默认 300s，tool.call 可按调用参数 `timeout` 秒延长）
 - 进程意外退出由宿主自动重启（崩溃自愈，在途请求重发一次）；连续快速退出 3 次放弃自动重启（防抖动风暴），下次调用再拉起
 
 ## 跨语言同名合并（TS + native 共同贡献一个子代理）
@@ -140,8 +147,9 @@ TS 侧（`packages/server/src/sub-agents/{name}.ts`）与 native 侧（manifest 
 ## 宿主行为（src/core/agents/sidecar.ts）
 
 - 惰性启动、请求 id 配对（并发复用同一进程）、启动串行化
+- 请求级 ctx：每次 `tool.call` 携带 `ctx`（sessionId/user/cwd/env/sandboxed，见协议 v2）——进程单例跨会话共享，会话上下文随请求传递
 - 请求超时：杀进程重启、该次请求拒绝
-- 崩溃自愈：进程意外退出自动重启一次 + 在途请求重发一次
+- 崩溃自愈：进程意外退出自动重启一次 + 在途请求重发一次（重发即原样重写请求行，携带原 ctx）
 - 服务退出清理（exit hook）+ 驱动侧 stdin EOF 自杀 双保险
 - stderr 环形缓冲 16KB（错误信息附因）
 

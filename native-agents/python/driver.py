@@ -10,12 +10,17 @@
 requirements.txt 层的可选依赖，由 python_pip 工具按需安装进语言目录 venv。
 
 协议（stdin/stdout 各一行一个 JSON，UTF-8）：
-  {"id":1,"op":"init"}                → {"id":1,"ok":true,"result":{"name":"python","protocol":1,...}}
+  {"id":1,"op":"init"}                → {"id":1,"ok":true,"result":{"name":"python","protocol":2,...}}
   {"id":2,"op":"tools.list"}          → {"id":2,"ok":true,"result":[{name,description,parameters}...]}
-  {"id":3,"op":"tool.call","args":{"tool":"python_run","args":{...}}}
+  {"id":3,"op":"tool.call","tool":"python_run","args":{...},
+                                       "ctx":{"sessionId":"a1b2","user":"admin","cwd":"…","env":{...},"sandboxed":false}}
                                       → {"id":3,"ok":true,"result":{"output":"...","data":{...}}}
 约定：stdout 只写协议行（print 全部重定向捕获）；stderr 自由文本（宿主环形缓冲排障）；
 stdin EOF → 立即退出（父进程已死，防孤儿）。
+
+请求级 ctx（协议 v2 核心）：边车为进程单例跨会话共享，会话上下文随每次 tool.call 传递——
+current_ctx()/ctx_env()/ctx_resolve() 读取；**禁止写入 os.environ**（并发请求不同会话会互踩，
+进程全局态承载不了请求级数据）。
 
 宿主注入的运行上下文（环境变量）：
   GEBAI_HOME      数据根（状态展示/兼容路径）
@@ -33,12 +38,56 @@ import sys
 import time
 import traceback
 
-PROTOCOL = 1
+PROTOCOL = 2
 
 # 语言目录（本驱动所在目录）：venv 与 requirements.txt 的归属地
 LANG_DIR = os.path.dirname(os.path.abspath(__file__))
 
 VENVS = {}  # 每个 session 一个命名空间（常驻状态）
+
+# ---------------- 请求级上下文（协议 v2） ----------------
+
+# 当前请求 ctx（分发循环串行执行，处理 tool.call 前设置；None = 无请求上下文如启动阶段）。
+# 边车为进程单例跨会话共享，会话 cwd/env/标识只能随请求传递。
+_CURRENT_CTX = None
+
+
+def set_current_ctx(ctx):
+    """分发循环设置当前请求 ctx（None 清除）。"""
+    global _CURRENT_CTX
+    _CURRENT_CTX = ctx
+
+
+def current_ctx():
+    """当前请求 ctx（dict；无请求上下文时空 dict）。"""
+    return _CURRENT_CTX or {}
+
+
+def ctx_session_id():
+    """当前请求会话标识（会话态隔离键，如 REPL 命名空间分桶；无请求 ctx 时 'default'）。"""
+    return str(current_ctx().get("sessionId") or "default")
+
+
+def ctx_env(key, default=None):
+    """请求级环境变量：先查任务 env 覆盖，再回落进程 env。
+    禁止写 os.environ（并发请求不同会话互踩，进程全局态承载不了请求级数据）。"""
+    env = current_ctx().get("env") or {}
+    if key in env:
+        return env[key]
+    return os.environ.get(key, default)
+
+
+def ctx_resolve(path):
+    """路径解析：绝对路径原样；相对路径基准=当前请求 ctx.cwd（会话工作区）；
+    无请求 ctx 时回落进程工作目录。"""
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return path
+    base = str(current_ctx().get("cwd") or "") or (os.getcwd() if os.getcwd() else "")
+    if not base:
+        return path
+    return os.path.join(base, path)
 
 
 def gebai_home():
@@ -114,7 +163,9 @@ def ns_for(session):
 def tool_run(args):
     """python_run：常驻命名空间执行（REPL 语义）。"""
     code = str(args.get("code") or "")
-    session = args.get("session")
+    # 会话隔离缺省取请求级 ctx.sessionId（协议 v2）：边车进程单例跨会话共享，
+    # 不同会话的 REPL 命名空间自然分桶；显式 session 参数仍可细粒度隔离
+    session = args.get("session") or ctx_session_id()
     ns, key = ns_for(session)
     out, err = io.StringIO(), io.StringIO()
     t0 = time.monotonic()
@@ -260,7 +311,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "Python 源码（多行；末行独立表达式= REPL 求值回显）"},
-                "session": {"type": "string", "description": "命名空间键（默认 default；隔离实验用不同 session 名）"},
+                "session": {"type": "string", "description": "命名空间键（缺省按会话隔离：同会话共享状态、跨会话互不可见；同会话内隔离实验可另起 session 名）"},
                 "timeout": {"type": "number", "description": "超时秒（默认 300；AI 推理等长任务可调大）"},
             },
             "required": ["code"],
@@ -300,6 +351,10 @@ def load_project_tools():
     try:
         spec = importlib.util.spec_from_file_location("project_tools", path)
         mod = importlib.util.module_from_spec(spec)
+        # 本驱动可能以 __main__ 运行（非 import 名 driver）：注册进 sys.modules，
+        # 项目 tools.py 内 `import driver` 拿到的即同一实例（ctx 助手/常驻状态共享，
+        # 而非重新加载一份副本导致 _CURRENT_CTX 永远为空）
+        sys.modules.setdefault("driver", sys.modules[__name__])
         spec.loader.exec_module(mod)
     except BaseException:
         sys.stderr.write("[driver] 项目 tools.py 加载失败，回退基础工具集:\n" + traceback.format_exc(limit=8) + "\n")
@@ -335,9 +390,12 @@ def handle(op, args):
         if not impl:
             return {"__error__": f"未知工具: {tool}"}
         try:
+            set_current_ctx(args.get("ctx") or None)
             return impl(args.get("args") or {})
         except BaseException:
             return {"__error__": traceback.format_exc(limit=12)}
+        finally:
+            set_current_ctx(None)
     return {"__error__": f"未知操作: {op}"}
 
 
@@ -356,7 +414,12 @@ def main():
             sys.stdout.flush()
             continue
         try:
-            result = handle(req.get("op"), req.get("args") or {})
+            # 协议 v2：tool.call 的 tool/args/ctx 为请求体顶级字段（与 op 平级），组装后交 handle
+            op = req.get("op")
+            hargs = req.get("args") or {}
+            if op == "tool.call":
+                hargs = {"tool": req.get("tool"), "args": req.get("args") or {}, "ctx": req.get("ctx")}
+            result = handle(op, hargs)
         except SystemExit as exc:
             os._exit(int(exc.code or 0))
         except BaseException as exc:  # 宿主兜底：请求级意外不打死宿主

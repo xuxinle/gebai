@@ -415,10 +415,10 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
         "def send(o):",
         "    sys.stdout.write(json.dumps(o) + chr(10))",
         "    sys.stdout.flush()",
-        "send({\"op\": \"init\", \"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1, \"tools\": TOOLS})",
+        "send({\"op\": \"init\", \"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 2, \"tools\": TOOLS})",
         "for line in sys.stdin:",
         "    req = json.loads(line)",
-        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1}})",
+        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 2}})",
         "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
         "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"hello from \" + os.environ[\"FAKE_NAME\"]}})",
       ].join(String.fromCharCode(10)) + String.fromCharCode(10),
@@ -429,7 +429,7 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
       mkdirSync(d, { recursive: true })
       writeFileSync(
         join(d, "agent.json"),
-        JSON.stringify({ name, description: name + " 热加载验证", protocol: 1, command: [py, driver], env: { FAKE_NAME: name } }),
+        JSON.stringify({ name, description: name + " 热加载验证", protocol: 2, command: [py, driver], env: { FAKE_NAME: name } }),
       )
     }
     try {
@@ -486,7 +486,7 @@ describe("跨语言同名合并（TS + native 贡献集 → 合并视图，DESIG
     mkdirSync(d, { recursive: true })
     writeFileSync(
       join(d, "agent.json"),
-      JSON.stringify({ name, description, protocol: 1, command: ["python", join(root, "drv.py")], env: { FAKE_NAME: name } }),
+      JSON.stringify({ name, description, protocol: 2, command: ["python", join(root, "drv.py")], env: { FAKE_NAME: name } }),
     )
     writeFileSync(join(d, "PROMPT.md"), `${name} native 提示词正文`)
     return d
@@ -509,7 +509,7 @@ describe("跨语言同名合并（TS + native 贡献集 → 合并视图，DESIG
         "    sys.stdout.flush()",
         "for line in sys.stdin:",
         "    req = json.loads(line)",
-        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1}})",
+        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 2}})",
         "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
         "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"native-\" + req[\"args\"][\"tool\"]}})",
       ].join(String.fromCharCode(10)) + String.fromCharCode(10),
@@ -565,7 +565,7 @@ describe("跨语言同名合并（TS + native 贡献集 → 合并视图，DESIG
         "    sys.stdout.flush()",
         "for line in sys.stdin:",
         "    req = json.loads(line)",
-        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1}})",
+        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 2}})",
         "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
         "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"ok\"}})",
       ].join(String.fromCharCode(10)) + String.fromCharCode(10),
@@ -578,7 +578,7 @@ describe("跨语言同名合并（TS + native 贡献集 → 合并视图，DESIG
       expect(m.def("mergx")?.description).toBe("v1")
       // native 变化（改 manifest description）：重拉 → 重合并（视图更新）
       const mf = join(agentDir, "agent.json")
-      writeFileSync(mf, JSON.stringify({ name: "mergx", description: "v2", protocol: 1, command: ["python", driver], env: { FAKE_NAME: "mergx" } }))
+      writeFileSync(mf, JSON.stringify({ name: "mergx", description: "v2", protocol: 2, command: ["python", driver], env: { FAKE_NAME: "mergx" } }))
       const st = statSync(mf)
       utimesSync(mf, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
       await m.refreshIfChanged()

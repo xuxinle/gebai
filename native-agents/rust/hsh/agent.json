@@ -1,7 +1,7 @@
 {
   "name": "hsh",
   "description": "哈希校验子代理（Rust 边车常驻进程）：hsh_sha256/hsh_sha1/hsh_md5 摘要（文本/字节/文件）、hsh_hmac_sha256 HMAC 签名、hsh_verify 完整性校验（多算法一键比对）",
-  "protocol": "1",
+  "protocol": "2",
   "command": ["{lang_dir}/target/release/hsh{exe}"],
   "build": {
     "command": ["cargo", "build", "--release", "--manifest-path", "{lang_dir}/Cargo.toml"]

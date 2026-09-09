@@ -3286,7 +3286,8 @@ describe("context compaction", () => {
       expect(sys).toContain("### code（")
       expect(sys).toContain("源码分析与修改专家")
       expect(sys).toContain("### vision（")
-      expect(sys).toContain("视觉分析助手")
+      // vision TS 侧提示词（跨语言合并：识别四工具迁 native，TS 侧仅 analyze 宿主引导）
+      expect(sys).toContain("多模态语义分析（analyze）的宿主侧引导")
       expect(sys).toContain("### self_optimize（")
       expect(sys).toContain("自我优化专家")
       // 新会话工具集：继承的全局工具（read/write）+ code_*/vision_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）

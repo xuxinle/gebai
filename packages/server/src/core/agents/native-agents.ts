@@ -35,7 +35,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join } from "node:path"
 import { resolveGebaiHome } from "../base/config"
 import type { SubAgentDef, Tool } from "../base/types"
-import { AgentSidecar, defaultSpawn, nativeAgentsSourceDir, type SidecarSpawnFn } from "./sidecar"
+import { AgentSidecar, defaultSpawn, nativeAgentsSourceDir, type SidecarCtx, type SidecarSpawnFn } from "./sidecar"
 
 /** 解释器解析（{python} 占位，其他语言 manifest 直接写可执行体路径/命令名）：
  *  GEBAI_PYTHON_DIR（解释器目录或可执行体完整路径；目录时补拼 python.exe/python）
@@ -79,6 +79,9 @@ export interface NativeAgentManifest {
   prompt?: string
   cwd?: string
   env?: Record<string, string>
+  /** 全部工具审批策略：缺省 true（任意代码执行面恒需审批）；只读识别类子代理可声明 false
+   *  （如 vision 的 ocr/locate/locate_image/detect——对齐 TS 侧同能力工具的免审批体验）。 */
+  requiresApproval?: boolean
   /** 编译型语言构建引导：command 首元素指向的可执行文件不存在时先执行（占位符同 command），
    *  产物落盘后正常启动——缺编译器的环境记 loadErrors 不阻断其他子代理。 */
   build?: NativeAgentBuild
@@ -104,7 +107,7 @@ export function parseManifest(raw: string, source: string): { manifest?: NativeA
   const protocol = Number(json.protocol ?? 0)
   const command = Array.isArray(json.command) ? json.command.map((c) => String(c)) : null
   if (!/^[a-z0-9_]+$/.test(name)) return { error: `${source}: name 非法（须 [a-z0-9_]+）: ${name}` }
-  if (protocol !== 1) return { error: `${source}: 不支持的协议版本 ${protocol}（当前支持 1）` }
+  if (protocol !== 2) return { error: `${source}: 不支持的协议版本 ${protocol}（当前支持 2——tool.call 请求级 ctx）` }
   if (!command || !command.length || command.some((c) => !c.trim())) return { error: `${source}: command 须为非空字符串数组` }
   return {
     manifest: {
@@ -117,6 +120,7 @@ export function parseManifest(raw: string, source: string): { manifest?: NativeA
       cwd: typeof json.cwd === "string" ? json.cwd : undefined,
       env: typeof json.env === "object" && json.env !== null ? Object.fromEntries(Object.entries(json.env as Record<string, string>).map(([k, v]) => [k, String(v)])) : undefined,
       build: typeof json.build === "object" && json.build !== null ? parseBuild(json.build as Record<string, unknown>) : undefined,
+      requiresApproval: typeof json.requiresApproval === "boolean" ? json.requiresApproval : undefined,
     },
   }
 }
@@ -261,16 +265,25 @@ export async function ensureBuilt(
  *  原样透传——多语言驱动自定义其形态）。 */
 const TOOL_DEFAULT_TIMEOUT_MS = 300_000 // 工具描述 timeout 缺省 300s：宿主请求超时与此对齐（长任务不会先被宿主杀）
 
-function sidecarTool(sidecar: AgentSidecar, toolName: string, def: { description: string; parameters: { type: string; properties: Record<string, unknown> } }, agentName: string): Tool {
+function sidecarTool(sidecar: AgentSidecar, toolName: string, def: { description: string; parameters: { type: string; properties: Record<string, unknown> } }, agentName: string, requiresApproval = true): Tool {
   return {
     name: toolName,
     description: def.description,
     parameters: def.parameters as unknown as Tool["parameters"],
-    requiresApproval: true, // 边车工具一律审批（任意代码执行面）
+    requiresApproval, // 缺省恒需审批（任意代码执行面）；manifest 可声明只读免审批（如 vision 识别四工具）
     card: { args: "code", codeField: "code", codeLang: toolName.includes("py") || agentName.includes("python") ? "python" : undefined } as Tool["card"],
-    async execute(args) {
+    async execute(args, ctx) {
       const timeoutMs = typeof args.timeout === "number" && args.timeout > 0 ? Math.min(args.timeout * 1000, 540_000) : TOOL_DEFAULT_TIMEOUT_MS
-      const r = await sidecar.toolCall(toolName, args, timeoutMs)
+      // 请求级 ctx（协议 v2）：进程单例跨会话共享，会话 cwd/env/标识随调用传递；
+      // cwd 取会话工作区（引擎恒定注入，不随项目绑定变化）
+      const sc: SidecarCtx = {
+        sessionId: ctx.sessionId,
+        user: ctx.user,
+        cwd: ctx.sessionWorkdir ?? ctx.workdir,
+        env: ctx.env ?? {},
+        sandboxed: !!ctx.sandboxed,
+      }
+      const r = await sidecar.toolCall(toolName, args, sc, timeoutMs)
       if (r.error) {
         return { output: `${r.error}\n（${agentName} 边车工具 ${toolName} 失败；边车进程已自动重启，命名空间如丢失请重建）` }
       }
@@ -342,7 +355,7 @@ export async function launchNativeAgent(
   }
   const tools = (await sidecar.toolsList()) as Array<{ name: string; description: string; parameters: { type: string; properties: Record<string, unknown> } }>
   const toolSet: Record<string, Tool> = {}
-  for (const t of tools) toolSet[t.name] = sidecarTool(sidecar, t.name, t, manifest.name)
+  for (const t of tools) toolSet[t.name] = sidecarTool(sidecar, t.name, t, manifest.name, manifest.requiresApproval !== false)
   const def = { name: manifest.name, description, systemPrompt, tools: toolSet }
   liveSidecars.get(manifest.name)?.dispose("重新启动（热加载重扫）")
   liveSidecars.set(manifest.name, sidecar)

@@ -1,7 +1,7 @@
 {
   "name": "imgproc",
   "description": "图像处理子代理（C++ 边车常驻进程）：imgproc_info 探测图片（尺寸/大小/亮度分布）、imgproc_grayscale 灰度化、imgproc_resize 高质量缩放（sRGB 重采样）、imgproc_stats 像素统计（通道均值/Otsu 阈值）",
-  "protocol": "1",
+  "protocol": "2",
   "command": ["{agent_dir}/driver{exe}"],
   "build": {
     "windows": ["{lang_dir}/build.bat", "{agent_name}"],
