@@ -107,7 +107,12 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
 
   // 安全模式：子Agent 工具按 Tool.safeMode 自主声明过滤（全局风险工具内置降级，不过滤）
   const registry = new ToolRegistry({ safeMode: config.safeMode })
-  for (const tool of Object.values(createGlobalTools())) registry.register(tool)
+  // restart_server 仅本地模式注入（操作者本人机器可重启自身；服务模式多用户部署无权重启宿主服务）
+  const globalToolFilter = config.auth === "local" ? null : new Set(["restart_server"])
+  for (const tool of Object.values(createGlobalTools())) {
+    if (globalToolFilter?.has(tool.name)) continue
+    registry.register(tool)
+  }
   // 视觉 provider 提供者注册（视觉能力统一经 vision 子代理——其 def 的 analyze 工具经 getVisionProvider
   // 复用同一解析逻辑）；任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider。
   // 全局 vision 工具已移除（架构决策：视觉相关统一走子代理，主会话需视觉时 agent_load 装载或路由自愈，见 DESIGN「视觉工具 vision」）

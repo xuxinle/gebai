@@ -473,6 +473,17 @@ src/
 - **双通道**：dev 形态由 `core/tools/index.ts` 模块初始化时运行时扫描本目录（重启进程生效，无热加载——self_optimize 只写子 Agent 目录）；dist/`--compile` 形态回退 `scripts/build-tools.ts` 生成的静态注册表 `core/tools/bundle.generated.ts`（gitignore）
 - **聚合器**：`createAllGlobalTools()`/`createGlobalTools()`/`isGlobalToolExcluded()` 签名与语义不变（构建期排除、重名抛错、engine 与 index.ts 注册面零改动）；`core/tools/index.ts` barrel 具名再导出原单文件时代的全部既有导出（导入方零改动），新增工具请从所在文件直接 import
 - 新增全局工具 = 在 `core/tools/` 新建一个导出 `globalTools` 的文件，不改任何中央注册表；命名空间专属工具（git/page_capture 等）放 `tools/extras.ts` 由子 Agent def 引用
+- **模式限定工具**：个别全局工具仅特定运行形态注入（如 `restart_server` 仅本地模式——compose 注册处按 `config.auth` 过滤，服务模式多用户部署不暴露）；工具仍在全局表（本地模式可用面不变），过滤发生在 compose 注册环节
+
+#### restart_server（重启自身服务，仅本地模式）
+
+重启本服务进程的可靠性设计——「自杀后谁拉起」：重启的最大风险是旧进程死了新进程起不来（进程树连坐），方案是外部拉起器彻底脱离服务进程树：
+
+- **外部拉起器**：工具执行时把 PowerShell 拉起脚本落盘 `%TEMP%/gebai-restart/launcher.ps1`（**UTF-8 BOM**——Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解析，脚本内中文会撕裂字符串），经 `wmic process call create` 启动——拉起器父进程是 WMI 宿主，与服务进程零亲缘，服务退出/被杀不影响拉起器运行
+- **拉起器流程**：等旧进程退出（最长 60s）→ 等端口释放（TCP 探测，最长 30s）→ 同端口/同 cwd/同启动级环境变量（`GEBAI_PORT/HOST/HOME/MODE/BASE_PATH`，凭据类不复制——`.env` 由 loadConfig 自行加载）`Start-Process` 启动新服务（Windows 无 job object 连坐，拉起器退出后新服务继续运行）→ 轮询 HTTP 就绪（最长 45s）→ 写状态文件 `state.json`（成功=新端口；失败=原因+日志尾部）
+- **自杀时序**：工具先布置拉起器，再延迟 2.5s `process.exit`（延迟内工具结果先送达飞书/WS，自杀在后）；拉起器部署失败则不退出（服务保持运行）
+- **状态可查**：`action=status` 读最近一次重启状态（不重启）；新服务日志在 `%TEMP%/gebai-restart/server.log.*`
+- **平台边界**：Windows 专用（wmic 拉起器）；非 Windows 本地模式返回不可用说明；`requiresApproval: true`（重启中断在途任务，须用户确认）
 
 ### 核心Agent流程
 
