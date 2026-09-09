@@ -479,11 +479,13 @@ src/
 
 重启本服务进程的可靠性设计——「自杀后谁拉起」：重启的最大风险是旧进程死了新进程起不来（进程树连坐），方案是外部拉起器彻底脱离服务进程树：
 
-- **外部拉起器**：工具执行时把 PowerShell 拉起脚本落盘 `%TEMP%/gebai-restart/launcher.ps1`（**UTF-8 BOM**——Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解析，脚本内中文会撕裂字符串），经 `wmic process call create` 启动——拉起器父进程是 WMI 宿主，与服务进程零亲缘，服务退出/被杀不影响拉起器运行
-- **拉起器流程**：等旧进程退出（最长 60s）→ 等端口释放（TCP 探测，最长 30s）→ 同端口/同 cwd/同启动级环境变量（`GEBAI_PORT/HOST/HOME/MODE/BASE_PATH`，凭据类不复制——`.env` 由 loadConfig 自行加载）`Start-Process` 启动新服务（Windows 无 job object 连坐，拉起器退出后新服务继续运行）→ 轮询 HTTP 就绪（最长 45s）→ 写状态文件 `state.json`（成功=新端口；失败=原因+日志尾部）
+- **外部拉起器（双平台）**：工具执行时把拉起脚本落盘 `{tmpdir}/gebai-restart/`，并部署为独立于服务进程树的进程：
+  - Windows：PowerShell 脚本 `launcher.ps1`（**UTF-8 BOM**——Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解析，脚本内中文会撕裂字符串），经 `wmic process call create` 启动——拉起器父进程是 WMI 宿主，与服务进程零亲缘，服务退出/被杀不影响拉起器运行；
+  - Linux/macOS：bash 脚本 `launcher.sh`（UTF-8 无 BOM，脚本内 mkdir -p 自建工作目录），经 `setsid` 启动（新会话新进程组，防 `kill -PGID` 整杀连坐），标准流重定向 /dev/null——服务退出后拉起器被 init 收养继续运行；
+- **拉起器流程（两平台同构）**：等旧进程退出（最长 60s；win `Get-Process` / posix `kill -0`）→ 等端口释放（最长 30s；win TCP 探测 / posix `ss -ltn`；被第三方占用直接失败写入 state，不动无辜进程）→ 同端口/同 cwd/同启动级环境变量（`GEBAI_PORT/HOST/HOME/MODE/BASE_PATH`，凭据类不复制——`.env` 由 loadConfig 自行加载）启动新服务（win `Start-Process` / posix `nohup &`，Windows 无 job object 连坐、posix 由 init 收养）→ 就绪探测（最长 90s；**端口属主 ≠ 旧 PID 且 HTTP 200 双条件**——单看 200 会在旧服务未死时误判；属主探测 win `Get-NetTCPConnection` / posix `ss -ltnp`）→ 写状态文件 `state.json`（成功=新 PID；失败=原因+日志尾部）
 - **自杀时序**：工具先布置拉起器，再延迟 2.5s `process.exit`（延迟内工具结果先送达飞书/WS，自杀在后）；拉起器部署失败则不退出（服务保持运行）
-- **状态可查**：`action=status` 读最近一次重启状态（不重启）；新服务日志在 `%TEMP%/gebai-restart/server.log.*`
-- **平台边界**：Windows 专用（wmic 拉起器）；非 Windows 本地模式返回不可用说明；`requiresApproval: true`（重启中断在途任务，须用户确认）
+- **状态可查**：`action=status` 读最近一次重启状态（不重启）；新服务日志在同目录 `server.log.*`
+- **平台依赖**：Windows 需 wmic/PowerShell（系统内置）；Linux 需 bash + ss（iproute2，各发行版标配）+ curl；`requiresApproval: true`（重启中断在途任务，须用户确认）
 
 ### 核心Agent流程
 
