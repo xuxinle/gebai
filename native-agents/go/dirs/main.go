@@ -29,17 +29,72 @@ type fileInfo struct {
 	depth int
 }
 
+// dirQueue —— 无界目录队列（互斥锁 + 条件变量）：worker 既是生产者又是消费者，
+// 若用有界 channel，全部 worker 可能同时阻塞在「往队列发送」而无人在接收——结构性
+// 自锁（目录突发多的树必现，如 node_modules）；无界队列发送永不阻塞，从根上消除。
+type dirQueue struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	items  []string
+	head   int
+	closed bool
+}
+
+func newDirQueue() *dirQueue {
+	q := &dirQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *dirQueue) push(s string) {
+	q.mu.Lock()
+	q.items = append(q.items, s)
+	q.mu.Unlock()
+	q.cond.Signal()
+}
+
+// close —— 唤醒全部等待者（它们见到空且已关则退出）。
+func (q *dirQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	q.cond.Broadcast()
+}
+
+// pop —— 取一个待处理目录；空且未关则等（pending>0 保证还有目录未完成，其完成路径
+// 必经 push 或减到 0 后的 close 唤醒，不会永久等待）。
+func (q *dirQueue) pop() (string, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.head >= len(q.items) && !q.closed {
+		q.cond.Wait()
+	}
+	if q.head >= len(q.items) {
+		return "", false
+	}
+	s := q.items[q.head]
+	q.items[q.head] = ""
+	q.head++
+	if q.head == len(q.items) { // 队列耗尽：重置，防底层数组无限增长
+		q.items = q.items[:0]
+		q.head = 0
+	}
+	return s, true
+}
+
 // walkConcurrent —— 并发遍历目录树（worker 池 + 原子在途计数）：
-// pending = 已入队未处理完的目录数；每处理完一个目录减 1，发现子目录入队前加 1；
-// 减到 0 的 worker 负责关闭队列（此时队列空且无在处理，close 安全）。
+// pending = 已入队未处理完的目录数；子目录入队前 Add、本目录全部发送完后减 1；
+// 减到 0 的 worker 关队列。旧版有界 channel 下 worker 既是生产者又是消费者，全部 worker
+// 可能同时阻塞在「往队列发送」而无人在接收——结构性自锁（目录突发多的树必现）；
+// 无界队列 push 永不阻塞，从根上消除。不可读目录（权限等）记入 errs 跳过，不中断遍历。
 func walkConcurrent(root string, maxDepth int) (entries []fileInfo, errs []string) {
 	type dirResult struct {
 		entries []fileInfo
 		err     string
 	}
 
-	dirQueue := make(chan string, 1024)
-	results := make(chan dirResult, 1024)
+	results := make(chan dirResult, 256)
+	queue := newDirQueue()
 	var pending atomic.Int64
 	var workersWG sync.WaitGroup
 
@@ -47,7 +102,7 @@ func walkConcurrent(root string, maxDepth int) (entries []fileInfo, errs []strin
 	depthOf := func(p string) int { return strings.Count(p, string(os.PathSeparator)) - rootDepth }
 
 	pending.Add(1)
-	dirQueue <- root // 缓冲充足，不会阻塞
+	queue.push(root)
 
 	workers := runtime.NumCPU()
 	if workers > 16 {
@@ -60,8 +115,13 @@ func walkConcurrent(root string, maxDepth int) (entries []fileInfo, errs []strin
 		workersWG.Add(1)
 		go func() {
 			defer workersWG.Done()
-			for dir := range dirQueue {
+			for {
+				dir, ok := queue.pop()
+				if !ok {
+					return
+				}
 				var res dirResult
+				var childDirs []string
 				dirents, err := os.ReadDir(dir)
 				if err != nil {
 					res.err = fmt.Sprintf("%s: %v", dir, err)
@@ -78,15 +138,22 @@ func walkConcurrent(root string, maxDepth int) (entries []fileInfo, errs []strin
 							continue // 符号链接目录跳过（防环）
 						}
 						res.entries = append(res.entries, fileInfo{path: full, isDir: true, depth: d})
-						pending.Add(1)
-						dirQueue <- full // 同步入队：缓冲满则等消费，不会出现 close 后 send
+						childDirs = append(childDirs, full)
 					} else if info, err := de.Info(); err == nil {
 						res.entries = append(res.entries, fileInfo{path: full, size: info.Size(), depth: d})
 					}
 				}
 				results <- res
+				// 先发结果、后入队子目录、最后递减 pending：子目录入队前先 Add(n)，
+				// pending 归 0 时全部子目录必已 push 完，close 后无人再 push
+				if n := len(childDirs); n > 0 {
+					pending.Add(int64(n))
+					for _, cd := range childDirs {
+						queue.push(cd)
+					}
+				}
 				if pending.Add(-1) == 0 {
-					close(dirQueue) // 最后一个完成者关队列
+					queue.close() // 最后一个完成者关队列
 				}
 			}
 		}()
