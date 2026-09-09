@@ -1,7 +1,7 @@
 // Package framework —— 歌白客卿 Rust/Go 系基础框架（协议 v2，见 keqing/README.md）。
 //
 // Go 语言目录 keqing/go/ 下共享本包；每个子代理项目（语言目录下的二级目录）一个
-// main.go —— import "gebai/客卿-framework/framework" 后用 RegisterTool 注册专属工具 +
+// main.go —— import "gebai/keqing-framework/framework" 后用 RegisterTool 注册专属工具 +
 // main() 调用 framework.Run() 即成完整边车驱动。一种语言派生任意多个子代理，实现语言对模型
 // 透明（模型只看到工具与提示词）。
 //

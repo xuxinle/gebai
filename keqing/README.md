@@ -25,7 +25,7 @@ keqing/                    # 仓库根（构建复制到 dist/，二进制形态
 │   └── imgproc/                  # 子代理项目：图像处理（info/grayscale/resize/stats）
 ├── rust/                         # Rust 语言目录（cargo workspace 统一管理）
 │   ├── Cargo.toml                # workspace 根（members: framework, hsh, …）
-│   ├── framework/               # 库 crate gebai-客卿-framework（协议实现共享）
+│   ├── framework/               # 库 crate gebai-keqing-framework（协议实现共享）
 │   │   └── src/lib.rs
 │   └── hsh/                      # bin crate 子代理项目：哈希校验（sha256/sha1/md5/hmac/verify）
 │       ├── Cargo.toml
@@ -33,12 +33,12 @@ keqing/                    # 仓库根（构建复制到 dist/，二进制形态
 │       ├── PROMPT.md
 │       └── src/main.rs           # 只写工具逻辑（依赖 framework crate）
 └── go/                           # Go 语言目录（go module 统一管理）
-    ├── go.mod                    # module gebai/客卿-framework
+    ├── go.mod                    # module gebai/keqing-framework
     ├── framework/framework.go    # 基础框架包（标准库 encoding/json，零手写 JSON）
     └── dirs/                     # 子代理项目：目录空间分析（tree/du/top/depth）
         ├── agent.json            # command → {agent_dir}/driver{exe}；build → go build
         ├── PROMPT.md
-        └── main.go               # import fw "gebai/客卿-framework/framework"
+        └── main.go               # import fw "gebai/keqing-framework/framework"
 
 {GEBAI_HOME}/agents/               # 用户自建（放置即生效；manifest 同名去重时用户自建胜出；与 TS 子代理同名则跨语言合并）
 └── my-agent/
@@ -183,11 +183,11 @@ Python 语言目录只保留 `docqa` 一个项目：基础能力（REPL/pip/stat
 
 ### Rust（keqing/rust/——cargo workspace）
 
-语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-客卿-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`hsh/` 等，`src/main.rs` 只写工具逻辑，依赖 `gebai-客卿-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。零第三方依赖（纯标准库，rustc/cargo 直编）。
+语言目录即一个 cargo workspace：`framework/` 库 crate（gebai-keqing-framework：迷你 JSON + 注册表 + NDJSON 协议循环）与各子代理 bin crate（`hsh/` 等，`src/main.rs` 只写工具逻辑，依赖 `gebai-keqing-framework = { path = "../framework" }`）。产物统一落 `target/release/{crate}{exe}`——manifest 的 command/build 指向它（`cargo build --release --manifest-path {lang_dir}/Cargo.toml`）；新增子代理 = workspace members 加一行 + 新 crate 目录。零第三方依赖（纯标准库，rustc/cargo 直编）。
 
 ### Go（keqing/go/——go module）
 
-语言目录即一个 go module（`gebai/客卿-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`dirs/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} {agent_dir}/main.go`）；新增子代理 = 新目录 + agent.json（module 内多 main 包用文件级构建，互不干扰）。
+语言目录即一个 go module（`gebai/keqing-framework`）：`framework/framework.go` 基础框架包（标准库 encoding/json + bufio，无需手写 JSON——注册/参数助手/panic 兜底/主循环）与各子代理项目（`dirs/` 等，`main.go` import 后 `fw.RegisterTool` 注册工具 + `main()` 调 `fw.Run()`）。产物落项目目录 `driver{exe}`（manifest build → `go build -o {agent_dir}/driver{exe} {agent_dir}/main.go`）；新增子代理 = 新目录 + agent.json（module 内多 main 包用文件级构建，互不干扰）。
 
 ## 任意语言接入示例（Go 心算代理）
 

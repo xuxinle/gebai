@@ -94,7 +94,7 @@ interface Pending {
   replay?: { id: number; line: string }
 }
 
-/** 单个边车进程宿主：一个 manifest（一个子代理）一个实例，由 客卿-agents 发现器持有。
+/** 单个边车进程宿主：一个 manifest（一个子代理）一个实例，由客卿发现器（keqing）持有。
  *  command 支持工厂函数：每次启动时解析（占位符如 {python} 需运行时解析——venv 创建后
  *  边车重启即自动切换 venv 解释器，无需重启服务）。 */
 export class AgentSidecar {

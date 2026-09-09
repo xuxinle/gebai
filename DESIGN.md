@@ -1112,7 +1112,7 @@ export const preload = false
 | `hsh`（客卿+TS） | sha256/sha1/md5/hmac_sha256/verify/crc32（→ `hsh_sha256`/`hsh_sha1`/`hsh_md5`/`hsh_hmac_sha256`/`hsh_verify`；`hsh_crc32` 为 TS 侧贡献，跨语言合并） | 全部（客卿 边车工具）；crc32 无需审批（纯函数） | ✗ | 哈希校验（Rust + TS 跨语言合并示例：三算法手写（FIPS 180-4 / RFC 1321）零依赖 + HMAC（RFC 2104），text/bytes_hex/path 三源输入、文件一次读盘三算法全出、多算法联合校验；TS 侧贡献 CRC-32（IEEE 802.3）基础工具——描述/提示词由 Rust 侧单独贡献，两侧合并为同一子代理）；cargo workspace 管理 |
 | `dirs`（客卿） | tree/du/top/depth（→ `dirs_tree`/`dirs_du`/`dirs_top`/`dirs_depth`） | 全部 | ✗ | 目录空间分析（Go 典型场景：goroutine 并发遍历 + 原子在途计数（无死锁收尾），目录树概览/指定深度占用排行/大文件排行（可按扩展名过滤）/结构统计（总量、最大深度、空目录），du 语义子树大小；go module 管理） |
 
-#### 客卿（客卿 agents：边车协议 + 自动发现启动注册）
+#### 客卿（多语言子代理：边车协议 + 自动发现启动注册）
 
 任意语言（Python/C++/Go/…）实现的子代理：**放置即自动发现 → 启动边车进程 → 握手拉取工具清单 → 注册为标准子代理**（`agent_list` 可见、`agent_load` 装载、`agent_run` 委派——与 TS 子代理完全同构）。设计原则：**实现语言对模型透明**——子代理 = 工具 + 提示词（能力导向命名与描述），语言仅是工程组织维度。
 

@@ -2,7 +2,7 @@
 // 典型场景——文件/文本完整性校验：下载校验、去重检测、内容寻址、HMAC 签名比对。
 // 算法手写（零依赖 workspace 惯例保持）：SHA-256 / SHA-1 / MD5（FIPS 180-4 / RFC 1321）
 // + HMAC（RFC 2104）通用构造 + 文件分块流式读取（大文件恒定内存）。
-// 基于语言目录共享基础框架（cargo workspace 库 crate gebai-客卿-framework）。
+// 基于语言目录共享基础框架（cargo workspace 库 crate gebai-keqing-framework）。
 // 构建：cargo build --release（workspace 根或本 crate 均可），产物 target/release/hsh{exe}。
 use framework::{schema, tool_err, tool_ok, Json, ToolDef};
 

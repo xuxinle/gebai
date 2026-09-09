@@ -1,7 +1,7 @@
 // Rust 语言基础框架（歌白客卿协议 v2，见 keqing/README.md）。
 //
 // 单文件零依赖（纯标准库）：语言目录 keqing/rust/ 下共享本 crate；每个子代理项目
-// （语言目录下的二级目录）一个 main.rs——依赖 gebai-客卿-framework 后用 framework::register_tool
+// （语言目录下的二级目录）一个 main.rs——依赖 gebai-keqing-framework 后用 framework::register_tool
 // 注册专属工具 + main() 调用 framework::run() 即成完整边车驱动。
 // 一种语言派生任意多个子代理，实现语言对模型透明（模型只看到工具与提示词）。
 //

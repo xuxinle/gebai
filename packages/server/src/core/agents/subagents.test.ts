@@ -261,7 +261,7 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
   })
 })
 
-describe("客卿集成（客卿 agents：发现→注册→装载→调用）", () => {
+describe("客卿集成（多语言子代理：发现→注册→装载→调用）", () => {
   /** fake 协议驱动（bun -e 子进程）：init/tools.list/tool.call 三 op，工具名为裸名（注册表自动加 {agent}_ 前缀）。 */
   const fakeSpawn = (cmd: string[], opts: { env?: Record<string, string> }) => {
     const proc = Bun.spawn(cmd, { env: { ...process.env, ...opts.env }, stdout: "pipe", stderr: "pipe", stdin: "pipe" })
@@ -277,10 +277,10 @@ describe("客卿集成（客卿 agents：发现→注册→装载→调用）", 
   }
 
   test("选项注入后才启用发现；fake 客卿子代理注册/装载/工具调用全链路", async () => {
-    // 1) 未注入选项：discover 不做任何 客卿 发现（既有测试零影响的行为面）
+    // 1) 未注入选项：discover 不做任何客卿发现（既有测试零影响的行为面）
     const plain = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
     await plain.discover()
-    // 2) 注入 fake spawn：发现 fake_客卿子代理并注册
+    // 2) 注入 fake spawn：发现 fake 客卿子代理并注册
     const registry = new ToolRegistry()
     const m = new SubAgentManager({ registry, preloadOverride: [] })
     m.setKeqingOpts({
@@ -383,10 +383,10 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
     expect(mgr.systemPromptInjection()).not.toContain("- code:")
   })
 
-  test("客卿 目录热加载：refreshIfChanged 在 TS 签名未变时也检查 客卿 签名（放置新目录即生效，无需重启）", async () => {
+  test("客卿目录热加载：refreshIfChanged 在 TS 签名未变时也检查客卿签名（放置新目录即生效，无需重启）", async () => {
     // fake spawn（bun -e 驱动，协议同 keqing/README）：两个同语言子代理先后放置，
     // 验证 ①多子代理并存注册 ②后放置的目录经 refreshIfChanged 被发现（修复前 TS 签名未变直接 return，
-    // 客卿 永不重扫）③对账回收（目录删除后 dispose）
+    // 客卿永不重扫）③对账回收（目录删除后 dispose）
     const fakeSpawn = (cmd: string[], opts: { env?: Record<string, string> }) => {
       const proc = Bun.spawn(cmd, { env: { ...process.env, ...opts.env }, stdout: "pipe", stderr: "pipe", stdin: "pipe" })
       return {
@@ -402,7 +402,7 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
     const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs")
     const { join } = await import("node:path")
     const { tmpdir } = await import("node:os")
-    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-客卿-hot-"))
+    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-keqing-hot-"))
     // fake 驱动：python 脚本（与官方驱动同进程模式，避免 bun-on-bun 边车组合的平台差异）
     const driver = join(fakeRoot, "drv.py")
     writeFileSync(
@@ -441,10 +441,10 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
       const mgrAny = m as unknown as { loadErrors?: Map<string, string> }
       console.log("discover loadErrors:", JSON.stringify([...(mgrAny.loadErrors?.entries() ?? [])]))
       expect(m.def("hot_one")).toBeDefined() // 首扫发现
-      // 后放置第二个目录：TS 签名未变，客卿 签名变化 → refreshIfChanged 应发现
+      // 后放置第二个目录：TS 签名未变，客卿签名变化 → refreshIfChanged 应发现
       mk("hot_two")
       await m.refreshIfChanged()
-      expect(m.def("hot_two")).toBeDefined() // 修复前这里失败（永不重扫 客卿）
+      expect(m.def("hot_two")).toBeDefined() // 修复前这里失败（永不重扫客卿）
       // 同语言多子代理并存：两个 fake（同 bun 驱动）均注册且工具各自独立
       expect(m.list().map((d) => d.name)).toContain("hot_one")
       expect(m.list().map((d) => d.name)).toContain("hot_two")
@@ -461,7 +461,7 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
   })
 })
 
-describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIGN「客卿」）", () => {
+describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN「客卿」）", () => {
   /** fake 协议驱动（python 子进程，同上文热加载用例）：上报 foo/bar 两工具，tool.call 回显 FAKE_NAME。 */
   const fakeSpawn2 = (cmd: string[], opts: { env?: Record<string, string> }) => {
     const proc = Bun.spawn(cmd, { env: { ...process.env, ...opts.env }, stdout: "pipe", stderr: "pipe", stdin: "pipe" })
@@ -488,14 +488,14 @@ describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIG
       join(d, "agent.json"),
       JSON.stringify({ name, description, protocol: 2, command: ["python", join(root, "drv.py")], env: { FAKE_NAME: name } }),
     )
-    writeFileSync(join(d, "PROMPT.md"), `${name} 客卿 提示词正文`)
+    writeFileSync(join(d, "PROMPT.md"), `${name} 客卿提示词正文`)
     return d
   }
 
   test("同名 TS+客卿：描述/提示词拼接、工具并集（同名冲突 TS 优先）、装载统一命名空间、卸载注销全部", async () => {
     const { mkdtempSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
-    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-客卿-merge-"))
+    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-keqing-merge-"))
     const driver = join(fakeRoot, "drv.py")
     writeFileSync(
       driver,
@@ -511,16 +511,16 @@ describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIG
         "    req = json.loads(line)",
         "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 2}})",
         "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
-        "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"客卿-\" + req[\"args\"][\"tool\"]}})",
+        "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"keqing-\" + req[\"args\"][\"tool\"]}})",
       ].join(String.fromCharCode(10)) + String.fromCharCode(10),
     )
     try {
-      writeFakeAgent(fakeRoot, "mergx", "客卿 侧描述")
+      writeFakeAgent(fakeRoot, "mergx", "客卿侧描述")
       const registry = new ToolRegistry()
       const m = new SubAgentManager({ registry, preloadOverride: [] })
       m.setKeqingOpts({ roots: [fakeRoot], spawn: fakeSpawn2 as never } as never)
       await m.discover()
-      // 客卿 先发现（单侧）；再补 TS 贡献（register 写入贡献集并重建合并视图）
+      // 客卿先发现（单侧）；再补 TS 贡献（register 写入贡献集并重建合并视图）
       m.register({
         name: "mergx",
         description: "TS 侧描述",
@@ -528,8 +528,8 @@ describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIG
         tools: { crc32: mkTsTool("crc32", "ts-crc32"), foo: mkTsTool("foo", "ts-foo") },
       })
       const def = m.def("mergx")!
-      expect(def.description).toBe("TS 侧描述；客卿 侧描述")
-      expect(def.systemPrompt).toBe("TS 提示词正文\n\nmergx 客卿 提示词正文")
+      expect(def.description).toBe("TS 侧描述；客卿侧描述")
+      expect(def.systemPrompt).toBe("TS 提示词正文\n\nmergx 客卿提示词正文")
       expect(Object.keys(def.tools ?? {}).sort()).toEqual(["bar", "crc32", "foo"])
       // 同名工具冲突：TS 贡献优先（执行体为 ts 实现）
       const fooOut = await def.tools!.foo!.execute({}, {} as never)
@@ -538,7 +538,7 @@ describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIG
       await m.load("mergx")
       for (const t of ["mergx_crc32", "mergx_foo", "mergx_bar"]) expect(registry.resolve(t)).toBeDefined()
       const barOut = await registry.resolve("mergx_bar")!.tool.execute({ tool: "bar" }, {} as never)
-      expect(barOut.output).toBe("客卿-bar")
+      expect(barOut.output).toBe("keqing-bar")
       // 卸载：全部合并工具（两侧）一并注销
       m.unload("mergx")
       for (const t of ["mergx_crc32", "mergx_foo", "mergx_bar"]) expect(registry.resolve(t)).toBeUndefined()
@@ -548,10 +548,10 @@ describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIG
     }
   })
 
-  test("热加载重合并：manifest 修改后重拉并重合并；TS 目录重扫不丢 客卿 贡献（贡献集独立缓存）", async () => {
+  test("热加载重合并：manifest 修改后重拉并重合并；TS 目录重扫不丢客卿贡献（贡献集独立缓存）", async () => {
     const { mkdtempSync, utimesSync, statSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
-    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-客卿-remerge-"))
+    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-keqing-remerge-"))
     const driver = join(fakeRoot, "drv.py")
     writeFileSync(
       driver,
@@ -576,14 +576,14 @@ describe("跨语言同名合并（TS + 客卿 贡献集 → 合并视图，DESIG
       m.setKeqingOpts({ roots: [fakeRoot], spawn: fakeSpawn2 as never } as never)
       await m.discover()
       expect(m.def("mergx")?.description).toBe("v1")
-      // 客卿 变化（改 manifest description）：重拉 → 重合并（视图更新）
+      // 客卿变化（改 manifest description）：重拉 → 重合并（视图更新）
       const mf = join(agentDir, "agent.json")
       writeFileSync(mf, JSON.stringify({ name: "mergx", description: "v2", protocol: 2, command: ["python", driver], env: { FAKE_NAME: "mergx" } }))
       const st = statSync(mf)
       utimesSync(mf, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
       await m.refreshIfChanged()
       expect(m.def("mergx")?.description).toBe("v2")
-      // TS 目录签名变化触发全量重扫：客卿 贡献不丢（独立贡献集 + 进程级缓存水合）
+      // TS 目录签名变化触发全量重扫：客卿贡献不丢（独立贡献集 + 进程级缓存水合）
       const probe = join(import.meta.dirname, "..", "..", "sub-agents", "code.ts")
       const st2 = statSync(probe)
       utimesSync(probe, new Date(st2.atimeMs + 6000), new Date(st2.mtimeMs + 6000))
