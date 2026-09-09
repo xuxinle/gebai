@@ -40,11 +40,11 @@ native-agents/                    # 仓库根（构建复制到 dist/，二进�
         ├── PROMPT.md
         └── main.go               # import fw "gebai/native-framework/framework"
 
-{GEBAI_HOME}/agents/               # 用户自建（放置即生效；同名覆盖内置）
+{GEBAI_HOME}/agents/               # 用户自建（放置即生效；manifest 同名去重时用户自建胜出；与 TS 子代理同名则跨语言合并）
 └── my-agent/
     ├── agent.json
     ├── main.py / main.exe / …     # 任意语言驱动
-    └── PROMPT.md
+    └── PROMPT.md                  # 可选（缺失即本侧不贡献提示词，交由合并层）
 ```
 
 ## manifest（agent.json）
@@ -52,11 +52,11 @@ native-agents/                    # 仓库根（构建复制到 dist/，二进�
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `name` | ✓ | 子代理名（`[a-z0-9_]+`，工具注册为 `{name}_{tool}`） |
-| `description` | ✓ | 一句话能力描述（agent_list/系统提示词注入用；能力导向，语言仅作次要说明） |
+| `description` | | 一句话能力描述（agent_list/系统提示词注入用；能力导向，语言仅作次要说明）。**可省略/留空**：留空即「本侧不贡献」，与同名 TS 子代理跨语言合并时由另一侧提供或合并层兜底 |
 | `protocol` | ✓ | 协议版本（当前 `1`） |
 | `command` | ✓ | 启动命令（字符串数组；占位符见下表） |
 | `driver` | | command 引用的驱动脚本文件名（相对 manifest 目录；`{driver}` 占位解析用） |
-| `prompt` | | 系统提示词文件名（缺省 `PROMPT.md`；正文注入子代理系统提示词，frontmatter 剥离） |
+| `prompt` | | 系统提示词文件名（缺省 `PROMPT.md`；正文注入子代理系统提示词，frontmatter 剥离；**缺失/留空即本侧不贡献**，与 description 同语义——交给合并层兜底） |
 | `cwd` | | 工作目录（缺省 manifest 目录；支持 `{GEBAI_HOME}` 占位） |
 | `env` | | 附加环境变量（值支持 `{GEBAI_HOME}` 占位；`GEBAI_HOME`/`GEBAI_AGENT_DIR` 总是注入） |
 | `build` | | 编译型语言构建引导（见下节） |
@@ -117,6 +117,26 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 - 不设内部超时（宿主侧超时：默认 120s，tool.call 可按调用参数 `timeout` 秒延长）
 - 进程意外退出由宿主自动重启（崩溃自愈，在途请求重发一次）；连续快速退出 3 次放弃自动重启（防抖动风暴），下次调用再拉起
 
+## 跨语言同名合并（TS + native 共同贡献一个子代理）
+
+TS 侧（`packages/server/src/sub-agents/{name}.ts`）与 native 侧（manifest 目录）可**同名共存**：两侧定义作为「贡献集」经 `mergeSubAgentDefs`（`core/agents/merge.ts`，纯函数）合并为同一个子代理，不再同名覆盖。合并语义：
+
+| 字段 | 合并规则 |
+|------|----------|
+| `description` | 非空项依次拼接（`；`分隔）；全空生成兜底描述 |
+| `systemPrompt` | 非空项依次拼接（空行分隔）；全空生成兜底引导句 |
+| `tools` | 并集（同名工具保留 TS 侧并告警）；装载后两侧工具同一 `{name}_` 命名空间 |
+| `dependencies` / `envVars` | 并集（envVars 同名取首个） |
+| `requiresApproval` | 对象合并 |
+| `preload` | 取或（任一侧 true 即 true） |
+| `projectRoot` / `writeGuard` | 取首个非空（TS 优先） |
+
+配套约定——**「只在一处定义、其他地方留空」**：native manifest 的 `description` 可省略/留空、`PROMPT.md` 可缺失（留空即本侧不贡献该字段，不再生成占位文本）；TS 侧 def 同样可留空 description/systemPrompt。两侧全空时合并层生成兜底描述与引导句（agent_list 恒有可读条目）。
+
+分工样例（内置 `hsh`）：基础工具 `hsh_crc32`（CRC-32，纯轻量逻辑）由 TS 侧 `sub-agents/hsh.ts` 贡献（描述/提示词留空），哈希/签名/校验等重活由 Rust 边车（`native-agents/rust/hsh/`）贡献——「基础工具 TS 写、特殊工具其他语言写」。
+
+热加载：任一侧目录签名变化 → 重扫该侧贡献集 → 重算合并视图（未装载会话与新会话生效；已装载会话沿用装载时定义，与 TS 热加载同语义）。卸载时两侧合并工具一并注销。
+
 ## 宿主行为（src/core/agents/sidecar.ts）
 
 - 惰性启动、请求 id 配对（并发复用同一进程）、启动串行化
@@ -138,7 +158,7 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 |--------|------|------|----------|
 | `docqa` | Python | `docqa_index`（BM25 索引）/ `docqa_query`（检索+高亮）/ `docqa_status`（+ 基础 run/pip/status，tools.py 合并） | 本地文档问答（RAG 检索层） |
 | `imgproc` | C++ | `imgproc_info` / `imgproc_grayscale` / `imgproc_resize` / `imgproc_stats` | 图像处理（stb 单头库） |
-| `hsh` | Rust | `hsh_sha256` / `hsh_sha1` / `hsh_md5` / `hsh_hmac_sha256` / `hsh_verify` | 哈希校验（文件/文本完整性） |
+| `hsh` | Rust + TS | `hsh_sha256` / `hsh_sha1` / `hsh_md5` / `hsh_hmac_sha256` / `hsh_verify` / `hsh_crc32`（TS 侧贡献，跨语言合并示例） | 哈希校验（文件/文本完整性） |
 | `dirs` | Go | `dirs_tree` / `dirs_du` / `dirs_top` / `dirs_depth` | 目录空间分析（并发遍历） |
 
 Python 语言目录只保留 `docqa` 一个项目：基础能力（REPL/pip/status）经 `tools.py` 合并模式与其共存（`docqa_run`/`docqa_pip`/`docqa_status`）。

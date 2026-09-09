@@ -66,7 +66,10 @@ describe("loadConfig 模式与密钥解析", () => {
     const keys = ["GEBAI_FEISHU_BOT_NOTIFY_TOOLS", "GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT", "GEBAI_FEISHU_BOT_AUTO_APPROVE"] as const
     const prev = keys.map((k) => [k, process.env[k]] as const)
     try {
-      for (const k of keys) delete process.env[k]
+      // 置空串而非删除：loadConfig 内 loadDotEnv 会在变量未定义时从仓库根 .env 回填
+      //（本机飞书通道真实配置存在这些变量），删除后测试结果依赖宿主 .env 内容；空串已定义不
+      // 触发回填且 bool 解析为 false——对宿主环境封闭
+      for (const k of keys) process.env[k] = ""
       const off = loadConfig()
       expect(off.feishuBotNotifyTools).toBe(false)
       expect(off.feishuBotNotifyAssistant).toBe(false)

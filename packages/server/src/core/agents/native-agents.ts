@@ -2,18 +2,20 @@
  * 多语言子代理发现器（core/agents/native-agents.ts）：扫描 manifest（agent.json）→ 启动
  * 边车进程 → init/tools.list 握手 → 构造标准 SubAgentDef 注册进 SubAgentManager。
  *
- * 发现范围（后者同名覆盖前者）：
+ * 发现范围（同名跨语言合并，见 README「跨语言同名合并」）：
  *   1. 内置源 native-agents/（仓库根，按实现语言分目录：python/cpp/rust/…——语言目录下共享
  *      基础框架驱动，每个二级目录一个子代理项目；dist 形态产物同构、二进制形态物化
  *      {GEBAI_HOME}/vendor/native-agents/——安装包预置物化；构建时过滤 venv/编译产物）
- *   2. 用户自建 {GEBAI_HOME}/agents/{name}/agent.json（放一个目录即成一个子代理，任意语言）
+ *   2. 用户自建 {GEBAI_HOME}/agents/{name}/agent.json（放一个目录即成一个子代理，任意语言；
+ *      与内置源同名去重时后者胜——manifest 层面的同名覆盖，与 TS+native 合并是两回事）
  *
  * 设计原则：实现语言对模型透明——子代理 = 工具 + 提示词（能力导向命名与描述），语言仅是
  * 工程组织维度；一种语言可派生任意多个子代理项目（manifest 可选 build 声明编译引导）。
  *
  * manifest（agent.json）字段：
  *   name*         子代理名（[a-z0-9_]+，即 agent_list/agent_load 名；目录名不必相同）
- *   description*  一句话能力描述
+ *   description   一句话能力描述（可省略/留空——留空即“本侧不贡献”，同名跨语言合并时由另一侧
+ *                提供或合并层兜底；单侧独立存在时 mergeSubAgentDefs 生成兜底描述）
  *   protocol*     协议版本（当前 1）
  *   command*      启动命令（字符串数组；占位符：{python}=解析出的解释器、{driver}=driver 脚本绝对路径）
  *   driver        command 占位 {driver} 引用的脚本文件名（相对 manifest 目录）
@@ -102,7 +104,6 @@ export function parseManifest(raw: string, source: string): { manifest?: NativeA
   const protocol = Number(json.protocol ?? 0)
   const command = Array.isArray(json.command) ? json.command.map((c) => String(c)) : null
   if (!/^[a-z0-9_]+$/.test(name)) return { error: `${source}: name 非法（须 [a-z0-9_]+）: ${name}` }
-  if (!description) return { error: `${source}: 缺 description` }
   if (protocol !== 1) return { error: `${source}: 不支持的协议版本 ${protocol}（当前支持 1）` }
   if (!command || !command.length || command.some((c) => !c.trim())) return { error: `${source}: command 须为非空字符串数组` }
   return {
@@ -298,6 +299,8 @@ export async function launchNativeAgent(
   opts: NativeAgentRunnerOptions = {},
 ): Promise<{ def: SubAgentDef; sidecar: AgentSidecar }> {
   const home = resolveGebaiHome()
+  // 描述统一 trim：manifest 留空即空串（不贡献，交由合并层；单侧时 mergeSubAgentDefs 兜底）
+  const description = String(manifest.description ?? "").trim()
   const pythonCmd = opts.resolvePython ? opts.resolvePython() : resolvePythonCommand(opts.env)
   // 编译型语言构建引导：可执行体缺失时先执行 manifest.build（如 rustc 直编 / cl 编译），
   // 产物落盘后正常启动；失败抛错记 loadErrors，不阻断其他子代理
@@ -308,12 +311,10 @@ export async function launchNativeAgent(
   let systemPrompt = ""
   if (existsSync(promptFile)) {
     const raw = readFileSync(promptFile, "utf8")
-    // frontmatter（--- description/… ---）剥离：description 已由 manifest 提供，只取正文
+    // frontmatter（--- description/… ---）剥离：description 由 manifest/合并层提供，只取正文
     systemPrompt = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim()
   }
-  if (!systemPrompt) {
-    systemPrompt = `你是多语言子代理 ${manifest.name}。${manifest.description}`
-  }
+  // 提示词留空 = 本侧不贡献 systemPrompt（交由跨语言合并层兜底/拼接——只在一处定义、其他地方留空）
   const cwd = manifest.cwd ? manifest.cwd.replace(/\{GEBAI_HOME\}/g, home) : dir
   // 基础环境继承：保留 PATH/SYSTEMROOT 等进程基础变量（Windows 下 python 编解码/subprocess 初始化依赖
   // SYSTEMROOT；极小 env 会让驱动启动即卡死无报错），manifest env 覆盖同名项；GEBAI_AGENT_DIR
@@ -332,7 +333,7 @@ export async function launchNativeAgent(
     spawn: opts.spawn,
   })
   if (opts.skipHandshake) {
-    return { def: { name: manifest.name, description: manifest.description, systemPrompt }, sidecar }
+    return { def: { name: manifest.name, description, systemPrompt }, sidecar }
   }
   const info = await sidecar.init()
   if (info.name !== manifest.name) {
@@ -342,7 +343,7 @@ export async function launchNativeAgent(
   const tools = (await sidecar.toolsList()) as Array<{ name: string; description: string; parameters: { type: string; properties: Record<string, unknown> } }>
   const toolSet: Record<string, Tool> = {}
   for (const t of tools) toolSet[t.name] = sidecarTool(sidecar, t.name, t, manifest.name)
-  const def = { name: manifest.name, description: manifest.description, systemPrompt, tools: toolSet }
+  const def = { name: manifest.name, description, systemPrompt, tools: toolSet }
   liveSidecars.get(manifest.name)?.dispose("重新启动（热加载重扫）")
   liveSidecars.set(manifest.name, sidecar)
   return { def, sidecar }

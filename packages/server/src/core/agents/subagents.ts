@@ -4,6 +4,7 @@ import type { SubAgentDef } from "../base/types"
 import type { ToolRegistry } from "../base/registry"
 import type { SubAgentInfo } from "@gebai/sdk"
 import { parseSubAgentMd } from "./sub-agent-md"
+import { mergeSubAgentDefs } from "./merge"
 import { discoverNativeAgents, disposeNativeAgentsNotIn, nativeAgentsEnabled, nativeAgentRoots, nativeAgentsSignature, type NativeAgentRunnerOptions } from "./native-agents"
 
 export interface SubAgentManagerOptions {
@@ -20,8 +21,12 @@ export interface SubAgentManagerOptions {
  *  过滤态入缓存会让一个实例的启停策略泄漏给同进程所有后续实例（跨实例污染）。 */
 let discoveredDefsCache: SubAgentDef[] | null = null
 let discoveredSigCache: string | null = null
-/** native（多语言）子代理目录签名缓存（与 TS 子代理目录签名拼为一套热加载判定）。 */
+/** native（多语言）子代理目录签名缓存（与 TS 子代理目录签名拼为一套热加载判定）；配套
+ *  nativeDefsCache 缓存最近一次成功发现的定义集（热加载幂等水合：签名未变不重拉起边车）。 */
 let nativeSigCache: string | null = null
+let nativeDefsCache: SubAgentDef[] | null = null
+/** 最近一次 native 发现的失败清单（name → 原因；与 nativeDefsCache 配套水合进实例 loadErrors）。 */
+let nativeErrorsCache: Array<[string, string]> | null = null
 /** 首次扫描的加载错误缓存（与 defs 缓存配套，跨实例水合同源）：name → 失败原因（import 抛错/
  *  缺 def 导出等）。签名未变的后续 discover 直接复用；self_optimize 修复文件后 mtime 变化触发重扫更新。 */
 let discoveredErrorsCache: Map<string, string> | null = null
@@ -53,6 +58,14 @@ async function subagentsDirSignature(dir: string): Promise<string | null> {
 
 export class SubAgentManager {
   private defs = new Map<string, SubAgentDef>()
+  /** TS 侧贡献集（sub-agents 目录扫描/bundle 注册表）：与 nativeDefs 经
+   *  rebuildMergedDefs 合成对外 defs（跨语言同名定义合并视图）。 */
+  private tsDefs = new Map<string, SubAgentDef>()
+  /** 手工注册贡献集（register 动态注册）：独立于目录扫描——热加载重扫（磁盘签名变化，含并行进程
+   *  改动目录的跨进程竞态）不冲掉运行期扩展，与 removedDefs 同样跨重扫存活；同名时与文件定义合并。 */
+  private manualDefs = new Map<string, SubAgentDef>()
+  /** native（多语言）侧贡献集（manifest 发现）：同一合成规则。 */
+  private nativeDefs = new Map<string, SubAgentDef>()
   private loaded = new Set<string>()
   private registry: ToolRegistry
   private preloadOverride?: string[]
@@ -61,6 +74,20 @@ export class SubAgentManager {
    *  null = 显式禁用（沙箱模式/GEBAI_NATIVE_AGENTS=off）。 */
   private nativeAgentsOpts: NativeAgentRunnerOptions | null | undefined
 
+  /** 同名贡献集合并视图重建（跨语言合并，DESIGN「多语言子代理」）：tsDefs/nativeDefs 任一变化后
+   *  调用——逐名 mergeSubAgentDefs（TS 贡献在前、native 在后）重算全量 defs，再过滤实例级
+   *  removedDefs。native 定义独立存于贡献集，TS 目录签名变化触发的全量重扫不影响 native 侧
+   *  （重扫只重建 tsDefs 后再次合并）；已装载会话沿用装载时的定义（不追踪热合并，与 TS 热加载同语义）。 */
+  private rebuildMergedDefs(): void {
+    const names = new Set<string>([...this.tsDefs.keys(), ...this.manualDefs.keys(), ...this.nativeDefs.keys()])
+    this.defs.clear()
+    for (const n of names) {
+      const parts = [this.tsDefs.get(n), this.manualDefs.get(n), this.nativeDefs.get(n)].filter((d): d is SubAgentDef => !!d)
+      this.defs.set(n, parts.length === 1 ? parts[0]! : mergeSubAgentDefs(n, parts))
+    }
+    for (const n of this.removedDefs) this.defs.delete(n)
+  }
+
   /** 注入 native 子代理发现选项（boot/compose 接线；roots 覆盖发现根目录供测试隔离）。 */
   setNativeAgentsOpts(opts: NativeAgentRunnerOptions | null): void {
     this.nativeAgentsOpts = opts
@@ -68,9 +95,6 @@ export class SubAgentManager {
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
-  /** 上一次 native 发现扫描的名单（对账基线：本次消失的从中移除——目录删除即失效）。 */
-  private lastNativeNames: Set<string> | null = null
-  private lastNativeNamesPrev: Set<string> | null = null
   /** 最近一次扫描中加载失败的子Agent（name → 失败原因）：模型侧可见（load/agent_run 的未知子Agent
    *  错误附原因），self_optimize 写错文件（import 抛错/缺 def 导出）能立即看到根因并修复——
    *  仅 console.warn 时模型不可见，自修复闭环断在「未知子Agent」无解释。 */
@@ -87,20 +111,20 @@ export class SubAgentManager {
     const sig = await subagentsDirSignature(dir)
     // 命中缓存（签名未变，或 bundled 形态注册表不可变）：直接复用扫描结果
     if (discoveredDefsCache && sig === discoveredSigCache) {
-      this.defs.clear()
-      for (const def of discoveredDefsCache) this.defs.set(def.name, def)
-      for (const n of this.removedDefs) this.defs.delete(n)
+      this.tsDefs.clear()
+      for (const def of discoveredDefsCache) this.tsDefs.set(def.name, def)
       this.loadErrors = new Map(discoveredErrorsCache ?? [])
+      this.rebuildMergedDefs()
       await this.discoverNativeIfChanged()
       await this.preload()
       return
     }
     if (sig === null) {
       // dist/二进制模式：源码目录不存在，回退到构建时生成的 bundle 注册表（不可变，写入缓存）
-      this.defs.clear()
+      this.tsDefs.clear()
       try {
         const { bundledDefs } = await import("../subagents.bundle.generated")
-        for (const def of bundledDefs) this.defs.set(def.name, def)
+        for (const def of bundledDefs) this.tsDefs.set(def.name, def)
       } catch (err) {
         // 必抛错，绝不静默降级为空列表——启动「成功」但没有任何子Agent 比启动失败更难排查；
         // 加载失败常见根因是子Agent 模块的模块作用域副作用（如第三方包解析，见 DESIGN「打包闭环」铁律）
@@ -110,15 +134,15 @@ export class SubAgentManager {
       }
       // 模块缓存存「未过滤全集」（实例级 removedDefs 过滤只作用于实例视图——启停名单是实例策略，
       // 写进进程缓存会污染后续所有实例的发现结果）
-      discoveredDefsCache = [...this.defs.values()]
+      discoveredDefsCache = [...this.tsDefs.values()]
       discoveredSigCache = null
-      for (const n of this.removedDefs) this.defs.delete(n)
+      this.rebuildMergedDefs()
       await this.discoverNativeIfChanged()
       await this.preload()
       return
     }
     // 全量扫描（首次或目录签名变化——热加载）：重扫前清空（删除的文件不再保留旧定义）
-    this.defs.clear()
+    this.tsDefs.clear()
     this.loadErrors.clear()
     const entries = await readdir(dir, { withFileTypes: true })
     for (const e of entries) {
@@ -130,7 +154,7 @@ export class SubAgentManager {
           const mtime = (await stat(join(dir, e.name)).catch(() => null))?.mtimeMs ?? 0
           const mod = await import(`../../sub-agents/${base}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
-          if (def) this.defs.set(def.name, def)
+          if (def) this.tsDefs.set(def.name, def)
           else {
             const msg = `${base}.ts 未导出 def（须 export const def: SubAgentDef）`
             console.warn(`[subagents] ${msg}，已跳过`)
@@ -152,7 +176,7 @@ export class SubAgentManager {
             const mtime = (await stat(tsEntry).catch(() => null))?.mtimeMs ?? 0
             const mod = await import(`../../sub-agents/${base}/${base}?t=${mtime}`)
             const def = mod.def as SubAgentDef | undefined
-            if (def) this.defs.set(def.name, def)
+            if (def) this.tsDefs.set(def.name, def)
             else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
           } catch (err) {
             console.warn(`[subagents] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
@@ -163,47 +187,43 @@ export class SubAgentManager {
         }
       }
     }
-    // 同 bundle 分支：先写未过滤全集缓存，实例级 removedDefs 过滤仅在实例 defs 上生效
-    discoveredDefsCache = [...this.defs.values()]
+    // 同 bundle 分支：先写未过滤全集缓存，实例级 removedDefs 过滤仅在合并视图上生效
+    discoveredDefsCache = [...this.tsDefs.values()]
     discoveredSigCache = sig
     discoveredErrorsCache = new Map(this.loadErrors)
-    for (const n of this.removedDefs) this.defs.delete(n)
+    this.rebuildMergedDefs()
     await this.discoverNativeIfChanged()
     await this.preload()
   }
 
   /** native（多语言）子代理发现（discover 尾部调用）：仅 boot 显式接线（setNativeAgentsOpts）且
    *  本地形态（非沙箱部署、GEBAI_NATIVE_AGENTS≠off）时启用——测试不注入选项即零影响；
-   *  目录签名变化才重拉起（含进程级边车注册表对账回收）；同名覆盖 TS 子代理（用户自建优先）。
-   *  失败安全：单项启动/握手失败记 loadErrors（模型可见根因）不阻断，整体失败静默跳过。 */
+   *  目录签名变化才重拉起（含进程级边车注册表对账回收）。发现的定义写入 nativeDefs 贡献集，
+   *  与 TS 同名定义经 rebuildMergedDefs 合并（跨语言合并视图）——不再「同名覆盖」，两侧共存。
+   *  进程级 nativeDefsCache 缓存启动结果（热加载幂等：实例重新 discover 而 native 签名未变时
+   *  不重拉起边车，直接水合缓存）；单项失败记 loadErrors（模型可见根因）不阻断。 */
   private async discoverNativeIfChanged(): Promise<void> {
     if (this.nativeAgentsOpts == null || !nativeAgentsEnabled()) return
     const roots = this.nativeAgentsOpts.roots ?? nativeAgentRoots()
     const nativeSig = await nativeAgentsSignature(roots)
-    if (nativeSigCache !== null && nativeSig === nativeSigCache) return // 未变化：零成本跳过
+    if (nativeSigCache !== null && nativeSig === nativeSigCache) {
+      // 签名未变：从进程级缓存水合（含首次发现启动失败重试的窗口——缓存未建立时仍会真实重拉）
+      if (nativeDefsCache) {
+        this.nativeDefs = new Map([...nativeDefsCache].map((d) => [d.name, d]))
+        for (const [name, err] of nativeErrorsCache ?? []) this.loadErrors.set(name, err)
+        this.rebuildMergedDefs()
+      }
+      return
+    }
     try {
       const { defs: nativeDefs, errors } = await discoverNativeAgents(this.nativeAgentsOpts ?? {})
-      // 对账：上次存在、本次消失的 native 子代理从 defs 移除（目录删除即失效；边车由 disposeNativeAgentsNotIn 回收）。
-      // 仅移除「本管理器上一次发现的 native 名单」里的名字——不碰 TS 子代理与测试桩手工 register 的定义
-      const keep = new Set(nativeDefs.map((d) => d.name))
-      for (const n of this.lastNativeNames ?? []) {
-        if (!keep.has(n)) this.defs.delete(n)
-      }
-      this.lastNativeNames = keep
-      for (const d of nativeDefs) this.defs.set(d.name, d)
+      this.nativeDefs = new Map(nativeDefs.map((d) => [d.name, d]))
       for (const [name, err] of errors) this.loadErrors.set(name, err)
-      // 缓存全集同步含 native defs（跨实例水合复用时同样可见）：先移除消失项再合入新名单
-      if (discoveredDefsCache) {
-        for (const d of nativeDefs) discoveredDefsCache = [...discoveredDefsCache.filter((x) => x.name !== d.name), d]
-        const nk = keep
-        discoveredDefsCache = discoveredDefsCache.filter((x) => !(this.lastNativeNamesPrev?.has(x.name) && !nk.has(x.name)))
-      }
-      this.lastNativeNamesPrev = new Set(keep)
-      if (discoveredErrorsCache) {
-        for (const [name, err] of errors) discoveredErrorsCache.set(name, err)
-      }
-      disposeNativeAgentsNotIn(nativeDefs.map((d) => d.name))
+      nativeDefsCache = nativeDefs
+      nativeErrorsCache = errors
       nativeSigCache = nativeSig
+      disposeNativeAgentsNotIn(nativeDefs.map((d) => d.name))
+      this.rebuildMergedDefs()
     } catch (err) {
       console.warn(`[subagents] native 子代理发现失败（已跳过）: ${(err as Error).message}`)
     }
@@ -215,7 +235,7 @@ export class SubAgentManager {
    *  测试桩手工 register 的管理器不因 load 意外扫入真实子Agent）。TS 签名与 native 签名各自判定：
    *  TS 变化走全量 discover（尾部含 native 检查），仅 native 变化只重拉 native（幂等跳过 TS 扫描）。 */
   async refreshIfChanged(): Promise<void> {
-    if (!discoveredDefsCache) return
+    if (!discoveredDefsCache && !nativeDefsCache) return
     const dir = join(import.meta.dirname, "..", "..", "sub-agents")
     const sig = await subagentsDirSignature(dir)
     if (sig !== null && sig !== discoveredSigCache) {
@@ -231,7 +251,7 @@ export class SubAgentManager {
     try {
       const md = await Bun.file(join(dir, base, `${base}.md`)).text()
       const { description, systemPrompt, dependencies } = parseSubAgentMd(base, md)
-      this.defs.set(base, dependencies?.length ? { name: base, description, systemPrompt, dependencies } : { name: base, description, systemPrompt })
+      this.tsDefs.set(base, dependencies?.length ? { name: base, description, systemPrompt, dependencies } : { name: base, description, systemPrompt })
     } catch (err) {
       const msg = `加载 ${base}/${base}.md 失败: ${String((err as Error).message || err)}`
       console.warn(`[subagents] ${msg}`)
@@ -349,15 +369,21 @@ export class SubAgentManager {
     return [...this.defs.values()]
   }
 
-  /** 动态注册子Agent 定义（测试/运行期扩展用；重名覆盖）。 */
+  /** 动态注册子Agent 定义（测试/运行期扩展用；重名覆盖）：写入手工贡献集并重建合并视图——
+   *  独立于目录扫描，热加载重扫不冲掉（运行期注册与磁盘定义同名时按合并规则共存）。 */
   register(def: SubAgentDef): void {
-    this.defs.set(def.name, def)
+    this.manualDefs.set(def.name, def)
+    this.rebuildMergedDefs()
   }
 
   /** 撤销子Agent 定义（能力开关关闭时隐藏，如 GEBAI_CRON_ENABLED=false 移除 cron）：未装载直接删除定义；
-   *  已装载则先注销其工具（注册表残留工具不清理会让模型可见但引擎不可用）；热加载重扫后仍保持移除。 */
+   *  已装载则先注销其工具（注册表残留工具不清理会让模型可见但引擎不可用）；热加载重扫后仍保持移除
+   *  （从三套贡献集删除，合并视图随重建消失）。 */
   unregister(name: string): void {
     if (this.loaded.has(name)) this.unload(name)
+    this.tsDefs.delete(name)
+    this.manualDefs.delete(name)
+    this.nativeDefs.delete(name)
     this.defs.delete(name)
     this.removedDefs.add(name)
   }

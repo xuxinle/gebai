@@ -24,7 +24,12 @@ test("parseManifest：合法/非法清单", () => {
   expect(parseManifest(JSON.stringify({ name: "Bad", description: "d", protocol: 1, command: ["x"] }), "t").error).toContain("name 非法")
   expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 2, command: ["x"] }), "t").error).toContain("协议版本")
   expect(parseManifest(JSON.stringify({ name: "a", description: "d", protocol: 1, command: [] }), "t").error).toContain("command")
-  expect(parseManifest(JSON.stringify({ name: "a", protocol: 1, command: ["x"] }), "t").error).toContain("description")
+  // description 可省略/留空：留空即本侧不贡献（交由跨语言合并层或 mergeSubAgentDefs 兜底），不再报错
+  const noDesc = parseManifest(JSON.stringify({ name: "a", protocol: 1, command: ["x"] }), "t")
+  expect(noDesc.error).toBeUndefined()
+  expect(noDesc.manifest?.description).toBe("")
+  const blankDesc = parseManifest(JSON.stringify({ name: "a", description: "   ", protocol: 1, command: ["x"] }), "t")
+  expect(blankDesc.manifest?.description).toBe("")
   // build 字段解析：合法保留、非法项忽略
   const withBuild = parseManifest(
     JSON.stringify({

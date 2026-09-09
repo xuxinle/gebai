@@ -460,3 +460,140 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
     }
   })
 })
+
+describe("跨语言同名合并（TS + native 贡献集 → 合并视图，DESIGN「多语言子代理」）", () => {
+  /** fake 协议驱动（python 子进程，同上文热加载用例）：上报 foo/bar 两工具，tool.call 回显 FAKE_NAME。 */
+  const fakeSpawn2 = (cmd: string[], opts: { env?: Record<string, string> }) => {
+    const proc = Bun.spawn(cmd, { env: { ...process.env, ...opts.env }, stdout: "pipe", stderr: "pipe", stdin: "pipe" })
+    return {
+      stdin: proc.stdin,
+      stdout: proc.stdout as unknown as ReadableStream<Uint8Array>,
+      stderr: proc.stderr as unknown as ReadableStream<Uint8Array>,
+      kill: () => proc.kill(),
+      get killed() {
+        return proc.killed
+      },
+    }
+  }
+  const mkTsTool = (name: string, marker: string): import("../base/types").Tool => ({
+    name,
+    description: `${marker} 工具`,
+    parameters: { type: "object" as const, properties: {} },
+    execute: async () => ({ output: marker }),
+  })
+  const writeFakeAgent = (root: string, name: string, description: string) => {
+    const d = join(root, name)
+    mkdirSync(d, { recursive: true })
+    writeFileSync(
+      join(d, "agent.json"),
+      JSON.stringify({ name, description, protocol: 1, command: ["python", join(root, "drv.py")], env: { FAKE_NAME: name } }),
+    )
+    writeFileSync(join(d, "PROMPT.md"), `${name} native 提示词正文`)
+    return d
+  }
+
+  test("同名 TS+native：描述/提示词拼接、工具并集（同名冲突 TS 优先）、装载统一命名空间、卸载注销全部", async () => {
+    const { mkdtempSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-native-merge-"))
+    const driver = join(fakeRoot, "drv.py")
+    writeFileSync(
+      driver,
+      [
+        "import json, os, sys",
+        "sys.stdout.reconfigure(encoding=\"utf-8\", newline=chr(10))",
+        "sys.stdin.reconfigure(encoding=\"utf-8\")",
+        "TOOLS = [{\"name\": \"foo\", \"description\": \"native foo\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}, {\"name\": \"bar\", \"description\": \"native bar\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}]",
+        "def send(o):",
+        "    sys.stdout.write(json.dumps(o) + chr(10))",
+        "    sys.stdout.flush()",
+        "for line in sys.stdin:",
+        "    req = json.loads(line)",
+        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1}})",
+        "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
+        "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"native-\" + req[\"args\"][\"tool\"]}})",
+      ].join(String.fromCharCode(10)) + String.fromCharCode(10),
+    )
+    try {
+      writeFakeAgent(fakeRoot, "mergx", "native 侧描述")
+      const registry = new ToolRegistry()
+      const m = new SubAgentManager({ registry, preloadOverride: [] })
+      m.setNativeAgentsOpts({ roots: [fakeRoot], spawn: fakeSpawn2 as never } as never)
+      await m.discover()
+      // native 先发现（单侧）；再补 TS 贡献（register 写入贡献集并重建合并视图）
+      m.register({
+        name: "mergx",
+        description: "TS 侧描述",
+        systemPrompt: "TS 提示词正文",
+        tools: { crc32: mkTsTool("crc32", "ts-crc32"), foo: mkTsTool("foo", "ts-foo") },
+      })
+      const def = m.def("mergx")!
+      expect(def.description).toBe("TS 侧描述；native 侧描述")
+      expect(def.systemPrompt).toBe("TS 提示词正文\n\nmergx native 提示词正文")
+      expect(Object.keys(def.tools ?? {}).sort()).toEqual(["bar", "crc32", "foo"])
+      // 同名工具冲突：TS 贡献优先（执行体为 ts 实现）
+      const fooOut = await def.tools!.foo!.execute({}, {} as never)
+      expect(fooOut.output).toBe("ts-foo")
+      // 装载：两侧工具统一进 mergx_ 命名空间
+      await m.load("mergx")
+      for (const t of ["mergx_crc32", "mergx_foo", "mergx_bar"]) expect(registry.resolve(t)).toBeDefined()
+      const barOut = await registry.resolve("mergx_bar")!.tool.execute({ tool: "bar" }, {} as never)
+      expect(barOut.output).toBe("native-bar")
+      // 卸载：全部合并工具（两侧）一并注销
+      m.unload("mergx")
+      for (const t of ["mergx_crc32", "mergx_foo", "mergx_bar"]) expect(registry.resolve(t)).toBeUndefined()
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true })
+      await new Promise((r) => setTimeout(r, 50)) // 边车进程退出窗口
+    }
+  })
+
+  test("热加载重合并：manifest 修改后重拉并重合并；TS 目录重扫不丢 native 贡献（贡献集独立缓存）", async () => {
+    const { mkdtempSync, utimesSync, statSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-native-remerge-"))
+    const driver = join(fakeRoot, "drv.py")
+    writeFileSync(
+      driver,
+      [
+        "import json, os, sys",
+        "sys.stdout.reconfigure(encoding=\"utf-8\", newline=chr(10))",
+        "sys.stdin.reconfigure(encoding=\"utf-8\")",
+        "TOOLS = [{\"name\": \"foo\", \"description\": \"echo\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}]",
+        "def send(o):",
+        "    sys.stdout.write(json.dumps(o) + chr(10))",
+        "    sys.stdout.flush()",
+        "for line in sys.stdin:",
+        "    req = json.loads(line)",
+        "    if req[\"op\"] == \"init\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"name\": os.environ[\"FAKE_NAME\"], \"protocol\": 1}})",
+        "    elif req[\"op\"] == \"tools.list\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": TOOLS})",
+        "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"ok\"}})",
+      ].join(String.fromCharCode(10)) + String.fromCharCode(10),
+    )
+    try {
+      const agentDir = writeFakeAgent(fakeRoot, "mergx", "v1")
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      m.setNativeAgentsOpts({ roots: [fakeRoot], spawn: fakeSpawn2 as never } as never)
+      await m.discover()
+      expect(m.def("mergx")?.description).toBe("v1")
+      // native 变化（改 manifest description）：重拉 → 重合并（视图更新）
+      const mf = join(agentDir, "agent.json")
+      writeFileSync(mf, JSON.stringify({ name: "mergx", description: "v2", protocol: 1, command: ["python", driver], env: { FAKE_NAME: "mergx" } }))
+      const st = statSync(mf)
+      utimesSync(mf, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
+      await m.refreshIfChanged()
+      expect(m.def("mergx")?.description).toBe("v2")
+      // TS 目录签名变化触发全量重扫：native 贡献不丢（独立贡献集 + 进程级缓存水合）
+      const probe = join(import.meta.dirname, "..", "..", "sub-agents", "code.ts")
+      const st2 = statSync(probe)
+      utimesSync(probe, new Date(st2.atimeMs + 6000), new Date(st2.mtimeMs + 6000))
+      await m.refreshIfChanged()
+      expect(m.def("mergx")).toBeDefined()
+      expect(m.def("mergx")?.description).toBe("v2")
+      expect(m.def("code")).toBeDefined() // TS 侧重扫正常
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true })
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  })
+})

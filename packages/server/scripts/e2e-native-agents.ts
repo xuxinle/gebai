@@ -3,7 +3,8 @@
  * 真实驱动（python/cpp/rust/go）、真实 spawn、真实 SubAgentManager/ToolRegistry。
  * 验证：发现注册 → 工具名带前缀 → 常驻状态保持 → 崩溃自愈 → pip status →
  * 构建引导（cpp/rust/go 可执行体缺失时自动编译）→ 四语言典型场景工具真机调用
- * （docqa 文档问答 / imgproc 图像处理 / hsh 哈希校验 / dirs 目录分析）。
+ * （docqa 文档问答 / imgproc 图像处理 / hsh 哈希校验 / dirs 目录分析）→
+ * hsh 跨语言合并（TS 侧 crc32 与 Rust 侧工具同子代理）。
  */
 import { SubAgentManager } from "../src/core/agents/subagents"
 import { ToolRegistry } from "../src/core/base/registry"
@@ -176,9 +177,25 @@ for (const f of [pngPath, join(process.cwd(), "tmp-e2e-imgproc-8.png"), join(pro
 }
 console.log("PASS: imgproc（C++ + stb）info/grayscale/resize/stats")
 
-// ---------------- hsh（Rust）：哈希校验（RFC 官方向量）----------------
-expectAgent("hsh")
+// ---------------- hsh（Rust + TS 跨语言合并）：哈希校验（RFC 官方向量）----------------
+const hshDef = expectAgent("hsh")
+// 跨语言合并：TS 侧贡献 crc32（描述/提示词留空），Rust 侧贡献 sha256/... 与描述提示词——同一子代理
+if (!("crc32" in (hshDef.tools ?? {})) || !("sha256" in (hshDef.tools ?? {}))) {
+  console.error("FAIL: hsh 应同时含 TS 贡献 crc32 与 native 贡献 sha256:", Object.keys(hshDef.tools ?? {}))
+  process.exit(1)
+}
+if (hshDef.description !== "哈希校验子代理（Rust 边车常驻进程）：hsh_sha256/hsh_sha1/hsh_md5 摘要（文本/字节/文件）、hsh_hmac_sha256 HMAC 签名、hsh_verify 完整性校验（多算法一键比对）") {
+  console.error("FAIL: hsh 描述应为 native 单侧贡献（TS 留空不拼接空串）:", hshDef.description)
+  process.exit(1)
+}
 await m.load("hsh")
+const crc32Tool = registry.resolve("hsh_crc32")!
+const h0 = await crc32Tool.tool.execute({ text: "123456789" }, fakeCtx)
+if ((h0.data as { digest?: string })?.digest !== "cbf43926") {
+  console.error("FAIL: hsh_crc32('123456789') 不符标准向量 cbf43926:", h0.output)
+  process.exit(1)
+}
+console.log("PASS: hsh 跨语言合并（TS 贡献 crc32 与 Rust 工具同命名空间，标准向量通过）")
 const sha256Tool = registry.resolve("hsh_sha256")!
 const h1 = await sha256Tool.tool.execute({ text: "abc" }, fakeCtx)
 if ((h1.data as { digest?: string })?.digest !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
@@ -202,7 +219,7 @@ if (!h4.output.includes("校验失败")) {
   console.error("FAIL: hsh_verify 错误值应失败:", h4.output)
   process.exit(1)
 }
-console.log("PASS: hsh（Rust）SHA-256/HMAC RFC 向量 + verify 双向判定")
+console.log("PASS: hsh（Rust）SHA-256/HMAC RFC 向量 + verify 双向判定 + TS crc32 合并")
 
 // ---------------- dirs（Go）：目录空间分析 ----------------
 expectAgent("dirs")
