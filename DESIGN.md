@@ -360,7 +360,7 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_CV_MODELS_DIR` | 本地 CV（`desktop_ocr`/`desktop_locate`）模型目录：含 `det.onnx`/`rec.onnx`/`dict.txt`（PP-OCR 中英文）三件套；任务级 env 可覆盖；未设置时按 二进制内嵌物化 → 源码 assets 目录 解析（见「小模型识别」） | 空 |
 | `GEBAI_CV_MAX_SIDE` | 本地 CV 输入图像降采样上限（像素长边，超过等比缩小后识别；坐标仍映射回原始像素系） | `1280` |
 | `GEBAI_CV_DETECT_MODEL` / `GEBAI_CV_DETECT_LABELS` | `desktop_detect` 自备 YOLO ONNX 模型路径与标签文件路径（每行一个类别；**MODEL 缺省自动发现 `{GEBAI_HOME}/models/detect/` 下唯一 `.onnx`——资源子仓库 drop-in 即用，多个时列出候选要求显式指定**；模型不内嵌，COCO 类别对 UI 无意义；ultralytics 导出的 ONNX 内嵌 imgsz/names 元数据自动读取——LABELS 与 SIZE 可省） | 空 |
-| `GEBAI_CV_DETECT_SIZE` | 检测输入边长覆盖（像素，320-4096；缺省取模型元数据 `imgsz`，再缺省 640） | 空 |
+| `GEBAI_CV_DETECT_SIZE` | 检测输入边长覆盖（像素，320-4096；缺省取模型元数据 `imgsz`，再回落 graph 首输入静态形状，末级 640） | 空 |
 | `GEBAI_CV_BACKEND` | **CV 推理后端全局开关（检测与 OCR 共用）**：`auto`（默认，GPU sidecar 可用即用、失败回落 wasm 并毒化）/ `sidecar`（强制 node 原生，失败不回落）/ `wasm`（强制进程内单线程 CPU） | `auto` |
 | `GEBAI_CV_DETECT_BACKEND` / `GEBAI_CV_OCR_BACKEND` | 细分覆盖（优先于全局）：检测/OCR 各自独立选择后端，取值同 `GEBAI_CV_BACKEND` | 空 |
 | `GEBAI_CV_EP` | GPU sidecar 执行提供者（全部 CV 推理共用）：`auto`（默认，Windows dml→cuda / macOS coreml→cuda 逐级探测、全失败回落 cpu 兜底并如实上报）/ `dml` / `cuda` / `coreml` / `cpu`（`GEBAI_CV_DETECT_EP` 为早期别名兼容） | `auto` |
@@ -2508,7 +2508,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | sh/py 结构化 data 文本上限 | 100k 字符 | `data.stdout`/`data.stderr` 超长截断（完整文本以 output 截断文件为准，`SCRIPT_DATA_TEXT_CAP`） |
 | 后端图表渲染超时 | 20 秒 | 后端组合渲染器（`core/diagram-render.ts`）单次超时上限：plantuml 走 `plantuml.ts` `PLANTUML_TIMEOUT_MS`（可注入），mermaid 渲染与 d2 编译/渲染各 20 秒 Promise 超时；引擎渲染本身秒级，超时防大图/挂起 |
 | 后端图表输出尺寸上限 | 1600 × 2400 px | 后端渲染默认 2x 超采样，超出按比例缩放到该上限（防超大 PNG 超飞书图片限制；`DEFAULT_MAX_WIDTH`/`DEFAULT_MAX_HEIGHT`） |
-| 图表语言 | `mermaid` / `plantuml` / `d2` / `echarts` | show 图表分支 `format` 参数四取值（SDK `DiagramFormat`，缺失/非法立即报错）；产物扩展名 `.mmd`/`.puml`/`.d2`/`.echarts`；前端本地渲染与后端组合渲染器（飞书/`render=backend`）均四语言全支持；echarts 源码为 option 的严格 JSON（双引号，容错注释/尾逗号） |
+| 图表语言 | `mermaid` / `plantuml` / `d2` / `echarts` | show 图表分支 `format` 参数四取值（SDK `DiagramFormat`，缺失/非法立即报错）；产物扩展名 `.mmd`/`.puml`/`.d2`/`.echarts`；前端本地渲染与后端组合渲染器（飞书/`render=backend`）均四语言全支持；echarts 源码为 option 的严格 JSON（双引号，容错注释/尾逗号）；服务端合法值域单点真相在 `artifacts.ts`（`DIAGRAM_FORMAT_VALUES` 派生自 `DIAGRAM_EXT_FOR` 键集，show 参数校验/schema enum/飞书桥接透传共用，SDK 新增语言漏项即编译报错） |
 | ECharts 画布尺寸 | 默认 960×600，钳制 200-4000 px | echarts SSR 渲染必须显式宽高（无 DOM 测量）；信封 `width`/`height` 超范围钳制、非法值回退默认（前后端一致） |
 | ECharts 源码形态 | 严格 JSON（键/字符串双引号），容错注释/尾逗号 | 不支持单引号/裸键名/`…`缩写（对象字面量不可用）；信封 `{"option":…,"width":…,"height":…}` 指定画布尺寸；解析失败错误信息点名常见病因（前后端一致） |
 | ECharts 标题/图例避让 | 冲突图例下移至标题底边 +6px；图例底边越界时联动下调未显式设置的 `grid.top` | echarts 6 图例默认在画布底部，但模型常按 v5 习惯显式 `legend.top: 0/'top'/小数值` 置顶——与顶部标题（默认占带 15–46.6）必然压字；高度按默认值折算（标题行高 = 字号×1.2 + padding×2 + 副标题 itemGap+行高；图例单行 30、折行每行 +28，条目总宽按全角 1em/半角 0.6em 估算，条目名缺省取 series 名）；不干预：图例 top 未设置（默认底部）/非顶部区域、标题不在顶部、二者水平分居左右两侧、图例隐藏、显式 `grid.top`/`grid.height`（`fixEchartsLegendOverlap`，前后端解析入口统一应用） |

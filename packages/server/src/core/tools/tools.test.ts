@@ -955,7 +955,8 @@ describe("global tools", () => {
   test("show schema：format 枚举覆盖四语言（code 模式必选由描述与 execute 校验引导）", () => {
     const params = showTool.parameters
     const fmt = (params.properties as { format: { enum: string[] } }).format
-    expect(fmt.enum).toEqual(["mermaid", "plantuml", "d2", "echarts"])
+    // 枚举单点派生自 artifacts.ts DIAGRAM_EXT_FOR（与 SDK DiagramFormat 同步），顺序为其键序
+    expect([...fmt.enum].sort()).toEqual(["d2", "echarts", "mermaid", "plantuml"])
     // 三选一内容源（code/html/path）无法用 required 表达，校验在 execute 内完成
     expect(params.required ?? []).not.toContain("format")
     // 工具描述与 format 参数说明内置四语言选择指南（触发词/适用场景），供模型按需选择

@@ -413,6 +413,41 @@ function metaModel(entries: string[]): Buffer {
   return Buffer.from(out)
 }
 
+/** 微型 ONNX 编码：graph(7) 首输入静态形状（dims）+ field 14 元数据（entries）——输入形状兜底用例。 */
+function shapeModel(dims: (number | string)[], entries: string[] = []): Buffer {
+  const varint = (v: number): number[] => {
+    const out: number[] = []
+    let n = v
+    for (;;) {
+      const b = n & 0x7f
+      n = Math.floor(n / 128)
+      out.push(n > 0 ? b | 0x80 : b)
+      if (n === 0) return out
+    }
+  }
+  const ld = (field: number, payload: number[]): number[] => [...varint((field << 3) | 2), ...varint(payload.length), ...payload]
+  const str = (s: string): number[] => Array.from(new TextEncoder().encode(s))
+  const dimEntry = (d: number | string): number[] =>
+    typeof d === "number" ? [...varint((1 << 3) | 0), ...varint(d)] : ld(2, str(d))
+  const shapeProto: number[] = []
+  for (const d of dims) shapeProto.push(...ld(1, dimEntry(d)))
+  const valueInfo = [...ld(1, str("images")), ...ld(2, ld(1, ld(2, shapeProto)))]
+  const parts: number[][] = [
+    [...varint((1 << 3) | 0), ...varint(10)],
+    ld(7, ld(11, valueInfo)),
+    ld(8, [...varint(1), ...varint(20)]),
+  ]
+  for (let i = 0; i + 1 < entries.length; i += 2) parts.push(ld(14, [...ld(1, str(entries[i])), ...ld(2, str(entries[i + 1]))]))
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return Buffer.from(out)
+}
+
 describe("detect 模型约定目录自动发现（models/detect drop-in 即用）", () => {
   test("目录内唯一 .onnx 自动生效（免 GEBAI_CV_DETECT_MODEL）", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-cv-disc-"))
@@ -545,3 +580,34 @@ describe("detect 模型元数据自适应（ultralytics ONNX）", () => {
     }
   })
 })
+
+  test("缺 imgsz 元数据时尺寸取 graph 首输入静态形状（1280 letterbox）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gebai-cv-shape-"))
+    writeFileSync(
+      join(dir, "model.onnx"),
+      shapeModel([1, 3, 1280, 1280], ["names", '{"0":"button","1":"icon"}']),
+    )
+    const n = 8
+    const out = new Float32Array(6 * n)
+    out[0 * n] = 640
+    out[1 * n] = 400
+    out[2 * n] = 200
+    out[3 * n] = 100
+    out[(4 + 1) * n] = 0.9
+    detectOut = { data: out, dims: [1, 6, n] }
+    try {
+      // 无 imgsz → graph 输入 [1,3,1280,1280]：scale 1280/64=20 → (27,17.5,10,5)（640 兜底则为 54）
+      const r = await getCvRunner().detect(solid(64, 64), {
+        env: { GEBAI_CV_DETECT_MODEL: join(dir, "model.onnx") },
+        conf: 0.25,
+      })
+      expect(r.objects.length).toBe(1)
+      expect(r.objects[0].label).toBe("icon")
+      expect(r.objects[0].x).toBeCloseTo(27, 4)
+      expect(r.objects[0].y).toBeCloseTo(17.5, 4)
+      expect(r.objects[0].w).toBeCloseTo(10, 4)
+      expect(r.objects[0].h).toBeCloseTo(5, 4)
+    } finally {
+      detectOut = null
+    }
+  })

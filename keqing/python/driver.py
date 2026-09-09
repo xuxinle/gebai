@@ -78,8 +78,9 @@ def ctx_env(key, default=None):
 
 
 def ctx_resolve(path):
-    """路径解析：绝对路径原样；相对路径基准=当前请求 ctx.cwd（会话工作区）；
-    无请求 ctx 时回落进程工作目录。"""
+    """路径解析：绝对路径原样；相对路径基准=当前请求 ctx.cwd（会话工作区）。
+    相对路径首段 tmp/ 前缀剥离（与宿主文件工具同语义——会话工作区已是 tmp/ 本身，
+    带前缀引用如 tmp/x.png 不叠加成 tmp/tmp/x.png）；无请求 ctx 时回落进程工作目录。"""
     if not path:
         return path
     if os.path.isabs(path):
@@ -87,6 +88,8 @@ def ctx_resolve(path):
     base = str(current_ctx().get("cwd") or "") or (os.getcwd() if os.getcwd() else "")
     if not base:
         return path
+    if path.startswith("tmp/") or path.startswith("tmp\\"):
+        path = path[4:]
     return os.path.join(base, path)
 
 

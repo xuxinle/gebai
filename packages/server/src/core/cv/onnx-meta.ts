@@ -6,7 +6,8 @@
  * 主要消费 ultralytics 导出约定（YOLO11/v8 ONNX 自带）：`imgsz`（如 "[1280, 1280]"，
  * letterbox 尺寸来源——官方常按 1280 训练导出，固定 640 会形状不匹配/掉精度）与
  * `names`（如 {"0":"button","1":"icon"}，类别表来源——省去单独的标签文件）。
- * 只需顶层字段遍历（graph 等大消息按长度跳过），不构造完整 protobuf 树。
+ * 只需顶层字段遍历（graph 等大消息按长度跳过），不构造完整 protobuf 树；另含
+ * parseOnnxInputSize——graph 首输入静态形状直解，imgsz 元数据缺失时的尺寸兜底。
  */
 
 /** 读 varint（返回值与下一位置）；越界返回 null。 */
@@ -181,4 +182,90 @@ export function ultralyticsMeta(meta: Record<string, string>): UltralyticsMeta {
     } catch { /* 该形态解析失败——尝试下一种 */ }
   }
   return { imgsz, names }
+}
+
+/* ---------------- graph 首输入静态形状（imgsz 元数据缺失时的尺寸兜底） ---------------- */
+
+/** 顺序遍历子消息字段（够用即可）：varint 数值 / length-delimited 负载回调，其余线型按宽度跳过；回调返回 true 终止。 */
+function walkFields(
+  buf: Uint8Array,
+  visit: (field: number, wt: number, span: Uint8Array | null, num: number) => boolean | void,
+): void {
+  let p = 0
+  while (p < buf.length) {
+    const head = readVarint(buf, p)
+    if (!head) break
+    const [tag, q] = head
+    p = q
+    const field = tag >>> 3
+    const wt = tag & 7
+    let num = 0
+    let span: Uint8Array | null = null
+    if (wt === 0) {
+      const v = readVarint(buf, p)
+      if (!v) break
+      num = v[0]
+      p = v[1]
+    } else if (wt === 2) {
+      const len = readVarint(buf, p)
+      if (!len || len[1] + len[0] > buf.length) break
+      span = buf.subarray(len[1], len[1] + len[0])
+      p = len[1] + len[0]
+    } else if (wt === 1) {
+      if (p + 8 > buf.length) break
+      p += 8
+    } else if (wt === 5) {
+      if (p + 4 > buf.length) break
+      p += 4
+    } else break
+    if (visit(field, wt, span, num)) return
+  }
+}
+
+/** 子消息内首个指定字段（length-delimited）的负载；不存在/解析失败返回 null。 */
+function firstField(buf: Uint8Array, want: number): Uint8Array | null {
+  const found: Uint8Array[] = []
+  walkFields(buf, (field, _wt, span) => {
+    if (field === want && span) {
+      found.push(span)
+      return true
+    }
+  })
+  return found.length ? found[0] : null
+}
+
+/** DimensionProto：dim_value(1, varint) 为静态维数值；dim_param(2) 等其余形态为动态维（null）。 */
+function dimensionValue(dim: Uint8Array): number | null {
+  const res: { v: number | null }[] = [{ v: null }]
+  walkFields(dim, (field, wt, _span, num) => {
+    if (field === 1 && wt === 0) {
+      res[0].v = num
+      return true
+    }
+  })
+  return res[0].v
+}
+
+/**
+ * 直解 graph（field 7）首输入 ValueInfo 的静态形状，返回 letterbox 边长——ultralytics
+ * 元数据缺 imgsz 时的兜底（如静态输入 [1,3,1280,1280] 的非 ultralytics 导出模型）。
+ * 只认末两维（H/W）均为静态数值且在 320–4096 的形状；动态维/解析失败返回 null。
+ */
+export function parseOnnxInputSize(bytes: Uint8Array): number | null {
+  const graph = firstField(bytes, 7) // ModelProto.graph
+  const input = graph ? firstField(graph, 11) : null // GraphProto.input（首个）
+  const type = input ? firstField(input, 2) : null // ValueInfoProto.type
+  const tensor = type ? firstField(type, 1) : null // TypeProto.tensor_type
+  const shape = tensor ? firstField(tensor, 2) : null // TypeProto.Tensor.shape
+  if (!shape) return null
+  const dims: (number | null)[] = []
+  walkFields(shape, (field, _wt, span) => {
+    if (field === 1 && span) dims.push(dimensionValue(span))
+  })
+  if (dims.length < 4) return null // 检测输入为 4 维 NCHW（batch 可动态），不足 4 维非检测输入
+  const h = dims[dims.length - 2]
+  const w = dims[dims.length - 1]
+  if (h === null || w === null) return null
+  const edge = Math.max(h, w)
+  return edge >= 320 && edge <= 4096 ? edge : null
 }

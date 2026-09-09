@@ -13,7 +13,7 @@ import { isBinaryMode, resolveGebaiHome } from "../base/config"
 import { cropImage, type RgbaImage } from "./image"
 import { ctcDecode, dbPostprocess, detPreprocess, recPreprocess, type OcrLine } from "./ocr"
 import { letterbox, yoloPostprocess, type DetectObject } from "./detect"
-import { parseOnnxMetadata, ultralyticsMeta } from "./onnx-meta"
+import { parseOnnxInputSize, parseOnnxMetadata, ultralyticsMeta } from "./onnx-meta"
 import { cvSidecarClient, poisonCvSidecar, type CvSidecar } from "./sidecar"
 import { loadOrtModule, resolveCvAssetsDir, type OrtModule, type OrtSession } from "./ort-loader"
 
@@ -287,7 +287,7 @@ interface DetectConfig {
   /** 模型文件大小（sidecar 会话缓存键——文件变更自动重建会话）。 */
   modelSize: number
   labels: string[]
-  /** letterbox 目标边长（环境变量 GEBAI_CV_DETECT_SIZE > ONNX 元数据 imgsz > 640）。 */
+  /** letterbox 目标边长（环境变量 GEBAI_CV_DETECT_SIZE > ONNX 元数据 imgsz > graph 首输入静态形状 > 640）。 */
   size: number
   labelsFromMeta: boolean
 }
@@ -319,7 +319,8 @@ function detectConfigFor(env: Record<string, string>): Promise<DetectConfig> {
   if (cached) return cached
   const cfg = (async (): Promise<DetectConfig> => {
     // 元数据从模型字节直接解析（与推理后端无关，wasm/sidecar 同一口径）
-    const meta = ultralyticsMeta(parseOnnxMetadata(new Uint8Array(readFileSync(modelPath))))
+    const modelBytes = new Uint8Array(readFileSync(modelPath))
+    const meta = ultralyticsMeta(parseOnnxMetadata(modelBytes))
     let labels: string[] | null = null
     let labelsFromMeta = false
     if (labelsPath) {
@@ -336,7 +337,8 @@ function detectConfigFor(env: Record<string, string>): Promise<DetectConfig> {
           `或改用 ultralytics 导出的 ONNX（内嵌 names 元数据自动读取）: ${modelPath}`,
       )
     }
-    return { modelPath, modelSize: statSync(modelPath).size, labels, size: sizeOverride || meta.imgsz || 640, labelsFromMeta }
+    // 尺寸：环境变量覆盖 > ultralytics imgsz 元数据 > graph 首输入静态形状 > 640
+    return { modelPath, modelSize: statSync(modelPath).size, labels, size: sizeOverride || meta.imgsz || parseOnnxInputSize(modelBytes) || 640, labelsFromMeta }
   })()
   detectConfigs.set(key, cfg)
   cfg.catch(() => detectConfigs.delete(key))

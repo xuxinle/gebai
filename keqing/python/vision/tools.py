@@ -855,7 +855,15 @@ def tool_detect(args):
             with open(labels_env, "r", encoding="utf-8", errors="replace") as f:
                 labels = [line.strip() for line in f if line.strip()]
         sess = _session(model)
-        size = meta["imgsz"] or 640
+        size = meta["imgsz"]
+        if not size:
+            # 元数据缺 imgsz：读会话输入形状的静态空间维兜底（如 [1,3,1280,1280] → 1280）
+            try:
+                shp = [d for d in sess.get_inputs()[0].shape if isinstance(d, int)]
+                size = max(shp[1:]) if len(shp) >= 3 else 0
+            except Exception:
+                size = 0
+        size = size or 640
         inp, scale, pad_x, pad_y = letterbox(img, size)
         out = sess.run(None, {sess.get_inputs()[0].name: inp})[0]
         dims = [1] + [d for d in np.asarray(out).shape[1:] if d] or [1, 1, 1]

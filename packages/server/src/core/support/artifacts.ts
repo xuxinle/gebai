@@ -15,6 +15,12 @@ const DIAGRAM_FORMATS: Record<string, DiagramFormat> = { puml: "plantuml", plant
 export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml", mermaid: "mmd", d2: "d2", echarts: "echarts" }
 /** 图表语言展示名（错误提示/文档用）。 */
 export const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }
+/** 图表语言全集（单点真相，派生自 DiagramFormat 键位表——SDK 新增语言而 DIAGRAM_EXT_FOR 漏项时编译报错）。 */
+export const DIAGRAM_FORMAT_VALUES: readonly DiagramFormat[] = Object.keys(DIAGRAM_EXT_FOR) as DiagramFormat[]
+/** format 值是否为合法图表语言（show 参数校验/飞书桥接透传共用）。 */
+export function isDiagramFormat(v: string): v is DiagramFormat {
+  return DIAGRAM_FORMAT_VALUES.includes(v as DiagramFormat)
+}
 
 /** 按文件名扩展名推断图表语言（未命中返回 undefined）。 */
 export function diagramFormatFor(path: string): DiagramFormat | undefined {

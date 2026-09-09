@@ -17,6 +17,8 @@ import type { SessionStore } from "../core/session/store"
 import { createFeishuApi, type FeishuApiLike } from "./api"
 import { FeishuConn, type FeishuConnOptions } from "./conn"
 import { createDiagramRenderer, type DiagramRenderer } from "../core/support/diagram-render"
+import { isDiagramFormat } from "../core/support/artifacts"
+import type { DiagramFormat } from "@gebai/sdk"
 import type { BotPromptAdapter } from "./adapter"
 
 /** 桥接用到的依赖子集（Pick 结构类型，便于测试注入 fake）。 */
@@ -826,7 +828,8 @@ export class FeishuBot {
   private async handleDrawRender(sessionId: string, chatId: string, payload: Record<string, unknown>): Promise<void> {
     const renderId = String(payload.renderId ?? "")
     const code = String(payload.code ?? "")
-    const format = payload.format === "mermaid" || payload.format === "d2" || payload.format === "echarts" ? payload.format : "plantuml"
+    // 合法值域单点同步（artifacts.ts），未知值缺省 plantuml
+    const format = isDiagramFormat(String(payload.format)) ? (payload.format as DiagramFormat) : "plantuml"
     const name = String(payload.name ?? "diagram").replace(/[^A-Za-z0-9_-]/g, "_") || "diagram"
     if (!renderId || !code) return
     try {

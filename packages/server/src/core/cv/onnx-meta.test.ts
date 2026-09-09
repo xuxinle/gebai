@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseOnnxMetadata, ultralyticsMeta } from "./onnx-meta"
+import { parseOnnxInputSize, parseOnnxMetadata, ultralyticsMeta } from "./onnx-meta"
 
 /* ---------- 微型 protobuf 编码器：手工构造 ModelProto 顶层字段 ---------- */
 
@@ -89,5 +89,57 @@ describe("ultralyticsMeta", () => {
     expect(ultralyticsMeta({ imgsz: "[9999, 9999]" }).imgsz).toBeNull()
     expect(ultralyticsMeta({ names: '{}' }).names).toBeNull()
     expect(ultralyticsMeta({ names: '["", " "]' }).names).toBeNull()
+  })
+})
+
+/* ---------- graph 首输入静态形状（parseOnnxInputSize） ---------- */
+
+/** DimensionProto：dim_value(1) 静态维 / dim_param(2) 动态维。 */
+function dim(entry: number | string): number[] {
+  return typeof entry === "number" ? [...varint((1 << 3) | 0), ...varint(entry)] : lenDelimited(2, str(entry))
+}
+
+/** 模型布局：ir_version + graph(7, 首输入 ValueInfo 含静态形状) + opset(8) + metadata_props(14)。 */
+function inputShapeModel(dims: (number | string)[], entries: string[] = []): Uint8Array {
+  const shapeProto: number[] = []
+  for (const d of dims) shapeProto.push(...lenDelimited(1, dim(d)))
+  const tensorType = lenDelimited(1, lenDelimited(2, shapeProto)) // TypeProto.tensor_type(1).shape(2)
+  const valueInfo = [...lenDelimited(1, str("images")), ...lenDelimited(2, tensorType)]
+  const parts: number[][] = [
+    [...varint((1 << 3) | 0), ...varint(10)],
+    lenDelimited(7, lenDelimited(11, valueInfo)),
+    lenDelimited(8, [...varint(1), ...varint(20)]),
+  ]
+  for (let i = 0; i + 1 < entries.length; i += 2) parts.push(metaEntry(entries[i], entries[i + 1]))
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return out
+}
+
+describe("parseOnnxInputSize", () => {
+  test("graph 首输入静态形状 [1,3,1280,1280] → 1280", () => {
+    expect(parseOnnxInputSize(inputShapeModel([1, 3, 1280, 1280]))).toBe(1280)
+  })
+
+  test("动态 batch 维（dim_param）不参与判定 → 空间维 960", () => {
+    expect(parseOnnxInputSize(inputShapeModel(["batch", 3, 960, 960]))).toBe(960)
+  })
+
+  test("空间维动态 / 不足两维 / 越界 → null", () => {
+    expect(parseOnnxInputSize(inputShapeModel([1, 3, "h", 640]))).toBeNull()
+    expect(parseOnnxInputSize(inputShapeModel([1, 3, 640]))).toBeNull()
+    expect(parseOnnxInputSize(inputShapeModel([1, 3, 300, 300]))).toBeNull()
+    expect(parseOnnxInputSize(inputShapeModel([1, 3, 8192, 8192]))).toBeNull()
+  })
+
+  test("无 graph / 垃圾字节 / graph 无输入 → null（元数据 fixture 的 graph 为不透明字节）", () => {
+    expect(parseOnnxInputSize(new Uint8Array(0))).toBeNull()
+    expect(parseOnnxInputSize(new Uint8Array([9, 9, 9]))).toBeNull()
+    expect(parseOnnxInputSize(modelBytes(["imgsz", "[640, 640]"]))).toBeNull()
   })
 })

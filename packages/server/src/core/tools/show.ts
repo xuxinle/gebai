@@ -10,6 +10,8 @@ import {
   diagramFormatFor,
   DIAGRAM_EXT,
   DIAGRAM_EXT_FOR,
+  DIAGRAM_FORMAT_VALUES,
+  isDiagramFormat,
   DIAGRAM_LABEL,
   IMAGE_EXT,
   injectPlantUmlLayout,
@@ -268,7 +270,7 @@ export const showTool: Tool = {
       path: { type: "string", description: "已有文件路径（与 code/html 三选一），按类型直显：图片内联、图表源文件（.mmd/.puml/.plantuml/.d2/.echarts）渲染成图表、.html 页面预览、文本/代码内联、其余查看/下载卡片——适合交付产物或需要用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径，不在会话文件区内的文件会复制一份（≤100MB）到会话文件区再展示；显式传 format 可按指定图表语言渲染任意文本文件" },
       name: { type: "string", description: "展示名/产物主名（不含扩展名；未传时图表默认 diagram、HTML 默认 page、path 模式默认取文件主名）" },
       format: {
-        enum: ["mermaid", "plantuml", "d2", "echarts"],
+        enum: [...DIAGRAM_FORMAT_VALUES],
         description:
           "图表语言（code 模式必选；path 模式可选，未传时按文件扩展名推断）：\n" +
           "【mermaid】流程图/时序图/状态图/甘特图/用户旅程、Markdown 文档嵌入、简单架构；语法最简。\n" +
@@ -288,17 +290,16 @@ export const showTool: Tool = {
     const htmlArg = args.html != null ? String(args.html) : ""
     const pathArg = args.path != null ? String(args.path) : ""
     const formatArg = String(args.format ?? "")
-    // format 校验前置：非法值立即报错而非静默回退 plantuml——实测复盘：漏传 format 时
-    // ECharts JSON 被当 PlantUML 渲染，报「PlantUML 渲染错误」误导模型连续多轮失败
-    if (formatArg && formatArg !== "mermaid" && formatArg !== "plantuml" && formatArg !== "d2" && formatArg !== "echarts") {
-      return { output: `show 失败：format 参数无效（"${formatArg}"）。可选值：mermaid / plantuml / d2 / echarts。` }
+    // format 校验前置：非法值立即报错而非静默回退 plantuml；合法值域与 SDK DiagramFormat 单点同步（artifacts.ts）
+    if (formatArg && !isDiagramFormat(formatArg)) {
+      return { output: `show 失败：format 参数无效（"${formatArg}"）。可选值：${DIAGRAM_FORMAT_VALUES.join(" / ")}。` }
     }
     if (!codeArg && !htmlArg && !pathArg.trim()) {
       return { output: "show 失败：缺少内容源——code（图表源码）/ html（HTML 源码）/ path（已有文件）三选一。" }
     }
     // ① 图表分支：code 源码（format 必选）
     if (codeArg) {
-      if (!formatArg) return { output: "show 失败：code（图表源码）必须同时传 format（mermaid / plantuml / d2 / echarts）。" }
+      if (!formatArg) return { output: `show 失败：code（图表源码）必须同时传 format（${DIAGRAM_FORMAT_VALUES.join(" / ")}）。` }
       const base = (args.name ? String(args.name) : "diagram").replace(DIAGRAM_EXT, "")
       return showDiagram(ctx, codeArg, formatArg as DiagramFormat, base, "", args.render)
     }
