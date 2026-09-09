@@ -38,7 +38,7 @@ std::string fileExtLower(const std::string& p) {
     size_t dot = p.find_last_of('.');
     if (dot == std::string::npos) return "";
     std::string e = p.substr(dot + 1);
-    for (char& c : e) c = char(tolower(unsigned char(c)));
+    for (char& c : e) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     return e;
 }
 
@@ -204,7 +204,7 @@ ToolResult toolStats(const Json& args) {
         if (img.px[i + 3] >= 250) ++opaque;
         hist[(unsigned char)(0.299 * img.px[i] + 0.587 * img.px[i + 1] + 0.114 * img.px[i + 2])]++;
     }
-    long long n = long long(img.w) * img.h;
+    long long n = static_cast<long long>(img.w) * img.h;
     // Otsu
     double total = double(n), sum = 0;
     for (int t = 0; t < 256; ++t) sum += t * hist[t];
