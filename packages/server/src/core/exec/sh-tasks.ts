@@ -143,10 +143,15 @@ export class ShTaskRunner implements ShTaskService {
     }
   }
 
-  /** 单任务存活/超时惰性刷新：pid 失活 → lost；超生命周期 → 终止并标记 timedOut。返回是否发生变化。 */
+  /** 单任务存活/超时惰性刷新：pid 失活 → lost；超生命周期 → 终止并标记 timedOut。返回是否发生变化。
+   *  本进程持有**同一 pid** 的句柄时不做 pid 探测——退出由 exited 回调回写 endedAt，
+   *  中间态的 pid 探测与 close 竞态会误判 lost；句柄缺失或 pid 不符（服务重启/记录被外部改写）
+   *  才走 pid 兜底判定。 */
   private async refreshOne(r: ShTaskRecord): Promise<boolean> {
     if (r.endedAt) return false
-    if (r.pid != null && !pidAlive(r.pid)) {
+    const handle = this.procs.get(r.id)
+    const handleOwnsRecord = handle != null && handle.pid != null && handle.pid === r.pid
+    if (!handleOwnsRecord && r.pid != null && !pidAlive(r.pid)) {
       r.lost = true
       r.endedAt = this.now()
       return true
@@ -188,13 +193,15 @@ export class ShTaskRunner implements ShTaskService {
       startedAt: this.now(),
       maxMs: opts.maxMs ?? SH_TASK_DEFAULT_MS,
     }
+    this.procs.set(id, proc)
+    // 先落盘再注册退出回写：命令可能瞬时退出（echo），回调先于记录落盘时 finish 读不到记录
+    // 会静默丢弃退出码，任务永久停在 running
+    await this.save([...records, rec])
     // 退出回写（闭包落盘，长任务跨工具调用存活）：lost 已置（失活竞态）时仅补退出码
     proc.exited.then(
       (code) => void this.finish(id, { exitCode: code }),
       (err) => void this.finish(id, { exitCode: 1, spawnError: String(err) }),
     )
-    this.procs.set(id, proc)
-    await this.save([...records, rec])
     return rec
   }
 

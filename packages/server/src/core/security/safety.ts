@@ -116,6 +116,11 @@ const SORT_OUTPUT_FLAG = /^(--output(=|$)|-o($|.))/
 /** 安全模式下允许的重定向目标特殊值（空设备，非数据文件）。 */
 const REDIRECT_SINK_OK = new Set(["/dev/null", "nul"])
 
+/** Windows 形态绝对路径（盘符 `C:/x`、`C:\\x`、UNC `\\\\srv\\share`）：非 win32 平台解析时会被当作相对路径。 */
+function isWindowsAbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p)
+}
+
 /** 命令归一化：取基础名（路径形式调用如 /bin/cat）、剥离 Windows .exe 后缀、小写。 */
 function normalizeCmdName(token: string): string {
   const base = token.replace(/[\\/]+/g, "/").split("/").pop() ?? token
@@ -183,6 +188,11 @@ export function validateShCommandSafeMode(cmd: string, ctx: { sandboxed?: boolea
     if (name === "date" && args.some((a) => /^(-s|--set)/.test(a))) return `${SH_DENY_PREFIX}date 不允许 -s/--set 设置时间`
     for (const t of redirectTargets) {
       if (REDIRECT_SINK_OK.has(t.replace(/[\\/]+/g, "/").toLowerCase())) continue
+      // Windows 盘符/UNC 绝对路径（C:/x、\\\\srv\\share）在非 win32 平台 resolve 后被当作相对路径，
+      // 可能落入用户目录而放行——跨平台命令按原样越界拒绝（fail-closed）
+      if (process.platform !== "win32" && isWindowsAbsolutePath(t)) {
+        return `${SH_DENY_PREFIX}重定向目标越界（${t} 须在用户目录内或 /dev/null）`
+      }
       const abs = resolve(ctx.workdir ?? ctx.home, t)
       if (safeModeWriteCheck([abs], ctx)) return `${SH_DENY_PREFIX}重定向目标越界（${t} 须在用户目录内或 /dev/null）`
     }

@@ -16,7 +16,8 @@
  */
 import { readdir } from "node:fs/promises"
 import { basename, join } from "node:path"
-import { writeFileSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
+import { writeFileIfChanged } from "./write-if-changed"
 import { pathToFileURL } from "node:url"
 import { parseSubAgentMd } from "../src/core/agents/sub-agent-md"
 
@@ -146,7 +147,7 @@ const lines = [
   `export const bundledDefs: SubAgentDef[] = [${included.map((d) => (preload.has(d.name) ? `{ ...subAgent_${d.name}, preload: true }` : `subAgent_${d.name}`)).join(", ")}]`,
   "",
 ]
-writeFileSync(outFile, lines.join("\n"))
+writeFileIfChanged(outFile, lines.join("\n"))
 console.log(
   `[build-subagents] bundled ${included.length}/${defs.length} sub-agents` +
     (preloadNames.length ? ` (preload: ${preloadNames.join(", ")})` : "") +

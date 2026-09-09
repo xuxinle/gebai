@@ -134,6 +134,7 @@ describe("restart_server 工具行为", () => {
     const deployed: Array<{ script: string; platform: string }> = []
     const tool = makeRestartServerTool({
       tmpDir: dir,
+      platform: "win32", // 断言 PowerShell 拉起器：显式注入，不随宿主平台漂移
       exitDelayMs: 5,
       exit: () => {
         exited++
@@ -147,7 +148,7 @@ describe("restart_server 工具行为", () => {
     expect(res.output).toContain("重启已布置")
     expect(deployed).toHaveLength(1)
     expect(deployed[0].script.endsWith("launcher.ps1")).toBe(true)
-    expect(deployed[0].platform).toBe(process.platform)
+    expect(deployed[0].platform).toBe("win32")
     const state = JSON.parse(readFileSync(join(restartDir(dir), "state.json"), "utf8"))
     expect(state.ok).toBeNull()
     await new Promise((r) => setTimeout(r, 60))

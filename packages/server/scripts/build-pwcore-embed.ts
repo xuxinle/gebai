@@ -11,8 +11,10 @@
  *
  * 该文件为生成产物，已 gitignore，勿手改。
  */
-import { gzipSync } from "node:zlib"
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+
+import { readdirSync, readFileSync, statSync } from "node:fs"
+import { writeFileIfChanged } from "./write-if-changed"
+import { gzipDeterministic } from "./gzip-deterministic"
 import { dirname, join, relative } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
@@ -37,7 +39,7 @@ function walk(dir: string): void {
     const rel = relative(coreRoot, p).split("\\").join("/")
     if (skip(rel)) continue
     if (e.isDirectory()) walk(p)
-    else if (e.isFile()) files.push({ path: rel, data: gzipSync(readFileSync(p)).toString("base64") })
+    else if (e.isFile()) files.push({ path: rel, data: gzipDeterministic(readFileSync(p)).toString("base64") })
   }
 }
 walk(coreRoot)
@@ -46,7 +48,7 @@ if (files.length === 0) throw new Error(`[build-pwcore-embed] playwright-core �
 // 入口优先 ESM（index.mjs）；版本号对内容敏感（路径+gzip 数据全量哈希），升级即触发运行时重建
 const entry = statSync(join(coreRoot, "index.mjs")).isFile() ? "index.mjs" : "index.js"
 const version = String(Bun.hash(files.map((f) => `${f.path}:${f.data}`).join("\n")))
-writeFileSync(outFile, JSON.stringify({ version, entry, files }))
+writeFileIfChanged(outFile, JSON.stringify({ version, entry, files }))
 console.log(
   `[build-pwcore-embed] embedded playwright-core (${files.length} files, base64 ${Math.round(files.reduce((n, f) => n + f.data.length, 0) / 1024)} KB) -> ${outFile}`,
 )

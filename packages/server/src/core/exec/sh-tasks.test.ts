@@ -146,6 +146,7 @@ describe("sh async background tasks", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  // 真实 spawn 子进程：分片并行时机器满载，bun 默认 5s 用例超时不够（wait 自身 15s）
   test("真实链路：Sandbox.spawnBackground 启动 echo 命令，日志落盘、退出码回写", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-shtask-real-"))
     const sandbox = new Sandbox({ home, enabled: false })
@@ -158,5 +159,5 @@ describe("sh async background tasks", () => {
     const log = await r.readLog(rec.id, 2000)
     expect(log).toContain("gebai-async-ok")
     rmSync(home, { recursive: true, force: true })
-  })
+  }, 20000)
 })

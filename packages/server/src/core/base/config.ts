@@ -13,6 +13,8 @@ export type SandboxMode = "auto" | "on" | "off"
  * a file next to user data. Values already present in the real env always win.
  */
 function loadDotEnv() {
+  // 测试进程不读仓库 .env（开发者本地配置会改变断言结果，见 scripts/test-preload.ts）
+  if (process.env.NODE_ENV === "test") return
   const base = isBinaryMode()
     ? resolveGebaiHome()
     : join(import.meta.dirname, "..", "..", "..", "..", "..")

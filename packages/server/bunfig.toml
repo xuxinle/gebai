@@ -2,3 +2,8 @@
 # （Bun 默认将 .md 走 html loader，会包裹 <p> 标签；此处统一为 text）
 [loader]
 ".md" = "text"
+
+# 测试进程环境净化：清掉 Bun 自动从 cwd/.env 注入与宿主 shell 残留的 GEBAI_*/CODE_* 变量，
+# 使测试结果不依赖开发者本地配置（详见 scripts/test-preload.ts）
+[test]
+preload = ["./scripts/test-preload.ts"]

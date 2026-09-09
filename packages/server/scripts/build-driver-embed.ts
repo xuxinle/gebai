@@ -9,8 +9,9 @@
  *
  * 该文件为生成产物，已 gitignore，勿手改。
  */
-import { gzipSync } from "node:zlib"
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
+import { writeFileIfChanged } from "./write-if-changed"
+import { gzipDeterministic } from "./gzip-deterministic"
 import { join } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
@@ -18,5 +19,5 @@ const src = join(root, "src", "core", "browser", "driver.mjs")
 const outFile = join(root, "src", "core", "driver.embedded.generated.json")
 
 const raw = readFileSync(src)
-writeFileSync(outFile, JSON.stringify({ gzip: true, driver: gzipSync(raw).toString("base64") }))
+writeFileIfChanged(outFile, JSON.stringify({ gzip: true, driver: gzipDeterministic(raw).toString("base64") }))
 console.log(`[build-driver-embed] embedded driver.mjs (${raw.length} bytes) -> ${outFile}`)

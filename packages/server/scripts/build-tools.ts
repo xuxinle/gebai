@@ -17,7 +17,8 @@
  *    - 消费方：`src/core/tools/index.ts` **静态导入**（运行时读文件在 bun --compile 单文件形态不可行）——
  *      因此生成文件提交默认空名单入库（与 bundle 的 gitignore 策略不同），裁剪构建后为脏属预期，勿提交裁剪态。
  */
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
+import { writeFileIfChanged } from "./write-if-changed"
 import { readdir } from "node:fs/promises"
 import { join } from "node:path"
 import { createAllGlobalTools } from "../src/core/tools"
@@ -45,7 +46,7 @@ const bundleLines = [
   `export const bundledToolEntries: GlobalToolEntry[] = [${files.map((f) => `...entries_${f.slice(0, -3)}`).join(", ")}]`,
   "",
 ]
-writeFileSync(bundleOut, bundleLines.join("\n"))
+writeFileIfChanged(bundleOut, bundleLines.join("\n"))
 console.log(`[build-tools] bundled ${files.length} tool files (${files.map((f) => f.slice(0, -3)).join(", ")}) -> ${bundleOut}`)
 
 // ---- 2. 排除清单 ----
@@ -73,5 +74,5 @@ const lines = [
   `export const EXCLUDED_GLOBAL_TOOLS: string[] = ${JSON.stringify(excludeNames)}`,
   "",
 ]
-writeFileSync(excludedOut, lines.join("\n"))
+writeFileIfChanged(excludedOut, lines.join("\n"))
 console.log(`[build-tools] excluded ${excludeNames.length} global tools${excludeNames.length ? ` (${excludeNames.join(", ")})` : ""} -> ${excludedOut}`)

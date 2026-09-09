@@ -9,9 +9,11 @@
  *
  * 该文件为生成产物，已 gitignore，勿手改。
  */
-import { readFileSync, writeFileSync, existsSync } from "node:fs"
+import { readFileSync, existsSync } from "node:fs"
+import { writeFileIfChanged } from "./write-if-changed"
+import { gzipDeterministic } from "./gzip-deterministic"
 import { join } from "node:path"
-import { gzipSync } from "node:zlib"
+
 import { LANG_WASM } from "../src/core/support/analyzer"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
@@ -33,9 +35,9 @@ for (const name of names) {
     continue
   }
   // wasm 经 gzip 压缩后 base64（约 2~3 倍压缩率）；运行时 Bun.gunzipSync 还原
-  files[name] = gzipSync(readFileSync(p)).toString("base64")
+  files[name] = gzipDeterministic(readFileSync(p)).toString("base64")
 }
 
 const pkg = JSON.parse(readFileSync(join(root, "node_modules", "tree-sitter-wasms", "package.json"), "utf8")) as { version?: string }
-writeFileSync(outFile, JSON.stringify({ version: pkg.version ?? "unknown", gzip: true, files }, null, 1))
+writeFileIfChanged(outFile, JSON.stringify({ version: pkg.version ?? "unknown", gzip: true, files }, null, 1))
 console.log(`[build-analyzer-wasm] embedded ${Object.keys(files).length} wasm files (tree-sitter-wasms v${pkg.version}) -> ${outFile}`)

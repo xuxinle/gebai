@@ -1491,7 +1491,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 - **启动**（`sh async:true`）：经 `Sandbox.spawnBackground` 起进程——与同步 `exec` 同规则的 shell/环境脱敏（沙箱用户剔除敏感变量）/Windows `chcp 65001`/Unix 进程组语义，但 stdout+stderr **合并持续写入日志文件**（WriteStream 落盘，不占内存）且不等待完成；`timeout` 参数在此语义为**任务生命周期上限**（默认 1800 秒、上限 3600 秒，防僵尸进程常驻）
 - **状态落盘**（会话 `tmp/sh-tasks/`，跨工具调用与服务重启可见）：`tasks.json` 记录（命令/cwd/pid/起止时间/退出码，原子写 tmp+rename）+ 每任务 `{id}.log` 合并输出日志；引擎按 `user:sessionId` 复用服务实例（`ToolContext.shTasks`），会话删除时释放（`forgetSession`）
-- **生命周期**：进程退出码由启动时注册的 `exited` 回调落盘回写（同进程内准确）；服务重启后 pid 失活而记录无终态 → 判定 `lost`（已结束、退出码未知，日志尾部仍可读）；生命周期超限在 status/wait/list/kill 时**惰性检查**——终止进程树（本进程内经句柄精确 kill，重启后按 pid 兜底：Windows `taskkill /T`/Unix 进程组）并标记 `timed_out`
+- **生命周期**：记录**先落盘、后注册** `exited` 回调——命令可能瞬时退出（`echo` 类），回调先于记录落盘会读不到记录而丢弃退出码，任务永久停在 running；回调落盘回写退出码（同进程内准确）；服务重启后 pid 失活而记录无终态 → 判定 `lost`（已结束、退出码未知，日志尾部仍可读）；**本进程持有该 pid 的句柄时不做 pid 探测**（退出由回调回写，中间态探测与 close 竞态会误判 lost），句柄缺失或 pid 不符才走 pid 兜底；生命周期超限在 status/wait/list/kill 时**惰性检查**——终止进程树（本进程内经句柄精确 kill，重启后按 pid 兜底：Windows `taskkill /T`/Unix 进程组）并标记 `timed_out`
 - **查询/等待/终止**（`bg_task`，id 前缀 `t` 分发到本服务）：`status` 立即返回当前状态（running/done/failed/killed/timed_out/lost）与输出尾部；`wait` 阻塞至完成或等待超时（默认 60 秒、上限 540——不晚于引擎 9 分钟工具兜底，超时返回当前状态可再次 wait）；`stop` 终止进程树并标记；`list` 与子Agent 运行、分支运行合并列出本会话全部后台任务
 - **上限**：单会话并发运行任务 ≤ 8（`SH_TASK_MAX_CONCURRENT`，超限拒绝新任务并引导清理）；输出尾部默认 4000、上限 20000 字符（`tail` 参数）
 - **审批与安全模式**：与同步 `sh` 完全同规则——命令本身照常过动态审批（`approval:false` 免审白名单强制）与安全模式只读白名单（`validateShCommandSafeMode`，降级语义不分同步/异步）；`bg_task` 管理动作（查询/等待/终止本会话后台任务）免审批
@@ -2309,8 +2309,12 @@ bun run --cwd packages/sdk test
 
 全套测试是 AI 编码迭代与 `self_optimize` 优化闭环的准入凭证，执行速度直接影响迭代效率，三项结构化保障：
 
-- **server 分片并行**：`packages/server` 的 `"test"` 脚本走 `scripts/test-parallel.ts`——全部 `*.test.ts` 排序后按轮转分成 N 个分片并行启动 `bun test` 子进程（bun test 单进程内测试文件串行执行，是全套件耗时主因；各文件相互独立、端口/临时目录均动态分配，并行安全）。默认 `min(8, max(2, CPU 核数))` 分片，`--shards=N` 参数或 `GEBAI_TEST_SHARDS` 环境变量覆盖；带文件路径/`-t`/`--coverage` 等参数时自动退回单进程透传（定向运行分片无收益）。输出逐行加 `[i/N]` 前缀流式透传，任一分片失败即非零退出。`test:serial` 保留串行入口
+- **server 分片并行**：`packages/server` 的 `"test"` 脚本走 `scripts/test-parallel.ts`——全部 `*.test.ts` 按**文件字节数降序的最长处理时间优先（LPT）装箱**分成 N 个分片并行启动 `bun test` 子进程（bun test 单进程内测试文件串行执行，是全套件耗时主因；测试耗时与文件规模强相关，轮转分配会把大文件堆在少数分片形成长尾）。默认 `min(8, max(2, CPU 核数))` 分片，`--shards=N` 参数或 `GEBAI_TEST_SHARDS` 环境变量覆盖；带文件路径/`-t`/`--coverage` 等参数时自动退回单进程透传（定向运行分片无收益）。输出逐行加 `[i/N]` 前缀流式透传。`test:serial` 保留串行入口
+- **失败复验（区分并行抖动与真失败）**：任一分片失败时，该分片文件列表**单进程串行重跑**——重跑通过判定为并行抖动（跨分片共享资源竞态，机器满载下真实 spawn 类用例也会触达用例超时），以 `⚠` 警告列出并给出精确复现命令、整体视为通过；重跑同样失败才是真失败（非零退出）。避免把环境/竞态抖动误当代码回归反复排查
+- **测试进程环境净化**：`bunfig.toml` 的 `[test] preload` 挂载 `scripts/test-preload.ts`，启动时清除全部 `GEBAI_`/`CODE_` 前缀变量——Bun 在 `bun test` 时按 cwd 自动加载 `.env`（仓库根 `.env` 的 `GEBAI_APPROVAL_SKIP`/`GEBAI_SELF_MODIFY`/`GEBAI_LLM_*` 会直接改变引擎审批、写守卫、Provider 解析等断言结果），宿主 shell 亦可能残留调试变量；配套 `loadConfig` 的 `loadDotEnv` 在 `NODE_ENV === "test"` 时跳过读仓库 `.env`（防用例内首次 loadConfig 重新注入）。测试结果不依赖开发者本地配置
+- **跨平台用例约定**：涉及平台分支的用例显式注入平台参数（如 `restart_server` 的 `platform: "win32"`），不随宿主平台漂移；安全判定对 Windows 形态绝对路径（盘符/UNC）在非 win32 平台一律按越界拒绝（fail-closed）
 - **turbo `test` 不依赖 `^build`**：各包 `main` 均指向 `src/*.ts`（bun 直接执行 TS 源码），测试无需先构建依赖包——冷缓存/改动后跑测试不再先付 vite 构建 + wasm 内嵌 + `bun build --compile` 的构建成本
+- **构建产物幂等（内容不变不写盘 + 跨平台确定性）**：`scripts/build-*.ts` 统一经 `write-if-changed.ts` 落盘——内容与磁盘一致则跳过写入，`typecheck`/`build` 反复重跑不再刷新已提交生成产物的 mtime 与字节（此前跑一次 typecheck 工作区就变脏，AI 每轮都要先确认「是否既有改动」）；内嵌产物 gzip 经 `gzip-deterministic.ts` 固定头部 XFL/OS 字节（zlib 默认随平台变化，同一源码在 Windows/Linux 生成不同字节）；`src/types/generated-json.d.ts` 通配声明 `*.generated.json`，构建产物缺失时 tsc 不再报 TS2307（运行时仍走各模块「缺失→回退/引导」分支）
 - **子Agent 发现进程级缓存（目录签名校验）**：`SubAgentManager.discover()` 首次扫描 `sub-agents/` 后缓存定义列表与**目录签名**（递归 `路径:mtime` 拼接，~30 次 stat），测试中每个用例新建 manager 重复 discover 时签名未变直接水合缓存、跳过目录扫描/动态 import；签名变化（新增/修改/删除子Agent 文件）即失效重扫（热加载，见「子Agent 热加载」）
 
 ### 测试分层
@@ -2386,6 +2390,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 计划文档目录 | `tmp/plans/` | ask 计划分支计划落盘目录（会话 `tmp/` 内，随会话文件面板可见；文件名按标题清洗（仅字母/数字/下划线/连字符，空回退 `plan`，长标题截断 60 字符），同标题重提计划覆盖更新） |
 | 用户输入落盘阈值 | 12000 字符 | 超长用户输入发送时全文落盘会话 `tmp/user_inputs/{hash}.txt`（原文不丢，read 可读），消息正文保留头尾各 4000 字符 + 文件引用（`USER_INPUT_SPILL_THRESHOLD`/`USER_INPUT_SPILL_HEAD`/`USER_INPUT_SPILL_TAIL`，见「上下文保护」） |
 | grep 单文件读取上限 | 1MB | 超出跳过该文件（防大文件/二进制拖慢搜索） |
+| 测试分片默认数 | `min(8, max(2, CPU 核数))` | `scripts/test-parallel.ts` 分片数（`--shards=N`/`GEBAI_TEST_SHARDS` 覆盖）；LPT 按文件字节数装箱均衡负载 |
 | grep 匹配子进程超时 | 20 秒 | 正则匹配在独立子进程执行（灾难性回溯防护），超时强杀并返回引导（`GREP_MATCHER_TIMEOUT_MS`）；行数据按 4MB 批量送子进程 |
 | edit 正则匹配超时 | 20 秒 | `edit` 的 `pattern` 项在独立子进程执行（灾难性回溯防护），超时强杀并返回引导（`REGEX_MATCHER_TIMEOUT_MS`）；单次匹配上限 1000 处（`REGEX_MAX_MATCHES`，超限拒绝） |
 | read/edit 文件大小上限 | 8MB / 5MB | 全量读入内存前 stat 预检（GB 级文件直接 OOM；edit 与 patch 5MB 同口径），超限引导 offset/limit 分段或 grep/patch 定位（`READ_MAX_FILE_BYTES`/`EDIT_MAX_FILE_BYTES`） |

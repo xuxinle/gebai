@@ -9,9 +9,11 @@
  *
  * 该文件为生成产物，已 gitignore，勿手改。
  */
-import { readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs"
+import { readFileSync, readdirSync, existsSync } from "node:fs"
+import { writeFileIfChanged } from "./write-if-changed"
+import { gzipDeterministic } from "./gzip-deterministic"
 import { join } from "node:path"
-import { gzipSync } from "node:zlib"
+
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const srcDir = join(root, "node_modules", "@terrastruct", "d2", "dist", "node-esm")
@@ -29,7 +31,7 @@ const files: Record<string, string> = {}
 for (const name of D2JS_FILES) {
   const raw = readFileSync(join(srcDir, name))
   // 全部文件 gzip 后 base64（wasm 22MB → ~7MB；JS 文本同样受益）；运行时 Bun.gunzipSync 还原
-  files[name] = gzipSync(raw).toString("base64")
+  files[name] = gzipDeterministic(raw).toString("base64")
 }
-writeFileSync(outFile, JSON.stringify({ version: pkg.version, gzip: true, files }, null, 1))
+writeFileIfChanged(outFile, JSON.stringify({ version: pkg.version, gzip: true, files }, null, 1))
 console.log(`[build-d2js] embedded ${D2JS_FILES.length} files (v${pkg.version}) -> ${outFile}`)
