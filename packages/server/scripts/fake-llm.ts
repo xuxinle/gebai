@@ -71,11 +71,11 @@ const SCENARIOS: Record<string, Step[]> = {
     { text: "分析结论：\n第一行结论\n第二行结论\n第三行结论" },
     { text: "主会话最终回复。" },
   ],
-  // native docqa 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：docqa_index 建索引
+  // 客卿 docqa 子代理链路（服务级 e2e：scripts/e2e-service-native.ts 配套）：docqa_index 建索引
   // → docqa_query 检索（常驻边车复用索引）→ 收尾。审批需免审批环境（GEBAI_APPROVAL_SKIP 会话 env）。
   // 注意引擎路由自愈：docqa_index 首调自动装载子Agent，无需 agent_load 步骤
   python: [
-    { toolCall: { id: "c1", name: "docqa_index", args: { dir: "native-agents/python/docqa/corpus" } } },
+    { toolCall: { id: "c1", name: "docqa_index", args: { dir: "keqing/python/docqa/corpus" } } },
     { toolCall: { id: "c2", name: "docqa_query", args: { query: "边车协议 超时", top_k: 2 } } },
     { text: "docqa 链路验证完成：索引已建、检索命中片段已返回。" },
   ],

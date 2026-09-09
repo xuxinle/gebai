@@ -1,6 +1,6 @@
 /**
  * vision 子代理 TS 侧贡献契约测试（跨语言合并后 TS 侧仅 analyze——识别四工具由
- * native-agents/python/vision/ 贡献，冒烟在 e2e-native-agents.ts 覆盖）：
+ * keqing/python/vision/ 贡献，冒烟在 e2e-keqing.ts 覆盖）：
  * 工具集只剩 analyze、description/PROMPT 合并语义、被依赖方约束保留。
  */
 import { describe, expect, test, afterAll } from "bun:test"
@@ -59,7 +59,7 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
 }
 
 describe("vision TS 侧贡献（跨语言合并：仅 analyze）", () => {
-  test("工具集仅 analyze（识别四工具由 native 侧贡献，onnxruntime 原生推理）", () => {
+  test("工具集仅 analyze（识别四工具由 客卿 侧贡献，onnxruntime 原生推理）", () => {
     expect(Object.keys(def.tools ?? {}).sort()).toEqual(["analyze"])
     expect(def.name).toBe("vision")
     expect(def.dependencies).toBeUndefined() // 零依赖（被依赖方）
@@ -67,7 +67,7 @@ describe("vision TS 侧贡献（跨语言合并：仅 analyze）", () => {
     expect(def.preload).toBe(false)
   })
 
-  test("description 留空（本侧不贡献，native 侧 manifest description + 合并层兜底）", () => {
+  test("description 留空（本侧不贡献，客卿 侧 manifest description + 合并层兜底）", () => {
     expect(def.description).toBe("")
   })
 
@@ -75,7 +75,7 @@ describe("vision TS 侧贡献（跨语言合并：仅 analyze）", () => {
     const p = def.systemPrompt
     expect(p).toContain("analyze")
     expect(p).toContain("被依赖方")
-    // 不复刻 native 侧内容（识别工具用法由 native PROMPT.md 贡献，合并层拼接）
+    // 不复刻 客卿 侧内容（识别工具用法由 客卿 PROMPT.md 贡献，合并层拼接）
     expect(p).not.toContain("决策序")
   })
 

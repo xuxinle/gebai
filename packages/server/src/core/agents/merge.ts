@@ -1,9 +1,9 @@
 /**
- * 子代理同名定义跨语言合并（纯函数）：TS 侧与 native（多语言）侧可各自贡献同名子代理的
+ * 子代理同名定义跨语言合并（纯函数）：TS 侧与 客卿（多语言）侧可各自贡献同名子代理的
  * 一部分——description/systemPrompt 非空项依次拼接、工具集合并（同名工具确定性保留前者并
  * 告警）、dependencies/envVars 并集、preload 取或、projectRoot/writeGuard 取首个非空。
  * 约定「只在一处定义、其他地方留空」：某侧 description 省略/留空、systemPrompt 文件缺失
- * 即表示该侧不贡献此字段（native manifest 放宽为此设计服务），合并层兜底生成描述。
+ * 即表示该侧不贡献此字段（客卿 manifest 放宽为此设计服务），合并层兜底生成描述。
  */
 import type { EnvCatalogVar, SubAgentDef, ToolSet } from "../base/types"
 
@@ -19,7 +19,7 @@ function joinText(parts: string[], sep: string): string {
 }
 
 /**
- * 合并同名子代理定义（贡献集至少 1 项；顺序即确定性优先级——TS 贡献在前、native 在后，
+ * 合并同名子代理定义（贡献集至少 1 项；顺序即确定性优先级——TS 贡献在前、客卿 在后，
  * 同名工具/函数字段冲突时前者胜出并 console.warn）。
  */
 export function mergeSubAgentDefs(name: string, defs: SubAgentDef[]): SubAgentDef {

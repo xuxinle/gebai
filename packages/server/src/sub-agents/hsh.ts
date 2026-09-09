@@ -1,6 +1,6 @@
 /**
- * hsh 的 TS 侧贡献（跨语言合并示例，DESIGN「多语言子代理」）：description/systemPrompt 留空——
- * 能力描述与工作流提示词由 native 侧（native-agents/rust/hsh/）单独贡献，本文件只补充一个
+ * hsh 的 TS 侧贡献（跨语言合并示例，DESIGN「客卿」）：description/systemPrompt 留空——
+ * 能力描述与工作流提示词由 客卿 侧（keqing/rust/hsh/）单独贡献，本文件只补充一个
  * 基础工具 crc32（适合 TS 直接实现的轻量逻辑），两侧经 SubAgentManager 合并为同一子代理。
  * 这是「基础工具 TS 写、特殊工具其他语言写」分工约定的落地样例。
  */
@@ -34,7 +34,7 @@ export const crc32Tool: Tool = {
 }
 
 export const name = "hsh"
-export const description = "" // 留空：由 native 侧贡献（跨语言合并约定——只在一处定义）
+export const description = "" // 留空：由 客卿 侧贡献（跨语言合并约定——只在一处定义）
 export const systemPrompt = "" // 留空：同上
 export const tools = { crc32: crc32Tool }
 

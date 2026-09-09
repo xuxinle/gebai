@@ -27,26 +27,26 @@ gebai.log
 users/
 tmp/
 feishu/
-# Python 语言目录 venv 与依赖清单（native-agents/python/，docqa_pip 自动创建/维护）
-native-agents/python/venv/
-native-agents/python/requirements.txt
+# Python 语言目录 venv 与依赖清单（keqing/python/，docqa_pip 自动创建/维护）
+keqing/python/venv/
+keqing/python/requirements.txt
 __pycache__/
-# 多语言子代理运行时数据（docqa 索引等，GEBAI_HOME 下）
-native-agent-data/
-# 多语言子代理编译产物与构建目录（native-agents/{cpp,rust,go}/ 下）：
+# 客卿运行时数据（docqa 索引等，GEBAI_HOME 下）
+keqing-data/
+# 客卿编译产物与构建目录（keqing/{cpp,rust,go}/ 下）：
 # 驱动可执行体形态：Windows driver.exe / Linux·macOS 无后缀 driver；
 # 其余为编译器中间产物（MSVC driver.obj/pdb/ilk/exp/lib、go build 覆盖写入的 driver.exe~）。
 # 逐后缀枚举而非 driver* 通配——后者会误伤源码同名文件（如 python/driver.py）。
 # target/ 为 cargo 构建目录。
-native-agents/**/driver
-native-agents/**/driver.exe
-native-agents/**/driver.exe~
-native-agents/**/driver.obj
-native-agents/**/driver.pdb
-native-agents/**/driver.ilk
-native-agents/**/driver.exp
-native-agents/**/driver.lib
-native-agents/rust/target/
+keqing/**/driver
+keqing/**/driver.exe
+keqing/**/driver.exe~
+keqing/**/driver.obj
+keqing/**/driver.pdb
+keqing/**/driver.ilk
+keqing/**/driver.exp
+keqing/**/driver.lib
+keqing/rust/target/
 Cargo.lock
 
 # OS

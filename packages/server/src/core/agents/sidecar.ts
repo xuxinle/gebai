@@ -1,6 +1,6 @@
 /**
- * 多语言子代理边车宿主（core/agents/sidecar.ts）：与任意语言实现（Python/C++/Go/…）的
- * 子代理进程通过 NDJSON over stdio 通信（协议见 native-agents/README.md）。
+ * 客卿边车宿主（core/agents/sidecar.ts）：与任意语言实现（Python/C++/Go/…）的
+ * 子代理进程通过 NDJSON over stdio 通信（协议见 keqing/README.md）。
  *
  * 进程管理对齐 CV sidecar（core/cv/sidecar.ts）已验证模式，并按「子代理进程」语义增强：
  * - 惰性启动 + 启动串行化（并发首次请求共用一次启动）
@@ -12,7 +12,7 @@
  * - 父进程退出清理（process exit hook）+ 驱动侧 stdin EOF 自杀 双保险防孤儿进程
  *
  * 本模块语言无关：spawn 命令来自 manifest（agent.json 的 command/args），不做任何
- * Python 特化——python 是 native-agents/ 下的第一个内置实现，不是机制的一部分。
+ * Python 特化——python 是 keqing/ 下的第一个内置实现，不是机制的一部分。
  */
 import { existsSync } from "node:fs"
 import { join } from "node:path"
@@ -28,7 +28,7 @@ const LINE_LIMIT = 1 << 24
  *  （防抖动风暴；稳定运行后的单次崩溃总是自愈重发）。 */
 const RESTART_BACKOFF_MS = 10_000
 
-/** 边车协议版本（协议 v2：tool.call 携带请求级 ctx 载荷，见 native-agents/README.md）。 */
+/** 边车协议版本（协议 v2：tool.call 携带请求级 ctx 载荷，见 keqing/README.md）。 */
 export const SIDECAR_PROTOCOL = 2
 
 /** 请求级上下文（协议 v2）：宿主每次 tool.call 组装发送——边车为进程单例、跨会话共享，
@@ -94,7 +94,7 @@ interface Pending {
   replay?: { id: number; line: string }
 }
 
-/** 单个边车进程宿主：一个 manifest（一个子代理）一个实例，由 native-agents 发现器持有。
+/** 单个边车进程宿主：一个 manifest（一个子代理）一个实例，由 客卿-agents 发现器持有。
  *  command 支持工厂函数：每次启动时解析（占位符如 {python} 需运行时解析——venv 创建后
  *  边车重启即自动切换 venv 解释器，无需重启服务）。 */
 export class AgentSidecar {
@@ -330,7 +330,7 @@ export class AgentSidecar {
   }
 
   private killAndRestart(reason: string): void {
-    console.error(`[native-agent] ${reason}`)
+    console.error(`[keqing] ${reason}`)
     const proc = this.proc
     this.proc = null
     this.stdin = null
@@ -352,14 +352,14 @@ export class AgentSidecar {
   }
 }
 
-/** 内置多语言子代理源目录解析：源码形态 src/core/agents → 仓库根 native-agents/（按实现语言
+/** 内置客卿源目录解析：源码形态 src/core/agents → 仓库根 keqing/（按实现语言
  *  分目录：python/cpp/rust/…，语言目录下共享基础框架驱动，每个二级目录一个子代理项目）；
- *  dist 形态（bun build 产物，模块位于 dist 根）→ 仓库根命中失败时 dist/native-agents/
+ *  dist 形态（bun build 产物，模块位于 dist 根）→ 仓库根命中失败时 dist/keqing/
  *  （build-subagents 构建时复制，供独立部署的 dist 树发现）；二进制形态（bun --compile 单
- *  文件）→ {GEBAI_HOME}/vendor/native-agents/（安装包模式预置物化）。 */
-export function nativeAgentsSourceDir(): string {
-  if (isBinaryMode()) return join(resolveGebaiHome(), "vendor", "native-agents")
-  const srcForm = join(import.meta.dirname, "..", "..", "..", "..", "..", "native-agents")
+ *  文件）→ {GEBAI_HOME}/vendor/keqing/（安装包模式预置物化）。 */
+export function keqingSourceDir(): string {
+  if (isBinaryMode()) return join(resolveGebaiHome(), "vendor", "keqing")
+  const srcForm = join(import.meta.dirname, "..", "..", "..", "..", "..", "keqing")
   if (existsSync(srcForm)) return srcForm
-  return join(import.meta.dirname, "native-agents")
+  return join(import.meta.dirname, "keqing")
 }

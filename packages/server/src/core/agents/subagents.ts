@@ -5,7 +5,7 @@ import type { ToolRegistry } from "../base/registry"
 import type { SubAgentInfo } from "@gebai/sdk"
 import { parseSubAgentMd } from "./sub-agent-md"
 import { mergeSubAgentDefs } from "./merge"
-import { discoverNativeAgents, disposeNativeAgentsNotIn, nativeAgentsEnabled, nativeAgentRoots, nativeAgentsSignature, type NativeAgentRunnerOptions } from "./native-agents"
+import { discoverKeqing, disposeKeqingNotIn, keqingEnabled, keqingRoots, keqingSignature, type KeqingRunnerOptions } from "./keqing"
 
 export interface SubAgentManagerOptions {
   registry: ToolRegistry
@@ -21,11 +21,11 @@ export interface SubAgentManagerOptions {
  *  过滤态入缓存会让一个实例的启停策略泄漏给同进程所有后续实例（跨实例污染）。 */
 let discoveredDefsCache: SubAgentDef[] | null = null
 let discoveredSigCache: string | null = null
-/** native（多语言）子代理目录签名缓存（与 TS 子代理目录签名拼为一套热加载判定）；配套
+/** 客卿（多语言）子代理目录签名缓存（与 TS 子代理目录签名拼为一套热加载判定）；配套
  *  nativeDefsCache 缓存最近一次成功发现的定义集（热加载幂等水合：签名未变不重拉起边车）。 */
 let nativeSigCache: string | null = null
 let nativeDefsCache: SubAgentDef[] | null = null
-/** 最近一次 native 发现的失败清单（name → 原因；与 nativeDefsCache 配套水合进实例 loadErrors）。 */
+/** 最近一次 客卿 发现的失败清单（name → 原因；与 nativeDefsCache 配套水合进实例 loadErrors）。 */
 let nativeErrorsCache: Array<[string, string]> | null = null
 /** 首次扫描的加载错误缓存（与 defs 缓存配套，跨实例水合同源）：name → 失败原因（import 抛错/
  *  缺 def 导出等）。签名未变的后续 discover 直接复用；self_optimize 修复文件后 mtime 变化触发重扫更新。 */
@@ -64,19 +64,19 @@ export class SubAgentManager {
   /** 手工注册贡献集（register 动态注册）：独立于目录扫描——热加载重扫（磁盘签名变化，含并行进程
    *  改动目录的跨进程竞态）不冲掉运行期扩展，与 removedDefs 同样跨重扫存活；同名时与文件定义合并。 */
   private manualDefs = new Map<string, SubAgentDef>()
-  /** native（多语言）侧贡献集（manifest 发现）：同一合成规则。 */
+  /** 客卿（多语言）侧贡献集（manifest 发现）：同一合成规则。 */
   private nativeDefs = new Map<string, SubAgentDef>()
   private loaded = new Set<string>()
   private registry: ToolRegistry
   private preloadOverride?: string[]
   private bundledNames: Set<string>
-  /** native（多语言）子代理发现选项（boot 接线注入；测试缺省 undefined——本地形态且非 off 才启用）。
-   *  null = 显式禁用（沙箱模式/GEBAI_NATIVE_AGENTS=off）。 */
-  private nativeAgentsOpts: NativeAgentRunnerOptions | null | undefined
+  /** 客卿（多语言）子代理发现选项（boot 接线注入；测试缺省 undefined——本地形态且非 off 才启用）。
+   *  null = 显式禁用（沙箱模式/GEBAI_KEQING=off）。 */
+  private keqingOpts: KeqingRunnerOptions | null | undefined
 
-  /** 同名贡献集合并视图重建（跨语言合并，DESIGN「多语言子代理」）：tsDefs/nativeDefs 任一变化后
-   *  调用——逐名 mergeSubAgentDefs（TS 贡献在前、native 在后）重算全量 defs，再过滤实例级
-   *  removedDefs。native 定义独立存于贡献集，TS 目录签名变化触发的全量重扫不影响 native 侧
+  /** 同名贡献集合并视图重建（跨语言合并，DESIGN「客卿」）：tsDefs/nativeDefs 任一变化后
+   *  调用——逐名 mergeSubAgentDefs（TS 贡献在前、客卿 在后）重算全量 defs，再过滤实例级
+   *  removedDefs。客卿 定义独立存于贡献集，TS 目录签名变化触发的全量重扫不影响 客卿 侧
    *  （重扫只重建 tsDefs 后再次合并）；已装载会话沿用装载时的定义（不追踪热合并，与 TS 热加载同语义）。 */
   private rebuildMergedDefs(): void {
     const names = new Set<string>([...this.tsDefs.keys(), ...this.manualDefs.keys(), ...this.nativeDefs.keys()])
@@ -88,9 +88,9 @@ export class SubAgentManager {
     for (const n of this.removedDefs) this.defs.delete(n)
   }
 
-  /** 注入 native 子代理发现选项（boot/compose 接线；roots 覆盖发现根目录供测试隔离）。 */
-  setNativeAgentsOpts(opts: NativeAgentRunnerOptions | null): void {
-    this.nativeAgentsOpts = opts
+  /** 注入 客卿子代理发现选项（boot/compose 接线；roots 覆盖发现根目录供测试隔离）。 */
+  setKeqingOpts(opts: KeqingRunnerOptions | null): void {
+    this.keqingOpts = opts
   }
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
@@ -196,16 +196,16 @@ export class SubAgentManager {
     await this.preload()
   }
 
-  /** native（多语言）子代理发现（discover 尾部调用）：仅 boot 显式接线（setNativeAgentsOpts）且
-   *  本地形态（非沙箱部署、GEBAI_NATIVE_AGENTS≠off）时启用——测试不注入选项即零影响；
+  /** 客卿（多语言）子代理发现（discover 尾部调用）：仅 boot 显式接线（setKeqingOpts）且
+   *  本地形态（非沙箱部署、GEBAI_KEQING≠off）时启用——测试不注入选项即零影响；
    *  目录签名变化才重拉起（含进程级边车注册表对账回收）。发现的定义写入 nativeDefs 贡献集，
    *  与 TS 同名定义经 rebuildMergedDefs 合并（跨语言合并视图）——不再「同名覆盖」，两侧共存。
-   *  进程级 nativeDefsCache 缓存启动结果（热加载幂等：实例重新 discover 而 native 签名未变时
+   *  进程级 nativeDefsCache 缓存启动结果（热加载幂等：实例重新 discover 而 客卿 签名未变时
    *  不重拉起边车，直接水合缓存）；单项失败记 loadErrors（模型可见根因）不阻断。 */
   private async discoverNativeIfChanged(): Promise<void> {
-    if (this.nativeAgentsOpts == null || !nativeAgentsEnabled()) return
-    const roots = this.nativeAgentsOpts.roots ?? nativeAgentRoots()
-    const nativeSig = await nativeAgentsSignature(roots)
+    if (this.keqingOpts == null || !keqingEnabled()) return
+    const roots = this.keqingOpts.roots ?? keqingRoots()
+    const nativeSig = await keqingSignature(roots)
     if (nativeSigCache !== null && nativeSig === nativeSigCache) {
       // 签名未变：从进程级缓存水合（含首次发现启动失败重试的窗口——缓存未建立时仍会真实重拉）
       if (nativeDefsCache) {
@@ -216,24 +216,24 @@ export class SubAgentManager {
       return
     }
     try {
-      const { defs: nativeDefs, errors } = await discoverNativeAgents(this.nativeAgentsOpts ?? {})
+      const { defs: nativeDefs, errors } = await discoverKeqing(this.keqingOpts ?? {})
       this.nativeDefs = new Map(nativeDefs.map((d) => [d.name, d]))
       for (const [name, err] of errors) this.loadErrors.set(name, err)
       nativeDefsCache = nativeDefs
       nativeErrorsCache = errors
       nativeSigCache = nativeSig
-      disposeNativeAgentsNotIn(nativeDefs.map((d) => d.name))
+      disposeKeqingNotIn(nativeDefs.map((d) => d.name))
       this.rebuildMergedDefs()
     } catch (err) {
-      console.warn(`[subagents] native 子代理发现失败（已跳过）: ${(err as Error).message}`)
+      console.warn(`[subagents] 客卿子代理发现失败（已跳过）: ${(err as Error).message}`)
     }
   }
 
   /** 热加载检查：目录签名变化时重新扫描（幂等、未变化时零成本目录遍历）。装载/新任务前调用——
    *  已装载会话沿用旧定义（工具注册与注入的提示词保持稳定），新定义对未装载与新会话生效。
    *  仅校验既有扫描结果（进程内从未 discover 过时不主动发起首次扫描——生产由启动 discover 负责，
-   *  测试桩手工 register 的管理器不因 load 意外扫入真实子Agent）。TS 签名与 native 签名各自判定：
-   *  TS 变化走全量 discover（尾部含 native 检查），仅 native 变化只重拉 native（幂等跳过 TS 扫描）。 */
+   *  测试桩手工 register 的管理器不因 load 意外扫入真实子Agent）。TS 签名与 客卿 签名各自判定：
+   *  TS 变化走全量 discover（尾部含 客卿 检查），仅 客卿 变化只重拉 客卿（幂等跳过 TS 扫描）。 */
   async refreshIfChanged(): Promise<void> {
     if (!discoveredDefsCache && !nativeDefsCache) return
     const dir = join(import.meta.dirname, "..", "..", "sub-agents")
