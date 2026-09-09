@@ -3,8 +3,9 @@
  * 可靠性设计——「自杀后谁拉起」：重启的最大风险是旧进程死了新进程起不来（进程树连坐）。
  * 方案是外部拉起器彻底脱离服务进程树（Windows/Linux 双平台）：
  * 1. 工具执行时把拉起器脚本落盘到固定路径（`{tmpdir}/gebai-restart/`）并部署为独立进程：
- *    - Windows：PowerShell 脚本，经 `wmic process call create` 启动——拉起器父进程是 WMI 宿主
- *      （Win32_Process provider），与服务进程零亲缘，服务退出/被杀不影响拉起器运行；
+ *    - Windows：PowerShell 脚本，二段式启动：先 `powershell Start-Process powershell -File …` 起一个
+ *      独立窗口进程（与当前服务零亲缘），由它再执行拉起器脚本——服务退出/被杀不影响拉起器运行
+ *      （WMIC 已废弃：Win11 24H2+ 默认移除，不可再用）；
  *    - Linux/macOS：bash 脚本，经 `setsid` 启动（新会话新进程组，防 kill -PGID 整杀连坐），
  *      标准流重定向 /dev/null——服务退出后拉起器被 init 收养，继续运行；
  * 2. 拉起器：等旧进程退出（60s）→ 等端口释放（30s；被第三方占用直接失败，不动无辜进程）→
@@ -15,7 +16,8 @@
  *
  * 平台差异：PowerShell 脚本必须带 UTF-8 BOM（Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解析，
  * 中文注释/字符串会撕裂语法）；bash 脚本用 UTF-8 无 BOM。端口属主探测 Windows 用 Get-NetTCPConnection，
- * Linux 用 ss -ltnp（iproute2 基础组件，各发行版标配）。
+ * Linux 用 ss -ltnp（iproute2 基础组件，各发行版标配）。状态文件一律 UTF-8 无 BOM：PS5.1 的
+ * Set-Content -Encoding UTF8 会写入 BOM，读方（status 动作）与消费方均按无 BOM 预期解析。
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -50,7 +52,7 @@ export interface RestartDeps {
   exitDelayMs: number
   /** 进程退出（默认 process.exit；测试注入）。 */
   exit: (code: number) => void
-  /** 拉起器部署（默认按平台 wmic / setsid；测试注入）。 */
+  /** 拉起器部署（默认按平台 Start-Process / setsid；测试注入）。 */
   spawnLauncher: (scriptPath: string, platform: NodeJS.Platform) => Promise<{ ok: boolean; error?: string }>
 }
 
@@ -77,6 +79,9 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
   const dir = restartDir(deps.tmpDir)
   const statePs = psq(join(dir, "state.json"))
   const logPs = psq(join(dir, "server.log"))
+  // 探测路径：GEBAI_BASE_PATH 前缀时挂上（默认 /api/v1/sub-agents；leading / 从 BASE_PATH 补齐）
+  const basePath = (deps.env.GEBAI_BASE_PATH || "").replace(/\/+$/, "")
+  const probe = `${basePath}/api/v1/sub-agents`
   return [
     "$ErrorActionPreference = 'Continue'",
     `$port = ${deps.port}`,
@@ -101,11 +106,11 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
     // 直接失败退出，不动老服务之外的东西（老进程没死的场景在阶段 1 已等过）
     "$owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess",
     "if ($owner) {",
-    `  @{ ok = $false; error = ('端口 ' + $port + ' 被其他进程(PID ' + $owner + ')占用，未启动新服务') } | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 '${statePs}'`,
+    `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; error = ('端口 ' + $port + ' 被其他进程(PID ' + $owner + ')占用，未启动新服务') } | ConvertTo-Json -Compress))`,
     "  exit 1",
     "}",
-    // 3) 启动新服务（Start-Process：新进程脱离原服务进程树——拉起器由 wmic 拉起、与原服务
-    //    零亲缘；拉起器退出后 Windows 不连坐子进程（无 job object），新服务继续运行）
+    // 3) 启动新服务（Start-Process：新进程脱离原服务进程树——拉起器由独立 PowerShell 宿主拉起、
+    //    与原服务零亲缘；拉起器退出后 Windows 不连坐子进程（无 job object），新服务继续运行）
     `$env:GEBAI_PORT = '${String(deps.port)}'`,
     ...Object.entries(deps.env).filter(([k]) => k !== "GEBAI_PORT").map(([k, v]) => `$env:${k} = '${psq(v)}'`),
     `Start-Process -FilePath '${psq(process.execPath)}' ${deps.binary ? `` : `-ArgumentList 'run','${psq(deps.entry!)}' `}-WorkingDirectory '${psq(deps.cwd)}' -WindowStyle Hidden -RedirectStandardOutput '${logPs}.out' -RedirectStandardError '${logPs}.err' | Out-Null`,
@@ -117,7 +122,7 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
     "while ((Get-Date) -lt $deadline) {",
     "  $owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess",
     "  if ($owner -and [int]$owner -ne $oldPid) {",
-    "    try { $r = Invoke-WebRequest -Uri ('http://127.0.0.1:' + $port + '/api/v1/sub-agents') -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ready = $true; $newPid = [int]$owner; break } } catch {}",
+    `    try { $r = Invoke-WebRequest -Uri ('http://127.0.0.1:' + $port + '${probe}') -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { $ready = $true; $newPid = [int]$owner; break } } catch {}`,
     "  }",
     "  Start-Sleep -Milliseconds 800",
     "}",
@@ -125,25 +130,36 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
     "$tail = ''",
     `if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -ErrorAction SilentlyContinue) -join [char]10 }`,
     "if ($ready) {",
-    `  @{ ok = $true; port = $port; pid = $newPid; note = '新服务已就绪' } | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 '${statePs}'`,
+    `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $true; port = $port; pid = $newPid; note = '新服务已就绪' } | ConvertTo-Json -Compress))`,
     "} else {",
-    `  @{ ok = $false; error = '就绪超时（90s）'; logTail = $tail } | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 '${statePs}'`,
+    `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; error = '就绪超时（90s）'; logTail = $tail } | ConvertTo-Json -Compress))`,
     "}",
   ].join("\n")
 }
 
-/** Windows 默认拉起器部署：wmic process call create（父进程=WMI 宿主，与服务进程零亲缘）。 */
-async function wmicSpawnLauncher(scriptPath: string): Promise<{ ok: boolean; error?: string }> {
-  const cmdline = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`
-  const proc = Bun.spawn(["wmic", "process", "call", "create", cmdline], {
-    stdout: "pipe",
-    stderr: "pipe",
-    windowsHide: true,
-  })
-  const out = await new Response(proc.stdout).text()
-  const code = await proc.exited
-  if (code !== 0 || !/ReturnValue\s*=\s*0/.test(out)) {
-    return { ok: false, error: `wmic 启动失败 (exit=${code}): ${out.slice(-300)}` }
+/** Windows 默认拉起器部署：二段式 PowerShell Start-Process（WMIC 已废弃：Win11 24H2+ 默认移除，不可再用）。
+ *
+ * 不能直接 Bun.spawn("powershell -File launcher.ps1")：拉起器会成为服务的直接子进程，Bun 子进程经
+ * job object 连坐——服务退出时拉起器一起被杀，重启必败。二段式：外层 powershell（服务的短暂子进程）
+ * 经 Start-Process 启动内层 powershell 执行拉起器——Start-Process 创建的新进程不受父 job object
+ * kill-on-close 连坐（中间的外层进程退出后链路断开），与原服务彻底零亲缘；外层确认内层已创建后
+ * 立即退出（存活秒级），服务随后自杀不牵连任何人。
+ */
+async function startProcessSpawnLauncher(scriptPath: string): Promise<{ ok: boolean; error?: string }> {
+  const proc = Bun.spawn(
+    [
+      "powershell",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `$p = Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','${psq(scriptPath)}') -WindowStyle Hidden -PassThru; if ($p) { exit 0 } else { exit 1 }`,
+    ],
+    { stdout: "pipe", stderr: "pipe", windowsHide: true },
+  )
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+  if (code !== 0) {
+    return { ok: false, error: `二段式 Start-Process 启动失败 (exit=${code}): ${(out + err).slice(-300)}` }
   }
   return { ok: true }
 }
@@ -228,12 +244,14 @@ async function setsidSpawnLauncher(scriptPath: string): Promise<{ ok: boolean; e
     stdout: "ignore",
     stderr: "ignore",
   })
-  // setsid 后台化：spawn 不等待（拉起器自包含全流程，无需与部署方交互）
+  // 拉起器必须长期存活（等旧进程退出最长 60s+）；部署方只验证它已进入运行态。
+  // 不可 await proc.exited 阻塞等它退出（拉起器要等服务退出才结束，会死锁部署方）；
+  // 用短窗口内进程是否已退出的窄探测判定「启动即崩」的失败，存活即返回成功。
   await new Promise((r) => setTimeout(r, 150))
-  const alive = await proc.exited.then((c) => c !== null && proc.exitCode === null).catch(() => false)
-  if (alive === false) {
-    const code = await proc.exited.catch(() => -1)
-    if (code === 0) return { ok: true } // 瞬间退出但成功？不可信——继续判失败
+  const exitedEarly = proc.exitCode !== null || proc.signalCode !== null
+  if (exitedEarly) {
+    const code = proc.exitCode ?? proc.signalCode ?? -1
+    if (code === 0) return { ok: true } // 瞬间成功退出：脚本内容异常（应有等待阶段），不信任，按失败处理
     return { ok: false, error: `setsid 启动失败 (exit=${code})：bash 或 setsid 不可用` }
   }
   return { ok: true }
@@ -263,7 +281,7 @@ async function deployLauncher(deps: RestartDeps): Promise<{ ok: boolean; error?:
 
 /** 默认拉起器部署（按平台分发）。 */
 async function defaultSpawnLauncher(scriptPath: string, platform: NodeJS.Platform): Promise<{ ok: boolean; error?: string }> {
-  return platform === "win32" ? wmicSpawnLauncher(scriptPath) : setsidSpawnLauncher(scriptPath)
+  return platform === "win32" ? startProcessSpawnLauncher(scriptPath) : setsidSpawnLauncher(scriptPath)
 }
 
 /** 读取最近一次重启状态（status 动作）。 */
@@ -271,7 +289,7 @@ async function readState(deps: Pick<RestartDeps, "tmpDir">): Promise<ToolResult>
   const stateFile = join(restartDir(deps.tmpDir), "state.json")
   try {
     const raw = await readFile(stateFile, "utf8")
-    return { output: `最近一次重启状态：\n${raw.trim()}` }
+    return { output: `最近一次重启状态：\n${raw.trim().replace(/^\uFEFF/, "")}` }
   } catch {
     return { output: `尚无重启记录（state.json 不存在）——从未执行过重启，或 ${restartDir()} 被清理。` }
   }

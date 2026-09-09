@@ -59,6 +59,18 @@ describe("restart_server（Windows 拉起器）", () => {
     expect(script).toContain("state.json")
   })
 
+  test("buildLauncherScriptWin：状态文件无 BOM（[IO.File]::WriteAllText，PS5.1 Set-Content UTF8 会带 BOM）", () => {
+    const script = buildLauncherScriptWin(makeDeps())
+    expect(script).toContain("[IO.File]::WriteAllText")
+    expect(script).not.toContain("Set-Content -Encoding UTF8")
+  })
+
+  test("buildLauncherScriptWin：GEBAI_BASE_PATH 时探测 URL 带前缀", () => {
+    const script = buildLauncherScriptWin(makeDeps({ env: { GEBAI_PORT: "3001", GEBAI_BASE_PATH: "/gebai" } }))
+    expect(script).toContain("'http://127.0.0.1:' + $port + '/gebai/api/v1/sub-agents'")
+    expect(script).not.toContain("'http://127.0.0.1:' + $port + '/api'")
+  })
+
   test("buildLauncherScriptWin：binary 模式无 run 入口参数", () => {
     const script = buildLauncherScriptWin(makeDeps({ binary: true }))
     expect(script).toContain("Start-Process -FilePath")
@@ -191,6 +203,36 @@ describe("restart_server 工具行为", () => {
     await new Promise((r) => setTimeout(r, 60))
     expect(exited).toBe(0)
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+// Windows 部署器实机冒烟：Win11 24H2+ 移除 WMIC 后 wmic 不可用，拉起器部署改用二段式
+// PowerShell Start-Process（跳过条件：非 win32 宿主）。
+// 注：冒烟只验证部署器（外层 powershell 退出码）——拉起器脚本内容用假 oldPid/端口构造，
+// 对不存在进程立即超时跳过、端口探测后按预期失败退出并写状态文件，无副作用。
+;(process.platform === "win32" ? describe : describe.skip)("restart_server（Windows 部署器实机冒烟）", () => {
+  test("默认部署器（win32）：二段式 Start-Process 成功启动拉起器，不再依赖 WMIC", async () => {
+    const { makeRestartServerTool } = await import("./restart")
+    // 动态选空闲高位端口：固定幻端口（如 1）在 Windows 管理员下可绑定，拉起器会真启动服务成孤儿进程
+    const freePort = await new Promise<number>((resolve, reject) => {
+      const srv = require("node:net").createServer()
+      srv.listen(0, "127.0.0.1", () => {
+        const p = srv.address().port
+        srv.close(() => resolve(p))
+      })
+      srv.on("error", reject)
+    })
+    const tool = makeRestartServerTool({
+      tmpDir: mkdtempSync(join(tmpdir(), "restart-smoke-")),
+      // 假 PID 立即满足「等旧进程退出」；拉起器在空闲端口上真启动一次服务——就绪后写成功状态（验证全链路），
+      // 该孤立服务无下游依赖，进程关闭后随 job object 回收
+      oldPid: -1,
+      port: freePort,
+      exitDelayMs: 60_000,
+      exit: () => {},
+    })
+    const res = await tool.execute({ action: "restart" }, ctxStub(tmpdir()))
+    expect(res.output).toContain("重启已布置")
   })
 })
 
