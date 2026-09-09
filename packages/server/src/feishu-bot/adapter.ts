@@ -22,10 +22,12 @@ export interface BotRunHandlers {
   onError?(error: string): void
   /** 任务结束（完成/出错，收尾清理用）。 */
   onEnd?(): void
-  /** 工具调用开始（notifyTools 开启时推送；主循环与子会话/分支过程均含）。 */
-  onToolCall?(name: string, toolCallId: string): void
-  /** 工具调用结果（notifyTools 开启时推送；session 标记子会话/分支过程）。 */
-  onToolResult?(name: string, output: string, session: boolean): void
+  /** 工具调用开始（notifyTools 开启时推送；主循环与子会话/分支过程均含）：单调用一条消息，
+   *  参数随载荷转发（摘要展示用）。 */
+  onToolCall?(name: string, toolCallId: string, args?: Record<string, unknown>): void
+  /** 工具调用结果（notifyTools 开启时推送；session 标记子会话/分支过程）：toolCallId 精确配对
+   *  开始消息（原地更新为完成态）。 */
+  onToolResult?(name: string, output: string, session: boolean, toolCallId?: string): void
   /** 助手中间轮文本（notifyAssistant 开启时推送：带工具调用的中间轮过程陈述/阶段结论）。 */
   onIntermediate?(text: string): void
 }
@@ -88,10 +90,11 @@ export class EngineBotAdapter implements BotPromptAdapter {
           break
         // 工具过程事件（工具调用/结果不受 outputMode 限制，始终发布）：按 notifyTools 开关转发
         case "event.tool.call":
-          if (this.channel.notifyTools) handlers.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""))
+          if (this.channel.notifyTools)
+            handlers.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""), (p.arguments ?? undefined) as Record<string, unknown> | undefined)
           break
         case "event.tool.result":
-          if (this.channel.notifyTools) handlers.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true)
+          if (this.channel.notifyTools) handlers.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true, p.toolCallId != null ? String(p.toolCallId) : undefined)
           break
         // 助手中间轮文本（notifyAssistant 开启 → 引擎 notifyIntermediate 发布）：过程陈述/阶段结论
         case "event.message.intermediate":

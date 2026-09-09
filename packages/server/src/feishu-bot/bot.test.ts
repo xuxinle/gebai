@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
 import type { SessionData } from "../core/base/types"
-import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard, formatToolNote } from "./bot"
+import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard, formatToolArgs } from "./bot"
 
 /** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
 const funame = (openId: string) => `feishu_${createHash("sha256").update(openId).digest("hex").slice(0, 24)}`
@@ -261,10 +261,10 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
           h.onIntermediate?.(String(p.text ?? ""))
           break
         case "event.tool.call":
-          h.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""))
+          h.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""), (p.arguments ?? undefined) as Record<string, unknown> | undefined)
           break
         case "event.tool.result":
-          h.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true)
+          h.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true, p.toolCallId != null ? String(p.toolCallId) : undefined)
           break
         case "event.task.done":
           h.onEnd?.()
@@ -1068,32 +1068,36 @@ describe("引擎事件推送", () => {
 describe("过程推送配置（GEBAI_FEISHU_BOT_NOTIFY_*）", () => {
   const base = { sessionId: sid(), timestamp: 0 }
 
-  test("notifyTools：工具调用滚动状态消息（发一条原地更新，消息保留不撤回）", async () => {
+  test("notifyTools：每个工具调用一条消息（开始🔧+参数摘要，结束原地更新✔+耗时；并行按 id 独立）", async () => {
     const f = makeBot({ notify: { tools: true } })
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    f.emit({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1" } })
+    // 工具开始：发一条运行中消息（含参数摘要）
+    f.emit({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1", arguments: { path: "src/a.ts", limit: 50 } } })
     await flush()
-    // 首个工具调用：发一条滚动状态消息
     expect(f.sent.filter((s) => String(JSON.stringify(s.content)).includes("🔧")).length).toBe(1)
-    f.emit({ type: "event.tool.call", ...base, payload: { name: "write", toolCallId: "tc2" } })
+    expect(String(JSON.stringify(f.sent[0].content))).toContain("path=\\\"src/a.ts\\\"")
+    // 第二个工具（并行）：另发一条独立消息（不同 toolCallId）
+    f.emit({ type: "event.tool.call", ...base, payload: { name: "write", toolCallId: "tc2", arguments: { path: "b.txt" } } })
     await flush()
-    // 第二个工具调用：原地更新同一条消息（PATCH，不发新）
-    expect(f.patches.length).toBe(1)
-    expect(String(JSON.stringify(f.patches[0].content))).toContain("write")
-    expect(f.sent.filter((s) => String(JSON.stringify(s.content)).includes("🔧")).length).toBe(1)
-    // 工具完成：标记完成位（✔）仍原地更新
-    f.emit({ type: "event.tool.result", ...base, payload: { name: "read", toolCallId: "tc1" } })
+    expect(f.sent.filter((s) => String(JSON.stringify(s.content)).includes("🔧")).length).toBe(2)
+    // 第一个工具完成：原地更新对应消息为✔（不碰另一条）
+    f.emit({ type: "event.tool.result", ...base, payload: { name: "read", toolCallId: "tc1", output: "ok" } })
     await flush()
-    expect(f.patches.length).toBe(2)
-    expect(String(JSON.stringify(f.patches[1].content))).toContain("✔ read")
-    // 最终回复：滚动状态消息保留不撤回，发最终卡片
+    expect(f.patches).toHaveLength(1)
+    expect(f.patches[0].messageId).toBe("om_sent_1")
+    expect(String(JSON.stringify(f.patches[0].content))).toContain("✔ read")
+    expect(String(JSON.stringify(f.patches[0].content))).not.toContain("write")
+    // 第二个工具完成：原地更新自己的消息
+    f.emit({ type: "event.tool.result", ...base, payload: { name: "write", toolCallId: "tc2", output: "done" } })
+    await flush()
+    expect(f.patches).toHaveLength(2)
+    expect(f.patches[1].messageId).toBe("om_sent_2")
+    // 最终回复：工具消息保留不撤回，发最终卡片
     f.emit({ type: "event.message.done", ...base, payload: { text: "完成" } })
     await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
     await flush()
-    const noteId = f.sent.find((s) => String(JSON.stringify(s.content)).includes("🔧"))
-    expect(noteId).toBeDefined()
     expect(f.deletes).toHaveLength(0)
   })
 
@@ -1138,18 +1142,17 @@ describe("过程推送配置（GEBAI_FEISHU_BOT_NOTIFY_*）", () => {
     expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("✍️"))).toBe(false)
   })
 
-  test("formatToolNote：滚动文案格式（已完成在前/未完成在后/超限截尾）", () => {
-    const items = Array.from({ length: 15 }, (_, i) => ({ name: `tool_${i}`, done: i < 10 }))
-    const note = formatToolNote(items, 6)
-    expect(note).toContain("已完成 10/15")
-    expect(note).toContain("✔ tool_9")
-    expect(note).not.toContain("tool_0、") // 超限截尾：最早的完成项被截（仅保留最近 6 项）
-    expect(note).toContain("🔧 tool_14…")
-    // 默认 max=12：15 项全显不截尾
-    const full = formatToolNote(items)
-    expect(full).toContain("tool_0、")
-    // 空列表返回空串（不发送）
-    expect(formatToolNote([])).toBe("")
+  test("formatToolArgs：参数摘要（key=\"value\" 连接、值/总长截断、空参/未定义过滤）", () => {
+    expect(formatToolArgs(undefined)).toBe("")
+    expect(formatToolArgs({})).toBe("")
+    expect(formatToolArgs({ path: "src/a.ts", limit: 50 })).toBe('path="src/a.ts" limit="50"')
+    // 对象序列化 + 长值截断
+    expect(formatToolArgs({ edits: [{ old: 1 }] })).toContain('edits="[{"old":1}]"')
+    const long = formatToolArgs({ content: "x".repeat(300) })
+    expect(long.length).toBeLessThanOrEqual(200 + 2)
+    expect(long).toContain("…")
+    // 未定义值过滤（调用方明确传入的不发）
+    expect(formatToolArgs({ a: 1, b: undefined })).toBe('a="1"')
   })
 })
 

@@ -33,10 +33,6 @@ export interface FeishuConnLike {
 class ChatOutbox {
   private queue: Promise<unknown> = Promise.resolve()
   private statusMsgId: string | null = null
-  /** 工具过程滚动状态消息（发一条原地更新；无更新能力时发新撤旧）。 */
-  private toolNoteMsgId: string | null = null
-  private toolNoteContent = ""
-  private toolNotePatchable = true
   private deltaBuf = ""
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private lastFlush = 0
@@ -80,20 +76,45 @@ class ChatOutbox {
     })
   }
 
-  /** 工具过程滚动状态（GEBAI_FEISHU_BOT_NOTIFY_TOOLS）：同一任务单条消息原地更新（PATCH），
-   *  更新接口不可用时发新消息（消息一律保留不撤回）。 */
-  toolNote(text: string): void {
-    if (!text.trim()) return
-    if (this.toolNoteMsgId !== null && this.toolNoteContent === text) return // 内容未变不重复更新
-    this.toolNoteContent = text
+  /** 工具过程消息组（GEBAI_FEISHU_BOT_NOTIFY_TOOLS）：每个工具调用一条消息——开始时发「🔧 名字(参数摘要)…」
+   *  运行中消息，结束时原地更新为「✔ 名字(参数摘要)（耗时）」（PATCH，消息保留不撤回）；并行工具按
+   *  toolCallId 各自独立；更新接口不可用时结束时发新消息（两条各自终态，不滚动）。 */
+  private toolMsgs = new Map<string, { msgId: string; text: string; startedAt: number; patchable: boolean }>()
+
+  /** 工具调用开始：发一条运行中消息（消息 id 与文案记入 toolMsgs 供结束时原地更新）。 */
+  toolStart(toolCallId: string, text: string): void {
+    if (!text.trim() || this.toolMsgs.has(toolCallId)) return
+    const startedAt = this.clock()
+    const initial = `🔧 ${text}…`
+    this.toolMsgs.set(toolCallId, { msgId: "", text, startedAt, patchable: true })
     this.enqueue(async () => {
-      if (this.toolNoteMsgId !== null && this.toolNotePatchable) {
-        // 原地更新（免刷屏；内容同型 text→text）
-        const ok = await this.api.patchMessage(this.toolNoteMsgId, "text", { text })
+      const id = await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text: initial } })
+      const rec = this.toolMsgs.get(toolCallId)
+      if (rec) rec.msgId = id
+    })
+  }
+
+  /** 工具调用结束：原地更新该调用的运行中消息为完成态（无消息/更新不可用时发新消息）。 */
+  toolFinish(toolCallId: string): void {
+    const rec = this.toolMsgs.get(toolCallId)
+    if (!rec) return
+    this.toolMsgs.delete(toolCallId)
+    if (!rec.msgId) {
+      // 开始消息仍在途（队列内 send 未完成）：完成文案接力排入其后，队列串行保序
+      this.enqueue(async () => {
+        await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text: `✔ ${rec.text}（<1s）` } })
+      })
+      return
+    }
+    const secs = Math.max(1, Math.round((this.clock() - rec.startedAt) / 1000))
+    const done = `✔ ${rec.text}（${secs}s）`
+    this.enqueue(async () => {
+      if (rec.patchable) {
+        const ok = await this.api.patchMessage(rec.msgId, "text", { text: done })
         if (ok) return
-        this.toolNotePatchable = false // 无更新能力（权限/旧接口）：后续每次发新消息（不撤旧）
+        rec.patchable = false
       }
-      this.toolNoteMsgId = await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text } })
+      await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text: done } })
     })
   }
 
@@ -132,8 +153,6 @@ class ChatOutbox {
   final(text: string, replyTo?: string): void {
     this.clearTransient()
     this.statusMsgId = null
-    this.toolNoteMsgId = null
-    this.toolNoteContent = ""
     this.enqueue(async () => {
       const card = buildReplyCard(text)
       await this.post("interactive", card, replyTo)
@@ -146,8 +165,6 @@ class ChatOutbox {
   error(text: string, replyTo?: string): void {
     this.clearTransient()
     this.statusMsgId = null
-    this.toolNoteMsgId = null
-    this.toolNoteContent = ""
     this.enqueue(async () => {
       await this.post("text", { text: `❌ ${text}` }, replyTo)
       this.finalSent = true
@@ -164,8 +181,6 @@ class ChatOutbox {
   taskDone(replyTo?: string): void {
     this.clearTransient()
     this.statusMsgId = null
-    this.toolNoteMsgId = null
-    this.toolNoteContent = ""
     this.enqueue(async () => {
       if (this.finalSent) return
       await this.post("text", { text: "✅ 任务完成" }, replyTo)
@@ -320,26 +335,23 @@ export function sanitizeId(raw: string): string | null {
   return /^[A-Za-z0-9_-]{1,64}$/.test(raw) ? raw : null
 }
 
+/** 工具调用参数摘要（单行紧凑，notifyTools 单调用消息用）：key="value" 空格连接，
+ *  值截断防刷屏（字符串去引号，对象/数组 JSON 序列化）。 */
+export function formatToolArgs(args: Record<string, unknown> | undefined, maxValueLen = 80, totalLimit = 200): string {
+  const entries = Object.entries(args ?? {}).filter(([, v]) => v !== undefined)
+  if (!entries.length) return ""
+  const fmtVal = (v: unknown): string => {
+    const s = typeof v === "string" ? v : JSON.stringify(v) ?? String(v)
+    return s.length > maxValueLen ? `${s.slice(0, maxValueLen)}…` : s
+  }
+  const text = entries.map(([k, v]) => `${k}="${fmtVal(v)}"`).join(" ")
+  return text.length > totalLimit ? `${text.slice(0, totalLimit)}…` : text
+}
+
 /** 飞书会话 id 派生：sha256("feishu:"+chatId) 前 32 位 hex——确定性（重启不变）且满足存储层
  *  会话 id 白名单（`feishu_{chatId}` 含 `_` 与大写不在 [0-9a-f]{32} 内，真实 SessionStore 下 save 抛错）。 */
 export function sessionIdForChat(chatId: string): string {
   return createHash("sha256").update(`feishu:${chatId}`).digest("hex").slice(0, 32)
-}
-
-/** 工具过程滚动文案（notifyTools）：已完成在前（✔）、未完成在后（🔧，末项加「…」），
- *  超限截尾（保留最新项，防刷屏）。 */
-export function formatToolNote(items: Array<{ name: string; done: boolean }>, max = 12): string {
-  const done = items.filter((it) => it.done)
-  const todo = items.filter((it) => !it.done)
-  const lines: string[] = []
-  if (done.length) {
-    lines.push(done.slice(-max).map((it) => `✔ ${it.name}`).join("、"))
-  }
-  if (todo.length) {
-    const shown = todo.slice(-max)
-    lines.push(shown.map((it, i) => `🔧 ${it.name}${i === shown.length - 1 ? "…" : ""}`).join("、"))
-  }
-  return lines.length ? `🔧 工具调用（已完成 ${done.length}/${items.length}）：\n${lines.join("\n")}` : ""
 }
 
 /** 解析消息 content（JSON 字符串）为文本；非文本类型返回 null。 */
@@ -441,9 +453,6 @@ export class FeishuBot {
   private active = new Map<string, string>()
   private ensureLocks = new Map<string, Promise<string>>()
   private userCache = new Map<string, { userId: string; at: number }>()
-  /** 工具过程滚动状态（notifyTools 开启时维护）：sessionId → 工具调用序列（name + 完成标记，
-   *  toolNote 滚动全量文案用；任务结束清理）。 */
-  private toolProgress = new Map<string, Array<{ name: string; done: boolean }>>()
   /** 待审批（审批卡片按钮 / 命令 /approve /reject 用）：chatId → 状态。 */
   private pendingApprovals = new Map<string, { toolCallId: string; tool: string; sessionId: string; openId: string; cardMessageId?: string }>()
   /** 待作答选择卡片（ask 交互卡片按钮用）：chatId → 状态。 */
@@ -780,25 +789,18 @@ export class FeishuBot {
           onDraw: (renderId, code, name, format) => {
             void this.handleDrawRender(sessionId, chatId, { renderId, code, name, format })
           },
-          // 工具过程推送（GEBAI_FEISHU_BOT_NOTIFY_TOOLS）：滚动状态消息（发一条原地更新，消息保留不撤回）。
-          // 完成标记列表（与发起序列同序）：未完成「🔧 name」在后，已完成「✔ name」在前，尾部截断防刷屏
+          // 工具过程推送（GEBAI_FEISHU_BOT_NOTIFY_TOOLS）：每个工具调用一条消息——开始发
+          // 「🔧 name(参数摘要)…」，结束原地更新为「✔ name(参数摘要)（耗时）」；并行工具按
+          // toolCallId 各自独立（不再整表滚动）
           onToolCall: this.opts.notify?.tools
-            ? (name) => {
-                const list = this.toolProgress.get(sessionId) ?? []
-                list.push({ name, done: false })
-                this.toolProgress.set(sessionId, list)
-                this.outbox(chatId).toolNote(formatToolNote(list))
+            ? (name, toolCallId, args) => {
+                const brief = formatToolArgs(args)
+                this.outbox(chatId).toolStart(toolCallId, brief ? `${name}（${brief}）` : name)
               }
             : undefined,
           onToolResult: this.opts.notify?.tools
-            ? (name) => {
-                const list = this.toolProgress.get(sessionId) ?? []
-                // 标记最早一个同名未完成为完成（并行同批同名工具调用无法按 id 精确区分——
-                // 滚动提示无需精确会计，完成计数正确即可）；列表无记录（如任务开始前的残留）时忽略
-                const idx = list.findIndex((it) => it.name === name && !it.done)
-                if (idx < 0) return
-                list[idx] = { ...list[idx], done: true }
-                this.outbox(chatId).toolNote(formatToolNote(list))
+            ? (_name, _output, _session, toolCallId) => {
+                if (toolCallId) this.outbox(chatId).toolFinish(toolCallId)
               }
             : undefined,
           // 助手中间轮文本（GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：预览消息（消息保留不撤回）
@@ -820,7 +822,6 @@ export class FeishuBot {
             this.outbox(chatId).taskDone(messageId)
             this.cleanupChoices(chatId)
             this.cleanupApprovals(chatId)
-            this.toolProgress.delete(sessionId)
             this.active.delete(sessionId)
             if (this.runOwners.get(sessionId) === openId) this.runOwners.delete(sessionId)
           },

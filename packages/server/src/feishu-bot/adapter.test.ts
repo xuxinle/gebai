@@ -103,11 +103,11 @@ describe("EngineBotAdapter（飞书接口层）", () => {
     await runPromise
   })
 
-  test("通道开关：notifyTools 转发工具事件，默认不转发", async () => {
+  test("通道开关：notifyTools 转发工具事件（含参数与 toolCallId），默认不转发", async () => {
     const called: string[] = []
     const handlers: BotRunHandlers = {
-      onToolCall: (name) => called.push(`call:${name}`),
-      onToolResult: (name) => called.push(`result:${name}`),
+      onToolCall: (name, id, args) => called.push(`call:${name}:${id}:${args ? Object.entries(args).map(([k, v]) => `${k}=${v}`).join(",") : "-"}`),
+      onToolResult: (name, _output, _session, toolCallId) => called.push(`result:${name}:${toolCallId ?? ""}`),
     }
     // 默认（无开关）：工具事件不转发（仅最终回复，过程静默）
     {
@@ -139,9 +139,9 @@ describe("EngineBotAdapter（飞书接口层）", () => {
       const bus = fakeBus()
       const adapter = new EngineBotAdapter(fake as never, bus as never, { notifyTools: true })
       const p = adapter.run("s1", "u1", "hi", {}, handlers)
-      bus.push({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1" } })
-      bus.push({ type: "event.tool.result", ...base, payload: { name: "read", output: "ok", session: true, sessionId: "s1" } })
-      expect(called).toEqual(["call:read", "result:read"])
+      bus.push({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1", arguments: { path: "a.ts" } } })
+      bus.push({ type: "event.tool.result", ...base, payload: { name: "read", output: "ok", session: true, sessionId: "s1", toolCallId: "tc1" } })
+      expect(called).toEqual(["call:read:tc1:path=a.ts", "result:read:tc1"])
       releaseRun?.()
       await p
     }
