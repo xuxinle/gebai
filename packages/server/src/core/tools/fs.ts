@@ -8,6 +8,8 @@ import { VISION_IMAGE_MIME } from "../llm/llm"
 import type { ContentBlock, FileEntry } from "@gebai/sdk"
 import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from "../base/diff"
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS, type AppliedHunk } from "../base/patch"
+import { concatBytes, decodeTextFile, detectEncoding, encodeText, ENCODING_LABEL, gbkCharOffsets, normalizeEol, type DecodedText } from "../base/file-text"
+import { REGEX_MAX_MATCHES, runRegexMatcher } from "../base/regex-runner"
 import { safeModeWriteCheck } from "../security/safety"
 import { truncate, sliceLines } from "../support/truncate"
 import { walkDirFiles, WALK_SKIP_DIRS } from "../support/walk"
@@ -141,6 +143,7 @@ export const readTool: Tool = {
     await assertReadableSize(path, "read", READ_MAX_FILE_BYTES)
     // 编码指定读取：按原始字节解码（非 UTF-8 文件——file info 探测为 GBK 等场景）；目录在此一并给出可读引导
     let content: string
+    let encodingNote = ""
     try {
       // 多模态图片读取（DESIGN「多模态支持」）：白名单图片（png/jpg/jpeg/gif/webp）不按文本解码（乱码无意义）——
       // 二进制读入后经 ToolResult.images 交引擎内联进工具结果消息（主模型多模态时模型直接可见，无需视觉工具）；
@@ -172,7 +175,22 @@ export const readTool: Tool = {
           return { output: `read 失败：按 ${enc} 解码失败（编码名非法或内容不是该编码）——可先用 file 工具（action=info）探测实际编码。` }
         }
       } else {
-        content = await ctx.readFile(path)
+        // 编码自动识别（与 edit 同一实现）：BOM/UTF-16/UTF-8/GBK 按探测结果解码——非 UTF-8 文本不再按 UTF-8 读成乱码；
+        // 不可识别（二进制/未知编码）回落到既有文本读取通道（保持原行为与错误语义）
+        let auto: DecodedText | null = null
+        try {
+          auto = decodeTextFile(await ctx.readBinaryFile(path))
+        } catch {
+          auto = null
+        }
+        if (auto) {
+          content = auto.text
+          if (auto.encoding !== "utf-8") {
+            encodingNote = `（编码：${ENCODING_LABEL[auto.encoding]}）`
+          }
+        } else {
+          content = await ctx.readFile(path)
+        }
       }
     } catch (err) {
       try {
@@ -207,6 +225,8 @@ export const readTool: Tool = {
       const firstLine = limit != null && limit < 0 ? Math.max(1, totalLines - shownLines + 1) : Math.max(1, offset ?? 1)
       body += `\n（第 ${firstLine}–${firstLine + shownLines - 1} 行，共 ${totalLines} 行）`
     }
+    // 非 UTF-8 编码注记：模型据此知悉文件编码（edit 按原编码写回，无需手动转码）
+    if (encodingNote) body += `\n${encodingNote}`
     const truncated = await truncate(body, "read", ctx)
     // 登记已读与内容指纹（write 防误覆盖/防陈旧覆盖守卫依据；读取失败抛错不登记）
     ctx.fileGuard?.markRead(path, content)
@@ -252,6 +272,16 @@ export const writeTool: Tool = {
     if (existing !== null && ctx.fileGuard?.staleSinceRead(path, existing)) {
       return {
         output: `write 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再写，避免覆盖他人的改动；确认要覆盖时在 read 之后立即 write。`,
+      }
+    }
+    // 非 UTF-8 目标文件：write 恒按 UTF-8 落盘，覆盖/追加会破坏原编码（GBK/UTF-16 文件被静默写坏）——
+    // 解码文本出现替换符时按字节复核编码，非 UTF 系明确拒绝并引导转码（局部修改改用 edit，其按原编码写回）
+    if (existing !== null && existing.includes("\uFFFD")) {
+      const det = detectEncoding(await ctx.readBinaryFile(path))
+      if (det && det.encoding !== "utf-8" && det.encoding !== "utf-8-bom") {
+        return {
+          output: `write 拒绝：${args.path} 当前编码为 ${ENCODING_LABEL[det.encoding]}，整体写入会按 UTF-8 落盘并破坏原编码。请先转码为 UTF-8（如 py 脚本），或改用 edit（按原编码写回）做局部修改。`,
+        }
       }
     }
     const content = stripBom(String(args.content ?? ""))
@@ -926,21 +956,73 @@ function findOccurrences(content: string, needle: string, limit = 1000): number[
   return out
 }
 
-/** 索引位置对应的行号（1 起始）。 */
-function lineOfIndex(content: string, index: number): number {
-  let line = 1
-  for (let i = 0; i < index; i++) if (content.charCodeAt(i) === 10 /* \n */) line++
-  return line
-}
-
 /** 空白归一化（近似匹配提示用）：所有空白折叠为单空格并去首尾。 */
 function collapseWhitespace(s: string): string {
   return s.replace(/\s+/g, " ").trim()
 }
+
+/** 行号前缀剥离：每行开头的「空白 + 数字 + 制表符」（read 默认行号输出形态）。
+ *  仅在精确匹配失败后作为修正手段尝试——精确匹配优先，TSV 等含合法数字前缀的内容不受影响。 */
+function stripLineNumberPrefixes(s: string): { text: string; changed: boolean } {
+  let changed = false
+  const text = s
+    .split("\n")
+    .map((l) => {
+      const m = /^[ \t]*\d+\t/.exec(l)
+      if (!m) return l
+      changed = true
+      return l.slice(m[0].length)
+    })
+    .join("\n")
+  return { text, changed }
+}
+
+/** 一组起始位置对应的行号（1 起始，按入参顺序返回；单趟扫描，replace_all 的千级匹配不退化）。 */
+function lineNumbersFor(text: string, starts: number[]): number[] {
+  const order = starts.map((s, i) => [s, i] as const).sort((a, b) => a[0] - b[0])
+  const res = new Array<number>(starts.length)
+  let line = 1
+  let cursor = 0
+  for (const [start, i] of order) {
+    while (cursor < start) {
+      if (text.charCodeAt(cursor) === 10) line++
+      cursor++
+    }
+    res[i] = line
+  }
+  return res
+}
+
+/** 正则替换模板展开：$& 整段匹配、$1..$9 捕获组（未参与匹配为空串）、$$ 字面 $；其余 $ 序列原样保留。 */
+function expandRegexReplacement(template: string, whole: string, groups: Array<string | null>): string {
+  return template.replace(/\$(\$|&|[1-9])/g, (_raw, g: string) => {
+    if (g === "$") return "$"
+    if (g === "&") return whole
+    const v = groups[Number(g) - 1]
+    return v == null ? "" : v
+  })
+}
+
+/** 字节序列相等判定（内容无变化时不落盘）。 */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+/** edit 单个编辑项：old_string（字面）与 pattern（正则）二选一。 */
+interface EditItem {
+  old_string?: string
+  pattern?: string
+  regex_flags?: string
+  new_string?: string
+  replace_all?: boolean
+}
+
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 old_string → new_string 定点替换，可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配）则整体不落盘。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write 守卫；read/edit/patch/write 成功过的文件视为已读）。old_string 须从文件当前内容精确复制（不含 read 输出的行号前缀）。改动较多或行号容易偏移时改用 patch。修改前先 read 目标区域。",
+    "精确修改文件：基于 old_string → new_string 定点替换，可一次多处，适合小范围改动；old_string 与 pattern 二选一（pattern 为正则，配 regex_flags 与 $1/$& 捕获引用——大段原文只改少量字符时用正则，省去整段重发）；任一编辑项校验失败（不唯一/不匹配/命中区域重叠）则整体不落盘。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write 守卫；read/edit/patch/write 成功过的文件视为已读）。编码与行尾自适应：GBK/UTF-16/BOM 文件按原编码读写（GBK 仅支持纯 ASCII 替换，非 ASCII 引导转码）、CRLF/裸 CR 文件与 LF 文本互配（未修改区域字节级保留，仅替换文本按文件主导行尾），old_string 误携行号前缀时自动剥离。改动较多或行号容易偏移时改用 patch。修改前先 read 目标区域。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" },
   parameters: schema(
     {
@@ -950,11 +1032,13 @@ export const editTool: Tool = {
         items: {
           type: "object",
           properties: {
-            old_string: { type: "string", description: "原文片段（非空，从文件当前内容精确复制，含缩进；须在文件中唯一，否则补充上下文或用 replace_all）" },
-            new_string: { type: "string", description: "替换后的内容" },
+            old_string: { type: "string", description: "原文片段（与 pattern 二选一，从文件当前内容复制、含缩进；须唯一，否则补充上下文或用 replace_all）" },
+            pattern: { type: "string", description: "正则模式（与 old_string 二选一；字面匹配用 old_string）——匹配在 LF 归一空间进行，大段原文仅改少量字符时用它省去整段重发" },
+            regex_flags: { type: "string", description: "正则标志（仅 pattern 项；支持 g/i/m/s/u/y，g 自动补齐，默认无）" },
+            new_string: { type: "string", description: "替换后的内容（删除内容传空串）；pattern 项支持 $& 整段匹配、$1..$9 捕获组、$$ 字面 $" },
             replace_all: { type: "boolean", description: "true 时替换全部匹配（默认 false：多处匹配报错不落盘）" },
           },
-          required: ["old_string", "new_string"],
+          required: ["new_string"],
         },
       },
     },
@@ -967,74 +1051,190 @@ export const editTool: Tool = {
     if (safeMsg) return { output: safeMsg }
     const guardMsg = await ctx.writeGuard?.([path])
     if (guardMsg) return { output: guardMsg }
-    await assertReadableSize(path, "edit", EDIT_MAX_FILE_BYTES)
-    let content = await ctx.readFile(path)
-    // BOM 感知：匹配用去 BOM 正文（BOM 会让首行 old_string 精确匹配失败），写回按原文件补回
-    const hadBom = content.startsWith("\uFEFF")
-    if (hadBom) content = content.slice(1)
-    // 防盲改守卫（与 write 防盲覆盖同规则）：已存在但本会话未 read 过 → 拒绝，防凭记忆/假设内容盲改（old_string 匹配失败白跑一轮）
+    // 参数前置校验（不读文件即可判定）：条目类型、old_string/pattern 二选一、old_string 非空
+    const rawEdits = Array.isArray(args.edits) ? (args.edits as unknown[]) : []
+    if (!rawEdits.length) return { output: `edit 拒绝：${args.path} 的 edits 为空——请提供至少一个编辑项（{old_string|pattern, new_string}）。` }
+    const edits: EditItem[] = []
+    for (const [idx, raw] of rawEdits.entries()) {
+      const nth = `第 ${idx + 1} 项`
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { output: `edit 拒绝：${nth} 不是对象——每项应为 {old_string|pattern, new_string, replace_all?}。` }
+      const e = raw as EditItem
+      const hasOld = typeof e.old_string === "string" && e.old_string !== ""
+      const hasPattern = typeof e.pattern === "string" && e.pattern !== ""
+      if (hasOld && hasPattern) return { output: `edit 拒绝：${nth} 同时给了 old_string 与 pattern——二者只能选其一（字面匹配用 old_string，正则用 pattern）。` }
+      if (!hasOld && !hasPattern) return { output: `edit 拒绝：${nth} 缺少 old_string 或 pattern——old_string 为要替换的原文片段（新建文件用 write）。` }
+      if (typeof e.new_string !== "string") return { output: `edit 拒绝：${nth} 缺少 new_string（删除内容传空串）。` }
+      if (e.replace_all !== undefined && typeof e.replace_all !== "boolean") return { output: `edit 拒绝：${nth} 的 replace_all 应为布尔值。` }
+      if (hasOld && e.old_string === e.new_string) return { output: `edit 拒绝：${nth} 的 old_string 与 new_string 完全相同（无改动）——请检查该项是否必要。` }
+      edits.push(e)
+    }
+    // 读取与大小预检：文件不存在/不可读、超出上限均给出明确引导（不抛原始 ENOENT）
+    let bytes: Uint8Array
+    try {
+      await assertReadableSize(path, "edit", EDIT_MAX_FILE_BYTES)
+      bytes = await ctx.readBinaryFile(path)
+    } catch (err) {
+      return { output: `edit 拒绝：无法读取 ${args.path}（${(err as Error).message}）——文件不存在时新建用 write，文件过大改用 patch，只改局部需先 read 确认路径与内容。` }
+    }
+    const decoded = decodeTextFile(bytes)
+    if (!decoded) {
+      return { output: `edit 拒绝：${args.path} 不是可识别的文本文件（二进制或未知编码）——二进制文件请用专用工具处理，非 UTF-8 文本先用 file 工具（action=info）探测编码。` }
+    }
+    const { encoding, eol, text } = decoded
+    // 防盲改守卫（与 write 防盲覆盖同规则）：已存在但本会话未 read 过 → 拒绝，防凭记忆/假设内容盲改
     if (ctx.fileGuard && !ctx.fileGuard.hasRead(path)) {
       return {
         output: `edit 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲改）。请先 read 该文件（或目标区域）确认当前内容后再 edit；read/edit/patch/write 成功过的文件视为已读。`,
       }
     }
-    // 防陈旧改守卫（与 write 防陈旧覆盖同规则）：内容自本会话上次读取/写入后已漂移 → 拒绝并引导重读——
-    // patch 的行号模糊容错可对漂移内容误命中，edit 的唯一性匹配失败提示也远不如陈旧提示直接
-    // （指纹边界 BOM 无关，此处传去 BOM 正文——行尾归一在守卫之后，比对用磁盘原始行尾）
-    if (ctx.fileGuard?.staleSinceRead(path, content)) {
+    // 防陈旧改守卫（与 write 防陈旧覆盖同规则）：内容自本会话上次读取/写入后已漂移 → 拒绝并引导重读。
+    // 指纹按解码文本比对（与 read 登记口径一致——去 BOM、保留行尾），编码探测先于守卫（非 UTF-8 文件的指纹同样可比）
+    if (ctx.fileGuard?.staleSinceRead(path, text)) {
       return {
         output: `edit 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再修改。`,
       }
     }
-    // 行尾感知（与 BOM 感知同构，置于守卫后——指纹比对用磁盘原始行尾）：Windows 检出文件多为 CRLF，
-    // 而模型提供的 old_string/new_string 几乎恒为 LF——多行片段精确匹配必失配。
-    // 匹配在 LF 归一空间进行，写回按原文件主导行尾还原（新内容保持与文件一致的行尾风格）。
-    const crlfCount = (content.match(/\r\n/g) || []).length
-    const lfOnlyCount = (content.match(/(?<!\r)\n/g) || []).length
-    const hadCrlf = crlfCount > 0 && crlfCount >= lfOnlyCount
-    if (hadCrlf) content = content.replace(/\r\n/g, "\n")
-    const edits = (args.edits as Array<{ old_string: string; new_string: string; replace_all?: boolean }>) || []
-    const applied: string[] = []
-    for (const [idx, e] of edits.entries()) {
-      // 行尾归一（匹配空间统一 LF）：模型给的 old/new_string 可能是 LF（常见）或 CRLF（少见），
-      // 与文件归一后的 LF 空间对齐——两个方向的自适应都成立；写回时按文件原行尾还原
-      const old_string = String(e.old_string ?? "").replace(/\r\n/g, "\n")
-      const new_string = String(e.new_string ?? "").replace(/\r\n/g, "\n")
-      const nth = `第 ${idx + 1} 项`
-      if (!old_string) {
-        throw new Error(`修改失败: ${nth} old_string 为空（old_string 必须是文件中的非空原文片段；新建文件用 write）`)
-      }
-      const occ = findOccurrences(content, old_string)
-      if (!occ.length) {
-        // 空白近似提示：归一化后可命中 → 大概率是缩进/空白复制不精确；
-        // 行号泄漏提示：old_string 携带 read 输出的「行号→制表符」前缀 → 去掉前缀后可精确命中
-        const near = collapseWhitespace(content).includes(collapseWhitespace(old_string))
-        const stripped = old_string.split("\n").map((l) => l.replace(/^\s*\d+\t/, "")).join("\n")
-        const lineNoLeak = stripped !== old_string && findOccurrences(content, stripped).length > 0
-        const hint = lineNoLeak
-          ? "（检测到 old_string 携带 read 输出的行号前缀——请去掉每行行号后重试）"
-          : near
-            ? "（检测到空白/缩进不一致的近似原文——请 read 后从原文逐字符复制 old_string）"
-            : "（请先 read 当前文件核对最新内容）"
-        throw new Error(`修改失败: ${nth} old_string 未在文件中精确匹配: ${old_string.slice(0, 60)}${hint}`)
-      }
-      if (occ.length > 1 && e.replace_all !== true) {
-        const lines = occ.slice(0, 8).map((i) => lineOfIndex(content, i)).join("、")
-        throw new Error(`修改失败: ${nth} old_string 匹配 ${occ.length} 处（行 ${lines}${occ.length > 8 ? "…" : ""}）——请扩大 old_string 上下文使其唯一，或确认全部替换时该项传 replace_all: true`)
-      }
-      const lineNos = e.replace_all === true ? occ : [occ[0]]
-      // 行号在替换前的内容上计算（替换会移动后续文本位置）
-      const shown = lineNos.slice(0, 8).map((i) => lineOfIndex(content, i))
-      content = e.replace_all === true ? content.split(old_string).join(new_string) : content.replace(old_string, new_string)
-      applied.push(`${idx + 1}) 行 ${shown.join("、")}${lineNos.length > 8 ? `（共 ${lineNos.length} 处）` : ""}`)
+    // 匹配在 LF 归一空间进行（CRLF/裸 CR 与 LF 双向自适应），写回按源字符区间拼接——未修改区域字节级保留，
+    // 混合行尾文件不被整文件改写；仅替换文本按文件主导行尾
+    const norm = normalizeEol(text)
+    const source = norm.text
+    const toSource = norm.toSource
+    const gbkOffsets = encoding === "gbk" ? gbkCharOffsets(text) : null
+    if (encoding === "gbk" && !gbkOffsets) {
+      return { output: `edit 拒绝：${args.path} 含 GB18030 四字节字符，字节级替换不支持——请先转码为 UTF-8（如 py 脚本）后再编辑。` }
     }
-    const finalContent = hadCrlf ? content.replace(/\n/g, "\r\n") : content
-    await ctx.writeFile(path, (hadBom ? "\uFEFF" : "") + finalContent)
-    // 修改后内容即已掌握（模型无需重读验证），登记已读（指纹按落盘内容登记——行尾还原后与磁盘一致）
-    ctx.fileGuard?.markRead(path, finalContent)
-    // 产物块（与 read/write 同款）：修改后的文件内容卡（弹窗查看模式收敛为文件链接）
-    const blocks = artifactBlocks(previewLogicalPath(path, ctx), finalContent)
-    return { output: `已对 ${args.path} 应用 ${edits.length} 处修改：${applied.join("；")}`, blocks }
+
+    const applied: string[] = []
+    // 替换区间（源文本坐标，按起点升序）：多编辑项按原文位置依次应用——先前项替换后的文本会参与后续项匹配
+    const regions: Array<{ start: number; end: number; text: string }> = []
+
+    for (const [idx, e] of edits.entries()) {
+      const nth = `第 ${idx + 1} 项`
+      const replaceAll = e.replace_all === true
+      let matches: Array<{ start: number; end: number; whole: string; groups: Array<string | null> }>
+
+      if (typeof e.pattern === "string" && e.pattern !== "") {
+        // 正则定位：独立子进程执行（灾难性回溯防护，与 grep 同机制）
+        const flagsRaw = typeof e.regex_flags === "string" ? e.regex_flags : ""
+        if (/[^gimsuy]/.test(flagsRaw)) return { output: `edit 拒绝：${nth} 的 regex_flags 含不支持的标志（仅 g/i/m/s/u/y）：${flagsRaw}` }
+        const flags = flagsRaw.includes("g") ? flagsRaw : `${flagsRaw}g`
+        const res = await runRegexMatcher({ pattern: e.pattern, flags, source, maxMatches: REGEX_MAX_MATCHES })
+        if (res.error) throw new Error(`修改失败: ${nth} ${res.error}`)
+        const found = res.matches ?? []
+        if (!found.length) throw new Error(`修改失败: ${nth} pattern 未在文件中匹配: ${e.pattern.slice(0, 80)}（请先 read 当前文件核对，或改用 old_string 字面匹配）`)
+        if (res.truncated) throw new Error(`修改失败: ${nth} pattern 匹配超过 ${REGEX_MAX_MATCHES} 处（已达上限，无法安全判定替换范围）——请收窄 pattern 或改用更精确的 old_string。`)
+        matches = found.map((m) => ({ start: m.start, end: m.end, whole: source.slice(m.start, m.end), groups: m.groups }))
+      } else {
+        // 字面匹配：行尾归一后比对（模型给的片段为 LF 或 CRLF 均适配）
+        let needle = String(e.old_string ?? "").replace(/\r\n/g, "\n")
+        let occ = findOccurrences(source, needle)
+        if (!occ.length) {
+          // 行号前缀自动剥离（read 默认带行号，复制时易误携）：去掉后能命中则直接按修正后的原文替换
+          const stripped = stripLineNumberPrefixes(needle)
+          if (stripped.changed) {
+            const occ2 = findOccurrences(source, stripped.text)
+            if (occ2.length) {
+              needle = stripped.text
+              occ = occ2
+            }
+          }
+        }
+        if (!occ.length) {
+          // 空白近似提示：归一化后可命中 → 大概率是缩进/空白复制不精确
+          const near = collapseWhitespace(source).includes(collapseWhitespace(needle))
+          const hint = near
+            ? "（检测到空白/缩进不一致的近似原文——请 read 后从原文逐字符复制 old_string）"
+            : "（请先 read 当前文件核对最新内容；大段原文只改少量字符时可用 pattern 正则）"
+          throw new Error(`修改失败: ${nth} old_string 未在文件中匹配: ${needle.slice(0, 60)}${hint}`)
+        }
+        matches = occ.map((i) => ({ start: i, end: i + needle.length, whole: needle, groups: [] }))
+      }
+
+      // 零长度匹配（如正则 ^ 或 a*）无替换意义，且会造成区间歧义——明确拒绝
+      const zero = matches.find((m) => m.end === m.start)
+      if (zero) throw new Error(`修改失败: ${nth} 匹配到零长度片段（模式可能写成 ^ / a* 类空匹配）——请改用能命中实际文本的模式。`)
+      if (matches.length > 1 && !replaceAll) {
+        const lines = lineNumbersFor(source, matches.slice(0, 8).map((m) => m.start)).join("、")
+        throw new Error(
+          `修改失败: ${nth} 匹配 ${matches.length} 处（行 ${lines}${matches.length > 8 ? "…" : ""}）——请扩大匹配范围使其唯一，或确认全部替换时该项传 replace_all: true`,
+        )
+      }
+      const chosen = replaceAll ? matches : [matches[0]]
+      // 区间重叠（同一原文/模式多处命中交错，或与前项替换区域交叠）：无法确定替换结果，整体失败
+      const sorted = [...chosen].sort((a, b) => a.start - b.start)
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i].start < sorted[i - 1].end) {
+          throw new Error(`修改失败: ${nth} 的匹配区域相互重叠（可能由重叠量词或与前面的编辑项交叠造成）——请收窄模式或拆分编辑项。`)
+        }
+      }
+      for (const m of sorted) {
+        for (const r of regions) {
+          if (m.start < r.end && r.start < m.end) {
+            throw new Error(`修改失败: ${nth} 的匹配区域与前面的编辑项重叠——请合并为一个编辑项，或调整匹配范围。`)
+          }
+        }
+      }
+
+      // 源字符区间 → 字节区间（GBK 非 ASCII 内容：字节级替换仅当替换文本为纯 ASCII 时可保长度不变）
+      for (const m of sorted) {
+        const start = toSource[m.start]
+        const end = m.end === source.length ? text.length : toSource[m.end]
+        const replacement = typeof e.pattern === "string" && e.pattern !== "" ? expandRegexReplacement(String(e.new_string ?? ""), m.whole, m.groups) : String(e.new_string ?? "")
+        // 替换文本内的换行按文件主导行尾落地（模型给的 new_string 恒为 LF 或 CRLF，统一按源行尾风格写入）
+        const styled = eol === "\n" ? replacement.replace(/\r\n/g, "\n") : replacement.replace(/\r\n/g, "\n").replace(/\n/g, eol)
+        if (gbkOffsets) {
+          // GBK 无编码表（TextEncoder 只支持 UTF 系）：字节级替换要求命中区域与替换文本均为纯 ASCII——
+          // 非 ASCII 场景明确拒绝并引导转码，不再静默写坏
+          if (!/^[\x00-\x7f]*$/.test(text.slice(start, end)) || !/^[\x00-\x7f]*$/.test(styled)) {
+            throw new Error(
+              `修改失败: ${nth} 目标文件为 GBK 编码，仅支持命中区域与替换文本均为纯 ASCII 的替换（非 ASCII 内容请先转码为 UTF-8 再编辑）——已中止，文件未改动。`,
+            )
+          }
+          regions.push({ start: gbkOffsets[start], end: gbkOffsets[end], text: styled })
+        } else {
+          regions.push({ start, end, text: styled })
+        }
+      }
+      const lineNos = lineNumbersFor(source, sorted.map((m) => m.start))
+      applied.push(`${idx + 1}) 行 ${lineNos.slice(0, 8).join("、")}${lineNos.length > 8 ? `（共 ${lineNos.length} 处）` : ""}`)
+    }
+
+    // 区间拼接写回：未修改区域取自原始字节（行尾风格/非目标编码字节原样保留），替换文本按主导行尾转换
+    regions.sort((a, b) => a.start - b.start)
+    let cursor = 0
+    let newText = ""
+    for (const r of regions) {
+      newText += text.slice(cursor, r.start) + r.text
+      cursor = r.end
+    }
+    newText += text.slice(cursor)
+    let outBytes: Uint8Array
+    if (encoding === "gbk") {
+      const parts: Uint8Array[] = []
+      let cursor = 0
+      for (const r of regions) {
+        parts.push(bytes.subarray(cursor, r.start), new TextEncoder().encode(r.text))
+        cursor = r.end
+      }
+      parts.push(bytes.subarray(cursor))
+      outBytes = concatBytes(parts)
+    } else {
+      outBytes = encodeText(newText, encoding)
+    }
+    if (!sameBytes(outBytes, bytes)) {
+      // 二进制通道优先（编码/BOM 精确保留）；未注入时（最小测试桩）UTF-8 系回落到文本写入通道
+      if (ctx.writeBinaryFile) await ctx.writeBinaryFile(path, outBytes)
+      else if (encoding === "utf-8" || encoding === "utf-8-bom") await ctx.writeFile(path, (encoding === "utf-8-bom" ? "\uFEFF" : "") + newText)
+      else return { output: `edit 失败：${args.path} 为 ${ENCODING_LABEL[encoding]} 编码，当前环境未提供二进制写入通道——请改用 write 或 patch。` }
+    }
+    // 修改后内容即已掌握（模型无需重读验证），登记已读——指纹按落盘解码文本（与 read 口径一致）
+    const finalText = decodeTextFile(outBytes)?.text ?? newText
+    ctx.fileGuard?.markRead(path, finalText)
+    // 产物块（与 read/write 同款）：修改后的文件内容卡
+    const blocks = artifactBlocks(previewLogicalPath(path, ctx), finalText)
+    const encNote = encoding === "utf-8" ? "" : `（${ENCODING_LABEL[encoding]}）`
+    const outNote = sameBytes(outBytes, bytes) ? "，内容无变化" : ""
+    return { output: `已对 ${args.path}${encNote} 应用 ${edits.length} 处修改${outNote}：${applied.join("；")}`, blocks }
   },
 }
 

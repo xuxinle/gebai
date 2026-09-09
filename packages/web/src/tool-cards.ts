@@ -270,19 +270,38 @@ function foldArgsBlock(inner: HTMLElement, chars: number): HTMLElement {
   return details
 }
 
-/** edits 参数项判定：{ old_string, new_string } 字符串对（参数一律蛇形，兼容归一在后端派发点）。 */
-function isEditPair(v: unknown): v is { old_string: string; new_string: string; replace_all?: boolean } {
-  return !!v && typeof v === "object" && typeof (v as { old_string?: unknown }).old_string === "string" && typeof (v as { new_string?: unknown }).new_string === "string"
+/** edit 参数项判定：old_string（字面）与 pattern（正则）二选一，new_string 必给。 */
+interface EditPair {
+  old_string?: string
+  pattern?: string
+  regex_flags?: string
+  new_string: string
+  replace_all?: boolean
 }
 
-/** edits 参数块：每处修改渲染为旧（红）/ 新（绿）对比块（多处编号），比 JSON 数组直观；空串侧省略（纯新增/纯删除）。 */
-function editsArgsBlock(list: Array<{ old_string: string; new_string: string; replace_all?: boolean }>): HTMLElement {
+function isEditPair(v: unknown): v is EditPair {
+  if (!v || typeof v !== "object") return false
+  const o = v as Record<string, unknown>
+  const hasOld = typeof o.old_string === "string" && o.old_string !== ""
+  const hasPattern = typeof o.pattern === "string" && o.pattern !== ""
+  return (hasOld || hasPattern) && typeof o.new_string === "string"
+}
+
+/** edits 参数块：每处修改渲染为旧（红）/ 新（绿）对比块（多处编号），比 JSON 数组直观；空串侧省略（纯新增/纯删除）。
+ *  正则项以模式（含标志）作旧侧展示——正则不是原文，前缀注记区分。 */
+function editsArgsBlock(list: EditPair[]): HTMLElement {
   const wrap = el("div", "tool-edits")
   list.forEach((e, i) => {
     if (list.length > 1) wrap.appendChild(el("div", "tool-edit-idx", `修改 ${i + 1}/${list.length}`))
     // replace_all 标记：该项替换全部匹配（审批时可见替换范围）
     if (e.replace_all === true) wrap.appendChild(el("div", "tool-edit-idx", "replace_all（替换全部匹配）"))
-    if (e.old_string) wrap.appendChild(el("pre", "tool-edit-old", e.old_string))
+    if (e.pattern) {
+      const flags = e.regex_flags ? `（标志 ${e.regex_flags}）` : ""
+      wrap.appendChild(el("div", "tool-edit-idx", `正则匹配${flags}`))
+      wrap.appendChild(el("pre", "tool-edit-old", e.pattern))
+    } else if (e.old_string) {
+      wrap.appendChild(el("pre", "tool-edit-old", e.old_string))
+    }
     if (e.new_string) wrap.appendChild(el("pre", "tool-edit-new", e.new_string))
   })
   return wrap
@@ -342,7 +361,7 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
         // 兜底无声明：其余参数（path 等）键值行展示
         wrap.appendChild(kvArgsBlock(Object.fromEntries(Object.entries(obj).filter(([k]) => k !== editsField))))
       }
-      const chars = list.reduce((n, e) => n + e.old_string.length + e.new_string.length, 0)
+      const chars = list.reduce((n, e) => n + (e.old_string?.length ?? 0) + (e.pattern?.length ?? 0) + e.new_string.length, 0)
       return foldIfNeeded(wrap, chars)
     }
     /* 形态不符（非 edits 数组）：回退自适应渲染 */

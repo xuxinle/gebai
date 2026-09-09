@@ -1220,7 +1220,9 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-hint-"))
     const c = ctx(home)
     await writeTool.execute({ path: "e.txt", content: "line1\n  indented foo\nline3\n" }, c)
-    await expect(editTool.execute({ path: "e.txt", edits: [{ old_string: "", new_string: "x" }] }, c)).rejects.toThrow("为空")
+    // 空 old_string 作为工具结果返回（不抛错、不落盘）
+    const empty = await editTool.execute({ path: "e.txt", edits: [{ old_string: "", new_string: "x" }] }, c)
+    expect(empty.output).toContain("缺少 old_string 或 pattern")
     await expect(editTool.execute({ path: "e.txt", edits: [{ old_string: "indented  foo", new_string: "x" }] }, c)).rejects.toThrow("空白")
     const r = await editTool.execute({ path: "e.txt", edits: [{ old_string: "line3", new_string: "LINE3" }] }, c)
     expect(r.output).toContain("行 3")
@@ -1361,17 +1363,18 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("edit 行号前缀误拷贝检测：old_string 携带 read 输出行号时给出明确提示", async () => {
+  test("edit 行号前缀自动剥离：old_string 携带 read 输出行号时按剥离后的原文替换", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-lnleak-"))
     const c = ctx(home)
     await writeTool.execute({ path: "e.txt", content: "alpha\nbeta\ngamma\n" }, c)
-    // 模型把 read 默认行号输出（1\talpha）整段复制进 old_string
+    // 模型把 read 默认行号输出（1\talpha）整段复制进 old_string：自动剥离后命中（少一次往返）
+    // 内容不符（alPHA≠alpha）时不因剥离而误改
     await expect(
-      editTool.execute({ path: "e.txt", edits: [{ old_string: "1\talpha\n2\tbeta", new_string: "x" }] }, c),
-    ).rejects.toThrow("行号前缀")
-    // 去掉行号后正常命中
-    const ok = await editTool.execute({ path: "e.txt", edits: [{ old_string: "alpha\nbeta", new_string: "ALPHA\nBETA" }] }, c)
+      editTool.execute({ path: "e.txt", edits: [{ old_string: "1\talPHA\n2\tbeta", new_string: "x" }] }, c),
+    ).rejects.toThrow("old_string 未在文件中匹配")
+    const ok = await editTool.execute({ path: "e.txt", edits: [{ old_string: "1\talpha\n2\tbeta", new_string: "ALPHA\nBETA" }] }, c)
     expect(ok.output).toContain("行 1")
+    expect(await Bun.file(join(c.workdir, "e.txt")).text()).toBe("ALPHA\nBETA\ngamma\n")
     cleanup(home)
   })
 

@@ -1155,11 +1155,12 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
   test("单处修改无编号；纯新增只显示新块", () => {
     __setToolCardMetaForTest(meta)
     const bubble = toolBubbleFor(
-      { id: "te2", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ old_string: "", new_string: "added" }] }, createdAt: 0 },
+      { id: "te2", role: "tool", name: "edit", content: "", arguments: { path: "a.ts", edits: [{ pattern: "^", new_string: "added" }] }, createdAt: 0 },
       "",
     )
-    expect(bubble.querySelector("div.tool-edit-idx")).toBeNull()
-    expect(bubble.querySelector("pre.tool-edit-old")).toBeNull()
+    expect(bubble.querySelector("div.tool-edit-idx")?.textContent).toContain("正则匹配") // 仅正则注记行，无「修改 N/M」编号
+    expect(bubble.textContent).not.toContain("修改 1/")
+    expect(bubble.querySelector("pre.tool-edit-old")?.textContent).toBe("^")
     expect(bubble.querySelector("pre.tool-edit-new")?.textContent).toBe("added")
   })
 
@@ -1205,6 +1206,27 @@ describe("edit 工具 edits 参数模式（旧/新对比块，替代 JSON）", (
     const fold = bubble.querySelector("details.tool-fold")
     expect(fold).not.toBeNull()
     expect(fold?.querySelectorAll("pre.tool-edit-new").length).toBe(1)
+  })
+
+  test("正则项（pattern）：模式作旧侧展示并标注标志，new_string 为新侧", () => {
+    __setToolCardMetaForTest(meta)
+    const bubble = toolBubbleFor(
+      {
+        id: "te7",
+        role: "tool",
+        name: "edit",
+        content: "",
+        arguments: { path: "a.ts", edits: [{ pattern: "foo\\((\\d+)\\)", regex_flags: "i", new_string: "bar($1)", replace_all: true }] },
+        createdAt: 0,
+      },
+      "",
+    )
+    expect(bubble.querySelector("div.tool-edits")).not.toBeNull()
+    expect(bubble.querySelector("pre.tool-edit-old")?.textContent).toBe("foo\\((\\d+)\\)")
+    expect(bubble.querySelector("pre.tool-edit-new")?.textContent).toBe("bar($1)")
+    expect(bubble.textContent).toContain("正则匹配")
+    expect(bubble.textContent).toContain("标志 i")
+    expect(bubble.textContent).toContain("replace_all")
   })
 })
 
