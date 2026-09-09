@@ -1022,7 +1022,7 @@ interface EditItem {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：基于 old_string → new_string 定点替换，可一次多处，适合小范围改动；old_string 与 pattern 二选一（pattern 为正则，配 regex_flags 与 $1/$& 捕获引用——大段原文只改少量字符时用正则，省去整段重发）；任一编辑项校验失败（不唯一/不匹配/命中区域重叠）则整体不落盘。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write 守卫；read/edit/patch/write 成功过的文件视为已读）。编码与行尾自适应：GBK/UTF-16/BOM 文件按原编码读写（GBK 仅支持纯 ASCII 替换，非 ASCII 引导转码）、CRLF/裸 CR 文件与 LF 文本互配（未修改区域字节级保留，仅替换文本按文件主导行尾），old_string 误携行号前缀时自动剥离。改动较多或行号容易偏移时改用 patch。修改前先 read 目标区域。",
+    "精确修改文件：old_string → new_string 定点替换（或 pattern 正则），可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配/命中区域重叠）则整体不落盘。目标文件须本会话已 read（防盲改）；编码与行尾自适应（GBK 仅支持纯 ASCII 替换）；old_string 误携行号前缀时自动剥离。改动较多或行号易偏移时改用 patch；改前先 read 目标区域。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" },
   parameters: schema(
     {
