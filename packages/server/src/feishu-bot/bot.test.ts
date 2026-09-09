@@ -620,7 +620,7 @@ describe("引擎事件推送", () => {
     expect(f.reactionDeletes.some((d) => d.messageId === "om_msg12" && d.reactionId === "reaction_1")).toBe(true)
   })
 
-  test("任务出错：错误文本发出并撤回「Typing」表情", async () => {
+  test("任务出错：错误文本发出并撤回「Typing」表情；错误后不补「任务完成」（错误即终态）", async () => {
     const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
@@ -633,6 +633,8 @@ describe("引擎事件推送", () => {
     expect(err.receiveIdType).toBe("reply")
     expect(err.receiveId).toBe("om_msg12")
     expect(f.reactionDeletes.some((d) => d.messageId === "om_msg12" && d.reactionId === "reaction_1")).toBe(true)
+    // 错误回复同为终态：不再补发「✅ 任务完成」
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("任务完成"))).toBe(false)
   })
 
   test("任务完成兜底：未发最终回复时补完成提示并撤回「Typing」表情", async () => {

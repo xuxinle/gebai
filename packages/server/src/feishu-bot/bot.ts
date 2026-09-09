@@ -141,7 +141,8 @@ class ChatOutbox {
     })
   }
 
-  /** 错误回复（引用原消息）：过程消息一律保留不撤回。 */
+  /** 错误回复（引用原消息）：过程消息一律保留不撤回。同为终态——置位 finalSent，
+   *  阻断 onEnd 兜底的「✅ 任务完成」（出错/取消后再补完成提示会误导用户）。 */
   error(text: string, replyTo?: string): void {
     this.clearTransient()
     this.statusMsgId = null
@@ -149,6 +150,7 @@ class ChatOutbox {
     this.toolNoteContent = ""
     this.enqueue(async () => {
       await this.post("text", { text: `❌ ${text}` }, replyTo)
+      this.finalSent = true
     })
   }
 
