@@ -956,9 +956,39 @@ function findOccurrences(content: string, needle: string, limit = 1000): number[
   return out
 }
 
-/** 空白归一化（近似匹配提示用）：所有空白折叠为单空格并去首尾。 */
+/** 空白归一化（近似匹配提示用）：所有空白段完全移除（token 序列比对，与 fuzzyWhitespaceMatches
+ *  同口径——多打/漏打空白均归一为同一结果，双向近似判定）。 */
 function collapseWhitespace(s: string): string {
-  return s.replace(/\s+/g, " ").trim()
+  return s.replace(/\s+/g, "")
+}
+
+/** 空白容错匹配：old_string 按非空白字符序列转成正则（每个空白段 → \s+），
+ *  在 source 中查找命中——模型抄写时多打/漏打空格、缩进不一致、全角/行尾差异
+ *  均能命中（非空白字符仍须全字面一致）。返回全部命中区间（LF 归一坐标）。 */
+function fuzzyWhitespaceMatches(source: string, needle: string): Array<{ start: number; end: number }> {
+  // 字符级双向容错：去掉全部空白后的字符序列转正则（字符间 \\s*，每字符转义）——
+  // needle 多空白或 source 多空白（含 CJK 文本内漏/多空格、缩进/行尾差异）均命中；
+  // 仍要求唯一命中才采用（多处命中报错不盲替换），误报面可控
+  const chars = [...needle.replace(/\s+/g, "")].map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  if (!chars.length) return []
+  const rx = new RegExp(chars.join("\\s*"), "g")
+  const out: Array<{ start: number; end: number }> = []
+  for (let m = rx.exec(source); m && out.length < 100; m = rx.exec(source)) {
+    out.push({ start: m.index, end: m.index + m[0].length })
+    rx.lastIndex = m.index + m[0].length
+  }
+  return out
+}
+
+/** 首个分歧点定位：逐字符比对到失配处，返回两侧上下文（供错误信息指出分歧位置）。
+ *  共同前缀 <4 字符时无法给出有意义分歧点（返回 null）。 */
+function firstDivergence(source: string, needle: string): string | null {
+  let i = 0
+  while (i < needle.length && source.includes(needle.slice(0, i + 1))) i++
+  if (i < 4) return null
+  const ctxLeft = needle.slice(Math.max(0, i - 20), i)
+  const ctxRight = needle.slice(i, i + 20)
+  return `分歧起点约在「…${ctxLeft}◀${ctxRight}…」（第 ${i} 个字符处起与文件不一致）`
 }
 
 /** 行号前缀剥离：每行开头的「空白 + 数字 + 制表符」（read 默认行号输出形态）。
@@ -1111,8 +1141,7 @@ export const editTool: Tool = {
     for (const [idx, e] of edits.entries()) {
       const nth = `第 ${idx + 1} 项`
       const replaceAll = e.replace_all === true
-      let matches: Array<{ start: number; end: number; whole: string; groups: Array<string | null> }>
-
+      let matches: Array<{ start: number; end: number; whole: string; groups: Array<string | null> }> = []
       if (typeof e.pattern === "string" && e.pattern !== "") {
         // 正则定位：独立子进程执行（灾难性回溯防护，与 grep 同机制）
         const flagsRaw = typeof e.regex_flags === "string" ? e.regex_flags : ""
@@ -1139,15 +1168,29 @@ export const editTool: Tool = {
             }
           }
         }
+        let fuzzyApplied = false
         if (!occ.length) {
+          // 空白容错匹配：非空白字符全字面、空白段放宽 \s+（抄写多/漏空格、缩进/行尾差异均能命中）。
+          // 唯一命中才采用（多处命中无法确定目标，仍报错）；命中后作为正则区间的字面替换落地。
+          const fz = fuzzyWhitespaceMatches(source, needle)
+          if (fz.length === 1) {
+            matches = [{ start: fz[0].start, end: fz[0].end, whole: source.slice(fz[0].start, fz[0].end), groups: [] }]
+            applied.push(`${idx + 1}) 行 ${lineNumbersFor(source, [fz[0].start]).join("、")}（空白容错命中——old_string 与原文仅空白字符差异，已自动对齐）`)
+            fuzzyApplied = true
+          }
+        }
+        if (!occ.length && !fuzzyApplied) {
           // 空白近似提示：归一化后可命中 → 大概率是缩进/空白复制不精确
           const near = collapseWhitespace(source).includes(collapseWhitespace(needle))
+          const div = firstDivergence(source, needle)
           const hint = near
-            ? "（检测到空白/缩进不一致的近似原文——请 read 后从原文逐字符复制 old_string）"
-            : "（请先 read 当前文件核对最新内容；大段原文只改少量字符时可用 pattern 正则）"
+            ? "（检测到空白/缩进不一致的近似原文——已尝试空白容错但非唯一命中；请 read 后从原文逐字符复制 old_string）"
+            : div
+              ? `（${div}；大段原文只改少量字符时可用 pattern 正则）`
+              : "（请先 read 当前文件核对最新内容；大段原文只改少量字符时可用 pattern 正则）"
           throw new Error(`修改失败: ${nth} old_string 未在文件中匹配: ${needle.slice(0, 60)}${hint}`)
         }
-        matches = occ.map((i) => ({ start: i, end: i + needle.length, whole: needle, groups: [] }))
+        if (!fuzzyApplied) matches = occ.map((i) => ({ start: i, end: i + needle.length, whole: needle, groups: [] }))
       }
 
       // 零长度匹配（如正则 ^ 或 a*）无替换意义，且会造成区间歧义——明确拒绝

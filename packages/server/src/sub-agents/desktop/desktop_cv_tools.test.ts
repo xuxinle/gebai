@@ -273,7 +273,7 @@ describe("desktop cv tools", () => {
     })
     // 本用例注入专属 runner：若被调用即记录（验证 wasm 未被走到）
     setCvRunnerFactory(() => ({
-      ocr: async (img) => {
+      ocr: async () => {
         wasmSeen = true
         return { lines: [{ text: "wasm行", score: 1, box: { x: 0, y: 0, w: 10, h: 10 } }], backend: "wasm-cpu" }
       },

@@ -1223,7 +1223,12 @@ describe("global tools", () => {
     // 空 old_string 作为工具结果返回（不抛错、不落盘）
     const empty = await editTool.execute({ path: "e.txt", edits: [{ old_string: "", new_string: "x" }] }, c)
     expect(empty.output).toContain("缺少 old_string 或 pattern")
-    await expect(editTool.execute({ path: "e.txt", edits: [{ old_string: "indented  foo", new_string: "x" }] }, c)).rejects.toThrow("空白")
+    // 空白差异唯一命中 → 空白容错自动对齐（不再报错）；多处命中才报错
+    const fuzzy = await editTool.execute({ path: "e.txt", edits: [{ old_string: "indented  foo", new_string: "FIXED" }] }, c)
+    expect(fuzzy.output).toContain("空白容错命中")
+    expect(await Bun.file(join(c.workdir, "e.txt")).text()).toContain("FIXED")
+    await writeTool.execute({ path: "e2.txt", content: "a  b\na  b\n" }, c)
+    await expect(editTool.execute({ path: "e2.txt", edits: [{ old_string: "a b", new_string: "X" }] }, c)).rejects.toThrow("空白")
     const r = await editTool.execute({ path: "e.txt", edits: [{ old_string: "line3", new_string: "LINE3" }] }, c)
     expect(r.output).toContain("行 3")
     expect(await Bun.file(join(c.workdir, "e.txt")).text()).toContain("LINE3")

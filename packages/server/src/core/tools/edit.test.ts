@@ -172,6 +172,22 @@ describe("edit 编码与行尾健壮性", () => {
     const e = await editTool.execute({ path: "b.bin", edits: [{ old_string: "PNG", new_string: "png" }] }, c)
     expect(e.output).toContain("不是可识别的文本文件")
   })
+
+  test("空白容错：old_string 与原文仅空白差异（多打空格/缩进不一致）时唯一命中自动对齐，多处命中仍报错；失配报首个分歧点", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-edit-fuzzy-"))
+    const c = ctx(home)
+    // 原文：双空格 + 尾随空格；模型 old_string：单空格、无尾随（空白抄写差异）
+    await writeTool.execute({ path: "f.txt", content: "const  value = 1 \nnext=2\n" }, c)
+    const e = await editTool.execute({ path: "f.txt", edits: [{ old_string: "const value = 1\nnext=2", new_string: "const v = 1\nnext=3" }] }, c)
+    expect(e.output).toContain("空白容错命中")
+    expect(readFileSync(join(c.workdir, "f.txt"), "utf8")).toBe("const v = 1\nnext=3\n")
+    // 多处空白差异命中（非唯一）→ 仍报错不盲替换：old_string 带缩进差异，两处均容错命中
+    await writeTool.execute({ path: "g.txt", content: "a  b\na  b\n" }, c)
+    await expect(editTool.execute({ path: "g.txt", edits: [{ old_string: "a b", new_string: "X" }] }, c)).rejects.toThrow("非唯一命中")
+    // 非空白字符差异 → 报首个分歧点（长行定位）
+    await writeTool.execute({ path: "h.txt", content: "这是很长的一行文字内容包含若干汉字用于定位分歧点位存在这里后面还有更多文字内容若干字" }, c)
+    await expect(editTool.execute({ path: "h.txt", edits: [{ old_string: "这是很长的一行文字内容包含若干汉字用于定位分歧点位错在这里后面还有更多文字内容若干字", new_string: "X" }] }, c)).rejects.toThrow("分歧起点")
+  })
 })
 
 describe("edit 正则匹配与参数健壮性", () => {
