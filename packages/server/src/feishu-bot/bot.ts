@@ -33,9 +33,6 @@ export interface FeishuConnLike {
 class ChatOutbox {
   private queue: Promise<unknown> = Promise.resolve()
   private statusMsgId: string | null = null
-  private deltaBuf = ""
-  private flushTimer: ReturnType<typeof setTimeout> | null = null
-  private lastFlush = 0
   private finalSent = false
 
   constructor(
@@ -43,8 +40,6 @@ class ChatOutbox {
     private api: FeishuApiLike,
     private clock: () => number,
     private log: (msg: string) => void,
-    private flushIntervalMs = 1500,
-    private flushMinChars = 60,
   ) {}
 
   private enqueue(fn: () => Promise<unknown>): void {
@@ -118,40 +113,17 @@ class ChatOutbox {
     })
   }
 
-  /** 增量文本：累积并按（字符阈值/时间阈值）触发预览消息（均保留不撤回）。 */
-  feedDelta(text: string): void {
-    this.deltaBuf += text
-    const now = this.clock()
-    const due = this.deltaBuf.length >= this.flushMinChars || now - this.lastFlush >= this.flushIntervalMs
-    if (!due) {
-      if (!this.flushTimer) {
-        this.flushTimer = setTimeout(() => {
-          this.flushTimer = null
-          this.flushPreview()
-        }, this.flushIntervalMs)
-      }
-      return
-    }
-    this.flushPreview()
-  }
-
-  private flushPreview(): void {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer)
-      this.flushTimer = null
-    }
-    const text = this.deltaBuf
-    this.deltaBuf = ""
-    if (!text) return
-    this.lastFlush = this.clock()
+  /** 助手中间轮文本（GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：发 markdown 卡片消息（与最终回复
+   *  同构——完整 Markdown 渲染；普通发送不引用原消息，保留不撤回）。 */
+  assistantNote(text: string): void {
+    if (!text.trim()) return
     this.enqueue(async () => {
-      await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "text", content: { text: `✍️ ${text}` } })
+      await this.api.sendMessage({ receiveId: this.chatId, receiveIdType: "chat_id", msgType: "interactive", content: buildReplyCard(text) })
     })
   }
 
-  /** 最终回复（卡片，引用原消息）：过程消息（预览/状态/工具滚动）一律保留不撤回。 */
+  /** 最终回复（卡片，引用原消息）：中间轮卡片与过程消息一律保留不撤回。 */
   final(text: string, replyTo?: string): void {
-    this.clearTransient()
     this.statusMsgId = null
     this.enqueue(async () => {
       const card = buildReplyCard(text)
@@ -163,7 +135,6 @@ class ChatOutbox {
   /** 错误回复（引用原消息）：过程消息一律保留不撤回。同为终态——置位 finalSent，
    *  阻断 onEnd 兜底的「✅ 任务完成」（出错/取消后再补完成提示会误导用户）。 */
   error(text: string, replyTo?: string): void {
-    this.clearTransient()
     this.statusMsgId = null
     this.enqueue(async () => {
       await this.post("text", { text: `❌ ${text}` }, replyTo)
@@ -179,20 +150,11 @@ class ChatOutbox {
 
   /** 任务完成兜底：最终回复未发出时补一条完成提示（消息一律保留不撤回；finalSent 检查在队列内，避免与 final 竞态）。 */
   taskDone(replyTo?: string): void {
-    this.clearTransient()
     this.statusMsgId = null
     this.enqueue(async () => {
       if (this.finalSent) return
       await this.post("text", { text: "✅ 任务完成" }, replyTo)
     })
-  }
-
-  private clearTransient(): void {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer)
-      this.flushTimer = null
-    }
-    this.deltaBuf = ""
   }
 }
 
@@ -418,12 +380,9 @@ export interface FeishuBotOptions {
   renderer?: DiagramRenderer
   clock?: () => number
   log?: (msg: string) => void
-  /** 预览刷新窗口（测试注入）。 */
-  flushIntervalMs?: number
-  flushMinChars?: number
   /** 通道行为开关（环境变量解析见 boot/compose；均默认 false 保持现状）：
-   *  - notifyTools：推送工具调用过程（滚动状态消息「🔧 调用 xxx」）
-   *  - notifyAssistant：推送助手中间轮文本（预览消息，发新撤旧）
+   *  - notifyTools：推送工具调用过程（每调用一条消息：🔧 开始 → ✔ 完成，原地更新）
+   *  - notifyAssistant：推送助手中间轮文本（markdown 卡片消息，与最终回复同构）
    *  （自动审批在接口层 EngineBotAdapter 构造注入，不经过 bot——bot 仅感知审批卡片不再到达） */
   notify?: { tools?: boolean; assistant?: boolean }
 }
@@ -803,10 +762,10 @@ export class FeishuBot {
                 if (toolCallId) this.outbox(chatId).toolFinish(toolCallId)
               }
             : undefined,
-          // 助手中间轮文本（GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：预览消息（消息保留不撤回）
+          // 助手中间轮文本（GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT）：markdown 卡片消息（与最终回复同构）
           onIntermediate: this.opts.notify?.assistant
             ? (text) => {
-                this.outbox(chatId).feedDelta(text)
+                this.outbox(chatId).assistantNote(text)
               }
             : undefined,
           onDone: (text) => {
@@ -852,7 +811,7 @@ export class FeishuBot {
   private outbox(chatId: string): ChatOutbox {
     let o = this.outboxes.get(chatId)
     if (!o) {
-      o = new ChatOutbox(chatId, this.api, this.clock, this.log, this.opts.flushIntervalMs, this.opts.flushMinChars)
+      o = new ChatOutbox(chatId, this.api, this.clock, this.log)
       this.outboxes.set(chatId, o)
     }
     return o

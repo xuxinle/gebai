@@ -68,7 +68,7 @@ interface Fakes {
   releaseRuns: () => void
 }
 
-function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: number; flushMinChars: number; home: string; hangRun: boolean; renderError: string | null; notify: { tools?: boolean; assistant?: boolean } }> = {}): Fakes {
+function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; hangRun: boolean; renderError: string | null; notify: { tools?: boolean; assistant?: boolean } }> = {}): Fakes {
   // 归属映射（feishu/chat-owners.json）写入真实临时目录；共享 home 可测「重启恢复」
   const home = opts.home ?? mkdtempSync(join(tmpdir(), "feishu-bot-test-"))
   const sessions = new Map<string, SessionData>()
@@ -210,8 +210,6 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; flushIntervalMs: 
       },
     },
     clock: Date.now,
-    flushIntervalMs: opts.flushIntervalMs ?? 1500,
-    flushMinChars: opts.flushMinChars ?? 60,
     notify: opts.notify,
   })
   return {
@@ -560,11 +558,11 @@ describe("引擎事件推送", () => {
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    // 接口层不转发文本增量（引擎 final_only 不推送 delta），无预览消息
+    // 接口层不转发文本增量（引擎 final_only 不推送 delta），无中间轮消息
     f.emit({ type: "event.message.delta", ...base, payload: { text: "你好" } })
     await flush()
-    const previews = f.sent.filter((s) => String(JSON.stringify(s.content)).includes("✍️"))
-    expect(previews).toHaveLength(0)
+    const notes = f.sent.filter((s) => s.msgType === "interactive")
+    expect(notes).toHaveLength(0)
     // 最终回复（onDone）直接发卡片
     f.emit({ type: "event.message.done", ...base, payload: { text: "最终完整回复" } })
     await flush()
@@ -1113,33 +1111,35 @@ describe("过程推送配置（GEBAI_FEISHU_BOT_NOTIFY_*）", () => {
     expect(f.patches.length).toBe(0)
   })
 
-  test("notifyAssistant：助手中间轮文本发预览消息（预览保留不撤回）", async () => {
-    const f = makeBot({ notify: { assistant: true }, flushIntervalMs: 0, flushMinChars: 1 })
+  test("notifyAssistant：助手中间轮文本发 markdown 卡片消息（与最终回复同构，保留不撤回）", async () => {
+    const f = makeBot({ notify: { assistant: true } })
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    f.emit({ type: "event.message.intermediate", ...base, payload: { text: "我先查一下文件。" } })
-    await flush()
-    await new Promise((r) => setTimeout(r, 20)) // 预览节流冲刷
-    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("✍️") && String(JSON.stringify(s.content)).includes("我先查一下文件"))).toBe(true)
-    // 最终回复：预览消息保留 + 发最终卡片
-    f.emit({ type: "event.message.done", ...base, payload: { text: "最终结论" } })
+    f.emit({ type: "event.message.intermediate", ...base, payload: { text: "**我先查一下文件。**" } })
     await waitUntil(() => f.sent.some((s) => s.msgType === "interactive"))
+    // 中间轮卡片：无头 markdown 组件渲染（与最终回复同构），普通发送不引用原消息
+    const note = f.sent.find((s) => s.msgType === "interactive" && String(JSON.stringify(s.content)).includes("我先查一下文件"))
+    expect(note).toBeDefined()
+    const card = note!.content as Record<string, unknown>
+    expect((card as { body?: { elements?: { tag: string; content?: string }[] } }).body?.elements?.[0]?.tag).toBe("markdown")
+    expect(note!.receiveIdType ?? "chat_id").toBe("chat_id")
+    // 最终回复：另发最终卡片（引用原消息），中间轮卡片保留不撤回
+    f.emit({ type: "event.message.done", ...base, payload: { text: "最终结论" } })
+    await waitUntil(() => f.sent.filter((s) => s.msgType === "interactive").length >= 2)
     await flush()
-    const preview = f.sent.find((s) => String(JSON.stringify(s.content)).includes("✍️"))
-    expect(preview).toBeDefined()
     expect(f.deletes).toHaveLength(0)
   })
 
   test("notifyAssistant 关闭（默认）：中间轮文本不推送", async () => {
-    const f = makeBot({ flushIntervalMs: 0, flushMinChars: 1 })
+    const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
     f.emit({ type: "event.message.intermediate", ...base, payload: { text: "过程陈述" } })
     await flush()
     await new Promise((r) => setTimeout(r, 20))
-    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("✍️"))).toBe(false)
+    expect(f.sent.some((s) => s.msgType === "interactive")).toBe(false)
   })
 
   test("formatToolArgs：参数摘要（key=\"value\" 连接、值/总长截断、空参/未定义过滤）", () => {
