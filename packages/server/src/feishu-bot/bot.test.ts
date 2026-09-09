@@ -38,7 +38,7 @@ interface Fakes {
   choices: Array<{ sessionId: string; choiceId: string; selection: string | string[] | null }>
   drawResults: Array<{ sessionId: string; renderId: string; result: { ok: boolean; error?: string } }>
   uploads: Array<{ mime: string; bytes: Uint8Array }>
-  /** 渲染器调用记录（code + format，验证三语言透传）。 */
+  /** 渲染器调用记录（code + format，验证四语言透传）。 */
   renderCalls: Array<{ code: string; format: string }>
   deletes: string[]
   /** 表情反应调用记录（add：messageId+emoji；delete：messageId+reactionId）。 */
@@ -858,7 +858,7 @@ describe("引擎事件推送", () => {
     expect(f.uploads).toHaveLength(0)
   })
 
-  test("画图（draw）：mermaid/d2 格式走后端三语言渲染——format 透传 + 上传发送图片", async () => {
+  test("画图（draw）：mermaid/d2/echarts 格式走后端四语言渲染——format 透传 + 上传发送图片", async () => {
     const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
@@ -875,6 +875,13 @@ describe("引擎事件推送", () => {
     expect(f.drawResults[1].result.ok).toBe(true)
     expect(f.renderCalls[1]).toEqual({ code: "gw -> svc", format: "d2" })
     expect(f.uploads).toHaveLength(2)
+    // echarts（JSON option）同样渲染成功，format 不得回退 plantuml
+    const echartCode = '{"xAxis":{"data":["A","B"]},"series":[{"type":"bar","data":[1,2]}]}'
+    f.emit({ type: "event.draw.render", ...base, payload: { renderId: "r6", code: echartCode, name: "chart", format: "echarts" } })
+    await waitUntil(() => f.drawResults.length === 3)
+    expect(f.drawResults[2].result.ok).toBe(true)
+    expect(f.renderCalls[2]).toEqual({ code: echartCode, format: "echarts" })
+    expect(f.uploads).toHaveLength(3)
   })
 
   test("画图（draw）：mermaid 渲染失败把错误回传引擎（模型据此修正）", async () => {

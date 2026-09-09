@@ -820,13 +820,13 @@ export class FeishuBot {
   /**
    * show 图表分支后端渲染（替代前端渲染链路）：图表源码（按 format）→ PNG → 落盘会话 tmp/ + 飞书图片消息，
    * 结果经 decideDrawResult 回传引擎（渲染成功工具才返回成功；失败把错误回传模型供修正）。
-   * 三语言均支持：plantuml（TeaVM 引擎）、mermaid（mermaid + happy-dom）、d2（@terrastruct/d2 WASM），
+   * 四语言均支持：plantuml（TeaVM 引擎）、mermaid（mermaid + happy-dom）、d2（@terrastruct/d2 WASM）、echarts（npm 包 SSR），
    * 统一走组合渲染器 core/diagram-render.ts（浅色主题白底图）。
    */
   private async handleDrawRender(sessionId: string, chatId: string, payload: Record<string, unknown>): Promise<void> {
     const renderId = String(payload.renderId ?? "")
     const code = String(payload.code ?? "")
-    const format = payload.format === "mermaid" || payload.format === "d2" ? payload.format : "plantuml"
+    const format = payload.format === "mermaid" || payload.format === "d2" || payload.format === "echarts" ? payload.format : "plantuml"
     const name = String(payload.name ?? "diagram").replace(/[^A-Za-z0-9_-]/g, "_") || "diagram"
     if (!renderId || !code) return
     try {

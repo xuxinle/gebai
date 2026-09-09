@@ -14,7 +14,7 @@ export interface BotRunHandlers {
   onApproval?(toolCallId: string, tool: string, args: Record<string, unknown>, retries: number): void
   /** 用户选择请求（ask 选项询问分支）。 */
   onChoice?(choiceId: string, prompt: string, options: unknown[], multi: boolean): void
-  /** 图表渲染请求（draw，飞书通道后端渲染成图片；format 图表语言，后端仅支持 plantuml）。 */
+  /** 图表渲染请求（draw，飞书通道后端渲染成图片；format 图表语言，四语言均支持）。 */
   onDraw?(renderId: string, code: string, name?: string, format?: string): void
   /** 最终回复文本（仅最终回复模式下唯一的文本信号，非子Agent 过程文本）。 */
   onDone?(text: string): void
