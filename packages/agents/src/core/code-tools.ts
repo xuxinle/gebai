@@ -234,7 +234,7 @@ interface PreviewServerDeps {
 function previewServerDeps(overrides: Partial<PreviewServerDeps> = {}): PreviewServerDeps {
   return {
     host: process.env.GEBAI_HOST || "127.0.0.1",
-    entry: join(import.meta.dirname, "..", "..", "..", "agents", "code", "index.ts"),
+    entry: join(import.meta.dirname, "..", "..", "..", "server", "src", "index.ts"),
     binary: isBinaryMode(),
     tmpDir: tmpdir(),
     timeoutMs: PREVIEW_START_TIMEOUT_MS,
