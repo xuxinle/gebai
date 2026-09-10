@@ -125,18 +125,26 @@ export class SubAgentManager {
       // dist/二进制模式：源码目录不存在，回退到构建时生成的 bundle 注册表（不可变，写入缓存）
       this.tsDefs.clear()
       try {
-        const { bundledDefs } = await import("../subagents.bundle.generated")
+        const { bundledDefs, bundledErrors } = await import("../subagents.bundle.generated")
         for (const def of bundledDefs) this.tsDefs.set(def.name, def)
+        // 构建期验证失败清单水合进 loadErrors（模型侧可见根因：agent_load/agent_run 未知名错误附因）
+        for (const [name, err] of bundledErrors) {
+          this.loadErrors.set(name, `bundle 构建期验证失败（${err}）——修复该子代理后重新构建可恢复`)
+          console.warn(`[subagents] bundle 剔除的子Agent ${name}: ${err}`)
+        }
       } catch (err) {
-        // 必抛错，绝不静默降级为空列表——启动「成功」但没有任何子Agent 比启动失败更难排查；
-        // 加载失败常见根因是子Agent 模块的模块作用域副作用（如第三方包解析，见 DESIGN「打包闭环」铁律）
-        throw new Error(
-          `[subagents] bundle 注册表缺失或加载失败（构建时先运行 scripts/build-subagents.ts）: ${err instanceof Error ? err.message : err}`,
+        // 注册表整体不可用（构建脚本未跑/生成文件损坏）：降级为空集而非阻断启动——子代理失败
+        // 不炸主流程（DESIGN「子代理失败隔离」），显眼告警后继续（引擎无子代理可用，但服务本体
+        // 与全局工具正常；修复构建链路重启即恢复）。单代理模块级失败已被构建期验证隔离（bundledErrors），
+        // 走到这里的常见根因是构建脚本未运行/生成文件损坏
+        console.error(
+          `[subagents] bundle 注册表缺失或加载失败（构建时先运行 scripts/build-subagents.ts），已降级为无子Agent启动: ${err instanceof Error ? err.message : err}`,
         )
       }
       // 模块缓存存「未过滤全集」（实例级 removedDefs 过滤只作用于实例视图——启停名单是实例策略，
       // 写进进程缓存会污染后续所有实例的发现结果）
       discoveredDefsCache = [...this.tsDefs.values()]
+      discoveredErrorsCache = new Map(this.loadErrors)
       discoveredSigCache = null
       this.rebuildMergedDefs()
       await this.discoverNativeIfChanged()
@@ -280,7 +288,16 @@ export class SubAgentManager {
     const targets = this.preloadOverride?.length ? this.preloadOverride : []
     for (const def of this.defs.values()) {
       const shouldPreload = targets.length ? targets.includes(def.name) : !!def.preload
-      if (shouldPreload) await this.load(def.name)
+      if (!shouldPreload) continue
+      // 逐个隔离（DESIGN「子代理失败隔离」）：单个预载失败（工具注册抛错/依赖缺失）只记 loadErrors
+      // + 告警，不抛穿 discover→启动主流程；其余子代理照常预载
+      try {
+        await this.load(def.name)
+      } catch (err) {
+        const msg = `预载 ${def.name} 失败: ${err instanceof Error ? err.message : String(err)}`
+        console.warn(`[subagents] ${msg}（已跳过，不影响其他子代理与启动）`)
+        this.loadErrors.set(def.name, msg)
+      }
     }
   }
 

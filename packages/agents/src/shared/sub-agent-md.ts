@@ -1,7 +1,7 @@
 /**
  * 纯提示词子 Agent（简化定义）的 md 解析（自 server core/agents/sub-agent-md.ts 下沉 agents 包，
  * server 发现（subagents.ts）与构建脚本（build-subagents.ts）经 `@gebai/agents` 消费——md 解析
- * 单一来源；配套 `mdSubAgentDef` 从解析结果直接构造 SubAgentDef，供包入口 allAgents 纳入纯 md 子代理）。
+ * 单一来源；配套 `mdSubAgentDef` 从解析结果直接构造 SubAgentDef（供发现链路直接消费）。
  *
  * `{dir}/{dir}.md` 单独存在（无同名 ts）时，直接由 md 构成 SubAgentDef——零 TS 代码的简单/组合式子 Agent。
  * 可选 frontmatter（YAML 风格，识别 description/dependencies/preload/env_vars）：

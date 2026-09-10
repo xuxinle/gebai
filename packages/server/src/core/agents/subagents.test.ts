@@ -637,3 +637,74 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
     }
   })
 })
+
+describe("子代理失败隔离（DESIGN「子代理失败隔离」：单个失败不炸主流程、不连带其他代理）", () => {
+  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")
+
+  test("坏子代理（顶层 import 抛错）不连带其他代理：其余照常发现注册，坏代理根因可见", async () => {
+    // 同批放入一个坏代理（import 不存在模块）与一个好代理
+    const bad = "zz_isolation_bad_tmp"
+    const good = "zz_isolation_good_tmp"
+    const badFile = join(dir, `${bad}.ts`)
+    const goodFile = join(dir, `${good}.ts`)
+    rmSync(badFile, { force: true })
+    rmSync(goodFile, { force: true })
+    writeFileSync(badFile, `import "./nonexistent-xyz"\nexport const def = { name: "${bad}", description: "x", systemPrompt: "y" }\n`)
+    writeFileSync(goodFile, `export const def = { name: "${good}", description: "好代理", systemPrompt: "y" }\n`)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover() // 不得抛错（坏代理只记 loadErrors）
+      expect(m.def(bad)).toBeUndefined()
+      expect(m.loadError(bad)).toBeTruthy()
+      expect(m.unknownAgentError(bad)).toContain(bad)
+      expect(m.def(good)?.description).toBe("好代理") // 好代理不受连带
+      expect(m.def("code")).toBeDefined() // 既有代理不受连带
+    } finally {
+      rmSync(badFile, { force: true })
+      rmSync(goodFile, { force: true })
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+  })
+
+  test("preload 单个失败不抛穿 discover（记 loadErrors，其余代理照常预载）", async () => {
+    // 好代理 preload:true + 工具注册必炸的代理 preload:true：后者预载失败只记 loadErrors
+    const bad = "zz_preload_bad_tmp"
+    const badFile = join(dir, `${bad}.ts`)
+    rmSync(badFile, { force: true })
+    writeFileSync(badFile, `export const def = { name: "${bad}", description: "x", systemPrompt: "y", preload: true, tools: { t: { name: "t", description: "d", parameters: { type: "object", properties: {} }, execute: async () => ({ output: "" }) } } }\n`)
+    try {
+      const registry = new ToolRegistry()
+      // 让 registerSubAgentTools 对本代理抛错（模拟注册失败）
+      const orig = registry.registerSubAgentTools.bind(registry)
+      registry.registerSubAgentTools = ((name: string) => {
+        if (name === bad) throw new Error("模拟注册失败")
+        return orig(name, {}, undefined)
+      }) as typeof registry.registerSubAgentTools
+      const m = new SubAgentManager({ registry, preloadOverride: [] })
+      await m.discover() // 不得抛错
+      expect(m.loadError(bad)).toContain("模拟注册失败")
+      // 其余 preload 代理（如手动注册的）不受影响
+      const other = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      other.register({ name: "zz_other_ok", description: "d", systemPrompt: "s", preload: true, tools: {} })
+      await other.discover()
+      expect(other.loadError("zz_other_ok")).toBeUndefined()
+    } finally {
+      rmSync(badFile, { force: true })
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+  })
+
+  test("bundle 形态 bundledErrors 水合进 loadErrors（构建期剔除的代理根因可见，不抛错）", async () => {
+    // 直接构造 discover 的 dist 分支不可行（源码目录存在）；以真实生成产物验证契约：
+    // bundledErrors 导出形态为数组（当前全绿为空），bundledDefs 非空——运行时水合逻辑由
+    // discover dist 分支消费（ bundledErrors 逐项进 loadErrors + 告警）
+    const { bundledDefs, bundledErrors } = await import("../subagents.bundle.generated")
+    expect(Array.isArray(bundledErrors)).toBe(true)
+    expect(bundledDefs.length).toBeGreaterThan(0)
+    // 单条 bundledError 的水合语义：错误信息含代理名与原因（模型侧 unknownAgentError 附因可读）
+    for (const [name, err] of bundledErrors) {
+      expect(typeof name).toBe("string")
+      expect(err.length).toBeGreaterThan(0)
+    }
+  })
+})
