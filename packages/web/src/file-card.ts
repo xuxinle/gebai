@@ -6,7 +6,7 @@
  */
 import type { ContentBlock } from "@gebai/sdk"
 import { el, filesPreview } from "./state"
-import { copyText, desktopDownloadHint } from "./ui"
+import { copyText, desktopDownloadHint, tip } from "./ui"
 import { highlightedCode, markdownBlock, blockText } from "./markdown"
 import { openImageViewer } from "./diagram"
 import { previewFrame, sandboxedHtml, iconButton, flashButton, ICON_COPY, ICON_DOWNLOAD, ICON_FULLSCREEN } from "./html-view"
@@ -126,8 +126,29 @@ function fileCard(title: string, badge: string | undefined, toolbar: HTMLElement
   return card
 }
 
-/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 下载（可选，常驻标题栏）+ 关闭 + 内容区，
- *  Esc/点击遮罩关闭。 */
+/** 弹窗全宽偏好（localStorage `gebai.ui.previewFull` = "1"）：宽度选择跨会话记忆。 */
+const PREVIEW_FULL_KEY = "gebai.ui.previewFull"
+
+function readPreviewFull(): boolean {
+  try {
+    return localStorage.getItem(PREVIEW_FULL_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writePreviewFull(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(PREVIEW_FULL_KEY, "1")
+    else localStorage.removeItem(PREVIEW_FULL_KEY)
+  } catch {
+    /* 隐私模式等场景忽略 */
+  }
+}
+
+/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 下载（可选，常驻标题栏）+ **全宽切换** + 关闭 + 内容区，
+ *  Esc/点击遮罩关闭。尺寸**按视口比例**（宽 90vw、高 88vh，见 css/chat.css `.preview-card`），
+ * 标题栏「全宽」切到铺满视口（`.is-full`）并记忆偏好。 */
 function previewShell(name: string, download?: { sessionId: string; path: string }): { overlay: HTMLElement; body: HTMLElement } {
   const overlay = el("div", "preview-overlay")
   const card = el("div", "preview-card")
@@ -139,7 +160,17 @@ function previewShell(name: string, download?: { sessionId: string; path: string
     dl.classList.add("preview-dl")
     head.appendChild(dl)
   }
-  head.appendChild(closeBtn)
+  const full = readPreviewFull()
+  if (full) card.classList.add("is-full")
+  const fullBtn = iconButton(full ? "按比例宽度" : "全宽铺满", ICON_FULLSCREEN)
+  fullBtn.classList.add("preview-full")
+  fullBtn.onclick = () => {
+    const on = !card.classList.contains("is-full")
+    card.classList.toggle("is-full", on)
+    tip(fullBtn, on ? "按比例宽度" : "全宽铺满")
+    writePreviewFull(on)
+  }
+  head.append(fullBtn, closeBtn)
   const body = el("div", "preview-body")
   card.append(head, body)
   overlay.appendChild(card)

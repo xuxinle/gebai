@@ -1445,4 +1445,40 @@ describe("原文件查看弹窗（previewShell：标题栏下载入口）", () =
     expect(dl.download).toBe("shot.png")
     expect(overlay.querySelector("img")).not.toBeNull()
   })
+
+  test("弹窗标题栏全宽切换（.preview-full）：切到 .is-full 并记忆偏好，重开沿用", async () => {
+    const prevLs = (globalThis as Record<string, unknown>).localStorage
+    const store = new Map<string, string>()
+    ;(globalThis as Record<string, unknown>).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    }
+    try {
+      const { openFilePreview } = await import("./file-card")
+      type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
+      const overlays = () => base.querySelectorAll("div.preview-overlay") as unknown as MockElWithQuery[]
+      const before = overlays().length
+      openFilePreview("s1", "shot.png", "tmp/shot.png", "image/png")
+      const overlay = overlays().slice(before).pop()!
+      const card = overlay.querySelector("div.preview-card") as unknown as ElWithClass
+      expect(card.classList.contains("is-full")).toBe(false) // 默认标准宽
+      const btn = overlay.querySelector("button.preview-full") as unknown as { onclick: () => void }
+      expect(btn).not.toBeNull()
+      btn.onclick()
+      expect(card.classList.contains("is-full")).toBe(true)
+      expect(store.get("gebai.ui.previewFull")).toBe("1")
+      btn.onclick() // 还原：清掉偏好，下次回到标准宽
+      expect(card.classList.contains("is-full")).toBe(false)
+      expect(store.has("gebai.ui.previewFull")).toBe(false)
+      // 偏好记忆：预置全宽后重开弹窗直接全宽
+      store.set("gebai.ui.previewFull", "1")
+      openFilePreview("s1", "shot.png", "tmp/shot.png", "image/png")
+      const card2 = overlays().slice(before).pop()!.querySelector("div.preview-card") as unknown as ElWithClass
+      expect(card2.classList.contains("is-full")).toBe(true)
+      for (const o of overlays().slice(before)) (o as unknown as { remove(): void }).remove()
+    } finally {
+      ;(globalThis as Record<string, unknown>).localStorage = prevLs
+    }
+  })
 })

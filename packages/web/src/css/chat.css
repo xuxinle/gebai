@@ -1110,11 +1110,20 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
-  width: min(920px, 100%);
-  max-height: 85vh;
+  /* 文件查看弹窗尺寸**按视口比例自适应**（宽 90vw、高 88vh）——旧值 min(920px) 在消息列
+     --msg-max-w = 800px 下几乎与正文同宽，代码长行/网页预览横向滚动明显；
+     标题栏「全宽」还能再切到铺满视口（.is-full：100% / 94vh），偏好记忆 localStorage `gebai.ui.previewFull` */
+  width: min(90vw, 100%);
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* 全宽模式（标题栏 ⤢ 切换）：铺满遮罩内可用空间 */
+.preview-card.is-full { width: 100%; max-height: 94vh; }
+/* 窄屏：遮罩边距收紧（比例弹窗才有实际可用宽），全宽档维持贴边铺满 */
+@media (max-width: 860px) {
+  .preview-overlay { padding: 12px; }
 }
 .preview-head {
   display: flex;
@@ -1149,9 +1158,23 @@
   border-radius: 4px;
 }
 .preview-dl:hover { color: var(--text); background: var(--bg-hover); }
-.preview-dl svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* 弹窗标题栏全宽切换（与下载/关闭同款交互，描边图标） */
+.preview-full {
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.preview-full:hover { color: var(--text); background: var(--bg-hover); }
+.preview-dl svg, .preview-full svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .preview-body { flex: 1; overflow: auto; padding: 14px; }
 .preview-body img { max-width: 100%; border-radius: var(--radius-sm); }
+/* 弹窗图片直显（openFilePreview 的直接子元素）：宽卡内居中，避免左侧大片留白 */
+.preview-body > img { margin: 0 auto; }
 .preview-code {
   background: var(--bg-inset);
   border: 1px solid var(--border);
