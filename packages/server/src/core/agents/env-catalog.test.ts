@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { getEnvCatalog } from "./env-catalog"
-import { def as codeDef } from "../../../../agents/src/code/index"
-import { def as selfOptimizeDef } from "../../../../agents/src/self_optimize/index"
-import { def as feishuDocsDef } from "../../../../agents/src/feishu_docs/feishu_docs"
+import { def as codeDef } from "../../../../agents/src/agents/code/index"
+import { def as selfOptimizeDef } from "../../../../agents/src/agents/self_optimize/index"
+import { def as feishuDocsDef } from "../../../../agents/src/agents/feishu_docs/feishu_docs"
 
 const defs = [codeDef, selfOptimizeDef, feishuDocsDef]
 

@@ -3338,7 +3338,7 @@ describe("context compaction", () => {
 
   test("agent_run 前置热加载重扫 + agent_load 失败暴露：刚写入的破损子Agent 即时报附因错误", async () => {
     const s = await setup("subunknown")
-    const file = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "zz_probe_fresh.ts")
+    const file = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents", "zz_probe_fresh.ts")
     writeFileSync(file, `import "./nonexistent-xyz"\nexport const def = { name: "zz_probe_fresh", description: "x", systemPrompt: "y" }`)
     try {
       const session = await s.store.createSession("default", "t")

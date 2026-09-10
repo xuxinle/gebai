@@ -20,10 +20,9 @@ import { readFileSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { pathToFileURL } from "node:url"
 import { parseSubAgentMd } from "@gebai/agents"
-import { NON_AGENT_DIRS, NON_AGENT_FILES } from "@gebai/agents"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const srcDir = join(root, "..", "agents", "src")  // @gebai/agents 包内子代理源
+const srcDir = join(root, "..", "agents", "src", "agents")  // @gebai/agents 子代理定义域（基建在 src/core/，物理分域即排除）
 const outFile = join(root, "src", "core", "subagents.bundle.generated.ts")
 
 /** 逗号分隔环境变量 → 名单（空值 = 未指定）。 */
@@ -60,15 +59,15 @@ const seen = new Set<string>()
 for (const e of entries) {
   const base = e.name
   if (e.isDirectory()) {
-    if (seen.has(base) || !validName(base) || NON_AGENT_DIRS.has(base)) continue
+    if (seen.has(base) || !validName(base)) continue
     seen.add(base)
     const tsEntry = join(srcDir, base, `${base}.ts`)
     const indexEntry = join(srcDir, base, "index.ts")
     if (isDefFile(tsEntry)) {
-      defs.push({ name: base, dir: true, importPath: `../../../agents/src/${base}/${base}` })
+      defs.push({ name: base, dir: true, importPath: `../../../agents/src/agents/${base}/${base}` })
     } else if (isDefFile(indexEntry)) {
       // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
-      defs.push({ name: base, dir: true, importPath: `../../../agents/src/${base}/index` })
+      defs.push({ name: base, dir: true, importPath: `../../../agents/src/agents/${base}/index` })
     } else {
       // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies/preload/env_vars 转义嵌入）
       try {
@@ -89,11 +88,10 @@ for (const e of entries) {
       }
     }
   } else if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
-    if (NON_AGENT_FILES.has(e.name)) continue
     const name = e.name.slice(0, -3)
     if (seen.has(name) || !validName(name)) continue
     seen.add(name)
-    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, importPath: `../../../agents/src/${name}` })
+    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, importPath: `../../../agents/src/agents/${name}` })
   }
 }
 defs.sort((a, b) => a.name.localeCompare(b.name))

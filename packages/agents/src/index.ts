@@ -11,22 +11,19 @@
  * 每个子代理模块约定：export const name / description / def（SubAgentDef，含 tools）。
  */
 
-// 子Agent 目录扫描排除清单（dev 发现 subagents.ts 与构建 build-subagents.ts 共享的唯一事实源）
-export { NON_AGENT_DIRS, NON_AGENT_FILES } from "./shared/scan"
-
 // 纯 md 子代理解析（md 定义单一来源：server 发现/构建脚本共用）
-export { parseSubAgentMd, mdSubAgentDef, type ParsedSubAgentMd } from "./shared/sub-agent-md"
+export { parseSubAgentMd, mdSubAgentDef, type ParsedSubAgentMd } from "./core/shared/sub-agent-md"
 
 // code 域工具（git/system_info/env_detect/preview_server——引擎 compose 从本包注册全局工具，单向依赖）
-export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "./code/tools"
-export { fetchWithRedirectGuard, assertPublicHttpUrl, checkWebhookUrl } from "./shared/fetch-guard"
-export { VISION_MIME_SET, VISION_MAX_IMAGE_BYTES, setVisionProviderGetter, getVisionProvider, makeVisionTool } from "./shared/vision"
-export * from "./feishu_docs/oauth"
-export { renderOfficeReadingView, OFFICE_PREVIEW_EXTS } from "./wps/preview"
-export { analyzeTool, searchSymbolsTool } from "./analyzer/analyzer"
-export { resizeForVision, resizeNote, imageSize } from "./shared/image-resize"
-export { createLazyBridge, withSessionLock, type BridgeLike } from "./browser/bridge"
-export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./shared/tls"
-export { saveMiniTool, deleteMiniTool, listMiniTools, getMiniTool } from "./widgets-store/mini-tools"
-export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT } from "./shared/page-capture"
-export { readFeedbackTool } from "./shared/feedback"
+export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "./core/code-tools"
+export { fetchWithRedirectGuard, assertPublicHttpUrl, checkWebhookUrl } from "./core/shared/fetch-guard"
+export { VISION_MIME_SET, VISION_MAX_IMAGE_BYTES, setVisionProviderGetter, getVisionProvider, makeVisionTool } from "./core/shared/vision"
+export * from "./agents/feishu_docs/oauth"
+export { renderOfficeReadingView, OFFICE_PREVIEW_EXTS } from "./agents/wps/preview"
+export { analyzeTool, searchSymbolsTool } from "./core/analyzer/analyzer"
+export { resizeForVision, resizeNote, imageSize } from "./core/shared/image-resize"
+export { createLazyBridge, withSessionLock, type BridgeLike } from "./core/browser/bridge"
+export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./core/shared/tls"
+export { saveMiniTool, deleteMiniTool, listMiniTools, getMiniTool } from "./core/widgets-store/mini-tools"
+export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT } from "./core/shared/page-capture"
+export { readFeedbackTool } from "./core/shared/feedback"

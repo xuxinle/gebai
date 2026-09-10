@@ -1,5 +1,5 @@
 /**
- * 构建时生成本地 CV（onnxruntime-web 运行时 + PP-OCR 模型）内嵌产物（`../agents/src/cv/cv.embedded.generated.json`）。
+ * 构建时生成本地 CV（onnxruntime-web 运行时 + PP-OCR 模型）内嵌产物（`../agents/src/core/cv/cv.embedded.generated.json`）。
  *
  * 背景：bun --compile 单二进制形态在用户机器上不可依赖 node_modules，本地 CV 推理的 ort
  * 运行时（dist 入口 mjs + wasm 本体，见 core/cv/ort-loader.ts）与 PP-OCR 模型三件套

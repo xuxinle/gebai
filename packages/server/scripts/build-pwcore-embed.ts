@@ -1,5 +1,5 @@
 /**
- * 构建时生成 playwright-core 内嵌产物（`../agents/src/browser/pwcore.embedded.generated.json`）。
+ * 构建时生成 playwright-core 内嵌产物（`../agents/src/core/browser/pwcore.embedded.generated.json`）。
  *
  * 背景：bun --compile 单二进制形态在用户机器上不可依赖 node_modules（`Bun.resolveSync`
  * 锚定真实 CWD 的可达性），playwright 模块须随产物内嵌。浏览器本体不内嵌：Windows 默认

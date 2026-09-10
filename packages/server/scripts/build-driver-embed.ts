@@ -1,6 +1,6 @@
 /**
- * 构建时生成浏览器桥接驱动（`../agents/src/browser/driver.mjs`）的内嵌产物
- * （`../agents/src/browser/driver.embedded.generated.json`）。
+ * 构建时生成浏览器桥接驱动（`../agents/src/core/browser/driver.mjs`）的内嵌产物
+ * （`../agents/src/core/browser/driver.embedded.generated.json`）。
  *
  * 背景：driver.mjs 需保持独立文件供 node 子进程运行，bun build/--compile 无法内联；
  * 二进制形态下以 gzip base64 内嵌进产物，运行时物化到 `{GEBAI_HOME}/vendor/playwright/`

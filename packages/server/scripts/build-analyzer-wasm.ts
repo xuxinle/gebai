@@ -1,5 +1,5 @@
 /**
- * 构建时生成 tree-sitter 语法 wasm 内嵌产物注册表（`../agents/src/analyzer/analyzer-wasm.embedded.generated.json`）。
+ * 构建时生成 tree-sitter 语法 wasm 内嵌产物注册表（`../agents/src/core/analyzer/analyzer-wasm.embedded.generated.json`）。
  *
  * 背景：analyzer 的语法解析依赖 `tree-sitter-wasms` 包（node_modules 内 wasm 文件），
  * bun --compile 单二进制运行时无 node_modules，`require.resolve` 无法定位——analyze/search_symbols
@@ -14,7 +14,7 @@ import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
 import { join } from "node:path"
 
-import { LANG_WASM } from "../../agents/src/analyzer/analyzer"
+import { LANG_WASM } from "../../agents/src/core/analyzer/analyzer"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const wasmDir = join(root, "node_modules", "tree-sitter-wasms", "out")

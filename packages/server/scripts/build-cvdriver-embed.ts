@@ -1,6 +1,6 @@
 /**
- * 构建时生成 CV GPU sidecar 驱动（`../agents/src/cv/cv-driver.mjs`）的内嵌产物
- * （`../agents/src/cv/cvdriver.embedded.generated.json`）。
+ * 构建时生成 CV GPU sidecar 驱动（`../agents/src/core/cv/cv-driver.mjs`）的内嵌产物
+ * （`../agents/src/core/cv/cvdriver.embedded.generated.json`）。
  *
  * 背景：cv-driver.mjs 需保持独立文件供 node 子进程运行（onnxruntime-node 原生推理），
  * bun build/--compile 无法内联；二进制形态下以 gzip base64 内嵌进产物，运行时物化到

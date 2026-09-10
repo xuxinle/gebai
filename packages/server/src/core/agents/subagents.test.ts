@@ -206,7 +206,7 @@ describe("子Agent 依赖与自动装载（dependencies 级联，DESIGN「子Age
 })
 
 describe("子Agent 热加载（目录签名失效缓存）", () => {
-  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")  // @gebai/agents 包内子代理源
+  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")  // @gebai/agents 包内子代理源
   test("目录双入口优先级：{name}/{name}.ts 优先于 {name}/index.ts（后者静默忽略，不报错）", async () => {
     const name = "zz_dualentry_tmp"
     const agentDir = join(dir, name)
@@ -379,7 +379,7 @@ describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE �
     m.applyEnableDisable([], ["code"])
     expect(m.def("code")).toBeUndefined()
     // 触发重扫（touch cron 目录内文件改变签名）后移除保持
-    const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "code", "index.ts")
+    const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents", "code", "index.ts")
     const st = statSync(probe)
     utimesSync(probe, new Date(st.atimeMs + 5000), new Date(st.mtimeMs + 5000))
     await m.refreshIfChanged()
@@ -624,7 +624,7 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
       await m.refreshIfChanged()
       expect(m.def("mergx")?.description).toBe("v2")
       // TS 目录签名变化触发全量重扫：客卿贡献不丢（独立贡献集 + 进程级缓存水合）
-      const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "code", "index.ts")
+      const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents", "code", "index.ts")
       const st2 = statSync(probe)
       utimesSync(probe, new Date(st2.atimeMs + 6000), new Date(st2.mtimeMs + 6000))
       await m.refreshIfChanged()
@@ -639,7 +639,7 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
 })
 
 describe("子代理失败隔离（DESIGN「子代理失败隔离」：单个失败不炸主流程、不连带其他代理）", () => {
-  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")
+  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
 
   test("坏子代理（顶层 import 抛错）不连带其他代理：其余照常发现注册，坏代理根因可见", async () => {
     // 同批放入一个坏代理（import 不存在模块）与一个好代理

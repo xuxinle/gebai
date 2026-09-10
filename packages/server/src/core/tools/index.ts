@@ -36,7 +36,7 @@ export { shTool, pyTool, resolvePythonCmd, _resetPythonCmdCache } from "./exec"
 export { showTool, fetchUrlTool, SHOW_MAX_BYTES, SHOW_TEXT_DIRECT_BYTES, SHOW_TEXT_MAX_CHARS } from "./show"
 // extras.ts 已整体迁 @gebai/agents（page_capture → shared/page-capture，read_feedback → shared/feedback）
 export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT, readFeedbackTool } from "@gebai/agents"
-// git/system_info/env_detect/preview_server（code 域工具）已迁 @gebai/agents（packages/agents/src/code/tools.ts）
+// git/system_info/env_detect/preview_server（code 域工具）已迁 @gebai/agents（packages/agents/src/core/code-tools.ts）
 export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "@gebai/agents"
 export { makeTodoTool, askTool, fullModeTool } from "./interact"
 export { agentListTool, agentLoadTool, agentRunTool, branchRunTool, branchSyncTool, bgTaskTool } from "./agent"

@@ -3,7 +3,7 @@ import { join } from "node:path"
 import type { SubAgentDef } from "../base/types"
 import type { ToolRegistry } from "../base/registry"
 import type { SubAgentInfo } from "@gebai/sdk"
-import { NON_AGENT_DIRS, NON_AGENT_FILES, parseSubAgentMd } from "@gebai/agents"
+import { parseSubAgentMd } from "@gebai/agents"
 import { mergeSubAgentDefs } from "./merge"
 import { discoverKeqing, disposeKeqingNotIn, keqingEnabled, keqingRoots, keqingSignature, type KeqingRunnerOptions } from "./keqing"
 
@@ -107,9 +107,9 @@ export class SubAgentManager {
   }
 
   async discover(): Promise<void> {
-    // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/，
+    // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/agents/ 子代理域（基建在 src/core/），
     // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）
-    const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")
+    const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
     const sig = await subagentsDirSignature(dir)
     // 命中缓存（签名未变，或 bundled 形态注册表不可变）：直接复用扫描结果
     if (discoveredDefsCache && sig === discoveredSigCache) {
@@ -154,17 +154,16 @@ export class SubAgentManager {
     // 全量扫描（首次或目录签名变化——热加载）：重扫前清空（删除的文件不再保留旧定义）
     this.tsDefs.clear()
     this.loadErrors.clear()
-    // 非子代理条目排除（@gebai/agents 导出的共享清单，与 build-subagents.ts 同源——见 shared/scan.ts）
+    // 扫描域 src/agents/ 内全是子代理定义（基建在 src/core/，物理分域即排除——无需排除清单）
     const entries = await readdir(dir, { withFileTypes: true })
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
-        if (NON_AGENT_FILES.has(e.name)) continue
         const base = e.name.slice(0, -3)
         if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则校验（DESIGN：子Agent 名 [a-z0-9_]+）
         try {
           // mtime 查询参数绕过模块缓存（Bun 相对路径 + 查询参数形态；file:// URL 查询参数不生效）：修改过的 TS 文件重新 import 拿到新代码
           const mtime = (await stat(join(dir, e.name)).catch(() => null))?.mtimeMs ?? 0
-          const mod = await import(`../../../../agents/src/${e.name}?t=${mtime}`)
+          const mod = await import(`../../../../agents/src/agents/${e.name}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
           if (def) this.tsDefs.set(def.name, def)
           else {
@@ -181,7 +180,7 @@ export class SubAgentManager {
         // 目录形式：{dir}/{dir}.ts 为定义入口；系统提示词可拆 {dir}.md 由入口文件导入并修饰。
         // 无同名 ts（或不导出 def）时支持纯提示词简化定义：{dir}/{dir}.md 单独存在即构成子Agent（零 TS）。
         const base = e.name
-        if (!/^[a-z0-9_]+$/.test(base) || NON_AGENT_DIRS.has(base)) continue // 命名规则 + 基建目录排除
+        if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则（基建已物理分域到 src/core/，无需排除清单）
         const tsEntry = join(dir, base, `${base}.ts`)
         const indexEntry = join(dir, base, "index.ts")
         const entry = (await access(tsEntry).then(() => true, () => false)) ? tsEntry : ((await access(indexEntry).then(() => true, () => false)) ? indexEntry : null)
@@ -189,7 +188,7 @@ export class SubAgentManager {
           try {
             const mtime = (await stat(entry).catch(() => null))?.mtimeMs ?? 0
             // 相对路径 + 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效）；目录形态入口名拼接
-            const rel = entry.endsWith(join("index.ts")) ? `../../../../agents/src/${base}/index` : `../../../../agents/src/${base}/${base}`
+            const rel = entry.endsWith(join("index.ts")) ? `../../../../agents/src/agents/${base}/index` : `../../../../agents/src/agents/${base}/${base}`
             const mod = await import(`${rel}?t=${mtime}`)
             const def = mod.def as SubAgentDef | undefined
             if (def) this.tsDefs.set(def.name, def)
@@ -252,9 +251,9 @@ export class SubAgentManager {
    *  TS 变化走全量 discover（尾部含 客卿 检查），仅 客卿 变化只重拉 客卿（幂等跳过 TS 扫描）。 */
   async refreshIfChanged(): Promise<void> {
     if (!discoveredDefsCache && !nativeDefsCache) return
-    // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/，
+    // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/agents/ 子代理域（基建在 src/core/），
     // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）
-    const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")
+    const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
     const sig = await subagentsDirSignature(dir)
     if (sig !== null && sig !== discoveredSigCache) {
       await this.discover()
