@@ -6,19 +6,38 @@
  * - **d2**：`@terrastruct/d2` 官方 WASM（node-esm 构建，文件路径 Worker——bun build 无法内联）：dev 模式直接 import 包；
  *   **二进制模式**从内嵌产物（`d2js.embedded.generated.json`，构建脚本 `scripts/build-d2js.ts` 生成，gzip base64）
  *   物化到 `{GEBAI_HOME}/vendor/d2js/{version}/` 后动态 import（与 playwright 子Agent 的 driver.mjs 复制同思路的打包闭环）。
- * - **echarts**：`echarts` npm 包 SSR 渲染（`ssr:true` + SVGRenderer，零 DOM）——**顶层急切导入**：zrender 环境探测在模块求值期
- *   完成，若在 happy-dom/PlantUML 垫层污染全局 window/document 后才加载会误判浏览器环境（文本测量需真 canvas，垫层不支持）；
- *   本文件经引擎与飞书桥接惰性 import，急切导入不增加启动开销。
+ * - **echarts**：`echarts` npm 包 SSR 渲染（`ssr:true` + SVGRenderer，零 DOM）——zrender 环境探测在模块求值期完成，
+ *   垫层活动时会误判浏览器环境（文本测量需真 canvas，垫层不支持）：模块顶部对全局作**临时清理后求值（TLA）**，
+ *   使判定与加载顺序解耦（见该处注释）；本文件经引擎与飞书桥接惰性 import，不增加启动开销。
  * - 各语言渲染经**串行队列**（mermaid 的 happy-dom document 与 d2 单 Worker 均为共享状态，防并发冲突）；依赖全部可注入（测试用 fake）。
  * - 失败抛错携带渲染原因（供回传模型修正源码）。
  */
 import type { DiagramFormat } from "@gebai/sdk"
-import * as echarts from "echarts"
 import { dirname, join } from "node:path"
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { pathToFileURL } from "node:url"
 import { Window, CSSStyleSheet } from "happy-dom"
 import { isBinaryMode, resolveGebaiHome } from "../base/config"
+
+/** echarts（zrender 环境探测在模块求值期完成）：在**临时清理过垫层全局的 Node 环境**中求值，
+ *  求值完毕立即还原——判定与加载顺序解耦。PlantUML/happy-dom 垫层在模块作用域安装全局 window/document
+ *  且不还原（plantuml.ts 的 shim 又被其自身静态导入先于本文件执行），若直接静态求值，谁先加载会决定
+ *  echarts 误判与否（误判浏览器环境后一旦垫层卸载 window，SSR 渲染即抛 window is not defined）。 */
+const echarts: typeof import("echarts") = await (async () => {
+  const g = globalThis as Record<string, unknown>
+  const saved: Array<[string, unknown]> = []
+  for (const k of ["window", "document", "navigator", "XMLSerializer"]) {
+    if (k in g) {
+      saved.push([k, g[k]])
+      delete g[k]
+    }
+  }
+  try {
+    return await import("echarts")
+  } finally {
+    for (const [k, v] of saved) g[k] = v
+  }
+})()
 
 /** 后端渲染器接口（引擎 ToolContext 与飞书桥接依赖注入，测试可伪造）。 */
 export interface DiagramRenderer {
@@ -663,7 +682,7 @@ export function createDiagramRenderer(deps: DiagramRendererDeps = {}): DiagramRe
       return enqueue(async () => {
         try {
           if (format === "echarts") {
-            // SSR 渲染零 DOM，与 mermaid/d2 的垫层互不影响（echarts 已在模块求值期以 Node 环境加载）
+            // SSR 渲染零 DOM，与 mermaid/d2 的垫层互不影响（echarts 已在模块求值期以清理后的 Node 环境加载）
             return await rasterize(await echartsRender(code), rasterOpts)
           }
           if (format === "mermaid") {

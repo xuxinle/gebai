@@ -11,6 +11,8 @@ export interface SubAgentManagerOptions {
   registry: ToolRegistry
   preloadOverride?: string[]
   bundledNames?: string[]
+  /** 扫描域覆盖（缺省按包内相对位置推导）：测试用——指向不存在的内置域即覆盖 bundle 回退分支。 */
+  scanDirs?: SubAgentScanDirs
 }
 
 /** 源码目录扫描结果缓存（进程级，存**未过滤全集**）：与目录签名（`discoveredSigCache`）配套——签名未变
@@ -32,10 +34,12 @@ let nativeErrorsCache: Array<[string, string]> | null = null
 let discoveredErrorsCache: Map<string, string> | null = null
 
 /** 计算子Agent 目录签名：递归收集 .ts/.md 文件（排除 .test.ts）的 路径:mtimeMs 排序拼接——
- *  任何新增/修改/删除都改变签名；目录不存在（dist/二进制 bundled 形态）返回 null（bundle 注册表不可变）。
+ *  任何新增/修改/删除都改变签名；**目录不存在返回 null**（dist/二进制形态无源码树）；目录存在但无
+ *  定义文件返回空串（「域未二开」与「域缺失」需区分——后者才是 bundle 回退的判定依据）。
  *  成本约一次目录遍历（~30 次 stat，可忽略），供每次 load/run 前的热加载检查。 */
 async function subagentsDirSignature(dir: string): Promise<string | null> {
   const parts: string[] = []
+  let readable = false
   const walk = async (d: string, prefix: string, depth: number): Promise<void> => {
     if (depth > 2) return
     let entries
@@ -44,6 +48,7 @@ async function subagentsDirSignature(dir: string): Promise<string | null> {
     } catch {
       return
     }
+    if (depth === 0) readable = true
     for (const e of entries) {
       if (e.isDirectory()) await walk(join(d, e.name), `${prefix}${e.name}/`, depth + 1)
       else if (e.isFile() && (e.name.endsWith(".ts") || e.name.endsWith(".md")) && !e.name.endsWith(".test.ts")) {
@@ -53,7 +58,35 @@ async function subagentsDirSignature(dir: string): Promise<string | null> {
     }
   }
   await walk(dir, "", 0)
-  return parts.length ? parts.sort().join("|") : null
+  return readable ? parts.sort().join("|") : null
+}
+
+/** 子代理扫描域（内置定义域 + 仓库根 custom 二开域）：discover 与热加载判定共用。 */
+export interface SubAgentScanDirs {
+  builtin: string
+  custom: string
+}
+
+function defaultScanDirs(): SubAgentScanDirs {
+  return {
+    builtin: join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents"),
+    custom: join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents"),
+  }
+}
+
+/** 双域签名（热加载判定单一来源，discover 与 refreshIfChanged 同源防漂移）：**内置域缺失即整体为 null**
+ *  （dist/二进制形态无源码树）→ discover 回退 bundle 注册表；custom 域缺失/未二开按空串计入。 */
+export async function discoverySignature(dirs: SubAgentScanDirs): Promise<string | null> {
+  const builtin = await subagentsDirSignature(dirs.builtin)
+  if (builtin === null) return null
+  const custom = await subagentsDirSignature(dirs.custom)
+  return `${builtin}|custom:${custom ?? ""}`
+}
+
+/** 子代理定义模块的 import 前缀（相对本文件）：Bun 相对路径 + 查询参数绕过模块缓存
+ *  （file:// URL 的查询参数不生效）。仅 dev 扫描分支使用（bundle 形态不扫描源码）。 */
+function agentImportBase(isCustom: boolean): string {
+  return isCustom ? "../../../../../custom/agents" : "../../../../agents/src/agents"
 }
 
 export class SubAgentManager {
@@ -70,6 +103,8 @@ export class SubAgentManager {
   private registry: ToolRegistry
   private preloadOverride?: string[]
   private bundledNames: Set<string>
+  /** 双域扫描根（构造时固定，测试可覆盖）。 */
+  private scanDirs: SubAgentScanDirs
   /** 客卿（多语言）子代理发现选项（boot 接线注入；测试缺省 undefined——本地形态且非 off 才启用）。
    *  null = 显式禁用（沙箱模式/GEBAI_KEQING=off）。 */
   private keqingOpts: KeqingRunnerOptions | null | undefined
@@ -104,6 +139,7 @@ export class SubAgentManager {
     this.registry = opts.registry
     this.preloadOverride = opts.preloadOverride
     this.bundledNames = new Set(opts.bundledNames || [])
+    this.scanDirs = opts.scanDirs ?? defaultScanDirs()
   }
 
   async discover(): Promise<void> {
@@ -111,10 +147,10 @@ export class SubAgentManager {
     // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）。
     // 双域扫描（DESIGN「custom 二开域」）：仓库根 custom/agents/ 是二开子代理域（随文件夹整体迁移，
     // 上游更新不触碰）——与内置域同规则扫描、同名覆盖（custom 后扫胜出）；域不存在（未二开/已裁剪）
-    // 签名拼空串，零开销零行为差异
-    const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
-    const customDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents")
-    const sig = (await subagentsDirSignature(dir)) + "|custom:" + (await subagentsDirSignature(customDir))
+    // 签名拼空串，零开销零行为差异。签名计算集中在 discoverySignature（discover 与热加载判定同源，
+    // 防两处漂移）：内置域缺失（dist/二进制形态）整体为 null，走下方 bundle 分支
+    const { builtin: dir, custom: customDir } = this.scanDirs
+    const sig = await discoverySignature(this.scanDirs)
     // 命中缓存（签名未变，或 bundled 形态注册表不可变）：直接复用扫描结果
     if (discoveredDefsCache && sig === discoveredSigCache) {
       this.tsDefs.clear()
@@ -183,7 +219,7 @@ export class SubAgentManager {
         try {
           // mtime 查询参数绕过模块缓存（Bun 相对路径 + 查询参数形态；file:// URL 查询参数不生效）：修改过的 TS 文件重新 import 拿到新代码
           const mtime = (await stat(join(dir, e.name)).catch(() => null))?.mtimeMs ?? 0
-          const mod = await import(`${isCustom ? "../../../../../custom/agents" : "../../../../agents/src/agents"}/${e.name}?t=${mtime}`)
+          const mod = await import(`${agentImportBase(isCustom)}/${e.name}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
           if (def) {
             if (isCustom && this.tsDefs.has(def.name)) console.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
@@ -210,7 +246,8 @@ export class SubAgentManager {
           try {
             const mtime = (await stat(entry).catch(() => null))?.mtimeMs ?? 0
             // 相对路径 + 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效）；目录形态入口名拼接
-            const rel = `${isCustom ? "../../../../../custom/agents" : "../../../../agents/src/agents"}/${base}${entry.endsWith(join("index.ts")) ? "/index" : `/${base}`}`
+            // 目录形态入口名拼接（entry 即上面选定的 tsEntry/indexEntry）
+            const rel = `${agentImportBase(isCustom)}/${base}${entry === indexEntry ? "/index" : `/${base}`}`
             const mod = await import(`${rel}?t=${mtime}`)
             const def = mod.def as SubAgentDef | undefined
             if (def) {
@@ -268,10 +305,9 @@ export class SubAgentManager {
    *  TS 变化走全量 discover（尾部含 客卿 检查），仅 客卿 变化只重拉 客卿（幂等跳过 TS 扫描）。 */
   async refreshIfChanged(): Promise<void> {
     if (!discoveredDefsCache && !nativeDefsCache) return
-    // 双域签名（与 discover 同式：内置 + custom 二开域，任一变化都触发全量重扫）
-    const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
-    const customDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents")
-    const sig = (await subagentsDirSignature(dir)) + "|custom:" + (await subagentsDirSignature(customDir))
+    // 双域签名（与 discover 同一 helper：任一域变化都触发全量重扫；bundle 形态下内置域缺失，
+    // 签名与缓存同为 null——判定相等，不做无谓重扫）
+    const sig = await discoverySignature(this.scanDirs)
     if (sig !== discoveredSigCache) {
       await this.discover()
       return

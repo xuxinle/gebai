@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { gzipSync } from "node:zlib"
 import { createDiagramRenderer, estimateGeometry, materializeD2Files, normalizeSvgRoot, parseEchartsInput, svgLogicalSize, textWidthEstimate } from "./diagram-render"
 
@@ -290,5 +291,27 @@ describe("diagram-render（后端四语言图表渲染）", () => {
     expect(png.byteLength).toBeGreaterThan(1000)
     expect(png[0]).toBe(0x89) // PNG 魔数
     expect(png[1]).toBe(0x50)
+  }, 20000)
+
+  test("echarts 环境判定与垫层加载顺序解耦（垫层先加载 + 卸除 window 后仍能 SSR）", async () => {
+    // 复现跨文件顺序（如 plantuml.test.ts 与 本文件同分片）：PlantUML 垫层先于本模块加载
+    // （其模块作用域设置全局 window/document 且不还原），随后收尾卸除全局 window（d2/plantuml 分支即如此）。
+    // echarts 若按加载顺序误判为浏览器环境，会在此抛 window is not defined——子进程隔离保证求值顺序确定
+    const shimUrl = pathToFileURL(join(import.meta.dir, "..", "..", "feishu-bot", "plantuml-dom-shim.ts")).href
+    const modUrl = pathToFileURL(join(import.meta.dir, "diagram-render.ts")).href
+    const script = [
+      `await import(${JSON.stringify(shimUrl)})`,
+      `if (!("window" in globalThis)) throw new Error("垫层未设置全局 window（前置条件不成立）")`,
+      `const { createDiagramRenderer } = await import(${JSON.stringify(modUrl)})`,
+      `delete globalThis.window`,
+      `const opt = JSON.stringify({ xAxis: { type: "category", data: ["a", "b"] }, yAxis: {}, series: [{ type: "bar", data: [1, 2] }] })`,
+      `const png = await createDiagramRenderer().renderPng(opt, { format: "echarts" })`,
+      `if (!(png[0] === 0x89 && png[1] === 0x50)) throw new Error("非 PNG 产物")`,
+      `console.log("echarts-ssr-ok:" + png.length)`,
+    ].join("\n")
+    const p = Bun.spawn([process.execPath, "-e", script], { cwd: join(import.meta.dir, "..", "..", ".."), stdout: "pipe", stderr: "pipe" })
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text())
+    await p.exited
+    expect(out).toContain("echarts-ssr-ok:")
   }, 20000)
 })

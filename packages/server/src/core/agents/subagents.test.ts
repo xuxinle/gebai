@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { ToolRegistry } from "../base/registry"
-import { SubAgentManager } from "./subagents"
+import { SubAgentManager, discoverySignature } from "./subagents"
 import type { SubAgentDef } from "../base/types"
 
 const loadedDef: SubAgentDef = {
@@ -706,6 +706,49 @@ describe("子代理失败隔离（DESIGN「子代理失败隔离」：单个失�
       expect(typeof name).toBe("string")
       expect(err.length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe("dist/二进制形态：域签名与 bundle 回退（scanDirs 覆盖）", () => {
+  /** 内置定义域真实路径（与生产同式：本文件位于 packages/server/src/core/agents/）。 */
+  const builtinDir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
+  /** 必然不存在的域（模拟 dist/二进制：产物内无源码树）。 */
+  const missingDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "no_such_agents_domain")
+
+  test("域签名：内置域缺失整体为 null；域存在但未二开按空串计入（缺失 ≠ 空）", async () => {
+    expect(await discoverySignature({ builtin: missingDir, custom: missingDir })).toBeNull()
+    const sig = await discoverySignature({ builtin: builtinDir, custom: missingDir })
+    expect(typeof sig).toBe("string")
+    expect(sig!.endsWith("|custom:")).toBe(true) // 缺失的二开域拼空串（非 "null"）
+    // 目录存在但无定义文件（空目录）：非 null（区别于「域缺失」），临时建空目录验证
+    const emptyDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "zz_empty_domain_probe")
+    mkdirSync(emptyDir, { recursive: true })
+    try {
+      const emptySig = await discoverySignature({ builtin: emptyDir, custom: missingDir })
+      expect(emptySig).not.toBeNull()
+      expect(emptySig).toBe("|custom:")
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
+  })
+
+  test("内置域缺失 → 回退 bundle 注册表：不抛错、定义与构建期失败清单均从注册表水合", async () => {
+    const m = new SubAgentManager({
+      registry: new ToolRegistry(),
+      preloadOverride: ["__none__"], // 阻断真实预载（本用例只验证发现回退）
+      scanDirs: { builtin: missingDir, custom: missingDir },
+    })
+    await m.discover() // 修复前：域签名拼接使此分支不可达 → 真实扫描缺失目录抛 ENOENT
+    const { bundledDefs, bundledErrors } = await import("../subagents.bundle.generated")
+    expect(m.allDefs().map((d) => d.name).sort()).toEqual(bundledDefs.map((d) => d.name).sort())
+    for (const [name, err] of bundledErrors) expect(m.loadError(name)).toContain(err)
+    // 二次 discover：命中进程级缓存（签名与缓存同为 null），幂等不抛错
+    await m.discover()
+    expect(m.allDefs().length).toBe(bundledDefs.length)
+    // 热加载判定：bundle 形态下签名未变（null === null）→ 不触发无谓重扫
+    await m.refreshIfChanged()
+    // 清理进程级缓存（bundle 形态写入的缓存不遗留：后续用例按真实源码域签名重扫重建）
+    await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
   })
 })
 

@@ -5,6 +5,8 @@
  * dispose、命令工厂解析、协议版本不匹配拒绝。
  */
 import { test, afterAll, expect } from "bun:test"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { AgentSidecar, SIDECAR_PROTOCOL, type SidecarCtx, type SidecarProc, type SidecarSpawnFn } from "./sidecar"
 
 /** fake 驱动源码：按行为开关响应协议（v2——tool.call 请求体顶级 tool/args/ctx，回显 ctx 供断言）。 */
@@ -75,8 +77,8 @@ function fakeSpawn(behavior: string): SidecarSpawnFn {
   }
 }
 
-/** 崩溃自愈用一次性标记文件（tmp 目录，测试间独立）。 */
-const flagFile = `${import.meta.dir}/.sidecar-test-flag`
+/** 崩溃自愈用一次性标记文件（系统临时目录：测试不在仓库目录内写文件——AGENTS「测试并行安全」）。 */
+const flagFile = join(tmpdir(), `gebai-sidecar-flag-${process.pid}`)
 try {
   require("node:fs").rmSync(flagFile, { force: true })
 } catch { /* 首次不存在 */ }

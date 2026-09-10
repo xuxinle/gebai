@@ -57,7 +57,7 @@ function validName(name: string): boolean {
 /** bundle 条目：定义导入路径（ts 静态 import / md 内联 def 两形态）、preload 烘焙信息与构建期
  *  导入验证结果（badAgents：模块顶层抛错/缺 def 导出/def 非法——剔除出静态 import 烘焙进
  *  bundledErrors，运行时水合进 loadErrors；单代理失败不阻断构建、不连带其他代理）。 */
-const defs: Array<{ name: string; importPath: string; inline?: string; dir?: boolean }> = []
+const defs: Array<{ name: string; importPath: string; baseDir: string; inline?: string; dir?: boolean }> = []
 const seen = new Set<string>()
 /** 单域扫描收集：目录内条目进 defs；同名已存在时移除旧条目后写胜出（custom 覆盖内置）。 */
 function collectDomain(entryBase: string, entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>, isCustom: boolean): void {
@@ -76,14 +76,14 @@ function collectDomain(entryBase: string, entries: Array<{ name: string; isDirec
       const tsEntry = join(entryBase, base, `${base}.ts`)
       const indexEntry = join(entryBase, base, "index.ts")
       if (isDefFile(tsEntry)) {
-        defs.push({ name: base, dir: true, importPath: `${importBase}/${base}/${base}` })
+        defs.push({ name: base, dir: true, baseDir: entryBase, importPath: `${importBase}/${base}/${base}` })
       } else if (isDefFile(indexEntry)) {
         // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
-        defs.push({ name: base, dir: true, importPath: `${importBase}/${base}/index` })
+        defs.push({ name: base, dir: true, baseDir: entryBase, importPath: `${importBase}/${base}/index` })
       } else {
       // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies/preload/env_vars 转义嵌入）
       try {
-        const md = readFileSync(join(srcDir, base, `${base}.md`), "utf8")
+        const md = readFileSync(join(entryBase, base, `${base}.md`), "utf8")
         const { description, systemPrompt, dependencies, preload, envVars } = parseSubAgentMd(base, md)
         const extra =
           `${dependencies?.length ? `, dependencies: ${JSON.stringify(dependencies)}` : ""}` +
@@ -92,6 +92,7 @@ function collectDomain(entryBase: string, entries: Array<{ name: string; isDirec
         defs.push({
           name: base,
           dir: true,
+          baseDir: entryBase,
           importPath: `inline:${base}`,
           inline: `{ name: ${JSON.stringify(base)}, description: ${JSON.stringify(description)}, systemPrompt: ${JSON.stringify(systemPrompt)}${extra} }`,
         })
@@ -108,7 +109,7 @@ function collectDomain(entryBase: string, entries: Array<{ name: string; isDirec
       if (i >= 0) defs.splice(i, 1)
     }
     seen.add(name)
-    if (isDefFile(join(entryBase, e.name))) defs.push({ name, dir: false, importPath: `${importBase}/${name}` })
+    if (isDefFile(join(entryBase, e.name))) defs.push({ name, dir: false, baseDir: entryBase, importPath: `${importBase}/${name}` })
   }
   }
 }
@@ -140,8 +141,8 @@ function resolveEntry(baseDir: string, d: { name: string; dir?: boolean }): stri
 }
 for (const d of included) {
   if (d.inline) continue // md 内联定义无模块导入风险（本脚本解析即验证）
-  // 双域入口解析：按 importPath 前缀定位真实文件（内置 srcDir / 二开 customDir）
-  const entryFile = d.importPath.includes("/custom/agents/") ? resolveEntry(customDir, d) : resolveEntry(srcDir, d)
+  // 域内入口解析：每个条目自带 baseDir（内置 srcDir / 二开 customDir）
+  const entryFile = resolveEntry(d.baseDir, d)
   try {
     const mod: unknown = await import(pathToFileURL(entryFile).href)
     const def = (mod as { def?: unknown }).def
@@ -161,16 +162,16 @@ const good = included.filter((d) => !bad.has(d.name))
 
 /** def 依赖名单读取：TS 定义动态 import 读 def.dependencies（与运行时 discover 同通道，模块按装载
  *  语义设计、import 零副作用）；纯 md 定义用 frontmatter 解析结果。import 失败告警按无依赖处理
- *  （运行时装载侧另有缺失跳过与告警兜底）。 */
-async function defDependencies(d: { name: string; dir?: boolean }): Promise<string[]> {
+ *  （运行时装载侧另有缺失跳过与告警兜底）。读取一律走条目自带 baseDir（内置/二开域各自解析）。 */
+async function defDependencies(d: { name: string; dir?: boolean; baseDir: string }): Promise<string[]> {
   try {
-    const tsPath = d.dir ? join(srcDir, d.name, `${d.name}.ts`) : join(srcDir, `${d.name}.ts`)
+    const tsPath = d.dir ? join(d.baseDir, d.name, `${d.name}.ts`) : join(d.baseDir, `${d.name}.ts`)
     if (isDefFile(tsPath)) {
       const mod = await import(pathToFileURL(tsPath).href)
       const deps = (mod.def as { dependencies?: string[] } | undefined)?.dependencies
       return deps ?? []
     }
-    const md = readFileSync(join(srcDir, d.name, `${d.name}.md`), "utf8")
+    const md = readFileSync(join(d.baseDir, d.name, `${d.name}.md`), "utf8")
     return parseSubAgentMd(d.name, md).dependencies ?? []
   } catch (err) {
     console.warn(`[build-subagents] 读取 ${d.name} 依赖失败（按无依赖处理）: ${err instanceof Error ? err.message : err}`)
