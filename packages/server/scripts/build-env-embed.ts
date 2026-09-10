@@ -7,16 +7,22 @@
  *   二进制：接收方无需配置模型即可使用；运行时同名环境变量与前端/任务级 env 仍可覆盖内置默认。
  * - 缺省（未设置）：写空对象（还原态）。
  *
- * 消费方：`src/index.ts` startServer 顶部经 `applyEmbeddedEnvDefaults` 填充进程环境未设置的键。
- * 文件策略与 tools-excluded.generated.ts 一致：**提交默认空对象入库**（缺省态无密钥，类型检查/测试
- * 依赖其存在）；内置构建后为**脏态（含密钥明文）属预期，绝不提交**——调用方构建脚本编译完成后
- * 须立即重跑本脚本还原空态。
+ * 消费方：`src/boot/compose.ts` 静态导入（`applyEmbeddedEnvDefaults` 填充进程环境未设置的键）。
+ *
+ * 文件策略与 tools-excluded.generated.ts 一致：**提交默认空对象入库**（缺省态无密钥，compose.ts 静态
+ * 导入依赖其存在——不入库会让新克隆环境 `bun run dev` 直接 Cannot find module）。因此
+ * **本文件不得写入 .gitignore**（历史踩坑：仓库瘦身时被误随二进制内嵌产物 *.embedded.generated.json
+ * 一并移出跟踪，新环境启动即报错）。内置构建后为**脏态（含密钥明文）属预期，绝不提交**——
+ * `packages/server` 的 build 链编译完自动调用 `--restore` 还原；手动构建（`GEBAI_BUILD_EMBED_ENV=1
+ * bun run scripts/build-env-embed.ts`）后须立即重跑 `bun run scripts/build-env-embed.ts --restore`。
+ * 入口自愈：`dev`/`typecheck`/`build` 前置调用本脚本（缺省空态 + write-if-changed 幂等）。
  *
  * 安全注意：内置值随二进制分发，**可被持有二进制者提取**（明文打进产物）——仅适用于受信任小范围
  * 分发，建议使用低额度专用 Key；打印仅输出变量名，绝不输出值。
  */
-import { readFileSync, writeFileSync, existsSync } from "node:fs"
+import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
+import { writeFileIfChanged } from "./write-if-changed"
 
 const serverRoot = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const repoRoot = join(serverRoot, "..", "..")
@@ -28,7 +34,13 @@ const EMBED_PREFIXES = ["GEBAI_LLM_", "GEBAI_VISION_"]
 
 const collect: Record<string, string> = {}
 
-if (process.env.GEBAI_BUILD_EMBED_ENV === "1") {
+/** `--restore`：强制还原空态（无视 `GEBAI_BUILD_EMBED_ENV`）。构建链在 `bun build` 完成后立即调用，
+ *  兑现「密钥只进二进制、不进工作区/版本控制」的契约（见文件头注释）。 */
+const restore = process.argv.includes("--restore")
+/** 是否处于「烘焙内置默认值」模式。 */
+const bakeMode = process.env.GEBAI_BUILD_EMBED_ENV === "1" && !restore
+
+if (bakeMode) {
   // 仓库根 .env 显式解析（Bun 亦会自动加载，显式解析保证确定性）
   if (existsSync(envFile)) {
     for (const raw of readFileSync(envFile, "utf8").split(/\r?\n/)) {
@@ -63,7 +75,15 @@ const lines = [
   `export const EMBEDDED_ENV_DEFAULTS: Record<string, string> = ${JSON.stringify(embedded)}`,
   "",
 ]
-writeFileSync(outFile, lines.join("\n"))
+const content = lines.join("\n")
+const wrote = writeFileIfChanged(outFile, content)
 console.log(
-  `[build-env-embed] ${process.env.GEBAI_BUILD_EMBED_ENV === "1" ? `内置 ${Object.keys(embedded).length} 项模型配置: ${Object.keys(embedded).sort().join(", ") || "无（.env 无匹配前缀变量）"}` : "空态（还原）"} -> ${outFile}`,
+  `[build-env-embed] ${bakeMode ? `内置 ${Object.keys(embedded).length} 项模型配置: ${Object.keys(embedded).sort().join(", ") || "无（.env 无匹配前缀变量）"}` : "空态（还原）"} -> ${outFile}${wrote ? "" : "（内容未变，跳过写入）"}`,
 )
+if (bakeMode && Object.keys(embedded).length) {
+  // 该文件**在版本控制中**（空态入库，compose.ts 静态导入）：烘焙态含密钥明文，编译完必须还原
+  console.warn(
+    "[build-env-embed] 注意：env-embedded.generated.ts 已入库，当前为含密钥明文脏态——" +
+      "编译完成后请立即 `bun run scripts/build-env-embed.ts --restore` 还原空态，切勿提交（server build 链已自动还原）",
+  )
+}
