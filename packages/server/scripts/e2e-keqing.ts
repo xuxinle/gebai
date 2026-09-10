@@ -262,6 +262,11 @@ if (!d1.output.includes("占用排行")) {
   console.error("FAIL: dirs_du:", d1.output)
   process.exit(1)
 }
+// 参数到达验证：data.root 必须等于传参目录（tool.call 平级 args 被丢弃时工具会回退缺省目录，输出仍含「占用排行」标题）
+if (String((d1.data as Record<string, unknown>)?.root ?? "").replaceAll("\\", "/") !== goDir.replaceAll("\\", "/")) {
+  console.error(`FAIL: dirs_du 参数未到达工具（data.root=${String((d1.data as Record<string, unknown>)?.root)}，期望 ${goDir}）——tool.call 请求的平级 args 被丢弃`)
+  process.exit(1)
+}
 const d2 = await depthTool.tool.execute({ dir: goDir }, fakeCtx)
 if (!/文件: \d+/.test(d2.output) || !/最大深度/.test(d2.output)) {
   console.error("FAIL: dirs_depth:", d2.output)

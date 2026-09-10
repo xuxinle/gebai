@@ -207,16 +207,13 @@ func dispatch(line string) map[string]any {
 		// 请求级 ctx（协议 v2）：串行分发循环内设置，工具 Execute 经 Ctx()/CtxEnv()/CtxResolve() 读取
 		currentCtx = req.Ctx
 		name := req.Tool
-		if name == "" {
-			name, _ = req.Args["tool"].(string)
-		}
 		mu.Lock()
 		t := tools[name]
 		mu.Unlock()
 		if t == nil {
 			return mk(false, nil, fmt.Sprintf("未知工具: %s", name))
 		}
-		args, _ := req.Args["args"].(map[string]any)
+		args := req.Args
 		if args == nil {
 			args = map[string]any{}
 		}
