@@ -95,6 +95,12 @@ packages/desktop/launcher/target/
 bun.lock
 packages/server/src/core/cv/cvdriver.embedded.generated.json
 
+# 构建产物一律不入库（历史遗留的同名文件也一并移出跟踪）：包路径迁移后旧规则只覆盖
+# packages/server/...，agents 包新路径 packages/agents/src/core/*.embedded.generated.json
+# 曾被连带入库——此兜底规则匹配任意路径，防止再次误提交（构建时由对应 scripts/build-*-embed.ts 生成）
+*.embedded.generated.json
+packages/server/src/core/session/env-embedded.generated.ts
+
 # 资源子仓库（模型/原生依赖，独立 git 仓库管理——见 models/README.md）
 /models/
 # Go 工具链分发包（本地下载缓存，勿提交）
