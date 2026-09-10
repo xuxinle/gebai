@@ -31,6 +31,8 @@
 #include <functional>
 #if defined(_WIN32)
 #include <direct.h>
+#else
+#include <unistd.h>
 #endif
 #include <map>
 #include <memory>
