@@ -149,6 +149,36 @@ describe("playwright tools", () => {
     expect(ok.output).toBe("标签页已关闭")
   })
 
+  test("open failure surfaces actionable output", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    const tools = createPlaywrightTools({
+      bridge: {
+        request: async () => {
+          throw new Error("net::ERR_NAME_NOT_RESOLVED")
+        },
+      },
+    })
+    const r = await tools.open.execute({ url: "https://nope.invalid" }, ctx(home))
+    expect(r.output).toContain("打开失败")
+    expect(r.output).toContain("ERR_NAME_NOT_RESOLVED")
+  })
+
+  test("close_page reports internal page as ignored", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
+    const tools = createPlaywrightTools({
+      bridge: {
+        request: async () => ({
+          closed: -1,
+          remaining: 1,
+          ignored: "edge://downloads-hub/",
+          hint: "该页属浏览器内部页，Chromium 拒绍关闭；已从标签页索引忽略",
+        }),
+      },
+    })
+    const r = await tools.close_page.execute({}, ctx(home))
+    expect(r.output).toContain("忽略")
+  })
+
   test("hover/dblclick/drag forward selectors to bridge", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-pw-"))
     const { bridge, calls } = recordingBridge()

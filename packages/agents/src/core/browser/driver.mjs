@@ -290,6 +290,8 @@ function num(v, dflt) {
 
 /** 单次操作超时：默认 30s，上限 120s（低于桥接进程 180s 请求超时，防单请求拖死整个桥接进程）。 */
 const OP_TIMEOUT_MAX = 120_000
+/** 标签页关闭的有界等待：内部页 close 永不返回，超时转忽略处理（不拖死请求）。 */
+const CLOSE_TIMEOUT_MS = 5_000
 function opTimeout(v, dflt = 30_000) {
   return Math.min(num(v, dflt), OP_TIMEOUT_MAX)
 }
@@ -335,6 +337,7 @@ async function ensureSession(sessionId) {
       dialogs: [], // 对话框记录
       dialogAuto: null, // 自动应答配置 { mode, promptText }
       downloads: [], // 已保存的下载记录
+      closedPages: new Set(), // 已忽略页（内部页不可关，从索引排除）
     }
     sessions.set(sessionId, s)
   }
@@ -348,6 +351,7 @@ async function ensureSession(sessionId) {
     s.netId = 0
     s.ws = []
     s.wsId = 0
+    s.closedPages = new Set()
     attachNetworkListeners(s)
     s.context.on("page", (p) => attachPageListeners(s, p))
     for (const p of s.context.pages()) attachPageListeners(s, p)
@@ -369,9 +373,47 @@ function gcContexts() {
   }
 }
 
+/** 浏览器内部页（下载页等 WebUI）：Chromium 拒绍关闭且 close 调用永不 resolve，不进标签页索引。 */
+function isInternalPage(page) {
+  return /^(edge|chrome|about):\/\/(downloads|newtab)/i.test(page.url())
+}
+
+/** 会话可见标签页（排除浏览器内部页与已忽略页）——工具的 index 一律以此为基准。 */
+function sessionPages(s) {
+  if (!s.context) return []
+  return s.context.pages().filter((p) => !isInternalPage(p) && !s.closedPages.has(p))
+}
+
+/** 有界关闭：内部页的 close 永不返回，无界等待会拖死整个桥接请求（超时杀进程→会话状态全失）。 */
+async function closePageBounded(page, ms) {
+  let timer
+  try {
+    return await Promise.race([
+      page.close().then(() => true, () => true),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), ms)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 剥除 ANSI 转义码（playwright 错误附带的 Call log 带颜色码，回传模型是噪音）。 */
+function cleanText(s) {
+  return String(s).replace(/\u001b\[[0-9;]*m/g, "")
+}
+
+/** 函数字面量（箭头函数 / function 表达式）：evaluate 对它们求值得到函数对象而非返回值。 */
+function isFunctionLiteral(expr) {
+  const e = expr.trim()
+  if (/^(async\s+)?function\b/.test(e)) return true
+  return /^(async\s+)?(\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(e)
+}
+
 /** 会话当前活动页（index 越界自动回退到最后一个）。 */
 function activePage(s, index) {
-  const pages = s.context.pages()
+  const pages = sessionPages(s)
   if (pages.length === 0) throw new Error("当前会话没有打开的页面，请先 open 或 new_page")
   let i = index === undefined ? s.activePageIndex : Number(index)
   if (!Number.isInteger(i) || i < 0 || i >= pages.length) i = pages.length - 1
@@ -501,6 +543,9 @@ const ops = {
     const page = activePage(s, args.index)
     const selector = str(args.selector)
     if (!selector) throw new Error("缺少 selector 参数")
+    if (args.checked !== undefined && typeof args.checked !== "boolean") {
+      throw new Error(`checked 必须是布尔值（当前收到 ${typeof args.checked}）：省略即视为勾选`)
+    }
     if (args.checked === false) await resolveTarget(page, selector).uncheck({ timeout: opTimeout(args.timeout) })
     else await resolveTarget(page, selector).check({ timeout: opTimeout(args.timeout) })
     return { checked: selector, state: args.checked === false ? "unchecked" : "checked" }
@@ -569,9 +614,11 @@ const ops = {
     const page = activePage(s, args.index)
     const expression = str(args.expression)
     if (!expression) throw new Error("缺少 expression 参数")
+    // 函数字面量需先调用：直接求值得到函数对象，序列化结果是 undefined
+    const src = isFunctionLiteral(expression) ? `(${expression})()` : expression
     // 表达式无内部超时（可能死循环），用 race 兜底：超时返回错误而非挂死桥接进程
     const value = await Promise.race([
-      page.evaluate(expression),
+      page.evaluate(src),
       new Promise((_, reject) => setTimeout(() => reject(new Error("evaluate 超时（120s）")), OP_TIMEOUT_MAX)),
     ])
     return { value: serialize(value) }
@@ -579,20 +626,19 @@ const ops = {
 
   async pages(args) {
     const s = await ensureSession(args.sessionId)
-    if (!s.context) return { pages: [] }
-    const list = await Promise.all(s.context.pages().map((p) => pageInfo(p)))
+    const list = await Promise.all(sessionPages(s).map((p) => pageInfo(p)))
     return { pages: list.map((p, i) => ({ index: i, ...p, active: i === s.activePageIndex })) }
   },
 
   async new_page(args) {
     const s = await ensureSession(args.sessionId)
     const page = await s.context.newPage()
-    s.activePageIndex = s.context.pages().length - 1
     const url = str(args.url)
     if (url) {
       assertNavUrl(url)
       await page.goto(url, { waitUntil: str(args.waitUntil, "load"), timeout: opTimeout(args.timeout) })
     }
+    s.activePageIndex = Math.max(0, sessionPages(s).indexOf(page))
     return { index: s.activePageIndex, ...(await pageInfo(page)) }
   },
 
@@ -604,13 +650,26 @@ const ops = {
 
   async close_page(args) {
     const s = await ensureSession(args.sessionId)
-    const pages = s.context.pages()
+    const pages = sessionPages(s)
     if (pages.length === 0) throw new Error("当前会话没有打开的页面")
     const i = args.index === undefined ? s.activePageIndex : Number(args.index)
     const idx = Number.isInteger(i) && i >= 0 && i < pages.length ? i : pages.length - 1
-    await pages[idx].close()
-    const rest = s.context.pages().length
-    s.activePageIndex = rest === 0 ? 0 : Math.max(0, idx - 1)
+    const page = pages[idx]
+    const closed = await closePageBounded(page, CLOSE_TIMEOUT_MS)
+    if (!closed) {
+      // 内部页（WebUI）：关不掉也不能无界等——从会话索引忽略，保留其余标签页与会话状态
+      s.closedPages.add(page)
+      const rest = sessionPages(s).length
+      s.activePageIndex = rest === 0 ? 0 : Math.max(0, Math.min(idx, rest - 1))
+      return {
+        closed: -1,
+        remaining: rest,
+        ignored: page.url(),
+        hint: `该页（${page.url()}）属浏览器内部页，Chromium 拒绍关闭；已从标签页索引忽略，彻底释放请用 close`,
+      }
+    }
+    const rest = sessionPages(s).length
+    s.activePageIndex = rest === 0 ? 0 : Math.max(0, Math.min(idx, rest - 1))
     return { closed: idx, remaining: rest }
   },
 
@@ -998,7 +1057,7 @@ rl.on("line", async (line) => {
     const result = await handler(args)
     respond({ id, ok: true, result })
   } catch (err) {
-    const message = err && err.message ? err.message : String(err)
+    const message = cleanText(err && err.message ? err.message : String(err))
     log(`op ${op} failed:`, message)
     respond({ id, ok: false, error: message })
   }

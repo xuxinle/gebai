@@ -80,13 +80,19 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
         ["url"]
       ),
       async execute(args, ctx) {
-        const r = await request(ctx.sessionId, "open", {
-          url: String(args.url ?? "").trim(),
-          waitUntil: String(args.wait_until ?? "load"),
-          timeout: num(args.timeout, 30_000),
-        })
-        const info = r as { url: string; title: string }
-        return { output: `已打开: ${info.url}\n标题: ${info.title || "(无标题)"}` }
+        try {
+          const r = await request(ctx.sessionId, "open", {
+            url: String(args.url ?? "").trim(),
+            waitUntil: String(args.wait_until ?? "load"),
+            timeout: num(args.timeout, 30_000),
+          })
+          const info = r as { url: string; title: string }
+          return { output: `已打开: ${info.url}\n标题: ${info.title || "(无标题)"}` }
+        } catch (err) {
+          return {
+            output: `打开失败: ${err instanceof Error ? err.message : String(err)}（本地文件用 file:// 绝对路径；域名解析/连接失败时换可达地址重试）`,
+          }
+        }
       },
     },
 
@@ -221,7 +227,17 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
         ["selector"]
       ),
       async execute(args, ctx) {
-        return run(ctx, "check", { selector: String(args.selector), checked: args.checked !== false, timeout: num(args.timeout, 30_000) }, `已${args.checked === false ? "取消勾选" : "勾选"}: ${args.selector}`)
+        const checked = args.checked
+        if (checked !== undefined && typeof checked !== "boolean") {
+          return { output: `checked 必须是布尔值（当前收到 ${typeof checked}）：省略即视为勾选` }
+        }
+        const want = checked !== false
+        return run(
+          ctx,
+          "check",
+          { selector: String(args.selector), checked: want, timeout: num(args.timeout, 30_000) },
+          `已${want ? "" : "取消"}勾选: ${args.selector}`,
+        )
       },
     },
 
@@ -398,13 +414,24 @@ export function createPlaywrightTools(deps: { bridge?: BridgeLike } = {}): ToolS
 
     close_page: {
       name: "close_page",
-      description: "关闭当前（或指定序号）标签页。",
+      description: "关闭当前（或指定序号）标签页。浏览器内部页（edge://\u2026 WebUI）无法关闭，会标记忽略而不报错。",
       card: { titleParams: ["index"], args: "none" },
       parameters: schema({
         index: { type: "number", description: "可选：标签页序号（默认当前页）" },
       }),
       async execute(args, ctx) {
-        return run(ctx, "close_page", { index: args.index }, "标签页已关闭")
+        try {
+          const r = (await request(ctx.sessionId, "close_page", { index: args.index })) as {
+            closed: number
+            remaining: number
+            hint?: string
+          }
+          if ((r.closed ?? 0) < 0) return { output: r.hint ?? "该页无法关闭，已从标签页索引忽略" }
+          const rest = typeof r.remaining === "number" ? `（剩余 ${r.remaining} 个）` : ""
+          return { output: `标签页已关闭${rest}` }
+        } catch (err) {
+          return { output: `关闭失败: ${err instanceof Error ? err.message : String(err)}` }
+        }
       },
     },
 

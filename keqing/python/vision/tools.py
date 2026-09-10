@@ -158,7 +158,15 @@ def crop_arr(arr, region):
 
 # ---------------- OCR 前后处理（对齐 TS core/cv/ocr.ts） ----------------
 
-DET_MAX_SIDE = 960
+DET_MAX_SIDE = 1920
+
+# OCR 大图分块：整图长边超过 OCR_TILE_SIDE 即切块（每块以原生分辨率走后端模型），
+# 相邻块重叠 OCR_TILE_OVERLAP 像素以免行被切在边界；重叠区同一条行按框 IoU 去重。
+# 检测输入尺寸对耗时影响很小（FHD 下 960→1920 仅 +20% 耗时）而准确率差异巨大
+# （小字高分命 2/7→7/7），故默认以原生尺度送检。
+OCR_TILE_SIDE = 2560
+OCR_TILE_OVERLAP = 320
+OCR_MERGE_IOU = 0.5
 DB_THRESHOLD = 0.3
 DB_BOX_THRESHOLD = 0.5
 DB_UNCLIP_RATIO = 1.6
@@ -310,15 +318,28 @@ def to_gray(arr):
 
 
 def downsample(g, s, ox=0, oy=0):
-    """整数倍降采样（步长采样，起点 (ox, oy)）——与 TS downsample 同语义。"""
+    """box 降采样（s×s 块均值，边缘块按实际像素数平均）；(ox, oy) 为采样原点相位偏移。
+
+    与 TS downsample 同语义（同一模板在两侧得到一致分数）。
+    """
     import numpy as np
 
-    H, W = g.shape
-    ys = np.arange(oy, H, s)
-    xs = np.arange(ox, W, s)
-    if not len(ys) or not len(xs):
+    if s <= 1:
+        return g if g.dtype == np.float32 else g.astype(np.float32)
+    sub = g[oy:, ox:]
+    if sub.size == 0:
         return np.zeros((0, 0), dtype=np.float32)
-    return g[np.ix_(ys, xs)]
+    H, W = sub.shape
+    pad_h, pad_w = (-H) % s, (-W) % s
+    f = sub.astype(np.float32)
+    mask = np.ones_like(f, dtype=np.float32)
+    if pad_h or pad_w:
+        f = np.pad(f, ((0, pad_h), (0, pad_w)))
+        mask = np.pad(mask, ((0, pad_h), (0, pad_w)))
+    h, w = f.shape[0] // s, f.shape[1] // s
+    blocks = f.reshape(h, s, w, s)
+    cnt = mask.reshape(h, s, w, s).sum(axis=(1, 3))
+    return (blocks.sum(axis=(1, 3)) / np.maximum(cnt, 1)).astype(np.float32)
 
 
 class _Tpl:
@@ -346,6 +367,15 @@ class _Integrals:
         s = self.s[y + h, x + w] - self.s[y, x + w] - self.s[y + h, x] + self.s[y, x]
         sq = self.sq[y + h, x + w] - self.sq[y, x + w] - self.sq[y + h, x] + self.sq[y, x]
         return s, sq
+
+
+def _window_sums(integ, h, w):
+    """积分图上的全图滑窗和/平方和（向量化）——shape (H-h+1, W-w+1)。"""
+    c1, c2 = integ.s, integ.sq
+    return (
+        c1[h:, w:] - c1[:-h, w:] - c1[h:, :-w] + c1[:-h, :-w],
+        c2[h:, w:] - c2[:-h, w:] - c2[h:, :-w] + c2[:-h, :-w],
+    )
 
 
 def _ncc_at(g, integ, tpl, x, y):
@@ -388,15 +418,21 @@ def match_template(search_arr, template_arr, threshold=0.8):
             ch, cw = c_search.shape
             if cw < c_tpl.w or ch < c_tpl.h:
                 continue
-            # 向量化滑窗 NCC：窗口提取用 stride_tricks，逐窗计算（比纯 Python 快百倍）
-            wins = sliding_window_view(c_search, (c_tpl.h, c_tpl.w))  # (oh, ow, th, tw)
             n = c_tpl.h * c_tpl.w
-            sums = wins.sum(axis=(2, 3))
-            sqs = (wins.astype(np.float64) ** 2).sum(axis=(2, 3))
+            sums, sqs = _window_sums(_Integrals(c_search), c_tpl.h, c_tpl.w)
             var = np.maximum(sqs - sums * sums / n, 0.0)
-            wmean = sums / n
-            dots = np.einsum("xyij,ij->xy", wins - wmean[:, :, None, None], tpl_zero)
-            scores = dots / (np.sqrt(var) * tpl_norm + 1e-12)
+            oh, ow = ch - c_tpl.h + 1, cw - c_tpl.w + 1
+            # 分子 Σ s·t̂（零均值模板下窗口均值项自动消去）：按模板行做一维相关再垂直累加，
+            # 复杂度 O(HW·(th+tw))——避免展开 (oh,ow,th,tw) 巨型中间数组（4K 图达 GB 级）
+            dots = np.zeros((oh, ow), dtype=np.float32)
+            for ty in range(c_tpl.h):
+                band = c_search[ty : ty + oh]
+                win = sliding_window_view(band, c_tpl.w, axis=1)  # (oh, ow, tw)
+                dots += np.einsum("xij,j->xi", win, tpl_zero[ty], optimize=True)
+            # 平坦窗口（方差≈0）的 NCC 无定义：分母取下限 1e-6（与 _ncc_at 的 denom<1e-6 保护同构），
+            # 否则残差会被放大成伪高分而挤占精化候选名额
+            den = np.sqrt(var) * tpl_norm
+            scores = np.where(den > 1e-6, dots / np.maximum(den, 1e-6), 0.0)
             ys_, xs_ = np.nonzero(scores > 0.4)
             for yy, xx in zip(ys_.tolist(), xs_.tolist()):
                 cands.append((float(scores[yy, xx]), ox + xx * scale, oy + yy * scale))
@@ -661,19 +697,24 @@ def _ocr_assets():
     return det, rec, _OCR["chars"]
 
 
-def ocr_lines(img_arr, max_side=DET_MAX_SIDE):
-    """完整 OCR：det → DB 框 → rec。返回 [{text, score, x, y, w, h}]（原图像素系）。"""
+def _detect_boxes(img_arr, max_side=DET_MAX_SIDE):
+    """det → DB 文本框（img_arr 像素系）。"""
     import numpy as np
 
-    _need_deps()
-    det_p, rec_p, chars = _ocr_assets()
+    det_p, _rec_p, _chars = _ocr_assets()
     H, W = img_arr.shape[:2]
     inp, _pw, _ph, scale = det_preprocess(img_arr, max_side)
-    det_sess = _session(det_p)
-    out = det_sess.run(None, {det_sess.get_inputs()[0].name: inp})[0]
+    sess = _session(det_p)
+    out = sess.run(None, {sess.get_inputs()[0].name: inp})[0]
     prob = np.asarray(out[0, 0], dtype=np.float32)
-    map_h, map_w = prob.shape
-    boxes = db_postprocess(prob, map_w, map_h, W, H, scale)
+    return db_postprocess(prob, prob.shape[1], prob.shape[0], W, H, scale)
+
+
+def _recognize(img_arr, boxes):
+    """DB 框 → 逐行识别文本（坐标与 img_arr 同系）。"""
+    import numpy as np
+
+    _det_p, rec_p, chars = _ocr_assets()
     rec_sess = _session(rec_p)
     lines = []
     for b in boxes:
@@ -689,6 +730,60 @@ def ocr_lines(img_arr, max_side=DET_MAX_SIDE):
         if text:
             lines.append({"text": text, "score": round(float(score), 3), "x": b["x"], "y": b["y"], "w": b["w"], "h": b["h"]})
     return lines
+
+
+def _iou_box(a, b):
+    """两框交并比（分块重叠区去重用）。"""
+    iw = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+    ih = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _merge_tile_lines(lines):
+    """分块结果去重：重叠区同一条行被相邻块各识别一次时保留置信度更高者，再按阅读序排序。"""
+    kept = []
+    for l in sorted(lines, key=lambda x: -x["score"]):
+        if any(_iou_box(l, k) > OCR_MERGE_IOU for k in kept):
+            continue
+        kept.append(l)
+    kept.sort(key=lambda l: (l["y"], l["x"]))
+    return kept
+
+
+def ocr_lines(img_arr, max_side=DET_MAX_SIDE):
+    """完整 OCR：det → DB 框 → rec。返回 [{text, score, x, y, w, h}]（原图像素系）。
+
+    大图自适应分块：长边超过 OCR_TILE_SIDE 时按块检测（每块以原生分辨率输入模型，
+    重叠区按框 IoU 去重）——整图等比缩到长边 max_side 会把小字号压到不可辨识，
+    分块后小字保持原生像素尺度。
+    """
+
+    _need_deps()
+    H, W = img_arr.shape[:2]
+    if max(H, W) <= OCR_TILE_SIDE:
+        return _recognize(img_arr, _detect_boxes(img_arr, max_side))
+    tile_side = max(OCR_TILE_SIDE, max_side)
+    step = max(1, OCR_TILE_SIDE - OCR_TILE_OVERLAP)
+    lines = []
+    y = 0
+    while y < H:
+        x = 0
+        while x < W:
+            tile = img_arr[y : min(y + OCR_TILE_SIDE, H), x : min(x + OCR_TILE_SIDE, W)]
+            if tile.shape[0] >= 8 and tile.shape[1] >= 8:
+                for l in _recognize(tile, _detect_boxes(tile, tile_side)):
+                    lines.append({**l, "x": l["x"] + x, "y": l["y"] + y})
+            if x + OCR_TILE_SIDE >= W:
+                break
+            x += step
+        if y + OCR_TILE_SIDE >= H:
+            break
+        y += step
+    return _merge_tile_lines(lines)
 
 
 OCR_LINE_LIMIT = 200

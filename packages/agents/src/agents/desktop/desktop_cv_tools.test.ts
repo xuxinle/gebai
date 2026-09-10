@@ -282,7 +282,7 @@ describe("desktop cv tools", () => {
     const r = await ocrTool.execute({ image: "shot.png", region: "50,40,100,60" }, c)
     // 委托发生：临时文件写入 + 传入裁剪后尺寸；wasm 未被调用
     expect(sidecarCalls.length).toBe(1)
-    expect(sidecarCalls[0].image).toContain("cv_sidecar_in.png")
+    expect(sidecarCalls[0].image).toContain("cv_sidecar_in")
     expect(sidecarCalls[0].width).toBe(100)
     expect(wasmSeen).toBe(false)
     // 坐标回加 region 偏移 + 后端标记

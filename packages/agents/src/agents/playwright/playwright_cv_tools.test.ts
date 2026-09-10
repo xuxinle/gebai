@@ -169,7 +169,7 @@ function installFake(lines = DEFAULT_LINES): void {
 }
 
 describe("playwright cv tools", () => {
-  test("ocr：image 省略 → 经桥接截当前页视口（fullPage=false 固定文件复用）+ 本地识别", async () => {
+  test("ocr：image 省略 → 经桥接截当前页视口（fullPage=false、每次调用唯一文件名）+ 本地识别", async () => {
     installFake()
     const home = mkdtempSync(join(tmpdir(), "gebai-pwcv-"))
     const fb = fakeBridge(() => pngBytes(300, 200))
@@ -178,7 +178,7 @@ describe("playwright cv tools", () => {
     expect(fb.ops.length).toBe(1)
     expect(fb.ops[0].op).toBe("screenshot")
     expect(fb.ops[0].args.fullPage).toBe(false)
-    expect(String(fb.ops[0].args.path)).toContain("pw_cv_capture.png")
+    expect(String(fb.ops[0].args.path)).toContain("pw_cv_capture")
     expect(r.output).toContain("登录")
     expect(r.output).toContain("视口")
     expect(seen.img?.width).toBe(300)

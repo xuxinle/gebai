@@ -262,8 +262,16 @@ export class Bridge implements BridgeLike {
     if (reason) logBridge(reason)
     const proc = this.proc
     this.onExit() // 先清状态，再杀进程；reader-done 回调因 proc 引用不匹配而不再重复清理
+    if (!proc) return
+    // Windows 无进程组：proc.kill 只终止 driver 自身，其拉起的浏览器子进程会成为孤儿驻留
+    // （占据内存与 profile 临时目录），故按 pid 整树终止
+    if (process.platform === "win32" && proc.pid) {
+      try {
+        Bun.spawnSync(["taskkill", "/pid", String(proc.pid), "/t", "/f"], { stdout: "ignore", stderr: "ignore" })
+      } catch { /* taskkill 不可用时回落到单进程 kill */ }
+    }
     try {
-      proc?.kill()
+      proc.kill()
     } catch { /* 已退出 */ }
   }
 }

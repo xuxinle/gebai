@@ -22,8 +22,16 @@ import { VISION_MAX_IMAGE_BYTES } from "./vision"
  * 直连边车进程：复用注册表的装载门控/审批策略/ctx 组装（sidecarTool 从 ctx 组装请求级
  * ctx，会话工作区/env 随调用传递），不绕过任何治理层。 */
 
-/** 跨进程图像传递临时文件（会话工作区内，覆盖复用不累积）。 */
-const SIDECAR_TMP = "tmp/cv_sidecar_in.png"
+/** 跨进程图像传递临时文件（会话工作区内，每次调用唯一文件名 + 用后删除）：
+ *  并发调用（js 编排里的 Promise.all 并行 ocr/locate/detect）共用同一路径会互相覆盖，
+ *  导致某次调用识别到别人的图像或边车读文件失败。 */
+const SIDECAR_TMP_PREFIX = "tmp/cv_sidecar_in"
+let sidecarTmpSeq = 0
+
+function nextSidecarTmp(): string {
+  sidecarTmpSeq += 1
+  return `${SIDECAR_TMP_PREFIX}_${sidecarTmpSeq}_${Math.random().toString(36).slice(2, 8)}.png`
+}
 
 interface SidecarOcrLine {
   text: string
@@ -46,12 +54,17 @@ async function callVisionSidecar<T>(
   if (!registered) throw new Error("vision 边车未装载")
   const bytes = encodePng(img)
   if (bytes.byteLength > VISION_MAX_IMAGE_BYTES) throw new Error(`图像编码后过大（${(bytes.byteLength / 1024 / 1024).toFixed(1)}MB，上限 8MB）`)
-  const path = ctx.resolvePath(SIDECAR_TMP)
+  const rel = nextSidecarTmp()
+  const path = ctx.resolvePath(rel)
   if (!ctx.writeBinaryFile) throw new Error("ToolContext 缺 writeBinaryFile（边车图像落盘不可用）")
   await ctx.writeBinaryFile(path, bytes)
-  const { output, data } = await registered.tool.execute({ ...args, image: SIDECAR_TMP }, ctx)
-  if (!data || typeof data !== "object") throw new Error(`vision 边车无结构化返回: ${String(output).slice(0, 120)}`)
-  return data as T
+  try {
+    const { output, data } = await registered.tool.execute({ ...args, image: rel }, ctx)
+    if (!data || typeof data !== "object") throw new Error(`vision 边车无结构化返回: ${String(output).slice(0, 120)}`)
+    return data as T
+  } finally {
+    await ctx.deleteFile(path).catch(() => {})
+  }
 }
 
 /** OCR 推理（sidecar-first）：优先 vision 边车，未装载/报错回落进程内 wasm。

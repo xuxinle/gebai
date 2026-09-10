@@ -24,8 +24,14 @@ export function createPlaywrightCvTools(deps: { bridge?: BridgeLike } = {}): Too
 
   /** 缺省识别源：当前页视口截图（与 playwright 工具同一桥接单例与会话锁）；region 在截图内
    *  裁剪、偏移回加——坐标一律映射回视口像素系（elementFromPoint 直接可用）。 */
+  /** 截图序号：并发 CV 调用（Promise.all 并行 ocr/locate/detect）共用同一文件名会互相覆盖，
+   *  导致某次调用解码到别人的截图——每次调用唯一文件名，解码后即删。 */
+  let captureSeq = 0
+
   const capturePage = async (ctx: ToolContext, region: string): Promise<CvSource | { error: string }> => {
-    const abs = ctx.resolvePath("tmp/pw_cv_capture.png")
+    captureSeq += 1
+    const rel = `tmp/pw_cv_capture_${captureSeq}_${Date.now().toString(36)}.png`
+    const abs = ctx.resolvePath(rel)
     try {
       await request(ctx.sessionId, "screenshot", { path: abs, fullPage: false, selector: "" })
     } catch (err) {
@@ -36,6 +42,8 @@ export function createPlaywrightCvTools(deps: { bridge?: BridgeLike } = {}): Too
       img = decodePng(await ctx.readBinaryFile(abs))
     } catch (e) {
       return { error: `截图解码失败: ${fail(e)}` }
+    } finally {
+      await ctx.deleteFile(abs).catch(() => {})
     }
     const box = region ? parseRegion(region) : null
     if (!box) return { img, offX: 0, offY: 0, sourceDesc: "当前页面截图（视口，坐标即视口像素）" }
