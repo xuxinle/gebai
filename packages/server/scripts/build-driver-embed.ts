@@ -1,6 +1,6 @@
 /**
- * 构建时生成浏览器桥接驱动（`src/core/browser/driver.mjs`）的内嵌产物
- * （`src/core/driver.embedded.generated.json`）。
+ * 构建时生成浏览器桥接驱动（`../agents/src/browser/driver.mjs`）的内嵌产物
+ * （`../agents/src/browser/driver.embedded.generated.json`）。
  *
  * 背景：driver.mjs 需保持独立文件供 node 子进程运行，bun build/--compile 无法内联；
  * 二进制形态下以 gzip base64 内嵌进产物，运行时物化到 `{GEBAI_HOME}/vendor/playwright/`
@@ -15,8 +15,8 @@ import { gzipDeterministic } from "./gzip-deterministic"
 import { join } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const src = join(root, "src", "core", "browser", "driver.mjs")
-const outFile = join(root, "src", "core", "driver.embedded.generated.json")
+const src = join(root, "..", "agents", "src", "browser", "driver.mjs")
+const outFile = join(root, "..", "agents", "src", "browser", "driver.embedded.generated.json")
 
 const raw = readFileSync(src)
 writeFileIfChanged(outFile, JSON.stringify({ gzip: true, driver: gzipDeterministic(raw).toString("base64") }))

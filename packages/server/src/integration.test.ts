@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
 import { GebaiClient } from "@gebai/sdk"
 import { sessionPath } from "./core/base/paths"
-import { saveMiniTool } from "./core/widgets/mini-tools"
+import { saveMiniTool } from "@gebai/agents"
 
 const home = mkdtempSync(join(tmpdir(), "gebai-http-"))
 let handle: ServerHandle

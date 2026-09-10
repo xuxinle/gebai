@@ -12,19 +12,19 @@
  */
 import type { SubAgentDef } from "@gebai/sdk"
 
-import * as code from "./code"
-import * as self_optimize from "./self_optimize"
-import * as hsh from "./hsh"
-import * as cron from "./cron"
-import * as desktop from "./desktop"
-import * as explore from "./explore"
-import * as feishu_docs from "./feishu_docs"
-import * as feishu_group from "./feishu_group"
-import * as playwright from "./playwright"
-import * as reverse_site from "./reverse_site"
-import * as vision from "./vision"
-import * as widgets from "./widgets"
-import * as wps from "./wps"
+import * as code from "./code/index"
+import * as self_optimize from "./self_optimize/index"
+import * as hsh from "./hsh/index"
+import * as cron from "./cron/cron"
+import * as desktop from "./desktop/desktop"
+import * as explore from "./explore/explore"
+import * as feishu_docs from "./feishu_docs/feishu_docs"
+import * as feishu_group from "./feishu_group/feishu_group"
+import * as playwright from "./playwright/playwright"
+import * as reverse_site from "./reverse_site/reverse_site"
+import * as vision from "./vision/vision"
+import * as widgets from "./widgets/widgets"
+import * as wps from "./wps/wps"
 
 /** 全部 TS 子代理模块（name/description/def），目录序与 server 侧 sub-agents 一致。 */
 export const allAgents: Array<{
@@ -37,3 +37,17 @@ export const allAgents: Array<{
 ]
 
 export { code, self_optimize, hsh, cron, desktop, explore, feishu_docs, feishu_group, playwright, reverse_site, vision, widgets, wps }
+
+// code 域工具（git/system_info/env_detect/preview_server——引擎 compose 从本包注册全局工具，单向依赖）
+export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "./code/tools"
+export { fetchWithRedirectGuard, assertPublicHttpUrl, checkWebhookUrl } from "./shared/fetch-guard"
+export { VISION_MIME_SET, VISION_MAX_IMAGE_BYTES, setVisionProviderGetter, getVisionProvider, makeVisionTool } from "./shared/vision"
+export * from "./feishu_docs/oauth"
+export { renderOfficeReadingView, OFFICE_PREVIEW_EXTS } from "./wps/preview"
+export { analyzeTool, searchSymbolsTool } from "./analyzer/analyzer"
+export { resizeForVision, resizeNote, imageSize } from "./shared/image-resize"
+export { createLazyBridge, withSessionLock, type BridgeLike } from "./browser/bridge"
+export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./shared/tls"
+export { saveMiniTool, deleteMiniTool, listMiniTools, getMiniTool } from "./widgets-store/mini-tools"
+export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT } from "./shared/page-capture"
+export { readFeedbackTool } from "./shared/feedback"

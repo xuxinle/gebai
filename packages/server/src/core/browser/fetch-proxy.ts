@@ -21,7 +21,7 @@ import { mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { currentToolFetchSession } from "../support/fetch-scope"
-import { createLazyBridge, type BridgeLike } from "./bridge"
+import { createLazyBridge, type BridgeLike } from "@gebai/agents"
 
 export const BROWSER_PROXY_ENV = "GEBAI_BROWSER_PROXY"
 

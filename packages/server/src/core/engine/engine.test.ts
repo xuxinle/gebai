@@ -219,7 +219,7 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "subself" && this.calls === 3) {
-      yield { type: "tool_call", toolCall: { id: "tc-so3", name: "write", arguments: { path: "packages/server/src/sub-agents/new_agent.ts", content: "x" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-so3", name: "write", arguments: { path: "packages/agents/src/new_agent.ts", content: "x" } } }
       yield { type: "done" }
       return
     }
@@ -3275,7 +3275,7 @@ describe("context compaction", () => {
       const s = await setup("subself")
       // 临时歌白仓库结构（SELF_OPTIMIZE_PROJECT 指向它，守卫按它界定仓库边界）
       const repo = mkdtempSync(join(tmpdir(), "gebai-selfopt-repo-"))
-      mkdirSync(join(repo, "packages", "server", "src", "sub-agents"), { recursive: true })
+      mkdirSync(join(repo, "packages", "agents", "src"), { recursive: true })
       mkdirSync(join(repo, "packages", "server", "src", "core"), { recursive: true })
       const session = await s.store.createSession("default", "t")
       await s.store.setEnv(session.id, "default", { SELF_OPTIMIZE_PROJECT: repo, GEBAI_APPROVAL_SKIP: "true" })
@@ -3300,7 +3300,7 @@ describe("context compaction", () => {
       expect(s.provider.seenTools[1]).not.toContain("code_read")
       // 写范围守卫：核心引擎源码被拒（未写入），子Agent 目录放行
       expect(existsSync(join(repo, "packages", "server", "src", "core", "engine.ts"))).toBe(false)
-      expect(await Bun.file(join(repo, "packages", "server", "src", "sub-agents", "new_agent.ts")).text()).toBe("x")
+      expect(await Bun.file(join(repo, "packages", "agents", "src", "new_agent.ts")).text()).toBe("x")
       const chats = JSON.stringify(s.provider.seenChats)
       expect(chats).toContain("拒绝写入")
       rmSync(repo, { recursive: true, force: true })
@@ -3338,7 +3338,7 @@ describe("context compaction", () => {
 
   test("agent_run 前置热加载重扫 + agent_load 失败暴露：刚写入的破损子Agent 即时报附因错误", async () => {
     const s = await setup("subunknown")
-    const file = join(import.meta.dirname, "..", "..", "sub-agents", "zz_probe_fresh.ts")
+    const file = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "zz_probe_fresh.ts")
     writeFileSync(file, `import "./nonexistent-xyz"\nexport const def = { name: "zz_probe_fresh", description: "x", systemPrompt: "y" }`)
     try {
       const session = await s.store.createSession("default", "t")

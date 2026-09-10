@@ -1,0 +1,1190 @@
+import { join } from "node:path"
+import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
+import { artifactBlocks } from "@gebai/sdk"
+import { parseRegion } from "@gebai/sdk"
+import type { ToolSchema } from "@gebai/sdk"
+
+/**
+ * 桌面控制工具集（desktop 专用）：截图、窗口控制、输入。
+ * 跨平台实现：Windows 走内置 PowerShell（无外部依赖）；macOS 走 screencapture + osascript；
+ * Linux 依赖 xdotool/wmctrl/scrot/import（缺失时明确报错）。
+ * 服务端部署（sandboxed）一律拒绝——桌面控制是对宿主机桌面的真实操作，仅限本地/桌面模式。
+ */
+
+function desktopGate(ctx: ToolContext): void {
+  if (ctx.sandboxed) throw new Error("桌面控制仅在本地/桌面模式可用（服务端部署已禁用）")
+}
+
+function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {
+  return { type: "object", properties, required }
+}
+
+/** PowerShell 脚本 → 命令串（旧通道，EncodedCommand 内联）：仅作 psCmd 文件写入失败时的兜底。 */
+function psEncoded(script: string): string {
+  const b64 = Buffer.from(script, "utf16le").toString("base64")
+  return `powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`
+}
+
+/**
+ * Windows PowerShell 执行通道（临时 .ps1 文件 + -File 执行，desktop 三工具文件共用）：
+ * - 旧 -EncodedCommand 把整个脚本 base64 内联进命令行，受 cmd 单条命令行 8191 字符上限约束
+ *   （截图/UIA 类长脚本必超——实测 ≥4KB 脚本即「command line is too long」exit 1 且无输出），
+ *   且企业管控软件会静默拦截长内联命令（exit 1 无任何 stdout/stderr）；
+ * - 脚本写入会话 tmp/ps-scripts/ 下临时 .ps1，UTF-8 带 BOM——PS 5.1 对无 BOM 文件按 ANSI
+ *   解码，中文注释/字符串必乱码；
+ * - -File 路径必须双引号包装：Windows 参数解析不认单引号，单引号混入路径致 -File 打开失败，
+ *   PS 回退交互模式打印横幅后随管道关闭静默退出，stdout 还会被横幅污染；内嵌双引号反引号转义；
+ * - 执行中的 .ps1 被 Windows 锁定，删除延迟 60s（unref 不阻塞进程退出）；删除失败留在会话目录无害；
+ * - ctx.writeFile 不可用/失败时兜底回 EncodedCommand 内联（短脚本仍可用，行为同旧通道）。
+ */
+export async function psCmd(ctx: ToolContext, script: string): Promise<string> {
+  try {
+    const base = ctx.sessionWorkdir ?? ctx.workdir
+    const dir = join(base, "ps-scripts")
+    const file = join(dir, `gebai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`)
+    await ctx.writeFile(file, `\uFEFF${script}`)
+    const t = setTimeout(() => {
+      ctx.deleteFile(file).catch(() => {})
+    }, 60_000)
+    t.unref?.()
+    return `powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "${file.replace(/"/g, '`"')}"`
+  } catch {
+    return psEncoded(script)
+  }
+}
+
+/**
+ * PowerShell DPI 感知声明（脚本头片段）：每个 PowerShell 进程独立声明，
+ * 使屏幕/窗口/鼠标坐标统一为物理像素——否则高 DPI 缩放（如 150%）下
+ * Screen.Bounds/CopyFromScreen 落入逻辑像素空间，与 OCR/点击坐标错位。
+ * desktop_cv_tools 复用（截图脚本同需求）。
+ */
+export const PS_DPI_AWARE = `Add-Type @"
+using System.Runtime.InteropServices;
+public class GebaiDpi {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+"@
+[GebaiDpi]::SetProcessDPIAware() | Out-Null`
+
+/** 任意文本以 base64 注入 PowerShell 脚本（规避引号/特殊字符）。 */
+function psLiteral(text: string): string {
+  return `[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${Buffer.from(text, "utf8").toString("base64")}"))`
+}
+
+/** 敏感值模式：sk- 前缀密钥、KEY/SECRET/TOKEN 赋值、Bearer 令牌。
+ *  泛型长串分支独立为 longTokenHit 启发式（40+ 且字母数字混合、非纯十六进制——
+ *  纯英文词/纯 hex（git commit sha）等正常长串不误判）。 */
+const SENSITIVE_VALUE_RE =
+  /(sk-[A-Za-z0-9_\-]{10,}|(?:secret|token|password|passwd|api[_-]?key|app[_-]?secret|access[_-]?key|private[_-]?key)\s*[=:：]\s*[^\s,;，。]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{20,})/i
+
+/** 长令牌启发式：40+ 连续字母数字下划线连字符，含字母且含数字，非纯十六进制。 */
+function longTokenHit(text: string): string | null {
+  for (const m of text.matchAll(/[A-Za-z0-9_\-]{40,}/g)) {
+    const t = m[0]
+    if (/^[0-9a-fA-F]+$/.test(t)) continue
+    if (/[0-9]/.test(t) && /[A-Za-z]/.test(t)) return t
+  }
+  return null
+}
+
+/** 敏感模式检测：命中返回脱敏后的命中片段（首 4 + **** + 尾 4），否则 null。 */
+export function detectSensitive(text: string): string | null {
+  const m = SENSITIVE_VALUE_RE.exec(text)
+  const hit = m?.[0] ?? longTokenHit(text)
+  if (!hit) return null
+  return hit.length > 8 ? `${hit.slice(0, 4)}****${hit.slice(-4)}` : hit
+}
+
+/** SendKeys 转义：特殊字符（+ ^ % ~ ( ) [ ] { }）逐字符包 {}，防被解释为组合键/修饰键。 */
+function sendKeysEscape(s: string): string {
+  return s.replace(/[+^%~()\[\]{}]/g, (c) => `{${c}}`)
+}
+
+function num(v: unknown, dflt: number): number {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : dflt
+}
+
+async function run(ctx: ToolContext, cmd: string, timeoutMs = 20000): Promise<ToolResult> {
+  const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs })
+  if (code !== 0) {
+    // stderr+stdout 合并展示（原来只显示其一，排障信息丢失）
+    const detail = [stderr?.trim(), stdout?.trim()].filter(Boolean).join("\n")
+    return { output: `执行失败 [exit ${code}]:${detail ? `\n${detail}` : "（无输出）"}` }
+  }
+  return { output: stdout.trim() || "(无输出)" }
+}
+
+/** shell 单引号字符串转义（POSIX: ' → '\''），用于 Linux/macOS 命令拼接。 */
+function sq(s: string): string {
+  return s.replace(/'/g, `'\\''`)
+}
+
+/** 窗口定位脚本片段（hwnd 优先）：hwnd 直取句柄；否则 procFilter 找进程主窗口。
+ *  EnumWindows 全量枚举后，同进程多窗口场景 hwnd 是唯一精确指向——focus/move/state 共用。 */
+function winLocate(hwnd: number, pid: number, title: string): { head: string; cond: string; assign: string; label: string } {
+  if (hwnd) {
+    return { head: `$h = [IntPtr]${hwnd}`, cond: "$true", assign: "", label: `HWND ${hwnd}` }
+  }
+  return {
+    head: procFilter(pid, title) + " | Select-Object -First 1",
+    cond: "($p -and $p.MainWindowHandle -ne 0)",
+    assign: "$h = $p.MainWindowHandle",
+    label: "$($p.ProcessName) (PID $($p.Id)) - $($p.MainWindowTitle)",
+  }
+}
+
+/** 进程查找：pid 优先，其次按标题匹配。title 经 base64 注入脚本内解码后 .Contains 匹配（无 PowerShell 插值面）。 */
+function procFilter(pid?: number, title?: string): string {
+  if (pid) return `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`
+  const b64 = Buffer.from(String(title ?? ""), "utf8").toString("base64")
+  return `$t = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${b64}"))
+$p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle.Contains($t) }`
+}
+
+/* ---------- 截图 ---------- */
+
+/** 黑帧/纯色告警：平均亮度极低提示显示器休眠/锁屏；暗色单色提示非真实画面。 */
+function blackFrameWarn(mean: number | null, colors: number | null): string | null {
+  if (mean === null) return null
+  if (mean < 8) return "⚠️ 截图平均亮度极低（疑似黑屏：显示器休眠/关闭/锁屏），像素分析可能无意义。请确认屏幕状态后重试。"
+  if (mean < 40 && colors !== null && colors < 16) return "⚠️ 截图整体为单一暗色（平均亮度低、色数少），可能非真实画面（黑屏/纯色屏）。"
+  return null
+}
+
+export const screenshotTool: Tool = {
+  name: "screenshot",
+  description:
+    "截取屏幕（全屏或指定区域），保存 PNG 到会话 tmp/ 并返回图片供 UI 展示。全屏覆盖所有显示器的虚拟屏幕（多显示器含负坐标副屏）；region 参数指定截取区域（相对主屏左上角，x/y 可为负以覆盖副屏，省略则全屏）。返回尺寸/原点元数据并自动检测黑屏/纯色帧（显示器休眠/锁屏时主动提示）。平台：Windows/macOS 内置支持；Linux 需 scrot 或 ImageMagick import。",
+  card: { titleParams: ["region"], args: "none" },
+  parameters: schema({
+    region: { type: "string", description: "可选：截取区域 'x,y,w,h'（像素，相对主屏左上角，x/y 可为负；省略则全屏=虚拟屏幕）" },
+    name: { type: "string", description: "可选：文件名（不含扩展名，默认 screenshot_<时间戳>）" },
+  }),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    // name 参数落地（此前声明未实现，模型按描述传名无效）：消毒为安全文件名基名
+    const nameBase = String(args.name ?? "").trim().replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60)
+    const rel = `${nameBase || `screenshot_${Date.now()}`}.png`
+    const path = ctx.resolvePath(rel)
+    const regionRaw = String(args.region ?? "").trim()
+    const region = parseRegion(regionRaw)
+    if (regionRaw && !region) {
+      return { output: `region 格式错误: ${regionRaw}（应为 x,y,w,h）` }
+    }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // 全屏 = 虚拟屏幕（覆盖所有显示器，副屏可为负坐标）；区域截图 Rectangle 原点即 region 原点
+      let bounds = "[System.Windows.Forms.SystemInformation]::VirtualScreen"
+      if (region) {
+        bounds = `New-Object System.Drawing.Rectangle(${region.x}, ${region.y}, ${region.w}, ${region.h})`
+      }
+      // 截图后抽样统计：平均亮度 + 采样色数（A1 黑帧检测），输出 STAT 行供解析
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+$b = ${bounds}
+$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+$bmp.Save('${path.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)
+$sum = 0.0; $n = 0; $colors = New-Object 'System.Collections.Generic.HashSet[int]'
+$step = [Math]::Max(1, [int][Math]::Sqrt($bmp.Width * $bmp.Height / 500))
+for ($x = 0; $x -lt $bmp.Width; $x += $step) {
+  for ($y = 0; $y -lt $bmp.Height; $y += $step) {
+    $p = $bmp.GetPixel($x, $y)
+    $sum += 0.299 * $p.R + 0.587 * $p.G + 0.114 * $p.B
+    $n++
+    [void]$colors.Add((($p.R -shl 16) -bor ($p.G -shl 8)) -bor $p.B)
+  }
+}
+"STAT $($b.X),$($b.Y) $($bmp.Width)x$($bmp.Height) mean=$([Math]::Round($sum / $n, 1)) colors=$($colors.Count)"
+$g.Dispose(); $bmp.Dispose()
+`)
+    } else if (plat === "darwin") {
+      cmd = regionRaw
+        ? `screencapture -x -R ${regionRaw} '${path}'`
+        : `screencapture -x '${path}'`
+    } else {
+      const probe = await ctx.runCommand("command -v scrot || command -v import || true", { timeoutMs: 5000 })
+      const toolName = probe.stdout.split("\n").find(Boolean)?.split("/").pop() ?? ""
+      if (!toolName) return { output: "Linux 桌面控制需要安装 scrot 或 ImageMagick(import)" }
+      cmd = toolName === "scrot" ? `scrot '${path}'` : `import -window root '${path}'`
+    }
+    const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 30000 })
+    if (code !== 0) return { output: `截图失败 [exit ${code}]:\n${stderr || stdout}` }
+    // 质量统计解析：win32 内置 STAT 行；macOS/Linux 用平台工具补取尺寸/亮度
+    const m = stdout.match(/STAT (-?\d+),(-?\d+) (\d+)x(\d+) mean=([\d.]+) colors=(\d+)/)
+    let size = m ? `${m[3]}x${m[4]}` : ""
+    let origin = m ? `${m[1]},${m[2]}` : ""
+    let mean: number | null = m ? Number(m[5]) : null
+    let colors: number | null = m ? Number(m[6]) : null
+    if (region && regionRaw) origin = `${region.x},${region.y}`
+    if (!m) {
+      if (plat === "darwin") {
+        const s = await ctx.runCommand(`sips -g pixelWidth -g pixelHeight '${path}'`, { timeoutMs: 10000 })
+        const w = s.stdout.match(/pixelWidth:\s*(\d+)/)?.[1]
+        const h = s.stdout.match(/pixelHeight:\s*(\d+)/)?.[1]
+        if (w && h) size = `${w}x${h}`
+      } else {
+        const probe = await ctx.runCommand("command -v identify convert || true", { timeoutMs: 5000 })
+        const tools = probe.stdout.split("\n").map((s) => s.split("/").pop()).filter(Boolean)
+        if (tools.includes("identify")) {
+          const id = await ctx.runCommand(`identify -format "%wx%h" '${path}'`, { timeoutMs: 10000 })
+          if (id.code === 0) size = id.stdout.trim()
+        }
+        if (tools.includes("convert")) {
+          const l = await ctx.runCommand(`convert '${path}' -format "%[fx:mean]" info:`, { timeoutMs: 10000 })
+          if (l.code === 0 && l.stdout.trim()) mean = Number(Number(l.stdout.trim()).toFixed(1))
+        }
+      }
+    }
+    const warn = blackFrameWarn(mean, colors)
+    const meta =
+      (size ? `尺寸 ${size}` : "") +
+      (origin ? `，原点 (${origin})——图片坐标加原点即屏幕坐标` : "") +
+      (mean !== null ? `，平均亮度 ${mean}/255` : "")
+    const scope = !regionRaw && plat === "win32" ? "（全屏=虚拟屏幕，覆盖所有显示器）" : ""
+    return { output: `已截图: ${rel}${meta ? `（${meta}）` : ""}${scope}${warn ? `\n${warn}` : ""}`, blocks: artifactBlocks(rel) }
+  },
+}
+
+/* ---------- 屏幕信息 ---------- */
+
+export const screenInfoTool: Tool = {
+  name: "screen_info",
+  description: "列出所有显示器（分辨率、位置、是否主屏），供截图 region / 鼠标坐标参考。截图 region 坐标以主屏左上角为原点。",
+  card: { args: "none" },
+  parameters: schema({}),
+  async execute(_args, ctx) {
+    desktopGate(ctx)
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Screen]::AllScreens | ForEach-Object { @($_.DeviceName, $_.Bounds.X, $_.Bounds.Y, $_.Bounds.Width, $_.Bounds.Height, $_.Primary) -join [char]9 }
+`)
+    } else if (plat === "darwin") {
+      cmd = `osascript -e 'tell application "Finder" to get bounds of window of desktop'`
+    } else {
+      const probe = await ctx.runCommand("command -v xrandr || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 屏幕信息需要安装 xrandr" }
+      cmd = `xrandr --query | grep " connected"`
+    }
+    const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 15000 })
+    if (code !== 0) return { output: `屏幕信息获取失败 [exit ${code}]:\n${stderr || stdout}` }
+    if (plat === "win32" && stdout.trim()) {
+      const rows = stdout.trim().split(/\r?\n/).map((l) => l.split("\t").map((f) => f.replace(/\r$/, "")))
+      const lines = rows.map((r) => `${r[0]} 位置(${r[1]},${r[2]}) ${r[3]}x${r[4]}${r[5] === "True" ? "（主屏）" : ""}`)
+      return { output: `共 ${rows.length} 个显示器：\n${lines.join("\n")}` }
+    }
+    if (plat === "darwin") return { output: `主屏 bounds: ${stdout.trim()}` }
+    return { output: stdout.trim() || "（无输出）" }
+  },
+}
+
+/* ---------- 窗口控制 ---------- */
+
+export const windowListTool: Tool = {
+  name: "window_list",
+  description:
+    "列出当前全部顶层可见窗口（PID、进程名、前台标记*、窗口位置 x,y,w,h、标题、HWND）。EnumWindows 全量枚举——同进程多窗口（浏览器多窗口/多开应用）逐个可见；窗口操作工具（focus/move/state）可传 hwnd 精确指向具体窗口。只读操作。",
+  card: { args: "none" },
+  parameters: schema({}),
+  async execute(_args, ctx) {
+    desktopGate(ctx)
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // EnumWindows 枚举全部顶层可见窗口（替代 Get-Process MainWindowHandle——后者每进程只见一个主窗口，
+      // 浏览器多窗口/多开应用漏窗口）；前台标记（GetForegroundWindow 比对）+ bounds（物理像素）+ HWND
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public struct GebaiRect3 { public int Left, Top, Right, Bottom; }
+public class GebaiWinList {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out GebaiRect3 r);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder t, int max);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+}
+"@
+$rows = New-Object System.Collections.Generic.List[object]
+$cb = [GebaiWinList+EnumProc]{ param($h, $l)
+  if (-not [GebaiWinList]::IsWindowVisible($h)) { return $true }
+  $sb = New-Object System.Text.StringBuilder 512
+  [void][GebaiWinList]::GetWindowText($h, $sb, 512)
+  $title = $sb.ToString()
+  if (-not $title) { return $true }
+  $r = New-Object GebaiRect3
+  [void][GebaiWinList]::GetWindowRect($h, [ref]$r)
+  $w = $r.Right - $r.Left; $ht = $r.Bottom - $r.Top
+  if ($w -le 0 -or $ht -le 0) { return $true }
+  $outPid = [uint32]0
+  [void][GebaiWinList]::GetWindowThreadProcessId($h, [ref]$outPid)
+  $proc = ""
+  try { $proc = (Get-Process -Id $outPid -ErrorAction SilentlyContinue).ProcessName } catch {}
+  $rows.Add([pscustomobject]@{ Hwnd = $h.ToInt64(); Pid = $outPid; Proc = $proc; Title = $title; Bounds = "$($r.Left),$($r.Top),$w,$ht" })
+  return $true
+}
+[void][GebaiWinList]::EnumWindows($cb, [IntPtr]::Zero)
+$fg = [GebaiWinList]::GetForegroundWindow()
+$rows | Sort-Object Proc | ForEach-Object {
+  $mark = if ([IntPtr]$_.Hwnd -eq $fg) { "*" } else { "" }
+  @($_.Pid, $_.Proc, $mark, $_.Bounds, $_.Title, $_.Hwnd) -join [char]9
+}
+`)
+    } else if (plat === "darwin") {
+      cmd = `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`
+    } else {
+      const probe = await ctx.runCommand("command -v wmctrl || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 窗口控制需要安装 wmctrl" }
+      cmd = `wmctrl -l`
+    }
+    const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 15000 })
+    if (code !== 0) return { output: `窗口列表获取失败 [exit ${code}]:\n${stderr || stdout}` }
+    // Windows TSV → 对齐文本（PID/进程名/前台标记/窗口位置/标题）
+    if (plat === "win32" && stdout.trim()) {
+      const rows = stdout.trim().split("\n").map((l) => l.split("\t"))
+      const pidW = Math.max(...rows.map((r) => r[0]?.length ?? 0), 3)
+      const nameW = Math.max(...rows.map((r) => r[1]?.length ?? 0), 4)
+      const lines = rows.map((r) => `${(r[2] === "*" ? "*" : " ") + (r[0] ?? "").padEnd(pidW)}  ${(r[1] ?? "").padEnd(nameW)}  ${r[3] ?? ""}  ${r[4] ?? ""}  [${r[5] ?? ""}]`)
+      const fg = rows.filter((r) => r[2] === "*").map((r) => r[1]).join(", ")
+      return {
+        output:
+          `共 ${rows.length} 个窗口（* = 当前前台；列：PID/进程/位置 x,y,w,h/标题/HWND——窗口操作工具可传 hwnd 精确指向多窗口进程中的具体窗口）：\n${lines.join("\n")}` +
+          (fg ? `\n当前前台: ${fg}` : "\n（无前台窗口标记——可能焦点在无主窗口的进程）"),
+      }
+    }
+    return { output: stdout.trim() || "（无可见窗口）" }
+  },
+}
+
+export const windowFocusTool: Tool = {
+  name: "window_focus",
+  description: "激活指定窗口到前台（按 PID 或标题匹配），激活后复核前台窗口确认生效；Windows 前台锁定拦截时经 Alt 键缓解重试，仍失败明确报错（请手动点击目标窗口后重试）。必要时先 window_list 定位。",
+  card: { titleParams: ["pid", "title"], args: "none" },
+  parameters: schema({
+    pid: { type: "number", description: "可选：目标窗口的 PID（window_list 结果第一列）" },
+    title: { type: "string", description: "可选：按标题模糊匹配窗口（pid 未提供时）" },
+    hwnd: { type: "number", description: "可选：window_list 最后列 HWND——同进程多窗口时精确指向具体窗口（优先于 pid/title）" },
+  }),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const pid = num(args.pid, 0)
+    const title = String(args.title ?? "")
+    const hwnd = num(args.hwnd, 0)
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd、pid 或 title" }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      const loc = winLocate(hwnd, pid, title)
+      cmd = await psCmd(ctx, `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiWin {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
+}
+"@
+${loc.head}
+if (${loc.cond}) {
+  ${loc.assign}
+  [GebaiWin]::ShowWindow($h, 9) | Out-Null
+  $ok = [GebaiWin]::SetForegroundWindow($h)
+  if (-not $ok -or [GebaiWin]::GetForegroundWindow() -ne $h) {
+    # Windows 前台锁定缓解：模拟 Alt 键击键使本进程获得前台权限后重试
+    [GebaiWin]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    [GebaiWin]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 60
+    $ok = [GebaiWin]::SetForegroundWindow($h)
+  }
+  if ($ok -and [GebaiWin]::GetForegroundWindow() -eq $h) {
+    "已激活: ${loc.label}"
+  } else {
+    "激活失败: Windows 前台锁定拦截（后台进程禁止夺取焦点）。请手动点击一次目标窗口后重试，或改用其他验证通道确认窗口状态"
+  }
+} else { "未找到匹配窗口（hwnd 无效或窗口已关闭——用 window_list 重新获取）" }
+`)
+    } else if (plat === "darwin") {
+      // PID 优先（unix id），否则按标题
+      const target = pid ? `whose unix id is ${pid}` : `whose name contains ${sq(JSON.stringify(title))}`
+      cmd = `osascript -e 'tell application "System Events" to set frontmost of (first process ${target}) to true'`
+    } else {
+      const probe = await ctx.runCommand("command -v wmctrl || command -v xdotool || true", { timeoutMs: 5000 })
+      const t = probe.stdout.split("\n").find(Boolean)?.split("/").pop() ?? ""
+      if (!t) return { output: "Linux 窗口控制需要安装 wmctrl 或 xdotool" }
+      cmd = t === "wmctrl" ? `wmctrl -a '${sq(title)}'` : `xdotool search --name '${sq(title)}' windowactivate`
+    }
+    return run(ctx, cmd)
+  },
+}
+
+export const windowMoveTool: Tool = {
+  name: "window_move",
+  description: "移动并可选调整窗口大小（x/y 为屏幕坐标，width/height 省略则保持原尺寸）。",
+  parameters: schema(
+    {
+      x: { type: "number", description: "目标左上角 X" },
+      y: { type: "number", description: "目标左上角 Y" },
+      width: { type: "number", description: "可选：目标宽度" },
+      height: { type: "number", description: "可选：目标高度" },
+      pid: { type: "number", description: "目标窗口 PID" },
+      title: { type: "string", description: "或按标题匹配" },
+      hwnd: { type: "number", description: "可选：window_list 最后列 HWND（优先于 pid/title，多窗口进程精确指向）" },
+    },
+    ["x", "y"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const x = num(args.x, 0)
+    const y = num(args.y, 0)
+    const pid = num(args.pid, 0)
+    const title = String(args.title ?? "")
+    const hwnd = num(args.hwnd, 0)
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd、pid 或 title" }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      const w = args.width != null ? String(num(args.width, 0)) : ""
+      const h = args.height != null ? String(num(args.height, 0)) : ""
+      const loc = winLocate(hwnd, pid, title)
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct GebaiRect { public int Left, Top, Right, Bottom; }
+public class GebaiWin2 {
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out GebaiRect r);
+}
+"@
+${loc.head}
+if (${loc.cond}) {
+  ${loc.assign}
+  $r = New-Object GebaiRect
+  [GebaiWin2]::GetWindowRect($h, [ref]$r) | Out-Null
+  $w = ${w || `($r.Right - $r.Left)`}
+  $h = ${h || `($r.Bottom - $r.Top)`}
+  [GebaiWin2]::SetWindowPos($h, [IntPtr]::Zero, ${x}, ${y}, $w, $h, 0x0040) | Out-Null
+  "已移动: ${loc.label} → (${x}, ${y}) ${w}x${h}"
+} else { "未找到匹配窗口" }
+`)
+    } else if (plat === "darwin") {
+      const target = pid ? `whose unix id is ${pid}` : `whose name contains ${sq(JSON.stringify(title))}`
+      cmd = `osascript -e 'tell application "System Events" to set position of front window of (first process ${target}) to {${x}, ${y}}'`
+    } else {
+      const probe = await ctx.runCommand("command -v wmctrl || command -v xdotool || true", { timeoutMs: 5000 })
+      const t = probe.stdout.split("\n").find(Boolean)?.split("/").pop() ?? ""
+      if (!t) return { output: "Linux 窗口控制需要安装 wmctrl 或 xdotool" }
+      if (t === "wmctrl") {
+        cmd = `wmctrl -r '${sq(title)}' -e 0,${x},${y},${num(args.width, -1)},${num(args.height, -1)}`
+      } else {
+        const size = args.width != null ? ` ${num(args.width, 0)} ${num(args.height, 0)}` : ""
+        cmd = `xdotool search --name '${sq(title)}' windowmove ${x} ${y}${size ? ` windowsize ${num(args.width, 0)} ${num(args.height, 0)}` : ""}`
+      }
+    }
+    return run(ctx, cmd)
+  },
+}
+
+/* ---------- 输入 ---------- */
+
+export const typeTextTool: Tool = {
+  name: "type_text",
+  description:
+    "向当前聚焦窗口输入文本。默认 clipboard 模式（剪贴板粘贴法，中文/符号可靠：写入回验重试、粘贴后延时恢复剪贴板，写入未生效时明确报错不粘贴；输入前自动做敏感信息检测并预览内容），keys 模式为纯按键逐字符输入（绕开剪贴板，仅 ASCII；中文 IME 激活时部分标点可能丢失）。先确保目标窗口已聚焦（window_focus）。",
+  parameters: schema(
+    {
+      text: { type: "string", description: "要输入的文本" },
+      mode: { enum: ["clipboard", "keys"], description: "可选：clipboard=剪贴板粘贴法（默认，写入回验）；keys=纯按键逐字符输入（仅 ASCII，IME 激活时标点可能丢失）" },
+    },
+    ["text"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const text = String(args.text ?? "")
+    if (!text) return { output: "text 不能为空" }
+    const mode = String(args.mode ?? "clipboard")
+    // 敏感信息主动告警（D2）：密钥/token 值模式检测到即中止，防经剪贴板泄漏
+    const sensitive = detectSensitive(text)
+    if (sensitive) {
+      return {
+        output:
+          `⚠️ 检测到疑似敏感信息（密钥/令牌模式：${sensitive}），已中止输入，防止经剪贴板泄漏。` +
+          `如确需输入：可改用 mode="keys" 纯按键模式（仅 ASCII 支持，绕开剪贴板），或在确认该文本非敏感后重试。`,
+      }
+    }
+    const preview = text.length > 40 ? `${text.slice(0, 40)}…（共 ${text.length} 字符）` : text
+    const plat = process.platform
+    let cmd: string
+    if (mode === "keys") {
+      // 纯按键模式：绕剪贴板逐字符输入，仅 ASCII 可打印字符可靠（SendKeys/osascript keystroke 对非 ASCII 支持不稳定）
+      if (/[^\x20-\x7E]/.test(text)) {
+        return { output: `mode="keys" 仅支持 ASCII 可打印字符（当前含非 ASCII，如：${text.slice(0, 20)}…）。中文/符号请用默认 clipboard 模式。` }
+      }
+      if (plat === "win32") {
+        cmd = await psCmd(ctx, `
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait(${psLiteral(sendKeysEscape(text))})
+"已输入 ${text.length} 字符（keys 模式）"
+`)
+      } else if (plat === "darwin") {
+        cmd = `osascript -e 'tell application "System Events" to keystroke ${sq(JSON.stringify(text))}'`
+      } else {
+        const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+        if (!probe.stdout.trim()) return { output: "Linux 输入需要安装 xdotool" }
+        cmd = `xdotool type --delay 15 '${sq(text)}'`
+      }
+      const r = await run(ctx, cmd)
+      return { output: `${r.output}（内容预览：${preview}；keys 模式）` }
+    }
+    // clipboard 模式：剪贴板粘贴法。写入回验重试（剪贴板管理软件可能拦截/覆盖写入，未生效即报错不粘贴），
+    // 粘贴后延时恢复（目标应用异步消费剪贴板，立即恢复会粘出旧内容）
+    if (plat === "win32") {
+      cmd = await psCmd(ctx, `
+Add-Type -AssemblyName System.Windows.Forms
+$old = $null; $oldOk = $false
+try { $old = Get-Clipboard -Raw; $oldOk = $true } catch {}
+$cr = [string][char]13; $lf = [string][char]10
+$want = ${psLiteral(text)}
+$wantN = $want.Replace($cr + $lf, $lf).Replace($cr, $lf)
+$setOk = $false
+foreach ($i in 1..3) {
+  try { Set-Clipboard -Value $want } catch {}
+  Start-Sleep -Milliseconds 80
+  try { if (((Get-Clipboard -Raw).Replace($cr + $lf, $lf).Replace($cr, $lf)) -ceq $wantN) { $setOk = $true; break } } catch {}
+}
+if (-not $setOk) {
+  "输入失败: 剪贴板写入未生效（可能被剪贴板管理软件拦截），未执行粘贴，原剪贴板未被修改"
+} else {
+  try {
+    [System.Windows.Forms.SendKeys]::SendWait("^v")
+    Start-Sleep -Milliseconds 1000
+  } finally {
+    if ($oldOk) { try { Set-Clipboard -Value $old } catch { "警告: 原剪贴板恢复失败" } } else { "警告: 原剪贴板备份失败，未恢复" }
+    Start-Sleep -Milliseconds 150
+  }
+  "已输入 ${text.length} 字符（剪贴板已恢复原内容）"
+}
+`)
+    } else if (plat === "darwin") {
+      cmd =
+        `osascript -e 'try' -e 'set oldClip to the clipboard as text' -e 'on error' -e 'set oldClip to missing value' -e 'end try' ` +
+        `-e 'set the clipboard to ${sq(JSON.stringify(text))}' -e 'tell application "System Events" to keystroke "v" using command down' ` +
+        `-e 'delay 1' -e 'if oldClip is not missing value then set the clipboard to oldClip'`
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 输入需要安装 xdotool" }
+      cmd = `xdotool type --delay 15 '${sq(text)}'`
+    }
+    const r = await run(ctx, cmd)
+    if (r.output.startsWith("输入失败")) return { output: r.output }
+    return { output: `${r.output}（内容预览：${preview}；剪贴板模式）` }
+  },
+}
+
+/** 剪贴板读取（只读）：截断展示 + 敏感信息扫描主动告警（D2）。 */
+export const clipboardReadTool: Tool = {
+  name: "clipboard_read",
+  description: "读取当前剪贴板内容（只读，不修改剪贴板），截断展示并自动做敏感信息扫描告警。",
+  card: { args: "none" },
+  parameters: schema({}),
+  async execute(_args, ctx) {
+    desktopGate(ctx)
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      cmd = await psCmd(ctx, `$c = Get-Clipboard -Raw -ErrorAction SilentlyContinue; if ($null -eq $c) { "（剪贴板为空）" } else { $c }`)
+    } else if (plat === "darwin") {
+      cmd =
+        `osascript -e 'try' -e 'set c to the clipboard as text' -e 'return c' -e 'on error' ` +
+        `-e 'return "（剪贴板为空或非文本）"' -e 'end try'`
+    } else {
+      const probe = await ctx.runCommand("command -v xclip || command -v xsel || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 读取剪贴板需要安装 xclip 或 xsel" }
+      cmd = probe.stdout.includes("xclip")
+        ? "xclip -o -selection clipboard 2>/dev/null || echo （剪贴板为空）"
+        : "xsel -b 2>/dev/null || echo （剪贴板为空）"
+    }
+    const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 15000 })
+    if (code !== 0) return { output: `剪贴板读取失败 [exit ${code}]:\n${stderr || stdout}` }
+    const content = stdout.replace(/\r?\n$/, "")
+    const preview = content.length > 500 ? `${content.slice(0, 500)}…（共 ${content.length} 字符，已截断）` : content
+    const sensitive = detectSensitive(content)
+    const warn = sensitive
+      ? `\n\n⚠️ 检测到疑似敏感信息（密钥/令牌模式：${sensitive}）。请勿将其粘贴到非信任应用；必要时使用 type_text 的 mode="keys"。`
+      : ""
+    return { output: `剪贴板内容：\n${preview}${warn}` }
+  },
+}
+
+/** 虚拟键别名 → keybd_event 扫描码：SendKeys 语法覆盖不了的系统键（win/vk_ 前缀统一）。
+ *  单键：win lwin rwin apps volume_up volume_down volume_mute
+ *  媒体：media_play media_pause media_play_pause media_stop media_next media_prev
+ *  mouse 类：vk_left vk_right vk_up vk_down（箭头键，SendKeys 也支持但别名统一入口）
+ *  其他：vk_add vk_subtract vk_multiply vk_divide vk_decimal（小键盘）vk_numlock vk_scroll vk_snapshot(print screen) vk_sleep */
+const VK_CODES: Record<string, number> = {
+  win: 0x5b, lwin: 0x5b, rwin: 0x5c, apps: 0x5d,
+  shift: 0x10, ctrl: 0x11, control: 0x11, alt: 0x12,
+  volume_up: 0xaf, volume_down: 0xae, volume_mute: 0xad,
+  media_play: 0xb3, media_pause: 0xb3, media_play_pause: 0xb3, media_stop: 0xb2, media_next: 0xb0, media_prev: 0xb1,
+  left: 0x25, up: 0x26, right: 0x27, down: 0x28,
+  add: 0x6b, subtract: 0x6d, multiply: 0x6a, divide: 0x6f, decimal: 0x6e,
+  numlock: 0x90, scroll: 0x91, snapshot: 0x2c, sleep: 0x5f,
+  esc: 0x1b, space: 0x20, tab: 0x09, backspace: 0x08, del: 0x2e, insert: 0x2d, home: 0x24, end: 0x23,
+  pgup: 0x21, pgdn: 0x22, capslock: 0x14, printscreen: 0x2c,
+}
+
+/** 解析虚拟键 token："vk" / "vk_" / 裸名（VK_CODES 键）或 "vk_XX" 十六进制扫描码 → keybd_event 码。
+ *  返回 null = 不是虚拟键（走 SendKeys）。修饰键仅认 vk 前缀（ctrl/shift/alt 裸名会与 SendKeys 语义冲突）。 */
+export function vkCode(token: string): number | null {
+  const t = token.toLowerCase()
+  if (t.startsWith("vk_")) {
+    const rest = t.slice(3)
+    if (/^[0-9a-f]{2}$/.test(rest)) return parseInt(rest, 16)
+    return VK_CODES[rest] ?? null
+  }
+  if (t === "win" || t.startsWith("media_") || t.startsWith("volume_")) {
+    return VK_CODES[t] ?? null
+  }
+  return null
+}
+
+/** 修饰键 vk 名：Ctrl=0x11 Shift=0x10 Alt=0x12（Win 作为主键单独处理）。 */
+function vkModifier(token: string): number | null {
+  let t = token.toLowerCase()
+  if (t.startsWith("vk_")) t = t.slice(3)
+  if (t === "ctrl" || t === "control") return 0x11
+  if (t === "shift") return 0x10
+  if (t === "alt") return 0x12
+  return null
+}
+
+/** 解析虚拟键组合串："win+r" / "media_next" / "vk_ctrl+vk_left" → { mods, main }；null = 非 vk 组合。
+ *  校验全部 token（任一不认识即 null 交回 SendKeys 路径报错，不静默半解析）。 */
+/** 主键解析：vk 名优先；单字母 a-z / 数字 0-9 映射 VK 码（vk 组合内的裸字母，如 win+r）。 */
+function vkMain(token: string): number | null {
+  const t = token.toLowerCase()
+  if (t.length === 1 && t >= "a" && t <= "z") return t.charCodeAt(0) - 0x20 // VK_A..VK_Z = 大写 ASCII（r→0x52）
+  if (t.length === 1 && t >= "0" && t <= "9") return t.charCodeAt(0) // VK_0..VK_9 = 0x30-0x39 即字符码
+  return vkCode(t)
+}
+
+export function parseVkCombo(keys: string): { mods: number[]; main: number } | null {
+  const parts = keys.toLowerCase().split("+").map((s) => s.trim()).filter(Boolean)
+  if (!parts.length) return null
+  let main = -1
+  const mods: number[] = []
+  for (const p of parts) {
+    // win 在组合中是修饰键（Win+R = 按住 Win 敲 R）；单独一个 "win" 才是主键（弹开始菜单）
+    if (parts.length > 1 && (p === "win" || p === "lwin")) { mods.push(0x5b); continue }
+    if (vkModifier(p) !== null) { mods.push(vkModifier(p)!); continue }
+    const c = vkMain(p)
+    if (c === null) return null
+    if (main !== -1) return null // 两个主键（如 win+r+f）——不支持的组合
+    main = c
+  }
+  // 纯修饰键组合（vk_shift / vk_ctrl+vk_shift）：main=-1——仅 down/up 有意义（按住/抬起修饰键）。
+  // 限定全部 token 带 vk_/win 前缀形态：裸 "shift"（单修饰键）走 SendKeys（+ 语义），防歧义
+  if (main === -1) {
+    const allPrefixed = parts.every((t) => t.startsWith("vk_"))
+    if (!allPrefixed) return null
+  }
+  return { mods, main }
+}
+
+/** keybd_event 脚本生成（按住/抬起分离 + 修饰键链 + 可选按住时长）。
+ *  flags: 0=按下 2=抬起（KEYEVENTF_KEYUP）；仅虚拟键路径使用（SendKeys 路径无法分离）。 */
+function vkScript(combo: { mods: number[]; main: number }, action: "press" | "down" | "up", holdMs: number): string {
+  const lines: string[] = []
+  const kb = (code: number, flags: number) => lines.push(`[GebaiKbd]::keybd_event(0x${code.toString(16)}, 0, ${flags}, [UIntPtr]::Zero)`)
+  const sleep = (ms: number) => lines.push(`Start-Sleep -Milliseconds ${ms}`)
+  if (action === "down") {
+    for (const m of combo.mods) kb(m, 0)
+    if (combo.main >= 0) kb(combo.main, 0)
+  } else if (action === "up") {
+    // 抬起序：主键先抬，修饰键逆序抬（与按下对称）；纯修饰键（main=-1）只抬修饰键
+    if (combo.main >= 0) kb(combo.main, 2)
+    for (let i = combo.mods.length - 1; i >= 0; i--) kb(combo.mods[i], 2)
+  } else {
+    // press：修饰键按下 → 主键按下 →（按住 hold_ms）→ 主键抬起 → 修饰键逆序抬起
+    for (const m of combo.mods) kb(m, 0)
+    if (combo.main >= 0) {
+      kb(combo.main, 0)
+      if (holdMs > 0) sleep(holdMs)
+      kb(combo.main, 2)
+    }
+    for (let i = combo.mods.length - 1; i >= 0; i--) kb(combo.mods[i], 2)
+  }
+  return lines.join("\n")
+}
+
+export const keyPressTool: Tool = {
+  name: "key_press",
+  description:
+    '发送按键/组合键到当前聚焦窗口。keys 使用 SendKeys 语法：{ENTER} {TAB} {ESC} {F5}，^c=Ctrl+C，%{F4}=Alt+F4，+{TAB}=Shift+Tab。系统级虚拟键用 vk 名：win+r（Win+R）、volume_up/volume_down/volume_mute（音量）、media_play_pause/media_next/media_prev/media_stop（媒体）、vk_left/vk_up（箭头）、vk_XX（任意十六进制扫描码）、vk_ctrl+vk_left（修饰键组合）。action：press（默认，完整点击）/ down（按住不抬）/ up（抬起）——按住/抬起分离支持「按住 Shift 点选」「按住 W 前进」等场景（仅 vk 与单修饰键路径；SendKeys 语法不含分离）。hold_ms：press 模式按住时长（默认 0 即即按即抬，长按场景如文件属性 Alt+Enter 查看用 500+）。macOS 用 osascript 语法（如 "c" using command down）。',
+  card: { titleParams: ["keys", "action"], args: "none" },
+  parameters: schema(
+    {
+      keys: { type: "string", description: "按键/组合键（SendKeys 语法或 vk 虚拟键名）" },
+      action: { enum: ["press", "down", "up"], description: "可选：press=完整点击（默认）/ down=按住不抬 / up=抬起（按住/抬起分离，仅 vk 路径）" },
+      hold_ms: { type: "number", description: "可选：press 模式按住毫秒数（默认 0 即即按即抬）" },
+    },
+    ["keys"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const keys = String(args.keys ?? "")
+    if (!keys) return { output: "keys 不能为空" }
+    const action = String(args.action ?? "press")
+    if (!["press", "down", "up"].includes(action)) return { output: `未知 action: ${action}` }
+    const holdMs = Math.max(0, Math.min(10000, num(args.hold_ms, 0)))
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      const combo = parseVkCombo(keys)
+      if (combo) {
+        // 虚拟键路径：keybd_event 直发扫描码（媒体键/Win 键/箭头/任意 vk_XX）+ 按住/抬起分离
+        cmd = await psCmd(ctx, `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiKbd {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+${vkScript(combo, action as "press" | "down" | "up", holdMs)}
+"已${action === "press" ? "发送" : action === "down" ? "按住" : "抬起"}: ${keys}"
+`)
+      } else if (action !== "press") {
+        return {
+          output:
+            `action=${action} 仅支持 vk 虚拟键路径（当前 keys: ${keys}）。按住/抬起分离请用 vk 名，如 "vk_shift"（按住 Shift）、"w"→"vk_w"；SendKeys 语法不支持 down/up。`,
+        }
+      } else {
+        cmd = await psCmd(ctx, `
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.SendKeys]::SendWait(${psLiteral(keys)})
+"已发送: ${keys}"
+`)
+      }
+    } else if (plat === "darwin") {
+      cmd = `osascript -e 'tell application "System Events" to keystroke ${sq(JSON.stringify(keys))}'`
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 输入需要安装 xdotool" }
+      // xdotool 键名仅限字母/数字/下划线/加号（如 ctrl+a），白名单防 shell 注入
+      if (!/^[A-Za-z0-9_+]+( [A-Za-z0-9_+]+)*$/.test(keys)) {
+        return { output: `keys 含非法字符（仅支持 xdotool 键名组合，如 ctrl+a）：${keys}` }
+      }
+      cmd = `xdotool key ${keys}`
+    }
+    return run(ctx, cmd)
+  },
+}
+
+export const mouseMoveTool: Tool = {
+  name: "mouse_move",
+  description: "移动鼠标指针到指定屏幕坐标（像素，主屏左上角为原点）。",
+  parameters: schema({ x: { type: "number" }, y: { type: "number" } }, ["x", "y"]),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const x = num(args.x, 0)
+    const y = num(args.y, 0)
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiMouse {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+}
+"@
+[GebaiMouse]::SetCursorPos(${x}, ${y}) | Out-Null
+"已移动至 (${x}, ${y})"
+`)
+    } else if (plat === "darwin") {
+      return { output: "macOS 鼠标控制需要安装 cliclick（brew install cliclick），当前未集成" }
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
+      cmd = `xdotool mousemove ${x} ${y}`
+    }
+    return run(ctx, cmd)
+  },
+}
+
+/** 修饰键组合解析："ctrl+shift" 等 → keybd_event 码数组；非法/重复 token 返回 null。 */
+export function parseModifiers(mods: string): number[] | null {
+  if (!mods) return []
+  const out: number[] = []
+  for (const part of mods
+    .toLowerCase()
+    .split("+")
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    const c = vkModifier(part)
+    if (c === null || out.includes(c)) return null
+    out.push(c)
+  }
+  return out
+}
+
+export const mouseClickTool: Tool = {
+  name: "mouse_click",
+  description:
+    '移动鼠标到指定坐标并点击。button: left（默认）/right/middle（中键）/double（双击）/triple（三击，段落全选）；双击/三击以 50ms 间隔连发（小于系统双击判定时间，应用可识别为多击）。modifiers: 修饰键（如 "ctrl"、"ctrl+shift"）按住期间点击——Ctrl+点击多选、Shift+扩展选区。',
+  parameters: schema(
+    {
+      x: { type: "number" },
+      y: { type: "number" },
+      button: { enum: ["left", "right", "middle", "double", "triple"] },
+      modifiers: { type: "string", description: '可选："ctrl"/"shift"/"alt" 以 + 组合（如 "ctrl+shift"）' },
+    },
+    ["x", "y"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const x = num(args.x, 0)
+    const y = num(args.y, 0)
+    const btn = String(args.button ?? "left")
+    const mods = parseModifiers(String(args.modifiers ?? ""))
+    if (mods === null) return { output: `modifiers 非法（仅支持 ctrl/shift/alt 以 + 组合）：${args.modifiers}` }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // mouse_event：LEFTDOWN 0x2/UP 0x4，RIGHT 0x8/0x10，MIDDLE 0x20/0x40；修饰键 keybd_event 按下→点击→逆序抬起
+      const [down, up] = btn === "right" ? ["0x0008", "0x0010"] : btn === "middle" ? ["0x0020", "0x0040"] : ["0x0002", "0x0004"]
+      const clicks = btn === "double" ? 2 : btn === "triple" ? 3 : 1
+      const label = { left: "单击", right: "右击", middle: "中键点击", double: "双击", triple: "三击" }[btn] ?? "点击"
+      const modDown = mods.map((m) => `[GebaiMouse2]::keybd_event(0x${m.toString(16)}, 0, 0, [UIntPtr]::Zero)`)
+      const modUp = [...mods].reverse().map((m) => `[GebaiMouse2]::keybd_event(0x${m.toString(16)}, 0, 2, [UIntPtr]::Zero)`)
+      const clickBlock = Array.from({ length: clicks }, (_, i) =>
+        `[GebaiMouse2]::mouse_event(${down}, 0, 0, 0, [UIntPtr]::Zero)
+[GebaiMouse2]::mouse_event(${up}, 0, 0, 0, [UIntPtr]::Zero)${i < clicks - 1 ? "\nStart-Sleep -Milliseconds 50" : ""}`,
+      ).join("\n")
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiMouse2 {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+[GebaiMouse2]::SetCursorPos(${x}, ${y}) | Out-Null
+${[...modDown, clickBlock, ...modUp].join("\n")}
+"已${label} (${x}, ${y})${mods.length ? `（修饰键 ${args.modifiers}）` : ""}"
+`)
+    } else if (plat === "darwin") {
+      return { output: "macOS 鼠标控制需要安装 cliclick（brew install cliclick），当前未集成" }
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
+      // xdotool 按键号：1=左 2=中 3=右；双击/三击 --repeat；modifiers 仅 Windows 支持
+      const btnArg = btn === "right" ? "3" : btn === "middle" ? "2" : btn === "double" ? "--repeat 2 1" : btn === "triple" ? "--repeat 3 1" : "1"
+      cmd = `xdotool mousemove ${x} ${y} click ${btnArg}`
+    }
+    const r = await run(ctx, cmd)
+    if (plat !== "win32" && mods.length) return { output: `${r.output}（注意：modifiers 仅 Windows 支持，本次未按修饰键）` }
+    return r
+  },
+}
+
+/* ---------- 滚动 / 拖拽 ---------- */
+
+export const mouseScrollTool: Tool = {
+  name: "mouse_scroll",
+  description:
+    "移动鼠标到指定坐标并滚动滚轮（direction: down/up=垂直（默认 down），left/right=水平；amount 滚动格数默认 3，每格约 3 行）。用于滚动列表/页面/画布。",
+  parameters: schema(
+    {
+      x: { type: "number" },
+      y: { type: "number" },
+      direction: { enum: ["down", "up", "left", "right"], description: "可选：滚动方向（默认 down）" },
+      amount: { type: "number", description: "可选：滚动格数（默认 3，范围 1-30）" },
+    },
+    ["x", "y"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const x = num(args.x, 0)
+    const y = num(args.y, 0)
+    const dir = String(args.direction ?? "down")
+    const amount = Math.max(1, Math.min(30, Math.round(num(args.amount, 3))))
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // wheel 正值向上、负值向下；hwheel 正值向右、负值向左；每格 120 单位（dwData 以带符号解释）
+      const units = amount * 120
+      const flag = dir === "left" || dir === "right" ? "0x1000" : "0x0800"
+      const data = dir === "down" || dir === "left" ? -units : units
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiMouse3 {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, int d, UIntPtr e);
+}
+"@
+[GebaiMouse3]::SetCursorPos(${x}, ${y}) | Out-Null
+[GebaiMouse3]::mouse_event(${flag}, 0, 0, ${data}, [UIntPtr]::Zero)
+"已向${dir}滚动 ${amount} 格 (${x}, ${y})"
+`)
+    } else if (plat === "darwin") {
+      return { output: "mouse_scroll 当前仅实现 Windows（macOS/Linux 暂未支持）" }
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
+      // xdotool 按键号：4=上 5=下 6=左 7=右
+      const btn = { up: "4", down: "5", left: "6", right: "7" }[dir] ?? "5"
+      cmd = `xdotool mousemove ${x} ${y} click --repeat ${amount} ${btn}`
+    }
+    return run(ctx, cmd)
+  },
+}
+
+export const mouseDragTool: Tool = {
+  name: "mouse_drag",
+  description:
+    '按住左键从 (from_x,from_y) 拖拽到 (to_x,to_y)（插值移动模拟真实轨迹，适配依赖鼠标移动事件的目标）。modifiers: 拖拽期间按住的修饰键（如 "ctrl"——Ctrl+拖拽复制文件、"shift"——约束轴/加速选中）。用于文件拖放、滑块调整、选区。',
+  parameters: schema(
+    {
+      from_x: { type: "number" },
+      from_y: { type: "number" },
+      to_x: { type: "number" },
+      to_y: { type: "number" },
+      modifiers: { type: "string", description: '可选："ctrl"/"shift"/"alt" 以 + 组合（拖拽期间按住）' },
+    },
+    ["from_x", "from_y", "to_x", "to_y"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const fx = num(args.from_x, 0)
+    const fy = num(args.from_y, 0)
+    const tx = num(args.to_x, 0)
+    const ty = num(args.to_y, 0)
+    const mods = parseModifiers(String(args.modifiers ?? ""))
+    if (mods === null) return { output: `modifiers 非法（仅支持 ctrl/shift/alt 以 + 组合）：${args.modifiers}` }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      const modDown = mods.map((m) => `[GebaiMouse4]::keybd_event(0x${m.toString(16)}, 0, 0, [UIntPtr]::Zero)`)
+      const modUp = [...mods].reverse().map((m) => `[GebaiMouse4]::keybd_event(0x${m.toString(16)}, 0, 2, [UIntPtr]::Zero)`)
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiMouse4 {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+}
+"@
+[GebaiMouse4]::SetCursorPos(${fx}, ${fy}) | Out-Null
+Start-Sleep -Milliseconds 60
+${modDown.join("\n")}
+[GebaiMouse4]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+$steps = 12
+for ($i = 1; $i -le $steps; $i++) {
+  $nx = ${fx} + [int]((${tx} - ${fx}) * $i / $steps)
+  $ny = ${fy} + [int]((${ty} - ${fy}) * $i / $steps)
+  [GebaiMouse4]::SetCursorPos($nx, $ny) | Out-Null
+  Start-Sleep -Milliseconds 12
+}
+[GebaiMouse4]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+${modUp.join("\n")}
+"已拖拽 (${fx}, ${fy}) → (${tx}, ${ty})${mods.length ? `（修饰键 ${args.modifiers}）` : ""}"
+`)
+    } else if (plat === "darwin") {
+      return { output: "mouse_drag 当前仅实现 Windows（macOS/Linux 暂未支持）" }
+    } else {
+      const probe = await ctx.runCommand("command -v xdotool || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 鼠标控制需要安装 xdotool" }
+      cmd = `xdotool mousemove ${fx} ${fy} mousedown 1 mousemove ${tx} ${ty} mouseup 1`
+    }
+    const r = await run(ctx, cmd)
+    if (plat !== "win32" && mods.length) return { output: `${r.output}（注意：modifiers 仅 Windows 支持，本次未按修饰键）` }
+    return r
+  },
+}
+
+/* ---------- 窗口状态 ---------- */
+
+export const windowStateTool: Tool = {
+  name: "window_state",
+  description:
+    "调整窗口状态（action: minimize=最小化 / maximize=最大化 / restore=还原 / close=优雅关闭（WM_CLOSE，可弹保存确认）/ topmost=置顶 / notopmost=取消置顶）。按 hwnd（多窗口进程精确指向）、pid 或 title 定位窗口（同 window_focus）。",
+  card: { titleParams: ["action", "pid", "title", "hwnd"], args: "none" },
+  parameters: schema(
+    {
+      action: { enum: ["minimize", "maximize", "restore", "close", "topmost", "notopmost"], description: "目标状态" },
+      pid: { type: "number", description: "可选：目标窗口的 PID（window_list 结果第一列）" },
+      title: { type: "string", description: "可选：按标题模糊匹配窗口（pid 未提供时）" },
+      hwnd: { type: "number", description: "可选：window_list 最后列 HWND（优先于 pid/title，多窗口进程精确指向）" },
+    },
+    ["action"],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const action = String(args.action ?? "")
+    const pid = num(args.pid, 0)
+    const title = String(args.title ?? "")
+    const hwnd = num(args.hwnd, 0)
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd、pid 或 title" }
+    const plat = process.platform
+    let cmd: string
+    if (plat === "win32") {
+      // ShowWindow：SW_CLOSE=0（发 WM_CLOSE 优雅关闭）/ SW_MAXIMIZE=3 / SW_MINIMIZE=6 / SW_RESTORE=9；
+      // topmost/notopmost 走 SetWindowPos HWND_TOPMOST(-1)/HWND_NOTOPMOST(-2) + SWP_NOMOVE|SWP_NOSIZE(0x0003)
+      const verb = { close: "已发送关闭指令", maximize: "已最大化", minimize: "已最小化", restore: "已还原", topmost: "已置顶", notopmost: "已取消置顶" }[action]
+      if (!verb) return { output: `未知 action: ${action}` }
+      const sw = { close: "0", maximize: "3", minimize: "6", restore: "9" }[action]
+      const pos = action === "topmost" ? "[IntPtr](-1)" : action === "notopmost" ? "[IntPtr](-2)" : ""
+      const act = pos ? `[GebaiWinState]::SetWindowPos($h, ${pos}, 0, 0, 0, 0, 0x0003) | Out-Null` : `[GebaiWinState]::ShowWindow($h, ${sw}) | Out-Null`
+      const loc = winLocate(hwnd, pid, title)
+      cmd = await psCmd(ctx, `
+${PS_DPI_AWARE}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GebaiWinState {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+}
+"@
+${loc.head}
+if (${loc.cond}) {
+  ${loc.assign}
+  ${act}
+  "${verb}: ${loc.label}"
+} else { "未找到匹配窗口" }
+`)
+    } else if (plat === "darwin") {
+      return { output: "window_state 当前仅实现 Windows（macOS/Linux 暂未支持）" }
+    } else {
+      const probe = await ctx.runCommand("command -v wmctrl || command -v xdotool || true", { timeoutMs: 5000 })
+      const t = probe.stdout.split("\n").find(Boolean)?.split("/").pop() ?? ""
+      if (!t) return { output: "Linux 窗口控制需要安装 wmctrl 或 xdotool" }
+      const target = title ? `'${sq(title)}'` : ""
+      if (t === "wmctrl") {
+        const prop = { minimize: "add,hidden", maximize: "add,maximized_vert,maximized_horz", restore: "remove,maximized_vert,maximized_horz" }[action]
+        if (action === "close") return { output: "Linux 下关闭窗口请用 wmctrl -c（或 xdotool key alt+F4），本工具暂未封装" }
+        cmd = `wmctrl -r ${target} -b ${prop}`
+      } else {
+        const op = { minimize: "windowminimize", maximize: "windowsize 100% 100%", restore: "windowsize 50% 50%", close: "key alt+F4" }[action]
+        cmd = `xdotool search --name ${target} ${op}`
+      }
+    }
+    return run(ctx, cmd)
+  },
+}
+
+/* ---------- 剪贴板写入 ---------- */
+
+export const clipboardWriteTool: Tool = {
+  name: "clipboard_write",
+  description:
+    "写入文本或图片到系统剪贴板（覆盖原内容，写入回验重试——剪贴板管理软件拦截时明确报错）。text 写入文本；image 写入 PNG 图片（相对会话工作目录，位图格式可直接粘贴到聊天/文档应用——截图交给用户手动粘贴的高频路径）——二选一。检测到疑似敏感值时告警但不中止（复制密钥供本人粘贴是常见需求）。",
+  card: { titleParams: ["image", "text"], args: "none" },
+  parameters: schema(
+    {
+      text: { type: "string", description: "可选：要写入的文本（与 image 二选一）" },
+      image: { type: "string", description: "可选：PNG 图片路径（相对会话工作目录，与 text 二选一，写入为位图）" },
+    },
+    [],
+  ),
+  async execute(args, ctx) {
+    desktopGate(ctx)
+    const text = String(args.text ?? "")
+    const image = String(args.image ?? "").trim()
+    if (text && image) return { output: "text 与 image 二选一（同时指定无法确定目标）" }
+    if (!text && !image) return { output: "请提供 text 或 image 参数" }
+    const plat = process.platform
+    let cmd: string
+    // 图片模式：PNG → 剪贴板位图（写入 + 回验尺寸一致）。OLE 剪贴板要求 STA——
+    // powershell.exe 默认 MTA，但 -STA 自 3.0 起为默认线程模型；runCommand 侧统一
+    // powershell -NoProfile -NonInteractive（Windows PowerShell 5.1 默认 STA）可直接 SetImage。
+    if (image) {
+      if (!image.toLowerCase().endsWith(".png")) return { output: `图片仅支持 PNG（当前 ${image}）` }
+      const imgPath = ctx.resolvePath(image).replace(/'/g, "''")
+      if (plat !== "win32") return { output: "图片写入剪贴板仅支持 Windows（macOS/Linux 暂未支持）" }
+      cmd = await psCmd(ctx, `
+$ErrorActionPreference = 'Stop'
+try {
+  Add-Type -AssemblyName System.Drawing
+  Add-Type -AssemblyName System.Windows.Forms
+  $imgPath = '${imgPath}'
+  # FromFile 保持文件句柄至 Dispose（FromStream+::new 内联在 PS5.1 有类型解析陷阱）
+  $b = [System.Drawing.Image]::FromFile($imgPath)
+  try {
+    [System.Windows.Forms.Clipboard]::SetImage($b)
+    Start-Sleep -Milliseconds 150
+    $cb = [System.Windows.Forms.Clipboard]::GetImage()
+    if ($cb -and $cb.Width -eq $b.Width -and $cb.Height -eq $b.Height) { "IMGOK $($b.Width)x$($b.Height)" } else { "IMGFAIL 回验失败（剪贴板可能被管理软件拦截）" }
+  } finally { $b.Dispose() }
+} catch {
+  "IMGFAIL " + $_.Exception.Message
+}
+`)
+      const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 20000 })
+      const out = (stdout || stderr).trim()
+      if (out.startsWith("IMGOK")) {
+        const dim = out.slice(6).trim()
+        return { output: `已写入图片到剪贴板（${image}，${dim}）——可到目标应用 Ctrl+V 粘贴` }
+      }
+      return { output: `图片写入剪贴板失败: ${out || `exit ${code}`}（确认 PNG 存在且剪贴板未被管理软件拦截）` }
+    }
+    if (plat === "win32") {
+      cmd = await psCmd(ctx, `
+Add-Type -AssemblyName System.Windows.Forms
+$want = ${psLiteral(text)}
+$setOk = $false
+foreach ($i in 1..3) {
+  try { Set-Clipboard -Value $want } catch {}
+  Start-Sleep -Milliseconds 80
+  try { if ((Get-Clipboard -Raw) -ceq $want) { $setOk = $true; break } } catch {}
+}
+if ($setOk) { "已写入" } else { "写入失败: 剪贴板写入未生效（可能被剪贴板管理软件拦截），原剪贴板可能已被部分修改" }
+`)
+    } else if (plat === "darwin") {
+      cmd = `osascript -e 'set the clipboard to ${sq(JSON.stringify(text))}'`
+    } else {
+      const probe = await ctx.runCommand("command -v xclip || command -v xsel || true", { timeoutMs: 5000 })
+      if (!probe.stdout.trim()) return { output: "Linux 剪贴板需要安装 xclip 或 xsel" }
+      cmd = probe.stdout.includes("xclip")
+        ? `printf '%s' ${sq(text)} | xclip -selection clipboard`
+        : `printf '%s' ${sq(text)} | xsel -b -i`
+    }
+    const r = await run(ctx, cmd)
+    if (r.output.startsWith("写入失败")) return { output: r.output }
+    const preview = text.length > 40 ? `${text.slice(0, 40)}…（共 ${text.length} 字符）` : text
+    const sensitive = detectSensitive(text)
+    const warn = sensitive ? `\n\n⚠️ 内容含疑似敏感信息（${sensitive}），已按原样写入——请勿粘贴到非信任位置。` : ""
+    return { output: `${r.output} ${text.length} 字符（内容预览：${preview}）${warn}` }
+  },
+}

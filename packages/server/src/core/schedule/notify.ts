@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto"
-import { checkWebhookUrl, fetchWithRedirectGuard } from "../security/fetch-guard"
+import { checkWebhookUrl, fetchWithRedirectGuard } from "@gebai/agents"
 import { hmacHex } from "../base/paths"
 
 /** 通知正文单字段（错误/输出摘要）保留长度。 */

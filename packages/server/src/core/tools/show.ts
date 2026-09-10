@@ -20,7 +20,7 @@ import {
   RENDER_HTML_MAX_HEIGHT,
   RENDER_HTML_MAX_WIDTH,
 } from "../support/artifacts"
-import { assertPublicHttpUrl, fetchWithRedirectGuard } from "../security/fetch-guard"
+import { assertPublicHttpUrl, fetchWithRedirectGuard } from "@gebai/agents"
 import { schema, type GlobalToolEntry } from "./shared"
 
 /** fetch_url：响应大小上限与超时；STREAM 上限为流式读取的内存护栏（超限中止读取）。 */

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync, writeFileSync } from "node:fs"
-import type { BridgeLike } from "./bridge"
+import type { BridgeLike } from "@gebai/agents"
 import { browserProxyEnabled, proxyFetch, installBrowserFetchProxy, BROWSER_PROXY_ENV } from "./fetch-proxy"
 import { runInToolFetchScope, runWithoutFetchProxy } from "../support/fetch-scope"
 

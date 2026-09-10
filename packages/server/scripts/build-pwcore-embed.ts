@@ -1,5 +1,5 @@
 /**
- * 构建时生成 playwright-core 内嵌产物（`src/core/pwcore.embedded.generated.json`）。
+ * 构建时生成 playwright-core 内嵌产物（`../agents/src/browser/pwcore.embedded.generated.json`）。
  *
  * 背景：bun --compile 单二进制形态在用户机器上不可依赖 node_modules（`Bun.resolveSync`
  * 锚定真实 CWD 的可达性），playwright 模块须随产物内嵌。浏览器本体不内嵌：Windows 默认
@@ -18,7 +18,7 @@ import { gzipDeterministic } from "./gzip-deterministic"
 import { dirname, join, relative } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const outFile = join(root, "src", "core", "pwcore.embedded.generated.json")
+const outFile = join(root, "..", "agents", "src", "browser", "pwcore.embedded.generated.json")
 
 // 定位 playwright-core：跟随 playwright 包解析位置（显式声明 playwright-core 依赖易与其版本错位）
 const pwEntry = Bun.resolveSync("playwright", root)

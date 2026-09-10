@@ -70,7 +70,7 @@ export function registerSessionFileRoutes(rc: RouteCtx): void {
     // 结构化 HTML（前端文件卡/弹窗 iframe 渲染）；渲染器惰性引入（exceljs/docx 解析较重，不拖启动），
     // 解析单一真相源在 wps 子Agent。非法/损坏文件 422（前端回退二进制占位与下载引导）。
     if (c.req.query("render") === "office") {
-      const { renderOfficeReadingView } = await import("../sub-agents/wps/preview")
+      const { renderOfficeReadingView } = await import("@gebai/agents")
       try {
         const html = await renderOfficeReadingView(safe)
         return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })

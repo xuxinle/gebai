@@ -24,7 +24,7 @@ export type ToolSet = Record<string, Tool>
 // ---- barrel 再导出（保持原 `core/tools` 导入路径兼容）----
 export * from "../support/truncate"
 export * from "../support/walk"
-export * from "../security/fetch-guard"
+export { fetchWithRedirectGuard, assertPublicHttpUrl } from "@gebai/agents"
 export * from "../support/artifacts"
 export * from "../support/plan"
 export * from "../support/exec-opts"
@@ -34,16 +34,10 @@ export * from "./shared"
 export { readTool, writeTool, lsTool, fileTool, grepTool, globTool, editTool, diffTool, patchTool } from "./fs"
 export { shTool, pyTool, resolvePythonCmd, _resetPythonCmdCache } from "./exec"
 export { showTool, fetchUrlTool, SHOW_MAX_BYTES, SHOW_TEXT_DIRECT_BYTES, SHOW_TEXT_MAX_CHARS } from "./show"
-export {
-  gitTool,
-  pageCaptureTool,
-  readFeedbackTool,
-  systemInfoTool,
-  envDetectTool,
-  makePreviewServerTool,
-  PAGE_CAPTURE_HTML_LIMIT,
-  type PreviewServerEntry,
-} from "./extras"
+// extras.ts 已整体迁 @gebai/agents（page_capture → shared/page-capture，read_feedback → shared/feedback）
+export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT, readFeedbackTool } from "@gebai/agents"
+// git/system_info/env_detect/preview_server（code 域工具）已迁 @gebai/agents（packages/agents/src/code/tools.ts）
+export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "@gebai/agents"
 export { makeTodoTool, askTool, fullModeTool } from "./interact"
 export { agentListTool, agentLoadTool, agentRunTool, branchRunTool, branchSyncTool, bgTaskTool } from "./agent"
 export { toolSchemasTool } from "./schemas"

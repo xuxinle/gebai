@@ -1,6 +1,6 @@
 /**
- * 构建时生成 CV GPU sidecar 驱动（`src/core/cv/cv-driver.mjs`）的内嵌产物
- * （`src/core/cv/cvdriver.embedded.generated.json`）。
+ * 构建时生成 CV GPU sidecar 驱动（`../agents/src/cv/cv-driver.mjs`）的内嵌产物
+ * （`../agents/src/cv/cvdriver.embedded.generated.json`）。
  *
  * 背景：cv-driver.mjs 需保持独立文件供 node 子进程运行（onnxruntime-node 原生推理），
  * bun build/--compile 无法内联；二进制形态下以 gzip base64 内嵌进产物，运行时物化到
@@ -17,8 +17,8 @@ import { gzipDeterministic } from "./gzip-deterministic"
 import { join } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const src = join(root, "src", "core", "cv", "cv-driver.mjs")
-const outFile = join(root, "src", "core", "cv", "cvdriver.embedded.generated.json")
+const src = join(root, "..", "agents", "src", "cv", "cv-driver.mjs")
+const outFile = join(root, "..", "agents", "src", "cv", "cvdriver.embedded.generated.json")
 
 const raw = readFileSync(src)
 writeFileIfChanged(outFile, JSON.stringify({ gzip: true, driver: gzipDeterministic(raw).toString("base64") }))

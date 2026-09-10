@@ -22,7 +22,10 @@ import { pathToFileURL } from "node:url"
 import { parseSubAgentMd } from "../src/core/agents/sub-agent-md"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const srcDir = join(root, "src", "sub-agents")
+const srcDir = join(root, "..", "agents", "src")  // @gebai/agents 包内子代理源
+/** 非子代理条目排除（agents 包内基建：analyzer/browser/cv/shared/widgets-store 目录 + 入口/类型声明文件）。 */
+const NON_AGENT_DIRS = new Set(["analyzer", "browser", "cv", "shared", "widgets-store"])
+const NON_AGENT_FILES = new Set(["index.ts", "types-md.d.ts"])
 const outFile = join(root, "src", "core", "subagents.bundle.generated.ts")
 
 /** 逗号分隔环境变量 → 名单（空值 = 未指定）。 */
@@ -57,11 +60,15 @@ const seen = new Set<string>()
 for (const e of entries) {
   const base = e.name
   if (e.isDirectory()) {
-    if (seen.has(base) || !validName(base)) continue
+    if (seen.has(base) || !validName(base) || NON_AGENT_DIRS.has(base)) continue
     seen.add(base)
     const tsEntry = join(srcDir, base, `${base}.ts`)
+    const indexEntry = join(srcDir, base, "index.ts")
     if (isDefFile(tsEntry)) {
-      defs.push({ name: base, dir: true, line: `import { def as subAgent_${base} } from "../sub-agents/${base}/${base}"` })
+      defs.push({ name: base, dir: true, line: `import { def as subAgent_${base} } from "../../../agents/src/${base}/${base}"` })
+    } else if (isDefFile(indexEntry)) {
+      // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
+      defs.push({ name: base, dir: true, line: `import { def as subAgent_${base} } from "../../../agents/src/${base}/index"` })
     } else {
       // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies 转义嵌入）
       try {
@@ -77,10 +84,11 @@ for (const e of entries) {
       }
     }
   } else if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
+    if (NON_AGENT_FILES.has(e.name)) continue
     const name = e.name.slice(0, -3)
     if (seen.has(name) || !validName(name)) continue
     seen.add(name)
-    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, line: `import { def as subAgent_${name} } from "../sub-agents/${name}"` })
+    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, line: `import { def as subAgent_${name} } from "../../../agents/src/${name}/index"` })
   }
 }
 defs.sort((a, b) => a.name.localeCompare(b.name))
@@ -166,8 +174,8 @@ const distDir = join(root, "dist")
 try {
   const { copyFile, mkdir, cp } = await import("node:fs/promises")
   await mkdir(distDir, { recursive: true })
-  await copyFile(join(root, "src", "core", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
-  await copyFile(join(root, "src", "core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
+  await copyFile(join(root, "..", "agents", "src", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
+  await copyFile(join(root, "..", "agents", "src", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
   // 客卿源（仓库根 keqing/，按语言分目录）→ dist/keqing/（独立部署的
   // dist 树发现兕底）；过滤运行时数据（venv/__pycache__）与编译产物（driver*.exe/objs）——
   // 只带源码与 manifest，可执行体由目标机构建引导按需生成；driver 跨平台形态：Windows

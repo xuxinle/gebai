@@ -3,7 +3,7 @@ import type { RouteCtx } from "./context"
 import type { FeedbackInfo, FeedbackInput } from "@gebai/sdk"
 import { feedbackContext, readFeedback, writeFeedback } from "../feedback"
 import { SERVICE_USER } from "../app"
-import { deleteMiniTool, getMiniTool, listMiniTools } from "../core/widgets/mini-tools"
+import { deleteMiniTool, getMiniTool, listMiniTools } from "@gebai/agents"
 
 export function registerFeedbackRoutes(rc: RouteCtx): void {
   const { app, d } = rc

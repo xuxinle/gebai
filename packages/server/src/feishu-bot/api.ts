@@ -4,7 +4,7 @@
  * 全部依赖注入（fetch 可伪造），不依赖官方 SDK。
  */
 import { hmacHex } from "../core/base/paths"
-import { feishuFetch } from "./tls"
+import { feishuFetch } from "@gebai/agents"
 
 export const FEISHU_BASE = "https://open.feishu.cn"
 

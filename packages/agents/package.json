@@ -10,7 +10,19 @@
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
-    "@gebai/sdk": "workspace:*"
+    "@gebai/sdk": "workspace:*",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "0.25.10",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "docx": "^9.7.1",
+    "exceljs": "^4.4.0",
+    "fflate": "^0.8.3",
+    "happy-dom": "^20.11.2",
+    "pdf-lib": "^1.17.1",
+    "pptxgenjs": "^4.0.1",
+    "unpdf": "^1.8.1",
+    "playwright": "^1.62.1",
+    "onnxruntime-web": "^1.29.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

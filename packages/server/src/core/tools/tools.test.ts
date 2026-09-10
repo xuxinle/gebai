@@ -4,7 +4,8 @@ import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
 import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest } from "."
-import { searchSymbolsTool } from "../support/analyzer"
+import { searchSymbolsTool } from "@gebai/agents"
+import { SessionStore } from "../session/store"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "../base/paths"
 import type { ToolContext, Tool, ToolResult } from "../base/types"
 
@@ -2977,3 +2978,90 @@ test("edit/patch 行尾自适应：CRLF 文件 × LF old_string/补丁——匹�
   cleanup(home)
 })
 
+// ---- 全局文件工具 project 参数 + preview 边界（自 agents 迁回：引擎域行为，agents 包不可依赖） ----
+describe("全局文件工具 project 参数（注册表形态，code 复用的同一份）", () => {
+  const SID = "abcdef01abcdef01abcdef01abcdef01"
+  function pctx(home: string, overrides: Record<string, unknown> = {}): ToolContext {
+    const tmp = join(home, "users", "default", "sessions", "s1", "tmp")
+    mkdirSync(tmp, { recursive: true })
+    return {
+      user: "default",
+      sessionId: overrides.sessionId as string ?? "s1",
+      workdir: tmp,
+      sessionWorkdir: tmp,
+      home,
+      env: {},
+      sandboxed: (overrides.sandboxed as boolean) ?? false,
+      resolvePath: (p: string) => join(tmp, p),
+      readFile: async (p: string) => await Bun.file(p).text(),
+      readBinaryFile: async (p: string) => new Uint8Array(await Bun.file(p).arrayBuffer()),
+      writeFile: async (p: string, content: string) => {
+        const { mkdir, writeFile } = await import("node:fs/promises")
+        const { dirname } = await import("node:path")
+        await mkdir(dirname(p), { recursive: true })
+        await writeFile(p, content)
+      },
+      listFiles: async () => [],
+      listDir: async () => [],
+      deleteFile: async () => {},
+      moveFile: async () => {},
+      runCommand: async () => ({ stdout: "", stderr: "", code: 0 }),
+      uploadAttachment: async (r: { path: string }) => r.path,
+      publish: () => {},
+      projects: [],
+      resolveProjectPath: () => { throw new Error("未知预置项目") },
+      getTodos: async () => [],
+      setTodos: async () => {},
+      registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
+      listSubAgentDefs: () => [],
+      loadSubAgent: async () => {},
+      runNewSession: async () => ({ output: "", archive: { runId: "", agents: [], input: "", output: "", messages: [] } }),
+      waitForChoice: async () => null,
+      waitForEnv: async () => false,
+      waitForDraw: async () => null,
+    } as ToolContext
+  }
+
+  test("全局 read/write/edit 带 project 参数：路径相对项目根解析，产物块携带项目内绝对路径", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-code-globals-"))
+    try {
+      const c = pctx(home, { sessionId: SID })
+      const tools = createGlobalTools()
+      const projRoot = join(home, "myproj")
+      mkdirSync(join(projRoot, "src"), { recursive: true })
+      writeFileSync(join(projRoot, "src", "a.ts"), "export const a = 1\n")
+      const r = await tools.read.execute({ project: projRoot, path: "src/a.ts" }, c)
+      expect(r.output).toContain("export const a = 1")
+      expect((r.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "a.ts"))
+      const w = await tools.write.execute({ project: projRoot, path: "src/b.ts", content: "const b = 2\n" }, c)
+      expect((w.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "b.ts"))
+      const e = await tools.edit.execute({ project: projRoot, path: "src/b.ts", edits: [{ old_string: "b = 2", new_string: "b = 3" }] }, c)
+      expect((e.blocks as Array<{ path?: string }>)[0]?.path).toBe(join(projRoot, "src", "b.ts"))
+      const s2 = await tools.write.execute({ path: "sess.txt", content: "x" }, c)
+      expect(s2.output).toContain("已写入")
+      expect(await Bun.file(join(c.workdir, "sess.txt")).text()).toBe("x")
+      const store = new SessionStore({ home })
+      expect(store.resolvePreviewFile(SID, "default", join(projRoot, "src", "a.ts"), false)).toBe(join(projRoot, "src", "a.ts"))
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("沙箱模式：project 根映射进用户数据目录后 preview 边界放行；越界根被拒（工具与 preview 同一边界）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-code-sb-"))
+    try {
+      const c = pctx(home, { sessionId: SID, sandboxed: true })
+      const tools = createGlobalTools()
+      const mapped = join(home, "users", "default", "proj")
+      mkdirSync(join(mapped, "src"), { recursive: true })
+      writeFileSync(join(mapped, "src", "a.ts"), "x\n")
+      const r = await tools.read.execute({ project: "./proj", path: "src/a.ts" }, c)
+      const blockPath = (r.blocks as Array<{ path?: string }>)[0]?.path as string
+      expect(blockPath).toBe(join(mapped, "src", "a.ts"))
+      const store = new SessionStore({ home })
+      expect(store.resolvePreviewFile(SID, "default", blockPath!, true)).toBe(blockPath)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})

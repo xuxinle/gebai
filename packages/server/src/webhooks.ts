@@ -3,7 +3,7 @@ import { dirname, join } from "node:path"
 import type { AgentEvent } from "@gebai/sdk"
 import type { EventBus } from "./core/base/event-bus"
 import { hmacHex } from "./core/base/paths"
-import { checkWebhookUrl, fetchWithRedirectGuard } from "./core/security/fetch-guard"
+import { checkWebhookUrl, fetchWithRedirectGuard } from "@gebai/agents"
 
 export interface WebhookConfig {
   id: string

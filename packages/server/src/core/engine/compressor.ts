@@ -6,7 +6,7 @@ import type { LLMChunk, LLMProvider, LLMUsage } from "../llm/llm"
 import type { SessionStore } from "../session/store"
 import { isProtectedMessage } from "../session/store"
 import type { EnvManager } from "../session/env"
-import { VISION_MIME_SET } from "../tools/vision"
+import { VISION_MIME_SET } from "@gebai/agents"
 
 /** 压缩判定保留比：默认压缩最早部分，保留最近一半可压缩消息。 */
 const COMPACT_KEEP_RATIO = 0.5

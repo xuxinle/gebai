@@ -1,8 +1,8 @@
 /** 认证与身份域路由：/auth/*（登录/注册/登出/me/外部身份兑换与探测）+ 飞书 OAuth 回调。 */
 import type { RouteCtx } from "./context"
 import { TokenBucket } from "../core/security/ratelimit"
-import { consumePendingAuth, defaultUserTokenStore, exchangeOAuthToken, fetchFeishuUserInfo, getPendingAuth, toUserTokenEntry } from "../sub-agents/feishu_docs/oauth"
-import { feishuFetch } from "../feishu-bot/tls"
+import { consumePendingAuth, defaultUserTokenStore, exchangeOAuthToken, fetchFeishuUserInfo, getPendingAuth, toUserTokenEntry } from "@gebai/agents"
+import { feishuFetch } from "@gebai/agents"
 
 export function registerAuthRoutes(rc: RouteCtx): void {
   const { app, d } = rc

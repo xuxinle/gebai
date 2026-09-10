@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { getEnvCatalog } from "./env-catalog"
-import { def as codeDef } from "../../sub-agents/code"
-import { def as selfOptimizeDef } from "../../sub-agents/self_optimize"
-import { def as feishuDocsDef } from "../../sub-agents/feishu_docs/feishu_docs"
+import { code, self_optimize, feishu_docs } from "@gebai/agents"
+
+const codeDef = code.def
+const selfOptimizeDef = self_optimize.def
+const feishuDocsDef = feishu_docs.def
 
 const defs = [codeDef, selfOptimizeDef, feishuDocsDef]
 

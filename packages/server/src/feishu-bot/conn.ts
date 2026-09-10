@@ -4,7 +4,7 @@
  */
 import { FEISHU_BASE } from "./api"
 import { buildAckFrame, buildPingFrame, FRAME_CONTROL, FRAME_DATA, FrameAssembler, parseClientConfig, parseDataFrame, parseEventPayload, type DataFrameInfo } from "./protocol"
-import { feishuFetch, feishuWsOptions } from "./tls"
+import { feishuFetch, feishuWsOptions } from "@gebai/agents"
 
 /** WebSocket 客户端的最小抽象（Bun 内置 WebSocket 满足该形状）。 */
 export interface WsLike {

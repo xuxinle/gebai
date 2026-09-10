@@ -178,6 +178,12 @@ export type ToolContext = {
    */
   waitForDraw: (render: { code: string; name?: string; format?: import("./types").DiagramFormat }) => Promise<{ ok: boolean; error?: string } | null>
   /**
+   * 请求前端捕获当前页面并等待结果（page_capture 工具用）：发布 event.capture.request 给前端，
+   * 前端回传渲染后 DOM html 与可选截图（imageBase64）；前端离线/超时返回 null。
+   * 可选：测试桩/无引擎环境未注入时工具返回不可用说明。
+   */
+  waitForCapture?: (opts?: { fullPage?: boolean; delayMs?: number }) => Promise<{ html: string; imageBase64?: string; error?: string } | null>
+  /**
    * 定时任务（cron_* 工具用，按当前用户绑定——用户级资源与会话解耦；服务端未启用定时任务能力时为空）。
    */
   cron?: CronService

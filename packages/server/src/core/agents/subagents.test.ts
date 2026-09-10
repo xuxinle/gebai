@@ -191,7 +191,7 @@ describe("子Agent 依赖与自动装载（dependencies 级联，DESIGN「子Age
 })
 
 describe("子Agent 热加载（目录签名失效缓存）", () => {
-  const dir = join(import.meta.dirname, "..", "..", "sub-agents")
+  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")  // @gebai/agents 包内子代理源
   test("新增/删除 md 子Agent 目录即时生效（无需重启进程）", async () => {
     const name = "zz_hotreload_tmp"
     const agentDir = join(dir, name)
@@ -223,7 +223,7 @@ describe("子Agent 热加载（目录签名失效缓存）", () => {
     m.unregister("cron")
     expect(m.def("cron")).toBeUndefined()
     // 触发重扫（touch code.ts 改变目录签名），removedDefs 过滤使其保持移除
-    const probe = join(dir, "code.ts")
+    const probe = join(dir, "code", "index.ts")
     const st = statSync(probe)
     utimesSync(probe, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
     await m.refreshIfChanged()
@@ -339,7 +339,7 @@ describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE �
     m.applyEnableDisable([], ["code"])
     expect(m.def("code")).toBeUndefined()
     // 触发重扫（touch cron 目录内文件改变签名）后移除保持
-    const probe = join(import.meta.dirname, "..", "..", "sub-agents", "code.ts")
+    const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "code", "index.ts")
     const st = statSync(probe)
     utimesSync(probe, new Date(st.atimeMs + 5000), new Date(st.mtimeMs + 5000))
     await m.refreshIfChanged()
@@ -584,7 +584,7 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
       await m.refreshIfChanged()
       expect(m.def("mergx")?.description).toBe("v2")
       // TS 目录签名变化触发全量重扫：客卿贡献不丢（独立贡献集 + 进程级缓存水合）
-      const probe = join(import.meta.dirname, "..", "..", "sub-agents", "code.ts")
+      const probe = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "code", "index.ts")
       const st2 = statSync(probe)
       utimesSync(probe, new Date(st2.atimeMs + 6000), new Date(st2.mtimeMs + 6000))
       await m.refreshIfChanged()
