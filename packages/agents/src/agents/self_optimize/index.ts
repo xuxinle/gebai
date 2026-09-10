@@ -195,13 +195,7 @@ const journalTool: import("@gebai/sdk").Tool = {
     const { join, dirname } = await import("node:path")
     const { mkdir } = await import("node:fs/promises")
     const file = join(ctx.home, "users", ctx.user, JOURNAL_FILE)
-    let entries: OptimizeJournalEntry[] = []
-    try {
-      const parsed = JSON.parse(await Bun.file(file).text())
-      if (Array.isArray(parsed)) entries = parsed.filter((e) => e && typeof e === "object" && typeof e.title === "string")
-    } catch {
-      /* 首次记录或文件损坏：从空开始 */
-    }
+    const entries = await readJsonList<OptimizeJournalEntry>(file, isJournalEntry)
     const action = String(args.action ?? "list")
     if (action === "append") {
       const title = String(args.title ?? "").trim()
@@ -215,11 +209,16 @@ const journalTool: import("@gebai/sdk").Tool = {
       if (outcome === "applied" || outcome === "reverted" || outcome === "failed") entry.outcome = outcome
       const lessons = String(args.lessons ?? "").trim()
       if (lessons) entry.lessons = lessons
-      entries.push(entry)
-      if (entries.length > JOURNAL_MAX_ENTRIES) entries = entries.slice(-JOURNAL_MAX_ENTRIES)
-      await mkdir(dirname(file), { recursive: true })
-      await Bun.write(file, JSON.stringify(entries, null, 2))
-      return { output: `已记录（累计 ${entries.length} 条）：${title}` }
+      // 锁内重读再追加：并发 append 各自读到的旧日志会互相覆盖（后写覆盖前写而丢记录）
+      const total = await withRuntimeJsonLock(async () => {
+        const fresh = await readJsonList<OptimizeJournalEntry>(file, isJournalEntry)
+        fresh.push(entry)
+        const kept = fresh.length > JOURNAL_MAX_ENTRIES ? fresh.slice(-JOURNAL_MAX_ENTRIES) : fresh
+        await mkdir(dirname(file), { recursive: true })
+        await Bun.write(file, JSON.stringify(kept, null, 2))
+        return kept.length
+      })
+      return { output: `已记录（累计 ${total} 条）：${title}` }
     }
     if (action !== "list") return { output: `无效的 action: ${action}（仅支持 append/list）。` }
     const limit = Math.max(1, Math.min(50, Number(args.limit) || 10))
@@ -249,6 +248,35 @@ interface OptimizeBacklogItem {
  *  条目解决即移除、不设环形上限——暂存项是待办不是历史，静默淘汰会丢待办。 */
 const BACKLOG_FILE = "self-optimize-backlog.json"
 
+/**
+ * 运行时 JSON 清单的读-改-写互斥：journal 与 backlog 的写入都是「读全量 → 改 → 整文件覆盖」，
+ * 并发调用（同一回复的多个工具调用、js 编排并行）各自读到同一旧值再写回，后写会静默覆盖前写而丢条目。
+ * 进程内串行化覆盖实际并发面（多个歌白实例共写同一用户文件不在支持范围）。
+ */
+let runtimeJsonQueue: Promise<unknown> = Promise.resolve()
+function withRuntimeJsonLock<T>(fn: () => Promise<T>): Promise<T> {
+  const task = runtimeJsonQueue.then(fn, fn)
+  runtimeJsonQueue = task.then(
+    () => undefined,
+    () => undefined,
+  )
+  return task
+}
+
+/** 读 JSON 清单（缺失/损坏或非数组时返回空清单，条目按 assert 校验过滤）。 */
+async function readJsonList<T>(file: string, assert: (v: Record<string, unknown>) => boolean): Promise<T[]> {
+  try {
+    const parsed = JSON.parse(await Bun.file(file).text())
+    if (Array.isArray(parsed)) return parsed.filter((e) => e && typeof e === "object" && assert(e)) as T[]
+  } catch {
+    /* 首次写入或文件损坏：从空开始 */
+  }
+  return []
+}
+
+const isBacklogItem = (e: Record<string, unknown>) => typeof e.problem === "string"
+const isJournalEntry = (e: Record<string, unknown>) => typeof e.title === "string"
+
 /** backlog：待优化项暂存清单（离线优化）——任务执行中因知识/工具不足或错误导致重复试错、低效而不便
  *  立即中断当前任务时，先把问题与优化方向暂存（会话ID自动记录，供后续回溯完整上下文），优化时机后移、
  *  证据先落盘；后续集中查看待优化项执行全面优化，解决后 resolve 移除。 */
@@ -267,38 +295,43 @@ const backlogTool: import("@gebai/sdk").Tool = {
     const { join, dirname } = await import("node:path")
     const { mkdir } = await import("node:fs/promises")
     const file = join(ctx.home, "users", ctx.user, BACKLOG_FILE)
-    let items: OptimizeBacklogItem[] = []
-    try {
-      const parsed = JSON.parse(await Bun.file(file).text())
-      if (Array.isArray(parsed)) items = parsed.filter((e) => e && typeof e === "object" && typeof e.problem === "string")
-    } catch {
-      /* 首次暂存或文件损坏：从空开始 */
-    }
+    const items = await readJsonList<OptimizeBacklogItem>(file, isBacklogItem)
     const action = String(args.action ?? "list")
     if (action === "add") {
       const problem = String(args.problem ?? "").trim()
       if (!problem) return { output: "backlog add 需要 problem（说清问题现象：什么知识/工具不足或错误导致了什么低效）。" }
-      const id = items.reduce((max, e) => Math.max(max, e.id || 0), 0) + 1
-      const item: OptimizeBacklogItem = { id, at: Date.now(), problem, session: String(args.session_id ?? ctx.sessionId ?? "") }
       const direction = String(args.direction ?? "").trim()
-      if (direction) item.direction = direction
-      items.push(item)
-      await mkdir(dirname(file), { recursive: true })
-      await Bun.write(file, JSON.stringify(items, null, 2))
+      const session = String(args.session_id ?? ctx.sessionId ?? "")
+      // 锁内重读再追加：并发 add 各自读到的旧清单会互相覆盖（后写覆盖前写而丢条目）
+      const added = await withRuntimeJsonLock(async () => {
+        const fresh = await readJsonList<OptimizeBacklogItem>(file, isBacklogItem)
+        const id = fresh.reduce((max, e) => Math.max(max, e.id || 0), 0) + 1
+        const item: OptimizeBacklogItem = { id, at: Date.now(), problem, session }
+        if (direction) item.direction = direction
+        fresh.push(item)
+        await mkdir(dirname(file), { recursive: true })
+        await Bun.write(file, JSON.stringify(fresh, null, 2))
+        return { id, total: fresh.length }
+      })
       return {
         output:
-          `已暂存待优化项 #${id}（共 ${items.length} 项待处理）：${problem}${direction ? `（方向：${direction}）` : ""}\n` +
+          `已暂存待优化项 #${added.id}（共 ${added.total} 项待处理）：${problem}${direction ? `（方向：${direction}）` : ""}\n` +
           `不打断当前任务继续执行；暂存后需用 ask 向用户确认处理时机——当场修复或留待后续集中全面优化（用户不选则默认后续；后续 self_optimize_backlog action=list 取清单执行）。`,
       }
     }
     if (action === "resolve") {
       const ids = new Set((Array.isArray(args.ids) ? args.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0))
       if (!ids.size) return { output: "backlog resolve 需要 ids（要移除的待优化项编号，从 add/list 输出取，可多个）。" }
-      const kept = items.filter((e) => !ids.has(e.id))
-      const resolved = items.length - kept.length
-      if (!resolved) return { output: `未找到编号 ${[...ids].join("/")} 对应的待优化项（action=list 查看当前清单）。` }
-      await Bun.write(file, JSON.stringify(kept, null, 2))
-      return { output: `已移除 ${resolved} 项已解决的待优化项，剩余 ${kept.length} 项待处理。优化过程请同步 self_optimize_journal append 记录。` }
+      // 锁内重读再移除：与并发 add 串行化，避免后写覆盖
+      const removed = await withRuntimeJsonLock(async () => {
+        const fresh = await readJsonList<OptimizeBacklogItem>(file, isBacklogItem)
+        const kept = fresh.filter((e) => !ids.has(e.id))
+        if (kept.length === fresh.length) return null
+        await Bun.write(file, JSON.stringify(kept, null, 2))
+        return { count: fresh.length - kept.length, total: kept.length }
+      })
+      if (!removed) return { output: `未找到编号 ${[...ids].join("/")} 对应的待优化项（action=list 查看当前清单）。` }
+      return { output: `已移除 ${removed.count} 项已解决的待优化项，剩余 ${removed.total} 项待处理。优化过程请同步 self_optimize_journal append 记录。` }
     }
     if (action !== "list") return { output: `无效的 action: ${action}（仅支持 add/list/resolve）。` }
     if (!items.length) return { output: "（暂无待优化项）" }

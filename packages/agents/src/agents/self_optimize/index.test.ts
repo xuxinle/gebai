@@ -351,4 +351,18 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     expect(r1.output).toContain("后续集中全面优化")
     cleanup(home)
   })
+
+  test("backlog 并发 add 不互相覆盖（读-改-写串行化）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-backlog-race-"))
+    const c = ctx(home)
+    // 同一回复的多个工具调用（js 编排 Promise.all）会并发 add：读-改-写各自读到同一旧清单、
+    // 后写覆盖前写而静默丢条目——互斥后全部落盘
+    await Promise.all(
+      Array.from({ length: 6 }, (_, i) => selfOptimizeDef.tools!.backlog.execute({ action: "add", problem: `并发问题 ${i}` }, c)),
+    )
+    const list = await selfOptimizeDef.tools!.backlog.execute({ action: "list" }, c)
+    expect(list.output).toContain("共 6 项")
+    for (let i = 0; i < 6; i++) expect(list.output).toContain(`并发问题 ${i}`)
+    cleanup(home)
+  })
 })

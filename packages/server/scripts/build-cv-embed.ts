@@ -5,7 +5,7 @@
  * 运行时（dist 入口 mjs + wasm 本体，见 core/cv/ort-loader.ts）与 PP-OCR 模型三件套
  * （det/rec ONNX + 字典）须随产物内嵌，运行时物化到 `{GEBAI_HOME}/vendor/cv/`。
  *
- * 模型来源：`assets/cv-models/` 已有文件优先（离线/内网自备三件套）；缺失时从
+ * 模型来源：`{GEBAI_HOME}/models/ocr/` 已有文件优先（资源子仓库，离线/内网自备三件套）；缺失时从
  * GEBAI_CV_MODEL_BASE 下载（缺省 hf-mirror 的 RapidOCR 托管 PP-OCRv4 mobile，内网可覆写
  * 镜像；文件名固定 det.onnx/rec.onnx 对应两个 URL）。字典从 rec 模型内嵌的 character
  * 元数据提取（RapidOCR 约定，免去单独的字典下载源）。下载失败时生成空清单——构建不失败，
@@ -20,7 +20,9 @@ import { agentsSrcPath } from "./agents-paths"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const outFile = agentsSrcPath("core", "cv", "cv.embedded.generated.json")
-const assetsDir = join(root, "assets", "cv-models")
+// 模型落盘目录：资源子仓库 {GEBAI_HOME}/models/ocr（dev 形态 GEBAI_HOME = 仓库根）
+const gebaiHome = process.env.GEBAI_HOME?.trim() || join(root, "..", "..")
+const assetsDir = join(gebaiHome, "models", "ocr")
 
 const MODEL_BASE = process.env.GEBAI_CV_MODEL_BASE || "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4"
 const MODEL_SOURCES = [
@@ -118,7 +120,7 @@ async function main(): Promise<void> {
   let dict = existsSync(dictPath) ? readFileSync(dictPath, "utf8") : null
   if (!dict) {
     dict = extractDictFromRec(new Uint8Array(readFileSync(join(assetsDir, "rec.onnx"))))
-    if (!dict) throw new Error("[build-cv-embed] rec 模型无内嵌 character 字典，且 assets/cv-models/dict.txt 缺失——请自备字典文件")
+    if (!dict) throw new Error("[build-cv-embed] rec 模型无内嵌 character 字典，且 models/ocr/dict.txt 缺失——请自备字典文件")
     writeFileSync(dictPath, dict)
   }
   addFile("dict.txt", Buffer.from(dict, "utf8"))

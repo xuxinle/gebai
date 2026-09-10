@@ -22,17 +22,22 @@ function num(v: unknown, dflt: number): number {
 /** 输出/数据节点行数上限（控件树规模失控保护；超出标记 truncated 建议收窄 depth/region）。 */
 const UIA_NODE_LIMIT = 400
 
+/** 浅树自动加深阈值：首查节点数低于此值且未显式指定 depth 时，以最大深度重查一次。 */
+const UIA_AUTO_DEEPEN_BELOW = 50
+const UIA_MAX_DEPTH = 12
+
 export const uiaInspectTool: Tool = {
   name: "uia_inspect",
   description:
-    "枚举目标窗口的 UI Automation 语义控件树（仅 Windows，只读）：控件角色/名称/AutomationId/类名/bounds/状态（enabled/focused）/值（输入框文本等）。定位窗口按 pid 或 title（可组合）。与像素通道互补：控件状态（禁用/勾选/焦点）与值是 OCR 判不了的，控件中心坐标可直接 mouse_click 交叉校验；Chromium/Electron 系无障碍树惰性构建已内置双查询（首查触发构建，400ms 后正式收集）。空树/浅树（<5 节点）说明目标是 Flutter/游戏/自绘框架（不暴露语义），应回落 desktop_ocr/desktop_locate/desktop_locate_image 像素通道。find 关键词只输出名称/ID 匹配的控件（含路径），depth 控制深度（默认 6，上限 12），max 控制行数上限（默认 200，上限 400）。",
+    "枚举目标窗口的 UI Automation 语义控件树（仅 Windows，只读）：控件角色/名称/AutomationId/类名/bounds/状态（enabled/focused）/值（输入框文本等）。定位窗口按 hwnd / pid / title（可组合）——hwnd 取自 window_list 最后一列，同进程多窗口（explorer 的桌面与任务栏、浏览器多窗口）时精确指向；只给 pid 命中多个顶层窗口时自动选面积最大者，并在输出中报告候选数。与像素通道互补：控件状态（禁用/勾选/焦点）与值是 OCR 判不了的，控件中心坐标可直接 mouse_click 交叉校验；Chromium/Electron 系无障碍树惰性构建已内置双查询（首查触发构建，400ms 后正式收集），并在未显式指定 depth 时对浅树自动加深重查一次（这类应用的容器节点与真实语义常跨多层）。空树/浅树（<5 节点）说明目标是 Flutter/游戏/自绘框架（不暴露语义），应回落 desktop_ocr/desktop_locate/desktop_locate_image 像素通道。find 关键词只输出名称/ID 匹配的控件（含路径），depth 控制深度（默认 6，自动加深至 12，上限 12），max 控制行数上限（默认 200，上限 400）。",
   card: { titleParams: ["pid", "title", "find"], args: "none" },
   parameters: schema(
     {
+      hwnd: { type: "number", description: "可选：目标窗口 HWND（window_list 结果最后一列，优先于 pid/title——同进程多窗口时精确指向）" },
       pid: { type: "number", description: "可选：目标窗口 PID（window_list 结果第一列）" },
       title: { type: "string", description: "可选：按标题模糊匹配窗口（与 pid 可组合，同进程多窗口时区分用）" },
       find: { type: "string", description: "可选：关键词过滤，只输出名称/AutomationId 含关键词的控件（含其路径）" },
-      depth: { type: "number", description: "可选：枚举深度（默认 6，上限 12）" },
+      depth: { type: "number", description: "可选：枚举深度（默认 6，上限 12；显式指定时不自动加深）" },
       max: { type: "number", description: "可选：输出行数上限（默认 200，上限 400）" },
     },
     [],
@@ -42,39 +47,48 @@ export const uiaInspectTool: Tool = {
     if (process.platform !== "win32") {
       return { output: "uia_inspect 仅支持 Windows（UI Automation 语义树；macOS AX / Linux AT-SPI 暂未集成）" }
     }
+    const hwnd = num(args.hwnd, 0)
     const pid = num(args.pid, 0)
     const title = String(args.title ?? "").trim()
-    if (!pid && !title) return { output: "请提供 pid 或 title（定位目标窗口）" }
+    if (!hwnd && !pid && !title) return { output: "请提供 hwnd / pid / title 之一（定位目标窗口；同进程多窗口用 hwnd 精确指向）" }
     const find = String(args.find ?? "").trim()
-    const depthMax = Math.max(1, Math.min(12, num(args.depth, 6)))
+    const explicitDepth = args.depth !== undefined && args.depth !== null && args.depth !== ""
+    const depthMax = Math.max(1, Math.min(UIA_MAX_DEPTH, num(args.depth, 6)))
     const maxRows = Math.max(10, Math.min(UIA_NODE_LIMIT, num(args.max, 200)))
-    // PowerShell 全量注入 base64（find 关键词经 psLiteral 同路径，无插值面）——沿用 desktop_tools 约定
+    // PowerShell 全量注入 base64（find 关键词经 base64 同路径，无插值面）——沿用 desktop_tools 约定
     const psScript = `
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
 $trueCond = [System.Windows.Automation.Condition]::TrueCondition
 $rootEl = [System.Windows.Automation.AutomationElement]::RootElement
 $wins = $rootEl.FindAll([System.Windows.Automation.TreeScope]::Children, $trueCond)
-$target = $null
+# 候选窗口收集：同进程多窗口（explorer 的桌面与任务栏、浏览器多窗口）按 pid 会命中多个，
+# 收集后取面积最大者为主窗口（按枚举顺序取首个会命中任务栏等辅助窗口）
+$cands = New-Object System.Collections.Generic.List[object]
 foreach ($w in $wins) {
   $c = $w.Current
   if (${pid ? `$c.ProcessId -ne ${pid}` : "$false"}) { continue }
+  if (${hwnd ? `[int]$c.NativeWindowHandle -ne ${hwnd}` : "$false"}) { continue }
   $wt = [string]$c.Name
   ${title ? `if (-not $wt.Contains([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${Buffer.from(title, "utf8").toString("base64")}")))) { continue }` : ""}
-  $target = $w; break
+  $r = $c.BoundingRectangle
+  $area = 0
+  if (-not [double]::IsInfinity($r.Width) -and -not [double]::IsNaN($r.Width) -and -not [double]::IsInfinity($r.Height) -and -not [double]::IsNaN($r.Height)) {
+    $area = [math]::Max(0, $r.Width) * [math]::Max(0, $r.Height)
+  }
+  $cands.Add([pscustomobject]@{ el = $w; hwnd = [int]$c.NativeWindowHandle; area = $area }) | Out-Null
 }
-if (-not $target) { "NOTFOUND"; exit }
+if ($cands.Count -eq 0) { "NOTFOUND"; exit }
+$pick = $cands | Sort-Object -Property area -Descending | Select-Object -First 1
+$target = $pick.el
 # 双查询：首查触发 Chromium 系惰性无障碍树构建，400ms 后正式收集
 [void]$target.FindAll([System.Windows.Automation.TreeScope]::Descendants, $trueCond)
 Start-Sleep -Milliseconds 400
-$rows = New-Object System.Collections.Generic.List[object]
-$script:truncated = $false
-$script:total = 0
 $findB64 = "${Buffer.from(find, "utf8").toString("base64")}"
 $findKw = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($findB64))
-function Walk($el, [int]$depth, [string]$path) {
+function Walk($el, [int]$depth, [string]$path, [int]$maxDepth) {
   $script:total++
-  if ($rows.Count -ge ${maxRows} + ${find ? "0" : "0"}) { $script:truncated = $true; return }
+  if ($script:rows.Count -ge ${maxRows}) { $script:truncated = $true; return }
   $c = $el.Current
   $ct = $c.ControlType.ProgrammaticName -replace "^ControlType\\.", ""
   if (-not $ct) { $ct = "Unknown" }
@@ -95,7 +109,7 @@ function Walk($el, [int]$depth, [string]$path) {
   $newPath = if ($path) { $path + " > " + $thisLabel } else { $thisLabel }
   $kwHit = ($findKw -eq "") -or ($nm -like "*$findKw*") -or ($aid -like "*$findKw*")
   if ($kwHit) {
-    $rows.Add([pscustomobject]@{
+    $script:rows.Add([pscustomobject]@{
       depth = $depth; role = $ct; name = $nm; automationId = $aid
       className = [string]$c.ClassName
       x = [int][Math]::Round($r.X); y = [int][Math]::Round($r.Y)
@@ -103,18 +117,31 @@ function Walk($el, [int]$depth, [string]$path) {
       states = ($states -join ","); value = $val; path = $newPath
     }) | Out-Null
   }
-  if ($depth -ge ${depthMax}) { return }
+  if ($depth -ge $maxDepth) { return }
   $kids = $el.FindAll([System.Windows.Automation.TreeScope]::Children, $trueCond)
-  foreach ($k in $kids) { Walk $k ($depth + 1) $newPath }
+  foreach ($k in $kids) { Walk $k ($depth + 1) $newPath $maxDepth }
 }
-Walk $target 0 ""
-if ($rows.Count -eq 0 -and $script:total -le 1) {
-  "EMPTY total=$($script:total) title=$([string]$target.Current.Name)"
-} elseif ($rows.Count -eq 0 -and "${find}" -ne "") {
+function Collect([int]$maxDepth) {
+  $script:rows = New-Object System.Collections.Generic.List[object]
+  $script:truncated = $false
+  $script:total = 0
+  Walk $target 0 "" $maxDepth
+}
+Collect ${depthMax}
+$deepened = $false
+# 浅树自动加深：Chromium/Electron 在受限深度下可能只暴露容器节点（真实语义在更深层），
+# 未显式指定 depth 时以最大深度重查一次
+if (${explicitDepth ? "$false" : "$true"} -and $script:total -ge 2 -and $script:total -lt ${UIA_AUTO_DEEPEN_BELOW} -and ${depthMax} -lt ${UIA_MAX_DEPTH}) {
+  Collect ${UIA_MAX_DEPTH}
+  $deepened = $true
+}
+if ($script:rows.Count -eq 0 -and $script:total -le 1) {
+  "EMPTY total=$($script:total)"
+} elseif ($script:rows.Count -eq 0 -and "${find}" -ne "") {
   "NOKW total=$($script:total)"
 } else {
-  $json = $rows | ConvertTo-Json -Depth 4 -Compress
-  "OK total=$($script:total) shown=$($rows.Count) truncated=$($script:truncated) kw=${find}"
+  $json = $script:rows | ConvertTo-Json -Depth 4 -Compress
+  "OK total=$($script:total) shown=$($script:rows.Count) truncated=$($script:truncated) cands=$($cands.Count) deepened=$($deepened) kw=${find}"
   $json
 }
 `
@@ -123,7 +150,10 @@ if ($rows.Count -eq 0 -and $script:total -le 1) {
     const { stdout, stderr, code } = await ctx.runCommand(cmd, { timeoutMs: 60000 })
     if (code !== 0) return { output: `UIA 枚举失败 [exit ${code}]: ${(stderr || stdout).slice(0, 500)}` }
     const text = stdout.trim()
-    if (text.startsWith("NOTFOUND")) return { output: `未找到匹配窗口（pid=${pid}${title ? ` title~${title}` : ""}）——用 window_list 确认目标存在` }
+    const targetDesc = `${hwnd ? `hwnd=${hwnd} ` : ""}${pid ? `pid=${pid} ` : ""}${title ? `title~${title}` : ""}`.trim()
+    if (text.startsWith("NOTFOUND")) {
+      return { output: `未找到匹配窗口（${targetDesc}）——用 window_list 确认目标存在（hwnd 取最后一列）` }
+    }
     if (text.startsWith("EMPTY")) {
       const total = Number(text.match(/total=(\d+)/)?.[1] ?? 0)
       return {
@@ -140,6 +170,8 @@ if ($rows.Count -eq 0 -and $script:total -le 1) {
     const metaLine = lines[0]
     const total = Number(metaLine.match(/total=(\d+)/)?.[1] ?? 0)
     const truncated = metaLine.includes("truncated=True")
+    const cands = Number(metaLine.match(/cands=(\d+)/)?.[1] ?? 1)
+    const deepened = metaLine.includes("deepened=True")
     // JSON 可能跨多行（ConvertTo-Json 折行）——元数据行之后全部拼接
     let nodes: unknown[] = []
     try {
@@ -159,13 +191,14 @@ if ($rows.Count -eq 0 -and $script:total -le 1) {
         return `${"  ".repeat(Number(n.depth) ?? 0)}${n.role}  "${String(n.name ?? "").slice(0, 60)}"  [${x},${y},${w},${h}] → 中心 (${cx},${cy})${states ? `  ${states}` : ""}${n.automationId ? `  id=${n.automationId}` : ""}`
       })
       .join("\n")
-    const hint = shallow
-      ? `\n⚠️ 树极浅（${total} 节点）——疑似 Flutter/游戏/自绘框架（不暴露语义），像素通道（desktop_ocr/locate/locate_image）优先。`
-      : ""
+    const hints: string[] = []
+    if (shallow) hints.push(`⚠️ 树极浅（${total} 节点）——疑似 Flutter/游戏/自绘框架（不暴露语义），像素通道（desktop_ocr/locate/locate_image）优先。`)
+    if (cands > 1) hints.push(`ℹ️ 有 ${cands} 个顶层窗口命中该条件，已取面积最大者——需精确指向其他窗口时用 hwnd（window_list 最后一列）。`)
+    if (deepened) hints.push(`ℹ️ 首查节点过少（<${UIA_AUTO_DEEPEN_BELOW}），已自动加深到 ${UIA_MAX_DEPTH} 重查。`)
     return {
       output:
-        `UIA 语义树（共 ${total} 节点，显示 ${rows.length}${truncated ? "，已达上限被截断——收窄 depth 或用 find 过滤" : ""}；坐标为屏幕像素，中心可直接 mouse_click）：\n${body}${hint}`,
-      data: { found: true, total, truncated, nodes: rows },
+        `UIA 语义树（共 ${total} 节点，显示 ${rows.length}${truncated ? "，已达上限被截断——收窄 depth 或用 find 过滤" : ""}；坐标为屏幕像素，中心可直接 mouse_click）：\n${body}${hints.length ? "\n" + hints.join("\n") : ""}`,
+      data: { found: true, total, truncated, deepened, candidateWindows: cands, nodes: rows },
     }
   },
 }

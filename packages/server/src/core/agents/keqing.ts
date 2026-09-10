@@ -283,7 +283,11 @@ function sidecarTool(sidecar: AgentSidecar, toolName: string, def: { description
         env: ctx.env ?? {},
         sandboxed: !!ctx.sandboxed,
       }
-      const r = await sidecar.toolCall(toolName, args, sc, timeoutMs)
+      // 热加载重扫会 dispose 旧实例并登记新实例（同名先 dispose 再拉新）——已装载该子Agent 的会话
+      // 持有当时的工具对象，若闭包直用旧实例，重扫后所有调用都报「边车已销毁」且不再拉起。
+      // 故执行时按名字取当前活跃实例（注册表未登记时回落装载时实例，测试与单侧贡献场景不受影响）。
+      const live = liveSidecars.get(agentName) ?? sidecar
+      const r = await live.toolCall(toolName, args, sc, timeoutMs)
       if (r.error) {
         return { output: `${r.error}\n（${agentName} 边车工具 ${toolName} 失败；边车进程已自动重启，命名空间如丢失请重建）` }
       }

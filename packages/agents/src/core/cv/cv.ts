@@ -1,6 +1,6 @@
 /**
  * 本地 CV 推理入口（core/cv）：惰性共享单例——ort 模块加载、模型目录解析（环境变量
- * GEBAI_CV_MODELS_DIR → 二进制物化目录 → 源码形态 assets/cv-models）、session 缓存
+ * GEBAI_CV_MODELS_DIR → 二进制物化目录 → {GEBAI_HOME}/models/ocr 资源子仓库）、session 缓存
  * （模型文件路径+大小键控）与全进程推理串行（wasm CPU 推理互斥，防同批扇出并发争抢）。
  * 检测（detect）另走分层后端：GPU sidecar（node + onnxruntime-node，见 sidecar.ts）→
  * wasm 进程内兜底（GEBAI_CV_DETECT_BACKEND 控制；标签/输入尺寸支持 ultralytics ONNX
@@ -9,7 +9,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { basename, join } from "node:path"
-import { isBinaryMode, resolveGebaiHome } from "../shared/config"
+import { resolveGebaiHome } from "../shared/config"
 import { cropImage, type RgbaImage } from "./image"
 import { ctcDecode, dbPostprocess, detPreprocess, recPreprocess, type OcrLine } from "./ocr"
 import { letterbox, yoloPostprocess, type DetectObject } from "./detect"
@@ -24,8 +24,8 @@ const DICT_FILE = "dict.txt"
 
 const MODEL_DIR_GUIDE =
   "本地识别模型未配置：请设置 GEBAI_CV_MODELS_DIR 指向包含 det.onnx / rec.onnx / dict.txt" +
-  "（PP-OCR 中英文 det/rec ONNX 与字典）的目录；源码形态可运行 scripts/build-cv-embed.ts 下载到" +
-  " packages/server/assets/cv-models/；单二进制形态需构建时内嵌（scripts/build-cv-embed.ts）"
+  "（PP-OCR 中英文 det/rec ONNX 与字典）的目录；源码形态可运行 scripts/build-cv-embed.ts 自动下载到" +
+  " {GEBAI_HOME}/models/ocr/；单二进制形态需构建时内嵌（scripts/build-cv-embed.ts）"
 
 const DETECT_MODEL_GUIDE =
   "目标检测未配置：设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径），或把模型放入 " +
@@ -86,15 +86,19 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 /* ---------------- 模型目录与 session 缓存 ---------------- */
 
-/** 解析 OCR 模型目录：GEBAI_CV_MODELS_DIR（绝对/相对路径均可）→ 二进制物化目录 → 源码 assets。 */
+/** 三件套齐备判定（目录内固定文件名全部存在）。 */
+function hasModels(dir: string): boolean {
+  return [DET_MODEL, REC_MODEL, DICT_FILE].every((f) => existsSync(join(dir, f)))
+}
+
+/** 解析 OCR 模型目录：GEBAI_CV_MODELS_DIR（绝对/相对路径均可）→ 内嵌物化/依赖目录
+ *  → {GEBAI_HOME}/models/ocr（资源子仓库——dev 形态 GEBAI_HOME = 仓库根）。 */
 function resolveModelDir(env: Record<string, string>, assetsDir: string | null): string | null {
   const custom = String(env.GEBAI_CV_MODELS_DIR ?? "").trim()
   if (custom) return custom
-  if (assetsDir && [DET_MODEL, REC_MODEL, DICT_FILE].every((f) => existsSync(join(assetsDir, f)))) return assetsDir
-  if (!isBinaryMode()) {
-    const dev = devAssetsDirOverride === false ? null : (devAssetsDirOverride ?? join(import.meta.dir, "..", "..", "..", "assets", "cv-models"))
-    if (dev && [DET_MODEL, REC_MODEL, DICT_FILE].every((f) => existsSync(join(dev, f)))) return dev
-  }
+  if (assetsDir && hasModels(assetsDir)) return assetsDir
+  const models = devAssetsDirOverride === false ? null : (devAssetsDirOverride ?? join(resolveGebaiHome(), "models", "ocr"))
+  if (models && hasModels(models)) return models
   return null
 }
 

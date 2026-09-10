@@ -6,9 +6,9 @@ det 归一化 ImageNet mean/std、rec 归一化 0.5/0.5、CTC blank=0、DB uncli
 v8/v5 双输出形态、ultralytics ONNX 元数据自适应）；模板匹配为 numpy 向量化重写（零均值 NCC +
 积分图 + 粗扫多相位 + 全分辨率精化，与 TS template.ts 同算法）。
 
-模型资产复用歌白 CV 约定：
+模型资产复用歌白 CV 约定（均落在资源子仓库 {GEBAI_HOME}/models/，dev 形态即仓库根 models/）：
 - OCR：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/models/ocr → {GEBAI_HOME}/vendor/cv-models
-  → 源码形态 packages/server/assets/cv-models（det.onnx / rec.onnx / dict.txt 三件套）
+  （det.onnx / rec.onnx / dict.txt 三件套）
 - 检测：GEBAI_CV_DETECT_MODEL（ultralytics 导出自动读 imgsz/names）或
   {GEBAI_HOME}/models/detect/ 唯一 .onnx
 图片路径一律经 driver.ctx_resolve 解析（相对路径基准=请求级会话工作区）。
@@ -50,20 +50,8 @@ def gebai_home():
     return os.environ.get("GEBAI_HOME") or os.path.expanduser("~/.gebai")
 
 
-def _src_assets_dir():
-    """源码形态模型目录（driver.py 位于 keqing/python/ → 仓库根 assets）：
-    packages/server/assets/cv-models（build-cv-embed.ts 下载产物）。"""
-    lang_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for _ in range(4):
-        cand = os.path.join(lang_dir, "packages", "server", "assets", "cv-models")
-        if os.path.isfile(os.path.join(cand, "det.onnx")):
-            return cand
-        lang_dir = os.path.dirname(lang_dir)
-    return None
-
-
 def resolve_ocr_dir():
-    """OCR 三件套目录：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/models/ocr → vendor → 源码形态。"""
+    """OCR 三件套目录：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/models/ocr → {GEBAI_HOME}/vendor/cv-models。"""
     import driver
 
     cands = []
@@ -73,9 +61,6 @@ def resolve_ocr_dir():
     home = gebai_home()
     cands.append(os.path.join(home, "models", "ocr"))
     cands.append(os.path.join(home, "vendor", "cv-models"))
-    src = _src_assets_dir()
-    if src:
-        cands.append(src)
     for d in cands:
         if os.path.isfile(os.path.join(d, "det.onnx")):
             return d
@@ -682,7 +667,7 @@ def _ocr_assets():
     if not d:
         raise RuntimeError(
             "OCR 模型未配置：请设置 GEBAI_CV_MODELS_DIR 指向含 det.onnx / rec.onnx / dict.txt 的目录"
-            "（PP-OCR 中英文三件套；源码形态可运行 scripts/build-cv-embed.ts 下载到 packages/server/assets/cv-models/）"
+            "（PP-OCR 中英文三件套；可放入 {GEBAI_HOME}/models/ocr/，或运行 scripts/build-cv-embed.ts 自动下载）"
         )
     det = os.path.join(d, "det.onnx")
     rec = os.path.join(d, "rec.onnx")
@@ -826,6 +811,33 @@ def tool_ocr(args):
     return {"output": head + "\n" + "\n".join(out_lines), "data": {"lines": lines}}
 
 
+def nearest_lines(target, lines, off_x=0, off_y=0, floor=0.4, limit=5):
+    """与 target 最相近的识别行（相似度降序）——OCR 误读回落：误读会让精确匹配落空，
+    给出候选文字与其坐标，使失败调用仍可继续（直接用候选文字重试或直接用其坐标）。"""
+    import difflib
+
+    ranked = ((difflib.SequenceMatcher(None, target, l["text"]).ratio(), l) for l in lines)
+    out = []
+    for ratio, l in sorted(ranked, key=lambda x: -x[0]):
+        if ratio < floor:
+            break
+        out.append(
+            {
+                "text": l["text"],
+                "ratio": round(float(ratio), 3),
+                "x": l["x"] + off_x,
+                "y": l["y"] + off_y,
+                "w": l["w"],
+                "h": l["h"],
+                "cx": round(l["x"] + off_x + l["w"] / 2),
+                "cy": round(l["y"] + off_y + l["h"] / 2),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
 def tool_locate(args):
     """locate：在图片中定位目标文字的精确像素坐标（本地 OCR）。"""
     import numpy as np
@@ -853,9 +865,20 @@ def tool_locate(args):
         if target in l["text"]
     ]
     if not cands:
+        near = nearest_lines(target, lines, off_x, off_y)
+        if near:
+            rows = [f"「{n['text']}」 中心 ({n['cx']}, {n['cy']})  相似度 {n['ratio']}" for n in near]
+            return {
+                "output": (
+                    f"未找到「{target}」精确匹配；以下识别行最相近（可能是 OCR 误读——可直接用其文字重试，或直接用坐标）：\n"
+                    + "\n".join(rows)
+                    + "\n坐标为图片像素系；若确无目标文字，用 vision_ocr 读取全部文字确认措辞。"
+                ),
+                "data": {"found": False, "near": near},
+            }
         return {
             "output": (
-                f"未找到「{target}」。建议：1) 用 vision_ocr 读取图片全部文字确认实际措辞；"
+                f"未找到「{target}」，也无相近识别行。建议：1) 用 vision_ocr 读取图片全部文字确认实际措辞；"
                 "2) 文字可能是图标/图形，改用 vision_locate_image（模板匹配）；3) 需语义理解改用 vision_analyze。"
             )
         }
@@ -930,6 +953,7 @@ def tool_detect(args):
     iou_thr = float(args.get("iou") or 0.45)
     pair_text = args.get("pair_text")
     pair_text = True if pair_text is None else bool(pair_text)
+    placeholder_labels = False
     region = str(args.get("region") or "")
     off_x = off_y = 0
     try:
@@ -966,6 +990,7 @@ def tool_detect(args):
         nc_est = dims[1] - 4 if dims[1] < (dims[2] or 0) else (dims[2] or 0) - 5
         if not labels or len(labels) < nc_est:
             labels = (labels or []) + [f"class_{i}" for i in range(max(nc_est, 1))]
+            placeholder_labels = True
         H, W = img.shape[:2]
         objs = yolo_postprocess(arr, dims, labels, W, H, scale, pad_x, pad_y, conf, iou_thr)
         objs = [{**o, "x": o["x"] + off_x, "y": o["y"] + off_y} for o in objs]
@@ -985,7 +1010,10 @@ def tool_detect(args):
         + (f"  文本: {o['text']}" if o.get("text") else "")
         for o in objs
     ]
-    return {"output": f"检测到 {len(objs)} 个目标（onnxruntime 原生推理）：\n" + "\n".join(out), "data": {"objects": objs}}
+    head = f"检测到 {len(objs)} 个目标（onnxruntime 原生推理）："
+    if placeholder_labels:
+        head += "\n（类别为 class_N 占位名——该模型无内嵌 names 元数据，无法据此判断检测到的是什么；可用 GEBAI_CV_DETECT_LABELS 指向每行一个类名的文本文件补齐）"
+    return {"output": head + "\n" + "\n".join(out), "data": {"objects": objs, "placeholderLabels": placeholder_labels}}
 
 
 TOOLS = [

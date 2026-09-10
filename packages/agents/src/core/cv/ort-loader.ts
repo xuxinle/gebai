@@ -75,7 +75,7 @@ export async function loadEmbeddedCvAssets(): Promise<EmbeddedCvAssets | null> {
 
 /** CV 资产目录解析（不加载 ort 模块——sidecar 推理路径解析模型路径时用，避免强制加载
  *  onnxruntime-web）：二进制形态物化内嵌产物；源码/部署形态解析 node_modules 的 dist；
- *  不可得返回 null（模型目录解析随后回落 环境变量 → 源码 assets）。 */
+ *  不可得返回 null（模型目录解析随后回落 环境变量 → {GEBAI_HOME}/models/ocr）。 */
 export async function resolveCvAssetsDir(): Promise<string | null> {
   if (isBinaryMode()) {
     const embedded = await loadEmbeddedCvAssets()
@@ -97,7 +97,7 @@ export async function resolveCvAssetsDir(): Promise<string | null> {
 /**
  * 加载 ort 模块（惰性、全进程共享）：二进制形态物化内嵌产物后从 vendor 目录动态 import；
  * 源码/部署形态解析 node_modules 的 onnxruntime-web/dist。返回 ort 命名空间与资产目录
- * （二进制形态 = vendor/cv；源码形态 = null，模型走 assets 目录或环境变量指定）。
+ * （二进制形态 = vendor/cv；源码形态 = null，模型走 {GEBAI_HOME}/models/ocr 或环境变量指定）。
  */
 export async function loadOrtModule(): Promise<{ ort: OrtModule; assetsDir: string | null }> {
   const dir = await resolveCvAssetsDir()

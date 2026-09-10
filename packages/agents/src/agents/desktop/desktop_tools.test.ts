@@ -22,6 +22,7 @@ import {
   detectSensitive,
 } from "./desktop_tools"
 import { def as desktopDef } from "./desktop"
+import { uiaInspectTool } from "./desktop_uia_tools"
 
 // 工具按 process.platform 分支（win32 走 PowerShell，linux 走 xdotool 等）：
 // 大部分用例断言 Windows 行为，统一 mock 为 win32（linux 专属用例内部自行覆盖并恢复）
@@ -826,3 +827,20 @@ describe("PowerShell 执行通道（临时 .ps1 文件 + -File）", () => {
   })
 })
 
+
+describe("uia_inspect（UIA 语义树）", () => {
+  test("定位参数含 hwnd（同进程多窗口精确指向），描述含自动加深与候选窗口说明", () => {
+    const props = Object.keys((uiaInspectTool.parameters as { properties: Record<string, unknown> }).properties)
+    expect(props).toEqual(expect.arrayContaining(["hwnd", "pid", "title"]))
+    expect(uiaInspectTool.description).toContain("hwnd")
+    expect(uiaInspectTool.description).toContain("面积最大")
+    expect(uiaInspectTool.description).toContain("自动加深")
+    expect(uiaInspectTool.requiresApproval).toBeFalsy() // 只读免审批
+  })
+
+  test("未提供定位参数时引导 hwnd/pid/title 三选一（不执行枚举）", async () => {
+    const r = await uiaInspectTool.execute!({}, {} as ToolContext)
+    expect(String(r.output)).toContain("hwnd")
+    expect(String(r.output)).toContain("同进程多窗口")
+  })
+})
