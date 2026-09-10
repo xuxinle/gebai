@@ -109,7 +109,8 @@ Monorepo 采用 Bun workspaces + Turborepo：
 
 | 包 | 路径 | 职责 |
 |---|------|------|
-| `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/新会话执行、REST/WebSocket/Webhook 对外接口；**代码分两层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根，子Agent 位于 `src/sub-agents/` |
+| `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/新会话执行、REST/WebSocket/Webhook 对外接口；**代码分层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根。TS 子Agent 已抽包 @gebai/agents（依赖单向 sdk ← agents ← server） |
+| `@gebai/agents` | `packages/agents/` | TS 子代理包：13 个子代理（code/self_optimize/hsh/cron/desktop/explore/feishu_docs/feishu_group/playwright/reverse_site/vision/widgets/wps）+ 子代理专属基建（`src/cv/` CV 全家、`src/browser/` 浏览器桥接、`src/analyzer/` tree-sitter 符号分析、`src/widgets-store/` 小工具存储、`src/shared/` 公共件：vision 工厂/fetch-guard/tls/image-resize/page-capture/feedback/config）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk |
 | `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约 |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端 |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体） |
@@ -459,7 +460,7 @@ src/
     security/       #   安全：sandbox/safety/ip/fetch-guard（SSRF 防护，webhook 校验共用）/ratelimit
     agents/         #   子Agent 装载器：subagents（扫描/热加载）/sub-agent-md/env-catalog
     widgets/        #   HTML 小工具库存储
-  sub-agents/       # 子Agent 定义（扩展点，扁平 by design——丢文件零注册）
+  sub-agents/       # （已迁 @gebai/agents 包——目录保留为空，dev 扫描 agents 包 src/）
   feishu-bot/       # 飞书对话桥接
 ```
 
@@ -668,11 +669,11 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 ### 子Agent（扩展机制）
 
-- 定义形式二选一：**单文件** `sub-agents/{name}.ts`，或**目录** `sub-agents/{name}/{name}.ts`（入口文件）+ 可选 `{name}.md`（系统提示词拆分维护）；作为服务端代码放在 `packages/server/src/sub-agents/` 下
+- 定义形式二选一：**单文件** `agents/src/{name}/index.ts`（或 `{name}/{name}.ts`）（入口文件）+ 可选 `{name}.md`（系统提示词拆分维护）；作为服务端代码放在 `packages/server/src/sub-agents/` 下
 - 目录形式下，系统提示词 md 由入口 ts 文件**导入并修饰**（见「子Agent文件格式」）：`import systemPrompt from "./{name}.md"`（Bun 原生文本导入，构建时随 ts 一起内联进产物）
 - **零注册**：文件/目录即声明，运行时自动扫描收集（跳过 `*.test.ts` 与辅助文件，目录形式只认 `{dir}/{dir}.ts`），无需任何配置文件或代码注册
-- **热加载（目录签名失效缓存，DESIGN「子Agent 热加载」）**：`sub-agents/` 目录的**新增/修改/删除**在下一次装载（`agent_load`/路由自愈/`agent_run` 预加载，`load()` 前检查）或新任务（`run()` 前）自动生效，无需重启——`refreshIfChanged()` 比对目录签名（递归 `路径:mtime`，~30 次 stat 可忽略），变化即重扫：TS 入口带 `?t={mtime}` 查询参数 import **绕过模块缓存**（修改过的文件拿到新代码；新文件本就不在缓存）；**`agent_run` 校验前置重扫**（`runNewSession` 与异步启动 `SessionRunRegistry.start` 的 validate 在名单校验前先 `refreshIfChanged`）——刚写入/修好的子Agent 文件**首次调用即被看见**（不重扫会以旧缓存误报无附言的「未知子Agent」或沿用修复前旧定义）；**已装载会话沿用旧定义**（工具注册与注入会话记录的提示词保持稳定，不迁移——防运行中会话行为漂移），新定义对未装载与新会话生效；运行期显式 `unregister` 的子Agent（如 cron 关关）重扫后保持移除（`removedDefs` 过滤，防「复活」）；二进制 bundle 形态源码目录不存在、注册表不可变，无热加载。**加载失败错误透出**：扫描中 import 抛错/缺 `def` 导出/md 解析失败的子Agent 记入 `loadErrors`（随 defs 一同进程级缓存），`agent_load` 与 `agent_run` 校验的「未知子Agent」错误**附加载失败原因**（模型可见根因——self_optimize 写错文件当场定位修复而非面对无解释的未知名，修复文件后 mtime 变化触发重扫自动恢复注册）；**`agent_load` 装载失败真实报错**（`ctx.loadSubAgent` 装载后仍未注册即抛 `unknownAgentError`——含附因；幂等重装已装载者仍成功，`loadAgentsForSession` 的单失败跳过容错仅用于会话恢复路径）。价值：self_optimize 生成/修改子Agent 后**当会话内即可 agent_run 验证成果**，自我优化闭环不再依赖重启
-- **打包闭环**：`bun build` 前由 `scripts/build-subagents.ts` 扫描 `src/sub-agents/` 生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**bundle 注册表缺失或加载失败必抛错（fail-fast），绝不静默降级为空子Agent 列表**——启动「成功」但没有任何子Agent 比启动失败更难排查。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，启动期解析失败会炸掉整个 bundle 注册表（服务启动即退出）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
+- **热加载（目录签名失效缓存，DESIGN「子Agent 热加载」）**：`@gebai/agents` 包 `src/` 目录的**新增/修改/删除**在下一次装载（`agent_load`/路由自愈/`agent_run` 预加载，`load()` 前检查）或新任务（`run()` 前）自动生效，无需重启——`refreshIfChanged()` 比对目录签名（递归 `路径:mtime`，~30 次 stat 可忽略），变化即重扫：TS 入口带 `?t={mtime}` 查询参数 import **绕过模块缓存**（修改过的文件拿到新代码；新文件本就不在缓存）；**`agent_run` 校验前置重扫**（`runNewSession` 与异步启动 `SessionRunRegistry.start` 的 validate 在名单校验前先 `refreshIfChanged`）——刚写入/修好的子Agent 文件**首次调用即被看见**（不重扫会以旧缓存误报无附言的「未知子Agent」或沿用修复前旧定义）；**已装载会话沿用旧定义**（工具注册与注入会话记录的提示词保持稳定，不迁移——防运行中会话行为漂移），新定义对未装载与新会话生效；运行期显式 `unregister` 的子Agent（如 cron 关关）重扫后保持移除（`removedDefs` 过滤，防「复活」）；二进制 bundle 形态源码目录不存在、注册表不可变，无热加载。**加载失败错误透出**：扫描中 import 抛错/缺 `def` 导出/md 解析失败的子Agent 记入 `loadErrors`（随 defs 一同进程级缓存），`agent_load` 与 `agent_run` 校验的「未知子Agent」错误**附加载失败原因**（模型可见根因——self_optimize 写错文件当场定位修复而非面对无解释的未知名，修复文件后 mtime 变化触发重扫自动恢复注册）；**`agent_load` 装载失败真实报错**（`ctx.loadSubAgent` 装载后仍未注册即抛 `unknownAgentError`——含附因；幂等重装已装载者仍成功，`loadAgentsForSession` 的单失败跳过容错仅用于会话恢复路径）。价值：self_optimize 生成/修改子Agent 后**当会话内即可 agent_run 验证成果**，自我优化闭环不再依赖重启
+- **打包闭环**：`bun build` 前由 `scripts/build-subagents.ts` 扫描 `packages/agents/src/` 生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**bundle 注册表缺失或加载失败必抛错（fail-fast），绝不静默降级为空子Agent 列表**——启动「成功」但没有任何子Agent 比启动失败更难排查。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，启动期解析失败会炸掉整个 bundle 注册表（服务启动即退出）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
 - **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制——**包含清单经依赖闭包自动展开**（include reverse_site 自动带上其 `dependencies` 声明的 playwright——运行时依赖自动装载要求依赖方在产物中存在，漏列会产出能力残缺的二进制；构建脚本动态 import 各 def 读取 `dependencies` 递归补入，依赖指向不存在的名字直接构建失败）；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（tool_schemas/js）同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools/index.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行）；`scripts/build-tools.ts` 同时生成全局工具 bundle 注册表 `core/tools/bundle.generated.ts`（见「全局工具零注册」），该文件 gitignore，裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > `{GEBAI_HOME}/.env` > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态）；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
 - **裁剪构建样例**（根 `scripts/` 目录）：`bun run build:code`（`build-code-agent.ts`）产出 code 场景精简**服务端**单文件二进制（`packages/server/dist/gebai-code[.exe]`，浏览器形态、内嵌 Web UI）——三层裁剪组合示范：子Agent 包含清单（code+explore，体积收益主来源：未选子Agent 模块整体摇出产物）+ 预加载清单（code 开箱即用）+ 全局工具排除清单（show/fetch_url）。可作为其他场景裁剪构建的模板：复制脚本改清单即可（如 reverse_site 站点逆向、feishu 文档、只读分析）
 - 命名规则：仅限小写字母、数字、下划线
@@ -734,7 +735,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 | 方式 | 配置 | 说明 |
 |------|------|------|
-| 全部打包 | 默认 | 打包 `src/sub-agents/` 下所有子Agent |
+| 全部打包 | 默认 | 打包 `@gebai/agents` 下所有子Agent |
 | 白名单 | 构建脚本传 `--sub-agents a,b,c` | 仅打包指定子Agent，控制二进制体积 |
 | 黑名单 | 构建脚本传 `--exclude-sub-agents x,y` | 排除指定子Agent，其余全部打包 |
 
@@ -886,7 +887,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 ### 内置子Agent 示例：通用源码分析/修改（`code`）
 
-作为子Agent 扩展机制的落地示例，内置「通用源码分析与修改」子Agent，定义于 `packages/server/src/sub-agents/code.ts`，面向**其他项目**（本地使用场景下不限制目录，可访问本机任意路径）：
+作为子Agent 扩展机制的落地示例，内置「通用源码分析与修改」子Agent，定义于 `packages/agents/src/code/index.ts`（@gebai/agents 包），面向**其他项目**（本地使用场景下不限制目录，可访问本机任意路径）：
 
 ```ts
 export const name = "code"
@@ -934,7 +935,7 @@ export const preload = false
 
 #### `vision`（视觉能力，图片分析型）
 
-实现于 `sub-agents/vision/`（目录形式：`vision.ts` 定义入口 + `vision.md` 系统提示词 + `vision.test.ts`），视觉能力的**通用层收拢**（图片输入型）与其他子代理的复用入口——全局 `vision` 工具已移除，本子代理是视觉语义分析的**唯一入口**（主会话 agent_load 装载/路由自愈，子Agent 依赖声明连带装载）（分层与两种复用方式的边界判定见「小模型识别」末条「视觉能力分层与子代理复用边界」）。**跨语言合并形态**（边车协议 v2 请求级 ctx 的首个内置样例）：
+实现于 `packages/agents/src/vision/`（@gebai/agents 包；`vision.ts` 定义入口 + `vision.md` 系统提示词 + `vision.test.ts`），视觉能力的**通用层收拢**（图片输入型）与其他子代理的复用入口——全局 `vision` 工具已移除，本子代理是视觉语义分析的**唯一入口**（主会话 agent_load 装载/路由自愈，子Agent 依赖声明连带装载）（分层与两种复用方式的边界判定见「小模型识别」末条「视觉能力分层与子代理复用边界」）。**跨语言合并形态**（边车协议 v2 请求级 ctx 的首个内置样例）：
 
 - **客卿侧（`keqing/python/vision/`，onnxruntime 原生推理）贡献**：`ocr`/`locate`/`locate_image`/`detect` 四个本地识别工具——重计算迁边车（原生推理比 wasm 快、模型进程级加载一次全会话复用），manifest `requiresApproval:false`（只读免审批）；算法与 TS `core/cv` 纯函数同源移植（det/rec 前后处理、DB 后处理、CTC 解码、零均值 NCC 模板匹配、letterbox+v8/v5 双形态后处理、ultralytics ONNX 元数据自适应），模型资产复用同一套（GEBAI_CV_MODELS_DIR / assets/cv-models / {GEBAI_HOME}/models/detect）；图片路径经请求级 `ctx.cwd` 解析；依赖（onnxruntime/numpy/pillow）缺失时工具返回安装提示不拋栈，探测延迟到调用时（模块加载阶段缺依赖不阻断工具集上报）
 - **TS 侧贡献**：仅 `analyze`（多模态语义分析）——provider 抽象属宿主 LLM 层（三协议流式适配、GEBAI_VISION_* 与任务级 env 覆盖、多模态回落链经 `getVisionProvider`），凭证不下传边车；description 留空不贡献，识别工具描述与决策序提示词由客卿侧 PROMPT.md 提供，合并层拼接两侧：
@@ -956,7 +957,7 @@ export const requiresApproval = { window_focus: true, window_move: true, window_
 export const preload = false
 ```
 
-- 实现于 `sub-agents/desktop/` 目录（`desktop.ts` 定义 + `desktop_tools.ts` 工具集 + `desktop_cv_tools.ts` 本地识别工具集 + `desktop_uia_tools.ts` UIA 语义工具 + 各自 `*.test.ts` 测试），工具不注册为全局工具，仅经子Agent 命名空间暴露（只声明桌面操控独有工具；验证多通道经全局 `agent_run` 委托 code 子Agent 读取应用数据文件断言结果——编排用全局名，def 不复刻全局工具）
+- 实现于 `packages/agents/src/desktop/` 目录（@gebai/agents 包）（`desktop.ts` 定义 + `desktop_tools.ts` 工具集 + `desktop_cv_tools.ts` 本地识别工具集 + `desktop_uia_tools.ts` UIA 语义工具 + 各自 `*.test.ts` 测试），工具不注册为全局工具，仅经子Agent 命名空间暴露（只声明桌面操控独有工具；验证多通道经全局 `agent_run` 委托 code 子Agent 读取应用数据文件断言结果——编排用全局名，def 不复刻全局工具）
 - **提示词纪律（js 编排优先）**：多步操作（窗口定位→聚焦→识别→点击/输入→验证，含分支/重试）默认经全局 `js` 编排为一段脚本执行——脚本内各 desktop 工具像函数一样 await（按注册名），按中间结果分支与重试，不逐步往返；js 保持默认审批（一次审批覆盖脚本内全部工具调用，含输入/点击类——免审运行时内部需审批工具被拒）；先 window_focus 复核「已激活」再输入/点击；OCR/locate 限定目标窗口 region 小区域识别（屏幕坐标=窗口原点+区域内坐标）；等待一律 desktop_wait_for，不反复截图轮询；vision 仅语义理解兜底，定位一律本地 OCR/locate；**vision 硬性兑底序**：读文字/找元素/判断界面状态（按钮文字是否变化、处于哪一页、是否弹提示）一律 desktop_ocr（find 过滤）/desktop_locate 先行，禁止用 vision 回答 OCR 能答的问题；仅当 OCR/locate 无结果或需理解非文字内容（图像内容/布局含义/报错图标）才 vision；**uia_inspect 决策序**：需要控件语义/状态（禁用/勾选/值/焦点控件——OCR 判不了）或控件树交叉校验时用 desktop_uia_inspect（仅 Windows；空树/浅树=Flutter/游戏/自绘立即回落像素通道），定位坐标仍以 desktop_locate/locate_image 为主通道；**等待纪律**：等非文字元素（加载动画/图标）用 wait_for 的 image/image_gone 模板模式，非 change（画面变化误报率高）
 - **权限拦截降级（UIPI）**：模拟输入对管理员权限（elevated）目标会被 Windows UIPI 静默拦截——症状为「点击/输入报告成功但界面毫无变化」（window_focus 已确认前台）。提示词约定：连续 2 次无效即停止重试，立即降级换通道（目标应用自带的本地 API/CLI（游戏客户端多带本地控制接口，经全局 sh/js 调用）、键盘/剪贴板间接操作，或建议用户以普通权限重启目标/提权运行歌白）；佐证判据：Get-Process/Win32_Process 查询目标进程路径/命令行为空 = 完整性级别高于当前会话（whoami /groups 查自身，Medium 即不可读写 elevated 进程信息），模拟输入与进程信息查询均注定失败
 - 跨平台：Windows 走内置 PowerShell（截图/窗口/输入，无外部依赖）；macOS 走 `screencapture` + `osascript`（鼠标需额外 `cliclick`）；Linux 依赖 `xdotool`/`wmctrl`/`scrot`（缺失时明确报错）。**Windows 坐标一致性**：全部涉及像素坐标的 PowerShell 脚本（截图/screen_info/window_list/window_move/mouse_*）开头声明 `SetProcessDPIAware`——坐标统一物理像素，防高 DPI 缩放（150% 等）下截图/窗口/鼠标坐标落入逻辑像素空间错位；**多显示器**：全屏截图与 cv 现截均取**虚拟屏幕**（`SystemInformation.VirtualScreen`，覆盖所有显示器，副屏可为负坐标），`region` 参数 x/y 支持负值（副屏在主屏左侧/上方），OCR/locate/locate_image 返回坐标一律映射回主屏原点像素系（虚拟屏幕原点/区域原点偏移），可直接用于 mouse_click；`window_list` 输出含**前台标记**（`GetForegroundWindow` 比对，`*` 行 + 「当前前台」汇总行）与**窗口 bounds**（`GetWindowRect` 物理像素 `x,y,w,h`）

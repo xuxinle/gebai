@@ -97,7 +97,7 @@ bun run lint                  # Lint
 
 ### 🧩 极致的子 Agent 扩展制（单文件定义、零注册）
 
-在 `packages/server/src/sub-agents/` 下放一个 `.ts` 文件（或一个目录 + `.md` 提示词），就完成了一个子 Agent 的定义——构建时自动扫描收集，**无需任何注册表、配置或代码登记**：
+在 `packages/agents/src/`（@gebai/agents 包）下放一个 `.ts` 文件（或一个目录 + `.md` 提示词），就完成了一个子 Agent 的定义——构建时自动扫描收集，**无需任何注册表、配置或代码登记**：
 
 ```ts
 export const name = "my_agent"
@@ -118,7 +118,7 @@ export const requiresApproval = { write: true }
 
 工具以 `{agent}_{tool}` 单下划线命名空间透明路由，对子 Agent 完全无感；命名冲突构建期校验，弱模型容错兜底。
 
-**English.** Drop a single `.ts` file (or a directory with an `.md` prompt) into `packages/server/src/sub-agents/` and you have defined a sub-agent — the build scans and collects them automatically, with **no registry, no config, no code registration**:
+**English.** Drop a single `.ts` file (or a directory with an `.md` prompt) into `packages/agents/src/` (the @gebai/agents package) and you have defined a sub-agent — the build scans and collects them automatically, with **no registry, no config, no code registration**:
 
 The key design is the precise distinction between two semantics — **load vs. run in a new session**:
 
@@ -304,7 +304,7 @@ Monorepo（Bun workspaces + Turborepo）：`@gebai/server`（服务端核心）/
 欢迎 Issue 与 PR！Issues 欢迎提 Bug（附复现步骤与环境信息）、功能建议与使用问题；提交 PR 前：
 
 1. 阅读 `DESIGN.md` 与 `AGENTS.md`
-2. 新增子 Agent？就是一个文件的事——`packages/server/src/sub-agents/` 下照模板写即可，记得同步 `DESIGN.md` 总览表
+2. 新增子 Agent？就是一个文件的事——`packages/agents/src/` 下照模板写即可，记得同步 `DESIGN.md` 总览表
 3. 提交前跑 `bun run test` / `bun run typecheck` / `bun run lint`
 
 **English.** Issues and PRs are welcome! File bugs (with reproduction steps and environment info), feature requests, or usage questions. Before opening a PR:

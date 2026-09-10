@@ -126,7 +126,7 @@ stdin/stdout 各一行一个 JSON 对象（UTF-8）。**stdout 只写协议行**
 
 ## 跨语言同名合并（TS + 客卿 共同贡献一个子代理）
 
-TS 侧（`packages/server/src/sub-agents/{name}.ts`）与 客卿 侧（manifest 目录）可**同名共存**：两侧定义作为「贡献集」经 `mergeSubAgentDefs`（`core/agents/merge.ts`，纯函数）合并为同一个子代理，不再同名覆盖。合并语义：
+TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）可**同名共存**：两侧定义作为「贡献集」经 `mergeSubAgentDefs`（`core/agents/merge.ts`，纯函数）合并为同一个子代理，不再同名覆盖。合并语义：
 
 | 字段 | 合并规则 |
 |------|----------|
