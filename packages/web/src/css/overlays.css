@@ -761,6 +761,19 @@
 .compact-meta { font-size: 11.5px; color: var(--text-faint); margin-bottom: 4px; }
 .compact-summary { white-space: pre-wrap; }
 
+/* ---------- 引擎提示（待办续做/收尾验证提醒：role=user + engineNote，展示上与用户输入区分） ---------- */
+/* 覆盖 .msg.user 的右对齐/反向排列：与助手消息同侧左对齐，但用虚框通知条弱化（非用户气泡） */
+.msg.engine-note { align-self: flex-start; flex-direction: row; max-width: var(--msg-max-w); }
+.bubble.engine-notice {
+  background: var(--bg-elev-2);
+  border: 1px dashed var(--border-strong);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+}
+.msg.engine-note .msg-name { color: var(--text-faint); }
+
 /* ---------- 子Agent 装载提示 ---------- */
 .bubble.load-notice {
   background: var(--bg-elev-2);

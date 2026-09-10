@@ -407,6 +407,29 @@ function internal(h: Harness, task: CronTask): CronTask {
   return h.cron["entries"].get(task.id)!
 }
 
+describe("定时任务结果写回来源会话", () => {
+  test("写回消息为 user 角色 + engineNote='cron'（尾 assistant 会被思考类模型以 400 拒绝）", async () => {
+    const h = setup()
+    try {
+      const { id } = await createSession(h)
+      const task = await h.cron.add("default", { name: "daily", type: "script", schedule: "0 9 * * *", script: "echo hi" }, id)
+      // 直接调内部写回路径（不实际执行脚本）：验证落盘形态
+      await (h.cron as unknown as { appendOriginMessage(t: CronTask, c: string, now: number): Promise<void> }).appendOriginMessage(
+        internal(h, task),
+        "⏰ 定时任务「daily」已完成：构建成功。",
+        Date.now(),
+      )
+      const session = await h.store.load(id, "default")
+      const msg = session!.messages.at(-1)!
+      expect(msg.role).toBe("user")
+      expect(msg.engineNote).toBe("cron")
+      expect(String(msg.content)).toContain("定时任务")
+    } finally {
+      cleanup(h)
+    }
+  })
+})
+
 /** 把任务拨到立即可触发。 */
 async function due(h: Harness, task: CronTask): Promise<void> {
   internal(h, task).nextRunAt = h.cron["now"]() - 1000

@@ -304,12 +304,12 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "hi")
     const msgs = (await store.load(session.id, "default"))!.messages
-    const nudge = msgs.find((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))
+    const nudge = msgs.find((m) => m.role === "user" && m.engineNote === "verify")
     expect(nudge).toBeDefined()
     expect(nudge!.content).toContain("src/a.ts")
-    // 落盘 assistant + engineNote 标记（UI/历史为助手气泡）；模型上下文回放为 user 角色
-    // （思考类模型不接受尾部 assistant，见 sdk Message.engineNote）
-    expect((nudge as { engineNote?: string }).engineNote).toBe("verify")
+    // 消息即 user 角色 + engineNote 标记（与用户输入同角色；思考类模型不接受以 assistant 结尾的请求——
+    // 见 sdk Message.engineNote；前端据此渲染为「引擎提示」通知条而非用户气泡）
+    expect(nudge!.engineNote).toBe("verify")
     expect(provider.calls).toBe(3) // 提醒额外触发一轮模型调用
     rmSync(home, { recursive: true, force: true })
   })
@@ -329,7 +329,7 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "hi")
     const msgs1 = (await store.load(session.id, "default"))!.messages
-    expect(msgs1.some((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))).toBe(false)
+    expect(msgs1.some((m) => m.engineNote === "verify")).toBe(false)
     // 仅文档文件（report.md）：不计入代码文件，不触发
     const provider2 = new HardenProvider()
     provider2.script = [
@@ -339,7 +339,7 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const s2 = await store.createSession("default", "t2")
     await engine.run(s2.id, "default", "hi2")
     const msgs2 = (await store.load(s2.id, "default"))!.messages
-    expect(msgs2.some((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))).toBe(false)
+    expect(msgs2.some((m) => m.engineNote === "verify")).toBe(false)
     rmSync(home, { recursive: true, force: true })
   })
 })

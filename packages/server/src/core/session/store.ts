@@ -118,6 +118,21 @@ export function isProtectedMessage(m: { role?: string; session?: boolean; sessio
   return !!(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
 }
 
+/** 引擎软性提醒内容前缀（存量数据无 engineNote 标记时的兜底识别：标记上线前落盘的提醒为 assistant 形态）。 */
+const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
+
+/**
+ * 引擎软性提醒判定（待办续做 `todo`／收尾验证提醒 `verify`）：消息**已是 user 角色**（与用户输入同角色，
+ * 随用户消息一起受上下文保护），此处只用于把「引擎写的提示」与「用户自己发的输入」区分开——
+ * UI 展示形态（弱化通知条而非用户气泡）、压缩护栏的「本次任务输入」定位。
+ * **字段标记优先**；存量数据（标记上线前落盘的 **assistant 形态**提醒）按内容前缀兜底——
+ * 前缀兜底限定 assistant 角色，否则用户手打「【待办提醒】…」这类文本会被误判。
+ */
+export function isEngineNote(m: { role?: string; engineNote?: string; content?: unknown }): boolean {
+  if (m.engineNote) return true
+  return m.role === "assistant" && ENGINE_NOTE_RE.test(typeof m.content === "string" ? m.content : "")
+}
+
 /** repairToolPairing 的结构化入参（Message 与 provider 层 MessageLike 均可赋入）。 */
 export interface PairingRepairMessage {
   id?: string

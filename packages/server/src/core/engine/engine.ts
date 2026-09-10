@@ -4,7 +4,7 @@ import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "@gebai/agents"
 import { resizeForVision, resizeNote } from "@gebai/agents"
 import type { ToolRegistry } from "../base/registry"
 import type { SessionStore } from "../session/store"
-import { estimateCtxTokens, estimateCharsTokens } from "../session/store"
+import { estimateCtxTokens, estimateCharsTokens, isEngineNote } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
@@ -103,13 +103,6 @@ const MAX_AGENTS_PER_RUN = 5
 /** LLM 流式调用读空闲超时（毫秒）：SSE 建立后超过该时长无任何 chunk 判定接口假死，中止本次调用
  *  （无产出走重试，有产出上抛为任务错误，不再无限挂起）。 */
 const LLM_IDLE_TIMEOUT_MS = 120_000
-
-/** 引擎软性提醒判定（待办续做／收尾验证）：engineNote 标记优先，存量数据按**内容前缀**识别
- *  （标记之前落盘的历史提醒消息没有字段，靠前缀兜底——否则老会话继续跑依旧会因尾部 assistant 被 400 拒绝）。 */
-const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
-function isEngineNote(m: { engineNote?: string; content?: unknown }): boolean {
-  return !!m.engineNote || ENGINE_NOTE_RE.test(typeof m.content === "string" ? m.content : "")
-}
 
 function attachmentSizeText(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`
@@ -931,14 +924,14 @@ export class AgentEngine {
             const list = [...mods.files].slice(0, 5).map((f) => `- ${f}`).join("\n")
             const more = mods.files.size > 5 ? `\n…（共 ${mods.files.size} 个文件）` : ""
             const verifyMsg = `【验证提醒】本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
-            // 提醒在模型上下文用 **user 角色**（尾部 assistant 会被思考类模型判为前缀续写并 400）；
-            // 落盘保持 assistant + engineNote 标记（UI/历史回放仍为助手气泡，loadHistory 回放为 user）
+            // 提醒落盘即 **user 角色**（与用户输入同角色、同受上下文保护）：思考类模型不接受以 assistant 结尾的
+            // 请求（前缀续写）；engineNote 标记供 UI 区分展示（弱化「引擎提示」通知条，非用户气泡）
             messages.push({ role: "assistant", content: finalText })
             messages.push({ role: "user", content: verifyMsg })
             const verifyMsgId = crypto.randomUUID()
             await this.opts.store.appendMessage(sessionId, {
               id: verifyMsgId,
-              role: "assistant",
+              role: "user",
               content: verifyMsg,
               engineNote: "verify",
               createdAt: Date.now(),
@@ -959,12 +952,12 @@ export class AgentEngine {
         const repeated = finalText !== "" && finalText === lastFinalText
         const contMsg = `【待办提醒】当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
         const contMsgId = crypto.randomUUID()
-        // 同上（收尾验证提醒）：上下文用 user 角色，落盘 assistant + engineNote 标记
+        // 同收尾验证提醒：落盘 user 角色 + engineNote 标记（思考类模型不接受尾部 assistant；标记供 UI 区分展示）
         messages.push({ role: "assistant", content: finalText })
         messages.push({ role: "user", content: contMsg })
         await this.opts.store.appendMessage(sessionId, {
           id: contMsgId,
-          role: "assistant",
+          role: "user",
           content: contMsg,
           engineNote: "todo",
           createdAt: Date.now(),
@@ -1044,8 +1037,10 @@ export class AgentEngine {
         if (m.loadedAgent && m.content) {
           agentSystems.push({ role: "system", content: m.content })
         } else if (m.compacted && m.content) {
-          // 上下文压缩摘要消息：作为 assistant 角色注入（保持消息序合法，不混入 system 段）
-          out.push({ role: "assistant", content: `[历史摘要] ${m.content}` })
+          // 上下文压缩摘要：注入 **user 角色**（不混入 system 段，且避开思考类模型的尾 assistant 约束——
+          // 全量压缩（scope:"all"）时摘要会落到消息末尾，assistant 形态会让后续请求 400）；
+          // UI 渲染不受影响（按落盘 role=system + compacted 标记渲为压缩通知）
+          out.push({ role: "user", content: `[历史摘要] ${m.content}` })
         }
         continue
       }
@@ -1058,10 +1053,9 @@ export class AgentEngine {
         // 推理独立字段（Message.reasoning）绝不进模型上下文——此处仅映射 content；
         // stripThinkTags 兼容旧版数据（推理曾内嵌 content 的 <think> 块），回放时一并剥离
         const content = stripThinkTags(m.content)
-        // 引擎软性提醒（待办续做/收尾验证）回放改 **user 角色**：落盘保持 assistant（UI 与历史记录为助手
-        // 气泡），但思考类模型（DeepSeek thinking）不接受以 assistant 结尾的请求（视为前缀续写、要求
-        // 回传 reasoning_content）——尾部 assistant 提醒会让后续请求 400、任务静默中断
-        if (isEngineNote(m)) {
+        // 存量兼容：标记上线前落盘的引擎提醒为 **assistant 形态**，回放改 user 角色——思考类模型（DeepSeek
+        // thinking）不接受以 assistant 结尾的请求（视为前缀续写、要求回传 reasoning_content）
+        if (m.role === "assistant" && isEngineNote(m)) {
           out.push({ role: "user", content })
           continue
         }
@@ -2458,7 +2452,12 @@ export class AgentEngine {
     const header = opts.final ? (summarized ? "已合并（摘要合入）" : "已合并") : summarized ? "阶段性合入（摘要）" : "阶段性合入"
     const msg: Message = {
       id: crypto.randomUUID(),
-      role: "assistant",
+      // 合并消息**落盘即 user + engineNote: "branch"**（与其余引擎注入同一口径）：思考类模型不接受以
+      // assistant 结尾的请求，而合入注入位置就在本轮 tool 结果之后（下一条即模型调用）——assistant
+      // 形态会让主线下一次调用 400（实测）；标记供前端渲染为「分支合入」通知条（非用户气泡）。
+      // branchMeta 保留（分支互相感知/主干增量标注分支来源）+ 携带过程存档 sessionRun（UI 折叠容器）
+      role: "user",
+      engineNote: "branch",
       content: `【并行分支「${handle.name}」${header}】\n${content}${summarized ? "\n（报告全文见分支过程存档，bg_task wait 可取回）" : ""}`,
       createdAt: Date.now(),
       branchMeta: { branchId: handle.branchId, name: handle.name, ...(handle.model ? { model: handle.model } : {}) },
@@ -2507,11 +2506,16 @@ export class AgentEngine {
       const flat = t.trim()
       return flat.length <= max ? flat : `${flat.slice(0, max)}\n…（该消息过长已截断）`
     }
+    // 引擎提示（分支合入/定时任务写回/提醒，role=user + engineNote）的来源标签：与前端展示名同口径
+    const noteLabel = (m: { engineNote?: string; branchMeta?: { name: string } }) =>
+      m.branchMeta?.name ? `合并·${m.branchMeta.name}` : m.engineNote === "cron" ? "定时任务" : "引擎提示"
     const lines: string[] = []
     for (const m of msgs.slice(from)) {
       if (delivered.has(m.id)) continue
       if (m.branchMeta?.branchId === branchId) continue // 本分支自己的合入：内容自产
-      if (m.role === "user") lines.push(`【主线用户】${head(m.content, perMsg)}`)
+      // 引擎提示不计为「主线用户」（否则分支报告/定时任务写回会冒充用户输入）
+      if (isEngineNote(m)) lines.push(`【${noteLabel(m)}】${head(m.content, perMsg)}`)
+      else if (m.role === "user") lines.push(`【主线用户】${head(m.content, perMsg)}`)
       else if (m.role === "assistant" && m.branchMeta) lines.push(`【合并·${m.branchMeta.name}】${head(m.content, perMsg)}`)
       else if (m.role === "assistant") lines.push(`【主线回复】${head(m.content, perMsg)}`)
       else if (m.role === "tool") lines.push(`【主线工具·${m.name ?? "?"}】${head(m.content, 600)}`)
@@ -2538,7 +2542,9 @@ export class AgentEngine {
       try {
         if (persist) await persist(msg)
         else await this.opts.store.appendMessage(sessionId, msg, user)
-        messages?.push({ role: "assistant", content: msg.content })
+        // 进模型上下文与落盘同形（都是 user + engineNote）：注入位置就在本轮 tool 结果之后，
+        // assistant 形态会让思考类模型判为前缀续写并 400（实测）
+        messages?.push({ role: "user", content: msg.content })
       } catch {
         /* 落盘失败不阻断任务收尾（与中断补写同策略） */
       }

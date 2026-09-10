@@ -30,7 +30,7 @@ import {
   clearDraft,
 } from "./state"
 import { markdownBlock } from "./markdown"
-import { appendMsg, appendTodoCard, beginMsgBatch, finishSessionRun, flushMsgBatch, reasoningBlock, renderLegacySubAgentArchive, renderSessionArchive, sessionRunBox } from "./messages"
+import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSessionRun, flushMsgBatch, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSessionArchive, sessionRunBox } from "./messages"
 import { clearUnread, isAtBottom, lockToBottom, restoreScroll } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyMinimalMode } from "./minimal-mode"
@@ -771,7 +771,7 @@ export async function maybeAutoTitle(sessionId: string) {
   // 首条输入优先取内存记录（发送时点即有，零额外请求）；缺失（页面刷新后补命名）时回退历史首条用户消息（子会话执行存档不算）
   const first =
     firstInputOf(sessionId) ??
-    (session ?? (await client.getSession(sessionId).catch(() => null)))?.messages?.find((m) => m.role === "user" && !m.session && m.content?.trim())?.content
+    (session ?? (await client.getSession(sessionId).catch(() => null)))?.messages?.find((m) => m.role === "user" && !m.session && !isEngineNoteMsg(m) && m.content?.trim())?.content
   if (!first) return
   const compact = first.replace(/\s+/g, " ").trim()
   // 落盘标题截 50 字符（超出省略号）：侧栏/标题栏按容器宽度自行省略，此处只防超长输入整段入库
@@ -805,7 +805,21 @@ export async function exportSession(sessionId: string): Promise<void> {
     for (const b of m.blocks ?? []) parts.push(blockToMarkdown(b))
     const text = parts.filter(Boolean).join("\n\n")
     if (!text.trim()) continue
-    const tag = m.role === "user" ? "🧑 用户" : m.role === "assistant" ? "🤖 助手" : m.role === "system" ? "📋 系统" : `🔧 工具${m.name ? `（${m.name}）` : ""}`
+    // 引擎提示按来源标注（与服务端 engineNote 取值一一对应）；其余按角色
+    const note = engineNoteOf(m)
+    const tag = note
+      ? note === "cron"
+        ? "⏰ 定时任务"
+        : note === "branch"
+          ? "🌿 分支合入"
+          : "⚙️ 引擎提示"
+      : m.role === "user"
+        ? "🧑 用户"
+        : m.role === "assistant"
+          ? "🤖 助手"
+          : m.role === "system"
+            ? "📋 系统"
+            : `🔧 工具${m.name ? `（${m.name}）` : ""}`
     lines.push(`## ${tag}`, "", text, "")
   }
   const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" })

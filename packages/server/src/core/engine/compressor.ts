@@ -4,7 +4,7 @@
 import type { Message, MessageLike } from "@gebai/sdk"
 import type { LLMChunk, LLMProvider, LLMUsage } from "../llm/llm"
 import type { SessionStore } from "../session/store"
-import { isProtectedMessage } from "../session/store"
+import { isProtectedMessage, isEngineNote } from "../session/store"
 import type { EnvManager } from "../session/env"
 import { VISION_MIME_SET } from "@gebai/agents"
 
@@ -110,11 +110,15 @@ export class ContextCompressor {
     if (!session) return false
     let lastUserIdx = -1
     for (let i = session.messages.length - 1; i >= 0; i--) {
-      if (session.messages[i].role === "user") {
+      // 引擎提示（提醒/定时任务写回/分支合入，同为 user 角色 + engineNote）**不是**用户输入：不参与
+      // 「本次任务输入」定位——否则任务末尾的提示会顶替真输入，真输入反被当作可裁剪历史
+      if (session.messages[i].role === "user" && !isEngineNote(session.messages[i])) {
         lastUserIdx = i
         break
       }
     }
+    // 注：引擎提示本身**可**被本护栏裁剪（不排除 isEngineNote）——它们都是引擎可再生的历史内容（分支报告全文
+    // 在过程存档/bg_task、提醒为一次性提示），体积可能不小（分支报告可达数千字符），不该永占窗口
     // 1) 图片降级（从最旧开始，一次降级一条消息的全部图片）：用户消息的图片附件与工具消息的
     //    图片引用（read 读取的图片）同规则让路
     for (let i = 0; i < session.messages.length; i++) {
@@ -139,11 +143,11 @@ export class ContextCompressor {
       await this.deps.store.save(session)
       return true
     }
-    // 2) 最旧用户消息裁剪占位（最新一条用户消息即本次任务输入，跳过）
-    for (let i = 0; i < session.messages.length; i++) {
-      if (i === lastUserIdx) continue
-      const m = session.messages[i]
-      if (m.role !== "user" || typeof m.content !== "string" || m.content.length <= 500) continue
+      // 2) 最旧用户消息裁剪占位（最新一条用户消息即本次任务输入，跳过；引擎提示可裁——见上注）
+  for (let i = 0; i < session.messages.length; i++) {
+    if (i === lastUserIdx) continue
+    const m = session.messages[i]
+    if (m.role !== "user" || typeof m.content !== "string" || m.content.length <= 500) continue
       if (m.content.startsWith("[历史消息已裁剪")) continue
       const size = m.content.length
       m.content = `[历史消息已裁剪（原 ${size} 字符，原文仍在会话记录中可查看）] ${m.content.slice(0, 200)}`

@@ -1482,3 +1482,74 @@ describe("原文件查看弹窗（previewShell：标题栏下载入口）", () =
     }
   })
 })
+
+describe("引擎提示消息（待办续做/收尾验证：role=user + engineNote，展示与用户输入区分）", () => {
+  test("引擎提示渲染为 engine-note 通知条（非用户气泡），无撤回按钮；用户消息不受影响", async () => {
+    const { appendMsg } = await import("./messages")
+    type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
+    const isEngineNote = (w: MockElWithQuery) => (w as unknown as ElWithClass).classList.contains("engine-note")
+    const hasRevoke = (w: MockElWithQuery) =>
+      (w.querySelectorAll("button") as unknown as Array<{ dataset: Record<string, string> }>).some((b) => /撤回/.test(b.dataset.tip ?? ""))
+    // 渲染到容器（parent）：绕过 msg-nav 导航重算（顶层 user 消息会触发，mock DOM 无布局）
+    const host = makeMockEl("div")
+    const render = (msg: Parameters<typeof appendMsg>[0]) => appendMsg(msg, false, host as unknown as HTMLElement) as unknown as MockElWithQuery
+
+    // 本版落盘形态：user + engineNote（会话记录里与用户输入同角色，展示形态分开）
+    const note = render({ id: "n1", role: "user", content: "【待办提醒】仍有未完成的待办", engineNote: "todo", createdAt: 1 })
+    expect(isEngineNote(note)).toBe(true)
+    expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
+    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("引擎提示")
+    expect(hasRevoke(note)).toBe(false)
+
+    // 用户自己发的消息（手打同前缀也不误判——前缀兜底限定 assistant 角色）：仍是用户气泡
+    const mine = render({ id: "u1", role: "user", content: "【待办提醒】我自己打的这句话", createdAt: 3 })
+    expect((mine as unknown as ElWithClass).classList.contains("user")).toBe(true)
+    expect(isEngineNote(mine)).toBe(false)
+  })
+
+  test("存量数据（标记上线前的 assistant 形态提醒）：按前缀识别为引擎提示并抑制撤回", async () => {
+    type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
+    // assistant 消息不建导航条，可走顶层渲染（撤回按钮的 noRevoke 抑制得以验证：普通助手消息本应有撤回）
+    const legacy = appendMsg({ id: "n2", role: "assistant", content: "【验证提醒】旧数据：请先跑测试。", createdAt: 2 }) as unknown as MockElWithQuery
+    expect((legacy as unknown as ElWithClass).classList.contains("engine-note")).toBe(true)
+    expect((legacy as unknown as ElWithClass).classList.contains("assistant")).toBe(false)
+    const revoke = (legacy.querySelectorAll("button") as unknown as Array<{ dataset: Record<string, string> }>).some((b) => /撤回/.test(b.dataset.tip ?? ""))
+    expect(revoke).toBe(false)
+    ;(legacy as unknown as { remove(): void }).remove()
+  })
+
+  test("定时任务写回（engineNote='cron'）：通知条称谓为「定时任务」", async () => {
+    const host = makeMockEl("div")
+    const note = appendMsg(
+      { id: "c1", role: "user", content: "⏰ 定时任务「daily」已完成。", engineNote: "cron", createdAt: 5 },
+      false,
+      host as unknown as HTMLElement,
+    ) as unknown as MockElWithQuery
+    type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
+    expect((note as unknown as ElWithClass).classList.contains("engine-note")).toBe(true)
+    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("定时任务")
+    expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
+  })
+
+  test("分支报告合入（engineNote='branch'）：通知条称谓为「分支合入」，不提供撤回", async () => {
+    const host = makeMockEl("div")
+    const note = appendMsg(
+      {
+        id: "b1",
+        role: "user",
+        engineNote: "branch",
+        content: "【并行分支「左路」已合并】\n调研结果：…",
+        branchMeta: { branchId: "br-1", name: "左路" },
+        createdAt: 6,
+      },
+      false,
+      host as unknown as HTMLElement,
+    ) as unknown as MockElWithQuery
+    type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
+    expect((note as unknown as ElWithClass).classList.contains("engine-note")).toBe(true)
+    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("分支合入")
+    expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
+    const revoke = (note.querySelectorAll("button") as unknown as Array<{ dataset: Record<string, string> }>).some((b) => /撤回/.test(b.dataset.tip ?? ""))
+    expect(revoke).toBe(false)
+  })
+})

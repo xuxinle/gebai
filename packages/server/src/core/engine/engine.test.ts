@@ -3075,10 +3075,27 @@ describe("context compaction", () => {
     // 用户输入不压缩不改变：压缩区间内的 user 消息原位保留
     for (let i = 1; i < 3; i++) expect(loaded!.messages.some((m) => m.role === "user" && m.content === `问题 ${i}`)).toBe(true)
     expect(events).toContain("event.message.compact")
-    // loadHistory 将摘要消息作为 assistant 注入（不污染 system 段）
+    // loadHistory 将摘要消息作为 **user 角色**注入（不污染 system 段，且避开思考类模型的尾 assistant 约束——
+    // 全量压缩（scope:"all"）时摘要会落到消息末尾，assistant 形态会让后续带工具面的请求 400）
     const msg = (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<import("@gebai/sdk").MessageLike[]> }).loadHistory
     const history = await msg.call(s.engine, s.session.id, "default")
-    expect(history.some((m) => String(m.content).startsWith("[历史摘要]"))).toBe(true)
+    const summaryMsg = history.find((m) => String(m.content).startsWith("[历史摘要]"))
+    expect(summaryMsg).toBeDefined()
+    expect(summaryMsg!.role).toBe("user")
+    cleanup(s.home)
+  })
+
+  test("全量压缩（scope:\"all\"）：摘要落尾时也以 user 结尾（尾部 assistant 会被思考类模型 400 拒绝）", async () => {
+    const s = await sessionWithHistory(6)
+    const result = await s.engine.compactSession(s.session.id, "default", "all")
+    expect(result.compacted).toBeGreaterThan(0)
+    const loaded = await s.store.load(s.session.id)
+    // 末尾若为摘要（compacted 标记），loadHistory 回放不得以 assistant 结尾
+    if (loaded!.messages.at(-1)?.compacted) {
+      const msg = (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<import("@gebai/sdk").MessageLike[]> }).loadHistory
+      const history = await msg.call(s.engine, s.session.id, "default")
+      expect(history.at(-1)!.role).not.toBe("assistant")
+    }
     cleanup(s.home)
   })
 
@@ -3592,30 +3609,31 @@ describe("context compaction", () => {
     // 软性提醒 + 纯文本回应即停：初始 1 轮 + 提醒 1 次（模型未再行动，视为已决定收尾）
     expect(s.provider.calls).toBe(2)
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
     expect(contMsgs.length).toBe(1)
     // 提醒携带未完成清单；事件携带 messageId/text 载荷（前端实时渲染）
     expect(String(contMsgs[0].content)).toContain("任务A")
     expect(String(contMsgs[0].content)).toContain("请自行决策")
-    // 落盘保持 assistant + engineNote 标记（UI/历史为助手气泡）；**模型上下文改 user 角色**——
+    // 消息即 user 角色（与用户输入同角色，随用户消息受上下文保护）+ engineNote 标记——
     // 思考类模型（DeepSeek thinking）不接受以 assistant 结尾的请求（视为前缀续写、要求回传
-    // reasoning_content），尾部 assistant 提醒会让后续调用 400、任务静默中断（实测）
-    expect((contMsgs[0] as { engineNote?: string }).engineNote).toBe("todo")
+    // reasoning_content），assistant 形态的提醒会让后续调用 400、任务静默中断（实测）；
+    // engineNote 供前端与记录导出区分「引擎写的提示」与「用户输入」
+    expect(contMsgs[0].engineNote).toBe("todo")
     const nudgeCtx = s.provider.seenChats[1]!
     expect(nudgeCtx[nudgeCtx.length - 1]!.role).toBe("user")
     expect(String(nudgeCtx[nudgeCtx.length - 1]!.content)).toContain("【待办提醒】")
     cleanup(s.home)
   })
 
-  test("提醒消息回放为 user 角色（含库存量数据：无 engineNote 标记按内容前缀识别）", async () => {
+  test("引擎提示判定与回放：user + engineNote 直接放行，存量 assistant 形态按内容前缀识别为 user", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
     // 存量格式：标记上线前落盘的 assistant 提醒消息（无 engineNote 字段）
     await s.store.appendMessage(session.id, { id: "old-nudge", role: "assistant", content: "【验证提醒】旧数据：请先跑测试。", createdAt: Date.now() } as never)
     const history = await (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<Array<{ role: string; content: unknown }>> }).loadHistory(session.id, "default")
     expect(history.find((m) => String(m.content).includes("【验证提醒】"))!.role).toBe("user")
-    // 新格式（带 engineNote 标记）同样回放为 user 角色
-    await s.store.appendMessage(session.id, { id: "new-nudge", role: "assistant", content: "【待办提醒】仍有未完成待办。", engineNote: "todo", createdAt: Date.now() } as never)
+    // 新格式：user + engineNote（本版落盘形态）回放保持 user
+    await s.store.appendMessage(session.id, { id: "new-nudge", role: "user", content: "【待办提醒】仍有未完成待办。", engineNote: "todo", createdAt: Date.now() } as never)
     const history2 = await (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<Array<{ role: string; content: unknown }>> }).loadHistory(session.id, "default")
     expect(history2.find((m) => String(m.content).includes("【待办提醒】"))!.role).toBe("user")
     cleanup(s.home)
@@ -3634,7 +3652,7 @@ describe("context compaction", () => {
     unsub()
     expect(s.provider.calls).toBe(3)
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
     expect(contMsgs.length).toBe(1)
     expect(events.filter((t) => t === "event.todo.continue").length).toBe(1)
     cleanup(s.home)
@@ -3651,7 +3669,7 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
     // 每次提醒后均继续行动（未纯文本收尾）：提醒注入至轮次上限 3 次
-    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
     expect(contMsgs.length).toBe(3)
     cleanup(s.home)
   })
@@ -3667,7 +3685,7 @@ describe("context compaction", () => {
     s.provider.replyText = "正在处理"
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => m.role === "assistant" && String(m.content).includes("【待办提醒】"))
+    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
     // 首次提醒无前文可比较；第 2/3 次提醒携带防复述提示
     expect(contMsgs.length).toBe(3)
     expect(String(contMsgs[0].content)).not.toContain("完全相同")

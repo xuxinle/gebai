@@ -73,11 +73,14 @@ export interface Message {
   /** 子Agent 装载提示词消息标记（role=system）：装载（agent_load/启动预载/WS sub_agent.load）时写入会话记录，
    *  内容为子Agent 完整系统提示词；loadHistory 时按 system 角色透传进模型上下文，UI 渲染为简短装载提示。 */
   loadedAgent?: string
-  /** 引擎软性提醒标记（role=assistant，`todo` 待办续做／`verify` 收尾验证提醒）：注入的提醒落盘保持
-   *  assistant 形态（UI 与历史记录为助手气泡），但 **loadHistory 回放时改以 user 角色进模型上下文**——
-   *  思考类模型（DeepSeek thinking 等）不接受以 assistant 结尾的请求（视为前缀续写、要求回传
-   *  `reasoning_content`），尾部 assistant 提醒会让后续每次调用 400、任务静默中断。 */
-  engineNote?: "todo" | "verify"
+  /** 引擎软性提示标记：消息**角色为 user**（与用户输入同角色、随用户消息一起受上下文保护），仅用于与用户
+   *  自己发的消息**区分展示**——UI 渲染为弱化的通知条（非用户气泡）。
+   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`cron` 定时任务结果写回、`branch` 分支报告合入。
+   *  落 user 的根本原因：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、
+   *  要求回传 `reasoning_content` → 400），而这类系统合成的消息注入位置往往就是模型下一次调用的前一条。
+   *  标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
+   *  （前缀兜底限定 assistant 角色）。 */
+  engineNote?: "todo" | "verify" | "cron" | "branch"
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */

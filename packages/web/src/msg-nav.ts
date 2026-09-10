@@ -93,6 +93,8 @@ function makeTooltip(): HTMLElement {
 }
 
 function roleOf(msg: HTMLElement): Seg["role"] {
+  // 引擎提示（待办续做/收尾验证，role=user + engineNote）：展示为通知条，不算用户输入（不建导航条）
+  if (msg.classList.contains("engine-note")) return "system"
   if (msg.classList.contains("user")) return "user"
   if (msg.classList.contains("tool")) return "tool"
   if (msg.classList.contains("system")) return "system"

@@ -532,9 +532,20 @@ describe("branch_run 主动合入与互相感知", () => {
       expect(interim?.content).toContain("A的中期发现：方案A可行且成本低")
       expect(interim?.branchMeta?.name).toBe("左路")
       expect(interim?.sessionRun).toBeUndefined() // 分支仍在执行，阶段性合入不带活引用存档
+      // 落盘即 user + engineNote: "branch"（与其余引擎注入同口径）：注入位置紧贴模型调用，assistant 形态
+      // 会被思考类模型 400 拒绝；标记供前端渲染为「分支合入」通知条（与用户输入区分）
+      expect(interim?.role).toBe("user")
+      expect(interim?.engineNote).toBe("branch")
       expect(msgs.findIndex((m) => m.content.includes("阶段性合入"))).toBeLessThan(msgs.findIndex((m) => m.branchMeta?.name === "左路" && m.content.includes("已合并")))
       expect(msgs.some((m) => m.branchMeta?.name === "左路" && m.content.includes("左路最终报告"))).toBe(true) // 合入后继续运行并最终合入
       expect(msgs.some((m) => m.branchMeta?.name === "右路" && m.content.includes("右路最终报告"))).toBe(true)
+      // 合入进模型上下文与落盘同形：user（落盘与上下文都是 user + engineNote，前端渲染为分支合入通知条）：
+      // 注入位置就是本轮 tool 结果之后（下一条即模型调用），assistant 形态会被思考类模型判为前缀续写并 400（实测）
+      const mainChats = h.provider.seenChats.filter((c) => c.some((x) => x.role === "user" && x.content === "做两个方案的调研"))
+      const mergedChat = mainChats.find((c) => c.some((x) => typeof x.content === "string" && x.content.includes("【并行分支「左路」")))
+      expect(mergedChat).toBeDefined()
+      expect(mergedChat!.some((x) => x.role === "assistant" && typeof x.content === "string" && x.content.includes("【并行分支「左路」"))).toBe(false)
+      expect(mergedChat!.some((x) => x.role === "user" && typeof x.content === "string" && x.content.includes("【并行分支「左路」"))).toBe(true)
       // 右路第二轮感知左路阶段性合入（通知注入其上下文；按包含分支提示词识别分支 chat）
       const bChats = h.provider.seenChats.filter((m) => m.some((x) => x.role === "user" && x.content === "调研方案B"))
       expect(bChats.length).toBeGreaterThanOrEqual(2)

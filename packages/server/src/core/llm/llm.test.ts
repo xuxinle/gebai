@@ -18,6 +18,47 @@ function withFetch(mock: (url?: string | URL, init?: RequestInit) => Promise<Res
   })
 }
 
+describe("尾部 assistant 降级（防御性归一化）", () => {
+  /** 捕获请求体 messages 数组。 */
+  async function sentMessages(msgs: MessageLike[], apiKind: ProviderConfig["apiKind"] = "openai"): Promise<Array<Record<string, unknown>>> {
+    let body: Record<string, unknown> = {}
+    await withFetch(
+      async (_url, init) => {
+        body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+        return new Response(OK_STREAM, { status: 200 })
+      },
+      async () => {
+        for await (const _ of createProvider({ ...BASE_CFG, apiKind }).chat(msgs)) void _
+      },
+    )
+    return (body.messages ?? body.input) as Array<Record<string, unknown>>
+  }
+
+  test("以 assistant 纯文本结尾的请求：末条降级为 user（思考类模型会 400 拒绝该形态）", async () => {
+    const sent = await sentMessages([{ role: "user", content: "问题" }, { role: "assistant", content: "【待办提醒】还有未完成待办" }])
+    expect(sent.at(-1)!.role).toBe("user")
+    expect(String(sent.at(-1)!.content)).toContain("【待办提醒】")
+  })
+
+  test("尾部 assistant 带 toolCalls（正常工具循环形态）不降级；尾 tool/user 不降级", async () => {
+    const withCalls = await sentMessages([
+      { role: "user", content: "问题" },
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "ls", arguments: {} }] },
+      { role: "tool", content: "结果", toolCallId: "c1", name: "ls" },
+    ])
+    expect(withCalls.at(-1)!.role).toBe("tool")
+    const plain = await sentMessages([{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" }])
+    expect(plain.at(-1)!.role).toBe("user")
+  })
+
+  test("Anthropic / Responses 序列化同样受保护（尾 assistant 降级）", async () => {
+    const anthropic = await sentMessages([{ role: "user", content: "问题" }, { role: "assistant", content: "结尾助手文本" }], "anthropic")
+    expect(anthropic.at(-1)!.role).toBe("user")
+    const responses = await sentMessages([{ role: "user", content: "问题" }, { role: "assistant", content: "结尾助手文本" }], "responses")
+    expect(responses.at(-1)!.role).toBe("user")
+  })
+})
+
 describe("provider robustness", () => {
   test("5xx 失败后重试成功（指数退避，仅重试一次）", async () => {
     let calls = 0

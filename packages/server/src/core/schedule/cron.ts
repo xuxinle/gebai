@@ -911,7 +911,10 @@ export class CronManager {
     }
   }
 
-  /** 结果消息写回来源会话（会话仍存在时；脚本型历史可见、模型可感知，会话删除则静默跳过）。 */
+  /** 结果消息写回来源会话（会话仍存在时；历史可见、模型可感知，会话删除则静默跳过）。
+   *  角色为 **user + engineNote: "cron"**：与引擎提醒同规则——思考类模型不接受以 assistant 结尾的请求
+   *  （写回后该消息若成为尾消息，会话下次带工具面的请求会被 400 拒绝；实测），且标记供 UI 渲染为
+   *  「定时任务」通知条（与用户自己发的消息区分）。 */
   private async appendOriginMessage(entry: CronTask, content: string, now: number): Promise<void> {
     const sid = entry.originSessionId
     if (!sid) return
@@ -920,8 +923,9 @@ export class CronManager {
       sid,
       {
         id: randomUUID(),
-        role: "assistant",
+        role: "user",
         content,
+        engineNote: "cron",
         createdAt: now,
       },
       entry.user,

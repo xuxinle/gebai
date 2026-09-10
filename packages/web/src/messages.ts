@@ -265,11 +265,44 @@ export function flushMsgBatch(): void {
   }
 }
 
+/** 引擎软性提醒内容前缀（存量数据无 engineNote 标记时的兜底：标记上线前落盘的提醒为 assistant 形态）。 */
+const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
+
+/** 引擎提示展示名（engineNote → 称谓）：todo/verify 为引擎自律提醒，cron 为定时任务结果写回，
+ *  branch 为分支报告合入。 */
+const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", cron: "定时任务", branch: "分支合入" }
+
+/**
+ * 引擎提示类型判定（与服务端 `store.isEngineNote` 同口径）：**字段标记优先**，存量数据
+ * （标记上线前的 **assistant 形态**提醒）按内容前缀兜底（前缀仅对 assistant 生效，
+ * 否则用户手打「【待办提醒】…」这类文本会被误判）。返回 undefined = 用户/模型的真实消息。
+ */
+export function engineNoteOf(m: { role?: string; engineNote?: string; content?: string }): string | undefined {
+  if (m.engineNote) return m.engineNote
+  if (m.role === "assistant" && ENGINE_NOTE_RE.test(typeof m.content === "string" ? m.content : "")) return "todo"
+  return undefined
+}
+
+/** 引擎提示展示名（engineNote → 通知条称谓，与服务端各注入点一一对应）。 */
+function engineNoteName(kind: string): string {
+  return ENGINE_NOTE_NAME[kind] ?? "引擎提示"
+}
+
+/** 是否为引擎提示消息（展示时与用户输入/助手回复区分）。 */
+export function isEngineNoteMsg(m: { role?: string; engineNote?: string; content?: string }): boolean {
+  return engineNoteOf(m) !== undefined
+}
+
 export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): HTMLElement {
-  const wrapper = el("div", `msg ${msg.role}${stream ? " streaming" : ""}`)
+  // 引擎提示（待办续做/收尾验证/定时任务写回/分支合入，role=user + engineNote）：与用户自己发的输入
+  // 同角色落盘，但展示形态区分——弱化通知条（非右对齐用户气泡，不提供撤回）；
+  // 存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别
+  const noteKind = msg.role === "user" || msg.role === "assistant" ? engineNoteOf(msg) : undefined
+  const wrapper = el("div", `msg ${noteKind ? "engine-note" : msg.role}${stream ? " streaming" : ""}`)
   const body = el("div", "msg-body")
   const meta = el("div", "msg-meta")
-  meta.append(el("span", "msg-name", ROLE_NAME[msg.role] ?? msg.role), el("span", "msg-time", formatTime(msg.createdAt)))
+  const displayNote = noteKind ? engineNoteName(noteKind) : undefined
+  meta.append(el("span", "msg-name", displayNote ?? ROLE_NAME[msg.role] ?? msg.role), el("span", "msg-time", formatTime(msg.createdAt)))
   body.appendChild(meta)
 
   // 子Agent 装载提示词消息（role=system + loadedAgent）：渲染为简短装载提示，不占正文（全文在会话记录存档）
@@ -313,15 +346,17 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
       bubble.appendChild(toolOutput(msg.content))
     }
   } else {
-    bubble = el("div", "bubble")
+    bubble = el("div", noteKind ? "bubble engine-notice" : "bubble")
   }
   if ((msg.content || msg.reasoning) && msg.role !== "tool") {
     bubble!.appendChild(
-      msg.role === "assistant"
-        ? msg.reasoning
-          ? assistantWithReasoning(msg.reasoning, msg.content)
-          : assistantContent(msg.content)
-        : blockText(msg.content),
+      noteKind
+        ? blockText(msg.content)
+        : msg.role === "assistant"
+          ? msg.reasoning
+            ? assistantWithReasoning(msg.reasoning, msg.content)
+            : assistantContent(msg.content)
+          : blockText(msg.content),
     )
   }
   // assistant 流式消息需要空 bubble 占位
@@ -329,8 +364,8 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   if (hasBody && bubble) body.appendChild(bubble)
 
   // 头部行复制按钮（hover 显示，不占气泡空间）；助手消息复制 markdown 源文；
-  // 容器内消息（子Agent 执行过程回放，id 为本地生成）不提供撤回
-  if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg, { noRevoke: !!parent })
+  // 容器内消息（子Agent 执行过程回放，id 为本地生成）与引擎提示不提供撤回
+  if (!stream && bubble) addMetaActions(meta, wrapper, bubble, msg, { noRevoke: !!parent || noteKind !== undefined })
 
   const cur = getCurrentSession()
   // 弹窗查看模式下文件工具（card.file）的产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）

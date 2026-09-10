@@ -210,13 +210,15 @@ async function init() {
       // 任务中模型经 full_mode 工具（用户批准）切换到完整模式：本地极简开关随之关闭
       if (ev.payload.enabled === false) syncMinimalModeFromServer(false)
     } else if (ev.type === "event.branch.merged") {
-      // 分支报告合入主上下文（DESIGN「会话分支运行与合并」）：实时渲染合并气泡（分支过程在折叠容器，
-      // 报告气泡即时可见；历史回放由存储中的合并消息承担，含过程存档容器）
+      // 分支报告合入（DESIGN「会话分支运行与合并」）：消息落盘为 **user + engineNote: "branch"**
+      // （与其余引擎注入同口径——assistant 形态会被思考类模型 400 拒绝），此处实时渲染为
+      // 「分支合入」通知条；分支执行过程在折叠容器（非最终合入不带存档），历史回放由存储消息承担
       if (getCurrentSession()?.id !== ev.sessionId) return
       sealSegment(ev.sessionId) // 合并消息独立成段（不并入主线在途流式文本）
       appendMsg({
         id: String(ev.payload.messageId ?? uuid()),
-        role: "assistant",
+        role: "user",
+        engineNote: "branch",
         content: String(ev.payload.text ?? ""),
         branchMeta: {
           branchId: String(ev.payload.branchId ?? ""),
@@ -228,14 +230,16 @@ async function init() {
       scrollIfSticky()
       refreshJumpBottom()
     } else if (ev.type === "event.todo.continue" || ev.type === "event.verify.nudge") {
-      // 引擎收尾提示实时可见（DESIGN「待办续做」「收尾验证提醒」）：提示以普通助手消息落盘，
-      // 此处按同款形态实时渲染；非当前会话由历史回放兑底
+      // 引擎收尾提示实时可见（DESIGN「待办续做」「收尾验证提醒」）：消息落盘为 **user 角色 + engineNote 标记**
+      // （与用户输入同角色，思考类模型不接受以 assistant 结尾的请求；标记供展示形态区分），
+      // 此处按同款形态实时渲染（引擎提示通知条）；非当前会话由历史回放兜底
       if (getCurrentSession()?.id !== ev.sessionId) return
       sealSegment(ev.sessionId)
       appendMsg({
         id: String(ev.payload.messageId ?? uuid()),
-        role: "assistant",
+        role: "user",
         content: String(ev.payload.text ?? ""),
+        engineNote: ev.type === "event.todo.continue" ? "todo" : "verify",
         createdAt: Date.now(),
       })
       scrollIfSticky()

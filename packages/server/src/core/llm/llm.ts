@@ -190,15 +190,34 @@ function toOpenAIContentBlock(b: Record<string, unknown>): Record<string, unknow
 }
 
 /**
+ * 尾部纯文本 assistant 降级为 user（发送前防御性归一化）。
+ *
+ * 思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**：视为前缀续写、要求回传
+ * `reasoning_content`，否则整个请求 400 `The reasoning_content in the thinking mode must be passed back to
+ * the API`（实测）——带工具面的请求尤其如此。任何**引擎写入而模型未产出**的尾部 assistant 都会让请求
+ * 整体失败：待办续做/收尾验证提醒、定时任务结果写回、压缩摘要（全量压缩时落尾）、撤回截断残留、
+ * 旧版本落盘的历史数据。
+ *
+ * 引擎合成的注入类消息已统一落 user 角色（见 engine.loadHistory / schedule/cron / Message.engineNote），
+ * 本函数是它们之后的总兜底：把未预见的来源在发送前降级为 user，避免整个会话因尾部形态被卡死。
+ * 正常工具循环请求总以 tool 结果或用户输入结尾（模型真实输出不会成为尾消息），故不触及。
+ * 注：若将来确实需要**前缀续写**（prefill）语义，需带上该 assistant 消息的 reasoning_content 并关闭本兜底。
+ */
+function demoteTailAssistant<T extends { role: string; toolCalls?: unknown }>(msgs: T[]): T[] {
+  const last = msgs[msgs.length - 1]
+  if (!last || last.role !== "assistant") return msgs
+  if (Array.isArray(last.toolCalls) && last.toolCalls.length > 0) return msgs
+  console.warn("[llm] 请求消息以 assistant 结尾（思考类模型会以 400 拒绝），已降级为 user 角色发送")
+  return [...msgs.slice(0, -1), { ...last, role: "user" }]
+}
+
+/**
  * 内部消息 → OpenAI 兼容格式。
- * **尾部消息不能是 assistant**（思考类模型如 DeepSeek thinking 会将其判为前缀续写，要求回传
- * `reasoning_content`，否则 400 `The reasoning_content in the thinking mode must be passed back to the API`
- * ——实测）。故引擎注入的软性提醒（待办续做/收尾验证）在上下文一律用 user 角色（见 engine.loadHistory
- * 与两处注入点）；新增“以助手消息注入再续跑”的机制时需遵守同一约束。
+ * 尾部形态约束见 demoteTailAssistant（发送前自动降级，新增“以助手消息注入再续跑”的机制同样受此保护）。
  */
 function toOpenAIMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of repairToolPairing(msgs, { flushTail: true })) {
+  for (const m of demoteTailAssistant(repairToolPairing(msgs, { flushTail: true }))) {
     if (m.role === "tool") {
       // 工具结果多模态（DESIGN「多模态支持」read 图片内联）：块数组映射为内容部件（text/image_url）；
       // 纯字符串保持原样（绝大多数工具结果零开销直传）
@@ -238,7 +257,7 @@ function toAnthropicContentBlock(b: Record<string, unknown>): Record<string, unk
 
 function toAnthropicMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of repairToolPairing(msgs, { flushTail: true })) {
+  for (const m of demoteTailAssistant(repairToolPairing(msgs, { flushTail: true }))) {
     if (m.role === "tool") {
       // 工具结果多模态：tool_result 内容支持块数组（text + image，Anthropic 官方形态——read 图片内联）
       out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content.map(toAnthropicContentBlock) : "") }] })
@@ -297,7 +316,7 @@ function capabilities(config: ProviderConfig): LLMCapabilities {
  */
 function toResponsesInput(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of repairToolPairing(msgs, { flushTail: true })) {
+  for (const m of demoteTailAssistant(repairToolPairing(msgs, { flushTail: true }))) {
     if (m.role === "tool") {
       // function_call_output 仅接受字符串：文本块拼为输出，图片块转紧随的 user 消息内容部件
       // （Responses 输入项顺序合法，模型同轮可见——工具结果多模态 read 图片内联）
