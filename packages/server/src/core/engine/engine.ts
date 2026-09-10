@@ -62,8 +62,10 @@ function fingerprint(content: string): string {
 /** 工具调用轮次上限：不限制（超长任务不截停）。失控防线独立存在：重复检测终止（MAX_REPEAT_STALLS）、
  *  用户取消、上下文压缩、模型自然收尾；rounds 仅作计数回传（toolRounds）。 */
 const MAX_TOOL_ROUNDS = Number.POSITIVE_INFINITY
-/** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。 */
-const MAX_TODO_CONTINUE = 3
+/** 待办续做：主循环完成后仍有未完成待办（pending/in_progress）时，追加提醒消息继续完成的轮次上限。
+ *  1 轮：提醒「一事一议」——注入一次即足够唤醒模型去处理待办，反复提醒只是打扰（模型未续做
+ *  即视为已决策收尾；若需更强催办可调高，防复述提示需 ≥2 轮才生效）。 */
+const MAX_TODO_CONTINUE = 1
 /** 收尾验证提醒轮次上限：改了代码文件但全程未跑测试/检查的任务，结束时最多注入一次提醒（防反复打扰）。 */
 const MAX_VERIFY_NUDGE = 1
 /** 收尾验证提醒——代码文件判定（write/edit/patch 命中这些扩展名的 path 才计入；md/txt 等文档不触发）。 */
@@ -872,7 +874,9 @@ export class AgentEngine {
 
       // 待办续做：每轮会话完成（模型给出最终回复）后检查待办，pending/in_progress 未完成则
       // 追加提示消息继续会话，直至全部完成或达到续做轮次上限（DESIGN「待办续做」）。
-      // 提示为 assistant 角色的软性提醒（仅陈述未完成事实，继续执行还是直接收尾由模型自行决策）；
+      // 提示为 **user 角色**的软性提醒（仅陈述未完成事实，继续执行还是直接收尾由模型自行决策）——
+      // user 而非 assistant：思考类模型不接受以 assistant 结尾的请求，而提醒注入点正是下一条模型调用的前一条
+      // （见 DESIGN「引擎注入消息的角色约定」），engineNote: "todo" 标记供 UI 区分展示；
       // 模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入
       let continueRound = 0
       let verifyRound = 0
@@ -948,7 +952,9 @@ export class AgentEngine {
         if (continueRound > 0 && res && res.toolRounds === 0) break
 
         const titleList = pending.map((t) => `- ${t.title}`).join("\n")
-        // 文本重复检测：回复与上上轮完全相同 → 追加提醒，避免待办续做空转复述（DESIGN「重复检测」）
+        // 文本重复检测：回复与上上轮完全相同 → 追加提醒，避免待办续做空转复述（DESIGN「重复检测」）。
+        // 注：需 ≥2 轮才可能触发（lastFinalText 于首次提醒后才有值）——当前 MAX_TODO_CONTINUE = 1
+        // 下为**休眠路径**（保留：上限调高即自动生效，逻辑本身与轮次无关）
         const repeated = finalText !== "" && finalText === lastFinalText
         const contMsg = `【待办提醒】当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
         const contMsgId = crypto.randomUUID()

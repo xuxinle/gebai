@@ -3601,7 +3601,7 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("todo continuation: 提示为 assistant 软性提醒，纯文本回应即停（模型决策收尾）", async () => {
+  test("todo continuation: 提示为 user 软性提醒 + engineNote:todo（落盘与回放同角色），纯文本回应即停", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
@@ -3668,14 +3668,15 @@ describe("context compaction", () => {
     s.provider.toolArgs = {}
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
-    // 每次提醒后均继续行动（未纯文本收尾）：提醒注入至轮次上限 3 次
+    // 每次提醒后均继续行动（未纯文本收尾）：上限 1 轮 → 仅注入 1 次提醒即停止
     const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
-    expect(contMsgs.length).toBe(3)
+    expect(contMsgs.length).toBe(1)
     cleanup(s.home)
   })
 
-  test("todo continuation: identical repeated replies get an anti-repetition hint", async () => {
-    // 行动轮回复完全相同（每次提醒后都调工具且文本一致）：第 2 次提醒起携带防复述提示
+  test("todo continuation: 防复述提示在 1 轮上限下不触发（需 ≥2 轮，休眠路径）", async () => {
+    // 行动轮回复完全相同（每次提醒后都调工具且文本一致）：防复述提示需 ≥2 轮才可能触发，
+    // 当前 MAX_TODO_CONTINUE = 1 → 仅 1 次提醒且不带该提示（上限调高即自动生效）
     const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
@@ -3686,11 +3687,8 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
     const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
-    // 首次提醒无前文可比较；第 2/3 次提醒携带防复述提示
-    expect(contMsgs.length).toBe(3)
+    expect(contMsgs.length).toBe(1)
     expect(String(contMsgs[0].content)).not.toContain("完全相同")
-    expect(String(contMsgs[1].content)).toContain("完全相同")
-    expect(String(contMsgs[2].content)).toContain("完全相同")
     cleanup(s.home)
   })
 
