@@ -165,6 +165,11 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   console.log(
     `[gebai] listening on http://${server.hostname}:${server.port} (GEBAI_HOME=${config.gebaiHome}, auth=${config.auth}, sandbox=${c.sandbox.enabled}${config.devReload ? ", dev-reload" : ""})`,
   )
+  // 飞书机器人长连接在监听建立后异步启动：通道握手（网络）不阻塞服务可用；失败只记日志不退出
+  // （GEBAI_FEISHU_BOT_ENABLED 的凭证缺失在 compose 启动期已抛错）
+  if (c.feishuBot) {
+    void c.feishuBot.start().catch((err) => console.error(`[feishu-bot] 启动失败（服务继续运行）: ${String((err as Error).message || err)}`))
+  }
   // 进程退出时终止 vite build --watch 子进程（防孤儿）
   process.on("exit", () => devReload?.stop())
   return server

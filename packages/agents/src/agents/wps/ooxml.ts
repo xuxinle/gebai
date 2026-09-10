@@ -3,19 +3,24 @@
  * 本文件负责解包（fflate）、XML 解析（happy-dom DOMParser，text/xml 模式支持命名空间前缀）、
  * 以及 docx 正文 / pptx 幻灯片的读取模型（word_read / ppt_read / word_append 的解析基础）。
  */
-import { Window } from "happy-dom"
-import type { Document, Element } from "happy-dom"
+import type { Document, Element, Window } from "happy-dom"
 import { strFromU8, unzipSync, zipSync } from "fflate"
 
 // DOMParser 无文档级状态，模块级共享一个 Window 实例即可（与 mermaid 的 happy-dom 垫层互不影响）
-const domWindow = new Window()
+let domWindow: Window | null = null
+
+/** happy-dom Window 惰性加载（模块图含 400+ 子模块，静态引入拖慢进程启动）：仅实际解析 Office XML 时引入。
+ *  parseXml 为同步 API，此处以 require 同步取（Bun 的 ESM 模块内可用）。 */
+function windowOf(): Window {
+  return (domWindow ??= new (require("happy-dom").Window)())
+}
 
 export function parseXml(text: string): Document {
   // 兼容性规范化：python-docx 等库写出的 XML 声明用单引号（<?xml version='1.0' ...?>），
   // happy-dom 的 text/xml 解析器不识别，会静默降级为 HTML 解析（根元素变 HTML/BODY），
   // 导致所有按命名空间前缀的标签查询落空。解析前统一把声明改为双引号形式。
   const normalized = text.replace(/^\s*(<\?xml[\s\S]*?\?>)/, (decl) => decl.replace(/'/g, '"'))
-  const doc = new domWindow.DOMParser().parseFromString(normalized, "text/xml")
+  const doc = new (windowOf().DOMParser)().parseFromString(normalized, "text/xml")
   // 防静默降级兜底：输入是 XML 却解析出 HTML 根元素 → 显式报错，避免下游误诊为「文件损坏/需另存」
   if (/^\s*<\?xml/.test(text) && doc.documentElement?.tagName === "HTML") {
     throw new Error(`XML 解析失败（解析器降级为 HTML）：${text.slice(0, 120)}`)

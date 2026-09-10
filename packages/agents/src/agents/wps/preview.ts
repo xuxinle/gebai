@@ -5,11 +5,10 @@
  * 与 exceljs），app 层经此模块惰性引入；内容全量 HTML 转义、样式自带，不还原精确分页与版式
  * （阅读视图口径，非排版视图）。
  */
-import { Workbook } from "exceljs"
 import type { Cell } from "exceljs"
 import { readDocx, readPptx, unzipFiles } from "./ooxml"
 import type { DocxBlock } from "./ooxml"
-import { cellText } from "./excel"
+import { cellText, loadWorkbook } from "./excel"
 
 /** 支持阅读视图的扩展名（与 files/preview?render=office 的分派一致）。 */
 export const OFFICE_PREVIEW_EXTS = new Set(["docx", "xlsx", "xlsm", "pptx"])
@@ -176,6 +175,7 @@ const SHEET_ROW_CAP = 500
 const SHEET_COL_CAP = 64
 
 async function xlsxView(bytes: Uint8Array): Promise<string> {
+  const Workbook = await loadWorkbook()
   const wb = new Workbook()
   // exceljs 对 load 入参的自有 Buffer 声明滞后（同 excel.ts 口径，运行时兼容——统一断言）
   await wb.xlsx.load(Buffer.from(bytes) as never)

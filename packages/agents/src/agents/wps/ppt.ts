@@ -3,11 +3,17 @@
  * 备注与背景）、ppt_read（解析幻灯片文本/表格/备注/图表与图片计数，markdown 输出）。
  * 注意 pptxgenjs 在 Bun 下的严格模式限制：文本数组一律归一为 {text, options} 对象形态（不传裸字符串数组）。
  */
-import PptxGenJS from "pptxgenjs"
 import type { Tool } from "@gebai/sdk"
 import { truncate } from "@gebai/sdk/node"
 import { readPptx, unzipFiles } from "./ooxml"
 import { asNum, blindOverwriteGuard, fileBlocks, fitImage, normColor, readImage, schema, writeGuards } from "./shared"
+
+/** pptxgenjs 惰性加载（静态引入拖慢进程启动）：仅实际生成 .pptx 时引入。 */
+let pptxLib: typeof import("pptxgenjs").default | null = null
+async function loadPptxGenJS(): Promise<typeof import("pptxgenjs").default> {
+  if (!pptxLib) pptxLib = (await import("pptxgenjs")).default
+  return pptxLib
+}
 
 const CHART_TYPES: Record<string, string> = {
   bar: "bar",
@@ -129,6 +135,7 @@ export const pptCreateTool: Tool = {
     }
     const meta = args.meta && typeof args.meta === "object" ? (args.meta as Record<string, unknown>) : {}
 
+    const PptxGenJS = await loadPptxGenJS()
     const pptx = new PptxGenJS()
     let layoutName = "LAYOUT_WIDE"
     if (args.layout === "4x3" || args.layout === "4:3") {

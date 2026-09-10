@@ -5,20 +5,27 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { RouteCtx } from "./context"
 
-function loadWebBundle(): Record<string, string> {
-  try {
-    return require("../core/web.bundle.generated").webBundle
-  } catch {
-    return {}
+/** 内嵌 web bundle（构建期 `scripts/build-web-bundle.ts` 生成，体积数十 MB）：**按需加载**——
+ *  仅二进制模式读取内嵌资源时经 embeddedWebAssets() 触发；源码/dev 形态走 webDist，不进启动路径。 */
+let webBundleCache: Record<string, string> | null = null
+function webBundle(): Record<string, string> {
+  if (!webBundleCache) {
+    let loaded: Record<string, string> = {}
+    try {
+      loaded = require("../core/web.bundle.generated").webBundle
+    } catch {
+      /* bundle 缺失（纯源码/dev 形态）：空表 */
+    }
+    webBundleCache = loaded
   }
+  return webBundleCache
 }
-const webBundle = loadWebBundle()
 
 /** 二进制模式内嵌静态资源访问（web bundle 为空时返回 null）。 */
 function embeddedWebAssets(): { get: (p: string) => Uint8Array<ArrayBuffer> | null } | null {
-  const keys = Object.keys(webBundle)
+  const keys = Object.keys(webBundle())
   if (!keys.length) return null
-  const byPath = new Map(keys.map((k) => [k, Buffer.from(webBundle[k], "base64")]))
+  const byPath = new Map(keys.map((k) => [k, Buffer.from(webBundle()[k], "base64")]))
   const asUint8 = (buf: Buffer | null): Uint8Array<ArrayBuffer> | null => (buf ? Uint8Array.from(buf) : null)
   return {
     get: (p: string) => {

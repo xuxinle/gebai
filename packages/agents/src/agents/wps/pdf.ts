@@ -6,8 +6,7 @@
  *   走 worker postMessage 在 Bun 下 DataCloneError，不可用）。
  * - pdf_merge / pdf_split / pdf_edit：合并、按区间/每 N 页/单页拆分、页面增删旋转移动 + 元数据 + 水印。
  */
-import { PDFDocument, PDFFont, PDFImage, StandardFonts, degrees, rgb } from "pdf-lib"
-import fontkit from "@pdf-lib/fontkit"
+import type { PDFDocument, PDFFont, PDFImage } from "pdf-lib"
 import { getDocumentProxy, getMeta } from "unpdf"
 import { homedir } from "node:os"
 import { readdirSync, readFileSync } from "node:fs"
@@ -17,13 +16,34 @@ import type { MdBlock, MdRun } from "./markdown"
 import { bodyInput } from "./markdown"
 import { asNum, blindOverwriteGuard, fileBlocks, normColor, readImage, schema, writeGuards } from "./shared"
 
+/** pdf-lib 惰性加载（模块图较重，静态引入拖慢进程启动）：仅实际生成/编辑 PDF 时引入。 */
+let pdfLib: typeof import("pdf-lib") | null = null
+async function loadPdfLib(): Promise<typeof import("pdf-lib")> {
+  if (!pdfLib) pdfLib = await import("pdf-lib")
+  return pdfLib
+}
+/** 同步取 pdf-lib（同步辅助函数用；调用前必已由 async 路径加载）。 */
+function pdfLibSync(): typeof import("pdf-lib") {
+  return (pdfLib ??= require("pdf-lib"))
+}
+
+/** fontkit（自定义字体解析）：与 pdf-lib 同惰性口径，仅嵌入 CJK 字体时引入。 */
+let fontkitLib: typeof import("@pdf-lib/fontkit") | null = null
+async function loadFontkit(): Promise<typeof import("@pdf-lib/fontkit")> {
+  if (!fontkitLib) {
+    const mod = (await import("@pdf-lib/fontkit")) as typeof import("@pdf-lib/fontkit") & { default?: typeof import("@pdf-lib/fontkit") }
+    fontkitLib = mod.default ?? mod
+  }
+  return fontkitLib
+}
+
 // ---------------------------------------------------------------------------
 // 基础：颜色 / 页码区间
 // ---------------------------------------------------------------------------
 
 function hexToRgb(hex: string) {
   const c = normColor(hex) ?? "000000"
-  return rgb(parseInt(c.slice(0, 2), 16) / 255, parseInt(c.slice(2, 4), 16) / 255, parseInt(c.slice(4, 6), 16) / 255)
+  return pdfLibSync().rgb(parseInt(c.slice(0, 2), 16) / 255, parseInt(c.slice(2, 4), 16) / 255, parseInt(c.slice(4, 6), 16) / 255)
 }
 
 /** 页码区间解析："1-3,5,8-"（1 起始，开区间到末页）→ 升序去重 0 起始索引；非法描述抛错。 */
@@ -358,6 +378,7 @@ interface FontSet {
 }
 
 async function embedFontSet(doc: PDFDocument, custom: CustomFont | null, subset = true): Promise<FontSet> {
+  const { StandardFonts } = await loadPdfLib()
   if (!custom) {
     const [r, b, i, bi, code] = await Promise.all([
       doc.embedFont(StandardFonts.Helvetica),
@@ -369,7 +390,7 @@ async function embedFontSet(doc: PDFDocument, custom: CustomFont | null, subset 
     const f = { regular: r, bold: b, italic: i, boldItalic: bi, code, custom: false, label: "Helvetica" }
     return { ...f, of: (bo: boolean, it: boolean) => (bo && it ? bi : bo ? b : it ? i : r) }
   }
-  doc.registerFontkit(fontkit)
+  doc.registerFontkit(await loadFontkit())
   const r = await doc.embedFont(custom.regular, { subset })
   const b = custom.bold ? await doc.embedFont(custom.bold, { subset }) : r
   const f = { regular: r, bold: b, italic: r, boldItalic: b, code: r, custom: true, label: custom.label }
@@ -898,6 +919,7 @@ export const pdfCreateTool: Tool = {
       })
       .join("")
 
+    const { PDFDocument, StandardFonts } = await loadPdfLib()
     const doc = await PDFDocument.create()
     doc.setCreator("GEBAI")
     doc.setProducer("GEBAI (pdf-lib)")
@@ -1104,6 +1126,7 @@ export const pdfReadTool: Tool = {
 // ---------------------------------------------------------------------------
 
 async function loadPdfDoc(bytes: Uint8Array, display: string): Promise<PDFDocument> {
+  const { PDFDocument } = await loadPdfLib()
   try {
     return await PDFDocument.load(bytes)
   } catch (err) {
@@ -1144,6 +1167,7 @@ export const pdfMergeTool: Tool = {
     const inputs = Array.isArray(args.inputs) ? args.inputs : []
     if (inputs.length < 2) return { output: "pdf_merge 需要 inputs 数组至少两个输入（单文件的页面重排用 pdf_edit 的 move op）。" }
 
+    const { PDFDocument } = await loadPdfLib()
     const out = await PDFDocument.create()
     out.setCreator("GEBAI")
     const parts: string[] = []
@@ -1258,6 +1282,7 @@ export const pdfSplitTool: Tool = {
 
     const outputs: Array<{ abs: string; rel: string; pages: number }> = []
     for (const g of groups) {
+      const { PDFDocument } = await loadPdfLib()
       const out = await PDFDocument.create()
       const copied = await out.copyPages(src, g.indices)
       for (const p of copied) out.addPage(p)
@@ -1311,6 +1336,7 @@ export const pdfEditTool: Tool = {
     } catch {
       return { output: `pdf_edit 失败：文件不存在或不可读（${args.path}）。` }
     }
+    const { PDFDocument, StandardFonts, degrees } = await loadPdfLib()
     let doc: PDFDocument
     try {
       doc = await loadPdfDoc(bytes, String(args.path))
@@ -1371,7 +1397,7 @@ export const pdfEditTool: Tool = {
           if (hasCjk(text)) {
             const custom = await resolveCustomFont(undefined, ctx, [])
             if (!custom) throw new Error("水印含中文但未找到系统 CJK 字体——可先安装中文字体，或改用西文水印文本")
-            doc.registerFontkit(fontkit)
+            doc.registerFontkit(await loadFontkit())
             font = await doc.embedFont(custom.regular, { subset: true })
           } else {
             font = await doc.embedFont(StandardFonts.HelveticaBold)

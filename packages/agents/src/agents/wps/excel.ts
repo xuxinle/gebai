@@ -4,11 +4,17 @@
  * 工作簿按 ops 批量修改：设值设样式/行列增删/工作表管理/合并/冻结）。读写均经 exceljs，
  * 路径与守卫与全局文件工具同规则（resolvePath 沙箱 + 防盲覆盖 + writeGuard）。
  */
-import { Workbook } from "exceljs"
-import type { Cell, Worksheet } from "exceljs"
+import type { Cell, Workbook, Worksheet } from "exceljs"
 import type { Tool, ToolContext } from "@gebai/sdk"
 import { truncate } from "@gebai/sdk/node"
 import { asNum, blindOverwriteGuard, fileBlocks, normColor, schema, writeGuards } from "./shared"
+
+/** exceljs 惰性加载（模块图含 150+ 子模块，静态引入拖慢进程启动）：仅实际读写 .xlsx 时引入。 */
+let exceljsWorkbook: typeof import("exceljs").Workbook | null = null
+export async function loadWorkbook(): Promise<typeof import("exceljs").Workbook> {
+  if (!exceljsWorkbook) exceljsWorkbook = (await import("exceljs")).Workbook
+  return exceljsWorkbook
+}
 
 // ---------------------------------------------------------------------------
 // 基础：列号/区域解析、单元格赋值与样式
@@ -225,6 +231,7 @@ export const excelReadTool: Tool = {
       return renderRows(rows, format, { sheet: ext.toUpperCase(), total: rows.length, shown: rows.length, cols: Math.max(0, ...rows.map((r) => r.length)) }, abs, ctx)
     }
 
+    const Workbook = await loadWorkbook()
     const wb = new Workbook()
     try {
       await wb.xlsx.load(Buffer.from(bytes) as never)
@@ -331,6 +338,7 @@ export const excelWriteTool: Tool = {
     if (blindMsg) return { output: blindMsg }
     if (!Array.isArray(args.sheets) || !args.sheets.length) return { output: "sheets 参数须为非空数组（至少一个工作表）。" }
 
+    const Workbook = await loadWorkbook()
     const wb = new Workbook()
     wb.creator = "GEBAI"
     const used = new Set<string>()
@@ -426,6 +434,7 @@ export const excelEditTool: Tool = {
     } catch {
       return { output: `excel_edit 失败：文件不存在（${args.path}）。新建工作簿用 excel_write。` }
     }
+    const Workbook = await loadWorkbook()
     const wb = new Workbook()
     try {
       await wb.xlsx.load(Buffer.from(bytes) as never)
@@ -575,6 +584,7 @@ export const excelEditTool: Tool = {
     const buf = await wb.xlsx.writeBuffer()
     const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf as ArrayBuffer)
     try {
+      const Workbook = await loadWorkbook()
       const check = new Workbook()
       await check.xlsx.load(Buffer.from(u8) as never)
     } catch {

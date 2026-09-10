@@ -16,7 +16,7 @@ import type { AuthService } from "../auth"
 import type { SessionStore } from "../core/session/store"
 import { createFeishuApi, type FeishuApiLike } from "./api"
 import { FeishuConn, type FeishuConnOptions } from "./conn"
-import { createDiagramRenderer, type DiagramRenderer } from "../core/support/diagram-render"
+import type { DiagramRenderer } from "../core/support/diagram-render"
 import { isDiagramFormat } from "../core/support/artifacts"
 import type { DiagramFormat } from "@gebai/sdk"
 import type { BotPromptAdapter } from "./adapter"
@@ -408,7 +408,8 @@ export class FeishuBot {
   private conn: FeishuConnLike
   private clock: () => number
   private log: (msg: string) => void
-  private renderer: DiagramRenderer
+  /** 图表渲染器（首个后端渲染请求时才构建，见 rendererOf；opts 注入时直用——测试 fake）。 */
+  private renderer: DiagramRenderer | null
   private outboxes = new Map<string, ChatOutbox>()
   /** 运行中任务：sessionId → chatId（引擎事件 → 飞书回推的路由表）。 */
   private active = new Map<string, string>()
@@ -433,7 +434,7 @@ export class FeishuBot {
     this.api = opts.api ?? createFeishuApi({ appId: opts.appId, appSecret: opts.appSecret })
     this.clock = opts.clock ?? Date.now
     this.log = opts.log ?? ((m) => console.log(`[feishu-bot] ${m}`))
-    this.renderer = opts.renderer ?? createDiagramRenderer()
+    this.renderer = opts.renderer ?? null
     this.ownersPath = join(opts.home, "feishu", "chat-owners.json")
     const connOpts: FeishuConnOptions = {
       appId: opts.appId,
@@ -819,6 +820,16 @@ export class FeishuBot {
     return o
   }
 
+  /** 取图表渲染器：`core/support/diagram-render` 静态依赖性重（echarts/happy-dom/mermaid/plantuml），
+   *  仅在首个后端渲染请求时 import——不拖进程启动。 */
+  private async rendererOf(): Promise<DiagramRenderer> {
+    if (!this.renderer) {
+      const { createDiagramRenderer } = await import("../core/support/diagram-render")
+      this.renderer = createDiagramRenderer()
+    }
+    return this.renderer
+  }
+
   /**
    * show 图表分支后端渲染（替代前端渲染链路）：图表源码（按 format）→ PNG → 落盘会话 tmp/ + 飞书图片消息，
    * 结果经 decideDrawResult 回传引擎（渲染成功工具才返回成功；失败把错误回传模型供修正）。
@@ -833,7 +844,7 @@ export class FeishuBot {
     const name = String(payload.name ?? "diagram").replace(/[^A-Za-z0-9_-]/g, "_") || "diagram"
     if (!renderId || !code) return
     try {
-      const png = await this.renderer.renderPng(code, { format })
+      const png = await (await this.rendererOf()).renderPng(code, { format })
       // 产物落盘会话 tmp/（与 .puml 并列，Web UI 文件面板可见；失败不阻塞图片发送）
       try {
         const owner = await this.userOf(sessionId)

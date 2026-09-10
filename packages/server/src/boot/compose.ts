@@ -297,7 +297,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       auth,
       notify: { tools: config.feishuBotNotifyTools, assistant: config.feishuBotNotifyAssistant },
     })
-    await feishuBot.start()
+    // 长连接建立（网络握手）由 serve.ts 在监听之后异步启动，不阻塞服务可用
   }
   // 外部身份验证器（GEBAI_EXTERNAL_AUTH_SECRET / GEBAI_EXTERNAL_AUTH_URL 配置；两者同设会抛错）
   const externalAuth = createExternalAuthProvider(config)

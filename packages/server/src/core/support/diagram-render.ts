@@ -8,7 +8,7 @@
  *   物化到 `{GEBAI_HOME}/vendor/d2js/{version}/` 后动态 import（与 playwright 子Agent 的 driver.mjs 复制同思路的打包闭环）。
  * - **echarts**：`echarts` npm 包 SSR 渲染（`ssr:true` + SVGRenderer，零 DOM）——**顶层急切导入**：zrender 环境探测在模块求值期
  *   完成，若在 happy-dom/PlantUML 垫层污染全局 window/document 后才加载会误判浏览器环境（文本测量需真 canvas，垫层不支持）；
- *   本文件经引擎惰性 import，急切导入不增加启动开销。
+ *   本文件经引擎与飞书桥接惰性 import，急切导入不增加启动开销。
  * - 各语言渲染经**串行队列**（mermaid 的 happy-dom document 与 d2 单 Worker 均为共享状态，防并发冲突）；依赖全部可注入（测试用 fake）。
  * - 失败抛错携带渲染原因（供回传模型修正源码）。
  */
