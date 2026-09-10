@@ -1,7 +1,7 @@
 /**
  * 构建时生成子 Agent bundle 注册表（`src/core/subagents.bundle.generated.ts`）。
  *
- * 背景：`discover()` 在 dev 模式下运行时扫描 `src/sub-agents/` 并动态 import；
+ * 背景：`discover()` 在 dev 模式下运行时扫描 `@gebai/agents` 的 `src/agents/`（子代理定义域）并动态 import；
  * 但 dist/bun --compile 产物中源码目录与动态 import 路径均不可用。
  * 本脚本在构建前把所有子 Agent 定义（含其导入的 .md 提示词）以静态 import
  * 聚合成注册表，随 bundle 一起内联进产物，实现子 Agent「打包进二进制」。
@@ -18,11 +18,12 @@ import { readdir } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { readFileSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
+import { AGENTS_SRC, agentsSrcPath } from "./agents-paths"
 import { pathToFileURL } from "node:url"
 import { parseSubAgentMd } from "@gebai/agents"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const srcDir = join(root, "..", "agents", "src", "agents")  // @gebai/agents 子代理定义域（基建在 src/core/，物理分域即排除）
+const srcDir = join(AGENTS_SRC, "agents") // @gebai/agents 子代理定义域（基建在 src/core/，物理分域即排除）
 const customDir = join(root, "..", "..", "custom", "agents") // 二开子代理域（仓库根 custom/：packages/server → 上两级即仓库根；随文件夹整体迁移，缺失零条目）
 const outFile = join(root, "src", "core", "subagents.bundle.generated.ts")
 
@@ -235,8 +236,8 @@ const distDir = join(root, "dist")
 try {
   const { copyFile, mkdir, cp } = await import("node:fs/promises")
   await mkdir(distDir, { recursive: true })
-  await copyFile(join(root, "..", "agents", "src", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
-  await copyFile(join(root, "..", "agents", "src", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
+  await copyFile(agentsSrcPath("core", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
+  await copyFile(agentsSrcPath("core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
   // 客卿源（仓库根 keqing/，按语言分目录）→ dist/keqing/（独立部署的
   // dist 树发现兕底）；过滤运行时数据（venv/__pycache__）与编译产物（driver*.exe/objs）——
   // 只带源码与 manifest，可执行体由目标机构建引导按需生成；driver 跨平台形态：Windows

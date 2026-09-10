@@ -1,6 +1,6 @@
 /** 服务端入口（薄）：startServer = compose（boot/compose.ts 装配）+ serve（boot/serve.ts 监听）。
  *  进程主命令分发（exec / 默认启动）见 boot/cli.ts。各域实现分布：REST routes/、WS 分发 ws-handlers/、
- *  领域核心 core/、扩展定义 sub-agents/。 */
+ *  领域核心 core/、扩展定义 @gebai/agents 包（子代理定义域 src/agents/）。 */
 import type { SessionStore } from "./core/session/store"
 import type { ToolRegistry } from "./core/base/registry"
 import type { AgentEngine } from "./core/engine/engine"

@@ -4,7 +4,7 @@
  * 背景：@terrastruct/d2 的 node-esm 构建通过「文件路径 Worker」运行（`new Worker(join(dirname(import.meta.url), "worker.js"))`，
  * 运行时按相对路径读取 d2.wasm/elk.js 等文件），bun build/--compile 无法内联该 Worker 及其文件依赖。
  * 本脚本把 node-esm 构建的全部文件（wasm 经 gzip 压缩）以 base64 形式内嵌进 JSON——
- * 该 JSON 被 `core/diagram-render.ts` 静态 import 随产物打进二进制；二进制运行时物化到
+ * 该 JSON 被 `core/support/diagram-render.ts` 静态 import 随产物打进二进制；二进制运行时物化到
  * `{GEBAI_HOME}/vendor/d2js/{version}/` 后动态 import（dev 模式不经此路径，直接 import 包）。
  *
  * 该文件为生成产物，已 gitignore，勿手改。

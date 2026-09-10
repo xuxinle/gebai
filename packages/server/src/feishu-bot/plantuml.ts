@@ -97,7 +97,7 @@ export const PLANTUML_TIMEOUT_MS = 20000
 export function createPlantUmlRenderer(opts: {
   /** 引擎渲染实现（测试注入 fake；缺省走静态导入的真实引擎）。 */
   engine?: () => Promise<PlantUmlApi>
-  /** PNG 栅格化（测试注入；缺省共享 @resvg/resvg-js 栅格化，见 core/diagram-render.ts）。 */
+  /** PNG 栅格化（测试注入；缺省共享 @resvg/resvg-js 栅格化，见 core/support/diagram-render.ts）。 */
   rasterize?: (svg: string, opts: { background?: string; maxWidth?: number; maxHeight?: number }) => Promise<Uint8Array>
   /** 渲染超时（毫秒，缺省 20 秒；测试注入小值加速超时用例）。 */
   timeoutMs?: number

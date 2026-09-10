@@ -140,7 +140,7 @@ TS 侧（`packages/agents/src/{name}.ts`）与 客卿 侧（manifest 目录）�
 
 配套约定——**「只在一处定义、其他地方留空」**：客卿 manifest 的 `description` 可省略/留空、`PROMPT.md` 可缺失（留空即本侧不贡献该字段，不再生成占位文本）；TS 侧 def 同样可留空 description/systemPrompt。两侧全空时合并层生成兜底描述与引导句（agent_list 恒有可读条目）。
 
-分工样例（内置 `hsh`）：基础工具 `hsh_crc32`（CRC-32，纯轻量逻辑）由 TS 侧 `sub-agents/hsh.ts` 贡献（描述/提示词留空），哈希/签名/校验等重活由 Rust 边车（`keqing/rust/hsh/`）贡献——「基础工具 TS 写、特殊工具其他语言写」。
+分工样例（内置 `hsh`）：基础工具 `hsh_crc32`（CRC-32，纯轻量逻辑）由 TS 侧 `packages/agents/src/agents/hsh/index.ts` 贡献（描述/提示词留空），哈希/签名/校验等重活由 Rust 边车（`keqing/rust/hsh/`）贡献——「基础工具 TS 写、特殊工具其他语言写」。
 
 热加载：任一侧目录签名变化 → 重扫该侧贡献集 → 重算合并视图（未装载会话与新会话生效；已装载会话沿用装载时定义，与 TS 热加载同语义）。卸载时两侧合并工具一并注销。
 

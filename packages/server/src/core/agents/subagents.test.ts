@@ -710,7 +710,6 @@ describe("子代理失败隔离（DESIGN「子代理失败隔离」：单个失�
 })
 
 describe("custom 二开域（双域扫描自动合并，DESIGN「custom 二开域」）", () => {
-  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
   const customDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents")
 
   test("custom 新增子代理即自动发现（与内置域合并；删除后消失，热加载同机制）", async () => {

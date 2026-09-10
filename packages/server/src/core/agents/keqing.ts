@@ -485,7 +485,7 @@ export function disposeAllKeqing(): void {
 /** 客卿 目录签名（热加载）：各根目录（语言目录）子目录（子代理项目）内全部文件（递归 2 层
  *  ——兼容 cargo/gradle 等标准工程布局 src/*.rs）的 路径:mtime 拼接——manifest/驱动脚本/提示词
  *  任一变化即变化；跳过 venv/__pycache__/objs/target 与编译产物（driver 可执行体及中间产物）
- *  ——运行时数据不触发重扫；根全不存在返回空串（与 sub-agents 签名拼接后仍稳定）。 */
+ *  ——运行时数据不触发重扫；根全不存在返回空串（与 子Agent 定义域签名拼接后仍稳定）。 */
 export async function keqingSignature(roots: string[]): Promise<string> {
   const { readdir, stat } = await import("node:fs/promises")
   const SKIP_DIRS = ["venv", "__pycache__", "objs", "target", ".git"]

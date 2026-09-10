@@ -12,13 +12,14 @@
 import { readFileSync, existsSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
+import { agentsSrcPath } from "./agents-paths"
 import { join } from "node:path"
 
 import { LANG_WASM } from "../../agents/src/core/analyzer/analyzer"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const wasmDir = join(root, "node_modules", "tree-sitter-wasms", "out")
-const outFile = join(root, "..", "agents", "src", "analyzer", "analyzer-wasm.embedded.generated.json")
+const outFile = agentsSrcPath("core", "analyzer", "analyzer-wasm.embedded.generated.json")
 
 if (!existsSync(wasmDir)) {
   console.warn("[build-analyzer-wasm] 未找到 tree-sitter-wasms（analyze/search_symbols 的二进制回退将不可用），跳过生成")

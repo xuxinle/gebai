@@ -16,9 +16,10 @@
 import { gzipSync } from "node:zlib"
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { agentsSrcPath } from "./agents-paths"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const outFile = join(root, "..", "agents", "src", "cv", "cv.embedded.generated.json")
+const outFile = agentsSrcPath("core", "cv", "cv.embedded.generated.json")
 const assetsDir = join(root, "assets", "cv-models")
 
 const MODEL_BASE = process.env.GEBAI_CV_MODEL_BASE || "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4"

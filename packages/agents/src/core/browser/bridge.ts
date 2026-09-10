@@ -2,7 +2,7 @@
  * 浏览器桥接基建（core 域）：node driver.mjs 子进程的 JSON-RPC 桥、playwright 模块/浏览器
  * channel 解析、pwcore 内嵌产物物化、会话串行化锁与全进程共享惰性桥接单例。
  *
- * 自 sub-agents/playwright/playwright_tools.ts 抽取为 core 域模块——桥接是平台级基建
+ * 自 packages/agents/src/agents/playwright/playwright_tools.ts 抽取为 core 域模块——桥接是平台级基建
  * （playwright / reverse_site 子Agent 与透明浏览器代理 fetch-proxy 的共同底座），
  * 不依赖任何子Agent 定义的存在（子Agent 被裁剪/停用不影响）。
  *

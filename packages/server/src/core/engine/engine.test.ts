@@ -214,7 +214,7 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "subself" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-so2", name: "write", arguments: { path: "packages/server/src/core/engine.ts", content: "x" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-so2", name: "write", arguments: { path: "packages/server/src/core/engine/engine.ts", content: "x" } } }
       yield { type: "done" }
       return
     }

@@ -15,10 +15,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
+import { agentsSrcPath } from "./agents-paths"
 import { dirname, join, relative } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const outFile = join(root, "..", "agents", "src", "browser", "pwcore.embedded.generated.json")
+const outFile = agentsSrcPath("core", "browser", "pwcore.embedded.generated.json")
 
 // 定位 playwright-core：跟随 playwright 包解析位置（显式声明 playwright-core 依赖易与其版本错位）
 const pwEntry = Bun.resolveSync("playwright", root)

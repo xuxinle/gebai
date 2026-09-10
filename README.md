@@ -56,8 +56,8 @@ bun run build                 # 全量构建（Web UI + 子 Agent 打包 + 桌�
                               # Full build (Web UI + sub-agent bundling + desktop)
 bun run build:code            # 裁剪构建示例：code 场景精简单文件二进制
                               # Trimmed build example: lean single-file binary for the code scenario
-bun run --cwd packages/server build:win --sub-agents a,b   # 仅打包指定子 Agent
-                                                            # Bundle only the listed sub-agents
+GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build   # 仅打包指定子 Agent
+                                                                # Bundle only the listed sub-agents
 ```
 
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（原生 WebView 启动器，内嵌服务端 / native WebView launcher with the server embedded）
@@ -97,7 +97,7 @@ bun run lint                  # Lint
 
 ### 🧩 极致的子 Agent 扩展制（单文件定义、零注册）
 
-在 `packages/agents/src/`（@gebai/agents 包）下放一个 `.ts` 文件（或一个目录 + `.md` 提示词），就完成了一个子 Agent 的定义——构建时自动扫描收集，**无需任何注册表、配置或代码登记**：
+在 `packages/agents/src/agents/`（@gebai/agents 包）下放一个 `.ts` 文件（或一个目录 + `.md` 提示词），就完成了一个子 Agent 的定义——构建时自动扫描收集，**无需任何注册表、配置或代码登记**：
 
 ```ts
 export const name = "my_agent"
@@ -118,7 +118,7 @@ export const requiresApproval = { write: true }
 
 工具以 `{agent}_{tool}` 单下划线命名空间透明路由，对子 Agent 完全无感；命名冲突构建期校验，弱模型容错兜底。
 
-**English.** Drop a single `.ts` file (or a directory with an `.md` prompt) into `packages/agents/src/` (the @gebai/agents package) and you have defined a sub-agent — the build scans and collects them automatically, with **no registry, no config, no code registration**:
+**English.** Drop a single `.ts` file (or a directory with an `.md` prompt) into `packages/agents/src/agents/` (the @gebai/agents package) and you have defined a sub-agent — the build scans and collects them automatically, with **no registry, no config, no code registration**:
 
 The key design is the precise distinction between two semantics — **load vs. run in a new session**:
 
@@ -155,7 +155,7 @@ Agent 通过**修改自身代码**来持续改进自己——子 Agent 定义、
 - **本地浏览器**：`gebai.exe` 开箱即用，自动打开浏览器
 - **服务端部署**：`--server` 服务模式，多用户账号密码登录
 
-Web UI、全部子 Agent、tree-sitter 语法、图表引擎、playwright 驱动全部内嵌；支持 `--sub-agents a,b` 按需裁剪二进制体积。
+Web UI、全部子 Agent、tree-sitter 语法、图表引擎、playwright 驱动全部内嵌；支持 `GEBAI_BUILD_SUBAGENTS=a,b` 按需裁剪二进制体积。
 
 **English.** `bun build --compile` produces a single executable with **zero runtime dependencies** (Bun is embedded):
 
@@ -163,7 +163,7 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎、playwright 驱动
 - **Local browser**: `gebai.exe` works out of the box and opens the browser automatically
 - **Server deployment**: `--server` mode with multi-user login
 
-The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playwright driver are all embedded; `--sub-agents a,b` trims the binary on demand.
+The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playwright driver are all embedded; `GEBAI_BUILD_SUBAGENTS=a,b` trims the binary on demand.
 
 ### 🛡️ 多用户安全隔离
 
@@ -304,13 +304,13 @@ Monorepo（Bun workspaces + Turborepo）：`@gebai/server`（服务端核心）/
 欢迎 Issue 与 PR！Issues 欢迎提 Bug（附复现步骤与环境信息）、功能建议与使用问题；提交 PR 前：
 
 1. 阅读 `DESIGN.md` 与 `AGENTS.md`
-2. 新增子 Agent？就是一个文件的事——`packages/agents/src/` 下照模板写即可，记得同步 `DESIGN.md` 总览表
+2. 新增子 Agent？就是一个文件的事——`packages/agents/src/agents/` 下照模板写即可，记得同步 `DESIGN.md` 总览表
 3. 提交前跑 `bun run test` / `bun run typecheck` / `bun run lint`
 
 **English.** Issues and PRs are welcome! File bugs (with reproduction steps and environment info), feature requests, or usage questions. Before opening a PR:
 
 1. Read `DESIGN.md` and `AGENTS.md`
-2. Adding a sub-agent? It's one file — follow the template under `packages/server/src/sub-agents/` and update the overview table in `DESIGN.md`
+2. Adding a sub-agent? It's one file — follow the template under `packages/agents/src/agents/` and update the overview table in `DESIGN.md`
 3. Run `bun run test` / `bun run typecheck` / `bun run lint` before committing
 
 ## 许可证 | License

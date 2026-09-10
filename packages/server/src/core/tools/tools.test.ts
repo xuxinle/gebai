@@ -1184,7 +1184,7 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  // save_tool/delete_tool（小工具库）已下沉 widgets 子Agent，对应测试见 sub-agents/widgets/widgets.test.ts
+  // save_tool/delete_tool（小工具库）已下沉 widgets 子Agent，对应测试见 packages/agents/src/agents/widgets/widgets.test.ts
 
   test("edit replaces matching substring", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools2-"))
@@ -1471,7 +1471,7 @@ describe("global tools", () => {
     expect(tools.delete_tool).toBeUndefined()
     // read_feedback 下沉 self_optimize 子Agent（自我优化专属输入通道，self_optimize_read_feedback 命名空间暴露）
     expect(tools.read_feedback).toBeUndefined()
-    // cron_* 下沉 cron 子Agent（cron_add/list/update/remove 命名空间暴露；对应测试见 sub-agents/cron/cron.test.ts）
+    // cron_* 下沉 cron 子Agent（cron_add/list/update/remove 命名空间暴露；对应测试见 packages/agents/src/agents/cron/cron.test.ts）
     expect(tools.cron_add).toBeUndefined()
     expect(tools.cron_list).toBeUndefined()
     expect(tools.cron_update).toBeUndefined()

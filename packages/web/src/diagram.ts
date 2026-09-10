@@ -487,7 +487,7 @@ function lenientJsonParse(code: string): unknown {
   return JSON.parse(stripped)
 }
 
-/* ---------- ECharts 标题/图例防重叠（与 packages/server/src/core/diagram-render.ts 同规则，改一处须同步另一处） ---------- */
+/* ---------- ECharts 标题/图例防重叠（与 packages/server/src/core/support/diagram-render.ts 同规则，改一处须同步另一处） ---------- */
 
 /** 图例与标题/绘图区的纵向间距（px）。 */
 const ECHARTS_LEGEND_GAP = 6

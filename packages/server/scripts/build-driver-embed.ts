@@ -12,11 +12,12 @@
 import { readFileSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
+import { agentsSrcPath } from "./agents-paths"
 import { join } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
-const src = join(root, "..", "agents", "src", "browser", "driver.mjs")
-const outFile = join(root, "..", "agents", "src", "browser", "driver.embedded.generated.json")
+const src = agentsSrcPath("core", "browser", "driver.mjs")
+const outFile = agentsSrcPath("core", "browser", "driver.embedded.generated.json")
 
 const raw = readFileSync(src)
 writeFileIfChanged(outFile, JSON.stringify({ gzip: true, driver: gzipDeterministic(raw).toString("base64") }))

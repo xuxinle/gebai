@@ -58,7 +58,7 @@ async function subagentsDirSignature(dir: string): Promise<string | null> {
 
 export class SubAgentManager {
   private defs = new Map<string, SubAgentDef>()
-  /** TS 侧贡献集（sub-agents 目录扫描/bundle 注册表）：与 nativeDefs 经
+  /** TS 侧贡献集（@gebai/agents 定义域目录扫描/bundle 注册表）：与 nativeDefs 经
    *  rebuildMergedDefs 合成对外 defs（跨语言同名定义合并视图）。 */
   private tsDefs = new Map<string, SubAgentDef>()
   /** 手工注册贡献集（register 动态注册）：独立于目录扫描——热加载重扫（磁盘签名变化，含并行进程

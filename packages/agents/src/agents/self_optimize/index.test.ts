@@ -106,8 +106,9 @@ describe("self_optimize sub-agent", () => {
     expect(selfOptimizeDef.projectRoot!({ SELF_OPTIMIZE_PROJECT: explicit })).toBe(explicit)
     // 未配置：脚本调试（dev）模式按模块路径推导歌白仓库根（与写范围守卫/run_tests 同源）——
     // 测试环境即源码检出形态；二进制模式此兜底返回 undefined（须显式配置）
+    // 层级：src/agents/self_optimize/ → 上溯五级即仓库根（物理分域后比旧布局多一层，改动目录层级须同步）
     const auto = selfOptimizeDef.projectRoot!({})
-    expect(auto).toBe(resolve(import.meta.dirname, "..", "..", "..", ".."))
+    expect(auto).toBe(resolve(import.meta.dirname, "..", "..", "..", "..", ".."))
   })
 
   test("系统提示词内置项目名称与项目根指引（注记「项目根:」由引擎动态注入）", () => {
@@ -124,7 +125,7 @@ describe("self_optimize sub-agent", () => {
 })
 
 describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强制而非仅提示词）", () => {
-  /** 构造最小歌白仓库结构（sub-agents 目录 + DESIGN.md + core 目录）。 */
+  /** 构造最小歌白仓库结构（子Agent 定义域 + DESIGN.md + core 目录）。 */
   function makeRepo(): { root: string; sub: string } {
     const root = mkdtempSync(join(tmpdir(), "gebai-selfopt-repo-"))
     mkdirSync(join(root, "packages", "agents", "src"), { recursive: true })
@@ -255,12 +256,12 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     await run("git init -q", { cwd: repo })
     await run("git config user.email t@t.local && git config user.name t", { cwd: repo })
     writeFileSync(join(repo, "tracked.txt"), "v1")
-    mkdirSync(join(repo, "packages", "server", "src", "sub-agents"), { recursive: true })
-    writeFileSync(join(repo, "packages", "server", "src", "sub-agents", "keeper.ts"), "export const keeper = 1\n")
+    mkdirSync(join(repo, "packages", "agents", "src", "agents"), { recursive: true })
+    writeFileSync(join(repo, "packages", "agents", "src", "agents", "keeper.ts"), "export const keeper = 1\n")
     await run("git add -A && git commit -qm init", { cwd: repo })
     // 模拟失败的自我修改：改 tracked + 新建 untracked（新子Agent 文件形态）
     writeFileSync(join(repo, "tracked.txt"), "v2-broken")
-    const newFile = join(repo, "packages", "server", "src", "sub-agents", "bad_agent.ts")
+    const newFile = join(repo, "packages", "agents", "src", "agents", "bad_agent.ts")
     writeFileSync(newFile, "export const broken = true\n")
     const realRun = (cmd: string, opts?: { workdir?: string }) =>
       new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
