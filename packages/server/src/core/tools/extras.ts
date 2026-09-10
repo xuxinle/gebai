@@ -25,6 +25,7 @@ export const pageCaptureTool: Tool = {
   }),
   async execute(args, ctx) {
     const delayMs = Math.max(0, Math.min(10000, Number(args.delay) || 0))
+    if (!ctx.waitForCapture) return { output: "当前环境不支持页面捕获（waitForCapture 服务未注入）。" }
     // full_page 入参 → 前端捕获契约载荷键 fullPage（WS 协议字段，两端契约不动）
     const cap = await ctx.waitForCapture({ fullPage: args.full_page === true, delayMs })
     if (!cap) return { output: "页面捕获失败：前端未能在限定时间内完成捕获（前端离线或捕获超时）。请确认浏览器页面已打开后重试。" }

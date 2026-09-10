@@ -1,3 +1,6 @@
 export * from "./types"
+export * from "./cron-types"
+export * from "./agent-contract"
+export * from "./agent-utils"
 export { GebaiClient } from "./client"
 export type { GebaiClientOptions } from "./client"
