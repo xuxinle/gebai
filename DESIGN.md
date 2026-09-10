@@ -1406,8 +1406,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **UI 展示**：会话消息流侧边栏实时呈现待办面板（状态/进度/依赖），事件推送 `event.todo.update` 驱动增量更新；`todo` 工具在消息流中渲染为**待办清单卡片**（状态图标 + 标题 + 元信息；状态为内联 SVG 描边图标——待处理空圆/进行中环箭头/已完成圈勾/已失败圈叉/已取消禁止符，随主题着色：进行中沿用主题强调色、已完成/已失败用语义色 `--success`/`--danger`，悬浮提示中文状态标签，元信息行只留优先级（中文高/中/低，纯文本不做视觉区分）/进度/备注），替代通用工具卡片，实时与历史会话一致；清单过长（>8 项）时自动**折叠较早的已完成项**（保留最近 3 项完成作上下文，未完成项始终可见），连续隐藏段收敛为一行「已折叠 N 项已完成」按钮，点击展开、展开后可收起
 - **与审批联动**：审批请求可关联待办项，拒绝/通过后对应待办状态联动更新
 - **失败恢复**：任务中断后基于待办清单继续执行，跳过已 `completed` 项，从剩余项恢复
-- **待办续做**：每轮会话完成（模型给出最终回复）后，引擎自动检查待办清单——仍有 `pending`/`in_progress` 项时，追加一条「【待办提醒】当前会话仍有未完成的待办：…请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾」消息并再次进入工具调用循环，直至待办全部完成、达到续做轮次上限（见常量参考，默认 3 轮）或模型决策收尾；提示为 **assistant 角色的软性提醒**（仅陈述未完成事实，继续还是直接收尾由模型自行决策），持久化进会话历史（前端渲染为普通助手消息，历史回放同构）并推送 `event.todo.continue` 事件（含 round/remaining/messageId/text，前端实时渲染）；**模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入**；`completed`/`cancelled`/`failed` 项视为已了结不再续做；回复与上上轮完全相同时附防复述提示
-- **收尾验证提醒**：与待办续做同机制的兜底纪律——任务结束（无未完成待办）时若**本任务修改过代码文件（write/edit/patch 命中代码扩展名且成功落盘）但全程未运行任何测试/检查类命令**（sh/py 的 command 命中测试/lint/typecheck 关键词、或 `run_tests` 工具），追加一条「【验证提醒】…请先运行相关测试或检查确认无回归，再给出最终回复；确不适用请说明」消息再续跑一轮（模型跑验证后正常收尾，或说明原因），上限 1 轮防反复打扰；提醒同为 **assistant 角色软性提醒**（与待办续做同形态），持久化进会话历史并推送 `event.verify.nudge` 事件（含 messageId/text，前端实时渲染）；拒绝/安全模式拦截与 dry_run 不计入修改，md 等非代码文件不触发
+- **待办续做**：每轮会话完成（模型给出最终回复）后，引擎自动检查待办清单——仍有 `pending`/`in_progress` 项时，追加一条「【待办提醒】当前会话仍有未完成的待办：…请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾」消息并再次进入工具调用循环，直至待办全部完成、达到续做轮次上限（见常量参考，默认 3 轮）或模型决策收尾；提示为 **assistant 角色的软性提醒**（仅陈述未完成事实，继续还是直接收尾由模型自行决策），落盘保持 assistant 形态（`Message.engineNote: "todo"` 标记，前端渲染为普通助手消息、历史回放同构），但 **loadHistory 回放给模型时改以 user 角色进入上下文**——思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、要求回传 `reasoning_content`），尾部 assistant 提醒会让后续每次调用 400、任务静默中断（实测；标记之前落盘的存量提醒消息按内容前缀「【待办提醒】/【验证提醒】」识别，同样回放为 user），持久化进会话历史并推送 `event.todo.continue` 事件（含 round/remaining/messageId/text，前端实时渲染）；**模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入**；`completed`/`cancelled`/`failed` 项视为已了结不再续做；回复与上上轮完全相同时附防复述提示
+- **收尾验证提醒**：与待办续做同机制的兜底纪律——任务结束（无未完成待办）时若**本任务修改过代码文件（write/edit/patch 命中代码扩展名且成功落盘）但全程未运行任何测试/检查类命令**（sh/py 的 command 命中测试/lint/typecheck 关键词、或 `run_tests` 工具），追加一条「【验证提醒】…请先运行相关测试或检查确认无回归，再给出最终回复；确不适用请说明」消息再续跑一轮（模型跑验证后正常收尾，或说明原因），上限 1 轮防反复打扰；提醒同为 **assistant 角色软性提醒**（与待办续做同形态：落盘 `engineNote: "verify"`、回放为 user 角色），持久化进会话历史并推送 `event.verify.nudge` 事件（含 messageId/text，前端实时渲染）；拒绝/安全模式拦截与 dry_run 不计入修改，md 等非代码文件不触发
 
 #### 用户询问（`ask`）
 
@@ -2053,8 +2053,8 @@ WebSocket 消息格式（JSON）：
 | `event.tool.call` | 工具开始执行（含名称与参数）；子Agent 执行过程中的工具调用携带 `session: true` + `sessionRunId`；**门控说明性结果（缺参/未知工具/通道禁用/安全拦截/无交互拒绝/重复中断/重复终止）同样推送**（与结果事件成对，前端实时建卡，不依赖刷新回看落盘历史） |
 | `event.tool.result` | 工具执行结果（含截断标记与文件路径）；子Agent 执行过程中的结果携带 `session: true` + `sessionRunId`；**审批拒绝/超时与取消/中断占位补写同样推送**（实时卡片落终态，不停留「执行中」） |
 | `event.todo.update` | 待办清单变更（新增/状态/进度） |
-| `event.todo.continue` | 待办续做提示（会话完成时仍有未完成待办，已追加 assistant 提示消息继续会话；含 round/remaining/messageId/text，前端据此实时渲染提示气泡） |
-| `event.verify.nudge` | 收尾验证提醒（改代码未跑测试的任务结束注入一次，与待办续做同形态的 assistant 软性提醒；含 messageId/text，前端据此实时渲染提示气泡） |
+| `event.todo.continue` | 待办续做提示（会话完成时仍有未完成待办，已追加 assistant 提示消息继续会话；含 round/remaining/messageId/text，前端据此实时渲染提示气泡；**落盘 assistant + `engineNote: "todo"`，回放给模型时以 user 角色进上下文**） |
+| `event.verify.nudge` | 收尾验证提醒（改代码未跑测试的任务结束注入一次，与待办续做同形态的 assistant 软性提醒；含 messageId/text，前端据此实时渲染提示气泡；**落盘 assistant + `engineNote: "verify"`，回放给模型时以 user 角色进上下文**） |
 | `event.draw.render` | 画图渲染请求（show 图表分支执行中推送，含 renderId + 图表源码 + **`format` 图表语言**（mermaid/plantuml/d2/echarts），前端按语言本地渲染后经 `draw.result` 回传） |
 | `event.env.request` | 环境变量填值请求（ask 填值分支执行中推送，含 envId + name + description + secret[是否敏感值]，前端弹窗填值后经 `env.decide` 回传；值注入本次任务 env 并保存到浏览器本地） |
 | `event.capture.request` | 页面捕获请求（page_capture 工具执行中推送，含 captureId + fullPage[是否整页截图]，前端捕获当前页面渲染后 DOM html + 截图后经 `capture.result` 回传） |

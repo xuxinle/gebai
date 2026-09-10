@@ -73,6 +73,11 @@ export interface Message {
   /** 子Agent 装载提示词消息标记（role=system）：装载（agent_load/启动预载/WS sub_agent.load）时写入会话记录，
    *  内容为子Agent 完整系统提示词；loadHistory 时按 system 角色透传进模型上下文，UI 渲染为简短装载提示。 */
   loadedAgent?: string
+  /** 引擎软性提醒标记（role=assistant，`todo` 待办续做／`verify` 收尾验证提醒）：注入的提醒落盘保持
+   *  assistant 形态（UI 与历史记录为助手气泡），但 **loadHistory 回放时改以 user 角色进模型上下文**——
+   *  思考类模型（DeepSeek thinking 等）不接受以 assistant 结尾的请求（视为前缀续写、要求回传
+   *  `reasoning_content`），尾部 assistant 提醒会让后续每次调用 400、任务静默中断。 */
+  engineNote?: "todo" | "verify"
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */

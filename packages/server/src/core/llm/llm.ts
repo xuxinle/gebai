@@ -189,6 +189,13 @@ function toOpenAIContentBlock(b: Record<string, unknown>): Record<string, unknow
   return b
 }
 
+/**
+ * 内部消息 → OpenAI 兼容格式。
+ * **尾部消息不能是 assistant**（思考类模型如 DeepSeek thinking 会将其判为前缀续写，要求回传
+ * `reasoning_content`，否则 400 `The reasoning_content in the thinking mode must be passed back to the API`
+ * ——实测）。故引擎注入的软性提醒（待办续做/收尾验证）在上下文一律用 user 角色（见 engine.loadHistory
+ * 与两处注入点）；新增“以助手消息注入再续跑”的机制时需遵守同一约束。
+ */
 function toOpenAIMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
   for (const m of repairToolPairing(msgs, { flushTail: true })) {

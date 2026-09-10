@@ -104,6 +104,13 @@ const MAX_AGENTS_PER_RUN = 5
  *  （无产出走重试，有产出上抛为任务错误，不再无限挂起）。 */
 const LLM_IDLE_TIMEOUT_MS = 120_000
 
+/** 引擎软性提醒判定（待办续做／收尾验证）：engineNote 标记优先，存量数据按**内容前缀**识别
+ *  （标记之前落盘的历史提醒消息没有字段，靠前缀兜底——否则老会话继续跑依旧会因尾部 assistant 被 400 拒绝）。 */
+const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
+function isEngineNote(m: { engineNote?: string; content?: unknown }): boolean {
+  return !!m.engineNote || ENGINE_NOTE_RE.test(typeof m.content === "string" ? m.content : "")
+}
+
 function attachmentSizeText(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`
   if (n >= 1024) return `${Math.ceil(n / 1024)}KB`
@@ -924,13 +931,16 @@ export class AgentEngine {
             const list = [...mods.files].slice(0, 5).map((f) => `- ${f}`).join("\n")
             const more = mods.files.size > 5 ? `\n…（共 ${mods.files.size} 个文件）` : ""
             const verifyMsg = `【验证提醒】本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
+            // 提醒在模型上下文用 **user 角色**（尾部 assistant 会被思考类模型判为前缀续写并 400）；
+            // 落盘保持 assistant + engineNote 标记（UI/历史回放仍为助手气泡，loadHistory 回放为 user）
             messages.push({ role: "assistant", content: finalText })
-            messages.push({ role: "assistant", content: verifyMsg })
+            messages.push({ role: "user", content: verifyMsg })
             const verifyMsgId = crypto.randomUUID()
             await this.opts.store.appendMessage(sessionId, {
               id: verifyMsgId,
               role: "assistant",
               content: verifyMsg,
+              engineNote: "verify",
               createdAt: Date.now(),
             }, user)
             this.publish(sessionId, "event.verify.nudge", { messageId: verifyMsgId, text: verifyMsg, sessionId })
@@ -949,12 +959,14 @@ export class AgentEngine {
         const repeated = finalText !== "" && finalText === lastFinalText
         const contMsg = `【待办提醒】当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
         const contMsgId = crypto.randomUUID()
+        // 同上（收尾验证提醒）：上下文用 user 角色，落盘 assistant + engineNote 标记
         messages.push({ role: "assistant", content: finalText })
-        messages.push({ role: "assistant", content: contMsg })
+        messages.push({ role: "user", content: contMsg })
         await this.opts.store.appendMessage(sessionId, {
           id: contMsgId,
           role: "assistant",
           content: contMsg,
+          engineNote: "todo",
           createdAt: Date.now(),
         }, user)
         lastFinalText = finalText
@@ -1046,6 +1058,13 @@ export class AgentEngine {
         // 推理独立字段（Message.reasoning）绝不进模型上下文——此处仅映射 content；
         // stripThinkTags 兼容旧版数据（推理曾内嵌 content 的 <think> 块），回放时一并剥离
         const content = stripThinkTags(m.content)
+        // 引擎软性提醒（待办续做/收尾验证）回放改 **user 角色**：落盘保持 assistant（UI 与历史记录为助手
+        // 气泡），但思考类模型（DeepSeek thinking）不接受以 assistant 结尾的请求（视为前缀续写、要求
+        // 回传 reasoning_content）——尾部 assistant 提醒会让后续请求 400、任务静默中断
+        if (isEngineNote(m)) {
+          out.push({ role: "user", content })
+          continue
+        }
         if (m.toolCalls?.length) {
           out.push({
             role: "assistant",

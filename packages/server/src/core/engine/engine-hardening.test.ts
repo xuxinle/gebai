@@ -307,6 +307,9 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const nudge = msgs.find((m) => m.role === "assistant" && m.content.includes("【验证提醒】"))
     expect(nudge).toBeDefined()
     expect(nudge!.content).toContain("src/a.ts")
+    // 落盘 assistant + engineNote 标记（UI/历史为助手气泡）；模型上下文回放为 user 角色
+    // （思考类模型不接受尾部 assistant，见 sdk Message.engineNote）
+    expect((nudge as { engineNote?: string }).engineNote).toBe("verify")
     expect(provider.calls).toBe(3) // 提醒额外触发一轮模型调用
     rmSync(home, { recursive: true, force: true })
   })

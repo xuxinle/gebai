@@ -3597,6 +3597,27 @@ describe("context compaction", () => {
     // 提醒携带未完成清单；事件携带 messageId/text 载荷（前端实时渲染）
     expect(String(contMsgs[0].content)).toContain("任务A")
     expect(String(contMsgs[0].content)).toContain("请自行决策")
+    // 落盘保持 assistant + engineNote 标记（UI/历史为助手气泡）；**模型上下文改 user 角色**——
+    // 思考类模型（DeepSeek thinking）不接受以 assistant 结尾的请求（视为前缀续写、要求回传
+    // reasoning_content），尾部 assistant 提醒会让后续调用 400、任务静默中断（实测）
+    expect((contMsgs[0] as { engineNote?: string }).engineNote).toBe("todo")
+    const nudgeCtx = s.provider.seenChats[1]!
+    expect(nudgeCtx[nudgeCtx.length - 1]!.role).toBe("user")
+    expect(String(nudgeCtx[nudgeCtx.length - 1]!.content)).toContain("【待办提醒】")
+    cleanup(s.home)
+  })
+
+  test("提醒消息回放为 user 角色（含库存量数据：无 engineNote 标记按内容前缀识别）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    // 存量格式：标记上线前落盘的 assistant 提醒消息（无 engineNote 字段）
+    await s.store.appendMessage(session.id, { id: "old-nudge", role: "assistant", content: "【验证提醒】旧数据：请先跑测试。", createdAt: Date.now() } as never)
+    const history = await (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<Array<{ role: string; content: unknown }>> }).loadHistory(session.id, "default")
+    expect(history.find((m) => String(m.content).includes("【验证提醒】"))!.role).toBe("user")
+    // 新格式（带 engineNote 标记）同样回放为 user 角色
+    await s.store.appendMessage(session.id, { id: "new-nudge", role: "assistant", content: "【待办提醒】仍有未完成待办。", engineNote: "todo", createdAt: Date.now() } as never)
+    const history2 = await (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<Array<{ role: string; content: unknown }>> }).loadHistory(session.id, "default")
+    expect(history2.find((m) => String(m.content).includes("【待办提醒】"))!.role).toBe("user")
     cleanup(s.home)
   })
 
