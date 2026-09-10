@@ -108,9 +108,13 @@ export class SubAgentManager {
 
   async discover(): Promise<void> {
     // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/agents/ 子代理域（基建在 src/core/），
-    // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）
+    // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）。
+    // 双域扫描（DESIGN「custom 二开域」）：仓库根 custom/agents/ 是二开子代理域（随文件夹整体迁移，
+    // 上游更新不触碰）——与内置域同规则扫描、同名覆盖（custom 后扫胜出）；域不存在（未二开/已裁剪）
+    // 签名拼空串，零开销零行为差异
     const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
-    const sig = await subagentsDirSignature(dir)
+    const customDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents")
+    const sig = (await subagentsDirSignature(dir)) + "|custom:" + (await subagentsDirSignature(customDir))
     // 命中缓存（签名未变，或 bundled 形态注册表不可变）：直接复用扫描结果
     if (discoveredDefsCache && sig === discoveredSigCache) {
       this.tsDefs.clear()
@@ -154,7 +158,23 @@ export class SubAgentManager {
     // 全量扫描（首次或目录签名变化——热加载）：重扫前清空（删除的文件不再保留旧定义）
     this.tsDefs.clear()
     this.loadErrors.clear()
-    // 扫描域 src/agents/ 内全是子代理定义（基建在 src/core/，物理分域即排除——无需排除清单）
+    // 双域依次扫描：内置域 → custom 二开域（同名 def 后写胜出一二开覆盖内置；custom 域缺失零迭代）。
+    // 扫描域内全是子代理定义（基建分别在 src/core/ 与 custom/core/，物理分域即排除——无需排除清单）
+    for (const scan of [dir, customDir]) await this.scanAgentDir(scan, scan !== dir)
+    // 同 bundle 分支：先写未过滤全集缓存，实例级 removedDefs 过滤仅在合并视图上生效
+    discoveredDefsCache = [...this.tsDefs.values()]
+    discoveredSigCache = sig
+    discoveredErrorsCache = new Map(this.loadErrors)
+    this.rebuildMergedDefs()
+    await this.discoverNativeIfChanged()
+    await this.preload()
+  }
+
+  /** 单个扫描域的子代理收集（dev 双域共用：内置 packages/agents/src/agents/ 与二开 custom/agents/）。
+   *  isCustom 仅影响日志标注与 import 路径推导；写入 this.tsDefs（后写覆盖先写——调用方保证 custom 在后）。 */
+  private async scanAgentDir(dir: string, isCustom: boolean): Promise<void> {
+    const domain = isCustom ? "custom" : "builtin"
+    // 扫描域内全是子代理定义（基建物理分域在各自 core/，无需排除清单）
     const entries = await readdir(dir, { withFileTypes: true })
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
@@ -163,24 +183,26 @@ export class SubAgentManager {
         try {
           // mtime 查询参数绕过模块缓存（Bun 相对路径 + 查询参数形态；file:// URL 查询参数不生效）：修改过的 TS 文件重新 import 拿到新代码
           const mtime = (await stat(join(dir, e.name)).catch(() => null))?.mtimeMs ?? 0
-          const mod = await import(`../../../../agents/src/agents/${e.name}?t=${mtime}`)
+          const mod = await import(`${isCustom ? "../../../../../custom/agents" : "../../../../agents/src/agents"}/${e.name}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
-          if (def) this.tsDefs.set(def.name, def)
-          else {
+          if (def) {
+            if (isCustom && this.tsDefs.has(def.name)) console.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
+            this.tsDefs.set(def.name, def)
+          } else {
             const msg = `${base}.ts 未导出 def（须 export const def: SubAgentDef）`
-            console.warn(`[subagents] ${msg}，已跳过`)
+            console.warn(`[subagents:${domain}] ${msg}，已跳过`)
             this.loadErrors.set(base, msg)
           }
         } catch (err) {
           const msg = `加载 ${base}.ts 失败: ${(err as Error).message}`
-          console.warn(`[subagents] ${msg}`)
+          console.warn(`[subagents:${domain}] ${msg}`)
           this.loadErrors.set(base, String((err as Error).message || err))
         }
       } else if (e.isDirectory()) {
         // 目录形式：{dir}/{dir}.ts 为定义入口；系统提示词可拆 {dir}.md 由入口文件导入并修饰。
         // 无同名 ts（或不导出 def）时支持纯提示词简化定义：{dir}/{dir}.md 单独存在即构成子Agent（零 TS）。
         const base = e.name
-        if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则（基建已物理分域到 src/core/，无需排除清单）
+        if (!/^[a-z0-9_]+$/.test(base)) continue // 命名规则（基建已物理分域到各自 core/，无需排除清单）
         const tsEntry = join(dir, base, `${base}.ts`)
         const indexEntry = join(dir, base, "index.ts")
         const entry = (await access(tsEntry).then(() => true, () => false)) ? tsEntry : ((await access(indexEntry).then(() => true, () => false)) ? indexEntry : null)
@@ -188,13 +210,15 @@ export class SubAgentManager {
           try {
             const mtime = (await stat(entry).catch(() => null))?.mtimeMs ?? 0
             // 相对路径 + 查询参数绕过模块缓存（Bun 对 file:// URL 的查询参数不生效）；目录形态入口名拼接
-            const rel = entry.endsWith(join("index.ts")) ? `../../../../agents/src/agents/${base}/index` : `../../../../agents/src/agents/${base}/${base}`
+            const rel = `${isCustom ? "../../../../../custom/agents" : "../../../../agents/src/agents"}/${base}${entry.endsWith(join("index.ts")) ? "/index" : `/${base}`}`
             const mod = await import(`${rel}?t=${mtime}`)
             const def = mod.def as SubAgentDef | undefined
-            if (def) this.tsDefs.set(def.name, def)
-            else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
+            if (def) {
+              if (isCustom && this.tsDefs.has(def.name)) console.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
+              this.tsDefs.set(def.name, def)
+            } else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
           } catch (err) {
-            console.warn(`[subagents] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
+            console.warn(`[subagents:${domain}] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
             this.loadErrors.set(base, `${entry} 加载失败: ${String((err as Error).message || err)}`)
           }
         } else {
@@ -202,13 +226,6 @@ export class SubAgentManager {
         }
       }
     }
-    // 同 bundle 分支：先写未过滤全集缓存，实例级 removedDefs 过滤仅在合并视图上生效
-    discoveredDefsCache = [...this.tsDefs.values()]
-    discoveredSigCache = sig
-    discoveredErrorsCache = new Map(this.loadErrors)
-    this.rebuildMergedDefs()
-    await this.discoverNativeIfChanged()
-    await this.preload()
   }
 
   /** 客卿（多语言）子代理发现（discover 尾部调用）：仅 boot 显式接线（setKeqingOpts）且
@@ -251,11 +268,11 @@ export class SubAgentManager {
    *  TS 变化走全量 discover（尾部含 客卿 检查），仅 客卿 变化只重拉 客卿（幂等跳过 TS 扫描）。 */
   async refreshIfChanged(): Promise<void> {
     if (!discoveredDefsCache && !nativeDefsCache) return
-    // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/agents/ 子代理域（基建在 src/core/），
-    // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）
+    // 双域签名（与 discover 同式：内置 + custom 二开域，任一变化都触发全量重扫）
     const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
-    const sig = await subagentsDirSignature(dir)
-    if (sig !== null && sig !== discoveredSigCache) {
+    const customDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents")
+    const sig = (await subagentsDirSignature(dir)) + "|custom:" + (await subagentsDirSignature(customDir))
+    if (sig !== discoveredSigCache) {
       await this.discover()
       return
     }

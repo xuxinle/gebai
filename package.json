@@ -12,7 +12,8 @@
     "dev:web": "bun run --cwd packages/web dev",
     "build": "turbo run build",
     "test": "turbo run test",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "turbo run typecheck && bun run scripts/typecheck-custom.ts",
+    "typecheck:custom": "bun run scripts/typecheck-custom.ts",
     "lint": "turbo run lint",
     "build:code": "bun run scripts/build-code-agent.ts"
   },

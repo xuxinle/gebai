@@ -23,6 +23,7 @@ import { parseSubAgentMd } from "@gebai/agents"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const srcDir = join(root, "..", "agents", "src", "agents")  // @gebai/agents 子代理定义域（基建在 src/core/，物理分域即排除）
+const customDir = join(root, "..", "..", "custom", "agents") // 二开子代理域（仓库根 custom/：packages/server → 上两级即仓库根；随文件夹整体迁移，缺失零条目）
 const outFile = join(root, "src", "core", "subagents.bundle.generated.ts")
 
 /** 逗号分隔环境变量 → 名单（空值 = 未指定）。 */
@@ -44,7 +45,8 @@ function isDefFile(p: string): boolean {
   }
 }
 
-const entries = await readdir(srcDir, { withFileTypes: true })
+const entries = await readdir(srcDir, { withFileTypes: true }).catch(() => [] as Awaited<ReturnType<typeof readdir>>)
+/** 双域扫描（内置 srcDir 先扫 → 二开 customDir 后扫）：同名后写覆盖（二开胜出，与 dev 发现同语义）；custom 域不存在零条目零告警。 */
 /** 子Agent 命名规则（DESIGN：仅限小写字母/数字/下划线）；不合规条目跳过并告警，防生成非法标识符。 */
 function validName(name: string): boolean {
   if (/^[a-z0-9_]+$/.test(name)) return true
@@ -56,19 +58,28 @@ function validName(name: string): boolean {
  *  bundledErrors，运行时水合进 loadErrors；单代理失败不阻断构建、不连带其他代理）。 */
 const defs: Array<{ name: string; importPath: string; inline?: string; dir?: boolean }> = []
 const seen = new Set<string>()
-for (const e of entries) {
-  const base = e.name
-  if (e.isDirectory()) {
-    if (seen.has(base) || !validName(base)) continue
-    seen.add(base)
-    const tsEntry = join(srcDir, base, `${base}.ts`)
-    const indexEntry = join(srcDir, base, "index.ts")
-    if (isDefFile(tsEntry)) {
-      defs.push({ name: base, dir: true, importPath: `../../../agents/src/agents/${base}/${base}` })
-    } else if (isDefFile(indexEntry)) {
-      // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
-      defs.push({ name: base, dir: true, importPath: `../../../agents/src/agents/${base}/index` })
-    } else {
+/** 单域扫描收集：目录内条目进 defs；同名已存在时移除旧条目后写胜出（custom 覆盖内置）。 */
+function collectDomain(entryBase: string, entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>, isCustom: boolean): void {
+  const domain = isCustom ? "custom" : "builtin"
+  const importBase = isCustom ? "../../../../custom/agents" : "../../../agents/src/agents"
+  for (const e of entries) {
+    const base = e.name
+    if (e.isDirectory()) {
+      if (!validName(base)) continue
+      if (seen.has(base)) {
+        console.log(`[build-subagents:${domain}] ${base} 同名，${domain} 版本覆盖`)
+        const i = defs.findIndex((d) => d.name === base)
+        if (i >= 0) defs.splice(i, 1)
+      }
+      seen.add(base)
+      const tsEntry = join(entryBase, base, `${base}.ts`)
+      const indexEntry = join(entryBase, base, "index.ts")
+      if (isDefFile(tsEntry)) {
+        defs.push({ name: base, dir: true, importPath: `${importBase}/${base}/${base}` })
+      } else if (isDefFile(indexEntry)) {
+        // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
+        defs.push({ name: base, dir: true, importPath: `${importBase}/${base}/index` })
+      } else {
       // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies/preload/env_vars 转义嵌入）
       try {
         const md = readFileSync(join(srcDir, base, `${base}.md`), "utf8")
@@ -84,16 +95,26 @@ for (const e of entries) {
           inline: `{ name: ${JSON.stringify(base)}, description: ${JSON.stringify(description)}, systemPrompt: ${JSON.stringify(systemPrompt)}${extra} }`,
         })
       } catch {
-        console.warn(`[build-subagents] 跳过 ${base}：{${base}.md} 缺失或不可读`)
+        console.warn(`[build-subagents:${domain}] 跳过 ${base}：{${base}.md} 缺失或不可读`)
       }
     }
   } else if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
     const name = e.name.slice(0, -3)
-    if (seen.has(name) || !validName(name)) continue
+    if (!validName(name)) continue
+    if (seen.has(name)) {
+      console.log(`[build-subagents:${domain}] ${name} 同名，${domain} 版本覆盖`)
+      const i = defs.findIndex((d) => d.name === name)
+      if (i >= 0) defs.splice(i, 1)
+    }
     seen.add(name)
-    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, importPath: `../../../agents/src/agents/${name}` })
+    if (isDefFile(join(entryBase, e.name))) defs.push({ name, dir: false, importPath: `${importBase}/${name}` })
+  }
   }
 }
+collectDomain(srcDir, entries, false)
+const customEntries = await readdir(customDir, { withFileTypes: true }).catch(() => null)
+if (customEntries) collectDomain(customDir, customEntries, true)
+else console.log("[build-subagents] custom/ 二开域不存在，仅打包内置子代理")
 defs.sort((a, b) => a.name.localeCompare(b.name))
 
 // 清单校验：未知名字直接失败（构建产物静默缺失比构建失败更难排查），并列出可用名单辅助修正
@@ -111,13 +132,15 @@ const included = includeNames.length ? defs.filter((d) => includeNames.includes(
  *  整个注册表，全部子代理不可用），原因烘焙进 bundledErrors（运行时水合进 loadErrors，模型
  *  可见根因）。单代理失败不阻断构建（打印告警），不连带其他代理。 */
 const badAgents: Array<[string, string]> = []
+/** 入口文件解析：目录形态 {name}/{name}.ts 优先，回退 {name}/index.ts；平铺 {name}.ts。 */
+function resolveEntry(baseDir: string, d: { name: string; dir?: boolean }): string {
+  if (!d.dir) return join(baseDir, `${d.name}.ts`)
+  return isDefFile(join(baseDir, d.name, `${d.name}.ts`)) ? join(baseDir, d.name, `${d.name}.ts`) : join(baseDir, d.name, "index.ts")
+}
 for (const d of included) {
   if (d.inline) continue // md 内联定义无模块导入风险（本脚本解析即验证）
-  const entryFile = d.dir
-    ? isDefFile(join(srcDir, d.name, `${d.name}.ts`))
-      ? join(srcDir, d.name, `${d.name}.ts`)
-      : join(srcDir, d.name, "index.ts")
-    : join(srcDir, `${d.name}.ts`)
+  // 双域入口解析：按 importPath 前缀定位真实文件（内置 srcDir / 二开 customDir）
+  const entryFile = d.importPath.includes("/custom/agents/") ? resolveEntry(customDir, d) : resolveEntry(srcDir, d)
   try {
     const mod: unknown = await import(pathToFileURL(entryFile).href)
     const def = (mod as { def?: unknown }).def

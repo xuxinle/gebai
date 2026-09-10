@@ -708,3 +708,66 @@ describe("子代理失败隔离（DESIGN「子代理失败隔离」：单个失�
     }
   })
 })
+
+describe("custom 二开域（双域扫描自动合并，DESIGN「custom 二开域」）", () => {
+  const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents")
+  const customDir = join(import.meta.dirname, "..", "..", "..", "..", "..", "custom", "agents")
+
+  test("custom 新增子代理即自动发现（与内置域合并；删除后消失，热加载同机制）", async () => {
+    const name = "zz_custom_probe_tmp"
+    const agentDir = join(customDir, name)
+    rmSync(agentDir, { recursive: true, force: true })
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, `${name}.ts`), `export const def = { name: "${name}", description: "二开探针", systemPrompt: "y" }\n`)
+    const cleanup = async () => {
+      rmSync(agentDir, { recursive: true, force: true })
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover()
+      expect(m.def(name)?.description).toBe("二开探针") // custom 域发现
+      expect(m.def("code")).toBeDefined() // 内置域不受影响
+      rmSync(agentDir, { recursive: true, force: true })
+      const m2 = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m2.discover() // 签名变化（custom 域 mtime 变化）→ 重扫 → 二开代理消失
+      expect(m2.def(name)).toBeUndefined()
+      expect(m2.def("code")).toBeDefined()
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("custom 同名覆盖内置（后扫胜出——改写内置行为而不动上游代码）", async () => {
+    const name = "hsh" // 内置轻量子代理，覆盖实验低风险
+    const agentDir = join(customDir, name)
+    rmSync(agentDir, { recursive: true, force: true })
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, `${name}.ts`), `export const def = { name: "${name}", description: "二开覆盖版", systemPrompt: "y" }\n`)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover()
+      expect(m.def(name)?.description).toBe("二开覆盖版") // custom 版本胜出
+    } finally {
+      rmSync(agentDir, { recursive: true, force: true })
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+  })
+
+  test("custom 域坏子代理失败隔离（不连带内置域，根因可见）", async () => {
+    const name = "zz_custom_bad_tmp"
+    const file = join(customDir, `${name}.ts`)
+    rmSync(file, { force: true })
+    writeFileSync(file, `import "./nonexistent-xyz"\nexport const def = { name: "${name}", description: "x", systemPrompt: "y" }\n`)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover() // 不抛错
+      expect(m.def(name)).toBeUndefined()
+      expect(m.loadError(name)).toBeTruthy()
+      expect(m.def("code")).toBeDefined() // 内置域不受连带
+    } finally {
+      rmSync(file, { force: true })
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+  })
+})

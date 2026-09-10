@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    "typeRoots": ["../packages/agents/node_modules/@types", "../node_modules/.bun/node_modules/@types"],
+    "paths": {
+      "@gebai/sdk": ["../packages/sdk/src"],
+      "@gebai/sdk/node": ["../packages/sdk/src/node.ts"],
+      "@gebai/agents": ["../packages/agents/src"]
+    }
+  },
+  "include": ["agents", "core"]
+}
