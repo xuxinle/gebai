@@ -1,5 +1,5 @@
 import type { ToolSet } from "@gebai/sdk"
-import { artifactBlocks, truncate } from "@gebai/sdk"
+import { artifactBlocks, truncate } from "@gebai/sdk/node"
 import { assertPublicHttpUrl } from "../shared/fetch-guard"
 import type { ToolSchema } from "@gebai/sdk"
 import { copyFile, mkdir } from "node:fs/promises"

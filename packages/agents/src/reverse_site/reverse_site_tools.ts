@@ -1,6 +1,6 @@
 import type { ToolSchema } from "@gebai/sdk"
 import type { Tool, ToolResult, ToolSet } from "@gebai/sdk"
-import { truncate, artifactBlocks } from "@gebai/sdk"
+import { truncate, artifactBlocks } from "@gebai/sdk/node"
 import { assertPublicHttpUrl, fetchWithRedirectGuard } from "../shared/fetch-guard"
 import { createLazyBridge, type BridgeLike } from "../browser/bridge"
 

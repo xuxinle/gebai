@@ -1,5 +1,5 @@
 import type { ToolContext, ToolResult, ToolSet } from "@gebai/sdk"
-import { artifactBlocks, truncate } from "@gebai/sdk"
+import { artifactBlocks, truncate } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 import { isAbsolute, join, normalize, sep } from "node:path"
 import { existsSync, readFileSync, statSync } from "node:fs"

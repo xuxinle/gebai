@@ -1,5 +1,5 @@
 import type { SubAgentDef } from "@gebai/sdk"
-import { projectAware } from "@gebai/sdk"
+import { projectAware } from "@gebai/sdk/node"
 import { wordAppendTool, wordCreateTool, wordReadTool } from "./word"
 import { excelEditTool, excelReadTool, excelWriteTool } from "./excel"
 import { pptCreateTool, pptReadTool } from "./ppt"

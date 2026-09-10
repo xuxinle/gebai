@@ -1,7 +1,7 @@
 import type { SubAgentDef } from "@gebai/sdk"
 import { analyzeTool, searchSymbolsTool } from "../analyzer/analyzer"
 /* MIGRATE-TODO: gitTool, makePreviewServerTool, envDetectTool, systemInfoTool */
-import { projectAware } from "@gebai/sdk"
+import { projectAware } from "@gebai/sdk/node"
 import { gitTool, makePreviewServerTool, envDetectTool, systemInfoTool } from "./tools"
 
 export const name = "code"

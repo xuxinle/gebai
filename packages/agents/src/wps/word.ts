@@ -29,7 +29,7 @@ import {
 } from "docx"
 import { strToU8 } from "fflate"
 import type { Tool, ToolContext } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 import { escapeXml, readDocx, unzipFiles, xmlStr, zipFiles } from "./ooxml"
 import type { MdBlock, MdRun } from "./markdown"
 import { bodyInput } from "./markdown"

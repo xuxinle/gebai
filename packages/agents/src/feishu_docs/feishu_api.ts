@@ -1,5 +1,5 @@
 import type {  Tool, ToolContext, ToolResult  } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 import { feishuFetch } from "../shared/tls"
 import {

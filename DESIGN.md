@@ -110,8 +110,8 @@ Monorepo 采用 Bun workspaces + Turborepo：
 | 包 | 路径 | 职责 |
 |---|------|------|
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/新会话执行、REST/WebSocket/Webhook 对外接口；**代码分层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根。TS 子Agent 已抽包 @gebai/agents（依赖单向 sdk ← agents ← server） |
-| `@gebai/agents` | `packages/agents/` | TS 子代理包：13 个子代理（code/self_optimize/hsh/cron/desktop/explore/feishu_docs/feishu_group/playwright/reverse_site/vision/widgets/wps）+ 子代理专属基建（`src/cv/` CV 全家、`src/browser/` 浏览器桥接、`src/analyzer/` tree-sitter 符号分析、`src/widgets-store/` 小工具存储、`src/shared/` 公共件：vision 工厂/fetch-guard/tls/image-resize/page-capture/feedback/config）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk |
-| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约 |
+| `@gebai/agents` | `packages/agents/` | TS 子代理包：13 个子代理（code/self_optimize/hsh/cron/desktop/explore/feishu_docs/feishu_group/playwright/reverse_site/vision/widgets/wps）+ 纯 md 子代理（目录内 `{name}/{name}.md` 单独存在、零 TS 代码的简化定义，经 `src/shared/sub-agent-md.ts` 解析纳入 allAgents——md 解析单一来源，server 发现 subagents.ts 与构建脚本 build-subagents.ts 均经本包消费）+ 子代理专属基建（`src/cv/` CV 全家、`src/browser/` 浏览器桥接、`src/analyzer/` tree-sitter 符号分析、`src/widgets-store/` 小工具存储、`src/shared/` 公共件：vision 工厂/fetch-guard/tls/image-resize/page-capture/feedback/sub-agent-md/config）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk，node 工具值导入走 `@gebai/sdk/node` |
+| `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端 |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体） |
 
@@ -134,7 +134,7 @@ Monorepo 根目录包含以下脚手架文件，非运行时依赖，仅服务�
 
 ### SDK (`@gebai/sdk`)
 
-客户端通过 SDK 与服务端 WebSocket/REST 连接，提供以下能力（TypeScript 官方 SDK，其他语言可基于 OpenAPI 规范生成）：
+客户端通过 SDK 与服务端 WebSocket/REST 连接，提供以下能力（TypeScript 官方 SDK，其他语言可基于 OpenAPI 规范生成）。**包为双入口**：主入口 `@gebai/sdk`（浏览器安全集：types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建——web 构建（vite treeshake:false）可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths，import node:path/node:crypto 等）独立子路径 `@gebai/sdk/node`，server/agents 的 node 侧值导入专用（package.json exports 映射 `.` / `./node` / `./package.json`）：
 
 ```ts
 class GebaiClient {

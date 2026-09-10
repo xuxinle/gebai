@@ -119,6 +119,10 @@ export type ToolContext = {
   writeFile: (p: string, content: string) => Promise<void>
   /** 写入二进制文件原始字节（draw 后端渲染 PNG 落盘等，路径同样经 resolvePath/沙箱约束）。 */
   writeBinaryFile?: (p: string, data: Uint8Array) => Promise<void>
+  /** 流式读取二进制文件（大文件分块，避免整文件驻留内存）：未实现时回退 readBinaryFile 整文件读取。 */
+  readBinaryStream?: (p: string) => AsyncIterable<Uint8Array>
+  /** 流式写入二进制文件（大文件分块落盘）：未实现时回退 writeBinaryFile 整文件写入。 */
+  writeBinaryStream?: (p: string, chunks: AsyncIterable<Uint8Array>) => Promise<void>
   listFiles: (p?: string) => Promise<FileEntry[]>
   /** 列出单层目录内容（ls 工具用）。 */
   listDir: (p: string) => Promise<FileEntry[]>

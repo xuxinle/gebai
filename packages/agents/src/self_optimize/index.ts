@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { SubAgentDef } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 import { readFeedbackTool } from "../shared/feedback"
 import { pageCaptureTool } from "../shared/page-capture"
 import { isBinaryMode } from "../shared/config"

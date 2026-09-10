@@ -1,5 +1,5 @@
 import type { ToolSchema } from "@gebai/sdk"
-import { artifactBlocks, previewLogicalPath } from "@gebai/sdk"
+import { artifactBlocks, previewLogicalPath } from "@gebai/sdk/node"
 import type { ToolContext } from "@gebai/sdk"
 
 export function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {

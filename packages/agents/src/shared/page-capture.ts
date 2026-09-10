@@ -2,7 +2,7 @@
  *  引擎按任务注入，测试桩未注入时返回不可用说明）。 */
 import { dirname } from "node:path"
 import type { ContentBlock, Tool } from "@gebai/sdk"
-import { schema } from "@gebai/sdk"
+import { schema } from "@gebai/sdk/node"
 
 /** 前端捕获 html 截断长度（WS 传输与落盘上限；完整 DOM 通常远超此，超出截取首部）。 */
 export const PAGE_CAPTURE_HTML_LIMIT = 300 * 1024

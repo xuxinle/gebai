@@ -5,7 +5,7 @@
  */
 import PptxGenJS from "pptxgenjs"
 import type { Tool } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 import { readPptx, unzipFiles } from "./ooxml"
 import { asNum, blindOverwriteGuard, fileBlocks, fitImage, normColor, readImage, schema, writeGuards } from "./shared"
 

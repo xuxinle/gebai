@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseSubAgentMd } from "./sub-agent-md"
+import { mdSubAgentDef, parseSubAgentMd } from "./sub-agent-md"
 
 describe("parseSubAgentMd", () => {
   test("parses frontmatter description and body as system prompt", () => {
@@ -93,5 +93,34 @@ description: 组合 Agent：编排多个子 Agent
       { name: "COMBO_HELPER_BASE_URL", description: "服务地址" },
     ])
     expect(parseSubAgentMd("none", "正文").envVars).toBeUndefined()
+  })
+})
+
+describe("mdSubAgentDef", () => {
+  test("builds SubAgentDef from plain md (no frontmatter)", () => {
+    const def = mdSubAgentDef("reporter", "# 报告专家\n\n负责撰写技术报告。")
+    expect(def.name).toBe("reporter")
+    expect(def.description).toBe("报告专家")
+    expect(def.systemPrompt).toBe("# 报告专家\n\n负责撰写技术报告。")
+    expect(def.dependencies).toBeUndefined()
+    expect(def.preload).toBeUndefined()
+    expect(def.envVars).toBeUndefined()
+  })
+
+  test("carries frontmatter fields (dependencies/preload/env_vars)", () => {
+    const md = `---
+description: 组合 Agent
+dependencies: playwright, code
+preload: true
+env_vars:
+  - name: COMPOSER_TOKEN
+    description: 访问令牌
+---
+正文`
+    const def = mdSubAgentDef("composer", md)
+    expect(def.description).toBe("组合 Agent")
+    expect(def.dependencies).toEqual(["playwright", "code"])
+    expect(def.preload).toBe(true)
+    expect(def.envVars).toEqual([{ name: "COMPOSER_TOKEN", description: "访问令牌" }])
   })
 })

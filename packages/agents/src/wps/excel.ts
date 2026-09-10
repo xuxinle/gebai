@@ -7,7 +7,7 @@
 import { Workbook } from "exceljs"
 import type { Cell, Worksheet } from "exceljs"
 import type { Tool, ToolContext } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 import { asNum, blindOverwriteGuard, fileBlocks, normColor, schema, writeGuards } from "./shared"
 
 // ---------------------------------------------------------------------------

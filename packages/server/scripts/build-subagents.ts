@@ -19,7 +19,7 @@ import { basename, join } from "node:path"
 import { readFileSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { pathToFileURL } from "node:url"
-import { parseSubAgentMd } from "../src/core/agents/sub-agent-md"
+import { parseSubAgentMd } from "@gebai/agents"
 import { NON_AGENT_DIRS, NON_AGENT_FILES } from "@gebai/agents"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
@@ -90,7 +90,7 @@ for (const e of entries) {
     const name = e.name.slice(0, -3)
     if (seen.has(name) || !validName(name)) continue
     seen.add(name)
-    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, line: `import { def as subAgent_${name} } from "../../../agents/src/${name}/index"` })
+    if (isDefFile(join(srcDir, e.name))) defs.push({ name, dir: false, line: `import { def as subAgent_${name} } from "../../../agents/src/${name}"` })
   }
 }
 defs.sort((a, b) => a.name.localeCompare(b.name))

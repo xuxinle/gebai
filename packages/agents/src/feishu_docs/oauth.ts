@@ -1,4 +1,4 @@
-import { sessionPath } from "@gebai/sdk"
+import { sessionPath } from "@gebai/sdk/node"
 
 /**
  * 飞书用户授权共享层（feishu_docs 子 Agent 工具与 REST OAuth 回调端点共用）。

@@ -11,7 +11,7 @@ import { getCvRunner } from "../cv/cv"
 import { pairObjectsWithText } from "../cv/detect"
 import { cropImage, decodePng, encodePng, type RgbaImage } from "../cv/image"
 import { matchTemplate, type TemplateMatch } from "../cv/template"
-import { parseRegion, schema } from "@gebai/sdk"
+import { parseRegion, schema } from "@gebai/sdk/node"
 import { VISION_MAX_IMAGE_BYTES } from "./vision"
 
 /* ---------------- 边车推理委托（sidecar-first + wasm 回落） ----------------

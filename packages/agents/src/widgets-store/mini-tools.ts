@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { shardPath } from "@gebai/sdk"
+import { shardPath } from "@gebai/sdk/node"
 
 /* ---------- HTML 小工具库（Agent 保存/加载的 HTML 小工具，支持公用与用户私有） ---------- */
 

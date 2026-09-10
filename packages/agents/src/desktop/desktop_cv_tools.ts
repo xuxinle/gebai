@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 桌面本地识别工具集（desktop 专用）：ocr/locate/locate_image/detect 四工具复用共享工厂
  * core/tools/cv-analysis（core/cv 域本地小模型推理的消费层——onnxruntime-web wasm 进程内
  * 推理，离线运行不耗模型配额），本文件注入 desktop 的缺省图像源（现截宿主机屏幕）与本地
@@ -11,7 +11,7 @@ import { ocrInfer } from "../shared/cv-analysis"
 import { decodePng, type RgbaImage } from "../cv/image"
 import { matchTemplate } from "../cv/template"
 import { createCvAnalysisTools, createDetectTool, type CvSource, type CvSourceLoader } from "../shared/cv-analysis"
-import { parseRegion, schema } from "@gebai/sdk"
+import { parseRegion, schema } from "@gebai/sdk/node"
 import { PS_DPI_AWARE, psCmd } from "./desktop_tools"
 
 function desktopGate(ctx: ToolContext): void {

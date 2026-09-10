@@ -1,5 +1,5 @@
 import type { Tool } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 import { resizeForVision, resizeNote } from "./image-resize"
 
 /** LLM 流式块（最小契约：视觉工具只需 text 块收集；与引擎 LLMProvider 结构兼容——

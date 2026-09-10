@@ -4,7 +4,7 @@ import { connect, createServer, type AddressInfo } from "node:net"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Tool, ToolResult } from "@gebai/sdk"
-import { truncate, schema } from "@gebai/sdk"
+import { truncate, schema } from "@gebai/sdk/node"
 import { isBinaryMode } from "../shared/config"
 
 /** git 只读工具：log 条数默认与上限。 */

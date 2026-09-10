@@ -1,6 +1,6 @@
 import { Language, Parser } from "web-tree-sitter"
 import type { Tool } from "@gebai/sdk"
-import { truncate } from "@gebai/sdk"
+import { truncate } from "@gebai/sdk/node"
 
 /**
  * tree-sitter（wasm）语法分析。

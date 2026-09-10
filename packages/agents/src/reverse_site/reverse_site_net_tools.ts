@@ -1,5 +1,5 @@
 import type { ToolContext, ToolSet } from "@gebai/sdk"
-import { truncate, artifactBlocks } from "@gebai/sdk"
+import { truncate, artifactBlocks } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 import { createLazyBridge, withSessionLock, type BridgeLike } from "../browser/bridge"
 import { parseJsonObject, type CapturedRequest } from "./reverse_site_tools"

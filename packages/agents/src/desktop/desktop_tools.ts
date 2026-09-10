@@ -1,7 +1,7 @@
 import { join } from "node:path"
 import type { Tool, ToolContext, ToolResult } from "@gebai/sdk"
-import { artifactBlocks } from "@gebai/sdk"
-import { parseRegion } from "@gebai/sdk"
+import { artifactBlocks } from "@gebai/sdk/node"
+import { parseRegion } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
 
 /**

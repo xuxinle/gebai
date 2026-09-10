@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { FeedbackInfo, Tool } from "@gebai/sdk"
-import { schema, walkDir } from "@gebai/sdk"
+import { schema, walkDir } from "@gebai/sdk/node"
 
 async function readFeedback(home: string, userId: string): Promise<FeedbackInfo[]> {
   const base = join(home, "users", userId, "feedback")

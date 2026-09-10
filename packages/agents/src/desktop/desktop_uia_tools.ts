@@ -7,7 +7,7 @@
  * 只读免审批；不点击不输入，坐标供 mouse_click 交叉校验。
  */
 import type { Tool, ToolResult } from "@gebai/sdk"
-import { schema } from "@gebai/sdk"
+import { schema } from "@gebai/sdk/node"
 import { psCmd } from "./desktop_tools"
 
 function desktopGate(ctx: { sandboxed?: boolean }): void {

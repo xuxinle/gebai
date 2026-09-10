@@ -2,7 +2,7 @@ import type { ToolContext, ToolSet } from "@gebai/sdk"
 import { createLazyBridge, withSessionLock, type BridgeLike } from "../browser/bridge"
 import { cropImage, decodePng, type RgbaImage } from "../cv/image"
 import { createCvAnalysisTools, type CvSource } from "../shared/cv-analysis"
-import { parseRegion } from "@gebai/sdk"
+import { parseRegion } from "@gebai/sdk/node"
 
 /**
  * playwright 子Agent 本地识别工具集（ocr/locate/locate_image）：复用 desktop 同款 core/cv
