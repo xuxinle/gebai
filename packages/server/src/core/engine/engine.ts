@@ -449,10 +449,13 @@ export class AgentEngine {
     return buildAgentSectionFn(this.promptDeps, def, user, env, sessionId)
   }
 
-  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务/异步运行句柄）；幂等，供 REST/WS 删除会话入口调用。 */
+  /** 会话删除时释放其运行态（已读文件追踪/动态工具/后台任务服务/异步运行句柄/装载者引用）；幂等，供 REST/WS 删除会话入口调用。 */
   forgetSession(sessionId: string): void {
     this.readFiles.delete(sessionId)
     this.dynamicTools.delete(sessionId)
+    // 会话级装载者引用解引用（owner 引用计数）：引用归零的注销工具注册——
+    // 不释放则 ownersByAgent 随会话累积（长运行服务无界增长）；agent_run 共享标记与全局装载不受影响
+    this.opts.subAgents.releaseOwner(sessionId)
     for (const key of this.shTaskServices.keys()) {
       if (key.endsWith(`:${sessionId}`)) this.shTaskServices.delete(key)
     }

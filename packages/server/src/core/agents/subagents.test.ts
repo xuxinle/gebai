@@ -188,10 +188,50 @@ describe("子Agent 依赖与自动装载（dependencies 级联，DESIGN「子Age
     mgr.unload("dep_base", "sessionA") // 最后一个引用解除才注销工具
     expect(registry.resolve("dep_base_base")).toBeUndefined()
   })
+
+  test("releaseOwner：按会话全量解引用（引用归零注销工具；他方引用不受影响；幂等）", async () => {
+    const { mgr, registry } = makeDepsManager()
+    await mgr.load("dep_mid", "sessionA") // 连带装载 dep_base
+    await mgr.load("dep_base", "sessionB") // 幂等跳过注册，追加 sessionB 引用
+    expect(registry.resolve("dep_base_base")).toBeDefined()
+    mgr.releaseOwner("sessionA") // 只释放 sessionA：dep_mid 归零注销，dep_base 仍有 sessionB
+    expect(registry.resolve("dep_mid_mid")).toBeUndefined()
+    expect(registry.resolve("dep_base_base")).toBeDefined()
+    mgr.releaseOwner("sessionA") // 幂等：未持有引用的 owner 无副作用
+    expect(registry.resolve("dep_base_base")).toBeDefined()
+    mgr.releaseOwner("sessionB") // 最后一个引用解除：全部注销
+    expect(registry.resolve("dep_base_base")).toBeUndefined()
+    expect(mgr.getLoaded()).toEqual([])
+  })
 })
 
 describe("子Agent 热加载（目录签名失效缓存）", () => {
   const dir = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src")  // @gebai/agents 包内子代理源
+  test("目录双入口优先级：{name}/{name}.ts 优先于 {name}/index.ts（后者静默忽略，不报错）", async () => {
+    const name = "zz_dualentry_tmp"
+    const agentDir = join(dir, name)
+    rmSync(agentDir, { recursive: true, force: true })
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(
+      join(agentDir, `${name}.ts`),
+      `export const def = { name: "${name}", description: "主入口胜出", systemPrompt: "y" }\n`,
+    )
+    writeFileSync(
+      join(agentDir, "index.ts"),
+      `export const def = { name: "${name}", description: "index 不应生效", systemPrompt: "y" }\n`,
+    )
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      await m.discover()
+      expect(m.def(name)?.description).toBe("主入口胜出")
+      expect(m.loadError(name)).toBeUndefined()
+    } finally {
+      rmSync(agentDir, { recursive: true, force: true })
+      // 清理后重扫：进程级缓存签名回到干净态（防影响后续用例的 refreshIfChanged）
+      await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+  })
+
   test("新增/删除 md 子Agent 目录即时生效（无需重启进程）", async () => {
     const name = "zz_hotreload_tmp"
     const agentDir = join(dir, name)

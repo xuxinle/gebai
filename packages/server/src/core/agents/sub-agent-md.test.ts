@@ -65,4 +65,33 @@ description: 组合 Agent：编排多个子 Agent
     expect(r.dependencies).toEqual(["playwright", "9x"])
     expect(parseSubAgentMd("none", "正文").dependencies).toBeUndefined()
   })
+
+  test("parses frontmatter preload（true/false；非严格值与未声明为 undefined）", () => {
+    expect(parseSubAgentMd("a", "---\npreload: true\n---\n正文").preload).toBe(true)
+    expect(parseSubAgentMd("a", "---\npreload: false\n---\n正文").preload).toBe(false)
+    expect(parseSubAgentMd("a", "---\npreload: yes\n---\n正文").preload).toBeUndefined()
+    expect(parseSubAgentMd("a", "正文").preload).toBeUndefined()
+  })
+
+  test("parses frontmatter env_vars 列表（name 须以 {name 大写}_ 前缀，description 取后续缩进行）", () => {
+    const md = [
+      "---",
+      "description: 组合助手",
+      "env_vars:",
+      "  - name: COMBO_HELPER_TOKEN",
+      "    description: 访问令牌（敏感）",
+      "  - name: COMBO_HELPER_BASE_URL",
+      "    description: 服务地址",
+      "  - name: WRONG_PREFIX_KEY",
+      "    description: 前缀不符应忽略",
+      "---",
+      "正文",
+    ].join("\n")
+    const r = parseSubAgentMd("combo_helper", md)
+    expect(r.envVars).toEqual([
+      { name: "COMBO_HELPER_TOKEN", description: "访问令牌（敏感）" },
+      { name: "COMBO_HELPER_BASE_URL", description: "服务地址" },
+    ])
+    expect(parseSubAgentMd("none", "正文").envVars).toBeUndefined()
+  })
 })

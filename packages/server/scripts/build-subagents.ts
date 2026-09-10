@@ -20,12 +20,10 @@ import { readFileSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { pathToFileURL } from "node:url"
 import { parseSubAgentMd } from "../src/core/agents/sub-agent-md"
+import { NON_AGENT_DIRS, NON_AGENT_FILES } from "@gebai/agents"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const srcDir = join(root, "..", "agents", "src")  // @gebai/agents 包内子代理源
-/** 非子代理条目排除（agents 包内基建：analyzer/browser/cv/shared/widgets-store 目录 + 入口/类型声明文件）。 */
-const NON_AGENT_DIRS = new Set(["analyzer", "browser", "cv", "shared", "widgets-store"])
-const NON_AGENT_FILES = new Set(["index.ts", "types-md.d.ts"])
 const outFile = join(root, "src", "core", "subagents.bundle.generated.ts")
 
 /** 逗号分隔环境变量 → 名单（空值 = 未指定）。 */
@@ -70,14 +68,18 @@ for (const e of entries) {
       // 平铺文件迁移形态：{name}/index.ts（code/hsh/self_optimize 等无同名入口的目录）
       defs.push({ name: base, dir: true, line: `import { def as subAgent_${base} } from "../../../agents/src/${base}/index"` })
     } else {
-      // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies 转义嵌入）
+      // 纯提示词简化定义：{dir}.md 单独存在，内联为 def 对象（description/systemPrompt/dependencies/preload/env_vars 转义嵌入）
       try {
         const md = readFileSync(join(srcDir, base, `${base}.md`), "utf8")
-        const { description, systemPrompt, dependencies } = parseSubAgentMd(base, md)
+        const { description, systemPrompt, dependencies, preload, envVars } = parseSubAgentMd(base, md)
+        const extra =
+          `${dependencies?.length ? `, dependencies: ${JSON.stringify(dependencies)}` : ""}` +
+          `${preload != null ? `, preload: ${preload}` : ""}` +
+          `${envVars?.length ? `, envVars: ${JSON.stringify(envVars)}` : ""}`
         defs.push({
           name: base,
           dir: true,
-          line: `const subAgent_${base}: SubAgentDef = { name: ${JSON.stringify(base)}, description: ${JSON.stringify(description)}, systemPrompt: ${JSON.stringify(systemPrompt)}${dependencies?.length ? `, dependencies: ${JSON.stringify(dependencies)}` : ""} }`,
+          line: `const subAgent_${base}: SubAgentDef = { name: ${JSON.stringify(base)}, description: ${JSON.stringify(description)}, systemPrompt: ${JSON.stringify(systemPrompt)}${extra} }`,
         })
       } catch {
         console.warn(`[build-subagents] 跳过 ${base}：{${base}.md} 缺失或不可读`)

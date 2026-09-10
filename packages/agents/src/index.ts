@@ -38,6 +38,9 @@ export const allAgents: Array<{
 
 export { code, self_optimize, hsh, cron, desktop, explore, feishu_docs, feishu_group, playwright, reverse_site, vision, widgets, wps }
 
+// 子Agent 目录扫描排除清单（dev 发现 subagents.ts 与构建 build-subagents.ts 共享的唯一事实源）
+export { NON_AGENT_DIRS, NON_AGENT_FILES } from "./shared/scan"
+
 // code 域工具（git/system_info/env_detect/preview_server——引擎 compose 从本包注册全局工具，单向依赖）
 export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "./code/tools"
 export { fetchWithRedirectGuard, assertPublicHttpUrl, checkWebhookUrl } from "./shared/fetch-guard"

@@ -3,6 +3,7 @@ import { join } from "node:path"
 import type { SubAgentDef } from "../base/types"
 import type { ToolRegistry } from "../base/registry"
 import type { SubAgentInfo } from "@gebai/sdk"
+import { NON_AGENT_DIRS, NON_AGENT_FILES } from "@gebai/agents"
 import { parseSubAgentMd } from "./sub-agent-md"
 import { mergeSubAgentDefs } from "./merge"
 import { discoverKeqing, disposeKeqingNotIn, keqingEnabled, keqingRoots, keqingSignature, type KeqingRunnerOptions } from "./keqing"
@@ -146,9 +147,7 @@ export class SubAgentManager {
     // 全量扫描（首次或目录签名变化——热加载）：重扫前清空（删除的文件不再保留旧定义）
     this.tsDefs.clear()
     this.loadErrors.clear()
-    // 非子代理条目排除（agents 包内基建目录与入口/类型声明，与 build-subagents.ts 同清单）
-    const NON_AGENT_DIRS = new Set(["analyzer", "browser", "cv", "shared", "widgets-store"])
-    const NON_AGENT_FILES = new Set(["index.ts", "types-md.d.ts"])
+    // 非子代理条目排除（@gebai/agents 导出的共享清单，与 build-subagents.ts 同源——见 shared/scan.ts）
     const entries = await readdir(dir, { withFileTypes: true })
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".test.ts")) {
@@ -257,13 +256,20 @@ export class SubAgentManager {
     await this.discoverNativeIfChanged()
   }
 
-  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description/dependencies）。
+  /** 纯提示词简化定义：{dir}/{dir}.md 单独构成子Agent（零 TS，可选 frontmatter description/dependencies/preload/env_vars）。
    *  加载失败记入 loadErrors（模型侧可见根因）。 */
   private async loadMdOnly(base: string, dir: string): Promise<void> {
     try {
       const md = await Bun.file(join(dir, base, `${base}.md`)).text()
-      const { description, systemPrompt, dependencies } = parseSubAgentMd(base, md)
-      this.tsDefs.set(base, dependencies?.length ? { name: base, description, systemPrompt, dependencies } : { name: base, description, systemPrompt })
+      const { description, systemPrompt, dependencies, preload, envVars } = parseSubAgentMd(base, md)
+      this.tsDefs.set(base, {
+        name: base,
+        description,
+        systemPrompt,
+        ...(dependencies?.length ? { dependencies } : {}),
+        ...(preload != null ? { preload } : {}),
+        ...(envVars?.length ? { envVars } : {}),
+      })
     } catch (err) {
       const msg = `加载 ${base}/${base}.md 失败: ${String((err as Error).message || err)}`
       console.warn(`[subagents] ${msg}`)
@@ -357,6 +363,21 @@ export class SubAgentManager {
     }
     this.registry.unregisterAgent(name)
     this.loaded.delete(name)
+  }
+
+  /** 按装载者全量解引用（会话删除时释放 owner 占位，防 ownersByAgent 无界增长）：
+   *  遍历全部已装载子Agent，解除该 owner 的引用；引用归零的注销工具注册（同 unload 语义）。
+ *  幂等，未装载过的 owner 调用无副作用。 */
+  releaseOwner(owner: string): void {
+    for (const name of [...this.loaded]) {
+      const owners = this.ownersByAgent.get(name)
+      if (!owners?.has(owner)) continue
+      owners.delete(owner)
+      if (owners.size > 0) continue // 其他装载者仍在用：保留工具注册
+      this.ownersByAgent.delete(name)
+      this.registry.unregisterAgent(name)
+      this.loaded.delete(name)
+    }
   }
 
   def(name: string): SubAgentDef | undefined {
