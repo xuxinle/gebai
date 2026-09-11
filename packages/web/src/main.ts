@@ -4,6 +4,7 @@ import "./css/base.css"
 import "./css/chat.css"
 import "./css/composer.css"
 import "./css/overlays.css"
+import "./css/files-split.css"
 import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
 import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
 import { bindMinimalMode, applyMinimalMode, syncMinimalModeFromServer } from "./minimal-mode"
@@ -12,6 +13,7 @@ import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
 import { bindWheel } from "./wheel"
 import { bindFilesEntry } from "./files-entry"
+import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
 import { initThemeFx } from "./theme-fx"
@@ -170,6 +172,7 @@ async function init() {
   bindMiniTools()
   bindWheel()
   bindFilesEntry()
+  bindFilesSplit()
   restoreToken()
   await loadToolCardMeta() // 工具卡片展示元数据（titleParams/args 模式），先于历史消息渲染就绪
   // 外部身份扩展点（同源集成）：本地无令牌且服务端启用时，用 URL 参数/宿主 localStorage 的登录态兑换令牌

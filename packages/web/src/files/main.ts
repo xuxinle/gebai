@@ -18,7 +18,7 @@ import { createEditor, refreshEditorTheme, monacoReady, type EditorHandle } from
 import { createExplorer } from "./explorer"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { createUrlSync, parseUrlState } from "./url-state"
-import { initTheme } from "../theme-core"
+import { initTheme, setAcrylicLt, setCnyScheme, setTheme, type AcrylicLtId, type CnySchemeId, type ThemeId } from "../theme-core"
 import { createGitPanel, diffEndpointsFor, mountDiffView, type DiffSpec, type GitPanel } from "./git"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
@@ -1049,7 +1049,10 @@ function renderRail(): void {
           { label: "服务端开关（GEBAI_FS_* / GEBAI_GIT_*）", icon: "settings", onClick: () => showEnvHelp() },
           { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
           { separator: true },
-          { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/` } },
+          // 嵌入态（分屏）下"返回主界面"= 关掉分屏容器；独立标签页才是整页跳回
+          EMBEDDED
+            ? { label: "关闭分屏", icon: "back", onClick: () => requestCloseSplit() }
+            : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/` } },
         ])
       }
       return b
@@ -1217,6 +1220,32 @@ document.addEventListener("gebai:theme-change", () => {
   refreshEditorTheme()
   renderRail()
 })
+
+/* ------------------------------ 被主界面分屏嵌入时 ------------------------------ */
+
+/**
+ * 是否被嵌在宿主页面里（主界面「分屏打开」把本页放进 iframe）。
+ * 两个跨界动作靠 postMessage 桥接：主题同步、返回主界面。
+ */
+const EMBEDDED = window.self !== window.top
+
+if (EMBEDDED) {
+  window.addEventListener("message", (e: MessageEvent) => {
+    // 只认同源且来自宿主窗口的消息
+    if (e.origin !== location.origin || e.source !== window.parent) return
+    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null } | null
+    if (data?.type !== "gebai:theme") return
+    // 宿主侧改主题时同步过来（工作台是独立文档，不会自己跟着变）
+    if (data.theme) void setTheme(data.theme as ThemeId)
+    setCnyScheme((data.cnyScheme as CnySchemeId | null) ?? null)
+    setAcrylicLt((data.acrylicLt as AcrylicLtId | null) ?? null)
+  })
+}
+
+/** 通知宿主关闭分屏（嵌入态下"返回主界面"的正确语义：关掉容器，而不是把 iframe 导航走）。 */
+function requestCloseSplit(): void {
+  window.parent.postMessage({ type: "gebai:files-close-split" }, location.origin)
+}
 
 /* ------------------------------ 冲突合并标签（三窗格） ------------------------------ */
 

@@ -204,6 +204,15 @@ function positionTooltip(host: HTMLElement, tt: HTMLElement): void {
   const tw = tt.offsetWidth
   const th = tt.offsetHeight
   const vw = document.documentElement.clientWidth
+  // data-tip-pos="left"：贴在宿主左侧、垂直居中。
+  // 用于「下方已被悬浮控件占用」的入口——标题栏的文件工作台按钮悬停时会从正下方弹出
+  // 分屏按钮，而标题栏贴顶（上方无空间）时提示气泡必落在下方，两者正好叠在一起把按钮遮住。
+  if (host.dataset.tipPos === "left") {
+    tt.style.left = `${r.left - 10}px`
+    tt.style.top = `${r.top + r.height / 2}px`
+    tt.style.transform = "translate(-100%, -50%)"
+    return
+  }
   // 上缘空间不足时翻转到下方
   const above = r.top > th + 14
   let x = r.left + r.width / 2

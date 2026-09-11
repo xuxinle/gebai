@@ -1,0 +1,176 @@
+/* ============================================================================
+   分屏模式（主界面）：把文件工作台嵌在右侧，左侧是被折叠了会话列表的主视图。
+   JS 见 src/files-split.ts（面板结构、拖动、主题桥接都在那边）。
+   ============================================================================ */
+
+/* ------------------------------ 入口按钮 ------------------------------ */
+
+/* 悬浮弹出：主按钮 = 新标签打开；下方副按钮 = 分屏打开（关闭分屏时同一按钮变 ✕）。
+   与轮盘菜单同一交互语言——hover 展开、不点击切换、离开即收。 */
+.files-entry {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+#files-split-btn {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 40;
+  background: var(--bg-elev);
+  border-color: var(--border);
+  box-shadow: var(--shadow-pop);
+  opacity: 0;
+  transform: translate(-50%, -6px) scale(0.86);
+  pointer-events: none;
+  /* 隐藏侧带一点延迟：指针从主按钮向下走时，短暂扫出容器也不至于立即塌掉 */
+  transition: opacity 0.16s ease 0.12s, transform 0.16s ease 0.12s, color var(--transition), background var(--transition);
+}
+
+/* 指针从主按钮移到副按钮，中间必然经过那 6px 空隙（不属于任何元素）：
+   空隙上盖一层透明"桥"（宽度同入口按钮，高度略大于间距），
+   否则中途 :hover 丢失 → 副按钮立刻 pointer-events:none、淡出 → 用户根本点不到它。
+   （这类"只能在瞬移鼠标时点得到"的问题很容易在自动化里蒙混过关，务必用逐步移动的指针验证。） */
+.files-entry::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 10px;
+}
+
+.files-entry:hover #files-split-btn,
+#files-split-btn:focus-visible,
+#files-split-btn.active {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+/* 分屏已开：副按钮常驻（否则只能靠它关，指针一移开就没了） */
+#files-split-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* hover 展开的按钮不该跟着 .icon-btn:hover 的底色变化而跳（保持面板色） */
+#files-split-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ------------------------------ 布局 ------------------------------ */
+
+/* 分屏：主视图（1fr）+ 右侧工作台（--files-split-w，缺省 50vw = 五五开）。
+   会话列表折叠掉——主视图只剩消息区，横向上才容得下右侧的 IDE。 */
+body.files-split #app,
+body.files-split.sidebar-collapsed #app {
+  grid-template-columns: 1fr var(--files-split-w, 50vw);
+}
+
+body.files-split aside {
+  display: none;
+}
+
+/* 左列是 1fr 网格项：默认 min-width:auto 会被长内容顶开，压窄右侧面板 */
+body.files-split main {
+  min-width: 0;
+}
+
+#files-split {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+#files-split[hidden] {
+  display: none;
+}
+
+/* 面板顶栏：标题 + 新标签/重载/关闭。工作台自己是 IDE 式界面（自带状态栏与工具窗），
+   这一条是"主界面这侧的容器控制"，不与之重复。 */
+.files-split-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  flex: none;
+  padding: 0 6px 0 12px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+
+.files-split-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.files-split-spacer {
+  flex: 1;
+}
+
+.files-split-bar .icon-btn {
+  width: 26px;
+  height: 24px;
+}
+
+.files-split-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  display: block;
+  background: var(--bg);
+}
+
+/* ------------------------------ 分界拖条 ------------------------------ */
+
+.files-split-resizer {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 6;
+  cursor: col-resize;
+}
+
+.files-split-resizer::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  transition: background 0.15s, width 0.15s;
+}
+
+.files-split-resizer:hover::after,
+.files-split-resizer.dragging::after {
+  left: 2.5px;
+  width: 2px;
+  background: var(--accent);
+}
+
+/* 拖动中：光标全局统一，且让 iframe 让开指针事件——
+   否则指针一进 iframe，pointermove 就被它吃掉，拖条会"粘住" */
+body.files-split-dragging {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.files-split-dragging .files-split-frame {
+  pointer-events: none;
+}

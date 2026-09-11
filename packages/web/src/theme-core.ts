@@ -168,22 +168,27 @@ export async function applyTheme(id: ThemeId): Promise<void> {
   }
   // View Transitions API
   const doc = document as Document & {
-    startViewTransition?: (cb: () => Promise<void> | void) => { finished: Promise<void> }
+    startViewTransition?: (cb: () => Promise<void> | void) => { ready?: Promise<void>; finished: Promise<void> }
   }
   if (typeof doc.startViewTransition === "function") {
     const vt = doc.startViewTransition(swap)
+    // `ready` 会在过渡被**跳过**时 reject，必须接住：
+    // 分屏模式下（页面里有 iframe）Chrome 会跳过 View Transition，若不处理就是一个
+    // 未捕获的 AbortError 打进控制台（用户看到的是主题照常切换、控制台一条红）。
+    // 跳过只是没有动画，swap 仍会执行，主题照常生效。
+    vt.ready?.catch(() => {})
     try {
       await vt.finished
     } catch {
-      /* 切换失败静默回退 */
+      /* 切换失败/被跳过：静默回退（无动画，但主题已换） */
     }
   } else {
     // 兜底：扫描光动画
     playSweepFallback()
     await swap()
   }
-  // 通知依赖主题的组件（如 Mermaid 图表重绘、Monaco 换色）
-  document.dispatchEvent(new CustomEvent("gebai:theme-change", { detail: { theme: id } }))
+  // 通知依赖主题的组件（如 Mermaid 图表重绘、Monaco 换色、分屏里的工作台）
+  notifyThemeChange()
 }
 
 /** 兜底动画：极光扫描光从顶部到底部贯穿整个屏幕 */
@@ -214,6 +219,18 @@ export async function setTheme(id: ThemeId): Promise<void> {
   await applyTheme(id)
 }
 
+/**
+ * 通知依赖主题的组件重新同步（Mermaid/Monaco 重绘、画布特效、分屏桥接…）。
+ *
+ * 凡是改变"生效主题"的操作都要发：改主题 id 固然要发，换人民币面额配色 / 默认主题黑白
+ * **同样改变最终配色**——只发 applyTheme 的话，这些配色变化不会通知任何人
+ * （表现：主界面把面额改成 50 元（翠绿），分屏里的工作台还是 100 元红）。
+ * 倾听者一律只做"重新同步"，不读 detail，所以这里无需区分变化源。
+ */
+function notifyThemeChange(): void {
+  document.dispatchEvent(new CustomEvent("gebai:theme-change", { detail: { theme: document.documentElement.dataset.theme } }))
+}
+
 /** 应用人民币面额配色：设置/移除根元素 data-cny-scheme（cny.css 中的配色变量块据此生效）。 */
 export function applyCnyScheme(scheme: CnySchemeId | null): void {
   const el = document.documentElement
@@ -231,6 +248,7 @@ export function setCnyScheme(scheme: CnySchemeId | null): void {
     /* ignore */
   }
   applyCnyScheme(scheme)
+  notifyThemeChange()
 }
 
 /** 应用默认主题黑白切换：设置/移除根元素 data-acrylic-lt（acrylic.css 亮色覆盖块据此生效）。 */
@@ -250,6 +268,7 @@ export function setAcrylicLt(lt: AcrylicLtId | null): void {
     /* ignore */
   }
   applyAcrylicLt(lt)
+  notifyThemeChange()
 }
 
 /**

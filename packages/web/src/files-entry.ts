@@ -61,12 +61,14 @@ export function bindFilesEntry(): void {
   btn.addEventListener("click", () => openFiles())
 }
 
-// 主界面快捷键：Ctrl+Shift+E 打开文件工作台（VSCode 习惯；不与聊天输入冲突——输入框内不触发）
+// 主界面快捷键：Ctrl+Shift+E 开关分屏（分屏已开则关闭）——VSCode 里同一个键也是"显示/隐藏侧边编辑器"，
+// 比"再开一个新标签"更贴合这个手势的预期（连按两次不该攒出两个标签页）。
+// 输入框内不触发，不与聊天输入冲突。
 document.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return
   if (e.key.toLowerCase() !== "e") return
   const t = e.target as HTMLElement | null
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return
   e.preventDefault()
-  openFiles({ path: undefined })
+  void import("./files-split").then((m) => m.toggleSplit({ path: undefined }))
 })
