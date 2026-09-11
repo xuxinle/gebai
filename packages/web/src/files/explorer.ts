@@ -33,6 +33,8 @@ export interface Explorer {
   getRoot: () => string
   setRoot: (rootId: string, path?: string) => Promise<void>
   refresh: (path?: string, opts?: { keepSelection?: boolean }) => Promise<void>
+  /** 仅回填 Git 装饰（徽标 + 状态类），不重建树——git 状态晚于首次渲染到达 */
+  refreshGitDecorations: () => void
   /** 展开并选中目标路径（从搜索结果/标签页跳转） */
   reveal: (path: string, opts?: { select?: boolean }) => Promise<void>
   selected: () => { path: string; type: DirEntry["type"] } | null
@@ -143,6 +145,9 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
 
   /* --------------------------- 树渲染 --------------------------- */
 
+  /** 行上的 Git 状态类全集（刷新前先清除，避免旧状态残留）。 */
+  const DECO_CLASSES = ["conflict", "untracked", "added", "deleted", "renamed", "staged", "modified", "child", "ignored"] as const
+
   function gitDecoration(path: string, isDir: boolean): { mark: string; cls: string; title: string } | null {
     const status = hooks.gitStatus()
     if (!status?.isRepo) return null
@@ -160,6 +165,39 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       if (c.path.startsWith(`${repoRel || ""}/`)) return { mark: "•", cls: "child", title: "该目录下有未提交变更" }
     }
     return null
+  }
+
+  /**
+   * 就地把 Git 装饰应用到一行（徽标 + 状态类）。
+   *
+   * 为什么不重渲染整树：树的展开状态、滚动位置、选中项都在 DOM 里，
+   * 每次 git 状态变化就重建会「折叠回去 + 滚动跳顶」。这里只换装饰元素。
+   */
+  function applyDecoration(row: HTMLElement): void {
+    const path = row.dataset.path ?? ""
+    const isDir = row.classList.contains("dir")
+    const deco = gitDecoration(path, isDir)
+    for (const c of DECO_CLASSES) row.classList.remove(`git-${c}`)
+    if (deco) row.classList.add(`git-${deco.cls}`)
+    const old = row.querySelector(".fw-git-mark, .fw-git-mark-gap")
+    const node = deco
+      ? h("span", { class: `fw-git-mark ${deco.cls}`, text: deco.mark, title: deco.title })
+      : h("span", { class: "fw-git-mark-gap" })
+    if (old) old.replaceWith(node)
+    else row.appendChild(node)
+  }
+
+  /** Git 装饰刷新（git 状态到达/变化后由宿主调用——状态到达晚于首次渲染，必须回填）。 */
+  function refreshGitDecorations(): void {
+    const status = hooks.gitStatus()
+    if (!status?.isRepo) {
+      for (const row of treeHost.querySelectorAll<HTMLElement>(".fw-tree-row")) {
+        for (const c of DECO_CLASSES) row.classList.remove(`git-${c}`)
+        row.querySelector(".fw-git-mark")?.replaceWith(h("span", { class: "fw-git-mark-gap" }))
+      }
+      return
+    }
+    for (const row of treeHost.querySelectorAll<HTMLElement>(".fw-tree-row")) applyDecoration(row)
   }
 
   function renderEntry(entry: DirEntry, depth: number): HTMLElement {
@@ -182,13 +220,9 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
         })()
       : h("span", { class: "fw-twisty-empty" })
     const ic = h("span", { class: `fw-file-icon c-${iconColorFor(entry.name, entry.type)}` }, [icon(isDir ? (exp ? "folderOpen" : "folder") : "file")])
-    const deco = gitDecoration(entry.path, isDir)
-    row.append(
-      twisty,
-      ic,
-      h("span", { class: "fw-tree-name", text: entry.name, title: entry.path }),
-      deco ? h("span", { class: `fw-git-mark ${deco.cls}`, text: deco.mark, title: deco.title }) : h("span", { class: "fw-git-mark-gap" }),
-    )
+    row.append(twisty, ic, h("span", { class: "fw-tree-name", text: entry.name, title: entry.path }))
+    // 装饰统一经 applyDecoration 落位（与刷新路径同源，避免两处逻辑漂移）
+    applyDecoration(row)
     row.onclick = () => {
       selectedPath = entry.path
       updateCrumbs()
@@ -593,6 +627,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     getRoot: () => rootId,
     setRoot,
     refresh,
+    refreshGitDecorations,
     reveal,
     selected: () => (selectedPath ? { path: selectedPath, type: (entriesOf(selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "")?.find((x) => x.path === selectedPath)?.type ?? "file") as DirEntry["type"] } : null),
     dispose: () => {

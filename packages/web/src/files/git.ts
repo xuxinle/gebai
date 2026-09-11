@@ -10,7 +10,7 @@
  * - 多步操作（merge/rebase/cherry-pick）冲突时面板顶部出现「继续 / 中止 / 跳过」条，避免用户卡死。
  */
 import type { FsApi, GitBranchInfo, GitChange, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
-import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime } from "./ui"
+import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, append } from "./ui"
 import { createDiffEditor } from "./editor"
 
 export type GitView = "changes" | "log" | "branches" | "tags" | "stash" | "remotes"
@@ -52,6 +52,8 @@ export interface GitHooks {
   openCompare: (init?: { from?: string; to?: string; path?: string; mergeBase?: boolean }) => void
   /** 打开冲突合并标签（三窗格：我方 / 结果 / 对方）；入参为仓库相对路径 */
   openMerge: (repoRel: string) => void
+  /** 关闭工具窗（标题栏关闭按钮；由宿主收起面板） */
+  close: () => void
   /** 是否可以写（GEBAI_FS_WRITE / GEBAI_GIT_WRITE） */
   writable: () => boolean
   /** 远程操作是否可用（GEBAI_GIT_REMOTE） */
@@ -65,15 +67,6 @@ export interface GitPanel {
   refresh: () => Promise<void>
   show: (view: GitView) => void
   view: () => GitView
-}
-
-const VIEW_LABEL: Record<GitView, string> = {
-  changes: "变更",
-  log: "日志",
-  branches: "分支",
-  tags: "标签",
-  stash: "暂存",
-  remotes: "远程",
 }
 
 export function createGitPanel(hooks: GitHooks): GitPanel {
@@ -93,9 +86,90 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   /** 变更列表是否显示整仓库（root 只是仓库子目录时默认只看当前目录，见 renderChanges）。 */
   let showWholeRepo = false
 
-  const tabsHost = h("div", { class: "fw-git-tabs" })
-  const body = h("div", { class: "fw-git-body" })
-  const el = h("div", { class: "fw-git-panel" }, [tabsHost, body])
+  /* ------------------------------ 工具窗骨架（IDEA 式） ------------------------------
+   * 底部工具窗 = 标题栏 + 三栏并排：变更内容 / 日志 / 分支。
+   * 为什么拆三栏而不是标签页：面板在**底部横向**展开，横向空间足够——变更、日志、分支
+   * 是提交前后最常互相参照的三块信息，能同屏看到比来回切标签有用（IDEA 工具窗同理）。
+   * 标签/暂存/远程收进「分支」栏内的小切换（同属「引用与远程」语义，用得不频繁）。
+   * ------------------------------------------------------------------------------ */
+
+  const titleBar = h("div", { class: "fw-git-titlebar" })
+  /** 三栏内容容器（各渲染函数只写自己那一栏，互不覆盖）。 */
+  const colChanges = h("div", { class: "fw-git-col-body" })
+  const colLog = h("div", { class: "fw-git-col-body" })
+  const colRefs = h("div", { class: "fw-git-col-body" })
+  /** 「分支」栏内部的小切换（分支 / 标签 / 暂存 / 远程）。 */
+  let refsTab: "branches" | "tags" | "stash" | "remotes" = "branches"
+
+  const colHead = (title: string, extra: Array<Node | null> = []): HTMLElement =>
+    h("div", { class: "fw-git-col-head" }, [h("span", { class: "fw-git-col-title", text: title }), ...extra])
+
+  const refsTabsHost = h("div", { class: "fw-git-refs-tabs" })
+  /** 变更栏计数（原顶部标签徽标的功能，三栏化后落在各栏标题上）。 */
+  const changesCount = h("span", { class: "fw-git-count" })
+  const colChangesEl = h("div", { class: "fw-git-col", "data-col": "changes" }, [colHead("变更内容", [changesCount]), colChanges])
+  const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colHead("日志"), colLog])
+  const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [colHead("分支", [refsTabsHost]), colRefs])
+  const colsHost = h("div", { class: "fw-git-cols" }, [colChangesEl, colLogEl, colRefsEl])
+  const el = h("div", { class: "fw-git-panel" }, [titleBar, colsHost])
+
+  /** 「分支」栏内部切换渲染（分支/标签/暂存/远程）。 */
+  function renderRefsTabs(): void {
+    clear(refsTabsHost)
+    const labels: Record<string, string> = { branches: "分支", tags: "标签", stash: "暂存", remotes: "远程" }
+    for (const k of ["branches", "tags", "stash", "remotes"] as const) {
+      const b = h("button", { class: `fw-git-refs-tab${refsTab === k ? " active" : ""}`, text: labels[k] })
+      b.onclick = () => {
+        refsTab = k
+        renderRefsTabs()
+        void refresh()
+      }
+      refsTabsHost.appendChild(b)
+    }
+  }
+
+  /** 标题栏：面板身份 + 当前分支 + 全局动作（刷新 / 范围切换 / 关闭）。 */
+  function renderTitleBar(): void {
+    clear(titleBar)
+    const s = hooks.status()
+    const prefix = hooks.repoPrefix()
+    append(titleBar, [
+      icon("git", 14),
+      h("span", { class: "fw-git-title", text: "源代码管理" }),
+      s?.isRepo && s.branch ? h("span", { class: "fw-git-branch", title: "当前分支" }, [icon("branch", 12), h("span", { text: s.branch })]) : null,
+      s?.isRepo && prefix
+        ? (() => {
+            const b = h("button", { class: "fw-chip", title: prefix ? `默认只显示「${prefix}/」范围内的变更；点击切换整仓库` : "显示整仓库" }, [
+              h("span", { text: showWholeRepo ? "整仓库" : `限 ${prefix}/` }),
+            ])
+            b.onclick = () => {
+              showWholeRepo = !showWholeRepo
+              void refresh()
+            }
+            return b
+          })()
+        : null,
+      s?.operation
+        ? h("span", { class: "fw-git-opbar" }, [
+            h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突）` : ""}` }),
+          ])
+        : null,
+      h("span", { class: "fw-grow" }),
+      (() => {
+        const b = h("button", { class: "fw-icon-btn", title: "刷新" })
+        b.appendChild(icon("refresh", 13))
+        b.onclick = () => void refresh()
+        return b
+      })(),
+      (() => {
+        // 关闭按钮在面板内（工具窗自己的标题栏），与 IDEA 工具窗一致
+        const b = h("button", { class: "fw-icon-btn", title: "关闭 Git 面板" })
+        b.appendChild(icon("close", 13))
+        b.onclick = () => hooks.close()
+        return b
+      })(),
+    ])
+  }
 
   /** 当前目录范围内的变更（root 为仓库子目录时；showWholeRepo 开启后为整仓库）。 */
   function scopedChanges(): { changes: GitChange[]; staged: number; unstaged: number; untracked: number; conflicted: number } {
@@ -112,26 +186,13 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     }
   }
 
-  function renderTabs(): void {
-    clear(tabsHost)
-    const s = hooks.status()
-    const scoped = scopedChanges()
-    const dirty = scoped.staged + scoped.unstaged + scoped.untracked + scoped.conflicted
-    for (const v of Object.keys(VIEW_LABEL) as GitView[]) {
-      const badge =
-        v === "changes" && dirty > 0
-          ? h("span", { class: "fw-badge", text: String(dirty) })
-          : v === "stash" && s?.stashCount
-            ? h("span", { class: "fw-badge", text: String(s.stashCount) })
-            : null
-      const btn = h("button", { class: `fw-git-tab${v === view ? " active" : ""}` }, [h("span", { text: VIEW_LABEL[v] }), badge])
-      btn.onclick = () => show(v)
-      tabsHost.appendChild(btn)
-    }
-  }
-
+  /**
+   * 切换到某视图：三栏并排常显，「分支」栏内的小切换（标签/暂存/远程）随之切换。
+   * 保留该方法是因为状态栏分支名、菜单等外部入口要能「跳到某个视图」。
+   */
   function show(v: GitView): void {
     view = v
+    if (v === "tags" || v === "stash" || v === "remotes") refsTab = v
     void refresh()
   }
 
@@ -267,8 +328,12 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
 
   function renderChanges(): void {
     const s = hooks.status()
+    const cnt = scopedChanges()
+    const dirty = cnt.staged + cnt.unstaged + cnt.untracked + cnt.conflicted
+    changesCount.textContent = dirty ? String(dirty) : ""
+    changesCount.title = dirty ? `已暂存 ${cnt.staged} · 未暂存 ${cnt.unstaged} · 未跟踪 ${cnt.untracked}${cnt.conflicted ? ` · 冲突 ${cnt.conflicted}` : ""}` : ""
     if (!s?.isRepo) {
-      body.replaceChildren(renderNotRepo())
+      colChanges.replaceChildren(renderNotRepo())
       return
     }
     // 路径过滤：root 可能只是仓库的子目录（如会话工作区）——默认只显示当前目录内的变更
@@ -348,7 +413,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       list.prepend(banner)
     }
 
-    body.replaceChildren(list, renderCommitBox())
+    colChanges.replaceChildren(list, renderCommitBox())
   }
 
   /** 进行中的多步操作 → 对应的继续/中止动作名（统一走同一组端点）。 */
@@ -563,7 +628,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       }
       list.appendChild(more)
     }
-    body.replaceChildren(head, list)
+    colLog.replaceChildren(head, list)
   }
 
   async function confirmer(title: string, message: string, fn: () => Promise<unknown>): Promise<void> {
@@ -601,7 +666,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   async function openCommit(c: GitCommitInfo): Promise<void> {
     const host = h("div", { class: "fw-commit-detail" })
     host.appendChild(h("div", { class: "fw-loading", text: "加载提交详情…" }))
-    body.replaceChildren(host)
+    colLog.replaceChildren(host)
     try {
       const res = await hooks.api.gitCommit(hooks.root(), c.hash)
       const files = h("div", { class: "fw-commit-files" })
@@ -717,7 +782,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     }
     group("本地分支", local)
     group("远程分支", remote)
-    body.replaceChildren(toolbar, list)
+    colRefs.replaceChildren(toolbar, list)
   }
 
   /* ------------------------------ 标签 / 暂存 / 远程 ------------------------------ */
@@ -751,7 +816,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       list.appendChild(row)
     }
     if (!localTags.length) list.appendChild(h("div", { class: "fw-empty", text: "暂无标签" }))
-    body.replaceChildren(toolbar, list)
+    colRefs.replaceChildren(toolbar, list)
   }
 
   async function loadStash(): Promise<void> {
@@ -794,7 +859,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       list.appendChild(row)
     }
     if (!stashes.length) list.appendChild(h("div", { class: "fw-empty", text: "暂无暂存记录" }))
-    body.replaceChildren(toolbar, list)
+    colRefs.replaceChildren(toolbar, list)
   }
 
   async function loadRemotes(): Promise<void> {
@@ -861,19 +926,30 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       list.appendChild(row)
     }
     if (!remotes.length) list.appendChild(h("div", { class: "fw-empty", text: "未配置远程仓库" }))
-    body.replaceChildren(toolbar, actions, list)
+    colRefs.replaceChildren(toolbar, actions, list)
   }
 
   /* ------------------------------ 主流程 ------------------------------ */
 
   async function refresh(): Promise<void> {
-    renderTabs()
-    if (view === "changes") renderChanges()
-    else if (view === "log") await loadLog(logItems.length === 0)
-    else if (view === "branches") await loadBranches()
-    else if (view === "tags") await loadTags()
-    else if (view === "stash") await loadStash()
-    else if (view === "remotes") await loadRemotes()
+    renderTitleBar()
+    renderRefsTabs()
+    const s = hooks.status()
+    if (!s?.isRepo) {
+      colChanges.replaceChildren(renderNotRepo())
+      colLog.replaceChildren()
+      colRefs.replaceChildren()
+      return
+    }
+    // 三栏各自渲染（并排常显，不互相覆盖）
+    renderChanges()
+    if (refsTab === "branches") await loadBranches()
+    else if (refsTab === "tags") await loadTags()
+    else if (refsTab === "stash") await loadStash()
+    else await loadRemotes()
+    // 日志按需加载：首次展开或显式刷新时拉一页，之后由「加载更多」续（避免每次刷新都全量重拉）
+    if (view === "log" || !logItems.length) await loadLog(logItems.length === 0)
+    else renderLog()
   }
 
   return { el, refresh, show, view: () => view }

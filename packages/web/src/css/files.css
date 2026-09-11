@@ -151,15 +151,7 @@
   border-right: 1px solid var(--border);
 }
 
-.fw-right {
-  width: 340px;
-  flex: none;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-elev);
-  border-left: 1px solid var(--border);
-}
+/* 旧右侧面板已迁至底部工具窗（.fw-git-dock）；保留此块以免残留引用出错 */
 
 .fw-resizer {
   width: 4px;
@@ -179,12 +171,53 @@
   user-select: none;
 }
 
+/* 底部工具窗拖高条（横向） */
+.fw-dock-resizer {
+  height: 4px;
+  flex: none;
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.fw-dock-resizer:hover,
+.fw-page.fw-dock-resizing .fw-dock-resizer {
+  background: var(--accent-soft);
+}
+
+.fw-dock-resizer.collapsed { display: none; }
+
+.fw-page.fw-dock-resizing {
+  cursor: row-resize;
+  user-select: none;
+}
+
 .fw-center {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-inset);
+}
+
+/* 底部工具窗：IDEA 式 tool window——高度可拖（默认 300px，双击拖条回到默认） */
+.fw-git-dock {
+  height: var(--git-dock-h, 300px);
+  min-height: 120px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.fw-git-dock.collapsed {
+  height: 0;
+  min-height: 0;
+  border-top: 0;
 }
 
 /* ------------------------------- 资源管理器 ------------------------------- */
@@ -383,6 +416,44 @@
 .fw-git-mark.conflict { color: var(--danger); }
 .fw-git-mark.child { color: var(--text-faint); }
 .fw-git-mark-gap { width: 12px; }
+
+/* ============================================================================
+   IDEA 风格 VCS 下划线：文件名下方彩色线表示 Git 状态（同时保留右侧字母徽标——
+   颜色一扫便知、字母给精确状态）。用 text-decoration 而非伪元素：不占布局、
+   不受省略号影响、选中文字时不会错位。
+   ============================================================================ */
+.fw-tree-row.git-modified > .fw-tree-name,
+.fw-tree-row.git-staged > .fw-tree-name,
+.fw-tree-row.git-untracked > .fw-tree-name,
+.fw-tree-row.git-added > .fw-tree-name,
+.fw-tree-row.git-conflict > .fw-tree-name {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.fw-tree-row.git-modified > .fw-tree-name { text-decoration-color: var(--tool); }
+.fw-tree-row.git-staged > .fw-tree-name,
+.fw-tree-row.git-untracked > .fw-tree-name,
+.fw-tree-row.git-added > .fw-tree-name { text-decoration-color: var(--success); }
+.fw-tree-row.git-conflict > .fw-tree-name { text-decoration-color: var(--danger); }
+
+/* 删除：删除线（IDEA 同习惯） */
+.fw-tree-row.git-deleted > .fw-tree-name {
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+}
+
+/* 目录：只表示「子项有变更」，用中性色避免误导为具体状态 */
+.fw-tree-row.dir.git-child > .fw-tree-name,
+.fw-tree-row.dir.git-modified > .fw-tree-name,
+.fw-tree-row.dir.git-staged > .fw-tree-name,
+.fw-tree-row.dir.git-untracked > .fw-tree-name {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--text-faint) 75%, transparent);
+}
 
 .fw-loading,
 .fw-empty,
@@ -917,7 +988,7 @@ button.fw-status-item:hover {
   outline: none;
 }
 
-/* ------------------------------- Git 面板 ------------------------------- */
+/* ------------------------------- Git 工具窗（底部停靠） ------------------------------- */
 
 .fw-git-panel {
   display: flex;
@@ -926,57 +997,137 @@ button.fw-status-item:hover {
   height: 100%;
 }
 
-.fw-git-headbar {
+/* 标题栏：身份 + 分支 + 范围 + 刷新/关闭（关闭按钮在面板内，与 IDEA 工具窗一致） */
+.fw-git-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex: none;
+  min-width: 0;
+}
+
+.fw-git-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.fw-git-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.fw-git-opbar {
+  font-size: 11.5px;
+  color: var(--warning);
+  white-space: nowrap;
+}
+
+/* 三栏并排：变更内容 | 日志 | 分支 */
+.fw-git-cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.35fr) minmax(200px, 0.9fr);
+  gap: 1px;
+  background: var(--border);
+}
+
+.fw-git-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.fw-git-col-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px 0;
+  padding: 3px 8px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex: none;
+  min-width: 0;
 }
 
-.fw-git-tabs {
+.fw-git-col-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.fw-git-col-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 「分支」栏内的小切换（分支/标签/暂存/远程） */
+.fw-git-refs-tabs {
   display: flex;
   align-items: center;
   gap: 2px;
-  flex: 1;
+  margin-left: auto;
   min-width: 0;
   overflow-x: auto;
 }
 
-.fw-git-tab {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
+.fw-git-refs-tab {
   border: 0;
   background: none;
-  color: var(--text-muted);
+  color: var(--text-faint);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
   white-space: nowrap;
 }
 
-.fw-git-tab:hover {
-  color: var(--text);
+.fw-git-refs-tab:hover { color: var(--text); background: var(--bg-hover); }
+.fw-git-refs-tab.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* 窄屏：三栏纵向堆叠（每栏给足最小高度，工具窗整体滚动） */
+@media (max-width: 1180px) {
+  .fw-git-cols {
+    grid-template-columns: 1fr;
+    grid-auto-rows: minmax(180px, auto);
+    overflow-y: auto;
+  }
 }
 
-.fw-git-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-.fw-badge {
+/* 栏标题计数（原顶部标签徽标的功能，三栏化后归各栏标题） */
+.fw-git-count:not(:empty) {
   min-width: 15px;
   height: 15px;
-  padding: 0 4px;
+  padding: 0 5px;
   border-radius: 8px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 10px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
   line-height: 15px;
   text-align: center;
+  font-family: var(--font-mono);
 }
 
 .fw-git-body {
@@ -2096,14 +2247,14 @@ button.fw-status-item:hover {
 .fw-merge-nav-label {
   font-family: var(--font-mono);
   font-size: 11.5px;
-  color: var(--warn, #d29922);
+  color: var(--warning);
   white-space: nowrap;
 }
 
-.fw-merge-nav-label.ok { color: var(--ok, #3fb950); }
+.fw-merge-nav-label.ok { color: var(--success); }
 
 .fw-merge-status { font-size: 11.5px; color: var(--text-faint); }
-.fw-merge-status.dirty { color: var(--warn, #d29922); }
+.fw-merge-status.dirty { color: var(--warning); }
 
 .fw-merge-panes {
   display: grid;

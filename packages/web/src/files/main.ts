@@ -106,13 +106,20 @@ const leftResizer = h("div", { class: "fw-resizer", title: "拖动调整宽度" 
 const tabbar = h("div", { class: "fw-tabbar" })
 const toolbar = h("div", { class: "fw-toolbar" })
 const views = h("div", { class: "fw-views" })
-const rightPanel = h("div", { class: "fw-right" })
-const rightResizer = h("div", { class: "fw-resizer", title: "拖动调整宽度" })
+// 底部工具窗（IDEA 式）：Git 面板停靠在此，可拖拽调高、可整体收起
+const gitDock = h("div", { class: "fw-git-dock" })
+const gitDockResizer = h("div", { class: "fw-dock-resizer", title: "拖动调整高度" })
 const statusbar = h("footer", { class: "fw-statusbar" })
 
 const rootEl = h("div", { class: "fw-app" }, [
   menubar,
-  h("div", { class: "fw-body" }, [railEl, leftPanel, leftResizer, h("div", { class: "fw-center" }, [tabbar, toolbar, views]), rightResizer, rightPanel]),
+  h("div", { class: "fw-body" }, [
+    railEl,
+    leftPanel,
+    leftResizer,
+    // 主区纵向：编辑区在上、Git 工具窗停靠在下（IDEA 的 tool window 布局）
+    h("div", { class: "fw-center" }, [tabbar, toolbar, views, gitDockResizer, gitDock]),
+  ]),
   statusbar,
 ])
 
@@ -151,11 +158,13 @@ function ensureGitPanel(): GitPanel {
     openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
     openCompare: (init) => void openCompare(init),
     openMerge: (repoRel) => void openMergeTab(repoRel),
+    // 关闭按钮在面板标题栏内：收起工具窗（不销毁实例，再开时状态保留）
+    close: () => toggleGitPanel(false),
     writable: () => !!(state.rootsResp?.writable && state.rootsResp?.gitWrite),
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
   })
-  rightPanel.appendChild(gitPanel.el)
+  gitDock.appendChild(gitPanel.el)
   return gitPanel
 }
 
@@ -202,6 +211,8 @@ async function refreshGit(): Promise<GitStatusInfo | null> {
   try {
     const status = await api.gitStatus(explorer.getRoot())
     state.gitStatus = status
+    // 回填树的 Git 装饰：树首次渲染时状态还没到（异步），不回填则徽标/下划线永不出现
+    explorer.refreshGitDecorations()
     if (status.isRepo && status.rootPath) {
       const info = state.roots.find((r) => r.id === explorer.getRoot())
       state.repoPrefix = status.rootPath
@@ -210,6 +221,7 @@ async function refreshGit(): Promise<GitStatusInfo | null> {
     }
   } catch {
     state.gitStatus = null
+    explorer.refreshGitDecorations()
   }
   renderStatus()
   return state.gitStatus
@@ -567,8 +579,7 @@ function renderTabbar(): void {
       const t = activeTab()
       if (t?.kind === "file") void loadTab(t)
     }),
-    btn("close", "关闭右侧 Git 面板", () => toggleGitPanel(!state.gitViewVisible)),
-  ])
+    ])
   tabbar.appendChild(actions)
 }
 
@@ -782,7 +793,9 @@ function menuAt(anchor: HTMLElement, items: Parameters<typeof showMenu>[2]): [nu
 function renderRail(): void {
   clear(railEl)
   const mk = (id: "explorer" | "search" | "git", iconName: string, title: string, onClick?: () => void) => {
-    const b = h("button", { class: `fw-rail-btn${state.leftView === id && !onClick ? " active" : ""}`, title })
+    const isGitDock = id === "git"
+    const active = isGitDock ? state.gitViewVisible : state.leftView === id && !onClick
+    const b = h("button", { class: `fw-rail-btn${active ? " active" : ""}`, title })
     b.appendChild(icon(iconName, 18))
     if (state.gitStatus?.isRepo && id === "git") {
       const n = state.gitStatus.counts.staged + state.gitStatus.counts.unstaged + state.gitStatus.counts.untracked + state.gitStatus.counts.conflicted
@@ -794,7 +807,7 @@ function renderRail(): void {
   railEl.append(
     mk("explorer", "folder", "资源管理器（Ctrl+Shift+E）"),
     mk("search", "search", "搜索（Ctrl+Shift+F）"),
-    mk("git", "git", "源代码管理（Ctrl+Shift+G）", () => toggleGitPanel(true)),
+    mk("git", "git", "源代码管理（Ctrl+Shift+G）", () => toggleGitPanel(!state.gitViewVisible)),
     h("div", { class: "fw-rail-spacer" }),
     (() => {
       const b = h("button", { class: "fw-rail-btn", title: "打开文件夹" })
@@ -1371,13 +1384,16 @@ function pickUpload(): void {
 
 function toggleGitPanel(visible: boolean): void {
   state.gitViewVisible = visible
-  rightPanel.style.display = visible ? "" : "none"
-  rightResizer.style.display = visible ? "" : "none"
+  gitDock.classList.toggle("collapsed", !visible)
+  gitDockResizer.classList.toggle("collapsed", !visible)
   if (visible) {
     ensureGitPanel()
     void gitPanel?.refresh()
+    // 展开后 Monaco 可视高度变化，重排编辑器（否则出现空白/裁切）
+    for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 30)
   }
   renderToolbar()
+  renderRail()
 }
 
 function showShortcuts(): void {
@@ -1533,13 +1549,69 @@ function bindResizer(resizer: HTMLElement, panel: HTMLElement, side: "left" | "r
     if (!dragging) return
     const width = side === "left" ? Math.max(180, Math.min(560, e.clientX)) : Math.max(240, Math.min(680, window.innerWidth - e.clientX))
     panel.style.width = `${width}px`
-    for (const ed of document.querySelectorAll<HTMLElement>(".fw-editor-host")) void ed
   })
   window.addEventListener("mouseup", () => {
     if (!dragging) return
     dragging = false
     document.body.classList.remove("fw-resizing")
     window.dispatchEvent(new Event("resize"))
+  })
+}
+
+/** 底部工具窗高度（localStorage 记忆；双击拖条复位默认）。 */
+const GIT_DOCK_H_KEY = "gebai.ui.gitDockH"
+const GIT_DOCK_H_DEFAULT = 300
+
+function readDockHeight(): number {
+  try {
+    const v = Number(localStorage.getItem(GIT_DOCK_H_KEY))
+    return v >= 120 && v <= window.innerHeight * 0.8 ? v : GIT_DOCK_H_DEFAULT
+  } catch {
+    return GIT_DOCK_H_DEFAULT
+  }
+}
+
+function applyDockHeight(h: number): void {
+  document.documentElement.style.setProperty("--git-dock-h", `${h}px`)
+  for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 0)
+}
+
+/** 拖动工具窗上沿调高（向上拖 = 变高），松手落盘高度并重排编辑器。 */
+function bindDockResizer(): void {
+  applyDockHeight(readDockHeight())
+  let dragging = false
+  gitDockResizer.addEventListener("mousedown", (e) => {
+    dragging = true
+    e.preventDefault()
+    document.body.classList.add("fw-dock-resizing")
+  })
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return
+    // 工具窗底边固定在视口底部（状态栏之上），高度由指针 Y 反推
+    const h = Math.max(120, Math.min(window.innerHeight * 0.8, window.innerHeight - e.clientY))
+    applyDockHeight(Math.round(h))
+  })
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return
+    dragging = false
+    document.body.classList.remove("fw-dock-resizing")
+    const cur = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--git-dock-h"), 10)
+    try {
+      if (cur) localStorage.setItem(GIT_DOCK_H_KEY, String(cur))
+    } catch {
+      /* 隐私模式忽略 */
+    }
+    window.dispatchEvent(new Event("resize"))
+    for (const t of state.tabs) t.editor?.layout()
+  })
+  // 双击复位默认高度（与 IDEA 工具窗「重置布局」同理）
+  gitDockResizer.addEventListener("dblclick", () => {
+    applyDockHeight(GIT_DOCK_H_DEFAULT)
+    try {
+      localStorage.removeItem(GIT_DOCK_H_KEY)
+    } catch {
+      /* 忽略 */
+    }
   })
 }
 
@@ -1559,7 +1631,7 @@ async function boot(): Promise<void> {
     showLeftView("explorer")
     toggleGitPanel(state.gitViewVisible && window.innerWidth >= 1180)
     bindResizer(leftResizer, leftPanel, "left")
-    bindResizer(rightResizer, rightPanel, "right")
+bindDockResizer()
     document.body.appendChild(rootEl)
     // 全局拖拽上传：拖文件到页面任意处即上传到当前选中目录
     document.addEventListener("dragover", (e) => {

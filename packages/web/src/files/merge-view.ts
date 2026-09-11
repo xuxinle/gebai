@@ -258,7 +258,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
       const current = info.current ?? ""
       if (!result) {
         panes.replaceChildren()
-        ours = await createPane(panes, { label: "我方（当前分支）", value: info.ours ?? "", language: hooks.language, accent: "var(--ok, #3fb950)" })
+        ours = await createPane(panes, { label: "我方（当前分支）", value: info.ours ?? "", language: hooks.language, accent: "var(--success)" })
         const mid = h("div", { class: "fw-merge-pane fw-merge-result" })
         const midHead = h("div", { class: "fw-merge-pane-head" }, [
           h("span", { class: "fw-merge-pane-title", text: "合并结果（可编辑）" }),
@@ -272,7 +272,7 @@ export async function createMergeView(hooks: MergeHooks, spec: MergeSpec): Promi
           dirty = true
           renderNav()
         })
-        theirs = await createPane(panes, { label: "对方（合入分支）", value: info.theirs ?? "", language: hooks.language, accent: "var(--tool, #58a6ff)" })
+        theirs = await createPane(panes, { label: "对方（合入分支）", value: info.theirs ?? "", language: hooks.language, accent: "var(--tool)" })
       } else if (result.getValue() !== current && !dirty) {
         result.setValue(current)
       }
