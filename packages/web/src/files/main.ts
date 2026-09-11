@@ -8,6 +8,7 @@
  * 状态模型：`tabs` 数组 + 每个标签独立的 DOM 子树（切标签只切显隐，保留滚动位置与编辑器状态）；
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
+import { resolveDeepLink } from "./deeplink"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
 // 文件工作台自带样式：base.css 提供设计令牌（主题 CSS 只换令牌），files.css 负责本页布局
 import "../css/base.css"
@@ -165,13 +166,10 @@ async function loadRoots(): Promise<void> {
       toast("文件工作台未在服务端启用（GEBAI_FS_ENABLED=false）", "error", 8000)
       return
     }
-    const params = new URLSearchParams(location.search)
-    const wantRoot = params.get("root")
-    const wantPath = params.get("path") ?? ""
-    const pick = (wantRoot && state.roots.find((r) => r.id === wantRoot)) || state.roots.find((r) => r.kind === "proj") || state.roots[0]
-    if (pick) {
-      await explorer.setRoot(pick.id, wantPath)
-      if (wantPath) void openFile(pick.id, wantPath, { preview: false })
+    const target = resolveDeepLink(state.roots, location.search, { isWin: IS_WIN })
+    if (target) {
+      await explorer.setRoot(target.rootId, target.dir)
+      if (target.file) void openFile(target.rootId, target.file, { preview: false, line: target.line })
     } else {
       toast("没有可用根（未注册项目且无会话工作区）", "warn")
     }
@@ -179,6 +177,9 @@ async function loadRoots(): Promise<void> {
     toast(`加载根清单失败：${(err as Error).message}`, "error", 8000)
   }
 }
+
+/** Windows 客户端（盘符大小写不敏感；深层链接解析按此选择匹配策略）。 */
+const IS_WIN = navigator.userAgent.includes("Windows")
 
 async function onRootChanged(rootId: string): Promise<void> {
   await refreshGit()

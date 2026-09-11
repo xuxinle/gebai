@@ -1429,6 +1429,9 @@ describe("文件展示方式（弹窗查看：文件工具产物 file 块收敛�
     expect(container.querySelector("div.file-link")).not.toBeNull()
     expect(container.querySelector("div.rendered-image")).not.toBeNull()
     expect(container.querySelector("div.rendered-file")).toBeNull()
+    // chip 内常驻「在工作台打开」与下载两个图标按钮（工作台入口：直接拿到 IDE 里接着改）
+    expect(container.querySelector("button.file-wb-icon")).not.toBeNull()
+    expect(container.querySelector("a.file-dl-icon")).not.toBeNull()
   })
 })
 

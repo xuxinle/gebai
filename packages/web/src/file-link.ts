@@ -6,10 +6,11 @@
  */
 import { el } from "./state"
 import { downloadAnchor, openFilePreview } from "./file-card"
+import { workbenchButton } from "./workbench"
 import type { ContentBlock } from "@gebai/sdk"
 
-/** 文件链接 chip：click 弹窗查看；下载图标常驻（经 files/preview 附件形式获取）。 */
-export function fileLinkChip(opts: { sessionId: string; name: string; path: string }): HTMLElement {
+/** 文件链接 chip：click 弹窗查看；下载与「在工作台打开」图标常驻（均 stopPropagation 防触发弹窗）。 */
+export function fileLinkChip(opts: { sessionId: string; name: string; path: string; line?: number }): HTMLElement {
   const chip = el("div", "file-link")
   chip.dataset.path = opts.path
   chip.setAttribute("role", "button")
@@ -23,6 +24,7 @@ export function fileLinkChip(opts: { sessionId: string; name: string; path: stri
       open()
     }
   })
+  chip.appendChild(workbenchButton(opts.sessionId, opts.path, opts.line))
   chip.appendChild(downloadAnchor(opts.sessionId, opts.path, opts.name))
   return chip
 }

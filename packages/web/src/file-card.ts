@@ -10,6 +10,7 @@ import { copyText, desktopDownloadHint, tip } from "./ui"
 import { highlightedCode, markdownBlock, blockText } from "./markdown"
 import { openImageViewer } from "./diagram"
 import { previewFrame, sandboxedHtml, iconButton, flashButton, ICON_COPY, ICON_DOWNLOAD, ICON_FULLSCREEN } from "./html-view"
+import { workbenchButton } from "./workbench"
 
 /* 扩展名 → 高亮语言（与服务端 core/diff.ts 的 EXT_LANG 保持一致；file 块无 language 字段按扩展推断）。 */
 const EXT_LANG: Record<string, string> = {
@@ -69,8 +70,8 @@ export function downloadAnchor(sessionId: string, path: string, name: string): H
   return a
 }
 
-/** 工具栏（hover 渐显）：复制 / 原文件查看（弹窗）。enableCopy 可后置回填（按需加载完成后）。 */
-function fileToolbar(opts: { copy?: () => string; source?: () => void }): {
+/** 工具栏（hover 渐显）：复制 / 在文件工作台中打开 / 原文件查看（弹窗）。enableCopy 可后置回填（按需加载完成后）。 */
+function fileToolbar(opts: { copy?: () => string; source?: () => void; workbench?: { sessionId: string; path: string } }): {
   el: HTMLElement
   enableCopy: (provider: () => string) => void
 } {
@@ -89,6 +90,10 @@ function fileToolbar(opts: { copy?: () => string; source?: () => void }): {
       }
     }
     bar.appendChild(copyBtn)
+  }
+  if (opts.workbench) {
+    // 与产物来源会话绑定：产物在哪个会话产生就打开哪个工作区
+    bar.appendChild(workbenchButton(opts.workbench.sessionId, opts.workbench.path))
   }
   if (opts.source) {
     const btn = iconButton("原文件查看", ICON_FULLSCREEN)
@@ -146,7 +151,7 @@ function writePreviewFull(on: boolean): void {
   }
 }
 
-/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 下载（可选，常驻标题栏）+ **全宽切换** + 关闭 + 内容区，
+/** 弹窗外框（原文件查看 / 文件链接点击共用）：标题 + 工作台打开 + 下载（可选，常驻标题栏）+ **全宽切换** + 关闭 + 内容区，
  *  Esc/点击遮罩关闭。尺寸**按视口比例**（宽 90vw、高 88vh，见 css/chat.css `.preview-card`），
  * 标题栏「全宽」切到铺满视口（`.is-full`）并记忆偏好。 */
 function previewShell(name: string, download?: { sessionId: string; path: string }): { overlay: HTMLElement; body: HTMLElement } {
@@ -156,6 +161,10 @@ function previewShell(name: string, download?: { sessionId: string; path: string
   const closeBtn = el("button", "preview-close", "✕")
   head.appendChild(el("span", "preview-title", name))
   if (download) {
+    // 「在工作台打开」置于下载之前（弹窗内也能直接抳到 IDE 工作台接着改）
+    const wb = workbenchButton(download.sessionId, download.path)
+    wb.classList.add("preview-wb")
+    head.appendChild(wb)
     const dl = downloadAnchor(download.sessionId, download.path, name)
     dl.classList.add("preview-dl")
     head.appendChild(dl)
@@ -243,6 +252,7 @@ export function renderCodeCard(container: HTMLElement, b: Extract<ContentBlock, 
   const hasPath = !!b.path
   const toolbar = fileToolbar({
     copy: () => b.text,
+    workbench: hasPath ? { sessionId, path: b.path! } : undefined,
     source: hasPath ? () => openFilePreview(sessionId, b.name ?? "file", b.path!, mimeFor(b.name ?? "", "code")) : undefined,
   })
   // 下载常驻文件卡头部（不随 hover 工具栏显隐）
@@ -257,6 +267,7 @@ export function renderFileCard(container: HTMLElement, b: Extract<ContentBlock, 
   const kind = fileKind(name, mime)
   const body = el("div", "file-body")
   const toolbar = fileToolbar({
+    workbench: { sessionId, path: b.path },
     source: () => openFilePreview(sessionId, name, b.path, mime),
   })
   const card = fileCard(name, kindBadge(kind), toolbar.el, body, downloadAnchor(sessionId, b.path, name))

@@ -903,6 +903,8 @@
 }
 .file-dl-icon:hover { color: var(--text); background: var(--bg-hover); }
 .file-dl-icon svg { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* 「在文件工作台中打开」：与下载图标同款式，hover 以工具色标示「跳到 IDE 接着改」 */
+.file-wb-icon:hover { color: var(--tool); }
 /* 内容区：高度上限 + 滚动（防巨长文本撑爆消息流；图片/PDF 各自限高） */
 .file-body {
   padding: 10px 12px;
