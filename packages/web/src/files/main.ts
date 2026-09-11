@@ -130,27 +130,30 @@ const statusbar = h("footer", { class: "fw-statusbar" })
 /**
  * 外壳分区（对齐 IDEA 的 tool window 布局）：
  *
- *   ┌───────────────────────────────┬──────────┐
- *   │ 活动栏 │ 左栏（资源管理器/变更） │ 编辑区   │  ← .fw-body：只占"上部"
- *   ├─────────────────────────────────────────────┤
- *   │ 底部工具窗（分支 | 日志 | 提交内容）          │  ← 整宽，横跨活动栏与左栏下方
- *   ├─────────────────────────────────────────────┤
+ *   ┌──────┬──────────────────────────────────────┐
+ *   │      │ 左栏（资源管理器/变更） │ 编辑区      │  ← .fw-body：只占"上部"
+ *   │ 活动 ├──────────────────────────────────────┤
+ *   │ 栏   │ 底部工具窗（分支 | 日志 | 提交内容）  │  ← 从活动栏右侧开始，横跨左栏下方
+ *   ├──────┴──────────────────────────────────────┤
  *   │ 状态栏                                       │
  *   └─────────────────────────────────────────────┘
  *
- * 底部工具窗放在 .fw-body **之外**（而不是编辑区里）：它要看的是「历史/提交」这类全局信息，
- * 与左边在看哪个目录无关，占满整宽才有足够横向空间摆三栏；左栏则随之上收到上半部分。
- * 与 IDEA 一致：打开底部工具窗时，左侧 Project 工具窗的高度会被压缩，而不是并排。
+ * 底部工具窗放在「上部区」**之外**（而不是编辑区里）：它看的是「历史/提交」这类全局信息，
+ * 与左边在看哪个目录无关，需要完整横宽才摆得下三栏；左栏则随之上收到上半部分
+ * （同 IDEA：打开底部工具窗时左侧 Project 工具窗被压矮，而非并排）。
+ *
+ * 活动栏是**唯一贯穿全高**的一列：视图切换/工具窗开关这类入口要在任何面板开合时都待在原位，
+ * 被底部工具窗截断半截会让"下方那几个按钮"看起来像是工具窗的一部分。
  */
 const rootEl = h("div", { class: "fw-app" }, [
-  h("div", { class: "fw-body" }, [
+  h("div", { class: "fw-main" }, [
     railEl,
-    leftPanel,
-    leftResizer,
-    h("div", { class: "fw-center" }, [tabbar, views]),
+    h("div", { class: "fw-right" }, [
+      h("div", { class: "fw-body" }, [leftPanel, leftResizer, h("div", { class: "fw-center" }, [tabbar, views])]),
+      gitDockResizer,
+      gitDock,
+    ]),
   ]),
-  gitDockResizer,
-  gitDock,
   statusbar,
 ])
 
@@ -1033,7 +1036,7 @@ function renderRail(): void {
     })(),
     (() => {
       // 菜单栏移除后，菜单里的杂项收进这一个入口（新建/上传/比较/快捷键/服务端开关/全屏/回主界面）
-      const b = h("button", { class: "fw-rail-btn", title: "更多（新建 / 比较 / 快捷键 / 服务端开关 / 全屏 / 返回主界面）" })
+      const b = h("button", { class: "fw-rail-btn", title: "更多（新建 / 比较 / 重新加载 / 快捷键 / 服务端开关 / 全屏 / 在新标签打开）" })
       b.appendChild(icon("settings", 18))
       b.onclick = () => {
         const r = b.getBoundingClientRect()
@@ -1047,6 +1050,9 @@ function renderRail(): void {
           { separator: true },
           { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
           { label: "服务端开关（GEBAI_FS_* / GEBAI_GIT_*）", icon: "settings", onClick: () => showEnvHelp() },
+          // 页面级动作归页面自己：分屏面板已经没有标题栏了，重新加载/在新标签打开都在这里
+          { label: "重新加载工作台", icon: "refresh", onClick: () => location.reload() },
+          ...(EMBEDDED ? [{ label: "在新标签打开", icon: "external", onClick: () => requestOpenInTab() }] : []),
           { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
           { separator: true },
           // 嵌入态（分屏）下"返回主界面"= 关掉分屏容器；独立标签页才是整页跳回
@@ -1240,11 +1246,34 @@ if (EMBEDDED) {
     setCnyScheme((data.cnyScheme as CnySchemeId | null) ?? null)
     setAcrylicLt((data.acrylicLt as AcrylicLtId | null) ?? null)
   })
+
+  /*
+   * 嵌入态的 Esc：宿主那侧收不到 iframe 里的按键，这里转发一次。
+   *
+   * 用**捕获阶段 + 事前检查浮层**，而不是“捕获阶段 stopPropagation 后再转发”：
+   * 菜单/对话框的 Escape 处理器都在冒泡阶段（且不 stopPropagation），等它们关完菜单再判断，
+   * DOM 里已经看不到浮层了，分屏会跟着一起关——用户只想关个菜单，却把整个工作台也关了。
+   * 在捕获阶段先看一眼“现在有没有浮层”：有就说明这一下 Esc 是冲着它去的，直接放手。
+   */
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape") return
+      if (document.querySelector(".fw-overlay, .fw-menu-pop")) return
+      requestCloseSplit()
+    },
+    true,
+  )
 }
 
 /** 通知宿主关闭分屏（嵌入态下"返回主界面"的正确语义：关掉容器，而不是把 iframe 导航走）。 */
 function requestCloseSplit(): void {
   window.parent.postMessage({ type: "gebai:files-close-split" }, location.origin)
+}
+
+/** 通知宿主把当前工作台另开一个标签页（嵌入态下自己 window.open 会丢宿主侧的参数上下文）。 */
+function requestOpenInTab(): void {
+  window.parent.postMessage({ type: "gebai:files-open-tab" }, location.origin)
 }
 
 /* ------------------------------ 冲突合并标签（三窗格） ------------------------------ */
@@ -1794,8 +1823,10 @@ function bindDockResizer(): void {
   })
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return
-    // 工具窗底边固定在视口底部（状态栏之上），高度由指针 Y 反推
-    const h = Math.max(120, Math.min(window.innerHeight * 0.8, window.innerHeight - e.clientY))
+    // 工具窗底边固定在状态栏上沿（不是视口底：状态栏在工具窗下面，用 innerHeight 反推会差一个状态栏高度，
+    // 表现为拖动时工具窗比指针慢一拍）
+    const bottom = statusbar.getBoundingClientRect().top
+    const h = Math.max(120, Math.min(window.innerHeight * 0.8, bottom - e.clientY))
     applyDockHeight(Math.round(h))
   })
   window.addEventListener("mouseup", () => {

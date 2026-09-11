@@ -42,18 +42,22 @@
 }
 
 .files-entry:hover #files-split-btn,
-#files-split-btn:focus-visible,
-#files-split-btn.active {
+#files-split-btn:focus-visible {
   opacity: 1;
   transform: translate(-50%, 0) scale(1);
   pointer-events: auto;
   transition-delay: 0s;
 }
 
-/* 分屏已开：副按钮常驻（否则只能靠它关，指针一移开就没了） */
-#files-split-btn.active {
-  color: var(--accent);
-  border-color: var(--accent);
+/* 独立的关闭按钮：与入口那组同款，仅分屏激活时出现在标题栏上（图标为 ✕ 描边——与入口的实心分屏
+   图标在视觉上明确区分"开"与"关"两个不同动作） */
+#files-split-close {
+  color: var(--text-muted);
+}
+
+#files-split-close:hover {
+  color: var(--text);
+  background: var(--bg-hover);
 }
 
 /* hover 展开的按钮不该跟着 .icon-btn:hover 的底色变化而跳（保持面板色） */
@@ -96,35 +100,10 @@ body.files-split main {
   display: none;
 }
 
-/* 面板顶栏：标题 + 新标签/重载/关闭。工作台自己是 IDE 式界面（自带状态栏与工具窗），
-   这一条是"主界面这侧的容器控制"，不与之重复。 */
-.files-split-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 30px;
-  flex: none;
-  padding: 0 6px 0 12px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
-}
-
-.files-split-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  user-select: none;
-}
-
-.files-split-spacer {
-  flex: 1;
-}
-
-.files-split-bar .icon-btn {
-  width: 26px;
-  height: 24px;
-}
-
+/* 面板 = 纯容器：只有 iframe（+ 左侧分界拖条），没有标题栏——
+   那条 30px 横条要花掉整个编辑区的垂直空间，而它的按钮各有更好的去处
+   （打开 = 标题栏入口主按钮；重载/在新标签打开 = 工作台自己的「更多」菜单；关闭 = 独立关闭按钮）。
+   面板因此完全让位给工作台本身（它自己就是 IDE 式界面，自带顶栏与状态栏）。 */
 .files-split-frame {
   flex: 1;
   width: 100%;

@@ -86,8 +86,11 @@
           <!-- 文件工作台入口：主按钮=新标签打开；悬浮时下方弹出「分屏打开」（见 files-split.ts） -->
           <div id="files-entry" class="files-entry">
             <button id="files-btn" class="icon-btn" data-tip="文件工作台（目录树 / 查看编辑 / Git）· 新标签打开" data-tip-pos="left" aria-label="打开文件工作台"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" fill-rule="evenodd" aria-hidden="true"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8L10 4zM9.05 9.55 5.95 12.65l3.1 3.1 1.25-1.25-1.85-1.85 1.85-1.85-1.25-1.25zm5.9 0-1.25 1.25 1.85 1.85-1.85 1.85 1.25 1.25 3.1-3.1-3.1-3.1z"/></svg></button>
-            <button id="files-split-btn" class="icon-btn" data-tip="分屏打开（右侧对照，可拖动分界）" aria-label="分屏打开文件工作台" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zm-1 4v10h18V8H3zm7.6 4.4L7.5 15.5l3.1 3.1 1.2-1.2-1.9-1.9 1.9-1.9-1.2-1.2zm2.8 0-1.2 1.2 1.9 1.9-1.9 1.9 1.2 1.2 3.1-3.1-3.1-3.1z"/></svg></button>
+            <!-- 悬浮时从下缘弹出的副按钮：只在浮空时出现，永远只表达"分屏打开" -->
+            <button id="files-split-btn" class="icon-btn" data-tip="分屏打开（右侧对照，可拖动分界 · Ctrl+Shift+E）" aria-label="分屏打开文件工作台" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zm-1 4v10h18V8H3zm7.6 4.4L7.5 15.5l3.1 3.1 1.2-1.2-1.9-1.9 1.9-1.9-1.2-1.2zm2.8 0-1.2 1.2 1.9 1.9-1.9 1.9 1.2 1.2 3.1-3.1-3.1-3.1z"/></svg></button>
           </div>
+          <!-- 独立的关闭分屏按钮：只在分屏激活时出现（与上面那组入口分开，入口便永远只表达"打开"） -->
+          <button id="files-split-close" class="icon-btn" data-tip="关闭分屏（Ctrl+Shift+E / Esc）" aria-label="关闭分屏" hidden><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
           <button id="wheel-btn" class="icon-btn" aria-label="快捷操作" aria-expanded="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z"/></svg></button>
         </div>
       </header>
