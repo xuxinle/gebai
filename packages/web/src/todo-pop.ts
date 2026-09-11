@@ -31,6 +31,8 @@ const ICON = {
   fill: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
   edit: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18 10l-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>',
   del: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>',
+  /** 绘制的加号（新增待办提交按钮）。 */
+  add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>',
 } as const
 
 interface TodoPopRefs {
@@ -40,7 +42,8 @@ interface TodoPopRefs {
   count: HTMLSpanElement
   addForm: HTMLFormElement
   addInput: HTMLTextAreaElement
-  addIdle: HTMLInputElement
+  /** 唯一的提交按钮（绘制的加号图标；无内容时 disable）。 */
+  addBtn: HTMLButtonElement
 }
 
 let refs: TodoPopRefs | null = null
@@ -87,6 +90,8 @@ export async function openTodoPop(): Promise<void> {
   await refresh()
   // 首次打开默认聚焦新增输入框，直接敲键盘即可记待办
   if (!wasOpen && !editingId) refs.addInput.focus()
+  autosizeAdd()
+  syncAddBtn()
   startPoll()
 }
 
@@ -272,41 +277,49 @@ function buildPop(): TodoPopRefs {
   const hint = el(
     "div",
     "todo-pop-hint",
-    "拖动标题栏移动窗口；待办全文即模型提示词（可多行详细描述）。▶ 执行 = 新建一条会话立即执行；⚡ = 服务端没有运行中的会话时按顺序自动执行",
+    "拖动标题栏移动窗口；待办全文即模型提示词（可多行详细描述）。▶ 执行 = 新建一条会话立即执行；⚡ = 服务端没有运行中的会话时按顺序自动执行（添加时 Shift+点击加号 可直接建成闲时任务）",
   )
 
   const list = el("ul", "todo-list")
   const empty = el("div", "todo-empty", "暂无待办：在下方输入内容后 Ctrl/Cmd+Enter 添加")
 
   const addForm = el("form", "todo-add")
+  addForm.autocomplete = "off"
   const addInput = document.createElement("textarea")
   addInput.className = "todo-add-input"
-  addInput.rows = 2
+  addInput.rows = 1
   addInput.placeholder = "新增待办…（可多行写详细提示词；Ctrl/Cmd+Enter 添加）"
   addInput.maxLength = 2000
+  // 高度随内容自适应（多行长提示词不被滚动条埋在 1 行高度里），到上限转为内部滚动
+  addInput.addEventListener("input", () => {
+    autosizeAdd()
+    syncAddBtn()
+  })
   addInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
-      addForm.requestSubmit()
+      void addTodo(e.shiftKey)
     }
   })
-  const addIdleLabel = el("label", "todo-add-idle")
-  const addIdle = document.createElement("input")
-  addIdle.type = "checkbox"
-  addIdleLabel.append(addIdle, document.createTextNode("⚡闲时"))
-  addIdleLabel.title = "勾选后：服务端没有运行中的会话时按顺序自动执行"
-  const addBtn = el("button", "todo-add-btn", "添加")
-  addBtn.type = "submit"
-  addForm.append(addInput, addIdleLabel, addBtn)
+  // 右侧只有一个图标按钮（绘制的加号）：点击即提交；Shift+点击 = 添加为闲时任务
+  const addBtn = el("button", "todo-add-submit")
+  addBtn.type = "button"
+  addBtn.disabled = true
+  addBtn.innerHTML = ICON.add
+  addBtn.dataset.tip = "添加待办（Shift+点击 = 添加为闲时任务）"
+  addBtn.setAttribute("aria-label", "添加待办")
+  addBtn.addEventListener("click", (e) => void addTodo(e.shiftKey))
+  addForm.append(addInput, addBtn)
 
   root.append(head, hint, list, empty, addForm)
   document.body.appendChild(root)
 
-  const r: TodoPopRefs = { root, list, empty, count, addForm, addInput, addIdle }
+  const r: TodoPopRefs = { root, list, empty, count, addForm, addInput, addBtn }
   bindHeadDrag(r)
+  // 回车提交（textarea 内 Enter 为换行，表单只有 Ctrl/Cmd+Enter 与按钮两条提交路径）
   addForm.addEventListener("submit", (e) => {
     e.preventDefault()
-    void addTodo()
+    void addTodo(false)
   })
   window.addEventListener("resize", () => {
     if (opened) applyPos(clampNow(currentPos()), true)
@@ -458,22 +471,39 @@ async function runTodo(t: UserTodo): Promise<void> {
   }
 }
 
-async function addTodo(): Promise<void> {
+/** 新增待办（idle=true 同时标记为闲时任务：Shift+点击加号 / Shift+Ctrl+Enter）。 */
+async function addTodo(idle = false): Promise<void> {
   const r = refs
   if (!r) return
   const text = r.addInput.value.trim()
   if (!text) return
-  const idle = r.addIdle.checked
   try {
     const created = await client.createUserTodo({ text, idle })
     todos = [...todos, created]
     r.addInput.value = ""
-    r.addIdle.checked = false
+    autosizeAdd()
+    syncAddBtn()
     render()
     r.addInput.focus()
   } catch (err) {
     toast(`新增失败: ${(err as Error).message}`)
   }
+}
+
+/** 新增区输入框高度自适应内容：到上限（视口 30%）后改为内部滚动。 */
+function autosizeAdd(): void {
+  const ta = refs?.addInput
+  if (!ta) return
+  ta.style.height = "auto"
+  const max = Math.round(window.innerHeight * 0.3)
+  ta.style.height = `${Math.min(ta.scrollHeight + 2, max)}px`
+}
+
+/** 提交按钮可用态：有内容才可点（空内容时保持暗淡不可点）。 */
+function syncAddBtn(): void {
+  const r = refs
+  if (!r) return
+  r.addBtn.disabled = !r.addInput.value.trim()
 }
 
 /** 填入输入框（点击条目文本或其「填入」按钮）：覆盖写入 + 聚焦（沿用 shortcuts.ts 的既有做法）。 */
