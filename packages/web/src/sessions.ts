@@ -368,6 +368,13 @@ export function setRunningAttach(fn: (sessionId: string) => Promise<void>): void
   runningAttachHook = fn
 }
 
+/** 按需附加恢复运行态（事件/快照驱动，与进入会话时的附加同一实现）：服务端在页面空闲期间开始的
+ *  任务（重启续跑/飞书桥接/定时任务/其他标签页）经 `event.task.start` 或快照 `running` 清单告知，
+ *  前端据此补上运行态（信号灯/停止按钮/单轮计时/在途流）——未运行或本页已接管时 no-op。 */
+export function attachRunningIfNeeded(sessionId: string): void {
+  void runningAttachHook?.(sessionId)
+}
+
 /* ---------- 批量选择删除 ---------- */
 
 let batchMode = false

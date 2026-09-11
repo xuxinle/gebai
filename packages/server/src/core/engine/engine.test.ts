@@ -3847,4 +3847,41 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     expect(first!.some((m) => m.role === "system" && String(m.content).includes("你是源码分析与修改专家"))).toBe(true)
     cleanup(home)
   })
+
+  test("任务开始即发布 event.task.start（早于 task.done）：页面空闲期间开始的任务也能同步运行态", async () => {
+    const { home, store, events, engine } = await setup("text")
+    const session = await store.createSession("default", "t")
+    const types: string[] = []
+    let startedAt: unknown
+    events.subscribe((e) => {
+      if (e.sessionId !== session.id) return
+      types.push(e.type)
+      if (e.type === "event.task.start") startedAt = e.payload.startedAt
+    })
+    await engine.run(session.id, "default", "hi")
+    // 开始事件先于结束事件，携带任务开始时刻（前端单轮计时起点用）
+    expect(types[0]).toBe("event.task.start")
+    expect(types).toContain("event.task.done")
+    expect(types.indexOf("event.task.start")).toBeLessThan(types.indexOf("event.task.done"))
+    expect(typeof startedAt).toBe("number")
+    cleanup(home)
+  })
+
+  test("用户消息落盘失败时不发布 event.task.start（只发 task.error）", async () => {
+    const { home, store, events, engine } = await setup("text")
+    const session = await store.createSession("default", "t")
+    const types: string[] = []
+    events.subscribe((e) => {
+      if (e.sessionId === session.id) types.push(e.type)
+    })
+    const orig = store.appendMessage.bind(store)
+    ;(store as unknown as { appendMessage: typeof store.appendMessage }).appendMessage = async () => {
+      throw new Error("disk full")
+    }
+    await engine.run(session.id, "default", "hi")
+    ;(store as unknown as { appendMessage: typeof store.appendMessage }).appendMessage = orig
+    expect(types).not.toContain("event.task.start")
+    expect(types).toEqual(["event.task.error"])
+    cleanup(home)
+  })
 })

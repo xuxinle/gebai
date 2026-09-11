@@ -20,7 +20,7 @@ import { initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { initTurnTimer } from "./turn-timer"
 import { initFileDisplay } from "./file-display"
-import { bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
+import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, maybeAutoTitle, refreshSessions, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
@@ -243,6 +243,10 @@ async function init() {
       })
       scrollIfSticky()
       refreshJumpBottom()
+    } else if (ev.type === "event.task.start") {
+      // 服务端开始运行（重启续跑/飞书桥接/定时任务/其他标签页发起）：本页未接管该会话时附加恢复运行态
+      // （信号灯/停止按钮/单轮计时/在途流）——否则页面在空闲期间错过任务开始会一直显示为空闲
+      if (getCurrentSession()?.id === ev.sessionId) attachRunningIfNeeded(ev.sessionId)
     }
   })
   // 连接状态展示 + 自动重连（SDK 内置指数退避；WS 为唯一通道，断开时进行中的流
@@ -262,6 +266,10 @@ async function init() {
         void loadMessages(s.id).catch(() => {})
       }
     }
+    // 快照即「运行中会话」的服务端权威清单：刷新/重连时若当前会话正在运行而本页未接管，附加恢复——
+    // 覆盖「刷新晚于任务开始」的时序（此时 task.start 已投递过，不随快照重放）
+    const running = getCurrentSession()
+    if (running && snap.running.includes(running.id)) attachRunningIfNeeded(running.id)
     // 模型上下文窗口：标题栏占比显示用（snapshot 与 session.list 均携带）
     setMaxCtxTokens(snap.maxContextTokens ?? 0)
     if (getCurrentSession() || isDraftView()) void refreshSessions(snap.sessions)

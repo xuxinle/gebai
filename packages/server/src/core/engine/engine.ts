@@ -849,6 +849,11 @@ export class AgentEngine {
         attachments: attachmentRefs,
         createdAt: Date.now(),
       }, user)
+      // 任务开始事件（DESIGN「运行中会话恢复」）：任务并非总由本页发起——重启续跑/飞书桥接/定时任务/
+      // 其他标签页都会在页面空闲时开始运行。无此事件时前端只能在本页发起或进入会话那一刻探测到
+      // 运行态，之后开始的任务（典型：重启后页面已刷新、续跑才启动）会一直显示为空闲（无信号灯/
+      // 停止按钮/单轮计时）。页面收到后按需附加恢复，与本页发起的运行态同构。
+      this.publish(sessionId, "event.task.start", { sessionId, startedAt: task.startedAt })
     } catch (err) {
       this.publish(sessionId, "event.task.error", { error: String((err as Error).message || err) })
       this.tasks.delete(sessionId)
