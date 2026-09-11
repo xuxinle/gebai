@@ -5,7 +5,7 @@
 
 /* ------------------------------ 入口按钮 ------------------------------ */
 
-/* 悬浮弹出：主按钮 = 新标签打开；**右侧**副按钮 = 分屏打开。
+/* 悬浮弹出：主按钮 = 分屏打开（开关）；**右侧**副按钮 = 新标签打开。
    与轮盘菜单同一交互语言——hover 展开、不点击切换、离开即收。 */
 .files-entry {
   position: relative;
@@ -13,7 +13,7 @@
   align-items: center;
 }
 
-#files-split-btn {
+#files-tab-btn {
   position: absolute;
   left: calc(100% + 6px);
   top: 50%;
@@ -41,8 +41,8 @@
   width: 10px;
 }
 
-.files-entry:hover #files-split-btn,
-#files-split-btn:focus-visible {
+.files-entry:hover #files-tab-btn,
+#files-tab-btn:focus-visible {
   opacity: 1;
   transform: translate(0, -50%) scale(1);
   pointer-events: auto;
@@ -50,7 +50,7 @@
 }
 
 /* hover 展开的按钮不该跟着 .icon-btn:hover 的底色变化而跳（保持面板色） */
-#files-split-btn:hover {
+#files-tab-btn:hover {
   background: var(--bg-hover);
   color: var(--text);
 }

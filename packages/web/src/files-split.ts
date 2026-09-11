@@ -30,7 +30,8 @@ const MIN_WINDOW = 1100
 
 let pane: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
-let peekBtn: HTMLButtonElement | null = null
+/** 主按钮（分屏开关，常驻可见）。副按钮（新标签打开）的绑定在 files-entry.ts 里，本模块不管它。 */
+let mainBtn: HTMLButtonElement | null = null
 /** 记住上一次进入分屏时的参数，重新打开时沿用（会话/根/主题由 filesUrl 现取）。 */
 let lastOpts: FilesOpenOpts = {}
 
@@ -69,10 +70,10 @@ function applyWidth(w: number | null): void {
  * 分屏面板 = **纯容器**：只有 iframe 与左侧分界拖条，没有标题栏。
  *
  * 为什么不留标题栏：它要为一条 30px 的横条付出整个编辑区的垂直空间，而里面那些按钮各有更好的去处——
- *   · 「打开」= 标题栏入口主按钮本身就是新标签打开；
- *   · 「重新加载 / 在新标签打开」= 挪进工作台自己的「更多」菜单（页面级动作归页面自己）；
- *   · 「关闭」= 也不在标题栏，而是走**面板内**与全局几条路径（工作台「更多」菜单的「关闭分屏」、
- *     Esc（两侧都能触发）、Ctrl+Shift+E；另有点标题栏「会话列表」也会关，见 bindFilesSplit 末尾）。
+ *   · 「打开」= 标题栏入口主按钮（分屏）与副按钮（新标签）；
+ *   · 「重新加载 / 在新标签打开 / 关闭分屏」= 扫进工作台自己的「更多」菜单（页面级动作归页面自己）；
+ *   · 「关闭」另有**面板内**与全局几条路径（活动栏最下方的「关闭分屏」、Esc（两侧都能触发）、
+ *     Ctrl+Shift+E；另有点标题栏「会话列表」也会关，见 bindFilesSplit 末尾）。
  * 面板因此完全让位给工作台本身：它自己就是 IDE 式界面，自带顶栏与状态栏。
  */
 function buildPane(): HTMLElement {
@@ -190,23 +191,23 @@ export function toggleSplit(opts: FilesOpenOpts = {}): void {
 }
 
 /**
- * 按钮态与分屏态保持一致。
- *
- * 「文件工作台」这组入口**保持原状**：副按钮的图标不随分屏态变形、也不常驻（仍然只在浮空时出现），
- * 这样它永远只表达一件事——"分屏打开"。
+ * 主按钮的提示文案随分屏态变（副按钮的文案固定，它是“新标签打开”、与分屏态无关）。
  *
  * 标题栏上不再有✕：关闭分屏改由**工作台自己**（嵌入态下它就在面板里，那里才是"关掉我"的自然位置）：
- * 「更多」菜单的「关闭分屏」、工作台内的 Esc（它自己转发给宿主，见 files/main.ts）、
- * 以及全局的 Ctrl+Shift+E；此外点标题栏的「会话列表」也会关分屏（见 bindFilesSplit 末尾）。
+ * 「更多」菜单的「关闭分屏」、活动栏最下方的「关闭分屏」、工作台内的 Esc（它自己转发给宿主，
+ * 见 files/main.ts）、以及全局的 Ctrl+Shift+E；此外点标题栏的「会话列表」也会关分屏（见 bindFilesSplit 末尾）。
  */
 function syncEntry(): void {
   const open = isSplitOpen()
-  if (peekBtn) {
+  if (mainBtn) {
     // 提示里带上快捷键：副按钮只在浮空时出现，键盘用户靠 Ctrl+Shift+E
     const tip = open ? "关闭分屏（Ctrl+Shift+E / Esc）" : "分屏打开（右侧对照，可拖动分界 · Ctrl+Shift+E）"
-    peekBtn.dataset.tip = tip
-    peekBtn.setAttribute("aria-label", tip)
-    peekBtn.setAttribute("aria-expanded", String(open))
+    mainBtn.dataset.tip = tip
+    mainBtn.setAttribute("aria-label", tip)
+    mainBtn.setAttribute("aria-expanded", String(open))
+    // 按钮互换后，主按钮**就是那个开关**，得自己表达开关态（以前靠旁边的✕，现✕已移除）。
+    // .icon-btn.active 是全站通用的"已开启"语义（轮盘按钮同款）。
+    mainBtn.classList.toggle("active", open)
   }
 }
 
@@ -252,18 +253,18 @@ function postTheme(): void {
 /* --------------------------- 绑定入口 --------------------------- */
 
 export function bindFilesSplit(): void {
-  peekBtn = document.getElementById("files-split-btn") as HTMLButtonElement | null
-  if (!peekBtn) return
-  // 主按钮仍是「新标签打开」（默认行为不变）；悬浮弹出的副按钮才进分屏
-  peekBtn.addEventListener("click", () => {
-    /*
-     * 指针点击时 `:focus-visible` 为 false，于是按钮淡出后**仍然握着焦点**：
-     * 此后随手按一下 Enter/空格，分屏会"隐形地"再切一次；聚焦提示气泡也会悬在那儿不散。
-     * 所以指针触发的点击后主动让出焦点；键盘触发的保留（:focus-visible 会让它继续显形）。
-     */
-    const fromKeyboard = peekBtn!.matches(":focus-visible")
+  mainBtn = document.getElementById("files-btn") as HTMLButtonElement | null
+  if (!mainBtn) return
+  /*
+   * 主按钮 = 分屏开关。
+   * 指针点击时 `:focus-visible` 为 false，于是按钮淡出后**仍然握着焦点**：
+   * 此后随手按一下 Enter/空格，分屏会"隐形地"再切一次；聚焦提示气泡也会悬在那儿不散。
+   * 所以指针触发的点击后主动让出焦点；键盘触发的保留（:focus-visible 会让它继续显形）。
+   */
+  mainBtn.addEventListener("click", () => {
+    const fromKeyboard = mainBtn!.matches(":focus-visible")
     toggleSplit()
-    if (!fromKeyboard) peekBtn?.blur()
+    if (!fromKeyboard) mainBtn?.blur()
   })
   // 没有标题栏✕：关闭走工作台自己的「更多」菜单（嵌入态的「关闭分屏」）、Esc（两侧都能触发）
   // 与全局 Ctrl+Shift+E（由 main 的快捷键表统一处理）。

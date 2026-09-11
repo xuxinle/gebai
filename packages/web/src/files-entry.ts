@@ -1,9 +1,12 @@
 /**
- * 文件工作台入口：标题栏轮盘按钮**左侧**的「文件」按钮 → 新标签打开独立页面 `/files`。
+ * 文件工作台入口的**跳转（新标签）**一侧：URL 拼装、在新标签/当前标签打开、副按钮绑定。
+ *
+ * 分工：标题栏入口的**主按钮 = 分屏打开**（见 files-split.ts，那是这个仓位最常用的动作）；
+ * 悬浮时从右侧弹出的**副按钮 = 新标签打开**（整个工作台页面，与聊天并行浏览时用）。
+ * 本模块只负责后者与 URL 拼装（分屏也要用它拼 iframe 的 src）。
  *
  * 为什么新标签而不是同页路由：文件工作台是重量级 IDE 式工作区（Monaco + Git 面板 + 大量
- * 资源请求），与聊天界面并行使用才是常态（一边让 Agent 改文件、一边自己核对差异）；
- * 独立页面同样带来故障隔离——编辑器崩了不影响会话，反之亦然。
+ * 资源请求），独立页面带来故障隔离——编辑器崩了不影响会话，反之亦然。
  *
  * 传参：
  *   · `session`  = 会话 id（令 `sess:` 根指向该会话工作区，Agent 产物就地可查）；
@@ -55,8 +58,13 @@ export function openFiles(opts: FilesOpenOpts = {}, newTab = true): void {
   else location.href = url
 }
 
+/**
+ * 入口的副按钮 = **新标签打开**（分屏在主按钮上，见 files-split.ts）。
+ * 两者分工：主按钮是常驻可见的那一个，承担最常用的动作（分屏对照）；
+ * 副按钮只在浮空时从右侧弹出，承担"这次要看整页"的少数情况。
+ */
 export function bindFilesEntry(): void {
-  const btn = document.getElementById("files-btn") as HTMLButtonElement | null
+  const btn = document.getElementById("files-tab-btn") as HTMLButtonElement | null
   if (!btn) return
   btn.addEventListener("click", () => openFiles())
 }
