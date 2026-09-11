@@ -89,6 +89,8 @@ interface Tab {
   diffDispose?: () => void
   /** 差异块导航（F7/Shift+F7 与标签栏按钮共用；降级渲染为 null） */
   diffNav?: DiffNav | null
+  /** 加载令牌（loadTab 每次自增；`await` 回来后据此判断自己是否已被取代 / 标签已关闭） */
+  loadGen?: number
   /**
    * 变更文件清单（与差异同一端点对）：跨文件导航用。
    * 打开差异后异步取，未就绪时标签栏按钮置灰。
@@ -440,10 +442,27 @@ function prevId(prev: Tab, root: string, path: string): boolean {
 async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = {}): Promise<void> {
   const host0 = viewHosts.get(tab.id)
   if (!host0) return
+  /**
+   * 每次加载取一个令牌：`await` 回来后标签可能已被关闭、或被新一轮加载接管。
+   * 没有这道守卫时（打开大文件后立刻 Ctrl+W、连点「重新加载」），异步回来的代码会把新编辑器
+   * 挂到已从文档移除的 host 上——它永远不会被释放（model 还捐着 MB 级字符串）。
+   */
+  const gen = (tab.loadGen ?? 0) + 1
+  tab.loadGen = gen
+  const stale = (): boolean => tab.loadGen !== gen || findTab(tab.id) !== tab
+  // 重建视图前先释放上一轮的编辑器/查看器（「重新加载」、「以文本打开」、图表源码↔预览切换
+  // 都会走到这里，早期每点一次就漏一个 Monaco 实例 + model）
+  tab.editor?.dispose()
+  tab.editor = undefined
+  tab.viewDispose?.()
+  tab.viewDispose = undefined
   clear(host0)
   host0.appendChild(h("div", { class: "fw-loading", text: `正在打开 ${tab.title}…` }))
+  /** 脏标记复核计时器（见 onChange） */
+  let dirtyTimer: number | null = null
   try {
     const statRes = await api.stat(tab.root, [tab.path])
+    if (stale()) return
     const stat = statRes.items[0]
     if (!stat) throw new Error("文件不存在")
     tab.stat = stat
@@ -454,12 +473,8 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
     }
     const useText = opts.forceText || stat.kind === "text" || stat.kind === "diagram" || !["image", "video", "audio", "pdf", "office", "archive", "font", "binary"].includes(stat.kind)
     if (useText) {
-      let read: ReadResponse
-      try {
-        read = await api.read(tab.root, tab.path, { maxBytes: Math.min(state.rootsResp?.maxRead ?? 10 * 1024 * 1024, 10 * 1024 * 1024), forceText: opts.forceText })
-      } catch (err) {
-        throw err
-      }
+      const read: ReadResponse = await api.read(tab.root, tab.path, { maxBytes: Math.min(state.rootsResp?.maxRead ?? 10 * 1024 * 1024, 10 * 1024 * 1024), forceText: opts.forceText })
+      if (stale()) return
       tab.content = read.content
       tab.baseline = read.content
       tab.encoding = read.encoding
@@ -482,20 +497,45 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
         language: read.language,
         readOnly: tab.mode !== "edit" || read.truncated,
       })
+      if (stale()) {
+        // 内核加载期间标签被关了：当场回收刚建好的实例（否则连 host 一起永久漏掉）
+        editor.dispose()
+        return
+      }
       tab.editor = editor
+      tab.dirty = false
       editor.onChange(() => {
-        const dirty = editor.getValue() !== tab.baseline
-        if (dirty !== tab.dirty) {
-          tab.dirty = dirty
+        /*
+         * 脏标记：早期实现每次击键都 `getValue() !== baseline` 做**全文比对**——大文件上是
+         * 每键物化一次 MB 级字符串。现在击键路径上零字符串分配：先乐观置脏 + 刷新标签栏，
+         * 再防抖复核一次（内容被改回原样时要能变回干净）。
+         */
+        if (!tab.dirty) {
+          tab.dirty = true
           renderTabbar()
         }
+        if (dirtyTimer !== null) window.clearTimeout(dirtyTimer)
+        dirtyTimer = window.setTimeout(() => {
+          dirtyTimer = null
+          if (stale() || !tab.editor) return
+          const dirty = tab.editor.getValue() !== tab.baseline
+          if (dirty !== tab.dirty) {
+            tab.dirty = dirty
+            renderTabbar()
+          }
+        }, 300)
       })
       editor.onCursor((info) => {
         if (activeTab()?.id !== tab.id) return
         state.cursor = info
-        renderStatus()
+        // 状态栏走按帧合并：拖选时每个 mousemove 都会回调，而状态栏是全量重建的（见 renderStatus）
+        scheduleStatus()
       })
-      if (opts.line) setTimeout(() => editor.revealLine(opts.line! - 1), 60)
+      if (opts.line) {
+        setTimeout(() => {
+          if (!stale()) editor.revealLine(opts.line! - 1)
+        }, 60)
+      }
     } else {
       clear(host0)
       tab.viewDispose = renderViewer(host0, viewerCtx(tab))
@@ -504,6 +544,8 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
     renderTabbar()
     renderStatus()
   } catch (err) {
+    // 已被新加载取代 / 标签已关：不要往（已卸下的）host 里写错误页
+    if (stale()) return
     clear(host0)
     tab.loadError = (err as Error).message
     const box = h("div", { class: "fw-placeholder" }, [
@@ -721,7 +763,7 @@ function activate(id: string): void {
   state.activeId = id
   for (const [tid, host] of viewHosts) host.classList.toggle("active", tid === id)
   if (tab.editor && tab.scrollTop) tab.editor.setScrollTop(tab.scrollTop)
-  setTimeout(() => tab.editor?.layout(), 20)
+  scheduleEditorLayout()
   renderTabbar()
   renderStatus()
   if (tab.kind === "file") void explorer.reveal(tab.path, { select: true })
@@ -883,8 +925,25 @@ function tabActions(): HTMLElement {
       btn("diff", "源码 / 渲染预览切换", () => {
         const host = viewHosts.get(t.id)
         if (!host) return
-        if (host.querySelector(".fw-diagram-wrap")) void loadTab(t)
-        else renderViewer(host, viewerCtx(t))
+        // 预览→源码：走 loadTab（它开头会 dispose 旧查看器、清空 host 后重建编辑器）
+        if (host.querySelector(".fw-diagram-wrap")) {
+          void loadTab(t)
+          return
+        }
+        // 源码→预览：未保存的修改会被丢掉（预览态没有编辑器承载它），先拦住
+        if (t.dirty) {
+          toast("有未保存的修改，请先保存再切换视图", "warn")
+          return
+        }
+        // 两态互切都得先把上一态**彻底卸掉**：只 append 不清 host 会源码与预览同屏叠着，
+        // 且旧 dispose 被覆盖后再无人调用（编辑器/查看器各漏一份）
+        t.editor?.dispose()
+        t.editor = undefined
+        t.viewDispose?.()
+        clear(host)
+        t.viewDispose = renderViewer(host, viewerCtx(t))
+        renderTabbar()
+        renderStatus()
       }),
     )
   }
@@ -945,9 +1004,42 @@ async function showFileHistoryByPath(path: string, root = explorer.getRoot()): P
   }
 }
 
+/** 状态栏刷新按帧合并（拖选/移动光标每个事件都会请求刷新一次）。 */
+let statusRaf = 0
+function scheduleStatus(): void {
+  if (statusRaf) return
+  statusRaf = requestAnimationFrame(() => {
+    statusRaf = 0
+    renderStatus()
+  })
+}
+
+/** 上一次渲染的状态快照（用于跳过「什么都没变」的整条重建）。 */
+let statusSig = ""
+
 function renderStatus(): void {
-  clear(statusbar)
   const tab = activeTab()
+  const g = state.gitStatus
+  const root = state.roots.find((r) => r.id === explorer.getRoot())
+  /*
+   * 状态栏是**整条重建**的（清空 + ~10 个节点 + 图标 + 时间串本地化），而它的调用点极密：
+   * 光标移动/拖选（拖选时每个 mousemove 一次）、保存、切标签、git 刷新……绝大多数时候什么都没变。
+   * 先做一次 O(1) 快照比对，未变直接返回（`toLocaleString` 与图标解析都不便宜）。
+   * 快照必须覆盖所有影响渲染的输入——新增状态栏条目时同步补字段。
+   */
+  const sig = [
+    tab?.id ?? "-", tab?.kind ?? "", tab?.mode ?? "", tab?.encoding ?? "", tab?.eol ?? "",
+    tab?.stat?.language ?? "", tab?.stat?.size ?? "", tab?.stat?.mtime ?? "", tab?.editor ? 1 : 0,
+    state.cursor.line, state.cursor.column, state.cursor.selected,
+    explorer.getRoot(), root?.name ?? "", root?.path ?? "", root?.isRepo ? 1 : 0,
+    g?.isRepo ? 1 : 0, g?.branch ?? "", g?.detached ? 1 : 0, g?.ahead ?? 0, g?.behind ?? 0,
+    g?.counts ? `${g.counts.staged}/${g.counts.unstaged}/${g.counts.untracked}/${g.counts.conflicted}` : "",
+    state.rootsResp?.writable ? 1 : 0,
+    monacoReady() ? 1 : 0,
+  ].join("|")
+  if (sig === statusSig) return
+  statusSig = sig
+  clear(statusbar)
   /*
    * 状态栏条目按**优先级**标注（data-pri，1 最要）：窄面板（分屏常在 640px 上下）里状态栏条目
    * 排不下时，CSS 按优先级从低到高逐级隐藏——而不是让整条状态栏把文档顶出横向滚动。
@@ -964,7 +1056,6 @@ function renderStatus(): void {
     el.dataset.pri = String(pri)
     return el
   }
-  const root = state.roots.find((r) => r.id === explorer.getRoot())
   const rel = h("button", { class: "fw-status-item", title: root?.path ?? "" }, [icon(root?.isRepo ? "git" : "folderOpen", 12), h("span", { text: root?.name ?? "-" })])
   rel.onclick = () => showMenu(...menuAt(rel, state.roots.map((r) => ({ label: r.name, icon: "folder", onClick: () => void explorer.setRoot(r.id) }))))
   statusbar.appendChild(btn(rel, 1))
@@ -1159,7 +1250,7 @@ async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolea
     tab.editor.setReadOnly(false)
     renderTabbar()
     toast("已保存", "success", 1600)
-    if (state.gitStatus?.isRepo) void refreshGit().then(() => gitPanel?.refresh())
+    if (state.gitStatus?.isRepo) void refreshGit().then(() => { if (state.gitViewVisible) void gitPanel?.refresh() })
     return true
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
@@ -1464,6 +1555,8 @@ async function openCompare(init: { from?: string; to?: string; path?: string; me
   )
   host.appendChild(view.el)
   compareTabs.set(id, { view, state: { from, to, mergeBase: init.mergeBase ?? false, path: init.path ?? "" } })
+  // 标签关闭时释放：早期比较标签从不设 viewDispose，compareTabs 里的视图与状态一直留着
+  tab.viewDispose = () => compareTabs.delete(id)
   await view.refresh()
   renderTabbar()
   renderStatus()
@@ -1549,20 +1642,34 @@ function buildSearchView(): HTMLElement {
  */
 function showLeftView(view: "changes" | "explorer" | "search", opts: { keepHidden?: boolean } = {}): void {
   state.leftView = view
-  clear(leftPanel)
-  if (view === "explorer") leftPanel.appendChild(explorer.el)
+  if (view === "explorer") mountLeftView(explorer.el)
   else if (view === "search") {
     if (!searchView) searchView = { el: buildSearchView() }
-    leftPanel.appendChild(searchView.el)
+    mountLeftView(searchView.el)
   } else {
     const panel = ensureChangesPanel()
-    leftPanel.appendChild(panel.el)
+    mountLeftView(panel.el)
     // 先渲染（用上一份状态），状态刷新到位后再渲染一次——否则首次打开是空面板
     panel.refresh()
     void refreshGit().then(() => panel.refresh())
   }
   if (!opts.keepHidden) setLeftVisible(true)
   renderRail()
+}
+
+/**
+ * 挂上并显示某个左栏视图（其余三个视图只置隐藏类）。
+ *
+ * 为什么不沿用早期的 `clear(leftPanel) + appendChild`：那会把离开的视图**从文档里摘下来**，
+ * 每次来回切都要重排整栏，而且被摘下的子树会丢失滚动位置（看目录树到一半去「变更」再回来，
+ * 树回到了顶部）——IDE 里这是最不能接受的“帮倒忙”。三视图体量都不大，常驻更划算。
+ */
+function mountLeftView(el: HTMLElement): void {
+  if (el.parentElement !== leftPanel) leftPanel.appendChild(el)
+  for (const child of leftPanel.children) {
+    if (child !== el) child.classList.add("fw-view-hidden")
+  }
+  el.classList.remove("fw-view-hidden")
 }
 
 /** 左栏是否展开（隐藏后编辑区占满——IDEA 的 Ctrl+B 行为）。 */
@@ -1573,7 +1680,7 @@ function leftVisible(): boolean {
 function setLeftVisible(visible: boolean): void {
   leftPanel.style.display = visible ? "" : "none"
   leftResizer.style.display = visible ? "" : "none"
-  for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 0)
+  scheduleEditorLayout()
   renderRail()
 }
 
@@ -1645,7 +1752,7 @@ function toggleGitPanel(visible: boolean, opts: { deferData?: boolean } = {}): v
     // 根为空时不请求（等 onRootChanged / 启动阶段二补刷）：否则会把「根未知」误当「不是仓库」
     if (explorer.getRoot()) void gitPanel?.refresh()
     // 展开后 Monaco 可视高度变化，重排编辑器（否则出现空白/裁切）
-    for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 30)
+    scheduleEditorLayout()
   }
   renderRail()
 }
@@ -1826,7 +1933,11 @@ document.addEventListener("keydown", (e) => {
     void explorer
       .refresh(undefined, { keepSelection: true })
       .then(() => refreshGit())
-      .then(() => gitPanel?.refresh())
+      // Git 工具窗收起时不刷它的内部三栏：否则每次 F5/保存都要付一遍分支/日志查询（分支栏
+      // 还含 ≤N 次 rev-list），而面板根本看不见——展开时 toggleGitPanel 会补刷
+      .then(() => {
+        if (state.gitViewVisible) void gitPanel?.refresh()
+      })
       .then(() => changesPanel?.refresh())
     return
   }
@@ -1843,10 +1954,50 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeMenu()
 })
 
+/* ------------------------------ 编辑器重排（合并到一帧） ------------------------------ */
+
+/**
+ * 面板尺寸变化后重排编辑器。Monaco 虽然开了 automaticLayout，但容器显隐/尺寸切换存在时序差
+ * （隐藏标签在 `display:none` 下量到 0 宽），所以仍需显式 layout 一次。
+ *
+ * 两点收敛：
+ *   ① 同帧内的多次调用合并为一次——拖分界条时每个 mousemove 都会走到这里，早期实现是给**每个**
+ *      标签各排一个 `setTimeout`，8 个标签 = 一帧内 8 次全量 relayout；
+ *   ② 默认只排**活动标签**（非活动标签在下次 `activate` 时会重排），“整体变换”这类一次性动作
+ *      用 `layoutAllEditors()` 补齐——拖动过程中的每帧给看不见的标签重排纯属浪费。
+ */
+let layoutRaf: number | null = null
+function scheduleEditorLayout(): void {
+  if (layoutRaf !== null) return
+  layoutRaf = requestAnimationFrame(() => {
+    layoutRaf = null
+    activeTab()?.editor?.layout()
+  })
+}
+
+/** 一次性重排全部标签（拖动结束这类“最终态”动作；先撤销待执行的合并帧避免重复）。 */
+function layoutAllEditors(): void {
+  if (layoutRaf !== null) {
+    cancelAnimationFrame(layoutRaf)
+    layoutRaf = null
+  }
+  for (const t of state.tabs) t.editor?.layout()
+}
+
 /* ------------------------------ 面板拖拽调宽 ------------------------------ */
 
 function bindResizer(resizer: HTMLElement, panel: HTMLElement, side: "left" | "right"): void {
   let dragging = false
+  /** 待写入宽度（拖动期间按帧合并：直接写 style 会每事件强制一次布局，而每帧只需最后一次值） */
+  let pending: number | null = null
+  let raf = 0
+  const flush = (): void => {
+    raf = 0
+    if (pending === null) return
+    panel.style.width = `${pending}px`
+    pending = null
+    scheduleEditorLayout()
+  }
   resizer.addEventListener("mousedown", (e) => {
     dragging = true
     e.preventDefault()
@@ -1854,14 +2005,17 @@ function bindResizer(resizer: HTMLElement, panel: HTMLElement, side: "left" | "r
   })
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return
-    const width = side === "left" ? Math.max(180, Math.min(560, e.clientX)) : Math.max(240, Math.min(680, window.innerWidth - e.clientX))
-    panel.style.width = `${width}px`
+    pending = side === "left" ? Math.max(180, Math.min(560, e.clientX)) : Math.max(240, Math.min(680, window.innerWidth - e.clientX))
+    if (!raf) raf = requestAnimationFrame(flush)
   })
   window.addEventListener("mouseup", () => {
     if (!dragging) return
     dragging = false
     document.body.classList.remove("fw-resizing")
+    if (raf) cancelAnimationFrame(raf)
+    flush()
     window.dispatchEvent(new Event("resize"))
+    layoutAllEditors()
   })
 }
 
@@ -1880,30 +2034,43 @@ function readDockHeight(): number {
 
 function applyDockHeight(h: number): void {
   document.documentElement.style.setProperty("--git-dock-h", `${h}px`)
-  for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 0)
+  scheduleEditorLayout()
 }
 
 /** 拖动工具窗上沿调高（向上拖 = 变高），松手落盘高度并重排编辑器。 */
 function bindDockResizer(): void {
   applyDockHeight(readDockHeight())
   let dragging = false
+  /** 工具窗底边（状态栏上沿）：拖动期间恒定，起手量一次（每帧量一次要连带强制布局） */
+  let dockBottom = 0
+  let pending: number | null = null
+  let raf = 0
+  const flush = (): void => {
+    raf = 0
+    if (pending === null) return
+    applyDockHeight(pending)
+    pending = null
+  }
   gitDockResizer.addEventListener("mousedown", (e) => {
     dragging = true
     e.preventDefault()
     document.body.classList.add("fw-dock-resizing")
+    dockBottom = statusbar.getBoundingClientRect().top
   })
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return
     // 工具窗底边固定在状态栏上沿（不是视口底：状态栏在工具窗下面，用 innerHeight 反推会差一个状态栏高度，
     // 表现为拖动时工具窗比指针慢一拍）
-    const bottom = statusbar.getBoundingClientRect().top
-    const h = Math.max(120, Math.min(window.innerHeight * 0.8, bottom - e.clientY))
-    applyDockHeight(Math.round(h))
+    const h = Math.max(120, Math.min(window.innerHeight * 0.8, dockBottom - e.clientY))
+    pending = Math.round(h)
+    if (!raf) raf = requestAnimationFrame(flush)
   })
   window.addEventListener("mouseup", () => {
     if (!dragging) return
     dragging = false
     document.body.classList.remove("fw-dock-resizing")
+    if (raf) cancelAnimationFrame(raf)
+    flush()
     const cur = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--git-dock-h"), 10)
     try {
       if (cur) localStorage.setItem(GIT_DOCK_H_KEY, String(cur))
@@ -1911,7 +2078,7 @@ function bindDockResizer(): void {
       /* 隐私模式忽略 */
     }
     window.dispatchEvent(new Event("resize"))
-    for (const t of state.tabs) t.editor?.layout()
+    layoutAllEditors()
   })
   // 双击复位默认高度（与 IDEA 工具窗「重置布局」同理）
   gitDockResizer.addEventListener("dblclick", () => {
@@ -1987,8 +2154,10 @@ function bindDragUpload(): void {
 }
 
 async function boot(): Promise<void> {
-  // 主题：与主界面共用同一引擎（含人民币面额配色 / 默认主题黑白变体 / 品牌化变量）
-  initTheme()
+  // 主题：与主界面共用同一引擎（含人民币面额配色 / 默认主题黑白变体）。
+  // urlPrefs:false —— 工作台不读 URL 上的主题参数：主题只认 localStorage（两页共享的用户级偏好，
+  // 另有跨标签页 storage 同步），否则带旧 gb_style 的链接会把两页拆成两套配色。
+  initTheme({ urlPrefs: false })
   const splash = document.getElementById("gb-splash")
   /**
    * 抹遮罩：**外壳已挂载并完成首帧**即可调用，不再等根清单/目录树/git 状态。
@@ -2022,10 +2191,9 @@ async function boot(): Promise<void> {
     document.body.appendChild(rootEl)
     bindDragUpload()
     unmountPlaceholder = mountBootPlaceholder()
-    // 外壳首次绘制即抹遮罩（首屏不等根清单往返）；空闲预热编辑器内核（首屏之后，不争带宽）
+    // 外壳首次绘制即抹遮罩（首屏不等根清单往返）
     await nextFrame()
     hideSplash()
-    prewarmMonaco()
 
     // ── 阶段二：数据装配（不阻塞首屏可见性）──
     await loadRoots()
@@ -2050,6 +2218,9 @@ async function boot(): Promise<void> {
       const to = params.get("to") ?? WORKTREE
       void openCompare({ from, to, path: params.get("path") ?? "", mergeBase: params.get("mergeBase") === "1" })
     }
+    // Monaco 空闲预热放在**数据装配之后**：启动期真正在等的是根清单/状态/读取这些请求，
+    // 把 1MB 编辑器内核的下载排在它们前面只会互相抢带宽（预热本身仍是 idle 调度）。
+    prewarmMonaco()
   }
   // boot 内部任何异常：仍移除遮罩（页面可见，错误以 toast/占位页表现），遄免白屏无反馈
   catch (err) {

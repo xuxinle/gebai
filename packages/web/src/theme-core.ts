@@ -13,6 +13,10 @@
  *   4. 全局默认（服务端注入 `window.__GEBAI_UI_STYLE__`，来自 `GEBAI_UI_STYLE`）
  *   5. 内置默认 `acrylic`
  *
+ * **文件工作台（`/files`）不读 URL 上的主题参数**（`initTheme({ urlPrefs: false })`）：它靠
+ * localStorage 与主界面共享同一份用户级偏好（另加跨标签页 `storage` 同步），URL 上既不带、
+ * 也不覆盖主题——否则一个带旧参数的链接就能把两页拆成两套配色。宿主定制仍可用 `?gb_vars`（主界面）。
+ *
  * 主题切换走 View Transitions API（Chrome 111+ / Edge / Safari 18+ / Firefox 128+），
  * 在不支持时回退为渐变覆盖层扫描动画，保证"丝滑"观感。
  *
@@ -69,6 +73,10 @@ let userCnyScheme: CnySchemeId | "reset" | null = null
 let userAcrylicLt: AcrylicLtId | "reset" | null = null
 let themeLink: HTMLLinkElement | null = null
 let transitionTimer: number | null = null
+/** 是否允许 URL 参数参与偏好解析（`initTheme` 设定；`/files` 传 false——主题只认 localStorage） */
+let urlPrefsEnabled = true
+/** 跨标签页同步只绑一次（两个入口各调一次 initTheme 也只会绑一个监听器） */
+let storageBound = false
 
 export function isTheme(v: unknown): v is ThemeId {
   return typeof v === "string" && (THEMES as readonly { id: string }[]).some((t) => t.id === v)
@@ -125,7 +133,7 @@ export function applyCustomVars(raw: string | null): void {
 
 export function resolveTheme(): ThemeId {
   if (userOverride) return userOverride
-  const fromUrl = new URLSearchParams(location.search).get("gb_style")
+  const fromUrl = urlPrefsEnabled ? new URLSearchParams(location.search).get("gb_style") : null
   if (fromUrl && isTheme(fromUrl)) return fromUrl
   const saved = localStorage.getItem(STYLE_KEY)
   if (saved && isTheme(saved)) return saved
@@ -138,7 +146,7 @@ export function resolveTheme(): ThemeId {
 export function resolveCnyScheme(): CnySchemeId | null {
   if (userCnyScheme === "reset") return null
   if (userCnyScheme) return userCnyScheme
-  const fromUrl = new URLSearchParams(location.search).get("gb_cny")
+  const fromUrl = urlPrefsEnabled ? new URLSearchParams(location.search).get("gb_cny") : null
   if (fromUrl && isCnyScheme(fromUrl)) return fromUrl
   const saved = localStorage.getItem(SCHEME_KEY)
   if (saved && isCnyScheme(saved)) return saved
@@ -149,7 +157,7 @@ export function resolveCnyScheme(): CnySchemeId | null {
 export function resolveAcrylicLt(): AcrylicLtId | null {
   if (userAcrylicLt === "reset") return null
   if (userAcrylicLt) return userAcrylicLt
-  const fromUrl = new URLSearchParams(location.search).get("gb_acrylic_lt")
+  const fromUrl = urlPrefsEnabled ? new URLSearchParams(location.search).get("gb_acrylic_lt") : null
   if (fromUrl && isAcrylicLt(fromUrl)) return fromUrl
   const saved = localStorage.getItem(ACRYLIC_LT_KEY)
   if (saved && isAcrylicLt(saved)) return saved
@@ -276,10 +284,46 @@ export function setAcrylicLt(lt: AcrylicLtId | null): void {
  * 一次性把用户级偏好全部落到位——data-theme、主题 CSS、人民币面额配色、默认主题黑白、品牌化变量。
  * 漏掉任何一项都会导致"从主界面进工作台换了一套配色"。
  */
-export function initTheme(): void {
-  const params = new URLSearchParams(location.search)
-  applyCustomVars(params.get("gb_vars"))
+export function initTheme(opts: { urlPrefs?: boolean } = {}): void {
+  urlPrefsEnabled = opts.urlPrefs ?? true
+  if (urlPrefsEnabled) applyCustomVars(new URLSearchParams(location.search).get("gb_vars"))
   applyCnyScheme(resolveCnyScheme())
   applyAcrylicLt(resolveAcrylicLt())
   void applyTheme(resolveTheme())
+  bindStorageSync()
+}
+
+/**
+ * 跨标签页同步：主题是**用户级偏好**（localStorage），主界面改主题后，已打开的
+ * 工作台标签页（以及反向）应即时跟随——否则「两页共享一套主题」在长开的标签页上名不副实，
+ * 要等到刷新才变。只重放实际变化的项，避免无谓的 View Transition 与组件重绘。
+ */
+function bindStorageSync(): void {
+  if (storageBound) return
+  storageBound = true
+  window.addEventListener("storage", (e) => {
+    if (e.storageArea !== localStorage) return
+    const all = e.key === null // localStorage.clear()
+    if (all || e.key === STYLE_KEY) {
+      userOverride = null // 持久化值即权威（本标签的手动选择被其他标签的显式选择取代）
+      const next = resolveTheme()
+      if (next !== document.documentElement.dataset.theme) void applyTheme(next)
+    }
+    if (all || e.key === SCHEME_KEY) {
+      userCnyScheme = null
+      const next = resolveCnyScheme()
+      if (next !== (document.documentElement.dataset.cnyScheme ?? null)) {
+        applyCnyScheme(next)
+        notifyThemeChange()
+      }
+    }
+    if (all || e.key === ACRYLIC_LT_KEY) {
+      userAcrylicLt = null
+      const next = resolveAcrylicLt()
+      if (next !== (document.documentElement.dataset.acrylicLt ?? null)) {
+        applyAcrylicLt(next)
+        notifyThemeChange()
+      }
+    }
+  })
 }

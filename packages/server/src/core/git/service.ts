@@ -662,6 +662,30 @@ export class GitService {
   }
 
   /**
+   * 差异统计摘要（对齐 `git diff --stat` 的形状：每文件一行 + 末尾汇总）。
+   *
+   * 为什么自己拼：`--stat` 是**又一次完整内容 diff**（含重命名探测），而我们只要一行摘要
+   * 加每文件的增删数——后者已经在 files 里算好了（调用方为 hunk 解析付过代价了）。
+   * 文件多时只列前 200 行（与 `--stat` 截断显示同一个意思），避免响应体白胖。
+   */
+  private summarize(files: GitFileDiff[]): string {
+    if (!files.length) return ""
+    const lines = files.slice(0, 200).map((f) => {
+      const total = f.additions + f.deletions
+      const bar = `${"+".repeat(Math.min(f.additions, 40))}${"-".repeat(Math.min(f.deletions, 40))}`
+      return ` ${f.path} | ${total} ${bar}`.trimEnd()
+    })
+    if (files.length > 200) lines.push(` …（另有 ${files.length - 200} 个文件）`)
+    const ins = files.reduce((n, f) => n + f.additions, 0)
+    const del = files.reduce((n, f) => n + f.deletions, 0)
+    const parts = [`${files.length} file${files.length === 1 ? "" : "s"} changed`]
+    if (ins) parts.push(`${ins} insertion${ins === 1 ? "" : "s"}(+)`)
+    if (del) parts.push(`${del} deletion${del === 1 ? "" : "s"}(-)`)
+    lines.push(` ${parts.join(", ")}`)
+    return lines.join("\n")
+  }
+
+  /**
    * 任意两端对比总览：文件清单（含状态/增删行数/重命名前后路径）+ 统计。
    * 前端「比较」视图的数据源（A 端 / B 端可分别选提交、分支、标签、工作区、暂存区）。
    */
@@ -702,10 +726,11 @@ export class GitService {
     // --name-status 的代价很小，却能把**文件清单的完整性**与逐行内容分开——
     // 用户至少知道「这次提交一共动了哪些文件」。
     await this.mergeNameStatus(root, args, files)
-    const statRes = await this.run([...args, "--stat"], root, { allowFail: true })
     const additions = files.reduce((n, f) => n + f.additions, 0)
     const deletions = files.reduce((n, f) => n + f.deletions, 0)
-    return { files, additions, deletions, from: opts.from ?? "WORKTREE", to: opts.to ?? "WORKTREE", stats: statRes.stdout.trim(), mergeBaseOf, truncated: t.truncated }
+    // stats 由已算好的 files 汇总（不再跑 `git diff --stat`：那又是一次完整内容 diff，
+    // 只为拿一行摘要——见 summarize）
+    return { files, additions, deletions, from: opts.from ?? "WORKTREE", to: opts.to ?? "WORKTREE", stats: this.summarize(files), mergeBaseOf, truncated: t.truncated }
   }
 
   /** 单文件差异（任意两端组合：工作区/暂存区/两 rev）。 */
@@ -917,9 +942,47 @@ export class GitService {
       })
   }
 
-  /** 分支清单（本地 + 远程；跟踪分支附 ahead/behind）。 */
+  /**
+   * 分支清单（本地 + 远程；跟踪分支附 ahead/behind）。
+   *
+   * ahead/behind 用 `%(upstream:track)` **一次带出来**：早期是筛出跟踪分支后逐个
+   * `git rev-list --left-right --count`（上限 50 个 = 最多 50 次进程启动；Windows 上单次
+   * 约 65ms，大型仓库点开 Git 面板就是秒级等待）。现在零额外进程。
+   * 极老版本 git（< 2.13）不认识 `:track` 字段时会整条 for-each-ref 失败，退回旧的逐分支计数路径。
+   */
   async branches(dir: string): Promise<GitBranch[]> {
     const root = await this.requireRepo(dir)
+    const fields = ["%(refname:short)", "%(objectname)", "%(upstream:short)"]
+    const fmt = [...fields, "%(upstream:track)", "%(HEAD)", "%(committerdate:unix)", "%(contents:subject)"].join(F)
+    const res = await this.run(["for-each-ref", `--format=${fmt}`, "refs/heads", "refs/remotes"], root, { allowFail: true })
+    if (res.code !== 0) return this.branchesByRevList(root)
+    const out: GitBranch[] = []
+    for (const line of res.stdout.split("\n")) {
+      if (!line.includes(F)) continue
+      const [name, hash, upstream, track, head, time, subject] = line.split(F)
+      if (!name || name.endsWith("/HEAD")) continue
+      const b: GitBranch = {
+        name,
+        remote: name.includes("/") && !name.startsWith("refs/"),
+        current: head === "*",
+        hash: hash ?? "",
+        upstream: upstream || undefined,
+        time: time ? Number(time) * 1000 : undefined,
+        subject: subject || undefined,
+      }
+      // track 形如 `[ahead 2, behind 1]` / `[ahead 2]` / `[behind 1]` / `[gone]`；同步时为 None
+      const ahead = /ahead (\d+)/.exec(track ?? "")
+      const behind = /behind (\d+)/.exec(track ?? "")
+      if (ahead) b.ahead = Number(ahead[1])
+      if (behind) b.behind = Number(behind[1])
+      out.push(b)
+    }
+    out.sort((a, b) => (a.current ? -1 : b.current ? 1 : a.remote === b.remote ? a.name.localeCompare(b.name) : a.remote ? 1 : -1))
+    return out
+  }
+
+  /** 分支清单的兼容路径（不支持 `%(upstream:track)` 的老 git）：查询后逐分支 rev-list 数 ahead/behind。 */
+  private async branchesByRevList(root: string): Promise<GitBranch[]> {
     const fmt = ["%(refname:short)", "%(objectname)", "%(upstream:short)", "%(HEAD)", "%(committerdate:unix)", "%(contents:subject)"].join(F)
     const res = await this.run(["for-each-ref", `--format=${fmt}`, "refs/heads", "refs/remotes"], root, { allowFail: true })
     const out: GitBranch[] = []
@@ -927,10 +990,9 @@ export class GitService {
       if (!line.includes(F)) continue
       const [name, hash, upstream, head, time, subject] = line.split(F)
       if (!name || name.endsWith("/HEAD")) continue
-      const remote = name.includes("/") && !name.startsWith("refs/")
       out.push({
         name,
-        remote,
+        remote: name.includes("/") && !name.startsWith("refs/"),
         current: head === "*",
         hash: hash ?? "",
         upstream: upstream || undefined,
@@ -938,7 +1000,7 @@ export class GitService {
         subject: subject || undefined,
       })
     }
-    // ahead/behind：仅对跟踪分支计算（上限 50 个，避免大仓库慢）
+    // ahead/behind：仅对跟踪分支计算（上限 50 个，避开大仓库慢）
     for (const b of out.filter((x) => x.upstream).slice(0, 50)) {
       const r = await this.run(["rev-list", "--left-right", "--count", `${b.name}...${b.upstream}`], root, { allowFail: true })
       const m = /^(\d+)\s+(\d+)/.exec(r.stdout.trim())

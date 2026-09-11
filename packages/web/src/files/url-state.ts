@@ -22,12 +22,16 @@ export interface UrlState {
 }
 
 /**
- * 构造新的 query：保留与本页无关但需要透传的参数（如 session / diffRoot / gb_style），
+ * 构造新的 query：保留与本页无关但需要透传的参数（如 session / diffRoot），
  * 只更新 root / path / line 三件套。
+ *
+ * `gb_style` 是**删除**项：主题已改走 localStorage（两页共享用户级偏好，见 theme-core 的
+ * initTheme），地址栏不再承接它——顺手把历史链接里的残留参数清掉，否则它会一直盖住用户偏好。
  */
 export function buildQuery(current: string, st: UrlState): string {
   const p = new URLSearchParams(current)
   p.delete("gb_root") // 旧参数名，避免与新 root 并存产生歧义
+  p.delete("gb_style") // 主题不进 URL
   if (st.root) p.set("root", st.root)
   else p.delete("root")
   if (st.path) p.set("path", st.path)

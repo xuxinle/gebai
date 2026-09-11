@@ -99,12 +99,25 @@ function renderImage(host: HTMLElement, ctx: ViewerCtx): () => void {
     },
     { passive: false },
   )
-  // 拖拽平移（放大后查看局部）
+  // 拖拽平移（放大后查看局部）：window 上的 mousemove/mouseup **只在拖动期间挂**，松手即摘。
+  // 早期是建视图时注册、永不摘——每开一张图就漏一对全局监听器（闭包还持着 stage）
   let dragging = false
   let sx = 0
   let sy = 0
   let sl = 0
   let st = 0
+  const onMove = (e: MouseEvent): void => {
+    if (!dragging) return
+    stage.scrollLeft = sl - (e.clientX - sx)
+    stage.scrollTop = st - (e.clientY - sy)
+  }
+  const onUp = (): void => {
+    if (!dragging) return
+    dragging = false
+    stage.classList.remove("dragging")
+    window.removeEventListener("mousemove", onMove)
+    window.removeEventListener("mouseup", onUp)
+  }
   stage.addEventListener("mousedown", (e) => {
     if (fit) return
     dragging = true
@@ -113,15 +126,8 @@ function renderImage(host: HTMLElement, ctx: ViewerCtx): () => void {
     sl = stage.scrollLeft
     st = stage.scrollTop
     stage.classList.add("dragging")
-  })
-  window.addEventListener("mousemove", (e) => {
-    if (!dragging) return
-    stage.scrollLeft = sl - (e.clientX - sx)
-    stage.scrollTop = st - (e.clientY - sy)
-  })
-  window.addEventListener("mouseup", () => {
-    dragging = false
-    stage.classList.remove("dragging")
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
   })
   apply()
   host.appendChild(bar)
@@ -138,6 +144,7 @@ function renderImage(host: HTMLElement, ctx: ViewerCtx): () => void {
   })
   return () => {
     img.removeEventListener("dblclick", onDouble)
+    onUp() // 拖动中被关闭：顺手把 window 监听一起摘掉
   }
 }
 

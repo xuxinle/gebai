@@ -16,7 +16,9 @@
  *   · `path`     = 直达文件（会话相对或绝对路径均可，工作台自行定位所属根）；
  *   · `line`     = 直达行号（1 起始，与 `path` 同用）；
  *   · `from`/`to`= 直接开比较视图的两端；
- *   · `gb_style` = 当前 UI 主题（沿用，避免两页主题不一致）。
+ *   · 主题**不进 URL**：工作台与主界面共享同一份用户级偏好（localStorage `gebai.ui.style`，
+ *     theme-core 的 initTheme 会以 urlPrefs:false 忽略 URL 上的主题参数），
+ *     否则一个旧链接就能把两页拆成两套配色。
  */
 import { getCurrentSession } from "./state"
 
@@ -33,14 +35,12 @@ export interface FilesOpenOpts {
   session?: string
 }
 
-/** 文件工作台 URL（保留会话上下文与当前主题）。 */
+/** 文件工作台 URL（保留会话上下文；主题不走 URL）。 */
 export function filesUrl(opts: FilesOpenOpts = {}): string {
   const base = (import.meta.env.BASE_URL || "/").replace(/\/$/, "")
   const params = new URLSearchParams()
   const session = opts.session ?? getCurrentSession()?.id
   if (session) params.set("session", session)
-  const theme = document.documentElement.dataset.theme
-  if (theme) params.set("gb_style", theme)
   if (opts.root) params.set("root", opts.root)
   if (opts.project) params.set("project", opts.project)
   if (opts.path) params.set("path", opts.path)

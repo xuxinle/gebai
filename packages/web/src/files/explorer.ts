@@ -151,30 +151,75 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
 
   /* --------------------------- 树渲染 --------------------------- */
 
+  /** 行索引：path → 行元素 / path → 条目。选中态切换、装饰刷新、reveal 定位都靠它，
+   * 省掉每次交互遍历整棵树（早期 `querySelectorAll(".fw-tree-row")` 是 O(行数)）。 */
+  const rowByPath = new Map<string, HTMLElement>()
+  const entryByPath = new Map<string, DirEntry>()
+
   /** 行上的 Git 状态类全集（刷新前先清除，避免旧状态残留）。 */
   const DECO_CLASSES = ["conflict", "untracked", "added", "deleted", "renamed", "staged", "modified", "child", "ignored"] as const
 
-  function gitDecoration(path: string, isDir: boolean): { mark: string; cls: string; title: string } | null {
+  interface Deco {
+    mark: string
+    cls: string
+    title: string
+  }
+
+  /** 「子项有变更」的目录装饰（中性灰点）。 */
+  const CHILD_DECO: Deco = { mark: "•", cls: "child", title: "该目录下有未提交变更" }
+
+  /**
+   * Git 装饰查询表 + 指纹。
+   *
+   * 为什么要建表：装饰是**按行**算的，早期实现每行都要在 `status.changes` 上做两轮线性扫描
+   * （精确命中 + 子项命中）—— 2000 行树 × 500 条变更 = 每次刷新百万级字符串比较，而且
+   * **渲染路径上就会调它**（每次展开目录/点文件/刷新状态都要重跑一次）。改成一次 O(变更数) 建表：
+   * `files` 是路径精确命中，`dirs` 是“有变更的祖先目录”集合，行内只剩 Map/Set 查询。
+   * 指纹（仓库前缀 + 每条变更的路径/类型/三态）未变则直接复用上次的表。
+   */
+  let decoTable: { fp: string; files: Map<string, Deco>; dirs: Set<string> } | null = null
+
+  function decoFor(): { files: Map<string, Deco>; dirs: Set<string> } {
+    const status = hooks.gitStatus()
+    const prefix = hooks.repoPathPrefix()
+    const parts: string[] = []
+    if (status?.isRepo) {
+      for (const c of status.changes) parts.push(`${c.path}\u0001${c.kind}\u0001${c.staged ? 1 : 0}${c.unstaged ? 1 : 0}${c.untracked ? 1 : 0}${c.conflicted ? 1 : 0}`)
+    }
+    const fp = `${status?.isRepo ? "1" : "0"}\u0002${prefix}\u0002${parts.join("\u0003")}`
+    if (decoTable?.fp === fp) return decoTable
+    const files = new Map<string, Deco>()
+    const dirs = new Set<string>()
+    if (status?.isRepo) {
+      for (const c of status.changes) {
+        const repoRel = prefix ? (c.path.startsWith(prefix) ? c.path.slice(prefix.length + 1) : "") : c.path
+        if (!repoRel) continue
+        if (!files.has(repoRel)) {
+          const mark = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.staged && !c.unstaged ? "S" : "M"
+          const cls = c.conflicted ? "conflict" : c.untracked ? "untracked" : c.kind === "deleted" ? "deleted" : c.staged && !c.unstaged ? "staged" : "modified"
+          files.set(repoRel, { mark, cls, title: `Git: ${c.kind}${c.staged ? "（已暂存）" : ""}` })
+        }
+        // 该变更的各级祖先目录都算「子项有变更」（与旧实现里 c.path.startsWith(dir + "/") 等价）
+        for (let i = repoRel.lastIndexOf("/"); i > 0; i = repoRel.lastIndexOf("/", i - 1)) dirs.add(repoRel.slice(0, i))
+      }
+    }
+    decoTable = { fp, files, dirs }
+    return decoTable
+  }
+
+  /** 一行的装饰（非仓库 / 仓库外 / 根行 → null）。 */
+  function decoOf(path: string, isDir: boolean): Deco | null {
     const status = hooks.gitStatus()
     if (!status?.isRepo) return null
     const prefix = hooks.repoPathPrefix()
-    const repoRel = prefix && path.startsWith(prefix) ? path.slice(prefix.length + 1) : prefix ? "" : path
-    if (!repoRel && !isDir) return null
-    for (const c of status.changes) {
-      if (c.path === repoRel || (isDir && repoRel && c.path.startsWith(`${repoRel}/`))) {
-        const ch = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.staged && !c.unstaged ? "S" : "M"
-        const cls = c.conflicted ? "conflict" : c.untracked ? "untracked" : c.kind === "deleted" ? "deleted" : c.staged && !c.unstaged ? "staged" : "modified"
-        return { mark: ch, cls, title: `Git: ${c.kind}${c.staged ? "（已暂存）" : ""}` }
-      }
-    }
-    for (const c of status.changes) {
-      if (c.path.startsWith(`${repoRel || ""}/`)) return { mark: "•", cls: "child", title: "该目录下有未提交变更" }
-    }
-    return null
+    const repoRel = prefix ? (path.startsWith(prefix) ? path.slice(prefix.length + 1) : "") : path
+    if (!repoRel) return null
+    const table = decoFor()
+    return table.files.get(repoRel) ?? (isDir && table.dirs.has(repoRel) ? CHILD_DECO : null)
   }
 
   /**
-   * 就地把 Git 装饰应用到一行（徽标 + 状态类）。
+   * 就地把 Git 装饰应用到一行（徽标 + 状态类）；**装饰未变则完全不碰 DOM**。
    *
    * 为什么不重渲染整树：树的展开状态、滚动位置、选中项都在 DOM 里，
    * 每次 git 状态变化就重建会「折叠回去 + 滚动跳顶」。这里只换装饰元素。
@@ -182,7 +227,10 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
   function applyDecoration(row: HTMLElement): void {
     const path = row.dataset.path ?? ""
     const isDir = row.classList.contains("dir")
-    const deco = gitDecoration(path, isDir)
+    const deco = decoOf(path, isDir)
+    const key = deco ? `${deco.cls}\u0001${deco.title}` : ""
+    if (row.dataset.deco === key) return
+    row.dataset.deco = key
     for (const c of DECO_CLASSES) row.classList.remove(`git-${c}`)
     if (deco) row.classList.add(`git-${deco.cls}`)
     const old = row.querySelector(".fw-git-mark, .fw-git-mark-gap")
@@ -195,23 +243,17 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
 
   /** Git 装饰刷新（git 状态到达/变化后由宿主调用——状态到达晚于首次渲染，必须回填）。 */
   function refreshGitDecorations(): void {
-    const status = hooks.gitStatus()
-    if (!status?.isRepo) {
-      for (const row of treeHost.querySelectorAll<HTMLElement>(".fw-tree-row")) {
-        for (const c of DECO_CLASSES) row.classList.remove(`git-${c}`)
-        row.querySelector(".fw-git-mark")?.replaceWith(h("span", { class: "fw-git-mark-gap" }))
-      }
-      return
-    }
-    for (const row of treeHost.querySelectorAll<HTMLElement>(".fw-tree-row")) applyDecoration(row)
+    for (const row of rowByPath.values()) applyDecoration(row)
   }
 
   function renderEntry(entry: DirEntry, depth: number): HTMLElement {
     const isDir = entry.type === "dir"
     const exp = isDir && (expanded.get(rootId)?.has(entry.path) ?? false)
+    // 选中/活动态不在建行时写死：统一由 refreshSelection() 落位（见那里为何）
     const row = h("div", {
-      class: `fw-tree-row ${isDir ? "dir" : "file"}${selectedPath === entry.path ? " selected" : ""}${hooks.activeFile()?.path === entry.path && hooks.activeFile()?.root === rootId ? " active" : ""}`,
+      class: `fw-tree-row ${isDir ? "dir" : "file"}`,
       "data-path": entry.path,
+      "data-depth": depth,
       draggable: "true",
     })
     row.style.paddingLeft = `${6 + depth * 13}px`
@@ -265,10 +307,12 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
         void handleDrop(e, entry.path)
       }
     }
+    rowByPath.set(entry.path, row)
+    entryByPath.set(entry.path, entry)
     return row
   }
 
-  function renderChildren(container: HTMLElement, path: string, depth: number): void {
+  function renderChildren(container: HTMLElement | DocumentFragment, path: string, depth: number): void {
     const entries = entriesOf(path)
     if (!entries) return
     const needle = depth === 0 && filterText ? filterText.toLowerCase() : ""
@@ -281,24 +325,75 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     }
   }
 
+  let lastSelectedRow: HTMLElement | null = null
+  let lastActiveRow: HTMLElement | null = null
+
+  /** 整树重建（换根/刷新/排序/过滤/展开失败等需要重排整树的场合；日常展开收起走局部增删）。 */
   function render(): void {
-    clear(treeHost)
+    rowByPath.clear()
+    entryByPath.clear()
+    lastSelectedRow = null
+    lastActiveRow = null
     const entries = entriesOf("")
     if (!entries) {
-      treeHost.appendChild(h("div", { class: "fw-loading", text: "加载中…" }))
+      treeHost.replaceChildren(h("div", { class: "fw-loading", text: "加载中…" }))
       return
     }
-    if (!entries.length) treeHost.appendChild(h("div", { class: "fw-empty", text: "空目录" }))
-    renderChildren(treeHost, "", 0)
+    // 先在片段上拼好整棵树再一次性提交：逐条 appendChild 到活动 DOM 会催生 N 次布局
+    const frag = document.createDocumentFragment()
+    if (!entries.length) frag.appendChild(h("div", { class: "fw-empty", text: "空目录" }))
+    renderChildren(frag, "", 0)
+    // 过滤后顶层一条都没命中：给个明确空态（否则是一块纯空白面板，看着像还没加载出来）
+    if (entries.length && filterText && !frag.querySelector(".fw-tree-row")) {
+      frag.appendChild(h("div", { class: "fw-empty", text: `当前目录无匹配「${filterText}」的条目` }))
+    }
+    treeHost.replaceChildren(frag)
+    refreshSelection()
     updateCrumbs()
   }
 
+  /** 目录行之后、属于它子树的连续行（扁平渲染下「深度大于本行」的行恰好就是它的子树）。 */
+  function subtreeRows(dirRow: HTMLElement): HTMLElement[] {
+    const depth = Number(dirRow.dataset.depth ?? 0)
+    const out: HTMLElement[] = []
+    for (let n = dirRow.nextElementSibling as HTMLElement | null; n && n.classList.contains("fw-tree-row") && Number(n.dataset.depth ?? 0) > depth; n = n.nextElementSibling as HTMLElement | null) {
+      out.push(n)
+    }
+    return out
+  }
+
+  /** 目录行的展开态：只换 twisty 图标与提示（CSS 靠图标区分开合，行本身不重建）。 */
+  function setDirOpen(row: HTMLElement, open: boolean): void {
+    const t = row.querySelector(".fw-twisty")
+    if (!t) return
+    t.setAttribute("title", open ? "折叠" : "展开")
+    t.replaceChildren(icon(open ? "chevronDown" : "chevronRight", 12))
+  }
+
+  /**
+   * 展开 / 收起目录。
+   *
+   * 早期实现无论开合都 `render()` 整树重建——于是在大目录里「展开一个子目录」也要重建
+   * 已展开的全部行（含每行的图标与命令闭包），这是树上最贵的操作。现在：
+   * 收起 = 删掉该行之后的子树行；展开 = 只把新子树插到该行之后，其余行（含滚动位置、
+   * 选中项、已有编辑器的行）原封不动。只有目标行已不在（发生过重建）时才回退到整树重建。
+   */
   async function toggleDir(path: string, forceOpen = false): Promise<void> {
     const set = expanded.get(rootId) ?? new Set<string>()
     expanded.set(rootId, set)
+    const row = rowByPath.get(path)
     if (set.has(path) && !forceOpen) {
       set.delete(path)
-      render()
+      if (!row) {
+        render()
+        return
+      }
+      for (const r of subtreeRows(row)) {
+        rowByPath.delete(r.dataset.path ?? "")
+        entryByPath.delete(r.dataset.path ?? "")
+        r.remove()
+      }
+      setDirOpen(row, false)
       return
     }
     set.add(path)
@@ -307,13 +402,38 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     } catch (err) {
       toast(`无法展开：${(err as Error).message}`, "error")
       set.delete(path)
+      return
+    }
+    const dirRow = rowByPath.get(path)
+    if (dirRow && !subtreeRows(dirRow).length) {
+      const frag = document.createDocumentFragment()
+      renderChildren(frag, path, Number(dirRow.dataset.depth ?? 0) + 1)
+      dirRow.after(frag)
+      setDirOpen(dirRow, true)
+      refreshSelection()
+      return
     }
     render()
   }
 
+  /**
+   * 选中/活动态刷新：只动「上一个 / 当前」两行。
+   * 早期实现每次点击/右键都遍历全部行做 `classList.toggle`（大树上每次点击 ~O(行数)），
+   * 而且活动态只在整树重建时更新（切标签后高亮会滞后）。
+   */
   function refreshSelection(): void {
-    for (const row of treeHost.querySelectorAll<HTMLElement>(".fw-tree-row")) {
-      row.classList.toggle("selected", row.dataset.path === selectedPath)
+    const selRow = selectedPath ? rowByPath.get(selectedPath) ?? null : null
+    if (selRow !== lastSelectedRow) {
+      lastSelectedRow?.classList.remove("selected")
+      selRow?.classList.add("selected")
+      lastSelectedRow = selRow
+    }
+    const act = hooks.activeFile()
+    const actRow = act && act.root === rootId ? rowByPath.get(act.path) ?? null : null
+    if (actRow !== lastActiveRow) {
+      lastActiveRow?.classList.remove("active")
+      actRow?.classList.add("active")
+      lastActiveRow = actRow
     }
   }
 
@@ -566,9 +686,15 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     showMenu(r.left, r.bottom + 4, items as never)
   }
 
+  // 过滤输入防抖：每敲一个字符就整树重建（整树 = 全量行重建）会直接把输入拖卡
+  let filterTimer: number | null = null
   filterInput.oninput = () => {
-    filterText = filterInput.value.trim()
-    render()
+    if (filterTimer !== null) window.clearTimeout(filterTimer)
+    filterTimer = window.setTimeout(() => {
+      filterTimer = null
+      filterText = filterInput.value.trim()
+      render()
+    }, 140)
   }
 
   treeHost.oncontextmenu = (e) => {
@@ -615,8 +741,12 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     let acc = ""
     const set = expanded.get(rootId) ?? new Set<string>()
     expanded.set(rootId, set)
+    // 展开集合或选中项真的变了、或树里还没有这一行时才重建整树：
+    // 早期无条件 render()，于是每次切标签（activate → reveal）都重建一次整树
+    let changed = !rowByPath.has(path)
     for (let i = 0; i < parts.length - 1; i++) {
       acc = acc ? `${acc}/${parts[i]}` : parts[i]
+      if (!set.has(acc)) changed = true
       set.add(acc)
       try {
         await loadDir(acc)
@@ -624,10 +754,17 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
         break
       }
     }
-    if (opts.select !== false) selectedPath = path
-    render()
-    const row = treeHost.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`)
-    row?.scrollIntoView({ block: "nearest" })
+    if (opts.select !== false && selectedPath !== path) {
+      selectedPath = path
+      changed = true
+    }
+    if (changed) {
+      render()
+    } else {
+      refreshSelection()
+      updateCrumbs()
+    }
+    rowByPath.get(path)?.scrollIntoView({ block: "nearest" })
     // 定位跳转（面包屑 / 深层链接 / 前进后退）同样要同步地址栏
     hooks.onNavigate?.(path, parts.length === 0 ? true : !path.includes("."))
   }
@@ -642,6 +779,10 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     selected: () => (selectedPath ? { path: selectedPath, type: (entriesOf(selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "")?.find((x) => x.path === selectedPath)?.type ?? "file") as DirEntry["type"] } : null),
     dispose: () => {
       cache.clear()
+      rowByPath.clear()
+      entryByPath.clear()
+      decoTable = null
+      if (filterTimer !== null) window.clearTimeout(filterTimer)
     },
   }
 }

@@ -239,10 +239,17 @@ function ensureBridge(): void {
     if (data?.type === "gebai:files-open-tab") window.open(frame?.src ?? filesUrl(lastOpts), "_blank", "noopener")
   })
 
-  // 窗口缩小到分屏下限以下：自动退出（否则两侧都挤成条，比新标签更糟）
+  // 窗口缩小到分屏下限以下：自动退出（否则两侧都挤成条，比新标签更糟）。
+  // 合并到一帧：拖动窗口时 resize 每事件一次，量 rect + 写 CSS 变量会连带着抖动
+  let resizeRaf = 0
   window.addEventListener("resize", () => {
-    if (isSplitOpen() && window.innerWidth < MIN_WINDOW) exitSplit()
-    else if (isSplitOpen()) applyWidth(pane ? Math.round(pane.getBoundingClientRect().width) : null)
+    if (resizeRaf) return
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = 0
+      if (!isSplitOpen()) return
+      if (window.innerWidth < MIN_WINDOW) exitSplit()
+      else applyWidth(pane ? Math.round(pane.getBoundingClientRect().width) : null)
+    })
   })
 }
 

@@ -94,8 +94,14 @@ const ICONS: Record<string, string> = {
   external: '<path d="M9.5 2.5H14V7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 2.5L8 8.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 9.5V13a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
 }
 
-/** 生成图标元素（14px，currentColor）。 */
+/** 图标元素缓存：目录树每行 1~2 个图标，逐次 `innerHTML` 解析 SVG 是纯浪费（克隆已有节点即可）。 */
+const iconCache = new Map<string, SVGSVGElement>()
+
+/** 生成图标元素（默认 14px，currentColor）。返回的总是新节点（可安全改属性/挂监听）。 */
 export function icon(name: keyof typeof ICONS | string, size = 14): SVGSVGElement {
+  const key = `${name}|${size}`
+  const cached = iconCache.get(key)
+  if (cached) return cached.cloneNode(true) as SVGSVGElement
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
   svg.setAttribute("viewBox", "0 0 16 16")
   svg.setAttribute("width", String(size))
@@ -103,7 +109,8 @@ export function icon(name: keyof typeof ICONS | string, size = 14): SVGSVGElemen
   svg.setAttribute("class", "fw-icon")
   svg.setAttribute("aria-hidden", "true")
   svg.innerHTML = ICONS[name] ?? ICONS.file
-  return svg
+  iconCache.set(key, svg)
+  return svg.cloneNode(true) as SVGSVGElement
 }
 
 export { ICONS }
@@ -298,8 +305,11 @@ export interface MenuItem {
 }
 
 let menuHost: HTMLElement | null = null
+/** 当前菜单的全局监听卸载函数（closeMenu 必须调它，不能只靠 MutationObserver——见 showMenu 注释）。 */
+let menuCleanup: (() => void) | null = null
 
 export function closeMenu(): void {
+  menuCleanup?.()
   menuHost?.remove()
   menuHost = null
 }
@@ -358,20 +368,25 @@ export function showMenu(x: number, y: number, items: MenuItem[]): void {
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeMenu()
   }
-  setTimeout(() => {
-    document.addEventListener("mousedown", onDown)
-    document.addEventListener("keydown", onKey)
-  }, 0)
   const cleanup = () => {
     document.removeEventListener("mousedown", onDown)
     document.removeEventListener("keydown", onKey)
-    if (menuHost === host) menuHost = null
     observer.disconnect()
+    if (menuCleanup === cleanup) menuCleanup = null
   }
   const observer = new MutationObserver(() => {
     if (!document.body.contains(host)) cleanup()
   })
+  /*
+   * 同步注册监听：早期用 `setTimeout(..., 0)` 延后注册、只靠 MutationObserver 清理——
+   * 若菜单在下一宏任务前就被关闭（快速连开两次菜单），清理已经跑完、监听随后才加上，
+   * 于是每开一次菜单就多一对永不摘除的 document 监听器（闭包还持着已移除的菜单 DOM）。
+   * 不会误关当前这次点击：打开菜单的都是 click/contextmenu，而 mousedown 早在它们之前就已派发完。
+   */
+  document.addEventListener("mousedown", onDown)
+  document.addEventListener("keydown", onKey)
   observer.observe(document.body, { childList: true })
+  menuCleanup = cleanup
 }
 
 /** 下拉菜单（按钮锚定；用于工具栏菜单）。 */

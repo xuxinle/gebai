@@ -378,10 +378,6 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     if (logHasMore) {
       const more = h("button", { class: "fw-btn ghost sm fw-more", text: logLoading ? "加载中…" : "加载更多" })
       more.onclick = () => void loadLog(false)
-      // 滚动到底自动加载
-      list.onscroll = () => {
-        if (list.scrollTop + list.clientHeight > list.scrollHeight - 60 && !logLoading) void loadLog(false)
-      }
       list.appendChild(more)
     }
     colLog.replaceChildren(head, list)
@@ -758,7 +754,19 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
 
   /* ------------------------------ 主流程 ------------------------------ */
 
-  async function refresh(): Promise<void> {
+  /** 刷新中的 promise：同刻重复刷新合并（切根 + 保存 + F5 常在同一拍里触发）。 */
+  let refreshing: Promise<void> | null = null
+
+  function refresh(): Promise<void> {
+    if (refreshing) return refreshing
+    const p = doRefresh().finally(() => {
+      if (refreshing === p) refreshing = null
+    })
+    refreshing = p
+    return p
+  }
+
+  async function doRefresh(): Promise<void> {
     renderTitleBar()
     renderRefsTabs()
     applyCols()
@@ -778,6 +786,21 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     if (view === "log" || !logItems.length) await loadLog(logItems.length === 0)
     else renderLog()
   }
+
+  /*
+   * 日志「滚动到底自动加载」：监听**真正的滚动容器** colLog（`.fw-git-col-body`）。
+   * 早期把 onscroll 挂在 `.fw-log-list` 上，而该元素没有 overflow（滚动在父级 colLog 上）——
+   * 非滚动元素不产生 scroll 事件，自动加载实际是死代码（只剩「加载更多」按钮）。
+   * 容器常驻，挂一次即可；只在日志视图与有待续页时响应。
+   */
+  colLog.addEventListener(
+    "scroll",
+    () => {
+      if (view !== "log" || logLoading || !logHasMore) return
+      if (colLog.scrollTop + colLog.clientHeight > colLog.scrollHeight - 60) void loadLog(false)
+    },
+    { passive: true },
+  )
 
   bindColResizer(sp1, "a")
   bindColResizer(sp2, "c")
@@ -895,9 +918,28 @@ export async function mountDiffView(
     } else if (fallback?.binary) {
       wrap.appendChild(h("div", { class: "fw-empty", text: "二进制文件差异，无法逐行显示" }))
     } else if (fallback?.hunks.length) {
+      /*
+       * 行数上限：单文件 hunks 的服务端字符上限（maxFileChars）能装下**数万行**，
+       * 而每行是 4 个 span —— 十万级节点会让主线程停机数秒（“点开大 diff 就卡死”）。
+       * 超出就只渲染前 MAX_LINES 行并明确告知行数，不让用户以为“差异就这么点”。
+       */
+      const MAX_LINES = 3000
+      let rendered = 0
+      let skipped = 0
+      let full = false
       for (const hk of fallback.hunks) {
+        if (full) {
+          skipped += hk.lines.length
+          continue
+        }
         wrap.appendChild(h("div", { class: "fw-hunk-head", text: hk.header }))
         for (const line of hk.lines) {
+          if (rendered >= MAX_LINES) {
+            full = true
+            skipped++
+            continue
+          }
+          rendered++
           wrap.appendChild(
             h("div", { class: `fw-hunk-line ${line.type}` }, [
               h("span", { class: "fw-hunk-no", text: line.oldLine ? String(line.oldLine) : "" }),
@@ -908,6 +950,7 @@ export async function mountDiffView(
           )
         }
       }
+      if (skipped) wrap.appendChild(h("div", { class: "fw-empty", text: `差异过大：仅渲染前 ${MAX_LINES} 行，另有 ${skipped} 行未显示（可下载查看完整差异）` }))
     } else {
       wrap.appendChild(h("div", { class: "fw-empty", text: headNote ? "无逐行差异可显示" : "该端点对下此文件无内容差异（可能只是重命名或权限变更）" }))
     }

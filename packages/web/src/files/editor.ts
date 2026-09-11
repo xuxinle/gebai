@@ -167,9 +167,23 @@ export function prewarmMonaco(): void {
   const run = (): void => {
     void loadMonaco().catch(() => undefined)
   }
-  const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback
-  if (typeof ric === "function") ric(run, { timeout: 2500 })
-  else setTimeout(run, 500)
+  const schedule = (): void => {
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback
+    if (typeof ric === "function") ric(run, { timeout: 2500 })
+    else setTimeout(run, 500)
+  }
+  // 后台标签页（Ctrl+点击开的新标签）：首屏并不在看，先不拉这 1MB，等切到前台再预热
+  if (document.hidden) {
+    document.addEventListener(
+      "visibilitychange",
+      () => {
+        if (!document.hidden) schedule()
+      },
+      { once: true },
+    )
+    return
+  }
+  schedule()
 }
 
 /* --------------------------- 主题映射 --------------------------- */
@@ -294,6 +308,20 @@ export { currentTheme }
 /** 大文件阈值：超过后关闭小地图与高级特性。 */
 const LARGE_FILE_CHARS = 1_500_000
 
+/**
+ * 选区字符数：按行长度累加算出，**不物化选区文本**。
+ *
+ * 早期这里用 `model.getValueInRange(sel).length`——选中多少就分配多少字符的字符串：
+ * 拖选/全选大文件时每个 mousemove 都要分配一遍（MB 级），是输入与拖选卡顿的元凶之一。
+ * 行长度是 Monaco 的行元数据（O(1)），累加只与**选中行数**相关，与字符量无关。
+ */
+function rangeLength(model: { getLineLength: (n: number) => number }, startLine: number, startColumn: number, endLine: number, endColumn: number): number {
+  if (endLine < startLine || (endLine === startLine && endColumn <= startColumn)) return 0
+  let len = endLine - startLine // 行间换行
+  for (let l = startLine; l <= endLine; l++) len += model.getLineLength(l)
+  return Math.max(0, len - (startColumn - 1) - (model.getLineLength(endLine) - endColumn + 1))
+}
+
 export async function createEditor(host: HTMLElement, opts: EditorOptions): Promise<EditorHandle> {
   const monaco = await loadMonaco()
   if (!monaco) return createFallbackEditor(host, opts)
@@ -329,6 +357,23 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     fixedOverflowWidgets: true,
   })
   let blameCollection: { clear: () => void } | null = null
+  /** 选区长度（同范围复用上次结果：光标事件与选区事件都会问一次，拖选时每个事件都要算） */
+  let selKey = ""
+  let selLen = 0
+  const selectionLength = (): number => {
+    const sel = ed.getSelection()
+    if (!sel || sel.isEmpty()) {
+      selKey = ""
+      selLen = 0
+      return 0
+    }
+    const key = `${sel.startLineNumber}:${sel.startColumn}-${sel.endLineNumber}:${sel.endColumn}`
+    if (key !== selKey) {
+      selKey = key
+      selLen = rangeLength(model, sel.startLineNumber, sel.startColumn, sel.endLineNumber, sel.endColumn)
+    }
+    return selLen
+  }
 
   return {
     kind: "monaco",
@@ -352,18 +397,14 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     setScrollTop: (top) => ed.setScrollTop(top),
     getCursor: () => {
       const pos = ed.getPosition()
-      const sel = ed.getSelection()
-      const len = sel ? model.getValueInRange(sel).length : 0
-      return { line: pos?.lineNumber ?? 1, column: pos?.column ?? 1, selected: len }
+      return { line: pos?.lineNumber ?? 1, column: pos?.column ?? 1, selected: selectionLength() }
     },
     onCursor: (cb) => {
       ed.onDidChangeCursorPosition((e) => {
-        const sel = ed.getSelection()
-        const len = sel ? model.getValueInRange(sel).length : 0
-        cb({ line: e.position.lineNumber, column: e.position.column, selected: len })
+        cb({ line: e.position.lineNumber, column: e.position.column, selected: selectionLength() })
       })
       ed.onDidChangeCursorSelection((e) => {
-        cb({ line: e.selection.positionLineNumber, column: e.selection.positionColumn, selected: model.getValueInRange(e.selection).length })
+        cb({ line: e.selection.positionLineNumber, column: e.selection.positionColumn, selected: selectionLength() })
       })
     },
     onChange: (cb) => {
@@ -530,27 +571,34 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
   const navCbs = new Set<(s: { index: number; total: number }) => void>()
   const changes = (): Array<{ originalStartLineNumber: number; originalEndLineNumber: number; modifiedStartLineNumber: number; modifiedEndLineNumber: number }> =>
     (ed.getLineChanges() ?? []) as never
+  /** 差异块清单缓存（滚动事件每帧都问；onDidUpdateDiff 时失效）。 */
+  let changeList: ReturnType<typeof changes> | null = null
+  const list = (): ReturnType<typeof changes> => (changeList ??= changes())
 
-  /** 视口顶部所在/之后的第一个差异块（都与视口无关时为最后一块）。 */
+  /** 视口顶部所在/之后的第一个差异块（都与视口无关时为最后一块）。按 modifiedEndLineNumber 单调递增做二分。 */
   function currentIndex(): number {
-    const cs = changes()
+    const cs = list()
     if (!cs.length) return -1
     const range = ed.getModifiedEditor().getVisibleRanges()[0]
     const top = range ? range.startLineNumber : 1
-    for (let i = 0; i < cs.length; i++) {
-      if (cs[i].modifiedEndLineNumber >= top) return i
+    let lo = 0
+    let hi = cs.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (cs[mid].modifiedEndLineNumber >= top) hi = mid
+      else lo = mid + 1
     }
-    return cs.length - 1
+    return cs[lo].modifiedEndLineNumber >= top ? lo : cs.length - 1
   }
 
   function emit(): void {
-    const total = changes().length
+    const total = list().length
     const s = { index: total ? currentIndex() + 1 : 0, total }
     for (const cb of navCbs) cb(s)
   }
 
   function reveal(i: number): void {
-    const cs = changes()
+    const cs = list()
     const c = cs[i]
     if (!c) return
     idx = i
@@ -576,19 +624,25 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
 
   /** 从当前块出发到下一（dir=1）/ 上一（dir=-1）处；到头**回卷**（连点不会没反馈地卡住，同 IDEA）。 */
   function step(dir: 1 | -1): void {
-    const cs = changes()
+    const cs = list()
     if (!cs.length) return
     const base = idx < 0 ? (dir === 1 ? -1 : 0) : idx
     const next = base + dir
     reveal(next < 0 ? cs.length - 1 : next >= cs.length ? 0 : next)
   }
 
-  // 滚动 / 差异重算后刷新计数
+  // 滚动 / 差异重算后刷新计数（滚动事件每帧都会回调：合并到一帧再算，计数 DOM 也随之少刷）
+  let scrollRaf = 0
   const sub = ed.getModifiedEditor().onDidScrollChange(() => {
-    if (idx >= 0) idx = currentIndex()
-    emit()
+    if (scrollRaf) return
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0
+      if (idx >= 0) idx = currentIndex()
+      emit()
+    })
   })
   const diffSub = ed.onDidUpdateDiff(() => {
+    changeList = null
     idx = -1
     emit()
   })
@@ -597,7 +651,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
   const nav: DiffNav = {
     next: () => step(1),
     prev: () => step(-1),
-    state: () => ({ index: changes().length ? Math.max(1, (idx < 0 ? currentIndex() : idx) + 1) : 0, total: changes().length }),
+    state: () => ({ index: list().length ? Math.max(1, (idx < 0 ? currentIndex() : idx) + 1) : 0, total: list().length }),
     onChange: (cb) => {
       navCbs.add(cb)
       cb(nav.state())

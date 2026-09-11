@@ -424,7 +424,7 @@ g 的墨迹下降 = 3px                                  ← 需要 3px → 被�
    （逐点移动指针穿过空隙：opacity 全程=1、最终 click 成功；修复前该路径 opacity 掉到 0）
    提示气泡 x=1240..1500（在主按钮左侧），与副按钮 x=1510 无重叠
 ③ 分屏：body.files-split、aside display=none、#app 列=800px 800px（50.0%）、标题栏整宽
-   iframe URL=/files?gb_style=…&root=…；内部工作台外壳渲染、Monaco 加载（monacoDom=1）
+   iframe URL=/files?root=…（主题不经 URL，靠 localStorage + postMessage）；内部工作台外壳渲染、Monaco 加载（monacoDom=1）
 ⑤ 拖动 760/480/700px 精确跟随；拖到 120px 被钳到 360px；双击复位 800px=50% 且清 localStorage
 ⑥ 主题：矩阵→matrix/matrix；人民币→cny/cny；面额 50 元→50/50（子页 data-cny-scheme 跟随）
 ⑦ 嵌入态「关闭分屏」：分屏关闭、iframe 未被导航走

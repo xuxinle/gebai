@@ -151,6 +151,13 @@
   border-right: 1px solid var(--border);
 }
 
+/* 左栏三视图常驻文档（切换只切显隐，见 main.ts 的 mountLeftView）：
+   这里的 !important 是必要的——视图根元素自己常带 display（flex/block），
+   UA 的 [hidden] 与普通类规则都会被它压过。 */
+.fw-left > .fw-view-hidden {
+  display: none !important;
+}
+
 /* 旧右侧面板已迁至底部工具窗（.fw-git-dock）；保留此块以免残留引用出错 */
 
 .fw-resizer {
@@ -2165,6 +2172,9 @@ button.fw-status-item:hover {
 }
 
 /* 对话框 */
+/** 对话框遮罩：不加 backdrop-filter。
+    全屏 blur 会让合成器把整个视口快照后重新模糊（每次开对话框/弹窗都付一遍），
+    而 `rgba(0,0,0,.5)` 已经足够压背景；菜单（小区域）的毛玻璃保留，那是主题观感的一部分。 */
 .fw-overlay {
   position: fixed;
   inset: 0;
@@ -2173,7 +2183,6 @@ button.fw-status-item:hover {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(2px);
 }
 
 .fw-dialog {
@@ -2326,7 +2335,7 @@ button.fw-status-item:hover {
 .fw-toast.out {
   opacity: 0;
   transform: translateY(6px);
-  transition: all 0.24s;
+  transition: opacity 0.24s, transform 0.24s;
 }
 
 .fw-toast.success {
