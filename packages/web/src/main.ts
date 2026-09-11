@@ -174,9 +174,9 @@ async function init() {
   bindFilesEntry()
   bindFilesSplit()
   restoreToken()
-  await loadToolCardMeta() // 工具卡片展示元数据（titleParams/args 模式），先于历史消息渲染就绪
-  // 外部身份扩展点（同源集成）：本地无令牌且服务端启用时，用 URL 参数/宿主 localStorage 的登录态兑换令牌
-  await tryExternalAuth()
+  // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
+  // 且服务端启用时用 URL 参数/宿主 localStorage 的登录态兑换令牌）互不依赖：并行发起，缩短首屏初始化串行链
+  await Promise.all([loadToolCardMeta(), tryExternalAuth()])
   bindSettings()
   bindAuth()
   bindComposer()

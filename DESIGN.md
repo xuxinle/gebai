@@ -60,6 +60,7 @@ GEBAI_HOME/
         ├── sessions/      # 会话持久化（按会话隔离，多层分片；分片段=会话 ID 自身前缀）
         │   └── {s0}/{s1}/{session_id}/    # {s0}=ID 前 2 位、{s1}=ID 第 3-4 位（肉眼可从 ID 推目录）
         │       ├── chat.json        # 会话消息
+│       ├── meta.json        # 列表元信息缓存（标题/时间/置顶/上下文用量 + 正文指纹，可重建）
         │       └── tmp/             # 该会话的临时文件工作区（附件、产物、截断文件等）
         │           └── truncated/   # 工具超长输出截断落盘（{tool_name}_{content_hash}.txt）
         ├── feedback/      # 用户反馈（按日期 + ID 前缀分片）
@@ -215,6 +216,17 @@ class GebaiClient {
 服务端内置 Web UI，由 Vite 构建打包并嵌入二进制。同一套 UI 同时服务于两种宿主：本地模式（WebView/浏览器）与服务模式（部署浏览器）。
 
 > **开发**：脚本调试模式（`bun run dev`）下服务端托管 `packages/web/dist` 构建产物。启动时若检测到 `packages/web` 源码比 `dist` 产物新（或 `dist` 缺失），会**自动执行 web 构建**后再监听端口，避免「改了前端代码但页面仍是旧产物」；二进制模式不触发（产物随二进制分发）。**开发热刷新**：`bun run dev --reload`（或 `GEBAI_DEV_RELOAD=1`）额外启动 `bun run build:watch`（先经 `scripts/clean-dist.ts` 带重试安全清空 dist——Windows 上 vite 内置 emptyDir 无重试、删除瞬时占用文件会抛 `ENOTEMPTY` 崩溃，故 vite 配置 `emptyOutDir: false`；再 `vite build --watch`）——Web 源码变更自动增量重建 dist，构建完成后经专用 WebSocket 通道（`/__gebai_hot`）广播，页面自动刷新；页面注入的监听脚本在连接断开（服务端重启）后也会自动刷新页面。**首轮构建窗口期兜底**：`--reload` 启动后 dist 会被 clean-dist 清空、vite 尚需数秒重建，此窗口期 `GET /` 读取不到 `index.html`——服务端不再抛 ENOENT 崩溃，而是返回 503 占位页（「前端构建中」，复用 `/__gebai_hot` 监听构建完成广播自动刷新，另以 3s 定时刷新兜底），构建完成后下次请求即返回真实页面；dev-reload 模式下即使 dist 目录整体暂时缺失，Web UI 路由也保持注册。**HTML 不缓存**：dev-reload 模式下 `GET /` 每次请求重读 `dist/index.html`（vite 每次重建产出新 hash 资源，若缓存启动时的旧 HTML，页面刷新后仍会加载旧资源、改动永不生效）；非 dev-reload（生产/二进制）模式维持启动后首次读取并缓存。
+
+> **首屏加载**：构建产物资源（`/assets` 指纹名、`/vendor` 引擎、`/fonts` 字体）由 `routes/static.ts` 统一托管，按 `Accept-Encoding` 协商 **Brotli（br 优先）/Gzip** 压缩——压缩结果按「路径+size+mtime+编码」在内存缓存（上限 32MB，超限按插入顺序淘汰），同一资源只压一次（vendor 引擎单文件数 MB，一次性 CPU 换长期带宽：plantuml.js 3.8MB → 942KB、main.js 485KB → 153KB）；woff2/wasm/图片等已压缩或二进制格式与小于 1.4KB 的资源不压（编码与头部开销可能反超收益），响应带 `Vary: Accept-Encoding` 保证中间代理按编码正确分流。**缓存策略**：`/assets/*`（vite 内容 hash）`public, max-age=31536000, immutable` 强缓存，`/vendor/*` 与 `/fonts/*`（稳定名）`public, max-age=86400`，dev-reload 下一律 `no-cache`（重建覆盖同名文件，新页面内容即时可见）；`index.html`/`files.html` 保持 `no-cache`（每次校验，防旧 HTML 引用已删除的旧 hash）。路径经解析钳制在 `webDist` 内（目录穿越拒绝），未命中前缀时落到 `serveStatic` 兜底（favicon、预览页等根文件）；二进制模式同一策略作用于内嵌资源表。
+
+> **首屏就绪（初始化与消息渲染）**：首屏时延由「初始化串行链 + 服务端列表查询 + 历史消息渲染」三段构成，各自按下列约定取最短路径：
+>
+> - **初始化链并行**：互不依赖的启动步骤并行发起（工具卡片元数据与外部身份兑换；会话列表与服务端恢复的当前会话消息），不做无谓串行；会话正文与待办清单也并行拉取。
+> - **列表只读元信息**：会话列表经 `store.listSessionInfos()`（`meta.json` 缓存，见「会话管理」）——列表不再为拿标题解析全部会话正文。
+> - **历史分片渲染**：打开会话只**首批渲染最近 40 条**（`FIRST_SCREEN_MESSAGES`），更早历史由 `fillHistory` 后台分片（每片 40 条、每片让出一帧 `requestAnimationFrame`）**前插补齐**，完成后按 DOM 顺序重建消息导航（`rebuildMsgNav`）。主线程阻塞从单块近 300ms 降为分片后的数十毫秒级，长历史会话不再拖住首屏可交互时间；内容不丢——补齐完成后 DOM 与 `session.get` 的可见消息集合一致（导航条/Ctrl+F/向上阅读全部可用）。
+> - **分片边界与滚动语义**：切分点由 `history-chunk.ts` 的 `historySplitIndex`（纯函数，可单测）计算，**向前扩展到执行过程容器（`sessionRunId`）的分组边界**——同一次 `agent_run` 的过程消息必须整组落在同一段，否则会被拆成两个折叠容器。前插补齐**等量补偿 `scrollTop`**（`scrollHeight` 增量），阅读中的视口内容原地不动。
+> - **阅读位置跨会话恢复**：离开时会话不在底部（记住 `scrollTop > 0`）时，因首批尚未渲染更早历史，按绝对位置恢复会被内容高度钳制到底部并误判「贴底跟随」（补齐前插时又被拽回底）——此种情况**先解除跟随、等补齐完成（内容坐标完整）后再 `restoreScroll`**；期间用户自行滚动（wheel/touchmove/keydown）则放弃恢复，不把用户拽回。
+> - **折叠容器回放**：历史容器不重建在途流引用（`liveRun` 仅首批传入）——流式累积与 `sessionRuns` 引用只属于当前运行，旧运行的补渲染不得覆盖它。
 
 > **构建性能**：图表渲染引擎全部**不参与 vite/rollup 打包**——构建/开发前由 `packages/web/scripts/build-vendor.ts` 原样拷贝到 `public/vendor/`（gitignore），运行时 `diagram.ts` 以**稳定文件名**按需加载：PlantUML 引擎 `@plantuml/core`（上游 TeaVM 编译单文件 `plantuml.js`，约 6.9MB，若走打包链路需 ~11s 占 web 构建 90%+，此方式将构建降至 ~1s）、`viz-global.js`（Graphviz 布局，classic script 注入）、Mermaid 官方 `dist/mermaid.min.js`（约 3.5MB 自包含 UMD，含全部图型）、ECharts 官方 `dist/echarts.min.js`（约 1MB 自包含 UMD，含 SVG 渲染器，SSR 模式直接输出 SVG 字符串）、D2 官方浏览器构建目录（`d2js/`：index.js + worker + wasm，内部相对路径引用）。**稳定文件名（无内容 hash）+ 静态伺服**：开发模式重建后 URL 不变，旧页面引用旧 hash 动态分块导致的 404（「Failed to fetch dynamically imported module」）**从根上消除**（`diagram.ts` 仍保留整页刷新一次兜底，覆盖极端缓存竞态）。产物随 `dist/` 一并分发。
 
@@ -1246,6 +1258,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **会话记录保存子Agent 装载状态**：`loadedSubAgents` 字段（已装载名单）+ `loadedAgent` 标记的 system 消息（完整提示词，UI 渲染为简短装载提示）；恢复历史会话时引擎自动按名单重新注册工具（`ensureSessionAgents`，幂等）——会话按保存的文件完全恢复状态；新会话首次运行按启动预载名单（`GEBAI_PRELOAD_SUB_AGENTS`）初始化，未配置默认不预载任何子Agent
 - 会话归属校验：仅会话所有者可访问（服务模式）
 - 列表查询时基于消息内容的哈希去重
+- **列表元信息缓存（`meta.json`）**：会话列表只消费标题/时间/置顶/上下文用量，若每查询都解析 `chat.json` 全文，开销随历史体量正相关（数十个会话可达数十 MB）。与 `chat.json` 同目录维护 `meta.json`（`name`/`userId`/`createdAt`/`updatedAt`/`pinned`/`ctxCachedTokens`/`ctxTokensFallback`/`messageCount` + 正文指纹 `source: {size, mtimeMs}`），`save()` 同步刷新；`listSessionInfos()` 命中缓存则直接返回，**文件缺失/损坏/指纹不符（陈旧）时回退读正文并就地重建**——**可重建的缓存、不是真相源**（`chat.json` 恒为准，外部编辑/旧版本写入/中途崩溃均自动纠正），存量会话首次列表自动建立；`listSessions()`（返回完整 `SessionData`）保留给需要正文的调用方（GC/归档等），列表类消费方（WS/REST 列表、快照、文件工作台目录选择、飞书会话命令）走 `listSessionInfos()`
 - 支持会话创建、切换、重命名、置顶、删除
 - **会话置顶**：`pinned` 字段（chat.json 持久化，未定义 = 未置顶，旧格式天然兼容）标记重要会话；列表查询置顶优先、组内按更新时间倒序；置顶/取消为元数据操作，**不刷新 `updatedAt`**（不动排序基线，旧会话置顶不会跳入时间分组）；前端「置顶」独立分组脱离时间分组展示
 - 支持会话级的审批跳过（`/approval-skip`）
@@ -2412,7 +2425,7 @@ bun run --cwd packages/server build:win --exclude-sub-agents x
 
 | 待实现项 | 现状与影响 | 计划方案 |
 |---------|-----------|----------|
-| 前端消息虚拟化/分页 | 会话消息全量加载 + 全量渲染（`session.get` 返回全部消息，`loadMessages` 重建全部 DOM，逐条重跑 markdown 解析与代码高亮）；数千条消息的会话切回时开销显著。已缓解项：流式渲染 120ms 尾沿节流全模式统一（消除流式期间 O(n²) 重解析，历史全量重建开销仍在） | 分两步：① 服务端按游标分页 + 前端只渲染最近 N 条、上滚加载更早（半虚拟化，改动集中在 `sessions.ts`/`messages.ts`）；② 视口窗口虚拟化（与粘底滚动/消息导航/跨会话滚动位置记忆协同，需回归验证） |
+| 前端消息虚拟化/分页 | 会话消息全量加载（`session.get` 返回全部消息），前端**分片渲染**：首屏只渲染最近 40 条，更早历史分片（每片 40 条、每片让出一帧）前插补齐并等量补偿 `scrollTop`，补齐完成后重建消息导航——主线程阻塞已从单块近 300ms 降至分片后的数十毫秒级。未做项：服务端分页（长会话仍会传输完整正文）与**视口窗口虚拟化**（渲染完成后全部历史仍在 DOM 中，数千条消息的会话 DOM 节点与样式计算量仍线性增长；`content-visibility: auto` 方案已因滚动回跳问题被否定，见「消息渲染不降级」） | ① 服务端按游标分页（`session.get` 支持窗口参数）+ 前端上滚按需拉取更早页，替代一次性返回全部正文（复用现有分片渲染的插入与滚动补偿路径）；② 视口窗口虚拟化（与粘底滚动/消息导航/跨会话滚动位置记忆协同，需回归验证） |
 
 ## 测试策略
 
@@ -2629,7 +2642,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | show format 校验 | 缺失/非法立即报错 | 不静默回退 plantuml（防漏传 format 时源码被错误语言渲染、报错误导模型）；`path` 模式扩展名可推断时免传 |
 | show echarts 通道加固 | 预校验 + 版本错位诊断 | 服务端 `parseEchartsInput` 预校验 JSON（无效立即报错不跑前端）；前端报错引擎与请求语言不符（旧版前端把 echarts 当 PlantUML 渲染）返回「前端渲染器版本过旧，请刷新页面」诊断，**不自动换通道**（前端渲染为默认正确通道） |
 | D2 主题 ID | 0（亮）/ 200（暗） | 前端按 UI 明暗选择、后端固定浅色（0=Neutral Default、200=Dark Mauve，`diagram.ts`/`diagram-render.ts` 常量） |
-| 前端本地渲染引擎 | mermaid（懒加载）/ @plantuml/core（懒加载）/ @terrastruct/d2（懒加载）/ echarts（懒加载） | 四语言零网络本地渲染；加载超时 30 秒（echarts 15 秒——约 1MB 体积小）、渲染/编译超时 20 秒（`diagram.ts`，引擎体积大慢机器加载可超 15 秒故放宽）；echarts SSR 模式（`init(null,…,{renderer:"svg",ssr:true})` + `renderToSVGString`）纯计算输出 SVG、无 DOM 挂载，缓存 key 含主题明暗（darkMode 注入）；**未知图表语言显式报错引导改用 `render=backend`（不静默回退 PlantUml——服务端新增语言而前端为旧版本时，回退会把源码当 PlantUML 渲染出误导性错误）**；**D2 前端单一串行队列**（浏览器构建单 Worker 共享 currentResolve，并发调用互相覆盖导致超时，`enqueueD2` 一次一个）；D2 编译错误 JSON 数组转可读文本（`formatD2Error` 提取 errmsg，前后端一致）；**动态分块加载失败自动整页刷新一次**（开发模式重建后旧页面引用旧 hash 分块 404，浏览器报 "Failed to fetch dynamically imported module"）；空闲预热 PlantUML + mermaid + echarts，D2（8MB WASM）不预热 |
+| 前端本地渲染引擎 | mermaid（懒加载）/ @plantuml/core（懒加载）/ @terrastruct/d2（懒加载）/ echarts（懒加载） | 四语言零网络本地渲染；加载超时 30 秒（echarts 15 秒——约 1MB 体积小）、渲染/编译超时 20 秒（`diagram.ts`，引擎体积大慢机器加载可超 15 秒故放宽）；echarts SSR 模式（`init(null,…,{renderer:"svg",ssr:true})` + `renderToSVGString`）纯计算输出 SVG、无 DOM 挂载，缓存 key 含主题明暗（darkMode 注入）；**未知图表语言显式报错引导改用 `render=backend`（不静默回退 PlantUml——服务端新增语言而前端为旧版本时，回退会把源码当 PlantUML 渲染出误导性错误）**；**D2 前端单一串行队列**（浏览器构建单 Worker 共享 currentResolve，并发调用互相覆盖导致超时，`enqueueD2` 一次一个）；D2 编译错误 JSON 数组转可读文本（`formatD2Error` 提取 errmsg，前后端一致）；**动态分块加载失败自动整页刷新一次**（开发模式重建后旧页面引用旧 hash 分块 404，浏览器报 "Failed to fetch dynamically imported module"）；空闲预热仅限**本机实际用过的引擎**（痕迹记于 localStorage `gebai.diagram.engines`，`renderDiagramSvg` 分派时记录），无图表使用史的会话首屏不下载任何引擎（单引擎数 MB）；D2（8MB WASM）不预热 |
 | 后端渲染引擎 | plantuml（TeaVM + DOM shim）/ mermaid + happy-dom / d2（`@terrastruct/d2` WASM）/ echarts（npm 包 SSR） | 四语言后端渲染（`core/support/diagram-render.ts`，飞书与 `render=backend` 共用）；懒加载（echarts 顶层急切导入——zrender 环境探测须先于 DOM 垫层污染）；单一串行队列；`globalThis.window` 仅临时存在（Bun worker_threads 冲突规避）；d2 二进制模式从内嵌产物（`scripts/build-d2js.ts` 生成 JSON，gzip base64）物化 `{GEBAI_HOME}/vendor/d2js/{version}/` |
 | show 复制上限 | 100MB | 会话 `tmp/` 外文件复制进会话文件区的尺寸上限（`SHOW_MAX_BYTES`），超出引导改为告知路径 |
 | show 文本直显上限 | 读取 512KB / 内联 4 万字符 | 文本/代码内联 `code` 块的读取上限（`SHOW_TEXT_DIRECT_BYTES`，超出仅给查看/下载卡片）与截断阈值（`SHOW_TEXT_MAX_CHARS`，超出截断展示 + 附 file 卡片取全文） |

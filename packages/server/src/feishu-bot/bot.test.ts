@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { createHash } from "node:crypto"
 import type { AgentEvent } from "@gebai/sdk"
 import type { SessionData } from "../core/base/types"
+import { toSessionInfo } from "../core/session/store"
 import { FeishuBot, parseMessageContent, sanitizeId, sessionIdForChat, stripMentions, sniffImageMime, truncateForFeishu, formatApprovalArgs, buildReplyCard, formatToolArgs } from "./bot"
 
 /** 测试辅助：与 bot.resolveUser 相同的映射用户名派生（openId 哈希前 24 位）。 */
@@ -106,7 +107,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
       deleted.push(id)
       sessions.delete(id)
     },
-    listSessions: async (userId: string) => [...sessions.values()].filter((s) => s.userId === userId),
+    listSessionInfos: async (userId: string) => [...sessions.values()].filter((s) => s.userId === userId).map(toSessionInfo),
     setEnv: async (sessionId: string, _user: string, vars: Record<string, string | null>) => {
       const flat = Object.fromEntries(Object.entries(vars).filter((kv): kv is [string, string] => kv[1] !== null))
       envSets.push({ sessionId, vars: flat })
@@ -1343,7 +1344,7 @@ describe("真实存储集成", () => {
         load: async () => null,
         save: async (s: SessionData) => void (s as SessionData),
         delete: async () => {},
-        listSessions: async () => [],
+        listSessionInfos: async () => [],
         setEnv: async () => ({}),
         getTmpDir: () => home,
       } as never,

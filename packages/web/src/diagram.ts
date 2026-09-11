@@ -13,6 +13,31 @@ export const DIAGRAM_EXT_FOR: Record<DiagramFormat, string> = { plantuml: "puml"
 /** 图表语言展示名（源码查看器/导出用）。 */
 export const DIAGRAM_LABEL: Record<DiagramFormat, string> = { plantuml: "PlantUML", mermaid: "Mermaid", d2: "D2", echarts: "ECharts" }
 
+/** 引擎使用痕迹（localStorage，用户级、跨会话保留）：空闲预热只针对真正用过的引擎，
+ *  无图表使用史的会话首屏不下载任何引擎（单引擎数 MB）。 */
+const ENGINE_USE_KEY = "gebai.diagram.engines"
+
+/** 读取已用过的引擎集合（localStorage 不可用时返回空集 → 不预热）。 */
+function usedEngines(): Set<string> {
+  try {
+    return new Set((localStorage.getItem(ENGINE_USE_KEY) ?? "").split(",").filter(Boolean))
+  } catch {
+    return new Set()
+  }
+}
+
+/** 记录一次实际渲染用到的引擎。 */
+function markEngineUsed(format: DiagramFormat): void {
+  try {
+    const used = usedEngines()
+    if (used.has(format)) return
+    used.add(format)
+    localStorage.setItem(ENGINE_USE_KEY, [...used].join(","))
+  } catch {
+    /* 隐私模式等场景忽略 */
+  }
+}
+
 /** 读取 CSS 变量为不透明 hex（rgba 与 body 背景合成，见 css-color.ts）。 */
 function cssVar(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
@@ -677,6 +702,7 @@ function handleStaleChunk(err: unknown): void {
 /** 按图表语言分派渲染（show 图表分支 event.draw.render 与内容块展示共用）；未知语言显式报错引导换通道，
  *  不静默回退 PlantUML——服务端新增图表语言而前端为旧版本时，回退会把源码当 PlantUML 渲染出误导性错误。 */
 export function renderDiagramSvg(format: DiagramFormat, code: string): Promise<string> {
+  markEngineUsed(format) // 使用痕迹：下次访问的空闲预热只针对用过的引擎
   let p: Promise<string>
   switch (format) {
     case "mermaid":
@@ -918,19 +944,23 @@ document.addEventListener("gebai:theme-change", () => {
   })()
 })
 
-// 空闲预热本地渲染引擎（PlantUML 6.9MB + mermaid 3.5MB + echarts 1MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口；
-// D2（8MB WASM）加载开销大且架构图频率低，不预热；低性能模式跳过预热（引擎内存/加载开销大），首次渲染由消息流触发
+// 空闲预热本地渲染引擎（PlantUML 6.9MB + mermaid 3.5MB + echarts 1MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口。
+// 只预热**本机实际用过的**引擎（痕迹由 markEngineUsed 记录）：无图表使用史的会话首屏不下载任何引擎；
+// D2（8MB WASM）加载开销大且架构图频率低，不预热；低性能模式跳过预热（引擎内存/加载开销大），首次渲染由消息流触发。
 if (typeof window !== "undefined") {
   window.addEventListener(
     "load",
     () => {
       if (isLowPower()) return
+      const used = usedEngines()
+      if (!used.size) return
       const raf = window as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void }
       const schedule = raf.requestIdleCallback ? (cb: () => void) => raf.requestIdleCallback!(cb, { timeout: 3000 }) : (cb: () => void) => setTimeout(cb, 800)
       schedule(() => {
-        void loadPlantUml().catch(() => {})
-        void loadMermaid().catch(() => {})
-        void loadEcharts().catch(() => {})
+        const loaders = { plantuml: loadPlantUml, mermaid: loadMermaid, echarts: loadEcharts } as const
+        for (const engine of Object.keys(loaders) as Array<keyof typeof loaders>) {
+          if (used.has(engine)) void loaders[engine]().catch(() => {})
+        }
       })
     },
     { once: true },

@@ -250,11 +250,18 @@ function addMetaActions(meta: HTMLElement, wrapper: HTMLElement, bubble: HTMLEle
 /** 供 main 组装（流式完成后绑定操作按钮）。 */
 export { addMetaActions }
 
-/** 批量渲染容器：loadMessages 批量挂载历史消息用（DocumentFragment 一次 append，避免逐条触发滚动/重排）。 */
+/** 批量渲染容器：loadMessages 批量挂载历史消息用（DocumentFragment 一次 append，避免逐条触发滚动/重排）。
+ *  target 传入时使用调用方自己的 fragment（分片补齐历史：由调用方控制前插位置与滚动补偿）。 */
 let batchFrag: DocumentFragment | null = null
-export function beginMsgBatch(): void {
+export function beginMsgBatch(target?: DocumentFragment): void {
   if (batchFrag) flushMsgBatch() // 并发切换会话时防御：先落盘上一个未完成的批次
-  batchFrag = document.createDocumentFragment()
+  batchFrag = target ?? document.createDocumentFragment()
+}
+/** 取出当前批次 fragment（不挂载），插入位置由调用方决定；无活跃批次返回 null。 */
+export function takeMsgBatch(): DocumentFragment | null {
+  const frag = batchFrag
+  batchFrag = null
+  return frag
 }
 export function flushMsgBatch(): void {
   const frag = batchFrag

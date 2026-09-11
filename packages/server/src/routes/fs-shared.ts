@@ -69,7 +69,7 @@ export async function buildRootContext(
     if (hit && Date.now() - hit.ts < 2000) {
       ctx.sessions = hit.roots.map((r) => ({ id: r.sessionId ?? "", name: r.name })).filter((s) => s.id)
     } else {
-      const sessions = await d.store.listSessions(user.id).catch(() => [])
+      const sessions = await d.store.listSessionInfos(user.id).catch(() => [])
       const sorted = sessions.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 20)
       ctx.sessions = sorted.map((s) => ({ id: s.id, name: s.name || s.id.slice(0, 8) }))
       catalogCache.set(key, { ts: Date.now(), roots: ctx.sessions.map((s) => ({ id: `sess:${s.id}`, kind: "sess" as const, name: s.name, path: "", writable: ctx.writable, sessionId: s.id })) })

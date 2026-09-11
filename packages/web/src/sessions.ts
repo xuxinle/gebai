@@ -30,15 +30,16 @@ import {
   clearDraft,
 } from "./state"
 import { markdownBlock } from "./markdown"
-import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSessionRun, flushMsgBatch, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSessionArchive, sessionRunBox } from "./messages"
-import { clearUnread, isAtBottom, lockToBottom, restoreScroll } from "./jump-bottom"
+import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSessionRun, flushMsgBatch, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSessionArchive, sessionRunBox, takeMsgBatch } from "./messages"
+import { clearUnread, isAtBottom, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyMinimalMode } from "./minimal-mode"
 import { applyApprovalVisibility } from "./approvals"
 import { autosize, firstInputOf, resetHistoryNav, syncSendButton } from "./composer"
 import { autoHideScrollbar, confirmDialog, desktopDownloadHint, toast } from "./ui"
 import { renderShortcutButtons } from "./shortcuts"
-import { clearMsgNav, updateMsgNav } from "./msg-nav"
+import { addMsgNavSeg, clearMsgNav, updateMsgNav } from "./msg-nav"
+import { historySplitIndex, runIdOfMessage } from "./history-chunk"
 import { renderAttachments } from "./attachments"
 import { clearQueue, renderQueue } from "./queue"
 
@@ -115,88 +116,13 @@ export async function loadMessages(sessionId: string) {
   else hideEmptyState()
   // 运行中的会话状态（新会话容器恢复/流式累积引用；先于消息循环就位）
   const run = runs.get(sessionId)
+  // 首批只渲染最近一屏，更早历史由 fillHistory 后台分片补齐：历史一次性完整渲染的耗时与消息量
+  // 正相关（DOM 构建 + markdown/高亮），长会话会把首屏可交互时间拖到秒级；分片补齐不丢内容
+  const split = historySplitIndex(visible, FIRST_SCREEN_MESSAGES)
   // 批量挂载避免逐条触发滚动/重排
   beginMsgBatch()
   try {
-    // 新会话执行过程消息（session 标记）：按 runId 分组渲染进折叠容器（默认折叠，只显示输入与最终返回）。
-    // 旧版（agent_call 时代）独立存档消息为 subAgent/subAgentRunId/subAgentMeta 字段，兼容回放
-    let subRun: { runId: string; container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement; lastMsg?: import("@gebai/sdk").Message } | null = null
-    const closeSubRun = () => {
-      if (!subRun) return
-      // 结束判定：最后一条消息为无 toolCalls 的 assistant（有最终回复）→ 折叠显示返回；
-      // 无最终回复（中断/风暴终止）：任务仍在运行 → 保持执行中态；任务已结束 → 折叠显示「（无返回）」
-      const last = subRun.lastMsg
-      const hasFinal = last?.role === "assistant" && !last.toolCalls?.length
-      if (hasFinal) finishSessionRun(subRun.container, subRun.outputEl, last!.content)
-      else if (runs.has(sessionId)) finishSessionRun(subRun.container, subRun.outputEl, undefined)
-      else finishSessionRun(subRun.container, subRun.outputEl, "")
-      subRun = null
-    }
-    for (const m of visible) {
-      const isLegacy = (m as import("@gebai/sdk").Message).subAgent === true
-      if (m.session || isLegacy) {
-        const runId = m.sessionRunId ?? (m as import("@gebai/sdk").Message).subAgentRunId
-        const agents = m.sessionMeta?.agents ?? ((m as import("@gebai/sdk").Message).subAgentMeta?.agent ? [(m as import("@gebai/sdk").Message).subAgentMeta!.agent] : [])
-        const input = m.sessionMeta?.input ?? (m as import("@gebai/sdk").Message).subAgentMeta?.input ?? (m.role === "user" ? m.content : "")
-        if (!subRun || runId !== subRun.runId) {
-          closeSubRun()
-          if (runId) {
-            // 任务运行中切回：重建容器并恢复 run.sessionRuns 引用与切走期间累积的流式文本
-            const existing = run?.sessionRuns?.get(runId)
-            const box = sessionRunBox({ runId, agents, input })
-            if (run) {
-              const reasoningAcc = existing?.reasoningAcc ?? ""
-              const acc = existing?.acc ?? ""
-              let streamEl: HTMLElement | null = null
-              let reasoningEl: HTMLElement | null = null
-              if (acc.trim() || reasoningAcc.trim()) {
-                streamEl = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, box.body)
-                const bubble = streamEl.querySelector<HTMLElement>(".msg-body .bubble")
-                if (bubble) {
-                  if (reasoningAcc.trim()) {
-                    reasoningEl = reasoningBlock()
-                    const rb = reasoningEl.querySelector<HTMLElement>(".reasoning-body")
-                    if (rb) rb.appendChild(markdownBlock(reasoningAcc.trim()))
-                    bubble.prepend(reasoningEl)
-                  }
-                  const textWrap = el("div", "msg-text")
-                  textWrap.appendChild(markdownBlock(acc))
-                  bubble.appendChild(textWrap)
-                }
-              }
-              run.sessionRuns ??= new Map()
-              run.sessionRuns.set(runId, {
-                runId,
-                agents,
-                input,
-                container: box.container,
-                body: box.body,
-                outputEl: box.outputEl,
-                acc,
-                el: streamEl,
-                messageId: existing?.messageId ?? "",
-                reasoningAcc,
-                reasoningEl,
-              })
-            }
-            subRun = { runId, container: box.container, body: box.body, outputEl: box.outputEl }
-          }
-        }
-        if (!subRun) continue
-        if (m.role === "user" && m.sessionMeta) continue // 输入已随容器创建渲染（sessionRunBox）
-        if (m.role === "user" && isLegacy && (m as import("@gebai/sdk").Message).subAgentMeta) continue
-        subRun.lastMsg = m
-        appendMsg(m, false, subRun.body)
-      } else {
-        closeSubRun()
-        // 新会话存档：agent_run 工具调用记录扩展字段（sessionRun）→ 先渲染折叠容器（含嵌套递归），
-        // 再渲染工具结果卡片（agent_run 输出为 markdown）；旧版 subAgentRun 字段兼容回放
-        if (m.sessionRun) renderSessionArchive(m.sessionRun)
-        else if ((m as import("@gebai/sdk").Message).subAgentRun) renderLegacySubAgentArchive((m as import("@gebai/sdk").Message).subAgentRun!)
-        appendMsg(m)
-      }
-    }
-    closeSubRun()
+    renderMessageRange(visible, split, visible.length, sessionId, run)
   } finally {
     flushMsgBatch()
   }
@@ -265,14 +191,177 @@ export async function loadMessages(sessionId: string) {
   // lockToBottom 启动的对齐保持循环）失效——直接赋值 scrollTop 会留下 following=true 的
   // 旧状态，未决回调晚于恢复执行时把刚恢复的历史位置拽到底部
   const mem = scrollMemory.get(sessionId)
-  if (mem !== undefined && mem >= 0) {
+  const readingHistory = mem !== undefined && mem >= 0
+  if (readingHistory && split === 0) {
     restoreScroll(mem)
+  } else if (readingHistory) {
+    // 阅读历史中切回，但更早历史尚未渲染：此时按绝对位置恢复会被内容高度钳制到底部，
+    // 并因「贴底」误判重新进入跟随（补齐前插时又被拽回底）——先解除跟随，补齐后再恢复
+    stopFollowing()
   } else {
     lockToBottom()
   }
   // 运行中会话附加（DESIGN「运行中会话恢复」）：页面刷新/切换进入运行中会话时恢复在途流与
   // 待决交互卡。渲染完成后再附加（存储基线先上屏，在途文本作为流式消息续接其后）
   void runningAttachHook?.(sessionId)
+  // 更早历史后台补齐：不阻塞首屏交互（每片让出一帧），补齐完成后重建消息导航
+  if (split > 0 && readingHistory) {
+    // 补齐完成（内容坐标完整）后再恢复阅读位置；期间用户自行滚动则放弃恢复，不把用户拽回
+    let takenOver = false
+    const onInput = () => {
+      takenOver = true
+    }
+    msgEl.addEventListener("wheel", onInput, { passive: true, once: true })
+    msgEl.addEventListener("touchmove", onInput, { passive: true, once: true })
+    window.addEventListener("keydown", onInput, { once: true })
+    void fillHistory(sessionId, seq, visible, split).then(() => {
+      msgEl.removeEventListener("wheel", onInput)
+      msgEl.removeEventListener("touchmove", onInput)
+      window.removeEventListener("keydown", onInput)
+      if (seq !== loadSeq || takenOver) return
+      restoreScroll(mem)
+    })
+  } else if (split > 0) {
+    void fillHistory(sessionId, seq, visible, split)
+  }
+}
+
+/** 首批渲染的尾部消息条数：首屏只需最近一屏内容即可交互，更早历史由 fillHistory 补齐。 */
+const FIRST_SCREEN_MESSAGES = 40
+
+/** 历史补齐片大小（条/片）：每片渲染后让出一帧，补齐期间主线程仍可响应交互。 */
+const HISTORY_FILL_CHUNK = 40
+
+/**
+ * 渲染 [from, to) 区间的消息：普通消息、工具结果卡片、新会话折叠容器（按 runId 分组）、
+ * sessionRun 存档（含嵌套）。liveRun 传入时恢复该运行的流式累积引用与容器——仅首批渲染传：
+ * 在途内容只属于当前运行，历史补齐的旧运行不得覆盖 liveRun.sessionRuns（会顶掉在途流引用）。
+ */
+function renderMessageRange(
+  msgs: Array<import("@gebai/sdk").Message>,
+  from: number,
+  to: number,
+  sessionId: string,
+  liveRun: ReturnType<typeof runs.get>,
+): void {
+  // 新会话执行过程消息（session 标记）：按 runId 分组渲染进折叠容器（默认折叠，只显示输入与最终返回）。
+  // 旧版（agent_call 时代）独立存档消息为 subAgent/subAgentRunId/subAgentMeta 字段，兼容回放
+  let subRun: { runId: string; container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement; lastMsg?: import("@gebai/sdk").Message } | null = null
+  const closeSubRun = () => {
+    if (!subRun) return
+    // 结束判定：最后一条消息为无 toolCalls 的 assistant（有最终回复）→ 折叠显示返回；
+    // 无最终回复（中断/风暴终止）：任务仍在运行 → 保持执行中态；任务已结束 → 折叠显示「（无返回）」
+    const last = subRun.lastMsg
+    const hasFinal = last?.role === "assistant" && !last.toolCalls?.length
+    if (hasFinal) finishSessionRun(subRun.container, subRun.outputEl, last!.content)
+    else if (runs.has(sessionId)) finishSessionRun(subRun.container, subRun.outputEl, undefined)
+    else finishSessionRun(subRun.container, subRun.outputEl, "")
+    subRun = null
+  }
+  for (let i = from; i < to; i++) {
+    const m = msgs[i]
+    const isLegacy = (m as import("@gebai/sdk").Message).subAgent === true
+    if (m.session || isLegacy) {
+      const runId = runIdOfMessage(m)
+      const agents = m.sessionMeta?.agents ?? ((m as import("@gebai/sdk").Message).subAgentMeta?.agent ? [(m as import("@gebai/sdk").Message).subAgentMeta!.agent] : [])
+      const input = m.sessionMeta?.input ?? (m as import("@gebai/sdk").Message).subAgentMeta?.input ?? (m.role === "user" ? m.content : "")
+      if (!subRun || runId !== subRun.runId) {
+        closeSubRun()
+        if (runId) {
+          // 任务运行中切回：重建容器并恢复 liveRun.sessionRuns 引用与切走期间累积的流式文本
+          const existing = liveRun?.sessionRuns?.get(runId)
+          const box = sessionRunBox({ runId, agents, input })
+          if (liveRun) {
+            const reasoningAcc = existing?.reasoningAcc ?? ""
+            const acc = existing?.acc ?? ""
+            let streamEl: HTMLElement | null = null
+            let reasoningEl: HTMLElement | null = null
+            if (acc.trim() || reasoningAcc.trim()) {
+              streamEl = appendMsg({ id: uuid(), role: "assistant", content: "", createdAt: Date.now() }, true, box.body)
+              const bubble = streamEl.querySelector<HTMLElement>(".msg-body .bubble")
+              if (bubble) {
+                if (reasoningAcc.trim()) {
+                  reasoningEl = reasoningBlock()
+                  const rb = reasoningEl.querySelector<HTMLElement>(".reasoning-body")
+                  if (rb) rb.appendChild(markdownBlock(reasoningAcc.trim()))
+                  bubble.prepend(reasoningEl)
+                }
+                const textWrap = el("div", "msg-text")
+                textWrap.appendChild(markdownBlock(acc))
+                bubble.appendChild(textWrap)
+              }
+            }
+            liveRun.sessionRuns ??= new Map()
+            liveRun.sessionRuns.set(runId, {
+              runId,
+              agents,
+              input,
+              container: box.container,
+              body: box.body,
+              outputEl: box.outputEl,
+              acc,
+              el: streamEl,
+              messageId: existing?.messageId ?? "",
+              reasoningAcc,
+              reasoningEl,
+            })
+          }
+          subRun = { runId, container: box.container, body: box.body, outputEl: box.outputEl }
+        }
+      }
+      if (!subRun) continue
+      if (m.role === "user" && m.sessionMeta) continue // 输入已随容器创建渲染（sessionRunBox）
+      if (m.role === "user" && isLegacy && (m as import("@gebai/sdk").Message).subAgentMeta) continue
+      subRun.lastMsg = m
+      appendMsg(m, false, subRun.body)
+    } else {
+      closeSubRun()
+      // 新会话存档：agent_run 工具调用记录扩展字段（sessionRun）→ 先渲染折叠容器（含嵌套递归），
+      // 再渲染工具结果卡片（agent_run 输出为 markdown）；旧版 subAgentRun 字段兼容回放
+      if (m.sessionRun) renderSessionArchive(m.sessionRun)
+      else if ((m as import("@gebai/sdk").Message).subAgentRun) renderLegacySubAgentArchive((m as import("@gebai/sdk").Message).subAgentRun!)
+      appendMsg(m)
+    }
+  }
+  closeSubRun()
+}
+
+/**
+ * 后台分片补齐更早历史（首批渲染完成后调用）：逐片渲染并**前插**到消息列顶部，同时等量补偿
+ * scrollTop——overflow-anchor 已关闭（见 base.css），前插内容会把当前视口内容往下推，不补偿
+ * 会打断正在读历史的用户。粘底时由 sticky-follow 的 DOM 变化跟踪自然落底，补偿与该语义不冲突。
+ */
+async function fillHistory(sessionId: string, seq: number, msgs: Array<import("@gebai/sdk").Message>, end: number): Promise<void> {
+  let cursor = end
+  while (cursor > 0) {
+    // 已切换会话/重新加载：消息列已重建，继续前插会污染新会话
+    if (seq !== loadSeq || getCurrentSession()?.id !== sessionId) return
+    const start = Math.max(0, cursor - HISTORY_FILL_CHUNK)
+    const frag = document.createDocumentFragment()
+    beginMsgBatch(frag)
+    try {
+      renderMessageRange(msgs, start, cursor, sessionId, undefined)
+    } finally {
+      takeMsgBatch()
+    }
+    const beforeHeight = msgEl.scrollHeight
+    const beforeTop = msgEl.scrollTop
+    msgEl.insertBefore(frag, msgEl.firstChild)
+    msgEl.scrollTop = beforeTop + (msgEl.scrollHeight - beforeHeight)
+    cursor = start
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  }
+  // 导航段按 DOM 顺序重建：补齐的旧消息注册顺序晚于首批消息，不重建会顺序错乱
+  rebuildMsgNav()
+}
+
+/** 按 DOM 顺序重建消息导航段（分片补齐后调用）。 */
+function rebuildMsgNav(): void {
+  clearMsgNav()
+  for (const node of Array.from(msgEl.children)) {
+    if (node.classList.contains("msg") || node.classList.contains("session-run")) addMsgNavSeg(node as HTMLElement)
+  }
+  updateMsgNav()
 }
 
 /** 运行中会话附加钩子（main.ts 注册实现；null 时无附加能力——单测环境等）。 */

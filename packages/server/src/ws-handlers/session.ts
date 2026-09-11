@@ -11,8 +11,9 @@ import { existsSync } from "node:fs"
 
 export const sessionHandlers: Record<string, WsHandler> = {
   "session.list": async ({ d, user, reply }) => {
-    const sessions = await d.store.listSessions(user.id)
-    return reply(true, { sessions: sessions.map(toSessionInfo), maxContextTokens: d.engine.contextWindow() })
+    // 列表只需元信息：走 meta 缓存路径，不为拿标题解析全部会话正文
+    const sessions = await d.store.listSessionInfos(user.id)
+    return reply(true, { sessions, maxContextTokens: d.engine.contextWindow() })
   },
   "session.create": async ({ d, user, p, reply }) => {
     const s = await d.store.createSession(user.id, p.name ? String(p.name) : undefined)

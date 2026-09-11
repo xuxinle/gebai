@@ -3,7 +3,6 @@ import { join, dirname } from "node:path"
 import type { AgentEvent, SessionInfo } from "@gebai/sdk"
 import type { AppDeps } from "./app"
 import type { WsConn, WsSink } from "./ws"
-import { toSessionInfo } from "./core/session/store"
 
 /**
  * WS 状态服务（MVC 模型层）：把连接级状态从传输层（ws.data）提升为
@@ -327,10 +326,10 @@ export class WsStateService {
   /** 构建状态快照（连接级当前会话 + 会话列表 + 运行中会话 + 日志基线 seq）。 */
   async buildSnapshot(conn: WsConn): Promise<WsSnapshot> {
     const user = conn.get()
-    const [sessions, running] = await Promise.all([this.d.store.listSessions(user.id), this.d.engine.runningIds(user.id)])
+    const [sessions, running] = await Promise.all([this.d.store.listSessionInfos(user.id), this.d.engine.runningIds(user.id)])
     return {
       currentSessionId: conn.getCurrent() ?? null,
-      sessions: sessions.map(toSessionInfo),
+      sessions,
       running,
       lastSeq: this.journal(user.id).lastSeq(),
       maxContextTokens: this.d.engine.contextWindow(),

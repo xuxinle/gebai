@@ -9,7 +9,6 @@ import { basenameName, isValidSessionId, sessionPath } from "../core/base/paths"
 import { findInTrash } from "../core/session/gc"
 import { validateEnvVars, maskEnv, filterEnvInjection } from "../core/session/env"
 import { getEnvCatalog } from "../core/agents/env-catalog"
-import { toSessionInfo } from "../core/session/store"
 import { TokenBucket } from "../core/security/ratelimit"
 
 export function registerSessionRoutes(rc: RouteCtx): void {
@@ -29,8 +28,9 @@ export function registerSessionRoutes(rc: RouteCtx): void {
 
   app.get("/api/v1/sessions", async (c) => {
     const user = await userOf(c)
-    const sessions = await d.store.listSessions(user.id)
-    return c.json(sessions.map(toSessionInfo))
+    // 列表只需元信息：走 meta 缓存路径，不为拿标题解析全部会话正文（正文由详情接口提供）
+    const sessions = await d.store.listSessionInfos(user.id)
+    return c.json(sessions)
   })
   app.post("/api/v1/sessions", async (c) => {
     const user = await userOf(c)

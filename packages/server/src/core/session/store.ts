@@ -1,5 +1,5 @@
 import { mkdir, writeFile, readFile, rm, readdir, stat, unlink, rename } from "node:fs/promises"
-import { join, resolve, sep, isAbsolute, relative } from "node:path"
+import { join, resolve, sep, isAbsolute, relative, dirname } from "node:path"
 import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
 import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "../base/paths"
 import { randomUUID } from "node:crypto"
@@ -48,18 +48,78 @@ export interface SessionData {
   pinned?: boolean
 }
 
-/** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。 */
+/** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。
+ *  ctxTokens 兜底顺序：持久化真值 → 列表缓存的兜底值（meta.json 落盘，免列表重解析正文）→ 按消息即时估算。 */
 export function toSessionInfo(s: SessionData): SessionInfo {
-  // ctxTokens 兜底：旧会话（新版本运行前创建）无持久化值时按持久化消息即时估算，保证列表全部有值
+  const fallback = (s as SessionData & { ctxTokensFallback?: number }).ctxTokensFallback
   return {
     id: s.id,
     name: s.name,
     userId: s.userId,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
-    ctxTokens: s.ctxTokens ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
+    ctxTokens: s.ctxTokens ?? fallback ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
     ctxCachedTokens: s.ctxCachedTokens,
     pinned: s.pinned ?? false,
+  }
+}
+
+/** 会话列表轻量元信息文件名（与 chat.json 同目录）。 */
+const META_FILE = "meta.json"
+
+/**
+ * 会话元信息（meta.json）：会话列表接口只消费标题/时间/置顶/上下文用量，若每次都解析 chat.json 全文，
+ * 列表开销将与历史体量正相关（数十个会话可达数十 MB），会话越多越慢。本文件是**可重建的缓存**，
+ * 不是真相源——chat.json 始终为准。`source` 记录生成本文件时的 chat.json 指纹（size + mtimeMs）：
+ * 不一致即视为陈旧（外部编辑/旧版本写入/中途崩溃），回退读正文并刷新，保证永不因缓存过期展示错数据。
+ */
+interface SessionMeta {
+  id: string
+  name: string
+  userId: string
+  createdAt: number
+  updatedAt: number
+  pinned?: boolean
+  /** 列表展示值：真实 usage 真值优先，无真值时为按消息估算的兜底值（与 toSessionInfo 同口径） */
+  ctxTokensFallback?: number
+  /** 同一次调用的提示词缓存命中 tokens（纯展示口径，列表圆环悬浮命中率） */
+  ctxCachedTokens?: number
+  messageCount: number
+  source: { size: number; mtimeMs: number }
+}
+
+/** 会话正文指纹（meta 陈旧判定依据）。 */
+type SourceStamp = { size: number; mtimeMs: number }
+
+/** 由会话对象构建元信息（ctxTokensFallback 口径与 toSessionInfo 一致：真值优先，否则按消息估算）。 */
+function toSessionMeta(s: SessionData, source: SourceStamp): SessionMeta {
+  return {
+    id: s.id,
+    name: s.name,
+    userId: s.userId,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+    pinned: s.pinned,
+    ctxTokensFallback: s.ctxTokens ?? (s.messages?.length ? estimateCtxTokens(s.messages) : undefined),
+    ctxCachedTokens: s.ctxCachedTokens,
+    messageCount: s.messages?.length ?? 0,
+    source,
+  }
+}
+
+/** 元信息 → 列表用轻量会话对象：messages/todos 为空数组（列表消费方只用元信息，正文由 load 提供）。 */
+function metaToSession(m: SessionMeta): SessionData & { ctxTokensFallback?: number } {
+  return {
+    id: m.id,
+    name: m.name,
+    userId: m.userId,
+    messages: [],
+    todos: [],
+    createdAt: m.createdAt,
+    updatedAt: m.updatedAt,
+    pinned: m.pinned,
+    ctxCachedTokens: m.ctxCachedTokens,
+    ctxTokensFallback: m.ctxTokensFallback,
   }
 }
 
@@ -299,8 +359,7 @@ export class SessionStore {
     await walkDir(base, 3, async (p) => {
       if (!p.endsWith("chat.json")) return
       try {
-        const raw = await readFile(p, "utf8")
-        const session = JSON.parse(raw) as SessionData
+        const session = JSON.parse(await readFile(p, "utf8")) as SessionData
         if (session.id && (session.userId === userId || !session.userId)) {
           out.push(session)
           index.push(p)
@@ -312,6 +371,71 @@ export class SessionStore {
     this.indexedPathsByUser.set(userId, index)
     // 置顶优先，组内按更新时间倒序
     return out.sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false) || b.updatedAt - a.updatedAt)
+  }
+
+  /**
+   * 会话列表（元信息）：列表消费方（UI 列表/快照/目录选择/机器人命令）只需标题与时间，
+   * 本方法优先读 meta.json（小文件），仅在缓存缺失/陈旧时回退解析 chat.json 并就地刷新缓存——
+   * 避免为拿元信息而解析全部会话正文（会话越长越多，列表开销越大）。
+   */
+  async listSessionInfos(userId: string): Promise<SessionInfo[]> {
+    const base = join(this.opts.home, "users", userId, "sessions")
+    const out: Array<{ info: SessionInfo; pinned: boolean; updatedAt: number }> = []
+    const index: string[] = []
+    await walkDir(base, 3, async (p) => {
+      if (!p.endsWith("chat.json")) return
+      const dir = dirname(p)
+      try {
+        const st = await stat(p)
+        const meta = await this.readMeta(join(dir, META_FILE), st)
+        if (meta && meta.id && (meta.userId === userId || !meta.userId)) {
+          out.push({ info: toSessionInfo(metaToSession(meta)), pinned: meta.pinned === true, updatedAt: meta.updatedAt })
+          index.push(p)
+          return
+        }
+        // 元信息缺失/陈旧（存量会话、外部编辑、旧版本写入）：回退读正文并建立缓存
+        const session = JSON.parse(await readFile(p, "utf8")) as SessionData
+        if (session.id && (session.userId === userId || !session.userId)) {
+          out.push({ info: toSessionInfo(session), pinned: session.pinned === true, updatedAt: session.updatedAt })
+          index.push(p)
+          await this.writeMeta(session, dir, { size: st.size, mtimeMs: st.mtimeMs })
+        }
+      } catch {
+        /* skip corrupt */
+      }
+    })
+    this.indexedPathsByUser.set(userId, index)
+    // 置顶优先，组内按更新时间倒序
+    out.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
+    return out.map((x) => x.info)
+  }
+
+  /** 读取元信息；文件缺失/损坏/与正文指纹不符（陈旧）时返回 null，由调用方回退读正文。 */
+  private async readMeta(path: string, st: SourceStamp): Promise<SessionMeta | null> {
+    try {
+      const meta = JSON.parse(await readFile(path, "utf8")) as SessionMeta
+      if (!meta.id || !meta.source) return null
+      if (meta.source.size !== st.size || meta.source.mtimeMs !== st.mtimeMs) return null
+      return meta
+    } catch {
+      return null
+    }
+  }
+
+  /** 原子写元信息（tmp + rename）；失败静默——缓存缺失只影响下次列表速度，功能不受影响。 */
+  private async writeMeta(session: SessionData, dir: string, source: SourceStamp): Promise<void> {
+    const target = join(dir, META_FILE)
+    const body = JSON.stringify(toSessionMeta(session, source))
+    try {
+      await writeFile(`${target}.tmp`, body)
+      await rename(`${target}.tmp`, target)
+    } catch {
+      try {
+        await writeFile(target, body)
+      } catch {
+        /* 目录不可写等情况：列表下次仍回退读正文 */
+      }
+    }
   }
 
   /**
@@ -348,15 +472,24 @@ export class SessionStore {
     // 只残留无害的 .tmp 文件
     const target = join(dir, "chat.json")
     const tmpPath = `${target}.tmp`
-    await writeFile(tmpPath, JSON.stringify(session, null, 2))
+    const body = JSON.stringify(session, null, 2)
+    await writeFile(tmpPath, body)
     try {
       await rename(tmpPath, target)
     } catch {
       // Windows 上目标正被并发读取（readFile 句柄未关）时 MoveFileEx 替换失败（EPERM）：
       // 回退直接覆写（原子性降级为最佳努力）——rename 竞态不应中断整个任务
-      await writeFile(target, JSON.stringify(session, null, 2))
+      await writeFile(target, body)
     }
     this.touchCache(session)
+    // 同步刷新列表元信息（列表接口据此免读正文）：指纹取刚写入的 chat.json——写入竞态只会
+    // 让 meta 偏旧（下次列表回退读正文并刷新），不会展示错误数据
+    try {
+      const st = await stat(target)
+      await this.writeMeta(session, dir, { size: st.size, mtimeMs: st.mtimeMs })
+    } catch {
+      /* 元信息写失败：列表回退读正文，功能不受影响 */
+    }
   }
 
   /**

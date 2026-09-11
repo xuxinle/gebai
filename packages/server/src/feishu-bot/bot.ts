@@ -22,7 +22,7 @@ import type { DiagramFormat } from "@gebai/sdk"
 import type { BotPromptAdapter } from "./adapter"
 
 /** 桥接用到的依赖子集（Pick 结构类型，便于测试注入 fake）。 */
-export type BotStore = Pick<SessionStore, "load" | "save" | "delete" | "listSessions" | "setEnv" | "getTmpDir">
+export type BotStore = Pick<SessionStore, "load" | "save" | "delete" | "listSessionInfos" | "setEnv" | "getTmpDir">
 export type BotAuth = Pick<AuthService, "defaultUser" | "listUsers" | "createUser">
 
 /** 长连接客户端最小形状（测试注入 fake）。 */
@@ -1085,7 +1085,7 @@ export class FeishuBot {
           outbox.sendText("暂无会话。")
           break
         }
-        const sessions = await this.opts.store.listSessions(owner)
+        const sessions = await this.opts.store.listSessionInfos(owner)
         if (!sessions.length) {
           outbox.sendText("暂无会话。")
           break
