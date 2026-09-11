@@ -54,6 +54,7 @@ const ICONS: Record<string, string> = {
   // 合并：两线汇于一条（三窗格合并视图 / 冲突行按钮）
   merge: '<path d="M4 2v5a4 4 0 004 4h4M12 2v3M12 11v3M14 8l-3-3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
   chevronDown: '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  chevronLeft: '<path d="M10 4L6 8l4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   folder: '<path d="M2 4.5A1.5 1.5 0 013.5 3h3l1.5 2h5A1.5 1.5 0 0114.5 6.5v6A1.5 1.5 0 0113 14H3.5A1.5 1.5 0 012 12.5v-8z" fill="currentColor" opacity=".85"/>',
   folderOpen: '<path d="M2 12.5V4.5A1.5 1.5 0 013.5 3h3L8 5h4.5A1.5 1.5 0 0114 6.5V8H5.6a1.5 1.5 0 00-1.45 1.1L2 12.5z" fill="currentColor" opacity=".85"/><path d="M4.6 9.1A1 1 0 015.55 8.5h8.2a1 1 0 01.96 1.28l-1.1 3.7A1.5 1.5 0 0112.2 14.5H3.2a1 1 0 01-.96-1.28l2.36-4.12z" fill="currentColor" opacity=".5"/>',
   file: '<path d="M4 2.5A1.5 1.5 0 015.5 1H9l4 4v9.5A1.5 1.5 0 0111.5 16h-6A1.5 1.5 0 014 14.5v-12z" fill="currentColor" opacity=".3"/><path d="M9 1v4h4" fill="none" stroke="currentColor" stroke-width="1.3"/>',

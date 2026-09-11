@@ -66,7 +66,12 @@ export interface DiffNav {
   next(): void
   prev(): void
   state(): { index: number; total: number }
-  onChange(cb: (s: { index: number; total: number }) => void): void
+  /**
+   * 订阅计数变化（滚动、跳转、差异重算都会触发）。
+   * 返回退订函数——订阅方是**标签栏**，每次重建标签栏都要退订旧的，
+   * 否则重渲染几次就有几个野订阅在更新早已移除的 DOM。
+   */
+  onChange(cb: (s: { index: number; total: number }) => void): () => void
 }
 
 let monacoPromise: Promise<Monaco | null> | null = null
@@ -482,7 +487,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
    *     两侧滚动是同步的（diff editor 自带同步滚动），露一边两边都会跟。
    */
   let idx = -1
-  let navCb: ((s: { index: number; total: number }) => void) | null = null
+  const navCbs = new Set<(s: { index: number; total: number }) => void>()
   const changes = (): Array<{ originalStartLineNumber: number; originalEndLineNumber: number; modifiedStartLineNumber: number; modifiedEndLineNumber: number }> =>
     (ed.getLineChanges() ?? []) as never
 
@@ -500,7 +505,8 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
 
   function emit(): void {
     const total = changes().length
-    navCb?.({ index: total ? currentIndex() + 1 : 0, total })
+    const s = { index: total ? currentIndex() + 1 : 0, total }
+    for (const cb of navCbs) cb(s)
   }
 
   function reveal(i: number): void {
@@ -553,8 +559,9 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     prev: () => step(-1),
     state: () => ({ index: changes().length ? Math.max(1, (idx < 0 ? currentIndex() : idx) + 1) : 0, total: changes().length }),
     onChange: (cb) => {
-      navCb = cb
+      navCbs.add(cb)
       cb(nav.state())
+      return () => navCbs.delete(cb)
     },
   }
 

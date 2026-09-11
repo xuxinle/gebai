@@ -19,7 +19,7 @@ import { createExplorer } from "./explorer"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { createUrlSync, parseUrlState } from "./url-state"
 import { initTheme } from "../theme-core"
-import { createGitPanel, mountDiffView, type DiffSpec, type GitPanel } from "./git"
+import { createGitPanel, diffEndpointsFor, mountDiffView, type DiffSpec, type GitPanel } from "./git"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
@@ -53,6 +53,14 @@ function resolveSessionId(): string | undefined {
   }
 }
 
+/** 一次「变更文件」遍历的上下文（差异标签内部换文件的游标）。 */
+interface ReviewCtx {
+  /** 仓库相对路径列表（顺序即差异列表顺序） */
+  files: string[]
+  /** 当前文件下标；-1 = 当前文件不在清单里（如从文件历史打开的某次提交差异） */
+  index: number
+}
+
 interface Tab {
   id: string
   kind: "file" | "diff"
@@ -79,8 +87,13 @@ interface Tab {
   /** 差异态 */
   diffSpec?: DiffSpec
   diffDispose?: () => void
-  /** 差异块导航（F7/Shift+F7 与工具条按钮共用；降级渲染为 null） */
+  /** 差异块导航（F7/Shift+F7 与标签栏按钮共用；降级渲染为 null） */
   diffNav?: DiffNav | null
+  /**
+   * 变更文件清单（与差异同一端点对）：跨文件导航用。
+   * 打开差异后异步取，未就绪时标签栏按钮置灰。
+   */
+  review?: ReviewCtx
   /** 标签图标覆盖（合并视图用 merge 图标，其余按 kind/dirty 推断） */
   icon?: string
 }
@@ -108,21 +121,36 @@ const railEl = h("div", { class: "fw-rail" })
 const leftPanel = h("div", { class: "fw-left" })
 const leftResizer = h("div", { class: "fw-resizer", title: "拖动调整宽度" })
 const tabbar = h("div", { class: "fw-tabbar" })
-const toolbar = h("div", { class: "fw-toolbar" })
 const views = h("div", { class: "fw-views" })
 // 底部工具窗（IDEA 式）：Git 面板停靠在此，可拖拽调高、可整体收起
 const gitDock = h("div", { class: "fw-git-dock" })
 const gitDockResizer = h("div", { class: "fw-dock-resizer", title: "拖动调整高度" })
 const statusbar = h("footer", { class: "fw-statusbar" })
 
+/**
+ * 外壳分区（对齐 IDEA 的 tool window 布局）：
+ *
+ *   ┌───────────────────────────────┬──────────┐
+ *   │ 活动栏 │ 左栏（资源管理器/变更） │ 编辑区   │  ← .fw-body：只占"上部"
+ *   ├─────────────────────────────────────────────┤
+ *   │ 底部工具窗（分支 | 日志 | 提交内容）          │  ← 整宽，横跨活动栏与左栏下方
+ *   ├─────────────────────────────────────────────┤
+ *   │ 状态栏                                       │
+ *   └─────────────────────────────────────────────┘
+ *
+ * 底部工具窗放在 .fw-body **之外**（而不是编辑区里）：它要看的是「历史/提交」这类全局信息，
+ * 与左边在看哪个目录无关，占满整宽才有足够横向空间摆三栏；左栏则随之上收到上半部分。
+ * 与 IDEA 一致：打开底部工具窗时，左侧 Project 工具窗的高度会被压缩，而不是并排。
+ */
 const rootEl = h("div", { class: "fw-app" }, [
   h("div", { class: "fw-body" }, [
     railEl,
     leftPanel,
     leftResizer,
-    // 主区纵向：编辑区在上、Git 工具窗停靠在下（IDEA 的 tool window 布局）
-    h("div", { class: "fw-center" }, [tabbar, toolbar, views, gitDockResizer, gitDock]),
+    h("div", { class: "fw-center" }, [tabbar, views]),
   ]),
+  gitDockResizer,
+  gitDock,
   statusbar,
 ])
 
@@ -320,6 +348,9 @@ function findTab(id: string): Tab | undefined {
 
 const viewHosts = new Map<string, HTMLElement>()
 
+/** 标签栏对「差异块计数」的订阅退订函数（标签栏每次重建都换一个）。 */
+let diffNavUnsub: (() => void) | null = null
+
 async function openFile(root: string, path: string, opts: { preview?: boolean; line?: number; forceText?: boolean } = {}): Promise<void> {
   if (!path) return
   const id = tabId("file", root, path)
@@ -427,7 +458,6 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
         if (dirty !== tab.dirty) {
           tab.dirty = dirty
           renderTabbar()
-          renderToolbar()
         }
       })
       editor.onCursor((info) => {
@@ -440,7 +470,8 @@ async function loadTab(tab: Tab, opts: { line?: number; forceText?: boolean } = 
       clear(host0)
       tab.viewDispose = renderViewer(host0, viewerCtx(tab))
     }
-    renderToolbar()
+    // 标签栏右侧动作依赖 tab.stat（能否编辑/是否图表…）与 kind，加载完才齐
+    renderTabbar()
     renderStatus()
   } catch (err) {
     clear(host0)
@@ -515,6 +546,112 @@ async function openDiff(spec: DiffSpec): Promise<void> {
   tab.diffDispose = view.dispose
   tab.diffNav = view.nav
   renderTabbar()
+  // 变更文件清单异步取（不挡首屏）：拿到后标签栏的跨文件导航才可用
+  void prepareReview(tab, spec)
+}
+
+/* ------------------------------ 变更文件遍历（跨文件导航） ------------------------------ */
+
+/**
+ * 取「与当前差异同一端点对」的变更文件清单——**由 DiffSpec 推导端点**，
+ * 所以工作区改动、某次提交、任意两端比较都能用同一套按钮遍历。
+ */
+async function fetchReviewFiles(spec: DiffSpec): Promise<string[]> {
+  const ep = diffEndpointsFor(spec)
+  // 用 compare 端点的参数（与取内容用的端点约定不同，见 DiffEndpoints 注释）
+  const res = await api.gitCompare(spec.root, ep.compare)
+  return res.files.map((f) => f.path)
+}
+
+/** 填充标签的 review 上下文（失败静默：只是没有跨文件导航，差异本身照常看）。 */
+async function prepareReview(tab: Tab, spec: DiffSpec): Promise<void> {
+  try {
+    const files = await fetchReviewFiles(spec)
+    if (!files.length) return
+    // 已销毁的标签不再回填（异步期间用户可能已关掉）
+    if (!findTab(tab.id)) return
+    tab.review = { files, index: files.indexOf(spec.path) }
+    if (state.activeId === tab.id) renderTabbar()
+  } catch {
+    /* 清单拿不到就不给跨文件导航 */
+  }
+}
+
+/**
+ * 在当前差异标签内换到上/下一个变更文件。
+ *
+ * 语义：**同一个标签内换文件**（不是每个文件开一个标签）——遍历 20 个文件不该堆 20 个标签。
+ * 因此换文件时要给标签改 key（标签 id 里含路径），否则「按 id 查已有标签」会指错文件。
+ * 若目标文件的差异标签已开着，则直接切过去（复用，不重复开）。
+ */
+async function navigateReview(tab: Tab, delta: 1 | -1): Promise<void> {
+  const review = tab.review
+  const spec = tab.diffSpec
+  if (!review || !spec) return
+  const n = review.files.length
+  if (n < 2) return
+  const next = review.index < 0 ? (delta === 1 ? 0 : n - 1) : (review.index + delta + n) % n
+  const path = review.files[next]
+  if (path === tab.path) return
+  const exist = findTab(diffTabId(spec, path))
+  if (exist && exist !== tab) {
+    // 已开着该文件的差异：切过去，并把游标对齐，之后的「下一个」从那继续
+    exist.review = { files: review.files, index: next }
+    activate(exist.id)
+    renderTabbar()
+    return
+  }
+  await loadDiffInto(tab, { ...spec, path, title: diffTitleFor(spec, path) }, next)
+}
+
+/** 差异标签 id：路径进 id（同一文件的差异只开一个标签）。 */
+function diffTabId(spec: DiffSpec, path: string): string {
+  return tabId("diff", spec.root, path, `:${JSON.stringify(spec.source)}`)
+}
+
+/**
+ * 换文件后的标签标题：沿用原标题的「来源后缀」（如「（工作区）」/「 @ 3a43d50b」），
+ * 只替换文件名部分——原来的标题格式由各调用方精心取过，不该被导航改掉。
+ */
+function diffTitleFor(spec: DiffSpec, path: string): string {
+  const base = (p: string) => p.split("/").pop() ?? p
+  const oldBase = base(spec.path)
+  const suffix = spec.title.startsWith(oldBase) ? spec.title.slice(oldBase.length) : ""
+  return suffix ? `${base(path)}${suffix}` : `${base(path)}（${diffEndpointsFor(spec).note}）`
+}
+
+/** 把另一个文件的差异装载进**同一个标签**（重建视图 + 给标签改 key）。 */
+async function loadDiffInto(tab: Tab, spec: DiffSpec, reviewIndex: number): Promise<void> {
+  const host = viewHosts.get(tab.id)
+  if (!host) return
+  tab.diffDispose?.()
+  tab.diffDispose = undefined
+  tab.diffNav = null
+  diffNavUnsub?.()
+  diffNavUnsub = null
+  rekeyTab(tab, diffTabId(spec, spec.path))
+  tab.path = spec.path
+  tab.title = `◧ ${spec.title}`
+  tab.diffSpec = spec
+  if (tab.review) tab.review = { files: tab.review.files, index: reviewIndex }
+  clear(host)
+  renderTabbar()
+  const info = state.roots.find((r) => r.id === spec.root)
+  const view = await mountDiffView(host, api, spec, { repoRootPath: info?.repoRoot ?? "", language: languageOf(spec.path) })
+  tab.diffDispose = view.dispose
+  tab.diffNav = view.nav
+  renderTabbar()
+  urlSync.replace()
+}
+
+/** 给标签改 key（id 变了，viewHosts / activeId 都要跟着）。 */
+function rekeyTab(tab: Tab, newId: string): void {
+  if (tab.id === newId) return
+  const old = tab.id
+  viewHosts.delete(old)
+  viewHosts.set(newId, tab.host)
+  tab.id = newId
+  if (state.activeId === old) state.activeId = newId
 }
 
 /** 仓库相对路径 → 当前根相对路径（root 是仓库子目录时剥离前缀；不在子树内则原样返回，避免误开）。 */
@@ -549,7 +686,6 @@ function activate(id: string): void {
   if (tab.editor && tab.scrollTop) tab.editor.setScrollTop(tab.scrollTop)
   setTimeout(() => tab.editor?.layout(), 20)
   renderTabbar()
-  renderToolbar()
   renderStatus()
   if (tab.kind === "file") void explorer.reveal(tab.path, { select: true })
   // 当前文件变了 → 地址栏就地替换（不新增历史：连开多个文件不该要按多次后退）
@@ -586,7 +722,6 @@ function forceClose(id: string): void {
     if (next) activate(next.id)
     else {
       renderTabbar()
-      renderToolbar()
       renderStatus()
     }
   } else renderTabbar()
@@ -595,6 +730,9 @@ function forceClose(id: string): void {
 /* ------------------------------ 渲染：标签栏 / 工具条 / 状态栏 ------------------------------ */
 
 function renderTabbar(): void {
+  // 退掉上一轮对差异计数的订阅（DOM 马上被清空，留着就是野订阅）
+  diffNavUnsub?.()
+  diffNavUnsub = null
   clear(tabbar)
   for (const t of state.tabs) {
     const el = h("div", { class: `fw-tab${t.id === state.activeId ? " active" : ""}${t.preview ? " preview" : ""}` }, [
@@ -644,24 +782,81 @@ function renderTabbar(): void {
     if (name?.trim()) void openFile(explorer.getRoot(), name.trim(), { preview: false })
   }
   tabbar.appendChild(spacer)
-  const actions = h("div", { class: "fw-tabbar-actions" }, [
-    btn("copy", "复制当前文件路径", () => {
-      const t = activeTab()
-      if (t) void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))
-    }),
-    btn("history", "当前文件的 Git 历史", () => {
-      const t = activeTab()
-      if (!t?.path) return
-      if (!gitPanel) ensureGitPanel()
-      gitPanel?.show("log")
-      toast("已切换到日志视图（可在日志中过滤该文件）", "info")
-    }),
-    btn("refresh", "重新加载当前文件", () => {
-      const t = activeTab()
-      if (t?.kind === "file") void loadTab(t)
-    }),
-    ])
-  tabbar.appendChild(actions)
+  tabbar.appendChild(tabActions())
+}
+
+/**
+ * 标签栏右侧动作区：**只放当前标签相关的图标按钮**（无文字，靠 title 提示）。
+ *
+ * 为什么收进标签栏而不是单独一行工具条：那行工具条有一半宽度被面包屑占着，
+ * 而面包屑的信息（在哪、什么文件）标签与资源管理器已经分别表达了；按钮归到标签栏后
+ * 省下一整行纵向空间给代码，且"当前标签能做什么"就在标签旁边，不用跨行找。
+ */
+function tabActions(): HTMLElement {
+  const box = h("div", { class: "fw-tabbar-actions" })
+  const t = activeTab()
+  if (!t) return box
+
+  if (t.kind === "diff") {
+    // 两组导航，箭头方向区分语义：左右 = 换文件（跨文件），上下 = 换差异（文件内）
+    const review = t.review
+    const hasList = !!review && review.files.length > 1
+    const prevFile = btn("chevronLeft", "上一个变更文件（Ctrl+Alt+↑）", () => void navigateReview(t, -1))
+    const nextFile = btn("chevronRight", "下一个变更文件（Ctrl+Alt+↓）", () => void navigateReview(t, 1))
+    prevFile.disabled = !hasList
+    nextFile.disabled = !hasList
+    const fileCount = h("span", {
+      class: "fw-nav-count",
+      text: review ? `${review.index < 0 ? "–" : review.index + 1} / ${review.files.length}` : "…",
+      title: review ? `变更文件：第 ${review.index < 0 ? "?" : review.index + 1} 个，共 ${review.files.length} 个` : "正在获取变更文件清单…",
+    })
+    box.appendChild(h("span", { class: "fw-nav-group" }, [prevFile, fileCount, nextFile]))
+
+    if (t.diffNav) {
+      const nav = t.diffNav
+      const prevDiff = btn("chevronUp", "上一处差异（Shift+F7）", () => nav.prev())
+      const nextDiff = btn("chevronDown", "下一处差异（F7）", () => nav.next())
+      const diffCount = h("span", { class: "fw-nav-count", text: "—", title: "当前差异块 / 总差异块" })
+      // 计数由差异视图驱动（滚动也会变）；标签栏每次重建都要退订，故留着退订函数
+      diffNavUnsub?.()
+      diffNavUnsub = nav.onChange((s) => {
+        diffCount.textContent = s.total ? `${s.index || 1} / ${s.total}` : "无差异"
+        prevDiff.disabled = !s.total
+        nextDiff.disabled = !s.total
+      })
+      box.appendChild(h("span", { class: "fw-nav-group" }, [prevDiff, diffCount, nextDiff]))
+    }
+    return box
+  }
+
+  // 合并视图自带工具条（且没有 stat）——不重复给按钮
+  if (t.kind !== "file" || !t.stat) return box
+
+  const editable = !!t.stat.editable && !t.truncated && state.rootsResp?.writable !== false
+  const modeBtn = btn(t.mode === "edit" ? "eye" : "edit", t.mode === "edit" ? "切换为查看（Ctrl+E）" : editable ? "编辑（Ctrl+E）" : "该文件类型不支持编辑", () => toggleMode(t), t.mode === "edit" ? "active" : "")
+  modeBtn.disabled = !editable
+  box.appendChild(modeBtn)
+
+  const saveBtn = btn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "")
+  saveBtn.disabled = !t.dirty || !state.rootsResp?.writable
+  box.appendChild(saveBtn)
+
+  if (diagramKindOf(extOf(t.path))) {
+    box.appendChild(
+      btn("diff", "源码 / 渲染预览切换", () => {
+        const host = viewHosts.get(t.id)
+        if (!host) return
+        if (host.querySelector(".fw-diagram-wrap")) void loadTab(t)
+        else renderViewer(host, viewerCtx(t))
+      }),
+    )
+  }
+
+  box.appendChild(btn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")))
+  if (state.gitStatus?.isRepo) box.appendChild(btn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)))
+  box.appendChild(btn("refresh", "重新加载当前文件", () => void loadTab(t)))
+  box.appendChild(btn("copy", "复制路径", () => void navigator.clipboard.writeText(t.path).then(() => toast("已复制路径", "success"))))
+  return box
 }
 
 function btn(iconName: string, title: string, onClick: () => void, cls = ""): HTMLButtonElement {
@@ -671,78 +866,6 @@ function btn(iconName: string, title: string, onClick: () => void, cls = ""): HT
   return b
 }
 
-function renderToolbar(): void {
-  clear(toolbar)
-  const tab = activeTab()
-  if (!tab) {
-    toolbar.appendChild(h("span", { class: "fw-hint", text: "从左侧资源管理器打开文件，或用 Ctrl+P 快速打开" }))
-    return
-  }
-  const info = state.roots.find((r) => r.id === tab.root)
-  const crumbs = h("div", { class: "fw-toolbar-path" })
-  const rootCrumb = h("button", { class: "fw-link", text: info?.name ?? tab.root })
-  rootCrumb.onclick = () => void explorer.reveal("")
-  crumbs.appendChild(rootCrumb)
-  const parts = tab.path.split("/")
-  let acc = ""
-  for (const p of parts) {
-    acc = acc ? `${acc}/${p}` : p
-    const target = acc
-    crumbs.append(icon("chevronRight", 11))
-    const seg = h("button", { class: "fw-link", text: p })
-    seg.onclick = () => void explorer.reveal(target)
-    crumbs.appendChild(seg)
-  }
-  toolbar.appendChild(crumbs)
-
-  const actions = h("div", { class: "fw-toolbar-actions" })
-  if (tab.kind === "file" && tab.stat) {
-    const editable = tab.stat.editable && !tab.truncated && !state.rootsResp?.writable === false
-    const modeBtn = h("button", { class: `fw-btn sm${tab.mode === "edit" ? " primary" : ""}`, title: editable ? "切换查看 / 编辑（Ctrl+E）" : "该文件类型不支持编辑" }, [icon(tab.mode === "edit" ? "eye" : "edit"), h("span", { text: tab.mode === "edit" ? "查看" : "编辑" })])
-    modeBtn.disabled = !editable
-    modeBtn.onclick = () => toggleMode(tab)
-    actions.appendChild(modeBtn)
-
-    const saveBtn = h("button", { class: "fw-btn sm", title: "保存（Ctrl+S）" }, [icon("save"), h("span", { text: "保存" })])
-    saveBtn.disabled = !tab.dirty || !state.rootsResp?.writable
-    saveBtn.onclick = () => void saveTab(tab)
-    actions.appendChild(saveBtn)
-
-    if (diagramKindOf(extOf(tab.path))) {
-      const b = h("button", { class: "fw-btn sm", title: "源码 / 渲染预览切换" }, [icon("diff"), h("span", { text: "渲染预览" })])
-      b.onclick = () => {
-        const host = viewHosts.get(tab.id)
-        if (!host) return
-        const hasPreview = host.querySelector(".fw-diagram-wrap")
-        if (hasPreview) {
-          void loadTab(tab)
-        } else {
-          host.appendChild(document.createElement("div"))
-          renderViewer(host, viewerCtx(tab))
-        }
-      }
-      actions.appendChild(b)
-    }
-
-    const dl = h("button", { class: "fw-btn sm", title: "下载" }, [icon("download"), h("span", { text: "下载" })])
-    dl.onclick = () => window.open(downloadUrl({ api, root: tab.root, path: tab.path }), "_blank")
-    actions.appendChild(dl)
-
-    if (state.gitStatus?.isRepo) {
-      const hist = h("button", { class: "fw-btn sm", title: "文件历史（Git log --follow）" }, [icon("history"), h("span", { text: "历史" })])
-      hist.onclick = () => void showFileHistory(tab)
-      actions.appendChild(hist)
-    }
-  }
-  if (tab.kind === "diff") {
-    actions.appendChild(h("span", { class: "fw-hint", text: "只读差异视图" }))
-  }
-  toolbar.appendChild(actions)
-}
-
-async function showFileHistory(tab: Tab): Promise<void> {
-  return showFileHistoryByPath(tab.path, tab.root)
-}
 
 /** 按路径看文件历史（工具栏与变更面板右键共用）。 */
 async function showFileHistoryByPath(path: string, root = explorer.getRoot()): Promise<void> {
@@ -866,7 +989,6 @@ function setEol(tab: Tab, eol: "lf" | "crlf" | "keep"): void {
       tab.editor.setValue(next)
       tab.dirty = tab.editor.getValue() !== tab.baseline
       renderTabbar()
-      renderToolbar()
     }
   }
 }
@@ -890,9 +1012,10 @@ function renderRail(): void {
     return b
   }
   railEl.append(
-    mkView("changes", "diff", "变更：工作区改动与提交（Ctrl+Shift+G）"),
     mkView("explorer", "folder", "资源管理器（Ctrl+Shift+E）"),
     mkView("search", "search", "搜索（Ctrl+Shift+F）"),
+    // 变更排在最后：前两个是"找文件"，变更面板是"看待提交的改动"，从导航到动作的顺序
+    mkView("changes", "diff", "变更：工作区改动与提交（Ctrl+Shift+G）"),
     h("div", { class: "fw-rail-spacer" }),
     // 底部组：工具窗开关 + 全局入口（原菜单栏的功能补位）
     (() => {
@@ -901,12 +1024,7 @@ function renderRail(): void {
       b.onclick = () => toggleGitPanel(!state.gitViewVisible)
       return b
     })(),
-    (() => {
-      const b = h("button", { class: "fw-rail-btn", title: "打开文件夹（切换根）" })
-      b.appendChild(icon("folderOpen", 18))
-      b.onclick = () => (document.querySelector(".fw-root-btn") as HTMLElement | null)?.click()
-      return b
-    })(),
+    // 「打开文件夹（切换根）」已移除：切根在资源管理器顶部的根选择按钮里（那里还带根清单与面包屑语义）
     (() => {
       const b = h("button", { class: "fw-rail-btn", title: "回收站" })
       b.appendChild(icon("trash", 18))
@@ -948,7 +1066,7 @@ function toggleMode(tab: Tab): void {
     tab.editor?.focus()
     toast("已进入编辑模式（Ctrl+S 保存）", "info", 2200)
   }
-  renderToolbar()
+  renderTabbar()
   renderStatus()
 }
 
@@ -968,7 +1086,6 @@ async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolea
     tab.mode = "edit"
     tab.editor.setReadOnly(false)
     renderTabbar()
-    renderToolbar()
     toast("已保存", "success", 1600)
     if (state.gitStatus?.isRepo) void refreshGit().then(() => gitPanel?.refresh())
     return true
@@ -988,7 +1105,6 @@ async function saveTab(tab: Tab, opts: { force?: boolean } = {}): Promise<boolea
         tab.encoding = detail.current.encoding
         tab.dirty = false
         renderTabbar()
-        renderToolbar()
         toast("已重新加载磁盘内容", "info")
         return false
       }
@@ -1164,7 +1280,6 @@ async function openMergeTab(repoRel: string): Promise<void> {
   }
   await view.refresh()
   renderTabbar()
-  renderToolbar()
   renderStatus()
 }
 
@@ -1230,7 +1345,6 @@ async function openCompare(init: { from?: string; to?: string; path?: string; me
   compareTabs.set(id, { view, state: { from, to, mergeBase: init.mergeBase ?? false, path: init.path ?? "" } })
   await view.refresh()
   renderTabbar()
-  renderToolbar()
   renderStatus()
 }
 
@@ -1404,7 +1518,6 @@ function toggleGitPanel(visible: boolean): void {
     // 展开后 Monaco 可视高度变化，重排编辑器（否则出现空白/裁切）
     for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 30)
   }
-  renderToolbar()
   renderRail()
 }
 
@@ -1424,6 +1537,7 @@ function showShortcuts(): void {
     ["F2", "重命名选中项"],
     ["Delete", "删除选中项（移入回收站）"],
     ["F7 / Shift+F7", "差异视图：下一处 / 上一处差异（Alt+↑↓ 同效）"],
+    ["Ctrl+Alt+↓ / ↑", "差异视图：下一个 / 上一个变更文件"],
     ["F9 / F8", "合并视图：下一个 / 上一个冲突"],
     ["F5", "刷新资源管理器与 Git 状态"],
     ["Ctrl+Enter（提交框内）", "提交"],
@@ -1477,6 +1591,29 @@ function showEnvHelp(): void {
 }
 
 /* ------------------------------ 快捷键 ------------------------------ */
+
+/**
+ * 跨文件导航单独用**捕获阶段**监听（Ctrl+Alt+↓ / Ctrl+Alt+↑）。
+ *
+ * 为什么不能放在下面那个冒泡阶段的全局处理器里：这两个组合是 **Monaco 的多光标快捷键**
+ * （insertCursorBelow/Above），编辑器获焦时事件到不了冒泡阶段。跨文件导航是"看代码"时的
+ * 高频动作，不该因为焦点在编辑器里就失灵——捕获先于 Monaco 自己的 keybinding 服务。
+ *
+ * 不用 Alt+←/→（更顺手）：那是浏览器前进/后退，会把工作台整页导航走。
+ */
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.altKey) return
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+    const t = activeTab()
+    if (t?.kind !== "diff" || !t.review || t.review.files.length < 2) return
+    e.preventDefault()
+    e.stopPropagation()
+    void navigateReview(t, e.key === "ArrowDown" ? 1 : -1)
+  },
+  true,
+)
 
 document.addEventListener("keydown", (e) => {
   const ctrl = e.ctrlKey || e.metaKey
@@ -1707,7 +1844,6 @@ async function boot(): Promise<void> {
     await restoreFromUrl()
     await refreshGit()
     renderTabbar()
-    renderToolbar()
     renderStatus()
     renderRail()
     // 深层链接：?root=proj:gebai&path=src/main.ts&line=10&diff=1

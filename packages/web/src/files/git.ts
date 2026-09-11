@@ -722,6 +722,74 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   return { el, refresh, show, view: () => view }
 }
 
+/** 差异端点对（A=原侧 / B=改侧）。 */
+export interface DiffEndpoints {
+  /** 取**内容**用的端点（gitContent：WORKTREE / INDEX / 任意 rev） */
+  originalRef: string
+  modifiedRef: string
+  /**
+   * 取**变更文件清单**用的参数（gitCompare）。
+   *
+   * 与内容端点的约定**不同**，别混用：内容端点里 INDEX 是「暂存区内容」，
+   * 而 compare 的端点语义是一张表（见服务端 diffArgs）——
+   * 「未暂存」要表达成 from 空、to=WORKTREE（`git diff`），
+   * 写成 from=INDEX&to=WORKTREE 会被解释成 `--cached`（HEAD↔暂存区），拿到的清单是错的
+   * （不报错，只是静默返回别的文件集合，所以这里必须显式分开写）。
+   */
+  compare: { from?: string; to?: string; mergeBase: boolean }
+  /** 人类可读的来源说明，如「暂存区 ↔ 工作区」 */
+  note: string
+  labelA: string
+  labelB: string
+}
+
+/**
+ * 由 DiffSpec 推导端点对——**只此一份**，三处共用：
+ * ① 差异视图取两侧文本；② 变更文件清单（上一个/下一个变更文件）；③ 工具条上的 A/B 说明。
+ * 各写一份很容易出现「视图按 A...B 取、清单却按 A..B 取」这类对不上的偏差。
+ */
+export function diffEndpointsFor(spec: DiffSpec): DiffEndpoints {
+  const { source } = spec
+  if (source.type === "worktree") {
+    return source.staged
+      ? {
+          originalRef: "HEAD",
+          modifiedRef: INDEX_REF,
+          compare: { to: INDEX_REF, mergeBase: false }, // 空 → INDEX == git diff --cached
+          note: "HEAD ↔ 暂存区",
+          labelA: "HEAD",
+          labelB: "暂存区",
+        }
+      : {
+          originalRef: INDEX_REF,
+          modifiedRef: WORKTREE_REF,
+          compare: { to: WORKTREE_REF, mergeBase: false }, // 空 → WORKTREE == git diff（索引↔工作区）
+          note: "暂存区 ↔ 工作区",
+          labelA: "暂存区",
+          labelB: "工作区",
+        }
+  }
+  if (source.type === "commit") {
+    const short = source.hash.slice(0, 8)
+    return {
+      originalRef: `${source.hash}^`,
+      modifiedRef: source.hash,
+      compare: { from: `${source.hash}^`, to: source.hash, mergeBase: false },
+      note: `${short} 本次提交`,
+      labelA: `${short}^`,
+      labelB: short,
+    }
+  }
+  const mb = !!source.mergeBase
+  return {
+    originalRef: source.from,
+    modifiedRef: source.to,
+    compare: { from: source.from, to: source.to, mergeBase: mb },
+    note: source.label ?? (mb ? `${source.from}...${source.to}（共同祖先）` : `${source.from} ↔ ${source.to}`),
+    labelA: mb ? "共同祖先" : source.from,
+    labelB: source.to,
+  }
+}
 /**
  * 并列差异视图（主区域内容）：解析两侧文本 → Monaco diff；失败回退结构化 hunks。
  *
@@ -745,25 +813,9 @@ export async function mountDiffView(
     const res = await api.gitContent(root, ref, path)
     return res.binary ? "（二进制文件，无法按文本显示）" : res.content
   }
-  /** 端点对（A=原侧，B=改侧）+ 人类可读标题。 */
-  const endpoints = async (): Promise<{ originalRef: string; modifiedRef: string; note: string }> => {
-    if (source.type === "worktree") {
-      return source.staged
-        ? { originalRef: "HEAD", modifiedRef: INDEX_REF, note: "HEAD ↔ 暂存区" }
-        : { originalRef: INDEX_REF, modifiedRef: WORKTREE_REF, note: "暂存区 ↔ 工作区" }
-    }
-    if (source.type === "commit") {
-      return { originalRef: `${source.hash}^`, modifiedRef: source.hash, note: `${source.hash.slice(0, 8)} 本次提交` }
-    }
-    if (source.mergeBase) {
-      // 三点：A 侧用共同祖先（与服务端 git diff A...B 语义一致）
-      return { originalRef: source.from, modifiedRef: source.to, note: source.label ?? `${source.from}...${source.to}（共同祖先）` }
-    }
-    return { originalRef: source.from, modifiedRef: source.to, note: source.label ?? `${source.from} ↔ ${source.to}` }
-  }
 
   try {
-    const ep = await endpoints()
+    const ep = diffEndpointsFor(spec)
     let originalRef = ep.originalRef
     // 三点语义（A...B）：先解析共同祖先，A 侧用祖先内容（与服务端 git diff A...B 一致）
     if (source.type === "range" && source.mergeBase) {
@@ -771,19 +823,12 @@ export async function mountDiffView(
       if (cmp?.mergeBaseOf) originalRef = cmp.mergeBaseOf
     }
     const [original, modified] = await Promise.all([side(originalRef), side(ep.modifiedRef)])
-    /** 差异块计数的位置（「n / m」）；未就绪时显示为 —。 */
-    const navCount = h("span", { class: "fw-diff-nav-count", title: "当前差异块 / 总差异块" , text: "—"})
-    const prevBtn = h("button", { class: "fw-icon-btn", title: "上一处差异（Shift+F7）" })
-    prevBtn.appendChild(icon("chevronUp", 14))
-    const nextBtn = h("button", { class: "fw-icon-btn", title: "下一处差异（F7）" })
-    nextBtn.appendChild(icon("chevronDown", 14))
-    const navGroup = h("span", { class: "fw-diff-nav" }, [prevBtn, navCount, nextBtn])
     const wrap = h("div", { class: "fw-diff-wrap" }, [
       h("div", { class: "fw-viewer-bar" }, [
         h("span", { class: "fw-viewer-info", text: `${ep.note}` }),
         h("span", { class: "fw-viewer-spacer" }),
-        navGroup,
-        h("span", { class: "fw-hint", text: `A：${source.type === "range" ? (source.mergeBase ? "共同祖先" : source.from) : source.type === "commit" ? `${source.hash.slice(0, 8)}^` : "HEAD"} ｜ B：${source.type === "range" ? source.to : source.type === "commit" ? source.hash.slice(0, 8) : "工作区/暂存区"}` }),
+        // 只留信息不放按钮：导航按钮统一在标签栏（跨文件一组 + 文件内一组，见 main.ts）
+        h("span", { class: "fw-hint", text: `A：${ep.labelA} ｜ B：${ep.labelB}` }),
       ]),
       (() => {
         const box = h("div", { class: "fw-diff-host" })
@@ -793,21 +838,7 @@ export async function mountDiffView(
     host.appendChild(wrap)
     const diffHost = wrap.querySelector(".fw-diff-host") as HTMLElement
     const handle = await createDiffEditor(diffHost, { original, modified, language: ctx.language })
-    // 导航接线：按钮/计数由 handle.nav 驱动；差异块为空时置灰（按钮看得见但不可用，不谜之失踪）
-    if (handle.nav) {
-      const nav = handle.nav
-      prevBtn.onclick = () => nav.prev()
-      nextBtn.onclick = () => nav.next()
-      nav.onChange((s) => {
-        navCount.textContent = s.total ? `${s.index || 1} / ${s.total}` : "无差异"
-        for (const b of [prevBtn, nextBtn]) {
-          if (s.total) b.removeAttribute("disabled")
-          else b.setAttribute("disabled", "")
-        }
-      })
-    } else {
-      navGroup.remove() // 降级/无差异块：不给点不到的按钮
-    }
+    // 导航按钮由标签栏渲染（handle.nav 交给调用方）
     return { dispose: () => {
       handle.dispose()
       wrap.remove()
