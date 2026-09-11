@@ -26,7 +26,6 @@ export const themeBtn = document.getElementById("theme-btn")!
 export const themePop = document.getElementById("theme-pop")!
 export const jumpBottom = document.getElementById("jump-bottom")!
 export const msgNav = document.getElementById("msg-nav")!
-export const miniToolsBtn = document.getElementById("mini-tools-btn") as HTMLButtonElement
 export const exportBtn = document.getElementById("export-btn")!
 export const compactBtn = document.getElementById("compact-btn")!
 export const settingsBtn = document.getElementById("settings-btn")!

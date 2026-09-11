@@ -7,10 +7,8 @@ import "./css/overlays.css"
 import "./css/files-split.css"
 import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
 import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
-import { bindMinimalMode, applyMinimalMode, syncMinimalModeFromServer } from "./minimal-mode"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
-import { bindMiniTools } from "./mini-tools"
 import { bindWheel } from "./wheel"
 import { bindFilesEntry } from "./files-entry"
 import { bindFilesSplit } from "./files-split"
@@ -99,7 +97,6 @@ composer.addEventListener("submit", async (e) => {
   // 自动审批开关同步会话 env：草稿首条消息创建的会话不经过 loadMessages（applyApprovalSkip 的既有同步点），
   // 每次任务启动前幂等补齐——WS 同连接按序处理，env 写入先于任务请求落地（服务端进程重启丢内存 env 时同样恢复）
   void applyApprovalSkip(sessionId)
-  void applyMinimalMode(sessionId) // 极简模式开关同样在任务启动前幂等同步
   input.value = ""
   autosize()
   syncSendButton()
@@ -168,8 +165,6 @@ async function init() {
   bindTooltips() // 自定义 tooltip（[data-tip] 全局委托）先于面板绑定
   bindThemePop()
   bindApprovalSkip()
-  bindMinimalMode()
-  bindMiniTools()
   bindWheel()
   bindFilesEntry()
   bindFilesSplit()
@@ -211,9 +206,6 @@ async function init() {
     } else if (ev.type === "event.session.ctx") {
       // 运行中上下文大小实时更新（会话列表 k 显示）；缓存命中（接口返回时）随同更新（圆环悬浮展示）
       updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0), ev.payload.ctxCachedTokens === undefined ? undefined : Number(ev.payload.ctxCachedTokens))
-    } else if (ev.type === "event.session.minimal") {
-      // 任务中模型经 full_mode 工具（用户批准）切换到完整模式：本地极简开关随之关闭
-      if (ev.payload.enabled === false) syncMinimalModeFromServer(false)
     } else if (ev.type === "event.branch.merged") {
       // 分支报告合入（DESIGN「会话分支运行与合并」）：消息落盘为 **user + engineNote: "branch"**
       // （与其余引擎注入同口径——assistant 形态会被思考类模型 400 拒绝），此处实时渲染为

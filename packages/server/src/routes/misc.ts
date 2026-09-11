@@ -1,9 +1,8 @@
-/** 反馈 / Webhook / HTML 小工具三组小域路由（各自独立、无共享逻辑，合并一个文件避免碎文件）。 */
+/** 反馈 / Webhook 两组小域路由（各自独立、无共享逻辑，合并一个文件避免碎文件）。 */
 import type { RouteCtx } from "./context"
 import type { FeedbackInfo, FeedbackInput } from "@gebai/sdk"
 import { feedbackContext, readFeedback, writeFeedback } from "../feedback"
 import { SERVICE_USER } from "../app"
-import { deleteMiniTool, getMiniTool, listMiniTools } from "@gebai/agents"
 
 export function registerFeedbackRoutes(rc: RouteCtx): void {
   const { app, d } = rc
@@ -65,32 +64,6 @@ export function registerWebhookRoutes(rc: RouteCtx): void {
     const mine = d.webhooks.list(user.role === "admin" ? undefined : user.id)
     if (!mine.some((w) => w.id === c.req.param("id"))) return c.json({ error: "not found" }, 404)
     await d.webhooks.remove(c.req.param("id"))
-    return c.json({ ok: true })
-  })
-}
-
-export function registerMiniToolRoutes(rc: RouteCtx): void {
-  const { app, d } = rc
-  const userOf = rc.userOf
-
-  // HTML 小工具库（Agent 经 save_tool 保存；列表/读取/删除供 UI 弹窗加载）
-  app.get("/api/v1/mini-tools", async (c) => {
-    const user = await userOf(c)
-    const tools = await listMiniTools(d.config.gebaiHome, user.id)
-    return c.json(tools)
-  })
-  app.get("/api/v1/mini-tools/:name", async (c) => {
-    const user = await userOf(c)
-    const tool = await getMiniTool(d.config.gebaiHome, user.id, c.req.param("name"))
-    if (!tool) return c.json({ error: "tool not found" }, 404)
-    return c.json(tool)
-  })
-  app.delete("/api/v1/mini-tools/:name", async (c) => {
-    const user = await userOf(c)
-    const scope = c.req.query("scope") === "public" ? "public" : "private"
-    // 多用户模式公共工具仅管理员可删（与 save_tool/delete_tool 同规则，防共享资源投毒/破坏）
-    const removed = await deleteMiniTool(d.config.gebaiHome, user.id, c.req.param("name"), scope, { mode: d.config.auth, role: user.role })
-    if (!removed) return c.json({ error: "tool not found" }, 404)
     return c.json({ ok: true })
   })
 }

@@ -345,21 +345,6 @@ export interface SubAgentInfo {
   bundled: boolean
 }
 
-/** HTML 小工具（Agent 经 save_tool 保存到服务端，公用或用户私有）。 */
-export interface MiniToolMeta {
-  name: string
-  scope: "public" | "private"
-  /** 创建者用户 id（公用工具记录归属）。 */
-  owner?: string
-  createdAt: number
-  updatedAt: number
-}
-
-/** 完整小工具信息（含 HTML 源码，仅单条读取时返回）。 */
-export interface MiniToolInfo extends MiniToolMeta {
-  html: string
-}
-
 export interface LLMCapabilities {
   streaming: boolean
   toolCalling: boolean

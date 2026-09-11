@@ -5,7 +5,6 @@ import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
 import { GebaiClient } from "@gebai/sdk"
 import { sessionPath } from "./core/base/paths"
-import { saveMiniTool } from "@gebai/agents"
 
 const home = mkdtempSync(join(tmpdir(), "gebai-http-"))
 let handle: ServerHandle
@@ -151,50 +150,5 @@ describe("REST API", () => {
     await client.connect()
     const sessions = await client.listSessions()
     expect(Array.isArray(sessions)).toBe(true)
-  })
-
-  test("mini-tools SDK methods wire to REST endpoints", async () => {
-    const client = new GebaiClient({ baseUrl: base() })
-    await saveMiniTool(home, "admin", { name: "sdk_tool", html: "<p>sdk</p>", scope: "public" })
-    const list = await client.listMiniTools()
-    expect(list.some((t) => t.name === "sdk_tool")).toBe(true)
-    const got = await client.getMiniTool("sdk_tool")
-    expect(got.html).toBe("<p>sdk</p>")
-    await client.deleteMiniTool("sdk_tool", "public")
-    await expect(client.getMiniTool("sdk_tool")).rejects.toThrow("404")
-  })
-
-  test("mini-tools REST: list/get/delete with private shadowing public", async () => {
-    // 经 save_tool 落库（公用 + 私有同名）
-    await saveMiniTool(home, "admin", { name: "clock", html: "<p>公共时钟</p>", scope: "public" })
-    await saveMiniTool(home, "admin", { name: "clock", html: "<p>我的时钟</p>", scope: "private" })
-    await saveMiniTool(home, "admin", { name: "calc", html: "<p>计算器</p>", scope: "public" })
-
-    // 列表：公用全部 + 本人私有；同名私有覆盖公用（只出现一条 clock）
-    const list = (await (await fetch(`${base()}/api/v1/mini-tools`)).json()) as Array<{ name: string; scope: string }>
-    const clocks = list.filter((t) => t.name === "clock")
-    expect(clocks.length).toBe(1)
-    expect(clocks[0].scope).toBe("private")
-    expect(list.some((t) => t.name === "calc" && t.scope === "public")).toBe(true)
-
-    // 单条读取：私有优先，含 html
-    const got = (await (await fetch(`${base()}/api/v1/mini-tools/clock`)).json()) as { name: string; html: string; scope: string }
-    expect(got.html).toBe("<p>我的时钟</p>")
-    expect(got.scope).toBe("private")
-
-    // 404
-    const missing = await fetch(`${base()}/api/v1/mini-tools/nope`)
-    expect(missing.status).toBe(404)
-
-    // 删除私有 → 同名公共恢复可见
-    const del = await fetch(`${base()}/api/v1/mini-tools/clock?scope=private`, { method: "DELETE" })
-    expect(del.status).toBe(200)
-    const after = (await (await fetch(`${base()}/api/v1/mini-tools/clock`)).json()) as { html: string; scope: string }
-    expect(after.html).toBe("<p>公共时钟</p>")
-
-    // 删除公共
-    const delPub = await fetch(`${base()}/api/v1/mini-tools/clock?scope=public`, { method: "DELETE" })
-    expect(delPub.status).toBe(200)
-    expect((await fetch(`${base()}/api/v1/mini-tools/clock`)).status).toBe(404)
   })
 })

@@ -36,7 +36,7 @@ export function resolveProjectRoot(project: string, ctx: ToolContext): string {
 /**
  * 为工具添加可选 project 参数（预置项目名/项目根路径/保留名 tmp）：传入时把路径解析基准与工作目录
  * 切换到所选根（沙箱模式限定该根内，本地模式不限制），未传时相对路径以会话工作目录为基准（行为不变）。
- * 全局文件工具（read/write/edit/patch/ls/grep/glob/file/diff/sh/py）经全局注册统一包装
+ * 全局文件工具（read/write/edit/patch/ls/grep/glob/file/sh/py）经全局注册统一包装
  * （ctx.projects/resolveProjectPath 由引擎聚合注入）；code/explore 的独有工具（search_symbols/analyze/git/
  * preview_server）同规则包装。
  */

@@ -1,15 +1,15 @@
 import { el } from "./state"
 
 /* 标题栏最右按钮轮盘：入口按钮（#wheel-btn）悬浮展开双弧扇形快捷菜单——
- * 内弧 r=85 会话操作组（小工具/导出/压缩），外弧 r=145 应用操作组（自动审批/极简模式/主题/设置/登出），
+ * 内弧 r=85 会话操作组（导出/压缩），外弧 r=145 应用操作组（自动审批/主题/设置/登出），
  * 两弧之间 r=115 细弧线分区；纯 hover 交互（入口 hover 展开、指针离开扇形区域延迟收起，不支持点击切换），
- * 外点/Esc/resize 关闭。8 个按钮自隐藏源容器移入（事件绑定在元素上，移动不失效）。 */
+ * 外点/Esc/resize 关闭。6 个按钮自隐藏源容器移入（事件绑定在元素上，移动不失效）。 */
 
 const INNER_R = 85 // 内弧半径（会话组）
 const OUTER_R = 145 // 外弧半径（应用组）
 const DIVIDER_R = 115 // 分区弧线半径
 // 分组角度（屏幕角：0°=正右，90°=正下；扇形受标题栏高度限制只能朝左下方展开）
-const INNER_ANGS = [93, 120, 147] // 会话组固定 3 个
+const INNER_RANGE: [number, number] = [93, 147] // 会话组按可见按钮数在区间内均布
 const OUTER_RANGE: [number, number] = [97, 153] // 应用组按可见按钮数在区间内均布
 const KEEP_PAD = 8 // hover 保持区相对扇形边界盒的外扩（指针在区域内不收起）
 const BTN = 32 // 按钮边长（.icon-btn）
@@ -33,8 +33,8 @@ function polar(r: number, deg: number): [number, number] {
 
 export function bindWheel() {
   const wheelBtn = document.getElementById("wheel-btn") as HTMLButtonElement
-  const inner = ["mini-tools-btn", "export-btn", "compact-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
-  const outer = ["approval-skip", "minimal-mode", "theme-btn", "settings-btn", "logout-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
+  const inner = ["export-btn", "compact-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
+  const outer = ["approval-skip", "theme-btn", "settings-btn", "logout-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
   const all = [...inner, ...outer]
 
   // 容器 = hover 保持区 + 分区弧线（挂 body，fixed，不随任何 transform 祖先偏移）
@@ -55,7 +55,7 @@ export function bindWheel() {
   svg.appendChild(path)
   keep.appendChild(svg)
 
-  // 8 个按钮移入容器（绑定保留在元素上），内弧按钮加分区底色
+  // 6 个按钮移入容器（绑定保留在元素上），内弧按钮加分区底色
   for (const b of all) keep.appendChild(b)
   for (const b of inner) b.classList.add("wheel-inner")
 
@@ -94,11 +94,13 @@ export function bindWheel() {
       maxX = Math.max(maxX, cx + BTN / 2 + dx)
       maxY = Math.max(maxY, cy + BTN / 2 + dy)
     }
+    const visInner = inner.filter((b) => !b.hidden)
     const visOuter = outer.filter((b) => !b.hidden)
+    const innerAngs = angs(visInner.length, INNER_RANGE)
     const outerAngs = angs(visOuter.length, OUTER_RANGE)
-    inner.forEach((b, i) => place(b, INNER_ANGS[i], INNER_R))
+    visInner.forEach((b, i) => place(b, innerAngs[i], INNER_R))
     visOuter.forEach((b, i) => place(b, outerAngs[i], OUTER_R))
-    for (const b of outer.filter((b) => b.hidden)) b.dataset.wheel = "translate(0px, 0px) scale(0.4)"
+    for (const b of [...inner, ...outer].filter((b) => b.hidden)) b.dataset.wheel = "translate(0px, 0px) scale(0.4)"
     keep.style.left = `${minX - KEEP_PAD}px`
     keep.style.top = `${minY - KEEP_PAD}px`
     keep.style.width = `${maxX - minX + KEEP_PAD * 2}px`

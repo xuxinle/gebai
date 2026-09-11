@@ -230,7 +230,6 @@ The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playw
 | `playwright` | 浏览器自动化 | 无头 Chromium，16 个工具，node 桥接，网络录制 |
 | `reverse_site` | 网站/接口逆向 | 网络录制还原接口契约、直连探测、产出 API 文档、联动 self_optimize 生成新子 Agent |
 | `feishu_docs` | 飞书云文档 | 文档/表格/多维表格/知识库/云空间/画板，支持用户授权（user_access_token） |
-| `widgets` | HTML 小工具库 | 保存/复用调试好的 HTML 页面组件 |
 | `cron` | 定时任务 | 无人值守的周期脚本与 Agent 任务（`GEBAI_CRON_ENABLED=true` 启用） |
 
 **English.**
@@ -244,7 +243,6 @@ The Web UI, all sub-agents, tree-sitter grammars, diagram engines, and the playw
 | `playwright` | Browser automation | Headless Chromium, 16 tools, node bridge, network recording |
 | `reverse_site` | Site/API reverse engineering | Reconstruct API contracts from network recordings, direct probing, API doc generation, teams up with self_optimize to generate new sub-agents |
 | `feishu_docs` | Feishu cloud docs | Docs/sheets/bitable/wiki/drive/boards; supports user authorization (user_access_token) |
-| `widgets` | HTML mini-tools | Save and reuse debugged HTML page components |
 | `cron` | Scheduled tasks | Unattended recurring scripts and agent jobs (enabled via `GEBAI_CRON_ENABLED=true`) |
 
 ## 架构一览 | Architecture at a Glance

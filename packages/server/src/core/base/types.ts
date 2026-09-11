@@ -2,7 +2,7 @@
  * 引擎侧类型入口：契约类型（Tool/ToolContext/SubAgentDef 等）以 @gebai/sdk 为单一来源，
  * 本文件 re-export 保持引擎内部既有引用路径稳定（迁移期兼容）；server 专有类型（ToolCallRecord/
  * SessionData/EventSink + 引擎服务注入字段）保留于此。
- * ToolContext 中引用引擎服务（shTasks/sessionRuns/branchRuns/renderDiagram/waitForCapture/exitMinimalMode）的
+ * ToolContext 中引用引擎服务（shTasks/sessionRuns/branchRuns/renderDiagram/waitForCapture）的
  * 可选字段为引擎增强面——在契约基础类型上交叉扩展（EngineToolContext），子代理只见契约字段。
  */
 import type { Tool as ContractTool, ToolContext as ContractToolContext, DynamicToolDef as ContractDynamicToolDef } from "@gebai/sdk"
@@ -21,8 +21,8 @@ export type {
   SubAgentDef,
 } from "@gebai/sdk"
 
-/** 引擎增强的 ToolContext：在契约基础上注入引擎服务（sh 异步任务/新会话执行存档/分支运行/后端图表渲染/
- *  极简模式退出）。全部可选——子代理与测试桩只依赖契约字段即可运行。 */
+/** 引擎增强的 ToolContext：在契约基础上注入引擎服务（sh 异步任务/新会话执行存档/分支运行/后端图表渲染）。
+ *  全部可选——子代理与测试桩只依赖契约字段即可运行。 */
 export type ToolContext = ContractToolContext & {
   /** sh 异步后台任务服务（引擎按会话注入，会话 tmp/sh-tasks/ 落盘）。 */
   shTasks?: import("../exec/sh-tasks").ShTaskService
@@ -32,8 +32,6 @@ export type ToolContext = ContractToolContext & {
   branchRuns?: import("../session/branch-runs").BranchRunService
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */
   renderDiagram?: (code: string, opts?: { format?: import("@gebai/sdk").DiagramFormat; background?: string; maxWidth?: number; maxHeight?: number }) => Promise<Uint8Array>
-  /** 退出极简模式（full_mode 工具用）。 */
-  exitMinimalMode?: () => void | Promise<void>
   /** 运行时工具定义注册（js 脚本 defineTool 用）。 */
   defineDynamicTool?: (def: ContractDynamicToolDef) => Promise<void>
 }

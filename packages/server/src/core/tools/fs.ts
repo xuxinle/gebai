@@ -1,4 +1,4 @@
-/** 文件类全局工具（read/write/ls/file/grep/glob/edit/patch/diff）——自 core/tools.ts 按域拆分。
+/** 文件类全局工具（read/write/ls/file/grep/glob/edit/patch）——自 core/tools.ts 按域拆分。
  *  注册条目见文件尾 globalTools（聚合器自动扫描，丢文件即注册）。 */
 import { spawn } from "node:child_process"
 import { tmpdir } from "node:os"
@@ -6,14 +6,13 @@ import { dirname, isAbsolute, join, relative } from "node:path"
 import type { Tool } from "../base/types"
 import { VISION_IMAGE_MIME } from "../llm/llm"
 import type { ContentBlock, FileEntry } from "@gebai/sdk"
-import { diffLines, inferLang, unifiedDiff, splitLines, DIFF_MAX_LINES } from "../base/diff"
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS, type AppliedHunk } from "../base/patch"
 import { concatBytes, decodeTextFile, detectEncoding, encodeText, ENCODING_LABEL, gbkCharOffsets, normalizeEol, type DecodedText } from "../base/file-text"
 import { REGEX_MAX_MATCHES, runRegexMatcher } from "../base/regex-runner"
 import { safeModeWriteCheck } from "../security/safety"
 import { truncate, sliceLines } from "../support/truncate"
 import { walkDirFiles, WALK_SKIP_DIRS } from "../support/walk"
-import { artifactBlocks, baseName, previewLogicalPath } from "../support/artifacts"
+import { artifactBlocks, previewLogicalPath } from "../support/artifacts"
 import { jsRuntimeCommand } from "../exec/js-tool"
 import { schema, type GlobalToolEntry } from "./shared"
 
@@ -1281,54 +1280,6 @@ export const editTool: Tool = {
   },
 }
 
-export const diffTool: Tool = {
-  name: "diff",
-  description: "对比两段文本或两个文件（旧 → 新），返回行级差异：unified diff 文本 + diff 内容块（UI 并排高亮对比）。old_text/new_text 与 old_path/new_path 任选一种。",
-  card: { args: "block" },
-  parameters: schema(
-    {
-      old_text: { type: "string", description: "旧文本内容（与 old_path 二选一）" },
-      new_text: { type: "string", description: "新文本内容（与 new_path 二选一）" },
-      old_path: { type: "string", description: "旧文件路径（与 old_text 二选一）" },
-      new_path: { type: "string", description: "新文件路径（与 new_text 二选一）" },
-      language: { type: "string", description: "语法高亮语言（typescript/json/python/bash 等，默认按文件名推断）" },
-      name: { type: "string", description: "对比标题（如「重构前后对比」，推荐传入有意义的标题；不传则默认取文件名）" },
-      oldName: { type: "string", description: "旧侧面板标题（如「重构前」「v1」，不传默认「旧」）" },
-      newName: { type: "string", description: "新侧面板标题（如「重构后」「v2」，不传默认「新」）" },
-    },
-  ),
-  async execute(args, ctx) {
-    let oldText: string
-    let newText: string
-    const oldPath = args.old_path ? String(args.old_path) : ""
-    const newPath = args.new_path ? String(args.new_path) : ""
-    if (args.old_text != null || args.new_text != null) {
-      if (oldPath || newPath) return { output: "diff: old_path/new_path 不能与 old_text/new_text 混用" }
-      oldText = String(args.old_text ?? "")
-      newText = String(args.new_text ?? "")
-    } else {
-      if (!oldPath || !newPath) return { output: "diff: 需要提供 old_text/new_text 或 old_path/new_path" }
-      oldText = await ctx.readFile(ctx.resolvePath(oldPath))
-      newText = await ctx.readFile(ctx.resolvePath(newPath))
-    }
-    const oldCount = splitLines(oldText).length
-    const newCount = splitLines(newText).length
-    if (oldCount > DIFF_MAX_LINES || newCount > DIFF_MAX_LINES) {
-      return { output: `diff: 文本过大（${oldCount} / ${newCount} 行，上限 ${DIFF_MAX_LINES} 行），请分段对比` }
-    }
-    const name = args.name ? String(args.name) : baseName(newPath) || baseName(oldPath) || "diff"
-    const language = args.language
-      ? String(args.language)
-      : inferLang(oldPath) || inferLang(newPath) || (args.name ? inferLang(String(args.name)) : "")
-    const lines = diffLines(oldText, newText)
-    const unified = unifiedDiff(oldText, newText, oldPath || "old", newPath || "new")
-    const truncated = await truncate(unified, "diff", ctx)
-    return {
-      ...truncated,
-      blocks: [{ type: "diff", oldText, newText, language, name, oldName: args.old_name ? String(args.old_name) : undefined, newName: args.new_name ? String(args.new_name) : undefined, lines }],
-    }
-  },
-}
 /** patch 应用结果摘要（hunk 位置与净变化）。 */
 function describeAppliedPatch(applied: Array<{ line: number; delta: number }>): string {
   const add = applied.reduce((s, a) => s + Math.max(0, a.delta), 0)
@@ -1338,7 +1289,7 @@ function describeAppliedPatch(applied: Array<{ line: number; delta: number }>): 
 export const patchTool: Tool = {
   name: "patch",
   description:
-    "应用 unified diff 补丁（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本（可基于 diff 工具输出构造）：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。全部文件全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write/edit 守卫）。",
+    "应用 unified diff 补丁（一次多 hunk，行号模糊容错）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。全部文件全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件已存在但本会话未 read 过时拒绝（防盲改，同 write/edit 守卫）。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff", file: "path" },
   parameters: schema(
     {
@@ -1350,7 +1301,7 @@ export const patchTool: Tool = {
   ),
   async execute(args, ctx) {
     const sections = parsePatch(String(args.patch ?? ""))
-    if (sections.length === 0) return { output: "patch: 补丁未解析到任何 hunk（请提供含 @@ 头的 unified diff 文本，格式见 diff 工具输出）" }
+    if (sections.length === 0) return { output: "patch: 补丁未解析到任何 hunk（请提供含 @@ 头的 unified diff 文本）" }
     const argPath = args.path ? String(args.path) : ""
     /** 文件头路径规范化：剥离 git 风格 a// b/ 前缀（/dev/null 与空值返回 undefined）。 */
     const headerPath = (p?: string): string | undefined => (p && p !== "/dev/null" ? p.replace(/^[ab]\//, "") : undefined)
@@ -1457,5 +1408,4 @@ export const globalTools: GlobalToolEntry[] = [
   { name: "file", tool: fileTool, project: true },
   { name: "edit", tool: editTool, project: true },
   { name: "patch", tool: patchTool, project: true },
-  { name: "diff", tool: diffTool, project: true },
 ]

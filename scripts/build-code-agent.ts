@@ -6,7 +6,7 @@
  *
  * 三层裁剪维度（DESIGN「构建期裁剪与预加载指定」）：
  * 1. `GEBAI_BUILD_SUBAGENTS`（子Agent 包含清单）——只打包场景所需子Agent。**体积收益主来源**：
- *    生成注册表不 import 未选子Agent，playwright/feishu_docs/widgets 等模块整体摇出产物；
+ *    生成注册表不 import 未选子Agent，playwright/feishu_docs/wps 等模块整体摇出产物；
  * 2. `GEBAI_BUILD_PRELOAD`（预加载清单）——烘焙 preload=true，启动即装载，用户开箱即用；
  * 3. `GEBAI_BUILD_EXCLUDE_TOOLS`（全局工具排除清单）——场景用不到的全局工具不注册不暴露
  *    （schema 不可见、调用报未知工具；agent_run 内建编排工具 tool_schemas/js 与 vision 同规则）。

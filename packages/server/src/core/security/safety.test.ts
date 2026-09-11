@@ -30,12 +30,12 @@ describe("安全模式判定", () => {
     for (const n of ["sh", "py", "js", "write", "edit", "patch", "file", "delete", "cron_add", "cron_update", "cron_remove"]) {
       expect(isRiskyToolName(n)).toBe(true)
     }
-    for (const n of ["code_sh", "code_write", "code_edit", "code_patch", "code_file", "widgets_delete"]) {
+    for (const n of ["code_sh", "code_write", "code_edit", "code_patch", "code_file", "code_delete"]) {
       expect(isRiskyToolName(n)).toBe(true)
     }
     for (const n of [
       "read", "ls", "grep", "glob", "show", "fetch_url", "todo",
-      "code_read", "code_glob", "code_git", "widgets_save", "widgets_get", "widgets_list", "fetch_doc",
+      "code_read", "code_glob", "code_git", "fetch_doc",
     ]) {
       expect(isRiskyToolName(n)).toBe(false)
     }

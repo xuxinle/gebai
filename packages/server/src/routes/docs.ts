@@ -38,8 +38,6 @@ export function registerDocsRoutes(rc: RouteCtx): void {
         "/api/v1/feedback": { get: { summary: "反馈查询（管理员可全部）" }, post: { summary: "提交反馈" } },
         "/api/v1/webhooks": { get: { summary: "Webhook 列表" }, post: { summary: "注册 Webhook" } },
         "/api/v1/webhooks/{id}": { delete: { summary: "删除 Webhook" } },
-        "/api/v1/mini-tools": { get: { summary: "HTML 小工具列表（公用 + 本人私有）" } },
-        "/api/v1/mini-tools/{name}": { get: { summary: "读取 HTML 小工具（含源码）" }, delete: { summary: "删除 HTML 小工具（?scope=private|public）" } },
       },
     }),
   )

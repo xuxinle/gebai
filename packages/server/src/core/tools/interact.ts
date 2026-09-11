@@ -1,4 +1,4 @@
-/** 交互类全局工具（todo/ask/full_mode）——自 core/tools.ts 按域拆分。 */
+/** 交互类全局工具（todo/ask）——自 core/tools.ts 按域拆分。 */
 import { randomUUID } from "node:crypto"
 import type { TodoItem } from "@gebai/sdk"
 import type { ChoiceOption, Tool } from "../base/types"
@@ -265,26 +265,8 @@ export const askTool: Tool = {
     return { output: "ask 失败：缺少询问内容——prompt+options（选项询问）/ name（环境变量填值）/ title+steps 或 content（计划审批）三选一。" }
   },
 }
-/** 切换完整模式（DESIGN「极简模式」）：仅极简会话可见可用（引擎 schema 过滤），需用户批准后执行。 */
-export const fullModeTool: Tool = {
-  name: "full_mode",
-  description: "切换到完整模式（仅在极简模式会话中可用）：解锁全部工具（读取文件、编排、子Agent 等）。当前会话处于极简模式（仅 sh/edit）而任务确需其他工具能力时调用本工具，用户批准后本任务后续轮次与后续任务均启用完整工具集与完整说明；被拒绝则继续用 sh/edit 完成。",
-  requiresApproval: true,
-  card: { titleParams: ["reason"], args: "none" },
-  parameters: schema({
-    reason: { type: "string", description: "可选：需要完整模式的原因（展示给用户作审批参考）" },
-  }, []),
-  async execute(_args, ctx) {
-    if (!ctx.exitMinimalMode) return { output: "当前环境不支持切换完整模式。" }
-    await ctx.exitMinimalMode()
-    return { output: "已切换到完整模式：全部工具已解锁、完整说明已生效（本任务后续轮次立即可用）。请继续执行任务。" }
-  },
-}
-
 
 export const globalTools: GlobalToolEntry[] = [
   { name: "todo", tool: () => makeTodoTool() },
   { name: "ask", tool: askTool },
-  // full_mode 仅极简会话可见可用（引擎按任务白名单过滤 schema）
-  { name: "full_mode", tool: fullModeTool },
 ]

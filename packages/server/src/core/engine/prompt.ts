@@ -27,23 +27,11 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
   const sandboxNote = deps.sandbox.enforcedFor(user)
     ? `（文件读写限定在此目录内，禁止越界）`
     : `（本地模式：不限制文件目录，可访问本机任意路径）`
-  // 极简模式提示词极简化（DESIGN「极简模式」）：编排/任务路由/子Agent 清单等说明对应工具均已裁剪，
-  // 注入纯属浪费上下文——仅保留身份、路径基准与极简工具说明（full_mode 切换完整模式后原地升级为完整提示词）
-  if (env.GEBAI_MINIMAL_MODE === "true") {
-    return [
-      `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体`,
-      `当前会话工作目录: ${workdir}/tmp（sh 命令与 edit 等文件工具的相对路径以此为基准，tmp/ 前缀可省略）${sandboxNote}`,
-      `当前会话处于极简模式：仅启用 sh、edit 与 full_mode 三个工具（其余工具均不可用）。查看/读取文件请用 sh 执行命令（cat、ls、find 等），修改文件请用 edit 工具；若任务确需其他工具能力，调用 full_mode 工具（需用户批准）切换到完整模式，批准后全部工具与完整说明立即生效。`,
-      ...(deps.config.safeMode ? [`安全模式已启用：sh 仅允许只读命令白名单、edit 限定用户目录内修改。`] : []),
-      ...(channelNote ? [channelNote] : []),
-    ].join("\n")
-  }
   const safeModeNote = deps.config.safeMode
     ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用。`
     : ""
   const parts = [
-    // 智能与智体概念模型（DESIGN「定位」）：行为化措辞（状态落盘、调用担责），非装饰性身份说明；
-    // 极简模式按提示词极简化原则不注入
+    // 智能与智体概念模型（DESIGN「定位」）：行为化措辞（状态落盘、调用担责），非装饰性身份说明
     `你是歌白智能体（GEBAI Agent）：极致动态扩展能力的智能体。你是智体：智能（模型）负责思考、无状态、可替换，记忆与责任都长在智体——需跨轮次/跨会话保留的结论与状态写入文件或会话记录；你的每次工具调用都是智体的行为，经审批执行、留痕可审计`,
     `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略；操作项目文件用文件工具的 project 参数——项目名或项目根路径，路径即相对所选项目根解析）${sandboxNote}`,
     ...(channelNote ? [channelNote] : []),

@@ -1184,8 +1184,6 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  // save_tool/delete_tool（小工具库）已下沉 widgets 子Agent，对应测试见 packages/agents/src/agents/widgets/widgets.test.ts
-
   test("edit replaces matching substring", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools2-"))
     const c = ctx(home)
@@ -1466,7 +1464,7 @@ describe("global tools", () => {
     // delete_file/move_file 合并为 file（rename/move/delete/info 多动作）
     expect(tools.delete_file).toBeUndefined()
     expect(tools.move_file).toBeUndefined()
-    // save_tool/delete_tool（小工具库）下沉 widgets 子Agent（widgets_save/list/get/delete，增删改查）
+    // save_tool/delete_tool（旧 HTML 库保存工具）已随该能力整体删除：不再有对应全局工具
     expect(tools.save_tool).toBeUndefined()
     expect(tools.delete_tool).toBeUndefined()
     // read_feedback 下沉 self_optimize 子Agent（自我优化专属输入通道，self_optimize_read_feedback 命名空间暴露）

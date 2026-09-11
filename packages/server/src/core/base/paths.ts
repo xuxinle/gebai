@@ -7,7 +7,7 @@ import { join, relative, isAbsolute, resolve, sep, dirname } from "node:path"
  * Sharding helpers per DESIGN.md.
  * Base 256 per layer (16x16). Paths are built from hex hash prefixes.
  * 会话/反馈等 hex ID 的分片段直接取 ID 自身前缀（肉眼可从 ID 推目录）；
- * 本函数供非 hex 键（如小工具名）做哈希分片。
+ * 本函数供非 hex 的存储键做哈希分片。
  */
 export function sha256Hex(input: string): string {
   return createHash("sha256").update(input).digest("hex")

@@ -112,7 +112,7 @@ function metaOf(name: string): NonNullable<ToolInfo["card"]> | undefined {
   return toolCardMeta.get(name) ?? toolCardMeta.get(shortToolName(name))
 }
 
-/** 结果直出内容块型工具（card.args="block" 声明）：调用不显示通用卡片，结果直接渲染内容块（show/diff）。 */
+/** 结果直出内容块型工具（card.args="block" 声明）：调用不显示通用卡片，结果直接渲染内容块（show）。 */
 export function isBlockOnly(name: string): boolean {
   return metaOf(name)?.args === "block"
 }

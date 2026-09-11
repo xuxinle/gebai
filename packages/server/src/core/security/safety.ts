@@ -32,7 +32,7 @@ export const SAFE_MODE_RISKY_TOOLS = new Set([
   "cron_add", "cron_update", "cron_remove", "cron_trigger",
 ])
 
-/** 子Agent 工具短名是否命中默认风险规则（如 code_sh → sh、widgets_delete → delete、my_cron_add → cron_add）。
+/** 子Agent 工具短名是否命中默认风险规则（如 code_sh → sh、code_delete → delete、my_cron_add → cron_add）。
  *  按完整短名后缀匹配（`_${risk}` endsWith），多段风险名（cron_add）同样命中。 */
 export function isRiskyToolName(name: string): boolean {
   for (const b of SAFE_MODE_RISKY_TOOLS) {

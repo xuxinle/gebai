@@ -21,7 +21,7 @@ import { registerSessionRoutes } from "./routes/sessions"
 import { registerSessionFileRoutes } from "./routes/session-files"
 import { registerToolRoutes } from "./routes/tools"
 import { registerCronRoutes } from "./routes/cron"
-import { registerFeedbackRoutes, registerWebhookRoutes, registerMiniToolRoutes } from "./routes/misc"
+import { registerFeedbackRoutes, registerWebhookRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
 import { registerStaticRoutes } from "./routes/static"
 import { registerRootRoutes } from "./routes/roots"
@@ -171,7 +171,6 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerCronRoutes(rc)
   registerFeedbackRoutes(rc)
   registerWebhookRoutes(rc)
-  registerMiniToolRoutes(rc)
   // 文件工作台（DESIGN「文件工作台」）：根清单 / 文件操作 / Git。注册在 static 之前——
   // `/files` 页面本身由 static 担住，`/api/v1/{roots,fs,git}` 与页面路径无冲突
   registerRootRoutes(rc)

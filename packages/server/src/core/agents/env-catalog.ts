@@ -40,7 +40,6 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "GEBAI_CV_DETECT_MODEL", description: "desktop_detect 自备 YOLO ONNX 模型路径（需自训练图标/控件模型）" },
   { name: "GEBAI_CV_DETECT_LABELS", description: "desktop_detect 标签文件路径（每行一个类别）" },
   { name: "GEBAI_APPROVAL_SKIP", description: "会话级审批跳过：true/false（用户本人会话生效；非管理员仍受沙箱约束）" },
-  { name: "GEBAI_MINIMAL_MODE", description: "会话级极简模式：true/false（仅启用 sh 与 edit 工具，其余工具从 schema 移除）" },
   { name: "HTTP_PROXY", description: "HTTP 代理地址（脚本/网络工具使用）" },
   { name: "HTTPS_PROXY", description: "HTTPS 代理地址（脚本/网络工具使用）" },
   { name: "NO_PROXY", description: "不走代理的地址列表（逗号分隔）" },

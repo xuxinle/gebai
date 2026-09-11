@@ -10,8 +10,6 @@ import type {
   FeedbackInfo,
   FeedbackInput,
   FileEntry,
-  MiniToolInfo,
-  MiniToolMeta,
   SessionDetail,
   SessionInfo,
   SubAgentInfo,
@@ -746,20 +744,6 @@ export class GebaiClient {
   /** 从回收站（GC 归档，保留期 7 天）恢复会话；归属用户或 admin 可操作。 */
   restoreSession(id: string): Promise<void> {
     return this.request<void>("session.restore", { id })
-  }
-
-  // ---- HTML 小工具库（REST） ----
-  /** 列出对当前用户可见的小工具（公用全部 + 本人私有；同名时私有覆盖公用）。 */
-  listMiniTools(): Promise<MiniToolMeta[]> {
-    return this.get<MiniToolMeta[]>("/api/v1/mini-tools")
-  }
-  /** 读取单个小工具（含 HTML 源码；解析顺序：用户私有 → 公用）。 */
-  getMiniTool(name: string): Promise<MiniToolInfo> {
-    return this.get<MiniToolInfo>(`/api/v1/mini-tools/${encodeURIComponent(name)}`)
-  }
-  /** 删除小工具（私有仅本人，公用需谨慎；?scope=private|public）。 */
-  deleteMiniTool(name: string, scope: "public" | "private" = "private"): Promise<void> {
-    return this.del(`/api/v1/mini-tools/${encodeURIComponent(name)}?scope=${scope}`).then(() => undefined)
   }
 
   listTodos(sessionId: string): Promise<TodoItem[]> {

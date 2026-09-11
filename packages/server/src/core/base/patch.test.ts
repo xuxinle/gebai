@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
 import { applyPatch, parsePatch, PATCH_FUZZ_LINES } from "./patch"
-import { unifiedDiff } from "./diff"
 
 describe("parsePatch", () => {
   test("standard patch with file headers and hunk", () => {
@@ -87,10 +86,12 @@ describe("applyPatch", () => {
     expect(r.applied).toEqual([{ index: 0, line: 2, delta: 0 }])
   })
 
-  test("round-trip: unifiedDiff output applies back to original", () => {
+  test("round-trip: unified diff text applies back to original", () => {
     const oldText = Array.from({ length: 20 }, (_, i) => `l${i + 1}`).join("\n") + "\n"
     const newText = oldText.replace("l3", "L3").replace("l17", "L17")
-    const files = parsePatch(unifiedDiff(oldText, newText, "old", "new"))
+    const files = parsePatch(
+      "--- old\n+++ new\n@@ -1,6 +1,6 @@\n l1\n l2\n-l3\n+L3\n l4\n l5\n l6\n@@ -14,7 +14,7 @@\n l14\n l15\n l16\n-l17\n+L17\n l18\n l19\n l20\n",
+    )
     const r = applyPatch(oldText, files[0])
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.result).toBe(newText)

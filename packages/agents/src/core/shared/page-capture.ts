@@ -51,6 +51,4 @@ export const pageCaptureTool: Tool = {
   },
 }
 
-// save_tool/delete_tool（HTML 小工具库）已下沉 widgets 子Agent：core/mini-tools.ts 提供存储实现，
-// widgets_save/widgets_list/widgets_get/widgets_delete 以子Agent 命名空间暴露（与模型工具语义区分）
 // draw/render_html/show_file 三工具已合并为 show（内容统一展示入口）：图表/HTML/文件三分支

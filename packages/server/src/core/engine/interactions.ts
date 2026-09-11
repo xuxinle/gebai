@@ -117,8 +117,6 @@ export interface TaskState {
   pendingCaptures: Map<string, PendingCapture>
   /** 通道级禁用工具（如飞书桥接禁用依赖前端页面的工具）：精确名或 {agent}_ 前缀名匹配。 */
   disabledTools: string[]
-  /** 极简模式工具白名单（DESIGN「极简模式」）：设置后仅名单内工具可用（schema 过滤 + 执行阻止）。 */
-  enabledTools?: string[]
   /** 交互模式（none/multi_turn/realtime，DESIGN「交互模式」）：工具声明的最低可用模式高于此值时被禁用。 */
   interactionMode: InteractionMode
   /** 请求级审批策略（REST prompt/chat 的 autoApprove 映射）：auto=需审批工具自动通过（含服务模式）；

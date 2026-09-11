@@ -1,5 +1,5 @@
 /**
- * @gebai/agents 入口：**只导子代理专属基建**（cv/browser/analyzer/widgets-store/shared 工具件），
+ * @gebai/agents 入口：**只导子代理专属基建**（cv/browser/analyzer/shared 工具件），
  * **不列子代理清单**——子代理发现注册全自动（DESIGN「子代理自动发现」）：dev 由 server
  * SubAgentManager.discover() 扫描本包 src/ 目录（{name}/{name}.ts | {name}/index.ts | 纯 md
  * 双入口 + md-only 规则），dist/binary 由构建期 build-subagents.ts 以同一规则扫描生成 bundle
@@ -24,6 +24,5 @@ export { analyzeTool, searchSymbolsTool } from "./core/analyzer/analyzer"
 export { resizeForVision, resizeNote, imageSize } from "./core/shared/image-resize"
 export { createLazyBridge, withSessionLock, type BridgeLike } from "./core/browser/bridge"
 export { feishuFetch, feishuWsOptions, feishuTlsInsecure } from "./core/shared/tls"
-export { saveMiniTool, deleteMiniTool, listMiniTools, getMiniTool } from "./core/widgets-store/mini-tools"
 export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT } from "./core/shared/page-capture"
 export { readFeedbackTool } from "./core/shared/feedback"
