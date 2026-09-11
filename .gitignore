@@ -26,6 +26,7 @@ gebai.log
 # 运行时数据（GEBAI_HOME when script-debug at repo root）
 users/
 tmp/
+audit-fs.jsonl
 feishu/
 # Python 语言目录 venv 与依赖清单（keqing/python/，docqa_pip 自动创建/维护）
 keqing/python/venv/

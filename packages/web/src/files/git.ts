@@ -50,6 +50,8 @@ export interface GitHooks {
   openFile: (root: string, path: string, line?: number) => void
   /** 打开「比较」标签（任意两端对比：提交↔提交、提交↔工作区/暂存区、分支↔分支；端点由比较视图自选） */
   openCompare: (init?: { from?: string; to?: string; path?: string; mergeBase?: boolean }) => void
+  /** 打开冲突合并标签（三窗格：我方 / 结果 / 对方）；入参为仓库相对路径 */
+  openMerge: (repoRel: string) => void
   /** 是否可以写（GEBAI_FS_WRITE / GEBAI_GIT_WRITE） */
   writable: () => boolean
   /** 远程操作是否可用（GEBAI_GIT_REMOTE） */
@@ -168,8 +170,11 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
         c.origPath ? h("span", { class: "fw-change-orig", text: ` ← ${c.origPath}` }) : null,
       ]),
       h("span", { class: "fw-change-actions" }, [
+        group === "conflicted"
+          ? btnIcon("merge", "解决冲突（三窗格合并）", () => hooks.openMerge(c.path))
+          : null,
         group === "unstaged" || group === "untracked" || group === "conflicted"
-          ? btnIcon("check", "暂存", () => void op("stage", { paths: [c.path] }, "已暂存", { silent: true }))
+          ? btnIcon("check", group === "conflicted" ? "标记为解决（暂存）" : "暂存", () => void op("stage", { paths: [c.path] }, group === "conflicted" ? "已标记为解决" : "已暂存", { silent: true }))
           : null,
         group === "staged" ? btnIcon("undo", "取消暂存", () => void op("unstage", { paths: [c.path] }, undefined, { silent: true })) : null,
         group !== "untracked"
@@ -197,11 +202,15 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
         }),
       ]),
     ])
-    row.ondblclick = () => hooks.openFile(hooks.root(), prefixPath(c.path))
+    row.ondblclick = () => (c.conflicted ? hooks.openMerge(c.path) : hooks.openFile(hooks.root(), prefixPath(c.path)))
     row.oncontextmenu = (e) => {
       e.preventDefault()
       showMenu(e.clientX, e.clientY, [
         { label: "打开文件", icon: "file", onClick: () => hooks.openFile(hooks.root(), prefixPath(c.path)) },
+        c.conflicted ? { label: "解决冲突（三窗格合并）", icon: "merge", onClick: () => hooks.openMerge(c.path) } : (null as never),
+        c.conflicted
+          ? { label: "标记为解决（暂存）", icon: "check", onClick: () => void op("stage", { paths: [c.path] }, "已标记为解决", { silent: true }) }
+          : (null as never),
         {
           label: "查看差异",
           icon: "diff",

@@ -7,8 +7,10 @@
  * 三档优先级：
  *   1. 显式 `?root=` / `?project=` → 直接用该根；
  *   2. `?path=` 为绝对路径 → 根清单中**最长前缀匹配**的根（项目文件命中项目根、会话 tmp 命中会话根）；
+ *   2b. 绝对路径不属任何已知根（项目外的 Agent 产物等）→ 以**所在目录**为 `abs:` 根直达；
  *   3. 其余（相对路径或无 path）→ `?session=` 指向的会话根；
- * 无参数时默认项目根（手工打开 `/files` 看代码），无项目则退回第一个根。
+ * 无参数时默认项目根（手工打开 `/files` 看代码），无项目则退回绑定根/第一个根。
+ * 注：会话根只接相对路径——绝对路径交给会话根必然越界（无意义），故走 2b。
  */
 
 /** 根清单条目中最小的字段面（服务端 `/api/v1/roots` 的子集；便于测试注入）。 */
@@ -81,6 +83,11 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
   if (wantRoot) {
     const r = byId(wantRoot)
     if (r) return { rootId: r.id, dir: dirOf(wantPath), file: wantPath, line }
+    // 清单之外的 `abs:<绝对路径>`：本地模式（非沙箱）下服务端可解析任意目录——
+    // 让「打开任意文件夹」「跳到项目外的 Agent 产物」也能用链接直达（沙箱下由服务端 403 拒绝）
+    if (wantRoot.startsWith("abs:") && isAbsPath(wantRoot.slice(4))) {
+      return { rootId: wantRoot, dir: dirOf(wantPath), file: wantPath, line }
+    }
   }
   // 2) 绝对路径 → 最长前缀匹配（多根重叠时取最精确的那个）
   if (wantPath && isAbsPath(wantPath)) {
@@ -104,6 +111,12 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
     }
     // 命中根：绝对路径换算为根内相对路径（越出前缀时 rel 兜底为文件名）
     if (best) return { rootId: best.root.id, dir: dirOf(best.rel), file: best.rel || wantPath.split(/[\\/]/).pop() || "", line }
+    // 不在任何已知根内（如 Agent 写到临时目录的产物）：以**所在目录**为 abs 根直达该文件——
+    // 服务端在沙箱模式下会拒绝绝对的 abs 根，此处不做安全判断（前端不是边界）
+    const dir = dirOf(wantPath)
+    if (dir) {
+      return { rootId: `abs:${dir}`, dir: "", file: wantPath.split(/[\\/]/).pop() ?? "", line }
+    }
   }
   // 3) 会话根（相对路径或仅指定 session）
   const fallback = pickDefault()

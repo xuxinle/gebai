@@ -2067,3 +2067,86 @@ button.fw-status-item:hover {
   background: var(--text-faint);
   background-clip: content-box;
 }
+/* ------------------------------ 冲突合并（三窗格） ------------------------------ */
+
+/* 合并视图：工具条 + 三窗格。窄屏（<1180px）纵向堆叠，避免每格太窄没法看代码。 */
+.fw-merge {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  outline: none;
+}
+
+.fw-merge-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev-1, var(--bg-inset));
+  flex-wrap: wrap;
+  flex: none;
+}
+
+.fw-merge-name { font-weight: 600; }
+.fw-merge-sep { flex: 1 1 auto; }
+
+/* 冲突导航计数（有冲突 → 警告色；全部处理完 → 成功色） */
+.fw-merge-nav-label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--warn, #d29922);
+  white-space: nowrap;
+}
+
+.fw-merge-nav-label.ok { color: var(--ok, #3fb950); }
+
+.fw-merge-status { font-size: 11.5px; color: var(--text-faint); }
+.fw-merge-status.dirty { color: var(--warn, #d29922); }
+
+.fw-merge-panes {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr 1fr;
+  gap: 1px;
+  background: var(--border);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.fw-merge-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.fw-merge-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--merge-accent, var(--border)) 12%, var(--bg-inset));
+  flex: none;
+}
+
+/* 左侧竖条标示「我方 / 对方」归属色（无 accent 时退化为中性边框色） */
+.fw-merge-pane-head { border-left: 3px solid var(--merge-accent, var(--border)); }
+.fw-merge-pane-title { font-weight: 600; color: var(--text); }
+.fw-merge-pane-meta { color: var(--text-faint); font-family: var(--font-mono); }
+
+/* 结果窗格：可编辑，给出更强的「这是你要交付的内容」视觉权重 */
+.fw-merge-result .fw-merge-pane-head {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-inset));
+  border-left-color: var(--accent);
+}
+
+.fw-merge-editor { flex: 1 1 auto; min-height: 0; position: relative; }
+
+@media (max-width: 1180px) {
+  .fw-merge-panes { grid-template-columns: 1fr; grid-auto-rows: minmax(0, 1fr); }
+  .fw-merge-bar { gap: 4px; }
+}

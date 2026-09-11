@@ -44,6 +44,12 @@ describe("deeplink 显式根优先", () => {
     })
   })
 
+  test("显式根不存在时：abs: 绝对路径直接接受（清单外目录可链接直达）", () => {
+    expect(resolve("?root=abs:/tmp/mrg&path=f.txt")).toEqual({ rootId: "abs:/tmp/mrg", dir: "", file: "f.txt", line: undefined })
+    // 非 abs: 的未知根仍忽略（继续按后续档定位）
+    expect(resolve("?root=proj:nope&path=/workspaces/gebai/src/app.ts")?.rootId).toBe("proj:gebai")
+  })
+
   test("显式根不存在时忽略它（不报错），继续按绝对路径/会话根定位", () => {
     expect(resolve("?root=proj:nope&path=/workspaces/gebai/src/app.ts")?.rootId).toBe("proj:gebai")
   })
@@ -84,13 +90,15 @@ describe("deeplink 绝对路径 → 最长前缀匹配", () => {
     expect(resolve("?path=/data")?.rootId).toBe("abs:/data")
   })
 
-  test("无匹配的绝对路径 → 回退会话根（路径原样交给该根，由其判定越界）", () => {
-    expect(resolve(`?session=${SESS}&path=/etc/hosts`)).toEqual({
-      rootId: `sess:${SESS}`,
-      dir: "/etc",
-      file: "/etc/hosts",
-      line: undefined,
-    })
+  test("会话根只接相对路径：绝对路径不落会话根，而以所在目录为 abs 根直达", () => {
+    // 绝对路径交给会话根必然越界（无意义），改用其所在目录作根——项目外产物也能开
+    expect(resolve(`?session=${SESS}&path=/etc/hosts`)).toEqual({ rootId: "abs:/etc", dir: "", file: "hosts", line: undefined })
+  })
+
+  test("无匹配且无会话时：以所在目录为 abs 根直接定位（项目外产物/临时目录也能开）", () => {
+    expect(resolve("?path=/tmp/mrg/f.txt")).toEqual({ rootId: "abs:/tmp/mrg", dir: "", file: "f.txt", line: undefined })
+    // 根目录下的文件：无目录可作根 → 交给默认根（不自造 `abs:` 空路径）
+    expect(resolve("?path=/f.txt")?.rootId).not.toBe("abs:")
   })
 
   test("Windows 客户端：盘符大小写不敏感匹配", () => {
@@ -103,7 +111,7 @@ describe("deeplink 绝对路径 → 最长前缀匹配", () => {
   })
 
   test("前缀相似但非子路径不算命中（/data2 不属于 /data）", () => {
-    expect(resolve("?session=" + SESS + "&path=/data2/x.txt")?.rootId).toBe(`sess:${SESS}`)
+    expect(resolve("?session=" + SESS + "&path=/data2/x.txt")?.rootId).toBe("abs:/data2")
   })
 
   test("同长前缀时项目类根优先（本地模式的 abs: 白名单根可指向同一目录）", () => {
@@ -152,8 +160,10 @@ describe("deeplink 默认与边界", () => {
     expect(resolveDeepLink(only, "")).toEqual({ rootId: "user:", dir: "", file: "", line: undefined })
   })
 
-  test("根清单为空 → null", () => {
-    expect(resolveDeepLink([], "?path=/a/b")).toBeNull()
+  test("根清单为空：绝对路径仍可自造 abs 根（无根可依时相对路径返回 null）", () => {
+    expect(resolveDeepLink([], "?path=/a/b")).toEqual({ rootId: "abs:/a", dir: "", file: "b", line: undefined })
+    expect(resolveDeepLink([], "?path=a/b")).toBeNull()
+    expect(resolveDeepLink([], "")).toBeNull()
   })
 
   test("line 参数解析（1 起始；非法/0/负数忽略）", () => {

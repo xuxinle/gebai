@@ -9,6 +9,7 @@
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
 import { resolveDeepLink } from "./deeplink"
+import { createMergeView, type MergeView } from "./merge-view"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
 // 文件工作台自带样式：base.css 提供设计令牌（主题 CSS 只换令牌），files.css 负责本页布局
 import "../css/base.css"
@@ -76,6 +77,8 @@ interface Tab {
   /** 差异态 */
   diffSpec?: DiffSpec
   diffDispose?: () => void
+  /** 标签图标覆盖（合并视图用 merge 图标，其余按 kind/dirty 推断） */
+  icon?: string
 }
 
 const state = {
@@ -147,6 +150,7 @@ function ensureGitPanel(): GitPanel {
     openDiff: (spec) => void openDiff(spec),
     openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
     openCompare: (init) => void openCompare(init),
+    openMerge: (repoRel) => void openMergeTab(repoRel),
     writable: () => !!(state.rootsResp?.writable && state.rootsResp?.gitWrite),
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
@@ -501,7 +505,7 @@ function renderTabbar(): void {
   clear(tabbar)
   for (const t of state.tabs) {
     const el = h("div", { class: `fw-tab${t.id === state.activeId ? " active" : ""}${t.preview ? " preview" : ""}` }, [
-      t.kind === "diff" ? icon("diff", 12) : icon(t.dirty ? "edit" : "file", 12),
+      t.icon ? icon(t.icon, 12) : t.kind === "diff" ? icon("diff", 12) : icon(t.dirty ? "edit" : "file", 12),
       h("span", { class: "fw-tab-title", text: t.title, title: t.kind === "diff" ? t.title : `${t.root} :: ${t.path}` }),
       t.dirty ? h("span", { class: "fw-tab-dot", title: "未保存" }) : null,
       (() => {
@@ -1012,6 +1016,72 @@ function bootstrapTheme(): void {
 
 document.addEventListener("gebai:theme-change", () => refreshEditorTheme())
 
+/* ------------------------------ 冲突合并标签（三窗格） ------------------------------ */
+
+/**
+ * 打开冲突合并标签（仓库相对路径入参——git 侧路径语义）。
+ * 结果窗格可编辑、可逐块采纳，保存走 fs（etag 乐观锁），标记为解决走 git stage。
+ */
+async function openMergeTab(repoRel: string): Promise<void> {
+  const root = explorer.getRoot()
+  const id = tabId("merge", root, repoRel)
+  const exist = findTab(id)
+  if (exist) {
+    activate(id)
+    const view = mergeViews.get(id)
+    if (view) void view.refresh()
+    return
+  }
+  const host = h("div", { class: "fw-tab-view" })
+  const tab: Tab = {
+    id,
+    kind: "file",
+    root,
+    path: repoRel,
+    title: "⑃ " + (repoRel.split("/").pop() ?? repoRel),
+    icon: "merge",
+    preview: false,
+    host,
+    mode: "view",
+    dirty: false,
+    baseline: "",
+    content: "",
+    encoding: "utf-8",
+    eol: "lf",
+    etag: "",
+  }
+  state.tabs.push(tab)
+  views.appendChild(host)
+  viewHosts.set(id, host)
+  activate(id)
+  const view = await createMergeView(
+    {
+      api,
+      root: () => explorer.getRoot(),
+      toRootPath,
+      language: languageOf(repoRel),
+      onSaved: () => void explorer.refresh(undefined, { keepSelection: true }),
+      onResolved: () => {
+        // 先拉新状态再重渲染面板——反过来会用旧 status 渲染（冲突行不消失）
+        void refreshGit().then(() => {
+          if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
+        })
+      },
+    },
+    { repoRel },
+  )
+  host.appendChild(view.el)
+  mergeViews.set(id, view)
+  tab.viewDispose = () => {
+    mergeViews.delete(id)
+    view.dispose()
+  }
+  await view.refresh()
+  renderTabbar()
+  renderToolbar()
+  renderStatus()
+}
+
 /* ------------------------------ 比较标签（任意两端对比） ------------------------------ */
 
 interface CompareTabState {
@@ -1022,6 +1092,9 @@ interface CompareTabState {
 }
 
 const compareTabs = new Map<string, { view: CompareView; state: CompareTabState }>()
+
+/** 合并标签视图句柄（关标签时 dispose；重复打开时 refresh）。 */
+const mergeViews = new Map<string, MergeView>()
 
 async function openCompare(init: { from?: string; to?: string; path?: string; mergeBase?: boolean } = {}): Promise<void> {
   const root = explorer.getRoot()
