@@ -303,6 +303,27 @@ class GebaiClient {
 
 ## 架构
 
+### 核心不变式：能力外置、权力内守（TS 引擎核心地位）
+
+歌白的核心是 TS 引擎里的「对话 → 工具调用 → 审批 → 执行」主循环（`AgentEngine` + `ToolRegistry`）。扩展能力可以外置到任意语言、任意进程，**裁决权力必须留在引擎**——本不变式与「单一真相源」并列，是所有多语言/边车/插件类扩展（客卿、`js` 桥、动态工具、二开）的准入门槛。
+
+| 归属 | 内容 | 现落点 |
+|------|------|--------|
+| **能力**（可外置） | 计算与算法（BM25/哈希/图像/CV 推理）、协议实现、工具实现细节、只读取当前请求 ctx、声明式上报 | 客卿驱动（Python/C++/Go/Rust）、`js`/动态工具子进程、CV sidecar |
+| **权力**（不外放） | 工具可见性（装载门控）、审批姿态判定、安全模式裁决、嵌套/depth 规则、会话 ctx 组装、会话真相（chat.json/动态工具/todo/cron）、进程生命周期 | `registry.resolve` 只返回 `enabled`；`requiresApproval` 由引擎以 `stripApprovalFlags` 后的参数调用；`isToolBlockedInSafeMode`；`fromJsBridge`/`depth`（标记由宿主内存盖章，子进程伪造不了）；`sidecarTool.execute` 组装请求 ctx；`SubAgentManager` 启停回收 |
+
+**边缘执行体只有两种合法姿态**：
+
+- **声明（declaration）**——上报自己具备什么：客卿 `tools.list` 上报工具清单与 JSON Schema，注册名（`{agent}_` 前缀）、审批姿态、装载可见性均由引擎决定；`manifest.requiresApproval:false` 属静态声明（写 manifest 者本就能写任意代码，可 diff、可审阅，用户还可 `PATCH /api/v1/tools` 覆盖）
+- **委托（intent）**——表达想做什么，由引擎裁决后执行：`js` 桥的 `{t:"call"}` 是唯一现役实现，引擎按调用者审批姿态（免审运行拦截需审批工具）、会话 ctx、嵌套规则重新裁决，子进程无法伪造豁免
+
+**两条红线**（违反即稀释核心地位，不予准入）：
+
+- **不得自证授权**：运行期由执行体自证「本次免审 / 我有权限」无效——审批姿态的唯一判定方是引擎，运行期自证不可审阅、不可 diff
+- **不得自取工具**：执行体自行取用工具、自行指定会话 ctx（sessionId/user/cwd/env）、自行缓存授权结果——一旦如此，引擎退化为消息总线
+
+**提案判定口径**（新开「外部执行体 → 工具」通道前先过三问）：① 来源可否证明且不可提权（宿主盖章标记 / 签发 token 链）？② 审批姿态由谁判定（须引擎；黑盒执行体不得继承调用者的审批豁免）？③ 能否用既有结构化解替代（TS 工具内 `ctx.registry` 直调、客卿跨语言同名合并、`js` 编排）？三问不齐则不做。参照实现：`packages/agents/src/core/shared/cv-analysis.ts` 的 `ctx.registry.resolve(tool).tool.execute({ ...args, image: rel }, ctx)`——进程内直调其他工具，复用装载门控/审批/ctx 组装，不绕过任何治理层。
+
 ### 运行形态
 
 一套核心代码、同一个二进制可执行文件，支持两种运行形态，由启动参数/环境变量切换：
@@ -1129,6 +1150,7 @@ export const preload = false
 - **边车环境**：基于宿主进程 env 继承基础变量（PATH/SYSTEMROOT 等——Windows 下 python 编码/subprocess 初始化依赖 SYSTEMROOT，极小 env 会启动即卡死无报错）+ `GEBAI_HOME` + `GEBAI_AGENT_DIR`（驱动定位子代理项目专属资产，如 Python 驱动加载 `{agent_dir}/tools.py`）+ manifest env 覆盖同名项；manifest `cwd` 语义收敛为驱动自身资产定位（进程工作目录），会话级路径一律经请求 ctx 传递——与进程单例跨会话共享的模型自洽
 - **门控与边界**：仅本地形态（沙箱启用即禁用；`GEBAI_KEQING=off` 显式关闭）；边车工具缺省恒需审批（任意代码执行面），manifest `requiresApproval:false` 可声明只读免审批（如 vision 识别四工具——对齐 TS 侧同能力工具体验）；单项失败（manifest 损坏/启动/握手失败/协议版本不匹配）记 loadErrors 模型可见根因，不阻断其他子代理；工具名驱动侧为裸名（注册表自动加 `{agent}_` 前缀）
 - **内置五个子代理**（`keqing/{python,cpp,rust,go}/`，各语言一个典型场景）：`docqa`（Python：`docqa_index` BM25 索引（中文二元分词 + 英文词元、mtime/size 增量复用、索引落 `{GEBAI_HOME}/keqing-data/docqa/`）、`docqa_query` 检索（命中片段词元高亮）、`docqa_status`；**同时携带语言框架基础工具** `docqa_run`（常驻命名空间 REPL：末行独立表达式求值 repr 回显，**缺省按 ctx.sessionId 隔离命名空间**——同会话共享状态跨会话互不可见，显式 session 参数仍可细粒度隔离，stdout/stderr 捕获，timeout 秒默认 300）/`docqa_pip`（install：packages 或 `-r requirements.txt`，venv 不存在自动创建，装完边车自动重启加载，freeze 快照写回）/`docqa_status`——Python 语言目录基础能力经 `tools.py` 合并模式与各项目共存）；`imgproc`（C++：stb 单头库 vendor 于 `cpp/stb/`，info/grayscale/resize/stats 图像处理）；`hsh`（Rust + TS 跨语言合并：sha256/sha1/md5/hmac_sha256/verify + TS 侧 crc32，三算法手写零依赖，cargo workspace 管理）；`dirs`（Go：tree/du/top/depth 并发目录分析，go module 管理）；`vision`（Python + TS 跨语言合并，见下）；解释器解析 `GEBAI_PYTHON_DIR` → 语言目录 venv（`keqing/python/venv`）→ 系统 PATH；四语言基础框架（Python 共享驱动 + C++ 头文件 + Rust cargo workspace + Go module，均含请求级 ctx 助手）见 `keqing/README.md`
+- **协议方向性约束（依「核心不变式：能力外置、权力内守」）**：客卿协议为**单向下行**（宿主 → 驱动 init/tools.list/tool.call，驱动只回响应）——驱动侧不得自取工具、不得自证授权；未来若开反向调用（协议 v3+）必须为**委托式**：驱动只发意图，宿主按该次 `tool.call` 绑定的会话 ctx 与调用者审批姿态重新裁决，并需来源可证不可提权（宿主签发 token，不得转交）+ 回调白名单（默认只读）；自取式回调（驱动自主取用工具/自带授权声明）不予准入
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 
@@ -1913,6 +1935,21 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 ### `js` 脚本工具（工具动态编程）
 
 **数据流编排的唯一内建方式**（原 `flow` 声明式管道已移除——上下文占用大、使用门槛高，js 完整语言能力可覆盖其全部场景且更直观）：可预判的固定流程与高阶编排逻辑（动态构造参数、按中间结果分支重试、复杂聚合变换、正则/字符串处理、错误分类处理）统一用 `js` 一次编程执行——脚本运行于 Bun 子进程（隔离、可超时终止），进程内注入**工具调用桥**与**会话上下文**，把工具当作函数做动态编程。实现为纯模块 `core/js-tool.ts`（前导生成 + 子进程桥接，可独立单测）。
+
+#### 为什么编排层是 `js`（而非 `py`）
+
+**分工结论：编排归 `js`，计算归 `py`**——这条边界由两边能力边界决定，非口味偏好（`py` 与客卿承载重计算：pandas/numpy/BM25/哈希/图像；`js` 承载编排），也是「给 py 加工具桥」类提案的驳回依据（依「核心不变式：能力外置、权力内守」——编排是发起治理动作的权力侧，不应跨语言边界）：
+
+| 编排层的硬要求 | `js` | `py` |
+|----------------|------|------|
+| **零装配可用** | Bun 运行时已 `--compile` 内嵌进二进制，`gebai exec` 复用自身（边际成本 0，交付即用） | 解释器不可内嵌——需宿主机安装，版本/环境不可控（DESIGN「脚本执行环境」标明宿主机要求为「安装 Python」） |
+| **协议通道可独占** | `console.*` 是单一汇聚点，补丁即接管几乎全部输出，stdout 保持纯协议 | 输出路径分散（`print`/`logging`/`warnings`/C 扩展直写 fd/`os.write(1,…)`/子进程继承 fd），**无法保证 stdout 纯净**——桥只能另开通道，而 Windows 无 fd 继承（只剩命名管道/loopback socket + 自建 token 认证） |
+| **可静态审查（安全模式的只读承诺）** | `scanJsReadOnly` 词元级拒绝 + 子进程 shim（写/进程/网络 API 屏蔽、`Function.prototype.constructor` 中性化）可**做实**「降级为只读运行时」 | 等价承诺不可做：`__import__`/`getattr`/`eval`/`exec`/`ctypes`/`pickle` 遍地逃逸面，字符串可拼出任意调用；进程内 `sys.addaudithook` 也拦不住 `os.system` 起的新进程（新进程无钩子） |
+| **固化闭环** | 函数一等公民，`fn.toString()` 直接序列化、跨进程重新求值语义干净（defineTool 与编排在同一语言里闭合） | `inspect.getsource` 在闭包/装饰器/模块依赖边界上脆弱，「源码序列化→新进程求值」不干净 |
+
+编排的三个刚需亦为 `js` 原生、`py` 要现搭：**工具即函数**（模块作用域函数声明，`await read({ path })` 直接可用；`defineTool` 注册后同脚本内立即可调）、**真并发**（`Promise.all` + 行级分发按 id 配对，`py` 等价需 asyncio/线程）、**数据模型同构**（工具 schema 为 JSON Schema、工具实现为 TS、编排为 JS，一个语言内闭合；`py` 侧有 `None`/`True` 映射与引号心智）。加上内嵌运行时的毫秒级启动，契合临时脚本这一高频用法。
+
+`py` 不可替代之处（故只作计算/长驻状态，不作编排）：重计算生态、已有 Python 资产与团队技能（写客卿驱动同样进工具面）、**长驻状态**（`docqa_run` 的会话级 REPL 命名空间——`js` 是一次性脚本不留状态）。
 
 #### 执行模型
 
