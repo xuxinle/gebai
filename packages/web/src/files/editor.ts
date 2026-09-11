@@ -76,6 +76,8 @@ export interface DiffNav {
 
 let monacoPromise: Promise<Monaco | null> | null = null
 let monacoRef: Monaco | null = null
+/** 已插入 head 的 AMD loader script（失败/超时后清理或复用，防重试时叠加多个 loader）。 */
+let monacoScript: HTMLScriptElement | null = null
 let currentTheme = "gebai-dark"
 let lightTheme = false
 
@@ -88,48 +90,86 @@ export function monacoVsPath(): string {
   return `${baseUrl()}/vendor/monaco/vs`
 }
 
-/** 加载 Monaco（AMD loader，单例；失败/超时返回 null 触发降级）。 */
+/**
+ * 加载 Monaco（AMD loader，单例；失败/超时返回 null 触发降级）。
+ *
+ * 单例语义分两层（可重试）：
+ * - **进行中**的加载全局共享同一 promise——并发调用（空闲预热 + 用户打开文件）不重复下载内核；
+ * - **失败/超时**不固化——复位单例并移除 loader script，后续调用可重新尝试。
+ *   旧版把 resolve(null) 的 promise 永久缓存：一次网络抖动/超时就把本页永久降级为轻量编辑器。
+ *   另：即使本次已超时，若 AMD require 稍后才成功（window.monaco 就位），下次调用会直接复用。
+ */
 export function loadMonaco(timeoutMs = 25000): Promise<Monaco | null> {
+  if (monacoRef) return Promise.resolve(monacoRef)
   if (monacoPromise) return monacoPromise
-  monacoPromise = new Promise<Monaco | null>((resolve) => {
+  const promise = new Promise<Monaco | null>((resolve) => {
     const w = window as unknown as Record<string, unknown>
+    let settled = false
+    const settle = (m: Monaco | null): void => {
+      if (settled) return
+      settled = true
+      if (m) defineTheme(m)
+      monacoRef = m
+      resolve(m)
+      if (m) return
+      // 失败/超时：撤销单例缓存（下次调用可重试）并清掉 loader script（重试时重新插入）
+      queueMicrotask(() => {
+        if (monacoPromise === promise) monacoPromise = null
+        monacoScript?.remove()
+        monacoScript = null
+      })
+    }
     if (w.monaco) {
-      monacoRef = w.monaco as Monaco
-      resolve(monacoRef)
+      settle(w.monaco as Monaco)
       return
     }
     const vs = monacoVsPath()
     w.MonacoEnvironment = {
       getWorkerUrl: (_moduleId: string, _label: string) => `${vs}/base/worker/workerMain.js`,
     }
-    const done = () => {
-      const m = (window as unknown as Record<string, unknown>).monaco as Monaco | undefined
-      monacoRef = m ?? null
-      if (m) defineTheme(m)
-      resolve(monacoRef)
-    }
-    const script = document.createElement("script")
+    const script = monacoScript ?? document.createElement("script")
+    monacoScript = script
     script.src = `${vs}/loader.js`
     script.async = true
     script.onload = () => {
       const requireFn = w.require as ((deps: string[], cb: () => void) => void) | undefined
       try {
         ;(w.require as { config?: (o: unknown) => void }).config?.({ paths: { vs } })
-        requireFn?.(["vs/editor/editor.main"], done)
+        requireFn?.(["vs/editor/editor.main"], () => {
+          settle(((window as unknown as Record<string, unknown>).monaco as Monaco | undefined) ?? null)
+        })
       } catch {
-        done()
+        settle(null)
       }
     }
     script.onerror = () => {
       console.warn("[files] Monaco 加载失败（vendor 缺失？），降级为轻量编辑器")
-      resolve(null)
+      settle(null)
     }
-    document.head.appendChild(script)
+    if (!script.isConnected) document.head.appendChild(script)
     setTimeout(() => {
-      if (!monacoRef) resolve(null)
+      if (!monacoRef) settle(null)
     }, timeoutMs)
   })
-  return monacoPromise
+  monacoPromise = promise
+  return promise
+}
+
+/**
+ * 首屏就绪后的**空闲预热**（静默，失败与未预热等价）。
+ *
+ * Monaco 首次加载要拉约 1MB 分块（editor 核心 + 语言 + worker），本地实测约 0.5s、远程更久。
+ * 放在 requestIdleCallback（无此 API 时退化为短延时）里预热：不与他人争首屏带宽，
+ * 用户首次打开文件时内核已就位，不再等加载。预热失败不影响后续：打开文件时自会重试并可能降级。
+ */
+export function prewarmMonaco(): void {
+  if (monacoRef || monacoPromise) return
+  const run = (): void => {
+    void loadMonaco().catch(() => undefined)
+  }
+  const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback
+  if (typeof ric === "function") ric(run, { timeout: 2500 })
+  else setTimeout(run, 500)
 }
 
 /* --------------------------- 主题映射 --------------------------- */

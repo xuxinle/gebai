@@ -33,6 +33,21 @@
   min-width: 0;
 }
 
+/* 启动衔接：splash 收拢淡出时，外壳极轻上浮淡入（纯 opacity/transform，不触发布局）。
+   仅启动期由 main.ts 加一次 class，之后不再参与，不影响后续任何重排。 */
+.fw-app.fw-enter {
+  animation: fw-boot-enter 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes fw-boot-enter {
+  from { opacity: 0.35; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fw-app.fw-enter { animation: none; }
+}
+
 /* 活动栏是唯一贯穿全高的一列：右边那一整块（上部区 + 底部工具窗）都在它右侧。
    这样工具窗不会把活动栏截成半截，活动栏的下半部分也不会看起来像工具窗的一部分。 */
 .fw-main {
@@ -688,6 +703,52 @@ button.fw-status-item:hover {
   flex: 1;
   min-height: 0;
   position: relative;
+}
+
+/* 启动占位：根清单到达前覆盖视图区（数据到位即由 main.ts 移除，不按时间）——
+   把等待期从「空白」换成明确反馈。pointer-events:none 使页面不被挡住（左栏与活动栏此刻已可交互）。 */
+.fw-boot-placeholder {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  pointer-events: none;
+  color: var(--text-muted);
+}
+
+.fw-boot-orb {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #06b6d4, #8b5cf6, #ec4899);
+  box-shadow: 0 0 24px rgba(139, 92, 246, 0.35);
+  animation: fw-boot-breathe 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes fw-boot-breathe {
+  from { transform: scale(0.9); opacity: 0.75; }
+  to   { transform: scale(1.06); opacity: 1; }
+}
+
+.fw-boot-text {
+  font-size: 12.5px;
+  letter-spacing: .12em;
+}
+
+/* 启动空窗期：Git 面板（根确定后创建）就位前的加载提示——
+   避免底部 dock 已展开却是一块无信息的大空框，数据到位即随面板创建移除。 */
+.fw-dock-loading {
+  padding: 14px 16px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fw-boot-orb { animation: none; }
 }
 
 .fw-tab-view {

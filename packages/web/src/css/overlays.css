@@ -554,7 +554,7 @@
 .mini-btn.danger { border-color: rgba(248, 81, 73, 0.5); color: var(--danger); }
 .mini-btn.danger:hover { background: rgba(248, 81, 73, 0.12); }
 
-/* ---------- 压缩通知 ---------- */* ---------- 压缩通知 ---------- */
+/* ---------- 压缩通知 ---------- */
 .bubble.compact-notice {
   background: var(--bg-elev-2);
   border: 1px dashed var(--border-strong);

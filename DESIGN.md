@@ -1315,6 +1315,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 - **形态与入口**：`packages/web/files.html` + `packages/web/src/files/{main,explorer,editor,viewers,git,compare,ui,api}.ts`；入口按钮 `packages/web/src/files-entry.ts` 注入标题栏，URL 透传 `session`（`sess:` 根指向本会话工作区）/`root`/`project`/`path`/`gb_style`（主题）。为什么新标签而非同页路由：Monaco + Git 面板资源重，「一边让 Agent 改、一边自己核差异」是常态，独立页同时带来故障隔离。
 - **根抽象（权限边界）**：所有 fs/git 接口只接受 `(root, 相对路径)`——`sess:<id>`（会话 `tmp/`）/`proj:<name>`（预置项目）/`bind:<agent>`（会话绑定项目）/`user:`（当前用户目录）/`abs:<path>`（绝对路径，**服务模式沙箱下拒绝**）；根清单 `rootCatalog()` 去重供前端根选择器；`GEBAI_FS_ROOTS` 白名单根（JSON 数组）供服务模式授予指定目录。路径防护三层：词法（拒 `..`/绝对路径）→ realpath（拒软链逃逸）→ 前缀（兄弟目录边界）。
+- **根清单探测（`GET /api/v1/roots` 的成本控制）**：根清单要给每个根标出「是不是 Git 仓库 / 当前分支」，早期实现**逐根串行** `repoRoot()` + 全量 `status()`——本地实测 25 个根（其中 20 个会话工作区都落在同一个仓库内）首次请求 **~5.0s**：同一仓库被反复探测，而每个 git 进程在 Windows 上光启动就要 ~65ms。现为四层省成本：① **浅路径优先 + 父仓库短路**（先探浅目录，摸清仓库根后落在其中的其他根直接复用，**逐级查 `.git` 防嵌套仓库被误短路**）；② **按仓库根去重**（同仓库只探一次）；③ **限并发 ≤8**（避免一次 spawn 几十个 git 进程）；④ **轻量 `probeRepo()` 替代 `status()`**（`rev-parse --show-toplevel --git-dir` + 读 `.git/HEAD` 判定分支——**不能用 `--abbrev-ref HEAD`**：未出生分支仓库上它报 `ambiguous argument 'HEAD'` 并非 0 退出，只看退出码会把空仓库误判成非仓库，而不看退出码又无法与 detached（同样输出字面量 `HEAD`）区分），结果缓存 TTL 60s（该缓存只喂左栏「仓库/分支」标签，实时状态另有 `/git/status` 等端点）。实测：git 进程数 71 → 8、冷启动 **~5.0s → 211ms**（真实 HTTP，另起实例）、热请求 1–2ms，25 个根的结果逐根一致（含嵌套仓库边界 6/6）。
+- **启动时序（首屏与数据解耦）**：`boot()` 分两阶段——阶段一**同步**搭外壳（不依赖任何网络往返），**双 rAF 首帧后立即抹掉启动遮罩**；阶段二才装配数据（根清单 / URL 恢复 / Git 状态 / 各面板渲染）。为何如此：外壳渲染与 `roots` 之类的往返毫无依赖，早期把遮罩挂到「roots + 目录树 + Git 状态全部返回」之后，等于把服务端的往返整段暴露成白屏等待（实测遮罩 6.2s vs 首帧 0.05s）。空窗期由中央占位（「正在准备工作区…」）与 Git 工具窗的「正在加载…」承担；`nextFrame()` 带 200ms 兜底（后台标签页 rAF 会被暂停）。启动期对同一根重复的 `git/status` 请求做去重（进行中复用 + 500ms 窗口，2 次 → 1 次），Git 面板延到根与状态就绪才建（空根会被判成「不是仓库」并摆出「初始化仓库」按钮）。**Monaco 空闲预热**：首屏就绪后用 `requestIdleCallback`（超时 2.5s 兜底）预取编辑器内核，首次打开文件不再空等 ~0.5s——`loadMonaco` 的失败/超时**必须复位单例**（早期把 `resolve(null)` 的 promise 永久缓存，一次失败就让本页永远降级为轻量编辑器；并发调用仍共享同一进行中 promise）。启动遮罩退场（色球收拢 + 淡出）与外壳入场均走纯 `opacity/transform`（不引发布局抖动），并尊重 `prefers-reduced-motion`。
 - **目录树**：懒加载单层列举（上层 5000 条 + truncated 标记）、目录优先自然序（`file2` 在 `file10` 前）、四种排序、隐藏文件可切、Git 状态色装饰、新建/改名/移动/复制/删除（回收站）/上传（拖拽）/下载。
 - **查看矩阵**：文本/代码 → Monaco（VSCode 同款内核，vendor 静态伺服）；图片/视频/音频（HTTP Range 拖动进度）/PDF/Office（服务端转换阅读视图）/压缩包（零依赖中央目录解析 + 解压）/二进制（hex）/图表源文件。条目 `kind`/`language`/`editable` 由服务端裁决（前端据此选查看器与是否显示编辑按钮）。
 - **默认只读**：编辑器状态机 `查看态 readOnly ⇄ 编辑态`（工具栏「编辑」/Ctrl+E 解锁，脏标记 ●，Ctrl+S 保存）；默认只读既是习惯也是安全默认（与 Agent 共用文件，误触不得改文件）。
@@ -2143,7 +2145,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/sessions/:id/files/download` | GET | 下载会话临时文件（`?path=`，二进制/文本原样下载，`Content-Disposition`） |
 | `/api/v1/sessions/:id/files/download` | POST | 多选打包下载（body 指定 paths 列表，返回 zip） |
 | `GET /files` | GET | **文件工作台页面**（独立 Vite 入口 `files.html`；`GEBAI_FS_ENABLED=false` 时 404） |
-| `/api/v1/roots` | GET | 文件工作台根清单（`sess:` 会话工作区 / `proj:` 预置项目 / `bind:` 绑定项目 / `user:` 用户目录 / `abs:` 白名单根）+ 能力开关（fsEnabled/fsWrite/gitEnabled/gitWrite/gitRemote/writable/sandboxed/上限） |
+| `/api/v1/roots` | GET | 文件工作台根清单（`sess:` 会话工作区 / `proj:` 预置项目 / `bind:` 绑定项目 / `user:` 用户目录 / `abs:` 白名单根）+ 能力开关（fsEnabled/fsWrite/gitEnabled/gitWrite/gitRemote/writable/sandboxed/上限）；每根附 Git 标记（`isRepo`/`branch`/`repoRoot`）——探测语义（去重 + 浅路径优先父仓库短路 + ≤8 并发 + 60s 缓存）见「文件工作台 → 根清单探测」 |
 | `/api/v1/roots/resolve` | GET | 单个根解析（?id=）——根可用性与真实路径校验 |
 | `/api/v1/fs/list` \| `/fs/tree` | GET | 目录列举（懒加载，?root&path&sort&order&showHidden）/ 树快照（?root&depth） |
 | `/api/v1/fs/stat` \| `/fs/read` | GET | 元信息 + `etag`（乐观锁）/ 文本读取（编码·换行·binary·truncated） |

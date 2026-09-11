@@ -14,7 +14,7 @@ import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, 
 // 文件工作台自带样式：base.css 提供设计令牌（主题 CSS 只换令牌），files.css 负责本页布局
 import "../css/base.css"
 import "../css/files.css"
-import { createEditor, refreshEditorTheme, monacoReady, type EditorHandle } from "./editor"
+import { createEditor, prewarmMonaco, refreshEditorTheme, monacoReady, type EditorHandle } from "./editor"
 import { createExplorer } from "./explorer"
 import { createChangesPanel, type ChangesPanel } from "./changes"
 import { createUrlSync, parseUrlState } from "./url-state"
@@ -277,26 +277,49 @@ async function onRootChanged(rootId: string): Promise<void> {
   renderRail()
 }
 
+/** 同根进行中的 git 状态请求（启动期 boot 与 onRootChanged 会先后触发，合并为一次往返）。 */
+let gitStatusInFlight: { root: string; promise: Promise<GitStatusInfo | null> } | null = null
+/** 最近一次成功的拉取（同根 500ms 内不重复请求：两个触发点相邻时真正只发一次）。 */
+let lastGitFetch: { root: string; ts: number } | null = null
+
 async function refreshGit(): Promise<GitStatusInfo | null> {
-  try {
-    const status = await api.gitStatus(explorer.getRoot())
-    state.gitStatus = status
-    // 回填树的 Git 装饰：树首次渲染时状态还没到（异步），不回填则徽标/下划线永不出现
-    explorer.refreshGitDecorations()
-    if (status.isRepo && status.rootPath) {
-      const info = state.roots.find((r) => r.id === explorer.getRoot())
-      state.repoPrefix = status.rootPath
-        ? ((info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").startsWith(status.rootPath) ? (info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").slice(status.rootPath.length).replace(/^\//, "") : "")
-        : ""
-    }
-  } catch {
-    state.gitStatus = null
-    explorer.refreshGitDecorations()
+  const root = explorer.getRoot()
+  // 启动期 boot 与 onRootChanged（setRoot 内）会先后触发同一根的刷新——复用进行中的请求
+  const inflight = gitStatusInFlight
+  if (inflight && inflight.root === root) return inflight.promise
+  // 刚拉过同一根：调用方要的是「状态就绪」而不是「必须再问一次」（git 状态 500ms 内的陈旧无感知）
+  if (lastGitFetch && lastGitFetch.root === root && Date.now() - lastGitFetch.ts < 500) {
+    renderStatus()
+    return state.gitStatus
   }
-  renderStatus()
-  // 变更面板与状态栏同源：状态一变就同步（只在它已创建时刷新，避免无谓重渲染）
-  changesPanel?.refresh()
-  return state.gitStatus
+  const promise = (async (): Promise<GitStatusInfo | null> => {
+    try {
+      const status = await api.gitStatus(root)
+      state.gitStatus = status
+      lastGitFetch = { root, ts: Date.now() }
+      // 回填树的 Git 装饰：树首次渲染时状态还没到（异步），不回填则徽标/下划线永不出现
+      explorer.refreshGitDecorations()
+      if (status.isRepo && status.rootPath) {
+        const info = state.roots.find((r) => r.id === root)
+        state.repoPrefix = status.rootPath
+          ? ((info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").startsWith(status.rootPath) ? (info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").slice(status.rootPath.length).replace(/^\//, "") : "")
+          : ""
+      }
+    } catch {
+      state.gitStatus = null
+      explorer.refreshGitDecorations()
+    }
+    renderStatus()
+    // 变更面板与状态栏同源：状态一变就同步（只在它已创建时刷新，避免无谓重渲染）
+    changesPanel?.refresh()
+    return state.gitStatus
+  })()
+  gitStatusInFlight = { root, promise }
+  try {
+    return await promise
+  } finally {
+    if (gitStatusInFlight?.promise === promise) gitStatusInFlight = null
+  }
 }
 
 /* ------------------------------ 地址栏同步 ------------------------------ */
@@ -1606,13 +1629,21 @@ function pickUpload(): void {
   input.click()
 }
 
-function toggleGitPanel(visible: boolean): void {
+/**
+ * 展开/收起底部 Git 工具窗。
+ *
+ * `deferData`：启动期专用——只同步可见性（先把骨架摆好），**不建面板也不取数据**。
+ * 此时根清单还没到（explorer 根为空），请求会得出「当前根不是 Git 仓库」这种误导结论
+ * （还会把「初始化仓库」按钮摆到误点位置），也白跑一轮请求；数据由根确定后的调用补上。
+ */
+function toggleGitPanel(visible: boolean, opts: { deferData?: boolean } = {}): void {
   state.gitViewVisible = visible
   gitDock.classList.toggle("collapsed", !visible)
   gitDockResizer.classList.toggle("collapsed", !visible)
-  if (visible) {
+  if (visible && !opts.deferData) {
     ensureGitPanel()
-    void gitPanel?.refresh()
+    // 根为空时不请求（等 onRootChanged / 启动阶段二补刷）：否则会把「根未知」误当「不是仓库」
+    if (explorer.getRoot()) void gitPanel?.refresh()
     // 展开后 Monaco 可视高度变化，重排编辑器（否则出现空白/裁切）
     for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 30)
   }
@@ -1895,57 +1926,122 @@ function bindDockResizer(): void {
 
 /* ------------------------------ 启动 ------------------------------ */
 
+/**
+ * 等一帧（双 rAF）：刚挂载的外壳完成首次布局与绘制后再抹遮罩。
+ * 为什么不用固定延时：延时值无法适配所有机器（慢了白等、快了看到空壳）；
+ * 而「首帧已绘制」正是「外壳可看」的准确判据。
+ */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      resolve()
+    }
+    requestAnimationFrame(() => requestAnimationFrame(finish))
+    // 后台标签页的 rAF 会被暂停/强节流（新标签后台打开的场景）——加超时兜底，
+    // 保证后续启动步骤照常推进（宁可早抹遮罩，也不卡在半渡）
+    setTimeout(finish, 200)
+  })
+}
+
+/**
+ * 启动占位（挂中央视图区）：根清单到达前给「正在准备工作区」的明确反馈。
+ * 返回撤销函数——**按数据而不是按时间**撤（慢机器上不会残留，快机器上不白等）。
+ */
+function mountBootPlaceholder(): () => void {
+  const box = h("div", { class: "fw-boot-placeholder" }, [h("div", { class: "fw-boot-orb" }), h("div", { class: "fw-boot-text", text: "正在准备工作区…" })])
+  views.appendChild(box)
+  return () => box.remove()
+}
+
+/** 全局拖拽上传：拖文件到页面任意处即上传到当前选中目录。 */
+function bindDragUpload(): void {
+  document.addEventListener("dragover", (e) => {
+    if (e.dataTransfer?.types.includes("Files")) {
+      e.preventDefault()
+      document.body.classList.add("fw-dragging")
+    }
+  })
+  document.addEventListener("dragleave", (e) => {
+    if (e.relatedTarget === null) document.body.classList.remove("fw-dragging")
+  })
+  document.addEventListener("drop", (e) => {
+    document.body.classList.remove("fw-dragging")
+    if (!e.dataTransfer?.files.length) return
+    const target = (e.target as HTMLElement).closest(".fw-tree-row, .fw-tree")
+    if (target) return // 交给资源管理器自己的处理（带目标目录语义）
+    e.preventDefault()
+    const sel = explorer.selected()
+    const dir = sel?.type === "dir" ? sel.path : ""
+    void api
+      .upload(explorer.getRoot(), Array.from(e.dataTransfer.files).map((f) => ({ file: f, path: dir ? `${dir}/${f.name}` : f.name })), false)
+      .then(async (res) => {
+        toast(`已上传 ${res.saved.length} 个文件`, "success")
+        await explorer.refresh(dir)
+        void refreshGit()
+      })
+      .catch((err) => toast(`上传失败：${(err as Error).message}`, "error"))
+  })
+}
+
 async function boot(): Promise<void> {
   // 主题：与主界面共用同一引擎（含人民币面额配色 / 默认主题黑白变体 / 品牌化变量）
   initTheme()
-  // 启动遮罩：首屏（根清单 + 目录树 + 编辑器就绪）后淡出移除；异常也移除，不让遮罩卡住页面
   const splash = document.getElementById("gb-splash")
+  /**
+   * 抹遮罩：**外壳已挂载并完成首帧**即可调用，不再等根清单/目录树/git 状态。
+   * 为什么要提前：根清单在服务端要逐个探测仓库（实测首次 5s+），而外壳本身不依赖任何入参——
+   * 把「看不清的空窗」换成「可看可交互的骨架 + 明确占位」，数据到达后自然填充（各视图本就有异步刷新路径）。
+   * 同时给外壳一个极轻的入场衔接（fw-enter，纯 opacity/transform，不引发布局抖动）。
+   */
+  let splashGone = false
   const hideSplash = (): void => {
+    if (splashGone) return
+    splashGone = true
+    rootEl.classList.add("fw-enter")
     if (!splash) return
     splash.classList.add("gb-splash-done")
     setTimeout(() => splash.remove(), 340)
   }
+  /** 启动占位撤销函数（异常路径也要撤，不让占位残留）。 */
+  let unmountPlaceholder: (() => void) | null = null
   try {
+    // ── 阶段一：同步搭好外壳（不依赖任何网络往返）──
     showLeftView("explorer", { keepHidden: true }) // 先建好左栏，可见性随后由 URL/默认值决定
-    toggleGitPanel(state.gitViewVisible && window.innerWidth >= 1180)
-    if (!state.gitViewVisible) toggleGitPanel(false) // 同步 collapsed class（避免先渲染后收起闪动）
+    // Git 面板此刻只摆骨架（deferData）——数据等根确定后再取（空根会误判「不是仓库」）
+    const wantGitPanel = state.gitViewVisible && window.innerWidth >= 1180
+    toggleGitPanel(wantGitPanel, { deferData: true })
+    if (!state.gitViewVisible) toggleGitPanel(false, { deferData: true }) // 同步 collapsed class（避免先渲染后收起闪动）
+    // dock 展开但无数据时给一行加载提示（否则启动空窗期是一块无信息的大空框）
+    const gitDockLoading = wantGitPanel ? h("div", { class: "fw-dock-loading", text: "正在加载 Git 信息…" }) : null
+    if (gitDockLoading) gitDock.appendChild(gitDockLoading)
     bindResizer(leftResizer, leftPanel, "left")
     bindDockResizer()
     document.body.appendChild(rootEl)
-    // 全局拖拽上传：拖文件到页面任意处即上传到当前选中目录
-    document.addEventListener("dragover", (e) => {
-      if (e.dataTransfer?.types.includes("Files")) {
-        e.preventDefault()
-        document.body.classList.add("fw-dragging")
-      }
-    })
-    document.addEventListener("dragleave", (e) => {
-      if (e.relatedTarget === null) document.body.classList.remove("fw-dragging")
-    })
-    document.addEventListener("drop", (e) => {
-      document.body.classList.remove("fw-dragging")
-      if (!e.dataTransfer?.files.length) return
-      const target = (e.target as HTMLElement).closest(".fw-tree-row, .fw-tree")
-      if (target) return // 交给资源管理器自己的处理（带目标目录语义）
-      e.preventDefault()
-      const sel = explorer.selected()
-      const dir = sel?.type === "dir" ? sel.path : ""
-      void api
-        .upload(explorer.getRoot(), Array.from(e.dataTransfer.files).map((f) => ({ file: f, path: dir ? `${dir}/${f.name}` : f.name })), false)
-        .then(async (res) => {
-          toast(`已上传 ${res.saved.length} 个文件`, "success")
-          await explorer.refresh(dir)
-          void refreshGit()
-        })
-        .catch((err) => toast(`上传失败：${(err as Error).message}`, "error"))
-    })
+    bindDragUpload()
+    unmountPlaceholder = mountBootPlaceholder()
+    // 外壳首次绘制即抹遮罩（首屏不等根清单往返）；空闲预热编辑器内核（首屏之后，不争带宽）
+    await nextFrame()
+    hideSplash()
+    prewarmMonaco()
+
+    // ── 阶段二：数据装配（不阻塞首屏可见性）──
     await loadRoots()
     // URL 恢复：进过哪个目录/打开过哪个文件，刷新或前进后退都回到原处（见 restoreFromUrl）
     await restoreFromUrl()
+    // git 状态先就绪（未就绪就建面板会把「状态未知」画成「当前根不是 Git 仓库」）；
+    // 与 onRootChanged 的触发合并，不会多跑一轮往返
     await refreshGit()
     renderTabbar()
     renderStatus()
     renderRail()
+    unmountPlaceholder()
+    unmountPlaceholder = null
+    // 根与状态都就绪：现在才建 Git 面板并取数据（阶段一只摆了骨架，见 toggleGitPanel 的 deferData）
+    if (state.gitViewVisible) toggleGitPanel(true)
+    gitDockLoading?.remove()
     // 深层链接：?root=proj:gebai&path=src/main.ts&line=10&diff=1
     const params = new URLSearchParams(location.search)
     const diffRoot = params.get("diffRoot")
@@ -1954,13 +2050,12 @@ async function boot(): Promise<void> {
       const to = params.get("to") ?? WORKTREE
       void openCompare({ from, to, path: params.get("path") ?? "", mergeBase: params.get("mergeBase") === "1" })
     }
-    // 首个文件标签的编辑器布局就绪后再抹遮罩（避免看到空壳布局）
-    setTimeout(hideSplash, 120)
   }
-  // boot 内部任何异常：仍移除遮罩（页面可见，错误以 toast/占位页表现），避免白屏无反馈
+  // boot 内部任何异常：仍移除遮罩（页面可见，错误以 toast/占位页表现），遄免白屏无反馈
   catch (err) {
     toast(`初始化失败：${(err as Error).message}`, "error", 8000)
     hideSplash()
+    unmountPlaceholder?.()
   }
 }
 

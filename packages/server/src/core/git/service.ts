@@ -9,8 +9,8 @@
  *  - **交互**：`GIT_TERMINAL_PROMPT=0` 杜绝等输入卡死；`--no-pager` 防分页器挂起；
  *  - **输出**：优先 porcelain=v2 / `-z`（NUL 分隔，免转义歧义），日志用 \x1f/\x1e 自定义分隔符自解析。
  */
-import { existsSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readFileSync, statSync } from "node:fs"
+import { isAbsolute, join } from "node:path"
 
 export interface GitResult {
   stdout: string
@@ -301,6 +301,63 @@ export class GitService {
   /** 探测是否仓库（供根清单标记）。 */
   async isRepo(dir: string): Promise<boolean> {
     return (await this.repoRoot(dir)) !== null
+  }
+
+  /**
+   * 轻量仓库探测：**一次 spawn 拿到仓库根与分支名**（供根清单标记）。
+   *
+   * 为什么不用 `status()`：`status()` 跑 `--porcelain=v2 --branch -z --untracked-files=all`
+   * 并额外一次 `stash list`，大仓库上是百毫秒级开销；而根清单只要「是不是仓库、分支叫什么」。
+   * 根清单一次要给几十个根打标记，其中大量根落在同一仓库内（会话工作区就在仓库里），
+   * 逐个跑全量 status 会把首屏拖到秒级。
+   *
+   * 为什么分支名不交给 git 而读 `.git/HEAD`：`--abbrev-ref HEAD` 在**未出生的分支**
+   * （刚 `git init`、还没首次提交）上会报 `ambiguous argument 'HEAD'` 并以非 0 退出，
+   * 而 `--show-toplevel` 本身是成功的——只看退出码会把「空仓库」错判成「非仓库」，
+   * 不看退出码又不行（未出生分支与分离头指针都输出字面量 `HEAD`，无法区分）。
+   * HEAD 永远是散文件、内容只有两种形态（`ref: refs/heads/<名>` 或提交 hash），
+   * 读它既准确又零额外进程；配 `--git-dir` 一并拿到后，子模块/worktree（`.git` 是文件）
+   * 也不用自己解析 `.git` 指向。
+   *
+   * 语义与 `status()` 对齐：非仓库返回 null；分离头指针时 `branch` 为 undefined 且
+   * `detached` 为 true（调用方据此显示 `(detached)`）；未出生分支能拿到分支名。
+   */
+  async probeRepo(dir: string): Promise<{ root: string; branch?: string; detached: boolean } | null> {
+    let st
+    try {
+      st = statSync(dir)
+    } catch {
+      return null
+    }
+    const base = st.isDirectory() ? dir : join(dir, "..")
+    const res = await this.run(["rev-parse", "--show-toplevel", "--git-dir"], base, { allowFail: true })
+    if (res.code !== 0) {
+      this.repoCache.set(base, { root: null, ts: Date.now() })
+      return null
+    }
+    const lines = res.stdout.split("\n").map((s) => s.trim())
+    const root = lines[0] ?? ""
+    if (!root) {
+      this.repoCache.set(base, { root: null, ts: Date.now() })
+      return null
+    }
+    // 顺手回填仓库探测缓存（与 repoRoot 同一份信息）：后续 status()/requireRepo() 对该目录
+    // 免再 spawn 一次 rev-parse——根清单是首屏第一请求，之前正是它顺带把这份缓存焐热的。
+    this.repoCache.set(base, { root, ts: Date.now() })
+    // --git-dir 可能是相对路径（仓库就在 cwd 时输出 ".git"），按 base 归一
+    const gitDirRaw = lines[1] ?? ".git"
+    const gitDir = isAbsolute(gitDirRaw) ? gitDirRaw : join(base, gitDirRaw || ".git")
+    let head = ""
+    try {
+      head = readFileSync(join(gitDir, "HEAD"), "utf8").trim()
+    } catch {
+      /* 读不到 HEAD（权限等异常形态）：已确认是仓库，分支留空 */
+      return { root, detached: false }
+    }
+    if (!head.startsWith("ref: ")) return { root, detached: true }
+    const ref = head.slice(5).trim()
+    const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref
+    return branch ? { root, branch, detached: false } : { root, detached: false }
   }
 
   /** 缓存失效（任何写操作后调用，保证后续读取看到新状态）。 */

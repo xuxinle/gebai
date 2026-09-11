@@ -7,32 +7,80 @@
     <title>文件工作台 · 歌白</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%0A%20%20%3Crect%20x%3D%222%22%20y%3D%222%22%20width%3D%2228%22%20height%3D%2228%22%20rx%3D%227%22%20fill%3D%22%234D6BFE%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M9%2010h14M9%2016h14M9%2022h9%22%20stroke%3D%22%23fff%22%20stroke-width%3D%222.4%22%20stroke-linecap%3D%22round%22%2F%3E%0A%3C%2Fsvg%3E" />
     <style id="gb-splash-style">
-      /* 启动遮罩：列表/编辑器就绪前挡住未渲染的骨架（与主界面 splash 同风格，避免闪白） */
+      /* 启动画面：样式内联于 HTML（外部 CSS/JS 就绪前即生效）。
+         视觉与主界面 index.html 的 splash 统一：同款渐变球 + conic 旋转环 + 品牌字发光，
+         底色用 acrylic 暗色 + 同款环境光斑，避免主题 CSS 就绪前闪出 :root（classic 配色）的蓝底。
+         退场：色球收拢消失 + 整体淡出（~260ms），外壳以 .fw-enter 极轻上浮淡入衔接（不再硬切）。 */
       #gb-splash {
         position: fixed; inset: 0; z-index: 9999;
         display: flex; align-items: center; justify-content: center;
-        background: var(--bg, #0c0c0e);
-        transition: opacity 0.3s ease;
+        background:
+          radial-gradient(ellipse 900px 480px at 50% -10%, rgba(59, 130, 246, 0.10), transparent 60%),
+          radial-gradient(ellipse 700px 420px at 85% 110%, rgba(139, 92, 246, 0.10), transparent 55%),
+          radial-gradient(ellipse 600px 360px at 12% 110%, rgba(45, 212, 191, 0.08), transparent 55%),
+          var(--bg, #0c0c0e);
+        transition: opacity 0.26s ease;
       }
       #gb-splash.gb-splash-done { opacity: 0; pointer-events: none; }
-      .gb-splash-inner { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+      .gb-splash-inner { display: flex; flex-direction: column; align-items: center; }
       .gb-splash-orb {
-        width: 64px; height: 64px; border-radius: 50%;
+        position: relative; width: 84px; height: 84px; border-radius: 50%;
         background: linear-gradient(135deg, #06b6d4, #8b5cf6, #ec4899);
-        box-shadow: 0 0 48px rgba(139, 92, 246, 0.4);
-        animation: gb-splash-breathe 1.5s ease-in-out infinite alternate;
+        box-shadow: 0 0 60px rgba(139, 92, 246, 0.45), 0 0 120px rgba(6, 182, 212, 0.25);
+        animation: gb-splash-breathe 1.6s ease-in-out infinite alternate;
+        transition: transform 0.26s cubic-bezier(0.4, 0, 0.6, 1), opacity 0.26s ease;
       }
-      @keyframes gb-splash-breathe { from { transform: scale(0.94); opacity: 0.85 } to { transform: scale(1.04); opacity: 1 } }
-      .gb-splash-text { font: 13px/1.6 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--text-muted, #8b949e); letter-spacing: .12em }
+      #gb-splash.gb-splash-done .gb-splash-orb { transform: scale(0.68); opacity: 0; }
+      @keyframes gb-splash-breathe {
+        from { transform: scale(0.92); filter: blur(1px) saturate(1.1); }
+        to   { transform: scale(1.08); filter: blur(2px) saturate(1.35); }
+      }
+      .gb-splash-ring {
+        position: absolute; inset: -10px; border-radius: 50%;
+        background: conic-gradient(from 0deg, transparent 0 70%, rgba(255, 255, 255, 0.55) 84%, transparent 94%);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1px));
+        mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1px));
+        animation: gb-splash-spin 1.4s linear infinite;
+      }
+      @keyframes gb-splash-spin { to { transform: rotate(360deg); } }
+      .gb-splash-brand {
+        margin-top: 30px; font-size: 22px; font-weight: 600; letter-spacing: 8px; text-indent: 8px;
+        color: #e6e6e6; animation: gb-splash-glow 2.2s ease-in-out infinite alternate;
+      }
+      @keyframes gb-splash-glow {
+        from { opacity: 0.7; }
+        to   { opacity: 1; text-shadow: 0 0 20px rgba(139, 92, 246, 0.9); }
+      }
+      .gb-splash-sub {
+        margin-top: 9px;
+        font: 12.5px/1.6 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--text-muted, #8b949e); letter-spacing: .2em; text-indent: .2em;
+      }
+      /* 减弱动效偏好：关掉循环动画与收拢位移，只保留极短淡出 */
+      @media (prefers-reduced-motion: reduce) {
+        .gb-splash-orb, .gb-splash-ring, .gb-splash-brand { animation: none; }
+        .gb-splash-orb { transition: opacity 0.12s ease; }
+        #gb-splash { transition-duration: 0.12s; }
+        #gb-splash.gb-splash-done .gb-splash-orb { transform: none; }
+      }
     </style>
   </head>
   <body class="fw-page">
-    <div id="gb-splash">
+    <!-- 启动画面（JS 就绪前覆盖全屏；外壳首帧就绪即收拢淡出，12s 兜底防卡死） -->
+    <div id="gb-splash" aria-hidden="true">
       <div class="gb-splash-inner">
-        <div class="gb-splash-orb"></div>
-        <div class="gb-splash-text">文件工作台</div>
+        <div class="gb-splash-orb" aria-hidden="true"><span class="gb-splash-ring"></span></div>
+        <div class="gb-splash-brand">文件工作台</div>
+        <div class="gb-splash-sub">歌白</div>
       </div>
     </div>
+    <script>
+      // 兜底：JS 模块加载/初始化异常时最多展示 12s，避免启动画面永久残留
+      setTimeout(function () {
+        var s = document.getElementById("gb-splash")
+        if (s) { s.classList.add("gb-splash-done"); setTimeout(function () { s.remove() }, 400) }
+      }, 12000)
+    </script>
     <script type="module" src="/src/files/main.ts"></script>
   </body>
 </html>
