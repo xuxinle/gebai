@@ -598,9 +598,12 @@
 .todo-pop {
   position: fixed;
   z-index: 55;
-  width: 336px;
-  max-width: calc(100vw - 24px);
-  max-height: min(72vh, 540px);
+  /* 尺寸：待办正文即模型提示词（可多行长文），窗口要容得下读写——宽高下限保底、上限不盖满屏幕 */
+  width: min(680px, 94vw);
+  min-width: 420px;
+  height: min(78vh, 860px);
+  min-height: 380px;
+  max-height: calc(100vh - 96px);
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
@@ -608,7 +611,7 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-pop);
   color: var(--text);
-  font-size: 13px;
+  font-size: 13.5px;
   overflow: hidden;
 }
 .todo-pop[hidden] { display: none; }
@@ -616,8 +619,8 @@
 .todo-pop-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: 10px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev-2);
   cursor: grab;
@@ -626,20 +629,20 @@
   touch-action: none;
 }
 .todo-pop.dragging .todo-pop-head { cursor: grabbing; }
-.todo-pop-title { font-weight: 600; }
+.todo-pop-title { font-weight: 600; font-size: 14.5px; }
 .todo-pop-count {
   flex: 1;
   min-width: 0;
   color: var(--text-faint);
-  font-size: 11.5px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .todo-pop-icon {
   flex: none;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   border: none;
@@ -653,10 +656,10 @@
 }
 .todo-pop-icon:hover { background: var(--bg-hover); color: var(--text); }
 .todo-pop-hint {
-  padding: 6px 10px;
+  padding: 7px 14px;
   color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 11.5px;
+  line-height: 1.5;
   border-bottom: 1px solid var(--border);
 }
 .todo-list {
@@ -701,17 +704,43 @@
   cursor: pointer;
 }
 .todo-body { flex: 1; min-width: 0; }
-.todo-text { display: block; line-height: 1.45; word-break: break-word; white-space: pre-wrap; cursor: pointer; }
+.todo-text {
+  display: block;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+  cursor: pointer;
+  font-size: 13.5px;
+}
+/* 长提示词折叠（列表不被打爆）：超过阈值高度后截断，由「展开全文」展开 */
+.todo-text.clamped {
+  max-height: 9.6em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+}
+.todo-more {
+  margin-top: 3px;
+  padding: 1px 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.todo-more:hover { border-color: var(--accent); color: var(--accent); }
 .todo-item.done .todo-text { color: var(--text-faint); text-decoration: line-through; }
-.todo-meta { margin-top: 2px; color: var(--text-muted); font-size: 11px; line-height: 1.4; word-break: break-word; }
+.todo-meta { margin-top: 3px; color: var(--text-muted); font-size: 11.5px; line-height: 1.45; word-break: break-word; }
 .todo-item.idle .todo-meta { color: var(--accent); }
 .todo-item.failed .todo-meta { color: var(--danger); }
 .todo-actions { flex: none; display: flex; gap: 2px; opacity: 0.5; }
 .todo-item:hover .todo-actions,
 .todo-actions:focus-within { opacity: 1; }
 .todo-act {
-  width: 22px;
-  height: 22px;
+  width: 25px;
+  height: 25px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -723,58 +752,81 @@
 }
 .todo-act:hover { background: var(--bg-inset); color: var(--text); }
 .todo-act.on { color: var(--accent); }
+.todo-act-run:hover { color: var(--success); }
 .todo-act-del:hover { color: var(--danger); }
+/* 行内编辑：多行文本域（可拖拽调高）——待办正文即详细提示词，编辑区要够大 */
 .todo-edit-input {
   width: 100%;
-  padding: 3px 6px;
+  min-height: 132px;
+  max-height: 46vh;
+  padding: 7px 9px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--accent);
   background: var(--bg-inset);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  resize: vertical;
+  overflow-y: auto;
 }
 .todo-edit-input:focus { outline: none; }
-.todo-empty { padding: 14px 12px; color: var(--text-faint); font-size: 12px; text-align: center; }
-.todo-add {
+.todo-edit-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+.todo-edit-tip { flex: 1; min-width: 0; color: var(--text-faint); font-size: 11px; }
+.todo-empty { padding: 20px 14px; color: var(--text-faint); font-size: 12.5px; text-align: center; }
+.todo-add {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
   border-top: 1px solid var(--border);
   background: var(--bg-elev-2);
 }
 .todo-add-input {
   flex: 1;
   min-width: 0;
-  padding: 6px 8px;
+  min-height: 56px;
+  max-height: 34vh;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong);
   background: var(--bg-inset);
   color: var(--text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
 }
 .todo-add-input:focus { outline: none; border-color: var(--accent); }
 .todo-add-input::placeholder { color: var(--text-faint); }
 .todo-add-idle {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
+  padding-bottom: 7px;
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
 }
-.todo-add-idle input { width: 13px; height: 13px; accent-color: var(--accent); }
+.todo-add-idle input { width: 14px; height: 14px; accent-color: var(--accent); }
 .todo-add-btn {
-  padding: 6px 10px;
+  margin-bottom: 7px;
+  padding: 7px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong);
   background: var(--bg-elev);
   color: var(--text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   cursor: pointer;
 }
 .todo-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+.todo-add-btn.ghost { background: transparent; color: var(--text-muted); margin-bottom: 0; }
+.todo-add-btn.ghost:hover { color: var(--text); }

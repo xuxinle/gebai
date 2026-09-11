@@ -98,4 +98,23 @@ describe("todos REST（用户级待办管理面）", () => {
       rmSync(home2, { recursive: true, force: true })
     }
   })
+
+  test("立即执行（POST /api/v1/todos/:id/run）：**新建会话**并即时返回会话 id", async () => {
+    const created = (await (await fetch(`${base()}/api/v1/todos`, { method: "POST", ...json({ text: "【REST】执行：写一份周报" }) })).json()) as { id: string }
+    const ran = await fetch(`${base()}/api/v1/todos/${created.id}/run`, { method: "POST" })
+    expect(ran.status).toBe(200)
+    const body = (await ran.json()) as { sessionId: string; todo: { id: string; idleState?: string } }
+    expect(body.sessionId).toMatch(/^[a-f0-9]{32}$/)
+    expect(body.todo.id).toBe(created.id)
+    // 执行会话确实已落盘（每次执行新建一条会话，标题带待办摘要）
+    const sid = body.sessionId
+    const persisted = ["admin", "default"].some((u) =>
+      existsSync(join(home, "users", u, "sessions", sid.slice(0, 2), sid.slice(2, 4), sid, "chat.json")),
+    )
+    expect(persisted).toBe(true)
+    // 非法 id 400 / 不存在 404
+    expect((await fetch(`${base()}/api/v1/todos/not-hex/run`, { method: "POST" })).status).toBe(400)
+    expect((await fetch(`${base()}/api/v1/todos/${"0".repeat(32)}/run`, { method: "POST" })).status).toBe(404)
+    await fetch(`${base()}/api/v1/todos/${created.id}`, { method: "DELETE" })
+  })
 })

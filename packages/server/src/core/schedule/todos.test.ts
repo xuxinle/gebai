@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SessionStore } from "../session/store"
 import type { AgentEngine } from "../engine/engine"
-import { IDLE_TODO_MAX_ATTEMPTS, UserTodoManager, type UserTodo } from "./todos"
+import { IDLE_TODO_MAX_ATTEMPTS, TodoBusyError, UserTodoManager, type UserTodo } from "./todos"
 
 /** 用户级待办与闲时任务（core/schedule/todos.ts）单测：CRUD/排序持久化、空闲调度、串行、失败放弃、超时。
  *  范式同 cron.test.ts：注入 now/tickIntervalMs 与 fake AgentEngine，直接 await tick() 而非等真实定时器。 */
@@ -254,6 +254,79 @@ describe("闲时任务调度", () => {
       await h.todos.tick()
       expect(h.runCalls).toHaveLength(0)
       expect(existsSync(todoFile(h))).toBe(true)
+    } finally {
+      cleanup(h)
+    }
+  })
+})
+
+describe("手动立即执行（新建会话）", () => {
+  test("run：新建会话执行待办全文（不需闲时标记），完成后自动勾选并记结果", async () => {
+    const h = setup()
+    try {
+      // 普通待办（未标记闲时）也能手动执行
+      const t = await h.todos.add("default", { text: "写一份周报\n包含本周进展与风险", idle: false })
+      const res = await h.todos.run("default", t.id)
+      expect(res).not.toBeNull()
+      expect(res!.sessionId).toMatch(/^[0-9a-f]{32}$/)
+      // 立即可知执行会话（不等执行结束）
+      expect(res!.todo.idleSessionId).toBe(res!.sessionId)
+      expect(res!.todo.idleState).toBe("running")
+      // 后台执行完成（run 内部 void 发出，等一个微任务/短间隔）
+      for (let i = 0; i < 50 && h.runCalls.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      await new Promise((r) => setTimeout(r, 30))
+      expect(h.runCalls).toHaveLength(1)
+      expect(h.runCalls[0].sid).toBe(res!.sessionId)
+      expect(h.runCalls[0].prompt).toContain("[待办执行]")
+      expect(h.runCalls[0].prompt).toContain("写一份周报\n包含本周进展与风险")
+      const cur = (await h.todos.list("default")).find((x) => x.id === t.id)!
+      expect(cur.done).toBe(true)
+      expect(cur.idleState).toBe("done")
+      expect(cur.idleResult).toBe("闲时任务已完成：示例结果")
+      const session = await h.store.load(res!.sessionId, "default")
+      expect(session?.name).toContain("待办执行")
+    } finally {
+      cleanup(h)
+    }
+  })
+
+  test("run：待办不存在返回 null；执行中重复触发报 TodoBusyError", async () => {
+    const h = setup()
+    try {
+      expect(await h.todos.run("default", "0".repeat(32))).toBeNull()
+      const t = await h.todos.add("default", { text: "长任务", idle: true })
+      h.runHang = true
+      const res = await h.todos.run("default", t.id)
+      expect(res).not.toBeNull()
+      // 执行中（runHang）再次手动触发 / tick 均不重复启动
+      await expect(h.todos.run("default", t.id)).rejects.toBeInstanceOf(TodoBusyError)
+      const before = h.runCalls.length
+      await h.todos.tick()
+      expect(h.runCalls).toHaveLength(before)
+      // 收尾（解挂起）
+      h.settle.splice(0).forEach((f) => f())
+      await new Promise((r) => setTimeout(r, 30))
+      const cur = (await h.todos.list("default")).find((x) => x.id === t.id)!
+      expect(cur.idleState).toBe("done")
+      expect(cur.done).toBe(true)
+    } finally {
+      cleanup(h)
+    }
+  })
+
+  test("run：执行失败按失败计次（不静默处理）", async () => {
+    const h = setup({ maxAttempts: 2 })
+    try {
+      const t = await h.todos.add("default", { text: "会失败的待办" })
+      h.runFail = "模型不可用"
+      await h.todos.run("default", t.id)
+      for (let i = 0; i < 50 && h.runCalls.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+      await new Promise((r) => setTimeout(r, 30))
+      const cur = (await h.todos.list("default")).find((x) => x.id === t.id)!
+      expect(cur.done).toBe(false)
+      expect(cur.idleAttempts).toBe(1)
+      expect(cur.idleError).toContain("模型不可用")
+      expect(cur.idleState).toBe("pending")
     } finally {
       cleanup(h)
     }

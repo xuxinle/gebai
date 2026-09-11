@@ -1,9 +1,9 @@
 /** 用户级待办域路由（用户级资源，DESIGN「用户级待办与闲时任务」）：REST 管理面（前端待办弹窗
  *  与其他集成共用）。与 cron 域同风格：写操作不经审批（REST 已有身份认证边界，与既有资源管理端点姿态一致）。
- *  注意清单级批量重排（拖动排序）走 `PATCH /api/v1/todos`（body { ids }）——避免与 :id 通配中间件冲突。 */
-import type { RouteCtx } from "./context"
+ *  注意清单级批量重排（拖动排序）走 `PATCH /api/v1/todos`（body { ids }）——避免与 :id 通配中间件冲突。 */import type { RouteCtx } from "./context"
 import type { Context } from "hono"
 import type { AppEnv } from "../app"
+import { TodoBusyError } from "../core/schedule/todos"
 
 export function registerTodoRoutes(rc: RouteCtx): void {
   const { app, d } = rc
@@ -16,6 +16,8 @@ export function registerTodoRoutes(rc: RouteCtx): void {
     await next()
   }
   app.use("/api/v1/todos/:id", validateTodoId)
+  // 子路径（/run）同样过 id 白名单：否则畸形 id 会落到处理器按「不存在」返回 404 而非 400
+  app.use("/api/v1/todos/:id/*", validateTodoId)
 
   // 能力开关关闭（GEBAI_IDLE_TODO_ENABLED=false）：统一 503（与 cron 域一致）
   const disabled = (c: Context<AppEnv>) => c.json({ error: "todos disabled (GEBAI_IDLE_TODO_ENABLED=false)" }, 503)
@@ -63,5 +65,19 @@ export function registerTodoRoutes(rc: RouteCtx): void {
     const user = await userOf(c)
     const removed = await d.todos.remove(user.id, c.req.param("id"))
     return removed ? c.json({ ok: true }) : c.json({ error: "not found" }, 404)
+  })
+  // 立即执行（**新建一条会话**跑该待办文本作为提示词）：建会话完成即返回（不等待执行结束），
+  // 结果后续回写待办；同一待办已在执行中 409，能力未启用/引擎未就绪 503
+  app.post("/api/v1/todos/:id/run", async (c) => {
+    if (!d.todos) return disabled(c)
+    const user = await userOf(c)
+    try {
+      const res = await d.todos.run(user.id, c.req.param("id"))
+      if (!res) return c.json({ error: "not found" }, 404)
+      return c.json(res)
+    } catch (err) {
+      const status = err instanceof TodoBusyError ? 409 : String((err as Error).message || err).includes("引擎未就绪") ? 503 : 400
+      return c.json({ error: String((err as Error).message || err) }, status)
+    }
   })
 }

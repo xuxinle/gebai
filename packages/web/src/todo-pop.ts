@@ -1,24 +1,36 @@
 /** 待办弹窗（DESIGN「用户级待办与闲时任务」）：标题栏轮盘「待办」按钮打开的**可拖动**浮层——
- *  用户在弹窗内新增/行内修改/删除/拖动排序/勾选完成，标记 ⚡ 的条目为闲时任务（服务端没有运行中
- *  的会话时按顺序自动执行）；点击条目文本或其「填入」按钮把内容写进对话输入框。
+ *  新增/多行编辑/删除/拖动排序/勾选完成；标记 ⚡ 的条目为闲时任务（服务端没有运行中的会话时按顺序
+ *  自动执行）；「▶ 执行」**新建一条会话**以该待办全文为提示词跑一次；点击条目文本或其「填入」按钮
+ *  把内容写进对话输入框。
  *
- *  数据源：REST /api/v1/todos（用户级资源，与会话解耦）；弹窗打开期间每 15s 静默刷新一次（闲时任务
- *  可能在后端改了状态），关闭即停。位置持久化在 localStorage `gebai.ui.todo.pos`（脏数据回退默认位）。
+ *  待办文本即模型提示词（可为多行详细描述）：列表内长文本折叠展示（可展开）、编辑与新增都用多行
+ *  文本域（编辑可拖拽调高，Ctrl/Cmd+Enter 保存）。
+ *
+ *  显隐：**只有点击右上角 ✕ 才隐藏**（点轮盘按钮、点弹窗外、按 Esc 都不关闭，避免编辑长提示词时
+ *  误触丢失）；打开状态与位置一起持久化（`gebai.ui.todo.open` / `gebai.ui.todo.pos`），页面刷新
+ *  （含 dev-reload）后自动恢复打开与位置。数据源 REST /api/v1/todos；打开期间每 15s 静默同步状态
+ *  （列表无变化时不重绘，不打断滚动/编辑）。
  *  拖动范式照 cny-cat.ts（pointerdown + setPointerCapture + 位移钳制 + 丢失捕获兜底）。 */
 import type { UserTodo } from "@gebai/sdk"
 import { autosize, syncSendButton } from "./composer"
+import { refreshSessions } from "./sessions"
 import { clampPos, defaultPos, dropTargetIndex, moveItem, parsePos, type PopPos } from "./todo-core"
 import { client, el, focusInput, input } from "./state"
 import { confirmDialog, toast } from "./ui"
 
 const POS_KEY = "gebai.ui.todo.pos"
+const OPEN_KEY = "gebai.ui.todo.open"
 const POLL_MS = 15_000
+/** 列表内长文本折叠阈值（行数 / 字符数，超过即折叠展示 + 「展开全文」）。 */
+const CLAMP_LINES = 8
+const CLAMP_CHARS = 420
 
 const ICON = {
-  idle: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M13 2L4.5 13H11l-1 9 8.5-11H12l1-9z"/></svg>',
-  fill: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
-  edit: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18 10l-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>',
-  del: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>',
+  idle: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M13 2L4.5 13H11l-1 9 8.5-11H12l1-9z"/></svg>',
+  run: '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 5l11 7-11 7V5z"/></svg>',
+  fill: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18 10l-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>',
+  del: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>',
 } as const
 
 interface TodoPopRefs {
@@ -27,7 +39,7 @@ interface TodoPopRefs {
   empty: HTMLDivElement
   count: HTMLSpanElement
   addForm: HTMLFormElement
-  addInput: HTMLInputElement
+  addInput: HTMLTextAreaElement
   addIdle: HTMLInputElement
 }
 
@@ -42,21 +54,22 @@ let pollTimer: number | null = null
 let dragFromIndex: number | null = null
 /** 浮层拖动会话（指针位移起点）。 */
 let dragWindow: { dx: number; dy: number; pid: number } | null = null
+/** 展开全文的待办 id（长文本折叠状态）。 */
+const expandedIds = new Set<string>()
+/** 上次渲染的数据签名（无变化时跳过重绘——不打断滚动与编辑）。 */
+let lastSig = ""
 
-/** 绑定轮盘「待办」按钮（main.ts 初始化时调用一次）。 */
+/** 绑定轮盘「待办」按钮（main.ts 初始化时调用一次）；上次退出时弹窗是打开的则自动恢复打开。 */
 export function bindTodoPop(): void {
   const btn = document.getElementById("todo-btn")
   if (!btn || bound) return
   bound = true
+  // 点轮盘按钮只负责「打开/前置」（**不关闭**——关闭唯一入口是弹窗右上角 ✕）
   btn.addEventListener("click", (e) => {
     e.preventDefault()
-    toggleTodoPop()
+    void openTodoPop()
   })
-}
-
-export function toggleTodoPop(): void {
-  if (opened) closeTodoPop()
-  else void openTodoPop()
+  if (readLocal(OPEN_KEY) === "1") void openTodoPop()
 }
 
 export function isTodoPopOpen(): boolean {
@@ -65,20 +78,24 @@ export function isTodoPopOpen(): boolean {
 
 export async function openTodoPop(): Promise<void> {
   if (!refs) refs = buildPop()
+  const wasOpen = opened
   opened = true
+  writeLocal(OPEN_KEY, "1")
   refs.root.hidden = false
   refs.root.classList.add("show")
-  applyPos(clampNow(loadPos()), true)
+  if (!wasOpen) applyPos(clampNow(loadPos()), true)
   await refresh()
   // 首次打开默认聚焦新增输入框，直接敲键盘即可记待办
-  refs.addInput.focus()
+  if (!wasOpen && !editingId) refs.addInput.focus()
   startPoll()
 }
 
+/** 隐藏弹窗（唯一入口：弹窗右上角 ✕）。 */
 export function closeTodoPop(): void {
   if (!refs) return
   opened = false
   editingId = null
+  writeLocal(OPEN_KEY, "0")
   refs.root.hidden = true
   refs.root.classList.remove("show")
   stopPoll()
@@ -86,20 +103,26 @@ export function closeTodoPop(): void {
 
 /* ---------- 数据 ---------- */
 
-async function refresh(): Promise<void> {
+/** 数据签名：id/文本/状态任一变化才重绘（定时同步不打断滚动与编辑）。 */
+function signature(): string {
+  return todos.map((t) => `${t.id}:${t.done ? 1 : 0}:${t.idle ? 1 : 0}:${t.idleState ?? ""}:${t.idleResult ?? ""}:${t.idleError ?? ""}:${t.text}`).join("|")
+}
+
+async function refresh(force = false): Promise<void> {
   try {
     todos = await client.listUserTodos()
   } catch (err) {
     toast(`待办加载失败: ${(err as Error).message}`)
     return
   }
-  if (!editingId) render()
+  const sig = signature()
+  if (force || sig !== lastSig) render()
 }
 
 function startPoll(): void {
   stopPoll()
   pollTimer = window.setInterval(() => {
-    if (!opened || document.visibilityState !== "visible") return
+    if (!opened || document.visibilityState !== "visible" || editingId) return
     void refresh()
   }, POLL_MS)
 }
@@ -114,6 +137,7 @@ function stopPoll(): void {
 function render(): void {
   const r = refs
   if (!r) return
+  lastSig = signature()
   r.list.textContent = ""
   r.count.textContent = summary()
   r.empty.hidden = todos.length > 0
@@ -154,14 +178,37 @@ function renderItem(t: UserTodo, index: number): HTMLElement {
   text.title = "点击填入输入框"
   text.addEventListener("click", () => fillFromTodo(t))
   body.appendChild(text)
+  // 长提示词折叠展示（列表不被打爆），可一键展开/收起
+  const lineCount = t.text.split("\n").length
+  if (!expandedIds.has(t.id) && (lineCount > CLAMP_LINES || t.text.length > CLAMP_CHARS)) {
+    text.classList.add("clamped")
+    const more = el("button", "todo-more", `展开全文（${t.text.length} 字 / ${lineCount} 行）`)
+    more.type = "button"
+    more.addEventListener("click", (e) => {
+      e.stopPropagation()
+      expandedIds.add(t.id)
+      render()
+    })
+    body.appendChild(more)
+  } else if (expandedIds.has(t.id)) {
+    const less = el("button", "todo-more", "收起")
+    less.type = "button"
+    less.addEventListener("click", (e) => {
+      e.stopPropagation()
+      expandedIds.delete(t.id)
+      render()
+    })
+    body.appendChild(less)
+  }
   const meta = idleMeta(t)
   if (meta) body.appendChild(meta)
   li.appendChild(body)
 
   const actions = el("div", "todo-actions")
-  actions.appendChild(actionBtn("idle", t.idle ? "关闭闲时任务" : "标记为闲时任务（服务端空闲时自动执行）", t.idle, () => void setIdle(t, !t.idle)))
+  actions.appendChild(actionBtn("run", "执行：新建一条会话，以本待办全文为提示词立即执行", false, () => void runTodo(t)))
+  actions.appendChild(actionBtn("idle", t.idle ? "关闭闲时任务" : "标记为闲时任务（服务端空闲时按顺序自动执行）", t.idle, () => void setIdle(t, !t.idle)))
   actions.appendChild(actionBtn("fill", "填入输入框", false, () => fillFromTodo(t)))
-  actions.appendChild(actionBtn("edit", "编辑内容", false, () => startEdit(li, t, text)))
+  actions.appendChild(actionBtn("edit", "编辑内容（多行提示词）", false, () => startEdit(li, t)))
   actions.appendChild(actionBtn("del", "删除待办", false, () => void removeTodo(t)))
   li.appendChild(actions)
 
@@ -183,15 +230,14 @@ function actionBtn(kind: keyof typeof ICON, tip: string, active: boolean, onClic
   return b
 }
 
-/** 闲时状态行（排队/执行中/已完成摘要/失败原因）。 */
+/** 闲时/执行状态行（排队中/执行中/已完成摘要/失败原因）。 */
 function idleMeta(t: UserTodo): HTMLElement | null {
-  if (!t.idle) return null
   let text = ""
-  if (t.idleState === "running") text = "⚡ 正在空闲执行…"
+  if (t.idleState === "running") text = "⚡ 正在执行…（新建会话运行中，完成后自动回写结果）"
   else if (t.idleState === "failed") text = `⚡ 已停止自动执行：${t.idleError ?? "多次失败"}`
   else if (t.done && t.idleResult) text = `⚡ 已完成：${t.idleResult}`
   else if (t.idleError) text = `⚡ 上次失败：${t.idleError}`
-  else if (t.idleState === "pending") text = "⚡ 排队中：服务端无运行中会话时按顺序执行"
+  else if (t.idle && t.idleState === "pending") text = "⚡ 排队中：服务端无运行中会话时按顺序自动执行"
   if (!text) return null
   const div = el("div", "todo-meta", text)
   div.title = text
@@ -214,26 +260,36 @@ function buildPop(): TodoPopRefs {
   refreshBtn.dataset.tip = "刷新"
   refreshBtn.setAttribute("aria-label", "刷新")
   refreshBtn.textContent = "↻"
-  refreshBtn.addEventListener("click", () => void refresh())
+  refreshBtn.addEventListener("click", () => void refresh(true))
   const closeBtn = el("button", "todo-pop-icon todo-pop-close")
   closeBtn.type = "button"
-  closeBtn.dataset.tip = "关闭"
+  closeBtn.dataset.tip = "关闭（唯一关闭入口；点弹窗外或按 Esc 不会关闭）"
   closeBtn.setAttribute("aria-label", "关闭待办")
   closeBtn.textContent = "✕"
   closeBtn.addEventListener("click", () => closeTodoPop())
   head.append(title, count, refreshBtn, closeBtn)
 
-  const hint = el("div", "todo-pop-hint", "拖动标题栏移动窗口；⚡ 闲时任务在服务端没有运行中的会话时按顺序自动执行")
+  const hint = el(
+    "div",
+    "todo-pop-hint",
+    "拖动标题栏移动窗口；待办全文即模型提示词（可多行详细描述）。▶ 执行 = 新建一条会话立即执行；⚡ = 服务端没有运行中的会话时按顺序自动执行",
+  )
 
   const list = el("ul", "todo-list")
-  const empty = el("div", "todo-empty", "暂无待办：在下方输入内容后回车添加")
+  const empty = el("div", "todo-empty", "暂无待办：在下方输入内容后 Ctrl/Cmd+Enter 添加")
 
   const addForm = el("form", "todo-add")
-  const addInput = document.createElement("input")
-  addInput.type = "text"
+  const addInput = document.createElement("textarea")
   addInput.className = "todo-add-input"
-  addInput.placeholder = "新增待办…（回车添加）"
+  addInput.rows = 2
+  addInput.placeholder = "新增待办…（可多行写详细提示词；Ctrl/Cmd+Enter 添加）"
   addInput.maxLength = 2000
+  addInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      addForm.requestSubmit()
+    }
+  })
   const addIdleLabel = el("label", "todo-add-idle")
   const addIdle = document.createElement("input")
   addIdle.type = "checkbox"
@@ -251,17 +307,6 @@ function buildPop(): TodoPopRefs {
   addForm.addEventListener("submit", (e) => {
     e.preventDefault()
     void addTodo()
-  })
-  // 外点关闭（点击轮盘按钮自身除外——由按钮 click 切换）
-  document.addEventListener("pointerdown", (e) => {
-    if (!opened) return
-    const target = e.target as Node
-    if (root.contains(target)) return
-    if (document.getElementById("todo-btn")?.contains(target)) return
-    closeTodoPop()
-  })
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && opened) closeTodoPop()
   })
   window.addEventListener("resize", () => {
     if (opened) applyPos(clampNow(currentPos()), true)
@@ -317,8 +362,8 @@ function clampNow(p: PopPos): PopPos {
   const r = refs
   if (!r) return p
   const rect = r.root.getBoundingClientRect()
-  const w = rect.width || 330
-  const h = rect.height || 380
+  const w = rect.width || 640
+  const h = rect.height || 560
   return clampPos(p.x, p.y, w, h, window.innerWidth, window.innerHeight)
 }
 
@@ -326,7 +371,7 @@ function loadPos(): PopPos {
   const saved = parsePos(readLocal(POS_KEY))
   if (saved) return saved
   const r = refs
-  const w = r ? r.root.getBoundingClientRect().width || 330 : 330
+  const w = r ? r.root.getBoundingClientRect().width || 640 : 640
   return defaultPos(w, window.innerWidth)
 }
 
@@ -334,11 +379,7 @@ function savePos(): void {
   const r = refs
   if (!r) return
   const p = currentPos()
-  try {
-    localStorage.setItem(POS_KEY, JSON.stringify(p))
-  } catch {
-    /* 隐私模式等：位置不持久化不影响使用 */
-  }
+  writeLocal(POS_KEY, JSON.stringify(p))
 }
 
 function readLocal(key: string): string | null {
@@ -349,6 +390,14 @@ function readLocal(key: string): string | null {
   }
 }
 
+function writeLocal(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* 隐私模式等：位置/打开态不持久化不影响使用 */
+  }
+}
+
 /* ---------- 交互 ---------- */
 
 async function setDone(t: UserTodo, done: boolean): Promise<void> {
@@ -356,7 +405,7 @@ async function setDone(t: UserTodo, done: boolean): Promise<void> {
     patchLocal(await client.updateUserTodo(t.id, { done }))
   } catch (err) {
     toast(`修改失败: ${(err as Error).message}`)
-    await refresh()
+    await refresh(true)
   }
 }
 
@@ -366,7 +415,7 @@ async function setIdle(t: UserTodo, idle: boolean): Promise<void> {
     if (idle) toast("已标记为闲时任务：服务端没有运行中的会话时自动执行", "ok")
   } catch (err) {
     toast(`修改失败: ${(err as Error).message}`)
-    await refresh()
+    await refresh(true)
   }
 }
 
@@ -375,7 +424,7 @@ async function saveText(t: UserTodo, text: string): Promise<void> {
     patchLocal(await client.updateUserTodo(t.id, { text }))
   } catch (err) {
     toast(`保存失败: ${(err as Error).message}`)
-    await refresh()
+    await refresh(true)
   }
 }
 
@@ -392,7 +441,20 @@ async function removeTodo(t: UserTodo): Promise<void> {
     render()
   } catch (err) {
     toast(`删除失败: ${(err as Error).message}`)
-    await refresh()
+    await refresh(true)
+  }
+}
+
+/** 立即执行：**新建一条会话**以该待办全文为提示词跑一次（后端不等待执行结束即返回会话 id）。 */
+async function runTodo(t: UserTodo): Promise<void> {
+  try {
+    const res = await client.runUserTodo(t.id)
+    patchLocal(res.todo)
+    toast(res.sessionId ? "已新建会话执行该待办，可在会话列表查看进度与结果" : "已开始执行", "ok")
+    void refreshSessions() // 会话列表即时出现执行会话（不阻塞）
+  } catch (err) {
+    toast(`执行失败: ${(err as Error).message}`)
+    await refresh(true)
   }
 }
 
@@ -429,19 +491,31 @@ function patchLocal(updated: UserTodo): void {
   if (!editingId) render()
 }
 
-/** 行内编辑：Enter 保存 / Esc 取消 / 失焦保存。 */
-function startEdit(li: HTMLElement, t: UserTodo, textEl: HTMLElement): void {
+/** 行内编辑（多行文本域，可拖拽调高）：Ctrl/Cmd+Enter 或「保存」保存，Esc 或「取消」放弃；
+ *  点击别处不自动保存（避免写长提示词时误触丢失/误存）。 */
+function startEdit(li: HTMLElement, t: UserTodo): void {
   if (editingId) return
   editingId = t.id
   li.classList.add("editing")
-  const editor = document.createElement("input")
-  editor.type = "text"
+  const body = li.querySelector(".todo-body") as HTMLElement
+  body.textContent = ""
+  const editor = document.createElement("textarea")
   editor.className = "todo-edit-input"
   editor.value = t.text
   editor.maxLength = 2000
-  textEl.replaceWith(editor)
+  editor.rows = 6
+  const actions = el("div", "todo-edit-actions")
+  const saveBtn = el("button", "todo-add-btn", "保存")
+  saveBtn.type = "button"
+  const cancelBtn = el("button", "todo-add-btn ghost", "取消")
+  cancelBtn.type = "button"
+  const tipText = el("span", "todo-edit-tip", "Ctrl/Cmd+Enter 保存 · Esc 取消")
+  actions.append(tipText, saveBtn, cancelBtn)
+  body.append(editor, actions)
+  li.querySelector(".todo-actions")?.setAttribute("hidden", "")
   editor.focus()
-  editor.select()
+  editor.setSelectionRange(editor.value.length, editor.value.length)
+
   let settled = false
   const finish = async (save: boolean) => {
     if (settled) return
@@ -452,16 +526,18 @@ function startEdit(li: HTMLElement, t: UserTodo, textEl: HTMLElement): void {
     if (save && value && value !== t.text) await saveText(t, value)
     else render()
   }
+  saveBtn.addEventListener("click", () => void finish(true))
+  cancelBtn.addEventListener("click", () => void finish(false))
   editor.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       void finish(true)
     } else if (e.key === "Escape") {
       e.preventDefault()
+      e.stopPropagation()
       void finish(false)
     }
   })
-  editor.addEventListener("blur", () => void finish(true))
 }
 
 /* ---------- 列表拖动排序（HTML5 drag；样式提示落点） ---------- */
@@ -514,6 +590,6 @@ async function applyOrder(next: UserTodo[]): Promise<void> {
     render()
   } catch (err) {
     toast(`排序保存失败: ${(err as Error).message}`)
-    await refresh()
+    await refresh(true)
   }
 }

@@ -785,6 +785,10 @@ export class GebaiClient {
       return (await res.json()) as UserTodo[]
     })
   }
+  /** 立即执行待办：**新建一条会话**以该待办文本为提示词跑一次（不等待执行结束，返回执行会话 id 供跳转）。 */
+  runUserTodo(id: string): Promise<{ todo: UserTodo; sessionId: string }> {
+    return this.post<{ todo: UserTodo; sessionId: string }>(`/api/v1/todos/${id}/run`, {})
+  }
   listTools(): Promise<ToolInfo[]> {
     return this.request<{ tools: ToolInfo[] }>("session.tool.get", {}).then((r) => r.tools)
   }

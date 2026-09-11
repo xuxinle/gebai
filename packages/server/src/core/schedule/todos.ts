@@ -5,7 +5,8 @@
  *  闲时任务：待办可标记 idle——服务端**没有正在运行的会话**时（engine 全局空闲判定），调度器按
  *  列表顺序取第一条待执行的闲时待办，**新建一条会话**执行其内容（一次一条、串行推进），执行完
  *  自动勾选完成并回写结果摘要（可从该会话回看完整过程）；失败累计 idleAttempts，达上限自动
- *  放弃并记 idleError（防死循环重试）。
+ *  放弃并记 idleError（防死循环重试）。手动执行（`run`，REST POST /api/v1/todos/:id/run）走同一条
+ *  执行链路（同样是新建会话），仅不受「服务端空闲」限制（用户显式要求立即执行）。
  *
  *  存储范式与定时任务（cron.ts）一致：启动 walkDir 扫描加载 + Map 驻留 + 按用户串行写链。 */
 import { randomUUID } from "node:crypto"
@@ -86,6 +87,16 @@ export interface UserTodoManagerDeps {
   timeoutMs?: number
   maxAttempts?: number
 }
+
+/** 闲时执行会话标题前缀 / 手动执行会话标题前缀（新建会话的可见名，附待办摘要）。 */
+const IDLE_TITLE = "闲时待办"
+const MANUAL_TITLE = "待办执行"
+/** 闲时执行 / 手动执行的提示词前缀（正文即待办全文，作为完整提示词交给模型）。 */
+const IDLE_PROMPT_HEAD = "[闲时待办任务]"
+const MANUAL_PROMPT_HEAD = "[待办执行]"
+
+/** 待办正在执行中（同一待办并发触发）：路由据此返回 409。 */
+export class TodoBusyError extends Error {}
 
 /** 取待办摘要（会话标题用）：首行 + 截断。 */
 function headline(text: string): string {
@@ -306,48 +317,80 @@ export class UserTodoManager {
     }
   }
 
-  /** 执行一条闲时待办：新建会话 → engine.run → 回写状态（成功自动勾选完成）。 */
+  /** 执行一条闲时待办（tick 路径）：新建会话执行 → 回写状态（成功自动勾选完成）。 */
   private async runIdle(entry: UserTodo): Promise<void> {
+    let sid: string
+    try {
+      sid = await this.openRunSession(entry, IDLE_TITLE)
+    } catch (err) {
+      await this.recordFailure(entry, err)
+      return
+    }
+    await this.runInSession(entry, sid, IDLE_PROMPT_HEAD)
+  }
+
+  /** 手动立即执行（REST POST /api/v1/todos/:id/run）：**新建一条会话**执行，不等待完成——建会话完成即
+   *  返回其 id（前端可据此跳转/提示），结果后续回写待办；不受「服务端空闲」限制（用户显式要求）。
+   *  返回 null 表示待办不存在；同一待办已在执行中抛 TodoBusyError（路由 409）。 */
+  async run(user: string, id: string): Promise<{ todo: UserTodo; sessionId: string } | null> {
+    const entry = this.entryOf(user, id)
+    if (!entry) return null
+    if (!this.engine) throw new Error("执行引擎未就绪")
+    // 同步占位防重入（并发点击/与 tick 撞车）：占位在建会话的 await 之前完成
+    if (entry.idleState === "running") throw new TodoBusyError("该待办正在执行中，请稍候")
+    entry.idleState = "running"
+    entry.idleError = undefined
+    let sid: string
+    try {
+      sid = await this.openRunSession(entry, MANUAL_TITLE)
+    } catch (err) {
+      await this.recordFailure(entry, err)
+      throw err
+    }
+    void this.runInSession(entry, sid, MANUAL_PROMPT_HEAD)
+    return { todo: { ...entry }, sessionId: sid }
+  }
+
+  /** 建立执行会话并登记（手动与闲时共用）：新建一条会话 + 标记 running/执行会话并落盘，返回会话 id。 */
+  private async openRunSession(entry: UserTodo, titlePrefix: string): Promise<string> {
+    const session = await this.deps.store.createSession(entry.user, `${titlePrefix} · ${headline(entry.text)}`)
+    const startAt = this.now()
+    entry.idleState = "running"
+    entry.idleRunAt = startAt
+    entry.idleSessionId = session.id
+    entry.idleError = undefined
+    entry.updatedAt = startAt
+    await this.saveUserEntries(entry.user)
+    return session.id
+  }
+
+  /** 在已建会话内执行待办内容并回写状态（手动与闲时共用链路）：**完整 Agent 循环**跑该待办文本
+   *  （作为详细提示词）。成功自动勾选完成并记结果摘要；失败/超时累计尝试次数，达上限停止自动执行。 */
+  private async runInSession(entry: UserTodo, sid: string, promptHead: string): Promise<void> {
     const engine = this.engine
     if (!engine) return
-    const now = this.now()
-    entry.idleState = "running"
-    entry.idleRunAt = now
-    entry.updatedAt = now
-    await this.saveUserEntries(entry.user)
-
-    let sid: string | undefined
     let status: "success" | "error" | "timeout" = "success"
     let error: string | undefined
+    let timedOut = false
+    // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景永不触发
+    const timer = setTimeout(() => {
+      timedOut = true
+      engine.cancel(sid)
+    }, this.timeoutMs)
     try {
-      const session = await this.deps.store.createSession(entry.user, `闲时待办 · ${headline(entry.text)}`)
-      sid = session.id
-      entry.idleSessionId = sid
-      await this.saveUserEntries(entry.user)
-      let timedOut = false
-      // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景永不触发
-      const timer = setTimeout(() => {
-        timedOut = true
-        engine.cancel(sid!)
-      }, this.timeoutMs)
-      try {
-        await engine.run(sid, entry.user, `[闲时待办任务]\n${entry.text}`)
-      } catch (err) {
-        // 超时主动取消的拒绝不算异常（按 timeout 记录）
-        if (!timedOut) {
-          status = "error"
-          error = String((err as Error).message || err).slice(0, 500)
-        }
-      } finally {
-        clearTimeout(timer)
-      }
-      if (timedOut) {
-        status = "timeout"
-        error = `执行超时（${Math.round(this.timeoutMs / 1000)}s），已终止`
-      }
+      await engine.run(sid, entry.user, `${promptHead}\n${entry.text}`)
     } catch (err) {
-      status = "error"
-      error = String((err as Error).message || err).slice(0, 500)
+      // 超时主动取消的拒绝不算异常（按 timeout 记录）
+      if (!timedOut) {
+        status = "error"
+        error = String((err as Error).message || err).slice(0, 500)
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+    if (timedOut) {
+      status = "timeout"
+      error = `执行超时（${Math.round(this.timeoutMs / 1000)}s），已终止`
     }
 
     const endedAt = this.now()
@@ -358,14 +401,25 @@ export class UserTodoManager {
       entry.done = true
       entry.idleState = "done"
       entry.idleError = undefined
-      entry.idleResult = sid ? await this.lastAssistantText(sid, entry.user) : undefined
+      entry.idleResult = await this.lastAssistantText(sid, entry.user)
     } else {
       entry.idleError = error ?? status
       entry.idleState = entry.idleAttempts >= this.maxAttempts ? "failed" : "pending"
       if (entry.idleState === "failed") {
-        entry.idleError = `${entry.idleError}；连续失败 ${entry.idleAttempts} 次，已停止闲时自动执行（可关闭再开启闲时任务以重试）`
+        entry.idleError = `${entry.idleError}；已累计失败 ${entry.idleAttempts} 次，已停止闲时自动执行（可关闭再开启闲时任务以重试）`
       }
     }
+    await this.saveUserEntries(entry.user)
+  }
+
+  /** 执行前置失败（建会话异常等）：如实计次并回写原因，防状态卡在 running。 */
+  private async recordFailure(entry: UserTodo, err: unknown): Promise<void> {
+    const endedAt = this.now()
+    entry.idleAttempts = (entry.idleAttempts ?? 0) + 1
+    entry.idleError = String((err as Error)?.message || err).slice(0, 500)
+    entry.idleState = entry.idleAttempts >= this.maxAttempts ? "failed" : "pending"
+    entry.updatedAt = endedAt
+    entry.idleRunAt = endedAt
     await this.saveUserEntries(entry.user)
   }
 
