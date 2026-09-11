@@ -15,7 +15,7 @@
 import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
 import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, append } from "./ui"
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
-import { createDiffEditor } from "./editor"
+import { createDiffEditor, type DiffNav } from "./editor"
 
 export type GitView = "changes" | "log" | "branches" | "tags" | "stash" | "remotes"
 
@@ -722,13 +722,23 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   return { el, refresh, show, view: () => view }
 }
 
-/** 并列差异视图（主区域内容）：解析两侧文本 → Monaco diff；失败回退结构化 hunks。 */
+/**
+ * 并列差异视图（主区域内容）：解析两侧文本 → Monaco diff；失败回退结构化 hunks。
+ *
+ * 返回差异块导航句柄（`nav`）：工具条上的「上一处/下一处差异」按钮与全局快捷键（F7/Shift+F7）
+ * 都走它；结构化 hunks 降级渲染与降级编辑器一样没有导航（返回 null）。
+ */
+export interface DiffViewHandle {
+  dispose: () => void
+  nav: DiffNav | null
+}
+
 export async function mountDiffView(
   host: HTMLElement,
   api: FsApi,
   spec: DiffSpec,
   ctx: { repoRootPath: string; language: string },
-): Promise<() => void> {
+): Promise<DiffViewHandle> {
   const { root, path, source } = spec
   /** 取某端点下的文件内容（WORKTREE / INDEX / rev 统一入口）。 */
   const side = async (ref: string): Promise<string> => {
@@ -761,10 +771,18 @@ export async function mountDiffView(
       if (cmp?.mergeBaseOf) originalRef = cmp.mergeBaseOf
     }
     const [original, modified] = await Promise.all([side(originalRef), side(ep.modifiedRef)])
+    /** 差异块计数的位置（「n / m」）；未就绪时显示为 —。 */
+    const navCount = h("span", { class: "fw-diff-nav-count", title: "当前差异块 / 总差异块" , text: "—"})
+    const prevBtn = h("button", { class: "fw-icon-btn", title: "上一处差异（Shift+F7）" })
+    prevBtn.appendChild(icon("chevronUp", 14))
+    const nextBtn = h("button", { class: "fw-icon-btn", title: "下一处差异（F7）" })
+    nextBtn.appendChild(icon("chevronDown", 14))
+    const navGroup = h("span", { class: "fw-diff-nav" }, [prevBtn, navCount, nextBtn])
     const wrap = h("div", { class: "fw-diff-wrap" }, [
       h("div", { class: "fw-viewer-bar" }, [
         h("span", { class: "fw-viewer-info", text: `${ep.note}` }),
         h("span", { class: "fw-viewer-spacer" }),
+        navGroup,
         h("span", { class: "fw-hint", text: `A：${source.type === "range" ? (source.mergeBase ? "共同祖先" : source.from) : source.type === "commit" ? `${source.hash.slice(0, 8)}^` : "HEAD"} ｜ B：${source.type === "range" ? source.to : source.type === "commit" ? source.hash.slice(0, 8) : "工作区/暂存区"}` }),
       ]),
       (() => {
@@ -775,10 +793,25 @@ export async function mountDiffView(
     host.appendChild(wrap)
     const diffHost = wrap.querySelector(".fw-diff-host") as HTMLElement
     const handle = await createDiffEditor(diffHost, { original, modified, language: ctx.language })
-    return () => {
+    // 导航接线：按钮/计数由 handle.nav 驱动；差异块为空时置灰（按钮看得见但不可用，不谜之失踪）
+    if (handle.nav) {
+      const nav = handle.nav
+      prevBtn.onclick = () => nav.prev()
+      nextBtn.onclick = () => nav.next()
+      nav.onChange((s) => {
+        navCount.textContent = s.total ? `${s.index || 1} / ${s.total}` : "无差异"
+        for (const b of [prevBtn, nextBtn]) {
+          if (s.total) b.removeAttribute("disabled")
+          else b.setAttribute("disabled", "")
+        }
+      })
+    } else {
+      navGroup.remove() // 降级/无差异块：不给点不到的按钮
+    }
+    return { dispose: () => {
       handle.dispose()
       wrap.remove()
-    }
+    }, nav: handle.nav ?? null }
   } catch (err) {
     // 回退：结构化 hunks（服务端已解析）
     const wrap = h("div", { class: "fw-hunks" })
@@ -802,6 +835,6 @@ export async function mountDiffView(
       wrap.appendChild(h("div", { class: "fw-error", text: `无法显示差异：${(err as Error).message}` }))
     }
     host.appendChild(wrap)
-    return () => wrap.remove()
+    return { dispose: () => wrap.remove(), nav: null }
   }
 }

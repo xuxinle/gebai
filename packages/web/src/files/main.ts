@@ -20,6 +20,7 @@ import { createChangesPanel, type ChangesPanel } from "./changes"
 import { createUrlSync, parseUrlState } from "./url-state"
 import { initTheme } from "../theme-core"
 import { createGitPanel, mountDiffView, type DiffSpec, type GitPanel } from "./git"
+import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
 import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
@@ -78,6 +79,8 @@ interface Tab {
   /** 差异态 */
   diffSpec?: DiffSpec
   diffDispose?: () => void
+  /** 差异块导航（F7/Shift+F7 与工具条按钮共用；降级渲染为 null） */
+  diffNav?: DiffNav | null
   /** 标签图标覆盖（合并视图用 merge 图标，其余按 kind/dirty 推断） */
   icon?: string
 }
@@ -508,7 +511,9 @@ async function openDiff(spec: DiffSpec): Promise<void> {
   viewHosts.set(id, host)
   activate(id)
   const info = state.roots.find((r) => r.id === spec.root)
-  tab.diffDispose = await mountDiffView(host, api, spec, { repoRootPath: info?.repoRoot ?? "", language: languageOf(spec.path) })
+  const view = await mountDiffView(host, api, spec, { repoRootPath: info?.repoRoot ?? "", language: languageOf(spec.path) })
+  tab.diffDispose = view.dispose
+  tab.diffNav = view.nav
   renderTabbar()
 }
 
@@ -1418,6 +1423,8 @@ function showShortcuts(): void {
     ["Ctrl+Shift+D", "比较（任意两个提交 / 提交与工作区）"],
     ["F2", "重命名选中项"],
     ["Delete", "删除选中项（移入回收站）"],
+    ["F7 / Shift+F7", "差异视图：下一处 / 上一处差异（Alt+↑↓ 同效）"],
+    ["F9 / F8", "合并视图：下一个 / 上一个冲突"],
     ["F5", "刷新资源管理器与 Git 状态"],
     ["Ctrl+Enter（提交框内）", "提交"],
   ]
@@ -1535,6 +1542,18 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault()
     setLeftVisible(!leftVisible())
     return
+  }
+  // 差异块导航（只在差异标签上生效）：F7/Shift+F7 同 IDEA；Alt+↑↓ 是编辑器习惯的别名。
+  // 冲突合并标签的 F8/F9 由 merge-view 自己接管（那边导航的是冲突块，语义不同）。
+  const navKey = e.key === "F7" || (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp"))
+  if (navKey) {
+    const nav = activeTab()?.diffNav
+    if (nav) {
+      e.preventDefault()
+      if (e.shiftKey || e.key === "ArrowUp") nav.prev()
+      else nav.next()
+      return
+    }
   }
   if (e.key === "F5") {
     e.preventDefault()

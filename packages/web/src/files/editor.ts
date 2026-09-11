@@ -54,6 +54,19 @@ export interface DiffHandle {
   kind: "monaco" | "fallback"
   layout(): void
   dispose(): void
+  /**
+   * 差异块导航（Monaco 可用；降级模式为 null）。
+   * `state().index` 从 1 起，0 = 位置未知（尚未定位）；`onChange` 让工具条上的计数实时跟随。
+   */
+  nav?: DiffNav
+}
+
+/** 差异块导航：在「上/下一处差异」间跳，位置跟随滚动实时变化。 */
+export interface DiffNav {
+  next(): void
+  prev(): void
+  state(): { index: number; total: number }
+  onChange(cb: (s: { index: number; total: number }) => void): void
 }
 
 let monacoPromise: Promise<Monaco | null> | null = null
@@ -444,7 +457,9 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     readOnly: true,
     automaticLayout: true,
     renderSideBySide: !opts.inline,
-    renderOverviewRuler: false,
+    // 右侧概览尺 = 「差异都在哪」的地图（配合上一处/下一处按钮，是这个视图的核心导航手段）。
+    // 普通编辑器关闭它保持干净；差异视图正需要它。
+    renderOverviewRuler: true,
     ignoreTrimWhitespace: false,
     fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
     fontSize: 13,
@@ -457,10 +472,117 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
     scrollbar: { verticalScrollbarSize: 11, horizontalScrollbarSize: 11, useShadows: false },
   })
   ed.setModel({ original, modified })
+
+  /* ---- 差异块导航 ----
+   * Monaco 不直接提供 goToNextDiff，但 getLineChanges() 给出全部差异块
+   *（原/改两侧的行号区间），据此自己跳。两个关键取舍：
+   *  1. 「当前块」以**视口顶部**判定而不是内部游标：用户滚到哪里，计数就显示哪一块
+   *     （与 VSCode 的 diff 导航一致）；
+   *  2. 纯删除块在 modified 侧行号为 0，此时改在 original 侧定位——
+   *     两侧滚动是同步的（diff editor 自带同步滚动），露一边两边都会跟。
+   */
+  let idx = -1
+  let navCb: ((s: { index: number; total: number }) => void) | null = null
+  const changes = (): Array<{ originalStartLineNumber: number; originalEndLineNumber: number; modifiedStartLineNumber: number; modifiedEndLineNumber: number }> =>
+    (ed.getLineChanges() ?? []) as never
+
+  /** 视口顶部所在/之后的第一个差异块（都与视口无关时为最后一块）。 */
+  function currentIndex(): number {
+    const cs = changes()
+    if (!cs.length) return -1
+    const range = ed.getModifiedEditor().getVisibleRanges()[0]
+    const top = range ? range.startLineNumber : 1
+    for (let i = 0; i < cs.length; i++) {
+      if (cs[i].modifiedEndLineNumber >= top) return i
+    }
+    return cs.length - 1
+  }
+
+  function emit(): void {
+    const total = changes().length
+    navCb?.({ index: total ? currentIndex() + 1 : 0, total })
+  }
+
+  function reveal(i: number): void {
+    const cs = changes()
+    const c = cs[i]
+    if (!c) return
+    idx = i
+    const me = ed.getModifiedEditor()
+    const oe = ed.getOriginalEditor()
+    const hasMod = c.modifiedStartLineNumber >= 1
+    const target = hasMod ? me : oe
+    const start = hasMod ? c.modifiedStartLineNumber : c.originalStartLineNumber
+    const end = hasMod ? Math.max(c.modifiedEndLineNumber, c.modifiedStartLineNumber) : Math.max(c.originalEndLineNumber, c.originalStartLineNumber)
+    // 选中整块：目标一眼可见（仅 revealLine 时，块很长也不好认）。
+    // 末列取该行**最大列**——单行变更若用 col 1 → col 1 是零宽选区（等于一个光标），
+    // 编辑器不会画任何选区高亮，"跳过去了"就看不出来。
+    const model = target.getModel()
+    target.setSelection({ startLineNumber: start, startColumn: 1, endLineNumber: end, endColumn: model ? model.getLineMaxColumn(end) : 1 })
+    target.revealLineInCenterIfOutsideViewport(start)
+    // Monaco 只在**获焦**时画强选区高亮；顺便让后续按键（方向键、Ctrl+F）落到差异视图上。
+    // 不抢表单焦点：在提交框/搜索框里打字时按 F7，不应把光标拽走。
+    const active = document.activeElement as HTMLElement | null
+    const inField = !!active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
+    if (!inField) target.focus()
+    emit()
+  }
+
+  /** 从当前块出发到下一（dir=1）/ 上一（dir=-1）处；到头**回卷**（连点不会没反馈地卡住，同 IDEA）。 */
+  function step(dir: 1 | -1): void {
+    const cs = changes()
+    if (!cs.length) return
+    const base = idx < 0 ? (dir === 1 ? -1 : 0) : idx
+    const next = base + dir
+    reveal(next < 0 ? cs.length - 1 : next >= cs.length ? 0 : next)
+  }
+
+  // 滚动 / 差异重算后刷新计数
+  const sub = ed.getModifiedEditor().onDidScrollChange(() => {
+    if (idx >= 0) idx = currentIndex()
+    emit()
+  })
+  const diffSub = ed.onDidUpdateDiff(() => {
+    idx = -1
+    emit()
+  })
+  emit()
+
+  const nav: DiffNav = {
+    next: () => step(1),
+    prev: () => step(-1),
+    state: () => ({ index: changes().length ? Math.max(1, (idx < 0 ? currentIndex() : idx) + 1) : 0, total: changes().length }),
+    onChange: (cb) => {
+      navCb = cb
+      cb(nav.state())
+    },
+  }
+
+  /* 键盘：捕获阶段挂在 host 上。
+   * 必须用 capture——Monaco 的 diff editor **内置**了 F7 / Shift+F7（diffReview）
+   * 并会 stopPropagation，冒泡阶段（宿主 main.ts 的全局快捷键）根本收不到：
+   * 编辑器一获焦，F7 就变成 Monaco 自己行为（且与我们的计数不同步）。
+   * 捕获先于 Monaco 自己的监听器，拦下并自己处理；Alt+↑↓ 一并支持。 */
+  const onKeyDown = (e: KeyboardEvent): void => {
+    const isNext = e.key === "F7" && !e.shiftKey
+    const isPrev = e.key === "F7" && e.shiftKey
+    const isAlt = e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp")
+    if (!isNext && !isPrev && !isAlt) return
+    e.preventDefault()
+    e.stopPropagation()
+    if (isPrev || e.key === "ArrowUp") nav.prev()
+    else nav.next()
+  }
+  host.addEventListener("keydown", onKeyDown, true)
+
   return {
     kind: "monaco",
+    nav,
     layout: () => ed.layout(),
     dispose: () => {
+      host.removeEventListener("keydown", onKeyDown, true)
+      sub.dispose()
+      diffSub.dispose()
       ed.dispose()
       original.dispose()
       modified.dispose()
