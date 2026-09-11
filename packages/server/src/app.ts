@@ -24,6 +24,9 @@ import { registerCronRoutes } from "./routes/cron"
 import { registerFeedbackRoutes, registerWebhookRoutes, registerMiniToolRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
 import { registerStaticRoutes } from "./routes/static"
+import { registerRootRoutes } from "./routes/roots"
+import { registerFsRoutes } from "./routes/fs"
+import { registerGitRoutes } from "./routes/git"
 
 export interface AppDeps {
   config: ServerConfig
@@ -42,6 +45,10 @@ export interface AppDeps {
   externalAuth: ExternalAuthProvider | null
   /** WS 状态服务（MVC 模型层：事件日志/连接状态/快照）；由 startServer 注入。 */
   state?: import("./ws-state").WsStateService
+  /** 文件工作台：写操作审计（组合根注入；缺省不审计）。 */
+  fsAudit?: import("./core/fs/audit").FsAudit
+  /** 文件工作台：Git 服务（组合根注入；缺省时 git 端点返回 503「Git 能力未启用」）。 */
+  git?: import("./core/git/service").GitService
 }
 
 export type AppEnv = { Variables: { deps: AppDeps; user: AuthUser } }
@@ -165,6 +172,11 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerFeedbackRoutes(rc)
   registerWebhookRoutes(rc)
   registerMiniToolRoutes(rc)
+  // 文件工作台（DESIGN「文件工作台」）：根清单 / 文件操作 / Git。注册在 static 之前——
+  // `/files` 页面本身由 static 担住，`/api/v1/{roots,fs,git}` 与页面路径无冲突
+  registerRootRoutes(rc)
+  registerFsRoutes(rc)
+  registerGitRoutes(rc)
   registerDocsRoutes(rc)
   registerStaticRoutes(rc)
 

@@ -11,6 +11,7 @@ import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton,
 import { bindSettings } from "./settings"
 import { bindMiniTools } from "./mini-tools"
 import { bindWheel } from "./wheel"
+import { bindFilesEntry } from "./files-entry"
 import { loadLocalEnv } from "./env-local"
 import { bindThemePop, initTheme } from "./theme"
 import { initThemeFx } from "./theme-fx"
@@ -168,6 +169,7 @@ async function init() {
   bindMinimalMode()
   bindMiniTools()
   bindWheel()
+  bindFilesEntry()
   restoreToken()
   await loadToolCardMeta() // 工具卡片展示元数据（titleParams/args 模式），先于历史消息渲染就绪
   // 外部身份扩展点（同源集成）：本地无令牌且服务端启用时，用 URL 参数/宿主 localStorage 的登录态兑换令牌

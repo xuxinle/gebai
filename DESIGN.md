@@ -113,7 +113,7 @@ Monorepo 采用 Bun workspaces + Turborepo：
 | `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，目录内全是子代理，基建/定义物理分域即排除，无需排除清单）+ `src/core/`（依赖组件基建：`analyzer/` tree-sitter 符号分析、`browser/` 浏览器桥接、`cv/` CV 全家、`widgets-store/` 小工具存储、`code-tools.ts` 域工具、`shared/` 公共件：vision 工厂/fetch-guard/tls/image-resize/page-capture/feedback/sub-agent-md/config）。发现注册全自动（dev 目录扫描 / 构建期 bundle 生成，包入口零子代理清单——新增子代理 = 在 src/agents/ 放定义文件即注册，新增基建 = src/core/ 下放目录即隔离）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk，node 工具值导入走 `@gebai/sdk/node` |
 | `custom/`（二开域） | `custom/` | **二次开发专属目录（与 packages/ 平级，上游更新不触碰）**：`custom/agents/`（二开子代理定义，同内置域布局）+ `custom/core/`（二开依赖组件）+ `tsconfig.json`（paths 指上游包）。**双域扫描自动合并**：dev 发现（subagents.ts）与构建打包（build-subagents.ts）均内置域先扫、custom 后扫，同名 custom 胜出（二开覆盖内置）；域缺失零条目零告警；热加载同机制（新增/修改/删除即生效）。**迁移 = 复制文件夹**：上游版本更新时整个 `custom/` 拷到新仓库根即完成。typecheck：`bun run typecheck:custom` |
 | `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
-| `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端 |
+| `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端。**多入口**：`index.html`（聊天页）+ `files.html`（**文件工作台** `/files`，源码 `src/files/{main,explorer,editor,viewers,git,compare,ui,api}.ts` + `src/files-entry.ts` 标题栏入口按钮）；Monaco 经 `public/vendor/monaco` 静态伺服（同 diagram 引擎惯例，不进 vite 打包） |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体） |
 
 #### 仓库根目录
@@ -228,6 +228,7 @@ class GebaiClient {
 | 环境变量页 | 浏览器本地（localStorage）增删改，对本浏览器所有会话生效，随消息临时注入服务端（不落盘防泄露；服务端不配模型变量时仅前端配置即可使用）——并入设置面板 |
 | 设置页 | UI 风格（外观性能模式）、`/approval-skip`（标题栏轮盘 ⚡）——设置面板；工具启停、子Agent 装载、Webhook 管理无 UI（设置面板不设对应 tab，经 SDK/API 使用） |
 | 用户管理页（管理员） | 用户创建/禁用/删除（服务模式）——并入设置面板 |
+| **文件工作台**（`/files`，独立页面/独立路径） | 目录树 + Monaco 查看/编辑 + IDEA 风格 Git 工具窗（变更/日志/分支/标签/暂存/远程）+ **任意两端差异对比**；入口为主界面标题栏**轮盘按钮左侧**的「文件」按钮（新标签页打开，透传 session/root/project/path/主题）。详见「文件工作台（`/files`）」章节 |
 
 - **启动动画画面**：页面加载（外部 CSS/JS 就绪前）即显示全屏启动动画——深黑底 + 极光呼吸光球 + 旋转光环 + 歌白品牌辉光文字（样式内联于 `index.html`，不依赖外部样式，避免主题样式未就位时空白窗口闪现）；`init()` 完成（含服务模式未登录转登录层）或失败后淡出移除，另以 12s 内联脚本兜底防残留
 | 反馈页（管理员） | 反馈查询/导出——并入设置面板 |
@@ -373,6 +374,14 @@ Agent 可将**调试好的 HTML 小工具**保存到服务端（标题栏轮盘�
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
 | `GEBAI_MINIMAL_MODE` | 会话级极简模式（`true` 仅启用 `sh` 与 `edit` 工具（外加 `full_mode` 切换入口），其余工具从 schema 移除且调用被阻止，系统提示词同步极简化；前端「极简模式」开关同步写入，见「工具选择」） | 空 |
 | `GEBAI_CRON_ENABLED` | 是否启用定时任务能力（注册 `cron` 子Agent（`cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove` 工具）、启动调度器并开放 REST `/api/v1/cron` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
+| `GEBAI_FS_ENABLED` | 是否启用**文件工作台**（`/files` 页面与 `/api/v1/fs`、`/api/v1/git`、`/api/v1/roots` 端点）；`false` 时页面 404、端点全部 404、标题栏入口按钮隐藏 | `true` |
+| `GEBAI_FS_WRITE` | 工作台写开关：`false` 时纯只读检视（新建/改名/移动/复制/删除/上传/保存全部拒绝；Git 写操作另由下方开关控制） | `true` |
+| `GEBAI_FS_ROOTS` | 服务模式下的额外白名单根（JSON 数组：字符串或 `{name,path,description,writable}`）；本地模式自动追加主目录/服务工作目录/盘符，无需配置 | 不设置 |
+| `GEBAI_FS_MAX_READ` / `GEBAI_FS_MAX_WRITE` / `GEBAI_FS_MAX_UPLOAD` / `GEBAI_FS_MAX_ZIP` | 工作台单次读取/写入/上传单文件/打包下载上限（字节） | 10MB / 10MB / 100MB / 500MB |
+| `GEBAI_FS_HIDDEN` | 目录树默认是否显示隐藏文件（前端可随时切换） | `false` |
+| `GEBAI_FS_AUDIT` | 工作台写操作审计（`{GEBAI_HOME}/audit-fs.jsonl`：谁、哪个根、什么动作、成败）——工作台写操作是用户本人直操、不走工具审批，审计是它的留痕等价物 | `true` |
+| `GEBAI_GIT_WRITE` | Git 写操作开关（暂存/提交/分支/合并/变基/重置/标签/暂存区/丢弃）；`false` 时仅保留只读查看与对比 | `true` |
+| `GEBAI_GIT_REMOTE` | Git 远程操作开关（fetch/pull/push/remote，需网络与凭据） | `true` |
 | `GEBAI_CRON_NOTIFY_WEBHOOK` | 定时任务**全局默认通知 webhook**（http(s) 回调 URL）：任务未配置自己的 `notify` 时自动经该通道推送（任务自配则不叠加）；启动时校验（SSRF 同规则），非法配置告警忽略 | 不设置 |
 | `GEBAI_CRON_NOTIFY_FEISHU` | 定时任务**全局默认飞书通知**：群 chat_id（`oc_` 前缀，以应用身份推送——需 `GEBAI_FEISHU_APP_ID/SECRET`）或群机器人 webhook URL，语义同 `feishu` 通道双形态；任务未配置 `notify` 时自动生效 | 不设置 |
 | `GEBAI_EXTERNAL_AUTH_SECRET` | 外部身份扩展点：HMAC 共享密钥（与 `GEBAI_EXTERNAL_AUTH_URL` 互斥，同设启动报错）；网站用密钥对「用户名.过期时间戳」签名（HMAC-SHA256，hex），凭证格式 `{exp}.{sig}`，exp 为毫秒时间戳，±10 分钟有效窗口防重放 | 空（不启用） |
@@ -449,8 +458,8 @@ src/
   index.ts          # 薄入口：startServer = compose + serve；进程主命令分发见 boot/cli.ts
   app.ts            # Hono 应用工厂（CORS/鉴权中间件 + 各域路由装配 + AppDeps）
   boot/             # 启动装配：compose.ts（DI 组合根）/ serve.ts（Bun.serve + WS 运行时）/ cli.ts（exec 子命令与 web dist 自动构建）
-  routes/           # REST 路由按域拆分（auth/users/sessions/session-files/tools/cron/misc(feedback+webhook+mini-tools)/docs/static），
-                    #   每文件 register{Domain}Routes(rc)，契约见 routes/context.ts；装配顺序：sessions 先于 session-files（共享 :id 白名单中间件）
+  routes/           # REST 路由按域拆分（auth/users/sessions/session-files/tools/cron/docs/static + **文件工作台：fs/fs-shared/roots/git** + misc(feedback+webhook+mini-tools)），
+                    #   每文件 register{Domain}Routes(rc)，契约见 routes/context.ts；装配顺序：sessions 先于 session-files（共享 :id 白名单中间件），fs 先于 git（共享 fs-shared 的根解析与审计）
   ws-handlers/      # WS 消息处理器按域拆分（auth/session/prompt/interaction/admin），每文件导出 Record<消息类型, WsHandler>；
                     #   ws.ts 为分发器（未登录守卫/会话 id 白名单/异常兜底）
   core/             # 领域核心（根目录只放构建生成物，源码按域入子目录）：
@@ -464,6 +473,8 @@ src/
     exec/           #   脚本执行：js-tool/sh-tasks
     browser/        #   浏览器桥接基建：bridge（node driver.mjs JSON-RPC 桥/playwright 模块与 channel 解析/惰性共享单例/会话锁）+ driver.mjs + fetch-proxy（透明浏览器代理垫片）——playwright/reverse_site 子Agent 与浏览器代理共用的平台级底座，不依赖子Agent 定义存在
     cv/             #   本地 CV 推理基建：ort-loader（onnxruntime-web wasm 运行时动态解析与内嵌物化）+ cv（惰性单例/模型目录解析/session 缓存/推理串行/检测分层后端选择）+ image/ocr/detect（前后处理纯函数，含检测×OCR 配对）+ onnx-meta（ONNX 元数据解析：ultralytics imgsz/names）+ template（模板匹配 NCC 纯函数）+ sidecar/cv-driver.mjs（GPU sidecar：node 子进程跑 onnxruntime-node，检测重模型的原生推理）——desktop/playwright 子Agent 本地识别的底座（工具消费层=core/tools/cv-analysis 共享工厂），不依赖子Agent 定义存在
+    fs/             #   文件工作台：roots（`sess:`/`proj:`/`bind:`/`user:`/`abs:` 根解析 + 白名单 + 路径防护）/service（列举与自然序、二进制与编码探测、文本读取、Range、打包 ZIP、内容搜索）/write（受保护的写：etag 乐观锁、编码回写、回收站）/archive（零依赖 ZIP 读）/mime（类型→查看器/语言）/audit（写操作审计）
+    git/            #   Git 图形化：service.ts（git CLI 封装：状态/日志/分支/标签/暂存/远程 + **任意两端 compare/diff/contentAt**（WORKTREE/INDEX/任意 rev/mergeBase）+ 写操作串行化与自动备份）
     security/       #   安全：sandbox/safety/ip/fetch-guard（SSRF 防护，webhook 校验共用）/ratelimit
     agents/         #   子Agent 装载器：subagents（扫描/热加载）/sub-agent-md/env-catalog
     widgets/        #   HTML 小工具库存储
@@ -1320,6 +1331,24 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - REST：`GET /api/v1/sessions/:id/files`、`/files/content`（?path=）、`/files/download`（?path= 单文件 / POST body {paths} 多选 zip 打包）、`/files/preview`（?path= &download= &render=office 文件预览：会话相对/项目绝对路径统一入口，点击弹窗查看用；render=office 返回 docx/xlsx/xlsm/pptx 阅读视图 HTML）
 - SDK：`listSessionFiles(sessionId)` / `readSessionFile(sessionId, path)` / `downloadSessionFile(sessionId, path)` / `downloadFilesZip(sessionId, paths)`
 
+### 文件工作台（`/files`）
+
+面向「彻底摆脱 VSCode」的一套自足文件工作台：**独立页面 + 独立路径**（`/files`，Vite 多入口 `files.html`），入口在聊天页标题栏**轮盘按钮左侧**的「文件」按钮（新标签页打开）。面向用户本人直操（不走工具审批，但写操作落审计）；让 Agent 去改仍走工具审批链路。设计稿与实现说明：`docs/file-workbench-design.md`、`docs/file-workbench-implementation.md`。
+
+- **形态与入口**：`packages/web/files.html` + `packages/web/src/files/{main,explorer,editor,viewers,git,compare,ui,api}.ts`；入口按钮 `packages/web/src/files-entry.ts` 注入标题栏，URL 透传 `session`（`sess:` 根指向本会话工作区）/`root`/`project`/`path`/`gb_style`（主题）。为什么新标签而非同页路由：Monaco + Git 面板资源重，「一边让 Agent 改、一边自己核差异」是常态，独立页同时带来故障隔离。
+- **根抽象（权限边界）**：所有 fs/git 接口只接受 `(root, 相对路径)`——`sess:<id>`（会话 `tmp/`）/`proj:<name>`（预置项目）/`bind:<agent>`（会话绑定项目）/`user:`（当前用户目录）/`abs:<path>`（绝对路径，**服务模式沙箱下拒绝**）；根清单 `rootCatalog()` 去重供前端根选择器；`GEBAI_FS_ROOTS` 白名单根（JSON 数组）供服务模式授予指定目录。路径防护三层：词法（拒 `..`/绝对路径）→ realpath（拒软链逃逸）→ 前缀（兄弟目录边界）。
+- **目录树**：懒加载单层列举（上层 5000 条 + truncated 标记）、目录优先自然序（`file2` 在 `file10` 前）、四种排序、隐藏文件可切、Git 状态色装饰、新建/改名/移动/复制/删除（回收站）/上传（拖拽）/下载。
+- **查看矩阵**：文本/代码 → Monaco（VSCode 同款内核，vendor 静态伺服）；图片/视频/音频（HTTP Range 拖动进度）/PDF/Office（服务端转换阅读视图）/压缩包（零依赖中央目录解析 + 解压）/二进制（hex）/图表源文件。条目 `kind`/`language`/`editable` 由服务端裁决（前端据此选查看器与是否显示编辑按钮）。
+- **默认只读**：编辑器状态机 `查看态 readOnly ⇄ 编辑态`（工具栏「编辑」/Ctrl+E 解锁，脏标记 ●，Ctrl+S 保存）；默认只读既是习惯也是安全默认（与 Agent 共用文件，误触不得改文件）。
+- **编码/换行保真**：读取探测 UTF-8(BOM)/UTF-16/GBK 回退/换行（lf crlf cr mixed），保存按原编码与目标换行回写；**写乐观锁**：保存携带 `etag`，磁盘已变则 409 返回当前内容 + 「覆盖/另存/放弃」。
+- **下载/上传**：单文件流式下载（`Content-Disposition`）；多选/目录打包 ZIP（`zipPaths`，UTF-8 文件名，超限 413 引导分批）；上传支持拖拽到指定目录、同名冲突处理。
+- **Git 图形化（任意两端对比为一等公民）**：差异统一抽象为**端点**——`WORKTREE` / `INDEX` / 空串（与 WORKTREE 搭配 = 未暂存）/ 任意 rev（提交/分支/标签/`HEAD~n`/SHA）；`compare(from,to)` 支持提交↔提交、提交↔工作区、提交↔暂存区、暂存区↔工作区、工作区↔历史提交、分支↔分支（`mergeBase` 三点语义）；`contentAt(ref,path)` 供 Monaco DiffEditor 取 **两侧真实文本**（非解析 patch，CRLF/编码差异下表现正确）；前端「比较」标签页两端各有端点选择器（工作副本/引用/本地分支/远程分支/最近提交/手输 rev）+ 交换 + `...` 开关 + path 过滤。工具窗六视图：变更（分组/逐行暂存/丢弃自动 stash 备份/提交框）/日志（图、过滤、分页、右键操作）/分支/标签/暂存/远程（fetch/pull/push force-with-lease）；破坏性写操作默认先备份并返回可恢复引用；`git blame` 追溯、冲突四方内容（base/ours/theirs/current）查看。
+- **子系统边界（会话工作区 vs 仓库根）**：root 可为仓库子目录（典型：会话 `tmp/` 位于项目仓库内）——服务端返回 `rootPath` + `prefix`，Git 面板与比较视图**默认限定该子目录**（chip 一键切整仓库；限定范围内无差异且整仓库有差异时给引导）。路径语义：**git 侧为仓库相对**（`contentAt`/git 命令）、**fs 侧为根相对**（树/编辑器），前端 `toRootPath()` 负责在打开文件时换算；`routes/git.ts` 仓库定位用独立 `dir` 参数（不复用 `path`——`path` 在这些端点是 pathspec，混用会把文件当目录）。
+- **安全与审计**：`GEBAI_FS_ENABLED`（总开关，false → 页面与 fs/git 端点全 404）/`GEBAI_FS_WRITE`（工作台写开关）/`GEBAI_GIT_WRITE`/`GEBAI_GIT_REMOTE`；写操作统一审计（`GEBAI_FS_AUDIT` → `{GEBAI_HOME}/audit-fs.jsonl`）；删除入回收站（可恢复/彻底清除）；上限 `GEBAI_FS_MAX_READ|WRITE|UPLOAD|ZIP`。
+- **验证**：`core/fs/service.test.ts`（17 例：列举/自然序/越界与软链防护/编码回环/Range/ZIP 含系统 unzip 交叉验证/搜索/根解析）与 `core/git/service.test.ts`（14 例：任意两端对比含 mergeBase、`contentAt` 三端点、`fileDiff`、refs/status/log）；另经真实浏览器（Playwright）冒烟：树展开 / Monaco 打开与语法 token / 只读→编辑切换 / Git 六视图 / 比较视图 / 并列差异 / 端点选择器 / 提交↔提交 对比，控制台零错误。
+- **客户端**：工作台页面自用薄客端 `files/api.ts`（同源 fetch，带 Bearer 登录态），**不经 `@gebai/sdk`**——该页是独立入口、不走会话 WS 通道；REST 契约与服务端同源，SDK 侧如需可后续薄封一层。
+- **已知边界**：Office 预览非像素级一致（兜底下载打开）；超大文件只读片段并提示下载；无内置 hex 编辑；未做专门三窗格合并编辑器（冲突为三方查看 + 编辑后再标记已解决）、Git 子模块详情、LFS。
+
 ### 日志系统
 - 日志级别：`debug`、`info`、`warn`、`error`
 - 通过环境变量 `GEBAI_LOG_LEVEL` 配置（默认 `info`）
@@ -2106,6 +2135,24 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/sessions/:id/files/content` | GET | 读取会话临时文件内容（`?path=`，文本截断预览或原始内容） |
 | `/api/v1/sessions/:id/files/download` | GET | 下载会话临时文件（`?path=`，二进制/文本原样下载，`Content-Disposition`） |
 | `/api/v1/sessions/:id/files/download` | POST | 多选打包下载（body 指定 paths 列表，返回 zip） |
+| `GET /files` | GET | **文件工作台页面**（独立 Vite 入口 `files.html`；`GEBAI_FS_ENABLED=false` 时 404） |
+| `/api/v1/roots` | GET | 文件工作台根清单（`sess:` 会话工作区 / `proj:` 预置项目 / `bind:` 绑定项目 / `user:` 用户目录 / `abs:` 白名单根）+ 能力开关（fsEnabled/fsWrite/gitEnabled/gitWrite/gitRemote/writable/sandboxed/上限） |
+| `/api/v1/roots/resolve` | GET | 单个根解析（?id=）——根可用性与真实路径校验 |
+| `/api/v1/fs/list` \| `/fs/tree` | GET | 目录列举（懒加载，?root&path&sort&order&showHidden）/ 树快照（?root&depth） |
+| `/api/v1/fs/stat` \| `/fs/read` | GET | 元信息 + `etag`（乐观锁）/ 文本读取（编码·换行·binary·truncated） |
+| `/api/v1/fs/raw` | GET | 原始字节（支持 HTTP Range：图片/视频/PDF/大文件） |
+| `/api/v1/fs/office` \| `/fs/archive` | GET | Office 阅读视图转换（docx/xlsx/pptx）/ 压缩包条目列表 |
+| `/api/v1/fs/search` | GET | 名称/内容搜索（ripgrep 优先，回退内置遍历；mode/glob/regex/maxResults） |
+| `/api/v1/fs/download` | GET/POST | 单文件流式下载（?root&path）/ 多选或目录打包 ZIP（body paths，UTF-8 文件名） |
+| `/api/v1/fs/write` | PUT | 保存文件（`etag` 乐观锁，冲突返回 409 + 当前磁盘内容；编码/换行保真） |
+| `/api/v1/fs/{mkdir,rename,move,copy,delete,upload,archive/extract}` | POST | 新建目录 / 重命名 / 移动 / 复制 / 删除（入回收站） / 上传（multipart） / 解压到工作区 |
+| `/api/v1/fs/trash` \| `/fs/trash/restore` \| `/fs/trash/purge` | GET/POST | 回收站列表 / 恢复 / 彻底清除 |
+| `/api/v1/git/status` | GET | 仓库状态（分支、变更分组与计数、`rootPath` 仓库根与 `prefix` 子目录前缀） |
+| `/api/v1/git/diff` \| `/git/compare` | GET | **任意两端差异/对比**（?root&from&to&path&mergeBase；端点：`WORKTREE`/`INDEX`/空串（配合 WORKTREE 表未暂存）/任意 rev） |
+| `/api/v1/git/file-diff` \| `/git/content` \| `/git/show` | GET | 单文件差异 / 端点内容（Monaco 并列视图两侧文本）/ 指定提交文件内容 |
+| `/api/v1/git/log` \| `/git/commit-detail` \| `/git/file-history` \| `/git/blame` | GET | 提交日志（可路径/作者/关键字过滤、分页）/ 提交详情 / 单文件历史 / 逐行追溯 |
+| `/api/v1/git/refs` \| `/branches` \| `/tags` \| `/remotes` \| `/stash` \| `/conflicts` | GET | 引用（分支/标签/最近提交/HEAD）/ 分支 / 标签 / 远程 / 暂存区列表 / 冲突四方内容 |
+| `/api/v1/git/{stage,unstage,discard,commit,branch,tag,checkout,merge,rebase,cherry-pick,revert,reset,stash,remote,fetch,pull,push,init}` | POST | Git 写操作（统一「开关守卫 → 执行 → 审计」；破坏性操作默认先备份并返回可恢复引用；`GEBAI_GIT_WRITE`/`GEBAI_GIT_REMOTE` 可关） |
 | `/api/v1/tools` | GET/PATCH | 工具集查询/启停配置 |
 | `/api/v1/sub-agents` | GET | 子Agent 能力列表（名称、描述、工具、打包状态） |
 | `/api/v1/webhooks` | GET/POST/DELETE | Webhook 注册/管理 |

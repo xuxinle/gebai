@@ -18,6 +18,8 @@ import { SubAgentManager } from "../core/agents/subagents"
 import { RESERVED_PROJECT_TMP } from "../core/tools/projects"
 import { AgentEngine } from "../core/engine/engine"
 import { WebhookManager } from "../webhooks"
+import { GitService } from "../core/git/service"
+import { FsAudit } from "../core/fs/audit"
 import { createExternalAuthProvider } from "../external-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
@@ -303,7 +305,24 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   const externalAuth = createExternalAuthProvider(config)
   // WS 状态服务（MVC 模型层）：每用户事件日志（断线可重放）+ 连接状态持久化 + 快照；
   // state 自持 deps 前身（不递归引用自身）
-  const baseDeps: AppDeps = { config, store, env, sandbox, registry, engine, auth, events, subAgents, webhooks, externalAuth, cron }
+  const baseDeps: AppDeps = {
+    config,
+    store,
+    env,
+    sandbox,
+    registry,
+    engine,
+    auth,
+    events,
+    subAgents,
+    webhooks,
+    externalAuth,
+    cron,
+    // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）
+    // 与写操作审计（用户直操文件系统的留痕；与工具审批的事前拦截互补）
+    git: new GitService({ writeEnabled: config.gitWrite !== false, remoteEnabled: config.gitRemote !== false }),
+    fsAudit: new FsAudit(config.gebaiHome, config.fsAudit !== false),
+  }
   const state = new WsStateService(config.gebaiHome, baseDeps)
   const deps: AppDeps = { ...baseDeps, state }
   const app = createApp(deps)

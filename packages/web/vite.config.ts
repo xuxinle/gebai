@@ -1,4 +1,8 @@
 import { defineConfig } from "vite"
+import { fileURLToPath } from "node:url"
+
+/** 页面入口绝对路径（多入口：主界面 index.html + 文件工作台 files.html）。 */
+const page = (name: string): string => fileURLToPath(new URL(`./${name}`, import.meta.url))
 
 export default defineConfig({
   server: {
@@ -21,6 +25,8 @@ export default defineConfig({
     chunkSizeWarningLimit: 7000,
     // 关闭 rollup tree-shaking：构建耗时大头是 rollup 对 6.4MB @plantuml/core 的副作用分析
     // （该依赖是已打包单文件，tree-shake 无收益）；全局关闭后应用产物体积影响极小（index.js +0.5KB）
-    rollupOptions: { treeshake: false },
+    // 多入口：index.html（主界面）+ files.html（文件工作台，独立页面 /files）；
+    // 共享同一份构建流水线（hash 资源、vendor 静态资源、dev-reload 热刷新）。
+    rollupOptions: { treeshake: false, input: { main: page("index.html"), files: page("files.html") } },
   },
 })

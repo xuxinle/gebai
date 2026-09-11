@@ -97,6 +97,29 @@ export interface ServerConfig {
   /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载，不可在会话/任务级修改）：有风险的工具（命令执行/写删文件等）
    *  被阻止执行，直接返回限制信息给模型。 */
   safeMode: boolean
+  /** 文件工作台总开关（GEBAI_FS_ENABLED，默认 true）：关闭时 `/files` 页面 404 且 fs/git 端点全部 404。 */
+  fsEnabled: boolean
+  /** 文件工作台写开关（GEBAI_FS_WRITE，默认 true）：false 时工作台为纯只读检视（含新建/改名/删除/上传/保存）。 */
+  fsWrite: boolean
+  /** 额外白名单根（GEBAI_FS_ROOTS，JSON 数组：字符串或 {name,path,description,writable}）：服务模式授予
+   *  指定目录访问；本地模式在其上追加盘符/主目录等。 */
+  fsRoots?: string
+  /** 单次读取上限（GEBAI_FS_MAX_READ 字节，默认 10MB）。 */
+  fsMaxRead: number
+  /** 单次写入上限（GEBAI_FS_MAX_WRITE 字节，默认 10MB）。 */
+  fsMaxWrite: number
+  /** 上传单文件上限（GEBAI_FS_MAX_UPLOAD 字节，默认 100MB）。 */
+  fsMaxUpload: number
+  /** 打包下载上限（GEBAI_FS_MAX_ZIP 字节，默认 500MB，超出引导分批）。 */
+  fsMaxZip: number
+  /** 默认显示隐藏文件（GEBAI_FS_HIDDEN，默认 false；前端可随时切换）。 */
+  fsHidden: boolean
+  /** 写操作审计（GEBAI_FS_AUDIT，默认 true → `{GEBAI_HOME}/audit-fs.jsonl`）。 */
+  fsAudit: boolean
+  /** Git 写操作开关（GEBAI_GIT_WRITE，默认 true）。 */
+  gitWrite: boolean
+  /** Git 远程操作开关（GEBAI_GIT_REMOTE，默认 true）：fetch/pull/push 需要网络与凭据。 */
+  gitRemote: boolean
 }
 
 function env(name: string, fallback = ""): string {
@@ -107,6 +130,14 @@ function bool(name: string, fallback = false): boolean {
   const v = process.env[name]
   if (v === undefined) return fallback
   return v === "true" || v === "1"
+}
+
+/** 正数环境变量（非法/非正回退默认值）。 */
+function num(name: string, fallback: number): number {
+  const v = process.env[name]
+  if (v === undefined || v.trim() === "") return fallback
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
 export function isBinaryMode(): boolean {
@@ -184,6 +215,18 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     feishuAppSecret: env("GEBAI_FEISHU_APP_SECRET") || undefined,
     // 安全模式：仅启动时从环境变量加载，不进入会话 env（不可被 ask 填值分支/前端 envOverride 修改）
     safeMode: bool("GEBAI_SAFE_MODE", false),
+    // 文件工作台（DESIGN「文件工作台」）：默认开启且可写；服务模式可置 GEBAI_FS_WRITE=false 做纯只读检视环境
+    fsEnabled: bool("GEBAI_FS_ENABLED", true),
+    fsWrite: bool("GEBAI_FS_WRITE", true),
+    fsRoots: env("GEBAI_FS_ROOTS") || undefined,
+    fsMaxRead: num("GEBAI_FS_MAX_READ", 10 * 1024 * 1024),
+    fsMaxWrite: num("GEBAI_FS_MAX_WRITE", 10 * 1024 * 1024),
+    fsMaxUpload: num("GEBAI_FS_MAX_UPLOAD", 100 * 1024 * 1024),
+    fsMaxZip: num("GEBAI_FS_MAX_ZIP", 500 * 1024 * 1024),
+    fsHidden: bool("GEBAI_FS_HIDDEN", false),
+    fsAudit: bool("GEBAI_FS_AUDIT", true),
+    gitWrite: bool("GEBAI_GIT_WRITE", true),
+    gitRemote: bool("GEBAI_GIT_REMOTE", true),
   }
   return { ...config, ...overrides }
 }

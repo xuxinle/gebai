@@ -59,30 +59,56 @@ export function registerStaticRoutes(rc: RouteCtx): void {
     const UI_STYLES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny"]
     const style = UI_STYLES.includes(d.config.uiStyle) ? d.config.uiStyle : "acrylic"
     let cachedHtml: string | null = null
+
+    /** 注入 UI 风格 + dev-reload 热刷新脚本（`/` 与 `/files` 共用）。 */
+    const inject = (raw: string): string => {
+      let injected = `<script>window.__GEBAI_UI_STYLE__=${JSON.stringify(style)}</script>`
+      // 开发模式热刷新（--reload）：监听 /__gebai_hot，收到 reload 或连接断开（服务端重启）即刷新页面
+      if (d.config.devReload) {
+        const hotPath = `${d.config.basePath === "/" ? "" : d.config.basePath}/__gebai_hot`
+        const client = `(()=>{let ws;const go=()=>{ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+${JSON.stringify(hotPath)});ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go()})()`
+        injected += `<script>${client}</script>`
+      }
+      return raw.replace("</head>", `${injected}</head>`)
+    }
+
+    /** 读取 webDist（或内嵌资源）中的某个 HTML 页面；缺失返回 null。 */
+    const readPage = (name: string): string | null => {
+      try {
+        return embedded ? new TextDecoder().decode(embedded.get(`/${name}`) ?? new Uint8Array()) : readFileSync(join(d.config.webDist, name), "utf8")
+      } catch {
+        return null
+      }
+    }
+
     app.get("/", (c) => {
       // dev-reload 模式下每次请求重读 dist/index.html：vite build --watch 每次重建产出新 hash
       // 资源，若缓存启动时的旧 HTML，页面刷新后仍加载旧资源（改动永不生效）；生产/二进制模式缓存即可
       if (d.config.devReload || !cachedHtml) {
-        let raw: string
-        try {
-          raw = embedded
-            ? new TextDecoder().decode(embedded.get("/index.html") ?? new Uint8Array())
-            : readFileSync(join(d.config.webDist, "index.html"), "utf8")
-        } catch {
+        const raw = readPage("index.html")
+        if (raw === null) {
           // 构建窗口期 index.html 暂缺：返回占位页（构建完成后自动刷新），不抛异常崩溃服务
           return c.html(buildPlaceholderHtml(d.config.basePath), 503, { "Cache-Control": "no-cache" })
         }
-        let injected = `<script>window.__GEBAI_UI_STYLE__=${JSON.stringify(style)}</script>`
-        // 开发模式热刷新（--reload）：监听 /__gebai_hot，收到 reload 或连接断开（服务端重启）即刷新页面
-        if (d.config.devReload) {
-          const hotPath = `${d.config.basePath === "/" ? "" : d.config.basePath}/__gebai_hot`
-          const client = `(()=>{let ws;const go=()=>{ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+${JSON.stringify(hotPath)});ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go()})()`
-          injected += `<script>${client}</script>`
-        }
-        cachedHtml = raw.replace("</head>", `${injected}</head>`)
+        cachedHtml = inject(raw)
       }
       return c.html(cachedHtml, 200, { "Cache-Control": "no-cache" })
     })
+
+    // 文件工作台（DESIGN「文件工作台」）：独立页面 `/files`（vite 多入口 files.html），
+    // 与主界面同等待遇（同一端口、同一注入、同一 dev-reload 通道）；缺失时不注册（不影响主界面）。
+    if (d.config.fsEnabled !== false && readPage("files.html") !== null) {
+      const served = new Set<string>()
+      for (const p of ["/files", `${d.config.basePath === "/" ? "" : d.config.basePath}/files`]) {
+        if (served.has(p)) continue
+        served.add(p)
+        app.get(p, (c) => {
+          const raw = readPage("files.html")
+          if (raw === null) return c.notFound()
+          return c.html(inject(raw), 200, { "Cache-Control": "no-cache" })
+        })
+      }
+    }
     if (embedded) {
       // 二进制模式：内嵌资源直接提供，无需磁盘
       app.use("*", async (c) => {

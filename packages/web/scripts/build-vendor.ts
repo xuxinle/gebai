@@ -54,8 +54,43 @@ function copyDirIfChanged(srcDir: string, outDir: string, label: string): void {
   console.log(`[build-vendor] ${label} -> ${outDir}${copied ? `（${copied} 个文件）` : "（已就绪，跳过）"}`)
 }
 
+/** 递归拷贝目录（逐文件大小比对跳过；可用于含子目录的树）。filter 可选：返回 false 的文件跳过。 */
+function copyTreeIfChanged(srcDir: string, outDir: string, label: string, filter?: (rel: string) => boolean): number {
+  if (!existsSync(srcDir)) {
+    console.error(`[build-vendor] 找不到 ${srcDir}，请先执行 bun install`)
+    process.exit(1)
+  }
+  mkdirSync(outDir, { recursive: true })
+  let copied = 0
+  const walk = (s: string, rel: string): void => {
+    for (const name of readdirSync(s)) {
+      const sub = join(s, name)
+      const relPath = rel ? `${rel}/${name}` : name
+      if (statSync(sub).isDirectory()) {
+        mkdirSync(join(outDir, relPath), { recursive: true })
+        walk(sub, relPath)
+        continue
+      }
+      if (filter && !filter(relPath)) continue
+      const out = join(outDir, relPath)
+      if (existsSync(out) && statSync(out).size === statSync(sub).size) continue
+      copyFileSync(sub, out)
+      copied++
+    }
+  }
+  walk(srcDir, "")
+  console.log(`[build-vendor] ${label} -> ${outDir}${copied ? `（${copied} 个文件）` : "（已就绪，跳过）"}`)
+  return copied
+}
+
 copyFileIfChanged(join(root, "node_modules", "@plantuml", "core", "plantuml.js"), join(vendor, "plantuml.js"), "plantuml.js")
 copyFileIfChanged(join(root, "node_modules", "@plantuml", "core", "viz-global.js"), join(vendor, "viz-global.js"), "viz-global.js")
 copyFileIfChanged(join(root, "node_modules", "mermaid", "dist", "mermaid.min.js"), join(vendor, "mermaid.js"), "mermaid.js")
 copyFileIfChanged(join(root, "node_modules", "echarts", "dist", "echarts.min.js"), join(vendor, "echarts.js"), "echarts.js")
 copyDirIfChanged(join(root, "node_modules", "@terrastruct", "d2", "dist", "browser"), join(vendor, "d2js"), "d2js")
+// Monaco（VSCode 同款编辑器内核）：monaco-editor/min/vs 的 AMD 构建原样拷到 vendor/monaco/vs。
+// 为何不走 vite 打包：AMD 构建文件名稳定（loader.js / editor/editor.main.js），构建后 URL 不变——
+// 与 vendor 其它引擎同一理由（vite 分包会生成带 hash 的文件名，dev-reload 重建后旧页面引用旧 chunk 即 404）；
+// 且 editor.main 自无需转译，vite 当普通 JS 处理反而会解析/改写其巨大的内部模块表。
+// 体积约 24MB（含 ts/json/css/html worker 与全部语言高亮），已 gitignore，仅构建期生成。
+copyTreeIfChanged(join(root, "node_modules", "monaco-editor", "min", "vs"), join(vendor, "monaco", "vs"), "monaco/vs", (rel) => !rel.endsWith(".map"))
