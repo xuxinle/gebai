@@ -89,6 +89,14 @@ export interface GitFileDiff {
   deletions: number
   /** 新增/删除/重命名等语义 */
   status?: GitChange["kind"]
+  /**
+   * 逐行内容被省略（文件或整次 diff 超出体量上限）。
+   *
+   * 为什么需要这个标记：上限一旦生效，**不给逐行内容**与**这个文件没改动**
+   * 在数据长得很像（都是 `hunks: []`）——UI 必须能区分，前者要提示
+   * 「过大，已省略」，后者该老老实实显示空。统计（+N/-N）与状态不受影响，仍然准确。
+   */
+  truncated?: boolean
 }
 
 export interface GitCommit {
@@ -150,6 +158,17 @@ const NET_TIMEOUT_MS = 300_000
 const F = "\x1f"
 const R = "\x1e"
 
+/**
+ * git 的**空树对象**（所有仓库共有、内容恒定的那个 tree）。
+ *
+ * 用来表达「根提交的 A 侧」：根提交没有父提交，`<hash>^` 在 git 里是
+ * `fatal: ambiguous argument '<hash>^': unknown revision`（422），但它相对什么变化
+ * 并非「错误」而是**空树**——任何文件对它都是新增。前端的提交详情与文件清单
+ * 都按 `${hash}^` ↔ `${hash}` 这一对端点取数，不归一的话根提交的跨文件导航
+ * 会因为 422 被静默吞掉（`prepareReview` 的 catch），用户以为「没有更多文件」。
+ */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 export class GitService {
   /** 每仓库写操作串行队列（防 index.lock 竞争）。 */
   private locks = new Map<string, Promise<unknown>>()
@@ -165,8 +184,25 @@ export class GitService {
       remoteEnabled: boolean
       /** 凭据注入（P4：临时 GIT_ASKPASS）；返回 env 增量 */
       credentialEnv?: (repo: string) => Record<string, string>
+      /** 单次 diff 文本总量上限（GEBAI_FS_MAX_DIFF 字节，默认 8MB）：超限则在**文件边界**截断 */
+      maxDiffBytes?: number
+      /** 单个文本文件（内容与逐行差异）上限（GEBAI_GIT_MAX_FILE 字符，默认 1M）：超限只给统计 */
+      maxFileChars?: number
     },
   ) {}
+
+  /* 体量上限（构造参数可覆盖，见 opts）。
+   * 目的不是省资源，而是**把「撑不住」变成一件看得见的事**：
+   * 没上限时，超大文件/超大提交会把整份内容 JSON 化、给 Monaco 建巨型 model，
+   * 表现是卡死或半途而废且没有任何提示；有上限后最坏情况是「统计 + 一行说明」——
+   * 信息少一点，但用户知道发生了什么（truncated / tooLarge 标记 + UI 提示）。 */
+  private get maxDiffBytes(): number {
+    return this.opts.maxDiffBytes ?? 8 * 1024 * 1024
+  }
+
+  private get maxFileChars(): number {
+    return this.opts.maxFileChars ?? 1_000_000
+  }
 
   /** 底层执行：数组参数、不经 shell、统一禁交互与分页。 */
   async run(args: string[], cwd: string, opts: { timeout?: number; input?: string; allowFail?: boolean; env?: Record<string, string> } = {}): Promise<GitResult> {
@@ -371,7 +407,142 @@ export class GitService {
    *  | REF | INDEX | `git diff --cached REF` | 提交 vs 暂存区 |
    *  | REF1 | REF2 | `git diff REF1 REF2` | 任意两提交/引用之间 |
    *  | REF1 | REF2 + mergeBase | `git diff REF1...REF2` | 两分支从共同祖先起的变化（分支对比的默认正确语义） |
+   *
+   * 端点里可能出现的 `<rev>^`（提交详情的 A 侧）先经 normalizeRev 归一（根提交 → 空树）。
    */
+
+  /**
+   * 端点归一：`<rev>^` 里的 `<rev>` 若为**根提交**（无父提交），换成 git 空树对象。
+   *
+   * 为什么需要：根提交的 `^` 在 git 里直接报错（`ambiguous argument '<rev>^'`，422），
+   * 而前端的提交详情把 A 侧与文件清单都挂在 `${hash}^` 上——不归一的话
+   * ① 跨文件导航静默消失（compare 422 被 `prepareReview` 的 catch 吃掉）；
+   * ② 比较视图选「某提交 ↔ 另一提交」时根提交一侧也会报错。
+   * 归一是**语义等价**的：根提交没有父提交，它相对空树的变化就是它的全部内容。
+   *
+   * 其他情况原样返回（含 `<rev>` 本身不合法——那该由 git 报错，不能被这里静默改成空树）。
+   */
+  private async normalizeRev(root: string, rev: string | undefined): Promise<string | undefined> {
+    const s = String(rev ?? "").trim()
+    const m = /^(.+)\^$/.exec(s)
+    if (!m) return rev
+    const hasParent = await this.run(["rev-parse", "--verify", "--quiet", s], root, { allowFail: true })
+    if (hasParent.code === 0 && hasParent.stdout.trim()) return rev
+    const base = m[1] ?? ""
+    const isCommit = await this.run(["rev-parse", "--verify", "--quiet", `${base}^{commit}`], root, { allowFail: true })
+    if (isCommit.code !== 0 || !isCommit.stdout.trim()) return rev
+    // `rev-list --parents -n 1 <rev>` 对根提交只输出自身一个 token，非根提交带父 hash
+    const parents = await this.run(["rev-list", "--parents", "-n", "1", base], root, { allowFail: true })
+    return parents.code === 0 && parents.stdout.trim().split(/\s+/).length <= 1 ? EMPTY_TREE : rev
+  }
+
+  /** 成对归一（空值原样透传）。 */
+  private async normalizePair(root: string, opts: { from?: string; to?: string }): Promise<{ from?: string; to?: string }> {
+    const from = await this.normalizeRev(root, opts.from)
+    const to = await this.normalizeRev(root, opts.to)
+    return { ...opts, from, to }
+  }
+
+  /**
+   * diff 文本裁剪：超上限时**在文件边界处**截断（不在 hunk 中间剪一刀，
+   * 以免解析出半截 hunk 被错当真实内容），并告知调用方已截断。
+   */
+  private trimDiffText(text: string): { text: string; truncated: boolean } {
+    if (text.length <= this.maxDiffBytes) return { text, truncated: false }
+    const cut = text.lastIndexOf("\ndiff --git ", this.maxDiffBytes)
+    return { text: cut > 0 ? text.slice(0, cut) : text.slice(0, this.maxDiffBytes), truncated: true }
+  }
+
+  /**
+   * 逐行内容限制：单文件 hunks 总字符超上限时丢掉 hunks、只留统计，并标 truncated。
+   * 文件列表与 +N/-N 不受影响（那才是「有哪些文件改了」的骨架信息）。
+   */
+  private capHunks(files: GitFileDiff[]): GitFileDiff[] {
+    return files.map((f) => {
+      if (f.truncated) return f
+      let chars = 0
+      for (const h of f.hunks) {
+        chars += h.header.length
+        for (const l of h.lines) chars += l.text.length + 8
+        if (chars > this.maxFileChars) break
+      }
+      return chars > this.maxFileChars ? { ...f, hunks: [], truncated: true } : f
+    })
+  }
+
+  /**
+   * 用 `--name-status` 补齐「没有逐行内容」的文件条目（纯重命名/纯模式变更，
+   * 以及被 trimDiffText 截掉的那部分）——保证**文件清单完整**，只是部分条目没 hunks。
+   *
+   * 被截掉的文件光有路径不够：UI 每行都显示 +N/-N，不给计数就会显示成「+0/-0」——
+   * 那看起来像「这个文件没改」，比没这行还糟。所以再问一次 `--numstat` 把真实计数补上
+   *（只在确实需要补齐时オ发这一趟，正常提交不付这个代价）。
+   */
+  private async mergeNameStatus(root: string, args: string[], files: GitFileDiff[], opts: { truncated?: boolean } = {}): Promise<void> {
+    const base = args.filter((a) => a !== "--stat" && a !== "--numstat")
+    const nameRes = await this.run([...base, "--name-status", "-z"], root, { allowFail: true })
+    if (nameRes.code !== 0 || !nameRes.stdout.includes("\0")) return
+    const tokens = nameRes.stdout.split("\0").filter(Boolean)
+    const pending: Array<{ path: string; oldPath?: string; status: GitFileDiff["status"] }> = []
+    for (let i = 0; i < tokens.length; ) {
+      const statusCode = tokens[i++]
+      const p1 = tokens[i++]
+      if (!statusCode || p1 === undefined) break
+      const code = statusCode[0]
+      let path = p1
+      let oldPath: string | undefined
+      if (code === "R" || code === "C") {
+        oldPath = p1
+        path = tokens[i++] ?? p1
+      }
+      const exist = files.find((f) => f.path === path)
+      if (exist) {
+        if (!exist.status) exist.status = code === "A" ? "added" : code === "D" ? "deleted" : code === "R" ? "renamed" : code === "M" ? "modified" : undefined
+        if (oldPath && !exist.oldPath) exist.oldPath = oldPath
+      } else {
+        pending.push({ path, oldPath, status: code === "A" ? "added" : code === "D" ? "deleted" : code === "R" ? "renamed" : code === "C" ? "copied" : code === "T" ? "typechange" : "modified" })
+      }
+    }
+    if (!pending.length) return
+    const stats = await this.numstat(root, base)
+    for (const p of pending) {
+      const st = stats.get(p.path)
+      files.push({
+        path: p.path,
+        oldPath: p.oldPath,
+        binary: false,
+        hunks: [],
+        additions: st?.add ?? 0,
+        deletions: st?.del ?? 0,
+        status: p.status,
+        /*
+         * 只有「整次 diff 被截断」时才标 truncated：那时没有 hunks 的原因是**逐行内容被上限截掉了**；
+         * 而正常目录下的 name-status 补齐（纯重命名/纯改权限）是真的没有内容差异，
+         * 标成 truncated 会显示成「改动过大」——把「换了个名字」误报成「大到看不了」。
+         */
+        ...(opts.truncated ? { truncated: true } : {}),
+      })
+    }
+  }
+
+  /** `--numstat -z` → 路径 → 增/删行数（二进制文件的两列是 `-`，按 0 计）。 */
+  private async numstat(root: string, base: string[]): Promise<Map<string, { add: number; del: number }>> {
+    const out = new Map<string, { add: number; del: number }>()
+    const res = await this.run([...base, "--numstat", "-z"], root, { allowFail: true })
+    if (res.code !== 0) return out
+    const toks = res.stdout.split("\0").filter((t) => t !== "")
+    for (let i = 0; i < toks.length; ) {
+      const m = /^(\d+|-)\t(\d+|-)\t(.*)$/.exec(toks[i++] ?? "")
+      if (!m) break // 遇到 diff 正文即停
+      let path = m[3] ?? ""
+      if (path === "") {
+        i++ // 重命名：紧跟 old、new 两个 token
+        path = toks[i++] ?? ""
+      }
+      out.set(path, { add: m[1] === "-" ? 0 : Number(m[1]), del: m[2] === "-" ? 0 : Number(m[2]) })
+    }
+    return out
+  }
   private diffArgs(opts: { from?: string; to?: string; staged?: boolean; mergeBase?: boolean; path?: string; context?: number; ignoreWhitespace?: boolean; stat?: boolean; nameOnly?: boolean }): string[] {
     const norm = (v: string | undefined): string => {
       const s = String(v ?? "").trim()
@@ -420,14 +591,17 @@ export class GitService {
   async diff(
     dir: string,
     opts: { path?: string; staged?: boolean; from?: string; to?: string; mergeBase?: boolean; context?: number; ignoreWhitespace?: boolean } = {},
-  ): Promise<{ files: GitFileDiff[]; raw: string }> {
+  ): Promise<{ files: GitFileDiff[]; raw: string; truncated: boolean }> {
     const root = await this.requireRepo(dir)
-    const args = this.diffArgs(opts)
+    // 端点归一（根提交的 `<hash>^` → 空树）：见 normalizeRev
+    const ep = await this.normalizePair(root, opts)
+    const args = this.diffArgs({ ...opts, ...ep })
     const res = await this.run(args, root, { allowFail: true })
     if (res.code !== 0) throw new GitError(422, (res.stderr || "git diff 失败").trim())
-    const files = parseUnifiedDiff(res.stdout)
+    const t = this.trimDiffText(res.stdout)
+    const files = this.capHunks(parseUnifiedDiff(t.text))
     // 重命名/仅内容不变（纯 mode 变更）时 parseUnifiedDiff 可能产出空 hunks 的文件条目：保留
-    return { files, raw: res.stdout }
+    return { files, raw: t.text, truncated: t.truncated }
   }
 
   /**
@@ -437,58 +611,44 @@ export class GitService {
   async compare(
     dir: string,
     opts: { from?: string; to?: string; mergeBase?: boolean; path?: string; context?: number; ignoreWhitespace?: boolean } = {},
-  ): Promise<{ files: GitFileDiff[]; additions: number; deletions: number; from: string; to: string; stats: string; mergeBaseOf?: string }> {
+  ): Promise<{ files: GitFileDiff[]; additions: number; deletions: number; from: string; to: string; stats: string; mergeBaseOf?: string; truncated?: boolean }> {
     const root = await this.requireRepo(dir)
+    // 端点归一（根提交的 `<hash>^` → 空树）：见 normalizeRev
+    const ep = await this.normalizePair(root, opts)
     // 三点（分支对比）：显式解析共同祖先，UI 上显示「基准 = merge-base(A,B)」，避免用户误以为在比 A..B
     let mergeBaseOf: string | undefined
-    if (opts.mergeBase && opts.from && opts.to) {
-      const mb = await this.run(["merge-base", opts.from, opts.to], root, { allowFail: true })
-      if (mb.code === 0 && mb.stdout.trim()) {
-        mergeBaseOf = mb.stdout.trim()
+    if (opts.mergeBase && ep.from && ep.to) {
+      if (ep.from === EMPTY_TREE || ep.to === EMPTY_TREE) {
+        // 根提交参与的比较：它没有祖先，「共同祖先」就是空树（全量新增），不必也无法交给 merge-base
+        mergeBaseOf = EMPTY_TREE
       } else {
-        throw new GitError(422, `无法计算共同祖先（${opts.from} / ${opts.to}）：${(mb.stderr || "无共同祖先").trim()}`)
+        const mb = await this.run(["merge-base", ep.from, ep.to], root, { allowFail: true })
+        if (mb.code === 0 && mb.stdout.trim()) {
+          mergeBaseOf = mb.stdout.trim()
+        } else {
+          throw new GitError(422, `无法计算共同祖先（${ep.from} / ${ep.to}）：${(mb.stderr || "无共同祖先").trim()}`)
+        }
       }
     }
-    const args = this.diffArgs(opts)
+    /*
+     * 根提交参与比较时**不能再走三点（`A...B`）**：git 的对称差需要两个 commit，
+     * 而 A 侧已经是空树（tree），会报 `object <hash> is a tree, not a commit`。
+     * 语义上空树**就是**共同祖先，直接用普通两点即可（拿到的正是「全量新增」）。
+     */
+    const usesEmptyTree = ep.from === EMPTY_TREE || ep.to === EMPTY_TREE
+    const args = this.diffArgs({ ...opts, ...ep, mergeBase: opts.mergeBase && !usesEmptyTree })
     const res = await this.run(args, root, { allowFail: true })
     if (res.code !== 0) throw new GitError(422, (res.stderr || "git diff 失败").trim())
-    const files = parseUnifiedDiff(res.stdout)
-    // 补全「无内容差异但状态变化」（纯重命名/纯模式变更）：--name-status 兜底
-    const nameRes = await this.run([...args.filter((a) => a !== "--stat"), "--name-status", "-z"], root, { allowFail: true })
-    if (nameRes.code === 0 && nameRes.stdout.includes("\0")) {
-      const tokens = nameRes.stdout.split("\0").filter(Boolean)
-      for (let i = 0; i < tokens.length; ) {
-        const statusCode = tokens[i++]
-        const p1 = tokens[i++]
-        if (!statusCode || p1 === undefined) break
-        const code = statusCode[0]
-        let path = p1
-        let oldPath: string | undefined
-        if (code === "R" || code === "C") {
-          oldPath = p1
-          path = tokens[i++] ?? p1
-        }
-        const exist = files.find((f) => f.path === path)
-        if (!exist) {
-          files.push({
-            path,
-            oldPath,
-            binary: false,
-            hunks: [],
-            additions: 0,
-            deletions: 0,
-            status: code === "A" ? "added" : code === "D" ? "deleted" : code === "R" ? "renamed" : code === "C" ? "copied" : code === "T" ? "typechange" : "modified",
-          })
-        } else if (!exist.status) {
-          exist.status = code === "A" ? "added" : code === "D" ? "deleted" : code === "R" ? "renamed" : code === "M" ? "modified" : undefined
-          if (oldPath && !exist.oldPath) exist.oldPath = oldPath
-        }
-      }
-    }
+    const t = this.trimDiffText(res.stdout)
+    const files = this.capHunks(parseUnifiedDiff(t.text))
+    // 补全「无内容差异但状态变化」（纯重命名/纯模式变更），以及被体量上限截掉的那部分文件：
+    // --name-status 的代价很小，却能把**文件清单的完整性**与逐行内容分开——
+    // 用户至少知道「这次提交一共动了哪些文件」。
+    await this.mergeNameStatus(root, args, files)
     const statRes = await this.run([...args, "--stat"], root, { allowFail: true })
     const additions = files.reduce((n, f) => n + f.additions, 0)
     const deletions = files.reduce((n, f) => n + f.deletions, 0)
-    return { files, additions, deletions, from: opts.from ?? "WORKTREE", to: opts.to ?? "WORKTREE", stats: statRes.stdout.trim(), mergeBaseOf }
+    return { files, additions, deletions, from: opts.from ?? "WORKTREE", to: opts.to ?? "WORKTREE", stats: statRes.stdout.trim(), mergeBaseOf, truncated: t.truncated }
   }
 
   /** 单文件差异（任意两端组合：工作区/暂存区/两 rev）。 */
@@ -498,17 +658,20 @@ export class GitService {
     opts: { staged?: boolean; from?: string; to?: string; mergeBase?: boolean; context?: number; ignoreWhitespace?: boolean } = {},
   ): Promise<GitFileDiff> {
     const root = await this.requireRepo(dir)
-    const args = this.diffArgs({ ...opts, path })
+    // 端点归一（根提交的 `<hash>^` → 空树）：见 normalizeRev
+    const ep = await this.normalizePair(root, opts)
+    const args = this.diffArgs({ ...opts, ...ep, path })
     const res = await this.run(args, root, { allowFail: true })
     if (res.code !== 0) throw new GitError(422, (res.stderr || "git diff 失败").trim())
-    const files = parseUnifiedDiff(res.stdout)
+    const t = this.trimDiffText(res.stdout)
+    const files = this.capHunks(parseUnifiedDiff(t.text))
     if (files.length) return files[0]
     // 无内容差异时给出状态（重命名/删除/新增）
     const nameRes = await this.run([...args.filter((a) => a !== "--name-status" && a !== "-z"), "--name-status"], root, { allowFail: true })
     const line = nameRes.stdout.trim().split("\n").pop() ?? ""
     const m = /^([A-Z])\d*\t(.*)$/.exec(line)
     const statusMap: Record<string, GitFileDiff["status"]> = { A: "added", D: "deleted", R: "renamed", C: "copied", M: "modified", T: "typechange" }
-    return { path, binary: false, hunks: [], additions: 0, deletions: 0, status: m ? statusMap[m[1]] : undefined }
+    return { path, binary: false, hunks: [], additions: 0, deletions: 0, status: m ? statusMap[m[1]] : undefined, truncated: t.truncated || undefined }
   }
 
   /**
@@ -536,9 +699,11 @@ export class GitService {
    * - WORKTREE：读磁盘（相对仓库根）；
    * - INDEX：`git show :0:path`（冲突时为 `:2:` 我方）；
    * - rev：`git show rev:path`。
-   * 返回 missing 便于前端把「新增/删除」侧渲染成空文档而非报错。
+   * 返回 missing 便于前端把「新增/删除」侧渲染成空文档而非报错；
+   * 超体量上限时返回 `tooLarge: true` + `size`，**不拉正文**——
+   * 两侧内容是要进 Monaco model 的，几 MB 的字符串建 model + 算差异会把主线程锁死。
    */
-  async contentAt(dir: string, ref: string, path: string): Promise<{ content: string; binary: boolean; missing: boolean; size: number; ref: string }> {
+  async contentAt(dir: string, ref: string, path: string): Promise<{ content: string; binary: boolean; missing: boolean; size: number; ref: string; tooLarge?: boolean }> {
     const root = await this.requireRepo(dir)
     const norm = String(ref ?? "").trim()
     const up = norm.toUpperCase()
@@ -549,6 +714,8 @@ export class GitService {
       if (!existsSync(abs)) return { content: "", binary: false, missing: true, size: 0, ref: "WORKTREE" }
       const st = statSync(abs)
       if (st.isDirectory()) return { content: "", binary: false, missing: true, size: 0, ref: "WORKTREE" }
+      // 先看大小再读盘：上限之外的文件连读都不读（读一个几十 MB 的文件只为了发现它太大，很亏）
+      if (st.size > this.maxFileChars) return { content: "", binary: false, missing: false, size: st.size, ref: "WORKTREE", tooLarge: true }
       const buf = new Uint8Array(await Bun.file(abs).arrayBuffer())
       const binary = buf.subarray(0, 8192).includes(0)
       if (binary) return { content: "", binary: true, missing: false, size: buf.length, ref: "WORKTREE" }
@@ -556,6 +723,8 @@ export class GitService {
       return { content: decodeBuffer(buf).text, binary: false, missing: false, size: buf.length, ref: "WORKTREE" }
     }
     if (up === "INDEX" || up === "STAGED") {
+      const big = await this.oversizedBlob(root, `:0:${rel}`)
+      if (big) return { content: "", binary: false, missing: false, size: big, ref: "INDEX", tooLarge: true }
       const res = await this.run(["show", `:0:${rel}`], root, { allowFail: true })
       if (res.code !== 0) {
         const ours = await this.run(["show", `:2:${rel}`], root, { allowFail: true })
@@ -564,9 +733,23 @@ export class GitService {
       }
       return { content: res.stdout, binary: false, missing: false, size: res.stdout.length, ref: "INDEX" }
     }
+    const big = await this.oversizedBlob(root, `${norm}:${rel}`)
+    if (big) return { content: "", binary: false, missing: false, size: big, ref: norm, tooLarge: true }
     const res = await this.run(["show", `${norm}:${rel}`], root, { allowFail: true })
     if (res.code !== 0) return { content: "", binary: false, missing: true, size: 0, ref: norm }
     return { content: res.stdout, binary: false, missing: false, size: res.stdout.length, ref: norm }
+  }
+
+  /**
+   * 先问 git「这个对象多大」而不是直接 `show`：`cat-file -s` 只读元数据，
+   * 几十 MB 的 blob 不会被拉进进程。返回 > 0 表示超限（即大小），否则 0。
+   * 对象不存在时也返回 0——让后面的 `show` 正常走 missing 分支，保持原有语义。
+   */
+  private async oversizedBlob(root: string, spec: string): Promise<number> {
+    const r = await this.run(["cat-file", "-s", spec], root, { allowFail: true })
+    if (r.code !== 0) return 0
+    const size = Number(r.stdout.trim())
+    return Number.isFinite(size) && size > this.maxFileChars ? size : 0
   }
 
   /** 提交日志（分页 + 路径/作者/关键字过滤；parents 供前端画泳道图）。 */
@@ -621,23 +804,28 @@ export class GitService {
   }
 
   /** 单提交详情（元信息 + 变更文件 + 统计）。 */
-  async commitDetail(dir: string, hash: string): Promise<{ commit: GitCommit; files: GitFileDiff[]; stats: string }> {
+  async commitDetail(dir: string, hash: string): Promise<{ commit: GitCommit; files: GitFileDiff[]; stats: string; truncated?: boolean }> {
     const root = await this.requireRepo(dir)
     const meta = await this.log(root, { limit: 1, ref: hash })
     const commit = meta.commits[0]
     if (!commit) throw new GitError(404, `提交不存在: ${hash}`)
-    const res = await this.run(["show", "--no-color", "--no-ext-diff", "-U0", "--format=", hash], root, { allowFail: true })
-    const files = parseUnifiedDiff(res.stdout)
+    const args = ["show", "--no-color", "--no-ext-diff", "-U0", "--format=", hash]
+    const res = await this.run(args, root, { allowFail: true })
+    const t = this.trimDiffText(res.stdout)
+    const files = this.capHunks(parseUnifiedDiff(t.text))
+    // 体量上限截掉了后面的文件时，用 --name-status 把清单补齐（提交详情的重心是「动了哪些文件」）
+    if (t.truncated) await this.mergeNameStatus(root, args, files, { truncated: true })
     const stat = await this.run(["show", "--no-color", "--stat", "--format=", hash], root, { allowFail: true })
-    return { commit, files, stats: stat.stdout.trim() }
+    return { commit, files, stats: stat.stdout.trim(), truncated: t.truncated }
   }
 
   /** 单提交对某文件的差异。 */
   async commitFileDiff(dir: string, hash: string, path: string, context = 3): Promise<GitFileDiff> {
     const root = await this.requireRepo(dir)
     const res = await this.run(["show", "--no-color", "--no-ext-diff", `-U${context}`, "--format=", hash, "--", path], root, { allowFail: true })
-    const files = parseUnifiedDiff(res.stdout)
-    return files[0] ?? { path, binary: false, hunks: [], additions: 0, deletions: 0 }
+    const t = this.trimDiffText(res.stdout)
+    const files = this.capHunks(parseUnifiedDiff(t.text))
+    return files[0] ?? { path, binary: false, hunks: [], additions: 0, deletions: 0, truncated: t.truncated || undefined }
   }
 
   /** 某文件的完整历史（跨重命名）。 */

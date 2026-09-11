@@ -13,7 +13,7 @@
  * - 多步操作（merge/rebase/cherry-pick）的「继续 / 跳过 / 中止」在变更面板顶部（冲突属于工作区状态）。
  */
 import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
-import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, append } from "./ui"
+import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, formatSize, append } from "./ui"
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor, type DiffNav } from "./editor"
 
@@ -429,6 +429,13 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     try {
       const res = await hooks.api.gitCommit(hooks.root(), c.hash)
       const files = h("div", { class: "fw-commit-files" })
+      // 超大提交（超 diff 体量上限）：清单仍然完整（服务端用 --name-status/-numstat 补齐），
+      // 但部分文件没有逐行内容——**说一声**，否则用户会以为“这个文件没改”。
+      // 注意：提示条不能在这里 append——下方 host.replaceChildren(...) 会把早期子节点全清掉，
+      // 它必须作为其中一个子节点一起交出去（这类“写了但被覆盖”的 bug 肉眼很难发现）。
+      const truncHint = res.truncated
+        ? h("div", { class: "fw-hint-bar" }, [icon("info", 13), h("span", { text: "该提交过大，已省略部分文件的逐行内容（清单与 +N/-N 仍然完整）" })])
+        : null
       for (const f of res.files) {
         const name = f.path.split("/").pop() ?? f.path
         const row = h("div", { class: "fw-commit-file" }, [
@@ -466,6 +473,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
           c.body ? h("pre", { class: "fw-commit-body", text: c.body }) : null,
         ]),
         h("div", { class: "fw-section-title", text: `变更文件（${res.files.length}）` }),
+        ...(truncHint ? [truncHint] : []),
         files,
       )
     } catch (err) {
@@ -864,9 +872,61 @@ export async function mountDiffView(
 ): Promise<DiffViewHandle> {
   const { root, path, source } = spec
   /** 取某端点下的文件内容（WORKTREE / INDEX / rev 统一入口）。 */
-  const side = async (ref: string): Promise<string> => {
+  const side = async (ref: string): Promise<{ text: string; tooLarge: boolean; missing: boolean; size: number }> => {
     const res = await api.gitContent(root, ref, path)
-    return res.binary ? "（二进制文件，无法按文本显示）" : res.content
+    if (res.binary) return { text: "（二进制文件，无法按文本显示）", tooLarge: false, missing: false, size: res.size }
+    // 超体量上限：服务端没拉正文（tooLarge），此时**不能**继续建 Monaco model——
+    // 这正是「点开大文件变成卡死/空白」的源头；改走结构化 hunks + 一行说明
+    if (res.tooLarge) return { text: "", tooLarge: true, missing: false, size: res.size }
+    return { text: res.content, tooLarge: false, missing: !!res.missing, size: res.size }
+  }
+
+  /**
+   * 结构化 hunks 降级渲染（Monaco 不可用 / 两侧超体量 / Monaco 抛错时走它）。
+   *
+   * `headNote` 用来把「为什么不是并列 Monaco」说清楚——降级本身不可怕，
+   * **不说一声的降级**才可怕（用户会以为文件就是这样/没改动）。
+   */
+  const renderHunks = (fallback: GitFileDiff | null | undefined, headNote?: string): DiffViewHandle => {
+    const wrap = h("div", { class: "fw-hunks" })
+    if (headNote) wrap.appendChild(h("div", { class: "fw-hint-bar" }, [icon("info", 13), h("span", { text: headNote })]))
+    if (fallback?.truncated && !fallback.hunks.length) {
+      wrap.appendChild(h("div", { class: "fw-empty", text: `逐行差异已省略：+${fallback.additions} / -${fallback.deletions} 行（超出体量上限）` }))
+    } else if (fallback?.binary) {
+      wrap.appendChild(h("div", { class: "fw-empty", text: "二进制文件差异，无法逐行显示" }))
+    } else if (fallback?.hunks.length) {
+      for (const hk of fallback.hunks) {
+        wrap.appendChild(h("div", { class: "fw-hunk-head", text: hk.header }))
+        for (const line of hk.lines) {
+          wrap.appendChild(
+            h("div", { class: `fw-hunk-line ${line.type}` }, [
+              h("span", { class: "fw-hunk-no", text: line.oldLine ? String(line.oldLine) : "" }),
+              h("span", { class: "fw-hunk-no", text: line.newLine ? String(line.newLine) : "" }),
+              h("span", { class: "fw-hunk-sign", text: line.type === "add" ? "+" : line.type === "del" ? "-" : " " }),
+              h("span", { class: "fw-hunk-text", text: line.text }),
+            ]),
+          )
+        }
+      }
+    } else {
+      wrap.appendChild(h("div", { class: "fw-empty", text: headNote ? "无逐行差异可显示" : "该端点对下此文件无内容差异（可能只是重命名或权限变更）" }))
+    }
+    host.appendChild(wrap)
+    return { dispose: () => wrap.remove(), nav: null }
+  }
+
+  /**
+   * 结构化差异的**兜底取数**：spec.fallback 未必带（各调用点给不给不一致），
+   * 拿不到就现取一份单文件差异——降级路径不该依赖调用点是否记得传参。
+   */
+  const fetchFallback = async (): Promise<GitFileDiff | null> => {
+    if (spec.fallback) return spec.fallback
+    try {
+      const ep = diffEndpointsFor(spec)
+      return await api.gitFileDiff(root, path, { from: ep.compare.from, to: ep.compare.to, mergeBase: ep.compare.mergeBase })
+    } catch {
+      return null
+    }
   }
 
   try {
@@ -877,7 +937,16 @@ export async function mountDiffView(
       const cmp = await api.gitCompare(root, { from: source.from, to: source.to, mergeBase: true, path }).catch(() => null)
       if (cmp?.mergeBaseOf) originalRef = cmp.mergeBaseOf
     }
-    const [original, modified] = await Promise.all([side(originalRef), side(ep.modifiedRef)])
+    const [a, b] = await Promise.all([side(originalRef), side(ep.modifiedRef)])
+    // 两侧都不存在：与其给两片空白（看起来像“坏了”），不如说清楚为什么
+    if (a.missing && b.missing) {
+      return renderHunks(await fetchFallback(), `两个端点下都不存在该文件（${ep.labelA} / ${ep.labelB}）——可能路径不对，或它在这段历史里被删除后又未重建`)
+    }
+    // 任一侧超体量 → 不建 Monaco model（见 side 的注释），直接降级
+    if (a.tooLarge || b.tooLarge) {
+      const who = [a.tooLarge ? `A（${ep.labelA}）${formatSize(a.size)}` : "", b.tooLarge ? `B（${ep.labelB}）${formatSize(b.size)}` : ""].filter(Boolean).join(" ｜ ")
+      return renderHunks(await fetchFallback(), `${who} 超过体量上限，已降级为逐行差异（不建编辑器，避免卡死）`)
+    }
     const wrap = h("div", { class: "fw-diff-wrap" }, [
       h("div", { class: "fw-viewer-bar" }, [
         h("span", { class: "fw-viewer-info", text: `${ep.note}` }),
@@ -892,35 +961,14 @@ export async function mountDiffView(
     ])
     host.appendChild(wrap)
     const diffHost = wrap.querySelector(".fw-diff-host") as HTMLElement
-    const handle = await createDiffEditor(diffHost, { original, modified, language: ctx.language })
+    const handle = await createDiffEditor(diffHost, { original: a.text, modified: b.text, language: ctx.language })
     // 导航按钮由标签栏渲染（handle.nav 交给调用方）
     return { dispose: () => {
       handle.dispose()
       wrap.remove()
     }, nav: handle.nav ?? null }
   } catch (err) {
-    // 回退：结构化 hunks（服务端已解析）
-    const wrap = h("div", { class: "fw-hunks" })
-    if (spec.fallback?.binary) {
-      wrap.appendChild(h("div", { class: "fw-empty", text: "二进制文件差异，无法逐行显示" }))
-    } else if (spec.fallback?.hunks.length) {
-      for (const hk of spec.fallback.hunks) {
-        wrap.appendChild(h("div", { class: "fw-hunk-head", text: hk.header }))
-        for (const line of hk.lines) {
-          wrap.appendChild(
-            h("div", { class: `fw-hunk-line ${line.type}` }, [
-              h("span", { class: "fw-hunk-no", text: line.oldLine ? String(line.oldLine) : "" }),
-              h("span", { class: "fw-hunk-no", text: line.newLine ? String(line.newLine) : "" }),
-              h("span", { class: "fw-hunk-sign", text: line.type === "add" ? "+" : line.type === "del" ? "-" : " " }),
-              h("span", { class: "fw-hunk-text", text: line.text }),
-            ]),
-          )
-        }
-      }
-    } else {
-      wrap.appendChild(h("div", { class: "fw-error", text: `无法显示差异：${(err as Error).message}` }))
-    }
-    host.appendChild(wrap)
-    return { dispose: () => wrap.remove(), nav: null }
+    // 回退：结构化 hunks（服务端已解析；没带就现取）
+    return renderHunks(await fetchFallback(), `并列视图不可用（${(err as Error).message}），已降级为逐行差异`)
   }
 }

@@ -570,7 +570,14 @@ async function fetchReviewFiles(spec: DiffSpec): Promise<string[]> {
   return res.files.map((f) => f.path)
 }
 
-/** 填充标签的 review 上下文（失败静默：只是没有跨文件导航，差异本身照常看）。 */
+/**
+ * 填充标签的 review 上下文（跨文件导航）。
+ *
+ * 失败**不再完全静默**：原先的 `catch {}` 会让「服务端报错」与「这个端点对下只有一个文件」
+ * 在界面上长得一模一样（都是“没有导航按钮”）——实测踩过：根提交时 compare 返回 422
+ * （`<hash>^` 在根提交上不存在），导航按钮凭空消失，而用户无法知道发生了什么。
+ * 现在提示一句（warn，短时），差异视图本身照常打开。
+ */
 async function prepareReview(tab: Tab, spec: DiffSpec): Promise<void> {
   try {
     const files = await fetchReviewFiles(spec)
@@ -579,8 +586,8 @@ async function prepareReview(tab: Tab, spec: DiffSpec): Promise<void> {
     if (!findTab(tab.id)) return
     tab.review = { files, index: files.indexOf(spec.path) }
     if (state.activeId === tab.id) renderTabbar()
-  } catch {
-    /* 清单拿不到就不给跨文件导航 */
+  } catch (err) {
+    toast(`无法获取变更文件清单（${(err as Error).message}）：跨文件导航不可用`, "warn", 5000)
   }
 }
 

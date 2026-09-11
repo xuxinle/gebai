@@ -320,7 +320,13 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     cron,
     // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）
     // 与写操作审计（用户直操文件系统的留痕；与工具审批的事前拦截互补）
-    git: new GitService({ writeEnabled: config.gitWrite !== false, remoteEnabled: config.gitRemote !== false }),
+    git: new GitService({
+      writeEnabled: config.gitWrite !== false,
+      remoteEnabled: config.gitRemote !== false,
+      // 体量上限（GEBAI_FS_MAX_DIFF / GEBAI_GIT_MAX_FILE）：超限降级为「统计 + 提示」而非卡死
+      maxDiffBytes: config.fsMaxDiff,
+      maxFileChars: config.gitMaxFile,
+    }),
     fsAudit: new FsAudit(config.gebaiHome, config.fsAudit !== false),
   }
   const state = new WsStateService(config.gebaiHome, baseDeps)

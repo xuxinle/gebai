@@ -1731,6 +1731,23 @@ button.fw-status-item:hover {
   font-size: 12px;
 }
 
+/* 降级提示条（差异视图）：说明「为什么不是并列 Monaco」——
+   降级本身不可怕，不说一声的降级才可怕（用户会以为文件就是这样/没改动）。 */
+.fw-hint-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-family: var(--font-ui, inherit);
+  font-size: 11.5px;
+  color: var(--warn, var(--accent));
+  background: color-mix(in srgb, var(--warn, var(--accent)) 12%, transparent);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
 .fw-hunk-head {
   padding: 3px 10px;
   background: var(--accent-soft);

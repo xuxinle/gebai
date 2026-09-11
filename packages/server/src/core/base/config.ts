@@ -120,6 +120,12 @@ export interface ServerConfig {
   gitWrite: boolean
   /** Git 远程操作开关（GEBAI_GIT_REMOTE，默认 true）：fetch/pull/push 需要网络与凭据。 */
   gitRemote: boolean
+  /** 单次 diff 文本总量上限（GEBAI_FS_MAX_DIFF 字节，默认 8MB）：对比/提交详情超限时
+   *  在**文件边界**截断并标 truncated，文件清单仍靠 `--name-status` 补齐。 */
+  fsMaxDiff: number
+  /** 单个文本文件（内容与逐行差异）上限（GEBAI_GIT_MAX_FILE 字符，默认 1M）：
+   *  超限时内容侧返回 tooLarge（不拉正文）、差异侧只给统计，避免巨型 Monaco model 锁死主线程。 */
+  gitMaxFile: number
 }
 
 function env(name: string, fallback = ""): string {
@@ -227,6 +233,9 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     fsAudit: bool("GEBAI_FS_AUDIT", true),
     gitWrite: bool("GEBAI_GIT_WRITE", true),
     gitRemote: bool("GEBAI_GIT_REMOTE", true),
+    // diff/文件体量上限：把「撑不住」变成看得见的事（truncated/tooLarge + UI 提示）
+    fsMaxDiff: num("GEBAI_FS_MAX_DIFF", 8 * 1024 * 1024),
+    gitMaxFile: num("GEBAI_GIT_MAX_FILE", 1_000_000),
   }
   return { ...config, ...overrides }
 }

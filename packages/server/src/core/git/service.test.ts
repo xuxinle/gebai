@@ -9,7 +9,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { GitService } from "./service"
+import { EMPTY_TREE, GitService } from "./service"
 
 let dir = ""
 let c1 = ""
@@ -132,6 +132,123 @@ describe("git 两侧内容取数（差异视图的数据源）", () => {
     const byWorktree = await svc.fileDiff(dir, "src/a.ts", { from: c2, to: "WORKTREE" })
     expect(byCommit.additions).toBeGreaterThan(0)
     expect(byWorktree.additions).toBeGreaterThan(0)
+  })
+})
+
+describe("git 根提交（无父提交）：A 侧归一到空树", () => {
+  /**
+   * 背景（实测复现）：前端的提交详情把 A 侧与文件清单都挂在 `${hash}^` 上。
+   * 对根提交，git 对 `c1^` 直接报 `ambiguous argument`（422）——而它相对什么变化
+   * 不是错误，是**空树**（所有文件对根提交都是新增）。不归一的话跨文件导航
+   * 会因为 422 被 prepareReview 静默吞掉、按钮凭空消失。
+   */
+  test("compare：`<根提交>^` ⇄ `<根提交>` 不报错，且清单等于该提交的全部文件（= git show 口径）", async () => {
+    const r = await svc.compare(dir, { from: `${c1}^`, to: c1 })
+    const byShow = git(`git show --name-only --format= ${c1}`).split("\n").filter(Boolean).sort()
+    expect(r.files.map((f) => f.path).sort().filter((p, i, a) => a.indexOf(p) === i)).toEqual(byShow)
+    expect(r.files.length).toBeGreaterThanOrEqual(2)
+    // 根提交里所有文件都是「新增」
+    expect(r.files.every((f) => f.status === "added" || f.additions > 0)).toBe(true)
+  })
+
+  test("diff / fileDiff：根提交的 A 侧同样可用（不再 422）", async () => {
+    const d = await svc.diff(dir, { from: `${c1}^`, to: c1 })
+    expect(d.files.length).toBeGreaterThanOrEqual(2)
+    const one = await svc.fileDiff(dir, "readme.md", { from: `${c1}^`, to: c1 })
+    expect(one.additions).toBeGreaterThan(0)
+  })
+
+  test("contentAt：根提交的 `^` 侧取不到内容 → missing（前端渲染为空文档）", async () => {
+    const a = await svc.contentAt(dir, `${c1}^`, "readme.md")
+    expect(a.missing).toBe(true)
+    expect(a.content).toBe("")
+    const b = await svc.contentAt(dir, c1, "readme.md")
+    expect(b.missing).toBe(false)
+    expect(b.content).toContain("#")
+  })
+
+  test("mergeBase：根提交参与比较时基准即空树（不发 merge-base 子进程）", async () => {
+    const r = await svc.compare(dir, { from: `${c1}^`, to: c1, mergeBase: true })
+    expect(r.mergeBaseOf).toBe(EMPTY_TREE)
+  })
+
+  test("回归：非根提交端点行为不变；非法 rev 仍报 422（不被静默改成空树）", async () => {
+    const normal = await svc.compare(dir, { from: `${c2}^`, to: c2 })
+    expect(normal.files.map((f) => f.path)).toContain("src/new.ts")
+    // 不存在的 rev：必须仍然报错（若被当成空树，就是拿错数据当差分了）
+    await expect(svc.compare(dir, { from: "deadbeefdeadbeef^", to: c2 })).rejects.toThrow()
+  })
+})
+
+describe("git 体量上限：把「撑不住」变成看得见的事", () => {
+  /**
+   * 背景（实测）：一个 262 文件 / 3.1MB diff 的提交，服务端要拼 6.5MB JSON、
+   * 前端要等 8s；单文件内容则会被整份拉进 Monaco model。
+   * 上限不是“省资源”，而是保证最坏情况退化为**统计 + 标记**，而不是卡死或默默少东西。
+   */
+  let d2 = ""
+  let big = ""
+  beforeAll(() => {
+    d2 = mkdtempSync(join(tmpdir(), "gebai-git-cap-"))
+    const g = (cmd: string): string => {
+      const p = Bun.spawnSync(["bash", "-lc", `cd '${d2}' && ${cmd}`], { stdout: "pipe", stderr: "pipe" })
+      if (p.exitCode !== 0) throw new Error(`${cmd}\n${p.stderr.toString()}`)
+      return p.stdout.toString().trim()
+    }
+    g("git init -q -b main && git config user.email t@t && git config user.name T")
+    for (let i = 0; i < 12; i += 1) writeFileSync(join(d2, `f${i}.txt`), lines(`L${i}`, 20))
+    g("git add -A && git commit -q -m c1")
+    for (let i = 0; i < 12; i += 1) writeFileSync(join(d2, `f${i}.txt`), `${lines(`L${i}`, 20)}\n${lines("ADD", 15)}`)
+    g("git add -A && git commit -q -m c2")
+    big = g("git rev-parse HEAD")
+  })
+  afterAll(() => rmSync(d2, { recursive: true, force: true }))
+
+  /** 阈值缩到极小的探针实例（同一仓库、同一套代码路径）。 */
+  const tiny = new GitService({ writeEnabled: false, remoteEnabled: false, maxDiffBytes: 300, maxFileChars: 120 } as never)
+
+  test("contentAt：超限的文件不拉正文，只给 tooLarge + size", async () => {
+    const r = await tiny.contentAt(d2, big, "f0.txt")
+    expect(r.tooLarge).toBe(true)
+    expect(r.content).toBe("")
+    expect(r.size).toBeGreaterThan(120)
+    // 阈值以内的文件正常拿到内容（不能一刀切全封）
+    writeFileSync(join(d2, "small.txt"), "hi\n")
+    const ok = await tiny.contentAt(d2, "WORKTREE", "small.txt")
+    expect(ok.tooLarge).toBeUndefined()
+    expect(ok.content).toBe("hi\n")
+  })
+
+  test("compare：diff 文本超限 → 标 truncated，但**文件清单仍然完整**（靠 --name-status 补齐）", async () => {
+    const r = await tiny.compare(d2, { from: `${big}^`, to: big })
+    expect(r.truncated).toBe(true)
+    expect(r.files.length).toBe(12)
+    // 被截掉的那些文件没有逐行内容，但状态/统计仍在
+    const noHunks = r.files.filter((f) => !f.hunks.length)
+    expect(noHunks.length).toBeGreaterThan(0)
+    expect(r.files.every((f) => f.additions + f.deletions > 0)).toBe(true)
+  })
+
+  test("fileDiff：单文件超限 → hunks 清空 + truncated（而不是半个 hunk 或报错）", async () => {
+    const f = await tiny.fileDiff(d2, "f0.txt", { from: `${big}^`, to: big })
+    expect(f.truncated).toBe(true)
+    expect(f.hunks).toHaveLength(0)
+    expect(f.additions).toBeGreaterThan(0)
+  })
+
+  test("commitDetail：超大提交同样退化（truncated + 清单完整）", async () => {
+    const r = await tiny.commitDetail(d2, big)
+    expect(r.truncated).toBe(true)
+    expect(r.files.length).toBe(12)
+    expect(r.stats).toContain("f0.txt")
+  })
+
+  test("默认阈值下的正常仓库：不误伤（不标 truncated / tooLarge）", async () => {
+    const normal = await svc.compare(dir, { from: c1, to: c2 })
+    expect(normal.truncated).toBe(false)
+    const content = await svc.contentAt(dir, c1, "readme.md")
+    expect(content.tooLarge).toBeUndefined()
+    expect(content.missing).toBe(false)
   })
 })
 

@@ -165,6 +165,8 @@ export interface GitFileDiff {
   additions: number
   deletions: number
   status?: string
+  /** 逐行内容被省略（文件或整次 diff 超体量上限）——与「这个文件没改动」区分开 */
+  truncated?: boolean
 }
 
 export interface GitCommitInfo {
@@ -392,7 +394,7 @@ export class FsApi {
     return this.req<GitStatusInfo>("GET", "/api/v1/git/status", { params: { root, path } })
   }
 
-  gitDiff(root: string, opts: { path?: string; staged?: boolean; from?: string; to?: string; mergeBase?: boolean; context?: number; ignoreWhitespace?: boolean }): Promise<{ files: GitFileDiff[]; raw: string }> {
+  gitDiff(root: string, opts: { path?: string; staged?: boolean; from?: string; to?: string; mergeBase?: boolean; context?: number; ignoreWhitespace?: boolean }): Promise<{ files: GitFileDiff[]; raw: string; truncated?: boolean }> {
     return this.req("GET", "/api/v1/git/diff", { params: { root, ...opts } })
   }
 
@@ -415,7 +417,7 @@ export class FsApi {
   }
 
   /** 某端点（`WORKTREE`/`INDEX`/rev）下的文件内容：并列 diff 的两侧真实文本。 */
-  gitContent(root: string, ref: string, path: string): Promise<{ content: string; binary: boolean; missing: boolean; size: number; ref: string }> {
+  gitContent(root: string, ref: string, path: string): Promise<{ content: string; binary: boolean; missing: boolean; size: number; ref: string; tooLarge?: boolean }> {
     return this.req("GET", "/api/v1/git/content", { params: { root, ref, path } })
   }
 
@@ -427,7 +429,7 @@ export class FsApi {
     return this.req("GET", "/api/v1/git/log", { params: { root, ...opts } })
   }
 
-  gitCommit(root: string, hash: string): Promise<{ commit: GitCommitInfo; files: GitFileDiff[]; stats: string }> {
+  gitCommit(root: string, hash: string): Promise<{ commit: GitCommitInfo; files: GitFileDiff[]; stats: string; truncated?: boolean }> {
     return this.req("GET", "/api/v1/git/commit", { params: { root, hash } })
   }
 
