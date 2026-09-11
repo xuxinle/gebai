@@ -39,50 +39,17 @@
   min-height: 0;
 }
 
-.fw-menubar {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  height: 34px;
-  padding: 0 8px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
-  flex: none;
-  user-select: none;
-}
+/* 标题栏（菜单栏）已移除：入口改由左侧活动栏、工具窗标题栏与工具栏承担。
+   这里不再保留 .fw-menubar / .fw-brand / .fw-menu-btn 的样式（死代码一并清掉）。 */
 
-.fw-brand {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px 4px 4px;
-  margin-right: 6px;
-  color: var(--text);
-  text-decoration: none;
-  font-weight: 600;
-  font-size: 13px;
-  border-radius: var(--radius-sm);
-}
-
-.fw-brand:hover {
-  background: var(--bg-hover);
-  color: var(--accent);
-}
-
-.fw-menu-btn {
-  background: none;
-  border: 0;
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 12.5px;
-  padding: 5px 9px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.fw-menu-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+/* 活动栏按钮上加一条极细分隔：上方是视图切换、下方是工具窗与全局入口 */
+.fw-rail-spacer {
+  flex: 1;
+  min-height: 8px;
+  margin: 4px 0;
+  border-top: 1px solid var(--border);
+  width: 24px;
+  align-self: center;
 }
 
 .fw-rail {
@@ -135,10 +102,6 @@
   font-size: 9.5px;
   line-height: 14px;
   text-align: center;
-}
-
-.fw-rail-spacer {
-  flex: 1;
 }
 
 .fw-left {
@@ -1043,14 +1006,89 @@ button.fw-status-item:hover {
   white-space: nowrap;
 }
 
-/* 三栏并排：变更内容 | 日志 | 分支 */
+/* 三栏并排：分支 | 日志 | 提交内容（从左到右是一条动线：点分支 → 看日志 → 看提交内容） */
 .fw-git-cols {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.35fr) minmax(200px, 0.9fr);
-  gap: 1px;
+  display: flex;
+  min-width: 0;
+}
+
+/* 默认弹性比例；拖动分界后由 --git-col-a / --git-col-b 变成固定宽度（localStorage 记忆） */
+.fw-git-col[data-col="refs"] { flex: 0 0 auto; width: var(--git-col-a, 200px); }
+.fw-git-col[data-col="log"] { flex: 1 1 auto; width: var(--git-col-b, auto); min-width: 0; }
+.fw-git-col[data-col="commit"] { flex: 0 0 auto; width: var(--git-col-c, 34%); min-width: 240px; }
+
+/* 拖动分界条 */
+.fw-col-resizer {
+  flex: none;
+  width: 5px;
+  margin: 0 -2px;
+  z-index: 2;
+  cursor: col-resize;
   background: var(--border);
+  transition: background 0.15s;
+}
+
+.fw-col-resizer:hover,
+.fw-col-resizer.active {
+  background: var(--accent);
+}
+
+.fw-page.fw-col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+
+/* ============================================================================
+   变更面板（左栏）：工作区改动 + 提交框
+   与底部 Git 工具窗的区别：这里回答「我现在改了什么、要不要提交」，
+   底部回答「历史上发生过什么」。所以这里的行更高、动作按钮更明显、提交框常驻底部。
+   ============================================================================ */
+
+.fw-changes-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.fw-changes-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 改动列表本身滚动；提交框 sticky 在底部（不随列表滚走） */
+.fw-changes-panel .fw-git-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 行内动作按钮：常态隐形，hover/选中时显形（列表保持干净，同 IDEA 的 Commit 窗） */
+.fw-hover-only {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.fw-change-row:hover .fw-hover-only,
+.fw-change-row:focus-within .fw-hover-only {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* 触屏没有 hover：常显，否则按钮永远点不到 */
+  .fw-hover-only { opacity: 0.7; }
+}
+
+/* 变更面板里的改动行比底部工具窗略高：更像"待办清单"，便于点选与暂存 */
+.fw-changes-panel .fw-change-row {
+  height: 26px;
 }
 
 .fw-git-col {
@@ -1113,6 +1151,18 @@ button.fw-status-item:hover {
 
 .fw-git-refs-tab:hover { color: var(--text); background: var(--bg-hover); }
 .fw-git-refs-tab.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* 栏标题右侧的小提示（如「点击日志查看」、当前分支） */
+.fw-git-col-hint {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
 
 /* 窄屏：三栏纵向堆叠（每栏给足最小高度，工具窗整体滚动） */
 @media (max-width: 1180px) {
@@ -1440,6 +1490,12 @@ button.fw-status-item:hover {
 
 .fw-branch-row:hover {
   background: var(--bg-hover);
+}
+
+/* 「正在看它的日志」的分支（与 current = 已检出的分支区分：这里是视图状态，不是仓库状态） */
+.fw-branch-row.log-active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .fw-branch-row.current {

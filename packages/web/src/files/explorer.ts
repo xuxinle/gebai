@@ -24,6 +24,11 @@ export interface ExplorerHooks {
   onFsChanged: () => void
   /** 根切换（main.ts 需要据此刷新 Git 面板） */
   onRootChanged: (rootId: string) => void
+  /**
+   * 树内导航（选中条目 / 定位跳转 / 换根）→ 宿主据此同步地址栏。
+   * isDir 决定「值得记一条历史」（进目录）还是「就地替换」（同目录内换文件）。
+   */
+  onNavigate?: (path: string, isDir: boolean) => void
   /** 在文件管理器中显示（本地模式；桌面端能力，缺省不显示该项） */
   revealInOs?: (root: string, path: string) => void
 }
@@ -119,12 +124,13 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     rootBtn.append(icon("folderOpen"), h("span", { class: "fw-root-name", text: info ? info.name : id }), icon("chevronDown"))
     rootBtn.title = info ? `${info.name}\n${info.path}` : id
     hooks.onRootChanged(id)
-    if (path) {
-      await reveal(path)
-      return
-    }
-    await refresh("")
+      if (path) {
+    await reveal(path)
+    return
   }
+  await refresh("")
+  hooks.onNavigate?.("", true)
+}
 
   function updateCrumbs(): void {
     clear(crumbHost)
@@ -228,6 +234,8 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       updateCrumbs()
       refreshSelection()
       if (!isDir) hooks.openFile(rootId, entry.path)
+      // 地址栏同步：进目录记一条历史（可后退），点文件就地替换
+      hooks.onNavigate?.(entry.path, isDir)
     }
     row.ondblclick = () => {
       if (isDir) toggleDir(entry.path, true)
@@ -620,6 +628,8 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     render()
     const row = treeHost.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`)
     row?.scrollIntoView({ block: "nearest" })
+    // 定位跳转（面包屑 / 深层链接 / 前进后退）同样要同步地址栏
+    hooks.onNavigate?.(path, parts.length === 0 ? true : !path.includes("."))
   }
 
   return {

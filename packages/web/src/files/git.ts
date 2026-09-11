@@ -1,16 +1,20 @@
 /**
- * 文件工作台 · Git 面板（右栏，IDEA 式 VCS 工具窗）：变更 / 日志 / 分支 / 标签 / 暂存 / 远程。
+ * 文件工作台 · Git 工具窗（底部停靠，IDEA 式）：**分支 | 日志 | 提交内容** 三栏并排。
+ *
+ * 三条栏构成一条动线：点分支 → 看它的日志 → 点某条提交 → 看这条提交改了什么。
+ * 分工上「变更（工作区改动 + 提交框）」不在这里——那是左栏的**变更面板**（changes.ts），
+ * 因为"我改了什么、现在提交"是编码时随时要看的，而"历史"是回顾时才看的，节奏不同。
  *
  * 交互原则（对齐 IDEA 的 VCS 工具窗习惯）：
- * - 变更列表按「冲突 / 暂存 / 未暂存 / 未跟踪」分组，行内按钮承担 stage/unstage/revert，双击开差异；
- * - 提交区在最下方常驻（消息框 + 提交 / 提交并推送），提交前可勾选「仅提交已暂存」；
- * - 日志分页加载，提交详情列出变更文件（点开 Monaco 并列 diff），支持路径过滤与文件历史；
- * - 破坏性操作（丢弃改动 / 重置 / 强制推送）统一二次确认，并在有备份能力时提示（丢弃自动 stash 备份、
- *   hard reset 自动建备份分支——见服务端 GitService）；
- * - 多步操作（merge/rebase/cherry-pick）冲突时面板顶部出现「继续 / 中止 / 跳过」条，避免用户卡死。
+ * - 三栏边界可拖（宽度记忆在 localStorage，双击分界复位）；
+ * - 日志分页加载、支持提交信息过滤与单文件历史（Git log --follow），点条目在右栏看内容；
+ * - 破坏性操作（重置 / 强制推送 / 分支删除）统一二次确认，并在有备份能力时提示
+ *   （hard reset 自动建备份分支——见服务端 GitService）；
+ * - 多步操作（merge/rebase/cherry-pick）的「继续 / 跳过 / 中止」在变更面板顶部（冲突属于工作区状态）。
  */
-import type { FsApi, GitBranchInfo, GitChange, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
+import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } from "./api"
 import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, append } from "./ui"
+import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor } from "./editor"
 
 export type GitView = "changes" | "log" | "branches" | "tags" | "stash" | "remotes"
@@ -72,6 +76,7 @@ export interface GitPanel {
 export function createGitPanel(hooks: GitHooks): GitPanel {
   let view: GitView = "changes"
   let logItems: GitCommitInfo[] = []
+  /** 当前选中的提交（右栏「提交内容」显示它）。 */
   let logHasMore = true
   let logLoading = false
   let logFilterPath = ""
@@ -80,11 +85,6 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   let localTags: Array<{ name: string; hash: string; time?: number; subject?: string }> = []
   let stashes: Array<{ index: number; ref: string; message: string; time?: number }> = []
   let remotes: Array<{ name: string; fetchUrl: string; pushUrl: string }> = []
-  let commitMessage = ""
-  let commitAmend = false
-  let committing = false
-  /** 变更列表是否显示整仓库（root 只是仓库子目录时默认只看当前目录，见 renderChanges）。 */
-  let showWholeRepo = false
 
   /* ------------------------------ 工具窗骨架（IDEA 式） ------------------------------
    * 底部工具窗 = 标题栏 + 三栏并排：变更内容 / 日志 / 分支。
@@ -94,24 +94,109 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
    * ------------------------------------------------------------------------------ */
 
   const titleBar = h("div", { class: "fw-git-titlebar" })
-  /** 三栏内容容器（各渲染函数只写自己那一栏，互不覆盖）。 */
-  const colChanges = h("div", { class: "fw-git-col-body" })
-  const colLog = h("div", { class: "fw-git-col-body" })
+  /**
+   * 三栏并排：分支（引用） | 日志 | 提交内容——**从左到右是一条动线**：
+   * 点分支 → 看它的日志 → 点某条提交 → 看这条提交改了什么。
+   * 日志栏只放日志（不再就地展开提交详情，否则"看列表"和"看内容"互相打断、返回后又丢滚动位置）。
+   */
   const colRefs = h("div", { class: "fw-git-col-body" })
+  const colLog = h("div", { class: "fw-git-col-body" })
+  const colCommit = h("div", { class: "fw-git-col-body" })
   /** 「分支」栏内部的小切换（分支 / 标签 / 暂存 / 远程）。 */
   let refsTab: "branches" | "tags" | "stash" | "remotes" = "branches"
+  /** 日志当前限定的分支/引用（点击分支栏设置）；空 = 全部分支（--all）。 */
+  let logBranch = ""
 
   const colHead = (title: string, extra: Array<Node | null> = []): HTMLElement =>
     h("div", { class: "fw-git-col-head" }, [h("span", { class: "fw-git-col-title", text: title }), ...extra])
 
   const refsTabsHost = h("div", { class: "fw-git-refs-tabs" })
-  /** 变更栏计数（原顶部标签徽标的功能，三栏化后落在各栏标题上）。 */
-  const changesCount = h("span", { class: "fw-git-count" })
-  const colChangesEl = h("div", { class: "fw-git-col", "data-col": "changes" }, [colHead("变更内容", [changesCount]), colChanges])
-  const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colHead("日志"), colLog])
+  /** 日志栏标题上的「当前分支过滤」芯片（点了分支才有）。 */
+  const logScope = h("span", { class: "fw-git-count-scope" })
+  const commitHint = h("span", { class: "fw-git-col-hint", text: "点击日志查看" })
   const colRefsEl = h("div", { class: "fw-git-col", "data-col": "refs" }, [colHead("分支", [refsTabsHost]), colRefs])
-  const colsHost = h("div", { class: "fw-git-cols" }, [colChangesEl, colLogEl, colRefsEl])
+  const colLogEl = h("div", { class: "fw-git-col", "data-col": "log" }, [colHead("日志", [logScope]), colLog])
+  const colCommitEl = h("div", { class: "fw-git-col", "data-col": "commit" }, [colHead("提交内容", [commitHint]), colCommit])
+
+  // 分界可拖：宽度存 CSS 变量，三栏共享（拖动左界只改左栏、右界改中栏）
+  const sp1 = h("div", { class: "fw-col-resizer", title: "拖动调整栏宽" })
+  const sp2 = h("div", { class: "fw-col-resizer", title: "拖动调整栏宽" })
+  const colsHost = h("div", { class: "fw-git-cols" }, [colRefsEl, sp1, colLogEl, sp2, colCommitEl])
   const el = h("div", { class: "fw-git-panel" }, [titleBar, colsHost])
+
+  /**
+   * 分界拖动：
+   *   a（左界）= 分支栏宽度，指针向右 = 变宽；
+   *   c（右界）= **提交内容栏**宽度，指针向左 = 变宽（拖的是右栏的左边缘）。
+   * 中间日志栏吃掉剩余空间（flex: 1），所以只需记两个数。宽度存 localStorage，跨会话记忆。
+   */
+  const COL_KEY = "gebai.ui.gitCols"
+  type ColW = { a: number | null; c: number | null }
+  function readCols(): ColW {
+    try {
+      const raw = localStorage.getItem(COL_KEY)
+      if (!raw) return { a: null, c: null }
+      const o = JSON.parse(raw) as { a?: number; c?: number }
+      return { a: typeof o.a === "number" ? o.a : null, c: typeof o.c === "number" ? o.c : null }
+    } catch {
+      return { a: null, c: null }
+    }
+  }
+  function applyCols(): void {
+    const w = readCols()
+    if (w.a) colsHost.style.setProperty("--git-col-a", `${w.a}px`)
+    if (w.c) colsHost.style.setProperty("--git-col-c", `${w.c}px`)
+  }
+  function bindColResizer(handle: HTMLElement, which: "a" | "c"): void {
+    const varName = which === "a" ? "--git-col-a" : "--git-col-c"
+    let dragging = false
+    let startX = 0
+    let startW = 0
+    handle.addEventListener("mousedown", (e) => {
+      dragging = true
+      startX = e.clientX
+      startW = (which === "a" ? colRefsEl : colCommitEl).getBoundingClientRect().width
+      handle.classList.add("active")
+      document.body.classList.add("fw-col-resizing")
+      e.preventDefault()
+    })
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return
+      const total = colsHost.getBoundingClientRect().width
+      // 分支/提交栏 140px 起（还要放得下分支名与提交主题），并给中间日志栏留 240px
+      const max = Math.max(140, which === "a" ? total - 380 : total - 380)
+      const delta = which === "a" ? e.clientX - startX : startX - e.clientX
+      const w = Math.max(140, Math.min(max, startW + delta))
+      colsHost.style.setProperty(varName, `${w}px`)
+    })
+    const persist = (): void => {
+      const cur = readCols()
+      const w = parseInt(getComputedStyle(colsHost).getPropertyValue(varName), 10)
+      const next: ColW = { a: which === "a" ? w || cur.a : cur.a, c: which === "c" ? w || cur.c : cur.c }
+      try {
+        localStorage.setItem(COL_KEY, JSON.stringify(next))
+      } catch {
+        /* 隐私模式忽略 */
+      }
+    }
+    window.addEventListener("mouseup", () => {
+      if (!dragging) return
+      dragging = false
+      handle.classList.remove("active")
+      document.body.classList.remove("fw-col-resizing")
+      persist()
+    })
+    // 双击分界 = 复位该栏（回到 CSS 默认比例）
+    handle.addEventListener("dblclick", () => {
+      colsHost.style.removeProperty(varName)
+      const cur = readCols()
+      try {
+        localStorage.setItem(COL_KEY, JSON.stringify(which === "a" ? { a: null, c: cur.c } : { a: cur.a, c: null }))
+      } catch {
+        /* 忽略 */
+      }
+    })
+  }
 
   /** 「分支」栏内部切换渲染（分支/标签/暂存/远程）。 */
   function renderRefsTabs(): void {
@@ -132,29 +217,25 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   function renderTitleBar(): void {
     clear(titleBar)
     const s = hooks.status()
-    const prefix = hooks.repoPrefix()
     append(titleBar, [
       icon("git", 14),
       h("span", { class: "fw-git-title", text: "源代码管理" }),
       s?.isRepo && s.branch ? h("span", { class: "fw-git-branch", title: "当前分支" }, [icon("branch", 12), h("span", { text: s.branch })]) : null,
-      s?.isRepo && prefix
-        ? (() => {
-            const b = h("button", { class: "fw-chip", title: prefix ? `默认只显示「${prefix}/」范围内的变更；点击切换整仓库` : "显示整仓库" }, [
-              h("span", { text: showWholeRepo ? "整仓库" : `限 ${prefix}/` }),
-            ])
-            b.onclick = () => {
-              showWholeRepo = !showWholeRepo
-              void refresh()
-            }
-            return b
-          })()
-        : null,
       s?.operation
         ? h("span", { class: "fw-git-opbar" }, [
             h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突）` : ""}` }),
           ])
         : null,
       h("span", { class: "fw-grow" }),
+      // 比较入口：菜单栏移除后挪到工具窗标题栏（与 Git 语义同处）
+      (() => {
+        const b = h("button", { class: "fw-btn ghost sm", title: "比较任意两个端点（提交/分支 ↔ 提交/分支/工作区/暂存区）Ctrl+Shift+D" }, [
+          icon("diff"),
+          h("span", { text: "比较" }),
+        ])
+        b.onclick = () => hooks.openCompare()
+        return b
+      })(),
       (() => {
         const b = h("button", { class: "fw-icon-btn", title: "刷新" })
         b.appendChild(icon("refresh", 13))
@@ -171,21 +252,6 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     ])
   }
 
-  /** 当前目录范围内的变更（root 为仓库子目录时；showWholeRepo 开启后为整仓库）。 */
-  function scopedChanges(): { changes: GitChange[]; staged: number; unstaged: number; untracked: number; conflicted: number } {
-    const s = hooks.status()
-    const prefix = hooks.repoPrefix()
-    const all = s?.changes ?? []
-    const changes = prefix && !showWholeRepo ? all.filter((c) => c.path === prefix || c.path.startsWith(`${prefix}/`)) : all
-    return {
-      changes,
-      staged: changes.filter((c) => c.staged).length,
-      unstaged: changes.filter((c) => c.unstaged).length,
-      untracked: changes.filter((c) => c.untracked).length,
-      conflicted: changes.filter((c) => c.conflicted).length,
-    }
-  }
-
   /**
    * 切换到某视图：三栏并排常显，「分支」栏内的小切换（标签/暂存/远程）随之切换。
    * 保留该方法是因为状态栏分支名、菜单等外部入口要能「跳到某个视图」。
@@ -196,342 +262,12 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     void refresh()
   }
 
-  /** 统一写操作执行：捕获错误 → toast；成功后刷新状态与视图。 */
-  async function op(action: string, body: Record<string, unknown>, okMsg?: string, opts: { silent?: boolean } = {}): Promise<Record<string, unknown> | null> {
-    try {
-      const res = (await hooks.api.gitOp(action, hooks.root(), body)) as Record<string, unknown>
-      const output = typeof res.output === "string" ? res.output : ""
-      if (!opts.silent) {
-        if (res.ok === false) {
-          toast(`${okMsg ? `${okMsg}失败：` : ""}${output || "操作未成功（可能存在冲突）"}`, "error", 6000)
-        } else if (output) toast(output.split("\n").slice(0, 3).join("\n"), "info", 4000)
-        else if (okMsg) toast(okMsg, "success")
-      }
-      await hooks.refreshStatus()
-      await refresh()
-      return res
-    } catch (err) {
-      toast(`${okMsg ? `${okMsg}失败：` : "操作失败："}${(err as Error).message}`, "error", 6000)
-      return null
-    }
-  }
+  /** 写操作（共享实现：toast + 刷新状态 + 刷新本面板）。 */
+  const op = createOpRunner(hooks, async () => {
+    await refresh()
+  })
 
-  /* ------------------------------ 变更视图 ------------------------------ */
-
-  function changeRow(c: GitChange, group: "staged" | "unstaged" | "untracked" | "conflicted"): HTMLElement {
-    const name = c.path.split("/").pop() ?? c.path
-    const dir = c.path.includes("/") ? c.path.slice(0, c.path.lastIndexOf("/")) : ""
-    const mark = c.conflicted ? "!" : c.untracked ? "U" : c.kind === "added" ? "A" : c.kind === "deleted" ? "D" : c.kind === "renamed" ? "R" : c.kind === "modified" ? "M" : "?"
-    const cls = c.conflicted ? "conflict" : mark
-    const row = h("div", { class: `fw-change-row ${cls}` }, [
-      h("span", { class: `fw-change-mark ${cls}`, text: mark, title: c.kind }),
-      h("span", { class: "fw-change-name", title: `${c.path}${c.origPath ? ` （原 ${c.origPath}）` : ""}` }, [
-        h("span", { text: name }),
-        dir ? h("span", { class: "fw-change-dir", text: `  ${dir}` }) : null,
-        c.origPath ? h("span", { class: "fw-change-orig", text: ` ← ${c.origPath}` }) : null,
-      ]),
-      h("span", { class: "fw-change-actions" }, [
-        group === "conflicted"
-          ? btnIcon("merge", "解决冲突（三窗格合并）", () => hooks.openMerge(c.path))
-          : null,
-        group === "unstaged" || group === "untracked" || group === "conflicted"
-          ? btnIcon("check", group === "conflicted" ? "标记为解决（暂存）" : "暂存", () => void op("stage", { paths: [c.path] }, group === "conflicted" ? "已标记为解决" : "已暂存", { silent: true }))
-          : null,
-        group === "staged" ? btnIcon("undo", "取消暂存", () => void op("unstage", { paths: [c.path] }, undefined, { silent: true })) : null,
-        group !== "untracked"
-          ? btnIcon("diff", "查看差异", () =>
-              hooks.openDiff({
-                title: `${name}${group === "staged" ? "（已暂存）" : ""}`,
-                root: hooks.root(),
-                // path 用仓库相对（git 语义）：服务端 contentAt 以仓库根为基准取两侧内容
-                path: c.path,
-                source: { type: "worktree", staged: group === "staged" },
-              }),
-            )
-          : null,
-        group !== "staged"
-          ? btnIcon("undo", "丢弃改动（自动 stash 备份）", () => void discard(c.path), "danger")
-          : null,
-        btnIcon("diff", "与 HEAD 比较", () =>
-          hooks.openCompare({ from: "HEAD", to: "WORKTREE", path: c.path }),
-        ),
-        btnIcon("history", "文件历史（Git log --follow）", () => {
-          logFilterPath = c.path
-          logItems = []
-          logHasMore = true
-          show("log")
-        }),
-      ]),
-    ])
-    row.ondblclick = () => (c.conflicted ? hooks.openMerge(c.path) : hooks.openFile(hooks.root(), prefixPath(c.path)))
-    row.oncontextmenu = (e) => {
-      e.preventDefault()
-      showMenu(e.clientX, e.clientY, [
-        { label: "打开文件", icon: "file", onClick: () => hooks.openFile(hooks.root(), prefixPath(c.path)) },
-        c.conflicted ? { label: "解决冲突（三窗格合并）", icon: "merge", onClick: () => hooks.openMerge(c.path) } : (null as never),
-        c.conflicted
-          ? { label: "标记为解决（暂存）", icon: "check", onClick: () => void op("stage", { paths: [c.path] }, "已标记为解决", { silent: true }) }
-          : (null as never),
-        {
-          label: "查看差异",
-          icon: "diff",
-          onClick: () =>
-            hooks.openDiff({
-              title: name,
-              root: hooks.root(),
-              path: c.path,
-              source: { type: "worktree", staged: group === "staged" },
-            }),
-        },
-        { separator: true },
-        { label: "暂存", icon: "check", disabled: group === "staged", onClick: () => void op("stage", { paths: [c.path] }, "已暂存", { silent: true }) },
-        { label: "取消暂存", icon: "undo", disabled: group !== "staged", onClick: () => void op("unstage", { paths: [c.path] }, undefined, { silent: true }) },
-        { label: "丢弃改动", icon: "trash", danger: true, disabled: group === "staged", onClick: () => void discard(c.path) },
-        { separator: true },
-        { label: "复制路径", icon: "copy", onClick: () => void navigator.clipboard.writeText(c.path) },
-        { label: "加入 .gitignore", icon: "git", onClick: () => void op("ignore", { entries: [c.untracked ? c.path : `/${c.path}`] }, "已忽略") },
-      ])
-    }
-    return row
-  }
-
-  /** Git 状态里的路径是仓库相对；转成当前根内的相对路径（root 可能指向仓库子目录）。 */
-  function prefixPath(repoRel: string): string {
-    const prefix = hooks.repoPrefix()
-    if (!prefix) return repoRel
-    return repoRel.startsWith(`${prefix}/`) ? repoRel.slice(prefix.length + 1) : repoRel
-  }
-
-  function btnIcon(name: string, title: string, onClick: () => void, cls = ""): HTMLButtonElement {
-    const b = h("button", { class: `fw-icon-btn sm ${cls}`, title })
-    b.appendChild(icon(name, 13))
-    b.onclick = (e) => {
-      e.stopPropagation()
-      onClick()
-    }
-    return b
-  }
-
-  async function discard(path: string): Promise<void> {
-    const ok = await confirmDialog({
-      title: "丢弃改动",
-      message: `确定丢弃「${path}」的工作区改动？`,
-      hint: "操作前会自动 stash 备份（可在「暂存」视图恢复），但请确认不再需要这些修改。",
-      okText: "丢弃",
-      danger: true,
-    })
-    if (!ok) return
-    const res = await op("discard", { paths: [path], backup: true }, "已丢弃改动")
-    if (res?.backupRef) toast(`已备份到 ${res.backupRef}`, "info")
-    hooks.onFsChanged()
-  }
-
-  function renderChanges(): void {
-    const s = hooks.status()
-    const cnt = scopedChanges()
-    const dirty = cnt.staged + cnt.unstaged + cnt.untracked + cnt.conflicted
-    changesCount.textContent = dirty ? String(dirty) : ""
-    changesCount.title = dirty ? `已暂存 ${cnt.staged} · 未暂存 ${cnt.unstaged} · 未跟踪 ${cnt.untracked}${cnt.conflicted ? ` · 冲突 ${cnt.conflicted}` : ""}` : ""
-    if (!s?.isRepo) {
-      colChanges.replaceChildren(renderNotRepo())
-      return
-    }
-    // 路径过滤：root 可能只是仓库的子目录（如会话工作区）——默认只显示当前目录内的变更
-    // （IDEA 的 VCS 工具窗也只看项目根范围内）；可一键切到整仓库。
-    const prefix = hooks.repoPrefix()
-    const scoped = scopedChanges().changes
-    const groups: Array<{ key: "conflicted" | "staged" | "unstaged" | "untracked"; label: string; items: GitChange[] }> = [
-      { key: "conflicted", label: "冲突", items: scoped.filter((c) => c.conflicted) },
-      { key: "staged", label: "已暂存", items: scoped.filter((c) => c.staged) },
-      { key: "unstaged", label: "未暂存", items: scoped.filter((c) => c.unstaged && !c.conflicted) },
-      { key: "untracked", label: "未跟踪", items: scoped.filter((c) => c.untracked) },
-    ]
-    const list = h("div", { class: "fw-git-list" })
-    if (prefix) {
-      const chip = h("button", { class: "fw-chip fw-scope-chip", title: prefix ? `当前限定：${prefix}` : "整仓库" }, [
-        icon(showWholeRepo ? "git" : "folder", 12),
-        h("span", { text: showWholeRepo ? "整仓库（点击仅看当前目录）" : `仅当前目录：${prefix.split("/").pop() ?? prefix}` }),
-      ])
-      chip.onclick = () => {
-        showWholeRepo = !showWholeRepo
-        renderChanges()
-      }
-      list.appendChild(chip)
-    }
-    for (const g of groups) {
-      if (!g.items.length) continue
-      const groupEl = h("div", { class: "fw-change-group" })
-      const head = h("div", { class: "fw-change-group-head" }, [
-        icon("chevronDown", 12),
-        h("span", { text: `${g.label}（${g.items.length}）` }),
-        h("span", { class: "fw-grow" }),
-        g.key !== "staged" && g.key !== "conflicted"
-          ? btnIcon("check", "全部暂存", () => void op("stage", { paths: g.items.map((c) => c.path) }, "已全部暂存", { silent: true }))
-          : null,
-        g.key === "staged" ? btnIcon("undo", "全部取消暂存", () => void op("unstage", { paths: g.items.map((c) => c.path) }, undefined, { silent: true })) : null,
-      ])
-      const inner = h("div", { class: "fw-change-group-body" }, g.items.map((c) => changeRow(c, g.key)))
-      head.onclick = (e) => {
-        if ((e.target as HTMLElement).closest("button")) return
-        inner.classList.toggle("collapsed")
-      }
-      groupEl.append(head, inner)
-      list.appendChild(groupEl)
-    }
-    if (!s.changes.length) list.appendChild(h("div", { class: "fw-empty", text: "工作区干净，没有未提交的变更" }))
-
-    // 多步操作态：继续 / 中止 / 跳过
-    if (s.operation) {
-      const banner = h("div", { class: "fw-git-banner warn" }, [
-        icon("warning"),
-        h("span", { text: `${s.operation} 进行中${s.counts.conflicted ? `（${s.counts.conflicted} 个冲突待解决）` : ""}` }),
-        h("span", { class: "fw-grow" }),
-        s.counts.conflicted
-          ? (() => {
-              const b = h("button", { class: "fw-btn sm", text: "打开冲突解决" })
-              b.onclick = () => void openConflicts()
-              return b
-            })()
-          : null,
-        (() => {
-          const b = h("button", { class: "fw-btn sm primary", text: "继续" })
-          b.onclick = () => void op(operationAction(s.operation, "continue"), {}, "已继续")
-          return b
-        })(),
-        (() => {
-          const b = h("button", { class: "fw-btn sm", text: "跳过" })
-          b.disabled = s.operation !== "rebase"
-          b.onclick = () => void op("rebase", { skip: true }, "已跳过")
-          return b
-        })(),
-        (() => {
-          const b = h("button", { class: "fw-btn sm danger", text: "中止" })
-          b.onclick = () => void op(operationAction(s.operation, "abort"), {}, "已中止")
-          return b
-        })(),
-      ])
-      list.prepend(banner)
-    }
-
-    colChanges.replaceChildren(list, renderCommitBox())
-  }
-
-  /** 进行中的多步操作 → 对应的继续/中止动作名（统一走同一组端点）。 */
-  function operationAction(opName: string | undefined, _mode: "abort" | "continue"): string {
-    if (opName === "rebase" || opName === "am") return "rebase"
-    if (opName === "cherry-pick") return "cherry-pick"
-    if (opName === "revert") return "revert"
-    return "merge"
-  }
-
-  function renderCommitBox(): HTMLElement {
-    const area = h("textarea", { class: "fw-commit-msg", placeholder: "提交信息（Ctrl+Enter 提交）", rows: 3 })
-    area.value = commitMessage
-    area.oninput = () => {
-      commitMessage = area.value
-    }
-    const stagedCount = scopedChanges().staged
-    const amendToggle = h("label", { class: "fw-check" }, [h("input", { type: "checkbox" })])
-    ;(amendToggle.querySelector("input") as HTMLInputElement).checked = commitAmend
-    ;(amendToggle.querySelector("input") as HTMLInputElement).onchange = (e) => {
-      commitAmend = (e.target as HTMLInputElement).checked
-    }
-    amendToggle.append(h("span", { text: "修补上次提交" }))
-    const signoff = h("label", { class: "fw-check" }, [h("input", { type: "checkbox" }), h("span", { text: "署名" })])
-
-    const doCommit = async (push: boolean) => {
-      if (committing) return
-      const msg = commitMessage.trim()
-      if (!msg && !commitAmend) {
-        toast("请填写提交信息", "error")
-        return
-      }
-      committing = true
-      commitBtn.setAttribute("disabled", "")
-      try {
-        const res = await hooks.api.gitOp<{ hash?: string; subject?: string }>("commit", hooks.root(), {
-          message: msg,
-          amend: commitAmend,
-          signoff: (signoff.querySelector("input") as HTMLInputElement).checked,
-          push,
-          setUpstream: push,
-        })
-        if ((res as { push?: { ok?: boolean; output?: string } }).push && (res as { push: { ok?: boolean; output?: string } }).push.ok === false) {
-          toast(`提交成功但推送失败：${(res as { push: { output: string } }).push.output?.slice(0, 300)}`, "error", 8000)
-        } else {
-          toast(push ? "已提交并推送" : "已提交", "success")
-        }
-        commitMessage = ""
-        commitAmend = false
-        await hooks.refreshStatus()
-        await refresh()
-        hooks.onFsChanged()
-      } catch (err) {
-        toast(`提交失败：${(err as Error).message}`, "error", 8000)
-      } finally {
-        committing = false
-        commitBtn.removeAttribute("disabled")
-      }
-    }
-
-    const commitBtn = h("button", { class: "fw-btn primary", title: stagedCount ? "" : "没有已暂存的变更（将提交工作区全部改动）" }, [icon("check"), h("span", { text: commitAmend ? "修补提交" : "提交" })])
-    commitBtn.onclick = () => void doCommit(false)
-    const pushBtn = h("button", { class: "fw-btn", title: "提交并推送当前分支" }, [icon("upload"), h("span", { text: "提交并推送" })])
-    pushBtn.onclick = () => void doCommit(true)
-    pushBtn.disabled = !hooks.remoteEnabled()
-
-    area.onkeydown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault()
-        void doCommit(false)
-      }
-    }
-
-    return h("div", { class: "fw-commit-box" }, [
-      area,
-      h("div", { class: "fw-commit-actions" }, [amendToggle, signoff, h("span", { class: "fw-grow" }), h("span", { class: "fw-hint", text: stagedCount ? `${stagedCount} 个文件已暂存` : "未暂存（提交将包含全部改动）" }), pushBtn, commitBtn]),
-    ])
-  }
-
-  function renderNotRepo(): HTMLElement {
-    const box = h("div", { class: "fw-placeholder" }, [
-      h("div", { class: "fw-placeholder-msg", text: "当前根不是 Git 仓库" }),
-      h("div", { class: "fw-placeholder-hint", text: "可以在此初始化仓库，或切换到含 .git 的项目根。" }),
-    ])
-    if (hooks.writable()) {
-      const b = h("button", { class: "fw-btn primary" }, [icon("git"), h("span", { text: "初始化仓库（git init）" })])
-      b.onclick = () =>
-        void (async () => {
-          const branch = await promptDialog({ title: "初始化 Git 仓库", label: "默认分支名", value: "main", okText: "初始化" })
-          if (branch === null) return
-          await op("init", { initialBranch: branch || "main" }, "已初始化仓库")
-        })()
-      box.appendChild(h("div", { class: "fw-placeholder-actions" }, [b]))
-    }
-    return box
-  }
-
-  /* ------------------------------ 冲突解决 ------------------------------ */
-
-  async function openConflicts(): Promise<void> {
-    try {
-      const res = await hooks.api.gitConflicts(hooks.root())
-      if (!res.files.length) {
-        toast("没有冲突文件", "info")
-        return
-      }
-      const first = res.files[0]
-      hooks.openDiff({
-        title: `冲突：${first.path.split("/").pop()}`,
-        root: hooks.root(),
-        path: first.path,
-        source: { type: "worktree", staged: false },
-      })
-      toast(`共 ${res.files.length} 个冲突文件，其余可在变更列表逐个打开`, "info", 5000)
-    } catch (err) {
-      toast(`读取冲突失败：${(err as Error).message}`, "error")
-    }
-  }
+  const renderNotRepo = (): HTMLElement => renderNotRepoShared(hooks, op)
 
   /* ------------------------------ 日志视图 ------------------------------ */
 
@@ -543,7 +279,15 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
         logItems = []
         logHasMore = true
       }
-      const res = await hooks.api.gitLog(hooks.root(), { limit: 60, skip: logItems.length, path: logFilterPath || undefined, grep: logFilterText || undefined, all: true })
+      const res = await hooks.api.gitLog(hooks.root(), {
+        limit: 60,
+        skip: logItems.length,
+        path: logFilterPath || undefined,
+        grep: logFilterText || undefined,
+        // 点了分支就只看该分支的日志；否则看全部分支（--all）
+        ref: logBranch || undefined,
+        all: !logBranch,
+      })
       // 去重（--all 下多分支有交集）
       const seen = new Set(logItems.map((c) => c.hash))
       for (const c of res.commits) if (!seen.has(c.hash)) logItems.push(c)
@@ -554,6 +298,8 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     } finally {
       logLoading = false
       renderLog()
+      // 日志过滤切换后同步分支栏高亮（"我正在看哪个分支的日志"要看得出来）
+      if (refsTab === "branches") renderBranches()
     }
   }
 
@@ -568,6 +314,16 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     }
     const head = h("div", { class: "fw-git-subbar" }, [
       search,
+      logBranch
+        ? (() => {
+            const chip = h("button", { class: "fw-chip", title: "改为查看全部分支的日志" }, [icon("branch", 12), h("span", { text: logBranch }), icon("close", 12)])
+            chip.onclick = () => {
+              logBranch = ""
+              void loadLog(true)
+            }
+            return chip
+          })()
+        : null,
       logFilterPath
         ? (() => {
             const chip = h("button", { class: "fw-chip", title: "清除路径过滤" }, [icon("file", 12), h("span", { text: logFilterPath }), icon("close", 12)])
@@ -585,7 +341,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     const list = h("div", { class: "fw-log-list" })
     if (!logItems.length && !logLoading) list.appendChild(h("div", { class: "fw-empty", text: logFilterPath ? "该文件暂无提交历史" : "暂无提交记录" }))
     for (const c of logItems) {
-      const row = h("div", { class: "fw-log-row" }, [
+      const row = h("div", { class: "fw-log-row", "data-hash": c.hash }, [
         h("div", { class: "fw-log-graph" }, [h("span", { class: "fw-commit-dot" + (c.parents.length > 1 ? " merge" : "") })]),
         h("div", { class: "fw-log-main" }, [
           h("div", { class: "fw-log-subject", text: c.subject || "(无提交信息)", title: c.subject }),
@@ -666,7 +422,10 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   async function openCommit(c: GitCommitInfo): Promise<void> {
     const host = h("div", { class: "fw-commit-detail" })
     host.appendChild(h("div", { class: "fw-loading", text: "加载提交详情…" }))
-    colLog.replaceChildren(host)
+    // 提交内容固定渲染在**右栏**（日志栏只放日志：列表不被打断、从右栏回看时滚动位置还在）
+    colCommit.replaceChildren(host)
+    commitHint.textContent = c.short
+    for (const row of colLog.querySelectorAll<HTMLElement>(".fw-log-row")) row.classList.toggle("active", row.dataset.hash === c.hash)
     try {
       const res = await hooks.api.gitCommit(hooks.root(), c.hash)
       const files = h("div", { class: "fw-commit-files" })
@@ -689,15 +448,18 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
           })
         files.appendChild(row)
       }
-      const back = h("button", { class: "fw-btn ghost sm" }, [icon("back"), h("span", { text: "返回日志" })])
-      back.onclick = () => show("log")
       const diffBtn = h("button", { class: "fw-btn sm" }, [icon("diff"), h("span", { text: "整提交差异" })])
       diffBtn.onclick = () =>
         hooks.openDiff({ title: `提交 ${c.short}`, root: hooks.root(), path: "", source: { type: "range", from: `${c.hash}^`, to: c.hash } })
       const workBtn = h("button", { class: "fw-btn sm", title: "此提交之后工作区又改了什么" }, [icon("edit"), h("span", { text: "与工作区比较" })])
       workBtn.onclick = () => hooks.openCompare({ from: c.hash, to: "WORKTREE" })
       host.replaceChildren(
-        h("div", { class: "fw-git-subbar" }, [back, h("span", { class: "fw-info" }, [h("span", { class: "fw-log-hash", text: c.short })]), h("span", { class: "fw-grow" }), workBtn, diffBtn]),
+        h("div", { class: "fw-git-subbar" }, [
+          h("span", { class: "fw-info" }, [h("span", { class: "fw-log-hash", text: c.short })]),
+          h("span", { class: "fw-grow" }),
+          workBtn,
+          diffBtn,
+        ]),
         h("div", { class: "fw-commit-head" }, [
           h("div", { class: "fw-commit-subject", text: c.subject }),
           h("div", { class: "fw-log-meta" }, [h("span", { text: c.author }), h("span", { text: c.authorEmail }), h("span", { text: formatTime(c.commitTime) }), ...c.refs.map((r) => h("span", { class: "fw-ref-chip", text: r }))]),
@@ -742,7 +504,7 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       if (!items.length) return
       list.appendChild(h("div", { class: "fw-section-title", text: `${title}（${items.length}）` }))
       for (const b of items) {
-        const row = h("div", { class: `fw-branch-row${b.current ? " current" : ""}` }, [
+        const row = h("div", { class: `fw-branch-row${b.current ? " current" : ""}${logBranch === b.name ? " log-active" : ""}` }, [
           icon(b.current ? "check" : "branch", 13),
           h("span", { class: "fw-branch-name", text: b.name, title: b.subject }),
           b.ahead ? h("span", { class: "fw-ahead", text: `↑${b.ahead}`, title: "领先上游提交数" }) : null,
@@ -750,12 +512,14 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
           h("span", { class: "fw-grow" }),
           h("span", { class: "fw-log-hash", text: b.hash.slice(0, 7) }),
         ])
+        // 单击 = 看这个分支的日志（分支栏 → 日志栏的动线）；检出在右键菜单里
         row.onclick = () => {
-          if (b.current) return
-          void confirmer("切换分支", `检出「${b.name}」？未提交的改动会随工作区一起携带。`, async () => {
-            await op(b.remote ? "checkout" : "branch", b.remote ? { ref: b.name.replace(/^([^/]+)\//, "$1/") , detach: false } : { action: "checkout", name: b.name }, "已切换分支")
-            hooks.onFsChanged()
-          })
+          logBranch = b.name
+          void loadLog(true)
+        }
+        row.onclick = () => {
+          logBranch = b.name
+          void loadLog(true)
         }
         row.oncontextmenu = (e) => {
           e.preventDefault()
@@ -934,15 +698,15 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
   async function refresh(): Promise<void> {
     renderTitleBar()
     renderRefsTabs()
+    applyCols()
     const s = hooks.status()
     if (!s?.isRepo) {
-      colChanges.replaceChildren(renderNotRepo())
+      colRefs.replaceChildren(renderNotRepo())
       colLog.replaceChildren()
-      colRefs.replaceChildren()
+      colCommit.replaceChildren()
       return
     }
     // 三栏各自渲染（并排常显，不互相覆盖）
-    renderChanges()
     if (refsTab === "branches") await loadBranches()
     else if (refsTab === "tags") await loadTags()
     else if (refsTab === "stash") await loadStash()
@@ -951,6 +715,9 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     if (view === "log" || !logItems.length) await loadLog(logItems.length === 0)
     else renderLog()
   }
+
+  bindColResizer(sp1, "a")
+  bindColResizer(sp2, "c")
 
   return { el, refresh, show, view: () => view }
 }

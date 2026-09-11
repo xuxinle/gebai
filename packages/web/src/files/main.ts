@@ -16,6 +16,9 @@ import "../css/base.css"
 import "../css/files.css"
 import { createEditor, refreshEditorTheme, monacoReady, type EditorHandle } from "./editor"
 import { createExplorer } from "./explorer"
+import { createChangesPanel, type ChangesPanel } from "./changes"
+import { createUrlSync, parseUrlState } from "./url-state"
+import { initTheme } from "../theme-core"
 import { createGitPanel, mountDiffView, type DiffSpec, type GitPanel } from "./git"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
@@ -25,8 +28,6 @@ import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, pr
 
 const LOCAL_ENV_KEY = "gebai.ui.env"
 const SESSION_KEY = "gebai.ui.session"
-const STYLE_KEY = "gebai.ui.style"
-const THEMES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny", "qinhan"]
 
 function readLocalEnv(): Record<string, string> {
   try {
@@ -90,7 +91,7 @@ const state = {
   repoPrefix: "",
   tabs: [] as Tab[],
   activeId: null as string | null,
-  leftView: "explorer" as "explorer" | "search",
+  leftView: "explorer" as "changes" | "explorer" | "search",
   gitViewVisible: window.innerWidth >= 1180,
   cursor: { line: 1, column: 1, selected: 0 },
 }
@@ -99,7 +100,7 @@ const api = new FsApi(() => state.env, () => state.sessionId)
 
 /* ------------------------------ 布局骨架 ------------------------------ */
 
-const menubar = h("header", { class: "fw-menubar" })
+// 无标题栏（IDEA 新 UI 的做法：去掉传统菜单栏，把入口交给左侧活动栏与工具窗自身）
 const railEl = h("div", { class: "fw-rail" })
 const leftPanel = h("div", { class: "fw-left" })
 const leftResizer = h("div", { class: "fw-resizer", title: "拖动调整宽度" })
@@ -112,7 +113,6 @@ const gitDockResizer = h("div", { class: "fw-dock-resizer", title: "拖动调整
 const statusbar = h("footer", { class: "fw-statusbar" })
 
 const rootEl = h("div", { class: "fw-app" }, [
-  menubar,
   h("div", { class: "fw-body" }, [
     railEl,
     leftPanel,
@@ -143,7 +143,39 @@ const explorer = createExplorer({
   repoPathPrefix: () => state.repoPrefix,
   onFsChanged: () => void refreshGit(),
   onRootChanged: (rootId) => void onRootChanged(rootId),
+  // 地址栏同步：进目录记历史（可后退），点文件就地替换
+  onNavigate: (_path, isDir) => (isDir ? urlSync.push() : urlSync.replace()),
 })
+
+/* ------------------------------ 变更面板（左栏工具窗） ------------------------------ */
+
+let changesPanel: ChangesPanel | null = null
+
+/**
+ * 变更面板（左栏）：工作区改动 + 提交框。
+ * 与底部 Git 工具窗分开挂载，但共用同一份 git 状态与同一套写操作流程（写完全都刷新）。
+ */
+function ensureChangesPanel(): ChangesPanel {
+  if (changesPanel) return changesPanel
+  changesPanel = createChangesPanel({
+    api,
+    root: () => explorer.getRoot(),
+    repoPrefix: () => state.repoPrefix,
+    status: () => state.gitStatus,
+    refreshStatus: () => refreshGit(),
+    openDiff: (spec) => void openDiff(spec),
+    openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
+    openCompare: (init) => void openCompare(init),
+    openMerge: (repoRel) => void openMergeTab(repoRel),
+    writable: () => !!(state.rootsResp?.writable && state.rootsResp?.gitWrite),
+    remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
+    onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
+    openFileHistory: (path) => void showFileHistoryByPath(path),
+    // 徽标：改动数变化时只重画 rail（不重画左栏，避免提交框里的输入被打断）
+    onCount: () => renderRail(),
+  })
+  return changesPanel
+}
 
 let gitPanel: GitPanel | null = null
 function ensureGitPanel(): GitPanel {
@@ -224,7 +256,49 @@ async function refreshGit(): Promise<GitStatusInfo | null> {
     explorer.refreshGitDecorations()
   }
   renderStatus()
+  // 变更面板与状态栏同源：状态一变就同步（只在它已创建时刷新，避免无谓重渲染）
+  changesPanel?.refresh()
   return state.gitStatus
+}
+
+/* ------------------------------ 地址栏同步 ------------------------------ */
+
+/**
+ * 地址栏 = 界面状态（root + 定位路径 + 行号）。
+ * 目录切换走 pushState（可后退回上一个目录），同目录内开文件走 replaceState；
+ * 刷新/前进后退经 restoreFromUrl 回到原处。
+ */
+const urlSync = createUrlSync({
+  read: () => {
+    const t = activeTab()
+    const sel = explorer.selected()
+    const path = t && t.kind === "file" ? t.path : (sel?.path ?? "")
+    const line = t?.kind === "file" ? state.cursor.line : undefined
+    return { root: explorer.getRoot(), path, line, session: state.sessionId }
+  },
+  onPop: (st) => restoreFromUrlState(st),
+})
+
+/** 从地址栏恢复（启动与浏览器前进后退共用）。 */
+async function restoreFromUrlState(st: Partial<{ root: string; path: string; line?: number }>): Promise<void> {
+  if (st.root && st.root !== explorer.getRoot()) {
+    await explorer.setRoot(st.root, undefined)
+  }
+  if (!st.path) return
+  // 目录 → 展开并在树中定位；文件 → 打开（浅层链接解析已在 deeplink.ts 完成根推断）
+  const isLikelyDir = !st.path.includes(".")
+  if (isLikelyDir) {
+    await explorer.reveal(st.path, { select: true })
+  } else {
+    await openFile(explorer.getRoot(), st.path, { preview: false, line: st.line })
+  }
+}
+
+/** 启动恢复：优先用已有的 ?root/?path（deeplink 已在 loadRoots 里落位），否则按根清单推断。 */
+async function restoreFromUrl(): Promise<void> {
+  const st = parseUrlState(location.search)
+  if (st.path) await restoreFromUrlState(st)
+  else if (st.root && st.root !== explorer.getRoot()) await explorer.setRoot(st.root, undefined)
 }
 
 /* ------------------------------ 标签页 ------------------------------ */
@@ -473,6 +547,8 @@ function activate(id: string): void {
   renderToolbar()
   renderStatus()
   if (tab.kind === "file") void explorer.reveal(tab.path, { select: true })
+  // 当前文件变了 → 地址栏就地替换（不新增历史：连开多个文件不该要按多次后退）
+  urlSync.replace()
 }
 
 function closeTab(id: string): void {
@@ -660,8 +736,13 @@ function renderToolbar(): void {
 }
 
 async function showFileHistory(tab: Tab): Promise<void> {
+  return showFileHistoryByPath(tab.path, tab.root)
+}
+
+/** 按路径看文件历史（工具栏与变更面板右键共用）。 */
+async function showFileHistoryByPath(path: string, root = explorer.getRoot()): Promise<void> {
   try {
-    const res = await api.gitFileHistory(tab.root, tab.path, 50)
+    const res = await api.gitFileHistory(root, path, 50)
     const overlay = h("div", { class: "fw-overlay" })
     const list = h("div", { class: "fw-history-list" })
     if (!res.commits.length) list.appendChild(h("div", { class: "fw-empty", text: "该文件暂无提交历史（可能是未跟踪文件）" }))
@@ -674,12 +755,12 @@ async function showFileHistory(tab: Tab): Promise<void> {
       ])
       row.onclick = () => {
         overlay.remove()
-        void openDiff({ title: `${tab.title} @ ${c.short}`, root: tab.root, path: tab.path, source: { type: "commit", hash: c.hash } })
+        void openDiff({ title: `${path.split("/").pop() ?? path} @ ${c.short}`, root, path, source: { type: "commit", hash: c.hash } })
       }
       list.appendChild(row)
     }
     const dialog = h("div", { class: "fw-dialog wide" }, [
-      h("div", { class: "fw-dialog-title" }, [icon("history"), h("span", { text: `文件历史：${tab.title}` })]),
+      h("div", { class: "fw-dialog-title" }, [icon("history"), h("span", { text: `文件历史：${path.split("/").pop() ?? path}` })]),
       h("div", { class: "fw-dialog-body" }, [list]),
       h("div", { class: "fw-dialog-actions" }, [
         (() => {
@@ -792,25 +873,31 @@ function menuAt(anchor: HTMLElement, items: Parameters<typeof showMenu>[2]): [nu
 
 function renderRail(): void {
   clear(railEl)
-  const mk = (id: "explorer" | "search" | "git", iconName: string, title: string, onClick?: () => void) => {
-    const isGitDock = id === "git"
-    const active = isGitDock ? state.gitViewVisible : state.leftView === id && !onClick
-    const b = h("button", { class: `fw-rail-btn${active ? " active" : ""}`, title })
+  /** 左栏视图按钮（变更 / 资源管理器 / 搜索）——点当前视图 = 收起左栏（IDEA 活动栏习惯）。 */
+  const mkView = (id: "changes" | "explorer" | "search", iconName: string, title: string) => {
+    const b = h("button", { class: `fw-rail-btn${leftVisible() && state.leftView === id ? " active" : ""}`, title })
     b.appendChild(icon(iconName, 18))
-    if (state.gitStatus?.isRepo && id === "git") {
-      const n = state.gitStatus.counts.staged + state.gitStatus.counts.unstaged + state.gitStatus.counts.untracked + state.gitStatus.counts.conflicted
+    if (id === "changes") {
+      const n = dirtyCount()
       if (n) b.appendChild(h("span", { class: "fw-rail-badge", text: String(n) }))
     }
-    b.onclick = onClick ?? (() => showLeftView(id as "explorer" | "search"))
+    b.onclick = () => toggleLeftView(id)
     return b
   }
   railEl.append(
-    mk("explorer", "folder", "资源管理器（Ctrl+Shift+E）"),
-    mk("search", "search", "搜索（Ctrl+Shift+F）"),
-    mk("git", "git", "源代码管理（Ctrl+Shift+G）", () => toggleGitPanel(!state.gitViewVisible)),
+    mkView("changes", "diff", "变更：工作区改动与提交（Ctrl+Shift+G）"),
+    mkView("explorer", "folder", "资源管理器（Ctrl+Shift+E）"),
+    mkView("search", "search", "搜索（Ctrl+Shift+F）"),
     h("div", { class: "fw-rail-spacer" }),
+    // 底部组：工具窗开关 + 全局入口（原菜单栏的功能补位）
     (() => {
-      const b = h("button", { class: "fw-rail-btn", title: "打开文件夹" })
+      const b = h("button", { class: `fw-rail-btn${state.gitViewVisible ? " active" : ""}`, title: "源代码管理工具窗（Ctrl+Alt+G）" })
+      b.appendChild(icon("git", 18))
+      b.onclick = () => toggleGitPanel(!state.gitViewVisible)
+      return b
+    })(),
+    (() => {
+      const b = h("button", { class: "fw-rail-btn", title: "打开文件夹（切换根）" })
       b.appendChild(icon("folderOpen", 18))
       b.onclick = () => (document.querySelector(".fw-root-btn") as HTMLElement | null)?.click()
       return b
@@ -822,10 +909,25 @@ function renderRail(): void {
       return b
     })(),
     (() => {
-      const b = h("button", { class: "fw-rail-btn", title: `切换主题（当前 ${document.documentElement.dataset.theme ?? "acrylic"}）` })
+      // 菜单栏移除后，菜单里的杂项收进这一个入口（新建/上传/比较/快捷键/服务端开关/全屏/回主界面）
+      const b = h("button", { class: "fw-rail-btn", title: "更多（新建 / 比较 / 快捷键 / 服务端开关 / 全屏 / 返回主界面）" })
       b.appendChild(icon("settings", 18))
       b.onclick = () => {
-        dropdown(b, THEMES.map((t) => ({ label: t, icon: document.documentElement.dataset.theme === t ? "check" : undefined, onClick: () => void applyTheme(t) })))
+        const r = b.getBoundingClientRect()
+        showMenu(r.left, r.top - 6, [
+          { label: "新建文件…", icon: "plus", disabled: !state.rootsResp?.writable, onClick: () => void newQuick("file") },
+          { label: "新建文件夹…", icon: "plus", disabled: !state.rootsResp?.writable, onClick: () => void newQuick("dir") },
+          { label: "上传文件…", icon: "upload", disabled: !state.rootsResp?.writable, onClick: () => pickUpload() },
+          { separator: true },
+          { label: "比较任意两端…", icon: "diff", shortcut: "Ctrl+Shift+D", onClick: () => void openCompare() },
+          { label: "刷新根清单与 Git 状态", icon: "refresh", onClick: () => void loadRoots().then(() => explorer.refresh("")) },
+          { separator: true },
+          { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
+          { label: "服务端开关（GEBAI_FS_* / GEBAI_GIT_*）", icon: "settings", onClick: () => showEnvHelp() },
+          { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
+          { separator: true },
+          { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/` } },
+        ])
       }
       return b
     })(),
@@ -987,47 +1089,13 @@ async function showTrash(): Promise<void> {
 
 /* ------------------------------ 主题 ------------------------------ */
 
-async function applyTheme(id: string): Promise<void> {
-  document.documentElement.dataset.theme = id
-  try {
-    localStorage.setItem(STYLE_KEY, id)
-  } catch {
-    /* 隐私模式忽略 */
-  }
-  const linkId = "fw-theme-css"
-  document.getElementById(linkId)?.remove()
-  await new Promise<void>((resolve) => {
-    const link = document.createElement("link")
-    link.id = linkId
-    link.rel = "stylesheet"
-    link.href = new URL(`../themes/${id}.css`, import.meta.url).href
-    link.onload = () => resolve()
-    link.onerror = () => resolve()
-    document.head.appendChild(link)
-  })
+// 主题引擎与主界面**共用**（theme-core）：主题是用户级偏好，两个入口必须完全一致，
+// 否则从主界面切到工作台会换一套配色（曾如此：工作台只读了 localStorage 的 id，
+// 没应用人民币面额配色与默认主题黑白变体）。工作台不再有自己的主题设置入口。
+document.addEventListener("gebai:theme-change", () => {
   refreshEditorTheme()
   renderRail()
-}
-
-function bootstrapTheme(): void {
-  const fromUrl = new URLSearchParams(location.search).get("gb_style")
-  let id = fromUrl && THEMES.includes(fromUrl) ? fromUrl : null
-  if (!id) {
-    try {
-      const saved = localStorage.getItem(STYLE_KEY)
-      if (saved && THEMES.includes(saved)) id = saved
-    } catch {
-      /* ignore */
-    }
-  }
-  if (!id) {
-    const globalStyle = (window as unknown as Record<string, unknown>).__GEBAI_UI_STYLE__
-    if (typeof globalStyle === "string" && THEMES.includes(globalStyle)) id = globalStyle
-  }
-  void applyTheme(id ?? "acrylic")
-}
-
-document.addEventListener("gebai:theme-change", () => refreshEditorTheme())
+})
 
 /* ------------------------------ 冲突合并标签（三窗格） ------------------------------ */
 
@@ -1235,112 +1303,51 @@ function buildSearchView(): HTMLElement {
   return el
 }
 
-function showLeftView(view: "explorer" | "search"): void {
+/**
+ * 左栏视图切换（三视图互斥：变更 | 资源管理器 | 搜索）。
+ * 「变更」与目录树互斥是刻意的：同一时刻只看一件事——要么在找文件，要么在看改动。
+ */
+function showLeftView(view: "changes" | "explorer" | "search", opts: { keepHidden?: boolean } = {}): void {
   state.leftView = view
   clear(leftPanel)
   if (view === "explorer") leftPanel.appendChild(explorer.el)
-  else {
+  else if (view === "search") {
     if (!searchView) searchView = { el: buildSearchView() }
     leftPanel.appendChild(searchView.el)
+  } else {
+    const panel = ensureChangesPanel()
+    leftPanel.appendChild(panel.el)
+    // 先渲染（用上一份状态），状态刷新到位后再渲染一次——否则首次打开是空面板
+    panel.refresh()
+    void refreshGit().then(() => panel.refresh())
   }
+  if (!opts.keepHidden) setLeftVisible(true)
   renderRail()
 }
 
-/* ------------------------------ 菜单栏 ------------------------------ */
+/** 左栏是否展开（隐藏后编辑区占满——IDEA 的 Ctrl+B 行为）。 */
+function leftVisible(): boolean {
+  return leftPanel.style.display !== "none"
+}
 
-function buildMenubar(): void {
-  clear(menubar)
-  const brand = h("a", { class: "fw-brand", href: `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/`, title: "返回歌白主界面" }, [icon("wheel", 16), h("span", { text: "歌白文件" })])
-  const mkMenu = (label: string, items: Parameters<typeof showMenu>[2]) => {
-    const b = h("button", { class: "fw-menu-btn", text: label })
-    b.onclick = () => {
-      const r = b.getBoundingClientRect()
-      showMenu(r.left, r.bottom + 2, items)
-    }
-    return b
-  }
-  menubar.append(
-    brand,
-    mkMenu("文件", [
-      { label: "新建文件…", icon: "plus", disabled: !state.rootsResp?.writable, onClick: () => void newQuick("file") },
-      { label: "新建文件夹…", icon: "plus", disabled: !state.rootsResp?.writable, onClick: () => void newQuick("dir") },
-      { separator: true },
-      { label: "上传文件…", icon: "upload", disabled: !state.rootsResp?.writable, onClick: () => pickUpload() },
-      { label: "打开文件夹…", icon: "folderOpen", onClick: () => (document.querySelector(".fw-root-btn") as HTMLElement | null)?.click() },
-      { separator: true },
-      { label: "保存", icon: "save", shortcut: "Ctrl+S", onClick: () => {
-        const t = activeTab()
-        if (t) void saveTab(t)
-      } },
-      { label: "重新加载当前文件", icon: "refresh", onClick: () => {
-        const t = activeTab()
-        if (t?.kind === "file") void loadTab(t)
-      } },
-      { separator: true },
-      { label: "回收站…", icon: "trash", onClick: () => void showTrash() },
-    ]),
-    mkMenu("编辑", [
-      { label: "进入/退出编辑模式", icon: "edit", shortcut: "Ctrl+E", onClick: () => {
-        const t = activeTab()
-        if (t && t.kind === "file") toggleMode(t)
-      } },
-      { label: "在当前文件中查找", icon: "search", shortcut: "Ctrl+F", onClick: () => {
-        const t = activeTab()
-        t?.editor?.focus()
-        document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true }))
-      } },
-      { separator: true },
-      { label: "复制路径", icon: "copy", onClick: () => {
-        const t = activeTab()
-        if (t) void navigator.clipboard.writeText(t.path).then(() => toast("已复制", "success"))
-      } },
-      { label: "下载当前文件", icon: "download", onClick: () => {
-        const t = activeTab()
-        if (t?.kind === "file") window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")
-      } },
-    ]),
-    mkMenu("视图", [
-      { label: "资源管理器", icon: "folder", shortcut: "Ctrl+Shift+E", onClick: () => showLeftView("explorer") },
-      { label: "搜索", icon: "search", shortcut: "Ctrl+Shift+F", onClick: () => showLeftView("search") },
-      { separator: true },
-      { label: state.gitViewVisible ? "隐藏 Git 面板" : "显示 Git 面板", icon: "git", shortcut: "Ctrl+Shift+G", onClick: () => toggleGitPanel(!state.gitViewVisible) },
-      { separator: true },
-      ...THEMES.map((t) => ({ label: `主题：${t}`, icon: document.documentElement.dataset.theme === t ? "check" : undefined, onClick: () => void applyTheme(t) })),
-      { separator: true },
-      { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
-    ]),
-    mkMenu("Git", [
-      { label: "比较（任意两端）…", icon: "diff", shortcut: "Ctrl+Shift+D", onClick: () => void openCompare() },
-      { label: "刷新状态", icon: "refresh", onClick: () => void refreshGit().then(() => gitPanel?.refresh()) },
-      { separator: true },
-      { label: "提交…", icon: "check", onClick: () => {
-        if (!state.gitViewVisible) toggleGitPanel(true)
-        gitPanel?.show("changes")
-      } },
-      { label: "日志", icon: "history", onClick: () => {
-        if (!state.gitViewVisible) toggleGitPanel(true)
-        gitPanel?.show("log")
-      } },
-      { label: "分支", icon: "branch", onClick: () => {
-        if (!state.gitViewVisible) toggleGitPanel(true)
-        gitPanel?.show("branches")
-      } },
-      { separator: true },
-      { label: "抓取 / 拉取 / 推送", icon: "sync", onClick: () => {
-        if (!state.gitViewVisible) toggleGitPanel(true)
-        gitPanel?.show("remotes")
-      } },
-    ]),
-    mkMenu("帮助", [
-      { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
-      { label: "服务端开关（GEBAI_FS_* / GEBAI_GIT_*）", icon: "settings", onClick: () => showEnvHelp() },
-    ]),
-    h("span", { class: "fw-grow" }),
-  )
-  const refresh = h("button", { class: "fw-icon-btn", title: "刷新根清单与 Git 状态" }, [icon("refresh", 14)])
-  refresh.onclick = () => void loadRoots().then(() => explorer.refresh(""))
-  const back = h("a", { class: "fw-btn sm", href: `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/`, title: "返回歌白主界面" }, [icon("back"), h("span", { text: "主界面" })])
-  menubar.append(refresh, back)
+function setLeftVisible(visible: boolean): void {
+  leftPanel.style.display = visible ? "" : "none"
+  leftResizer.style.display = visible ? "" : "none"
+  for (const t of state.tabs) setTimeout(() => t.editor?.layout(), 0)
+  renderRail()
+}
+
+/** 点当前视图按钮 = 收起左栏；点其它视图 = 切换（并展开）。 */
+function toggleLeftView(view: "changes" | "explorer" | "search"): void {
+  if (state.leftView === view && leftVisible()) setLeftVisible(false)
+  else showLeftView(view)
+}
+
+/** 工作区改动数（rail 上「变更」按钮的徽标）。 */
+function dirtyCount(): number {
+  const c = state.gitStatus?.counts
+  if (!c) return 0
+  return c.staged + c.unstaged + c.untracked + c.conflicted
 }
 
 async function newQuick(kind: "file" | "dir"): Promise<void> {
@@ -1405,7 +1412,9 @@ function showShortcuts(): void {
     ["Ctrl+B", "显示/隐藏左侧栏"],
     ["Ctrl+Shift+E", "资源管理器"],
     ["Ctrl+Shift+F", "搜索"],
-    ["Ctrl+Shift+G", "Git 面板"],
+    ["Ctrl+Shift+G", "左侧变更面板"],
+    ["Ctrl+Alt+G", "底部 Git 工具窗"],
+    ["Ctrl+K", "更多（新建 / 比较 / 服务端开关）"],
     ["Ctrl+Shift+D", "比较（任意两个提交 / 提交与工作区）"],
     ["F2", "重命名选中项"],
     ["Delete", "删除选中项（移入回收站）"],
@@ -1501,9 +1510,20 @@ document.addEventListener("keydown", (e) => {
     showLeftView("search")
     return
   }
+  // Ctrl+Shift+G = 左侧变更面板（与 IDEA 的 Git 工具窗语义一致）；Ctrl+Alt+G = 底部工具窗
   if (ctrl && e.shiftKey && e.key.toLowerCase() === "g") {
     e.preventDefault()
-    toggleGitPanel(true)
+    toggleLeftView("changes")
+    return
+  }
+  if (ctrl && e.altKey && e.key.toLowerCase() === "g") {
+    e.preventDefault()
+    toggleGitPanel(!state.gitViewVisible)
+    return
+  }
+  if (ctrl && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault()
+    ;(railEl.querySelector('.fw-rail-btn[title^="更多"]') as HTMLElement | null)?.click()
     return
   }
   if (ctrl && e.shiftKey && e.key.toLowerCase() === "d") {
@@ -1513,14 +1533,16 @@ document.addEventListener("keydown", (e) => {
   }
   if (ctrl && !e.shiftKey && e.key.toLowerCase() === "b") {
     e.preventDefault()
-    const hidden = leftPanel.style.display === "none"
-    leftPanel.style.display = hidden ? "" : "none"
-    leftResizer.style.display = hidden ? "" : "none"
+    setLeftVisible(!leftVisible())
     return
   }
   if (e.key === "F5") {
     e.preventDefault()
-    void explorer.refresh(undefined, { keepSelection: true }).then(() => refreshGit().then(() => gitPanel?.refresh()))
+    void explorer
+      .refresh(undefined, { keepSelection: true })
+      .then(() => refreshGit())
+      .then(() => gitPanel?.refresh())
+      .then(() => changesPanel?.refresh())
     return
   }
   if (e.key === "F2" && !inInput) {
@@ -1618,7 +1640,8 @@ function bindDockResizer(): void {
 /* ------------------------------ 启动 ------------------------------ */
 
 async function boot(): Promise<void> {
-  bootstrapTheme()
+  // 主题：与主界面共用同一引擎（含人民币面额配色 / 默认主题黑白变体 / 品牌化变量）
+  initTheme()
   // 启动遮罩：首屏（根清单 + 目录树 + 编辑器就绪）后淡出移除；异常也移除，不让遮罩卡住页面
   const splash = document.getElementById("gb-splash")
   const hideSplash = (): void => {
@@ -1627,11 +1650,11 @@ async function boot(): Promise<void> {
     setTimeout(() => splash.remove(), 340)
   }
   try {
-    buildMenubar()
-    showLeftView("explorer")
+    showLeftView("explorer", { keepHidden: true }) // 先建好左栏，可见性随后由 URL/默认值决定
     toggleGitPanel(state.gitViewVisible && window.innerWidth >= 1180)
+    if (!state.gitViewVisible) toggleGitPanel(false) // 同步 collapsed class（避免先渲染后收起闪动）
     bindResizer(leftResizer, leftPanel, "left")
-bindDockResizer()
+    bindDockResizer()
     document.body.appendChild(rootEl)
     // 全局拖拽上传：拖文件到页面任意处即上传到当前选中目录
     document.addEventListener("dragover", (e) => {
@@ -1661,6 +1684,8 @@ bindDockResizer()
         .catch((err) => toast(`上传失败：${(err as Error).message}`, "error"))
     })
     await loadRoots()
+    // URL 恢复：进过哪个目录/打开过哪个文件，刷新或前进后退都回到原处（见 restoreFromUrl）
+    await restoreFromUrl()
     await refreshGit()
     renderTabbar()
     renderToolbar()
