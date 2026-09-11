@@ -31,8 +31,6 @@ const MIN_WINDOW = 1100
 let pane: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
 let peekBtn: HTMLButtonElement | null = null
-/** 分屏关闭按钮（标题栏上，独立于入口那组；仅分屏激活时可见）。 */
-let closeBtn: HTMLButtonElement | null = null
 /** 记住上一次进入分屏时的参数，重新打开时沿用（会话/根/主题由 filesUrl 现取）。 */
 let lastOpts: FilesOpenOpts = {}
 
@@ -70,10 +68,11 @@ function applyWidth(w: number | null): void {
 /**
  * 分屏面板 = **纯容器**：只有 iframe 与左侧分界拖条，没有标题栏。
  *
- * 为什么不留标题栏：它要为一条 30px 的横条付出整个编辑区的垂直空间，而里面那三个按钮各有更好的去处——
+ * 为什么不留标题栏：它要为一条 30px 的横条付出整个编辑区的垂直空间，而里面那些按钮各有更好的去处——
  *   · 「打开」= 标题栏入口主按钮本身就是新标签打开；
  *   · 「重新加载 / 在新标签打开」= 挪进工作台自己的「更多」菜单（页面级动作归页面自己）；
- *   · 「关闭」= 标题栏上的独立关闭按钮（分屏激活时才出现，见 syncEntry）。
+ *   · 「关闭」= 也不在标题栏，而是走**面板内**与全局几条路径（工作台「更多」菜单的「关闭分屏」、
+ *     Esc（两侧都能触发）、Ctrl+Shift+E；另有点标题栏「会话列表」也会关，见 bindFilesSplit 末尾）。
  * 面板因此完全让位给工作台本身：它自己就是 IDE 式界面，自带顶栏与状态栏。
  */
 function buildPane(): HTMLElement {
@@ -194,13 +193,14 @@ export function toggleSplit(opts: FilesOpenOpts = {}): void {
  * 按钮态与分屏态保持一致。
  *
  * 「文件工作台」这组入口**保持原状**：副按钮的图标不随分屏态变形、也不常驻（仍然只在浮空时出现），
- * 这样它永远只表达一件事——"分屏打开"。分屏是否开着、怎么关，交给旁边那个**独立关闭按钮**
- * （只在分屏激活时出现，是"单独显示"的那一个）。此前副按钮在分屏时变成 ✕ 并常驻，
- * 等于让同一个位置同时承担开与关，图标一变形还得先认一下。
+ * 这样它永远只表达一件事——"分屏打开"。
+ *
+ * 标题栏上不再有✕：关闭分屏改由**工作台自己**（嵌入态下它就在面板里，那里才是"关掉我"的自然位置）：
+ * 「更多」菜单的「关闭分屏」、工作台内的 Esc（它自己转发给宿主，见 files/main.ts）、
+ * 以及全局的 Ctrl+Shift+E；此外点标题栏的「会话列表」也会关分屏（见 bindFilesSplit 末尾）。
  */
 function syncEntry(): void {
   const open = isSplitOpen()
-  if (closeBtn) closeBtn.hidden = !open
   if (peekBtn) {
     // 提示里带上快捷键：副按钮只在浮空时出现，键盘用户靠 Ctrl+Shift+E
     const tip = open ? "关闭分屏（Ctrl+Shift+E / Esc）" : "分屏打开（右侧对照，可拖动分界 · Ctrl+Shift+E）"
@@ -253,7 +253,6 @@ function postTheme(): void {
 
 export function bindFilesSplit(): void {
   peekBtn = document.getElementById("files-split-btn") as HTMLButtonElement | null
-  closeBtn = document.getElementById("files-split-close") as HTMLButtonElement | null
   if (!peekBtn) return
   // 主按钮仍是「新标签打开」（默认行为不变）；悬浮弹出的副按钮才进分屏
   peekBtn.addEventListener("click", () => {
@@ -266,8 +265,8 @@ export function bindFilesSplit(): void {
     toggleSplit()
     if (!fromKeyboard) peekBtn?.blur()
   })
-  // 独立关闭按钮：与入口那组分开放，入口就永远只表达"打开"
-  closeBtn?.addEventListener("click", () => exitSplit())
+  // 没有标题栏✕：关闭走工作台自己的「更多」菜单（嵌入态的「关闭分屏」）、Esc（两侧都能触发）
+  // 与全局 Ctrl+Shift+E（由 main 的快捷键表统一处理）。
   // Esc 关闭：焦点在主界面这一侧时可用（焦点在工作台内部时由它自己转发，见 files/main.ts）
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && isSplitOpen()) exitSplit()

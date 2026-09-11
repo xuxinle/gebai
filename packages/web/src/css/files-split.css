@@ -49,17 +49,6 @@
   transition-delay: 0s;
 }
 
-/* 独立的关闭按钮（在标题栏右侧）：仅分屏激活时出现，图标为 ✕ 描边——
-   与入口那组（空心文件夹 / 实心分屏）在视觉与位置上都是分开的两个东西。 */
-#files-split-close {
-  color: var(--text-muted);
-}
-
-#files-split-close:hover {
-  color: var(--text);
-  background: var(--bg-hover);
-}
-
 /* hover 展开的按钮不该跟着 .icon-btn:hover 的底色变化而跳（保持面板色） */
 #files-split-btn:hover {
   background: var(--bg-hover);
@@ -113,7 +102,7 @@ body.files-split main {
 
 /* 面板 = 纯容器：只有 iframe（+ 左侧分界拖条），没有标题栏——
    那条 30px 横条要花掉整个编辑区的垂直空间，而它的按钮各有更好的去处
-   （打开 = 标题栏入口主按钮；重载/在新标签打开 = 工作台自己的「更多」菜单；关闭 = 独立关闭按钮）。
+   （打开 = 标题栏入口主按钮；重载/在新标签打开/关闭 = 工作台自己的「更多」菜单，关分屏另有 Esc 与 Ctrl+Shift+E）。
    面板因此完全让位给工作台本身（它自己就是 IDE 式界面，自带顶栏与状态栏）。 */
 .files-split-frame {
   flex: 1;
