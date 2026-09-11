@@ -1084,6 +1084,19 @@ function renderRail(): void {
       return b
     })(),
   )
+  /*
+   * 分屏（嵌入）时在活动栏**最下方**给一个「关闭分屏」。
+   * 为什么放这里：标题栏的 ✕ 已按反馈移除，而嵌入态下面板自己没有顶栏——鼠标用户要关分屏，
+   * 只剩「更多」菜单里的那一项（两步）。站在最下方、图标与「更多」里的那一项同款（back），
+   * 既好找又不占编辑区。独立标签页时不存在“分屏”，故仅 EMBEDDED 渲染。
+   * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
+   */
+  if (EMBEDDED) {
+    const close = h("button", { class: "fw-rail-btn", title: "关闭分屏（Ctrl+Shift+E / Esc）" })
+    close.appendChild(icon("back", 18))
+    close.onclick = () => requestCloseSplit()
+    railEl.appendChild(close)
+  }
 }
 
 /* ------------------------------ 查看/编辑与保存 ------------------------------ */

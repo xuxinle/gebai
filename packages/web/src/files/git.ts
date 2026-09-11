@@ -475,6 +475,52 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
 
   /* ------------------------------ 分支视图 ------------------------------ */
 
+  /**
+   * 推送某个分支（分支右键菜单）。
+   *
+   * 为什么不能简单地 `git push <branch>`：git 把无仓库参数时的第一个参数当成**仓库**（远程名或 URL），
+   * 不是 refspec——`git push feat` 会报 "'feat' does not appear to be a git repository"。
+   * 所以必须显式给出远程，并用 `本地:远程` 形式的 refspec：
+   *   · 分支已配上游（`b.upstream` 形如 `origin/feat-x`）→ 推给**它的上游**，且远端分支名按上游取
+   *     （不能想当然用同名：上游可以叫别的名字）；
+   *   · 没有上游 → 这是「发布分支」动作：挑一个远程，推同名分支并 `--set-upstream` 建立跟踪。
+   */
+  async function pushBranch(b: GitBranchInfo, at?: { x: number; y: number }): Promise<void> {
+    const slash = b.upstream?.indexOf("/") ?? -1
+    if (b.upstream && slash > 0) {
+      const remote = b.upstream.slice(0, slash)
+      const branch = b.upstream.slice(slash + 1)
+      await op("push", { remote, refspec: `${b.name}:${branch}` }, `已推送 ${b.name}`)
+      return
+    }
+    // 无上游：需要挑一个远程（远程清单可能还没加载过，先取一次）
+    let list = remotes
+    try {
+      list = (await hooks.api.gitRemotes(hooks.root())).remotes
+    } catch {
+      /* 取不到就用已有缓存 */
+    }
+    if (!list.length) {
+      toast("未配置远程仓库：先在引用栏的「远程」里添加一个", "error", 5000)
+      return
+    }
+    const publish = (remote: string) => {
+      void op("push", { remote, refspec: `${b.name}:${b.name}`, setUpstream: true }, `已推送 ${b.name} 并设为跟踪 ${remote}/${b.name}`)
+    }
+    // 唯一远程与 origin 都不用问；多个远程且无 origin 时让用户选一个（网络写操作不替用户猜）
+    const only = list.find((r) => r.name === "origin") ?? (list.length === 1 ? list[0] : undefined)
+    if (only) {
+      publish(only.name)
+      return
+    }
+    if (!at) return
+    showMenu(
+      at.x,
+      at.y,
+      list.map((r) => ({ label: `推送到 ${r.name}（并设为上游）`, icon: "upload", onClick: () => publish(r.name) })),
+    )
+  }
+
   async function loadBranches(): Promise<void> {
     try {
       const res = await hooks.api.gitBranches(hooks.root())
@@ -525,6 +571,15 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
           e.preventDefault()
           showMenu(e.clientX, e.clientY, [
             { label: "检出", icon: "check", disabled: b.current, onClick: () => void op("branch", { action: "checkout", name: b.name }, "已切换") },
+            // 推送：远程分支没法再推（b.remote），故只给本地分支；领先上游时把数字写进标签，
+            // 与分支行上的 ↑N 同一口径——不用点开就知道有没有东西要推。
+            {
+              label: b.ahead ? `推送（↑${b.ahead}）` : "推送",
+              icon: "upload",
+              disabled: b.remote || !hooks.writable() || !hooks.remoteEnabled(),
+              onClick: () => void pushBranch(b, { x: e.clientX, y: e.clientY }),
+            },
+            { separator: true },
             { label: "与当前分支比较（共同祖先）", icon: "diff", disabled: b.current, onClick: () => hooks.openCompare({ from: "HEAD", to: b.name, mergeBase: true }) },
             { label: "与当前分支比较（含各自新提交）", icon: "diff", disabled: b.current, onClick: () => hooks.openCompare({ from: "HEAD", to: b.name }) },
             { label: "与工作区比较", icon: "edit", onClick: () => hooks.openCompare({ from: b.name, to: "WORKTREE" }) },
