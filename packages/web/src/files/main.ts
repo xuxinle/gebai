@@ -1198,7 +1198,7 @@ function renderRail(): void {
           { separator: true },
           // 嵌入态（分屏）下"返回主界面"= 关掉分屏容器；独立标签页才是整页跳回
           EMBEDDED
-            ? { label: "关闭分屏", icon: "back", onClick: () => requestCloseSplit() }
+            ? { label: "关闭分屏", icon: "collapseRight", onClick: () => requestCloseSplit() }
             : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/` } },
         ])
       }
@@ -1207,14 +1207,14 @@ function renderRail(): void {
   )
   /*
    * 分屏（嵌入）时在活动栏**最下方**给一个「关闭分屏」。
-   * 为什么放这里：标题栏的 ✕ 已按反馈移除，而嵌入态下面板自己没有顶栏——鼠标用户要关分屏，
-   * 只剩「更多」菜单里的那一项（两步）。站在最下方、图标与「更多」里的那一项同款（back），
+   * 为什么放这里：嵌入态下面板自己没有顶栏，鼠标用户要关分屏只剩「更多」菜单里的那一项（两步）；
+   * 站在最下方、图标与「更多」里的那一项同款（collapseRight——面板停在窗口右列，箭头指出向），
    * 既好找又不占编辑区。独立标签页时不存在“分屏”，故仅 EMBEDDED 渲染。
    * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
    */
   if (EMBEDDED) {
     const close = h("button", { class: "fw-rail-btn", title: "关闭分屏（Ctrl+Shift+E / Esc）" })
-    close.appendChild(icon("back", 18))
+    close.appendChild(icon("collapseRight", 18))
     close.onclick = () => requestCloseSplit()
     railEl.appendChild(close)
   }

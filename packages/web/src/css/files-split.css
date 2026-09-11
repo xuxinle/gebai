@@ -64,6 +64,12 @@ body.files-split.sidebar-collapsed #app {
   grid-template-columns: 1fr var(--files-split-w, 50vw);
 }
 
+/* 右列整列归工作台（它占满整个窗口高度），标题栏因此只留在左列会话区上方——
+   工作台自己是 IDE 式界面（自带顶栏与状态栏），头顶再压一条宿主标题栏只是白占编辑区的高度。 */
+body.files-split header {
+  grid-column: 1;
+}
+
 body.files-split aside {
   display: none;
 }
@@ -75,7 +81,8 @@ body.files-split main {
 
 #files-split {
   grid-column: 2;
-  grid-row: 2;
+  /* 跨满两行（标题栏行 + 内容行）：面板从窗口顶到底占满右列 */
+  grid-row: 1 / -1;
   position: relative;
   /*
    * 必须显式加入「内容层」（与 main 同值）。

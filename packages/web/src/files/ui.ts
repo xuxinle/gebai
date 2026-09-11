@@ -78,6 +78,8 @@ const ICONS: Record<string, string> = {
   diff: '<path d="M4 2v12M12 2v12M2 5h4M10 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   settings: '<circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.5l1 1.8 2-.4.4 2 1.8 1-1 1.8 1 1.8-1.8 1-.4 2-2-.4L8 14.5l-1-1.8-2 .4-.4-2-1.8-1 1-1.8-1-1.8 1.8-1 .4-2 2 .4L8 1.5z" fill="none" stroke="currentColor" stroke-width="1.2"/>',
   back: '<path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  // 分屏收回（back 的镜像）：工作台面板停在窗口右列，箭头指出向
+  collapseRight: '<path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   expand: '<path d="M6 2h8v8M6 14H2V6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   play: '<path d="M5 3l8 5-8 5V3z" fill="currentColor"/>',
   zoomIn: '<circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5L14 14M7 5v4M5 7h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
