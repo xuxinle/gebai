@@ -1348,8 +1348,9 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - 渲染与交互在 `files/merge-view.ts`；三窗格窄屏（<1180px）纵向堆叠。
 - **工具窗与目录树的 IDE 细节**：
   - **底部停靠**：Git 工具窗在编辑区**下方**（`--git-dock-h` 高度可拖，默认 300px，双击拖条复位，高度记忆在 localStorage；窄屏 <1180px 时三栏纵向堆叠），rail 上的 git 按钮切换展开/收起、展开态高亮；关闭按钮在**面板自己的标题栏**内（与 IDEA 工具窗一致，不在标签栏上）。
-  - **目录树 VCS 装饰（IDEA 风格）**：文件名下方**彩色下划线**表示状态（修改=工具色 / 新增·未跟踪·已暂存=成功色 / 冲突=危险色 / 删除=删除线），同时保留右侧**字母徽标**（精确状态：M/A/D/R/S/U/!）与 hover 提示。装饰刷新走 `explorer.refreshGitDecorations()`——**只换装饰元素、不重建树**（树的展开态/滚动位置/选中项都在 DOM 里，重建会「折叠回去 + 滚动跳顶」）。
-    - 修过的坑：git 状态是异步到达的，而树在状态到达**之前**就渲染完了；早期只在渲染时取一次 `gitStatus()` → 徽标永远为空（只有手动刷新才出现）。现在 `refreshGit()` 拿到状态后回填装饰。
+  - **目录树 VCS 装饰（IDEA 风格）**：文件名下方**彩色下划线**表示状态，同时保留右侧**字母徽标**（精确状态：M/A/D/R/S/U/!）与 hover 提示。颜色与 Git 面板的变更字母**同一套语言**（修改=警告色琥珀 / 新增·未跟踪·已暂存=成功色绿 / 冲突=危险色红 / 删除=红色删除线 / 仅「子项有变更」的目录=中性灰）——不用 `--tool`（那是聊天里工具消息的颜色，部分主题下是灰的，语义不符）。装饰刷新走 `explorer.refreshGitDecorations()`——**只换装饰元素、不重建树**（树的展开态/滚动位置/选中项都在 DOM 里，重建会「折叠回去 + 滚动跳顶」）。
+    - 修过的坑①：git 状态是异步到达的，而树在状态到达**之前**就渲染完了；早期只在渲染时取一次 `gitStatus()` → 徽标永远为空（只有手动刷新才出现）。现在 `refreshGit()` 拿到状态后回填装饰。
+    - 修过的坑②（**`line-height: 1` 把字母下半部裁掉**）：树容器原为 `line-height: 1`，行盒 = 12.5px 而字体 ascent+descent = 15px——半行距为**负**，基线以下只剩 ~1.75px；而 `g/j/p/q/y` 的尾巴需要 ~3px，文件名 span 的 `overflow: hidden`（横向省略号所必需）会把**纵向溢出一起裁掉**。后果：`keqing` 的 `g` 尾巴被切平，看起来像 `q`（更糟的字体度量下切得更多），且新加的状态下划线（baseline 下 2px）**整条不可见**——computed style 说 `underline`，实际一个像素都没画。改为 `line-height: 1.55`（19.4px，基线以下 ~5.2px）后尾巴与下划线都完整，行高 22px 不变。**教训：`overflow: hidden` 的省略号容器会把 `line-height < 字体度量` 的墨迹（含 descender 与 text-decoration）静默裁掉，且 computed style 不反映——必须看渲染结果或量基线以下空间。**
 - **子系统边界（会话工作区 vs 仓库根）**：root 可为仓库子目录（典型：会话 `tmp/` 位于项目仓库内）——服务端返回 `rootPath` + `prefix`，Git 面板与比较视图**默认限定该子目录**（chip 一键切整仓库；限定范围内无差异且整仓库有差异时给引导）。路径语义：**git 侧为仓库相对**（`contentAt`/git 命令）、**fs 侧为根相对**（树/编辑器），前端 `toRootPath()` 负责在打开文件时换算；`routes/git.ts` 仓库定位用独立 `dir` 参数（不复用 `path`——`path` 在这些端点是 pathspec，混用会把文件当目录）。
 - **安全与审计**：`GEBAI_FS_ENABLED`（总开关，false → 页面与 fs/git 端点全 404）/`GEBAI_FS_WRITE`（工作台写开关）/`GEBAI_GIT_WRITE`/`GEBAI_GIT_REMOTE`；写操作统一审计（`GEBAI_FS_AUDIT` → `{GEBAI_HOME}/audit-fs.jsonl`）；删除入回收站（可恢复/彻底清除）；上限 `GEBAI_FS_MAX_READ|WRITE|UPLOAD|ZIP`。
 - **与主界面的集成**：除标题栏轮盘左侧的「文件」按钮外，**消息流里的文件产物也能一键跳工作台**——文件链接 chip、文件卡工具栏、原文件弹窗标题栏三处各有「在文件工作台中打开」（`file-wb-icon`）；产物在哪个会话产生就打开哪个会话的工作区（chip 显式携带渲染时的会话 id，不随当前会话漂移）。

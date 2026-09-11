@@ -316,7 +316,14 @@
   overflow: auto;
   padding: 4px 0 24px;
   font-size: 12.5px;
-  line-height: 1;
+  /*
+   * line-height 不能用 1：行盒会缩到 12.5px，而字体 ascent+descent = 15px——
+   * 半行距变负，基线以下只剩 ~1.75px，而 g/j/p/q/y 的尾巴需要 3px。
+   * 文件名 span 带 overflow:hidden（横向省略号所必需），**纵向溢出会被一并裁掉**：
+   * 结果就是「keqing」里的 g 尾巴被切，看着像 q；名字下的状态下划线（offset 2px）整条不可见。
+   * 1.55 × 12.5 = 19.4px：基线以下 ~5.2px，尾巴与下划线都完整；仍小于行高 22px。
+   */
+  line-height: 1.55;
 }
 
 .fw-tree-row {
@@ -429,10 +436,13 @@
 .fw-tree-row.git-conflict > .fw-tree-name {
   text-decoration: underline;
   text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  /* 2px + 1px 粗度 = 基线以下 3px，正好在行盒内（不会像 3px 那样贴边） */
+  text-underline-offset: 2px;
 }
 
-.fw-tree-row.git-modified > .fw-tree-name { text-decoration-color: var(--tool); }
+/* 颜色与 Git 面板的变更字母同一套语言（M 琥珀 / A·U 绿 / 冲突红），
+   不用 --tool ——那是聊天里工具消息的颜色，在部分主题下是灰的，语义不符 */
+.fw-tree-row.git-modified > .fw-tree-name { text-decoration-color: var(--warning); }
 .fw-tree-row.git-staged > .fw-tree-name,
 .fw-tree-row.git-untracked > .fw-tree-name,
 .fw-tree-row.git-added > .fw-tree-name { text-decoration-color: var(--success); }
@@ -444,14 +454,12 @@
   text-decoration-color: var(--danger);
 }
 
-/* 目录：只表示「子项有变更」，用中性色避免误导为具体状态 */
-.fw-tree-row.dir.git-child > .fw-tree-name,
-.fw-tree-row.dir.git-modified > .fw-tree-name,
-.fw-tree-row.dir.git-staged > .fw-tree-name,
-.fw-tree-row.dir.git-untracked > .fw-tree-name {
+/* 目录：只有「子项有变更」但自身状态不明时才用中性色；
+   若目录已被归到具体状态（modified/untracked/staged）则与它的字母标记同色，不一致会误导 */
+.fw-tree-row.dir.git-child > .fw-tree-name {
   text-decoration: underline;
   text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  text-underline-offset: 2px;
   text-decoration-color: color-mix(in srgb, var(--text-faint) 75%, transparent);
 }
 
