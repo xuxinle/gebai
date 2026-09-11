@@ -200,8 +200,13 @@ export function toggleSplit(opts: FilesOpenOpts = {}): void {
 function syncEntry(): void {
   const open = isSplitOpen()
   if (mainBtn) {
-    // 提示里带上快捷键：副按钮只在浮空时出现，键盘用户靠 Ctrl+Shift+E
-    const tip = open ? "关闭分屏（Ctrl+Shift+E / Esc）" : "分屏打开（右侧对照，可拖动分界 · Ctrl+Shift+E）"
+    /*
+     * 文案取「动作（快捷键）」两句式，与标题栏其他入口同调（如「新会话（Ctrl+N / Ctrl+Shift+O）」）。
+     * 早先这里是「分屏打开（右侧对照，可拖动分界 · Ctrl+Shift+E）」——一个 30 字的单行气泡，
+     * 比按钮宽四倍、压在按钮下方，悬浮时相当抢眼；而「右侧对照 / 可拖动分界」是点下去一眼就懂的事，
+     * 不必写进提示。
+     */
+    const tip = open ? "关闭分屏（Ctrl+Shift+E / Esc）" : "分屏打开（Ctrl+Shift+E）"
     mainBtn.dataset.tip = tip
     mainBtn.setAttribute("aria-label", tip)
     mainBtn.setAttribute("aria-expanded", String(open))
