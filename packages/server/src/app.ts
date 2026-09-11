@@ -14,6 +14,7 @@ import type { EventBus } from "./core/base/event-bus"
 import type { SubAgentManager } from "./core/agents/subagents"
 import type { WebhookManager } from "./webhooks"
 import type { ServerConfig } from "./core/base/config"
+import { BOOT_ID } from "./core/base/boot-id"
 import type { RouteCtx } from "./routes/context"
 import { registerAuthRoutes } from "./routes/auth"
 import { registerUserRoutes } from "./routes/users"
@@ -159,8 +160,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   const rc: RouteCtx = { app, d, userOf, requireAdmin }
 
-  // Health
-  app.get("/api/health", (c) => c.json({ ok: true, ts: Date.now() }))
+  // Health（boot=进程启动标识：Web 页面据此在服务重启后自动重新加载，见 core/base/boot-id.ts）
+  app.get("/api/health", (c) => c.json({ ok: true, ts: Date.now(), boot: BOOT_ID }))
 
   // 各域路由（装配顺序：sessions 的 :id 白名单中间件须先于 session-files 注册）
   registerAuthRoutes(rc)

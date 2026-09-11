@@ -26,9 +26,93 @@ import type { Tool, ToolResult } from "../base/types"
 import { isBinaryMode } from "../base/config"
 import { schema } from "./shared"
 
-/** 重启工作目录（拉起器脚本/状态文件/新服务日志）。 */
+/** 重启工作目录（拉起器脚本/状态文件/续跑请求/新服务日志）。 */
 export function restartDir(tmp: string = tmpdir()): string {
   return join(tmp, "gebai-restart")
+}
+
+/** 续跑请求（restart_server 的 `prompt` 参数）：旧进程自杀前落盘，新服务启动后**消费一次**——
+ *  把提示词作为用户消息注入原会话并触发新一轮运行（模型据此继续工作，无需用户重新发消息）。 */
+export interface RestartContinuation {
+  /** 目标会话（缺省为调用工具时的当前会话）。 */
+  sessionId: string
+  /** 会话属主用户。 */
+  user: string
+  /** 发起用户角色（admin/user；续跑任务的公共资源权限判定用）。 */
+  role?: string
+  /** 重启就绪后自动注入会话的用户提示词（原样落盘为 user 消息）。 */
+  prompt: string
+  /** 写盘时刻（ms）：新服务据此判有效期（过期不执行，防陈旧请求被无关启动误消费）。 */
+  at: number
+  /** 旧服务 PID（诊断用）。 */
+  oldPid: number
+}
+
+/** 续跑执行结果（新服务消费后写入 continue.result.json，status 动作展示）。
+ *  `ok: null` = 已开始执行、任务尚在跑（先写「执行中」再跑、完成后覆盖——任务中途进程再被重启也留下痕迹）。 */
+export interface ContinuationResult {
+  ok: boolean | null
+  sessionId: string
+  /** 「本次启动由重启拉起器承接」的确认结论：confirmed=state.json 的 pid 匹配本进程 /
+   *  failed=拉起器已判失败（人工拉起兜底）/ timeout=等待超时未确认。 */
+  confirm?: "confirmed" | "failed" | "timeout"
+  promptChars?: number
+  /** 附注（status 展示；如「续跑执行中」）。 */
+  note?: string
+  /** 未执行的原因（过期/会话不存在等）。 */
+  reason?: string
+  /** 执行异常（engine.run 抛错）。 */
+  error?: string
+  at: number
+}
+
+/** 续跑请求文件路径。 */
+export function continuationFile(tmp: string = tmpdir()): string {
+  return join(restartDir(tmp), "continue.json")
+}
+
+/** 续跑执行结果文件路径。 */
+export function continuationResultFile(tmp: string = tmpdir()): string {
+  return join(restartDir(tmp), "continue.result.json")
+}
+
+/** 写续跑请求：**在部署拉起器之前**调用——写失败即中止本次重启（不留「重启成功但续跑指令丢失」的半成品）。 */
+export async function writeContinuation(req: RestartContinuation, tmp: string = tmpdir()): Promise<void> {
+  await mkdir(restartDir(tmp), { recursive: true })
+  await writeFile(continuationFile(tmp), JSON.stringify(req), "utf8")
+}
+
+/** 读续跑请求（不存在/损坏返回 null）。 */
+export async function readContinuation(tmp: string = tmpdir()): Promise<RestartContinuation | null> {
+  try {
+    const raw = await readFile(continuationFile(tmp), "utf8")
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, "")) as RestartContinuation
+    if (!parsed || typeof parsed.sessionId !== "string" || typeof parsed.user !== "string" || typeof parsed.prompt !== "string") return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** 删除续跑请求（消费一次性语义：先删再执行，并发/重复启动不会双跑）。 */
+export async function removeContinuation(tmp: string = tmpdir()): Promise<void> {
+  const { unlink } = await import("node:fs/promises")
+  await unlink(continuationFile(tmp)).catch(() => {})
+}
+
+/** 写续跑执行结果（覆盖式：只保留最近一次）。 */
+export async function writeContinuationResult(res: ContinuationResult, tmp: string = tmpdir()): Promise<void> {
+  await mkdir(restartDir(tmp), { recursive: true })
+  await writeFile(continuationResultFile(tmp), JSON.stringify(res), "utf8").catch(() => {})
+}
+
+/** 读续跑执行结果（无记录返回 null）。 */
+export async function readContinuationResult(tmp: string = tmpdir()): Promise<ContinuationResult | null> {
+  try {
+    return JSON.parse((await readFile(continuationResultFile(tmp), "utf8")).replace(/^\uFEFF/, "")) as ContinuationResult
+  } catch {
+    return null
+  }
 }
 
 export interface RestartDeps {
@@ -50,6 +134,10 @@ export interface RestartDeps {
   platform: NodeJS.Platform
   /** 自杀延迟（工具结果送达窗口，毫秒）。 */
   exitDelayMs: number
+  /** 当前进程是否 dev-reload 模式（`--reload` 参数或 GEBAI_DEV_RELOAD=1）：**argv 参数不会被拉起器
+   *  复制**（新进程固定 `bun run <entry>`），重启时须改经环境变量传给新进程——否则前端构建 watch
+   *  （vite build --watch）与页面热刷新通道在重启后永久丢失，直到再次手工以 --reload 启动。 */
+  devReload: boolean
   /** 进程退出（默认 process.exit；测试注入）。 */
   exit: (code: number) => void
   /** 拉起器部署（默认按平台 Start-Process / setsid；测试注入）。 */
@@ -58,7 +146,7 @@ export interface RestartDeps {
 
 /** 新进程须继承的启动级环境变量（端口/家目录/监听地址/模式；凭据类不复制——.env 由 loadConfig 自行加载）。 */
 export function pickRestartEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
-  const keys = ["GEBAI_PORT", "GEBAI_HOST", "GEBAI_HOME", "GEBAI_MODE", "GEBAI_BASE_PATH"]
+  const keys = ["GEBAI_PORT", "GEBAI_HOST", "GEBAI_HOME", "GEBAI_MODE", "GEBAI_BASE_PATH", "GEBAI_DEV_RELOAD"]
   const out: Record<string, string> = {}
   for (const k of keys) {
     const v = env[k]
@@ -84,6 +172,9 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
   const probe = `${basePath}/api/v1/sub-agents`
   return [
     "$ErrorActionPreference = 'Continue'",
+    // 日志轮转：Start-Process 的 -RedirectStandardOutput 为**覆盖写**，连续重启会吞掉上一次的诊断日志
+    `if (Test-Path '${logPs}.out') { Move-Item '${logPs}.out' '${logPs}.out.prev' -Force }`,
+    `if (Test-Path '${logPs}.err') { Move-Item '${logPs}.err' '${logPs}.err.prev' -Force }`,
     `$port = ${deps.port}`,
     `$oldPid = ${deps.oldPid}`,
     // 1) 等旧进程退出（进程不存在即释放；最长 60s）
@@ -188,6 +279,9 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
     "set -u",
     // 目录自建（不依赖部署方 mkdir——脚本自带全流程自包含）
     `mkdir -p ${shq(dir)}`,
+    // 日志轮转：直接覆盖会吞掉上一次重启的诊断日志（保留 .prev）
+    `mv -f ${shq(logOut)} ${shq(`${logOut}.prev`)} 2>/dev/null || true`,
+    `mv -f ${shq(logErr)} ${shq(`${logErr}.prev`)} 2>/dev/null || true`,
     `port=${deps.port}`,
     `old_pid=${deps.oldPid}`,
     // 1) 等旧进程退出（kill -0 探测存在性；最长 60s）
@@ -284,15 +378,128 @@ async function defaultSpawnLauncher(scriptPath: string, platform: NodeJS.Platfor
   return platform === "win32" ? startProcessSpawnLauncher(scriptPath) : setsidSpawnLauncher(scriptPath)
 }
 
-/** 读取最近一次重启状态（status 动作）。 */
+/** 读 state.json（拉起器写入的重启结论；不存在/损坏返回 null）。 */
+async function readStateFile(tmpDir: string): Promise<{ ok?: boolean | null; pid?: number; error?: string } | null> {
+  try {
+    return JSON.parse((await readFile(join(restartDir(tmpDir), "state.json"), "utf8")).replace(/^\uFEFF/, ""))
+  } catch {
+    return null
+  }
+}
+
+/** 续跑消费依赖（测试注入全部可选，便于离线验证判定分支）。 */
+export interface ConsumeContinuationDeps {
+  /** 当前进程 PID（与 state.json 的 pid 比对，确认「本次启动由重启拉起器承接」）。 */
+  pid: number
+  /** 实际触发续跑（装配处包装 engine.run：把 req.prompt 作为 user 消息注入 req.sessionId 并跑一轮）。 */
+  run: (req: RestartContinuation) => Promise<void>
+  tmpDir?: string
+  /** 会话存在性校验（缺省跳过）。 */
+  sessionExists?: (sessionId: string, user: string) => Promise<boolean>
+  /** 等 state.json 确认的最长时间（ms，默认 25000）。 */
+  waitStateMs?: number
+  /** 轮询间隔（ms，默认 500）。 */
+  pollMs?: number
+  /** 请求有效期（ms，默认 10 分钟）。 */
+  maxAgeMs?: number
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  log?: (msg: string) => void
+}
+
+export interface ConsumeContinuationOutcome {
+  consumed: boolean
+  reason: string
+  confirm?: "confirmed" | "failed" | "timeout"
+}
+
+/**
+ * 消费续跑请求（新服务启动后调用的非阻塞后台任务）：把旧进程留下的提示词注入原会话继续执行。
+ * 确认与兜底：
+ * - state.json 的 pid === 本进程 → confirmed（正常路径：本次启动确由重启拉起器承接）；
+ * - 拉起器已写失败结论（ok=false）→ failed：本进程非它拉起（人工恢复/桌面外壳），**仍执行**——
+ *   提示词是调用方的明确意图，「重启失败后人工恢复」正是最需要它不丢的场景；
+ * - 等待超时未确认 → timeout：同样执行（覆盖状态文件写入失败/延迟的极端情形）；
+ * - 过期（> maxAgeMs）→ 丢弃不执行（防陈旧请求被无关启动误消费）；
+ * - **先删请求文件再执行**（一次性语义：并发/重复启动不会双跑）；结论写 continue.result.json
+ *   供 restart_server(action="status") / server.log 确认。
+ */
+export async function consumeRestartContinuation(deps: ConsumeContinuationDeps): Promise<ConsumeContinuationOutcome> {
+  const tmp = deps.tmpDir ?? tmpdir()
+  const now = deps.now ?? (() => Date.now())
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const log = deps.log ?? ((m: string) => console.log(`[restart] ${m}`))
+  const req = await readContinuation(tmp)
+  if (!req) return { consumed: false, reason: "无续跑请求" }
+  const age = now() - req.at
+  if (!Number.isFinite(age) || age > (deps.maxAgeMs ?? 10 * 60_000) || age < -60_000) {
+    await removeContinuation(tmp)
+    await writeContinuationResult({ ok: false, sessionId: req.sessionId, reason: "续跑请求已过期，未执行", at: now() }, tmp)
+    log(`续跑请求已过期（${Math.round(age / 1000)}s），丢弃`)
+    return { consumed: false, reason: "已过期" }
+  }
+  // 等 state.json 确认：就绪探测完成后由拉起器写入，通常在服务监听后 1~3s 内到达
+  const waitMs = deps.waitStateMs ?? 25_000
+  const pollMs = deps.pollMs ?? 500
+  const deadline = now() + waitMs
+  let confirm: "confirmed" | "failed" | "timeout" = "timeout"
+  let detail = "等待 state.json 确认超时"
+  for (;;) {
+    const st = await readStateFile(tmp)
+    if (st) {
+      if (st.pid === deps.pid) {
+        confirm = "confirmed"
+        detail = "state.json 的 pid 为本进程"
+        break
+      }
+      if (st.ok === false) {
+        confirm = "failed"
+        detail = st.error ?? "拉起器判定重启失败"
+        break
+      }
+    }
+    if (now() >= deadline) break
+    await sleep(pollMs)
+  }
+  await removeContinuation(tmp)
+  log(`续跑请求（会话 ${req.sessionId}，${req.prompt.length} 字）：确认=${confirm}（${detail}）`)
+  if (deps.sessionExists && !(await deps.sessionExists(req.sessionId, req.user).catch(() => false))) {
+    await writeContinuationResult({ ok: false, sessionId: req.sessionId, confirm, reason: "会话不存在，续跑未执行", at: now() }, tmp)
+    log(`续跑未执行：会话 ${req.sessionId} 不存在`)
+    return { consumed: false, reason: "会话不存在", confirm }
+  }
+  try {
+    // 先写「执行中」再跑：续跑任务可能一直跑到下次重启（本用例：任务本身就含下一次重启）——
+    // 不先写则在任务中途进程被杀时完全无痕迹，status 看不到任何续跑记录
+    await writeContinuationResult({ ok: null, sessionId: req.sessionId, confirm, note: "续跑执行中", promptChars: req.prompt.length, at: now() }, tmp)
+    await deps.run(req)
+    await writeContinuationResult({ ok: true, sessionId: req.sessionId, confirm, promptChars: req.prompt.length, at: now() }, tmp)
+    log(`续跑完成：会话 ${req.sessionId}`)
+    return { consumed: true, reason: "已续跑", confirm }
+  } catch (err) {
+    const msg = String((err as Error).message || err).slice(0, 500)
+    await writeContinuationResult({ ok: false, sessionId: req.sessionId, confirm, error: msg, at: now() }, tmp)
+    log(`续跑失败：${msg}`)
+    return { consumed: false, reason: `续跑失败: ${msg}`, confirm }
+  }
+}
+
+/** 读取最近一次重启状态 + 续跑情况（status 动作）。 */
 async function readState(deps: Pick<RestartDeps, "tmpDir">): Promise<ToolResult> {
   const stateFile = join(restartDir(deps.tmpDir), "state.json")
+  let text: string
   try {
     const raw = await readFile(stateFile, "utf8")
-    return { output: `最近一次重启状态：\n${raw.trim().replace(/^\uFEFF/, "")}` }
+    text = `最近一次重启状态：\n${raw.trim().replace(/^\uFEFF/, "")}`
   } catch {
-    return { output: `尚无重启记录（state.json 不存在）——从未执行过重启，或 ${restartDir()} 被清理。` }
+    text = `尚无重启记录（state.json 不存在）——从未执行过重启，或 ${restartDir()} 被清理。`
   }
+  const cont = await readContinuation(deps.tmpDir)
+  const res = await readContinuationResult(deps.tmpDir)
+  const lines = [text]
+  lines.push(cont ? `续跑请求（等待新服务消费）：会话 ${cont.sessionId}，提示词 ${cont.prompt.length} 字，写入于 ${new Date(cont.at).toISOString()}` : "续跑请求：无")
+  lines.push(res ? `续跑结果：${JSON.stringify(res)}` : "续跑结果：无")
+  return { output: lines.join("\n") }
 }
 
 /** 构造 restart_server 工具（依赖注入便于测试）。 */
@@ -307,6 +514,7 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
     env: pickRestartEnv(),
     platform: process.platform,
     exitDelayMs: 2500,
+    devReload: process.argv.includes("--reload") || process.env.GEBAI_DEV_RELOAD === "1",
     exit: (code) => process.exit(code),
     spawnLauncher: defaultSpawnLauncher,
     ...overrides,
@@ -314,25 +522,61 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
   return {
     name: "restart_server",
     description:
-      "重启本歌白服务进程（仅本地模式可用，Windows/Linux/macOS）。执行后当前连接（飞书/Web）会短暂中断，几秒后自动恢复——外部拉起器（独立于服务进程树）等待旧进程退出与端口释放，再以同端口/同配置启动新服务并确认就绪；结果写入系统临时目录 gebai-restart/state.json，日志在同目录 server.log.*。action=status 查看最近一次重启状态（不重启）。服务模式（多用户部署）不提供本工具。",
+      "重启本歌白服务进程（仅本地模式可用，Windows/Linux/macOS）。执行后当前连接（飞书/Web）会短暂中断，几秒后自动恢复——外部拉起器（独立于服务进程树）等待旧进程退出与端口释放，再以同端口/同配置启动新服务并确认就绪；Web 页面在服务重启后自动重新加载（无需手动刷新），dev-reload（--reload）能力随重启继承。" +
+      "可传 prompt 指定「重启后续跑」：新服务就绪后自动把这段提示词作为用户消息注入本会话并继续执行（服务重启会中断在途任务，续跑指令用于告诉模型重启后接着干什么）。" +
+      "结果写入系统临时目录 gebai-restart/state.json，续跑情况见同目录 continue.result.json，日志在 server.log.*。action=status 查看最近一次重启与续跑状态（不重启）。服务模式（多用户部署）不提供本工具。",
     parameters: schema({
-      action: { type: "string", enum: ["restart", "status"], description: "restart=执行重启（默认）；status=只读最近一次重启状态" },
+      action: { type: "string", enum: ["restart", "status"], description: "restart=执行重启（默认）；status=只读最近一次重启状态与续跑情况" },
+      prompt: {
+        type: "string",
+        description:
+          "可选（仅 action=restart）：重启完成、新服务就绪后自动注入本会话的用户提示词（续跑指令）——新服务把它作为用户消息落盘并继续执行，无需用户重新发消息。重启会中断当前任务，需要接着干活时务必传：写清重启后要做什么（如「服务已重启，请继续验证 XX 并汇报结果」）。缺省不续跑。",
+      },
+      session: { type: "string", description: "可选：续跑目标会话 id（默认当前会话）" },
     }),
     requiresApproval: true,
-    async execute(args): Promise<ToolResult> {
+    async execute(args, ctx): Promise<ToolResult> {
       if (args.action === "status") return readState(deps)
-      // 状态文件先写「进行中」（旧内容清除；重启失败时拉起器覆盖为失败原因）
       const dir = restartDir(deps.tmpDir)
       await mkdir(dir, { recursive: true })
+      // 续跑请求（prompt 参数）：先落盘——写失败即中止本次重启（不留「重启了但续跑指令丢失」的半成品）
+      const prompt = typeof args.prompt === "string" ? args.prompt.trim() : ""
+      let continuation: RestartContinuation | null = null
+      if (prompt) {
+        const sessionArg = typeof args.session === "string" ? args.session.trim() : ""
+        continuation = {
+          sessionId: sessionArg || ctx.sessionId,
+          user: ctx.user,
+          role: ctx.userRole,
+          prompt,
+          at: Date.now(),
+          oldPid: deps.oldPid,
+        }
+        try {
+          await writeContinuation(continuation, deps.tmpDir)
+        } catch (err) {
+          return { output: `续跑请求写入失败，未执行重启（服务仍在运行）：${String((err as Error).message || err)}` }
+        }
+      }
+      // dev-reload 继承：拉起器固定 `bun run <entry>`（argv 的 --reload 不会被复制），改经环境变量传给新进程
+      const effDeps: RestartDeps =
+        deps.devReload && deps.env.GEBAI_DEV_RELOAD !== "1" ? { ...deps, env: { ...deps.env, GEBAI_DEV_RELOAD: "1" } } : deps
+      // 状态文件先写「进行中」（旧内容清除；重启失败时拉起器覆盖为失败原因）
       await writeFile(join(dir, "state.json"), JSON.stringify({ ok: null, note: "重启进行中", oldPid: deps.oldPid, at: new Date().toISOString() }), "utf8")
-      const deployed = await deployLauncher(deps)
+      const deployed = await deployLauncher(effDeps)
       if (!deployed.ok) {
+        // 未重启：清理续跑请求，避免残留文件被下次无关启动消费
+        if (continuation) await removeContinuation(deps.tmpDir)
         return { output: `拉起器部署失败，未执行重启（服务仍在运行）：${deployed.error ?? "未知错误"}` }
       }
       // 先送达本回复再退出：延迟自杀窗口内引擎已完成本轮工具结果回传
+      const contNote = continuation
+        ? `续跑已布置：新服务就绪后将在会话 ${continuation.sessionId} 自动注入该提示词（${prompt.length} 字）并继续执行。`
+        : ""
       const output =
         `重启已布置：外部拉起器（独立进程）已启动，${deps.exitDelayMs}ms 后当前进程退出（PID ${deps.oldPid}）。` +
-        `新服务将以端口 ${deps.port} 拉起，就绪探测最长 90s。` +
+        `新服务将以端口 ${deps.port} 拉起${deps.devReload ? "（dev-reload 模式继承）" : ""}，就绪探测最长 90s。` +
+        contNote +
         `恢复后可用 restart_server(action="status") 或查看 ${dir}${deps.platform === "win32" ? "\\state.json" : "/state.json"} 确认结果。`
       setTimeout(() => deps.exit(0), deps.exitDelayMs)
       return { output }

@@ -1,10 +1,22 @@
 /** restart_server 工具单测：双平台拉起器脚本构造、环境变量挑选、状态读取、服务模式不注入。 */
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, readFileSync } from "node:fs"
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import type { RestartDeps } from "./restart"
-import { buildLauncherScript, buildLauncherScriptPosix, buildLauncherScriptWin, makeRestartServerTool, pickRestartEnv, restartDir } from "./restart"
+import type { RestartContinuation, RestartDeps } from "./restart"
+import {
+  buildLauncherScript,
+  buildLauncherScriptPosix,
+  buildLauncherScriptWin,
+  consumeRestartContinuation,
+  makeRestartServerTool,
+  pickRestartEnv,
+  readContinuation,
+  readContinuationResult,
+  removeContinuation,
+  restartDir,
+  writeContinuation,
+} from "./restart"
 
 function makeDeps(overrides: Partial<RestartDeps> = {}): RestartDeps {
   return {
@@ -17,6 +29,7 @@ function makeDeps(overrides: Partial<RestartDeps> = {}): RestartDeps {
     env: { GEBAI_PORT: "3001", GEBAI_HOME: "/repo" },
     platform: "win32",
     exitDelayMs: 10,
+    devReload: false,
     exit: () => {},
     spawnLauncher: async () => ({ ok: true }),
     ...overrides,
@@ -51,6 +64,8 @@ describe("restart_server（Windows 拉起器）", () => {
     expect(script).toContain("$oldPid = 1234")
     expect(script).toContain("$port = 3001")
     expect(script).toContain("Get-Process -Id $oldPid")
+    expect(script).toContain("Move-Item") // 日志轮转（Start-Process 覆盖写会吞掉上次诊断日志）
+    expect(script).toContain("server.log.out.prev")
     expect(script).toContain("Start-Process -FilePath")
     expect(script).toContain("-WorkingDirectory '/repo/packages/server'")
     expect(script).toContain("$env:GEBAI_PORT = '3001'")
@@ -96,6 +111,7 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
     expect(script).toContain("export GEBAI_PORT='3001'")
     expect(script).toContain("export GEBAI_HOME='/repo'")
     expect(script).toContain("server.log.out")
+    expect(script).toContain("server.log.out.prev") // 日志轮转（保留上次重启的诊断日志）
     expect(script).toContain("curl -sf -o /dev/null -m 3")
     expect(script).toContain("pid=\\K[0-9]+")
     expect(script).toContain("state.json")
@@ -233,6 +249,307 @@ describe("restart_server 工具行为", () => {
     })
     const res = await tool.execute({ action: "restart" }, ctxStub(tmpdir()))
     expect(res.output).toContain("重启已布置")
+  })
+})
+
+describe("restart_server 续跑（prompt 参数）", () => {
+  test("续跑请求落盘：写后可读回，删除后为空", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    try {
+      const req: RestartContinuation = { sessionId: "s1", user: "u1", role: "admin", prompt: "服务已重启，请继续", at: Date.now(), oldPid: 42 }
+      await writeContinuation(req, dir)
+      expect(await readContinuation(dir)).toEqual(req)
+      await removeContinuation(dir)
+      expect(await readContinuation(dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("restart 动作带 prompt：写续跑请求（当前会话/用户）+ 输出提示续跑布置", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "win32",
+        exitDelayMs: 5,
+        exit: () => {},
+        spawnLauncher: async () => ({ ok: true }),
+      })
+      const res = await tool.execute({ action: "restart", prompt: "  服务已重启，请继续验证  " }, ctxStub(dir))
+      expect(res.output).toContain("续跑已布置")
+      const cont = await readContinuation(dir)
+      expect(cont?.prompt).toBe("服务已重启，请继续验证") // 首尾空白归一
+      expect(cont?.sessionId).toBe("s") // 缺省=当前会话（ctxStub）
+      expect(cont?.user).toBe("u")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("restart 动作带 prompt + session：按指定会话续跑", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    try {
+      const tool = makeRestartServerTool({ tmpDir: dir, platform: "win32", exitDelayMs: 5, exit: () => {}, spawnLauncher: async () => ({ ok: true }) })
+      await tool.execute({ action: "restart", prompt: "继续", session: "abcdef01abcdef01abcdef01abcdef01" }, ctxStub(dir))
+      expect((await readContinuation(dir))?.sessionId).toBe("abcdef01abcdef01abcdef01abcdef01")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("拉起器部署失败：不退出且清理续跑请求（不残留待消费指令）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    let exited = 0
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "win32",
+        exitDelayMs: 5,
+        exit: () => {
+          exited++
+        },
+        spawnLauncher: async () => ({ ok: false, error: "部署失败" }),
+      })
+      const res = await tool.execute({ action: "restart", prompt: "继续" }, ctxStub(dir))
+      expect(res.output).toContain("拉起器部署失败")
+      await new Promise((r) => setTimeout(r, 40))
+      expect(exited).toBe(0)
+      expect(await readContinuation(dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("status 动作展示续跑请求与结果", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    try {
+      await writeContinuation({ sessionId: "s9", user: "u", prompt: "继续干活", at: Date.now(), oldPid: 1 }, dir)
+      const tool = makeRestartServerTool({ tmpDir: dir })
+      const res = await tool.execute({ action: "status" }, ctxStub(dir))
+      expect(res.output).toContain("续跑请求（等待新服务消费）")
+      expect(res.output).toContain("s9")
+      expect(res.output).toContain("续跑结果：无")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("restart_server 继承 dev-reload（重启后前端构建 watch 不丢）", () => {
+  test("pickRestartEnv：GEBAI_DEV_RELOAD 作为启动级变量被继承", () => {
+    expect(pickRestartEnv({ GEBAI_DEV_RELOAD: "1", GEBAI_PORT: "3001" })).toEqual({ GEBAI_PORT: "3001", GEBAI_DEV_RELOAD: "1" })
+  })
+
+  test("devReload 模式（--reload 启动）：拉起器脚本给新进程显式带 GEBAI_DEV_RELOAD=1（argv 不随拉起器复制）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    const scripts: string[] = []
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "win32",
+        devReload: true,
+        env: { GEBAI_PORT: "3001" },
+        exitDelayMs: 5,
+        exit: () => {},
+        spawnLauncher: async (script) => {
+          scripts.push(script)
+          return { ok: true }
+        },
+      })
+      const res = await tool.execute({ action: "restart" }, ctxStub(dir))
+      expect(res.output).toContain("dev-reload 模式继承")
+      expect(readFileSync(scripts[0], "utf8")).toContain("$env:GEBAI_DEV_RELOAD = '1'")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("非 devReload 模式：不向新进程注入该变量", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-cont-"))
+    const scripts: string[] = []
+    try {
+      const tool = makeRestartServerTool({
+        tmpDir: dir,
+        platform: "linux",
+        devReload: false,
+        env: { GEBAI_PORT: "3001" },
+        exitDelayMs: 5,
+        exit: () => {},
+        spawnLauncher: async (script) => {
+          scripts.push(script)
+          return { ok: true }
+        },
+      })
+      await tool.execute({ action: "restart" }, ctxStub(dir))
+      expect(readFileSync(scripts[0], "utf8")).not.toContain("GEBAI_DEV_RELOAD")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("consumeRestartContinuation（新服务启动消费续跑请求）", () => {
+  /** 虚拟时钟：sleep 推进虚拟时间，避免 timeout 分支真等 25s。 */
+  function clock(stepMs: number) {
+    let t = 1_700_000_000_000
+    return { now: () => t, sleep: async () => void (t += stepMs), at: () => t }
+  }
+
+  function makeDir(): string {
+    return mkdtempSync(join(tmpdir(), "restart-consume-"))
+  }
+
+  const REQ: RestartContinuation = { sessionId: "sess-1", user: "admin", role: "admin", prompt: "服务已重启，请继续", at: 1_700_000_000_000, oldPid: 7 }
+
+  test("无请求：静默返回，不触发运行", async () => {
+    const dir = makeDir()
+    try {
+      let ran = 0
+      const out = await consumeRestartContinuation({ tmpDir: dir, pid: 99, run: async () => void ran++, log: () => {} })
+      expect(out.consumed).toBe(false)
+      expect(out.reason).toBe("无续跑请求")
+      expect(ran).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("confirmed（state.json 的 pid 为本进程）：按提示词续跑、请求被消费、结果落盘", async () => {
+    const dir = makeDir()
+    try {
+      const c = clock(500)
+      await writeContinuation({ ...REQ, at: c.now() }, dir)
+      writeFileSync(join(restartDir(dir), "state.json"), JSON.stringify({ ok: true, port: 3000, pid: 99 }))
+      const seen: RestartContinuation[] = []
+      let during: Awaited<ReturnType<typeof readContinuationResult>> = null
+      const out = await consumeRestartContinuation({
+        tmpDir: dir,
+        pid: 99,
+        run: async (req) => {
+          seen.push(req)
+          during = await readContinuationResult(dir) // 执行期间应先有「执行中」记录（任务中途被杀也留痕迹）
+        },
+        now: c.now,
+        sleep: c.sleep,
+        log: () => {},
+      })
+      expect(out).toMatchObject({ consumed: true, confirm: "confirmed" })
+      expect(seen).toHaveLength(1)
+      expect(seen[0].sessionId).toBe("sess-1")
+      expect(seen[0].prompt).toBe("服务已重启，请继续")
+      expect(during).toMatchObject({ ok: null, note: "续跑执行中", confirm: "confirmed" })
+      expect(await readContinuation(dir)).toBeNull() // 一次性消费
+      expect((await readContinuationResult(dir))?.ok).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("拉起器已判失败（ok=false）：仍执行续跑（人工恢复场景不丢提示词），confirm=failed", async () => {
+    const dir = makeDir()
+    try {
+      const c = clock(500)
+      await writeContinuation({ ...REQ, at: c.now() }, dir)
+      writeFileSync(join(restartDir(dir), "state.json"), JSON.stringify({ ok: false, error: "端口被其他进程占用" }))
+      let ran = 0
+      const out = await consumeRestartContinuation({ tmpDir: dir, pid: 99, run: async () => void ran++, now: c.now, sleep: c.sleep, log: () => {} })
+      expect(out.confirm).toBe("failed")
+      expect(ran).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("等待超时未确认（无 state.json）：兜底执行，confirm=timeout", async () => {
+    const dir = makeDir()
+    try {
+      const c = clock(500)
+      await writeContinuation({ ...REQ, at: c.now() }, dir)
+      let ran = 0
+      const out = await consumeRestartContinuation({
+        tmpDir: dir,
+        pid: 99,
+        run: async () => void ran++,
+        now: c.now,
+        sleep: c.sleep,
+        waitStateMs: 1000,
+        pollMs: 500,
+        log: () => {},
+      })
+      expect(out.confirm).toBe("timeout")
+      expect(ran).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("请求过期（>10 分钟）：不执行并清理，不给无关启动误跑", async () => {
+    const dir = makeDir()
+    try {
+      const c = clock(500)
+      await writeContinuation({ ...REQ, at: c.now() - 11 * 60_000 }, dir)
+      let ran = 0
+      const out = await consumeRestartContinuation({ tmpDir: dir, pid: 99, run: async () => void ran++, now: c.now, sleep: c.sleep, log: () => {} })
+      expect(out.consumed).toBe(false)
+      expect(out.reason).toBe("已过期")
+      expect(ran).toBe(0)
+      expect(await readContinuation(dir)).toBeNull()
+      expect((await readContinuationResult(dir))?.reason).toContain("过期")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("会话不存在：不运行，结果记录原因（请求同样被消费，不重复尝试）", async () => {
+    const dir = makeDir()
+    try {
+      const c = clock(500)
+      await writeContinuation({ ...REQ, at: c.now() }, dir)
+      writeFileSync(join(restartDir(dir), "state.json"), JSON.stringify({ ok: true, pid: 99 }))
+      let ran = 0
+      const out = await consumeRestartContinuation({
+        tmpDir: dir,
+        pid: 99,
+        run: async () => void ran++,
+        sessionExists: async () => false,
+        now: c.now,
+        sleep: c.sleep,
+        log: () => {},
+      })
+      expect(out.reason).toBe("会话不存在")
+      expect(ran).toBe(0)
+      expect((await readContinuationResult(dir))?.reason).toContain("会话不存在")
+      expect(await readContinuation(dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("续跑执行抛错：结果记录错误（不抛出到启动路径）", async () => {
+    const dir = makeDir()
+    try {
+      const c = clock(500)
+      await writeContinuation({ ...REQ, at: c.now() }, dir)
+      writeFileSync(join(restartDir(dir), "state.json"), JSON.stringify({ ok: true, pid: 99 }))
+      const out = await consumeRestartContinuation({
+        tmpDir: dir,
+        pid: 99,
+        run: async () => {
+          throw new Error("模型不可用")
+        },
+        now: c.now,
+        sleep: c.sleep,
+        log: () => {},
+      })
+      expect(out.consumed).toBe(false)
+      expect(out.reason).toContain("模型不可用")
+      const res = await readContinuationResult(dir)
+      expect(res?.ok).toBe(false)
+      expect(res?.error).toContain("模型不可用")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

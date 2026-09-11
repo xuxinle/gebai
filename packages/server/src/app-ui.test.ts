@@ -114,3 +114,53 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
     }
   })
 })
+
+describe("Web UI 服务重启自动刷新（bootId 轮询注入）", () => {
+  test("本地模式：注入 bootId 比对脚本（服务重启后页面自动重新加载，免除手工 F5）", async () => {
+    const dist = mkdtempSync(join(tmpdir(), "gebai-dist-boot-"))
+    try {
+      writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
+      const html = await (await createApp(makeDeps({ webDist: dist })).request("/")).text()
+      expect(html).toContain("/api/health")
+      expect(html).toContain("location.reload()")
+      expect(html).toContain("setInterval")
+    } finally {
+      rmSync(dist, { recursive: true, force: true })
+    }
+  })
+
+  test("服务模式：不注入该脚本（多用户部署不被服务重启打扰），UI 风格注入不受影响", async () => {
+    const dist = mkdtempSync(join(tmpdir(), "gebai-dist-boot-server-"))
+    try {
+      writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
+      const html = await (await createApp(makeDeps({ webDist: dist, auth: "server" })).request("/")).text()
+      expect(html).not.toContain("/api/health")
+      expect(html).toContain("__GEBAI_UI_STYLE__")
+    } finally {
+      rmSync(dist, { recursive: true, force: true })
+    }
+  })
+
+  test("GEBAI_BASE_PATH 前缀：健康检查路径带前缀", async () => {
+    const dist = mkdtempSync(join(tmpdir(), "gebai-dist-boot-base-"))
+    try {
+      writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
+      const html = await (await createApp(makeDeps({ webDist: dist, basePath: "/gebai" })).request("/")).text()
+      expect(html).toContain("/gebai/api/health")
+    } finally {
+      rmSync(dist, { recursive: true, force: true })
+    }
+  })
+
+  test("/api/health 返回进程启动标识 boot（同一进程内稳定，重启后变化）", async () => {
+    const app = createApp(makeDeps())
+    const res = await app.request("/api/health")
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { ok: boolean; boot?: string }
+    expect(body.ok).toBe(true)
+    expect(typeof body.boot).toBe("string")
+    expect((body.boot ?? "").length).toBeGreaterThan(10)
+    const again = (await (await app.request("/api/health")).json()) as { boot?: string }
+    expect(again.boot).toBe(body.boot)
+  })
+})

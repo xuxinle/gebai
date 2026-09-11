@@ -163,13 +163,22 @@ export function registerStaticRoutes(rc: RouteCtx): void {
     const style = UI_STYLES.includes(d.config.uiStyle) ? d.config.uiStyle : "acrylic"
     let cachedHtml: string | null = null
 
-    /** 注入 UI 风格 + dev-reload 热刷新脚本（`/` 与 `/files` 共用）。 */
+    /** 注入 UI 风格 + dev-reload 热刷新脚本 + 重启自动刷新脚本（`/` 与 `/files` 共用）。 */
     const inject = (raw: string): string => {
       let injected = `<script>window.__GEBAI_UI_STYLE__=${JSON.stringify(style)}</script>`
       // 开发模式热刷新（--reload）：监听 /__gebai_hot，收到 reload 或连接断开（服务端重启）即刷新页面
       if (d.config.devReload) {
         const hotPath = `${d.config.basePath === "/" ? "" : d.config.basePath}/__gebai_hot`
         const client = `(()=>{let ws;const go=()=>{ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+${JSON.stringify(hotPath)});ws.onmessage=e=>{try{if(JSON.parse(e.data).type==="reload")location.reload()}catch{}};ws.onclose=()=>setTimeout(()=>location.reload(),400)};go()})()`
+        injected += `<script>${client}</script>`
+      }
+      // 服务重启后页面自动重新加载（本地模式）：轮询 /api/health 的进程启动标识 bootId——变化即说明
+      // 服务已被重启（重启时前端产物可能已重建），自动重载页面取新产物，免除手工 F5；服务模式不注入
+      // （多用户部署下不打扰他人页面）。与 dev-reload 的 ws 刷新互补：ws 广播只覆盖本进程内的构建完成，
+      // 换进程的重启不经过它（旧 ws 断开虽会刷新，但那只在 dev-reload 模式注入）。
+      if (d.config.auth === "local") {
+        const healthPath = `${d.config.basePath === "/" ? "" : d.config.basePath}/api/health`
+        const client = `(()=>{let boot=null;const check=()=>{fetch(${JSON.stringify(healthPath)},{cache:"no-store"}).then(r=>r.ok?r.json():null).then(j=>{if(!j||!j.boot)return;if(boot===null){boot=j.boot;return}if(j.boot!==boot)location.reload()}).catch(()=>{})};check();setInterval(check,3000)})()`
         injected += `<script>${client}</script>`
       }
       return raw.replace("</head>", `${injected}</head>`)

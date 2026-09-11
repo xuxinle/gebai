@@ -15,6 +15,7 @@ import type { AppDeps, createApp } from "./app"
 import { composeServer } from "./boot/compose"
 import { serveComposed } from "./boot/serve"
 import { runMain } from "./boot/cli"
+import { consumeRestartContinuation } from "./core/tools/restart"
 
 export interface ServerHandle {
   server: ReturnType<typeof Bun.serve>
@@ -40,6 +41,20 @@ export interface ServerHandle {
 export async function startServer(overrides: Partial<Parameters<typeof loadConfig>[0]> = {}): Promise<ServerHandle> {
   const c = await composeServer(overrides)
   const server = serveComposed(c)
+  // 重启续跑（restart_server 的 prompt 参数）：本次启动若承接自重启拉起器，把旧进程留下的提示词注入
+  // 原会话继续执行（后台任务，不阻塞监听；结论写 {tmpdir}/gebai-restart/continue.result.json）。
+  // 仅本地模式（restart_server 本身也只在此形态暴露）；测试进程跳过——本机 tmp 可能残留真实续跑请求，
+  // 测试触发引擎运行会造成意外副作用。
+  if (c.config.auth === "local" && process.env.NODE_ENV !== "test") {
+    void consumeRestartContinuation({
+      pid: process.pid,
+      sessionExists: async (sessionId, user) => !!(await c.store.load(sessionId, user)),
+      run: async (req) => {
+        // engine.run 落盘 user 消息（原样提示词）并跑起完整 agent 循环：模型按重启后续跑指令继续工作
+        await c.engine.run(req.sessionId, req.user, req.prompt, { role: req.role })
+      },
+    }).catch((err) => console.error(`[restart] 续跑消费异常: ${String((err as Error).message || err)}`))
+  }
   return { server, app: c.app, engine: c.engine, store: c.store, registry: c.registry, subAgents: c.subAgents, auth: c.auth, events: c.events, config: c.config, deps: c.deps, gc: c.gc, cron: c.cron, devReload: c.devReload, feishuBot: c.feishuBot }
 }
 
