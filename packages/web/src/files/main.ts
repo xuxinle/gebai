@@ -144,11 +144,15 @@ const statusbar = h("footer", { class: "fw-statusbar" })
  *
  * 活动栏是**唯一贯穿全高**的一列：视图切换/工具窗开关这类入口要在任何面板开合时都待在原位，
  * 被底部工具窗截断半截会让"下方那几个按钮"看起来像是工具窗的一部分。
+ *
+ * 命名提醒：包裹类叫 .fw-main-right 而**不是** .fw-right——后者是已废弃的"右侧 Git 面板"用过的
+ * 名字，CSS 里还留过一条针对它的窄屏规则（absolute + top:34px），撞名会让整块包裹在 ≤1080px
+ * 时变成一条抽屉、编辑区被压成几十像素宽（已踩过一次，见 files.css 同名注释）。
  */
 const rootEl = h("div", { class: "fw-app" }, [
   h("div", { class: "fw-main" }, [
     railEl,
-    h("div", { class: "fw-right" }, [
+    h("div", { class: "fw-main-right" }, [
       h("div", { class: "fw-body" }, [leftPanel, leftResizer, h("div", { class: "fw-center" }, [tabbar, views])]),
       gitDockResizer,
       gitDock,
@@ -914,10 +918,26 @@ async function showFileHistoryByPath(path: string, root = explorer.getRoot()): P
 function renderStatus(): void {
   clear(statusbar)
   const tab = activeTab()
+  /*
+   * 状态栏条目按**优先级**标注（data-pri，1 最要）：窄面板（分屏常在 640px 上下）里状态栏条目
+   * 排不下时，CSS 按优先级从低到高逐级隐藏——而不是让整条状态栏把文档顶出横向滚动。
+   * 为什么要显式标：条目是按当前文件动态增删的（编码/行列/大小…只在文件标签下出现），
+   * 用 :nth-child 猜“哪几个能藏”会随文件类型变化而错位。
+   */
+  const item = (cls: string, opts: { title?: string; pri: 1 | 2 | 3 } & Record<string, unknown> = { pri: 2 }): HTMLElement => {
+    const { pri, ...rest } = opts
+    const el = h("span", { class: `fw-status-item ${cls}`.trim(), ...rest } as Parameters<typeof h>[1])
+    el.dataset.pri = String(pri)
+    return el
+  }
+  const btn = (el: HTMLElement, pri: 1 | 2 | 3): HTMLElement => {
+    el.dataset.pri = String(pri)
+    return el
+  }
   const root = state.roots.find((r) => r.id === explorer.getRoot())
   const rel = h("button", { class: "fw-status-item", title: root?.path ?? "" }, [icon(root?.isRepo ? "git" : "folderOpen", 12), h("span", { text: root?.name ?? "-" })])
   rel.onclick = () => showMenu(...menuAt(rel, state.roots.map((r) => ({ label: r.name, icon: "folder", onClick: () => void explorer.setRoot(r.id) }))))
-  statusbar.appendChild(rel)
+  statusbar.appendChild(btn(rel, 1))
 
   if (state.gitStatus?.isRepo) {
     const s = state.gitStatus
@@ -934,14 +954,13 @@ function renderStatus(): void {
       if (!state.gitViewVisible) toggleGitPanel(true)
       gitPanel?.show("branches")
     }
-    statusbar.appendChild(branch)
+    statusbar.appendChild(btn(branch, 1))
   }
 
   statusbar.appendChild(h("span", { class: "fw-grow" }))
 
   if (tab?.kind === "file" && tab.stat) {
     const t = tab
-    statusbar.appendChild(h("span", { class: "fw-status-item", title: "字符编码（点击切换保存编码）" }, []))
     const encBtn = h("button", { class: "fw-status-item", title: "字符编码（保存时按此编码回写）" }, [h("span", { text: t.encoding === "binary" ? "二进制" : t.encoding.toUpperCase() })])
     encBtn.onclick = () => {
       dropdown(encBtn, ["utf-8", "utf-8-bom", "utf-16le", "utf-16be", "gbk", "gb18030", "big5", "latin1"].map((e) => ({
@@ -954,7 +973,7 @@ function renderStatus(): void {
         },
       })))
     }
-    statusbar.appendChild(encBtn)
+    statusbar.appendChild(btn(encBtn, 3))
 
     const eolBtn = h("button", { class: "fw-status-item", title: "行尾序列（保存时按此写回；keep 表示保持编辑器内容原样）" }, [h("span", { text: t.eol === "crlf" ? "CRLF" : t.eol === "mixed" ? "混合" : "LF" })])
     eolBtn.onclick = () =>
@@ -963,20 +982,21 @@ function renderStatus(): void {
         { label: "CRLF（Windows）", icon: t.eol === "crlf" ? "check" : undefined, onClick: () => setEol(t, "crlf") },
         { label: "保持内容原样", icon: t.eol === "keep" ? "check" : undefined, onClick: () => setEol(t, "keep") },
       ])
-    statusbar.appendChild(eolBtn)
+    statusbar.appendChild(btn(eolBtn, 3))
 
     const statInfo = t.stat
-    statusbar.appendChild(h("span", { class: "fw-status-item", text: statInfo?.language || "plaintext" }))
-    statusbar.appendChild(h("span", { class: "fw-status-item", text: t.mode === "edit" ? "编辑" : "只读" }))
+    // 语言 / 只读态、行列坐标：窄屏下比编码、大小、时间更常看，优先级高一级
+    statusbar.appendChild(item("", { pri: 2, text: statInfo?.language || "plaintext" }))
+    statusbar.appendChild(item(t.mode === "edit" ? "" : "warn", { pri: 1, text: t.mode === "edit" ? "编辑" : "只读" }))
     if (t.editor) {
-      statusbar.appendChild(h("span", { class: "fw-status-item", text: `行 ${state.cursor.line}，列 ${state.cursor.column}${state.cursor.selected ? `（选中 ${state.cursor.selected}）` : ""}` }))
+      statusbar.appendChild(item("", { pri: 2, text: `行 ${state.cursor.line}，列 ${state.cursor.column}${state.cursor.selected ? `（选中 ${state.cursor.selected}）` : ""}` }))
     }
-    statusbar.appendChild(h("span", { class: "fw-status-item", text: formatSize(statInfo?.size ?? 0) }))
+    statusbar.appendChild(item("", { pri: 3, text: formatSize(statInfo?.size ?? 0) }))
     const mtime = statInfo?.mtime ?? 0
-    statusbar.appendChild(h("span", { class: "fw-status-item", title: formatTime(mtime), text: new Date(mtime).toLocaleString("zh-CN", { hour12: false }) }))
+    statusbar.appendChild(item("", { pri: 3, title: formatTime(mtime), text: new Date(mtime).toLocaleString("zh-CN", { hour12: false }) }))
   }
-  statusbar.appendChild(h("span", { class: "fw-status-item", title: `编辑器内核：${monacoReady() ? "Monaco（VSCode 同款）" : "轻量降级模式"}`, text: monacoReady() ? "Monaco" : "轻量模式" }))
-  if (state.rootsResp && !state.rootsResp.writable) statusbar.appendChild(h("span", { class: "fw-status-item warn", text: "只读模式" }))
+  statusbar.appendChild(item("", { pri: 3, title: `编辑器内核：${monacoReady() ? "Monaco（VSCode 同款）" : "轻量降级模式"}`, text: monacoReady() ? "Monaco" : "轻量模式" }))
+  if (state.rootsResp && !state.rootsResp.writable) statusbar.appendChild(item("warn", { pri: 1, text: "只读模式" }))
 }
 
 function setEol(tab: Tab, eol: "lf" | "crlf" | "keep"): void {

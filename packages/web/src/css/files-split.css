@@ -5,7 +5,7 @@
 
 /* ------------------------------ 入口按钮 ------------------------------ */
 
-/* 悬浮弹出：主按钮 = 新标签打开；下方副按钮 = 分屏打开（关闭分屏时同一按钮变 ✕）。
+/* 悬浮弹出：主按钮 = 新标签打开；**右侧**副按钮 = 分屏打开。
    与轮盘菜单同一交互语言——hover 展开、不点击切换、离开即收。 */
 .files-entry {
   position: relative;
@@ -15,42 +15,42 @@
 
 #files-split-btn {
   position: absolute;
-  top: calc(100% + 6px);
-  left: 50%;
+  left: calc(100% + 6px);
+  top: 50%;
   z-index: 40;
   background: var(--bg-elev);
   border-color: var(--border);
   box-shadow: var(--shadow-pop);
   opacity: 0;
-  transform: translate(-50%, -6px) scale(0.86);
+  transform: translate(-6px, -50%) scale(0.86);
   pointer-events: none;
-  /* 隐藏侧带一点延迟：指针从主按钮向下走时，短暂扫出容器也不至于立即塌掉 */
+  /* 隐藏侧带一点延迟：指针从主按钮向右走时，短暂扫出容器也不至于立即塌掉 */
   transition: opacity 0.16s ease 0.12s, transform 0.16s ease 0.12s, color var(--transition), background var(--transition);
 }
 
 /* 指针从主按钮移到副按钮，中间必然经过那 6px 空隙（不属于任何元素）：
-   空隙上盖一层透明"桥"（宽度同入口按钮，高度略大于间距），
-   否则中途 :hover 丢失 → 副按钮立刻 pointer-events:none、淡出 → 用户根本点不到它。
+   空隙上盖一层透明"桥"（高度同入口按钮，宽度略大于间距），否则中途 :hover 丢失 →
+   副按钮立刻 pointer-events:none、淡出 → 用户根本点不到它。
    （这类"只能在瞬移鼠标时点得到"的问题很容易在自动化里蒙混过关，务必用逐步移动的指针验证。） */
 .files-entry::after {
   content: "";
   position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  height: 10px;
+  left: 100%;
+  top: 0;
+  bottom: 0;
+  width: 10px;
 }
 
 .files-entry:hover #files-split-btn,
 #files-split-btn:focus-visible {
   opacity: 1;
-  transform: translate(-50%, 0) scale(1);
+  transform: translate(0, -50%) scale(1);
   pointer-events: auto;
   transition-delay: 0s;
 }
 
-/* 独立的关闭按钮：与入口那组同款，仅分屏激活时出现在标题栏上（图标为 ✕ 描边——与入口的实心分屏
-   图标在视觉上明确区分"开"与"关"两个不同动作） */
+/* 独立的关闭按钮（在标题栏右侧）：仅分屏激活时出现，图标为 ✕ 描边——
+   与入口那组（空心文件夹 / 实心分屏）在视觉与位置上都是分开的两个东西。 */
 #files-split-close {
   color: var(--text-muted);
 }

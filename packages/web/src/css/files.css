@@ -41,8 +41,11 @@
   min-height: 0;
 }
 
-/* 活动栏右侧的一整列：上部（左栏 + 编辑区）在上，底部工具窗在下 */
-.fw-right {
+/* 活动栏右侧的一整列：上部（左栏 + 编辑区）在上，底部工具窗在下。
+   注意类名带 main：**不能**叫 .fw-right——那是"旧右侧 Git 面板"用过的名字，
+   文件里还留着一条针对它的窄屏规则（position:absolute + top:34px），
+   撞名会让整块包裹在 ≤1080px 时被绝对定位成一条抽屉，编辑区被压成几十像素宽。 */
+.fw-main-right {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -50,7 +53,7 @@
   min-height: 0;
 }
 
-/* 上部：左栏 + 编辑区。底部工具窗在它之外（.fw-right 的兄弟节点），
+/* 上部：左栏 + 编辑区。底部工具窗在它之外（.fw-main-right 的兄弟节点），
    所以左栏只占上半部分，底部工具窗横跨左栏下方——同 IDEA 打开底部工具窗时的效果。 */
 .fw-body {
   display: flex;
@@ -607,6 +610,10 @@
   border-top: 1px solid var(--border);
   font-size: 11.5px;
   color: var(--text-muted);
+  /* 状态栏是**最容易把窄面板顶出横向滚动**的地方：条目都是 nowrap、又不肯收缩。
+     这里先兜住（超出即裁），再由下面的优先级规则逐级隐藏——见 renderStatus 里 data-pri 的说明。 */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .fw-status-item {
@@ -632,6 +639,17 @@ button.fw-status-item {
 button.fw-status-item:hover {
   background: var(--bg-hover);
   color: var(--text);
+}
+
+/* 状态栏条目随宽度逐级退让（data-pri：1 最要，3 最先隐）。
+   分屏常在“半宽多一点”（面板 ≈ 860px，去掉活动栏与左栏后状态栏只剩 ~570px），
+   按面板宽分三级：≤900 隐 pri3（编码/EOL/大小/时间/Monaco 内核），≤700 再隐 pri2（语言/行列）。 */
+@media (max-width: 900px) {
+  .fw-statusbar .fw-status-item[data-pri="3"] { display: none; }
+}
+
+@media (max-width: 700px) {
+  .fw-statusbar .fw-status-item[data-pri="2"] { display: none; }
 }
 
 .fw-status-item.warn {
@@ -1180,12 +1198,25 @@ button.fw-status-item:hover {
   max-width: 50%;
 }
 
-/* 窄屏：三栏纵向堆叠（每栏给足最小高度，工具窗整体滚动） */
-@media (max-width: 1180px) {
+/* 窄屏：三栏纵向堆叠（每栏给足最小高度，工具窗整体滚动）。
+
+   两个坑：
+   ① 原写法设的是 `grid-template-columns`，但 `.fw-git-cols` 是 **flex** 容器——这条规则从来没生效过
+      （死代码）。三栏各自是 `flex: 0 0 auto` + 固定宽度，窄屏下直接横向溢出。
+   ② 断点不能定在 1180px：分屏常在“半宽多一点”（≈860px 面板宽）使用，那时工具窗还有 ~815px，
+      三栏（200 + 弹性 + 240）完全摆得下且有富余；按 1180 堆叠反而把好用的三栏拆成一列高塔。
+      按“三栏所需最小宽”定：refs 200 + log ≈160 + commit 240 ≈ 600px，工具窗宽 = 面板宽 − 活动栏 44，
+      所以堆叠断点取 700px（面板 700 → 工具窗 656）。 */
+@media (max-width: 700px) {
   .fw-git-cols {
-    grid-template-columns: 1fr;
-    grid-auto-rows: minmax(180px, auto);
+    flex-direction: column;
     overflow-y: auto;
+  }
+  .fw-git-col[data-col] {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+    min-height: 180px;
   }
 }
 
@@ -2257,16 +2288,10 @@ button.fw-status-item:hover {
   pointer-events: none;
 }
 
-/* 窄屏：Git 面板收为抽屉（仍可 Ctrl+Shift+G 切出） */
+/* 窄屏：左栏收窄。原「Git 面板收为抽屉」规则随 .fw-right 一起删除——
+   Git 面板早已迁到**下方**工具窗（.fw-git-dock），那条规则是死代码，
+   留着只会等着下一次撞名（它就撞过一次：见 .fw-main-right 的注释）。 */
 @media (max-width: 1080px) {
-  .fw-right {
-    position: absolute;
-    right: 0;
-    top: 34px;
-    bottom: 24px;
-    z-index: 30;
-    box-shadow: var(--shadow-pop);
-  }
   .fw-left {
     width: 240px;
   }
