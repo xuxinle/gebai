@@ -88,6 +88,17 @@ body.files-split main {
   grid-column: 2;
   grid-row: 2;
   position: relative;
+  /*
+   * 必须显式加入「内容层」（与 main 同值）。
+   *
+   * 主题的背景装饰是 **fixed 伪元素**（如浪潮的太阳就是 #app::after，z-index:0），它们钉在视口上、
+   * 与本面板同处一个堆叠上下文；两者 z-index 都是 auto/0 时，谁在上只看树的先后——而伪元素是
+   * #app 的**最后**子节点，于是太阳会画到工作台面板上面。
+   * 主题自己用的就是这套约定（synthwave: main { z-index: 1 }，并特意让 main 透明以透出太阳），
+   * 面板只是又一个与 main 平级的内容区，所以取同一个值。
+   * （以后再加顶层级内容区（弹层/面板/分屏）时都得跟这一步，否则又会踩同一个坑。）
+   */
+  z-index: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;

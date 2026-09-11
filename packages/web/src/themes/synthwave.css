@@ -125,11 +125,21 @@
   100% { opacity: 0.78; transform: scale(1.05); }
 }
 
-/* 内容层置于背景装饰之上：main 背景透明以透出太阳/网格，气泡/卡片自身背景保证可读 */
+/* 内容层置于背景装饰之上：main 背景透明以透出太阳/网格，气泡/卡片自身背景保证可读。
+   （背景装饰是 fixed 伪元素，任何新的顶层级内容区（如分屏面板 #files-split）
+   都得给自己一个不低于 1 的 z-index，否则会被装饰盖住——详见 files-split.css 的注释。） */
 [data-theme="synthwave"] main {
   position: relative;
   z-index: 1;
   background: transparent;
+}
+
+/* 分屏时太阳改以**主视图（左列）中心**为心。
+   太阳是 position:fixed，left:50% 是相对**视口**居中：分屏后右侧被不透明的工作台面板盖住，
+   可见的就只剩被切了一半的太阳。改成“排掉右列再取中”，太阳就完整落在聊天区（与它的设计意图一致：
+   坐在主视图背后）。分屏宽度变量由 files-split.ts 写在根元素上，这里直接复用。 */
+[data-theme="synthwave"] body.files-split #app::after {
+  left: calc((100vw - var(--files-split-w, 50vw)) / 2);
 }
 
 
