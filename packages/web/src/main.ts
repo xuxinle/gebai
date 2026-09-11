@@ -10,6 +10,7 @@ import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
 import { bindWheel } from "./wheel"
+import { bindTodoPop } from "./todo-pop"
 import { bindFilesEntry } from "./files-entry"
 import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
@@ -166,6 +167,7 @@ async function init() {
   bindThemePop()
   bindApprovalSkip()
   bindWheel()
+  bindTodoPop() // 轮盘「待办」按钮 → 可拖动待办弹窗（用户级待办 + 闲时任务）
   bindFilesEntry()
   bindFilesSplit()
   restoreToken()

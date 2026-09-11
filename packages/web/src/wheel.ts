@@ -1,7 +1,7 @@
 import { el } from "./state"
 
 /* 标题栏最右按钮轮盘：入口按钮（#wheel-btn）悬浮展开双弧扇形快捷菜单——
- * 内弧 r=85 会话操作组（导出/压缩），外弧 r=145 应用操作组（自动审批/主题/设置/登出），
+ * 内弧 r=85 会话操作组（导出/压缩上下文/待办），外弧 r=145 应用操作组（自动审批/主题/设置/登出），
  * 两弧之间 r=115 细弧线分区；纯 hover 交互（入口 hover 展开、指针离开扇形区域延迟收起，不支持点击切换），
  * 外点/Esc/resize 关闭。6 个按钮自隐藏源容器移入（事件绑定在元素上，移动不失效）。 */
 
@@ -33,7 +33,7 @@ function polar(r: number, deg: number): [number, number] {
 
 export function bindWheel() {
   const wheelBtn = document.getElementById("wheel-btn") as HTMLButtonElement
-  const inner = ["export-btn", "compact-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
+  const inner = ["export-btn", "compact-btn", "todo-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
   const outer = ["approval-skip", "theme-btn", "settings-btn", "logout-btn"].map((id) => document.getElementById(id) as HTMLButtonElement)
   const all = [...inner, ...outer]
 

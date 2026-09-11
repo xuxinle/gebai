@@ -261,13 +261,37 @@ export interface TodoItem {
   note?: string
 }
 
+/** 用户级待办（DESIGN「用户级待办与闲时任务」）：用户清单条目，与会话级 TodoItem（agent 自己
+ *  维护的任务跟踪）无关。标记 idle 的条目在服务端无运行中会话时按列表顺序自动执行。 */
+export interface UserTodo {
+  id: string
+  /** 待办内容（闲时任务执行时同时作为提示词）。 */
+  text: string
+  done: boolean
+  /** 是否闲时任务。 */
+  idle: boolean
+  createdAt: number
+  updatedAt: number
+  /** 闲时执行状态：pending 排队 / running 执行中 / done 已成功 / failed 已放弃（达失败上限）。 */
+  idleState?: "pending" | "running" | "done" | "failed"
+  /** 已尝试执行次数。 */
+  idleAttempts?: number
+  /** 最近一次执行失败原因。 */
+  idleError?: string
+  /** 最近一次执行时间。 */
+  idleRunAt?: number
+  /** 最近一次执行所在会话（完整过程与结果在此回看）。 */
+  idleSessionId?: string
+  /** 最近一次执行结果摘要。 */
+  idleResult?: string
+}
+
 export interface FileEntry {
   path: string
   size: number
   modifiedAt: number
   isDir: boolean
 }
-
 export interface FeedbackInput {
   messageId: string
   sessionId: string

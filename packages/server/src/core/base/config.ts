@@ -67,6 +67,9 @@ export interface ServerConfig {
   /** 是否启用定时任务能力（GEBAI_CRON_ENABLED，默认 true：注册 cron 子Agent（cron_* 工具）并启动调度器；
    *  显式 false 时完全不可见）。 */
   cronEnabled: boolean
+  /** 是否启用用户级待办与闲时任务（GEBAI_IDLE_TODO_ENABLED，默认 true：启动待办存储与闲时调度器，
+   *  REST /api/v1/todos 可用；显式 false 时路由返回 503 且不自动执行闲时待办）。 */
+  idleTodoEnabled: boolean
   /** 定时任务全局默认通知 webhook（GEBAI_CRON_NOTIFY_WEBHOOK）：任务未配 notify 时自动追加该通道。 */
   cronNotifyWebhook?: string
   /** 定时任务全局默认飞书通知（GEBAI_CRON_NOTIFY_FEISHU）：群 chat_id（oc_ 前缀，应用身份推送）或群机器人
@@ -203,6 +206,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     signupMode: env("GEBAI_SIGNUP_MODE") === "approval" ? "approval" : "open",
     gcDisabled: bool("GEBAI_GC_DISABLED", false),
     cronEnabled: bool("GEBAI_CRON_ENABLED", true),
+    idleTodoEnabled: bool("GEBAI_IDLE_TODO_ENABLED", true),
     cronNotifyWebhook: env("GEBAI_CRON_NOTIFY_WEBHOOK").trim() || undefined,
     cronNotifyFeishu: env("GEBAI_CRON_NOTIFY_FEISHU").trim() || undefined,
     externalAuthSecret: env("GEBAI_EXTERNAL_AUTH_SECRET") || undefined,

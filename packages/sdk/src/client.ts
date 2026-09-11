@@ -17,6 +17,7 @@ import type {
   ToolInfo,
   UserInfo,
   UserPatch,
+  UserTodo,
   WebhookInfo,
   WsSnapshot,
 } from "./types"
@@ -748,6 +749,41 @@ export class GebaiClient {
 
   listTodos(sessionId: string): Promise<TodoItem[]> {
     return this.request<{ todos: TodoItem[] }>("session.todo.get", { id: sessionId }).then((r) => r.todos)
+  }
+
+  // ---- 用户级待办（待办弹窗与闲时任务，REST /api/v1/todos；与会话级 TodoItem 无关） ----
+  /** 用户待办清单（数组顺序即清单顺序）。 */
+  listUserTodos(): Promise<UserTodo[]> {
+    return this.get<UserTodo[]>("/api/v1/todos")
+  }
+  /** 新增待办（idle=true 标记为闲时任务：服务端无运行中会话时按顺序自动执行）。 */
+  createUserTodo(input: { text: string; idle?: boolean }): Promise<UserTodo> {
+    return this.post<UserTodo>("/api/v1/todos", input)
+  }
+  /** 修改待办（文本/完成/闲时标记）。 */
+  updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean }): Promise<UserTodo> {
+    return fetch(`${this.baseUrl}/api/v1/todos/${id}`, {
+      method: "PATCH",
+      headers: this.headers(),
+      body: JSON.stringify(patch),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      return (await res.json()) as UserTodo
+    })
+  }
+  deleteUserTodo(id: string): Promise<void> {
+    return this.del<void>(`/api/v1/todos/${id}`)
+  }
+  /** 拖动排序：按给定 id 顺序重排清单（返回新顺序的清单）。 */
+  reorderUserTodos(ids: string[]): Promise<UserTodo[]> {
+    return fetch(`${this.baseUrl}/api/v1/todos`, {
+      method: "PATCH",
+      headers: this.headers(),
+      body: JSON.stringify({ ids }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      return (await res.json()) as UserTodo[]
+    })
   }
   listTools(): Promise<ToolInfo[]> {
     return this.request<{ tools: ToolInfo[] }>("session.tool.get", {}).then((r) => r.tools)

@@ -323,6 +323,15 @@ export class AgentEngine {
     return this.tasks.has(sessionId)
   }
 
+  /** 服务端是否忙碌（全局聚合：任一会话任务/后台运行/分支运行进行中即为真）。
+   *  闲时任务调度器据此判定「服务端没有正在运行的会话」，避免与用户会话争抢资源。 */
+  busy(): boolean {
+    if (this.tasks.size > 0) return true
+    for (const h of this.sessionRunStore.values()) if (h.status === "running") return true
+    for (const h of this.branchRunStore.values()) if (h.status === "running") return true
+    return false
+  }
+
   /** 运行中会话附加快照（session.attach，DESIGN「运行中会话恢复」）：页面刷新/切换后前端据此恢复——
    *  在途流式累积（未持久化的部分文本/推理）+ 待决交互清单（审批/选择/填值/画图/捕获——事件已推送过、
    *  新页面收不到，凭此重渲染卡片继续作答）。未运行返回 null。 */

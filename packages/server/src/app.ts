@@ -22,6 +22,7 @@ import { registerSessionRoutes } from "./routes/sessions"
 import { registerSessionFileRoutes } from "./routes/session-files"
 import { registerToolRoutes } from "./routes/tools"
 import { registerCronRoutes } from "./routes/cron"
+import { registerTodoRoutes } from "./routes/todos"
 import { registerFeedbackRoutes, registerWebhookRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
 import { registerStaticRoutes } from "./routes/static"
@@ -42,6 +43,8 @@ export interface AppDeps {
   webhooks: WebhookManager
   /** 定时任务调度器（GEBAI_CRON_ENABLED=false 时不启动，为 null——REST 返回能力未启用）。 */
   cron?: import("./core/schedule/cron").CronManager | null
+  /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时不启动，为 null——REST 返回 503）。 */
+  todos?: import("./core/schedule/todos").UserTodoManager | null
   /** 外部身份验证器（GEBAI_EXTERNAL_AUTH_* 配置；未配置为 null）。 */
   externalAuth: ExternalAuthProvider | null
   /** WS 状态服务（MVC 模型层：事件日志/连接状态/快照）；由 startServer 注入。 */
@@ -170,6 +173,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerSessionFileRoutes(rc)
   registerToolRoutes(rc)
   registerCronRoutes(rc)
+  registerTodoRoutes(rc)
   registerFeedbackRoutes(rc)
   registerWebhookRoutes(rc)
   // 文件工作台（DESIGN「文件工作台」）：根清单 / 文件操作 / Git。注册在 static 之前——

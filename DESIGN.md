@@ -51,6 +51,7 @@ GEBAI_HOME/
     ├── registry.json      # 用户注册表（服务模式）：用户名 → 加盐哈希/角色/状态
     └── {user}/            # 每个用户独立的数据目录
         ├── cron.json      # 用户级定时任务（GEBAI_CRON_ENABLED 默认启用；用户级资源，与会话生命周期解耦）
+        ├── todos.json     # 用户级待办清单（轮盘「待办」弹窗；标记 ⚡ 的条目为闲时任务，GEBAI_IDLE_TODO_ENABLED 默认启用）
         ├── cron-workspace/  # 定时任务专属工作目录（按任务 id 分目录，脚本 cwd，跨次运行保留产物）
         │   └── {task_id}/
         ├── sessions/      # 会话持久化（按会话隔离，多层分片；分片段=会话 ID 自身前缀）
@@ -230,6 +231,7 @@ class GebaiClient {
 | 会话列表 | 新建/切换/删除会话（**草稿页跨刷新保持**——进入草稿页即清除 localStorage 记忆的上次会话（`gebai.ui.session`），刷新后保持空白草稿页而非跳回旧会话，首条消息发送时才创建会话的懒创建语义与刷新恢复解耦；**新会话快捷键双绑定 Ctrl+N / Ctrl+Shift+O**——与「＋」按钮等效进入草稿页，已处于草稿页时无操作防误触清草稿，批量模式随按钮禁用；浏览器形态 Ctrl+N 为浏览器保留键（新窗口）无法拦截，Ctrl+Shift+O 为浏览器形态兜底，桌面 WebView 形态两者均生效），双击会话名重命名，上下文压缩入口（标题栏轮盘 🗜️）；**行内仅保留选中按钮**：每个会话行时间区有一个**勾选框（选中按钮）**——**默认隐藏**，右键菜单「选中」进入多选（批量）模式后常驻显示，点击勾选/取消（多选统一走该按钮）；✎/✕ 操作按钮已移除，**重命名/删除/复制会话 ID 收敛到右键菜单**（屏蔽浏览器默认菜单，随光标定位 + 视口边缘翻转，Esc/点击/滚动/新右键关闭；「复制会话 ID」任意条目可用、Toast 反馈——定位问题/反馈用；批量模式下菜单项变为「选择/取消选择」）；**滚动条占位恒定**：滚动条沟槽恒定保留（`scrollbar-gutter: stable`，静止透明、hover/滑动才显色），会话条目宽度不随 hover 伸缩（覆盖式滚动条环境此前 hover 时条目无端变长 8px、离开缩回）；**批量删除**：右键「选中」进入多选（批量）模式（批量模式下点击行也切换选中），批量模式下操作条显示已选计数，删除所选走确认弹窗逐个删除；全部取消自动退出批量模式；当前会话被删自动切换到剩余第一个或新建；**删除成功后重建列表**；**按日期分组**：列表按更新时间分组为 今天/昨天/近7天/更早（组内按更新时间倒序），**组头点击折叠/展开**（折叠组不渲染成员，箭头旋转指示，折叠状态 localStorage `gebai.ui.sessionsCollapsed` 记忆；批量模式下强制全展开——折叠分组全部可见可勾选，**组头点击切换全组选中/取消**；搜索时平铺不分组）；**整栏折叠**：桌面端（>860px）标题栏最左按钮折叠/展开整个会话列表（折叠隐藏侧栏、主区占满，状态 `gebai.ui.sidebarCollapsed` 持久化；**Ctrl+B 快捷键等效切换**），窄屏维持滑动抽屉行为 |
 | 环境变量页 | 浏览器本地（localStorage）增删改，对本浏览器所有会话生效，随消息临时注入服务端（不落盘防泄露；服务端不配模型变量时仅前端配置即可使用）——并入设置面板 |
 | 设置页 | UI 风格（外观性能模式）、`/approval-skip`（标题栏轮盘 ⚡）——设置面板；工具启停、子Agent 装载、Webhook 管理无 UI（设置面板不设对应 tab，经 SDK/API 使用） |
+| 待办弹窗 | 标题栏轮盘「待办」按钮打开的可拖动浮层（`todo-pop.ts`）：新增/行内修改/删除/勾选完成/**拖动排序**/**点击条目填入对话输入框**；⚡ 标记闲时任务（服务端没有运行中的会话时按顺序自动执行，执行过程与结果在新建的执行会话回看） |
 | 用户管理页（管理员） | 用户创建/禁用/删除（服务模式）——并入设置面板 |
 | **文件工作台**（`/files`，独立页面/独立路径） | 目录树 + Monaco 查看/编辑 + IDEA 风格 Git 工具窗（变更/日志/分支/标签/暂存/远程）+ **任意两端差异对比**；入口在聊天页标题栏**会话列表按钮右边**——主按钮 = **分屏打开**（右侧 iframe 对照），悬浮时右方弹出的副按钮 = **新标签打开**（透传 session/root/project/path/主题）。详见「文件工作台（`/files`）」章节 |
 
@@ -387,6 +389,7 @@ class GebaiClient {
 | `GEBAI_SIGNUP_MODE` | 注册审批模式：`open`（默认，注册即用）/ `approval`（注册待 admin 审批——用户置 `disabled+pending` 待审、不可登录，admin 在用户管理页批准/拒绝） | `open` |
 | `GEBAI_APPROVAL_SKIP` | 会话级审批跳过（等价 `/approval-skip`，`true` 跳过） | 空 |
 | `GEBAI_CRON_ENABLED` | 是否启用定时任务能力（注册 `cron` 子Agent（`cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove` 工具）、启动调度器并开放 REST `/api/v1/cron` 管理面；`false` 时子Agent 不注册、调度器不启动、REST 返回 503，能力完全不可见） | `true` |
+| `GEBAI_IDLE_TODO_ENABLED` | 是否启用**用户级待办与闲时任务**（标题栏轮盘「待办」弹窗 + REST `/api/v1/todos` 管理面 + 闲时调度器——标记 ⚡ 的待办在服务端没有运行中的会话时按顺序自动执行）；`false` 时调度器不启动、REST 返回 503 | `true` |
 | `GEBAI_FS_ENABLED` | 是否启用**文件工作台**（`/files` 页面与 `/api/v1/fs`、`/api/v1/git`、`/api/v1/roots` 端点）；`false` 时页面 404、端点全部 404、标题栏入口按钮隐藏 | `true` |
 | `GEBAI_FS_WRITE` | 工作台写开关：`false` 时纯只读检视（新建/改名/移动/复制/删除/上传/保存全部拒绝；Git 写操作另由下方开关控制） | `true` |
 | `GEBAI_FS_ROOTS` | 服务模式下的额外白名单根（JSON 数组：字符串或 `{name,path,description,writable}`）；本地模式自动追加主目录/服务工作目录/盘符，无需配置 | 不设置 |
@@ -483,7 +486,7 @@ src/
     tools/          #   全局工具域：注册文件（fs/exec/show/agent/interact/schemas/extras）+ shared.ts（GlobalToolEntry 契约与 schema/parseRegion 助手）+ cv-analysis.ts（本地识别三工具共享工厂，desktop/playwright 复用）+ index.ts（聚合器/barrel）+ projects.ts/vision.ts
     support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/analyzer/diagram-render/image-resize（视觉传输压缩）
     session/        #   会话域：store（持久化）/env/branch-runs/session-runs/gc
-    schedule/       #   定时任务：cron + notify（通知通道）
+        schedule/       # 定时任务与用户级待办：cron + notify（通知通道）+ todos（用户级待办清单与闲时任务调度）
     exec/           #   脚本执行：js-tool/sh-tasks
     browser/        #   浏览器桥接基建：bridge（node driver.mjs JSON-RPC 桥/playwright 模块与 channel 解析/惰性共享单例/会话锁）+ driver.mjs + fetch-proxy（透明浏览器代理垫片）——playwright/reverse_site 子Agent 与浏览器代理共用的平台级底座，不依赖子Agent 定义存在
     cv/             #   本地 CV 推理基建：ort-loader（onnxruntime-web wasm 运行时动态解析与内嵌物化）+ cv（惰性单例/模型目录解析/session 缓存/推理串行/检测分层后端选择）+ image/ocr/detect（前后处理纯函数，含检测×OCR 配对）+ onnx-meta（ONNX 元数据解析：ultralytics imgsz/names）+ template（模板匹配 NCC 纯函数）+ sidecar/cv-driver.mjs（GPU sidecar：node 子进程跑 onnxruntime-node，检测重模型的原生推理）——desktop/playwright 子Agent 本地识别的底座（工具消费层=core/tools/cv-analysis 共享工厂），不依赖子Agent 定义存在
@@ -1559,6 +1562,19 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **事件**：触发时推送 `event.cron.run`（任务 ID/类型/名称/手动标记）；执行结束**两类任务均**推送 `event.cron.result`（成功/失败/跳过/超时与输出摘要、prompt 型含执行会话 id、自动停用标记——prompt 型详细过程在该会话消息流）
 - **注入链路**：构造顺序为 `AgentEngine` 先建、`CronManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `cron_*` 工具，避免循环构造依赖）——`cron.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.cron` 经 `setCron()` 回填（`cron_*` 工具的 ToolContext 绑定源；单向注入不回填会使能力开启下工具仍恒报「能力未启用」，测试亦按此生产接线覆盖）；通知依赖（fetch/飞书应用消息发送器）与子Agent 名校验器（`agentExists`）随构造注入
 
+### 用户级待办与闲时任务
+
+**用户级**待办清单（标题栏轮盘「待办」按钮打开的可拖动弹窗）：与引擎**会话级**待办（`todo` 工具，agent 自己维护的任务清单，随会话走）语义不同——用户待办属于**用户**（`users/{user}/todos.json`），跨会话/重启保留，供用户自己记事项、一键填入输入框。待办可标记为**闲时任务**（⚡）：服务端**没有正在运行的会话**时，调度器按清单顺序自动执行（一次一条、串行），适合把「不急但要做」的活儿交给空闲时段。能力由 `GEBAI_IDLE_TODO_ENABLED`（**默认 `true`**）开关：显式 `false` 时调度器不启动、REST 返回 503。
+
+- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留 + 按用户串行写链（并发写不互相覆盖，范式同 `cron.json`）；条目字段 `id`（32 位 hex）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + 闲时执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是闲时任务的提示词）；开启闲时标记时重置失败计数重新排队，取消勾选完成视作重新排队
+- **REST 管理面**（前端弹窗与第三方集成共用，写操作不经审批——REST 已有身份认证边界，与 cron 域同姿态）：`GET /api/v1/todos`（清单）、`POST /api/v1/todos`（新增 `{text, idle?}`，201）、`PATCH /api/v1/todos`（**清单级批量重排** `{ids: [...]}`，拖动排序落库；未列出的条目按原序追加在后防丢失）、`PATCH /api/v1/todos/:id`（`{text?, done?, idle?}`）、`DELETE /api/v1/todos/:id`；条目 id 走 32 位 hex 格式白名单，按认证用户过滤（跨用户不可见不可操作），能力关闭时 503
+- **闲时执行（`core/schedule/todos.ts` 的 `UserTodoManager`）**：
+  - **空闲判定**：`engine.busy()`（全局聚合：任一会话任务/后台运行/分支运行进行中即为真）——用户正在跑会话时闲时任务不启动、不抢资源，下个 tick 再评估
+  - **串行与重入防护**：调度器单飞（`firing`），一次 tick 至多启动一条；跨 tick 由「执行中的会话使 `busy()` 为真」自然串行（无需额外锁），执行结束释放会话后下个 tick 取清单中下一条待执行的闲时待办
+  - **执行目标**：**每次新建一条会话**（标题 `闲时待办 · {摘要}`，进入用户会话列表，上下文每次全新），提示词为 `[闲时待办任务]\n{待办文本}`；结果摘要取执行会话末条 assistant 回复（限 1000 字符）写回待办，完整过程在该会话消息流回看
+  - **完成与失败语义**：执行成功自动勾选完成（`done=true`、`idleState=done`）；失败/超时累计 `idleAttempts`，达上限（3 次）置 `idleState=failed` 并停止自动执行（`idleError` 记因，防死循环重试）；单次执行超时 30 分钟（到时 `engine.cancel` 终止）。tick 周期 30 秒（`IDLE_TODO_TICK_INTERVAL_MS`，与定时任务同量级），无待执行闲时待办时即时返回
+- **弹窗交互（`packages/web/src/todo-pop.ts`）**：轮盘「待办」按钮开关；**标题栏拖动移动窗口**（pointer capture + 视口钳制——顶部与左右保留最小可见像素，配 localStorage 记忆 `gebai.ui.todo.pos`，脏数据回退默认位）；新增（底部输入 + ⚡闲时勾选，回车添加）、行内修改（Enter 保存 / Esc 取消 / 失焦保存）、删除（确认框）、勾选完成、**拖动排序**（HTML5 drag，落点上下半区高亮提示，drop 后调 `PATCH /api/v1/todos` 落库，失败回滚为服务端真值）、⚡ 闲时开关（行内显示排队/执行中/完成摘要/失败原因）；**点击条目文本或「填入」按钮把内容写进对话输入框**（`input.value` + `autosize()` + `syncSendButton()` + `focusInput()`，沿用快捷胶囊的既有做法，不自动发送）；弹窗打开期间每 15 秒静默刷新（闲时任务在后端改了状态），关闭即停；外点/Esc 关闭。纯逻辑（拖动重排/落点换算/位置钳制）拆在 `todo-core.ts` 单测（同 `press-gesture.ts` 的拆法，无 jsdom 依赖）
+
 ### 工具执行与渲染
 - 工具调用时在 UI 中打印工具名和参数，参数以 JSON 格式展示（脚本类工具渲染为语法高亮代码块）
 - `todo` 与 `ask` 渲染为**特别卡片**（待办清单卡 / 问答记录卡 / 计划卡；ask 按参数形态分流——options → 问答记录卡、title → 计划卡、其余（填值）走通用工具卡），不显示通用工具卡片
@@ -2621,6 +2637,10 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 定时任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
 | 定时任务运行历史 | 每任务 10 条 | 最近运行记录环形保留（`CRON_RUNS_HISTORY`：触发/结束时间/状态/耗时/输出摘要/执行会话/手动标记） |
 | 定时任务名长度上限 | 100 字符 | `CRON_NAME_MAX` |
+| 用户待办 tick 周期 | 30 秒 | 闲时任务调度检查周期（`IDLE_TODO_TICK_INTERVAL_MS`：服务端空闲且存在待执行的闲时待办时，每次至多启动一条） |
+| 用户待办执行超时 | 30 分钟 | 单条闲时待办执行上限（`IDLE_TODO_TIMEOUT_MS`，到时 `engine.cancel` 终止执行会话并按失败计次） |
+| 用户待办失败上限 | 3 次 | 闲时待办连续失败上限（`IDLE_TODO_MAX_ATTEMPTS`，达上限停止自动执行，`idleError` 记因待人工处理） |
+| 用户待办文本/结果上限 | 2000 / 1000 字符 | 待办文本上限（也是闲时任务提示词，`TODO_TEXT_MAX`）/ 执行结果摘要（`TODO_RESULT_MAX`）；单用户条数上限 500（`TODO_MAX_ITEMS`） |
 | 定时通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片正文中输出与错误的保留长度（`NOTIFY_TEXT_MAX`；卡片整体限 12000——`NOTIFY_CARD_MAX`，1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 `truncateForFeishu` 同额）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
 | show html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
 | js 工具调用总数上限 | 100 | 单次 js 脚本内工具调用总数（`JS_TOOL_MAX_CALLS`） |

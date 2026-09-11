@@ -25,6 +25,7 @@ import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelR
 import { setVisionProviderGetter } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
 import { CronManager } from "../core/schedule/cron"
+import { UserTodoManager } from "../core/schedule/todos"
 import { isFeishuChatId, validateNotifyChannel } from "../core/schedule/notify"
 import { createApp, type AppDeps } from "../app"
 import { DevReloadManager, webRootOf } from "../dev-reload"
@@ -47,6 +48,8 @@ export interface Composed {
   sandbox: Sandbox
   webhooks: WebhookManager
   cron: CronManager | null
+  /** 用户级待办管理器（GEBAI_IDLE_TODO_ENABLED=false 时为 null）。 */
+  todos: UserTodoManager | null
   gc: { stop: () => void } | null
   feishuBot: FeishuBot | null
   deps: AppDeps
@@ -270,6 +273,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     cron.attach(engine)
     await cron.start()
   }
+  // 用户级待办与闲时任务（GEBAI_IDLE_TODO_ENABLED，默认 true）：待办清单是用户级资源
+  // （users/{user}/todos.json）；标记为闲时任务的待办在「服务端没有运行的会话」时按顺序自动执行。
+  // 关闭时不启动调度器（REST /api/v1/todos 返回 503「能力未启用」）。
+  let todos: UserTodoManager | null = null
+  if (config.idleTodoEnabled) {
+    todos = new UserTodoManager({ home: config.gebaiHome, store, engine })
+    await todos.start()
+  }
   // 数据生命周期 GC：启动即跑一次，之后每日周期执行（GEBAI_GC_DISABLED=1 关闭）
   const gc = config.gcDisabled
     ? null
@@ -318,6 +329,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     webhooks,
     externalAuth,
     cron,
+    todos,
     // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）
     // 与写操作审计（用户直操文件系统的留痕；与工具审批的事前拦截互补）
     git: new GitService({
@@ -346,5 +358,5 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     devReload.start()
   }
 
-  return { config, store, registry, engine, subAgents, auth, events, sandbox, webhooks, cron, gc, feishuBot, deps, state, app, devReload, devReloadClients }
+  return { config, store, registry, engine, subAgents, auth, events, sandbox, webhooks, cron, todos, gc, feishuBot, deps, state, app, devReload, devReloadClients }
 }
