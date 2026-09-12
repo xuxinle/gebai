@@ -30,18 +30,23 @@ describe("会话列表元信息缓存（meta.json）", () => {
       expect(existsSync(meta)).toBe(true)
       expect(JSON.parse(readFileSync(meta, "utf8")).source.size).toBe(statSync(chat).size)
 
-      // 列表命中缓存：不重写 meta（回退解析正丈的分支必然重写 meta，mtime 变化即证据）
+      // 列表命中缓存：不重写 meta（回退解析正文的分支必然重写 meta，mtime 变化即证据）
       const before = statSync(meta).mtimeMs
       const infos = await store.listSessionInfos("alice")
       expect(infos.map((s) => s.id)).toEqual([id])
       expect(infos[0].name).toBe("会话")
       expect(statSync(meta).mtimeMs).toBe(before)
 
-      // 对照：缓存缺失时会回退读正丈并重建缓存（mtime 变化）
+      // 对照：缓存缺失时回退读正文并重建缓存——证据取「重建内容反映正文真值」而非 mtime：
+      // Windows 上 statSync().mtimeMs 粒度较粗，rmSync 后重建可能落在同一时间片，mtime 断言会偶发假失败
       rmSync(meta)
+      // 先改正文（size 变化）：重建的 meta 必须反映新 size，而非沿用 rmSync 前的旧值
+      const grown = JSON.parse(readFileSync(chat, "utf8"))
+      grown.messages.push({ id: "extra", role: "user", content: "补一条", createdAt: 999 })
+      writeFileSync(chat, JSON.stringify(grown))
       expect(await store.listSessionInfos("alice")).toHaveLength(1)
       expect(existsSync(meta)).toBe(true)
-      expect(statSync(meta).mtimeMs).not.toBe(before)
+      expect(JSON.parse(readFileSync(meta, "utf8")).source.size).toBe(statSync(chat).size)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
