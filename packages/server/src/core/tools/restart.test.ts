@@ -1,6 +1,6 @@
 /** restart_server 工具单测：双平台拉起器脚本构造、环境变量挑选、状态读取、服务模式不注入。 */
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs"
 import { connect, createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -10,6 +10,7 @@ import {
   buildLauncherScriptPosix,
   buildLauncherScriptWin,
   consumeRestartContinuation,
+  explainRestartState,
   makeRestartServerTool,
   pickRestartEnv,
   readContinuation,
@@ -121,7 +122,68 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
   test("buildLauncherScriptPosix：第三方占端口 → 失败退出不动无辜进程", () => {
     const script = buildLauncherScriptPosix(makeDeps({ platform: "linux" }))
     expect(script).toContain("被其他进程(PID")
+    expect(script).toContain('"reason":"occupied"')
     expect(script).toContain("exit 1")
+  })
+
+  test("buildLauncherScriptWin：端口占用分类——属主存活=真占用、属主已死=僵尸套接字（各写准原因）", () => {
+    const script = buildLauncherScriptWin(makeDeps())
+    // 属主存活判定：端口释放的判据是 socket 句柄引用计数归零，不是「进程存在」
+    expect(script).toContain("$ownerAlive = $false")
+    expect(script).toContain("Get-Process -Id $owner")
+    expect(script).toContain("reason = 'occupied'")
+    expect(script).toContain("reason = 'zombie-socket'")
+    // 僵尸套接字的错误文案要点明「用户空间无法释放」
+    expect(script).toContain("僵尸套接字")
+    expect(script).toContain("已不存在，但端口仍 LISTENING")
+    // 两种情形都严格失败（不自动换端口、不动无辜进程）
+    expect(script).toContain("exit 1")
+    // 中止时还原轮转掉的诊断日志（否则现场只剩 .prev）
+    expect(script).toContain("Move-Item '")
+    expect(script.match(/\.prev' '[^']*server\.log/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+  })
+
+  test("buildLauncherScriptPosix：属主已死 → 陈旧监听记录分类（与 Windows 同口径）", () => {
+    const script = buildLauncherScriptPosix(makeDeps({ platform: "linux" }))
+    expect(script).toContain("owner_alive=0")
+    expect(script).toContain('kill -0 "$owner"')
+    expect(script).toContain("zombie-socket")
+  })
+
+  test("explainRestartState：僵尸套接字的诊断与处置指引（区分「真占用」）", () => {
+    const zombie = explainRestartState({ ok: false, reason: "zombie-socket", port: 3000, ownerPid: 2564, error: "端口 3000 被僵尸套接字占用" })
+    const joined = zombie.join("\n")
+    expect(joined).toContain("僵尸套接字")
+    expect(joined).toContain("PID 2564")
+    expect(joined).toContain("已不存在")
+    expect(joined).toContain("注销并重新登录") // 关键自救手段（比重启电脑快）
+    expect(joined).toContain("taskkill") // 解释为何杀不掉
+    const occupied = explainRestartState({ ok: false, reason: "occupied", port: 3000, ownerPid: 99 }).join("\n")
+    expect(occupied).toContain("仍存活")
+    expect(occupied).not.toContain("僵尸")
+    // 就绪超时：提示看新服务日志尾部
+    const timeout = explainRestartState({ ok: false, reason: "ready-timeout", error: "就绪超时（90s）", logTail: "boom" }).join("\n")
+    expect(timeout).toContain("90 秒内就绪")
+    expect(timeout).toContain("boom")
+  })
+
+  test("status 动作：僵尸状态展示诊断与处置（不再只打印原始 JSON）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-zombie-"))
+    try {
+      mkdirSync(join(restartDir(dir)), { recursive: true })
+      writeFileSync(
+        join(restartDir(dir), "state.json"),
+        JSON.stringify({ ok: false, reason: "zombie-socket", port: 3000, ownerPid: 2564, error: "端口 3000 被僵尸套接字占用" }),
+        "utf8",
+      )
+      const tool = makeRestartServerTool({ tmpDir: dir })
+      const res = await tool.execute({ action: "status" }, ctxStub(dir))
+      expect(res.output).toContain("僵尸套接字")
+      expect(res.output).toContain("注销并重新登录")
+      expect(res.output).toContain("原始 state.json")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test("buildLauncherScriptPosix：binary 模式无 run 参数", () => {

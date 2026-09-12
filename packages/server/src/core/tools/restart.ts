@@ -194,11 +194,24 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
     "  if (-not $open) { break }",
     "  Start-Sleep -Milliseconds 500",
     "}",
-    // 端口仍被占用：占用者不是老进程（我们只杀老进程）——可能是第三方服务抢注，启动必撞 EADDRINUSE；
-    // 直接失败退出，不动老服务之外的东西（老进程没死的场景在阶段 1 已等过）
+    // 端口仍被占用：**区分「真被其他进程抢占」与「僵尸套接字」**——端口释放的判据是 socket 句柄
+    // 引用计数归零，不是「拥有者进程存在」：句柄被其他进程继承时，进程已消失而端口仍 LISTENING
+    // （netstat 显示 PID / tasklist 查不到 / taskkill 报找不到进程，用户空间无法释放）。
+    // 两种情形都严格失败（不动无辜进程、不自动换端口），但必须报准原因——否则用户只能猜。
     "$owner = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess",
     "if ($owner) {",
-    `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; error = ('端口 ' + $port + ' 被其他进程(PID ' + $owner + ')占用，未启动新服务') } | ConvertTo-Json -Compress))`,
+    "  $ownerAlive = $false",
+    "  try { Get-Process -Id $owner -ErrorAction Stop | Out-Null; $ownerAlive = $true } catch {}",
+    "  $tail = ''",
+    `  if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -ErrorAction SilentlyContinue) -join [char]10 }`,
+    // 中止即还原轮转掉的诊断日志：否则现场只剩 .prev，事后难查（成功路径才需要让位给新日志）
+    `  if (Test-Path '${logPs}.out.prev') { Move-Item '${logPs}.out.prev' '${logPs}.out' -Force }`,
+    `  if (Test-Path '${logPs}.err.prev') { Move-Item '${logPs}.err.prev' '${logPs}.err' -Force }`,
+    "  if ($ownerAlive) {",
+    `    [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; reason = 'occupied'; port = $port; ownerPid = [int]$owner; error = ('端口 ' + $port + ' 被其他进程(PID ' + $owner + ')占用，未启动新服务'); logTail = $tail } | ConvertTo-Json -Compress))`,
+    "  } else {",
+    `    [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; reason = 'zombie-socket'; port = $port; ownerPid = [int]$owner; error = ('端口 ' + $port + ' 被僵尸套接字占用：属主进程 PID ' + $owner + ' 已不存在，但端口仍 LISTENING（socket 句柄被其他进程持有、引用计数未归零）；用户空间无法释放该端口'); logTail = $tail } | ConvertTo-Json -Compress))`,
+    "  }",
     "  exit 1",
     "}",
     // 3) 启动新服务（Start-Process：新进程脱离原服务进程树——拉起器由独立 PowerShell 宿主拉起、
@@ -297,11 +310,17 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
     "  [ $SECONDS -ge $deadline ] && break",
     "  sleep 0.5",
     "done",
-    // 端口仍被监听：占用者不是老进程（我们只等老进程死）——第三方抢注，启动必撞 EADDRINUSE；
-    // 直接失败退出，不动无辜进程
+    // 端口仍被监听：同样区分「真占用」与「监听记录陈旧（属主已不存在）」——两情形都严格失败，
+    // 但原因要报准（Linux 下进程退出时内核会关闭其 fd、端口随之释放，此情形应属罕见）
     `if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then`,
     `  owner=$(ss -ltnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\\K[0-9]+' | head -1)`,
-    `  printf '{"ok":false,"error":"端口 %s 被其他进程(PID %s)占用，未启动新服务"}\\n' "$port" "\${owner:-unknown}" > ${shq(stateFile)}`,
+    '  owner_alive=0',
+    '  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then owner_alive=1; fi',
+    '  if [ "$owner_alive" = "1" ]; then',
+    `    printf '{"ok":false,"reason":"occupied","port":%s,"ownerPid":"%s","error":"端口 %s 被其他进程(PID %s)占用，未启动新服务"}\\n' "$port" "\${owner:-unknown}" "$port" "\${owner:-unknown}" > ${shq(stateFile)}`,
+    '  else',
+    `    printf '{"ok":false,"reason":"zombie-socket","port":%s,"ownerPid":"%s","error":"端口 %s 仍处于 LISTENING 但属主进程 %s 已不存在（陈旧监听记录）；用户空间无法释放该端口"}\\n' "$port" "\${owner:-unknown}" "$port" "\${owner:-unknown}" > ${shq(stateFile)}`,
+    '  fi',
     "  exit 1",
     "fi",
     // 3) 启动新服务（nohup + &：脱离终端挂断信号；拉起器经 setsid 已独立会话，退出后
@@ -485,13 +504,56 @@ export async function consumeRestartContinuation(deps: ConsumeContinuationDeps):
   }
 }
 
+/**
+ * 重启失败原因的处置说明（status 展示用；state.json 只存结构化短字段，长文案在此展开）。
+ * 区分「真被占用」与「僵尸套接字」是必要的：两者处置方式完全不同，而现象都是「端口起不来」。
+ */
+export function explainRestartState(state: Record<string, unknown>): string[] {
+  const reason = String(state.reason ?? "")
+  const pid = state.ownerPid !== undefined ? String(state.ownerPid) : "未知"
+  const port = state.port !== undefined ? String(state.port) : "未知"
+  const lines: string[] = []
+  if (reason === "occupied") {
+    lines.push(`诊断：端口 ${port} 被其他进程（PID ${pid}）占用——该进程仍存活，且不是本次要替换的旧进程，故不抢端口、立即失败。`)
+    lines.push("处置：先结束该进程（或改用其他端口）后重试。")
+  } else if (reason === "zombie-socket") {
+    lines.push(
+      `诊断：端口 ${port} 被僵尸套接字占用——属主进程 PID ${pid} 已不存在，但端口仍处于 LISTENING` +
+        "（socket 句柄被其他进程持有，内核引用计数未归零，故端口不释放）。",
+    )
+    lines.push(
+      "为何杀不掉：netstat 显示的只是创建者 PID；真正持有句柄的可能是继承了它的子进程——" +
+        "taskkill / 任务管理器对该 PID 无效（进程已不存在），用户空间也无法直接释放该端口。",
+    )
+    lines.push(
+      "处置（代价从低到高）：① 注销并重新登录（终止本会话全部进程、释放句柄，比重启电脑快）；" +
+        "② 结束可能持有句柄的后代进程（如 dev-reload 的构建 watch、浏览器驱动）；③ 重启电脑；" +
+        "或改用其他端口启动。",
+    )
+  } else if (reason === "ready-timeout" || String(state.error ?? "").includes("就绪超时")) {
+    lines.push("诊断：新服务已拉起但未在 90 秒内就绪（看下方 logTail 判断启动失败原因）。")
+  }
+  if (state.error) lines.push(`原始错误：${String(state.error)}`)
+  const tail = typeof state.logTail === "string" ? state.logTail.trim() : ""
+  if (tail) lines.push(`新服务日志尾部：${tail}`)
+  return lines
+}
+
 /** 读取最近一次重启状态 + 续跑情况（status 动作）。 */
 async function readState(deps: Pick<RestartDeps, "tmpDir">): Promise<ToolResult> {
   const stateFile = join(restartDir(deps.tmpDir), "state.json")
   let text: string
   try {
-    const raw = await readFile(stateFile, "utf8")
-    text = `最近一次重启状态：\n${raw.trim().replace(/^\uFEFF/, "")}`
+    const raw = (await readFile(stateFile, "utf8")).replace(/^\uFEFF/, "").trim()
+    let parsed: Record<string, unknown> | null = null
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>
+    } catch {
+      /* 损坏/半截写入：按原文展示 */
+    }
+    text = parsed
+      ? [`最近一次重启状态（ok=${String(parsed.ok)}）：`, ...explainRestartState(parsed), `原始 state.json：${raw}`].join("\n")
+      : `最近一次重启状态：\n${raw}`
   } catch {
     text = `尚无重启记录（state.json 不存在）——从未执行过重启，或 ${restartDir()} 被清理。`
   }
