@@ -642,7 +642,9 @@
   border-radius: 0;
   white-space: normal;
   word-break: break-word;
-  max-height: 200px;
+  /* 长推理高度上限（视口 60% / 720px 封顶）：卡片默认折叠，展开阅读时才占高——上限给足以减少
+     长推理的内部滚动；超出部分内部滚动并粘底跟随（reasoning-scroll.ts），其余消息仍留上下文余地 */
+  max-height: min(60vh, 720px);
   overflow-y: auto;
 }
 

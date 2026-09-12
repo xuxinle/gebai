@@ -1853,7 +1853,7 @@ interface ChatChunk {                   // 流式输出单元
 }
 
 // 补充语义：
-// - `reasoning`：推理内容增量（reasoning_content / thinking），前端渲染为折叠推理块：思考中默认展开实时展示（推理内容可见），推理段结束（正文开始/工具调用封段/流结束）自动折回收起态，用户可点 summary 重新展开；**内容 markdown 完整渲染**（与正文同路径节流——**120ms 尾沿节流是全模式统一路径**，低性能模式不再单独降频）；推理内容超出可视高度（`.reasoning-body` 限高 200px）时内部滚动条自动跟随最新内容，用户上翻翻阅历史不打扰（`reasoning-scroll.ts`）；
+// - `reasoning`：推理内容增量（reasoning_content / thinking），前端渲染为折叠推理块：思考中默认展开实时展示（推理内容可见），推理段结束（正文开始/工具调用封段/流结束）自动折回收起态，用户可点 summary 重新展开；**内容 markdown 完整渲染**（与正文同路径节流——**120ms 尾沿节流是全模式统一路径**，低性能模式不再单独降频）；推理内容超出可视高度（`.reasoning-body` 限高 min(60vh, 720px)）时内部滚动条自动跟随最新内容，用户上翻翻阅历史不打扰（`reasoning-scroll.ts`）；
 //   推理**持久化为独立字段**（`Message.reasoning`，content 保持纯正文；历史会话/切回可见，前端默认折叠可展开，内容同样 markdown 渲染），**回放给 LLM 时不携带**（`loadHistory` 仅映射 content——推理绝不进模型上下文）；旧版数据推理内嵌 content 的 `<think>` 块：前端回退解析展示、回放时 `stripThinkTags` 剥离（兼容，不做数据迁移）
 // - `text`：文本增量；**携带 `session: true` + `sessionRunId` 表示文本来自新会话执行过程**（agent_run 派生会话流式回复），前端渲染进该 run 的折叠容器（见下）
 // - `session_start`：新会话 run 开始（携带 runId + agents/input），前端创建折叠容器——执行中**展开并滚动到可见**；服务端**每轮重推**（同 runId 幂等，前端容器已存在则忽略），前端容器随消息重载丢失（切走会话/断线重连）后新一轮 delta 前可据此重建；分支运行的 start 携带 `branch`/`model`（容器标题「🌿 分支 · 名（模型）」）
