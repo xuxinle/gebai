@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["bun"],
+    "typeRoots": ["../node_modules/@types", "../packages/agents/node_modules/@types"]
+  },
+  "include": ["**/*.ts"]
+}

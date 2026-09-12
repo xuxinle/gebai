@@ -6,13 +6,15 @@
  * 惰性启动、请求超时杀进程重启、stderr 环形缓冲。协议：行分隔 JSON 头 + 定长原始字节帧
  * （见 cv-driver.mjs 顶部说明）。OCR 等轻推理不迁移（wasm 0.5-2s 已达标），仅检测消费。
  *
- * onnxruntime-node 不随构建内嵌（体积/许可）：解析顺序 GEBAI_CV_ORT_NODE_DIR →
- * {GEBAI_HOME}/vendor/onnxruntime-node（内嵌形态预留）→ node_modules（源码/部署形态安装了
- * 该依赖时）；全部不可解析 → sidecar 不可用 → 检测自动回落 wasm（保留现有方案兜底）。
+ * onnxruntime-node 不随构建内嵌（体积/许可）：解析顺序 GEBAI_CV_ORT_NODE_DIR → 资源目录
+ * `{GEBAI_HOME}/resources/vendor/node_modules`（资源子仓库 drop-in 即生效，见 ./resources.ts）→
+ * `{GEBAI_HOME}/vendor` → node_modules（源码/部署形态安装了该依赖时）；全部不可解析 → sidecar
+ * 不可用 → 检测自动回落 wasm（保留现有方案兜底）。
  */
 import { dirname, join } from "node:path"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { isBinaryMode, resolveGebaiHome } from "../shared/config"
+import { isBinaryMode } from "../shared/config"
+import { cvRuntimeDir, ortNodePrefixCandidates } from "./resources"
 import { log } from "@gebai/sdk/node"
 
 const DRIVER_FILE = "cv-driver.mjs"
@@ -44,11 +46,12 @@ const defaultSpawn: SidecarSpawn = (cmd) => {
 }
 
 /** 驱动脚本路径：源码模式与本文件同目录；二进制（bun --compile）形态从内嵌产物
- *  （./cvdriver.embedded.generated.json，构建脚本 scripts/build-cvdriver-embed.ts 生成）
- *  物化到 {GEBAI_HOME}/vendor/cv/（与 playwright driver 同思路的打包闭环）。 */
+ *  （./cvdriver.embedded.generated.json，构建脚本 packages/server/scripts/build-cvdriver-embed.ts
+ *  生成）释放到资源目录 `{GEBAI_HOME}/resources/vendor/cv/`（内嵌 ort 运行时同目录，见 ./resources.ts）。 */
 export async function resolveCvDriverFile(): Promise<string> {
   if (!isBinaryMode()) return join(import.meta.dir, DRIVER_FILE)
-  const dir = join(resolveGebaiHome(), "vendor", "cv")
+  const dir = cvRuntimeDir()
+  if (!dir) throw new Error("无法释放 CV sidecar 驱动：{GEBAI_HOME} 不可解析")
   const file = join(dir, DRIVER_FILE)
   if (!existsSync(file)) {
     const embedded = await import("./cvdriver.embedded.generated.json")
@@ -80,23 +83,20 @@ function ortNodePackageRoot(entry: string): string | null {
 
 /**
  * onnxruntime-node 解析（不进 bundle 图——运行时解析，bundle 注册表启动安全）：
- * GEBAI_CV_ORT_NODE_DIR（包根或其父目录）→ **{GEBAI_HOME}/models/vendor/node_modules**
- * （资源子仓库约定位置——npm 整包含依赖放入即生效，见 models/README.md；包内
- * onnxruntime-common 等依赖经 node 标准向上查找天然可用）→ {GEBAI_HOME}/vendor →
- * node_modules（源码/部署形态）。不可解析返回 null（sidecar 不可用，检测回落 wasm）。
+ * GEBAI_CV_ORT_NODE_DIR（包根或其父目录）→ 资源目录 `{GEBAI_HOME}/resources/vendor/node_modules`
+ * （资源子仓库 drop-in 即生效，见 ./resources.ts；包内 onnxruntime-common 等依赖经 node 标准
+ * 向上查找天然可用）→ 旧资源目录 → {GEBAI_HOME}/vendor → node_modules（源码/部署形态）。
+ * 不可解析返回 null（sidecar 不可用，检测回落 wasm）。
  */
 export function resolveOrtNodeDir(env: Record<string, string> = process.env as Record<string, string>): string | null {
   const explicit = String(env.GEBAI_CV_ORT_NODE_DIR ?? "").trim()
   if (explicit) return existsSync(join(explicit, "onnxruntime-node", "package.json")) ? join(explicit, "onnxruntime-node") : explicit
-  try {
-    const home = resolveGebaiHome()
-    for (const prefix of [join(home, "models", "vendor"), join(home, "vendor")]) {
-      // 两种布局：prefix/onnxruntime-node（裸包）或 prefix/node_modules/onnxruntime-node（npm 布局含依赖闭包）
-      for (const pkg of [join(prefix, "node_modules", "onnxruntime-node"), join(prefix, "onnxruntime-node")]) {
-        if (existsSync(join(pkg, "package.json"))) return pkg
-      }
+  for (const prefix of ortNodePrefixCandidates()) {
+    // 两种布局：prefix/onnxruntime-node（裸包）或 prefix/node_modules/onnxruntime-node（npm 布局含依赖闭包）
+    for (const pkg of [join(prefix, "node_modules", "onnxruntime-node"), join(prefix, "onnxruntime-node")]) {
+      if (existsSync(join(pkg, "package.json"))) return pkg
     }
-  } catch { /* GEBAI_HOME 不可解析（测试环境等）——继续走 node_modules 探查 */ }
+  }
   try {
     // 拼接规避 bundler 对字面量的静态解析（运行时按需加载，与 ort-loader 同款）
     const resolved = Bun.resolveSync("onnxruntime-" + "node", import.meta.dir)

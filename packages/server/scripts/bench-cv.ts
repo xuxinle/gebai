@@ -1,7 +1,7 @@
 /**
  * CV 分层视觉栈综合实测（性能/可靠性/准确性）——诊断工具，不进构建链。
  * 运行：cd packages/server && bun run scripts/bench-cv.ts
- * 前提：models 资源仓库就位（零配置），sidecar 可用（GPU/native）。
+ * 前提：resources 资源仓库就位（零配置），sidecar 可用（GPU/native）。
  */
 import { getCvRunner } from "../src/core/cv/cv"
 import { decodePng, cropImage } from "../src/core/cv/image"

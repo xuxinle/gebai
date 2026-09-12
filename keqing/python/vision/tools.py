@@ -6,11 +6,12 @@ det 归一化 ImageNet mean/std、rec 归一化 0.5/0.5、CTC blank=0、DB uncli
 v8/v5 双输出形态、ultralytics ONNX 元数据自适应）；模板匹配为 numpy 向量化重写（零均值 NCC +
 积分图 + 粗扫多相位 + 全分辨率精化，与 TS template.ts 同算法）。
 
-模型资产复用歌白 CV 约定（均落在资源子仓库 {GEBAI_HOME}/models/，dev 形态即仓库根 models/）：
-- OCR：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/models/ocr → {GEBAI_HOME}/vendor/cv-models
-  （det.onnx / rec.onnx / dict.txt 三件套）
+模型资产复用歌白 CV 约定（资源目录 {GEBAI_HOME}/resources/，dev 形态即仓库根 resources/，路径口径与
+TS core/cv/resources.ts 一致）：
+- OCR：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/resources/models/cv/ocr → 旧布局 {GEBAI_HOME}/models/ocr
+  → {GEBAI_HOME}/vendor/cv-models（det.onnx / rec.onnx / dict.txt 三件套）
 - 检测：GEBAI_CV_DETECT_MODEL（ultralytics 导出自动读 imgsz/names）或
-  {GEBAI_HOME}/models/detect/ 唯一 .onnx
+  {GEBAI_HOME}/resources/models/cv/detect/ 唯一 .onnx（旧布局 {GEBAI_HOME}/models/detect/ 回退）
 图片路径一律经 driver.ctx_resolve 解析（相对路径基准=请求级会话工作区）。
 """
 
@@ -50,17 +51,23 @@ def gebai_home():
     return os.environ.get("GEBAI_HOME") or os.path.expanduser("~/.gebai")
 
 
+def _resource_candidates(current, legacy):
+    """资源目录候选（新资源目录优先，旧 models/ 布局回退）——与 TS core/cv/resources.ts 同口径。"""
+    home = gebai_home()
+    return [os.path.join(home, *current), os.path.join(home, *legacy)]
+
+
 def resolve_ocr_dir():
-    """OCR 三件套目录：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/models/ocr → {GEBAI_HOME}/vendor/cv-models。"""
+    """OCR 三件套目录：GEBAI_CV_MODELS_DIR → {GEBAI_HOME}/resources/models/cv/ocr → 旧 models/ocr
+    → {GEBAI_HOME}/vendor/cv-models。"""
     import driver
 
     cands = []
     env_dir = driver.ctx_env("GEBAI_CV_MODELS_DIR")
     if env_dir:
         cands.append(env_dir)
-    home = gebai_home()
-    cands.append(os.path.join(home, "models", "ocr"))
-    cands.append(os.path.join(home, "vendor", "cv-models"))
+    cands.extend(_resource_candidates(("resources", "models", "cv", "ocr"), ("models", "ocr")))
+    cands.append(os.path.join(gebai_home(), "vendor", "cv-models"))
     for d in cands:
         if os.path.isfile(os.path.join(d, "det.onnx")):
             return d
@@ -68,22 +75,23 @@ def resolve_ocr_dir():
 
 
 def resolve_detect_model():
-    """检测模型：GEBAI_CV_DETECT_MODEL → {GEBAI_HOME}/models/detect/ 唯一 .onnx。"""
+    """检测模型：GEBAI_CV_DETECT_MODEL → {GEBAI_HOME}/resources/models/cv/detect/ 唯一 .onnx
+    （旧布局 {GEBAI_HOME}/models/detect/ 回退）。"""
     import driver
 
     explicit = driver.ctx_env("GEBAI_CV_DETECT_MODEL")
     if explicit and os.path.isfile(explicit):
         return explicit, None
-    d = os.path.join(gebai_home(), "models", "detect")
-    try:
-        onnx = [n for n in os.listdir(d) if n.lower().endswith(".onnx")]
-    except OSError:
-        return None, "目标检测未配置：设置 GEBAI_CV_DETECT_MODEL 或把唯一 .onnx 放入 {GEBAI_HOME}/models/detect/（ultralytics 导出自动读 imgsz/names；其他来源需 GEBAI_CV_DETECT_LABELS）"
-    if len(onnx) == 1:
-        return os.path.join(d, onnx[0]), None
-    if not onnx:
-        return None, "目标检测未配置：{GEBAI_HOME}/models/detect/ 无 .onnx（自备 ultralytics YOLO 导出模型放入即用）"
-    return None, f"目标检测模型歧义：{d} 下有 {len(onnx)} 个 .onnx，请用 GEBAI_CV_DETECT_MODEL 显式指定"
+    for d in _resource_candidates(("resources", "models", "cv", "detect"), ("models", "detect")):
+        try:
+            onnx = [n for n in os.listdir(d) if n.lower().endswith(".onnx")]
+        except OSError:
+            continue
+        if len(onnx) == 1:
+            return os.path.join(d, onnx[0]), None
+        if onnx:
+            return None, f"目标检测模型歧义：{d} 下有 {len(onnx)} 个 .onnx，请用 GEBAI_CV_DETECT_MODEL 显式指定"
+    return None, "目标检测未配置：{GEBAI_HOME}/resources/models/cv/detect/ 无 .onnx（设置 GEBAI_CV_DETECT_MODEL，或把 ultralytics YOLO 导出模型放入该目录即用）"
 
 
 # ---------------- 推理会话（进程级缓存——模型加载一次全会话复用） ----------------
@@ -667,7 +675,7 @@ def _ocr_assets():
     if not d:
         raise RuntimeError(
             "OCR 模型未配置：请设置 GEBAI_CV_MODELS_DIR 指向含 det.onnx / rec.onnx / dict.txt 的目录"
-            "（PP-OCR 中英文三件套；可放入 {GEBAI_HOME}/models/ocr/，或运行 scripts/build-cv-embed.ts 自动下载）"
+            "（PP-OCR 中英文三件套；可放入 {GEBAI_HOME}/resources/models/cv/ocr/，或运行 packages/server/scripts/build-cv-embed.ts 自动下载）"
         )
     det = os.path.join(d, "det.onnx")
     rec = os.path.join(d, "rec.onnx")
@@ -1059,7 +1067,7 @@ TOOLS = [
     },
     {
         "name": "detect",
-        "description": "本地目标检测（自备 YOLO ONNX 模型：GEBAI_CV_DETECT_MODEL 指定，或放入 {GEBAI_HOME}/models/detect/ 唯一 .onnx 自动生效；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与图片像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）。image 为 PNG 图片路径（必填）；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
+        "description": "本地目标检测（自备 YOLO ONNX 模型：GEBAI_CV_DETECT_MODEL 指定，或放入 {GEBAI_HOME}/resources/models/cv/detect/ 唯一 .onnx 自动生效；ultralytics 导出的 ONNX 自动读取内嵌输入尺寸与类别，免标签配置）。返回检测对象类别与图片像素坐标，并默认与 OCR 配对输出每框文本（pair_text 可关）。image 为 PNG 图片路径（必填）；conf 置信度阈值（默认 0.25）；iou NMS 阈值（默认 0.45，密集小控件场景建议 0.1）。",
         "parameters": {
             "type": "object",
             "properties": {

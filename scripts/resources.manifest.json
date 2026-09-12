@@ -1,0 +1,110 @@
+{
+  "$comment": "歌白资源目录下载清单（scripts/download-resources.ts 读取；目标目录 <仓库根>/resources，GEBAI_RESOURCES_DIR 可覆盖）。单个文件列多个来源，按顺序尝试（--source / GEBAI_RESOURCE_SOURCE 可指定 kind 优先级）；下载后按 size/sha256 校验。",
+  "version": 1,
+  "entries": [
+    {
+      "path": "models/cv/ocr/det.onnx",
+      "size": 4745517,
+      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "PP-OCRv4 mobile 文本检测 ONNX（中英文；本地识别 det 前处理/DB 后处理按此模型约定）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/RapidAI/RapidOCR/repo?Revision=master&FilePath=onnx/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.onnx"
+        },
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx"
+        }
+      ]
+    },
+    {
+      "path": "models/cv/ocr/rec.onnx",
+      "size": 10857958,
+      "sha256": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "PP-OCRv4 mobile 文本识别 ONNX（中英文 CTC；character 字典内嵌于模型元数据）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/RapidAI/RapidOCR/repo?Revision=master&FilePath=onnx/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile.onnx"
+        },
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx"
+        }
+      ]
+    },
+    {
+      "path": "models/cv/ocr/dict.txt",
+      "size": 26249,
+      "sha256": "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
+      "required": true,
+      "license": "Apache-2.0",
+      "description": "CTC 字符表（6623 行，与 rec 模型配套；可手工替换）",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/RapidAI/RapidOCR/repo?Revision=master&FilePath=paddle/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile/ppocr_keys_v1.txt"
+        }
+      ],
+      "derive": {
+        "method": "rec-metadata",
+        "from": "models/cv/ocr/rec.onnx",
+        "note": "下载源不可达时从 rec 模型内嵌的 character 元数据提取（RapidOCR 约定）"
+      }
+    },
+    {
+      "path": "models/cv/detect/screenparser-best.pt",
+      "size": 153259543,
+      "sha256": "dbcb4f583ccfdb8100a68e606525c247890a2de4c1a54b14741e0ee29ce0ab88",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "ScreenParser UI 组件检测训练权重（ultralytics YOLO，55 类；检测模型不随构建内嵌，放入 models/cv/detect/ 即自动生效）",
+      "sources": [
+        {
+          "kind": "hf-mirror",
+          "url": "https://hf-mirror.com/docling-project/ScreenParser/resolve/main/best.pt"
+        },
+        {
+          "kind": "huggingface",
+          "url": "https://huggingface.co/docling-project/ScreenParser/resolve/main/best.pt"
+        }
+      ]
+    },
+    {
+      "path": "models/cv/detect/screenparser-best.onnx",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "ScreenParser 运行时 ONNX（由上面的 .pt 导出；缺省自动发现该目录下唯一 .onnx，也可换用任意 ultralytics 导出的 YOLO 模型）",
+      "derive": {
+        "method": "export-command",
+        "from": "models/cv/detect/screenparser-best.pt",
+        "command": "yolo export model=screenparser-best.pt format=onnx imgsz=1280",
+        "note": "需 ultralytics 工具链；导出产物放回 models/cv/detect/ 即生效（GEBAI_CV_DETECT_MODEL 可显式指定其他模型）"
+      }
+    }
+  ],
+  "packages": [
+    {
+      "dir": "vendor",
+      "manager": "npm",
+      "required": false,
+      "description": "GPU sidecar 原生推理依赖闭包（onnxruntime-node 及其依赖；缺失时检测自动回落 wasm CPU）",
+      "dependencies": {
+        "onnxruntime-node": "1.29.0"
+      }
+    }
+  ]
+}

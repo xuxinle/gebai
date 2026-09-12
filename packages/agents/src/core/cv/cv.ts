@@ -1,6 +1,6 @@
 /**
  * 本地 CV 推理入口（core/cv）：惰性共享单例——ort 模块加载、模型目录解析（环境变量
- * GEBAI_CV_MODELS_DIR → 二进制物化目录 → {GEBAI_HOME}/models/ocr 资源子仓库）、session 缓存
+ * GEBAI_CV_MODELS_DIR → 二进制形态释放的内嵌模型目录 → 资源目录候选链，见 ./resources.ts）、session 缓存
  * （模型文件路径+大小键控）与全进程推理串行（wasm CPU 推理互斥，防同批扇出并发争抢）。
  * 检测（detect）另走分层后端：GPU sidecar（node + onnxruntime-node，见 sidecar.ts）→
  * wasm 进程内兜底（GEBAI_CV_DETECT_BACKEND 控制；标签/输入尺寸支持 ultralytics ONNX
@@ -9,13 +9,13 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { basename, join } from "node:path"
-import { resolveGebaiHome } from "../shared/config"
+import { detectModelDirCandidates, ocrModelDirCandidates } from "./resources"
 import { cropImage, type RgbaImage } from "./image"
 import { ctcDecode, dbPostprocess, detPreprocess, recPreprocessBatch, REC_HEIGHT, type OcrLine } from "./ocr"
 import { letterbox, yoloPostprocess, type DetectObject } from "./detect"
 import { parseOnnxInputSize, parseOnnxMetadata, ultralyticsMeta } from "./onnx-meta"
 import { cvSidecarClient, poisonCvSidecar, type CvSidecar } from "./sidecar"
-import { loadOrtModule, resolveCvAssetsDir, type OrtModule, type OrtSession } from "./ort-loader"
+import { loadOrtModule, resolveCvRuntime, type OrtModule, type OrtSession } from "./ort-loader"
 
 /** OCR 模型三件套（模型目录内固定文件名）。 */
 const DET_MODEL = "det.onnx"
@@ -24,12 +24,12 @@ const DICT_FILE = "dict.txt"
 
 const MODEL_DIR_GUIDE =
   "本地识别模型未配置：请设置 GEBAI_CV_MODELS_DIR 指向包含 det.onnx / rec.onnx / dict.txt" +
-  "（PP-OCR 中英文 det/rec ONNX 与字典）的目录；源码形态可运行 scripts/build-cv-embed.ts 自动下载到" +
-  " {GEBAI_HOME}/models/ocr/；单二进制形态需构建时内嵌（scripts/build-cv-embed.ts）"
+  "（PP-OCR 中英文 det/rec ONNX 与字典）的目录；也可把三件套放入 {GEBAI_HOME}/resources/models/cv/ocr/" +
+  "（资源目录，构建时缺失会自动下载到此处；单二进制形态构建时内嵌并释放到同一路径）"
 
 const DETECT_MODEL_GUIDE =
   "目标检测未配置：设置 GEBAI_CV_DETECT_MODEL（YOLO ONNX 模型路径），或把模型放入 " +
-  "{GEBAI_HOME}/models/detect/（唯一 .onnx 自动生效——资源仓库整体放入 models/ 即零配置可用）。" +
+  "{GEBAI_HOME}/resources/models/cv/detect/（唯一 .onnx 自动生效——资源目录整体放入 {GEBAI_HOME}/resources/ 即零配置可用）。" +
   "模型不随构建内嵌，请自备（ultralytics YOLO 导出的 ONNX 自动读取内嵌 imgsz/names 元数据——" +
   "免标签文件与尺寸配置；其他来源需设 GEBAI_CV_DETECT_LABELS，每行一个类别）"
 
@@ -60,8 +60,8 @@ export function setCvRunnerFactory(factory: (() => CvRunner) | null): void {
   runnerFactory = factory
 }
 
-let ortLoader: () => Promise<{ ort: OrtModule; assetsDir: string | null }> = loadOrtModule
-export function setCvOrtLoader(loader: (() => Promise<{ ort: OrtModule; assetsDir: string | null }>) | null): void {
+let ortLoader: () => Promise<{ ort: OrtModule; modelsDir: string | null }> = loadOrtModule
+export function setCvOrtLoader(loader: (() => Promise<{ ort: OrtModule; modelsDir: string | null }>) | null): void {
   ortLoader = loader ?? loadOrtModule
 }
 
@@ -91,14 +91,15 @@ function hasModels(dir: string): boolean {
   return [DET_MODEL, REC_MODEL, DICT_FILE].every((f) => existsSync(join(dir, f)))
 }
 
-/** 解析 OCR 模型目录：GEBAI_CV_MODELS_DIR（绝对/相对路径均可）→ 内嵌物化/依赖目录
- *  → {GEBAI_HOME}/models/ocr（资源子仓库——dev 形态 GEBAI_HOME = 仓库根）。 */
-function resolveModelDir(env: Record<string, string>, assetsDir: string | null): string | null {
+/** 解析 OCR 模型目录：GEBAI_CV_MODELS_DIR（绝对/相对路径均可）→ 二进制形态释放的内嵌模型目录
+ *  → 资源目录候选链（`{GEBAI_HOME}/resources/models/cv/ocr` → 旧 `models/ocr`）。 */
+function resolveModelDir(env: Record<string, string>, embeddedModelsDir: string | null): string | null {
   const custom = String(env.GEBAI_CV_MODELS_DIR ?? "").trim()
   if (custom) return custom
-  if (assetsDir && hasModels(assetsDir)) return assetsDir
-  const models = devAssetsDirOverride === false ? null : (devAssetsDirOverride ?? join(resolveGebaiHome(), "models", "ocr"))
-  if (models && hasModels(models)) return models
+  if (embeddedModelsDir && hasModels(embeddedModelsDir)) return embeddedModelsDir
+  if (devAssetsDirOverride === false) return null
+  if (devAssetsDirOverride && hasModels(devAssetsDirOverride)) return devAssetsDirOverride
+  for (const dir of ocrModelDirCandidates()) if (hasModels(dir)) return dir
   return null
 }
 
@@ -109,11 +110,11 @@ interface OcrState {
   chars: string[]
 }
 
-let ortModule: Promise<{ ort: OrtModule; assetsDir: string | null }> | null = null
+let ortModule: Promise<{ ort: OrtModule; modelsDir: string | null }> | null = null
 const ocrStates = new Map<string, Promise<OcrState>>()
 const sessions = new Map<string, Promise<OrtSession>>()
 
-function loadOrt(): Promise<{ ort: OrtModule; assetsDir: string | null }> {
+function loadOrt(): Promise<{ ort: OrtModule; modelsDir: string | null }> {
   return (ortModule ??= ortLoader())
 }
 
@@ -133,8 +134,8 @@ function sessionFor(ort: OrtModule, path: string): Promise<OrtSession> {
 }
 
 function ocrStateFor(env: Record<string, string>): Promise<OcrState> {
-  return loadOrt().then(({ ort, assetsDir }) => {
-    const dir = resolveModelDir(env, assetsDir)
+  return loadOrt().then(({ ort, modelsDir }) => {
+    const dir = resolveModelDir(env, modelsDir)
     if (!dir) throw new Error(MODEL_DIR_GUIDE)
     const detPath = join(dir, DET_MODEL)
     const recPath = join(dir, REC_MODEL)
@@ -201,7 +202,7 @@ async function runTiered<T>(
       }
     } else if (mode === "sidecar") {
       throw new Error(
-        "CV sidecar 不可用：onnxruntime-node 未解析到（放入 {GEBAI_HOME}/models/vendor/node_modules、设 GEBAI_CV_ORT_NODE_DIR 或安装依赖）；" +
+        "CV sidecar 不可用：onnxruntime-node 未解析到（放入 {GEBAI_HOME}/resources/vendor/node_modules、设 GEBAI_CV_ORT_NODE_DIR 或安装依赖）；" +
           "显式 sidecar 不回落，改 auto/wasm 可切换",
       )
     }
@@ -223,8 +224,8 @@ const ocrPathsCache = new Map<string, Promise<OcrModelPaths>>()
 const ocrCharsCache = new Map<string, string[]>()
 
 function ocrModelPathsFor(env: Record<string, string>): Promise<OcrModelPaths> {
-  return resolveCvAssetsDir().then((assetsDir) => {
-    const dir = resolveModelDir(env, assetsDir)
+  return resolveCvRuntime().then((runtime) => {
+    const dir = resolveModelDir(env, runtime?.modelsDir ?? null)
     if (!dir) throw new Error(MODEL_DIR_GUIDE)
     const cached = ocrPathsCache.get(dir)
     if (cached) return cached
@@ -254,7 +255,7 @@ function ocrCharsFor(dictPath: string): string[] {
 
 /* ---------------- 检测配置（模型路径 / 标签 / 输入尺寸） ---------------- */
 
-/** 检测模型约定发现目录（drop-in 即用）：{GEBAI_HOME}/models/detect/。 */
+/** 检测模型约定发现目录（drop-in 即用）：`{GEBAI_HOME}/resources/models/cv/detect/`（旧 `models/detect/` 回退）。 */
 let detectDirOverride: string | false | undefined
 /** 测试注入：false = 视为不存在（保证「未配置→指引」用例确定性，防本机真模型干扰）。 */
 export function setCvDetectDirForTests(dir: string | false | undefined): void {
@@ -262,27 +263,22 @@ export function setCvDetectDirForTests(dir: string | false | undefined): void {
 }
 
 function discoverDetectModel(): { path: string } | { multiple: string[] } | null {
-  let dir: string | null
   if (detectDirOverride === false) return null
-  if (detectDirOverride !== undefined) dir = detectDirOverride
-  else {
+  const dirs = detectDirOverride !== undefined ? [detectDirOverride] : detectModelDirCandidates()
+  // 候选目录逐个检查（新布局优先）：第一个含 .onnx 的目录生效
+  for (const dir of dirs) {
+    let onnx: string[]
     try {
-      dir = join(resolveGebaiHome(), "models", "detect")
+      onnx = readdirSync(dir)
+        .filter((f) => f.toLowerCase().endsWith(".onnx"))
+        .sort()
+        .map((f) => join(dir, f))
     } catch {
-      return null
+      continue
     }
+    if (onnx.length === 1) return { path: onnx[0] }
+    if (onnx.length > 1) return { multiple: onnx }
   }
-  let onnx: string[]
-  try {
-    onnx = readdirSync(dir)
-      .filter((f) => f.toLowerCase().endsWith(".onnx"))
-      .sort()
-      .map((f) => join(dir!, f))
-  } catch {
-    return null
-  }
-  if (onnx.length === 1) return { path: onnx[0] }
-  if (onnx.length > 1) return { multiple: onnx }
   return null
 }
 
@@ -301,12 +297,12 @@ const detectConfigs = new Map<string, Promise<DetectConfig>>()
 function detectConfigFor(env: Record<string, string>): Promise<DetectConfig> {
   let modelPath = String(env.GEBAI_CV_DETECT_MODEL ?? "").trim()
   if (!modelPath) {
-    // 约定目录自动发现（env 显式指定优先）：models/detect/ 唯一 .onnx 即生效，多个列出候选
+    // 约定目录自动发现（env 显式指定优先）：资源目录 models/cv/detect/ 唯一 .onnx 即生效，多个列出候选
     const found = discoverDetectModel()
     if (found && "multiple" in found) {
       return Promise.reject(
         new Error(
-          `models/detect/ 下有 ${found.multiple.length} 个 ONNX 检测模型，无法自动选择：` +
+          `资源目录 models/cv/detect/ 下有 ${found.multiple.length} 个 ONNX 检测模型，无法自动选择：` +
             `${found.multiple.map((p) => basename(p)).join("、")}。设置 GEBAI_CV_DETECT_MODEL 指定其一，或目录内只保留一个 .onnx`,
         ),
       )

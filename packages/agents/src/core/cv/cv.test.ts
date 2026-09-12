@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { getCvRunner, sliceBatchOutput, setCvDetectDirForTests, setCvDevAssetsDirForTests, setCvOrtLoader, setCvRunnerFactory } from "./cv"
@@ -68,10 +68,10 @@ function modelDir(): string {
 }
 
 beforeAll(() => {
-  setCvOrtLoader(() => Promise.resolve({ ort, assetsDir: null }))
+  setCvOrtLoader(() => Promise.resolve({ ort, modelsDir: null }))
   // 屏蔽 dev 资产目录回退（本机可能已下载真模型），保证「未配置→指引」用例确定性
   setCvDevAssetsDirForTests(false)
-  // 屏蔽检测模型约定目录发现（本机 models/detect 可能有真模型），自动发现用例内按需指向临时目录
+  // 屏蔽检测模型约定目录发现（本机资源目录 models/cv/detect 可能有真模型），自动发现用例内按需指向临时目录
   setCvDetectDirForTests(false)
   // sidecar 恒不可用（分层后端用例内按需注入替身）——保证缺省走 wasm 路径的确定性
   setCvSidecarFactoryForTests(() => null)
@@ -448,7 +448,7 @@ function shapeModel(dims: (number | string)[], entries: string[] = []): Buffer {
   return Buffer.from(out)
 }
 
-describe("detect 模型约定目录自动发现（models/detect drop-in 即用）", () => {
+describe("detect 模型约定目录自动发现（资源目录 models/cv/detect drop-in 即用）", () => {
   test("目录内唯一 .onnx 自动生效（免 GEBAI_CV_DETECT_MODEL）", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gebai-cv-disc-"))
     writeFileSync(join(dir, "a.onnx"), metaModel(["imgsz", "[640, 640]", "names", '{"0":"btn"}']))
@@ -514,6 +514,55 @@ describe("detect 模型约定目录自动发现（models/detect drop-in 即用�
       await expect(getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 })).rejects.toThrow(/GEBAI_CV_DETECT_MODEL/)
     } finally {
       setCvDetectDirForTests(false)
+    }
+  })
+
+  test("资源目录候选链：{GEBAI_HOME}/resources/models/cv/detect 下 drop-in 即生效（不注入 override）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-cv-home-"))
+    const dir = join(home, "resources", "models", "cv", "detect")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "auto.onnx"), metaModel(["imgsz", "[640, 640]", "names", '{"0":"btn"}']))
+    process.env.GEBAI_HOME = home
+    setCvDetectDirForTests(undefined) // 走真实候选链
+    const n = 8
+    const out = new Float32Array(5 * n)
+    out[2 * n] = 640
+    out[3 * n] = 640
+    out[4 * n] = 0.9
+    detectOut = { data: out, dims: [1, 5, n] }
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 })
+      expect(r.objects.length).toBe(1)
+      expect(r.objects[0].label).toBe("btn")
+    } finally {
+      detectOut = null
+      setCvDetectDirForTests(false)
+      delete process.env.GEBAI_HOME
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("旧布局 {GEBAI_HOME}/models/detect 仍可回退发现", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-cv-legacy-"))
+    const dir = join(home, "models", "detect")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "legacy.onnx"), metaModel(["names", '{"0":"legacy"}']))
+    process.env.GEBAI_HOME = home
+    setCvDetectDirForTests(undefined)
+    const n = 8
+    const out = new Float32Array(5 * n)
+    out[2 * n] = 640
+    out[3 * n] = 640
+    out[4 * n] = 0.9
+    detectOut = { data: out, dims: [1, 5, n] }
+    try {
+      const r = await getCvRunner().detect(solid(64, 64), { env: {}, conf: 0.25 })
+      expect(r.objects[0].label).toBe("legacy")
+    } finally {
+      detectOut = null
+      setCvDetectDirForTests(false)
+      delete process.env.GEBAI_HOME
+      rmSync(home, { recursive: true, force: true })
     }
   })
 })

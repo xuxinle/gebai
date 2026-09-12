@@ -36,6 +36,10 @@ GEBAI is an agent engine built around one stable core loop: **conversation → t
 #    1. Install dependencies
 bun install
 
+# 1.5 （可选）下载本地识别资源（PP-OCR 模型、GPU 推理依赖）——本地视觉识别用，不装则相关工具不可用
+#     1.5 (optional) Fetch local-vision resources (PP-OCR models, GPU runtime deps)
+bun run resources:download
+
 # 2. 配置模型（复制 .env.example 为 .env 并填入 LLM 配置）
 #    2. Configure a model (copy .env.example to .env and fill in LLM settings)
 cp .env.example .env

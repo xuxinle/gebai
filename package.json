@@ -12,10 +12,13 @@
     "dev:web": "bun run --cwd packages/web dev",
     "build": "turbo run build",
     "test": "turbo run test",
-    "typecheck": "turbo run typecheck && bun run scripts/typecheck-custom.ts",
+    "typecheck": "turbo run typecheck && bun run scripts/typecheck-custom.ts && bun run typecheck:scripts",
     "typecheck:custom": "bun run scripts/typecheck-custom.ts",
+    "typecheck:scripts": "bunx tsc -p scripts/tsconfig.json",
     "lint": "turbo run lint",
-    "build:code": "bun run scripts/build-code-agent.ts"
+    "build:code": "bun run scripts/build-code-agent.ts",
+    "resources:download": "bun run scripts/download-resources.ts",
+    "resources:check": "bun run scripts/download-resources.ts --check"
   },
   "devDependencies": {
     "playwright": "^1.62.1",

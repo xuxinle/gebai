@@ -28,7 +28,7 @@ Bun workspaces + Turborepo 的 Monorepo：
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `dist/gebai-desktop.exe`（`launcher/`：tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制；构建期可参数化产出场景变体） |
 
 - **二次开发域**：仓库根 `custom/`（`custom/agents/` 子代理定义 + `custom/core/` 依赖组件，与 `packages/` 平级）——放置即注册、同名覆盖内置；上游更新时整个目录拷到新仓库根即完成迁移。
-- **随包分发的大体积资源**：两类落点，均**不依赖用户系统安装**——① `models/` 资源子仓库（独立 git 仓库，`{GEBAI_HOME}/models/`，见其 `README.md`）存模型与运行时原生依赖；② 构建期内嵌产物（`*.embedded.generated.json`，gzip base64，已 gitignore）+ 运行时物化到 `{GEBAI_HOME}/vendor/<name>/`（d2js / playwright driver / CV）。**内置 ripgrep**（`grep`/`glob` 的 rg 引擎）**只走后者**（内嵌产物）——来源收敛为「npm 包」与「系统」两条，`models/` 刻意不存第二份二进制副本；解析链与双引擎对齐规则见 `DESIGN.md`「内置 ripgrep」，重新生成用 `bun run --cwd packages/server build:rg`（取 rg 顺序：`GEBAI_RG_PATH` → node_modules 的 `@vscode/ripgrep`（`optionalDependencies`，经 npm registry 分发平台子包，拉不到不阻断 `bun install`）→ 系统 `PATH`；不落盘资源、不联网下载）。
+- **随包分发的大体积资源**：两类落点，均**不依赖用户系统安装**——① `resources/` 资源子仓库（独立 git 仓库，`{GEBAI_HOME}/resources/`，见其 `README.md`）存模型与运行时依赖——主仓库带下载清单与脚本（`scripts/resources.manifest.json` + `scripts/download-resources.ts`，`bun run resources:download`：多源 modelscope/huggingface/镜像 + sha256 校验），按清单自动拉取即得同构目录，无需克隆子仓库；② 构建期内嵌产物（`*.embedded.generated.json`，gzip base64，已 gitignore）+ 运行时释放到 `{GEBAI_HOME}/vendor/<name>/`（d2js / playwright driver）与资源目录 `{GEBAI_HOME}/resources/vendor/cv/`（CV 运行时）。**内置 ripgrep**（`grep`/`glob` 的 rg 引擎）**只走后者**（内嵌产物）——来源收敛为「npm 包」与「系统」两条，`resources/` 刻意不存第二份二进制副本；解析链与双引擎对齐规则见 `DESIGN.md`「内置 ripgrep」，重新生成用 `bun run --cwd packages/server build:rg`（取 rg 顺序：`GEBAI_RG_PATH` → node_modules 的 `@vscode/ripgrep`（`optionalDependencies`，经 npm registry 分发平台子包，拉不到不阻断 `bun install`）→ 系统 `PATH`；不落盘资源、不联网下载）。
 - 语言：TypeScript，运行时 Bun。
 - Web 框架：Hono（服务端）、Vite（前端构建）。
 - LLM 接入**不依赖第三方 AI SDK**，自行实现 OpenAI 兼容 `chat/completions`、OpenAI `responses` 与 Anthropic `messages` 三类接口的请求与 SSE 流解析，统一抽象为 `provider.chat()`。
@@ -54,8 +54,9 @@ bun run --cwd packages/sdk test
 bun run --cwd packages/server test:coverage
 
 # 类型检查 / Lint
-bun run typecheck
-bun run typecheck:custom   # 二开域（custom/）单独类型检查
+bun run typecheck        # 全量：各包 + custom/ 二开域 + 根 scripts/（turbo 只覆盖 packages，后两者由根脚本补检）
+bun run typecheck:custom   # 只检二开域（custom/）
+bun run typecheck:scripts  # 只检根 scripts/（仓库级构建/下载脚本）
 bun run lint
 ```
 

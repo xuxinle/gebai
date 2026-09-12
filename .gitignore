@@ -108,7 +108,9 @@ packages/server/src/core/cv/cvdriver.embedded.generated.json
 # 不入库会让新克隆环境 `bun run dev` 直接 Cannot find module（历史踩坑：仓库瘦身时误随
 # 二进制内嵌产物一并移出跟踪）。内置构建后为含密钥脏态属预期，构建脚本编译后立即还原空态。
 
-# 资源子仓库（模型/原生依赖，独立 git 仓库管理——见 models/README.md）
+# 资源子仓库（模型/运行时依赖，独立 git 仓库管理——见 resources/README.md）
+/resources/
+# 旧资源目录名（历史布局，仅作解析回退）
 /models/
 # Go 工具链分发包（本地下载缓存，勿提交）
 go.zip  

@@ -3,9 +3,12 @@
  *
  * 背景：bun --compile 单二进制形态在用户机器上不可依赖 node_modules，本地 CV 推理的 ort
  * 运行时（dist 入口 mjs + wasm 本体，见 core/cv/ort-loader.ts）与 PP-OCR 模型三件套
- * （det/rec ONNX + 字典）须随产物内嵌，运行时物化到 `{GEBAI_HOME}/vendor/cv/`。
+ * （det/rec ONNX + 字典）须随产物内嵌，运行时释放到资源目录 `{GEBAI_HOME}/resources/`——相对结构
+ * 与资源子仓库一致（模型 → `models/cv/ocr/`，ort 运行时 → `vendor/cv/`；布局约定见
+ * packages/agents/src/core/cv/resources.ts）。
  *
- * 模型来源：`{GEBAI_HOME}/models/ocr/` 已有文件优先（资源子仓库，离线/内网自备三件套）；缺失时从
+ * 模型来源：`{GEBAI_HOME}/resources/models/cv/ocr/` 已有文件优先（资源子仓库，离线/内网自备三件套）；
+ * 旧资源目录 `{GEBAI_HOME}/models/ocr/` 已有三件套时沿用（兼容未迁移的开发机）；缺失时从
  * GEBAI_CV_MODEL_BASE 下载（缺省 hf-mirror 的 RapidOCR 托管 PP-OCRv4 mobile，内网可覆写
  * 镜像；文件名固定 det.onnx/rec.onnx 对应两个 URL）。字典从 rec 模型内嵌的 character
  * 元数据提取（RapidOCR 约定，免去单独的字典下载源）。下载失败时生成空清单——构建不失败，
@@ -20,9 +23,15 @@ import { agentsSrcPath } from "./agents-paths"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const outFile = agentsSrcPath("core", "cv", "cv.embedded.generated.json")
-// 模型落盘目录：资源子仓库 {GEBAI_HOME}/models/ocr（dev 形态 GEBAI_HOME = 仓库根）
+// 模型来源/落盘目录：资源目录 {GEBAI_HOME}/resources/models/cv/ocr（dev 形态 GEBAI_HOME = 仓库根）
 const gebaiHome = process.env.GEBAI_HOME?.trim() || join(root, "..", "..")
-const assetsDir = join(gebaiHome, "models", "ocr")
+const ocrDirCurrent = join(gebaiHome, "resources", "models", "cv", "ocr")
+const ocrDirLegacy = join(gebaiHome, "models", "ocr")
+// 新资源目录已有模型优先；否则旧资源目录有则沿用；都没有时下载落盘到新目录
+const ocrDir =
+  existsSync(join(ocrDirCurrent, "det.onnx")) || !existsSync(join(ocrDirLegacy, "det.onnx"))
+    ? ocrDirCurrent
+    : ocrDirLegacy
 
 const MODEL_BASE = process.env.GEBAI_CV_MODEL_BASE || "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4"
 const MODEL_SOURCES = [
@@ -39,9 +48,9 @@ function addFile(path: string, bytes: Uint8Array): void {
 }
 
 async function downloadModels(): Promise<boolean> {
-  mkdirSync(assetsDir, { recursive: true })
+  mkdirSync(ocrDir, { recursive: true })
   for (const { name, url } of MODEL_SOURCES) {
-    const target = join(assetsDir, name)
+    const target = join(ocrDir, name)
     if (existsSync(target) && statBytes(target) > 1_000_000) continue
     try {
       console.log(`[build-cv-embed] downloading ${name} <- ${url}`)
@@ -92,7 +101,7 @@ function extractDictFromRec(recBytes: Uint8Array): string | null {
 async function main(): Promise<void> {
   // 模型：本地已有优先，缺失则下载
   const modelsReady =
-    (existsSync(join(assetsDir, "det.onnx")) && existsSync(join(assetsDir, "rec.onnx"))) || (await downloadModels())
+    (existsSync(join(ocrDir, "det.onnx")) && existsSync(join(ocrDir, "rec.onnx"))) || (await downloadModels())
   // ort 运行时：解析 node_modules 的 onnxruntime-web dist
   let ortDir: string | null = null
   try {
@@ -111,19 +120,19 @@ async function main(): Promise<void> {
     return
   }
 
-  for (const f of ORT_FILES) addFile(f, new Uint8Array(readFileSync(join(ortDir, f))))
-  addFile("det.onnx", new Uint8Array(readFileSync(join(assetsDir, "det.onnx"))))
-  addFile("rec.onnx", new Uint8Array(readFileSync(join(assetsDir, "rec.onnx"))))
+  for (const f of ORT_FILES) addFile(`vendor/cv/${f}`, new Uint8Array(readFileSync(join(ortDir, f))))
+  addFile("models/cv/ocr/det.onnx", new Uint8Array(readFileSync(join(ocrDir, "det.onnx"))))
+  addFile("models/cv/ocr/rec.onnx", new Uint8Array(readFileSync(join(ocrDir, "rec.onnx"))))
 
   // 字典：rec 元数据提取（缺省已随模型内嵌）；已有 dict.txt 则沿用（允许手工替换）
-  const dictPath = join(assetsDir, "dict.txt")
+  const dictPath = join(ocrDir, "dict.txt")
   let dict = existsSync(dictPath) ? readFileSync(dictPath, "utf8") : null
   if (!dict) {
-    dict = extractDictFromRec(new Uint8Array(readFileSync(join(assetsDir, "rec.onnx"))))
-    if (!dict) throw new Error("[build-cv-embed] rec 模型无内嵌 character 字典，且 models/ocr/dict.txt 缺失——请自备字典文件")
+    dict = extractDictFromRec(new Uint8Array(readFileSync(join(ocrDir, "rec.onnx"))))
+    if (!dict) throw new Error("[build-cv-embed] rec 模型无内嵌 character 字典，且资源目录 models/cv/ocr/dict.txt 缺失——请自备字典文件")
     writeFileSync(dictPath, dict)
   }
-  addFile("dict.txt", Buffer.from(dict, "utf8"))
+  addFile("models/cv/ocr/dict.txt", Buffer.from(dict, "utf8"))
 
   const version = String(Bun.hash(files.map((f) => `${f.path}:${f.data}`).join("\n")))
   writeFileSync(outFile, JSON.stringify({ version, files }))
