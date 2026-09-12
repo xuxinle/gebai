@@ -81,7 +81,8 @@ export interface SessionData {
   /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
   /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
   dynamicTools?: DynamicToolDef[]
-  /** 超限截断累计（chat.json 持久化）：因 300 条上限被丢弃的历史消息条数与最近一次时间戳。
+  /** 超限截断累计（chat.json 持久化）：因消息上限被丢弃的历史消息条数与最近一次时间戳
+   *  （丢弃只针对最早的非保护消息，用户输入/系统提示词原位保留）。
    *  loadHistory 据此在历史最前注入「历史裁剪」提示——模型于是知道更早内容已不在上下文中。 */
   trimmed?: { count: number; at: number }
 }

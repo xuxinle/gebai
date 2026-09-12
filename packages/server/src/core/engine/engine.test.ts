@@ -3106,63 +3106,16 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("条数触发的预防性压缩：消息数接近会话上限时 run 前自动压缩（不让 300 条截断静默丢历史）", async () => {
-    const s = await setup("text")
-    const session = await s.store.createSession("default", "t")
-    for (let i = 0; i < 125; i++) {
-      await s.store.appendMessage(session.id, { id: `u-${i}`, role: "user", content: `问题 ${i}`, createdAt: i * 2 + 1 } as never)
-      await s.store.appendMessage(session.id, { id: `a-${i}`, role: "assistant", content: `回答 ${i}`, createdAt: i * 2 + 2 } as never)
-    }
-    const before = (await s.store.load(session.id))!.messages.length
-    expect(before).toBeGreaterThanOrEqual(240) // 达到条数阈值（300 的 80%）
-    await s.engine.run(session.id, "default", "继续")
-    const after = (await s.store.load(session.id))!.messages
-    expect(after.some((m) => m.compacted)).toBe(true) // run 前预防性压缩发生
-    expect(after.length).toBeLessThan(before)
-    cleanup(s.home)
-  })
-
-  test("任务中途条数触发压缩：单次 run 内消息数接近上限时腾挪（不等跨 run 预检）", async () => {
-    const s = await setup("text")
-    const session = await s.store.createSession("default", "t")
-    // 预置 226 条（低于 run 前条数阈值 240，避免预检先把它压掉）
-    for (let i = 0; i < 113; i++) {
-      await s.store.appendMessage(session.id, { id: `u-${i}`, role: "user", content: `问题 ${i}`, createdAt: i * 2 + 1 } as never)
-      await s.store.appendMessage(session.id, { id: `a-${i}`, role: "assistant", content: `回答 ${i}`, createdAt: i * 2 + 2 } as never)
-    }
-    expect((await s.store.load(session.id))!.messages.length).toBe(226)
-    // 模型连续发起工具调用（maxContextTokens=0 → 只走条数口径）→ 单次 run 内消息增长越过阈值
-    let calls = 0
-    const provider = {
-      ...s.provider,
-      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 0 }),
-      chat: async function* () {
-        calls++
-        if (calls <= 20) {
-          yield { type: "tool_call", toolCall: { id: `call-${calls}`, name: "read", arguments: { path: `nope-${calls}.txt` } } }
-          yield { type: "done" }
-          return
-        }
-        yield { type: "text", text: "完成" }
-        yield { type: "done" }
-      },
-    }
-    ;(s.engine as unknown as { opts: { provider: unknown } }).opts.provider = provider
-    await s.engine.run(session.id, "default", "继续")
-    const after = (await s.store.load(session.id))!.messages
-    expect(after.some((m) => m.compacted)).toBe(true) // 中途条数触发压缩
-    expect(after.length).toBeLessThan(300) // 未触达 300 条硬截断
-    cleanup(s.home)
-  })
-
   test("超限截断记录 trimmed 并在下次装载注入「历史裁剪」提示（模型知道历史断裂）", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
-    for (let i = 0; i < 320; i++) {
-      await s.store.appendMessage(session.id, { id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 1 } as never)
-    }
+    // 直接构造超限历史（上限 1000 条）：逐条 appendMessage 会做上千次全量落盘，改为一次装载后单次 append 触发截断
+    const seed = (await s.store.load(session.id))!
+    seed.messages = Array.from({ length: 1000 }, (_, i) => ({ id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 1 })) as never
+    await s.store.appendMessage(session.id, { id: "tail", role: "assistant", content: "tail", createdAt: 1001 } as never)
     const loaded = await s.store.load(session.id)
-    expect(loaded!.trimmed?.count).toBeGreaterThan(0)
+    expect(loaded!.messages.length).toBe(1000)
+    expect(loaded!.trimmed?.count).toBe(1)
     const histFn = (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<import("@gebai/sdk").MessageLike[]> }).loadHistory
     const history = await histFn.call(s.engine, session.id, "default")
     expect(String(history[0]!.content)).toContain("[历史裁剪]")

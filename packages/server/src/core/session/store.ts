@@ -4,8 +4,11 @@ import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
 import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "../base/paths"
 import { randomUUID } from "node:crypto"
 
-/** 会话消息持久化上限（条）。导出供引擎做「条数触发的预防性压缩」判定（见 engine 的 needsCountCompaction）。 */
-export const MAX_CACHE_MESSAGES = 300
+/** 会话消息持久化上限（条）——**纯存储安全网**，不参与压缩判定（上下文保护只认 token 水位口径，见 DESIGN「上下文保护」）。
+ *  取值高于水位口径可达的条数：128k 窗口、输出预留 16384、system 提示词与工具 schema 约 13k 时，
+ *  撞水位需平均约 99 token/条以上，等价约 1000 条密消息；正常会话的提前裁剪由压缩承担，本上限只在
+ *  极端密消息会话中兜底（避免 chat.json 无界增长）。 */
+export const MAX_CACHE_MESSAGES = 1000
 const MAX_CACHE_SESSIONS = 10
 /** 会话 env 内存缓存上限（LRU）：仅活跃会话驻留，防长生命周期进程无界增长。 */
 const MAX_ENV_CACHE_SESSIONS = 256
@@ -47,7 +50,8 @@ export interface SessionData {
   /** 会话置顶标记（chat.json 持久化）：置顶会话在列表置顶分组置前展示；
    *  未定义 = 未置顶（旧格式天然兼容）。置顶/取消不刷新 updatedAt（元数据操作不动排序基线）。 */
   pinned?: boolean
-  /** 超限截断累计（chat.json 持久化）：因 300 条上限被丢弃的历史消息条数与最近一次时间戳。
+  /** 超限截断累计（chat.json 持久化）：因消息上限（MAX_CACHE_MESSAGES）被丢弃的历史消息条数与
+   *  最近一次时间戳。丢弃只针对最早的非保护消息（用户输入/系统提示词/存档原位保留，见 isProtectedMessage）。
    *  loadHistory 据此在历史最前注入「历史裁剪」提示——模型于是知道更早内容已不在上下文中，
    *  而不是把「历史从中间开始」当作完整历史（截断本身不生成摘要，是上下文保护的最后一道兜底）。 */
   trimmed?: { count: number; at: number }
@@ -190,8 +194,8 @@ export function isProtectedMessage(m: { role?: string; session?: boolean; sessio
  * - 系统提示词（角色 system：主 system 段消息、子Agent 装载提示词、压缩摘要自身）压缩时原位保留
  *   （DESIGN「上下文保护」原则：系统提示词不要压缩）；
  * - 其余消息（用户输入、assistant、tool、引擎注入的提醒）进入压缩区间后由 LLM 摘要替换并**完全移除**
- *   （近消息由滑动窗口原样保留；远消息原消息不再残留于上下文——原文仍在会话记录 chat.json 中，
- *   UI 可查看、可回溯，模型侧只看得到摘要）；
+ *   （近消息由滑动窗口原样保留；远消息原消息不再残留于上下文，也不再残留于会话记录——摘要是其在
+ *   会话中留下的唯一形态，模型与 UI 都只看得到摘要）；
  * - 新会话执行存档（session/sessionRun/subAgent/subAgentRun）本就不进主上下文，压缩不动它们（仅存档）。
  */
 export function isCompressibleMessage(m: { role?: string; engineNote?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
@@ -516,9 +520,9 @@ export class SessionStore {
   /**
    * 超限截断（顺序保留）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/新会话执行存档）
    * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直至长度不超上限——不重排消息顺序（append 语义
-   * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免长会话中上下文压缩机制被静默破坏、
-   * 避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身超过上限时按原样保留（软上限，
-   * 用户输入与系统提示词不改变优先）。丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时
+   * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免压缩摘要（受保护）被当普通历史
+   * 丢弃而让压缩成果静默作废、避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身超过
+   * 上限时按原样保留（软上限，用户输入与系统提示词不改变优先）。丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时
    * 连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），
    * 实际保留条数可略低于上限（配对完整性优先）。
    *
@@ -580,7 +584,7 @@ export class SessionStore {
   /**
     * 上下文压缩：将 [from, to) 区间内【可压缩】历史消息替换为一条摘要消息（DESIGN「上下文保护」）。
  * 可压缩口径（isCompressibleMessage）：**除系统提示词外全部**——近消息由滑动窗口排除在区间之外原样保留，
- * 区间内的用户输入/assistant/tool 消息被摘要替换并**完全移除**（原消息仍留在会话记录中可回溯）；
+ * 区间内的用户输入/assistant/tool 消息被摘要替换并**完全移除**（摘要是其唯一留存形态）；
  * 区间内夹带的系统提示词消息（主 system 段/装载提示词）**原样保留**（不参与替换，原则：系统提示词不压缩）。
  * 摘要消息标记 compacted/summary，loadHistory 时作为 user 角色注入（不污染 system 段）。
  * 区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）。

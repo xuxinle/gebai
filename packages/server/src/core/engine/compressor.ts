@@ -237,18 +237,18 @@ export function buildSummaryChunks(lines: string[], budget = SUMMARY_INPUT_LIMIT
     tailChars += lines[j].length + 1
   }
   const omitted = total - headChars - tailChars
-  const note = `[省略] 此处约 ${omitted} 字符的历史内容因超出摘要输入预算未纳入（消息过密）：摘要仅覆盖最早与最近两端，其余细节已随压缩丢弃（原文仍在会话记录中）。`
+  const note = `[省略] 此处约 ${omitted} 字符的历史内容因超出摘要输入预算未纳入（消息过密）：摘要仅覆盖最早与最近两端，其余细节已随压缩移除。`
   return [...packLines(headLines, budget, maxChunks), note, ...packLines(tailLines, budget, maxChunks)]
 }
 
 /**
  * 摘要失败（接口异常/读超时/取消）时的降级文本：保留**被裁剪内容的骨架行**而非一句空占位——
- * 模型仍能知道被裁剪的历史大致是什么、涉及哪些文件与工具（原文仍在会话记录中可查看），
+ * 模型仍能知道被裁剪的历史大致是什么、涉及哪些文件与工具，
  * 比「历史已丢弃」式占位信息量大得多。
  */
 export function summarizeFallback(slice: Message[]): string {
   const lines = slice.slice(0, SUMMARY_FALLBACK_LINES).map((m) => summarizeMessageLine(m, SUMMARY_FALLBACK_ITEM_LIMIT))
-  const head = `[上下文已裁剪：摘要生成失败，已丢弃最早 ${slice.length} 条历史消息（原文仍在会话记录中可查看）。以下为被裁剪内容的骨架记录]`
+  const head = `[上下文已裁剪：摘要生成失败，已丢弃最早 ${slice.length} 条历史消息（原文不再保留）。以下为被裁剪内容的骨架记录]`
   const more = slice.length > SUMMARY_FALLBACK_LINES ? `\n…（另有 ${slice.length - SUMMARY_FALLBACK_LINES} 条更晚的消息同样已被裁剪）` : ""
   return `${head}\n${lines.join("\n")}${more}`.slice(0, SUMMARY_OUTPUT_LIMIT)
 }
@@ -423,8 +423,8 @@ export class ContextCompressor {
 
   /**
    * 溢出硬护栏（上下文压缩无法收敛时的最后防线）：受保护消息让路——
-   * 1) 最旧带图片附件的用户消息：附件图片降级为文本说明（图片永久占窗口且不参与压缩）；
-   * 2) 仍无图片可降级：最旧用户消息内容替换为裁剪占位（原文仍在 chat.json，UI 可查、不丢数据）。
+   * 1) 最旧带图片附件的用户消息：附件图片降级为文本说明（图片永久占窗口且不参与压缩，图片文件本身仍在会话 tmp/ 中）；
+   * 2) 仍无图片可降级：最旧用户消息内容替换为裁剪占位（占位后原文不再保留，仅保留头部 200 字符）。
    * 最新一条用户消息（本次任务的输入）永不裁剪——裁掉当前任务输入则任务失去意义。
    * 返回是否发生降级。
    */
@@ -475,10 +475,10 @@ export class ContextCompressor {
       if (m.role !== "user" || typeof m.content !== "string" || m.content.length <= 500) continue
       if (m.content.startsWith("[历史消息已裁剪")) continue
       const size = m.content.length
-      m.content = `[历史消息已裁剪（原 ${size} 字符，原文仍在会话记录中可查看）] ${m.content.slice(0, 200)}`
+      m.content = `[历史消息已裁剪（原 ${size} 字符，原文不再保留）] ${m.content.slice(0, 200)}`
       console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息（${size} 字符）裁剪为占位`)
       await this.deps.store.save(session)
-      this.publishDegrade(sessionId, `上下文溢出护栏：最旧用户消息（${size} 字符）已裁剪为占位（原文仍在会话记录中可查看）`, "user-message")
+      this.publishDegrade(sessionId, `上下文溢出护栏：最旧用户消息（${size} 字符）已裁剪为占位`, "user-message")
       return true
     }
     return false

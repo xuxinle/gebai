@@ -4,7 +4,7 @@ import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "@gebai/agents"
 import { resizeForVision, resizeNote } from "@gebai/agents"
 import type { ToolRegistry } from "../base/registry"
 import type { SessionStore } from "../session/store"
-import { estimateCtxTokens, estimateCharsTokens, isEngineNote, isCompressibleMessage, MAX_CACHE_MESSAGES } from "../session/store"
+import { estimateCtxTokens, estimateCharsTokens, isEngineNote } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
@@ -99,14 +99,6 @@ const LLM_RETRY_BACKOFF_MS = 800
 function lacksOutputRoom(cap: number, reserve: number, inputTokens?: number): boolean {
   return cap > 0 && reserve > 0 && inputTokens !== undefined && cap - inputTokens < reserve
 }
-/** 条数触发的预防性压缩阈值：消息数达到会话上限（MAX_CACHE_MESSAGES）的 80% 且可压缩消息不少于
- *  COMPACT_MIN_COMPRESSIBLE 时，run 前预防性压缩一次——否则 appendMessage 的超限截断会静默丢弃
- *  最早历史（不生成摘要、不给模型任何提示），而大窗口模型（如 512k）下 token 阈值可能永远晚于条数上限到达。 */
-const COMPACT_MESSAGE_TRIGGER = Math.floor(MAX_CACHE_MESSAGES * 0.8)
-const COMPACT_MIN_COMPRESSIBLE = 40
-/** 任务中途条数触发相对 run 前阈值的余量：内存消息列表比持久化消息多出 system 提示词与装载提示词等，
- *  留出余量避免 run 刚开始就因“看起来已超阈”而反复腾挪。 */
-const COMPACT_COUNT_SLACK = 20
 /** 附件图片内联上限（与 vision 子代理 analyze 一致）：超出不内联，降级为文本说明。 */
 const ATTACHMENT_INLINE_LIMIT = VISION_MAX_IMAGE_BYTES
 /** 历史图片内联窗口：仅最近 N 条含图片的用户消息内联进上下文，更早的降级为文本说明
@@ -292,16 +284,6 @@ export class AgentEngine {
    *  分支完成时入队；runLoop 在工具批处理边界排空（tool 结果之后追加，保持 tool_calls 配对完整，
    *  主线下轮模型调用即见）；任务结束（run finally）冲刷落盘（异步分支结果不因任务收尾丢失）。 */
   private branchMerges = new Map<string, Message[]>()
-
-  /** 条数口径的预防性压缩判定（DESIGN「上下文保护」）：消息总数接近会话上限（MAX_CACHE_MESSAGES 的 80%）
-   *  且仍有足量可压缩消息时返回 true——否则 appendMessage 的超限截断会静默丢弃最早历史（无摘要、无提示），
-   *  模型对历史断裂毫不知情。可压缩消息不足时不再空转（靠 token 阈值与溢出护栏兜底）。 */
-  private needsCountCompaction(messages: Message[]): boolean {
-    if (messages.length < COMPACT_MESSAGE_TRIGGER) return false
-    let compressible = 0
-    for (const m of messages) if (isCompressibleMessage(m)) compressible++
-    return compressible >= COMPACT_MIN_COMPRESSIBLE
-  }
 
   /** 上下文压缩器（压缩/溢出恢复，自本类拆分；见 compressor.ts）。 */
   private compressor: ContextCompressor
@@ -922,29 +904,24 @@ export class AgentEngine {
         // 保证长会话存在可收敛的溢出兜底，而非等模型接口报错后任务失败
         let snap = await this.opts.store.load(sessionId, user)
         let baseline = snap?.ctxInputTokens
-        // 条数口径（预防性）：消息数接近会话上限（MAX_CACHE_MESSAGES）时也压缩一次——大窗口模型
-        // （如 512k）下 token 阈值可能永远晚于条数上限到达，而条数超限的截断不发摘要、不给模型提示
-        let byCount = this.needsCountCompaction(snap?.messages ?? [])
         const overThreshold = () => lacksOutputRoom(cap, reserve, baseline)
         // 摘要请求与主循环同前缀（system 提示词 + 同一段历史 + 同批工具）：服务端前缀缓存命中，
         // “压缩前把历史重发一遍”因此不再以全价计费（见 compressor 的缓存路径）
         const preCheckRegistry = this.sessionRegistry(sessionId)
         const preCheckTools = preCheckRegistry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, preCheckRegistry.resolve(s.name)?.tool))
-        for (let guard = 0; guard < 4 && (overThreshold() || byCount); guard++) {
+        for (let guard = 0; guard < 4 && overThreshold(); guard++) {
           const before = history.length
           await this.compactSession(sessionId, user, undefined, taskProvider, { internal: true, cachePrefix: { systemPrompt, tools: preCheckTools } })
           history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
           snap = await this.opts.store.load(sessionId, user)
           baseline = snap?.ctxInputTokens
-          byCount = this.needsCountCompaction(snap?.messages ?? [])
           if (history.length >= before) {
-            // 压缩无效（仅剩受保护消息）：硬护栏降级受保护消息（原文仍在会话存储中，不丢数据）
+            // 压缩无效（仅剩受保护消息）：硬护栏降级受保护消息（图片降级不丢原文；最旧用户消息裁剪为占位）
             const degraded = await this.degradeProtectedMessages(sessionId, user)
             if (!degraded) break
             history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
             snap = await this.opts.store.load(sessionId, user)
             baseline = snap?.ctxInputTokens
-            byCount = this.needsCountCompaction(snap?.messages ?? [])
           }
         }
       }
@@ -1174,14 +1151,14 @@ export class AgentEngine {
         })
       }
     }
-    // 超限截断提示（会话曾因 300 条上限丢弃最早历史时注入）：模型据此知道更早内容已不在上下文中，
-    // 而不是把「历史从中间开始」当作完整历史——截断本身不生成摘要（预防性压缩会尽量让截断不发生，
-    // 见 needsCountCompaction）；提示不落盘、不占会话消息条数（每次装载动态生成）
+    // 超限截断提示（会话曾因消息上限丢弃最早历史时注入）：模型据此知道更早内容已不在上下文中，
+    // 而不是把「历史从中间开始」当作完整历史——截断本身不生成摘要（上下文保护只认 token 水位口径，
+    // 本提示是最后一道兜底）；提示不落盘、不占会话消息条数（每次装载动态生成）
     const trimNote: MessageLike[] = session?.trimmed?.count
       ? [
           {
             role: "user",
-            content: `[历史裁剪] 为控制会话长度，最早的 ${session.trimmed.count} 条消息已从上下文中移除（原文仍在会话记录中可查看）。`,
+            content: `[历史裁剪] 为控制会话长度，已从上下文中移除 ${session.trimmed.count} 条最早的非保护消息（用户输入与系统提示词原位保留；被移除消息的原文不再保留）。`,
           },
         ]
       : []
@@ -1941,16 +1918,14 @@ export class AgentEngine {
       messages.push({ role: "assistant", content: text, toolCalls })
       this.clearStream(sessionId) // 本轮文本已随 assistant(toolCalls) 持久化，在途快照清空
 
-      // 任务中途上下文腾挪：① 输出预留驱动——本次调用返回的真实 input tokens 已致窗口剩余不足
-      // 一次回复（cap - input < reserve）；② 条数预防——单次 run 内上下文消息数接近会话上限（300 条）时同样腾挪，
-      // 否则本轮工具结果会把会话推过上限，trimToCacheLimit 直接丢弃最早历史（不生成摘要）。
+      // 任务中途上下文腾挪：本次调用返回的真实 input tokens 已致窗口剩余不足一次回复
+      // （cap - input < reserve）时压缩最早历史。
       // 已持久化的 assistant 消息随 loadHistory 回到重建后的消息列表（同序），后续工具结果照常追加，
-      // 会话语义不受影响；压缩无效时硬护栏降级受保护消息（历史图片降级/最旧用户消息裁剪，原文不丢）
+      // 会话语义不受影响；压缩无效时硬护栏降级受保护消息（历史图片降级/最旧用户消息裁剪，只改本次请求形态）
       const cap2 = provider.capabilities().maxContextTokens
       const reserve2 = outputReserveTokens(cap2, provider.capabilities().maxOutputTokens)
       const overTokens = lacksOutputRoom(cap2, reserve2, ctxUsage.ctxInputTokens)
-      const overCount = messages.length >= COMPACT_MESSAGE_TRIGGER + COMPACT_COUNT_SLACK
-      if (overTokens || overCount) {
+      if (overTokens) {
         await this.makeContextRoom(sessionId, user, provider, messages, params.systemPrompt, ctxUsage, schemas)
       }
 
