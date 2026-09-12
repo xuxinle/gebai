@@ -182,7 +182,7 @@ export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown
  * 提示词/compacted 摘要/旧格式 system）与用户输入、新会话执行存档（session/sessionRun/subAgent/subAgentRun）
  * ——超限截断（`trimToCacheLimit`）不丢弃它们、配对修复不把它们当孤儿；区间夹带时原位保留。
  * 注：**压缩（有摘要的移除）另有一套口径**（`isCompressibleMessage`）：压缩只保系统提示词，
- * 用户输入随区间被摘要替换并完全移除（摘要承载其要点，原文在会话记录中可回溯）。
+ * 用户输入随区间被摘要替换并完全移除（摘要承载其要点，**原文不再保留**——压缩会改写会话记录）。
  */
 export function isProtectedMessage(m: { role?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
   if (m.role === "user" || m.role === "system") return true
@@ -198,7 +198,7 @@ export function isProtectedMessage(m: { role?: string; session?: boolean; sessio
  *   会话中留下的唯一形态，模型与 UI 都只看得到摘要）；
  * - 新会话执行存档（session/sessionRun/subAgent/subAgentRun）本就不进主上下文，压缩不动它们（仅存档）。
  */
-export function isCompressibleMessage(m: { role?: string; engineNote?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
+export function isCompressibleMessage(m: { role?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
   if (m.role === "system") return false
   return !(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
 }
@@ -602,7 +602,7 @@ export class SessionStore {
     if (start >= end) return messages
     const slice = messages.slice(start, end)
     // 系统提示词消息（角色 system：主 system 段/装载提示词/既有摘要）原位保留——系统提示词不压缩；
-    // 其余消息（含用户输入）随区间被摘要替换并完全移除（原消息仍在会话记录中可回溯）
+    // 其余消息（含用户输入）随区间被摘要替换并完全移除（**原文不再保留**：摘要即其唯一留存形态）
     const kept = slice.filter((m) => !isCompressibleMessage(m))
     const removed = slice.length - kept.length
     if (removed === 0) return messages

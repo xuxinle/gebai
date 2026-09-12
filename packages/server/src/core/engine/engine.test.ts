@@ -2963,7 +2963,7 @@ describe("context compaction", () => {
     expect(compacted!.role).toBe("system")
     expect(compacted!.content).toBe("摘要文本")
     expect(compacted!.summary).toContain("已压缩 4 条")
-    // 远消息完全抛弃：区间内用户输入原文不在上下文中（原文仍存于会话记录，UI 可回溯）
+    // 远消息完全抛弃：区间内用户输入原文既不在上下文中、也不再留存于会话记录（摘要是其唯一形态）
     expect(next.some((m) => m.role === "user" && m.content === "问题 0")).toBe(false)
     expect(next.some((m) => m.role === "user" && m.content === "问题 1")).toBe(false)
     // 区间外的近期消息原样保留

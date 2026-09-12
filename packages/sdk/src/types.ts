@@ -97,9 +97,10 @@ export interface Message {
    * 分支运行（branch_run）同样以本形态存档（branch 字段标识）。
    */
   sessionRun?: SessionRunArchive
-  /** 分支运行合并消息标记（role=assistant，DESIGN「会话分支运行与合并」）：branch_run 分支最终报告
-   *  合入主上下文的消息携带；随消息落盘，loadHistory 按普通 assistant 消息进上下文（内容自带分支头行），
-   *  UI 据此渲染分支合并样式，sessionRun 字段携带分支过程存档供回放。 */
+  /** 分支运行合并消息标记（**role=user + engineNote:"branch"**，DESIGN「会话分支运行与合并」）：branch_run
+   *  分支最终报告合入主上下文的消息携带；与用户消息同角色可避开思考类模型的尾 assistant 约束、并随用户消息
+   *  受上下文保护；随消息落盘，loadHistory 按普通 user 消息进上下文（内容自带分支头行），UI 按 engineNote
+   *  渲染分支合并通知条，sessionRun 字段携带分支过程存档供回放。 */
   branchMeta?: { branchId: string; name: string; model?: string }
   /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
   subAgent?: boolean

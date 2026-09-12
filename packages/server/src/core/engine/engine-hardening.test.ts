@@ -197,7 +197,7 @@ describe("溢出硬护栏", () => {
     await engine.run(session.id, "default", `最新输入`.repeat(50))
     const loaded = await store.load(session.id)
     const old = loaded!.messages.find((m) => m.id === "old-u")!
-    // 最旧用户消息被裁剪为占位（原文仍在会话存储中）
+    // 最旧用户消息被裁剪为占位（占位后原文不再保留，仅保留头部）
     expect(old.content).toContain("历史消息已裁剪")
     // 系统提示词不被压缩/裁剪
     expect(loaded!.messages.some((m) => m.id === "sys-1" && String(m.content).includes("### code 提示词"))).toBe(true)

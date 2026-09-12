@@ -313,7 +313,7 @@ describe("compressSession 摘要放置与规划", () => {
       expect(msgs.some((m) => m.role === "assistant" && String(m.content).startsWith(`回答 ${i}`))).toBe(false)
     }
     expect(msgs.some((m) => m.role === "user" && m.content === "问题 9")).toBe(true)
-    // 原文仍在会话记录可回溯（截断掉的只是上下文可见性，数据不丢）：摘要消息带压缩条数说明
+    // 原文不再保留（摘要是其在会话中的唯一留存形态）：摘要消息带压缩条数说明
     const summary = msgs.find((m) => m.compacted)
     expect(String(summary!.summary)).toContain("已压缩")
     s.cleanup()
