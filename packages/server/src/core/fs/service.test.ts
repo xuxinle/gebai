@@ -9,7 +9,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import {
   collectFiles,
   decodeBuffer,
@@ -25,6 +25,7 @@ import {
   zipPaths,
 } from "./service"
 import { FsError, isInside, normalizeRel, parseRootId, resolveInRoot, resolveRoot, rootCatalog, type RootContext } from "./roots"
+import { listZip, readZipEntry } from "./archive"
 
 function tmpdirWith(files: Record<string, string | Uint8Array>, dirs: string[] = []): string {
   const dir = mkdtempSync(join(tmpdir(), "gebai-fs-"))
@@ -92,9 +93,9 @@ describe("core/fs 路径防护（写操作的安全底线）", () => {
     const root = "/tmp/gebai-root"
     expect(() => resolveInRoot(root, "../../etc/passwd")).toThrow(FsError)
     expect(() => resolveInRoot(root, "/etc/passwd")).toThrow(FsError)
-    expect(resolveInRoot(root, "a/b.txt")).toBe("/tmp/gebai-root/a/b.txt")
+    expect(resolveInRoot(root, "a/b.txt")).toBe(resolve(root, "a/b.txt"))
     // 显式 allowAbsolute（下载打包场景，路径来自服务端自身校验结果）
-    expect(resolveInRoot(root, "/tmp/gebai-root/a.txt", { allowAbsolute: true })).toBe("/tmp/gebai-root/a.txt")
+    expect(resolveInRoot(root, "/tmp/gebai-root/a.txt", { allowAbsolute: true })).toBe(resolve(root, "a.txt"))
     expect(isInside(root, "/tmp/gebai-root/a")).toBe(true)
     expect(isInside(root, "/tmp/gebai-root2/a")).toBe(false)
     // 前缀相似的兄弟目录不能算「根内」（否则 /root2 会被当成 /root 的子路径）
@@ -182,7 +183,7 @@ describe("core/fs HTTP Range（视频/大文件拖进度条）", () => {
 })
 
 describe("core/fs ZIP 打包（下载文件夹）", () => {
-  test("zipPaths 产出合法 ZIP，中文名以 UTF-8 存储，且能被系统 unzip 解出", async () => {
+  test("zipPaths 产出合法 ZIP，中文名以 UTF-8 存储，且条目可原样解出", async () => {
     const root = tmpdirWith({ "中文.txt": "内容", "sub/b.txt": "BBB" }, ["sub"])
     const zipPath = join(tmpdir(), `gebai-zip-${Date.now()}.zip`)
     try {
@@ -194,14 +195,17 @@ describe("core/fs ZIP 打包（下载文件夹）", () => {
       for (let i = 0; i + needle.length <= bytes.length && !found; i++) found = needle.every((b, j) => bytes[i + j] === b)
       expect(found).toBe(true)
 
-      writeFileSync(zipPath, bytes)
-      const listing = Bun.spawnSync(["unzip", "-l", zipPath])
-      if (listing.exitCode === 0) {
-        const out = listing.stdout.toString()
-        expect(out).toContain("2 files") // 目录递归打包：两个文件都在
-        expect(out).toContain("sub/b.txt") // ASCII 名直接可读
-        // 内容可被系统 unzip 原样解出
-        expect(Bun.spawnSync(["unzip", "-p", zipPath, "sub/b.txt"]).stdout.toString()).toBe("BBB")
+      // 中央目录可解析、条目内容可原样解出（对产物做 ZIP 规范级校验，不依赖系统工具）
+      const entries = listZip(bytes)
+      expect(entries.map((e) => e.name).sort()).toEqual(["sub/b.txt", "中文.txt"]) // 目录递归打包：两个文件都在
+      const content = (name: string): string => new TextDecoder().decode(readZipEntry(bytes, entries.find((e) => e.name === name)!))
+      expect(content("sub/b.txt")).toBe("BBB")
+      expect(content("中文.txt")).toBe("内容")
+      // 系统 unzip 交叉验证（POSIX 常见；无此命令时跳过，上文已覆盖同等校验）
+      const unzip = Bun.which("unzip")
+      if (unzip) {
+        writeFileSync(zipPath, bytes)
+        expect(Bun.spawnSync([unzip, "-p", zipPath, "sub/b.txt"]).stdout.toString()).toBe("BBB")
       }
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -275,11 +279,11 @@ describe("core/fs 根解析（sess:/proj:/bind:/user:/abs:）", () => {
     // 项目/绑定根的目录存在性由 ctx.isDir 注入（测试不依赖真实文件系统）
     const c = ctx({ isDir: () => true })
     // 会话目录按 id 前两段分片（ab/cd/<id>/tmp），避免单目录堆积
-    expect(resolveRoot("sess:abcdef1234567890abcdef1234567890", c).abs).toBe("/gebai-home/users/admin/sessions/ab/cd/abcdef1234567890abcdef1234567890/tmp")
-    expect(resolveRoot("proj:gebai", c).abs).toBe("/workspaces/gebai")
-    expect(resolveRoot("bind:code", c).abs).toBe("/workspaces/proj")
-    expect(resolveRoot("user:", c).abs).toBe("/gebai-home/users/admin")
-    expect(resolveRoot("abs:/tmp", c).abs).toBe("/tmp")
+    expect(resolveRoot("sess:abcdef1234567890abcdef1234567890", c).abs).toBe(join(c.home, "users", c.user, "sessions", "ab", "cd", "abcdef1234567890abcdef1234567890", "tmp"))
+    expect(resolveRoot("proj:gebai", c).abs).toBe(resolve("/workspaces/gebai"))
+    expect(resolveRoot("bind:code", c).abs).toBe(resolve("/workspaces/proj"))
+    expect(resolveRoot("user:", c).abs).toBe(join("/gebai-home", "users", "admin"))
+    expect(resolveRoot("abs:/tmp", c).abs).toBe(resolve("/tmp"))
     // 沙箱（服务模式）下绝对路径根一律拒绝
     expect(() => resolveRoot("abs:/tmp", ctx({ sandboxed: true, isDir: () => true }))).toThrow(FsError)
     expect(() => resolveRoot("proj:nope", c)).toThrow(FsError)
@@ -288,8 +292,10 @@ describe("core/fs 根解析（sess:/proj:/bind:/user:/abs:）", () => {
   })
 
   test("写开关：writable=false 时根为只读（前端据此隐藏写操作）", () => {
-    expect(resolveRoot("proj:gebai", ctx({ writable: false })).writable).toBe(false)
-    expect(resolveRoot("proj:gebai", ctx()).writable).toBe(true)
+    // isDir 注入使目录存在性不依赖真实文件系统（同一断言在 Windows 开发机上同样成立）
+    const exists = { isDir: () => true }
+    expect(resolveRoot("proj:gebai", ctx({ ...exists, writable: false })).writable).toBe(false)
+    expect(resolveRoot("proj:gebai", ctx(exists)).writable).toBe(true)
   })
 
   test("rootCatalog：会话 + 项目 + 绑定 + 用户目录，按 id 去重", () => {

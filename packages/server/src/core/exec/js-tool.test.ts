@@ -70,6 +70,20 @@ function ctxWithTools(home: string, extra: ToolContext["registry"] = undefined a
   return c
 }
 
+/** 删除测试临时目录：被杀子进程的 cwd 就是该目录，Windows 上进程终止后句柄释放有延迟，
+ *  立即 rm 会 EBUSY（超时/中断用例的清理因此偶发失败，与行为断言无关）——短重试后放弃
+ *  （临时目录残留无害）。 */
+async function rmTemp(dir: string): Promise<void> {
+  for (let i = 0; i < 40; i += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+      return
+    } catch {
+      await Bun.sleep(25)
+    }
+  }
+}
+
 describe("js 脚本工具", () => {
   test("工具像内置函数一样直接调用（无 tools. 前缀），返回 output/data", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-fn-"))
@@ -493,7 +507,7 @@ for (let i = 0; i < ${JS_TOOL_MAX_CALLS + 5}; i++) {
     expect(r.output).toContain("timed out")
     expect((r.data as { timedOut: boolean; exitCode: number }).timedOut).toBe(true)
     expect((r.data as { exitCode: number }).exitCode).toBe(124)
-    rmSync(home, { recursive: true, force: true })
+    await rmTemp(home)
   })
 
   test("取消信号：abort 时终止子进程", async () => {
@@ -505,7 +519,7 @@ for (let i = 0; i < ${JS_TOOL_MAX_CALLS + 5}; i++) {
     c.signal = ac.signal
     const r = await p
     expect(r.output).toContain("[interrupted]")
-    rmSync(home, { recursive: true, force: true })
+    await rmTemp(home)
   })
 
   test("脚本可读写会话工作目录文件（Bun API 与 write 工具一致视角）", async () => {

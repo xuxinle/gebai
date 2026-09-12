@@ -17,31 +17,40 @@ let c2 = ""
 
 const svc = new GitService({ writeEnabled: true, remoteEnabled: false, credentialEnv: () => ({}) } as never)
 
-function git(cmd: string): string {
-  const p = Bun.spawnSync(["bash", "-lc", `cd '${dir}' && ${cmd}`], { stdout: "pipe", stderr: "pipe" })
-  if (p.exitCode !== 0) throw new Error(`${cmd}\n${p.stderr.toString()}`)
+/** 真实 git 执行（数组传参 + cwd 定位：不经 shell，跨平台一致且免去引号转义）。 */
+function runGit(cwd: string, args: string[]): string {
+  const p = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  if (p.exitCode !== 0) throw new Error(`git ${args.join(" ")}\n${p.stderr.toString()}`)
   return p.stdout.toString().trim()
+}
+
+function git(...args: string[]): string {
+  return runGit(dir, args)
 }
 
 const lines = (s: string, n: number): string => Array.from({ length: n }, (_, i) => `${s} ${i}`).join("\n")
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "gebai-git-"))
-  git("git init -q -b main && git config user.email t@t && git config user.name T")
+  git("init", "-q", "-b", "main")
+  git("config", "user.email", "t@t")
+  git("config", "user.name", "T")
   mkdirSync(join(dir, "src"), { recursive: true })
   writeFileSync(join(dir, "src/a.ts"), lines("A", 5))
   writeFileSync(join(dir, "readme.md"), "# 一\n")
-  git("git add -A && git commit -q -m 'feat: 初始'")
-  c1 = git("git rev-parse HEAD")
+  git("add", "-A")
+  git("commit", "-q", "-m", "feat: 初始")
+  c1 = git("rev-parse", "HEAD")
   writeFileSync(join(dir, "src/a.ts"), `${lines("A", 5)}\n${lines("B", 3)}`)
   writeFileSync(join(dir, "src/new.ts"), "export const n = 1\n")
-  git("git add -A && git commit -q -m 'feat: 追加'")
-  c2 = git("git rev-parse HEAD")
+  git("add", "-A")
+  git("commit", "-q", "-m", "feat: 追加")
+  c2 = git("rev-parse", "HEAD")
   // 工作区：未暂存改动 + 已暂存新增 + 重命名
   writeFileSync(join(dir, "src/a.ts"), `${lines("A", 5)}\n${lines("B", 3)}\n// 工作区又加了一行\n`)
   writeFileSync(join(dir, "src/staged.ts"), "export const s = 2\n")
-  git("git add src/staged.ts")
-  git("git mv readme.md README.md")
+  git("add", "src/staged.ts")
+  git("mv", "readme.md", "README.md")
 })
 
 afterAll(() => {
@@ -100,17 +109,18 @@ describe("git 任意两端对比：提交 ↔ 工作树 / 暂存区", () => {
 
 describe("git 任意两端对比：分支/标签（共同祖先语义）", () => {
   test("mergeBase=true 时只显示各自分支引入的改动（三点 ... 语义）", async () => {
-    git("git checkout -q -b other")
+    git("checkout", "-q", "-b", "other")
     writeFileSync(join(dir, "src/other.ts"), "export const o = 3\n")
     // 只提交本分支的新文件：保留工作区其余脏状态，不影响其它用例
     // 只提交该路径（pathspec commit）：暂存区里其它内容保持暂存状态，供后续用例断言
-    git("git add src/other.ts && git commit -q -m 'feat: other' -- src/other.ts")
+    git("add", "src/other.ts")
+    git("commit", "-q", "-m", "feat: other", "--", "src/other.ts")
     const r = await svc.compare(dir, { from: "main", to: "other", mergeBase: true })
     expect(r.mergeBaseOf).toBeTruthy()
     expect(r.files.map((f) => f.path)).toContain("src/other.ts")
     const two = await svc.compare(dir, { from: "main", to: "other" })
     expect(two.files.length).toBeGreaterThanOrEqual(r.files.length)
-    git("git checkout -q main")
+    git("checkout", "-q", "main")
   })
 })
 
@@ -144,7 +154,7 @@ describe("git 根提交（无父提交）：A 侧归一到空树", () => {
    */
   test("compare：`<根提交>^` ⇄ `<根提交>` 不报错，且清单等于该提交的全部文件（= git show 口径）", async () => {
     const r = await svc.compare(dir, { from: `${c1}^`, to: c1 })
-    const byShow = git(`git show --name-only --format= ${c1}`).split("\n").filter(Boolean).sort()
+    const byShow = git("show", "--name-only", "--format=", c1).split("\n").filter(Boolean).sort()
     expect(r.files.map((f) => f.path).sort().filter((p, i, a) => a.indexOf(p) === i)).toEqual(byShow)
     expect(r.files.length).toBeGreaterThanOrEqual(2)
     // 根提交里所有文件都是「新增」
@@ -190,17 +200,17 @@ describe("git 体量上限：把「撑不住」变成看得见的事", () => {
   let big = ""
   beforeAll(() => {
     d2 = mkdtempSync(join(tmpdir(), "gebai-git-cap-"))
-    const g = (cmd: string): string => {
-      const p = Bun.spawnSync(["bash", "-lc", `cd '${d2}' && ${cmd}`], { stdout: "pipe", stderr: "pipe" })
-      if (p.exitCode !== 0) throw new Error(`${cmd}\n${p.stderr.toString()}`)
-      return p.stdout.toString().trim()
-    }
-    g("git init -q -b main && git config user.email t@t && git config user.name T")
+    const g = (...args: string[]): string => runGit(d2, args)
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "T")
     for (let i = 0; i < 12; i += 1) writeFileSync(join(d2, `f${i}.txt`), lines(`L${i}`, 20))
-    g("git add -A && git commit -q -m c1")
+    g("add", "-A")
+    g("commit", "-q", "-m", "c1")
     for (let i = 0; i < 12; i += 1) writeFileSync(join(d2, `f${i}.txt`), `${lines(`L${i}`, 20)}\n${lines("ADD", 15)}`)
-    g("git add -A && git commit -q -m c2")
-    big = g("git rev-parse HEAD")
+    g("add", "-A")
+    g("commit", "-q", "-m", "c2")
+    big = g("rev-parse", "HEAD")
   })
   afterAll(() => rmSync(d2, { recursive: true, force: true }))
 

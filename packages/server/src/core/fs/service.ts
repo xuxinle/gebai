@@ -670,7 +670,9 @@ export async function searchInRoot(
         line_number?: number
         submatches?: Array<{ start?: number }>
       }
-      const p = (data.path?.text ?? "").replace(/^\.\//, "").replace(/\\/g, "/")
+      // rg 在 Windows 上以本地分隔符输出路径（`.\b.md`）：先归一为 POSIX 分隔符再剥 `./` 前缀，
+      // 否则剥离失败会留下 `./b.md`（前端拿去解析与内置回退引擎的 `b.md` 形态不一致）
+      const p = (data.path?.text ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
       if (!p) continue
       let size = 0
       let mtime = 0
