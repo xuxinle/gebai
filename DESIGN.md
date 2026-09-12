@@ -376,7 +376,7 @@ class GebaiClient {
 | `GEBAI_PRELOAD_SUB_AGENTS` | 启动预载子Agent 名单（逗号分隔）：启动时注册其工具，**每个新会话创建时自动装载**（提示词 system 消息写入会话记录 + 工具注册）；为空 = 默认不预载任何子Agent | 空 |
 | `GEBAI_SUB_AGENTS_ENABLE` | 子Agent **白名单**（逗号分隔）：非空时仅保留名单内子Agent（其余全部 `unregister`——`agent_list`/`agent_load`/`agent_run`/系统提示词注入均不可见，热加载不复活）；与 `GEBAI_SUB_AGENTS_DISABLE` 同时配置**先白后黑**（黑名单最终生效） | 空（不裁剪） |
 | `GEBAI_SUB_AGENTS_DISABLE` | 子Agent **黑名单**（逗号分隔）：名单内子Agent `unregister`（运行时能力面收敛，与构建期 `GEBAI_BUILD_SUBAGENTS` 打包裁剪互补）；名单未知名启动告警忽略不阻断 | 空 |
-| `GEBAI_UI_STYLE` | 默认 UI 风格（`acrylic`/`aether`/`matrix`/`tokyo-night`/`cyberpunk`/`synthwave`/`aurora`/`ink`/`cny`）；**服务端白名单为这 9 项**（`qinhan` 虽在前端主题面板可选，但未进白名单——设了会被静默回落为 `acrylic`，属待修缺陷）；可被 URL/用户级覆盖 | `acrylic` |
+| `GEBAI_UI_STYLE` | 默认 UI 风格（`acrylic`/`aether`/`matrix`/`tokyo-night`/`cyberpunk`/`synthwave`/`aurora`/`ink`/`cny`/`qinhan`）；**服务端白名单为这 10 项**（须与前端主题表 `packages/web/src/theme-core.ts` 同步——主题增删时两处不同步则该主题经环境变量设置会被静默回落为 `acrylic`，参见 `routes/static.ts` 的 `UI_STYLES`）；可被 URL/用户级覆盖 | `acrylic` |
 | `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error`——`loadConfig` 后由组合根 `setLogLevel(config.logLevel)` 生效（最小日志器 `@gebai/sdk/node` 的 `log.*`，见「日志系统」）；非法值忽略保持原级别 | `info` |
 | `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具） | 空（全部启用） |
 | `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具） | 空 |
