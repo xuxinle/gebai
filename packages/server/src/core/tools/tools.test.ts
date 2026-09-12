@@ -1943,10 +1943,9 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-re-"))
     const c = ctx(home)
     // 嵌套量词 + 超长单行：正则 test 是**同步 CPU 操作、不可中断**，真实工作量是「每文件 × 每行」各调一次。
-    // 实测 `(a+)+b` 失配输入：JSC（Bun）有回溯预算缓解（单次有界 ~0.77s，n=30 与 n=100000 同为 ~770ms；
-    // 结果正确不误判），但 5000 次调用仍远超 8s；V8（Node）无缓解，n=30 即指数挂死（>9s）。
-    // 故不能依赖运行时的缓解（随部署运行时不同，且只保证单次有界）——匹配隔离在子进程（超时强杀），
-    // 主进程必有界返回；本用例断言的就是这个「有界」（而非某个具体耗时）。
+    // 本项目仅部署 Bun（JSC），其回溯预算只约束**单次**调用（实测上界随形态而异：`(a+)+b` ~0.78s、
+    // `(a*)*b` ~2.1s、`(a|a)+b` 长输入 3.5s），而实测 20 次调用即 >10s——单次缓解约束不了整体。
+    // 故隔离到子进程（超时强杀）让主进程必有界返回；本用例断言的就是这个「有界」（而非某个具体耗时）。
     const evilLine = "a".repeat(20_000)
     c.listFiles = async () => [{ path: "big.txt", size: 20_001, modifiedAt: 0, isDir: false }]
     c.readFile = async () => `${evilLine}\nend\n`
