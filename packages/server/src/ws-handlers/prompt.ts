@@ -2,6 +2,7 @@
 import type { WsHandler } from "./context"
 import { filterEnvInjection } from "../core/session/env"
 import { TokenBucket } from "../core/security/ratelimit"
+import { log } from "@gebai/sdk/node"
 
 /** 每用户 prompt 速率限制（容量 60 突发、30/秒补充；防单用户刷 LLM 配额，与 REST 同规则）。 */
 const promptRateLimit = new TokenBucket(60, 30)
@@ -41,7 +42,7 @@ export const promptHandlers: Record<string, WsHandler> = {
       })
       .catch((err) => {
         // 引擎 run 内部已发布 event.task.error；此处兜底记录（正常不应到达）
-        console.warn(`[ws] engine.run failed: ${String((err as Error).message || err)}`)
+        log.warn(`[ws] engine.run failed: ${String((err as Error).message || err)}`)
       })
     return reply(true)
   },

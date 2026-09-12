@@ -6,6 +6,7 @@
  * 即表示该侧不贡献此字段（客卿 manifest 放宽为此设计服务），合并层兜底生成描述。
  */
 import type { EnvCatalogVar, SubAgentDef, ToolSet } from "../base/types"
+import { log } from "@gebai/sdk/node"
 
 /** 描述兜底：全部贡献的 description 均空时生成（保持 agent_list/系统提示词注入恒有可读描述）。 */
 export function fallbackDescription(name: string): string {
@@ -41,7 +42,7 @@ export function mergeSubAgentDefs(name: string, defs: SubAgentDef[]): SubAgentDe
     if (!tools) tools = { ...d.tools }
     else {
       for (const [toolName, tool] of Object.entries(d.tools)) {
-        if (tools[toolName]) console.warn(`[subagents] 子代理 ${name} 的工具 ${toolName} 多处定义，保留靠前贡献（后者丢弃）`)
+        if (tools[toolName]) log.warn(`[subagents] 子代理 ${name} 的工具 ${toolName} 多处定义，保留靠前贡献（后者丢弃）`)
         else tools[toolName] = tool
       }
     }

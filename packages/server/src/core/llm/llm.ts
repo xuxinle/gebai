@@ -1,6 +1,7 @@
 import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 import { repairToolPairing } from "../session/store"
 import { runWithoutFetchProxy } from "../support/fetch-scope"
+import { log } from "@gebai/sdk/node"
 
 export interface LLMToolDef {
   name: string
@@ -207,7 +208,7 @@ function demoteTailAssistant<T extends { role: string; toolCalls?: unknown }>(ms
   const last = msgs[msgs.length - 1]
   if (!last || last.role !== "assistant") return msgs
   if (Array.isArray(last.toolCalls) && last.toolCalls.length > 0) return msgs
-  console.warn("[llm] 请求消息以 assistant 结尾（思考类模型会以 400 拒绝），已降级为 user 角色发送")
+  log.warn("[llm] 请求消息以 assistant 结尾（思考类模型会以 400 拒绝），已降级为 user 角色发送")
   return [...msgs.slice(0, -1), { ...last, role: "user" }]
 }
 

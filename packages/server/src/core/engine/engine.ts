@@ -25,6 +25,7 @@ import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } f
 import { runInToolFetchScope } from "../support/fetch-scope"
 import { createHash } from "node:crypto"
 import { ContextCompressor, outputReserveTokens, type SummarizeCachePrefix } from "./compressor"
+import { log } from "@gebai/sdk/node"
 import {
   APPROVAL_TIMEOUT,
   CAPTURE_TIMEOUT,
@@ -148,7 +149,7 @@ function parseExtraParamsSafe(raw: string | undefined): Record<string, unknown> 
   try {
     return parseExtraParams(raw)
   } catch (err) {
-    console.warn(`[gebai] 忽略无效的 GEBAI_LLM_EXTRA_PARAMS: ${(err as Error).message}`)
+    log.warn(`[gebai] 忽略无效的 GEBAI_LLM_EXTRA_PARAMS: ${(err as Error).message}`)
     return {}
   }
 }
@@ -1262,7 +1263,7 @@ export class AgentEngine {
       const added = await this.loadAgentsForSession(session, names, env)
       if (added.length) await this.opts.store.save(session)
     } catch (err) {
-      console.warn(`[engine] 会话子Agent 装载保障失败: ${(err as Error).message}`)
+      log.warn(`[engine] 会话子Agent 装载保障失败: ${(err as Error).message}`)
     }
   }
 
@@ -1281,7 +1282,7 @@ export class AgentEngine {
       try {
         loadedNow = await this.opts.subAgents.load(name, session.id)
       } catch (err) {
-        console.warn(`[engine] 装载子Agent ${name} 失败: ${(err as Error).message}`)
+        log.warn(`[engine] 装载子Agent ${name} 失败: ${(err as Error).message}`)
         continue
       }
       for (const n of loadedNow) {

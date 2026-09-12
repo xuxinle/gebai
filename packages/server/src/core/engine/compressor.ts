@@ -7,6 +7,7 @@ import type { SessionStore } from "../session/store"
 import { isEngineNote, isCompressibleMessage, estimateCharsTokens } from "../session/store"
 import type { EnvManager } from "../session/env"
 import { VISION_MIME_SET } from "@gebai/agents"
+import { log } from "@gebai/sdk/node"
 
 export const COMPACT_OUTPUT_RESERVE_FALLBACK = 16384
 /** 输出预留的最小值（窗口很小时不能让预留缩到无意义）。 */
@@ -452,7 +453,7 @@ export class ContextCompressor {
         const note = m.images.map((img) => `[历史图片已降级为路径说明: ${img.display ?? img.path}，可用 vision/read 工具按需查看]`).join(" ")
         m.content = `${note}\n${m.content}`
         delete m.images
-        console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧工具消息的 ${imgCount} 张图片降级为文本说明`)
+        log.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧工具消息的 ${imgCount} 张图片降级为文本说明`)
         await this.deps.store.save(session)
         this.publishDegrade(sessionId, `上下文溢出护栏：最旧工具消息的 ${imgCount} 张历史图片已降级为路径说明（可用 vision/read 按需查看）`, "tool-images")
         return true
@@ -463,7 +464,7 @@ export class ContextCompressor {
       m.attachments = m.attachments.filter((a) => !VISION_MIME_SET.has(a.mime))
       const note = images.map((a) => `[历史图片已降级为路径说明: ${a.path}（${a.name}），可用 vision/read 工具按需查看]`).join(" ")
       m.content = `${note}\n${m.content}`
-      console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息的 ${images.length} 张图片降级为文本说明`)
+      log.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息的 ${images.length} 张图片降级为文本说明`)
       await this.deps.store.save(session)
       this.publishDegrade(sessionId, `上下文溢出护栏：最旧用户消息的 ${images.length} 张历史图片已降级为路径说明（可用 vision/read 按需查看）`, "user-images")
       return true
@@ -476,7 +477,7 @@ export class ContextCompressor {
       if (m.content.startsWith("[历史消息已裁剪")) continue
       const size = m.content.length
       m.content = `[历史消息已裁剪（原 ${size} 字符，原文不再保留）] ${m.content.slice(0, 200)}`
-      console.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息（${size} 字符）裁剪为占位`)
+      log.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息（${size} 字符）裁剪为占位`)
       await this.deps.store.save(session)
       this.publishDegrade(sessionId, `上下文溢出护栏：最旧用户消息（${size} 字符）已裁剪为占位`, "user-message")
       return true

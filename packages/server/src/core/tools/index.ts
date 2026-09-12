@@ -18,6 +18,7 @@ import type { Tool } from "../base/types"
 import { projectAware } from "./projects"
 import { EXCLUDED_GLOBAL_TOOLS } from "../tools-excluded.generated"
 import type { GlobalToolEntry } from "./shared"
+import { log } from "@gebai/sdk/node"
 
 export type ToolSet = Record<string, Tool>
 
@@ -79,7 +80,7 @@ const scanErrors: string[] = []
     const { bundledToolEntries } = await import("./bundle.generated")
     allEntries = bundledToolEntries
   }
-  for (const err of scanErrors) console.warn(`[tools] 工具文件加载失败（已跳过）: ${err}`)
+  for (const err of scanErrors) log.warn(`[tools] 工具文件加载失败（已跳过）: ${err}`)
 }
 
 // ---- 构建期排除名单（GEBAI_BUILD_EXCLUDE_TOOLS → scripts/build-tools.ts 生成并烘焙，静态导入：

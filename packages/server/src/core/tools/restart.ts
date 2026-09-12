@@ -25,6 +25,7 @@ import { join } from "node:path"
 import type { Tool, ToolResult } from "../base/types"
 import { isBinaryMode } from "../base/config"
 import { schema } from "./shared"
+import { log as logger } from "@gebai/sdk/node"
 
 /** 重启工作目录（拉起器脚本/状态文件/续跑请求/新服务日志）。 */
 export function restartDir(tmp: string = tmpdir()): string {
@@ -428,7 +429,7 @@ export async function consumeRestartContinuation(deps: ConsumeContinuationDeps):
   const tmp = deps.tmpDir ?? tmpdir()
   const now = deps.now ?? (() => Date.now())
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
-  const log = deps.log ?? ((m: string) => console.log(`[restart] ${m}`))
+  const log = deps.log ?? ((m: string) => logger.info(`[restart] ${m}`))
   const req = await readContinuation(tmp)
   if (!req) return { consumed: false, reason: "无续跑请求" }
   const age = now() - req.at

@@ -6,6 +6,7 @@ import { SERVICE_USER, type AppDeps } from "../app"
 import { handleWsMessage, type WsConn, type WsSink } from "../ws"
 import { WsStateService } from "../ws-state"
 import type { Composed } from "./compose"
+import { log } from "@gebai/sdk/node"
 
 /** 每个 WS 连接的事件总线退订函数（以连接为键，避免与 ws.data 的 user 字段互相覆盖）。 */
 const wsSubs = new WeakMap<object, () => void>()
@@ -31,7 +32,7 @@ export function makeWsSink(ws: ServerWebSocket<unknown>): WsSink {
       if (ws.readyState !== WebSocket.OPEN) return
       const buffered = (ws as unknown as { getBufferedAmount?: () => number }).getBufferedAmount?.() ?? 0
       if (buffered > WS_MAX_BUFFERED) {
-        console.warn("[ws] 慢客户端发送缓冲超限（16MB），断开连接——客户端将自动重连并按 seq 重放")
+        log.warn("[ws] 慢客户端发送缓冲超限（16MB），断开连接——客户端将自动重连并按 seq 重放")
         ws.close()
         return
       }
@@ -86,6 +87,33 @@ export function makeWsConn(ws: ServerWebSocket<unknown>, d: AppDeps, state: WsSt
 }
 
 /** 启动监听（compose 之后）：Bun.serve + WS 生命周期 + 退出钩子；返回 server 实例。 */
+/**
+ * 跨源升级是否放行（与 REST 侧 app.ts 的 CORS 中间件同规则）：
+ * - 无 Origin：非浏览器客户端（原生/CLI/服务端调用）不受同源策略约束 → 放行；
+ * - 服务模式：有令牌鉴权（跨源也需先登录）→ 放行；
+ * - 显式配置 `GEBAI_CORS_ORIGINS`（不含 `*`）：视为有意开放的跨源白名单 → 放行
+ *   （与 REST 同口径；白名单具体命中与否由 REST 侧 CORS 响应头约束，WS 不重复判定）；
+ * - 其余（本地/桌面免登录形态 + 缺省 `*`）：要求 Origin 与请求 Host 同源，否则拒绝。
+ * 导出供测试锁定：WS 与 REST 两处豁免面必须一致，错位会造成难排查的配置陷阱。
+ */
+export function wsOriginAllowed(opts: {
+  origin: string | null
+  host: string | null
+  auth: string
+  corsOrigins?: string[] | null
+}): { ok: boolean; reason?: "cross-origin" | "invalid-origin" } {
+  const origin = opts.origin
+  if (!origin) return { ok: true }
+  const cors = (opts.corsOrigins ?? []).length ? opts.corsOrigins! : ["*"]
+  if (opts.auth === "server" || !cors.includes("*")) return { ok: true }
+  try {
+    if (new URL(origin).host !== (opts.host ?? "")) return { ok: false, reason: "cross-origin" }
+  } catch {
+    return { ok: false, reason: "invalid-origin" }
+  }
+  return { ok: true }
+}
+
 export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   const { config, deps, app, state, devReload, devReloadClients } = c
   const server = Bun.serve<unknown>({
@@ -95,16 +123,16 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
     fetch: (req, srv) => {
       const url = new URL(req.url)
       // 跨站来源防护（本地/桌面免登录形态）：WebSocket 不受同源策略约束，恶意网页可直接连
-      // ws://127.0.0.1:* 以 admin 身份建会话执行命令。浏览器发起的 WS 必带 Origin——
-      // 与请求 Host 不同源即拒绝升级；非浏览器客户端（无 Origin）不受影响。
-      const wsOrigin = req.headers.get("origin")
-      if (wsOrigin) {
-        const host = req.headers.get("host") ?? url.host
-        try {
-          if (new URL(wsOrigin).host !== host) return new Response("cross-origin ws rejected", { status: 403 })
-        } catch {
-          return new Response("invalid origin", { status: 403 })
-        }
+      // ws://127.0.0.1:* 以 admin 身份建会话执行命令。浏览器发起的 WS 必带 Origin。
+      // 豁免与判定统一在 wsOriginAllowed（与 REST 的 CORS 中间件同规则，两处口径必须一致）。
+      const verdict = wsOriginAllowed({
+        origin: req.headers.get("origin"),
+        host: req.headers.get("host") ?? url.host,
+        auth: config.auth,
+        corsOrigins: config.corsOrigins,
+      })
+      if (!verdict.ok) {
+        return new Response(verdict.reason === "cross-origin" ? "cross-origin ws rejected" : "invalid origin", { status: 403 })
       }
       const wsPath = `${config.basePath === "/" ? "" : config.basePath}/ws`
       if (url.pathname === wsPath && srv.upgrade(req, { data: {} })) return
@@ -168,7 +196,7 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   // 飞书机器人长连接在监听建立后异步启动：通道握手（网络）不阻塞服务可用；失败只记日志不退出
   // （GEBAI_FEISHU_BOT_ENABLED 的凭证缺失在 compose 启动期已抛错）
   if (c.feishuBot) {
-    void c.feishuBot.start().catch((err) => console.error(`[feishu-bot] 启动失败（服务继续运行）: ${String((err as Error).message || err)}`))
+    void c.feishuBot.start().catch((err) => log.error(`[feishu-bot] 启动失败（服务继续运行）: ${String((err as Error).message || err)}`))
   }
   // 进程退出时终止 vite build --watch 子进程（防孤儿）
   process.on("exit", () => devReload?.stop())

@@ -5,6 +5,7 @@
 import { FEISHU_BASE } from "./api"
 import { buildAckFrame, buildPingFrame, FRAME_CONTROL, FRAME_DATA, FrameAssembler, parseClientConfig, parseDataFrame, parseEventPayload, type DataFrameInfo } from "./protocol"
 import { feishuFetch, feishuWsOptions } from "@gebai/agents"
+import { log } from "@gebai/sdk/node"
 
 /** WebSocket 客户端的最小抽象（Bun 内置 WebSocket 满足该形状）。 */
 export interface WsLike {
@@ -79,7 +80,7 @@ export class FeishuConn {
   private clock: () => number
 
   constructor(private opts: FeishuConnOptions) {
-    this.log = opts.log ?? ((m) => console.log(`[feishu-conn] ${m}`))
+    this.log = opts.log ?? ((m) => log.info(`[feishu-conn] ${m}`))
     this.clock = opts.clock ?? Date.now
     this.assembler = new FrameAssembler(this.clock)
     this.fetchImpl =

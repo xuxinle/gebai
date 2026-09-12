@@ -20,6 +20,7 @@
  */
 import { readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { log as logger } from "@gebai/sdk/node"
 
 /** 主实例锁文件名（`{GEBAI_HOME}/.gebai-primary.json`）。 */
 export const PRIMARY_LOCK_FILE = ".gebai-primary.json"
@@ -104,7 +105,7 @@ export interface PrimaryGateDeps {
   leaseMs?: number
   /** 看门狗周期（缺省 `PRIMARY_WATCHDOG_INTERVAL_MS`）。 */
   intervalMs?: number
-  /** 日志输出（缺省 `console.log`）。 */
+  /** 日志输出（缺省经 `log.info`，受 GEBAI_LOG_LEVEL 过滤）。 */
   log?: (msg: string) => void
   /** PID 存活探测（缺省 `defaultIsPidAlive`）。 */
   isAlive?: (pid: number) => boolean
@@ -139,7 +140,7 @@ export function createPrimaryGate(deps: PrimaryGateDeps): PrimaryGate {
   const now = deps.now ?? (() => Date.now())
   const leaseMs = deps.leaseMs ?? PRIMARY_LEASE_MS
   const intervalMs = deps.intervalMs ?? PRIMARY_WATCHDOG_INTERVAL_MS
-  const log = deps.log ?? ((m: string) => console.log(m))
+  const log = deps.log ?? ((m: string) => logger.info(m))
   const isAlive = deps.isAlive ?? defaultIsPidAlive
   const setTimer = deps.setInterval ?? ((fn, ms) => setInterval(fn, ms))
   const clearTimer = deps.clearInterval ?? ((t) => clearInterval(t))

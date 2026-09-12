@@ -36,6 +36,7 @@ import { EngineBotAdapter } from "../feishu-bot/adapter"
 import { createFeishuApi } from "../feishu-bot/api"
 import { makeWsSink } from "./serve"
 import { installBrowserFetchProxy } from "../core/browser/fetch-proxy"
+import { log, setLogLevel } from "@gebai/sdk/node"
 
 /** 组合产物：全部组件实例 + 监听所需的依赖包（serve.ts 消费）。 */
 export interface Composed {
@@ -68,6 +69,8 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   applyEmbeddedEnvDefaults(EMBEDDED_ENV_DEFAULTS)
 
   const config = loadConfig(overrides)
+  // 日志级别早于任何装配日志生效（GEBAI_LOG_LEVEL，默认 info；非法值忽略）
+  setLogLevel(config.logLevel)
 
   // 透明浏览器代理（GEBAI_BROWSER_PROXY=1，重启生效）：服务启动即安装 fetch 垫片——平台级
   // 能力，不依赖任何子Agent 的装载/裁剪（桥接基建在 core/browser，见 DESIGN「透明浏览器代理」）
@@ -153,7 +156,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     if (existsSync(defaultDir) && !existsSync(adminDir)) {
       try {
         await rename(defaultDir, adminDir)
-        console.log("[gebai] 本地模式用户目录迁移：users/default → users/admin")
+        log.info("[gebai] 本地模式用户目录迁移：users/default → users/admin")
       } catch {
         /* 迁移失败不影响启动（后续写入按 admin 目录） */
       }
@@ -251,7 +254,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
         if (type === "feishu" && isFeishuChatId(raw) && !feishuApi) throw new Error("chat_id 形态需配置 GEBAI_FEISHU_APP_ID/GEBAI_FEISHU_APP_SECRET")
         defaultNotify.push(ch)
       } catch (err) {
-        console.warn(`[gebai] 全局定时通知 ${label} 配置无效，已忽略: ${(err as Error).message}`)
+        log.warn(`[gebai] 全局定时通知 ${label} 配置无效，已忽略: ${(err as Error).message}`)
       }
     }
     cron = new CronManager({
@@ -299,7 +302,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   if (primaryGate && config.scheduler === "auto") {
     primaryGate.start(
       async () => {
-        console.log("[gebai] 调度已接管：本实例开始运行定时任务与闲时待办")
+        log.info("[gebai] 调度已接管：本实例开始运行定时任务与闲时待办")
         await cron?.start()
         await todos?.start()
       },

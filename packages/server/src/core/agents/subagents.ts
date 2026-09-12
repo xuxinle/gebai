@@ -6,6 +6,7 @@ import type { SubAgentInfo } from "@gebai/sdk"
 import { parseSubAgentMd } from "@gebai/agents"
 import { mergeSubAgentDefs } from "./merge"
 import { discoverKeqing, disposeKeqingNotIn, keqingEnabled, keqingRoots, keqingSignature, type KeqingRunnerOptions } from "./keqing"
+import { log } from "@gebai/sdk/node"
 
 export interface SubAgentManagerOptions {
   registry: ToolRegistry
@@ -170,14 +171,14 @@ export class SubAgentManager {
         // 构建期验证失败清单水合进 loadErrors（模型侧可见根因：agent_load/agent_run 未知名错误附因）
         for (const [name, err] of bundledErrors) {
           this.loadErrors.set(name, `bundle 构建期验证失败（${err}）——修复该子代理后重新构建可恢复`)
-          console.warn(`[subagents] bundle 剔除的子Agent ${name}: ${err}`)
+          log.warn(`[subagents] bundle 剔除的子Agent ${name}: ${err}`)
         }
       } catch (err) {
         // 注册表整体不可用（构建脚本未跑/生成文件损坏）：降级为空集而非阻断启动——子代理失败
         // 不炸主流程（DESIGN「子代理失败隔离」），显眼告警后继续（引擎无子代理可用，但服务本体
         // 与全局工具正常；修复构建链路重启即恢复）。单代理模块级失败已被构建期验证隔离（bundledErrors），
         // 走到这里的常见根因是构建脚本未运行/生成文件损坏
-        console.error(
+        log.error(
           `[subagents] bundle 注册表缺失或加载失败（构建时先运行 scripts/build-subagents.ts），已降级为无子Agent启动: ${err instanceof Error ? err.message : err}`,
         )
       }
@@ -222,16 +223,16 @@ export class SubAgentManager {
           const mod = await import(`${agentImportBase(isCustom)}/${e.name}?t=${mtime}`)
           const def = mod.def as SubAgentDef | undefined
           if (def) {
-            if (isCustom && this.tsDefs.has(def.name)) console.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
+            if (isCustom && this.tsDefs.has(def.name)) log.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
             this.tsDefs.set(def.name, def)
           } else {
             const msg = `${base}.ts 未导出 def（须 export const def: SubAgentDef）`
-            console.warn(`[subagents:${domain}] ${msg}，已跳过`)
+            log.warn(`[subagents:${domain}] ${msg}，已跳过`)
             this.loadErrors.set(base, msg)
           }
         } catch (err) {
           const msg = `加载 ${base}.ts 失败: ${(err as Error).message}`
-          console.warn(`[subagents:${domain}] ${msg}`)
+          log.warn(`[subagents:${domain}] ${msg}`)
           this.loadErrors.set(base, String((err as Error).message || err))
         }
       } else if (e.isDirectory()) {
@@ -251,11 +252,11 @@ export class SubAgentManager {
             const mod = await import(`${rel}?t=${mtime}`)
             const def = mod.def as SubAgentDef | undefined
             if (def) {
-              if (isCustom && this.tsDefs.has(def.name)) console.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
+              if (isCustom && this.tsDefs.has(def.name)) log.warn(`[subagents] custom 域 ${def.name} 覆盖内置同名定义（二开覆盖语义）`)
               this.tsDefs.set(def.name, def)
             } else await this.loadMdOnly(base, dir) // ts 存在但不导出 def（纯辅助目录）→ 回退 md，与 bundle 行为一致
           } catch (err) {
-            console.warn(`[subagents:${domain}] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
+            log.warn(`[subagents:${domain}] 加载 ${base}/${base}.ts 失败: ${(err as Error).message}`)
             this.loadErrors.set(base, `${entry} 加载失败: ${String((err as Error).message || err)}`)
           }
         } else {
@@ -294,7 +295,7 @@ export class SubAgentManager {
       disposeKeqingNotIn(nativeDefs.map((d) => d.name))
       this.rebuildMergedDefs()
     } catch (err) {
-      console.warn(`[subagents] 客卿子代理发现失败（已跳过）: ${(err as Error).message}`)
+      log.warn(`[subagents] 客卿子代理发现失败（已跳过）: ${(err as Error).message}`)
     }
   }
 
@@ -331,7 +332,7 @@ export class SubAgentManager {
       })
     } catch (err) {
       const msg = `加载 ${base}/${base}.md 失败: ${String((err as Error).message || err)}`
-      console.warn(`[subagents] ${msg}`)
+      log.warn(`[subagents] ${msg}`)
       this.loadErrors.set(base, msg)
     }
   }
@@ -347,7 +348,7 @@ export class SubAgentManager {
         await this.load(def.name)
       } catch (err) {
         const msg = `预载 ${def.name} 失败: ${err instanceof Error ? err.message : String(err)}`
-        console.warn(`[subagents] ${msg}（已跳过，不影响其他子代理与启动）`)
+        log.warn(`[subagents] ${msg}（已跳过，不影响其他子代理与启动）`)
         this.loadErrors.set(def.name, msg)
       }
     }
@@ -372,7 +373,7 @@ export class SubAgentManager {
       if (st === "visiting") throw new Error(`子Agent 依赖循环: ${[...path, n].join(" → ")}`)
       const def = this.defs.get(n)
       if (!def) {
-        if (path.length) console.warn(`[subagents] ${path[path.length - 1]} 依赖的子Agent ${n} 不存在（可能被启停名单移除或构建裁剪），已跳过`)
+        if (path.length) log.warn(`[subagents] ${path[path.length - 1]} 依赖的子Agent ${n} 不存在（可能被启停名单移除或构建裁剪），已跳过`)
         state.set(n, "done")
         return
       }
@@ -502,18 +503,18 @@ export class SubAgentManager {
         if (!whitelist.has(name)) this.unregister(name)
       }
       for (const name of whitelist) {
-        if (!this.defs.has(name)) console.warn(`[subagents] GEBAI_SUB_AGENTS_ENABLE 中的子Agent 不存在: ${name}`)
+        if (!this.defs.has(name)) log.warn(`[subagents] GEBAI_SUB_AGENTS_ENABLE 中的子Agent 不存在: ${name}`)
       }
     }
     for (const name of disable) {
       if (!this.defs.has(name)) {
-        console.warn(`[subagents] GEBAI_SUB_AGENTS_DISABLE 中的子Agent 不存在: ${name}`)
+        log.warn(`[subagents] GEBAI_SUB_AGENTS_DISABLE 中的子Agent 不存在: ${name}`)
         continue
       }
       this.unregister(name)
     }
     for (const name of preloaded) {
-      if (!this.defs.has(name)) console.warn(`[subagents] 预载的子Agent ${name} 已被启停名单移除（不再预载）`)
+      if (!this.defs.has(name)) log.warn(`[subagents] 预载的子Agent ${name} 已被启停名单移除（不再预载）`)
     }
   }
 

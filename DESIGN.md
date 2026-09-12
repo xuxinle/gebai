@@ -377,7 +377,7 @@ class GebaiClient {
 | `GEBAI_SUB_AGENTS_ENABLE` | 子Agent **白名单**（逗号分隔）：非空时仅保留名单内子Agent（其余全部 `unregister`——`agent_list`/`agent_load`/`agent_run`/系统提示词注入均不可见，热加载不复活）；与 `GEBAI_SUB_AGENTS_DISABLE` 同时配置**先白后黑**（黑名单最终生效） | 空（不裁剪） |
 | `GEBAI_SUB_AGENTS_DISABLE` | 子Agent **黑名单**（逗号分隔）：名单内子Agent `unregister`（运行时能力面收敛，与构建期 `GEBAI_BUILD_SUBAGENTS` 打包裁剪互补）；名单未知名启动告警忽略不阻断 | 空 |
 | `GEBAI_UI_STYLE` | 默认 UI 风格（`acrylic`/`aether`/`matrix`/`tokyo-night`/`cyberpunk`/`synthwave`/`aurora`/`ink`/`cny`）；**服务端白名单为这 9 项**（`qinhan` 虽在前端主题面板可选，但未进白名单——设了会被静默回落为 `acrylic`，属待修缺陷）；可被 URL/用户级覆盖 | `acrylic` |
-| `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error`（**当前读入 `config.logLevel` 后无消费点，级别过滤未实现**——日志统一走标准输出，见「日志系统」） | `info` |
+| `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error`——`loadConfig` 后由组合根 `setLogLevel(config.logLevel)` 生效（最小日志器 `@gebai/sdk/node` 的 `log.*`，见「日志系统」）；非法值忽略保持原级别 | `info` |
 | `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具） | 空（全部启用） |
 | `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具） | 空 |
 | `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs`/`feishu_group` 子Agent 的全局兜底 + 机器人桥接凭证 + 定时任务飞书应用消息通知（指定群 chat_id 推送/@人））、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**机器人行为开关 `GEBAI_FEISHU_BOT_NOTIFY_TOOLS`（工具调用过程滚动状态消息）/ `GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT`（助手中间轮文本预览）/ `GEBAI_FEISHU_BOT_AUTO_APPROVE`（需审批工具自动通过，见「飞书机器人集成 → 配置」）**、TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）；`feishu_group` 专属前缀 `FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET` 可独立配置 | 不启用 |
@@ -641,7 +641,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **登录限流**：连续失败 5 次锁定该用户名 60 秒（内存计数），防在线爆破；**登录/兑换/注册端点另加令牌桶**（REST：登录/兑换全局桶 60 突发/2 每秒 + 来源桶 10 突发/0.2 每秒，注册独立桶 30/0.5 + 10/0.1；WS `auth.login` 密码路径同款桶 30/1——scrypt 即使异步化仍耗 CPU，轮换用户名即可绕过按用户名锁定，防 CPU DoS 放大器；`GEBAI_TRUST_PROXY=true` 时 REST 按 `X-Forwarded-For` 首段区分来源）
 - **令牌机制**：登录后签发会话令牌（HMAC 签名，7 天 TTL），后续 WebSocket 连接携带令牌建立用户上下文；**令牌表持久化到 `{GEBAI_HOME}/auth-tokens.json`**（签发/撤销/过期清理时落盘，进程重启后已签发令牌仍有效——单机部署下重启不掉线；过期令牌在 authorize/保存时顺带清理，不无界增长）
 - **WS 未登录拦截**：服务模式下未登录（无令牌）的 WS 连接仅允许 `auth.login`，其余消息一律拒绝
-- **跨站来源防护（本地/桌面免登录形态）**：WebSocket 不受同源策略约束且本地模式免登录——恶意网页可直连 `ws://127.0.0.1:*` 以 admin 身份建会话执行命令（REST 通道因 CORS `*` 同样暴露）。防护：WS upgrade 与 REST `/api/*` 均校验 **Origin 与 Host 同源**（浏览器发起的跨站请求必带 Origin，不同源即 403；非浏览器客户端无 Origin 不受限）。**两侧豁免面不同（待修）**：REST 在「显式配 `GEBAI_CORS_ORIGINS` 视为有意开放」或服务模式（令牌鉴权）下不拦；**WS 无条件校验**——不看 CORS 白名单、不看运行模式（显式配白名单后跨源 REST 可用而 WS 仍被拒；服务模式下异域前端 WS 连不上）
+- **跨站来源防护（本地/桌面免登录形态）**：WebSocket 不受同源策略约束且本地模式免登录——恶意网页可直连 `ws://127.0.0.1:*` 以 admin 身份建会话执行命令（REST 通道因 CORS `*` 同样暴露）。防护：WS upgrade 与 REST `/api/*` 均校验 **Origin 与 Host 同源**（浏览器发起的跨站请求必带 Origin，不同源即 403；非浏览器客户端无 Origin 不受限）。**两侧豁免面一致**（`wsOriginAllowed` 与 REST CORS 中间件同规则）：服务模式（令牌鉴权）不拦、显式配置 `GEBAI_CORS_ORIGINS`（不含 `*`）视为有意开放的跨源白名单不拦；仅「本地/桌面免登录形态 + 缺省 `*`」才要求同源——避免「白名单放开了 REST 却连不上 WS」「服务模式异域前端能调 REST 不能开 WS」的配置陷阱
 - **WS 全局子Agent 装载/卸载管理员门槛**：`sub_agent.load`/`sub_agent.unload` 不带 `sessionId` 的**全局形态**（变更所有用户的工具注册面）服务模式下仅 admin（与 REST 工具启停同门槛）；带 `sessionId` 的会话级装载/卸载不受限（只影响本人会话）；模型侧 `agent_load` 装载进当前会话（会话级引用，见「子Agent」引用计数）
 - **用户管理**：支持管理员创建/禁用用户；每个用户独立命名空间（`users/{user}/`）；服务模式 admin 用户通过启动参数 `GEBAI_ADMIN_PASSWORD_HASH` 引导（**设置则启用并覆盖其密码哈希，不设置则禁用**，启动参数为权威配置每次启动重置；admin 被禁用时**普通用户可经注册页自助注册使用**（普通角色），管理员能力须部署方设置哈希启用）；**REST 与 WS 双通道的用户管理端点均校验管理员角色**（非管理员一律 403，防普通用户提权/越权管理）
 - **请求校验**：所有会话操作先解析令牌确定用户，再校验会话归属（含取消任务、审批决策等控制类操作）；**会话 ID 格式白名单**（32 位小写 hex，`randomUUID` 去连字符）在存储层 `sessionPath`/`store` 与 REST 中间件、WS 消息入口四层强制——畸形/穿越形态（`../`、路径分隔符）一律 400/错误应答，从根上杜绝会话 ID 拼路径形成的目录穿越
@@ -1427,8 +1427,9 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 ### 日志系统
 - 日志级别：`debug`、`info`、`warn`、`error`
-- 通过环境变量 `GEBAI_LOG_LEVEL` 声明级别（默认 `info`）——**当前读入 `config.logLevel` 后无消费点，级别过滤尚未实现**
-- 日志走**标准输出/错误**（`console.log/warn/error`），无文件 sink、无轮转；二进制形态由宿主收集（如桌面侧车重定向到 `server.log.*`）
+- **最小日志器**（`@gebai/sdk/node` 的 `logger.ts`）：`log.debug/info/warn/error` 按 `GEBAI_LOG_LEVEL` 过滤（`debug` < `info` 默认 < `warn` < `error`；`setLogLevel` 由组合根在 `loadConfig` 后立即调用，早于任何装配日志）；另导出 `logEnabled(level)` 供调用点短路昂贵的参数构造。**只做级别过滤**，不做结构化日志、不引依赖——保持既有排障习惯（stdout/stderr 分流、宿主重定向到 `server.log.*`）。
+- 日志走**标准输出/错误**（`log.*` 内部仍是 `console.log/warn/error`），无文件 sink、无轮转；二进制形态由宿主收集（如桌面侧车重定向到 `server.log.*`）
+- **协议性输出不走日志器**：宿主/工具据以解析的行直接 `console.*`——启动就绪行 `[gebai] listening on http://…`（桌面启动器靠它取端口）、拉起器状态文件与 `server.log.*`、`dev-reload` 子进程 stderr 转发、启动期致命错误：它们不是「可调级别」的东西，被级别静默会让外部依赖方失效
 - 日志脱敏：不记录密码、令牌、密钥明文，敏感字段以 `***` 替代（env 回显经 `maskEnv`）；会话内容默认不落日志
 
 ### 数据生命周期
@@ -2308,7 +2309,7 @@ WebSocket 消息格式（JSON）：
 面向其他前端与业务系统对接，提供多层次的集成方式：
 
 - **官方 SDK（`@gebai/sdk`）**：WebSocket 连接管理 + REST 调用封装，开箱即用（`login`、`sendPrompt` 流式消费等）
-- **OpenAPI 规范**：`/api/docs` 提供**手写的核心端点摘要**（`routes/docs.ts` 静态清单，**非自动生成**且覆盖不全——fs/git/roots/cron/todos 等域未列入），业务系统可据此生成任意语言客户端（Java/Go/Python 等）
+- **OpenAPI 规范**：`/api/docs` 的**端点表由路由注册自动生成**（请求时遍历 `app.routes`，故注册顺序无关；只取 `/api/` 域、跳过 Hono 派生的 `HEAD` 与中间件 `ALL`，路径参数 `:id` → `{id}`），**摘要取自补充表**（未登记的端点仍列出并标注「未登记摘要」，不隐藏）——手写清单会与实现漂移（新增忘登记、删掉的仍列着），生成器保证「有哪些端点」永远与代码一致；响应含 `x-endpoints-total`/`x-summary-covered` 便于判断摘要覆盖度。业务系统可据此生成任意语言客户端（Java/Go/Python 等）
 - **任意前端接入**：任何支持 WebSocket/HTTP 的前端（React/Vue/小程序/App 等）均可直接对接双通道 API，不绑定 UI
 - **Web UI 嵌入**：内置 Web UI 支持 iframe 嵌入业务系统页面，可通过 URL 参数指定 UI 风格/自定义主题变量（`gb_style`/`gb_vars`/`gb_cny`）；**无「URL 参数携带令牌免登录」**——登录态只存浏览器本地（`localStorage`），跨系统免登录走外部身份兑换（`gb_ext_username`/`gb_ext_credential`）
 - **接口认证**：REST 支持 `Authorization: Bearer <token>`（先登录获取令牌）与 HTTP Basic（单次请求直验账号密码，复用登录限流、不签发令牌）两种方式，WS 统一 `auth.login`；不提供独立服务令牌（原 `X-API-Key` 服务身份机制已移除）

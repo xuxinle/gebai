@@ -4,6 +4,7 @@ import { existsSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { loadConfig, isBinaryMode } from "../core/base/config"
 import { walkDir } from "../core/base/paths"
+import { log } from "@gebai/sdk/node"
 
 /** `gebai exec` 子命令实现：动态 import 目标脚本（模块顶层执行；退出码由脚本自身 process.exit 决定）。 */
 async function importExecScript(file: string): Promise<void> {
@@ -28,7 +29,7 @@ export async function ensureWebDistBuilt(): Promise<void> {
 
   const distIndex = join(config.webDist, "index.html")
   const distMtime = existsSync(distIndex) ? statSync(distIndex).mtimeMs : 0
-  if (!distMtime) console.log("[gebai] web dist 缺失，自动构建…")
+  if (!distMtime) log.info("[gebai] web dist 缺失，自动构建…")
 
   // 扫描 web 源码最新修改时间（src/ 递归 + 顶层入口/依赖清单）
   const webRoot = join(config.webDist, "..")
@@ -46,16 +47,16 @@ export async function ensureWebDistBuilt(): Promise<void> {
   check(join(webRoot, "package.json"))
 
   if (newestSrc > distMtime + 1000) {
-    console.log("[gebai] 检测到 web 源码更新，自动构建（约 1s）…")
+    log.info("[gebai] 检测到 web 源码更新，自动构建（约 1s）…")
     const r = Bun.spawnSync({
       cmd: [process.execPath, "run", "--cwd", webRoot, "build"],
       stdout: "inherit",
       stderr: "inherit",
     })
     if (!r.success) {
-      console.warn("[gebai] web 自动构建失败，继续使用现有 dist；可手动执行: bun run --cwd packages/web build")
+      log.warn("[gebai] web 自动构建失败，继续使用现有 dist；可手动执行: bun run --cwd packages/web build")
     } else {
-      console.log("[gebai] web 构建完成")
+      log.info("[gebai] web 构建完成")
     }
   }
 }

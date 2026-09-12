@@ -13,6 +13,7 @@
 import { dirname, join } from "node:path"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { isBinaryMode, resolveGebaiHome } from "../shared/config"
+import { log } from "@gebai/sdk/node"
 
 const DRIVER_FILE = "cv-driver.mjs"
 const REQUEST_TIMEOUT_MS = 120_000
@@ -312,7 +313,7 @@ export class CvSidecar {
   }
 
   kill(reason?: string): void {
-    if (reason) console.error(`[cv-sidecar] ${reason}`)
+    if (reason) log.error(`[cv-sidecar] ${reason}`)
     const proc = this.proc
     this.onExit()
     try {
@@ -346,7 +347,7 @@ export function resetCvSidecarForTests(): void {
  *  auto 回落路径上每次检测都先等一遍 sidecar 超时再回落 wasm。 */
 export function poisonCvSidecar(reason?: string): void {
   cvSidecarPoisoned = true
-  if (reason) console.error(`[cv-sidecar] 已毒化，检测回落 wasm: ${reason.slice(0, 300)}`)
+  if (reason) log.error(`[cv-sidecar] 已毒化，检测回落 wasm: ${reason.slice(0, 300)}`)
 }
 
 /** 全进程共享惰性 sidecar 单例：驱动缺失 / ort-node 不可解析 / 运行期失败毒化 → null（检测回落 wasm）。

@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url"
 import { dirname, join, normalize, sep } from "node:path"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { isBinaryMode, resolveGebaiHome } from "../shared/config"
+import { log } from "@gebai/sdk/node"
 
 const DRIVER_FILE = "driver.mjs"
 const REQUEST_TIMEOUT_MS = 180_000 // 单个请求超时（超时即杀进程重启，浏览器状态丢失）
@@ -278,7 +279,7 @@ export class Bridge implements BridgeLike {
 
 /** 桥接进程日志（stderr），仅诊断用。 */
 function logBridge(msg: string): void {
-  console.error(`[playwright-bridge] ${msg}`)
+  log.error(`[playwright-bridge] ${msg}`)
 }
 
 /* ---------------- 惰性桥接 ---------------- */

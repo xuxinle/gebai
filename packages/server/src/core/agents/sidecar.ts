@@ -17,6 +17,7 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { isBinaryMode, resolveGebaiHome } from "../base/config"
+import { log } from "@gebai/sdk/node"
 
 /** 边车请求默认超时：tool.call 由驱动侧自定义工具决定（AI 库推理可到分钟级）。 */
 const REQUEST_TIMEOUT_MS = 120_000
@@ -330,7 +331,7 @@ export class AgentSidecar {
   }
 
   private killAndRestart(reason: string): void {
-    console.error(`[keqing] ${reason}`)
+    log.error(`[keqing] ${reason}`)
     const proc = this.proc
     this.proc = null
     this.stdin = null

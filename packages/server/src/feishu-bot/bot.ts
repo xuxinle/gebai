@@ -20,6 +20,7 @@ import type { DiagramRenderer } from "../core/support/diagram-render"
 import { isDiagramFormat } from "../core/support/artifacts"
 import type { DiagramFormat } from "@gebai/sdk"
 import type { BotPromptAdapter } from "./adapter"
+import { log } from "@gebai/sdk/node"
 
 /** 桥接用到的依赖子集（Pick 结构类型，便于测试注入 fake）。 */
 export type BotStore = Pick<SessionStore, "load" | "save" | "delete" | "listSessionInfos" | "setEnv" | "getTmpDir">
@@ -433,7 +434,7 @@ export class FeishuBot {
   constructor(private opts: FeishuBotOptions) {
     this.api = opts.api ?? createFeishuApi({ appId: opts.appId, appSecret: opts.appSecret })
     this.clock = opts.clock ?? Date.now
-    this.log = opts.log ?? ((m) => console.log(`[feishu-bot] ${m}`))
+    this.log = opts.log ?? ((m) => log.info(`[feishu-bot] ${m}`))
     this.renderer = opts.renderer ?? null
     this.ownersPath = join(opts.home, "feishu", "chat-owners.json")
     const connOpts: FeishuConnOptions = {

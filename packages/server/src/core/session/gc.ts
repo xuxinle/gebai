@@ -1,6 +1,7 @@
 import { readdir, readFile, stat, mkdir, rename, rm } from "node:fs/promises"
 import { join, dirname } from "node:path"
 import { walkDir } from "../base/paths"
+import { log } from "@gebai/sdk/node"
 
 /** 对齐 DESIGN.md 常量表：会话闲置过期 90 天 / trash 保留 7 天 / feedback 保留 180 天。 */
 export const DEFAULT_SESSION_IDLE_MS = 90 * 24 * 60 * 60 * 1000
@@ -177,7 +178,7 @@ export function scheduleGC(home: string, opts: GCOptions = {}, intervalMs = GC_I
     try {
       const stats = await runGC(home, opts)
       // 日志脱敏：仅统计数字，不打印用户/路径明细
-      console.log(
+      log.info(
         `[gebai] gc: archived=${stats.sessionsArchived} trashDirs=${stats.trashDirsDeleted} feedbackDirs=${stats.feedbackDirsDeleted} legacyTruncated=${stats.legacyTruncatedDeleted}`,
       )
     } catch {
