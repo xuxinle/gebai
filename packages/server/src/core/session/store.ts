@@ -4,7 +4,8 @@ import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
 import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "../base/paths"
 import { randomUUID } from "node:crypto"
 
-const MAX_CACHE_MESSAGES = 300
+/** 会话消息持久化上限（条）。导出供引擎做「条数触发的预防性压缩」判定（见 engine 的 needsCountCompaction）。 */
+export const MAX_CACHE_MESSAGES = 300
 const MAX_CACHE_SESSIONS = 10
 /** 会话 env 内存缓存上限（LRU）：仅活跃会话驻留，防长生命周期进程无界增长。 */
 const MAX_ENV_CACHE_SESSIONS = 256
@@ -46,6 +47,10 @@ export interface SessionData {
   /** 会话置顶标记（chat.json 持久化）：置顶会话在列表置顶分组置前展示；
    *  未定义 = 未置顶（旧格式天然兼容）。置顶/取消不刷新 updatedAt（元数据操作不动排序基线）。 */
   pinned?: boolean
+  /** 超限截断累计（chat.json 持久化）：因 300 条上限被丢弃的历史消息条数与最近一次时间戳。
+   *  loadHistory 据此在历史最前注入「历史裁剪」提示——模型于是知道更早内容已不在上下文中，
+   *  而不是把「历史从中间开始」当作完整历史（截断本身不生成摘要，是上下文保护的最后一道兜底）。 */
+  trimmed?: { count: number; at: number }
 }
 
 /** 会话公开信息（列表/详情接口统一序列化，REST 与 WS 共用）。
@@ -169,13 +174,29 @@ export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown
 }
 
 /**
- * 上下文保护消息（不压缩、不改变）：系统提示词（含 loadedAgent 装载提示词/compacted 摘要/旧格式 system）
- * 与用户输入原样保留，新会话执行存档（session/sessionRun/subAgent/subAgentRun）同理——压缩不选进区间、
- * 不进摘要输入、超限截断不丢弃、区间夹带时原位保留。
+ * 上下文保护消息（**超限截断与溢出护栏**口径：不做无摘要的静默丢弃）：系统提示词（含 loadedAgent 装载
+ * 提示词/compacted 摘要/旧格式 system）与用户输入、新会话执行存档（session/sessionRun/subAgent/subAgentRun）
+ * ——超限截断（`trimToCacheLimit`）不丢弃它们、配对修复不把它们当孤儿；区间夹带时原位保留。
+ * 注：**压缩（有摘要的移除）另有一套口径**（`isCompressibleMessage`）：压缩只保系统提示词，
+ * 用户输入随区间被摘要替换并完全移除（摘要承载其要点，原文在会话记录中可回溯）。
  */
 export function isProtectedMessage(m: { role?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
   if (m.role === "user" || m.role === "system") return true
   return !!(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
+}
+
+/**
+ * 上下文压缩的可压缩判定（压缩区间选取与摘要输入的口径）：**只有系统提示词不可压缩**。
+ * - 系统提示词（角色 system：主 system 段消息、子Agent 装载提示词、压缩摘要自身）压缩时原位保留
+ *   （DESIGN「上下文保护」原则：系统提示词不要压缩）；
+ * - 其余消息（用户输入、assistant、tool、引擎注入的提醒）进入压缩区间后由 LLM 摘要替换并**完全移除**
+ *   （近消息由滑动窗口原样保留；远消息原消息不再残留于上下文——原文仍在会话记录 chat.json 中，
+ *   UI 可查看、可回溯，模型侧只看得到摘要）；
+ * - 新会话执行存档（session/sessionRun/subAgent/subAgentRun）本就不进主上下文，压缩不动它们（仅存档）。
+ */
+export function isCompressibleMessage(m: { role?: string; engineNote?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
+  if (m.role === "system") return false
+  return !(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
 }
 
 /** 引擎软性提醒内容前缀（存量数据无 engineNote 标记时的兜底识别：标记上线前落盘的提醒为 assistant 形态）。 */
@@ -500,9 +521,12 @@ export class SessionStore {
    * 用户输入与系统提示词不改变优先）。丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时
    * 连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），
    * 实际保留条数可略低于上限（配对完整性优先）。
+   *
+   * 返回 { messages, dropped }：dropped 为本次丢弃条数——调用方累计进 `SessionData.trimmed`，
+   * 由 loadHistory 注入「历史裁剪」提示（模型据此知道更早内容已不在上下文中，而不是无声断裂）。
    */
-  private trimToCacheLimit(messages: Message[]): Message[] {
-    if (messages.length <= MAX_CACHE_MESSAGES) return messages
+  private trimToCacheLimit(messages: Message[]): { messages: Message[]; dropped: number } {
+    if (messages.length <= MAX_CACHE_MESSAGES) return { messages, dropped: 0 }
     const over = messages.length - MAX_CACHE_MESSAGES
     const out: Message[] = []
     let dropped = 0
@@ -517,7 +541,13 @@ export class SessionStore {
         while (i + 1 < messages.length && messages[i + 1].role === "tool" && !isProtectedMessage(messages[i + 1])) i++
       }
     }
-    return out
+    return { messages: out, dropped }
+  }
+
+  /** 超限截断丢弃记录的累计（chat.json 持久化 `trimmed`）：loadHistory 据此注入裁剪提示。 */
+  private recordTrim(session: SessionData, dropped: number): void {
+    if (dropped <= 0) return
+    session.trimmed = { count: (session.trimmed?.count ?? 0) + dropped, at: Date.now() }
   }
 
   /** userId 可选：任务流程内的持久化调用传归属用户，缓存被挤出后仍可从磁盘确定性装载（LRU 双保险）。 */
@@ -525,7 +555,9 @@ export class SessionStore {
     const session = await this.load(sessionId, userId)
     if (!session) throw new Error(`session not found: ${sessionId}`)
     session.messages.push(msg)
-    session.messages = this.trimToCacheLimit(session.messages)
+    const trimmed = this.trimToCacheLimit(session.messages)
+    session.messages = trimmed.messages
+    this.recordTrim(session, trimmed.dropped)
     await this.save(session)
   }
 
@@ -546,13 +578,18 @@ export class SessionStore {
   }
 
   /**
-   * 上下文压缩：将 [from, to) 区间内【可压缩】历史消息替换为一条摘要消息（DESIGN「上下文保护」）。
-   * 区间内夹带的受保护消息（isProtectedMessage：系统提示词/用户输入/新会话执行存档）**原样保留**
-   * （不参与压缩替换，仅其前后的普通消息合并为摘要）；摘要消息标记 compacted/summary，loadHistory 时作为
-   * assistant 角色注入（不污染 system 段）。区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）。
+    * 上下文压缩：将 [from, to) 区间内【可压缩】历史消息替换为一条摘要消息（DESIGN「上下文保护」）。
+ * 可压缩口径（isCompressibleMessage）：**除系统提示词外全部**——近消息由滑动窗口排除在区间之外原样保留，
+ * 区间内的用户输入/assistant/tool 消息被摘要替换并**完全移除**（原消息仍留在会话记录中可回溯）；
+ * 区间内夹带的系统提示词消息（主 system 段/装载提示词）**原样保留**（不参与替换，原则：系统提示词不压缩）。
+ * 摘要消息标记 compacted/summary，loadHistory 时作为 user 角色注入（不污染 system 段）。
+ * 区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）。
+   * **摘要置于消息数组最前**（压缩原则：远的消息压缩后放到数组前面，不与近期原文交错；
+   * 模型先读历史摘要再读近期原文，越旧的信息越靠前）；**既有摘要一并吸收**（absorbSummaries 默认开）——
+   * 长会话反复压缩时摘要恒为一条（旧摘要内容由调用方纳入新摘要输入，信息不丢）。
    * 返回压缩后的消息列表。
    */
-  async compactMessages(sessionId: string, userId: string, opts: { from: number; to: number; summary: string }): Promise<Message[]> {
+  async compactMessages(sessionId: string, userId: string, opts: { from: number; to: number; summary: string; absorbSummaries?: boolean }): Promise<Message[]> {
     const session = await this.load(sessionId, userId)
     if (!session) throw new Error(`session not found: ${sessionId}`)
     const messages = session.messages
@@ -560,8 +597,9 @@ export class SessionStore {
     const end = Math.min(messages.length, opts.to)
     if (start >= end) return messages
     const slice = messages.slice(start, end)
-    // 受保护消息（系统提示词/用户输入/存档）原位保留——用户输入与系统提示词不压缩不改变
-    const kept = slice.filter(isProtectedMessage)
+    // 系统提示词消息（角色 system：主 system 段/装载提示词/既有摘要）原位保留——系统提示词不压缩；
+    // 其余消息（含用户输入）随区间被摘要替换并完全移除（原消息仍在会话记录中可回溯）
+    const kept = slice.filter((m) => !isCompressibleMessage(m))
     const removed = slice.length - kept.length
     if (removed === 0) return messages
     const firstTs = messages[start]?.createdAt
@@ -574,9 +612,13 @@ export class SessionStore {
       summary: removed > 1 ? `已压缩 ${removed} 条历史消息（${firstTs} ~ ${lastTs}）` : "已压缩 1 条历史消息",
       createdAt: Date.now(),
     }
-    const next = [...messages.slice(0, start), ...kept, compacted, ...messages.slice(end)]
+    // 摘要放数组最前；区间内保留的受保护消息紧随其后（原位），区间外消息顺序不变
+    let next = [compacted, ...messages.slice(0, start), ...kept, ...messages.slice(end)]
+    if (opts.absorbSummaries !== false) next = next.filter((m) => m === compacted || !m.compacted)
     // 区间边界可能切在 assistant(toolCalls)/tool 配对中间——压缩后立即修复配对完整性
-    session.messages = this.trimToCacheLimit(repairToolPairing(next))
+    const trimmed = this.trimToCacheLimit(repairToolPairing(next))
+    session.messages = trimmed.messages
+    this.recordTrim(session, trimmed.dropped)
     // 消息被摘要替换后，真实 usage 基线的索引锚点（ctxAtMessage）错位：清除基线，
     // 压缩判定回退估算，直至下一次真实模型调用重建基线（DESIGN「上下文保护」）
     session.ctxInputTokens = undefined

@@ -175,10 +175,10 @@ describe("agent_run 加固", () => {
 })
 
 describe("溢出硬护栏", () => {
-  test("全部用户消息无压缩空间时：接口拒绝 → 硬护栏裁剪最旧用户消息为占位，最新输入不被裁", async () => {
+  test("无可压缩内容时硬护栏兜底：接口拒绝 → 裁剪最旧用户消息为占位，最新输入不被裁", async () => {
     const provider = new HardenProvider()
     provider.maxCtx = 800 // 极小窗口
-    // 接口以上下文长度错误拒绝（真实大小信号）→ 压缩（无 assistant/tool 可压缩）→ 硬护栏降级
+    // 接口以上下文长度错误拒绝（真实大小信号）→ 压缩（滑动窗口外的可压缩消息不足 2 条）→ 硬护栏降级
     let calls = 0
     const origChat = provider.chat.bind(provider)
     provider.chat = async function* (msgs: MessageLike[], opts?: ChatOptions) {
@@ -190,16 +190,19 @@ describe("溢出硬护栏", () => {
     }
     const { home, store, engine } = await setupEngine(provider)
     const session = await store.createSession("default", "t")
-    // 预置多条历史用户消息（无 assistant/tool → 无可压缩内容；>500 字符才可被护栏裁剪）
-    for (let i = 0; i < 5; i++) {
-      await store.appendMessage(session.id, { id: `old-${i}`, role: "user", content: `历史用户消息${i}`.repeat(100), createdAt: Date.now() })
-    }
+    // 历史只有系统提示词消息 + 1 条长用户消息：压缩无内容可压（系统提示词不压缩、滑动窗口占住那条用户消息）
+    await store.appendMessage(session.id, { id: "sys-1", role: "system", loadedAgent: "code", content: "### code 提示词".repeat(20), createdAt: Date.now() } as never)
+    await store.appendMessage(session.id, { id: "sys-2", role: "system", loadedAgent: "vision", content: "### vision 提示词".repeat(20), createdAt: Date.now() } as never)
+    await store.appendMessage(session.id, { id: "old-u", role: "user", content: `历史用户消息`.repeat(100), createdAt: Date.now() })
     await engine.run(session.id, "default", `最新输入`.repeat(50))
     const loaded = await store.load(session.id)
-    const users = loaded!.messages.filter((m) => m.role === "user")
+    const old = loaded!.messages.find((m) => m.id === "old-u")!
     // 最旧用户消息被裁剪为占位（原文仍在会话存储中）
-    expect(users[0].content).toContain("历史消息已裁剪")
+    expect(old.content).toContain("历史消息已裁剪")
+    // 系统提示词不被压缩/裁剪
+    expect(loaded!.messages.some((m) => m.id === "sys-1" && String(m.content).includes("### code 提示词"))).toBe(true)
     // 最新输入（本次任务）原样保留
+    const users = loaded!.messages.filter((m) => m.role === "user")
     expect(users[users.length - 1].content.startsWith("最新输入")).toBe(true)
     rmSync(home, { recursive: true, force: true })
   })
@@ -207,21 +210,24 @@ describe("溢出硬护栏", () => {
 
 describe("任务中途自动压缩（真实 usage 驱动）", () => {
   test("真实 input tokens 超过窗口阈值时压缩最早历史，任务继续完成", async () => {
-    // 每轮调用返回相同的真实 usage（8500 > 0.8 × 10000）：压缩判定只用模型服务返回的大小
+    // 每轮调用返回相同的真实 usage（190000 > 200000 - 16384）：压缩判定只用模型服务返回的大小
     let calls = 0
+    /** 每次调用的请求快照（消息引用会被主循环后续变异，必须快照）与工具清单。 */
+    const seen: Array<{ msgs: MessageLike[]; tools: string[] }> = []
     const provider = {
       id: "fake-midrun",
-      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: true, maxContextTokens: 10000 }),
-      async *chat(_msgs: MessageLike[], _o?: ChatOptions): AsyncIterable<LLMChunk> {
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: true, maxContextTokens: 200000 }),
+      async *chat(_msgs: MessageLike[], o?: ChatOptions): AsyncIterable<LLMChunk> {
         calls++
+        seen.push({ msgs: _msgs.map((m) => ({ ...m })), tools: ((o?.tools ?? []) as Array<{ name: string }>).map((t) => t.name) })
         if (calls <= 6) {
           // offset 随轮次变化（避免重复检测中断连续读同一文件）
           yield { type: "tool_call", toolCall: { id: `tc-${calls}`, name: "read", arguments: { path: "tmp/x.txt", offset: calls } } }
-          yield { type: "done", usage: { inputTokens: 8500 } }
+          yield { type: "done", usage: { inputTokens: 190000, cachedTokens: 180000 } }
           return
         }
         yield { type: "text", text: "done" }
-        yield { type: "done", usage: { inputTokens: 8500 } }
+        yield { type: "done", usage: { inputTokens: 190000, cachedTokens: 180000 } }
       },
     } as unknown as HardenProvider
     const { home, store, engine } = await setupEngine(provider, { authMode: "local" })
@@ -236,6 +242,21 @@ describe("任务中途自动压缩（真实 usage 驱动）", () => {
     // 压缩后消息列表重建，任务继续执行：后续轮次的工具结果保留、最终回复收尾
     expect(loaded!.messages.filter((m) => m.role === "tool" && m.content.includes("长内容")).length).toBeGreaterThanOrEqual(1)
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content === "done")).toBe(true)
+    // —— 缓存复用（本机制的核心诉求）：摘要调用直接重发主循环同前缀，服务端前缀缓存可命中 ——
+    const sumIdx = seen.findIndex((r) => r.msgs.some((m) => typeof m.content === "string" && m.content.includes("【压缩指令】")))
+    expect(sumIdx).toBeGreaterThan(0) // 摘要调用确实走的是前缀路径（不是骨架行路径）
+    const sumReq = seen[sumIdx]!.msgs
+    const prevReq = seen[sumIdx - 1]!.msgs
+    // ① 摘要请求 = 上一条主循环请求的真前缀 + 尾部压缩指令（去掉指令后逐条相同）——
+    // 压缩区间覆盖到滑动窗口边界，常常就是「上一条请求的全部」（命中率 100%）
+    const prefix = sumReq.slice(0, -1)
+    expect(prefix.length).toBeLessThanOrEqual(prevReq.length)
+    expect(prefix.length).toBeGreaterThan(1)
+    expect(prefix).toEqual(prevReq.slice(0, prefix.length))
+    // ② system 提示词逐字节相同（前缀缓存匹配的首要条件）
+    expect(prefix[0]).toEqual(prevReq[0])
+    // ③ 同批工具 schema（多数服务商的前缀缓存包含 tools 段，缺了会整体失配）
+    expect(seen[sumIdx]!.tools).toEqual(seen[sumIdx - 1]!.tools)
     rmSync(home, { recursive: true, force: true })
   })
 })

@@ -2951,16 +2951,18 @@ describe("context compaction", () => {
     const { home, store, session } = await sessionWithHistory(6)
     const before = (await store.load(session.id))!.messages.length
     const next = await store.compactMessages(session.id, "default", { from: 0, to: 4, summary: "摘要文本" })
-    // 区间内 2 条用户输入原位保留：长度 = 12 - 4 + 1(摘要) + 2(保留用户) = 11
-    expect(next.length).toBe(before - 4 + 1 + 2)
+    // 区间内 4 条（含 2 条用户输入）全部被摘要替换并移除：长度 = 12 - 4 + 1(摘要)
+    expect(next.length).toBe(before - 4 + 1)
     const compacted = next.find((m) => m.compacted)
     expect(compacted).toBeDefined()
     expect(compacted!.role).toBe("system")
     expect(compacted!.content).toBe("摘要文本")
-    expect(compacted!.summary).toContain("已压缩 2 条")
-    // 用户输入不压缩不改变（区间内 user 消息原位保留、内容不变）
-    expect(next.filter((m) => m.role === "user" && m.content === "问题 0")).toHaveLength(1)
-    expect(next.filter((m) => m.role === "user" && m.content === "问题 1")).toHaveLength(1)
+    expect(compacted!.summary).toContain("已压缩 4 条")
+    // 远消息完全抛弃：区间内用户输入原文不在上下文中（原文仍存于会话记录，UI 可回溯）
+    expect(next.some((m) => m.role === "user" && m.content === "问题 0")).toBe(false)
+    expect(next.some((m) => m.role === "user" && m.content === "问题 1")).toBe(false)
+    // 区间外的近期消息原样保留
+    expect(next.some((m) => m.role === "user" && m.content === "问题 4")).toBe(true)
     cleanup(home)
   })
 
@@ -2973,8 +2975,9 @@ describe("context compaction", () => {
     expect(result.summary).toBeTruthy()
     const loaded = await s.store.load(s.session.id)
     expect(loaded!.messages.some((m) => m.compacted)).toBe(true)
-    // 用户输入不压缩不改变：压缩区间内的 user 消息原位保留
-    for (let i = 1; i < 3; i++) expect(loaded!.messages.some((m) => m.role === "user" && m.content === `问题 ${i}`)).toBe(true)
+    // 远消息完全抛弃：被压区间的用户输入原文已不在上下文（摘要承载其要点）；滑动窗口内的近期输入原样保留
+    expect(loaded!.messages.some((m) => m.role === "user" && m.content === "问题 0")).toBe(false)
+    expect(loaded!.messages.some((m) => m.role === "user" && m.content === "问题 5")).toBe(true)
     expect(events).toContain("event.message.compact")
     // loadHistory 将摘要消息作为 **user 角色**注入（不污染 system 段，且避开思考类模型的尾 assistant 约束——
     // 全量压缩（scope:"all"）时摘要会落到消息末尾，assistant 形态会让后续带工具面的请求 400）
@@ -3000,7 +3003,7 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("compactSession 不碰子Agent 装载提示词消息（不选进区间、不进摘要输入、原位保留）", async () => {
+  test("compactSession 不碰子Agent 装载提示词消息（不选进区间、原位保留）", async () => {
     const s = await sessionWithHistory(4)
     // 会话中途装载：历史中间插入装载提示词消息（模拟 agent_load 后追加）
     await s.store.appendMessage(s.session.id, { id: "load-1", role: "system", loadedAgent: "code", content: "### code（完整提示词）\n你是源码分析专家。", createdAt: Date.now() } as never)
@@ -3008,7 +3011,8 @@ describe("context compaction", () => {
       await s.store.appendMessage(s.session.id, { id: crypto.randomUUID(), role: "user", content: `后续问题 ${i}`, createdAt: Date.now() })
       await s.store.appendMessage(s.session.id, { id: crypto.randomUUID(), role: "assistant", content: `后续回答 ${i}`, createdAt: Date.now() })
     }
-    // 摘要输入断言：provider 收到的压缩输入不含装载提示词内容
+    // 注：装载提示词会随「缓存友好前缀」进入摘要请求（那是主循环同前缀的一部分，不这样前缀缓存就失配）；
+    // 要守住的不变量是**会话记录**里它不被压缩替换/移动（下一轮仍完整回放给模型）
     let summaryInput = ""
     const spy = {
       ...s.provider,
@@ -3020,11 +3024,14 @@ describe("context compaction", () => {
     }
     ;(s.engine as unknown as { opts: { provider: unknown } }).opts.provider = spy
     await s.engine.compactSession(s.session.id, "default")
-    expect(summaryInput).not.toContain("你是源码分析专家") // 提示词全文未进摘要输入
     const loaded = await s.store.load(s.session.id)
     const note = loaded!.messages.find((m) => m.loadedAgent === "code")
     expect(note).toBeDefined() // 消息本体原位保留（未被压缩替换/移动）
     expect(note!.content).toContain("你是源码分析专家")
+    // 摘要是新消息（不吞掉装载提示词的 id/标记），且在消息数组最前
+    expect(summaryInput).toContain("压缩指令")
+    expect(loaded!.messages.some((m) => m.compacted)).toBe(true)
+    expect(loaded!.messages.find((m) => m.loadedAgent === "code")!.id).toBe("load-1")
     cleanup(s.home)
   })
 
@@ -3066,23 +3073,104 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("repeated compaction never re-compacts an existing summary message", async () => {
+  test("repeated compaction absorbs the existing summary（长会话摘要恒为一条）", async () => {
     const s = await sessionWithHistory(10) // 20 条消息
     const r1 = await s.engine.compactSession(s.session.id, "default")
-    // 区间内 5 条 assistant 被摘要替换（4 条 user 原位保留，不算压缩条数）
+    // 无真实占用基线时保守口径：窗口 20→10 条，窗口外 10 条可压缩消息只压一半（5 条）
     expect(r1.compacted).toBe(5)
     const r2 = await s.engine.compactSession(s.session.id, "default")
-    // 第二轮压缩剩余未压缩历史（保留最近一半），摘要消息本身不参与
-    expect(r2.compacted).toBe(2)
+    // 第二轮：16 条（15 可压缩含摘要前的 14 条 + 1 摘要）→ 窗口 = min(12, 8) = 8 → 窗口外 7 条 → 压一半（4 条）；已有摘要被吸收
+    expect(r2.compacted).toBe(4)
     const after = (await s.store.load(s.session.id))!.messages
     const compacted = after.filter((m) => m.compacted)
-    expect(compacted.length).toBe(2)
-    // 两条摘要消息均描述各自的原始区间（不存在「摘要的摘要」链）
-    for (const c of compacted) expect(c.summary).toContain("已压缩")
+    expect(compacted.length).toBe(1)
+    expect(compacted[0]!.content).toBe(r2.summary) // 新摘要吸收了旧摘要内容
+    expect(compacted[0]!.summary).toContain("已压缩")
     cleanup(s.home)
   })
 
-  test("摘要输入只含将被移除的可压缩消息：系统提示词与用户输入不进摘要", async () => {
+  test("引擎注入的提醒消息可被压缩吸收（引擎可再生内容不随用户输入永久占窗口）", async () => {
+    const s = await sessionWithHistory(3) // u0,a0,u1,a1,u2,a2
+    await s.store.appendMessage(s.session.id, { id: "note-1", role: "user", engineNote: "cron", content: "【定时任务】提醒内容", createdAt: Date.now() } as never)
+    for (let i = 0; i < 4; i++) {
+      await s.store.appendMessage(s.session.id, { id: `u-${i}`, role: "user", content: `后续 ${i}`, createdAt: Date.now() })
+      await s.store.appendMessage(s.session.id, { id: `a-${i}`, role: "assistant", content: `后续回答 ${i}`, createdAt: Date.now() })
+    }
+    // 显式指定覆盖引擎提醒的区间（无基线时保守口径只压窗口外一半，未必够到该条）
+    const r = await s.engine.compactSession(s.session.id, "default", { from: 0, to: 8 })
+    expect(r.compacted).toBeGreaterThan(0)
+    const loaded = await s.store.load(s.session.id)
+    // 引擎提示与用户输入同属可压缩消息（被摘要吸收）：不再永久保留
+    expect(loaded!.messages.some((m) => m.id === "note-1")).toBe(false)
+    expect(loaded!.messages.some((m) => m.role === "user" && m.content === "后续 3")).toBe(true)
+    cleanup(s.home)
+  })
+
+  test("条数触发的预防性压缩：消息数接近会话上限时 run 前自动压缩（不让 300 条截断静默丢历史）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    for (let i = 0; i < 125; i++) {
+      await s.store.appendMessage(session.id, { id: `u-${i}`, role: "user", content: `问题 ${i}`, createdAt: i * 2 + 1 } as never)
+      await s.store.appendMessage(session.id, { id: `a-${i}`, role: "assistant", content: `回答 ${i}`, createdAt: i * 2 + 2 } as never)
+    }
+    const before = (await s.store.load(session.id))!.messages.length
+    expect(before).toBeGreaterThanOrEqual(240) // 达到条数阈值（300 的 80%）
+    await s.engine.run(session.id, "default", "继续")
+    const after = (await s.store.load(session.id))!.messages
+    expect(after.some((m) => m.compacted)).toBe(true) // run 前预防性压缩发生
+    expect(after.length).toBeLessThan(before)
+    cleanup(s.home)
+  })
+
+  test("任务中途条数触发压缩：单次 run 内消息数接近上限时腾挪（不等跨 run 预检）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    // 预置 226 条（低于 run 前条数阈值 240，避免预检先把它压掉）
+    for (let i = 0; i < 113; i++) {
+      await s.store.appendMessage(session.id, { id: `u-${i}`, role: "user", content: `问题 ${i}`, createdAt: i * 2 + 1 } as never)
+      await s.store.appendMessage(session.id, { id: `a-${i}`, role: "assistant", content: `回答 ${i}`, createdAt: i * 2 + 2 } as never)
+    }
+    expect((await s.store.load(session.id))!.messages.length).toBe(226)
+    // 模型连续发起工具调用（maxContextTokens=0 → 只走条数口径）→ 单次 run 内消息增长越过阈值
+    let calls = 0
+    const provider = {
+      ...s.provider,
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 0 }),
+      chat: async function* () {
+        calls++
+        if (calls <= 20) {
+          yield { type: "tool_call", toolCall: { id: `call-${calls}`, name: "read", arguments: { path: `nope-${calls}.txt` } } }
+          yield { type: "done" }
+          return
+        }
+        yield { type: "text", text: "完成" }
+        yield { type: "done" }
+      },
+    }
+    ;(s.engine as unknown as { opts: { provider: unknown } }).opts.provider = provider
+    await s.engine.run(session.id, "default", "继续")
+    const after = (await s.store.load(session.id))!.messages
+    expect(after.some((m) => m.compacted)).toBe(true) // 中途条数触发压缩
+    expect(after.length).toBeLessThan(300) // 未触达 300 条硬截断
+    cleanup(s.home)
+  })
+
+  test("超限截断记录 trimmed 并在下次装载注入「历史裁剪」提示（模型知道历史断裂）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    for (let i = 0; i < 320; i++) {
+      await s.store.appendMessage(session.id, { id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 1 } as never)
+    }
+    const loaded = await s.store.load(session.id)
+    expect(loaded!.trimmed?.count).toBeGreaterThan(0)
+    const histFn = (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<import("@gebai/sdk").MessageLike[]> }).loadHistory
+    const history = await histFn.call(s.engine, session.id, "default")
+    expect(String(history[0]!.content)).toContain("[历史裁剪]")
+    expect(String(history[0]!.content)).toContain(`${loaded!.trimmed!.count} 条`)
+    cleanup(s.home)
+  })
+
+  test("压缩只移除可压缩消息：系统提示词保留、区间内用户输入随摘要移除", async () => {
     const s = await sessionWithHistory(4) // u0,a0,u1,a1,u2,a2,u3,a3
     const inputs: string[] = []
     const spy = {
@@ -3096,10 +3184,13 @@ describe("context compaction", () => {
     ;(s.engine as unknown as { opts: { provider: unknown } }).opts.provider = spy
     await s.engine.compactSession(s.session.id, "default")
     expect(inputs.length).toBeGreaterThan(0)
-    // assistant 内容进摘要输入；用户输入不进（原样保留在上下文中）
+    // 摘要请求走「缓存友好前缀」（与主循环同前缀的原文 + 压缩指令）：早先的 assistant/用户输入都在其中
     expect(inputs[0]).toContain("回答 0")
-    expect(inputs[0]).toContain("回答 1")
-    expect(inputs[0]).not.toContain("问题 1")
+    expect(inputs[0]).toContain("压缩指令")
+    // 压缩后：早先的用户输入随摘要移除（远消息完全抛弃），滑动窗口内的近期输入原样保留
+    const loaded = await s.store.load(s.session.id)
+    expect(loaded!.messages.some((m) => m.role === "user" && m.content === "问题 0")).toBe(false)
+    expect(loaded!.messages.some((m) => m.role === "user" && m.content === "问题 3")).toBe(true)
     cleanup(s.home)
   })
 

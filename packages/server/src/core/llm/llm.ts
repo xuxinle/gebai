@@ -305,6 +305,7 @@ function capabilities(config: ProviderConfig): LLMCapabilities {
     toolCalling: true,
     multimodal: config.multimodal,
     maxContextTokens: config.maxContextTokens,
+    maxOutputTokens: config.maxOutputTokens,
     model: config.model,
   }
 }

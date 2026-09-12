@@ -374,6 +374,9 @@ export interface LLMCapabilities {
   toolCalling: boolean
   multimodal: boolean
   maxContextTokens: number
+  /** 单次响应输出 token 上限（maxOutputTokens 配置值；未配置/测试替身缺省）：
+   *  上下文压缩的触发基准——窗口剩余必须足够支撑一次回复（见 DESIGN「上下文占用口径」）。 */
+  maxOutputTokens?: number
   /** 模型名（ProviderConfig.model；assistant 消息落盘携带供反馈关联，测试替身可缺省）。 */
   model?: string
 }

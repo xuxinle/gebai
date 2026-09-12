@@ -79,7 +79,11 @@ export interface SessionData {
    *  history.slice(ctxAtMessage) 估算基线之后的增量（下一次真实调用会用真值接管并重建基线）。 */
   ctxAtMessage?: number
   /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
+  /** 会话级运行时定义工具清单（js defineTool 注册，chat.json 持久化、重启恢复）：序列化定义。 */
   dynamicTools?: DynamicToolDef[]
+  /** 超限截断累计（chat.json 持久化）：因 300 条上限被丢弃的历史消息条数与最近一次时间戳。
+   *  loadHistory 据此在历史最前注入「历史裁剪」提示——模型于是知道更早内容已不在上下文中。 */
+  trimmed?: { count: number; at: number }
 }
 
 export interface EventSink {

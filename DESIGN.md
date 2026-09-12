@@ -422,7 +422,7 @@ class GebaiClient {
 - **任务级模型覆盖**：主模型与视觉模型配置（`GEBAI_LLM_*` 全套与 `GEBAI_VISION_*`）支持会话/任务级覆盖——启动时以进程环境变量固化基准配置（`core/llm/llm.ts` 的 `applyModelEnvOverrides`/`resolveVisionProvider`，boot/compose.ts 组装 `AgentEngineOptions.resolveProvider` 与 env 感知的视觉 getter），每次任务启动按合并后 env 解析 Provider（无覆盖键时沿用启动实例零开销）；覆盖项含模型名、接口地址、密钥、接口类型、上下文预算、多模态声明，未覆盖项继承启动配置；作用域覆盖主循环（含上下文压缩阈值/摘要与附件内联判定——**主动压缩（UI/REST 入口）未显式指定 Provider 时同样按合并后 env 解析**）与 `agent_run` 新会话执行
 - 多模态：`provider.chat()` 统一承载文本 + 图片/音视频消息，按 Provider/模型能力自动组装各自消息格式（统一内部图片块 `{type:"image", mime, data}` → OpenAI 系（chat/completions 与 Responses）`image_url` data URL / Anthropic base64 `image` 块）
 - **额外多模态（视觉）模型**：支持独立配置视觉模型（`GEBAI_VISION_*`，缺省继承主模型接口），供全局工具 `vision` 将图片文件交给视觉模型分析（目标 + 图片文件参数）；未配置时 `vision` 回落到主模型（须声明多模态能力）
-- **能力声明**：`LLMProvider.capabilities()` 返回 `{ streaming, toolCalling, multimodal, maxContextTokens }`，Agent 引擎据此决定：是否启用工具循环、附件降级策略、上下文占用判定（压缩阈值触发）
+- **模型能力声明**：`LLMProvider.capabilities()` 返回 `{ streaming, toolCalling, multimodal, maxContextTokens, maxOutputTokens }`——`maxOutputTokens`（单次响应输出上限）为上下文压缩的触发基准（窗口剩余必须足够支撑一次回复）；`maxContextTokens` 用于上下文占用判定
 - 通过 `GEBAI_MODE`（默认 `local`；兼容旧 `GEBAI_AUTH`，或 CLI `--server`）环境变量切换运行形态：
   - **本地模式**（默认）：无需登录，直接以 **admin 用户**身份工作（**管理员超级权限 + 路径沙箱豁免**，不受任何权限限制），数据仍按用户目录存储
   - **服务模式**：启用登录鉴权（用户名/密码），密码仅存**加盐哈希**（scrypt，不落明文），会话按用户隔离，多用户公用同一服务端；**开放注册**（注册用户恒为普通角色）；**admin 为特权用户**（不受用户权限限制），**唯一入口是 `GEBAI_ADMIN_PASSWORD_HASH`**（未配置时 admin 禁用，但普通用户可注册使用）
@@ -1701,25 +1701,32 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 #### 自动压缩
 
-- 触发条件：上下文接近窗口阈值（如 80%）时自动触发，无需人工干预
+- 触发条件：**窗口剩余不足以支撑一次回复**时自动触发，无需人工干预（不以窗口百分比判定——真正约束是「留给输出的空间」，输出上限由模型与配置（`GEBAI_LLM_MAX_OUTPUT_TOKENS`）决定，并非窗口的固定比例）
+- **压缩四原则**（用户口径，逐条落到 `planCompactRange` + `store.compactMessages`）：
+  ① **近消息是滑动窗口**：最近 `COMPACT_WINDOW_MESSAGES`（12 条，任意角色；上限为历史一半，避免短会话压不动；`GEBAI_COMPACT_WINDOW` 可调）永选进压缩区间，随新消息自然向前滑动；
+  ② **远消息用模型压缩、原消息完全抛弃**：区间取最早的连续一段（远的先压），区间内**除系统提示词以外**的消息（含用户输入、assistant、tool 结果）全部由摘要替换并**从上下文移除**——不残留原文（原文仍在会话记录 chat.json 中，UI 可查看、可回溯）；
+  ③ **压缩消息放到前面、保持远近顺序**：摘要恒为一条且置于消息数组**最前**，模型先读历史摘要再读近期原文，与近期消息不交错（越旧的信息越靠前）；
+  ④ **水位阈值之间压缩**：上水位（触发）= 剩余 < 输出预留（窗口 - 输入 < reserve）；下水位（目标）= 剩余 ≥ 输出预留 × 2 且输入不低于窗口 40%——在两个水位之间压缩，平衡语义保留与上下文空间（每次不压太多）
+- **系统提示词不要压缩**（原则 ④）：压缩区间只含可压缩消息（`isCompressibleMessage`）——**角色 system 的消息一律不进区间**，夹带时由 `compactMessages` 原位保留（主 system 段消息、子Agent 装载提示词均不被摘要替换）；缓存友好前缀请求会把它们作为主循环同前缀一并发给模型（前缀缓存匹配所需，模型只是重看一眼已看过的内容），但会话记录里的这些消息一字不改、位置不变
 - **上下文占用口径：只认模型服务返回的真实大小**（`input_tokens`，含 system 提示词与工具 schema，即「真上下文」）——压缩判定不依赖任何估算，估算容易误判（chars/4 对中文低估 2~4 倍、工具 schema 与图片块又难以折算），一律以接口真值为准：
-  - **跨 run**：上次任务最后一次调用返回的真实 `input_tokens` 持久化为基线（`SessionData.ctxInputTokens`）；下次 run 基线本身超阈值即先压缩（本次调用只会更大），不做增量估算
-  - **任务中途**：每轮调用返回的真实 `input_tokens` 超阈值（80%）时压缩最早历史（`makeContextRoom`），长任务不再等接口拒绝
+  - **跨 run**：上次任务最后一次调用返回的真实 `input_tokens` 持久化为基线（`SessionData.ctxInputTokens`）；下次 run 基线本身已致剩余不足一次回复即先压缩（本次调用只会更大），不做增量估算
+  - **任务中途**：每轮调用返回的真实 `input_tokens` 使窗口剩余 < 输出预留时压缩最早历史（`makeContextRoom`），长任务不再等接口拒绝
   - **溢出恢复**：接口以上下文长度错误拒绝（4xx = 真实大小的权威信号）时，压缩最早历史后重试（至多 3 次）——无基线会话首次调用即超窗也能收敛，不再任务失败
-  - 接口不返回 usage（或压缩替换消息导致索引锚点失效）时不估算预判，由本次调用的真值 / 溢出恢复接管；估算仅用于**展示**（会话列表 ctxTokens 增量补足，见常量表）
+  - 接口不返回 usage（或压缩替换消息导致索引锚点失效）时不估算预判，由本次调用的真值 / 溢出恢复接管；估算仅用于**压缩量规划**（`estimateMessageTokens`：需腾出多少空间→压缩多少条）与会话列表 ctxTokens 展示的增量补足
+  - **输出预留取值**（`outputReserveTokens`）：模型单次响应输出上限（能力声明 `maxOutputTokens`），未声明时缺省 16384，并夹在 `[1024, 窗口一半]` 内——预留不能超过窗口一半，否则小窗口模型会永远处于「剩余不足」而反复压缩
   - **提示词缓存命中度量（展示口径）**：usage 中的缓存命中字段统一提取为 `LLMUsage.cachedTokens`（OpenAI chat/responses 的 `prompt_tokens_details`/`input_tokens_details.cached_tokens` 已含在 input 内，Anthropic 的 `cache_read_input_tokens` 在 `input_tokens` 之外——pickUsage 折算并入 inputTokens 统一「cached ⊆ input」口径）；随真实 usage 基线同点位流转：每轮经 `event.session.ctx` 携带 `ctxCachedTokens` 推送、任务结束持久化为 `SessionData.ctxCachedTokens`（接口不返回缓存字段时 undefined，撤回/压缩清基线时一并清除），前端上下文圆环悬浮展示「缓存命中 tokens（占比）」。仅度量不改变请求构造——三家接口均未发送缓存控制标记（Anthropic `cache_control` / OpenAI 自动前缀缓存），命中率由服务端自动前缀缓存自然产生
 - 压缩策略（按序使用）：
   0. **超长用户输入落盘（预防）**：发送时超过阈值的用户输入自动全文写入会话 `tmp/user_inputs/{内容哈希}.txt`（原文不丢——文件面板可见、模型可经 `read` 工具读取全文；内容哈希去重，相同输入复用同一文件），消息正文保留头尾预览 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样不变，落盘失败降级为原样保留（不改变优先）
   1. **工具大输出截断**：工具返回超过截断阈值自动截取头尾摘要（**按行保留完整行**，避免切断半行/半条目；单行巨长如 minified 时该行按字符兜底），完整内容写入文件，截断消息中附带文件路径供大模型后续读取。**引擎兜底（不依赖工具自觉）**：工具未自行截断的超长输出，由引擎在主循环统一截断落盘——凡 `output` 超过截断阈值且未带 `truncated` 标记的结果，自动复用同一截断逻辑（含内容块保留），保证任何第三方/新工具都不会撑爆上下文；已自行截断的工具结果不重复处理
-  2. **旧消息摘要**：将最早一段历史消息由 LLM 生成摘要，替换原始消息，摘要保留关键信息。**系统提示词与用户输入不压缩不改变**（`isProtectedMessage`：user/system 角色消息与新会话执行存档）——不选进压缩区间、不进摘要输入、区间夹带时原位保留，压缩只作用于 assistant/tool 消息，压缩条数只计实际移除的消息
+  2. **旧消息摘要（压缩后置于消息数组最前，原消息完全抛弃）**：将最早一段历史消息（**除系统提示词以外全部**：用户输入/assistant/tool）由 LLM 生成摘要，摘要替换这些消息并从上下文中移除（**摘要恒为一条且位于消息数组最前**，不与近期原文交错；原文仍在会话记录中可回溯，UI 可查看）。摘要保留关键信息。**摘要输入优先用「缓存友好前缀请求」**：直接把与主循环**逐字节同前缀**的历史原文发过去（同一 system 提示词 + 同一段历史 + 同一批工具 schema，经 `loadHistory(upToIndex)` 渲染）+ 尾部压缩指令——服务端前缀缓存命中，已处理过的 token 按缓存价计（比把历史重写成骨架再发全价更便宜，且保留完整原文与工具调用史）；不可用时退回「骨架行 + 分块」：每条消息压成一行（assistant 工具调用轮 content 常为空——补上工具名与参数摘要，否则「调用过什么工具」在摘要里彻底消失；tool 结果带工具名与内容前段），单块输入上限 20000 字符、至多 6 块（总覆盖约 12 万字符），超出时**逐块摘要后合并**（map-reduce；单块失败跳过，不影响其余块）；总量超总预算时**头尾保留**（最早的任务背景与最新进度都进摘要）+ 中部省略说明行——不再按 20000 字符一刀切静默丢弃（52 万 token 窗口下一次压缩常覆盖 15 万字符以上，旧实现只有约 1/8 进摘要且无任何省略提示）。**滚动摘要合并**：压缩时既有摘要摘内容作为「此前摘要」并入新摘要并随新摘要替换（摘要恒为一条，不再随压缩次数累积）；**区间端点对齐 `assistant(toolCalls)/tool` 配对边界**（边界处的工具结果一并纳入，避免被当孤儿丢弃）；**摘要失败降级为骨架行**（角色 + 工具名/参数 + 内容首段，而非一句空占位），原文仍在会话记录中可查看。**系统提示词不可压缩**（`isCompressibleMessage`：仅 role=system 被排除；用户输入/assistant/tool/引擎注入消息均可压缩）——不选进压缩区间、区间夹带时原位保留；压缩条数只计实际移除的消息
   3. **滚动裁剪**：摘要仍超限时丢弃最早消息，保证最新上下文完整
-  4. **溢出硬护栏（压缩无法收敛时的最后防线）**：历史几乎全是用户输入/系统提示词（无可压缩内容）时，受保护消息让路——最旧用户消息的图片附件降级为文本说明（可用 vision/read 按需查看）、仍不够将最旧用户消息替换为裁剪占位（原文仍在 chat.json，UI 可查、不丢数据）；**最新一条用户消息（本次任务输入）永不裁剪**；压缩为**迭代执行**（run 前按基线迭代压缩直至收敛，任务中途/溢出恢复经 `makeContextRoom` 压缩 → 护栏降级两步腾挪）
+  4. **溢出硬护栏（压缩无法收敛时的最后防线）**：压缩无内容可压时（历史几乎全是系统提示词，或可压缩消息都在滑动窗口内）受保护消息让路——最旧用户消息的图片附件降级为文本说明（可用 vision/read 按需查看）、仍不够将最旧用户消息替换为裁剪占位（原文仍在 chat.json，UI 可查、不丢数据）；**最新一条用户消息（本次任务输入）永不裁剪**；压缩为**迭代执行**（run 前按基线迭代压缩直至收敛，任务中途/溢出恢复经 `makeContextRoom` 压缩 → 护栏降级两步腾挪）
   5. **历史图片内联窗口**：仅最近 3 组含图片的消息（用户图片附件与工具结果图片——read 读取的图片引用）内联进上下文，更早的图片降级为路径说明（图片永久占窗口且不参与压缩，长会话会被历史图片占死窗口）
   6. **LLM 流式读空闲超时**：SSE 建立后连续 120 秒无任何 chunk 判定接口假死，中止本次调用（无产出走重试、有产出上抛为任务错误）——此前网关/上游挂起会无限挂起任务
 - 压缩过程对用户透明，UI 显示压缩通知（压缩范围、摘要内容），原始消息可从会话文件回溯
 - 压缩后继续原任务流程，不影响进行中的工具调用循环
 
-> **实现**：已落地。`engine.compactSession()` 支持主动（`session.compact` / REST `POST /compact`，scope 指定区间）与自动触发（真实 usage 超窗口 80% 时压缩最早历史，触发口径见「上下文占用口径」）；摘要由 LLM 生成（**同样带读空闲超时与取消信号**（同 `chatWithIdleTimeout` 防假死）——压缩在任务流程内同步等待，无超时会把整个运行中任务永久挂死；失败降级为滚动裁剪占位），摘要消息持久化（`compacted`/`summary` 标记，UI 渲染为压缩通知，历史重载时作为 assistant 角色注入）；已压缩摘要消息不参与后续压缩。**手动压缩在会话有任务运行时被拒**（summarize 是秒级 LLM 调用，期间任务持续追加消息，陈旧压缩区间会套删未参与摘要的新落盘内容；自动压缩经 `internal` 标记在任务流程内自身协调，不受此限）。**超长用户输入落盘**（`spillLongUserInput`，run 发送时执行）：超阈值输入全文写入会话 `tmp/user_inputs/`，消息正文保留头尾 + 文件引用。**压缩不碰系统提示词与用户输入**（`isProtectedMessage`：user/system 角色 + 新会话执行存档）——不选进压缩区间、不进摘要输入（摘要只覆盖将被移除的 assistant/tool 消息）、区间夹带时由 `store.compactMessages` 原位保留不移动（装载提示词是会话恢复的关键记录，用户输入是原始上下文基准，压缩过程中完全不受影响）；区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）；`compactMessages` 的压缩条数只计实际移除消息数。超限截断（`trimToCacheLimit`，300 条上限）同样保护：受保护消息原位保留、从最早的其他消息开始丢弃，受保护消息本身超上限时按原样保留（软上限，不改变优先），丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），实际保留条数可略低于上限；截断保护同上（`compacted`/`loadedAgent`/用户输入消息在超限截断中原位保留、不重排）。**配对完整性修复（`repairToolPairing`）**：任务取消中断、压缩/截断边界或旧版本缺陷仍可能产生「孤儿 tool 结果」（发起 assistant 已删）或「未应答 toolCalls」（结果缺失）——严格校验的接口（OpenAI tool_calls/tool、Anthropic tool_use/tool_result 配对）会拒绝整个请求，会话自此每次运行 400 卡死。修复分层落地：① 引擎工具循环取消/异常路径为本轮全部 toolCalls 补写占位结果（assistant 先落盘后执行的中断不再缺结果）；② 存储层 `compactMessages` 压缩后、`readFileByPath` 磁盘装载时即时修复（孤儿普通 tool 丢弃、孤儿受保护 tool（agent_run 存档）补最小 assistant 桩、中途未应答补占位结果；尾部未应答**不在存储层 flush**——正常执行流 assistant 先落盘结果随后到达，提前 flush 会让真实结果反被判孤儿丢弃）；③ `llm.ts` 三家序列化入口兜底（含尾部 flush + Anthropic 相邻同角色 user 消息合并），旧版本已损坏的会话在下一次模型调用自愈。压缩替换消息后真实 usage 基线的索引锚点失效：`store.compactMessages` 自动清除 `ctxInputTokens`/`ctxAtMessage`，压缩判定改由下一次真实调用重建真值。**压缩迭代 + 溢出护栏 + 中途压缩 + 溢出恢复 + 读空闲超时均已落地**（`engine.ts`：`makeContextRoom`/`degradeProtectedMessages`/`callModelWithOverflowRecovery`/`isContextOverflowError`/`chatWithIdleTimeout`；图片内联窗口 `INLINE_IMAGE_RECENT=3` 作用于 `loadHistory`）。
+> **实现**：已落地。`engine.compactSession()` 支持主动（`session.compact` / REST `POST /compact`，scope 指定区间）与自动触发（**窗口剩余 < 输出预留**时压缩、消息数达会话上限 80%（240 条）时预防性压缩，触发与目标口径见「上下文占用口径」与「常量参考」）；摘要由 LLM 生成，**首选「缓存友好前缀请求」**：直接把与主循环**逐字节同前缀**的历史原文（同一 system 提示词、同一段历史、同一批工具 schema，经 `loadHistory(upToIndex)` 渲染）加上尾部压缩指令发给模型（`CACHE_PREFIX_INSTRUCTION`）——服务端前缀缓存（OpenAI 自动前缀缓存 / DeepSeek 上下文缓存 / 智谱・千问等同机制）因此**命中**，已处理过的 token 按缓存价计（多数服务商 10%~50%），且无需把消息重写成骨架（保留完整原文与工具调用史，摘要信息量更高）；不可用时退回「骨架行 + 分块」路径：前缀装不下（`estimateMessageLikeTokens` 超 `窗口 - 8192`）、前缀内有既有摘要无法吸收、上次同模型调用未命中缓存（`usage.cachedTokens=0`，按 provider+model 记忆，不白付全价）、空文本/接口异常。`GEBAI_COMPACT_CACHE_PREFIX` 可强制开关（0/off 强制骨架、1/on 强制原文前缀、缺省自适应）。摘要调用同样带读空闲超时与取消信号（同 `chatWithIdleTimeout` 防假死）——压缩在任务流程内同步等待，无超时会把整个运行中任务永久挂死；失败降级为骨架行占位（保留被裁剪内容的工具/文件脉络，而非一句空话）。摘要消息持久化（`compacted`/`summary` 标记，UI 渲染为压缩通知，历史重载时作为 **user 角色**注入且置于历史最前）；已压缩摘要消息不重复保留（压缩时既有摘要内容作为「此前摘要」并入新摘要输入、随新摘要替换——长会话摘要恒为一条且始终在数组最前）。**手动压缩在会话有任务运行时被拒**（summarize 是秒级 LLM 调用，期间任务持续追加消息，陈旧压缩区间会套删未参与摘要的新落盘内容；自动压缩经 `internal` 标记在任务流程内自身协调，不受此限）。**超长用户输入落盘**（`spillLongUserInput`，run 发送时执行）：超阈值输入全文写入会话 `tmp/user_inputs/`，消息正文保留头尾 + 文件引用。**压缩只不碰系统提示词**（`isCompressibleMessage`：仅 role=system 被排除；用户输入/assistant/tool/引擎注入提醒均可压缩）——系统提示词消息（含装载提示词）不选进压缩区间、区间夹带时由 `store.compactMessages` 原位保留不移动；缓存友好前缀请求会把系统提示词作为**主循环同前缀**一并发给模型（前缀缓存匹配所需），但**会话记录里它一字不改、位置不变**；区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）；`compactMessages` 的压缩条数只计实际移除消息数。超限截断（`trimToCacheLimit`，300 条上限）同样保护：受保护消息原位保留、从最早的其他消息开始丢弃，受保护消息本身超上限时按原样保留（软上限，不改变优先），丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），实际保留条数可略低于上限；截断保护同上（`compacted`/`loadedAgent`/用户输入消息在超限截断中原位保留、不重排）。**配对完整性修复（`repairToolPairing`）**：任务取消中断、压缩/截断边界或旧版本缺陷仍可能产生「孤儿 tool 结果」（发起 assistant 已删）或「未应答 toolCalls」（结果缺失）——严格校验的接口（OpenAI tool_calls/tool、Anthropic tool_use/tool_result 配对）会拒绝整个请求，会话自此每次运行 400 卡死。修复分层落地：① 引擎工具循环取消/异常路径为本轮全部 toolCalls 补写占位结果（assistant 先落盘后执行的中断不再缺结果）；② 存储层 `compactMessages` 压缩后、`readFileByPath` 磁盘装载时即时修复（孤儿普通 tool 丢弃、孤儿受保护 tool（agent_run 存档）补最小 assistant 桩、中途未应答补占位结果；尾部未应答**不在存储层 flush**——正常执行流 assistant 先落盘结果随后到达，提前 flush 会让真实结果反被判孤儿丢弃）；③ `llm.ts` 三家序列化入口兜底（含尾部 flush + Anthropic 相邻同角色 user 消息合并），旧版本已损坏的会话在下一次模型调用自愈。压缩替换消息后真实 usage 基线的索引锚点失效：`store.compactMessages` 自动清除 `ctxInputTokens`/`ctxAtMessage`，压缩判定改由下一次真实调用重建真值。**压缩迭代 + 溢出护栏 + 中途压缩 + 溢出恢复 + 读空闲超时均已落地**（`engine.ts`：`makeContextRoom`/`degradeProtectedMessages`/`callModelWithOverflowRecovery`/`isContextOverflowError`/`chatWithIdleTimeout`；图片内联窗口 `INLINE_IMAGE_RECENT=3` 作用于 `loadHistory`）。**摘要输入保真与滚动合并**（`compressor.ts`：`summarizeMessageLine` 工具调用骨架、`buildSummaryChunks` 分块与头尾保留、`summarizeFallback` 骨架降级、`summarize` 的 map-reduce 与合并、`compactSession` 的既有摘要吸收与区间配对对齐）；**输出预留驱动的压缩规划**（`outputReserveTokens` + `lacksOutputRoom` + `planCompactRange`：触发看「窗口剩余是否还够一次回复（maxOutputTokens）」，目标为「剩余 ≥ 输出预留 × 2」且不低于窗口 40%（**水位区间压缩**），压缩区间不越**近消息滑动窗口**（最近 12 条消息，`COMPACT_WINDOW_MESSAGES`/`GEBAI_COMPACT_WINDOW` 可调，上限为历史一半；**有真实占用基线时窗口仅为保底下限**——压多少由水位算出的需腾出量决定），需腾出量按 `estimateMessageTokens` 逐条累计——确保「最近的保留、远的先压、每次不压太多」）；**条数触发的预防性压缩**（`engine.needsCountCompaction`：run 前消息数达会话上限 80%（240）且可压缩消息 ≥40 时压缩；单次 run 内消息数达 260 时中途腾挪——大窗口模型下 token 口径可能晚于条数上限到达，而截断不发摘要）；**截断记录与提示**（`SessionData.trimmed` + `loadHistory` 注入「[历史裁剪]」提示，模型知道更早内容已不在上下文中，而不会把历史从中间开始当作完整历史）；**溢出护栏降级可见**（`degradeProtectedMessages` 经 `event.message.compact` 发布 `degraded` 事件，UI 显示上下文为何变化）。
 
 #### 主动压缩
 
@@ -1822,7 +1829,7 @@ interface ChatChunk {                   // 流式输出单元
 }
 
 // 补充语义：
-// - `reasoning`：推理内容增量（reasoning_content / thinking），前端流式推理中展开实时展示、推理完成（正文开始/流结束）自动折叠，可手动展开；**内容 markdown 完整渲染**（与正文同路径节流渲染，低性能模式合并 120ms）；推理内容超出可视高度（`.reasoning-body` 限高 200px）时内部滚动条自动跟随最新内容，用户上翻翻阅历史不打扰（`reasoning-scroll.ts`）；
+// - `reasoning`：推理内容增量（reasoning_content / thinking），前端渲染为折叠推理块：思考中默认展开实时展示（推理内容可见），推理段结束（正文开始/工具调用封段/流结束）自动折回收起态，用户可点 summary 重新展开；**内容 markdown 完整渲染**（与正文同路径节流渲染，低性能模式合并 120ms）；推理内容超出可视高度（`.reasoning-body` 限高 200px）时内部滚动条自动跟随最新内容，用户上翻翻阅历史不打扰（`reasoning-scroll.ts`）；
 //   推理**持久化为独立字段**（`Message.reasoning`，content 保持纯正文；历史会话/切回可见，前端默认折叠可展开，内容同样 markdown 渲染），**回放给 LLM 时不携带**（`loadHistory` 仅映射 content——推理绝不进模型上下文）；旧版数据推理内嵌 content 的 `<think>` 块：前端回退解析展示、回放时 `stripThinkTags` 剥离（兼容，不做数据迁移）
 // - `text`：文本增量；**携带 `session: true` + `sessionRunId` 表示文本来自新会话执行过程**（agent_run 派生会话流式回复），前端渲染进该 run 的折叠容器（见下）
 // - `session_start`：新会话 run 开始（携带 runId + agents/input），前端创建折叠容器——执行中**展开并滚动到可见**；服务端**每轮重推**（同 runId 幂等，前端容器已存在则忽略），前端容器随消息重载丢失（切走会话/断线重连）后新一轮 delta 前可据此重建；分支运行的 start 携带 `branch`/`model`（容器标题「🌿 分支 · 名（模型）」）
@@ -2164,7 +2171,7 @@ WebSocket 消息格式（JSON）：
 |------|------|
 | `event.message.delta` | LLM 文本增量（流式）；子Agent 执行过程的文本增量携带 `session: true` + `sessionRunId`（前端渲染进子Agent 折叠容器）；`messageId` 每轮刷新（引擎每轮生成新 id），前端据此检测轮界——主循环 text 路径与新会话容器均按 id 变化封段（后台会话工具事件不渲染卡片从而不在工具调用处封段，轮界检测是唯一分段保障） |
 | `event.message.done` | 一条完整消息生成完成（子Agent 轮的 done 同样携带 `session: true` + `sessionRunId`） |
-| `event.message.reasoning` | 推理内容增量（reasoning_content/thinking，前端流式推理中展开实时展示、推理完成自动折叠）；子Agent 执行过程的推理增量携带 `session: true` + `sessionRunId` |
+| `event.message.reasoning` | 推理内容增量（reasoning_content/thinking，前端思考中展开实时展示、推理段结束自动折叠）；子Agent 执行过程的推理增量携带 `session: true` + `sessionRunId` |
 | `event.session.start` | 新会话 run 开始（含 runId + agents 列表 + input + depth；**每轮重推、同 runId 幂等**——前端容器已存在则忽略，容器随消息重载丢失后据此重建）；分支运行（branch_run）携带 `branch`（分支名）+ `model`（模型路由名，未指定缺省），前端容器标题渲染「🌿 分支 · 名（模型）」 |
 | `event.session.done` | 新会话 run 结束（含 runId + agents + output[最终返回]；异常时 output 为空并携带 error），前端折叠容器并写入返回摘要；分支运行携带 `branch` 标识 |
 | `event.branch.merged` | 分支报告合入主上下文（branch_run 分支**最终合并**与运行中 `branch_sync` 交出 content 的**阶段性合入**均推送，含 messageId/branchId/name/model/text[合并消息全文]）：前端实时渲染「分支合入」通知条（消息落盘 `role: "user"` + `engineNote: "branch"`；历史回放由存储中的合并消息承担——最终合并含过程存档折叠容器，阶段性合入仅文本） |
@@ -2575,10 +2582,12 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 浏览器请求拦截规则 | 32 条/会话 | `reverse_site_route` 拦截规则上限（超出提示先 clear；上下文重建后自动重挂） |
 | 浏览器响应体提取上限 | 20MB | `capture_body` 完整响应体落盘上限（文本预览 200KB 截断，超长/二进制走 file 参数直接写盘）；透明浏览器代理（`GEBAI_BROWSER_PROXY`）的单响应体临时文件中转同限，单次代理请求超时 110s |
 | 浏览器对话框/下载记录 | 100 条/会话 | dialog 记录（list 默认返回最近 50）与下载记录上限（下载文件保留在系统临时目录，仅记录淘汰） |
-| 上下文压缩阈值 | 窗口的 80% | 达到后自动触发上下文压缩（见「上下文保护」） |
-| 上下文占用口径 | 模型服务返回的 usage 真值 | 压缩判定只认接口返回的 `input_tokens`（含 system 提示词与工具 schema）：run 前按上次调用持久化基线、任务中途按每轮真实 usage（80% 阈值触发压缩）、接口上下文长度 4xx 拒绝时压缩重试（溢出恢复）；接口不返回 usage 时不估算预判（由真值/溢出恢复接管）。估算（`estimateCharsTokens`，CJK 约 1 token/字、ASCII 约 4 字符/token）仅用于会话列表 ctxTokens 展示的增量补足（见「上下文保护」）。缓存命中（`cachedTokens`/`ctxCachedTokens`）为纯展示口径，随 usage 基线同点位建立/清除（见「自动压缩」的缓存命中度量） |
-| 压缩保留最近比例 | 50% | 主动/自动压缩默认保留最近一半可压缩消息，保证最新上下文完整 |
-| 摘要输入/输出上限 | 20000 / 2000 字符 | LLM 摘要请求的输入裁剪长度与输出上限 |
+| 上下文压缩触发 | 窗口剩余 < 一次回复的输出预留 / 240 条 | **不以窗口百分比判定**——真正约束是「留给输出的空间」：窗口剩余（`maxContextTokens - 最近一次真实 input tokens`）不足以支撑一次回复（输出预留 = 模型单次响应输出上限 `maxOutputTokens`，即 `GEBAI_LLM_MAX_OUTPUT_TOKENS`；未声明时缺省 16384，并夹在 `[1024, 窗口一半]` 内）时触发压缩（`outputReserveTokens`/`lacksOutputRoom`）。② **条数口径**：消息数达会话上限（300）的 80%（`COMPACT_MESSAGE_TRIGGER`=240）且可压缩消息 ≥40（`COMPACT_MIN_COMPRESSIBLE`）时 run 前预防性压缩，**单次 run 内**内存消息列表长度 ≥ 260（`COMPACT_COUNT_SLACK`）时中途腾挪（否则本轮工具结果会把会话推过 300 条硬截断）——大窗口模型下 token 口径可能晚于条数上限到达，而条数超限截断不发摘要（见「上下文保护」） |
+| 上下文压缩目标 | 剩余 ≥ 输出预留 × 2 且输入不低于窗口 40%（下水位） | **水位区间压缩**：上水位（触发）= 剩余 < 输出预留（见上行）；下水位（目标）= `max(窗口 × 40%, 窗口 - 输出预留 × 2)`（`COMPACT_FLOOR_RATIO`/`COMPACT_TARGET_RESERVE_MULTIPLE`）——需腾出量 = 当前占用 - 目标输入（并受「不降到 40% 以下」上限约束），按 `estimateMessageTokens` 逐条累计（压多少算多少，不一次压太多）；基线已低于目标（如接口已报溢出）时只最小腾挪窗口 5%（`COMPACT_MIN_ROOM_RATIO`） |
+| 上下文压缩可压缩口径 | 除系统提示词外全部 | `isCompressibleMessage`：**仅 role=system 不可压缩**（系统提示词/装载提示词区间夹带时原位保留）；用户输入、assistant、tool 结果、引擎注入提醒进区间后被摘要替换并**完全移除**（滑动窗口内的近消息不入区间）；新会话执行存档（session/subAgent 标记）不进主上下文也不动。与超限截断口径（`isProtectedMessage`：user/system/存档不做无摘要丢弃）分开 |
+| 上下文占用口径 | 模型服务返回的 usage 真值 | 压缩判定只认接口返回的 `input_tokens`（含 system 提示词与工具 schema）：run 前按上次调用持久化基线、任务中途按每轮真实 usage（窗口剩余 < 输出预留时压缩，见上行）、接口上下文长度 4xx 拒绝时压缩重试（溢出恢复）；接口不返回 usage 时不估算预判（由真值/溢出恢复接管）。估算（`estimateCharsTokens`，CJK 约 1 token/字、ASCII 约 4 字符/token）用于压缩量规划（`estimateMessageTokens`）与会话列表 ctxTokens 展示的增量补足（见「上下文保护」）。缓存命中（`cachedTokens`/`ctxCachedTokens`）为纯展示口径，随 usage 基线同点位建立/清除（见「自动压缩」的缓存命中度量） |
+| 压缩保留最近下限 | **滑动窗口 12 条消息**（任意角色） | 近消息窗口（`COMPACT_WINDOW_MESSAGES`，`GEBAI_COMPACT_WINDOW` 可调）：最近这么多条消息永不进压缩区间（原样保留），随新消息自然向前滑动；上限为历史一半（`floor(len/2)`）——否则短会话永远压不动。有真实占用基线时窗口仅为**保底下限**（压多少由水位算出的需腾出量决定，实际会话一般不会触及窗口）；无基线（老会话/接口不返回 usage/窗口未知）时退保守口径：只压掉窗口外可压缩消息的一半 |
+| 摘要输入/输出上限 | 单块 20000 / 总覆盖 12 万 / 输出 2000 字符；请求预留 8192 tokens | **首选缓存友好前缀请求**（与主循环逐字节同前缀的原文 + 尾部压缩指令，不分块；装不下时才算超预算）；骨架路径：单块输入预算（`SUMMARY_INPUT_LIMIT`）、块数上限 6（`SUMMARY_MAX_CHUNKS`，超出时头尾保留 + 中部省略说明）、输出上限（`SUMMARY_OUTPUT_LIMIT`）、单条骨架 600 字符（`SUMMARY_ITEM_LIMIT`）、降级骨架 15 行 × 120 字符（`SUMMARY_FALLBACK_LINES`/`SUMMARY_FALLBACK_ITEM_LIMIT`）；前缀请求可行性预判用 `SUMMARY_OUTPUT_RESERVE_TOKENS`（8192：摘要输出 + 工具 schema 段开销）
 | 工具调用轮次上限 | 不限制 | 单次任务内模型工具调用轮次无上限（超长任务不截停）；失控防护由重复检测终止/用户取消/上下文压缩承担，`rounds` 仅计数回传 |
 | 重复检测窗口 | 最近 8 次调用 | 工具调用签名（工具名+参数 JSON）滚动窗口（`MAX_REPEAT_WINDOW`） |
 | 重复检测命中阈值 | 连续 3 次 | 窗口**尾部连续**出现相同签名第 3 次（其间无任何其他调用）才判定为无效重复，中断该次执行并注入引导提示（`MAX_REPEAT_HITS`）；间隔其他调用后重发同签名不累积（「改动后复查」合法）；**同批重复签名只记录一次**（同批相同调用是有意扇出，跨轮连续重发才累积） |
@@ -2609,7 +2618,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 反馈数据保留期 | 180 天 | `feedback/` 反馈保留时长（已实现） |
 | 会话闲置过期 | 90 天 | 无活跃会话归档到 `trash/` 的时间（按 `chat.json` mtime 判定，已实现） |
 | GC 周期 | 24 小时 | 数据生命周期清理任务执行周期（启动时立即执行一次） |
-| 消息缓存上限 | 300 条 | 会话消息持久化上限（超限截断丢最早的非保护消息，按 tool_call 配对原子丢弃；系统提示词/用户输入/存档消息原位保留，见「上下文保护」） |
+| 消息缓存上限 | 300 条 | 会话消息持久化上限（超限截断丢最早的非保护消息，按 tool_call 配对原子丢弃；系统提示词/用户输入/存档消息原位保留，见「上下文保护」）。**截断丢弃条数累计入 `SessionData.trimmed`**，`loadHistory` 据此在历史最前注入「[历史裁剪]」提示（模型知道更早内容已被裁剪，而非把历史从中间开始当完整历史）；run 前条数触发的预防性压缩（240 条）尽量让截断不发生 |
 | 桌面固定端口 | 47896 | 桌面形态默认监听端口（`DESKTOP_PORT`，见「端口固定」） |
 | Session 缓存 LRU | 10 个 | 会话列表 LRU 驱逐上限 |
 | 截断内容哈希 | SHA256 | 基于完整返回内容计算，用于去重和文件命名 |
@@ -2632,7 +2641,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | wait_for 轮询默认 | 超时 20s（上限 120）/ 间隔 2s / 变化判定差 2/255 | desktop_wait_for 默认参数（timeout_s/interval_s 可调）；change 模式灰度采样均差超阈值判定画面变化，超时不视为错误并返回最后观察状态 |
 | LLM 流式读空闲超时 | 120 秒 | SSE 建立后连续无 chunk 判定接口假死中止本次调用（`LLM_IDLE_TIMEOUT_MS`，测试可注入 `llmIdleTimeoutMs`） |
 | 模型单次响应输出上限 | anthropic 缺省 8192 / 其余接口缺省 | 单次响应输出 token 上限（`GEBAI_LLM_MAX_OUTPUT_TOKENS` 启动/任务级可配）：输出超限截断由引擎检测（`length`/`max_tokens`/Responses `incomplete`）并抢救落盘 + 引导 `write append` 分段续写（见「核心Agent流程」大文件分段写入与截断抢救）；Anthropic 接口强制要求 `max_tokens` 故有内置缺省 |
-| 溢出护栏裁剪下限 | 500 字符 | 用户消息超过该长度才可被护栏裁剪为占位（短消息裁剪无收益；最新一条用户消息永不裁剪） |
+| 溢出护栏裁剪下限 | 500 字符 | 用户消息超过该长度才可被护栏裁剪为占位（短消息裁剪无收益；最新一条用户消息永不裁剪）；**每次降级经 `event.message.compact` 发布 `degraded` 事件**（UI 可见上下文为何变化，不再只写 console.warn） |
 | agent_run 子Agent 上限 | 5 个 | 单次新会话执行可预加载的子Agent 数量上限（去重后判定，`MAX_AGENTS_PER_RUN`） |
 | WS 事件日志持久化 | `users/{user}/ws-journal.jsonl` | 日志尾部 JSONL 追加持久化（每 2000 条重写裁剪），重启后 seq 连续 |
 | delta 合并窗口 | 50ms / 200KB 上限 | 同一消息的连续文本增量合并为单条日志事件（`DELTA_MERGE_MS`/`DELTA_MERGE_MAX_CHARS`） |

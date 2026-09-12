@@ -196,12 +196,13 @@ describe("SessionStore context tokens", () => {
     cleanup(home)
   })
 
-  test("compactMessages 区间内仅剩受保护消息时不做改动（不创建摘要、保留 usage 基线）", async () => {
+  test("compactMessages 区间内仅剩系统提示词时不做改动（不创建摘要、保留 usage 基线）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-ctx-"))
     const store = new SessionStore({ home })
     const session = await store.createSession("default")
+    // 区间内只有 system 消息（系统提示词不压缩）→ 无可压缩内容
     for (let i = 0; i < 4; i++) {
-      await store.appendMessage(session.id, { id: crypto.randomUUID(), role: "user", content: `q${i}`, createdAt: Date.now() })
+      await store.appendMessage(session.id, { id: crypto.randomUUID(), role: "system", loadedAgent: "code", content: `p${i}`, createdAt: Date.now() })
     }
     const loaded = await store.load(session.id)
     loaded!.ctxInputTokens = 1234
@@ -209,7 +210,7 @@ describe("SessionStore context tokens", () => {
     await store.save(loaded!)
     await store.compactMessages(session.id, "default", { from: 0, to: 2, summary: "摘要" })
     const after = await store.load(session.id)
-    expect(after!.messages).toHaveLength(4) // 用户输入不改变
+    expect(after!.messages).toHaveLength(4) // 系统提示词不压缩
     expect(after!.ctxInputTokens).toBe(1234) // 消息未被替换：基线锚点仍有效
     cleanup(home)
   })
@@ -513,7 +514,7 @@ describe("SessionStore 装载提示词消息保护", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("compactMessages 区间内系统提示词与用户输入原位保留（不随压缩替换丢失）", async () => {
+  test("compactMessages 系统提示词原位保留（用户输入随区间被摘要替换）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-store-compact-load-"))
     const store = new SessionStore({ home })
     const session = await store.createSession("default")
@@ -524,18 +525,18 @@ describe("SessionStore 装载提示词消息保护", () => {
     for (let i = 6; i < 10; i++) {
       await store.appendMessage(session.id, { id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 2 } as never)
     }
-    // 压缩中间区间（含系统提示词与用户输入）：原位保留，仅 assistant 消息并入摘要
+    // 压缩中间区间（含系统提示词与用户输入）：系统提示词原位保留，其余（含用户输入）并入摘要
     await store.compactMessages(session.id, "default", { from: 1, to: 9, summary: "压缩摘要" })
     const loaded = await store.load(session.id)
     expect(loaded!.messages.some((m) => m.loadedAgent === "code")).toBe(true)
-    // 区间内的用户输入全部原位保留（不压缩不改变）
-    for (let i = 1; i < 6; i++) expect(loaded!.messages.some((m) => m.id === `m-${i}` && m.content === `msg ${i}`)).toBe(true)
-    // 区间内的 assistant 消息被摘要替换（m-6/m-7 在区间内；m-8/m-9 区间外保留）
+    // 区间内的用户输入（m-1..m-5）已被摘要替换并移除（远消息完全抛弃）
+    for (let i = 1; i < 6; i++) expect(loaded!.messages.some((m) => m.id === `m-${i}`)).toBe(false)
+    // 区间内的 assistant 消息同被摘要替换（m-6/m-7 在区间内；m-8/m-9 区间外保留）
     expect(loaded!.messages.some((m) => m.compacted)).toBe(true)
     expect(loaded!.messages.some((m) => m.id === "m-6" || m.id === "m-7")).toBe(false)
     expect(loaded!.messages.some((m) => m.id === "m-8")).toBe(true)
-    // 摘要计数 = 实际移除条数（2 条 assistant）
-    expect(loaded!.messages.find((m) => m.compacted)!.summary).toContain("已压缩 2 条")
+    // 摘要计数 = 实际移除条数（区间内 5 条 user + 2 条 assistant）
+    expect(loaded!.messages.find((m) => m.compacted)!.summary).toContain("已压缩 7 条")
     rmSync(home, { recursive: true, force: true })
   })
 
