@@ -716,6 +716,27 @@ Ctrl+Shift+E 仍能开关分屏；控制台零错误
 > 一个提醒自己的教训：这一轮我最先报给用户的「8.0 秒」是**测量方法造成的假象**（固定 sleep 计入）。
 > 把计时改成「点击 → 轮询到目标元素出现」之后，同一操作是 571ms。**测量脚本本身也会撒谎。**
 
+### 5.17 终端面板（底部工具窗第二视图）+ Git 面板细节收口
+
+**终端（新增能力）**
+
+- **位置**：与 Git 面板**同槽**——同一个 `.fw-git-dock`、同一高度变量（`--git-dock-h`）与拖拽条；两个面板实例都常驻，切换只切 `.fw-dock-hidden` 类，因此 Git 的滚动位置与终端的滚动缓冲/会话都不会丢。入口：活动栏「终端」按钮（`icon('terminal')`）、`Ctrl+Alt+T`；可见性与当前视图存 `gebai.ui.dockVisible` / `gebai.ui.dockView`（无记忆时按窗口宽度，<1180px 默认收起）。
+- **后端**：`core/exec/term-session.ts`（`TerminalService`：会话表 + 有界滚动缓冲 + 哨兵解析 + 中断/回收）+ `routes/terminal.ts`（7 个端点，见设计稿 3.4）；配置 `GEBAI_TERMINAL` / `GEBAI_TERMINAL_SHELL`；沙箱非豁免用户 403、只读模式拒绝执行、每条命令写 `term.exec` 审计。
+- **前端**：`files/terminal-core.ts`（ANSI SGR / `\r` `\b` `\t` / TermBuffer / 历史，纯函数可测）+ `files/terminal.ts`（多会话标签、输入行 + ↑↓ 历史 + Ctrl+C/Ctrl+L、250ms 增量轮询、回到底部、跟随根）+ `css/terminal.css`（独立文件，与 files.css 分开以免互撞）。
+- **中文命令为什么要落盘执行**：cmd / PowerShell 从**管道**读 stdin 时按控制台 OEM/ANSI 代码页解析，UTF-8 的中文命令会被解成乱码（cmd 会停在 `More?` 未闭合状态并退出 shell）；因此含非 ASCII 的命令落成会话私有临时脚本（`{tmp}/gebai-term/{id}/cN.cmd|ps1`，UTF-8）再以 `call "…"` / `& "…"` 执行（PowerShell 会话启动时另按进程级执行策略 Bypass）。脚本随会话关闭/回收清理，最多保留最近 20 个。
+
+**Git 面板细节**
+
+- **日志刷新与续页**：`doRefresh` 每次重置到首页（提交后 / F5 能看到新历史），首页与现有列表一致时不重建 DOM；滚动到底自动续页（监听真正的滚动容器）；日志加载带代际号 + 根比对，切根后旧响应被丢弃。
+- **状态失败与「不是仓库」分开**：新增 `state.gitStatusError`，面板给可重试的故障态（不再摆出「初始化仓库」入口），状态栏给可点击重试的提示项。
+- **在途反馈**：`createOpRunner` 新增 `onBusy` 回调，标题栏显示「抓取远程…」等中文进度，远程动作按钮在途禁用；写操作失败详情多带几行（原先前端只取前 3 行）。
+- **栏内状态**：分支 / 标签 / 暂存 / 远程四栏都补了加载中与读取失败（含重试）+ 空态，重建内容时保留滚动位置。
+- **日志过滤**：按文件（资源管理器 / 变更面板 / 提交内容右键「在日志中筛选」）、按作者（日志行右键）、关键字；过滤条常驻不重建（保住输入与焦点），过滤芯片逐项可清。
+- **可达性与拖动**：列表行 `tabindex` + `role=button` + Enter/Space；三栏分界条改为 Pointer Capture + rAF 合并，可聚焦并用 ←/→ 调宽，窗口 resize 后重新夹宽度（并修了 `which === "a" ? total - 380 : total - 380` 这类两个分支相同的笔误与 min-width 不一致）。
+- **菜单与入口补全**：日志行「检出此提交（分离 HEAD）」「只看某作者的提交」；分支行「删除远程分支」「复制提交哈希」；标签行「在日志中查看」「推送全部标签到远程」；远程行「抓取该远程」「复制推送地址」；暂存行单击改双击（避免误触 pop）。编辑器标签工具条新增 **blame 开关**（服务端 `/git/blame` 与行装饰早已就位，只是没有入口），编辑态禁用。
+- **后端补全**：`GitService.branchOp` 支持远程分支删除（`git push <remote> --delete <branch>`，走 `assertRemote`）。
+- **契约清理**：`api.gitStatus` 去掉不存在的 `path` 参数、`api.gitFileDiff` 去掉被后端忽略的 `staged`。
+
 ### 5.18 分屏停靠侧左右互换 + 折叠按钮朝向 + 折叠/展开过渡（第十八轮：三项反馈）
 
 #### ① 会话与文件左右互换（分屏停靠侧）
@@ -807,6 +828,14 @@ GET  /api/v1/git/refs?root&recent              分支/标签/最近提交/HEAD
 GET  /api/v1/git/branches|tags|remotes|stash|blame|conflicts|commit-detail…
 POST /api/v1/git/{stage,unstage,discard,commit,branch,tag,checkout,merge,rebase,
                  cherry-pick,revert,reset,stash,remote,fetch,pull,push,init}
+
+GET  /api/v1/terminal/info                终端能力（开关/沙箱/只读/shell 清单/上限）
+POST /api/v1/terminal/create              创建持久 shell 会话（root + 根内 cwd + shell）
+POST /api/v1/terminal/input               {id, data, exec}：写命令（追加哨兵行）或原样写 stdin
+GET  /api/v1/terminal/read?id&since       增量输出（哨兵行已剥离）+ 退出事件 + 存活标记
+POST /api/v1/terminal/interrupt           终止当前命令并以原 cwd 重建 shell
+POST /api/v1/terminal/close               关闭会话（幂等）
+GET  /api/v1/terminal/list                会话清单
 ```
 
 所有写操作返回 `{ ok, …结果, backupRef? }`；错误统一 `{ error, code }`，前端 toast + 可展开详情。
@@ -820,6 +849,7 @@ POST /api/v1/git/{stage,unstage,discard,commit,branch,tag,checkout,merge,rebase,
   - `packages/server/src/core/git/service.test.ts`（14 例）：提交↔提交（含反向）、提交↔工作区、提交↔暂存区、暂存区↔工作区、工作区↔历史提交、分支 mergeBase、`contentAt` 三端点、`fileDiff`、`refs/status/log`、非仓库错误。
 - **真实浏览器冒烟**（Playwright，`/files`）已验证：外壳渲染、目录展开、Monaco 打开（行 DOM + 语法 token）、查看↔编辑切换、状态栏、Git 面板六视图、分支列表、比较视图（整仓库 11 个差异文件）、Monaco 并列差异渲染、端点选择器分组、日志 60 条、提交↔提交对比；此后逐轮增补：深层链接 4 场景、冲突合并 7 步（真实冲突仓库）、树 Git 装饰与下划线（含 A/B 像素测量）、工具窗拖高/收展/编辑器重排、三栏分界拖动、左侧变更面板与互斥、URL 四步（进目录/开文件/刷新/后退）、**主题共用双向跟随**、**控制台零错误**。
 - **全量回归**：`bun run test`（server 全套 500+ 用例）、`bunx tsc --noEmit`（web/server）、`bun run --cwd packages/web build` 全绿。
+- **终端与 Git 面板细节（本轮）**：`packages/server/src/core/exec/term-session.test.ts`（24 例：哨兵解析与剥离、增量游标与退出事件投递、缓冲上限、并发上限、中断重建、空闲回收、关闭幂等、跨块 UTF-8、GBK 回退、非 ASCII 命令落盘改写）与 `routes/terminal.test.ts`（6 例：404/403/只读拒绍与字段形状）；前端 `files/terminal-core.test.ts`（22 例：SGR 映射、未知转义、`\r`/`\b`/`\t`、长行截断、颜色随行冻结、历史去重与上限）。真机冒烟（临时端口独立服务）：创建会话 → `echo 中文输出测试` → `cd packages` → `dir /b` → `ping` 后 interrupt → 再执行 `echo after-interrupt` 全部正确，cwd 与退出码随哨兵正确回报；真实浏览器（Playwright）下终端面板与 Git 面板的互斥切换、命令回显、快捷键与控制台零错误。
 
 ---
 

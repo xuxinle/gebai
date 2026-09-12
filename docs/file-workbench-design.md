@@ -218,7 +218,39 @@ root 解析 → 目标绝对路径（root/join(path)）
 - 破坏性操作（`reset --hard`、`push --force*`、删除分支/标签、`clean -fd`、`discard`）：前端二次确认 + 可选「先建备份分支/自动 stash」+ 审计日志。
 - 所有 git 写操作记录：`{ts, user, root, repo, action, args(脱敏), result}`。
 
-### 3.4 审计（`core/audit/fs-audit.ts`）
+### 3.4 终端 API（`core/exec/term-session.ts` + `routes/terminal.ts`）
+
+**TerminalService 关键实现约束**
+
+- **持久 shell 会话**：每条会话一个常驻 shell 子进程（Windows 默认 `cmd.exe`，POSIX 默认 `bash`，`GEBAI_TERMINAL_SHELL` 可指定），stdin 保持打开——`cd`/`set`/`export` 在会话内生效（这是「终端」与「一次性命令」的分界）。
+- **不引入 PTY**（Windows 需 ConPTY / 原生依赖）：命令回显与提示符由前端渲染，命令边界用**哨兵行**判定——写完命令立即写入一行哨兵命令，其输出形如 `{TOKEN}{退出码}|{cwd}`：
+  - `cmd.exe`：`echo {TOKEN}%errorlevel%^|%CD%`
+  - `bash`：`echo "{TOKEN}$?|$PWD"`
+  - PowerShell：`Write-Output ("{TOKEN}" + $(if ($?) {0} else {1}) + "|" + (Get-Location).Path)`
+
+  服务端识别行内 `{TOKEN}` 前缀的行（TOKEN 每次随机），从输出中剥离并产出退出码与 cwd。
+- **输出与编码**：stdout/stderr 合并进有界环形缓冲，`read(id, since)` 按游标返回增量；Windows 下 shell 启动先 `chcp 65001`，输出按 `TextDecoder(stream: true)` 增量解码，出现 U+FFFD 时按 GBK 回退（与 `sandbox.ts` 的 `decodeOutput` 同口径）。
+- **中断语义**：`interrupt` ＝按进程树终止当前 shell（Windows `taskkill /T /F`，POSIX 进程组 SIGKILL）并以**原 cwd 重建** shell（保留会话 id、滚动缓冲、cwd）——`Ctrl+C` 不是「整个会话消失」。
+- **资源与回收**：并发会话上限 8、空闲 30 分钟回收；会话为进程内状态，服务重启即消失。
+
+**REST 端点（`/api/v1/terminal`）**
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/info` | GET | 能力探测：`{enabled, reason?, sandboxed, writable, shells[], defaultShell, maxSessions, idleMs}`（只列本机实际存在的 shell） |
+| `/create` | POST | `{root, cwd?, shell?, session?, env?}` → `{id, shell, shellName, cwd, root, cursor, output, startedAt}` |
+| `/input` | POST | `{id, data, exec?}`：`exec:true`（默认）写入 `data + "\n"` 并追加哨兵行；`exec:false` 原样写入（交互输入 / 控制字符） |
+| `/read` | GET | `?id=&since=` → `{cursor, text, exits:[{token,code,cwd}], alive}`（增量输出，哨兵行已剥离） |
+| `/interrupt` | POST | 终止当前命令并以原 cwd 重建 shell |
+| `/close` | POST | 关闭会话（幂等） |
+| `/list` | GET | 当前会话清单 |
+
+**安全策略**
+
+- 沙箱启用且用户非豁免 → 全部端点 403（终端等同于任意命令执行，多用户部署不开放）；`GEBAI_FS_WRITE=false` 拒绝创建 / 执行；`GEBAI_TERMINAL=false` 时 `info` 返回 `enabled:false`，其余端点 404。
+- cwd 由 `(root, 相对路径)` 经 `resolveInRoot` 解析（越界 403）；每条命令写审计（`action=term.exec`，含命令首行与 cwd）。
+
+### 3.5 审计（`core/audit/fs-audit.ts`）
 
 - 写入 `{GEBAI_HOME}/audit-fs.jsonl`（JSONL 追加，10MB 轮转保留 5 份）。
 - 记录：时间、用户、来源（`web`/`agent`/`api`）、root+path、动作（write/mkdir/rename/move/delete/upload/git.*）、大小、结果（ok/error 原因）、客户端 IP（信任代理时取 `X-Forwarded-For`，复用既有代理头约定）。
@@ -272,8 +304,8 @@ app.get(`${base}/files/*`, handler)        // 深链（如 /files?root=proj:geba
 │ ▾ Changes(7)  │  状态栏：proj:gebai/src/main.ts · UTF-8 · LF  │              │
 │  M src/a.ts   │          · main ↑1↓2 · Ln 42, Col 7 · 12.4KB  │              │
 ├──────────────┴───────────────────────────────────────────────┴───────────────┤
-│ ▾ Git 日志图（Graph 泳道 · 提交详情 · 变更文件 · 右键 cherry-pick/revert）    │  ← 底部面板（可折叠）
-│ ▾ 搜索结果   ▾ 输出（sh-tasks 日志）   ▾ 问题                                  │
+│ ▾ Git（分支 | 日志 | 提交内容） · ▾ 终端（Ctrl+Alt+T）                          │  ← 底部工具窗（可折叠）
+│   Git 与终端同槽互斥：同一停靠位 / 高度 / 拖拽条，切换只切显隐（实例都保留）      │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -427,6 +459,17 @@ monaco.editor.create(el, {
 - 状态栏右侧：当前分支（点击 → 分支弹窗）、ahead/behind（点击 → 同步操作）、仓库状态点（干净/脏/冲突）、stash 数、进行中的操作（`merging/rebasing` 带「中止/继续」）。
 - 顶栏 Git 图标：Changes 数徽标、一键「提交…」、一键「更新项目（pull）」、一键「推送」。
 - 与 Agent 联动（亮点）：Changes 视图工具条「✨ 生成提交信息」（把 diff 交给 Agent 生成 conventional commit 文案，走正常模型调用）、「🛠 让 Agent 提交」（把变更打包成一次 prompt，走工具审批链路，事后审计）。
+
+**H. 已落地的细节约定（Git 面板）**
+
+- **日志刷新**：每次工具窗刷新都从最新一页重取（提交后 / F5 都能看到新历史），但首页与现有列表一致时不重建 DOM——翻了几页的位置与滚动不会被拽回顶部；滚动到底自动续页（监听真正的滚动容器）。
+- **竞态防护**：日志加载带代际号 + 根比对，切根后旧根的响应被丢弃（避免「面板停在上一个根的数据上」）。
+- **状态失败与「不是仓库」分开**：`/git/status` 读失败时面板与状态栏显示可重试的故障态，不再摆出「初始化仓库」这类误导入口。
+- **网络操作在途反馈**：fetch/pull/push 期间标题栏显示「进行中：抓取远程…」，远程动作按钮同时禁用。
+- **栏内状态**：分支 / 标签 / 暂存 / 远程四栏都有加载中与读取失败（含重试）状态，空态区分「没有数据」与「过滤后无结果」。
+- **日志过滤**：按文件（资源管理器 / 变更面板 / 提交内容右键「在 Git 日志中筛选」）、按作者（日志行右键）、按提交信息关键字；过滤条常驻不重建，输入与焦点不会被打断。
+- **可达性**：列表行 `tabindex` + `role=button`（Enter/Space 等同点击），三栏分界条可聚焦并用 ←/→ 调宽（Pointer Capture + rAF 合并，窗口缩放后重新夹宽度）。
+- **入口补全**：blame（文件标签工具条开关，服务端 `/git/blame` 与编辑器行装饰早已就位）、远程分支删除（`git push <remote> --delete`）、`push --tags`、覆盖已有标签显式 `force`。
 
 ### 4.8 命令面板与快捷键
 

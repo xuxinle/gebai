@@ -31,6 +31,8 @@ export interface ExplorerHooks {
   onNavigate?: (path: string, isDir: boolean) => void
   /** 在文件管理器中显示（本地模式；桌面端能力，缺省不显示该项） */
   revealInOs?: (root: string, path: string) => void
+  /** 在 Git 工具窗的日志栏按该文件过滤（宿主管工具窗的展开；缺省不显示该项） */
+  openLogFilter?: (path: string) => void
 }
 
 export interface Explorer {
@@ -545,7 +547,12 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       )
       if (meta.gitEnabled) {
         const repos = hooks.roots().find((r) => r.id === rootId)?.isRepo
-        if (repos) items.push({ separator: true }, { label: "忽略此条目（.gitignore）", icon: "git", disabled: !writable, onClick: () => void doIgnore(entry.path, isDir) })
+        if (repos) {
+          items.push({ separator: true })
+          // 只对文件给出：目录的历史过滤语义是“该目录下的提交”，与「单文件历史」不是一回事
+          if (!isDir && hooks.openLogFilter) items.push({ label: "在 Git 日志中筛选该文件", icon: "history", onClick: () => hooks.openLogFilter?.(entry.path) })
+          items.push({ label: "忽略此条目（.gitignore）", icon: "git", disabled: !writable, onClick: () => void doIgnore(entry.path, isDir) })
+        }
       }
     } else {
       items.push(

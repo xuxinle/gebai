@@ -1200,7 +1200,8 @@ export class GitService {
     dir: string,
     op: { action: "create" | "checkout" | "delete" | "rename" | "track" | "upstream"; name: string; startPoint?: string; newName?: string; force?: boolean; remote?: boolean },
   ): Promise<void> {
-    this.assertWrite()
+    if (op.remote) this.assertRemote()
+    else this.assertWrite()
     const root = await this.requireRepo(dir)
     await this.serialize(root, async () => {
       if (op.action === "create") await this.run(["branch", ...(op.force ? ["-f"] : []), op.name, ...(op.startPoint ? [op.startPoint] : [])], root)
@@ -1208,7 +1209,13 @@ export class GitService {
       else if (op.action === "rename") await this.run(["branch", "-m", op.name, op.newName ?? ""], root)
       else if (op.action === "track") await this.run(["branch", "--set-upstream-to", op.startPoint ?? "", op.name], root)
       else if (op.action === "upstream") await this.run(["branch", `--set-upstream-to=${op.startPoint ?? ""}`, op.name], root)
-      else await this.run(["branch", op.force ? "-D" : "-d", op.name], root)
+      else if (op.remote) {
+        // 远程分支删除就是一次带删除的推送（`git push <remote> --delete <branch>`）；
+        // 远程名从分支全名解析（远程分支在前端用全名，形如 origin/feat）
+        const slash = op.name.indexOf("/")
+        if (slash <= 0) throw new GitError(422, `远程分支名需要形如 <remote>/<branch>：${op.name}`)
+        await this.run(["push", op.name.slice(0, slash), "--delete", op.name.slice(slash + 1)], root)
+      } else await this.run(["branch", op.force ? "-D" : "-d", op.name], root)
       this.invalidate(root)
     })
   }

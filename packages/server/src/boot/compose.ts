@@ -20,6 +20,7 @@ import { AgentEngine } from "../core/engine/engine"
 import { WebhookManager } from "../webhooks"
 import { GitService } from "../core/git/service"
 import { FsAudit } from "../core/fs/audit"
+import { TerminalService } from "../core/exec/term-session"
 import { createExternalAuthProvider } from "../external-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
@@ -371,6 +372,11 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       maxFileChars: config.gitMaxFile,
     }),
     fsAudit: new FsAudit(config.gebaiHome, config.fsAudit !== false),
+    // 终端（DESIGN「文件工作台·终端」）：持久 shell 会话（管道 + 哨兵行判定命令结束），
+    // 会话常驻于服务进程内，无状态落盘；可用性由路由层按开关与沙箱判定
+    terminal: new TerminalService({
+      defaultShell: config.terminalShell,
+    }),
   }
   const state = new WsStateService(config.gebaiHome, baseDeps)
   const deps: AppDeps = { ...baseDeps, state }

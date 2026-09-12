@@ -2493,3 +2493,77 @@ button.fw-status-item:hover {
   .fw-merge-panes { grid-template-columns: 1fr; grid-auto-rows: minmax(0, 1fr); }
   .fw-merge-bar { gap: 4px; }
 }
+
+/* --------------------------- Git 面板：栏内状态与可达性 ---------------------------
+   1) 栏内状态条（加载中 / 读取失败 + 重试）：贴在列表区顶部，不遮挡数据；
+   2) 日志加载失败条：比栏内状态条更醒目（列表本身就在报错位置）；
+   3) 列表行的键盘焦点环：列表行是 div + role=button，必须显式给焦点样式，
+      否则键盘用户在列表里「看不见自己在哪」。 */
+
+.fw-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--bg-inset);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.fw-bar.error {
+  color: var(--text);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-inset));
+}
+
+.fw-error-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-inset));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--radius-sm);
+}
+
+/* 日志栏过滤芯片容器（常驻于过滤条内，随过滤条件增减） */
+.fw-git-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* 提交内容栏占位（未选提交 / 非仓库 / 状态不可用时的说明） */
+.fw-commit-empty {
+  padding: 16px 12px;
+}
+
+/* 在途写操作徽标（标题栏） */
+.fw-git-opbar.busy {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.fw-log-row:focus-visible,
+.fw-branch-row:focus-visible,
+.fw-commit-file:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 状态栏警告项（Git 状态不可用 / 多步操作进行中） */
+.fw-status-item.warn {
+  color: #f0a020;
+}
+
+/* 底部工具窗的视图互斥：终端与 Git 面板都挂在 .fw-git-dock 内，用类切换显隐。
+   用 hidden 属性不行——面板自身是 display:flex，属性选择器会被类规则压过。 */
+.fw-git-dock > .fw-dock-hidden {
+  display: none !important;
+}

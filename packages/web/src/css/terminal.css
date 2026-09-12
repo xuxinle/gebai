@@ -1,0 +1,447 @@
+/* ============================================================================
+   文件工作台 · 终端面板（类名前缀 fw-term）
+   独立成文件（不改 files.css）：终端自带一套版式（等宽输出区 / 行内 ANSI 高亮 / 常驻输入行），
+   与 Git 面板的样式改动互不覆盖；颜色/圆角/字体一律走 base.css 的设计令牌，
+   主题只换令牌即可跟随（同 files.css 的约定）。
+   ============================================================================ */
+
+/* 面板根：撑满 dock（dock 高度由 --git-dock-h 控制，这里只吃满父容器） */
+.fw-term-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+/* 标题栏：身份 + 会话标签 + 当前目录 + 动作（与 .fw-git-titlebar 同一节奏） */
+.fw-term-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  flex: none;
+  min-width: 0;
+}
+
+.fw-term-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  flex: none;
+}
+
+.fw-term-grow {
+  flex: 1;
+  min-width: 8px;
+}
+
+/* ---------- 会话标签 ---------- */
+
+.fw-term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.fw-term-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.fw-term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  padding: 2px 3px 2px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: none;
+}
+
+.fw-term-tab:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.fw-term-tab.active {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+}
+
+.fw-term-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 忙碌指示：有命令在跑时亮起（标签都在标题栏，切换会话也能看到哪个在跑） */
+.fw-term-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+.fw-term-tab.busy .fw-term-dot {
+  background: var(--accent);
+  animation: fw-term-pulse 1s ease-in-out infinite;
+}
+
+.fw-term-tab.dead .fw-term-dot {
+  background: var(--danger);
+}
+
+@keyframes fw-term-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.fw-term-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.6;
+  flex: none;
+}
+
+.fw-term-tab-close:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+  color: var(--danger);
+}
+
+/* ---------- 当前目录（尾段 + 完整路径在 title） ---------- */
+
+.fw-term-cwd {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.fw-term-cwd-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fw-term-cwd[hidden] {
+  display: none;
+}
+
+/* ---------- 动作按钮 ---------- */
+
+.fw-term-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.fw-term-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 22px;
+  min-width: 22px;
+  padding: 0 5px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.fw-term-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.fw-term-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 激活态的开关（跟随当前根） */
+.fw-term-btn.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 中断：危险语义（会杀掉当前命令） */
+.fw-term-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.fw-term-btn.big {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.fw-term-btn.big:hover {
+  background: var(--bg-hover);
+}
+
+/* ---------- 输出区 ---------- */
+
+.fw-term-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
+
+/* 每个会话一份视图（切标签只切显隐，保留各自的滚动位置与缓冲） */
+.fw-term-view {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.fw-term-view[hidden] {
+  display: none;
+}
+
+.fw-term-out {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 8px 4px;
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre;
+  user-select: text;
+  cursor: text;
+}
+
+.fw-term-line {
+  min-height: 1.45em;
+}
+
+/* 空行也要占一行高（纯空 div 无内容时高度为 0，会与真实终端错位） */
+.fw-term-line:empty::after {
+  content: "\200b";
+}
+
+.fw-term-trunc {
+  color: var(--text-faint);
+}
+
+/* 前端补的信息行（退出码 / 会话结束 / 提交失败）：弱化样式，与命令输出区分 */
+.fw-term-meta {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.fw-term-meta.warn {
+  color: var(--warning);
+}
+
+/* 回到底部：离开底部（用户上滚看历史）时浮出 */
+.fw-term-jump {
+  position: absolute;
+  right: 16px;
+  bottom: 40px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font-size: 11.5px;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.fw-term-jump:hover {
+  background: var(--bg-hover);
+}
+
+.fw-term-jump[hidden] {
+  display: none;
+}
+
+/* ---------- 输入行 ---------- */
+
+.fw-term-inputrow {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-family: var(--font-mono);
+}
+
+.fw-term-prompt {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+  font-size: 12.5px;
+}
+
+.fw-term-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.fw-term-input::placeholder {
+  color: var(--text-faint);
+}
+
+.fw-term-input:disabled {
+  color: var(--text-faint);
+}
+
+/* 焦点环交给输入行整体（输入框本身去掉了 outline，避免边框抖动） */
+.fw-term-inputrow:focus-within {
+  border-top-color: var(--accent);
+}
+
+/* ---------- 空态 / 不可用占位 ---------- */
+
+.fw-term-empty,
+.fw-term-notice {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.fw-term-notice-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.fw-term-notice-hint {
+  max-width: 520px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---------- ANSI 前景色（30-37 / 90-97） ----------
+   终端配色与主题无关：语义色尽量复用令牌（danger/success/warning/accent 等），
+   令牌没有的（品红/青/白/黑）给固定值，保证亮暗主题下对比度都够。 */
+
+.fw-term-fg-black {
+  color: var(--text-faint);
+}
+.fw-term-fg-red {
+  color: var(--danger);
+}
+.fw-term-fg-green {
+  color: var(--success);
+}
+.fw-term-fg-yellow {
+  color: var(--warning);
+}
+.fw-term-fg-blue {
+  color: var(--accent);
+}
+.fw-term-fg-magenta {
+  color: #c678dd;
+}
+.fw-term-fg-cyan {
+  color: var(--tool);
+}
+.fw-term-fg-white {
+  color: var(--text);
+}
+.fw-term-fg-brightBlack {
+  color: var(--text-muted);
+}
+.fw-term-fg-brightRed {
+  color: #ff7b72;
+}
+.fw-term-fg-brightGreen {
+  color: #56d364;
+}
+.fw-term-fg-brightYellow {
+  color: #e3b341;
+}
+.fw-term-fg-brightBlue {
+  color: var(--accent-hover);
+}
+.fw-term-fg-brightMagenta {
+  color: #d2a8ff;
+}
+.fw-term-fg-brightCyan {
+  color: #56d4dd;
+}
+.fw-term-fg-brightWhite {
+  color: var(--text);
+}
+
+.fw-term-bold {
+  font-weight: 700;
+}

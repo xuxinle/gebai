@@ -133,6 +133,10 @@ export interface ServerConfig {
   /** 单个文本文件（内容与逐行差异）上限（GEBAI_GIT_MAX_FILE 字符，默认 1M）：
    *  超限时内容侧返回 tooLarge（不拉正文）、差异侧只给统计，避免巨型 Monaco model 锁死主线程。 */
   gitMaxFile: number
+  /** 终端面板总开关（GEBAI_TERMINAL，默认 true）：false 时终端端点 404（info 回 enabled:false + 原因）。 */
+  terminalEnabled: boolean
+  /** 终端默认 Shell（GEBAI_TERMINAL_SHELL：id 或可执行路径，如 cmd / bash / /bin/zsh）；空 = 按平台自动探测。 */
+  terminalShell?: string
 }
 
 function env(name: string, fallback = ""): string {
@@ -250,6 +254,10 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     // diff/文件体量上限：把「撑不住」变成看得见的事（truncated/tooLarge + UI 提示）
     fsMaxDiff: num("GEBAI_FS_MAX_DIFF", 8 * 1024 * 1024),
     gitMaxFile: num("GEBAI_GIT_MAX_FILE", 1_000_000),
+    // 终端（DESIGN「文件工作台·终端」）：持久 shell 会话；shell 留空按平台探测
+    // （Windows cmd.exe/powershell.exe/pwsh.exe，POSIX /bin/bash、/bin/sh、$SHELL）
+    terminalEnabled: bool("GEBAI_TERMINAL", true),
+    terminalShell: env("GEBAI_TERMINAL_SHELL") || undefined,
   }
   return { ...config, ...overrides }
 }

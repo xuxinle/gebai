@@ -29,6 +29,7 @@ import { registerStaticRoutes } from "./routes/static"
 import { registerRootRoutes } from "./routes/roots"
 import { registerFsRoutes } from "./routes/fs"
 import { registerGitRoutes } from "./routes/git"
+import { registerTerminalRoutes } from "./routes/terminal"
 
 export interface AppDeps {
   config: ServerConfig
@@ -53,6 +54,8 @@ export interface AppDeps {
   fsAudit?: import("./core/fs/audit").FsAudit
   /** 文件工作台：Git 服务（组合根注入；缺省时 git 端点返回 503「Git 能力未启用」）。 */
   git?: import("./core/git/service").GitService
+  /** 文件工作台：终端服务（组合根注入；缺省时终端端点 404「终端能力未启用」）。 */
+  terminal?: import("./core/exec/term-session").TerminalService
 }
 
 export type AppEnv = { Variables: { deps: AppDeps; user: AuthUser } }
@@ -181,6 +184,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   registerRootRoutes(rc)
   registerFsRoutes(rc)
   registerGitRoutes(rc)
+  // 终端（DESIGN「文件工作台·终端」）：持久 shell 会话与增量读取，注册位置同相邻的 roots/fs/git 域
+  registerTerminalRoutes(rc)
   registerDocsRoutes(rc)
   registerStaticRoutes(rc)
 

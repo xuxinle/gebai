@@ -15,6 +15,8 @@ export interface GitOpHooks {
   root: () => string
   /** 主动刷新状态（写操作后调用） */
   refreshStatus: () => Promise<GitStatusInfo | null>
+  /** 写操作在途通知（开始传动作名、结束传 null）：面板据此显示进度并禁用并发入口。 */
+  onBusy?: (action: string | null) => void
 }
 
 export function btnIcon(name: string, title: string, onClick: () => void, cls = ""): HTMLButtonElement {
@@ -43,21 +45,30 @@ export function createOpRunner(hooks: GitOpHooks, after: () => Promise<void>) {
     okMsg?: string,
     opts: { silent?: boolean } = {},
   ): Promise<Record<string, unknown> | null> {
+    // 在途通知：网络动作耗时以秒计，面板需要能显示“正在做什么”并禁用并发入口
+    hooks.onBusy?.(action)
     try {
       const res = (await hooks.api.gitOp(action, hooks.root(), body)) as Record<string, unknown>
       const output = typeof res.output === "string" ? res.output : ""
       if (!opts.silent) {
         if (res.ok === false) {
-          toast(`${okMsg ? `${okMsg}失败：` : ""}${output || "操作未成功（可能存在冲突）"}`, "error", 6000)
-        } else if (output) toast(output.split("\n").slice(0, 3).join("\n"), "info", 4000)
+          // 冲突/拒绝的细节都写在 output 里，多带几行——只给一句“未成功”等于没说
+          const detail = (output || "操作未成功（可能存在冲突）").split("\n").slice(0, 6).join("\n").slice(0, 600)
+          toast(`${okMsg ? `${okMsg}失败：` : ""}${detail}`, "error", 8000)
+        } else if (output) toast(output.split("\n").slice(0, 4).join("\n").slice(0, 400), "info", 4000)
         else if (okMsg) toast(okMsg, "success")
       }
       await hooks.refreshStatus()
       await after()
       return res
     } catch (err) {
-      toast(`${okMsg ? `${okMsg}失败：` : ""}${(err as Error).message}`, "error", 6000)
+      // 服务端写操作存在两套语义（200+ok:false 与 4xx+message），失败详情可能挂在 detail.output 上
+      const e = err as Error & { detail?: { output?: string } }
+      const extra = e.detail?.output ? `\n${e.detail.output.split("\n").slice(0, 6).join("\n").slice(0, 600)}` : ""
+      toast(`${okMsg ? `${okMsg}失败：` : ""}${e.message}${extra}`, "error", 8000)
       return null
+    } finally {
+      hooks.onBusy?.(null)
     }
   }
 }

@@ -20,6 +20,7 @@ import { createChangesPanel, type ChangesPanel } from "./changes"
 import { createUrlSync, parseUrlState } from "./url-state"
 import { initTheme, setAcrylicLt, setCnyScheme, setTheme, type AcrylicLtId, type CnySchemeId, type ThemeId } from "../theme-core"
 import { createGitPanel, diffEndpointsFor, mountDiffView, type DiffSpec, type GitPanel } from "./git"
+import { createTerminalPanel, type TerminalPanel } from "./terminal"
 import type { DiffNav } from "./editor"
 import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, diagramKindOf, type ViewerCtx } from "./viewers"
@@ -29,6 +30,32 @@ import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, pr
 
 const LOCAL_ENV_KEY = "gebai.ui.env"
 const SESSION_KEY = "gebai.ui.session"
+/** 底部工具窗的当前视图与开合状态（跨会话记忆：上次看的是 Git 还是终端，下次照旧）。 */
+const DOCK_VIEW_KEY = "gebai.ui.dockView"
+const DOCK_VISIBLE_KEY = "gebai.ui.dockVisible"
+
+/** 底部工具窗的视图（互斥显示，实例各自保留状态）。 */
+type DockView = "git" | "terminal"
+
+function readDockView(): DockView {
+  try {
+    return localStorage.getItem(DOCK_VIEW_KEY) === "terminal" ? "terminal" : "git"
+  } catch {
+    return "git"
+  }
+}
+
+/** 工具窗是否展开：优先用上次记忆，没记忆时按窗口宽度（窄屏默认收起）。 */
+function readDockVisible(): boolean {
+  try {
+    const v = localStorage.getItem(DOCK_VISIBLE_KEY)
+    if (v === "1") return true
+    if (v === "0") return false
+  } catch {
+    /* 隐私模式：按宽度默认 */
+  }
+  return window.innerWidth >= 1180
+}
 
 function readLocalEnv(): Record<string, string> {
   try {
@@ -98,6 +125,8 @@ interface Tab {
   review?: ReviewCtx
   /** 标签图标覆盖（合并视图用 merge 图标，其余按 kind/dirty 推断） */
   icon?: string
+  /** blame 行装饰是否已开启（只读查看时可用；编辑器重建后失效） */
+  blameOn?: boolean
 }
 
 const state = {
@@ -106,11 +135,18 @@ const state = {
   rootsResp: null as RootsResponse | null,
   roots: [] as RootInfo[],
   gitStatus: null as GitStatusInfo | null,
+  /** Git 状态读取失败原因（null = 正常）：与「不是仓库」分开，供面板与状态栏区分展示。 */
+  gitStatusError: null as string | null,
   repoPrefix: "",
   tabs: [] as Tab[],
   activeId: null as string | null,
   leftView: "explorer" as "changes" | "explorer" | "search",
-  gitViewVisible: window.innerWidth >= 1180,
+  /** 工具窗可见且当前是 Git（多处刷新逻辑据此判断“Git 面板是否真的看得见”） */
+  gitViewVisible: readDockVisible() && readDockView() === "git" && window.innerWidth >= 1180,
+  /** 底部工具窗开合（与 dockView 一起决定显示哪个面板） */
+  dockVisible: readDockVisible() && window.innerWidth >= 1180,
+  /** 底部工具窗当前视图（Git / 终端） */
+  dockView: readDockView(),
   cursor: { line: 1, column: 1, selected: 0 },
 }
 
@@ -185,6 +221,8 @@ const explorer = createExplorer({
   onRootChanged: (rootId) => void onRootChanged(rootId),
   // 地址栏同步：进目录记历史（可后退），点文件就地替换
   onNavigate: (_path, isDir) => (isDir ? urlSync.push() : urlSync.replace()),
+  // 「在 Git 日志中筛选该文件」：宿主负责展开工具窗（面板自己不知道当前是否可见）
+  openLogFilter: (path) => void showInGitLog(path),
 })
 
 /* ------------------------------ 变更面板（左栏工具窗） ------------------------------ */
@@ -211,6 +249,7 @@ function ensureChangesPanel(): ChangesPanel {
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
     openFileHistory: (path) => void showFileHistoryByPath(path),
+    showInLog: (path) => void showInGitLog(path),
     // 徽标：改动数变化时只重画 rail（不重画左栏，避免提交框里的输入被打断）
     onCount: () => renderRail(),
   })
@@ -225,6 +264,7 @@ function ensureGitPanel(): GitPanel {
     root: () => explorer.getRoot(),
     repoPrefix: () => state.repoPrefix,
     status: () => state.gitStatus,
+    statusError: () => state.gitStatusError,
     refreshStatus: () => refreshGit(),
     openDiff: (spec) => void openDiff(spec),
     openFile: (root, path, line) => void openFile(root, path, { preview: false, line }),
@@ -236,8 +276,45 @@ function ensureGitPanel(): GitPanel {
     remoteEnabled: () => !!(state.rootsResp?.gitRemote && state.rootsResp?.writable),
     onFsChanged: () => void explorer.refresh(undefined, { keepSelection: true }),
   })
+  // 初始显隐按当前工具窗状态定（面板创建得晚于状态初始化）
+  gitPanel.el.classList.toggle("fw-dock-hidden", !(state.dockVisible && state.dockView === "git"))
   gitDock.appendChild(gitPanel.el)
   return gitPanel
+}
+
+/* ------------------------------ 终端面板（同一底部工具窗） ------------------------------ */
+
+let termPanel: TerminalPanel | null = null
+
+/**
+ * 终端面板与 Git 面板**共用同一个底部工具窗**：同一停靠位、同一高度变量、同一拖拽条。
+ * 两者互斥显示但实例都保留——切来切去不该丢掉 Git 的滚动位置与终端的滚动缓冲/会话。
+ */
+function ensureTerminalPanel(): TerminalPanel {
+  if (termPanel) return termPanel
+  termPanel = createTerminalPanel({
+    root: () => explorer.getRoot(),
+    // cwd 初值：选中目录时用它，否则根目录（根内相对路径）
+    cwd: () => {
+      const sel = explorer.selected()
+      return sel?.type === "dir" ? sel.path : ""
+    },
+    session: () => state.sessionId,
+    env: () => state.env,
+    close: () => setDock(false),
+  })
+  termPanel.el.classList.toggle("fw-dock-hidden", !(state.dockVisible && state.dockView === "terminal"))
+  gitDock.appendChild(termPanel.el)
+  return termPanel
+}
+
+/**
+ * 在 Git 工具窗的日志栏按文件过滤（资源管理器 / 变更面板 / 提交内容的入口）。
+ * 工具窗收起时先展开——否则用户点完看不到任何变化（数据其实已经过滤好了）。
+ */
+async function showInGitLog(path: string): Promise<void> {
+  if (!state.gitViewVisible) toggleGitPanel(true)
+  await ensureGitPanel().filterByPath(path)
 }
 
 /* ------------------------------ 根与 Git 状态 ------------------------------ */
@@ -269,6 +346,8 @@ const IS_WIN = navigator.userAgent.includes("Windows")
 async function onRootChanged(rootId: string): Promise<void> {
   await refreshGit()
   if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
+  // 终端跟随根（开关在面板里；关掉时本调用无副作用）
+  termPanel?.onRootChanged()
   const info = state.roots.find((r) => r.id === rootId)
   state.repoPrefix = ""
   if (info?.isRepo && info.repoRoot) {
@@ -298,6 +377,7 @@ async function refreshGit(): Promise<GitStatusInfo | null> {
     try {
       const status = await api.gitStatus(root)
       state.gitStatus = status
+      state.gitStatusError = null
       lastGitFetch = { root, ts: Date.now() }
       // 回填树的 Git 装饰：树首次渲染时状态还没到（异步），不回填则徽标/下划线永不出现
       explorer.refreshGitDecorations()
@@ -307,8 +387,10 @@ async function refreshGit(): Promise<GitStatusInfo | null> {
           ? ((info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").startsWith(status.rootPath) ? (info?.path ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").slice(status.rootPath.length).replace(/^\//, "") : "")
           : ""
       }
-    } catch {
+    } catch (err) {
+      // 读失败 ≠ 不是仓库：错误要留给状态栏与面板显示（否则会把「初始化仓库」当成正确入口）
       state.gitStatus = null
+      state.gitStatusError = (err as Error).message
       explorer.refreshGitDecorations()
     }
     renderStatus()
@@ -920,6 +1002,14 @@ function tabActions(): HTMLElement {
   saveBtn.disabled = !t.dirty || !state.rootsResp?.writable
   box.appendChild(saveBtn)
 
+  // Git blame：服务端端点与编辑器行装饰本就在位，缺的只是入口。
+  // 只在只读查看时开放——编辑中行号会随编辑漂移，装饰会指到别的行。
+  if (state.gitStatus?.isRepo) {
+    const blameBtn = btn("history", t.mode === "edit" ? "编辑态下不可用 blame（行号会漂移）" : t.blameOn ? "关闭 blame 行装饰" : "显示 blame（每行来自哪次提交、谁改的）", () => void toggleBlame(t), t.blameOn ? "active" : "")
+    blameBtn.disabled = !t.editor || t.mode === "edit"
+    box.appendChild(blameBtn)
+  }
+
   if (diagramKindOf(extOf(t.path))) {
     box.appendChild(
       btn("diff", "源码 / 渲染预览切换", () => {
@@ -1060,9 +1150,16 @@ function renderStatus(): void {
   rel.onclick = () => showMenu(...menuAt(rel, state.roots.map((r) => ({ label: r.name, icon: "folder", onClick: () => void explorer.setRoot(r.id) }))))
   statusbar.appendChild(btn(rel, 1))
 
+  // 状态读失败：给一个能重试的明确提示，而不是让状态栏这块直接什么都不显示（读失败与「不是仓库」不是一回事）
+  if (state.gitStatusError) {
+    const warn = h("button", { class: "fw-status-item warn", title: `Git 状态读取失败：${state.gitStatusError}（点击重试）` }, [icon("warning", 12), h("span", { text: "Git 状态不可用" })])
+    warn.onclick = () => void refreshGit()
+    statusbar.appendChild(btn(warn, 1))
+  }
+
   if (state.gitStatus?.isRepo) {
     const s = state.gitStatus
-    const branch = h("button", { class: "fw-status-item git", title: "切换分支" }, [
+    const branch = h("button", { class: "fw-status-item git", title: "源代码管理工具窗（Ctrl+Alt+G）" }, [
       icon("branch", 12),
       h("span", { text: s.branch ?? (s.detached ? "(detached)" : "-") }),
       s.ahead ? h("span", { class: "fw-ahead", text: `↑${s.ahead}` }) : null,
@@ -1076,6 +1173,27 @@ function renderStatus(): void {
       gitPanel?.show("branches")
     }
     statusbar.appendChild(btn(branch, 1))
+
+    // 多步操作（merge/rebase/cherry-pick/revert）进行中：继续/中止在左栏「变更」面板顶部，
+    // 但状态栏也要能一眼看出“仓库正处在中间状态”——否则很容易在半途提交或切分支。
+    if (s.operation) {
+      const opItem = h("button", { class: "fw-status-item warn", title: "多步操作进行中：继续 / 跳过 / 中止在左栏「变更」面板顶部" }, [
+        icon("sync", 12),
+        h("span", { text: `${s.operation} 进行中` }),
+      ])
+      opItem.onclick = () => toggleLeftView("changes")
+      statusbar.appendChild(btn(opItem, 1))
+    }
+
+    // 暂存条目：点开面板的「暂存」栏（stash 最容易被忘在角落里）
+    if (s.stashCount > 0) {
+      const stashItem = h("button", { class: "fw-status-item", title: `有 ${s.stashCount} 条 stash` }, [icon("archive", 12), h("span", { text: String(s.stashCount) })])
+      stashItem.onclick = () => {
+        if (!state.gitViewVisible) toggleGitPanel(true)
+        gitPanel?.show("stash")
+      }
+      statusbar.appendChild(btn(stashItem, 2))
+    }
   }
 
   statusbar.appendChild(h("span", { class: "fw-grow" }))
@@ -1163,6 +1281,13 @@ function renderRail(): void {
     h("div", { class: "fw-rail-spacer" }),
     // 底部组：工具窗开关 + 全局入口（原菜单栏的功能补位）
     (() => {
+      const active = state.dockVisible && state.dockView === "terminal"
+      const b = h("button", { class: `fw-rail-btn${active ? " active" : ""}`, title: "终端（Ctrl+Alt+T）" })
+      b.appendChild(icon("terminal", 18))
+      b.onclick = () => toggleTerminalPanel(!active)
+      return b
+    })(),
+    (() => {
       const b = h("button", { class: `fw-rail-btn${state.gitViewVisible ? " active" : ""}`, title: "源代码管理工具窗（Ctrl+Alt+G）" })
       b.appendChild(icon("git", 18))
       b.onclick = () => toggleGitPanel(!state.gitViewVisible)
@@ -1230,8 +1355,36 @@ function renderRail(): void {
 
 /* ------------------------------ 查看/编辑与保存 ------------------------------ */
 
+/**
+ * 切换 blame 行装饰：数据来自 `/git/blame`（编辑器只负责把行装饰画上去）。
+ * 编辑态不可用——行号会随编辑漂移，装饰会指到别的行上，反而误导。
+ */
+async function toggleBlame(tab: Tab): Promise<void> {
+  if (!tab.editor || tab.kind !== "file") return
+  if (tab.blameOn) {
+    tab.editor.setBlame([])
+    tab.blameOn = false
+    renderTabbar()
+    return
+  }
+  try {
+    const res = await api.gitBlame(tab.root, tab.path)
+    tab.editor.setBlame(res.lines)
+    tab.blameOn = true
+    if (!res.lines.length) toast("该文件没有可用的 blame 信息（未跟踪 / 历史为空）", "info")
+  } catch (err) {
+    toast(`读取 blame 失败：${(err as Error).message}`, "error")
+  }
+  renderTabbar()
+}
+
 function toggleMode(tab: Tab): void {
   tab.mode = tab.mode === "edit" ? "view" : "edit"
+  // 进编辑态先撤掉 blame：行号会随编辑漂移，留着装饰比不显示更糟
+  if (tab.mode === "edit" && tab.blameOn) {
+    tab.editor?.setBlame([])
+    tab.blameOn = false
+  }
   tab.editor?.setReadOnly(tab.mode !== "edit" || !!tab.truncated)
   if (tab.mode === "edit") {
     tab.editor?.focus()
@@ -1781,18 +1934,41 @@ function pickUpload(): void {
  * 此时根清单还没到（explorer 根为空），请求会得出「当前根不是 Git 仓库」这种误导结论
  * （还会把「初始化仓库」按钮摆到误点位置），也白跑一轮请求；数据由根确定后的调用补上。
  */
-function toggleGitPanel(visible: boolean, opts: { deferData?: boolean } = {}): void {
-  state.gitViewVisible = visible
+function setDock(visible: boolean, view: DockView = state.dockView, opts: { deferData?: boolean } = {}): void {
+  state.dockVisible = visible
+  state.dockView = view
+  state.gitViewVisible = visible && view === "git"
   gitDock.classList.toggle("collapsed", !visible)
   gitDockResizer.classList.toggle("collapsed", !visible)
-  if (visible && !opts.deferData) {
+  // 视图只挂一次，靠类切换显隐——用 hidden 属性不行：面板自身是 display:flex，会把它压过去
+  gitPanel?.el.classList.toggle("fw-dock-hidden", !(visible && view === "git"))
+  termPanel?.el.classList.toggle("fw-dock-hidden", !(visible && view === "terminal"))
+  try {
+    localStorage.setItem(DOCK_VIEW_KEY, view)
+    localStorage.setItem(DOCK_VISIBLE_KEY, visible ? "1" : "0")
+  } catch {
+    /* 隐私模式忽略 */
+  }
+  if (visible && view === "git" && !opts.deferData) {
     ensureGitPanel()
     // 根为空时不请求（等 onRootChanged / 启动阶段二补刷）：否则会把「根未知」误当「不是仓库」
     if (explorer.getRoot()) void gitPanel?.refresh()
-    // 展开后 Monaco 可视高度变化，重排编辑器（否则出现空白/裁切）
-    scheduleEditorLayout()
   }
+  if (visible && view === "terminal" && !opts.deferData) ensureTerminalPanel().activate()
+  else termPanel?.deactivate()
+  // 展开/切换后 Monaco 可视高度变化，重排编辑器（否则出现空白/裁切）
+  if (visible && !opts.deferData) scheduleEditorLayout()
   renderRail()
+}
+
+/** 展开/收起底部 Git 工具窗（可见时同时把工具窗切到 Git 视图）。 */
+function toggleGitPanel(visible: boolean, opts: { deferData?: boolean } = {}): void {
+  setDock(visible, visible ? "git" : state.dockView, opts)
+}
+
+/** 展开/收起底部终端工具窗。 */
+function toggleTerminalPanel(visible: boolean): void {
+  setDock(visible, visible ? "terminal" : state.dockView)
 }
 
 function showShortcuts(): void {
@@ -1806,6 +1982,7 @@ function showShortcuts(): void {
     ["Ctrl+Shift+F", "搜索"],
     ["Ctrl+Shift+G", "左侧变更面板"],
     ["Ctrl+Alt+G", "底部 Git 工具窗"],
+    ["Ctrl+Alt+T", "底部终端工具窗"],
     ["Ctrl+K", "更多（新建 / 比较 / 服务端开关）"],
     ["Ctrl+Shift+D", "比较（任意两个提交 / 提交与工作区）"],
     ["F2", "重命名选中项"],
@@ -1937,6 +2114,12 @@ document.addEventListener("keydown", (e) => {
   if (ctrl && e.altKey && e.key.toLowerCase() === "g") {
     e.preventDefault()
     toggleGitPanel(!state.gitViewVisible)
+    return
+  }
+  if (ctrl && e.altKey && e.key.toLowerCase() === "t") {
+    e.preventDefault()
+    // 终端开关：当前看的不是终端就切过去，是终端则收起工具窗
+    toggleTerminalPanel(!(state.dockVisible && state.dockView === "terminal"))
     return
   }
   if (ctrl && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
@@ -2217,13 +2400,11 @@ async function boot(): Promise<void> {
   try {
     // ── 阶段一：同步搭好外壳（不依赖任何网络往返）──
     showLeftView("explorer", { keepHidden: true }) // 先建好左栏，可见性随后由 URL/默认值决定
-    // Git 面板此刻只摆骨架（deferData）——数据等根确定后再取（空根会误判「不是仓库」）
-    const wantGitPanel = state.gitViewVisible && window.innerWidth >= 1180
-    toggleGitPanel(wantGitPanel, { deferData: true })
-    if (!state.gitViewVisible) toggleGitPanel(false, { deferData: true }) // 同步 collapsed class（避免先渲染后收起闪动）
-    // dock 展开但无数据时给一行加载提示（否则启动空窗期是一块无信息的大空框）
-    const gitDockLoading = wantGitPanel ? h("div", { class: "fw-dock-loading", text: "正在加载 Git 信息…" }) : null
-    if (gitDockLoading) gitDock.appendChild(gitDockLoading)
+      // 工具窗此刻只摆骨架（deferData）——数据等根确定后再取（空根会误判「不是仓库」）
+  setDock(state.dockVisible, state.dockView, { deferData: true })
+  // dock 展开但无数据时给一行加载提示（否则启动空窗期是一块无信息的大空框）
+  const dockLoading = state.dockVisible ? h("div", { class: "fw-dock-loading", text: state.dockView === "terminal" ? "正在准备终端…" : "正在加载 Git 信息…" }) : null
+  if (dockLoading) gitDock.appendChild(dockLoading)
     bindResizer(leftResizer, leftPanel, "left")
     bindDockResizer()
     document.body.appendChild(rootEl)
@@ -2245,9 +2426,9 @@ async function boot(): Promise<void> {
     renderRail()
     unmountPlaceholder()
     unmountPlaceholder = null
-    // 根与状态都就绪：现在才建 Git 面板并取数据（阶段一只摆了骨架，见 toggleGitPanel 的 deferData）
-    if (state.gitViewVisible) toggleGitPanel(true)
-    gitDockLoading?.remove()
+      // 根与状态都就绪：现在才建面板并取数据（阶段一只摆了骨架，见 setDock 的 deferData）
+  setDock(state.dockVisible, state.dockView)
+  dockLoading?.remove()
     // 深层链接：?root=proj:gebai&path=src/main.ts&line=10&diff=1
     const params = new URLSearchParams(location.search)
     const diffRoot = params.get("diffRoot")

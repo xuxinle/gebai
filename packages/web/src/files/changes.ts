@@ -38,6 +38,8 @@ export interface ChangesHooks extends GitOpHooks {
   onFsChanged: () => void
   /** 打开某文件的 Git 历史（Git log --follow） */
   openFileHistory: (path: string) => void
+  /** 在 Git 工具窗的日志栏按该文件过滤（宿主管工具窗的展开） */
+  showInLog: (path: string) => void
   /** 改动总数变化（rail 上的「变更」按钮徽标） */
   onCount: (n: number) => void
 }
@@ -183,6 +185,7 @@ export function createChangesPanel(hooks: ChangesHooks): ChangesPanel {
             }),
         },
         { label: "文件历史（Git log --follow）", icon: "history", onClick: () => hooks.openFileHistory(prefixPath(c.path)) },
+        { label: "在日志栏中筛选该文件", icon: "history", onClick: () => hooks.showInLog(prefixPath(c.path)) },
         { label: "与任一提交比较…", icon: "sync", onClick: () => hooks.openCompare({ from: "HEAD", to: "WORKTREE" }) },
         { separator: true },
         { label: "复制路径", icon: "copy", onClick: () => void navigator.clipboard.writeText(c.path).then(() => toast("已复制路径", "success")) },

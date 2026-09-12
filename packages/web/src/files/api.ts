@@ -390,8 +390,8 @@ export class FsApi {
 
   /* --------------------------- Git --------------------------- */
 
-  gitStatus(root: string, path?: string): Promise<GitStatusInfo> {
-    return this.req<GitStatusInfo>("GET", "/api/v1/git/status", { params: { root, path } })
+  gitStatus(root: string): Promise<GitStatusInfo> {
+    return this.req<GitStatusInfo>("GET", "/api/v1/git/status", { params: { root } })
   }
 
   gitDiff(root: string, opts: { path?: string; staged?: boolean; from?: string; to?: string; mergeBase?: boolean; context?: number; ignoreWhitespace?: boolean }): Promise<{ files: GitFileDiff[]; raw: string; truncated?: boolean }> {
@@ -421,7 +421,7 @@ export class FsApi {
     return this.req("GET", "/api/v1/git/content", { params: { root, ref, path } })
   }
 
-  gitFileDiff(root: string, path: string, opts: { staged?: boolean; from?: string; to?: string; mergeBase?: boolean; context?: number } = {}): Promise<GitFileDiff> {
+  gitFileDiff(root: string, path: string, opts: { from?: string; to?: string; mergeBase?: boolean; context?: number } = {}): Promise<GitFileDiff> {
     return this.req<GitFileDiff>("GET", "/api/v1/git/file-diff", { params: { root, path, ...opts } })
   }
 
