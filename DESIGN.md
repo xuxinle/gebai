@@ -41,7 +41,6 @@
 目录结构（文件可能非常多，所有按文件数量增长的目录均做**多层分片**，避免单目录文件过多）：
 ```
 GEBAI_HOME/
-├── gebai.log              # 日志文件（全局）
 ├── .env                   # 启动配置（可选，二进制形态自动加载；真实环境变量优先；用户手写，服务端只读不写）
 ├── conn-state.json        # WS 连接状态（每用户当前会话，防抖落盘；重连/重启后恢复，见「WebSocket」）
 ├── agents/                # 用户自建客卿（放置即发现；同名覆盖内置，见「客卿」）
@@ -75,14 +74,14 @@ GEBAI_HOME/
 | `feedback/` | 反馈 ID **自身前缀**（hex、随机均匀） | 日期 + 前 2 位 `{h0}` / 第 3-4 位 `{h1}` |
 | `trash/` | 归档日期 | `YYYY-MM-DD/` |
 
-- **hex ID 的分片段直接取 ID 自身前缀**（会话/反馈 ID 为 32 位小写 hex 随机串，前缀分布均匀、分片效果与哈希等价）——从 ID 可直接目视定位目录（排查/运维无需计算哈希）；非 hex 键（按哈希分片）与内容寻址（截断文件按内容哈希**去重**）仍走哈希
-- 截断文件（`tmp/truncated/`）在会话目录内，随会话分片；内容 SHA256 哈希命名去重（同内容不重复写入），会话内数量有限无需额外分片
+- **hex ID 的分片段直接取 ID 自身前缀**（会话/反馈 ID 为 32 位小写 hex 随机串，前缀分布均匀、分片效果与哈希等价）——从 ID 可直接目视定位目录（排查/运维无需计算哈希）；非 hex 键（按哈希分片）与内容寻址（截断文件按内容哈希**命名**）仍走哈希
+- 截断文件（`tmp/truncated/`）在会话目录内，随会话分片；文件名按内容 SHA256 哈希命名（同内容同名同文件、重复截断幂等覆盖，写入无存在性短路），会话内数量有限无需额外分片
 
 - 每层分片基数 256（16×16），单目录满约 16K 子目录/文件时自动感知；层级可按需加深（`{s2}`、`{h2}` 等）
 - 会话 ID、反馈 ID 分片均为纯函数映射，天然支持 O(1) 定位（无需扫描）
 - 分片仅影响存储布局，路径由服务端内部解析，上层（模型/前端/API）感知的仍是逻辑路径
 
-> 本地模式使用固定默认用户 **admin**（用户名/用户 id 均为 `admin`），目录结构完全一致，核心代码单一路径。**admin 为特权用户（超级权限）**：`role: "admin"` 管理员角色，且**豁免路径沙箱**——沙箱启用（服务端部署/`GEBAI_SANDBOX=on`）时 admin 仍按本地模式放开（绝对路径/`../` 越界放行、脚本环境不剔除敏感变量、桌面控制/私网访问不限制），不受用户沙箱控制。旧版本地模式数据目录 `users/default/` 在启动时自动迁移为 `users/admin/`。
+> 本地模式使用固定默认用户 **admin**（用户名/用户 id 均为 `admin`），目录结构完全一致，核心代码单一路径。**admin 为特权用户（超级权限）**：`role: "admin"` 管理员角色，且**本地模式下豁免路径沙箱**（绝对路径/`../` 越界放行、脚本环境不剔除敏感变量、桌面控制/私网访问不限制）。**豁免仅本地模式生效**（`isExempt: (u) => u === "admin" && config.auth === "local"`）——服务端部署（沙箱启用）下 admin 与普通用户同等受沙箱约束，多租户边界一致。旧版本地模式数据目录 `users/default/` 在启动时自动迁移为 `users/admin/`。
 
 ## 技术栈
 - **语言**: TypeScript (bun 运行时)
@@ -92,13 +91,13 @@ GEBAI_HOME/
   - **OpenAI 兼容 Chat Completions**（`/chat/completions`，SSE 流式）：OpenAI、DeepSeek、通义、Kimi、GLM、Ollama 等主流服务
   - **OpenAI Responses API**（`/responses`，SSE 流式）：OpenAI 新一代接口（`gpt-5` 等新模型）
   - **Anthropic Messages**（`/v1/messages`，SSE 流式）：Anthropic Claude 官方与兼容服务
-  - 三类接口均支持**多模态**（文本 + 图片/音视频），统一抽象为 `provider.chat()`，按模型能力自动组装对应格式
+  - 三类接口均支持**多模态图片**（文本 + 图片；音频/视频是文件工作台的查看能力，不投喂模型），统一抽象为 `provider.chat()`，按模型能力自动组装对应格式
   - **接口地址（`GEBAI_LLM_API_BASE`）两种写法均可**（`endpointUrl` 助手统一拼接）：服务**根地址**（自动追加接口路径，尾部斜杠剥净，如 `https://api.deepseek.com`、`https://open.bigmodel.cn/api/paas/v4`）或**完整接口地址**（文档/控制台直接复制的形态，如 `https://open.bigmodel.cn/api/paas/v4/chat/completions`——已以接口路径结尾则原样使用，不重复拼接）；视觉模型 `GEBAI_VISION_API_BASE` 同规则（复用同一 Provider 实现）
 - **前端**: Web (Vite 构建)，桌面端由原生 WebView 启动器（tao/wry）或系统浏览器加载同一套 Web UI
-- **语法分析**: tree-sitter（wasm，`web-tree-sitter` + `tree-sitter-wasms`），供 code 的 `analyze` 工具做代码结构概览；非 AI 依赖，不影响「不引入第三方 AI SDK」原则；**语法 wasm 构建期内嵌**（`scripts/build-analyzer-wasm.ts` 生成 gzip+base64 注册表，二进制打包模式回退内嵌产物，dev 模式读 node_modules）
-- **本地 CV 推理**: onnxruntime-web（wasm，单线程）+ PP-OCRv4 mobile ONNX 模型，供 desktop 子Agent 的 `desktop_ocr`/`desktop_locate`/`desktop_detect` 做本地小模型图像识别（中英文 OCR 文字定位 / 自备 YOLO 检测）；检测类重模型另走 **GPU sidecar**（node 子进程 onnxruntime-node：Windows DirectML/CUDA、macOS CoreML，见「小模型识别」检测分层后端），失败回落 wasm；非 LLM 依赖、进程内推理不涉模型服务，不影响「不引入第三方 AI SDK」原则（该原则约束 LLM 请求与流解析自行实现）；运行时 dist 入口动态加载（不进 bundle 图）+ 二进制形态整包内嵌（见「小模型识别」）
+- **语法分析**: tree-sitter（wasm，`web-tree-sitter` + `tree-sitter-wasms`），供 code 的 `analyze` 工具做代码结构概览；非 AI 依赖，不影响「不引入第三方 AI SDK」原则；**语法 wasm 构建期内嵌**（`packages/server/scripts/build-analyzer-wasm.ts` 生成 gzip+base64 注册表，二进制打包模式回退内嵌产物，dev 模式读 node_modules）
+- **本地 CV 推理**: onnxruntime-web（wasm，单线程）+ PP-OCRv4 mobile ONNX 模型，供 desktop 子Agent 的 `desktop_ocr`/`desktop_locate`/`desktop_locate_image`/`desktop_detect` 做本地小模型图像识别（中英文 OCR 文字定位 / 自备 YOLO 检测）；检测类重模型另走 **GPU sidecar**（node 子进程 onnxruntime-node：Windows DirectML/CUDA、macOS CoreML，见「小模型识别」检测分层后端），失败回落 wasm；非 LLM 依赖、进程内推理不涉模型服务，不影响「不引入第三方 AI SDK」原则（该原则约束 LLM 请求与流解析自行实现）；运行时 dist 入口动态加载（不进 bundle 图）+ 二进制形态整包内嵌（见「小模型识别」）
 - **文档处理**: `docx`（Word 生成）/ `exceljs`（Excel 读写）/ `pptxgenjs`（PPT 生成）/ `fflate`（OOXML ZIP 解包，docx/pptx 读取与追加重打包）/ `pdf-lib`+`@pdf-lib/fontkit`（PDF 生成与页面编辑——TTC 需抽取子字体重建独立 TTF 后 embedFont，`removePage` 不失效 pageCache 混用 getPages 会取幽灵页）/ `unpdf`（PDF 文本提取——内嵌 pdf.js；其 `extractText` 走 worker postMessage 在 Bun 下 DataCloneError，须用 `getDocumentProxy` 低层 API），供 `wps` 子Agent 做文档读写排版；非 AI 依赖。复用既有 `happy-dom`（`DOMParser` 以 `text/xml` 模式解析 OOXML 部件——支持命名空间前缀标签查询，注意其 `Element.children` 为 `HTMLCollection` 须转真数组后用数组方法；`parseXml` 入口统一做 XML 声明规范化——python-docx 等第三方库写出的单引号声明 `<?xml version='1.0' …?>` 会使 happy-dom 静默降级为 HTML 解析、`w:`/`p:` 前缀查询全部落空，并对降级显式报错防误诊「文件损坏」）
-- **依赖版本钉死**: `@plantuml/core` 钉精确版本 `1.2026.6`（lockfile 不入库，caret 范围会解析到 1.2026.7——该版在 feishu-bot 渲染路径上 TeaVM 崩溃 `createProcessingInstruction`，时序图渲染必现失败）
+- **依赖版本钉死**: `@plantuml/core` 在 `@gebai/server` 钉精确版本 `1.2026.6`（lockfile 不入库，caret 范围会解析到 1.2026.7——该版在 feishu-bot 渲染路径上 TeaVM 崩溃 `createProcessingInstruction`，时序图渲染必现失败）；`@gebai/web` 侧仍为 `^1.2026.6`（前端渲染不走 TeaVM，风险不同，宜同步钉死）
 
 ## 软件包结构
 
@@ -107,10 +106,10 @@ Monorepo 采用 Bun workspaces + Turborepo：
 | 包 | 路径 | 职责 |
 |---|------|------|
 | `@gebai/server` | `packages/server/` | 服务端核心：Hono 服务、Agent 引擎、会话管理、子Agent 装载/新会话执行、REST/WebSocket/Webhook 对外接口；**代码分层**——核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具等）位于 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）位于 `src/` 根。TS 子Agent 已抽包 @gebai/agents（依赖单向 sdk ← agents ← server） |
-| `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，目录内全是子代理，基建/定义物理分域即排除，无需排除清单）+ `src/core/`（依赖组件基建：`analyzer/` tree-sitter 符号分析、`browser/` 浏览器桥接、`cv/` CV 全家、`code-tools.ts` 域工具、`shared/` 公共件：vision 工厂/fetch-guard/tls/image-resize/page-capture/feedback/sub-agent-md/config）。发现注册全自动（dev 目录扫描 / 构建期 bundle 生成，包入口零子代理清单——新增子代理 = 在 src/agents/ 放定义文件即注册，新增基建 = src/core/ 下放目录即隔离）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk，node 工具值导入走 `@gebai/sdk/node` |
+| `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，目录内全是子代理，基建/定义物理分域即排除，无需排除清单）+ `src/core/`（依赖组件基建：`analyzer/` tree-sitter 符号分析、`browser/` 浏览器桥接、`cv/` CV 全家、`code-tools.ts` 域工具、`shared/` 公共件：vision 工厂/fetch-guard/ip/tls/image-resize/cv-analysis/page-capture/feedback/sub-agent-md/config）。发现注册全自动（dev 目录扫描 / 构建期 bundle 生成，包入口零子代理清单——新增子代理 = 在 src/agents/ 放定义文件即注册，新增基建 = src/core/ 下放目录即隔离）。零 import @gebai/server（编译期强制）；契约类型一律来自 @gebai/sdk，node 工具值导入走 `@gebai/sdk/node` |
 | `custom/`（二开域） | `custom/` | **二次开发专属目录（与 packages/ 平级，上游更新不触碰）**：`custom/agents/`（二开子代理定义，同内置域布局）+ `custom/core/`（二开依赖组件）+ `tsconfig.json`（paths 指上游包）。**双域扫描自动合并**：dev 发现（subagents.ts）与构建打包（build-subagents.ts）均内置域先扫、custom 后扫，同名 custom 胜出（二开覆盖内置）；域缺失零条目零告警；热加载同机制（新增/修改/删除即生效）。**迁移 = 复制文件夹**：上游版本更新时整个 `custom/` 拷到新仓库根即完成。typecheck：`bun run typecheck:custom` |
 | `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WebSocket/REST 连接管理、类型定义、API 契约。**双入口**（DESIGN「SDK 双入口」）：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract 契约与类型 + GebaiClient，零 node 内建，web 构建可安全消费）；node 内建工具模块（agent-utils/artifacts/projects/walk/paths）独立子路径 `@gebai/sdk/node`（server/agents 的 node 侧值导入专用；package.json exports 映射 `.` / `./node` / `./package.json`，主入口混入 node 内建会致 web 构建（vite treeshake:false）解析 `__vite-browser-external` 具名导出崩溃） |
-| `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端。**多入口**：`index.html`（聊天页）+ `files.html`（**文件工作台** `/files`，源码 `src/files/{main,explorer,editor,viewers,git,compare,ui,api}.ts` + `src/files-entry.ts` 标题栏入口按钮）；Monaco 经 `public/vendor/monaco` 静态伺服（同 diagram 引擎惯例，不进 vite 打包） |
+| `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制作为内置前端。**多入口**：`index.html`（聊天页）+ `files.html`（**文件工作台** `/files`，源码 `src/files/{main,explorer,editor,viewers,git,compare,ui,api,changes,merge,merge-view,git-shared,url-state,deeplink}.ts` + `src/files-entry.ts` 标题栏入口按钮）；Monaco 经 `public/vendor/monaco` 静态伺服（同 diagram 引擎惯例，不进 vite 打包） |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `launcher/`（tao/wry 原生 WebView 启动器，内嵌服务端二进制一并打包；构建期可参数化产出场景变体） |
 
 #### 仓库根目录
@@ -122,7 +121,6 @@ Monorepo 根目录包含以下脚手架文件，非运行时依赖，仅服务�
 | `package.json` | 根包：Bun workspaces（`packages/*`）+ Turborepo 任务脚本（`dev`/`build`/`test`/`lint`/`typecheck`） |
 | `turbo.json` | Turborepo 任务编排（缓存、依赖顺序、持久任务） |
 | `tsconfig.base.json` | 各包共享的 TypeScript 基础配置（Bun/strict） |
-| `kilo.json` | 开发工具（Kilo）项目配置 |
 | `AGENTS.md` | 编码约定（对编码 Agent 的指令）：以 `DESIGN.md` 为权威设计来源，设计变更必须回写 `DESIGN.md` |
 | `DESIGN.md` | **权威设计文档**，本文件 |
 | `.env` | 开发本地配置（`GEBAI_*`/`OPENAI_*` 环境变量），**仅本地、不入版本库**；脚本调试模式启动时加载（二进制形态改为加载 `{GEBAI_HOME}/.env`，见「GEBAI_HOME」），真实环境变量恒优先 |
@@ -139,39 +137,61 @@ class GebaiClient {
   connect(): Promise<void> // WS 建连带 8s 超时，服务不可达/代理挂起时快速失败，避免初始化永久等待；连接地址解析：显式 baseUrl 优先（http→ws / https→wss），否则浏览器 DOM 下按 location.origin 解析为绝对地址（WebView 内嵌 about:blank/srcdoc、file: 等基址文档下相对路径会抛 "The URL '/ws' is invalid"），非 DOM 环境回退相对路径 `/ws`；连接建立后自动心跳保活（默认 5s 周期 ping，pong 应答超时 10s 判定死连主动断开触发自动重连，防代理按闲置时间断连；间隔/超时可在构造参数覆盖）
   // 认证（服务模式）
   login(username: string, password: string): Promise<void>
+  register(username: string, password: string): Promise<{ user: UserInfo; pending: boolean }> // open 模式注册即登录；approval 模式返回 pending 待审批
   logout(): Promise<void>
-  // 未登录占位（公开端点/未认证上下文兜底；不作为认证结果）
-  setApiKey(key: string): void
+  getCurrentUser(): Promise<UserInfo>
+  // 外部身份兑换（同源集成扩展点，见「多用户隔离与安全」）
+  exchangeExternalUser(username: string, credential: string): Promise<UserInfo>
+  getExternalAuthConfig(): Promise<{ enabled: boolean; storageKey?: string | null; autocreate?: boolean }>
+  getEnvCatalog(): Promise<{ groups: Array<{ group: string; label: string; vars: Array<{ name: string; description: string }> }> }> // 环境变量面板白名单目录
+  // 令牌与连接态（UI 登录态持久化、SSE 兜底判定用）
+  setToken(token: string): void
+  getToken(): string | undefined
+  isConnected(): boolean
   // 会话
   listSessions(): Promise<SessionInfo[]>
   createSession(name?: string): Promise<SessionInfo>
-  getSession(id: string): Promise<SessionInfo>
+  getSession(id: string): Promise<SessionDetail> // 含正文详情（列表用 SessionInfo）
   deleteSession(id: string): Promise<void>
+  restoreSession(id: string): Promise<void> // 从 trash 恢复已归档会话
+  truncateSession(id: string, beforeMsgId: string): Promise<void> // 截断某消息之前的历史
   renameSession(id: string, name: string): Promise<void>
   pinSession(id: string, pinned: boolean): Promise<void> // 置顶/取消置顶（不刷新 updatedAt）
   switchSession(id: string): Promise<void>
   getCurrentSession(): Promise<SessionInfo | null>
   // 环境变量（会话内存态，不落盘；用户环境变量只存浏览器本地）
-  getSessionEnv(sessionId: string): Promise<Record<string, string>>
+  getSessionEnv(sessionId: string): Promise<EnvVarSource[]> // 带来源标记（服务端/会话/用户三层）
   setSessionEnv(sessionId: string, vars: Record<string, string | null>): Promise<void>
   // 上下文压缩
   compactSession(sessionId: string, scope?: "all" | { from: number; to: number }): Promise<void>
   // 任务控制
   cancelTask(sessionId: string): Promise<void>
   decideApproval(sessionId: string, toolCallId: string, approve: boolean): Promise<void>
+  decideChoice(sessionId: string, choiceId: string, selection: string | string[] | null): Promise<void> // ask 选项回传（null=取消）
+  decideEnv(sessionId: string, envId: string, value: string | null): Promise<void> // ask 填值回传
+  submitDrawResult(sessionId: string, renderId: string, ok: boolean, error?: string): Promise<void>
+  submitCaptureResult(sessionId: string, captureId: string, result: { html: string; imageBase64?: string; error?: string }): Promise<void>
   // 反馈
   submitFeedback(feedback: FeedbackInput): Promise<void>
   listFeedback(filter?: FeedbackFilter): Promise<FeedbackInfo[]>
   // 用户管理（服务模式，管理员）
   listUsers(): Promise<UserInfo[]>
-  createUser(username: string, password: string): Promise<UserInfo>
-  updateUser(id: string, patch: Partial<UserPatch>): Promise<UserInfo>
+  createUser(username: string, password: string, role?: "user" | "admin"): Promise<UserInfo>
+  updateUser(id: string, patch: UserPatch): Promise<UserInfo>
   deleteUser(id: string): Promise<void>
   // 子Agent
   listSubAgents(): Promise<SubAgentInfo[]>
-  loadSubAgent(name: string): Promise<void>
-  // 待办
+  loadSubAgent(name: string, sessionId?: string): Promise<void>
+  unloadSubAgent(name: string, sessionId?: string): Promise<void>
+  // 待办（会话级）
   listTodos(sessionId: string): Promise<TodoItem[]>
+  // 待办（用户级 / 闲时任务，见「用户级待办与闲时任务」）
+  listUserTodos(): Promise<UserTodo[]>
+  createUserTodo(input: { text: string; idle?: boolean }): Promise<UserTodo>
+  updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean }): Promise<UserTodo>
+  deleteUserTodo(id: string): Promise<void>
+  reorderUserTodos(ids: string[]): Promise<UserTodo[]>
+  runUserTodo(id: string): Promise<{ todo: UserTodo; sessionId: string }> // 立即执行：新建会话以该待办文本为提示词跑一次
   // 会话临时文件
   listSessionFiles(sessionId: string): Promise<FileEntry[]>
   readSessionFile(sessionId: string, path: string): Promise<string>
@@ -180,8 +200,7 @@ class GebaiClient {
   // 工具选择
   listTools(): Promise<ToolInfo[]>
   setToolEnabled(name: string, enabled: boolean): Promise<void>
-  // 当前用户 / Webhook（REST）
-  getCurrentUser(): Promise<UserInfo>
+  // Webhook（REST）
   listWebhooks(): Promise<WebhookInfo[]>
   registerWebhook(input: { url: string; events?: string[]; secret?: string }): Promise<WebhookInfo>
   deleteWebhook(id: string): Promise<void>
@@ -207,7 +226,7 @@ class GebaiClient {
 
 服务端内置 Web UI，由 Vite 构建打包并嵌入二进制。同一套 UI 同时服务于两种宿主：本地模式（WebView/浏览器）与服务模式（部署浏览器）。
 
-> **开发**：脚本调试模式（`bun run dev`）下服务端托管 `packages/web/dist` 构建产物。启动时若检测到 `packages/web` 源码比 `dist` 产物新（或 `dist` 缺失），会**自动执行 web 构建**后再监听端口，避免「改了前端代码但页面仍是旧产物」；二进制模式不触发（产物随二进制分发）。**开发热刷新**：`bun run dev --reload`（或 `GEBAI_DEV_RELOAD=1`）额外启动 `bun run build:watch`（先经 `scripts/clean-dist.ts` 带重试安全清空 dist——Windows 上 vite 内置 emptyDir 无重试、删除瞬时占用文件会抛 `ENOTEMPTY` 崩溃，故 vite 配置 `emptyOutDir: false`；再 `vite build --watch`）——Web 源码变更自动增量重建 dist，构建完成后经专用 WebSocket 通道（`/__gebai_hot`）广播，页面自动刷新；页面注入的监听脚本在连接断开（服务端重启）后也会自动刷新页面。**首轮构建窗口期兜底**：`--reload` 启动后 dist 会被 clean-dist 清空、vite 尚需数秒重建，此窗口期 `GET /` 读取不到 `index.html`——服务端不再抛 ENOENT 崩溃，而是返回 503 占位页（「前端构建中」，复用 `/__gebai_hot` 监听构建完成广播自动刷新，另以 3s 定时刷新兜底），构建完成后下次请求即返回真实页面；dev-reload 模式下即使 dist 目录整体暂时缺失，Web UI 路由也保持注册。**HTML 不缓存**：dev-reload 模式下 `GET /` 每次请求重读 `dist/index.html`（vite 每次重建产出新 hash 资源，若缓存启动时的旧 HTML，页面刷新后仍会加载旧资源、改动永不生效）；非 dev-reload（生产/二进制）模式维持启动后首次读取并缓存。**服务重启自动刷新**：页面注入脚本轮询 `/api/health` 的进程启动标识 bootId（`core/base/boot-id.ts`，每进程启动生成一次）——变化即说明服务已重启（且重启时前端产物可能已重建），自动 `location.reload()` 重新加载，免除手工 F5（即「重启服务，前端跟着重启」）；仅本地模式（auth=local）注入，服务模式多用户部署不被服务重启打扰。**重启继承**：`restart_server` 把 `GEBAI_DEV_RELOAD` 作为启动级环境变量传给新进程（`--reload` 是 argv 参数、不会被拉起器复制，故工具侧显式补 `GEBAI_DEV_RELOAD=1`），重启后 vite build --watch 与热刷新通道不丢。
+> **开发**：脚本调试模式（`bun run dev`）下服务端托管 `packages/web/dist` 构建产物。启动时若检测到 `packages/web` 源码比 `dist` 产物新（或 `dist` 缺失），会**自动执行 web 构建**后再监听端口，避免「改了前端代码但页面仍是旧产物」；二进制模式不触发（产物随二进制分发）。**开发热刷新**：`bun run dev --reload`（或 `GEBAI_DEV_RELOAD=1`）额外启动 `bun run build:watch`（先经 `packages/web/scripts/clean-dist.ts` 带重试安全清空 dist——Windows 上 vite 内置 emptyDir 无重试、删除瞬时占用文件会抛 `ENOTEMPTY` 崩溃，故 vite 配置 `emptyOutDir: false`；再 `vite build --watch`）——Web 源码变更自动增量重建 dist，构建完成后经专用 WebSocket 通道（`/__gebai_hot`）广播，页面自动刷新；页面注入的监听脚本在连接断开（服务端重启）后也会自动刷新页面。**首轮构建窗口期兜底**：`--reload` 启动后 dist 会被 clean-dist 清空、vite 尚需数秒重建，此窗口期 `GET /` 读取不到 `index.html`——服务端不再抛 ENOENT 崩溃，而是返回 503 占位页（「前端构建中」，复用 `/__gebai_hot` 监听构建完成广播自动刷新，另以 3s 定时刷新兜底），构建完成后下次请求即返回真实页面；dev-reload 模式下即使 dist 目录整体暂时缺失，Web UI 路由也保持注册。**HTML 不缓存**：dev-reload 模式下 `GET /` 每次请求重读 `dist/index.html`（vite 每次重建产出新 hash 资源，若缓存启动时的旧 HTML，页面刷新后仍会加载旧资源、改动永不生效）；非 dev-reload（生产/二进制）模式维持启动后首次读取并缓存。**服务重启自动刷新**：页面注入脚本轮询 `/api/health` 的进程启动标识 bootId（`core/base/boot-id.ts`，每进程启动生成一次）——变化即说明服务已重启（且重启时前端产物可能已重建），自动 `location.reload()` 重新加载，免除手工 F5（即「重启服务，前端跟着重启」）；仅本地模式（auth=local）注入，服务模式多用户部署不被服务重启打扰。**重启继承**：`restart_server` 把 `GEBAI_DEV_RELOAD` 作为启动级环境变量传给新进程（`--reload` 是 argv 参数、不会被拉起器复制，故工具侧显式补 `GEBAI_DEV_RELOAD=1`），重启后 vite build --watch 与热刷新通道不丢。
 
 > **首屏加载**：构建产物资源（`/assets` 指纹名、`/vendor` 引擎、`/fonts` 字体）由 `routes/static.ts` 统一托管，按 `Accept-Encoding` 协商 **Brotli（br 优先）/Gzip** 压缩——压缩结果按「路径+size+mtime+编码」在内存缓存（上限 32MB，超限按插入顺序淘汰），同一资源只压一次（vendor 引擎单文件数 MB，一次性 CPU 换长期带宽：plantuml.js 3.8MB → 942KB、main.js 485KB → 153KB）；woff2/wasm/图片等已压缩或二进制格式与小于 1.4KB 的资源不压（编码与头部开销可能反超收益），响应带 `Vary: Accept-Encoding` 保证中间代理按编码正确分流。**缓存策略**：`/assets/*`（vite 内容 hash）`public, max-age=31536000, immutable` 强缓存，`/vendor/*` 与 `/fonts/*`（稳定名）`public, max-age=86400`，dev-reload 下一律 `no-cache`（重建覆盖同名文件，新页面内容即时可见）；`index.html`/`files.html` 保持 `no-cache`（每次校验，防旧 HTML 引用已删除的旧 hash）。路径经解析钳制在 `webDist` 内（目录穿越拒绝），未命中前缀时落到 `serveStatic` 兜底（favicon、预览页等根文件）；二进制模式同一策略作用于内嵌资源表。
 
@@ -220,7 +239,7 @@ class GebaiClient {
 > - **阅读位置跨会话恢复**：离开时会话不在底部（记住 `scrollTop > 0`）时，因首批尚未渲染更早历史，按绝对位置恢复会被内容高度钳制到底部并误判「贴底跟随」（补齐前插时又被拽回底）——此种情况**先解除跟随、等补齐完成（内容坐标完整）后再 `restoreScroll`**；期间用户自行滚动（wheel/touchmove/keydown）则放弃恢复，不把用户拽回。
 > - **折叠容器回放**：历史容器不重建在途流引用（`liveRun` 仅首批传入）——流式累积与 `sessionRuns` 引用只属于当前运行，旧运行的补渲染不得覆盖它。
 
-> **构建性能**：图表渲染引擎全部**不参与 vite/rollup 打包**——构建/开发前由 `packages/web/scripts/build-vendor.ts` 原样拷贝到 `public/vendor/`（gitignore），运行时 `diagram.ts` 以**稳定文件名**按需加载：PlantUML 引擎 `@plantuml/core`（上游 TeaVM 编译单文件 `plantuml.js`，约 6.9MB，若走打包链路需 ~11s 占 web 构建 90%+，此方式将构建降至 ~1s）、`viz-global.js`（Graphviz 布局，classic script 注入）、Mermaid 官方 `dist/mermaid.min.js`（约 3.5MB 自包含 UMD，含全部图型）、ECharts 官方 `dist/echarts.min.js`（约 1MB 自包含 UMD，含 SVG 渲染器，SSR 模式直接输出 SVG 字符串）、D2 官方浏览器构建目录（`d2js/`：index.js + worker + wasm，内部相对路径引用）。**稳定文件名（无内容 hash）+ 静态伺服**：开发模式重建后 URL 不变，旧页面引用旧 hash 动态分块导致的 404（「Failed to fetch dynamically imported module」）**从根上消除**（`diagram.ts` 仍保留整页刷新一次兜底，覆盖极端缓存竞态）。产物随 `dist/` 一并分发。
+> **构建性能**：图表渲染引擎全部**不参与 vite/rollup 打包**——构建/开发前由 `packages/web/scripts/build-vendor.ts` 原样拷贝到 `public/vendor/`（gitignore），运行时 `diagram.ts` 以**稳定文件名**按需加载：PlantUML 引擎 `@plantuml/core`（上游 TeaVM 编译单文件 `plantuml.js`，实测约 3.9MB，若走打包链路会占 web 构建绝大头，此方式将构建降至秒级）、`viz-global.js`（Graphviz 布局，classic script 注入）、Mermaid 官方 `dist/mermaid.min.js`（约 3.5MB 自包含 UMD，含全部图型）、ECharts 官方 `dist/echarts.min.js`（约 1MB 自包含 UMD，含 SVG 渲染器，SSR 模式直接输出 SVG 字符串）、D2 官方浏览器构建目录（`d2js/`：index.js + worker + wasm，内部相对路径引用）。**稳定文件名（无内容 hash）+ 静态伺服**：开发模式重建后 URL 不变，旧页面引用旧 hash 动态分块导致的 404（「Failed to fetch dynamically imported module」）**从根上消除**（`diagram.ts` 仍保留整页刷新一次兜底，覆盖极端缓存竞态）。产物随 `dist/` 一并分发。
 
 页面清单：
 
@@ -246,7 +265,7 @@ class GebaiClient {
 
 前端**不依赖浏览器原生交互控件**，全部交互组件基于主题 CSS 变量自绘（`packages/web/src/ui.ts` + `css/overlays.css`）：
 
-- **对话框**：`alert`/`confirm` 全部替换——错误提示走 **Toast**（底部居中浮层，`toast(text, kind)`，自动消失，`error`/`ok` 两种色点）；确认走**自绘模态框** `confirmDialog({ title, text, okLabel, danger, list })`（返回 Promise<boolean>，Esc/遮罩/取消关闭，复用 `.preview-overlay` + `.confirm-card` 样式，支持待删条目列表展示）
+- **对话框**：`alert`/`confirm` 全部替换——错误提示走 **Toast**（底部居中浮层，`toast(text, kind)`，自动消失，`error`/`ok` 两种色点）；确认走**自绘模态框** `confirmDialog({ title, text, okLabel, danger, list })`（返回 Promise<boolean>，Esc/遮罩/取消关闭，复用 `.preview-overlay` + `.confirm-card` 样式——两样式定义在 `css/chat.css`，非 `overlays.css`）
 - **Tooltip**：`title` 属性全部替换为 `data-tip` 属性（JS 侧 `tip(el, text)` 助手），`bindTooltips()` 全局委托（pointerover/pointerout/focusin/focusout）渲染单个固定定位浮层——不受容器 overflow 裁剪、视口边缘翻转、长文本省略；**滚动隐藏收窄**：仅当滚动容器包含悬浮宿主（或页面级滚动）时隐藏（fixed 浮层只会随宿主自身漂移）——此前任意滚动一律隐藏，生成中消息流 sticky-follow 自动滚动等**无关容器**的程序滚动会把标题栏上下文圆环的悬浮刚显示即冲掉（光标未动不重触发 pointerover，提示消失，表现为「信号灯闪烁期间悬浮失效」）
 - **表单控件**：`<select>` 替换为自绘下拉 `customSelect({ options, value, onChange })`（按钮 + 固定定位浮层，Esc/外部点击关闭，暴露 `root`/`value`/`setValue`；**浮层懒创建且挂载到 `document.body`**——部分主题给行加 hover `transform`（`.settings-row` / `#session-list li` 的 `translateX`），transform 祖先会成为 fixed 子元素的 containing block，浮层 `left/top` 会被解释为行内局部坐标而飞出屏外（实测偏移约 820px）；挂 body 后 fixed 始终相对视口，按钮 `getBoundingClientRect()` 视口坐标直接可用；同时**每次打开重建、关闭即移除**，设置面板重渲染不会在 body 堆积隐藏的孤儿浮层）；`datalist` 替换为输入联想浮层 `bindSuggestions(input, items)`（focus/input 过滤展示，点击回填，浮层同样挂 body）；复选框自绘（`appearance: none`，`.ck` 类，勾选 SVG 对勾）；`required` 原生校验气泡关闭（表单 `novalidate` + 提交时自绘校验，失败 Toast 提示）；文件选择沿用隐藏 input + 自定义触发按钮
 
@@ -352,12 +371,12 @@ class GebaiClient {
 | `GEBAI_CORS_ORIGINS` | 允许跨域来源（逗号分隔，`*` 表示全部） | `*` |
 | `GEBAI_BASE_PATH` | 反向代理挂载前缀（如 `/gebai`），静态资源/API/WS 均以该前缀为基准 | `/` |
 | `GEBAI_TRUST_PROXY` | 是否信任 `X-Forwarded-*` 代理头（`true`/`false`） | `false` |
-| `GEBAI_SANDBOX` | 路径沙箱：`auto`（**只看运行形态**——服务模式强制启用，本地模式不限制；不按监听地址/IP 判定）/ `on`（强制限制）/ `off`（不限制）；**admin 用户豁免**（特权用户，不受用户沙箱控制，见「多用户隔离与安全」） | `auto` |
+| `GEBAI_SANDBOX` | 路径沙箱：`auto`（**只看运行形态**——服务模式强制启用，本地模式不限制；不按监听地址/IP 判定）/ `on`（强制限制）/ `off`（不限制）；**admin 豁免仅本地模式**（`isExempt` 判 `auth === "local"`；服务端部署下 admin 同受沙箱约束，见「多用户隔离与安全」） | `auto` |
 | `GEBAI_PRELOAD_SUB_AGENTS` | 启动预载子Agent 名单（逗号分隔）：启动时注册其工具，**每个新会话创建时自动装载**（提示词 system 消息写入会话记录 + 工具注册）；为空 = 默认不预载任何子Agent | 空 |
 | `GEBAI_SUB_AGENTS_ENABLE` | 子Agent **白名单**（逗号分隔）：非空时仅保留名单内子Agent（其余全部 `unregister`——`agent_list`/`agent_load`/`agent_run`/系统提示词注入均不可见，热加载不复活）；与 `GEBAI_SUB_AGENTS_DISABLE` 同时配置**先白后黑**（黑名单最终生效） | 空（不裁剪） |
 | `GEBAI_SUB_AGENTS_DISABLE` | 子Agent **黑名单**（逗号分隔）：名单内子Agent `unregister`（运行时能力面收敛，与构建期 `GEBAI_BUILD_SUBAGENTS` 打包裁剪互补）；名单未知名启动告警忽略不阻断 | 空 |
-| `GEBAI_UI_STYLE` | 默认 UI 风格（`acrylic`/`aether`/`matrix`/`tokyo-night`/`cyberpunk`/`synthwave`/`aurora`/`ink`/`cny`/`qinhan`），可被 URL/用户级覆盖 | `acrylic` |
-| `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error` | `info` |
+| `GEBAI_UI_STYLE` | 默认 UI 风格（`acrylic`/`aether`/`matrix`/`tokyo-night`/`cyberpunk`/`synthwave`/`aurora`/`ink`/`cny`）；**服务端白名单为这 9 项**（`qinhan` 虽在前端主题面板可选，但未进白名单——设了会被静默回落为 `acrylic`，属待修缺陷）；可被 URL/用户级覆盖 | `acrylic` |
+| `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error`（**当前读入 `config.logLevel` 后无消费点，级别过滤未实现**——日志统一走标准输出，见「日志系统」） | `info` |
 | `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具） | 空（全部启用） |
 | `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具） | 空 |
 | `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs`/`feishu_group` 子Agent 的全局兜底 + 机器人桥接凭证 + 定时任务飞书应用消息通知（指定群 chat_id 推送/@人））、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**机器人行为开关 `GEBAI_FEISHU_BOT_NOTIFY_TOOLS`（工具调用过程滚动状态消息）/ `GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT`（助手中间轮文本预览）/ `GEBAI_FEISHU_BOT_AUTO_APPROVE`（需审批工具自动通过，见「飞书机器人集成 → 配置」）**、TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）；`feishu_group` 专属前缀 `FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET` 可独立配置 | 不启用 |
@@ -406,7 +425,6 @@ class GebaiClient {
 | `GEBAI_EXTERNAL_AUTH_AUTOCREATE` | 外部用户名不存在时自动创建 GEBAI 用户（普通角色、随机密码不可密码登录）；`false` 时仅允许管理员预建的同名用户 | `true` |
 | `GEBAI_EXTERNAL_AUTH_STORAGE_KEY` | Web UI 同源直读宿主 localStorage 的凭证 key（值支持 JSON `{"username","credential"}` 或 `"username:credential"` 字符串）；不设则仅支持 URL 参数注入 | 空 |
 | `--server` | 开启服务模式（等价 `GEBAI_MODE=server`，参数优先） | - |
-| `--no-webview` | 强制不启动桌面 WebView | - |
 
 > 以上为**全局层**环境变量（进程注入），会话层可覆盖其中可运行时变更的项（**模型/Provider 配置全量可覆盖**：`GEBAI_LLM_MODEL`/`API_BASE`/`API_KEY`/`API_KIND`/`MAX_CONTEXT`/`MAX_OUTPUT_TOKENS`/`MULTIMODAL`/`ROUTES` 与 `GEBAI_VISION_*` 任务级生效，按任务重建 Provider，见「环境变量配置」）。
 
@@ -420,8 +438,8 @@ class GebaiClient {
 - 支持多种 LLM Provider：支持 OpenAI 兼容 `chat/completions`、OpenAI Responses（`/responses`）与 Anthropic `messages` 三类接口（均流式），通过统一的 `provider.chat()` 抽象封装，自行解析 SSE 流，不依赖第三方 AI SDK
 - **额外模型接口参数**：支持自定义非标准请求体参数（如 `reasoning_effort` 推理强度、`temperature`、`thinking` 等），来源两级——Provider 级（`GEBAI_LLM_EXTRA_PARAMS` 环境变量，启动解析失败即报错）+ 任务级（浏览器本地注入同名环境变量，非法 JSON 静默忽略），后者优先，均顶层合并进请求体
 - **任务级模型覆盖**：主模型与视觉模型配置（`GEBAI_LLM_*` 全套与 `GEBAI_VISION_*`）支持会话/任务级覆盖——启动时以进程环境变量固化基准配置（`core/llm/llm.ts` 的 `applyModelEnvOverrides`/`resolveVisionProvider`，boot/compose.ts 组装 `AgentEngineOptions.resolveProvider` 与 env 感知的视觉 getter），每次任务启动按合并后 env 解析 Provider（无覆盖键时沿用启动实例零开销）；覆盖项含模型名、接口地址、密钥、接口类型、上下文预算、多模态声明，未覆盖项继承启动配置；作用域覆盖主循环（含上下文压缩阈值/摘要与附件内联判定——**主动压缩（UI/REST 入口）未显式指定 Provider 时同样按合并后 env 解析**）与 `agent_run` 新会话执行
-- 多模态：`provider.chat()` 统一承载文本 + 图片/音视频消息，按 Provider/模型能力自动组装各自消息格式（统一内部图片块 `{type:"image", mime, data}` → OpenAI 系（chat/completions 与 Responses）`image_url` data URL / Anthropic base64 `image` 块）
-- **额外多模态（视觉）模型**：支持独立配置视觉模型（`GEBAI_VISION_*`，缺省继承主模型接口），供全局工具 `vision` 将图片文件交给视觉模型分析（目标 + 图片文件参数）；未配置时 `vision` 回落到主模型（须声明多模态能力）
+- 多模态：`provider.chat()` 统一承载文本 + 图片消息（音频/视频为文件工作台查看能力，不投喂模型），按 Provider/模型能力自动组装各自消息格式（统一内部图片块 `{type:"image", mime, data}` → OpenAI 系（chat/completions 与 Responses）`image_url` data URL / Anthropic base64 `image` 块）
+- **额外多模态（视觉）模型**：支持独立配置视觉模型（`GEBAI_VISION_*`，缺省继承主模型接口），供 vision 子代理的 `vision_analyze` 将图片文件交给视觉模型分析（目标 + 图片文件参数）；未配置时回落到主模型（须声明多模态能力）
 - **模型能力声明**：`LLMProvider.capabilities()` 返回 `{ streaming, toolCalling, multimodal, maxContextTokens, maxOutputTokens }`——`maxOutputTokens`（单次响应输出上限）为上下文压缩的触发基准（窗口剩余必须足够支撑一次回复）；`maxContextTokens` 用于上下文占用判定
 - 通过 `GEBAI_MODE`（默认 `local`；兼容旧 `GEBAI_AUTH`，或 CLI `--server`）环境变量切换运行形态：
   - **本地模式**（默认）：无需登录，直接以 **admin 用户**身份工作（**管理员超级权限 + 路径沙箱豁免**，不受任何权限限制），数据仍按用户目录存储
@@ -429,7 +447,7 @@ class GebaiClient {
 - 业务系统集成统一走**账号密码认证**：`POST /api/v1/auth/login` 获取令牌后以 `Authorization: Bearer <token>` 调用 REST；或**单次请求直接带 HTTP Basic**（`Authorization: Basic base64(username:password)`，等价隐式登录，复用密码校验与登录限流、不签发令牌）；WS 用 `auth.login { token }` 建立用户上下文——**无独立服务令牌**（原 `GEBAI_SERVICE_API_KEY` 服务身份机制已移除，避免任何服务端密钥进入 Agent 可达环境）
 - **启动加载策略（重依赖惰性化）**：以「服务可用性优先」组织启动——`listening` 之前只加载引擎主循环与装配必需的模块，重第三方依赖一律延迟到首次实际使用（ESM 用 `await import()`，同步 API 用模块级单例 `require` 缓存）：
   - **图表渲染**（`core/support/diagram-render.ts`：echarts/happy-dom/mermaid/plantuml/d2）：引擎（ToolContext `renderDiagram`）与飞书桥接（`FeishuBot.rendererOf`）均惰性取，不在启动路径
-  - **Office/PDF 解析与生成**（`agents/wps/*`：exceljs/docx/pptxgenjs/pdf-lib/fontkit/happy-dom）：各工具 `execute`（均 async）内引入；`@gebai/agents` 的 `renderOfficeReadingView` 经 `wps/excel.loadWorkbook()` 复用同一惰性入口（该导出位于 `@gebai/agents` 入口且被 `core/tools/show.ts` 静态引用，不得静态拖入重依赖）
+  - **Office/PDF 解析与生成**（`agents/wps/*`：exceljs/docx/pptxgenjs/pdf-lib/fontkit/happy-dom）：各工具 `execute`（均 async）内引入；`@gebai/agents` 的 `renderOfficeReadingView` 经 `wps/excel.loadWorkbook()` 复用同一惰性入口（该导出位于 `@gebai/agents` 入口，被 `routes/fs.ts`/`routes/session-files.ts` 经 `await import("@gebai/agents")` 动态引用，不得静态拖入重依赖）
   - **内嵌 Web UI bundle**（`core/web.bundle.generated.ts`，数十 MB）：仅二进制模式读取内嵌资源时加载（`routes/static.ts` 的 `embeddedWebAssets()`）；源码/dev 形态走 `webDist`，不进启动路径
   - **飞书机器人长连接**：监听建立后异步发起（`boot/serve.ts` 于 `listening` 之后 `void feishuBot.start()`，握手失败只记 error 日志、服务照常可用；凭证缺失仍在 compose 装配期抛错）；`new FeishuBot` 构造不触发网络
   - 子Agent 定义模块（`discover()` 逐一 import 以取 `def`）遵循同一约定：**模块顶层不静态引入重第三方库**，实现内延迟到首次工具调用（`def` 的 name/description/tools 组装只依赖轻量模块）
@@ -457,14 +475,14 @@ class GebaiClient {
 | 接口 | 职责 | 关键方法 |
 |------|------|---------|
 | `LLMProvider` | 三类接口统一抽象、多模态组装、流式解析；**多模态内容块转换**：统一内部图片块 `{type:"image", mime, data}`（base64）按接口规范转换（OpenAI 系 `image_url` data URL、Anthropic base64 `image` 块），`imageMessageBlocks()` 助手构造文本+图片消息；**Responses API**：消息转 `input`（assistant 工具调用拆独立 `function_call` item + `function_call_output`），工具扁平格式 `{type:"function",name,description,parameters}`，流式事件解析（`output_item.added`/`function_call_arguments.delta|done`/`output_text.delta`/`reasoning_*_text.delta`/`completed`，stop reason 取末条 message `finish_reason`）；**额外模型接口参数**：Provider 级（`GEBAI_LLM_EXTRA_PARAMS`）与调用级（`ChatOptions.extraParams`）请求体参数顶层合并（后者优先）；**接口健壮性**：fetch 层对网络错误/429/5xx 指数退避重试（2 次，500ms 基数，退避可被取消），4xx 与 AbortError 不重试，错误响应体截断 200 字符 | `chat(messages, opts): AsyncIterable<Chunk>`、`capabilities()` |
-| `AgentEngine` | 主循环状态机：工具循环（**同批工具并行执行**，见「核心Agent流程」）/审批/重试/压缩/取消；**模型调用健壮性**：空响应（无文本且无工具调用，含只思考未输出）与无产出异常经 `callModel` 指数退避重试（2 次，800ms 基数，注入提示引导），已有产出后断流不重试（避免重复输出），耗尽抛中文错误；**重试过程前端可见**——每次将重试的模型服务异常推送 `event.model.error`（非终态瞬时提示，见「事件清单」）；**重复检测**：最近 8 次工具调用签名（工具名+参数 JSON）滚动窗口，相同签名在窗口尾部**连续**出现第 3 次（其间无任何其他调用）才中断执行并注入引导提示（间隔其他调用后重发同签名是「改动后复查」，不判重复），中断超 2 次终止工具循环（避免模型无效重复；同批重复签名只计一次——同批相同调用是有意扇出，跨轮连续重发才累积）；待办续做回复与上轮完全相同（纯文本）时追加防复述提示；**会话级已读文件追踪**（fileGuard，防盲写守卫，见「防盲写守卫」） | `run(session, prompt, opts)`、`cancel(sessionId)` |
+| `AgentEngine` | 主循环状态机：工具循环（**同批工具并行执行**，见「核心Agent流程」）/审批/重试/压缩/取消；**模型调用健壮性**：空响应（无文本且无工具调用，含只思考未输出）与无产出异常经 `callModel` 指数退避重试（2 次，800ms 基数，注入提示引导），已有产出后断流不重试（避免重复输出），耗尽抛中文错误；**重试过程前端可见**——每次将重试的模型服务异常推送 `event.model.error`（非终态瞬时提示，见「事件清单」）；**重复检测**：最近 8 次工具调用签名（工具名+参数 JSON）滚动窗口，相同签名在窗口尾部**连续**出现第 3 次（其间无任何其他调用）才中断执行并注入引导提示（间隔其他调用后重发同签名是「改动后复查」，不判重复），中断超 2 次终止工具循环（避免模型无效重复；同批重复签名只计一次——同批相同调用是有意扇出，跨轮连续重发才累积）；待办续做回复与上轮完全相同（纯文本）时追加防复述提示；**会话级已读文件追踪**（fileGuard，防盲写守卫，见「防盲写守卫」） | `run(sessionId, user, prompt, opts)`、`cancel(sessionId)` |
 | `ToolRegistry` | 工具注册/命名空间解析/启停/审批声明 | `register(tool)`、`resolve(name)`、`list()` |
 | `SessionStore` | 会话/消息/待办/附件持久化（分片路径） | `load(id)`、`save(session)`、`appendMessage()` |
-| `EnvManager` | 环境变量合并：全局（进程 env）+ 会话内存态（不落盘）；用户环境变量只存浏览器本地、随 prompt 任务级注入 | `resolve(sessionId): Record<string,string>` |
+| `EnvManager` | 环境变量合并：全局（进程 env）+ 会话内存态（不落盘）；用户环境变量只存浏览器本地、随 prompt 任务级注入 | `resolve(sessionId, user): Promise<Record<string,string>>` |
 | `AuthService` | 用户认证、令牌、归属校验、API Key | `login()`、`authorize(ws/api)` |
 | `Sandbox` | 路径沙箱、子进程执行、超时控制（支持取消信号：abort 按进程树终止——Unix 进程组 SIGKILL、Windows `taskkill /T`） | `resolvePath(user, path)`、`exec(cmd, opts)` |
 | `EventBus` | 服务端事件分发（WS/Webhook/飞书） | `publish(event)`、`subscribe()` |
-| `Compressor` | 上下文压缩与截断落盘 | `compact(session, scope)` |
+| `ContextCompressor` | 上下文压缩与截断落盘（水位触发 / 溢出恢复） | `compactSession(sessionId, user, scope?, provider, opts?)` |
 
 #### 服务端目录结构（领域分层）
 
@@ -483,30 +501,30 @@ src/
     base/           #   基础层：types/config/paths/event-bus/registry + 文本行/补丁纯算法
     llm/            #   LLM 接入（Provider 工厂与三接口实现）+ 多模态解析
     engine/         #   引擎：engine.ts（主循环）+ interactions.ts（五种阻塞交互的等待/决策）+ compressor.ts（上下文压缩/溢出恢复）+ prompt.ts（系统提示词构建）
-    tools/          #   全局工具域：注册文件（fs/exec/show/agent/interact/schemas/extras）+ shared.ts（GlobalToolEntry 契约与 schema/parseRegion 助手）+ cv-analysis.ts（本地识别三工具共享工厂，desktop/playwright 复用）+ index.ts（聚合器/barrel）+ projects.ts/vision.ts
-    support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/analyzer/diagram-render/image-resize（视觉传输压缩）
+    tools/          #   全局工具域：注册文件（fs/exec/show/agent/interact/schemas/restart/projects）+ shared.ts（GlobalToolEntry 契约与 schema/parseRegion 助手）+ index.ts（聚合器/barrel）。本地识别共享工厂（cv-analysis）与 vision 工厂已迁 @gebai/agents core/shared，经 registry 直调消费
+    support/        #   工具与引擎共用支撑：truncate/walk/artifacts/plan/exec-opts/fetch-scope/diagram-render（analyzer 与 image-resize 已迁 @gebai/agents）
     session/        #   会话域：store（持久化）/env/branch-runs/session-runs/gc
         schedule/       # 定时任务与用户级待办：cron + notify（通知通道）+ todos（用户级待办清单与闲时任务调度）
     exec/           #   脚本执行：js-tool/sh-tasks
-    browser/        #   浏览器桥接基建：bridge（node driver.mjs JSON-RPC 桥/playwright 模块与 channel 解析/惰性共享单例/会话锁）+ driver.mjs + fetch-proxy（透明浏览器代理垫片）——playwright/reverse_site 子Agent 与浏览器代理共用的平台级底座，不依赖子Agent 定义存在
-    cv/             #   本地 CV 推理基建：ort-loader（onnxruntime-web wasm 运行时动态解析与内嵌物化）+ cv（惰性单例/模型目录解析/session 缓存/推理串行/检测分层后端选择）+ image/ocr/detect（前后处理纯函数，含检测×OCR 配对）+ onnx-meta（ONNX 元数据解析：ultralytics imgsz/names）+ template（模板匹配 NCC 纯函数）+ sidecar/cv-driver.mjs（GPU sidecar：node 子进程跑 onnxruntime-node，检测重模型的原生推理）——desktop/playwright 子Agent 本地识别的底座（工具消费层=core/tools/cv-analysis 共享工厂），不依赖子Agent 定义存在
+    browser/        #   仅剩 fetch-proxy（透明浏览器代理垫片，供 fetch_url/SSRF 路径共用）；完整桥接基建（bridge.ts + driver.mjs + pwcore 内嵌产物）在 @gebai/agents core/browser——playwright/reverse_site 子Agent 与浏览器代理共用的平台级底座，不依赖子Agent 定义存在
+    cv/             #   （已整体迁至 @gebai/agents core/cv）本地 CV 推理基建：ort-loader + cv + image/ocr/detect + onnx-meta + template + sidecar/cv-driver.mjs，内嵌产物 cv.embedded.generated.json 同目录——desktop/playwright 子Agent 本地识别的底座（工具消费层=agents core/shared/cv-analysis 共享工厂）
     fs/             #   文件工作台：roots（`sess:`/`proj:`/`bind:`/`user:`/`abs:` 根解析 + 白名单 + 路径防护）/service（列举与自然序、二进制与编码探测、文本读取、Range、打包 ZIP、内容搜索）/write（受保护的写：etag 乐观锁、编码回写、回收站）/archive（零依赖 ZIP 读）/mime（类型→查看器/语言）/audit（写操作审计）
     git/            #   Git 图形化：service.ts（git CLI 封装：状态/日志/分支/标签/暂存/远程 + **任意两端 compare/diff/contentAt**（WORKTREE/INDEX/任意 rev/mergeBase）+ 写操作串行化与自动备份）
-    security/       #   安全：sandbox/safety/ip/fetch-guard（SSRF 防护，webhook 校验共用）/ratelimit
-    agents/         #   子Agent 装载器：subagents（扫描/热加载）/sub-agent-md/env-catalog
+    security/       #   安全：sandbox/safety/ratelimit（ip/fetch-guard 的 SSRF 防护已迁 @gebai/agents core/shared，server 侧经包导入）
+    agents/         #   子Agent 装载器：subagents（扫描/热加载）/keqing（客卿 sidecar）/merge/env-catalog（sub-agent-md 已迁 @gebai/agents core/shared）
   feishu-bot/       # 飞书对话桥接
 ```
 
-**分层规则**：依赖单向——`base` ← `support`/`security` ← `tools`/`exec`/`session`/`schedule` ← `engine` ← `routes`/`ws-handlers` ← `boot`。`core/` 内部模块**禁止 import `core/tools` 聚合 barrel**（聚合器含目录扫描顶层 await，反向依赖会成环导致未初始化绑定）——共用能力直引 `core/support/*`、`core/security/*` 叶子模块；子 Agent 与顶层（routes/boot）可经 barrel 取既有导出。`checkWebhookUrl`/`fetchWithRedirectGuard` 等 SSRF 校验统一在 `core/security/fetch-guard.ts`（消除 core→顶层越层依赖）。
+**分层规则**：依赖单向——`base` ← `support`/`security` ← `tools`/`exec`/`session`/`schedule` ← `engine` ← `routes`/`ws-handlers` ← `boot`。`core/` 内部模块**禁止 import `core/tools` 聚合 barrel**（聚合器含目录扫描顶层 await，反向依赖会成环导致未初始化绑定）——共用能力直引 `core/support/*`、`core/security/*` 叶子模块；子 Agent 与顶层（routes/boot）可经 barrel 取既有导出。`checkWebhookUrl`/`fetchWithRedirectGuard` 等 SSRF 校验统一在 `@gebai/agents` core/shared/fetch-guard（server 侧经包导入，不新增越层依赖）。
 
 #### 全局工具零注册（文件级自动扩展）
 
 全局工具与子 Agent 同为「丢文件即注册」的扩展模型（`core/tools/` 目录）：
 
-- **注册契约**：目录内凡导出 `export const globalTools: GlobalToolEntry[]` 的文件即被收集——`GlobalToolEntry = { name, tool: Tool | (() => Tool), project?: boolean | "workdir" }`（`project` 声明 `projectAware` 包装，聚合器统一施加）；`shared.ts` 定义契约，纯辅助文件（`projects.ts`/`vision.ts` 等不导出 globalTools 的）不参与注册
-- **双通道**：dev 形态由 `core/tools/index.ts` 模块初始化时运行时扫描本目录（重启进程生效，无热加载——self_optimize 只写子 Agent 目录）；dist/`--compile` 形态回退 `scripts/build-tools.ts` 生成的静态注册表 `core/tools/bundle.generated.ts`（gitignore）
+- **注册契约**：目录内凡导出 `export const globalTools: GlobalToolEntry[]` 的文件即被收集——`GlobalToolEntry = { name, tool: Tool | (() => Tool), project?: boolean | "workdir" }`（`project` 声明 `projectAware` 包装，聚合器统一施加）；`shared.ts` 定义契约，纯辅助文件（如 `projects.ts` 等不导出 globalTools 的）不参与注册
+- **双通道**：dev 形态由 `core/tools/index.ts` 模块初始化时运行时扫描本目录（重启进程生效，无热加载——self_optimize 只写子 Agent 目录）；dist/`--compile` 形态回退 `packages/server/scripts/build-tools.ts` 生成的静态注册表 `core/tools/bundle.generated.ts`（gitignore）
 - **聚合器**：`createAllGlobalTools()`/`createGlobalTools()`/`isGlobalToolExcluded()` 签名与语义不变（构建期排除、重名抛错、engine 与 index.ts 注册面零改动）；`core/tools/index.ts` barrel 具名再导出原单文件时代的全部既有导出（导入方零改动），新增工具请从所在文件直接 import
-- 新增全局工具 = 在 `core/tools/` 新建一个导出 `globalTools` 的文件，不改任何中央注册表；命名空间专属工具（git/page_capture 等）放 `tools/extras.ts` 由子 Agent def 引用
+- 新增全局工具 = 在 `core/tools/` 新建一个导出 `globalTools` 的文件，不改任何中央注册表；命名空间专属工具（git/page_capture/read_feedback 等）落 `@gebai/agents` core/shared（原 server `core/tools/extras.ts` 已整体迁出），由子 Agent def 引用
 - **模式限定工具**：个别全局工具仅特定运行形态注入（如 `restart_server` 仅本地模式——compose 注册处按 `config.auth` 过滤，服务模式多用户部署不暴露）；工具仍在全局表（本地模式可用面不变），过滤发生在 compose 注册环节
 
 #### restart_server（重启自身服务，仅本地模式）
@@ -549,7 +567,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **必填参数校验（两循环同规则）**：模型漏传工具参数时（schema `required` 声明的键缺失/null）**不执行工具**，直接回传「工具 X 缺少必填参数: …」——缺失值若进工具会被 `String(undefined)` 成字面量 `"undefined"` 落进路径解析，报出与真实原因无关的 ENOENT（如 `edit` 漏传 `path` → `tmp\undefined`），模型无法从报错定位到「少传了参数」；校验点在审批门**之前**（坏调用不打扰用户审批），主循环与新会话循环一致生效
 - **大文件分段写入与截断抢救**：生成大文件时模型被迫单次输出全部内容，易触发接口超时与输出上限截断（参数 JSON 不完整）。三层防护——①**分段写入载体**：`write` 支持 `append:true` 追加模式，工具描述与 code 子Agent 提示词内置指引（约 300 行以上分多段写，每段 200~300 行），单次响应短、不再超时；②**截断检测**：provider 如实传出结束原因（OpenAI `finish_reason=length`、Anthropic `max_tokens`、Responses `response.incomplete`→`length`，不再吞为正常 stop），解析失败的工具参数携带原始全文（`toolCall.raw`，原仅 500 字符片段）；③**抢救落盘**：引擎对 write 类工具（`write`/`{agent}_write`）容错解析原始参数前缀（`salvageWriteArgs`：提取完整 `path` 与已生成 `content` 前缀，尾部不完整转义丢弃、非法转义放弃），先把已生成部分落盘并登记已读，工具结果引导模型 `append:true` 续写剩余部分（从已写入之后继续，不重新生成全量）——失败轮次转化为进度；未抢救（非 write 工具/前缀解析失败/防盲覆盖守卫拒绝）时回传截断专属引导（拆小操作/分段写入），不再笼统提示「重新输出合法 JSON」（重新整体输出只会再次截断）。单次响应输出上限可配（`GEBAI_LLM_MAX_OUTPUT_TOKENS` 任务级覆盖，Anthropic 缺省 8192）
 - **防盲写守卫（已读追踪）**：`write` 覆盖/追加、`edit`、`patch` 修改「已存在但本会话未读过」的文件均被拒绝（会话级 fileGuard 已读追踪，`read`/`edit`/`patch`/`write` 成功即登记），引导模型先 `read` 再改——拒绝作为工具结果返回，模型一轮自愈，不中断任务（见「防盲写守卫」）
-- **上下文管理**：历史超出窗口阈值时自动压缩（工具输出截断 → 旧消息摘要 → 滚动裁剪，见「上下文保护」），也支持用户主动压缩
+- **上下文管理**：窗口剩余不足以支撑一次回复时自动压缩（工具输出截断 → 旧消息摘要 → 溢出硬护栏，见「上下文保护」），也支持用户主动压缩
 - **审批超时**：审批请求超时（见常量参考）自动拒绝该次调用并提示模型调整，避免任务悬挂
 
 ### 会话输入队列（前端实现）
@@ -571,7 +589,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **附件 → 模型内容**（`AgentEngine.loadHistory` 重建）：图片附件（png/jpeg/gif/webp）且主模型声明多模态能力（`GEBAI_LLM_MULTIMODAL=true`）且 ≤8MB 时**压缩后**（见「图片压缩时序」）base64 内联为统一 `image` 块（携带 `path/name/size` 元数据，size 为原始体积），图片块后附尺寸说明 text 块（原始/压缩后尺寸与体积）；其余（非图片/超限/文件缺失/模型无多模态）降级为文本说明（路径 + MIME + 大小 + 视觉子代理指引），由模型决定装载 vision 子代理（`vision_analyze`）/`read` 等工具处理
 - **工具结果图片内联（`read` 图片直读）**：`read` 读取白名单图片（png/jpg/jpeg/gif/webp）**不按文本解码**（乱码无意义）——二进制读入后经 `ToolResult.images` 交引擎处理：主模型多模态时图片以统一 `image` 块**内联进工具结果消息**（模型直接可见，无需 vision 等其他工具），轻量引用（`Message.images`：绝对路径/原始路径/MIME，不含 base64）随工具消息落盘、`loadHistory` 历史重建按引用重读内联；非多模态不内联，工具返回说明 + 视觉子代理指引。svg 为文本按正常读取；bmp 不在白名单（返回转换引导）。**序列化**：OpenAI 兼容 `role:"tool"` 的 content 为块数组（text + `image_url`）；Anthropic `tool_result` content 为块数组（text + image，官方形态）；Responses 的 `function_call_output` 仅接受字符串——文本拼入输出，图片块转为紧随的 user 消息内容部件（同轮可见）
 - **接口拒绝自动降级**：主模型声明多模态但接口实际拒绝图片块（HTTP 4xx）时，引擎将图片块一次性降级为文本说明后重试（附件图片与工具结果图片同路径降级，说明文案区分来源；模型可改走 `vision` 工具），实现「无多模态能力自动降级」兜底
-- **图片压缩时序（原图保存、发送时压缩）**：粘贴/上传/URL 引用一律按**原图**存入会话 `tmp/`（无损保留，模型/本地 CV 工具/用户取用的都是原图）；仅在**发送给大模型前**由服务端压缩（`core/support/image-resize.ts`，Bun.Image 原生编解码）：非 GIF 且长边 >1280px 或体积 >2MB 时等比缩放（长边 1280，体积仍超限按 0.8 倍迭代，下限 0.25 倍）后**同格式**重编码（JPEG/WebP 质量 0.85，PNG 保持 PNG）；未超限/解码失败原样发送。压缩不回写文件（原图不动），并随图片附尺寸说明（`[图片已压缩: 原始 W×H X → w×h x（坐标/细节按比例对应原图）]`，未压缩标注 `[图片 W×H x，未压缩]`）——多模态内联（引擎附件/工具结果图片）与 vision 子代理 analyze 同源共用。GIF 为动画帧格式不压缩
+- **图片压缩时序（原图保存、发送时压缩）**：粘贴/上传/URL 引用一律按**原图**存入会话 `tmp/`（无损保留，模型/本地 CV 工具/用户取用的都是原图）；仅在**发送给大模型前**由服务端压缩（`@gebai/agents` core/shared/image-resize.ts，Bun.Image 原生编解码）：非 GIF 且长边 >1280px 或体积 >2MB 时等比缩放（长边 1280，体积仍超限按 0.8 倍迭代，下限 0.25 倍）后**同格式**重编码（JPEG/WebP 质量 0.85，PNG 保持 PNG）；未超限/解码失败原样发送。压缩不回写文件（原图不动），并随图片附尺寸说明（`[图片已压缩: 原始 W×H X → w×h x（坐标/细节按比例对应原图）]`，未压缩标注 `[图片 W×H x，未压缩]`）——多模态内联（引擎附件/工具结果图片）与 vision 子代理 analyze 同源共用。GIF 为动画帧格式不压缩
 - **多模态消息格式**：统一内部消息模型（文本 + 内容块数组），`provider.chat()` 按接口规范转换：
   - OpenAI 兼容：`content` 为 `[{ type: "text" | "image_url", ... }]` 结构（user/assistant 消息与 tool 结果消息同构）
   - Anthropic：`content` 为 `[{ type: "text" | "image" | "document", ... }]` 结构（`tool_result` 内容同为块数组）
@@ -586,21 +604,21 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 **全局 `vision` 工具已移除**（架构决策：视觉相关能力统一收进 vision 子代理，单一入口）：主会话需要视觉分析时 `agent_load` 装载 vision（或模型调用 `vision_*` 时路由自愈自动装载）；子Agent 经 `dependencies: ["vision"]` 依赖声明连带装载（如 self_optimize）；desktop/playwright 域内保留各自的 CV 工具（缺省图像源便利，见「视觉能力分层与子代理复用边界」）。旧形态（`index.ts` 组装层注册全局 vision、agent_run 新会话继承块同源注册、主会话内 `vision` 与 `vision_analyze` 双份同源 schema 并存）一并退场。
 
-视觉语义分析的实现仍在 `core/tools/vision.ts`（`makeVisionTool` 工厂 + provider 解析），vision 子代理 def 以 `name="analyze"` 复用——工厂不再是全局注册的专属物，而是子代理工具的实现源：
+视觉语义分析的实现已迁 `@gebai/agents` core/shared/vision.ts（`makeVisionTool` 工厂 + provider 解析），vision 子代理 def 以 `name="analyze"` 复用——工厂不再是全局注册的专属物，而是子代理工具的实现源：
 
 - **provider 解析**：组装层 `setVisionProviderGetter` 注入（`boot/compose.ts`，`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落；任务级 env 覆盖生效）
 - **模型选择**：配置 `GEBAI_VISION_MODEL` 后使用独立视觉 Provider（`GEBAI_VISION_*`，接口地址/密钥/类型缺省继承主模型）；未配置时回落到主模型（须显式声明多模态能力，`GEBAI_LLM_MULTIMODAL=true`，默认 false），两者皆不可用则返回配置提示
 - **传输**：图片以 base64 内联（统一内部图片块 → OpenAI `image_url` data URL / Anthropic base64 `image` 块）随文本目标一起调用视觉模型，单图上限见常量参考；**发送前服务端压缩**（见「图片压缩时序」，原图不动）并把原始/压缩尺寸写入文本目标一并告知模型；**超时控制**（`timeout` 参数，默认 30 秒、钳制 1~300）：手动定时器 + AbortSignal 与用户取消信号合并，超时返回提示引导改用本地视觉工具（ocr/locate/locate_image/detect），用户取消原样上抛；返回分析文本（超长走截断保护），并携带 `image` 内容块供 UI 展示
 - **降级指引**：图片附件/工具图片块未内联时（模型无多模态能力、接口拒绝图片、超限），文本说明指引模型走 `vision_analyze`（vision 子代理）——engine 的附件说明、read 非多模态分支、图片块降级重试同此措辞
 
-#### 小模型识别（本地 CV 推理，core/cv）
+#### 小模型识别（本地 CV 推理，`@gebai/agents` core/cv）
 
-与 `vision`（外部视觉模型服务）互补的**本地小模型图像识别**：非模型服务的 ONNX 推理（PP-OCR 中英文 OCR 为主力，可选自备 YOLO 检测），onnxruntime-web **wasm 进程内**运行——离线可用、不耗模型配额、毫秒~秒级延迟，且能给出**精确像素坐标**（LLM 视觉估坐标不准，这是桌面自动化的刚需）。基建在 `core/cv/` 域，不依赖子Agent 定义存在；**工具消费层为共享工厂 `core/tools/cv-analysis.ts`**（ocr/locate/locate_image 三工具 `createCvAnalysisTools` + detect 目标检测 `createDetectTool`，均注入缺省图像源与文案）：desktop 子Agent 注入「现截宿主机屏幕 + 本地模式闸门」（`desktop_ocr`/`desktop_locate`/`desktop_locate_image`/`desktop_detect`，见 desktop 小节）；playwright 子Agent 注入「共享桥接截当前页视口 + 无闸门」（`playwright_ocr`/`playwright_locate`/`playwright_locate_image`，见 playwright 小节）；vision 子代理注入「无缺省源（image 必填）+ 无闸门」（`vision_ocr`/`vision_locate`/`vision_locate_image`/`vision_detect`，见 vision 小节）——同一识别逻辑三个消费方零复制（视觉能力分层与子代理复用边界，见「小模型识别」末条与 vision 子Agent 小节）。
+与 `vision`（外部视觉模型服务）互补的**本地小模型图像识别**：非模型服务的 ONNX 推理（PP-OCR 中英文 OCR 为主力，可选自备 YOLO 检测），onnxruntime-web **wasm 进程内**运行——离线可用、不耗模型配额、毫秒~秒级延迟，且能给出**精确像素坐标**（LLM 视觉估坐标不准，这是桌面自动化的刚需）。基建在 `@gebai/agents` core/cv 域，不依赖子Agent 定义存在；**工具消费层为共享工厂 `@gebai/agents` core/shared/cv-analysis.ts**（ocr/locate/locate_image 三工具 `createCvAnalysisTools` + detect 目标检测 `createDetectTool`，均注入缺省图像源与文案）：desktop 子Agent 注入「现截宿主机屏幕 + 本地模式闸门」（`desktop_ocr`/`desktop_locate`/`desktop_locate_image`/`desktop_detect`，见 desktop 小节）；playwright 子Agent 注入「共享桥接截当前页视口 + 无闸门」（`playwright_ocr`/`playwright_locate`/`playwright_locate_image`，见 playwright 小节）；vision 子代理注入「无缺省源（image 必填）+ 无闸门」（`vision_ocr`/`vision_locate`/`vision_locate_image`/`vision_detect`，见 vision 小节）——同一识别逻辑三个消费方零复制（视觉能力分层与子代理复用边界，见「小模型识别」末条与 vision 子Agent 小节）。
 
-- **运行时加载（不进 bundle 图）**：onnxruntime-web 经运行时动态 import dist 入口（拼接包名 + `Bun.resolveSync` + file URL，与 playwright 模块同款规避——bundle 注册表启动安全；裸导入在 node 条件下会指向 onnxruntime-node 原生绑定，故必须走 dist 文件直连）；单线程 wasm（`numThreads=1`，无 SharedArrayBuffer/worker 依赖）。单二进制形态从内嵌产物（`core/cv.embedded.generated.json`，构建脚本 `scripts/build-cv-embed.ts` 生成）物化到 `{GEBAI_HOME}/vendor/cv/`（版本 marker 整目录重建 + 防穿越 + 并发共享，与 pwcore 同思路）；源码/部署形态解析 node_modules
+- **运行时加载（不进 bundle 图）**：onnxruntime-web 经运行时动态 import dist 入口（拼接包名 + `Bun.resolveSync` + file URL，与 playwright 模块同款规避——bundle 注册表启动安全；裸导入在 node 条件下会指向 onnxruntime-node 原生绑定，故必须走 dist 文件直连）；单线程 wasm（`numThreads=1`，无 SharedArrayBuffer/worker 依赖）。单二进制形态从内嵌产物（`core/cv.embedded.generated.json`，构建脚本 `packages/server/scripts/build-cv-embed.ts` 生成）物化到 `{GEBAI_HOME}/vendor/cv/`（版本 marker 整目录重建 + 防穿越 + 并发共享，与 pwcore 同思路）；源码/部署形态解析 node_modules
 - **模型交付**：构建时下载 PP-OCRv4 mobile（det ~4.7MB + rec ~10.9MB，onnxruntime-web Apache-2.0/MIT 许可）内嵌进产物——下载源 `GEBAI_CV_MODEL_BASE` 可覆写（内网镜像），`{GEBAI_HOME}/models/ocr/` 已有文件跳过下载（资源子仓库离线自备）；字典从 rec 模型内嵌的 `character` 元数据提取（RapidOCR 约定）。下载失败生成空清单——构建不失败，运行时给配置指引。运行时模型目录解析：`GEBAI_CV_MODELS_DIR`（任务级 env 可覆盖）→ 二进制物化目录 → `{GEBAI_HOME}/models/ocr/`（资源子仓库）；目录内固定三件套 `det.onnx`/`rec.onnx`/`dict.txt`
 - **推理形态**：惰性共享单例（首次调用初始化 ort + 加载模型，~1-3s）；session 按模型文件路径+大小缓存（文件变更自动重建）；**wasm 路径全进程推理串行**（Promise 链互斥，防同批扇出并发争抢）。wasm CPU 推理同步阻塞事件循环（单次约 0.5-2s）——desktop（本地模式、单管理员）与 playwright 视口截图识别消费可接受（串行互斥保证并发安全）；若未来多租户高并发下成为吞吐瓶颈，OCR 亦可迁入 sidecar（协议为通用 ONNX 会话运行器）
-- **分层后端（GPU sidecar ↔ wasm，全部 CV 推理共用，`cv.ts` `runTiered` + `sidecar.ts` + `cv-driver.mjs`）**：检测类重模型（如 YOLO11-L@1280 ≈ 350 GFLOPs）在 wasm 单线程下数十秒级不可用，OCR（det+rec，全屏大图 wasm 单次可达数秒且阻塞事件循环）同样受益——spawn 常驻 `node cv-driver.mjs` 子进程跑 **onnxruntime-node** 原生推理（进程管理仿浏览器桥接：惰性启动、请求超时杀进程重启、stderr 环形缓冲、全进程共享单例）。**EP 逐级探测显式上报**：auto 下 Windows dml（DirectML，任意 DX12 显卡免装依赖）→ cuda、macOS coreml → cuda、全失败回落 cpu（多线程）兜底，session.create 返回实际落地 EP（不静默降级），工具输出如实标注 `后端 sidecar:dml/...`。协议：行分隔 JSON 头 + 定长原始字节帧（张量不走 JSON 化，1280 输入张量 ~20MB/输出 ~32MB 本机管道毫秒级）；前后处理（letterbox/NMS/DB/CTC）留在 Bun 进程，driver 是通用 ONNX 会话运行器（init/session.create/session.run 三 op，`runModel` 按模型键缓存会话——检测与 OCR det/rec 共用同一入口）；**OCR sidecar 路径不加载 onnxruntime-web**（模型目录经 `resolveCvAssetsDir` 后端无关解析）；模板匹配为纯 JS 计算（非 ONNX）维持进程内。后端选择：`GEBAI_CV_BACKEND` 全局 > `GEBAI_CV_DETECT_BACKEND`/`GEBAI_CV_OCR_BACKEND` 细分覆盖 > auto；工具输出（desktop_ocr/desktop_detect）如实标注实际后端。**onnxruntime-node 不随构建内嵌**（体积/许可）：按 `GEBAI_CV_ORT_NODE_DIR` → `{GEBAI_HOME}/models/vendor/node_modules/onnxruntime-node`（**资源子仓库约定位置**——模型/原生依赖集中存放于项目下独立 git 仓库 `models/`，主仓库 gitignore 隔离；npm 整包依赖闭包放入即生效，onnxruntime-common 等依赖经 node 标准向上查找可用）→ `{GEBAI_HOME}/vendor` → node_modules 解析，不可解析即 sidecar 不可用；运行期失败（超时/崩溃）**毒化**——本进程生命周期内不再重试，回落 wasm（细分/全局 sidecar 显式指定时不回落、错误如实上抛）；父进程退出时杀子进程（`process.exit` 不保证关闭 stdio 管道，一次性脚本会留孤儿 node 进程持 GPU 会话，实测修复）。二进制形态驱动脚本内嵌（`cvdriver.embedded.generated.json`，`scripts/build-cvdriver-embed.ts`）物化到 `{GEBAI_HOME}/vendor/cv/`，dist 形态由 build-subagents 复制到产物目录
+- **分层后端（GPU sidecar ↔ wasm，全部 CV 推理共用，`cv.ts` `runTiered` + `sidecar.ts` + `cv-driver.mjs`）**：检测类重模型（如 YOLO11-L@1280 ≈ 350 GFLOPs）在 wasm 单线程下数十秒级不可用，OCR（det+rec，全屏大图 wasm 单次可达数秒且阻塞事件循环）同样受益——spawn 常驻 `node cv-driver.mjs` 子进程跑 **onnxruntime-node** 原生推理（进程管理仿浏览器桥接：惰性启动、请求超时杀进程重启、stderr 环形缓冲、全进程共享单例）。**EP 逐级探测显式上报**：auto 下 Windows dml（DirectML，任意 DX12 显卡免装依赖）→ cuda、macOS coreml → cuda、全失败回落 cpu（多线程）兜底，session.create 返回实际落地 EP（不静默降级），工具输出如实标注 `后端 sidecar:dml/...`。协议：行分隔 JSON 头 + 定长原始字节帧（张量不走 JSON 化，1280 输入张量 ~20MB/输出 ~32MB 本机管道毫秒级）；前后处理（letterbox/NMS/DB/CTC）留在 Bun 进程，driver 是通用 ONNX 会话运行器（init/session.create/session.run 三 op，`runModel` 按模型键缓存会话——检测与 OCR det/rec 共用同一入口）；**OCR sidecar 路径不加载 onnxruntime-web**（模型目录经 `resolveCvAssetsDir` 后端无关解析）；模板匹配为纯 JS 计算（非 ONNX）维持进程内。后端选择：`GEBAI_CV_BACKEND` 全局 > `GEBAI_CV_DETECT_BACKEND`/`GEBAI_CV_OCR_BACKEND` 细分覆盖 > auto；工具输出（desktop_ocr/desktop_detect）如实标注实际后端。**onnxruntime-node 不随构建内嵌**（体积/许可）：按 `GEBAI_CV_ORT_NODE_DIR` → `{GEBAI_HOME}/models/vendor/node_modules/onnxruntime-node`（**资源子仓库约定位置**——模型/原生依赖集中存放于项目下独立 git 仓库 `models/`，主仓库 gitignore 隔离；npm 整包依赖闭包放入即生效，onnxruntime-common 等依赖经 node 标准向上查找可用）→ `{GEBAI_HOME}/vendor` → node_modules 解析，不可解析即 sidecar 不可用；运行期失败（超时/崩溃）**毒化**——本进程生命周期内不再重试，回落 wasm（细分/全局 sidecar 显式指定时不回落、错误如实上抛）；父进程退出时杀子进程（`process.exit` 不保证关闭 stdio 管道，一次性脚本会留孤儿 node 进程持 GPU 会话，实测修复）。二进制形态驱动脚本内嵌（`cvdriver.embedded.generated.json`，`packages/server/scripts/build-cvdriver-embed.ts`）物化到 `{GEBAI_HOME}/vendor/cv/`，dist 形态由 build-subagents 复制到产物目录
 - **前后处理（纯函数，`image.ts`/`ocr.ts`/`detect.ts`/`onnx-meta.ts`）**：PNG 解码自研（node:zlib inflate + 逆滤波，覆盖 8-bit 非隔行灰度/RGB/调色板/带 alpha——截图场景全覆盖，16-bit/隔行/JPEG 明确报错）；det 前处理等比缩放（长边 ≤960）+ 32 倍数零填充，DB 后处理（阈值 0.3 → 3x3 膨胀合并碎片 → 8-连通域 → 框内核心像素均值置信度 → unclip 外扩 → 阅读序排序）；rec 前处理 48 高等比缩放 + 320 宽零填充，CTC 贪心解码（blank=index 0，字典 = `[blank] + 6623 字符 + 空格`，对齐 RapidOCR 的 PP-OCR ONNX 部署约定）；YOLO letterbox（缺省 640、114 灰，**尺寸按模型元数据/`GEBAI_CV_DETECT_SIZE` 自适应**）+ NMS（IoU 缺省 0.45，**工具 `iou` 参数可配**——密集小控件场景调低至 0.1），兼容 v8 `[1,4+nc,N]` 与 v5 `[1,N,5+nc]` 两种输出形态（按形状自动识别）；**检测框×OCR 行配对**（`pairObjectsWithText`：行中心落在框内即归属、多行按阅读序拼接——「组件类型+文本」的结构化元素表，完整屏幕解析的本地拼装）；`onnx-meta.ts` 直接从模型字节解析 ONNX metadata_props（顶层 field 14，不依赖 ort 运行时——wasm/sidecar 两条后端同一口径），提取 ultralytics 约定的 `imgsz`（输入尺寸）与 `names`（类别表，省标签文件）；**坐标一律还原到输入图像原始像素系**（region 偏移 + 缩放比例），desktop 供 `mouse_click`、playwright 供视口 `document.elementFromPoint` 直接使用
 - **目标检测（`desktop_detect`）**：模型不内嵌——**缺省自动发现 `{GEBAI_HOME}/models/detect/` 下唯一 `.onnx`（资源子仓库整体放入 `{GEBAI_HOME}/models/` 即零配置可用：检测模型自动发现 + GPU sidecar 原生包自动解析）**，或 `GEBAI_CV_DETECT_MODEL` 显式指定（多模型共存时必须显式，否则列出候选报错）；ultralytics 导出（YOLO11/v8）即插即用（元数据自适应尺寸与类别）；非 ultralytics 来源设 `GEBAI_CV_DETECT_LABELS`（每行一类别）；COCO 预训练类别对 UI 操作无意义，面向 UI 组件检测模型（如 ScreenParser 类）或自训练图标/控件模型；推理走「检测分层后端」（上一条）
 - **模板匹配（`template.ts` 纯函数，非 ONNX 推理）**：NCC（归一化互相关）同尺寸匹配，补「文字走 OCR、检测需自训 YOLO」之间的图标/控件定位空白（`desktop_locate_image`/`playwright_locate_image`/`vision_locate_image` 消费，零训练）；两阶段加速——box 降采样**相位偏移粗扫**（origin {0,s/2}² 多相位防高频内容错位去相关，粗扫门限 0.4 仅引导）+ 全分辨率邻域精化，窗口均值/方差经「和+平方和」积分图 O(1) 求取；非极大值抑制后至多 5 个匹配（2560x1440 全屏 + 48px 模板实测约 350ms）；不做缩放不变（模板需与目标同一显示环境同尺寸）
@@ -621,7 +639,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **登录限流**：连续失败 5 次锁定该用户名 60 秒（内存计数），防在线爆破；**登录/兑换/注册端点另加令牌桶**（REST：登录/兑换全局桶 60 突发/2 每秒 + 来源桶 10 突发/0.2 每秒，注册独立桶 30/0.5 + 10/0.1；WS `auth.login` 密码路径同款桶 30/1——scrypt 即使异步化仍耗 CPU，轮换用户名即可绕过按用户名锁定，防 CPU DoS 放大器；`GEBAI_TRUST_PROXY=true` 时 REST 按 `X-Forwarded-For` 首段区分来源）
 - **令牌机制**：登录后签发会话令牌（HMAC 签名，7 天 TTL），后续 WebSocket 连接携带令牌建立用户上下文；**令牌表持久化到 `{GEBAI_HOME}/auth-tokens.json`**（签发/撤销/过期清理时落盘，进程重启后已签发令牌仍有效——单机部署下重启不掉线；过期令牌在 authorize/保存时顺带清理，不无界增长）
 - **WS 未登录拦截**：服务模式下未登录（无令牌）的 WS 连接仅允许 `auth.login`，其余消息一律拒绝
-- **跨站来源防护（本地/桌面免登录形态）**：WebSocket 不受同源策略约束且本地模式免登录——恶意网页可直连 `ws://127.0.0.1:*` 以 admin 身份建会话执行命令（REST 通道因 CORS `*` 同样暴露）。防护：WS upgrade 与 REST `/api/*` 均校验 **Origin 与 Host 同源**（浏览器发起的跨站请求必带 Origin，不同源即 403；非浏览器客户端无 Origin 不受限；显式配置 `GEBAI_CORS_ORIGINS` 视为有意开放，仅缺省 `*` 且本地模式时拦截）；服务模式有令牌鉴权豁免
+- **跨站来源防护（本地/桌面免登录形态）**：WebSocket 不受同源策略约束且本地模式免登录——恶意网页可直连 `ws://127.0.0.1:*` 以 admin 身份建会话执行命令（REST 通道因 CORS `*` 同样暴露）。防护：WS upgrade 与 REST `/api/*` 均校验 **Origin 与 Host 同源**（浏览器发起的跨站请求必带 Origin，不同源即 403；非浏览器客户端无 Origin 不受限）。**两侧豁免面不同（待修）**：REST 在「显式配 `GEBAI_CORS_ORIGINS` 视为有意开放」或服务模式（令牌鉴权）下不拦；**WS 无条件校验**——不看 CORS 白名单、不看运行模式（显式配白名单后跨源 REST 可用而 WS 仍被拒；服务模式下异域前端 WS 连不上）
 - **WS 全局子Agent 装载/卸载管理员门槛**：`sub_agent.load`/`sub_agent.unload` 不带 `sessionId` 的**全局形态**（变更所有用户的工具注册面）服务模式下仅 admin（与 REST 工具启停同门槛）；带 `sessionId` 的会话级装载/卸载不受限（只影响本人会话）；模型侧 `agent_load` 装载进当前会话（会话级引用，见「子Agent」引用计数）
 - **用户管理**：支持管理员创建/禁用用户；每个用户独立命名空间（`users/{user}/`）；服务模式 admin 用户通过启动参数 `GEBAI_ADMIN_PASSWORD_HASH` 引导（**设置则启用并覆盖其密码哈希，不设置则禁用**，启动参数为权威配置每次启动重置；admin 被禁用时**普通用户可经注册页自助注册使用**（普通角色），管理员能力须部署方设置哈希启用）；**REST 与 WS 双通道的用户管理端点均校验管理员角色**（非管理员一律 403，防普通用户提权/越权管理）
 - **请求校验**：所有会话操作先解析令牌确定用户，再校验会话归属（含取消任务、审批决策等控制类操作）；**会话 ID 格式白名单**（32 位小写 hex，`randomUUID` 去连字符）在存储层 `sessionPath`/`store` 与 REST 中间件、WS 消息入口四层强制——畸形/穿越形态（`../`、路径分隔符）一律 400/错误应答，从根上杜绝会话 ID 拼路径形成的目录穿越
@@ -635,7 +653,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **桌面控制隔离**：`desktop`（截图/窗口控制/键盘鼠标输入）是对宿主机桌面的真实操作，**仅本地/桌面模式或沙箱豁免用户可用**——服务端部署（沙箱约束用户）下全部工具一律拒绝执行；输入/点击/窗口控制类工具默认需审批，防远程滥用与误操作。部署警示：**服务模式（`GEBAI_SANDBOX=auto` 时）自动强制启用沙箱**，阻断远程桌面操控（admin 豁免除外）
 - **浏览器隔离**：`playwright`（无头浏览器自动化）运行在**隔离的浏览器环境**（独立 Chromium 进程，不触宿主机桌面/文件系统），服务端部署可用；但导航/交互/脚本类工具（`open`/`click`/`fill`/`press`/`select`/`check`/`evaluate`/`new_page`）默认需审批——防远程用户借服务端浏览器探测内网（SSRF）、提交表单或执行任意页面脚本；浏览器上下文按会话隔离，`evaluate` 可读取页面内数据（含表单值/cookie），仅限审批后执行
 - **Webhook SSRF 防护**：Webhook 注册默认拒绝回环/链路本地/云元数据地址（`localhost`、`127.*`、`169.254.*`、`::1`、`fe80:*` 及其 IPv4-mapped/尾点 FQDN 等绕过形式），需内网回调时以 `GEBAI_WEBHOOK_ALLOW_PRIVATE=true` 显式放开；**投递同样带逐跳重定向校验**（复用 `fetchWithRedirectGuard`，每跳 Location 重新过 `checkWebhookUrl`，防「注册公网 URL → 302 内网/元数据」跳板绕过注册期校验，与 `fetch_url`/`http_request` 同口径）
-- **公网访问守卫（fetch_url/http_request）**：沙箱约束用户（服务端部署模式）仅允许公网地址——拒绝回环/链路本地/私网（RFC1918）与 **ULA**（`fc00::/7`）；主机名判定统一走 `core/ip.ts`，覆盖常见绕过形式：**IPv4-mapped IPv6**（`[::ffff:127.0.0.1]` 及完整形式）、IPv4-compatible IPv6、**整数/十六进制/八进制 IPv4**（`2130706433`/`0x7f000001`/`0177.0.0.1`，WHATWG URL 已规范化为点分十进制）、**尾点 FQDN**（`localhost.`）；`fetch_url` 与 `http_request`（默认路径）另带**重定向逐跳校验**（`redirect: "manual"` 手动跟随，每跳 Location 重新执行公网校验，跳数上限 5），防「初始公网 → 302 内网」跳板绕过；**域名做 DNS 解析复查**（`assertPublicHttpUrl` 异步解析主机名，任一解析地址命中私网/回环即拒绝——覆盖内网 DNS 名（`kubernetes.default.svc` 等）与「公网域名 A 记录指向内网」的重绑定形态；解析失败/3s 超时放行由 fetch 层超时兜底）；**豁免用户（admin）不限制私网访问**
+- **公网访问守卫（fetch_url/http_request）**：沙箱约束用户（服务端部署模式）仅允许公网地址——拒绝回环/链路本地/私网（RFC1918）与 **ULA**（`fc00::/7`）；主机名判定统一走 `@gebai/agents` core/shared/ip.ts，覆盖常见绕过形式：**IPv4-mapped IPv6**（`[::ffff:127.0.0.1]` 及完整形式）、IPv4-compatible IPv6、**整数/十六进制/八进制 IPv4**（`2130706433`/`0x7f000001`/`0177.0.0.1`，WHATWG URL 已规范化为点分十进制）、**尾点 FQDN**（`localhost.`）；`fetch_url` 与 `http_request`（默认路径）另带**重定向逐跳校验**（`redirect: "manual"` 手动跟随，每跳 Location 重新执行公网校验，跳数上限 5），防「初始公网 → 302 内网」跳板绕过；**域名做 DNS 解析复查**（`assertPublicHttpUrl` 异步解析主机名，任一解析地址命中私网/回环即拒绝——覆盖内网 DNS 名（`kubernetes.default.svc` 等）与「公网域名 A 记录指向内网」的重绑定形态；解析失败/3s 超时放行由 fetch 层超时兜底）；**豁免用户（admin）不限制私网访问**
 - **环境变量隔离**：**用户环境变量服务端零留存**（只存浏览器本地 localStorage，服务端不落任何 env 文件；会话内存态 env 不落盘、重启即空），用户间互不可见；`{AGENT_NAME_UPPER}_*` 前缀为**命名约定与前端目录白名单口径**（envVars 声明汇总进环境变量面板），运行时硬边界为脚本子进程/`js` ctx 的**敏感变量剔除**（见「脚本隔离」——敏感判定按完整结尾单词匹配：`*_KEY`/`*_TOKEN`/`*_SECRET`/`*_HASH`/`*_KEY_ID`/`*_CREDENTIAL`/`DATABASE_URL`/`CONNECTION_STRING` 及裸名 `TOKEN`/`SECRET`/`PASSWORD` 等前后缀/裸名形态，防 `GEBAI_ADMIN_PASSWORD_HASH`/`AWS_ACCESS_KEY_ID` 类漏判），敏感变量脱敏显示
 - **子Agent共享**：子Agent 为服务端内置代码，构建时编译进二进制，全局共享、只读、无用户差异
 - **审批隔离**：`/approval-skip` 为会话级设置，仅作用于当前会话（会话内存态 env，不落盘），不影响其他用户；**用户本人可设置自己的会话**（前端开关、REST `PUT /env`、WS `session.env.set`、飞书 `/approval-skip` 命令——写入只影响本人会话，非管理员仍受路径/脚本/网络沙箱完整约束）；**ask 填值分支服务模式下一律拒绝 `GEBAI_APPROVAL_SKIP`**——模型驱动的写入不得自设审批跳过（防提示词注入诱导），本地/单用户模式不受限
@@ -643,12 +661,12 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
   | 能力 | 安全模式降级形态 |
   |------|------------------|
   | `sh` | 只读命令白名单（`cat`/`head`/`tail`/`grep`/`find`/`ls`/`git` 读子命令/`sort`/`diff` 等查看与文本处理类；`sed`/`awk` 有脚本内写/执行通道、`less`/`more` 有 `!` shell 逃逸，均不入列）；命令解析 fail-closed（反引号/后台执行 `&`/进程替换 `<(cmd)`/未闭合引号等无法识别的结构一律拒绝）；输出重定向 `>`/`>>`/`2>`/`&>` 目标须在**安全写范围**内（`/dev/null`/`NUL` 放行），fd 复制 `2>&1` 放行；`$(...)` 命令替换与双引号内替换按替换语义**递归校验**（POSIX 双引号内 `$()` 与反引号会执行，单引号为字面量）；`find` 禁 `-exec`/`-delete` 等执行/写动作、`sort` 禁 `-o`/`--output`、`git` 仅读子命令（`status`/`log`/`diff`/`show`/`blame`/`rev-parse`/`ls-files`/`describe` 等）、`env` 仅单独执行、`date` 禁 `-s`/`--set`、`hostname` 仅 flag 参数 |
-  | `py` | 子进程内 `sys.addaudithook` 审计钩子（`core/safety.ts` `PY_SAFE_BOOTSTRAP`）：写模式 `open`（mode 含 `w`/`a`/`x`/`+` 或 flags 含 `O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`）、进程（`os.system`/`subprocess.*`/`os.posix_spawn`/`os.fork`）、网络（`socket.connect`/`bind`）、文件变更（`os.remove`/`rename`/`mkdir`/`chmod` 等、`shutil.*`）、`ctypes.dlopen`（防绕过钩子的裸系统调用）、`sqlite3.connect` 全部拒绝；钩子堆叠不可移除，**仅保留文件读取** |
+  | `py` | 子进程内 `sys.addaudithook` 审计钩子（`core/security/safety.ts` `PY_SAFE_BOOTSTRAP`）：写模式 `open`（mode 含 `w`/`a`/`x`/`+` 或 flags 含 `O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`）、进程（`os.system`/`subprocess.*`/`os.posix_spawn`/`os.fork`）、网络（`socket.connect`/`bind`）、文件变更（`os.remove`/`rename`/`mkdir`/`chmod` 等、`shutil.*`）、`ctypes.dlopen`（防绕过钩子的裸系统调用）、`sqlite3.connect` 全部拒绝；钩子堆叠不可移除，**仅保留文件读取** |
   | `js` | 双层降级：静态扫描（`scanJsReadOnly`）**按词元级拒绝**（而非调用形态）——`import`/`require` 任意出现即拒（静态 import 语句提升先于 shim 执行、`const rq = require; rq(...)` 别名形态调用正则拦不住）、`Bun` 仅放行 `Bun.file`（`Bun["fetch"]` 括号访问可躲点号正则，且 fetch/sqlite 为不可覆写 getter、Bun 全局 non-configurable 无法运行时代理，扫描是唯一防线）、`getBuiltinModule` 词元拒绝；运行时 shim（注入子进程）屏蔽其余——`Bun` 对象属性覆写为抛错桩（`write`/`spawn`/`serve`/`$`/`sql` 等）、`Bun.file` 包装拦截 `write`/`writer`/`sink`/`truncate`（读方法照常）、删除 `eval`/`Function`/`fetch`/`WebSocket`/`Worker` 全局、`Function.prototype.constructor` 中性化防 `(fn).constructor` 回收、`process` 仅拦 `binding`/`dlopen`/`getBuiltinModule`/`kill`（桥协议依赖 stdin/stdout/exit）、字符串定时器拒绝、`Reflect.get` 作用于 Bun 对象时拒绝（防反射读取绕过属性覆写）、**模块级 `var require` 中和**（CJS 参数遮蔽/ESM 定义绑定，别名引用拿到拒绝桩）——**仅保留文件读取**；子进程环境同样剔除敏感变量（安全模式下 `process.env` 不暴露密钥）；写文件用 `write` 工具、网络用 `fetch_url` 工具（RPC 调用各工具按其降级规则执行） |
   | `write`/`edit`/`patch`/`file` | 限定**安全写范围**内（`safeModeWriteCheck`）：沙箱模式=用户数据根（`users/{user}`）；本地模式=OS 用户主目录 + `GEBAI_HOME` + 会话工作目录（Windows 大小写不敏感比较）。越界拒绝并提示，范围内照常 |
   | 动态工具（`js` defineTool） | 与 `js` 同规则降级（execute 源码静态扫描 + 子进程只读 shim），注册与水合**不再跳过**——只读动态工具（数据处理/查询类）安全模式下保持可用 |
-  | `cron_add`/`cron_update`/`cron_remove` | **维持硬阻断**（定时任务延迟触发任意执行，无法降级）：引擎主/子循环、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批） |
-  | 子Agent 工具 | **自主声明 `Tool.safeMode`**：`true`=作者判定安全模式下可提供（即使短名风险如 `{agent}_sh`，须自行保证实现只读或体内按 `ctx.safeMode` 校验）；`false`=判定不提供（即使名字无风险）；未声明=按短名风险规则默认（`isRiskyToolName`：`{agent}_sh`/`{agent}_write`/`{agent}_file`/`{agent}_delete`/`{agent}_cron_add` 等 `_risk` 后缀命中则不注册）。注册期过滤（`ToolRegistry({safeMode})`，主注册表与 agent_run 新会话注册表同规则）——不注册即 schema 不可见、调用报未知工具 |
+  | `cron_add`/`cron_update`/`cron_remove`/`cron_trigger` | **维持硬阻断**（定时任务延迟触发任意执行，无法降级）：引擎主/子循环、`js` RPC 分发层按 `isToolBlockedInSafeMode` 同规则拦截，模型调用时直接返回限制信息（不执行、不弹审批） |
+  | 子Agent 工具 | **自主声明 `Tool.safeMode`**：`true`=作者判定安全模式下可提供（即使短名风险如 `{agent}_sh`，须自行保证实现只读或体内按 `ctx.safeMode` 校验）；`false`=判定不提供（即使名字无风险）；未声明=按短名风险规则默认（`isRiskyToolName`：短名集合为 `sh`/`py`/`js`/`write`/`edit`/`patch`/`file`/`delete`/`cron_add`/`cron_update`/`cron_remove`/`cron_trigger`，按「等于或 `_{risk}` 结尾」匹配——如 `{agent}_sh`/`{agent}_cron_add` 命中则不注册）。注册期过滤（`ToolRegistry({safeMode})`，主注册表与 agent_run 新会话注册表同规则）——不注册即 schema 不可见、调用报未知工具 |
   **安全写范围**与**降级说明注入**：系统提示词（主循环与 agent_run 新会话）在安全模式下追加降级能力说明（模型知晓能力边界）；已创建的 script 型定时任务触发时跳过（落盘提示、不执行 shell，`nextRunAt` 正常推进）；审批姿态不变（各工具原 `requiresApproval` 规则照常生效）
 - **限流保护**：按用户限制并发任务数与消息速率，防止资源滥用；单用户单会话同时仅一个任务运行；**每用户 prompt 令牌桶限流**（REST `POST /sessions/:id/prompt` 与 WS `session.prompt` 同规则：容量 60 突发、30/秒补充，超限返回 429 / error reply）
 
@@ -665,7 +683,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **子Agent 装载引用计数**：`SubAgentManager.load/unload` 按 owner（会话 id/agent_run 共享标记/全局）解引用——一个会话卸载子Agent 不再注销全局注册表砍掉其他会话正在使用的工具（装载状态按会话建模、注册表全局共享的矛盾以引用计数弥合）
 - **SDK 连接韧性**：心跳判死阈值回归 `heartbeatTimeoutMs` 语义（此前下一拍间隔即杀，高延迟链路「连上→误杀→重连」循环）；断线批量 reject 在途请求时清超时 timer（不再二次 onError「WS 请求超时」误导）；建连期无 onerror 的 close 路径 settle 共享 promise（调用方不再永久挂起）；断线恢复后 seq 基线收敛（缺口后方无新事件窗口内不再重复重放旧区间——旧 `task.done` 截断新任务流）；`dispatchEvent` 按 seq 去重（多会话并发恢复同一批重放事件不再双份分发）；WS 附件 `Uint8Array` 序列化为数组（此前 JSON 化为类数组对象、服务端构造抛错）
 - **Web 交互修复**：审批 Y/N 快捷键排除文本输入焦点（搜索/重命名框打字误批）；审批等待刷新前端看门狗活跃时间（服务端审批等 5 分钟、前端 150s 看门狗不再误杀）；审批卡按 toolCallId 去重（事件重放不堆叠）；切回会话时运行中工具卡重建过滤历史已完成项；断线全量重同步后子Agent 容器惰性重建（run 输出不再静默丢弃）
-- **其他**：`file delete` 递归删除需审批（见「工具审批」）；附件重名自动加序号（同批两个 data.csv 不再静默覆盖）；analyzer 的 tree-sitter Tree 用毕显式释放（wasm 原生内存）；`serve_dir` 静态服务 8 个上限（最旧淘汰）；desktop `screenshot` 的 `name` 参数落地（此前声明未实现）；`draw`/`render_html` 的 name 参数补 writeGuard/安全模式写检查（此前可越出子Agent 写范围）；SSE 解析兼容 CRLF/CR 行结尾与多行 data 按规范 join（部分网关 CRLF 行结尾整轮静默无输出）；三家 provider 的 done chunk 语义统一（恰好一次、断流补发）；SSE 消费方提前退出时 cancel 上游响应流（连接不悬挂）；vision 调用透传取消信号
+- **其他**：`file delete` 递归删除需审批（见「工具审批」）；附件重名自动加序号（同批两个 data.csv 不再静默覆盖）；analyzer 的 tree-sitter Tree 用毕显式释放（wasm 原生内存）；`serve_dir` 静态服务 8 个上限（最旧淘汰）；desktop `screenshot` 的 `name` 参数落地（此前声明未实现）；`show`（由已合并的 `draw`/`render_html`/`show_file` 三工具演进而来）的 name 参数补 writeGuard/安全模式写检查（此前可越出子Agent 写范围）；SSE 解析兼容 CRLF/CR 行结尾与多行 data 按规范 join（部分网关 CRLF 行结尾整轮静默无输出）；三家 provider 的 done chunk 语义统一（恰好一次、断流补发）；SSE 消费方提前退出时 cancel 上游响应流（连接不悬挂）；vision 调用透传取消信号
 
 ### 总Agent
 - 系统提示词**身份行**携带智能与智体概念模型（「你是智体：智能（模型）负责思考、无状态、可替换，记忆与责任都长在智体——需跨轮次/跨会话保留的结论与状态写入文件或会话记录；你的每次工具调用都是智体的行为，经审批执行、留痕可审计」）——行为化措辞而非装饰（落盘纪律与担责意识直接约束模型行为）。概念定义与五条设计戒律见「定位 → 智能与智体（概念模型）」
@@ -674,7 +692,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - 系统提示词内置**并行多路引导**：同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 `branch_run` 会话分支运行——从当前上下文 fork 多分支同时执行（各分支掌握主线全部背景与工具，可各自传 `model` 走不同模型接口并行），分支报告自动合入主上下文，长耗时分支 `async:true` 后台执行；并行多线是摆脱单轮串行等待、加速大体量任务的主要手段（见「会话分支运行与合并」）
 - 桌面/浏览器子Agent 系统提示词内置**验证多通道降级策略**：截图黑屏/失败时切换 DOM/content、窗口状态、数据文件等通道，任一失效立即降级并告知用户，不盲目重试单一通道
 - **系统提示词中声明会话工作目录**（会话 `tmp/`，如 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/tmp/`）并说明**所有文件工具的相对路径以此为基准（`tmp/` 前缀可省略）**；服务端部署模式下大模型读写限定在该目录，桌面/本地浏览器模式不限制目录（同路径沙箱规则）
-- 系统提示词中引导模型：复杂操作应编写脚本（`sh`/`py`）一次执行，避免大量单步工具调用
+- 系统提示词中引导模型：复杂/多步操作优先用 `js` 脚本编排一次执行（脚本内工具像内置函数直接 await、可用变量/分支/循环表达任意流程），纯系统操作用 `sh`/`py` 脚本
 - 系统提示词中引导模型：**重大任务（多步骤/有风险/不可逆/用户需要把关）先制定计划**——调用 `ask` 的计划审批分支（title+steps）把计划文档写入会话文件并在界面展示，阻塞等待用户批准后再执行（被拒绝则按修改意见修订后重新提交）；简单任务无需计划审批，`todo` 跟踪即可
 - 子Agent 装载后，系统提示词实时更新；**声明依赖的子Agent 装载即连带装载其依赖**（`def.dependencies` 驱动的级联，`SubAgentManager.load` 幂等，WS `sub_agent.load`/`agent_load`/预加载所有装载路径均生效，如 `self_optimize`→`code`+`vision`、`reverse_site`→`playwright`，见「子Agent 依赖与自动装载」）；**`agent_run` 预加载时同样连带预加载依赖**（`normalizeRunAgents` 同规则展开——装载方 def 只声明独有工具，依赖的工具与工作流提示词由依赖方 def 提供，不重复注册）
 - **提示词分层职责（严格划分，防止职责越界与重复）**：
@@ -686,7 +704,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 
 #### 子Agent 提示词编写规范（8 维强化检查清单）
 
-新增/修改子Agent 系统提示词时按以下 8 个维度逐项检查（自我优化审查提示词同样适用）；内置子Agent 均已按此清单强化：
+新增/修改子Agent 系统提示词时按以下 8 个维度逐项检查（自我优化审查提示词同样适用）；内置子Agent 参考此清单编写：
 
 | 维度 | 检查项 |
 |------|--------|
@@ -697,7 +715,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 | 5. 验证多通道 | 不依赖单一验证通道（截图/内容读取/DOM/请求记录/直连探测）；任一通道失效立即切换并**明确告知用户当前采用的验证方式**，不盲目重试同一通道 |
 | 6. 协作与编排 | `agent_run` 委托形态（委托谁、输入什么、期望产出——如 desktop 委托 code 读数据文件验证、playwright 被 code 委托做浏览器验证）；与 `self_optimize` 联动边界（仅 reverse_site 转交文档） |
 | 7. 验证闭环 | 修改/操作后验证（测试/检查/断言）；失败先定位（读错误信息分类）再修，不盲目重复执行 |
-| 8. 降级与诊断 | 错误分类 → 针对性处理（元素不存在/导航失败/鉴权失败/限频等）；回退/占位路径说明（如摘要失败降级滚动裁剪、OAuth 刷新失败回退应用身份） |
+| 8. 降级与诊断 | 错误分类 → 针对性处理（元素不存在/导航失败/鉴权失败/限频等）；回退/占位路径说明（如摘要失败降级为骨架行占位、OAuth 刷新失败回退应用身份） |
 
 > 提示词只写**模型行为指令**，不写实现机制（工具内部如何实现由代码承担）；不复刻其他子Agent 的内容；保持精简——每个维度点到即止，防止提示词膨胀稀释注意力。
 
@@ -706,14 +724,14 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - 定义形式：**单文件** `agents/src/agents/{name}.ts`，或**目录** `{name}/{name}.ts`（`{name}/index.ts` 为回退入口）——入口可另配 `{name}.md` 系统提示词（由入口 ts 导入并修饰）；无 ts 定义时纯 `{name}/{name}.md` 即零 TS 简化定义。子代理定义一律放 `packages/agents/src/agents/`（基建组件在同级 `src/core/`，物理分域）
 - 目录形式下，系统提示词 md 由入口 ts 文件**导入并修饰**（见「子Agent文件格式」）：`import systemPrompt from "./{name}.md"`（Bun 原生文本导入，构建时随 ts 一起内联进产物）
 - **零注册**：文件/目录即声明，运行时自动扫描收集（跳过 `*.test.ts` 与辅助文件，目录形式只认 `{dir}/{dir}.ts`），无需任何配置文件或代码注册；**包入口 `@gebai/agents` 同样零清单**——入口只导基建工具（发现/装载链路全自动，新增子Agent = 在 `packages/agents/src/` 放定义文件即可，入口与 server 均零改动，无手工清单可漏改漂移）；**二开同理**：`custom/agents/{name}/` 放定义文件即注册（双域扫描自动合并，同名 custom 胜出——见包结构表「custom/ 二开域」）
-- **热加载（目录签名失效缓存，DESIGN「子Agent 热加载」）**：`@gebai/agents` 包 `src/agents/`（子代理定义域）目录的**新增/修改/删除**在下一次装载（`agent_load`/路由自愈/`agent_run` 预加载，`load()` 前检查）或新任务（`run()` 前）自动生效，无需重启——`refreshIfChanged()` 比对目录签名（递归 `路径:mtime`，~30 次 stat 可忽略），变化即重扫：TS 入口带 `?t={mtime}` 查询参数 import **绕过模块缓存**（修改过的文件拿到新代码；新文件本就不在缓存）；扫描域与基建物理分域（子代理在 `src/agents/`、基建在 `src/core/`——目录即语义，无需排除清单，新增基建目录不再需要改任何清单）；包入口零子代理清单（见上「零注册」），发现正确性由 server 侧发现链路测试锁定；**会话删除释放装载者引用**：`forgetSession` 经 `releaseOwner` 按会话全量解引用（owner 引用计数归零才注销工具注册——`ownersByAgent` 随会话删除回收，防长运行服务无界增长；全局装载与 `agent_run` 共享标记不受影响）；**已装载会话沿用旧定义**（工具注册与注入会话记录的提示词保持稳定，不迁移——防运行中会话行为漂移），新定义对未装载与新会话生效；运行期显式 `unregister` 的子Agent（如 cron 关关）重扫后保持移除（`removedDefs` 过滤，防「复活」）；二进制 bundle 形态源码目录不存在、注册表不可变，无热加载。**加载失败错误透出**：扫描中 import 抛错/缺 `def` 导出/md 解析失败的子Agent 记入 `loadErrors`（随 defs 一同进程级缓存），`agent_load` 与 `agent_run` 校验的「未知子Agent」错误**附加载失败原因**（模型可见根因——self_optimize 写错文件当场定位修复而非面对无解释的未知名，修复文件后 mtime 变化触发重扫自动恢复注册）；**`agent_load` 装载失败真实报错**（`ctx.loadSubAgent` 装载后仍未注册即抛 `unknownAgentError`——含附因；幂等重装已装载者仍成功，`loadAgentsForSession` 的单失败跳过容错仅用于会话恢复路径）。价值：self_optimize 生成/修改子Agent 后**当会话内即可 agent_run 验证成果**，自我优化闭环不再依赖重启
-- **打包闭环**：`bun build` 前由 `scripts/build-subagents.ts` 扫描 `packages/agents/src/agents/`（子代理定义域）生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**构建期逐代理验证（DESIGN「子代理失败隔离」）**：脚本对每个 TS 定义真 import 一遍，模块顶层抛错/缺 `def` 导出/`def.name` 不一致的代理**剔除出静态 import**（否则运行时顶层静态 import 任一模块失败会炸整个注册表），原因烘焙进 `bundledErrors`（运行时水合进 `loadErrors`，模型侧可见根因）；单代理失败只告警不阻断构建、不连带其他代理。**运行时降级不阻断启动**：bundle 注册表整体缺失/加载失败（构建脚本未跑/生成文件损坏）时降级为无子Agent启动（显眼告警，服务本体与全局工具正常，修复构建链路重启即恢复）——子代理失败不炸主流程，绝不因单模块问题让服务不可用。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，此类启动期解析失败已被构建期验证拦截（剔除出 bundle）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
-- **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制——**包含清单经依赖闭包自动展开**（include reverse_site 自动带上其 `dependencies` 声明的 playwright——运行时依赖自动装载要求依赖方在产物中存在，漏列会产出能力残缺的二进制；构建脚本动态 import 各 def 读取 `dependencies` 递归补入，依赖指向不存在的名字直接构建失败）；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先；预载逐个隔离——单个预载失败只记 loadErrors + 告警，不阻断启动与其余代理，见「子代理失败隔离」）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（tool_schemas/js）同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools/index.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行）；`scripts/build-tools.ts` 同时生成全局工具 bundle 注册表 `core/tools/bundle.generated.ts`（见「全局工具零注册」），该文件 gitignore，裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > `{GEBAI_HOME}/.env` > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态——**该文件必须在版本控制中、不得写入 .gitignore**：`boot/compose.ts` 静态导入，缺文件则新克隆环境 `bun run dev` 启动即 `Cannot find module`（历史踩坑：仓库瘦身时被误随 `*.embedded.generated.json` 二进制内嵌产物一并移出跟踪）；`packages/server` 的 `dev`/`typecheck`/`build` 链前置经本脚本兜底生成，`build` 编译后再以 `--restore` 自动还原空态；并由 `core/generated-artifacts.test.ts` 守卫——`src/**` 中**静态导入**的 `generated` 模块必须存在且已被 git 跟踪，误移出跟踪当场测试报红；动态导入不在此列（构建链接管 + 运行时降级））；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
+- **热加载（目录签名失效缓存，DESIGN「子Agent 热加载」）**：`@gebai/agents` 包 `src/agents/`（子代理定义域）目录的**新增/修改/删除**在下一次装载（`agent_load`/路由自愈/`agent_run` 预加载，`load()` 前检查）或新任务（`run()` 前）自动生效，无需重启——`refreshIfChanged()` 比对目录签名（递归 `路径:mtime`，**深度上限 2 层**——更深层的定义文件变化不触发重扫；~30 次 stat 可忽略），变化即重扫：TS 入口带 `?t={mtime}` 查询参数 import **绕过模块缓存**（修改过的文件拿到新代码；新文件本就不在缓存）；扫描域与基建物理分域（子代理在 `src/agents/`、基建在 `src/core/`——目录即语义，无需排除清单，新增基建目录不再需要改任何清单）；包入口零子代理清单（见上「零注册」），发现正确性由 server 侧发现链路测试锁定；**会话删除释放装载者引用**：`forgetSession` 经 `releaseOwner` 按会话全量解引用（owner 引用计数归零才注销工具注册——`ownersByAgent` 随会话删除回收，防长运行服务无界增长；全局装载与 `agent_run` 共享标记不受影响）；**已装载会话沿用旧定义**（工具注册与注入会话记录的提示词保持稳定，不迁移——防运行中会话行为漂移），新定义对未装载与新会话生效；运行期显式 `unregister` 的子Agent（如 cron 关关）重扫后保持移除（`removedDefs` 过滤，防「复活」）；二进制 bundle 形态源码目录不存在、注册表不可变，无热加载。**加载失败错误透出**：扫描中 import 抛错/缺 `def` 导出/md 解析失败的子Agent 记入 `loadErrors`（随 defs 一同进程级缓存），`agent_load` 与 `agent_run` 校验的「未知子Agent」错误**附加载失败原因**（模型可见根因——self_optimize 写错文件当场定位修复而非面对无解释的未知名，修复文件后 mtime 变化触发重扫自动恢复注册）；**`agent_load` 装载失败真实报错**（`ctx.loadSubAgent` 装载后仍未注册即抛 `unknownAgentError`——含附因；幂等重装已装载者仍成功，`loadAgentsForSession` 的单失败跳过容错仅用于会话恢复路径）。价值：self_optimize 生成/修改子Agent 后**当会话内即可 agent_run 验证成果**，自我优化闭环不再依赖重启
+- **打包闭环**：`bun build` 前由 `packages/server/scripts/build-subagents.ts` 扫描 `packages/agents/src/agents/`（子代理定义域）生成 bundle 注册表（`src/core/subagents.bundle.generated.ts`，gitignore），全部子Agent 定义（含 md 提示词）以静态 import 内联进产物；dist/二进制模式下源码目录不可用，`discover()` 自动回退到 bundle 注册表——子Agent 真正「打包进二进制」，运行时无需读取任何子Agent 文件。**构建期逐代理验证（DESIGN「子代理失败隔离」）**：脚本对每个 TS 定义真 import 一遍，模块顶层抛错/缺 `def` 导出/`def.name` 不一致的代理**剔除出静态 import**（否则运行时顶层静态 import 任一模块失败会炸整个注册表），原因烘焙进 `bundledErrors`（运行时水合进 `loadErrors`，模型侧可见根因）；单代理失败只告警不阻断构建、不连带其他代理。**运行时降级不阻断启动**：bundle 注册表整体缺失/加载失败（构建脚本未跑/生成文件损坏）时降级为无子Agent启动（显眼告警，服务本体与全局工具正常，修复构建链路重启即恢复）——子代理失败不炸主流程，绝不因单模块问题让服务不可用。**例外与配套**：playwright 子Agent 的 `driver.mjs`（node 桥接进程，须保持独立文件）由构建脚本复制到 `dist/` 与产物同目录，运行时按 `import.meta.dir` 定位（`--compile` 形态另经 `packages/server/scripts/build-driver-embed.ts` 内嵌、物化到 `{GEBAI_HOME}/vendor/playwright/`）；playwright-core 包树经 `packages/server/scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌（`pwcore.embedded.generated.json`，gitignore），运行时物化到 `{GEBAI_HOME}/vendor/playwright-core/`（见 playwright 子Agent「依赖与部署」）。**铁律：bundle 图内的子Agent 模块禁止模块作用域的第三方包解析**（`Bun.resolveSync`、裸 `import`/`require` 等）——编译产物中这类解析锚定真实 CWD 的 node_modules 可达性，此类启动期解析失败已被构建期验证拦截（剔除出 bundle）；此类依赖须延迟到首次工具调用（playwright 经 `createLazyBridge()` 惰性单例，解析失败降级为工具级运行时错误，不影响服务启动）
+- **构建期裁剪与预加载指定**（环境变量，二进制形态无法改源码、构建时定死）：`GEBAI_BUILD_SUBAGENTS`（逗号分隔包含清单，缺省 = 全部打包）按需产出精简二进制——**包含清单经依赖闭包自动展开**（include reverse_site 自动带上其 `dependencies` 声明的 playwright——运行时依赖自动装载要求依赖方在产物中存在，漏列会产出能力残缺的二进制；构建脚本动态 import 各 def 读取 `dependencies` 递归补入，依赖指向不存在的名字直接构建失败）；`GEBAI_BUILD_PRELOAD`（逗号分隔预加载清单）烘焙为 `def.preload=true`（启动即装载，运行时 `GEBAI_PRELOAD_SUB_AGENTS` 覆盖仍优先；预载逐个隔离——单个预载失败只记 loadErrors + 告警，不阻断启动与其余代理，见「子代理失败隔离」）；`GEBAI_BUILD_EXCLUDE_TOOLS`（逗号分隔**全局工具排除清单**，`packages/server/scripts/build-tools.ts` 生成 `tools-excluded.generated.ts` 烘焙）——被排除的全局工具不注册不暴露（schema 不可见、调用报未知工具），agent_run 新会话内建编排工具（tool_schemas/js）同规则过滤（`isGlobalToolExcluded`）；语义注意：全局工具排除是**能力裁剪**——工具实现与工具表同模块仍会打包（无法摇树），体积裁剪主要来自子Agent 包含清单与内嵌产物跳过。三清单中的未知名字构建直接失败并列出可用名单（防产物静默缺失）。`tools-excluded.generated.ts` 与 subagents.bundle 不同——**提交默认空名单入库**（消费方 `core/tools/index.ts` 静态导入：运行时读文件在 `--compile` 单文件形态不可行）；`packages/server/scripts/build-tools.ts` 同时生成全局工具 bundle 注册表 `core/tools/bundle.generated.ts`（见「全局工具零注册」），该文件 gitignore，裁剪构建后为脏属预期，勿提交裁剪态。**模型配置内置**（`GEBAI_BUILD_EMBED_ENV=1`，`packages/server/scripts/build-env-embed.ts`）：把仓库根 `.env`（+进程环境）中 `GEBAI_LLM_*`/`GEBAI_VISION_*` 前缀的模型配置烘焙为二进制**启动默认值**（`env-embedded.generated.ts`，`startServer` 顶部经 `applyEmbeddedEnvDefaults` 仅填充未设置/空串的键——优先级：前端/任务级 env > 运行时环境变量 > `{GEBAI_HOME}/.env` > 内置默认），发行裁剪构建产出「开箱即用」产物；文件策略同 tools-excluded（默认空对象入库、内置构建后脏态勿提交，调用方构建脚本编译后立即还原空态——**该文件必须在版本控制中、不得写入 .gitignore**：`boot/compose.ts` 静态导入，缺文件则新克隆环境 `bun run dev` 启动即 `Cannot find module`（历史踩坑：仓库瘦身时被误随 `*.embedded.generated.json` 二进制内嵌产物一并移出跟踪）；`packages/server` 的 `dev`/`typecheck`/`build` 链前置经本脚本兜底生成，`build` 编译后再以 `--restore` 自动还原空态；并由 `core/generated-artifacts.test.ts` 守卫——`src/**` 中**静态导入**的 `generated` 模块必须存在且已被 git 跟踪，误移出跟踪当场测试报红；动态导入不在此列（构建链接管 + 运行时降级））；**安全边界：内置密钥明文随二进制分发、可被持有者提取**——仅限受信任小范围分发，建议低额度专用 Key，生成/构建日志只输出变量名不输出值
 - **裁剪构建样例**（根 `scripts/` 目录）：`bun run build:code`（`build-code-agent.ts`）产出 code 场景精简**服务端**单文件二进制（`packages/server/dist/gebai-code[.exe]`，浏览器形态、内嵌 Web UI）——三层裁剪组合示范：子Agent 包含清单（code+explore，体积收益主来源：未选子Agent 模块整体摇出产物）+ 预加载清单（code 开箱即用）+ 全局工具排除清单（show/fetch_url）。可作为其他场景裁剪构建的模板：复制脚本改清单即可（如 reverse_site 站点逆向、feishu 文档、只读分析）
 - 命名规则：仅限小写字母、数字、下划线
 - 子代理定义模块的 import 前缀按域区分（内置域 `../../../../agents/src/agents`、二开域 `../../../../../custom/agents`，均相对发现器文件）；域目录存在但无定义文件与域目录缺失是两种状态，后者（无源码树）才回退 bundle 注册表
 - 子Agent 定义的工具名无需关注前缀，总Agent 负责在其 schema 中添加 `{agent_name}_` 前缀（命名空间规则见「工具与命名空间」），以及工具调用时的路由和转发，对子Agent 完全透明
-- 环境变量作用域：子Agent 只能访问 `{AGENT_NAME_UPPER}_*` 前缀的变量
+- 环境变量作用域：子Agent 配置项按 `{AGENT_NAME_UPPER}_*` 前缀**约定**声明（进入环境变量面板目录与 `envVars` 白名单口径）——**无强制的访问隔离**：TS 子Agent 工具与客卿均拿到完整 `ctx.env`，真正的硬边界是脚本子进程/js ctx 的敏感变量剔除（见「脚本隔离」「环境变量隔离」）
 - 全局共享：所有用户使用同一份内置子Agent，无用户差异
 
 #### 装载 vs 新会话执行（概念模型）
@@ -825,7 +843,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **启动**（`agent_run async:true`）：预加载清单**同步校验**（去重/`self_optimize` 连带 `code`/数量与深度上限/未知名检查，`engine.normalizeRunAgents`，同步/异步启动共用——未知名等错误立即抛给模型而非留下幽灵运行），通过后登记句柄并立即返回；执行过程事件（`session: true` + `sessionRunId`）照常实时推送前端（发起任务结束后 delta 推送不中断——任务已不在 tasks 表时缺省视为 streaming）
 - **查询/等待/终止/清单**（`bg_task`，id 前缀 `r` 分发到本服务；`t` 前缀走 sh 命令任务分支）：`status` 立即返回运行状态与**进度快照**（已执行模型回复轮次/工具调用次数/最近一条存档条目尾部——从存档活引用实时推导，`agent_run` 存档创建即经 `onArchive` 回调交注册表持有）；`wait` 阻塞等待完成并取回最终结果与**完整存档**（挂到 `bg_task` 执行记录扩展字段供历史回放；timeout 秒内未完成返回当前进度可再次 wait，默认 60 秒、上限 540——不晚于引擎 9 分钟工具兜底）；`stop` **主动终止**（abort 传播进执行循环，终止前的执行过程保留在存档可回放）；`list` 列出本会话全部运行
 - **状态机**：`running`（执行中）→ `done`（正常完成）/ `failed`（执行异常）/ `cancelled`（被终止——`bg_task stop` 显式终止，或发起任务被用户停止/审批拒绝时**父任务取消信号连带终止**；运行结束后解除信号监听，防监听器泄漏）
-- **实现与生命周期**：运行是**进程内异步任务**（`core/session-runs.ts` 的 `SessionRunRegistry`，引擎级共享句柄表 + 按会话过滤的薄视图，`buildContext` 注入 `ctx.sessionRuns`），跨工具调用可见、随进程存活——服务重启即中断（不落盘恢复，与 sh 任务的 `lost` 判定哲学一致）；跨任务可见（上一任务启动的后台运行，后续任务可 `bg_task` 查询/等待/终止）；终态记录按会话保留最近 20 条（超出淘汰最旧）；**会话删除连带清理**（`engine.forgetSession`）——运行中的先终止（孤儿运行无消费者）、该会话全部句柄移除（句柄含全量存档，滞留即内存泄漏）
+- **实现与生命周期**：运行是**进程内异步任务**（`core/session/session-runs.ts` 的 `SessionRunRegistry`，引擎级共享句柄表 + 按会话过滤的薄视图，`buildContext` 注入 `ctx.sessionRuns`），跨工具调用可见、随进程存活——服务重启即中断（不落盘恢复，与 sh 任务的 `lost` 判定哲学一致）；跨任务可见（上一任务启动的后台运行，后续任务可 `bg_task` 查询/等待/终止）；终态记录按会话保留最近 20 条（超出淘汰最旧）；**会话删除连带清理**（`engine.forgetSession`）——运行中的先终止（孤儿运行无消费者）、该会话全部句柄移除（句柄含全量存档，滞留即内存泄漏）
 - **在途流式快照隔离**：异步运行与主任务**真正并行**（同步 `agent_run` 期间主任务在等工具、不流式，无此交错）——`noteStream` 对 session 标记的增量在主任务快照流式期间不写入（按 messageId 开新快照会互相整体替换，attach 恢复可能把后台文本渲染进主任务气泡；后台进度已有 event 推送，快照仅为 attach 兜底，主任务流式期间以主任务为准）；`clearStream` 按 `sessionRunId` 定向清空（后台运行轮末不误清并行主任务的在途快照）
 - **门禁**：单会话并发后台运行上限 8（超限拒绝新运行并引导清理）；预加载清单与深度限制同同步路径；`bg_task` 管理动作免审批（查询/等待/终止本会话后台任务）
 
@@ -859,7 +877,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 1. **全局精确匹配**：先查全局工具表，命中即全局工具
 2. **子Agent 前缀匹配**：遍历已注册子Agent，取「最长匹配的 `{agent}_` 前缀」，剩余部分为工具名——注册表固定，解析结果确定，任何 `a_b_c` 形态都有唯一解
 
-**注册期碰撞检查**（构建时自动校验）
+**注册期碰撞检查**（注册时校验——构建期 bundle 注册走同一路径）
 
 - 全局工具名不得以任何 `{agent}_` 开头（与子Agent 命名空间互斥）
 - 子Agent 名不得互为前缀（如 `web` 与 `web_search` 同时存在会引入前缀竞争，构建时报错）
@@ -867,7 +885,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 **弱模型容错兜底**
 
 - 精确查找失败时做**分隔符归一化重试**：将工具名中的 `-`、`.`、`:` 全部替换为 `_` 后重查，覆盖弱模型的分隔符误写
-- 仍失败则返回明确错误（提示最接近的候选工具名），引导模型下一轮修正，不静默吞错
+- 仍失败则返回明确错误（`unknownToolMsg` 附**该子Agent 可用工具全名清单**），引导模型下一轮修正，不静默吞错
 
 **透明转发**
 
@@ -911,7 +929,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **fork 点**：`branch_run` 工具调用时的主线上下文（含已装载子Agent 的提示词与工具）。fork 快照同步切片；快照尾部可能带尚未应答的 `assistant(toolCalls)`（本轮工具批处理进行中），为悬空 toolCall **合成占位 tool 结果**（严格校验的接口要求 tool_calls 后紧跟 tool 响应），再追加分支任务指令（user 消息）
 - **分支执行**：复用新会话执行循环（审批/重复检测/轮次上限/流式推送同构），分支系统提示词 = 主会话同一系统提示词（单源复用）+ 分支附注（并行职责/并发写提醒——其他分支可能并行修改同一文件，写入前先读最新内容/不向用户提问/完成后输出最终报告）。分支工具面 = 主会话注册表视图快照（全局工具 + 已装载子Agent `{agent}_` 工具 + 会话动态工具）；分支内装载子Agent 只进本分支（隔离语义，不写主会话记录）；**已读追踪 fork 快照**——分支拷贝 fork 点的会话级已读表（防盲写/防陈旧覆盖守卫的分支隔离：fork 后主线/兄弟分支的读写互不串扰，见「防盲写守卫」）
 - **多路模型接口（模型路由）**：分支的 `model` 参数按名解析——命中 `GEBAI_LLM_ROUTES` 配置的**命名路由**（JSON：`{"路由名": {"model", "api_base"?, "api_key"?, "api_kind"?, "max_context"?}}`）走独立端点/模型；未命中视为字面模型名（主配置基准覆盖）；缺省沿用任务级模型。多分支各走各的 Provider 并行，分摊单路模型服务的限流与串行速度限制。路由表可配在进程 env 或会话/任务级 env（前端 env 面板同样生效）
-- **合并（自动）**：分支正常完成即把最终报告构造为**合并消息**（assistant，内容头行 `【并行分支「名」已合并】` 自描述 + `branchMeta` 标记 + 完整过程存档 `sessionRun`（`branch` 字段标识，历史回放渲染「🌿 分支」折叠容器））合入主上下文：任务运行中入**引擎合并队列**，runLoop 在**工具批处理边界排空**（位于本轮 tool 结果之后追加——`assistant(toolCalls)`→`tool` 配对完整，主线下轮模型调用即见）；异步分支晚于主线结束时直接落盘（下次 run 经 loadHistory 进上下文），任务收尾（run finally）冲刷队列防丢失。报告超长保留头尾截断（`BRANCH_MERGE_MAX_CHARS`，纯上下文保护）。失败/被终止的分支**不合入**（过程保留在存档，`bg_task` 可取回回放）
+- **合并（自动）**：分支正常完成即把最终报告构造为**合并消息**（role=`user` + `engineNote: "branch"`——思考类模型不接受以 assistant 结尾的历史；内容头行 `【并行分支「名」已合并】` 自描述 + `branchMeta` 标记 + 完整过程存档 `sessionRun`（`branch` 字段标识，历史回放渲染「🌿 分支」折叠容器））合入主上下文：任务运行中入**引擎合并队列**，runLoop 在**工具批处理边界排空**（位于本轮 tool 结果之后追加——`assistant(toolCalls)`→`tool` 配对完整，主线下轮模型调用即见）；异步分支晚于主线结束时直接落盘（下次 run 经 loadHistory 进上下文），任务收尾（run finally）冲刷队列防丢失。报告超长保留头尾截断（`BRANCH_MERGE_MAX_CHARS`，纯上下文保护）。失败/被终止的分支**不合入**（过程保留在存档，`bg_task` 可取回回放）
 - **合入粒度（`merge` 参数，调用级）**：`full`（缺省）=报告全文合入（上列行为）；`summary`=**摘要合入**——报告超过 `BRANCH_MERGE_SUMMARY_SKIP_CHARS`（1500 字符）时先经任务级模型压缩为「结论+关键发现+产物清单+建议」要点（`summarizeBranchReport`，复用压缩同款读空闲超时防护；短于阈值不值得一次模型调用，原文合入），合并消息头行带「（摘要合入）」标记并附「全文见分支过程存档」注记——**主线上下文只进摘要，全文保留在过程存档/`bg_task` wait 可取回**；摘要失败/空结果全文兜底（合入不因摘要失败而丢失）；分支多/报告长时保主线上下文预算（多轮「分支合并」不打爆主线）。同步 fan-out 的等待覆盖合入完成（注册表 done promise 在合入回调 settle 之后——工具结果返回时摘要合并消息必已入队，主线下一轮即见）
 - **双向同步（`branch_sync` 工具，仅分支上下文注册——分支唯一协作工具，双向一个入口）**：**传 `content` = 交出**——阶段性成果（重要结论/产物清单/对其他分支有用的发现）立即合入主干（同一合并队列/落盘路径，内容头行 `阶段性合入`、不带过程存档：分支仍在执行、存档为活引用，完成时的最终合并才携带完整存档），广播其他分支，**分支继续执行不受影响**、可多次调用；**不传 = 拉取**——返回主干自 fork/上次同步以来的**全部新消息**（主线用户输入/回复、其他分支合入全文 `【合并·名】`、主线工具结果摘要，逐消息 1200 字符、工具摘要 600）。两种用法均返回主干增量快照（`trunkSnapshot`）——**合入即感知**，交出后立刻看到主干新进展。水位（`forkAt`/`syncedAt`，存储消息数）推进保证增量式（每次只返回新内容）；合并队列中未落盘的合入（同步 fan-out 期间）一并回显并按消息 id 登记已投递（防其落盘后在下次增量重复出现）；本分支自己的合入跳过（内容自产）。fork 水位在 runBranch 首个 await 后记录（此刻存储尾部即 fork 快照的持久化等价——在途 tool 结果尚未落盘，不属主干可见内容）。主会话/新会话执行内未注册本工具（调用返回不可用说明）
 - **互相感知（主干通知注入 + branch_sync 按需同步）**：分支 fork 快照后主干仍在演进，双向感知靠**两条通道**——①**通知注入**（自动、紧凑）：任何合入（阶段性/最终）与主线每轮最终回复（异步分支场景；同步 fan-out 期间主线阻塞在 branch_run 工具内无此交错）都向**本会话其他运行中分支**的收件箱（`BranchRunHandle.inbox`）压入通知（`【分支感知】分支「名」…合入主干` / `【主线进展】主线回复`，截断 `BRANCH_NOTICE_MAX_CHARS`），分支执行循环**每轮轮首排空**注入为 user 消息（位于上一轮 tool 结果之后，tool_calls 配对不破坏；入分支存档可回放）；②**branch_sync 按需同步**（完整）：通知只给摘要，需要主干完整内容（如依赖兄弟分支详细发现做决策）时增量拉取全文。分支感知主线与兄弟分支的进展后可调整分工（避免重复工作/冲突）；发起方不收到自己的通知（`exceptBranchId`）
@@ -942,7 +960,7 @@ export const preload = false
 - **项目机制（`project` 参数，无状态逐次指定）**：操作项目必须**显式**指定——全局文件工具与 code 独有工具的 `project` 参数传**预置项目名**或**项目根路径**（自由项目），路径即相对所选根解析（沙箱模式限定该根内）；未传 `project` 时相对路径以会话工作目录为基准（默认语义不变）。无会话粘性默认根（旧版 `project` 工具的 use/clear 已移除——「每次调用重复传根路径」由预置项目名/相对路径本身消化，机制无状态更简洁）；`grep`/`glob`/`search_symbols` 在项目模式下递归扫描项目根（跳过 `.git`/`node_modules`/`dist` 等大型目录，限深 10 层）；**绑定项目根的新会话（`agent_run` + `{AGENT}_PROJECT`）内文件清单基准随根切换**——`ctx.listFiles` 与路径解析基准（resolveBase）一致取项目根文件树，`search_symbols` 等以 `listFiles` 为扫描清单的工具默认扫项目根，无需显式 `project` 参数（此前清单恒为会话 tmp 子树，绑定根会话里只能搜到 tmp）；`git`/`sh`/`py`/`preview_server` 以项目根为工作目录
 - **保留项目名 `tmp`（会话工作区）**：`project` 参数接受保留名 `tmp`，解析到**会话工作区**（引擎恒定注入 `ctx.sessionWorkdir`——`workdir` 在新会话绑定项目根时是项目根，`tmp` 不随之变化；未注入时回退 `workdir`）。访问会话文件（附件、中间产物、临时脚本）的显式通道——「世界切换」统一到 project 参数语义，不再依赖工具名分叉。**预置项目名不得占用 `tmp`**：启动校验拒绝（`index.ts` 扫描子Agent `envVars` 声明的 `{AGENT}_PROJECTS` 进程环境变量），前端注入的任务级 env 由 `presetProjectsFor` 同规则兜底抛错——防呆在配置期暴露，避免静默遮蔽保留名后无法访问会话文件
 - **验证/环境工具（自全局工具集下沉，全局集最小化）**：`preview_server`（临时新端口启动/停止一份独立进程的 GEBAI 服务，`action=start`/`stop`，供用户验证服务端类改动——不中断当前会话，启动返回 URL/PID/日志路径；经 `projectAware` 包装以 `{workdir:true}` 暴露——带 `project` 参数时以项目根为启动目录）、`env_detect`（环境探测：平台/架构、PATH 去重、关键工具链版本 node/bun/python/git/cargo 等（缺失标记不可用）、Windows MSVC 与 WebView2 状态，指导安装缺失组件）、`system_info`（系统基础信息）——三者不注册为全局工具，以 `code_preview_server`/`code_env_detect`/`code_system_info` 命名空间暴露（`self_optimize` 经连带装载 code 一并获得），全部免审批
-- **tree-sitter 语法分析（`analyze`）**：基于 `web-tree-sitter`（wasm）按语言加载语法（JS/TS/TSX/Python/Go/Rust/Java/C/C++/JSON/HTML/CSS/Bash 等 30+ 语言，语法文件来自 `tree-sitter-wasms`），输出结构化概览（导入/导出、函数/类/方法/类型定义及行号、嵌套关系），替代逐行阅读快速定位；首次使用懒加载、按语言缓存 parser；**wasm 加载双通道**——dev 模式 `require.resolve` 读 node_modules，二进制/打包模式回退构建期内嵌注册表（`analyzer-wasm.embedded.generated.json`，`scripts/build-analyzer-wasm.ts` 生成，gzip 压缩约 3.6MB）；**报错区分两类**：语言不在映射表报「不支持的语言」（附支持列表），wasm 资源加载失败报「语法分析不可用」（提示依赖缺失/未内嵌并引导改用 read）——不再把资源缺失误报为语言不支持
+- **tree-sitter 语法分析（`analyze`）**：基于 `web-tree-sitter`（wasm）按语言加载语法（JS/TS/TSX/Python/Go/Rust/Java/C/C++/JSON/HTML/CSS/Bash 等 30+ 语言，语法文件来自 `tree-sitter-wasms`），输出结构化概览（导入/导出、函数/类/方法/类型定义及行号、嵌套关系），替代逐行阅读快速定位；首次使用懒加载、按语言缓存 parser；**wasm 加载双通道**——dev 模式 `require.resolve` 读 node_modules，二进制/打包模式回退构建期内嵌注册表（`analyzer-wasm.embedded.generated.json`，`packages/server/scripts/build-analyzer-wasm.ts` 生成，gzip 压缩约 3.6MB）；**报错区分两类**：语言不在映射表报「不支持的语言」（附支持列表），wasm 资源加载失败报「语法分析不可用」（提示依赖缺失/未内嵌并引导改用 read）——不再把资源缺失误报为语言不支持
 - **两种项目形态（统一 project 参数，二选一）**：
   - **预置项目**：会话环境变量 `CODE_PROJECTS`（JSON 数组 `[{name, path, description?}]`）声明命名项目注册表——**工具以 `project` 参数（项目名）选择目标项目**，路径参数相对所选项目根解析；预置项目**可携带项目说明**（`description`），清单（名称/说明/路径）注入**子Agent 系统提示词**（engine 组装子Agent 提示词时注入——`agent_run` 执行新会话与装载写会话记录（`ensureSessionAgents`）均注入，**不注入总Agent 系统提示词**；注记置于职责分隔头之后、静态提示词之前（环境信息前置，模型开工先读清单按名选项目））；**描述动态体现**：engine 的 `agentDescription` 把预置项目摘要（名称: 说明（路径））与装载后工具摘要追加进 code 描述——未装载清单（总Agent 系统提示词）与 `agent_list` 输出均展示，总Agent 装载前即可按项目名/工具能力关联任务与代码位置，完整注记（工具 project 参数用法说明）仍只在子Agent 提示词；非法 JSON 静默忽略（回退自由项目模式），同名项目去重（首个生效）
   - **自由路径项目**：`project` 参数直接传**项目根路径**（绝对/相对；`looksLikePath` 判定——绝对路径、含路径分隔或 `.`/`~` 开头；本地模式绝对直用/相对按进程 cwd 解析，沙箱模式限定用户数据目录内与预置项目同规则）——无需预配置即获得与预置项目一致的「路径相对项目根解析 + 项目根工作目录 + 项目根递归搜索」三重路由
@@ -957,8 +975,8 @@ export const preload = false
   - 任一形态下**不得修改 GEBAI 服务端自身源码**（提示词与权限双重约束，自我优化走 `self_optimize`）
 - **验证闭环**：系统提示词要求修改后运行项目测试（按语言选 `bun test`/`npm test`/`pytest` 等，Python 项目用 `py`）与类型检查/lint（`bun run typecheck`/`bun run lint` 等），失败则继续修复；Web 项目需要浏览器端验证时经 `agent_run` 委托 `playwright`
 - **新会话执行模式**：总Agent 以 `agent_run` 执行新会话（预加载 `code`）时，`code` 自主完成「规划 → 分析 → 方案 → 修改 → 验证」全流程后交回
-- **预加载**：`preload = true` 使该子Agent 默认注入，随时可被总Agent 选用
-- 新增子Agent 只需照此模式放置 TS 文件，构建时选择性打包（`--sub-agents code`）
+- **预加载**：`preload` 声明该子Agent 是否默认注入——**内置子Agent 一律 `preload = false`**（按需 `agent_load` / 路由自愈），部署方可用 `GEBAI_PRELOAD_SUB_AGENTS` 指定预载集合
+- 新增子Agent 只需照此模式放置定义（目录形态 `{name}/{name}.ts` + `{name}.md`，或纯 `.md` 零 TS 定义），构建期按 `GEBAI_BUILD_SUBAGENTS` 选择性打包（见「选择性打包」）
 
 > **职责边界**：`code` 只处理外部项目。**自我优化（改 GEBAI 自身代码）由独立的 `self_optimize` 子Agent 承担**（见下节），两者工作区、审批策略、提示词均分离，避免普通源码分析流程获得修改服务端代码的权限。`code` 的 `agent_run` 委托仅用于只读/验证类委托（如 `playwright`），不委托 `self_optimize`（防经子Agent 链间接获得服务端修改能力，边界由总Agent 路由引导「GEBAI 自身代码 → self_optimize」维护）。
 
@@ -975,17 +993,17 @@ export const preload = false
 - **客卿侧（`keqing/python/vision/`，onnxruntime 原生推理）贡献**：`ocr`/`locate`/`locate_image`/`detect` 四个本地识别工具——重计算迁边车（原生推理比 wasm 快、模型进程级加载一次全会话复用），manifest `requiresApproval:false`（只读免审批）；算法与 TS `core/cv` 纯函数同源移植（det/rec 前后处理、DB 后处理、CTC 解码、零均值 NCC 模板匹配、letterbox+v8/v5 双形态后处理、ultralytics ONNX 元数据自适应），模型资产复用同一套（GEBAI_CV_MODELS_DIR / assets/cv-models / {GEBAI_HOME}/models/detect）；图片路径经请求级 `ctx.cwd` 解析；依赖（onnxruntime/numpy/pillow）缺失时工具返回安装提示不拋栈，探测延迟到调用时（模块加载阶段缺依赖不阻断工具集上报）
 - **TS 侧贡献**：仅 `analyze`（多模态语义分析）——provider 抽象属宿主 LLM 层（三协议流式适配、GEBAI_VISION_* 与任务级 env 覆盖、多模态回落链经 `getVisionProvider`），凭证不下传边车；description 留空不贡献，识别工具描述与决策序提示词由客卿侧 PROMPT.md 提供，合并层拼接两侧：
 
-- **工具集**（五工具，全部只读免审批、无环境闸门（沙箱可用）、零依赖）：`analyze`（多模态模型语义分析——理解图像内容/布局含义/非文字元素，支持 png/jpg/jpeg/gif/webp；复用 `makeVisionTool` 工厂注入 `getVisionProvider`（同一 provider 解析：GEBAI_VISION_* 外挂 → 多模态主模型回落））、`ocr`（本地 OCR 读文字带图片像素坐标）、`locate`（定位文字坐标）、`locate_image`（模板匹配定位图标/图形）、`detect`（自备 YOLO 目标检测，默认配对 OCR 文本）——后四者复用 `createCvAnalysisTools`/`createDetectTool` 共享工厂，注入「无缺省源（image 必填）+ 无闸门」形态
+- **工具集**（跨语言合并后共 8 个：客卿侧贡献 `ocr`/`locate`/`locate_image`/`detect` 四项，与语言基础工具 `run`/`pip`/`status` 合并后随 `analyze` 一并装载；全部只读免审批；**受客卿门控**——客卿仅本地形态启用、沙箱启用即整体禁用，故服务端部署下只有 TS 侧 `analyze` 可用）：`analyze`（多模态模型语义分析——理解图像内容/布局含义/非文字元素，支持 png/jpg/jpeg/gif/webp；复用 `makeVisionTool` 工厂注入 `getVisionProvider`（同一 provider 解析：GEBAI_VISION_* 外挂 → 多模态主模型回落））、`ocr`（本地 OCR 读文字带图片像素坐标）、`locate`（定位文字坐标）、`locate_image`（模板匹配定位图标/图形）、`detect`（自备 YOLO 目标检测，默认配对 OCR 文本）——后四者复用 `createCvAnalysisTools`/`createDetectTool` 共享工厂，注入「无缺省源（image 必填）+ 无闸门」形态
 - **边界（不截图）**：输入一律为图片文件路径（PNG；analyze 另支持 jpg/jpeg/gif/webp）——本子Agent 不提供缺省图像源，需要现截屏幕/页面由 desktop/playwright 子代理完成；坐标为图片像素系，消费方自行映射到目标环境（屏幕加窗口原点、页面用 elementFromPoint）
 - **决策序（硬性，按性能从高到低）**：①读文字/找文字/判断可 OCR 状态 → `ocr`/`locate`（本地 OCR，毫秒~秒级、精确坐标、离线不耗配额）——禁止用 analyze 回答 ocr 能答的问题；②找图标/图形/UI 元素 → `locate_image`（本地模板匹配）；③找对象/框目标 → `detect`（本地 YOLO）；④`analyze`（外部多模态模型，秒级延迟、耗配额、可能超时）仅语义理解（图像内容/布局含义/非文字元素）或 1~3 无结果时兜底——超时不原样重试，先回到 1~3
 - **依赖复用（方式一消费方）**：`self_optimize` 声明 `dependencies: ["code", "vision"]`——agent_run 新会话即使不继承全局工具也有视觉能力（page_capture 截图后 `vision_analyze` 分析、`vision_ocr` 读图文字）；desktop/playwright 的本地识别推理也消费 vision 边车（见下条「推理委托」）；语义分析兜底按需 agent_load 装载；全局 `vision` 工具已移除（降级指引文案统一改指 vision_analyze）
-- **推理委托（desktop/playwright 复用边车推理，sidecar-first）**：desktop_ocr/desktop_locate/desktop_detect、playwright_ocr/playwright_locate/playwright_detect 与 desktop_wait_for 的 text 模式，推理优先经 `ToolContext.registry` 调用 `vision_ocr`/`vision_detect`（即 vision Python 边车——onnxruntime 原生推理、模型进程级缓存），未装载/报错回落进程内 wasm（`core/tools/cv-analysis` 内 ocrInfer/detectInfer 统一封装）。跨进程图像传递：RgbaImage 经 `encodePng`（`core/cv/image` 新增，与 decodePng 对称）落会话工作区**每次调用唯一**的临时文件（`tmp/cv_sidecar_in_<序号>_<随机>.png`，用后即删）后以相对路径调用，边车经请求级 ctx.cwd 解析——并发 CV 调用（js 编排 Promise.all 并行 ocr/locate/detect）不共用路径，不会互相覆盖或读到瞬时半写文件；坐标系完全同构（边车返回坐标相对传入 PNG=裁剪后图像像素系，与 wasm 一致，消费层 offX/offY 回加不变）——纯 drop-in。经注册表而非直连边车进程：复用装载门控/审批策略/ctx 组装，不绕过任何治理层；边车未装载时零开销回落（registry.resolve 不到即 wasm）
+- **推理委托（desktop/playwright 复用边车推理，sidecar-first）**：desktop_ocr/desktop_locate/desktop_detect、playwright_ocr/playwright_locate/playwright_detect 与 desktop_wait_for 的 text 模式，推理优先经 `ToolContext.registry` 调用 `vision_ocr`/`vision_detect`（即 vision Python 边车——onnxruntime 原生推理、模型进程级缓存），未装载/报错回落进程内 wasm（`@gebai/agents` core/shared/cv-analysis 内 ocrInfer/detectInfer 统一封装）。跨进程图像传递：RgbaImage 经 `encodePng`（`@gebai/agents` core/cv/image，与 decodePng 对称）落会话工作区**每次调用唯一**的临时文件（`tmp/cv_sidecar_in_<序号>_<随机>.png`，用后即删）后以相对路径调用，边车经请求级 ctx.cwd 解析——并发 CV 调用（js 编排 Promise.all 并行 ocr/locate/detect）不共用路径，不会互相覆盖或读到瞬时半写文件；坐标系完全同构（边车返回坐标相对传入 PNG=裁剪后图像像素系，与 wasm 一致，消费层 offX/offY 回加不变）——纯 drop-in。经注册表而非直连边车进程：复用装载门控/审批策略/ctx 组装，不绕过任何治理层；边车未装载时零开销回落（registry.resolve 不到即 wasm）
 - **缺省源截图**：desktop/playwright 的缺省图像源（现截屏幕/当前页视口）同样用每次调用唯一的临时文件名（`cv_capture.png` / `pw_cv_capture_<序号>_<随机>.png`）并读后即删——同一会话内并发取图不互相覆盖
 - **大图与小字（OCR 分块）**：整图长边超过 `OCR_TILE_SIDE` 时按块检测（相邻块重叠固定像素、重叠区同行按框 IoU 去重取高分），每块以原生分辨率送模型——整图等比缩到长边上限会把小字号压到不可辨识；检测输入尺寸对耗时影响很小（FHD 960→1920 仅 +20% 耗时，小字高分命中 2/7→7/7），故默认原生尺度送检
 - **平坦窗口（模板匹配）**：粗扫与精化两阶段的 NCC 分母均设下限（窗口方差≈0 时 NCC 无定义，记 0 分）——否则浮点残差会被放大成伪高分，挤占精化候选名额而使真匹配拿不到
 - **降采样语义一致**：两侧（TS `core/cv/template.ts` 与 客卿 `vision/tools.py`）均为 box 块均值降采样（边缘块按实际像素数平均），同一模板在两侧得到一致分数
 - **定位失败回落（`locate`）**：目标文字精确匹配落空时，按相似度给出最相近的若干识别行（含文字、坐标与相似度）——OCR 对小字/艺术字的误读会让精确匹配落空，直接报「未找到」把可继续的失败变成死路（模型只能撞词重试）；确无相近行时才给出换通道建议，两条失败路径都指向可行动的下一步
-- **检测类别缺标签（`detect`）**：模型无内嵌 `names` 元数据时类别以 `class_N` 占位并显式提示（可用 `GEBAI_CV_DETECT_LABELS` 指向每行一个类名的文本文件补齐），`data.placeholderLabels` 同源标记——占位类别无法据此判断检测到的是什么，静默输出会让模型误读
+- **检测类别缺标签（`detect`）**：模型无内嵌 `names` 元数据时类别以 `class_N` 占位并显式提示（可用 `GEBAI_CV_DETECT_LABELS` 指向每行一个类名的文本文件补齐），占位类别名即 `class_N`（`data.objects` 里直接可辨）——占位类别无法据此判断检测到的是什么，静默输出会让模型误读
 
 #### `desktop`（桌面控制）
 
@@ -1004,7 +1022,7 @@ export const preload = false
 - 跨平台：Windows 走内置 PowerShell（截图/窗口/输入，无外部依赖）；macOS 走 `screencapture` + `osascript`（鼠标需额外 `cliclick`）；Linux 依赖 `xdotool`/`wmctrl`/`scrot`（缺失时明确报错）。**Windows 坐标一致性**：全部涉及像素坐标的 PowerShell 脚本（截图/screen_info/window_list/window_move/mouse_*）开头声明 `SetProcessDPIAware`——坐标统一物理像素，防高 DPI 缩放（150% 等）下截图/窗口/鼠标坐标落入逻辑像素空间错位；**多显示器**：全屏截图与 cv 现截均取**虚拟屏幕**（`SystemInformation.VirtualScreen`，覆盖所有显示器，副屏可为负坐标），`region` 参数 x/y 支持负值（副屏在主屏左侧/上方），OCR/locate/locate_image 返回坐标一律映射回主屏原点像素系（虚拟屏幕原点/区域原点偏移），可直接用于 mouse_click；`window_list` 输出含**前台标记**（`GetForegroundWindow` 比对，`*` 行 + 「当前前台」汇总行）与**窗口 bounds**（`GetWindowRect` 物理像素 `x,y,w,h`）
 - **Windows PowerShell 执行通道（临时 .ps1 文件 + -File）**：所有 PowerShell 脚本（desktop_tools/desktop_cv_tools/desktop_uia_tools 三文件共用 `psCmd()` 助手）不再用 `-EncodedCommand` base64 内联——旧通道把整个脚本内联进命令行，受 cmd 单条命令行 8191 字符上限约束（截图/UIA 类长脚本必超——实测 ≥4KB 脚本即「command line is too long」静默 exit 1 且无任何输出），且企业管控软件会静默拦截长内联命令；改为脚本写入会话 `tmp/ps-scripts/` 下临时 .ps1，**UTF-8 带 BOM**（PS 5.1 对无 BOM 文件按 ANSI 解码，中文必乱码），经 `powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -File "<绝对路径>"` 执行（路径双引号包裹——Windows 参数解析不认单引号，单引号混入路径致 -File 打开失败、PS 回退交互模式污染 stdout；内嵌双引号反引号转义），执行后延迟 60s 删除临时文件（执行中的 .ps1 被 Windows 锁定；unref 不阻塞进程退出；删除失败留在会话目录无害）；`ctx.writeFile` 不可用/失败时兑底回 EncodedCommand 内联（短脚本行为同旧通道）；工具 run() 失败输出 stderr+stdout 合并展示（原来只显示其一，排障信息丢失）
 - 截图返回 `image` 内容块实时展示，并**自动做黑帧/纯色检测**（平均亮度极低提示显示器休眠/锁屏，暗色单色提示非真实画面）与**尺寸/原点元数据**（`STAT` 行 / sips / ImageMagick——原点供图片坐标 → 屏幕坐标换算）；`screen_info` 列出全部显示器（分辨率/位置/主屏）供 region 与坐标参考；文本输入默认剪贴板粘贴法（中文/符号可靠，**写入回验重试**——剪贴板管理软件拦截写入时明确报错不粘贴；粘贴后**延时恢复**原剪贴板——目标应用异步消费剪贴板，立即恢复会粘出旧内容），`mode="keys"` 纯按键模式（绕剪贴板，仅 ASCII；中文 IME 激活时部分标点可能丢失）；`window_focus` **激活后复核前台窗口**（`GetForegroundWindow` 比对），前台锁定拦截时经模拟 Alt 击键缓解重试，仍失败明确报错（不虚报成功）；`window_state`（最小化/最大化/还原/关闭，close 经 `WM_CLOSE` 优雅关闭可弹保存确认）、`mouse_scroll`（滚轮四方向，每格 120 单位）、`mouse_drag`（左键按住 + 12 步插值移动 + 抬起，适配依赖真实鼠标轨迹的目标）与 `clipboard_write`（写入回验 + 敏感值**告警不中止**——复制密钥供本人粘贴是常见需求）为 Windows 实现，macOS/Linux 部分明确输出「暂未支持」；`type_text`/`clipboard_read` 输入或读取前自动做**敏感值扫描**（`sk-` 前缀、KEY/SECRET/TOKEN 赋值、Bearer 令牌，长令牌启发式 40+ 字母数字混合且非纯十六进制——纯英文长串/git commit sha 不误判），命中即中止（type_text）/告警（clipboard_read）；**服务端部署（沙箱启用）下所有工具拒绝执行**；**Windows 输入增强（2024 批次）**：`key_press` 支持 `action: press/down/up`（按住/抬起分离——按住 Shift 点选、按住 W 前进）与 `hold_ms`（press 按住时长），系统级虚拟键经 vk 名直发 keybd_event 扫描码（`win+r`/`volume_up`/`media_next`/`vk_left`/`vk_XX` 任意十六进制码——SendKeys 覆盖不了的媒体/Win/箭头键；`win` 在组合中是修饰键，`vk_shift` 纯修饰键组合仅 down/up 有意义，裸 `shift` 仍走 SendKeys `+` 语义）；`mouse_click` 支持 `modifiers`（ctrl/shift/alt 以 + 组合，按住期间点击后逆序抬起）与 `button: middle/triple`（中键/三击段落选择，双击/三击 50ms 间隔时序）；`mouse_drag` 同样支持 `modifiers`（Ctrl+拖拽复制文件）；**窗口控制增强**：`window_list` 经 EnumWindows 枚举全部顶层可见窗口（替代 Get-Process MainWindowHandle——后者每进程只见一个主窗口，浏览器多窗口/多开应用漏窗口），输出末列 HWND；`window_focus/move/state` 新增 `hwnd` 参数精确指向多窗口进程中的具体窗口（优先于 pid/title，winLocate 助手统一注入——注意 PS 条件须用 `$true` 字面量，裸 `true` 在 PS5.1 被当命令调用恒走 else）；`window_state` 新增 `topmost/notopmost`（SetWindowPos HWND_TOPMOST/-2 + SWP_NOMOVE|NOSIZE）；**剪贴板图片**：`clipboard_write` 的 `image` 参数（PNG 路径 → 系统剪贴板位图，FromFile+Dispose——FromStream+`::new` 内联在 PS5.1 有类型解析陷阱；写入后回验尺寸一致，截图交给用户 Ctrl+V 粘贴的高频路径），与 `text` 二选一
-- **本地识别五工具（只读免审批，`desktop_cv_tools.ts`，基建见「小模型识别」；其中 ocr/locate/locate_image/detect 四工具均经共享工厂 `core/tools/cv-analysis`（playwright 与 vision 子代理复用同工厂，见「视觉能力分层与子代理复用边界」），wait_for 为 desktop 独有实现）**：`desktop_ocr`（读屏幕/图片文字：image 省略现截全屏、region 限定区域（负坐标覆盖副屏）、find 关键词过滤；返回行文本+框+中心坐标+置信度，超 200 行截断提示收窄；data 携带结构化 lines）、`desktop_locate`（按目标文字定位：匹配分级 完全相等 > 行包含目标 > 目标包含行，返回最佳匹配中心坐标（直接可 `mouse_click`）+ 候选清单；未找到时给出多通道建议）、`desktop_locate_image`（**模板匹配定位图标/图形**：`template` 模板 PNG 路径或 `template_region` 在搜索图坐标系内取模板区域；NCC 同尺寸匹配（模板需与目标同一显示环境同尺寸），threshold 默认 0.8；返回最佳匹配中心坐标 + 候选；未找到建议降阈值/改 desktop_locate/vision）、`desktop_detect`（自备 YOLO 检测：`GEBAI_CV_DETECT_MODEL` 配置**或放入 `{GEBAI_HOME}/models/detect/` 唯一 .onnx 自动发现**（`GEBAI_CV_DETECT_LABELS` 可选——ultralytics 导出 ONNX 自动读取 names/imgsz 元数据）；**默认与 OCR 配对输出「组件类型+文本」**（`pair_text` 可关——检测只给类别不含语义，找特定文字按钮仍以 desktop_locate 为主）；`conf`/`iou`（NMS 阈值，密集小控件建议 0.1）可调；**推理分层**——GPU sidecar（GEBAI_CV_DETECT_BACKEND/EP，Windows DirectML 等任意 DX12 显卡）可用即用，输出如实标注实际后端，不可用/失败自动回落 wasm；未配置返回指引）、`desktop_wait_for`（**界面条件等待**：mode=text/text_gone 等待文字出现/消失（本地 OCR 轮询）、image/image_gone 等待模板图像出现/消失（NCC 模板匹配，`template` PNG 路径 + `threshold` 默认 0.8——加载动画/图标等非文字元素等待）、change 等待画面变化（灰度采样均差 > 2/255 对比基线）；timeout_s 默认 20 上限 120、interval_s 默认 2；超时不视为错误，返回最后观察状态）；坐标一律**映射回主屏原点像素系**（虚拟屏幕原点/区域偏移 + 缩放还原——识别在降采样图像上进行，返回坐标对准原屏幕）；现截复用固定文件 `cv_capture.png`（覆盖写，不随调用累积）；输入图仅支持 PNG（desktop/playwright 截图生态一致，其他格式明确报错）；模型/运行时缺失时错误输出为中文配置指引（不中断会话）
+- **本地识别五工具（只读免审批，`desktop_cv_tools.ts`，基建见「小模型识别」；其中 ocr/locate/locate_image/detect 四工具均经共享工厂 `@gebai/agents` core/shared/cv-analysis（playwright 与 vision 子代理复用同工厂，见「视觉能力分层与子代理复用边界」），wait_for 为 desktop 独有实现）**：`desktop_ocr`（读屏幕/图片文字：image 省略现截全屏、region 限定区域（负坐标覆盖副屏）、find 关键词过滤；返回行文本+框+中心坐标+置信度，超 200 行截断提示收窄；data 携带结构化 lines）、`desktop_locate`（按目标文字定位：匹配分级 完全相等 > 行包含目标 > 目标包含行，返回最佳匹配中心坐标（直接可 `mouse_click`）+ 候选清单；未找到时给出多通道建议）、`desktop_locate_image`（**模板匹配定位图标/图形**：`template` 模板 PNG 路径或 `template_region` 在搜索图坐标系内取模板区域；NCC 同尺寸匹配（模板需与目标同一显示环境同尺寸），threshold 默认 0.8；返回最佳匹配中心坐标 + 候选；未找到建议降阈值/改 desktop_locate/vision）、`desktop_detect`（自备 YOLO 检测：`GEBAI_CV_DETECT_MODEL` 配置**或放入 `{GEBAI_HOME}/models/detect/` 唯一 .onnx 自动发现**（`GEBAI_CV_DETECT_LABELS` 可选——ultralytics 导出 ONNX 自动读取 names/imgsz 元数据）；**默认与 OCR 配对输出「组件类型+文本」**（`pair_text` 可关——检测只给类别不含语义，找特定文字按钮仍以 desktop_locate 为主）；`conf`/`iou`（NMS 阈值，密集小控件建议 0.1）可调；**推理分层**——GPU sidecar（GEBAI_CV_DETECT_BACKEND/EP，Windows DirectML 等任意 DX12 显卡）可用即用，输出如实标注实际后端，不可用/失败自动回落 wasm；未配置返回指引）、`desktop_wait_for`（**界面条件等待**：mode=text/text_gone 等待文字出现/消失（本地 OCR 轮询）、image/image_gone 等待模板图像出现/消失（NCC 模板匹配，`template` PNG 路径 + `threshold` 默认 0.8——加载动画/图标等非文字元素等待）、change 等待画面变化（灰度采样均差 > 2/255 对比基线）；timeout_s 默认 20 上限 120、interval_s 默认 2；超时不视为错误，返回最后观察状态）；坐标一律**映射回主屏原点像素系**（虚拟屏幕原点/区域偏移 + 缩放还原——识别在降采样图像上进行，返回坐标对准原屏幕）；现截复用固定文件 `cv_capture.png`（覆盖写，不随调用累积）；输入图仅支持 PNG（desktop/playwright 截图生态一致，其他格式明确报错）；模型/运行时缺失时错误输出为中文配置指引（不中断会话）
 - **UIA 语义树（`desktop_uia_inspect`，`desktop_uia_tools.ts`，仅 Windows、只读免审批）**：枚举目标窗口的 UI Automation 控件树——控件角色/名称/AutomationId/类名/bounds/状态（disabled/focused）/值模式文本（输入框内容），中心坐标可直接 mouse_click；定位窗口按 `hwnd`（window_list 结果最后一列，同进程多窗口精确指向）/pid/title（可组合）——只给 pid 时同进程多顶层窗口（explorer 的桌面与任务栏、浏览器多窗口）会命中多个，取面积最大者为主窗口并在输出中报告候选数（按枚举顺序取首个会命中任务栏等辅助窗口）；`find` 关键词只输出名称/ID 匹配控件（含路径）、`depth`（默认 6 上限 12）/`max`（默认 200 上限 400）控制规模，超限标记 truncated。**Chromium/Electron/WebView2 无障碍树惰性构建已内置双查询**（首查触发构建 → 400ms → 正式收集——实测 Edge 首查 50 节点、复查 598），**未显式指定 depth 时浅树（<50 节点）自动加深到 12 重查一次**（这类应用的容器节点与真实语义常跨多层：VSCode depth=6 仅 12 节点、depth=12 有 75 节点真实语义）；BoundingRectangle 可为 Infinity/NaN（屏幕外/未布局元素）已归零防 Int32 转换异常；**空树/浅树（<5 节点）= Flutter/游戏/自绘框架不暴露语义**——输出明确提示回落像素通道（desktop_ocr/locate/locate_image），提示词同源纪律：控件状态（禁用/勾选/值）OCR 判不了才用 uia_inspect，与像素通道互补而非替代；服务端部署拒绝（同域闸门）
 
 #### `feishu_docs`（飞书云文档）
@@ -1031,13 +1049,13 @@ export const preload = false
 - **工具集**（30 个）＝ 导航与内容（`playwright_tools.ts`）+ 会话类（`playwright_session_tools.ts`）+ 本地识别（`playwright_cv_tools.ts`）：
   - 导航/内容/交互（`playwright_tools.ts`，20 个）：`open`（导航，支持 http/https 与 **file:// 本地文件**，可配 wait_until；失败输出「打开失败: …」+ 排查建议）、`content`（text/html/both 读取，超长自动截断落盘）、`screenshot`（页面/元素/整页，保存会话 `tmp/` 并返回图片块与绝对路径）、`click`/`fill`/`press`/`select`/`check`（交互与表单；`check` 的 checked 非布尔值直接报错，不当 true 静默处理）、`hover`（悬停展开菜单）/`dblclick`（双击）/`drag`（元素拖拽，locator.dragTo）/`upload`（文件上传 setInputFiles，files 经 `resolvePath` 沙箱解析）、`wait_for`（元素/URL/网络空闲等待）、`evaluate`（页面内 JS 执行，JSON 序列化结果；**表达式与函数字面量 `() => …`均支持**（后者自动调用，否则求值得函数对象而序列化为 undefined）；失败提示改用 `content` 观察 DOM）、`pages`/`new_page`/`switch_page`/`close_page`（多标签页管理；**浏览器内部页**（edge://downloads-hub 等 WebUI）不进标签页索引，`close_page` 有界等待 5s，超时转「忽略」而不拖死桥接请求）、`close`（关闭会话浏览器上下文）、`serve_dir`（**内置静态文件服务器**：服务本地目录返回 http 地址，解决本地 HTML 需手工起服务的场景；服务端部署仅可服务预置项目目录）
   - 会话类（`playwright_session_tools.ts`，7 个）：`pdf`（页面导出 PDF 到会话 `tmp/`）、`downloads`（**下载捕获**：页面触发的下载自动存到系统临时目录，list 查看 / save 复制进会话目录）、`dialogs`（**对话框管理**：alert/confirm/prompt 记录 list + 自动应答 auto（accept/dismiss，prompt 可配文本）+ clear；无配置时默认 dismiss 防页面冻结）、`emulate`（**环境仿真**：视口/UA/语言/时区/移动端模式（isMobile+hasTouch），action=reset 恢复默认）、`cookies`（cookie list/set/clear，输出真实凭证）、`local_storage`（当前页 origin 的 localStorage 读写，driver 定式 evaluate 非任意脚本）、`storage_state`（**登录态持久化**：save/restore playwright storageState 格式（cookie+各 origin localStorage）文件，跨会话/跨任务免重复登录；restore 逐 origin 开临时页写 localStorage，不可达 origin 告警不中断）
-  - 本地识别（`playwright_cv_tools.ts`，3 个，只读免审批）：`ocr`/`locate`/`locate_image`——**复用 desktop 同款 core/cv 小模型基建**（共享工厂 `core/tools/cv-analysis`，见「小模型识别」），缺省图像源注入为「共享桥接截当前页视口」（与 playwright 工具同一桥接单例与会话锁；临时文件**每次调用唯一命名**（序号+随机，并发调用不互相覆盖）且用后即删；image 参数传 PNG 时同 desktop 语义）：`playwright_ocr`（读当前页面/图片文字：region 限定区域、find 过滤，返回行文本+框+中心坐标+置信度）、`playwright_locate`（按目标文字定位视口像素坐标）、`playwright_locate_image`（模板匹配定位图标/图形——验证图标/logo 真实渲染）；坐标一律**视口像素系**（`evaluate` 的 `document.elementFromPoint(x, y)` 定位元素后直接操作）；浏览器为隔离环境，**无 desktop 的本地模式闸门，服务端部署（沙箱）可用**；定位 canvas/WebGL 渲染文字、图片化文字/验证码等 DOM 读不到内容的兜底通道（普通文本/元素仍优先 content/选择器），语义理解按需装载 vision 子代理（vision_analyze）；**环境耦合的缺省源便利留在域内（复用方式二），不依赖 vision 子代理**（边界判定见「视觉能力分层与子代理复用边界」）
+  - 本地识别（`playwright_cv_tools.ts`，3 个，只读免审批）：`ocr`/`locate`/`locate_image`——**复用 desktop 同款 core/cv 小模型基建**（共享工厂 `@gebai/agents` core/shared/cv-analysis，见「小模型识别」），缺省图像源注入为「共享桥接截当前页视口」（与 playwright 工具同一桥接单例与会话锁；临时文件**每次调用唯一命名**（序号+随机，并发调用不互相覆盖）且用后即删；image 参数传 PNG 时同 desktop 语义）：`playwright_ocr`（读当前页面/图片文字：region 限定区域、find 过滤，返回行文本+框+中心坐标+置信度）、`playwright_locate`（按目标文字定位视口像素坐标）、`playwright_locate_image`（模板匹配定位图标/图形——验证图标/logo 真实渲染）；坐标一律**视口像素系**（`evaluate` 的 `document.elementFromPoint(x, y)` 定位元素后直接操作）；浏览器为隔离环境，**无 desktop 的本地模式闸门，服务端部署（沙箱）可用**；定位 canvas/WebGL 渲染文字、图片化文字/验证码等 DOM 读不到内容的兜底通道（普通文本/元素仍优先 content/选择器），语义理解按需装载 vision 子代理（vision_analyze）；**环境耦合的缺省源便利留在域内（复用方式二），不依赖 vision 子代理**（边界判定见「视觉能力分层与子代理复用边界」）
 - **选择器穿透 iframe**：selector 支持 `iframe选择器 >> 子iframe选择器 >> 目标选择器`（`>>` 分段，前段逐级 `Locator.contentFrame()`），click/fill/content/screenshot 等全部带 selector 的工具生效；CSS 引擎天然穿透开放 shadow DOM
 - **桥接架构（core/browser/bridge.ts，平台级基建）**：Bun 运行时与 playwright driver 的 pipe 通信存在兼容问题（chromium 启动超时，node 环境正常），因此 **Bun 进程内不直接 import playwright**——桥接 spawn 常驻 `node driver.mjs` 子进程（driver 在 `core/browser/driver.mjs`），经 stdin/stdout 行分隔 JSON-RPC 通信（请求 id 匹配、180s 超时杀进程重启、stderr 环形缓冲诊断；**kill 按 pid 整树终止**——Windows 无进程组，`proc.kill()` 只终止 driver，其拉起的浏览器孙进程会成孤儿驻留（占内存与 profile 临时目录），故 Windows 下先 `taskkill /pid <pid> /t /f`；**driver 回传的错误信息剥除 ANSI 转义码**（playwright 的 Call log 自带颜色码，回传模型是噪音））；driver 内 Browser 单例（断开自动重建），BrowserContext 按 sessionId 隔离（多用户/多会话互不串扰，`acceptDownloads: true` 创建），空闲 10 分钟惰性回收；页面级监听（dialog/download/websocket 帧）经 `context.on("page")` 统一挂接；Bun 侧按会话串行化工具调用（同会话防并发操作同一页面，`withSessionLock`）。桥接进程与浏览器会话**全进程共享单例**（`createLazyBridge()` 惰性构造——首次工具调用才解析 playwright 模块并启动桥接进程，playwright 与 reverse_site 两命名空间及透明浏览器代理操作同一浏览器，页面状态一致；解析失败降级为工具级报错，不影响服务启动）。基建属 core 域（`core/browser/`），**不依赖任何子Agent 定义的存在**——playwright 被裁剪/停用时子Agent 工具面消失，但桥接与透明浏览器代理照常可用
 - **网络录制（driver 扩展能力，reverse_site 使用）**：driver 额外提供 `network_*` 操作——按会话录制浏览器上下文内的全部请求（方法/URL/类型/请求头/请求体/响应状态/响应头/响应体预览，单会话上限 500 条，响应体预览上限 20KB，entry 保留 Response 对象供完整响应体提取），**录制时自动脱敏**（`authorization`/`cookie`/`x-api-key`/`set-cookie` 等敏感头与 postData 中 `token`/`password`/`secret` 等键值一律 `***`）；`network_list` 支持按 method/url（正则或子串）/status 过滤、detail 详情开关与 limit 条数上限（HAR 全量导出用）
 - **透明浏览器代理（`GEBAI_BROWSER_PROXY=1`，服务启动时 `boot/compose.ts` 安装、重启生效）**：内网「仅限浏览器访问」（非浏览器进程直连被拒）场景的进程级 fetch 垫片——`core/browser/fetch-proxy.ts` 替换 `globalThis.fetch`，**工具执行作用域内**（引擎 `runToolInterruptible` 统一进入 `runInToolFetchScope(sessionId)`，原语在 `core/support/fetch-scope.ts` 的 AsyncLocalStorage）的 http(s) 请求自动改经共享浏览器会话的 `context.request` 发出（携带浏览器 UA 与会话 cookie/登录态），由 driver `http_fetch` 操作承载（响应体经系统临时文件中转——二进制安全、绕开桥接 JSON 结果上限，读毕即删；返回**未脱敏**响应头，垫片构造回标准 `Response`，模型可见输出的脱敏仍由各工具层自行负责；单次请求超时 110s）。**平台级能力：不依赖任何子Agent**——安装点在组合根（boot/compose），桥接基建在 core/browser，playwright 被裁剪/停用不影响代理可用；工具代码与模型零感知（工具 schema/系统提示词均不变），任何子Agent（含 self_optimize 生成的新Agent）用普通 `fetch` 即可访问受限内网站点。边界：作用域外（LLM 请求/webhook/调度/启动逻辑）不受影响；嵌套引擎（`agent_run` 在工具内跑完整引擎）的 LLM 流式请求经 `runWithoutFetchProxy` 豁免（`core/llm/llm.ts` fetchRetry 单点包裹）恒直连；sh/py/js **子进程**内网络不经此垫片；`Request` 对象输入与 FormData/Blob 等非字符串请求体回退直连（multipart 上传等复杂形态）；`redirect:"manual"` 映射 `maxRedirects=0`（`fetchWithRedirectGuard` 逐跳 SSRF 校验语义保留——沙箱公网限制不因代理放宽）；AbortSignal 语义保留（触发即 AbortError）。未开启（缺省）时安装为 no-op 零开销
 - **仿真档案语义**：UA/视口/locale/timezone 为上下文级选项，只在 newContext 时生效——`emulate` 存档后**立即重建上下文应用**（已打开页面/cookie/录制状态清空，拦截规则自动重挂；工具描述与提示词均注明「需保留登录态先 storage_state save」）
-- **依赖与部署**：运行时需宿主机可执行 `node`。playwright 模块解析顺序：**单二进制形态**优先物化内嵌 playwright-core（`scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌 → 运行时物化 `{GEBAI_HOME}/vendor/playwright-core/`，版本不一致自动重建）；回退 `playwrightModuleUrl()` 经 `Bun.resolveSync` 解析 node_modules 的 playwright 包（源码/服务端部署形态）。浏览器本体不内嵌：Windows 默认 `channel=msedge` 驱动系统自带 Edge（Win10/11 必装，免下载浏览器），`GEBAI_PLAYWRIGHT_CHANNEL` 覆写（如 `chromium`/`chrome`，留空 = 不指定 channel、用默认 chromium——需 `bunx playwright install chromium`，Linux 服务端部署即此路径）。模块缺失/解析失败降级为**工具级报错**，不影响服务启动与其他子Agent。构建时 `driver.mjs` 由 `build-subagents.ts` 复制到 `dist/` 与产物同目录（不能被 bundle 内联）
+- **依赖与部署**：运行时需宿主机可执行 `node`。playwright 模块解析顺序：**单二进制形态**优先物化内嵌 playwright-core（`packages/server/scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌 → 运行时物化 `{GEBAI_HOME}/vendor/playwright-core/`，版本不一致自动重建）；回退 `playwrightModuleUrl()` 经 `Bun.resolveSync` 解析 node_modules 的 playwright 包（源码/服务端部署形态）。浏览器本体不内嵌：Windows 默认 `channel=msedge` 驱动系统自带 Edge（Win10/11 必装，免下载浏览器），`GEBAI_PLAYWRIGHT_CHANNEL` 覆写（如 `chromium`/`chrome`，留空 = 不指定 channel、用默认 chromium——需 `bunx playwright install chromium`，Linux 服务端部署即此路径）。模块缺失/解析失败降级为**工具级报错**，不影响服务启动与其他子Agent。构建时 `driver.mjs` 由 `build-subagents.ts` 复制到 `dist/` 与产物同目录（不能被 bundle 内联）
 - **审批**：导航/交互/脚本/服务/凭证/仿真类（`open`/`click`/`fill`/`press`/`select`/`check`/`hover`/`dblclick`/`drag`/`upload`/`evaluate`/`new_page`/`serve_dir`/`emulate`/`cookies`/`local_storage`/`storage_state`）默认需审批——服务端部署下可被诱导访问内网/提交表单，防 SSRF 与任意脚本滥用；**凭证类（cookies/local_storage/storage_state）输出真实值，审批门控与 evaluate 同级**；只读类（`content`/`screenshot`/`pdf`/`downloads`/`dialogs`/`pages`/`wait_for`/`switch_page`/`ocr`/`locate`/`locate_image`）与清理类（`close_page`/`close`）免审批
 - **提示词纪律**：等待一律 `wait_for` 目标条件（不用固定 sleep——异步渲染时序不可靠）；被 `code`/`self_optimize` 委托做浏览器端验证时明确验证目标→操作→content/screenshot 取证→给出结论与证据位置；交互类操作前先说明意图（审批预期）；凭证输出只用于用户明确要求的登录态分析/注入，不外传不入文档
 
@@ -1127,7 +1145,7 @@ export const preload = false
 | `code` | 独有工具 search_symbols/analyze/git/preview_server/env_detect/system_info（文件读写查询与交互编排复用**全局工具**——read/write/edit/patch/sh/py/ls/grep/glob/file/fetch_url/ask/todo/agent_run，带 project 参数路由项目，不重复注册） | 无（全局工具维持自身姿态） | ✗ | 代码编写与源码分析/修改（非 GEBAI 自身代码：tree-sitter 语法分析与符号双模式搜索（定义 + 引用/调用点）、git 只读核对（status/diff/log/show/branch/ls-files/grep）、浏览器端验证委托、项目内置、验证服务（自全局下沉 preview_server）与环境/工具链探测（env_detect/system_info）；文件读写/补丁应用/待办规划/方案确认经全局工具完成） |
 | `self_optimize` | 独有工具 read_feedback/run_tests/rollback/journal/backlog/page_capture；**通用工具与工作流直接复用**（装载/`agent_run` 预加载均连带 code——文件读写用全局工具、分析/验证类操作用 `code_*` 独有工具（含 code_preview_server），code 工作流提示词随连带装载注入，不重复注册；视觉分析经 vision 子代理 `vision_analyze`/`vision_ocr`——依赖连带装载获得，def 不复刻）；声明 `writeGuard` 写范围守卫（核心引擎源码默认只读的代码级强制） | run_tests+rollback | ✗ | 优化歌白自身（tree-sitter/补丁应用/验证服务等通用能力经全局工具与 code；特有：反馈读取、测试准入（test/typecheck/lint 三件套）+回滚（含新建文件清理）、优化日志跨会话沉淀、待优化项暂存与集中全面优化（backlog 离线优化——知识/工具不足导致重复试错时先暂存后集中处理）、项目内置+AGENTS.md 自动注入、前端页面捕获读取实际 html/截图 + 视觉分析（vision 子代理）、写范围守卫；**装载即连带装载 code 与 vision**） |
 | `explore` | 独有工具 search_symbols/analyze/git（全部只读，支持 project 参数路由；文件读取检索复用全局只读工具） | 无（全免审批） | ✗ | 只读代码探索（大范围摸底/架构梳理/多点位定位，agent_run 委托执行（默认继承全局工具），返回结论与 文件:行号 清单，中间过程不占主上下文；修改用 code） |
-| `vision` | analyze/ocr/locate/locate_image/detect（全部只读免审批；image 必填无缺省源——不截图，实现复用 makeVisionTool/cv-analysis 共享工厂） | 无（全免审批） | ✗ | 视觉能力通用层（图片分析型，全局 vision 工具已移除——视觉语义分析唯一入口：主会话 agent_load/路由自愈，子Agent 依赖声明连带装载）：多模态语义分析（analyze）+ 本地 OCR/文字定位/模板匹配/YOLO 检测（沙箱可用，零依赖；被依赖方——self_optimize 声明 dependencies 复用；desktop/playwright 域内走共享工厂不依赖）；现截屏幕/页面用 desktop/playwright |
+| `vision` | analyze + run/pip/status + ocr/locate/locate_image/detect（装载后共 8 个：客卿侧四项本地识别与语言基础工具合并，全部只读免审批；image 必填无缺省源——不截图，实现复用 makeVisionTool/cv-analysis 共享工厂） | 无（全免审批） | ✗ | 视觉能力通用层（图片分析型，全局 vision 工具已移除——视觉语义分析唯一入口：主会话 agent_load/路由自愈，子Agent 依赖声明连带装载）：多模态语义分析（analyze）+ 本地 OCR/文字定位/模板匹配/YOLO 检测（**受客卿门控——客卿仅本地形态启用，沙箱启用即整体禁用，故服务端部署下只剩 TS 侧 analyze 可用**；被依赖方——self_optimize 声明 dependencies 复用；desktop/playwright 域内走共享工厂不依赖）；现截屏幕/页面用 desktop/playwright |
 | `desktop` | screenshot/window_*/type_text/key_press/mouse_*/clipboard_*/screen_info/ocr/locate/locate_image/detect/wait_for | window_*+type/key/mouse+clipboard_write | ✗ | 桌面控制（截图（虚拟屏幕多显示器）/本地 OCR 识别与文字·模板定位/窗口（激活/移动/状态）/输入（输入/点击/滚动/拖拽）/剪贴板读写/界面条件等待，仅本地模式） |
 | `feishu_docs` | auth_status/auth_user_authorize/auth_user_token/auth_user_status/auth_user_clear/create_doc/get_doc_meta/get_doc_text/get_doc_blocks/list_blocks/find_blocks/add_blocks/update_block/delete_blocks/import_markdown/export_doc/list_files/create_folder/get_file_meta/upload_file/download_file/delete_file/search/create_sheet/get_sheet_meta/read_sheet/write_sheet/append_sheet/create_bitable/list_bitable_tables/list_bitable_records/add_bitable_records/update_bitable_record/delete_bitable_records/list_wiki_spaces/create_wiki_node/get_wiki_node/get_board/add_permission/api_call | 写操作全部（创建/修改/删除/上传/授权） | ✗ | 飞书云文档（文档/表格/多维表格/知识库/云空间/搜索/权限/思维导图画板；**可配置 user_access_token 以用户身份操作、创建用户所有权资源**；需配置 `FEISHU_DOCS_*` 或全局 `GEBAI_FEISHU_*` 凭证） |
 | `playwright` | open/content/screenshot/click/fill/press/select/check/hover/dblclick/drag/upload/wait_for/evaluate/pages/new_page/switch_page/close_page/close/serve_dir + pdf/downloads/dialogs/emulate/cookies/local_storage/storage_state + ocr/locate/locate_image | open+click+fill+press+select+check+hover+dblclick+drag+upload+evaluate+new_page+serve_dir+emulate+cookies+local_storage+storage_state（凭证类与 evaluate 同级） | ✗ | 浏览器自动化（无头 Chromium，node 桥接；选择器 `>>` 穿透 iframe；下载/对话框/仿真/登录态管理；页面截图本地 OCR/文字·模板定位（canvas 等无 DOM 内容兜底，沙箱可用）；需宿主机 node + playwright 包 + 浏览器） |
@@ -1223,7 +1241,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **反馈读取（`self_optimize_read_feedback`）**：自全局工具集下沉（全局不再注册 `read_feedback`，自我优化为唯一消费方）——按用户反馈按时间倒序读取，声明进 def 同时覆盖装载模式（`self_optimize_read_feedback` 命名空间）与新会话执行环境（全局工具不在注册表，def 声明保证可用）；反馈是自我优化的核心输入通道
 - **页面捕获（`page_capture`）**：仿 show 图表分支的前端配合链路——引擎发布 `event.capture.request`（含 captureId + fullPage + delay）→ 前端捕获**当前浏览器页面**（渲染后 DOM html 截断 300KB + modern-screenshot 截图，png/jpeg，体积压缩 ≤2MB；fullPage=true 截整页，高度上限 12000px，缺省视口；**delay 为捕获前等待毫秒数**（UI 操作/动画/异步渲染完成后截图，上限 10 秒，前端 sleep 后统一捕获 html 与截图））经 WS `capture.result` 回传 → 服务端落盘会话 `tmp/capture/`（`page-<ts>.html` + `page-<ts>.png|jpg`）并返回文件/图片内容块；模型用 `read`（code_*）读取实际渲染 html，截图主模型多模态时用 `read` 直接查看（图片内联进上下文）、否则用 `vision_analyze`（vision 子代理，agent_load 装载或依赖连带装载）分析（结果文案按能力分流引导）——**UI 修改后模型直接看到真实渲染效果**（dev 模式修改后自动热更新，捕获前提示用户刷新页面；30 秒超时返回失败提示）
 - **视觉分析（依赖 `vision` 子代理，`dependencies` 声明复用——方式一）**：def 声明依赖后 `vision_analyze`（语义分析截图）/`vision_ocr`（读图文字）随装载/预加载自动可用——`agent_run` 新会话即使不继承全局工具也有视觉能力；analyze 的 provider 解析与全局基建同一源（组装层 `boot/compose.ts` 注册 `setVisionProviderGetter`，`GEBAI_VISION_*` 外挂视觉模型 → 多模态主模型回落——`makeVisionTool` 工厂单源）；全局 vision 工具已移除，视觉分析统一经此通道
-- **写范围守卫（`SubAgentDef.writeGuard`，代码级强制而非仅提示词）**：def 声明 `writeGuard(env, absPaths)`，引擎注入 `ToolContext.writeGuard`——文件写类工具（`write`/`edit`/`patch`/`file`（rename/move/delete 动作，move/rename 校验源与目标两路径））写入前以**解析后的绝对路径**调用，返回非空字符串即拒绝（作为工具结果返回引导模型调整，不抛错不落盘）。**装载模式按会话装载名单动态收集**（`sessionWriteGuard`：调用时点读会话 `loadedSubAgents`，任务中途 `agent_load` 装载后立即生效）、**新会话模式按预加载名单静态组合**（`defsWriteGuard`）——两个路径一致生效（旧实现仅新会话路径有守卫，装载路径因工具去重丢失守卫副本，现已修复）。政策内容：**默认只读模式仅允许写入 子Agent 包（`packages/agents/src/`）与仓库级文档/配置（`DESIGN.md`/`AGENTS.md`/`.env.example`/`README.md`/`kilo.json`）**，核心引擎源码（`core/`/`app`/`ws` 等）拒绝写入（返回拒绝说明引导改用子Agent 扩展或开启开关）；`GEBAI_SELF_MODIFY=true`（启动级环境变量）放开到仓库内任意路径；仓库根解析：`SELF_OPTIMIZE_PROJECT` 优先，dev 模式按模块路径推导，二进制模式必须显式配置；**守卫只保护歌白仓库**——仓库根之外的常规写入（会话 `tmp/` 产物等）不受限（守卫目的是保护服务端源码，不约束无关产物）。**边界（脚本通道不拦）**：守卫拦截的是文件写类工具，`sh`/`py` 脚本内的重定向/写文件不经守卫——防线为「sh 写类命令默认需审批（免审白名单仅只读/测试类，见「工具审批」）+ 提示词明令禁止经脚本写仓库文件」；`GEBAI_APPROVAL_SKIP=true` 跳过审批时仅剩提示词约束（操作者自担）
+- **写范围守卫（`SubAgentDef.writeGuard`，代码级强制而非仅提示词）**：def 声明 `writeGuard(env, absPaths)`，引擎注入 `ToolContext.writeGuard`——文件写类工具（`write`/`edit`/`patch`/`file`（rename/move/delete 动作，move/rename 校验源与目标两路径））写入前以**解析后的绝对路径**调用，返回非空字符串即拒绝（作为工具结果返回引导模型调整，不抛错不落盘）。**装载模式按会话装载名单动态收集**（`sessionWriteGuard`：调用时点读会话 `loadedSubAgents`，任务中途 `agent_load` 装载后立即生效）、**新会话模式按预加载名单静态组合**（`defsWriteGuard`）——两个路径一致生效（旧实现仅新会话路径有守卫，装载路径因工具去重丢失守卫副本，现已修复）。政策内容：**默认只读模式仅允许写入 子Agent 包（`packages/agents/src/`）与仓库级文档/配置（`DESIGN.md`/`AGENTS.md`/`AGENT.md`/`.env.example`/`README.md`/`kilo.json`——其中 `kilo.json` 仓库中并不存在，属待清理的失效白名单项，见「已知项」）**，核心引擎源码（`core/`/`app`/`ws` 等）拒绝写入（返回拒绝说明引导改用子Agent 扩展或开启开关）；`GEBAI_SELF_MODIFY=true`（启动级环境变量）放开到仓库内任意路径；仓库根解析：`SELF_OPTIMIZE_PROJECT` 优先，dev 模式按模块路径推导，二进制模式必须显式配置；**守卫只保护歌白仓库**——仓库根之外的常规写入（会话 `tmp/` 产物等）不受限（守卫目的是保护服务端源码，不约束无关产物）。**边界（脚本通道不拦）**：守卫拦截的是文件写类工具，`sh`/`py` 脚本内的重定向/写文件不经守卫——防线为「sh 写类命令默认需审批（免审白名单仅只读/测试类，见「工具审批」）+ 提示词明令禁止经脚本写仓库文件」；`GEBAI_APPROVAL_SKIP=true` 跳过审批时仅剩提示词约束（操作者自担）
 - **测试准入 + 回滚工具**：`run_tests`（在仓库根执行验证，需审批）——**`checks` 参数选择检查项**（`["test"]` 缺省：`bun test` 指定文件或 `bun run test` 全量；`["test","typecheck","lint"]` 三件套与 AGENTS.md 提交准入一致，**一次审批跑全**，按序执行首项失败即停，超时 10 分钟）；输出**始终合并 stdout+stderr**（bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然），只取 stdout 会丢失「跑了哪些用例、几个 pass」——准入判定看 exit code，明细供人核验）；`rollback`（恢复被修改的 tracked 文件 + **删除新建的 untracked 文件**，需审批）——新文件是自我修改的主要产物（如新建子Agent），`git checkout` 只恢复 tracked、残留会被热加载注册为破损 Agent，故先 `git clean -nd` dry-run 列出将删除的新建文件（输出如实展示）再 `git clean -fd` 清理；checkout 对新建文件本就无可恢复（pathspec 不匹配属预期，不报错）；两者 files/paths 路径参数**校验前置**（含引号/shell 元字符/百分号的条目直接拒绝——审批界面展示的是参数而非拼好的命令，不设防的拼接会把注入带过审批门），合法条目双引号包裹拼入命令（空格路径保持单参数）；文件写入经全局 write/edit/patch（默认免审批，受防盲写守卫约束），sh/py 走工具自身动态审批（默认需审批、`approval` 参数按次免审，见「工具审批」）
 - **优化日志（`self_optimize_journal`，跨会话优化记忆）**：`append` 记录一次优化（title 必填 + changes 改动清单 + verification 验证方式与结果 + outcome applied/reverted/failed + lessons 经验教训）、`list` 读最近记录（limit 默认 10，新→旧）——**变更管理的补丁记录落地**：git 历史只记代码变更，journal 补「为什么改 + 验证结果 + 教训」，后续优化任务开工先查历史不重复踩坑（提示词固定引导：开工 list、收尾 append）；存储 `users/{user}/self-optimize-journal.json`（与 ws-journal 同位的 gitignored 运行时数据），环形保留最近 100 条，损坏/首次从空开始
 - **待优化暂存清单（`self_optimize_backlog`，离线优化）**：任务执行中因自身知识/工具不足或错误导致重复试错、低效，而不便中断当前任务深入优化时 `add` 暂存（problem 问题现象必填 + direction 优化方向；session_id 缺省自动记当前会话，供后续回溯完整上下文）——**优化时机后移、证据先落盘，不打断当前任务；暂存后 ask 向用户确认处理时机（当场修复 / 留待后续集中全面优化）**；后续执行全面优化时 `list` 取待优化项清单（旧→新）按主题归并逐项处理（需更多上下文可读来源会话记录 `users/{user}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json`——本地模式可读，沙箱部署模式会话文件不可读时以暂存文本为准），完成后 `resolve ids=[…]` 移除（优化记录本身仍由 journal append 承载）；存储 `users/{user}/self-optimize-backlog.json`（与 journal 同位的 gitignored 运行时数据；**add/resolve 与 journal append 的读-改-写经进程内互斥串行化**——两者的写入均为「读全量 → 改 → 整文件覆盖」，并发调用（同一回复的多个工具调用、js 编排并行）各自读到同一旧值再写回，后写会静默覆盖前写而丢条目），解决即移除、**不设环形上限**（暂存项是待办不是历史，静默淘汰会丢待办）；触发引导内置于 def description——总Agent 任务执行中重复试错低效时装载 self_optimize 暂存或直接优化
@@ -1239,7 +1257,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **变更管理**：每次自我修改经 `self_optimize_journal` 生成补丁记录（title/changes/verification/outcome/lessons，`users/{user}/self-optimize-journal.json` 环形 100 条，可 list 查看）；回滚走 `rollback` 工具（恢复修改 + 删除新建文件）；代码版本控制（git）即代码层优化历史，journal 补「为什么改 + 验证结果 + 教训」的决策层历史
 - **生效方式**：
   - 脚本调试模式：**子Agent 定义热加载**（见「子Agent 热加载」）——新增/修改/删除子Agent 文件在下一次装载/新任务前即时生效（self_optimize 改完子 Agent 后当会话内即可 `agent_run` 验证成果）；核心引擎源码修改仍需重启进程生效
-  - 二进制模式：无源码目录，热加载不适用（bundle 注册表不可变）；修改后的代码进入下次构建；运行期通过环境变量覆盖提示词/配置（会话级）实现即时调优
+  - 二进制模式：无源码目录，热加载不适用（bundle 注册表不可变）；修改后的代码进入下次构建；运行期经会话级环境变量可覆盖**可配置项**（模型/路由/CV 路径/`{AGENT}_*` 等）实现即时调优——**子Agent 静态提示词不在可覆盖范围内**（随 bundle 固化，改动须重新构建）
 - **安全约束**：自我修改走统一审批流（写操作逐次审批）；修改范围由**写保护闸门代码级强制**——默认只读模式仅限子Agent 目录与仓库级文档/配置，核心引擎源码默认只读（`GEBAI_SELF_MODIFY=true` 显式开启，见「写保护闸门」）
 - **测试门槛**：任何自我修改必须通过相关测试（`run_tests`）才能视为完成，防止退化；测试失败用 `rollback` 回滚本次改动（测试策略与覆盖率门槛见「测试策略」）
 - **用户验证**：修改通过测试后，`self_optimize` 用 `ask` 询问用户是否启动验证服务（`preview_server`，临时新端口独立进程，不中断当前会话），确认后启动并告知访问 URL；验证结束（或用户拒绝）即停止，避免残留进程
@@ -1248,8 +1266,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - 会话按用户持久化到 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/chat.json`（`{s0}`/`{s1}` 为会话 ID 自身 hex 前缀分片——前 2 位/第 3-4 位，肉眼可从 ID 推路径，见目录结构）
 - **会话记录保存子Agent 装载状态**：`loadedSubAgents` 字段（已装载名单）+ `loadedAgent` 标记的 system 消息（完整提示词，UI 渲染为简短装载提示）；恢复历史会话时引擎自动按名单重新注册工具（`ensureSessionAgents`，幂等）——会话按保存的文件完全恢复状态；新会话首次运行按启动预载名单（`GEBAI_PRELOAD_SUB_AGENTS`）初始化，未配置默认不预载任何子Agent
 - 会话归属校验：仅会话所有者可访问（服务模式）
-- 列表查询时基于消息内容的哈希去重
-- **列表元信息缓存（`meta.json`）**：会话列表只消费标题/时间/置顶/上下文用量，若每查询都解析 `chat.json` 全文，开销随历史体量正相关（数十个会话可达数十 MB）。与 `chat.json` 同目录维护 `meta.json`（`name`/`userId`/`createdAt`/`updatedAt`/`pinned`/`ctxCachedTokens`/`ctxTokensFallback`/`messageCount` + 正文指纹 `source: {size, mtimeMs}`），`save()` 同步刷新；`listSessionInfos()` 命中缓存则直接返回，**文件缺失/损坏/指纹不符（陈旧）时回退读正文并就地重建**——**可重建的缓存、不是真相源**（`chat.json` 恒为准，外部编辑/旧版本写入/中途崩溃均自动纠正），存量会话首次列表自动建立；`listSessions()`（返回完整 `SessionData`）保留给需要正文的调用方（GC/归档等），列表类消费方（WS/REST 列表、快照、文件工作台目录选择、飞书会话命令）走 `listSessionInfos()`
+- 列表查询不为元信息解析正文：走同目录 `meta.json` 指纹缓存（见下条），`chat.json` 仅在缓存缺失/指纹不符时解析
+- **列表元信息缓存（`meta.json`）**：会话列表只消费标题/时间/置顶/上下文用量，若每查询都解析 `chat.json` 全文，开销随历史体量正相关（数十个会话可达数十 MB）。与 `chat.json` 同目录维护 `meta.json`（`id`/`name`/`userId`/`createdAt`/`updatedAt`/`pinned`/`ctxCachedTokens`/`ctxTokensFallback`/`messageCount` + 正文指纹 `source: {size, mtimeMs}`），`save()` 同步刷新；`listSessionInfos()` 命中缓存则直接返回，**文件缺失/损坏/指纹不符（陈旧）时回退读正文并就地重建**——**可重建的缓存、不是真相源**（`chat.json` 恒为准，外部编辑/旧版本写入/中途崩溃均自动纠正），存量会话首次列表自动建立；`listSessions()`（返回完整 `SessionData`）保留给需要正文的调用方（GC/归档等），列表类消费方（WS/REST 列表、快照、文件工作台目录选择、飞书会话命令）走 `listSessionInfos()`
 - 支持会话创建、切换、重命名、置顶、删除
 - **会话置顶**：`pinned` 字段（chat.json 持久化，未定义 = 未置顶，旧格式天然兼容）标记重要会话；列表查询置顶优先、组内按更新时间倒序；置顶/取消为元数据操作，**不刷新 `updatedAt`**（不动排序基线，旧会话置顶不会跳入时间分组）；前端「置顶」独立分组脱离时间分组展示
 - 支持会话级的审批跳过（`/approval-skip`）
@@ -1321,8 +1339,8 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 会话 `tmp/` 中的文件（Agent 产出、脚本输出、截断内容引用等）支持在 UI 中查看与下载：
 
-- **文件列表**：UI 提供会话文件面板，按目录树展示 `tmp/` 下全部文件（路径、大小、修改时间），可刷新
-- **查看**：文本文件（文本/JSON/代码）内嵌预览，超过预览阈值（默认 100KB）截断提示；二进制文件（图片等）可预览，其余提示下载
+- **文件列表**：**经文件工作台浏览**（聊天页无独立会话文件面板）——工作台暴露 `sess:<sessionId>` 根指向该会话 `tmp/` 子树（WS `session.files.list` / REST `/api/v1/sessions/:id/files` 提供数据，SDK 有对应方法）
+- **查看**：文本文件（文本/JSON/代码）内嵌预览——消息流文件卡文本上限 **40,000 字符**（超出截断提示），工作台文本读取上限为 `GEBAI_FS_MAX_READ`（默认 10MB）；二进制文件（图片等）可预览，其余提示下载
 - **下载**：单文件下载、多选打包下载（zip）；通过 REST 下载端点返回原文件（`Content-Disposition` 指定文件名）
 - **安全边界**：文件操作严格限定在会话 `tmp/` 内，路径解析复用路径沙箱（拒绝 `../`、绝对路径、符号链接），仅会话所有者可访问；**列表仅暴露 `tmp/` 子树**（`chat.json`/`cron.json`/`todo.json` 等会话数据文件不列出），REST/WS 文件接口的路径解析统一以 `tmp/` 为根并兼容 `tmp/` 前缀（旧附件/截断引用路径）
 - **文件预览（`files/preview`，文件卡/文件链接取数入口）**：`read`/`write` 产物 file 块的路径为**服务端解析后的真实路径**（工具执行时按会话 `tmp/` 真实绝对路径（`sessionPath` 拼接——项目绑定工具的 workdir 是项目根不能作判定依据）归属判定：会话内 → `tmp/` 逻辑路径，code 项目文件（project 参数/预置项目解析后）→ 绝对路径），前端「文件展示方式=弹窗查看」时产物 file 块收敛为**文件链接 chip**（点击弹窗查看）、嵌入模式下文件内容卡取数同样可用（原始参数路径在项目工具下无法由 files 接口解析的 404 缺陷由此修复）；取数统一走 `GET /sessions/:id/files/preview?path=`：**相对路径以会话 `tmp/` 为根**（与 content 同规则），**绝对路径按用户隔离边界放行**——沙箱用户仅允许本用户数据目录（`users/{user}/`，与文件工具 project 参数经 `resolveInSandbox(root=users/{user})` 的可达范围一致，含符号链接逃逸检查），非沙箱（本地模式操作者本人，与文件工具能力对齐）放开；`?download=1` 以附件形式返回（文件卡/chip 的下载入口），前端不猜测路径解析
@@ -1407,9 +1425,9 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 ### 日志系统
 - 日志级别：`debug`、`info`、`warn`、`error`
-- 通过环境变量 `GEBAI_LOG_LEVEL` 配置（默认 `info`）
-- 日志写入 `{GEBAI_HOME}/gebai.log`
-- 日志脱敏：不记录密码、令牌、密钥明文，敏感字段以 `***` 替代；会话内容默认不落日志
+- 通过环境变量 `GEBAI_LOG_LEVEL` 声明级别（默认 `info`）——**当前读入 `config.logLevel` 后无消费点，级别过滤尚未实现**
+- 日志走**标准输出/错误**（`console.log/warn/error`），无文件 sink、无轮转；二进制形态由宿主收集（如桌面侧车重定向到 `server.log.*`）
+- 日志脱敏：不记录密码、令牌、密钥明文，敏感字段以 `***` 替代（env 回显经 `maskEnv`）；会话内容默认不落日志
 
 ### 数据生命周期
 
@@ -1420,7 +1438,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **反馈数据**：`feedback/` 按日期分片，超过保留期（默认 180 天）自动清理，管理导出不受影响
 - **临时文件**：会话 `tmp/` 在会话删除或会话过期（默认 90 天无活跃）时整体清理（含截断文件、附件、产物）
 - **会话过期策略**：本地/服务模式均可配置会话闲置过期时间（默认 90 天，按 `chat.json` 最后修改时间判定），过期会话归档到 `trash/` 后可恢复，超保留期删除；**归档会话自助恢复通道**：`POST /api/v1/sessions/:id/restore`（WS `session.restore` 同权）——归属用户或 admin 可把 `trash/{date}/{id}` 目录整体移回分片存储位置（数据/tmp 附件/env 一并恢复），会话已存在返回 409，未归档/无权限统一 404（不泄露他人会话存在性）
-- 历史遗留的用户级 `truncated/` 目录（截断文件并入会话 `tmp/` 前的旧数据）由 GC 一次性迁移清理
+- 历史遗留的用户级 `truncated/` 目录（截断文件并入会话 `tmp/` 前的旧数据）由 GC 在**30 天宽限期后直接删除**（不迁移内容，宽限期防与旧版本进程写入冲突）
 
 ### 工具审批
 - 全局工具：`sh`、`py` 默认需要审批；`read`/`write`/`edit` 默认无需审批（`file` 的 `delete` 动作**动态需审批**——递归且不可恢复，能力上甚于一次 `sh rm`）
@@ -1429,7 +1447,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 ^- `js`：**默认审批一次覆盖整个脚本含内部工具调用**（代码已经用户审阅；`approval:false` 免审运行时内部需审批工具在 RPC 分发层被拒——脚本体未经审阅不得免审执行审批工具）；**动态审批机制**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（函数异常按需审批 fail-safe））；嵌套调用的 params 中自带 `approval: false` 不改变外层审批姿态（分发层按剥离免审标记后的姿态解析，防脚本内自我免审）
 - 会话级跳过：`/approval-skip` 命令；**会话运行中开启即时生效**——引擎审批点实时判定（任务 env 快照或会话内存态 env 任一为 `true` 即跳过，前端开启时自动通过当前等待中的审批卡片，后续审批直接跳过；关闭需下次任务生效）；**用户本人可设置自己的会话**（`GEBAI_APPROVAL_SKIP` 写入会话内存态 env，不落盘——非管理员仍受路径/脚本/网络沙箱完整约束；ask 填值分支模型驱动通道服务模式下一律拒绝）
 - 请求级跳过/收紧（REST `prompt`/`chat` body 的 `autoApprove` 布尔，任务级生效不持久化）：`true` 映射任务级 `approvalPolicy=auto`（需审批工具自动通过，含服务模式——调用方即用户本人，与会话级跳过同一授权面）；`false` 映射 `deny`（无交互通道下需审批工具直接拒绝，本地模式同样生效，不空等超时）；见「交互模式 → 审批策略按模式分级」
-- 同一消息最多重试 10 次
+- 审批被拒/超时**只计数展示**（`event.approval.request` 的 `retries`），**不设次数上限**；模型连续重复调用由重复检测终止（`MAX_REPEAT_HITS=3`/`MAX_REPEAT_STALLS=2`）
 
 ### 工具选择
 
@@ -1442,7 +1460,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **白名单优先**：`GEBAI_TOOL_ENABLE` 声明后仅启用列表内工具；`GEBAI_TOOL_DISABLE` 排除指定工具；两者同时配置时先白名单后黑名单
 - **粒度**：全局工具按名称（`sh`/`read`/`edit`…）；子Agent 工具按 `{agent_name}_{tool_name}` 精确控制，也可按 `{agent_name}_*` 整包禁用
 - **禁用效果**：禁用后工具从总Agent schema 中移除，模型不可见、不可调用；已装载子Agent 中被禁用的工具同样不注入
-- **前端支持**：工具管理界面提供开关列表（分组：全局/子Agent）、搜索与即时生效，保存后新任务生效
+- **管理入口**：经 REST `GET/PATCH /api/v1/tools`（SDK `listTools`/`setToolEnabled`）——**前端暂无图形化开关面板**（设置面板注明「工具启停经 API 使用」）；保存后新任务生效
 - **用途**：安全收紧（如生产环境禁用 `sh`/`py`）、裁剪上下文、按业务场景定制能力面
 - **权限**：REST `PATCH /api/v1/tools` 与 WS 工具启停为**服务端全局状态**（所有用户/会话共享），服务模式下仅管理员可操作（普通用户返回 403）；环境变量级（`GEBAI_TOOL_ENABLE`/`GEBAI_TOOL_DISABLE`）由部署方配置不受此限
 
@@ -1484,11 +1502,10 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 - **工具**：`todo`（待办增删改查统一入口——`entries` 为操作列表，每项 `op=add/update/delete`：add 需 `title`（可带 `priority`/`note`/`eta`），update/delete 按 `id` 或 `title` 定位（id 优先，无 id 时 title 精确匹配、唯一包含匹配兜底，多个同名提示改用 id；update 改标题需用 id），省略或空数组 = 查询；返回操作摘要与**当前全部待办状态**快照（含 id），模型一次掌握最新清单，无需再查 id。工具描述引导：新增待办开启新任务时，及时 delete 清理与当前任务无关的历史残留待办——待办只跟踪当前任务，陈旧条目徒增干扰与 token 浪费）
 - **状态机**：`pending → in_progress → completed`，异常终止为 `failed`/`cancelled`
-- **字段**：标题、状态、优先级、进度（0-100%）、预计耗时（分钟）、依赖项、备注
-- **持久化**：会话级 `todo.json`（`sessions/{s0}/{s1}/{session_id}/todo.json`），随会话隔离与恢复
+- **字段**：标题、状态、优先级、进度（0-100%）、预计耗时（分钟）、依赖项（`TodoItem.dependencies` 类型保留，但 `todo` 工具 schema 与 UI 均未开放）、备注
+- **持久化**：随 `chat.json` 的 `todos` 字段持久化（会话级，随会话隔离与恢复；无独立 `todo.json`）
 - **Agent 引导**：系统提示词引导模型在复杂多步任务开始时先 `todo` 拆解计划（entries 批量建清单），每完成一步 `todo` 更新，任务结束 `todo`（空 entries）汇报
 - **UI 展示**：会话消息流侧边栏实时呈现待办面板（状态/进度/依赖），事件推送 `event.todo.update` 驱动增量更新；`todo` 工具在消息流中渲染为**待办清单卡片**（状态图标 + 标题 + 元信息；状态为内联 SVG 描边图标——待处理空圆/进行中环箭头/已完成圈勾/已失败圈叉/已取消禁止符，随主题着色：进行中沿用主题强调色、已完成/已失败用语义色 `--success`/`--danger`，悬浮提示中文状态标签，元信息行只留优先级（中文高/中/低，纯文本不做视觉区分）/进度/备注），替代通用工具卡片，实时与历史会话一致；清单过长（>8 项）时自动**折叠较早的已完成项**（保留最近 3 项完成作上下文，未完成项始终可见），连续隐藏段收敛为一行「已折叠 N 项已完成」按钮，点击展开、展开后可收起
-- **与审批联动**：审批请求可关联待办项，拒绝/通过后对应待办状态联动更新
 - **失败恢复**：任务中断后基于待办清单继续执行，跳过已 `completed` 项，从剩余项恢复
 - **待办续做**：每轮会话完成（模型给出最终回复）后，引擎自动检查待办清单——仍有 `pending`/`in_progress` 项时，追加一条「【待办提醒】当前会话仍有未完成的待办：…请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾」消息并再次进入工具调用循环，直至待办全部完成、达到续做轮次上限（见常量参考，默认 **1 轮**——待办提醒一事一议、不反复打扰，模型未续做即视为已决策收尾）或模型决策收尾；提示为 **user 角色的软性提醒**（仅陈述未完成事实，继续还是直接收尾由模型自行决策）——消息**落盘即 `role: "user"` + `Message.engineNote: "todo"` 标记**：与用户输入同角色使其随用户消息受上下文保护，并避开思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**的约束（视为前缀续写、要求回传 `reasoning_content`，尾部 assistant 提醒会让后续每次调用 400、任务静默中断——实测）；标记用于**展示上与用户自己发的消息区分**（前端渲染为弱化的「引擎提示」虚线通知条 `.msg.engine-note`，非用户气泡、不提供撤回，称谓行显示「引擎提示」；存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别——前缀兜底限定 assistant 角色，用户手打同前缀文本不误判）；持久化进会话历史并推送 `event.todo.continue` 事件（含 round/remaining/messageId/text，前端实时渲染）；**模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入**；`completed`/`cancelled`/`failed` 项视为已了结不再续做；回复与上上轮完全相同时附防复述提示（需 ≥2 轮才可能触发，当前 1 轮上限下为休眠路径）；压缩护栏的「本次任务输入」（最新一条用户消息，永不裁剪）**不受引擎提示影响**（isEngineNote 命中则跳过）
 - **收尾验证提醒**：与待办续做同机制的兜底纪律——任务结束（无未完成待办）时若**本任务修改过代码文件（write/edit/patch 命中代码扩展名且成功落盘）但全程未运行任何测试/检查类命令**（sh/py 的 command 命中测试/lint/typecheck 关键词、或 `run_tests` 工具），追加一条「【验证提醒】…请先运行相关测试或检查确认无回归，再给出最终回复；确不适用请说明」消息再续跑一轮（模型跑验证后正常收尾，或说明原因），上限 1 轮防反复打扰；提醒同为 **user 角色软性提醒**（与待办续做同形态：落盘 `role: "user"` + `engineNote: "verify"`，展示为「引擎提示」通知条、回放保持 user），持久化进会话历史并推送 `event.verify.nudge` 事件（含 messageId/text，前端实时渲染）；拒绝/安全模式拦截与 dry_run 不计入修改，md 等非代码文件不触发
@@ -1566,13 +1583,13 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 **用户级**待办清单（标题栏轮盘「待办」按钮打开的可拖动弹窗）：与引擎**会话级**待办（`todo` 工具，agent 自己维护的任务清单，随会话走）语义不同——用户待办属于**用户**（`users/{user}/todos.json`），跨会话/重启保留，供用户自己记事项，可**一键填入输入框**或**新建会话立即执行**。待办可标记为**闲时任务**（⚡）：服务端**没有正在运行的会话**时，调度器按清单顺序自动执行（一次一条、串行），适合把「不急但要做」的活儿交给空闲时段。能力由 `GEBAI_IDLE_TODO_ENABLED`（**默认 `true`**）开关：显式 `false` 时调度器不启动、REST 返回 503。
 
-- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留 + 按用户串行写链（并发写不互相覆盖，范式同 `cron.json`）；条目字段 `id`（32 位 hex）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + 闲时执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是闲时任务的提示词）；开启闲时标记时重置失败计数重新排队，取消勾选完成视作重新排队
+- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留 + 按用户串行写链（并发写不互相覆盖，范式同 `cron.json`）；条目字段 `id`（32 位 hex）/`user`（归属用户）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + 闲时执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是闲时任务的提示词）；开启闲时标记时重置失败计数重新排队，取消勾选完成视作重新排队
 - **REST 管理面**（前端弹窗与第三方集成共用，写操作不经审批——REST 已有身份认证边界，与 cron 域同姿态）：`GET /api/v1/todos`（清单）、`POST /api/v1/todos`（新增 `{text, idle?}`，201）、`PATCH /api/v1/todos`（**清单级批量重排** `{ids: [...]}`，拖动排序落库；未列出的条目按原序追加在后防丢失）、`PATCH /api/v1/todos/:id`（`{text?, done?, idle?}`）、`DELETE /api/v1/todos/:id`、`POST /api/v1/todos/:id/run`（**立即执行**：新建一条会话跑该待办，建会话完成即返回 `{todo, sessionId}` 不等待执行结束；同一待办已在执行中 409、引擎未就绪 503）；条目 id 走 32 位 hex 格式白名单（`:id` 与其子路径 `/run` 同规则），按认证用户过滤（跨用户不可见不可操作），能力关闭时 503
 - **执行即新建会话（手动与闲时同一链路）**：无论手动「▶ 执行」还是闲时自动执行，都是**新建一条独立会话**以该待办全文为提示词跑完整 Agent 循环（手动标题 `待办执行 · {摘要}` / 闲时标题 `闲时待办 · {摘要}`，都进入用户会话列表，上下文每次全新）——待办文本就是交给模型的**详细提示词**（可多行长文，上限 2000 字符）；区别仅在于手动执行不受「服务端空闲」限制（用户显式要求立即跑）。执行结果回写待办（`idleSessionId` / `idleResult` 摘要 / 失败原因），完整过程与产物在该执行会话里回看；两条路径共用 `runInSession`，同一待办并发触发由同步占位 + `TodoBusyError` 拦截
 - **闲时执行（`core/schedule/todos.ts` 的 `UserTodoManager`）**：
   - **空闲判定**：`engine.busy()`（全局聚合：任一会话任务/后台运行/分支运行进行中即为真）——用户正在跑会话时闲时任务不启动、不抢资源，下个 tick 再评估
   - **串行与重入防护**：调度器单飞（`firing`），一次 tick 至多启动一条；跨 tick 由「执行中的会话使 `busy()` 为真」自然串行（无需额外锁），执行结束释放会话后下个 tick 取清单中下一条待执行的闲时待办
-  - **执行目标**：**每次新建一条会话**（标题 `闲时待办 · {摘要}`，进入用户会话列表，上下文每次全新），提示词为 `[闲时待办任务]\n{待办文本}`；结果摘要取执行会话末条 assistant 回复（限 1000 字符）写回待办，完整过程在该会话消息流回看  - **完成与失败语义**：执行成功自动勾选完成（`done=true`、`idleState=done`）；失败/超时累计 `idleAttempts`，达上限（3 次）置 `idleState=failed` 并停止自动执行（`idleError` 记因，防死循环重试）；单次执行超时 30 分钟（到时 `engine.cancel` 终止）。tick 周期 30 秒（`IDLE_TODO_TICK_INTERVAL_MS`，与定时任务同量级），无待执行闲时待办时即时返回
+  - **执行目标**：**每次新建一条会话**（标题 `闲时待办 · {摘要}`，进入用户会话列表，上下文每次全新），提示词为 `[闲时待办任务]\n{待办文本}`（手动路径前缀为 `[待办执行]`）；结果摘要取执行会话末条 assistant 回复（限 1000 字符）写回待办，完整过程在该会话消息流回看  - **完成与失败语义**：执行成功自动勾选完成（`done=true`、`idleState=done`）；失败/超时累计 `idleAttempts`，达上限（3 次）置 `idleState=failed` 并停止自动执行（`idleError` 记因，防死循环重试）；单次执行超时 30 分钟（到时 `engine.cancel` 终止）。tick 周期 30 秒（`IDLE_TODO_TICK_INTERVAL_MS`，与定时任务同量级），无待执行闲时待办时即时返回
 - **弹窗交互（`packages/web/src/todo-pop.ts`）**：
   - **尺寸**：`min(680px, 94vw) × min(78vh, 860px)`（宽/高各有下限保底）——待办正文即模型提示词（可多行长文），窗口要同时容得下“读全文”与“写长文”；长文本在列表内**折叠展示**（超阈值高度截断 + 「展开全文」/「收起」），避免单条长提示词把列表打爆
   - **显隐**：**只有点击弹窗右上角 ✕ 才隐藏**——点轮盘按钮只负责打开/前置（不切换关闭）、点弹窗外不关、Esc 不关（编辑态 Esc 仅取消编辑），避免写长提示词时误触丢失；**打开状态与位置一并持久化**（`gebai.ui.todo.open` / `gebai.ui.todo.pos`），页面刷新（含 dev-reload 自动刷新）后恢复原状
@@ -1602,7 +1619,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | JS/TS（经 `sh`） | 宿主机已有 `node`/`bun` 时 `sh` 直接调用亦可（`bun run x.ts` / `node x.js`），与 `js` 工具两条路径并存 | 安装 bun/node |
 
 - 二进制编译时已内嵌 Bun 运行时，`gebai exec` 隐藏子命令（`import.meta.main` 入口拦截 `process.argv`，**exec 段双位置路由**：argv[2] 或 argv[3]）让二进制无需宿主机安装 bun/node 即可执行 JS/TS 脚本，同时保持子进程隔离（不回到进程内执行）。子进程命令二进制模式统一**带入口段** `[execPath, 入口, "exec", script]`：编译单文件形态（`gebai.exe`）子进程 argv[1] 自动为内嵌虚拟入口，入口段仅占位（exec 落在 argv[3]）；**容器形态**（execPath=bun 跑 `dist/` 打包产物，包内各模块 `import.meta.path` 一致指向打包产物）入口段是真实 dist 入口（exec 落在 argv[2]）——缺失入口段时 bun 会把 `exec` 当子命令、script 当命令名直接报错（js 工具全挂）
-- 能力探测：启动时检测宿主可用解释器（`python`/`node`/`bun`），在工具 schema 描述与 UI 中标注当前环境可用性，模型据实选择
+- 解释器自适应：`py` 调用时惰性探测可用命令（`python3` → `python` → `py`，结果缓存），schema 描述**不做启动期可用性标注**；环境/工具链探测能力下沉 code 子Agent 的 `env_detect`（平台/架构、工具链版本、MSVC/WebView2 状态）
 - **工作目录标注**：`sh`/`py` 在**非会话默认目录**执行（`workdir` 参数、`project` 参数路由或项目绑定会话）时输出末尾标注「（工作目录: …）」——按 cwd 发现目标的工具（`bun test` 等）目录不对时一眼可辨（「命令在哪个目录跑的」不再靠猜）；`sh` 的退出码直接读返回结果的 `exitCode` 字段（无需 `echo $?` / `%errorlevel%`——Windows cmd 下无 `$?` 展开）
 - **输出大小**：工具输出超过截断阈值走上下文保护（截断落盘），防止内存膨胀
 
@@ -1628,7 +1645,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 - **`Tool.outputSchema`**：声明 `data` 的 JSON Schema，经 `tool_schemas` 工具批量暴露给模型——js 编排前先查输出结构，避免逐个试调浪费往返
 - **引擎兜底截断保留 `data`**（含 `sessionRun` 扩展字段）：截断只作用于模型可见文本
-- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（matches）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`js`（logs/result/exitCode/calls，logs/result 截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`todo`（todos）、`agent_list`（agents）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
+- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（matches）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`js`（logs/result/exitCode/calls，logs/result 截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`todo`（todos）、`show`、`patch`、`agent_load`/`agent_run`/`branch_run`/`bg_task`（后者均带 `Tool.outputSchema`）；**`agent_list` 未注册进全局工具表**（仅在已装载子Agent 的上下文可见，故不计入本清单）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
 - **`tool_schemas` 工具**（批量查询）：`tools` 传工具名列表返回各工具 `{name, description, parameters, outputSchema}`（未知/未启用标记错误）；省略时返回全部已启用工具的输出结构概要（紧凑一行一个，不含输入参数）
 
 #### 富内容块渲染
@@ -1649,7 +1666,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **文件内容卡**（`code` 带文件信息与 `file` 块的统一渲染，`web/file-card.ts`）：头部（文件名 + 语言/类型徽标 + hover 渐显工具栏：**复制/原文件查看** + **常驻下载图标**（不随 hover 显隐；描边图标，文件卡头部/文件链接 chip/弹窗共用 `downloadAnchor`，经 `files/preview` 附件形式，桌面 WebView 提示下载位置））+ 内容区按类型渲染——`markdown` 语言**渲染 md**（复制复制源码、弹窗看原文）、其余**语法高亮**（hljs 语言集与前后端 `EXT_LANG` 三表同步，扩充 go/rust/java/kotlin/ruby/c/cpp/csharp/php/sql/lua/swift/dart/scss/less）、图片内联点击全屏、PDF 卡内 iframe、`text/html` 卡内**沙箱 iframe**（复用 html 块的域隔离管线）、二进制类型占位提示；`file` 块内容**进入视口才 fetch**（`files/preview` 按需加载——会话相对与项目绝对路径统一入口，read/write 产物块路径为解析后真实路径，**code 项目文件的文件卡/下载同样可用**（旧版按原始参数路径经 `files/content` 解析在项目文件下 404）；历史长会话不产生全量请求），卡内文本渲染上限 4 万字符（超出截断引导「原文件」查看）；「原文件查看」弹窗（**尺寸按视口比例**：标准档 `width: min(90vw, 100%)` + `max-height: 88vh`——消息列 `--msg-max-w` = 800px 下旧值 920px 几乎与正文同宽、代码长行/网页预览横向滚动明显；窄屏（≤ 860px）遮罩 padding 收到 12px；标题栏**全宽切换**按钮（`.preview-full`，图标按钮）在「标准比例 / 铺满视口」（`.preview-card.is-full` = width 100% + max-height 94vh）间切换，偏好记忆于 localStorage `gebai.ui.previewFull`；标题栏含**常驻下载按钮**（同 `downloadAnchor`，与关闭同款图标交互）+ 图片直显（宽卡内居中，`.preview-body > img` 不误伤查看器缩放图）/PDF 内嵌/md 渲染/沙箱 html/文本高亮，与文件链接 chip 共用弹窗骨架）承载全文；超长文本截断由 show 服务端产出**单个带 `path` 的 `code` 块**（不再附独立 file 卡片，全文经工具栏获取）
 - **文件展示方式（「嵌入展示/弹窗查看」，设置面板「外观」，`web/file-display.ts`）**：`read`/`write` 等文件工具（含 code 子Agent 同款包装，`card.file` 声明）的**产物文件卡**（工具卡下方的 file 内容块）在两种形态间切换——**嵌入展示**（默认，现状：产物 file 块渲染为文件内容卡，进入视口按需加载内联展示）或**弹窗查看**（产物 file 块收敛为**文件链接 chip**：📄 图标 + 文件名 + 路径（弱化单行省略）+ 下载图标，点击弹窗查看文件全文；chip 即块位置渲染于 `.msg-body`，路径取块自带的解析后真实路径，经 `files/preview` 取数）；**参数区与工具输出不受影响**（write 的 content、edit 的旧/新对比、read 的输出照常渲染——展示方式只作用于下方产物文件卡），图片/图表等视觉产物块照常内联（仅 file 块切换形态），show 等非文件卡工具的块不受影响；实时（appendToolResult）与历史（appendMsg）同构分流；localStorage `gebai.ui.fileDisplay` 仅存 `"popup"`，跨标签 storage 事件同步，切换后重载当前会话消息即时生效（渲染是结构性的）
 - 图表渲染走**通道化渲染链路**：`show` 图表分支执行中引擎发布 `event.draw.render`（含 renderId + 源码 + **图表语言 `format`**）→ **Web 通道**前端**本地渲染**（按 format 分派本地引擎、**零网络请求**：mermaid → 官方 `dist/mermaid.min.js` 自包含 UMD、plantuml → 官方 `@plantuml/core` 引擎（TeaVM 编译，含内置 Graphviz 布局）、d2 → 官方 `@terrastruct/d2` WASM 引擎（浏览器构建，Web Worker 内编译渲染）、echarts → 官方 `dist/echarts.min.js` 自包含 UMD（**SSR 模式直接输出 SVG 字符串**——JSON option 纯计算渲染为静态 SVG，无 DOM 挂载、无动画，与其余三语言同一「源码 → SVG」契约）；**引擎经 `public/vendor/` 稳定文件名静态伺服**——无内容 hash，重建后 URL 不变，开发模式旧页面的动态分块 404 从根上消除，见「构建性能」）经 WS `draw.result` 或 REST `POST /sessions/:id/draw` 回传结果（**前端按 payload.format 原样分发**——`onDrawRender` 不做语言归一化，未知语言由 `renderDiagramSvg` 显式报错；echarts 曾被这里的归一化吞掉喂给 PlantUML 引擎，最新前端也报「PlantUML 渲染错误」）；**飞书通道与 `render=backend`** 由服务端**组合后端渲染器四语言全支持**（见「后端图表渲染」）——`show` 图表分支 **`render` 参数选择渲染通道**：`frontend`（**默认首选**，浏览器本地渲染 SVG 可交互缩放、零服务端开销，降低后端性能压力）/ `backend`（**服务端直接渲染成 PNG 图片**：引擎经 ToolContext `renderDiagram` 调用组合渲染器，落盘会话 `tmp/{name}.png` 并返回 `image` 内容块（**前端图片块点击进入全屏查看器**：缩放/平移/复制/下载），**仅导出/分享图片等确需 PNG 文件时使用**，四语言均支持；**前端渲染不可用（收到「画图能力受限」）时提示模型改用 backend 重试**）；**`code` 与 `path` 二选一（文件渲染）**——`path` 指定会话内已存在的图表文件（`.mmd`/`.mermaid`/`.puml`/`.plantuml`/`.d2`/`.echarts`）直接读取渲染（图表名默认取文件主名，format 未传时按扩展名推断，规范化源码落盘 `tmp/{base}.{ext}`，已生成图表文件再渲染/换通道时不重发源码），`code` 缺省仅需 `path`；**渲染成功工具才返回成功**（前端：图表块 + 落盘源码文件；后端：图片块 + 落盘源码/`.png`），渲染报错（语法错误等）把错误文本返回给模型（据此修正源码，错误信息指明失败的语言），**5 秒超时返回「画图能力受限」**（前端/飞书通道渲染端离线或引擎加载失败时降级，不阻塞任务；`render=backend` 不经前端回传，走服务端渲染器自身超时兜底）；**echarts 通道加固（实测复盘，前端渲染为默认正确通道、不自动换通道旁路）**：① 服务端**预校验 JSON**（`parseEchartsInput` 纯解析零渲染开销）——无效 JSON 立即精确报错，不白跑前端一轮；② **前端版本错位明确诊断**：前端报错引擎与请求语言不符（如请求 echarts 却由 PlantUML 引擎报错——旧版前端把未知语言静默当 PlantUML 渲染）时，返回「前端渲染器版本过旧，请刷新页面」的诊断而非误导性的源码错误；新版前端对未知语言自身也显式报错引导（见「前端本地渲染引擎」）
-- **后端图表渲染（四语言）**：组合渲染器 `core/support/diagram-render.ts`（show 图表分支 `render=backend` 与飞书通道共用，浅色主题白底图）——**plantuml**：复用 `feishu-bot/plantuml.ts`（TeaVM 引擎 + 极简 DOM 垫层，串行队列）；**mermaid**：`mermaid` npm 包 + **happy-dom DOM 垫层**（固定浅色主题 `htmlLabels: false` 纯 SVG 输出；happy-dom 无布局引擎，`getBBox` 以几何属性估算覆盖——rect/path/line 坐标、文本按**全角 1.0em / 半角 0.6em 逐字符估算**（全角统一按半角 0.6em 会低估约 40%，中文标签经 getBBox→viewBox 传导导致整图偏窄、文字被裁剪），否则 mermaid 布局坍缩为 16px）；**d2**：`@terrastruct/d2` WASM（node-esm 构建，**文件路径 Worker**——bun build 无法内联：dev 直接 import 包；**二进制模式**从内嵌产物（`scripts/build-d2js.ts` 生成 `d2js.embedded.generated.json`，gzip base64，随产物打进二进制）物化到 `{GEBAI_HOME}/vendor/d2js/{version}/` 后动态 import，版本目录幂等物化 + 旧版本清理）；**echarts**：`echarts` npm 包 SSR 渲染（`init(null, null, {renderer:"svg", ssr:true, width, height})` + `renderToSVGString()`，零 DOM）——`parseEchartsInput` 解析 JSON option（宽松 JSON：容忍注释/尾逗号）或 `{"option":…,"width":…,"height":…}` 信封（尺寸钳制 200-4000，默认 960×600），注入 `animation:false`（SSR 静态输出必须）；**标题/图例防重叠**（echarts 6 图例默认在底部，模型按 v5 习惯显式 `legend.top: 0/'top'/小数值` 时置顶图例与顶部标题必然压字——纵向冲突时图例自动下移到标题底边之下，越界时联动下调未显式设置的 `grid.top`，规则见常量表「ECharts 标题/图例避让」，前端 `parseEchartsOption` 同规则）；**echarts 求值环境隔离**（zrender 环境探测在模块求值期完成，误判浏览器环境后（浏览器路径文本测量需真 canvas，垫层不支持）一旦垫层卸载全局 window 即抛 `window is not defined`；而 PlantUML/happy-dom 垫层在模块作用域安装全局 window/document 且不还原，谁先加载会决定判定结果——模块顶部对全局作**临时清理后求值（TLA）并立即还原**，使环境判定与加载顺序解耦；diagram-render.ts 经引擎与飞书桥接惰性 import，不增加启动开销）；**SVG → PNG** 共享栅格化（`@resvg/resvg-js`，2x 超采样、1600×2400 上限）：根元素规范化（百分比尺寸显式化、**负原点 viewBox 平移归一**——resvg 对负原点 viewBox panic，以 `translate` 包裹内容平移进正象限且不包裹 `<style>`/`<defs>`/`<title>`）；**全局环境切换**（共享进程全局 DOM/Worker，统一走单一串行队列）：happy-dom 垫层与 PlantUML 垫层相互覆盖全局 document——mermaid 渲染前强制重放 happy-dom 垫层、plantuml 渲染前重放其垫层；**`globalThis.window` 仅临时存在**（mermaid 导入/渲染期临时注入，plantuml 渲染后即删）——实测 Bun 的 `node:worker_threads` 在全局 `window` 存在时 Worker 启动挂起（D2 渲染器依赖）；错误按语言包装回传（`Mermaid 渲染错误：…`/`D2 渲染错误：…`/`ECharts 渲染错误：…`），各引擎按需加载（echarts 在模块求值期以隔离环境加载，不拖慢启动）
+- **后端图表渲染（四语言）**：组合渲染器 `core/support/diagram-render.ts`（show 图表分支 `render=backend` 与飞书通道共用，浅色主题白底图）——**plantuml**：复用 `feishu-bot/plantuml.ts`（TeaVM 引擎 + 极简 DOM 垫层，串行队列）；**mermaid**：`mermaid` npm 包 + **happy-dom DOM 垫层**（固定浅色主题 `htmlLabels: false` 纯 SVG 输出；happy-dom 无布局引擎，`getBBox` 以几何属性估算覆盖——rect/path/line 坐标、文本按**全角 1.0em / 半角 0.6em 逐字符估算**（全角统一按半角 0.6em 会低估约 40%，中文标签经 getBBox→viewBox 传导导致整图偏窄、文字被裁剪），否则 mermaid 布局坍缩为 16px）；**d2**：`@terrastruct/d2` WASM（node-esm 构建，**文件路径 Worker**——bun build 无法内联：dev 直接 import 包；**二进制模式**从内嵌产物（`packages/server/scripts/build-d2js.ts` 生成 `d2js.embedded.generated.json`，gzip base64，随产物打进二进制）物化到 `{GEBAI_HOME}/vendor/d2js/{version}/` 后动态 import，版本目录幂等物化 + 旧版本清理）；**echarts**：`echarts` npm 包 SSR 渲染（`init(null, null, {renderer:"svg", ssr:true, width, height})` + `renderToSVGString()`，零 DOM）——`parseEchartsInput` 解析 JSON option（宽松 JSON：容忍注释/尾逗号）或 `{"option":…,"width":…,"height":…}` 信封（尺寸钳制 200-4000，默认 960×600），注入 `animation:false`（SSR 静态输出必须）；**标题/图例防重叠**（echarts 6 图例默认在底部，模型按 v5 习惯显式 `legend.top: 0/'top'/小数值` 时置顶图例与顶部标题必然压字——纵向冲突时图例自动下移到标题底边之下，越界时联动下调未显式设置的 `grid.top`，规则见常量表「ECharts 标题/图例避让」，前端 `parseEchartsOption` 同规则）；**echarts 求值环境隔离**（zrender 环境探测在模块求值期完成，误判浏览器环境后（浏览器路径文本测量需真 canvas，垫层不支持）一旦垫层卸载全局 window 即抛 `window is not defined`；而 PlantUML/happy-dom 垫层在模块作用域安装全局 window/document 且不还原，谁先加载会决定判定结果——模块顶部对全局作**临时清理后求值（TLA）并立即还原**，使环境判定与加载顺序解耦；diagram-render.ts 经引擎与飞书桥接惰性 import，不增加启动开销）；**SVG → PNG** 共享栅格化（`@resvg/resvg-js`，2x 超采样、1600×2400 上限）：根元素规范化（百分比尺寸显式化、**负原点 viewBox 平移归一**——resvg 对负原点 viewBox panic，以 `translate` 包裹内容平移进正象限且不包裹 `<style>`/`<defs>`/`<title>`）；**全局环境切换**（共享进程全局 DOM/Worker，统一走单一串行队列）：happy-dom 垫层与 PlantUML 垫层相互覆盖全局 document——mermaid 渲染前强制重放 happy-dom 垫层、plantuml 渲染前重放其垫层；**`globalThis.window` 仅临时存在**（mermaid 导入/渲染期临时注入，plantuml 渲染后即删）——实测 Bun 的 `node:worker_threads` 在全局 `window` 存在时 Worker 启动挂起（D2 渲染器依赖）；错误按语言包装回传（`Mermaid 渲染错误：…`/`D2 渲染错误：…`/`ECharts 渲染错误：…`），各引擎按需加载（echarts 在模块求值期以隔离环境加载，不拖慢启动）
 - 图表配色**跟随 UI 主题**：三种语言按各自机制适配——① **PlantUML 双层机制**：注入引擎确认支持的 `skinparam`（backgroundColor/defaultFontColor/class/object/state/note/activity/时序图分组/生命线/泳道等，追加在源码末尾覆盖用户 `!theme`/自定义 skinparam）+ **渲染后颜色兜底修正**（TeaVM 版仅支持少量 skinparam，其余元素为引擎硬编码默认色）：将引擎默认亮色（节点/激活条/分组背景）、默认暗色（文字/描边）等替换为主题 CSS 变量色；② **Mermaid**：按当前 UI 明暗以 `theme: dark/default` 重新 `initialize`（主题为全局状态，明暗切换时重建；**固定 `htmlLabels: false` 纯 SVG 文本标签**——默认 true 时标签渲染为 HTML 元素包于 `<foreignObject>`，会被注入 DOM 前的 DOMPurify SVG 净化剥离导致「有框无文字」，前端与后端渲染器一致；**`suppressErrorRendering: true` 抑制内置错误渲染**——默认渲染失败（语法错误等）会在 `document.body` 遗留「Syntax error in text」错误图标容器且无法关闭，抑制后渲染期临时元素一并清理，错误统一经 Promise 拒绝由调用方处理：缩略图占位/查看器回退/回传模型修正源码）；③ **D2**：按当前 UI 明暗选主题 ID（亮色 `0`=Neutral Default、暗色 `200`=Dark Mauve，官方默认暗色主题）作为渲染参数；④ **ECharts**：按当前 UI 明暗注入 `darkMode: true/false`（echarts 内置暗色适配——轴线/标签/默认调色板自动切换，用户 option 显式设置的颜色不受影响）；**标题/图例防重叠**（`fixEchartsLegendOverlap`，前后端解析入口统一应用：置顶图例与顶部标题纵向冲突时自动下移避让，见常量表「ECharts 标题/图例避让」）；**JSON option 无法表达函数**（formatter 等用字符串模板 `"{b}: {c}"`，echarts 原生支持；前后端解析一致：宽松 JSON 容忍注释/尾逗号，信封指定画布尺寸）；**明暗判定统一按正文文字色感知亮度**（`hexLuminance(--text) ≥ 128` 视为暗色）；**主题变量为 rgba 时与 body 背景合成不透明等效色**（`css-color.ts` 纯函数，带单测——否则亮色主题下图表退化回暗色默认值、深字深底不可读）；用户显式指定的颜色不受影响；切换主题后已渲染图表自动重绘；SVG 按主题化源码缓存，同图重复渲染零开销；引擎空闲预热（PlantUML + mermaid + echarts；D2 的 8MB WASM 开销大且架构图频率低不预热）避免首次调用超时；渲染 SVG 注入 DOM 前经 DOMPurify 净化（PlantUML 支持 `<html>`/`<img>` 嵌入，防脚本注入）
 - 消息 `blocks` 字段持久化于 `chat.json`，历史会话加载时以同一渲染管线呈现，保证「历史可看」
 - 工具执行事件（`event.tool.result`）携带 `blocks`，UI 实时展示图片/图表等产物
@@ -1703,11 +1720,10 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 - 触发条件：**窗口剩余不足以支撑一次回复**时自动触发，无需人工干预（不以窗口百分比判定——真正约束是「留给输出的空间」，输出上限由模型与配置（`GEBAI_LLM_MAX_OUTPUT_TOKENS`）决定，并非窗口的固定比例）
 - **压缩四原则**（用户口径，逐条落到 `planCompactRange` + `store.compactMessages`）：
-  ① **近消息是滑动窗口**：最近 `COMPACT_WINDOW_MESSAGES`（12 条，任意角色；上限为历史一半，避免短会话压不动；`GEBAI_COMPACT_WINDOW` 可调）永选进压缩区间，随新消息自然向前滑动；
-  ② **远消息用模型压缩、原消息完全抛弃**：区间取最早的连续一段（远的先压），区间内**除系统提示词以外**的消息（含用户输入、assistant、tool 结果）全部由摘要替换并**从上下文移除**——不残留原文（会话记录 chat.json 同样只留摘要，原文不另存）；
-  ③ **压缩消息放到前面、保持远近顺序**：摘要恒为一条且置于消息数组**最前**，模型先读历史摘要再读近期原文，与近期消息不交错（越旧的信息越靠前）；
-  ④ **水位阈值之间压缩**：上水位（触发）= 剩余 < 输出预留（窗口 - 输入 < reserve）；下水位（目标）= 剩余 ≥ 输出预留 × 2 且输入不低于窗口 40%——在两个水位之间压缩，平衡语义保留与上下文空间（每次不压太多）
-- **系统提示词不要压缩**（原则 ④）：压缩区间只含可压缩消息（`isCompressibleMessage`）——**角色 system 的消息一律不进区间**，夹带时由 `compactMessages` 原位保留（主 system 段消息、子Agent 装载提示词均不被摘要替换）；缓存友好前缀请求会把它们作为主循环同前缀一并发给模型（前缀缓存匹配所需，模型只是重看一眼已看过的内容），但会话记录里的这些消息一字不改、位置不变
+  ① **近消息是滑动窗口**：最近 `COMPACT_WINDOW_MESSAGES`（12 条，任意角色；上限为历史一半，避免短会话压不动；`GEBAI_COMPACT_WINDOW` 可调）**永不进**压缩区间（原样保留），随新消息自然向前滑动；
+  ② **远消息用模型压缩、原消息完全抛弃**：区间取最早的连续一段（远的先压），区间内**除系统提示词以外**的消息（含用户输入、assistant、tool 结果）全部由摘要替换并**从上下文移除**——不残留原文（会话记录 chat.json 同样只留摘要，原文不另存）；摘要恒为一条且置于消息数组**最前**（模型先读历史摘要再读近期原文，与近期消息不交错：越旧的信息越靠前）；
+  ③ **水位阈值之间压缩**：上水位（触发）= 剩余 < 输出预留（窗口 - 输入 < reserve）；下水位（目标）= 剩余 ≥ 输出预留 × 2 且输入不低于窗口 40%——在两个水位之间压缩，平衡语义保留与上下文空间（每次不压太多）；
+  ④ **系统提示词不要压缩**：压缩区间只含可压缩消息（`isCompressibleMessage`）——**角色 system 的消息一律不进区间**，夹带时由 `compactMessages` 原位保留（主 system 段消息、子Agent 装载提示词均不被摘要替换）；缓存友好前缀请求会把它们作为主循环同前缀一并发给模型（前缀缓存匹配所需，模型只是重看一眼已看过的内容），但会话记录里的这些消息一字不改、位置不变
 - **上下文占用口径：只认模型服务返回的真实大小**（`input_tokens`，含 system 提示词与工具 schema，即「真上下文」）——压缩判定不依赖任何估算，估算容易误判（chars/4 对中文低估 2~4 倍、工具 schema 与图片块又难以折算），一律以接口真值为准：
   - **跨 run**：上次任务最后一次调用返回的真实 `input_tokens` 持久化为基线（`SessionData.ctxInputTokens`）；下次 run 基线本身已致剩余不足一次回复即先压缩（本次调用只会更大），不做增量估算
   - **任务中途**：每轮调用返回的真实 `input_tokens` 使窗口剩余 < 输出预留时压缩最早历史（`makeContextRoom`），长任务不再等接口拒绝
@@ -1716,29 +1732,29 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - **输出预留取值**（`outputReserveTokens`）：模型单次响应输出上限（能力声明 `maxOutputTokens`），未声明时缺省 16384，并夹在 `[1024, 窗口一半]` 内——预留不能超过窗口一半，否则小窗口模型会永远处于「剩余不足」而反复压缩
   - **提示词缓存命中度量（展示口径）**：usage 中的缓存命中字段统一提取为 `LLMUsage.cachedTokens`（OpenAI chat/responses 的 `prompt_tokens_details`/`input_tokens_details.cached_tokens` 已含在 input 内，Anthropic 的 `cache_read_input_tokens` 在 `input_tokens` 之外——pickUsage 折算并入 inputTokens 统一「cached ⊆ input」口径）；随真实 usage 基线同点位流转：每轮经 `event.session.ctx` 携带 `ctxCachedTokens` 推送、任务结束持久化为 `SessionData.ctxCachedTokens`（接口不返回缓存字段时 undefined，撤回/压缩清基线时一并清除），前端上下文圆环悬浮展示「缓存命中 tokens（占比）」。仅度量不改变请求构造——三家接口均未发送缓存控制标记（Anthropic `cache_control` / OpenAI 自动前缀缓存），命中率由服务端自动前缀缓存自然产生
 - 压缩策略（按序使用）：
-  0. **超长用户输入落盘（预防）**：发送时超过阈值的用户输入自动全文写入会话 `tmp/user_inputs/{内容哈希}.txt`（原文不丢——文件面板可见、模型可经 `read` 工具读取全文；内容哈希去重，相同输入复用同一文件），消息正文保留头尾预览 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样不变，落盘失败降级为原样保留（不改变优先）
+  0. **超长用户输入落盘（预防）**：发送时超过阈值的用户输入自动全文写入会话 `tmp/user_inputs/{内容哈希}.txt`（原文不丢——文件面板可见、模型可经 `read` 工具读取全文；按内容哈希命名，相同输入映射同一文件），消息正文保留头尾预览 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样不变，落盘失败降级为原样保留（不改变优先）
   1. **工具大输出截断**：工具返回超过截断阈值自动截取头尾摘要（**按行保留完整行**，避免切断半行/半条目；单行巨长如 minified 时该行按字符兜底），完整内容写入文件，截断消息中附带文件路径供大模型后续读取。**引擎兜底（不依赖工具自觉）**：工具未自行截断的超长输出，由引擎在主循环统一截断落盘——凡 `output` 超过截断阈值且未带 `truncated` 标记的结果，自动复用同一截断逻辑（含内容块保留），保证任何第三方/新工具都不会撑爆上下文；已自行截断的工具结果不重复处理
   2. **旧消息摘要（压缩后置于消息数组最前，原消息完全抛弃）**：将最早一段历史消息（**除系统提示词以外全部**：用户输入/assistant/tool）由 LLM 生成摘要，摘要替换这些消息并从上下文中移除（**摘要恒为一条且位于消息数组最前**，不与近期原文交错；原文不另存——摘要即其在会话中的唯一留存形态，模型与 UI 都只看得到摘要）。摘要保留关键信息。**摘要输入优先用「缓存友好前缀请求」**：直接把与主循环**逐字节同前缀**的历史原文发过去（同一 system 提示词 + 同一段历史 + 同一批工具 schema，经 `loadHistory(upToIndex)` 渲染）+ 尾部压缩指令——服务端前缀缓存命中，已处理过的 token 按缓存价计（比把历史重写成骨架再发全价更便宜，且保留完整原文与工具调用史）；不可用时退回「骨架行 + 分块」：每条消息压成一行（assistant 工具调用轮 content 常为空——补上工具名与参数摘要，否则「调用过什么工具」在摘要里彻底消失；tool 结果带工具名与内容前段），单块输入上限 20000 字符、至多 6 块（总覆盖约 12 万字符），超出时**逐块摘要后合并**（map-reduce；单块失败跳过，不影响其余块）；总量超总预算时**头尾保留**（最早的任务背景与最新进度都进摘要）+ 中部省略说明行——不再按 20000 字符一刀切静默丢弃（52 万 token 窗口下一次压缩常覆盖 15 万字符以上，旧实现只有约 1/8 进摘要且无任何省略提示）。**滚动摘要合并**：压缩时既有摘要摘内容作为「此前摘要」并入新摘要并随新摘要替换（摘要恒为一条，不再随压缩次数累积）；**区间端点对齐 `assistant(toolCalls)/tool` 配对边界**（边界处的工具结果一并纳入，避免被当孤儿丢弃）；**摘要失败降级为骨架行**（角色 + 工具名/参数 + 内容首段，而非一句空占位），原文仍在会话记录中可查看。**系统提示词不可压缩**（`isCompressibleMessage`：仅 role=system 被排除；用户输入/assistant/tool/引擎注入消息均可压缩）——不选进压缩区间、区间夹带时原位保留；压缩条数只计实际移除的消息
-  3. **滚动裁剪**：摘要仍超限时丢弃最早消息，保证最新上下文完整
-  4. **溢出硬护栏（压缩无法收敛时的最后防线）**：压缩无内容可压时（历史几乎全是系统提示词，或可压缩消息都在滑动窗口内）受保护消息让路——最旧用户消息的图片附件降级为文本说明（可用 vision/read 按需查看）、仍不够将最旧用户消息替换为裁剪占位（原文仍在 chat.json，UI 可查、不丢数据）；**最新一条用户消息（本次任务输入）永不裁剪**；压缩为**迭代执行**（run 前按基线迭代压缩直至收敛，任务中途/溢出恢复经 `makeContextRoom` 压缩 → 护栏降级两步腾挪）
+  3. **摘要超限截断**：摘要本身超长时按 `SUMMARY_OUTPUT_LIMIT`（2000 字符）截断——更早历史的移除由压缩区间（②）与溢出护栏承担，不另设「滚动裁剪」独立步骤
+  4. **溢出硬护栏（压缩无法收敛时的最后防线）**：压缩无内容可压时（历史几乎全是系统提示词，或可压缩消息都在滑动窗口内）受保护消息让路——最旧用户消息的图片附件降级为文本说明（可用 vision/read 按需查看）、仍不够将最旧用户消息替换为裁剪占位（占位文本明示「原 N 字符，**原文不再保留**」——压缩与护栏都会改写 chat.json，原文不另存）；**最新一条用户消息（本次任务输入）永不裁剪**；压缩为**迭代执行**（run 前按基线迭代压缩直至收敛，任务中途/溢出恢复经 `makeContextRoom` 压缩 → 护栏降级两步腾挪）
   5. **历史图片内联窗口**：仅最近 3 组含图片的消息（用户图片附件与工具结果图片——read 读取的图片引用）内联进上下文，更早的图片降级为路径说明（图片永久占窗口且不参与压缩，长会话会被历史图片占死窗口）
   6. **LLM 流式读空闲超时**：SSE 建立后连续 120 秒无任何 chunk 判定接口假死，中止本次调用（无产出走重试、有产出上抛为任务错误）——此前网关/上游挂起会无限挂起任务
-- 压缩过程对用户透明，UI 显示压缩通知（压缩范围、摘要内容），原始消息可从会话文件回溯
+- 压缩过程对用户透明，UI 显示压缩通知（压缩范围、摘要内容）——**被压缩区间的原文不另存**（chat.json 只留摘要，见原则 ②）
 - 压缩后继续原任务流程，不影响进行中的工具调用循环
 
 > **实现**：已落地。`engine.compactSession()` 支持主动（`session.compact` / REST `POST /compact`，scope 指定区间）与自动触发（**窗口剩余 < 输出预留**时压缩，触发与目标口径见「上下文占用口径」与「常量参考」）；摘要由 LLM 生成，**首选「缓存友好前缀请求」**：直接把与主循环**逐字节同前缀**的历史原文（同一 system 提示词、同一段历史、同一批工具 schema，经 `loadHistory(upToIndex)` 渲染）加上尾部压缩指令发给模型（`CACHE_PREFIX_INSTRUCTION`）——服务端前缀缓存（OpenAI 自动前缀缓存 / DeepSeek 上下文缓存 / 智谱・千问等同机制）因此**命中**，已处理过的 token 按缓存价计（多数服务商 10%~50%），且无需把消息重写成骨架（保留完整原文与工具调用史，摘要信息量更高）；不可用时退回「骨架行 + 分块」路径：前缀装不下（`estimateMessageLikeTokens` 超 `窗口 - 8192`）、前缀内有既有摘要无法吸收、上次同模型调用未命中缓存（`usage.cachedTokens=0`，按 provider+model 记忆，不白付全价）、空文本/接口异常。`GEBAI_COMPACT_CACHE_PREFIX` 可强制开关（0/off 强制骨架、1/on 强制原文前缀、缺省自适应）。摘要调用同样带读空闲超时与取消信号（同 `chatWithIdleTimeout` 防假死）——压缩在任务流程内同步等待，无超时会把整个运行中任务永久挂死；失败降级为骨架行占位（保留被裁剪内容的工具/文件脉络，而非一句空话）。摘要消息持久化（`compacted`/`summary` 标记，UI 渲染为压缩通知，历史重载时作为 **user 角色**注入且置于历史最前）；已压缩摘要消息不重复保留（压缩时既有摘要内容作为「此前摘要」并入新摘要输入、随新摘要替换——长会话摘要恒为一条且始终在数组最前）。**手动压缩在会话有任务运行时被拒**（summarize 是秒级 LLM 调用，期间任务持续追加消息，陈旧压缩区间会套删未参与摘要的新落盘内容；自动压缩经 `internal` 标记在任务流程内自身协调，不受此限）。**超长用户输入落盘**（`spillLongUserInput`，run 发送时执行）：超阈值输入全文写入会话 `tmp/user_inputs/`，消息正文保留头尾 + 文件引用。**压缩只不碰系统提示词**（`isCompressibleMessage`：仅 role=system 被排除；用户输入/assistant/tool/引擎注入提醒均可压缩）——系统提示词消息（含装载提示词）不选进压缩区间、区间夹带时由 `store.compactMessages` 原位保留不移动；缓存友好前缀请求会把系统提示词作为**主循环同前缀**一并发给模型（前缀缓存匹配所需），但**会话记录里它一字不改、位置不变**；区间内无可压缩消息时不做任何改动（不创建摘要、不动 usage 基线）；`compactMessages` 的压缩条数只计实际移除消息数。超限截断（`trimToCacheLimit`，1000 条上限，纯存储安全网）同样保护：受保护消息原位保留、从最早的其他消息开始丢弃，受保护消息本身超上限时按原样保留（软上限，不改变优先），丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），实际保留条数可略低于上限；截断保护同上（`compacted`/`loadedAgent`/用户输入消息在超限截断中原位保留、不重排）。**配对完整性修复（`repairToolPairing`）**：任务取消中断、压缩/截断边界或旧版本缺陷仍可能产生「孤儿 tool 结果」（发起 assistant 已删）或「未应答 toolCalls」（结果缺失）——严格校验的接口（OpenAI tool_calls/tool、Anthropic tool_use/tool_result 配对）会拒绝整个请求，会话自此每次运行 400 卡死。修复分层落地：① 引擎工具循环取消/异常路径为本轮全部 toolCalls 补写占位结果（assistant 先落盘后执行的中断不再缺结果）；② 存储层 `compactMessages` 压缩后、`readFileByPath` 磁盘装载时即时修复（孤儿普通 tool 丢弃、孤儿受保护 tool（agent_run 存档）补最小 assistant 桩、中途未应答补占位结果；尾部未应答**不在存储层 flush**——正常执行流 assistant 先落盘结果随后到达，提前 flush 会让真实结果反被判孤儿丢弃）；③ `llm.ts` 三家序列化入口兜底（含尾部 flush + Anthropic 相邻同角色 user 消息合并），旧版本已损坏的会话在下一次模型调用自愈。压缩替换消息后真实 usage 基线的索引锚点失效：`store.compactMessages` 自动清除 `ctxInputTokens`/`ctxAtMessage`，压缩判定改由下一次真实调用重建真值。**压缩迭代 + 溢出护栏 + 中途压缩 + 溢出恢复 + 读空闲超时均已落地**（`engine.ts`：`makeContextRoom`/`degradeProtectedMessages`/`callModelWithOverflowRecovery`/`isContextOverflowError`/`chatWithIdleTimeout`；图片内联窗口 `INLINE_IMAGE_RECENT=3` 作用于 `loadHistory`）。**摘要输入保真与滚动合并**（`compressor.ts`：`summarizeMessageLine` 工具调用骨架、`buildSummaryChunks` 分块与头尾保留、`summarizeFallback` 骨架降级、`summarize` 的 map-reduce 与合并、`compactSession` 的既有摘要吸收与区间配对对齐）；**输出预留驱动的压缩规划**（`outputReserveTokens` + `lacksOutputRoom` + `planCompactRange`：触发看「窗口剩余是否还够一次回复（maxOutputTokens）」，目标为「剩余 ≥ 输出预留 × 2」且不低于窗口 40%（**水位区间压缩**），压缩区间不越**近消息滑动窗口**（最近 12 条消息，`COMPACT_WINDOW_MESSAGES`/`GEBAI_COMPACT_WINDOW` 可调，上限为历史一半；**有真实占用基线时窗口仅为保底下限**——压多少由水位算出的需腾出量决定），需腾出量按 `estimateMessageTokens` 逐条累计——确保「最近的保留、远的先压、每次不压太多」）；**截断记录与提示**（`SessionData.trimmed` + `loadHistory` 注入「[历史裁剪]」提示，模型知道更早内容已不在上下文中，而不会把历史从中间开始当作完整历史）；**溢出护栏降级可见**（`degradeProtectedMessages` 经 `event.message.compact` 发布 `degraded` 事件，UI 显示上下文为何变化）。
 
 #### 主动压缩
 
-- 用户可随时在 UI 中手动触发压缩当前会话：一键「压缩上下文」或 `/compact` 命令
-- 支持自定义压缩范围：全部历史 / 指定消息区间 / 仅工具输出
+- 用户可随时在 UI 中手动触发压缩当前会话：标题栏一键「压缩上下文」按钮（REST `POST /api/v1/sessions/:id/compact`；**无 `/compact` 斜杠命令**）
+- 支持自定义压缩范围：`scope` 取 `"all"`（全部历史）或 `{from,to}`（指定消息区间）——**无「仅工具输出」**（前端 UI 未传 scope，仅 REST/WS 入口可指定）
 - 主动压缩同样走上述策略，压缩结果立即生效并持久化
 
 #### 截断保护存储
 
 - 存储路径：`{session}/tmp/truncated/{tool_name}_{content_hash}.txt`（`{session}` 为会话根目录 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}`）
 - 消息中返回**会话根内逻辑路径**（如 `tmp/truncated/read_xxx.txt`）：沙箱模式下模型可经 `read` 工具直接读取（修复早期「沙箱读不到截断文件」的矛盾），前端文件面板同步可见/可下载
-- 文件名含工具名可溯源；基于内容 SHA256 哈希去重，相同输出不重复写入
+- 文件名含工具名可溯源；文件名按内容 SHA256 哈希命名（同内容同路径，重复截断幂等覆盖，写入无存在性短路）
 - 生命周期随会话：会话删除/过期时随 `tmp/` 整体清理（见「数据生命周期」）
 
 ### 消息模型与数据结构
@@ -1763,6 +1779,11 @@ type DiffLine = { kind: "equal" | "add" | "del"; text: string }
 interface Message {
   id: string
   role: "user" | "assistant" | "tool" | "system"
+  name?: string                        // 工具消息的工具名 / 助手消息名
+  images?: Array<{ path: string; mime: string }>
+                                       // 工具结果图片引用（轻量、不含 base64）：loadHistory 按内联窗口重读内联
+  arguments?: Record<string, unknown>  // assistant 工具调用的参数（与 toolCalls 配对）
+  loadedAgent?: string                 // 子Agent 装载提示词的 system 消息标记（loadHistory 透传进模型上下文）
   content: string
   reasoning?: string                   // 推理内容（reasoning_content/thinking）独立字段：assistant 消息持久化时写入，content 保持纯正文；
                                        // 回放给 LLM 时（loadHistory）不携带——推理绝不进模型上下文；UI 历史渲染为折叠推理卡；旧版数据推理内嵌 content 的 <think> 块（兼容展示/剥离）
@@ -1817,7 +1838,7 @@ interface ToolCall {
 }
 
 interface ChatChunk {                   // 流式输出单元
-  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "session_start" | "session_done"
+  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "session_start" | "session_done" | "resume" | "model_error"
   messageId?: string                    // text delta 携带本条 assistant 消息 id（前端反馈/操作绑定）
   session?: boolean                    // 事件来自新会话执行过程（agent_run 派生会话/branch_run 分支运行；主回复不带此标记）
   sessionRunId?: string                // 新会话执行 run 标识：同一次 agent_run/branch_run 的执行过程事件共享（前端按此分组渲染）
@@ -1826,10 +1847,13 @@ interface ChatChunk {                   // 流式输出单元
   toolCall?: ToolCall
   approval?: { toolCallId: string; retries: number; tool: string }
   error?: string
+  output?: string                       // done 携带的最终输出（含 session 形态）
+  blocks?: ContentBlock[]               // tool_result 携带的富内容块（图片/图表/文件）
+  retry?: number; maxRetry?: number     // model_error 携带的重试进度（非终态瞬时提示）
 }
 
 // 补充语义：
-// - `reasoning`：推理内容增量（reasoning_content / thinking），前端渲染为折叠推理块：思考中默认展开实时展示（推理内容可见），推理段结束（正文开始/工具调用封段/流结束）自动折回收起态，用户可点 summary 重新展开；**内容 markdown 完整渲染**（与正文同路径节流渲染，低性能模式合并 120ms）；推理内容超出可视高度（`.reasoning-body` 限高 200px）时内部滚动条自动跟随最新内容，用户上翻翻阅历史不打扰（`reasoning-scroll.ts`）；
+// - `reasoning`：推理内容增量（reasoning_content / thinking），前端渲染为折叠推理块：思考中默认展开实时展示（推理内容可见），推理段结束（正文开始/工具调用封段/流结束）自动折回收起态，用户可点 summary 重新展开；**内容 markdown 完整渲染**（与正文同路径节流——**120ms 尾沿节流是全模式统一路径**，低性能模式不再单独降频）；推理内容超出可视高度（`.reasoning-body` 限高 200px）时内部滚动条自动跟随最新内容，用户上翻翻阅历史不打扰（`reasoning-scroll.ts`）；
 //   推理**持久化为独立字段**（`Message.reasoning`，content 保持纯正文；历史会话/切回可见，前端默认折叠可展开，内容同样 markdown 渲染），**回放给 LLM 时不携带**（`loadHistory` 仅映射 content——推理绝不进模型上下文）；旧版数据推理内嵌 content 的 `<think>` 块：前端回退解析展示、回放时 `stripThinkTags` 剥离（兼容，不做数据迁移）
 // - `text`：文本增量；**携带 `session: true` + `sessionRunId` 表示文本来自新会话执行过程**（agent_run 派生会话流式回复），前端渲染进该 run 的折叠容器（见下）
 // - `session_start`：新会话 run 开始（携带 runId + agents/input），前端创建折叠容器——执行中**展开并滚动到可见**；服务端**每轮重推**（同 runId 幂等，前端容器已存在则忽略），前端容器随消息重载丢失（切走会话/断线重连）后新一轮 delta 前可据此重建；分支运行的 start 携带 `branch`/`model`（容器标题「🌿 分支 · 名（模型）」）
@@ -1846,7 +1870,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 }
 ```
 
-- 消息持久化上限（1000 条/会话，纯存储安全网，超出截断最早的非保护消息）+ LRU 会话缓存（10 个）
+- 消息持久化上限（1000 条/会话，纯存储安全网，超出截断最早的非保护消息）+ LRU 会话缓存（10 个）+ 会话 env 解析 LRU 缓存（256 个，`MAX_ENV_CACHE_SESSIONS`）
 - 附件引用 `AttachmentRef`：`{ path, mime, name, size }`，指向会话 `tmp/` 内文件
 
 ## 功能列表
@@ -1859,10 +1883,11 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `write` | 写入文件（默认整体覆盖；`append:true` 追加模式——内容接在文件末尾，不存在则新建）。相对路径以会话 `tmp/` 为基准（`tmp/` 前缀可省略，受沙箱限制）；目标文件**已存在且本会话未 read 过**时拒绝（防盲覆盖，先 read 再覆盖，覆盖/追加同规则，见「防盲写守卫」）；**已存在但内容自上次读取/写入后被修改过**（并行分支/脚本命令/外部编辑）同样拒绝（防陈旧覆盖，重新 read 后再写）；**非 UTF-8 目标文件（GBK/UTF-16）拒绝整体写入**（write 恒按 UTF-8 落盘会破坏原编码——引导转码或改用 `edit` 按原编码写回）；**大文件（约 300 行以上）分段写入**——首段普通 write、后续段 `append:true` 续写（每段 200~300 行），防单次模型输出过长被输出上限截断或接口超时（截断时引擎抢救落盘 + 引导续写，见「核心Agent流程」大文件分段写入与截断抢救） | 否 |
 | `ls` | 列出目录内容（文件/子目录、大小） | 否 |
 | `grep` | 按正则表达式在会话工作目录（`tmp/`）中递归搜索文本内容（返回 文件:行号: 匹配行——路径带 `tmp/` 前缀可直接用于文件工具，限文件大小与匹配数）；`output` 三种结果形态（`content` 逐行内容 / `files` 仅命中文件清单——宽泛摸底定位优先 / `count` 每文件命中行数）、`context` 附匹配行前后上下文（格式同 `grep -n -C`：匹配行 `文件:行号:` 前缀、上下文行 `文件-行号-` 前缀、组间 `--` 分隔；`contextBefore`/`contextAfter` 可指定**非对称**上下文（同 `-B`/`-A`——看定义后的实现体常用），指定时覆盖 `context` 对应侧）、`literal:true` 按字面匹配（正则元字符自动转义——搜索 `foo.bar(` 类代码片段免转义）、`include`/`exclude` 按路径 glob 过滤/排除（逗号分隔多模式、`{a,b}` 花括号交替；无 `/` 的模式按目录/文件名匹配任意层级）、`head_limit` 压低匹配上限先看一部分；node_modules/.git/dist 等大型目录默认跳过（include 原文显式点名除外）（见「grep 内容检索工具」） | 否 |
-| `glob` | 按文件名模式（glob：`*`/`**` 跨目录、`?` 单字符、`{a,b}` 花括号交替）在会话工作目录（`tmp/`）递归查找文件（path 可限定子目录，`tmp/` 前缀可省略，与 `read`/`write` 同一路径解析规则；返回路径带 `tmp/` 前缀，可直接用于文件工具）；`exclude` 排除路径模式（与 grep 同语法）；node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外） | 否 |
-| `file` | **文件管理（单工具多动作）**：`copy` 复制文件（`to` 含目标文件名，二进制通道支持任意类型、父目录自动创建，≤100MB）/ `rename` 重命名（同目录改名，`new_name` 仅名字不含路径——含分隔符拒绝防越界，跨目录用 move）/ `move` 移动或跨目录改名（`to` 含目标文件名，父目录不存在自动创建，与 `write` 一致）/ `mkdir` 新建目录（递归，已存在幂等不报错）/ `delete` 删除文件或目录（递归，不可恢复）/ `info` 查看文件信息——**按内容探测**（类似 `file` 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite/Java class 等）、文本 vs 二进制判定（二进制勿盲 read）、编码检测（UTF-8/BOM/UTF-16/疑似 GBK——GBK 用 `read` 的 `encoding=gbk` 读取）、shebang 解释器；**扩展名与实际内容不符时显式提示**（`data.extMismatch`）；附人类可读大小与修改时间，目录附直接子条目数。写动作（copy/rename/move/mkdir/delete）走写范围守卫；与 `ls`（目录列表）分工——`ls` 单独保留 | 否 |
+| `glob` | 按文件名模式（glob：`*`/`**` 跨目录、`?` 单字符、`{a,b}` 花括号交替）在会话工作目录（`tmp/`）递归查找文件（path 可限定子目录，`tmp/` 前缀可省略，与 `read`/`write` 同一路径解析规则；返回路径带 `tmp/` 前缀，可直接用于文件工具）；`exclude` 排除路径模式（与 grep 同语法）；node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）；**本地模式下 `path` 可传 `tmp/` 外路径并实际遍历搜索**（沙箱模式拒绝越界） | 否 |
+| `file` | **文件管理（单工具多动作）**：`copy` 复制文件（`to` 含目标文件名，二进制通道支持任意类型、父目录自动创建，≤100MB）/ `rename` 重命名（同目录改名，`new_name` 仅名字不含路径——含分隔符拒绝防越界，跨目录用 move）/ `move` 移动或跨目录改名（`to` 含目标文件名，父目录不存在自动创建，与 `write` 一致）/ `mkdir` 新建目录（递归，已存在幂等不报错）/ `delete` 删除文件或目录（递归，不可恢复）/ `info` 查看文件信息——**按内容探测**（类似 `file` 命令，读头部 1KB）：魔数识别实际类型（图片/压缩包/Office/PDF/可执行/SQLite/Java class 等）、文本 vs 二进制判定（二进制勿盲 read）、编码检测（UTF-8/BOM/UTF-16/疑似 GBK——GBK 用 `read` 的 `encoding=gbk` 读取）、shebang 解释器；**扩展名与实际内容不符时显式提示**（`data.extMismatch`）；附人类可读大小与修改时间，目录附直接子条目数。写动作（copy/rename/move/mkdir/delete）走写范围守卫；与 `ls`（目录列表）分工——`ls` 单独保留；写动作走写范围守卫 | **否**（`delete` 动作动态需审批） |
 | `edit` | **精确修改文件**：`old_string` → `new_string` 定点替换（可多处），或 `pattern`（正则）→ `new_string`——二者二选一，正则项配 `regex_flags`（`g/i/m/s/u/y`，`g` 自动补齐）与 `$&`/`$1..$9`/`$$` 捕获引用，大段原文只改少量字符时用正则省去整段重发；替换前校验匹配与**唯一性**（多处命中报错列出行号，或该项 `replace_all: true` 全部替换），失败即报错不落盘；空 `edits`、项非对象、缺 `new_string`、`old_string` 与 `pattern` 同给、`old_string` 为空或等于 `new_string` 均拒绝；目标文件已存在但本会话未 read 过时拒绝（防盲改守卫，与 write 同规则）；**编码感知**（BOM/UTF-8/UTF-16 LE·BE/GBK 自动探测，按原编码写回——GBK 仅支持命中区域与替换文本均纯 ASCII，否则明确拒绝并引导转码，不再静默写坏）；**行尾健壮**：CRLF/裸 CR 文件 × LF 原文片段在 LF 归一空间匹配（双向自适应），写回按源字符区间拼接——未修改区域字节级保留（混合行尾不被整文件改写），仅替换文本按文件主导行尾；`old_string` 误携 read 行号前缀时自动剥离；匹配失败时检测空白/缩进近似原文并给提示；成功回报各处应用行号（见「edit 修改工具」） | 否 |
 | `patch` | **应用 unified diff 补丁**：一次多 hunk、行号模糊容错（上下文裁剪重试），全部 hunk 校验通过才整体落盘（原子），`dry_run` 可预演不落盘；**多文件补丁**按 `---`/`+++` 文件头分组逐文件应用（`a/`/`b/` 前缀自动剥离，跨文件原子——任一文件任一 hunk 失败整体不落盘）；目标文件已存在但未 read 过时拒绝（防盲改守卫）；**行尾感知**（与 edit 同构）：CRLF 文件 × LF 补丁在 LF 归一空间匹配、写回按原文件行尾还原（见「patch 补丁应用工具」） | 否 |
+| `restart_server` | 重启本服务进程（仅本地模式注入，见「restart_server」；支持 `action=status` 只读查询与重启后续跑 `prompt`） | **是** |
 | `tool_schemas` | **批量获取工具 schema**：按工具名列表返回输入参数与结构化输出（`data`）的 JSON Schema；省略时返回全部已启用工具的输出结构概要——js 编排前理解输出结构，避免逐个试调 | 否 |
 | `agent_list` | 列出可用子Agent（名称/描述/是否已装载；**不列工具名**，工具名以注册的工具集为准）。**不注册进总Agent 全局工具集**——未装载清单已由 `systemPromptInjection` 注入提示词（模型上下文已有，工具冗余且干扰工具选择）；仅在新会话执行环境注入（纯 md 组合子Agent 自动注入编排工具时，见「子Agent文件格式」） | 否 |
 | `agent_load` | **装载**子Agent 能力模块（类比 import 子模块：工具并入当前工具集、**完整系统提示词作为 system 消息写入会话记录**（持久化，恢复会话自动还原），**不创建独立上下文**；默认使用方式：装载后直接用其工具，仅在需要干净上下文或防膨胀时才改用 `agent_run` 新会话执行；装载反馈**不枚举工具清单**——`{agent}_*` 工具 schema 已注册进工具集（下一轮请求即全量下发），再列一遍是冗余） | 否 |
@@ -1870,7 +1895,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `branch_run` | **会话分支运行（git 式并发）**：从主会话**当前上下文** fork 出多个并行分支（`branches` 清单 1-8 项，每项 `name?`（缺省 b1..bN，批内唯一，≤32 字符不含空白、中文名合法）/`prompt`（分支任务指令）/`model?`（**模型路由**——`GEBAI_LLM_ROUTES` 命名路由走独立端点，多路接口并行）），各分支独立 LLM 循环、同一上下文快照与工具面并行执行，最终报告**自动合入主上下文**（合并消息 + 过程存档，主线下轮即见）——像 git 一样不停分支合并，多路并行摆脱单轮串行的模型服务速度限制；分支内用 `branch_sync` **双向同步主干**（传 content 交出阶段性成果并继续运行/不传拉取主干完整增量），主干与兄弟分支进展以通知注入分支**互相感知**（见「会话分支运行与合并」）；与 `agent_run` 分工：分支继承主线全部历史与系统提示词（fork 而非隔离），适合同一任务的并行多路探索/执行，agent_run 适合委派独立子任务；`merge` 可选合入粒度（缺省 `full` 全文；`summary` 摘要合入——长报告压成结论要点进主线、全文留过程存档，见「会话分支运行与合并」合入粒度）；默认阻塞等全部完成（结果为概要，全文在随后的合并消息），`async:true` 后台执行——立即返回 branchId，完成自动合入，`bg_task`（b 前缀）管理 | 否 |
 | `bg_task` | **后台异步任务统一管理**（三类同构管理面合并，**按 id 前缀自动识别**，无需指定类型——旧 `sh_task`/`agent_task` 已合并为本工具）：**命令任务**（`sh async:true` 启动，taskId 形如 `tXXXXXXXX`，见「sh 异步后台任务」）——`status` 返回状态与 stdout+stderr 合并日志尾部（`tail` 参数默认 4000 上限 20000 字符，完整日志 `tmp/sh-tasks/{id}.log`）；**子Agent 运行**（`agent_run async:true` 启动，runId 形如 `rXXXXXXXX`，见「新会话执行的异步运行」）——`status` 返回进度（已执行轮次/工具调用/最近活动，已结束含最终结果），`wait` 完成时取回最终结果与完整存档（挂执行记录扩展字段供历史回放）；**分支运行**（`branch_run async:true` 启动，branchId 形如 `bXXXXXXXX`，见「会话分支运行与合并」）——报告完成即自动合入主上下文（无需取回动作），`status`/`wait` 附进度、合入状态与存档，`stop` 终止且该分支不合入。公共动作：`wait` 阻塞等待完成（`timeout` 秒内未完成返回当前状态，默认 60 上限 540——「先做别的再回头等结果」）；`stop` 终止（命令任务杀进程树、运行/分支协作中止且已执行过程保留在存档）；`list` 三类合并列出本会话全部后台任务（按启动顺序） | 否 |
 | `sh` | 执行Shell命令（**Windows 下经 cmd.exe 执行：命令串联用 `&&`/`||`/换行，`;` 非分隔符会被并入参数，引号与变量展开以 cmd 为准（无 `$?`/`$VAR`，环境变量用 `%VAR%`）；退出码直接读返回结果的 `exitCode` 字段，无需 `echo $?`/`%errorlevel%`**；**`workdir` 参数**：命令工作目录（相对路径基于会话工作目录/项目根解析——免 `cd X && cmd` 串联，Windows 下引号语义更稳；async 后台任务同以该目录为 cwd；非默认工作目录执行时输出末尾标注「（工作目录: …）」）；**`input` 参数**：stdin 输入，对象/数组自动序列化为 JSON 文本（双引号，脚本 `json.loads` 可解析）；**`timeout` 参数：执行超时秒数，默认 300、上限 540，超时按进程树终止并返回超时结果（`async:true` 时为任务生命周期上限：默认 1800、上限 3600）**；**`strict` 参数**：true 时非 0 退出码抛工具级错误（js 编排「非 0 即中断」，默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出）；**`async` 参数**：true 后台异步执行——立即返回 taskId 不阻塞（长耗时构建/测试先做其他事再回头查询，见「sh 异步后台任务」）；**`approval` 参数**：本次调用是否需审批，默认 true，明确安全的只读/幂等命令可传 false 按次免审（见「工具审批」）；可运行 `bun run`/`node`；JS/TS 亦可通过内置运行时 `gebai exec` 自执行，见「脚本执行环境」） | **是**（默认；`approval:false` 按次免审） |
-| `py` | 执行Python代码（**`input` 参数同 `sh`**；**`timeout` 参数同 `sh`**；**`strict` 参数同 `sh`**；**`approval` 参数同 `sh`**） | **是**（默认；`approval:false` 按次免审） |
+| `py` | 执行Python代码（**`input` 参数同 `sh`**；**`timeout` 参数同 `sh`**；**`strict` 参数同 `sh`**；`approval` 为**兼容参数**：`code` 为任意代码、无法静态判定安全性，**免审标记不生效——恒需审批**） | **是**（恒需审批，不接受 `approval:false` 免审） |
 | `js` | **执行 JS/TS 脚本（工具动态编程）**：Bun 子进程运行，脚本内工具**像内置函数一样直接调用**——`await read(params)`（已启用工具名即顶层函数，动态名字 `tools.call`）+ `ctx` **注入会话上下文**（user/sessionId/workdir/home/sandboxed/env/projects/messages 最近消息快照）+ `input`（编排传入）；console 输出即工具输出，`return` 值进 `data.result`；`timeout`/`strict`/`approval` 参数同 `sh`（见「js 脚本工具」） | **是**（默认；`approval:false` 按次免审） |
 | `show` | **向用户展示内容的统一入口**（原 `draw`/`render_html`/`show_file` 三工具合并，内容源三选一）：①**图表**——`code` + `format`（必选：`mermaid`/`plantuml`/`d2`/`echarts`，工具描述与参数说明内置选择指南——Mermaid 通用图表首选、PlantUML 标准 UML 严谨建模、D2 美观架构图/对外展示、ECharts 数据可视化/统计图表（option 的严格 JSON，值禁止函数）），渲染成功才返回成功、报错回传模型、5 秒超时判定画图能力受限；Web 前端本地渲染（配色跟随 UI 主题）/飞书桥接后端渲染 PNG/`render=backend` 服务端渲染 PNG（返回 `image` 内容块）；产物保存会话 `tmp/` 并返回 `diagram` 内容块（`format` 字段携带图表语言）；`path` 指向已有图表文件直接渲染（图表名取文件主名、format 按扩展名推断，不重发源码）；**PlantUML 布局规范内置于工具描述**（未设置间距时自动注入 `skinparam ranksep 80`/`nodesep 40` 兜底，见「内容展示」）；②**HTML 页面**——`html` 源码直接在聊天界面渲染展示（沙箱 iframe 域隔离预览：脚本可执行、隔离于宿主页面；适合网页原型/数据报表/可视化组件/带交互脚本的小页面），落盘 `tmp/` 并返回 `html` 内容块，可选 `width`/`height` 预览尺寸；③**文件直显**——`path` 按类型产出直显内容块（图片内联、图表源文件渲染图表、`.html` 页面预览、文本/代码内联（超 4 万字符截断 + 文件卡片取全文）、无法内联类型（PDF/压缩包/Office/音视频）查看/下载卡片）；会话 `tmp/` 内直接引用，会话外文件复制 `tmp/shown/{主名}-{内容哈希}.{扩展名}`（≤100MB）后引用（见「内容展示」）；`card.args="block"` 声明（调用不显示通用卡片，结果直出内容块）；**分支门控**（html 分支仅实时通道、图表分支无交互模式直接引导 `render=backend`、path 分支全模式可用，见「内容展示」） | 否 |
 | `fetch_url` | 抓取 URL 内容（网页/API/文档；服务端部署模式限制公网地址防 SSRF 并逐跳校验重定向，响应超阈值截断） | 否 |
@@ -2058,7 +2083,7 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 
 | 路径 | 通道 |
 |------|------|
-| `/`、`/assets/*` | 内置 Web UI 静态资源（浏览器/WebView 直接访问） |
+| `/`、`/assets/*`、`/vendor/*`、`/fonts/*` | 内置 Web UI 静态资源（浏览器/WebView 直接访问；`/vendor` 为图表引擎等静态伺服的第三方产物、`/fonts` 为内置字体） |
 | `/ws` | WebSocket（实时通道） |
 | `/api/*` | REST HTTP（同步通道） |
 | `/api/docs` | OpenAPI 文档 |
@@ -2077,7 +2102,7 @@ return { total: items.length, sizes: items.map(x => x.output.length) }
 - **单一 upstream**：只需代理一个后端地址（`{host}:{port}`），无需为前端/API/WebSocket 配置多个 upstream 或端口
 - **路径前缀挂载**：支持 `GEBAI_BASE_PATH`（如 `/gebai`）将整体挂载到业务域名子路径下，静态资源、`/api/*`、`/ws` 均以该前缀为基准解析，前端资源内引用的路径自动带上前缀
 - **WebSocket 代理**：代理需开启 Upgrade/Connection 透传（`ws://` 路径同为 `{base}/ws`），服务端依据标准 WebSocket 握手，可与 HTTP 同一 location 规则转发
-- **代理头透传**：支持 `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host`，用于生成正确的回调地址与日志记录；`GEBAI_TRUST_PROXY`（或等价）控制是否信任代理头
+- **代理头透传**：**仅消费 `X-Forwarded-For`**（来源 IP 判定，用于登录/注册限流分桶；`GEBAI_TRUST_PROXY` 控制是否信任）——`X-Forwarded-Proto`/`X-Forwarded-Host` **无消费点**，对外回调地址由 `GEBAI_PUBLIC_URL` 决定
 - **HTTPS 终结**：代理侧终结 TLS 后转发明文即可，WebSocket 使用 `wss://`，无需服务端额外证书配置
 - **示例（Nginx）**：
   ```
@@ -2138,16 +2163,15 @@ WebSocket 消息格式（JSON）：
 | `session.switch` | 切换当前会话 |
 | `session.env.get` | 获取会话环境变量（内存态，含来源层级） |
 | `session.env.set` | 设置/覆盖/删除会话环境变量（内存写入，不落盘） |
-| `session.compact` | 主动压缩会话上下文（支持范围参数） |
 | `session.todo.get` | 获取会话待办清单 |
 | `session.tool.get` | 获取当前生效工具集（含启用状态） |
 | `sub_agent.list` | 列出可用子Agent |
 | `sub_agent.load` | 装载子Agent 模块（按需装载；可选 `sessionId`——传入时装载到该会话：注册工具 + 提示词消息写入会话记录，缺省仅全局注册工具） |
 | `session.files.list` | 列出会话临时文件 |
 | `session.files.get` | 读取会话临时文件内容 |
-| `session.prompt` | 发送对话消息（流式返回 Chat 内容，支持附件引用） |
-| `session.attachment.upload` | 上传附件（多模态，二进制分段或整体传输） |
 | `session.current` | 获取当前会话 |
+| `sub_agent.unload` | 卸载子Agent（带 `sessionId` 为会话级；全局形态仅 admin） |
+| `session.restore` | 从 `trash/` 恢复已归档会话（归属用户或 admin） |
 | `session.cancel` | 取消当前任务 |
 | `session.attach` | **运行中会话附加快照**（页面刷新/切换恢复用）：返回 `{ running, startedAt, stream, pending, lastSeq }`——在途流式累积（未持久化部分文本/推理 + messageId/session 标记）、待决交互清单（审批/选择/填值/画图/捕获，含重渲染所需全部载荷）、任务开始时刻与该用户事件日志基线 seq；`running=false` 表示未运行（前端放弃附加）；归属校验同其余会话操作 |
 | `session.compact` | 主动压缩会话上下文（支持范围参数，返回压缩条数与摘要） |
@@ -2173,7 +2197,7 @@ WebSocket 消息格式（JSON）：
 | `event.message.done` | 一条完整消息生成完成（子Agent 轮的 done 同样携带 `session: true` + `sessionRunId`） |
 | `event.message.reasoning` | 推理内容增量（reasoning_content/thinking，前端思考中展开实时展示、推理段结束自动折叠）；子Agent 执行过程的推理增量携带 `session: true` + `sessionRunId` |
 | `event.session.start` | 新会话 run 开始（含 runId + agents 列表 + input + depth；**每轮重推、同 runId 幂等**——前端容器已存在则忽略，容器随消息重载丢失后据此重建）；分支运行（branch_run）携带 `branch`（分支名）+ `model`（模型路由名，未指定缺省），前端容器标题渲染「🌿 分支 · 名（模型）」 |
-| `event.session.done` | 新会话 run 结束（含 runId + agents + output[最终返回]；异常时 output 为空并携带 error），前端折叠容器并写入返回摘要；分支运行携带 `branch` 标识 |
+| `event.session.done` | 新会话 run 结束（含 runId + agents + output[最终返回]；异常时 output 为空并携带 error），前端折叠容器并写入返回摘要；分支运行携带 `branch` 标识。**每轮模型回复结束与循环上限退出都会推送**（与 start 同为每轮重推、同 runId 幂等），前端靠封段而非等 run 结束 |
 | `event.branch.merged` | 分支报告合入主上下文（branch_run 分支**最终合并**与运行中 `branch_sync` 交出 content 的**阶段性合入**均推送，含 messageId/branchId/name/model/text[合并消息全文]）：前端实时渲染「分支合入」通知条（消息落盘 `role: "user"` + `engineNote: "branch"`；历史回放由存储中的合并消息承担——最终合并含过程存档折叠容器，阶段性合入仅文本） |
 | `event.tool.call` | 工具开始执行（含名称与参数）；子Agent 执行过程中的工具调用携带 `session: true` + `sessionRunId`；**门控说明性结果（缺参/未知工具/通道禁用/安全拦截/无交互拒绝/重复中断/重复终止）同样推送**（与结果事件成对，前端实时建卡，不依赖刷新回看落盘历史） |
 | `event.tool.result` | 工具执行结果（含截断标记与文件路径）；子Agent 执行过程中的结果携带 `session: true` + `sessionRunId`；**审批拒绝/超时与取消/中断占位补写同样推送**（实时卡片落终态，不停留「执行中」） |
@@ -2187,6 +2211,12 @@ WebSocket 消息格式（JSON）：
 | `event.cron.run` | 定时任务触发（含任务 ID/类型/名称/周期，见「定时任务」） |
 | `event.cron.result` | 定时任务脚本执行结果（成功/失败与输出；prompt 型结果经消息流呈现） |
 | `event.task.done` | 本轮任务完成 |
+| `event.task.start` | 本轮任务开始（前端据此切换运行态/信号灯） |
+| `event.choice.request` | ask 选项询问请求（前端弹选择卡片，经 `choice.decide` 回传） |
+| `event.tool.result.start` | 工具结果输出开始（长结果分段落屏前的信号） |
+| `event.tool.alive` | 长工具执行心跳（默认 25s，刷新前端空闲看门狗，见「等待期不误判挂起」） |
+| `event.message.intermediate` | 助手中间轮文本（飞书 `notifyIntermediate` 通道预览用） |
+| `event.message.compact` | 上下文压缩/护栏降级通知（含 `degraded` 标记，UI 展示压缩范围与原因） |
 | `event.task.error` | 本轮任务出错（含错误信息） |
 | `event.model.error` | **模型服务异常（非终态，引擎将自动重试）**：接口异常/空响应重试前推送 `{error, retry, maxRetry}`——重试退避期间任务无输出，前端据此显示「模型服务异常，正在自动重试」瞬时提示（文本恢复/任务结束时移除）；重试耗尽的最终失败仍走 `event.task.error` |
 | `event.session.ctx` | 运行中上下文大小更新（每轮模型调用后推送，含 ctxTokens token 计数：真实 usage 基准 + 未发送增量估算，无真值时全量估算兜底；会话列表 k 显示用。接口返回缓存字段时携带 `ctxCachedTokens`：同一次调用的提示词缓存命中 tokens，前端上下文圆环悬浮展示命中率） |
@@ -2238,7 +2268,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/git/status` | GET | 仓库状态（分支、变更分组与计数、`rootPath` 仓库根与 `prefix` 子目录前缀） |
 | `/api/v1/git/diff` \| `/git/compare` | GET | **任意两端差异/对比**（?root&from&to&path&mergeBase；端点：`WORKTREE`/`INDEX`/空串（配合 WORKTREE 表未暂存）/任意 rev） |
 | `/api/v1/git/file-diff` \| `/git/content` \| `/git/show` | GET | 单文件差异 / 端点内容（Monaco 并列视图两侧文本）/ 指定提交文件内容 |
-| `/api/v1/git/log` \| `/git/commit-detail` \| `/git/file-history` \| `/git/blame` | GET | 提交日志（可路径/作者/关键字过滤、分页）/ 提交详情 / 单文件历史 / 逐行追溯 |
+| `/api/v1/git/log` \| `/git/commit` \| `/git/file-history` \| `/git/blame` | GET | 提交日志（可路径/作者/关键字过滤、分页）/ 提交详情 / 单文件历史 / 逐行追溯 |
 | `/api/v1/git/refs` \| `/branches` \| `/tags` \| `/remotes` \| `/stash` \| `/conflicts` | GET | 引用（分支/标签/最近提交/HEAD）/ 分支 / 标签 / 远程 / 暂存区列表 / 冲突四方内容 |
 | `/api/v1/git/{stage,unstage,discard,commit,branch,tag,checkout,merge,rebase,cherry-pick,revert,reset,stash,remote,fetch,pull,push,init}` | POST | Git 写操作（统一「开关守卫 → 执行 → 审计」；破坏性操作默认先备份并返回可恢复引用；`GEBAI_GIT_WRITE`/`GEBAI_GIT_REMOTE` 可关） |
 | `/api/v1/tools` | GET/PATCH | 工具集查询/启停配置 |
@@ -2265,12 +2295,12 @@ WebSocket 消息格式（JSON）：
 面向其他前端与业务系统对接，提供多层次的集成方式：
 
 - **官方 SDK（`@gebai/sdk`）**：WebSocket 连接管理 + REST 调用封装，开箱即用（`login`、`sendPrompt` 流式消费等）
-- **OpenAPI 规范**：REST 端点自动生成 OpenAPI 文档（`/api/docs`），业务系统可据此生成任意语言客户端（Java/Go/Python 等）
+- **OpenAPI 规范**：`/api/docs` 提供**手写的核心端点摘要**（`routes/docs.ts` 静态清单，**非自动生成**且覆盖不全——fs/git/roots/cron/todos 等域未列入），业务系统可据此生成任意语言客户端（Java/Go/Python 等）
 - **任意前端接入**：任何支持 WebSocket/HTTP 的前端（React/Vue/小程序/App 等）均可直接对接双通道 API，不绑定 UI
-- **Web UI 嵌入**：内置 Web UI 支持 iframe 嵌入业务系统页面，通过 URL 参数携带令牌免登录，并可通过参数指定 UI 风格/自定义主题变量
+- **Web UI 嵌入**：内置 Web UI 支持 iframe 嵌入业务系统页面，可通过 URL 参数指定 UI 风格/自定义主题变量（`gb_style`/`gb_vars`/`gb_cny`）；**无「URL 参数携带令牌免登录」**——登录态只存浏览器本地（`localStorage`），跨系统免登录走外部身份兑换（`gb_ext_username`/`gb_ext_credential`）
 - **接口认证**：REST 支持 `Authorization: Bearer <token>`（先登录获取令牌）与 HTTP Basic（单次请求直验账号密码，复用登录限流、不签发令牌）两种方式，WS 统一 `auth.login`；不提供独立服务令牌（原 `X-API-Key` 服务身份机制已移除）
 - **外部身份扩展点（同源集成）**：服务模式下网站可复用自身登录态作为 GEBAI 用户——配置 `GEBAI_EXTERNAL_AUTH_*` 后，前端把本地登录态经 URL 参数（`?gb_ext_username=&gb_ext_credential=`）或 localStorage（`GEBAI_EXTERNAL_AUTH_STORAGE_KEY`，同源直读）交给 Web UI，Web UI 启动时自动调 `POST /api/v1/auth/exchange` 兑换令牌（HMAC 验签或 HTTP 回调验证，见「认证与鉴权」）；业务系统也可用 SDK `exchangeExternalUser` 自行对接（React/Vue 等任意前端），无需依赖内置 UI
-- **身份对接**：服务模式下支持对接外部 SSO/OIDC（可选），复用业务系统已有账号体系
+- **身份对接**：服务模式下支持**外部身份兑换扩展点**（`GEBAI_EXTERNAL_AUTH_SECRET` HMAC / `GEBAI_EXTERNAL_AUTH_URL` 回调，见「多用户隔离与安全」），复用业务系统已有账号体系；**标准 SSO/OIDC 对接未实现**（列于「待实现」）
 - **审批集成**：审批请求可通过 REST/Webhook 转发到业务系统审批流，而非局限于内置 UI
 
 ### 飞书机器人集成
@@ -2281,7 +2311,7 @@ WebSocket 消息格式（JSON）：
 - **身份映射**：本地模式全部映射到 admin 用户（`AuthService.defaultUser`；**旧版默认用户为 `default`——升级后启动时自动迁移遗留归属与旧会话：`feishu/chat-owners.json` 内 `default` 归属改写为当前默认用户、`users/default/sessions/` 下飞书会话目录搬迁至 `users/admin/`、chat.json 的 `userId` 同步改写，幂等可重试、仅本地模式触发**）；服务模式按飞书用户 `open_id` 自动创建 GEBAI 映射用户（用户名 `feishu_{sha256(open_id)前24位}`——open_id 可含大写/超长，直接拼接过不了用户名白名单，哈希派生确定性防碰撞；随机密码不可密码登录，角色普通用户，管理员可在用户管理禁用），10 分钟内存缓存；**映射用户创建失败即中止任务**（绝不以默认 admin 兕底运行——那会让飞书侧任务以沙箱豁免身份执行）
 - **会话映射**：每个飞书单聊/群聊自动关联独立 GEBAI 会话（**会话 id = `sha256("feishu:"+chat_id)` 前 32 位 hex**——满足存储层会话 id 白名单 `[0-9a-f]{32}`，`feishu_{chat_id}` 形态会被 `sessionPath` 拒绝；确定性派生，重启不变；会话名取飞书会话名称），消息上下文与 Web UI 完全互通；群聊成员共享同一会话（引擎身份为会话创建者，不因他人发言重建/覆盖）
 - **消息互通**：文本消息（群聊自动剥离 `@_user_N` 提及占位）→ `session.prompt`；图片消息 → 下载为附件（魔数探测 mime）进入会话；任务完成发最终 **interactive 卡片**（JSON 2.0 markdown 渲染，超长截断并提示 Web UI 查看，**以「回复」引用原用户消息**）；开启 `GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT` 时中间轮文本另发同构 markdown 卡片（见配置节）；最终回复与错误回复同为终态（`finalSent` 互斥标记），任务结束时尚未收到任何终态才补「✅ 任务完成」兜底（结果全在子 Agent/画图输出中的任务在飞书侧也有完成信号；出错/取消后不另发完成提示）；工具调用发「🔧 正在执行」状态消息（同任务至多一条）。**消息保留策略：机器人发出的所有消息一律不撤回**（预览/状态/滚动提示/审批与选择卡片均留痕），仅最终回复引用原用户消息；唯一例外是「Typing」表情反应（非消息本体，输出完成后移除）
-- **画图（show 图表分支）后端渲染**：飞书通道不再依赖前端渲染，由桥接**后端直接渲染成图片**——`event.draw.render` 到达后，桥接调用**四语言组合渲染器**（`core/support/diagram-render.ts`：plantuml = `@plantuml/core` TeaVM 引擎本地渲染 SVG（零网络，浏览器 DOM API 以极简 shim 垫层运行）、mermaid = mermaid + happy-dom 垫层（getBBox 几何估算覆盖）、d2 = `@terrastruct/d2` WASM（二进制模式内嵌产物物化到 `{GEBAI_HOME}/vendor/d2js/`）、echarts = npm 包 SSR 渲染（`ssr:true` + SVGRenderer 零 DOM）→ `@resvg/resvg-js` 栅格化 PNG，浅色主题白底图，单一串行队列防引擎/全局环境冲突，超长按上限等比缩放）→ PNG 落盘会话 `tmp/{name}.png`（与源码文件并列，Web UI 文件面板可见）→ 上传飞书图片（`im/v1/images`，multipart）→ 发送 `image` 消息 → 经 `decideDrawResult` 回传引擎（成功才返回成功；失败把渲染错误回传模型供修正源码；`EngineBotAdapter.onDraw` 透传 format 字段）；**该渲染器同样供 Web 通道 `show` 图表分支 `render=backend` 复用**（引擎经 ToolContext `renderDiagram` 惰性加载，落盘 `tmp/{name}.png` 并返回 `image` 内容块）
+- **画图（show 图表分支）后端渲染**：飞书通道不再依赖前端渲染，由桥接**后端直接渲染成图片**——`event.draw.render` 到达后，桥接调用**四语言组合渲染器**（`core/support/diagram-render.ts`：plantuml = `@plantuml/core` TeaVM 引擎本地渲染 SVG（零网络，浏览器 DOM API 以极简 shim 垫层运行）、mermaid = mermaid + happy-dom 垫层（getBBox 几何估算覆盖）、d2 = `@terrastruct/d2` WASM（二进制模式内嵌产物物化到 `{GEBAI_HOME}/vendor/d2js/{version}/`）、echarts = npm 包 SSR 渲染（`ssr:true` + SVGRenderer 零 DOM）→ `@resvg/resvg-js` 栅格化 PNG，浅色主题白底图，单一串行队列防引擎/全局环境冲突，超长按上限等比缩放）→ PNG 落盘会话 `tmp/{name}.png`（与源码文件并列，Web UI 文件面板可见）→ 上传飞书图片（`im/v1/images`，multipart）→ 发送 `image` 消息 → 经 `decideDrawResult` 回传引擎（成功才返回成功；失败把渲染错误回传模型供修正源码；`EngineBotAdapter.onDraw` 透传 format 字段）；**该渲染器同样供 Web 通道 `show` 图表分支 `render=backend` 复用**（引擎经 ToolContext `renderDiagram` 惰性加载，落盘 `tmp/{name}.png` 并返回 `image` 内容块）
 - **选择（ask 选项询问分支）交互卡片**：`event.choice.request` 到达后发送**交互式按钮卡片**（选项按钮每行至多 5 个，`value` 携带 `choiceId`+`act`+选项值）替代前端选择卡；按钮点击经卡片交互帧回传——单选立即 `decideChoice`，多选切换勾选（点击回包 `card` 字段更新卡片按钮态与「已选」提示），「✅ 完成选择」提交勾选集合、「❌ 拒绝回答/放弃」提交拒绝；**已决策的卡片经 ACK 响应更新为终态**（「✅ 已选择：X」/「❌ 已放弃回答」，按钮不可再点；`card` 字段为 `{"type":"raw","data":…}` 官方包装）；**仅任务发起者可作答**（与审批授权一致，防群聊成员越权，他人点击回 toast 拒绝）；任务结束（完成/错误）清除待作答状态（卡片保留留痕，状态清除后按钮回调不再决策）
 - **接口层桥接（多轮交互 + 仅最终回复）**：飞书 bot 不直接接触 AgentEngine/EventBus（不侵入引擎层），经 `BotPromptAdapter` 接口运行——固定 `interactionMode: "multi_turn"` + `outputMode: "final_only"` + **通道环境注记 `channelNote`**（`FEISHU_CHANNEL_NOTE`：引擎 `run` 选项通道无关地注入系统提示词[主提示词]——模型据此感知「当前对话经飞书机器人通道进行」：回复以 Markdown 卡片渲染且超长会截断（大段产物建议落盘并引导 Web UI 查看）、审批/选择经卡片按钮作答且用户可能回复 /approve 等命令、依赖前端页面的工具本通道不可用、图片自动转附件而其余富媒体不支持）；引擎事件流由 `EngineBotAdapter` 映射为语义回调（onApproval/onChoice/onDraw/onDone/onError/onEnd），**过程事件（工具调用状态、文本增量、推理、新会话执行过程）不推送**，回复仅最终消息（无打字机预览）；**收到消息先给用户消息添加「Typing」表情反应模拟「正在输入」（飞书开放平台无 typing 接口——实测 `POST /im/v1/messages/{id}/typing` 与 `POST /im/v1/chats/{id}/input_status` 均 404；改用 Message Reaction API `POST /im/v1/messages/{message_id}/reactions`，body `{"reaction_type":{"emoji_type":"Typing"}}`——`emoji_type` 必须为[官方表情文案说明](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce)中的标准 ID（`Typing` 为敲键盘表情，传 emoji 字符会报 231001），响应 `data.reaction_id` 为唯一标识；权限 `im:message` 或 `im:message.reactions:write_only` 任一即可），输出完成（最终回复/出错/兜底）后移除该反应（`DELETE /im/v1/messages/{message_id}/reactions/{reaction_id}`，表情反应非消息本体，不受消息保留策略约束），不发送额外表情/状态消息；**最终回复（interactive 卡片）、错误回复与任务完成兜底提示均以「回复」形式引用原消息发送（`POST /im/v1/messages/{message_id}/reply`，客户端显示引用气泡；message_id 不合法时回落普通发送）**；依赖实时前端的工具（`page_capture`，声明 `interaction: "realtime"`）由引擎按交互模式自动从模型 schema 中移除（含子Agent 命名空间同名工具 `{agent}_{tool}`），被调用时阻止执行并返回「当前通道不可用」说明（见「交互模式」）；`ask`/`show` 全模式可见（ask 选择/计划分支经飞书选择卡片作答、填值分支明确报错；show html 分支明确报错、图表分支经飞书后端渲染出图）；关键操作（requiresApproval）经审批交互卡片询问用户（见「审批交互卡片」）
 - **交互命令**：`/help`、`/new`（清空当前对话上下文重建会话，**仅会话创建者可操作**）、`/sessions`、`/cancel`（**仅任务发起者可操作**）、`/approve`、`/reject`（批准/拒绝最近一个待审批工具调用，**仅审批发起者可操作**；审批卡片按钮的主路径兜底——卡片不可用/按钮失效时以命令完成决策（卡片保留留痕））、`/approval-skip`（**仅会话创建者可开启**——群聊成员不得为共享会话开启免审批；写入会话内存态 env，不落盘、服务重启后需重新开启）
@@ -2293,18 +2323,20 @@ WebSocket 消息格式（JSON）：
   - `GEBAI_FEISHU_BOT_AUTO_APPROVE`——**自动审批工具**：需审批工具自动通过（审批卡片不再弹出）；适配层透传引擎任务级 `autoApprove: true`（`approvalPolicy=auto`，含服务模式——部署方为飞书通道整体担责，与映射用户自设审批跳过等价）；仅建议内网/低风险部署开启，公网部署保持审批卡片交互
 - **飞书 TLS 策略**：`GEBAI_FEISHU_INSECURE_TLS=true` 时**所有飞书出站请求禁用 TLS 证书校验**（内网代理/中间人证书场景）——机器人桥接 REST 请求（token/消息/图片，`feishu-bot/api.ts`）、长连接 endpoint 发现与 WebSocket（`feishu-bot/conn.ts`，Bun WebSocket `tls.rejectUnauthorized=false`）、`feishu_docs` 子Agent 全部接口与 OAuth 兑换/用户信息（`feishu-bot/tls.ts` 共享 `feishuFetch`/`feishuWsOptions` 助手，注入 `fetch`/`WebSocket` 的 `tls.rejectUnauthorized=false`；仅在可信内网开启）
 - **安全**：长连接为出站连接（不暴露回调端口）；凭证仅存环境变量（本地 `.env` 不入版本库）；服务模式按飞书用户隔离数据与权限（映射用户为普通角色）；消息/会话 id 白名单校验（`[A-Za-z0-9_-]{1,64}`）防路径注入；卡片按钮回调的 chatId/openId 同样白名单校验 + 发起者授权；**事件处理异常全程捕获**（async 回调 rejection 不得成为 unhandled rejection）；会话归属/映射用户缺失时中止而非兜底
-- **实现**：`packages/server/src/feishu-bot/`（`pb.ts` protobuf 帧编解码、`protocol.ts` 帧协议/合包/ACK、`conn.ts` 长连接客户端（事件 + 卡片交互帧；判活/握手超时/快速重试断连韧性）、`api.ts` 开放平台 API（token 缓存/消息收发/图片上传下载/会话信息）、`tls.ts` TLS 策略助手（`GEBAI_FEISHU_INSECURE_TLS` 禁用证书校验，机器人/feishu_docs/OAuth 共用）、`plantuml.ts` 后端渲染器（DOM shim + TeaVM 引擎 + resvg）、`bot.ts` 桥接编排（依赖全部注入））；单测 129 用例（真实凭证握手验证通过）；Webhook 回调模式（公网 HTTPS + 签名验签）为后续迭代
+- **实现**：`packages/server/src/feishu-bot/`（`pb.ts` protobuf 帧编解码、`protocol.ts` 帧协议/合包/ACK、`conn.ts` 长连接客户端（事件 + 卡片交互帧；判活/握手超时/快速重试断连韧性）、`api.ts` 开放平台 API（token 缓存/消息收发/图片上传下载/会话信息）；TLS 策略助手已迁 `@gebai/agents` core/shared/tls.ts（`GEBAI_FEISHU_INSECURE_TLS` 禁用证书校验，机器人/feishu_docs/OAuth 共用，server 侧经包导入）、`plantuml.ts` 后端渲染器（DOM shim + TeaVM 引擎 + resvg）、`bot.ts` 桥接编排（依赖全部注入））；单测 129 用例（真实凭证握手验证通过）；Webhook 回调模式（公网 HTTPS + 签名验签）为后续迭代
 
 ### 子Agent文件格式
 
 **单文件形式**（`packages/agents/src/agents/{name}.ts`）：
 
 ```ts
-export const name: string
-export const description: string          // 能力描述，注入系统提示词供总Agent 决策
+export const def: SubAgentDef             // ★ 契约主体：加载器只认 mod.def（未导出即报「须 export const def: SubAgentDef」）
+// SubAgentDef 字段：name / description / systemPrompt / tools / requiresApproval? / preload? /
+//   dependencies? / envVars? / writeGuard?（工具结构化输出契约写在各 Tool 上：Tool.outputSchema，JSON Schema）
+export const name: string                 // 可选：便捷导出
+export const description: string
 export const systemPrompt: string
 export const tools: ToolSet               // 子Agent 自有工具（注册为 {agent}_{tool}）
-export function toolSchemas(): ToolSet
 export const requiresApproval?: Record<string, boolean>
 export const preload?: boolean            // 是否预加载（默认 false，按需装载）
 export const dependencies?: string[]     // 依赖的其他子Agent 名单（装载/预加载/agent_run 自动连带装载，
@@ -2337,7 +2369,7 @@ export const systemPrompt = systemPromptBase
 - 目录内其他辅助文件（如 `tools.ts` 工具集）由入口文件自行 import，仅入口文件被扫描收录
 - `description`：总Agent 根据描述判断何时调用该子Agent，是子Agent 能力被发现的关键
 - `preload`：声明该子Agent 默认预加载（模块语义，属「装载」的启动期形态：工具与能力描述立即注入总Agent）；未声明者通过 `agent_load` 按需装载，也可用 `GEBAI_PRELOAD_SUB_AGENTS` 统一声明
-- 工具的返回类型（text/json）在 `toolSchemas()` 中声明，通过 schema 的 `returns` 字段体现，不单独导出 `returnFormats`
+- 工具的结构化输出契约写在各 `Tool` 上（`Tool.outputSchema?: ToolSchema`，JSON Schema），经 `tool_schemas` 工具批量暴露——**无 `toolSchemas()` 导出、无 `returns` 字段**
 - `agent_run` 执行新会话：输入为 `agents`（子Agent 列表）+ `input`（任务文本），返回为 `output`（文本），新会话（预加载子Agent）自行规划执行（默认阻塞执行返回；`async:true` 后台异步执行，`bg_task` 管理，见「新会话执行的异步运行」）
 - 子Agent 内无全局可变量，工具函数体为纯函数或依赖注入工厂，天然支持并发加载
 - **复用其他子Agent 的能力用 `dependencies` 声明**（装载/预加载自动连带，工具以依赖方 `{dep}_` 命名空间注册——如 reverse_site 依赖 playwright、self_optimize 依赖 code），不在 `tools` 中展开依赖方的工具实现（旧形态会产生重复注册与审批映射复刻）；机制上 `tools` 仍可直接引用全局工具实现（如 `read`/`write`/`sh`，以 `{agent}_` 前缀暴露），但按「子Agent 只声明独有工具」约定应直接用全局名，不重复声明
@@ -2359,7 +2391,7 @@ env_vars:（可选；可配置环境变量声明，变量名须以 {NAME 大写}
 
 - 目录内无同名 `{name}.ts` 时，加载器直接由 md 构成定义（`name`=目录名）；frontmatter 识别 `description`/`dependencies`/`preload`/`env_vars`（条目须符合命名规则 `[a-z0-9_]+`，非法条目过滤；`env_vars` 的变量名须以 `{NAME 大写}_` 前缀，非前缀条目忽略）——组合式子Agent 声明依赖后编排提示词可直接引用依赖方 `{dep}_` 工具，无需运行时先 `agent_load`；`preload`/`env_vars` 使零 TS 定义具备与 TS 目录形式同等的启动期/面板能力
 - 无工具的简化定义在新会话运行环境**自动注入编排工具**（`agent_list`/`agent_load`/`agent_run`/`bg_task`，原名暴露、无 `{agent}_` 前缀），支持组合式子Agent 编排装载/执行新会话其他子Agent（受递归深度 3 层限制）
-- 有工具的子Agent 需要编排能力时，可显式引用导出的 `agentListTool`/`agentLoadTool`/`agentCallTool`（`core/tools/` barrel），注册为 `{agent}_agent_run` 等带前缀形态
+- 有工具的子Agent 需要编排能力时，可显式引用导出的 `agentListTool`/`agentLoadTool`/`agentRunTool`/`branchRunTool`/`branchSyncTool`/`bgTaskTool`（`core/tools/` barrel），注册为 `{agent}_agent_run` 等带前缀形态
 - 示例：纯 md 组合子Agent 即 `packages/agents/src/agents/{name}/{name}.md`（零 TS），编排其他子Agent 产出完整链路的组合能力可由此模式定义
 
 ## 桌面端架构
@@ -2367,8 +2399,8 @@ env_vars:（可选；可配置环境变量声明，变量名须以 {NAME 大写}
 基于 **tao + wry（系统原生 WebView：Windows WebView2 / macOS WKWebView / Linux WebKitGTK）** 实现桌面应用，复用服务端内置 Web UI，无需额外前端框架、无 Tauri 框架依赖。产物为两个独立可分发的 exe：
 
 - **`dist/gebai.exe`（纯 Bun 单文件，浏览器形态）**：`bun build --compile` 产物（入口 `src/index.ts`），同进程启动服务端并自动打开系统默认浏览器（`GEBAI_NO_OPEN=1` 时不打开）；Web UI、子Agent、D2.js、playwright driver 与 playwright-core 等全部内嵌，单文件即可运行，也可作为服务端直接部署（`--server`）
-- **`dist/gebai-desktop.exe`（原生 WebView 启动器）**：Rust 单文件（`launcher/`，约 180 行），构建时经 `include_bytes!` **内嵌整个服务端二进制**；启动时物化到用户数据目录（Windows `%LOCALAPPDATA%\{app}\gebai-server.exe`，长度不一致即覆盖）并 spawn（`GEBAI_NO_OPEN=1` + `CREATE_NO_WINDOW`），从侧车 stdout 解析监听端口（`[gebai] listening on http://HOST:PORT`），WebView 导航到 `http://127.0.0.1:{port}`；窗口关闭（`CloseRequested`/`LoopDestroyed`）时一并 kill 侧车；WebView 用户数据目录固定在 `%LOCALAPPDATA%\{app}\webview\`（不在 exe 旁落地）；WebView 经初始化脚本注入 `window.__GEBAI_DESKTOP__` 桌面形态标记，Web UI（`state.isDesktopApp`）据此在下载（文件卡/图表图片/HTML 源码/会话导出）时以 toast 提示进度位置与保存位置——WebView 内下载指示不明显，浏览器形态有自身下载指示故不提示。**场景变体参数化**（`launcher/build.rs` 构建期环境变量注入，`rustc-env` 烘焙进 `main.rs`；缺省值 = 完整桌面端，行为不变）：`GEBAI_LAUNCHER_SERVER_EXE`（内嵌的服务端二进制路径，缺省 `dist/gebai.exe`）、`GEBAI_LAUNCHER_APP_NAME`（应用标识——物化数据目录名/非 Windows 同目录服务端文件名/WebView 配置目录，缺省 `gebai`）、`GEBAI_LAUNCHER_TITLE`（窗口标题与 exe 资源 ProductName，缺省「歌白」）、`GEBAI_LAUNCHER_PORT`（可选固定端口：spawn 时设 `GEBAI_PORT`，变体与完整桌面端各占独立端口互不冲突且 localStorage origin 各自稳定，缺省不指定）
-- **单文件自带 UI**：构建时 `scripts/build-web-bundle.ts` 把 `packages/web/dist` 全量资源 base64 内嵌为 `web.bundle.generated.ts`（gitignore），随服务端编译进二进制；二进制模式（`webDist` 不存在）静态路由改从内嵌资源提供，`/` 与 `/assets/*` 均可访问——单文件二进制完整可用（含 Web UI + 全部子Agent）；脚本调试模式该文件缺失时服务端自动回退（不内嵌 UI），无需预先构建
+- **`dist/gebai-desktop.exe`（原生 WebView 启动器）**：Rust 单文件（`launcher/src/main.rs`，约 230 行），构建时经 `include_bytes!` **内嵌整个服务端二进制**；启动时物化到用户数据目录（Windows `%LOCALAPPDATA%\{app}\gebai-server.exe`——**长度先行短路，长度相同再比 SipHash**，一致即跳过重写）并 spawn（`GEBAI_NO_OPEN=1` + `CREATE_NO_WINDOW`），从侧车 stdout 解析监听端口（`[gebai] listening on http://HOST:PORT`），WebView 导航到 `http://127.0.0.1:{port}`；窗口关闭（`CloseRequested`/`LoopDestroyed`）时一并 kill 侧车；WebView 用户数据目录固定在 `%LOCALAPPDATA%\{app}\webview\`（不在 exe 旁落地）；WebView 经初始化脚本注入 `window.__GEBAI_DESKTOP__` 桌面形态标记，Web UI（`state.isDesktopApp`）据此在下载（文件卡/图表图片/HTML 源码/会话导出）时以 toast 提示进度位置与保存位置——WebView 内下载指示不明显，浏览器形态有自身下载指示故不提示。**场景变体参数化**（`launcher/build.rs` 构建期环境变量注入，`rustc-env` 烘焙进 `main.rs`；缺省值 = 完整桌面端，行为不变）：`GEBAI_LAUNCHER_SERVER_EXE`（内嵌的服务端二进制路径，缺省 `dist/gebai.exe`）、`GEBAI_LAUNCHER_APP_NAME`（应用标识——物化数据目录名/非 Windows 同目录服务端文件名/WebView 配置目录，缺省 `gebai`）、`GEBAI_LAUNCHER_TITLE`（窗口标题与 exe 资源 ProductName，缺省「歌白」）、`GEBAI_LAUNCHER_PORT`（可选固定端口：spawn 时设 `GEBAI_PORT`，变体与完整桌面端各占独立端口互不冲突且 localStorage origin 各自稳定，缺省不指定）
+- **单文件自带 UI**：构建时 `packages/server/scripts/build-web-bundle.ts` 把 `packages/web/dist` 全量资源 base64 内嵌为 `web.bundle.generated.ts`（gitignore），随服务端编译进二进制；二进制模式（`webDist` 不存在）静态路由改从内嵌资源提供，`/` 与 `/assets/*` 均可访问——单文件二进制完整可用（含 Web UI + 全部子Agent）；脚本调试模式该文件缺失时服务端自动回退（不内嵌 UI），无需预先构建
 - 桌面端与浏览器访问共用同一套 Web UI、同一套服务端核心，仅宿主不同
 - **端口固定（桌面形态）**：桌面形态（`gebai-desktop.exe` 侧车与 `gebai.exe` 浏览器形态）默认固定端口 **47896**（`DESKTOP_PORT`，不易冲突——避开常见开发端口与 Windows 临时端口段 49152+）。核心目的是保持 origin（协议+主机+端口）稳定：浏览器/WebView 的 localStorage 按源隔离，端口每次随机变化会使环境变量（`gebai.ui.env`）、主题、快捷键等全部浏览器本地数据跨重启「凭空丢失」（用户环境变量仅存浏览器本地，服务端零留存，无兜底可恢复，见「环境变量隔离」）。端口被占（如重复启动）**直接报错退出，不回退随机端口**——随机 origin 正是数据丢失的根因；显式 `GEBAI_PORT` 或调用方 overrides 优先。服务端部署形态仍默认 3000
 - 数据目录 `GEBAI_HOME` 默认 `~/.gebai/`；侧车物化采用**内容哈希比对**（长度相同再比 SipHash，防同尺寸不同内容的陈旧残留）；两种桌面形态（浏览器形态 exe 与启动器侧车）同为二进制模式，启动时加载 `{GEBAI_HOME}/.env` 作为启动配置（真实环境变量优先，见「启动参数与环境变量」）——模型密钥等配置放 `~/.gebai/.env` 即可生效，无需设置系统环境变量
@@ -2376,12 +2408,12 @@ env_vars:（可选；可配置环境变量声明，变量名须以 {NAME 大写}
 ### 构建与产物
 
 - 构建链：`bun run --cwd packages/desktop build` → `server:build`（图标生成 → web 构建 → web bundle → 子Agent bundle → D2.js 内嵌 → driver 内嵌 → playwright-core 内嵌 → CV 运行时与模型内嵌 → CV sidecar 驱动内嵌 → `--compile` 产出 `dist/gebai.exe`）→ `launcher:build`（cargo release 编译 `launcher/` 并复制为 `dist/gebai-desktop.exe`）
-- **品牌图标管线**：canonical 源为 `packages/web/public/favicon.svg`（大脑造型）；`scripts/gen-icon.ts` 用 resvg 渲染多尺寸打包为 `icons/icon.ico`（gitignore，16–128 无压缩 BMP + 256 PNG），并回写 `packages/web/index.html` 的内联 favicon data URI。exe 嵌入**不走 bun `--windows-icon`**（其会改动像素/alpha，与 rcedit 同样不可用）：`gebai.exe` 由 `scripts/embed-icon.ts` 经 kernel32 `UpdateResource`（bun:ffi）原样写入 RT_GROUP_ICON+RT_ICON 资源（32px 条目排首位，兼容简化提取器）；`gebai-desktop.exe` 经 `winresource`（`launcher/build.rs`，`rerun-if-changed` 聟动重建）——网页 favicon 与两个 exe 图标同源。**运行时窗口图标**（任务栏/标题栏）不属于 exe 资源，需窗口类显式设置：gen-icon 同时产出 `icons/icon32.rgba`（32px 原始 RGBA），launcher `include_bytes` 内嵌后经 tao `with_window_icon` 挂到窗口
+- **品牌图标管线**：canonical 源为 `packages/web/public/favicon.svg`（大脑造型）；`packages/desktop/scripts/gen-icon.ts` 用 resvg 渲染多尺寸打包为 `icons/icon.ico`（gitignore，16/24/32/48/64/128 无压缩 BMP + 256 PNG），并回写 `packages/web/index.html` 的内联 favicon data URI。exe 嵌入**不走 bun `--windows-icon`**（其会改动像素/alpha，与 rcedit 同样不可用）：`gebai.exe` 由 `packages/desktop/scripts/embed-icon.ts` 经 kernel32 `UpdateResource`（bun:ffi）原样写入 RT_GROUP_ICON+RT_ICON 资源（32px 条目排首位，兼容简化提取器）；`gebai-desktop.exe` 经 `winresource`（`launcher/build.rs`，`rerun-if-changed` 聟动重建）——网页 favicon 与两个 exe 图标同源。**运行时窗口图标**（任务栏/标题栏）不属于 exe 资源，需窗口类显式设置：gen-icon 同时产出 `icons/icon32.rgba`（32px 原始 RGBA），launcher `include_bytes` 内嵌后经 tao `with_window_icon` 挂到窗口
 - 产物：`packages/desktop/dist/gebai.exe` 与 `packages/desktop/dist/gebai-desktop.exe`（`launcher:build` 依赖 `dist/gebai.exe` 已存在，故构建顺序固定）
 - 要求：Rust 工具链（仅启动器需要）、WebView2 运行时（Windows 自带）；`gebai.exe` 单独分发时无需任何 Rust 依赖
-- 浏览器桥接驱动 `core/browser/driver.mjs`（playwright/reverse_site 子Agent 与透明浏览器代理共用）：服务端 dist（非编译）形态由 `scripts/build-subagents.ts` 复制到 dist/ 与入口同目录；二进制形态由 `scripts/build-driver-embed.ts` 生成内嵌产物 `driver.embedded.generated.json`（gzip base64），运行时物化到 `{GEBAI_HOME}/vendor/playwright/driver.mjs`（桥接仍需运行机器具备 node；playwright 模块源码/部署形态解析 node_modules，二进制形态用内嵌 pwcore 产物）
-- 本地 CV 运行时与模型 `core/cv.embedded.generated.json`（desktop 子Agent 小模型识别）：`scripts/build-cv-embed.ts` 把 onnxruntime-web dist 两文件（入口 mjs + wasm 本体）与 PP-OCR 模型三件套（det/rec ONNX + 字典，构建时从 `GEBAI_CV_MODEL_BASE` 下载或取 {GEBAI_HOME}/models/ocr 已有自备）整包 gzip base64 内嵌，运行时物化到 `{GEBAI_HOME}/vendor/cv/`（单二进制形态下 ort 与模型均不可依赖 node_modules，必须内嵌；源码/部署形态 ort 解析 node_modules、模型走 `GEBAI_HOME/models/ocr` 或 `GEBAI_CV_MODELS_DIR`；下载失败生成空清单不阻断构建，运行时给配置指引）；**模型资产一律不入 packages 源码树**（集中放资源子仓库 `models/`）
-- CV GPU sidecar 驱动 `core/cv/cv-driver.mjs`（检测分层后端，见「小模型识别」）：`scripts/build-cvdriver-embed.ts` 生成内嵌产物 `cvdriver.embedded.generated.json`，运行时物化到 `{GEBAI_HOME}/vendor/cv/cv-driver.mjs`；dist 形态由 build-subagents 复制到产物目录。驱动脚本本身仅数 KB 随构建内嵌；**onnxruntime-node 依赖不内嵌**（体积/许可）——运行机安装该依赖或设 `GEBAI_CV_ORT_NODE_DIR` 指向其目录即启用 GPU 推理，缺省回落 wasm（保留现有方案兜底）；sidecar 需运行机具备 node（与 playwright 桥接同前提）
+- 浏览器桥接驱动 `@gebai/agents` core/browser/driver.mjs（playwright/reverse_site 子Agent 与透明浏览器代理共用）：服务端 dist（非编译）形态由 `packages/server/scripts/build-subagents.ts` 复制到 dist/ 与入口同目录；二进制形态由 `packages/server/scripts/build-driver-embed.ts` 生成内嵌产物 `driver.embedded.generated.json`（gzip base64），运行时物化到 `{GEBAI_HOME}/vendor/playwright/driver.mjs`（桥接仍需运行机器具备 node；playwright 模块源码/部署形态解析 node_modules，二进制形态用内嵌 pwcore 产物）
+- 本地 CV 运行时与模型 `@gebai/agents` core/cv/cv.embedded.generated.json（desktop 子Agent 小模型识别）：`packages/server/scripts/build-cv-embed.ts` 把 onnxruntime-web dist 两文件（入口 mjs + wasm 本体）与 PP-OCR 模型三件套（det/rec ONNX + 字典，构建时从 `GEBAI_CV_MODEL_BASE` 下载或取 {GEBAI_HOME}/models/ocr 已有自备）整包 gzip base64 内嵌，运行时物化到 `{GEBAI_HOME}/vendor/cv/`（单二进制形态下 ort 与模型均不可依赖 node_modules，必须内嵌；源码/部署形态 ort 解析 node_modules、模型走 `GEBAI_HOME/models/ocr` 或 `GEBAI_CV_MODELS_DIR`；下载失败生成空清单不阻断构建，运行时给配置指引）；**模型资产一律不入 packages 源码树**（集中放资源子仓库 `models/`）
+- CV GPU sidecar 驱动 `@gebai/agents` core/cv/cv-driver.mjs（检测分层后端，见「小模型识别」）：`packages/server/scripts/build-cvdriver-embed.ts` 生成内嵌产物 `cvdriver.embedded.generated.json`，运行时物化到 `{GEBAI_HOME}/vendor/cv/cv-driver.mjs`；dist 形态由 build-subagents 复制到产物目录。驱动脚本本身仅数 KB 随构建内嵌；**onnxruntime-node 依赖不内嵌**（体积/许可）——运行机安装该依赖或设 `GEBAI_CV_ORT_NODE_DIR` 指向其目录即启用 GPU 推理，缺省回落 wasm（保留现有方案兜底）；sidecar 需运行机具备 node（与 playwright 桥接同前提）
 
 ### 启动方式
 
@@ -2394,7 +2426,7 @@ env_vars:（可选；可配置环境变量声明，变量名须以 {NAME 大写}
 
 ### 最终构建目标
 
-单二进制可执行文件，通过 `bun build --compile` 产出，支持 Windows / Linux / macOS 三平台。同一二进制承载全部运行形态，分发物仅一个文件，**零运行时依赖**（Bun 运行时已内嵌，宿主机无需安装 bun/node/python 即可运行服务本身；脚本工具的解释器要求见「脚本执行环境」）：
+单二进制可执行文件，通过 `bun build --compile` 产出，支持 Windows / Linux / macOS 三平台。同一二进制承载全部运行形态，分发物仅一个文件，**服务本体零运行时依赖**（Bun 运行时已内嵌，宿主机无需安装 bun/node/python 即可运行服务本身；脚本工具的解释器要求见「脚本执行环境」，playwright 桥接与 CV 边车需宿主 node）：
 
 - 本地桌面应用（WebView 宿主）
 - 本地浏览器访问（服务端 + 浏览器）
@@ -2405,14 +2437,16 @@ Vite 构建产物（Web UI）、桌面端 WebView 宿主、子Agent 代码一并
 构建时支持**子Agent 选择性打包**（白名单/黑名单，见「子Agent」章节），不同发行规格（桌面全量版、服务端精简版）由同一源码产出：
 
 ```
-bun run --cwd packages/server build:win                  # 全量子Agent 打包
-bun run --cwd packages/server build:win --sub-agents a,b # 仅打包指定子Agent
-bun run --cwd packages/server build:win --exclude-sub-agents x
+GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build   # 仅打包指定子Agent（依赖闭包自动展开）
+GEBAI_BUILD_PRELOAD=a bun run --cwd packages/server build      # 烘焙 def.preload=true
+bun run --cwd packages/server build                            # 全量（缺省）
+# 注：选择性打包是**构建期环境变量**，无 --sub-agents/--exclude-sub-agents CLI；
+#     运行时黑名单用 GEBAI_SUB_AGENTS_ENABLE/DISABLE（见「子Agent 启停名单」）
 ```
 
 ### 运行模式区分
 
-代码必须区分运行模式，通过 `Bun.main === import.meta.path` 或环境变量判定：
+代码区分运行模式以 **`package.json` 是否存在**判定二进制形态（`isBinaryMode()`），并据此定 `GEBAI_HOME`（二进制 → `~/.gebai/`，源码 → 仓库根）：
 
 | 模式 | 判定方式 | GEBAI_HOME | 子Agent 来源 |
 |------|---------|------------|-------------|
@@ -2424,7 +2458,7 @@ bun run --cwd packages/server build:win --exclude-sub-agents x
 ### 升级与兼容
 
 - **原地升级**：新版本二进制直接替换旧文件重启即可，数据（`GEBAI_HOME`）与配置（环境变量）无需迁移
-- **数据兼容**：会话/环境变量存储格式带版本字段，升级时兼容旧版本数据，必要时自动迁移
+- **数据兼容**：**存储格式未设版本字段**——兼容靠一次性迁移（`users/default/` → `users/admin/` 目录搬迁、飞书 `default` 归属改写）与「新字段可选、旧数据缺省」的读侧容错
 - **API 兼容**：`/api/v1` 语义化版本，破坏性变更升级主版本号；WebSocket 消息类型保持向后兼容（新增类型不影响旧客户端）
 - **多实例共处**：单机可并排部署多实例（不同 `GEBAI_PORT` / `GEBAI_HOME`），便于灰度与多租户
 
@@ -2472,12 +2506,12 @@ bun run --cwd packages/sdk test
 
 全套测试是 AI 编码迭代与 `self_optimize` 优化闭环的准入凭证，执行速度直接影响迭代效率，三项结构化保障：
 
-- **server 分片并行**：`packages/server` 的 `"test"` 脚本走 `scripts/test-parallel.ts`——全部 `*.test.ts` 按**文件字节数降序的最长处理时间优先（LPT）装箱**分成 N 个分片并行启动 `bun test` 子进程（bun test 单进程内测试文件串行执行，是全套件耗时主因；测试耗时与文件规模强相关，轮转分配会把大文件堆在少数分片形成长尾）。默认 `min(8, max(2, CPU 核数))` 分片，`--shards=N` 参数或 `GEBAI_TEST_SHARDS` 环境变量覆盖；带文件路径/`-t`/`--coverage` 等参数时自动退回单进程透传（定向运行分片无收益）。输出逐行加 `[i/N]` 前缀流式透传。`test:serial` 保留串行入口
+- **server 分片并行**：`packages/server` 的 `"test"` 脚本走 `packages/server/scripts/test-parallel.ts`——全部 `*.test.ts` 按**文件字节数降序的最长处理时间优先（LPT）装箱**分成 N 个分片并行启动 `bun test` 子进程（bun test 单进程内测试文件串行执行，是全套件耗时主因；测试耗时与文件规模强相关，轮转分配会把大文件堆在少数分片形成长尾）。默认 `min(8, max(2, CPU 核数))` 分片，`--shards=N` 参数或 `GEBAI_TEST_SHARDS` 环境变量覆盖；带文件路径/`-t`/`--coverage` 等参数时自动退回单进程透传（定向运行分片无收益）。输出逐行加 `[i/N]` 前缀流式透传。`test:serial` 保留串行入口
 - **失败复验（区分并行抖动与真失败）**：任一分片失败时，该分片文件列表**单进程串行重跑**——重跑通过判定为并行抖动（跨分片共享资源竞态，机器满载下真实 spawn 类用例也会触达用例超时），以 `⚠` 警告列出并给出精确复现命令、整体视为通过；重跑同样失败才是真失败（非零退出）。避免把环境/竞态抖动误当代码回归反复排查
-- **测试进程环境净化**：`bunfig.toml` 的 `[test] preload` 挂载 `scripts/test-preload.ts`，启动时清除全部 `GEBAI_`/`CODE_` 前缀变量——Bun 在 `bun test` 时按 cwd 自动加载 `.env`（仓库根 `.env` 的 `GEBAI_APPROVAL_SKIP`/`GEBAI_SELF_MODIFY`/`GEBAI_LLM_*` 会直接改变引擎审批、写守卫、Provider 解析等断言结果），宿主 shell 亦可能残留调试变量；配套 `loadConfig` 的 `loadDotEnv` 在 `NODE_ENV === "test"` 时跳过读仓库 `.env`（防用例内首次 loadConfig 重新注入）。测试结果不依赖开发者本地配置
+- **测试进程环境净化**：`bunfig.toml` 的 `[test] preload` 挂载 `packages/server/scripts/test-preload.ts`，启动时清除全部 `GEBAI_`/`CODE_` 前缀变量——Bun 在 `bun test` 时按 cwd 自动加载 `.env`（仓库根 `.env` 的 `GEBAI_APPROVAL_SKIP`/`GEBAI_SELF_MODIFY`/`GEBAI_LLM_*` 会直接改变引擎审批、写守卫、Provider 解析等断言结果），宿主 shell 亦可能残留调试变量；配套 `loadConfig` 的 `loadDotEnv` 在 `NODE_ENV === "test"` 时跳过读仓库 `.env`（防用例内首次 loadConfig 重新注入）。测试结果不依赖开发者本地配置
 - **跨平台用例约定**：涉及平台分支的用例显式注入平台参数（如 `restart_server` 的 `platform: "win32"`），不随宿主平台漂移；安全判定对 Windows 形态绝对路径（盘符/UNC）在非 win32 平台一律按越界拒绝（fail-closed）
 - **turbo `test` 不依赖 `^build`**：各包 `main` 均指向 `src/*.ts`（bun 直接执行 TS 源码），测试无需先构建依赖包——冷缓存/改动后跑测试不再先付 vite 构建 + wasm 内嵌 + `bun build --compile` 的构建成本
-- **构建产物幂等（内容不变不写盘 + 跨平台确定性）**：`scripts/build-*.ts` 统一经 `write-if-changed.ts` 落盘——内容与磁盘一致则跳过写入，`typecheck`/`build` 反复重跑不再刷新已提交生成产物的 mtime 与字节（此前跑一次 typecheck 工作区就变脏，AI 每轮都要先确认「是否既有改动」）；内嵌产物 gzip 经 `gzip-deterministic.ts` 固定头部 XFL/OS 字节（zlib 默认随平台变化，同一源码在 Windows/Linux 生成不同字节）；`src/types/generated-json.d.ts` 通配声明 `*.generated.json`，构建产物缺失时 tsc 不再报 TS2307（运行时仍走各模块「缺失→回退/引导」分支）
+- **构建产物幂等（内容不变不写盘 + 跨平台确定性）**：`packages/server/scripts/build-*.ts` 统一经 `write-if-changed.ts` 落盘——内容与磁盘一致则跳过写入，`typecheck`/`build` 反复重跑不再刷新已提交生成产物的 mtime 与字节（此前跑一次 typecheck 工作区就变脏，AI 每轮都要先确认「是否既有改动」）；内嵌产物 gzip 经 `gzip-deterministic.ts` 固定头部 XFL/OS 字节（zlib 默认随平台变化，同一源码在 Windows/Linux 生成不同字节）；`src/types/generated-json.d.ts` 通配声明 `*.generated.json`，构建产物缺失时 tsc 不再报 TS2307（运行时仍走各模块「缺失→回退/引导」分支）
 - **子Agent 发现进程级缓存（目录签名校验）**：`SubAgentManager.discover()` 首次扫描 `packages/agents/src/agents/` 后缓存定义列表与**目录签名**（递归 `路径:mtime` 拼接，~30 次 stat），测试中每个用例新建 manager 重复 discover 时签名未变直接水合缓存、跳过目录扫描/动态 import；签名变化（新增/修改/删除子Agent 文件）即失效重扫（热加载，见「子Agent 热加载」）
 
 ### 测试分层
@@ -2507,22 +2541,23 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | `ask` | 延迟 4s 调 `ask` 计划分支（阻塞等审批）→ 批准后收尾 | 计划卡片全文、选择卡片弹出时消息流落底、审批后继续 |
 | `error` | 每次调用 HTTP 500 | 错误气泡与重试耗尽呈现 |
 
-场景脚本耗尽后回复固定收尾文本（防场景外调用死循环）；`/probe` 页面（`http://127.0.0.1:9801/probe`）连服务端 `/ws` 验证浏览器连通性（标题 `WS_OK`/`WS_ERR`/`WS_TIMEOUT`）。
+场景脚本耗尽后回复固定收尾文本（防场景外调用死循环）；`/probe` 页面（`http://127.0.0.1:9801/probe`）连服务端 `/ws` 验证浏览器连通性（标题四态：`WS_OK`/`WS_ERR`/`WS_TIMEOUT`/`WS_CLOSED`）。
 
 ### 覆盖率门槛
 
 - 核心引擎（AgentEngine、ToolRegistry、EnvManager、Sandbox、命名空间解析）行覆盖率 ≥ 90%
 - 工具函数 ≥ 80%；整体仓库 ≥ 70%（`bun run --cwd packages/server test:coverage` 产出报告）
-- CI/本地提交前强制跑全量测试，失败即阻塞
 
-#### 实现状态（初始落地）
+> 上述为**人工约定的目标值**：无 `coverageThreshold` 配置、仓库亦无 CI 流水线（`.github/workflows` 不存在），门槛不构成强制门禁；提交前跑全量测试靠约定（`run_tests` 工具与 AGENTS.md 纪律）。
+
+#### 实现状态（初始落地快照——部分计数与描述为当时形态，最新口径以正文各节与「常量参考」为准）
 
 
-- 已实现：`@gebai/server`（AgentEngine 主循环、LLMProvider（OpenAI 兼容 chat/completions + OpenAI Responses + Anthropic 三接口 SSE 解析，**usage 真值解析**（OpenAI `stream_options.include_usage` 末 chunk / Responses `response.usage` / Anthropic `message_start.input_tokens`+`message_delta.output_tokens`，统一挂 done chunk 的 `usage` 字段；服务端不返回时为 undefined → 引擎估算兜底，见「上下文占用口径」），**统一多模态内容块转换**（图片块 base64 内联 → OpenAI `image_url` / Anthropic `image`，`imageMessageBlocks` 助手），**额外模型接口参数 `GEBAI_LLM_EXTRA_PARAMS`（JSON，如推理强度 `reasoning_effort`）Provider 级 + 任务级（浏览器本地注入）两级覆盖，顶层合并进请求体**）、ToolRegistry 命名空间解析（含注册期前缀互斥校验）、SessionStore 分片持久化、EnvManager（全局 + 会话内存态，用户环境变量零留存）、Sandbox 路径沙箱/子进程、AuthService 多用户令牌、**外部身份扩展点**（同源部署集成网站：`POST /api/v1/auth/exchange` 外部身份 → GEBAI 令牌，验证器可插拔——`GEBAI_EXTERNAL_AUTH_SECRET` HMAC 验签（±10 分钟防重放）或 `GEBAI_EXTERNAL_AUTH_URL` HTTP 回调验证，互斥同设报错；`AUTOCREATE` 自动创建/白名单两种映射；Web UI 启动时 URL 参数或 localStorage 同源直读自动兑换，SDK `exchangeExternalUser`/`getExternalAuthConfig`；`external-auth.ts` 单测 13 用例 + 端点集成测试 6 用例）、EventBus、富内容块（text/code/image/file/diagram/diff/html）渲染、**视觉工具 `vision`**（额外多模态模型 `GEBAI_VISION_*` 配置，目标 `target` + 图片文件 `image` 参数，base64 内联调用视觉模型，未配置时回落到显式声明多模态能力的主模型，单图 8MB 上限，输出截断保护 + `image` 内容块；`makeVisionTool` 依赖注入可单测）、**图片附件链路**（本地模式附件源路径按会话根解析（修复 CWD 误解析）、`AttachmentRef` 存逻辑路径、多模态主模型 base64 内联/其余降级文本说明 + vision 指引、接口 HTTP 4xx 拒绝图片块时自动降级重试、Web 端 canvas 图片压缩 1280px/2MB）、**内容展示工具 `show` 图表分支（原 `draw`）**（**四种图表语言**——`format` 必选参数 `mermaid`/`plantuml`/`d2`/`echarts`，工具描述与参数说明内置选择指南指导模型按需选择；前端实时渲染确认：成功才返回、报错回传模型、5 秒超时降级；Web 前端本地渲染四语言各自引擎（mermaid npm 包 / `@plantuml/core` / `@terrastruct/d2` WASM / echarts UMD SSR 渲染 SVG，均零网络）；**后端组合渲染器四语言全支持**（飞书与 `render=backend` 通道：plantuml TeaVM 引擎 / mermaid + happy-dom 垫层（getBBox 几何估算覆盖防布局坍缩）/ d2 WASM（二进制模式内嵌产物物化 `{GEBAI_HOME}/vendor/d2js/`）/ echarts npm 包 SSR（`ssr:true` 零 DOM，顶层急切导入防 zrender 环境误判）+ 共享 resvg 栅格化（负原点 viewBox 平移归一兼容），全局环境切换 + 单一串行队列，`globalThis.window` 仅临时存在））、**html 分支（原 `render_html`）**（沙箱 iframe 域隔离渲染：`allow-scripts` 不含 `allow-same-origin`，脚本可执行但隔离于 opaque origin，无法访问宿主页面 DOM/存储/顶层导航；落盘会话 `tmp/` 并返回 `html` 块，支持模型显式指定预览尺寸 `width`/`height`，未指定时 iframe 固定铺满消息流宽度、无任何内容宽度反馈）、**path 分支（原 `show_file`）**（模型把文件**直接展示给用户**：按类型产出直显内容块——图片内联 `image`、图表源文件 `diagram` 渲染、`.html` 沙箱预览、文本/代码内联 `code`（≤512KB 读取/4 万字符截断）；无法内联类型回退 `file` 查看卡片（点击按需加载，PDF 内嵌渲染）；会话 `tmp/` 内直接引用，会话外文件复制到 `tmp/shown/{主名}-{内容哈希}.{扩展名}`（≤100MB）后引用）、**全局 diff 工具**（LCS 行级对比 + unified diff 文本，纯函数 `core/diff.ts`）、5 个内置子Agent（含 `desktop`、**飞书云文档 `feishu_docs`**：42 个工具覆盖文档 docx 创建/读取/块编辑/按文本反查块 id（`find_blocks`）/Markdown 导入导出/**插入图片（`insert_image` 三步流程）**/**思维导图画板读取（`get_board`：mindnote 块自动提取画板 token，结构化提取 PlantUML 源码或重建连接线流程）**/**用户授权（`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear`：OAuth code 流程配置 user_access_token，会话级存储+自动刷新，配置后资源操作以用户身份执行、创建用户所有权文档；**默认自动回调**——授权后浏览器跳回内置端点 `GET /api/v1/oauth/feishu/callback` 自动兑换写回会话（`GEBAI_PUBLIC_URL` 可配，见「飞书用户授权」））**、云空间、电子表格、多维表格、知识库、搜索、权限与 `api_call` 兜底；块列表附 `type_name` 标注、`page_all` 自动翻页（达上限提示）、小节读取、块操作失败本地诊断、**权限类错误码自动附所需 scope 与授权链接**；`FEISHU_DOCS_*` 凭证 + tenant_access_token 缓存；写操作审批；`createFeishuTools` 依赖注入 + `markdownToBlocks`/`blockText`/`extractBoardContent`/`extractOAuthCode` 纯函数 + 共享 OAuth 模块（`oauth.ts`：兑换/刷新/会话令牌存取/授权状态注册，工具与 REST 回调共用），单测覆盖率 95%）、**浏览器自动化 `playwright`**（无头 Chromium，15 个工具覆盖导航/读取/截图/交互/表单/JS 执行/多标签页；**node 桥接架构**——Bun 与 playwright driver pipe 兼容问题用常驻 node 子进程 JSON-RPC 规避，BrowserContext 按会话隔离 + 空闲回收，导航/交互/脚本类默认审批；`createPlaywrightTools` 依赖注入 + Bridge 协议层单测 17 用例，真实 chromium E2E 验证通过）、REST/WS 双通道 API（WS 消息处理独立 `ws.ts`、反馈存取独立 `feedback.ts`；REST 全端点：feedback 查询/导出、多选 zip 打包下载、Webhook CRUD、OpenAPI 文档、auth/me、**飞书 OAuth 回调 `/api/v1/oauth/feishu/callback`**）、**上下文压缩**（主动 + 自动 80% 阈值，LLM 摘要 + 滚动裁剪降级）、**Webhook 推送**（HMAC 签名、3 次指数退避重试、事件白名单、多用户会话归属过滤）、命名空间注册期碰撞校验、服务模式 admin 密码哈希引导（`GEBAI_ADMIN_PASSWORD_HASH`：设置启用/未设置禁用，启动参数权威配置）、会话操作归属校验）、`@gebai/sdk`（GebaiClient：含 getCurrentSession、webhook/工具启停/打包下载方法）、`@gebai/web`（Vite 聊天 UI，按功能域模块化拆分：state/messages/tool-cards/sessions/composer/attachments/approvals/settings/auth/markdown/diagram/diff/html-view/jump-bottom 等，样式按 base/chat/composer/overlays 分片；**Inter / JetBrains Mono 字体内置**（@font-face 随产物分发，不依赖目标机器字体）；富内容块渲染、历史加载、**交互式图表编辑（Mermaid/PlantUML/D2/ECharts 四语言本地渲染 + 主题适配——PlantUML skinparam 注入与渲染后颜色兜底修正、Mermaid 按 UI 明暗重新 initialize、D2 按 UI 明暗选主题 ID 0/200、ECharts 按 UI 明暗注入 darkMode、标题/图例同顶冲突自动下移避让）**、**diff 并排对比视图（按语言语法高亮，跨行着色平衡）**、**HTML 页面沙箱渲染（预览卡片 + 全屏查看器 + 源码/复制/下载，`render_html` 工具产物）**、**多套 UI 风格（9 套，除默认主题外各配画布环境高级特效）**、**低性能模式（纯手动开关，降级动画/毛玻璃特效与图表导出采样，不做硬件自动检测）**、**单轮计时器（任务运行期间消息上实时显示本轮耗时，外观 tab 可关）**、**人民币招财猫（`cny` 主题专属：悬浮可拖动玩偶 + 拖动金币轨迹 + 点击连击爆金币 + 单轮完成大爆发（运行越久越多）；全屏 canvas 粒子引擎（金币 3D 翻转 + 六面额纸币各半，预渲染精灵），低性能模式不发射）**、多用户登录页、会话重命名、压缩入口与压缩通知、设置面板（**浏览器本地环境变量增删改（localStorage，对本浏览器所有会话生效，随消息临时注入服务端、不落盘防泄露；服务端不配模型变量时仅前端配置即可使用；含 `GEBAI_LLM_EXTRA_PARAMS` 建议项，可按任务覆盖模型接口参数；一句话说明与保存按钮固定面板底部）**/外观性能模式/用户管理/反馈列表；工具启停、子Agent 装载与 Webhook 管理不设 UI，保留 SDK/API 方法）、**图表预览卡片随内容自适应**、**发送消息/切换会话自动锁定滚动到底（粘底跟随核心 `sticky-follow.ts` **意图驱动**——主消息列（`sticky-scroll.ts` 工厂 + 「跳到最新」按钮）/ 推理体（`reasoning-scroll.ts`）/ 新会话容器（`scrollSessionSticky`）三处共用同一工厂，可独立单测；「跳到最新」按钮显隐 = 跟随状态完全一致：按钮隐藏 = 跟随中（新内容持续滚动到底），按钮显示 = 用户在阅读历史不打扰。跟随状态只由三类信号翻转，**不做滚动事件位置取证**（目标位置比对 / 程序落位差值）——浏览器 scroll 事件异步合并送达，内容增长/收缩引发的钳制与布局调整同样产生滚动事件，取证式分类必被迟到事件误判为用户滚动、被过期落位误判为用户上翻（「自动滚动滚一段后失灵」的根因）：① **用户输入意图**（同步、必然先于其滚动效果到达，无竞态）：滚轮上滚 / 触摸上滑 / 向上滚动键（PageUp/ArrowUp/Home；输入框内方向键滚动的是文本光标不触发）/ 滚动条拖动（pointerdown 命中滚动条槽区：`offsetWidth-clientWidth` 宽度带）/ 消息导航跳转（`stopFollowing` 显式解除）→ 立即解除；② **几何贴底**：任何滚动事件落在阈值内（主列 64px / 容器 8px / 推理体 4px）→ 恢复跟随（滚回底部 / 收缩钳制到底收敛；小幅上滚在阈值内视为仍贴底继续跟随）；③ **静默窗口兜底**：未贴底且距最近程序滚动/DOM 变化超 80ms → 无法归因为内部动作，视为未知输入（中键自动滚动 / 查找定位 / 覆盖式滚动条拖动）→ 解除；窗口内的未贴底事件视为程序滚动/钳制的迟到事件：保持跟随并回正到底（续滚无需登记目标落位——旧实现须读回 clamp 后实际落位精确比对，且续滚自身不登记导致容器内跟随必现失效）。**窗口时间戳仅在跟随中刷新**——未跟随时内容变更（流式每 120ms 重解析）不再续窗：否则窗口对流式会话永不关闭，非滚轮类滚动输入每滚一下都被回正拽底（「滚动卡死」形态）。**粘底对齐保持（帧预算循环 240 帧）**沿用：内容高度存在不触发 MutationObserver 的异步修正（字体/图片加载等异步布局修正）——跟随期间按帧续查对齐（每帧仅属性读取、贴底即空转）、预算耗尽自停（几何不可用/NaN 时停转防死循环）；新内容（DOM 变化 MutationObserver / 图片加载含 markdown 内嵌 `<img>` 由 `msgEl` 委托捕获阶段 load 监听 / ResizeObserver）触发跟随，rAF 节流每帧至多一次保证流式高频更新性能；会话切回滚动位置恢复走 `restoreScroll`：落位后按几何同步跟随状态，未决跟随回调（排期中的 rAF/对齐保持循环）按执行时状态自然失效——loadMessages 尾部先排期 scrollIfSticky rAF 再 lockToBottom 后恢复历史位置，未决回调不把恢复位置拽到底部）**、**消息质量反馈（助手消息 👍/👎 提交反馈，设置面板反馈页可见）**、**会话导出（Markdown 下载）**、DOM 引用统一集中于 `state.ts` 与代码高亮复用（`highlightedCode`））、`@gebai/desktop`（服务端同进程 + 浏览器兜底宿主）。
+- 已实现：`@gebai/server`（AgentEngine 主循环、LLMProvider（OpenAI 兼容 chat/completions + OpenAI Responses + Anthropic 三接口 SSE 解析，**usage 真值解析**（OpenAI `stream_options.include_usage` 末 chunk / Responses `response.usage` / Anthropic `message_start.input_tokens`+`message_delta.output_tokens`，统一挂 done chunk 的 `usage` 字段；服务端不返回时为 undefined → 引擎估算兜底，见「上下文占用口径」），**统一多模态内容块转换**（图片块 base64 内联 → OpenAI `image_url` / Anthropic `image`，`imageMessageBlocks` 助手），**额外模型接口参数 `GEBAI_LLM_EXTRA_PARAMS`（JSON，如推理强度 `reasoning_effort`）Provider 级 + 任务级（浏览器本地注入）两级覆盖，顶层合并进请求体**）、ToolRegistry 命名空间解析（含注册期前缀互斥校验）、SessionStore 分片持久化、EnvManager（全局 + 会话内存态，用户环境变量零留存）、Sandbox 路径沙箱/子进程、AuthService 多用户令牌、**外部身份扩展点**（同源部署集成网站：`POST /api/v1/auth/exchange` 外部身份 → GEBAI 令牌，验证器可插拔——`GEBAI_EXTERNAL_AUTH_SECRET` HMAC 验签（±10 分钟防重放）或 `GEBAI_EXTERNAL_AUTH_URL` HTTP 回调验证，互斥同设报错；`AUTOCREATE` 自动创建/白名单两种映射；Web UI 启动时 URL 参数或 localStorage 同源直读自动兑换，SDK `exchangeExternalUser`/`getExternalAuthConfig`；`external-auth.ts` 单测 13 用例 + 端点集成测试 6 用例）、EventBus、富内容块（text/code/image/file/diagram/diff/html）渲染、**视觉工具 `vision`（后已移除——视觉统一走 vision 子代理）**（额外多模态模型 `GEBAI_VISION_*` 配置，目标 `target` + 图片文件 `image` 参数，base64 内联调用视觉模型，未配置时回落到显式声明多模态能力的主模型，单图 8MB 上限，输出截断保护 + `image` 内容块；`makeVisionTool` 依赖注入可单测）、**图片附件链路**（本地模式附件源路径按会话根解析（修复 CWD 误解析）、`AttachmentRef` 存逻辑路径、多模态主模型 base64 内联/其余降级文本说明 + vision 指引、接口 HTTP 4xx 拒绝图片块时自动降级重试、Web 端 canvas 图片压缩 1280px/2MB）、**内容展示工具 `show` 图表分支（原 `draw`）**（**四种图表语言**——`format` 必选参数 `mermaid`/`plantuml`/`d2`/`echarts`，工具描述与参数说明内置选择指南指导模型按需选择；前端实时渲染确认：成功才返回、报错回传模型、5 秒超时降级；Web 前端本地渲染四语言各自引擎（mermaid npm 包 / `@plantuml/core` / `@terrastruct/d2` WASM / echarts UMD SSR 渲染 SVG，均零网络）；**后端组合渲染器四语言全支持**（飞书与 `render=backend` 通道：plantuml TeaVM 引擎 / mermaid + happy-dom 垫层（getBBox 几何估算覆盖防布局坍缩）/ d2 WASM（二进制模式内嵌产物物化 `{GEBAI_HOME}/vendor/d2js/{version}/`，版本变更自动换目录）/ echarts npm 包 SSR（`ssr:true` 零 DOM，顶层急切导入防 zrender 环境误判）+ 共享 resvg 栅格化（负原点 viewBox 平移归一兼容），全局环境切换 + 单一串行队列，`globalThis.window` 仅临时存在））、**html 分支（原 `render_html`）**（沙箱 iframe 域隔离渲染：`allow-scripts` 不含 `allow-same-origin`，脚本可执行但隔离于 opaque origin，无法访问宿主页面 DOM/存储/顶层导航；落盘会话 `tmp/` 并返回 `html` 块，支持模型显式指定预览尺寸 `width`/`height`，未指定时 iframe 固定铺满消息流宽度、无任何内容宽度反馈）、**path 分支（原 `show_file`）**（模型把文件**直接展示给用户**：按类型产出直显内容块——图片内联 `image`、图表源文件 `diagram` 渲染、`.html` 沙箱预览、文本/代码内联 `code`（≤512KB 读取/4 万字符截断）；无法内联类型回退 `file` 查看卡片（点击按需加载，PDF 内嵌渲染）；会话 `tmp/` 内直接引用，会话外文件复制到 `tmp/shown/{主名}-{内容哈希}.{扩展名}`（≤100MB）后引用）、**全局 diff 工具（后已移除）**（LCS 行级对比原为纯函数 `core/diff.ts`，工具本身已下线——`diff` 内容块仅用于历史会话回放）、5 个内置子Agent（当时；**现为 12 个**，见「更多内置子Agent」）。以下为当时形态（含 `desktop`、**飞书云文档 `feishu_docs`**：42 个工具覆盖文档 docx 创建/读取/块编辑/按文本反查块 id（`find_blocks`）/Markdown 导入导出/**插入图片（`insert_image` 三步流程）**/**思维导图画板读取（`get_board`：mindnote 块自动提取画板 token，结构化提取 PlantUML 源码或重建连接线流程）**/**用户授权（`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear`：OAuth code 流程配置 user_access_token，会话级存储+自动刷新，配置后资源操作以用户身份执行、创建用户所有权文档；**默认自动回调**——授权后浏览器跳回内置端点 `GET /api/v1/oauth/feishu/callback` 自动兑换写回会话（`GEBAI_PUBLIC_URL` 可配，见「飞书用户授权」））**、云空间、电子表格、多维表格、知识库、搜索、权限与 `api_call` 兜底；块列表附 `type_name` 标注、`page_all` 自动翻页（达上限提示）、小节读取、块操作失败本地诊断、**权限类错误码自动附所需 scope 与授权链接**；`FEISHU_DOCS_*` 凭证 + tenant_access_token 缓存；写操作审批；`createFeishuTools` 依赖注入 + `markdownToBlocks`/`blockText`/`extractBoardContent`/`extractOAuthCode` 纯函数 + 共享 OAuth 模块（`oauth.ts`：兑换/刷新/会话令牌存取/授权状态注册，工具与 REST 回调共用），单测覆盖率 95%）、**浏览器自动化 `playwright`**（无头 Chromium，**当时 15 个工具，现为 30 个**（20 基础 + 7 会话 + 3 CV），覆盖导航/读取/截图/交互/表单/JS 执行/多标签页；**node 桥接架构**——Bun 与 playwright driver pipe 兼容问题用常驻 node 子进程 JSON-RPC 规避，BrowserContext 按会话隔离 + 空闲回收，导航/交互/脚本类默认审批；`createPlaywrightTools` 依赖注入 + Bridge 协议层单测 17 用例，真实 chromium E2E 验证通过）、REST/WS 双通道 API（WS 消息处理独立 `ws.ts`、反馈存取独立 `feedback.ts`；REST 全端点：feedback 查询/导出、多选 zip 打包下载、Webhook CRUD、OpenAPI 文档、auth/me、**飞书 OAuth 回调 `/api/v1/oauth/feishu/callback`**）、**上下文压缩**（当时口径：主动 + 自动 80% 窗口阈值触发、LLM 摘要 + 滚动裁剪降级；**现为「窗口剩余 < 输出预留」水位触发**，见「上下文保护」）、**Webhook 推送**（HMAC 签名、3 次指数退避重试、事件白名单、多用户会话归属过滤）、命名空间注册期碰撞校验、服务模式 admin 密码哈希引导（`GEBAI_ADMIN_PASSWORD_HASH`：设置启用/未设置禁用，启动参数权威配置）、会话操作归属校验）、`@gebai/sdk`（GebaiClient：含 getCurrentSession、webhook/工具启停/打包下载方法）、`@gebai/web`（Vite 聊天 UI，按功能域模块化拆分：state/messages/tool-cards/sessions/composer/attachments/approvals/settings/auth/markdown/diagram/diff/html-view/jump-bottom 等，样式按 base/chat/composer/overlays 分片；**Inter / JetBrains Mono 字体内置**（@font-face 随产物分发，不依赖目标机器字体）；富内容块渲染、历史加载、**交互式图表编辑（Mermaid/PlantUML/D2/ECharts 四语言本地渲染 + 主题适配——PlantUML skinparam 注入与渲染后颜色兜底修正、Mermaid 按 UI 明暗重新 initialize、D2 按 UI 明暗选主题 ID 0/200、ECharts 按 UI 明暗注入 darkMode、标题/图例同顶冲突自动下移避让）**、**diff 并排对比视图（按语言语法高亮，跨行着色平衡）**、**HTML 页面沙箱渲染（预览卡片 + 全屏查看器 + 源码/复制/下载，`render_html` 工具产物）**、**多套 UI 风格（当时 9 套，现 10 套含 `qinhan`；除默认主题外各配画布环境高级特效）**、**低性能模式（纯手动开关，降级动画/毛玻璃特效与图表导出采样，不做硬件自动检测）**、**单轮计时器（任务运行期间消息上实时显示本轮耗时，外观 tab 可关）**、**人民币招财猫（`cny` 主题专属：悬浮可拖动玩偶 + 拖动金币轨迹 + 点击连击爆金币 + 单轮完成大爆发（运行越久越多）；全屏 canvas 粒子引擎（金币 3D 翻转 + 六面额纸币各半，预渲染精灵），低性能模式不发射）**、多用户登录页、会话重命名、压缩入口与压缩通知、设置面板（**浏览器本地环境变量增删改（localStorage，对本浏览器所有会话生效，随消息临时注入服务端、不落盘防泄露；服务端不配模型变量时仅前端配置即可使用；含 `GEBAI_LLM_EXTRA_PARAMS` 建议项，可按任务覆盖模型接口参数；一句话说明与保存按钮固定面板底部）**/外观性能模式/用户管理/反馈列表；工具启停、子Agent 装载与 Webhook 管理不设 UI，保留 SDK/API 方法）、**图表预览卡片随内容自适应**、**发送消息/切换会话自动锁定滚动到底（粘底跟随核心 `sticky-follow.ts` **意图驱动**——主消息列（`sticky-scroll.ts` 工厂 + 「跳到最新」按钮）/ 推理体（`reasoning-scroll.ts`）/ 新会话容器（`scrollSessionSticky`）三处共用同一工厂，可独立单测；「跳到最新」按钮显隐 = 跟随状态完全一致：按钮隐藏 = 跟随中（新内容持续滚动到底），按钮显示 = 用户在阅读历史不打扰。跟随状态只由三类信号翻转，**不做滚动事件位置取证**（目标位置比对 / 程序落位差值）——浏览器 scroll 事件异步合并送达，内容增长/收缩引发的钳制与布局调整同样产生滚动事件，取证式分类必被迟到事件误判为用户滚动、被过期落位误判为用户上翻（「自动滚动滚一段后失灵」的根因）：① **用户输入意图**（同步、必然先于其滚动效果到达，无竞态）：滚轮上滚 / 触摸上滑 / 向上滚动键（PageUp/ArrowUp/Home；输入框内方向键滚动的是文本光标不触发）/ 滚动条拖动（pointerdown 命中滚动条槽区：`offsetWidth-clientWidth` 宽度带）/ 消息导航跳转（`stopFollowing` 显式解除）→ 立即解除；② **几何贴底**：任何滚动事件落在阈值内（主列 64px / 容器 8px / 推理体 4px）→ 恢复跟随（滚回底部 / 收缩钳制到底收敛；小幅上滚在阈值内视为仍贴底继续跟随）；③ **静默窗口兜底**：未贴底且距最近程序滚动/DOM 变化超 80ms → 无法归因为内部动作，视为未知输入（中键自动滚动 / 查找定位 / 覆盖式滚动条拖动）→ 解除；窗口内的未贴底事件视为程序滚动/钳制的迟到事件：保持跟随并回正到底（续滚无需登记目标落位——旧实现须读回 clamp 后实际落位精确比对，且续滚自身不登记导致容器内跟随必现失效）。**窗口时间戳仅在跟随中刷新**——未跟随时内容变更（流式每 120ms 重解析）不再续窗：否则窗口对流式会话永不关闭，非滚轮类滚动输入每滚一下都被回正拽底（「滚动卡死」形态）。**粘底对齐保持（帧预算循环 240 帧）**沿用：内容高度存在不触发 MutationObserver 的异步修正（字体/图片加载等异步布局修正）——跟随期间按帧续查对齐（每帧仅属性读取、贴底即空转）、预算耗尽自停（几何不可用/NaN 时停转防死循环）；新内容（DOM 变化 MutationObserver / 图片加载含 markdown 内嵌 `<img>` 由 `msgEl` 委托捕获阶段 load 监听 / ResizeObserver）触发跟随，rAF 节流每帧至多一次保证流式高频更新性能；会话切回滚动位置恢复走 `restoreScroll`：落位后按几何同步跟随状态，未决跟随回调（排期中的 rAF/对齐保持循环）按执行时状态自然失效——loadMessages 尾部先排期 scrollIfSticky rAF 再 lockToBottom 后恢复历史位置，未决回调不把恢复位置拽到底部）**、**消息质量反馈（助手消息 👍/👎 提交反馈，设置面板反馈页可见）**、**会话导出（Markdown 下载）**、DOM 引用统一集中于 `state.ts` 与代码高亮复用（`highlightedCode`））、`@gebai/desktop`（服务端同进程 + 浏览器兜底宿主）。
 
 - 测试：`bun run --cwd packages/server test`（分片并行）全量用例通过（核心引擎、命名空间、沙箱、压缩、Webhook、ZIP、协议契约、服务模式鉴权、飞书机器人全覆盖）。
-- 已实现补充：**原生 WebView 桌面宿主**（`packages/desktop/launcher/`：tao 窗口 + wry WebView，无 Tauri 依赖；`include_bytes!` 内嵌 `gebai.exe`，物化到 `%LOCALAPPDATA%\gebai\` 后 spawn，stdout 解析端口导航 WebView，关窗回收侧车）、**playwright driver 打包闭环**（`scripts/build-driver-embed.ts` 生成 `driver.embedded.generated.json` 内嵌产物，二进制运行时物化 `{GEBAI_HOME}/vendor/playwright/driver.mjs`）、**playwright-core 打包闭环与惰性桥接**（`scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌、运行时物化 `{GEBAI_HOME}/vendor/playwright-core/`；桥接经 `createLazyBridge()` 全进程惰性单例，bundle 图内子Agent 模块禁止模块作用域第三方包解析；Windows 默认 `channel=msedge` 驱动系统 Edge，`GEBAI_PLAYWRIGHT_CHANNEL` 覆写）、**数据生命周期 GC**（`core/session/gc.ts`：会话 90 天闲置归档 `trash/`、`trash/` 7 天物理删除、`feedback/` 180 天清理、遗留用户级 `truncated/` 迁移清理；启动即跑 + 每日周期，`GEBAI_GC_DISABLED=1` 关闭）、**子Agent 目录化**（`packages/agents/src/agents/{name}/{name}.ts` + `{name}.md` 提示词拆分与 ts 导入修饰）、**子Agent 打包闭环**（`scripts/build-subagents.ts` 构建时生成 bundle 注册表，dist/二进制模式 `discover()` 回退加载，md 提示词随静态 import 内联进产物；playwright 的 node 桥接驱动 `driver.mjs` 复制到 dist/ 与产物同目录；**D2.js 打包闭环**——`scripts/build-d2js.ts` 生成内嵌产物 `d2js.embedded.generated.json`（node-esm 构建 7 文件 gzip base64，静态 import 随产物打进二进制，运行时物化到 `{GEBAI_HOME}/vendor/d2js/` 供文件路径 Worker 运行；构建命令 `--external @terrastruct/d2`））、**定时任务**（`core/schedule/cron.ts` + `packages/agents/src/agents/cron/cron.ts` + `core/schedule/notify.ts`：`GEBAI_CRON_ENABLED` 开关（**默认开启**，显式 false 时 `cron` 子Agent 不注册、`cron_*` 工具完全不注册、REST 503）；`cron` 子Agent 命名空间暴露 `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove` 工具（创建/修改/删除/手动触发默认需审批，自原全局工具下沉并补手动触发）；**用户级存储** `users/{user}/cron.json`（与会话生命周期解耦，会话内保存的旧版布局已弃用、启动遇之忽略）+ 任务专属工作目录；脚本运行 + 提示词运行 agent 两种类型，prompt 型执行目标 ephemeral/sticky/session 三态（独立新会话/专用会话复用/绑定会话，绑定会话删除自愈降级）；5 段 cron（可配 IANA 时区，日周 OR 语义）/`@every n{s,m,h,d}`/`@daily` 等/`@at` 一次性表达式；`misfire` 错过补跑、`timeoutMs` 执行超时（prompt 型 engine.cancel 终止）、`maxConsecutiveErrors` 连续失败自动停用、每任务 10 条运行历史；通知通道（webhook/飞书群自定义机器人加签/飞书应用消息，`notifyOn` 时机，尽力而为不阻塞执行，密钥回显脱敏）；REST `/api/v1/cron` 管理面；30 秒 tick 调度；`event.cron.run`/`event.cron.result` 事件）、**多用户安全加固**（REST 用户管理端点管理员校验（与 WS 同权限，防提权）、`GEBAI_APPROVAL_SKIP` 用户本人可设置自己的会话（会话内存态 env 不落盘，写入只影响本人会话，非管理员仍受沙箱约束；ask 填值分支服务模式拒绝）、沙箱模式脚本子进程环境剔除敏感变量（`*_KEY`/`*_TOKEN`/`*_SECRET`/`PASSWORD`，防服务端密钥经 sh/py/cron 外泄）、`PATCH /api/v1/tools` 服务模式限管理员、**默认用户沙箱豁免**（**admin 用户为特权用户**，`Sandbox.isExempt`/`enforcedFor(user)` 按用户判定豁免——沙箱启用时仍按本地模式放开：绝对路径/越界放行、脚本环境不脱敏、桌面控制/私网访问可用；普通用户受约束）、`store.load` 按用户索引 + 会话归属记录（修复旧版无 userId 会话跨用户命中））、**前端页面捕获 `page_capture`**（仿 show 图表分支前端配合链路：引擎发布 `event.capture.request` → 前端捕获当前页面渲染后 DOM html（截断 300KB）+ modern-screenshot 截图（png/jpeg，体积压缩 ≤2MB）→ WS `capture.result` 回传 → 落盘会话 `tmp/capture/` 并返回文件/图片块；`self_optimize` 重构为 **code 超集**（继承其全部工具（含并入 code 的 preview_server）+ page_capture/vision），vision provider 经 `setVisionProviderGetter` 注册点与主 Agent 共用解析逻辑；SDK `submitCaptureResult`；页面捕获超时 30 秒、整页截图高度上限 12000px）、**飞书机器人对话桥接**（`feishu-bot/`：自研极简 protobuf 帧编解码（pbbp2.Frame）+ 长连接协议层（endpoint 发现/心跳/分片合包/ACK/自动重连）+ 开放平台 API（tenant_access_token 缓存、消息发送/撤回、图片资源下载、会话信息）+ 桥接编排（会话映射 `feishu_{chat_id}`、身份映射（多用户按 open_id 自动建户）、文本/图片消息处理、@提及剥离、流式增量预览（节流合并发新撤旧）+ 最终卡片（lark_md）、斜杠命令、文本命令式审批；`GEBAI_FEISHU_BOT_ENABLED` 开关，依赖全部注入；单测 79 用例 + 真实凭证长连接握手验证通过）。
-- 未完成（后续迭代）：子Agent 选择性打包（白名单/黑名单裁剪）、飞书机器人 Webhook 回调模式与交互卡片审批、OIDC 身份对接。
+- 已实现补充：**原生 WebView 桌面宿主**（`packages/desktop/launcher/`：tao 窗口 + wry WebView，无 Tauri 依赖；`include_bytes!` 内嵌 `gebai.exe`，物化到 `%LOCALAPPDATA%\gebai\` 后 spawn，stdout 解析端口导航 WebView，关窗回收侧车）、**playwright driver 打包闭环**（`packages/server/scripts/build-driver-embed.ts` 生成 `driver.embedded.generated.json` 内嵌产物，二进制运行时物化 `{GEBAI_HOME}/vendor/playwright/driver.mjs`）、**playwright-core 打包闭环与惰性桥接**（`packages/server/scripts/build-pwcore-embed.ts` 整树 gzip base64 内嵌、运行时物化 `{GEBAI_HOME}/vendor/playwright-core/`；桥接经 `createLazyBridge()` 全进程惰性单例，bundle 图内子Agent 模块禁止模块作用域第三方包解析；Windows 默认 `channel=msedge` 驱动系统 Edge，`GEBAI_PLAYWRIGHT_CHANNEL` 覆写）、**数据生命周期 GC**（`core/session/gc.ts`：会话 90 天闲置归档 `trash/`、`trash/` 7 天物理删除、`feedback/` 180 天清理、遗留用户级 `truncated/`（30 天宽限期后删除，非迁移）；启动即跑 + 每日周期，`GEBAI_GC_DISABLED=1` 关闭）、**子Agent 目录化**（`packages/agents/src/agents/{name}/{name}.ts` + `{name}.md` 提示词拆分与 ts 导入修饰）、**子Agent 打包闭环**（`packages/server/scripts/build-subagents.ts` 构建时生成 bundle 注册表，dist/二进制模式 `discover()` 回退加载，md 提示词随静态 import 内联进产物；playwright 的 node 桥接驱动 `driver.mjs` 复制到 dist/ 与产物同目录；**D2.js 打包闭环**——`packages/server/scripts/build-d2js.ts` 生成内嵌产物 `d2js.embedded.generated.json`（node-esm 构建 7 文件 gzip base64，静态 import 随产物打进二进制，运行时物化到 `{GEBAI_HOME}/vendor/d2js/{version}/` 供文件路径 Worker 运行；构建命令 `--external @terrastruct/d2`））、**定时任务**（`core/schedule/cron.ts` + `packages/agents/src/agents/cron/cron.ts` + `core/schedule/notify.ts`：`GEBAI_CRON_ENABLED` 开关（**默认开启**，显式 false 时 `cron` 子Agent 不注册、`cron_*` 工具完全不注册、REST 503）；`cron` 子Agent 命名空间暴露 `cron_add`/`cron_list`/`cron_update`/`cron_trigger`/`cron_remove` 工具（创建/修改/删除/手动触发默认需审批，自原全局工具下沉并补手动触发）；**用户级存储** `users/{user}/cron.json`（与会话生命周期解耦，会话内保存的旧版布局已弃用、启动遇之忽略）+ 任务专属工作目录；脚本运行 + 提示词运行 agent 两种类型，prompt 型执行目标 ephemeral/sticky/session 三态（独立新会话/专用会话复用/绑定会话，绑定会话删除自愈降级）；5 段 cron（可配 IANA 时区，日周 OR 语义）/`@every n{s,m,h,d}`/`@daily` 等/`@at` 一次性表达式；`misfire` 错过补跑、`timeoutMs` 执行超时（prompt 型 engine.cancel 终止）、`maxConsecutiveErrors` 连续失败自动停用、每任务 10 条运行历史；通知通道（webhook/飞书群自定义机器人加签/飞书应用消息，`notifyOn` 时机，尽力而为不阻塞执行，密钥回显脱敏）；REST `/api/v1/cron` 管理面；30 秒 tick 调度；`event.cron.run`/`event.cron.result` 事件）、**多用户安全加固**（REST 用户管理端点管理员校验（与 WS 同权限，防提权）、`GEBAI_APPROVAL_SKIP` 用户本人可设置自己的会话（会话内存态 env 不落盘，写入只影响本人会话，非管理员仍受沙箱约束；ask 填值分支服务模式拒绝）、沙箱模式脚本子进程环境剔除敏感变量（`*_KEY`/`*_TOKEN`/`*_SECRET`/`PASSWORD`，防服务端密钥经 sh/py/cron 外泄）、`PATCH /api/v1/tools` 服务模式限管理员、**默认用户沙箱豁免**（**admin 用户为特权用户**，`Sandbox.isExempt`/`enforcedFor(user)` 按用户判定——豁免**仅本地模式生效**（`auth === "local"`），服务端部署下 admin 同受沙箱约束；普通用户恒受约束）、`store.load` 按用户索引 + 会话归属记录（修复旧版无 userId 会话跨用户命中））、**前端页面捕获 `page_capture`**（仿 show 图表分支前端配合链路：引擎发布 `event.capture.request` → 前端捕获当前页面渲染后 DOM html（截断 300KB）+ modern-screenshot 截图（png/jpeg，体积压缩 ≤2MB）→ WS `capture.result` 回传 → 落盘会话 `tmp/capture/` 并返回文件/图片块；`self_optimize` 重构为 **code 超集**（继承其全部工具（含并入 code 的 preview_server）+ page_capture/vision），vision provider 经 `setVisionProviderGetter` 注册点与主 Agent 共用解析逻辑；SDK `submitCaptureResult`；页面捕获超时 30 秒、整页截图高度上限 12000px）、**飞书机器人对话桥接**（`feishu-bot/`：自研极简 protobuf 帧编解码（pbbp2.Frame）+ 长连接协议层（endpoint 发现/心跳/分片合包/ACK/自动重连）+ 开放平台 API（tenant_access_token 缓存、消息发送/撤回、图片资源下载、会话信息）+ 桥接编排（会话映射当时为 `feishu_{chat_id}`，**现为 `sha256("feishu:"+chat_id)` 前 32 位 hex**；身份映射（多用户按 open_id 自动建户）、文本/图片消息处理、@提及剥离、流式增量预览（节流合并发新撤旧）+ 最终卡片（lark_md）、斜杠命令、文本命令式审批；`GEBAI_FEISHU_BOT_ENABLED` 开关，依赖全部注入；单测 **134 用例** + 真实凭证长连接握手验证通过）。
+- 未完成（后续迭代）：子Agent 选择性打包的黑名单形态（构建期只有白名单 `GEBAI_BUILD_SUBAGENTS`，黑名单为**运行时** `GEBAI_SUB_AGENTS_DISABLE`）、飞书机器人 Webhook 回调模式、OIDC 身份对接。
 
 ### 稳定性保障：防「模型误改」安全网
 
@@ -2550,10 +2585,10 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 模型调用重试退避 | 800ms 基数 | 引擎层指数退避（800/1600/3200ms，`LLM_RETRY_BACKOFF_MS`，测试可注入 `retryBackoffMs` 加速重试用例）；provider 层 500ms 基数 |
 | 工具返回截断阈值 | ~12000 字符 | 超出后按行截头尾（保留完整行，单行巨长按字符兜底），完整内容写入会话 `tmp/truncated/{tool}_{hash}.txt`（会话根内逻辑路径，沙箱内可读），返回路径给模型；**引擎在主循环兜底**：工具未自行截断的超长输出统一走该逻辑（`TRUNCATE_THRESHOLD`）；阈值适配现代大上下文窗口，膨胀防护由上层压缩器兜底 |
 | 截断保留首/尾 | 各 4000 字符 | 截断消息保留的 head/tail 长度（`TRUNCATE_HEAD_CHARS`/`TRUNCATE_TAIL_CHARS`） |
-| 计划文档目录 | `tmp/plans/` | ask 计划分支计划落盘目录（会话 `tmp/` 内，随会话文件面板可见；文件名按标题清洗（仅字母/数字/下划线/连字符，空回退 `plan`，长标题截断 60 字符），同标题重提计划覆盖更新） |
+| 计划文档目录 | `tmp/plans/` | ask 计划分支计划落盘目录（会话 `tmp/` 内，随会话文件面板可见；文件名按标题清洗（Unicode 字母/数字/下划线/连字符——**中文保留**，空回退 `plan`，长标题截断 60 字符），同标题重提计划覆盖更新） |
 | 用户输入落盘阈值 | 12000 字符 | 超长用户输入发送时全文落盘会话 `tmp/user_inputs/{hash}.txt`（原文不丢，read 可读），消息正文保留头尾各 4000 字符 + 文件引用（`USER_INPUT_SPILL_THRESHOLD`/`USER_INPUT_SPILL_HEAD`/`USER_INPUT_SPILL_TAIL`，见「上下文保护」） |
 | grep 单文件读取上限 | 1MB | 超出跳过该文件（防大文件/二进制拖慢搜索） |
-| 测试分片默认数 | `min(8, max(2, CPU 核数))` | `scripts/test-parallel.ts` 分片数（`--shards=N`/`GEBAI_TEST_SHARDS` 覆盖）；LPT 按文件字节数装箱均衡负载 |
+| 测试分片默认数 | `min(8, max(2, CPU 核数))` | `packages/server/scripts/test-parallel.ts` 分片数（`--shards=N`/`GEBAI_TEST_SHARDS` 覆盖）；LPT 按文件字节数装箱均衡负载 |
 | grep 匹配子进程超时 | 20 秒 | 正则匹配在独立子进程执行（灾难性回溯防护），超时强杀并返回引导（`GREP_MATCHER_TIMEOUT_MS`）；行数据按 4MB 批量送子进程 |
 | edit 正则匹配超时 | 20 秒 | `edit` 的 `pattern` 项在独立子进程执行（灾难性回溯防护），超时强杀并返回引导（`REGEX_MATCHER_TIMEOUT_MS`）；单次匹配上限 1000 处（`REGEX_MAX_MATCHES`，超限拒绝） |
 | read/edit 文件大小上限 | 8MB / 5MB | 全量读入内存前 stat 预检（GB 级文件直接 OOM；edit 与 patch 5MB 同口径），超限引导 offset/limit 分段或 grep/patch 定位（`READ_MAX_FILE_BYTES`/`EDIT_MAX_FILE_BYTES`） |
@@ -2593,7 +2628,6 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 重复检测命中阈值 | 连续 3 次 | 窗口**尾部连续**出现相同签名第 3 次（其间无任何其他调用）才判定为无效重复，中断该次执行并注入引导提示（`MAX_REPEAT_HITS`）；间隔其他调用后重发同签名不累积（「改动后复查」合法）；**同批重复签名只记录一次**（同批相同调用是有意扇出，跨轮连续重发才累积） |
 | 重复中断上限 | 2 次 | 重复中断超过该值终止工具循环（`MAX_REPEAT_STALLS`），仍返回最后产出文本 |
 | 同批工具并行上限 | 8 个 | 单次模型响应返回的多个工具调用并行执行的并发护栏（`MAX_PARALLEL_TOOLS`，超出按调用顺序排队）；需严格串行的操作由模型用 js 脚本编排或拆分多轮（见「同批工具并行执行」） |
-| 消息重试上限 | 10 次 | 审批**超时自动拒绝**后提示模型调整的最大重试次数（显式拒绝即停止会话，不重试；`approval.request` 的 `retries` 字段为该工具调用累计拒绝次数） |
 | 审批超时 | 5 分钟 | 审批请求等待上限，超时自动拒绝并提示模型调整 |
 | 脚本执行超时 | 5 分钟 | `sh`/`py` 单次执行上限（超时杀进程并返回 `[timed out after ...]` 结果给模型，不结束任务）；`timeout` 参数可按次调整（秒，默认 300、上限 540，不晚于工具执行超时兜底） |
 | sh 异步任务生命周期 | 默认 30 分钟 / 上限 60 分钟 | `sh async:true` 后台任务生命周期上限（status/wait/list/kill 时惰性检查，超限终止并标记 timed_out；`timeout` 参数在此语义下调整，`shTaskLifetimeMs`） |
@@ -2618,11 +2652,13 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | 反馈数据保留期 | 180 天 | `feedback/` 反馈保留时长（已实现） |
 | 会话闲置过期 | 90 天 | 无活跃会话归档到 `trash/` 的时间（按 `chat.json` mtime 判定，已实现） |
 | GC 周期 | 24 小时 | 数据生命周期清理任务执行周期（启动时立即执行一次） |
+| WS 事件日志容量 | 1000 条 | 每用户事件日志上限（`JOURNAL_CAP`，超出丢最旧；重放出现缺口时客户端触发全量重同步） |
+| 注册端点限流 | 30 突发/0.5每秒 + 10 突发/0.1每秒 | 注册独立令牌桶（全局桶 + 来源桶，`routes/auth.ts`） |
 | 消息缓存上限 | 1000 条 | 会话消息**持久化**上限——**纯存储安全网，不参与压缩判定**（上下文保护只认 token 水位口径）：超限截断丢最早的非保护消息，按 tool_call 配对原子丢弃；系统提示词/用户输入/存档消息原位保留（见「上下文保护」）。取值高于水位口径可达的条数（128k 窗口、输出预留 16384、system 提示词与工具 schema 约 13k 时，撞水位需平均约 99 token/条以上），正常会话的提前裁剪由压缩承担。**代价**：`store.save` 每条消息全量重写 `chat.json`——实测中位约 2.9KB/条，本上限下单个会话文件可达数 MB（写放大随消息数线性增长） |
 | 桌面固定端口 | 47896 | 桌面形态默认监听端口（`DESKTOP_PORT`，见「端口固定」） |
 | Session 缓存 LRU | 10 个 | 会话列表 LRU 驱逐上限 |
 | 截断内容哈希 | SHA256 | 基于完整返回内容计算，用于去重和文件命名 |
-| 图片压缩上限 | 1280px / 2MB | 发送给大模型前的服务端压缩阈值（`core/support/image-resize.ts`，长边/体积超限等比缩放后同格式重编码，JPEG/WebP 质量 0.85；原图保存不压缩，见「图片压缩时序」） |
+| 图片压缩上限 | 1280px / 2MB | 发送给大模型前的服务端压缩阈值（`@gebai/agents` core/shared/image-resize.ts，长边/体积超限等比缩放后同格式重编码，JPEG/WebP 质量 0.85；原图保存不压缩，见「图片压缩时序」） |
 | analyze 超时 | 30 秒（钳制 1~300） | vision 子代理 `analyze` 的 `timeout` 参数默认值；超时返回提示引导改用本地视觉工具 |
 | 视觉工具图片上限 | 8MB | 视觉分析（vision_analyze）单张图片大小上限（超出提示压缩后重试） |
 | 页面捕获等待超时 | 30 秒 | `page_capture` 工具等待前端捕获回传的最长时间（超时返回「页面捕获失败」提示） |
@@ -2647,7 +2683,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | delta 合并窗口 | 50ms / 200KB 上限 | 同一消息的连续文本增量合并为单条日志事件（`DELTA_MERGE_MS`/`DELTA_MERGE_MAX_CHARS`） |
 | WS 发送缓冲上限 | 16MB | 单连接发送缓冲超限判定慢客户端并断开（走自动重连 + seq 重放收敛，`WS_MAX_BUFFERED`） |
 | 登录 IP 限流 | 60 突发/2每秒 + 10 突发/0.2每秒 | 登录/兑换端点全局桶与来源桶（`GEBAI_TRUST_PROXY=true` 按 X-Forwarded-For 区分来源） |
-| 附件大小上限 | 20MB | 单附件上传大小上限（音频/视频/文档） |
+| 附件大小上限 | 无强制上限 | 附件上传端点**未做尺寸判定**（原文「20MB」无对应实现；代码中仅飞书图片 20MB 与浏览器桥响应体 20MB 两处，属不同场景） |
 | 定时任务 tick 周期 | 30 秒 | 调度器检查周期（`CRON_TICK_INTERVAL_MS`） |
 | 定时任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 | 单次执行缺省上限（`CRON_SCRIPT_TIMEOUT_MS`/`CRON_PROMPT_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.cancel` 终止会话任务） |
 | 定时任务超时上下限 | 1 秒 / 24 小时 | `timeoutMs` 合法区间（`CRON_TIMEOUT_MIN_MS`/`CRON_TIMEOUT_MAX_MS`） |
@@ -2669,7 +2705,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | js 动态工具源码上限 | 100k 字符 | execute 源码长度上限（`JS_DYNAMIC_SOURCE_CAP`，源码随会话持久化，防撑爆 chat.json） |
 | js 动态工具名 | `[a-z][a-z0-9_]{0,39}` | 运行时定义工具命名约束（与全局工具命名一致，`DYNAMIC_TOOL_NAME_RE`）；execute 源码 ≤ 2000 字符描述 |
 | sh/py 结构化 data 文本上限 | 100k 字符 | `data.stdout`/`data.stderr` 超长截断（完整文本以 output 截断文件为准，`SCRIPT_DATA_TEXT_CAP`） |
-| 后端图表渲染超时 | 20 秒 | 后端组合渲染器（`core/support/diagram-render.ts`）单次超时上限：plantuml 走 `plantuml.ts` `PLANTUML_TIMEOUT_MS`（可注入），mermaid 渲染与 d2 编译/渲染各 20 秒 Promise 超时；引擎渲染本身秒级，超时防大图/挂起 |
+| 后端图表渲染超时 | 20 秒（仅 plantuml） | `feishu-bot/plantuml.ts` 的 `PLANTUML_TIMEOUT_MS`（可注入）——**mermaid 与 d2 的后端渲染无超时**（`core/support/diagram-render.ts` 直接 await；20 秒超时只在前端本地渲染侧，见下行） |
 | 后端图表输出尺寸上限 | 1600 × 2400 px | 后端渲染默认 2x 超采样，超出按比例缩放到该上限（防超大 PNG 超飞书图片限制；`DEFAULT_MAX_WIDTH`/`DEFAULT_MAX_HEIGHT`） |
 | 图表语言 | `mermaid` / `plantuml` / `d2` / `echarts` | show 图表分支 `format` 参数四取值（SDK `DiagramFormat`，缺失/非法立即报错）；产物扩展名 `.mmd`/`.puml`/`.d2`/`.echarts`；前端本地渲染与后端组合渲染器（飞书/`render=backend`）均四语言全支持；echarts 源码为 option 的严格 JSON（双引号，容错注释/尾逗号）；服务端合法值域单点真相在 `artifacts.ts`（`DIAGRAM_FORMAT_VALUES` 派生自 `DIAGRAM_EXT_FOR` 键集，show 参数校验/schema enum/飞书桥接透传共用，SDK 新增语言漏项即编译报错） |
 | ECharts 画布尺寸 | 默认 960×600，钳制 200-4000 px | echarts SSR 渲染必须显式宽高（无 DOM 测量）；信封 `width`/`height` 超范围钳制、非法值回退默认（前后端一致） |
@@ -2679,7 +2715,7 @@ GEBAI_LLM_API_BASE=http://127.0.0.1:9801/v1 GEBAI_LLM_API_KEY=test \
 | show echarts 通道加固 | 预校验 + 版本错位诊断 | 服务端 `parseEchartsInput` 预校验 JSON（无效立即报错不跑前端）；前端报错引擎与请求语言不符（旧版前端把 echarts 当 PlantUML 渲染）返回「前端渲染器版本过旧，请刷新页面」诊断，**不自动换通道**（前端渲染为默认正确通道） |
 | D2 主题 ID | 0（亮）/ 200（暗） | 前端按 UI 明暗选择、后端固定浅色（0=Neutral Default、200=Dark Mauve，`diagram.ts`/`diagram-render.ts` 常量） |
 | 前端本地渲染引擎 | mermaid（懒加载）/ @plantuml/core（懒加载）/ @terrastruct/d2（懒加载）/ echarts（懒加载） | 四语言零网络本地渲染；加载超时 30 秒（echarts 15 秒——约 1MB 体积小）、渲染/编译超时 20 秒（`diagram.ts`，引擎体积大慢机器加载可超 15 秒故放宽）；echarts SSR 模式（`init(null,…,{renderer:"svg",ssr:true})` + `renderToSVGString`）纯计算输出 SVG、无 DOM 挂载，缓存 key 含主题明暗（darkMode 注入）；**未知图表语言显式报错引导改用 `render=backend`（不静默回退 PlantUml——服务端新增语言而前端为旧版本时，回退会把源码当 PlantUML 渲染出误导性错误）**；**D2 前端单一串行队列**（浏览器构建单 Worker 共享 currentResolve，并发调用互相覆盖导致超时，`enqueueD2` 一次一个）；D2 编译错误 JSON 数组转可读文本（`formatD2Error` 提取 errmsg，前后端一致）；**动态分块加载失败自动整页刷新一次**（开发模式重建后旧页面引用旧 hash 分块 404，浏览器报 "Failed to fetch dynamically imported module"）；空闲预热仅限**本机实际用过的引擎**（痕迹记于 localStorage `gebai.diagram.engines`，`renderDiagramSvg` 分派时记录），无图表使用史的会话首屏不下载任何引擎（单引擎数 MB）；D2（8MB WASM）不预热 |
-| 后端渲染引擎 | plantuml（TeaVM + DOM shim）/ mermaid + happy-dom / d2（`@terrastruct/d2` WASM）/ echarts（npm 包 SSR） | 四语言后端渲染（`core/support/diagram-render.ts`，飞书与 `render=backend` 共用）；懒加载（echarts 顶层急切导入——zrender 环境探测须先于 DOM 垫层污染）；单一串行队列；`globalThis.window` 仅临时存在（Bun worker_threads 冲突规避）；d2 二进制模式从内嵌产物（`scripts/build-d2js.ts` 生成 JSON，gzip base64）物化 `{GEBAI_HOME}/vendor/d2js/{version}/` |
+| 后端渲染引擎 | plantuml（TeaVM + DOM shim）/ mermaid + happy-dom / d2（`@terrastruct/d2` WASM）/ echarts（npm 包 SSR） | 四语言后端渲染（`core/support/diagram-render.ts`，飞书与 `render=backend` 共用）；懒加载（echarts 顶层急切导入——zrender 环境探测须先于 DOM 垫层污染）；单一串行队列；`globalThis.window` 仅临时存在（Bun worker_threads 冲突规避）；d2 二进制模式从内嵌产物（`packages/server/scripts/build-d2js.ts` 生成 JSON，gzip base64）物化 `{GEBAI_HOME}/vendor/d2js/{version}/` |
 | show 复制上限 | 100MB | 会话 `tmp/` 外文件复制进会话文件区的尺寸上限（`SHOW_MAX_BYTES`），超出引导改为告知路径 |
 | show 文本直显上限 | 读取 512KB / 内联 4 万字符 | 文本/代码内联 `code` 块的读取上限（`SHOW_TEXT_DIRECT_BYTES`，超出仅给查看/下载卡片）与截断阈值（`SHOW_TEXT_MAX_CHARS`，超出截断展示 + 附 file 卡片取全文） |
-| D2.js 内嵌产物 | `src/core/d2js.embedded.generated.json`（gitignore） | 构建时 `scripts/build-d2js.ts` 生成；node-esm 构建 7 文件 gzip base64（22MB wasm → 9.9MB）；构建命令 `--external @terrastruct/d2` 保持运行时文件路径 Worker 可用 |
+| D2.js 内嵌产物 | `packages/server/src/core/d2js.embedded.generated.json`（gitignore） | 构建时 `packages/server/scripts/build-d2js.ts` 生成；node-esm 构建 7 文件 gzip base64（22MB wasm → 9.9MB）；构建命令 `--external @terrastruct/d2` 保持运行时文件路径 Worker 可用 |
