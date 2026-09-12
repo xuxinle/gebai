@@ -1191,14 +1191,21 @@ function renderRail(): void {
           { separator: true },
           { label: "快捷键一览", icon: "info", onClick: () => showShortcuts() },
           { label: "服务端开关（GEBAI_FS_* / GEBAI_GIT_*）", icon: "settings", onClick: () => showEnvHelp() },
-          // 页面级动作归页面自己：分屏面板已经没有标题栏了，重新加载/在新标签打开都在这里
+          // 页面级动作归页面自己：分屏面板已经没有标题栏了，重新加载/在新标签打开/换停靠侧都在这里
           { label: "重新加载工作台", icon: "refresh", onClick: () => location.reload() },
-          ...(EMBEDDED ? [{ label: "在新标签打开", icon: "external", onClick: () => requestOpenInTab() }] : []),
+          ...(EMBEDDED
+            ? [
+                { label: "在新标签打开", icon: "external", onClick: () => requestOpenInTab() },
+                // 左右互换：面板在左则在右，反之亦然（换的是宿主布局，工作台自己不搬家）
+                { label: splitSide === "left" ? "分屏停靠改到右侧" : "分屏停靠改到左侧", icon: "swap", onClick: () => requestSplitSwap() },
+              ]
+            : []),
           { label: "全屏", icon: "expand", onClick: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
           { separator: true },
           // 嵌入态（分屏）下"返回主界面"= 关掉分屏容器；独立标签页才是整页跳回
+          // （箭头随面板停靠侧：面板停在窗口哪一侧，它就指哪一侧）
           EMBEDDED
-            ? { label: "关闭分屏", icon: "collapseRight", onClick: () => requestCloseSplit() }
+            ? { label: "关闭分屏", icon: closeSplitIcon(), onClick: () => requestCloseSplit() }
             : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = `${(import.meta.env.BASE_URL || "/").replace(/\/$/, "")}/` } },
         ])
       }
@@ -1208,13 +1215,14 @@ function renderRail(): void {
   /*
    * 分屏（嵌入）时在活动栏**最下方**给一个「关闭分屏」。
    * 为什么放这里：嵌入态下面板自己没有顶栏，鼠标用户要关分屏只剩「更多」菜单里的那一项（两步）；
-   * 站在最下方、图标与「更多」里的那一项同款（collapseRight——面板停在窗口右列，箭头指出向），
+   * 站在最下方、图标与「更多」里的那一项同款（箭头**指出向**，随面板停靠侧：
+   * 面板在左 → collapseLeft，在右 → collapseRight），
    * 既好找又不占编辑区。独立标签页时不存在“分屏”，故仅 EMBEDDED 渲染。
    * （单独 append：railEl.append 不收 null，上面那串是定长列表。）
    */
   if (EMBEDDED) {
     const close = h("button", { class: "fw-rail-btn", title: "关闭分屏（Ctrl+Shift+E / Esc）" })
-    close.appendChild(icon("collapseRight", 18))
+    close.appendChild(icon(closeSplitIcon(), 18))
     close.onclick = () => requestCloseSplit()
     railEl.appendChild(close)
   }
@@ -1384,8 +1392,15 @@ document.addEventListener("gebai:theme-change", () => {
 /* ------------------------------ 被主界面分屏嵌入时 ------------------------------ */
 
 /**
+ * 分屏面板停在窗口哪一侧（宿主经 postMessage 告知，见 files-split.ts）。
+ * 只影响两处表达：活动栏/菜单里「关闭分屏」的**箭头朝向**，与「停靠改到左/右」那一项的文案。
+ * 缺省 left——与宿主缺省停靠侧一致，消息到达前的首帧也不至于指反。
+ */
+let splitSide: "left" | "right" = "left"
+
+/**
  * 是否被嵌在宿主页面里（主界面「分屏打开」把本页放进 iframe）。
- * 两个跨界动作靠 postMessage 桥接：主题同步、返回主界面。
+ * 三个跨界动作靠 postMessage 桥接：主题同步、停靠侧同步、返回主界面。
  */
 const EMBEDDED = window.self !== window.top
 
@@ -1393,7 +1408,16 @@ if (EMBEDDED) {
   window.addEventListener("message", (e: MessageEvent) => {
     // 只认同源且来自宿主窗口的消息
     if (e.origin !== location.origin || e.source !== window.parent) return
-    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null } | null
+    const data = e.data as { type?: string; theme?: string | null; cnyScheme?: string | null; acrylicLt?: string | null; side?: string | null } | null
+    // 宿主侧的停靠侧：换侧时活动栏与「更多」菜单里的箭头/文案要跟着翻（工作台自己不知道面板贴哪边）
+    if (data?.type === "gebai:files-split-side") {
+      const next = data.side === "right" ? "right" : "left"
+      if (next !== splitSide) {
+        splitSide = next
+        renderRail()
+      }
+      return
+    }
     if (data?.type !== "gebai:theme") return
     // 宿主侧改主题时同步过来（工作台是独立文档，不会自己跟着变）
     if (data.theme) void setTheme(data.theme as ThemeId)
@@ -1428,6 +1452,20 @@ function requestCloseSplit(): void {
 /** 通知宿主把当前工作台另开一个标签页（嵌入态下自己 window.open 会丢宿主侧的参数上下文）。 */
 function requestOpenInTab(): void {
   window.parent.postMessage({ type: "gebai:files-open-tab" }, location.origin)
+}
+
+/** 通知宿主把分屏停靠侧左右互换（面板在左 ↔ 在右）；换完宿主会回一条 gebai:files-split-side。 */
+function requestSplitSwap(): void {
+  window.parent.postMessage({ type: "gebai:files-split-swap" }, location.origin)
+}
+
+/**
+ * 「关闭分屏」的箭头朝向：箭头**指出向**——面板停在窗口哪一侧就指哪一侧
+ * （左停靠 → 向左，与右停靠的 collapseRight 互为镜像）。面板在左时整条活动栏也在窗口最左，
+ * 箭头指左才与「把面板收出去」的手势一致。
+ */
+function closeSplitIcon(): "collapseLeft" | "collapseRight" {
+  return splitSide === "left" ? "collapseLeft" : "collapseRight"
 }
 
 /* ------------------------------ 冲突合并标签（三窗格） ------------------------------ */

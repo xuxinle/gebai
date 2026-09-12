@@ -1,6 +1,7 @@
 /* ============================================================================
-   分屏模式（主界面）：把文件工作台嵌在右侧，左侧是被折叠了会话列表的主视图。
-   JS 见 src/files-split.ts（面板结构、拖动、主题桥接都在那边）。
+   分屏模式（主界面）：把文件工作台嵌进主界面——缺省停靠在**左侧**（会话区在右），
+   亦可在工作台「更多」菜单里换到右侧。停靠侧与宽度都持久化，折叠/展开带宽度过渡。
+   JS 见 src/files-split.ts（面板结构、拖动、跨停靠侧与桥接都在那边）。
    ============================================================================ */
 
 /* ------------------------------ 入口按钮 ------------------------------ */
@@ -57,33 +58,49 @@
 
 /* ------------------------------ 布局 ------------------------------ */
 
-/* 分屏：主视图（1fr）+ 右侧工作台（--files-split-w，缺省 50vw = 五五开）。
-   会话列表折叠掉——主视图只剩消息区，横向上才容得下右侧的 IDE。 */
+/* 分屏：会话区（1fr）+ 文件工作台（宽度由**面板自身**承担，网格列用 auto 跟着它）。
+   为什么宽度写在面板上而不是网格列里的 var：
+   折叠/展开要做宽度过渡，而 `grid-template-columns: 1fr var(--files-split-w)` 里的 var
+   无法逐帧插值（@property 注册自定义属性可以，但旧 WebView 上会静默退化成瞬变）。
+   面板的 `width` 是普通可过渡属性，auto 列每帧跟着它重排 —— 过渡在布局上真实成立，
+   左列会话区也就同一帧里平滑吃掉/让出这段宽度。
+   停靠侧在网格里只表现为**谁在第 1 列**（列序互换，面板与标题栏一起换过去）。
+   会话列表折叠掉——会话区只剩消息区，横向上才容得下工作台。 */
 body.files-split #app,
 body.files-split.sidebar-collapsed #app {
-  grid-template-columns: 1fr var(--files-split-w, 50vw);
+  grid-template-columns: 1fr auto;
 }
 
-/* 右列整列归工作台（它占满整个窗口高度），标题栏因此只留在左列会话区上方——
-   工作台自己是 IDE 式界面（自带顶栏与状态栏），头顶再压一条宿主标题栏只是白占编辑区的高度。 */
+body.files-split[data-files-split-side="left"] #app,
+body.files-split.sidebar-collapsed[data-files-split-side="left"] #app {
+  grid-template-columns: auto 1fr;
+}
+
+/* 标题栏只留在**会话区**那一列上方（工作台是自己带顶栏与状态栏的 IDE 式界面，
+   头顶再压一条宿主标题栏只是白占编辑区的高度） */
 body.files-split header {
   grid-column: 1;
+}
+
+body.files-split[data-files-split-side="left"] header {
+  grid-column: 2;
 }
 
 body.files-split aside {
   display: none;
 }
 
-/* 左列是 1fr 网格项：默认 min-width:auto 会被长内容顶开，压窄右侧面板 */
+/* 会话区是 1fr 网格项：默认 min-width:auto 会被长内容顶开，压窄分屏面板 */
 body.files-split main {
   min-width: 0;
 }
 
 #files-split {
   grid-column: 2;
-  /* 跨满两行（标题栏行 + 内容行）：面板从窗口顶到底占满右列 */
+  /* 跨满两行（标题栏行 + 内容行）：面板从窗口顶到底占满整列 */
   grid-row: 1 / -1;
   position: relative;
+  width: var(--files-split-w, 50vw);
   /*
    * 必须显式加入「内容层」（与 main 同值）。
    *
@@ -95,36 +112,78 @@ body.files-split main {
    * （以后再加顶层级内容区（弹层/面板/分屏）时都得跟这一步，否则又会踩同一个坑。）
    */
   z-index: 1;
-  display: flex;
-  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border-left: 1px solid var(--border);
+  /* 分界线不在这里画：它由分界拖条的 1px 线画（见下）——面板自身带边框的话，
+     iframe（绝对定位，基准是 **padding box**）会被推离面板边缘 1px，折叠/展开时看得见缝。 */
   background: var(--bg);
+}
+
+/* 左停靠：面板换到第 1 列，分界线随之跑到它的右缘（拖条自己会跟过去） */
+body[data-files-split-side="left"] #files-split {
+  grid-column: 1;
+}
+
+/* 折叠/展开过渡：只在动画期间打开——
+   常开会把「拖窗口边缘」也带上 220ms 橡皮筋（面板缺省宽度是 50vw，拖窗口时它每帧都在变，
+   过渡会让面板迟迟跟不上窗口）。.anim 由 files-split.ts 在 start/finish 两侧成对增删。 */
+#files-split.anim {
+  /* 动画期间裁剪：iframe 保持目标宽度（内部不重排、Monaco 不抖），可见范围由面板宽度裁出来 */
+  overflow: hidden;
+  transition: width 0.22s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #files-split.anim {
+    transition: none;
+  }
+}
+
+/* 拖分界时不吃过渡：宽度得跟手（双击复位、窗口缩放同理即时） */
+body.files-split-dragging #files-split {
+  transition: none;
 }
 
 #files-split[hidden] {
   display: none;
 }
 
-/* 面板 = 纯容器：只有 iframe（+ 左侧分界拖条），没有标题栏——
-   那条 30px 横条要花掉整个编辑区的垂直空间，而它的按钮各有更好的去处
-   （打开 = 标题栏入口主按钮；重载/在新标签打开/关闭 = 工作台自己的「更多」菜单，关分屏另有 Esc 与 Ctrl+Shift+E）。
+/* 面板 = 纯容器：只有 iframe（+ 分界线上的拖条），没有标题栏——那条 30px 横条要花掉整个编辑区的
+   垂直空间，而它的按钮各有更好的去处（打开 = 标题栏入口主按钮；重载/在新标签打开/停靠改到左侧/
+   关闭分屏 = 工作台自己的「更多」菜单，关分屏另有 Esc 与 Ctrl+Shift+E）。
    面板因此完全让位给工作台本身（它自己就是 IDE 式界面，自带顶栏与状态栏）。 */
 .files-split-frame {
-  flex: 1;
-  width: 100%;
-  min-height: 0;
+  position: absolute;
+  top: 0;
+  /*
+   * 高度必须**显式**给百分比，不能靠 top:0 + bottom:0 拉伸：
+   * iframe 是**替换元素**，绝对定位时“上下一夹 + height:auto”不会把它拉满，而是退回它的**固有尺寸**
+   * （300×150）——实测症状：面板 720 高、iframe 却只有 150 高，工作台只剩顶上一条，
+   * 下面全是面板底色（它的状态栏被挤在 y≈140 处与树重叠）。
+   * 100% 对得上：面板是拉伸的网格项，高度确定。
+   */
+  height: 100%;
+  /* 宽度只认变量（= 面板的目标宽度），不跟面板的当前宽度走：折叠/展开期间它**不重排**，
+     于是工作台里的编辑器不会在半路被挤成 0 宽反复 relayout，视觉上就是"面板从边缘滑出"。 */
+  width: var(--files-split-w, 50vw);
   border: 0;
   display: block;
   background: var(--bg);
+}
+
+/* iframe 锚在**分界线那一侧**：面板宽度收缩时内容跟着分界线一起滑出（而不是原地被"擦除"） */
+body[data-files-split-side="right"] .files-split-frame {
+  left: 0;
+}
+
+body[data-files-split-side="left"] .files-split-frame {
+  right: 0;
 }
 
 /* ------------------------------ 分界拖条 ------------------------------ */
 
 .files-split-resizer {
   position: absolute;
-  left: -3px;
   top: 0;
   bottom: 0;
   width: 7px;
@@ -132,10 +191,18 @@ body.files-split main {
   cursor: col-resize;
 }
 
+/* 拖条裹在**分界线**上（跨出去 3px 才够好抓）：面板在右 → 分界在面板左缘；面板在左 → 右缘 */
+body[data-files-split-side="right"] .files-split-resizer {
+  left: -3px;
+}
+
+body[data-files-split-side="left"] .files-split-resizer {
+  right: -3px;
+}
+
 .files-split-resizer::after {
   content: "";
   position: absolute;
-  left: 3px;
   top: 0;
   bottom: 0;
   width: 1px;
@@ -143,11 +210,28 @@ body.files-split main {
   transition: background 0.15s, width 0.15s;
 }
 
+body[data-files-split-side="right"] .files-split-resizer::after {
+  left: 3px;
+}
+
+body[data-files-split-side="left"] .files-split-resizer::after {
+  right: 3px;
+}
+
 .files-split-resizer:hover::after,
 .files-split-resizer.dragging::after {
-  left: 2.5px;
   width: 2px;
   background: var(--accent);
+}
+
+body[data-files-split-side="right"] .files-split-resizer:hover::after,
+body[data-files-split-side="right"] .files-split-resizer.dragging::after {
+  left: 2.5px;
+}
+
+body[data-files-split-side="left"] .files-split-resizer:hover::after,
+body[data-files-split-side="left"] .files-split-resizer.dragging::after {
+  right: 2.5px;
 }
 
 /* 拖动中：光标全局统一，且让 iframe 让开指针事件——
