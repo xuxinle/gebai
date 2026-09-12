@@ -730,9 +730,11 @@ describe("CronManager", () => {
       }
       h.cron.stop()
       // 模拟停机错过触发点（nextRunAt 已过期——改内存后落盘，模拟「上次运行后关机」的磁盘状态）
+      // 逐条「改内存 → 落盘」：persistEntry 落盘后会用磁盘真值刷新本地镜像（不能先改两条再统一落盘）
       internal(h, skip).nextRunAt = base - 3600_000
+      await h.cron["persistEntry"](user, internal(h, skip))
       internal(h, run).nextRunAt = base - 3600_000
-      await h.cron["saveUserEntries"](user)
+      await h.cron["persistEntry"](user, internal(h, run))
       // 重启：新调度器加载同一 home
       const store = new SessionStore({ home: h.home })
       const cron2 = new CronManager({

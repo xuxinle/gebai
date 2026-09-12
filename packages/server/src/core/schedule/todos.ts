@@ -10,9 +10,10 @@
  *
  *  存储范式与定时任务（cron.ts）一致：启动 walkDir 扫描加载 + Map 驻留 + 按用户串行写链。 */
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { dirname, join, relative, sep } from "node:path"
+import { readFile } from "node:fs/promises"
+import { join, relative, sep } from "node:path"
 import { walkDir } from "../base/paths"
+import { mutateJsonList } from "../support/json-store"
 import type { AgentEngine } from "../engine/engine"
 import type { SessionStore } from "../session/store"
 
@@ -110,7 +111,6 @@ export class UserTodoManager {
   private timer: ReturnType<typeof setInterval> | null = null
   /** 单飞标记：一次只执行一条闲时待办（执行可能远超 tick 间隔，防并发叠加）。 */
   private firing = false
-  private writes = new Map<string, Promise<void>>()
   private engine: AgentEngine | undefined
   private now: () => number
   private tickMs: number
@@ -208,8 +208,6 @@ export class UserTodoManager {
 
   async add(user: string, input: UserTodoCreateInput): Promise<UserTodo> {
     const text = this.normalizeText(input?.text)
-    const count = [...this.entries.values()].filter((e) => e.user === user).length
-    if (count >= TODO_MAX_ITEMS) throw new Error(`待办条数已达上限（${TODO_MAX_ITEMS}），请先清理已完成项`)
     const now = this.now()
     const idle = input?.idle === true
     const entry: UserTodo = {
@@ -222,70 +220,82 @@ export class UserTodoManager {
       updatedAt: now,
       ...(idle ? { idleState: "pending" as const, idleAttempts: 0 } : {}),
     }
-    this.entries.set(entry.id, entry) // Map 保持插入序 → 新待办追加在清单末尾
-    await this.saveUserEntries(user)
+    // 条数上限以**磁盘真值**判定（多实例并存时本进程镜像可能偏少）
+    await this.persist(user, (disk) => {
+      if (disk.length >= TODO_MAX_ITEMS) throw new Error(`待办条数已达上限（${TODO_MAX_ITEMS}），请先清理已完成项`)
+      return disk.some((e) => e.id === entry.id) ? disk : [...disk, entry]
+    })
     return { ...entry }
   }
 
   async update(user: string, id: string, patch: UserTodoUpdateInput): Promise<UserTodo | null> {
-    const entry = this.entryOf(user, id)
-    if (!entry) return null
-    if (typeof patch?.text === "string") entry.text = this.normalizeText(patch.text)
-    if (typeof patch?.done === "boolean") {
-      entry.done = patch.done
-      // 取消勾选视为重新排队（若仍是闲时任务，下一轮空闲会再执行一次）
-      if (!patch.done && entry.idle) entry.idleState = "pending"
-    }
-    if (typeof patch?.idle === "boolean" && patch.idle !== entry.idle) {
-      entry.idle = patch.idle
-      if (patch.idle) {
-        // 开启闲时执行：重置失败计数与状态，重新排队
-        entry.idleState = "pending"
-        entry.idleAttempts = 0
-        entry.idleError = undefined
-      } else {
-        entry.idleState = undefined
-        entry.idleError = undefined
+    if (!this.entryOf(user, id)) return null
+    const updatedAt = this.now()
+    // 补丁以**磁盘条目**为基准应用（本进程镜像可能陈旧；磁盘条目携带其他实例写入的字段）
+    const applyPatch = (e: UserTodo): UserTodo => {
+      const next = { ...e }
+      if (typeof patch?.text === "string") next.text = this.normalizeText(patch.text)
+      if (typeof patch?.done === "boolean") {
+        next.done = patch.done
+        // 取消勾选视为重新排队（若仍是闲时任务，下一轮空闲会再执行一次）
+        if (!patch.done && next.idle) next.idleState = "pending"
       }
+      if (typeof patch?.idle === "boolean" && patch.idle !== next.idle) {
+        next.idle = patch.idle
+        if (patch.idle) {
+          // 开启闲时执行：重置失败计数与状态，重新排队
+          next.idleState = "pending"
+          next.idleAttempts = 0
+          next.idleError = undefined
+        } else {
+          next.idleState = undefined
+          next.idleError = undefined
+        }
+      }
+      next.updatedAt = updatedAt
+      return next
     }
-    entry.updatedAt = this.now()
-    await this.saveUserEntries(user)
-    return { ...entry }
+    const patched = new Map<string, UserTodo>()
+    await this.persist(user, (disk) =>
+      disk.map((e) => {
+        if (e.id !== id) return e
+        const next = applyPatch(e)
+        patched.set(e.id, next)
+        return next
+      }),
+    )
+    const result = patched.get(id)
+    return result ? { ...result } : null
   }
 
   async remove(user: string, id: string): Promise<boolean> {
-    const entry = this.entryOf(user, id)
-    if (!entry) return false
-    this.entries.delete(id)
-    await this.saveUserEntries(user)
-    return true
+    if (!this.entryOf(user, id)) return false
+    let removed = false
+    await this.persist(user, (disk) => {
+      const next = disk.filter((e) => e.id !== id)
+      removed = next.length !== disk.length
+      return next
+    })
+    return removed
   }
 
   /** 拖动排序：按给定 id 顺序重排该用户清单（未列出的条目按原序追加在后，避免并发新增丢失）。 */
   async reorder(user: string, ids: string[]): Promise<UserTodo[]> {
     if (!Array.isArray(ids)) throw new Error("缺少顺序数组（ids）")
-    const mine = [...this.entries.values()].filter((e) => e.user === user)
-    const byId = new Map(mine.map((e) => [e.id, e]))
-    const queue: UserTodo[] = []
-    for (const raw of ids) {
-      const e = byId.get(String(raw))
-      if (!e) continue
-      byId.delete(e.id)
-      queue.push(e)
-    }
-    for (const e of mine) if (byId.has(e.id)) queue.push(e)
-    // 重建 Map：本用户条目占据原有位置槽、按新顺序填充，其余用户条目保持原相对序
-    const next = new Map<string, UserTodo>()
-    for (const [key, value] of this.entries) {
-      if (value.user !== user) {
-        next.set(key, value)
-        continue
+    const want = ids.map(String)
+    await this.persist(user, (disk) => {
+      const byId = new Map(disk.map((e) => [e.id, e]))
+      const queue: UserTodo[] = []
+      for (const id of want) {
+        const e = byId.get(id)
+        if (!e) continue
+        byId.delete(e.id)
+        queue.push(e)
       }
-      const e = queue.shift()
-      if (e) next.set(e.id, e)
-    }
-    this.entries = next
-    await this.saveUserEntries(user)
+      // 未列出的条目（并发新增/其他实例写入）按原序追加在后，不丢
+      for (const e of disk) if (byId.has(e.id)) queue.push(e)
+      return queue
+    })
     return this.list(user)
   }
 
@@ -348,19 +358,22 @@ export class UserTodoManager {
       throw err
     }
     void this.runInSession(entry, sid, MANUAL_PROMPT_HEAD)
-    return { todo: { ...entry }, sessionId: sid }
+    // 返回**同步后**的条目（openRunSession 已落盘并刷新本地镜像；entry 是刷新前的旧对象）
+    const fresh = this.entryOf(user, id) ?? entry
+    return { todo: { ...fresh }, sessionId: sid }
   }
 
   /** 建立执行会话并登记（手动与闲时共用）：新建一条会话 + 标记 running/执行会话并落盘，返回会话 id。 */
   private async openRunSession(entry: UserTodo, titlePrefix: string): Promise<string> {
     const session = await this.deps.store.createSession(entry.user, `${titlePrefix} · ${headline(entry.text)}`)
     const startAt = this.now()
-    entry.idleState = "running"
-    entry.idleRunAt = startAt
-    entry.idleSessionId = session.id
-    entry.idleError = undefined
-    entry.updatedAt = startAt
-    await this.saveUserEntries(entry.user)
+    await this.persist(entry.user, (disk) =>
+      disk.map((e) =>
+        e.id === entry.id
+          ? { ...e, idleState: "running" as const, idleRunAt: startAt, idleSessionId: session.id, idleError: undefined, updatedAt: startAt }
+          : e,
+      ),
+    )
     return session.id
   }
 
@@ -394,33 +407,56 @@ export class UserTodoManager {
     }
 
     const endedAt = this.now()
-    entry.idleAttempts = (entry.idleAttempts ?? 0) + 1
-    entry.idleRunAt = endedAt
-    entry.updatedAt = endedAt
-    if (status === "success") {
-      entry.done = true
-      entry.idleState = "done"
-      entry.idleError = undefined
-      entry.idleResult = await this.lastAssistantText(sid, entry.user)
-    } else {
-      entry.idleError = error ?? status
-      entry.idleState = entry.idleAttempts >= this.maxAttempts ? "failed" : "pending"
-      if (entry.idleState === "failed") {
-        entry.idleError = `${entry.idleError}；已累计失败 ${entry.idleAttempts} 次，已停止闲时自动执行（可关闭再开启闲时任务以重试）`
-      }
-    }
-    await this.saveUserEntries(entry.user)
+    const resultText = status === "success" ? await this.lastAssistantText(sid, entry.user) : undefined
+    // 计次与终态按**磁盘条目**累计（多实例/重复触发下不丢计数）
+    await this.persist(entry.user, (disk) =>
+      disk.map((e) => {
+        if (e.id !== entry.id) return e
+        const attempts = (e.idleAttempts ?? 0) + 1
+        if (status === "success") {
+          return {
+            ...e,
+            done: true,
+            idleState: "done" as const,
+            idleError: undefined,
+            idleResult: resultText,
+            idleAttempts: attempts,
+            idleRunAt: endedAt,
+            updatedAt: endedAt,
+          }
+        }
+        const failed = attempts >= this.maxAttempts
+        const base = error ?? status
+        return {
+          ...e,
+          idleAttempts: attempts,
+          idleRunAt: endedAt,
+          updatedAt: endedAt,
+          idleState: failed ? ("failed" as const) : ("pending" as const),
+          idleError: failed ? `${base}；已累计失败 ${attempts} 次，已停止闲时自动执行（可关闭再开启闲时任务以重试）` : base,
+        }
+      }),
+    )
   }
 
   /** 执行前置失败（建会话异常等）：如实计次并回写原因，防状态卡在 running。 */
   private async recordFailure(entry: UserTodo, err: unknown): Promise<void> {
     const endedAt = this.now()
-    entry.idleAttempts = (entry.idleAttempts ?? 0) + 1
-    entry.idleError = String((err as Error)?.message || err).slice(0, 500)
-    entry.idleState = entry.idleAttempts >= this.maxAttempts ? "failed" : "pending"
-    entry.updatedAt = endedAt
-    entry.idleRunAt = endedAt
-    await this.saveUserEntries(entry.user)
+    const reason = String((err as Error)?.message || err).slice(0, 500)
+    await this.persist(entry.user, (disk) =>
+      disk.map((e) => {
+        if (e.id !== entry.id) return e
+        const attempts = (e.idleAttempts ?? 0) + 1
+        return {
+          ...e,
+          idleAttempts: attempts,
+          idleError: reason,
+          idleState: attempts >= this.maxAttempts ? ("failed" as const) : ("pending" as const),
+          updatedAt: endedAt,
+          idleRunAt: endedAt,
+        }
+      }),
+    )
   }
 
   /** 执行结果摘要：执行会话最后一条 assistant 消息（截断）。 */
@@ -434,18 +470,27 @@ export class UserTodoManager {
     }
   }
 
-  /** 落盘：按用户串行化写链（并发写不互相覆盖）。 */
-  private saveUserEntries(user: string): Promise<void> {
-    const todos = [...this.entries.values()].filter((e) => e.user === user)
-    const prev = this.writes.get(user) ?? Promise.resolve()
-    const next = prev
-      .then(async () => {
-        const file = this.userTodoFile(user)
-        await mkdir(dirname(file), { recursive: true })
-        await writeFile(file, JSON.stringify(todos, null, 2))
-      })
-      .catch(() => {})
-    this.writes.set(user, next)
-    return next
+  /** 以**磁盘真值**为基准执行变更并落盘（跨进程写锁 + 原子写 + 滚动备份），随后用结果同步本地镜像。
+   *  旧实现写的是本进程内存镜像：多实例并存时后写者整体覆盖前者（同一闲时待办被两实例各跑一次、
+   *  计次只留一份），镜像陈旧或为空时一次覆盖即清空磁盘既有条目（曾把已完成待办连同 idleResult 抹掉）。 */
+  private async persist(user: string, mutate: (disk: UserTodo[]) => UserTodo[]): Promise<void> {
+    const next = await mutateJsonList(this.userTodoFile(user), mutate, { normalize: (raw) => this.normalizeLoaded(raw) })
+    this.syncUser(user, next)
+  }
+
+  /** 用落盘真值同步本地镜像：本用户条目按原有位置槽填充新顺序，其余用户条目相对序不变。 */
+  private syncUser(user: string, list: UserTodo[]): void {
+    const queue = [...list]
+    const next = new Map<string, UserTodo>()
+    for (const [key, value] of this.entries) {
+      if (value.user !== user) {
+        next.set(key, value)
+        continue
+      }
+      const e = queue.shift()
+      if (e) next.set(e.id, e)
+    }
+    for (const e of queue) next.set(e.id, e)
+    this.entries = next
   }
 }

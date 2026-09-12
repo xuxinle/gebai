@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { join, dirname, relative, sep } from "node:path"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { join, relative, sep } from "node:path"
+import { mkdir, readFile } from "node:fs/promises"
 import type { AgentEvent } from "@gebai/sdk"
 import type { AgentEngine } from "../engine/engine"
 import type { SessionStore } from "../session/store"
@@ -10,6 +10,7 @@ import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
 import type { CronNotifyChannel, CronResultNotification, FeishuAtTarget, NotifyDeps } from "./notify"
 import { validateNotifyChannel, sendCronNotification, normalizeAtList, isFeishuChatId } from "./notify"
+import { mutateJsonList } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
 
 /** 定时任务调度器 tick 周期（DESIGN「常量参考」）。 */
@@ -391,7 +392,6 @@ export class CronManager {
   private timer: ReturnType<typeof setInterval> | null = null
   /** 执行中的任务 id（重入防护）：单次执行可远超 tick 间隔，nextRunAt 完成后才推进。 */
   private firing = new Set<string>()
-  private writes = new Map<string, Promise<void>>()
   private engine: AgentEngine | undefined
   private now: () => number
 
@@ -431,7 +431,8 @@ export class CronManager {
         if (!Array.isArray(tasks)) return
         for (const t of tasks) {
           const entry = this.normalizeLoaded(t, now)
-          if (entry) this.entries.set(entry.id, entry)
+          // 同 id 去重放在调用处（归一化函数供 RMW 读磁盘真值复用，不能把「已加载」当非法）
+          if (entry && !this.entries.has(entry.id)) this.entries.set(entry.id, entry)
         }
       } catch {
         /* 跳过损坏文件 */
@@ -447,7 +448,6 @@ export class CronManager {
     if (!t || typeof t !== "object") return null
     const entry = t as CronTask
     if (typeof entry.id !== "string" || !entry.user || typeof entry.schedule !== "string") return null
-    if (this.entries.has(entry.id)) return null
     // schedule/时区合法性校验（add/update 时已拒，此处防外部编辑损坏）：非法直接禁用，
     // 否则 nextTime 解析失败回退 +30s 会形成每 30s 触发一次的热循环
     if (entry.enabled) {
@@ -517,8 +517,7 @@ export class CronManager {
     const parsed = parseCronSchedule(schedule, timezone)
     if (isOneShotSchedule(schedule) && parsed.next(now) <= now) throw new Error("@at 时间已过去（一次性任务请指定未来时间）")
     entry.nextRunAt = parsed.next(now)
-    this.entries.set(entry.id, entry)
-    await this.saveUserEntries(user)
+    await this.persistEntry(user, entry)
     return this.publicView(entry)
   }
 
@@ -566,16 +565,13 @@ export class CronManager {
       if (isOneShotSchedule(entry.schedule) && parsed.next(this.now()) <= this.now()) throw new Error("@at 时间已过去（一次性任务请指定未来时间）")
       entry.nextRunAt = parsed.next(this.now())
     }
-    await this.saveUserEntries(user)
+    await this.persistEntry(user, entry)
     return this.publicView(entry)
   }
 
   async remove(user: string, id: string): Promise<boolean> {
-    const entry = this.entryOf(user, id)
-    if (!entry) return false
-    this.entries.delete(id)
-    await this.saveUserEntries(user)
-    return true
+    if (!this.entryOf(user, id)) return false
+    return await this.deleteEntry(user, id)
   }
 
   async list(user: string): Promise<CronTask[]> {
@@ -617,7 +613,7 @@ export class CronManager {
           status: "error",
           error: entry.lastError,
         })
-        await this.saveUserEntries(entry.user)
+        await this.persistEntry(entry.user, entry)
       }
     }
   }
@@ -852,7 +848,7 @@ export class CronManager {
     // 手动触发不推进 nextRunAt（不影响既定节奏；一次性任务已停用无须推进）
     if (!manual) entry.nextRunAt = this.nextTime(entry, endedAt)
     entry.updatedAt = endedAt
-    await this.saveUserEntries(user)
+    await this.persistEntry(user, entry)
     this.publish(entry, "event.cron.result", {
       id: entry.id,
       type: entry.type,
@@ -979,18 +975,55 @@ export class CronManager {
     return entry && entry.user === user ? entry : undefined
   }
 
-  private saveUserEntries(user: string): Promise<void> {
-    const tasks = [...this.entries.values()].filter((e) => e.user === user)
-    const prev = this.writes.get(user) ?? Promise.resolve()
-    const next = prev
-      .then(async () => {
-        const file = this.userCronFile(user)
-        await mkdir(dirname(file), { recursive: true })
-        await writeFile(file, JSON.stringify(tasks, null, 2))
-      })
-      .catch(() => {})
-    this.writes.set(user, next)
-    return next
+  /** 以某用户**磁盘真值**为基准落盘（跨进程写锁 + 原子写 + 滚动备份）。
+   *  旧实现整体覆盖写本进程镜像：多实例并存时会把其他实例写入的条目整体抹掉。 */
+  private async persist(user: string, mutate: (disk: CronTask[]) => CronTask[]): Promise<CronTask[]> {
+    const now = this.now()
+    return await mutateJsonList(this.userCronFile(user), mutate, {
+      normalize: (raw) => this.normalizeLoaded(raw, now),
+    })
+  }
+
+  /** 单条 upsert：以磁盘真值为基准合并本条改动（其余条目原样保留，磁盘上本进程未知的条目也不会丢）。
+   *  落盘后把真值回填本地镜像与 `entry` 自身（fire 之后的 publish/notify 读到的是真值）。 */
+  private async persistEntry(user: string, entry: CronTask): Promise<void> {
+    const next = await this.persist(user, (disk) => {
+      const i = disk.findIndex((e) => e.id === entry.id)
+      if (i < 0) return [...disk, { ...entry }]
+      const merged = disk.slice()
+      merged[i] = { ...entry }
+      return merged
+    })
+    this.replaceUserEntries(user, next)
+    const fresh = next.find((e) => e.id === entry.id)
+    if (fresh) Object.assign(entry, fresh)
+  }
+
+  /** 单条删除（磁盘真值与本地镜像同步）。 */
+  private async deleteEntry(user: string, id: string): Promise<boolean> {
+    const next = await this.persist(user, (disk) => disk.filter((e) => e.id !== id))
+    const removed = !next.some((e) => e.id === id)
+    this.replaceUserEntries(user, next)
+    return removed
+  }
+
+  /** 用落盘真值同步本地镜像（该用户条目换成磁盘真值；其他用户条目保持原相对序）。
+   *  磁盘上新增的条目（其他实例写入）一并纳入，本进程可见。
+   *  **保持已有条目的对象标识**（只就地改写字段）：调用方与 fire 流程持有的是条目引用，
+   *  换成新对象会使后续写在旧对象上的字段（如 `lastNotifyError`）从镜像里消失。 */
+  private replaceUserEntries(user: string, list: CronTask[]): void {
+    const byId = new Map(list.map((e) => [e.id, e]))
+    for (const [key, value] of this.entries) {
+      if (value.user !== user) continue
+      const fresh = byId.get(key)
+      if (!fresh) {
+        this.entries.delete(key)
+        continue
+      }
+      Object.assign(value, fresh)
+      byId.delete(key)
+    }
+    for (const e of byId.values()) if (!this.entries.has(e.id)) this.entries.set(e.id, e)
   }
 
   private publish(entry: CronTask, type: string, payload: Record<string, unknown>): void {
