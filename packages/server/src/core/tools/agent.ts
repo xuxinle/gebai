@@ -10,9 +10,14 @@ import { schema, type GlobalToolEntry } from "./shared"
 /** bg_task 命令任务（sh async:true）输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
 const SH_TASK_TAIL_DEFAULT = 4000
 const SH_TASK_TAIL_MAX = 20000
-/** bg_task wait 默认等待秒数（上限对齐脚本超时上限 540，保证不晚于引擎 9 分钟兜底；命令任务与子Agent 运行同口径）。 */
+/** bg_task wait 等待秒数（默认与上限相同，均为 1 分钟；命令任务/子Agent 运行/分支运行同口径）：阻塞等待是「回头取结果」的
+ *  便捷动作，上限压到 1 分钟强制按进度轮询——等满上限而不看过程是无收益的空耗。超时返回当前状态与进度，
+ *  需要继续等再次 wait 即可（子Agent 运行与分支运行的完成报告不受影响：前者落存档、后者自动合入主上下文）。 */
 const SH_TASK_WAIT_DEFAULT_S = 60
-const SH_TASK_WAIT_MAX_S = 540
+const SH_TASK_WAIT_MAX_S = 60
+/** 同步 branch_run 的 fan-in 等待上限（秒）：不经 bg_task——branch_run 不带 async 时语义就是「阻塞等全部分支
+ *  完成」，不随 bg_task wait 上限收紧（后台等待才需要短轮询，同步等待本身就是设计意图）。 */
+const BRANCH_SYNC_WAIT_S = 540
 
 function shTaskTailChars(v: unknown): number {
   const n = Number(v)
@@ -207,7 +212,7 @@ export const branchRunTool: Tool = {
     // 同步 fan-out/fan-in：等待全部分支终态（每分支完成即经引擎合并队列自动合入主上下文——
     // 排空点在本轮工具结果之后，随后模型调用即见全部合并消息，本结果只给概要不重复全文）
     const recs: BranchRunRecord[] = []
-    for (const r of started) recs.push((await ctx.branchRuns.wait(r.branchId, shTaskWaitMs(540))) ?? r)
+    for (const r of started) recs.push((await ctx.branchRuns.wait(r.branchId, BRANCH_SYNC_WAIT_S * 1000)) ?? r)
     const lines = recs.map((r) => `- ${branchTaskLine(r)}`)
     const failed = recs.filter((r) => r.status !== "done")
     return {
@@ -244,13 +249,13 @@ export const branchSyncTool: Tool = {
  *  stop 终止 / list 列出本会话全部后台任务（三类合并）。管理动作免审批。 */
 export const bgTaskTool: Tool = {
   name: "bg_task",
-  description: "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）、子Agent 运行（agent_run async:true 启动，runId 形如 rXXXXXXXX）与分支运行（branch_run async:true 启动，branchId 形如 bXXXXXXXX——完成报告自动合入主上下文，无需取回动作）。action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 tmp/sh-tasks/{id}.log），运行附进度（已执行轮次/工具调用/最近活动，已结束含最终结果），分支附进度与合入状态；action=wait 阻塞等待完成并取回结果（运行完成时附完整存档供回放；分支报告已自动合入，wait 仅确认终态与存档；timeout 秒内未完成返回当前状态，适合「先做别的再回头等结果」）；action=stop 终止（命令任务杀进程树、运行/分支协作中止，已执行过程保留在存档）；action=list 列出本会话全部后台任务。",
+  description: "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）、子Agent 运行（agent_run async:true 启动，runId 形如 rXXXXXXXX）与分支运行（branch_run async:true 启动，branchId 形如 bXXXXXXXX——完成报告自动合入主上下文，无需取回动作）。action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 tmp/sh-tasks/{id}.log），运行附进度（已执行轮次/工具调用/最近活动，已结束含最终结果），分支附进度与合入状态；action=wait 阻塞等待完成并取回结果（运行完成时附完整存档供回放；分支报告已自动合入，wait 仅确认终态与存档；timeout 秒内未完成返回当前状态（上限 1 分钟——等待超时后建议用 status 看进度，不宜闭眼等））；action=stop 终止（命令任务杀进程树、运行/分支协作中止，已执行过程保留在存档）；action=list 列出本会话全部后台任务。",
   card: { titleParams: ["action", "id"] },
   parameters: schema(
     {
       action: { type: "string", enum: ["status", "wait", "stop", "list"], description: "操作（必填）" },
       id: { type: "string", description: "任务 id——命令任务 taskId（t 开头）、运行 runId（r 开头）或分支 branchId（b 开头），action=list 可省略" },
-      timeout: { type: "number", description: "wait 操作等待秒数（默认 60，上限 540）" },
+      timeout: { type: "number", description: "wait 操作等待秒数（默认/上限 60——最长阻塞 1 分钟，超时返回当前状态与进度，需要继续等再次 wait 或改用 status 看进度）" },
       tail: { type: "number", description: "命令任务返回输出尾部字符数（默认 4000，上限 20000）" },
     },
     ["action"],
