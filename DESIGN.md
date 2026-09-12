@@ -1666,7 +1666,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 - **`Tool.outputSchema`**：声明 `data` 的 JSON Schema，经 `tool_schemas` 工具批量暴露给模型——js 编排前先查输出结构，避免逐个试调浪费往返
 - **引擎兜底截断保留 `data`**（含 `sessionRun` 扩展字段）：截断只作用于模型可见文本
-- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（matches）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`js`（logs/result/exitCode/calls，logs/result 截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`todo`（todos）、`show`、`patch`、`agent_load`/`agent_run`/`branch_run`/`bg_task`（后者均带 `Tool.outputSchema`）；**`agent_list` 未注册进全局工具表**（仅在已装载子Agent 的上下文可见，故不计入本清单）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
+- 已提供结构化输出的全局工具：`ls`（entries）、`glob`（files/total）、`file`（info：path/type/size/isDir/modifiedAt/entries/encoding/text/extMismatch）、`grep`（**三键齐备**：matches/files/counts——不论 output 选哪种模式三键同时给出，主键为本次形态，避免调用方按 `data.matches` 读取时在 files/count 模式静默得到空数组）、`sh`/`py`（stdout/stderr/exitCode，stdout/stderr 在 data 中截断至 100k 字符）、`js`（logs/result/exitCode/calls，logs/result 截断至 100k 字符）、`fetch_url`（ok/status/contentType/error）、`todo`（todos）、`show`、`patch`、`agent_load`/`agent_run`/`branch_run`/`bg_task`（后者均带 `Tool.outputSchema`）；**`agent_list` 未注册进全局工具表**（仅在已装载子Agent 的上下文可见，故不计入本清单）；子Agent 工具可按同一模式声明（`ToolResult.data` + `Tool.outputSchema`，如 `code_git`：status/log）
 - **`tool_schemas` 工具**（批量查询）：`tools` 传工具名列表返回各工具 `{name, description, parameters, outputSchema}`（未知/未启用标记错误）；省略时返回全部已启用工具的输出结构概要（紧凑一行一个，不含输入参数）
 
 #### 富内容块渲染
@@ -1966,7 +1966,7 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 - **上下文行（`context`，0-10，仅 content 模式）**：匹配行前后各附 N 行，格式同 `grep -n -C`——匹配行前缀 `文件:行号:`、上下文行前缀 `文件-行号-`、不相邻组之间 `--` 分隔；重叠区间自动合并，一次调用即可看清命中语境（免二次 `read`）；**非对称上下文**：`context_before`/`context_after`（0-10，同 `-B`/`-A`）独立指定前后行数（指定时覆盖 `context` 对应侧）——「只看定义后的实现体」场景不必为看后文付出前文噪音
 - **上限**：单文件 1MB、全局匹配默认 200 处（三种形态同一口径，达上限附「结果可能不完整」提示；`head_limit` 参数可压低先看一部分——`data.truncated` 标记截断）；输出超长走统一截断保护
 - **正则匹配在独立子进程执行（灾难性回溯防护）**：模型提供的正则存在灾难性回溯形态（嵌套量词如 `(a+)+b` 配超长单行——同步匹配挂死 JS 事件循环且无中断手段，服务端全部会话冻结），匹配（行数据按 4MB 批量经 stdin 送子进程、命中行号回父进程渲染）在独立子进程执行，20 秒超时强杀（Unix 杀进程组/Windows `taskkill /T`）；超时返回「简化 pattern/缩小范围」引导而非回退进程内匹配（回退即重新暴露挂死面）
-- **结构化输出**：`data = { mode, matches?, files?, counts?, truncated? }`（按形态携带，`mode` 标明本次形态），供 js 编排引用
+- **结构化输出**：`data = { mode, matches, files, counts, truncated? }`——**三键齐备**（不论 output 选哪种模式，matches（行级）/files（文件清单）/counts（每文件命中数，按命中数降序）同时给出，`mode` 标明本次主形态；无匹配时三键均为空数组），供 js 编排引用——**不要按 mode 猜键名**（曾在校对中因按 `data.matches` 读 files 模式而误判「代码中不存在」）
 - **审批**：默认无需审批（纯读取）
 
 ### 防盲写守卫（已读追踪 + 内容指纹）

@@ -629,7 +629,7 @@ function listPathCandidates(p: string): string[] {
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。**结构化结果三键齐备**（`data.matches`/`data.files`/`data.counts`）——不论 output 选哪种模式，三键都在：主键为本次形态，其余为同一结果的另一种视图（精确与否读官方 outputSchema 一致），按任一键读取都不会静默得到空数组。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
@@ -649,14 +649,14 @@ export const grepTool: Tool = {
   ),
   outputSchema: schema(
     {
-      mode: { type: "string", enum: ["content", "files", "count"], description: "本次结果形态" },
+      mode: { type: "string", enum: ["content", "files", "count"], description: "本次结果形态（主键）" },
       matches: {
         type: "array",
-        description: "匹配列表（mode=content；按文件与行号顺序，上限 head_limit/200）",
+        description: "匹配列表（mode=content 为主；其余模式为空数组）",
         items: schema({ file: { type: "string" }, line: { type: "integer", description: "行号（1 起始）" }, text: { type: "string", description: "匹配行（去除首尾空白，截取前 200 字符）" } }, ["file", "line", "text"]),
       },
-      files: { type: "array", description: "命中文件列表（mode=files）", items: { type: "string" } },
-      counts: { type: "array", description: "每文件命中行数（mode=count，按命中数降序）", items: schema({ file: { type: "string" }, count: { type: "integer" } }, ["file", "count"]) },
+      files: { type: "array", description: "命中文件列表（mode=files 为主；content/count 模式下为同一结果的文件视图）", items: { type: "string" } },
+      counts: { type: "array", description: "每文件命中行数（mode=count 为主，按命中数降序；content/files 模式下为同一结果的计数视图）", items: schema({ file: { type: "string" }, count: { type: "integer" } }, ["file", "count"]) },
       truncated: { type: "boolean", description: "是否达到匹配上限（结果可能不完整）" },
     },
     ["mode"],
@@ -763,12 +763,10 @@ export const grepTool: Tool = {
     const blocks: string[] = []
     const fileCounts: Array<{ file: string; count: number }> = []
     for (const f of hitFiles) {
-      if (mode === "content") {
-        for (const i of f.hitIdx) matches.push({ file: f.display, line: i + 1, text: f.lines[i]?.trim().slice(0, 200) ?? "" })
-      } else {
-        fileCounts.push({ file: f.display, count: f.hitIdx.length })
-        continue
-      }
+      // 行级匹配与文件计数在**所有模式**下都收集（三键齐备的数据基础；总数受 maxMatches 上限约束）
+      fileCounts.push({ file: f.display, count: f.hitIdx.length })
+      for (const i of f.hitIdx) matches.push({ file: f.display, line: i + 1, text: f.lines[i]?.trim().slice(0, 200) ?? "" })
+      if (mode !== "content") continue
       if (before > 0 || after > 0) {
         // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔；before/after 可非对称）
         const ranges: Array<[number, number]> = []
@@ -791,20 +789,24 @@ export const grepTool: Tool = {
         blocks.push(...f.hitIdx.map((i) => `${f.display}:${i + 1}: ${f.lines[i]?.trim().slice(0, 200) ?? ""}`))
       }
     }
+    // 三键齐备：任何模式都同时给出 matches（行级）/ files（文件清单）/ counts（每文件命中数）——
+    // 此前各模式只给主键（content→matches / files→files / count→counts），调用方（js 编排/子 agent）
+    // 统一按 `data.matches` 读取时，files/count 模式会静默得到空数组，把「未找到」误判为「不存在」。
     const capNote = capped ? "\n…（已达匹配上限，结果可能不完整；可缩小 pattern/path/include 范围）" : ""
+    const sortCounts = (list: Array<{ file: string; count: number }>) => [...list].sort((a, b) => b.count - a.count || a.file.localeCompare(b.file))
+    const counts = sortCounts(fileCounts)
+    const fl = counts.map((c) => c.file)
     if (mode === "files") {
-      const fl = fileCounts.map((c) => c.file)
-      if (!fl.length) return { output: "（无匹配）", data: { mode, files: [], counts: [] } }
-      return { ...(await truncate(fl.join("\n") + capNote, "grep", ctx)), data: { mode, files: fl, truncated: capped } }
+      if (!fl.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
+      return { ...(await truncate(fl.join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped } }
     }
     if (mode === "count") {
-      if (!fileCounts.length) return { output: "（无匹配）", data: { mode, counts: [], files: [] } }
-      const sorted = [...fileCounts].sort((a, b) => b.count - a.count || a.file.localeCompare(b.file))
-      return { ...(await truncate(sorted.map((c) => `${c.file}: ${c.count}`).join("\n") + capNote, "grep", ctx)), data: { mode, counts: sorted, truncated: capped } }
+      if (!counts.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
+      return { ...(await truncate(counts.map((c) => `${c.file}: ${c.count}`).join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped } }
     }
     if (!matches.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
     const truncated = await truncate(blocks.join("\n") + capNote, "grep", ctx)
-    return { ...truncated, data: { mode, matches, truncated: capped } }
+    return { ...truncated, data: { mode, matches, files: fl, counts, truncated: capped } }
   },
 }
 

@@ -1985,6 +1985,37 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep 结构化结果三键齐备：三种模式都同时给 matches/files/counts（避免按 data.matches 读取得到空数组）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-keys-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "a.ts", size: 10, modifiedAt: 0, isDir: false },
+      { path: "b.ts", size: 10, modifiedAt: 0, isDir: false },
+    ]
+    c.readFile = async (p) => (p.endsWith("a.ts") ? "todo: one\ntodo: two\n" : "todo: three\n")
+    const tools = createGlobalTools()
+    type Data = { mode: string; matches: unknown[]; files: string[]; counts: Array<{ file: string; count: number }> }
+    for (const output of ["content", "files", "count"] as const) {
+      const r = await tools.grep.execute({ pattern: "todo", output }, c)
+      const d = r.data as Data
+      // 三键必须都存在（旧实现在 content 模式缺 files/counts、files 模式缺 matches）
+      expect(Array.isArray(d.matches)).toBe(true)
+      expect(Array.isArray(d.files)).toBe(true)
+      expect(Array.isArray(d.counts)).toBe(true)
+      expect(d.mode).toBe(output)
+      // 非空结果下三键都不为空：“按 data.matches 读”在任何模式都能拿到命中文（含 files/count 模式）
+      expect(d.matches.length).toBeGreaterThan(0)
+      expect(d.files).toEqual(["a.ts", "b.ts"])
+      expect(d.counts).toEqual([{ file: "a.ts", count: 2 }, { file: "b.ts", count: 1 }])
+    }
+    // 无匹配：三键同样齐备（均为空数组），调用方无需分支处理
+    const none = await tools.grep.execute({ pattern: "zzz-not-here" }, c)
+    expect(none.data).toEqual({ mode: "content", matches: [], files: [], counts: [] })
+    const noneFiles = await tools.grep.execute({ pattern: "zzz-not-here", output: "files" }, c)
+    expect(noneFiles.data).toEqual({ mode: "files", matches: [], files: [], counts: [] })
+    cleanup(home)
+  })
+
   test("grep literal 按字面匹配正则元字符；head_limit 压低上限并标记 truncated", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-lit-"))
     const c = ctx(home)
