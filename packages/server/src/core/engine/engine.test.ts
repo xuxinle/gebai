@@ -429,6 +429,11 @@ async function setup(mode: "tool" | "approval" | "approval2" | "text" | "sub" | 
       delete process.env[k]
     }
   }
+  // 审批跳过：EnvManager.resolve 把整个 process.env 并入任务 env（session/env.ts），宿主进程带
+  // GEBAI_APPROVAL_SKIP=true（如启动服务的终端环境）时需审批工具整体免审——审批类断言（拒绝/等待/弹卡）
+  // 全数失效。置空串而非 delete：loadDotEnv 只回填「未定义」的键，置空串对 .env 含同键的场景同样免疫
+  savedEnv.GEBAI_APPROVAL_SKIP = process.env.GEBAI_APPROVAL_SKIP
+  process.env.GEBAI_APPROVAL_SKIP = ""
   return { home, store, registry, sandbox, auth, env, events, subAgents, engine, provider, config }
 }
 

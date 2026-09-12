@@ -7,7 +7,7 @@ import { ToolRegistry } from "./registry"
 import { shardPath, sessionPath, resolveInSandbox, sha256Hex } from "./paths"
 import { EnvManager, isSensitive, filterEnvInjection, cleanupLegacyUserEnv } from "../session/env"
 import { Sandbox } from "../security/sandbox"
-import { SessionStore, toSessionInfo, estimateCtxTokens, isProtectedMessage } from "../session/store"
+import { SessionStore, toSessionInfo, estimateCtxTokens, isProtectedMessage, MAX_CACHE_MESSAGES } from "../session/store"
 import type { Tool, ToolContext } from "./types"
 
 function tool(name: string, approval = false): Tool {
@@ -468,23 +468,29 @@ describe("SessionStore 装载提示词消息保护", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-store-load-"))
     const store = new SessionStore({ home })
     const session = await store.createSession("default")
-    // 模拟会话中途装载：先有历史消息，再 append 装载提示词（末尾），再大量普通消息触发截断
-    for (let i = 0; i < 5; i++) {
-      await store.appendMessage(session.id, { id: `m-${i}`, role: "user", content: `msg ${i}`, createdAt: i + 1 } as never)
-    }
-    await store.appendMessage(session.id, { id: "load-1", role: "system", loadedAgent: "code", content: "### code（提示词）", createdAt: 6 } as never)
-    for (let i = 5; i < 355; i++) {
-      await store.appendMessage(session.id, { id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 2 } as never)
-    }
+    // 超限历史直接铺满消息数组（逐条 appendMessage 会做上千次全量落盘），由末尾一次 append 触发截断。
+    // 场景：先有历史，中途 append 装载提示词（末尾），再有大量普通消息把会话推过上限
+    const OVER = 57 // 溢出量：截断丢掉最早 57 条非保护消息（m-5 ~ m-61）
+    const TOTAL = MAX_CACHE_MESSAGES + OVER // = 铺满的历史（TOTAL-1 条）+ 触发截断的末尾 append（1 条）
+    const seed = (await store.load(session.id))!
+    const seeded: Array<Record<string, unknown>> = []
+    for (let i = 0; i < 5; i++) seeded.push({ id: `m-${i}`, role: "user", content: `msg ${i}`, createdAt: i + 1 })
+    seeded.push({ id: "load-1", role: "system", loadedAgent: "code", content: "### code（提示词）", createdAt: 6 })
+    // 前 6 条为受保护消息（5 条用户输入 + 1 条装载提示词），其余全部为可丢弃的 assistant
+    for (let i = 5; i < TOTAL - 2; i++) seeded.push({ id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 2 })
+    seed.messages = seeded as never
+    await store.save(seed)
+    await store.appendMessage(session.id, { id: "tail", role: "assistant", content: "tail", createdAt: 99_999 } as never)
+
     const loaded = await store.load(session.id)
-    expect(loaded!.messages.length).toBeLessThanOrEqual(300)
+    expect(loaded!.messages.length).toBe(MAX_CACHE_MESSAGES)
     // 用户输入与系统提示词全部保留（截断只丢可压缩的 assistant 消息）
     for (let i = 0; i < 5; i++) expect(loaded!.messages.some((m) => m.id === `m-${i}`)).toBe(true)
     const loadIdx = loaded!.messages.findIndex((m) => m.loadedAgent === "code")
     expect(loadIdx).toBeGreaterThan(-1)
     // 顺序保持：截断为「原数组子序列」（从最早的非 protected 丢弃），装载提示词后的消息仍是原序后续（未被重排/穿插）
     const ids = loaded!.messages.map((m) => m.id)
-    expect(ids[ids.indexOf("load-1") + 1]).toBe("m-61") // 丢最早 56 条 assistant 后，装载消息后紧跟原序后续
+    expect(ids[ids.indexOf("load-1") + 1]).toBe(`m-${5 + OVER}`) // 丢最早 OVER 条 assistant 后，装载消息后紧跟原序后续
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -492,15 +498,24 @@ describe("SessionStore 装载提示词消息保护", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-store-trim-pair-"))
     const store = new SessionStore({ home })
     const session = await store.createSession("default")
-    await store.appendMessage(session.id, { id: "u-0", role: "user", content: "q", createdAt: 1 } as never)
-    // 150 轮工具调用（assistant(toolCalls) + tool 结果交替）+ 1 条用户输入 = 301 条，恰超 300 上限 1 条：
-    // 预算只允许丢 1 条——首轮 assistant 被丢后其 tool 结果必须连带丢弃（配对原子性的关键场景）
-    for (let i = 0; i < 150; i++) {
-      await store.appendMessage(session.id, { id: `a-${i}`, role: "assistant", toolCalls: [{ id: `tc-${i}`, name: "read", arguments: {} }], content: "", createdAt: 2 + i * 2 } as never)
-      await store.appendMessage(session.id, { id: `t-${i}`, role: "tool", toolCallId: `tc-${i}`, name: "read", content: "ok", createdAt: 3 + i * 2 } as never)
+    // 历史铺到上限（2 条受保护消息 + 499 轮工具调用 = 1000 条），末尾 append 第 500 轮的
+    // assistant(toolCalls) 触发截断——预算只允许丢 1 条，而首轮 assistant 被丢后其 tool 结果
+    // 必须连带丢弃（配对原子性的关键场景）
+    const seed = (await store.load(session.id))!
+    const seeded: Array<Record<string, unknown>> = [
+      { id: "u-0", role: "user", content: "q", createdAt: 1 },
+      { id: "load-1", role: "system", loadedAgent: "code", content: "### code（提示词）", createdAt: 2 },
+    ]
+    for (let i = 0; i < 499; i++) {
+      seeded.push({ id: `a-${i}`, role: "assistant", toolCalls: [{ id: `tc-${i}`, name: "read", arguments: {} }], content: "", createdAt: 3 + i * 2 })
+      seeded.push({ id: `t-${i}`, role: "tool", toolCallId: `tc-${i}`, name: "read", content: "ok", createdAt: 4 + i * 2 })
     }
+    seed.messages = seeded as never
+    await store.save(seed)
+    await store.appendMessage(session.id, { id: "a-499", role: "assistant", toolCalls: [{ id: "tc-499", name: "read", arguments: {} }], content: "", createdAt: 1002 } as never)
+
     const msgs = (await store.load(session.id))!.messages
-    expect(msgs.length).toBe(299) // 301 - 首轮整对 2 条（软上限允许略低于 300）
+    expect(msgs.length).toBe(999) // 1001 - 首轮整对 2 条（软上限允许略低于上限）
     // 首轮 assistant 与其 tool 结果一起消失（而非只丢 assistant 留下孤儿 tool）
     expect(msgs.some((m) => m.id === "a-0" || m.id === "t-0")).toBe(false)
     // 每条 tool 消息的前一条都是包含其 toolCallId 的 assistant（配对完整，无孤儿）
