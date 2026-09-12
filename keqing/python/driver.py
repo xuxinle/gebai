@@ -346,12 +346,21 @@ TOOL_IMPLS = {"run": tool_run, "pip": tool_pip, "status": tool_status}
 def load_project_tools():
     """加载子代理项目专属工具（{agent_dir}/tools.py）：导出 AGENT_NAME + TOOLS + TOOL_IMPLS
     时与基础工具合并（同名覆盖）——同语言框架派生多个子代理的扩展点；加载失败记 stderr
-    并回退基础工具集（失败安全：不影响基础工具可用）。"""
-    global AGENT_NAME, TOOLS, TOOL_IMPLS
+    并回退基础工具集（失败安全：不影响基础工具可用）。
+
+    **可重复调用**（热重载）：每次都从基础集重建再叠加项目工具——否则上一版里被改名/删掉的
+    工具会残留在 TOOLS 中（合并是追加式），重载后列表会越来越长。"""
+    global AGENT_NAME, TOOLS, TOOL_IMPLS, _project_tools_mtime
     path = os.path.join(agent_dir(), "tools.py")
+    # 先回到基础态（含“tools.py 被删掉”的情形）
+    TOOLS = list(_BASE_TOOLS)
+    TOOL_IMPLS = dict(_BASE_TOOL_IMPLS)
+    AGENT_NAME = _BASE_AGENT_NAME
+    _project_tools_mtime = None
     if not os.path.isfile(path):
         return
     try:
+        _project_tools_mtime = os.path.getmtime(path)
         spec = importlib.util.spec_from_file_location("project_tools", path)
         mod = importlib.util.module_from_spec(spec)
         # 本驱动可能以 __main__ 运行（非 import 名 driver）：注册进 sys.modules，
@@ -373,6 +382,30 @@ def load_project_tools():
             TOOL_IMPLS[name] = impls_extra[name]
 
 
+def maybe_reload_project_tools():
+    """项目工具热重载：{agent_dir}/tools.py 的 mtime 与加载时不同即重新加载。
+
+    为何需要：工具模块在进程启动时一次性加载——改完源码后旧代码持续生效（除非重启边车），
+    调试本地能力（vision/docqa 等）时极易误判「修改无效」。每次分发前一次 os.stat 的开销可忽略。
+    重载会重置该模块的模块级状态（如惰性加载的模型），故只在源码真的变了才做。"""
+    path = os.path.join(agent_dir(), "tools.py")
+    try:
+        mtime = os.path.getmtime(path) if os.path.isfile(path) else None
+    except OSError:
+        mtime = None
+    if mtime == _project_tools_mtime:
+        return
+    load_project_tools()
+    if mtime is not None:
+        sys.stderr.write(f"[driver] 项目工具已热重载（tools.py mtime 变更）: {path}\n")
+
+
+_BASE_TOOLS = list(TOOLS)
+_BASE_TOOL_IMPLS = dict(TOOL_IMPLS)
+_BASE_AGENT_NAME = AGENT_NAME
+# 已加载的项目 tools.py mtime（None = 无项目工具）；maybe_reload_project_tools 据此判变更
+_project_tools_mtime = None
+
 load_project_tools()
 
 
@@ -386,8 +419,10 @@ def handle(op, args):
             "venvActive": bool(venv_python()),
         }
     if op == "tools.list":
+        maybe_reload_project_tools()
         return TOOLS
     if op == "tool.call":
+        maybe_reload_project_tools()
         tool = str(args.get("tool") or "")
         impl = TOOL_IMPLS.get(tool)
         if not impl:
