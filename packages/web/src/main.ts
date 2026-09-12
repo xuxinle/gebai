@@ -204,7 +204,12 @@ async function init() {
     } else if (ev.type === "event.tool.result") {
       onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
     } else if (ev.type === "event.message.compact") {
-      onMessageCompact({ sessionId: ev.sessionId, count: Number(ev.payload.count ?? 0), summary: String(ev.payload.summary ?? "") })
+      onMessageCompact({
+        sessionId: ev.sessionId,
+        count: Number(ev.payload.count ?? 0),
+        summary: String(ev.payload.summary ?? ""),
+        degraded: ev.payload.degraded === undefined ? undefined : String(ev.payload.degraded),
+      })
     } else if (ev.type === "event.session.ctx") {
       // 运行中上下文大小实时更新（会话列表 k 显示）；缓存命中（接口返回时）随同更新（圆环悬浮展示）
       updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0), ev.payload.ctxCachedTokens === undefined ? undefined : Number(ev.payload.ctxCachedTokens))

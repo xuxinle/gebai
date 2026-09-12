@@ -3,7 +3,7 @@ import type { ContentBlock, DiagramFormat, TodoItem } from "@gebai/sdk"
 import { addApproval } from "./approvals"
 import { capturePage } from "./capture"
 import { noteIncoming } from "./jump-bottom"
-import { appendCompactNotice, appendMsg, appendToolResult, appendTodoCard, renderChoiceCard, renderEnvRequestCard, scrollSessionSticky, sealBlockResultSegment, sealSegment, sealSessionSegment } from "./messages"
+import { appendCompactNotice, compactNoticeTitle, appendMsg, appendToolResult, appendTodoCard, renderChoiceCard, renderEnvRequestCard, scrollSessionSticky, sealBlockResultSegment, sealSegment, sealSessionSegment } from "./messages"
 import { isBlockOnly, shortToolName } from "./tool-cards"
 import { renderDiagramSvg } from "./diagram"
 import { client, getCurrentSession, pendingTools, pendingToolsKey, runs, todoState } from "./state"
@@ -190,13 +190,13 @@ export function onToolResult(ev: { sessionId: string; toolCallId: string; name: 
   appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent)
   if (sub) scrollSessionSticky(sub.body)
 }
-export function onMessageCompact(ev: { sessionId: string; count: number; summary: string }) {
-  // 上下文压缩通知（自动/主动压缩均推送）
+export function onMessageCompact(ev: { sessionId: string; count: number; summary: string; degraded?: string }) {
+  // 上下文压缩 / 溢出护栏降级通知（自动/主动压缩与护栏降级共用本事件；degraded 标识护栏降级类型）
   const cur = getCurrentSession()
   if (ev.sessionId !== cur?.id) return
   noteIncoming()
   const count = Number.isFinite(Number(ev.count)) ? Number(ev.count) : 0
-  appendCompactNotice(`已压缩 ${count} 条历史消息`, String(ev.summary ?? ""))
+  appendCompactNotice(compactNoticeTitle(count, ev.degraded), String(ev.summary ?? ""))
 }
 
 /** 单个流式 chunk 的渲染处理（直接发送与排队输入自动执行共用的流式渲染管道）。 */

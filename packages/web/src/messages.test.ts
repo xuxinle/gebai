@@ -157,7 +157,7 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions } = await import("./messages")
+const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead, renderToolArgsDone } = await import("./tool-cards")
 
@@ -1554,5 +1554,19 @@ describe("引擎提示消息（待办续做/收尾验证：role=user + engineNot
     expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
     const revoke = (note.querySelectorAll("button") as unknown as Array<{ dataset: Record<string, string> }>).some((b) => /撤回/.test(b.dataset.tip ?? ""))
     expect(revoke).toBe(false)
+  })
+})
+
+describe("压缩/降级通知标题（compactNoticeTitle）", () => {
+  test("无 degraded = 压缩替换：标题报压缩条数", () => {
+    expect(compactNoticeTitle(12)).toBe("已压缩 12 条历史消息")
+    expect(compactNoticeTitle(0)).toBe("已压缩 0 条历史消息")
+  })
+  test("有 degraded = 溢出护栏降级：标题按护栏语义，不复刻压缩条数", () => {
+    // 三种降级类型（服务端 payload.degraded：tool-images/user-images/user-message）
+    for (const kind of ["tool-images", "user-images", "user-message"]) {
+      expect(compactNoticeTitle(0, kind)).toBe("上下文溢出护栏")
+      expect(compactNoticeTitle(12, kind)).toBe("上下文溢出护栏") // 护栏降级不与「已压缩 N 条」混同
+    }
   })
 })

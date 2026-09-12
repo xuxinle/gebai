@@ -2229,7 +2229,7 @@ WebSocket 消息格式（JSON）：
 | `event.tool.result.start` | 工具结果输出开始（长结果分段落屏前的信号） |
 | `event.tool.alive` | 长工具执行心跳（默认 25s，刷新前端空闲看门狗，见「等待期不误判挂起」） |
 | `event.message.intermediate` | 助手中间轮文本（飞书 `notifyIntermediate` 通道预览用） |
-| `event.message.compact` | 上下文压缩/护栏降级通知（含 `degraded` 标记，UI 展示压缩范围与原因） |
+| `event.message.compact` | 上下文压缩/护栏降级通知（含 `degraded` 标记——`tool-images`/`user-images`/`user-message`；**前端按此区分标题**：无标记 =「已压缩 N 条历史消息」，有标记 =「上下文溢出护栏」，具体降级类型与后果由 `summary` 承载） |
 | `event.task.error` | 本轮任务出错（含错误信息） |
 | `event.model.error` | **模型服务异常（非终态，引擎将自动重试）**：接口异常/空响应重试前推送 `{error, retry, maxRetry}`——重试退避期间任务无输出，前端据此显示「模型服务异常，正在自动重试」瞬时提示（文本恢复/任务结束时移除）；重试耗尽的最终失败仍走 `event.task.error` |
 | `event.session.ctx` | 运行中上下文大小更新（每轮模型调用后推送，含 ctxTokens token 计数：真实 usage 基准 + 未发送增量估算，无真值时全量估算兜底；会话列表 k 显示用。接口返回缓存字段时携带 `ctxCachedTokens`：同一次调用的提示词缓存命中 tokens，前端上下文圆环悬浮展示命中率） |

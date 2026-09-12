@@ -393,6 +393,13 @@ export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): H
   return wrapper
 }
 
+/** 压缩/降级通知标题：`degraded` 存在 = 溢出护栏降级（历史图片降级为路径说明 / 最旧用户消息裁剪为占位，
+ *  不是压缩替换，见 DESIGN「上下文保护」）——两者对用户是不同事件（「上下文变短了」vs「护栏动了我的历史」），
+ *  标题按语义区分；具体降级类型与后果由服务端 summary 承载，不复刻到标题（单源去重）。 */
+export function compactNoticeTitle(count: number, degraded?: string): string {
+  return degraded ? "上下文溢出护栏" : `已压缩 ${count} 条历史消息`
+}
+
 /** 实时压缩通知气泡（event.message.compact 推送时渲染，不持久化）。 */
 export function appendCompactNotice(title: string, summary: string) {
   const wrapper = el("div", "msg system")
