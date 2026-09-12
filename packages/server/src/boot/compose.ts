@@ -26,6 +26,7 @@ import { setVisionProviderGetter } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
 import { CronManager } from "../core/schedule/cron"
 import { UserTodoManager } from "../core/schedule/todos"
+import { createPrimaryGate } from "../core/schedule/primary"
 import { isFeishuChatId, validateNotifyChannel } from "../core/schedule/notify"
 import { createApp, type AppDeps } from "../app"
 import { DevReloadManager, webRootOf } from "../dev-reload"
@@ -221,6 +222,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   const webhooks = new WebhookManager({ home: config.gebaiHome })
   webhooks.ownerOf = async (sessionId: string) => store.ownerOf(sessionId)
   await webhooks.start(events)
+  // 调度主实例门控（GEBAI_SCHEDULER，默认 auto）：调度判定全在进程内（`CronManager.tick` /
+  // `UserTodoManager.tick` 只看本进程状态与 `engine.busy()`），同一 GEBAI_HOME 下多实例并存必然各跑一份：
+  // 闲时待办被重复领走（僵尸/从实例自己没有会话 → 永远认为「服务端空闲」）、定时任务重复触发。
+  // auto：主实例锁决定谁跑调度，未拿到锁的实例只服务（看门狗在主实例退出后接管）；
+  // on：强制本实例跑（忽略锁）；off：完全不跑调度。能力全关（无 cron 也无待办）时不参与锁协商
+  const scheduling = config.cronEnabled || config.idleTodoEnabled
+  const primaryGate = scheduling ? createPrimaryGate({ home: config.gebaiHome, port: config.port, mode: config.scheduler }) : null
+  const runScheduler = primaryGate ? await primaryGate.acquire() : false
   // 定时任务（GEBAI_CRON_ENABLED，默认开启）：通知通道含飞书应用消息（feishu_chat）——复用全局飞书
   // 应用凭证（GEBAI_FEISHU_APP_ID/SECRET，与机器人桥接/云文档共用）构建发送器；agents 预载名单合法性
   // 由 subAgents.def 探测；webhookId 引用解析——具名注册（userId 记录）仅本人任务可引用，全局注册
@@ -272,6 +281,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     })
     cron.attach(engine)
     await cron.start()
+    // 从实例：只加载不跑 tick（数据必须加载——REST/工具的读写都以内存镜像为准，空镜像一次写入会把
+    // 磁盘上其他条目抹掉；tick 才是会重复执行的部分）
+    if (!runScheduler) cron.stop()
   }
   // 用户级待办与闲时任务（GEBAI_IDLE_TODO_ENABLED，默认 true）：待办清单是用户级资源
   // （users/{user}/todos.json）；标记为闲时任务的待办在「服务端没有运行的会话」时按顺序自动执行。
@@ -280,6 +292,22 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   if (config.idleTodoEnabled) {
     todos = new UserTodoManager({ home: config.gebaiHome, store, engine })
     await todos.start()
+    if (!runScheduler) todos.stop() // 从实例：只加载不跑 tick（同 cron，见上）
+  }
+  // 看门狗（仅 auto）：从实例在主实例死亡/租约过期后接管调度（补一条日志便于定位「谁在跑」）；
+  // 主实例锁被他人接管（本进程长时间阻塞错过续租）则停调度退让，避免双跑
+  if (primaryGate && config.scheduler === "auto") {
+    primaryGate.start(
+      async () => {
+        console.log("[gebai] 调度已接管：本实例开始运行定时任务与闲时待办")
+        await cron?.start()
+        await todos?.start()
+      },
+      () => {
+        cron?.stop()
+        todos?.stop()
+      },
+    )
   }
   // 数据生命周期 GC：启动即跑一次，之后每日周期执行（GEBAI_GC_DISABLED=1 关闭）
   const gc = config.gcDisabled

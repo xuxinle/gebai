@@ -103,6 +103,7 @@ bun run lint
 - **环境封闭**：测试进程不读仓库 `.env`（`packages/server/bunfig.toml` 的 `[test] preload` 清 `GEBAI_`/`CODE_` 变量 + `loadConfig` 的 `loadDotEnv` 在 test 期跳过）；**该 preload 只在包目录下生效**——从仓库根直接跑 `bun test packages/server/...` 不会加载它（工具/脚本跑测试请用 `--cwd packages/server`，否则仓库根 `.env` 会污染断言）。断言不得依赖开发者本地配置或宿主环境变量。
 - **跨平台**：涉及平台分支的用例显式注入平台参数（如 `platform: "win32"`），不随宿主平台漂移。
 - **并行安全**：新增测试不得在仓库目录内写文件/改 mtime（用 `mkdtempSync`）、不得依赖固定端口/固定临时路径；真实 spawn 类用例给足用例超时（并行分片满载时 5s 默认不够）。
+- **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器 / `Start-Process` 创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_CRON_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
 - 分层：单元测试（核心模块必须，零外部依赖）→ 集成测试（mock LLM Provider 跑 AgentEngine 主循环）→ 契约测试（WS/REST/SSE 消息格式、SDK 一致性）→ E2E（mock LLM + 内存存储跑主路径）。
 - 覆盖率门槛（**目标值**，无 `coverageThreshold` 配置与 CI 强制，靠约定）：核心引擎（`AgentEngine`/`ToolRegistry`/`EnvManager`/`Sandbox`/命名空间解析）行覆盖率 ≥ 90%；工具函数 ≥ 80%；整体 ≥ 70%。
 - 可伪造性：`LLMProvider`、时间、文件系统均有测试替身（fake），测试不依赖真实网络/时钟/磁盘。

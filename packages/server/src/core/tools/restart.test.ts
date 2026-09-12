@@ -1,6 +1,7 @@
 /** restart_server 工具单测：双平台拉起器脚本构造、环境变量挑选、状态读取、服务模式不注入。 */
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs"
+import { connect, createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { RestartContinuation, RestartDeps } from "./restart"
@@ -222,34 +223,213 @@ describe("restart_server 工具行为", () => {
   })
 })
 
-// Windows 部署器实机冒烟：Win11 24H2+ 移除 WMIC 后 wmic 不可用，拉起器部署改用二段式
-// PowerShell Start-Process（跳过条件：非 win32 宿主）。
-// 注：冒烟只验证部署器（外层 powershell 退出码）——拉起器脚本内容用假 oldPid/端口构造，
-// 对不存在进程立即超时跳过、端口探测后按预期失败退出并写状态文件，无副作用。
-;(process.platform === "win32" ? describe : describe.skip)("restart_server（Windows 部署器实机冒烟）", () => {
-  test("默认部署器（win32）：二段式 Start-Process 成功启动拉起器，不再依赖 WMIC", async () => {
-    const { makeRestartServerTool } = await import("./restart")
-    // 动态选空闲高位端口：固定幻端口（如 1）在 Windows 管理员下可绑定，拉起器会真启动服务成孤儿进程
-    const freePort = await new Promise<number>((resolve, reject) => {
-      const srv = require("node:net").createServer()
-      srv.listen(0, "127.0.0.1", () => {
-        const p = srv.address().port
-        srv.close(() => resolve(p))
-      })
-      srv.on("error", reject)
+// ---- Windows 部署器实机冒烟辅助（真起服务进程，必须能干净回收） ----
+
+/** 取一个当前空闲的端口（内核分配后立即释放）。 */
+async function pickFreePort(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const srv = createServer()
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address()
+      const port = addr && typeof addr === "object" ? addr.port : 0
+      srv.close(() => resolve(port))
     })
-    const tool = makeRestartServerTool({
-      tmpDir: mkdtempSync(join(tmpdir(), "restart-smoke-")),
-      // 假 PID 立即满足「等旧进程退出」；拉起器在空闲端口上真启动一次服务——就绪后写成功状态（验证全链路），
-      // 该孤立服务无下游依赖，进程关闭后随 job object 回收
-      oldPid: -1,
-      port: freePort,
-      exitDelayMs: 60_000,
-      exit: () => {},
-    })
-    const res = await tool.execute({ action: "restart" }, ctxStub(tmpdir()))
-    expect(res.output).toContain("重启已布置")
+    srv.on("error", reject)
   })
+}
+
+/** 端口监听者 PID（无监听返回 0；探测方式与拉起器同源：Get-NetTCPConnection）。 */
+async function portOwnerPid(port: number): Promise<number> {
+  const proc = Bun.spawn(
+    [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      `((Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess)`,
+    ],
+    { stdout: "pipe", stderr: "ignore", windowsHide: true },
+  )
+  const out = (await new Response(proc.stdout).text()).trim()
+  await proc.exited
+  const pid = Number(out)
+  return Number.isFinite(pid) && pid > 0 ? pid : 0
+}
+
+/** 进程是否存在（ESRCH=不存在；EPERM 等=存在但非本进程，按存在计）。 */
+function processAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code !== "ESRCH"
+  }
+}
+
+/** 端口是否仍在监听（TCP 连接探测）。 */
+function portListening(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const sock = connect({ host: "127.0.0.1", port })
+    sock.setTimeout(500)
+    sock.once("connect", () => {
+      sock.destroy()
+      resolve(true)
+    })
+    sock.once("timeout", () => {
+      sock.destroy()
+      resolve(false)
+    })
+    sock.once("error", () => resolve(false))
+  })
+}
+
+/** 等端口释放（最多 timeoutMs）。 */
+async function waitPortReleased(port: number, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await portListening(port))) return
+    await new Promise((r) => setTimeout(r, 300))
+  }
+}
+
+/** 收进程树：SIGTERM → 轮询等退出 → 仍在则 taskkill /T /F。
+ *  端口属主进程可能有子进程（`bun run <入口>` 的运行时形态视版本而定），必须连树一起收。 */
+async function killProcessTree(pid: number): Promise<void> {
+  if (!pid || pid <= 0) return
+  try {
+    process.kill(pid, "SIGTERM")
+  } catch {
+    /* 已退出 */
+  }
+  const soft = Date.now() + 5_000
+  while (Date.now() < soft && processAlive(pid)) await new Promise((r) => setTimeout(r, 200))
+  if (!processAlive(pid)) return
+  await Bun.spawn(["taskkill", "/PID", String(pid), "/T", "/F"], { stdout: "ignore", stderr: "ignore", windowsHide: true }).exited
+  const hard = Date.now() + 5_000
+  while (Date.now() < hard && processAlive(pid)) await new Promise((r) => setTimeout(r, 200))
+}
+
+/** 命令行含指定服务入口的 bun 服务进程 PID 清单（`bun run <入口>`）——冒烟兜底回收与残留复核的依据。
+ *  限 `bun.exe`：查询本身的 powershell/cmd 命令行里就带着这个匹配串，不限进程名会把它们自己也匹配进来。 */
+async function servicePids(entry: string): Promise<number[]> {
+  const pattern = entry.replace(/'/g, "''")
+  const proc = Bun.spawn(
+    [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      `(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'bun.exe' -and $_.CommandLine -like '*${pattern}*' } | Select-Object -ExpandProperty ProcessId) -join ','`,
+    ],
+    { stdout: "pipe", stderr: "ignore", windowsHide: true },
+  )
+  const out = (await new Response(proc.stdout).text()).trim()
+  await proc.exited
+  return out
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0)
+}
+
+/** 收掉本用例期间新出现的服务进程（基线内的不动），返回仍残留的 PID（超时未收干净）。
+ *  进程被终止到从进程表消失有时间差，故轮询直到没有新的。 */
+async function killStrayServices(entry: string, baseline: number[], timeoutMs = 15_000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const strays = (await servicePids(entry).catch(() => [] as number[])).filter((x) => !baseline.includes(x))
+    if (strays.length === 0) return []
+    for (const p of strays) await killProcessTree(p)
+    if (Date.now() >= deadline) return strays
+    await new Promise((r) => setTimeout(r, 500))
+  }
+}
+
+/** 等拉起器写 state.json 终态（ok 非 null）；超时返回 null。 */
+async function waitRestartState(tmpDir: string, timeoutMs = 150_000): Promise<{ ok?: boolean | null; port?: number; pid?: number; error?: string } | null> {
+  const file = join(restartDir(tmpDir), "state.json")
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      const st = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, ""))
+      if (st && st.ok !== null && st.ok !== undefined) return st
+    } catch {
+      /* 尚未写入 */
+    }
+    if (Date.now() >= deadline) return null
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+}
+
+// Windows 部署器实机冒烟（跳过条件：非 win32 宿主）：Win11 24H2+ 移除 WMIC 后 wmic 不可用，
+// 拉起器部署改用二段式 PowerShell Start-Process。
+// 本用例**真跑全链路**：拉起器在随机空闲端口真拉起一个完整服务、真等 HTTP 就绪、真写 state.json。
+// 因此收尾与隔离是硬要求——拉起器经 Start-Process 由独立 PowerShell 宿主创建（与服务/测试进程零亲缘），
+// **不受测试进程 job object 约束**，测试结束不会自动回收：不主动 kill 就会留下「没有任何会话、
+// 永远认为服务端空闲」的孤儿实例，抢跑真实实例的闲时待办与定时任务。
+// 故：读 state.json 收掉新服务 PID（try/finally 保证断言失败也收）；环境显式隔离到用例临时目录。
+;(process.platform === "win32" ? describe : describe.skip)("restart_server（Windows 部署器实机冒烟）", () => {
+  test(
+    "默认部署器（win32）：二段式 Start-Process 成功启动拉起器，不再依赖 WMIC",
+    async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "restart-smoke-"))
+      const entry = join(import.meta.dirname, "..", "..", "index.ts")
+      const freePort = await pickFreePort()
+      // 基线：用例开始前已存在的服务进程（如 dev 主进程），收尾兜底绝不误杀
+      const preexisting = await servicePids(entry)
+      const tool = makeRestartServerTool({
+        tmpDir,
+        entry,
+        // 假 PID 立即满足「等旧进程退出」；拉起器在空闲端口上真启动一次服务——就绪后写成功状态（真链路验证）
+        oldPid: -1,
+        port: freePort,
+        exitDelayMs: 60_000,
+        exit: () => {},
+        // 子进程环境隔离：家目录落用例临时目录（不碰真实 users/、待办、定时任务），
+        // 后台副作用全关（只验证「能起、能就绪」），NODE_ENV=test 使子进程跳过仓库 .env 加载
+        env: {
+          NODE_ENV: "test",
+          GEBAI_HOME: join(tmpDir, "home"),
+          GEBAI_IDLE_TODO_ENABLED: "false",
+          GEBAI_CRON_ENABLED: "false",
+          GEBAI_FEISHU_BOT_ENABLED: "false",
+          GEBAI_GC_DISABLED: "1",
+        },
+      })
+      let pid = 0
+      let ready = false
+      try {
+        const res = await tool.execute({ action: "restart" }, ctxStub(tmpdir()))
+        expect(res.output).toContain("重启已布置")
+        const state = await waitRestartState(tmpDir)
+        expect(state).not.toBeNull()
+        // ok=true = 新服务真监听该端口且 HTTP 200（拉起器 90s 就绪探测的结论）
+        expect(state?.ok).toBe(true)
+        expect(state?.port).toBe(freePort)
+        pid = Number(state?.pid ?? 0)
+        expect(pid).toBeGreaterThan(0)
+        ready = true
+        // state.json 记的 PID 就是该端口的实际监听者（复核拉起器的属主判定）
+        expect(await portOwnerPid(freePort)).toBe(pid)
+        expect(await portListening(freePort)).toBe(true)
+      } finally {
+        // 无条件回收：state.json 的 PID + 端口实际属主 + 本用例期间新出现的服务进程
+        const owners = new Set<number>()
+        if (pid > 0) owners.add(pid)
+        if (ready) {
+          const owner = await portOwnerPid(freePort).catch(() => 0)
+          if (owner > 0) owners.add(owner)
+        }
+        for (const p of owners) await killProcessTree(p)
+        await waitPortReleased(freePort)
+        // 兜底：就绪失败时 state.json 没有 pid，按基线差集收掉本次新起的服务进程
+        await killStrayServices(entry, preexisting)
+        rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      }
+      // 验收点：端口已释放、无新增服务进程（断言失败时不会走到这里——cleanup 已完成）
+      expect(await portListening(freePort)).toBe(false)
+      expect(await killStrayServices(entry, preexisting)).toEqual([])
+    },
+    240_000,
+  )
 })
 
 describe("restart_server 续跑（prompt 参数）", () => {

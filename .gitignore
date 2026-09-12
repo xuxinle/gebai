@@ -28,6 +28,9 @@ users/
 tmp/
 audit-fs.jsonl
 feishu/
+# 调度主实例锁（{GEBAI_HOME}/.gebai-primary.json，运行时文件）
+.gebai-primary.json
+.gebai-primary.json.*.tmp
 # Python 语言目录 venv 与依赖清单（keqing/python/，docqa_pip 自动创建/维护）
 keqing/python/venv/
 keqing/python/requirements.txt

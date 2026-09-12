@@ -70,6 +70,10 @@ export interface ServerConfig {
   /** 是否启用用户级待办与闲时任务（GEBAI_IDLE_TODO_ENABLED，默认 true：启动待办存储与闲时调度器，
    *  REST /api/v1/todos 可用；显式 false 时路由返回 503 且不自动执行闲时待办）。 */
   idleTodoEnabled: boolean
+  /** 调度器门控模式（GEBAI_SCHEDULER，默认 auto）——同一 GEBAI_HOME 下的调度互斥：
+   *  auto=按主实例锁判定（只一个实例跑定时任务与闲时待办，余者退化为从实例并挂看门狗等接管）；
+   *  on=强制本实例跑调度（忽略锁，多实例同时 on 会重复调度）；off=完全不跑调度。 */
+  scheduler: "auto" | "on" | "off"
   /** 定时任务全局默认通知 webhook（GEBAI_CRON_NOTIFY_WEBHOOK）：任务未配 notify 时自动追加该通道。 */
   cronNotifyWebhook?: string
   /** 定时任务全局默认飞书通知（GEBAI_CRON_NOTIFY_FEISHU）：群 chat_id（oc_ 前缀，应用身份推送）或群机器人
@@ -207,6 +211,12 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     gcDisabled: bool("GEBAI_GC_DISABLED", false),
     cronEnabled: bool("GEBAI_CRON_ENABLED", true),
     idleTodoEnabled: bool("GEBAI_IDLE_TODO_ENABLED", true),
+    // 调度器门控模式（GEBAI_SCHEDULER，默认 auto）：auto=按主实例锁判定（同库单主实例调度）；
+    // on/off 为显式部署决策——解析规则与 core/schedule/primary.ts 的 resolveSchedulerMode 一致
+    scheduler: (() => {
+      const v = env("GEBAI_SCHEDULER").trim().toLowerCase()
+      return v === "on" || v === "off" ? v : "auto"
+    })(),
     cronNotifyWebhook: env("GEBAI_CRON_NOTIFY_WEBHOOK").trim() || undefined,
     cronNotifyFeishu: env("GEBAI_CRON_NOTIFY_FEISHU").trim() || undefined,
     externalAuthSecret: env("GEBAI_EXTERNAL_AUTH_SECRET") || undefined,
