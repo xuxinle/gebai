@@ -944,7 +944,7 @@ document.addEventListener("gebai:theme-change", () => {
   })()
 })
 
-// 空闲预热本地渲染引擎（PlantUML 6.9MB + mermaid 3.5MB + echarts 1MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口。
+// 空闲预热本地渲染引擎（PlantUML 6.8MB + mermaid 3.4MB + echarts 1.1MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口。
 // 只预热**本机实际用过的**引擎（痕迹由 markEngineUsed 记录）：无图表使用史的会话首屏不下载任何引擎；
 // D2（8MB WASM）加载开销大且架构图频率低，不预热；低性能模式跳过预热（引擎内存/加载开销大），首次渲染由消息流触发。
 if (typeof window !== "undefined") {

@@ -14,8 +14,12 @@ export async function truncate(content: string, toolName: string, ctx: ToolConte
   const absPath = truncatedPath(ctx.home, ctx.user, ctx.sessionId, toolName, content)
   try {
     const { mkdir, writeFile } = await import("node:fs/promises")
-    await mkdir(dirname(absPath), { recursive: true })
-    await writeFile(absPath, content)
+    const { existsSync } = await import("node:fs")
+    // 内容寻址（文件名含完整内容 SHA256，同内容必同路径）：已存在即内容一致，跳过重写
+    if (!existsSync(absPath)) {
+      await mkdir(dirname(absPath), { recursive: true })
+      await writeFile(absPath, content)
+    }
   } catch {
     /* ignore write failure; still return truncated head/tail */
   }
@@ -65,8 +69,12 @@ export async function spillLongUserInput(content: string, tmpDir: string): Promi
   const abs = join(tmpDir, "user_inputs", `${hash}.txt`)
   try {
     const { mkdir, writeFile } = await import("node:fs/promises")
-    await mkdir(dirname(abs), { recursive: true })
-    await writeFile(abs, content)
+    const { existsSync } = await import("node:fs")
+    // 内容寻址（文件名含内容哈希）：已存在即同内容，跳过重写
+    if (!existsSync(abs)) {
+      await mkdir(dirname(abs), { recursive: true })
+      await writeFile(abs, content)
+    }
   } catch {
     return { content, spilled: false }
   }

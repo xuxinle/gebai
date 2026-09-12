@@ -162,7 +162,7 @@ export const readTool: Tool = {
         }
       }
       if (ext === "bmp") {
-        return { output: `read 拒绝：${args.path} 是 bmp 图片，不在多模态支持格式内（png/jpg/jpeg/gif/webp）。请先转换为支持格式（如 sh/py 脚本或 draw 工具）后读取。` }
+        return { output: `read 拒绝：${args.path} 是 bmp 图片，不在多模态支持格式内（png/jpg/jpeg/gif/webp）。请先用 sh/py 脚本转换为支持格式后读取；若只需把该文件展示给用户，可直接用 show 工具。` }
       }
       if (args.encoding) {
         const enc = String(args.encoding)

@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@gebai/sdk": "workspace:*",
-    "@plantuml/core": "^1.2026.6",
+    "@plantuml/core": "1.2026.6",
     "dompurify": "^3.4.12",
     "highlight.js": "^11.11.1",
     "markdown-it": "^15.0.0",

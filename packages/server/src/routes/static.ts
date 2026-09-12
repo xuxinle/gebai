@@ -158,8 +158,10 @@ export function registerStaticRoutes(rc: RouteCtx): void {
   // 由 `/` 路由在 index.html 暂缺时返回占位页，避免服务崩溃或 UI 整体缺失。
   const embedded = d.config.binaryMode ? embeddedWebAssets() : null
   if (existsSync(d.config.webDist) || embedded || d.config.devReload) {
-    // 注入全局默认 UI 风格（GEBAI_UI_STYLE），前端按 会话/URL > 用户 > 全局 优先级解析
-    const UI_STYLES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny"]
+    // 注入全局默认 UI 风格（GEBAI_UI_STYLE），前端按 会话/URL > 用户 > 全局 优先级解析。
+    // 白名单须覆盖前端主题表（packages/web/src/theme-core.ts 的 THEMES）——主题增删时同步此处，
+    // 否则该主题经环境变量设置会被静默回落为 acrylic（前端面板手动切换不经此白名单）。
+    const UI_STYLES = ["acrylic", "aether", "cyberpunk", "aurora", "synthwave", "matrix", "tokyo-night", "ink", "cny", "qinhan"]
     const style = UI_STYLES.includes(d.config.uiStyle) ? d.config.uiStyle : "acrylic"
     let cachedHtml: string | null = null
 

@@ -59,13 +59,17 @@ describe("Web UI 路由（dev-reload 首轮构建窗口期）", () => {
     }
   })
 
-  test("UI 风格白名单：aether 直通、非法值回落默认 acrylic", async () => {
+  test("UI 风格白名单：aether/qinhan 直通、非法值回落默认 acrylic", async () => {
     const dist = mkdtempSync(join(tmpdir(), "gebai-dist-style-"))
     try {
       writeFileSync(join(dist, "index.html"), "<!doctype html><html><head></head><body>ok</body></html>")
       const pass = createApp(makeDeps({ webDist: dist, uiStyle: "aether" }))
       const passHtml = await (await pass.request("/")).text()
       expect(passHtml).toContain('__GEBAI_UI_STYLE__="aether"')
+      // 白名单须覆盖前端主题表（theme-core.ts 的 THEMES）：前端可选主题经环境变量设置应原样生效
+      const qinhan = createApp(makeDeps({ webDist: dist, uiStyle: "qinhan" }))
+      const qinhanHtml = await (await qinhan.request("/")).text()
+      expect(qinhanHtml).toContain('__GEBAI_UI_STYLE__="qinhan"')
       const fallback = createApp(makeDeps({ webDist: dist, uiStyle: "neon" }))
       const fallbackHtml = await (await fallback.request("/")).text()
       expect(fallbackHtml).toContain('__GEBAI_UI_STYLE__="acrylic"')
