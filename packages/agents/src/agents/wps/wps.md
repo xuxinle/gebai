@@ -25,14 +25,21 @@ PPT（ppt_create / ppt_read）：
 - 图表选型：趋势用 line、类别对比用 bar（条形 hbar）、构成占比用 pie/doughnut、相关性用 scatter；数据系列名要有意义；
 - notes 写演讲备注；background 可设页底色/背景图；theme 调全局字体字号色（默认微软雅黑，标题 30pt 深蓝/正文 18pt）。
 
+交付与预览（用户说「给我看文件」时）：
+- 先分清楚「用户看得到什么」：Web 前端有文件面板与 Office 阅读视图；**飞书等无文件面板的通道只能看到内联内容**——纯文件卡片在那里等于「看不见」。故凡是要让人「看成品」，都要给出一张内联图。
+- PDF 转图内联（任何通道通用）：用 `py` 调 pymupdf 把页面渲染成 PNG，再 `read` 该 PNG（多模态直接内联）：
+  `import pymupdf; d = pymupdf.open(pdf); pix = d[0].get_pixmap(dpi=110); pix.save("page-1.png")`
+  dpi 建议 100~130（再高图体积与识别收益不成比例）；多页时只渲染关键页（封面/结果页），不要把几十页全转图。
+- Office 三件套（docx/xlsx/pptx）要「看得见」：**同时产出一份 PDF 版**再按上条转图——宿主机装有 LibreOffice 时用 `sh` 执行 `soffice --headless --convert-to pdf --outdir <目录> <文件>`（需审批）；没有则用 word_read/excel_read/ppt_read 读回内容后 pdf_create 重建（排版可能简化，交付时说明）。
+- 交付话术：文件路径 + 内容摘要 + 内联预览图，并说明 PDF 版与源文件的关系。
+
 PDF（pdf_create / pdf_read / pdf_merge / pdf_split / pdf_edit）：
 - pdf_create：markdown/blocks 生成排版 PDF（语法同 word_create，含表格/图片/代码块/<!--toc--> 目录真实页码/<!--pagebreak-->）；中文自动嵌入系统字体（子集化产物小），style.baseFont 可指定字体族或 .ttf/.ttc 字体文件路径（须 TrueType 轮廓）；footer 支持 {page}/{pages} 页码；图片仅 png/jpg；
 - pdf_read：逐页提取文本层（pages 选页、max_pages 限长）；空白页 = 扫描件/图片型 PDF（文本层为空，需截图转图后视觉读取）；加密文件传 password；
 - pdf_merge：多文件合并（inputs 可按 pages 抽取部分页）；pdf_split：按区间/每 N 页/单页拆分；pdf_edit：delete/rotate/move 页面操作 + metadata 元数据 + watermark 水印（ops 按序执行）；
-- Word/Excel/PPT 转 PDF：宿主机装有 LibreOffice 时用 sh 执行 `soffice --headless --convert-to pdf --outdir <目录> <文件>`（需审批），无则用 word_read 读回内容后 pdf_create 重建。
 
 通用约定：
 - 旧版二进制格式 .doc/.xls/.ppt 不支持——请用户先在 Office/WPS 中另存为 .docx/.xlsx/.pptx 再处理；
 - 目标文件已存在且本会话未读取过时，覆盖类工具（word_create/excel_write/ppt_create/pdf_create/pdf_merge）会拒绝（防盲覆盖）——先读后写；
-- 数据类需求（统计/透视/批量变换）可先用 py/js 加工成干净数据再写入文档；图片素材缺失时可用 draw/show 生成图表 PNG 后嵌入；
+- 数据类需求（统计/透视/批量变换）可先用 py/js 加工成干净数据再写入文档；图片素材缺失时可用 show 生成图表 PNG 后嵌入；
 - 大文档/大表格分段生成与读取（word_append 续写、excel_read/pdf_read 翻页），避免单次输出过长被截断。
