@@ -177,6 +177,19 @@ export function recPreprocess(crop: RgbaImage): { data: Float32Array; width: num
   return { data: rgbaToCHW(canvas, REC_MEAN, REC_STD), width: REC_WIDTH }
 }
 
+/** 批量 rec 前处理：所有裁剪经 letterbox 后形状一致（固定 `REC_WIDTH×REC_HEIGHT`），可拼成
+ *  `[N,3,48,320]` 一次推理——OCR 耗时主要在 rec 推理的**次数**（逐行一次 inference，单次本身很小），
+ *  批处理把每行的调度与往返开销摊薄。*/
+export function recPreprocessBatch(crops: RgbaImage[]): { data: Float32Array; width: number; count: number } {
+  const per = REC_WIDTH * REC_HEIGHT * 3
+  const data = new Float32Array(per * crops.length)
+  for (let i = 0; i < crops.length; i++) {
+    const r = recPreprocess(crops[i]!)
+    data.set(r.data, i * per)
+  }
+  return { data, width: REC_WIDTH, count: crops.length }
+}
+
 /** CTC 贪心解码：逐时间步 argmax，合并连续相同后去 blank；返回文本与命中步平均置信度。 */
 export function ctcDecode(
   probs: Float32Array,

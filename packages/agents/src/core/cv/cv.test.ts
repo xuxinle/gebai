@@ -2,7 +2,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { getCvRunner, setCvDetectDirForTests, setCvDevAssetsDirForTests, setCvOrtLoader, setCvRunnerFactory } from "./cv"
+import { getCvRunner, sliceBatchOutput, setCvDetectDirForTests, setCvDevAssetsDirForTests, setCvOrtLoader, setCvRunnerFactory } from "./cv"
 import { resetCvSidecarForTests, setCvSidecarFactoryForTests, type CvSidecar } from "./sidecar"
 import type { OrtModule, OrtSession, OrtTensorLike } from "./ort-loader"
 import type { RgbaImage } from "./image"
@@ -611,3 +611,21 @@ describe("detect 模型元数据自适应（ultralytics ONNX）", () => {
       detectOut = null
     }
   })
+
+describe("sliceBatchOutput（批输出切片）", () => {
+  test("[N,T,C] 输出按样本切开：每样本拿到自己的 T*C 数据", () => {
+    const T = 4, C = 3, N = 2
+    const data = new Float32Array(N * T * C).map((_, i) => i)
+    const a = sliceBatchOutput(data, [N, T, C], 0, N)
+    expect(a.dims).toEqual([1, T, C])
+    expect(Array.from(a.data)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    const b = sliceBatchOutput(data, [N, T, C], 1, N)
+    expect(Array.from(b.data)).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23])
+  })
+
+  test("单样本输出（无批维）原样返回，不误切", () => {
+    const data = new Float32Array([1, 2, 3, 4, 5, 6])
+    const r = sliceBatchOutput(data, [1, 2, 3], 0, 1)
+    expect(Array.from(r.data)).toEqual([1, 2, 3, 4, 5, 6])
+  })
+})

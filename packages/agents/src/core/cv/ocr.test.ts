@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ctcDecode, dbPostprocess, detPreprocess, recPreprocess, sortReadingOrder } from "./ocr"
+import { ctcDecode, dbPostprocess, detPreprocess, recPreprocess, recPreprocessBatch, sortReadingOrder } from "./ocr"
 import type { RgbaImage } from "./image"
 
 function solidImage(w: number, h: number, fill: [number, number, number]): RgbaImage {
@@ -131,5 +131,27 @@ describe("ctcDecode", () => {
     const p = new Float32Array([0.1, 0.0, 0.9]) // classes=3，argmax=2 越界（chars 长度 2）
     const { text } = ctcDecode(p, 1, 3, ["·", "a"])
     expect(text).toBe("")
+  })
+})
+
+describe("recPreprocessBatch（批处理前处理）", () => {
+  test("N 个裁剪拼成单一批张量，且每个样本与逐条前处理完全一致", () => {
+    const crops = [solidImage(120, 30, [10, 20, 30]), solidImage(60, 48, [200, 100, 50]), solidImage(500, 24, [0, 0, 0])]
+    const batch = recPreprocessBatch(crops)
+    expect(batch.count).toBe(3)
+    expect(batch.width).toBe(320)
+    const per = 3 * 48 * 320
+    expect(batch.data.length).toBe(per * 3)
+    for (let i = 0; i < crops.length; i++) {
+      const single = recPreprocess(crops[i]!)
+      const slice = batch.data.subarray(i * per, (i + 1) * per)
+      expect(Array.from(slice)).toEqual(Array.from(single.data)) // 批处理不改变任何像素
+    }
+  })
+
+  test("空批次：长度 0、不抛错", () => {
+    const batch = recPreprocessBatch([])
+    expect(batch.count).toBe(0)
+    expect(batch.data.length).toBe(0)
   })
 })
