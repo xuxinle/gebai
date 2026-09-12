@@ -39,6 +39,8 @@ const GLOBAL_VARS: EnvCatalogVar[] = [
   { name: "GEBAI_CV_MAX_SIDE", description: "本地 CV 输入图像降采样上限（像素长边，默认 1280；坐标仍映射回原始像素系）" },
   { name: "GEBAI_CV_DETECT_MODEL", description: "desktop_detect 自备 YOLO ONNX 模型路径（需自训练图标/控件模型）" },
   { name: "GEBAI_CV_DETECT_LABELS", description: "desktop_detect 标签文件路径（每行一个类别）" },
+  { name: "GEBAI_RG_PATH", description: "内置 ripgrep（grep/glob 的 rg 引擎）可执行体路径：显式覆盖内置来源（npm 包 @vscode/ripgrep 或内嵌产物；指向不存在即视为不可用，不静默改用其他来源）" },
+  { name: "GEBAI_GREP_ENGINE", description: "grep 搜索引擎：auto（默认，rg 优先、失败回退内置遍历）/ rg（强制，不可用则明确报错）/ builtin（强制内置遍历）" },
   { name: "GEBAI_APPROVAL_SKIP", description: "会话级审批跳过：true/false（用户本人会话生效；非管理员仍受沙箱约束）" },
   { name: "HTTP_PROXY", description: "HTTP 代理地址（脚本/网络工具使用）" },
   { name: "HTTPS_PROXY", description: "HTTPS 代理地址（脚本/网络工具使用）" },

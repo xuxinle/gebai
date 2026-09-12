@@ -13,6 +13,7 @@ import { readFile, stat } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { buildZip } from "../../zip"
 import { WALK_SKIP_DIRS } from "../support/walk"
+import { resolveRipgrep, runRipgrep } from "../support/ripgrep"
 import { fsBadRequest, fsNotFound, fsTooLarge, isInside, isWindowsFs, resolveInRoot } from "./roots"
 import { extOf, kindForPath, languageForPath, mimeForPath, type FileKind } from "./mime"
 
@@ -532,19 +533,6 @@ export interface SearchResult {
   engine: "ripgrep" | "builtin"
 }
 
-/** ripgrep 可用性（首次探测后缓存）。 */
-let rgAvailable: boolean | null = null
-function hasRipgrep(): boolean {
-  if (rgAvailable !== null) return rgAvailable
-  try {
-    const p = Bun.which("rg")
-    rgAvailable = !!p
-  } catch {
-    rgAvailable = false
-  }
-  return rgAvailable
-}
-
 /** 简易 glob → 正则（`*` 单层、`**` 跨层、`?` 单字符、`{a,b}` 交替）。 */
 export function globToRegExp(glob: string): RegExp {
   let re = ""
@@ -640,59 +628,68 @@ export async function searchInRoot(
   }
 
   const maxFileSize = opts.maxFileSize ?? 2 * 1024 * 1024
-  if (hasRipgrep()) {
-    const args = ["--json", "--line-number", "--column", "--no-heading", "--max-filesize", String(maxFileSize), "--max-count", "50", "-m", "50"]
+  // 内置 ripgrep 优先（随包分发，见 core/support/ripgrep.ts）；异步 spawn——旧实现用 Bun.spawnSync
+  // 搜索期间**阻塞整个服务事件循环**（大仓上达秒级，全体会话一起卡），改异步后不再冻结
+  const rgPath = await resolveRipgrep()
+  if (rgPath) {
+    // 只保留 --max-count（`-m` 与它同义，旧实现两个都传）；此处保留 rg 默认的 .gitignore/隐藏文件规则
+    // （与 grep 工具不同：文件工作台的搜索面向仓库浏览，尊重 .gitignore 更符合预期，DESIGN 已约定）
+    const args = ["--json", "--max-filesize", String(maxFileSize), "--max-count", "50"]
     if (ignoreCase) args.push("-i")
     if (!opts.regex) args.push("-F")
     if (opts.glob) args.push("-g", opts.glob)
     for (const d of WALK_SKIP_DIRS) args.push("-g", `!${d}`)
     args.push("-e", query, ".")
-    const proc = Bun.spawnSync(["rg", ...args], { cwd: rootAbs, stdout: "pipe", stderr: "ignore" })
-    const text = new TextDecoder().decode(proc.stdout ?? new Uint8Array())
     const hits: SearchHit[] = []
     let truncated = false
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue
-      if (hits.length >= max) {
-        truncated = true
-        break
-      }
-      let obj: { type?: string; data?: Record<string, unknown> }
-      try {
-        obj = JSON.parse(line)
-      } catch {
-        continue
-      }
-      if (obj.type !== "match" || !obj.data) continue
-      const data = obj.data as {
-        path?: { text?: string }
-        lines?: { text?: string }
-        line_number?: number
-        submatches?: Array<{ start?: number }>
-      }
-      // rg 在 Windows 上以本地分隔符输出路径（`.\b.md`）：先归一为 POSIX 分隔符再剥 `./` 前缀，
-      // 否则剥离失败会留下 `./b.md`（前端拿去解析与内置回退引擎的 `b.md` 形态不一致）
-      const p = (data.path?.text ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
-      if (!p) continue
-      let size = 0
-      let mtime = 0
-      try {
-        const s = statSync(join(rootAbs, p))
-        size = s.size
-        mtime = s.mtimeMs
-      } catch {
-        /* 竞态忽略 */
-      }
-      hits.push({
-        path: p,
-        line: data.line_number ?? 0,
-        column: (data.submatches?.[0]?.start ?? 0) + 1,
-        lineText: (data.lines?.text ?? "").replace(/\r?\n$/, "").slice(0, 400),
-        size,
-        mtime,
-      })
-    }
-    return { hits, truncated, engine: "ripgrep" }
+    const run = await runRipgrep(rgPath, {
+      cwd: rootAbs,
+      args,
+      onLine: (line) => {
+        if (!line.trim()) return
+        if (hits.length >= max) {
+          truncated = true
+          return false // 已达上限：提前收工（不再等 rg 跑完整个仓库）
+        }
+        let obj: { type?: string; data?: Record<string, unknown> }
+        try {
+          obj = JSON.parse(line)
+        } catch {
+          return
+        }
+        if (obj.type !== "match" || !obj.data) return
+        const data = obj.data as {
+          path?: { text?: string }
+          lines?: { text?: string }
+          line_number?: number
+          submatches?: Array<{ start?: number }>
+        }
+        // rg 在 Windows 上以本地分隔符输出路径（`.\b.md`）：先归一为 POSIX 分隔符再剥 `./` 前缀，
+        // 否则剥离失败会留下 `./b.md`（前端拿去解析与内置回退引擎的 `b.md` 形态不一致）
+        const p = (data.path?.text ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
+        if (!p) return
+        let size = 0
+        let mtime = 0
+        try {
+          const s = statSync(join(rootAbs, p))
+          size = s.size
+          mtime = s.mtimeMs
+        } catch {
+          /* 竞态忽略 */
+        }
+        hits.push({
+          path: p,
+          line: data.line_number ?? 0,
+          column: (data.submatches?.[0]?.start ?? 0) + 1,
+          lineText: (data.lines?.text ?? "").replace(/\r?\n$/, "").slice(0, 400),
+          size,
+          mtime,
+        })
+        return undefined
+      },
+    })
+    // 正常完成或主动提前收工才采用 rg 结果；失败/被中断则落到下方内置回退（不把半截结果当完整结果返回）
+    if (!run.error && (run.stopped || run.code === 0 || run.code === 1)) return { hits, truncated, engine: "ripgrep" }
   }
 
   // 内置回退：逐文件逐行正则

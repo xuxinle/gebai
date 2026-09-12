@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative } from "node:path"
-import type { Tool } from "../base/types"
+import type { Tool, ToolContext } from "../base/types"
 import { VISION_IMAGE_MIME } from "../llm/llm"
 import type { ContentBlock, FileEntry } from "@gebai/sdk"
 import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS, type AppliedHunk } from "../base/patch"
@@ -12,6 +12,7 @@ import { REGEX_MAX_MATCHES, runRegexMatcher } from "../base/regex-runner"
 import { safeModeWriteCheck } from "../security/safety"
 import { truncate, sliceLines } from "../support/truncate"
 import { walkDirFiles, WALK_SKIP_DIRS } from "../support/walk"
+import { grepEnginePreference, resolveRipgrep, runRipgrep } from "../support/ripgrep"
 import { artifactBlocks, previewLogicalPath } from "../support/artifacts"
 import { jsRuntimeCommand } from "../exec/js-tool"
 import { schema, type GlobalToolEntry } from "./shared"
@@ -32,8 +33,13 @@ async function assertReadableSize(path: string, tool: string, maxBytes: number):
 /** grep：单文件读取上限与最大匹配行数。 */
 const GREP_MAX_FILE_BYTES = 1024 * 1024
 const GREP_MAX_MATCHES = 200
-/** grep 匹配子进程超时：模型提供的正则存在灾难性回溯形态（如 (a+)+b 配超长单行），同步执行
- *  会挂死 JS 事件循环且无同步中断手段（服务端全部会话冻结）——匹配在独立子进程执行，超时强杀。 */
+/** grep 匹配子进程超时：模型提供的正则可能含灾难性回溯形态（如 (a+)+b 配超长单行）——
+ *  正则 test 是**同步 CPU 操作、不可中断**，而真实工作量是「每文件 × 每行」调用一次（数千次）；
+ *  实测 `(a+)+b` 失配输入：JSC（Bun）有回溯预算缓解，单次有界（~0.77s，n=30 与 n=100000 同为 ~770ms，
+ *  且结果正确不误判），但 5000 次调用（50 文件×100 行）仍远超 8s；V8（Node）无缓解，n=30 即指数挂死。
+ *  故**不能依赖运行时的缓解**（JSC 有、V8 无，且缓解只保证单次有界、不保证整体有界）——
+ *  匹配隔离到独立子进程 + 超时强杀，把「无界挂死」变成「20s 内有界失败 + 引导」，
+ *  期间主进程事件循环照常服务其他会话（否则全部会话 WS/HTTP 冻结）。 */
 const GREP_MATCHER_TIMEOUT_MS = 20_000
 
 /** grep 匹配 runner（独立子进程，bun 直跑）：stdin 收 JSON 请求、stdout 回 JSON 结果。
@@ -73,7 +79,9 @@ async function runGrepMatcher(
   req: Record<string, unknown>,
 ): Promise<{ error?: string; hits?: Array<{ display: string; hitIdx: number[] }>; total?: number; capped?: boolean }> {
   const { writeFile } = await import("node:fs/promises")
-  if (!grepRunnerPath) {
+  // 落盘判定带存在性复核（而非仅缓存非空）：runner 位于系统临时目录，可能被外部清理（如 tmp 清理任务、
+  // 同 pid 复用的测试进程删文件）——仅凭缓存会认为“已写好”而反复启动子进程失败（且失败现象是超时误导）
+  if (!grepRunnerPath || !(await Bun.file(grepRunnerPath).exists())) {
     grepRunnerPath = join(tmpdir(), `gebai-grep-runner-${process.pid}.js`)
     await writeFile(grepRunnerPath, GREP_MATCHER_SCRIPT)
   }
@@ -626,10 +634,306 @@ export const fileTool: Tool = {
 function listPathCandidates(p: string): string[] {
   return p.startsWith("tmp/") ? [p, p.slice(4)] : [p]
 }
+/* ---------------- grep 引擎（ripgrep 优先 + 内置遍历回退） ---------------- */
+
+/** 路径归一化键（统一 POSIX 分隔符 + Windows 大小写不敏感）：rg 回传的是自身遍历得到的路径，
+ *  需与 ctx.resolvePath 解析出的绝对路径对得上（同一文件两种写法必须先归一再比对）。 */
+function fsPathKey(p: string): string {
+  const s = p.replace(/\\/g, "/")
+  return process.platform === "win32" ? s.toLowerCase() : s
+}
+
+/** 引擎归一事件：命中行（hit=true）与上下文行（hit=false），按文件分组、行号升序。
+ *  两个引擎都归一到本中间表示，渲染层（上限注记/上下文组/三键数据）完全共用。 */
+interface GrepEvent {
+  line: number
+  text: string
+  hit: boolean
+}
+interface GrepFileEvents {
+  display: string
+  events: GrepEvent[]
+}
+
+/** 引擎统一返回：files 非空即成功（可能是空数组——确实无命中）；error 非空交调用方换引擎。 */
+interface GrepEngineResult {
+  files: GrepFileEvents[]
+  capped: boolean
+  error?: string
+}
+
+/**
+ * ripgrep 引擎：rg 直接扫真实文件系统（不把候选文件全文读进内存），结果按「绝对路径 → 显示路径」
+ * allowlist 精确回填——**过滤语义仍由 ctx.listFiles() + include/exclude 决定**（两层分离：过滤权威不变、
+ * 扫描提速；rg 视野 ⊇ 过滤结果，回填时只做收敛，不会漏命中）。
+ *
+ * 与内置引擎对齐的三处取舍（否则两引擎结果会静默漂移）：
+ *  - `--hidden --no-ignore*`：内置遍历只跳过 WALK_SKIP_DIRS，既不读 .gitignore 也不跳过隐藏文件
+ *  - `--max-count maxMatches+1`：多读一行即可判定 capped，与内置子进程匹配器同口径
+ *  - `--max-filesize`：与内置的候选文件大小上限一致（超限文件本就不在 allowlist 内）
+ * rg 不支持的正则语法（Rust 引擎无后向引用/环视）、超时、启动失败均返回 error 交调用方回退内置引擎。
+ */
+async function searchWithRipgrep(opts: {
+  rgPath: string
+  rootAbs: string
+  /** 搜索目标：单文件内搜给该文件相对路径，否则给 path 子树（缺省整根 `.`）。 */
+  target: string
+  pattern: string
+  literal: boolean
+  ignoreCase: boolean
+  before: number
+  after: number
+  maxMatches: number
+  files: FileEntry[]
+  resolveAbs: (display: string) => string
+  /** 传给 rg 的排除目录（`-g !<dir>`）：与内置引擎的默认跳过规则同源。 */
+  excludeDirs: string[]
+}): Promise<GrepEngineResult> {
+  const allow = new Map<string, string>()
+  for (const f of opts.files) allow.set(fsPathKey(opts.resolveAbs(f.path)), f.path)
+  const args = [
+    "--json",
+    "--no-messages",
+    // 与内置引擎对齐：内置遍历只跳过 WALK_SKIP_DIRS、不读 .gitignore、不跳过隐藏文件
+    "--hidden",
+    "--no-ignore",
+    "--no-ignore-vcs",
+    "--no-ignore-parent",
+    "--no-ignore-dot",
+    "--no-ignore-global",
+    "--max-filesize",
+    String(GREP_MAX_FILE_BYTES),
+    "--max-count",
+    String(opts.maxMatches + 1),
+  ]
+  if (opts.ignoreCase) args.push("-i")
+  if (opts.literal) args.push("-F")
+  if (opts.before > 0) args.push("-B", String(opts.before))
+  if (opts.after > 0) args.push("-A", String(opts.after))
+  for (const d of opts.excludeDirs) args.push("-g", `!${d}`)
+  args.push("-e", opts.pattern, opts.target || ".")
+
+  const byDisplay = new Map<string, GrepFileEvents>()
+  let total = 0
+  let capped = false
+  // summary 事件里的实际扫描文件数（仅正常跑完才有）：用于识别「rg 看不到候选文件」的情形
+  let searched = -1
+  const run = await runRipgrep(opts.rgPath, {
+    cwd: opts.rootAbs,
+    args,
+    onLine: (line) => {
+      if (!line) return
+      let obj: { type?: string; data?: Record<string, unknown> }
+      try {
+        obj = JSON.parse(line) as { type?: string; data?: Record<string, unknown> }
+      } catch {
+        return // rg 正常输出全为行式 JSON；防御性忽略异常行
+      }
+      if (obj.type === "summary") {
+        const stats = (obj.data as { stats?: { searches?: number } } | undefined)?.stats
+        searched = Math.max(0, Math.floor(Number(stats?.searches ?? -1)))
+        return
+      }
+      if (obj.type !== "match" && obj.type !== "context") return
+      const d = obj.data as { path?: { text?: string }; lines?: { text?: string | null; bytes?: string }; line_number?: number } | undefined
+      // rg 在 Windows 上以本地分隔符输出路径（`.\a.txt`）：先归一分隔符再剥 `./` 前缀
+      const rel = (d?.path?.text ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
+      if (!rel) return
+      const display = allow.get(fsPathKey(join(opts.rootAbs, rel)))
+      if (!display) return // allowlist 之外（过滤层的范围比 rg 收窄时的边角）→ 丢弃
+      const hit = obj.type === "match"
+      // 非 UTF-8 行：rg 改给 base64 的 bytes（UTF-8 有损解码，与内置引擎按文本读取同效）
+      let text = typeof d?.lines?.text === "string" ? d.lines.text : ""
+      if (!text && typeof d?.lines?.bytes === "string") text = Buffer.from(d.lines.bytes, "base64").toString("utf8")
+      // 上限判定先于记录：超限的那一条**不进入结果**（与内置匹配器只记 maxMatches 条同口径）——
+      // 多读一条才发现超限，故同时确知「结果不完整」（capped）
+      if (hit) {
+        if (total >= opts.maxMatches) {
+          capped = true
+          return false
+        }
+        total++
+      }
+      let f = byDisplay.get(display)
+      if (!f) {
+        f = { display, events: [] }
+        byDisplay.set(display, f)
+      }
+      f.events.push({ line: Math.max(1, Math.floor(Number(d?.line_number ?? 0))), text, hit })
+      return undefined
+    },
+  })
+  if (run.error) return { files: [], capped, error: run.error }
+  // 退出码 2 = rg 报错（Rust 正则语法不支持 / 路径消失等）；code 为 null 且非主动停止 = 被外部杀掉，
+  // 两种情况结果都可能不完整，交调用方回退内置引擎（宁可慢、不可错）
+  if (!run.stopped && (run.code === 2 || run.code === null)) {
+    return { files: [], capped, error: "rg 无法执行该 pattern（Rust 正则语法与 JS 不同：不支持后向引用/环视等）或被中断" }
+  }
+  // 候选非空、零命中、而 rg 一个文件都没扫到：ctx.listFiles 的坐标在磁盘上不存在（虚拟/陈旧清单）——
+  // rg 看不见它们，只有内置引擎（走 ctx.readFile 抽象）能给出正确结果，交调用方回退
+  if (!run.stopped && searched === 0 && total === 0 && opts.files.length > 0) {
+    return { files: [], capped: false, error: "rg 未能访问到候选文件（列表与磁盘不一致）" }
+  }
+  return { files: [...byDisplay.values()], capped }
+}
+
+/**
+ * 内置遍历引擎（rg 不可用或运行失败时的回退，也是「功能不降级」的兜底）：读候选文件内容 → 按行匹配
+ * → 命中行号归一为事件流。两条匹配通道：
+ *  - **literal（字面量）→ 进程内匹配**：转义后不含量词/交替，**只有一条匹配路径**，不存在回溯组合爆炸
+ *    （回溯的本质是多条可能路径的指数组合）——故可安全进程内执行，省掉「内容序列化 + 跨进程搬运 +
+ *    反序列化」的开销
+ *  - **正则 → 子进程匹配**（灾难性回溯防护，见 GREP_MATCHER_TIMEOUT_MS 与 runGrepMatcher）：
+ *    内容按 4MB 批经 stdin 送子进程
+ * 读取按块**并发**（限额 16，文件顺序与串行版一致）：旧实现逐文件串行 await，是回退路径的主要耗时来源
+ *  （实测 2058 文件 / 108MB：串行读 ~1.2s → 并发读 ~0.1s；跨进程搬运 108MB 另需 ~1.6s，故 literal
+ *   走进程内后，回退路径从秒级降到百毫秒级）。
+ */
+async function searchWithBuiltin(opts: {
+  ctx: ToolContext
+  files: FileEntry[]
+  pattern: string
+  flags: string
+  maxMatches: number
+  before: number
+  after: number
+  /** literal 模式（pattern 为已转义字面量）→ 进程内匹配；false（正则）→ 子进程隔离匹配。 */
+  literal: boolean
+}): Promise<GrepEngineResult> {
+  /** 读并发上限：块内并发、块间串行入批（顺序不变、瞬时内存受限于块大小）。 */
+  const READ_CONCURRENCY = 16
+  const hitFiles: Array<{ display: string; lines: string[]; hitIdx: number[] }> = []
+  let capped = false
+  let stop = false
+  let totalHits = 0
+
+  /** 读一个候选文件 → 行数组与字节数；不可读（二进制等）返回 null。行切分与 rg 引擎对齐。 */
+  const load = async (f: FileEntry): Promise<{ display: string; lines: string[]; bytes: number } | null> => {
+    let content: string
+    try {
+      content = await opts.ctx.readFile(opts.ctx.resolvePath(f.path))
+    } catch {
+      return null // 二进制等不可读文件跳过
+    }
+    // 二进制内容（NUL 字节）跳过：防乱码匹配行刷进上下文（同 grep 二进制检测语义）
+    if (content.includes("\0")) return null
+    // 行切分与 rg 引擎对齐：以换行结尾的文件**不产出末尾幻影空行**（否则 -A 上下文会多渲染一行
+    // 文件中并不存在、只由末尾换行产生的空行；`^$` 之类的匹配也会因此在行尾多一处命中）
+    const lines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n")
+    return { display: f.path, lines, bytes: content.length }
+  }
+
+  if (opts.literal) {
+    // 字面量：进程内逐行匹配（转义后不含量词/交替 → 无回溯形态，不需要子进程隔离）
+    const re = new RegExp(opts.pattern, opts.flags)
+    for (let base = 0; base < opts.files.length; base += READ_CONCURRENCY) {
+      const loaded = await Promise.all(opts.files.slice(base, base + READ_CONCURRENCY).map(load))
+      for (const item of loaded) {
+        if (!item) continue
+        const hitIdx: number[] = []
+        for (let i = 0; i < item.lines.length; i++) {
+          if (!re.test(item.lines[i])) continue
+          // 全局上限：超限的那一条**不进入结果**（与 rg 引擎同口径）
+          if (totalHits >= opts.maxMatches) {
+            capped = true
+            stop = true
+            break
+          }
+          totalHits++
+          hitIdx.push(i)
+        }
+        if (hitIdx.length) hitFiles.push({ display: item.display, lines: item.lines, hitIdx })
+        if (stop) break
+      }
+      if (stop) break
+    }
+  } else {
+    // 正则：分批读 → 行数据送子进程匹配 → 命中行号回父进程渲染。批大小上限控制 stdin 载荷与瞬时内存；
+    // 命中文件的行保留用于上下文渲染（受匹配上限约束）
+    const BATCH_BYTES = 4 * 1024 * 1024
+    let matcherError: string | null = null
+    let batch: Array<{ display: string; lines: string[] }> = []
+    let batchBytes = 0
+    const flushBatch = async () => {
+      if (!batch.length) return
+      const sent = batch
+      // 全局上限**跳批生效**（旧实现每批各自从 0 计数——大仓上批数多，累计命中可达上千，违背「全局 200」契约），
+      // 额度 +1：多读一条才能判定 capped，且超限的那一条**不进入结果**（与 rg 引擎同口径）
+      const r = await runGrepMatcher({
+        pattern: opts.pattern,
+        flags: opts.flags,
+        maxMatches: Math.max(1, opts.maxMatches - totalHits + 1),
+        files: sent,
+      })
+      batch = []
+      batchBytes = 0
+      if (r.error) {
+        matcherError = r.error
+        stop = true
+        return
+      }
+      for (const [i, h] of (r.hits ?? []).entries()) {
+        if (!h.hitIdx.length) continue
+        const room = Math.max(0, opts.maxMatches - totalHits)
+        const take = h.hitIdx.slice(0, room)
+        totalHits += take.length
+        if (take.length) hitFiles.push({ display: h.display, lines: sent[i]?.lines ?? [], hitIdx: take })
+        if (take.length < h.hitIdx.length) {
+          capped = true
+          stop = true
+        }
+      }
+      if (r.capped) {
+        capped = true
+        stop = true
+      }
+    }
+    for (let base = 0; base < opts.files.length && !stop; base += READ_CONCURRENCY) {
+      const loaded = await Promise.all(opts.files.slice(base, base + READ_CONCURRENCY).map(load))
+      for (const item of loaded) {
+        if (!item || stop) continue
+        if (batchBytes + item.bytes > BATCH_BYTES) {
+          await flushBatch()
+          if (stop) break
+        }
+        batch.push({ display: item.display, lines: item.lines })
+        batchBytes += item.bytes
+      }
+    }
+    await flushBatch()
+    if (matcherError) return { files: [], capped, error: matcherError }
+  }
+  // 归一为事件流（与 rg 引擎同一中间表示）：命中行 + 上下文行
+  const out: GrepFileEvents[] = []
+  for (const f of hitFiles) {
+    const events: GrepEvent[] = []
+    if (opts.before > 0 || opts.after > 0) {
+      // 重叠区间合并（与既有上下文渲染口径一致）：命中行 hit=true、区间内其余行为上下文行
+      const hitSet = new Set(f.hitIdx)
+      const ranges: Array<[number, number]> = []
+      for (const i of f.hitIdx) {
+        const s = Math.max(0, i - opts.before)
+        const e = Math.min(f.lines.length - 1, i + opts.after)
+        const last = ranges[ranges.length - 1]
+        if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
+        else ranges.push([s, e])
+      }
+      for (const [s, e] of ranges) {
+        for (let i = s; i <= e; i++) events.push({ line: i + 1, text: f.lines[i] ?? "", hit: hitSet.has(i) })
+      }
+    } else {
+      for (const i of f.hitIdx) events.push({ line: i + 1, text: f.lines[i] ?? "", hit: true })
+    }
+    out.push({ display: f.display, events })
+  }
+  return { files: out, capped }
+}
+
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。**结构化结果三键齐备**（`data.matches`/`data.files`/`data.counts`）——不论 output 选哪种模式，三键都在：主键为本次形态，其余为同一结果的另一种视图（精确与否读官方 outputSchema 一致），按任一键读取都不会静默得到空数组。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。**结构化结果三键齐备**（`data.matches`/`data.files`/`data.counts`）——不论 output 选哪种模式，三键都在：主键为本次形态，其余为同一结果的另一种视图（精确与否读官方 outputSchema 一致），按任一键读取都不会静默得到空数组。" +
+    "搜索引擎：内置 ripgrep 优先（随包分发、无需系统安装）——rg 直接扫盘不把文件全文读进内存，大范围搜索快百倍；rg 不可用或其正则语法不支持该 pattern（Rust 引擎无后向引用/环视）时自动回退内置遍历引擎，`data.engine` 如实反映本次所用引擎（GEBAI_GREP_ENGINE=rg|builtin 可强制）。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
@@ -658,12 +962,14 @@ export const grepTool: Tool = {
       files: { type: "array", description: "命中文件列表（mode=files 为主；content/count 模式下为同一结果的文件视图）", items: { type: "string" } },
       counts: { type: "array", description: "每文件命中行数（mode=count 为主，按命中数降序；content/files 模式下为同一结果的计数视图）", items: schema({ file: { type: "string" }, count: { type: "integer" } }, ["file", "count"]) },
       truncated: { type: "boolean", description: "是否达到匹配上限（结果可能不完整）" },
+      engine: { type: "string", enum: ["rg", "builtin"], description: "本次实际所用的搜索引擎：rg=内置 ripgrep（默认）/ builtin=内置遍历回退（rg 不可用或其正则语法不支持该 pattern 时）" },
     },
     ["mode"],
   ),
   async execute(args, ctx) {
+    const rawPattern = String(args.pattern)
     // literal 固定字符串模式：正则元字符转义后按字面匹配（默认正则）
-    const pattern = args.literal === true ? String(args.pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : String(args.pattern)
+    const pattern = args.literal === true ? rawPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : rawPattern
     // 正则合法性预检（实际匹配在子进程，见 runGrepMatcher）
     try {
       new RegExp(pattern, args.ignore_case ? "i" : "")
@@ -680,6 +986,20 @@ export const grepTool: Tool = {
     const includeRes = globFilters(args.include)
     const includeRaw = args.include ? String(args.include) : ""
     const excludeRes = globFilters(args.exclude)
+    // 引擎选择：内置 ripgrep 优先（随包分发、无需系统安装，见 core/support/ripgrep.ts）——rg 直接扫真实文件
+    // 系统、不把候选文件全文读进内存（gebai 仓库根搜索实测 20s+ → 亚秒级）；不可用或运行失败回退内置遍历
+    // 引擎（只降速不降级，逃生口见 GEBAI_GREP_ENGINE）
+    const pref = grepEnginePreference()
+    const rgPath = pref === "builtin" ? null : await resolveRipgrep()
+    const engineLabel: "rg" | "builtin" = rgPath ? "rg" : "builtin"
+    if (pref === "rg" && !rgPath) {
+      return {
+        output:
+          "grep: 内置 ripgrep 不可用（GEBAI_GREP_ENGINE=rg 要求 rg 可用）——请运行 packages/server/scripts/build-rg-embed.ts 生成内置产物，" +
+          "或置 GEBAI_RG_PATH 指向 rg 可执行体；置 GEBAI_GREP_ENGINE=auto 可回退内置引擎",
+        data: { mode, matches: [], files: [], counts: [], engine: "builtin" },
+      }
+    }
     const path = args.path ? String(args.path).replace(/\\/g, "/") : ""
     // path 统一经 resolvePath 解析归一化（同 glob：显式传 "." 与省略等价、tmp/ 前缀可省略）
     let relPath = ""
@@ -690,9 +1010,9 @@ export const grepTool: Tool = {
       const rel = relative(root, resolved).replace(/\\/g, "/")
       if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
         // tmp/项目根外路径：本地模式与 read 同款自由度，按给定 path 前缀实际遍历搜索；沙箱部署模式仍拒绝越界
-        if (ctx.sandboxed) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
+        if (ctx.sandboxed) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
         outside = await walkDirFiles(resolved, path.replace(/\/+$/, ""))
-        if (!outside.length) return { output: `grep: 路径不存在或无可搜文件: ${path}`, data: { mode, matches: [], files: [], counts: [] } }
+        if (!outside.length) return { output: `grep: 路径不存在或无可搜文件: ${path}`, data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
       } else relPath = rel === "." ? "" : rel.replace(/\/+$/, "")
     }
     const prefix = relPath ? `${relPath}/` : ""
@@ -709,84 +1029,75 @@ export const grepTool: Tool = {
       if (!exact && isDefaultExcluded(cs, includeRaw)) return false
       return true
     })
-    if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [] } }
-    // 分批读文件 → 行数据送子进程匹配（灾难性回溯防护，见 runGrepMatcher）→ 命中行号回父进程渲染。
-    // 批大小上限控制 stdin 载荷与瞬时内存；命中文件的行保留用于上下文渲染（受匹配上限约束）
-    const BATCH_BYTES = 4 * 1024 * 1024
-    const hitFiles: Array<{ display: string; lines: string[]; hitIdx: number[] }> = []
-    let capped = false
-    let matcherError: string | null = null
-    let batch: Array<{ display: string; lines: string[] }> = []
-    let batchBytes = 0
-    let stop = false
-    const flushBatch = async () => {
-      if (!batch.length) return
-      const sent = batch
-      const r = await runGrepMatcher({ pattern, flags: args.ignore_case ? "i" : "", maxMatches, files: sent })
-      batch = []
-      batchBytes = 0
-      if (r.error) {
-        matcherError = r.error
-        stop = true
-        return
-      }
-      for (const [i, h] of (r.hits ?? []).entries()) {
-        if (h.hitIdx.length) hitFiles.push({ display: h.display, lines: sent[i]?.lines ?? [], hitIdx: h.hitIdx })
-      }
-      if (r.capped) {
-        capped = true
-        stop = true
+    if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
+    // 引擎调度：rg 优先（rg 视野 ⊇ 过滤结果，回填时按 allowlist 收敛）；运行失败则回退内置遍历，
+    // engine 如实反映**实际所用**引擎（可观测：rg 不可用/不支持的正则会静默回退，但不掩盖给调用方）
+    const rootAbs = outside ? ctx.resolvePath(path) : ctx.resolvePath(".")
+    let result: GrepEngineResult | null = null
+    let engine: "rg" | "builtin" = "builtin"
+    if (rgPath) {
+      // 搜索目标：单文件内搜直接给该文件（避免为一次内搜扫全树），否则给 path 子树（缺省整根）
+      const relTarget = exact ? relative(rootAbs, ctx.resolvePath(exact.path)).replace(/\\/g, "/") : relPath
+      const target = relTarget && !relTarget.startsWith("../") && !isAbsolute(relTarget) ? relTarget : "."
+      const r = await searchWithRipgrep({
+        rgPath,
+        rootAbs,
+        target,
+        pattern: rawPattern,
+        // literal 由 rg 的 -F 承担，此处必须传**未转义**原文（转义后的 pattern 只给内置引擎用）
+        literal: args.literal === true,
+        ignoreCase: args.ignore_case === true,
+        before,
+        after,
+        maxMatches,
+        files,
+        resolveAbs: (d) => ctx.resolvePath(d),
+        // 默认跳过大型/生成目录（与内置引擎同款规则：include 显式点名该目录时不排除；单文件内搜无需）
+        excludeDirs: exact ? [] : [...WALK_SKIP_DIRS].filter((d) => !includeRaw.includes(d)),
+      })
+      if (!r.error) {
+        result = r
+        engine = "rg"
       }
     }
-    for (const f of files) {
-      if (stop) break
-      let content: string
-      try {
-        content = await ctx.readFile(ctx.resolvePath(f.path))
-      } catch {
-        continue // 二进制等不可读文件跳过
-      }
-      // 二进制内容（NUL 字节）跳过：防乱码匹配行刷进上下文（同 grep 二进制检测语义）
-      if (content.includes("\0")) continue
-      const lines = content.split("\n")
-      if (batchBytes + content.length > BATCH_BYTES) {
-        await flushBatch()
-        if (stop) break
-      }
-      batch.push({ display: f.path, lines })
-      batchBytes += content.length
+    if (!result) {
+      result = await searchWithBuiltin({
+        ctx,
+        files,
+        pattern,
+        flags: args.ignore_case ? "i" : "",
+        maxMatches,
+        before,
+        after,
+        literal: args.literal === true,
+      })
     }
-    await flushBatch()
-    if (matcherError) return { output: `grep: ${matcherError}`, data: { mode, matches: [], files: [], counts: [] } }
+    if (result.error) return { output: `grep: ${result.error}`, data: { mode, matches: [], files: [], counts: [], engine } }
+    const capped = result.capped
+    // 渲染（两引擎共用事件流）：文件块按显示路径排序——输出顺序与引擎无关、跨次运行稳定
+    const ordered = [...result.files].sort((a, b) => a.display.localeCompare(b.display))
     const matches: Array<{ file: string; line: number; text: string }> = []
     // content 模式渲染行（含 context 组）；非 content 模式按文件聚合命中数
     const blocks: string[] = []
     const fileCounts: Array<{ file: string; count: number }> = []
-    for (const f of hitFiles) {
+    for (const f of ordered) {
       // 行级匹配与文件计数在**所有模式**下都收集（三键齐备的数据基础；总数受 maxMatches 上限约束）
-      fileCounts.push({ file: f.display, count: f.hitIdx.length })
-      for (const i of f.hitIdx) matches.push({ file: f.display, line: i + 1, text: f.lines[i]?.trim().slice(0, 200) ?? "" })
+      fileCounts.push({ file: f.display, count: f.events.filter((e) => e.hit).length })
+      for (const e of f.events) {
+        if (e.hit) matches.push({ file: f.display, line: e.line, text: e.text.trim().slice(0, 200) })
+      }
       if (mode !== "content") continue
       if (before > 0 || after > 0) {
-        // 上下文模式：重叠区间合并后整块渲染（匹配行 : 前缀、上下文行 - 前缀，组间 -- 分隔；before/after 可非对称）
-        const ranges: Array<[number, number]> = []
-        for (const i of f.hitIdx) {
-          const s = Math.max(0, i - before)
-          const e = Math.min(f.lines.length - 1, i + after)
-          const last = ranges[ranges.length - 1]
-          if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
-          else ranges.push([s, e])
+        // 上下文模式：事件流已按行升序，连续行归组、组间 -- 分隔（匹配行 : 前缀、上下文行 - 前缀；可非对称）
+        let prev = -2
+        for (const e of f.events) {
+          if (prev !== -2 && e.line !== prev + 1) blocks.push("--")
+          blocks.push(`${f.display}${e.hit ? ":" : "-"}${e.line}${e.hit ? ": " : "- "}${e.text.trim().slice(0, 200)}`)
+          prev = e.line
         }
-        const hitSet = new Set(f.hitIdx)
-        for (const [s, e] of ranges) {
-          for (let i = s; i <= e; i++) {
-            const text = f.lines[i]?.trim().slice(0, 200) ?? ""
-            blocks.push(hitSet.has(i) ? `${f.display}:${i + 1}: ${text}` : `${f.display}-${i + 1}- ${text}`)
-          }
-          blocks.push("--")
-        }
+        if (f.events.length) blocks.push("--")
       } else {
-        blocks.push(...f.hitIdx.map((i) => `${f.display}:${i + 1}: ${f.lines[i]?.trim().slice(0, 200) ?? ""}`))
+        blocks.push(...f.events.map((e) => `${f.display}:${e.line}: ${e.text.trim().slice(0, 200)}`))
       }
     }
     // 三键齐备：任何模式都同时给出 matches（行级）/ files（文件清单）/ counts（每文件命中数）——
@@ -797,16 +1108,16 @@ export const grepTool: Tool = {
     const counts = sortCounts(fileCounts)
     const fl = counts.map((c) => c.file)
     if (mode === "files") {
-      if (!fl.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
-      return { ...(await truncate(fl.join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped } }
+      if (!fl.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [], engine } }
+      return { ...(await truncate(fl.join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped, engine } }
     }
     if (mode === "count") {
-      if (!counts.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
-      return { ...(await truncate(counts.map((c) => `${c.file}: ${c.count}`).join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped } }
+      if (!counts.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [], engine } }
+      return { ...(await truncate(counts.map((c) => `${c.file}: ${c.count}`).join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped, engine } }
     }
-    if (!matches.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [] } }
+    if (!matches.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [], engine } }
     const truncated = await truncate(blocks.join("\n") + capNote, "grep", ctx)
-    return { ...truncated, data: { mode, matches, files: fl, counts, truncated: capped } }
+    return { ...truncated, data: { mode, matches, files: fl, counts, truncated: capped, engine } }
   },
 }
 
@@ -900,12 +1211,12 @@ function isDefaultExcluded(candidates: string[], rawPattern: string): boolean {
 export const globTool: Tool = {
   name: "glob",
   description:
-    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。exclude 可排除路径模式（如 tests/**,*.md）。",
+    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）在会话工作目录（tmp/）中递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。exclude 可排除路径模式（如 tests/**,*.md）。path 可限定起点，也支持 tmp/ 外的绝对/相对路径（本地模式实际遍历该目录，结果路径带给定前缀；沙箱部署仍限范围内；路径不存在时明确报错）。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
       pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
-      path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
+      path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略；本地模式可传 tmp/ 外的绝对/相对路径，按该目录实际遍历）" },
       exclude: { type: "string", description: "排除的路径 glob（逗号分隔多模式；与 grep exclude 同语法——无 / 的模式按目录/文件名匹配任意层级）" },
     },
     ["pattern"],
@@ -922,26 +1233,42 @@ export const globTool: Tool = {
     // path 统一经 resolvePath 解析（与 read/write/ls 一致：相对路径基于会话工作目录 tmp/，tmp/ 前缀可省略；
     // 项目上下文基于项目根），解析回基准相对逻辑路径后与列表坐标做前缀匹配（沙箱模式拒绝越界路径）
     let prefix = ""
+    let outside: FileEntry[] | undefined
     if (path) {
       const root = ctx.resolvePath(".")
-      const rel = relative(root, ctx.resolvePath(path)).replace(/\\/g, "/")
-      // listFiles 仅覆盖列表范围（会话 tmp/ 子树或项目根）：path 落在范围外（本地模式放开沙箱时可能）则无可列文件
+      const resolved = ctx.resolvePath(path)
+      const rel = relative(root, resolved).replace(/\\/g, "/")
       if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
-        return { output: "（无匹配文件）" }
-      }
-      prefix = !rel || rel === "." ? "" : `${rel.replace(/\/+$/, "")}/`
+        // tmp/项目根外路径：本地模式与 read/grep 同款自由度，按给定 path 前缀**实际遍历**（walkDirFiles：
+        // 跳过 node_modules/.git/dist 等大型/生成目录、深度上限 10，与 code/explore 项目遍历同一实现），
+        // 结果路径带给定前缀可直接用于 read；沙箱部署模式仍拒绝越界
+        if (ctx.sandboxed) return { output: "（无匹配文件）", data: { files: [], total: 0 } }
+        outside = await walkDirFiles(resolved, path.replace(/\/+$/, ""))
+        // 路径不存在或无可列文件：**明确报错**——旧实现这里直接返回「（无匹配文件）」，与「目录存在但无匹配」
+        // 完全同义，调用方（含模型）会把「访问不到」误判为「不存在」（与 grep 的 tmp 外路径三态提示对齐）
+        if (!outside.length) return { output: `glob: 路径不存在或无可列文件: ${path}`, data: { files: [], total: 0 } }
+      } else prefix = !rel || rel === "." ? "" : `${rel.replace(/\/+$/, "")}/`
     }
-    const files = (await ctx.listFiles())
+    // 范围外已由 walkDirFiles 按给定 path 定界（其输出带该前缀），故此时 prefix 为空、只做模式与排除过滤；
+    // 范围外的模式/exclude 统一按「相对给定 path 的路径」判定——与会话内的相对坐标语义一致
+    // （否则 exclude: "src/**" 这类含分隔符的模式对绝对路径永不命中，出现「排除静默不生效」）；
+    // path 指向**单个文件**时 walkDirFiles 只回一条且等于给足路径本身（不以「目录/」开头），此处退化为
+    // 文件名判定（与 grep 的单文件内搜语义对齐）
+    const outsideBase = outside ? `${path.replace(/\/+$/, "")}/` : ""
+    const files = (outside ?? (await ctx.listFiles()))
       .filter((f) => !f.isDir)
       .map((f) => f.path)
       .filter((p) => {
-        const cs = listPathCandidates(p)
+        const cs = outside
+          ? [p.startsWith(outsideBase) ? p.slice(outsideBase.length) : (p.split("/").pop() ?? p)]
+          : listPathCandidates(p)
         return cs.some((c) => {
           const rel = prefix ? c.slice(prefix.length) : c
           return (prefix ? c.startsWith(prefix) : true) && re.test(rel)
         }) && !(excludeRes && globMatchAny(excludeRes, cs)) && !isDefaultExcluded(cs, rawPattern)
       })
-    if (!files.length) return { output: "（无匹配文件）", data: { files: [] } }
+    // total 恒给（outputSchema 声明 files/total 必填，旧实现空结果缺 total）
+    if (!files.length) return { output: "（无匹配文件）", data: { files: [], total: 0 } }
     const listed = files.slice(0, 200)
     return { output: listed.join("\n"), data: { files: listed, total: files.length } }
   },

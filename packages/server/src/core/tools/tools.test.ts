@@ -7,6 +7,7 @@ import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolveP
 import { searchSymbolsTool } from "@gebai/agents"
 import { SessionStore } from "../session/store"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "../base/paths"
+import { resetRipgrepCache, ripgrepAvailable } from "../support/ripgrep"
 import type { ToolContext, Tool, ToolResult } from "../base/types"
 
 /** 测试会话 id（合法 32 位 hex，与生产 randomUUID 形态一致——fileRefFor 等按 sessionPath 归属判定依赖格式白名单）。 */
@@ -1941,8 +1942,11 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
   test("grep 灾难性回溯正则在子进程执行：有界完成（主进程事件循环不冻结）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-re-"))
     const c = ctx(home)
-    // 嵌套量词 + 超长单行：JSC/YARR 有回溯缓解但仍是秒级（随行数/文件数累积冻结事件循环），
-    // V8 系运行时则直接指数挂死——匹配隔离在子进程（超时强杀），主进程必有界返回
+    // 嵌套量词 + 超长单行：正则 test 是**同步 CPU 操作、不可中断**，真实工作量是「每文件 × 每行」各调一次。
+    // 实测 `(a+)+b` 失配输入：JSC（Bun）有回溯预算缓解（单次有界 ~0.77s，n=30 与 n=100000 同为 ~770ms；
+    // 结果正确不误判），但 5000 次调用仍远超 8s；V8（Node）无缓解，n=30 即指数挂死（>9s）。
+    // 故不能依赖运行时的缓解（随部署运行时不同，且只保证单次有界）——匹配隔离在子进程（超时强杀），
+    // 主进程必有界返回；本用例断言的就是这个「有界」（而非某个具体耗时）。
     const evilLine = "a".repeat(20_000)
     c.listFiles = async () => [{ path: "big.txt", size: 20_001, modifiedAt: 0, isDir: false }]
     c.readFile = async () => `${evilLine}\nend\n`
@@ -2008,11 +2012,11 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
       expect(d.files).toEqual(["a.ts", "b.ts"])
       expect(d.counts).toEqual([{ file: "a.ts", count: 2 }, { file: "b.ts", count: 1 }])
     }
-    // 无匹配：三键同样齐备（均为空数组），调用方无需分支处理
+    // 无匹配：三键同样齐备（均为空数组），调用方无需分支处理（engine 额外字段不参与断言）
     const none = await tools.grep.execute({ pattern: "zzz-not-here" }, c)
-    expect(none.data).toEqual({ mode: "content", matches: [], files: [], counts: [] })
+    expect(none.data).toMatchObject({ mode: "content", matches: [], files: [], counts: [] })
     const noneFiles = await tools.grep.execute({ pattern: "zzz-not-here", output: "files" }, c)
-    expect(noneFiles.data).toEqual({ mode: "files", matches: [], files: [], counts: [] })
+    expect(noneFiles.data).toMatchObject({ mode: "files", matches: [], files: [], counts: [] })
     cleanup(home)
   })
 
@@ -2102,6 +2106,69 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep 全局上限跨批生效：多批读取时命中总数不得超过 head_limit（旧实现每批各自从 0 计数）", async () => {
+    if (!(await ripgrepAvailable())) {
+      console.log("[跳过] 内置 ripgrep 不可用（跨批上限用例）")
+      return
+    }
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-batch-"))
+    const c = ctx(home)
+    // 6 个各约 0.74MB 的文件（单文件 < 1MB 上限；总 4.4MB > 4MB 批次阈值 → 逼出多批）：
+    // 每文件 2 处命中——批 1（f1..f5，10 处）恰好凑满上限，批 2（f6，2 处）超限
+    const files: Record<string, string> = {}
+    const filler = "pad pad pad pad pad pad pad pad pad pad\n".repeat(18_000)
+    for (let i = 0; i < 6; i++) files[`f${i}.txt`] = `${filler}NEEDLE_A\nNEEDLE_B\n`
+    c.listFiles = async () => seedTmpFiles(c, files)
+    const tools = createGlobalTools()
+    const prevEngine = process.env.GEBAI_GREP_ENGINE
+    try {
+      for (const engine of ["builtin", "rg"] as const) {
+        process.env.GEBAI_GREP_ENGINE = engine
+        const r = await tools.grep.execute({ pattern: "NEEDLE_[AB]", head_limit: 10 }, c)
+        const d = r.data as { matches: unknown[]; truncated: boolean; engine: string }
+        expect(d.engine, `未走 ${engine} 引擎`).toBe(engine)
+        expect(d.matches.length, `${engine} 引擎命中数超过 head_limit`).toBe(10)
+        expect(d.truncated, `${engine} 引擎未标记截断`).toBe(true)
+        expect(r.output).toContain("已达匹配上限")
+      }
+    } finally {
+      if (prevEngine === undefined) delete process.env.GEBAI_GREP_ENGINE
+      else process.env.GEBAI_GREP_ENGINE = prevEngine
+      cleanup(home)
+    }
+  })
+
+  test("grep literal 走进程内匹配（不再启动匹配子进程）；与等价正则结果一致", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-inproc-"))
+    const c = ctx(home)
+    c.listFiles = async () => seedTmpFiles(c, { "src/a.ts": "todo: one\nfoo.bar(x)\n", "src/b.ts": "no hit\n" })
+    const tools = createGlobalTools()
+    // 可观测契约：匹配子进程 runner 临时文件（仅调 runGrepMatcher 时写入）——须强制内置引擎
+    const runnerFile = join(tmpdir(), `gebai-grep-runner-${process.pid}.js`)
+    const prevEngine = process.env.GEBAI_GREP_ENGINE
+    try {
+      process.env.GEBAI_GREP_ENGINE = "builtin"
+      // literal：进程内匹配（转义后无回溯形态）——不应创建 runner 文件
+      rmSync(runnerFile, { force: true })
+      const lit = await tools.grep.execute({ pattern: "todo", literal: true }, c)
+      expect(lit.output).toContain("src/a.ts:1: todo: one")
+      expect((lit.data as { engine: string }).engine).toBe("builtin")
+      expect(existsSync(runnerFile), "literal 路径仍启动了匹配子进程").toBe(false)
+      // 正则：仍走子进程隔离（灾难性回溯防护）——创建 runner 文件（且 runner 被删后可自愈重建）
+      const re = await tools.grep.execute({ pattern: "todo" }, c)
+      expect(existsSync(runnerFile), "正则路径未走子进程隔离").toBe(true)
+      // 无元字符时两者语义等价（literal 的进程内实现未改变匹配结果）
+      expect(lit.output).toBe(re.output)
+      // literal + ignore_case 同样在进程内正确工作
+      const ci = await tools.grep.execute({ pattern: "TODO", literal: true, ignore_case: true }, c)
+      expect(ci.output).toBe(lit.output)
+    } finally {
+      if (prevEngine === undefined) delete process.env.GEBAI_GREP_ENGINE
+      else process.env.GEBAI_GREP_ENGINE = prevEngine
+      cleanup(home)
+    }
+  })
+
   test("read 指定编码解码（GBK）；解码失败/目录给出可读错误", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-read-enc-"))
     const c = ctx(home)
@@ -2159,10 +2226,48 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const abs = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "src") }, c)
     expect(abs.output).toContain("src/a.ts")
     expect(abs.output).not.toContain("test/c.ts")
-    // path 指向会话外（本地模式放开沙箱）时无可列文件
+    // path 指向会话外且目录不存在：明确报错（不再与「目录内无匹配」同义——调用方无法区分「访问不到」与「不存在」）
     const outside = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "..", "outside") }, c)
-    expect(outside.output).toBe("（无匹配文件）")
+    expect(outside.output).toContain("路径不存在或无可列文件")
     cleanup(home)
+  })
+
+  test("glob 本地模式 tmp 外路径实际遍历：目录/单文件/不存在三态（对齐 grep 与 read 的自由度）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-glob-out-"))
+    const c = ctx(home)
+    // 范围外真实目录：含 src/a.ts、b.ts、c.md 与 node_modules/pkg/e.js
+    const proj = mkdtempSync(join(tmpdir(), "gebai-glob-proj-"))
+    mkdirSync(join(proj, "src"), { recursive: true })
+    mkdirSync(join(proj, "node_modules", "pkg"), { recursive: true })
+    writeFileSync(join(proj, "src", "a.ts"), "export const a = 1\n")
+    writeFileSync(join(proj, "b.ts"), "export const b = 2\n")
+    writeFileSync(join(proj, "c.md"), "# c\n")
+    writeFileSync(join(proj, "node_modules", "pkg", "e.js"), "export const e = 3\n")
+    const tools = createGlobalTools()
+    const projPath = proj.replace(/\\/g, "/")
+    // 目录：按给定前缀递归列出（路径可直接用于 read）；默认跳过 node_modules；total 准确
+    const dir = await tools.glob.execute({ pattern: "*.ts", path: projPath }, c)
+    expect(dir.output).toContain(`${projPath}/src/a.ts`)
+    expect(dir.output).toContain(`${projPath}/b.ts`)
+    expect(dir.output).not.toContain("c.md")
+    expect(dir.output).not.toContain("node_modules")
+    expect((dir.data as { total: number }).total).toBe(2)
+    // exclude 在范围外同样生效（按相对给定 path 的路径判定，与会话内语义一致）
+    const excl = await tools.glob.execute({ pattern: "*.ts", path: projPath, exclude: "src/**" }, c)
+    expect(excl.output).toContain(`${projPath}/b.ts`)
+    expect(excl.output).not.toContain("src/a.ts")
+    // 单文件：文件名匹配时命中；不匹配时无匹配（不报错）
+    const file = await tools.glob.execute({ pattern: "a.ts", path: `${projPath}/src/a.ts` }, c)
+    expect(file.output).toContain(`${projPath}/src/a.ts`)
+    const notMatch = await tools.glob.execute({ pattern: "zzz.ts", path: `${projPath}/src/a.ts` }, c)
+    expect(notMatch.output).toBe("（无匹配文件）")
+    // 空结果 data 也带 total（outputSchema 声明必填）
+    expect((notMatch.data as { total: number }).total).toBe(0)
+    // 沙箱部署模式：范围外路径仍拒绝（不遍历）
+    const denied = await tools.glob.execute({ pattern: "*.ts", path: projPath }, { ...c, sandboxed: true })
+    expect(denied.output).toBe("（无匹配文件）")
+    cleanup(home)
+    rmSync(proj, { recursive: true, force: true })
   })
 
   test("glob 花括号交替与 exclude 排除；默认跳过大型目录（模式显式点名除外）", async () => {
@@ -2282,6 +2387,161 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     const denied = await tools.grep.execute({ pattern: "todo", path: projPath }, { ...c, sandboxed: true })
     expect(denied.output).toBe("（无匹配文件）")
     cleanup(home)
+  })
+
+  /** 把测试文件写进会话 tmp/（磁盘真文件）并返回会话坐标文件清单：rg 扫盘与内置引擎经 ctx 读取
+   *  看到同一内容——grep 语义才能在双引擎下参数化验证（纯 readFile 桩只有内置引擎可见）。 */
+  function seedTmpFiles(
+    c: ToolContext,
+    files: Record<string, string>,
+  ): Array<{ path: string; size: number; modifiedAt: number; isDir: boolean }> {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = join(c.workdir!, ...rel.split("/"))
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+    }
+    return Object.entries(files).map(([rel, content]) => ({ path: `tmp/${rel}`, size: content.length, modifiedAt: 0, isDir: false }))
+  }
+
+  test("grep 双引擎一致性：同一批查询在 rg 与内置引擎下 output/data 逐字段一致", async () => {
+    if (!(await ripgrepAvailable())) {
+      console.log("[跳过] 内置 ripgrep 不可用（双引擎一致性用例）")
+      return
+    }
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-parity-"))
+    const c = ctx(home)
+    c.listFiles = async () =>
+      seedTmpFiles(c, {
+        "src/a.ts": "const x = 1\ntodo: fix this\nfoo.bar(x)\nplain foo\n",
+        "src/b.js": "todo: js thing\nnothing\n",
+        "src/sub/deep.ts": "deep todo\n",
+        "top.md": "todo: top\nfoo foo\n",
+        "node_modules/pkg/skip.js": "todo: skipped\n",
+      })
+    // 矩阵：内容/模式/include/exclude/花括号/上下文（对称与非对称）/literal/大小写/路径定界/默认跳过
+    const cases: Array<Record<string, unknown>> = [
+      { pattern: "todo" },
+      { pattern: "todo", include: "*.ts" },
+      { pattern: "todo", exclude: "src/**" },
+      { pattern: "todo", include: "*.{ts,md}" },
+      { pattern: "todo", context: 1 },
+      { pattern: "todo", context_before: 2 },
+      { pattern: "foo.bar(", literal: true },
+      { pattern: "TODO", ignore_case: true },
+      { pattern: "todo", output: "files" },
+      { pattern: "foo", output: "count" },
+      { pattern: "zzz-not-here" },
+      { pattern: "todo", path: "src" },
+      { pattern: "todo", path: "src/a.ts" },
+      { pattern: "skipped" },
+    ]
+    const prevEngine = process.env.GEBAI_GREP_ENGINE
+    try {
+      for (const args of cases) {
+        const label = JSON.stringify(args)
+        const got: Array<{ output: string; data: Record<string, unknown> }> = []
+        for (const engine of ["rg", "builtin"] as const) {
+          process.env.GEBAI_GREP_ENGINE = engine
+          const r = await createGlobalTools().grep.execute(args, c)
+          got.push({ output: r.output, data: r.data as Record<string, unknown> })
+          // 引擎确实按开关切换（否则本用例退化为自证）
+          expect(got[got.length - 1].data.engine, `未走 ${engine} 引擎：${label}`).toBe(engine)
+        }
+        expect(got[0].output, `output 不一致：${label}`).toBe(got[1].output)
+        expect({ ...got[0].data, engine: "?" }, `data 不一致：${label}`).toEqual({ ...got[1].data, engine: "?" })
+      }
+    } finally {
+      if (prevEngine === undefined) delete process.env.GEBAI_GREP_ENGINE
+      else process.env.GEBAI_GREP_ENGINE = prevEngine
+      cleanup(home)
+    }
+  })
+
+  test("grep 引擎选择：开关强制切换 / rg 不可用时明确报错 / rg 语法不支持的正则自动回退", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-engine-"))
+    const c = ctx(home)
+    c.listFiles = async () => seedTmpFiles(c, { "a.ts": "const foo = 1\n", "b.ts": "no match\n" })
+    const tools = createGlobalTools()
+    const prevEngine = process.env.GEBAI_GREP_ENGINE
+    const prevPath = process.env.GEBAI_RG_PATH
+    try {
+      // 环视：Rust 正则（rg）不支持 → 自动回退内置引擎，结果仍正确（engine 如实为 builtin）
+      process.env.GEBAI_GREP_ENGINE = "auto"
+      const lookahead = await tools.grep.execute({ pattern: "foo(?= =)" }, c)
+      expect(lookahead.output).toContain("a.ts:1: const foo = 1")
+      expect((lookahead.data as { engine: string }).engine).toBe("builtin")
+      // 强制内置：走内置引擎（rg 在位时的逃生口）
+      process.env.GEBAI_GREP_ENGINE = "builtin"
+      const forced = await tools.grep.execute({ pattern: "foo" }, c)
+      expect(forced.output).toContain("a.ts:1: const foo = 1")
+      expect((forced.data as { engine: string }).engine).toBe("builtin")
+      // 强制 rg 但 rg 不可用（GEBAI_RG_PATH 指向不存在）：明确报错而非静默降级
+      process.env.GEBAI_GREP_ENGINE = "rg"
+      process.env.GEBAI_RG_PATH = join(home, "no-such-rg")
+      resetRipgrepCache()
+      const missing = await tools.grep.execute({ pattern: "foo" }, c)
+      expect(missing.output).toContain("内置 ripgrep 不可用")
+      expect((missing.data as { engine: string }).engine).toBe("builtin")
+      // 同环境下 auto：静默回退内置（功能不降级、只降速）
+      process.env.GEBAI_GREP_ENGINE = "auto"
+      const auto = await tools.grep.execute({ pattern: "foo" }, c)
+      expect(auto.output).toContain("a.ts:1: const foo = 1")
+      expect((auto.data as { engine: string }).engine).toBe("builtin")
+    } finally {
+      if (prevEngine === undefined) delete process.env.GEBAI_GREP_ENGINE
+      else process.env.GEBAI_GREP_ENGINE = prevEngine
+      if (prevPath === undefined) delete process.env.GEBAI_RG_PATH
+      else process.env.GEBAI_RG_PATH = prevPath
+      resetRipgrepCache()
+      cleanup(home)
+    }
+  })
+
+  test("grep rg 引擎不读文件内容（性能契约）：readFile 调用为 0，内置引擎为 N，结果一致", async () => {
+    if (!(await ripgrepAvailable())) {
+      console.log("[跳过] 内置 ripgrep 不可用（性能契约用例）")
+      return
+    }
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-scale-"))
+    const c = ctx(home)
+    const files: Record<string, string> = {}
+    // 240 文件 / 12 子目录；命中行共 60 文件 × 2 = 120 处（低于 200 上限，避免截断带来的扫描顺序差异）
+    for (let i = 0; i < 240; i++) {
+      files[`mod${i % 12}/f${i}.ts`] = `export const v${i} = ${i}\n`.repeat(20) + `NEEDLE_${i % 4}_MARK\nNEEDLE_${i % 4}_MARK\n`
+    }
+    c.listFiles = async () => seedTmpFiles(c, files)
+    const origRead = c.readFile
+    let reads = 0
+    c.readFile = async (p) => {
+      reads++
+      return origRead(p)
+    }
+    const tools = createGlobalTools()
+    const prevEngine = process.env.GEBAI_GREP_ENGINE
+    try {
+      process.env.GEBAI_GREP_ENGINE = "rg"
+      const rgStart = Date.now()
+      const rgResult = await tools.grep.execute({ pattern: "NEEDLE_2_MARK", output: "count" }, c)
+      const rgMs = Date.now() - rgStart
+      expect((rgResult.data as { engine: string }).engine).toBe("rg")
+      // 命中 60 个文件（mod2/mod6/mod10 三个目录的全部文件）
+      expect((rgResult.data as { counts: unknown[] }).counts).toHaveLength(60)
+      // 关键契约：rg 引擎不把候选文件内容读进进程（旧实现是 240 次全文读取——根目录搜索数十秒的根因）
+      expect(reads).toBe(0)
+      // 内置引擎同查询：确实逐文件读取，且结果与 rg 完全一致（证明提速不改语义）
+      process.env.GEBAI_GREP_ENGINE = "builtin"
+      reads = 0
+      const builtinResult = await tools.grep.execute({ pattern: "NEEDLE_2_MARK", output: "count" }, c)
+      expect((builtinResult.data as { engine: string }).engine).toBe("builtin")
+      expect(reads).toBe(240)
+      expect(builtinResult.output).toBe(rgResult.output)
+      // 计时冒烟（宽阀值）：该规模下 rg 必须秒级完成（内置引擎在真实大仓会退化为数十秒）
+      expect(rgMs).toBeLessThan(15_000)
+    } finally {
+      if (prevEngine === undefined) delete process.env.GEBAI_GREP_ENGINE
+      else process.env.GEBAI_GREP_ENGINE = prevEngine
+      cleanup(home)
+    }
   })
 
   test("file copy 复制文件（二进制通道、目标父目录自动创建）；mkdir 递归建目录且幂等", async () => {
