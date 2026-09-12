@@ -20,6 +20,7 @@
  * Set-Content -Encoding UTF8 会写入 BOM，读方（status 动作）与消费方均按无 BOM 预期解析。
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Tool, ToolResult } from "../base/types"
@@ -543,6 +544,52 @@ export function explainRestartState(state: Record<string, unknown>): string[] {
   return lines
 }
 
+/**
+ * 拉起器脚本的「代码新鲜度」。
+ *
+ * 为何需要单独判定：脚本由**当前运行进程的内存代码**在重启那一刻生成（见本文件头的可靠性设计），
+ * 因此「改了 restart.ts 再重启」时，本次生成的脚本仍是**旧逻辑**——拉起器相关改动需要**再重启一次**
+ * 才真正生效（新进程从磁盘加载新代码，它生成的脚本才是新的）。这个特性不影响其他文件的改动
+ * （新进程直接读新源码），只影响本文件自身，但很容易让“验证已生效”的结论落空，故在 status 里显式提示。
+ */
+export interface LauncherFreshness {
+  /** 是否做了判定（二进制模式/源文件不可读时为 false——编译形态下无源码可比）。 */
+  checked: boolean
+  /** 运行中代码落后于磁盘源码（拉起器改动需再重启一次才生效）。 */
+  stale: boolean
+  /** 磁盘上 restart.ts 的 mtime（ms）。 */
+  sourceMtime?: number
+  /** 本进程启动时刻（ms）。 */
+  startedAt?: number
+}
+
+/** 判定拉起器代码是否落后于磁盘源码（参数可注入，便于单测）。 */
+export function launcherCodeFreshness(
+  opts: { sourceFile?: string; startedAt?: number; now?: number } = {},
+): LauncherFreshness {
+  const sourceFile = opts.sourceFile ?? join(import.meta.dirname ?? "", "restart.ts")
+  const startedAt = opts.startedAt ?? (opts.now ?? Date.now()) - process.uptime() * 1000
+  let sourceMtime: number
+  try {
+    sourceMtime = statSync(sourceFile).mtimeMs
+  } catch {
+    return { checked: false, stale: false } // 二进制模式（$bunfs 虚拟路径）或文件不可读：无源码可比
+  }
+  // 容差 1s：改完立即重启时 mtime 可能与启动时刻同秒，避免误报
+  return { checked: true, stale: sourceMtime > startedAt + 1000, sourceMtime, startedAt }
+}
+
+/** 把新鲜度判定格式化为 status 的一行（纯函数，便于断言）。 */
+export function formatLauncherFreshness(f: LauncherFreshness): string {
+  if (!f.checked) return "拉起器代码：无法判定（二进制/编译形态无源码可比）"
+  const at = (ms?: number) => (ms ? new Date(ms).toLocaleString("zh-CN") : "未知")
+  if (!f.stale) return `拉起器代码：最新（restart.ts 未在本进程启动后修改，mtime ${at(f.sourceMtime)}）`
+  return [
+    `⚠️ 拉起器代码落后：restart.ts 于 ${at(f.sourceMtime)} 修改，而本进程启动于 ${at(f.startedAt)}——`,
+    "   本进程生成的拉起器脚本仍是**改动前**的逻辑；拉起器相关改动需**再重启一次**才生效（不影响其他文件的改动）。",
+  ].join("\n")
+}
+
 /** 读取最近一次重启状态 + 续跑情况（status 动作）。 */
 async function readState(deps: Pick<RestartDeps, "tmpDir">): Promise<ToolResult> {
   const stateFile = join(restartDir(deps.tmpDir), "state.json")
@@ -564,6 +611,7 @@ async function readState(deps: Pick<RestartDeps, "tmpDir">): Promise<ToolResult>
   const cont = await readContinuation(deps.tmpDir)
   const res = await readContinuationResult(deps.tmpDir)
   const lines = [text]
+  lines.push(formatLauncherFreshness(launcherCodeFreshness()))
   lines.push(cont ? `续跑请求（等待新服务消费）：会话 ${cont.sessionId}，提示词 ${cont.prompt.length} 字，写入于 ${new Date(cont.at).toISOString()}` : "续跑请求：无")
   lines.push(res ? `续跑结果：${JSON.stringify(res)}` : "续跑结果：无")
   return { output: lines.join("\n") }
@@ -591,7 +639,7 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
     description:
       "重启本歌白服务进程（仅本地模式可用，Windows/Linux/macOS）。执行后当前连接（飞书/Web）会短暂中断，几秒后自动恢复——外部拉起器（独立于服务进程树）等待旧进程退出与端口释放，再以同端口/同配置启动新服务并确认就绪；Web 页面在服务重启后自动重新加载（无需手动刷新），dev-reload（--reload）能力随重启继承。" +
       "可传 prompt 指定「重启后续跑」：新服务就绪后自动把这段提示词作为用户消息注入本会话并继续执行（服务重启会中断在途任务，续跑指令用于告诉模型重启后接着干什么）。" +
-      "结果写入系统临时目录 gebai-restart/state.json，续跑情况见同目录 continue.result.json，日志在 server.log.*。action=status 查看最近一次重启与续跑状态（不重启）。服务模式（多用户部署）不提供本工具。",
+      "结果写入系统临时目录 gebai-restart/state.json，续跑情况见同目录 continue.result.json，日志在 server.log.*。action=status 查看最近一次重启与续跑状态（不重启；并提示拉起器代码是否落后于磁盘源码）。服务模式（多用户部署）不提供本工具。",
     parameters: schema({
       action: { type: "string", enum: ["restart", "status"], description: "restart=执行重启（默认）；status=只读最近一次重启状态与续跑情况" },
       prompt: {

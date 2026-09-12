@@ -1,6 +1,6 @@
 /** restart_server 工具单测：双平台拉起器脚本构造、环境变量挑选、状态读取、服务模式不注入。 */
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { connect, createServer } from "node:net"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -11,6 +11,8 @@ import {
   buildLauncherScriptWin,
   consumeRestartContinuation,
   explainRestartState,
+  formatLauncherFreshness,
+  launcherCodeFreshness,
   makeRestartServerTool,
   pickRestartEnv,
   readContinuation,
@@ -190,6 +192,39 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
     const timeout = explainRestartState({ ok: false, reason: "ready-timeout", error: "就绪超时（90s）", logTail: "boom" }).join("\n")
     expect(timeout).toContain("90 秒内就绪")
     expect(timeout).toContain("boom")
+  })
+
+  test("launcherCodeFreshness：进程启动后源码又被改过 → 判定为落后（拉起器改动需再重启一次）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "restart-fresh-"))
+    try {
+      const src = join(dir, "restart.ts")
+      writeFileSync(src, "// v1", "utf8")
+      const mtime = statSync(src).mtimeMs
+      // 进程启动于源码修改**之前** → 运行中代码落后于磁盘
+      expect(launcherCodeFreshness({ sourceFile: src, startedAt: mtime - 5000 })).toMatchObject({ checked: true, stale: true })
+      // 进程启动于源码修改**之后** → 最新（当前代码就是磁盘代码）
+      expect(launcherCodeFreshness({ sourceFile: src, startedAt: mtime + 5000 })).toMatchObject({ checked: true, stale: false })
+      // 容差：同一秒内改完立即重启不误报
+      expect(launcherCodeFreshness({ sourceFile: src, startedAt: mtime - 500 }).stale).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("launcherCodeFreshness：源码不可读（二进制/编译形态）→ checked=false，不误报落后", () => {
+    const r = launcherCodeFreshness({ sourceFile: join(tmpdir(), "definitely-missing-restart.ts") })
+    expect(r.checked).toBe(false)
+    expect(r.stale).toBe(false)
+  })
+
+  test("formatLauncherFreshness：落后时给出重启两次的说明，最新时一行确认，不可判定时如实说明", () => {
+    const stale = formatLauncherFreshness({ checked: true, stale: true, sourceMtime: 1_700_000_000_000, startedAt: 1_699_999_000_000 })
+    expect(stale).toContain("拉起器代码落后")
+    expect(stale).toContain("再重启一次")
+    const fresh = formatLauncherFreshness({ checked: true, stale: false, sourceMtime: 1_700_000_000_000, startedAt: 1_700_001_000_000 })
+    expect(fresh).toContain("拉起器代码：最新")
+    expect(fresh).not.toContain("再重启一次")
+    expect(formatLauncherFreshness({ checked: false, stale: false })).toContain("无法判定")
   })
 
   test("status 动作：僵尸状态展示诊断与处置（不再只打印原始 JSON）", async () => {
