@@ -212,6 +212,30 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     cleanup(home)
   })
 
+  test("run_tests 的 test 项在包目录下执行（bunfig.toml 的 md loader 与环境净化只在包目录生效）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-so-cwd-"))
+    const repo = join(home, "repo")
+    mkdirSync(join(repo, "packages", "server"), { recursive: true })
+    const calls: Array<{ cmd: string; workdir?: string }> = []
+    const c = ctx(home, {
+      env: { SELF_OPTIMIZE_PROJECT: repo },
+      runCommand: async (cmd: string, opts?: { workdir?: string }) => {
+        calls.push({ cmd, workdir: opts?.workdir })
+        return { stdout: "ok", stderr: "", code: 0 }
+      },
+    })
+    // 文件同属一个包：切到该包目录（bunfig.toml 生效）并把路径转成相对该包
+    await selfOptimizeDef.tools!.run_tests.execute({ files: ["packages/server/src/a.test.ts", "packages/server/src/b.test.ts"] }, c)
+    expect(calls[0]!.cmd).toBe('bun test "src/a.test.ts" "src/b.test.ts"')
+    expect(calls[0]!.workdir).toBe(join(repo, "packages", "server"))
+    // 跨包：保持仓库根执行（不猜包目录，避免把路径拼到不存在的位置）
+    calls.length = 0
+    await selfOptimizeDef.tools!.run_tests.execute({ files: ["packages/server/src/a.test.ts", "packages/web/src/b.test.ts"] }, c)
+    expect(calls[0]!.workdir).toBe(repo)
+    expect(calls[0]!.cmd).toBe('bun test "packages/server/src/a.test.ts" "packages/web/src/b.test.ts"')
+    cleanup(home)
+  })
+
   test("run_tests checks 三件套：按序执行 test/typecheck/lint，首项失败即停（成功亦合并 stderr 明细）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-selfopt-checks-"))
     const cmds: string[] = []

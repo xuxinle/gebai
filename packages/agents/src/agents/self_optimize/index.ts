@@ -14,7 +14,7 @@ export const systemPrompt =
   "2) 离线优化（暂存 → 集中全面优化）：任务执行中因自身知识/工具不足或错误导致重复试错、低效（多次失败重试、工具用法反复出错、缺关键工具/子Agent），而当前任务不便中断深入优化时——先把问题暂存：self_optimize_backlog action=add（problem 问题现象 + direction 优化方向，会话ID自动记录供回溯），随即继续当前任务；暂存后用 ask 向用户确认处理时机（当场修复 / 留待后续集中全面优化，用户不选则默认后续）；后续执行全面优化时 action=list 取待优化项清单，按主题归并逐项优化（需更多上下文可读来源会话记录 {GEBAI_HOME}/users/{用户}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json——本地模式可读；沙箱部署模式会话文件不可读时以暂存的问题/方向文本为准），每项优化完成后 journal append 记录、backlog action=resolve ids=[编号] 移除；\n" +
   "3) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 包（packages/agents/src/）与仓库级文档/配置（DESIGN.md/AGENTS.md/AGENT.md/.env.example/README.md），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户在服务端设置 GEBAI_SELF_MODIFY=true 后重启；把改进沉淀为新的/修改后的子Agent 是首选方式（子Agent 是歌白的标准扩展机制）；写仓库文件一律用 write/edit/patch 文件工具（写范围守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（守卫不拦脚本通道，绕行属违规且绕开防盲写保护）；新建/修改子Agent 文件后立即验证注册（agent_run 试跑或 agent_list 查看——注册失败会直接返回文件加载错误原因，据因修复后再验）；\n" +
   "4) **设计同步铁律**：任何修改行为/接口/协议/存储布局/常量/命名规则等设计层面变更，必须同步更新 DESIGN.md 对应章节（文档与代码保持一致）；**产物纯净**：写出的代码/子Agent 提示词/文档只描述当前完整的能力与限制，不留历史痕迹——不写「何时发现/修复了什么问题」「为何改成现在这样」等变更缘由（缘由归 git 提交说明与 self_optimize_journal，历史有专门载体、不进产物），代码注释同理只述当前约束；遇到既有历史注记（时间/问题描述/修复记录）顺手清除；\n" +
-  "5) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"src/core/engine.test.ts\"]；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
+  "5) 验证（**测试是唯一准入凭证**）：任何修改必须通过相关测试——用 self_optimize_run_tests 工具执行（files 传相关测试文件，如 [\"packages/server/src/core/engine.test.ts\"]、相对仓库根；确认无回归后用 checks=[\"test\",\"typecheck\",\"lint\"] 跑三件套、all=true 跑全量——与 AGENTS.md 提交准入一致，一次审批跑全），失败则修复或 self_optimize_rollback 回滚（恢复修改并删除本次新建文件；失败先看错误信息定位再修复重测，不盲目重复执行）；\n" +
   "6) 用户验证：修改通过测试后，用 ask 询问用户验证方式——UI/前端类修改建议直接在当前浏览器页面验证（dev 模式修改后自动热更新，先请用户刷新页面，再调用 page_capture 捕获实际渲染结果：read 读取渲染后 html、vision_analyze 分析截图（vision 子代理已连带装载；读图文字用 vision_ocr），确认视觉效果与预期一致后再收尾）；服务端功能类修改可用 preview_server 在临时新端口启动验证服务（独立进程不中断当前会话），用户确认后启动并告知访问 URL 与停止方式，验证结束后用 preview_server action=stop 停止；\n" +
   "7) 收尾：git 工具只读查看变更（status/diff/log，无需审批）确认改动范围，只提交预期文件、不擅自 commit（add/commit 等写操作用 sh 且需审批；工作区若有与本次任务无关的未提交改动，先 git status 确认清楚，不混淆/误提交）；用 self_optimize_journal 记录本次优化（title/changes/verification/outcome/lessons——优化历史跨会话沉淀）；本次解决了待优化项的，self_optimize_backlog action=resolve ids=[编号] 一并移除；总结先结论后细节，关键位置引用 文件:行号；验证/测试未通过时如实说明并附关键错误输出。\n" +
   "项目名称：歌白（GEBAI Agent）。项目范围：项目根以系统提示词动态注记「项目根:」为准——设置了 SELF_OPTIMIZE_PROJECT 环境变量时即该路径（服务端部署限定项目内，本地模式不限制目录）；未设置时脚本调试（dev）模式自动推导为歌白源码仓库根（与 run_tests/rollback 工作目录及写范围守卫同源，提示词注记给出具体路径）；二进制模式未配置且无注记时按用户给定的路径处理。"
@@ -79,13 +79,31 @@ function safePathArgs(paths: string[]): string | null {
 
 /** run_tests：在歌白仓库根执行验证（指定测试文件/全量 + 可选 typecheck/lint——AGENTS.md 准入三件套）：
  *  测试是自我修改的唯一准入凭证。 */
+
+/** run_tests 的 test 项调用形态（cwd + 文件参数）：`bunfig.toml` 只在**包目录**下生效——`[loader] .md=text`
+ *  （子Agent 提示词的 md 导入）与 `[test] preload`（测试环境净化，清 GEBAI_ 与 CODE_ 前缀变量）都靠它；从仓库根直接
+ *  `bun test packages/server/x.test.ts` 两者兼失：md 被按 HTML 导入、仓库根 .env 注入测试进程——环境问题
+ *  会被误报为「改动引入回归」。文件同属一个包时切到该包目录并把路径转成相对该包（跨包/非包路径保持仓库根）。 */
+function testInvocation(root: string, files: string[]): { workdir: string; args: string } {
+  const norm = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "")
+  const pkgs = new Set(files.map((f) => /^packages\/([^/]+)\//.exec(norm(f))?.[1] ?? ""))
+  if (files.length > 0 && pkgs.size === 1 && !pkgs.has("")) {
+    const pkg = [...pkgs][0]!
+    return {
+      workdir: resolve(root, "packages", pkg),
+      args: files.map((f) => `"${norm(f).slice(`packages/${pkg}/`.length)}"`).join(" "),
+    }
+  }
+  return { workdir: root, args: files.map((f) => `"${f}"`).join(" ") }
+}
+
 const runTestsTool: import("@gebai/sdk").Tool = {
   name: "run_tests",
   description:
-    "在歌白仓库根执行验证（自我修改的唯一准入凭证）：checks 选择检查项（默认 [\"test\"]；修改确认后、收尾前用 [\"test\",\"typecheck\",\"lint\"] 三件套——与 AGENTS.md 提交准入一致，一次审批跑全）；test 时 files 传相关测试文件（相对仓库根，可多个），all=true 跑全量。按序执行、首项失败即停。输出各项结果（失败需修复或 rollback 回滚）。需审批。",
+    "在歌白仓库根执行验证（自我修改的唯一准入凭证）：checks 选择检查项（默认 [\"test\"]；修改确认后、收尾前用 [\"test\",\"typecheck\",\"lint\"] 三件套——与 AGENTS.md 提交准入一致，一次审批跑全）；test 时 files 传相关测试文件（相对仓库根，可多个；同属一个包时自动切到该包目录执行，使 bunfig.toml 的 md loader 与测试环境净化生效），all=true 跑全量。按序执行、首项失败即停。输出各项结果（失败需修复或 rollback 回滚）。需审批。",
   requiresApproval: true,
   parameters: schema({
-    files: { type: "array", items: { type: "string" }, description: "测试文件列表（相对仓库根；如 [\"src/core/engine.test.ts\"]）" },
+    files: { type: "array", items: { type: "string" }, description: "测试文件列表（相对仓库根，如 [\"packages/server/src/core/engine.test.ts\"]；同属一个包时自动切到该包目录执行）" },
     all: { type: "boolean", description: "true 跑全量测试（bun run test，忽略 files）" },
     checks: { type: "array", items: { type: "string", enum: ["test", "typecheck", "lint"] }, description: "检查项列表（默认 [\"test\"]；[\"test\",\"typecheck\",\"lint\"] 为提交前三件套）" },
   }),
@@ -104,15 +122,18 @@ const runTestsTool: import("@gebai/sdk").Tool = {
     if (unsafe) return { output: unsafe }
     const sections: string[] = []
     for (const check of checks) {
+      // test 项按包目录执行（bunfig.toml 的 md loader 与测试环境净化只在包目录生效，见 testInvocation）；
+      // typecheck/lint 是根级 turbo 任务，恒在仓库根执行
+      const inv = check === "test" && args.all !== true ? testInvocation(root, files) : { workdir: root, args: "" }
       const cmd =
         check === "test"
           ? args.all === true
             ? "bun run test"
-            : `bun test ${files.map((f) => `"${f}"`).join(" ")}`
+            : `bun test ${inv.args}`
           : check === "typecheck"
             ? "bun run typecheck"
             : "bun run lint"
-      const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: root, timeoutMs: 10 * 60 * 1000 })
+      const { stdout, stderr, code } = await ctx.runCommand(cmd, { workdir: inv.workdir, timeoutMs: 10 * 60 * 1000 })
       // 始终合并 stderr：bun test 在 Windows 把用例明细/汇总写 stderr（exit 0 亦然），只取 stdout 会让
       // 用户看不到「跑了哪些用例、几个 pass」——准入判定看 exit code，明细供人核验
       const text = [stdout, stderr].filter(Boolean).join("\n")
