@@ -28,6 +28,10 @@ users/
 tmp/
 audit-fs.jsonl
 feishu/
+# 二进制形态运行时物化点（{GEBAI_HOME}/vendor/：playwright driver 与 pwcore、d2js、ripgrep、
+# 客卿预置物化；以 GEBAI_HOME=仓库根 运行编译产物时在根下生成，dev 形态不经此路径。
+# 本地 CV 运行时不在此——它在 resources/vendor/cv，随资源目录整体忽略）
+/vendor/
 # 调度主实例锁（{GEBAI_HOME}/.gebai-primary.json，运行时文件）
 .gebai-primary.json
 .gebai-primary.json.*.tmp
