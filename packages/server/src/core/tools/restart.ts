@@ -203,10 +203,11 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
     "  $ownerAlive = $false",
     "  try { Get-Process -Id $owner -ErrorAction Stop | Out-Null; $ownerAlive = $true } catch {}",
     "  $tail = ''",
-    `  if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -ErrorAction SilentlyContinue) -join [char]10 }`,
-    // 中止即还原轮转掉的诊断日志：否则现场只剩 .prev，事后难查（成功路径才需要让位给新日志）
+    // 中止即还原轮转掉的诊断日志（成功路径才需要让位给新日志）：**必须先还原再读**——
+    // 文件在脚本开头已被轮转为 .prev，直接读 .err 会拿到空值，使 logTail 恒为空
     `  if (Test-Path '${logPs}.out.prev') { Move-Item '${logPs}.out.prev' '${logPs}.out' -Force }`,
     `  if (Test-Path '${logPs}.err.prev') { Move-Item '${logPs}.err.prev' '${logPs}.err' -Force }`,
+    `  if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -Encoding UTF8 -ErrorAction SilentlyContinue) -join [char]10 }`,
     "  if ($ownerAlive) {",
     `    [IO.File]::WriteAllText('${statePs}', (@{ ok = $false; reason = 'occupied'; port = $port; ownerPid = [int]$owner; error = ('端口 ' + $port + ' 被其他进程(PID ' + $owner + ')占用，未启动新服务'); logTail = $tail } | ConvertTo-Json -Compress))`,
     "  } else {",
@@ -233,7 +234,7 @@ export function buildLauncherScriptWin(deps: RestartDeps): string {
     "}",
     // 5) 写状态文件（成功=就绪；失败=日志尾部）
     "$tail = ''",
-    `if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -ErrorAction SilentlyContinue) -join [char]10 }`,
+    `if (Test-Path '${logPs}.err') { $tail = (Get-Content '${logPs}.err' -Tail 20 -Encoding UTF8 -ErrorAction SilentlyContinue) -join [char]10 }`,
     "if ($ready) {",
     `  [IO.File]::WriteAllText('${statePs}', (@{ ok = $true; port = $port; pid = $newPid; note = '新服务已就绪' } | ConvertTo-Json -Compress))`,
     "} else {",
@@ -316,10 +317,14 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
     `  owner=$(ss -ltnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\\K[0-9]+' | head -1)`,
     '  owner_alive=0',
     '  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then owner_alive=1; fi',
+    // 中止即还原轮转掉的诊断日志（与 Windows 同口径），再读其尾部供 state 展示
+    `  mv -f ${shq(`${logOut}.prev`)} ${shq(logOut)} 2>/dev/null || true`,
+    `  mv -f ${shq(`${logErr}.prev`)} ${shq(logErr)} 2>/dev/null || true`,
+    '  tail_log() { tail -n 20 ' + shq(logErr) + ' 2>/dev/null | tr "\\n" " "; }',
     '  if [ "$owner_alive" = "1" ]; then',
-    `    printf '{"ok":false,"reason":"occupied","port":%s,"ownerPid":"%s","error":"端口 %s 被其他进程(PID %s)占用，未启动新服务"}\\n' "$port" "\${owner:-unknown}" "$port" "\${owner:-unknown}" > ${shq(stateFile)}`,
+    `    printf '{"ok":false,"reason":"occupied","port":%s,"ownerPid":"%s","error":"端口 %s 被其他进程(PID %s)占用，未启动新服务","logTail":"%s"}\\n' "$port" "\${owner:-unknown}" "$port" "\${owner:-unknown}" "$(tail_log)" > ${shq(stateFile)}`,
     '  else',
-    `    printf '{"ok":false,"reason":"zombie-socket","port":%s,"ownerPid":"%s","error":"端口 %s 仍处于 LISTENING 但属主进程 %s 已不存在（陈旧监听记录）；用户空间无法释放该端口"}\\n' "$port" "\${owner:-unknown}" "$port" "\${owner:-unknown}" > ${shq(stateFile)}`,
+    `    printf '{"ok":false,"reason":"zombie-socket","port":%s,"ownerPid":"%s","error":"端口 %s 仍处于 LISTENING 但属主进程 %s 已不存在（陈旧监听记录）；用户空间无法释放该端口","logTail":"%s"}\\n' "$port" "\${owner:-unknown}" "$port" "\${owner:-unknown}" "$(tail_log)" > ${shq(stateFile)}`,
     '  fi',
     "  exit 1",
     "fi",
@@ -341,8 +346,7 @@ export function buildLauncherScriptPosix(deps: RestartDeps): string {
     "  fi",
     "  sleep 0.8",
     "done",
-    // 5) 写状态文件（成功=就绪；失败=日志尾部）
-    `tail_log() { tail -n 20 ${shq(logErr)} 2>/dev/null | tr '\\n' ' '; }`,
+    // 5) 写状态文件（成功=就绪；失败=日志尾部）——tail_log 已在端口占用分支前定义
     'if [ "$ready" = "1" ]; then',
     `  printf '{"ok":true,"port":%s,"pid":%s,"note":"新服务已就绪"}\\n' "$port" "$new_pid" > ${shq(stateFile)}`,
     "else",

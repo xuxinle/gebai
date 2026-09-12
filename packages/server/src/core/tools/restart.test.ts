@@ -119,6 +119,31 @@ describe("restart_server（Linux/macOS 拉起器）", () => {
     expect(script).toContain("state.json")
   })
 
+  test("拉起器脚本：logTail 先还原再读取（否则读的是已轮转走的空文件，诊断信息丢失）", () => {
+    // Windows：脚本开头把 .out/.err 轮转为 .prev，因此失败分支必须**先 Move-Item 还原、再 Get-Content 读**
+    const winLines = buildLauncherScriptWin(makeDeps()).split("\n")
+    const winRestore = winLines.findIndex((l) => l.includes(".err.prev") && l.includes("Move-Item"))
+    const winRead = winLines.findIndex((l) => l.includes("Get-Content") && l.includes(".err'"))
+    expect(winRestore).toBeGreaterThan(-1)
+    expect(winRead).toBeGreaterThan(-1)
+    expect(winRestore).toBeLessThan(winRead) // 顺序断言：还原在前
+    // posix：同口径（还原 mv -f 先于 tail_log 定义/调用）
+    const posix = buildLauncherScriptPosix(makeDeps({ platform: "linux" }))
+    const posixLines = posix.split("\n")
+    const posRestore = posixLines.findIndex((l) => l.includes("server.log.err.prev") && l.trim().startsWith("mv -f"))
+    const posTail = posixLines.findIndex((l) => l.includes("tail_log()"))
+    expect(posRestore).toBeGreaterThan(-1)
+    expect(posTail).toBeGreaterThan(-1)
+    expect(posRestore).toBeLessThan(posTail)
+    // 占用分支必须带 logTail（两平台）；Windows 读日志需显式 -Encoding UTF8（服务日志为 UTF-8，
+    // PS5.1 的 Get-Content 缺省按 ANSI 读 → 中文诊断信息会乱码）
+    expect(buildLauncherScriptWin(makeDeps())).toContain("logTail = $tail")
+    expect(winLines.filter((l) => l.includes("Get-Content")).every((l) => l.includes("-Encoding UTF8"))).toBe(true)
+    expect(posix).toContain('"logTail":"%s"')
+    // tail_log 只定义一次（避免重复定义）
+    expect(posixLines.filter((l) => l.includes("tail_log()")).length).toBe(1)
+  })
+
   test("buildLauncherScriptPosix：第三方占端口 → 失败退出不动无辜进程", () => {
     const script = buildLauncherScriptPosix(makeDeps({ platform: "linux" }))
     expect(script).toContain("被其他进程(PID")
