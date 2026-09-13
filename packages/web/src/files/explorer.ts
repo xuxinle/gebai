@@ -44,6 +44,8 @@ export interface Explorer {
   refreshGitDecorations: () => void
   /** 展开并选中目标路径（从搜索结果/标签页跳转） */
   reveal: (path: string, opts?: { select?: boolean }) => Promise<void>
+  /** 展开/收起「当前目录过滤」输入行（Ctrl+Alt+F）。 */
+  toggleSearch: (open?: boolean) => void
   selected: () => { path: string; type: DirEntry["type"] } | null
   dispose: () => void
 }
@@ -58,50 +60,97 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
   let showHidden = false
 
   const treeHost = h("div", { class: "fw-tree" })
-  const crumbHost = h("div", { class: "fw-crumbs" })
   const filterInput = h("input", { class: "fw-input sm", placeholder: "按名称过滤（当前目录）", type: "search" })
+
+  /** 头部小图标按钮（title 即提示；与标签栏动作区同款 .fw-icon-btn）。 */
+  function headBtn(name: string, title: string, onClick: () => void, cls = ""): HTMLButtonElement {
+    const b = h("button", { class: `fw-icon-btn sm ${cls}`.trim(), title })
+    b.appendChild(icon(name, 14))
+    b.onclick = onClick
+    return b
+  }
+
   const rootBtn = h("button", { class: "fw-root-btn" }, [icon("folderOpen"), h("span", { class: "fw-root-name", text: "选择根" }), icon("chevronDown")])
+  const writableNow = () => hooks.rootsMeta().writable
+  const newFileBtn = headBtn("filePlus", "新建文件", () => {
+    if (!writableNow()) return toast("当前为只读模式（GEBAI_FS_WRITE=false）", "error")
+    void doNewFile(selectedDir())
+  })
+  const newDirBtn = headBtn("folderPlus", "新建文件夹", () => {
+    if (!writableNow()) return toast("当前为只读模式（GEBAI_FS_WRITE=false）", "error")
+    void doNewDir(selectedDir())
+  })
+  const moreBtn = headBtn("more", "更多操作（过滤 / 排序 / 隐藏文件 / 上传 / 折叠）", () => openMoreMenu(moreBtn))
+  const searchRow = h("div", { class: "fw-explorer-search", hidden: true }, [filterInput, headBtn("close", "关闭过滤（Esc）", () => toggleSearch(false))])
 
   const el = h("div", { class: "fw-explorer" }, [
-    h("div", { class: "fw-explorer-head" }, [rootBtn]),
-    h("div", { class: "fw-explorer-tools" }, [
-      filterInput,
-      (() => {
-        const b = h("button", { class: "fw-icon-btn", title: "排序（名称/时间/大小/类型）" }, [icon("settings")])
-        b.onclick = () => {
-          const r = b.getBoundingClientRect()
-          showMenu(r.left, r.bottom + 4, [
-            { label: "名称", icon: "file", onClick: () => setSort("name") },
-            { label: "修改时间", icon: "history", onClick: () => setSort("mtime") },
-            { label: "大小", icon: "archive", onClick: () => setSort("size") },
-            { label: "类型", icon: "diff", onClick: () => setSort("type") },
-          ])
-        }
-        return b
-      })(),
-      (() => {
-        const b = h("button", { class: "fw-icon-btn", title: "显示/隐藏隐藏文件" }, [icon("eye")])
-        b.onclick = () => {
-          showHidden = !showHidden
-          b.classList.toggle("active", showHidden)
-          void refresh("")
-        }
-        return b
-      })(),
-      (() => {
-        const b = h("button", { class: "fw-icon-btn", title: "刷新" }, [icon("refresh")])
-        b.onclick = () => void refresh("")
-        return b
-      })(),
+    h("div", { class: "fw-explorer-head" }, [
+      rootBtn,
+      h("div", { class: "fw-head-actions" }, [
+        newFileBtn,
+        newDirBtn,
+        headBtn("refresh", "刷新（F5）", () => void refresh("")),
+        moreBtn,
+      ]),
     ]),
-    crumbHost,
+    searchRow,
     treeHost,
   ])
 
   function setSort(key: typeof sortKey): void {
     sortKey = key
     cache.clear()
-    void refresh("")
+    void refresh("", { keepSelection: true })
+  }
+
+  /** 当前「新建 / 上传」的目标目录：选中目录用目录本身，选中文件用其父目录，未选中用根目录。 */
+  function selectedDir(): string {
+    if (!selectedPath) return ""
+    if (entryByPath.get(selectedPath)?.type === "dir") return selectedPath
+    return selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : ""
+  }
+
+  /** 折叠当前根的全部展开项。 */
+  function collapseAll(): void {
+    expanded.get(rootId)?.clear()
+    render()
+  }
+
+  /** 「当前目录过滤」输入行：默认隐藏，Ctrl+Alt+F 或「更多」菜单展开；Esc / 关闭按钮收起并清空。 */
+  function toggleSearch(open?: boolean): void {
+    const next = open ?? searchRow.hidden
+    searchRow.hidden = !next
+    if (next) filterInput.focus()
+    else if (filterText) {
+      filterInput.value = ""
+      filterText = ""
+      render()
+    }
+  }
+
+  /** 显示/隐藏隐藏文件：服务端按此过滤，缓存键不含该开关，故整体失效重取。 */
+  function toggleHidden(): void {
+    showHidden = !showHidden
+    cache.clear()
+    void refresh("", { keepSelection: true })
+  }
+
+  /** 头部「更多」菜单：过滤 / 排序 / 隐藏文件 / 上传 / 折叠全部收在一处，头部只留高频图标。 */
+  function openMoreMenu(anchor: HTMLElement): void {
+    const r = anchor.getBoundingClientRect()
+    const mark = (on: boolean) => (on ? "✓ " : "")
+    showMenu(r.left, r.bottom + 4, [
+      { label: "在当前目录过滤…", icon: "search", shortcut: "Ctrl+Alt+F", onClick: () => toggleSearch(true) },
+      { separator: true },
+      { label: `${mark(sortKey === "name")}按名称排序`, icon: "file", onClick: () => setSort("name") },
+      { label: `${mark(sortKey === "mtime")}按修改时间排序`, icon: "history", onClick: () => setSort("mtime") },
+      { label: `${mark(sortKey === "size")}按大小排序`, icon: "archive", onClick: () => setSort("size") },
+      { label: `${mark(sortKey === "type")}按类型排序`, icon: "diff", onClick: () => setSort("type") },
+      { separator: true },
+      { label: `${mark(showHidden)}显示隐藏文件`, icon: "eye", onClick: () => toggleHidden() },
+      { label: "上传文件…", icon: "upload", disabled: !writableNow(), onClick: () => pickAndUpload(selectedDir()) },
+      { label: "折叠全部", icon: "collapseAll", onClick: () => collapseAll() },
+    ])
   }
 
   function entriesOf(path: string): DirEntry[] | undefined {
@@ -133,23 +182,6 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
   await refresh("")
   hooks.onNavigate?.("", true)
 }
-
-  function updateCrumbs(): void {
-    clear(crumbHost)
-    const info = hooks.roots().find((r) => r.id === rootId)
-    const parts = (selectedPath ?? "").split("/").filter(Boolean)
-    const rootCrumb = h("button", { class: "fw-crumb" }, [icon("folderOpen"), h("span", { text: info?.name ?? rootId })])
-    rootCrumb.onclick = () => void refresh("")
-    crumbHost.appendChild(rootCrumb)
-    let acc = ""
-    for (const p of parts) {
-      acc = acc ? `${acc}/${p}` : p
-      const target = acc
-      const seg = h("button", { class: "fw-crumb" }, [icon("chevronRight"), h("span", { text: p })])
-      seg.onclick = () => void reveal(target)
-      crumbHost.appendChild(seg)
-    }
-  }
 
   /* --------------------------- 树渲染 --------------------------- */
 
@@ -275,7 +307,6 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     applyDecoration(row)
     row.onclick = () => {
       selectedPath = entry.path
-      updateCrumbs()
       refreshSelection()
       if (!isDir) hooks.openFile(rootId, entry.path)
       // 地址栏同步：进目录记一条历史（可后退），点文件就地替换
@@ -351,7 +382,6 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     }
     treeHost.replaceChildren(frag)
     refreshSelection()
-    updateCrumbs()
   }
 
   /** 目录行之后、属于它子树的连续行（扁平渲染下「深度大于本行」的行恰好就是它的子树）。 */
@@ -703,12 +733,17 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       render()
     }, 140)
   }
+  filterInput.onkeydown = (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation()
+      toggleSearch(false)
+    }
+  }
 
   treeHost.oncontextmenu = (e) => {
     if (e.target === treeHost) {
       e.preventDefault()
       selectedPath = null
-      updateCrumbs()
       refreshSelection()
       openEntryMenu(e.clientX, e.clientY)
     }
@@ -769,7 +804,6 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
       render()
     } else {
       refreshSelection()
-      updateCrumbs()
     }
     rowByPath.get(path)?.scrollIntoView({ block: "nearest" })
     // 定位跳转（面包屑 / 深层链接 / 前进后退）同样要同步地址栏
@@ -783,6 +817,7 @@ export function createExplorer(hooks: ExplorerHooks): Explorer {
     refresh,
     refreshGitDecorations,
     reveal,
+    toggleSearch,
     selected: () => (selectedPath ? { path: selectedPath, type: (entriesOf(selectedPath.includes("/") ? selectedPath.slice(0, selectedPath.lastIndexOf("/")) : "")?.find((x) => x.path === selectedPath)?.type ?? "file") as DirEntry["type"] } : null),
     dispose: () => {
       cache.clear()

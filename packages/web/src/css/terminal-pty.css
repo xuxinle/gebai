@@ -1,0 +1,89 @@
+/**
+ * 文件工作台 · 终端面板（PTY + xterm）样式。
+ *
+ * 只补 xterm 容器与搜索浮层；标题栏 / 标签 / 按钮沿用 terminal.css 的 .fw-term-* 类
+ * （降级实现与 PTY 实现共用同一套外观）。容器类名走 fw-pty-* 前缀，避免与旧实现的
+ * .fw-term-body / .fw-term-view 布局规则打架。
+ */
+
+.fw-term-host {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.fw-pty-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.fw-pty-view {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.fw-pty-view[hidden] {
+  display: none;
+}
+
+/* xterm 挂载点：绝对定位撑满，让 FitAddon 量到的尺寸始终等于可见区域 */
+.fw-pty-term {
+  position: absolute;
+  inset: 0;
+  padding: 4px 6px 0 6px;
+  background: var(--bg-inset);
+}
+
+.fw-pty-term .xterm {
+  height: 100%;
+}
+
+.fw-pty-term .xterm-viewport {
+  background: transparent !important;
+}
+
+.fw-pty-term .xterm-screen canvas {
+  /* 主题背景由容器给，避免 xterm 默认黑底在浅色主题下突兀 */
+  background: transparent;
+}
+
+/* 搜索浮层（VSCode 终端搜索同款：右上角） */
+.fw-pty-search {
+  position: absolute;
+  top: 6px;
+  right: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+.fw-pty-search[hidden] {
+  display: none;
+}
+
+.fw-pty-search .fw-input {
+  width: 170px;
+}
+
+.fw-pty-search-status {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 占位（能力不可用 / 加载中）：与降级实现同一套 .fw-term-notice 外观，仅补竖排间距 */
+.fw-pty-body .fw-term-notice {
+  margin: auto;
+}

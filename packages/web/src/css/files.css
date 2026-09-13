@@ -236,8 +236,12 @@
   height: 100%;
 }
 
+/* 头部单行（VSCode 式）：根选择占主宽，右侧一排小图标按钮；过滤行按需展开、默认不占高度。 */
 .fw-explorer-head {
-  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -245,8 +249,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
-  padding: 6px 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -269,7 +274,14 @@
   text-align: left;
 }
 
-.fw-explorer-tools {
+.fw-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.fw-explorer-search {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -277,45 +289,14 @@
   border-bottom: 1px solid var(--border);
 }
 
-.fw-explorer-tools .fw-input {
+/* display:flex 会盖掉 [hidden] 的 UA 样式，必须显式重笔 */
+.fw-explorer-search[hidden] {
+  display: none;
+}
+
+.fw-explorer-search .fw-input {
   flex: 1;
   min-width: 0;
-}
-
-.fw-crumbs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 1px;
-  padding: 4px 6px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
-}
-
-.fw-crumb {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px 5px;
-  border: 0;
-  background: none;
-  color: var(--text-muted);
-  border-radius: 4px;
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-  max-width: 140px;
-}
-
-.fw-crumb span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fw-crumb:hover {
-  background: var(--bg-hover);
-  color: var(--text);
 }
 
 .fw-tree {

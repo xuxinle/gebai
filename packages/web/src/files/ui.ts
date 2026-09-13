@@ -67,6 +67,11 @@ const ICONS: Record<string, string> = {
   download: '<path d="M8 2v8m0 0l3-3m-3 3L5 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 12.5v1A1.5 1.5 0 004 15h8a1.5 1.5 0 001.5-1.5v-1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   upload: '<path d="M8 14V6m0 0L5 9m3-3l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 4.5v-1A1.5 1.5 0 014 2h8a1.5 1.5 0 011.5 1.5v1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   plus: '<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  // 资源管理器头部：新建文件 / 新建文件夹 / 折叠全部 / 更多
+  filePlus: '<path d="M3.6 3A1.6 1.6 0 015.2 1.4h3.4l3.2 3.2v6.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8.6 1.4v3.2h3.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M11.8 11.4v4M9.8 13.4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  folderPlus: '<path d="M1.8 4.6A1.5 1.5 0 013.3 3.1h2.9l1.4 1.9h4.9A1.5 1.5 0 0114 6.5v5.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M11.8 11.4v4M9.8 13.4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  collapseAll: '<path d="M3 3.6h10M3 12.4h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.4 6.6L8 5l1.6 1.6M6.4 9.4L8 11l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  more: '<circle cx="3.4" cy="8" r="1.25" fill="currentColor"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/><circle cx="12.6" cy="8" r="1.25" fill="currentColor"/>',
   minus: '<path d="M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   close: '<path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9.2a1 1 0 001 .8h5.6a1 1 0 001-.8l.7-9.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',

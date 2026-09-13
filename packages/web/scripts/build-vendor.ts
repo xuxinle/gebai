@@ -94,3 +94,12 @@ copyDirIfChanged(join(root, "node_modules", "@terrastruct", "d2", "dist", "brows
 // 且 editor.main 自无需转译，vite 当普通 JS 处理反而会解析/改写其巨大的内部模块表。
 // 体积约 24MB（含 ts/json/css/html worker 与全部语言高亮），已 gitignore，仅构建期生成。
 copyTreeIfChanged(join(root, "node_modules", "monaco-editor", "min", "vs"), join(vendor, "monaco", "vs"), "monaco/vs", (rel) => !rel.endsWith(".map"))
+// xterm.js（VSCode 同款终端内核）+ 三个官方 addon：ESM 构建按稳定文件名伺服、运行时动态 import
+// （与 mermaid/d2 同款理由：不走打包链，dev-reload 重建后 URL 不变）。为何不用 UMD 构建：
+// xterm 6 的 UMD 包靠 `for (var s in exports)` 把导出挂到全局，而这批导出是不可枚举属性，
+// 全局拿不到 Terminal（实测 undefined）；ESM 的命名导出无此问题，与动态 import 配合也更直接。
+copyFileIfChanged(join(root, "node_modules", "@xterm", "xterm", "lib", "xterm.mjs"), join(vendor, "xterm", "xterm.mjs"), "xterm.mjs")
+copyFileIfChanged(join(root, "node_modules", "@xterm", "xterm", "css", "xterm.css"), join(vendor, "xterm", "xterm.css"), "xterm.css")
+copyFileIfChanged(join(root, "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.mjs"), join(vendor, "xterm", "addon-fit.mjs"), "addon-fit.mjs")
+copyFileIfChanged(join(root, "node_modules", "@xterm", "addon-search", "lib", "addon-search.mjs"), join(vendor, "xterm", "addon-search.mjs"), "addon-search.mjs")
+copyFileIfChanged(join(root, "node_modules", "@xterm", "addon-web-links", "lib", "addon-web-links.mjs"), join(vendor, "xterm", "addon-web-links.mjs"), "addon-web-links.mjs")

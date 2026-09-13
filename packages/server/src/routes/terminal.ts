@@ -95,6 +95,7 @@ export function registerTerminalRoutes(rc: RouteCtx): void {
       const sandboxed = d.sandbox.enforcedFor(user.id)
       if (sandboxed) return c.json({ error: SANDBOX_DENIED }, 403)
       const writable = !readOnly()
+      const pty = d.terminalPty?.available()
       const meta = d.terminal?.info()
       const enabled = termEnabled() && writable
       const reason = !meta || d.config.terminalEnabled === false ? TERM_OFF : writable ? undefined : READ_ONLY
@@ -107,6 +108,9 @@ export function registerTerminalRoutes(rc: RouteCtx): void {
         defaultShell: meta?.defaultShell ?? "",
         maxSessions: meta?.maxSessions ?? TERMINAL_MAX_SESSIONS,
         idleMs: meta?.idleMs ?? TERMINAL_IDLE_MS,
+        // PTY（真伪控制台）能力位：可用时前端用 xterm + WS 交互式终端，否则降级管道式会话
+        pty: !!pty?.ok,
+        ptyReason: pty?.ok ? undefined : pty?.reason,
       })
     } catch (err) {
       return errorResponse(c, err)

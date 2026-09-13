@@ -10,6 +10,8 @@ import { log } from "@gebai/sdk/node"
 
 /** 每个 WS 连接的事件总线退订函数（以连接为键，避免与 ws.data 的 user 字段互相覆盖）。 */
 const wsSubs = new WeakMap<object, () => void>()
+/** 每个 WS 连接的发送 sink（同连接复用同一对象：终端订阅以它为键退订）。 */
+const wsSinks = new WeakMap<object, WsSink>()
 /** 每个 WS 连接的连接上下文（open/message 共享同一实例，保证用户变更回调一致）。 */
 const wsConns = new WeakMap<object, WsConn>()
 /**
@@ -39,6 +41,19 @@ export function makeWsSink(ws: ServerWebSocket<unknown>): WsSink {
       ws.send(data)
     },
   }
+}
+
+/**
+ * 连接级 sink（带背压保护）：同一连接内多次分发复用同一对象——终端输出订阅以 sink 为键，
+ * 连接关闭时才能精确退订（每次 makeWsSink 新建对象的话，退订就找不到订阅者了）。
+ */
+function sinkOf(ws: ServerWebSocket<unknown>): WsSink {
+  let sink = wsSinks.get(ws)
+  if (!sink) {
+    sink = makeWsSink(ws)
+    wsSinks.set(ws, sink)
+  }
+  return sink
 }
 
 /**
@@ -152,7 +167,7 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         // 退订函数存于 WeakMap，避免被 auth.login 的 ws.data 覆盖而泄漏订阅。
         // 发送统一走背压保护 sink（慢客户端超限断开，见 makeWsSink）
         const conn = makeWsConn(ws, deps, state)
-        const sink = makeWsSink(ws)
+        const sink = sinkOf(ws)
         let unsub = state.subscribe(conn.get().id, (entry) => sink.send(JSON.stringify(entry)))
         // 用户变更（auth.login/logout）：事件订阅重绑到新用户
         conn.onUserChange?.(() => {
@@ -177,7 +192,7 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         // 按到达顺序串行处理（见 wsMsgChains 注释）：前一条消息完成后再处理下一条，
         // 保证 auth.login 的 conn.set(u) 先于后续请求生效（Bun 不保证 async handler 串行）
         const prev = wsMsgChains.get(ws) ?? Promise.resolve()
-        const next = prev.then(() => handleWsMessage(deps, makeWsSink(ws), msg, conn)).catch(() => {})
+        const next = prev.then(() => handleWsMessage(deps, sinkOf(ws), msg, conn)).catch(() => {})
         wsMsgChains.set(ws, next)
         await next
       },
@@ -185,6 +200,10 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
         wsSubs.get(ws)?.()
         wsSubs.delete(ws)
         devReloadClients.delete(ws)
+        // 终端输出订阅退订：会话本身保留（由空闲回收或用户显式关闭终结），仅断开推送
+        const sink = wsSinks.get(ws)
+        if (sink) deps.terminalPty?.detach(sink)
+        wsSinks.delete(ws)
       },
     },
   })
@@ -200,5 +219,7 @@ export function serveComposed(c: Composed): ReturnType<typeof Bun.serve> {
   }
   // 进程退出时终止 vite build --watch 子进程（防孤儿）
   process.on("exit", () => devReload?.stop())
+  // PTY 驱动预热（首次编译 exe 约 1s）：后台执行，用户首次打开终端时不必等编译
+  void deps.terminalPty?.warmup()
   return server
 }

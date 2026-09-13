@@ -56,6 +56,8 @@ export interface AppDeps {
   git?: import("./core/git/service").GitService
   /** 文件工作台：终端服务（组合根注入；缺省时终端端点 404「终端能力未启用」）。 */
   terminal?: import("./core/exec/term-session").TerminalService
+  /** 文件工作台：终端 PTY 服务（Windows ConPTY；缺省或不可用时终端降级为管道式会话）。 */
+  terminalPty?: import("./core/exec/pty-session").PtySessionService
 }
 
 export type AppEnv = { Variables: { deps: AppDeps; user: AuthUser } }

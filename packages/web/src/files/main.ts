@@ -1983,6 +1983,7 @@ function showShortcuts(): void {
     ["Ctrl+Shift+G", "左侧变更面板"],
     ["Ctrl+Alt+G", "底部 Git 工具窗"],
     ["Ctrl+Alt+T", "底部终端工具窗"],
+    ["Ctrl+Alt+F", "资源管理器：在当前目录过滤"],
     ["Ctrl+K", "更多（新建 / 比较 / 服务端开关）"],
     ["Ctrl+Shift+D", "比较（任意两个提交 / 提交与工作区）"],
     ["F2", "重命名选中项"],
@@ -2120,6 +2121,13 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault()
     // 终端开关：当前看的不是终端就切过去，是终端则收起工具窗
     toggleTerminalPanel(!(state.dockVisible && state.dockView === "terminal"))
+    return
+  }
+  if (ctrl && e.altKey && e.key.toLowerCase() === "f") {
+    e.preventDefault()
+    // 资源管理器「在当前目录过滤」：展开左栏 + 切到资源管理器 + 展开过滤行
+    showLeftView("explorer")
+    explorer.toggleSearch()
     return
   }
   if (ctrl && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
