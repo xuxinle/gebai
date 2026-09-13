@@ -33,7 +33,6 @@ function ctx(home: string, env: Record<string, string> = {}): ToolContext {
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "", archive: {} as never }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => null,

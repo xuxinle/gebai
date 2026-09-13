@@ -4,7 +4,7 @@ import { historySplitIndex, isRunMessage, runIdOfMessage, type RunMessageLike } 
 /** 普通消息（不进折叠容器）。 */
 const plain = (): RunMessageLike => ({})
 /** 执行过程消息（同一 runId 归入同一折叠容器）。 */
-const run = (runId: string): RunMessageLike => ({ session: true, sessionRunId: runId })
+const run = (runId: string): RunMessageLike => ({ subSession: true, subSessionId: runId })
 
 describe("历史分片切分（historySplitIndex）", () => {
   test("消息数不超过首批容量：全部渲染（起点 0）", () => {

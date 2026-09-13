@@ -70,13 +70,13 @@ class FakeProvider implements LLMProvider {
       return
     }
     if (this.mode === "sub" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-sub", name: "agent_run", arguments: { agents: ["code"], input: "modify a file" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sub", name: "subsession_run", arguments: { agents: ["code"], input: "modify a file" } } }
       yield { type: "done" }
       return
     }
-    // subunknown：刚写入的破损子Agent 文件——agent_run 校验前置重扫（错误附因）+ agent_load 失败真实暴露
+    // subunknown：刚写入的破损子Agent 文件——subsession_run 校验前置重扫（错误附因）+ agent_load 失败真实暴露
     if (this.mode === "subunknown" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-su1", name: "agent_run", arguments: { agents: ["zz_probe_fresh"], input: "hi" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-su1", name: "subsession_run", arguments: { agents: ["zz_probe_fresh"], input: "hi" } } }
       yield { type: "done" }
       return
     }
@@ -87,7 +87,7 @@ class FakeProvider implements LLMProvider {
     }
     // subwrite：总Agent 调 code，子Agent 内调 write 写文件（项目绑定验证用）
     if (this.mode === "subwrite" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-sub", name: "agent_run", arguments: { agents: ["code"], input: "modify project" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sub", name: "subsession_run", arguments: { agents: ["code"], input: "modify project" } } }
       yield { type: "done" }
       return
     }
@@ -98,7 +98,7 @@ class FakeProvider implements LLMProvider {
     }
     // subproj：子Agent 内以 project 参数（预置项目名）调 write（预置项目验证用，参数来自 toolArgs）
     if (this.mode === "subproj" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-sub", name: "agent_run", arguments: { agents: ["code"], input: "modify preset project" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sub", name: "subsession_run", arguments: { agents: ["code"], input: "modify preset project" } } }
       yield { type: "done" }
       return
     }
@@ -109,7 +109,7 @@ class FakeProvider implements LLMProvider {
     }
     // subgrep：子Agent 内以 project 参数对预置项目根递归 grep（跳过大型目录）
     if (this.mode === "subgrep" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-g1", name: "agent_run", arguments: { agents: ["code"], input: "search code" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-g1", name: "subsession_run", arguments: { agents: ["code"], input: "search code" } } }
       yield { type: "done" }
       return
     }
@@ -119,26 +119,26 @@ class FakeProvider implements LLMProvider {
       return
     }
     // subcompose：总Agent 调 combo_test（测试注册的纯 md 组合子 Agent），
-    // 其环境注入的 agent_run 再编排 code
+    // 其环境注入的 subsession_run 再编排 code
     if (this.mode === "subcompose" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-c1", name: "agent_run", arguments: { agents: ["combo_test"], input: "make a report" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-c1", name: "subsession_run", arguments: { agents: ["combo_test"], input: "make a report" } } }
       yield { type: "done" }
       return
     }
     if (this.mode === "subcompose" && this.calls === 2) {
-      yield { type: "tool_call", toolCall: { id: "tc-c2", name: "agent_run", arguments: { agents: ["code"], input: "fix a bug" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-c2", name: "subsession_run", arguments: { agents: ["code"], input: "fix a bug" } } }
       yield { type: "done" }
       return
     }
-    // subdeep：递归自嵌套 combo_test，验证 SUBAGENT_DEPTH=3 截断（depth≥3 时 runNewSession 直接抛错，不再触发 chat）
+    // subdeep：递归自嵌套 combo_test，验证 SUBAGENT_DEPTH=3 截断（depth≥3 时 runSubSession 直接抛错，不再触发 chat）
     if (this.mode === "subdeep" && this.calls <= 3) {
-      yield { type: "tool_call", toolCall: { id: `tc-d${this.calls}`, name: "agent_run", arguments: { agents: ["combo_test"], input: "loop" } } }
+      yield { type: "tool_call", toolCall: { id: `tc-d${this.calls}`, name: "subsession_run", arguments: { agents: ["combo_test"], input: "loop" } } }
       yield { type: "done" }
       return
     }
     // substream：总Agent 调 code；子Agent 内一轮推理+文本+工具调用（验证推理/工具不推送），一轮纯文本（验证 done 推送）
     if (this.mode === "substream" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-s1", name: "agent_run", arguments: { agents: ["code"], input: "check something" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-s1", name: "subsession_run", arguments: { agents: ["code"], input: "check something" } } }
       yield { type: "done" }
       return
     }
@@ -156,17 +156,17 @@ class FakeProvider implements LLMProvider {
     }
     // suberr：总Agent 调 code；子Agent 内部模型调用持续抛错（重试耗尽后失败，验证异常路径 done 携带 error）
     if (this.mode === "suberr" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-e1", name: "agent_run", arguments: { agents: ["code"], input: "boom" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-e1", name: "subsession_run", arguments: { agents: ["code"], input: "boom" } } }
       yield { type: "done" }
       return
     }
     if (this.mode === "suberr" && this.calls >= 2) {
       throw new Error("sub agent model failed")
     }
-    // submulti：总Agent 一次预加载多个子Agent（code + writer_test）执行新会话；
-    // 新会话内调用第二个子Agent 的工具（writer_test_summarize），验证多 Agent 工具集叠加
+    // submulti：总Agent 一次预加载多个子Agent（code + writer_test）执行子会话；
+    // 子会话内调用第二个子Agent 的工具（writer_test_summarize），验证多 Agent 工具集叠加
     if (this.mode === "submulti" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-m1", name: "agent_run", arguments: { agents: ["code", "writer_test"], input: "make a report" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-m1", name: "subsession_run", arguments: { agents: ["code", "writer_test"], input: "make a report" } } }
       yield { type: "done" }
       return
     }
@@ -180,10 +180,10 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subpipe：总Agent 调 code 执行新会话；新会话内调用 tool_schemas（编排支持工具），
-    // 验证编排能力（tool_schemas/js）在新会话环境注册且经会话注册表解析全局工具
+    // subpipe：总Agent 调 code 执行子会话；子会话内调用 tool_schemas（编排支持工具），
+    // 验证编排能力（tool_schemas/js）在子会话环境注册且经会话注册表解析全局工具
     if (this.mode === "subpipe" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-p1", name: "agent_run", arguments: { agents: ["code"], input: "batch task" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-p1", name: "subsession_run", arguments: { agents: ["code"], input: "batch task" } } }
       yield { type: "done" }
       return
     }
@@ -206,10 +206,10 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subself：agent_run 预加载 self_optimize（验证连带预载 code + 写范围守卫）——
-    // 新会话内先试写核心引擎源码（守卫拒绝），再写子Agent 目录（放行）
+    // subself：subsession_run 预加载 self_optimize（验证连带预载 code + 写范围守卫）——
+    // 子会话内先试写核心引擎源码（守卫拒绝），再写子Agent 目录（放行）
     if (this.mode === "subself" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-so1", name: "agent_run", arguments: { agents: ["self_optimize"], input: "optimize gebai" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-so1", name: "subsession_run", arguments: { agents: ["self_optimize"], input: "optimize gebai" } } }
       yield { type: "done" }
       return
     }
@@ -239,9 +239,9 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subrev：agent_run 预加载 reverse_site——依赖自动连带预载 playwright（新会话双命名空间工具与提示词）
+    // subrev：subsession_run 预加载 reverse_site——依赖自动连带预载 playwright（子会话双命名空间工具与提示词）
     if (this.mode === "subrev" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-rv1", name: "agent_run", arguments: { agents: ["reverse_site"], input: "analyze site" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-rv1", name: "subsession_run", arguments: { agents: ["reverse_site"], input: "analyze site" } } }
       yield { type: "done" }
       return
     }
@@ -301,9 +301,9 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subautoload：新会话（combo_test 纯 md 组合，未预加载 code）内直接调用 code_system_info（新会话循环路由自愈）
+    // subautoload：子会话（combo_test 纯 md 组合，未预加载 code）内直接调用 code_system_info（子会话循环路由自愈）
     if (this.mode === "subautoload" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-sa1", name: "agent_run", arguments: { agents: ["combo_test"], input: "list files" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sa1", name: "subsession_run", arguments: { agents: ["combo_test"], input: "list files" } } }
       yield { type: "done" }
       return
     }
@@ -312,10 +312,10 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // subrisky：安全模式注册期过滤验证——新会话预加载 risky_test（其工具短名 delete 命中风险规则），
+    // subrisky：安全模式注册期过滤验证——子会话预加载 risky_test（其工具短名 delete 命中风险规则），
     // 调用 risky_test_delete 报未知工具
     if (this.mode === "subrisky" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-sr1", name: "agent_run", arguments: { agents: ["risky_test"], input: "delete something" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-sr1", name: "subsession_run", arguments: { agents: ["risky_test"], input: "delete something" } } }
       yield { type: "done" }
       return
     }
@@ -346,9 +346,9 @@ class FakeProvider implements LLMProvider {
       yield { type: "done" }
       return
     }
-    // 新会话内同批并行：外层 agent_run，子会话单批两个 tool_call（工具来自测试子Agent para_test_slow）
+    // 子会话内同批并行：外层 subsession_run，子会话单批两个 tool_call（工具来自测试子Agent para_test_slow）
     if (this.mode === "subparallel" && this.calls === 1) {
-      yield { type: "tool_call", toolCall: { id: "tc-spr1", name: "agent_run", arguments: { agents: ["para_test"], input: "run parallel" } } }
+      yield { type: "tool_call", toolCall: { id: "tc-spr1", name: "subsession_run", arguments: { agents: ["para_test"], input: "run parallel" } } }
       yield { type: "done" }
       return
     }
@@ -646,9 +646,9 @@ describe("AgentEngine", () => {
     cleanup(home)
   })
 
-  test("new-session loop runs same-batch tools in parallel (新会话循环同批并行，存档完整)", async () => {
+  test("new-session loop runs same-batch tools in parallel (子会话循环同批并行，存档完整)", async () => {
     const { home, engine, store, subAgents } = await setup("subparallel")
-    // 工具经测试子Agent 提供（新会话继承全局工具走 createGlobalTools 工厂全集，不含主注册表临时注册项）
+    // 工具经测试子Agent 提供（子会话继承全局工具走 createGlobalTools 工厂全集，不含主注册表临时注册项）
     let active = 0
     let max = 0
     subAgents.register({
@@ -673,10 +673,10 @@ describe("AgentEngine", () => {
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "delegate")
     expect(max).toBeGreaterThanOrEqual(2)
-    // 存档（agent_run 工具消息扩展字段）包含两个并行调用的结果条目
+    // 存档（subsession_run 工具消息扩展字段）包含两个并行调用的结果条目
     const loaded = await store.load(session.id)
-    const runToolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run")!
-    const archive = (runToolMsg as unknown as { sessionRun?: { messages: Array<{ role: string; content: string }> } }).sessionRun
+    const runToolMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "subsession_run")!
+    const archive = (runToolMsg as unknown as { subSessionArchive?: { messages: Array<{ role: string; content: string }> } }).subSessionArchive
     expect(archive).toBeDefined()
     const toolEntries = archive!.messages.filter((m) => m.role === "tool")
     expect(toolEntries.length).toBe(2)
@@ -735,7 +735,7 @@ describe("AgentEngine", () => {
     cleanup(home)
   })
 
-  test("任务级模型覆盖：agent_run 新会话执行同样使用任务级 Provider", async () => {
+  test("任务级模型覆盖：subsession_run 子会话执行同样使用任务级 Provider", async () => {
     const { home, store, registry, env, sandbox, events, config, subAgents } = await setup("sub")
     const baseProvider = new FakeProvider("sub")
     const overriddenProvider = new FakeProvider("sub")
@@ -754,7 +754,7 @@ describe("AgentEngine", () => {
     const session = await store.createSession("default", "t")
     await store.setEnv(session.id, "default", { GEBAI_LLM_MODEL: "gpt-x" })
     await engine.run(session.id, "default", "hi")
-    // 主循环（2 轮）+ 新会话执行（1 轮）均由任务级 Provider 服务，启动实例零调用
+    // 主循环（2 轮）+ 子会话执行（1 轮）均由任务级 Provider 服务，启动实例零调用
     expect(overriddenProvider.calls).toBe(3)
     expect(baseProvider.calls).toBe(0)
     cleanup(home)
@@ -904,7 +904,7 @@ console.log("defined ok")`,
     engine2.forgetSession(session.id)
     const session2 = await store.createSession("default", "t2")
     await engine.run(session2.id, "default", "again")
-    // 最后一轮 chat 的 schema 不再含 hello_tool（新会话无覆盖层）
+    // 最后一轮 chat 的 schema 不再含 hello_tool（子会话无覆盖层）
     const lastSeen = provider.seenTools[provider.seenTools.length - 1]
     expect(lastSeen.includes("hello_tool")).toBe(false)
     cleanup(home)
@@ -1023,7 +1023,8 @@ console.log("defined ok")`,
     // 未运行：null
     expect(engine.attachSnapshot(session.id)).toBeNull()
     const run = engine.run(session.id, "default", "run sh")
-    await new Promise((r) => setTimeout(r, 50))
+    // 轮询等待待决审批出现（固定 sleep 在并行跑测的负载下会误判；快照本身为只读）
+    for (let i = 0; i < 200 && (engine.attachSnapshot(session.id)?.pending.length ?? 0) === 0; i++) await new Promise((r) => setTimeout(r, 10))
     // 审批等待中：running + 待决审批（工具名/重试计数载荷完整，前端重渲染审批卡用）
     const snap = engine.attachSnapshot(session.id)
     expect(snap).not.toBeNull()
@@ -1321,7 +1322,7 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("runs a preloaded sub-agent via agent_run (new session)", async () => {
+  test("runs a preloaded sub-agent via subsession_run (new session)", async () => {
     const { home, engine, store } = await setup("sub")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "call code")
@@ -1350,25 +1351,25 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("agent_run streams new-session full execution to frontend and persists it (archived, not in main context)", async () => {
+  test("subsession_run streams new-session full execution to frontend and persists it (archived, not in main context)", async () => {
     const { home, engine, store, events, provider } = await setup("substream")
     const session = await store.createSession("default", "t")
-    const got: Array<{ type: string; text?: string; name?: string; session?: boolean; runId?: string; agents?: string[]; input?: string; output?: string }> = []
+    const got: Array<{ type: string; text?: string; name?: string; subSession?: boolean; runId?: string; agents?: string[]; input?: string; output?: string }> = []
     events.subscribe((e) => {
       if (
         e.type.startsWith("event.message.") ||
         e.type === "event.tool.call" ||
         e.type === "event.tool.result" ||
-        e.type === "event.session.start" ||
-        e.type === "event.session.done"
+        e.type === "event.subsession.start" ||
+        e.type === "event.subsession.done"
       ) {
         const p = e.payload as Record<string, unknown>
         got.push({
           type: e.type,
           text: p.text as string | undefined,
           name: p.name as string | undefined,
-          session: p.session as boolean | undefined,
-          runId: p.sessionRunId as string | undefined,
+          subSession: p.subSession as boolean | undefined,
+          runId: p.subSessionId as string | undefined,
           agents: p.agents as string[] | undefined,
           input: p.input as string | undefined,
           output: p.output as string | undefined,
@@ -1376,35 +1377,35 @@ console.log("defined ok")`,
       }
     })
     await engine.run(session.id, "default", "run sub-agent")
-    // 新会话每轮模型回复文本实时推送到前端（带 session 标记）
+    // 子会话每轮模型回复文本实时推送到前端（带 session 标记）
     const texts = got.filter((e) => e.type === "event.message.delta").map((e) => e.text).join("")
     expect(texts).toContain("子代理开始分析")
     expect(texts).toContain("子代理完成分析")
-    // 新会话最终轮推送 done（仅一条 session 标记的 done：中间工具轮不推 done）
-    expect(got.filter((e) => e.type === "event.message.done" && e.session).map((e) => e.text)).toEqual(["子代理完成分析"])
-    // 新会话的推理与工具调用全程推送（与主循环一致）：reasoning 带 session 标记，工具含主循环 agent_run 与新会话内 todo（全局工具继承）
+    // 子会话最终轮推送 done（仅一条 session 标记的 done：中间工具轮不推 done）
+    expect(got.filter((e) => e.type === "event.message.done" && e.subSession).map((e) => e.text)).toEqual(["子代理完成分析"])
+    // 子会话的推理与工具调用全程推送（与主循环一致）：reasoning 带 session 标记，工具含主循环 subsession_run 与子会话内 todo（全局工具继承）
     const reasonings = got.filter((e) => e.type === "event.message.reasoning")
     expect(reasonings.map((e) => e.text)).toEqual(["子代理推理过程"])
-    expect(reasonings.every((e) => e.session === true)).toBe(true)
-    expect(got.filter((e) => e.type === "event.tool.call").map((e) => [e.name, e.session])).toEqual([
-      ["agent_run", undefined],
+    expect(reasonings.every((e) => e.subSession === true)).toBe(true)
+    expect(got.filter((e) => e.type === "event.tool.call").map((e) => [e.name, e.subSession])).toEqual([
+      ["subsession_run", undefined],
       ["todo", true],
     ])
-    // 新会话 run 起止事件：start 携带 agents/input（每轮重推、同 runId 幂等，前端容器重建兜底），done 携带最终输出（前端折叠容器标题用）
-    const starts = got.filter((e) => e.type === "event.session.start")
+    // 子会话 run 起止事件：start 携带 agents/input（每轮重推、同 runId 幂等，前端容器重建兜底），done 携带最终输出（前端折叠容器标题用）
+    const starts = got.filter((e) => e.type === "event.subsession.start")
     expect(starts.length).toBeGreaterThanOrEqual(1)
     expect(starts[0].agents).toEqual(["code"])
     expect(starts[0].input).toBe("check something")
     expect(starts.every((e) => e.agents && e.agents[0] === "code" && e.input === "check something")).toBe(true)
-    const dones = got.filter((e) => e.type === "event.session.done")
+    const dones = got.filter((e) => e.type === "event.subsession.done")
     expect(dones).toHaveLength(1)
     expect(dones[0].output).toBe("子代理完成分析")
-    // 新会话执行完整存档：作为 agent_run 工具调用记录的扩展字段落盘（sessionRun 存档含全部内容）
+    // 子会话执行完整存档：作为 subsession_run 工具调用记录的扩展字段落盘（subSession 存档含全部内容）
     const loaded = await store.load(session.id)
-    expect(loaded!.messages.some((m) => m.session)).toBe(false) // 不再逐条落盘独立 session 消息
-    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    expect(loaded!.messages.some((m) => m.subSession)).toBe(false) // 不再逐条落盘独立 session 消息
+    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)
     expect(callMsg).toBeDefined()
-    const archive = callMsg!.sessionRun!
+    const archive = callMsg!.subSessionArchive!
     expect(archive.agents).toEqual(["code"])
     expect(archive.input).toBe("check something")
     expect(archive.output).toBe("子代理完成分析")
@@ -1412,35 +1413,35 @@ console.log("defined ok")`,
     expect(archive.messages.some((m) => m.role === "assistant" && m.content.includes("子代理开始分析") && m.toolCalls?.[0]?.name === "todo")).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.name === "todo")).toBe(true)
     expect(archive.messages.some((m) => m.role === "assistant" && m.content.includes("子代理完成分析"))).toBe(true)
-    // 存档条目推理独立字段（SessionRunEntry.reasoning，与主循环同规则）：content 纯正文、推理字段携带、无推理轮省略
+    // 存档条目推理独立字段（SubSessionEntry.reasoning，与主循环同规则）：content 纯正文、推理字段携带、无推理轮省略
     expect(archive.messages.find((m) => m.role === "assistant" && m.content.includes("子代理开始分析"))?.reasoning).toBe("子代理推理过程")
     expect(archive.messages.find((m) => m.role === "assistant" && m.content.includes("子代理开始分析"))?.content).not.toContain("<think>")
     expect(archive.messages.find((m) => m.role === "assistant" && m.content.includes("子代理完成分析"))?.reasoning).toBeUndefined()
-    // 存档不进入主上下文：再次运行会话（新一轮对话），模型看到的消息不含新会话内部过程
-    // （推理/中间文本/内部工具）；agent_run 调用参数与最终结果仍属主上下文（DESIGN：模型可见调用与最终返回）
+    // 存档不进入主上下文：再次运行会话（新一轮对话），模型看到的消息不含子会话内部过程
+    // （推理/中间文本/内部工具）；subsession_run 调用参数与最终结果仍属主上下文（DESIGN：模型可见调用与最终返回）
     await engine.run(session.id, "default", "next question")
     const lastChat = provider.seenChats[provider.seenChats.length - 1]
     const joined = JSON.stringify(lastChat)
     expect(joined).not.toContain("子代理推理过程")
     expect(joined).not.toContain("子代理开始分析")
-    // 新会话内 todo（全局工具继承）的执行结果（查询待办清单文本）不进主上下文
+    // 子会话内 todo（全局工具继承）的执行结果（查询待办清单文本）不进主上下文
     expect(joined).not.toContain("待办")
-    expect(joined).toContain("agent_run")
+    expect(joined).toContain("subsession_run")
     expect(joined).toContain("子代理完成分析")
     cleanup(home)
   })
 
-  test("compact keeps new-session archive intact (agent_run 记录扩展字段存档不随压缩丢失)", async () => {
+  test("compact keeps new-session archive intact (subsession_run 记录扩展字段存档不随压缩丢失)", async () => {
     const { home, engine, store } = await setup("substream")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "run sub-agent")
     const before = (await store.load(session.id))!.messages
-    const archivedBefore = before.filter((m) => m.sessionRun)
+    const archivedBefore = before.filter((m) => m.subSessionArchive)
     expect(archivedBefore.length).toBeGreaterThan(0)
-    // 全区间压缩：区间内夹带带存档的 agent_run 工具消息
+    // 全区间压缩：区间内夹带带存档的 subsession_run 工具消息
     await engine.compactSession(session.id, "default", { from: 0, to: before.length })
     const after = (await store.load(session.id))!.messages
-    const archivedAfter = after.filter((m) => m.sessionRun)
+    const archivedAfter = after.filter((m) => m.subSessionArchive)
     // 存档消息原样保留（同 id 同序），普通消息被压缩为摘要
     expect(archivedAfter.map((m) => m.id)).toEqual(archivedBefore.map((m) => m.id))
     expect(after.some((m) => m.compacted)).toBe(true)
@@ -1452,7 +1453,7 @@ console.log("defined ok")`,
     const session = await store.createSession("default", "t")
     const dones: Array<{ output?: string; error?: string }> = []
     events.subscribe((e) => {
-      if (e.type === "event.session.done") dones.push(e.payload as { output?: string; error?: string })
+      if (e.type === "event.subsession.done") dones.push(e.payload as { output?: string; error?: string })
     })
     await engine.run(session.id, "default", "run sub-agent")
     // 异常收尾：done 事件 output 为空并携带 error（前端据此折叠显示「（无返回/已中断）」，不残留「执行中」）
@@ -1474,22 +1475,22 @@ console.log("defined ok")`,
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "produce report")
     const loaded = await store.load(session.id)
-    // combo_test 环境注入的 agent_run（原名）可解析：无「未知工具」消息
-    expect(loaded!.messages.some((m) => m.content.includes("未知工具: agent_run"))).toBe(false)
+    // combo_test 环境注入的 subsession_run（原名）可解析：无「未知工具」消息
+    expect(loaded!.messages.some((m) => m.content.includes("未知工具: subsession_run"))).toBe(false)
     // 嵌套编排链路跑通：combo_test → code 均返回文本并汇总到最终回复
     expect(loaded!.messages.some((m) => m.role === "assistant" && m.content.includes("result after"))).toBe(true)
     cleanup(home)
   })
 
-  test("agent_run environment provides tool_schemas orchestration support (global tools resolvable)", async () => {
+  test("subsession_run environment provides tool_schemas orchestration support (global tools resolvable)", async () => {
     const { home, engine, store } = await setup("subpipe")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "run pipeline")
     const loaded = await store.load(session.id)
-    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)
     expect(callMsg).toBeDefined()
-    const archive = callMsg!.sessionRun!
-    // 新会话内 tool_schemas 执行成功：全局工具（todo，继承注册）经会话注册表解析、无「未知工具」错误
+    const archive = callMsg!.subSessionArchive!
+    // 子会话内 tool_schemas 执行成功：全局工具（todo，继承注册）经会话注册表解析、无「未知工具」错误
     expect(archive.messages.some((m) => m.role === "tool" && m.name === "tool_schemas" && m.content.includes("todo"))).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
     cleanup(home)
@@ -1543,13 +1544,13 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("路由自愈（新会话循环）：未预加载子Agent 的 {agent}_* 调用在本次运行内装载执行（隔离语义）", async () => {
+  test("路由自愈（子会话循环）：未预加载子Agent 的 {agent}_* 调用在本次运行内装载执行（隔离语义）", async () => {
     const { home, engine, store, provider, subAgents } = await setup("subautoload")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "delegate")
-    // 新会话内 code_system_info 经自愈装载执行：无「未知工具」，后续轮次 schema 已含、上下文拼接 code 提示词段
-    const callMsg = (await store.load(session.id))!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
-    const archive = callMsg!.sessionRun!
+    // 子会话内 code_system_info 经自愈装载执行：无「未知工具」，后续轮次 schema 已含、上下文拼接 code 提示词段
+    const callMsg = (await store.load(session.id))!.messages.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)
+    const archive = callMsg!.subSessionArchive!
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("自动装载子Agent code"))).toBe(true)
     expect(archive.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(false)
     expect(provider.seenTools[2]).toContain("code_system_info")
@@ -1561,9 +1562,9 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("agent_run preloads multiple sub-agents: 完整提示词拼接 + 多 Agent 工具集叠加", async () => {
+  test("subsession_run preloads multiple sub-agents: 完整提示词拼接 + 多 Agent 工具集叠加", async () => {
     const { home, engine, store, subAgents, provider } = await setup("submulti")
-    // 动态注册第二个测试子Agent（带工具）：验证多 Agent 预加载时其工具同样进入新会话
+    // 动态注册第二个测试子Agent（带工具）：验证多 Agent 预加载时其工具同样进入子会话
     subAgents.register({
       name: "writer_test",
       description: "文档撰写",
@@ -1580,21 +1581,21 @@ console.log("defined ok")`,
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "multi-agent task")
     const loaded = await store.load(session.id)
-    // 新会话系统提示词 = 两个子Agent 完整提示词拼接（均注入）
+    // 子会话系统提示词 = 两个子Agent 完整提示词拼接（均注入）
     const childSystem = String(provider.seenChats[1][0].content)
     expect(childSystem).toContain("你是源码分析与修改专家")
     expect(childSystem).toContain("你是 writer_test")
     expect(childSystem).toContain("已预加载子Agent: code, writer_test")
-    // 新会话内调用了第二个子Agent 的工具（writer_test_summarize）：多 Agent 工具集叠加生效
-    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    // 子会话内调用了第二个子Agent 的工具（writer_test_summarize）：多 Agent 工具集叠加生效
+    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)
     expect(callMsg).toBeDefined()
-    const archive = callMsg!.sessionRun!
+    const archive = callMsg!.subSessionArchive!
     expect(archive.agents).toEqual(["code", "writer_test"])
     expect(archive.messages.some((m) => m.role === "tool" && m.name === "writer_test_summarize" && m.content.includes("已汇总: draft"))).toBe(true)
     cleanup(home)
   })
 
-  test("sub-agent recursion depth is enforced via runNewSession depth propagation", async () => {
+  test("sub-agent recursion depth is enforced via runSubSession depth propagation", async () => {
     const { home, engine, store, provider } = await setup("subdeep")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "loop")
@@ -2254,7 +2255,7 @@ console.log("defined ok")`,
   })
 
   test("safe mode: risky-named sub-agent tools are not registered (unknown tool on call, no side effect)", async () => {
-    const s = await setup("subrisky", false, "local", true) // safeMode=true；新会话预加载 risky_test 并调用其 delete 工具
+    const s = await setup("subrisky", false, "local", true) // safeMode=true；子会话预加载 risky_test 并调用其 delete 工具
     // 动态注册测试子Agent：工具短名 delete 命中安全模式风险规则（注册期过滤），执行体带副作用标记
     let sideEffect = false
     s.subAgents.register({
@@ -2277,9 +2278,9 @@ console.log("defined ok")`,
     await s.engine.run(session.id, "default", "delete file")
     const loaded = await s.store.load(session.id)
     // 子Agent 风险短名工具（risky_test_delete）注册期被 Tool.safeMode 规则过滤：schema 不下发，调用报未知工具
-    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
+    const callMsg = loaded!.messages.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)
     expect(callMsg).toBeDefined()
-    const subToolMsg = callMsg!.sessionRun!.messages.find((m) => m.role === "tool" && m.name === "risky_test_delete")
+    const subToolMsg = callMsg!.subSessionArchive!.messages.find((m) => m.role === "tool" && m.name === "risky_test_delete")
     expect(subToolMsg?.content).toContain("未知工具")
     expect(sideEffect).toBe(false)
     // 子Agent 收到未知工具说明后调整（最终正常返回，主循环收尾）
@@ -2609,12 +2610,12 @@ console.log("defined ok")`,
 
   test("disabledTools blocks tools in new sessions too (inherited globals filtered)", async () => {
     const s = await setup("subwrite")
-    // 新会话继承的全局 write：禁用 write 对新会话同样生效
+    // 子会话继承的全局 write：禁用 write 对子会话同样生效
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "ask code agent to write", { disabledTools: ["write"] })
-    // 新会话内的 schema 过滤（write 不出现在子Agent 模型调用的工具列表，seenTools[1] 为子Agent 首轮）
+    // 子会话内的 schema 过滤（write 不出现在子Agent 模型调用的工具列表，seenTools[1] 为子Agent 首轮）
     expect(s.provider.seenTools[1]).not.toContain("write")
-    // 新会话循环内被调用时阻止执行（禁用说明作为工具结果返回给子Agent 模型）
+    // 子会话循环内被调用时阻止执行（禁用说明作为工具结果返回给子Agent 模型）
     const disabledMsgs = s.provider.seenChats.some((chat) =>
       chat.some((m) => m.role === "tool" && m.name === "write" && String(m.content).includes("当前通道不可用")),
     )
@@ -3058,7 +3059,7 @@ describe("context compaction", () => {
 
   test("auto compaction triggers when the model service rejects with context length exceeded（接口 4xx = 真实大小信号）", async () => {
     const s = await sessionWithHistory(10)
-    // 无 usage 基线（新会话/接口不返回 usage）：不做估算预判——接口以上下文长度错误拒绝
+    // 无 usage 基线（子会话/接口不返回 usage）：不做估算预判——接口以上下文长度错误拒绝
     // （真实大小信号）后，压缩最早历史并重试成功
     let calls = 0
     const smallCap = {
@@ -3232,7 +3233,7 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("agent_run 预加载 self_optimize 连带预载 code 与 vision（工具与提示词复用）+ 写范围守卫生效", async () => {
+  test("subsession_run 预加载 self_optimize 连带预载 code 与 vision（工具与提示词复用）+ 写范围守卫生效", async () => {
     // 环境隔离：selfModifyEnabled 直读 process.env，宿主 .env 配置 GEBAI_SELF_MODIFY=true 会整体放开写
     // 范围守卫——本测试验证默认只读路径。清空必须置空串而非 delete：config 的 .env 注入只跳过非 undefined
     // 键（delete 后 setup() 会从 .env 回填 true），而 selfModifyEnabled 仅认 "true"/"1"（空串=关闭）
@@ -3247,7 +3248,7 @@ describe("context compaction", () => {
       const session = await s.store.createSession("default", "t")
       await s.store.setEnv(session.id, "default", { SELF_OPTIMIZE_PROJECT: repo, GEBAI_APPROVAL_SKIP: "true" })
       await s.engine.run(session.id, "default", "optimize gebai")
-      // 新会话系统消息：连带预载 code 与 vision（三段职责提示词都在，通用工作流来自 code）
+      // 子会话系统消息：连带预载 code 与 vision（三段职责提示词都在，通用工作流来自 code）
       const sys = String(s.provider.seenChats[1][0].content)
       expect(sys).toContain("已预加载子Agent: code, vision, self_optimize")
       expect(sys).toContain("### code（")
@@ -3257,7 +3258,7 @@ describe("context compaction", () => {
       expect(sys).toContain("多模态语义分析（analyze）的宿主侧引导")
       expect(sys).toContain("### self_optimize（")
       expect(sys).toContain("自我优化专家")
-      // 新会话工具集：继承的全局工具（read/write）+ code_*/vision_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
+      // 子会话工具集：继承的全局工具（read/write）+ code_*/vision_* 独有工具 + self_optimize_* 独有工具并存（不重复注册）
       expect(s.provider.seenTools[1]).toContain("read")
       expect(s.provider.seenTools[1]).toContain("write")
       expect(s.provider.seenTools[1]).toContain("code_search_symbols")
@@ -3278,32 +3279,32 @@ describe("context compaction", () => {
     }
   })
 
-  test("agent_run 预加载 reverse_site 依赖自动连带 playwright（双命名空间工具与提示词，不重复注册）", async () => {
+  test("subsession_run 预加载 reverse_site 依赖自动连带 playwright（双命名空间工具与提示词，不重复注册）", async () => {
     const s = await setup("subrev")
     if (!s.subAgents.def("reverse_site") || !s.subAgents.def("playwright")) return test.skip("reverse_site/playwright 未打包", () => {})
     // cascade 展开顺序：依赖在前、自身在后
     expect(s.subAgents.cascade("reverse_site")).toEqual(["playwright", "reverse_site"])
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "go")
-    // 新会话系统消息：连带预载 playwright（两段职责提示词都在，浏览器工具来自 playwright 命名空间）
+    // 子会话系统消息：连带预载 playwright（两段职责提示词都在，浏览器工具来自 playwright 命名空间）
     const sys = String(s.provider.seenChats[1][0].content)
     expect(sys).toContain("已预加载子Agent: playwright, reverse_site")
     expect(sys).toContain("### playwright（")
     expect(sys).toContain("网页浏览")
     expect(sys).toContain("### reverse_site（")
     expect(sys).toContain("网站与接口逆向分析专家")
-    // 新会话工具集：playwright_*（依赖）与 reverse_site_*（capture/http_request 独有）并存；
+    // 子会话工具集：playwright_*（依赖）与 reverse_site_*（capture/http_request 独有）并存；
     // 浏览器/文件/编排工具不再注册进 reverse_site_ 命名空间（def 不复刻依赖方与全局工具）
     expect(s.provider.seenTools[1]).toContain("playwright_open")
     expect(s.provider.seenTools[1]).toContain("reverse_site_capture_start")
     expect(s.provider.seenTools[1]).toContain("reverse_site_http_request")
     expect(s.provider.seenTools[1]).not.toContain("reverse_site_open")
     expect(s.provider.seenTools[1]).not.toContain("reverse_site_write")
-    expect(s.provider.seenTools[1]).not.toContain("reverse_site_agent_run")
+    expect(s.provider.seenTools[1]).not.toContain("reverse_site_subsession_run")
     cleanup(s.home)
   })
 
-  test("agent_run 前置热加载重扫 + agent_load 失败暴露：刚写入的破损子Agent 即时报附因错误", async () => {
+  test("subsession_run 前置热加载重扫 + agent_load 失败暴露：刚写入的破损子Agent 即时报附因错误", async () => {
     const s = await setup("subunknown")
     const file = join(import.meta.dirname, "..", "..", "..", "..", "agents", "src", "agents", "zz_probe_fresh.ts")
     writeFileSync(file, `import "./nonexistent-xyz"\nexport const def = { name: "zz_probe_fresh", description: "x", systemPrompt: "y" }`)
@@ -3311,7 +3312,7 @@ describe("context compaction", () => {
       const session = await s.store.createSession("default", "t")
       await s.engine.run(session.id, "default", "go")
       const chats = JSON.stringify(s.provider.seenChats)
-      // agent_run：runNewSession 前置重扫后校验——错误附带载失败原因（不重扫则以旧缓存报无附言的裸「未知子Agent」）
+      // subsession_run：runSubSession 前置重扫后校验——错误附带载失败原因（不重扫则以旧缓存报无附言的裸「未知子Agent」）
       expect(chats).toContain("未知子Agent: zz_probe_fresh")
       expect(chats).toContain("其文件加载失败")
       // agent_load：装载失败真实暴露（loadSubAgent 装载后仍未注册即抛，原先固定返回成功模板）
@@ -3323,7 +3324,7 @@ describe("context compaction", () => {
     }
   })
 
-  test("loaded-mode: 装载段落注入「项目根」注记（dev 自动推导，与 agent_run 形态对齐；附相对路径限定语）", async () => {
+  test("loaded-mode: 装载段落注入「项目根」注记（dev 自动推导，与 subsession_run 形态对齐；附相对路径限定语）", async () => {
     const s = await setup("text")
     if (!s.subAgents.def("self_optimize")) return test.skip("self_optimize 未打包", () => {})
     const session = await s.store.createSession("default", "t")
@@ -3751,7 +3752,7 @@ describe("AgentEngine cron integration", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("cron sub-agent unregistered when capability disabled (invisible to agent_list/agent_run)", async () => {
+  test("cron sub-agent unregistered when capability disabled (invisible to agent_list/subsession_run)", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-engine-cron-gate-"))
     mkdirSync(join(home, "users", "default"), { recursive: true })
     const registry = new ToolRegistry()
@@ -3770,7 +3771,7 @@ describe("AgentEngine cron integration", () => {
 
 
 describe("会话级子Agent 装载持久化与恢复", () => {
-  test("默认不预载：新会话 run 无装载提示词消息、无装载记录", async () => {
+  test("默认不预载：子会话 run 无装载提示词消息、无装载记录", async () => {
     const { home, engine, store } = await setup("text")
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "hi")
@@ -3780,7 +3781,7 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     cleanup(home)
   })
 
-  test("预载名单初始化：新会话按启动预载名单写入提示词消息并注册工具", async () => {
+  test("预载名单初始化：子会话按启动预载名单写入提示词消息并注册工具", async () => {
     const { home, engine, store, registry, config } = await setup("text")
     config.preloadSubAgents = ["code"] // 模拟 GEBAI_PRELOAD_SUB_AGENTS=code
     const session = await store.createSession("default", "t")

@@ -131,7 +131,7 @@ export class SubAgentManager {
   /** 运行期显式移除的子Agent 名（如 GEBAI_CRON_ENABLED=false 时 unregister cron）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
-  /** 最近一次扫描中加载失败的子Agent（name → 失败原因）：模型侧可见（load/agent_run 的未知子Agent
+  /** 最近一次扫描中加载失败的子Agent（name → 失败原因）：模型侧可见（load/subsession_run 的未知子Agent
    *  错误附原因），self_optimize 写错文件（import 抛错/缺 def 导出）能立即看到根因并修复——
    *  仅 console.warn 时模型不可见，自修复闭环断在「未知子Agent」无解释。 */
   private loadErrors = new Map<string, string>()
@@ -168,7 +168,7 @@ export class SubAgentManager {
       try {
         const { bundledDefs, bundledErrors } = await import("../subagents.bundle.generated")
         for (const def of bundledDefs) this.tsDefs.set(def.name, def)
-        // 构建期验证失败清单水合进 loadErrors（模型侧可见根因：agent_load/agent_run 未知名错误附因）
+        // 构建期验证失败清单水合进 loadErrors（模型侧可见根因：agent_load/subsession_run 未知名错误附因）
         for (const [name, err] of bundledErrors) {
           this.loadErrors.set(name, `bundle 构建期验证失败（${err}）——修复该子代理后重新构建可恢复`)
           log.warn(`[subagents] bundle 剔除的子Agent ${name}: ${err}`)
@@ -387,14 +387,14 @@ export class SubAgentManager {
   }
 
   /** 装载子Agent 能力模块（agent_load 工具 / WS sub_agent.load / 预加载的统一入口，幂等）：
-   *  模块语义（DESIGN「装载 vs 新会话执行」）——工具并入当前工具集（{agent}_ 命名空间注册）、完整系统提示词由调用方写入会话记录，
-   *  不创建新上下文、无独立执行；与新会话执行（agent_run，派生临时新会话执行）是两种不同概念。
-   *  owner：装载者（会话 id / agent_run 共享标记 / 缺省全局），unload 按其解引用。
+   *  模块语义（DESIGN「装载 vs 子会话运行」）——工具并入当前工具集（{agent}_ 命名空间注册）、完整系统提示词由调用方写入会话记录，
+   *  不创建新上下文、无独立执行；与子会话运行（subsession_run，派生临时子会话执行任务）是两种不同概念。
+   *  owner：装载者（会话 id / subsession_run 共享标记 / 缺省全局），unload 按其解引用。
    *  依赖自动装载：cascade 展开的名单逐个幂等装载（依赖方只注册 def 声明的独有工具，依赖的工具由
    *  依赖方 def 以其自身命名空间注册，不重复定义——如 reverse_site 复用 playwright_*、self_optimize 复用 code_*）。
    *  返回本次实际装载的名字列表（幂等跳过的不计入；连带装载依赖时依赖也计入）。 */
   async load(name: string, owner: string = SubAgentManager.GLOBAL_OWNER): Promise<string[]> {
-    // 热加载检查（目录签名变化即重扫）：agent_load/路由自愈/agent_run 预加载前拿到最新定义
+    // 热加载检查（目录签名变化即重扫）：agent_load/路由自愈/subsession_run 预加载前拿到最新定义
     // （如 self_optimize 刚生成的子Agent 文件）；签名未变时零成本（一次目录遍历）
     await this.refreshIfChanged()
     const def = this.defs.get(name)
@@ -459,7 +459,7 @@ export class SubAgentManager {
     return this.loadErrors.get(name)
   }
 
-  /** 未知子Agent 错误信息（agent_load/agent_run 校验共用）：命中加载失败记录时附原因——
+  /** 未知子Agent 错误信息（agent_load/subsession_run 校验共用）：命中加载失败记录时附原因——
    *  文件存在但加载失败（语法错误/缺导出/缺依赖）与名字拼错是两类问题，附因引导精确修复。 */
   unknownAgentError(name: string): string {
     const err = this.loadErrors.get(name)
@@ -493,7 +493,7 @@ export class SubAgentManager {
   /** 按启停名单收敛子Agent 集（GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单，
    *  启动 discover 后调用一次）：enable 非空 = 白名单（未列出的全部 unregister）；disable = 黑名单；
    *  两者同时配置先白后黑（黑名单最终生效）。unregister 含工具注销、已预载卸载与热加载防复活
-   *  （removedDefs），agent_list/系统提示词注入/agent_run 校验随之完全不可见；名单中的未知名告警忽略
+   *  （removedDefs），agent_list/系统提示词注入/subsession_run 校验随之完全不可见；名单中的未知名告警忽略
    *  （防拼写错误静默失效，不阻断启动——与选择性打包不同，运行态名单以实际发现的子Agent 为准）。 */
   applyEnableDisable(enable: string[] = [], disable: string[] = []): void {
     const preloaded = [...this.loaded] // 过滤前已预载的名单（def.preload 与 GEBAI_PRELOAD_SUB_AGENTS），用于移除告警
@@ -550,7 +550,7 @@ export class SubAgentManager {
   /** 未装载子Agent 轻量引导注入总Agent 系统提示词。
    *  已装载子Agent 的完整系统提示词不在此注入——装载时已作为 system 消息写入会话记录（chat.json 持久化，
    *  loadHistory 透传进模型上下文），此处再注入会双份占用上下文；未装载的仅注入轻量列表（名称 + 描述），
-   *  引导模型 agent_load 装载（工具注册进会话、提示词写入会话记录）或 agent_run 执行新会话。
+   *  引导模型 agent_load 装载（工具注册进会话、提示词写入会话记录）或 subsession_run 派生子会话。
    *  不展开工具列表——工具名已注册进工具集（schema 全名）。
    *  describe：可选描述覆写（engine 用于在描述中动态体现预置项目清单，方便按项目名关联任务）。
    *  visibleToOwner：可选会话过滤（会话 id）——按「对该会话可见」判定未装载（其他会话装载过的不算本会话已装载，

@@ -173,10 +173,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   subAgents.setKeqingOpts(sandbox.enabled ? null : {})
   await subAgents.discover()
   // 定时任务能力开关（GEBAI_CRON_ENABLED，默认 true）：关闭时 cron 子Agent 不注册（agent_list/agent_load/
-  // agent_run 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/cron 可管
+  // subsession_run 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/cron 可管
   if (!config.cronEnabled) subAgents.unregister("cron")
   // 子Agent 启停名单（GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单）：enable 非空仅保留
-  // 名单内，disable 移除名单内（先白后黑）；unregister 后 agent_list/装载/新会话执行/系统提示词注入均不可见
+  // 名单内，disable 移除名单内（先白后黑）；unregister 后 agent_list/装载/子会话运行/系统提示词注入均不可见
   // 且热加载不复活；未知名告警不阻断启动
   subAgents.applyEnableDisable(config.subAgentsEnable, config.subAgentsDisable)
   // 预置项目保留名防呆（DESIGN「项目机制」）：tmp 为会话工作区保留名——{AGENT}_PROJECTS 配了叫 tmp 的
@@ -218,7 +218,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
       // 引用比较会把「无实际覆盖」误判为重建（每次任务新建 Provider + 测试注入的 fake 被绕过）
       return JSON.stringify(cfg) === JSON.stringify(mainConfig) ? undefined : createProvider(cfg)
     },
-    // 分支运行模型路由（DESIGN「会话分支运行与合并」多路接口）：GEBAI_LLM_ROUTES 路由名命中走
+    // 子会话运行模型路由（DESIGN「子会话运行」多路接口）：GEBAI_LLM_ROUTES 路由名命中走
     // 独立端点/模型，字面模型名按主配置基准覆盖——多分支多路并行分摊单路限流
     resolveModelProvider: (env, name) => resolveModelRouteProvider(mainConfig, env, name),
   })

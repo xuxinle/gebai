@@ -117,19 +117,19 @@ export function getEmptyState(): HTMLElement | null {
   return emptyState
 }
 
-/** 新会话 run 折叠容器状态（agent_run 执行过程/branch_run 分支运行）：同 runId 事件共享，执行中展开、结束后折叠只显示输入与最终返回。 */
-export interface SessionRunState {
+/** 子会话运行折叠容器状态（subsession_run 执行过程）：同 runId 事件共享，执行中展开、结束后折叠只显示输入与最终返回。 */
+export interface SubSessionState {
   runId: string
-  /** 预加载进新会话的子Agent 列表。 */
+  /** 预加载进子会话的子Agent 列表。 */
   agents: string[]
   input: string
-  /** 分支运行（branch_run）标识：容器标题「🌿 分支 · name(model)」用；新会话执行无此字段。 */
-  branch?: { name: string; model?: string }
-  /** details.session-run 折叠容器（summary=标题+输入/返回摘要，body=执行过程消息区）。 */
+  /** 子会话标识：容器标题「🌿 子会话 · name(model)」用。 */
+  subsession?: { name: string; model?: string }
+  /** details.subsession-run 折叠容器（summary=标题+输入/返回摘要，body=执行过程消息区）。 */
   container: HTMLDetailsElement
-  /** 容器内消息追加区（.session-body）。 */
+  /** 容器内消息追加区（.subsession-body）。 */
   body: HTMLElement
-  /** 折叠摘要行「返回」区（.session-output）：执行中显示占位，结束后显示最终返回。 */
+  /** 折叠摘要行「返回」区（.subsession-output）：执行中显示占位，结束后显示最终返回。 */
   outputEl: HTMLElement
   /** 当前流式文本累积（本轮）。 */
   acc: string
@@ -160,12 +160,12 @@ export interface RunState {
   abort: AbortController
   /** 低性能模式流式渲染节流定时器（跨 chunk 合并渲染，未排期时为 undefined）。 */
   renderTimer?: ReturnType<typeof setTimeout>
-  /** 当前文本段来源（主循环/新会话执行）：来源切换时封段换行，避免新会话输出一直追加成同一条。 */
+  /** 当前文本段来源（主循环/子会话运行）：来源切换时封段换行，避免新会话输出一直追加成同一条。 */
   lastTextKind?: "main" | "sub"
   /** 当前文本段所属消息 id（新会话新一轮回复时封段）。 */
   lastTextMsgId?: string
-  /** 新会话 run 折叠容器：runId → 状态（agent_run 执行过程，结束后折叠保留在 DOM）。 */
-  sessionRuns?: Map<string, SessionRunState>
+  /** 新会话 run 折叠容器：runId → 状态（subsession_run 执行过程，结束后折叠保留在 DOM）。 */
+  subSessions?: Map<string, SubSessionState>
   /** 模型服务异常瞬时提示元素（event.model.error 重试期间显示；文本恢复/任务结束时移除）。 */
   modelErrorEl?: HTMLElement | null
   /** 单轮计时开始时刻（consumeTaskStream 入口记录）。 */

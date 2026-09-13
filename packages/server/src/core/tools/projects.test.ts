@@ -42,7 +42,6 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
@@ -153,7 +152,7 @@ describe("项目机制（core/projects，全局工具 project 参数）", () => 
     expect(denied.output).toContain("project 参数")
     const ok = await tool.execute({ path: "a.txt", project: "app" }, c)
     expect(ok.output).toContain(join(home, "proj"))
-    // 绑定根会话（新会话执行模式）：未传 project 放行（路径基准即绑定根）
+    // 绑定根会话（子会话运行模式）：未传 project 放行（路径基准即绑定根）
     const bound = join(home, "bound")
     mkdirSync(bound, { recursive: true })
     const c2 = ctx(home, { env: { CODE_RESTRICT_PROJECTS: "true" }, workdir: bound, boundProjectRoot: bound, resolvePath: (p) => join(bound, p) })

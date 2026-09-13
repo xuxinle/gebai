@@ -38,7 +38,6 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
@@ -317,7 +316,7 @@ describe("reverse_site def", () => {
       expect(names).toContain(t)
     }
     // 浏览器自动化全套经 dependencies 连带装载（playwright_ 命名空间）；文件/编排工具走全局名——本 def 不重复声明
-    for (const t of ["open", "content", "evaluate", "screenshot", "fetch_url", "read", "write", "agent_run", "agent_list", "agent_load"]) {
+    for (const t of ["open", "content", "evaluate", "screenshot", "fetch_url", "read", "write", "subsession_run", "agent_list", "agent_load"]) {
       expect(names).not.toContain(t)
     }
     expect(reverseSiteDef.dependencies).toEqual(["playwright"])

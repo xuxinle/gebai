@@ -3,14 +3,14 @@ import type { ChatChunk } from "@gebai/sdk"
 import { cnyCatTurnEnd } from "./cny-cat"
 import { syncSendButton } from "./composer"
 import { refreshJumpBottom, scrollIfSticky } from "./jump-bottom"
-import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, finishSessionRun, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, sessionRunBox } from "./messages"
+import { addMetaActions, appendMsg, assistantContent, clearInteractionCards, finishSubSession, reasoningBlock, scrollSessionSticky, sealSegment, sealSessionSegment, subSessionBox } from "./messages"
 import { blockText, markdownBlock } from "./markdown"
 import { clearApprovals } from "./approvals"
 import { clearPendingTools, focusInput } from "./state"
 import { maybeAutoTitle } from "./sessions"
 import { drainQueue } from "./queue"
 import { scrollReasoningSticky } from "./reasoning-scroll"
-import { client, el, getCurrentSession, msgEl, runs, syncConnThinking, type RunState, type SessionRunState } from "./state"
+import { client, el, getCurrentSession, msgEl, runs, syncConnThinking, type RunState, type SubSessionState } from "./state"
 import { uuid } from "./uuid"
 import { IDLE_TIMEOUT_MS, startTurnTimer, stopTurnTimer } from "./turn-view"
 
@@ -22,7 +22,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     run.messageId = ""
     run.lastTextKind = undefined
     run.lastTextMsgId = undefined
-    run.sessionRuns = undefined // 新会话容器随消息元素一并重建（服务端每轮重推 start，容器会重新创建）
+    run.subSessions = undefined // 新会话容器随消息元素一并重建（服务端每轮重推 start，容器会重新创建）
     if (run.el) {
       run.el.classList.remove("streaming")
       run.el.remove()
@@ -36,18 +36,18 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     if (run.modelErrorEl?.isConnected) clearModelErrorNotice(run)
     const prevMsgId = run.messageId // 轮界检测用前值（messageId 随后刷新，见下方 text 分支）
     if (chunk.messageId) run.messageId = chunk.messageId
-    const runId = chunk.sessionRunId
+    const runId = chunk.subSessionId
     if (runId) {
-      // 新会话执行过程文本：渲染进该 run 的折叠容器（执行中展开，与主回复同流显示）
-      let sub = run.sessionRuns?.get(runId)
+      // 子会话运行过程文本：渲染进该 run 的折叠容器（执行中展开，与主回复同流显示）
+      let sub = run.subSessions?.get(runId)
       if (!sub) {
-        // 容器缺失（重连全量重同步清空 sessionRuns 后服务端不重推 start——事件已在断线前投递）：
+        // 容器缺失（重连全量重同步清空 subSessions 后服务端不重推 start——事件已在断线前投递）：
         // 惰性重建容器兜底，否则该 run 后续输出静默丢弃、容器永久停留旧状态（分支标题等元信息
-        // 随 sessionRuns 一并丢失，下一轮 start 重推时容器已存在会被忽略——可接受的降级）
-        run.sessionRuns ??= new Map()
-        const box = sessionRunBox({ runId, agents: [], input: "" })
+        // 随 subSessions 一并丢失，下一轮 start 重推时容器已存在会被忽略——可接受的降级）
+        run.subSessions ??= new Map()
+        const box = subSessionBox({ runId, agents: [], input: "" })
         sub = { runId, agents: [], input: "", container: box.container, body: box.body, outputEl: box.outputEl, acc: "", el: null, messageId: "", reasoningAcc: "", reasoningEl: null }
-        run.sessionRuns.set(runId, sub)
+        run.subSessions.set(runId, sub)
         scrollIfSticky()
         refreshJumpBottom()
       }
@@ -70,7 +70,7 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     }
     // 新会话输出与主回复分段（换行分隔）：来源切换（主↔新会话）或
     // 新会话新一轮回复（messageId 变化）时封存当前文本段，避免内容一直追加成同一条
-    const isSub = chunk.session === true
+    const isSub = chunk.subSession === true
     if (run.lastTextKind !== undefined) {
       const kindChanged = run.lastTextKind !== (isSub ? "sub" : "main")
       const subRoundChanged = isSub && !!run.lastTextMsgId && !!chunk.messageId && run.lastTextMsgId !== chunk.messageId
@@ -100,10 +100,10 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     }
     scheduleStreamRender(run)
   } else if (chunk.kind === "reasoning") {
-    const runId = chunk.sessionRunId
+    const runId = chunk.subSessionId
     if (runId) {
-      // 新会话执行过程推理：渲染进容器内气泡（与主循环同构的折叠推理块）
-      const sub = run.sessionRuns?.get(runId)
+      // 子会话运行过程推理：渲染进容器内气泡（与主循环同构的折叠推理块）
+      const sub = run.subSessions?.get(runId)
       if (!sub) return
       if (!sub.container.isConnected) {
         // 切走/重载中：只累积推理（切回由 loadMessages 恢复），与主循环累积语义一致
@@ -148,21 +148,21 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
         refreshJumpBottom()
       }
     }
-  } else if (chunk.kind === "session_start") {
-    // 新会话 run 开始：创建折叠容器（执行中展开并滚动到可见；服务端每轮重推同 runId start，已存在则忽略）
-    // 分支运行（branch_run）容器标题带分支名/模型路由（sessionMeta.branch/model）
-    const runId = chunk.sessionRunId ?? ""
+  } else if (chunk.kind === "subsession_start") {
+    // 子会话 run 开始：创建折叠容器（执行中展开并滚动到可见；服务端每轮重推同 runId start，已存在则忽略）
+    // 容器标题带子会话名/模型路由（subSessionMeta.subsession/model）
+    const runId = chunk.subSessionId ?? ""
     if (!runId || getCurrentSession()?.id !== sessionId) return
-    sealSegment(sessionId) // 新会话开始：主文本段在此分段
-    run.sessionRuns ??= new Map()
-    if (run.sessionRuns.get(runId)?.container.isConnected) return
-    const branch = chunk.sessionMeta?.branch ? { name: chunk.sessionMeta.branch, model: chunk.sessionMeta.model } : undefined
-    const box = sessionRunBox({ runId, agents: chunk.sessionMeta?.agents ?? [], input: chunk.sessionMeta?.input ?? "", branch })
-    run.sessionRuns.set(runId, {
+    sealSegment(sessionId) // 子会话开始：父会话文本段在此分段
+    run.subSessions ??= new Map()
+    if (run.subSessions.get(runId)?.container.isConnected) return
+    const subsession = chunk.subSessionMeta?.subsession ? { name: chunk.subSessionMeta.subsession, model: chunk.subSessionMeta.model } : undefined
+    const box = subSessionBox({ runId, agents: chunk.subSessionMeta?.agents ?? [], input: chunk.subSessionMeta?.input ?? "", subsession })
+    run.subSessions.set(runId, {
       runId,
-      agents: chunk.sessionMeta?.agents ?? [],
-      input: chunk.sessionMeta?.input ?? "",
-      branch,
+      agents: chunk.subSessionMeta?.agents ?? [],
+      input: chunk.subSessionMeta?.input ?? "",
+      subsession,
       container: box.container,
       body: box.body,
       outputEl: box.outputEl,
@@ -174,10 +174,10 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
     })
     scrollIfSticky()
     refreshJumpBottom()
-  } else if (chunk.kind === "session_done") {
-    // 新会话 run 结束：封存流式文本段，写入最终返回摘要并自动折叠容器（只显示输入与最终返回）
-    const runId = chunk.sessionRunId ?? ""
-    const sub = run.sessionRuns?.get(runId)
+  } else if (chunk.kind === "subsession_done") {
+    // 子会话 run 结束：封存流式文本段，写入最终返回摘要并自动折叠容器（只显示输入与最终返回）
+    const runId = chunk.subSessionId ?? ""
+    const sub = run.subSessions?.get(runId)
     if (sub) {
       if (sub.el?.isConnected) {
         sub.el.classList.remove("streaming")
@@ -185,8 +185,8 @@ function applyStreamChunk(run: RunState, sessionId: string, chunk: ChatChunk): v
         if (bubble) addMetaActions(sub.el.querySelector<HTMLElement>(".msg-meta") ?? sub.el, sub.el, bubble, { role: "assistant", content: sub.acc, id: sub.messageId }, { noRevoke: true })
       }
       sealSessionSegment(sub)
-      finishSessionRun(sub.container, sub.outputEl, chunk.sessionMeta?.output ?? "")
-      run.sessionRuns?.delete(runId)
+      finishSubSession(sub.container, sub.outputEl, chunk.subSessionMeta?.output ?? "")
+      run.subSessions?.delete(runId)
     }
   } else if (chunk.kind === "model_error") {
     // 模型服务异常（引擎自动重试中）：消息流尾部瞬时提示，非终态——文本恢复时移除
@@ -382,7 +382,7 @@ function clearStreamRender(run: RunState): void {
 }
 
 /** 新会话容器内流式文本渲染：与主循环 renderStreamText 同构（推理块 + 正文 markdown），追加到容器并滚动。 */
-function renderSessionStreamText(sub: SessionRunState): void {
+function renderSessionStreamText(sub: SubSessionState): void {
   if (sub.reasoningEl?.isConnected) {
     const rb = sub.reasoningEl.querySelector<HTMLElement>(".reasoning-body")
     if (rb) {
@@ -406,7 +406,7 @@ function renderSessionStreamText(sub: SessionRunState): void {
 }
 
 /** 新会话容器内流式文本渲染按 120ms 尾沿节流（与主循环 scheduleStreamRender 同构，所有模式统一）。 */
-function scheduleSessionRender(sub: SessionRunState): void {
+function scheduleSessionRender(sub: SubSessionState): void {
   if (sub.renderTimer) return
   sub.renderTimer = setTimeout(() => {
     sub.renderTimer = undefined

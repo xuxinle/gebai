@@ -156,7 +156,7 @@ describe("大文件生成截断防护", () => {
   })
 })
 
-describe("agent_run 加固", () => {
+describe("subsession_run 加固", () => {
   test("预加载子Agent 数量上限（>5 拒绝）与去重", async () => {
     const provider = new HardenProvider()
     const { home, store, engine, subAgents } = await setupEngine(provider)
@@ -164,12 +164,19 @@ describe("agent_run 加固", () => {
       subAgents.register({ name: n, description: n, systemPrompt: n })
     }
     const session = await store.createSession("default", "t")
-    const runNewSession = (engine as unknown as { runNewSession: (sid: string, user: string, env: Record<string, string>, agents: string[], input: string, signal: AbortSignal) => Promise<unknown> }).runNewSession.bind(engine) as unknown as (sid: string, user: string, env: Record<string, string>, agents: string[], input: string, signal: AbortSignal) => Promise<{ output: string; archive: { agents: string[] } }>
-    // 6 个不同名：超上限拒绝
-    await expect(runNewSession(session.id, "default", {}, ["dummy_a", "dummy_b", "dummy_c", "dummy_d", "dummy_e", "dummy_f"], "x", new AbortController().signal)).rejects.toThrow(/数量超限/)
+    // 经工具入口（注册表 start 内前置校验：去重/连带/上限/未知名校验在 Registry.validate，非 runSubSession 入口）
+    provider.script = [
+      { mode: "tool", tool: "subsession_run", args: { agents: ["dummy_a", "dummy_b", "dummy_c", "dummy_d", "dummy_e", "dummy_f"], input: "x" } },
+      { mode: "tool", tool: "subsession_run", args: { agents: ["dummy_a", "dummy_a", "dummy_b", "dummy_b", "dummy_c", "dummy_c"], input: "x" } },
+      { mode: "text", text: "done" },
+    ]
+    await engine.run(session.id, "default", "hi")
+    const calls = (await store.load(session.id, "default"))!.messages.filter((m) => m.role === "tool" && m.name === "subsession_run")
+    // 6 个不同名：超上限拒绝（工具结果携带原因，模型可修正）
+    expect(calls[0].content).toContain("数量超限")
+    expect(calls[0].subSessionArchive).toBeUndefined()
     // 重复名去重后 3 个：正常执行完成（去重生效，不因重复名报错）
-    const result = await runNewSession(session.id, "default", {}, ["dummy_a", "dummy_a", "dummy_b", "dummy_b", "dummy_c", "dummy_c"], "x", new AbortController().signal)
-    expect(result.archive.agents).toEqual(["dummy_a", "dummy_b", "dummy_c"])
+    expect(calls[1].subSessionArchive?.agents).toEqual(["dummy_a", "dummy_b", "dummy_c"])
     rmSync(home, { recursive: true, force: true })
   })
 })
@@ -417,12 +424,12 @@ describe("装载工具会话可见性与全局工具复用", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("agent_run 全局工具继承：默认继承（新会话可直接用全局 write），inherit_global_tools=false 时不继承", async () => {
+  test("subsession_run 全局工具继承：默认继承（子会话可直接用全局 write），inherit_global_tools=false 时不继承", async () => {
     const provider = new HardenProvider()
     provider.script = [
-      // 主会话：agent_run 预加载 code（默认继承全局工具）
-      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "write a file" } },
-      // 新会话：直接调用全局 write（继承形态）后收尾
+      // 主会话：subsession_run 预加载 code（默认继承全局工具）
+      { mode: "tool", tool: "subsession_run", args: { agents: ["code"], input: "write a file" } },
+      // 子会话：直接调用全局 write（继承形态）后收尾
       { mode: "tool", tool: "write", args: { path: "inherited.txt", content: "from child" } },
       { mode: "text", text: "child done" },
       { mode: "text", text: "main done" },
@@ -430,18 +437,18 @@ describe("装载工具会话可见性与全局工具复用", () => {
     const { home, store, engine } = await setupEngine(provider)
     const a = await store.createSession("default", "a")
     await engine.run(a.id, "default", "hi")
-    // 新会话内全局 write 已执行（写入会话工作区——agent_run 新会话与主会话共用 sessionId 工作区）
+    // 子会话内全局 write 已执行（写入会话工作区——subsession_run 子会话与主会话共用 sessionId 工作区）
     const ws = join(sessionPath(home, "default", a.id), "tmp")
     expect(await Bun.file(join(ws, "inherited.txt")).text()).toBe("from child")
-    // 新会话 schema：全局工具齐全 + code 独有工具前缀（第二次模型调用的 schema 清单）
+    // 子会话 schema：全局工具齐全 + code 独有工具前缀（第二次模型调用的 schema 清单）
     const childSchemas = provider.toolSchemas[1]
     expect(childSchemas.some((t) => t.name === "write")).toBe(true)
     expect(childSchemas.some((t) => t.name === "grep")).toBe(true)
     expect(childSchemas.some((t) => t.name === "code_search_symbols")).toBe(true)
-    // 关闭继承：新会话仅剩子Agent 独有工具 + 内建编排，全局 write 不可见（调用报未知工具）
+    // 关闭继承：子会话仅剩子Agent 独有工具 + 内建编排，全局 write 不可见（调用报未知工具）
     const provider2 = new HardenProvider()
     provider2.script = [
-      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "write a file", inherit_global_tools: false } },
+      { mode: "tool", tool: "subsession_run", args: { agents: ["code"], input: "write a file", inherit_global_tools: false } },
       { mode: "tool", tool: "write", args: { path: "no-inherit.txt", content: "x" } },
       { mode: "text", text: "child done" },
       { mode: "text", text: "main done" },
@@ -456,16 +463,16 @@ describe("装载工具会话可见性与全局工具复用", () => {
     expect(childSchemas2.some((t) => t.name === "code_search_symbols")).toBe(true)
     // 未继承时全局 write 调用报未知工具（模型在下一轮收尾）
     const msgs2 = (await store2.load(b.id, "default"))!.messages
-    const callMsg = msgs2.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)
-    expect(callMsg!.sessionRun!.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(true)
+    const callMsg = msgs2.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)
+    expect(callMsg!.subSessionArchive!.messages.some((m) => m.role === "tool" && m.content.includes("未知工具"))).toBe(true)
     rmSync(home, { recursive: true, force: true })
     rmSync(home2, { recursive: true, force: true })
   })
 
-  test("agent_run 全局提示词注入：默认注入（与全局工具继承一致，新会话与主会话同构），inherit_global_prompt=false 时仅子Agent 段", async () => {
+  test("subsession_run 全局提示词注入：默认注入（与全局工具继承一致，子会话与主会话同构），inherit_global_prompt=false 时仅子Agent 段", async () => {
     const provider = new HardenProvider()
     provider.script = [
-      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do" } },
+      { mode: "tool", tool: "subsession_run", args: { agents: ["code"], input: "do" } },
       { mode: "text", text: "child done" },
       { mode: "text", text: "main done" },
     ]
@@ -481,7 +488,7 @@ describe("装载工具会话可见性与全局工具复用", () => {
 
     const provider2 = new HardenProvider()
     provider2.script = [
-      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "do", inherit_global_prompt: false } },
+      { mode: "tool", tool: "subsession_run", args: { agents: ["code"], input: "do", inherit_global_prompt: false } },
       { mode: "text", text: "child done" },
       { mode: "text", text: "main done" },
     ]
@@ -497,12 +504,12 @@ describe("装载工具会话可见性与全局工具复用", () => {
     rmSync(home2, { recursive: true, force: true })
   })
 
-  test("agent_run 绑定项目根的新会话：search_symbols 扫描项目文件树（listFiles 随 resolveBase 切换），而非仅会话 tmp", async () => {
+  test("subsession_run 绑定项目根的子会话：search_symbols 扫描项目文件树（listFiles 随 resolveBase 切换），而非仅会话 tmp", async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "gebai-harden-proj-"))
     writeFileSync(join(projectRoot, "app.ts"), "export function findMeInProject() {\n  return 1\n}\n")
     const provider = new HardenProvider()
     provider.script = [
-      { mode: "tool", tool: "agent_run", args: { agents: ["code"], input: "search" } },
+      { mode: "tool", tool: "subsession_run", args: { agents: ["code"], input: "search" } },
       { mode: "tool", tool: "code_search_symbols", args: { symbol: "findMeInProject" } },
       { mode: "text", text: "child done" },
       { mode: "text", text: "main done" },
@@ -511,8 +518,8 @@ describe("装载工具会话可见性与全局工具复用", () => {
     const a = await store.createSession("default", "a")
     await engine.run(a.id, "default", "hi", { envOverride: { CODE_PROJECT: projectRoot } })
     const msgs = (await store.load(a.id, "default"))!.messages
-    const callMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_run" && m.sessionRun)!
-    const sym = callMsg.sessionRun!.messages.find((m) => m.role === "tool" && m.content.includes("findMeInProject"))
+    const callMsg = msgs.find((m) => m.role === "tool" && m.name === "subsession_run" && m.subSessionArchive)!
+    const sym = callMsg.subSessionArchive!.messages.find((m) => m.role === "tool" && m.content.includes("findMeInProject"))
     expect(sym).toBeTruthy()
     expect(sym!.content).toContain("app.ts")
     rmSync(projectRoot, { recursive: true, force: true })
@@ -535,9 +542,9 @@ describe("装载工具会话可见性与全局工具复用", () => {
   })
 })
 
-describe("agent_run 异步后台运行（async:true + bg_task）", () => {
-  /** 主/子会话双形态假模型：系统提示词含「临时新会话」判定子会话；主会话按 calls 序号走
-   *  agent_run(async) → bg_task（id 从上一轮 agent_run 工具结果文本提取）→ 收尾。 */
+describe("subsession_run 异步后台运行（async:true + bg_task）", () => {
+  /** 主/子会话双形态假模型：系统提示词含「临时子会话」判定子会话；主会话按 calls 序号走
+   *  subsession_run(async) → bg_task（id 从上一轮 subsession_run 工具结果文本提取）→ 收尾。 */
   class AsyncRunProvider implements LLMProvider {
     readonly id = "fake"
     calls = 0
@@ -556,8 +563,8 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
     }
     async *chat(msgs: MessageLike[], opts?: ChatOptions): AsyncIterable<LLMChunk> {
       this.seen.push(msgs)
-      // 子会话系统提示词以固定句式开头（主会话提示词的子Agent 目录也可能含「临时新会话」字样，不能 includes）
-      const isChild = String(msgs[0]?.content ?? "").startsWith("你正在一个临时新会话中执行任务")
+      // 子会话系统提示词以固定句式开头（主会话提示词的子Agent 目录也可能含「临时子会话」字样，不能 includes）
+      const isChild = String(msgs[0]?.content ?? "").startsWith("你正在一个子会话中执行任务")
       if (isChild) {
         this.childCalls++
         if (this.childCalls === 1 && this.hangChild) {
@@ -582,7 +589,7 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
       }
       this.calls++
       if (this.calls === 1) {
-        yield { type: "tool_call", toolCall: { id: "tc-start", name: "agent_run", arguments: { agents: ["code"], input: "long job", async: true } } }
+        yield { type: "tool_call", toolCall: { id: "tc-start", name: "subsession_run", arguments: { agents: ["code"], input: "long job", async: true } } }
         yield { type: "done" }
         return
       }
@@ -597,7 +604,7 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
           })
         }
         const toolMsgs = msgs.filter((m) => m.role === "tool")
-        const runId = String(toolMsgs[toolMsgs.length - 1]?.content ?? "").match(/runId: (r[0-9a-f]+)/)?.[1] ?? "r-none"
+        const runId = String(toolMsgs[toolMsgs.length - 1]?.content ?? "").match(/runId: (s[0-9a-f]+)/)?.[1] ?? "s-none"
         yield { type: "tool_call", toolCall: { id: `tc-manage-${this.calls}`, name: "bg_task", arguments: { action: this.waitAction, id: runId, timeout: 20 } } }
         yield { type: "done" }
         return
@@ -621,22 +628,22 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
     const { home, store, engine } = await setupEngine(provider)
     const a = await store.createSession("default", "a")
     await engine.run(a.id, "default", "hi")
-    // 子会话在新会话共享工作区完成 write（后台运行真实执行）
+    // 子会话在子会话共享工作区完成 write（后台运行真实执行）
     const ws = join(sessionPath(home, "default", a.id), "tmp")
     expect(await Bun.file(join(ws, "async-proof.txt")).text()).toBe("child was here")
     const msgs = (await store.load(a.id, "default"))!.messages
-    // agent_run 异步启动记录（立即返回，不携带存档）
-    const startMsg = msgs.find((m) => m.role === "tool" && m.name === "agent_run")
-    expect(startMsg!.content).toContain("后台子Agent 运行已启动")
-    expect(startMsg!.content).toMatch(/runId: r[0-9a-f]+/)
-    expect(startMsg!.sessionRun).toBeUndefined()
+    // subsession_run 异步启动记录（立即返回，不携带存档）
+    const startMsg = msgs.find((m) => m.role === "tool" && m.name === "subsession_run")
+    expect(startMsg!.content).toContain("子会话已后台启动")
+    expect(startMsg!.content).toMatch(/runId: s[0-9a-f]+/)
+    expect(startMsg!.subSessionArchive).toBeUndefined()
     // bg_task wait 终态记录：取回最终结果 + 完整存档（历史回放扩展字段）
     const waitMsg = msgs.find((m) => m.role === "tool" && m.name === "bg_task")!
-    expect(waitMsg.content).toContain("后台运行")
+    expect(waitMsg.content).toContain("子会话运行")
     expect(waitMsg.content).toContain("child finished")
-    expect(waitMsg.sessionRun).toBeTruthy()
-    expect(waitMsg.sessionRun!.output).toBe("child finished")
-    expect(waitMsg.sessionRun!.messages.some((m) => m.role === "tool" && m.content.includes("async-proof.txt"))).toBe(true)
+    expect(waitMsg.subSessionArchive).toBeTruthy()
+    expect(waitMsg.subSessionArchive!.output).toBe("child finished")
+    expect(waitMsg.subSessionArchive!.messages.some((m) => m.role === "tool" && m.content.includes("async-proof.txt"))).toBe(true)
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -651,9 +658,9 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
     const cancelMsg = msgs.find((m) => m.role === "tool" && m.name === "bg_task")!
     expect(cancelMsg.content).toContain("已终止")
     // 取消发生在子会话首个模型调用期间（存档仅含初始输入），存档仍随终止结果回传（过程保留语义）
-    expect(cancelMsg.sessionRun).toBeTruthy()
-    expect(cancelMsg.sessionRun!.input).toBe("long job")
-    expect(cancelMsg.sessionRun!.messages[0].role).toBe("user")
+    expect(cancelMsg.subSessionArchive).toBeTruthy()
+    expect(cancelMsg.subSessionArchive!.input).toBe("long job")
+    expect(cancelMsg.subSessionArchive!.messages[0].role).toBe("user")
     // write 未执行（任务被拦截在模型调用阶段）
     const ws = join(sessionPath(home, "default", a.id), "tmp")
     expect(await Bun.file(join(ws, "async-proof.txt")).exists()).toBe(false)
@@ -686,18 +693,18 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
     // 后台运行已启动（子会话首轮模型调用完成、其 session 快照可能已建）后，注入主任务流式快照
     await waitFor(() => provider.childCalls >= 1)
     const internals = engine as unknown as {
-      noteStream: (sid: string, patch: { messageId?: string; text?: string; reasoning?: string; session?: boolean; sessionRunId?: string }) => void
-      clearStream: (sid: string, sessionRunId?: string) => void
+      noteStream: (sid: string, patch: { messageId?: string; text?: string; reasoning?: string; subSession?: boolean; subSessionId?: string }) => void
+      clearStream: (sid: string, subSessionId?: string) => void
     }
     internals.noteStream(a.id, { messageId: "main-msg", text: "主任务流式文本" })
     // 后台运行的 session delta 不覆盖主任务快照（并行保护）
-    internals.noteStream(a.id, { messageId: "bg-msg", text: "后台运行文本", session: true, sessionRunId: "r-bg" })
+    internals.noteStream(a.id, { messageId: "bg-msg", text: "后台运行文本", subSession: true, subSessionId: "s-bg" })
     internals.noteStream(a.id, { messageId: "main-msg", text: "继续" })
     const snap = engine.attachSnapshot(a.id)
     expect(snap!.stream!.text).toBe("主任务流式文本继续")
-    expect(snap!.stream!.session).toBeFalsy()
+    expect(snap!.stream!.subSession).toBeFalsy()
     // 后台运行的轮末清空不误清主任务快照（只清属于该 run 的 session 快照）
-    internals.clearStream(a.id, "r-bg")
+    internals.clearStream(a.id, "s-bg")
     expect(engine.attachSnapshot(a.id)!.stream).toBeTruthy()
     // 主任务自己的清空语义不变
     internals.clearStream(a.id)
@@ -715,7 +722,7 @@ describe("agent_run 异步后台运行（async:true + bg_task）", () => {
     const a = await store.createSession("default", "a")
     const runPromise = engine.run(a.id, "default", "hi")
     await waitFor(() => provider.childCalls >= 1)
-    const storeMap = (engine as unknown as { sessionRunStore: Map<string, { sessionId: string; status: string }> }).sessionRunStore
+    const storeMap = (engine as unknown as { subSessionStore: Map<string, { sessionId: string; status: string }> }).subSessionStore
     expect(storeMap.size).toBeGreaterThan(0)
     expect([...storeMap.values()].every((h) => h.sessionId === a.id)).toBe(true)
     engine.forgetSession(a.id)

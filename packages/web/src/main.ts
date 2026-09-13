@@ -187,7 +187,9 @@ async function init() {
     if (ev.type === "event.approval.request") {
       onApprovalRequest({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), tool: String(ev.payload.tool ?? "") })
     } else if (ev.type === "event.todo.update") {
-      onTodoUpdate({ sessionId: ev.sessionId, todos: (ev.payload.todos as TodoItem[]) ?? [] })
+      // 子会话的待办为运行内隔离清单（DESIGN「子会话运行」待办隔离）：不进父会话待办面板——
+      // 卡片已在子会话折叠容器内由工具结果渲染，此处仅刷新父会话清单
+      if (ev.payload.subSession !== true) onTodoUpdate({ sessionId: ev.sessionId, todos: (ev.payload.todos as TodoItem[]) ?? [] })
     } else if (ev.type === "event.choice.request") {
       onChoiceRequest({ sessionId: ev.sessionId, prompt: String(ev.payload.prompt ?? ""), options: (Array.isArray(ev.payload.options) ? ev.payload.options : []) as Array<string | Record<string, unknown>>, choiceId: String(ev.payload.choiceId ?? ""), multi: ev.payload.multi === true, plan: ev.payload.plan as { title?: unknown; content?: unknown; path?: unknown } | undefined })
     } else if (ev.type === "event.env.request") {
@@ -197,12 +199,12 @@ async function init() {
     } else if (ev.type === "event.capture.request") {
       onCaptureRequest({ sessionId: ev.sessionId, captureId: String(ev.payload.captureId ?? ""), fullPage: ev.payload.fullPage === true, delay: Number(ev.payload.delay ?? 0) })
     } else if (ev.type === "event.tool.call") {
-      onToolCall({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? ""), arguments: ev.payload.arguments as Record<string, unknown> | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
+      onToolCall({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? ""), arguments: ev.payload.arguments as Record<string, unknown> | undefined, subSessionId: ev.payload.subSessionId as string | undefined })
     } else if (ev.type === "event.tool.alive") {
       // 长工具执行心跳：阻塞类工具（sh/py 长命令）执行期间无其他数据，据此刷新活跃，防空闲看门狗误取消
       touchRunActivity(ev.sessionId)
     } else if (ev.type === "event.tool.result") {
-      onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, sessionRunId: ev.payload.sessionRunId as string | undefined })
+      onToolResult({ sessionId: ev.sessionId, toolCallId: String(ev.payload.toolCallId ?? ""), name: String(ev.payload.name ?? "tool"), output: String(ev.payload.output ?? ""), blocks: ev.payload.blocks as ContentBlock[] | undefined, subSessionId: ev.payload.subSessionId as string | undefined })
     } else if (ev.type === "event.message.compact") {
       onMessageCompact({
         sessionId: ev.sessionId,
@@ -213,19 +215,19 @@ async function init() {
     } else if (ev.type === "event.session.ctx") {
       // 运行中上下文大小实时更新（会话列表 k 显示）；缓存命中（接口返回时）随同更新（圆环悬浮展示）
       updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0), ev.payload.ctxCachedTokens === undefined ? undefined : Number(ev.payload.ctxCachedTokens))
-    } else if (ev.type === "event.branch.merged") {
-      // 分支报告合入（DESIGN「会话分支运行与合并」）：消息落盘为 **user + engineNote: "branch"**
+    } else if (ev.type === "event.subsession.merged") {
+      // 子会话报告合入（DESIGN「子会话运行」）：消息落盘为 **user + engineNote: "subsession"**
       // （与其余引擎注入同口径——assistant 形态会被思考类模型 400 拒绝），此处实时渲染为
-      // 「分支合入」通知条；分支执行过程在折叠容器（非最终合入不带存档），历史回放由存储消息承担
+      // 「子会话合入」通知条；子会话执行过程在折叠容器（非最终合入不带存档），历史回放由存储消息承担
       if (getCurrentSession()?.id !== ev.sessionId) return
-      sealSegment(ev.sessionId) // 合并消息独立成段（不并入主线在途流式文本）
+      sealSegment(ev.sessionId) // 合并消息独立成段（不并入在途流式文本）
       appendMsg({
         id: String(ev.payload.messageId ?? uuid()),
         role: "user",
-        engineNote: "branch",
+        engineNote: "subsession",
         content: String(ev.payload.text ?? ""),
-        branchMeta: {
-          branchId: String(ev.payload.branchId ?? ""),
+        subSessionMerged: {
+          runId: String(ev.payload.runId ?? ""),
           name: String(ev.payload.name ?? ""),
           ...(ev.payload.model ? { model: String(ev.payload.model) } : {}),
         },

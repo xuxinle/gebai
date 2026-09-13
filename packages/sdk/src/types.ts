@@ -75,33 +75,32 @@ export interface Message {
   loadedAgent?: string
   /** 引擎软性提示标记：消息**角色为 user**（与用户输入同角色、随用户消息一起受上下文保护），仅用于与用户
    *  自己发的消息**区分展示**——UI 渲染为弱化的通知条（非用户气泡）。
-   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`cron` 定时任务结果写回、`branch` 分支报告合入。
+   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`cron` 定时任务结果写回、`subsession` 子会话报告合入。
    *  落 user 的根本原因：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、
    *  要求回传 `reasoning_content` → 400），而这类系统合成的消息注入位置往往就是模型下一次调用的前一条。
    *  标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
    *  （前缀兜底限定 assistant 角色）。 */
-  engineNote?: "todo" | "verify" | "cron" | "branch"
+  engineNote?: "todo" | "verify" | "cron" | "subsession"
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean
   /** 压缩摘要消息：被压缩的原始区间描述（条数/时间范围） */
   summary?: string
-  /** 新会话执行（agent_run）过程消息标记：完整存档但【不进入主 LLM 上下文】（loadHistory 跳过），前端按 runId 分组折叠渲染。 */
-  session?: boolean
-  /** 新会话执行 run 标识：同一次 agent_run 执行过程的消息共享（前端回放按此分组）。 */
-  sessionRunId?: string
-  /** 新会话执行 run 元信息（仅该 run 首条消息携带）：折叠容器标题用（预加载子Agent 名与输入）。 */
-  sessionMeta?: { agents: string[]; input: string }
+  /** 子会话运行过程消息标记（DESIGN「子会话运行」）：完整存档但【不进入主 LLM 上下文】（loadHistory 跳过），前端按 runId 分组折叠渲染。 */
+  subSession?: boolean
+  /** 子会话运行标识：同一次子会话运行过程的消息共享（前端回放按此分组）。 */
+  subSessionId?: string
+  /** 子会话运行元信息（仅该 run 首条消息携带）：折叠容器标题用（预加载子Agent 名与输入）。 */
+  subSessionMeta?: { agents: string[]; input: string }
   /**
-   * 新会话执行完整存档（agent_run 工具调用记录的扩展字段）：该次执行的全部内容
+   * 子会话运行完整存档（subsession_run 工具调用记录的扩展字段）：该次运行的全部内容
    * （输入/每轮回复/推理/工具调用与结果），历史会话回放据此渲染折叠容器。
-   * 分支运行（branch_run）同样以本形态存档（branch 字段标识）。
    */
-  sessionRun?: SessionRunArchive
-  /** 分支运行合并消息标记（**role=user + engineNote:"branch"**，DESIGN「会话分支运行与合并」）：branch_run
-   *  分支最终报告合入主上下文的消息携带；与用户消息同角色可避开思考类模型的尾 assistant 约束、并随用户消息
-   *  受上下文保护；随消息落盘，loadHistory 按普通 user 消息进上下文（内容自带分支头行），UI 按 engineNote
-   *  渲染分支合并通知条，sessionRun 字段携带分支过程存档供回放。 */
-  branchMeta?: { branchId: string; name: string; model?: string }
+  subSessionArchive?: SubSessionArchive
+  /** 子会话报告合入标记（**role=user + engineNote:"subsession"**，DESIGN「子会话运行」）：子会话最终报告/
+   *  阶段性成果合入父会话上下文的消息携带；与用户消息同角色可避开思考类模型的尾 assistant 约束、并随用户消息
+   *  受上下文保护；随消息落盘，loadHistory 按普通 user 消息进上下文（内容自带子会话头行），UI 按 engineNote
+   *  渲染子会话合入通知条，subSessionArchive 字段携带运行过程存档供回放。 */
+  subSessionMerged?: { runId: string; name: string; model?: string }
   /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
   subAgent?: boolean
   /** 旧版（agent_call 时代）字段：兼容历史会话回放，新数据不再写入。 */
@@ -113,8 +112,8 @@ export interface Message {
   createdAt: number
 }
 
-/** 新会话执行存档条目：执行过程消息（user/assistant/tool 全量内容）。 */
-export interface SessionRunEntry {
+/** 子会话运行存档条目：执行过程消息（user/assistant/tool 全量内容）。 */
+export interface SubSessionEntry {
   role: "user" | "assistant" | "tool"
   name?: string
   content: string
@@ -124,24 +123,24 @@ export interface SessionRunEntry {
   toolCallId?: string
   arguments?: Record<string, unknown>
   blocks?: ContentBlock[]
-  /** 嵌套 agent_run（新会话内再执行新会话）的存档递归携带。 */
-  sessionRun?: SessionRunArchive
+  /** 嵌套子会话（子会话内再派生子会话）的存档递归携带。 */
+  subSessionArchive?: SubSessionArchive
 }
 
-/** 新会话执行完整存档（agent_run 工具记录扩展字段，见 Message.sessionRun）。 */
-export interface SessionRunArchive {
+/** 子会话运行完整存档（subsession_run 工具记录扩展字段，见 Message.subSessionArchive）。 */
+export interface SubSessionArchive {
   runId: string
-  /** 预加载进新会话的子Agent 列表（完整系统提示词与工具进入新会话上下文）。 */
+  /** 预加载进子会话的子Agent 列表（完整系统提示词与工具进入子会话上下文；空数组=不加载）。 */
   agents: string[]
   input: string
   /** 最终返回文本（容器折叠后摘要展示；异常/取消为空串）。 */
   output: string
-  messages: SessionRunEntry[]
-  /** 分支运行（branch_run）标识：分支存档携带（agents 为空数组），前端容器标题按分支名渲染。 */
-  branch?: { name: string; model?: string }
+  messages: SubSessionEntry[]
+  /** 子会话标识（名称与模型路由）：前端容器标题「子会话「名」（模型）」用。 */
+  subsession?: { name: string; model?: string }
 }
 
-/** 旧版（agent_call 时代）子Agent run 存档：结构同 SessionRunArchive 但 agent 为单值，仅历史会话兼容回放。 */
+/** 旧版（agent_call 时代）子Agent run 存档：结构同 SubSessionArchive 但 agent 为单值，仅历史会话兼容回放。 */
 export interface LegacySubAgentRunEntry {
   role: "user" | "assistant" | "tool"
   name?: string
@@ -163,15 +162,15 @@ export interface LegacySubAgentRunArchive {
 }
 
 export interface ChatChunk {
-  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "session_start" | "session_done" | "model_error"
+  kind: "text" | "reasoning" | "tool_call" | "tool_result" | "approval" | "done" | "error" | "reset" | "resume" | "subsession_start" | "subsession_done" | "model_error"
   messageId?: string
-  /** 事件来自新会话执行过程（agent_run 派生会话；主回复不带此标记）。 */
-  session?: boolean
-  /** 新会话执行 run 标识：同一次 agent_run 的执行过程事件共享（前端按此分组渲染）。 */
-  sessionRunId?: string
-  /** 新会话执行 run 元信息：session_start 携带 agents/input，session_done 携带 agents/output（前端折叠容器标题用）；
-   *  分支运行（branch_run）的 start/done 携带 branch（分支名）与 model（模型路由名，未指定缺省）。 */
-  sessionMeta?: { agents: string[]; input?: string; output?: string; branch?: string; model?: string }
+  /** 事件来自子会话运行过程（subsession_run 派生子会话；主回复/主工具不带此标记）。 */
+  subSession?: boolean
+  /** 子会话运行标识：同一次子会话运行的过程事件共享（前端按此分组渲染）。 */
+  subSessionId?: string
+  /** 子会话运行元信息：subsession_start 携带 agents/input，subsession_done 携带 agents/output（前端折叠容器标题用）；
+   *  subsession 为子会话名与模型路由（未指定缺省）。 */
+  subSessionMeta?: { agents: string[]; input?: string; output?: string; subsession?: string; model?: string }
   text?: string
   toolCall?: ToolCall
   approval?: { toolCallId: string; retries: number; tool: string }
@@ -225,7 +224,7 @@ export interface AttachSnapshot {
   /** 任务开始时刻（前端单轮计时器起点恢复用）。 */
   startedAt?: number
   /** 在途 assistant 回合的累积文本/推理（尚未持久化——刷新后从存储恢复不了的部分）。 */
-  stream?: { messageId: string; text: string; reasoning: string; session?: boolean; sessionRunId?: string }
+  stream?: { messageId: string; text: string; reasoning: string; subSession?: boolean; subSessionId?: string }
   /** 待决交互清单（审批/选择/填值/画图/捕获）。 */
   pending: PendingInteraction[]
   /** 快照反映到的事件日志 seq（attach 流据此过滤已含入快照的事件并重放缺口）。 */
@@ -401,6 +400,6 @@ export interface MessageLike {
   name?: string
   toolCallId?: string
   toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> | string }>
-  /** 嵌套 agent_run 存档（仅服务端内存态挂载，provider 序列化忽略；不进主 LLM 上下文）。 */
-  sessionRun?: SessionRunArchive
+  /** 嵌套子会话存档（仅服务端内存态挂载，provider 序列化忽略；不进主 LLM 上下文）。 */
+  subSessionArchive?: SubSessionArchive
 }

@@ -32,7 +32,6 @@ function ctx(home: string): ToolContext {
     },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "", archive: {} as never }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => null,

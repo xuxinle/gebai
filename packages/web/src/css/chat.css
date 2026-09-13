@@ -213,7 +213,7 @@
   max-width: 100%;
   box-sizing: border-box;
 }
-/* 工具气泡内 markdown 输出（agent_run 最终返回/计划卡片）恢复正常换行语义：气泡的
+/* 工具气泡内 markdown 输出（subsession_run 最终返回/计划卡片）恢复正常换行语义：气泡的
    pre-wrap 面向纯文本参数/输出（保留源换行）；markdown 渲染的软换行已是 <br>，
    markdown-it 在 <br> 后保留的源 \n 若再按 pre-wrap 折行，每行之间会多出一个空行 */
 .msg.tool .bubble .markdown {
@@ -293,7 +293,7 @@
 .msg.tool .bubble .tool-head .tool-name { flex: none; white-space: nowrap; }
 /* 标题参数后缀：单行省略不撑爆卡片头（截断时悬浮 tooltip 见全文） */
 .msg.tool .bubble .tool-head .tool-suffix { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
-/* agent_run 子Agent 列表不截断：允许换行完整展示 */
+/* subsession_run 子Agent 列表不截断：允许换行完整展示 */
 .msg.tool .bubble .tool-head .tool-suffix.wrap { white-space: pre-wrap; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 /* 工具长输出/长参数自动折叠：超长默认收起，点击展开 */
 .msg.tool .bubble .tool-out, .msg.tool .bubble .tool-fold { margin-top: 6px; }
@@ -391,9 +391,9 @@
   word-break: break-word;
 }
 
-/* agent_run 输入参数块：工具卡片参数区与新会话折叠容器顶部共用（不带「输入」提示） */
-.msg.tool .bubble .agent-run-input,
-.session-run .session-body .agent-run-input {
+/* subsession_run 输入参数块：工具卡片参数区与新会话折叠容器顶部共用（不带「输入」提示） */
+.msg.tool .bubble .subsession-input,
+.subsession-run .subsession-body .subsession-input {
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -406,15 +406,15 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
-.session-run .session-body .agent-run-input {
+.subsession-run .subsession-body .subsession-input {
   margin: 6px 0 8px;
 }
 
-/* branch_run 分支参数块：每分支一个小节（「🌿 名（模型路由）」头 + 任务指令块，指令块复用 agent-run-input） */
-.branch-args-item { margin: 0 0 8px; }
-.branch-args-item:last-child { margin-bottom: 0; }
-.branch-args-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
-.branch-args-async { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+/* subsession_run 分支参数块：每分支一个小节（「🌿 名（模型路由）」头 + 任务指令块，指令块复用 subsession-input） */
+.subsession-args-item { margin: 0 0 8px; }
+.subsession-args-item:last-child { margin-bottom: 0; }
+.subsession-args-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.subsession-args-async { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
 
 /* 待办卡片 */
 .todo-item { display: flex; gap: 8px; padding: 3px 0; align-items: flex-start; }
@@ -648,15 +648,15 @@
   overflow-y: auto;
 }
 
-/* 新会话执行过程折叠容器：执行中展开显示完整过程（推理/工具/回复），结束后自动折叠只显示最终返回 */
-.session-run {
+/* 子会话运行过程折叠容器：执行中展开显示完整过程（推理/工具/回复），结束后自动折叠只显示最终返回 */
+.subsession-run {
   margin: 8px 0;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
-.session-run > summary {
+.subsession-run > summary {
   cursor: pointer;
   user-select: none;
   display: flex;
@@ -667,59 +667,59 @@
   font-size: 13px;
   list-style: none;
 }
-.session-run > summary::-webkit-details-marker {
+.subsession-run > summary::-webkit-details-marker {
   display: none;
 }
-.session-run > summary::before {
+.subsession-run > summary::before {
   content: "▸";
   color: var(--text-faint);
   font-size: 11px;
   transition: transform var(--transition);
 }
-.session-run[open] > summary::before {
+.subsession-run[open] > summary::before {
   transform: rotate(90deg);
 }
-.session-run .session-title {
+.subsession-run .subsession-title {
   font-weight: 600;
   color: var(--text);
 }
-.session-run .session-output {
+.subsession-run .subsession-output {
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 45%;
 }
-.session-run.done .session-output {
+.subsession-run.done .subsession-output {
   color: var(--success, #3fb950);
 }
-.session-run[open] > summary {
+.subsession-run[open] > summary {
   border-bottom: 1px solid var(--border);
 }
-.session-run .session-body {
+.subsession-run .subsession-body {
   padding: 4px 12px 10px;
   max-height: 45vh;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* flex 列：内部消息（.msg.user align-self: flex-end 右对齐等）依赖 flex 布局；
-     此前靠 base.css 会话列表 .session-body 同名类的全局规则意外供 flex，
+     此前靠 base.css 会话列表 .subsession-body 同名类的全局规则意外供 flex，
      该规则已收窄作用域，此处显式声明（同名类职责分离） */
   display: flex;
   flex-direction: column;
 }
 /* 容器内消息（执行过程）：meta 紧凑展示（隐藏重复时间），气泡间距收紧 */
-.session-run .msg {
+.subsession-run .msg {
   padding: 0;
 }
-.session-run .msg .msg-meta {
+.subsession-run .msg .msg-meta {
   padding: 6px 0 2px;
   font-size: 11px;
   opacity: 0.75;
 }
-.session-run .msg .msg-meta .msg-time {
+.subsession-run .msg .msg-meta .msg-time {
   display: none;
 }
-.session-run .msg .bubble {
+.subsession-run .msg .bubble {
   margin-top: 0;
 }
 

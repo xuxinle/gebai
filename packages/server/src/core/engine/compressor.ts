@@ -316,7 +316,7 @@ export class ContextCompressor {
     const llm = provider ?? this.deps.resolveProvider?.(await this.deps.env.resolve(sessionId, user)) ?? this.deps.getDefaultProvider()
     const messages = session.messages
     // 可压缩消息（isCompressibleMessage）：受保护消息（系统提示词含装载提示词/压缩摘要、用户输入、
-    // 新会话执行存档）不压缩不改变（不选进区间、不进摘要输入，区间夹带时由 compactMessages 原位保留）；
+    // 子会话运行存档）不压缩不改变（不选进区间、不进摘要输入，区间夹带时由 compactMessages 原位保留）；
     // 引擎注入的消息（软性提醒/裁剪提示，同为 user 角色）是引擎可再生的派生内容，可被摘要吸收
     const compactable: number[] = []
     for (let i = 0; i < messages.length; i++) {
@@ -611,14 +611,14 @@ export class ContextCompressor {
     return { text: text.trim(), usage }
   }
 
-  /** 分支报告摘要（merge=summary 合入粒度，DESIGN「会话分支运行与合并」）：任务级模型压缩为「结论+要点」，
+  /** 子会话报告摘要（merge=summary 合入粒度，DESIGN「子会话运行」）：任务级模型压缩为「结论+要点」，
    *  失败/空结果返回 undefined——调用方全文兜底（合入不因摘要失败而丢失）。 */
-  async summarizeBranchReport(content: string, env: Record<string, string>): Promise<string | undefined> {
+  async summarizeSubSessionReport(content: string, env: Record<string, string>): Promise<string | undefined> {
     try {
       const provider = this.deps.resolveProvider?.(env) ?? this.deps.getDefaultProvider()
       const out = await this.completeText(
         [
-          { role: "system", content: "你是并行分支报告压缩器。把分支执行报告压缩为给主线决策用的要点：保留结论、关键发现、产物文件路径、给主线的建议与未尽事项；舍弃过程叙述与客套话。直接输出要点正文（可分条），不超过 400 字。" },
+          { role: "system", content: "你是子会话报告压缩器。把子会话执行报告压缩为给父会话决策用的要点：保留结论、关键发现、产物文件路径、给父会话的建议与未尽事项；舍弃过程叙述与客套话。直接输出要点正文（可分条），不超过 400 字。" },
           { role: "user", content: content.slice(0, SUMMARY_INPUT_LIMIT) },
         ],
         provider,

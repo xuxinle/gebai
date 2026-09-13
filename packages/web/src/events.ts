@@ -75,11 +75,11 @@ export function onCaptureRequest(ev: { sessionId: string; captureId: string; ful
     }
   })()
 }
-export function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; arguments?: Record<string, unknown>; sessionRunId?: string }) {
+export function onToolCall(ev: { sessionId: string; toolCallId: string; name: string; arguments?: Record<string, unknown>; subSessionId?: string }) {
   // 工具事件只渲染当前显示的会话；切走的会话由 loadMessages 兜底（服务端已持久化）
   const cur = getCurrentSession()
   if (ev.sessionId !== cur?.id) return
-  const runId = ev.sessionRunId
+  const runId = ev.subSessionId
   const short = shortToolName(String(ev.name ?? ""))
   const argsObj = ev.arguments as Record<string, unknown> | undefined
   // ask 选项询问分支：等待期只在审批容器渲染交互选择卡片
@@ -94,9 +94,9 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
     if (!prompt && !options.length) return
     noteIncoming()
     const askArgs = { prompt, options, multi }
-    // 新会话执行过程内的调用：记录卡渲染进该 run 的折叠容器
+    // 子会话运行过程内的调用：记录卡渲染进该 run 的折叠容器
     if (runId) {
-      const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
+      const sub = runs.get(ev.sessionId)?.subSessions?.get(runId)
       if (!sub?.container.isConnected) return
       sealSessionSegment(sub) // 容器内文本分段：问答记录卡处截断当前文本段
       pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_choice", runId, askArgs })
@@ -116,7 +116,7 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
     if (!title) return
     noteIncoming()
     if (runId) {
-      const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
+      const sub = runs.get(ev.sessionId)?.subSessions?.get(runId)
       if (!sub?.container.isConnected) return
       sealSessionSegment(sub) // 容器内文本分段：后续计划卡处截断当前文本段
       pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId, runId), { session: ev.sessionId, kind: "ask_plan", runId, planArgs: args })
@@ -129,9 +129,9 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
   }
   if (isBlockOnly(String(ev.name ?? ""))) return
   noteIncoming()
-  // 新会话执行过程内的工具调用：渲染进该 run 的折叠容器（容器缺失=切走场景，由 loadMessages 兜底）
+  // 子会话运行过程内的工具调用：渲染进该 run 的折叠容器（容器缺失=切走场景，由 loadMessages 兜底）
   if (runId) {
-    const sub = runs.get(ev.sessionId)?.sessionRuns?.get(runId)
+    const sub = runs.get(ev.sessionId)?.subSessions?.get(runId)
     if (!sub?.container.isConnected) return
     sealSessionSegment(sub) // 容器内文本分段：工具调用处截断当前文本段
     if (short === "todo") {
@@ -163,12 +163,12 @@ export function onToolCall(ev: { sessionId: string; toolCallId: string; name: st
   const body = wrapper.querySelector<HTMLElement>(".msg-body")
   if (body) pendingTools.set(pendingToolsKey(ev.sessionId, ev.toolCallId), { wrapper, body, session: ev.sessionId, kind: "tool", name: String(ev.name ?? ""), argsText: args })
 }
-export function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; sessionRunId?: string }) {
+export function onToolResult(ev: { sessionId: string; toolCallId: string; name: string; output: string; blocks?: ContentBlock[]; subSessionId?: string }) {
   const cur = getCurrentSession()
   if (ev.sessionId !== cur?.id) {
     // 切走会话时结果不渲染，但配对必须清理：残留会让切回时 loadMessages 按「未完成配对」
     // 重建等待卡，与历史渲染的已完成工具卡重复且永不更新
-    if (ev.toolCallId) pendingTools.delete(pendingToolsKey(ev.sessionId, ev.toolCallId, ev.sessionRunId))
+    if (ev.toolCallId) pendingTools.delete(pendingToolsKey(ev.sessionId, ev.toolCallId, ev.subSessionId))
     return
   }
   const name = String(ev.name ?? "tool")
@@ -177,14 +177,14 @@ export function onToolResult(ev: { sessionId: string; toolCallId: string; name: 
   if (isBlockOnly(name)) {
     // show/diff 等（card.args="block"）：不显示工具卡片，appendMsg 只渲染内容块（渲染失败/能力受限时显示输出文本）；
     // 追加前封存当前文本段——图表卡片独立展示，画图后的输出另起新卡片（防输出追加到图上方同一张卡片）
-    const runId = ev.sessionRunId
-    const parent = runId ? runs.get(ev.sessionId)?.sessionRuns?.get(runId)?.body : undefined
+    const runId = ev.subSessionId
+    const parent = runId ? runs.get(ev.sessionId)?.subSessions?.get(runId)?.body : undefined
     sealBlockResultSegment(ev.sessionId, runId)
     appendMsg({ id: uuid(), role: "tool", name, content: String(ev.output ?? ""), blocks, createdAt: Date.now() }, false, parent)
     return
   }
-  const runId = ev.sessionRunId
-  const sub = runId ? runs.get(ev.sessionId)?.sessionRuns?.get(runId) : undefined
+  const runId = ev.subSessionId
+  const sub = runId ? runs.get(ev.sessionId)?.subSessions?.get(runId) : undefined
   const parent = sub?.body
   // ask 选项询问分支：更新消息流中的问答卡片（头部完成态 + 回答；无配对时兜底独立结果消息）
   appendToolResult(ev.sessionId, ev.toolCallId, name, String(ev.output ?? ""), blocks, runId, parent)

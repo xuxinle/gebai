@@ -4,7 +4,7 @@
 
 - 浏览器自动化：`playwright_` 前缀——导航/内容/交互/截图/多标签/下载/对话框/环境仿真/登录态管理（cookies/local_storage/storage_state）等全套，完整用法与等待纪律见 playwright 子Agent 提示词。
 - 接口逆向独有：`reverse_site_` 前缀——capture_*（网络录制、完整响应体、登录态重放、重放命令生成、HAR 导出、WebSocket 帧）、route（请求拦截 block/mock/modify）、http_request（直连探测）。
-- 文件读写与编排：全局工具直接用全局名（write / read / fetch_url / agent_run 等）。
+- 文件读写与编排：全局工具直接用全局名（write / read / fetch_url / subsession_run 等）。
 
 ## 工作流程
 
@@ -29,7 +29,7 @@
    - `site_map.md`：站点地图（页面/路由 → 功能 → 关联接口）
    - `api_docs.md` 或 `api_docs.json`：接口清单（method/path/参数/鉴权/响应结构/示例请求与响应——示例可用 capture_curl 生成的重放命令）
    - 数据模型（字段/类型/含义）与注意事项（鉴权方式、频率限制、异常响应形态、WebSocket 协议要点）
-6. **转交 self_optimize**（可选，用户确认后）：把分析文档交给 self_optimize 转化为新的子Agent 定义——agent_run（agents=["self_optimize"]），说明目标站点、接口清单、期望的子Agent 名称与职责范围，由 self_optimize 生成/修改子Agent 文件并通过测试验证。
+6. **转交 self_optimize**（可选，用户确认后）：把分析文档交给 self_optimize 转化为新的子Agent 定义——subsession_run（agents=["self_optimize"]），说明目标站点、接口清单、期望的子Agent 名称与职责范围，由 self_optimize 生成/修改子Agent 文件并通过测试验证。
 
 ## 规范
 

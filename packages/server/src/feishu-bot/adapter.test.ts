@@ -66,7 +66,7 @@ describe("EngineBotAdapter（飞书接口层）", () => {
     bus.push({ type: "event.choice.request", ...base, payload: { choiceId: "c1", prompt: "请选择", options: ["A", "B"], multi: false } })
     bus.push({ type: "event.draw.render", ...base, payload: { renderId: "r1", code: "@startuml", name: "flow" } })
     // 新会话过程 done（session 标记）不触发 onDone（仅最终回复）
-    bus.push({ type: "event.message.done", ...base, payload: { text: "子代理过程", session: true } })
+    bus.push({ type: "event.message.done", ...base, payload: { text: "子代理过程", subSession: true } })
     bus.push({ type: "event.message.done", ...base, payload: { text: "最终回复" } })
     bus.push({ type: "event.task.done", ...base, payload: {} })
     expect(called).toEqual([
@@ -140,7 +140,7 @@ describe("EngineBotAdapter（飞书接口层）", () => {
       const adapter = new EngineBotAdapter(fake as never, bus as never, { notifyTools: true })
       const p = adapter.run("s1", "u1", "hi", {}, handlers)
       bus.push({ type: "event.tool.call", ...base, payload: { name: "read", toolCallId: "tc1", arguments: { path: "a.ts" } } })
-      bus.push({ type: "event.tool.result", ...base, payload: { name: "read", output: "ok", session: true, sessionId: "s1", toolCallId: "tc1" } })
+      bus.push({ type: "event.tool.result", ...base, payload: { name: "read", output: "ok", subSession: true, sessionId: "s1", toolCallId: "tc1" } })
       expect(called).toEqual(["call:read:tc1:path=a.ts", "result:read:tc1"])
       releaseRun?.()
       await p

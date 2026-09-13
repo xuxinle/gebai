@@ -254,7 +254,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
           h.onDraw?.(String(p.renderId ?? ""), String(p.code ?? ""), p.name != null ? String(p.name) : undefined, p.format != null ? String(p.format) : undefined)
           break
         case "event.message.done":
-          if (p.session !== true) h.onDone?.(String(p.text ?? ""))
+          if (p.subSession !== true) h.onDone?.(String(p.text ?? ""))
           break
         case "event.message.intermediate":
           h.onIntermediate?.(String(p.text ?? ""))
@@ -263,7 +263,7 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
           h.onToolCall?.(String(p.name ?? ""), String(p.toolCallId ?? ""), (p.arguments ?? undefined) as Record<string, unknown> | undefined)
           break
         case "event.tool.result":
-          h.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.session === true, p.toolCallId != null ? String(p.toolCallId) : undefined)
+          h.onToolResult?.(String(p.name ?? ""), String(p.output ?? ""), p.subSession === true, p.toolCallId != null ? String(p.toolCallId) : undefined)
           break
         case "event.task.done":
           h.onEnd?.()
@@ -572,13 +572,13 @@ describe("引擎事件推送", () => {
     expect(JSON.stringify(cards[0].content)).toContain("最终完整回复")
   })
 
-  test("新会话执行过程的 done（session 标记）不触发 final 卡片", async () => {
+  test("子会话运行过程的 done（subSession 标记）不触发 final 卡片", async () => {
     const f = makeBot()
     await f.bot.start()
     await f.bot.handleFeishuEvent(receiveEvent())
     await flush()
-    // 新会话执行过程的 done（session 标记）不是任务最终回复：接口层不转发 onDone（任务未结束）
-    f.emit({ type: "event.message.done", ...base, payload: { text: "子代理完成", session: true } })
+    // 子会话运行过程的 done（subSession 标记）不是任务最终回复：接口层不转发 onDone（任务未结束）
+    f.emit({ type: "event.message.done", ...base, payload: { text: "子代理完成", subSession: true } })
     await flush()
     const cards = f.sent.filter((s) => s.msgType === "interactive")
     expect(cards).toHaveLength(0)

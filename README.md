@@ -111,27 +111,27 @@ export const tools: ToolSet = { read, write, sh, ... }  // 复用或新建工具
 export const requiresApproval = { write: true }
 ```
 
-关键设计是「**装载 vs 新会话执行**」两种语义的精确区分：
+关键设计是「**装载 vs 子会话运行**」两种语义的精确区分：
 
-| 能力 | 装载（`agent_load`，模块语义） | 新会话执行（`agent_run`，会话语义） |
+| 能力 | 装载（`agent_load`，模块语义） | 子会话运行（`subsession_run`，会话语义） |
 |------|------|------|
-| 类比 | `import` 子模块 | 派生临时新会话 |
-| 上下文 | 并入主上下文，全程可见 | 独立上下文，完全隔离、只回传结果 |
-| 效果 | 工具注册进当前工具集 + 完整提示词写入会话 | 预加载一个或多个子 Agent 后阻塞执行并完整存档 |
-| 适用 | 默认方式：装完直接用其工具 | 需要干净上下文、防止上下文膨胀 |
+| 类比 | `import` 子模块 | 父子会话（进程）：fork 继承父上下文 / spawn 隔离新上下文 |
+| 上下文 | 并入父上下文，全程可见 | 默认隔离新上下文（`inherit_context:false`）；`true` 则 fork 父消息历史/提示词/工具面 |
+| 效果 | 工具注册进当前工具集 + 完整提示词写入会话 | 预加载子 Agent（可空）执行任务：隔离形态结果经返回值/bg_task 交付，继承形态报告自动合入父会话 |
+| 适用 | 默认方式：装完直接用其工具 | 需要干净上下文、防止上下文膨胀；或同一任务的并行多路推进（异步可主动合入阶段性成果） |
 
 工具以 `{agent}_{tool}` 单下划线命名空间透明路由，对子 Agent 完全无感；命名冲突构建期校验，弱模型容错兜底。
 
 **English.** Drop a single `.ts` file (or a directory with an `.md` prompt) into `packages/agents/src/agents/` (the @gebai/agents package) and you have defined a sub-agent — the build scans and collects them automatically, with **no registry, no config, no code registration**:
 
-The key design is the precise distinction between two semantics — **load vs. run in a new session**:
+The key design is the precise distinction between two semantics — **load vs. run in a sub-session**:
 
-| | Load (`agent_load`, module semantics) | New-session run (`agent_run`, session semantics) |
+| | Load (`agent_load`, module semantics) | Sub-session run (`subsession_run`, session semantics) |
 |------|------|------|
-| Analogy | `import` a submodule | Spawn a temporary new session |
-| Context | Merged into the main context, always visible | Fully isolated; only the final result returns |
-| Effect | Tools join the current toolset + full prompt written into the session | Preloads one or more sub-agents, blocks until done, fully archived |
-| Best for | Default: use its tools right after loading | Clean context; prevents context bloat |
+| Analogy | `import` a submodule | Parent/child processes: fork (inherit parent context) or spawn (isolated context) |
+| Context | Merged into the parent context, always visible | Isolated by default (`inherit_context:false`); `true` forks the parent history/prompt/tool face |
+| Effect | Tools join the current toolset + full prompt written into the session | Runs the task with optionally preloaded sub-agents; isolated results return via tool result / `bg_task`, forked reports auto-merge into the parent |
+| Best for | Default: use its tools right after loading | Clean context / no context bloat; or parallel multi-track work (async children can merge interim results) |
 
 Tools route transparently through the `{agent}_{tool}` single-underscore namespace — sub-agents never notice it. Naming collisions are validated at build time, with tolerant fallbacks for weaker models.
 
@@ -282,7 +282,7 @@ Monorepo（Bun workspaces + Turborepo）：`@gebai/server`（服务端核心）/
 ## 路线图 | Roadmap
 
 - [x] 核心主循环（对话 → 工具 → 审批 → 执行）
-- [x] 单文件子 Agent 扩展 + 装载/新会话执行
+- [x] 单文件子 Agent 扩展 + 装载/子会话运行
 - [x] 代码级自我优化（测试准入 + 自动回滚）
 - [x] 多用户隔离 + 路径沙箱 + 外部身份集成
 - [x] 单二进制三形态分发（桌面 / 浏览器 / 服务端）

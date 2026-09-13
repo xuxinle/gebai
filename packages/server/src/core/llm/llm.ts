@@ -140,7 +140,7 @@ async function fetchRetry(url: string, init: RequestInit, retries = 2): Promise<
   for (let attempt = 0; ; attempt++) {
     let res: Response
     try {
-      // LLM 请求恒直连：豁免工具执行作用域的透明浏览器代理（agent_run 嵌套引擎的 SSE 流式
+      // LLM 请求恒直连：豁免工具执行作用域的透明浏览器代理（subsession_run 嵌套引擎的 SSE 流式
       // 不可经浏览器中转缓冲），见 core/support/fetch-scope.ts
       res = await runWithoutFetchProxy(() => fetch(url, init))
     } catch (err) {
@@ -412,9 +412,9 @@ export function applyModelEnvOverrides(base: ProviderConfig, env: Record<string,
 }
 
 /**
- * 命名模型路由（`GEBAI_LLM_ROUTES`，DESIGN「会话分支运行与合并」多路接口）：JSON 对象
+ * 命名模型路由（`GEBAI_LLM_ROUTES`，DESIGN「子会话运行」多路接口）：JSON 对象
  * `{ "<路由名>": { "model": "...", "api_base"?: "...", "api_key"?: "...", "api_kind"?: "openai|responses|anthropic", "max_context"?: 400000 } }`。
- * 分支运行按路由名解析各自 Provider——多端点/多模型并行分摊单路限流，摆脱单轮串行速度限制。
+ * 子会话运行按路由名解析各自 Provider——多端点/多模型并行分摊单路限流，摆脱单轮串行速度限制。
  * 非法 JSON/非对象/字段缺失的条目静默忽略；未配置返回空表。
  */
 export function parseModelRoutes(env: Record<string, string> | undefined): Record<string, { model: string; apiBase?: string; apiKey?: string; apiKind?: ApiKind; maxContextTokens?: number }> {
@@ -445,7 +445,7 @@ export function parseModelRoutes(env: Record<string, string> | undefined): Recor
 }
 
 /**
- * 按名解析分支运行 Provider（branch_run 的 model 参数）：命中 `GEBAI_LLM_ROUTES` 路由名 →
+ * 按名解析子会话运行 Provider（subsession_run 的 model 参数）：命中 `GEBAI_LLM_ROUTES` 路由名 →
  * 路由配置合并启动配置构建独立 Provider（未指定的项沿用任务级合并基准）；未命中路由名 →
  * 视为字面模型名覆盖；name 为空返回 undefined（沿用任务级 Provider）。
  */

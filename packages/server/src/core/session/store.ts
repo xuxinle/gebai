@@ -163,12 +163,12 @@ export function estimateCharsTokens(text: string): number {
  * 不随会话持久化，统一口径避免显示值在运行结束前后回跳）。仅在无 usage 真值（老会话/接口不返回 usage）时
  * 由 toSessionInfo/任务结束持久化使用；有真值时的口径见 engine（真实 input tokens + 未发送增量估算）。
  */
-export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown; toolCalls?: Array<{ name?: string; arguments?: unknown }>; session?: boolean; subAgent?: boolean }>): number {
+export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown; toolCalls?: Array<{ name?: string; arguments?: unknown }>; subSession?: boolean; subAgent?: boolean }>): number {
   let tokens = 0
   for (const m of msgs) {
     if (m.role === "system") continue
-    // 新会话执行过程消息不进主 LLM 上下文：不计入上下文占用（会话列表展示口径与引擎一致；subAgent 为旧版兼容）
-    if (m.session || m.subAgent) continue
+    // 子会话运行过程消息不进父 LLM 上下文：不计入上下文占用（会话列表展示口径与引擎一致；subAgent 为旧版兼容）
+    if (m.subSession || m.subAgent) continue
     tokens += estimateCharsTokens(Array.isArray(m.content) ? JSON.stringify(m.content) : String(m.content ?? ""))
     if (m.toolCalls) {
       for (const tc of m.toolCalls) tokens += estimateCharsTokens((tc.name ?? "") + JSON.stringify(tc.arguments ?? {}))
@@ -179,14 +179,14 @@ export function estimateCtxTokens(msgs: Array<{ role?: string; content?: unknown
 
 /**
  * 上下文保护消息（**超限截断与溢出护栏**口径：不做无摘要的静默丢弃）：系统提示词（含 loadedAgent 装载
- * 提示词/compacted 摘要/旧格式 system）与用户输入、新会话执行存档（session/sessionRun/subAgent/subAgentRun）
+ * 提示词/compacted 摘要/旧格式 system）与用户输入、子会话运行存档（subSession/subSessionArchive/subAgent/subAgentRun）
  * ——超限截断（`trimToCacheLimit`）不丢弃它们、配对修复不把它们当孤儿；区间夹带时原位保留。
  * 注：**压缩（有摘要的移除）另有一套口径**（`isCompressibleMessage`）：压缩只保系统提示词，
  * 用户输入随区间被摘要替换并完全移除（摘要承载其要点，**原文不再保留**——压缩会改写会话记录）。
  */
-export function isProtectedMessage(m: { role?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
+export function isProtectedMessage(m: { role?: string; subSession?: boolean; subSessionArchive?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
   if (m.role === "user" || m.role === "system") return true
-  return !!(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
+  return !!(m.subSession || m.subSessionArchive || m.subAgent || m.subAgentRun)
 }
 
 /**
@@ -196,11 +196,11 @@ export function isProtectedMessage(m: { role?: string; session?: boolean; sessio
  * - 其余消息（用户输入、assistant、tool、引擎注入的提醒）进入压缩区间后由 LLM 摘要替换并**完全移除**
  *   （近消息由滑动窗口原样保留；远消息原消息不再残留于上下文，也不再残留于会话记录——摘要是其在
  *   会话中留下的唯一形态，模型与 UI 都只看得到摘要）；
- * - 新会话执行存档（session/sessionRun/subAgent/subAgentRun）本就不进主上下文，压缩不动它们（仅存档）。
+ * - 子会话运行存档（subSession/subSessionArchive/subAgent/subAgentRun）本就不进父上下文，压缩不动它们（仅存档）。
  */
-export function isCompressibleMessage(m: { role?: string; session?: boolean; sessionRun?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
+export function isCompressibleMessage(m: { role?: string; subSession?: boolean; subSessionArchive?: unknown; subAgent?: boolean; subAgentRun?: unknown }): boolean {
   if (m.role === "system") return false
-  return !(m.session || m.sessionRun || m.subAgent || m.subAgentRun)
+  return !(m.subSession || m.subSessionArchive || m.subAgent || m.subAgentRun)
 }
 
 /** 引擎软性提醒内容前缀（存量数据无 engineNote 标记时的兜底识别：标记上线前落盘的提醒为 assistant 形态）。 */
@@ -227,8 +227,8 @@ export interface PairingRepairMessage {
   toolCallId?: string
   toolCalls?: Array<{ id: string; name: string; arguments?: unknown }>
   createdAt?: number
-  session?: boolean
-  sessionRun?: unknown
+  subSession?: boolean
+  subSessionArchive?: unknown
   subAgent?: boolean
   subAgentRun?: unknown
 }
@@ -238,7 +238,7 @@ export interface PairingRepairMessage {
  * 旧版本缺陷产生「孤儿 tool 结果」（发起 assistant 已被删）或「未应答 toolCalls」（tool 结果缺失）时，
  * 严格校验的 LLM 接口（OpenAI 要求 tool 消息跟随对应 tool_calls、Anthropic 要求每个 tool_use 有
  * tool_result）会拒绝整个请求——会话自此每次运行都被 400 卡死，本函数使历史自愈：
- * - 孤儿 tool 消息：受保护的（agent_run 存档等）补一条最小 assistant(toolCalls) 桩保持配对可见，普通的丢弃；
+ * - 孤儿 tool 消息：受保护的（subsession_run 存档等）补一条最小 assistant(toolCalls) 桩保持配对可见，普通的丢弃；
  * - 中途出现未应答 toolCalls（其后已有后续消息）时补占位 tool 结果；
  * - 尾部未应答 toolCalls **只在 flushTail 时补占位**（llm 序列化前调用——发送时刻不可能存在在途批次）；
  *   存储/装载路径不 flush 尾部——正常执行流 assistant(toolCalls) 先落盘、结果随后到达，提前 flush 会
@@ -268,7 +268,7 @@ export function repairToolPairing<T extends PairingRepairMessage>(messages: T[],
         pending.delete(m.toolCallId)
         out.push(m)
       } else if (isProtectedMessage(m) && m.toolCallId) {
-        // 受保护 tool（agent_run 存档）：补最小 assistant 桩而非丢弃——存档内容保持可见
+        // 受保护 tool（subsession_run 存档）：补最小 assistant 桩而非丢弃——存档内容保持可见
         out.push({
           id: randomUUID().replace(/-/g, ""),
           role: "assistant",
@@ -518,7 +518,7 @@ export class SessionStore {
   }
 
   /**
-   * 超限截断（顺序保留）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/新会话执行存档）
+   * 超限截断（顺序保留）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/子会话运行存档）
    * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直至长度不超上限——不重排消息顺序（append 语义
    * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免压缩摘要（受保护）被当普通历史
    * 丢弃而让压缩成果静默作废、避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身超过

@@ -44,7 +44,6 @@ export function makeCtx(home: string): { ctx: ToolContext; readSet: Set<string> 
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: [], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),

@@ -1164,9 +1164,9 @@ export class GebaiClient {
           return
         }
         attached = true
-        // 种子 chunk：在途推理先于正文（渲染顺序：推理块 prepend 于正文气泡）；session 标记路由到新会话容器
-        const sub = snap.stream?.session === true ? { session: true as const } : {}
-        const runId = snap.stream?.sessionRunId ? { sessionRunId: snap.stream.sessionRunId } : {}
+        // 种子 chunk：在途推理先于正文（渲染顺序：推理块 prepend 于正文气泡）；subSession 标记路由到子会话容器
+        const sub = snap.stream?.subSession === true ? { subSession: true as const } : {}
+        const runId = snap.stream?.subSessionId ? { subSessionId: snap.stream.subSessionId } : {}
         if (snap.stream?.reasoning) push({ kind: "reasoning", text: snap.stream.reasoning, ...sub, ...runId })
         if (snap.stream?.text) push({ kind: "text", text: snap.stream.text, messageId: snap.stream.messageId, ...sub, ...runId })
         // 快照之后（订阅/请求期间到达）的事件按 seq 重放补入；缺口（overrun）放弃附加——存储恢复兜底
@@ -1226,39 +1226,39 @@ export class GebaiClient {
  */
 export function wsEventToChunk(ev: AgentEvent): ChatChunk | null {
   const p = ev.payload
-  // 新会话执行过程事件透传标记：reasoning/工具/审批事件与主循环共用，前端据此识别渲染到新会话容器
-  const sub = p.session === true ? { session: true as const } : {}
-  const runId = typeof p.sessionRunId === "string" ? { sessionRunId: p.sessionRunId } : {}
+  // 子会话运行过程事件透传标记：reasoning/工具/审批事件与主循环共用，前端据此识别渲染到子会话容器
+  const sub = p.subSession === true ? { subSession: true as const } : {}
+  const runId = typeof p.subSessionId === "string" ? { subSessionId: p.subSessionId } : {}
   switch (ev.type) {
-    case "event.session.start":
+    case "event.subsession.start":
       return {
-        kind: "session_start",
-        session: true,
-        sessionRunId: String(p.runId ?? ""),
-        sessionMeta: {
+        kind: "subsession_start",
+        subSession: true,
+        subSessionId: String(p.runId ?? ""),
+        subSessionMeta: {
           agents: Array.isArray(p.agents) ? p.agents.map(String) : [],
           input: String(p.input ?? ""),
-          ...(typeof p.branch === "string" && p.branch ? { branch: p.branch } : {}),
+          ...(typeof p.subsession === "string" && p.subsession ? { subsession: p.subsession } : {}),
           ...(typeof p.model === "string" && p.model ? { model: p.model } : {}),
         },
       }
-    case "event.session.done":
+    case "event.subsession.done":
       return {
-        kind: "session_done",
-        session: true,
-        sessionRunId: String(p.runId ?? ""),
+        kind: "subsession_done",
+        subSession: true,
+        subSessionId: String(p.runId ?? ""),
         // 异常/取消路径：output 为空时携带 error 说明（前端折叠容器显示中断原因）
-        sessionMeta: {
+        subSessionMeta: {
           agents: Array.isArray(p.agents) ? p.agents.map(String) : [],
           output: String((p.output as string) || (p.error ? `（已中断: ${String(p.error)}）` : "")),
-          ...(typeof p.branch === "string" && p.branch ? { branch: p.branch } : {}),
+          ...(typeof p.subsession === "string" && p.subsession ? { subsession: p.subsession } : {}),
         },
       }
     case "event.message.delta": {
       const chunk: ChatChunk = { kind: "text", text: String(p.text ?? ""), messageId: p.messageId as string | undefined }
-      // 新会话执行过程标记透传（前端据此分段显示新会话输出）
-      if (p.session === true) chunk.session = true
-      if (typeof p.sessionRunId === "string") chunk.sessionRunId = p.sessionRunId
+      // 子会话运行过程标记透传（前端据此分段显示子会话输出）
+      if (p.subSession === true) chunk.subSession = true
+      if (typeof p.subSessionId === "string") chunk.subSessionId = p.subSessionId
       return chunk
     }
     case "event.message.reasoning":

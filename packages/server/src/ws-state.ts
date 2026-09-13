@@ -195,8 +195,8 @@ export interface WsSnapshot {
 interface PendingDelta {
   sessionId: string
   messageId?: string
-  sessionRunId?: string
-  sessionMark: boolean
+  subSessionId?: string
+  subSessionMark: boolean
   text: string
   timestamp: number
   timer: ReturnType<typeof setTimeout>
@@ -272,8 +272,8 @@ export class WsStateService {
         cur &&
         cur.sessionId === ev.sessionId &&
         cur.messageId === ev.payload.messageId &&
-        cur.sessionRunId === ev.payload.sessionRunId &&
-        cur.sessionMark === (ev.payload.session === true)
+        cur.subSessionId === ev.payload.subSessionId &&
+        cur.subSessionMark === (ev.payload.subSession === true)
       if (sameStream && cur) {
         cur.text = (cur.text + String(ev.payload.text ?? "")).slice(0, DELTA_MERGE_MAX_CHARS)
         return
@@ -282,8 +282,8 @@ export class WsStateService {
       const pending: PendingDelta = {
         sessionId: ev.sessionId,
         messageId: ev.payload.messageId as string | undefined,
-        sessionRunId: ev.payload.sessionRunId as string | undefined,
-        sessionMark: ev.payload.session === true,
+        subSessionId: ev.payload.subSessionId as string | undefined,
+        subSessionMark: ev.payload.subSession === true,
         text: String(ev.payload.text ?? ""),
         timestamp: ev.timestamp,
         timer: setTimeout(() => this.flushDelta(uid), DELTA_MERGE_MS),
@@ -304,8 +304,8 @@ export class WsStateService {
     if (!pending.text) return
     const payload: Record<string, unknown> = { text: pending.text }
     if (pending.messageId !== undefined) payload.messageId = pending.messageId
-    if (pending.sessionMark) payload.session = true
-    if (pending.sessionRunId !== undefined) payload.sessionRunId = pending.sessionRunId
+    if (pending.subSessionMark) payload.subSession = true
+    if (pending.subSessionId !== undefined) payload.subSessionId = pending.subSessionId
     this.appendAndNotify(uid, { type: "event.message.delta", sessionId: pending.sessionId, payload, timestamp: pending.timestamp })
   }
 

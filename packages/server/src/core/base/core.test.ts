@@ -583,7 +583,7 @@ describe("SessionStore 装载提示词消息保护", () => {
     await store.appendMessage(session.id, { id: "a1", role: "assistant", content: "x", toolCalls: [{ id: "tc-1", name: "sh", arguments: {} }], createdAt: 1 } as never)
     await store.appendMessage(session.id, { id: "u1", role: "user", content: "q", createdAt: 2 } as never)
     await store.appendMessage(session.id, { id: "t-x", role: "tool", content: "orphan", toolCallId: "tc-none", name: "sh", createdAt: 3 } as never)
-    await store.appendMessage(session.id, { id: "t-run", role: "tool", content: "archive", toolCallId: "tc-run", name: "agent_run", sessionRun: { entries: [] }, createdAt: 4 } as never)
+    await store.appendMessage(session.id, { id: "t-run", role: "tool", content: "archive", toolCallId: "tc-run", name: "subsession_run", subSessionArchive: { entries: [] }, createdAt: 4 } as never)
     // 新实例（无内存缓存）从磁盘装载：readFileByPath 修复
     const store2 = new SessionStore({ home })
     const loaded = await store2.load(session.id, "default")

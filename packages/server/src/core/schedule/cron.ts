@@ -763,7 +763,7 @@ export class CronManager {
         // 绑定会话已删除：自愈降级为 ephemeral（任务保留，一次性记因）
         entry.target = "ephemeral"
         entry.sessionId = undefined
-        error = `绑定会话已删除，本次起改为独立新会话执行`
+        error = `绑定会话已删除，本次起改为独立会话执行`
         sid = await this.resolvePromptSession(entry, "ephemeral")
       }
       if (!sid) throw new Error("无法获得执行会话")

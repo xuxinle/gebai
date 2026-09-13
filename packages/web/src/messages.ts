@@ -1,5 +1,5 @@
 import { uuid } from "./uuid"
-import type { ContentBlock, Message, SessionRunArchive } from "@gebai/sdk"
+import type { ContentBlock, Message, SubSessionArchive } from "@gebai/sdk"
 import {
   ROLE_NAME,
   client,
@@ -15,7 +15,7 @@ import {
   pendingToolsKey,
   runs,
   todoState,
-  type SessionRunState,
+  type SubSessionState,
 } from "./state"
 import { blockText, markdownBlock } from "./markdown"
 import { renderCodeCard, renderFileCard } from "./file-card"
@@ -275,9 +275,9 @@ export function flushMsgBatch(): void {
 /** 引擎软性提醒内容前缀（存量数据无 engineNote 标记时的兜底：标记上线前落盘的提醒为 assistant 形态）。 */
 const ENGINE_NOTE_RE = /^【(待办提醒|验证提醒)】/
 
-/** 引擎提示展示名（engineNote → 称谓）：todo/verify 为引擎自律提醒，cron 为定时任务结果写回，
- *  branch 为分支报告合入。 */
-const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", cron: "定时任务", branch: "分支合入" }
+/* * 引擎提示展示名（engineNote → 称谓）：todo/verify 为引擎自律提醒，cron 为定时任务结果写回，
+ *  subsession 为子会话报告合入。 */
+const ENGINE_NOTE_NAME: Record<string, string> = { todo: "引擎提示", verify: "引擎提示", cron: "定时任务", subsession: "子会话合入" }
 
 /**
  * 引擎提示类型判定（与服务端 `store.isEngineNote` 同口径）：**字段标记优先**，存量数据
@@ -301,7 +301,7 @@ export function isEngineNoteMsg(m: { role?: string; engineNote?: string; content
 }
 
 export function appendMsg(msg: Message, stream = false, parent?: HTMLElement): HTMLElement {
-  // 引擎提示（待办续做/收尾验证/定时任务写回/分支合入，role=user + engineNote）：与用户自己发的输入
+  // 引擎提示（待办续做/收尾验证/定时任务写回/子会话合入，role=user + engineNote）：与用户自己发的输入
   // 同角色落盘，但展示形态区分——弱化通知条（非右对齐用户气泡，不提供撤回）；
   // 存量数据（标记上线前的 assistant 形态提醒）按内容前缀兜底识别
   const noteKind = msg.role === "user" || msg.role === "assistant" ? engineNoteOf(msg) : undefined
@@ -442,7 +442,7 @@ function flushStreamRender(s: { renderTimer?: ReturnType<typeof setTimeout>; el:
 function sealTextState(s: { renderTimer?: ReturnType<typeof setTimeout>; el: HTMLElement | null; reasoningEl: HTMLElement | null; acc: string; reasoningAcc: string }): void {
   // 节流排期待触发 = acc/reasoningAcc 存在未上屏增量：先同步冲刷最后一帧再清零，
   // 否则封段前最后一个节流窗口（120ms）内的内容永久丢失——快速模型整轮回复可全部
-  // 落在一个窗口内，气泡残留空白（agent_run 执行过程「只见结果不见过程」的主因）
+  // 落在一个窗口内，气泡残留空白（子会话运行过程「只见结果不见过程」的主因）
   if (s.renderTimer) flushStreamRender(s)
   // 无条件移除流式光标：工具执行期间即使正文为空（只有推理/无内容）也不应持续闪烁；
   // 工具调用后若继续输出，文本/推理分支会惰性重建 streaming 气泡
@@ -464,15 +464,15 @@ export function sealSegment(sessionId: string) {
 }
 
 /** 封存新会话 run 内当前文本段：新会话内工具调用处截断（与主循环 sealSegment 同构）。 */
-export function sealSessionSegment(sub: SessionRunState): void {
+export function sealSessionSegment(sub: SubSessionState): void {
   sealTextState(sub)
 }
 
 /** 块级工具结果（show/diff 等 card.args="block" 工具）封段：工具结果卡片追加前封存当前文本段
- *  （含新会话执行容器内），使图表等块卡片独立展示、画图后的输出另起新卡片——防输出继续追加到图上方同一张卡片。 */
+ *  （含子会话运行容器内），使图表等块卡片独立展示、画图后的输出另起新卡片——防输出继续追加到图上方同一张卡片。 */
 export function sealBlockResultSegment(sessionId: string, runId?: string): void {
   if (runId) {
-    const sub = runs.get(sessionId)?.sessionRuns?.get(runId)
+    const sub = runs.get(sessionId)?.subSessions?.get(runId)
     if (sub) sealSessionSegment(sub) // 容器缺失（切走场景）：无段可封
     return
   }
@@ -487,35 +487,32 @@ function inlineSnippet(text: string, max = 60): string {
 }
 
 /**
- * 新会话 run 折叠容器（details.session-run）：summary 显示「🚀 新会话 · 预加载 agents · 执行中/→ 返回: …」，
- * 分支运行（branch_run，DESIGN「会话分支运行与合并」）显示「🌿 分支 · name(model)」，
+ * 子会话运行折叠容器（details.subsession-run）：summary 显示「🌿 子会话 · name(model) · ⚙ 子Agent …」，
  * body 渲染完整执行过程（输入块/推理/工具卡片/回复）。
  * - 执行中（output 未提供）：默认展开（过程实时可见，main.ts 配合滚动）
  * - 已结束（output 提供，可为空串表示无返回）：默认折叠，只显示最终返回（点 summary 展开看过程，输入以块展示）
  */
-export function sessionRunBox(opts: { runId: string; agents: string[]; input: string; output?: string; branch?: { name: string; model?: string } }, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
+export function subSessionBox(opts: { runId: string; agents: string[]; input: string; output?: string; subsession?: { name: string; model?: string } }, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
   const container = document.createElement("details")
-  container.className = "session-run"
+  container.className = "subsession-run"
   container.dataset.runId = opts.runId
   const summary = el("summary", "session-summary")
   summary.append(
     el(
       "span",
-      "session-title",
-      opts.branch
-        ? `🌿 分支 · ${opts.branch.name}${opts.branch.model ? `（${opts.branch.model}）` : ""}`
-        : `🚀 新会话${opts.agents.length ? ` · ${opts.agents.join(" + ")}` : ""}`,
+      "subsession-title",
+      `🌿 子会话${opts.subsession ? ` · ${opts.subsession.name}${opts.subsession.model ? `（${opts.subsession.model}）` : ""}` : ""}${opts.agents.length ? ` · ⚙ ${opts.agents.join(" + ")}` : ""}`,
     ),
   )
-  const outputEl = el("span", "session-output")
+  const outputEl = el("span", "subsession-output")
   summary.appendChild(outputEl)
-  const body = el("div", "session-body")
+  const body = el("div", "subsession-body")
   container.append(summary, body)
-  // 执行中默认展开（过程实时可见；完成后 finishSessionRun 自动折叠）
+  // 执行中默认展开（过程实时可见；完成后 finishSubSession 自动折叠）
   if (opts.output === undefined || opts.output === null) container.open = true
   // 输入以参数块渲染在容器顶部（与工具参数块同款样式，不带「输入」提示）
-  if (opts.input) body.appendChild(el("div", "agent-run-input", opts.input))
-  finishSessionRun(container, outputEl, opts.output)
+  if (opts.input) body.appendChild(el("div", "subsession-input", opts.input))
+  finishSubSession(container, outputEl, opts.output)
   if (parent) parent.appendChild(container)
   else if (batchFrag) batchFrag.appendChild(container)
   else msgEl.appendChild(container)
@@ -526,14 +523,14 @@ export function sessionRunBox(opts: { runId: string; agents: string[]; input: st
 }
 
 /**
- * 历史回放：从 agent_run 工具调用记录的扩展字段（sessionRun 存档）渲染新会话折叠容器。
- * 递归渲染嵌套执行（新会话内再 agent_run 的存档挂在工具消息上）；parent 指定时嵌套进外层容器 body。
+ * 历史回放：从 subsession_run 工具调用记录的扩展字段（subSessionArchive 存档）渲染子会话折叠容器。
+ * 递归渲染嵌套子会话（子会话内再派生的存档挂在工具消息上）；parent 指定时嵌套进外层容器 body。
  */
-export function renderSessionArchive(archive: SessionRunArchive, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
-  const box = sessionRunBox({ runId: archive.runId, agents: archive.agents, input: archive.input, output: archive.output, branch: archive.branch }, parent)
+export function renderSubSessionArchive(archive: SubSessionArchive, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
+  const box = subSessionBox({ runId: archive.runId, agents: archive.agents, input: archive.input, output: archive.output, subsession: archive.subsession }, parent)
   for (const am of archive.messages) {
-    if (am.sessionRun) {
-      renderSessionArchive(am.sessionRun, box.body)
+    if (am.subSessionArchive) {
+      renderSubSessionArchive(am.subSessionArchive, box.body)
       continue
     }
     appendMsg(
@@ -549,7 +546,7 @@ export function renderSessionArchive(archive: SessionRunArchive, parent?: HTMLEl
  * 历史回放（旧版兼容）：agent_call 时代子Agent run 存档（LegacySubAgentRunArchive，agent 单值）渲染折叠容器。
  */
 export function renderLegacySubAgentArchive(archive: import("@gebai/sdk").LegacySubAgentRunArchive, parent?: HTMLElement): { container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement } {
-  const box = sessionRunBox({ runId: archive.runId, agents: [archive.agent], input: archive.input, output: archive.output }, parent)
+  const box = subSessionBox({ runId: archive.runId, agents: [archive.agent], input: archive.input, output: archive.output }, parent)
   for (const am of archive.messages) {
     if (am.subAgentRun) {
       renderLegacySubAgentArchive(am.subAgentRun, box.body)
@@ -572,7 +569,7 @@ export function renderLegacySubAgentArchive(archive: import("@gebai/sdk").Legacy
 /** 容器贴底判定阈值（距底部 < 8px 视为贴底）。 */
 const SESSION_STICKY_THRESHOLD = 8
 
-/** 每个容器 body 的跟随核心（sessionRunBox 创建时绑定）。 */
+/** 每个容器 body 的跟随核心（subSessionBox 创建时绑定）。 */
 const sessionFollowers = new WeakMap<HTMLElement, StickyFollowHandle>()
 
 export function scrollSessionSticky(body: HTMLElement): void {
@@ -591,7 +588,7 @@ export function bindSessionScroll(body: HTMLElement): void {
  * - output 为空串：已结束但无返回（失败/取消/风暴终止），折叠并显示「（无返回）」
  * - output 非空：已结束，折叠并显示返回摘要
  */
-export function finishSessionRun(container: HTMLDetailsElement, outputEl: HTMLElement, output: string | undefined | null): void {
+export function finishSubSession(container: HTMLDetailsElement, outputEl: HTMLElement, output: string | undefined | null): void {
   if (output === undefined || output === null) {
     outputEl.textContent = "执行中…"
     container.classList.remove("done")
@@ -700,12 +697,12 @@ export function appendToolResult(sessionId: string, toolCallId: string, name: st
     }
     const bubble = entry.wrapper?.querySelector(".bubble")
     // 超长参数收敛：执行/审批等待期完整直显，结果到达（完成态）收敛为折叠块（与历史回放同构；
-    // agent_run/branch_run 专用参数块无 tool-args 标记，天然跳过）
+    // subsession_run 专用参数块无 tool-args 标记，天然跳过）
     const argsEl = bubble?.querySelector<HTMLElement>(".tool-args")
     if (argsEl && entry.argsText) argsEl.replaceWith(renderToolArgsDone(name, entry.argsText) ?? argsEl)
     if (bubble && output) {
-      // agent_run：最终返回为 markdown 输出，直接渲染（与历史 toolCard 一致）
-      if (shortToolName(name) === "agent_run") bubble.appendChild(markdownBlock(output))
+      // subsession_run：最终返回为 markdown 输出，直接渲染（与历史 toolCard 一致）
+      if (shortToolName(name) === "subsession_run") bubble.appendChild(markdownBlock(output))
       else bubble.appendChild(toolOutput(output))
     }
     // 弹窗查看模式下文件工具产物 file 块收敛为文件链接 chip（其余块照常；参数区与输出不受影响）

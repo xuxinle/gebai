@@ -41,8 +41,7 @@ function ctx(home: string, sessionId = "s1", env: Record<string, string> = {}): 
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
-    waitForChoice: async () => null,
+        waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
     waitForCapture: async () => null,
@@ -407,17 +406,17 @@ return r.output` },
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("agent_run 新会话存档透传到 js 结果（历史回放不丢）", async () => {
+  test("subsession_run 子会话存档透传到 js 结果（历史回放不丢）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-run-"))
     const c = ctxWithTools(home)
-    const ar: Tool = mkTool("agent_run", async () => ({
+    const ar: Tool = mkTool("subsession_run", async () => ({
       output: "done",
-      sessionRun: { runId: "r9", agents: ["x"], input: "", output: "done", messages: [] },
+      subSessionArchive: { runId: "r9", agents: ["x"], input: "", output: "done", messages: [] },
     }))
-    c.registry.resolve = (name: string) => (name === "agent_run" ? { name, tool: ar } : undefined)
-    c.registry.schemas = () => [{ name: "agent_run", description: "", parameters: {} }]
-    const r = await jsTool.execute({ code: `const a = await agent_run({}); return a.sessionRun.runId` }, c)
-    expect((r.sessionRun as { runId: string } | undefined)?.runId).toBe("r9")
+    c.registry.resolve = (name: string) => (name === "subsession_run" ? { name, tool: ar } : undefined)
+    c.registry.schemas = () => [{ name: "subsession_run", description: "", parameters: {} }]
+    const r = await jsTool.execute({ code: `const a = await subsession_run({}); return a.subSessionArchive.runId` }, c)
+    expect((r.subSessionArchive as { runId: string } | undefined)?.runId).toBe("r9")
     rmSync(home, { recursive: true, force: true })
   })
 

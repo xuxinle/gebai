@@ -66,7 +66,6 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
@@ -656,7 +655,7 @@ describe("desktop definition", () => {
     expect(p).not.toContain("自动读模型元数据")
   })
 
-  test("preload off and tools registered (独有工具 only——编排用全局 agent_run，不复刻)", () => {
+  test("preload off and tools registered (独有工具 only——编排用全局 subsession_run，不复刻)", () => {
     expect(desktopDef.preload).toBe(false)
     expect(Object.keys(desktopDef.tools ?? {}).sort()).toEqual(
       [

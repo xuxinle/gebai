@@ -9,7 +9,7 @@ import type {
   AttachmentRef,
   ContentBlock,
   FileEntry,
-  SessionRunArchive,
+  SubSessionArchive,
   TodoItem,
   ToolSchema,
 } from "./types"
@@ -29,8 +29,8 @@ export interface ToolResult {
   images?: ToolResultImage[]
   truncated?: boolean
   filePath?: string
-  /** agent_run（执行新会话）工具返回：新会话 run 完整存档（扩展字段落盘到工具调用记录，历史回放渲染用）。 */
-  sessionRun?: SessionRunArchive
+  /** 子会话运行（subsession_run）工具返回：运行完整存档（扩展字段落盘到工具调用记录，历史回放渲染用）。 */
+  subSessionArchive?: SubSessionArchive
 }
 
 /** 工具结果携带的多模态图片：`path` 为解析后绝对路径（引擎按需读取内联、落盘引用），`display` 为
@@ -78,7 +78,7 @@ export type InteractionMode = "none" | "multi_turn" | "realtime"
 /** 输出方式（请求层配置）：final_only=仅最终响应、streaming=流式输出。 */
 export type OutputMode = "final_only" | "streaming"
 
-/** 会话级已读文件追踪契约（防误覆盖/防陈旧覆盖；引擎按会话注入，分支运行 fork 独立快照）。 */
+/** 会话级已读文件追踪契约（防误覆盖/防陈旧覆盖；引擎按会话注入，继承上下文的子会话 fork 独立快照）。 */
 export interface FileGuardContext {
   /** 登记已读与读取时内容指纹（写入成功后同登记——写后内容即已掌握）；content 缺省仅登记已读（不参与陈旧比对）。 */
   markRead(absPath: string, content?: string): void
@@ -97,7 +97,7 @@ export type ToolContext = {
   authMode?: "local" | "server"
   sessionId: string
   workdir: string
-  /** 会话工作区绝对路径（引擎恒定注入，不随项目绑定变化——workdir 在新会话绑定项目根时是项目根，
+  /** 会话工作区绝对路径（引擎恒定注入，不随项目绑定变化——workdir 在子会话绑定项目根时是项目根，
    *  保留项目名 tmp（DESIGN「项目机制」）恒指本路径）。可选：测试桩未注入时回退 workdir。 */
   sessionWorkdir?: string
   /** 子Agent 项目绑定根（{AGENT_NAME_UPPER}_PROJECT 解析结果，未绑定为空）：受限模式下未传 project 时允许在绑定根内操作。 */
@@ -144,7 +144,7 @@ export type ToolContext = {
   fromJsBridge?: boolean
   /** 会话级已读文件追踪（防误覆盖/防陈旧覆盖）。可选：测试桩/无引擎环境不注入时相关守卫自动放行。 */
   fileGuard?: FileGuardContext
-  /** 写范围守卫（子Agent 声明、引擎按「会话已装载/新会话预加载的子Agent」注入）：文件写类工具
+  /** 写范围守卫（子Agent 声明、引擎按「会话已装载/子会话预加载的子Agent」注入）：文件写类工具
    *  （write/edit/patch/file（rename/move/delete））写入前以**解析后的绝对路径**调用，
    *  返回非空字符串 = 拒绝写入（作为工具结果返回引导模型调整，不抛错）。可选：未注入时不限制。 */
   writeGuard?: (absPaths: string[]) => string | null | Promise<string | null>
@@ -160,14 +160,8 @@ export type ToolContext = {
     getAgentNames(): string[]
   }
   listSubAgentDefs: () => Array<{ name: string; description: string; preload: boolean; loaded: boolean; tools?: string[] }>
-  /** 装载子Agent 能力模块（agent_load 工具）：其工具并入当前工具集、能力描述注入系统提示词；不创建新上下文、无独立执行（DESIGN「装载 vs 新会话执行」）。 */
+  /** 装载子Agent 能力模块（agent_load 工具）：其工具并入当前工具集、能力描述注入系统提示词；不创建新上下文、无独立执行（DESIGN「装载 vs 子会话运行」）。 */
   loadSubAgent: (name: string) => Promise<void>
-  /** 执行新会话（agent_run 工具）：派生临时新会话、预加载指定子Agent 列表后阻塞执行任务，
-   *  返回最终输出文本与完整执行存档。opts.inheritGlobalTools/inheritGlobalPrompt（默认 true）
-   *  控制全局工具注册与总Agent 全局系统提示词注入。 */
-  runNewSession: (agents: string[], input: string, opts?: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean }) => Promise<{ output: string; archive: SessionRunArchive }>
-  /** 分支与主干双向同步（branch_sync 工具；引擎仅主循环注入——分支内/新会话执行内不可再分支）。可选。 */
-  branchSync?: (content?: string) => Promise<string>
   /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。
    *  plan 为计划审批分支附加载荷。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean, plan?: ChoicePlan) => Promise<ChoiceResult>
@@ -239,30 +233,30 @@ export interface SubAgentDef {
   name: string
   description: string
   systemPrompt: string
-  /** 依赖的其他子Agent 名单（依赖自动装载）：装载/预加载/agent_run 预执行本子Agent 时自动连带
+  /** 依赖的其他子Agent 名单（依赖自动装载）：装载/预加载/subsession_run 预执行本子Agent 时自动连带
    *  装载全部依赖（工具按各自 {agent}_ 命名空间注册、提示词一并注入，不重复定义）——子Agent 间
    *  复用能力走依赖声明而非把依赖方的工具展开进自己的 def。依赖缺失（被启停名单移除/构建裁剪）时
    *  跳过不阻断；循环依赖在装载时报错（cascade 展开检测）。如 reverse_site 依赖 playwright、
    *  self_optimize 依赖 code。 */
   dependencies?: string[]
   /** 子Agent 自有工具（注册为 {agent}_{tool}）。可省略：纯提示词子 Agent（简单/组合式），
-   *  省略时子 Agent 运行环境自动注入编排工具（agent_list/agent_load/agent_run）。 */
+   *  省略时子 Agent 运行环境自动注入编排工具（agent_list/agent_load/subsession_run）。 */
   tools?: ToolSet
   requiresApproval?: Record<string, boolean>
   preload?: boolean
   /** 子Agent 可配置环境变量声明（`{AGENT_NAME_UPPER}_*` 前缀）；汇总进环境变量目录（前端面板白名单）。 */
   envVars?: EnvCatalogVar[]
   /** 默认项目根兜底解析（`{AGENT_NAME_UPPER}_PROJECT` 环境变量未配置时生效）：返回绝对路径即视为项目
-   *  绑定（提示词注入「项目根」注记、agent_run 新会话以其为工作目录、加载项目 AGENTS.md——与显式
+   *  绑定（提示词注入「项目根」注记、subsession_run 子会话以其为工作目录、加载项目 AGENTS.md——与显式
    *  绑定同语义，沙箱模式同规则拒绝）。 */
   projectRoot?: (env: Record<string, string>) => string | undefined
-  /** 写范围守卫声明：会话装载本子Agent（或新会话预加载）后，本政策注入 ToolContext.writeGuard——
+  /** 写范围守卫声明：会话装载本子Agent（或子会话预加载）后，本政策注入 ToolContext.writeGuard——
    *  文件写类工具写入前以解析后的绝对路径调用，返回非空字符串 = 拒绝写入。 */
   writeGuard?: (env: Record<string, string>, absPaths: string[]) => string | null
 }
 
 /** 会话级运行时定义工具（js defineTool）的持久化形态：execute 源码序列化保存，
- *  随会话 chat.json 落盘、重启恢复；新会话执行内定义的工具不落盘（仅本次运行注册表）。 */
+ *  随会话 chat.json 落盘、重启恢复；子会话运行内定义的工具不落盘（仅本次运行注册表）。 */
 export interface DynamicToolDef {
   name: string
   description: string

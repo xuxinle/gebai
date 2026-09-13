@@ -88,8 +88,9 @@ export interface StreamSnapshot {
   messageId: string
   text: string
   reasoning: string
-  session?: boolean
-  sessionRunId?: string
+  /** 子会话运行过程标记（父任务流式期间不写入，防并行快照互相替换）。 */
+  subSession?: boolean
+  subSessionId?: string
 }
 
 /** 运行中任务状态（交互等待的载体；engine 的 tasks Map 值类型）。 */

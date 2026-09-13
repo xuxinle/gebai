@@ -8,16 +8,16 @@ function toolWithProps(properties: Record<string, unknown>, required: string[] =
 
 describe("tolerantToolName（工具名容错归一）", () => {
   test("分隔符（./-/:）与驼峰归一蛇形", () => {
-    expect(tolerantToolName("agent.run")).toBe("agent_run")
-    expect(tolerantToolName("agent-run")).toBe("agent_run")
-    expect(tolerantToolName("agent:run")).toBe("agent_run")
-    expect(tolerantToolName("agentRun")).toBe("agent_run")
-    expect(tolerantToolName("AgentRun")).toBe("agent_run")
+    expect(tolerantToolName("subsession.run")).toBe("subsession_run")
+    expect(tolerantToolName("subsession-run")).toBe("subsession_run")
+    expect(tolerantToolName("subsession:run")).toBe("subsession_run")
+    expect(tolerantToolName("subsessionRun")).toBe("subsession_run")
+    expect(tolerantToolName("SubsessionRun")).toBe("subsession_run")
     expect(tolerantToolName("codeRead")).toBe("code_read")
   })
   test("连续大写缩写拆点（HTTPFetch→http_fetch）；已合规蛇形恒等", () => {
     expect(tolerantToolName("HTTPFetch")).toBe("http_fetch")
-    expect(tolerantToolName("agent_run")).toBe("agent_run")
+    expect(tolerantToolName("subsession_run")).toBe("subsession_run")
     expect(tolerantToolName("read")).toBe("read")
     expect(tolerantToolName("bg_task")).toBe("bg_task")
   })

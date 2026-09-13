@@ -1,25 +1,25 @@
 /**
  * 历史分片渲染的切分规则（纯函数，无 DOM）：长会话首屏只渲染最近一段，更早历史由
- * 调用方分片补齐。切分必须尊重「新会话执行过程容器」的分组边界——同一 runId 的过程消息
+ * 调用方分片补齐。切分必须尊重「子会话运行过程容器」的分组边界——同一 runId 的过程消息
  * 渲染进同一个折叠容器，起点切在组中间会把一次执行拆成两个容器（回放形态错乱）。
  */
 
-/** 执行过程消息（新版 session 标记 / 旧版 subAgent 存档）。 */
+/** 执行过程消息（子会话运行标记 subSession / 旧版 subAgent 存档）。 */
 export interface RunMessageLike {
-  session?: boolean
+  subSession?: boolean
   subAgent?: boolean
-  sessionRunId?: string
+  subSessionId?: string
   subAgentRunId?: string
 }
 
 /** 是否为执行过程消息（进折叠容器）。 */
 export function isRunMessage(m: RunMessageLike | undefined): boolean {
-  return !!m && (m.session === true || m.subAgent === true)
+  return !!m && (m.subSession === true || m.subAgent === true)
 }
 
-/** 执行过程消息的运行标识（新版 sessionRunId / 旧版 subAgentRunId）。 */
+/** 执行过程消息的运行标识（新版 subSessionId / 旧版 subAgentRunId）。 */
 export function runIdOfMessage(m: RunMessageLike): string | undefined {
-  return m.sessionRunId ?? m.subAgentRunId
+  return m.subSessionId ?? m.subAgentRunId
 }
 
 /**

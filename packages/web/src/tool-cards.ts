@@ -25,28 +25,30 @@ export function shortToolName(name: string): string {
   return splitToolName(name).tool
 }
 
-/** agent_run 工具判定：执行新会话卡片（头部列出全部预加载子Agent 名，参数区只显示输入提示词）。 */
-export function isAgentRun(name: string): boolean {
-  return shortToolName(name) === "agent_run"
+/** subsession_run 工具判定：子会话运行卡片（头部列出各子会话名，参数区按子会话渲染任务指令块）。 */
+export function isSubSessionRun(name: string): boolean {
+  return shortToolName(name) === "subsession_run"
 }
 
-/** branch_run 工具判定：分支运行卡片（头部列出各分支名，参数区按分支渲染任务指令块）。 */
-export function isBranchRun(name: string): boolean {
-  return shortToolName(name) === "branch_run"
-}
-
-/** branch_run 分支清单解析：{name?, prompt, model?} 项 → 头部标签（缺省名按服务端规则 b1..bN 补）。 */
-function branchLabels(v: unknown): Array<{ label: string; prompt: string }> {
-  if (!Array.isArray(v)) return []
-  const out: Array<{ label: string; prompt: string }> = []
-  v.forEach((item, i) => {
-    if (!item || typeof item !== "object") return
-    const r = item as Record<string, unknown>
-    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : `b${i + 1}`
-    const model = typeof r.model === "string" && r.model.trim() ? `（${r.model.trim()}）` : ""
-    out.push({ label: `${name}${model}`, prompt: typeof r.prompt === "string" ? r.prompt : "" })
-  })
-  return out
+/** 子会话清单解析（单任务形态 input 与多任务形态 subsessions 统一形态）：
+ *  { name?, input, agents?, model? } → 头部标签与任务指令（缺省名按服务端规则 s1..sN 补）。 */
+function subSessionItems(obj: Record<string, unknown> | null): Array<{ label: string; input: string }> {
+  if (!obj) return []
+  const list = Array.isArray(obj.subsessions) ? obj.subsessions : null
+  if (list) {
+    const out: Array<{ label: string; input: string }> = []
+    list.forEach((item, i) => {
+      if (!item || typeof item !== "object") return
+      const r = item as Record<string, unknown>
+      const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : `s${i + 1}`
+      const model = typeof r.model === "string" && r.model.trim() ? `（${r.model.trim()}）` : ""
+      out.push({ label: `${name}${model}`, input: typeof r.input === "string" ? r.input : "" })
+    })
+    return out
+  }
+  if (typeof obj.input !== "string" || !obj.input.trim()) return []
+  const model = typeof obj.model === "string" && obj.model.trim() ? `（${obj.model.trim()}）` : ""
+  return [{ label: `s1${model}`, input: obj.input }]
 }
 
 /* ---------- 工具卡片渲染（toolBubble / toolCard / 待办 / 选择） ---------- */
@@ -130,7 +132,7 @@ export function fileBlocksAsLinks(name: string | undefined): boolean {
 
 /* ---------- 卡片头部（图标 + 工具名 + 标题参数后缀，结构化灵活展示） ---------- */
 
-/** 标题后缀信息：text 展示文本（含前导 `·`）；wrap 允许多行完整展示（agent_run 专用）；
+/** 标题后缀信息：text 展示文本（含前导 `·`）；wrap 允许多行完整展示（subsession_run 专用）；
  *  full 为未截断全文（悬浮 title 用，仅与 text 不同时携带）。 */
 interface TitleSuffixInfo {
   text: string
@@ -172,15 +174,11 @@ function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Reco
   return { text, full: full === text ? undefined : full }
 }
 
-/** 标题后缀统一入口：agent_run 专用（头部直接列出全部预加载子Agent 名，`+` 连接、不截断、允许多行）；
- *  branch_run 专用（头部列出各分支名，带模型路由后缀，`+` 连接、允许多行）；其余按 titleParams 声明。 */
+/** 标题后缀统一入口：subsession_run 专用（头部列出各子会话名，带模型路由后缀，`+` 连接、允许多行）；
+ *  其余按 titleParams 声明。 */
 function titleSuffixInfo(name: string, args: Record<string, unknown> | null): TitleSuffixInfo | null {
-  if (isAgentRun(name)) {
-    const agents = Array.isArray(args?.agents) ? args.agents.map(String).filter(Boolean) : []
-    return agents.length ? { text: `· ${agents.join(" + ")}`, wrap: true } : null
-  }
-  if (isBranchRun(name)) {
-    const labels = branchLabels(args?.branches).map((b) => b.label)
+  if (isSubSessionRun(name)) {
+    const labels = subSessionItems(args).map((b) => b.label)
     return labels.length ? { text: `· ${labels.join(" + ")}`, wrap: true } : null
   }
   return titleSuffix(metaOf(name), args)
@@ -200,41 +198,30 @@ export function toolHead(state: "call" | "done", name: string, args: Record<stri
   return head
 }
 
-/** agent_run 参数区：输入提示词以块展示（与普通工具参数块同款样式，预加载子Agent 名已在卡片头部列出）。 */
-function agentRunArgsBlock(args: string): HTMLElement | null {
+/** subsession_run 参数区：每子会话一个小节（头部「🌿 名（模型路由）」+ 任务指令块）；
+ *  并附运行形态提示行（继承/隔离上下文、async 后台执行、merge 摘要合入）。子会话名已在卡片头部列出。 */
+function subSessionArgsBlock(args: string): HTMLElement | null {
   let obj: Record<string, unknown> | null = null
   try {
     obj = JSON.parse(args) as Record<string, unknown>
   } catch {
     return null
   }
-  if (!obj || typeof obj.input !== "string" || !obj.input.trim()) return null
-  return el("div", "agent-run-input", obj.input)
-}
-
-/** branch_run 参数区：每分支一个小节（头部「🌿 名（模型路由）」+ 任务指令块，指令块与 agent_run 输入同款）；
- *  async 后台执行附一行提示。分支名已在卡片头部列出，此处小节头保留模型路由等上下文。 */
-function branchRunArgsBlock(args: string): HTMLElement | null {
-  let obj: Record<string, unknown> | null = null
-  try {
-    obj = JSON.parse(args) as Record<string, unknown>
-  } catch {
-    return null
-  }
-  if (!obj) return null
-  const branches = branchLabels(obj.branches)
-  if (!branches.length) return null
-  const wrap = el("div", "branch-args")
-  for (const b of branches) {
-    if (!b.prompt.trim()) continue
-    const sec = el("div", "branch-args-item")
-    sec.appendChild(el("div", "branch-args-head", `🌿 ${b.label}`))
-    sec.appendChild(el("div", "agent-run-input", b.prompt))
+  const items = subSessionItems(obj)
+  if (!items.length) return null
+  const wrap = el("div", "subsession-args")
+  for (const item of items) {
+    if (!item.input.trim()) continue
+    const sec = el("div", "subsession-args-item")
+    sec.appendChild(el("div", "subsession-args-head", `🌿 ${item.label}`))
+    sec.appendChild(el("div", "subsession-input", item.input))
     wrap.appendChild(sec)
   }
   if (!wrap.children.length) return null
-  if (obj.async === true) wrap.appendChild(el("div", "branch-args-async", "⏳ async 后台执行——完成自动合入，bg_task 管理"))
-  if (obj.merge === "summary") wrap.appendChild(el("div", "branch-args-async", "📄 merge 摘要合入——长报告压成要点进主线，全文在过程存档"))
+  const note = (text: string) => wrap.appendChild(el("div", "subsession-args-note", text))
+  note(obj?.inherit_context === true ? "🧬 继承父会话上下文（fork）——子会话掌握父会话全部背景，报告完成自动合入" : "📦 隔离上下文（新上下文）——子Agent 提示词 + 全局工具，结果由工具返回")
+  if (obj?.async === true) note("⏳ async 后台执行——子会话可用 subsession_merge 合入阶段性成果，bg_task 管理")
+  if (obj?.merge === "summary") note("📄 merge 摘要合入——长报告压成要点进父会话，全文在过程存档")
   return wrap
 }
 
@@ -385,7 +372,7 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
 }
 
 /** 完成态参数区重渲染（结果到达 appendToolResult 调用）：执行/审批等待期完整直显的超长参数此时收敛为
- *  折叠块，与历史回放同构；agent_run/branch_run 专用参数块不参与折叠、无 tool-args 标记，不会进入本路径。 */
+ *  折叠块，与历史回放同构；subsession_run/subsession_run 专用参数块不参与折叠、无 tool-args 标记，不会进入本路径。 */
 export function renderToolArgsDone(name: string, args: string): HTMLElement | null {
   const ab = toolArgsBlock(name, args, metaOf(name))
   ab?.classList.add("tool-args")
@@ -419,8 +406,7 @@ function toolBubble(content: string): HTMLElement {
     if (parsed.args) {
       // 实时执行中卡（含等待审批）：超长参数完整直显（fold=false），结果到达时由 appendToolResult 收敛为折叠块
       let ab: HTMLElement | null
-      if (isAgentRun(parsed.name)) ab = agentRunArgsBlock(parsed.args)
-      else if (isBranchRun(parsed.name)) ab = branchRunArgsBlock(parsed.args)
+      if (isSubSessionRun(parsed.name)) ab = subSessionArgsBlock(parsed.args)
       else {
         ab = toolArgsBlock(parsed.name, parsed.args, metaOf(parsed.name), false)
         ab?.classList.add("tool-args")
@@ -687,8 +673,7 @@ export function toolCard(msg: Message): HTMLElement {
     const argsJson = JSON.stringify(msg.arguments, null, 2)
     // 历史回放=已完成的调用：超长参数按阈值折叠（与实时卡完成态收敛同构）
     let ab: HTMLElement | null
-    if (isAgentRun(msg.name ?? "")) ab = agentRunArgsBlock(argsJson)
-    else if (isBranchRun(msg.name ?? "")) ab = branchRunArgsBlock(argsJson)
+    if (isSubSessionRun(msg.name ?? "")) ab = subSessionArgsBlock(argsJson)
     else {
       ab = toolArgsBlock(msg.name ?? "", argsJson, meta)
       ab?.classList.add("tool-args")
@@ -696,8 +681,8 @@ export function toolCard(msg: Message): HTMLElement {
     if (ab) bubble.appendChild(ab)
   }
   if (msg.content) {
-    // agent_run 工具（携带 sessionRun 存档；旧版 agent_call 的 subAgentRun 兼容）：最终返回为 markdown 输出，直接渲染（与助手消息同构）
-    if (msg.sessionRun || msg.subAgentRun) {
+    // subsession_run 工具（携带子会话运行存档；旧版 agent_call 的 subAgentRun 兼容）：最终返回为 markdown 输出，直接渲染（与助手消息同构）
+    if (msg.subSessionArchive || msg.subAgentRun) {
       bubble.appendChild(markdownBlock(msg.content))
     } else {
       bubble.appendChild(toolOutput(msg.content))

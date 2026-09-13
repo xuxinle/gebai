@@ -1,7 +1,7 @@
 /**
  * 假 OpenAI 兼容 SSE 服务——无真实模型 Key 的端到端自测工具。
  *
- * 背景：Web 前端 / 服务端联调与回归自测（流式渲染、agent_run 执行过程、计划审批等）
+ * 背景：Web 前端 / 服务端联调与回归自测（流式渲染、subsession_run 执行过程、计划审批等）
  * 依赖模型行为，真实接口不可控且慢。本服务按场景脚本回放 OpenAI `chat/completions`
  * 流式响应（含 tool_calls 分片、reasoning、usage），服务端 provider 无感接入。
  *
@@ -14,8 +14,8 @@
  *   long      多轮长 markdown 回复（滚动/粘底实测：标题/段落/代码块/表格；轮次 ≥2 附长推理——
  *             正文开始时推理块自动折叠，单帧大收缩的滚动稳定性实测；配 FAKE_LLM_CHUNK_DELAY_MS
  *             分片延迟制造持续时长的流式阶段，默认 0 一次性下发）
- *   agent_run 主会话调 agent_run → 子会话两轮（文本 + code_ls 工具 / 多行结论）→
- *             主会话收尾（验证新会话执行过程实时渲染与结果 markdown 换行）
+ *   subsession_run 主会话调 subsession_run → 子会话两轮（文本 + code_ls 工具 / 多行结论）→
+ *             主会话收尾（验证子会话运行过程实时渲染与结果 markdown 换行）
  *   plan      延迟 4s 调 plan 计划审批（waitForChoice 阻塞等用户批准/拒绝）→
  *             批准后主会话收尾（验证计划卡片、选择卡片、审批后继续；延迟窗口用于
  *             先把页面滚离底部再观察审批弹出时是否落底展示计划）
@@ -64,10 +64,10 @@ const SCENARIOS: Record<string, Step[]> = {
     reasoning: n >= 2 ? Array.from({ length: 60 }, (_, i) => `推理步骤 ${i + 1}：分析问题的第 ${i + 1} 个方面，考虑多种可能性并权衡取舍，逐步逼近结论。`).join("\n") : undefined,
     text: longReply(n),
   })),
-  agent_run: [
-    { toolCall: { id: "c1", name: "agent_run", args: { agents: ["code"], input: "检查目录并总结" } } },
+  subsession_run: [
+    { toolCall: { id: "c1", name: "subsession_run", args: { agents: ["code"], input: "检查目录并总结" } } },
     { text: "子会话第一轮：开始检查目录。", toolCall: { id: "c2", name: "code_ls", args: { path: "." } } },
-    // 多行结论：验证 agent_run 结果 markdown 渲染不出现双倍换行
+    // 多行结论：验证 subsession_run 结果 markdown 渲染不出现双倍换行
     { text: "分析结论：\n第一行结论\n第二行结论\n第三行结论" },
     { text: "主会话最终回复。" },
   ],

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import type { ToolInfo } from "@gebai/sdk"
-import type { RunState, SessionRunState } from "./state"
+import type { RunState, SubSessionState } from "./state"
 // markdown.ts 模块级 import dompurify：bun test 无 DOM 环境 sanitize 不可用，先 mock 模块（须早于动态 import messages）
 mock.module("dompurify", () => ({ default: { sanitize: (s: unknown) => s } }))
 
@@ -157,7 +157,7 @@ const doc = {
 }
 
 // 动态 import：mock 之后加载依赖 DOM 的模块
-const { sealSegment, sessionRunBox, finishSessionRun, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
+const { sealSegment, subSessionBox, finishSubSession, sealSessionSegment, sealBlockResultSegment, bindSessionScroll, scrollSessionSticky, renderSubSessionArchive, renderLegacySubAgentArchive, renderBlock, appendAskUserRecord, appendPlanCard, appendToolResult, renderChoiceCard, appendMsg, addMetaActions, compactNoticeTitle } = await import("./messages")
 const { runs, pendingTools, pendingToolsKey, approvalsEl, client, setCurrentSession } = await import("./state")
 const { isBlockOnly, toolBubbleFor, __setToolCardMetaForTest, buildPlanMarkdown, planResultHead, askUserResultHead, renderToolArgsDone } = await import("./tool-cards")
 
@@ -386,7 +386,7 @@ describe("sealSegment", () => {
 })
 
 describe("sealBlockResultSegment（块级工具结果封段：图表卡片独立展示、后续输出另起新卡片）", () => {
-  function fakeSub(overrides: Partial<SessionRunState> = {}): SessionRunState {
+  function fakeSub(overrides: Partial<SubSessionState> = {}): SubSessionState {
     return {
       runId: "r1",
       agents: [],
@@ -400,7 +400,7 @@ describe("sealBlockResultSegment（块级工具结果封段：图表卡片独立
       reasoningAcc: "",
       reasoningEl: null,
       ...overrides,
-    } as SessionRunState
+    } as SubSessionState
   }
 
   test("主循环：封存当前文本段（el 置空、推理折叠），后续输出惰性另起新卡片", () => {
@@ -414,17 +414,17 @@ describe("sealBlockResultSegment（块级工具结果封段：图表卡片独立
     runs.clear()
   })
 
-  test("新会话执行容器内：封存容器文本段；容器缺失时 no-op 不崩溃", () => {
+  test("子会话运行容器内：封存容器文本段；容器缺失时 no-op 不崩溃", () => {
     const subEl = makeMockEl("div") as unknown as HTMLElement
     const sub = fakeSub({ el: subEl })
-    runs.set("s1", fakeRun({ sessionRuns: new Map([["r1", sub]]) }))
+    runs.set("s1", fakeRun({ subSessions: new Map([["r1", sub]]) }))
     sealBlockResultSegment("s1", "r1")
     expect(sub.el).toBeNull()
     expect(sub.acc).toBe("")
     // 容器缺失（切走场景）：不封任何段、不抛错
-    runs.set("s1", fakeRun({ sessionRuns: new Map() }))
+    runs.set("s1", fakeRun({ subSessions: new Map() }))
     sealBlockResultSegment("s1", "rX")
-    expect(runs.get("s1")!.sessionRuns!.size).toBe(0)
+    expect(runs.get("s1")!.subSessions!.size).toBe(0)
     runs.clear()
   })
 })
@@ -543,41 +543,41 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
   })
 })
 
-describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执行折叠容器）", () => {
+describe("subSessionBox / finishSubSession / sealSessionSegment（子会话运行折叠容器）", () => {
   test("container renders input as param block, stays open while running, collapses with output summary when done", () => {
-    const box = sessionRunBox({ runId: "r1", agents: ["code"], input: "改个文件" })
-    expect(box.container.className).toContain("session-run")
+    const box = subSessionBox({ runId: "r1", agents: ["code"], input: "改个文件" })
+    expect(box.container.className).toContain("subsession-run")
     expect(box.container.dataset.runId).toBe("r1")
     // 执行中：展开 + 输出区占位
     expect((box.container as HTMLDetailsElement).open).toBe(true)
     expect(box.outputEl.textContent).toContain("执行中")
     // 输入以参数块渲染在容器顶部，标题无「输入: …」提示
-    const inputBlock = box.body.querySelector("div.agent-run-input")
+    const inputBlock = box.body.querySelector("div.subsession-input")
     expect(inputBlock?.textContent).toBe("改个文件")
-    expect(box.container.querySelector(".session-input")).toBeNull()
-    expect(box.container.querySelector(".session-title")?.textContent).not.toContain("输入:")
+    expect(box.container.querySelector("summary .subsession-input")).toBeNull()
+    expect(box.container.querySelector(".subsession-title")?.textContent).not.toContain("输入:")
     // 结束后：自动折叠，只显示最终返回（summary 内）
-    finishSessionRun(box.container, box.outputEl, "已完成修改")
+    finishSubSession(box.container, box.outputEl, "已完成修改")
     expect((box.container as HTMLDetailsElement).open).toBe(false)
     expect(box.outputEl.textContent).toContain("已完成修改")
     expect(box.container.classList.contains("done")).toBe(true)
   })
 
   test("多 Agent 预加载：标题列出全部预加载子Agent", () => {
-    const box = sessionRunBox({ runId: "r4", agents: ["code", "playwright"], input: "改个文件" })
-    expect(box.container.querySelector(".session-title")?.textContent).toContain("code")
-    expect(box.container.querySelector(".session-title")?.textContent).toContain("playwright")
+    const box = subSessionBox({ runId: "r4", agents: ["code", "playwright"], input: "改个文件" })
+    expect(box.container.querySelector(".subsession-title")?.textContent).toContain("code")
+    expect(box.container.querySelector(".subsession-title")?.textContent).toContain("playwright")
   })
 
-  test("finishSessionRun: undefined keeps running state, empty string collapses with 无返回 (失败/取消不误导)", () => {
-    const box = sessionRunBox({ runId: "r2", agents: ["code"], input: "x" })
+  test("finishSubSession: undefined keeps running state, empty string collapses with 无返回 (失败/取消不误导)", () => {
+    const box = subSessionBox({ runId: "r2", agents: ["code"], input: "x" })
     // undefined/null：run 未收尾 → 保持执行中态（不折叠）
-    finishSessionRun(box.container, box.outputEl, undefined)
+    finishSubSession(box.container, box.outputEl, undefined)
     expect((box.container as HTMLDetailsElement).open).toBe(true)
     expect(box.outputEl.textContent).toContain("执行中")
     // 空串：已结束但无返回（失败/取消/风暴终止）→ 折叠并显示无返回，不再误导为执行中
-    const box2 = sessionRunBox({ runId: "r3", agents: ["code"], input: "x" })
-    finishSessionRun(box2.container, box2.outputEl, "")
+    const box2 = subSessionBox({ runId: "r3", agents: ["code"], input: "x" })
+    finishSubSession(box2.container, box2.outputEl, "")
     expect((box2.container as HTMLDetailsElement).open).toBe(false)
     expect(box2.outputEl.textContent).toContain("无返回")
   })
@@ -674,8 +674,8 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
     expect(scrollTop).toBe(100) // 不再跟随
   })
 
-  test("renderSessionArchive renders archive container with full process and nested runs (历史回放)", () => {
-    const box = renderSessionArchive({
+  test("renderSubSessionArchive renders archive container with full process and nested runs (历史回放)", () => {
+    const box = renderSubSessionArchive({
       runId: "run1",
       agents: ["code"],
       input: "改个文件",
@@ -688,25 +688,25 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
       ],
     })
     // 已结束存档：默认折叠，摘要含最终返回，body 渲染完整过程消息
-    expect(box.container.className).toContain("session-run")
+    expect(box.container.className).toContain("subsession-run")
     expect((box.container as HTMLDetailsElement).open).toBe(false)
     expect(box.outputEl.textContent).toContain("→ 返回")
     expect(box.body.querySelector(".msg")).toBeTruthy()
-    // 嵌套执行存档：新会话内再 agent_run → 递归渲染进外层容器 body
-    const combo = renderSessionArchive({
+    // 嵌套执行存档：子会话内再派生 → 递归渲染进外层容器 body
+    const combo = renderSubSessionArchive({
       runId: "run2",
       agents: ["combo"],
       input: "组合调用",
       output: "ok",
       messages: [
         { role: "user", content: "组合调用" },
-        { role: "assistant", content: "委托给 code", toolCalls: [{ id: "c2", name: "agent_run", arguments: { agents: ["code"], input: "x" } }] },
+        { role: "assistant", content: "委托给 code", toolCalls: [{ id: "c2", name: "subsession_run", arguments: { agents: ["code"], input: "x" } }] },
         {
           role: "tool",
-          name: "agent_run",
+          name: "subsession_run",
           content: "ok",
           toolCallId: "c2",
-          sessionRun: {
+          subSessionArchive: {
             runId: "inner",
             agents: ["code"],
             input: "x",
@@ -716,9 +716,9 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
         },
       ],
     })
-    const inner = combo.body.querySelector("details.session-run")
+    const inner = combo.body.querySelector("details.subsession-run")
     expect(inner).toBeTruthy()
-    expect(inner?.querySelector(".session-output")?.textContent).toContain("内部结果")
+    expect(inner?.querySelector(".subsession-output")?.textContent).toContain("内部结果")
   })
 
   test("renderLegacySubAgentArchive renders old-format archive (agent 单值兼容回放)", () => {
@@ -729,7 +729,7 @@ describe("sessionRunBox / finishSessionRun / sealSessionSegment（新会话执�
       output: "旧结果",
       messages: [{ role: "user", content: "x" }, { role: "assistant", content: "旧结果" }],
     })
-    expect(box.container.className).toContain("session-run")
+    expect(box.container.className).toContain("subsession-run")
     expect(box.outputEl.textContent).toContain("旧结果")
     expect(box.body.querySelector(".msg")).toBeTruthy()
   })
@@ -910,103 +910,83 @@ describe("ask 计划卡片（消息流展示计划全文 + 审批结果更新）
   })
 })
 
-describe("agent_run 工具卡片（头部列全部预加载子Agent 名，参数区输入以块展示）", () => {
-  test("history card (toolCard): 头部含全部预加载子Agent，参数区只显示输入", () => {
-    const bubble = toolBubbleFor(
-      { id: "t1", role: "tool", name: "agent_run", content: "结果", arguments: { agents: ["code", "playwright"], input: "改文件并验证" }, createdAt: 0 },
-      "结果",
-    )
-    const head = bubble.querySelector("div.tool-head")
-    expect(head?.textContent).toContain("agent_run")
-    expect(head?.textContent).toContain("code + playwright")
-    expect(head?.textContent).not.toContain("agents=")
-    // 参数区输入以块展示（预加载子Agent 名已入标题，不重复渲染 agents JSON）
-    const input = bubble.querySelector("div.agent-run-input")
-    expect(input?.textContent).toBe("改文件并验证")
-    expect(bubble.querySelector("div.tool-rest")).toBeNull()
-  })
-
-  test("realtime card (toolBubble): → agent_run 调用同样头部列全部子Agent + 下方输入", () => {
-    const bubble = toolBubbleFor(
-      { id: "t2", role: "tool", content: "", createdAt: 0 },
-      `→ agent_run {"agents":["code","playwright","feishu_docs"],"input":"先改代码再写文档"}`,
-    )
-    const head = bubble.querySelector("div.tool-head")
-    expect(head?.textContent).toContain("code + playwright + feishu_docs")
-    const input = bubble.querySelector("div.agent-run-input")
-    expect(input?.textContent).toBe("先改代码再写文档")
-    expect(bubble.querySelector("div.agent-run-label")).toBeNull()
-  })
-
-  test("无输入（空 input）时不渲染参数区，仅头部列出子Agent", () => {
-    const bubble = toolBubbleFor(
-      { id: "t3", role: "tool", name: "agent_run", content: "", arguments: { agents: ["code"] }, createdAt: 0 },
-      "",
-    )
-    expect(bubble.querySelector("div.agent-run-input")).toBeNull()
-    expect(bubble.querySelector("div.tool-head")?.textContent).toContain("code")
-  })
-})
-
-describe("branch_run 工具卡片（头部列各分支名，参数区按分支渲染指令块）", () => {
-  test("history card (toolCard): 头部列分支名（带模型路由），参数区每分支一小节", () => {
+describe("subsession_run 工具卡片（头部列各子会话名，参数区按子会话渲染指令块）", () => {
+  test("history card (toolCard): 头部列子会话名（带模型路由），参数区每子会话一小节", () => {
     const bubble = toolBubbleFor(
       {
         id: "b1",
         role: "tool",
-        name: "branch_run",
+        name: "subsession_run",
         content: "结果",
         arguments: {
-          branches: [
-            { name: "左路", prompt: "调研方案A" },
-            { name: "右路", prompt: "调研方案B", model: "fast" },
+          subsessions: [
+            { name: "左路", input: "调研方案A" },
+            { name: "右路", input: "调研方案B", model: "fast" },
           ],
+          inherit_context: true,
         },
         createdAt: 0,
       },
       "结果",
     )
     const head = bubble.querySelector("div.tool-head")
-    expect(head?.textContent).toContain("branch_run")
+    expect(head?.textContent).toContain("subsession_run")
     expect(head?.textContent).toContain("左路 + 右路（fast）")
     expect(head?.textContent).not.toContain("[object Object]")
-    // 参数区：每分支一小节（🌿 名头 + 指令块），无 JSON 块
-    const items = bubble.querySelectorAll("div.branch-args-item")
+    // 参数区：每子会话一小节（🌿 名头 + 指令块），无 JSON 块
+    const items = bubble.querySelectorAll("div.subsession-args-item")
     expect(items.length).toBe(2)
     expect(items[0]?.textContent).toContain("🌿 左路")
     expect(items[0]?.textContent).toContain("调研方案A")
     expect(items[1]?.textContent).toContain("🌿 右路（fast）")
     expect(items[1]?.textContent).toContain("调研方案B")
-    // 参数区无通用 JSON/键值渲染（分支小节已完整表达）
+    // 运行形态提示行：继承上下文 / 隔离上下文
+    const notes = [...bubble.querySelectorAll("div.subsession-args-note")].map((n) => n.textContent ?? "")
+    expect(notes.some((t) => t.includes("继承父会话上下文"))).toBe(true)
+    // 参数区无通用 JSON/键值渲染（子会话小节已完整表达）
     expect(bubble.querySelector("div.tool-kv")).toBeNull()
-    expect(bubble.querySelectorAll("div.branch-args-item").length).toBe(2)
   })
 
-  test("realtime card (toolBubble): → branch_run 调用同样渲染，缺省名 b1..bN、async/merge 附提示行", () => {
+  test("realtime card (toolBubble): → subsession_run 调用同样渲染，缺省名 s1..sN、async/merge 附提示行", () => {
     const bubble = toolBubbleFor(
       { id: "b2", role: "tool", content: "", createdAt: 0 },
-      `→ branch_run {"branches":[{"name":"左路","prompt":"调研A"},{"prompt":"调研B"}],"async":true,"merge":"summary"}`,
+      `→ subsession_run {"subsessions":[{"name":"左路","input":"调研A"},{"input":"调研B"}],"async":true,"merge":"summary"}`,
     )
     const head = bubble.querySelector("div.tool-head")
-    expect(head?.textContent).toContain("左路 + b2")
-    const items = bubble.querySelectorAll("div.branch-args-item")
+    expect(head?.textContent).toContain("左路 + s2")
+    const items = bubble.querySelectorAll("div.subsession-args-item")
     expect(items.length).toBe(2)
-    expect(items[1]?.textContent).toContain("🌿 b2")
-    const hints = [...bubble.querySelectorAll("div.branch-args-async")].map((n) => n.textContent ?? "")
-    expect(hints.some((t) => t.includes("async"))).toBe(true)
-    expect(hints.some((t) => t.includes("merge 摘要合入"))).toBe(true)
+    expect(items[1]?.textContent).toContain("🌿 s2")
+    const notes = [...bubble.querySelectorAll("div.subsession-args-note")].map((n) => n.textContent ?? "")
+    expect(notes.some((t) => t.includes("隔离上下文"))).toBe(true)
+    expect(notes.some((t) => t.includes("async"))).toBe(true)
+    expect(notes.some((t) => t.includes("merge 摘要合入"))).toBe(true)
   })
 
-  test("空 branches 不渲染参数区，仅工具名头部", () => {
+  test("单任务隔离形态：头部列子会话名，参数区只显示任务指令（不重复 agents JSON）", () => {
     const bubble = toolBubbleFor(
-      { id: "b3", role: "tool", name: "branch_run", content: "", arguments: { branches: [] }, createdAt: 0 },
-      "",
+      { id: "t1", role: "tool", name: "subsession_run", content: "结果", arguments: { agents: ["code", "playwright"], input: "改文件并验证" }, createdAt: 0 },
+      "结果",
     )
-    expect(bubble.querySelector("div.branch-args-item")).toBeNull()
-    expect(bubble.querySelector("div.tool-head")?.textContent).toContain("branch_run")
+    const head = bubble.querySelector("div.tool-head")
+    expect(head?.textContent).toContain("subsession_run")
+    expect(head?.textContent).toContain("s1")
+    expect(head?.textContent).not.toContain("agents=")
+    // 参数区任务指令以块展示（预加载子Agent 名已入标题，不重复渲染 agents JSON）
+    const input = bubble.querySelector("div.subsession-input")
+    expect(input?.textContent).toBe("改文件并验证")
+    expect(bubble.querySelector("div.tool-rest")).toBeNull()
+    expect(bubble.querySelector("div.tool-kv")).toBeNull()
+    // 无 subsessions 时头部不列 agents（agents 仅随子会话小节/工具名表达）
+    expect(head?.textContent).toContain("s1")
+  })
+
+  test("空入参不渲染参数区，仅子会话名头部", () => {
+    const bubble = toolBubbleFor({ id: "b3", role: "tool", name: "subsession_run", content: "", arguments: { subsessions: [] }, createdAt: 0 }, "")
+    expect(bubble.querySelector("div.subsession-args-item")).toBeNull()
+    expect(bubble.querySelector("div.tool-head")?.textContent).toContain("subsession_run")
   })
 })
-
 describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式）", () => {
   test("单标题参数仅显示值（省略 key= 前缀），标题参数不在参数区重复", () => {
     __setToolCardMetaForTest([["read", { titleParams: ["path"] }]])
@@ -1534,15 +1514,15 @@ describe("引擎提示消息（待办续做/收尾验证：role=user + engineNot
     expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
   })
 
-  test("分支报告合入（engineNote='branch'）：通知条称谓为「分支合入」，不提供撤回", async () => {
+  test("子会话报告合入（engineNote='subsession'）：通知条称谓为「子会话合入」，不提供撤回", async () => {
     const host = makeMockEl("div")
     const note = appendMsg(
       {
         id: "b1",
         role: "user",
-        engineNote: "branch",
-        content: "【并行分支「左路」已合并】\n调研结果：…",
-        branchMeta: { branchId: "br-1", name: "左路" },
+        engineNote: "subsession",
+        content: "【子会话「左路」已合并】\n调研结果：…",
+        subSessionMerged: { runId: "s1", name: "左路" },
         createdAt: 6,
       },
       false,
@@ -1550,7 +1530,7 @@ describe("引擎提示消息（待办续做/收尾验证：role=user + engineNot
     ) as unknown as MockElWithQuery
     type ElWithClass = MockElWithQuery & { classList: { contains(c: string): boolean } }
     expect((note as unknown as ElWithClass).classList.contains("engine-note")).toBe(true)
-    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("分支合入")
+    expect((note.querySelector("span.msg-name") as unknown as { textContent: string }).textContent).toBe("子会话合入")
     expect(note.querySelector("div.bubble.engine-notice")).not.toBeNull()
     const revoke = (note.querySelectorAll("button") as unknown as Array<{ dataset: Record<string, string> }>).some((b) => /撤回/.test(b.dataset.tip ?? ""))
     expect(revoke).toBe(false)

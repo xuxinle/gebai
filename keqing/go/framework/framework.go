@@ -40,7 +40,7 @@ type ToolDef struct {
 	Execute     func(args map[string]any) ToolResult
 }
 
-// ToolResult —— 工具执行结果：Output 给模型看的文本，Data 可选结构化输出（透传给 js/agent_run 等）。
+// ToolResult —— 工具执行结果：Output 给模型看的文本，Data 可选结构化输出（透传给 js/subsession_run 等）。
 type ToolResult struct {
 	Output string
 	Data   any

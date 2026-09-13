@@ -30,7 +30,7 @@ export const systemPrompt =
   "5) 反馈与等待：执行后反馈结果——截图返回图片，mouse_click 坐标基于截图实际尺寸判断（desktop_locate/desktop_locate_image 返回的坐标已相对屏幕原点，可直接使用），说明截图位置与关键结论；操作后等待界面就绪用 desktop_wait_for（等文字出现/消失、模板图像出现/消失（image/image_gone）或画面变化，默认 20s 超时），不要自己反复截图轮询；\n" +
   "6) js 编排（多步默认）：定位→点击→输入→验证等多步序列、含条件分支或失败重试的流程，默认用全局 js 工具写成一段脚本执行——脚本内工具像函数一样直接 await（按当前注册名，如 desktop_window_list/desktop_window_focus/desktop_ocr/desktop_mouse_click），按中间结果分支与重试，不要逐步工具调用往返（每轮往返都耗一次模型思考）；编排模板：desktop_window_list 取目标窗口 PID 与 bounds → desktop_window_focus（输出「已激活」再继续，防焦点被抢）→ OCR/locate 限定窗口 region 小区域识别（换算：屏幕坐标=窗口原点+区域内坐标）→ 点击/输入 → desktop_wait_for 验证，失败分支在脚本内重试或降级换通道；js 保持默认审批（一次审批覆盖脚本内全部工具调用，含输入/点击类），不要传 approval:false（免审运行时内部需审批工具会被拒绝）；脚本开头用注释写明操作序列与目标窗口，便于用户审批审阅；单步操作直接调用工具即可，不必编排；\n" +
   "7) 约束：只执行用户明确要求的操作，不做额外破坏性动作（不改系统设置、不删除文件、不触发危险快捷键）。\n" +
-  "验证多通道：不依赖单一验证通道——截图黑屏/纯色（工具会主动提示）时立即切换通道，不要反复重试截图：用 window_list 确认窗口是否在前台、用 desktop_ocr/clipboard_read 验证界面文本与剪贴板状态，或经 agent_run 委托 code 子Agent 读取应用数据文件断言结果；任何通道失效即降级并明确告知用户当前采用的验证方式。"
+  "验证多通道：不依赖单一验证通道——截图黑屏/纯色（工具会主动提示）时立即切换通道，不要反复重试截图：用 window_list 确认窗口是否在前台、用 desktop_ocr/clipboard_read 验证界面文本与剪贴板状态，或经 subsession_run 委托 code 子Agent 读取应用数据文件断言结果；任何通道失效即降级并明确告知用户当前采用的验证方式。"
 export const tools = {
   screenshot: screenshotTool,
   window_list: windowListTool,
@@ -52,7 +52,7 @@ export const tools = {
   detect: detectTool,
   wait_for: waitForTool,
   uia_inspect: uiaInspectTool,
-  // 编排（agent_run 委托 code 验证等）用全局工具 agent_run（主会话恒有，新会话默认继承）——
+  // 编排（subsession_run 委托 code 验证等）用全局工具 subsession_run（主会话恒有，新会话默认继承）——
   // 子Agent 只声明独有工具，不复刻全局编排工具
 }
 export const requiresApproval = {

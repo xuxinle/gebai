@@ -43,7 +43,7 @@ export interface ServerConfig {
   sandbox: SandboxMode
   preloadSubAgents: string[]
   /** 子Agent 白名单（GEBAI_SUB_AGENTS_ENABLE，逗号分隔）：非空时仅保留名单内的子Agent（其余全部
-   *  unregister——agent_list/agent_load/agent_run/系统提示词注入均不可见）；与黑名单同时配置时先白后黑
+   *  unregister——agent_list/agent_load/subsession_run/系统提示词注入均不可见）；与黑名单同时配置时先白后黑
    *  （黑名单最终生效）。 */
   subAgentsEnable?: string[]
   /** 子Agent 黑名单（GEBAI_SUB_AGENTS_DISABLE，逗号分隔）：名单内的子Agent unregister（运行时开关，

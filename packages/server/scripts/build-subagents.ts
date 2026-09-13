@@ -213,7 +213,7 @@ const lines = [
   // 预加载清单烘焙：展开补 preload=true（运行时 GEBAI_PRELOAD_SUB_AGENTS 覆盖仍优先）
   `export const bundledDefs: SubAgentDef[] = [${good.map((d) => (preload.has(d.name) ? `{ ...subAgent_${d.name}, preload: true }` : `subAgent_${d.name}`)).join(", ")}]`,
   "",
-  // 构建期验证失败清单（name → 原因）：运行时水合进 loadErrors（agent_load/agent_run 未知名错误附因）
+  // 构建期验证失败清单（name → 原因）：运行时水合进 loadErrors（agent_load/subsession_run 未知名错误附因）
   `export const bundledErrors: Array<[string, string]> = ${JSON.stringify(badAgents)}`,
   "",
 ]

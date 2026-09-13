@@ -82,7 +82,6 @@ function ctx(home: string, sessionId = SID, env: Record<string, string> = {}): T
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
@@ -233,7 +232,7 @@ describe("global tools", () => {
     // bg_task stop（杀进程树终态记录）
     const killed = await bgTaskTool.execute({ action: "stop", id: "tabc1234" }, c)
     expect(killed.output).toContain("[killed]")
-    // bg_task list（无 sessionRuns 服务时仅列命令任务）
+    // bg_task list（无 subSessions 服务时仅列命令任务）
     const listed = await bgTaskTool.execute({ action: "list" }, c)
     expect(listed.output).toContain("tabc1234")
     expect(listed.output).toContain("bun run build")
@@ -252,9 +251,9 @@ describe("global tools", () => {
     expect(start.output).toContain("不支持后台任务")
     const q = await bgTaskTool.execute({ action: "status", id: "tabc1234" }, c)
     expect(q.output).toContain("不支持命令后台任务")
-    // r 前缀（子Agent 运行）无 sessionRuns 服务：另一形态的不可用说明
-    const r = await bgTaskTool.execute({ action: "status", id: "rabc1234" }, c)
-    expect(r.output).toContain("不支持异步子Agent 运行")
+    // s 前缀（子会话运行）无 subSessions 服务：另一形态的不可用说明
+    const r = await bgTaskTool.execute({ action: "status", id: "sabc1234" }, c)
+    expect(r.output).toContain("不支持子会话后台运行")
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -1447,7 +1446,7 @@ describe("global tools", () => {
       "read", "write", "ls", "grep", "glob", "file",
       "edit", "sh", "py", "show", "fetch_url",
       "todo", "ask",
-      "agent_load", "agent_run", "bg_task",
+      "agent_load", "subsession_run", "bg_task",
     ]) {
       expect(tools[n]).toBeDefined()
     }
@@ -1671,28 +1670,48 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("agent_run routes through runNewSession and todo tools work", async () => {
+  test("subsession_run 经 subSessions 服务派生子会话（单任务/多任务/空 agents），todo 工具可用", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools4-"))
     const todos: import("@gebai/sdk").TodoItem[] = []
+    const archive = (runId: string, input: string) => ({ runId, agents: ["code"], input, output: `result|${input}`, messages: [{ role: "user" as const, content: input }] })
+    let lastInput = "x"
     const c: ToolContext = {
       ...ctx(home),
-      runNewSession: async (agents, input) => ({ output: `${agents.join("+")}|${input}`, archive: { runId: "r", agents, input, output: `${agents.join("+")}|${input}`, messages: [] } }),
+      // 子会话运行服务桩：start 立即返回终态快照（隔离形态由工具结果交付，继承形态报告已合入父上下文）
+      subSessions: {
+        start: async (specs) => {
+          lastInput = specs[0].input
+          return specs.map((sp, i) => ({ runId: `s${i}`, sessionId: "s1", name: sp.name, input: sp.input, agents: sp.agents, ...(sp.model ? { model: sp.model } : {}), inheritContext: sp.inheritContext, async: sp.async, depth: 1, startedAt: 0, status: "done" as const, rounds: 1, toolCalls: 0, merged: sp.inheritContext, output: `result|${sp.input}` }))
+        },
+        get: () => undefined,
+        list: () => [],
+        wait: async (id) => ({ runId: id, sessionId: "s1", name: "s1", input: lastInput, agents: [], inheritContext: false, async: false, depth: 1, startedAt: 0, status: "done" as const, rounds: 1, toolCalls: 0, merged: false, output: `result|${lastInput}` }),
+        cancel: async () => undefined,
+        result: (id) => ({ output: `result|${lastInput}`, archive: archive(id, lastInput) }),
+      },
       getTodos: async () => todos,
-      setTodos: async (t) => {
-        todos.splice(0, todos.length, ...t)
+      setTodos: async (t2) => {
+        todos.splice(0, todos.length, ...t2)
       },
     }
     const tools = createGlobalTools()
-    const r = await tools.agent_run.execute({ agents: ["code"], input: "do it" }, c)
-    expect(r.output).toBe("code|do it")
-    // 多 Agent 预加载：agents 列表透传
-    const r2 = await tools.agent_run.execute({ agents: ["code", "playwright"], input: "verify" }, c)
-    expect(r2.output).toBe("code+playwright|verify")
-    expect(r2.sessionRun).toBeDefined()
-    expect(r2.sessionRun!.agents).toEqual(["code", "playwright"])
-    // 空 agents：明确报错
-    const r3 = await tools.agent_run.execute({ agents: [], input: "x" }, c)
-    expect(r3.output).toContain("非空子Agent 名称列表")
+    // 单任务隔离形态：agents 透传，最终结果作为工具结果返回，过程存档挂调用记录
+    const r = await tools.subsession_run.execute({ input: "do it", agents: ["code"] }, c)
+    expect(r.output).toContain("最终结果")
+    expect(r.output).toContain("result|do it")
+    expect(r.subSessionArchive).toBeDefined()
+    // 多任务并发形态：多个子会话
+    const r2 = await tools.subsession_run.execute({ subsessions: [{ name: "甲", input: "a" }, { name: "乙", input: "b" }] }, c)
+    expect(r2.output).toContain("共 2 个子会话")
+    // 两形态同给：明确报错
+    const r3 = await tools.subsession_run.execute({ input: "x", subsessions: [{ input: "y" }] }, c)
+    expect(r3.output).toContain("二选一")
+    // 两形态都缺：引导
+    const r4 = await tools.subsession_run.execute({}, c)
+    expect(r4.output).toContain("缺少参数 input")
+    // 无 subSessions 服务：不可用说明
+    const noSvc = await tools.subsession_run.execute({ input: "x" }, ctx(home))
+    expect(noSvc.output).toContain("不支持子会话运行")
 
     const added = await tools.todo.execute({ entries: [{ op: "add", title: "t1", eta: 30 }] }, c)
     expect(added.output).toContain("新增: t1")
@@ -3303,7 +3322,6 @@ describe("全局文件工具 project 参数（注册表形态，code 复用的�
       registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
       listSubAgentDefs: () => [],
       loadSubAgent: async () => {},
-      runNewSession: async () => ({ output: "", archive: { runId: "", agents: [], input: "", output: "", messages: [] } }),
       waitForChoice: async () => null,
       waitForEnv: async () => false,
       waitForDraw: async () => null,

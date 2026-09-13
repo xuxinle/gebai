@@ -21,7 +21,7 @@ Bun workspaces + Turborepo 的 Monorepo：
 
 | 包 | 路径 | 职责 |
 |----|------|------|
-| `@gebai/server` | `packages/server/` | 服务端核心：Hono、Agent 引擎、会话管理、子 Agent 装载/新会话执行、REST/WS/Webhook；**代码分层**：核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具）在 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）在 `src/` 根 |
+| `@gebai/server` | `packages/server/` | 服务端核心：Hono、Agent 引擎、会话管理、子 Agent 装载/子会话运行、REST/WS/Webhook；**代码分层**：核心引擎与全局工具（`AgentEngine`/`ToolRegistry`/`Sandbox`/`SessionStore`/`LLMProvider`/全局工具）在 `src/core/`，应用层（HTTP/WS/Webhook/鉴权/配置）在 `src/` 根 |
 | `@gebai/agents` | `packages/agents/` | TS 子代理包，**双域分居**：`src/agents/`（纯子代理定义——扫描域，丢文件即注册，无需排除清单）+ `src/core/`（基建组件：`analyzer/`、`browser/`、`cv/`、`code-tools.ts`、`shared/`）。**零 import `@gebai/server`**（编译期强制）；契约类型一律来自 `@gebai/sdk`，node 工具值导入走 `@gebai/sdk/node` |
 | `@gebai/sdk` | `packages/sdk/` | 客户端 SDK：WS/REST 连接管理、类型定义、API 契约。**双入口**：主入口 `.` 为浏览器安全集（types/cron-types/agent-contract + GebaiClient，**零 node 内建**）；node 内建模块（agent-utils/artifacts/projects/walk/paths）走 `@gebai/sdk/node`——**主入口混入 node 内建会致 web 构建崩溃**（vite treeshake:false 解析 `__vite-browser-external` 具名导出失败） |
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制 |
@@ -78,7 +78,7 @@ bun run lint
 
 ### 命名与命名空间
 
-- **子 Agent 概念术语（消除模型误解的关键）**：`agent_load` = **装载**（模块语义，类比 import 子模块：工具并入当前工具集，无独立上下文）；`agent_run` = **新会话执行**（会话语义：派生临时新会话，预加载一个或多个子 Agent（完整提示词+工具）后阻塞执行，只返回最终结果）。代码/注释/系统提示词/文档一律用「装载/新会话执行」，不用「加载/调用子Agent」。详见 `DESIGN.md`「装载 vs 新会话执行（概念模型）」。
+- **子 Agent 概念术语（消除模型误解的关键）**：`agent_load` = **装载**（模块语义，类比 import 子模块：工具并入当前工具集，无独立上下文）；`subsession_run` = **子会话运行**（会话语义：派生一个或多个子会话执行任务，一个入口覆盖「隔离新上下文（spawn）+ 预加载子 Agent」与「继承父会话上下文（fork）」两种形态，同步阻塞执行或 `async:true` 后台运行）。代码/注释/系统提示词/文档一律用「装载/子会话运行」，不用「加载/调用子Agent」。详见 `DESIGN.md`「装载 vs 子会话运行（概念模型）」。
 - 子 Agent 名：`[a-z0-9_]+`（小写字母/数字/下划线）。
 - 子 Agent 工具名：`[a-zA-Z0-9_]+`（不含 `.`/`-`/`:`）。
 - 全局工具名：`[a-z][a-z0-9_]*`（小写开头，不含 `.`/`-`/`:`）。
@@ -114,8 +114,8 @@ bun run lint
 ## 如何新增子 Agent
 
 1. 在 `packages/agents/src/agents/` 下新增定义：**单文件** `{name}.ts`、**目录** `{name}/{name}.ts`（`{name}/index.ts` 为回退入口；系统提示词可拆 `{name}.md` 由 ts 导入并修饰），或 **纯提示词** `{name}/{name}.md`（零 TS）。
-   **TS 定义形态必须导出 `export const def: SubAgentDef`**（纯提示词 `.md` 形态无需此项）——加载器只读 `mod.def`，未导出即报「未导出 def（须 export const def: SubAgentDef）」加载失败。字段：`name`/`description`/`systemPrompt`/`tools`（省略即纯提示词子 Agent）/`requiresApproval`/`preload`/`dependencies`（依赖名单：装载/预加载/`agent_run` 自动连带装载，工具与提示词按依赖方命名空间复用，不在本 def 重复声明）/`envVars`（可配置环境变量声明，`{AGENT_NAME_UPPER}_` 前缀，自动汇总进前端面板白名单）/`projectRoot`（默认项目根兜底）/`writeGuard`（写范围守卫）；契约定义见 `packages/sdk/src/agent-contract.ts`，模板见 `DESIGN.md`「子Agent文件格式」（顶层可先导出同名常量再组装，如 `export const preload = false` + `export const def = { ... }`）。
-2. **纯提示词简化定义**：仅需系统提示词的简单/组合式子Agent 可直接放 `{name}/{name}.md`（零 TS，可选 frontmatter `description`/`dependencies`/`preload`/`env_vars`）；`tools` 省略时自动注入编排工具（`agent_list`/`agent_load`/`agent_run` + `bg_task`），组合式子Agent 在提示词中说明编排策略即可。
+   **TS 定义形态必须导出 `export const def: SubAgentDef`**（纯提示词 `.md` 形态无需此项）——加载器只读 `mod.def`，未导出即报「未导出 def（须 export const def: SubAgentDef）」加载失败。字段：`name`/`description`/`systemPrompt`/`tools`（省略即纯提示词子 Agent）/`requiresApproval`/`preload`/`dependencies`（依赖名单：装载/预加载/`subsession_run` 自动连带装载，工具与提示词按依赖方命名空间复用，不在本 def 重复声明）/`envVars`（可配置环境变量声明，`{AGENT_NAME_UPPER}_` 前缀，自动汇总进前端面板白名单）/`projectRoot`（默认项目根兜底）/`writeGuard`（写范围守卫）；契约定义见 `packages/sdk/src/agent-contract.ts`，模板见 `DESIGN.md`「子Agent文件格式」（顶层可先导出同名常量再组装，如 `export const preload = false` + `export const def = { ... }`）。
+2. **纯提示词简化定义**：仅需系统提示词的简单/组合式子Agent 可直接放 `{name}/{name}.md`（零 TS，可选 frontmatter `description`/`dependencies`/`preload`/`env_vars`）；`tools` 省略时自动注入编排工具（`agent_list`/`agent_load`/`subsession_run` + `bg_task`），组合式子Agent 在提示词中说明编排策略即可。
 3. 命名符合规则；工具名无需关注前缀，总 Agent 自动加 `{agent}_` 命名空间。
 4. 构建时自动扫描收集（零注册）；可按需选择性打包（构建期环境变量 `GEBAI_BUILD_SUBAGENTS`/`GEBAI_BUILD_PRELOAD`，无 CLI 参数）。
 5. 同步在 `DESIGN.md` 中补充该子 Agent 的说明与总览表。

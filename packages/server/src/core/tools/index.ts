@@ -40,7 +40,7 @@ export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT, readFeedbackTool } from "@geb
 // git/system_info/env_detect/preview_server（code 域工具）已迁 @gebai/agents（packages/agents/src/core/code-tools.ts）
 export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "@gebai/agents"
 export { makeTodoTool, askTool } from "./interact"
-export { agentListTool, agentLoadTool, agentRunTool, branchRunTool, branchSyncTool, bgTaskTool } from "./agent"
+export { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool } from "./agent"
 export { toolSchemasTool } from "./schemas"
 
 // ---- 目录扫描（dev）→ bundle 回退（dist/--compile），模块初始化一次成形 ----
@@ -93,7 +93,7 @@ export function _setExcludedGlobalToolsForTest(names: string[]): void {
   for (const n of names) excludedGlobalTools.add(n)
 }
 
-/** 工具是否被构建期排除：index.ts 注册（含 vision）、engine agent_run 新会话内建编排工具（tool_schemas/js）
+/** 工具是否被构建期排除：index.ts 注册（含 vision）、engine subsession_run 新会话内建编排工具（tool_schemas/js）
  *  注入共用——排除 = 不注册不暴露（schema 不可见、调用报未知工具）。 */
 export function isGlobalToolExcluded(name: string): boolean {
   return excludedGlobalTools.has(name)
@@ -103,7 +103,7 @@ export function isGlobalToolExcluded(name: string): boolean {
  *  否则连续两次不同排除清单的构建会误拒上次被排除的名字）。
  *  文件/路径类工具统一经 projectAware 包装（DESIGN「项目机制」）：默认会话相对路径，project 参数
  *  （预置项目名/项目根路径/保留名 tmp）切换解析基准——code/explore 等编码类子Agent 不再重复定义文件工具，
- *  装载与新会话执行直接复用全局同名工具。projectAware 由聚合器按条目 `project` 声明统一施加。 */
+ *  装载与子会话运行直接复用全局同名工具。projectAware 由聚合器按条目 `project` 声明统一施加。 */
 export function createAllGlobalTools(): Record<string, Tool> {
   if (!allEntries) throw new Error("[tools] 全局工具注册表未初始化")
   const out: Record<string, Tool> = {}

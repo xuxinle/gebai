@@ -30,7 +30,7 @@ import {
   clearDraft,
 } from "./state"
 import { markdownBlock } from "./markdown"
-import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSessionRun, flushMsgBatch, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSessionArchive, sessionRunBox, takeMsgBatch } from "./messages"
+import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSubSession, flushMsgBatch, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSubSessionArchive, subSessionBox, takeMsgBatch } from "./messages"
 import { clearUnread, isAtBottom, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
 import { applyApprovalVisibility } from "./approvals"
@@ -166,7 +166,7 @@ export async function loadMessages(sessionId: string) {
       pendingTools.delete(key)
       continue
     }
-    const parent = entry.runId ? run?.sessionRuns?.get(entry.runId)?.body : undefined
+    const parent = entry.runId ? run?.subSessions?.get(entry.runId)?.body : undefined
     if (entry.kind === "todo") {
       const w = appendTodoCard(sessionId, parent)
       entry.wrapper = w
@@ -232,8 +232,8 @@ const HISTORY_FILL_CHUNK = 40
 
 /**
  * 渲染 [from, to) 区间的消息：普通消息、工具结果卡片、新会话折叠容器（按 runId 分组）、
- * sessionRun 存档（含嵌套）。liveRun 传入时恢复该运行的流式累积引用与容器——仅首批渲染传：
- * 在途内容只属于当前运行，历史补齐的旧运行不得覆盖 liveRun.sessionRuns（会顶掉在途流引用）。
+ * subSession 存档（含嵌套）。liveRun 传入时恢复该运行的流式累积引用与容器——仅首批渲染传：
+ * 在途内容只属于当前运行，历史补齐的旧运行不得覆盖 liveRun.subSessions（会顶掉在途流引用）。
  */
 function renderMessageRange(
   msgs: Array<import("@gebai/sdk").Message>,
@@ -242,7 +242,7 @@ function renderMessageRange(
   sessionId: string,
   liveRun: ReturnType<typeof runs.get>,
 ): void {
-  // 新会话执行过程消息（session 标记）：按 runId 分组渲染进折叠容器（默认折叠，只显示输入与最终返回）。
+  // 子会话运行过程消息（subSession 标记）：按 runId 分组渲染进折叠容器（默认折叠，只显示输入与最终返回）。
   // 旧版（agent_call 时代）独立存档消息为 subAgent/subAgentRunId/subAgentMeta 字段，兼容回放
   let subRun: { runId: string; container: HTMLDetailsElement; body: HTMLElement; outputEl: HTMLElement; lastMsg?: import("@gebai/sdk").Message } | null = null
   const closeSubRun = () => {
@@ -251,24 +251,24 @@ function renderMessageRange(
     // 无最终回复（中断/风暴终止）：任务仍在运行 → 保持执行中态；任务已结束 → 折叠显示「（无返回）」
     const last = subRun.lastMsg
     const hasFinal = last?.role === "assistant" && !last.toolCalls?.length
-    if (hasFinal) finishSessionRun(subRun.container, subRun.outputEl, last!.content)
-    else if (runs.has(sessionId)) finishSessionRun(subRun.container, subRun.outputEl, undefined)
-    else finishSessionRun(subRun.container, subRun.outputEl, "")
+    if (hasFinal) finishSubSession(subRun.container, subRun.outputEl, last!.content)
+    else if (runs.has(sessionId)) finishSubSession(subRun.container, subRun.outputEl, undefined)
+    else finishSubSession(subRun.container, subRun.outputEl, "")
     subRun = null
   }
   for (let i = from; i < to; i++) {
     const m = msgs[i]
     const isLegacy = (m as import("@gebai/sdk").Message).subAgent === true
-    if (m.session || isLegacy) {
+    if (m.subSession || isLegacy) {
       const runId = runIdOfMessage(m)
-      const agents = m.sessionMeta?.agents ?? ((m as import("@gebai/sdk").Message).subAgentMeta?.agent ? [(m as import("@gebai/sdk").Message).subAgentMeta!.agent] : [])
-      const input = m.sessionMeta?.input ?? (m as import("@gebai/sdk").Message).subAgentMeta?.input ?? (m.role === "user" ? m.content : "")
+      const agents = m.subSessionMeta?.agents ?? ((m as import("@gebai/sdk").Message).subAgentMeta?.agent ? [(m as import("@gebai/sdk").Message).subAgentMeta!.agent] : [])
+      const input = m.subSessionMeta?.input ?? (m as import("@gebai/sdk").Message).subAgentMeta?.input ?? (m.role === "user" ? m.content : "")
       if (!subRun || runId !== subRun.runId) {
         closeSubRun()
         if (runId) {
-          // 任务运行中切回：重建容器并恢复 liveRun.sessionRuns 引用与切走期间累积的流式文本
-          const existing = liveRun?.sessionRuns?.get(runId)
-          const box = sessionRunBox({ runId, agents, input })
+          // 任务运行中切回：重建容器并恢复 liveRun.subSessions 引用与切走期间累积的流式文本
+          const existing = liveRun?.subSessions?.get(runId)
+          const box = subSessionBox({ runId, agents, input })
           if (liveRun) {
             const reasoningAcc = existing?.reasoningAcc ?? ""
             const acc = existing?.acc ?? ""
@@ -289,8 +289,8 @@ function renderMessageRange(
                 bubble.appendChild(textWrap)
               }
             }
-            liveRun.sessionRuns ??= new Map()
-            liveRun.sessionRuns.set(runId, {
+            liveRun.subSessions ??= new Map()
+            liveRun.subSessions.set(runId, {
               runId,
               agents,
               input,
@@ -308,15 +308,15 @@ function renderMessageRange(
         }
       }
       if (!subRun) continue
-      if (m.role === "user" && m.sessionMeta) continue // 输入已随容器创建渲染（sessionRunBox）
+      if (m.role === "user" && m.subSessionMeta) continue // 输入已随容器创建渲染（subSessionBox）
       if (m.role === "user" && isLegacy && (m as import("@gebai/sdk").Message).subAgentMeta) continue
       subRun.lastMsg = m
       appendMsg(m, false, subRun.body)
     } else {
       closeSubRun()
-      // 新会话存档：agent_run 工具调用记录扩展字段（sessionRun）→ 先渲染折叠容器（含嵌套递归），
-      // 再渲染工具结果卡片（agent_run 输出为 markdown）；旧版 subAgentRun 字段兼容回放
-      if (m.sessionRun) renderSessionArchive(m.sessionRun)
+      // 子会话存档：subsession_run 工具调用记录扩展字段（subSessionArchive）→ 先渲染折叠容器（含嵌套递归），
+      // 再渲染工具结果卡片（subsession_run 输出为 markdown）；旧版 subAgentRun 字段兼容回放
+      if (m.subSessionArchive) renderSubSessionArchive(m.subSessionArchive)
       else if ((m as import("@gebai/sdk").Message).subAgentRun) renderLegacySubAgentArchive((m as import("@gebai/sdk").Message).subAgentRun!)
       appendMsg(m)
     }
@@ -357,7 +357,7 @@ async function fillHistory(sessionId: string, seq: number, msgs: Array<import("@
 function rebuildMsgNav(): void {
   clearMsgNav()
   for (const node of Array.from(msgEl.children)) {
-    if (node.classList.contains("msg") || node.classList.contains("session-run")) addMsgNavSeg(node as HTMLElement)
+    if (node.classList.contains("msg") || node.classList.contains("subsession-run")) addMsgNavSeg(node as HTMLElement)
   }
   updateMsgNav()
 }
@@ -865,7 +865,7 @@ export async function maybeAutoTitle(sessionId: string) {
   // 首条输入优先取内存记录（发送时点即有，零额外请求）；缺失（页面刷新后补命名）时回退历史首条用户消息（子会话执行存档不算）
   const first =
     firstInputOf(sessionId) ??
-    (session ?? (await client.getSession(sessionId).catch(() => null)))?.messages?.find((m) => m.role === "user" && !m.session && !isEngineNoteMsg(m) && m.content?.trim())?.content
+    (session ?? (await client.getSession(sessionId).catch(() => null)))?.messages?.find((m) => m.role === "user" && !m.subSession && !isEngineNoteMsg(m) && m.content?.trim())?.content
   if (!first) return
   const compact = first.replace(/\s+/g, " ").trim()
   // 落盘标题截 50 字符（超出省略号）：侧栏/标题栏按容器宽度自行省略，此处只防超长输入整段入库
@@ -904,7 +904,7 @@ export async function exportSession(sessionId: string): Promise<void> {
     const tag = note
       ? note === "cron"
         ? "⏰ 定时任务"
-        : note === "branch"
+        : note === "subsession"
           ? "🌿 分支合入"
           : "⚙️ 引擎提示"
       : m.role === "user"

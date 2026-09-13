@@ -49,7 +49,6 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
@@ -90,7 +89,7 @@ describe("vision TS 侧贡献（跨语言合并：仅 analyze）", () => {
 })
 
 describe("依赖复用（方式一：dependencies 声明——self_optimize 依赖 vision）", () => {
-  test("self_optimize def 声明依赖 vision（agent_run 新会话级联预加载，截图分析不依赖全局 vision 继承）", async () => {
+  test("self_optimize def 声明依赖 vision（subsession_run 新会话级联预加载，截图分析不依赖全局 vision 继承）", async () => {
     const { def: selfOptDef } = await import("../self_optimize")
     expect(selfOptDef.dependencies).toContain("code")
     expect(selfOptDef.dependencies).toContain("vision")

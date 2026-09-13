@@ -6,7 +6,7 @@
  * webhook/调度/启动逻辑）不受影响。core 层只提供作用域原语，垫片实现位于 playwright 子Agent
  * （浏览器会话与桥接的属主），避免 core → 子代理定义域反向依赖。
  *
- * 嵌套执行（agent_run 在工具内跑完整引擎）经 `runWithoutFetchProxy` 豁免——嵌套引擎的 LLM
+ * 嵌套执行（subsession_run 在工具内跑完整引擎）经 `runWithoutFetchProxy` 豁免——嵌套引擎的 LLM
  * 流式请求恒直连，不被外层工具作用域连带代理。 */
 import { AsyncLocalStorage } from "node:async_hooks"
 

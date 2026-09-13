@@ -42,7 +42,6 @@ function ctx(home: string, overrides: Partial<ToolContext> = {}): ToolContext {
     registry: { schemas: () => [], resolve: () => undefined, getAgentNames: () => [] },
     listSubAgentDefs: () => [],
     loadSubAgent: async () => {},
-    runNewSession: async () => ({ output: "ok", archive: { runId: "r", agents: ["x"], input: "", output: "ok", messages: [] } }),
     waitForChoice: async () => null,
     waitForEnv: async () => false,
     waitForDraw: async () => ({ ok: true }),
@@ -58,7 +57,7 @@ describe("code sub-agent（独有工具集，文件工具复用全局）", () =>
       expect(names).toContain(t)
     }
     // 重复工具彻底删除：文件读写查询/脚本/交互编排均用全局工具（同名全局名直接调用）
-    for (const t of ["read", "write", "edit", "patch", "sh", "bg_task", "py", "ls", "grep", "glob", "file", "project", "fetch_url", "ask", "agent_run", "todo"]) {
+    for (const t of ["read", "write", "edit", "patch", "sh", "bg_task", "py", "ls", "grep", "glob", "file", "project", "fetch_url", "ask", "subsession_run", "todo"]) {
       expect(names).not.toContain(t)
     }
     // project 参数路由：路径/工作目录类独有工具带 project 参数；纯环境信息类不带
@@ -104,7 +103,7 @@ describe("code sub-agent（独有工具集，文件工具复用全局）", () =>
     expect(denied.output).toContain("project 参数")
     const ok = await codeDef.tools!.git.execute({ project: "app", action: "status" }, c)
     expect(ok.output).toContain("main")
-    // 绑定根（新会话执行模式 + CODE_PROJECT）：未传 project 放行
+    // 绑定根（子会话运行模式 + CODE_PROJECT）：未传 project 放行
     const bound = join(home, "bound")
     mkdirSync(bound, { recursive: true })
     const c2 = ctx(home, {

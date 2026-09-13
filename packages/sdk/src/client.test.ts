@@ -227,41 +227,41 @@ describe("wsEventToChunk", () => {
   test("maps WS events to ChatChunk contract (delta/reasoning/tool/approval/done/error)", () => {
     const ev = (type: string, payload: Record<string, unknown> = {}) => ({ type, sessionId: "s1", payload, timestamp: Date.now() })
     expect(wsEventToChunk(ev("event.message.delta", { text: "你", messageId: "m1" }))).toEqual({ kind: "text", text: "你", messageId: "m1" })
-    // 新会话执行过程 delta 透传 session 标记（前端据此分段显示）
-    expect(wsEventToChunk(ev("event.message.delta", { text: "子代理过程", messageId: "m2", session: true }))).toEqual({ kind: "text", text: "子代理过程", messageId: "m2", session: true })
+    // 子会话运行过程 delta 透传 subSession 标记（前端据此分段显示）
+    expect(wsEventToChunk(ev("event.message.delta", { text: "子代理过程", messageId: "m2", subSession: true }))).toEqual({ kind: "text", text: "子代理过程", messageId: "m2", subSession: true })
     expect(wsEventToChunk(ev("event.message.reasoning", { text: "思考" }))).toEqual({ kind: "reasoning", text: "思考" })
-    // 新会话执行过程：reasoning/工具/审批事件透传 session 与 sessionRunId 标记（前端据此渲染到新会话容器）
-    expect(wsEventToChunk(ev("event.message.reasoning", { text: "子代理思考", session: true, sessionRunId: "r1" }))).toEqual({
+    // 子会话运行过程：reasoning/工具/审批事件透传 subSession 与 subSessionId 标记（前端据此渲染到新会话容器）
+    expect(wsEventToChunk(ev("event.message.reasoning", { text: "子代理思考", subSession: true, subSessionId: "r1" }))).toEqual({
       kind: "reasoning",
       text: "子代理思考",
-      session: true,
-      sessionRunId: "r1",
+      subSession: true,
+      subSessionId: "r1",
     })
-    expect(wsEventToChunk(ev("event.tool.call", { toolCallId: "t2", name: "code_todo", arguments: {}, session: true, sessionRunId: "r1" }))).toEqual({
+    expect(wsEventToChunk(ev("event.tool.call", { toolCallId: "t2", name: "code_todo", arguments: {}, subSession: true, subSessionId: "r1" }))).toEqual({
       kind: "tool_call",
       toolCall: { id: "t2", name: "code_todo", arguments: {} },
-      session: true,
-      sessionRunId: "r1",
+      subSession: true,
+      subSessionId: "r1",
     })
     // 新会话 run 起止事件：start 携带 agents/input，done 携带 agents/output（前端折叠容器标题用）
-    expect(wsEventToChunk(ev("event.session.start", { runId: "r1", agents: ["code", "playwright"], input: "改个文件", depth: 1 }))).toEqual({
-      kind: "session_start",
-      session: true,
-      sessionRunId: "r1",
-      sessionMeta: { agents: ["code", "playwright"], input: "改个文件" },
+    expect(wsEventToChunk(ev("event.subsession.start", { runId: "r1", agents: ["code", "playwright"], input: "改个文件", depth: 1 }))).toEqual({
+      kind: "subsession_start",
+      subSession: true,
+      subSessionId: "r1",
+      subSessionMeta: { agents: ["code", "playwright"], input: "改个文件" },
     })
-    expect(wsEventToChunk(ev("event.session.done", { runId: "r1", agents: ["code"], output: "已完成" }))).toEqual({
-      kind: "session_done",
-      session: true,
-      sessionRunId: "r1",
-      sessionMeta: { agents: ["code"], output: "已完成" },
+    expect(wsEventToChunk(ev("event.subsession.done", { runId: "r1", agents: ["code"], output: "已完成" }))).toEqual({
+      kind: "subsession_done",
+      subSession: true,
+      subSessionId: "r1",
+      subSessionMeta: { agents: ["code"], output: "已完成" },
     })
     // 异常路径：output 为空（引擎 catch 显式传 ""）且携带 error → 折叠摘要显示中断原因
-    expect(wsEventToChunk(ev("event.session.done", { runId: "r1", agents: ["code"], output: "", error: "cancelled" }))).toEqual({
-      kind: "session_done",
-      session: true,
-      sessionRunId: "r1",
-      sessionMeta: { agents: ["code"], output: "（已中断: cancelled）" },
+    expect(wsEventToChunk(ev("event.subsession.done", { runId: "r1", agents: ["code"], output: "", error: "cancelled" }))).toEqual({
+      kind: "subsession_done",
+      subSession: true,
+      subSessionId: "r1",
+      subSessionMeta: { agents: ["code"], output: "（已中断: cancelled）" },
     })
     // 已移除的 reset 事件不再映射（DSML 泄漏检测已去除）
     expect(wsEventToChunk(ev("event.message.reset", { messageId: "m1" }))).toBeNull()

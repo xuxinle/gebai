@@ -39,8 +39,8 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     `复杂/多步操作优先用 js 脚本编排一次执行，避免大量单步工具调用浪费往返与词元（脚本内工具像内置函数一样直接 await 调用、可用变量/分支/循环/错误处理表达任意流程，编排前可用 tool_schemas 查询工具输出结构，语法见 js 工具描述）；纯系统操作用 sh/py 脚本。`,
     `同一次回复返回的多个工具调用会并行执行（互不等待）：互不依赖的操作放进同批调用可显著加速（多文件读取/多路查询/独立子任务等尽量同批发出）；有先后依赖、需严格串行的操作不要同批发出——用 js 脚本按序编排（await 前一步结果再决定下一步），或拆分到多轮逐步执行；对同一文件的写/改尤其必须串行编排（并行修改会相互覆盖）。`,
     `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。`,
-    `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染主上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 agent_run 执行新会话——派生临时新会话，预加载一个或多个子Agent（完整系统提示词与工具）后执行，只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或执行新会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
-    `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 branch_run 会话分支运行——从主上下文 fork 多分支同时执行（各分支掌握主线全部背景与工具，可各自传 model 走不同模型接口并行更快），分支最终报告自动合入主上下文；长耗时分支传 async:true 后台执行（bg_task 管理），可不断分支合并像 git 一样推进——并行多线是摆脱单轮串行等待、加速大体量任务的主要手段。`,
+    `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染父上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 subsession_run 派生子会话——inherit_context 缺省 false 即隔离新上下文，agents 传需预加载的子Agent（可省略/为空 = 不加载任何子Agent），只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或派生子会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）`,
+    `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 subsession_run 的 inherit_context:true（fork 父会话上下文）——各子会话掌握父会话全部背景与工具，可用 subsessions 数组一次派生多个（每个可单独传 model 走不同模型接口并行更快），报告完成即自动合入父会话；长耗时子会话传 async:true 后台执行（bg_task 管理，子会话内可用 subsession_merge 随时合入阶段性成果），可不断派生合并像 git 一样推进——并行多线是摆脱单轮串行等待、加速大体量任务的主要手段。`,
     // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
     // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
     subAgentProjectNote(deps, user, env),
@@ -54,16 +54,16 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
 /** 项目绑定注入总Agent 系统提示词（{AGENT_NAME_UPPER}_PROJECT 环境变量，DESIGN「项目内置」；
  *  SubAgentDef.projectRoot 兜底（环境变量未配置时的默认项目根，如 self_optimize 脚本调试模式自动
  *  推导歌白仓库根）同规则注入）；预置项目说明与受限模式说明（{AGENT_NAME_UPPER}_PROJECTS /
- *  CODE_RESTRICT_PROJECTS）属 code 子Agent 行为约束，只注入子Agent 系统提示词（agent_run 执行新会话时），
+ *  CODE_RESTRICT_PROJECTS）属 code 子Agent 行为约束，只注入子Agent 系统提示词（subsession_run 隔离子会话时），
  *  不注入总Agent 系统提示词。 */
 export function subAgentProjectNote(deps: PromptDeps, user: string, env: Record<string, string>): string {
   const lines: string[] = []
   for (const d of deps.subAgents.list()) {
     const root = deps.resolveSubAgentProject(user, env, d.name)
     if (!root) continue
-    // 仅声明绑定与根路径（agent_run 新会话执行该子Agent 时以其为项目根；装载模式下路径基准仍是会话目录，
+    // 仅声明绑定与根路径（subsession_run 隔离子会话加载该子Agent 时以其为项目根；装载模式下路径基准仍是会话目录，
     // 访问项目请用预置项目 project 参数或绝对路径，不宣称工作目录已切换）
-    lines.push(`${d.name} 子Agent 项目绑定：${root}（agent_run 新会话执行该子Agent 时以其为项目根；装载模式下路径基准为会话目录，访问项目用 project 参数或绝对路径）`)
+    lines.push(`${d.name} 子Agent 项目绑定：${root}（subsession_run 隔离子会话加载该子Agent 时以其为项目根；装载模式下路径基准为会话目录，访问项目用 project 参数或绝对路径）`)
   }
   return lines.length ? `\n\n${lines.join("\n")}` : ""
 }
@@ -104,7 +104,7 @@ export function agentDescription(deps: PromptDeps, d: { name: string; descriptio
   return parts.join(" ")
 }
 
-/** 子Agent 提示词段落（职责分隔头 + 项目注记 + 静态提示词 + 项目 AGENTS.md）：runNewSession 预加载拼接
+/** 子Agent 提示词段落（职责分隔头 + 项目注记 + 静态提示词 + 项目 AGENTS.md）：runSubSession 预加载拼接
  *  与运行中装载（路由自愈）共用。动态环境注记（项目根/预置项目清单/受限模式）置于职责分隔头之后、
  *  静态提示词之前——配置信息前置，模型开工先读环境（目标项目与 project 参数取值），再读工作流。 */
 export async function buildAgentSection(deps: PromptDeps, def: SubAgentDef, user: string, env: Record<string, string>, sessionId: string): Promise<string> {

@@ -1,4 +1,4 @@
-import type { AttachmentInput, AttachmentRef, DiagramFormat, Message, MessageLike, SessionRunArchive, SessionRunEntry } from "@gebai/sdk"
+import type { AttachmentInput, AttachmentRef, DiagramFormat, Message, MessageLike, SubSessionArchive, SubSessionEntry, TodoItem } from "@gebai/sdk"
 import { LLMConfigError, parseExtraParams, salvageWriteArgs, type LLMChunk, type LLMProvider, type LLMUsage } from "../llm/llm"
 import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "@gebai/agents"
 import { resizeForVision, resizeNote } from "@gebai/agents"
@@ -13,11 +13,10 @@ import type { SubAgentManager } from "../agents/subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage } from "../base/types"
 import { ToolRegistry as BaseToolRegistry } from "../base/registry"
 import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
-import { agentListTool, agentLoadTool, agentRunTool, bgTaskTool, branchSyncTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
+import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
-import { SessionRunRegistry, type SessionRunHandle } from "../session/session-runs"
-import { BranchRunRegistry, type BranchRunHandle, type BranchSpec, BRANCH_MERGE_MAX_CHARS, BRANCH_MERGE_SUMMARY_SKIP_CHARS, branchNoticeHead } from "../session/branch-runs"
+import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionNoticeHead } from "../session/subsessions"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, resolve } from "node:path"
@@ -105,7 +104,7 @@ const ATTACHMENT_INLINE_LIMIT = VISION_MAX_IMAGE_BYTES
 /** 历史图片内联窗口：仅最近 N 条含图片的用户消息内联进上下文，更早的降级为文本说明
  *  （图片永久占据上下文且不受压缩保护，长会话会被历史图片占死窗口）。 */
 const INLINE_IMAGE_RECENT = 3
-/** 单次 agent_run（新会话执行）可预加载的子Agent 数量上限（防异常/恶意调用拼装超大提示词）。 */
+/** 单次子会话运行可预加载的子Agent 数量上限（防异常/恶意调用拼装超大提示词）。 */
 const MAX_AGENTS_PER_RUN = 5
 /** LLM 流式调用读空闲超时（毫秒）：SSE 建立后超过该时长无任何 chunk 判定接口假死，中止本次调用
  *  （无产出走重试，有产出上抛为任务错误，不再无限挂起）。 */
@@ -219,8 +218,8 @@ export interface AgentEngineOptions {
   /** 任务级主模型 Provider 解析：env 配置 GEBAI_LLM_* 时返回重建的 Provider（覆盖启动配置）；
    *  无覆盖返回 undefined（调用方沿用 opts.provider 实例）。 */
   resolveProvider?: (env: Record<string, string>) => LLMProvider | undefined
-  /** 分支运行模型路由解析（DESIGN「会话分支运行与合并」多路接口）：按名（GEBAI_LLM_ROUTES 路由名或
-   *  字面模型名）返回独立 Provider；未注入或名字为空返回 undefined（分支沿用任务级 Provider）。 */
+  /** 子会话模型路由解析（DESIGN「子会话运行」多路接口）：按名（GEBAI_LLM_ROUTES 路由名或
+   *  字面模型名）返回独立 Provider；未注入或名字为空返回 undefined（子会话沿用任务级 Provider）。 */
   resolveModelProvider?: (env: Record<string, string>, name: string) => LLMProvider | undefined
   registry: ToolRegistry
   store: SessionStore
@@ -257,7 +256,7 @@ export class AgentEngine {
   /** 会话级已读文件追踪（fileGuard 防误覆盖/防陈旧覆盖，DESIGN「write 防误覆盖守卫」）：sessionId → (已读绝对路径 →
    *  读取/写入时内容指纹)。read/edit/patch/write 成功后登记（含指纹），write/edit/patch 写前按「未读 → 防盲写、
    *  指纹漂移 → 防陈旧覆盖」两档拦截（并行分支/主线/脚本命令/外部编辑改动均会漂移指纹）；
-   *  分支运行 fork 独立快照（runBranch 拷贝本表——分支已读基线 = fork 点主线可见内容，互不串扰）；
+   *  继承上下文的子会话独立快照（runSubSession 拷贝本表——子会话已读基线 = fork 点父会话可见内容，互不串扰）；
    *  会话删除经 forgetSession 释放（进程内无界增长防护）。 */
   private readFiles = new Map<string, Map<string, string | null>>()
   /** 单会话已读登记上限（防长会话无界增长；超出整表重置——守卫降级为「需重读」，保护语义不破坏）。 */
@@ -273,18 +272,15 @@ export class AgentEngine {
   /** 会话级 sh 异步后台任务服务（会话 tmp/sh-tasks/ 落盘，跨调用/跨重启可见）：user:sessionId → runner。 */
   private shTaskServices = new Map<string, ShTaskRunner>()
 
-  /** agent_run 异步后台运行句柄（进程内，引擎级共享：runId → handle；DESIGN「新会话执行的异步运行」）。
-   *  运行存活与本进程绑定（重启即中断，不落盘恢复）；SessionRunRegistry 为按会话过滤的薄视图。 */
-  private sessionRunStore = new Map<string, SessionRunHandle>()
+  /** 子会话运行句柄（进程内，引擎级共享：runId → handle；DESIGN「子会话运行」）：一个注册表覆盖
+   *  「执行新会话」与「并行分支」两种形态，sync/async 同径（同步=启动后等待、异步=后台）。
+   *  运行存活与本进程绑定（重启即中断，不落盘恢复）；SubSessionRegistry 为按视角过滤的薄视图。 */
+  private subSessionStore = new Map<string, SubSessionHandle>()
 
-  /** 会话分支运行句柄（进程内，引擎级共享：branchId → handle；DESIGN「会话分支运行与合并」）。
-   *  同 session-runs 哲学：随进程存活、重启即中断；BranchRunRegistry 为按会话过滤的薄视图。 */
-  private branchRunStore = new Map<string, BranchRunHandle>()
-
-  /** 分支合并队列（DESIGN「会话分支运行与合并」）：sessionId → 待合入主上下文的分支报告消息。
-   *  分支完成时入队；runLoop 在工具批处理边界排空（tool 结果之后追加，保持 tool_calls 配对完整，
-   *  主线下轮模型调用即见）；任务结束（run finally）冲刷落盘（异步分支结果不因任务收尾丢失）。 */
-  private branchMerges = new Map<string, Message[]>()
+  /** 父会话合并队列（DESIGN「子会话运行」）：sessionId → 待合入父上下文的子会话报告消息（继承上下文形态）。
+   *  子会话完成/阶段性合入时入队；runLoop 在工具批处理边界排空（tool 结果之后追加，保持 tool_calls 配对完整，
+   *  父会话下轮模型调用即见）；任务结束（run finally）冲刷落盘（异步子会话结果不因任务收尾丢失）。 */
+  private parentMerges = new Map<string, Message[]>()
 
   /** 上下文压缩器（压缩/溢出恢复，自本类拆分；见 compressor.ts）。 */
   private compressor: ContextCompressor
@@ -329,12 +325,11 @@ export class AgentEngine {
     return this.tasks.has(sessionId)
   }
 
-  /** 服务端是否忙碌（全局聚合：任一会话任务/后台运行/分支运行进行中即为真）。
+  /** 服务端是否忙碌（全局聚合：任一会话任务/子会话运行进行中即为真）。
    *  闲时任务调度器据此判定「服务端没有正在运行的会话」，避免与用户会话争抢资源。 */
   busy(): boolean {
     if (this.tasks.size > 0) return true
-    for (const h of this.sessionRunStore.values()) if (h.status === "running") return true
-    for (const h of this.branchRunStore.values()) if (h.status === "running") return true
+    for (const h of this.subSessionStore.values()) if (h.status === "running") return true
     return false
   }
 
@@ -423,8 +418,8 @@ export class AgentEngine {
     return this.compressor.compactSession(sessionId, user, scope, provider, { ...opts, cachePrefix })
   }
 
-  private async summarizeBranchReport(content: string, env: Record<string, string>): Promise<string | undefined> {
-    return this.compressor.summarizeBranchReport(content, env)
+  private async summarizeSubSessionReport(content: string, env: Record<string, string>): Promise<string | undefined> {
+    return this.compressor.summarizeSubSessionReport(content, env)
   }
 
   private async callModelWithOverflowRecovery(
@@ -499,25 +494,20 @@ export class AgentEngine {
     this.readFiles.delete(sessionId)
     this.dynamicTools.delete(sessionId)
     // 会话级装载者引用解引用（owner 引用计数）：引用归零的注销工具注册——
-    // 不释放则 ownersByAgent 随会话累积（长运行服务无界增长）；agent_run 共享标记与全局装载不受影响
+    // 不释放则 ownersByAgent 随会话累积（长运行服务无界增长）；子会话共享标记与全局装载不受影响
     this.opts.subAgents.releaseOwner(sessionId)
     for (const key of this.shTaskServices.keys()) {
       if (key.endsWith(`:${sessionId}`)) this.shTaskServices.delete(key)
     }
-    // 异步后台运行（agent_run async:true）：运行中的先终止（孤儿运行无消费者、句柄含全量存档，滞留即泄漏），
-    // 该会话全部句柄移除（终态记录 prune 只在同会话新运行结束时触发，删除场景须显式清理）
-    for (const [runId, h] of this.sessionRunStore) {
+    // 子会话运行（DESIGN「子会话运行」）：运行中的先终止（孤儿运行无消费者、句柄含全量存档，滞留即泄漏），
+    // 该会话全部句柄移除（终态记录 prune 只在同会话新运行结束时触发，删除场景须显式清理）；
+    // 合并队列一并丢弃（目标会话已不存在）
+    for (const [runId, h] of this.subSessionStore) {
       if (h.sessionId !== sessionId) continue
       if (h.status === "running") h.controller.abort(new Error("会话已删除"))
-      this.sessionRunStore.delete(runId)
+      this.subSessionStore.delete(runId)
     }
-    // 分支运行（branch_run）同规则清理；合并队列一并丢弃（目标会话已不存在）
-    for (const [branchId, h] of this.branchRunStore) {
-      if (h.sessionId !== sessionId) continue
-      if (h.status === "running") h.controller.abort(new Error("会话已删除"))
-      this.branchRunStore.delete(branchId)
-    }
-    this.branchMerges.delete(sessionId)
+    this.parentMerges.delete(sessionId)
   }
 
   /** 对本会话可见的子Agent 名集合（装载工具会话可见性，DESIGN「装载工具会话可见性」）：每次取用现算
@@ -616,7 +606,7 @@ export class AgentEngine {
   }
 
   /** 取（或建）会话的 fileGuard：标记/查询本会话已读文件与内容指纹（BOM 无关——read 登记去 BOM 正文、
-   *  write 比对含 BOM 原文，指纹在边界统一归一）。分支运行传入 fork 快照副本（与主线/兄弟分支隔离）。 */
+   *  write 比对含 BOM 原文，指纹在边界统一归一）。子会话继承上下文形态传入 fork 快照副本（与父会话/兄弟子会话隔离）。 */
   private fileGuardFor(tracked: Map<string, string | null>): NonNullable<ToolContext["fileGuard"]> {
     return {
       markRead(absPath: string, content?: string) {
@@ -647,7 +637,7 @@ export class AgentEngine {
     return null
   }
 
-  /** 新会话模式写范围守卫：预加载子Agent 名单静态已知，静态组合各 SubAgentDef.writeGuard。 */
+  /** 子会话预加载模式写范围守卫：预加载子Agent 名单静态已知，静态组合各 SubAgentDef.writeGuard。 */
   private defsWriteGuard(agentNames: string[], env: Record<string, string>): ToolContext["writeGuard"] {
     const guards = agentNames
       .map((n) => this.opts.subAgents.def(n)?.writeGuard)
@@ -772,30 +762,30 @@ export class AgentEngine {
     this.opts.events.publish({ type, sessionId, payload, timestamp: Date.now() })
   }
 
-  /** 在途流式快照累积（attach 用）：delta/reasoning 发布点同步更新（messageId 变化开启新快照）；
+    /** 在途流式快照累积（attach 用）：delta/reasoning 发布点同步更新（messageId 变化开启新快照）；
    *  消息持久化点经 clearStream 清空（已持久化部分由存储恢复）。
-   *  session 标记（新会话执行过程）在主任务快照流式期间不写入——异步后台运行与主任务真正并行
-   *  （同步 agent_run 期间主任务在等工具、不流式，无此交错）：按 messageId 开新快照会互相整体替换，
-   *  attach 恢复可能把后台运行文本渲染进主任务气泡；后台进度已有 event 推送（sessionRunId 路由），
-   *  快照仅为 attach 兜底，主任务流式期间以主任务为准。 */
-  private noteStream(sessionId: string, patch: { messageId?: string; text?: string; reasoning?: string; session?: boolean; sessionRunId?: string }): void {
+   *  subSession 标记（子会话运行过程）在父任务快照流式期间不写入——异步子会话与父任务真正并行
+   *  （同步子会话运行期间父任务在等工具、不流式，无此交错）：按 messageId 开新快照会互相整体替换，
+   *  attach 恢复可能把后台运行文本渲染进父任务气泡；后台进度已有 event 推送（subSessionId 路由），
+   *  快照仅为 attach 兜底，父任务流式期间以父任务为准。 */
+  private noteStream(sessionId: string, patch: { messageId?: string; text?: string; reasoning?: string; subSession?: boolean; subSessionId?: string }): void {
     const task = this.tasks.get(sessionId)
     if (!task) return
-    if (patch.session && task.stream && !task.stream.session) return
+    if (patch.subSession && task.stream && !task.stream.subSession) return
     if (patch.messageId !== undefined && patch.messageId !== task.stream?.messageId) {
-      task.stream = { messageId: patch.messageId, text: "", reasoning: "", session: patch.session, sessionRunId: patch.sessionRunId }
+      task.stream = { messageId: patch.messageId, text: "", reasoning: "", subSession: patch.subSession, subSessionId: patch.subSessionId }
     }
     if (!task.stream) return
     if (patch.text !== undefined) task.stream.text += patch.text
     if (patch.reasoning !== undefined) task.stream.reasoning = patch.reasoning
   }
 
-  /** 在途流式快照清空（消息已持久化，刷新恢复改由存储承担）。sessionRunId 指定时只清属于该运行的
-   *  session 快照（新会话循环轮末用——异步运行不误清正在流式的主任务快照）；缺省无条件清（主循环）。 */
-  private clearStream(sessionId: string, sessionRunId?: string): void {
+  /** 在途流式快照清空（消息已持久化，刷新恢复改由存储承担）。subSessionId 指定时只清属于该运行的
+   *  子会话快照（子会话循环轮末用——异步子会话不误清正在流式的父任务快照）；缺省无条件清（主循环）。 */
+  private clearStream(sessionId: string, subSessionId?: string): void {
     const task = this.tasks.get(sessionId)
     if (!task?.stream) return
-    if (sessionRunId !== undefined && (!task.stream.session || task.stream.sessionRunId !== sessionRunId)) return
+    if (subSessionId !== undefined && (!task.stream.subSession || task.stream.subSessionId !== subSessionId)) return
     task.stream = undefined
   }
 
@@ -842,7 +832,7 @@ export class AgentEngine {
     try {
       const session = await this.opts.store.load(sessionId, user)
       if (!session) throw new Error(`会话不存在: ${sessionId}`)
-      // 会话级子Agent 装载保障（DESIGN「装载 vs 新会话执行」）：新会话按启动预载名单初始化
+      // 会话级子Agent 装载保障（DESIGN「装载 vs 子会话运行」）：新会话按启动预载名单初始化
       // （工具注册 + 提示词 system 消息写入会话记录），恢复历史会话时按会话记录重新注册工具并补齐提示词消息
       await this.ensureSessionAgents(session)
       // 会话级动态工具水合（重启恢复）：js defineTool 注册的定义随 chat.json 落盘，run() 时重建
@@ -966,10 +956,10 @@ export class AgentEngine {
             createdAt: Date.now(),
           }, user)
           this.clearStream(sessionId) // 最终回复已持久化，在途快照清空
-          // 主线进展广播（分支互相感知，DESIGN「会话分支运行与合并」）：异步分支运行中主线每轮最终回复
-          // 通知各分支（同步 fan-out 期间主线阻塞在 branch_run 工具内，无此交错）——分支据此感知主线决策
-          if ([...this.branchRunStore.values()].some((h) => h.sessionId === sessionId && h.status === "running")) {
-            this.relayToBranches(sessionId, undefined, `【主线进展】主线回复:\n${branchNoticeHead(finalText)}`)
+          // 父会话进展广播（互相感知，DESIGN「子会话运行」）：异步子会话运行中父会话每轮最终回复
+          // 通知各子会话（同步 fan-out 期间父会话阻塞在 subsession_run 工具内，无此交错）——子会话据此感知父会话决策
+          if ([...this.subSessionStore.values()].some((h) => h.sessionId === sessionId && h.status === "running")) {
+            this.relayToSubSessions(sessionId, undefined, `【父会话进展】父会话回复:\n${subSessionNoticeHead(finalText)}`)
           }
         }
         if (controller.signal.aborted) break
@@ -1061,9 +1051,9 @@ export class AgentEngine {
       for (const ch of task.choices.values()) clearTimeout(ch.timer)
       this.tasks.delete(sessionId)
       this.taskMods.delete(sessionId)
-      // 分支合并队列冲刷（仅落盘；上下文随任务结束，下次 run 经 loadHistory 进上下文）：置于 tasks.delete
-      // 之后——其后完成的分支经 trunkMerge 判定无任务直接落盘，无入队/漏排空竞态
-      await this.drainBranchMerges(sessionId, user).catch(() => {})
+      // 父会话合并队列冲刷（仅落盘；上下文随任务结束，下次 run 经 loadHistory 进上下文）：置于 tasks.delete
+      // 之后——其后完成的子会话经 mergeToParent 判定无任务直接落盘，无入队/漏排空竞态
+      await this.drainParentMerges(sessionId, user).catch(() => {})
     }
   }
 
@@ -1098,8 +1088,8 @@ export class AgentEngine {
     let idx = 0
     for (const m of msgs) {
       const allowInline = inlineAllowed[idx++]
-      // 子Agent 执行过程消息：仅存档与前端回放，不进入主 LLM 上下文
-      if (m.subAgent || m.session) continue
+      // 子Agent 执行过程消息：仅存档与前端回放，不进入父 LLM 上下文
+      if (m.subAgent || m.subSession) continue
       // 缓存友好前缀（upToIndex 给定时）：只渲染边界内的历史；装载提示词仍全量收集——
       // 它们在全量渲染里统一置于最前，必须进前缀才能与主循环请求保持同前缀
       const inPrefix = upToIndex === undefined || idx - 1 < upToIndex
@@ -1257,7 +1247,7 @@ export class AgentEngine {
    */
   private async ensureSessionAgents(session: SessionData): Promise<void> {
     try {
-      // env：装载提示词需动态拼接预置项目清单（{AGENT}_PROJECTS，与 runNewSession 的 presetNote 一致）
+      // env：装载提示词需动态拼接预置项目清单（{AGENT}_PROJECTS，与 runSubSession 的 presetNote 一致）
       const env = await this.opts.env.resolve(session.id, session.userId)
       const names = session.loadedSubAgents ?? this.opts.config.preloadSubAgents
       const added = await this.loadAgentsForSession(session, names, env)
@@ -1289,8 +1279,8 @@ export class AgentEngine {
         if (session.messages.some((m) => m.loadedAgent === n)) continue // 提示词消息已持久化（恢复场景）
         const def = this.opts.subAgents.def(n)
         if (!def) continue
-        // 预置项目清单动态注入（装载模式闭环：模型按名使用 project 参数；与 runNewSession 的 presetNote 一致）；
-        // 项目根注记与 agent_run 形态（buildAgentSection）对齐——装载模式下相对路径基准仍是会话目录，
+        // 预置项目清单动态注入（装载模式闭环：模型按名使用 project 参数；与 runSubSession 的 presetNote 一致）；
+        // 项目根注记与 subsession_run 形态（buildAgentSection）对齐——装载模式下相对路径基准仍是会话目录，
         // 注记附限定语防误导（不宣称工作目录已切换，访问项目用 project 参数或绝对路径）
         const projectRoot = this.resolveSubAgentProject(session.userId, env, n)
         const workNote = projectRoot
@@ -1348,7 +1338,7 @@ export class AgentEngine {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; branchSync?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null>; multimodal?: boolean },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; subSessionMerge?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null>; multimodal?: boolean; todoScope?: { get: () => Promise<TodoItem[]>; set: (t: TodoItem[]) => Promise<void> }; ownerRunId?: string },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1361,7 +1351,7 @@ export class AgentEngine {
     const projects = opts?.projects ?? []
     // 子进程取消信号：任务取消统一生效（子Agent 不设独立超时，无额外信号源）
     const execSignal = signal
-    // 已读追踪表：缺省按会话（主循环/agent_run 新会话共用会话级表）；分支运行传 fork 快照副本（隔离，防跨流串扰）
+    // 已读追踪表：缺省按会话（主循环/subsession_run 新会话共用会话级表）；子会话运行传 fork 快照副本（隔离，防跨流串扰）
     let sessionReads = this.readFiles.get(sessionId)
     if (!sessionReads) {
       sessionReads = new Map()
@@ -1432,7 +1422,7 @@ export class AgentEngine {
         const { createDiagramRenderer } = await import("../support/diagram-render")
         return createDiagramRenderer().renderPng(code, { format: opts?.format, background: opts?.background, maxWidth: opts?.maxWidth, maxHeight: opts?.maxHeight })
       },
-      // 文件清单基准与路径解析基准一致：绑定项目根（agent_run 新会话 {AGENT}_PROJECT）时列出项目文件树
+      // 文件清单基准与路径解析基准一致：绑定项目根（subsession_run 新会话 {AGENT}_PROJECT）时列出项目文件树
       // （search_symbols 等以 listFiles 为扫描清单的工具随项目根生效）；默认列出会话 tmp 子树
       listFiles: () => (resolveRoot ? walkDirFiles(resolveRoot) : store.listSessionFiles(sessionId, user)),
       listDir: async (p) => {
@@ -1468,15 +1458,19 @@ export class AgentEngine {
       // 启动（同 exec 的 env 脱敏/chcp/进程组语义，输出合并写日志文件）
       shTasks: this.shTaskServiceFor(user, sessionId),
       uploadAttachment: async (ref) => ref.path,
-      publish: (type, payload) => self.publish(sessionId, type, payload),
+      // 事件发布：todo 更新在子会话内附加 subSession 标记——前端不把它当作父会话清单更新（子会话待办卡片
+      // 渲染在其折叠容器内，DESIGN「子会话运行」待办隔离）
+      publish: (type, payload) =>
+        self.publish(sessionId, type, opts?.ownerRunId && type === "event.todo.update" ? { ...payload, subSession: true, subSessionId: opts.ownerRunId } : payload),
       projects,
       resolveProjectPath: (name) => {
         const p = projects.find((x) => x.name === name)
         if (!p) throw new Error(`未知预置项目: ${name}`)
         return p.path
       },
-      getTodos: () => store.getTodos(sessionId, user),
-      setTodos: (todos) => store.setTodos(sessionId, todos, user),
+      // 待办：父会话为会话级清单（随 chat.json 落盘）；子会话为运行内隔离清单（不落盘、不回流、不继承）
+      getTodos: opts?.todoScope ? () => opts.todoScope!.get() : () => store.getTodos(sessionId, user),
+      setTodos: opts?.todoScope ? (todos) => opts.todoScope!.set(todos) : (todos) => store.setTodos(sessionId, todos, user),
       registry: {
         schemas: (enabledOnly = true) => (opts?.registry ?? self.opts.registry).schemas(enabledOnly),
         resolve: (name) => {
@@ -1511,10 +1505,10 @@ export class AgentEngine {
             }
           }
         } else {
-          // 新会话执行形态（临时会话无持久化 SessionData）：仅全局注册工具（共享 run 标记防引用表随每次 agent_run 增长）
-          await self.opts.subAgents.load(String(name), "agent_run").catch(() => {})
+          // 子会话形态（临时上下文无持久化 SessionData）：仅全局注册工具（共享 owner 标记防引用表随每次子会话运行增长）
+          await self.opts.subAgents.load(String(name), "subsession").catch(() => {})
         }
-        // 新会话执行形态的双注册（DESIGN「子Agent 路由」）：ctx 处于 per-run 注册表环境（loadIntoRegistry 注入）时，
+        // 子会话形态的双注册（DESIGN「子Agent 路由」）：ctx 处于 per-run 注册表环境（loadIntoRegistry 注入）时，
         // 工具须同时注册进本次运行注册表——仅注册进全局注册表对新会话循环不可见（reg.resolve 查不上），
         // 模型装载后立即调用会「未知工具」
         if (opts?.loadIntoRegistry) self.registerIntoRegistry(opts.loadIntoRegistry, String(name))
@@ -1523,41 +1517,33 @@ export class AgentEngine {
         // 原因（含 loadErrors 附因）；已装载（幂等重装）视为成功不抛
         if (!self.opts.subAgents.isLoaded(String(name))) throw new Error(self.opts.subAgents.unknownAgentError(String(name)))
       },
-      // 执行新会话（agent_run 工具）：派生临时新会话、预加载子Agent 列表后执行任务（DESIGN「装载 vs 新会话执行」）；
-      // inheritGlobalTools（默认 true）= 全局工具一并注册进新会话；inheritGlobalPrompt（默认 true）= 总Agent
-      // 全局提示词注入新会话；深度 +1 限制递归嵌套
-      runNewSession: (agents, input, opts) => self.runNewSession(sessionId, user, env, agents, input, signal, depth + 1, opts),
-      // agent_run 异步后台运行服务（agent_run async:true 启动、bg_task 查询/等待/终止；DESIGN「新会话执行的异步运行」）：
-      // 句柄存引擎级共享表，本实例为按会话过滤视图；父任务取消信号传播进后台运行（用户停止连带终止）
-      sessionRuns: new SessionRunRegistry({
-        sessionId,
-        store: self.sessionRunStore,
-        parentSignal: signal,
-        // 异步启动校验前置热加载重扫（与 runNewSession 同规则）：新写/新修的子Agent 文件即时可见
-        validate: async (agents) => {
-          await self.opts.subAgents.refreshIfChanged().catch(() => {})
-          return self.normalizeRunAgents(agents, depth + 1)
-        },
-        runner: (agents, input, runSignal, runOpts) => self.runNewSession(sessionId, user, env, agents, input, runSignal, depth + 1, runOpts),
-      }),
-      // 会话分支运行服务（branch_run 工具，DESIGN「会话分支运行与合并」）：仅主循环（depth 0）注入——
-      // 分支内/新会话执行内不可再分支（防递归扇出爆炸，分支是主上下文派生语义）。fork 源绑定本上下文
-      // live messages（分支 fork 主线当前上下文快照，start 同步切片）；分支完成经 onDone 走引擎合并
-      // 队列自动合入主上下文。
-      branchRuns: depth === 0 && opts?.messages
-        ? new BranchRunRegistry({
+      // 子会话运行服务（subsession_run 工具，DESIGN「子会话运行」）：一套注册表覆盖「执行新会话」（隔离
+      // 上下文）与「并行分支」（继承上下文）两种形态；本视图绑定当前上下文（live messages 为 fork 源、当前
+      // 工具面为 fork 工具面快照、当前深度为嵌套基准），子会话内可再派生子会话（进程树，深度上限 SUBAGENT_DEPTH）。
+      // 句柄存引擎级共享表，本实例为按视角过滤的薄视图；父任务取消信号沿进程树下传（用户停止连带终止）。
+      subSessions: opts?.messages
+        ? new SubSessionRegistry({
             sessionId,
-            store: self.branchRunStore,
-            runner: (spec, branchSignal, forkMessages) => self.runBranch(sessionId, user, env, spec, branchSignal, forkMessages),
+            store: self.subSessionStore,
             forkSource: opts.messages,
             parentSignal: signal,
-            onDone: (handle) => self.trunkMerge(sessionId, user, env, handle, { final: true, content: handle.output ?? "" }),
+            depth,
+            ...(opts.ownerRunId ? { ownerRunId: opts.ownerRunId } : {}),
+            // 启动校验前置热加载重扫（与 runSubSession 同规则）：新写/新修的子Agent 文件即时可见
+            validate: async (spec) => {
+              await self.opts.subAgents.refreshIfChanged().catch(() => {})
+              return self.normalizeRunAgents(spec.agents, depth + 1)
+            },
+            runner: (spec, runSignal, forkMessages) => self.runSubSession(sessionId, user, env, spec, runSignal, forkMessages, opts.registry ?? self.opts.registry),
+            // 报告合入父会话：继承上下文形态（fork）经此回调入合并队列/落盘（异步子会话晚于父任务结束时直接落盘）；
+            // 隔离形态不经此路径（结果由工具返回值 / bg_task 交付）
+            onDone: (handle) => self.mergeToParent(sessionId, user, env, handle, { final: true, content: handle.output ?? "" }),
           })
         : undefined,
-      // 分支与主干双向同步（branch_sync 工具，DESIGN「会话分支运行与合并」互相感知）：仅分支运行上下文
-      // 注入（runBranch 绑定分支身份回调——传 content 先合入再统一返回主干增量）；主会话/新会话执行未注入
-      branchSync: opts?.branchSync,
-      // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；新会话执行 → 本次运行注册表（随运行结束释放）。
+      // 子会话与父会话双向同步（subsession_merge 工具，DESIGN「子会话运行」互相感知）：仅异步子会话运行上下文
+      // 注入（runSubSession 绑定运行身份回调——传 content 先合入再统一返回父会话增量）；其余上下文未注入
+      subSessionMerge: opts?.subSessionMerge,
+      // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；子会话运行 → 本次运行注册表（随运行结束释放）。
       // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
       defineDynamicTool: opts?.registerDynamic,
       waitForChoice: (prompt, options, multi, plan) => self.waitForChoice(sessionId, prompt, options, multi, execSignal, plan),
@@ -1619,7 +1605,7 @@ export class AgentEngine {
         if (!reg.resolve("agent_list")) {
           reg.register(agentListTool)
           reg.register(agentLoadTool)
-          reg.register(agentRunTool)
+          reg.register(subSessionRunTool)
         }
         continue
       }
@@ -1630,7 +1616,7 @@ export class AgentEngine {
 
 
   /** 新会话循环内的装载（路由自愈）：注册进本次运行注册表 + 提示词段落插入临时 messages 系统前置段 +
-   *  预置项目并入 ctx.projects 引用数组——不写全局注册表、不落盘父会话记录（新会话执行隔离语义）。 */
+   *  预置项目并入 ctx.projects 引用数组——不写全局注册表、不落盘父会话记录（子会话运行隔离语义）。 */
   private async loadAgentIntoRun(
     reg: ToolRegistry,
     agent: string,
@@ -2090,13 +2076,13 @@ export class AgentEngine {
             // 兜底截断（不依赖工具自觉）：工具未自行截断的超长输出统一截断落盘，防上下文爆炸；
             // 结构化 data 与存档扩展字段原样保留（截断只作用于模型可见文本）
             const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun, images: result.images }
+              ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, subSessionArchive: result.subSessionArchive, images: result.images }
               : result
             // 多模态工具结果图片（read 等读取的图片）：主模型多模态时内联进 tool 消息；轻量引用
             // （path/display/mime，不含 base64）随消息落盘，loadHistory 历史重建按引用重读内联
             const imageBlocks = provider.capabilities().multimodal && safe.images?.length ? await this.toolImageBlocks(safe.images) : []
             const imageRefs = safe.images?.length ? { images: safe.images.map(({ path, display, mime }) => ({ path, ...(display ? { display } : {}), mime })) } : {}
-            await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, sessionRun: safe.sessionRun, ...imageRefs }, imageBlocks)
+            await persistTool(tc, autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入当前工具集、提示词已注入上下文）\n${safe.output}` : safe.output, { blocks: safe.blocks, arguments: tc.arguments, subSessionArchive: safe.subSessionArchive, ...imageRefs }, imageBlocks)
             this.publish(sessionId, "event.tool.result", {
               name: tc.name,
               toolCallId: tc.id,
@@ -2116,9 +2102,9 @@ export class AgentEngine {
         await fillMissingToolResults("任务中断：该工具调用未执行完成。")
         throw err
       }
-      // 分支合并排空（DESIGN「会话分支运行与合并」）：本轮工具结果落盘后追加已完成分支的报告——
-      // 位于 tool 消息之后（tool_calls 配对完整），主线下轮模型调用即见合并内容
-      await this.drainBranchMerges(sessionId, user, persist, messages)
+              // 父会话合并排空（DESIGN「子会话运行」）：本轮工具结果落盘后追加已完成子会话的报告——
+        // 位于 tool 消息之后（tool_calls 配对完整），父会话下轮模型调用即见合并内容
+        await this.drainParentMerges(sessionId, user, persist, messages)
       rounds++
       if (stopped) break
     }
@@ -2236,9 +2222,9 @@ export class AgentEngine {
     }
   }
 
-  /** agent_run 预加载清单校验与规范化：去重、依赖级联展开（cascade：依赖在前，与装载模式
+  /** subsession_run 预加载清单校验与规范化：去重、依赖级联展开（cascade：依赖在前，与装载模式
    *  SubAgentManager.load 的依赖自动装载同规则——reverse_site 连带 playwright、self_optimize 连带 code 等）、
-   *  数量与深度上限、未知名检查。同步（runNewSession）与异步（SessionRunRegistry.start）启动共用——
+   *  数量与深度上限、未知名检查。同步（runSubSession）与异步（SubSessionRegistry.start）启动共用——
    *  异步启动在登记句柄前同步校验，未知名等错误立即抛给模型。 */
   private normalizeRunAgents(agents: string[], depth: number): string[] {
     const requested = [...new Set(agents)]
@@ -2256,302 +2242,301 @@ export class AgentEngine {
     return out
   }
 
-  /** 新会话执行（agent_run 工具）：派生临时新会话，预加载指定子Agent 列表（完整系统提示词拼接+工具并入，
-   *  模块语义的「装载」在独立上下文生效）后执行任务，返回最终结果与完整存档（DESIGN「装载 vs 新会话执行」）。
-   *  inheritGlobalTools（默认 true）：全局工具一并注册进新会话——与主会话同构的完整工具面（文件读写查询
-   *  统一用全局工具，子Agent 只带独有能力）；关闭时仅预加载子Agent 工具 + 内建编排（tool_schemas/js）。
-   *  inheritGlobalPrompt（默认 true）：总Agent 全局系统提示词（buildSystemPrompt——身份/行为约定/编排指引）
-   *  作为新会话系统提示词前缀注入——与全局工具继承默认一致，新会话与主会话同构；关闭时仅子Agent 提示词
-   *  （上下文最省）。提示词中的路径/工具可用性描述以新会话实际为准（附注说明）。
-   *  onArchive：存档创建即回调（异步运行 registry 持活引用推导进度；同步路径不传）。 */
-  private async runNewSession(
+  /** 子会话运行（subsession_run 工具，DESIGN「子会话运行」）：一套父子会话模型统一两种形态——
+   *  **隔离上下文**（inheritContext=false，exec 语义）：全新消息历史（子Agent 完整系统提示词 + 全局提示词），
+   *  工具面 = 全局工具（inheritGlobalTools）+ 各子Agent 独有工具（{agent}_ 命名空间）+ 内建编排；
+   *  预加载名单为空时即「通用子会话」（全局工具 + 编排，无子Agent）。结果经返回值/bg_task 交付（隔离不破坏）。
+   *  **继承上下文**（inheritContext=true，fork 语义）：父上下文消息历史快照 + 父系统提示词（+子会话附注）+
+   *  父工具面快照（调用方注册表视图；子会话内装载子Agent 只进本子会话）；报告完成后经注册表 onDone 合入父会话。
+   *  两种形态共通：运行内待办隔离清单、异步注入 subsession_merge（同步不注入）、事件带 subSession 标记。 */
+  private async runSubSession(
     sessionId: string,
     user: string,
     env: Record<string, string>,
-    agents: string[],
-    input: string,
-    signal: AbortSignal,
-    depth = 0,
-    opts: { inheritGlobalTools?: boolean; inheritGlobalPrompt?: boolean; onArchive?: (archive: SessionRunArchive) => void } = {},
-  ): Promise<{ output: string; archive: SessionRunArchive }> {
-    // 前置热加载重扫（与 load() 同规则）：self_optimize 刚写完/修好子Agent 文件即 agent_run——
-    // 校验（normalizeRunAgents）只读当前注册表，不重扫会以旧缓存误报「未知子Agent」（无加载失败附言）
-    // 或沿用修复前的旧定义
-    await this.opts.subAgents.refreshIfChanged().catch(() => {})
-    agents = this.normalizeRunAgents(agents, depth)
-    const defs = agents.map((name) => this.opts.subAgents.def(name)!)
-    const inheritGlobals = opts.inheritGlobalTools !== false
-    // 新会话工具注册：每个预加载子Agent 的独有工具以 {agent}_ 命名空间并入（装载语义）；
-    // 安全模式与主注册表同规则（Tool.safeMode 自主声明过滤，引擎构造期常量）
-    const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
-    let orchestrationInjected = false
-    for (const def of defs) {
-      reg.registerSubAgentTools(def.name, def.tools ?? {}, def.requiresApproval)
-      // 简化定义（无工具，含纯 md 定义）：注入编排工具（原名暴露，无 {agent}_ 前缀，多 Agent 时仅注入一次）
-      // ——支持组合式子 Agent 通过 agent_run/bg_task/agent_list/agent_load 编排其他子 Agent
-      if (!def.tools || Object.keys(def.tools).length === 0) {
-        if (!orchestrationInjected) {
-          reg.register(agentListTool)
-          reg.register(agentLoadTool)
-          reg.register(agentRunTool)
-          reg.register(bgTaskTool)
-          orchestrationInjected = true
-        }
-      }
-    }
-    // 编排能力（与总Agent 主循环一致）：新会话内同样可用 tool_schemas 批量查询工具输出结构、
-    // js 脚本动态编程（直接调用工具 + 会话上下文注入）——构建期排除清单（GEBAI_BUILD_EXCLUDE_TOOLS）同规则生效
-    if (!isGlobalToolExcluded("tool_schemas")) reg.register(toolSchemasTool)
-    if (!isGlobalToolExcluded("js")) reg.register(jsTool)
-    // 全局工具继承（默认开启，DESIGN「新会话执行的上下文隔离」）：read/write/grep/sh 等全局工具（含
-    // project 参数路由）一并注册——子Agent 不再重复定义文件工具，新会话与主会话工具面同构；
-    // 已注册的名字跳过（子Agent 独有工具的 {agent}_ 前缀名与全局名不冲突，防御性去重）
-    if (inheritGlobals) {
-      for (const tool of Object.values(createGlobalTools())) {
-        if (reg.resolve(tool.name)) continue
-        reg.register(tool)
-      }
-      // 视觉能力不在全局工具表（全局 vision 工具已移除，统一经 vision 子代理）：需要视觉的预加载名单
-      // 经 dependencies 声明连带装载（如 self_optimize→vision），未声明的子Agent 新会话确需视觉时
-      // 由模型经 agent_load 装载 vision（主会话路由自愈同款机制）
-    }
-
-    // 系统提示词：各预加载子Agent 的完整系统提示词拼接 + 各自的项目注记（项目内置/预置项目/受限模式/AGENTS.md）；
-    // 每个子Agent 前加职责分隔头（名称 + 能力描述），明确各段提示词对应的工具命名空间与职责域，多 Agent 预加载时不混淆
-    const systemParts: string[] = []
-    const mergedPresets: PresetProject[] = []
-    const seen = new Set<string>()
-    let baseProjectRoot: string | undefined
-    for (const def of defs) {
-      // 项目内置（特定项目绑定）：会话环境变量 {AGENT_NAME_UPPER}_PROJECT（如 CODE_PROJECT）指定子Agent 的项目根
-      // —— 工作目录与路径解析以项目根为基准，系统提示词注入项目路径
-      baseProjectRoot ??= this.resolveSubAgentProject(user, env, def.name)
-      systemParts.push(await this.buildAgentSection(def, user, env, sessionId))
-      // 预置项目全量合并（同名去重）：多 Agent 预加载时 project 参数路由均可用
-      for (const p of this.presetProjectsFor(user, env, def.name)) {
-        if (!seen.has(p.name)) {
-          seen.add(p.name)
-          mergedPresets.push(p)
-        }
-      }
-    }
-    const safeNote = this.opts.config.safeMode
-      ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用；部分子Agent 风险工具未注册。`
-      : ""
-    const globalsNote = inheritGlobals
-      ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/sh/py/fetch_url/todo/ask/agent_run 等，与主会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
-      : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（tool_schemas/js）。`
-    // 全局提示词注入（默认开启，与 inherit_global_tools 默认一致）：总Agent 主系统提示词作为前缀（单源复用
-    // buildSystemPrompt，不复刻）；其中路径基准/工具清单等环境描述以本新会话实际为准，附注消歧
-    const inheritGlobalPrompt = opts.inheritGlobalPrompt !== false
-    const globalPromptPart = inheritGlobalPrompt
-      ? `以下为总Agent 全局系统提示词（主会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
-      : ""
-    // 编排指引（js 优先）防重复注入：注入全局提示词时其编排段已含同款内容，开场白不再复述；
-    // 仅 inherit_global_prompt=false（新会话无 buildSystemPrompt）时保留兜底版
-    const orchestrationNote = inheritGlobalPrompt
-      ? ""
-      : "可预判的多步固定流程优先用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，可用 tool_schemas 批量查询工具输出结构，语法详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。"
-    const messages: MessageLike[] = [
-      {
-        role: "system",
-        content: `你正在一个临时新会话中执行任务（与主会话隔离，执行过程不进入主上下文）。已预加载子Agent: ${agents.join(", ")}，其完整系统提示词如下。\n${globalsNote}${orchestrationNote ? `\n${orchestrationNote}` : ""}${safeNote}\n\n${globalPromptPart}${systemParts.join("\n\n")}`,
-      },
-      { role: "user", content: input },
-    ]
-
-    // 不设超时：执行过程新会话回复实时推送到前端（进度可见），无进度空转问题已由可见性解决；
-    // 中止仅依赖父任务取消信号（用户停止/任务取消传播），工具级超时兜底（TOOL_TIMEOUT_MS）仍在
-    const runId = crypto.randomUUID()
-    // 新会话 run 完整存档（DESIGN「新会话执行存档」）：执行过程全部内容收集进 archive，
-    // 由 agent_run 工具作为调用记录的扩展字段落盘（不逐条写会话消息）——仅存档与前端回放，
-    // loadHistory 不受影响（不进入主 LLM 上下文）
-    const archive: SessionRunArchive = { runId, agents, input, output: "", messages: [{ role: "user", content: input }] }
-    // 存档创建即回调（异步运行 registry 持活引用，进度快照随执行实时推导；同步路径不传）
-    opts.onArchive?.(archive)
-    this.publish(sessionId, "event.session.start", { runId, agents, input, depth, sessionId })
-    try {
-      const output = await this.runNewSessionLoop(sessionId, user, env, agents, input, messages, reg, signal, depth, archive, { workdir: baseProjectRoot ?? undefined, resolveBase: baseProjectRoot, projects: mergedPresets })
-      archive.output = output
-      return { output, archive }
-    } catch (err) {
-      // 异常/取消收尾：推送 done 事件让前端折叠容器（存档不落盘，失败过程不回放）
-      this.publish(sessionId, "event.session.done", { runId, agents, output: "", error: String((err as Error).message || err), sessionId })
-      throw err
-    }
-  }
-
-  /**
-   * 分支运行（branch_run 工具，DESIGN「会话分支运行与合并」）：从主会话**当前上下文** fork 派生分支——
-   * 同一系统提示词（+分支附注）、同一消息历史（fork 快照）、同一工具面（会话注册表视图快照，含已装载
-   * 子Agent 与动态工具），独立 LLM 循环并行执行（复用 runNewSessionLoop：审批/重复检测/存档/流式推送同构）。
-   * spec.model 命中模型路由（resolveModelProvider，GEBAI_LLM_ROUTES 多路接口）时走独立 Provider——
-   * 多分支多端点并行，摆脱单轮串行的模型服务速度限制。完成后报告经注册表 onDone（trunkMerge 最终合并）
-   * 自动合入主上下文；本方法只负责执行与存档。
-   */
-  private async runBranch(
-    sessionId: string,
-    user: string,
-    env: Record<string, string>,
-    spec: BranchSpec & { branchId: string },
+    spec: SubSessionSpec & { runId: string; depth: number },
     signal: AbortSignal,
     forkMessages: MessageLike[],
-  ): Promise<{ output: string; archive: SessionRunArchive }> {
-    // 工具面快照：主会话当前注册表视图逐项注册进本次分支注册表（分支内装载子Agent 只进本分支——
-    // loadAgentIntoRun 隔离语义，不写主会话记录/全局注册表；禁用态工具不进快照）；
-    // 另注册 branch_sync（分支与主干双向同步的唯一工具，DESIGN「会话分支运行与合并」互相感知）——仅分支上下文可见
-    const view = this.sessionRegistry(sessionId)
-    const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
-    for (const s of view.schemas(false)) {
-      const rt = view.resolve(s.name)
-      if (rt && rt.enabled !== false) reg.register(rt.tool, (rt as { agent?: string }).agent)
+    host: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">,
+  ): Promise<{ output: string; archive: SubSessionArchive }> {
+    const archive: SubSessionArchive = {
+      runId: spec.runId,
+      agents: spec.agents,
+      input: spec.input,
+      output: "",
+      messages: [{ role: "user", content: spec.input }],
+      subsession: { name: spec.name, ...(spec.model ? { model: spec.model } : {}) },
     }
-    reg.register(branchSyncTool)
-    // 已读追踪 fork 快照（防误覆盖/防陈旧覆盖的分支隔离）：拷贝 fork 点会话级已读表——分支已读基线 =
-    // fork 时主线可见内容；此后主线/兄弟分支的读写互不串扰（跨流盲写/陈旧覆盖由指纹漂移拦截，
-    // fork 后他人读过的文件不视为本分支已读）。须在任何 await 前拷贝（fork 点同步语义）
-    const branchReads = new Map(this.readFiles.get(sessionId) ?? [])
-    // fork 点主干水位（branch_sync 增量基准）：以存储消息数为准——runLoop 边落盘边推进，
-    // 此刻存储尾部即 fork 快照的持久化等价（在途 tool 结果尚未落盘，不属主干可见内容）。首个 await 后
-    // 句柄必已登记（registry.start 在启动 runner 后同步 store.set）
-    const forkSession = await this.opts.store.load(sessionId, user)
-    const forkHandle = this.branchRunStore.get(spec.branchId)
-    if (forkHandle) forkHandle.forkAt = forkSession?.messages.length ?? 0
-    // fork 快照补齐：主线在 branch_run 工具调用内派生——快照尾部带尚未应答的 assistant(toolCalls)
-    // （本轮工具批处理进行中）。严格校验的接口（tool_calls 后必须紧跟 tool 响应）会 400，
-    // 为悬空 toolCall 合成占位结果（紧随已有 tool 结果之后，配对完整）
-    const fork = [...forkMessages]
-    const lastToolCalls = [...fork].reverse().find((m) => m.role === "assistant" && m.toolCalls?.length)
-    if (lastToolCalls?.toolCalls?.length) {
-      const answered = new Set(fork.filter((m) => m.role === "tool").map((m) => m.toolCallId))
-      for (const tc of lastToolCalls.toolCalls) {
-        if (!answered.has(tc.id)) fork.push({ role: "tool", content: "（主线已派生并行分支，该工具调用结果不在本分支上下文中）", toolCallId: tc.id, name: tc.name })
+    // 本次运行私有工具注册表（子会话内装载子Agent 只进本子会话，不写父会话记录/全局注册表）；安全模式同规则
+    const reg = new BaseToolRegistry({ safeMode: this.opts.config.safeMode })
+    // 运行内待办清单（隔离，DESIGN「子会话运行」待办隔离）：子会话的 todo 工具读写本清单——
+    // 不落盘、不回流父会话、不继承父会话待办；随运行结束释放
+    const todos: TodoItem[] = []
+    const todoScope = {
+      get: async () => [...todos],
+      set: async (next: TodoItem[]) => {
+        todos.splice(0, todos.length, ...next)
+      },
+    }
+    const defs = spec.agents.map((name) => this.opts.subAgents.def(name)!)
+    // 预加载子Agent 的提示词段（每个子Agent 前加职责分隔头；继承形态追加在父系统提示词之后）
+    const sections: string[] = []
+    for (const def of defs) sections.push(await this.buildAgentSection(def, user, env, sessionId))
+    let messages: MessageLike[]
+    let ctxOpts: {
+      workdir?: string
+      resolveBase?: string
+      projects?: PresetProject[]
+      provider?: LLMProvider
+      subSession: { name: string; model?: string }
+      drainInbox?: () => string[]
+      subSessionMergeApply?: (content?: string) => Promise<string>
+      fileGuardMap?: Map<string, string | null>
+      todoScope?: { get: () => Promise<TodoItem[]>; set: (t: TodoItem[]) => Promise<void> }
+    }
+    const modelNote = spec.model ? `，模型路由 ${spec.model}` : ""
+    if (spec.inheritContext) {
+      // ── fork：父上下文（消息历史 + 系统提示词 + 工具面）────────────────────────────────────
+      // 工具面快照：父上下文注册表视图逐项注册（含已装载子Agent 与动态工具；禁用态工具不进快照）
+      for (const s of host.schemas(false)) {
+        const rt = host.resolve(s.name)
+        if (rt && rt.enabled !== false) reg.register(rt.tool, rt.agent)
+      }
+      // 追加预加载子Agent（可选）：独有工具并入本子会话工具面（{agent}_ 命名空间；与父已装载者重名幂等跳过）
+      for (const def of defs) {
+        if (reg.getAgentNames().includes(def.name)) continue
+        reg.registerSubAgentTools(def.name, def.tools ?? {}, def.requiresApproval)
+      }
+      // fork 快照补齐：父会话在 subsession_run 工具调用内派生子会话——快照尾部带尚未应答的
+      // assistant(toolCalls)（本轮工具批处理进行中）。严格校验的接口（tool_calls 后必须紧跟 tool 响应）会 400，
+      // 为悬空 toolCall 合成占位结果（紧随已有 tool 结果之后，配对完整）
+      const fork = [...forkMessages]
+      const lastToolCalls = [...fork].reverse().find((m) => m.role === "assistant" && m.toolCalls?.length)
+      if (lastToolCalls?.toolCalls?.length) {
+        const answered = new Set(fork.filter((m) => m.role === "tool").map((m) => m.toolCallId))
+        for (const tc of lastToolCalls.toolCalls) {
+          if (!answered.has(tc.id)) fork.push({ role: "tool", content: "（父会话已派生子会话，该工具调用结果不在本子会话上下文中）", toolCallId: tc.id, name: tc.name })
+        }
+      }
+      // 系统提示词：父上下文同一系统提示词（fork 快照首条 system 消息，单源复用）+ 子会话附注 + 预加载子Agent 提示词段
+      const addendum = `\n\n【并行子会话】你是父会话当前上下文派生的子会话「${spec.name}」${modelNote}，与其他子会话、父会话同时执行。请专注完成本子会话任务，可使用全部工具；其他子会话可能并行修改同一文件，写入前先读取最新内容。子会话内不要向用户提问（ask 类交互不适用子会话），需审批的工具照常走审批。${
+        spec.async
+          ? `协作感知（subsession_merge，双向）：传 content 即交出阶段性成果（立即合入父会话并广播其他子会话，本子会话继续执行，可多次）；不传即拉取父会话完整增量（父会话输入/回复、其他子会话合入全文）；两种用法都返回父会话新进展——合入通知（【子会话感知】/【父会话进展】）只是摘要，需要完整内容时就调 subsession_merge。`
+          : `本子会话为同步运行（父会话正在等待结果）：阶段性发现直接写入最终报告即可，运行完成时报告自动合入父会话。`
+      }收到进展后据此调整分工，避免重复工作或冲突。完成后直接输出最终报告（结论/产物/关键发现），报告将合入父会话——不要输出与子会话任务无关的内容。`
+      const sysContent = (typeof fork[0]?.content === "string" ? fork[0].content : this.buildSystemPrompt(sessionId, user, env)) + addendum
+      messages = [{ role: "system", content: `${sysContent}${sections.length ? `\n\n${sections.join("\n\n")}` : ""}` }, ...fork.slice(1), { role: "user", content: spec.input }]
+      // 已读追踪 fork 快照（防误覆盖/防陈旧覆盖的子会话隔离）：拷贝 fork 点父会话已读表——此后父会话/
+      // 兄弟子会话的读写互不串扰（fork 后他人读过的文件不视为本子会话已读）
+      const forkReads = new Map(this.readFiles.get(sessionId) ?? [])
+      ctxOpts = {
+        projects: this.allPresetProjects(user, env),
+        subSession: archive.subsession!,
+        fileGuardMap: forkReads,
+        todoScope,
+      }
+    } else {
+      // ── exec：隔离新上下文（子Agent 提示词 + 全局工具/全局提示词）──────────────────────────
+      const inheritGlobals = spec.inheritGlobalTools !== false
+      let orchestrationInjected = false
+      for (const def of defs) {
+        reg.registerSubAgentTools(def.name, def.tools ?? {}, def.requiresApproval)
+        // 简化定义（无工具，含纯 md 定义）或未加载子Agent：注入编排工具（原名暴露，无 {agent}_ 前缀，仅注入一次）
+        // ——支持组合式子 Agent 与通用子会话通过 agent_load/agent_list/subsession_run/bg_task 编排其他子会话
+        if (!def.tools || Object.keys(def.tools).length === 0) {
+          if (!orchestrationInjected) {
+            reg.register(agentListTool)
+            reg.register(agentLoadTool)
+            reg.register(subSessionRunTool)
+            reg.register(bgTaskTool)
+            orchestrationInjected = true
+          }
+        }
+      }
+      if (!defs.length && !orchestrationInjected) {
+        reg.register(agentListTool)
+        reg.register(agentLoadTool)
+        reg.register(subSessionRunTool)
+        reg.register(bgTaskTool)
+        orchestrationInjected = true
+      }
+      // 编排能力（与父会话主循环一致）：tool_schemas 批量查询工具输出结构、js 脚本动态编程
+      // （构建期排除清单 GEBAI_BUILD_EXCLUDE_TOOLS 同规则生效）
+      if (!isGlobalToolExcluded("tool_schemas")) reg.register(toolSchemasTool)
+      if (!isGlobalToolExcluded("js")) reg.register(jsTool)
+      // 全局工具继承（默认开启，DESIGN「子会话运行的上下文隔离」）：read/write/grep/sh 等全局工具（含
+      // project 参数路由）一并注册——子会话与父会话工具面同构；已注册的名字跳过（{agent}_ 前缀名不冲突）
+      if (inheritGlobals) {
+        for (const tool of Object.values(createGlobalTools())) {
+          if (reg.resolve(tool.name)) continue
+          reg.register(tool)
+        }
+      }
+      // 项目绑定（隔离形态）：{AGENT_NAME_UPPER}_PROJECT 指定子Agent 的项目根——工作目录与路径解析以项目根为基准
+      let baseProjectRoot: string | undefined
+      const mergedPresets: PresetProject[] = []
+      const seen = new Set<string>()
+      for (const def of defs) {
+        baseProjectRoot ??= this.resolveSubAgentProject(user, env, def.name)
+        for (const p of this.presetProjectsFor(user, env, def.name)) {
+          if (!seen.has(p.name)) {
+            seen.add(p.name)
+            mergedPresets.push(p)
+          }
+        }
+      }
+      const safeNote = this.opts.config.safeMode
+        ? `\n安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；定时任务调度（cron_*）不可用；部分子Agent 风险工具未注册。`
+        : ""
+      const globalsNote = inheritGlobals
+        ? `全局工具已继承进本会话（read/write/edit/patch/ls/grep/glob/file/sh/py/fetch_url/todo/ask 等，与父会话同名同参——文件工具可用 project 参数路由项目，未传时相对路径以${baseProjectRoot ? "项目根" : "会话工作目录"}为基准）；预加载子Agent 只提供独有工具（以 {agent}_ 前缀调用）。`
+        : `本会话未继承全局工具（inherit_global_tools=false）：仅预加载子Agent 的工具（以 {agent}_ 前缀调用）与内建编排（tool_schemas/js）。`
+      const globalPromptPart = spec.inheritGlobalPrompt !== false
+        ? `以下为总Agent 全局系统提示词（父会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
+        : ""
+      // 编排指引（js 优先）防重复注入：注入全局提示词时其编排段已含同款内容，开场白不再复述
+      const orchestrationNote =
+        spec.inheritGlobalPrompt !== false
+          ? ""
+          : "可预判的多步固定流程优先用 js 脚本动态编程一次执行（脚本内工具像内置函数一样直接 await read(params) 调用、ctx 注入会话上下文，可用 tool_schemas 批量查询工具输出结构，语法详见 js 工具描述）；纯系统操作也可编写脚本（sh/py）一次执行——避免大量单步工具调用浪费往返与词元。"
+      messages = [
+        {
+          role: "system",
+          content: `你正在一个子会话中执行任务（与父会话隔离，执行过程不进入父会话上下文；运行结束其结果交付父会话）。子会话「${spec.name}」${modelNote}${spec.agents.length ? `，已预加载子Agent: ${spec.agents.join(", ")}，其完整系统提示词如下` : "，未预加载子Agent"}。\n${globalsNote}${orchestrationNote ? `\n${orchestrationNote}` : ""}${safeNote}\n\n${globalPromptPart}${sections.join("\n\n")}`,
+        },
+        { role: "user", content: spec.input },
+      ]
+      ctxOpts = {
+        workdir: baseProjectRoot ?? undefined,
+        resolveBase: baseProjectRoot,
+        projects: mergedPresets,
+        subSession: archive.subsession!,
+        todoScope,
       }
     }
-    // 分支系统提示词：主会话同一系统提示词（单源复用 buildSystemPrompt）+ 分支附注（并行职责/并发写提醒/
-    // 双向同步与互相感知——branch_sync 交出阶段性成果/拉取主干增量，主干与其他分支的进展以通知注入本上下文）
-    const modelNote = spec.model ? `，模型路由 ${spec.model}` : ""
-    const branchAddendum = `\n\n【并行分支运行】你是主会话当前上下文派生的并行分支「${spec.name}」${modelNote}，与其他分支、主线同时执行。请专注完成本分支任务，可使用全部工具；其他分支可能并行修改同一文件，写入前先读取最新内容。分支内不要向用户提问（ask 类交互不适用分支），需审批的工具照常走审批。协作感知（唯一工具 branch_sync，双向）：传 content 即交出阶段性成果（立即合入主干并广播其他分支，本分支继续执行，可多次）；不传即拉取主干完整增量（主线输入/回复、其他分支合入全文）；两种用法都返回主干新进展——合入通知（【分支感知】/【主线进展】）只是摘要，需要完整内容时就调 branch_sync；收到进展后据此调整分工，避免重复工作或冲突。完成后直接输出最终报告（结论/产物/关键发现），报告将合并回主会话主线——不要输出与分支任务无关的内容。`
-    const messages: MessageLike[] = [
-      { role: "system", content: `${this.buildSystemPrompt(sessionId, user, env)}${branchAddendum}` },
-      ...fork.slice(1),
-      { role: "user", content: spec.prompt },
-    ]
-    // 模型路由（多路接口）：spec.model 命中路由走独立 Provider（resolveModelProvider 未注入/未命中回落任务级）
+    // fork 点父会话水位（subsession_merge 增量拉取基准）：此刻存储尾部即 fork 快照的持久化等价
+    // （父会话阻塞/并发推进均以本次快照为界，增量只含此后的新消息）
+    if (spec.inheritContext) {
+      const forkSession = await this.opts.store.load(sessionId, user)
+      const forkHandle = this.subSessionStore.get(spec.runId)
+      if (forkHandle) forkHandle.forkAt = forkSession?.messages.length ?? 0
+    }
+    // 模型路由（多路接口）：spec.model 命中路由走独立 Provider（未注入/未命中回落任务级）
     const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
     const provider = spec.model ? (this.opts.resolveModelProvider?.(env, spec.model) ?? taskProvider) : taskProvider
-    // 分支存档（SessionRunArchive，branch 字段标识；runId = branchId——事件路由/存档关联/bg_task 一致）
-    const archive: SessionRunArchive = {
-      runId: spec.branchId,
-      agents: [],
-      input: spec.prompt,
-      output: "",
-      messages: [{ role: "user", content: spec.prompt }],
-      branch: { name: spec.name, ...(spec.model ? { model: spec.model } : {}) },
-    }
-    this.publish(sessionId, "event.session.start", { runId: spec.branchId, agents: [], input: spec.prompt, depth: 1, branch: spec.name, ...(spec.model ? { model: spec.model } : {}), sessionId })
+    // 异步运行注入合并工具（subsession_merge，DESIGN「子会话运行」）：同步运行不注入——父会话正阻塞等待，
+    // 阶段性合入既无收益又与最终交付重复（要求：同步不注入合并工具）
+    const subSessionMergeApply = spec.async
+      ? async (content?: string) => {
+          if (content !== undefined) {
+            const h = this.subSessionStore.get(spec.runId)
+            if (h) await this.mergeToParent(sessionId, user, env, h, { final: false, content })
+          }
+          return await this.parentSnapshot(sessionId, user, spec.runId)
+        }
+      : undefined
+    if (spec.async) reg.register(subSessionMergeTool)
+    this.publish(sessionId, "event.subsession.start", { runId: spec.runId, agents: spec.agents, input: spec.input, depth: spec.depth, subsession: spec.name, ...(spec.model ? { model: spec.model } : {}), sessionId })
     try {
-      const output = await this.runNewSessionLoop(sessionId, user, env, [], spec.prompt, messages, reg, signal, 1, archive, {
+      const output = await this.runSubSessionLoop(sessionId, user, env, spec.agents, spec.input, messages, reg, signal, spec.depth, archive, {
+        ...ctxOpts,
         provider,
-        branch: archive.branch,
-        fileGuardMap: branchReads,
-        // 主干通知收件箱（句柄惰性查找——回调每轮调用时句柄必已在引擎级表登记）
+        subSessionMergeApply,
+        // 父会话通知收件箱（互相感知）：无关同步/异步——通知由父会话或其他子会话的合入触发
         drainInbox: () => {
-          const h = this.branchRunStore.get(spec.branchId)
+          const h = this.subSessionStore.get(spec.runId)
           const out = h?.inbox ?? []
           if (h) h.inbox = []
           return out
-        },
-        // 分支与主干双向同步（branch_sync 工具 → ctx.branchSync，分支唯一同步工具）：传 content 先合入
-        // 主干（trunkMerge 阶段性路径），随后统一返回主干增量快照（合入与拉取同径，天然合入即感知）
-        branchSync: async (content) => {
-          if (content !== undefined) {
-            const h = this.branchRunStore.get(spec.branchId)
-            if (h) await this.trunkMerge(sessionId, user, env, h, { final: false, content })
-          }
-          return await this.trunkSnapshot(sessionId, user, spec.branchId)
         },
       })
       archive.output = output
       return { output, archive }
     } catch (err) {
-      this.publish(sessionId, "event.session.done", { runId: spec.branchId, agents: [], output: "", error: String((err as Error).message || err), branch: spec.name, sessionId })
-      throw err
+      // 取消/异常：把「已跑到哪」的部分过程存档随错误携带（注册表落进句柄 → bg_task 终态回传，
+      // 历史回放不丢过程；完整存档构造在循环内失败点前已更新 messages）
+      const e = (err instanceof Error ? err : new Error(String(err))) as Error & { archive?: unknown }
+      const partial = archive.messages.length ? archive : undefined
+      if (partial) e.archive = partial
+      this.publish(sessionId, "event.subsession.done", { runId: spec.runId, agents: spec.agents, output: "", error: String((err as Error).message || err), subsession: spec.name, sessionId })
+      throw e
     }
   }
 
-  /** 分支报告合入主上下文（DESIGN「会话分支运行与合并」）：最终合并（注册表 onDone）与阶段性合入
-   *  （branch_sync 传 content）的统一实现——构造合并消息（assistant，内容带分支头行自描述 + branchMeta；
-   *  最终合并携带完整过程存档 sessionRun，阶段性不带——分支仍在执行、存档为活引用）入主干、推送
-   *  event.branch.merged（前端实时渲染合并气泡）、广播通知其他运行中分支（互相感知）。
-   *  final=true 标记句柄已合入（bg_task 状态展示）；interimNote 供阶段性通知文案。
-   *  merge=summary（合入粒度）：超阈值报告先经任务级模型摘要（summarizeBranchReport）再合入——失败全文兜底；
-   *  异步方法（摘要含模型调用），同步 fan-out 经注册表 done promise 等待合入完成（结果前排空）。 */
-  private async trunkMerge(sessionId: string, user: string, env: Record<string, string>, handle: BranchRunHandle, opts: { final: boolean; content: string }): Promise<void> {
+  /**
+   * 子会话报告/阶段性成果合入父会话（DESIGN「子会话运行」）：最终合入（注册表 onDone）与阶段性合入
+   * （subsession_merge 传 content）的统一实现——构造合并消息（role=user + engineNote="subsession"，内容头行
+   * 自描述 + subSessionMerged 标记；最终合入携带完整过程存档 subSessionArchive，阶段性不带——子会话仍在执行、
+   * 存档为活引用）入父会话上下文、推送 event.subsession.merged（前端实时渲染合并消息）、
+   * 广播通知其他运行中子会话（互相感知）。
+   * merge=summary（合入粒度）：超阈值报告先经任务级模型摘要（summarizeSubSessionReport）再合入——失败全文兜底；
+   * 异步方法（摘要含模型调用），同步运行经注册表 done promise 等待合入完成（工具结果返回时合并消息必已入队）。
+   */
+  private async mergeToParent(sessionId: string, user: string, env: Record<string, string>, handle: SubSessionHandle, opts: { final: boolean; content: string }): Promise<void> {
     if (opts.final) handle.merged = true
-    let raw = opts.content.trim() || "（分支已完成，无最终文本输出）"
-    // 摘要合入（merge=summary）：短报告不值得一次模型调用，原文合入；全文保留在分支过程存档/bg_task
+    let raw = opts.content.trim() || "（子会话已完成，无最终文本输出）"
+    // 摘要合入（merge=summary）：短报告不值得一次模型调用，原文合入；全文保留在过程存档/bg_task
     let summarized = false
-    if (handle.mergeMode === "summary" && raw.length > BRANCH_MERGE_SUMMARY_SKIP_CHARS) {
-      const summary = await this.summarizeBranchReport(raw, env)
+    if (handle.merge === "summary" && raw.length > SUBSESSION_MERGE_SUMMARY_SKIP_CHARS) {
+      const summary = await this.summarizeSubSessionReport(raw, env)
       if (summary && summary.length < raw.length) {
         raw = summary
         summarized = true
       }
     }
-    // 长度保护（分支输出无落盘兜底，纯上下文保护）：超限保留头尾 + 省略说明
-    const kind = opts.final ? "分支报告" : "阶段性成果"
-    const content = raw.length > BRANCH_MERGE_MAX_CHARS
-      ? `${raw.slice(0, Math.floor(BRANCH_MERGE_MAX_CHARS * 0.7))}\n…（${kind}过长，中间省略约 ${raw.length - BRANCH_MERGE_MAX_CHARS} 字符）\n${raw.slice(-Math.floor(BRANCH_MERGE_MAX_CHARS * 0.3))}`
-      : raw
+    // 长度保护（子会话输出无落盘兜底，纯父上下文保护）：超限保留头尾 + 省略说明
+    const kind = opts.final ? "子会话报告" : "阶段性成果"
+    const content =
+      raw.length > SUBSESSION_MERGE_MAX_CHARS
+        ? `${raw.slice(0, Math.floor(SUBSESSION_MERGE_MAX_CHARS * 0.7))}\n…（${kind}过长，中间省略约 ${raw.length - SUBSESSION_MERGE_MAX_CHARS} 字符）\n${raw.slice(-Math.floor(SUBSESSION_MERGE_MAX_CHARS * 0.3))}`
+        : raw
     const header = opts.final ? (summarized ? "已合并（摘要合入）" : "已合并") : summarized ? "阶段性合入（摘要）" : "阶段性合入"
     const msg: Message = {
       id: crypto.randomUUID(),
-      // 合并消息**落盘即 user + engineNote: "branch"**（与其余引擎注入同一口径）：思考类模型不接受以
+      // 合并消息**落盘即 user + engineNote: "subsession"**（与其余引擎注入同一口径）：思考类模型不接受以
       // assistant 结尾的请求，而合入注入位置就在本轮 tool 结果之后（下一条即模型调用）——assistant
-      // 形态会让主线下一次调用 400（实测）；标记供前端渲染为「分支合入」通知条（非用户气泡）。
-      // branchMeta 保留（分支互相感知/主干增量标注分支来源）+ 携带过程存档 sessionRun（UI 折叠容器）
+      // 形态会让父会话下一次调用 400（实测）；标记供前端渲染为「子会话合入」通知条（非用户气泡）。
+      // subSessionMerged 保留来源标识（互相感知/父会话增量标注来源）+ 携带过程存档（UI 折叠容器）
       role: "user",
-      engineNote: "branch",
-      content: `【并行分支「${handle.name}」${header}】\n${content}${summarized ? "\n（报告全文见分支过程存档，bg_task wait 可取回）" : ""}`,
+      engineNote: "subsession",
+      content: `【子会话「${handle.name}」${header}】\n${content}${summarized ? "\n（报告全文见子会话过程存档，bg_task wait 可取回）" : ""}`,
       createdAt: Date.now(),
-      branchMeta: { branchId: handle.branchId, name: handle.name, ...(handle.model ? { model: handle.model } : {}) },
-      ...(opts.final && handle.archive ? { sessionRun: handle.archive } : {}),
+      subSessionMerged: { runId: handle.runId, name: handle.name, ...(handle.model ? { model: handle.model } : {}) },
+      ...(opts.final && handle.archive ? { subSessionArchive: handle.archive } : {}),
     }
-    this.enqueueTrunkMerge(sessionId, user, msg)
-    this.publish(sessionId, "event.branch.merged", { messageId: msg.id, branchId: handle.branchId, name: handle.name, ...(handle.model ? { model: handle.model } : {}), text: msg.content, sessionId })
-    const noticeLead = opts.final ? "已完成并合入主干（最终报告）" : "阶段性合入主干"
-    this.relayToBranches(sessionId, handle.branchId, `【分支感知】分支「${handle.name}」${noticeLead}:\n${branchNoticeHead(content)}`)
+    this.enqueueParentMerge(sessionId, user, msg)
+    this.publish(sessionId, "event.subsession.merged", { messageId: msg.id, runId: handle.runId, name: handle.name, ...(handle.model ? { model: handle.model } : {}), text: msg.content, sessionId })
+    const noticeLead = opts.final ? "已完成并合入父会话（最终报告）" : "阶段性合入父会话"
+    this.relayToSubSessions(sessionId, handle.runId, `【子会话感知】子会话「${handle.name}」${noticeLead}:\n${subSessionNoticeHead(content)}`)
   }
 
-  /** 合并消息入主干（最终/阶段性共用）：任务运行中入合并队列（runLoop 工具批处理边界排空），否则直接落盘。 */
-  private enqueueTrunkMerge(sessionId: string, user: string, msg: Message): void {
+  /** 合并消息入父会话（最终/阶段性共用）：父会话任务运行中入合并队列（runLoop 工具批处理边界排空），否则直接落盘。 */
+  private enqueueParentMerge(sessionId: string, user: string, msg: Message): void {
     if (this.tasks.has(sessionId)) {
-      const q = this.branchMerges.get(sessionId) ?? []
+      const q = this.parentMerges.get(sessionId) ?? []
       q.push(msg)
-      this.branchMerges.set(sessionId, q)
+      this.parentMerges.set(sessionId, q)
     } else {
       void this.opts.store.appendMessage(sessionId, msg, user).catch(() => {})
     }
   }
 
-  /** 主干通知广播（互相感知）：把通知压入本会话其他运行中分支的收件箱（分支执行循环轮首排空注入）。 */
-  private relayToBranches(sessionId: string, exceptBranchId: string | undefined, notice: string): void {
-    for (const h of this.branchRunStore.values()) {
-      if (h.sessionId !== sessionId || h.status !== "running" || h.branchId === exceptBranchId) continue
+  /** 父会话通知广播（互相感知）：把通知压入本会话其他运行中子会话的收件箱（子会话执行循环轮首排空注入）。 */
+  private relayToSubSessions(sessionId: string, exceptRunId: string | undefined, notice: string): void {
+    for (const h of this.subSessionStore.values()) {
+      if (h.sessionId !== sessionId || h.status !== "running" || h.runId === exceptRunId) continue
       ;(h.inbox ??= []).push(notice)
     }
   }
 
   /**
-   * 主干增量快照（branch_sync 工具返回体，DESIGN「会话分支运行与合并」互相感知）：返回主干自
-   * fork/上次同步以来的全部新消息——主线用户输入/回复、其他分支合入全文、主线工具结果摘要。
-   * 水位推进至当前存储尾部；合并队列中尚未落盘的合入（同步 fan-out 期间）一并回显并登记已投递 id
-   * （防其落盘后在下次增量中重复出现）；本分支自己的合入跳过（内容自产，无需回显）。
+   * 父会话增量快照（subsession_merge 拉取返回体，DESIGN「子会话运行」互相感知）：返回父会话自 fork/上次同步
+   * 以来的全部新消息——父会话用户输入/回复、其他子会话合入全文、父会话工具结果摘要。
+   * 水位推进至当前存储尾部；合并队列中尚未落盘的合入一并回显并登记已投递 id（防其落盘后在下次增量中重复出现）；
+   * 本子会话自己的合入跳过（内容自产，无需回显）。
    */
-  private async trunkSnapshot(sessionId: string, user: string, branchId: string): Promise<string> {
-    const h = this.branchRunStore.get(branchId)
-    if (!h || h.status !== "running") return "（分支已结束，无法同步主干）"
+  private async parentSnapshot(sessionId: string, user: string, runId: string): Promise<string> {
+    const h = this.subSessionStore.get(runId)
+    if (!h || h.status !== "running") return "（子会话已结束，无法同步父会话）"
     const session = await this.opts.store.load(sessionId, user)
     const msgs = session?.messages ?? []
     const from = Math.min(h.syncedAt ?? h.forkAt ?? msgs.length, msgs.length)
@@ -2561,38 +2546,37 @@ export class AgentEngine {
       const flat = t.trim()
       return flat.length <= max ? flat : `${flat.slice(0, max)}\n…（该消息过长已截断）`
     }
-    // 引擎提示（分支合入/定时任务写回/提醒，role=user + engineNote）的来源标签：与前端展示名同口径
-    const noteLabel = (m: { engineNote?: string; branchMeta?: { name: string } }) =>
-      m.branchMeta?.name ? `合并·${m.branchMeta.name}` : m.engineNote === "cron" ? "定时任务" : "引擎提示"
+    // 引擎提示（子会话合入/定时任务写回/提醒，role=user + engineNote）的来源标签：与前端展示名同口径
+    const noteLabel = (m: { engineNote?: string; subSessionMerged?: { name: string } }) =>
+      m.subSessionMerged?.name ? `合并·${m.subSessionMerged.name}` : m.engineNote === "cron" ? "定时任务" : "引擎提示"
     const lines: string[] = []
     for (const m of msgs.slice(from)) {
       if (delivered.has(m.id)) continue
-      if (m.branchMeta?.branchId === branchId) continue // 本分支自己的合入：内容自产
-      // 引擎提示不计为「主线用户」（否则分支报告/定时任务写回会冒充用户输入）
+      if (m.subSessionMerged?.runId === runId) continue // 本子会话自己的合入：内容自产
+      // 引擎提示不计为「父会话用户」（否则子会话报告/定时任务写回会冒充用户输入）
       if (isEngineNote(m)) lines.push(`【${noteLabel(m)}】${head(m.content, perMsg)}`)
-      else if (m.role === "user") lines.push(`【主线用户】${head(m.content, perMsg)}`)
-      else if (m.role === "assistant" && m.branchMeta) lines.push(`【合并·${m.branchMeta.name}】${head(m.content, perMsg)}`)
-      else if (m.role === "assistant") lines.push(`【主线回复】${head(m.content, perMsg)}`)
-      else if (m.role === "tool") lines.push(`【主线工具·${m.name ?? "?"}】${head(m.content, 600)}`)
-      // system（装载提示词/压缩摘要）：fork 后新增的装载提示词对分支无操作意义，跳过
+      else if (m.role === "user") lines.push(`【父会话用户】${head(m.content, perMsg)}`)
+      else if (m.role === "assistant") lines.push(`【父会话回复】${head(m.content, perMsg)}`)
+      else if (m.role === "tool") lines.push(`【父会话工具·${m.name ?? "?"}】${head(m.content, 600)}`)
+      // system（装载提示词/压缩摘要）：fork 后新增的装载提示词对子会话无操作意义，跳过
     }
-    // 合并队列中未落盘的合入（同步 fan-out 期间其他分支的合入在队列、落盘在工具批处理边界）
-    for (const q of this.branchMerges.get(sessionId) ?? []) {
-      if (delivered.has(q.id) || q.branchMeta?.branchId === branchId) continue
+    // 合并队列中未落盘的合入（同步 fan-out 期间其他子会话的合入在队列、落盘在工具批处理边界）
+    for (const q of this.parentMerges.get(sessionId) ?? []) {
+      if (delivered.has(q.id) || q.subSessionMerged?.runId === runId) continue
       delivered.add(q.id)
-      lines.push(`【合并·${q.branchMeta?.name ?? "?"}】${head(q.content, perMsg)}`)
+      lines.push(`【合并·${q.subSessionMerged?.name ?? "?"}】${head(q.content, perMsg)}`)
     }
     h.syncedAt = msgs.length
-    return lines.length ? lines.join("\n\n") : "（主干自 fork/上次同步以来暂无新消息）"
+    return lines.length ? lines.join("\n\n") : "（父会话自 fork/上次同步以来暂无新消息）"
   }
 
-  /** 分支合并队列排空：把已完成分支的合并消息追加进存储与当前任务上下文（位于本轮 tool 结果之后——
-   *  assistant(toolCalls)→tool 配对完整，主线下轮模型调用即见合并内容）。runLoop 工具批处理边界调用；
+  /** 父会话合并队列排空：把已完成子会话的合并消息追加进存储与当前任务上下文（位于本轮 tool 结果之后——
+   *  assistant(toolCalls)→tool 配对完整，父会话下轮模型调用即见合并内容）。runLoop 工具批处理边界调用；
    *  任务收尾（run finally）仅落盘冲刷（上下文随任务结束，下次 run 经 loadHistory 进上下文）。 */
-  private async drainBranchMerges(sessionId: string, user: string, persist?: (msg: Message) => Promise<void>, messages?: MessageLike[]): Promise<void> {
-    const q = this.branchMerges.get(sessionId)
+  private async drainParentMerges(sessionId: string, user: string, persist?: (msg: Message) => Promise<void>, messages?: MessageLike[]): Promise<void> {
+    const q = this.parentMerges.get(sessionId)
     if (!q?.length) return
-    this.branchMerges.delete(sessionId)
+    this.parentMerges.delete(sessionId)
     for (const msg of q) {
       try {
         if (persist) await persist(msg)
@@ -2687,7 +2671,10 @@ export class AgentEngine {
     return out
   }
 
-  private async runNewSessionLoop(
+  /** 子会话执行循环（subsession_run 派生运行，DESIGN「子会话运行」）：与主循环同构（审批/重复检测/
+   *  轮次上限/流式推送/截断/事件推送），差异只在：不落盘会话消息而收集进存档、不设独立超时（中止靠父任务
+   *  取消信号传播）、待办为运行内隔离清单。继承/隔离两种上下文形态由 runSubSession 组装好后进入本循环。 */
+  private async runSubSessionLoop(
     sessionId: string,
     user: string,
     env: Record<string, string>,
@@ -2697,8 +2684,18 @@ export class AgentEngine {
     reg: ToolRegistry,
     signal: AbortSignal,
     depth: number,
-    archive: SessionRunArchive,
-    ctxOpts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; provider?: LLMProvider; branch?: { name: string; model?: string }; drainInbox?: () => string[]; branchSync?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null> },
+    archive: SubSessionArchive,
+    ctxOpts?: {
+      workdir?: string
+      resolveBase?: string
+      projects?: PresetProject[]
+      provider?: LLMProvider
+      subSession?: { name: string; model?: string }
+      drainInbox?: () => string[]
+      subSessionMergeApply?: (content?: string) => Promise<string>
+      fileGuardMap?: Map<string, string | null>
+      todoScope?: { get: () => Promise<TodoItem[]>; set: (t: TodoItem[]) => Promise<void> }
+    },
   ): Promise<string> {
     let rounds = 0
     let lastText = ""
@@ -2707,61 +2704,85 @@ export class AgentEngine {
     // 重复检测（与主循环一致，DESIGN「重复检测」）：相同工具+参数连续重发（其间无其他调用）中断并注入引导提示，超限终止
     const recentCalls: string[] = []
     let repeatStalls = 0
-    // 取消中止判定：新会话执行不设独立超时，中止仅由父任务取消传播（报「已取消」）
+    // 取消中止判定：子会话不设独立超时，中止仅由父任务取消传播（报「已取消」）
     const activeSignal = signal
     const abortReason = () => (activeSignal.reason instanceof Error ? activeSignal.reason.message : activeSignal.reason ? String(activeSignal.reason) : "cancelled")
     // 会话上下文注入：messages 透传 buildContext（js 脚本工具 ctx.messages 快照源）；
-    // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄主会话）；
-    // 安全模式拒绝（与主会话 registerDynamicTool 同规则，js 工具已拦截，此为纵深防御）
-    // 任务级主模型：与主循环一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）；
-    // 分支运行（ctxOpts.provider）按模型路由解析的独立 Provider 优先——多路接口并行
+    // 运行时工具定义进本次运行注册表（随运行结束释放，不落盘、不外泄父会话）；
+    // ownerRunId = 本次运行标识——本上下文内再派生子会话时作为其 parentRunId（进程树），同时标记待办隔离作用域
+    // 任务级主模型：与父会话一致，env 配置 GEBAI_LLM_* 时重建 Provider（无覆盖沿用启动实例）；
+    // 子会话（ctxOpts.provider）按模型路由解析的独立 Provider 优先——多路接口并行
     // （先于 ctx 解析：ctx.multimodal 按任务级 Provider 能力注入，read 等工具据此决定图片处理形态）
     const taskProvider = ctxOpts?.provider ?? this.opts.resolveProvider?.(env) ?? this.opts.provider
-    const ctx = this.buildContext(sessionId, user, env, signal, { ...ctxOpts, registry: reg, loadIntoRegistry: reg, role: this.tasks.get(sessionId)?.role, writeGuard: this.defsWriteGuard(agents, env), messages, registerDynamic: async (def) => { reg.register(makeDynamicTool(def)) }, multimodal: taskProvider.capabilities().multimodal }, depth)
+    const ctx = this.buildContext(
+      sessionId,
+      user,
+      env,
+      signal,
+      {
+        workdir: ctxOpts?.workdir,
+        resolveBase: ctxOpts?.resolveBase,
+        projects: ctxOpts?.projects,
+        registry: reg,
+        loadIntoRegistry: reg,
+        role: this.tasks.get(sessionId)?.role,
+        writeGuard: this.defsWriteGuard(agents, env),
+        messages,
+        fileGuardMap: ctxOpts?.fileGuardMap,
+        subSessionMerge: ctxOpts?.subSessionMergeApply,
+        todoScope: ctxOpts?.todoScope,
+        ownerRunId: archive.runId,
+        registerDynamic: async (def) => {
+          reg.register(makeDynamicTool(def))
+        },
+        multimodal: taskProvider.capabilities().multimodal,
+      },
+      depth,
+    )
     // 任务级额外模型接口参数（浏览器本地注入 GEBAI_LLM_EXTRA_PARAMS）：非法 JSON 忽略
     const extraParams = parseExtraParamsSafe(env.GEBAI_LLM_EXTRA_PARAMS)
-    // 存档收集（替代原逐条落盘）：执行过程消息追加进 archive.messages，最终由 agent_run 扩展字段落盘
-    const pushArchive = (entry: SessionRunEntry) => {
+    // 存档收集（替代原逐条落盘）：执行过程消息追加进 archive.messages，最终由 subsession_run 扩展字段落盘
+    const pushArchive = (entry: SubSessionEntry) => {
       archive.messages.push(entry)
       return Promise.resolve()
     }
 
     while (rounds < MAX_TOOL_ROUNDS) {
       if (activeSignal.aborted) throw new Error(abortReason())
-      // 主干通知注入（分支互相感知，DESIGN「会话分支运行与合并」）：其他分支合入/主线进展的通知
-      // 在轮首排空注入——位于上一轮 tool 结果之后（tool_calls 配对完整），分支下轮模型调用即见
+      // 父会话通知注入（互相感知，DESIGN「子会话运行」）：其他子会话合入/父会话进展的通知
+      // 在轮首排空注入——位于上一轮 tool 结果之后（tool_calls 配对完整），子会话下轮模型调用即见
       for (const notice of ctxOpts?.drainInbox?.() ?? []) {
         await pushArchive({ role: "user", content: notice })
         messages.push({ role: "user", content: notice })
       }
       // 每轮重推 start 事件（同 runId 幂等，前端容器已存在时忽略）：前端容器随消息重载丢失
-      // （切走会话/断线重连）后，新一轮 delta 前可据此重建折叠容器；分支运行携带 branch/model 标识
-      this.publish(sessionId, "event.session.start", { runId: archive.runId, agents, input, depth, ...(ctxOpts?.branch ? { branch: ctxOpts.branch.name, ...(ctxOpts.branch.model ? { model: ctxOpts.branch.model } : {}) } : {}), sessionId })
+      // （切走会话/断线重连）后，新一轮 delta 前可据此重建折叠容器；携子会话名与模型路由标识
+      this.publish(sessionId, "event.subsession.start", { runId: archive.runId, agents, input, depth, ...(ctxOpts?.subSession ? { subsession: ctxOpts.subSession.name, ...(ctxOpts.subSession.model ? { model: ctxOpts.subSession.model } : {}) } : {}), sessionId })
       const assistantMsgId = crypto.randomUUID()
-      // 执行过程：新会话的模型回复文本/推理实时推送到前端（与主循环同流显示，带 session 标记）
+      // 执行过程：子会话的模型回复文本/推理实时推送到前端（与主循环同流显示，携 subSession 标记）
       let reasoningAcc = ""
       const { text, toolCalls, stopReason } = await this.callModel(taskProvider, messages, reg.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, reg.resolve(s.name)?.tool)), activeSignal, (chunk) => {
         if (chunk.type === "text") {
-          // session 标记：区别于主循环推送，渠道层可据此识别「新会话执行过程」事件；
-          // 仅最终响应（final_only）不推送新会话过程文本；异步后台运行在发起任务结束后仍照常推送
+          // subSession 标记：区别于主循环推送，渠道层可据此识别「子会话运行过程」事件；
+          // 仅最终响应（final_only）不推送子会话过程文本；异步子会话在发起任务结束后仍照常推送
           // （任务已不在 tasks 表，缺省视为 streaming——final_only 会话仅在任务存续期内可判定）
-          this.noteStream(sessionId, { messageId: assistantMsgId, text: chunk.text, session: true, sessionRunId: archive.runId })
-          if ((this.tasks.get(sessionId)?.outputMode ?? "streaming") === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, session: true, sessionRunId: archive.runId, sessionId })
+          this.noteStream(sessionId, { messageId: assistantMsgId, text: chunk.text, subSession: true, subSessionId: archive.runId })
+          if ((this.tasks.get(sessionId)?.outputMode ?? "streaming") === "streaming") this.publish(sessionId, "event.message.delta", { text: chunk.text, messageId: assistantMsgId, subSession: true, subSessionId: archive.runId, sessionId })
         } else if (chunk.type === "reasoning" && chunk.text?.trim()) {
           reasoningAcc += chunk.text
           this.noteStream(sessionId, { reasoning: reasoningAcc })
-          if ((this.tasks.get(sessionId)?.outputMode ?? "streaming") === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, session: true, sessionRunId: archive.runId, messageId: assistantMsgId, sessionId })
+          if ((this.tasks.get(sessionId)?.outputMode ?? "streaming") === "streaming") this.publish(sessionId, "event.message.reasoning", { text: chunk.text, subSession: true, subSessionId: archive.runId, messageId: assistantMsgId, sessionId })
         }
       }, extraParams, sessionId)
       lastText = text
       if (!toolCalls.length) {
-        this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, session: true, sessionRunId: archive.runId, sessionId })
-        // 新会话 run 收尾：最终回复入存档（折叠容器回放展示）
+        this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, subSession: true, subSessionId: archive.runId, sessionId })
+        // 子会话运行收尾：最终回复入存档（折叠容器回放展示）
         if (text) {
           await pushArchive({ role: "assistant", content: text, reasoning: reasoningAcc.trim() ? reasoningAcc.trim() : undefined })
         }
         this.clearStream(sessionId, archive.runId)
-        this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: text, ...(ctxOpts?.branch ? { branch: ctxOpts.branch.name } : {}), sessionId })
+        this.publish(sessionId, "event.subsession.done", { runId: archive.runId, agents, output: text, ...(ctxOpts?.subSession ? { subsession: ctxOpts.subSession.name } : {}), sessionId })
         return text
       }
 
@@ -2777,10 +2798,10 @@ export class AgentEngine {
       const pending: Array<{ tc: (typeof toolCalls)[number]; rt: NonNullable<ReturnType<ToolRegistry["resolve"]>>; autoLoaded: string; approvalRequired: boolean }> = []
       // 门控说明性结果（不执行）同样推送 call+result 事件对（与主循环同因）：前端实时建卡，与存档回放一致
       const gatedNote = async (tc: (typeof toolCalls)[number], note: string) => {
-        this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
+        this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, subSession: true, subSessionId: archive.runId })
         await pushArchive({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
         messages.push({ role: "tool", content: note, toolCallId: tc.id, name: tc.name })
-        this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: note, session: true, sessionRunId: archive.runId, sessionId })
+        this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: note, subSession: true, subSessionId: archive.runId, sessionId })
       }
       for (const tc of toolCalls) {
         if (stopped) {
@@ -2806,8 +2827,8 @@ export class AgentEngine {
         let rt = reg.resolve(tc.name)
         let autoLoaded = ""
         if (!rt) {
-          // 路由自愈（与主循环一致，DESIGN「子Agent 路由」）：新会话内的装载走本运行注册表 + 临时 messages
-          // 插段（loadAgentIntoRun），不写全局注册表/父会话记录（新会话执行隔离语义）
+          // 路由自愈（与主循环一致，DESIGN「子Agent 路由」）：子会话内的装载走本运行注册表 + 临时 messages
+          // 插段（loadAgentIntoRun），不写全局注册表/父会话记录（子会话隔离语义）
           const agent = this.subAgentForToolName(tc.name)
           if (agent) {
             await this.loadAgentIntoRun(reg, agent, messages, user, env, sessionId, ctxOpts?.projects).catch(() => {})
@@ -2855,10 +2876,10 @@ export class AgentEngine {
           if (activeSignal.aborted) throw new Error(abortReason())
           if (approvalRequired) {
             const retries = this.tasks.get(sessionId)?.retries.get(tc.id) ?? 0
-            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true, session: true, sessionRunId: archive.runId })
-            this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments, session: true, sessionRunId: archive.runId, sessionId })
+            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, requiresApproval: true, subSession: true, subSessionId: archive.runId })
+            this.publish(sessionId, "event.approval.request", { toolCallId: tc.id, tool: tc.name, retries, arguments: tc.arguments, subSession: true, subSessionId: archive.runId, sessionId })
             const verdict = await this.waitApproval(sessionId, tc.id, rt.name, activeSignal)
-            // 新会话内：取消/超时信号解开等待后立即中止（存档随 run 整体，取消由上层按已取消结果收尾）
+            // 子会话内：取消/超时信号解开等待后立即中止（存档随运行整体，取消由上层按已取消结果收尾）
             if (activeSignal.aborted) throw new Error(abortReason())
             if (verdict !== "approved") {
               this.tasks.get(sessionId)?.retries.set(tc.id, retries + 1)
@@ -2866,25 +2887,25 @@ export class AgentEngine {
               await pushArchive({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
               messages.push({ role: "tool", content: denied, toolCallId: tc.id, name: tc.name })
               // 拒绝/超时同样推送结果事件（与主循环同因）：实时卡片落终态
-              this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: denied, session: true, sessionRunId: archive.runId, sessionId })
+              this.publish(sessionId, "event.tool.result", { name: tc.name, toolCallId: tc.id, output: denied, subSession: true, subSessionId: archive.runId, sessionId })
               return
             }
           } else {
-            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, session: true, sessionRunId: archive.runId })
+            this.publish(sessionId, "event.tool.call", { name: tc.name, arguments: tc.arguments, toolCallId: tc.id, subSession: true, subSessionId: archive.runId })
           }
           // 取消/超时统一收口：父任务停止均中断执行（脚本进程同步被杀），超时作为结果返回模型
-          this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, session: true, sessionRunId: archive.runId, sessionId })
+          this.publish(sessionId, "event.tool.result.start", { name: tc.name, toolCallId: tc.id, subSession: true, subSessionId: archive.runId, sessionId })
           const result = await this.runToolInterruptible(rt.tool, tc.arguments, ctx, activeSignal, rt.name, sessionId, tc.id)
           // 兜底截断（与主循环一致）：超长工具输出统一截断，防存档膨胀；结构化 data 与存档扩展字段原样保留
           const safe = !result.truncated && result.output.length > TRUNCATE_THRESHOLD
-            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, sessionRun: result.sessionRun, images: result.images }
+            ? { ...(await truncate(result.output, rt.name, ctx)), blocks: result.blocks, data: result.data, subSessionArchive: result.subSessionArchive, images: result.images }
             : result
-          // 嵌套 agent_run：新会话的存档递归挂到工具消息上（历史回放嵌套容器）；不进主上下文，
+          // 嵌套子会话：运行的存档递归挂到工具消息上（历史回放嵌套容器）；不进父上下文，
           // provider 序列化只取已知字段，额外字段不会泄漏进 LLM 请求
-          const nested = safe.sessionRun ? { sessionRun: safe.sessionRun } : {}
+          const nested = safe.subSessionArchive ? { subSessionArchive: safe.subSessionArchive } : {}
           const withNote = autoLoaded ? `（引擎已自动装载子Agent ${autoLoaded}——其工具已并入本次执行、提示词已注入上下文）\n${safe.output}` : safe.output
           // 多模态工具结果图片（read 等读取的图片）：主模型多模态时内联进本次运行的 tool 消息
-          // （新会话执行为内存态，无落盘引用——随运行结束释放，不进存档/UI 走 blocks）
+          // （子会话运行为内存态，无落盘引用——随运行结束释放，不进存档/UI 走 blocks）
           const imageBlocks = taskProvider.capabilities().multimodal && safe.images?.length ? await this.toolImageBlocks(safe.images) : []
           await pushArchive({ role: "tool", content: withNote, blocks: safe.blocks, toolCallId: tc.id, name: tc.name, arguments: tc.arguments, ...nested })
           messages.push({ role: "tool", content: imageBlocks.length ? [{ type: "text", text: withNote }, ...imageBlocks] : withNote, toolCallId: tc.id, name: tc.name, ...nested })
@@ -2895,8 +2916,8 @@ export class AgentEngine {
             filePath: safe.filePath,
             output: safe.output,
             blocks: safe.blocks,
-            session: true,
-            sessionRunId: archive.runId,
+            subSession: true,
+            subSessionId: archive.runId,
             sessionId,
           })
         } catch (err) {
@@ -2908,7 +2929,7 @@ export class AgentEngine {
       if (stopped) break
     }
     // 循环上限退出（重复调用风暴终止）：同样推送 done 事件折叠容器
-    this.publish(sessionId, "event.session.done", { runId: archive.runId, agents, output: lastText, ...(ctxOpts?.branch ? { branch: ctxOpts.branch.name } : {}), sessionId })
+    this.publish(sessionId, "event.subsession.done", { runId: archive.runId, agents, output: lastText, ...(ctxOpts?.subSession ? { subsession: ctxOpts.subSession.name } : {}), sessionId })
     return lastText
   }
 
