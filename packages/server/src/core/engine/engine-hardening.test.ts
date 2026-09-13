@@ -370,6 +370,51 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     expect(msgs2.some((m) => m.engineNote === "verify")).toBe(false)
     rmSync(home, { recursive: true, force: true })
   })
+  test("命名空间验证工具与 js 编排跑验证算已验证（不提醒）；js 仅提及关键词/非验证命令仍提醒", async () => {
+    // 假工具：只需参数/名称命中判定，不真跑（sh/js/run_tests 均替身）
+    const fakeRegistry = new ToolRegistry()
+    const noopParams = { type: "object" as const, properties: {} }
+    for (const [n, t] of Object.entries(createGlobalTools())) if (n !== "sh" && n !== "js") fakeRegistry.register(t)
+    fakeRegistry.register({ name: "sh", description: "fake sh", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    fakeRegistry.register({ name: "js", description: "fake js", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    fakeRegistry.register({ name: "self_optimize_run_tests", description: "fake run_tests", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    const provider = new HardenProvider()
+    provider.script = [
+      // ① 命名空间验证工具：self_optimize_run_tests（旧实现按短名 "tests" 判定 → 漏 → 误报提醒）
+      { mode: "tool", tool: "write", args: { path: "src/a.ts", content: "const x = 1\n" } },
+      { mode: "tool", tool: "self_optimize_run_tests", args: { checks: ["test"] } },
+      { mode: "text", text: "已改并跑过测试" },
+      // ② js 编排内跑验证命令（脚本内 sh(...) 调用 + 验证关键词）
+      { mode: "tool", tool: "write", args: { path: "src/b.ts", content: "const y = 2\n" } },
+      { mode: "tool", tool: "js", args: { code: 'const r = await sh({ command: "bun test src/a.test.ts" })\nreturn r.output' } },
+      { mode: "text", text: "js 编排跑过测试" },
+      // ③ js 仅提及关键词（grep 搜 lint/typecheck 字样）→ 不得算已验证，仍提醒
+      { mode: "tool", tool: "write", args: { path: "src/c.ts", content: "const z = 3\n" } },
+      { mode: "tool", tool: "js", args: { code: 'return await grep({ pattern: "typecheck|eslint" })' } },
+      { mode: "text", text: "只是搜了下关键词" },
+      { mode: "text", text: "好，我补跑测试" },
+      // ④ 非验证命令（dir）→ 仍提醒
+      { mode: "tool", tool: "write", args: { path: "src/d.ts", content: "const w = 4\n" } },
+      { mode: "tool", tool: "sh", args: { command: "dir /b src", approval: false } },
+      { mode: "text", text: "列了下目录" },
+      { mode: "text", text: "好，我补跑测试" },
+    ]
+    const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
+    const hasNudge = async (sid: string) => ((await store.load(sid, "default"))!.messages.some((m) => m.engineNote === "verify"))
+    const s1 = await store.createSession("default", "t1")
+    await engine.run(s1.id, "default", "hi")
+    expect(await hasNudge(s1.id)).toBe(false) // ①
+    const s2 = await store.createSession("default", "t2")
+    await engine.run(s2.id, "default", "hi")
+    expect(await hasNudge(s2.id)).toBe(false) // ②
+    const s3 = await store.createSession("default", "t3")
+    await engine.run(s3.id, "default", "hi")
+    expect(await hasNudge(s3.id)).toBe(true) // ③
+    const s4 = await store.createSession("default", "t4")
+    await engine.run(s4.id, "default", "hi")
+    expect(await hasNudge(s4.id)).toBe(true) // ④
+    rmSync(home, { recursive: true, force: true })
+  })
 })
 
 describe("装载工具会话可见性与全局工具复用", () => {

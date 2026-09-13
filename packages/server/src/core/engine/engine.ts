@@ -72,6 +72,11 @@ const MAX_VERIFY_NUDGE = 1
 const VERIFY_CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|c|h|cpp|hpp|cc|cs|rb|php|swift|scala|vue|svelte|dart|lua|sh|bash|sql)$/i
 /** 收尾验证提醒——测试/检查类命令判定（sh/py 的 command 文本匹配；宽匹配宁漏勿紧：误判已验证只少一次提醒）。 */
 const VERIFY_CMD_RE = /\b(bun test|bun run test|npm test|npm run test|yarn test|pnpm test|pytest|vitest|jest|go test|cargo test|deno test|gradle test|gradlew\s+\S*test|mvn test|tsc|typecheck|type-check|eslint|biome check|ruff|mypy|flake8|clang-tidy|lint)\b/i
+/** 收尾验证提醒——验证类工具判定：**名称后缀**（不能取「最后一段短名」——`self_optimize_run_tests` 的短名是
+ *  `tests`，按短名相等判定会漏，实测导致 5 次误报提醒；后缀口径让命名空间形态与全局同名工具一视同仁）。 */
+const VERIFY_TOOL_RE = /(^|_)run_tests$/
+/** 收尾验证提醒——js 编排脚本的**命令调用点**（脚本内真去执行命令/子进程，而非仅仅提及关键词）。 */
+const JS_EXEC_MARK_RE = /\b(?:sh|py|bg_task)\s*\(|["']?command["']?\s*:/
 /** 收尾验证提醒——写类工具的拒绝形态（守卫/安全模式拦截未落盘，不计入修改文件）。 */
 const MOD_REJECTED_RE = /^(write|edit|patch) 拒绝|安全模式|受限模式/
 /** 重复检测滚动窗口：记录最近 N 次工具调用签名（工具名+参数 JSON），窗口尾部连续相同签名达到阈值判定为无效重复。 */
@@ -2255,20 +2260,28 @@ private activeSchemas(sessionId: string) {
   }
 
   /** 收尾验证提醒数据收集：write/edit/patch 成功修改代码文件（拒绝/安全模式拦截与 dryRun 不计）记入文件清单；
-   *  sh/py 执行测试/检查类命令、run_tests 工具调用即标记已验证。名称取命名空间短名（code_write 等同权）。 */
+   *  验证判定覆盖三条通道——① sh/py 的 command 命中测试/检查关键词；② 验证类工具调用（名称后缀 `run_tests`，
+   *  含命名空间形态 `self_optimize_run_tests`）；③ js 编排（脚本内以 sh/py/bg_task 执行验证命令）。
+   *  写类工具取命名空间短名（code_write 与全局 write 同权）；**验证工具必须用后缀正则**（短名判定会漏）. */
   private trackTaskMods(sessionId: string, name: string, args: Record<string, unknown>, result: ToolResult): void {
     const mods = this.taskMods.get(sessionId)
     if (!mods) return
     const short = name.includes("_") ? name.slice(name.lastIndexOf("_") + 1) : name
-    if (short === "write" || short === "edit" || short === "patch") {
+    if (VERIFY_TOOL_RE.test(name)) {
+      mods.verified = true
+    } else if (short === "write" || short === "edit" || short === "patch") {
       if (typeof args.path !== "string") return
       if (args.dry_run === true || args.dryRun === true || result.output.includes("预演")) return
       if (MOD_REJECTED_RE.test(result.output)) return
       if (VERIFY_CODE_FILE_RE.test(args.path)) mods.files.add(args.path)
     } else if (short === "sh" || short === "py") {
       if (VERIFY_CMD_RE.test(String(args.command ?? ""))) mods.verified = true
-    } else if (short === "run_tests") {
-      mods.verified = true
+    } else if (short === "js") {
+      // js 编排是主推的复杂流程通道（脚本内工具像内置函数直接调用）：脚本里真去跑验证命令也算已验证。
+      // 但必须「命令调用点 + 验证关键词」同时出现——脚本里 grep/read 到 lint/typecheck 字样不算，
+      // 否则搜关键词类任务会被误记为已验证，反向漏掉真该提醒的场景。
+      const code = String(args.code ?? "")
+      if (JS_EXEC_MARK_RE.test(code) && VERIFY_CMD_RE.test(code)) mods.verified = true
     }
   }
 
