@@ -256,19 +256,20 @@ async function showHtml(ctx: ToolContext, html: string, base: string, width: unk
  *   `render=backend` 服务端渲染 PNG；产物落盘 tmp/ 并返回 diagram 块。
  * - `html`（HTML 页面）：沙箱 iframe 域隔离预览，返回 html 块；仅实时前端通道（分支内校验）。
  * - `path`（已有文件直显）：图片 → image 块；图表源文件 → 渲染验证 + diagram 块（与 code 同一管线）；
- *   `.html` → html 块；文本/代码 → code 块内联（超长截断 + 附 file 卡片）；其余 → file 卡片。
+ *   `.html` → html 块；文本/代码 → code 块内联（markdown 渲染为文档、其余语法高亮；超长截断 + 附 file 卡片）；其余 → file 卡片。
+ * - 类型/语言一律按**真实文件路径**推断（`name` 只作展示名，不参与判断）。
  */
 export const showTool: Tool = {
   name: "show",
   description:
-    "向用户展示内容（聊天界面内联呈现），内容源三选一：①图表——code 传源码 + format 指定语言（Mermaid 通用首选 / PlantUML 标准 UML 建模 / D2 美观架构图 / ECharts 数据图表，选型指南见 format 参数），前端实时渲染验证，渲染成功才返回成功、失败返回错误信息供修正；②HTML 页面——html 传源码，沙箱 iframe 域隔离预览，仅 Web 前端通道；③已有文件——path 传路径按类型直显：图片内联显示、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、文本/代码内联展示、无法内联的类型（PDF/压缩包/Office/音视频等）给查看/下载卡片。产物保存到会话 tmp/ 并返回对应内容块。",
+    "向用户展示内容（聊天界面内联呈现），内容源三选一：①图表——code 传源码 + format 指定语言（Mermaid 通用首选 / PlantUML 标准 UML 建模 / D2 美观架构图 / ECharts 数据图表，选型指南见 format 参数），前端实时渲染验证，渲染成功才返回成功、失败返回错误信息供修正；②HTML 页面——html 传源码，沙箱 iframe 域隔离预览，仅 Web 前端通道；③已有文件——path 传路径按**文件真实类型**直显（与 name 无关）：图片内联显示、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、其余文本/代码语法高亮内联展示、无法内联的类型（PDF/压缩包/Office/音视频等）给查看/下载卡片。产物保存到会话 tmp/ 并返回对应内容块。",
   card: { args: "block" },
   parameters: schema(
     {
       code: { type: "string", description: "图表源码（与 html/path 三选一，需同时传 format）。PlantUML 布局：流程类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包。PlantUML 勿手动添加 @startuml/@enduml（自动补全）。ECharts：传 option 的严格 JSON（键名与字符串一律双引号，不支持单引号/裸键名/…省略号缩写；容错 //注释 与尾逗号），格式化用字符串模板如 \"{b}: {c}\"" },
       html: { type: "string", description: "HTML 页面源码（与 code/path 三选一；完整文档或片段均可，自动补全为完整页面）。沙箱 iframe 域隔离预览：脚本可执行但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航。适合网页原型、数据报表、卡片/徽章、可视化组件、带交互脚本的小页面。样式用内联 CSS，图片可用 data: URI 或外部 URL，脚本内联或外部均可" },
-      path: { type: "string", description: "已有文件路径（与 code/html 三选一），按类型直显：图片内联、图表源文件（.mmd/.puml/.plantuml/.d2/.echarts）渲染成图表、.html 页面预览、文本/代码内联、其余查看/下载卡片——适合交付产物或需要用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径，不在会话文件区内的文件会复制一份（≤100MB）到会话文件区再展示；显式传 format 可按指定图表语言渲染任意文本文件" },
-      name: { type: "string", description: "展示名/产物主名（不含扩展名；未传时图表默认 diagram、HTML 默认 page、path 模式默认取文件主名）" },
+      path: { type: "string", description: "已有文件路径（与 code/html 三选一），按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件（.mmd/.puml/.plantuml/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档、其余文本/代码语法高亮内联、其余查看/下载卡片——适合交付产物或需要用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径，不在会话文件区内的文件会复制一份（≤100MB）到会话文件区再展示；显式传 format 可按指定图表语言渲染任意文本文件" },
+      name: { type: "string", description: "展示名/产物主名（不含扩展名；未传时图表默认 diagram、HTML 默认 page、path 模式默认取文件主名）。**仅影响展示名与产物文件名，不参与类型/语言判断**（类型一律按真实文件路径推断）" },
       format: {
         enum: [...DIAGRAM_FORMAT_VALUES],
         description:
@@ -319,6 +320,10 @@ export const showTool: Tool = {
       return ctx.readFile(abs)
     }
     const copiedNote = inSessionTmp ? "" : `（源 ${rawPath}，已复制到会话文件区 ${logical}）`
+    // 语言按**真实文件路径**推断（abs 的扩展名），不用展示名 display——`name` 惯例不含扩展名（工具参数
+    // 描述即写「不含扩展名」），据它推断会把 .md 判成未知语言 → 前端只能 highlightAuto（markdown 文本
+    // 被当源码高亮而不是渲染成文档），.yml/.json/.ts 等同样丢高亮。display 只作展示名。
+    const lang = inferLang(abs) || undefined
     // path+format：按指定图表语言渲染该文件内容（不限扩展名，与 code 模式同一管线）
     if (formatArg) {
       return showDiagram(ctx, await readText(), formatArg as DiagramFormat, display.replace(/\.[^.]+$/, "") || "diagram", rawPath, args.render)
@@ -347,14 +352,14 @@ export const showTool: Tool = {
     if (SHOW_TEXT_EXT.has(abs.split(".").pop()?.toLowerCase() ?? "") && size <= SHOW_TEXT_DIRECT_BYTES) {
       const text = await readText()
       if (text.length <= SHOW_TEXT_MAX_CHARS) {
-        blocks.push({ type: "code", text, language: inferLang(display) || undefined, path: logical, name: display })
+        blocks.push({ type: "code", text, language: lang, path: logical, name: display })
         how = `内容内联展示（${text.length} 字符）`
       } else {
         // 超长文本截断展示；全文经文件卡工具栏下载/「原文件」查看获取（files/content 按需加载），不再附独立 file 卡片
         blocks.push({
           type: "code",
           text: `${text.slice(0, SHOW_TEXT_MAX_CHARS)}\n…（文本过长已截断，全文 ${text.length} 字符可下载或点「原文件」查看）`,
-          language: inferLang(display) || undefined,
+          language: lang,
           path: logical,
           name: display,
         })

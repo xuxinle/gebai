@@ -8,6 +8,10 @@ describe("inferLang", () => {
     expect(inferLang("x.py")).toBe("python")
     expect(inferLang("run.sh")).toBe("bash")
     expect(inferLang("page.html")).toBe("xml")
+    // yaml 不得落 markdown（该错位会让 .yml 在前端被当 markdown 渲染成文档而非高亮）
+    expect(inferLang("a.yml")).toBe("yaml")
+    expect(inferLang("conf.YAML")).toBe("yaml")
+    expect(inferLang("README.md")).toBe("markdown")
   })
   test("unknown extension or no dot", () => {
     expect(inferLang("Makefile")).toBe("")

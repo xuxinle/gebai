@@ -53,7 +53,7 @@ export function renderBlock(container: HTMLElement, b: ContentBlock, sessionId: 
       container.appendChild(blockText(b.text))
       break
     case "code":
-      // 文件内容卡：markdown 语言渲染 md、其余语法高亮；path 附带时提供复制/原文件/下载工具栏
+      // 文件内容卡：markdown 渲染 md（含缺 language 时按 name/path 推断）、其余语法高亮；path 附带时提供复制/原文件/下载工具栏
       renderCodeCard(container, b, sessionId)
       break
     case "image": {

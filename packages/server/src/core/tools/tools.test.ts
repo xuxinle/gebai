@@ -740,6 +740,34 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("show path 分支：语言按真实文件推断（name 不含扩展名时 markdown 仍为 markdown，不落 highlightAuto）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-showfile-lang-"))
+    const sid = "abcdef01abcdef01abcdef01abcdef01"
+    const c = ctx(home, sid)
+    const sessionTmp = join(sessionPath(home, "default", sid), "tmp")
+    mkdirSync(sessionTmp, { recursive: true })
+    // 模型惯例：name 是展示名（工具参数描述即写「不含扩展名」）——语言仍须按真实文件的 .md 推断，
+    // 否则 language 为空 → 前端只能 highlightAuto（markdown 被当源码高亮而不是渲染成文档）
+    writeFileSync(join(sessionTmp, "调研.md"), "# 标题\n\n- 项\n")
+    const md = await showTool.execute({ path: join(sessionTmp, "调研.md"), name: "调研报告" }, c)
+    const mdBlock = md.blocks![0] as { type: string; language?: string; name?: string; path?: string }
+    expect(mdBlock.type).toBe("code")
+    expect(mdBlock.language).toBe("markdown")
+    expect(mdBlock.name).toBe("调研报告") // 展示名照旧（只作标题，不参与类型判断）
+    expect(mdBlock.path).toBe("tmp/调研.md")
+    // YAML 不是 markdown（照旧映射会被前端渲染成文档）：yml → yaml 语法高亮
+    writeFileSync(join(sessionTmp, "conf.yml"), "a: 1\n")
+    const yml = await showTool.execute({ path: join(sessionTmp, "conf.yml"), name: "配置" }, c)
+    expect((yml.blocks![0] as { language?: string }).language).toBe("yaml")
+    // 超长截断分支同样按真实文件推断语言
+    writeFileSync(join(sessionTmp, "长文.md"), "# 头\n" + "x".repeat(45_000))
+    const big = await showTool.execute({ path: join(sessionTmp, "长文.md"), name: "长文" }, c)
+    const bigBlock = big.blocks![0] as { language?: string; text: string }
+    expect(bigBlock.language).toBe("markdown")
+    expect(bigBlock.text).toContain("已截断")
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("show path 分支：会话外文件复制到 tmp/shown/ 后直显（文本内联 code 块、哈希命名复用、超长截断）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-showfile-copy-"))
     const sid = "abcdef01abcdef01abcdef01abcdef01"

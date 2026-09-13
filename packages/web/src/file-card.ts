@@ -17,7 +17,7 @@ const EXT_LANG: Record<string, string> = {
   ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
   json: "json", py: "python", pyw: "python", sh: "bash", bash: "bash", zsh: "bash",
   css: "css", scss: "scss", less: "less", html: "xml", htm: "xml", xml: "xml", svg: "xml", vue: "xml", svelte: "xml",
-  md: "markdown", markdown: "markdown", yml: "markdown", yaml: "markdown",
+  md: "markdown", markdown: "markdown", yml: "yaml", yaml: "yaml",
   go: "go", rs: "rust", java: "java", kt: "kotlin", kts: "kotlin", rb: "ruby",
   c: "c", h: "c", cpp: "cpp", hpp: "cpp", cc: "cpp", cs: "csharp", php: "php",
   sql: "sql", lua: "lua", swift: "swift", dart: "dart",
@@ -243,9 +243,11 @@ function fetchFailText(err: unknown, where: "card" | "popup"): string {
   return `${where === "card" ? "内容加载失败" : "无法预览该文件"}: ${(err as Error).message}。${hint}`
 }
 
-/** code 内容块 → 文件内容卡：markdown 语言渲染 md、其余语法高亮；path 附带时提供原文件查看与常驻下载。 */
+/** code 内容块 → 文件内容卡：markdown 渲染 md、其余语法高亮；path 附带时提供原文件查看与常驻下载。
+ *  语言以块内 `language` 为准；缺省时按文件名、再按产物路径扩展名推断（show 的展示名 `name` 惯例
+ *  不含扩展名、历史卡片同样缺 language——不推断就会落到 highlightAuto，markdown 被当源码高亮）。 */
 export function renderCodeCard(container: HTMLElement, b: Extract<ContentBlock, { type: "code" }>, sessionId: string): void {
-  const lang = b.language ?? ""
+  const lang = b.language || langForFile(b.name ?? "", "") || langForFile(b.path ?? "", "")
   const title = b.name || (lang && lang !== "markdown" ? `${lang} 代码` : "文本")
   const body = el("div", "file-body")
   body.appendChild(textBody(lang, b.text))

@@ -461,6 +461,23 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
     expect(card.querySelectorAll("button").length).toBeGreaterThanOrEqual(2)
   })
 
+  test("code 块缺 language：按 name/path 扩展名推断（.md 仍渲染 markdown、.yml 高亮而非当文档）", () => {
+    // show 的展示名惯例不含扩展名、历史卡片同样可能缺 language——推断不出来就落 highlightAuto，
+    // markdown 会被当源码高亮（用户报了这个问题）
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "code", text: "# 标题", path: "tmp/shown/调研-a1b2c3d4.md", name: "调研" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    expect(card.querySelector("div.markdown")).not.toBeNull()
+    expect((card.querySelector("span.file-title") as unknown as { textContent?: string })?.textContent).toBe("调研")
+    // yaml：不当 markdown 渲染，走语法高亮并标 yaml 徽标
+    const c2 = makeMockEl("div")
+    renderBlock(c2 as unknown as HTMLElement, { type: "code", text: "a: 1", path: "tmp/shown/conf-a1b2c3d4.yml", name: "配置" }, "s1")
+    const card2 = c2.children[0] as unknown as MockElWithQuery
+    expect(card2.querySelector("div.markdown")).toBeNull()
+    expect(card2.querySelector("pre.file-code")).not.toBeNull()
+    expect((card2.querySelector("span.file-badge") as unknown as { textContent?: string })?.textContent).toBe("yaml")
+  })
+
   test("code 块源码语言：语法高亮 pre（file-code），语言作徽标", () => {
     const container = makeMockEl("div")
     renderBlock(container as unknown as HTMLElement, { type: "code", text: "const a = 1", language: "typescript", path: "tmp/a.ts", name: "a.ts" }, "s1")

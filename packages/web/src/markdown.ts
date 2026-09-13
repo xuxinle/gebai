@@ -10,6 +10,7 @@ import typescript from "highlight.js/lib/languages/typescript"
 import css from "highlight.js/lib/languages/css"
 import xml from "highlight.js/lib/languages/xml"
 import markdown from "highlight.js/lib/languages/markdown"
+import yaml from "highlight.js/lib/languages/yaml"
 import scss from "highlight.js/lib/languages/scss"
 import less from "highlight.js/lib/languages/less"
 import go from "highlight.js/lib/languages/go"
@@ -31,7 +32,7 @@ import { isLowPower } from "./low-power"
 
 // 语言集与 EXT_LANG（file-card.ts / 服务端 core/diff.ts）保持一致；未注册语言由 highlightAuto 兜底
 for (const [name, lang] of Object.entries({
-  bash, python, json, javascript, typescript, css, xml, markdown,
+  bash, python, json, javascript, typescript, css, xml, markdown, yaml,
   scss, less, go, rust, java, kotlin, ruby, c, cpp, csharp, php, sql, lua, swift, dart,
 })) {
   hljs.registerLanguage(name, lang)
