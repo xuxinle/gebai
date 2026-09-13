@@ -16,6 +16,7 @@ import type { FsApi, GitBranchInfo, GitCommitInfo, GitFileDiff, GitStatusInfo } 
 import { h, icon, showMenu, toast, confirmDialog, promptDialog, clear, timeAgo, formatTime, formatSize, append } from "./ui"
 import { btnIcon, createOpRunner, renderNotRepo as renderNotRepoShared } from "./git-shared"
 import { createDiffEditor, type DiffNav } from "./editor"
+import { graphEdgePath, layoutCommitGraph, type GraphGeometry, type GraphRow } from "./git-graph"
 
 /** 外部可跳转的引用视图（三栏并排常显，故不含「变更」——工作区改动是左栏工具窗的职责）。 */
 export type GitView = "log" | "branches" | "tags" | "stash" | "remotes"
@@ -38,6 +39,53 @@ export interface DiffSpec {
 
 export const WORKTREE_REF = "WORKTREE"
 export const INDEX_REF = "INDEX"
+
+/* ------------------------------ 提交图（日志栏左侧） ------------------------------
+ * 泳道布局与连线几何在 files/git-graph.ts（纯逻辑、可单测）；这里只做像素换算与 SVG 落地。
+ * 行高必须与 CSS 中 `.fw-log-row.graph` 的内容高度一致——跨行的连线靠它严丝合缝。
+ * ------------------------------------------------------------------------------ */
+
+/** 车道宽上限（车道多时按图列总宽等比收窄，线不丢、只是更密） */
+const LANE_W = 14
+/** 日志行内容高度（px），与 files.css 的 `.fw-log-row.graph` 对齐 */
+const ROW_H = 44
+/** 图列总宽上限：再宽就该给提交信息让位了 */
+const GRAPH_MAX_W = 132
+/** 车道配色：**不跟随主题令牌**——图形要靠多色区分并行分支，需要与主题无关的稳定色板 */
+const GRAPH_PALETTE = ["#d9534f", "#4a8fe7", "#3fa96a", "#d2903f", "#9b6cd8", "#2fa3b5", "#d4609f", "#8b8b3d", "#6f7fd8", "#c96a4a"]
+
+const SVG_NS = "http://www.w3.org/2000/svg"
+
+/** 单行提交图（连线 + 节点圆）：一行一个 SVG，宽度统一、高度固定，相邻行自然接成一张图。 */
+function commitGraphSvg(row: GraphRow, geo: GraphGeometry & { width: number }): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg")
+  svg.setAttribute("class", "fw-graph-svg")
+  svg.setAttribute("width", String(geo.width))
+  svg.setAttribute("height", String(geo.rowH))
+  svg.setAttribute("viewBox", `0 0 ${geo.width} ${geo.rowH}`)
+  svg.setAttribute("aria-hidden", "true")
+  for (const e of row.edges) {
+    const path = document.createElementNS(SVG_NS, "path")
+    path.setAttribute("d", graphEdgePath(e, geo))
+    path.setAttribute("fill", "none")
+    path.setAttribute("stroke-linecap", "round")
+    path.style.stroke = GRAPH_PALETTE[e.color % GRAPH_PALETTE.length]!
+    path.style.strokeWidth = "1.6"
+    svg.appendChild(path)
+  }
+  // 合并提交画空心节点（与线性提交区分），颜色随所在车道
+  const dot = document.createElementNS(SVG_NS, "circle")
+  dot.setAttribute("cx", String(row.lane * geo.laneW + geo.laneW / 2))
+  dot.setAttribute("cy", String(geo.rowH / 2))
+  dot.setAttribute("r", row.merge ? "3.6" : "3")
+  dot.setAttribute("fill", row.merge ? "none" : GRAPH_PALETTE[row.color % GRAPH_PALETTE.length]!)
+  if (row.merge) {
+    dot.style.stroke = GRAPH_PALETTE[row.color % GRAPH_PALETTE.length]!
+    dot.style.strokeWidth = "1.8"
+  }
+  svg.appendChild(dot)
+  return svg
+}
 
 /** 写操作动作 → 中文进度文案（标题栏在途提示用；未收录的动作直接显示动作名）。 */
 const OP_LABELS: Record<string, string> = {
@@ -523,6 +571,11 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
     // 重建列表前记下滚动位置：后台刷新（F5 / 提交后 / 写操作后）不该把正在看的提交滚走
     const scrollTop = colLog.scrollTop
     clear(logList)
+    // 提交图：车道多时收窄车道宽（图列总宽封顶）；complete 决定「挂不到实处的线」留不留
+    const graph = layoutCommitGraph(logItems, { complete: !logHasMore })
+    const laneW = Math.max(7, Math.min(LANE_W, Math.floor(GRAPH_MAX_W / Math.max(1, graph.cols))))
+    const geo = { laneW, rowH: ROW_H, width: Math.max(laneW, graph.cols * laneW) }
+    logList.style.setProperty("--fw-graph-w", `${geo.width}px`)
     if (logError) {
       const bar = h("div", { class: "fw-error-bar" }, [icon("warning", 13), h("span", { text: `读取日志失败：${logError}` }), h("span", { class: "fw-grow" })])
       const retry = h("button", { class: "fw-btn sm", text: "重试" })
@@ -534,9 +587,13 @@ export function createGitPanel(hooks: GitHooks): GitPanel {
       const filtered = !!(logFilterPath || logFilterAuthor || logFilterText)
       logList.appendChild(h("div", { class: "fw-empty", text: filtered ? "没有匹配的提交记录" : "暂无提交记录" }))
     }
-    for (const c of logItems) {
-      const row = h("div", { class: "fw-log-row", "data-hash": c.hash, tabindex: "0", role: "button", "aria-label": `${c.short} ${c.subject}` }, [
-        h("div", { class: "fw-log-graph" }, [h("span", { class: "fw-commit-dot" + (c.parents.length > 1 ? " merge" : "") })]),
+    for (let i = 0; i < logItems.length; i++) {
+      const c = logItems[i]!
+      const graphRow = graph.rows[i]
+      const graphCell = h("div", { class: "fw-log-graph" })
+      if (graphRow) graphCell.appendChild(commitGraphSvg(graphRow, geo))
+      const row = h("div", { class: "fw-log-row graph", "data-hash": c.hash, tabindex: "0", role: "button", "aria-label": `${c.short} ${c.subject}` }, [
+        graphCell,
         h("div", { class: "fw-log-main" }, [
           h("div", { class: "fw-log-subject", text: c.subject || "(无提交信息)", title: c.subject }),
           h("div", { class: "fw-log-meta" }, [

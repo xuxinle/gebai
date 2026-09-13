@@ -1462,22 +1462,35 @@ button.fw-status-item:hover {
 }
 
 .fw-log-graph {
-  width: 14px;
+  flex: none;
+  width: var(--fw-graph-w, 14px);
   display: flex;
   align-items: center;
+}
+
+/* 带提交图的行：内容高度固定 44px（含 1px 底边框）——跨行连线必须严丝合缝，
+   行高一旦随内容变，同一根线在相邻两行就会错位（对应 files/git-graph.ts 的 ROW_H）。 */
+.fw-log-row.graph {
+  height: 45px;
+  padding: 0 8px;
+  align-items: stretch;
+}
+
+.fw-log-row.graph .fw-log-main {
+  display: flex;
+  flex-direction: column;
   justify-content: center;
 }
 
-.fw-commit-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex: none;
+/* 固定行高下换行只会被裁掉：提交信息与 refs 标签一行到底，超出即截断 */
+.fw-log-row.graph .fw-log-meta {
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
-.fw-commit-dot.merge {
-  background: var(--warning);
+.fw-graph-svg {
+  display: block;
+  flex: none;
 }
 
 .fw-log-main {
