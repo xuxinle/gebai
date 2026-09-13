@@ -219,7 +219,7 @@ return errs`,
     )
     const data = r.data as { result: string[] }
     expect(data.result[0]).toContain("未知工具: nope")
-    expect(data.result[1]).toContain("防嵌套")
+    expect(data.result[1]).toContain("不能再调用 js")
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -347,14 +347,14 @@ return { errs, ro: ro.output }`,
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("嵌套守卫：fromJsBridge 标记下 js/动态工具拒绝；js→直执行工具→js 通道封死", async () => {
+  test("重入守卫：语言链含 js 时 js 拒绝；js→直执行工具→js 通道封死", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-nest2-"))
-    // 标记直拒（js 工具）
+    // 链检查直拒（纵深防御路径：工具内部直调 js 时也拦得住；正常路径在分发层硬拒）
     const cMarked = ctxWithTools(home)
-    cMarked.fromJsBridge = true
+    cMarked.bridgeLangs = ["js"]
     const refused = await jsTool.execute({ code: "return 1" }, cMarked)
     expect(refused.output).toContain("嵌套")
-    // 动态工具不经 marker 拒绝（depth 0 同脚本调用是合法路径，动态嵌套由 depth 守卫拦截——见 defineTool 系列测试）
+    // 动态工具不经重入拒绝（depth 0 同脚本调用是合法路径，动态嵌套由 depth 守卫拦截——见 defineTool 系列测试）
     const c = ctxWithTools(home)
     // 集成：js 调直执行透传工具（原 flow 同款通道——工具内部以桥传入的 ctx 再执行 js）→ 得到拒绝说明（不再起嵌套子进程）
     const passthrough: Tool = mkTool("passthrough", async (args, c2) => jsTool.execute((args as { params: { code: string } }).params, c2))

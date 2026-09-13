@@ -1639,7 +1639,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | 脚本 | 运行方式 | 宿主机要求 |
 |------|---------|-----------|
 | `sh` | 子进程执行 shell（Windows 自动 `chcp 65001` 切 UTF-8 代码页 + 输出自适应解码：UTF-8 优先、含替换字符回退 GBK；Windows 子进程不设 detached——实测会导致外部程序管道输出丢失；命令成功但无输出时明确提示「无输出」，区分捕获失败；**`timeout` 参数（秒，默认 300、上限 540）调整个别执行超时**） | 有 shell（各平台自带） |
-| `py` | 子进程执行 python（**`timeout` 参数同 `sh`**） | 安装 Python |
+| `py` | 子进程执行 python（**`timeout` 参数同 `sh`**）；**本地模式带工具桥**（工具名即函数 / `tools.call` / `ctx`·`input` 注入，协议走回环 socket，见「py 工具桥（仅本地模式）」） | 安装 Python |
 | `js` | 子进程执行 JS/TS（Bun 运行时：脚本调试模式 `bun <script>` 直跑；二进制模式 `[execPath, 入口, "exec", script]` 复用**编译进二进制/打包产物的 Bun 运行时**自执行，见「js 脚本工具」；**`timeout` 参数同 `sh`**） | **无需安装**（运行时已内嵌） |
 | JS/TS（经 `sh`） | 宿主机已有 `node`/`bun` 时 `sh` 直接调用亦可（`bun run x.ts` / `node x.js`），与 `js` 工具两条路径并存 | 安装 bun/node |
 
@@ -2059,22 +2059,39 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 
 ### `js` 脚本工具（工具动态编程）
 
-**数据流编排的唯一内建方式**（原 `flow` 声明式管道已移除——上下文占用大、使用门槛高，js 完整语言能力可覆盖其全部场景且更直观）：可预判的固定流程与高阶编排逻辑（动态构造参数、按中间结果分支重试、复杂聚合变换、正则/字符串处理、错误分类处理）统一用 `js` 一次编程执行——脚本运行于 Bun 子进程（隔离、可超时终止），进程内注入**工具调用桥**与**会话上下文**，把工具当作函数做动态编程。实现为纯模块 `core/js-tool.ts`（前导生成 + 子进程桥接，可独立单测）。
+**数据流编排的唯一内建方式**（原 `flow` 声明式管道已移除——上下文占用大、使用门槛高，js 完整语言能力可覆盖其全部场景且更直观）：可预判的固定流程与高阶编排逻辑（动态构造参数、按中间结果分支重试、复杂聚合变换、正则/字符串处理、错误分类处理）统一用 `js` 一次编程执行——脚本运行于 Bun 子进程（隔离、可超时终止），进程内注入**工具调用桥**与**会话上下文**，把工具当作函数做动态编程。实现为纯模块 `core/js-tool.ts`（前导生成 + 子进程桥接，可独立单测）；**分发层守卫抽到 `core/exec/tool-bridge.ts` 与 py 桥共用**（两条桥一份实现，漏一条即多一条绕过通道），py 侧见「py 工具桥（仅本地模式）」。
 
 #### 为什么编排层是 `js`（而非 `py`）
 
-**分工结论：编排归 `js`，计算归 `py`**——这条边界由两边能力边界决定，非口味偏好（`py` 与客卿承载重计算：pandas/numpy/BM25/哈希/图像；`js` 承载编排），也是「给 py 加工具桥」类提案的驳回依据（依「核心不变式：能力外置、权力内守」——编排是发起治理动作的权力侧，不应跨语言边界）：
+**分工结论：编排首选 `js`，计算归 `py`**——这条边界由两边能力边界决定，非口味偏好（`py` 与客卿承载重计算：pandas/numpy/BM25/哈希/图像；`js` 承载编排），也是**默认编排入口落在 `js`** 的依据。`py` 侧的编排能力**仅在本地模式**以「py 工具桥」补齐（见下节）——结论不是「py 不能编排」，而是下表三项成本在沙箱/多用户部署不划算；本地单用户部署下它们可接受，故桥只在该形态启用：
 
 | 编排层的硬要求 | `js` | `py` |
 |----------------|------|------|
 | **零装配可用** | Bun 运行时已 `--compile` 内嵌进二进制，`gebai exec` 复用自身（边际成本 0，交付即用） | 解释器不可内嵌——需宿主机安装，版本/环境不可控（DESIGN「脚本执行环境」标明宿主机要求为「安装 Python」） |
-| **协议通道可独占** | `console.*` 是单一汇聚点，补丁即接管几乎全部输出，stdout 保持纯协议 | 输出路径分散（`print`/`logging`/`warnings`/C 扩展直写 fd/`os.write(1,…)`/子进程继承 fd），**无法保证 stdout 纯净**——桥只能另开通道，而 Windows 无 fd 继承（只剩命名管道/loopback socket + 自建 token 认证） |
-| **可静态审查（安全模式的只读承诺）** | `scanJsReadOnly` 词元级拒绝 + 子进程 shim（写/进程/网络 API 屏蔽、`Function.prototype.constructor` 中性化）可**做实**「降级为只读运行时」 | 等价承诺不可做：`__import__`/`getattr`/`eval`/`exec`/`ctypes`/`pickle` 遍地逃逸面，字符串可拼出任意调用；进程内 `sys.addaudithook` 也拦不住 `os.system` 起的新进程（新进程无钩子） |
+| **协议通道可独占** | `console.*` 是单一汇聚点，补丁即接管几乎全部输出，stdout 保持纯协议 | 输出路径分散（`print`/`logging`/`warnings`/C 扩展直写 fd/`os.write(1,…)`/子进程继承 fd），**stdout 不可独占**——故 py 桥**不占 stdio，另开通道**：回环 socket + 一次性 token 认证（Windows 无 fd 继承，stdio 之外只有命名管道/loopback socket 两条路，已按后者落地，见下节） |
+| **可静态审查（安全模式的只读承诺）** | `scanJsReadOnly` 词元级拒绝 + 子进程 shim（写/进程/网络 API 屏蔽、`Function.prototype.constructor` 中性化）可**做实**「降级为只读运行时」 | 等价承诺不可做：`__import__`/`getattr`/`eval`/`exec`/`ctypes`/`pickle` 遍地逃逸面，字符串可拼出任意调用；进程内 `sys.addaudithook` 也拦不住 `os.system` 起的新进程（新进程无钩子）——**故安全模式不注入 py 桥**（只读运行时形态保持原样） |
 | **固化闭环** | 函数一等公民，`fn.toString()` 直接序列化、跨进程重新求值语义干净（defineTool 与编排在同一语言里闭合） | `inspect.getsource` 在闭包/装饰器/模块依赖边界上脆弱，「源码序列化→新进程求值」不干净 |
 
-编排的三个刚需亦为 `js` 原生、`py` 要现搭：**工具即函数**（模块作用域函数声明，`await read({ path })` 直接可用；`defineTool` 注册后同脚本内立即可调）、**真并发**（`Promise.all` + 行级分发按 id 配对，`py` 等价需 asyncio/线程）、**数据模型同构**（工具 schema 为 JSON Schema、工具实现为 TS、编排为 JS，一个语言内闭合；`py` 侧有 `None`/`True` 映射与引号心智）。加上内嵌运行时的毫秒级启动，契合临时脚本这一高频用法。
+编排的三个刚需 **`js` 原生即得**（**工具即函数**——模块作用域函数声明 + `defineTool` 注册后同脚本内立即可调；**真并发**——`Promise.all` + 行级分发按 id 配对；**数据模型同构**——工具 schema/工具实现/编排同为 JS，一个语言内闭合），`py` 侧则由「py 工具桥」在**本地模式**现搭（工具名即函数、线程池并行调用、`json.loads` 注入与 `None`/`True` 映射的心智成本）。加上内嵌运行时的毫秒级启动，契合临时脚本这一高频用法。
 
 `py` 不可替代之处（故只作计算/长驻状态，不作编排）：重计算生态、已有 Python 资产与团队技能（写客卿驱动同样进工具面）、**长驻状态**（`docqa_run` 的会话级 REPL 命名空间——`js` 是一次性脚本不留状态）。
+
+#### py 工具桥（仅本地模式）
+
+`py` 在本地模式（非沙箱、非安全模式、非经 js 桥调用）下**也具备「工具即函数」编排能力**，调用面与 `js` 对称——代价按上表三项在小规模部署可接受，且不与「编排首选 js」冲突：`js` 仍是默认编排入口（零装配 + `defineTool` 闭环），py 桥服务于已有 Python 资产/技能与「计算与编排同脚本」的本地场景。
+
+- **通信：协议不借用 stdio**（本实现的核心取舍）。Python 输出路径分散，stdout 无法像 `console.*` 那样被单点接管，故桥**另开通道**：父进程 `net.createServer` 监听 `127.0.0.1:0` 随机端口 + 一次性 token（`randomUUID`），**只接受首个连接**（首行 `{"t":"auth",…}` 校验，失败即断开）且连接建立后**立即关闭监听**；`print`/fd 直写/C 扩展/子进程继承的所有输出一律原样进 stdout（父进程按纯文本捕获，与旧 `runCommand` 路径语义一致），stdin 亦不被占用（`input` 以变量注入）——**不存在用户输出污染协议解析的问题，也无需 fd 重定向/特殊标记**
+- **调用面**：已启用工具名即函数——`r = read({"path": "a.txt"})`（Python 侧按 `keyword`/`builtins` 过滤非法标识符与内建同名）；动态名用 `tools.call(name, params)` 或 `tools.<工具名>(params)`；返回值为 dict 且支持属性访问（`r["output"]` ≡ `r.output`，含 `data`/`blocks`/`truncated`；**属性访问仅作用于顶层**——嵌套字段是普通 dict，按下标访问，如 `r["data"]["exitCode"]`）；工具失败抛 `_G_ToolError`（`try/except` 可容错继续）。注入 `ctx`（`env` 运行时取 `os.environ`——脚本文件不落盘密钥，与 js 同规则）与 `input`（JSON 注入，遮蔽内建 `input()`）；脚本设顶层变量 `result = …` 即作为结构化返回值（进 `data.result`），`data` 为 `{stdout, stderr, exitCode, result?, calls?}`
+- **真并发**：应答由后台读线程按 id 派发到各调用方队列，`tools.call` 为**同步阻塞** API——单线程写法自然，`ThreadPoolExecutor` 可并行调用（与 js 的 `Promise.all` 同语义）
+- **门控（fail-closed）**：仅 `!ctx.sandboxed && !ctx.safeMode && !bridgeLangs.includes("py")` 才注入桥——沙箱模式（服务端多用户部署）与安全模式走既有 `runCommand` 纯脚本路径（行为不变）；安全模式**刻意不给桥**（只读承诺不因新通道被削弱，需要编排时用 js）；py 桥重入（链中已含 py，链断在该层）同样不注桥。另一种语言首次进入时照常注桥（`js→py` 的 py 带桥，链重入由链封死）
+- **降级**：socket/进程不可用（连接未在 8 秒内建立、子进程未能启动）时**不退回有污染风险的 stdio 桥**，改纯脚本执行并在输出首行说明「脚本桥不可用」
+- **不支持 `defineTool`**（Python「源码序列化 → 新进程求值」不干净）；**审批恒需**（`code` 为任意代码、无法静态判定，`approval:false` 不生效；默认审批一次覆盖脚本内全部工具调用）
+- **守卫与 js 共用**（`core/exec/tool-bridge.ts`）：名称容错、同类桥重入、运行时定义工具 depth 限制、安全模式硬阻断集（cron 类）、调用总数上限、必填参数校验、免审拦截、结果封顶与 `blocks`/子会话存档透传
+- **嵌套面：链式重入（同类桥不可重入）**——ctx 携带**脚本桥语言链**（`bridgeLangs`，分发层逐层追加），判定用「已进入链 + 本桥语言」：
+  - `py→js`、`js→py`（**另一种语言首次进入**）：**放行**——一层混合编排合法（py 里可借 JS 能力，js 里可借 Python 计算/生态）；链只增不减，任一语言第二次出现即拒，链长上限 2（最多再由 2 层脚本子进程），自然终止
+  - `js→…→js` / `py→…→py`（同类重入，含 `js→py→js`、`py→js→py` 与动态工具中转）：**拒绝**——分发层硬拒（脚本侧表现为工具级异常，`try/except` 可捕获）；js 的 execute 另有一道链检查作纵深防御（拦住「工具内部直调桥」的旁路；此处为**返回文本的软拒绝**：主循环下模型读文本自愈，脚本内则由分发层先拦）
+  - **为何重入必须硬拒绝**：脚本桥内是**程序化调用**——软拒绝会被脚本当正常返回值继续处理（`try/except` 抓不到），脚本无从判定
+- **实现期踩坑（均已回归覆盖）**：① JSON 字面量含 `true/false/null` 不是合法 Python 字面量——注入数据一律经 `json.loads` 解析（`_G_CTX`/`_G_INPUT`/`_G_TOOL_NAMES`）；② 子进程退出（`child close`）与 socket `data` 事件派发顺序不保证——收尾须**排空**（等 in-flight 工具调用结束 + 数据安静 60ms，上限 500ms），否则 `done` 消息丢失（表现为「脚本返回值丢失」）；③ Windows 上 `close()` 时若有 pending `recv` 会触发 RST、对端丢弃尚未派发的 `done`——Python 侧先 `shutdown(SHUT_RDWR)` 再 `close`；④ Python 管道下块缓冲会打乱输出顺序——以 `-u` + `PYTHONUTF8=1` 启动
 
 #### 执行模型
 
@@ -2117,7 +2134,7 @@ await defineTool({
 - **审批**：与 `sh` 同姿态——默认需审批（脚本=任意代码执行），`approval:false` 按次免审；**默认审批一次覆盖整个脚本含内部工具调用**（一次审批、依次执行）；**免审运行（`approval:false`/免审动态工具）时内部调用需审批的工具在 RPC 分发层被拒**——免审脚本体未经用户审阅，按剥离免审标记后的审批姿态解析（`stripApprovalFlags`，防脚本内再传 `approval:false` 自我免审，与引擎无交互硬门槛同规则；`requiresApproval` 函数异常按需审批处理）
 - **安全模式**：`js` 本身**降级为只读运行时**而非禁用——静态扫描（`scanJsReadOnly`：动态 `import()`/`require()`/`eval()`/`Function()`/`import.meta.require`/`process.getBuiltinModule`/`process.binding`/`Bun.fetch`/`Bun.sqlite` 前置拒绝）+ 子进程 shim（Bun 写/进程/网络 API 屏蔽、`Bun.file` 拦写留读、eval/Function/fetch/Worker 全局删除、`Function.prototype.constructor` 中性化）；内部工具调用在 RPC 分发层按硬阻断集（`isToolBlockedInSafeMode`，cron 调度类）拦截（无绕过通道），`sh`/`py`/`write` 等照常可调、由各工具降级规则执行；`defineTool` 与磁盘持久化动态工具同规则降级（execute 源码扫描 + 只读 shim），注册与水合均允许——只读动态工具安全模式下可用
 - **内部调用走同一 `ToolContext`**：`writeGuard`（子Agent 写范围）/`fileGuard`（防盲覆盖）等会话级守卫对脚本内工具调用同样生效
-- **防嵌套**：脚本内不能再调用 `js`（含 `{agent}_js`）——防嵌套 RPC 桥子进程失控；**动态工具内不能调用动态工具/js**（`runtimeDefined` + depth 守卫），**动态工具运行器（depth 1）内不能再 `defineTool`**（防递归注册）；RPC 分发层执行工具统一携带 **`fromJsBridge` 标记**，`js` 的 execute 见标记即拒——封死 js→（直执行工具）→js 交替递归与所有经直执行工具回到 js 的路径（动态工具不经标记拒绝：depth 0 同脚本调用是合法路径，js→dyn 至多一层动态子进程、无递归通道）；`sh`/`py` 不受限（脚本本就可 `Bun.spawn`）
+- **防嵌套（链式重入）**：脚本桥不可重入——ctx 携带**语言链**（`bridgeLangs`，分发层逐层追加，判定用「已进入链 + 本桥语言」），同类桥再次进入即拒（`js→…→js`、`py→…→py`，含经直执行工具/动态工具的中转）；**另一种语言首次进入放行**（`js→py` / `py→js` 一层混合编排，链长上限 2 自然终止）。**动态工具内不能调用动态工具/js**（`runtimeDefined` + depth 守卫），**动态工具运行器（depth 1）内不能再 `defineTool`**（防递归注册）；`js` 的 execute 另有链检查作纵深防御（拦「工具内部直调桥」旁路，为返回文本的软拒绝）；`sh`/`py` 不受限（脚本本就可 `Bun.spawn`）
 - **规模上限**：单次脚本工具调用总数 ≤ 100；RPC 协议行子进程侧 ~2MB / 服务端 2.5MB 截断兜底（防巨对象撑爆内存）；非 JSON 输出行 ≤100k 按日志透传、超长丢弃留注（多为 2MB 截断产生的非法 JSON，防垃圾文本刷屏）
 - **密钥不落盘**：`ctx.env` 不嵌入临时脚本文件（历来明文写入合并后的全部环境变量，崩溃残留即密钥泄漏）——子进程内改为运行时引用 `process.env`（spawn 已传同源环境、沙箱脱敏同规则，语义完全一致）；messages 等会话数据仍嵌入（ctx 注入契约，属任务数据）
 - **内置函数声明过滤 JS 全局名**：子Agent 工具名为 JS 全局（`fetch`/`JSON`/`Promise`/`Bun` 等）时不生成模块作用域函数声明（会遮蔽全局，`JSON.parse` 莫名变工具调用），仍可经 `tools.call` 动态调用
@@ -2799,8 +2816,9 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 用户待办文本/结果上限 | 2000 / 1000 字符 | 待办文本上限（也是闲时任务提示词，`TODO_TEXT_MAX`）/ 执行结果摘要（`TODO_RESULT_MAX`）；单用户条数上限 500（`TODO_MAX_ITEMS`） |
 | 定时通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片正文中输出与错误的保留长度（`NOTIFY_TEXT_MAX`；卡片整体限 12000——`NOTIFY_CARD_MAX`，1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 `truncateForFeishu` 同额）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
 | show html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
-| js 工具调用总数上限 | 100 | 单次 js 脚本内工具调用总数（`JS_TOOL_MAX_CALLS`） |
-| js RPC 字段截断 | 100k 字符 | js 工具调用桥单字段（output/data）截断（`JS_RPC_FIELD_CAP`） |
+| 脚本桥调用总数上限 | 100 | 单次脚本（js/py 桥）内工具调用总数（`BRIDGE_TOOL_MAX_CALLS`；js 侧别名 `JS_TOOL_MAX_CALLS`） |
+| 脚本桥字段截断 | 100k 字符 | 脚本桥单字段（output/data）截断（`BRIDGE_FIELD_CAP`，js 侧别名 `JS_RPC_FIELD_CAP`）；内层 blocks 透传上限 10（`BRIDGE_BLOCKS_CAP`） |
+| py 桥常量 | 连接 8s / stdout 2MB / 协议行 2.5MB | 桥连接建立超时（`PY_BRIDGE_CONNECT_TIMEOUT_MS`，超时即降级纯脚本执行）/ stdout 捕获上限（`PY_STDOUT_CAP`，超出丢弃留注）与 stderr 尾部 8k（`PY_STDERR_TAIL`）/ 单条协议行上限（`PY_PROTOCOL_LINE_CAP`）；data 字段截断 100k（`PY_DATA_TEXT_CAP`）、返回值预览 2000（`PY_RESULT_PREVIEW_CHARS`） |
 | js data 截断 | 100k 字符 | js 结构化 data 中 logs/result 截断（`JS_DATA_TEXT_CAP`，与 sh/py 对齐）；返回值预览 2000 字符（`JS_RESULT_PREVIEW_CHARS`） |
 | js RPC 协议行上限 | 子进程 2MB / 服务端 2.5MB | 协议行截断兜底（防巨对象撑爆内存，超出注明截断） |
 | js 会话上下文注入 | 最近 50 条 / 单条 2000 字符 | ctx.messages 快照条数与单条内容上限（`JS_CONTEXT_MESSAGES_MAX`/`JS_CONTEXT_MESSAGE_CHARS`） |

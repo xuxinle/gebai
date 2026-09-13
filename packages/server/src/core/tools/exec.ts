@@ -1,8 +1,9 @@
-/** 脚本执行类全局工具（sh/py；js 见 core/exec/js-tool.ts，本文件一并登记注册条目）——自 core/tools.ts 按域拆分。 */
-import { randomUUID } from "node:crypto"
+/** 脚本执行类全局工具（sh；py 见 core/exec/py-tool.ts（工具桥，仅本地模式）、js 见 core/exec/js-tool.ts）
+ *  ——本文件一并登记注册条目，自 core/tools.ts 按域拆分。 */
 import type { Tool, ToolContext } from "../base/types"
 import { jsTool } from "../exec/js-tool"
-import { PY_SAFE_BOOTSTRAP, shApprovalFreeAllowed, validateShCommandSafeMode } from "../security/safety"
+import { pyTool } from "../exec/py-tool"
+import { shApprovalFreeAllowed, validateShCommandSafeMode } from "../security/safety"
 import { scriptTimeoutMs } from "../support/exec-opts"
 import { shTaskLifetimeMs } from "../exec/sh-tasks"
 import { truncate } from "../support/truncate"
@@ -99,72 +100,9 @@ export const shTool: Tool = {
   },
 }
 
-/** python 可执行文件探测缓存：undefined=未探测，null=已探测但未命中候选。 */
-let pythonCmdCache: string | null | undefined
-
-/** 测试用：重置探测缓存。 */
-export function _resetPythonCmdCache(): void {
-  pythonCmdCache = undefined
-}
-
-/** 探测可用的 python 命令（跨平台：Linux/macOS 多为 python3，Windows 多为 python/py），结果缓存。 */
-export async function resolvePythonCmd(ctx: ToolContext): Promise<string> {
-  if (pythonCmdCache != null) return pythonCmdCache
-  for (const cand of ["python3", "python", "py"]) {
-    const r = await ctx.runCommand(`${cand} --version`).catch(() => ({ stdout: "", stderr: "", code: 1 }))
-    if (r.code === 0) {
-      pythonCmdCache = cand
-      return cand
-    }
-  }
-  pythonCmdCache = "python"
-  return "python"
-}
-
-export const pyTool: Tool = {
-  name: "py",
-  description: "执行 Python 代码（经临时文件），stdout 为输出。安全模式下审计钩子屏蔽写文件/进程/网络（仅保留文件读取）。",
-  requiresApproval: scriptRequiresApproval,
-  card: { args: "code", codeField: "code", codeLang: "python" },
-  parameters: schema(
-    {
-      code: { type: "string", description: "Python 程序源码" },
-      input: { type: "string", description: "可选：作为程序 stdin 的输入数据" },
-      timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
-      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」语义）；默认 false 非 0 退出作为正常结果返回" },
-      approval: { type: "boolean", description: "兼容参数：py 的 code 为任意代码、无法静态判定安全性，免审标记不生效（默认且恒需审批）" },
-    },
-    ["code"],
-  ),
-  outputSchema: scriptOutputSchema,
-  async execute(args, ctx) {
-    const code = String(args.code ?? "")
-    const input = scriptInput(args.input)
-    // 代码写临时文件执行：stdin 留给管道数据（原实现 code 走 stdin，无法同时传输入）；
-    // 安全模式：前置审计钩子引导段（sys.addaudithook 拦写模式 open 与进程/网络/文件变更系统调用，仅保留文件读取）
-    const finalCode = ctx.safeMode ? `${PY_SAFE_BOOTSTRAP}\n${code}` : code
-    const { writeFile, rm } = await import("node:fs/promises")
-    const scriptPath = `${ctx.workdir}/.gebai_py_${randomUUID().replace(/-/g, "")}.py`
-    await writeFile(scriptPath, finalCode)
-    try {
-      // -X utf8 / PYTHONUTF8=1：强制 UTF-8 输出（Windows 默认 GBK 会造成乱码）
-      const py = await resolvePythonCmd(ctx)
-      const { stdout, stderr, code: exit } = await ctx.runCommand(`${py} -X utf8 "${scriptPath}"`, { workdir: ctx.workdir, env: { ...ctx.env, PYTHONUTF8: "1" }, input, timeoutMs: scriptTimeoutMs(args.timeout) })
-      // strict：非 0 退出码转工具级异常（js 编排内未捕获即中断整个脚本，try/catch 可容错继续）
-      if (args.strict === true && exit !== 0) {
-        throw new Error(`程序执行失败（exit ${exit}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)
-      }
-      const out = exit === 0 ? stdout : `${stdout}\n${stderr}\n[exit ${exit}]`
-      // 成功但无输出：明确提示（区分「程序成功无输出」与「stdout 捕获失败」）；
-      // 工作目录注记（与 sh 同规则）：project 参数路由/项目绑定时标注实际执行目录
-      const cwdNote = ctx.workdir !== (ctx.sessionWorkdir ?? ctx.workdir) ? `\n（工作目录: ${ctx.workdir}）` : ""
-      const final = exit === 0 && !stdout.trim() ? `（程序执行成功，无输出）${cwdNote}` : out + cwdNote
-      return { ...(await truncate(final, "py", ctx)), data: scriptData(stdout, stderr, exit) }
-    } finally {
-      await rm(scriptPath, { force: true }).catch(() => {})
-    }
-  },
-}
+/** py 工具（工具桥，仅本地模式）与解释器解析的实现见 core/exec/py-tool.ts：此处 re-export
+ *  保持既有引用路径（tools/index.ts、测试）稳定。 */
+export { pyTool, resolvePythonCmd, _resetPythonCmdCache } from "../exec/py-tool"
 
 export const globalTools: GlobalToolEntry[] = [
   // sh/py 统一 projectAware({ workdir: true }) 包装：workdir 参数切换执行目录（项目机制）

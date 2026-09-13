@@ -163,6 +163,8 @@ describe("global tools", () => {
   test("py strict: non-zero exit throws; zero exit unaffected", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-py-strict-"))
     const c = ctx(home)
+    // 沙箱模式：走纯脚本路径（`runCommand`）——本地模式为工具桥路径（socket spawn），见 py-tool.test.ts
+    c.sandboxed = true
     // 脚本经临时文件执行（命令是解释器+路径，无法从命令内容判断脚本），按脚本调用序号模拟退出码；
     // --version 探测恒成功
     let scriptCalls = 0
@@ -339,6 +341,8 @@ describe("global tools", () => {
     _resetPythonCmdCache()
     const home = mkdtempSync(join(tmpdir(), "gebai-py-timeout-"))
     const c = ctx(home)
+    // 沙箱模式：走纯脚本路径（本地模式为工具桥路径，超时由子进程 kill 实现）
+    c.sandboxed = true
     let timeoutMs: number | undefined
     c.runCommand = async (cmd, o) => {
       if (cmd.endsWith("--version")) return { stdout: "Python 3.12.0\n", stderr: "", code: 0 }
@@ -1925,9 +1929,12 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
   test("py/sh 对象 input 序列化为 JSON 文本（脚本 json.loads 可直接解析，非 [object Object]）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-py-json-"))
     _resetPythonCmdCache()
+    // 沙箱模式：走纯脚本路径（input 经 stdin 承接）——本地模式工具桥下 input 以 JSON 注入 `input` 变量（见 py-tool.test.ts）
+    const pyCtx = ctx(home)
+    pyCtx.sandboxed = true
     const r = await createGlobalTools().py.execute(
       { code: "import json, sys\nprint(json.loads(sys.stdin.read())['name'])", input: { name: "demo", v: 1 } },
-      ctx(home),
+      pyCtx,
     )
     expect(r.output.trim()).toBe("demo")
     const c = ctx(tmpdir())

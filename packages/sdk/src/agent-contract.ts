@@ -140,8 +140,14 @@ export type ToolContext = {
   recentMessages?: () => Array<{ role: string; name?: string; content: string }>
   /** 安全模式（GEBAI_SAFE_MODE=true 启动时加载）：js 等工具内直接执行工具的工具需按同规则拦截。 */
   safeMode?: boolean
-  /** js RPC 桥标记（js-tool 分发层注入，仅 js-tool 内部使用）。 */
-  fromJsBridge?: boolean
+  /** 脚本桥语言链（脚本桥分发层注入，仅 js/py 桥内部使用）：**已进入**的脚本桥语言，按调用顺序追加
+   *  （`["py","js"]` = 顶层 py 桥内调用 js 桥）。用途：
+   *  ① 同类桥不可重入——目标是 js/py 且该语言已在链中时分发层拒绝（防嵌套 RPC 子进程失控）；
+   *  ② js 的 execute 见链中含 js 即拒（纵深防御，工具内部直调桥也拦得住）；
+   *  ③ py 的门控——链中含 py（重入）时不注入工具桥，改纯脚本执行。
+   *  另一种语言首次进入时放行（一节混合编排：py→js / js→py 均合法）。
+   *  可选：测试桩/无桥环境不注入时按空链处理。 */
+  bridgeLangs?: string[]
   /** 会话级已读文件追踪（防误覆盖/防陈旧覆盖）。可选：测试桩/无引擎环境不注入时相关守卫自动放行。 */
   fileGuard?: FileGuardContext
   /** 写范围守卫（子Agent 声明、引擎按「会话已装载/子会话预加载的子Agent」注入）：文件写类工具
