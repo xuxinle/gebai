@@ -318,7 +318,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     ? null
     : scheduleGC(config.gebaiHome, {
         // 归档后失效会话缓存，防止缓存命中后 save() 在 sessions/ 重建已归档目录
-        onArchive: (sessionId) => store.evict(sessionId),
+        onArchive: (sessionId) => store.markRemoved(sessionId, "archived"),
       })
   // 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true）：长连接订阅消息事件，回推 Agent 回复
   let feishuBot: FeishuBot | null = null

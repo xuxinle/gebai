@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs"
-import { readFile, writeFile } from "node:fs/promises"
+import { readFile, rename, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve, sep } from "node:path"
 import { ToolRegistry } from "./registry"
@@ -418,6 +418,54 @@ describe("SessionStore ownership", () => {
     expect(store.ownerOf(s.id)).toBe("alice")
     await store.delete(s.id)
     expect(store.ownerOf(s.id)).toBeNull()
+    cleanup(home)
+  })
+
+  test("delete 同时失效缓存：已删会话不可再读，陈旧引用不复活数据", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-del-cache-"))
+    const store = new SessionStore({ home })
+    const s = await store.createSession("alice")
+    await store.appendMessage(s.id, { id: "m1", role: "user", content: "hi", createdAt: Date.now() })
+    const dir = sessionPath(home, "alice", s.id)
+    const stale = await store.load(s.id, "alice")
+    await store.delete(s.id, "alice")
+    // 目录已删 **且缓存已失效**：load 不得命中内存残留（否则 REST GET/WS 仍返还已删数据）
+    expect(existsSync(dir)).toBe(false)
+    expect(await store.load(s.id, "alice")).toBeNull()
+    // 会话列表也不含已删会话
+    expect((await store.listSessions("alice")).some((x) => x.id === s.id)).toBe(false)
+    /** 删后 store 级写入路径一律拒绝且不重建目录（均经 load 前置）。 */
+    await expect(store.appendMessage(s.id, { id: "m2", role: "user", content: "after delete", createdAt: Date.now() })).rejects.toThrow(/not found/)
+    await expect(store.setTodos(s.id, [{ id: "t1", title: "x", status: "pending", priority: "medium" }])).rejects.toThrow(/not found/)
+    expect(existsSync(dir)).toBe(false)
+    /** 陈旧引用直接 save（运行中任务收尾/压缩/cron 的真实形态）：拒绝落盘且目录不重建。 */
+    stale!.messages.push({ id: "m3", role: "user", content: "stale", createdAt: Date.now() })
+    await expect(store.save(stale!)).rejects.toThrow(/deleted/)
+    expect(existsSync(dir)).toBe(false)
+    cleanup(home)
+  })
+
+  test("GC 归档置移除标记：归档后陈旧引用不复活；恢复后（clearRemoved）可正常落盘", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-archive-"))
+    const store = new SessionStore({ home })
+    const s = await store.createSession("alice")
+    await store.appendMessage(s.id, { id: "m1", role: "user", content: "hi", createdAt: Date.now() })
+    const dir = sessionPath(home, "alice", s.id)
+    const stale = await store.load(s.id, "alice")
+    // 模拟 GC 归档：目录移入 trash 后置移除标记
+    const trashDir = join(home, "users", "alice", "trash", "2020-01-01", s.id)
+    mkdirSync(join(home, "users", "alice", "trash", "2020-01-01"), { recursive: true })
+    await rename(dir, trashDir)
+    store.markRemoved(s.id, "archived")
+    await expect(store.save(stale!)).rejects.toThrow(/archived/)
+    expect(existsSync(dir)).toBe(false)
+    // 恢复（回收站移回 + clearRemoved）：可正常读写
+    await rename(trashDir, dir)
+    store.clearRemoved(s.id)
+    const loaded = await store.load(s.id, "alice")
+    expect(loaded).not.toBeNull()
+    await expect(store.appendMessage(s.id, { id: "m2", role: "user", content: "back", createdAt: Date.now() })).resolves.toBeUndefined()
+    expect(existsSync(join(dir, "chat.json"))).toBe(true)
     cleanup(home)
   })
 

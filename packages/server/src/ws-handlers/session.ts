@@ -85,7 +85,7 @@ export const sessionHandlers: Record<string, WsHandler> = {
     } catch (err) {
       return reply(false, undefined, `restore failed: ${String((err as Error).message || err)}`)
     }
-    d.store.evict(id)
+    d.store.clearRemoved(id)
     return reply(true)
   },
   "session.todo.get": async ({ d, user, p, reply }) => {

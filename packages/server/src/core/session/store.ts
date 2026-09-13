@@ -291,6 +291,9 @@ export function repairToolPairing<T extends PairingRepairMessage>(messages: T[],
   return out
 }
 
+/** 会话从存储移除的原因（`SessionStore.markRemoved`）：删除（用户主动/清理）与 GC 归档（进回收站）。 */
+export type RemovalReason = "deleted" | "archived"
+
 export class SessionStore {
   private cache = new Map<string, SessionData>()
   private envCache = new Map<string, Record<string, string>>()
@@ -298,6 +301,10 @@ export class SessionStore {
   private indexedPathsByUser = new Map<string, string[]>()
   /** 会话 id → 所有者 user id（无 user 上下文的归属查询用，如 webhook 事件过滤）。 */
   private owners = new Map<string, string>()
+  /** 会话 id → 移除原因（删除 / GC 归档）：`save()` 拒绝为已移除会话落盘——
+   *  移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾/压缩/cron 等直接 save 路径）
+   *  不会把已删/已归档会话连同数据整体重建；新建会话（新 id 不复用）与回收站恢复会清除该标记。 */
+  private removed = new Map<string, RemovalReason>()
 
   constructor(private opts: SessionStoreOptions) {}
 
@@ -486,8 +493,15 @@ export class SessionStore {
     }
   }
 
-  /** touch: false 跳过 updatedAt 刷新（置顶等元数据操作专用——不动排序基线，旧会话置顶不跳组）。 */
+  /** touch: false 跳过 updatedAt 刷新（置顶等元数据操作专用——不动排序基线，旧会话置顶不跳组）。
+   *
+   *  已移除会话（删除 / GC 归档）**拒绝落盘**：移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾、
+   *  上下文压缩、cron 写回等直接 save 路径）会把已删/已归档会话连同数据整体重建——会话已从列表/磁盘
+   *  消失，写入应当报错而非静默复活。引用为“已死”是编程错误，按 fail-closed 报出（与 appendMessage
+   *  的 session not found 同口径）。新建会话（新 id 不复用）与回收站恢复（clearRemoved）不受影响。 */
   async save(session: SessionData, opts: { touch?: boolean } = {}): Promise<void> {
+    const reason = this.removed.get(session.id)
+    if (reason) throw new Error(`session ${reason}: ${session.id}（已从存储移除，不再落盘）`)
     if (opts.touch !== false) session.updatedAt = Date.now()
     const dir = this.dir(session.userId, session.id)
     await this.ensureDir(dir)
@@ -659,13 +673,40 @@ export class SessionStore {
     await this.save(session, { touch: false })
   }
 
+  /**
+   * 删除会话：磁盘目录移除 + 缓存失效 + 置移除标记。
+   * 失效必须发生在 load 之后——load 命中/回读都会把会话放回缓存（touchCache），
+   * 先失效再读等于没失效：缓存残留会让已删会话仍可被 load 读到（REST GET/WS session.get
+   * 返回已删数据，删除不生效），且后续任何 save()（运行中任务收尾、改待办等）会把目录重建、
+   * 删掉的数据复活（与 GC 归档路径同理，evict 注释已就此告警）。
+   */
   async delete(sessionId: string, userId?: string): Promise<void> {
-    this.evict(sessionId)
     this.owners.delete(sessionId)
     const session = await this.load(sessionId, userId)
-    if (!session) return
-    const dir = this.dir(session.userId, sessionId)
-    await rm(dir, { recursive: true, force: true })
+    if (!session) {
+      // 未找到（不存在/归属未知）：仅失效缓存；**不置移除标记**——目录可能仍在磁盘
+      //（如未传 userId 而会话未在缓存），置标记会让它后续无谓地拒绝落盘
+      this.evict(sessionId)
+      return
+    }
+    await rm(this.dir(session.userId, sessionId), { recursive: true, force: true })
+    this.markRemoved(sessionId, "deleted")
+  }
+
+  /**
+   * 会话已从存储移除（删除 / GC 归档后调用）：失效缓存 + 置移除标记。
+   * 移除标记使 `save()` 拒绝为该 id 落盘——移除后仍持有旧 `SessionData` 的调用方
+   * （运行中任务收尾/压缩/cron 等直接 save 路径）不会把已删/已归档会话连同数据整体重建。
+   */
+  markRemoved(sessionId: string, reason: RemovalReason): void {
+    this.evict(sessionId)
+    this.removed.set(sessionId, reason)
+  }
+
+  /** 清除移除标记（回收站恢复会话后调用）：恢复的会话可正常读写（恢复的是新目录，无陈旧引用风险）。 */
+  clearRemoved(sessionId: string): void {
+    this.evict(sessionId)
+    this.removed.delete(sessionId)
   }
 
   getTmpDir(sessionId: string, userId: string): string {

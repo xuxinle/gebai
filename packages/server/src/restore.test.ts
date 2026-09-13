@@ -33,7 +33,7 @@ describe("会话回收站恢复", () => {
     const trashDir = join(home, "users", "admin", "trash", date, created.id)
     mkdirSync(dirname(trashDir), { recursive: true })
     await rename(dir, trashDir)
-    handle.store.evict(created.id) // 生产流程 GC 归档时会失效缓存（onArchive 回调）
+    handle.store.markRemoved(created.id, "archived") // 生产流程 GC 归档时置移除标记（onArchive 回调）
     // 归档后正常查询不可见
     expect((await fetch(`${base()}/api/v1/sessions/${created.id}`)).status).toBe(404)
     // 恢复

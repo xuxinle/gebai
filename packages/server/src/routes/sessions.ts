@@ -65,7 +65,7 @@ export function registerSessionRoutes(rc: RouteCtx): void {
     } catch (err) {
       return c.json({ error: `restore failed: ${String((err as Error).message || err)}` }, 500)
     }
-    d.store.evict(id)
+    d.store.clearRemoved(id)
     return c.json({ ok: true })
   })
   app.patch("/api/v1/sessions/:id", async (c) => {
