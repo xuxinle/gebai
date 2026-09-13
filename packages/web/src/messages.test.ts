@@ -1549,4 +1549,8 @@ describe("压缩/降级通知标题（compactNoticeTitle）", () => {
       expect(compactNoticeTitle(12, kind)).toBe("上下文溢出护栏") // 护栏降级不与「已压缩 N 条」混同
     }
   })
+  test("degraded=trim = 消息条数上限裁剪：与护栏降级分开（用户能分辨上下文为何变短）", () => {
+    expect(compactNoticeTitle(0, "trim")).toBe("历史消息条数超限裁剪")
+    expect(compactNoticeTitle(12, "trim")).toBe("历史消息条数超限裁剪")
+  })
 })

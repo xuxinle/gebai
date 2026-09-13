@@ -12,13 +12,20 @@ import { log } from "@gebai/sdk/node"
 export const COMPACT_OUTPUT_RESERVE_FALLBACK = 16384
 /** 输出预留的最小值（窗口很小时不能让预留缩到无意义）。 */
 const COMPACT_OUTPUT_RESERVE_MIN = 1024
-/** 压缩目标剩余倍数：压缩后窗口剩余 = 输出预留 × 该倍数（>1 让后续若干轮不必立即再压，
- *  同时避免一次压太多——尽可能多保留信息）。 */
-const COMPACT_TARGET_RESERVE_MULTIPLE = 2
-/** 压缩下限水位：压缩不得把输入压到窗口的该比例以下（压太狠丢信息）。 */
-const COMPACT_FLOOR_RATIO = 0.4
+/** 压缩目标水位：压缩后输入占窗口的比例（**压到该水位即停**）。上水位（触发）由引擎按
+ *  「剩余 < 输出预留」判定（见 engine.lacksOutputRoom），下水位即本比例。
+ *  取值权衡：偏高则该次压缩「压了等于没压」（后续若干轮立刻再触发）；偏低则一次丢弃过多
+ *  历史（原文不另存，仅数百字摘要承载）。环境变量 GEBAI_COMPACT_TARGET_RATIO 可调。 */
+export const COMPACT_TARGET_RATIO = 0.4
+/** 目标水位的合法区间（环境变量越界/非法时忽略取缺省）。 */
+const COMPACT_TARGET_RATIO_MIN = 0.1
+const COMPACT_TARGET_RATIO_MAX = 0.9
 /** 已低于目标水位时的最小腾挪量（溢出恢复场景：接口已报溢出，至少腾出该比例的窗口空间）。 */
 const COMPACT_MIN_ROOM_RATIO = 0.05
+/** 估算折算比率（估算总量 / 真值基线）的合法区间：异常数据不得放大误压（估算偏高时折算量变小，
+ *  偏低时变大——边界外一律退回 1:1，宁可按原估算走也不按异常比率翻倍丢弃历史）。 */
+const COMPACT_EST_SCALE_MIN = 0.25
+const COMPACT_EST_SCALE_MAX = 4
 /** 近消息滑动窗口（条，任意角色）：最近这么多条消息永不进压缩区间（原样保留）。
  *  上限为历史一半——否则短会话永远压不动（保留下限反而让压缩失效）。环境变量 GEBAI_COMPACT_WINDOW 可调。 */
 const COMPACT_WINDOW_MESSAGES = 12
@@ -26,10 +33,10 @@ const COMPACT_WINDOW_MESSAGES = 12
 const IMAGE_TOKEN_ESTIMATE = 1000
 
 /**
- * 一次回复的输出预留（压缩触发与目标的唯一基准）：模型单次响应输出上限（接口能力声明的
+ * 一次回复的输出预留（**压缩触发**的基准）：模型单次响应输出上限（接口能力声明的
  * maxOutputTokens），未声明时用缺省预留，并夹在 [1k, 窗口一半] 内——预留不能超过窗口一半，
  * 否则小窗口模型会永远处于「剩余不足」状态而反复压缩。
- * 压缩触发 = 窗口剩余 < 本预留（剩余不足以支撑一次回复）。
+ * 压缩触发 = 窗口剩余 < 本预留（剩余不足以支撑一次回复）；压缩目标水位另由 COMPACT_TARGET_RATIO 决定。
  */
 export function outputReserveTokens(cap: number, maxOutputTokens?: number): number {
   if (cap <= 0) return 0
@@ -95,6 +102,16 @@ function estimateMessageLikeTokens(m: MessageLike): number {
   return t
 }
 
+/** 工具 schema 段的 token 粗估（与 estimateCharsTokens 同口径）：schema 不在 messages 里，
+ *  却真实计入接口 input_tokens（实测占比不小）——压缩量折算（planCompactRange 的 estTotal）与
+ *  上下文显示口径（engine 发布 event.session.ctx 的估算分支）都需要把它补上，否则估算系统性偏低。 */
+export function estimateSchemasTokens(schemas?: Array<{ name?: string; description?: string; parameters?: unknown }>): number {
+  if (!schemas?.length) return 0
+  let t = 0
+  for (const s of schemas) t += estimateCharsTokens(`${s.name ?? ""}${s.description ?? ""}${JSON.stringify(s.parameters ?? {})}`)
+  return t
+}
+
 /** 文本截断（保留「共多少字符」提示，模型据此知道有省略）。 */
 function clipText(s: string, n: number): string {
   if (s.length <= n) return s
@@ -138,21 +155,43 @@ export function alignPairingBounds(messages: Message[], from: number, to: number
 }
 
 /**
- * 压缩区间规划（水位区间 + 滑动窗口）：压缩四条基本原则的落点——
+ * 压缩区间规划（目标水位 + 滑动窗口）：压缩四条基本原则的落点——
  * ① **近消息滑动窗口**：最近 `window`（默认 COMPACT_WINDOW_MESSAGES，上限为历史一半）条消息（任意角色）
  *    永不进压缩区间，随新消息自然向前滑动；
  * ② **远消息压缩后完全抛弃**：区间取最早的连续一段（远的先压），区间内可压缩消息由摘要替换并从上下文移除；
- * ③ **水位之间压缩**：上水位 = 窗口 - 输出预留（`reserve`，剩余不够一次回复即触发），下水位 = 窗口×40%
- *    与「窗口 - 预留×2」取高（压缩后仍能支撑若干次回复，且不压太狠）——需腾出量 = 基线 - 目标输入，
- *    按 estimateMessageTokens 逐条累计（压多少算多少，不一次压太多）；无真实占用基线时压到窗口边界；
+ * ③ **压到目标水位即停**：上水位（触发）= `reserve` 驱动的「窗口剩余 < 输出预留」（见 engine）；
+ *    下水位（目标）= 窗口 × `targetRatio`（COMPACT_TARGET_RATIO，缺省 40%；环境变量
+ *    GEBAI_COMPACT_TARGET_RATIO 可调），且不高于触发线（目标高于触发线等于永远压不到，夹到触发线即停）
+ *    ——需腾出量 = 真值基线 − 目标输入，按估算逐条累计到量即止；可压消息不够（窗口外全压完仍高于目标）
+ *    时压满窗口外，不足部分交给迭代压缩（run 前至多 4 轮）与溢出恢复；
  * ④ **系统提示词不压缩**：区间只取可压缩消息（系统提示词消息由 compactMessages 原位保留，见 store）。
- * 无真实占用基线（算不出需腾出量）时退保守口径：压掉窗口外可压缩消息的一半（不一次丢大量历史，靠不足时的迭代压缩与溢出重试逐步收敛）。
+ * **估算折算**：需腾出量是真值口径（接口 usage），逐条累计却是估算口径（estimateMessageTokens，
+ * 实测低于真值 20%~30%）——按 `estTotal`（全消息 + 工具 schema 的估算量）与基线的比率折算后再累计，
+ * 使「压够量」在真值口径下同样成立（否则估算偏低会让压除量超过目标、或反之压不到目标）。
+ * 无真实占用基线（算不出需腾出量）时退保守口径：压掉窗口外可压缩消息的一半（靠不足时的迭代压缩与溢出重试逐步收敛）。
  * 返回压缩区间（已对齐配对边界）或 null（无可压缩区间）。
  */
+/** 目标水位比例的合法化（调用方/环境变量传入）：非法或越界一律退回缺省 COMPACT_TARGET_RATIO。 */
+function clampTargetRatio(ratio?: number): number {
+  if (ratio === undefined || !Number.isFinite(ratio)) return COMPACT_TARGET_RATIO
+  if (ratio < COMPACT_TARGET_RATIO_MIN || ratio > COMPACT_TARGET_RATIO_MAX) return COMPACT_TARGET_RATIO
+  return ratio
+}
+
+/** 估算折算比率（估算总量 / 真值基线）：把真值口径的「需腾出量」换算为估算口径的累计目标。
+ *  无估算总量（调用方未提供）或比率越界（异常数据）时退回 1:1——宁可按原估算走，
+ *  也不按异常比率放大丢弃量。 */
+function estimateScale(baseline: number, estTotal?: number): number {
+  if (!estTotal || estTotal <= 0 || baseline <= 0) return 1
+  const scale = estTotal / baseline
+  if (scale < COMPACT_EST_SCALE_MIN || scale > COMPACT_EST_SCALE_MAX) return 1
+  return scale
+}
+
 export function planCompactRange(
   messages: Message[],
   compactable: number[],
-  ctx: { baseline?: number; cap: number; reserve: number; window?: number },
+  ctx: { baseline?: number; cap: number; reserve: number; window?: number; targetRatio?: number; estTotal?: number },
 ): { from: number; to: number } | null {
   if (compactable.length < 2) return null
   const { baseline, cap, reserve } = ctx
@@ -163,13 +202,14 @@ export function planCompactRange(
   if (inRange.length < 2) return null
   let k: number
   if (cap > 0 && baseline !== undefined && baseline > 0) {
-    // ③ 水位区间：目标输入 = max(下限水位, 窗口 - 输出预留 × 倍数)
-    const floor = cap * COMPACT_FLOOR_RATIO
-    const targetInput = Math.max(floor, cap - reserve * COMPACT_TARGET_RESERVE_MULTIPLE)
+    // ③ 目标水位：压到「窗口 × targetRatio」即停；目标不高于触发线（窗口 - 输出预留）——
+    // 目标高于触发线时永远压不到目标而反复触发，夹到触发线即停（配置矛盾时以触发线为准）
+    const trigger = reserve > 0 ? cap - reserve : cap
+    const targetInput = Math.max(0, Math.min(cap * clampTargetRatio(ctx.targetRatio), trigger))
     let need = baseline - targetInput
-    // 下限水位保护：不把输入压到 floor 以下
-    if (need > 0) need = Math.min(need, Math.max(0, baseline - floor))
     if (need <= 0) need = cap * COMPACT_MIN_ROOM_RATIO // 已低于目标（如接口已报溢出）：至少腾出一点
+    // 估算折算：需腾出量是真值口径，逐条累计是估算口径（见 doc 的「估算折算」）
+    need = Math.max(1, Math.round(need * estimateScale(baseline, ctx.estTotal)))
     let acc = 0
     k = 0
     for (; k < inRange.length; k++) {
@@ -335,12 +375,22 @@ export class ContextCompressor {
       from = aligned.from
       to = aligned.to
     } else {
-      // 默认：水位区间 + 滑动窗口（近消息原样保留、远消息压缩后完全抛弃、每次只压到目标水位）
+      // 默认：目标水位 + 滑动窗口（近消息原样保留、远消息压缩后完全抛弃、压到目标水位即停）
       // cap 从 provider 能力声明读取；测试桩/不完整的 Provider 未声明能力时退回兜底口径（保留最近一半）
       const caps = typeof llm?.capabilities === "function" ? llm.capabilities() : undefined
       const cap = caps?.maxContextTokens ?? 0
       const reserve = outputReserveTokens(cap, caps?.maxOutputTokens)
-      const plan = planCompactRange(messages, compactable, { baseline: session.ctxInputTokens, cap, reserve, window: this.windowMessages() })
+      // 估算总量（全消息 + 主循环同批工具 schema）：供 planCompactRange 把真值口径的需腾出量
+      // 折算为估算口径——schema 不在 messages 里却真实计入 input_tokens，缺了它折算比率会系统性偏低
+      const estTotal = messages.reduce((a, m) => a + estimateMessageTokens(m), 0) + estimateSchemasTokens(opts.cachePrefix?.tools)
+      const plan = planCompactRange(messages, compactable, {
+        baseline: session.ctxInputTokens,
+        cap,
+        reserve,
+        window: this.windowMessages(),
+        targetRatio: this.targetRatio(),
+        estTotal,
+      })
       if (!plan) return { compacted: 0, summary: "" }
       from = plan.from
       to = plan.to
@@ -413,6 +463,15 @@ export class ContextCompressor {
     if (!raw) return undefined
     const n = Number(raw)
     return Number.isFinite(n) && n >= 2 ? Math.floor(n) : undefined
+  }
+
+  /** 压缩目标水位比例（GEBAI_COMPACT_TARGET_RATIO 可调，非法/越界忽略取缺省 COMPACT_TARGET_RATIO）。
+   *  取值区间 (0,1)：如 0.6 表示压到窗口 60% 即止。 */
+  private targetRatio(): number | undefined {
+    const raw = this.deps.readEnv?.("GEBAI_COMPACT_TARGET_RATIO") ?? process.env.GEBAI_COMPACT_TARGET_RATIO
+    if (!raw) return undefined
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 && n < 1 ? n : undefined
   }
 
   /** 溢出护栏降级通知（UI 可见性）：护栏会改动上下文（历史图片降级/最旧用户消息裁剪），

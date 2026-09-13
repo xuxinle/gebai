@@ -8,7 +8,7 @@ import type { Message, MessageLike } from "@gebai/sdk"
 import { SessionStore } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { LLMProvider } from "../llm/llm"
-import { ContextCompressor, buildSummaryChunks, summarizeMessageLine, summarizeFallback, planCompactRange, estimateMessageTokens, outputReserveTokens, COMPACT_OUTPUT_RESERVE_FALLBACK, type CompressorDeps } from "./compressor"
+import { ContextCompressor, buildSummaryChunks, summarizeMessageLine, summarizeFallback, planCompactRange, estimateMessageTokens, estimateSchemasTokens, outputReserveTokens, COMPACT_OUTPUT_RESERVE_FALLBACK, type CompressorDeps } from "./compressor"
 
 function msg(role: Message["role"], content: string, extra: Partial<Message> = {}): Message {
   return { id: crypto.randomUUID().replace(/-/g, ""), role, content, createdAt: Date.now(), ...extra } as Message
@@ -35,6 +35,8 @@ async function setup(opts: {
   messages?: Message[]
   /** 可选的「与主循环同前缀」历史渲染（缓存友好摘要路径；upToIndex 为区间末端 store 下标）。 */
   loadHistory?: (sessionId: string, user: string, inlineMultimodal?: boolean, upToIndex?: number) => Promise<MessageLike[]>
+  /** 可选的配置读取（GEBAI_COMPACT_* 环境变量口径）：不注入时 compressor 读 process.env。 */
+  readEnv?: (name: string) => string | undefined
 }) {
   const home = mkdtempSync(join(tmpdir(), "gebai-compressor-"))
   const store = new SessionStore({ home })
@@ -51,6 +53,7 @@ async function setup(opts: {
     publish: (_sid, type, payload) => events.push({ type, payload }),
     loadHistory: opts.loadHistory ?? (async () => []),
     callModel: async () => ({ text: "", toolCalls: [] }),
+    readEnv: opts.readEnv,
   }
   return { compressor: new ContextCompressor(deps), store, session, events, cleanup: () => rmSync(home, { recursive: true, force: true }) }
 }
@@ -205,21 +208,53 @@ describe("压缩区间规划（水位区间 + 滑动窗口）", () => {
     expect(outputReserveTokens(0, 32000)).toBe(0) // 无窗口信息：0（退回兜底口径）
   })
 
-  test("水位区间：从触发水位（剩余不足一次回复）压到目标水位（剩余够两次回复），不一次压太多", () => {
+  test("目标水位：从触发水位压到窗口 40%（缺省下水位），不够则压满窗口外可压消息", () => {
     const messages = Array.from({ length: 30 }, bigMsg)
     const compactable = messages.map((_, i) => i)
-    // cap 100000、预留 10000 → 上水位：占用 > 90000 触发；下水位（目标输入）80000 → 需腾出 15000 ≈ 15 条
-    // （滑动窗口 12 条 → 最多只能压到下标 18，需腾出量远小于此）
+    // cap 100000、预留 10000 → 上水位：占用 > 90000 触发；下水位（目标输入）= 100000 × 40% = 40000
+    // 基线 95000 → 需腾 55000（≈55 条），但滑动窗口 12 条不可动 → 窗口外仅 18 条 → 压满 18 条
     const plan = planCompactRange(messages, compactable, { baseline: 95000, cap: 100000, reserve: 10000 })
     expect(plan).not.toBeNull()
     expect(plan!.from).toBe(0)
-    expect(plan!.to).toBe(15)
+    expect(plan!.to).toBe(18)
+  })
+
+  test("目标水位可调（GEBAI_COMPACT_TARGET_RATIO 同口径）：比例越高压得越少", () => {
+    const messages = Array.from({ length: 60 }, bigMsg)
+    const compactable = messages.map((_, i) => i)
+    // 60 条（窗口 12 → 窗口外 48 条可压）；基线 95000、cap 100000
+    // 目标 70% = 70000 → 需腾 25000 ≈ 25 条；缺省 40% = 40000 → 需腾 55000 > 48 条 → 压满窗口外
+    const high = planCompactRange(messages, compactable, { baseline: 95000, cap: 100000, reserve: 10000, targetRatio: 0.7 })
+    expect(high!.to).toBe(25)
+    const dflt = planCompactRange(messages, compactable, { baseline: 95000, cap: 100000, reserve: 10000 })
+    expect(dflt!.to).toBe(48)
+  })
+
+  test("目标水位不高于触发线：配置矛盾（比例定的目标高于触发线）时夹到触发线即停", () => {
+    const messages = Array.from({ length: 30 }, bigMsg)
+    const compactable = messages.map((_, i) => i)
+    // 预留 80000 → 触发线 20000 低于目标 40%×100000 = 40000 → 目标取触发线 20000
+    // 基线 30000 → 需腾 10000 ≈ 10 条（若不夹取，目标 40000 已高于基线，只需最小腾挪 5000 ≈ 5 条）
+    const plan = planCompactRange(messages, compactable, { baseline: 30000, cap: 100000, reserve: 80000 })
+    expect(plan!.to).toBe(10)
+  })
+
+  test("估算折算：按 estTotal/基线 比率把真值口径的需腾出量换算为估算口径", () => {
+    const messages = Array.from({ length: 60 }, bigMsg) // 全量估算 60000
+    const compactable = messages.map((_, i) => i)
+    // 基线 95000、目标 40000 → 需腾 55000（真值口径）；估算总量 47500 → 比率 0.5 → 累计目标 27500
+    // → 28 条（每条 1000）；不折算会按 55000 估算累计而压满窗口外 48 条，远超目标
+    const plan = planCompactRange(messages, compactable, { baseline: 95000, cap: 100000, reserve: 10000, estTotal: 47500 })
+    expect(plan!.to).toBe(28)
+    // 比率越界（异常数据：全量估算远小于基线）退回 1:1——仍按 55000 累计 → 压满窗口外，不放大丢弃量
+    const wild = planCompactRange(messages, compactable, { baseline: 95000, cap: 100000, reserve: 10000, estTotal: 1000 })
+    expect(wild!.to).toBe(48)
   })
 
   test("近消息滑动窗口：最近 12 条（任意角色）永不进压缩区间，即使需腾出量很大", () => {
     const messages = Array.from({ length: 40 }, bigMsg)
     const compactable = messages.map((_, i) => i)
-    // 目标输入 40000（40% 下限）：基线 96000 → 需腾 56000，但窗口内 12 条不可动 → 最多压到下标 28
+    // 目标输入 40000（窗口 40%）：基线 96000 → 需腾 56000，但窗口内 12 条不可动 → 最多压到下标 28
     const plan = planCompactRange(messages, compactable, { baseline: 96000, cap: 100000, reserve: 30000 })
     expect(plan!.to).toBe(28)
     // 显式指定窗口（GEBAI_COMPACT_WINDOW 同类口径）同样生效
@@ -246,7 +281,7 @@ describe("压缩区间规划（水位区间 + 滑动窗口）", () => {
   test("窗口内可压缩消息不足时不做压缩", () => {
     const messages = Array.from({ length: 20 }, () => msg("assistant", "x".repeat(400)))
     const compactable = messages.map((_, i) => i)
-    // 每条 100 token、需腾 2000 → 窗口外 10 条全拿也不够 → 压满窗口外那段（to = 10）
+    // 每条 100 token、目标输入 40000 → 需腾 60000 远超窗口外总量 → 压满窗口外那段（to = 10）
     const plan = planCompactRange(messages, compactable, { baseline: 100000, cap: 100000, reserve: 1000 })
     expect(plan!.to).toBe(10)
   })
@@ -259,13 +294,25 @@ describe("压缩区间规划（水位区间 + 滑动窗口）", () => {
     expect(plan!.to).toBe(5)
   })
 
-  test("窗口 40% 下限保护：需腾出量不超过「基线 - 窗口 40%」（压太狠会丢信息）", () => {
+  test("目标水位为窗口 40%：基线远高于目标时压满窗口外可压消息（压到目标即停）", () => {
     const messages = Array.from({ length: 60 }, bigMsg)
     const compactable = messages.map((_, i) => i)
-    // 预留 45000 → cap-2×reserve=10000 低于下限 40000 → 目标输入取 40000；基线 96000 → 需腾 56000
+    // 预留 45000 → 触发线 55000 高于目标 40000 → 目标输入取 40000；基线 96000 → 需腾 56000
     // 窗口外仅 48 条（共 48000 token）→ 压满 48 条
     const plan = planCompactRange(messages, compactable, { baseline: 96000, cap: 100000, reserve: 45000 })
     expect(plan!.to).toBe(48)
+  })
+
+  test("工具 schema 估算：无 schema 为 0，多个按同口径累加（上下文显示与折算口径共用）", () => {
+    expect(estimateSchemasTokens(undefined)).toBe(0)
+    expect(estimateSchemasTokens([])).toBe(0)
+    const one = estimateSchemasTokens([{ name: "read", description: "读文件", parameters: { type: "object" } }])
+    expect(one).toBeGreaterThan(0)
+    const two = estimateSchemasTokens([
+      { name: "read", description: "读文件", parameters: { type: "object" } },
+      { name: "write", description: "写文件", parameters: { type: "object" } },
+    ])
+    expect(two).toBeGreaterThan(one)
   })
 
   test("单条消息 token 估算包含工具调用签名与图片", () => {
@@ -437,6 +484,40 @@ describe("溢出硬护栏", () => {
     // 最新一条用户消息（本次任务输入）不被裁剪
     const loaded = await s.store.load(s.session.id)
     expect(loaded!.messages.some((m) => m.content === "最新任务输入")).toBe(true)
+    s.cleanup()
+  })
+})
+
+describe("压缩目标水位（compactSession 集成）", () => {
+  /** mock provider 声明窗口 100000 / 输出上限 8192 → 触发线 91808；基线固定 95000（超出触发线）。
+   *  目标 = min(窗口 × targetRatio, 触发线)：缺省 40% → 40000。 */
+  const longHistory = () => Array.from({ length: 40 }, () => msg("assistant", "x".repeat(4000))) // 每条 ≈1000 token
+
+  test("缺省目标水位 40%：按估算折算压到目标（不再只腾出窗口 5%）", async () => {
+    const { provider } = mockProvider()
+    const s = await setup({ provider, messages: longHistory() })
+    const snap = await s.store.load(s.session.id)
+    snap!.ctxInputTokens = 95000
+    await s.store.save(snap!)
+    // 需腾 55000（真值口径）；估算折算比率 = 40000/95000 ≈ 0.42 → 累计目标 23158 ≈ 24 条
+    const r = await s.compressor.compactSession(s.session.id, "default", undefined, provider)
+    expect(r.compacted).toBe(24)
+    s.cleanup()
+  })
+
+  test("GEBAI_COMPACT_TARGET_RATIO 生效：比例越高压得越少", async () => {
+    const { provider } = mockProvider()
+    const s = await setup({
+      provider,
+      messages: longHistory(),
+      readEnv: (name) => (name === "GEBAI_COMPACT_TARGET_RATIO" ? "0.8" : undefined),
+    })
+    const snap = await s.store.load(s.session.id)
+    snap!.ctxInputTokens = 95000
+    await s.store.save(snap!)
+    // 目标 80000 → 需腾 15000 → 折算后 6316 ≈ 7 条
+    const r = await s.compressor.compactSession(s.session.id, "default", undefined, provider)
+    expect(r.compacted).toBe(7)
     s.cleanup()
   })
 })

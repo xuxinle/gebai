@@ -6,7 +6,7 @@ import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 import type { LLMChunk, LLMProvider, ChatOptions } from "../llm/llm"
 import { AgentEngine, stripThinkTags } from "./engine"
 import { currentToolFetchSession } from "../support/fetch-scope"
-import { SessionStore } from "../session/store"
+import { SessionStore, estimateCtxTokens } from "../session/store"
 import { ToolRegistry } from "../base/registry"
 import { createGlobalTools, pageCaptureTool, TRUNCATE_THRESHOLD } from "../tools"
 import { Sandbox } from "../security/sandbox"
@@ -1175,7 +1175,50 @@ console.log("defined ok")`,
     cleanup(home)
   })
 
-  test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 input tokens 为基线（估算只补增量）", async () => {
+  test("消息上限裁剪：运行开始按 trimmed 计数发布一次 degraded=trim 通知，计数不增不重复播报", async () => {
+  const { home, engine, store, events } = await setup("text")
+  const session = await store.createSession("default", "t")
+  // 直接植入 trimmed 计数（真实截断路径由 appendMessage/compactMessages 累计，此处只验证通知接线）
+  const snap = await store.load(session.id)
+  snap!.trimmed = { count: 7, at: Date.now() }
+  await store.save(snap!)
+  const notices: Array<Record<string, unknown>> = []
+  events.subscribe((e) => {
+    if (e.type === "event.message.compact" && e.payload.degraded === "trim" && e.sessionId === session.id) notices.push(e.payload as Record<string, unknown>)
+  })
+  await engine.run(session.id, "default", "hi")
+  expect(notices.length).toBe(1)
+  expect(String(notices[0]!.summary)).toContain("7 条")
+  expect(notices[0]!.count).toBe(0) // 与护栏降级同语义：不是压缩替换
+  await engine.run(session.id, "default", "again")
+  expect(notices.length).toBe(1) // 计数未增长 → 不再播报
+  cleanup(home)
+})
+
+test("无 usage 真值：ctx 推送口径计入工具 schema 段（schema 不在 messages 里）", async () => {
+  const { home, engine, store, events, registry } = await setup("text")
+  const session = await store.createSession("default", "t")
+  const pushed: number[] = []
+  events.subscribe((e) => {
+    if (e.type === "event.session.ctx" && e.sessionId === session.id) pushed.push(Number((e.payload as { ctxTokens?: number }).ctxTokens ?? 0))
+  })
+  await engine.run(session.id, "default", "hi")
+  const before = pushed[pushed.length - 1]!
+  expect(before).toBeGreaterThan(0)
+  // 新注一个 description 超长（≈50000 token 估算）的工具后重跑：推送值增量只可能来自 schema 段
+  // （新增消息的估算量微不足道；store.estimateCtxTokens 忽略 system 与 schema，故不能作对比基准）
+  registry.register({ name: "big_schema", description: "x".repeat(200000), parameters: { type: "object" }, execute: async () => ({ output: "ok" }) } as never)
+  await engine.run(session.id, "default", "again")
+  const after = pushed[pushed.length - 1]!
+  expect(after - before).toBeGreaterThanOrEqual(40000)
+  // 持久化兜底口径（无 usage 时）同样计入 schema 段：历史会话列表不会因此偏小
+  const loaded = await store.load(session.id)
+  expect(loaded!.ctxTokens!).toBeGreaterThanOrEqual(40000)
+  expect(estimateCtxTokens(loaded!.messages)).toBeLessThan(loaded!.ctxTokens!)
+  cleanup(home)
+})
+
+test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 input tokens 为基线（估算只补增量）", async () => {
     const { home, engine, store, events, provider } = await setup("tool")
     provider.usage = { inputTokens: 3000, outputTokens: 7, totalTokens: 3007, cachedTokens: 2000 }
     const session = await store.createSession("default", "t")

@@ -23,7 +23,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
 import { runInToolFetchScope } from "../support/fetch-scope"
 import { createHash } from "node:crypto"
-import { ContextCompressor, outputReserveTokens, type SummarizeCachePrefix } from "./compressor"
+import { ContextCompressor, outputReserveTokens, estimateSchemasTokens, type SummarizeCachePrefix } from "./compressor"
 import { log } from "@gebai/sdk/node"
 import {
   APPROVAL_TIMEOUT,
@@ -282,6 +282,9 @@ export class AgentEngine {
    *  父会话下轮模型调用即见）；任务结束（run finally）冲刷落盘（异步子会话结果不因任务收尾丢失）。 */
   private parentMerges = new Map<string, Message[]>()
 
+  /** 消息上限截断的已通知条数（会话 → 累计被丢弃数）：条数增长才再通知一次（见 notifyTrim）。 */
+  private trimNotified = new Map<string, number>()
+
   /** 上下文压缩器（压缩/溢出恢复，自本类拆分；见 compressor.ts）。 */
   private compressor: ContextCompressor
   /** 系统提示词构建依赖包（项目解析等引擎方法注入；见 prompt.ts）。 */
@@ -409,10 +412,9 @@ export class AgentEngine {
     let cachePrefix = opts.cachePrefix
     if (!cachePrefix) {
       const env = await this.opts.env.resolve(sessionId, user)
-      const registry = this.sessionRegistry(sessionId)
       cachePrefix = {
         systemPrompt: this.buildSystemPrompt(sessionId, user, env),
-        tools: registry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, registry.resolve(s.name)?.tool)),
+        tools: this.activeSchemas(sessionId),
       }
     }
     return this.compressor.compactSession(sessionId, user, scope, provider, { ...opts, cachePrefix })
@@ -519,6 +521,29 @@ export class AgentEngine {
       if (this.opts.subAgents.visibleTo(d.name, sessionId)) visible.add(d.name)
     }
     return visible
+  }
+
+  /** 主循环同批工具 schema（过滤本会话被禁用的工具）：模型调用、摘要缓存前缀与上下文估算口径
+ *  （event.session.ctx 推送、无 usage 真值时的持久化兜底）共用同一份，保证各处口径一致。 */
+private activeSchemas(sessionId: string) {
+  const registry = this.sessionRegistry(sessionId)
+  return registry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, registry.resolve(s.name)?.tool))
+}
+
+  /** 消息上限截断的用户可见通知：模型侧已有 loadHistory 注入的 [历史裁剪] 提示，但 UI 此前无声——
+   *  长会话里静默截断容易被误认为「压缩没生效/上下文下不去」。累计丢弃条数较上次通知增长时发一次
+   *  event.message.compact（degraded: "trim"，count=0 同护栏降级语义：不是压缩替换）。 */
+  private notifyTrim(sessionId: string, count: number | undefined): void {
+    const n = count ?? 0
+    const prev = this.trimNotified.get(sessionId) ?? 0
+    if (n <= prev) return
+    this.trimNotified.set(sessionId, n)
+    this.publish(sessionId, "event.message.compact", {
+      sessionId,
+      count: 0,
+      degraded: "trim",
+      summary: `会话消息条数达到上限：本次又移除最早的 ${n - prev} 条非保护消息（累计 ${n} 条；被移除消息原文不再保留）。需要保留完整历史请及时归档或压缩会话。`,
+    })
   }
 
   /** 会话注册表视图（全局注册表 + 本会话动态工具覆盖层 + 装载工具会话可见性过滤）：runLoop/buildContext 经此解析。
@@ -878,10 +903,10 @@ export class AgentEngine {
       const taskProvider = this.opts.resolveProvider?.(env) ?? this.opts.provider
       const systemPrompt = this.buildSystemPrompt(sessionId, user, env)
       let history = await this.loadHistory(sessionId, user, taskProvider.capabilities().multimodal)
-          // 自动压缩（DESIGN「上下文保护」）：**窗口剩余不够一次回复**（上水位 = 窗口 - 输出预留）时先压缩最早历史，
-    // 保证最新上下文完整、压缩过程对进行中的任务透明（水位与摘要均用任务级模型）。
-    // 压缩目标为**下水位**（剩余 ≥ 输出预留×2 且不低于窗口 40%，见 compressor.planCompactRange）——
-    // 在两个水位之间压缩：每次不压太多、尽可能多保留信息；近消息由滑动窗口原样保留。
+      // 自动压缩（DESIGN「上下文保护」）：**窗口剩余不够一次回复**（上水位 = 窗口 - 输出预留）时先压缩最早历史，
+      // 保证最新上下文完整、压缩过程对进行中的任务透明（水位与摘要均用任务级模型）。
+      // 压缩目标为**下水位**（窗口 × COMPACT_TARGET_RATIO，缺省 40%；GEBAI_COMPACT_TARGET_RATIO 可调）——
+      // 压到目标即停，近消息由滑动窗口原样保留。
       // 占用口径：只认模型服务返回的真实 input tokens——上次任务最后一次调用持久化的 usage
       // 基线（session.ctxInputTokens，含 system 与工具 schema）。基线本身已超阈值即先压缩
       // （本次调用只会更大）；无基线（新会话/接口不返回 usage/压缩后锚点失效）不做估算预判，
@@ -894,12 +919,12 @@ export class AgentEngine {
         // 受保护消息让路（历史图片降级为文本说明、最旧用户消息裁剪为占位），
         // 保证长会话存在可收敛的溢出兜底，而非等模型接口报错后任务失败
         let snap = await this.opts.store.load(sessionId, user)
+        this.notifyTrim(sessionId, snap?.trimmed?.count)
         let baseline = snap?.ctxInputTokens
         const overThreshold = () => lacksOutputRoom(cap, reserve, baseline)
         // 摘要请求与主循环同前缀（system 提示词 + 同一段历史 + 同批工具）：服务端前缀缓存命中，
         // “压缩前把历史重发一遍”因此不再以全价计费（见 compressor 的缓存路径）
-        const preCheckRegistry = this.sessionRegistry(sessionId)
-        const preCheckTools = preCheckRegistry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, preCheckRegistry.resolve(s.name)?.tool))
+        const preCheckTools = this.activeSchemas(sessionId)
         for (let guard = 0; guard < 4 && overThreshold(); guard++) {
           const before = history.length
           await this.compactSession(sessionId, user, undefined, taskProvider, { internal: true, cachePrefix: { systemPrompt, tools: preCheckTools } })
@@ -1035,11 +1060,13 @@ export class AgentEngine {
         } else {
           saved.ctxInputTokens = undefined
           saved.ctxAtMessage = undefined
-          saved.ctxTokens = estimateCtxTokens(saved.messages)
+          saved.ctxTokens = estimateCtxTokens(saved.messages) + estimateSchemasTokens(this.activeSchemas(sessionId))
           saved.ctxCachedTokens = undefined
         }
         await this.opts.store.save(saved)
       }
+      // 本次任务内发生的超限截断（appendMessage/compactMessages 落盘时记录）在此补一次用户可见通知
+      this.notifyTrim(sessionId, saved?.trimmed?.count)
       this.publish(sessionId, "event.task.done", { sessionId })
     } catch (err) {
       const aborted = controller.signal.aborted
@@ -1852,7 +1879,7 @@ export class AgentEngine {
       // 本轮推理全文累积（流式 publish 的同时落盘合并为 <think> 块，历史会话可见）
       let reasoningAcc = ""
 
-      const schemas = registry.schemas().filter((s) => !this.isToolDisabled(sessionId, s.name, registry.resolve(s.name)?.tool))
+      const schemas = this.activeSchemas(sessionId)
       // 模型调用（含上下文溢出恢复：接口 4xx 上下文长度错误 = 真实大小信号，压缩后重试）
       const call = await this.callModelWithOverflowRecovery(sessionId, user, provider, messages, schemas, params.systemPrompt, signal, extraParams, ctxUsage, (chunk) => {
         // 输出方式：仅最终响应（final_only）不推送文本增量与推理流，流式输出（streaming）正常推送
@@ -1874,10 +1901,14 @@ export class AgentEngine {
         ctxUsage.ctxCountedLen = messages.length
       }
       // 上下文大小实时推送（前端会话列表展示，单位 k）：真实 usage 基准 + 未发送增量估算；
+      // 无真值（压缩重建后基线锚点失效）时退回全量估算，并补上工具 schema 段估算（schema 不在 messages
+      // 里却真实计入 input_tokens）——否则压缩后推送值系统性偏低、下一轮真值回来时数值跳变；
       // ctxCachedTokens = 同一次调用的提示词缓存命中（前端上下文圆环悬浮展示命中率，接口不返回时缺省）
       this.publish(sessionId, "event.session.ctx", {
         ctxTokens:
-          ctxUsage.ctxInputTokens !== undefined ? ctxUsage.ctxInputTokens + estimateTokens(messages.slice(ctxUsage.ctxCountedLen)) : estimateTokens(messages),
+          ctxUsage.ctxInputTokens !== undefined
+            ? ctxUsage.ctxInputTokens + estimateTokens(messages.slice(ctxUsage.ctxCountedLen))
+            : estimateTokens(messages) + estimateSchemasTokens(schemas),
         ...(ctxUsage.ctxInputTokens !== undefined ? { ctxCachedTokens: ctxUsage.ctxCachedTokens } : {}),
       })
       if (!toolCalls.length) {
