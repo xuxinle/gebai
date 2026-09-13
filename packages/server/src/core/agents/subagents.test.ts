@@ -3,8 +3,13 @@ import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { ToolRegistry } from "../base/registry"
 import { SubAgentManager, discoverySignature } from "./subagents"
-import { disposeAllKeqing } from "./keqing"
+import { disposeAllKeqing, resolvePythonCommand } from "./keqing"
 import type { SubAgentDef } from "../base/types"
+
+/** 客卿 fake 驱动是真 python 脚本，需环境有可用解释器。用产品解析器判定（与运行时同一口径：
+ *  GEBAI_PYTHON_DIR → 语言目录 venv → PATH 的 python3/python/py），不在无 python 的环境里
+ *  把「环境缺失」当测试失败（同 keqing-driver.test.ts 的 available 口径）。 */
+const pythonAvailable = resolvePythonCommand() !== null
 
 const loadedDef: SubAgentDef = {
   name: "code",
@@ -425,6 +430,7 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
   })
 
   test("客卿目录热加载：refreshIfChanged 在 TS 签名未变时也检查客卿签名（放置新目录即生效，无需重启）", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
     // fake spawn（bun -e 驱动，协议同 keqing/README）：两个同语言子代理先后放置，
     // 验证 ①多子代理并存注册 ②后放置的目录经 refreshIfChanged 被发现（修复前 TS 签名未变直接 return，
     // 客卿永不重扫）③对账回收（目录删除后 dispose）
@@ -464,13 +470,12 @@ describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () =
         "    elif req[\"op\"] == \"tool.call\": send({\"id\": req[\"id\"], \"ok\": True, \"result\": {\"output\": \"hello from \" + os.environ[\"FAKE_NAME\"]}})",
       ].join(String.fromCharCode(10)) + String.fromCharCode(10),
     )
-    const py = process.platform === "win32" ? "python" : "python3"
     const mk = (name: string) => {
       const d = join(fakeRoot, name)
       mkdirSync(d, { recursive: true })
       writeFileSync(
         join(d, "agent.json"),
-        JSON.stringify({ name, description: name + " 热加载验证", protocol: 2, command: [py, driver], env: { FAKE_NAME: name } }),
+        JSON.stringify({ name, description: name + " 热加载验证", protocol: 2, command: ["{python}", driver], env: { FAKE_NAME: name } }),
       )
     }
     try {
@@ -527,13 +532,14 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
     mkdirSync(d, { recursive: true })
     writeFileSync(
       join(d, "agent.json"),
-      JSON.stringify({ name, description, protocol: 2, command: ["python", join(root, "drv.py")], env: { FAKE_NAME: name } }),
+      JSON.stringify({ name, description, protocol: 2, command: ["{python}", join(root, "drv.py")], env: { FAKE_NAME: name } }),
     )
     writeFileSync(join(d, "PROMPT.md"), `${name} 客卿提示词正文`)
     return d
   }
 
   test("同名 TS+客卿：描述/提示词拼接、工具并集（同名冲突 TS 优先）、装载统一命名空间、卸载注销全部", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
     const { mkdtempSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-keqing-merge-"))
@@ -590,6 +596,7 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
   })
 
   test("热加载重合并：manifest 修改后重拉并重合并；TS 目录重扫不丢客卿贡献（贡献集独立缓存）", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
     const { mkdtempSync, utimesSync, statSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const fakeRoot = mkdtempSync(join(tmpdir(), "gebai-keqing-remerge-"))
@@ -619,7 +626,7 @@ describe("跨语言同名合并（TS + 客卿贡献集 → 合并视图，DESIGN
       expect(m.def("mergx")?.description).toBe("v1")
       // 客卿变化（改 manifest description）：重拉 → 重合并（视图更新）
       const mf = join(agentDir, "agent.json")
-      writeFileSync(mf, JSON.stringify({ name: "mergx", description: "v2", protocol: 2, command: ["python", driver], env: { FAKE_NAME: "mergx" } }))
+      writeFileSync(mf, JSON.stringify({ name: "mergx", description: "v2", protocol: 2, command: ["{python}", driver], env: { FAKE_NAME: "mergx" } }))
       const st = statSync(mf)
       utimesSync(mf, new Date(st.atimeMs + 4000), new Date(st.mtimeMs + 4000))
       await m.refreshIfChanged()
@@ -856,6 +863,7 @@ describe("客卿发现延迟（deferNative：启动不被 sidecar 阻塞）", ()
   }
 
   test("deferNative：discover 不等客卿握手即返回；whenNativeReady 后就绪", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
     const { rmSync } = await import("node:fs")
     const delaySec = 1.5
     const root = await makeSlowRoot(delaySec)
@@ -881,6 +889,7 @@ describe("客卿发现延迟（deferNative：启动不被 sidecar 阻塞）", ()
   })
 
   test("deferNative 下 load 会先等后台发现（显式装载语义不变）", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
     const { rmSync } = await import("node:fs")
     const root = await makeSlowRoot(1.5)
     try {
@@ -900,6 +909,7 @@ describe("客卿发现延迟（deferNative：启动不被 sidecar 阻塞）", ()
   })
 
   test("非 defer（缺省）仍同步等待客卿发现", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
     const { rmSync } = await import("node:fs")
     const root = await makeSlowRoot(1.5)
     try {

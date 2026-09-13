@@ -101,6 +101,10 @@ test("scanManifestDirs：仅含 agent.json 的子目录入表；无 manifest 目
 })
 
 test("discoverKeqing：坏驱动握手失败记入 errors 不抛出；无 python 的 command 占位报错可读", async () => {
+  // 坏驱动需真解释器才会被拉起（无 python 时 spawn 失败，测的就不是握手路径了）——
+  // 用产品解析器取解释器（跨平台：Windows python/py、Linux python3），缺失则跳过
+  const py = resolvePythonCommand()
+  if (!py) return test.skip("python 不可用", () => {})
   const root = join(tmpRoot, "bad-drv")
   mkdirSync(root, { recursive: true })
   mkdirSync(join(root, "badagent"))
@@ -110,7 +114,9 @@ test("discoverKeqing：坏驱动握手失败记入 errors 不抛出；无 python
   )
   // main.py 不是协议驱动（启动后立即退出）：握手失败 → errors
   writeFileSync(join(root, "badagent", "main.py"), "import sys\nsys.exit(3)\n")
-  const { defs, errors } = await discoverKeqing({ resolvePython: () => ["python"] })
+  // roots 限定到本用例的临时目录：不扫真实客卿目录（那里有编译型客卿，会因环境缺 Go/Rust
+  // 工具链或下载依赖而拖慢/超时——本用例只验证坏驱动的握手失败路径，不该依赖别的客卿）
+  const { defs, errors } = await discoverKeqing({ roots: [root], resolvePython: () => py })
   // 只验证不抛出 + errors 结构（具体成败取决于环境，本用例的坏驱动应失败）
   expect(Array.isArray(defs)).toBe(true)
   expect(Array.isArray(errors)).toBe(true)
