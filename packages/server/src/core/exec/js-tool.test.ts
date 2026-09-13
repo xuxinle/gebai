@@ -630,10 +630,16 @@ describe("js 运行时工具定义（defineTool）", () => {
       resolve: (name) => (defined.has(name) ? { name, tool: defined.get(name)! } : baseResolve(name)),
       getAgentNames: () => [],
     }
-    c.defineDynamicTool = async (def) => {
+    c.defineDynamicTool = async (def, opts) => {
       const tool = makeDynamicTool(def)
-      if (defined.has(tool.name) || baseResolve(tool.name)) throw new Error(`工具名已存在: ${tool.name}`)
+      const exists = defined.has(tool.name)
+      // 与引擎同语义：overwrite 只覆盖本会话已注册的同名动态工具，占用全局工具名仍拒绝
+      if ((exists || baseResolve(tool.name)) && !(opts?.overwrite === true && exists)) throw new Error(`工具名已存在: ${tool.name}`)
       defined.set(tool.name, tool)
+      return { overwritten: exists }
+    }
+    c.undefineDynamicTool = async (name) => {
+      if (!defined.delete(name)) throw new Error(`动态工具不存在: ${name}`)
     }
     return { c, defined }
   }
@@ -688,6 +694,30 @@ return "done"`,
     const tool = defined.get("plain_ret")!
     const r2 = await tool.execute({ a: 1 }, c)
     expect(r2.output).toBe('值:{"a":1}')
+    rmSync(home, { recursive: true, force: true })
+  }, 60000)
+
+  test("defineTool overwrite 覆盖同名动态工具；undefineTool 注销并回收脚本全局", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-def4-"))
+    const { c, defined } = ctxWithDefine(home)
+    const r = await jsTool.execute(
+      {
+        code: `const v1 = await defineTool({ name: "ver", description: "v1", requiresApproval: false, async execute() { return "v1" } })
+const dup = await defineTool({ name: "ver", description: "v2", async execute() { return "v2" } }).then(v => "dup-ok" + JSON.stringify(v)).catch(e => e.message)
+const v2 = await defineTool({ name: "ver", description: "v2", requiresApproval: false, overwrite: true, async execute() { return "v2" } })
+console.log("v1:", JSON.stringify(v1)); console.log("dup:", dup); console.log("v2:", JSON.stringify(v2))
+await undefineTool("ver")
+const gone = await tools.call("ver", {}).then(() => "still-there").catch(e => e.message)
+console.log("gone:", gone)`,
+      },
+      c,
+    )
+    expect(r.output).toContain('v1: {"registered":"ver","overwritten":false}')
+    expect(r.output).toContain("工具名已存在: ver")
+    expect(r.output).toContain('v2: {"registered":"ver","overwritten":true}')
+    // 注销后：覆盖层已移除、脚本全局同名函数已摘除（按名调用落到「未知工具」）
+    expect(defined.has("ver")).toBe(false)
+    expect(r.output).toContain("未知工具")
     rmSync(home, { recursive: true, force: true })
   }, 60000)
 

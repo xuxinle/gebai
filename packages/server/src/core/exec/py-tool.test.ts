@@ -183,6 +183,32 @@ describe("py 工具桥（本地模式）", () => {
     await rmTemp(home)
   })
 
+  test.if(!!PY)("工具异常可按名 except _G_ToolError（异常类已注入用户命名空间）", async () => {
+    _resetPythonCmdCache()
+    const home = tmpHome("bridge-toolerror")
+    const c = ctx(home)
+    const r = await pyTool.execute(
+      {
+        code: [
+          "try:",
+          '    boom({})',
+          "    result = {'caught': False}",
+          "except _G_ToolError as e:",
+          '    print("caught-by-name:", type(e).__name__, isinstance(e, RuntimeError))',
+          "    result = {'caught': True, 'name': type(e).__name__}",
+        ].join("\n"),
+      },
+      c,
+    )
+    // 注入前用户代码的 globals 里没有 _G_ToolError（模块全局不在 exec 解析链上）——
+    // 按工具描述写 except _G_ToolError 会 NameError，本用例守住该承诺
+    expect(r.output).toContain("caught-by-name: _G_ToolError True")
+    const data = r.data as { exitCode: number; result: { caught: boolean; name: string } }
+    expect(data.exitCode).toBe(0)
+    expect(data.result).toEqual({ caught: true, name: "_G_ToolError" })
+    await rmTemp(home)
+  })
+
   test.if(!!PY)("fd 直写/子进程输出与工具调用交织：协议不被污染（不借用 stdio 的核心收益）", async () => {
     _resetPythonCmdCache()
     const home = tmpHome("bridge-stdio")

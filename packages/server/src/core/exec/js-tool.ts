@@ -135,10 +135,22 @@ function scriptPreamble(): string {
     "  var name = String(def.name || '')",
     "  return new Promise(function (resolve, reject) {",
     "    __G_pending.set(id, { resolve: resolve, reject: reject })",
-    "    __G_send({ t: 'def', id: id, name: name, description: String(def.description || ''), parameters: def.parameters || { type: 'object', properties: {} }, requiresApproval: def.requiresApproval, source: def.execute.toString() })",
+    "    __G_send({ t: 'def', id: id, name: name, description: String(def.description || ''), parameters: def.parameters || { type: 'object', properties: {} }, requiresApproval: def.requiresApproval, overwrite: def.overwrite === true, source: def.execute.toString() })",
     "  }).then(function (res) {",
     // 注册成功后注入脚本全局（同脚本内立即可像内置函数一样调用；后续脚本经服务端声明生成）
     "    try { if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) globalThis[name] = function (params) { return __G_call(name, params) } } catch (e) {}",
+    "    return res",
+    "  })",
+    "}",
+    "function undefineTool(name) {",
+    "  __G_seq++",
+    "  var id = __G_seq",
+    "  return new Promise(function (resolve, reject) {",
+    "    __G_pending.set(id, { resolve: resolve, reject: reject })",
+    "    __G_send({ t: 'undef', id: id, name: String(name == null ? '' : name) })",
+    "  }).then(function (res) {",
+    // 注销成功后从脚本全局摘掉同名函数（后续调用回到「未知工具」而非静默走 RPC）
+    "    try { var n = String((res && res.removed) || name); if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n)) delete globalThis[n] } catch (e) {}",
     "    return res",
     "  })",
     "}",
@@ -406,7 +418,7 @@ async function runJsScript(
   }
 
   const dispatchLine = async (line: string): Promise<void> => {
-    let msg: { t?: string; id?: number; name?: string; params?: Record<string, unknown>; level?: string; text?: string; value?: unknown; error?: string; description?: string; parameters?: Record<string, unknown>; source?: string; requiresApproval?: boolean }
+    let msg: { t?: string; id?: number; name?: string; params?: Record<string, unknown>; level?: string; text?: string; value?: unknown; error?: string; description?: string; parameters?: Record<string, unknown>; source?: string; requiresApproval?: boolean; overwrite?: boolean }
     try {
       msg = JSON.parse(line)
     } catch {
@@ -459,12 +471,35 @@ async function runJsScript(
         requiresApproval: msg.requiresApproval,
       }
       try {
-        await ctx.defineDynamicTool(def)
+        const res = await ctx.defineDynamicTool(def, { overwrite: msg.overwrite === true })
+        const overwritten = !!res && typeof res === "object" && (res as { overwritten?: boolean }).overwritten === true
         out.calls.push({ name: `defineTool:${def.name}`, ok: true })
-        respond(true, { registered: def.name })
+        respond(true, { registered: def.name, overwritten })
       } catch (err) {
         out.calls.push({ name: `defineTool:${def.name}`, ok: false, error: (err as Error).message })
         respond(false, `defineTool 失败: ${(err as Error).message}`)
+      }
+      return
+    }
+    // 运行时工具注销（undefineTool）：摘除本会话（或本次子会话运行）内 defineTool 注册的动态工具
+    if (msg.t === "undef") {
+      const name = String(msg.name ?? "")
+      if ((opts.depth ?? 0) > 0) {
+        out.calls.push({ name: `undefineTool:${name}`, ok: false, error: "动态工具内不可 undefineTool" })
+        respond(false, "动态工具运行器内不能再 undefineTool")
+        return
+      }
+      if (!ctx.undefineDynamicTool) {
+        respond(false, "当前环境不支持注销动态工具（undefineTool）")
+        return
+      }
+      try {
+        await ctx.undefineDynamicTool(name)
+        out.calls.push({ name: `undefineTool:${name}`, ok: true })
+        respond(true, { removed: name })
+      } catch (err) {
+        out.calls.push({ name: `undefineTool:${name}`, ok: false, error: (err as Error).message })
+        respond(false, `undefineTool 失败: ${(err as Error).message}`)
       }
       return
     }
@@ -582,7 +617,7 @@ export const jsTool: Tool = {
     "- **工具即内置函数**：`const r = await read({ path: \"a.txt\" })`（当前已启用的每个工具名都是一个可直接 await 的函数，无需前缀）；动态名字用 `await tools.call(name, params)` 或 `await tools.xxx(params)`。返回 `{ output, data, blocks, truncated, filePath }`（data 为结构化输出，结构可先用 tool_schemas 查询）；工具抛错 = Promise reject（可 try/catch 容错）。并行用 `Promise.all`；调用总数上限 100 次。内部工具产生的图片/图表/文件块与 subsession_run 的新会话存档透传到 js 结果（UI 可见、历史回放不丢）。\n" +
     "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；编排传入的 `input` 参数可直接引用（JSON 文本需自行 JSON.parse）。\n" +
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
-    "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（默认 true 需审批，仅明确安全的只读/幂等工具传 false）。\n" +
+    "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（体内可用工具函数/ctx，须自包含不闭包外部变量）；重复劳动的逻辑（多轮要复用的加工/查询流程）写成 defineTool 而非每轮重贴整个脚本。`requiresApproval` 可选（默认 true 需审批，仅明确安全的只读/幂等工具传 false）；`overwrite: true` 覆盖本会话同名**动态**工具（全局工具/子Agent 工具占用名仍拒绝）；`await undefineTool(name)` 注销已注册的动态工具（环境不支持时抛错误，可 catch）。\n" +
     "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。**脚本进程 cwd 即会话 tmp/**：裸 fs/Bun.write 的相对路径直接用文件名（如 `a.txt`）——不要再带 `tmp/` 前缀（会多套一层写入 `tmp/tmp/…`）；工具函数（read/write 等）两种写法等价（`tmp/` 前缀自动剥离，仅工具参数层生效）。",
   // js 免审按词元扫描放行：纯数据加工/工具编排代码（无网络外发/进程/环境读取/Bun 写通道）免审生效，
   //  含上述通道的一律仍需审批（防提示词注入借免审标记外发数据或执行进程）。approval:false 参数

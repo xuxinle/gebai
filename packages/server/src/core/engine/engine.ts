@@ -597,21 +597,32 @@ private activeSchemas(sessionId: string) {
   }
 
   /** 注册会话级动态工具（js defineTool RPC → ToolContext.defineDynamicTool）：校验命名/重名/命名空间
-   *  碰撞与安全模式后并入覆盖层，并随会话 chat.json 落盘（重启恢复）。 */
-  private async registerDynamicTool(sessionId: string, user: string, def: DynamicToolDef): Promise<void> {
+   *  碰撞与安全模式后并入覆盖层，并随会话 chat.json 落盘（重启恢复）。
+   *  overwrite=true（脚本 `defineTool({ ..., overwrite: true })`）：仅允许覆盖本会话**已注册的同名动态
+   *  工具**——全局工具与子Agent 命名空间占用名仍拒绝；返回 overwritten 供脚本侧回报。 */
+  private async registerDynamicTool(sessionId: string, user: string, def: DynamicToolDef, overwrite = false): Promise<{ overwritten: boolean }> {
     // 安全模式：动态工具与 js 同规则降级（makeDynamicTool.execute 源码静态扫描 + 子进程只读 shim），允许注册
     const tool = makeDynamicTool(def)
     const view = this.sessionRegistry(sessionId)
-    if (view.resolve(tool.name)) throw new Error(`工具名已存在: ${tool.name}（与现有工具/已定义工具冲突，请换名）`)
+    const existing = this.dynamicTools.get(sessionId)
+    const replacing = existing?.has(tool.name) === true
+    if (view.resolve(tool.name) && !(overwrite && replacing)) {
+      throw new Error(
+        overwrite
+          ? `工具名已存在: ${tool.name}（overwrite 仅可覆盖本会话 defineTool 注册的动态工具；全局工具/子Agent 工具占用名不可覆盖）`
+          : `工具名已存在: ${tool.name}（与现有工具/已定义工具冲突，请换名；要覆盖同名动态工具传 overwrite: true）`,
+      )
+    }
     for (const agent of view.getAgentNames()) {
       if (tool.name.startsWith(`${agent}_`)) throw new Error(`工具名 ${tool.name} 与子Agent 命名空间冲突（${agent}_ 前缀保留）`)
     }
-    let m = this.dynamicTools.get(sessionId)
+    let m = existing
     if (!m) {
       m = new Map()
       this.dynamicTools.set(sessionId, m)
     }
-    if (m.size >= AgentEngine.DYNAMIC_TOOLS_CAP) throw new Error(`本会话动态工具数量超上限（${AgentEngine.DYNAMIC_TOOLS_CAP}）`)
+    // 容量上限只对新增生效（覆盖是原地替换，不占新位）
+    if (!replacing && m.size >= AgentEngine.DYNAMIC_TOOLS_CAP) throw new Error(`本会话动态工具数量超上限（${AgentEngine.DYNAMIC_TOOLS_CAP}）`)
     // 持久化用定义（makeDynamicTool 校验/归一化后的形态）：parameters 取归一化 schema，源码去首尾空白；
     // requiresApproval 始终显式写布尔（默认 true 语义下省略键会被水合回 true，显式 false 定义必须保真）
     const persisted: DynamicToolDef = {
@@ -626,6 +637,21 @@ private activeSchemas(sessionId: string) {
     const session = await this.opts.store.load(sessionId, user)
     if (!session) throw new Error(`会话不存在: ${sessionId}`)
     session.dynamicTools = [...m.values()].map((x) => x.def)
+    await this.opts.store.save(session)
+    return { overwritten: replacing }
+  }
+
+  /** 注销会话级动态工具（js undefineTool RPC → ToolContext.undefineDynamicTool）：从覆盖层摘除并同步
+   *  chat.json（重启后不再水合）。**仅**可注销本会话 defineTool 注册的动态工具——名字不在覆盖层即报错，
+   *  绝不回落删除全局工具/子Agent 工具。 */
+  private async unregisterDynamicTool(sessionId: string, user: string, name: string): Promise<void> {
+    const m = this.dynamicTools.get(sessionId)
+    if (!m?.has(name)) throw new Error(`动态工具不存在: ${name}（仅可注销本会话 defineTool 注册的工具）`)
+    m.delete(name)
+    if (!m.size) this.dynamicTools.delete(sessionId)
+    const session = await this.opts.store.load(sessionId, user)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    session.dynamicTools = [...(this.dynamicTools.get(sessionId)?.values() ?? [])].map((x) => x.def)
     await this.opts.store.save(session)
   }
 
@@ -1382,7 +1408,7 @@ private activeSchemas(sessionId: string) {
     user: string,
     env: Record<string, string>,
     signal: AbortSignal,
-    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef) => Promise<void>; loadIntoRegistry?: ToolRegistry; subSessionMerge?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null>; multimodal?: boolean; todoScope?: { get: () => Promise<TodoItem[]>; set: (t: TodoItem[]) => Promise<void> }; ownerRunId?: string },
+    opts?: { workdir?: string; resolveBase?: string; projects?: PresetProject[]; role?: string; messages?: MessageLike[]; registry?: Pick<ToolRegistry, "schemas" | "resolve" | "getAgentNames">; writeGuard?: ToolContext["writeGuard"]; registerDynamic?: (def: DynamicToolDef, opts?: { overwrite?: boolean }) => Promise<{ overwritten?: boolean } | void>; unregisterDynamic?: (name: string) => Promise<void>; loadIntoRegistry?: ToolRegistry; subSessionMerge?: (content?: string) => Promise<string>; fileGuardMap?: Map<string, string | null>; multimodal?: boolean; todoScope?: { get: () => Promise<TodoItem[]>; set: (t: TodoItem[]) => Promise<void> }; ownerRunId?: string },
     depth = 0,
   ): ToolContext {
     const store = this.opts.store
@@ -1587,9 +1613,11 @@ private activeSchemas(sessionId: string) {
       // 子会话与父会话双向同步（subsession_merge 工具，DESIGN「子会话运行」互相感知）：仅异步子会话运行上下文
       // 注入（runSubSession 绑定运行身份回调——传 content 先合入再统一返回父会话增量）；其余上下文未注入
       subSessionMerge: opts?.subSessionMerge,
-      // 运行时工具定义（js defineTool）：主会话 → 会话覆盖层（随会话落盘）；子会话运行 → 本次运行注册表（随运行结束释放）。
-      // 可选：未注入（无 registerDynamic 来源）时 js 侧 defineTool 返回不可用错误
+      // 运行时工具定义/注销（js defineTool / undefineTool）：主会话 → 会话覆盖层（随会话落盘）；子会话运行 →
+      // 本次运行注册表（随运行结束释放）。可选：未注入（无 registerDynamic/unregisterDynamic 来源）时
+      // js 侧 defineTool / undefineTool 返回不可用错误
       defineDynamicTool: opts?.registerDynamic,
+      undefineDynamicTool: opts?.unregisterDynamic,
       waitForChoice: (prompt, options, multi, plan) => self.waitForChoice(sessionId, prompt, options, multi, execSignal, plan),
       waitForEnv: (name, description, secret) => self.waitForEnv(sessionId, name, description ?? "", secret === true, execSignal),
       waitForDraw: (render) => self.waitForDraw(sessionId, render, execSignal),
@@ -1888,7 +1916,7 @@ private activeSchemas(sessionId: string) {
     // 最终轮（无 toolCalls）的 assistantMsgId：本轮消息不在此持久化（由 run() 收口落盘），
     // 回传给 run() 用同一 id 落盘——流式增量已按该 id 推送前端，撤回/反馈对刚完成的回复立即生效
     let lastMessageId: string | undefined
-    const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages, registry, registerDynamic: (def) => this.registerDynamicTool(sessionId, user, def), multimodal: provider.capabilities().multimodal }, 0)
+    const ctx = this.buildContext(sessionId, user, env, signal, { projects: this.allPresetProjects(user, env), role: this.tasks.get(sessionId)?.role, messages, registry, registerDynamic: (def, o) => this.registerDynamicTool(sessionId, user, def, o?.overwrite === true), unregisterDynamic: (name) => this.unregisterDynamicTool(sessionId, user, name), multimodal: provider.capabilities().multimodal }, 0)
 
     while (rounds < MAX_TOOL_ROUNDS) {
       if (signal.aborted) throw new Error("cancelled")
@@ -2795,9 +2823,11 @@ private activeSchemas(sessionId: string) {
         subSessionMerge: ctxOpts?.subSessionMergeApply,
         todoScope: ctxOpts?.todoScope,
         ownerRunId: archive.runId,
-        registerDynamic: async (def) => {
-          reg.register(makeDynamicTool(def))
-        },
+              // 子会话运行内定义的工具只进本次运行注册表（随运行结束释放）：同名定义天然覆盖（reg.register 原地替换），
+      // 不提供 unregisterDynamic（运行内注销语义不成立，js 侧 undefineTool 会返回环境不支持）
+      registerDynamic: async (def) => {
+        reg.register(makeDynamicTool(def))
+      },
         multimodal: taskProvider.capabilities().multimodal,
       },
       depth,

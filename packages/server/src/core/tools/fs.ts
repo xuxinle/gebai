@@ -247,6 +247,29 @@ export const readTool: Tool = {
   },
 }
 
+/** 同路径写串行队列：把「读旧值 → 守卫判定 → 计算 → 落盘」整段 RMW 串起来执行。
+ *  仅给 ctx.writeFile 加锁不够——并发 append 的多个调用各自读到同一份旧值，各自算完再整体落盘，
+ *  后写者会覆盖前写者（js/py 脚本内 `Promise.all` 并行 append/写同一文件时静默丢行）。
+ *  队列只保序不做错误传播：前序失败不阻塞后续，锁随队尾出清（Map 不随路径数无限增长）。 */
+const pathWriteChains = new Map<string, Promise<void>>()
+async function withPathWriteLock<T>(absPath: string, fn: () => Promise<T>): Promise<T> {
+  const key = process.platform === "win32" ? absPath.toLowerCase() : absPath
+  const prev = pathWriteChains.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  const tail = prev.then(() => gate)
+  pathWriteChains.set(key, tail)
+  await prev.catch(() => {})
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (pathWriteChains.get(key) === tail) pathWriteChains.delete(key)
+  }
+}
+
 export const writeTool: Tool = {
   name: "write",
   description:
@@ -266,49 +289,53 @@ export const writeTool: Tool = {
     const guardMsg = await ctx.writeGuard?.([path])
     if (guardMsg) return { output: guardMsg }
     const append = args.append === true
-    let existing: string | null = null
-    try {
-      existing = await ctx.readFile(path)
-    } catch {
-      existing = null
-    }
-    // 防误覆盖守卫（ZCode Write 语义，覆盖/追加同规则）：已存在但未读过 → 拒绝并引导先 read（模型下一轮自纠，一次往返）
-    if (existing !== null && ctx.fileGuard && !ctx.fileGuard.hasRead(path)) {
-      return {
-        output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
+    // 临界区（同路径串行，见 withPathWriteLock）：读旧值 → 防误覆盖/防陈旧/编码守卫 → 计算 → 落盘 → 登记指纹。
+    // 并发写同一文件时后续调用会排队，读到的是前一次落盘后的内容（append 不再互相覆盖丢行）。
+    return withPathWriteLock(path, async () => {
+      let existing: string | null = null
+      try {
+        existing = await ctx.readFile(path)
+      } catch {
+        existing = null
       }
-    }
-    // 防陈旧覆盖守卫：内容自本会话上次读取/写入后已漂移（并行分支/主线/脚本命令/外部编辑）→ 拒绝并引导重读，
-    // 防基于旧认知静默覆盖他人改动
-    if (existing !== null && ctx.fileGuard?.staleSinceRead(path, existing)) {
-      return {
-        output: `write 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再写，避免覆盖他人的改动；确认要覆盖时在 read 之后立即 write。`,
-      }
-    }
-    // 非 UTF-8 目标文件：write 恒按 UTF-8 落盘，覆盖/追加会破坏原编码（GBK/UTF-16 文件被静默写坏）——
-    // 解码文本出现替换符时按字节复核编码，非 UTF 系明确拒绝并引导转码（局部修改改用 edit，其按原编码写回）
-    if (existing !== null && existing.includes("\uFFFD")) {
-      const det = detectEncoding(await ctx.readBinaryFile(path))
-      if (det && det.encoding !== "utf-8" && det.encoding !== "utf-8-bom") {
+      // 防误覆盖守卫（ZCode Write 语义，覆盖/追加同规则）：已存在但未读过 → 拒绝并引导先 read（模型下一轮自纠，一次往返）
+      if (existing !== null && ctx.fileGuard && !ctx.fileGuard.hasRead(path)) {
         return {
-          output: `write 拒绝：${args.path} 当前编码为 ${ENCODING_LABEL[det.encoding]}，整体写入会按 UTF-8 落盘并破坏原编码。请先转码为 UTF-8（如 py 脚本），或改用 edit（按原编码写回）做局部修改。`,
+          output: `write 拒绝：${args.path} 已存在，但本会话尚未读取过其内容（防盲覆盖）。请先 read 该文件确认现有内容，确实要整体覆盖时再 write；只改局部用 edit（定点替换）或 patch（unified diff）。新建文件不受此限制。`,
         }
       }
-    }
-    const content = stripBom(String(args.content ?? ""))
-    // 覆盖写保留原文件的 UTF-8 BOM（read 展示的是去 BOM 正文，模型意图即正文；BOM 丢失会改变文件字节内容）；
-    // 追加模式接在 existing 之后不动文件头
-    const bom = existing !== null && existing.startsWith("\uFEFF") ? "\uFEFF" : ""
-    const final = append && existing !== null ? existing + content : bom + content
-    await ctx.writeFile(path, final)
-    ctx.fileGuard?.markRead(path, final)
-    const blocks = artifactBlocks(previewLogicalPath(path, ctx), final)
-    return {
-      output: append && existing !== null
-        ? `已追加 ${content.length} 字符至 ${args.path}（现共 ${final.length} 字符）`
-        : `已写入 ${args.path}（${content.length} 字符）`,
-      blocks,
-    }
+      // 防陈旧覆盖守卫：内容自本会话上次读取/写入后已漂移（并行分支/主线/脚本命令/外部编辑）→ 拒绝并引导重读，
+      // 防基于旧认知静默覆盖他人改动
+      if (existing !== null && ctx.fileGuard?.staleSinceRead(path, existing)) {
+        return {
+          output: `write 拒绝：${args.path} 的内容自本会话上次读取/写入后已被修改（可能是并行分支、主线任务、脚本命令或外部编辑）。请重新 read 最新内容后再写，避免覆盖他人的改动；确认要覆盖时在 read 之后立即 write。`,
+        }
+      }
+      // 非 UTF-8 目标文件：write 恒按 UTF-8 落盘，覆盖/追加会破坏原编码（GBK/UTF-16 文件被静默写坏）——
+      // 解码文本出现替换符时按字节复核编码，非 UTF 系明确拒绝并引导转码（局部修改改用 edit，其按原编码写回）
+      if (existing !== null && existing.includes("\uFFFD")) {
+        const det = detectEncoding(await ctx.readBinaryFile(path))
+        if (det && det.encoding !== "utf-8" && det.encoding !== "utf-8-bom") {
+          return {
+            output: `write 拒绝：${args.path} 当前编码为 ${ENCODING_LABEL[det.encoding]}，整体写入会按 UTF-8 落盘并破坏原编码。请先转码为 UTF-8（如 py 脚本），或改用 edit（按原编码写回）做局部修改。`,
+          }
+        }
+      }
+      const content = stripBom(String(args.content ?? ""))
+      // 覆盖写保留原文件的 UTF-8 BOM（read 展示的是去 BOM 正文，模型意图即正文；BOM 丢失会改变文件字节内容）；
+      // 追加模式接在 existing 之后不动文件头
+      const bom = existing !== null && existing.startsWith("\uFEFF") ? "\uFEFF" : ""
+      const final = append && existing !== null ? existing + content : bom + content
+      await ctx.writeFile(path, final)
+      ctx.fileGuard?.markRead(path, final)
+      const blocks = artifactBlocks(previewLogicalPath(path, ctx), final)
+      return {
+        output: append && existing !== null
+          ? `已追加 ${content.length} 字符至 ${args.path}（现共 ${final.length} 字符）`
+          : `已写入 ${args.path}（${content.length} 字符）`,
+        blocks,
+      }
+    })
   },
 }
 
@@ -1161,15 +1188,27 @@ function expandBraces(pattern: string): string[] {
   return out
 }
 
-/** glob 模式转正则：`*`/`**` → 任意字符（跨目录层级，递归查找），`?` → 单字符，`{a,b}` 花括号交替展开为多候选。 */
+/** glob 模式转正则：星号与双星号 → 任意字符（跨目录层级，本工具按「递归查找」契约设计），`?` → 单字符，
+ *  `{a,b}` 花括号交替展开为多候选。
+ *  **双星号后紧跟斜杠时特判为零层或多层目录前缀**（`(?:.*` 与斜杠收尾的 `)?` 组，语义与
+ *  core/fs/service.ts 的 globToRegExp 对齐）——旧实现把该斜杠当字面量，于是
+ *  「双星号 + 斜杠 + 星号」这类模式要求至少一层真实目录：工具自身描述里的示例模式
+ *  「双星号 + 斜杠 + test/星号.js」匹配不到根级 test/ 目录，把 path 限定到子目录后
+ *  用递归模式也查不到该目录的直接子文件（返回 0 个）。 */
 function globToRegExp(pattern: string): RegExp {
   const parts = expandBraces(pattern).map((v) => {
     let out = ""
     for (let i = 0; i < v.length; i++) {
       const c = v[i]
       if (c === "*") {
-        out += ".*"
-        if (v[i + 1] === "*") i++
+        if (v[i + 1] === "*" && v[i + 2] === "/") {
+          // `**/`：零层或多层目录前缀（旧实现把 / 当字面量要求，导致根级文件永不命中）
+          out += "(?:.*/)?"
+          i += 2
+        } else {
+          out += ".*"
+          if (v[i + 1] === "*") i++
+        }
       } else if (c === "?") out += "."
       else out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&")
     }
@@ -1219,7 +1258,7 @@ export const globTool: Tool = {
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
-      pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
+      pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替；`**/` 可匹配零层目录——`**/*.ts` 同时命中根级与子目录的 ts 文件）" },
       path: { type: "string", description: "搜索起点（默认 .，相对会话工作目录，tmp/ 前缀可省略；本地模式可传 tmp/ 外的绝对/相对路径，按该目录实际遍历）" },
       exclude: { type: "string", description: "排除的路径 glob（逗号分隔多模式；与 grep exclude 同语法——无 / 的模式按目录/文件名匹配任意层级）" },
     },

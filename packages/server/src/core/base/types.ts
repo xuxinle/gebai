@@ -32,8 +32,11 @@ export type ToolContext = ContractToolContext & {
   subSessionMerge?: (content?: string) => Promise<string>
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */
   renderDiagram?: (code: string, opts?: { format?: import("@gebai/sdk").DiagramFormat; background?: string; maxWidth?: number; maxHeight?: number }) => Promise<Uint8Array>
-  /** 运行时工具定义注册（js 脚本 defineTool 用）。 */
-  defineDynamicTool?: (def: ContractDynamicToolDef) => Promise<void>
+  /** 运行时工具定义注册（js 脚本 defineTool 用）。`overwrite: true` 时允许覆盖本会话已注册的
+   *  **同名动态工具**（全局工具/子Agent 命名空间占用名仍拒绝）；返回 overwritten 表示本次为覆盖。 */
+  defineDynamicTool?: (def: ContractDynamicToolDef, opts?: { overwrite?: boolean }) => Promise<{ overwritten?: boolean } | void>
+  /** 运行时工具注销（js 脚本 undefineTool 用）：仅可注销本会话/本次运行内 defineTool 注册的动态工具。 */
+  undefineDynamicTool?: (name: string) => Promise<void>
 }
 
 /** 会话级运行时定义工具（js defineTool）的持久化形态（契约类型同形，引擎侧引用别名）。 */

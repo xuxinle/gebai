@@ -191,6 +191,10 @@ for _g_name in _G_TOOL_NAMES:
         continue
     _g_ns[_g_name] = (lambda _n: (lambda params=None: _g_call(_n, params)))(_g_name)
 
+# 异常类注入用户命名空间：工具描述承诺「工具失败抛 _G_ToolError（可 try/except 容错继续）」；
+# 用户代码的 globals 就是 _g_ns（模块全局不在 exec 的解析链上），不注入则 except _G_ToolError 直接 NameError。
+_g_ns["_G_ToolError"] = _G_ToolError
+
 _g_exit = 0
 try:
     exec(compile(_G_USER_SRC, "<gebai-py>", "exec"), _g_ns)
@@ -656,7 +660,7 @@ const pyOutputSchema = schema(
 export const pyTool: Tool = {
   name: "py",
   description:
-    "执行 Python 代码（经临时文件），stdout 为输出。**本地模式下代码可调用其他工具并注入会话上下文（工具桥）**：已启用的工具名即函数——`r = read({\"path\": \"a.txt\"})`，返回 dict（`r[\"output\"]` / `r.output` 等价，含 data/blocks/truncated；**属性访问仅作用于顶层**——嵌套字段按下标，如 `r[\"data\"][\"exitCode\"]`）；动态名字用 `tools.call(name, params)` 或 `tools.<工具名>(params)`；工具调用为同步 API（`ThreadPoolExecutor` 可并行，应答按 id 配对）；工具失败抛 `_G_ToolError`（可 try/except 容错继续）。脚本设置顶层变量 `result = ...` 即作为结构化返回值（进 data.result）；注入 `ctx`（user/sessionId/workdir/home/sandboxed/env/projects/messages）与 `input`（调用入参，对象按 JSON 注入；注意该变量遮蔽内建 `input()`）。\n" +
+    "执行 Python 代码（经临时文件），stdout 为输出。**本地模式下代码可调用其他工具并注入会话上下文（工具桥）**：已启用的工具名即函数——`r = read({\"path\": \"a.txt\"})`，返回 dict（`r[\"output\"]` / `r.output` 等价，含 data/blocks/truncated；**属性访问仅作用于顶层**——嵌套字段按下标，如 `r[\"data\"][\"exitCode\"]`）；动态名字用 `tools.call(name, params)` 或 `tools.<工具名>(params)`；工具调用为同步 API（`ThreadPoolExecutor` 可并行，应答按 id 配对）；工具失败抛 `_G_ToolError`（可 try/except 容错继续）。脚本设置顶层变量 `result = ...` 即作为结构化返回值（进 data.result）；注入 `ctx`（user/sessionId/workdir/home/sandboxed/env/projects/messages）与 `input`（调用入参，对象/数组原样注入为 dict/list，与 js 侧一致；注意该变量遮蔽内建 `input()`）。\n" +
     "- **仅本地模式**：沙箱模式（服务端部署）与安全模式（只读运行时：审计钩子屏蔽写/进程/网络，仅保留文件读取）下不注入工具桥，纯脚本执行。不支持 defineTool。\n" +
     "- 协议走回环 socket，stdout/stderr 完全归脚本输出（`print`/fd 直写/子进程输出均照常进 stdout），stdin 不被占用。\n" +
     "- 嵌套：py 桥不可重入（py 内不能再调 py，硬拒抛 `_G_ToolError`）；可调 js（首次进入）；JS 已在本链中（如 `js→py→js`）时同样硬拒。\n" +
@@ -667,7 +671,7 @@ export const pyTool: Tool = {
   parameters: schema(
     {
       code: { type: "string", description: "Python 程序源码（本地模式下可用工具桥：工具名即函数、tools.call、ctx/input 注入；`result = ...` 作为返回值）" },
-      input: { type: "string", description: "可选：作为程序 stdin 的输入数据（本地模式工具桥路径下按 JSON 注入 `input` 变量）" },
+      input: { description: "可选：任意输入，脚本内经 `input` 引用（本地模式工具桥下对象/数组原样注入为 dict/list，与 js 一致；纯脚本降级路径按 JSON 文本走 stdin）" },
       timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540；超时进程被终止并返回超时结果）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」语义）；默认 false 非 0 退出作为正常结果返回" },
       approval: { type: "boolean", description: "兼容参数：py 的 code 为任意代码、无法静态判定安全性，免审标记不生效（默认且恒需审批）" },

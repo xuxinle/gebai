@@ -1376,6 +1376,27 @@ describe("global tools", () => {
     cleanup(home)
   })
 
+  test("并发 append 同一文件不丢行（同路径写串行队列：整段读-改-写串行）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-write-race-"))
+    const c = ctx(home)
+    c.fileGuard = fakeGuard()
+    // 脚本内 Promise.all 并行 append：旧实现各调用读到同一份旧值 → 后写覆盖前写（10 次只剩 1 行）
+    await writeTool.execute({ path: "race.txt", content: "" }, c)
+    await Promise.all(Array.from({ length: 10 }, (_, i) => writeTool.execute({ path: "race.txt", content: `line-${i}\n`, append: true }, c)))
+    const text = await Bun.file(join(c.workdir, "race.txt")).text()
+    const lines = text.split("\n").filter(Boolean)
+    expect(lines.length).toBe(10)
+    expect(new Set(lines).size).toBe(10)
+    // 并发整体覆盖同一文件同样串行化：结果恒为其中一次的完整内容（不相互交叉）
+    await Promise.all([
+      writeTool.execute({ path: "over.txt", content: "A".repeat(2000) }, c),
+      writeTool.execute({ path: "over.txt", content: "B".repeat(2000) }, c),
+    ])
+    const over = await Bun.file(join(c.workdir, "over.txt")).text()
+    expect(over === "A".repeat(2000) || over === "B".repeat(2000)).toBe(true)
+    cleanup(home)
+  })
+
   test("edit 防盲改守卫：未读过的已存在文件拒绝，read/write 后放行，新建文件不受限", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-edit-guard-"))
     const c = ctx(home)
@@ -2282,6 +2303,31 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     // path 指向会话外且目录不存在：明确报错（不再与「目录内无匹配」同义——调用方无法区分「访问不到」与「不存在」）
     const outside = await createGlobalTools().glob.execute({ pattern: "*.ts", path: join(c.workdir, "..", "outside") }, c)
     expect(outside.output).toContain("路径不存在或无可列文件")
+    cleanup(home)
+  })
+
+  test("glob `**/` 可匹配零层目录：**/* 命中直接子文件、**/test/*.js 命中根级 test", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-glob-zero-"))
+    const c = ctx(home)
+    c.listFiles = async () => [
+      { path: "a.ts", size: 1, modifiedAt: 0, isDir: false },
+      { path: "src/b.ts", size: 1, modifiedAt: 0, isDir: false },
+      { path: "test/c.js", size: 1, modifiedAt: 0, isDir: false },
+      { path: "src/test/d.js", size: 1, modifiedAt: 0, isDir: false },
+    ]
+    // 旧实现把 `**` 后的 `/` 当字面量：`**/*` 要求至少一层目录 → 根级文件全漏（返回 0 个）
+    const all = await createGlobalTools().glob.execute({ pattern: "**/*" }, c)
+    expect((all.data as { total: number }).total).toBe(4)
+    expect(all.output).toContain("a.ts")
+    // 工具描述里的示例模式：根级 test/ 目录也必须命中
+    const t = await createGlobalTools().glob.execute({ pattern: "**/test/*.js" }, c)
+    expect(t.output).toContain("test/c.js")
+    expect(t.output).toContain("src/test/d.js")
+    expect(t.output).not.toContain("b.ts")
+    // path 限定起点（前缀剥离后匹配）同样成立
+    const sub = await createGlobalTools().glob.execute({ pattern: "**/*", path: "src" }, c)
+    expect((sub.data as { total: number }).total).toBe(2)
+    expect(sub.output).not.toContain("a.ts")
     cleanup(home)
   })
 
