@@ -13,11 +13,14 @@ const store = new Map<string, string>()
     return store.size
   },
 } as unknown as Storage
-// setTurnTimerSetting → applyTurnTimer 需要 document：最小桩
-;(globalThis as Record<string, unknown>).document = {
-  documentElement: { dataset: {} },
-  dispatchEvent: () => true,
-} as unknown as Document
+// setTurnTimerSetting → applyTurnTimer 需要 document：只补自己需要的字段，
+// 不整体替换（基线 DOM 由 scripts/test-preload.ts 提供，整体替换会把它盖掉，
+// 后续测试文件里模块顶层的 getElementById 之类就会炸）
+const turnTimerDoc = ((globalThis as Record<string, unknown>).document ??= {}) as Record<string, unknown>
+turnTimerDoc.documentElement ??= { dataset: {} }
+turnTimerDoc.dispatchEvent ??= () => true
+turnTimerDoc.addEventListener ??= () => {}
+turnTimerDoc.removeEventListener ??= () => {}
 
 describe("turn-timer setting", () => {
   test("默认开启；不存/其它存储值均视为开启", () => {

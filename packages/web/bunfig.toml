@@ -1,0 +1,4 @@
+# 测试基线环境：任何测试文件之前装好一套完整的最小 DOM
+# （页面模块在 import 期就会绑定真实 DOM，见 scripts/test-preload.ts 的说明）
+[test]
+preload = ["./scripts/test-preload.ts"]

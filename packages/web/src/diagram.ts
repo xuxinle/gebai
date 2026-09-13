@@ -921,33 +921,38 @@ function trackRendered(canvas: HTMLElement, entry: { code: string; format: Diagr
 }
 
 // 主题切换后按最新主题配色重绘所有已渲染缩略图（编辑态/已移除的跳过）
-document.addEventListener("gebai:theme-change", () => {
-  svgCache.clear() // PlantUML skinparam 随主题变化，缓存失效
-  mermaidCache.clear() // mermaid 主题为全局初始化状态，切换后重渲染
-  d2Cache.clear() // d2 主题 ID 随明暗变化，缓存失效
-  echartsCache.clear() // echarts darkMode 随明暗变化，缓存失效
-  void (async () => {
-    for (const ref of [...activeCanvases]) {
-      const canvas = ref.deref()
-      const entry = canvas ? rendered.get(canvas) : undefined
-      if (!canvas || !entry) {
-        activeCanvases.delete(ref) // 已回收
-        continue
+// 防御：测试环境可能存在缺 addEventListener 的 document 泄漏 stub（同 sticky-scroll 的 window 防护），
+// 且测试文件执行顺序不定——无防护时本模块的顶层副作用会直接抽掉整个测试文件。
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("gebai:theme-change", () => {
+    svgCache.clear() // PlantUML skinparam 随主题变化，缓存失效
+    mermaidCache.clear() // mermaid 主题为全局初始化状态，切换后重渲染
+    d2Cache.clear() // d2 主题 ID 随明暗变化，缓存失效
+    echartsCache.clear() // echarts darkMode 随明暗变化，缓存失效
+    void (async () => {
+      for (const ref of [...activeCanvases]) {
+        const canvas = ref.deref()
+        const entry = canvas ? rendered.get(canvas) : undefined
+        if (!canvas || !entry) {
+          activeCanvases.delete(ref) // 已回收
+          continue
+        }
+        if (!canvas.isConnected) {
+          activeCanvases.delete(ref) // 已脱离 DOM（如会话切换清空）
+          continue
+        }
+        canvas.innerHTML = ""
+        await renderThumbnail(canvas, entry.code, entry.format)
       }
-      if (!canvas.isConnected) {
-        activeCanvases.delete(ref) // 已脱离 DOM（如会话切换清空）
-        continue
-      }
-      canvas.innerHTML = ""
-      await renderThumbnail(canvas, entry.code, entry.format)
-    }
-  })()
-})
+    })()
+  })
+}
 
 // 空闲预热本地渲染引擎（PlantUML 6.8MB + mermaid 3.4MB + echarts 1.1MB 懒加载）：避免首次 draw 调用时引擎加载吃掉 5 秒渲染窗口。
 // 只预热**本机实际用过的**引擎（痕迹由 markEngineUsed 记录）：无图表使用史的会话首屏不下载任何引擎；
 // D2（8MB WASM）加载开销大且架构图频率低，不预热；低性能模式跳过预热（引擎内存/加载开销大），首次渲染由消息流触发。
-if (typeof window !== "undefined") {
+// 防御：测试环境可能存在缺 addEventListener 的 window 泄漏 stub（同 sticky-scroll 的 window 防护）
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener(
     "load",
     () => {

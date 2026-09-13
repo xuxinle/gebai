@@ -104,6 +104,7 @@ bun run lint
 - 统一 `bun test`，测试文件与被测代码同目录（`*.test.ts`）。
 - **环境封闭**：测试进程不读仓库 `.env`（`packages/server/bunfig.toml` 的 `[test] preload` 清 `GEBAI_`/`CODE_` 变量 + `loadConfig` 的 `loadDotEnv` 在 test 期跳过）；**该 preload 只在包目录下生效**——从仓库根直接跑 `bun test packages/server/...` 不会加载它（工具/脚本跑测试请用 `--cwd packages/server`，否则仓库根 `.env` 会污染断言）。断言不得依赖开发者本地配置或宿主环境变量。
 - **跨平台**：涉及平台分支的用例显式注入平台参数（如 `platform: "win32"`），不随宿主平台漂移。
+- **DOM 桩不跨文件泄漏**（`packages/web`）：该包测试依赖基线 DOM（`packages/web/bunfig.toml` 的 `[test] preload` → `scripts/test-preload.ts`），因为不少页面模块在 **import 期就绑定真实 DOM**。测试文件**不得整体替换** `document`/`window`（会把基线盖掉，而 Bun 同进程跑完全部测试文件，后加载的文件看到的是上一个文件留下的桩），只补自己需要的字段（`doc.documentElement ??= …`）；被用例刻意当作**缺省**验证回退路径的全局（如 `IntersectionObserver`）不装进基线。
 - **并行安全**：新增测试不得在仓库目录内写文件/改 mtime（用 `mkdtempSync`）、不得依赖固定端口/固定临时路径；真实 spawn 类用例给足用例超时（并行分片满载时 5s 默认不够）。
 - **真起服务进程的用例必须自收尾且环境隔离**（实机冒烟类）：外部拉起器 / `Start-Process` 创建的子进程**不受测试进程 job object 约束**，测试退出不会自动回收——用例必须 `try/finally` 杀进程树（`state.json` 记的 PID + 端口属主 + `taskkill /T /F`）并删临时目录；`GEBAI_HOME` 指向用例临时目录、显式关闭后台副作用（`GEBAI_IDLE_TODO_ENABLED`/`GEBAI_CRON_ENABLED`/`GEBAI_FEISHU_BOT_ENABLED`/`GEBAI_GC_DISABLED`）——残留实例没有任何会话，会持续抢跑真实实例的闲时待办与定时任务。
 - 分层：单元测试（核心模块必须，零外部依赖）→ 集成测试（mock LLM Provider 跑 AgentEngine 主循环）→ 契约测试（WS/REST/SSE 消息格式、SDK 一致性）→ E2E（mock LLM + 内存存储跑主路径）。

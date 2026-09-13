@@ -13,11 +13,14 @@ const store = new Map<string, string>()
     return store.size
   },
 } as unknown as Storage
-// setLowPowerSetting → applyLowPower 需要 document：最小桩
-;(globalThis as Record<string, unknown>).document = {
-  documentElement: { dataset: {} },
-  dispatchEvent: () => true,
-} as unknown as Document
+// setLowPowerSetting → applyLowPower 需要 document：只补自己需要的字段，
+// 不整体替换（基线 DOM 由 scripts/test-preload.ts 提供，整体替换会把它盖掉，
+// 后续测试文件里模块顶层的 getElementById 之类就会炸）
+const lowPowerDoc = ((globalThis as Record<string, unknown>).document ??= {}) as Record<string, unknown>
+lowPowerDoc.documentElement ??= { dataset: {} }
+lowPowerDoc.dispatchEvent ??= () => true
+lowPowerDoc.addEventListener ??= () => {}
+lowPowerDoc.removeEventListener ??= () => {}
 
 describe("low-power setting (manual switch)", () => {
   test("默认关闭（不做硬件自动检测）；旧三态存储值兼容映射为关闭", () => {

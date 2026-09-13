@@ -211,7 +211,8 @@ export function createStickyFollow(el: HTMLElement, opts: StickyFollowOptions = 
     { passive: true },
   )
 
-  if (opts.observeMutations) {
+  // 防御：测试环境可能无 MutationObserver（同下方 ResizeObserver 的守卫）
+  if (opts.observeMutations && typeof MutationObserver !== "undefined") {
     new MutationObserver(() => contentChanged()).observe(el, { childList: true, subtree: true, characterData: true })
   }
   if (typeof ResizeObserver !== "undefined") {

@@ -72,11 +72,15 @@ export function bindFilesEntry(): void {
 // 主界面快捷键：Ctrl+Shift+E 开关分屏（分屏已开则关闭）——VSCode 里同一个键也是"显示/隐藏侧边编辑器"，
 // 比"再开一个新标签"更贴合这个手势的预期（连按两次不该攒出两个标签页）。
 // 输入框内不触发，不与聊天输入冲突。
-document.addEventListener("keydown", (e) => {
-  if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return
-  if (e.key.toLowerCase() !== "e") return
-  const t = e.target as HTMLElement | null
-  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return
-  e.preventDefault()
-  void import("./files-split").then((m) => m.toggleSplit({ path: undefined }))
-})
+// 防御：测试环境可能存在缺 addEventListener 的 document 泄漏 stub（同 sticky-scroll 的 window 防护）——
+// 测试文件执行顺序不定，无防护时本模块的顶层副作用会直接抽掉整个测试文件。
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return
+    if (e.key.toLowerCase() !== "e") return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return
+    e.preventDefault()
+    void import("./files-split").then((m) => m.toggleSplit({ path: undefined }))
+  })
+}

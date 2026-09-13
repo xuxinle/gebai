@@ -2,8 +2,13 @@ import { describe, expect, test, mock } from "bun:test"
 
 // 全量测试下 window 可能被其他测试文件泄漏为 globalThis（navigator 无 userAgent），
 // 真实 modern-screenshot 模块在导入时求值 `window.navigator?.userAgent.includes(...)` 会抛
-// 「USER_AGENT.includes is not a function」——先固定受控浏览器环境，保证模块级求值安全
-;(globalThis as Record<string, unknown>).window = { navigator: { userAgent: "bun-test" } }
+// 「USER_AGENT.includes is not a function」——先固定受控浏览器环境，保证模块级求值安全。
+// 监听方法一并给成 no-op：本桩是模块级写入、后续测试文件共用，缺方法会让下游模块的顶层监听直接抛。
+;(globalThis as Record<string, unknown>).window = {
+  navigator: { userAgent: "bun-test" },
+  addEventListener() {},
+  removeEventListener() {},
+}
 ;(globalThis as Record<string, unknown>).navigator = { userAgent: "bun-test", onLine: true }
 
 // mock modern-screenshot（bun test 无浏览器）：domToPng 返回固定 data URL
@@ -32,10 +37,14 @@ function mockDoc(html: string, opts: { clientWidth?: number; clientHeight?: numb
     clientWidth: opts.clientWidth ?? 1280,
     clientHeight: opts.clientHeight ?? 800,
     scrollHeight: opts.scrollHeight ?? 800,
+    dataset: {},
+    addEventListener() {},
+    removeEventListener() {},
   }
-  ;(globalThis as Record<string, unknown>).document = {
-    documentElement: root,
-  }
+  // 只换 documentElement，不整体替换 document：整体替换会把基线 DOM（scripts/test-preload.ts）盖掉，
+  // 而本文件之后加载的测试文件里，模块顶层的 getElementById 之类会直接抛。
+  const doc = ((globalThis as Record<string, unknown>).document ??= {}) as Record<string, unknown>
+  doc.documentElement = root
   ;(globalThis as Record<string, unknown>).getComputedStyle = () => ({ backgroundColor: "#ffffff" })
   return root
 }
