@@ -217,6 +217,8 @@ export interface PreviewServerEntry {
   url: string
   log: string
   startedAt: number
+  /** 是否开启前端构建热重建（GEBAI_DEV_RELOAD=1）：源码改动自动重建 dist 并刷新页面。 */
+  hot?: boolean
 }
 
 interface PreviewServerDeps {
@@ -229,16 +231,24 @@ interface PreviewServerDeps {
   tmpDir: string
   timeoutMs: number
   intervalMs: number
+  /** 前端工作目录（packages/web）：hot 模式需要它才能找到 build:watch 脚本。 */
+  webRoot: string
+  /** 默认是否开启热重建（脚本模式默认开：预览的是本仓库前端产物，改源码立即生效）。 */
+  hotDefault: boolean
 }
 
 function previewServerDeps(overrides: Partial<PreviewServerDeps> = {}): PreviewServerDeps {
+  const binary = isBinaryMode()
   return {
     host: process.env.GEBAI_HOST || "127.0.0.1",
     entry: join(import.meta.dirname, "..", "..", "..", "server", "src", "index.ts"),
-    binary: isBinaryMode(),
+    binary,
     tmpDir: tmpdir(),
     timeoutMs: PREVIEW_START_TIMEOUT_MS,
     intervalMs: PREVIEW_POLL_INTERVAL_MS,
+    webRoot: join(import.meta.dirname, "..", "..", "..", "web"),
+    // 二进制形态无仓库源码（web/ 不存在），热重建无意义且会白起一个 watcher
+    hotDefault: !binary,
     ...overrides,
   }
 }
@@ -344,15 +354,18 @@ function displayHostFor(host: string): string {
   return host === "0.0.0.0" || host === "::" || host === "::0" ? "127.0.0.1" : host
 }
 
-async function startPreview(deps: PreviewServerDeps, rawPort?: unknown): Promise<ToolResult> {
+async function startPreview(deps: PreviewServerDeps, rawPort?: unknown, rawHot?: unknown): Promise<ToolResult> {
   const port = rawPort === undefined ? await findFreePort() : Number(rawPort)
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { output: `无效端口: ${rawPort}` }
   if (await isPortOpen(port)) return { output: `端口 ${port} 已被占用，请换一个端口或省略 port 自动选取。` }
+  // 前端热重建（GEBAI_DEV_RELOAD=1）：预览服务会拉起 vite build --watch，源码改动自动重建 dist 并刷新页面——
+  // 改前端源码后不再需要停止/重启预览服务（旧形态只服务既有静态产物，改源码看不到变化）
+  const hot = (rawHot === undefined ? deps.hotDefault : rawHot === true) && !deps.binary
   const log = join(deps.tmpDir, `gebai-preview-${port}.log`)
   const cmd = deps.binary ? [process.execPath] : [process.execPath, deps.entry]
   const proc = Bun.spawn({
     cmd,
-    env: { ...process.env, GEBAI_PORT: String(port) },
+    env: { ...process.env, GEBAI_PORT: String(port), ...(hot ? { GEBAI_DEV_RELOAD: "1" } : {}) },
     cwd: deps.binary ? homedir() : process.cwd(),
     stdout: Bun.file(log),
     stderr: Bun.file(log),
@@ -367,10 +380,15 @@ async function startPreview(deps: PreviewServerDeps, rawPort?: unknown): Promise
   const host = displayHostFor(deps.host)
   const url = `http://${host}:${port}`
   const state = await loadPreviewState(deps.tmpDir)
-  const entry: PreviewServerEntry = { port, pid: proc.pid, url, log, startedAt: Date.now() }
+  const entry: PreviewServerEntry = { port, pid: proc.pid, url, log, startedAt: Date.now(), ...(hot ? { hot: true } : {}) }
   await savePreviewState(deps.tmpDir, [...state.filter((e) => e.port !== port), entry])
   return {
-    output: `验证服务已启动（独立进程，不中断当前会话）：${url}\nPID: ${proc.pid}\n日志: ${log}\n验证完成后用 preview_server action=stop 停止（pid=${proc.pid}）。`,
+    output:
+      `验证服务已启动（独立进程，不中断当前会话）：${url}\nPID: ${proc.pid}\n日志: ${log}\n` +
+      (hot
+        ? "已开启前端热重建：改动 packages/web 源码后 vite 自动重建 dist，页面由服务推送自动刷新——无需重启本预览服务（首次构建就绪前页面可能短暂不可用）。\n"
+        : "未开启热重建（二进制形态或 hot:false）：只服务当前静态产物，改动前端源码后需 action=stop 再 action=start。\n") +
+      `验证完成后用 preview_server action=stop 停止（pid=${proc.pid}）。`,
   }
 }
 
@@ -393,15 +411,20 @@ export function makePreviewServerTool(overrides: Partial<PreviewServerDeps> = {}
   const deps = previewServerDeps(overrides)
   return {
     name: "preview_server",
-    description: "在临时新端口启动/停止一份 歌白验证服务（独立进程，不中断当前会话与主服务），供用户验证代码改动。action=start（默认）启动并返回访问 URL/PID/日志路径；action=stop 停止（pid 或 port 指定）。验证完必须停止，避免残留进程。",
+    description:
+      "在临时新端口启动/停止一份歌白验证服务（独立进程，不中断当前会话与主服务），供用户验证代码改动——对象是**歌白自身**的前端/服务端改动（预览服务即歌白服务，不是任意项目的通用预览器；验证外部项目请用项目自己的启动命令 + sh 后台任务）。" +
+      "action=start（默认）启动并返回访问 URL/PID/日志路径；**默认开启前端热重建**（脚本模式）：改动 packages/web 源码后 vite 自动重建 dist，页面自动刷新——不再需要停止/重启预览服务（旧形态只服务静态产物，改源码看不到变化）；hot:false 关闭；二进制形态无仓库源码，自动不开。" +
+      "action=stop 停止（pid 或 port 指定）。验证完必须停止，避免残留进程。" +
+      "注意：热重建写的是仓库共享 dist（构建前会清空 dist，窗口内页面产物引用可能短暂为空）、主实例与预览实例共用同一份产物；仅服务端改动用 hot:false 更稳。",
     parameters: schema({
       action: { type: "string", enum: ["start", "stop"], description: "操作（默认 start）" },
       port: { type: "number", description: "启动/停止目标端口（启动时默认自动选取空闲端口）" },
       pid: { type: "number", description: "停止时指定进程 PID（与 port 二选一）" },
+      hot: { type: "boolean", description: "start 时是否开启前端热重建（默认开，仅脚本模式）：改动 packages/web 源码自动重建 dist 并刷新页面；关掉则只服务当前静态产物" },
     }),
     async execute(args) {
       if (args.action === "stop") return stopPreview(deps, args.pid, args.port)
-      return startPreview(deps, args.port)
+      return startPreview(deps, args.port, args.hot)
     },
   }
 }

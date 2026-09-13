@@ -1,6 +1,5 @@
 import type { SubAgentDef } from "@gebai/sdk"
 import { analyzeTool, searchSymbolsTool } from "../../core/analyzer/analyzer"
-/* MIGRATE-TODO: gitTool, makePreviewServerTool, envDetectTool, systemInfoTool */
 import { projectAware } from "@gebai/sdk/node"
 import { gitTool, makePreviewServerTool, envDetectTool, systemInfoTool } from "../../core/code-tools"
 

@@ -73,6 +73,15 @@ describe("code sub-agent（独有工具集，文件工具复用全局）", () =>
     expect(codeDef.preload).toBe(false)
   })
 
+  test("preview_server 声明 hot 参数（前端热重建开关）与构建语义描述", () => {
+    const tool = codeDef.tools!.preview_server
+    expect(tool.parameters.properties).toHaveProperty("hot")
+    expect(tool.description).toContain("前端热重建")
+    // 工具边界说清：预览对象是歌白自身（不是任意项目的通用预览器）、改前端源码无需重启
+    expect(tool.description).toContain("歌白自身")
+    expect(tool.description).toContain("不再需要停止/重启") // 改前端源码后无需重启预览服务
+  })
+
   test("project 参数路由 git 工作目录到项目根（预置项目名与路径形态）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-code-"))
     const root = join(home, "freeproj")
