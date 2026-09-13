@@ -322,9 +322,12 @@ describe("历史图片内联窗口", () => {
 
 describe("收尾验证提醒（改代码未跑测试的任务结束注入一次提醒）", () => {
   test("改了代码文件但未跑测试：任务结束注入一次验证提醒并续跑一轮（模型说明后收尾）", async () => {
+    // 代码文件故意写在**会话工作区之外**（独立项目目录）：会话 tmp/ 内是临时产物/测试夹具，明确不计入
+    // 代码改动（见下个用例）——提醒只针对真实项目代码的回归风险
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-proj-"))
     const provider = new HardenProvider()
     provider.script = [
-      { mode: "tool", tool: "write", args: { path: "src/a.ts", content: "const x = 1\n" } },
+      { mode: "tool", tool: "write", args: { path: join(proj, "src", "a.ts"), content: "const x = 1\n" } },
       { mode: "text", text: "改完了" },
       { mode: "text", text: "好的，该改动不涉及行为" },
     ]
@@ -334,12 +337,51 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const msgs = (await store.load(session.id, "default"))!.messages
     const nudge = msgs.find((m) => m.role === "user" && m.engineNote === "verify")
     expect(nudge).toBeDefined()
-    expect(nudge!.content).toContain("src/a.ts")
+    expect(nudge!.content).toContain("a.ts")
     // 消息即 user 角色 + engineNote 标记（与用户输入同角色；思考类模型不接受以 assistant 结尾的请求——
     // 见 sdk Message.engineNote；前端据此渲染为「引擎提示」通知条而非用户气泡）
     expect(nudge!.engineNote).toBe("verify")
     expect(provider.calls).toBe(3) // 提醒额外触发一轮模型调用
     rmSync(home, { recursive: true, force: true })
+    rmSync(proj, { recursive: true, force: true })
+  })
+
+  test("会话工作区（tmp/）内的脚本/夹具不计入代码改动：不触发验证提醒；项目代码仍照常触发", async () => {
+    // 实测来源：为测试 show 工具在会话 tmp/ 写了 demo.py 夹具，旧口径按扩展名计入代码文件 →
+    // 任务收尾误报「修改了 1 个代码文件但未跑测试」。会话工作区内的产物是临时物，不是回归验证对象。
+    const provider = new HardenProvider()
+    provider.script = [
+      { mode: "tool", tool: "write", args: { path: "demo.py", content: "print('fixture')\n" } },
+      { mode: "text", text: "夹具写好了" },
+    ]
+    const { home, store, engine } = await setupEngine(provider)
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    // 夹具确实落在会话工作区（排除口径的前提成立）
+    expect(await Bun.file(join(sessionPath(home, "default", session.id), "tmp", "demo.py")).exists()).toBe(true)
+    const msgs = (await store.load(session.id, "default"))!.messages
+    expect(msgs.some((m) => m.engineNote === "verify")).toBe(false)
+    expect(provider.calls).toBe(2) // 无提醒 → 不额外续跑一轮
+    // 同一任务里会话外项目代码仍照常计入（排除只针对会话工作区，不放过真实改动）
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-mix-"))
+    const p2 = new HardenProvider()
+    p2.script = [
+      { mode: "tool", tool: "write", args: { path: "fixture.py", content: "print(1)\n" } },
+      { mode: "tool", tool: "write", args: { path: join(proj, "src", "b.ts"), content: "export const b = 2\n" } },
+      { mode: "text", text: "写完" },
+      { mode: "text", text: "确无需跑测试" },
+    ]
+    const { home: home2, store: store2, engine: engine2 } = await setupEngine(p2)
+    const s2 = await store2.createSession("default", "t2")
+    await engine2.run(s2.id, "default", "hi")
+    const nudge2 = (await store2.load(s2.id, "default"))!.messages.find((m) => m.engineNote === "verify")
+    expect(nudge2).toBeDefined()
+    expect(nudge2!.content).toContain("b.ts")
+    expect(nudge2!.content).toContain("1 个代码文件")
+    expect(nudge2!.content).not.toContain("fixture.py") // 会话内夹具不进清单
+    rmSync(home, { recursive: true, force: true })
+    rmSync(home2, { recursive: true, force: true })
+    rmSync(proj, { recursive: true, force: true })
   })
 
   test("已运行测试命令（sh 白名单免审形态）或仅改非代码文件：不触发提醒", async () => {
@@ -371,6 +413,8 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     rmSync(home, { recursive: true, force: true })
   })
   test("命名空间验证工具与 js 编排跑验证算已验证（不提醒）；js 仅提及关键词/非验证命令仍提醒", async () => {
+    // 代码文件写在**会话工作区之外**：本用例只验证「是否算已验证」的判定，而会话 tmp/ 内的写入不计入代码改动
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-ns-"))
     // 假工具：只需参数/名称命中判定，不真跑（sh/js/run_tests 均替身）
     const fakeRegistry = new ToolRegistry()
     const noopParams = { type: "object" as const, properties: {} }
@@ -381,20 +425,20 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     const provider = new HardenProvider()
     provider.script = [
       // ① 命名空间验证工具：self_optimize_run_tests（旧实现按短名 "tests" 判定 → 漏 → 误报提醒）
-      { mode: "tool", tool: "write", args: { path: "src/a.ts", content: "const x = 1\n" } },
+      { mode: "tool", tool: "write", args: { path: join(proj, "src", "a.ts"), content: "const x = 1\n" } },
       { mode: "tool", tool: "self_optimize_run_tests", args: { checks: ["test"] } },
       { mode: "text", text: "已改并跑过测试" },
       // ② js 编排内跑验证命令（脚本内 sh(...) 调用 + 验证关键词）
-      { mode: "tool", tool: "write", args: { path: "src/b.ts", content: "const y = 2\n" } },
+      { mode: "tool", tool: "write", args: { path: join(proj, "src", "b.ts"), content: "const y = 2\n" } },
       { mode: "tool", tool: "js", args: { code: 'const r = await sh({ command: "bun test src/a.test.ts" })\nreturn r.output' } },
       { mode: "text", text: "js 编排跑过测试" },
       // ③ js 仅提及关键词（grep 搜 lint/typecheck 字样）→ 不得算已验证，仍提醒
-      { mode: "tool", tool: "write", args: { path: "src/c.ts", content: "const z = 3\n" } },
+      { mode: "tool", tool: "write", args: { path: join(proj, "src", "c.ts"), content: "const z = 3\n" } },
       { mode: "tool", tool: "js", args: { code: 'return await grep({ pattern: "typecheck|eslint" })' } },
       { mode: "text", text: "只是搜了下关键词" },
       { mode: "text", text: "好，我补跑测试" },
       // ④ 非验证命令（dir）→ 仍提醒
-      { mode: "tool", tool: "write", args: { path: "src/d.ts", content: "const w = 4\n" } },
+      { mode: "tool", tool: "write", args: { path: join(proj, "src", "d.ts"), content: "const w = 4\n" } },
       { mode: "tool", tool: "sh", args: { command: "dir /b src", approval: false } },
       { mode: "text", text: "列了下目录" },
       { mode: "text", text: "好，我补跑测试" },
@@ -414,6 +458,7 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     await engine.run(s4.id, "default", "hi")
     expect(await hasNudge(s4.id)).toBe(true) // ④
     rmSync(home, { recursive: true, force: true })
+    rmSync(proj, { recursive: true, force: true })
   })
 })
 

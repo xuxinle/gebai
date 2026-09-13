@@ -591,7 +591,7 @@ describe("global tools", () => {
       expect(render.format).toBe("plantuml")
       return { ok: true }
     }
-    const r = await showTool.execute({ code: "Alice -> Bob: hello", name: "flow", format: "plantuml" }, c)
+    const r = await showTool.execute({ content: "Alice -> Bob: hello", name: "flow", format: "plantuml" }, c)
     expect(r.blocks![0].type).toBe("diagram")
     expect((r.blocks![0] as { format: string }).format).toBe("plantuml")
     expect(r.output).toContain("渲染成功")
@@ -611,13 +611,13 @@ describe("global tools", () => {
     const c = ctx(home)
     // 渲染报错 → 错误返回给模型，不写文件
     c.waitForDraw = async () => ({ ok: false, error: "PlantUML 语法错误：Syntax Error?" })
-    const failed = await showTool.execute({ code: "Alice ->", name: "bad", format: "plantuml" }, c)
+    const failed = await showTool.execute({ content: "Alice ->", name: "bad", format: "plantuml" }, c)
     expect(failed.output).toContain("画图失败（渲染错误）")
     expect(failed.output).toContain("Syntax Error")
     expect(failed.blocks).toBeUndefined()
     // 5 秒超时 → 返回画图能力受限
     c.waitForDraw = async () => null
-    const timedOut = await showTool.execute({ code: "Alice -> Bob", name: "slow", format: "plantuml" }, c)
+    const timedOut = await showTool.execute({ content: "Alice -> Bob", name: "slow", format: "plantuml" }, c)
     expect(timedOut.output).toContain("画图能力受限")
     cleanup(home)
   })
@@ -631,7 +631,7 @@ describe("global tools", () => {
       expect(code).toContain("Alice -> Bob")
       return new Uint8Array([0x89, 0x50, 0x4e, 0x47])
     }
-    const r = await showTool.execute({ code: "Alice -> Bob: hello", name: "flow", format: "plantuml", render: "backend" }, c)
+    const r = await showTool.execute({ content: "Alice -> Bob: hello", name: "flow", format: "plantuml", render: "backend" }, c)
     // 返回 image 内容块（相对会话根路径，前端直接展示图片）
     expect(r.blocks![0].type).toBe("image")
     expect((r.blocks![0] as { path: string }).path).toBe("tmp/flow.png")
@@ -652,13 +652,13 @@ describe("global tools", () => {
     c.renderDiagram = async () => {
       throw new Error("PlantUML 渲染错误：Syntax Error?")
     }
-    const failed = await showTool.execute({ code: "Alice ->", name: "bad", format: "plantuml", render: "backend" }, c)
+    const failed = await showTool.execute({ content: "Alice ->", name: "bad", format: "plantuml", render: "backend" }, c)
     expect(failed.output).toContain("画图失败（后端渲染错误）")
     expect(failed.output).toContain("Syntax Error")
     expect(failed.blocks).toBeUndefined()
     // 未注入渲染器（后端能力未启用）→ 明确提示不可用
     const c2 = ctx(home)
-    const unavailable = await showTool.execute({ code: "Alice -> Bob", name: "x", format: "plantuml", render: "backend" }, c2)
+    const unavailable = await showTool.execute({ content: "Alice -> Bob", name: "x", format: "plantuml", render: "backend" }, c2)
     expect(unavailable.output).toContain("后端渲染不可用")
     cleanup(home)
   })
@@ -672,7 +672,7 @@ describe("global tools", () => {
       expect(render.code).toBe(code) // echarts 源码原样透传（无 PlantUML 类规范化）
       return { ok: true }
     }
-    const r = await showTool.execute({ code, name: "sales", format: "echarts" }, c)
+    const r = await showTool.execute({ content: code, name: "sales", format: "echarts" }, c)
     expect(r.blocks![0].type).toBe("diagram")
     expect((r.blocks![0] as { format: string }).format).toBe("echarts")
     expect(r.output).toContain("tmp/sales.echarts")
@@ -687,7 +687,7 @@ describe("global tools", () => {
     c.waitForDraw = async () => {
       throw new Error("waitForDraw 不应被调用")
     }
-    const bad = await showTool.execute({ code: "{not json", name: "x", format: "echarts" }, c)
+    const bad = await showTool.execute({ content: "{not json", name: "x", format: "echarts" }, c)
     expect(bad.output).toContain("画图失败")
     expect(bad.output).toContain("合法 JSON")
     expect(bad.blocks).toBeUndefined()
@@ -700,7 +700,7 @@ describe("global tools", () => {
     const c = ctx(home)
     // 旧版前端把未知语言静默走 PlantUML 引擎：报错引擎与请求语言不符 → 版本错位诊断
     c.waitForDraw = async () => ({ ok: false, error: "PlantUML 渲染错误：[From textarea (line 2)]" })
-    const r = await showTool.execute({ code, name: "sales", format: "echarts" }, c)
+    const r = await showTool.execute({ content: code, name: "sales", format: "echarts" }, c)
     expect(r.output).toContain("前端渲染器版本过旧")
     expect(r.output).toContain("PlantUML")
     expect(r.output).toContain("刷新页面")
@@ -742,6 +742,34 @@ describe("global tools", () => {
     // 会话内文件不产生复制副本
     expect(existsSync(join(sessionTmp, "shown"))).toBe(false)
     rmSync(home, { recursive: true, force: true })
+  })
+
+  test("show path 分支：无扩展名/dotfile 按内容探测内联文本；二进制与有扩展名的格式仍给卡片", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shownoext-"))
+    const sid = "abcdef01abcdef01abcdef01abcdef01"
+    const c = ctx(home, sid)
+    const sessionTmp = join(sessionPath(home, "default", sid), "tmp")
+    mkdirSync(sessionTmp, { recursive: true })
+    // 无扩展名纯文本（LICENSE/Makefile/Dockerfile 一类）→ 内容探测后 code 块内联
+    writeFileSync(join(sessionTmp, "LICENSE"), "MIT License\n\nCopyright (c) 2026\n")
+    const lic = await showTool.execute({ path: join(sessionTmp, "LICENSE") }, c)
+    expect((lic.blocks![0] as { type: string }).type).toBe("code")
+    expect((lic.blocks![0] as { text: string }).text).toContain("MIT License")
+    expect(lic.output).toContain("内容内联展示")
+    // dotfile（.gitignore）同样按内容探测
+    writeFileSync(join(sessionTmp, ".gitignore"), "node_modules/\ndist/\n")
+    const gi = await showTool.execute({ path: join(sessionTmp, ".gitignore") }, c)
+    expect((gi.blocks![0] as { text: string }).text).toContain("node_modules/")
+    // 无扩展名二进制（含 NUL 字节）→ 回落查看/下载卡片
+    writeFileSync(join(sessionTmp, "blob"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01, 0x02]))
+    const bin = await showTool.execute({ path: join(sessionTmp, "blob") }, c)
+    expect((bin.blocks![0] as { type: string }).type).toBe("file")
+    expect(bin.output).toContain("无法内联")
+    // 探测只覆盖无扩展名文件：有扩展名的格式即使内容恰好是纯 ASCII 也仍按类型给卡片（防 .pdf 这类被误判成文本）
+    writeFileSync(join(sessionTmp, "tiny.pdf"), "%PDF-1.4\n%%EOF\n")
+    const pdf = await showTool.execute({ path: join(sessionTmp, "tiny.pdf") }, c)
+    expect((pdf.blocks![0] as { type: string }).type).toBe("file")
+    cleanup(home)
   })
 
   test("show path 分支：语言按真实文件推断（name 不含扩展名时 markdown 仍为 markdown，不落 highlightAuto）", async () => {
@@ -828,8 +856,8 @@ describe("global tools", () => {
     }
     const denied = await showTool.execute({ path: "../secrets" }, c)
     expect(denied.output).toContain("路径被拒绝")
-    // 缺内容源 → 三选一引导
-    expect((await showTool.execute({}, c)).output).toContain("三选一")
+    // 缺内容源 → 二选一引导
+    expect((await showTool.execute({}, c)).output).toContain("二选一")
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -892,7 +920,7 @@ describe("global tools", () => {
       expect(render.code).toBe("flowchart LR\nA --> B")
       return { ok: true }
     }
-    const r = await showTool.execute({ format: "mermaid", code: "flowchart LR\nA --> B", name: "flow" }, c)
+    const r = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> B", name: "flow" }, c)
     expect(r.output).toContain("tmp/flow.mmd")
     const block = r.blocks![0] as { type: string; name: string; code: string; format: string }
     expect(block.type).toBe("diagram")
@@ -911,7 +939,7 @@ describe("global tools", () => {
       expect(render.code).toBe("gateway -> auth")
       return { ok: true }
     }
-    const r = await showTool.execute({ format: "d2", code: "gateway -> auth", name: "arch" }, c)
+    const r = await showTool.execute({ format: "d2", content: "gateway -> auth", name: "arch" }, c)
     expect(r.output).toContain("tmp/arch.d2")
     const block = r.blocks![0] as { type: string; name: string; code: string; format: string }
     expect(block.type).toBe("diagram")
@@ -954,14 +982,14 @@ describe("global tools", () => {
       got.push(o?.format ?? "")
       return new Uint8Array([0x89, 0x50, 0x4e, 0x47])
     }
-    const mmd = await showTool.execute({ format: "mermaid", code: "flowchart LR\nA --> B", name: "f", render: "backend" }, c)
+    const mmd = await showTool.execute({ format: "mermaid", content: "flowchart LR\nA --> B", name: "f", render: "backend" }, c)
     expect(mmd.blocks![0].type).toBe("image")
     expect((mmd.blocks![0] as { path: string }).path).toBe("tmp/f.png")
-    const d2 = await showTool.execute({ format: "d2", code: "a -> b", name: "a", render: "backend" }, c)
+    const d2 = await showTool.execute({ format: "d2", content: "a -> b", name: "a", render: "backend" }, c)
     expect((d2.blocks![0] as { path: string }).path).toBe("tmp/a.png")
-    const ech = await showTool.execute({ format: "echarts", code: '{"series":[{"type":"pie","data":[1,2]}]}', name: "e", render: "backend" }, c)
+    const ech = await showTool.execute({ format: "echarts", content: '{"series":[{"type":"pie","data":[1,2]}]}', name: "e", render: "backend" }, c)
     expect((ech.blocks![0] as { path: string }).path).toBe("tmp/e.png")
-    const puml = await showTool.execute({ code: "Alice -> Bob", name: "p", format: "plantuml", render: "backend" }, c)
+    const puml = await showTool.execute({ content: "Alice -> Bob", name: "p", format: "plantuml", render: "backend" }, c)
     expect((puml.blocks![0] as { path: string }).path).toBe("tmp/p.png")
     // format 透传：mermaid/d2/echarts/plantuml（缺省）
     expect(got).toEqual(["mermaid", "d2", "echarts", "plantuml"])
@@ -969,7 +997,7 @@ describe("global tools", () => {
     c.renderDiagram = async () => {
       throw new Error("D2 渲染错误：connection missing destination")
     }
-    const failed = await showTool.execute({ format: "d2", code: "x ->", name: "bad", render: "backend" }, c)
+    const failed = await showTool.execute({ format: "d2", content: "x ->", name: "bad", render: "backend" }, c)
     expect(failed.output).toContain("画图失败（后端渲染错误）")
     expect(failed.output).toContain("请修正 D2 源码后重试")
     cleanup(home)
@@ -979,52 +1007,86 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-draw-mmd-err-"))
     const c = ctx(home)
     c.waitForDraw = async () => ({ ok: false, error: "Parse error on line 2" })
-    const r = await showTool.execute({ format: "mermaid", code: "flowchart", name: "bad" }, c)
+    const r = await showTool.execute({ format: "mermaid", content: "flowchart", name: "bad" }, c)
     expect(r.output).toContain("画图失败（渲染错误）")
     expect(r.output).toContain("请修正 Mermaid 源码后重试")
     cleanup(home)
   })
 
-  test("show schema：format 枚举覆盖四语言（code 模式必选由描述与 execute 校验引导）", () => {
+  test("show schema：format 枚举覆盖四语言 + html（content 模式必选由描述与 execute 校验引导）", () => {
     const params = showTool.parameters
     const fmt = (params.properties as { format: { enum: string[] } }).format
-    // 枚举单点派生自 artifacts.ts DIAGRAM_EXT_FOR（与 SDK DiagramFormat 同步），顺序为其键序
-    expect([...fmt.enum].sort()).toEqual(["d2", "echarts", "mermaid", "plantuml"])
-    // 三选一内容源（code/html/path）无法用 required 表达，校验在 execute 内完成
+    // 枚举单点派生自 artifacts.ts DIAGRAM_EXT_FOR（与 SDK DiagramFormat 同步）+ html（页面预览），顺序为其键序
+    expect([...fmt.enum].sort()).toEqual(["d2", "echarts", "html", "mermaid", "plantuml"])
+    // 内容与路径二选一（content/path）无法用 required 表达，校验在 execute 内完成
     expect(params.required ?? []).not.toContain("format")
     // 工具描述与 format 参数说明内置四语言选择指南（触发词/适用场景），供模型按需选择
     expect(showTool.description).toContain("Mermaid")
     expect(showTool.description).toContain("PlantUML")
     expect(showTool.description).toContain("D2")
     expect(showTool.description).toContain("ECharts")
-    expect(fmt.enum.length).toBe(4)
+    expect(fmt.enum.length).toBe(5)
+  })
+
+  test("show schema：参数面统一为 name/format/content/path + 三个可选微调", () => {
+    const props = showTool.parameters?.properties as Record<string, unknown>
+    expect(Object.keys(props)).toEqual(["name", "format", "content", "path", "render", "width", "height"])
+    // 旧内容源参数已并入 content（不再有 code/html 双参数）
+    expect(props.code).toBeUndefined()
+    expect(props.html).toBeUndefined()
   })
 
   test("show format 缺失/非法立即报错，不再静默回退 plantuml（防 ECharts JSON 被当 PlantUML 渲染误导模型）", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-draw-fmt-"))
     const c = ctx(home, "abcdef01abcdef01abcdef01abcdef01")
-    // code 模式缺 format → 明确报错并列出可选值（不渲染）
-    const missing = await showTool.execute({ code: '{"series":[{"type":"pie"}]}', name: "x" }, c)
+    // content 模式缺 format → 明确报错并列出可选值（不渲染）
+    const missing = await showTool.execute({ content: '{"series":[{"type":"pie"}]}', name: "x" }, c)
     expect(missing.output).toContain("必须同时传 format")
     expect(missing.output).toContain("echarts")
     expect(missing.blocks).toBeUndefined()
-    // 非法 format → 报错列出可选值
-    const invalid = await showTool.execute({ code: "A -> B", format: "graphviz" }, c)
+    // 非法 format → 报错列出可选值（含 html）
+    const invalid = await showTool.execute({ content: "A -> B", format: "graphviz" }, c)
     expect(invalid.output).toContain("format 参数无效")
     expect(invalid.output).toContain("graphviz")
+    expect(invalid.output).toContain("html")
     expect(invalid.blocks).toBeUndefined()
     // path 模式：扩展名可推断时无需 format（既有行为保留）
     await writeTool.execute({ path: "flow.puml", content: "Alice -> Bob" }, c)
     c.waitForDraw = async () => ({ ok: true })
     const inferred = await showTool.execute({ path: "flow.puml" }, c)
     expect(inferred.output).toContain("渲染成功")
-    // 缺内容源 → 三选一引导
-    expect((await showTool.execute({ format: "mermaid" }, c)).output).toContain("三选一")
+    // 缺内容源 → 二选一引导
+    expect((await showTool.execute({ format: "mermaid" }, c)).output).toContain("二选一")
     // path 模式：非图表扩展且未传 format → 走文件直显（文本内联 code 块），不再报错
     await writeTool.execute({ path: "chart.txt", content: "mermaid source" }, c)
     const noInfer = await showTool.execute({ path: "chart.txt" }, c)
     expect(noInfer.blocks![0].type).toBe("code")
     expect((noInfer.blocks![0] as { text: string }).text).toBe("mermaid source")
+    cleanup(home)
+  })
+
+  test("show 参数契约：content 与 path 二选一（同时传立即报错）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-show-args-"))
+    const c = ctx(home)
+    const both = await showTool.execute({ content: "<p>x</p>", format: "html", path: "a.html" }, c)
+    expect(both.output).toContain("只能二选一")
+    expect(both.blocks).toBeUndefined()
+    cleanup(home)
+  })
+
+  test("show path + format=html：按页面解释（不限 .html 扩展名），非实时通道明确报错", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-show-path-html-"))
+    const c = ctx(home, "abcdef01abcdef01abcdef01abcdef01")
+    await writeTool.execute({ path: "page.txt", content: "<p>from txt</p>" }, c)
+    const r = await showTool.execute({ path: "tmp/page.txt", format: "html" }, c)
+    expect(r.blocks![0].type).toBe("html")
+    expect((r.blocks![0] as { html: string }).html).toBe("<p>from txt</p>")
+    expect(r.output).toContain("HTML 页面预览展示")
+    // 非实时通道：不预览，文件本体保留（可告知路径）
+    c.interactionMode = "multi_turn"
+    const gate = await showTool.execute({ path: "tmp/page.txt", format: "html" }, c)
+    expect(gate.output).toContain("不支持 HTML 页面预览")
+    expect(gate.blocks).toBeUndefined()
     cleanup(home)
   })
 
@@ -1110,7 +1172,7 @@ describe("global tools", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-html-"))
     const c = ctx(home)
     const html = "<!doctype html><html><body><h1>报告</h1><p>数据</p></body></html>"
-    const r = await showTool.execute({ html, name: "report" }, c)
+    const r = await showTool.execute({ format: "html", content: html, name: "report" }, c)
     expect(r.blocks![0].type).toBe("html")
     const block = r.blocks![0] as { html: string; name: string }
     expect(block.html).toBe(html)
@@ -1125,10 +1187,10 @@ describe("global tools", () => {
   test("show html 分支：默认名 page 并剥离 .html 后缀", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-html2-"))
     const c = ctx(home)
-    const r = await showTool.execute({ html: "<p>hi</p>", name: "page.html" }, c)
+    const r = await showTool.execute({ format: "html", content: "<p>hi</p>", name: "page.html" }, c)
     expect((r.blocks![0] as { name: string }).name).toBe("page.html")
     expect(r.output).toContain("tmp/page.html")
-    const d = await showTool.execute({ html: "<p>hi</p>" }, c)
+    const d = await showTool.execute({ format: "html", content: "<p>hi</p>" }, c)
     expect((d.blocks![0] as { name: string }).name).toBe("page.html")
     cleanup(home)
   })
@@ -1136,13 +1198,13 @@ describe("global tools", () => {
   test("show html 分支：显式 width/height 进块，非法值忽略", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-tools-html3-"))
     const c = ctx(home)
-    const ok = await showTool.execute({ html: "<p>hi</p>", width: 900, height: 640.5 }, c)
+    const ok = await showTool.execute({ format: "html", content: "<p>hi</p>", width: 900, height: 640.5 }, c)
     const block = ok.blocks![0] as { width?: number; height?: number }
     expect(block.width).toBe(900)
     expect(block.height).toBe(641)
-    const noSize = await showTool.execute({ html: "<p>hi</p>" }, c)
+    const noSize = await showTool.execute({ format: "html", content: "<p>hi</p>" }, c)
     expect((noSize.blocks![0] as { width?: number }).width).toBeUndefined()
-    const bad = await showTool.execute({ html: "<p>hi</p>", width: -1, height: 999999 }, c)
+    const bad = await showTool.execute({ format: "html", content: "<p>hi</p>", width: -1, height: 999999 }, c)
     const badBlock = bad.blocks![0] as { width?: number; height?: number }
     expect(badBlock.width).toBeUndefined()
     expect(badBlock.height).toBeUndefined()
@@ -1160,6 +1222,7 @@ describe("global tools", () => {
     const r = await showTool.execute({ path: join(sessionTmp, "assets", "report.html"), width: 800 }, c)
     expect(r.output).toContain("HTML 页面预览展示")
     expect(r.output).toContain("tmp/assets/report.html")
+    expect(r.output).toContain("字节") // 尺寸口径为字节（曾误标「字符」，与 st.size 不符）
     const block = r.blocks![0] as { html: string; name: string; width?: number }
     expect(block.html).toBe("<p>from file</p>")
     expect(block.name).toBe("report.html")
@@ -1181,7 +1244,7 @@ describe("global tools", () => {
     const c = ctx(home, "abcdef01abcdef01abcdef01abcdef01")
     // 飞书多轮通道：无前端页面预览能力 → 明确报错（文件未产出，模型改用其他方式）
     c.interactionMode = "multi_turn"
-    const r = await showTool.execute({ html: "<p>hi</p>" }, c)
+    const r = await showTool.execute({ format: "html", content: "<p>hi</p>" }, c)
     expect(r.output).toContain("不支持 HTML 页面预览")
     expect(r.blocks).toBeUndefined()
     // path 指向 .html 在非实时通道同样明确报错
@@ -1190,10 +1253,10 @@ describe("global tools", () => {
     expect(r2.output).toContain("不支持 HTML 页面预览")
     // 实时通道正常渲染
     c.interactionMode = "realtime"
-    const ok = await showTool.execute({ html: "<p>hi</p>" }, c)
+    const ok = await showTool.execute({ format: "html", content: "<p>hi</p>" }, c)
     expect(ok.blocks![0].type).toBe("html")
     // 未注入 interactionMode（测试桩/无引擎环境）不做分支门控，保持全通道行为
-    const legacy = await showTool.execute({ html: "<p>hi</p>" }, ctx(home))
+    const legacy = await showTool.execute({ format: "html", content: "<p>hi</p>" }, ctx(home))
     expect(legacy.blocks![0].type).toBe("html")
     cleanup(home)
   })
@@ -1205,13 +1268,13 @@ describe("global tools", () => {
     c.waitForDraw = async () => {
       throw new Error("waitForDraw 不应被调用")
     }
-    const r = await showTool.execute({ code: "Alice -> Bob", format: "plantuml" }, c)
+    const r = await showTool.execute({ content: "Alice -> Bob", format: "plantuml" }, c)
     expect(r.output).toContain("画图能力受限")
     expect(r.output).toContain("render=backend")
     expect(r.blocks).toBeUndefined()
     // render=backend 在无交互模式可用（服务端渲染，不依赖前端）
     c.renderDiagram = async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47])
-    const png = await showTool.execute({ code: "Alice -> Bob", format: "plantuml", render: "backend" }, c)
+    const png = await showTool.execute({ content: "Alice -> Bob", format: "plantuml", render: "backend" }, c)
     expect(png.blocks![0].type).toBe("image")
     cleanup(home)
   })

@@ -19,7 +19,7 @@ import { ShTaskRunner } from "../exec/sh-tasks"
 import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionNoticeHead } from "../session/subsessions"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
-import { dirname, isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
 import { runInToolFetchScope } from "../support/fetch-scope"
 import { createHash } from "node:crypto"
@@ -68,7 +68,8 @@ const MAX_TOOL_ROUNDS = Number.POSITIVE_INFINITY
 const MAX_TODO_CONTINUE = 1
 /** 收尾验证提醒轮次上限：改了代码文件但全程未跑测试/检查的任务，结束时最多注入一次提醒（防反复打扰）。 */
 const MAX_VERIFY_NUDGE = 1
-/** 收尾验证提醒——代码文件判定（write/edit/patch 命中这些扩展名的 path 才计入；md/txt 等文档不触发）。 */
+/** 收尾验证提醒——代码文件判定（write/edit/patch 命中这些扩展名的 path 才计入；md/txt 等文档不触发；
+ *  **会话工作区（session tmp/）内的文件另行排除**——见 inSessionTmp：那是临时产物/测试夹具，非代码改动）。 */
 const VERIFY_CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|c|h|cpp|hpp|cc|cs|rb|php|swift|scala|vue|svelte|dart|lua|sh|bash|sql)$/i
 /** 收尾验证提醒——测试/检查类命令判定（sh/py 的 command 文本匹配；宽匹配宁漏勿紧：误判已验证只少一次提醒）。 */
 const VERIFY_CMD_RE = /\b(bun test|bun run test|npm test|npm run test|yarn test|pnpm test|pytest|vitest|jest|go test|cargo test|deno test|gradle test|gradlew\s+\S*test|mvn test|tsc|typecheck|type-check|eslint|biome check|ruff|mypy|flake8|clang-tidy|lint)\b/i
@@ -2279,7 +2280,7 @@ private activeSchemas(sessionId: string) {
       // trackTaskMods 等后续处理留在作用域外
       runInToolFetchScope(sessionId, () => tool.execute(args, ctx)).then(
         (r) => {
-          this.trackTaskMods(sessionId, name, args, r)
+          this.trackTaskMods(sessionId, name, args, r, ctx)
           finish(r)
         },
         (err) => finish({ output: `工具执行失败: ${(err as Error).message}` }),
@@ -2287,11 +2288,30 @@ private activeSchemas(sessionId: string) {
     })
   }
 
+  /**
+   * 收尾验证提醒——会话工作区（session tmp/）文件判定：该目录内是模型的**临时产物与测试夹具**（为验证
+   *  某能力随手写的脚本、导出的中间结果），不是需要回归验证的代码改动——计入会让「写夹具测工具」这类
+   *  任务在收尾误报提醒（实测：测试 show 工具时写的 tmp/demo.py 被当成 1 个代码文件改动）。
+   *  项目内代码（项目绑定子Agent 的相对路径按项目根解析）与绝对路径用户代码不受影响。
+   *  路径解析失败（沙箱越界等）按「非会话文件」处理：保守计入，不因解析异常放过真实改动。
+   */
+  private inSessionTmp(ctx: ToolContext, rawPath: string): boolean {
+    let abs: string
+    let tmp: string
+    try {
+      abs = ctx.resolvePath(rawPath)
+      tmp = join(sessionPath(ctx.home, ctx.user, ctx.sessionId), "tmp")
+    } catch {
+      return false
+    }
+    return abs === tmp || abs.startsWith(tmp + sep)
+  }
+
   /** 收尾验证提醒数据收集：write/edit/patch 成功修改代码文件（拒绝/安全模式拦截与 dryRun 不计）记入文件清单；
    *  验证判定覆盖三条通道——① sh/py 的 command 命中测试/检查关键词；② 验证类工具调用（名称后缀 `run_tests`，
    *  含命名空间形态 `self_optimize_run_tests`）；③ js 编排（脚本内以 sh/py/bg_task 执行验证命令）。
    *  写类工具取命名空间短名（code_write 与全局 write 同权）；**验证工具必须用后缀正则**（短名判定会漏）. */
-  private trackTaskMods(sessionId: string, name: string, args: Record<string, unknown>, result: ToolResult): void {
+  private trackTaskMods(sessionId: string, name: string, args: Record<string, unknown>, result: ToolResult, ctx: ToolContext): void {
     const mods = this.taskMods.get(sessionId)
     if (!mods) return
     const short = name.includes("_") ? name.slice(name.lastIndexOf("_") + 1) : name
@@ -2301,7 +2321,8 @@ private activeSchemas(sessionId: string) {
       if (typeof args.path !== "string") return
       if (args.dry_run === true || args.dryRun === true || result.output.includes("预演")) return
       if (MOD_REJECTED_RE.test(result.output)) return
-      if (VERIFY_CODE_FILE_RE.test(args.path)) mods.files.add(args.path)
+      // 会话工作区内的文件是临时产物/测试夹具（写的验证脚本、导出的中间结果），不算需要回归验证的代码改动
+      if (VERIFY_CODE_FILE_RE.test(args.path) && !this.inSessionTmp(ctx, args.path)) mods.files.add(args.path)
     } else if (short === "sh" || short === "py") {
       if (VERIFY_CMD_RE.test(String(args.command ?? ""))) mods.verified = true
     } else if (short === "js") {

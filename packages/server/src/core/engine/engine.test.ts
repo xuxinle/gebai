@@ -1667,7 +1667,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
   test("tool result blocks are persisted to session message", async () => {
     const s = await setup("tool")
     s.provider.toolName = "show"
-    s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
+    s.provider.toolArgs = { content: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     // show 图表分支执行期间等待前端渲染回传：模拟前端渲染成功
     s.events.subscribe((e) => {
@@ -2024,7 +2024,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
   test("show 图表分支 blocks the loop until the frontend render result arrives (decideDrawResult resumes)", async () => {
     const s = await setup("tool")
     s.provider.toolName = "show"
-    s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
+    s.provider.toolArgs = { content: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     let renderId = ""
     s.events.subscribe((e) => {
@@ -2072,7 +2072,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
   test("show 图表分支 returns render error and timeout message to the model", async () => {
     const s = await setup("tool")
     s.provider.toolName = "show"
-    s.provider.toolArgs = { code: "Alice -> Bob", format: "plantuml" }
+    s.provider.toolArgs = { content: "Alice -> Bob", format: "plantuml" }
     const session = await s.store.createSession("default", "t")
     let renderId = ""
     s.events.subscribe((e) => {
@@ -2248,7 +2248,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
   test("disabledTools filters schemas (channel-scoped tool removal) and blocks execution", async () => {
     const s = await setup("tool")
     s.provider.toolName = "show"
-    s.provider.toolArgs = { html: "<p>hi</p>" }
+    s.provider.toolArgs = { format: "html", content: "<p>hi</p>" }
     const session = await s.store.createSession("default", "t")
     await s.engine.run(session.id, "default", "render a page", { disabledTools: ["show", "fetch_url", "page_capture"] })
     const loaded = await s.store.load(session.id)
@@ -2672,7 +2672,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
   test("disabledTools does not leak across runs (per-task scope)", async () => {
     const s = await setup("tool")
     s.provider.toolName = "show"
-    s.provider.toolArgs = { html: "<p>hi</p>" }
+    s.provider.toolArgs = { format: "html", content: "<p>hi</p>" }
     const session = await s.store.createSession("default", "t")
     // 第一轮禁用 show
     await s.engine.run(session.id, "default", "render a page", { disabledTools: ["show"] })
