@@ -23,8 +23,9 @@
  *   一次要重建 Monaco/Git 状态，几秒白屏不值当。真正销毁是页面刷新。
  * - 宽度持久化（localStorage），默认 **50vw**（五五开）；**停靠侧**同样持久化；打开状态不持久化——
  *   页面加载即拉起一个重工作台，对多数访问是浪费。
- * - 折叠/展开带 **220ms 宽度过渡**（`#files-split.anim`，见 files-split.css）：面板宽度是普通可过渡
- *   属性，网格列用 `auto` 跟着它走，于是左列会话区在同一帧里平滑吃掉/让出这段宽度。
+ * - 折叠/展开是 **200ms 滑入/滑出**（`#files-split.anim`，见 files-split.css）：面板整体从窗口边缘
+ *   平移进出（transform，合成层位移），栅格宽度一步到位。**不做宽度过渡**——会话区每帧重排整段
+ *   会话在长会话上是几十上百毫秒一次，宽度过渡会被挤成两三帧（实测数字见 CSS）。
  */
 import { filesUrl, type FilesOpenOpts } from "./files-entry"
 import { clampSplitWidth, normalizeSplitSide, splitWidthFromPointer, SPLIT_MIN_WINDOW, type SplitSide } from "./files-split-core"
@@ -35,8 +36,8 @@ export type { SplitSide }
 const W_KEY = "gebai.ui.filesSplitW"
 /** 停靠侧持久化键；缺省由 files-split-core 的 SPLIT_DEFAULT_SIDE 决定（左侧）。 */
 const SIDE_KEY = "gebai.ui.filesSplitSide"
-/** 折叠/展开过渡时长（ms）——与 files-split.css 里 `#files-split.anim` 的 width 过渡同值。 */
-const ANIM_MS = 220
+/** 折叠/展开动画时长（ms）——与 files-split.css 里 `#files-split.anim` 的 transform 过渡同值。 */
+const ANIM_MS = 200
 
 let pane: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
@@ -59,7 +60,7 @@ let animTimer = 0
 
 /**
  * 分屏是否处于打开态。
- * 收起的 220ms 过渡里返回 false：这段时间里按钮已是「分屏打开」，语义上就该按已关对待
+ * 收起的 200ms 动画里返回 false：这段时间里按钮已是「分屏打开」，语义上就该按已关对待
  * （Esc/点会话列表再关一次没有意义，而重新点是「推开」）。
  */
 export function isSplitOpen(): boolean {
@@ -121,8 +122,7 @@ function storedWidth(): number | null {
 
 /**
  * 写入生效宽度：根元素上的 `--files-split-w` —— 面板宽度、主题的太阳定位、分屏的栅格列都读它。
- * 只写变量、不碰面板的内联宽度：面板宽度归 CSS（`width: var(--files-split-w, 50vw)`），
- * 折叠动画期间才用内联宽度把它压到 0（见 openPane/closePane）。
+ * 只写变量、不碰面板的内联尺寸，宽度始终归 CSS（`width: var(--files-split-w, 50vw)`）。
  */
 function applyWidth(w: number | null): void {
   const root = document.documentElement
@@ -172,11 +172,11 @@ function buildPane(): HTMLElement {
   })
 
   el.append(resizer, f)
-  // 过渡的收尾统一走 settle（transitionend 与兜底定时器都进它）：
-  // 展开完撤 .anim（否则窗口缩放会拖出 220ms 橡皮筋），收起完藏面板。
+  // 动画的收尾统一走 settle（transitionend 与兜底定时器都进它）：
+  // 展开完撤 .anim（否则会一直挂在合成层上），收起完藏面板（见 finishClose）。
   el.addEventListener("transitionend", (e) => {
     const ev = e as TransitionEvent
-    if (ev.target !== el || ev.propertyName !== "width") return
+    if (ev.target !== el || ev.propertyName !== "transform") return
     settle(el)
   })
   pane = el
@@ -288,31 +288,41 @@ export function toggleSplit(opts: FilesOpenOpts = {}): void {
 }
 
 /**
- * 推开面板（带宽度过渡）。
+ * 推开面板（带滑入动画）。
  *
- * 顺序是关键：**先把内联宽度写成 0 并强制一帧**，再移除它把宽度交回 CSS 变量——
- * 否则浏览器只看到「hidden → 显示 + 目标宽度」这一次状态变化，没有"上一个宽度"可插值，动画根本不会发生。
+ * 顺序是关键：**先把面板整体推到窗外（内联 transform）并强制一帧**，再移除内联值交给 CSS——
+ * 否则浏览器只看到「hidden → 显示 + 归位」这一次状态变化，没有"上一个位置"可插值，动画根本不会发生。
+ * 栅格（`body.files-split`）在这一步之前就已落地：会话区一次性重排到位，此后整场动画只位移、不再重排。
  */
 function openPane(el: HTMLElement): void {
   document.body.classList.add("files-split")
   el.hidden = false
   if (prefersReducedMotion()) {
     el.classList.remove("anim")
-    el.style.removeProperty("width")
+    el.style.removeProperty("transform")
     return
   }
   el.classList.add("anim")
-  el.style.width = "0px"
+  el.style.transform = offEdge()
   void el.offsetWidth
-  el.style.removeProperty("width")
-  // 兜底：过渡被中途打断（拖分界/换侧）而不再有 transitionend 时，.anim 不能永远留着
+  el.style.removeProperty("transform")
+  // 兜底：动画被中途打断（换侧/连点）而不再有 transitionend 时，.anim 不能永远留着
   armSettleTimer(el)
 }
 
-/** 收合面板（带宽度过渡）：先过渡到 0 宽，收尾交给 settle（transitionend 或定时器先到者）。 */
+/** 面板在窗外（分界线那一侧的外面）：左停靠从左边滑进来，右停靠从右边。 */
+function offEdge(): string {
+  return `translateX(${side === "left" ? "-" : ""}100%)`
+}
+
+/**
+ * 收合面板（带滑出动画）：面板整体滑到窗外，滑完交给 settle（transitionend 或定时器先到者）。
+ * 栅格此刻还撑着面板那一列（会话区照旧窄着）：面板先出画，最后一步才把空间还给会话区
+ * （见 finishClose）——那一步只有一次会话重排，中途没有。
+ */
 function closePane(el: HTMLElement): void {
   el.classList.add("anim")
-  el.style.width = "0px"
+  el.style.transform = offEdge()
   armSettleTimer(el)
 }
 
@@ -333,13 +343,16 @@ function settle(el: HTMLElement): void {
   else finishClose(el)
 }
 
-/** 收起收尾：藏面板、撤过渡态、退出分屏栅格（`--files-split-w` 与 body 类一起收回）。 */
+/**
+ * 收起收尾：藏面板、撤动画态、退出分屏栅格（`--files-split-w` 与 body 类一起收回）。
+ * 会话区在这一步才展开——收起动画里它一直是窄的那份布局，只在最后重排一次。
+ */
 function finishClose(el: HTMLElement): void {
   clearTimeout(animTimer)
   animTimer = 0
   if (open) return // 收起途中又被推开：收尾交给展开流程
   el.hidden = true
-  el.style.removeProperty("width")
+  el.style.removeProperty("transform")
   el.classList.remove("anim")
   document.body.classList.remove("files-split")
   applyWidth(null)
