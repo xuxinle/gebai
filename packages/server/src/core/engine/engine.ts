@@ -417,7 +417,19 @@ export class AgentEngine {
         tools: this.activeSchemas(sessionId),
       }
     }
-    return this.compressor.compactSession(sessionId, user, scope, provider, { ...opts, cachePrefix })
+    const res = await this.compressor.compactSession(sessionId, user, scope, provider, { ...opts, cachePrefix })
+    // 压缩后即时刷新展示口径（不等下一轮模型调用）：压缩清除了真值基线，而展示值此前只在
+    // 任务结束时才写——不在这里补一脚，圆环与列表会继续显示「压缩前」的旧数（观感：压缩了
+    // 但百分比没掉）；值取压缩后消息估算 + 工具 schema 段（与主循环推送同口径）
+    if (res.compacted > 0) {
+      const snap = await this.opts.store.load(sessionId, user).catch(() => null)
+      const tokens = (snap ? estimateCtxTokens(snap.messages) : 0) + estimateSchemasTokens(cachePrefix.tools)
+      if (tokens > 0) {
+        this.publish(sessionId, "event.session.ctx", { ctxTokens: tokens })
+        await this.opts.store.updateCtxStats(sessionId, user, { ctxTokens: tokens, ctxCachedTokens: undefined }).catch(() => {})
+      }
+    }
+    return res
   }
 
   private async summarizeSubSessionReport(content: string, env: Record<string, string>): Promise<string | undefined> {
@@ -1904,13 +1916,20 @@ private activeSchemas(sessionId: string) {
       // 无真值（压缩重建后基线锚点失效）时退回全量估算，并补上工具 schema 段估算（schema 不在 messages
       // 里却真实计入 input_tokens）——否则压缩后推送值系统性偏低、下一轮真值回来时数值跳变；
       // ctxCachedTokens = 同一次调用的提示词缓存命中（前端上下文圆环悬浮展示命中率，接口不返回时缺省）
+      const ctxTokensNow =
+        ctxUsage.ctxInputTokens !== undefined
+          ? ctxUsage.ctxInputTokens + estimateTokens(messages.slice(ctxUsage.ctxCountedLen))
+          : estimateTokens(messages) + estimateSchemasTokens(schemas)
       this.publish(sessionId, "event.session.ctx", {
-        ctxTokens:
-          ctxUsage.ctxInputTokens !== undefined
-            ? ctxUsage.ctxInputTokens + estimateTokens(messages.slice(ctxUsage.ctxCountedLen))
-            : estimateTokens(messages) + estimateSchemasTokens(schemas),
+        ctxTokens: ctxTokensNow,
         ...(ctxUsage.ctxInputTokens !== undefined ? { ctxCachedTokens: ctxUsage.ctxCachedTokens } : {}),
       })
+      // 展示值同步落盘（只重写 meta.json，不碰 chat.json）：会话列表 / 状态快照 / 页面刷新与
+      // 实时推送同口径——否则这些读取面只能拿到「上次任务结束时”的值，运行中刷新会在陈旧值
+      // 与当前真值之间来回跳（同一会话两个数字轮流显示）
+      await this.opts.store
+        .updateCtxStats(sessionId, user, { ctxTokens: ctxTokensNow, ctxCachedTokens: ctxUsage.ctxCachedTokens })
+        .catch(() => {})
       if (!toolCalls.length) {
         this.publish(sessionId, "event.message.done", { text, messageId: assistantMsgId, sessionId })
         lastMessageId = assistantMsgId

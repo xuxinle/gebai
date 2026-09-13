@@ -132,6 +132,53 @@ describe("会话列表元信息缓存（meta.json）", () => {
     }
   })
 
+  test("updateCtxStats：只刷新 meta（正文一字不改），列表/详情立即拿到运行中真值", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-meta-ctxstats-"))
+    try {
+      const store = new SessionStore({ home })
+      const id = await seed(store, "alice", 3)
+      const chatPath = join(dirOf(home, "alice", id), "chat.json")
+      const before = readFileSync(chatPath, "utf8")
+      await store.updateCtxStats(id, "alice", { ctxTokens: 42000, ctxCachedTokens: 40000 })
+      expect(readFileSync(chatPath, "utf8")).toBe(before) // 不重写正文（运行中每轮调用的开销只有一个小文件）
+      const info = (await store.listSessionInfos("alice")).find((x) => x.id === id)!
+      expect(info.ctxTokens).toBe(42000) // 列表（快照/刷新同源）与运行中推送同口径
+      expect(info.ctxCachedTokens).toBe(40000)
+      // 未缓存会话（无运行中任务）/ 已删除会话：静默 no-op，不产生副作用
+      await store.updateCtxStats("ffffffffffffffffffffffffffffffff", "alice", { ctxTokens: 1 })
+      await store.delete(id, "alice")
+      await store.updateCtxStats(id, "alice", { ctxTokens: 2 })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("压缩后展示值重算为当前消息估算（不再停留在压缩前的真值）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-meta-compact-"))
+    try {
+      const store = new SessionStore({ home })
+      const id = await seed(store, "alice", 6)
+      const s = (await store.load(id, "alice"))!
+      s.ctxInputTokens = 90000
+      s.ctxAtMessage = 5
+      s.ctxTokens = 91000
+      s.ctxCachedTokens = 80000
+      await store.save(s)
+      await store.compactMessages(id, "alice", { from: 0, to: 4, summary: "摘要正文" })
+      const loaded = (await store.load(id, "alice"))!
+      // 真值与缓存命中随压缩清除；展示值重算为压缩后的消息估算（压缩前旧数不得残留）
+      expect(loaded.ctxInputTokens).toBeUndefined()
+      expect(loaded.ctxCachedTokens).toBeUndefined()
+      expect(loaded.ctxTokens).toBeGreaterThan(0)
+      expect(loaded.ctxTokens!).toBeLessThan(1000)
+      // 列表（meta 路径）与 load 同口径：压缩后刷新不再显示压缩前的百分比
+      const info = (await store.listSessionInfos("alice")).find((x) => x.id === id)!
+      expect(info.ctxTokens).toBe(loaded.ctxTokens!)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   test("跨用户隔离：meta 缓存不越权返回他人会话", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-meta-iso-"))
     try {

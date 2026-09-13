@@ -47,12 +47,15 @@ class FakeProvider implements LLMProvider {
   failFirstError: Error | null = null
   /** done chunk 携带的 usage 真值（模拟服务端返回 input tokens，含缓存命中 cachedTokens）；undefined = 不返回（估算兜底路径）。 */
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedTokens?: number } | undefined = undefined
+  /** 每次 chat 调用入口的探针（第几次调用，从 1 开始）：运行中状态（落盘值/列表口径）断言用。 */
+  onChat?: (call: number) => void | Promise<void>
   constructor(private mode: "tool" | "approval" | "approval2" | "text" | "sub" | "subwrite" | "submulti" | "subproj" | "subgrep" | "subcompose" | "subdeep" | "substream" | "suberr" | "subpipe" | "loadproj" | "interact" | "askenv" | "guard" | "subself" | "dyn" | "autoload" | "subautoload" | "subrisky" | "streamwait" | "parallel" | "mixapprove" | "mixmissing" | "subparallel" | "subunknown" | "subrev" = "tool") {}
   capabilities(): LLMCapabilities {
     return { streaming: true, toolCalling: true, multimodal: this.multimodal, maxContextTokens: 10000, ...(this.model ? { model: this.model } : {}) }
   }
   async *chat(_msgs: MessageLike[], _opts?: ChatOptions): AsyncIterable<LLMChunk> {
     this.calls++
+    if (this.onChat) await this.onChat(this.calls)
     // 深拷贝：引擎运行中会原地修改 messages（如图片块降级），断言需看到调用时的原始内容
     this.seenChats.push(JSON.parse(JSON.stringify(_msgs)) as MessageLike[])
     this.seenTools.push((_opts?.tools ?? []).map((t) => t.name))

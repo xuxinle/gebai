@@ -3,8 +3,8 @@
  *  AgentEngine 公共 API 不变。 */
 import type { Message, MessageLike } from "@gebai/sdk"
 import type { LLMChunk, LLMProvider, LLMUsage } from "../llm/llm"
-import type { SessionStore } from "../session/store"
-import { isEngineNote, isCompressibleMessage, estimateCharsTokens } from "../session/store"
+import type { SessionStore, SessionData } from "../session/store"
+import { isEngineNote, isCompressibleMessage, estimateCharsTokens, estimateCtxTokens } from "../session/store"
 import type { EnvManager } from "../session/env"
 import { VISION_MIME_SET } from "@gebai/agents"
 import { log } from "@gebai/sdk/node"
@@ -513,7 +513,7 @@ export class ContextCompressor {
         m.content = `${note}\n${m.content}`
         delete m.images
         log.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧工具消息的 ${imgCount} 张图片降级为文本说明`)
-        await this.deps.store.save(session)
+        await this.saveAfterDegrade(session)
         this.publishDegrade(sessionId, `上下文溢出护栏：最旧工具消息的 ${imgCount} 张历史图片已降级为路径说明（可用 vision/read 按需查看）`, "tool-images")
         return true
       }
@@ -524,7 +524,7 @@ export class ContextCompressor {
       const note = images.map((a) => `[历史图片已降级为路径说明: ${a.path}（${a.name}），可用 vision/read 工具按需查看]`).join(" ")
       m.content = `${note}\n${m.content}`
       log.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息的 ${images.length} 张图片降级为文本说明`)
-      await this.deps.store.save(session)
+      await this.saveAfterDegrade(session)
       this.publishDegrade(sessionId, `上下文溢出护栏：最旧用户消息的 ${images.length} 张历史图片已降级为路径说明（可用 vision/read 按需查看）`, "user-images")
       return true
     }
@@ -537,11 +537,22 @@ export class ContextCompressor {
       const size = m.content.length
       m.content = `[历史消息已裁剪（原 ${size} 字符，原文不再保留）] ${m.content.slice(0, 200)}`
       log.warn(`[engine] 会话 ${sessionId} 溢出护栏：最旧用户消息（${size} 字符）裁剪为占位`)
-      await this.deps.store.save(session)
+      await this.saveAfterDegrade(session)
       this.publishDegrade(sessionId, `上下文溢出护栏：最旧用户消息（${size} 字符）已裁剪为占位`, "user-message")
       return true
     }
     return false
+  }
+
+  /** 护栏降级落盘：降级改写了历史消息内容（图片降为路径说明 / 长消息裁为占位），旧的真实 usage
+   *  基线与展示值同时失效——清基线回退估算（下次真实调用重建），并把展示值重算为当前消息估算
+   *  （同压缩/截断口径）；否则 UI 继续显示降级前的百分比，用户看不到护栏起了作用。 */
+  private async saveAfterDegrade(session: SessionData): Promise<void> {
+    session.ctxInputTokens = undefined
+    session.ctxAtMessage = undefined
+    session.ctxCachedTokens = undefined
+    session.ctxTokens = estimateCtxTokens(session.messages)
+    await this.deps.store.save(session)
   }
 
   /**

@@ -532,6 +532,30 @@ export class SessionStore {
   }
 
   /**
+   * 上下文用量展示值的轻量落盘（运行中每轮真值到达时调用）：只更新内存会话字段 + 原子重写
+   * meta.json（小文件），**不重写 chat.json**——会话列表 / 状态快照 / 页面刷新读到的因此与
+   * `event.session.ctx` 实时推送同口径；否则这些读取面只能拿到「上次任务结束时写入的值」，
+   * 运行中刷新会在陈旧值与实时真值之间来回跳（30% / 60% 交替）。
+   *
+   * chat.json 的 source 指纹（size/mtimeMs）原样沿用：meta 新鲜度判定不受影响（正文未变，
+   * 指纹本就该保持）；下一次 save() 会按新正文重新写入两端。
+   */
+  async updateCtxStats(sessionId: string, userId: string, stats: { ctxTokens: number; ctxCachedTokens?: number }): Promise<void> {
+    const session = this.cache.get(sessionId)
+    if (!session || session.userId !== userId) return // 未缓存（无运行中任务）：真值到达前无需落盘
+    if (this.removed.has(sessionId)) return
+    session.ctxTokens = stats.ctxTokens
+    session.ctxCachedTokens = stats.ctxCachedTokens
+    const dir = this.dir(session.userId, session.id)
+    try {
+      const st = await stat(join(dir, "chat.json"))
+      await this.writeMeta(session, dir, { size: st.size, mtimeMs: st.mtimeMs })
+    } catch {
+      /* 元信息写失败：列表回退读正文（值略旧），功能不受影响 */
+    }
+  }
+
+  /**
    * 超限截断（顺序保留）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/子会话运行存档）
    * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直至长度不超上限——不重排消息顺序（append 语义
    * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免压缩摘要（受保护）被当普通历史
@@ -642,6 +666,9 @@ export class SessionStore {
     session.ctxInputTokens = undefined
     session.ctxCachedTokens = undefined
     session.ctxAtMessage = undefined
+    // 展示值（ctxTokens）同样随真值失效：不清就等于长期展示「压缩前」的旧数（压缩后 UI 仍报
+    // 压缩前的百分比）——与 truncateMessages 同口径重算为当前消息的估算值
+    session.ctxTokens = estimateCtxTokens(session.messages)
     await this.save(session)
     return session.messages
   }

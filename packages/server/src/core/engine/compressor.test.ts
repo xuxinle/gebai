@@ -486,6 +486,34 @@ describe("溢出硬护栏", () => {
     expect(loaded!.messages.some((m) => m.content === "最新任务输入")).toBe(true)
     s.cleanup()
   })
+
+  test("降级同时重算展示值：不再停留在降级前的真值（否则 UI 看不到护栏起了作用）", async () => {
+    const { provider } = mockProvider()
+    const s = await setup({
+      provider,
+      messages: [
+        msg("user", `很长的历史用户输入 ${"z".repeat(600)}`),
+        msg("assistant", "收到"),
+        msg("user", "最新任务输入"),
+        msg("assistant", "进行中"),
+      ],
+    })
+    // 先植入降级前的真值与展示值（模拟上一轮调用后的状态）
+    const before = (await s.store.load(s.session.id))!
+    before.ctxInputTokens = 89000
+    before.ctxAtMessage = 3
+    before.ctxTokens = 90000
+    before.ctxCachedTokens = 80000
+    await s.store.save(before)
+    expect(await s.compressor.degradeProtectedMessages(s.session.id, "default")).toBe(true)
+    const loaded = (await s.store.load(s.session.id))!
+    expect(loaded.ctxInputTokens).toBeUndefined()
+    expect(loaded.ctxAtMessage).toBeUndefined()
+    expect(loaded.ctxCachedTokens).toBeUndefined()
+    expect(loaded.ctxTokens).toBeGreaterThan(0)
+    expect(loaded.ctxTokens!).toBeLessThan(1000)
+    s.cleanup()
+  })
 })
 
 describe("压缩目标水位（compactSession 集成）", () => {
