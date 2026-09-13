@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { ToolRegistry } from "../base/registry"
 import { SubAgentManager, discoverySignature } from "./subagents"
+import { disposeAllKeqing } from "./keqing"
 import type { SubAgentDef } from "../base/types"
 
 const loadedDef: SubAgentDef = {
@@ -810,6 +811,107 @@ describe("custom 二开域（双域扫描自动合并，DESIGN「custom 二开�
     } finally {
       rmSync(file, { force: true })
       await new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] }).discover()
+    }
+  })
+})
+
+describe("客卿发现延迟（deferNative：启动不被 sidecar 阻塞）", () => {
+  /** 慢握手驱动：init 响应前先睡一段时间，用于「阻塞 vs 不阻塞」的可观测差异。 */
+  const slowDriverSource = (delaySec: number) =>
+    [
+      "import json, os, sys, time",
+      'sys.stdout.reconfigure(encoding="utf-8", newline=chr(10))',
+      'sys.stdin.reconfigure(encoding="utf-8")',
+      `time.sleep(${delaySec})`,
+      "for line in sys.stdin:",
+      "    req = json.loads(line)",
+      '    if req["op"] == "init":',
+      '        sys.stdout.write(json.dumps({"id": req["id"], "ok": True, "result": {"name": os.environ.get("FAKE_NAME", "slow"), "protocol": 2}}) + chr(10))',
+      "        sys.stdout.flush()",
+      '    elif req["op"] == "tools.list":',
+      '        sys.stdout.write(json.dumps({"id": req["id"], "ok": True, "result": []}) + chr(10))',
+      "        sys.stdout.flush()",
+    ].join(String.fromCharCode(10)) + String.fromCharCode(10)
+
+  /** 建一个只有一个慢客卿的假根目录（manifest 用 {python} 占位：由解释器解析器跨平台解析）。 */
+  async function makeSlowRoot(delaySec: number): Promise<string> {
+    const { mkdtempSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const root = mkdtempSync(join(tmpdir(), "gebai-keqing-defer-"))
+    writeFileSync(join(root, "drv.py"), slowDriverSource(delaySec))
+    const d = join(root, "slowagent")
+    mkdirSync(d, { recursive: true })
+    writeFileSync(
+      join(d, "agent.json"),
+      JSON.stringify({
+        name: "slowagent",
+        description: "慢握手客卿",
+        protocol: 2,
+        command: ["{python}", join(root, "drv.py")],
+        env: { FAKE_NAME: "slowagent" },
+      }),
+    )
+    writeFileSync(join(d, "PROMPT.md"), "slowagent 提示词正文")
+    return root
+  }
+
+  test("deferNative：discover 不等客卿握手即返回；whenNativeReady 后就绪", async () => {
+    const { rmSync } = await import("node:fs")
+    const delaySec = 1.5
+    const root = await makeSlowRoot(delaySec)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      m.setKeqingOpts({ roots: [root] } as never)
+
+      const t0 = Date.now()
+      await m.discover({ deferNative: true })
+      expect(Date.now() - t0).toBeLessThan(delaySec * 1000) // 未等满握手时长
+      expect(m.def("slowagent")).toBeUndefined() // 后台未回：合并视图里还没有
+
+      await m.whenNativeReady() // 等后台发现
+      expect(m.def("slowagent")).toBeDefined() // 就绪后自动合并进视图
+      const t1 = Date.now()
+      await m.whenNativeReady() // 已完成：零等待
+      expect(Date.now() - t1).toBeLessThan(100)
+    } finally {
+      await disposeAllKeqing() // 先回收边车进程：否则它仍占着临时目录
+      await new Promise((r) => setTimeout(r, 50)) // 进程退出窗口
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("deferNative 下 load 会先等后台发现（显式装载语义不变）", async () => {
+    const { rmSync } = await import("node:fs")
+    const root = await makeSlowRoot(1.5)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      m.setKeqingOpts({ roots: [root] } as never)
+      await m.discover({ deferNative: true })
+      expect(m.def("slowagent")).toBeUndefined()
+      // 显式装载：不因后台未回而报「未知子Agent」
+      const loaded = await m.load("slowagent")
+      expect(loaded).toContain("slowagent")
+      expect(m.def("slowagent")).toBeDefined()
+    } finally {
+      await disposeAllKeqing() // 先回收边车进程：否则它仍占着临时目录
+      await new Promise((r) => setTimeout(r, 50)) // 进程退出窗口
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("非 defer（缺省）仍同步等待客卿发现", async () => {
+    const { rmSync } = await import("node:fs")
+    const root = await makeSlowRoot(1.5)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: [] })
+      m.setKeqingOpts({ roots: [root] } as never)
+      await m.discover()
+      // 缺省语义：await 回来时客卿定义已在视图里（测试与脚本依赖此语义）
+      expect(m.def("slowagent")).toBeDefined()
+    } finally {
+      await disposeAllKeqing() // 先回收边车进程：否则它仍占着临时目录
+      await new Promise((r) => setTimeout(r, 50)) // 进程退出窗口
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })

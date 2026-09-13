@@ -109,6 +109,9 @@ export class SubAgentManager {
   /** 客卿（多语言）子代理发现选项（boot 接线注入；测试缺省 undefined——本地形态且非 off 才启用）。
    *  null = 显式禁用（沙箱模式/GEBAI_KEQING=off）。 */
   private keqingOpts: KeqingRunnerOptions | null | undefined
+  /** 启动期延迟发起的客卿发现在途/完成 promise（deferNative 语义，见 discover）。
+   *  null = 无在途发现（从未发起，或已同步完成）。 */
+  private nativeReady: Promise<void> | null = null
 
   /** 同名贡献集合并视图重建（跨语言合并，DESIGN「客卿」）：tsDefs/nativeDefs 任一变化后
    *  调用——逐名 mergeSubAgentDefs（TS 贡献在前、客卿 在后）重算全量 defs，再过滤实例级
@@ -143,7 +146,15 @@ export class SubAgentManager {
     this.scanDirs = opts.scanDirs ?? defaultScanDirs()
   }
 
-  async discover(): Promise<void> {
+  /**
+   * 全量发现（TS 域扫描 + 客卿发现）。
+   *
+   * `deferNative`：客卿发现**不阻塞本次调用**——启动路径（boot/compose）用它，避免被客卿侧车握手与
+   * 编译型构建引导拖慢（测过：受限网络下 go 下载 toolchain 的 TCP 超时能把启动拉长 30s）：
+   * 客卿发现转为后台任务并存为 nativeReady，就绪后自动重建合并视图；需要完整清单的操作（显式装载）
+   * 经 whenNativeReady 等待它。TS 域扫描（本地文件遍历 + 定义 import）仍同步。
+   */
+  async discover(opts: { deferNative?: boolean } = {}): Promise<void> {
     // TS 子代理已抽包 @gebai/agents（DESIGN「TS 子代理抽包解耦」）：dev 扫描 agents 包 src/agents/ 子代理域（基建在 src/core/），
     // bundle 形态走 subagents.bundle.generated（构建脚本同样指向 agents 包）。
     // 双域扫描（DESIGN「custom 二开域」）：仓库根 custom/agents/ 是二开子代理域（随文件夹整体迁移，
@@ -158,7 +169,7 @@ export class SubAgentManager {
       for (const def of discoveredDefsCache) this.tsDefs.set(def.name, def)
       this.loadErrors = new Map(discoveredErrorsCache ?? [])
       this.rebuildMergedDefs()
-      await this.discoverNativeIfChanged()
+      await this.runNativeDiscovery(opts.deferNative === true)
       await this.preload()
       return
     }
@@ -188,7 +199,7 @@ export class SubAgentManager {
       discoveredErrorsCache = new Map(this.loadErrors)
       discoveredSigCache = null
       this.rebuildMergedDefs()
-      await this.discoverNativeIfChanged()
+      await this.runNativeDiscovery(opts.deferNative === true)
       await this.preload()
       return
     }
@@ -203,8 +214,42 @@ export class SubAgentManager {
     discoveredSigCache = sig
     discoveredErrorsCache = new Map(this.loadErrors)
     this.rebuildMergedDefs()
-    await this.discoverNativeIfChanged()
+    await this.runNativeDiscovery(opts.deferNative === true)
     await this.preload()
+  }
+
+  /**
+   * 客卿发现：`defer` 为真则后台进行（存 nativeReady 供 whenNativeReady 等待），否则同步等待。
+   * 在途复用以防重复拉起侧车：同一时刻只会有一份发现（重复发现会各自握手并注册同名边车，
+   * 先注册的那份被后写覆盖后无人回收 → 进程泄漏）。
+   */
+  private async runNativeDiscovery(defer: boolean): Promise<void> {
+    if (!defer) {
+      // 启动期后台发现仍在途：等它（同一份），不另起
+      if (this.nativeReady) {
+        await this.nativeReady
+        return
+      }
+      await this.discoverNativeIfChanged()
+      return
+    }
+    this.nativeReady ??= this.discoverNativeIfChanged()
+      .catch((err) => {
+        // 后台发现整体失败不阻断启动（与同步路径同语义：单个客卿失败已记 loadErrors）
+        log.warn(`[subagents] 客卿子代理后台发现失败（已跳过）: ${err instanceof Error ? err.message : err}`)
+      })
+      .finally(() => {
+        this.nativeReady = null
+      })
+  }
+
+  /**
+   * 等待启动期后台客卿发现完成（无在途发现则立即返回）。
+   * 调用方：显式装载（load）——客卿子代理（如 Python 侧 imgproc/vision/docqa）在后台发现完成前
+   * 不在合并视图里，不等待会报「未知子Agent」；等一次的成本只在首次（完成后 nativeReady 恒为 null）。
+   */
+  async whenNativeReady(): Promise<void> {
+    await this.nativeReady
   }
 
   /** 单个扫描域的子代理收集（dev 双域共用：内置 packages/agents/src/agents/ 与二开 custom/agents/）。
@@ -313,6 +358,10 @@ export class SubAgentManager {
       await this.discover()
       return
     }
+    // 启动期后台客卿发现仍在途：不重复发起（重复发现会各自握手并注册同名边车 → 进程泄漏）。
+    // 需要完整清单的调用方（load）经 whenNativeReady 等它；新任务构提示词不等它——启动不被
+    // 慢发现拖住是本改动的目的，若在此处等待等于把 30s 又搬到第一条消息上
+    if (this.nativeReady) return
     await this.discoverNativeIfChanged()
   }
 
@@ -397,6 +446,9 @@ export class SubAgentManager {
     // 热加载检查（目录签名变化即重扫）：agent_load/路由自愈/subsession_run 预加载前拿到最新定义
     // （如 self_optimize 刚生成的子Agent 文件）；签名未变时零成本（一次目录遍历）
     await this.refreshIfChanged()
+    // 启动期后台客卿发现尚未回：显式装载要求定义可见，先等它（无在途发现则零等待；
+    // 客卿定义就绪后自动重建合并视图，等完再取 defs）
+    await this.whenNativeReady()
     const def = this.defs.get(name)
     if (!def) throw new Error(this.unknownAgentError(name))
     const track = (n: string) => {

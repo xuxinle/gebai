@@ -172,7 +172,10 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 客卿（DESIGN「客卿」）：仅本地形态启用——沙箱启用（服务端部署）时注入 null
   // 显式禁用；GEBAI_KEQING=off 同效。发现失败不阻断启动（逐项记 loadErrors）。
   subAgents.setKeqingOpts(sandbox.enabled ? null : {})
-  await subAgents.discover()
+  // 客卿发现放后台（deferNative）：侧车握手与编译型客卿的构建引导耗时不可控（实测：受限网络下
+  // go 下载 toolchain 的 TCP 超时能把启动拉长 30s），不该让服务启动等它；TS 域扫描（本地）仍同步。
+  // 就绪后自动合并进定义视图，需完整清单的操作（agent_load）由 SubAgentManager 内部等它。
+  await subAgents.discover({ deferNative: true })
   // 定时任务能力开关（GEBAI_CRON_ENABLED，默认 true）：关闭时 cron 子Agent 不注册（agent_list/agent_load/
   // subsession_run 均不可见，cron_* 工具不进工具表/schema，与调度器一致完全隐藏）；开启时按需装载、REST /api/v1/cron 可管
   if (!config.cronEnabled) subAgents.unregister("cron")
