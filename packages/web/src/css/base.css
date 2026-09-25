@@ -521,6 +521,34 @@ aside {
 :root[data-low-power="on"] .turn-timer.running .tt-ico { animation: none; }
 .turn-timer[hidden] { display: none; }
 :root[data-turn-timer="off"] .turn-timer { display: none; }
+/* 输出速率：单轮计时器右侧常驻显示**纯数值**（单位与估算标记不上屏，避免标题栏噪声），
+   **按导航交通拥挤配色分级着速**——六级路况色（畅通→顺畅→良好→缓行→拥堵→严重拥堵）
+   由主题色 --success（绿）/ --warning（黄）/ --danger（红）经 color-mix 派生出连续过渡色，
+   随主题自适应（颜色本身即表达快慢）；生成中为估算值（降不透明度），接口 usage 真值到达
+   后转为实测值（满不透明度）；hover 经 data-tip 给出单位（tok/s）、本轮输出 tokens、
+   生成时长与路况级名；外观设置关闭（data-token-rate="off"）时隐藏 */
+.token-rate {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--rate-color, var(--success));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  user-select: none;
+  transition: color 0.3s ease;
+  opacity: 1;
+}
+.token-rate[data-rate="1"] { --rate-color: var(--success); }                                              /* 畅通 */
+.token-rate[data-rate="2"] { --rate-color: color-mix(in srgb, var(--success) 76%, var(--warning)); }      /* 顺畅 */
+.token-rate[data-rate="3"] { --rate-color: color-mix(in srgb, var(--success) 48%, var(--warning)); }      /* 良好 */
+.token-rate[data-rate="4"] { --rate-color: var(--warning); }                                             /* 缓行 */
+.token-rate[data-rate="5"] { --rate-color: color-mix(in srgb, var(--warning) 46%, var(--danger)); }       /* 拥堵 */
+.token-rate[data-rate="6"] { --rate-color: var(--danger); }                                              /* 严重拥堵 */
+.token-rate[data-est="1"] { opacity: 0.72; } /* 估算值：颜色仍表达速度分级，整体降不透明度 */
+.token-rate .tr-ico { flex: none; opacity: 0.9; }
+.token-rate[hidden] { display: none; }
+:root[data-token-rate="off"] .token-rate { display: none; }
 /* 圆环：-90° 旋转使弧线从 12 点方向顺时针填充；pathLength=100 归一化周长，
    JS 直接以百分比数值写 stroke-dashoffset（100-占比），免周长换算 */
 #header-ctx .ctx-ring {

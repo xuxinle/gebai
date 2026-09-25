@@ -3,6 +3,7 @@ import { client, el, setConn, settingsBody, settingsBtn, settingsFoot, settingsO
 import { blockText } from "./markdown"
 import { isLowPower, setLowPowerSetting } from "./low-power"
 import { isTurnTimerEnabled, setTurnTimerSetting } from "./turn-timer"
+import { isTokenRateEnabled, setTokenRateSetting } from "./token-rate"
 import { isFilePopup, setFileDisplaySetting } from "./file-display"
 import { getFxPanelsSetting, setFxPanelsSetting } from "./fx-panels"
 import { loadLocalEnv, saveLocalEnv, filterEnvToCatalog, type EnvCatalogGroup } from "./env-local"
@@ -107,6 +108,24 @@ function renderSettingsAppearance() {
   ttRow.append(ttInfo, ttBtn)
   list.appendChild(ttRow)
 
+  // 输出速率（tok/s）：运行期间在标题栏显示模型输出速度，生成中为估算值、接口 usage 到达后为实测值
+  const trRow = el("div", "settings-row")
+  const trInfo = el("div", "settings-row-info")
+  const trDesc = el("div", "settings-row-desc")
+  const trBtn = el("button", "mini-btn")
+  const trRefreshDesc = () => {
+    const on = isTokenRateEnabled() // 跨标签同步：设置可能在别的标签被修改
+    trBtn.textContent = on ? "关闭" : "开启"
+    trDesc.textContent = on ? "已开启：标题栏显示输出速率（tok/s）" : "已关闭：不显示输出速率"
+  }
+  trBtn.onclick = () => {
+    setTokenRateSetting(isTokenRateEnabled() ? "off" : "on")
+    trRefreshDesc()
+  }
+  trInfo.append(el("div", "settings-row-name", "输出速率"), trDesc)
+  trRow.append(trInfo, trBtn)
+  list.appendChild(trRow)
+
   // 文件展示方式：read/write/edit/patch 等文件工具（含 code 子Agent 同款工具）的**产物文件卡**——
   // 弹窗（默认：收敛为文件链接，点击弹窗查看；适配会话相对与项目路径）或嵌入（卡片内联展示文件内容）；
   // 参数区与输出不受影响
@@ -153,6 +172,7 @@ function renderSettingsAppearance() {
   appearanceRefresh = refreshDesc
   refreshDesc()
   ttRefreshDesc()
+  trRefreshDesc()
   fdRefreshDesc()
   fxRefreshDesc()
 }

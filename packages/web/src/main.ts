@@ -25,6 +25,7 @@ import { initCnyCat } from "./cny-cat"
 import { initLowPower } from "./low-power"
 import { installScrollProbe, isScrollProbeEnabled } from "./scroll-probe"
 import { initTurnTimer } from "./turn-timer"
+import { initTokenRate, noteTpsFrame } from "./token-rate"
 import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
@@ -188,6 +189,7 @@ async function init() {
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initFxPanels() // 特效面板形态（毛玻璃/实底）：根元素标记先于主题与特效挂载
   initTurnTimer()
+  initTokenRate() // 输出速率（tok/s）显示：标题栏常驻，生成中估算、usage 真值到达后实测（外观 tab 可关）
   initFileDisplay() // 文件展示方式（直显/弹窗）跨标签同步；变更时重载当前会话消息
   document.addEventListener("gebai:file-display-change", () => {
     // 渲染是结构性的（文件链接 chip ↔ 内联内容），切换后重载当前会话即时生效
@@ -252,6 +254,18 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
     } else if (ev.type === "event.session.ctx") {
       // 运行中上下文大小实时更新（会话列表 k 显示）；缓存命中（接口返回时）随同更新（圆环悬浮展示）
       updateSessionCtx(ev.sessionId, Number(ev.payload.ctxTokens ?? 0), ev.payload.ctxCachedTokens === undefined ? undefined : Number(ev.payload.ctxCachedTokens))
+    } else if (ev.type === "event.session.tps") {
+      // 输出速率帧（生成中周期推送 + 调用结束收尾帧）：服务端为唯一口径，前端只展示
+      const tps = Number(ev.payload.tps ?? 0)
+      if (tps > 0) {
+        noteTpsFrame(ev.sessionId, {
+          tps,
+          outTokens: Number(ev.payload.outTokens ?? 0),
+          genMs: Number(ev.payload.genMs ?? 0),
+          est: ev.payload.est !== false,
+          active: ev.payload.active === true,
+        })
+      }
     } else if (ev.type === "event.subsession.merged") {
       // 子会话报告合入（DESIGN「子会话运行」）：消息落盘为 **user + engineNote: "subsession"**
       // （与其余引擎注入同口径——assistant 形态会被思考类模型 400 拒绝），此处实时渲染为

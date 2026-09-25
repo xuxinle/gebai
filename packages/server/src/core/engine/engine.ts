@@ -4,7 +4,7 @@ import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "@gebai/agents"
 import { resizeForVision, resizeNote } from "@gebai/agents"
 import type { ToolRegistry } from "../base/registry"
 import type { SessionStore } from "../session/store"
-import { estimateCtxTokens, isEngineNote } from "../session/store"
+import { estimateCharsTokens, estimateCtxTokens, isEngineNote } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
@@ -126,6 +126,19 @@ const MAX_AGENTS_PER_RUN = 5
 /** LLM 流式调用读空闲超时（毫秒）：SSE 建立后超过该时长无任何 chunk 判定接口假死，中止本次调用
  *  （无产出走重试，有产出上抛为任务错误，不再无限挂起）。 */
 const LLM_IDLE_TIMEOUT_MS = 120_000
+/** 输出速率（tok/s）可计量的最短生成窗口（毫秒）：窗口 = 首个输出 chunk 到末个输出 chunk，
+ *  短于此值说明接口一次性返回整段（非流式），除不出解码速度，不推送速率帧。 */
+const MIN_TPS_WINDOW_MS = 50
+/** 生成中速率帧推送节流（毫秒）：一次模型调用内按此周期上报服务端口径速率（前端只展示不估算），
+ *  长回答不再只在调用结束时才有一个数（断线重放也因周期远大于增量合并窗口而不增压力）。 */
+const TPS_PUSH_INTERVAL_MS = 1000
+/** 生成中速率帧的最小窗口（毫秒）：刚起步的几十毫秒窗口算出的值全是噪声，不够就不报。 */
+const TPS_MIN_GEN_MS = 300
+
+/** 速率换算（tokens ÷ 毫秒窗口 → tokens/秒，保留一位小数）。 */
+function rateOf(tokens: number, ms: number): number {
+  return ms > 0 ? Math.round((tokens / ms) * 10_000) / 10 : 0
+}
 
 function attachmentSizeText(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`
@@ -1931,16 +1944,41 @@ private activeSchemas(sessionId: string) {
     let usage: LLMUsage | undefined
     // 最后一次成功尝试的结束原因（length/max_tokens = 输出上限截断，argsError 处理区分引导）
     let stopReason: string | undefined
+    // 输出速率计量：本次尝试的生成窗口 = 首个输出 chunk 到末个输出 chunk（不含首 token 等待），
+    // 与接口 usage.outputTokens 相除得解码速度真值
+    let firstOutAt = 0
+    let lastOutAt = 0
+    // 生成中速率帧（服务端估算，前端只展示不估算）：本窗口累计估算输出 tokens 与上次推送时刻
+    let estTokens = 0
+    let lastTpsPushAt = 0
     for (;;) {
       const msgs = hint ? [...messages, { role: "user" as const, content: hint }] : messages
       try {
         usage = undefined
         stopReason = undefined
+        firstOutAt = 0
+        lastOutAt = 0
+        estTokens = 0
+        lastTpsPushAt = 0
         for await (const chunk of this.chatWithIdleTimeout(provider, msgs, schemas, signal, extraParams)) {
           if (chunk.type === "text") text += chunk.text
           else if (chunk.type === "reasoning" && chunk.text?.trim()) reasoningSeen = true
           else if (chunk.type === "tool_call" && chunk.toolCall) toolCalls.push({ ...chunk.toolCall, argsError: chunk.toolArgsError })
           else if (chunk.type === "done" && chunk.stopReason) stopReason = chunk.stopReason
+          // 输出 chunk（正文/推理/工具调用参数）都算生成产出，用于划出生成窗口
+          if (chunk.type === "text" || chunk.type === "reasoning" || chunk.type === "tool_call") {
+            const at = Date.now()
+            if (!firstOutAt) firstOutAt = at
+            lastOutAt = at
+            // 生成中速率帧（节流）：服务端估算口径（CJK 感知字符折算，与 usage 真值同量级），
+            // 窗口不足不报——数字在长回答全长期间持续刷新，而不是只在调用结束时才出现
+            estTokens += estimateCharsTokens(chunk.type === "tool_call" ? JSON.stringify(chunk.toolCall?.arguments ?? {}) : (chunk.text ?? ""))
+            if (sessionId && firstOutAt && at - lastTpsPushAt >= TPS_PUSH_INTERVAL_MS && at - firstOutAt >= TPS_MIN_GEN_MS) {
+              lastTpsPushAt = at
+              const genMs = at - firstOutAt
+              this.publish(sessionId, "event.session.tps", { tps: rateOf(estTokens, genMs), outTokens: estTokens, genMs, est: true, active: true })
+            }
+          }
           if (chunk.usage) usage = chunk.usage
           onChunk?.(chunk)
         }
@@ -1984,6 +2022,13 @@ private activeSchemas(sessionId: string) {
           continue
         }
         throw new Error(`模型未返回任何内容（已重试 ${attempts} 次）`)
+      }
+      // 调用结束的收尾速率帧（active=false，前端据此结束本轮生成态）：接口返回 output tokens
+      // 时用真值（est=false），否则用服务端估算收尾（est=true）；窗口过短不推
+      const genMs = lastOutAt - firstOutAt
+      const finalTokens = usage?.outputTokens ?? estTokens
+      if (sessionId && finalTokens > 0 && genMs >= MIN_TPS_WINDOW_MS) {
+        this.publish(sessionId, "event.session.tps", { tps: rateOf(finalTokens, genMs), outTokens: finalTokens, genMs, est: usage?.outputTokens === undefined, active: false })
       }
       return { text, toolCalls, usage, stopReason }
     }

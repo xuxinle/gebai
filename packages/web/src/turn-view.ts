@@ -2,12 +2,14 @@
 import { isTurnTimerEnabled } from "./turn-timer"
 import { getCurrentSession, headerCtxEl, runs, turnTimerEl, type RunState } from "./state"
 
+/** 时长文本（冒号分隔，无单位后缀）：<1h 为 `分:秒`（`0:07`），≥1h 为 `时:分:秒`（`1:05:03`）。 */
 export function formatTurnDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = String(s % 60).padStart(2, "0")
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${sec}`
+  return `${m}:${sec}`
 }
 
 /** 单轮计时器：标题栏右侧、上下文占比左侧常驻显示，**随会话视图切换**——当前会话运行中实时走

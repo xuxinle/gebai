@@ -1450,6 +1450,113 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     cleanup(home)
   })
 
+  test("输出速率：调用结束推收尾帧（usage.outputTokens ÷ 生成窗口）", async () => {
+    const { home, engine, store, events } = await setup("text")
+    const session = await store.createSession("default", "t")
+    const pushed: Array<Record<string, unknown>> = []
+    events.subscribe((e) => {
+      if (e.type === "event.session.tps" && e.sessionId === session.id) pushed.push(e.payload as Record<string, unknown>)
+    })
+    // 流式 provider：4 个输出 chunk 间隔 40ms（窗口 ≈120ms），done 带 outputTokens 真值
+    const streaming = {
+      id: "stream-tps",
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 100000 }),
+      chat: async function* () {
+        yield { type: "text", text: "第一段" }
+        await new Promise((r) => setTimeout(r, 40))
+        yield { type: "text", text: "第二段" }
+        await new Promise((r) => setTimeout(r, 40))
+        yield { type: "text", text: "第三段" }
+        await new Promise((r) => setTimeout(r, 40))
+        yield { type: "text", text: "第四段" }
+        yield { type: "done", usage: { inputTokens: 1000, outputTokens: 400, totalTokens: 1400 } }
+      },
+    }
+    ;(engine as unknown as { opts: { provider: unknown } }).opts.provider = streaming
+    await engine.run(session.id, "default", "hi")
+    // 生成窗口仅 120ms（< TPS_PUSH_INTERVAL_MS）：生成中的周期帧一次都不发，只有收尾帧
+    expect(pushed).toHaveLength(1)
+    const ev = pushed[0]!
+    expect(ev.outTokens).toBe(400)
+    expect(ev.est).toBe(false) // 接口 usage 真值口径
+    expect(ev.active).toBe(false) // 收尾帧
+    expect(Number(ev.genMs)).toBeGreaterThanOrEqual(120) // 三个 40ms 间隔
+    // tps 口径：outputTokens ÷ 生成窗口（毫秒换算成秒）
+    expect(Number(ev.tps)).toBeCloseTo((400 / Number(ev.genMs)) * 1000, 1)
+    cleanup(home)
+  })
+
+  test("输出速率：长回答在生成中按节流周期持续推帧（前后端唯一数据源在服务端）", async () => {
+    const { home, engine, store, events } = await setup("text")
+    const session = await store.createSession("default", "t")
+    const pushed: Array<Record<string, unknown>> = []
+    events.subscribe((e) => {
+      if (e.type === "event.session.tps" && e.sessionId === session.id) pushed.push(e.payload as Record<string, unknown>)
+    })
+    // 每次输出前等 400ms：1.6s 的生成窗口跨越多个 TPS_PUSH_INTERVAL_MS(1s) 周期
+    const slow = {
+      id: "slow-tps",
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 100000 }),
+      chat: async function* () {
+        for (const seg of ["第一段", "第二段", "第三段", "第四段"]) {
+          await new Promise((r) => setTimeout(r, 400))
+          yield { type: "text", text: seg }
+        }
+        yield { type: "done", usage: { inputTokens: 1000, outputTokens: 400, totalTokens: 1400 } }
+      },
+    }
+    ;(engine as unknown as { opts: { provider: unknown } }).opts.provider = slow
+    await engine.run(session.id, "default", "hi")
+    const active = pushed.filter((p) => p.active === true)
+    expect(active.length).toBeGreaterThanOrEqual(1) // 生成中至少一帧（不是只在结束时才有一个数）
+    expect(active.every((p) => p.est === true)).toBe(true) // 生成中帧为服务端估算口径
+    expect(active.every((p) => Number(p.outTokens) > 0 && Number(p.genMs) >= 300)).toBe(true)
+    // 末帧必为收尾帧：接口 usage 真值接管
+    expect(pushed[pushed.length - 1]!.active).toBe(false)
+    expect(pushed[pushed.length - 1]!.est).toBe(false)
+    expect(pushed[pushed.length - 1]!.outTokens).toBe(400)
+    cleanup(home)
+  })
+
+  test("输出速率：无 usage 时用服务端估算收尾；产出瞬时完成（窗口过短）不推送", async () => {
+    const { home, engine, store, events } = await setup("text")
+    const session = await store.createSession("default", "t")
+    const pushed: Array<Record<string, unknown>> = []
+    events.subscribe((e) => {
+      if (e.type === "event.session.tps" && e.sessionId === session.id) pushed.push(e.payload as Record<string, unknown>)
+    })
+    // 无 usage：仍按服务端估算收尾（est=true），速率不缺席
+    const noUsage = {
+      id: "no-usage",
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 100000 }),
+      chat: async function* () {
+        yield { type: "text", text: "第一段" }
+        await new Promise((r) => setTimeout(r, 200))
+        yield { type: "text", text: "第二段" }
+        yield { type: "done" }
+      },
+    }
+    ;(engine as unknown as { opts: { provider: unknown } }).opts.provider = noUsage
+    await engine.run(session.id, "default", "hi")
+    expect(pushed).toHaveLength(1)
+    expect(pushed[0]!.est).toBe(true)
+    expect(pushed[0]!.active).toBe(false)
+    expect(Number(pushed[0]!.outTokens)).toBeGreaterThan(0)
+    // 有 usage 但整段一次性返回（窗口 < MIN_TPS_WINDOW_MS）：解码速度不可测，不推送
+    const instant = {
+      id: "instant",
+      capabilities: () => ({ streaming: true, toolCalling: true, multimodal: false, maxContextTokens: 100000 }),
+      chat: async function* () {
+        yield { type: "text", text: "整段一次返回" }
+        yield { type: "done", usage: { inputTokens: 1000, outputTokens: 400 } }
+      },
+    }
+    ;(engine as unknown as { opts: { provider: unknown } }).opts.provider = instant
+    await engine.run(session.id, "default", "again")
+    expect(pushed).toHaveLength(1)
+    cleanup(home)
+  })
+
   test("压缩判定使用持久化 usage 基线；压缩后基线清除", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")

@@ -58,6 +58,7 @@ export const settingsTabs = document.getElementById("settings-tabs")!
 export const settingsBody = document.getElementById("settings-body")!
 export const settingsFoot = document.getElementById("settings-foot")!
 export const turnTimerEl = document.getElementById("turn-timer")!
+export const tokenRateEl = document.getElementById("token-rate")!
 
 /* ---------- 可变状态（跨模块共享） ---------- */
 
