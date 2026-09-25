@@ -14,18 +14,76 @@ function makeHome(): string {
 }
 
 describe("local_infer 子Agent 定义", () => {
-  test("名称与工具集符合契约", () => {
+  test("名称与工具集符合契约（引擎供给 + 进程管理 + 目标/推理调用 + 基准/解析）", () => {
     expect(def.name).toBe("local_infer")
     expect(def.preload).toBe(false)
-    for (const t of ["status", "models", "start", "stop", "bench", "inspect"]) {
-      expect(def.tools![t]).toBeDefined()
+    const expected = [
+      // 引擎供给（跨平台跨设备）
+      "engines",
+      "engine_fetch",
+      "model_fetch",
+      // 内网/离线：源码发现与就地编译
+      "sources",
+      "source_build",
+      // 进程管理
+      "status",
+      "models",
+      "start",
+      "stop",
+      "restart",
+      "logs",
+      // 推理目标与调用（批量提交 + 结构化输出）
+      "targets",
+      "generate",
+      "batch",
+      "jobs",
+      // 基准与模型解析
+      "bench",
+      "inspect",
+    ]
+    for (const t of expected) expect(def.tools![t]).toBeDefined()
+    // 不多不少：17 个工具
+    expect(Object.keys(def.tools!).sort()).toEqual([...expected].sort())
+
+    // 改变服务状态、下载落盘与编译落盘的工具需审批；只读工具与推理调用免审批
+    expect(requiresApproval).toEqual({
+      start: true,
+      stop: true,
+      restart: true,
+      bench: true,
+      engine_fetch: true,
+      model_fetch: true,
+      source_build: true,
+    })
+    for (const t of ["status", "models", "logs", "inspect", "engines", "targets", "sources", "generate", "batch", "jobs"]) {
+      expect(def.tools![t].requiresApproval).toBeUndefined()
     }
-    // 只读工具免审批，会改变系统状态的工具需审批
-    expect(requiresApproval).toEqual({ start: true, stop: true, bench: true })
-    expect(def.tools!.status.requiresApproval).toBeUndefined()
-    expect(def.tools!.models.requiresApproval).toBeUndefined()
-    expect(def.tools!.inspect.requiresApproval).toBeUndefined()
-    expect(def.tools!.start.requiresApproval).toBe(true)
+    for (const t of ["start", "stop", "restart", "bench", "engine_fetch", "model_fetch", "source_build"]) {
+      expect(def.tools![t].requiresApproval).toBe(true)
+    }
+  })
+
+  test("工具描述声明了批量与结构化的关键语义", () => {
+    expect(def.tools!.batch.description).toContain("批量")
+    expect(def.tools!.generate.description).toContain("结构化")
+    expect(def.tools!.jobs.description.length).toBeGreaterThan(20)
+    // 系统提示词需覆盖四条主线（否则模型不知道怎么用这批工具）
+    for (const kw of ["local_infer_generate", "local_infer_batch", "local_infer_jobs", "结构化", "slot"]) {
+      expect(def.systemPrompt).toContain(kw)
+    }
+    // 跨平台/跨设备、统一目标、内网源码编译（新增能力必须在提示词里可达，否则模型不会用）
+    for (const kw of ["local_infer_engines", "local_infer_engine_fetch", "local_infer_model_fetch", "local_infer_targets", "local_infer_sources", "local_infer_source_build", "target", "CPU", "Vulkan", "内网"]) {
+      expect(def.systemPrompt).toContain(kw)
+    }
+    expect(def.description).toContain("跨平台")
+  })
+
+  test("安全模式声明：改状态/起进程/发请求/写产物的工具不提供，纯读取的声明可用", () => {
+    // 未声明时按短名风险规则默认放行，而 start/stop/batch 等均不带风险后缀，故必须显式声明
+    for (const t of ["start", "stop", "restart", "bench", "status", "inspect", "generate", "batch", "jobs", "engine_fetch", "model_fetch", "source_build"]) {
+      expect(def.tools![t].safeMode).toBe(false)
+    }
+    for (const t of ["models", "logs", "engines", "targets", "sources"]) expect(def.tools![t].safeMode).toBe(true)
   })
 
   test("工具名不含非法字符（命名空间前缀由引擎拼接）", () => {

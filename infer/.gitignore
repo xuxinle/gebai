@@ -10,6 +10,10 @@ bench/reports/*.json
 bench/reports/*.md
 bench/reports/*.log
 bench/reports/*.log.err
+# 批量推理任务产物（输入副本 / 结果 JSONL / 任务状态）
+bench/runs/
+# 运行态状态文件（服务实例 PID/端口/日志，可重建）
+run/
 # 剖析报告（nsys 产物，可用 scripts 重新采集）
 bench/nsys/
 

@@ -1,0 +1,250 @@
+{
+  "//": "引擎矩阵：llama.cpp 官方发行版的跨平台引擎清单（linux/win32/darwin × cpu/cuda/vulkan/metal/rocm/sycl/openvino）。推理不绑定 Windows、不绑定 NVIDIA——矩阵按本机 platform+arch 过滤，再按实测设备探测结果挑可用后端。",
+  "//url": "资产地址 = {release.llama_cpp.base}/{tag}/{asset}（文件名格式固定，见 engines.ts 的 engineAssetUrl）。",
+  "//verified": "tag b11175（2026-09-25 发布）的全部 asset 名逐条核对自实际发行资产清单，勿凭记忆改写。",
+  "//install": "安装落点 infer/vendor/<id>/（标记文件 .engine.json 记录 tag/asset/exe），下载缓存在 infer/vendor/.cache/；zip 用 fflate 解压，tar.gz 交给系统 tar（Windows 10+ 自带 bsdtar 同名）。",
+  "//cudart": "CUDA 引擎的 cudart（cublas/cublasLt/cudart 等运行时）在上游是**单独发布的资产**，安装时一并解压到同一目录（见 cudart_asset）。",
+  "//extras": "宁可多录：多平台/多后端条目错录无害（列清单时按平台过滤），漏录则表现为「本机无可用引擎」。",
+  "version": 1,
+  "release": {
+    "llama_cpp": {
+      "tag": "b11175",
+      "base": "https://github.com/ggml-org/llama.cpp/releases/download"
+    }
+  },
+  "engines": [
+    {
+      "id": "linux-cpu-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "cpu",
+      "asset": "llama-b11175-bin-ubuntu-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "无 GPU 机器的默认引擎（验证机即此路径：Linux x86_64 裸 CPU 可跑）",
+      "requires": "x86_64 Linux（Ubuntu 22.04+/glibc 2.35+ 或同代发行版）"
+    },
+    {
+      "id": "linux-cuda-12.8-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "cuda",
+      "asset": "llama-b11175-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "archive": "tar.gz",
+      "cudart_asset": "cudart-llama-b11175-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "notes": "Linux + NVIDIA（原生 Linux 与 WSL2 同档；实测与 Windows 原生构建性能一致，见 README 6.10——平台不是瓶颈）",
+      "requires": "NVIDIA 驱动 ≥ 570（CUDA 12.8 运行时随 cudart 资产一并安装）"
+    },
+    {
+      "id": "linux-cuda-13.4-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "cuda",
+      "asset": "llama-b11175-bin-ubuntu-cuda-13.4-x64.tar.gz",
+      "archive": "tar.gz",
+      "cudart_asset": "cudart-llama-b11175-bin-ubuntu-cuda-13.4-x64.tar.gz",
+      "notes": "更新的 CUDA 13.4 栈（与 12.8 档并存，便于 A/B 与驱动升级过渡）",
+      "requires": "NVIDIA 驱动 ≥ 580（CUDA 13.4 运行时随 cudart 资产一并安装）"
+    },
+    {
+      "id": "linux-vulkan-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "vulkan",
+      "asset": "llama-b11175-bin-ubuntu-vulkan-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "无 CUDA 时的 GPU 回退（AMD/Intel 走 Vulkan）",
+      "requires": "有效 Vulkan ICD（mesa/厂商驱动）；实测比 CUDA 慢 2.6 倍（见 profiles.json 的 //engine）"
+    },
+    {
+      "id": "linux-rocm-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "rocm",
+      "asset": "llama-b11175-bin-ubuntu-rocm-10.0-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "AMD ROCm 10.0（gfx 架构支持以上游为准）",
+      "requires": "AMD GPU + ROCm 10.0 运行时"
+    },
+    {
+      "id": "linux-openvino-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "openvino",
+      "asset": "llama-b11175-bin-ubuntu-openvino-2026.4-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "Intel OpenVINO 2026.4（Intel 核显/独显/NPU 加速路径）",
+      "requires": "OpenVINO 运行时（归档内含部分库，缺件时按上游说明补）"
+    },
+    {
+      "id": "linux-sycl-fp16-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "sycl",
+      "asset": "llama-b11175-bin-ubuntu-sycl-fp16-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "Intel oneAPI SYCL（fp16 主路径，Intel Arc/核显）",
+      "requires": "oneAPI 运行时 + Intel GPU 驱动"
+    },
+    {
+      "id": "linux-sycl-fp32-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "device": "sycl",
+      "asset": "llama-b11175-bin-ubuntu-sycl-fp32-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "SYCL fp32 变体（fp16 精度问题或内核异常时的回退）",
+      "requires": "oneAPI 运行时 + Intel GPU 驱动"
+    },
+    {
+      "id": "linux-cpu-arm64",
+      "platform": "linux",
+      "arch": "arm64",
+      "device": "cpu",
+      "asset": "llama-b11175-bin-ubuntu-arm64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "ARM64 Linux（服务器 ARM、Apple 虚拟机内的 Linux 等）"
+    },
+    {
+      "id": "linux-snapdragon-arm64",
+      "platform": "linux",
+      "arch": "arm64",
+      "device": "cpu",
+      "asset": "llama-b11175-bin-linux-arm64-snapdragon.tar.gz",
+      "archive": "tar.gz",
+      "notes": "Snapdragon X Elite 平台优化构建（Windows on ARM 的 Linux 侧/原生 Linux ARM 笔记本）",
+      "requires": "Snapdragon（ARM64）平台"
+    },
+    {
+      "id": "linux-cuda-13.4-arm64",
+      "platform": "linux",
+      "arch": "arm64",
+      "device": "cuda",
+      "asset": "llama-b11175-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+      "archive": "tar.gz",
+      "cudart_asset": "cudart-llama-b11175-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+      "notes": "ARM64 + CUDA（Grace/Jetson 一类平台）",
+      "requires": "ARM64 Linux + NVIDIA 驱动 ≥ 580"
+    },
+    {
+      "id": "linux-vulkan-arm64",
+      "platform": "linux",
+      "arch": "arm64",
+      "device": "vulkan",
+      "asset": "llama-b11175-bin-ubuntu-vulkan-arm64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "ARM64 + Vulkan（Mali/Adreno 等）",
+      "requires": "有效 Vulkan ICD"
+    },
+    {
+      "id": "win-cpu-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "cpu",
+      "asset": "llama-b11175-bin-win-cpu-x64.zip",
+      "archive": "zip",
+      "notes": "Windows 纯 CPU（无 NVIDIA 卡或驱动异常时的回退与对照）"
+    },
+    {
+      "id": "win-cuda-12.4-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "cuda",
+      "asset": "llama-b11175-bin-win-cuda-12.4-x64.zip",
+      "archive": "zip",
+      "cudart_asset": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "notes": "Windows CUDA 12.4——与现有 engine_dir（vendor/llama-b11100-win-cuda12.4）对应，profiles.json 里全部 Windows CUDA 档位指向本引擎",
+      "requires": "NVIDIA 驱动 ≥ 550（cudart 随资产一并安装，目录自包含）"
+    },
+    {
+      "id": "win-cuda-13.4-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "cuda",
+      "asset": "llama-b11175-bin-win-cuda-13.4-x64.zip",
+      "archive": "zip",
+      "cudart_asset": "cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "notes": "Windows CUDA 13.4（新驱动栈；与 12.4 档并存便于回退）",
+      "requires": "NVIDIA 驱动 ≥ 580"
+    },
+    {
+      "id": "win-vulkan-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "vulkan",
+      "asset": "llama-b11175-bin-win-vulkan-x64.zip",
+      "archive": "zip",
+      "notes": "Windows Vulkan 回退（AMD/Intel 或 CUDA 不可用时）",
+      "requires": "有效 Vulkan ICD（显卡驱动自带）"
+    },
+    {
+      "id": "win-rocm-10.0-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "rocm",
+      "asset": "llama-b11175-bin-win-rocm-10.0-x64.zip",
+      "archive": "zip",
+      "notes": "Windows + AMD ROCm 10.0（HIP SDK）",
+      "requires": "AMD GPU + HIP SDK 10.0"
+    },
+    {
+      "id": "win-sycl-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "sycl",
+      "asset": "llama-b11175-bin-win-sycl-x64.zip",
+      "archive": "zip",
+      "notes": "Windows + Intel oneAPI SYCL",
+      "requires": "oneAPI 运行时 + Intel GPU 驱动"
+    },
+    {
+      "id": "win-openvino-x64",
+      "platform": "win32",
+      "arch": "x64",
+      "device": "openvino",
+      "asset": "llama-b11175-bin-win-openvino-2026.4-x64.zip",
+      "archive": "zip",
+      "notes": "Windows + Intel OpenVINO 2026.4",
+      "requires": "OpenVINO 运行时"
+    },
+    {
+      "id": "win-cpu-arm64",
+      "platform": "win32",
+      "arch": "arm64",
+      "device": "cpu",
+      "asset": "llama-b11175-bin-win-cpu-arm64.zip",
+      "archive": "zip",
+      "notes": "Windows on ARM（Snapdragon X 等）CPU 路径"
+    },
+    {
+      "id": "win-cuda-13.4-arm64",
+      "platform": "win32",
+      "arch": "arm64",
+      "device": "cuda",
+      "asset": "llama-b11175-bin-win-cuda-13.4-arm64.zip",
+      "archive": "zip",
+      "cudart_asset": "cudart-llama-bin-win-cuda-13.4-arm64.zip",
+      "notes": "Windows on ARM + CUDA 13.4（罕见组合，先录着）",
+      "requires": "ARM64 Windows + NVIDIA 驱动 ≥ 580"
+    },
+    {
+      "id": "macos-metal-arm64",
+      "platform": "darwin",
+      "arch": "arm64",
+      "device": "metal",
+      "asset": "llama-b11175-bin-macos-arm64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "Apple Silicon（Metal 后端；归档同时含 CPU 后端，n_gpu_layers=0 即纯 CPU 跑）",
+      "requires": "macOS 13+"
+    },
+    {
+      "id": "macos-metal-x64",
+      "platform": "darwin",
+      "arch": "x64",
+      "device": "metal",
+      "asset": "llama-b11175-bin-macos-x64.tar.gz",
+      "archive": "tar.gz",
+      "notes": "Intel Mac（Metal；同样含 CPU 后端）",
+      "requires": "macOS 13+"
+    }
+  ]
+}

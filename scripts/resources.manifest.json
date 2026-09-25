@@ -94,6 +94,20 @@
         "command": "yolo export model=screenparser-best.pt format=onnx imgsz=1280",
         "note": "需 ultralytics 工具链；导出产物放回 models/cv/detect/ 即生效（GEBAI_CV_DETECT_MODEL 可显式指定其他模型）"
       }
+    },
+    {
+      "path": "src/llama.cpp-b11175.tar.gz",
+      "size": 37582941,
+      "sha256": "3eb3318dbaf839bef5ab4f76b22604a5265e66a5927059866ea06858137f1bb7",
+      "required": false,
+      "license": "MIT",
+      "description": "llama.cpp 源码归档（**内网/离线编译用**：预编译包需访问 GitHub，内网机器改为随包带入源码，由 local_infer 的 sources/source_build 发现并就地编译成引擎；该归档自带 vendor/ 依赖（cpp-httplib/nlohmann/stb 等），离线编译无需联网 FetchContent）",
+      "sources": [
+        {
+          "kind": "github",
+          "url": "https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11175.tar.gz"
+        }
+      ]
     }
   ],
   "packages": [

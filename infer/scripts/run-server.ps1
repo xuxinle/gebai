@@ -117,7 +117,7 @@ if ($DryRun) { Write-Host '(DryRun，不启动)' -ForegroundColor Yellow; exit 0
 
 if ($Background) {
     $quoted = ($argvList | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
-    $cmdline = "cmd /c `"`"$exe`" $quoted > `"$log`" 2> `"$log.err`"`""
+    $cmdline = "cmd /c `"`"$exe`" $quoted > `"$log`" 2> `"$($log).err`"`""
     $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdline }
     if ($created.ReturnValue -ne 0) {
         Write-Host "启动失败（WMI Win32_Process.Create 返回 $($created.ReturnValue)）" -ForegroundColor Red
@@ -126,6 +126,33 @@ if ($Background) {
     $pid2 = $created.ProcessId
     Write-Host "已启动 PID=$pid2（已脱离当前进程树）" -ForegroundColor Green
     Write-Host "日志: $log"
+
+    # 服务状态文件：进程管理的唯一事实来源（status/stop/restart/logs 据此精确定位实例）。
+    # 无 BOM 写出（Windows PowerShell 5.1 的 Set-Content -Encoding UTF8 会带 BOM，
+    # 使读取侧 JSON.parse 直接失败）；失败只警告，不影响服务运行。
+    try {
+        $stateDir = Join-Path $Root 'run'
+        if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
+        $statePath = Join-Path $stateDir "server-$Port.json"
+        $stateRec = [ordered]@{
+            pid        = $pid2
+            port       = $Port
+            profile    = $Profile
+            model      = (Split-Path -Leaf $modelPath)
+            host       = '127.0.0.1'
+            exe        = $exe
+            log        = $log
+            err_log    = "$($log).err"
+            started_at = (Get-Date).ToString('s')
+            argv       = @($argvList)
+            engine     = (Split-Path -Leaf (Split-Path -Parent $exe))
+        }
+        [System.IO.File]::WriteAllText($statePath, (($stateRec | ConvertTo-Json -Depth 5) + "`n"), [System.Text.UTF8Encoding]::new($false))
+        Write-Host "状态文件: $statePath"
+    } catch {
+        Write-Host "警告：服务状态文件写入失败（$($_.Exception.Message)）——服务本身不受影响" -ForegroundColor Yellow
+    }
+
     if ($NoWait) { exit 0 }
 
     Write-Host "等待就绪..."
@@ -136,6 +163,8 @@ if ($Background) {
             if ($r.StatusCode -eq 200) { Write-Host "服务就绪: http://127.0.0.1:$Port (耗时 $($i*2)s)" -ForegroundColor Green; exit 0 }
         } catch { }
         if (-not (Get-Process -Id $pid2 -ErrorAction SilentlyContinue)) {
+            # 不删状态文件：留下的陈旧记录正是「启动即崩溃」的现场证据（status 会提示并附日志尾部），
+            # 由 stop 显式清理。
             Write-Host "进程已退出（见日志 $log）" -ForegroundColor Red
             exit 1
         }

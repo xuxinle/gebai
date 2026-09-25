@@ -224,6 +224,124 @@ pwsh -File infer/scripts/bench.ps1 -Contexts 4096,32768 -Runs 3
 pwsh -File infer/scripts/plan-memory.ps1
 ```
 
+### 5.3 跨平台与跨设备（引擎矩阵）
+
+推理**不绑定 Windows、不绑定 NVIDIA**。引擎清单在 `config/engines.json`（矩阵：linux/win32/darwin × cpu/cuda/vulkan/metal/rocm/sycl/openvino，资产名逐条核对自 llama.cpp 发行版），按本机 `platform+arch` 过滤、按实测设备探测（`nvidia-smi` / `/dev/nvidia*` / `vulkaninfo` / `/dev/dri` / darwin 判 Metal）挑后端：
+
+```powershell
+# 在 GEBAI 里（local_infer 子Agent）
+local_infer_engines(action="detect")          # CPU 核数 / CUDA / Vulkan / Metal 可用性 + 探测依据 + 推荐引擎
+local_infer_engines(action="list")             # 23 条矩阵 × 本机平台 × 已安装状态
+local_infer_engine_fetch(id="linux-cpu-x64")   # 下载安装（断点续传 + 校验 + 解压 + 递归定位 llama-server + 写安装标记）
+local_infer_model_fetch(preset="qwen2.5-0.5b") # 小模型（CPU 档位可用；已有则幂等跳过）
+local_infer_start(profile="cpu-small", port=19080)   # 无 GPU 也能起
+```
+
+安装落点 `vendor/<engine-id>/`（标记文件 `.engine.json` 记 tag/资产/exe；CUDA 引擎的 cudart 运行时一并装到同目录），下载缓存在 `vendor/.cache/`。归档内部布局各平台不同（Linux 为 `<tag>/llama-server`、Windows 在 `build/bin` 下），因此**递归定位可执行文件**而不是写死路径。
+
+无 GPU 机器上实测（Linux x86_64 / 8 核 / Qwen2.5-0.5B-Q4_K_M）：单流解码 **15.7–28 t/s**（短 prompt 更快），`json_schema` 约束解码与结构化校验全通。注意 **CPU 上并发无增益**（4 路各约 2.5 t/s、聚合持平——CPU 算力被 slot 平分），与 GPU 场景结论相反。
+
+### 5.4 内网/离线：发现源码自动编译
+
+**预编译包需要外网**（GitHub 发行版）。内网/air-gapped 机器改为**随包带入源码，就地编译**：
+
+```powershell
+# ① 联网机器：把源码归档拉进资源目录（清单已登记该条目，size/sha256 校验）
+bun run resources:download --only="src/**"     # → resources/src/llama.cpp-b11175.tar.gz（37.6MB，自带 vendor/ 依赖）
+# ② 内网机器：发现 → 看工具链 → 编译（产物与下载安装的引擎同一落点）
+local_infer_sources(action="list")                              # 列出候选：含归档预览、CMakeLists 与 vendor/ 依赖的有无
+local_infer_sources(action="toolchain")                          # 工具链（cmake/ninja/gcc/nvcc/hipcc…）与各设备就绪 + 内网补齐办法
+local_infer_source_build(source="llama.cpp-b11175", device="cpu", offline=true)   # 真实编译安装（长编译加 background=true）
+local_infer_start(engine="linux-cpu-src", profile="cpu-small")  # 用自编译引擎起服务
+```
+
+- **发现根**（按优先级）：`LOCAL_INFER_SOURCE_DIRS`（环境变量，路径分隔符分隔）→ `{GEBAI_HOME}/resources/src/` → `{GEBAI_HOME}/resources/engines/` → `<infer>/engine/`。目录与归档（`.tar.gz`/`.zip`）都支持；归档**只预览不解压**（条目数/顶层/是否含 `CMakeLists.txt`/是否自带 `vendor/`），解压延迟到编译时（落 `vendor/.cache/src/<id>/`，幂等可复用）。
+- **离线可行性判定**：llama.cpp 的 CMake 在缺 `vendor/` 依赖时会尝试联网取（内网表现为长时间挂起）——因此发现层会**全量过滤**归档条目给出「是否自带 vendor/」的结论（按采样判定会漏——实测该归档的 vendor 在 3999 条里的最后几十条），并在缺失时明确提示换用完整源码包。`offline=false` 才允许 FetchContent 联网。
+- **编译安装**：cmake 预设按后端只开目标开关（cpu/cuda/vulkan/metal/rocm）+ `-DLLAMA_BUILD_SERVER=ON -DLLAMA_CURL=OFF`（去 libcurl 硬依赖）；`Ninja` 优先、否则 `Unix Makefiles`/`MinGW Makefiles`；产物复制到 `vendor/<engine-id>/bin/`（**解引用符号链接**，安装目录自包含——`build/bin/` 里是 `libggml-base.so → .so.0 → .so.0.25.3` 这类链，漏拷就起不来），并写同一格式的 `.engine.json`（额外带 `build.{from_source,source_dir,build_dir,device,offline,log,commit}`）。
+- **本机实测**（Linux x86_64 / 8 核 / 无 GPU / Qwen2.5-0.5B-Q4_K_M）：`resources/src/llama.cpp-b11175.tar.gz` → 零外网 cmake 配置 **1.5 s** → 全量编译 **308 s**（Ninja / 8 并行，271 个目标，exit 0）→ `vendor/linux-cpu-src/bin/llama-server` 可跑，同模型同参数解码 **25.8–32.7 t/s**（3 轮）；**预编译包对照组 28.2–30.4 t/s**——两者同档，即**自建不损失性能**（本机编译带 `-march=native`，在别的机器/量化上可能更明显，以本机实测为准）。
+- **编译任务可管**：每次编译落 `run/builds/<build_id>.json`（步骤/阶段/日志/属主 PID，与批量同款存活判定）与 `bench/reports/build-<id>-<stamp>.log`；`background=true` 后台编译（CPU 数分钟、CUDA 等十几分钟以上），`status`/`log`/`list`/`cancel` 随时管；取消在**阶段之间**生效（不强杀 cmake，避免留下半成品构建目录）。`engines(action="list")` 会把这类**不在矩阵里的已装引擎**（源码编译产物）单独列一段，可直接被 `start` 的 `engine` 参数引用。
+- **工具链路径也认非 PATH 位置**：探测结果同时给出每个工具的**绝对路径**（`ToolchainInfo.paths`），便携工具链（如放进 `resources/toolchain/bin`）不必先改 PATH 就能被编译层直接调用。
+
+- **一条命令冒烟**（脚本直接调用上面这些工具，因此验证的就是模型走的那条路径；零重复实现）：
+
+```bash
+# Linux / macOS（POSIX）
+bash infer/scripts/smoke-source-build.sh                       # 发现 → 工具链 → 编译 → 起服务 → 结构化推理 → 批量 → 停止
+bash infer/scripts/smoke-source-build.sh --skip-build          # 只验下游链路（用已安装引擎，几十秒）
+bash infer/scripts/smoke-source-build.sh --device cuda --items 4 --keep
+# Windows
+pwsh -File infer/scripts/smoke-source-build.ps1 -SkipBuild     # 同一实现的包装（参数透传）
+```
+
+  共 8 步、每步做**真实断言**（不是只看输出）：候选存在 / 后端就绪 / 产物 exe 落盘 / 引擎在清单可见 / `/health`+`/props` 直连复验 n_ctx / 结构化 JSON 可解析且满足必填字段 / `results.jsonl` 行数与成功数一致 / 停服务后端口真释放。退出码 0/1 可接 CI；`--engine-id` 同 id 重跑=幂等跳过编译（首次验编译，之后秒验下游）。
+
+### 5.5 服务进程管理（状态文件 / 日志 / 跨平台启动）
+
+`run-server.ps1 -Background` 启动成功后会写两份记录（旧版脚本只写前者，子Agent 会按端口反查 PID 补写后者）：
+| 文件 | 内容 | 用途 |
+|---|---|---|
+| `bench/reports/launch-<时间戳>.json` | 本次启动的完整 argv、模型字节数、显存规划 | 审计与回放 |
+| `run/server-<端口>.json` | PID、端口、档位、模型、日志路径、argv | **进程管理的唯一事实来源**（status/stop/restart/logs 据此精确定位实例） |
+
+```powershell
+# 看实例与 PID 存活（服务崩溃后状态文件会显示「已退出」并附日志疑似错误）
+pwsh -File infer/scripts/run-server.ps1 -Profile fast -Background -NoWait
+# 换档位/换模型 = 重启（llama-server 不支持热切换）：停掉该端口实例后再启
+```
+
+日志落 `bench/reports/server-<时间戳>.log`（stdout）与 `.log.err`（stderr）。`local_infer_logs` 工具从尾部按块回退读取（大日志不整文件入内存）并给出失败特征摘要；**不做流式跟随**（跟随会挂住会话）。
+
+**启动路径跨平台**（不再依赖 PowerShell）：子Agent 缺省走 TS 层的 launcher —— `detached` 拉起（脱离调用方进程树，否则工具会挂在长驻子进程上）+ stdout/stderr 重定向到日志文件 + `/health` 就绪轮询 + 按 PID/端口精确终止；平台命令构造均为「显式平台参数的纯函数」（win32/POSIX 双轨可测）。Windows 上无已装引擎且未显式要求 launcher 时自动回退 `run-server.ps1`，也可用 `LOCAL_INFER_LAUNCH=script` 强制。启动记录 `bench/reports/launch-<stamp>.json` 记完整 argv（含引擎 id、启动方式、可执行文件路径），可审计可回放。
+
+在 GEBAI 里这一切由 `local_infer` 子Agent 承担（工具复用上述脚本与状态文件，不复制逻辑）：
+
+| 工具 | 作用 | 审批 |
+|---|---|---|
+| `local_infer_engines` | 引擎矩阵 × 本机平台 × 已安装状态；设备探测（CPU/CUDA/Vulkan/Metal + 依据 + 推荐） | 免 |
+| `local_infer_engine_fetch` / `local_infer_model_fetch` | 下载安装引擎 / 下载模型（断点续传 + 校验，幂等） | 需 |
+| `local_infer_status` | 实例列表（PID + 存活校验）/进程/端口与占用者/`/health`+`/props`（n_ctx、**slot 数=并发上限**）/显存/引擎/最近启动 | 免 |
+| `local_infer_start` / `local_infer_stop` / `local_infer_restart` | 启停与重启（`engine` 选引擎、`mode` 选启动方式）；stop/restart 支持按 PID、端口、档位精确终止进程树并清理状态文件 | 需 |
+| `local_infer_logs` | 日志尾读 + 关键字过滤 + 错误特征摘要 + 文件清单 | 免 |
+| `local_infer_generate` | 单条推理（含结构化输出：JSON Schema 约束 + 工具侧校验与回灌重试） | 免 |
+| `local_infer_batch` | 批量提交与断点续跑（`background=true` 随服务进程后台执行、立即返回 job_id） | 免 |
+| `local_infer_jobs` | 批次 list/status/results/cancel | 免 |
+| `local_infer_bench` / `local_infer_inspect` / `local_infer_models` | 基准 / GGUF 结构 / 档位清单 | bench 需 |
+
+### 5.6 批量提交推理任务（+ 结构化输出 + 统一推理目标）
+
+单条与批量都走标准 `/v1/chat/completions`，批量**不引入任何第三方依赖**（自实现 worker pool：限流、退避重试、逐条落盘），产物落 `bench/runs/<job_id>/`：
+
+| 文件 | 内容 |
+|---|---|
+| `items.jsonl` | 输入副本（含 id 与 meta；给定同 `job_id` 即续跑该任务） |
+| `results.jsonl` | **逐条 append** 的结果（可实时 tail；进度以此为准，不信状态文件快照） |
+| `job.json` | 任务快照（状态/并发/总条数/已处理/失败/产物路径；后台批次另记 `background`/`owner_pid` 与终态 `summary`） |
+
+```
+# 在 GEBAI 里（local_infer 子Agent）
+local_infer_generate(prompt="把这句话翻成英文：…", schema={...})      # 单条 + 结构化
+local_infer_batch(items=[{"id":"q1","prompt":"…"}, …], schema={...})  # 批量（同步）
+local_infer_batch(items_file="bench/runs/questions.jsonl", job_id="kb-2026-09", background=true)  # 后台跑
+local_infer_batch(job_id="kb-2026-09", resume=true)                   # 同 id 续跑剩余条目
+local_infer_jobs(action="status", job_id="kb-2026-09")                 # 进度（+ 存活判定）
+local_infer_jobs(action="results", job_id="kb-2026-09", only="failed")# 只看失败条目
+local_infer_jobs(action="cancel", job_id="kb-2026-09")                 # 真中止在跑的后台批次
+```
+
+**并发怎么定**：`concurrency` 缺省 1（串行）；给定值会与档位 `parallel` 比对并夹取。依据是实测结论——**并发只在「slot 数匹配的短 prompt」且瓶颈在 GPU 时有效**（np=16 短 prompt 聚合 627.8 t/s = 4.30×）；长 prompt（如 GEBAI 会话的 15K 系统提示 + 工具定义）下预填充占主导、并发无增益（见 6.9/6.10）；**纯 CPU 上并发同样无增益**（0.5B 实测：单流 15.7 t/s，4 路各约 2.5 t/s、聚合持平——CPU 算力被 slot 平分）。所以：短 prompt 大批量用 `throughput` 档（np=16），长 prompt 用 `concurrent` 档（np=2/4），CPU 保持 1；并发上限就取 `local_infer_status` 报出的 slot 数。
+
+**推理目标（不限于本机）**：`generate`/`batch` 的 `target` 参数选目标——缺省 `local`（本机受管实例，端口取状态文件 > `LOCAL_INFER_PORT` > 8080）；也可直连 `http://…` 或用在 `LOCAL_INFER_TARGETS` 里声明的命名目标（含 `api_key`）。`local_infer_targets(probe=true)` 列出全部目标并探活（n_ctx/slot/模型名）。密钥在输出与 `job.json` 里一律只出现掩码，产物只记目标名与不含密钥的 base_url。
+
+**结构化输出**：`schema`（JSON Schema）交给服务端转 GBNF 约束解码，工具侧再做「抽取 JSON + 轻量 Schema 校验（type/required/enum/嵌套）」，校验不过**把错误回灌给模型重试一次**（`retry_on_invalid=false` 可关）；`grammar` 为 GBNF 直传兜底（注意与 `-bs` 后端采样不兼容，引擎会自动回退 CPU 采样）；`json_object` 只要求合法 JSON，是最弱的降级手段（服务端不认识约束时工具会自动降级为它并给出预警）。结果同时给到 `content`/`reasoning_content`、`usage`、服务端 timings 换算的实测 t/s。
+
+**同步还是后台**：`background` 缺省 **false**（同步执行——本次工具调用等批次跑完，条目多时会长时间占住本轮，可用 `max_items` 分片推进）。**条目多时用 `background=true`**：前置处理（解析条目/断点跳过/分片/并发夹取）完成后立即返回 job_id，批次在服务进程内继续跑、逐条 append 到 `results.jsonl`，随后用 `local_infer_jobs(action="status")` 查进度、`action="results"` 取结果。
+
+- 会话中断或工具调用结束**不会**杀掉后台批次（批次的信号刻意不绑会话取消）；真中止用 `local_infer_jobs(action="cancel")`——对在本服务进程跑的后台批次写取消标记并 `abort()`，在飞条目跑完后停止。
+- **服务重启**会让在跑的后台批次变成「已中断」：`jobs(action="status")` 按 `owner_pid` 探活并幂等改判状态、给出续跑指引；**不会自动续跑**（避免重启后无人值守地占满 GPU）。用 `local_infer_batch(job_id=…, resume=true)` 接续。
+- 同一 `job_id` 已有在跑批次时重复提交会被拒绝（不会改写正在跑任务的输入副本）。
+- 落盘语义：被取消时**尚未开始**的条目只作占位、**不写入** `results.jsonl`（产物只含真实产出），resume 时自然重跑；被中止的在飞条目如实记为一次失败，resume 会重做。所以 `results.jsonl` 的行数在「取消过」的任务里可能少于条目数，这是预期行为。
+- 批量工具类任务建议 `enable_thinking=false`（实测省 91% token 且工具调用结果一致）；条目多时可用 `LOCAL_INFER_BATCH_MAX_ITEMS` 设一个默认分片上限。
+
 ---
 
 ## 六、实测数据（全部为本机真实测量）

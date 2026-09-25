@@ -6,12 +6,15 @@
   "//backend_sampling": "-bs 后端采样：实测 129.1 → 136.4 t/s（+5.7%）且 temperature=0 下输出逐字节一致（见 scripts/verify-bs.ps1）。消除每步的 logits 回传（248320×4 B）。与语法约束不兼容——带 grammar 的请求会自动回退到 CPU 采样（引擎自行降级，不影响正确性）。",
   "//parallel": "slot 数存在最优解（实测，100 token/请求）：np=16 时单请求 141.9 t/s（与 np=1 持平，slot 按需分配）且 16 路并发聚合 627.8 t/s（4.30×）；np=24 开始劣化（单请求 85.8、聚合 482）；np=32 崩塌（单请求 11.9）。并发是唯一被证明有效的吞吐手段（见 concurrent-max 档）。",
   "//memory_cliff": "显存硬边界 ≈15600 MiB：ctx 65536+np16 → 15549 MiB（正常，627.8 t/s）；ctx 131072+np16 → 15786 MiB（**崩塌至 41.9 t/s**）；np=24 → 15606（劣化）。与“上下文超 128K 崩塌”同一现象——逼近上限后引擎走入低效路径。调参后务必核对显存。",
+  "//engine_matrix": "每个档位的 engine 字段指向 config/engines.json 的引擎 id（引擎层按「本机平台+实测设备」解析安装状态与 llama-server 路径）。Windows CUDA 七档统一指向 win-cuda-12.4-x64（与 engine_dir 的 vendor/llama-b11100-win-cuda12.4 对应）；engine_dir 保留作旧路径回退。cpu-baseline / cpu-small 不固定引擎——由引擎层按本机平台解析（见 engines.ts 的 pickEngineForPlatform / installedEngine）。",
+  "//cross_platform": "七档（fast/balanced/quality/long-context/concurrent/concurrent-max/throughput）的数值全部实测自 Windows + RTX 4080 SUPER 16GB（CUDA 12.4）；非 Windows 或无 GPU 的机器用 cpu-small 档（跨平台验证与轻量任务，CPU 即可跑）。临时切换用 LOCAL_INFER_PROFILE=cpu-small，或 local_infer_start(profile=\"cpu-small\")。",
   "version": 2,
   "engine_dir": "vendor/llama-b11100-win-cuda12.4",
   "models_dir": "../../resources/models/infer",
   "default_profile": "fast",
   "profiles": {
     "fast": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【默认·推荐】IQ3_XXS 全 GPU：tg 143 t/s / pp 4391 t/s，显存占用约 13.2GB",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
       "ctx": 32768,
@@ -28,6 +31,7 @@
       "extra_args": ["--jinja", "-bs"]
     },
     "balanced": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【均衡档】IQ3_S（3.96bpw，ffn_down 为 IQ4_XS 同款位宽）全 GPU：bench tg 138 / 服务 118 t/s。",
       "//warn": "显存吃紧——32K 上下文占用 15811/16376 MiB，仅余约 565 MiB。长上下文或并发请改用 fast 档，或降低 ctx。",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_S.gguf",
@@ -45,6 +49,7 @@
       "extra_args": ["--jinja", "-bs"]
     },
     "quality": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【最高质量档】IQ4_XS（4.25bpw）显存装不下全量，8 层专家留 CPU：tg 82 t/s / pp 943 t/s。",
       "//when": "仅在确需最高保真度且可接受一半速度时使用（其余档位均全 GPU 驻留）",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ4_XS.gguf",
@@ -62,6 +67,7 @@
       "extra_args": ["--jinja", "-bs"]
     },
     "long-context": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【长上下文】128K 是本机实测硬上限：显存 15.6GB、解码 93 t/s（几乎不衰减）、8K 提示预填充 3579 t/s。",
       "//limit": "超过 128K 性能断崖下跌（160K/192K/224K/256K 实测 22/38/28/21 t/s，而显存占用几乎相同——逼近上限后引擎走入低效路径）。显存余量仅约 730 MiB，勿与其他 GPU 任务并用。",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
@@ -79,6 +85,7 @@
       "extra_args": ["--jinja", "-bs"]
     },
     "concurrent": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【GEBAI 多会话】np=2 + ctx 65536 → 每 slot 32768 token。关键约束：GEBAI 的 prompt（系统提示词+工具定义）实测达 **15352 token**，所以每 slot 必须 ≥ 24K，np 不可能很大。单请求 141.9 t/s，2 路并发聚合 114.7 t/s（大 prompt 时预填充占主导，并发无增益）。显存 14794 MiB，余量充裕。",
       "//caching": "llama-server 的 prompt caching **默认启用且是本场景最重要的优化**：实测 3603 token 的固定前缀第二次请求直接命中缓存（cache_n=3603, prompt_n=4），墙钟 0.83 → 0.46 s。GEBAI 的固定系统提示词只需算一次。",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
@@ -96,6 +103,7 @@
       "extra_args": ["--jinja", "--cont-batching", "-bs"]
     },
     "concurrent-max": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【GEBAI 多会话·最大并发】IQ2_XXS/Q2_K_XL 比 IQ3_XXS 省 2.7/1.1 GB 显存，把并发从 np=2 提到 **np=4**，同时保持每 slot 32768 token（GEBAI 的 15K prompt 仍能装下）。实测 4 路并发聚合 **317-327 t/s**，比 concurrent 档（np=2，218-222 t/s）提升 **46%**。",
       "//model_choice": "首选 Q2_K_XL（位宽 2.74 bpw，比 IQ2_XXS 的 2.06 更高、质量更好，且实测单流 152.3 t/s 也更快）；IQ2_XXS 仅作显存更紧时（13805 vs 14427 MiB）的回退。",
       "//why": "关键机理：GPU 不是带宽瓶颈（利用率仅 4-25%），所以单纯减小量化不会更快——IQ2 单流 148.9 vs IQ3 146（噪声级），2 并发 198-205 vs IQ3 218-222（**反而略慢**，低位宽解包开销更大）。真正的收益来自**显存释放换取的并发度**：并发是唯一被证明有效的吞吐手段（投机解码已全路径否定，见 //spec）。",
@@ -116,6 +124,7 @@
       "extra_args": ["--jinja", "--cont-batching", "-bs"]
     },
     "throughput": {
+      "engine": "win-cuda-12.4-x64",
       "//": "【纯短 prompt 批量场景】np=16 + ctx 65536 → 每 slot 4096：16 路并发聚合 **627.8 t/s（4.30×）**，单请求仍 141.9 t/s。仅适用于短 prompt（单次 ≤ 4K token）的批量任务；GEBAI 会话（prompt 15K）会报 exceed_context，请用 concurrent 档。显存 15549 MiB（安全线 ≈15600）。",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
       "ctx": 65536,
@@ -133,6 +142,8 @@
     },
     "cpu-baseline": {
       "//": "【对照】全 CPU（无 GPU offload），用于量化 GPU 加速收益",
+      "//engine": "不固定引擎：本档位在 Windows/WSL/Linux 都要能跑，按平台无法在配置里固定一个 id——由引擎层按本机平台解析（engines.ts: pickEngineForPlatform / installedEngine），显式点名用 local_infer_start(engine=\"...\")。",
+      "//note": "本档以 35B 大模型做 CPU 对照（需数十 GB 内存+时间）；跨平台的小模型验证请用 cpu-small 档。",
       "model": "Qwen-AgentWorld-35B-A3B-UD-IQ3_XXS.gguf",
       "ctx": 8192,
       "n_gpu_layers": 0,
@@ -146,6 +157,23 @@
       "spec_type": null,
       "parallel": 1,
       "extra_args": []
+    },
+    "cpu-small": {
+      "//": "【跨平台·无 GPU】无 GPU / 非 Windows 的通用档位（跨平台验证与轻量任务）：0.5B Q4_K_M 全 CPU 驻留，秒级加载、可交互；小模型因此可以跑 CPU；与 35B 各档互不影响（互不共享引擎与显存）。",
+      "//engine": "不固定引擎：按平台解析（Linux/Windows 用对应 cpu 引擎，macOS 用 Metal 归档的纯 CPU 路径）——由引擎层按本机平台解析（engines.ts: pickEngineForPlatform / installedEngine）。",
+      "//model_src": "模型不入库：local_infer_model_fetch(preset=\"qwen2.5-0.5b\") 或 local_infer_engines/local_infer_models 查看现状；大小 397808192 字节、sha256 见 engines.ts 的 MODEL_PRESETS。",
+      "//sizing": "ctx 8192 / batch 512 / ubatch 128 是 CPU 上的稳健起点：更小的 ubatch 降低单次预填充延迟，parallel=2 让轻量并发也能用；显存需求为 0。",
+      "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+      "ctx": 8192,
+      "n_gpu_layers": 0,
+      "n_cpu_moe": null,
+      "flash_attn": "off",
+      "threads": 6,
+      "batch": 512,
+      "ubatch": 128,
+      "spec_type": null,
+      "parallel": 2,
+      "extra_args": ["--jinja"]
     }
   }
 }
