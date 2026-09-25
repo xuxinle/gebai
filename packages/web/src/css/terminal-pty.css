@@ -99,6 +99,50 @@
   color: var(--text-muted);
 }
 
+/* 查找框内的三个开关（Aa / ab / .*）：文字按钮，按下态高亮（与 VSCode 的开关同语义） */
+.fw-term-toggle {
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--text-muted);
+}
+
+.fw-term-toggle.active {
+  color: var(--text);
+  background: var(--bg-hover, rgba(127, 127, 127, 0.2));
+  border-radius: var(--radius-sm);
+}
+
+/* 搜索命中高亮：xterm 6 的 decoration 渲染器不读 addon 传的 backgroundColor（只按调用方的
+ * onRender 设样式，addon 只给当前命中加了一道 1px outline）——不补这一层，命中在滚动缓冲里
+ * 就是“看不见”（只有当前命中有一圈细边框）。底色由 JS 写入 --term-find-*（随明暗切）。 */
+.fw-pty-term .xterm-decoration.xterm-find-result-decoration {
+  background-color: var(--term-find-match, rgba(245, 245, 67, 0.3));
+  border-radius: 2px;
+}
+
+/* 当前命中：addon 给它内联了 outline（其它命中没有），据此再加一档底色 */
+.fw-pty-term .xterm-decoration.xterm-find-result-decoration[style*="outline"] {
+  background-color: var(--term-find-active, rgba(245, 245, 67, 0.7));
+}
+
+/* 非活动标签来了新输出：亮点变实心（VSCode 的活动指示），切回去即消 */
+.fw-term-tab.unread .fw-term-dot {
+  background: var(--accent, #3b8eea);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #3b8eea) 25%, transparent);
+}
+
+/* 剪贴板回退用的隐藏 textarea（execCommand("copy") 的目标） */
+.fw-term-clip {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
 /* 占位（能力不可用 / 加载中）：与降级实现同一套 .fw-term-notice 外观，仅补竖排间距 */
 .fw-pty-body .fw-term-notice {
   margin: auto;

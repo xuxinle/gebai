@@ -15,11 +15,38 @@
  * 会话与连接解耦：标签关闭才关会话；工具窗收起只是 deactivate（WS 保留），页面刷新后按会话 id
  * 重新 attach（服务端回放缓冲），shell 里跑着的东西不丢。
  */
-import { clear, dropdown, h, icon, showMenu, toast } from "./ui"
+import { clear, confirmDialog, dropdown, h, icon, promptDialog, showMenu, toast } from "./ui"
 import { pathTail, samePath } from "./terminal-core"
 import { appPath } from "@gebai/sdk"
 import { WorkbenchSocket } from "./ws-client"
 import { realSessionIds, readTermSessions, writeTermSessions } from "./term-sessions"
+import { MIN_CONTRAST_RATIO, searchMatchColors, terminalTheme } from "./term-theme"
+import {
+  DEFAULT_SEARCH_OPTIONS,
+  SEARCH_TOGGLES,
+  parseSearchOptions,
+  searchDecorations,
+  searchStatusText,
+  toggleSearchOption,
+  type SearchToggle,
+  type TermSearchOptions,
+} from "./term-search"
+import {
+  CURSOR_STYLES,
+  DEFAULT_PREFS,
+  FONT_SIZE_KEY,
+  FOLLOW_ROOT_KEY,
+  LINE_HEIGHT_STEPS,
+  PREFS_KEY,
+  clampFontSize,
+  clampLineHeight,
+  nextInCycle,
+  parsePrefs,
+  serializePrefs,
+  type TermPrefs,
+} from "./term-prefs"
+import { resolveTabLabel, shouldConfirmClose, tabTooltip } from "./term-tabs"
+import { TERM_KEYS, termKeyBindings, type TermActions } from "./term-keys"
 import "../css/terminal.css"
 import "../css/terminal-pty.css"
 import type { Terminal as XTerm } from "@xterm/xterm"
@@ -31,27 +58,16 @@ import { matchKey, parseSpec } from "../keymap"
 
 /* ------------------------------ 终端键位 ------------------------------ */
 
-/**
- * 终端内的键位（单一来源）：工作台键位表与 xterm 的键盘预处理共用这一份定义。
- *
- * 取终端自己的惯例键：`Ctrl+Shift+C/V` 复制粘贴、`Ctrl+F` 搜索、`Ctrl+=/-/0` 字号。
- * 这些组合在浏览器里都有默认行为（纯文本粘贴、页面查找、页面缩放）但不是**保留命令**——
- * 按键先到页面，捕获阶段 `preventDefault` 即接管（DevTools 打开时 `Ctrl+Shift+C` 会被它抢走，属已知取舍）。
- * 只有 **Ctrl+C（中断当前命令）**与 shell 一致：浏览器不独占它（C 是编辑键，页面可接管），
- * 终端的中断语义就建在它上面。
- */
-const TERM_KEYS = {
-  copy: ["Ctrl+Shift+C"],
-  paste: ["Ctrl+Shift+V"],
-  search: ["Ctrl+F"],
-  fontUp: ["Ctrl+="],
-  fontDown: ["Ctrl+-"],
-  fontReset: ["Ctrl+0"],
-  interrupt: ["Ctrl+C"],
+/** 等一帧：布局尺寸要等浏览器算完样式才可信（FitAddon 量列数依赖它）。 */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()))
 }
 
+/** 光标样式的菜单文案（xterm 的取值是英文术语，菜单里给中文）。 */
+const CURSOR_LABEL: Record<TermPrefs["cursorStyle"], string> = { bar: "竖线", block: "方块", underline: "下划线" }
+
 /** 事件是否命中一组键位写法（与键位表同源）。 */
-function hits(e: KeyboardEvent, specs: string[]): boolean {
+function hits(e: KeyboardEvent, specs: readonly string[]): boolean {
   return specs.some((s) => {
     const p = parseSpec(s)
     return !!p && matchKey(e, p)
@@ -59,15 +75,6 @@ function hits(e: KeyboardEvent, specs: string[]): boolean {
 }
 
 /** 面板动作句柄：键位表只注册一次（面板可能重建），动作按最新面板转发。 */
-interface TermActions {
-  copy(): void
-  paste(): void
-  search(): void
-  fontSize(delta: number): void
-  fontReset(): void
-  interrupt(): void
-}
-
 let termActions: TermActions | null = null
 let termKeysRegistered = false
 
@@ -79,29 +86,53 @@ function registerTermKeys(actions: TermActions): void {
   termActions = actions
   if (termKeysRegistered) return
   termKeysRegistered = true
-  const focus: ["terminal"] = ["terminal"]
-  workbenchKeymap.addAll([
-    { id: "wb.term.copy", keys: TERM_KEYS.copy, label: "终端：复制选区", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.copy() },
-    { id: "wb.term.paste", keys: TERM_KEYS.paste, label: "终端：粘贴", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.paste() },
-    { id: "wb.term.search", keys: TERM_KEYS.search, label: "终端：搜索滚动缓冲", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.search() },
-    { id: "wb.term.fontUp", keys: TERM_KEYS.fontUp, label: "终端：放大字号", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.fontSize(1) },
-    { id: "wb.term.fontDown", keys: TERM_KEYS.fontDown, label: "终端：缩小字号", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.fontSize(-1) },
-    { id: "wb.term.fontReset", keys: TERM_KEYS.fontReset, label: "终端：字号复位", group: "wb.term", browser: "override", focus, phase: "capture", run: () => termActions?.fontReset() },
-    {
-      id: "wb.term.interrupt",
-      keys: TERM_KEYS.interrupt,
-      label: "终端：中断当前命令（有选区时改为复制）",
-      group: "wb.term",
-      focus,
-      phase: "capture",
-      run: () => termActions?.interrupt(),
-    },
-  ])
+  workbenchKeymap.addAll(termKeyBindings(() => termActions))
 }
 
-/** 字号 / 跟随根 的本地持久化键（与降级实现同口径）。 */
-const FONT_KEY = "gebai.ui.termFontSize"
-const FOLLOW_KEY = "gebai.ui.termFollowRoot"
+/* ------------------------------ 偏好读写 ------------------------------ */
+
+/** 读偏好：JSON 键为主，字号与跟随根缺省时读旧键（升级不重置用户设置）。 */
+function readPrefs(): TermPrefs {
+  const read = (k: string): unknown => {
+    try {
+      return localStorage.getItem(k)
+    } catch {
+      return null
+    }
+  }
+  return parsePrefs(read(PREFS_KEY), { fontSize: read(FONT_SIZE_KEY), followRoot: read(FOLLOW_ROOT_KEY) })
+}
+
+/** 写偏好：JSON 键 + 字号/跟随根两个旧键（降级实现读同一份值，两版式字号一致）。 */
+function savePrefs(p: TermPrefs): void {
+  try {
+    localStorage.setItem(PREFS_KEY, serializePrefs(p))
+    localStorage.setItem(FONT_SIZE_KEY, String(p.fontSize))
+    localStorage.setItem(FOLLOW_ROOT_KEY, p.followRoot ? "1" : "0")
+  } catch {
+    /* 存储不可用：仅本次生效 */
+  }
+}
+
+/** 搜索开关的本地键（与查找框共生命周期：刷新后保持上次的开关状态）。 */
+const SEARCH_OPTS_KEY = "gebai.ui.termSearchOpts"
+
+function readSearchOpts(): TermSearchOptions {
+  try {
+    return parseSearchOptions(localStorage.getItem(SEARCH_OPTS_KEY))
+  } catch {
+    return { ...DEFAULT_SEARCH_OPTIONS }
+  }
+}
+
+function saveSearchOpts(o: TermSearchOptions): void {
+  try {
+    localStorage.setItem(SEARCH_OPTS_KEY, JSON.stringify(o))
+  } catch {
+    /* 同上 */
+  }
+}
+
 /** 认证令牌（服务模式登录后写入，与聊天页共享）。 */
 const AUTH_TOKEN_KEY = "gebai.auth.token"
 
@@ -166,34 +197,28 @@ export function loadXterm(): Promise<XtermVendor> {
 
 /* ------------------------------ 终端外观 ------------------------------ */
 
-/** 从主题 CSS 变量取色（背景/前景跟随主题；ANSI 16 色用通用暗色调色板）。 */
-function xtermTheme(): Record<string, string> {
+/**
+ * 从主题 CSS 变量取一次配色：背景/前景/选区来自界面主题，**16 色 ANSI 调色板不来自主题**
+ * （按背景明暗取 VSCode 默认的暗/亮两套，见 term-theme——亮色与常规色必须是两档取值）。
+ */
+function themeColors(): { theme: Record<string, string>; match: ReturnType<typeof searchMatchColors> } {
   const cs = getComputedStyle(document.documentElement)
   const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback
-  const fg = v("--text", "#d4d4d4")
+  const background = v("--bg-inset", "#181818")
   return {
-    background: v("--bg-inset", "#181818"),
-    foreground: fg,
-    cursor: fg,
-    cursorAccent: v("--bg-inset", "#181818"),
-    selectionBackground: "rgba(120, 160, 255, 0.35)",
-    black: "#1e1e1e",
-    red: "#f14c4c",
-    green: "#23d18b",
-    yellow: "#e5c07b",
-    blue: "#3b8eea",
-    magenta: "#d670d6",
-    cyan: "#29b8db",
-    white: "#d4d4d4",
-    brightBlack: "#6a6a6a",
-    brightRed: "#f14c4c",
-    brightGreen: "#23d18b",
-    brightYellow: "#f5f543",
-    brightBlue: "#3b8eea",
-    brightMagenta: "#d670d6",
-    brightCyan: "#29b8db",
-    brightWhite: "#ffffff",
+    theme: terminalTheme({ background, foreground: v("--text", "#d4d4d4") }),
+    match: searchMatchColors(background),
   }
+}
+
+/**
+ * 服务端是不是 Windows（决定要不要启用 xterm 的 ConPTY 语义）。
+ * 先看服务端给的 shell 路径（最权威：终端跑在服务端，不在浏览器所在机器），再回落 UA。
+ */
+function serverIsWindows(info: TermInfo | null): boolean {
+  const p = info?.shells.find((s) => s.available)?.path ?? ""
+  if (p) return /^[a-zA-Z]:[\\/]/.test(p) || /\\.exe$/i.test(p)
+  return /Windows/i.test(navigator.userAgent)
 }
 
 /** 终端字体：自带 JetBrains Mono（public/fonts/ 随产物分发，四字重 @font-face 见 base.css）
@@ -201,39 +226,6 @@ function xtermTheme(): Record<string, string> {
  * 字体文件未就绪时由 font-display: swap 回退到后续系统字体，无白屏。 */
 function terminalFontFamily(): string {
   return "'JetBrains Mono', Consolas, 'Cascadia Mono', 'Courier New', monospace"
-}
-
-function readFontSize(): number {
-  try {
-    const n = Number(localStorage.getItem(FONT_KEY))
-    return Number.isFinite(n) && n >= 8 && n <= 28 ? n : 13
-  } catch {
-    return 13
-  }
-}
-
-function saveFontSize(n: number): void {
-  try {
-    localStorage.setItem(FONT_KEY, String(n))
-  } catch {
-    /* 存储不可用时仅本次生效 */
-  }
-}
-
-function readFollow(): boolean {
-  try {
-    return localStorage.getItem(FOLLOW_KEY) !== "0"
-  } catch {
-    return true
-  }
-}
-
-function saveFollow(on: boolean): void {
-  try {
-    localStorage.setItem(FOLLOW_KEY, on ? "1" : "0")
-  } catch {
-    /* 同上 */
-  }
 }
 
 function readToken(): string | null {
@@ -271,14 +263,15 @@ async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
   }
 }
 
-/** 根 id → 绝对路径（跟随当前根用；与资源管理器同一份根清单）。 */
-async function fetchRootPath(rootId: string): Promise<string | null> {
+/** 根 id → 绝对路径 + 展示名（跟随当前根、cwd 芯片用；与资源管理器同一份根清单）。 */
+async function fetchRootInfo(rootId: string): Promise<{ path: string; name: string } | null> {
   try {
     const token = readToken()
     const res = await fetch(appPath("/api/v1/roots"), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
     if (!res.ok) return null
-    const body = (await res.json()) as { roots?: Array<{ id: string; path: string }> }
-    return body.roots?.find((r) => r.id === rootId)?.path ?? null
+    const body = (await res.json()) as { roots?: Array<{ id: string; path: string; name?: string }> }
+    const hit = body.roots?.find((r) => r.id === rootId)
+    return hit ? { path: hit.path, name: hit.name ?? "" } : null
   } catch {
     return null
   }
@@ -302,20 +295,31 @@ interface PtyTab {
   cwd: string
   alive: boolean
   ro: ResizeObserver
+  /** shell 经 OSC 0/2 上报的标题（标签名优先于 shell 名）。 */
+  oscTitle: string
+  /** 用户重命名（最高优先，仅本次页面生命周期）。 */
+  customTitle: string
+  /** 退出码（dead 标签 tooltip 用）。 */
+  exitCode: number | null
+  /** 非活动标签有新输出（标签上的亮点提示）。 */
+  unread: boolean
+  /** 最近一次收到输出的时间：关闭确认的忙闲近似判定（见 term-tabs）。 */
+  lastOutputAt: number
 }
 
-/** 终端面板（PTY + xterm）：多标签、复制粘贴、搜索、字号、跟随当前根。 */
+/** 终端面板（PTY + xterm）：多标签、复制粘贴、搜索、字号、偏好、跟随当前根。 */
 export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
   let vendor: XtermVendor | null = null
   let info: TermInfo | null = null
   let active = false
   let booting: Promise<void> | null = null
-  let followRoot = readFollow()
-  let fontSize = readFontSize()
+  let prefs = readPrefs()
+  let searchOpts = readSearchOpts()
   let activeId: string | null = null
   const tabs: PtyTab[] = []
   const socket = new WorkbenchSocket({ label: "终端", context: () => hooks.session() })
-  const rootPaths = new Map<string, string>()
+  /** 根 id → 绝对路径 + 展示名（跟随根与 cwd 芯片共用一次拉取）。 */
+  const rootInfo = new Map<string, { path: string; name: string }>()
 
   /* ---------- 骨架 ---------- */
 
@@ -327,10 +331,27 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
   const searchBar = h("div", { class: "fw-pty-search", hidden: true })
   const searchInput = h("input", { class: "fw-input sm", placeholder: "在终端中查找…", type: "search" })
   const searchStatus = h("span", { class: "fw-pty-search-status" })
+  /** 查找框内的三个开关（区分大小写 / 全词 / 正则）——与 VSCode 终端查找同顺序、同语义。 */
+  const searchToggles = SEARCH_TOGGLES.map((t) => {
+    const b = h("button", { class: "fw-term-btn fw-term-toggle", title: t.title, text: t.label })
+    b.onclick = () => {
+      searchOpts = toggleSearchOption(searchOpts, t.key)
+      saveSearchOpts(searchOpts)
+      paintSearchToggles()
+      const tab = activeTab()
+      // 先清一次：search addon 对**同一个关键词**不重建高亮与计数（它按关键词缓存判定），
+      // 不清就会「换了开关但命中数还是旧的」
+      tab?.search.clearDecorations()
+      searchInput.focus()
+      findInTerm(1)
+    }
+    return { key: t.key as SearchToggle, el: b }
+  })
   searchBar.append(
     icon("search", 13),
     searchInput,
     searchStatus,
+    ...searchToggles.map((t) => t.el),
     btn("chevronUp", "上一处（Shift+Enter）", () => findInTerm(-1)),
     btn("chevronDown", "下一处（Enter）", () => findInTerm(1)),
     btn("close", "关闭搜索（Esc）", () => toggleSearch(false)),
@@ -343,11 +364,14 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     return b
   }
 
-  const newBtn = btn("plus", "新建终端（选择 Shell）", () => pickShell())
-  const clearBtn = btn("trash", "清屏（右键菜单）", () => activeTab()?.term.clear())
+  const newBtn = btn("plus", "新建终端（选 Shell；Ctrl+Shift+` 直接新建）", () => pickShell())
+  const clearBtn = btn("trash", "清屏（Ctrl+K）", () => {
+    const t = activeTab()
+    t?.term.clear()
+  })
   const intBtn = btn("minus", "中断当前命令（Ctrl+C）", () => void interruptActive(), "danger")
   const searchBtn = btn("search", "在终端中查找（Ctrl+F）", () => toggleSearch())
-  const moreBtn = btn("settings", "终端设置（字号 / 跟随当前根 / 重启）", () => openMore())
+  const moreBtn = btn("settings", "终端设置（字号 / 行高 / 光标 / 跟随当前根 / 重启）", () => openMore())
   const closeBtn = btn("close", "关闭工具窗", () => hooks.close())
   const titlebar = h("div", { class: "fw-term-titlebar" }, [
     h("span", { class: "fw-term-title" }, [icon("terminal", 13), h("span", { text: "终端" })]),
@@ -364,19 +388,28 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     const tab = tabs.find((t) => t.id === p.id)
     if (!tab) return
     const data = typeof p.data === "string" ? p.data : ""
-    if (data) tab.term.write(data)
+    if (!data) return
+    tab.lastOutputAt = Date.now()
+    // 非活动标签来了新输出：点个亮点（VSCode 的活动指示），切回去就消
+    if (tab.id !== activeId && !tab.unread) {
+      tab.unread = true
+      paintTabs()
+    }
+    tab.term.write(data)
   })
   socket.on("term.ready", (p) => {
     const tab = tabs.find((t) => t.id === p.id)
-    if (tab) {
-      tab.alive = true
-      paintTabs()
-    }
+    if (!tab) return
+    tab.alive = true
+    // 会话就绪后对齐一次尺寸：建会话与 fit 之间有竞态窗口（见 openTab）
+    syncSize(tab)
+    paintTabs()
   })
   socket.on("term.exit", (p) => {
     const tab = tabs.find((t) => t.id === p.id)
     if (!tab) return
     tab.alive = false
+    tab.exitCode = typeof p.code === "number" ? p.code : null
     paintTabs()
   })
   socket.on("term.error", (p) => {
@@ -445,35 +478,71 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
         e.stopPropagation()
         void closeTab(t.id)
       }
-      const cls = `fw-term-tab${t.id === activeId ? " active" : ""}${t.alive ? "" : " dead"}`
-      const tabEl = h("div", { class: cls, title: `${t.shellName} · ${t.cwd || hooks.root()}` }, [
+      const label = resolveTabLabel({ shellName: t.shellName, oscTitle: t.oscTitle, custom: t.customTitle })
+      const cls = `fw-term-tab${t.id === activeId ? " active" : ""}${t.alive ? "" : " dead"}${t.unread ? " unread" : ""}`
+      const tabEl = h("div", { class: cls, title: tabTooltip({ label, shellName: t.shellName, cwd: t.cwd, alive: t.alive, exitCode: t.exitCode }) }, [
         h("span", { class: "fw-term-dot" }),
-        h("span", { class: "fw-term-tab-name", text: t.shellName }),
+        h("span", { class: "fw-term-tab-name", text: label }),
         closeTabBtn,
       ])
       tabEl.onclick = () => selectTab(t.id)
+      // 双击重命名（与 VSCode 的「重命名终端」同语义）；右键菜单是同一套动作的入口
+      tabEl.ondblclick = (e) => {
+        e.stopPropagation()
+        void renameTab(t)
+      }
+      tabEl.oncontextmenu = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        openTabMenu(t, e.clientX, e.clientY)
+      }
       t.tabEl = tabEl
       tabbar.appendChild(tabEl)
     }
     syncCwdChip()
   }
 
+  /** 标签右键菜单：重命名 / 重启 / 关闭（与双击重命名同源）。 */
+  function openTabMenu(t: PtyTab, x: number, y: number): void {
+    showMenu(x, y, [
+      { label: "重命名…", icon: "edit", onClick: () => void renameTab(t) },
+      { label: "重启该终端", icon: "refresh", onClick: () => void restartTab(t) },
+      { label: "复制工作目录", icon: "copy", disabled: !t.cwd, onClick: () => void copyText(t.cwd, "已复制工作目录") },
+      { separator: true },
+      { label: "关闭该终端", icon: "close", onClick: () => void closeTab(t.id) },
+    ])
+  }
+
+  /** 重命名（空输入 = 恢复默认：回到 shell 标题 / shell 名）。 */
+  async function renameTab(t: PtyTab): Promise<void> {
+    const cur = resolveTabLabel({ shellName: t.shellName, oscTitle: t.oscTitle, custom: t.customTitle })
+    const next = await promptDialog({ title: "重命名终端", label: "留空恢复默认标题", value: cur, placeholder: t.shellName })
+    if (next === null) return
+    t.customTitle = next.trim()
+    paintTabs()
+  }
+
+  /** cwd 芯片：显示当前目录尾名，回落到根目录名/路径尾（旧实现回落的是根 **id**，会显示成 `bind:self_optimize`）。 */
   function syncCwdChip(): void {
     const t = activeTab()
     if (!t) {
       cwdChip.hidden = true
       return
     }
-    const tail = pathTail(t.cwd || hooks.root())
+    const rootId = hooks.root()
+    const info = rootInfo.get(rootId)
+    const where = t.cwd || info?.path || ""
+    const label = pathTail(where) || info?.name || rootId
     cwdChip.hidden = false
-    cwdName.textContent = tail
-    cwdChip.title = t.cwd || hooks.root()
+    cwdName.textContent = label
+    cwdChip.title = where || label
   }
 
   function selectTab(id: string): void {
     const t = tabs.find((x) => x.id === id)
     if (!t) return
     activeId = id
+    t.unread = false
     for (const x of tabs) x.view.hidden = x.id !== id
     paintTabs()
     persist()
@@ -586,7 +655,14 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     await opening
   }
 
-  /** 开一条终端：先建 xterm 视图（立刻可见），再向服务端申请 PTY 会话。 */
+  /**
+   * 开一条终端：先建 xterm 视图（立刻可见），**量出真实尺寸再申请 PTY 会话**。
+   *
+   * 顺序要紧：xterm 建出来时是默认 80×24，面板尺寸要等到它进入可见布局后才量得到（FitAddon）。
+   * 若先把默认尺寸随 `term.open` 发出去，则 PTY 会以 80×24 起步、而屏幕按真实列数渲染——
+   * `COLUMNS/LINES` 错、长行折行错位、TUI 按 80×24 排版（实测症状），而且只有窗口 resize
+   * 才偶然被纠正（因为那次 fit 触发的 resize 终于带上了真实会话 id）。
+   */
   async function openTab(shell?: string): Promise<PtyTab | null> {
     try {
       await ensureBooted()
@@ -600,6 +676,8 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     body.appendChild(t.view)
     dropNotice()
     selectTab(t.id)
+    await nextFrame()
+    fitTab(t)
     const reply = await socket.request("term.open", {
       root: hooks.root(),
       cwd: hooks.cwd(),
@@ -630,15 +708,30 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     if (session?.cwd) t.cwd = String(session.cwd)
     if (shell) t.shellId = shell
     t.alive = true
+    // open 往返期间用户可能已拖过面板/改过窗口：拿到真 id 后对齐一次尺寸
+    syncSize(t)
     paintTabs()
     persist()
     return t
   }
 
+  /**
+   * 关闭标签：有进程在跑时先确认（VSCode 的 confirmOnKill 同语义）。
+   * 忙闲为**近似判定**（最近有输出即认为在跑，见 term-tabs），确认只是一次拦截，不阻塞其它操作。
+   */
   async function closeTab(id: string): Promise<void> {
     const idx = tabs.findIndex((t) => t.id === id)
     if (idx < 0) return
     const t = tabs[idx]
+    if (shouldConfirmClose({ alive: t.alive, lastOutputAt: t.lastOutputAt, now: Date.now() })) {
+      const ok = await confirmDialog({
+        title: "关闭这个终端？",
+        message: `「${resolveTabLabel({ shellName: t.shellName, oscTitle: t.oscTitle, custom: t.customTitle })}」最近仍有输出，可能有命令在跑。`,
+        okText: "终止并关闭",
+        danger: true,
+      })
+      if (!ok) return
+    }
     // 会话 id 未知（创建未应答就关闭）时服务端幂等返回成功
     socket.send("term.close", { id: t.id })
     t.ro.disconnect()
@@ -670,15 +763,18 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     const view = h("div", { class: "fw-pty-view", hidden: true }, [host])
     const term = new v.Terminal({
       fontFamily: terminalFontFamily(),
-      fontSize,
-      lineHeight: 1.25,
-      cursorBlink: true,
-      cursorStyle: "bar",
+      fontSize: prefs.fontSize,
+      lineHeight: prefs.lineHeight,
+      cursorBlink: prefs.cursorBlink,
+      cursorStyle: prefs.cursorStyle,
       scrollback: 8000,
       allowProposedApi: true,
-      theme: xtermTheme(),
-      // 让 xterm 按 Windows ConPTY 的语义处理换行/光标（包装行、退格行为）
-      windowsPty: { backend: "conpty" },
+      // 最小对比度：与 VSCode 默认一致（4.5），ANSI 前景与背景对比不足时向可读方向调整
+      minimumContrastRatio: MIN_CONTRAST_RATIO,
+      theme: themeColors().theme,
+      // 只有 Windows 的 ConPTY 需要这套换行/光标重绘语义；在 POSIX 上启用会让 xterm 按伪控制台的
+      // 约定处理包装行（与真实 tty 的行为不一致，长行回显/重绘时会错位）
+      ...(serverIsWindows(info) ? { windowsPty: { backend: "conpty" as const } } : {}),
     })
     const fit = new v.FitAddon()
     const search = new v.SearchAddon()
@@ -686,6 +782,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     term.loadAddon(search)
     term.loadAddon(new v.WebLinksAddon())
     term.open(host)
+    applySearchColors(host)
     term.onData((data) => {
       const id = currentId()
       if (!id) return
@@ -704,8 +801,40 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
         .catch(() => {})
     })
     term.attachCustomKeyEventHandler((e) => onTermKey(e))
+    // 命中计数（查找框右侧的「第 n/m 项」）：search addon 每次找完都会报一次
+    search.onDidChangeResults((r) => setSearchStatus(r))
+    // shell 可以随时改标题（OSC 0/2）：VSCode 用标题作标签名，我们也跟随
+    term.onTitleChange((title) => {
+      const t = tabs.find((x) => x.term === term)
+      if (!t) return
+      t.oscTitle = String(title ?? "")
+      paintTabs()
+    })
     term.onSelectionChange(() => {
-      /* 选中变化：无需处理（复制走快捷键/右键菜单） */
+      // 选中即复制（默认关）：VSCode 的同名选项，Linux 终端习惯
+      if (!prefs.copyOnSelection) return
+      const sel = term.getSelection()
+      if (sel) void copyText(sel, "已复制终端选区", true)
+    })
+    // Ctrl+滚轮 缩放字号：浏览器里 Ctrl+滚轮是**整页缩放**，终端里应归字号
+    host.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey || !prefs.wheelZoom) return
+        e.preventDefault()
+        e.stopPropagation()
+        applyPrefs({ fontSize: prefs.fontSize + (e.deltaY < 0 ? 1 : -1) })
+      },
+      { passive: false, capture: true },
+    )
+    // 中键粘贴（X11 惯例；Chrome 默认中键是自动滚动，在终端里应归粘贴）
+    host.addEventListener("mousedown", (e) => {
+      if (e.button !== 1) return
+      e.preventDefault()
+      void pasteClipboard()
+    })
+    host.addEventListener("auxclick", (e) => {
+      if (e.button === 1) e.preventDefault()
     })
     host.oncontextmenu = (e) => {
       e.preventDefault()
@@ -723,6 +852,11 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       tabEl: document.createElement("div"),
       cwd: "",
       alive: false,
+      oscTitle: "",
+      customTitle: "",
+      exitCode: null,
+      unread: false,
+      lastOutputAt: 0,
       ro: new ResizeObserver(() => fitTab(t)),
     }
     t.ro.observe(host)
@@ -731,13 +865,47 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     return t
   }
 
+  /** 搜索命中底色（xterm 6 的 decoration 不读 backgroundColor，靠 CSS 变量落到 .xterm-find-result-decoration 上）。 */
+  function applySearchColors(host: HTMLElement): void {
+    const c = themeColors().match
+    host.style.setProperty("--term-find-match", c.matchBackground)
+    host.style.setProperty("--term-find-active", c.activeMatchBackground)
+  }
+
+  /** 把当前 xterm 尺寸下发给服务端（建会话后补发 / 重连对齐用）。 */
+  function syncSize(t: PtyTab): void {
+    if (!t.id || t.id.startsWith("tmp")) return
+    void socket
+      .ensureOpen()
+      .then(() => socket.send("term.resize", { id: t.id, cols: t.term.cols, rows: t.term.rows }))
+      .catch(() => {})
+  }
+
   // 键位表登记：document 捕获 + focus 限定在终端面板内（面板重建时只转发到最新动作）
   registerTermKeys({
     copy: () => void copySelection(),
     paste: () => void pasteClipboard(),
     search: () => toggleSearch(true),
-    fontSize: (delta) => applyFontSize(fontSize + delta),
-    fontReset: () => applyFontSize(13),
+    fontSize: (delta) => applyPrefs({ fontSize: prefs.fontSize + delta }),
+    fontReset: () => applyPrefs({ fontSize: DEFAULT_PREFS.fontSize }),
+    clear: () => {
+      const t = activeTab()
+      t?.term.clear()
+      t?.term.focus()
+    },
+    selectAll: () => activeTab()?.term.selectAll(),
+    newTab: () => void createTab(),
+    closeTab: () => {
+      const t = activeTab()
+      if (t) void closeTab(t.id)
+    },
+    switchTab: (delta) => switchTab(delta),
+    scroll: (to) => {
+      const t = activeTab()
+      if (!t) return
+      if (to === "top") t.term.scrollToTop()
+      else t.term.scrollToBottom()
+    },
     interrupt: () => {
       // 有选区则复制，否则中断当前命令（ConPTY 不认 ETX，见服务端 interrupt）
       const t = activeTab()
@@ -746,20 +914,37 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     },
   })
 
+  /** 切换终端标签（Ctrl+Shift+↑/↓）：按标签栏顺序循环。 */
+  function switchTab(delta: 1 | -1): void {
+    if (tabs.length < 2) return
+    const i = tabs.findIndex((t) => t.id === activeId)
+    const next = tabs[(i + delta + tabs.length) % tabs.length]
+    if (next) selectTab(next.id)
+  }
+
   /** 中断当前命令（终止进程树并以原目录重建 shell）。连按节流：避免一次紧张操作把 shell 重建多次。 */
   let lastInterrupt = 0
   async function interruptActive(): Promise<void> {
     const t = activeTab()
     if (!t) return
     if (!t.alive) {
-      toast("终端进程已结束，请新建一个终端", "warn")
+      toast("终端进程已结束（按 Enter 重启，或关闭该标签）", "warn")
       return
     }
     const now = Date.now()
     if (now - lastInterrupt < 800) return
     lastInterrupt = now
     const reply = await socket.request("term.interrupt", { id: t.id })
-    if (!reply.ok) toast(reply.error ?? "中断失败", "error")
+    if (!reply.ok) {
+      toast(reply.error ?? "中断失败", "error")
+      return
+    }
+    // 中断后 shell 回到会话创建时的目录（Windows 重建 shell）：cwd 芯片跟着服务端回报走
+    const cwd = reply.payload?.cwd
+    if (typeof cwd === "string") {
+      t.cwd = cwd
+      paintTabs()
+    }
   }
 
   /* ---------- 交互：快捷键 / 菜单 / 搜索 ---------- */
@@ -784,15 +969,28 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       return false
     }
     if (hits(e, TERM_KEYS.fontUp)) {
-      applyFontSize(fontSize + 1)
+      applyPrefs({ fontSize: prefs.fontSize + 1 })
       return false
     }
     if (hits(e, TERM_KEYS.fontDown)) {
-      applyFontSize(fontSize - 1)
+      applyPrefs({ fontSize: prefs.fontSize - 1 })
       return false
     }
     if (hits(e, TERM_KEYS.fontReset)) {
-      applyFontSize(13)
+      applyPrefs({ fontSize: DEFAULT_PREFS.fontSize })
+      return false
+    }
+    if (hits(e, TERM_KEYS.clear)) {
+      const t = activeTab()
+      t?.term.clear()
+      return false
+    }
+    if (hits(e, TERM_KEYS.selectAll)) {
+      activeTab()?.term.selectAll()
+      return false
+    }
+    if (hits(e, TERM_KEYS.nextTab) || hits(e, TERM_KEYS.prevTab)) {
+      switchTab(hits(e, TERM_KEYS.nextTab) ? 1 : -1)
       return false
     }
     if (hits(e, TERM_KEYS.interrupt)) {
@@ -805,45 +1003,84 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       toggleSearch(false)
       return false
     }
+    // 进程已结束的标签：Enter 就地重启（VSCode 里同样不用先关掉再新建）
+    if (e.key === "Enter" && !activeTab()?.alive && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      void restartTab(activeTab())
+      return false
+    }
     return true
   }
 
-  async function copySelection(): Promise<void> {
-    const t = activeTab()
-    const sel = t?.term.getSelection() ?? ""
-    if (!sel) return
+  /**
+   * 写剪贴板：`navigator.clipboard` 在非安全上下文/权限受限时会直接拒绝，
+   * 此时回退到隐藏 textarea + `execCommand("copy")`（已废弃但仍是唯一的回退通道）。
+   * 返回是否写成功（调用方据此决定要不要报错）。
+   */
+  async function copyText(text: string, okMessage: string, quiet = false): Promise<boolean> {
+    if (!text) return false
     try {
-      await navigator.clipboard.writeText(sel)
-      toast("已复制终端选区", "success")
+      await navigator.clipboard.writeText(text)
+      if (!quiet) toast(okMessage, "success")
+      return true
     } catch {
-      toast("复制失败：剪贴板不可用", "error")
+      /* 走下面的回退 */
     }
+    try {
+      const ta = h("textarea", { class: "fw-term-clip" })
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand("copy")
+      ta.remove()
+      if (ok) {
+        if (!quiet) toast(okMessage, "success")
+        return true
+      }
+    } catch {
+      /* 两者都不可用：如实报错 */
+    }
+    if (!quiet) toast("复制失败：剪贴板不可用", "error")
+    return false
+  }
+
+  async function copySelection(): Promise<void> {
+    const sel = activeTab()?.term.getSelection() ?? ""
+    if (!sel) return
+    await copyText(sel, "已复制终端选区")
   }
 
   async function pasteClipboard(): Promise<void> {
     const t = activeTab()
-    if (!t || !t.alive) return
+    if (!t || !t.alive) {
+      toast("终端进程已结束（按 Enter 重启，或关闭该标签）", "warn")
+      return
+    }
     try {
       const text = await navigator.clipboard.readText()
       if (text) t.term.paste(text)
     } catch {
-      toast("粘贴失败：请允许剪贴板访问，或用 Ctrl+Shift+V", "error")
+      // 读剪贴板需要权限/安全上下文：把可行路径说清楚（原生粘贴事件不经过权限接口）
+      toast("无法读取剪贴板：请用 Ctrl+V / Shift+Insert / 右键粘贴", "error", 5000)
     }
   }
 
   function openContextMenu(x: number, y: number): void {
     const t = activeTab()
     const hasSel = !!t?.term.getSelection()
+    const dead = !!t && !t.alive
     showMenu(x, y, [
       { label: "复制", icon: "copy", disabled: !hasSel, onClick: () => void copySelection() },
       { label: "粘贴", icon: "upload", disabled: !t?.alive, onClick: () => void pasteClipboard() },
-      { label: "全选", icon: "check", onClick: () => t?.term.selectAll() },
+      { label: "全选", icon: "check", disabled: !t, onClick: () => t?.term.selectAll() },
       { separator: true },
-      { label: "清屏", icon: "trash", onClick: () => t?.term.clear() },
-      { label: "查找…", icon: "search", onClick: () => toggleSearch(true) },
+      { label: "清屏", icon: "trash", disabled: !t, onClick: () => t?.term.clear() },
+      { label: "查找…", icon: "search", disabled: !t, onClick: () => toggleSearch(true) },
+      { label: "滚动到顶部", icon: "chevronUp", disabled: !t, onClick: () => t?.term.scrollToTop() },
+      { label: "滚动到底部", icon: "chevronDown", disabled: !t, onClick: () => t?.term.scrollToBottom() },
       { separator: true },
       { label: "新建终端", icon: "plus", onClick: () => void createTab() },
-      { label: "重启该终端", icon: "refresh", disabled: !t, onClick: () => void restartTab(t!) },
+      { label: dead ? "重新启动该终端" : "重启该终端", icon: "refresh", disabled: !t, onClick: () => void restartTab(t!) },
+      { label: "关闭该终端", icon: "close", disabled: !t, onClick: () => void closeTab(t!.id) },
     ])
   }
 
@@ -853,6 +1090,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     if (next) {
       const t = activeTab()
       if (t) t.view.appendChild(searchBar)
+      paintSearchToggles()
       searchInput.focus()
       searchInput.select()
     } else {
@@ -863,18 +1101,41 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     }
   }
 
-  let searchSeq = 0
+  /** 三个开关的按下态（与持久化的 searchOpts 同源）。 */
+  function paintSearchToggles(): void {
+    for (const t of searchToggles) t.el.classList.toggle("active", searchOpts[t.key])
+  }
+
+  /** 当前终端的命中计数 → 查找框文案（由 search addon 的 onDidChangeResults 驱动）。 */
+  function setSearchStatus(r: { resultIndex: number; resultCount: number } | null): void {
+    searchStatus.textContent = searchStatusText(r, searchInput.value.trim())
+  }
+
+  /**
+   * 查找调用包一层：开了正则开关后，**输入过程中必然出现半截式**（`[`、`(`、`\`）——
+   * xterm 的 search addon 会直接把非法模式交给 RegExp 并抛异常，不包一层就是一个未捕获错误。
+   */
+  function runSearch(fn: () => boolean): void {
+    try {
+      fn()
+    } catch {
+      searchStatus.textContent = "正则无效"
+    }
+  }
+
   function findInTerm(direction: 1 | -1): void {
     const t = activeTab()
     if (!t) return
     const q = searchInput.value.trim()
-    if (!q) return
-    const seq = ++searchSeq
-    const found =
-      direction === 1
-        ? t.search.findNext(q, { incremental: false, decorations: { matchOverviewRuler: "#3b8eea", activeMatchColorOverviewRuler: "#f5f543" } })
-        : t.search.findPrevious(q, { decorations: { matchOverviewRuler: "#3b8eea", activeMatchColorOverviewRuler: "#f5f543" } })
-    if (seq === searchSeq) searchStatus.textContent = found ? "" : "无匹配"
+    if (!q) {
+      t.search.clearDecorations()
+      setSearchStatus(null)
+      return
+    }
+    // decorations 必须**每次**传入：search addon 只在收到它时才建命中装饰，
+    // 且缺底色字段就是「不画」而不是「用默认色」——漏传 = 搜索看不见任何高亮。
+    const opts = { ...searchOpts, incremental: false, decorations: searchDecorations(themeColors().match) }
+    runSearch(() => (direction === 1 ? t.search.findNext(q, opts) : t.search.findPrevious(q, opts)))
   }
 
   searchInput.oninput = () => {
@@ -883,10 +1144,11 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     const q = searchInput.value
     if (!q) {
       t.search.clearDecorations()
-      searchStatus.textContent = ""
+      setSearchStatus(null)
       return
     }
-    t.search.findNext(q, { incremental: true })
+    // 增量搜索：边打边定位，但同时带上开关与 decoration（与回车路径同口径）
+    runSearch(() => t.search.findNext(q, { ...searchOpts, incremental: true, decorations: searchDecorations(themeColors().match) }))
   }
   searchInput.onkeydown = (e) => {
     if (e.key === "Enter") {
@@ -898,49 +1160,81 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     }
   }
 
-  /* ---------- 设置与窗口尺寸 ---------- */
+  /* ---------- 偏好落地 ---------- */
 
-  function applyFontSize(next: number): void {
-    fontSize = Math.max(8, Math.min(28, next))
-    saveFontSize(fontSize)
+  /**
+   * 应用偏好（局部改动走这里，不要直接改 prefs 字段）：
+   * xterm 的 options 支持热更新，改动后要**重新 fit**（字号/行高变了列数就变了），
+   * 并把尺寸变化下发服务端（TUI 程序据此重排）。
+   */
+  function applyPrefs(patch: Partial<TermPrefs>): void {
+    const next: TermPrefs = {
+      ...prefs,
+      ...patch,
+      fontSize: patch.fontSize === undefined ? prefs.fontSize : clampFontSize(patch.fontSize),
+      lineHeight: patch.lineHeight === undefined ? prefs.lineHeight : clampLineHeight(patch.lineHeight),
+    }
+    const fontChanged = next.fontSize !== prefs.fontSize || next.lineHeight !== prefs.lineHeight
+    prefs = next
+    savePrefs(prefs)
     for (const t of tabs) {
-      t.term.options.fontSize = fontSize
-      fitTab(t)
+      t.term.options.fontSize = prefs.fontSize
+      t.term.options.lineHeight = prefs.lineHeight
+      t.term.options.cursorStyle = prefs.cursorStyle
+      t.term.options.cursorBlink = prefs.cursorBlink
+      if (fontChanged) fitTab(t)
+    }
+    if (fontChanged) toast(`终端字号 ${prefs.fontSize}`, "info", 1200)
+  }
+
+  /** 主题可能被用户切换（明暗变化）：重算调色板与搜索底色并落到所有终端。 */
+  function applyTheme(): void {
+    for (const t of tabs) {
+      t.term.options.theme = themeColors().theme
+      applySearchColors(t.host)
     }
   }
 
+  /** 设置菜单（字号 / 行高 / 光标 / 选中即复制 / Ctrl+滚轮 / 跟随当前根 / 重启）。 */
   function openMore(): void {
     const r = moreBtn.getBoundingClientRect()
     showMenu(r.left, r.bottom + 4, [
-      { label: `字号 ${fontSize}（增大）`, icon: "zoomIn", onClick: () => applyFontSize(fontSize + 1) },
-      { label: `字号 ${fontSize}（减小）`, icon: "zoomOut", onClick: () => applyFontSize(fontSize - 1) },
-      { label: "重置字号", icon: "refresh", onClick: () => applyFontSize(13) },
+      { label: `字号 ${prefs.fontSize}（增大）`, icon: "zoomIn", onClick: () => applyPrefs({ fontSize: prefs.fontSize + 1 }) },
+      { label: `字号 ${prefs.fontSize}（减小）`, icon: "zoomOut", onClick: () => applyPrefs({ fontSize: prefs.fontSize - 1 }) },
+      { label: "重置字号", icon: "refresh", onClick: () => applyPrefs({ fontSize: DEFAULT_PREFS.fontSize }) },
+      { label: `行高 ${prefs.lineHeight}（切换）`, icon: "wrap", onClick: () => applyPrefs({ lineHeight: nextInCycle(LINE_HEIGHT_STEPS, prefs.lineHeight) }) },
+      { label: `光标：${CURSOR_LABEL[prefs.cursorStyle]}（切换）`, icon: "edit", onClick: () => applyPrefs({ cursorStyle: nextInCycle(CURSOR_STYLES, prefs.cursorStyle) }) },
+      { label: `${prefs.cursorBlink ? "✓ " : ""}光标闪烁`, icon: "eye", onClick: () => applyPrefs({ cursorBlink: !prefs.cursorBlink }) },
+      { label: `${prefs.copyOnSelection ? "✓ " : ""}选中即复制`, icon: "copy", onClick: () => applyPrefs({ copyOnSelection: !prefs.copyOnSelection }) },
+      { label: `${prefs.wheelZoom ? "✓ " : ""}Ctrl+滚轮 缩放字号`, icon: "wheel", onClick: () => applyPrefs({ wheelZoom: !prefs.wheelZoom }) },
       { separator: true },
-      { label: `${followRoot ? "✓ " : ""}跟随当前根`, icon: "folder", onClick: () => toggleFollow() },
+      { label: `${prefs.followRoot ? "✓ " : ""}跟随当前根`, icon: "folder", onClick: () => applyPrefs({ followRoot: !prefs.followRoot }) },
+      { label: "跟随当前根（立即 cd 一次）", icon: "folderOpen", onClick: () => void applyFollowRoot(true) },
       { label: "重启当前终端", icon: "refresh", onClick: () => void restartTab(activeTab()) },
     ])
   }
 
-  function toggleFollow(): void {
-    followRoot = !followRoot
-    saveFollow(followRoot)
-    if (followRoot) void applyFollowRoot()
-  }
-
-  /** 切换工作台根：跟随开启时在当前终端里 cd 过去。 */
-  async function applyFollowRoot(): Promise<void> {
+  /** 切换工作台根：跟随开启时在当前终端里 cd 过去（`force` 用于菜单里的「立即 cd 一次」）。 */
+  async function applyFollowRoot(force = false): Promise<void> {
     const t = activeTab()
     if (!t || !t.alive) return
+    if (!force && !prefs.followRoot) return
     const rootId = hooks.root()
-    let abs = rootPaths.get(rootId)
-    if (abs === undefined) {
-      const hit = await fetchRootPath(rootId)
-      if (!hit) return
-      rootPaths.set(rootId, hit)
-      abs = hit
+    let hit = rootInfo.get(rootId)
+    if (!hit) {
+      const fetched = await fetchRootInfo(rootId)
+      if (!fetched) return
+      rootInfo.set(rootId, fetched)
+      hit = fetched
     }
+    const abs = hit.path
+    if (!abs) return
     if (samePath(abs, t.cwd)) return
-    socket.send("term.input", { id: t.id, data: `cd "${abs.replace(/"/g, '\\"')}"\r` })
+    // 连接可能刚断：先确保通道再发（与键盘输入同一路）
+    void socket
+      .ensureOpen()
+      .then(() => socket.send("term.input", { id: t.id, data: `cd "${abs.replace(/"/g, '\\"')}"\r` }))
+      .catch(() => {})
   }
 
   async function restartTab(t: PtyTab | null): Promise<void> {
@@ -968,7 +1262,11 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
 
   /* ---------- 装配 ---------- */
 
+  // 主题切换（明暗可能变）：重算调色板并落到所有终端
+  document.addEventListener("gebai:theme-change", () => applyTheme())
+
   paintTabs()
+  paintSearchToggles()
   paintNotice("正在准备终端…", "首次使用会加载终端内核（xterm.js）。")
 
   return {
@@ -995,7 +1293,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       active = false
     },
     onRootChanged() {
-      if (followRoot) void applyFollowRoot()
+      if (prefs.followRoot) void applyFollowRoot()
     },
   }
 }

@@ -1,6 +1,6 @@
 # 歌白键盘快捷键
 
-这份表由键位表生成口径维护：**唯一来源**是 `packages/web/src/keymap.ts`（机制 + 浏览器冲突判定）+ `keymap-main.ts`（主界面表）+ `sessions.ts` / `files-entry.ts`（主界面运行时注册）+ `files/main.ts`（工作台动作表）+ `files/keymap-wb.ts` / `files/terminal-pty.ts`（元素级与终端登记）。页面里的快捷键一览（标题栏轮盘「快捷键」、工作台「更多 → 快捷键」）也由同一张表渲染，不存在第二份手写清单。
+这份表由键位表生成口径维护：**唯一来源**是 `packages/web/src/keymap.ts`（机制 + 浏览器冲突判定）+ `keymap-main.ts`（主界面表）+ `sessions.ts` / `files-entry.ts`（主界面运行时注册）+ `files/main.ts`（工作台动作表）+ `files/keymap-wb.ts`（元素级登记）+ `files/term-keys.ts`（终端面板表，含 `validateKeymap` 单测）。页面里的快捷键一览（标题栏轮盘「快捷键」、工作台「更多 → 快捷键」）也由同一张表渲染，不存在第二份手写清单。
 
 ## 总则：用常用键，能接管浏览器的就接管
 
@@ -70,11 +70,20 @@
 
 | 快捷键 | 作用 | 接管/冲突说明 |
 |---|---|---|
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | 复制选区 / 粘贴 | 接管「粘贴为纯文本」等；DevTools 打开时 `Ctrl+Shift+C` 会被它的「审查元素」抢走（已知取舍） |
-| `Ctrl+F` | 搜索滚动缓冲 | 接管「页面查找」 |
+| `Ctrl+Shift+C` / `Ctrl+Insert` | 复制选区 | 接管「粘贴为纯文本」等；DevTools 打开时 `Ctrl+Shift+C` 会被它的「审查元素」抢走（已知取舍） |
+| `Ctrl+Shift+V` / `Shift+Insert` | 粘贴（中键粘贴同效） | 单行与多行都按 shell 的 bracketed paste 语义落入命令行，不自动执行 |
+| `Ctrl+F` | 搜索滚动缓冲（`Aa` / `ab` / `.*` 三开关 + 第 n/m 项计数） | 接管「页面查找」 |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 字号 +1 / −1 / 复位 | 接管「页面缩放」（仅在终端获焦时；别处页面缩放照常） |
+| `Ctrl+滚轮` | 字号缩放（可在设置里关） | 不接管的话会落到浏览器的整页缩放上 |
+| `Ctrl+K` | 清屏 | 接管「地址栏搜索」 |
+| `Ctrl+Shift+A` | 全选滚动缓冲 | — |
+| `Ctrl+Shift+\`` | 新建终端（直接建，选 shell 走标题栏「＋」） | — |
+| `Alt+Shift+W` | 关闭当前终端（有输出在跑时先确认） | 工作台全局的 `Alt+W` 在终端内让位给 shell，故另取一键 |
+| `Ctrl+Shift+↑` / `Ctrl+Shift+↓` | 上一个 / 下一个终端标签 | VSCode 用的 `Ctrl+PageUp/PageDown` 是 Chromium 保留组合，页面收不到事件 |
+| `Ctrl+Shift+Home` / `Ctrl+Shift+End` | 滚动到顶 / 底 | — |
 | `Ctrl+C` | 中断当前命令（有选区时改为复制） | 浏览器不独占它（C 是编辑键），终端的中断语义就建在它上面 |
-| `Ctrl+L` | 清屏（仅降级终端） | 接管「聚焦地址栏」 |
+| `Enter`（进程已结束时） | 重启该终端 | 与 VSCode 一样不用先关再建 |
+| `Ctrl+L` | 清屏（仅降级终端，xterm 侧由 PTY 自处理） | 接管「聚焦地址栏」 |
 | `Enter` / `↑` `↓` | 执行命令 / 命令历史（降级终端的输入框内） | — |
 | `Esc` | 关闭终端搜索框 | — |
 

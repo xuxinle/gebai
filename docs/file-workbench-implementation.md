@@ -1537,6 +1537,36 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 
 ---
 
+### 5.41 终端面板对照 VSCode 全面测试与修复（第四十一轮）
+
+做法：先在真实浏览器（Playwright + Chromium，本机 `/files`，POSIX PTY=bash）里逐项操作并读屏取证（尺寸/折行/颜色/搜索/键位/粘贴/重开/刷新接管），再对照 VSCode 终端的能力清单逐条判定，最后修 + 用同一套脚本回归。
+
+**测出来的真缺陷（每条都有屏录或输出证据）**
+
+| 缺陷 | 证据 | 修法 |
+|---|---|---|
+| 首屏 PTY 尺寸恒为 80×24（面板实宽 ~172 列也不变），只有窗口 resize 后才同步 → `COLUMNS/LINES` 错、长行折行错位、TUI 按 80×24 排版 | `stty size` → `24 80`；改视口后 → `14 120` → `12 172`。根因：`term.open` 在 rAF fit **之前**发出（cols/rows 还是 xterm 默认值），随后 fit 触发的 `term.resize` 用的是尚未迁移的占位 id（`tmp1`）被服务端丢弃 | 先挂上并选中 → 等一帧 → `fit()` → 带真实 cols/rows 发 `term.open`；拿到真 id 后再补发一次尺寸，`term.ready` 亦补一次 |
+| POSIX 上无条件启用 `windowsPty:{backend:"conpty"}` | 代码审计（ConPTY 的包装行/重绘语义只对 Windows 成立） | 平台按**服务端 shell 路径**判定（终端跑在服务端），UA 兜底 |
+| **搜索没有任何可见高亮**（只有当前命中一圈 1px 细边框） | DOM 取证：`.xterm-decoration` 存在但 `backgroundColor` 为空；vendor 源码：xterm 6 的 decoration 渲染器不读 addon 传的 `backgroundColor`，而 addon 自己的 `_applyStyles` 只给当前命中加 outline | 底色改由 CSS 变量落到 `.xterm-find-result-decoration`（当前命中按内联 outline 判定再加一档），值随明暗主题 |
+| 查找框无 `Aa` / `ab` / `.*` 开关，也无命中计数；**换开关不重算**（同一关键词下 addon 按缓存短路） | probe：搜索栏只有两个方向按钮 + 关闭；拨开关后计数不变（6 → 6） | 补三开关 + `onDidChangeResults` 计数；切开关先 `clearDecorations()` 再查（强制重建） |
+| 正则输入到半截（`[`、`(`）时抛**未捕获异常** | pageerror：`Invalid regular expression: /FINDME-[/` | 查找调用包 catch → 状态显示「正则无效」 |
+| ANSI 调色板 `brightRed == red` 等 8 组同值，且与主题无关 | 代码审计 + 打印 16 色对照 | 换 VSCode 默认暗/亮两套调色板（`files/term-theme.ts`，按背景亮度择一）+ 最小对比度 4.5 |
+| 终端内 `Ctrl+滚轮` 落到浏览器的**整页缩放** | 代码审计（无 wheel 处理） | 接管为字号缩放（可在设置里关） |
+| 键位缺口：清屏/全选/滚轮/切标签/新建/关闭只能点按钮 | 代码审计 | 补 `Ctrl+K`、`Ctrl+Shift+A`、`Ctrl+Shift+↑/↓`、`Ctrl+Shift+``、`Alt+Shift+W`、`Ctrl+Shift+Home/End`、`Ctrl+Insert`/`Shift+Insert`、中键粘贴；表抽到 `files/term-keys.ts` 并跑 `validateKeymap` 单测 |
+| 标签名恒为 shell 名（多标签无法区分）；非活动标签有新输出无提示；进程结束后只能关掉重开 | probe：三个标签都叫 Bash；`exit` 后标签 dead 且 Enter 无反应 | OSC 0/2 标题 → 标签名（双击/右键重命名）、未读点、dead 标签 Enter 就地重启 |
+| 关闭标签直接杀会话，无确认 | 代码审计 | 有输出在跑时先确认（近似判据，见已知边界） |
+| cwd 芯片显示根 **id**（实测 `bind:self_optimize`） | probe1 | 回落根的展示名 / 路径尾；中断后按服务端回报的 cwd 更新 |
+| 复制失败即报错（非安全上下文无回退） | 代码审计 | 回退 `execCommand("copy")`；读失败给出可行路径提示 |
+| **新写的偏好读取在“全新环境”下得到最小字号 8**（自查抓到的） | 菜单显示「字号 8（增大）」；根因：`Number(null) === 0` 被当成合法字号夹到下限 | `clampFontSize`/`clampLineHeight` 把 `null`/空串当“没有这个值”，并补单测 |
+
+**实测证实本来就正常、不重复劳动的部分**：真 PTY 与字节级输入、bash 原生提示符与回显、中文宽字符、真彩色与 16 色、`Ctrl+C` 中断（POSIX 真 SIGINT、shell 存活）、拖选 + `Ctrl+Shift+C` 复制、原生粘贴事件路径、**bracketed paste 多行粘贴不误执行**（与 VSCode + bash 一致）、多标签新建/关闭/激活唯一、刷新后 attach 回放会话、ResizeObserver 拖拽重排、shell 退出提示、控制台零错误。
+
+**回归（`term-probe/term-e2e.mjs`，31 项）**：尺寸（172 列 = 面板实宽，改前恒 80）、200 字符长行折行后内容完整、ANSI 红与亮红两档不同色、搜索高亮可见 + 计数 + 三开关（区分大小写 6→4、正则 4 处）+ Esc 清高亮、`Ctrl+K` 清屏、`Ctrl+Shift+A` 全选、`Ctrl+Shift+`` 新建、`Ctrl+Shift+↑/↓` 切标签、`Ctrl+Shift+Home/End` 滚到顶/底、未读点（出现与消除）、OSC 标题跟随到标签名、粘贴三种路径（`Ctrl+Shift+V` / `Shift+Insert` / 中键）、拖选后 `Ctrl+C` 复制且不中断、设置菜单六项齐备、关闭正在输出的终端先确认（取消后标签仍在）、`exit` 后 dead + 退出码 130 + Enter 重启、刷新后接管 + 尺寸仍正确、控制台零错误——**31/31 通过**；单测 `packages/web` 全量 925 例通过，`tsc --noEmit` 通过。
+
+**已知边界（新增）**：不做 shell integration（命令装饰 / cwd 跟踪 / 命令间跳转）、拆分终端、标签拖拽重排、WebGL 渲染、iTerm2 / Sixel 图片协议；关闭确认的忙闲判据是近似的（按最近 1.5s 内有无输出，`sleep 30` 这类静默命令不会拦）。
+
+---
+
 ## 8. 已知边界与后续可选增强
 
 - Office 预览依赖服务端转换，复杂排版（图表、批注）不保证像素级一致 → 提供「下载打开」兜底。
@@ -1544,3 +1574,4 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 - 视频仅浏览器原生可解码格式（mp4/webm；H.265 视浏览器而定）。
 - 合并冲突解决目前是「三方内容查看 + 用编辑态改文件 + 标记已解决」，未做专门的三窗格合并编辑器。
 - 未做：多根同时打开（一次一个活动根，多标签跨根可开）、Git 子模块详情、LFS 管理、提交图的无上限虚拟滚动（当前分页加载）。
+- 终端：不做 shell integration（命令装饰 / 滚动条命令标记 / cwd 自动跟踪 / 命令间跳转，需 shell 侧注入与 OSC 序列）、拆分终端、标签拖拽重排、WebGL（GPU）渲染与 iTerm2 / Sixel 图片协议；关标签的忙碌判据是近似（按最近有无输出，而非 PTY 前台进程组），静默的长命令不会拦；「跟随当前根」只在切根时补一条 `cd`，不跟踪 shell 内的 `cd`。
