@@ -63,7 +63,7 @@ export async function buildRootContext(
     ? await d.env.resolve(opts.sessionId, user.id).catch(() => processEnvSnapshot())
     : processEnvSnapshot()
   const env = { ...baseEnv, ...parseEnvInput(opts.envInput) }
-  const { projects, binds } = d.engine.workbenchProjects(user.id, env)
+  const projects = d.engine.workbenchProjects(user.id, env)
   const extraRoots: FileRoot[] = [...parseExtraRoots(d.config.fsRoots, sandboxed)]
   if (!sandboxed) extraRoots.push(...localExtraRoots())
   const ctx: RootContext = {
@@ -72,7 +72,6 @@ export async function buildRootContext(
     sandboxed,
     writable: d.config.fsWrite !== false,
     projects,
-    binds,
     extraRoots,
   }
   if (opts.withSessions) {

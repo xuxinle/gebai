@@ -18,7 +18,7 @@ function makeDeps(config: Partial<ServerConfig>): AppDeps {
     config: { auth: "local", gebaiHome: join(tmpdir(), "gebai-static-home"), ...config } as unknown as ServerConfig,
     auth: { defaultUser: () => "service" },
     sandbox: { enforcedFor: () => false, isExempt: () => true },
-    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    engine: { workbenchProjects: () => [] },
     store: { getEnv: async () => ({}) },
   } as unknown as AppDeps
 }

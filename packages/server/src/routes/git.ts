@@ -86,7 +86,6 @@ export function registerGitRoutes(rc: RouteCtx): void {
       const { ctx } = await ctxFor(c)
       const dirs: Array<{ rootId: string; dir: string }> = []
       for (const p of ctx.projects) dirs.push({ rootId: `proj:${p.name}`, dir: p.path })
-      for (const b of ctx.binds) dirs.push({ rootId: `bind:${b.agent}`, dir: b.root })
       for (const e of ctx.extraRoots) dirs.push({ rootId: e.id, dir: e.path })
       const out = []
       for (const item of dirs) {

@@ -23,12 +23,12 @@ function makeDeps(opts: { sessionEnv?: Record<string, string>; globalEnv?: Recor
       workbenchProjects: (_user: string, env: Record<string, string>) => {
         seen.push(env)
         const raw = env.CODE_PROJECTS
-        if (!raw) return { projects: [], binds: [] }
+        if (!raw) return []
         try {
           const list = JSON.parse(raw) as Array<{ name: string; path: string }>
-          return { projects: Array.isArray(list) ? list : [], binds: [] }
+          return Array.isArray(list) ? list : []
         } catch {
-          return { projects: [], binds: [] }
+          return []
         }
       },
     },

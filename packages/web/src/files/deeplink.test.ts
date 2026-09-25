@@ -171,12 +171,9 @@ describe("deeplink 默认与边界", () => {  test("无参数 → 项目根优�
     expect(resolve("")).toEqual({ rootId: "proj:gebai", dir: "", file: "", line: undefined })
   })
 
-  test("无项目根时回退绑定根，再回退第一个根", () => {
-    const bindOnly: DeepLinkRoot[] = [
-      { id: "sess:x", kind: "sess", path: "/s/tmp" },
-      { id: "bind:code", kind: "bind", path: "/proj" },
-    ]
-    expect(resolveDeepLink(bindOnly, "")?.rootId).toBe("bind:code")
+  test("无项目根时回退第一个根", () => {
+    const sessOnly: DeepLinkRoot[] = [{ id: "sess:x", kind: "sess", path: "/s/tmp" }]
+    expect(resolveDeepLink(sessOnly, "")?.rootId).toBe("sess:x")
     const only: DeepLinkRoot[] = [{ id: "user:", kind: "user", path: "/gebai/users/admin" }]
     expect(resolveDeepLink(only, "")).toEqual({ rootId: "user:", dir: "", file: "", line: undefined })
   })

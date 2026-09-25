@@ -14,7 +14,6 @@ const tree: RootMenuEntry[] = [
   root("sess:2", "会话二", "sess"),
   root("sess:3", "会话三", "sess"),
   root("proj:gebai", "gebai", "proj", { isRepo: true, branch: "master" }),
-  root("bind:x", "self_optimize", "bind"),
   root("user:", "用户目录", "user"),
   root("abs:C:\\tmp", "tmp", "abs"),
 ]
@@ -24,15 +23,15 @@ describe("根选择菜单分组", () => {
     const s = buildRootSections(tree, "sess:1")
     expect(s[0]!.title).toBe("项目")
     expect(s[0]!.entries.map((e) => e.id)).toEqual(["proj:gebai"])
-    expect(s.map((x) => x.title)).toEqual(["项目", "绑定项目", "会话工作区", "其它"])
+    expect(s.map((x) => x.title)).toEqual(["项目", "会话工作区", "其它"])
   })
 
   test("空分组不出现（没有预置项目时不留空标题）", () => {
     const s = buildRootSections(tree.filter((x) => x.kind !== "proj"), "sess:1")
-    expect(s.map((x) => x.title)).toEqual(["绑定项目", "会话工作区", "其它"])
+    expect(s.map((x) => x.title)).toEqual(["会话工作区", "其它"])
   })
 
-  test("其它组收揽 sess/proj/bind 之外的根（user / abs）", () => {
+  test("其它组收揽 sess/proj 之外的根（user / abs）", () => {
     const s = buildRootSections(tree, "sess:1")
     const other = s.find((x) => x.title === "其它")!
     expect(other.entries.map((e) => e.kind)).toEqual(["user", "abs"])

@@ -55,6 +55,7 @@ import {
   buildAgentSection as buildAgentSectionFn,
   buildPresetNote as buildPresetNoteFn,
   buildSystemPrompt as buildSystemPromptFn,
+  withBuiltinProjects as withBuiltinProjectsFn,
   type PromptDeps,
 } from "./prompt"
 
@@ -550,18 +551,11 @@ export class AgentEngine {
   }
 
   /**
-   * 文件工作台所需的项目信息（DESIGN「文件工作台」）：预置项目清单（{AGENT}_PROJECTS）与各子Agent 的
-   * 绑定项目根（{AGENT}_PROJECT）。**与模型 project 参数同一份解析逻辑**——工作台看到的项目即模型能用
-   *  项目名寻址的项目（两处真相合一，避免 UI 与工具行为漂移）。
+   * 文件工作台所需的项目清单（DESIGN「文件工作台」）：**与模型 project 参数同一份解析逻辑**——
+   *  工作台看到的项目即模型能用项目名寻址的项目（两处真相合一，避免 UI 与工具行为漂移）。
    */
-  workbenchProjects(user: string, env: Record<string, string>): { projects: PresetProject[]; binds: Array<{ agent: string; root: string }> } {
-    const projects = this.allPresetProjects(user, env)
-    const binds: Array<{ agent: string; root: string }> = []
-    for (const d of this.opts.subAgents.list()) {
-      const root = this.resolveSubAgentProject(user, env, d.name)
-      if (root) binds.push({ agent: d.name, root })
-    }
-    return { projects, binds }
+  workbenchProjects(user: string, env: Record<string, string>): PresetProject[] {
+    return this.allPresetProjects(user, env)
   }
 
   private allPresetProjects(user: string, env: Record<string, string>): PresetProject[] {
@@ -2796,7 +2790,7 @@ private activeSchemas(sessionId: string) {
       ctxOpts = {
         workdir: baseProjectRoot ?? undefined,
         resolveBase: baseProjectRoot,
-        projects: mergedPresets,
+        projects: withBuiltinProjectsFn(this.promptDeps, user, mergedPresets),
         subSession: archive.subsession!,
         todoScope,
       }

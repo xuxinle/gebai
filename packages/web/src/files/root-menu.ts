@@ -3,7 +3,7 @@
  *
  * 分两类决策：
  *
- * - **分组顺序与标题**：项目（`proj`）排最上——它是最常用的落脚点，其余按「绑定项目 → 会话工作区 → 其它」。
+ * - **分组顺序与标题**：项目（`proj`）排最上——它是最常用的落脚点，其余按「会话工作区 → 其它」。
  *   标题「项目」而不是「预置项目」：菜单里说「项目」就够，`proj` 这个名字是服务端注册表的叫法。
  * - **会话折叠**：会话根按最近使用排（服务端已这样排）且数量可以很多（上限 20），全铺出来会把这个
  *   菜单拉成一长条，而其中绝大多数是「顺手点一下看看」的旧会话。默认只列「最近若干个 + 当前所在的那个」，
@@ -34,12 +34,11 @@ export const SESSION_VISIBLE = 5
 
 const GROUP_ORDER: Array<{ title: string; kind: string; collapse?: boolean }> = [
   { title: "项目", kind: "proj" },
-  { title: "绑定项目", kind: "bind" },
   { title: "会话工作区", kind: "sess", collapse: true },
   { title: "其它", kind: "other" },
 ]
 
-const KNOWN_KINDS = ["sess", "proj", "bind"]
+const KNOWN_KINDS = ["sess", "proj"]
 
 /** 分组 + 折叠（`roots` 的顺序按调用方给的来；会话组保持服务端的最近使用序）。 */
 export function buildRootSections(roots: RootMenuEntry[], currentRootId: string, sessVisible = SESSION_VISIBLE): RootMenuSection[] {

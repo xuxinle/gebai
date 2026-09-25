@@ -14,7 +14,6 @@
 | 设计稿 | 实际落地 | 原因 |
 |---|---|---|
 | 审计在 `core/audit/fs-audit.ts` | `core/fs/audit.ts` | 与 fs 域内聚，避免 core 下散落小目录 |
-| 根类型 `sess/proj/user/abs` | 增加 `bind:<agent>` | 会话绑定项目（`{AGENT}_PROJECT`）需要独立根 id |
 | 差异视图直接看 patch | 优先 Monaco DiffEditor（两侧真实文本），patch 仅作降级 | CRLF/编码差异下的表现更正确 |
 | `routes/git.ts` 用 `path` 定位仓库子目录 | 改用独立 `dir` 参数 | `path` 在 diff/compare/content 里是 pathspec，混用会把文件当目录 |
 | — | 新增「目录限定」语义（Git 面板与比较视图默认限定 root 子目录，可切整仓库） | 会话工作区常是仓库子目录，整仓库变更噪音大 |
@@ -26,14 +25,14 @@
 
 | # | 需求 | 落地设计 | 关键实现 |
 |---|------|----------|----------|
-| 1 | 目录树，可打开文件夹与预置项目 | 「根」抽象 + 懒加载树 + 根选择器 | `core/fs/roots.ts`（`sess:`/`proj:`/`bind:`/`user:`/`abs:`）、`files/explorer.ts` |
+| 1 | 目录树，可打开文件夹与预置项目 | 「根」抽象 + 懒加载树 + 根选择器 | `core/fs/roots.ts`（`sess:`/`proj:`/`user:`/`abs:`）、`files/explorer.ts` |
 | 2 | Monaco（VSCode 同款）查看编辑 + 语法高亮 | Monaco AMD 本地加载，语言按扩展名推断，diff 编辑器同源 | `files/editor.ts`、`files/main.ts:languageOf`、`public/vendor/monaco` |
 | 3 | 默认只读，点按钮才进编辑 | 状态机 `view ⇄ edit`，未进编辑态时编辑器 `readOnly: true`、编辑器不产生脏状态 | `files/main.ts`（状态栏「只读/编辑」）、`files/editor.ts` |
 | 4 | 图片/视频/PDF/WPS/代码都能看，仅代码可编辑 | 查看器链：文本编辑器 / 图片（缩放平移）/ 视频音频（Range）/ PDF 内嵌 / Office 转换（docx·xlsx·pptx→预览）/ 压缩包列表 / 二进制 hex / 图表；仅 `kind=text\|diagram` 开放编辑 | `files/viewers.ts`、`core/fs/mime.ts`、`routes/fs.ts /office /archive` |
 | 5 | 支持下载 | 单文件流式下载（`Content-Disposition`、Range）+ 目录/多选打包 ZIP（UTF-8 文件名）+ 上传（拖拽/粘贴/多选） | `core/fs/service.ts:zipPaths`、`core/fs/archive.ts`、`routes/fs.ts:/download /upload` |
 | 6 | 完备 Git 图形操作，界面参考 IDEA | 右侧 VCS 工具窗 + 差异编辑器 + 日志/分支/标签/暂存/远程五视图 + 提交框 + 上下文菜单；写操作全部带备份/冲突提示 | `files/git.ts`（955 行）、`core/git/service.ts`、`routes/git.ts` |
 | 7 | 独立页面与路径，入口在主界面轮盘按钮左侧 | `/files` 独立 HTML 入口（Vite 多入口）；标题栏入口与**会话工作台同窗**（主按钮＝并列、副按钮＝整窗，透传 session/root/project/path/主题）；消息流里的文件产物另走「新标签打开整页」 | `packages/web/files.html`、`vite.config.ts`、`files-entry.ts`、`files-split.ts`、`app.ts`（`/files` 静态路由） |
-| 8 | 彻底摆脱 VSCode 且更好 | 会话工作区 / 预置项目 / 绑定项目 / 任意本地目录统一为「根」；编辑带乐观锁 + 编码/换行保真；Git 侧支持任意两端对比、逐行暂存、冲突三方查看 | 见下文各节 |
+| 8 | 彻底摆脱 VSCode 且更好 | 会话工作区 / 项目 / 任意本地目录统一为「根」；编辑带乐观锁 + 编码/换行保真；Git 侧支持任意两端对比、逐行暂存、冲突三方查看 | 见下文各节 |
 
 ---
 
@@ -63,7 +62,7 @@
 
 ### 2.1 安全与权限模型（先定边界，再谈功能）
 
-- **根（root）是权限边界**：`resolveRoot()` 把 `sess:<id>` / `proj:<name>` / `bind:<agent>` / `user:` / `abs:<path>` 解析为绝对路径；`abs:` 在服务模式（沙箱）下一律拒绝，只允许注册的项目根与用户目录。
+- **根（root）是权限边界**：`resolveRoot()` 把 `sess:<id>` / `proj:<name>` / `user:` / `abs:<path>` 解析为绝对路径；`abs:` 在服务模式（沙箱）下一律拒绝，只允许注册的项目根与用户目录。
 - **两条写开关**：`GEBAI_FS_WRITE=false` 全局只读；git 另有 `GEBAI_GIT_WRITE` / `GEBAI_GIT_REMOTE`（远程操作单独放行）。
 
 ...（省略 141 行）...
@@ -82,7 +81,7 @@
 
 - **会话归属不漂移**：chip 显式携带**渲染时**的会话 id（`opts.session`），历史消息里的产物不会因当前会话切换而开错工作区。
 - **主界面不解析根**：只把原始路径透传（`/files?session=…&path=…`），由工作台 `files/deeplink.ts` 定位所属根。原因：产物路径有两类（会话相对 `tmp/` 逻辑路径 / 项目绝对路径），主界面若自行匹配根，就要复制一份根清单与匹配规则，根的增删/改名都会让它失配。
-- **定位规则（三档优先级）**：① 显式 `?root=`/`?project=`；② 绝对路径 → **最长前缀匹配**的根（平局时按类型：proj/bind > sess > user > abs，因为本地模式的 `abs:` 白名单根常与注册项目指向同一目录，不应抢占项目根）；③ 其余 → `?session=` 的会话根（无参数默认项目根 → 绑定根 → 第一个根）。`?line=` 打开后跳行；`tmp/` 前缀自动剥离。
+- **定位规则（三档优先级）**：① 显式 `?root=`/`?project=`；② 绝对路径 → **最长前缀匹配**的根（平局时按类型：proj > sess > user > abs，因为本地模式的 `abs:` 白名单根常与注册项目指向同一目录，不应抢占项目根）；③ 其余 → `?session=` 的会话根（无参数默认项目根 → 第一个根）。`?line=` 打开后跳行；`tmp/` 前缀自动剥离。
 - **可测性**：解析逻辑抽为独立纯函数模块（参数可注入 `search`/`isWin`、无 DOM 依赖）——`main.ts` 顶层会建 DOM 与启动，无法直接对其单测；抽离后得 23 例单测（显式根 / 嵌套根取最精确 / Windows 盘符大小写 / temp 前缀 / 中文空格路径 / 无匹配回退）。
 - **实测（Playwright，真实服务）**：
 
@@ -1555,7 +1554,7 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 | 键位缺口：清屏/全选/滚轮/切标签/新建/关闭只能点按钮 | 代码审计 | 补 `Ctrl+K`、`Ctrl+Shift+A`、`Ctrl+Shift+↑/↓`、`Ctrl+Shift+``、`Alt+Shift+W`、`Ctrl+Shift+Home/End`、`Ctrl+Insert`/`Shift+Insert`、中键粘贴；表抽到 `files/term-keys.ts` 并跑 `validateKeymap` 单测 |
 | 标签名恒为 shell 名（多标签无法区分）；非活动标签有新输出无提示；进程结束后只能关掉重开 | probe：三个标签都叫 Bash；`exit` 后标签 dead 且 Enter 无反应 | OSC 0/2 标题 → 标签名（双击/右键重命名）、未读点、dead 标签 Enter 就地重启 |
 | 关闭标签直接杀会话，无确认 | 代码审计 | 有输出在跑时先确认（近似判据，见已知边界） |
-| cwd 芯片显示根 **id**（实测 `bind:self_optimize`） | probe1 | 回落根的展示名 / 路径尾；中断后按服务端回报的 cwd 更新 |
+| cwd 芯片显示根 **id**（实测形如 `proj:歌白`） | probe1 | 回落根的展示名 / 路径尾；中断后按服务端回报的 cwd 更新 |
 | 复制失败即报错（非安全上下文无回退） | 代码审计 | 回退 `execCommand("copy")`；读失败给出可行路径提示 |
 | **新写的偏好读取在“全新环境”下得到最小字号 8**（自查抓到的） | 菜单显示「字号 8（增大）」；根因：`Number(null) === 0` 被当成合法字号夹到下限 | `clampFontSize`/`clampLineHeight` 把 `null`/空串当“没有这个值”，并补单测 |
 

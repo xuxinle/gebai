@@ -3822,9 +3822,19 @@ describe("context compaction", () => {
       GEBAI_APPROVAL_SKIP: "true",
     })
     await s.engine.run(session.id, "default", "modify file")
-    // 非法 JSON 未注入清单；自由路径模式正常写入会话 tmp
+    // 非法 JSON 未注入清单（只剩内置项目）；自由路径模式正常写入会话 tmp
     const sysMsgs = s.provider.seenChats.flatMap((msgs) => msgs.map((m) => String(m.content)))
-    expect(sysMsgs.some((c) => c.includes("预置项目（全局文件工具用 project 参数指定项目名"))).toBe(false)
+    const note = sysMsgs.find((c) => c.includes("预置项目（全局文件工具用 project 参数指定项目名"))
+    expect(note).toBeDefined()
+    // 注记块 = 表头行 + 紧随其后的「- 名称」条目（遇首行非条目即结束）；本用例非法 JSON 下只剩内置项目
+    const block = note!.split("预置项目（全局文件工具用 project 参数指定项目名")[1]!.split("\n")
+    const entries: string[] = []
+    for (const line of block.slice(1)) {
+      if (!line.startsWith("- ")) break
+      entries.push(line)
+    }
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toContain("歌白")
     const writeChat = s.provider.seenChats.find((msgs) => msgs.some((m) => m.role === "tool" && m.name === "write" && typeof m.content === "string" && m.content.includes("已写入")))
     expect(writeChat).toBeDefined()
     cleanup(s.home)

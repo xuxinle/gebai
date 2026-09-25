@@ -41,7 +41,7 @@ function makeDeps(home: string): AppDeps {
     config,
     auth: { defaultUser: () => SERVICE_USER },
     sandbox: { enforcedFor: () => false, isExempt: () => true },
-    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    engine: { workbenchProjects: () => [] },
     store: { getEnv: async () => ({}) },
     git: new GitService({ writeEnabled: true, remoteEnabled: false }),
   } as unknown as AppDeps

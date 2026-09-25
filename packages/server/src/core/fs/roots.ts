@@ -6,8 +6,7 @@
  *
  *  root 形态：
  *  | `sess:<sessionId>` | 会话工作区（users/{u}/sessions/.../tmp）——仅本人会话（id 白名单 + 路径自证归属） |
- *  | `proj:<name>`      | 预置项目（{AGENT}_PROJECTS 注册表，与模型 project 参数同一份真相） |
- *  | `bind:<agent>`     | 会话绑定项目根（{AGENT}_PROJECT） |
+ *  | `proj:<name>`      | 预置项目（{AGENT}_PROJECTS 注册表 + 内置「歌白」，与模型 project 参数同一份真相） |
  *  | `user:`            | 当前用户数据目录（users/{u}/） |
  *  | `abs:<绝对路径>`   | 任意绝对路径根（仅本地模式；服务模式一律 403） |
  */
@@ -16,7 +15,7 @@ import { homedir } from "node:os"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { assertNoSymlinkEscape, isValidSessionId, sessionPath } from "../base/paths"
 
-export type RootKind = "sess" | "proj" | "bind" | "user" | "abs"
+export type RootKind = "sess" | "proj" | "user" | "abs"
 
 /** 统一错误类型（路由层映射 HTTP 状态码；消息面向用户可读）。 */
 export class FsError extends Error {
@@ -66,8 +65,6 @@ export interface RootContext {
   writable: boolean
   /** 预置项目（与模型 project 参数同源；由引擎提供） */
   projects: Array<{ name: string; path: string; description?: string }>
-  /** 会话绑定项目根（{AGENT}_PROJECT） */
-  binds: Array<{ agent: string; root: string }>
   /** 额外白名单根（GEBAI_FS_ROOTS / 本地模式盘符与常用目录） */
   extraRoots: FileRoot[]
   /** 会话清单（构建 `sess:` 根） */
@@ -165,8 +162,8 @@ export function parseRootId(rootId: string): { kind: RootKind; id: string } {
   const i = raw.indexOf(":")
   const kind = (i < 0 ? "" : raw.slice(0, i)) as RootKind
   const id = i < 0 ? "" : raw.slice(i + 1)
-  if (!["sess", "proj", "bind", "user", "abs"].includes(kind)) {
-    throw fsBadRequest(`未知根类型: ${raw}（形如 sess:<id> / proj:<name> / bind:<agent> / user: / abs:<path>）`)
+  if (!["sess", "proj", "user", "abs"].includes(kind)) {
+    throw fsBadRequest(`未知根类型: ${raw}（形如 sess:<id> / proj:<name> / user: / abs:<path>）`)
   }
   if (kind === "sess" && !isValidSessionId(id)) throw fsBadRequest(`非法会话 id: ${id}`)
   if (kind !== "user" && kind !== "sess" && kind !== "abs" && !id.trim()) throw fsBadRequest(`根缺少标识: ${raw}`)
@@ -196,14 +193,8 @@ export function resolveRoot(rootId: string, ctx: RootContext): ResolvedRoot {
     if (!exists(p.path)) throw new FsError(404, `项目目录不存在: ${id}（${p.path}）`)
     return { id: rootId, kind, abs: resolve(p.path), writable: ctx.writable }
   }
-  if (kind === "bind") {
-    const b = ctx.binds.find((x) => x.agent === id)
-    if (!b) throw new FsError(404, `未绑定项目: ${id}`)
-    if (!exists(b.root)) throw new FsError(404, `绑定项目目录不存在: ${id}（${b.root}）`)
-    return { id: rootId, kind, abs: resolve(b.root), writable: ctx.writable }
-  }
   // abs: 绝对路径根——服务模式（沙箱启用）一律拒绝；本地模式放行
-  if (ctx.sandboxed) throw fsForbidden("沙箱模式下不允许绝对路径根（请使用 sess: / proj: / bind: / user: 根）")
+  if (ctx.sandboxed) throw fsForbidden("沙箱模式下不允许绝对路径根（请使用 sess: / proj: / user: 根）")
   const abs = resolve(id)
   if (!exists(abs)) throw new FsError(404, `目录不存在: ${abs}`)
   // 显式白名单根（GEBAI_FS_ROOTS）在服务模式下的可写性由条目自身决定，本地模式恒可写
@@ -272,8 +263,8 @@ export function parseExtraRoots(raw: string | undefined, sandboxed: boolean): Fi
 }
 
 /**
- * 根清单（前端左栏根选择器）：会话工作区（最近 N 个）+ 预置项目 + 绑定项目 + 用户目录 + 额外根。
- * 同一路径多来源时按 id 去重（预置项目优先展示，避免同名路径重复列）。
+ * 根清单（前端左栏根选择器）：会话工作区（最近 N 个）+ 预置项目 + 用户目录 + 额外根。
+ * 同一 id 多来源时去重（预置项目优先展示，避免重复列）。
  */
 export function rootCatalog(ctx: RootContext, opts: { sessionLimit?: number } = {}): FileRoot[] {
   const limit = opts.sessionLimit ?? 20
@@ -289,10 +280,9 @@ export function rootCatalog(ctx: RootContext, opts: { sessionLimit?: number } = 
     push({ id: `sess:${s.id}`, kind: "sess", name: s.name || s.id.slice(0, 8), path: abs, sessionId: s.id, writable: ctx.writable })
   }
   for (const p of ctx.projects) push({ id: `proj:${p.name}`, kind: "proj", name: p.name, path: p.path, description: p.description, writable: ctx.writable })
-  for (const b of ctx.binds) push({ id: `bind:${b.agent}`, kind: "bind", name: `${b.agent} 绑定项目`, path: b.root, writable: ctx.writable })
   push({ id: "user:", kind: "user", name: "用户目录", path: join(ctx.home, "users", ctx.user), writable: ctx.writable })
   for (const r of ctx.extraRoots) push(r)
-  return out.slice(0, limit + ctx.projects.length + ctx.binds.length + ctx.extraRoots.length + 1)
+  return out.slice(0, limit + ctx.projects.length + ctx.extraRoots.length + 1)
 }
 
 /** 会话 id 是否属于该用户（root 解析已按用户目录拼接，此处提供显式校验供路由复用）。 */

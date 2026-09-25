@@ -37,7 +37,7 @@ function makeDeps(opts: { config?: Partial<ServerConfig>; sandboxed?: boolean; t
     config,
     auth: { defaultUser: () => SERVICE_USER },
     sandbox: { enforcedFor: () => opts.sandboxed === true, isExempt: () => false },
-    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    engine: { workbenchProjects: () => [] },
     store: { getEnv: async () => ({}) },
     terminal: opts.terminal,
   } as unknown as AppDeps

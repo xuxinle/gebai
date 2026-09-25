@@ -13,7 +13,7 @@ import { appBase } from "@gebai/sdk"
 
 export interface RootInfo {
   id: string
-  kind: "sess" | "proj" | "bind" | "user" | "abs"
+  kind: "sess" | "proj" | "user" | "abs"
   name: string
   path: string
   description?: string

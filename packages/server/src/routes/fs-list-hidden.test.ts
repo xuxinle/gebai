@@ -24,7 +24,7 @@ function makeDeps(fsHidden: boolean, home: string): AppDeps {
     config,
     auth: { defaultUser: () => SERVICE_USER },
     sandbox: { enforcedFor: () => false, isExempt: () => true },
-    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    engine: { workbenchProjects: () => [] },
     store: { getEnv: async () => ({}) },
   } as unknown as AppDeps
 }

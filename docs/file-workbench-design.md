@@ -109,8 +109,7 @@
 | root 值 | 含义 | 解析 | 可写性 |
 |---|---|---|---|
 | `sess:<sessionId>` | 会话工作区（`users/{u}/sessions/.../tmp`） | `store.resolveSessionTmpFile` 同规则 | 可写（本人会话） |
-| `proj:<name>` | 预置项目（`CODE_PROJECTS` 注册表） | 复用 `resolveProjectRoot(name)` 语义 | 本地默认可写；服务模式按 `GEBAI_FS_PROJECT_WRITE`（默认 on） |
-| `bind:<name>` | 会话绑定项目（`CODE_PROJECT` / `SELF_OPTIMIZE_PROJECT`） | 绑定根 | 同上 |
+| `proj:<name>` | 预置项目（`{AGENT}_PROJECTS` 注册表 + 内置「歌白」） | 复用 `resolveProjectRoot(name)` 语义 | 本地默认可写；服务模式按 `GEBAI_FS_PROJECT_WRITE`（默认 on） |
 | `user:` | 当前用户数据目录（`users/{u}/`） | 直接 | 可写（仅本人） |
 | `abs:<urlencoded-abs-path>` | 绝对路径 | 仅本地模式（`!sandbox.enforcedFor(user)`）允许；否则 403 | 可写（本地模式=操作者本人） |
 
@@ -146,7 +145,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/api/v1/roots` | GET | **根清单**：会话 tmp、预置项目（名称/描述/路径/是否 git 仓库/当前分支）、绑定项目、用户目录、本地模式盘符与常用目录（`~`、home、cwd、`/workspaces` 等）+ 每根的 `writable`/`vcs` 标记 |
+| `/api/v1/roots` | GET | **根清单**：会话 tmp、预置项目（含内置「歌白」；名称/描述/路径/是否 git 仓库/当前分支）、用户目录、本地模式盘符与常用目录（`~`、home、cwd、`/workspaces` 等）+ 每根的 `writable`/`vcs` 标记 |
 | `/api/v1/fs/list` | GET | 单层目录列表：`?root=&path=&showHidden=&sort=`（`showHidden` 缺省取 `GEBAI_FS_HIDDEN`，显式给出则该值优先），返回 `{name, path, type: file\|dir\|symlink, size, mtime, mode, isGitIgnored, ext}`；目录优先 + 自然排序；单层上限 5000 条（超出 `truncated`） |
 | `/api/v1/fs/tree` | GET | 递归树（`?depth=1..3`）供首屏展开；深度受控（默认 1，前端懒加载） |
 | `/api/v1/fs/stat` | GET | 单/多路径元信息（批量 `paths[]`）：类型、大小、mtime、编码探测、行数、是否二进制、是否大文件、mime |
@@ -333,7 +332,7 @@ app.get(`${base}/files/*`, handler)        // 深链（如 /files?root=proj:geba
 |---|---|
 | 懒加载 | 首屏 `depth=1`；展开时 `fs/list` 单层拉取；展开状态按 (root,path) 缓存 |
 | 虚拟滚动 | 目录 >2000 条时启用窗口化渲染（只渲染视口 ± 缓冲） |
-| 多根 | 根清单分组：会话 tmp / 预置项目 / 绑定项目 / 用户目录 / 本地盘符；每根可折叠、可「在新标签打开」 |
+| 多根 | 根清单分组：会话 tmp / 项目 / 用户目录 / 本地盘符；每根可折叠、可「在新标签打开」 |
 | 排序 | 目录优先 + 自然排序（`a2 < a10`）；可切换「按名称/按修改时间/按大小」 |
 | 过滤 | 顶部即时过滤（子串/`*`/`**` glob/正则开关）+「仅显示变更文件」 |
 | 状态标识 | 扩展名图标/颜色点、Git 状态色（M 蓝 / A 绿 / D 红 / ?? 灰 / U 冲突红）、忽略文件淡显、符号链接箭头、只读锁标 |
@@ -663,7 +662,7 @@ monaco.editor.create(el, {
 
 | 用户诉求 | 本方案对应 | 状态 |
 |---|---|---|
-| 1. 目录树，可打开文件夹与预置项目 | §4.4 树 + §3.1 Root（会话 tmp / 预置项目 / 绑定项目 / 用户目录 / 本地盘符） | ✅ |
+| 1. 目录树，可打开文件夹与预置项目 | §4.4 树 + §3.1 Root（会话 tmp / 项目 / 用户目录 / 本地盘符） | ✅ |
 | 2. VSCode 同款查看编辑组件 + 语法高亮 | §4.5 Monaco（VSCode 内核）+ 语言映射 + diff 视图 | ✅ |
 | 3. 默认查看，点按钮进入编辑 | §4.5「默认 readOnly → 编辑/保存/放弃」交互 | ✅ |
 | 4. 绝大多数格式能看，只有代码可编辑 | §4.6 预览矩阵（图片/音视频/PDF/Office/压缩包/hex/图表源文件…）；编辑仅对文本/代码开放，媒体类无编辑入口 | ✅ |

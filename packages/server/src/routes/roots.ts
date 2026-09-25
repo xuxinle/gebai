@@ -1,5 +1,5 @@
 /** 文件工作台 · 根清单路由：`GET /api/v1/roots`（前端左栏根选择器与「打开文件夹」入口的数据源）。
- *  返回：会话工作区（最近 N 个）/ 预置项目 / 绑定项目 / 用户目录 / 额外白名单根（本地模式含盘符），
+ *  返回：会话工作区（最近 N 个）/ 预置项目 / 用户目录 / 额外白名单根（本地模式含盘符），
  *  每根附 `writable` 与 git 仓库标记（仓库/分支，供 UI 直接显示 VCS 状态而不额外请求）。 */
 import type { RouteCtx } from "./context"
 import { existsSync } from "node:fs"

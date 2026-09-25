@@ -24,7 +24,7 @@ function makeDeps(opts: { home?: string; fsWatch?: boolean; sandboxed?: boolean;
     config,
     auth: { defaultUser: () => SERVICE_USER },
     sandbox: { enforcedFor: () => opts.sandboxed === true, isExempt: () => false },
-    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    engine: { workbenchProjects: () => [] },
     store: { getEnv: async () => ({}) },
     git: opts.git,
   } as unknown as AppDeps

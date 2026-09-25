@@ -1,7 +1,7 @@
 /** 文件工作台 · 文件域路由（DESIGN「文件工作台」）：根内目录/文件的列举、读取、流式原样输出、下载、
  *  搜索、归档浏览、写入与结构操作（新建/改名/移动/复制/删除/上传/回收站）。
  *
- *  契约：所有端点以 `(root, path)` 寻址；`root` 见 core/fs/roots.ts（sess:/proj:/bind:/user:/abs:）。
+ *  契约：所有端点以 `(root, path)` 寻址；`root` 见 core/fs/roots.ts（sess:/proj:/user:/abs:）。
  *  只读端点（list/stat/read/raw/office/download/search/archive）不写审计；写端点一律过写开关 + 审计留痕。
  */
 import type { Context } from "hono"

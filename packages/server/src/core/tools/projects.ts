@@ -12,6 +12,9 @@ export function sessionBoundary(ctx: ToolContext): string {
 /** 保留项目名：会话工作区（tmp）——project 参数可指定；预置项目名不得占用（启动校验拒绝）。 */
 export const RESERVED_PROJECT_TMP = "tmp"
 
+/** 内置项目名：歌白自身（家目录——dev/源码形态下即歌白仓库根；本地模式恒在预置项目清单中）。 */
+export const SELF_PROJECT_NAME = "歌白"
+
 export const PROJECT_PARAM = {
   project: { type: "string", description: `项目根：预置项目名/项目根路径/保留名 ${RESERVED_PROJECT_TMP}（会话工作区）——传入后相对路径与工作目录按此根解析` },
 }

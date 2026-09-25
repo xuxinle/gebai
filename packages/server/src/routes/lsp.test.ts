@@ -24,7 +24,7 @@ function makeDeps(opts: { config?: Partial<ServerConfig>; sandboxed?: boolean; l
     config,
     auth: { defaultUser: () => SERVICE_USER },
     sandbox: { enforcedFor: () => opts.sandboxed === true, isExempt: () => false },
-    engine: { workbenchProjects: () => ({ projects: [], binds: [] }) },
+    engine: { workbenchProjects: () => [] },
     store: { getEnv: async () => ({}) },
   } as unknown as AppDeps
   if (opts.lsp !== null) deps.lsp = opts.lsp ?? fakeLsp()

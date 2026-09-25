@@ -85,7 +85,7 @@ export function rootAbsFromId(id: string): string | null {
 }
 
 /** 根类型在「同样覆盖目标」时的优先级（与 deeplink.ts 的 KIND_RANK 同口径：项目类最优先，任意目录最后）。 */
-const KIND_RANK: Record<string, number> = { proj: 0, bind: 0, sess: 1, user: 2, abs: 3 }
+const KIND_RANK: Record<string, number> = { proj: 0, sess: 1, user: 2, abs: 3 }
 const rankOf = (kind: string): number => KIND_RANK[kind] ?? 9
 
 export interface ResolvedRepoPath {

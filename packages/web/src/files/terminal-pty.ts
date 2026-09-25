@@ -522,7 +522,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     paintTabs()
   }
 
-  /** cwd 芯片：显示当前目录尾名，回落到根目录名/路径尾（旧实现回落的是根 **id**，会显示成 `bind:self_optimize`）。 */
+  /** cwd 芯片：显示当前目录尾名，回落到根目录名/根 id。 */
   function syncCwdChip(): void {
     const t = activeTab()
     if (!t) {

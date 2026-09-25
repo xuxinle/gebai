@@ -254,14 +254,13 @@ describe("core/fs 搜索（名称/内容）", () => {
   })
 })
 
-describe("core/fs 根解析（sess:/proj:/bind:/user:/abs:）", () => {
+describe("core/fs 根解析（sess:/proj:/user:/abs:）", () => {
   const ctx = (over: Partial<RootContext> = {}): RootContext => ({
     home: "/gebai-home",
     user: "admin",
     sandboxed: false,
     writable: true,
     projects: [{ name: "gebai", path: "/workspaces/gebai" }],
-    binds: [{ agent: "code", root: "/workspaces/proj" }],
     extraRoots: [],
     sessions: [{ id: "abcdef1234567890abcdef1234567890", name: "会话甲" }],
     ...over,
@@ -275,20 +274,19 @@ describe("core/fs 根解析（sess:/proj:/bind:/user:/abs:）", () => {
     expect(() => parseRootId("sess:短")).toThrow(FsError)
   })
 
-  test("resolveRoot：会话/项目/绑定/用户/绝对路径；沙箱下拒绝 abs:", () => {
-    // 项目/绑定根的目录存在性由 ctx.isDir 注入（测试不依赖真实文件系统）
+  test("resolveRoot：会话/项目/用户/绝对路径；沙箱下拒绝 abs:", () => {
+    // 项目根的目录存在性由 ctx.isDir 注入（测试不依赖真实文件系统）
     const c = ctx({ isDir: () => true })
     // 会话目录按 id 前两段分片（ab/cd/<id>/tmp），避免单目录堆积
     expect(resolveRoot("sess:abcdef1234567890abcdef1234567890", c).abs).toBe(join(c.home, "users", c.user, "sessions", "ab", "cd", "abcdef1234567890abcdef1234567890", "tmp"))
     expect(resolveRoot("proj:gebai", c).abs).toBe(resolve("/workspaces/gebai"))
-    expect(resolveRoot("bind:code", c).abs).toBe(resolve("/workspaces/proj"))
     expect(resolveRoot("user:", c).abs).toBe(join("/gebai-home", "users", "admin"))
     expect(resolveRoot("abs:/tmp", c).abs).toBe(resolve("/tmp"))
     // 沙箱（服务模式）下绝对路径根一律拒绝
     expect(() => resolveRoot("abs:/tmp", ctx({ sandboxed: true, isDir: () => true }))).toThrow(FsError)
     expect(() => resolveRoot("proj:nope", c)).toThrow(FsError)
-    // 目录不存在的项目/绑定根 → 404（前端表现为该根不可用，而非界面崩溃）
-    expect(() => resolveRoot("bind:code", ctx({ isDir: () => false }))).toThrow(FsError)
+    // 目录不存在的项目根 → 404（前端表现为该根不可用，而非界面崩溃）
+    expect(() => resolveRoot("proj:gebai", ctx({ isDir: () => false }))).toThrow(FsError)
   })
 
   test("写开关：writable=false 时根为只读（前端据此隐藏写操作）", () => {
@@ -298,11 +296,10 @@ describe("core/fs 根解析（sess:/proj:/bind:/user:/abs:）", () => {
     expect(resolveRoot("proj:gebai", ctx(exists)).writable).toBe(true)
   })
 
-  test("rootCatalog：会话 + 项目 + 绑定 + 用户目录，按 id 去重", () => {
+  test("rootCatalog：会话 + 项目 + 用户目录，按 id 去重", () => {
     const list = rootCatalog(ctx())
     const ids = list.map((r) => r.id)
     expect(ids).toContain("proj:gebai")
-    expect(ids).toContain("bind:code")
     expect(ids).toContain("user:")
     expect(new Set(ids).size).toBe(ids.length)
     expect(list.find((r) => r.id === "proj:gebai")?.name).toBe("gebai")

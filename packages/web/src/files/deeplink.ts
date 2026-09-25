@@ -65,11 +65,11 @@ function dirOf(file: string): string {
 }
 
 /**
- * 同长前缀时的根优先级：项目类根（服务端注册/绑定） > 会话工作区 > 用户目录 > 本地任意目录。
+ * 同长前缀时的根优先级：项目根（服务端注册） > 会话工作区 > 用户目录 > 本地任意目录。
  * 本地模式下 `abs:` 白名单根会与注册项目**指向同一目录**（如服务工作目录 = 项目根），
  * 两者前缀长度相同——按类型定优先级，避开「明明是项目文件却落到临时目录根」的观感偏差。
  */
-const KIND_RANK: Record<string, number> = { proj: 0, bind: 0, sess: 1, user: 2, abs: 3 }
+const KIND_RANK: Record<string, number> = { proj: 0, sess: 1, user: 2, abs: 3 }
 const rankOf = (k: string): number => KIND_RANK[k] ?? 9
 
 /**
@@ -90,7 +90,6 @@ export function resolveDeepLink(roots: DeepLinkRoot[], search: string, opts: Dee
     // 显式指定会话时以该会话工作区为先（入口按钮语义：看本会话 Agent 产物）；否则项目类根优先
     (sessId ? byId(`sess:${sessId}`) : undefined) ??
     roots.find((r) => r.kind === "proj") ??
-    roots.find((r) => r.kind === "bind") ??
     roots[0]
 
   // 1) 显式根

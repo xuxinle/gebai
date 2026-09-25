@@ -2,6 +2,7 @@
  *  （buildAgentSection）、动态描述（agentDescription）与项目注记。engine 注入 PromptDeps（项目解析、
  *  AGENTS.md 读取等引擎方法）委托调用。 */
 import type { PresetProject, SubAgentDef } from "../base/types"
+import { SELF_PROJECT_NAME } from "../tools/projects"
 import type { ServerConfig } from "../base/config"
 import type { Sandbox } from "../security/sandbox"
 import type { SubAgentManager } from "../agents/subagents"
@@ -46,6 +47,10 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
     // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
     subAgentProjectNote(deps, user, env),
+    // 内置项目（歌白自身）：与文件工作台的项目列表同源——工作台能看到的项目，模型可按名寻址
+    builtinProjects(deps, user)
+      .map((p) => `内置项目「${p.name}」：${p.path}（project 参数可按名寻址）`)
+      .join(""),
     // 会话级过滤（DESIGN「装载工具会话可见性」）：目录按「对本会话可见」判定未装载——其他会话装载过
     // 不代表本会话已装载（防跨会话泄漏：A 装载后 B 的目录仍应列出该子Agent 供 B 装载）
     deps.subAgents.systemPromptInjection((d) => agentDescription(deps, { name: d.name, description: d.description, tools: Object.keys(d.tools ?? {}) }, user, env), sessionId),
@@ -70,7 +75,21 @@ export function subAgentProjectNote(deps: PromptDeps, user: string, env: Record<
   return lines.length ? `\n\n${lines.join("\n")}` : ""
 }
 
-/** 汇总所有已注册子Agent 的预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS）：装载模式下总Agent 直接使用子Agent 工具时 project 参数路由用；同名去重（首个生效）。 */
+/** 内置项目：歌白自身（家目录——dev/源码形态下即歌白仓库根）与预置项目同清单（本地模式恒可寻址；
+ *  服务模式与 `{AGENT}_PROJECTS` 同规则不生效）。用户配置同名项目时以其配置为准。 */
+export function builtinProjects(deps: PromptDeps, user: string): PresetProject[] {
+  if (deps.sandbox.enforcedFor(user)) return []
+  return [{ name: SELF_PROJECT_NAME, path: deps.config.gebaiHome, description: "歌白自身（家目录：源码、用户数据与资源）" }]
+}
+
+/** 并入内置项目（同名已被占用时保持原清单——配置优先）。 */
+export function withBuiltinProjects(deps: PromptDeps, user: string, list: PresetProject[]): PresetProject[] {
+  const builtin = builtinProjects(deps, user)
+  if (!builtin.length || list.some((p) => p.name === SELF_PROJECT_NAME)) return list
+  return [...list, ...builtin]
+}
+
+/** 汇总所有已注册子Agent 的预置项目注册表（{AGENT_NAME_UPPER}_PROJECTS）：装载模式下总Agent 直接使用子Agent 工具时 project 参数路由用；同名去重（首个生效）；末尾附内置项目。 */
 export function allPresetProjects(deps: PromptDeps, user: string, env: Record<string, string>): PresetProject[] {
   const out: PresetProject[] = []
   const seen = new Set<string>()
@@ -81,7 +100,7 @@ export function allPresetProjects(deps: PromptDeps, user: string, env: Record<st
       out.push(p)
     }
   }
-  return out
+  return withBuiltinProjects(deps, user, out)
 }
 
 /** 预置项目清单注记（子Agent 提示词开头动态追加：名称/说明/路径，供模型按名使用 project 参数）。 */
@@ -114,7 +133,7 @@ export function agentDescription(deps: PromptDeps, d: { name: string; descriptio
 export async function buildAgentSection(deps: PromptDeps, def: SubAgentDef, user: string, env: Record<string, string>, sessionId: string): Promise<string> {
   // 项目内置（特定项目绑定）：会话环境变量 {AGENT_NAME_UPPER}_PROJECT（如 CODE_PROJECT）指定子Agent 的项目根
   const projectRoot = deps.resolveSubAgentProject(user, env, def.name)
-  const presetProjects = deps.presetProjectsFor(user, env, def.name)
+  const presetProjects = withBuiltinProjects(deps, user, deps.presetProjectsFor(user, env, def.name))
   const workNote = projectRoot ? `\n项目根: ${projectRoot}` : `\n工作目录: ${sessionPath(deps.config.gebaiHome, user, sessionId)}/tmp`
   const presetNote = buildPresetNote(def.name, projectRoot, presetProjects)
   const restrictNote = env.CODE_RESTRICT_PROJECTS === "true"
