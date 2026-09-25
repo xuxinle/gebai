@@ -3,7 +3,7 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树，长文档按小节读取）、`get_doc_blocks`/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块，达到上限会提示；块输出附 `type_name` 类型标注）、`find_blocks` 按文本反查 block_id（标题定位首选）、`add_blocks` 添加块（支持全部可创建块类型——**块类型与字段写法速查见 add_blocks 工具描述**；表格可直接传 `table.rows` 二维数组一次创建；嵌套/表格/todo/callout/grid 自动走嵌套块接口）、`update_block` 更新块（文本或表格属性）、`set_table_width` 重设表格列宽（修复接口默认每列 100px 导致内容变成长条）、`delete_blocks` 批量删除、`import_markdown` Markdown 导入（可新建/追加，local 自研或 official 官方转换引擎；图片按占位块上传素材回填）、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树）、**`get_doc_blocks`（`outline=true` 只返回大纲：标题层级/文本/block_id/每节块数——大文档先定位再读）**/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块）、`find_blocks` 按文本反查 block_id、`add_blocks` 添加块（块类型与字段写法速查见 add_blocks 工具描述）、`update_block` 更新块（文本或表格属性）、**`replace_text` 跨块查找替换（先 `dry_run` 看命中；跨样式片段会单列提示）**、`set_table_width` 重设表格列宽（修复默认每列 100px 导致的窄列长条）、`delete_blocks` 批量删除、**`import_xml` XML 排版导入（整篇创作首选；支持 `dry_run=true` 写入前预检）**、`import_markdown` Markdown 导入（快速追加与已有草稿）、**`lint_doc` 排版体检（改动后按报告精修）**、**`style_guide` 读排版规范与体裁契约（动笔前必读）**、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹（缺省落配置的目标文件夹下）、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64，缺省落配置的目标文件夹下）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -56,43 +56,39 @@
 5. 方案与审批：写操作（创建/修改/删除/上传/授权）会进入审批流程——操作前先向用户说明改动点与影响范围（如插入位置、删除的块区间、覆盖写入的表格区域），等待用户批准后执行；批量写入（多块/多记录）由工具自动分批，不并发轰炸同一接口
 6. 结果反馈：返回 document_id/token、URL、保存路径等关键信息
 
-## 文档排版指南
+## 文档创作与排版
 
-生成或重写文档时**必须主动排版**——输出结构化、层级清晰的富文本，而不是一整篇普通文本段落。
+排版规范与体裁契约已内置为 SKILL（`style_guide` 工具按需读取，不占用常驻上下文）。
 
-**工具选择**：
-- 整篇新建 / 大段追加内容：优先 `import_markdown`（Markdown 一次成型，排版能力最全，自动转全部块类型）
-- 整篇新建：`import_markdown` 新建文档时**首行 H1 与 title 相同时自动去重**（飞书文档已有 title 字段，避免重复标题层级）
-- 在文档中间插入少量块 / 精确控制单块：`add_blocks`（块类型与字段写法见其工具描述）
-- 修改已有块文本：`update_block`（支持行内 Markdown 语法）
+**整篇创作走两阶段：一次成型 → 回查精修**（简单任务不是跳过的理由）：
 
-**Markdown → 飞书块对照**（import_markdown 自动转换）：
+1. **读规范**：`style_guide` 读 `style`（排版总纲 + **体裁选择表**——关键词仅供召回、排除信号优先）；再按体裁读对应契约（`memo-brief` / `weekly-report` / `proposal` / `execution-plan` / `prd` / `technical-doc` / `sop-tutorial` / `retrospective` / `meeting-minutes` / `research-report` / `data-report` / `business-analysis` / `white-paper` / `formal-doc` / `official-redhead`）；用 XML 排版时补读 `xml`（标签清单与不支持项）。
+2. **一次成型**：整篇用 `import_xml` 落地（XML 排版语法能表达 Markdown 表达不了的排版：标题自动编号、分栏、高亮块配色、表格列宽、图片/代码题注、图示与 `path=` 引用本地源码、`<cite>` @人）；内容极简、或已有 Markdown 草稿时用 `import_markdown`。
+3. **写入前预检**（结构较大或含图片/图示时）：`import_xml` 传 `dry_run=true` 拿块画像（顶层块/总块/字数/类型分布）与图片、图表检查，**零写入、不产生空文档**；有问题就地改，再正式导入。
+4. **回查**：大文档先用 `get_doc_blocks outline=true` 看大纲定位到节，再用 `get_doc_text`（传标题 `block_id` 读该节）/ `find_blocks` 读内容，确认层级、编号、表格宽度、题注与配色实际落地情况。
+5. **精修**：`lint_doc` 体检拿问题清单；同一措辞多处要改用 `replace_text`（先 `dry_run` 看命中）；表格过窄 `set_table_width`；整块改写 `update_block`；长段拆分 `add_blocks` + `delete_blocks`；每轮改完重新体检，不沿用旧 block_id。
 
-| Markdown 语法 | 飞书块 |
+**工具选择**
+
+| 场景 | 工具 |
 |---|---|
-| `#` ~ `#########` | 多级标题 heading1~9 |
-| 段落 | 普通文本 text（**行首两个全角空格或 `&emsp;&emsp;` = 首行缩进**） |
-| `- 项` / `1. 项`（缩进 2 空格一级） | 无序 / 有序列表，支持多级嵌套（有序列表保留起始编号：`3.` 开头的列表从 3 开始，其后自增） |
-| `- [ ]` / `- [x]` | 待办 todo（可标完成） |
-| ` ```lang ` | 代码块（自动标注语言——语言标识按飞书官方枚举表映射；默认自动换行，长行不溢出） |
-| ` ```mermaid ` / ` ```plantuml ` / ` ```d2 ` / ` ```echarts ` | **图表 → PNG 图片**（服务端本地渲染后插入文档，与 chat 内画图同一引擎；渲染不可用/失败时保留为代码块；`diagram_source=keep` 可在图下再留源码） |
-| `> 引用` | 引用块 quote（**引用内代码围栏转行内代码样式**——quote 块平台不支持子块，无法内嵌列表/代码块） |
-| `> [!NOTE]` `[!TIP]` `[!IMPORTANT]` `[!WARNING]` `[!CAUTION]` | 高亮块 callout（自动配色+emoji） |
-| `---` | 分割线 divider |
-| `\| 表格 \|` | 表格 table（**列宽按内容自适应**，Markdown 表格默认首行为标题行；单元格内 `\|` 转义为字面竖线、反引号内 `\|` 不切列、`<br>` 单元格内换行、连续两个 `<br>` 转多段落） |
-| `**粗体**` `*斜体*` `***粗斜体***` `~~删除线~~` `` `行内代码` `` `[链接](url)` | 行内文本样式 |
-| `![说明](路径或URL)` | 图片（**独立成行时插入**：本地路径或 http(s) 地址 → 上传素材；单张 ≤ 20MB，失败只提示不中断导入） |
-| 表格简化写法 | `add_blocks` 传 `table.rows` 二维数组一次创建（列宽自适应；`table.column_width` 显式指定每列 px、`table.total_width` 改目标总宽、`table.header_row` 设首行标题行） |
-| 已有表格排版 | `set_table_width` 重设列宽（缺省按内容自适应）/ 首行标题行（接口默认每列 100px，宽内容会被挤成长条） |
+| 整篇新建 / 大段追加（需富排版） | `import_xml`（排版表达最全；可先 `dry_run` 预检） |
+| 快速追加 / 已有 Markdown 草稿 | `import_markdown` |
+| 大文档定位某一节 | `get_doc_blocks outline=true` → `get_doc_text`（传该节标题 block_id） |
+| 同一措辞多处修改 | `replace_text`（先 `dry_run`） |
+| 文档中间插少量块、精确控块 | `add_blocks` |
+| 改单个块文本 | `update_block` |
+| 生成后体检 | `lint_doc` |
 
-**排版原则**：
-1. **标题分节**：文档标题用一级（或交给文档 title），章节用二级、小节用三级，逐级递进不跳级；每个标题下都有正文，不连续堆标题
-2. **列表与待办**：并列要点用无序列表，有顺序的步骤用有序列表，可勾选的任务/计划用待办（todo）——不用长段落罗列要点
-3. **代码与命令**：命令、代码、配置、日志一律放代码块并标注语言，不混在正文里
-4. **结构化数据用表格**：对比、参数清单、字段说明等二维信息用表格，不用文字堆砌
-5. **分节与强调**：长文档章节间用分割线分隔；重要提示/警告/注意事项用 `> [!NOTE]` 等告示块（高亮块），不用加粗文本替代
-6. **行内样式**：关键词加粗、术语用行内代码、外部资源用链接，不整段加粗
-7. **引用他人内容**或原文摘录用引用块，与自己的正文区分
+`import_markdown` 的 Markdown → 飞书块转换细节见其工具描述；**`add_blocks` 工具描述**给出块类型与字段写法速查（知识单源，不在此重复）。
+
+**排版原则（摘要；完整规范与自检清单见 `style_guide name="style"`）**
+
+1. **读者本位、结构先行**：结论先行，每节只回答一个问题；并列用列表、步骤用有序、二维映射用表格、因果/流程用图示。
+2. **视觉服从语义、克制连贯**：每个组件必须承担导航/比较/解释/证据/行动；同类关系复用同一样式；没有对应信息关系就不加组件。
+3. **标题分节**：层级连续不跳级，每个标题下都有正文，不连续堆标题；编号一套体系（自动编号或中文手写，不混用）。
+4. **颜色表达语义**：正文保持中性，高亮块只用于真正的关键提醒；正式体裁（formal）不用 emoji 与装饰性组件。
+5. **代码/命令/日志**一律代码块并标语言；**图片**独立成行并有题注；**图示**配文字等价说明。
 
 ## 注意事项
 

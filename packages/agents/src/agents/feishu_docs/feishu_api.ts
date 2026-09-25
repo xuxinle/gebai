@@ -1,6 +1,9 @@
 import type {  Tool, ToolContext, ToolResult, DiagramFormat  } from "@gebai/sdk"
+import { statSync, readFileSync } from "node:fs"
 import { truncate } from "@gebai/sdk/node"
 import type { ToolSchema } from "@gebai/sdk"
+import { xmlToBlocks } from "./docx_xml"
+import { readStyleDoc, styleDocList } from "./styles"
 import { feishuFetch } from "../../core/shared/tls"
 import {
   AUTH_AUTHORIZE_URL,
@@ -729,9 +732,10 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getDocBlocks = tool(
     "get_doc_blocks",
-    "获取文档全部块（含块类型/文本元素/子块 id 的富结构 JSON，每块附 type_name 类型标注）。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
+    "获取文档全部块（含块类型/文本元素/子块 id 的富结构 JSON，每块附 type_name 类型标注）。**`outline=true` 只返回大纲**（标题层级/文本/block_id/每节顶层块数）——大文档先看目录定位小节，再用 get_doc_text 传该标题 block_id 读整节。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
     {
       document_id: { type: "string" },
+      outline: { type: "boolean", description: "只返回文档大纲（标题清单 + block_id + 每节顶层块数），用于先定位再按节读取（默认 false 返回全部块）" },
       page_token: { type: "string", description: "分页标记（可选）" },
       page_size: { type: "number", description: "每页块数，默认 100" },
       page_all: { type: "boolean", description: "自动翻页取全部块（默认 false，上限 2000）" },
@@ -739,6 +743,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     ["document_id"],
     async (args, ctx) => {
       const docId = String(args.document_id)
+      if (args.outline === true) {
+        const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
+        const { entries } = docOutline(items)
+        if (!entries.length) return { output: `文档没有标题（共 ${items.length} 个块）——建议先按读者任务分节加标题，再用本模式定位` }
+        const lines = entries.map((e) => `${"  ".repeat(Math.max(0, e.level - 1))}- h${e.level} ${e.text || "(无标题文本)"}  [${e.blockId}] 节内块 ${e.sectionBlocks}`)
+        const capNote = truncated ? "；⚠️ 已达 2000 块读取上限，大纲可能不完整" : ""
+        return { output: `文档大纲（${entries.length} 个标题${capNote}）：\n${lines.join("\n")}\n\n下一步：用 get_doc_text 传某个标题的 block_id 读整节，或用 find_blocks 找关键词定位。` }
+      }
       if (args.page_all === true) {
         const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, num(args.page_size, 100), 2000)
         // 上限提示放在 JSON 之后另起一行（大 JSON 会被截断，尾部行保留提示）
@@ -824,7 +836,7 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const addBlocks = tool(
     "add_blocks",
-    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（**按飞书官方枚举表转数字**，未知回退 PlainText）、默认 `wrap=true` 自动换行（可传 `code.style.wrap=false` 关闭）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文放 children 子块**——`callout.elements` 会被服务端忽略；**颜色/emoji 为 callout 顶层字段**（background_color/border_color/text_color 数字枚举、emoji_id）——`callout.style` 包裹会被忽略并回落默认配色；**必须至少一个子块**（空内容补空 text 子块，否则报 1770041）；text 快捷写法自动生成子块）；24 grid 分栏（grid.column_size 2~5 必填，children=[25 grid_column 块，每列一个]；**grid_column 不带 width_ratio（实测 9499 invalid parameter，列宽默认均分）**，调整列宽可 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [全列宽度数组]}`——列内内容创建后经 update_block 填充（先 get_doc_blocks 查列内默认文本块 id），带 children 会报 field validation failed）。\n- **表格列宽自动按内容自适应**（汉字计双宽、总宽 730px、单列下限 100px）：可用 table.column_width 显式指定每列 px（长度须等于列数）或 table.total_width 改目标总宽，table.header_row 设首行标题行；改**已有表格**的列宽/标题行用 set_table_width。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
+    "在文档指定块下添加子块，单次最多 50 块（超出自动分批）。\n支持的块类型：\n- 文本类：**普通文本用 2 text（1 是 page 根块，不接受 text 内容）**；3~11 heading1~9、12 bullet、13 ordered、14 code、15 quote、17 todo（todo.style.done 标记完成）、22 divider（**divider 直接 divider:{}，不要传空 text**）。字段用类型对应驼峰名（text/heading1/bullet/ordered/code/quote/todo/divider），统一传 text 字段会自动映射；code 块 language 支持语言名（**按飞书官方枚举表转数字**，未知回退 PlainText）、默认 `wrap=true` 自动换行（可传 `code.style.wrap=false` 关闭）。**16 equation 公式块不可经 API 创建（官方创建接口枚举不含 16，实测 99992402）——请改用普通文本块表示公式，或提示用户手动插入公式块**。\n- 表格 31：嵌套写法（table 带 children=[table_cell 块]）或简化写法 table.rows 二维数组（如 {\"block_type\":31,\"table\":{\"rows\":[[\"列A\",\"列B\"],[\"a1\",\"b1\"]]}}）。\n- 容器类（自动走创建嵌套块接口一次创建，追加到末尾、index 不生效）：19 callout 高亮块（**正文放 children 子块**——`callout.elements` 会被服务端忽略；**颜色/emoji 为 callout 顶层字段**（background_color/border_color/text_color 数字枚举、emoji_id）——`callout.style` 包裹会被忽略并回落默认配色；**必须至少一个子块**（空内容补空 text 子块，否则报 1770041）；text 快捷写法自动生成子块）；24 grid 分栏（grid.column_size 2~5 必填且等于 grid_column 子块数；**每个 grid_column 必须带** `grid_column:{width_ratio:<整数>}` **且至少一个子块**——实测 width_ratio 只接受整数（传 0.5 报 9499）、缺该字段或空列报 1770041；工具会自动把小数权重按比例换算为整数并补空列；列内可直接放段落/列表/待办等块，随分栏一次创建；列宽可再经 api_call 调 PATCH `.../blocks/{grid_id}` 传 `update_grid_column_width_ratio: {width_ratios: [整数权重数组]}` 调整）。\n- **表格列宽自动按内容自适应**（汉字计双宽、总宽 730px、单列下限 100px）：可用 table.column_width 显式指定每列 px（长度须等于列数）或 table.total_width 改目标总宽，table.header_row 设首行标题行；改**已有表格**的列宽/标题行用 set_table_width。\n- **复杂嵌套 JSON 请分批提交（每批少量块）或优先简化写法（text 快捷参数 / table.rows）**——长 JSON 易被模型输出截断导致解析失败。\n- 引用型（需先有云空间资源 token 或外部地址）：35 embed（embed.url 必填）、37 file（file.token）、39 sheet（sheet.token）、43 mindnote（mindnote.token，思维导图/画板）、44 bitable（bitable.token，多维表格）、46 diagram（diagram.diagram_type）。\n- 图片 27 请用 insert_image 工具（三步流程，add_blocks 不支持）；32 table_cell 不可单独创建（须随 table）。",
     {
       document_id: { type: "string" },
       block_id: { type: "string", description: "父块 id（缺省文档根块，追加到末尾）" },
@@ -878,14 +890,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
           if (Number(bo.block_type ?? 0) === BLOCK_TYPE.TABLE && (bo.table as Record<string, unknown> | undefined)?.rows !== undefined) {
             rootId = expandTableRows(bo, bb)
           } else {
-            // grid 修复（实测）：grid_column 带 children 报 field validation failed、width_ratio 报 9499——
-            // 创建时剥离列内容与列宽（只建 grid+grid_column 骨架，列宽默认均分、
-            // 列内默认文本块由飞书自动生成），内容创建后经 update_block 填充
-            const stripped = stripGridColumnContents(bo)
-            if (stripped.fillColumns > 0) {
-              fillNote = `；grid 列内内容已剥离，创建后用 update_block 填充（先 get_doc_blocks 查询列内默认文本块 id）`
+            // grid 归一（实测）：每列补 width_ratio 与空子块——缺一即报 1770041
+            const prepared = prepareGridColumns(bo)
+            if (prepared.filledColumns > 0) {
+              fillNote = `；分栏空列已补空段落（平台要求每列至少一个子块）`
             }
-            rootId = buildGroup(stripped.block, bb)
+            rootId = buildGroup(prepared.block, bb)
           }
           groups.push({ rootId, blocks: bb.blocks.slice(before) })
         }
@@ -997,6 +1007,76 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     },
   )
 
+  const replaceText = tool(
+    "replace_text",
+    "跨块查找替换文本（不改变块结构与行内样式）：先 `dry_run=true` 看命中清单（块 id/类型/次数/预览），确认后正式替换（一次 ``batch_update`` 批量提交，比逐块 update_block 快）。适用场景：同一个术语/名称/口径在全文多处要统一改。**跨样式片段**（命中跨越加粗/链接等样式边界）无法逐段替换，会在报告里单列并给出块 id（改用 update_block 整块重写）。",
+    {
+      document_id: { type: "string" },
+      pattern: { type: "string", description: "要查找的文本（默认按字面匹配；regex=true 时按正则）" },
+      replacement: { type: "string", description: "替换为的文本（空字符串 = 删除命中内容）" },
+      regex: { type: "boolean", description: "pattern 按正则解释（默认 false 字面匹配）" },
+      block_ids: { type: "array", items: { type: "string" }, description: "只在这些块内替换（缺省全文）" },
+      limit: { type: "number", description: "最多更新多少个块（防止一次改太多，缺省不限）" },
+      dry_run: { type: "boolean", description: "只预览命中不写入（默认 false）" },
+    },
+    ["document_id", "pattern", "replacement"],
+    async (args, ctx) => {
+      const docId = String(args.document_id)
+      const { items } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
+      const plan = replaceInBlocks(items, {
+        pattern: String(args.pattern),
+        replacement: String(args.replacement),
+        regex: args.regex === true,
+        blockIds: Array.isArray(args.block_ids) ? (args.block_ids as unknown[]).map((x) => String(x)) : undefined,
+        limit: args.limit !== undefined ? num(args.limit, 0) : undefined,
+      })
+      const hitLines = plan.hits.map((h) => `- [${h.typeName}] ${h.blockId}：${h.count} 处 → ${h.preview}`)
+      const crossLines = plan.crossRun.map((h) => `- [${h.typeName}] ${h.blockId}：命中跨样式片段（${h.count} 处），逐段替换无法完成 → 用 update_block 整块重写；片段：${h.preview}`)
+      if (args.dry_run === true) {
+        if (!plan.total) return { output: `未命中：全文没有与「${String(args.pattern)}」匹配的文本（统计 ${items.length} 个块；可检查大小写/全角半角，或改用 regex=true）` }
+        const parts = [`预演（dry_run，未写入）：共命中 ${plan.total} 处，涉及 ${plan.hits.length + plan.crossRun.length} 个块`]
+        if (hitLines.length) parts.push(`可替换 ${plan.hits.length} 个块：\n${hitLines.join("\n")}`)
+        if (crossLines.length) parts.push(`需手工处理 ${plan.crossRun.length} 个块：\n${crossLines.join("\n")}`)
+        if (plan.skipped) parts.push(`因 limit 跳过 ${plan.skipped} 个块`)
+        parts.push("确认无误后用 dry_run=false 正式替换。")
+        return { output: parts.join("\n") }
+      }
+      if (!plan.updates.length) return { output: `未执行替换：可替换命中 0 处${plan.crossRun.length ? `（有 ${plan.crossRun.length} 个块命中跨样式片段，需用 update_block 手工改）` : ""}` }
+      let ok = 0
+      const failures: string[] = []
+      for (let i = 0; i < plan.updates.length; i += 20) {
+        const batch = plan.updates.slice(i, i + 20)
+        try {
+          await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/batch_update`, {
+            method: "PATCH",
+            body: { requests: batch.map((u) => ({ block_id: u.blockId, update_text_elements: { elements: u.elements } })) },
+          })
+          ok += batch.length
+        } catch (err) {
+          // 整批失败时逐个重试（定位到具体块，并把失败块如实报出，不整批丢弃）
+          for (const u of batch) {
+            try {
+              await api(ctx, `/open-apis/docx/v1/documents/${docId}/blocks/${u.blockId}`, {
+                method: "PATCH",
+                body: { block_id: u.blockId, update_text_elements: { elements: u.elements } },
+              })
+              ok++
+            } catch (err2) {
+              failures.push(`${u.blockId}（${(err2 as Error).message.slice(0, 120)}）`)
+            }
+          }
+        }
+        if (i + 20 < plan.updates.length) await new Promise((r) => setTimeout(r, 350))
+      }
+      const parts = [`✓ 已替换 ${ok}/${plan.updates.length} 个块（共 ${plan.total} 处命中）`]
+      if (failures.length) parts.push(`未成功 ${failures.length} 个：${failures.join("；")}`)
+      if (plan.crossRun.length) parts.push(`跨样式片段未处理 ${plan.crossRun.length} 个块：${plan.crossRun.map((h) => h.blockId).join("、")}（用 update_block 整块重写）`)
+      if (plan.skipped) parts.push(`因 limit 跳过 ${plan.skipped} 个块`)
+      parts.push("建议：重新跑 lint_doc 确认无回归。")
+      return { output: parts.join("\n") }
+    },
+  )
+
   const setTableWidth = tool(
     "set_table_width",
     "重设文档中表格的列宽——修复接口默认列宽（每列 100px）导致的窄列长条。columns 缺省时按单元格内容自适应分配（汉字计双宽、总宽 730px、单列下限 100px，与 Markdown 导入表格同一算法）；total_width 指定自适应目标总宽；columns 显式指定每列宽度（px，长度须等于列数）。接口一次只能改一列，工具内部逐列串行提交（遵守文档编辑 3 次/秒限频）。",
@@ -1091,6 +1171,154 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     return { count: groups.length, relations }
   }
 
+  /** 图表占位块渲染 + 图片素材回填的共享管线（import_markdown / import_xml 共用）：
+   *  渲染图表占位块（ctx.renderDiagram；渲染器缺失或失败时就地降级为同语言代码块，源码不丢）
+   *  → 插入块组 → 按 block_id 关系回填图片素材（单条失败只记录，不中断整篇导入）。 */
+  async function insertWithMedia(
+    ctx: ToolContext,
+    docId: string,
+    parent: string,
+    groups: BlockGroup[],
+    opts: { keepDiagramSource?: boolean } = {},
+  ): Promise<{ count: number; images: Array<{ src: string; ok: boolean; note: string }>; diagrams: Array<{ format: string; ok: boolean; note: string }> }> {
+    const images: Array<{ src: string; ok: boolean; note: string }> = []
+    const diagrams: Array<{ format: string; ok: boolean; note: string }> = []
+    const renderer = (ctx as ToolContext & DiagramRendererCtx).renderDiagram
+    const prepared: BlockGroup[] = []
+    let srcSeq = 0
+    for (const g of groups) {
+      prepared.push(g)
+      for (const block of g.blocks) {
+        const format = block._diagram_format
+        if (typeof format !== "string") continue
+        const code = String(block._diagram_code ?? "")
+        const degrade = (reason: string): void => {
+          // 渲染错误可能多行（如 Mermaid 的 parse error 示意图）：折成单行保持输出紧凑
+          diagrams.push({ format, ok: false, note: reason.replace(/\s+/g, " ").trim() })
+          delete block._diagram_format
+          delete block._diagram_code
+          block.block_type = BLOCK_TYPE.CODE
+          block.code = { style: { language: codeLangEnum(format), wrap: true }, elements: [{ text_run: { content: code } }] }
+        }
+        if (!renderer) {
+          degrade("当前环境未提供服务端图表渲染，已保留为代码块")
+          continue
+        }
+        try {
+          const png = await renderer(code, { format: format as DiagramFormat })
+          block._image_bytes = png
+          block._image_name = `${format}.png`
+          diagrams.push({ format, ok: true, note: `${(png.length / 1024).toFixed(0)}KB` })
+          // keep：图下方再留一份源码代码块（独立块组，插在图之后）——id 用独立前缀避开占位块数字 id
+          if (opts.keepDiagramSource) {
+            const id = `diagsrc${++srcSeq}`
+            prepared.push({ rootId: id, blocks: [{ block_id: id, ...codeBlock(format, code), children: [] }] })
+          }
+        } catch (err) {
+          degrade((err as Error).message.slice(0, 200))
+        }
+      }
+    }
+    // 内联 SVG（<whiteboard type="svg">…</whiteboard>）：转字节后走图片回填管线（与本地图片同一通道）
+    for (const g of prepared) {
+      for (const block of g.blocks) {
+        const svg = block._svg_inline
+        if (typeof svg !== "string") continue
+        delete block._svg_inline
+        block._image_bytes = new TextEncoder().encode(svg)
+        if (typeof block._image_name !== "string") block._image_name = "diagram.svg"
+      }
+    }
+    const res = await insertGroups(ctx, docId, parent, prepared)
+    for (const block of prepared.flatMap((g) => g.blocks)) {
+      const bytes = block._image_bytes instanceof Uint8Array ? block._image_bytes : undefined
+      const src = typeof block._image_src === "string" ? block._image_src : undefined
+      if (!bytes && !src) continue
+      const label = src ?? (typeof block._image_name === "string" ? block._image_name : "图表")
+      const realId = res.relations.get(String(block.block_id))
+      if (!realId) {
+        images.push({ src: label, ok: false, note: "未拿到块 id" })
+        continue
+      }
+      try {
+        if (bytes) {
+          const done = await fillImageBlock(ctx, docId, realId, bytes, typeof block._image_name === "string" ? block._image_name : "diagram.png")
+          images.push({ src: label, ok: true, note: done.width ? `${done.width}×${done.height}` : "已上传" })
+        } else {
+          const { bytes: imgBytes, fileName } = await readImageBytes(ctx, src!)
+          const done = await fillImageBlock(ctx, docId, realId, imgBytes, fileName)
+          images.push({ src: label, ok: true, note: done.width ? `${done.width}×${done.height}` : "已上传" })
+        }
+      } catch (err) {
+        images.push({ src: label, ok: false, note: (err as Error).message })
+      }
+    }
+    return { count: res.count, images, diagrams }
+  }
+
+  /** 写入前媒体预检（dry_run 用）：图片路径/大小/可达性、内联 SVG 合法性、图表试渲染。
+   *  只返回问题清单，不发写入请求——把错在产生空文档之前就暴露出来。 */
+  async function precheckMedia(
+    ctx: ToolContext,
+    blocks: Array<Record<string, unknown>>,
+    renderer: ((code: string, opts?: { format?: DiagramFormat }) => Promise<Uint8Array>) | undefined,
+    keepSource: boolean,
+  ): Promise<string[]> {
+    const problems: string[] = []
+    const images: string[] = []
+    const diagrams: Array<{ format: string; code: string }> = []
+    let svgCount = 0
+    const walk = (list: Array<Record<string, unknown>>): void => {
+      for (const b of list) {
+        const src = b._image_src
+        if (typeof src === "string") images.push(src)
+        if (typeof b._svg_inline === "string") svgCount++
+        if (typeof b._diagram_format === "string") diagrams.push({ format: b._diagram_format, code: String(b._diagram_code ?? "") })
+        const kids = b.children
+        if (Array.isArray(kids)) walk(kids as Array<Record<string, unknown>>)
+      }
+    }
+    walk(blocks)
+    const maxBytes = 20 * 1024 * 1024
+    for (const src of images) {
+      if (/^https?:\/\//i.test(src)) {
+        try {
+          const res = await deps.fetchFn(src, { signal: AbortSignal.timeout(8000) })
+          if (!res.ok) problems.push(`网络图片不可访问（HTTP ${res.status}）：${src}`)
+          else {
+            const len = Number(res.headers.get("content-length") ?? 0)
+            if (len > maxBytes) problems.push(`网络图片超过 20MB 上限：${src}`)
+          }
+        } catch (err) {
+          problems.push(`网络图片下载失败（网络不可达或超时）：${src}（${(err as Error).message.slice(0, 80)}）`)
+        }
+        continue
+      }
+      try {
+        const st = statSync(ctx.resolvePath(src))
+        if (!st.isFile()) problems.push(`图片路径不是文件：${src}`)
+        else if (st.size === 0) problems.push(`图片文件为空：${src}`)
+        else if (st.size > maxBytes) problems.push(`图片超过 20MB 上限：${src}（${(st.size / 1024 / 1024).toFixed(1)}MB）`)
+      } catch {
+        problems.push(`图片文件不存在（相对当前工作目录解析）：${src}`)
+      }
+    }
+    if (svgCount > 0) problems.push(`内含 ${svgCount} 个内联 SVG：将作为图片插入（保真显示，不可编辑为画板）——确认这是预期效果`)
+    for (const { format, code } of diagrams) {
+      if (!renderer) {
+        problems.push(`当前环境未提供图表渲染（${format}）——正式导入会降级为代码块`)
+        continue
+      }
+      try {
+        const png = await renderer(code, { format: format as DiagramFormat })
+        problems.push(`[信息] ${format} 图表可渲染（${(png.length / 1024).toFixed(0)}KB）${keepSource ? "；diagram_source=keep 会在图下附源码" : ""}`)
+      } catch (err) {
+        problems.push(`${format} 图表渲染失败（会降级为代码块）：${(err as Error).message.replace(/\s+/g, " ").slice(0, 160)}`)
+      }
+    }
+    return problems
+  }
+
   const importMarkdown = tool(
     "import_markdown",
     "将 Markdown 文本导入为飞书文档：不传 document_id 则新建文档（title 必填，**首行 H1 与 title 重复时自动去重**），否则追加到现有文档末尾。自动转换：多级标题（#~#########，1~9 级）/段落（**行首两个全角空格 = 首行缩进**）/有序无序列表（**缩进嵌套**，每 2 空格或 1 tab 一级；**有序列表保留起始编号**）/任务列表（- [ ] / - [x]）/代码块（按官方枚举表标注语言、默认自动换行）/**图表围栏（```mermaid / ```plantuml / ```d2 / ```echarts 代码块）→ 服务端本地渲染为 PNG 图片插入文档（无需联网；渲染不可用或失败时保留为代码块；diagram_source=keep 可在图下再留源码）**/引用（**引用内代码围栏转行内代码样式**——quote 块平台不支持子块）/GitHub 告示（`> [!NOTE]`/`[!TIP]`/`[!IMPORTANT]`/`[!WARNING]`/`[!CAUTION]` → 高亮块 callout，自动配色）/表格（列宽自适应、首行标题行；**单元格内 `\|` 为字面竖线、反引号内 `|` 不切列，`<br>` 单元格内换行、连续两个 `<br>` 转多段落**）/**图片（独立成行的 `![说明](本地路径或URL)` → 上传素材插入，单张 ≤20MB）**/行内加粗斜体粗斜体删除线行内代码链接。**生成整篇文档或大段内容时优先用本工具**（Markdown 一次成型，排版能力最全）。返回 document_id。",
@@ -1122,76 +1350,12 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       let engineNote = ""
       const images: Array<{ src: string; ok: boolean; note: string }> = []
       const diagrams: Array<{ format: string; ok: boolean; note: string }> = []
-      const keepSource = args.diagram_source === "keep"
-      /** 渲染图表围栏：调服务端渲染器（ctx.renderDiagram）产出 PNG 字节挂到占位块（`_image_bytes`）；
-       *  渲染器缺失（受限环境）或渲染失败时就地把占位块降级为同语言代码块（源码不丢，导入不中断）。 */
-      const prepareDiagrams = async (groups: BlockGroup[]): Promise<BlockGroup[]> => {
-        const renderer = (ctx as ToolContext & DiagramRendererCtx).renderDiagram
-        const out: BlockGroup[] = []
-        let srcSeq = 0
-        for (const g of groups) {
-          out.push(g)
-          for (const block of g.blocks) {
-            const format = block._diagram_format
-            if (typeof format !== "string") continue
-            const code = String(block._diagram_code ?? "")
-            const degrade = (reason: string): void => {
-              // 渲染错误可能多行（如 Mermaid 的 parse error 示意图）：折成单行保持输出紧凑
-              diagrams.push({ format, ok: false, note: reason.replace(/\s+/g, " ").trim() })
-              delete block._diagram_format
-              delete block._diagram_code
-              block.block_type = BLOCK_TYPE.CODE
-              block.code = { style: { language: codeLangEnum(format), wrap: true }, elements: [{ text_run: { content: code } }] }
-            }
-            if (!renderer) {
-              degrade("当前环境未提供服务端图表渲染，已保留为代码块")
-              continue
-            }
-            try {
-              const png = await renderer(code, { format: format as DiagramFormat })
-              block._image_bytes = png
-              block._image_name = `${format}.png`
-              diagrams.push({ format, ok: true, note: `${(png.length / 1024).toFixed(0)}KB` })
-              // keep：图下方再留一份源码代码块（独立块组，插在图之后）——id 用独立前缀避开占位块数字 id
-              if (keepSource) {
-                const id = `diagsrc${++srcSeq}`
-                out.push({ rootId: id, blocks: [{ block_id: id, ...codeBlock(format, code), children: [] }] })
-              }
-            } catch (err) {
-              degrade((err as Error).message.slice(0, 200))
-            }
-          }
-        }
-        return out
-      }
-      /** 插入块组并按占位块回填图片/图表素材（单个失败只记录，不中断整篇导入）。 */
+      /** 导入管线：图表渲染 + 图片回填（与 import_xml 共用 insertWithMedia） */
       const runImport = async (groups: BlockGroup[]): Promise<void> => {
-        const prepared = await prepareDiagrams(groups)
-        const res = await insertGroups(ctx, docId, parent, prepared)
+        const res = await insertWithMedia(ctx, docId, parent, groups, { keepDiagramSource: args.diagram_source === "keep" })
         count = res.count
-        for (const block of prepared.flatMap((g) => g.blocks)) {
-          const bytes = block._image_bytes instanceof Uint8Array ? block._image_bytes : undefined
-          const src = typeof block._image_src === "string" ? block._image_src : undefined
-          if (!bytes && !src) continue
-          const label = src ?? (typeof block._image_name === "string" ? block._image_name : "图表")
-          const realId = res.relations.get(String(block.block_id))
-          if (!realId) {
-            images.push({ src: label, ok: false, note: "未拿到块 id" })
-            continue
-          }
-          try {
-            if (bytes) {
-              const done = await fillImageBlock(ctx, docId, realId, bytes, typeof block._image_name === "string" ? block._image_name : "diagram.png")
-              images.push({ src: label, ok: true, note: done.width ? `${done.width}×${done.height}` : "已上传" })
-            } else {
-              const { bytes: imgBytes, fileName } = await readImageBytes(ctx, src!)
-              const done = await fillImageBlock(ctx, docId, realId, imgBytes, fileName)
-              images.push({ src: label, ok: true, note: done.width ? `${done.width}×${done.height}` : "已上传" })
-            }
-          } catch (err) {
-            images.push({ src: label, ok: false, note: (err as Error).message })
-          }
-        }
+        images.push(...res.images)
+        diagrams.push(...res.diagrams)
       }
       if (args.engine === "official") {
         try {
@@ -1244,6 +1408,130 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
         : ""
       const folderDash = createdDoc ? folderNote(ctx, args.folder_token) : ""
       return { output: `✓ 已导入 ${count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${diagramNote}${imageNote}${engineNote}${folderDash}` }
+    },
+  )
+
+  const importXml = tool(
+    "import_xml",
+    "将 XML 排版语法（类 HTML）一次导入为飞书文档：不传 document_id 则新建（标题取参数或 XML 内 `<title>`）。**整篇创作首选**——相比 import_markdown 多出：标题自动编号（`seq=\"auto\"` → 1 / 1.1 / 1.1.1）、分栏 `<grid>`、高亮块配色 `<callout>`、表格列宽 `<colgroup>`、图片/代码题注、`<whiteboard type=\"mermaid\">` 图示（也支持 `path=\"@./a.mmd\"` 引用本地源码与 `type=\"svg\"` 直传）、`<cite type=\"user\" user-id=\"ou_…\"/>` @人。动笔前先 style_guide 读 style 与对应体裁契约；标签清单见 style_guide(name=\"xml\")。**结构较大或含图片/图示时先传 `dry_run=true` 预检**（出块画像与图片/图表检查，零写入，不创建空文档）；导入后跑 lint_doc 体检并精修。返回 document_id 与降级说明。",
+    {
+      content: { type: "string", description: "XML 排版内容（`<title>` / `<h1 seq=\"auto\">` / `<p>` / `<ul>` / `<table>` / `<callout>` / `<grid>` / `<img>` / `<whiteboard>` / `<cite>` 等）" },
+      document_id: { type: "string", description: "目标文档（缺省新建；传则追加到文末）" },
+      title: { type: "string", description: "新建时的文档标题（缺省取 XML 内 <title>，再退到「未命名文档」）" },
+      folder_token: { type: "string", description: "新建时的目标文件夹 token（可选；缺省用 FEISHU_DOCS_FOLDER_URL）" },
+      diagram_source: { type: "string", description: "图表源码保留策略：hide（默认）或 keep（图下方再留源码代码块）" },
+      dry_run: { type: "boolean", description: "只做预检不写入（默认 false）：解析 XML + 出块画像（顶层块数/字数/类型分布）+ 检查图片路径与大小、试渲染图表，返回问题清单——用于写入前把错就地改掉" },
+    },
+    ["content"],
+    async (args, ctx) => {
+      // path= 引用的本地文件（图表源码 / SVG）在解析阶段读入；读取失败只记说明，不中断
+      const readLocal = (p: string): string | undefined => {
+        try {
+          return readFileSync(ctx.resolvePath(p), "utf8")
+        } catch {
+          return undefined
+        }
+      }
+      const parsed = xmlToBlocks(String(args.content), { title: args.title !== undefined ? String(args.title) : undefined, readFile: readLocal })
+      if (args.dry_run === true) {
+        const profile = xmlProfile(parsed.blocks)
+        const problems: string[] = []
+        const typeLines = Object.entries(profile.counts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k} ${v}`)
+          .join(" / ")
+        // 图片与本地图表文件预检
+        for (const issue of await precheckMedia(ctx, parsed.blocks, (ctx as ToolContext & DiagramRendererCtx).renderDiagram, args.diagram_source === "keep")) problems.push(issue)
+        const head = `预检通过项：顶层块 ${profile.topLevel}、总块 ${profile.total}、字数约 ${profile.chars}（${typeLines}）${parsed.title ? `、标题「${parsed.title}」` : "、⚠️ 未提供标题（新建时需传 title 参数）"}`
+        const notes = parsed.notes.length ? `\n排版说明:\n- ${parsed.notes.join("\n- ")}` : ""
+        const body = problems.length ? `\n待处理 ${problems.length} 项:\n- ${problems.join("\n- ")}` : "\n未发现阻断问题，可直接正式导入（dry_run 置为 false）。"
+        return { output: `预检（dry_run，未写入任何内容）：\n${head}${body}${notes}\n建议：修完问题后正式导入（dry_run=false），再跑 lint_doc 做排版体检。` }
+      }
+      let docId = args.document_id ? String(args.document_id) : ""
+      const createdDoc = !docId
+      const title = String(args.title ?? parsed.title ?? "未命名文档")
+      if (!docId) {
+        const created = (await api(ctx, "/open-apis/docx/v1/documents", {
+          method: "POST",
+          body: { title, folder_token: targetFolder(ctx, args.folder_token) },
+        })) as { document?: { document_id: string } }
+        docId = created.document?.document_id ?? ""
+        if (!docId) throw new Error("创建文档失败：响应缺少 document_id")
+      }
+      const parent = await rootBlockId(ctx, docId)
+      // 块描述 → 块组：走与 add_blocks 同一套归一（callout 配色与子块、code 语言、todo done、表格列宽）+ grid 列补全
+      const bb = new BlockBuilder(0)
+      const groups: BlockGroup[] = []
+      for (const desc of parsed.blocks) {
+        const gridErr = gridStructureError(desc)
+        if (gridErr) throw new Error(gridErr)
+        const before = bb.counter
+        const normalized = prepareGridColumns(normalizeBlockFields(desc)).block
+        const rootId =
+          Number(normalized.block_type ?? 0) === BLOCK_TYPE.TABLE && (normalized.table as Record<string, unknown> | undefined)?.rows !== undefined
+            ? expandTableRows(normalized, bb)
+            : buildGroup(normalized, bb)
+        groups.push({ rootId, blocks: bb.blocks.slice(before) })
+      }
+      const res = await insertWithMedia(ctx, docId, parent, groups, { keepDiagramSource: args.diagram_source === "keep" })
+      const missedDiagrams = res.diagrams.filter((x) => !x.ok)
+      const diagramNote = res.diagrams.length
+        ? `\n图表: ${res.diagrams.length - missedDiagrams.length}/${res.diagrams.length} 已渲染为图片${missedDiagrams.length ? `（未渲染已保留为代码块: ${missedDiagrams.map((x) => x.format).join("、")}）` : ""}`
+        : ""
+      const failedImages = res.images.filter((x) => !x.ok)
+      const imageNote = res.images.length
+        ? `\n图片: ${res.images.length - failedImages.length}/${res.images.length} 已插入${failedImages.length ? `（未插入: ${failedImages.map((x) => `${x.src}（${x.note}）`).join("；")}）` : ""}`
+        : ""
+      const notes = parsed.notes.length ? `\n排版说明:\n- ${parsed.notes.join("\n- ")}` : ""
+      const folderDash = createdDoc ? folderNote(ctx, args.folder_token) : ""
+      return {
+        output: `✓ 已导入 ${res.count} 个顶层块 → document_id: ${docId}\nURL: https://feishu.cn/docx/${docId}${diagramNote}${imageNote}${notes}${folderDash}\n建议：接着跑 lint_doc 体检，按报告精修（表格列宽/层级/长段落）。`,
+      }
+    },
+  )
+
+  const lintDoc = tool(
+    "lint_doc",
+    "排版体检：读取文档块结构，按排版规范逐条检查（标题层级跳级/连续标题/空标题、超长段落、表格列宽过窄与缺表头、代码块缺语言、列表嵌套过深、分割线过密、高亮块滥用、纯文字墙、空段落）并返回问题清单（block_id + 问题 + 修复建议）。生成或改完文档后跑一遍，按报告做最小范围精修（表格用 set_table_width、文本用 update_block、长段拆用 add_blocks/delete_blocks）。",
+    {
+      document_id: { type: "string" },
+      limit: { type: "number", description: "最多返回的问题条数（默认 30）" },
+    },
+    ["document_id"],
+    async (args, ctx) => {
+      const docId = String(args.document_id)
+      const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
+      const { issues, stats } = lintBlocks(items)
+      const limit = args.limit !== undefined ? Math.max(1, Math.min(200, Number(args.limit))) : 30
+      const warn = issues.filter((i) => i.level === "warn").length
+      const info = issues.length - warn
+      const typeSummary = Object.entries(stats.counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k} ${v}`)
+        .join(" / ")
+      const shown = issues.slice(0, limit)
+      const lines = shown.map((i) => `- [${i.level}] ${i.rule}（${i.typeName} ${i.blockId}）：${i.detail} → ${i.fix}`)
+      const more = issues.length > shown.length ? `\n（另有 ${issues.length - shown.length} 条未展示，可传 limit 查看）` : ""
+      const head = `排版体检：${stats.blocks} 个块（${typeSummary}），发现 ${issues.length} 个问题（warn ${warn} / info ${info}）${truncated ? "；块数达到读取上限 2000，报告只覆盖已读取部分" : ""}`
+      if (!issues.length) return { output: `${head}\n未发现排版问题：层级、表格、代码与组件使用均符合规范。` }
+      return { output: `${head}\n${lines.join("\n")}${more}\n建议：先修 warn 项（表格列宽 / 标题层级），再按需处理 info；每轮修改后重新体检，不沿用旧的 block_id。` }
+    },
+  )
+
+  const styleGuide = tool(
+    "style_guide",
+    "读取飞书文档排版规范（SKILL）：不传 name 列出可用文档；传 name 返回全文——`style`（排版总纲：判定原则、视觉策略档位、组件选择表、颜色规范、硬性排版规格、两阶段工作流、交付自检）、`xml`（XML 排版语法与不支持项），以及体裁契约：weekly-report / technical-doc / prd / proposal / retrospective / research-report / data-report / meeting-minutes / sop-tutorial / formal-doc。**整篇创作前必读**：先 style，再对应体裁；写 XML 时补 xml。",
+    { name: { type: "string", description: "文档名（缺省列出全部可用文档）" } },
+    [],
+    async (args) => {
+      const name = args.name !== undefined ? String(args.name).trim() : ""
+      if (!name) {
+        const list = styleDocList().map((d) => `- ${d.name}：${d.summary}`).join("\n")
+        return { output: `可用排版规范文档（用 style_guide name=<名> 读取全文）：\n${list}` }
+      }
+      const doc = readStyleDoc(name)
+      if (!doc) return { output: `❌ 未知规范文档 "${name}"；可用：${styleDocList().map((d) => d.name).join("、")}` }
+      return { output: doc.content }
     },
   )
 
@@ -2025,9 +2313,13 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     find_blocks: findBlocks,
     add_blocks: addBlocks,
     update_block: updateBlock,
+    replace_text: replaceText,
     set_table_width: setTableWidth,
     delete_blocks: deleteBlocks,
     import_markdown: importMarkdown,
+    import_xml: importXml,
+    lint_doc: lintDoc,
+    style_guide: styleGuide,
     export_doc: exportDoc,
     list_files: listFiles,
     create_folder: createFolder,
@@ -3067,31 +3359,51 @@ function expandTableRows(block: Record<string, unknown>, bb: BlockBuilder): stri
  * （descendant 接口要求）；忽略调用方传入的 block_id，强制生成全局唯一 id（防重复引用冲突）。
  * 返回该顶层块的 rootId（块本体已 push 进 bb.blocks）。
  */
-/** grid 骨架化（实测修复）：grid_column 带 children 报 field validation failed、
- *  传 width_ratio 报 9499 invalid parameter——创建时剥离列内容与列宽（只建 grid+grid_column 骨架，
- *  列宽默认均分、列内默认文本块由飞书自动生成），内容创建后经 update_block 填充。
- *  返回剥离了内容的列数。 */
-export function stripGridColumnContents(block: Record<string, unknown>): { block: Record<string, unknown>; fillColumns: number } {
+/**
+ * 分栏列宽比例归一为**整数权重**（实测修复：接口 width_ratio 只接受整数，传 0.5 报
+ * 9499 Invalid parameter value；XML 写法按官方样式用 0~1 小数，这里换算成同比例整数）。
+ * 规则：全为整数则原样；含小数则整体 ×100 取整，再按最大公约数约分（0.5/0.5 → 1/1、0.6/0.4 → 3/2、0.25/0.75 → 1/3）。
+ */
+export function widthRatioWeights(ratios: number[]): number[] {
+  const allInt = ratios.every((r) => Number.isInteger(r) && r > 0)
+  if (allInt) return ratios.map((r) => Math.round(r))
+  const scaled = ratios.map((r) => Math.max(1, Math.round((Number.isFinite(r) && r > 0 ? r : 1) * 100)))
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
+  const g = scaled.reduce((a, b) => gcd(a, b))
+  return g > 1 ? scaled.map((v) => v / g) : scaled
+}
+
+/**
+ * grid 分栏创建前归一（实测修复）：descendant 接口要求**每个 grid_column 带整数 width_ratio 且至少一个子块**
+ * ——缺 width_ratio（或传小数权重）与空列均被拒（1770041 open schema mismatch / 9499 invalid parameter）。
+ * 归一：width_ratio 统一为整数权重（小数按比例换算）；空列补一个空文本子块。返回补全子块的列数。
+ */
+export function prepareGridColumns(block: Record<string, unknown>): { block: Record<string, unknown>; filledColumns: number } {
   const b = { ...block }
-  let fillColumns = 0
+  let filledColumns = 0
   if (Number(b.block_type ?? 0) === BLOCK_TYPE.GRID && Array.isArray(b.children)) {
-    b.children = b.children.map((k) => {
-      const col = { ...(k as Record<string, unknown>) }
-      if (Number(col.block_type ?? 0) === BLOCK_TYPE.GRID_COLUMN) {
-        // 实测 9499 invalid parameter：创建时不传 width_ratio（列宽默认均分）；
-        // grid_column 字段保留为对象（无其他字段时为 {}，符合官方创建 schema）
-        const gc = col.grid_column && typeof col.grid_column === "object" && !Array.isArray(col.grid_column) ? { ...(col.grid_column as Record<string, unknown>) } : {}
-        delete gc.width_ratio
-        col.grid_column = gc
-        if (Array.isArray(col.children) && col.children.length > 0) {
-          delete col.children
-          fillColumns++
-        }
+    const cols = b.children as Array<Record<string, unknown>>
+    const ratios = cols.map((k) => {
+      const gc = (k as Record<string, unknown>).grid_column
+      const raw = gc && typeof gc === "object" && !Array.isArray(gc) ? Number((gc as Record<string, unknown>).width_ratio) : NaN
+      return Number.isFinite(raw) && raw > 0 ? raw : 1
+    })
+    const weights = widthRatioWeights(ratios)
+    b.children = cols.map((k, i) => {
+      const col = { ...k }
+      if (Number(col.block_type ?? 0) !== BLOCK_TYPE.GRID_COLUMN) return col
+      const gc = col.grid_column && typeof col.grid_column === "object" && !Array.isArray(col.grid_column) ? { ...(col.grid_column as Record<string, unknown>) } : {}
+      gc.width_ratio = weights[i] ?? 1
+      col.grid_column = gc
+      const kids = Array.isArray(col.children) ? col.children : []
+      if (!kids.length) {
+        col.children = [{ block_type: BLOCK_TYPE.TEXT, text: { elements: [{ text_run: { content: "" } }] } }]
+        filledColumns++
       }
       return col
     })
   }
-  return { block: b, fillColumns }
+  return { block: b, filledColumns }
 }
 
 /** grid 结构校验（实测 1770041 open schema mismatch）：column_size 必须 2~5 且与 grid_column 子块数一致。 */
@@ -3359,4 +3671,268 @@ export function markdownToBlocks(md: string): BlockGroup[] {
     idBase += 1
   }
   return groups
+}
+
+/** 排版体检问题项。 */
+export interface LintIssue {
+  level: "warn" | "info"
+  rule: string
+  blockId: string
+  typeName: string
+  detail: string
+  fix: string
+}
+
+/** 正文块可读文本（标题/段落/列表/待办/引用/代码；容器块不含）。 */
+function lintText(block: Record<string, unknown>): string {
+  return (blockElements(block) ?? [])
+    .map((e) => String((e as { text_run?: { content?: unknown } }).text_run?.content ?? ""))
+    .join("")
+}
+
+/**
+ * 排版体检（纯函数，供 lint_doc 工具与单测使用）：按文档流顺序检查结构、层级、表格、代码与组件使用。
+ * 报告块 id 与修复动作，使模型能直接做最小范围精修。
+ */
+export function lintBlocks(items: Array<Record<string, unknown>>): { issues: LintIssue[]; stats: { blocks: number; counts: Record<string, number> } } {
+  const counts: Record<string, number> = {}
+  for (const b of items) {
+    const t = blockTypeName(Number(b.block_type ?? 0))
+    counts[t] = (counts[t] ?? 0) + 1
+  }
+  // 按文档流顺序展开（自 page 根块深度优先；无 page 块时按接口返回顺序）
+  const byId = new Map(items.map((b) => [String(b.block_id ?? ""), b]))
+  const order: Array<{ b: Record<string, unknown>; listDepth: number }> = []
+  const seen = new Set<string>()
+  const walk = (id: string, listDepth: number, depth: number): void => {
+    const b = byId.get(id)
+    if (!b || seen.has(id) || depth > 20) return
+    seen.add(id)
+    const type = Number(b.block_type ?? 0)
+    const isList = type === BLOCK_TYPE.BULLET || type === BLOCK_TYPE.ORDERED || type === BLOCK_TYPE.TODO
+    order.push({ b, listDepth })
+    for (const c of (Array.isArray(b.children) ? b.children : []) as unknown[]) walk(String(c), isList ? listDepth + 1 : listDepth, depth + 1)
+  }
+  const page = items.find((b) => Number(b.block_type ?? 0) === 1)
+  if (page) walk(String(page.block_id ?? ""), 0, 0)
+  else for (const b of items) walk(String(b.block_id ?? ""), 0, 0)
+
+  const issues: LintIssue[] = []
+  const push = (level: "warn" | "info", rule: string, b: Record<string, unknown>, detail: string, fix: string): void => {
+    issues.push({ level, rule, blockId: String(b.block_id ?? ""), typeName: blockTypeName(Number(b.block_type ?? 0)), detail, fix })
+  }
+  const isHeading = (t: number): boolean => t >= BLOCK_TYPE.HEADING1 && t <= BLOCK_TYPE.HEADING1 + 8
+  let lastHeadingLevel = 0
+  let headingCount = 0
+  let dividerCount = 0
+  let calloutCount = 0
+  let textCount = 0
+  let richCount = 0
+  let prevWasHeading = false
+
+  for (const { b, listDepth } of order) {
+    const type = Number(b.block_type ?? 0)
+    if (isHeading(type)) {
+      headingCount++
+      const level = type - BLOCK_TYPE.HEADING1 + 1
+      const text = lintText(b).trim()
+      if (!text) push("warn", "空标题", b, "标题没有文字", "update_block 补标题文本，或 delete_blocks 删掉空标题")
+      if (lastHeadingLevel && level > lastHeadingLevel + 1) {
+        push("warn", "标题层级跳级", b, `h${lastHeadingLevel} 之后直接出现 h${level}`, "把该标题降为 h" + (lastHeadingLevel + 1) + "（update_block 无法改块类型：用 add_blocks 重建该标题并删除原块）")
+      }
+      if (prevWasHeading) push("warn", "连续标题", b, "上一个块也是标题，本节没有正文", "补正文，或合并相邻小节")
+      if (level > 4) push("info", "标题层级过深", b, `h${level} 已超过 4 级`, "降级为列表或拆分文档")
+      lastHeadingLevel = level
+      prevWasHeading = true
+      continue
+    }
+    prevWasHeading = false
+    if (type === BLOCK_TYPE.TEXT) {
+      const text = lintText(b)
+      if (!text.trim()) push("warn", "空段落", b, "空文本块残留", "delete_blocks 删除该块")
+      else {
+        textCount++
+        const lines = text.split("\n").length
+        if (text.length > 300 || lines > 6) push("info", "段落过长", b, `${text.length} 字 / ${lines} 行（建议 ≤300 字、≤6 行）`, "拆成多段或用列表/表格承载要点")
+      }
+      continue
+    }
+    if (type === BLOCK_TYPE.CODE) {
+      const codeStyle = (((b.code as Record<string, unknown> | undefined)?.style ?? {}) as { language?: unknown })
+      const lang = Number(codeStyle.language ?? 1)
+      if (!lang || lang === 1) push("info", "代码块缺语言", b, "未标注代码语言（PlainText）", "重新导入该块时补 lang（add_blocks 传 code.style.language）")
+      richCount++
+      continue
+    }
+    if (type === BLOCK_TYPE.TABLE) {
+      const prop = ((b.table as Record<string, unknown> | undefined)?.property ?? {}) as Record<string, unknown>
+      const widths = Array.isArray(prop.column_width) ? (prop.column_width as unknown[]).map((w) => Number(w)) : []
+      const min = widths.length ? Math.min(...widths) : 0
+      const cols = Number(prop.column_size ?? widths.length ?? 0)
+      if (widths.length && min < TABLE_MIN_COLUMN_WIDTH) {
+        push("warn", "表格列宽过窄", b, `${cols} 列，最小列宽 ${min}px（建议 ≥${TABLE_MIN_COLUMN_WIDTH}px）`, "set_table_width 按内容自适应重排")
+      }
+      if (prop.header_row !== true) push("info", "表格缺表头", b, "首行未设为标题行", "set_table_width 传 header_row=true")
+      if (cols > 6) push("info", "表格列过多", b, `${cols} 列`, "拆成多张表，或改用分栏/列表承载")
+      richCount++
+      continue
+    }
+    if (type === BLOCK_TYPE.DIVIDER) {
+      dividerCount++
+      continue
+    }
+    if (type === BLOCK_TYPE.CALLOUT) {
+      calloutCount++
+      richCount++
+      continue
+    }
+    if (type === BLOCK_TYPE.IMAGE || type === BLOCK_TYPE.GRID || type === BLOCK_TYPE.DIAGRAM || type === BLOCK_TYPE.SHEET || type === BLOCK_TYPE.BITABLE) {
+      richCount++
+      continue
+    }
+    if (listDepth > 3) push("info", "列表嵌套过深", b, `嵌套 ${listDepth} 层`, "压平为 2 层以内，深层内容改用表格或独立小节")
+  }
+
+  if (dividerCount > 5) push("info", "分割线过多", { block_id: "-" }, `全文 ${dividerCount} 条分割线`, "只在大的章节切换处保留分割线")
+  if (calloutCount > 10 || (calloutCount > 0 && calloutCount > textCount * 0.5)) {
+    push("info", "高亮块过多", { block_id: "-" }, `高亮块 ${calloutCount} 个 vs 正文段 ${textCount} 个`, "只保留真正需要提醒的高亮块（克制原则）")
+  }
+  if (!headingCount && items.length > 10) push("info", "缺少标题结构", { block_id: "-" }, "整篇没有标题", "按读者任务分节，用 h1/h2 建立层级")
+  if (textCount > 20 && richCount === 0) push("info", "纯文字墙", { block_id: "-" }, `${textCount} 个段落但无表格/图示/高亮块`, "把并列信息改为表格、流程改为图示、关键提醒改高亮块")
+  return { issues, stats: { blocks: items.length, counts } }
+}
+
+/** XML 预检画像（纯函数）：顶层块数、总块数（含子树）、字数（文本元素之和）、块类型分布。 */
+export function xmlProfile(blocks: Array<Record<string, unknown>>): { topLevel: number; total: number; chars: number; counts: Record<string, number> } {
+  const counts: Record<string, number> = {}
+  let total = 0
+  let chars = 0
+  const walk = (list: Array<Record<string, unknown>>): void => {
+    for (const b of list) {
+      total++
+      const name = blockTypeName(Number(b.block_type ?? 0))
+      counts[name] = (counts[name] ?? 0) + 1
+      for (const e of (blockElements(b) ?? []) as Array<{ text_run?: { content?: unknown } }>) chars += String(e.text_run?.content ?? "").length
+      const kids = b.children
+      if (Array.isArray(kids)) walk(kids as Array<Record<string, unknown>>)
+    }
+  }
+  walk(blocks)
+  return { topLevel: blocks.length, total, chars, counts }
+}
+
+/** 文档大纲条目（outline 模式用）。 */
+export interface OutlineEntry {
+  level: number
+  /** 标题文本（含自动编号前缀，若有）。 */
+  text: string
+  blockId: string
+  /** 该节内的顶层块数（到下一个同级或更高级标题为止；0 = 空节）。 */
+  sectionBlocks: number
+}
+
+/**
+ * 文档大纲（纯函数）：按文档流顺序抽取标题并统计每节顶层块数。
+ * 供 get_doc_blocks outline=true 使用——大文档先看目录再按节读取，避免整篇拉取。
+ */
+export function docOutline(items: Array<Record<string, unknown>>): { entries: OutlineEntry[]; hasPage: boolean } {
+  const byId = new Map(items.map((b) => [String(b.block_id ?? ""), b]))
+  const page = items.find((b) => Number(b.block_type ?? 0) === 1)
+  const topLevel = (page
+    ? ((Array.isArray(page.children) ? page.children : []) as unknown[]).map((c) => byId.get(String(c))).filter(Boolean)
+    : items.filter((b) => !b.parent_id)) as Array<Record<string, unknown>>
+  const isHeading = (t: number): boolean => t >= BLOCK_TYPE.HEADING1 && t <= BLOCK_TYPE.HEADING1 + 8
+  const entries: OutlineEntry[] = []
+  let current: OutlineEntry | null = null
+  for (const b of topLevel) {
+    const type = Number(b.block_type ?? 0)
+    if (isHeading(type)) {
+      current = { level: type - BLOCK_TYPE.HEADING1 + 1, text: lintText(b).trim(), blockId: String(b.block_id ?? ""), sectionBlocks: 0 }
+      entries.push(current)
+      continue
+    }
+    if (current) current.sectionBlocks++
+  }
+  return { entries, hasPage: !!page }
+}
+
+/** 替换命中详情。 */
+export interface ReplaceHit {
+  blockId: string
+  typeName: string
+  count: number
+  /** 替换后的片段预览（截断）。 */
+  preview: string
+}
+
+export interface ReplacePlan {
+  /** 待提交的块更新（block_id + 新文本元素）。 */
+  updates: Array<{ blockId: string; elements: Record<string, unknown>[] }>
+  hits: ReplaceHit[]
+  /** 命中跨越多个文本片段（跨样式/跨 run），逐段替换无法完成——需用 update_block 手工改。 */
+  crossRun: ReplaceHit[]
+  /** 全部命中次数（含 crossRun 中的）。 */
+  total: number
+  /** 因 limit 未纳入更新的块数。 */
+  skipped: number
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+/**
+ * 跨块文本替换（纯函数）：逐 text_run 替换以**保留行内样式与链接**。
+ * 飞书把一段文本切成多个 run（样式边界、编辑历史），若命中的字符串跨 run（如加粗尾部 + 普通开头），
+ * 逐段替换无法命中——单独归入 crossRun 提示用 update_block 手工处理，不静默丢失。
+ */
+export function replaceInBlocks(
+  items: Array<Record<string, unknown>>,
+  opts: { pattern: string; replacement: string; regex?: boolean; blockIds?: string[]; limit?: number },
+): ReplacePlan {
+  const source = opts.regex ? opts.pattern : escapeRegExp(opts.pattern)
+  try {
+    new RegExp(source, "g")
+  } catch (err) {
+    throw new Error(`查找模式不合法：${(err as Error).message}${opts.regex ? "" : "（pattern 默认按字面文本处理）"}`)
+  }
+  const allowed = opts.blockIds && opts.blockIds.length ? new Set(opts.blockIds) : null
+  const limit = opts.limit !== undefined && opts.limit > 0 ? Math.floor(opts.limit) : Infinity
+  const updates: ReplacePlan["updates"] = []
+  const hits: ReplaceHit[] = []
+  const crossRun: ReplaceHit[] = []
+  let total = 0
+  let skipped = 0
+  for (const b of items) {
+    const blockId = String(b.block_id ?? "")
+    if (allowed && !allowed.has(blockId)) continue
+    const elements = (blockElements(b) ?? []) as Record<string, unknown>[]
+    if (!elements.length) continue
+    const runText = (e: Record<string, unknown>): string => String((e.text_run as { content?: unknown } | undefined)?.content ?? "")
+    const joined = elements.map(runText).join("")
+    const count = [...joined.matchAll(new RegExp(source, "g"))].length
+    if (!count) continue
+    total += count
+    let runCount = 0
+    const next = elements.map((e) => {
+      const tr = e.text_run as { content?: string } | undefined
+      if (!tr || typeof tr.content !== "string" || !tr.content) return e
+      const replaced = tr.content.replace(new RegExp(source, "g"), opts.replacement)
+      if (replaced === tr.content) return e
+      runCount += [...tr.content.matchAll(new RegExp(source, "g"))].length
+      return { ...e, text_run: { ...tr, content: replaced } }
+    })
+    const typeName = blockTypeName(Number(b.block_type ?? 0))
+    if (runCount === 0) {
+      crossRun.push({ blockId, typeName, count, preview: joined.slice(0, 60) })
+      continue
+    }
+    if (updates.length >= limit) {
+      skipped++
+      continue
+    }
+    updates.push({ blockId, elements: next })
+    hits.push({ blockId, typeName, count: runCount, preview: joined.replace(new RegExp(source, "g"), opts.replacement).slice(0, 60) })
+  }
+  return { updates, hits, crossRun, total, skipped }
 }

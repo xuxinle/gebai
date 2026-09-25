@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, stripGridColumnContents, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, prepareGridColumns, widthRatioWeights, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, xmlProfile, docOutline, replaceInBlocks, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -566,26 +566,38 @@ describe("normalizeBlockFields 块字段自动映射", () => {
       code: { elements: [], style: { language: 49 } },
     })
   })
-  test("stripGridColumnContents：grid_column 剥离 children 与 width_ratio（实测 field validation failed / 9499）", () => {
-    // 有内容列：剥离 children，计入 fillColumns；width_ratio 一律剥离（默认均分）
+  test("widthRatioWeights：小数权重按比例换算为整数（接口只接受整数 width_ratio）", () => {
+    expect(widthRatioWeights([1, 1])).toEqual([1, 1])
+    expect(widthRatioWeights([6, 4])).toEqual([6, 4])
+    expect(widthRatioWeights([0.5, 0.5])).toEqual([1, 1])
+    expect(widthRatioWeights([0.6, 0.4])).toEqual([3, 2])
+    expect(widthRatioWeights([0.7, 0.2, 0.1])).toEqual([7, 2, 1])
+    expect(widthRatioWeights([0.25, 0.75])).toEqual([1, 3])
+    // 非正数兜底：仍返回正整数权重（保证请求合法）
+    expect(widthRatioWeights([0, 1]).every((v) => Number.isInteger(v) && v > 0)).toBe(true)
+  })
+
+  test("prepareGridColumns：每列补整数 width_ratio 与空子块（实测缺一即报 1770041 / 9499）", () => {
     const withContent = {
       block_type: 24,
-      grid: { column_size: 1 },
-      children: [{ block_type: 25, grid_column: { width_ratio: 100 }, children: [{ block_type: 2, text: "内容" }] }],
+      grid: { column_size: 2 },
+      children: [
+        { block_type: 25, grid_column: { width_ratio: 0.6 }, children: [{ block_type: 2, text: "内容" }] },
+        { block_type: 25, grid_column: {} },
+      ],
     }
-    const r1 = stripGridColumnContents(withContent)
-    expect(r1.fillColumns).toBe(1)
-    expect(r1.block.children).toEqual([{ block_type: 25, grid_column: {} }])
-    expect(withContent).toEqual({
-      block_type: 24,
-      grid: { column_size: 1 },
-      children: [{ block_type: 25, grid_column: { width_ratio: 100 }, children: [{ block_type: 2, text: "内容" }] }],
-    }) // 不污染入参
-    // 无内容列/非 grid：原样返回（width_ratio 仍剥离），fillColumns=0
-    const empty = stripGridColumnContents({ block_type: 24, grid: { column_size: 2 }, children: [{ block_type: 25, grid_column: { width_ratio: 50 } }] })
-    expect(empty.fillColumns).toBe(0)
-    expect(empty.block.children).toEqual([{ block_type: 25, grid_column: {} }])
-    expect(stripGridColumnContents({ block_type: 2, text: "x" }).fillColumns).toBe(0)
+    const r = prepareGridColumns(withContent)
+    const cols = r.block.children as Array<Record<string, unknown>>
+    expect(r.filledColumns).toBe(1)
+    // 有内容的列：小数权重换算为整数、子块原样保留
+    expect(cols[0].grid_column).toEqual({ width_ratio: 3 })
+    expect(cols[0].children as unknown[]).toHaveLength(1)
+    // 空列：补权重（与其他列保持相对比例：0.6 : 缺省 1 → 3 : 5）与一个空文本子块
+    expect(cols[1].grid_column).toEqual({ width_ratio: 5 })
+    expect((cols[1].children as Array<Record<string, unknown>>)[0]).toMatchObject({ block_type: 2 })
+    // 不污染入参；非 grid 原样返回
+    expect(withContent.children[1]).toEqual({ block_type: 25, grid_column: {} })
+    expect(prepareGridColumns({ block_type: 2, text: "x" }).filledColumns).toBe(0)
   })
 
   test("gridStructureError：column_size 必须 2~5 且与 grid_column 子块数一致", () => {
@@ -1378,7 +1390,7 @@ describe("add_blocks", () => {
     expect(childCalls).toBe(3)
   })
 
-  test("grid_column 自动剥离 children 与 width_ratio（实测 field validation failed / 9499），输出引导 update 填充", async () => {
+  test("grid_column 自动补 width_ratio 与空子块（实测缺一即报 1770041），列内容随分栏一次创建", async () => {
     const { tools, records } = makeTools((req) => {
       if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
       if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
@@ -1395,13 +1407,17 @@ describe("add_blocks", () => {
     }
     const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify([grid]) }, ctx())
     expect(result.output).toContain("走创建嵌套块接口")
-    expect(result.output).toContain("update_block 填充") // 剥离引导
+    expect(result.output).toContain("分栏空列已补空段落")
     const desc = records.find((r) => r.url.includes("/descendant"))
-    const body = JSON.parse(String(desc!.init?.body)) as { descendants: Array<{ block_type: number; children: string[]; grid_column?: Record<string, unknown> }> }
+    const body = JSON.parse(String(desc!.init?.body)) as { descendants: Array<{ block_id: string; block_type: number; children: string[]; grid_column?: Record<string, unknown>; text?: unknown }> }
     const cols = body.descendants.filter((d) => d.block_type === 25)
     expect(cols).toHaveLength(2)
-    expect(cols.every((c) => c.grid_column !== undefined && c.grid_column.width_ratio === undefined)).toBe(true) // width_ratio 剥离（9499）
-    expect(cols.every((c) => !c.children || c.children.length === 0)).toBe(true) // children 已剥离（不再 field validation failed）
+    // width_ratio 原值保留（缺省时补 1——每列必须带，否则 1770041）
+    expect(cols.map((c) => c.grid_column)).toEqual([{ width_ratio: 50 }, { width_ratio: 50 }])
+    // 每列至少一个子块；列内内容随分栏一次创建（不再剥离）
+    expect(cols.every((c) => c.children.length >= 1)).toBe(true)
+    const texts = body.descendants.filter((d) => d.block_type === 2).map((d) => JSON.stringify(d.text))
+    expect(texts.join()).toContain("左列")
   })
 
   test("grid 结构前置校验：column_size 与列数不一致 / equation 不可创建均报可读错误", async () => {
@@ -1521,7 +1537,7 @@ describe("add_blocks", () => {
     })
     // callout（实测）：callout=19、grid=24、grid_column=25（原 40/33/34 有误）；容器块不能经 children 接口创建，须走 descendant；
     // callout 正文在 children 子块（elements 被忽略）、颜色/emoji 为 callout 顶层字段、至少一个子块（缺则 1770041）；
-    // grid_column 带 children 报 field validation failed、width_ratio 报 9499（均剥离为骨架）
+    // grid_column 带 children 报 field validation failed、width_ratio 报 9499（均为旧实现误判：正确写法是**列带 width_ratio 且非空**）
     const blocks = [
       { block_type: 19, callout: { background_color: 3, elements: [{ text_run: { content: "提示内容" } }] } },
       {
@@ -1535,14 +1551,14 @@ describe("add_blocks", () => {
     ]
     const result = await tools.add_blocks.execute({ document_id: "doxcn1", blocks: JSON.stringify(blocks) }, ctx())
     expect(result.output).toContain("走创建嵌套块接口")
-    expect(result.output).toContain("update_block 填充") // grid_column 内容剥离引导
+    expect(result.output).not.toContain("update_block 填充")
     const desc = records.find((r) => r.url.includes("/descendant"))
     const body = JSON.parse(String(desc!.init?.body)) as {
       children_id: string[]
       descendants: Array<{ block_id: string; block_type: number; children?: string[]; callout?: { background_color?: number; border_color?: number; emoji_id?: string }; grid?: { column_size: number }; grid_column?: Record<string, unknown>; text?: unknown }>
     }
-    // 展开顺序：callout 的正文子块(2) 先于父块入组 → callout(19)；grid 内 grid_column(25) 剥离内容与列宽 → grid(24)
-    expect(body.descendants.map((d) => d.block_type)).toEqual([2, 19, 25, 25, 24])
+    // 展开顺序：子块先于父块入组——callout 正文(2) → callout(19)；每列文本(2) → grid_column(25)；最后 grid(24)
+    expect(body.descendants.map((d) => d.block_type)).toEqual([2, 19, 2, 25, 2, 25, 24])
     const callout = body.descendants.find((d) => d.block_type === 19)!
     // 实测：颜色/emoji 为 callout 顶层字段；正文在 children 子块（elements 被忽略）
     expect(callout.callout).toEqual({ background_color: 3 })
@@ -1554,8 +1570,9 @@ describe("add_blocks", () => {
     expect(grid.children).toHaveLength(2)
     const cols = body.descendants.filter((d) => d.block_type === 25)
     expect(cols).toHaveLength(2)
-    expect(cols.every((c) => c.grid_column !== undefined && c.grid_column.width_ratio === undefined)).toBe(true) // width_ratio 剥离（9499）
-    expect(cols.every((c) => !c.children || c.children.length === 0)).toBe(true) // 剥离：不再 field validation failed
+    // 每列带 width_ratio 且至少一个子块（实测：缺一即报 1770041）
+    expect(cols.every((c) => Number(c.grid_column?.width_ratio) > 0)).toBe(true)
+    expect(cols.every((c) => (c.children?.length ?? 0) >= 1)).toBe(true)
     // 容器块不注入多余 text 字段
     expect(body.descendants.find((d) => d.block_type === 19)?.text).toBeUndefined()
     expect(body.descendants.find((d) => d.block_type === 24)?.text).toBeUndefined()
@@ -2823,11 +2840,11 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
       expect(t.length).toBeLessThanOrEqual(40 - "feishu_docs".length - 1)
     }
     // 写操作全部需审批
-    for (const w of ["create_doc", "import_markdown", "delete_blocks", "upload_file", "add_permission", "api_call", "set_table_width"]) {
+    for (const w of ["create_doc", "import_markdown", "import_xml", "delete_blocks", "upload_file", "add_permission", "api_call", "set_table_width"]) {
       expect(feishuDef.requiresApproval?.[w]).toBe(true)
     }
-    // 读操作/会话配置不审批
-    for (const r of ["get_doc_text", "list_files", "read_sheet", "get_board", "auth_user_authorize", "auth_user_token", "auth_user_status", "auth_user_clear"]) {
+    // 读操作/会话配置/只读体检不审批
+    for (const r of ["get_doc_text", "list_files", "read_sheet", "get_board", "auth_user_authorize", "auth_user_token", "auth_user_status", "auth_user_clear", "lint_doc", "style_guide"]) {
       expect(feishuDef.requiresApproval?.[r]).toBeUndefined()
     }
     expect(feishuDef.preload).toBe(false)
@@ -2850,16 +2867,239 @@ describe("子Agent 定义", () => {  test("feishu_docs 定义完整且工具命�
     // 限制提示：image 走 insert_image、table_cell 不可单独创建
     expect(desc).toContain("insert_image")
     expect(desc).toContain("table_cell 不可单独创建")
-    // 实测缺陷提示：equation 不可创建、callout 正文放子块/颜色emoji 为顶层字段、grid_column 不带 width_ratio
+    // 实测缺陷提示：equation 不可创建、callout 正文放子块/颜色emoji 为顶层字段、grid 每列须带 width_ratio 且非空
     expect(desc).toContain("不可经 API 创建")
     expect(desc).toContain("正文放 children 子块")
     expect(desc).toContain("callout 顶层字段")
-    expect(desc).toContain("不带 width_ratio")
+    expect(desc).toContain("width_ratio")
     // md-only 细节已并入 add_blocks 描述：todo.style.done、grid 列宽 api_call 调整
     expect(desc).toContain("todo.style.done")
     expect(desc).toContain("update_grid_column_width_ratio")
     // 块类型知识单源于 add_blocks 描述：系统提示词只留指针，不重复整表
     expect(feishuDef.systemPrompt).toContain("add_blocks 工具描述")
     expect(feishuDef.systemPrompt).not.toContain("## 块类型速查")
+  })
+})
+
+describe("排版 SKILL 与 XML 导入", () => {
+  test("style_guide：无 name 列出全部文档，有 name 返回全文，未知名给出可用清单", async () => {
+    const { tools } = makeTools(() => jsonResponse({ code: 0, msg: "ok" }))
+    const list = await tools.style_guide.execute({}, ctx())
+    for (const n of ["style", "xml", "weekly-report", "technical-doc", "formal-doc"]) expect(list.output).toContain(n)
+    const xml = await tools.style_guide.execute({ name: "xml" }, ctx())
+    expect(xml.output).toContain("width-ratio")
+    expect(xml.output).toContain("import_xml")
+    const style = await tools.style_guide.execute({ name: "style" }, ctx())
+    expect(style.output).toContain("工作流")
+    const bad = await tools.style_guide.execute({ name: "nope" }, ctx())
+    expect(bad.output).toContain("未知规范文档")
+    expect(bad.output).toContain("weekly-report")
+  })
+
+  test("import_xml：XML 一次成型——标题自动编号/高亮块配色/分栏/表格列宽落到 descendant 请求", async () => {
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.endsWith("/docx/v1/documents")) return jsonResponse({ code: 0, msg: "success", data: { document: { document_id: "doc_1" } } })
+      if (req.url.includes("/blocks?page_size=1")) return jsonResponse({ code: 0, msg: "success", data: { items: [{ block_id: "page_root", block_type: 1 }] } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const xml = [
+      "<title>季度复盘</title>",
+      '<h1 seq="auto">结论</h1>',
+      "<p>本期交付按时完成。</p>",
+      '<callout emoji="bulb" background-color="medium-red"><p>风险：依赖尚未确认。</p></callout>',
+      "<table><colgroup><col width=\"200\"/><col width=\"530\"/></colgroup><thead><tr><th>项</th><th>值</th></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody></table>",
+      '<grid><column width-ratio="0.5"><p>左栏</p></column><column width-ratio="0.5"><p>右栏</p></column></grid>',
+    ].join("\n")
+    const result = await tools.import_xml.execute({ content: xml }, ctx())
+    expect(result.output).toContain("已导入")
+    expect(result.output).toContain("doc_1")
+    const desc = records.find((r) => r.url.includes("/descendant"))
+    const body = JSON.parse(String(desc!.init?.body)) as { descendants: Array<Record<string, unknown>> }
+    const blocks = body.descendants
+    // 标题自动编号（1 结论），未手写序号
+    const h1 = blocks.find((b) => b.block_type === 3) as { heading1: { elements: Array<{ text_run: { content: string } }> } }
+    expect(h1.heading1.elements.map((e) => e.text_run.content).join("")).toBe("1 结论")
+    // 高亮块：medium-red → 8；子块在 children；无 local 字段泄漏
+    const callout = blocks.find((b) => b.block_type === 19) as { callout: Record<string, unknown>; children: string[] }
+    expect(callout.callout).toMatchObject({ background_color: 8, emoji_id: "bulb" })
+    expect(callout.children).toHaveLength(1)
+    // 表格：rows 展开为 table + table_cell，列宽来自 colgroup、首行标题行
+    const table = blocks.find((b) => b.block_type === 31) as { table: { property: Record<string, unknown> } }
+    expect(table.table.property).toMatchObject({ column_width: [200, 530], header_row: true, row_size: 2, column_size: 2 })
+    expect(blocks.filter((b) => b.block_type === 32)).toHaveLength(4)
+    // 分栏：每列带整数 width_ratio 且非空（0.5/0.5 → 1/1）
+    const cols = blocks.filter((b) => b.block_type === 25) as Array<{ grid_column: { width_ratio: number }; children: string[] }>
+    expect(cols.map((c) => c.grid_column.width_ratio)).toEqual([1, 1])
+    expect(cols.every((c) => c.children.length >= 1)).toBe(true)
+    // 本地元数据（_ 前缀）不随请求外发
+    expect(JSON.stringify(body)).not.toContain("_image")
+    expect(JSON.stringify(body)).not.toContain("_diagram")
+  })
+
+  test("import_xml：标签未闭合报可读错误；只写 title 报无可导入块", async () => {
+    const { tools, records } = makeTools(() => jsonResponse({ code: 0, msg: "success", data: {} }))
+    const unclosed = await tools.import_xml.execute({ content: "<p>正文" }, ctx())
+    expect(unclosed.output).toContain("❌")
+    expect(unclosed.output).toContain("未闭合")
+    const onlyTitle = await tools.import_xml.execute({ content: "<title>只有标题</title>" }, ctx())
+    expect(onlyTitle.output).toContain("没有可导入的块")
+    expect(records.some((r) => r.url.includes("/descendant"))).toBe(false)
+  })
+
+  test("lint_doc：报告层级跳级/连续标题/长段落/表格列宽/代码语言/空段落，并附块 id 与修复建议", async () => {
+    const blocks = [
+      { block_id: "page", block_type: 1, children: ["h1", "h3", "h3b", "p1", "p2", "tbl", "code1", "empty"] },
+      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "结论" } }] } },
+      { block_id: "h3", block_type: 5, parent_id: "page", heading3: { elements: [{ text_run: { content: "细节" } }] } },
+      { block_id: "h3b", block_type: 5, parent_id: "page", heading3: { elements: [{ text_run: { content: "另一节" } }] } },
+      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "长".repeat(320) } }] } },
+      { block_id: "p2", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "正常段落" } }] } },
+      { block_id: "tbl", block_type: 31, parent_id: "page", children: [], table: { property: { column_size: 2, column_width: [60, 670], header_row: false } } },
+      { block_id: "code1", block_type: 14, parent_id: "page", code: { style: { language: 1 }, elements: [{ text_run: { content: "x" } }] } },
+      { block_id: "empty", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "" } }] } },
+    ]
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.lint_doc.execute({ document_id: "doc_1" }, ctx())
+    expect(r.output).toContain("排版体检")
+    for (const rule of ["标题层级跳级", "连续标题", "段落过长", "表格列宽过窄", "表格缺表头", "代码块缺语言", "空段落"]) {
+      expect(r.output).toContain(rule)
+    }
+    expect(r.output).toContain("tbl") // 报告带 block_id，便于直接精修
+    expect(r.output).toContain("set_table_width")
+    expect(r.output).toContain("warn")
+  })
+
+  test("lint_doc：文档无问题时给出明确结论", async () => {
+    const blocks = [
+      { block_id: "page", block_type: 1, children: ["h1", "p1", "tbl"] },
+      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "结论" } }] } },
+      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "正文" } }] } },
+      { block_id: "tbl", block_type: 31, parent_id: "page", children: [], table: { property: { column_size: 2, column_width: [365, 365], header_row: true } } },
+    ]
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.lint_doc.execute({ document_id: "doc_1" }, ctx())
+    expect(r.output).toContain("未发现排版问题")
+  })
+})
+
+describe("预检 / 大纲 / 跨块替换（纯函数）", () => {
+  test("xmlProfile：顶层块、总块（含子树）、字数与类型分布", () => {
+    const p = xmlProfile([
+      { block_type: 3, heading1: { elements: [{ text_run: { content: "标题" } }] } },
+      { block_type: 19, callout: { background_color: 5 }, children: [{ block_type: 2, text: { elements: [{ text_run: { content: "提示" } }] } }] },
+    ])
+    expect(p.topLevel).toBe(2)
+    expect(p.total).toBe(3)
+    expect(p.chars).toBe(4)
+    expect(p.counts).toMatchObject({ heading1: 1, callout: 1, text: 1 })
+  })
+
+  test("docOutline：按文档流抽标题并统计每节顶层块数", () => {
+    const items = [
+      { block_id: "page", block_type: 1, children: ["h1", "p1", "h2", "p2", "p3"] },
+      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "1 结论" } }] } },
+      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "正文" } }] } },
+      { block_id: "h2", block_type: 4, parent_id: "page", heading2: { elements: [{ text_run: { content: "1.1 细节" } }] } },
+      { block_id: "p2", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "a" } }] } },
+      { block_id: "p3", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "b" } }] } },
+    ]
+    const { entries, hasPage } = docOutline(items)
+    expect(hasPage).toBe(true)
+    expect(entries).toEqual([
+      { level: 1, text: "1 结论", blockId: "h1", sectionBlocks: 1 },
+      { level: 2, text: "1.1 细节", blockId: "h2", sectionBlocks: 2 },
+    ])
+    expect(docOutline([{ block_id: "p", block_type: 2 }]).entries).toEqual([])
+  })
+
+  test("replaceInBlocks：逐 run 替换保留样式，跨 run 命中单列", () => {
+    const items = [
+      { block_id: "b1", block_type: 2, text: { elements: [{ text_run: { content: "旧术词出现两次：旧术词" } }] } },
+      { block_id: "b2", block_type: 2, text: { elements: [{ text_run: { content: "前缀旧", text_element_style: { bold: true } } }, { text_run: { content: "术词后" } }] } },
+      { block_id: "b3", block_type: 2, text: { elements: [{ text_run: { content: "无关内容" } }] } },
+    ]
+    const plan = replaceInBlocks(items, { pattern: "旧术词", replacement: "新术词" })
+    expect(plan.total).toBe(3)
+    expect(plan.updates.map((u) => u.blockId)).toEqual(["b1"]) // b2 跨 run，无法逐段替换
+    expect(plan.hits[0].count).toBe(2)
+    expect(plan.crossRun.map((h) => h.blockId)).toEqual(["b2"])
+    // 样式保留：仅 content 变
+    const els = plan.updates[0].elements as Array<{ text_run: { content: string } }>
+    expect(els[0].text_run.content).toBe("新术词出现两次：新术词")
+  })
+
+  test("replaceInBlocks：limit 截断与 blockIds 限定、正则模式、非法正则报错", () => {
+    const items = ["a1", "a2", "a3"].map((id, i) => ({ block_id: id, block_type: 2, text: { elements: [{ text_run: { content: `X${i}` } }] } }))
+    const limited = replaceInBlocks(items, { pattern: "X", replacement: "Y", limit: 2 })
+    expect(limited.updates).toHaveLength(2)
+    expect(limited.skipped).toBe(1)
+    const scoped = replaceInBlocks(items, { pattern: "X", replacement: "Y", blockIds: ["a2"] })
+    expect(scoped.updates.map((u) => u.blockId)).toEqual(["a2"])
+    const regex = replaceInBlocks(items, { pattern: "X\\d", replacement: "Z", regex: true })
+    expect(regex.updates).toHaveLength(3)
+    expect(() => replaceInBlocks(items, { pattern: "(", replacement: "x", regex: true })).toThrow(/不合法/)
+    // 字面模式：正则元字符不当正则用
+    const literal = replaceInBlocks([{ block_id: "b", block_type: 2, text: { elements: [{ text_run: { content: "a.b" } }] } }], { pattern: "a.b", replacement: "c" })
+    expect(literal.updates).toHaveLength(1)
+  })
+
+  test("replace_text 工具：dry_run 预览不写入；正式执行走 batch_update", async () => {
+    const blocks = [
+      { block_id: "page", block_type: 1, children: ["t1"] },
+      { block_id: "t1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "旧称：旧称方案" } }] } },
+    ]
+    const { tools, records } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const preview = await tools.replace_text.execute({ document_id: "doc_1", pattern: "旧称", replacement: "新称", dry_run: true }, ctx())
+    expect(preview.output).toContain("预演")
+    expect(preview.output).toContain("t1")
+    expect(preview.output).toContain("共命中 2 处")
+    expect(records.some((r) => r.init?.method === "PATCH")).toBe(false) // 预演零写入
+
+    const done = await tools.replace_text.execute({ document_id: "doc_1", pattern: "旧称", replacement: "新称" }, ctx())
+    expect(done.output).toContain("已替换 1/1 个块")
+    const patch = records.find((r) => r.url.includes("/blocks/batch_update"))
+    const body = JSON.parse(String(patch!.init?.body)) as { requests: Array<{ block_id: string; update_text_elements: { elements: Array<{ text_run: { content: string } }> } }> }
+    expect(body.requests[0].block_id).toBe("t1")
+    expect(body.requests[0].update_text_elements.elements[0].text_run.content).toBe("新称：新称方案")
+  })
+
+  test("import_xml dry_run：出画像与问题清单，且不创建文档、不写入块", async () => {
+    const { tools, records } = makeTools(() => jsonResponse({ code: 0, msg: "success", data: {} }))
+    const xml = '<title>预检</title><h1 seq="auto">结论</h1><p>正文</p><img path="@./missing.png"/>'
+    const r = await tools.import_xml.execute({ content: xml, dry_run: true }, ctx())
+    expect(r.output).toContain("预检（dry_run，未写入任何内容）")
+    expect(r.output).toContain("字数约")
+    expect(r.output).toContain("图片文件不存在")
+    expect(records.length).toBe(0) // 零请求：既不建文档也不写块
+  })
+
+  test("get_doc_blocks outline：只返回大纲（标题 + block_id + 节内块数）", async () => {
+    const blocks = [
+      { block_id: "page", block_type: 1, children: ["h1", "p1"] },
+      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "1 甲" } }] } },
+      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "正文" } }] } },
+    ]
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.get_doc_blocks.execute({ document_id: "doc_1", outline: true }, ctx())
+    expect(r.output).toContain("文档大纲（1 个标题）")
+    expect(r.output).toContain("- h1 1 甲  [h1] 节内块 1")
+    expect(r.output).toContain("get_doc_text")
   })
 })
