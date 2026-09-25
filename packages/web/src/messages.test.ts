@@ -547,6 +547,17 @@ describe("文件内容卡（code/file 块统一渲染：按类型分派 + 工具
     expect((card.querySelector("span.file-badge") as unknown as { textContent?: string })?.textContent).toBe("typescript")
   })
 
+  test("code 块 text 语言：纯文本 pre（不自动高亮）、无语言徽标", () => {
+    const container = makeMockEl("div")
+    renderBlock(container as unknown as HTMLElement, { type: "code", text: "2024-01-01 INFO ready", language: "text", path: "tmp/app-a1b2c3d4.txt", name: "app-a1b2c3d4.txt" }, "s1")
+    const card = container.children[0] as unknown as MockElWithQuery
+    expect(card.querySelector("pre.file-code")).not.toBeNull()
+    expect(card.querySelector("div.markdown")).toBeNull()
+    // 纯文本与 markdown 一样不标语言徽标（其余语言徽标展示高亮语言）
+    expect(card.querySelector("span.file-badge")).toBeNull()
+    expect((card.querySelector("span.file-title") as unknown as { textContent?: string })?.textContent).toBe("app-a1b2c3d4.txt")
+  })
+
   test("code 块无 path（防御降级）：仍渲染卡片与内容，无下载/原文件入口", () => {
     const container = makeMockEl("div")
     renderBlock(container as unknown as HTMLElement, { type: "code", text: "裸文本", language: "bash" }, "s1")

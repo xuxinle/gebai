@@ -5,7 +5,7 @@ import { el } from "./state"
 import { copyText } from "./ui"
 
 // 渲染核心（markdown-it 规则 / 代码高亮 / DOMPurify 净化）在 md-core.ts —— 文件工作台的 markdown 预览共用同一套。
-export { highlightCode, renderMarkdown, applyLinkTargetRule, applyTaskLists } from "./md-core"
+export { highlightCode, renderMarkdown, applyLinkTargetRule, applyTaskLists, escapePlain } from "./md-core"
 
 /** 高亮代码元素（复用：代码块/文件预览/工具参数共用）。 */
 export function highlightedCode(lang: string, code: string): HTMLElement {

@@ -2072,7 +2072,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 #### 内容展示（`show`）
 
-全局工具 `show` 是**向用户展示内容的统一入口**（原 `draw`/`render_html`/`show_file` 三工具合并），参数面统一为 `name`（展示名）/ `format`（内容格式，`content` 必选、`path` 可选）/ `content`（内容）/ `path`（已有文件），**内容与路径二选一**（`content` 直给内容、`path` 指向已有文件；同时传或都缺均立即报错引导）；`format` 值域 = 四种图表语言 + `html`（页面预览），`content` 的解释方式完全由它决定，`path` 未传时按文件真实类型/扩展名推断；另有三个**可选微调参数** `render`（图表渲染通道）/ `width`/`height`（HTML 预览尺寸），不参与内容源选择；产物均落盘会话 `tmp/` 并返回对应内容块；`card.args="block"` 声明（调用不显示通用工具卡片，内容块直接渲染）；各分支均默认无需审批。
+全局工具 `show` 是**向用户展示内容的统一入口**（原 `draw`/`render_html`/`show_file` 三工具合并），参数面统一为 `name`（展示名）/ `format`（内容格式，`content` 必选、`path` 可选）/ `content`（内容）/ `path`（已有文件），**内容与路径二选一**（`content` 直给内容、`path` 指向已有文件；同时传或都缺均立即报错引导）；`format` 值域 = 四种图表语言 + `html`（页面预览）+ 三种文本型内容（`markdown`/`code`/`text`），`content` 的解释方式完全由它决定，`path` 未传时按文件真实类型/扩展名推断；另有**可选参数** `language`（`code` 分支的高亮语言）与**可选微调参数** `render`（图表渲染通道）/ `width`/`height`（HTML 预览尺寸），不参与内容源选择；产物均落盘会话 `tmp/` 并返回对应内容块；`card.args="block"` 声明（调用不显示通用工具卡片，内容块直接渲染）；各分支均默认无需审批。
 
 **① 图表交互式创作（`content` + 图表语言 `format`，或 `path` 指向图表源文件）**——专门支持**结构化图表的交互式创作**，**四种图表语言由工具描述/参数说明内置选择指南指导模型按需选择**（四语言对比如下）：
 
@@ -2100,16 +2100,24 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - - **主题跟随**：iframe 预览区边框与背景走主题变量（`--border`/`--bg-inset`），内容页无自带背景时与主题一致（避免亮色突兀块）；srcdoc 注入 `style#gebai-theme` 同步**主题变量集**（`--bg`/`--text`/`--accent`/`--border`/`--radius-*`/`--font-mono` 等 20 个核心变量写入 `:root`，工具/预览页面可用 `var(--x)` 引用主题色）与背景/滚动条色值，并设置 `data-theme` 属性（支持 `[data-theme]` 分支样式）；初始快照注入，宿主主题切换经 postMessage `gebai-host/theme` 广播动态更新——**`gebai:theme-change` 事件驱动立即广播**（免 500ms 轮询延迟，轮询兜底异步加载）；内容页自带背景/变量时其自身规则（文档中靠后）覆盖注入值，不破坏内容设计
 - **审批**：默认无需审批（仅展示 + 写入会话 `tmp/`，与图表分支同级）
 
-**③ 文件主动展示（`path` 内容源）**——把文件**直接展示给用户**（交付产物 / 需要用户过目的文件）——**按文件类型产出直显内容块，内容在消息流内联呈现**：
+**③ 文本型内容（`content` + `format: "markdown"|"code"|"text"`，或 `path` + 显式 format）**——把文档/源码/纯文本**直接呈现给用户**（长文档、源码交付不必堆进回复正文）：
+
+- **三种格式**：`markdown` 按 markdown 渲染为排版文档（标题/列表/表格/引用/代码块）；`code` 为源码/配置文件，可选 `language` 指定高亮语言（`typescript`/`python`/`bash`/`json`/`yaml`/`sql` 等，入参归一化为小写，缺省按 `path` 的真实文件扩展名推断、推断不出时由前端自动识别）；`text` 为纯文本（日志/命令输出/配置片段），**不做语法高亮**；`name` 缺省时产物主名取 `doc`（markdown）/ `code` / `text`
+- **产物**：落盘会话 `tmp/{主名}-{内容哈希8}.{扩展名}`（`markdown` → `.md`、`text` → `.txt`、`code` → 按语言映射的扩展名（`core/base/diff.ts` 的 `extForLang`，未命中回落 `.txt`））——UI 文件面板可见、模型可经 `read` 读回、可下载；命名带内容哈希，同内容幂等、异内容各存（历史消息里的产物引用不被后续同名产出覆盖）
+- **内容块**：统一 `code` 块（`{ type: "code"; text; language?; path; name }`）——`markdown` 由前端文件内容卡**渲染为文档**（而非源码高亮）、`code` 按语言语法高亮并标语言徽标、`text` 走**纯转义呈现**（不自动高亮、不标语言徽标）；超 4 万字符（`SHOW_TEXT_MAX_CHARS`）块内截断，全文留在产物文件（与 `path` 直显同口径）
+- **`path` + 显式 format**：可把任意文本文件按指定格式解释（不限扩展名，如 `.txt` 按 `markdown` 渲染/任意文件按 `code` 高亮）；未显式传 format 时仍按扩展名推断（既有行为）
+- **通道与审批**：文本型分支不依赖前端渲染能力，实时 / 飞书 / REST 全通道可用（产物路径随输出文本给出）；默认无需审批（仅展示 + 写入会话 `tmp/`，与图表/HTML 分支同级）
+
+**④ 文件主动展示（`path` 内容源）**——把文件**直接展示给用户**（交付产物 / 需要用户过目的文件）——**按文件类型产出直显内容块，内容在消息流内联呈现**：
 
 - **直显矩阵**：图片（PNG/JPG/GIF/WebP/SVG/BMP）→ `image` 块（内联 `<img>` + 点击全屏查看器）；图表源文件（`.puml`/`.plantuml`/`.mmd`/`.mermaid`/`.d2`/`.echarts`）→ 走①的渲染验证管线（format 按扩展名推断，与 `content` 模式同一闭环，重新渲染/换通道不重发源码）产出 `diagram` 块；`.html` → `html` 块（沙箱 iframe 页面预览，显式 `width`/`height` 生效）；文本/代码（txt/md/csv/json/yaml/log/常见代码扩展名，≤512KB）→ `code` 块（附带 `path`/`name`，文件内容卡渲染：md 渲染、源码语法高亮、工具栏复制/原文件/下载；超 4 万字符截断展示，全文经工具栏下载或「原文件」弹窗获取）；**无扩展名/dotfile**（`LICENSE`/`Makefile`/`Dockerfile`/`.gitignore` 等）→ **按内容探测判定**（无 NUL 字节、替换字符与控制字符占比 ≤1% 视为文本）后同样走 `code` 块内联，否则回落 `file` 块——这类文件没有扩展名可信、展开白名单永远追不全，只能按内容判定；探测**刻意只覆盖无扩展名/dotfile**（空扩展名没有「类型承诺」，探测零风险）：`tiny.pdf` 这类有扩展名的格式即使内容恰好是纯 ASCII 也仍按扩展名给卡片（探测它们会把二进制格式误判成文本，已有用例固化）；**语言/类型一律按真实文件路径（`abs`）推断，不用展示名 `name`**——`name` 惯例不含扩展名（参数描述即写「不含扩展名」，实测历史调用 `{path:"xxx.md", name:"调研报告"}`），据它推断 language 为空 → 前端只能 `highlightAuto`，markdown 被当源码高亮而不是渲染成文档（yml/json/ts 等同样丢高亮）；**无法内联的类型**（PDF/压缩包/Office 等）→ `file` 块（文件内容卡按 mime 分派渲染，内容进入视口才按需加载）；**音视频**（`video/*`/`audio/*` 或扩展名 .mp4/.webm/.mov/.m4v/.mkv/.mp3/.wav/.m4a/.aac/.ogg/.flac）→ 同走 `file` 块，卡内渲染浏览器原生 `<video controls>` / `<audio controls>`（取数经 `files/preview`，**服务端 `Response(Bun.file(…))` 自动处理 Range** → 206 + `content-range`，进度条可拖动；不自动播放，`preload="metadata"` 只拉元数据）
 - **与普通工具的语义区分**：`show` path 分支是「给用户看」的主动通道（内容直接呈现）；`read` 等常规工具按既有行为返回产物块（文件类产物为查看/下载卡片，不自动展开内容）
-- **参数**：`path`（与 `content` 二选一，会话 `tmp/` 相对路径（前缀可省略）；本地模式可为工作区相对/绝对路径）、`name`（可选，展示文件名，默认取文件主名；**仅影响展示名与产物文件名，不参与类型/语言判断**——类型一律按真实文件推断）、`format`（可选，显式指定时按该格式解释文件内容：图表语言 → 渲染该文件、`html` → 页面预览，不再按扩展名推断）
+- **参数**：`path`（与 `content` 二选一，会话 `tmp/` 相对路径（前缀可省略）；本地模式可为工作区相对/绝对路径）、`name`（可选，展示文件名，默认取文件主名；**仅影响展示名与产物文件名，不参与类型/语言判断**——类型一律按真实文件推断）、`format`（可选，显式指定时按该格式解释文件内容：图表语言 → 渲染该文件、`html` → 页面预览、`markdown`/`code`/`text` → 文本型解释，不再按扩展名推断）、`language`（可选，与 `format:"code"` 搭配的高亮语言；未传按真实文件路径扩展名推断）
 - - **路径处理**：会话 `tmp/` 内文件**直接引用**（零复制）；会话外文件（本地模式工作区/绝对路径）**复制一份**到会话 `tmp/shown/{主名}-{内容哈希8}.{扩展名}`（内容哈希命名，重复展示复用同一副本；上限 100MB，超出引导改为告知路径）后引用——前端文件接口只服务会话 `tmp/`，复制保证可见性与文件面板留存。**归属判定用会话 `tmp/` 真实绝对路径**（`sessionPath` 拼接；项目绑定子Agent 的 `resolvePath` 基准是项目根，不能作判定依据），复制目标同样直接写会话 `tmp/` 绝对路径（绕开项目根基准，保证落在真实会话文件区）
 - - **mime 推断**：按扩展名映射（图片 + PDF/文本/CSV/JSON/HTML/Office/音视频等常见类型），驱动前端预览入口形态（图片内嵌/PDF 内嵌查看/文本高亮/下载提示）
 - **审批**：默认无需审批（只读 + 复制进本会话 `tmp/`，与图表分支同级）；`card.args="block"` 声明（调用不显示通用工具卡片，内容块直接渲染）
 
-**分支门控（合并型工具的通道能力校验）**——`show` 不声明工具级 `interaction`（全模式可见），引擎把当前任务的 `interactionMode` 注入 ToolContext（`ctx.interactionMode`），工具在分支内校验通道能力：`html` 分支（`content` + `format: "html"`，或 `path` 指向 `.html`/显式 `format: "html"`）仅 `realtime`（飞书/REST 下明确报错「当前通道不支持 HTML 页面预览」，引导改用文字描述或产出 `.html` 文件后经 `path` 交付）；图表分支 `realtime` → 前端渲染、`multi_turn` → 飞书后端渲染（同一 `event.draw.render` 通道）、`none` → **不空等 5 秒超时**直接引导 `render=backend`（backend 为服务端能力，无交互模式可用）；`path` 文件分支全模式可用（REST 消费者仍可拿到内容块）。未注入 `interactionMode`（测试桩/无引擎环境）不做分支门控。
+**分支门控（合并型工具的通道能力校验）**——`show` 不声明工具级 `interaction`（全模式可见），引擎把当前任务的 `interactionMode` 注入 ToolContext（`ctx.interactionMode`），工具在分支内校验通道能力：`html` 分支（`content` + `format: "html"`，或 `path` 指向 `.html`/显式 `format: "html"`）仅 `realtime`（飞书/REST 下明确报错「当前通道不支持 HTML 页面预览」，引导改用文字描述或产出 `.html` 文件后经 `path` 交付）；图表分支 `realtime` → 前端渲染、`multi_turn` → 飞书后端渲染（同一 `event.draw.render` 通道）、`none` → **不空等 5 秒超时**直接引导 `render=backend`（backend 为服务端能力，无交互模式可用）；`path` 文件分支全模式可用（REST 消费者仍可拿到内容块）；文本型分支（`markdown`/`code`/`text`）不依赖前端渲染，全模式可用。未注入 `interactionMode`（测试桩/无引擎环境）不做分支门控。
 
 ### 上下文保护
 

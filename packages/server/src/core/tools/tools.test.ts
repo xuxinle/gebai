@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
+import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, SHOW_TEXT_MAX_CHARS, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest, PAGE_CAPTURE_HTML_LIMIT } from "."
 import { searchSymbolsTool } from "@gebai/agents"
 import { SessionStore } from "../session/store"
@@ -1048,11 +1048,11 @@ describe("global tools", () => {
     cleanup(home)
   })
 
-  test("show schema：format 枚举覆盖四语言 + html（content 模式必选由描述与 execute 校验引导）", () => {
+  test("show schema：format 枚举覆盖四语言 + 文本型三格式 + html（content 模式必选由描述与 execute 校验引导）", () => {
     const params = showTool.parameters
     const fmt = (params.properties as { format: { enum: string[] } }).format
-    // 枚举单点派生自 artifacts.ts DIAGRAM_EXT_FOR（与 SDK DiagramFormat 同步）+ html（页面预览），顺序为其键序
-    expect([...fmt.enum].sort()).toEqual(["d2", "echarts", "html", "mermaid", "plantuml"])
+    // 枚举单点派生自 artifacts.ts DIAGRAM_EXT_FOR（与 SDK DiagramFormat 同步）+ 文本型三格式 + html（页面预览），顺序为其键序
+    expect([...fmt.enum].sort()).toEqual(["code", "d2", "echarts", "html", "markdown", "mermaid", "plantuml", "text"])
     // 内容与路径二选一（content/path）无法用 required 表达，校验在 execute 内完成
     expect(params.required ?? []).not.toContain("format")
     // 工具描述与 format 参数说明内置四语言选择指南（触发词/适用场景），供模型按需选择
@@ -1060,12 +1060,12 @@ describe("global tools", () => {
     expect(showTool.description).toContain("PlantUML")
     expect(showTool.description).toContain("D2")
     expect(showTool.description).toContain("ECharts")
-    expect(fmt.enum.length).toBe(5)
+    expect(fmt.enum.length).toBe(8)
   })
 
-  test("show schema：参数面统一为 name/format/content/path + 三个可选微调", () => {
+  test("show schema：参数面统一为 name/format/content/path + 可选微调 language/render/width/height", () => {
     const props = showTool.parameters?.properties as Record<string, unknown>
-    expect(Object.keys(props)).toEqual(["name", "format", "content", "path", "render", "width", "height"])
+    expect(Object.keys(props)).toEqual(["name", "format", "content", "path", "language", "render", "width", "height"])
     // 旧内容源参数已并入 content（不再有 code/html 双参数）
     expect(props.code).toBeUndefined()
     expect(props.html).toBeUndefined()
@@ -1084,6 +1084,8 @@ describe("global tools", () => {
     expect(invalid.output).toContain("format 参数无效")
     expect(invalid.output).toContain("graphviz")
     expect(invalid.output).toContain("html")
+    // 文本型三格式在合法值域内（曾把 format:"markdown" 判为非法值）
+    expect(invalid.output).toContain("markdown / code / text")
     expect(invalid.blocks).toBeUndefined()
     // path 模式：扩展名可推断时无需 format（既有行为保留）
     await writeTool.execute({ path: "flow.puml", content: "Alice -> Bob" }, c)
@@ -1253,6 +1255,73 @@ describe("global tools", () => {
     const badBlock = bad.blocks![0] as { width?: number; height?: number }
     expect(badBlock.width).toBeUndefined()
     expect(badBlock.height).toBeUndefined()
+    cleanup(home)
+  })
+
+  test("show 文本分支：content + markdown 落盘 .md 并返回 code 块（language=markdown 供前端渲染文档）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-show-md-"))
+    const c = ctx(home)
+    const md = "# 报告\n\n| 项 | 值 |\n| --- | --- |\n| a | 1 |\n"
+    const r = await showTool.execute({ format: "markdown", content: md, name: "调研报告" }, c)
+    expect(r.output).toContain("markdown 文档已生成并展示")
+    const block = r.blocks![0] as { type: string; text: string; language?: string; path?: string; name?: string }
+    expect(block).toMatchObject({ type: "code", text: md, language: "markdown" })
+    expect(block.name).toMatch(/^调研报告-[0-9a-f]{8}\.md$/)
+    expect(block.path).toBe(`tmp/${block.name}`)
+    // 产物落盘会话 tmp/，模型可经 read 读同一逻辑路径
+    expect(await readTool.execute({ path: block.path!, line_numbers: false }, c)).toMatchObject({ output: md })
+    // 文本型分支不依赖前端渲染能力：飞书/REST 通道同样可用（产物路径随输出给出）
+    const multi = ctx(home)
+    multi.interactionMode = "multi_turn"
+    expect((await showTool.execute({ format: "markdown", content: "# x" }, multi)).blocks![0].type).toBe("code")
+    cleanup(home)
+  })
+
+  test("show 文本分支：code 按 language 高亮并落盘带扩展名产物；text 纯文本（无语法高亮）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-show-code-"))
+    const c = ctx(home)
+    const code = "export const x: number = 1\n"
+    const r = await showTool.execute({ format: "code", content: code, language: "TypeScript", name: "handler" }, c)
+    const block = r.blocks![0] as { language?: string; name?: string; path?: string }
+    expect(block.language).toBe("typescript") // 入参归一化为小写
+    expect(block.name).toMatch(/^handler-[0-9a-f]{8}\.ts$/)
+    expect(await Bun.file(join(c.workdir, block.path!.replace(/^tmp\//, ""))).text()).toBe(code)
+    // 未传 language 且展示名无扩展名 → 无高亮语言（前端自动识别），产物回落 .txt
+    const bare = await showTool.execute({ format: "code", content: "x = 1" }, c)
+    expect((bare.blocks![0] as { language?: string }).language).toBeUndefined()
+    expect((bare.blocks![0] as { name: string }).name).toMatch(/^code-[0-9a-f]{8}\.txt$/)
+    // 纯文本：语言标记 text（前端不做高亮、不显示语言徽标），产物统一 .txt
+    const t = await showTool.execute({ format: "text", content: "2024-01-01 INFO ready", name: "app.log" }, c)
+    expect(t.blocks![0]).toMatchObject({ type: "code", language: "text", text: "2024-01-01 INFO ready" })
+    expect((t.blocks![0] as { name: string }).name).toMatch(/^app-[0-9a-f]{8}\.txt$/)
+    cleanup(home)
+  })
+
+  test("show 文本分支：path + 显式 format 按文本解释（不限扩展名，语言按真实路径推断）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-show-text-path-"))
+    const c = ctx(home)
+    await writeTool.execute({ path: "notes.txt", content: "# 标题\n正文" }, c)
+    const r = await showTool.execute({ path: "tmp/notes.txt", format: "markdown" }, c)
+    expect(r.output).toContain("markdown 文档已展示")
+    expect(r.blocks![0]).toMatchObject({ type: "code", language: "markdown", text: "# 标题\n正文" })
+    expect((r.blocks![0] as { name: string }).name).toMatch(/^notes-[0-9a-f]{8}\.md$/)
+    // code 分支：未传 language 时按真实文件路径扩展名推断
+    await writeTool.execute({ path: "app.py", content: "print(1)" }, c)
+    const py = await showTool.execute({ path: "tmp/app.py", format: "code" }, c)
+    expect((py.blocks![0] as { language?: string }).language).toBe("python")
+    expect((py.blocks![0] as { name: string }).name).toMatch(/^app-[0-9a-f]{8}\.py$/)
+    cleanup(home)
+  })
+
+  test("show 文本分支：超长内容块内截断，全文留在产物文件", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-show-text-long-"))
+    const c = ctx(home)
+    const long = "abc".repeat(Math.ceil((SHOW_TEXT_MAX_CHARS + 100) / 3)) // 超过块内展示上限
+    const r = await showTool.execute({ format: "text", content: long, name: "big" }, c)
+    const block = r.blocks![0] as { text: string; path: string }
+    expect(block.text).toContain("已截断")
+    expect(block.text.length).toBeLessThan(long.length)
+    expect(await Bun.file(join(c.workdir, block.path.replace(/^tmp\//, ""))).text()).toBe(long)
     cleanup(home)
   })
 

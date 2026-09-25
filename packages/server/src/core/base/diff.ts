@@ -16,6 +16,18 @@ export function inferLang(name: string): string {
   return EXT_LANG[ext] ?? ""
 }
 
+/** 语法高亮语言 → 规范化产物扩展名（show `code` 分支落盘命名用；未命中回落 `txt`）。 */
+const LANG_EXT: Record<string, string> = {
+  typescript: "ts", javascript: "js", json: "json", python: "py", bash: "sh",
+  html: "html", xml: "xml", css: "css", scss: "scss", less: "less", yaml: "yml",
+  markdown: "md", go: "go", rust: "rs", java: "java", kotlin: "kt", ruby: "rb",
+  c: "c", cpp: "cpp", csharp: "cs", php: "php", sql: "sql", lua: "lua", swift: "swift", dart: "dart",
+}
+
+export function extForLang(lang: string): string {
+  return LANG_EXT[lang.toLowerCase()] ?? "txt"
+}
+
 /** 拆分文本为行（忽略末尾换行产生的空行，`"a\n"` 与 `"a"` 等价）。 */
 export function splitLines(text: string): string[] {
   if (text === "") return []

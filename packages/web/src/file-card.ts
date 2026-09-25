@@ -8,7 +8,7 @@ import type { ContentBlock } from "@gebai/sdk"
 import { el, filesPreview } from "./state"
 import { copyText, desktopDownloadHint, tip } from "./ui"
 import { nextScopeId, popKeyScope, pushKeyScope } from "./keymap"
-import { highlightedCode, markdownBlock, blockText } from "./markdown"
+import { highlightedCode, markdownBlock, blockText, escapePlain } from "./markdown"
 import { openImageViewer } from "./diagram"
 import { previewFrame, sandboxedHtml, iconButton, flashButton, ICON_COPY, ICON_DOWNLOAD, ICON_FULLSCREEN } from "./html-view"
 import { workbenchButton } from "./workbench"
@@ -48,10 +48,14 @@ function fileKind(name: string, mime: string): "image" | "video" | "audio" | "pd
   return "binary"
 }
 
-/** 文本内容渲染：markdown 语言 → markdown 渲染；其余语法高亮（复制入口统一在卡工具栏）。 */
+/** 文本内容渲染：markdown 语言 → markdown 渲染；text → 纯文本（不自动高亮）；其余语法高亮（复制入口统一在卡工具栏）。 */
 function textBody(lang: string, text: string): HTMLElement {
   if (lang === "markdown") return markdownBlock(text)
   const pre = el("pre", "file-code")
+  if (lang === "text") {
+    pre.innerHTML = escapePlain(text)
+    return pre
+  }
   pre.appendChild(highlightedCode(lang, text))
   return pre
 }
@@ -249,12 +253,14 @@ function fetchFailText(err: unknown, where: "card" | "popup"): string {
   return `${where === "card" ? "内容加载失败" : "无法预览该文件"}: ${(err as Error).message}。${hint}`
 }
 
-/** code 内容块 → 文件内容卡：markdown 渲染 md、其余语法高亮；path 附带时提供原文件查看与常驻下载。
+/** code 内容块 → 文件内容卡：markdown 渲染 md、text 纯文本、其余语法高亮；path 附带时提供原文件查看与常驻下载。
  *  语言以块内 `language` 为准；缺省时按文件名、再按产物路径扩展名推断（show 的展示名 `name` 惯例
  *  不含扩展名、历史卡片同样缺 language——不推断就会落到 highlightAuto，markdown 被当源码高亮）。 */
 export function renderCodeCard(container: HTMLElement, b: Extract<ContentBlock, { type: "code" }>, sessionId: string): void {
   const lang = b.language || langForFile(b.name ?? "", "") || langForFile(b.path ?? "", "")
-  const title = b.name || (lang && lang !== "markdown" ? `${lang} 代码` : "文本")
+  // markdown（渲染为文档）与 text（纯文本）不带语言徽标，其余语言徽标展示高亮语言
+  const badge = lang && lang !== "markdown" && lang !== "text" ? lang : undefined
+  const title = b.name || (badge ? `${lang} 代码` : "文本")
   const body = el("div", "file-body")
   body.appendChild(textBody(lang, b.text))
   const hasPath = !!b.path
@@ -265,7 +271,7 @@ export function renderCodeCard(container: HTMLElement, b: Extract<ContentBlock, 
   })
   // 下载常驻文件卡头部（不随 hover 工具栏显隐）
   const dl = b.path ? downloadAnchor(sessionId, b.path, b.name ?? "file") : undefined
-  container.appendChild(fileCard(title, lang && lang !== "markdown" ? lang : undefined, toolbar.el, body, dl))
+  container.appendChild(fileCard(title, badge, toolbar.el, body, dl))
 }
 
 /** file 内容块 → 文件内容卡：按 mime/扩展分派，内容进入视口后按需加载。 */

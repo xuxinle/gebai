@@ -4,7 +4,7 @@ import { join, relative, sep } from "node:path"
 import type { ContentBlock, DiagramFormat } from "@gebai/sdk"
 import type { Tool, ToolContext, ToolResult } from "../base/types"
 import { sessionPath } from "../base/paths"
-import { inferLang } from "../base/diff"
+import { extForLang, inferLang } from "../base/diff"
 import { truncate } from "../support/truncate"
 import {
   diagramFormatFor,
@@ -14,6 +14,7 @@ import {
   DIAGRAM_LABEL,
   IMAGE_EXT,
   injectPlantUmlLayout,
+  isDiagramFormat,
   mimeFor,
   normalizePlantUml,
   RENDER_HTML_MAX_HEIGHT,
@@ -121,9 +122,16 @@ function isNoExtFile(abs: string): boolean {
   return seg.lastIndexOf(".") <= 0
 }
 
-/** show 内容格式值域：四种图表语言 + `html`（页面预览）——content 的解释方式完全由 format 决定，
- *  path 模式可省略（按文件真实类型/扩展名推断）。 */
-const SHOW_FORMAT_VALUES: readonly string[] = [...DIAGRAM_FORMAT_VALUES, "html"]
+/** show 文本型内容格式：内容以内联 `code` 块交付（前端文件内容卡按语言分派渲染），产物同样落盘会话 tmp/。 */
+const TEXT_FORMAT_VALUES = ["markdown", "code", "text"] as const
+type TextFormat = (typeof TEXT_FORMAT_VALUES)[number]
+const isTextFormat = (v: string): v is TextFormat => (TEXT_FORMAT_VALUES as readonly string[]).includes(v)
+/** 文本型格式的产物默认主名（未传 `name` 时用）。 */
+const TEXT_DEFAULT_NAME: Record<TextFormat, string> = { markdown: "doc", code: "code", text: "text" }
+
+/** show 内容格式值域：四种图表语言 + 三种文本型内容 + `html`（页面预览）——content 的解释方式完全由
+ *  format 决定，path 模式可省略（按文件真实类型/扩展名推断）。 */
+const SHOW_FORMAT_VALUES: readonly string[] = [...DIAGRAM_FORMAT_VALUES, ...TEXT_FORMAT_VALUES, "html"]
 
 /** show 文件归属处理：会话 tmp/ 内文件直接引用（零复制）；会话外（本地模式工作区/绝对路径）复制一份到
  * tmp/shown/（内容哈希命名，重复展示复用同一副本）后引用——前端文件接口只服务会话 tmp/，复制保证
@@ -267,6 +275,40 @@ async function showDiagram(
   }
 }
 
+/**
+ * show 文本型内容分支（`markdown`/`code`/`text`：content 直给内容与 path 指定文件共用）——内容以内联
+ * `code` 块交付（前端文件内容卡分派：markdown 渲染为文档、code 按语言高亮、text 纯文本），同时落盘会话
+ * `tmp/` 产物（内容哈希命名，历史可回看/可下载）。超长内容块内截断、全文留在产物文件（与 path 直显同口径）。
+ */
+async function showText(
+  ctx: ToolContext,
+  raw: string,
+  format: TextFormat,
+  rawName: string,
+  fromPath: string,
+  language: unknown,
+): Promise<ToolResult> {
+  // 语言：markdown/text 由 format 决定；code 取显式 language，缺省按**真实文件路径**（path 模式）扩展名推断
+  const lang =
+    format === "markdown"
+      ? "markdown"
+      : format === "text"
+        ? "text"
+        : (typeof language === "string" ? language.trim().toLowerCase() : "") || inferLang(fromPath || rawName)
+  const base = rawName.replace(/\.[^./\\]{1,10}$/, "") || format
+  const ext = format === "markdown" ? "md" : format === "text" ? "txt" : extForLang(lang)
+  const rel = `tmp/${artifactName(base, raw, `.${ext}`)}`
+  await ctx.writeFile(ctx.resolvePath(rel), raw)
+  const label = format === "markdown" ? "markdown 文档" : format === "text" ? "纯文本" : "代码"
+  const shown = raw.length > SHOW_TEXT_MAX_CHARS ? `${raw.slice(0, SHOW_TEXT_MAX_CHARS)}\n…（内容过长已截断，全文 ${raw.length} 字符可下载或点「原文件」查看）` : raw
+  return {
+    output: fromPath
+      ? `${label}已展示: ${rel}（源文件 ${fromPath}，${raw.length} 字符）`
+      : `${label}已生成并展示: ${rel}（${raw.length} 字符）`,
+    blocks: [{ type: "code", text: shown, language: lang || undefined, path: rel, name: rel.split("/").pop() ?? `${base}.${ext}` }],
+  }
+}
+
 /** html 内容块构造：显式尺寸为正整数且不超上限时附加（其余值忽略，回退默认）。 */
 function htmlBlock(html: string, name: string, width: unknown, height: unknown): ContentBlock {
   const block: Record<string, unknown> = { type: "html", html, name }
@@ -295,18 +337,19 @@ async function showHtml(ctx: ToolContext, html: string, base: string, width: unk
 /**
  * show：把内容**直接展示给用户**——统一入口（`content` 内容 / `path` 已有文件二选一），内容在消息流内联呈现。
  * 参数面：`name`（展示名）/ `format`（内容格式，content 必选、path 可选）/ `content`（内容）/ `path`（路径），
- * 另有三个可选微调 `render`（图表渲染通道）/ `width`/`height`（HTML 预览尺寸）——不参与内容源选择。
+ * 另有 `language`（code 分支高亮语言）与 `render`（图表渲染通道）/ `width`/`height`（HTML 预览尺寸）等可选微调——不参与内容源选择。
  * - `content`+`format`（创作）：图表语言 → 四语言实时渲染验证（成功才返回成功，失败返回错误供修正），
- *   `render=backend` 服务端渲染 PNG；`html` → HTML 页面（沙箱 iframe 域隔离预览，仅实时前端通道）；产物落盘 tmp/。
+ *   `render=backend` 服务端渲染 PNG；`html` → HTML 页面（沙箱 iframe 域隔离预览，仅实时前端通道）；
+ *   `markdown`/`code`/`text` → 内联 code 块（文档渲染/语法高亮/纯文本）；产物落盘 tmp/。
  * - `path`（已有文件直显）：图片 → image 块；图表源文件 → 渲染验证 + diagram 块（与 content 同一管线）；
  *   `.html` → html 块；文本/代码 → code 块内联（markdown 渲染为文档、其余语法高亮；超长截断 + 附 file 卡片）；其余 → file 卡片。
- *   显式 `format` 时按该格式解释文件内容（图表语言渲染 / html 页面预览），不再按扩展名推断。
+ *   显式 `format` 时按该格式解释文件内容（图表语言渲染 / html 页面预览 / markdown·code·text 文本型解释），不再按扩展名推断。
  * - 类型/语言一律按**真实文件路径**（或显式 `format`）推断（`name` 只作展示名，不参与判断）。
  */
 export const showTool: Tool = {
   name: "show",
   description:
-    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts 或 html 页面，选型见 format 参数）：图表分支前端实时渲染验证，渲染成功才返回成功、失败返回错误供修正；html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）。②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、音频/视频在文件卡内联播放（可拖进度）、其余文本/代码语法高亮内联、无扩展名纯文本（LICENSE/Makefile 等）按内容探测后内联、其余类型给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回内容块。",
+    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts、html 页面、或文本型 markdown/code/text，选型见 format 参数）：图表分支前端实时渲染验证，渲染成功才返回成功、失败返回错误供修正；html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）；文本型分支（markdown/code/text）内容在文件内容卡内联呈现（markdown 渲染为文档、code 按语言高亮、text 纯文本），并落盘会话 tmp/ 产物供下载/回看。②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、音频/视频在文件卡内联播放（可拖进度）、其余文本/代码语法高亮内联、无扩展名纯文本（LICENSE/Makefile 等）按内容探测后内联、其余类型给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回内容块。",
   card: { args: "block" },
   parameters: schema(
     {
@@ -320,10 +363,14 @@ export const showTool: Tool = {
           "【plantuml】类图/组件图/部署图/用例图/活动图/ER 图等标准 UML 与严谨建模，功能最全。\n" +
           "【d2】系统架构/云架构/网络拓扑/微服务等对外展示场景（PPT/汇报），默认布局最现代。\n" +
           "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等数据可视化与统计图表；content 传 option 的严格 JSON（键名与字符串一律双引号，值禁止函数），可选信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸（默认 960×600）；图例默认在画布底部，与标题同顶冲突时渲染器自动下移避让，无需手动设置 legend.top。\n" +
-          "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图；数据分析=echarts 统计图表。",
+          "【markdown】markdown 文档（标题/列表/表格/引用/代码块）——content 传 markdown 源码，渲染为排版文档；也可把任意文本文件经 path + format:\"markdown\" 按文档解释。\n" +
+          "【code】源码/配置文件——content 传源码，可选 `language` 指定高亮语言（如 typescript/python/bash/json/yaml/sql），缺省按路径扩展名推断；产物文件名按语言带扩展名。\n" +
+          "【text】纯文本（日志/命令输出/配置片段等）——不做语法高亮，原样内联呈现。\n" +
+          "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图；数据分析=echarts 统计图表；长文/说明=markdown 文档。",
       },
-      content: { type: "string", description: "内容（与 path 二选一：直接给内容用 content，已有文件用 path），解释方式由 format 决定；必须同时传 format。**图表源码**——PlantUML 布局：流程/时序类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包；勿手动添加 @startuml/@enduml（自动补全）。ECharts 源码要求见 format 说明。**HTML 源码**——完整文档或片段均可（自动补全为完整页面）；沙箱 iframe 域隔离预览：脚本可执行但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航；适合网页原型、数据报表、卡片、可视化组件等；样式用内联 CSS，图片用 data: URI 或外部 URL。" },
+      content: { type: "string", description: "内容（与 path 二选一：直接给内容用 content，已有文件用 path），解释方式由 format 决定；必须同时传 format。**图表源码**——PlantUML 布局：流程/时序类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包；勿手动添加 @startuml/@enduml（自动补全）。ECharts 源码要求见 format 说明。**HTML 源码**——完整文档或片段均可（自动补全为完整页面）；沙箱 iframe 域隔离预览：脚本可执行但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航；适合网页原型、数据报表、卡片、可视化组件等；样式用内联 CSS，图片用 data: URI 或外部 URL。**文本型源码**——markdown/code/text 直接传文本内容（长文档/源码交付用，避免在回复正文里堆长文）。" },
       path: { type: "string", description: "已有文件路径（与 content 二选一），按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件渲染成图表、.html 页面预览、markdown 渲染为文档、其余文本/代码语法高亮内联、无扩展名纯文本按内容探测后内联、其余查看/下载卡片——适合交付产物或需用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径（会话外文件会复制一份，≤100MB）；显式传 format 时按该格式解释文件内容" },
+      language: { type: "string", description: "语法高亮语言（可选，仅 `format: \"code\"` 用；如 typescript/python/bash/json/yaml/sql——缺省按 path 的文件扩展名推断，无法推断时由前端自动识别）。" },
       render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（可选微调，仅图表分支；默认 frontend，首选前端渲染降低服务端负载）：frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销）/ backend（服务端渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用，四语言均支持；前端渲染不可用（收到「画图能力受限」）时改用 backend 重试）" },
       width: { type: "number", description: "HTML 预览宽度（px，可选微调，仅 html 分支，默认铺满消息流宽度）" },
       height: { type: "number", description: "HTML 预览高度（px，可选微调，仅 html 分支，不传默认取会话区域高度的 2/3）" },
@@ -344,12 +391,15 @@ export const showTool: Tool = {
     if (!contentArg && !pathArg.trim()) {
       return { output: "show 失败：缺少内容源——content（内容，须同时传 format）或 path（已有文件路径）二选一。" }
     }
-    // ① content 分支：内容类别由 format 决定（图表语言 → 渲染验证；html → 页面预览）
+    // ① content 分支：内容类别由 format 决定（图表语言 → 渲染验证；html → 页面预览；markdown/code/text → 文本型内联）
     if (contentArg) {
       if (!formatArg) return { output: `show 失败：content（内容）必须同时传 format（${SHOW_FORMAT_VALUES.join(" / ")}）。` }
       if (formatArg === "html") {
         const base = (args.name ? String(args.name) : "page").replace(/\.html?$/, "")
         return showHtml(ctx, contentArg, base, args.width, args.height)
+      }
+      if (isTextFormat(formatArg)) {
+        return showText(ctx, contentArg, formatArg, args.name ? String(args.name) : TEXT_DEFAULT_NAME[formatArg], "", args.language)
       }
       const base = (args.name ? String(args.name) : "diagram").replace(DIAGRAM_EXT, "")
       return showDiagram(ctx, contentArg, formatArg as DiagramFormat, base, "", args.render)
@@ -380,10 +430,11 @@ export const showTool: Tool = {
       }
     }
     if (formatArg === "html") return asHtml()
-    // path+format（图表语言）：显式格式优先于扩展名推断——渲染该文件内容（不限扩展名，与 content 模式同一管线）
-    if (formatArg) {
-      return showDiagram(ctx, await readText(), formatArg as DiagramFormat, display.replace(/\.[^.]+$/, "") || "diagram", rawPath, args.render)
+    // path+format（图表语言 / 文本型格式）：显式格式优先于扩展名推断——按该格式解释文件内容（不限扩展名）
+    if (isDiagramFormat(formatArg)) {
+      return showDiagram(ctx, await readText(), formatArg, display.replace(/\.[^.]+$/, "") || "diagram", rawPath, args.render)
     }
+    if (isTextFormat(formatArg)) return showText(ctx, await readText(), formatArg, display, rawPath, args.language)
     if (IMAGE_EXT.test(abs)) {
       return {
         output: `已向用户展示文件 ${display}（${logical}，${size} 字节，图片内联展示，点击可全屏查看）${copiedNote}。`,

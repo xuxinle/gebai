@@ -318,7 +318,7 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 | `py` | 执行 Python 代码（本地模式带工具桥：工具名即函数、`tools.call`、`ctx`/`input` 注入） | 恒需审批 |
 | `js` | 执行 JS/TS 脚本（Bun 运行时）：脚本内工具即函数（`await read(...)`）、`defineTool` 注册会话级动态工具、`bg_task` 调度后台任务 | 默认需审批（词元扫描通过可免审） |
 | `fetch_url` | 抓取 URL 内容（网页/API/文档；沙箱模式禁公网外地址并逐跳校验） | 免审 |
-| `show` | 内容展示统一入口：内联呈现 / 四语言图表 / 沙箱 HTML 页面（原 `draw`/`render_html`/`show_file` 合并） | 免审 |
+| `show` | 内容展示统一入口：Markdown 文档 / 源码高亮 / 纯文本 / 四语言图表 / 沙箱 HTML 页面（`content` 直给或 `path` 直显，原 `draw`/`render_html`/`show_file` 合并） | 免审 |
 | `ask` | 向用户询问并阻塞等待的统一入口：选项询问 / 环境变量填值 / 计划审批（原 `ask_user`/`ask_env`/`plan` 合并） | 免审 |
 | `todo` | 待办清单（新增/更新/删除/查询，entries 批量操作） | 免审 |
 | `tool_schemas` | 批量查询工具的输入参数 schema 与结构化输出（data）schema | 免审 |

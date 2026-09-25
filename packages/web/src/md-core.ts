@@ -56,8 +56,8 @@ export function highlightCode(lang: string, code: string): string {
   }
 }
 
-/** 纯转义（无高亮）：低性能模式无语言标注代码块的兜底，避免 highlightAuto 的开销。 */
-function escapePlain(code: string): string {
+/** 纯转义（无高亮）：低性能模式无语言标注代码块的兜底与纯文本内容（show `text` 分支）的渲染。 */
+export function escapePlain(code: string): string {
   return code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
