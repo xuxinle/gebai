@@ -6,7 +6,7 @@ import type { LLMCapabilities, MessageLike } from "@gebai/sdk"
 import type { LLMChunk, LLMProvider, ChatOptions } from "../llm/llm"
 import { AgentEngine, stripThinkTags } from "./engine"
 import { currentToolFetchSession } from "../support/fetch-scope"
-import { SessionStore, estimateCtxTokens } from "../session/store"
+import { SessionStore, estimateCtxTokens, MAX_CACHE_MESSAGES, TRIM_LOW_WATER_MESSAGES } from "../session/store"
 import { ToolRegistry } from "../base/registry"
 import { createGlobalTools, pageCaptureTool, TRUNCATE_THRESHOLD } from "../tools"
 import { Sandbox } from "../security/sandbox"
@@ -3447,13 +3447,14 @@ describe("context compaction", () => {
   test("超限截断记录 trimmed 并在下次装载注入「历史裁剪」提示（模型知道历史断裂）", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
-    // 直接构造超限历史（上限 1000 条）：逐条 appendMessage 会做上千次全量落盘，改为一次装载后单次 append 触发截断
+    // 直接构造超限历史（上限 2000 条）：逐条 appendMessage 会做上千次全量落盘，改为一次装载后单次 append 触发截断
     const seed = (await s.store.load(session.id))!
-    seed.messages = Array.from({ length: 1000 }, (_, i) => ({ id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 1 })) as never
+    seed.messages = Array.from({ length: MAX_CACHE_MESSAGES }, (_, i) => ({ id: `m-${i}`, role: "assistant", content: `msg ${i}`, createdAt: i + 1 })) as never
     await s.store.appendMessage(session.id, { id: "tail", role: "assistant", content: "tail", createdAt: 1001 } as never)
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.length).toBe(1000)
-    expect(loaded!.trimmed?.count).toBe(1)
+    // 按批裁剪一次降到低水位（而非刚好压回上限）
+    expect(loaded!.messages.length).toBe(TRIM_LOW_WATER_MESSAGES)
+    expect(loaded!.trimmed?.count).toBe(MAX_CACHE_MESSAGES + 1 - TRIM_LOW_WATER_MESSAGES)
     const histFn = (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<import("@gebai/sdk").MessageLike[]> }).loadHistory
     const history = await histFn.call(s.engine, session.id, "default")
     expect(String(history[0]!.content)).toContain("[历史裁剪]")

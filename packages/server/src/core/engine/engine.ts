@@ -4,7 +4,7 @@ import { VISION_MAX_IMAGE_BYTES, VISION_MIME_SET } from "@gebai/agents"
 import { resizeForVision, resizeNote } from "@gebai/agents"
 import type { ToolRegistry } from "../base/registry"
 import type { SessionStore } from "../session/store"
-import { estimateCharsTokens, estimateCtxTokens, isEngineNote } from "../session/store"
+import { estimateCharsTokens, estimateCtxTokens, isEngineNote, TRIM_BATCH_MESSAGES } from "../session/store"
 import type { EnvManager } from "../session/env"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
@@ -631,7 +631,7 @@ private activeSchemas(sessionId: string) {
       sessionId,
       count: 0,
       degraded: "trim",
-      summary: `会话消息条数达到上限：本次又移除最早的 ${n - prev} 条非保护消息（累计 ${n} 条；被移除消息原文不再保留）。需要保留完整历史请及时归档或压缩会话。`,
+      summary: `会话消息条数达到上限：本次按批移除最早的 ${n - prev} 条非保护消息（累计 ${n} 条；被移除消息原文不再保留）——每批一次裁到低水位，需再积累约 ${TRIM_BATCH_MESSAGES} 条消息才会再次裁剪，避免反复改写上下文前缀。需要保留完整历史请及时归档或压缩会话。`,
     })
   }
 

@@ -6,9 +6,15 @@ import { randomUUID } from "node:crypto"
 
 /** 会话消息持久化上限（条）——**纯存储安全网**，不参与压缩判定（上下文保护只认 token 水位口径，见 DESIGN「上下文保护」）。
  *  取值高于水位口径可达的条数：128k 窗口、输出预留 16384、system 提示词与工具 schema 约 13k 时，
- *  撞水位需平均约 99 token/条以上，等价约 1000 条密消息；正常会话的提前裁剪由压缩承担，本上限只在
+ *  撞水位需平均约 50 token/条以上，等价约 2000 条密消息；正常会话的提前裁剪由压缩承担，本上限只在
  *  极端密消息会话中兜底（避免 chat.json 无界增长）。 */
-export const MAX_CACHE_MESSAGES = 1000
+export const MAX_CACHE_MESSAGES = 2000
+/** 单次裁剪的目标条数（低水位）：超限时**一次裁到低水位**而非逐条挤出——裁剪会改写送模型的历史前缀
+ *  （服务端前缀缓存全失效），逐条裁剪等于每条新消息都改一次前缀；按批裁剪把前缀变化摊薄到每积累
+ *  `MAX_CACHE_MESSAGES - TRIM_LOW_WATER_MESSAGES` 条消息一次。 */
+export const TRIM_LOW_WATER_MESSAGES = Math.floor(MAX_CACHE_MESSAGES * 0.9)
+/** 单次裁剪腾出的余量（条）：低水位到上限的差额，也是两次裁剪之间的最小新消息积累量。 */
+export const TRIM_BATCH_MESSAGES = MAX_CACHE_MESSAGES - TRIM_LOW_WATER_MESSAGES
 const MAX_CACHE_SESSIONS = 10
 /** 会话 env 内存缓存上限（LRU）：仅活跃会话驻留，防长生命周期进程无界增长。 */
 const MAX_ENV_CACHE_SESSIONS = 256
@@ -569,34 +575,42 @@ export class SessionStore {
   }
 
   /**
-   * 超限截断（顺序保留）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/子会话运行存档）
-   * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直至长度不超上限——不重排消息顺序（append 语义
-   * 装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免压缩摘要（受保护）被当普通历史
-   * 丢弃而让压缩成果静默作废、避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身超过
-   * 上限时按原样保留（软上限，用户输入与系统提示词不改变优先）。丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时
+   * 超限截断（顺序保留、按批执行）：受保护消息（isProtectedMessage：系统提示词/用户输入/压缩摘要/子会话运行存档）
+   * 原位保留，从最早的其他消息（assistant/tool）开始丢弃直到长度降到**低水位**（TRIM_LOW_WATER_MESSAGES，
+   * 而非「刚好压回上限」）——裁剪会改写送模型的历史前缀（服务端前缀缓存失效），按批裁剪把前缀变化摊薄到
+   * 每积累 TRIM_BATCH_MESSAGES 条消息一次，逐条挤出则等于每条新消息都改一次前缀。不重排消息顺序（append
+   * 语义装载的提示词消息保持在末尾，前端渲染与缓存引用顺序稳定），避免压缩摘要（受保护）被当普通历史
+   * 丢弃而让压缩成果静默作废、避免装载提示词（会话恢复关键记录）与用户输入丢失。受保护消息本身使长度
+   * 高于低水位时按原样保留（软上限，用户输入与系统提示词不改变优先）。丢弃按 tool_call 配对原子执行——assistant(toolCalls) 被丢弃时
    * 连带其后紧邻的 tool 结果（拆散配对会产生孤儿 tool 消息，严格校验的 LLM 接口会拒绝整个请求），
-   * 实际保留条数可略低于上限（配对完整性优先）。
+   * 实际保留条数可略低于低水位（配对完整性优先）。
    *
-   * 返回 { messages, dropped }：dropped 为本次丢弃条数——调用方累计进 `SessionData.trimmed`，
-   * 由 loadHistory 注入「历史裁剪」提示（模型据此知道更早内容已不在上下文中，而不是无声断裂）。
+   * 返回 { messages, dropped }：dropped 为本次**实际移除**的消息条数（含配对连带丢弃的 tool 结果）——
+   * 调用方累计进 `SessionData.trimmed`，由 loadHistory 注入「历史裁剪」提示（模型据此知道更早内容已不在
+   * 上下文中，而不是无声断裂）。
    */
   private trimToCacheLimit(messages: Message[]): { messages: Message[]; dropped: number } {
     if (messages.length <= MAX_CACHE_MESSAGES) return { messages, dropped: 0 }
-    const over = messages.length - MAX_CACHE_MESSAGES
+    // 目标：把长度降到低水位（一次腾出 TRIM_BATCH_MESSAGES 条余量）——可丢消息不足时实际移除少于目标 (软上限)
+    const goal = messages.length - TRIM_LOW_WATER_MESSAGES
     const out: Message[] = []
-    let dropped = 0
+    let removed = 0
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i]
-      if (isProtectedMessage(m) || dropped >= over) {
+      if (isProtectedMessage(m) || removed >= goal) {
         out.push(m)
         continue
       }
-      dropped++
+      removed++
       if (m.role === "assistant" && m.toolCalls?.length) {
-        while (i + 1 < messages.length && messages[i + 1].role === "tool" && !isProtectedMessage(messages[i + 1])) i++
+        // 配对原子性：连带丢弃其后紧邻的 tool 结果，连带丢弃数同样计入移除数（否则下次裁剪会提前触发）
+        while (i + 1 < messages.length && messages[i + 1].role === "tool" && !isProtectedMessage(messages[i + 1])) {
+          i++
+          removed++
+        }
       }
     }
-    return { messages: out, dropped }
+    return { messages: out, dropped: removed }
   }
 
   /** 超限截断丢弃记录的累计（chat.json 持久化 `trimmed`）：loadHistory 据此注入裁剪提示。 */
