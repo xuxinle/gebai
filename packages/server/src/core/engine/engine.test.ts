@@ -1010,6 +1010,11 @@ console.log("defined ok")`,
     // 该工具不响应取消信号 → 宽限内未交回自身中断结果 → 走统一标记的即时收口
     expect(toolMsg!.content).toContain("[interrupted by user]")
     expect(toolMsg!.content).toContain("未取得工具返回")
+    // 中断返回带上该调用被中断时已执行的时间（此次取消发生在工具开始执行约 200ms 后）
+    const elapsed = /已执行 ([0-9.]+) 秒/.exec(String(toolMsg!.content))
+    expect(elapsed).not.toBeNull()
+    expect(Number(elapsed![1])).toBeGreaterThanOrEqual(0.1)
+    expect(Number(elapsed![1])).toBeLessThan(3)
     expect(provider.calls).toBe(1) // 取消后不再发起后续模型调用
     expect(engine.isRunning(session.id)).toBe(false)
     cleanup(home)
@@ -1043,6 +1048,38 @@ console.log("defined ok")`,
     expect(toolMsg!.content).toContain("[interrupted by user]")
     expect(toolMsg!.content).toContain("partial build output")
     expect(toolMsg!.content).toContain("已被用户取消")
+    // 交回自身中断结果的中断返回同样带已执行时间
+    expect(toolMsg!.content).toMatch(/已执行 [0-9.]+ 秒/)
+    expect(s.engine.isRunning(session.id)).toBe(false)
+    cleanup(s.home)
+  })
+
+  test("cancel keeps the tool's own abort error (partial output) and reports elapsed time", async () => {
+    const s = await setup("tool", false, "local", false, { cancelGraceMs: 3000 })
+    s.registry.register({
+      name: "script_abort_error",
+      description: "tool that throws on cancel with partial output",
+      parameters: { type: "object", properties: {} },
+      async execute(_args, ctx) {
+        // 模拟 js/py 桥的中断语义：取消信号到达时把中断前的输出带进抛出信息
+        await new Promise<void>((resolve) => {
+          if (!ctx.signal || ctx.signal.aborted) return resolve()
+          ctx.signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        throw new Error("partial stdout before abort\n[interrupted]")
+      },
+    })
+    s.provider.toolName = "script_abort_error"
+    const session = await s.store.createSession("default", "t")
+    const run = s.engine.run(session.id, "default", "run the script")
+    await new Promise((r) => setTimeout(r, 200)) // 等工具进入执行
+    s.engine.cancel(session.id)
+    await run
+    const toolMsg = (await s.store.load(session.id))!.messages.find((m) => m.role === "tool")
+    // 报错文本（含中断前的输出）不被丢弃，并附上已执行时间
+    expect(toolMsg!.content).toContain("[interrupted by user]")
+    expect(toolMsg!.content).toContain("partial stdout before abort")
+    expect(toolMsg!.content).toMatch(/已执行 [0-9.]+ 秒/)
     expect(s.engine.isRunning(session.id)).toBe(false)
     cleanup(s.home)
   })
@@ -1066,6 +1103,8 @@ console.log("defined ok")`,
     expect(toolMsg!.content).toContain("[interrupted by user]")
     expect(toolMsg!.content).toContain("已被用户取消")
     expect(toolMsg!.content).not.toContain("已被用户拒绝") // 取消不写「用户拒绝」虚假记录
+    // 审批等待中被取消的调用未进入执行：不报已执行时间（与执行中被停区分）
+    expect(toolMsg!.content).not.toContain("已执行")
     cleanup(s.home)
   })
 
@@ -1096,6 +1135,8 @@ console.log("defined ok")`,
     expect(toolMsgs).toHaveLength(10) // 每个 toolCall 都有结果（无悬空配对）
     expect(toolMsgs.every((m) => String(m.content).includes("[interrupted by user]"))).toBe(true)
     expect(toolMsgs.filter((m) => String(m.content).includes("本次调用未执行"))).toHaveLength(2)
+    // 已开始执行的 8 个调用带已执行时间（排队中的 2 个未执行，不带）
+    expect(toolMsgs.filter((m) => /已执行 [0-9.]+ 秒/.test(String(m.content)))).toHaveLength(8)
     cleanup(s.home)
   })
 

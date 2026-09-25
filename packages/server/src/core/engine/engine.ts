@@ -226,27 +226,37 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
  *  模型与用户据此把「用户中断」与执行超时、引擎错误等其他终止原因区分开。 */
 const USER_INTERRUPT_MARK = "[interrupted by user]"
 
+/** 已执行时长文案（毫秒 → 「（已执行 12.3 秒）」，分钟级写「2 分 5 秒」）：中断返回带上它，
+ *  模型与用户据此知道这次调用在执行了多久的位置被停（无执行起点的调用不传，不写该段）。 */
+function elapsedNote(elapsedMs?: number): string {
+  if (elapsedMs === undefined) return ""
+  const s = elapsedMs / 1000
+  const text = s < 60 ? `${s.toFixed(1)} 秒` : `${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`
+  return `（已执行 ${text}）`
+}
+
 /** 被用户中断、未及执行的工具调用结果（保持 assistant/tool 配对完整）。 */
 function userInterruptedSkippedMsg(name: string): string {
   return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：本次调用未执行。`
 }
 
-/** 被用户中断、执行中被终止且未取得工具返回的结果（工具未在宽限期内交回自身的中断结果）。 */
-function userInterruptedMsg(name: string): string {
-  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断，未取得工具返回。`
+/** 被用户中断、执行中被终止且未取得工具返回的结果（工具未在宽限期内交回自身的中断结果）。
+ *  elapsedMs 为该调用被中断时已执行的时间（无执行起点的调用——未及启动、审批等待中被取消——不传）。 */
+function userInterruptedMsg(name: string, elapsedMs?: number): string {
+  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断${elapsedNote(elapsedMs)}，未取得工具返回。`
 }
 
 /** 被用户中断的工具自身交回了内容：保留其真实返回（中断前已产生的输出 + 工具侧中断标记）作为工具结果。 */
-function interruptedToolResult(name: string, r: ToolResult): ToolResult {
+function interruptedToolResult(name: string, r: ToolResult, elapsedMs?: number): ToolResult {
   const output = r.output ?? ""
   return output.trim()
-    ? { ...r, output: `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：以下为该工具被中断时返回的内容（可能不完整）：\n${output}` }
-    : { ...r, output: userInterruptedMsg(name) }
+    ? { ...r, output: `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断${elapsedNote(elapsedMs)}，以下为该工具中断时返回的内容（可能不完整）：\n${output}` }
+    : { ...r, output: userInterruptedMsg(name, elapsedMs) }
 }
 
 /** 被用户中断的工具在中断时报错：保留其报错文本（js/py 等把中断前的输出带进报错信息，丢弃会丢失部分结果）。 */
-function userInterruptedErrorMsg(name: string, message: string): string {
-  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断，工具报错如下（其中可能含中断前的输出）：\n${message}`
+function userInterruptedErrorMsg(name: string, message: string, elapsedMs?: number): string {
+  return `${USER_INTERRUPT_MARK} 工具 ${name} 已被用户取消（任务已停止）：执行被用户中断${elapsedNote(elapsedMs)}，工具报错如下（其中可能含中断前的输出）：\n${message}`
 }
 
 export interface AgentEngineOptions {
@@ -2447,7 +2457,8 @@ private activeSchemas(sessionId: string) {
    *   `Sandbox.exec` 的 signal 支持），并**把工具自身的中断返回并进工具结果**——工具侧的中断处理在取消信号
    *   到达的同一轮返回（`[interrupted by user]` / `[interrupted]` 标记 + 中断前已产生的输出），
    *   宽限期（cancelGraceMs）内到达即作为工具结果落盘（模型下一轮看得见被中断时的真实状态）；
-   *   宽限内不返回的挂起工具以统一中断标记即时收口，取消等待不被拖慢
+   *   宽限内不返回的挂起工具以统一中断标记即时收口，取消等待不被拖慢；
+   *   中断返回一律附上**该调用被中断时已执行的时间**（取消信号到达时刻计时，见 elapsedNote）
    * - 执行超时（TOOL_TIMEOUT_MS）：不结束任务，把「执行超时」作为工具结果返回给模型，
    *   由模型决定调整方案重试（脚本先由 sandbox 自身超时杀进程，此兜底覆盖挂起的非脚本工具）
    * - 工具异常：转为「工具执行失败」结果（与原有行为一致）
@@ -2457,6 +2468,9 @@ private activeSchemas(sessionId: string) {
     return new Promise<ToolResult>((resolve) => {
       let done = false
       let cancelled = false
+      /** 取消信号到达时该调用已执行的时间（毫秒）：中断返回带上它（宽限期后才交回的中断结果同样按此报告）。 */
+      let cancelledElapsedMs = 0
+      const startedAt = Date.now()
       let timer: ReturnType<typeof setTimeout>
       let graceTimer: ReturnType<typeof setTimeout> | undefined
       let onAbort: () => void
@@ -2476,8 +2490,9 @@ private activeSchemas(sessionId: string) {
       }
       onAbort = () => {
         cancelled = true
+        cancelledElapsedMs = Date.now() - startedAt
         clearTimeout(timer) // 取消后不再需要执行超时兜底
-        graceTimer = setTimeout(() => finish({ output: userInterruptedMsg(name) }), this.opts.cancelGraceMs ?? TOOL_ABORT_GRACE_MS)
+        graceTimer = setTimeout(() => finish({ output: userInterruptedMsg(name, cancelledElapsedMs) }), this.opts.cancelGraceMs ?? TOOL_ABORT_GRACE_MS)
       }
       timer = setTimeout(
         () => finish({ output: `工具 ${name} 执行超时（超过 ${Math.round((this.opts.toolTimeoutMs ?? TOOL_TIMEOUT_MS) / 1000)} 秒）已终止。请分析原因（死循环/等待外部资源等）后调整方案，或拆分为更小步骤重试。` }),
@@ -2491,11 +2506,11 @@ private activeSchemas(sessionId: string) {
       runInToolFetchScope(sessionId, () => tool.execute(args, ctx)).then(
         (r) => {
           this.trackTaskMods(sessionId, name, args, r, ctx)
-          finish(cancelled ? interruptedToolResult(name, r) : r)
+          finish(cancelled ? interruptedToolResult(name, r, cancelledElapsedMs) : r)
         },
         (err) =>
           finish({
-            output: cancelled ? userInterruptedErrorMsg(name, (err as Error).message) : `工具执行失败: ${(err as Error).message}`,
+            output: cancelled ? userInterruptedErrorMsg(name, (err as Error).message, cancelledElapsedMs) : `工具执行失败: ${(err as Error).message}`,
           }),
       )
     })
