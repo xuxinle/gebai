@@ -10,6 +10,9 @@ import {
   matchKey,
   normalizeKeyName,
   parseSpec,
+  popKeyScope,
+  pushEscScope,
+  setActiveKeymap,
   toSpecList,
   validateKeymap,
   type KeyBinding,
@@ -285,6 +288,27 @@ describe("分发器", () => {
     target.fire(makeEvent({ key: "Escape", target: PLAIN }), "bubble")
     expect(closed).toEqual(["preview", "dialog", "menu"])
     expect(map.hasScope("dialog")).toBe(false)
+  })
+
+  test("Esc 作用域：默认不抢终端（shell 的 Esc 归 shell），菜单类把终端算进来且走捕获阶段", () => {
+    const closed: string[] = []
+    const map = createKeymap([])
+    const target = makeTarget()
+    map.install(target)
+    setActiveKeymap(map)
+    // 普通浮层（弹窗/查看器）：终端焦点下 Esc 不归它（会递给 shell：vim 退出插入模式等）
+    map.pushScope({ id: "plain", bindings: [binding({ id: "t.plainEsc", keys: "Esc", focus: ["other", "editor", "input"], run: () => closed.push("plain") })] })
+    target.fire(makeEvent({ key: "Escape", target: TERMINAL }), "bubble")
+    expect(closed).toEqual([])
+    // 菜单：pushEscScope 的 includeTerminal 形态（终端焦点 + 捕获阶段——
+    // xterm 在自己的 textarea 上就把按键吃掉并向 shell 发 ESC，冒泡阶段根本收不到）
+    pushEscScope("t.menu", "关闭菜单", () => closed.push("menu"), "wb.ui", { includeTerminal: true })
+    target.fire(makeEvent({ key: "Escape", target: TERMINAL }), "capture")
+    expect(closed).toEqual(["menu"])
+    target.fire(makeEvent({ key: "Escape", target: TERMINAL }), "bubble")
+    expect(closed).toEqual(["menu"]) // 捕获阶段已消费，不会再走一遍
+    popKeyScope("t.menu")
+    setActiveKeymap(null)
   })
 
   test("元素级登记（owned: false）不参与分发，但可进入帮助与校验", () => {

@@ -36,10 +36,19 @@ describe("term-keys（终端键位表）", () => {
     expect(keysOf("wb.term.copy")).toEqual(["Ctrl+Shift+C", "Ctrl+Insert"])
     expect(keysOf("wb.term.paste")).toEqual(["Ctrl+Shift+V", "Shift+Insert"])
     expect(keysOf("wb.term.search")).toEqual(["Ctrl+F"])
-    expect(keysOf("wb.term.clear")).toEqual(["Ctrl+K"])
+    expect(keysOf("wb.term.clear")).toEqual(["Ctrl+Shift+K"])
     expect(keysOf("wb.term.selectAll")).toEqual(["Ctrl+Shift+A"])
     expect(keysOf("wb.term.closeTab")).toEqual(["Alt+Shift+W"])
     expect(keysOf("wb.term.nextTab")).toEqual(["Ctrl+Shift+↓"])
+  })
+
+  test("不占 shell 的读行键：Ctrl+K（删至行尾）/ Ctrl+A（行首）/ Ctrl+E / Ctrl+W / Ctrl+L 均不在表内", () => {
+    const specs = bindings.flatMap((b) => toSpecList(b.keys))
+    // xterm 会把 Ctrl+K 编成 ^K 发给 shell（readline kill-line），Ctrl+L 则是 readline 的清屏，
+    // 都不能被面板抢走；Ctrl+字母只有加上 Shift 才不产生字节（见 xterm Keyboard.ts）。
+    for (const forbidden of ["Ctrl+K", "Ctrl+A", "Ctrl+E", "Ctrl+W", "Ctrl+L", "Ctrl+U", "Ctrl+P", "Ctrl+N", "Ctrl+B"]) {
+      expect(specs).not.toContain(forbidden)
+    }
   })
 
   test("动作转发到最新面板（面板重建后旧句柄不残留）", () => {
@@ -67,7 +76,7 @@ describe("term-keys（终端键位表）", () => {
   })
 
   test("键位常量与绑定表一一对应（改表漏改绑定会被这里拦住）", () => {
-    expect(TERM_KEYS.clear).toEqual(["Ctrl+K"])
+    expect(TERM_KEYS.clear).toEqual(["Ctrl+Shift+K"])
     const ids = bindings.map((b) => b.id)
     expect(new Set(ids).size).toBe(ids.length)
   })

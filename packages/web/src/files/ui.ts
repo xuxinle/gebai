@@ -453,7 +453,9 @@ export function showMenu(x: number, y: number, items: MenuItem[]): void {
    * 于是每开一次菜单就多一对永不摘除的 document 监听器（闭包还持着已移除的菜单 DOM）。
    * 不会误关当前这次点击：打开菜单的都是 click/contextmenu，而 mousedown 早在它们之前就已派发完。
    */
-  const scopeId = pushEscScope("wb.menu", "关闭菜单", closeMenu, "wb.ui")
+  // 菜单可能开在终端面板上（终端里右键 / 设置 / 标签菜单）：焦点在终端时 Esc 也要能关菜单，
+  // 否则 Esc 会穿透给 shell（readline 进 ESC 前缀态、vim 退出插入模式），而菜单还开着。
+  const scopeId = pushEscScope("wb.menu", "关闭菜单", closeMenu, "wb.ui", { includeTerminal: true })
   document.addEventListener("mousedown", onDown)
   observer.observe(document.body, { childList: true })
   menuCleanup = cleanup

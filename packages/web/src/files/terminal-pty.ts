@@ -827,17 +827,21 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
       },
       { passive: false, capture: true },
     )
-    // 中键粘贴（X11 惯例；Chrome 默认中键是自动滚动，在终端里应归粘贴）
+    // 中键粘贴（X11 惯例）；但**鼠标上报开启的程序**（vim set mouse=a、htop…）要自己吃中键
     host.addEventListener("mousedown", (e) => {
       if (e.button !== 1) return
+      if (mouseReporting()) return
       e.preventDefault()
       void pasteClipboard()
     })
     host.addEventListener("auxclick", (e) => {
-      if (e.button === 1) e.preventDefault()
+      if (e.button === 1 && !mouseReporting()) e.preventDefault()
     })
     host.oncontextmenu = (e) => {
       e.preventDefault()
+      // 鼠标上报开启时，右键是**程序**的（vim 的右键菜单/扩展选择等）；面板菜单让位，
+      // 按住 Shift 强制调出（与「Shift 拖动可绕过鼠标上报选文本」同一套约定）
+      if (mouseReporting() && !e.shiftKey) return
       openContextMenu(e.clientX, e.clientY)
     }
     const t: PtyTab = {
@@ -870,6 +874,21 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     const c = themeColors().match
     host.style.setProperty("--term-find-match", c.matchBackground)
     host.style.setProperty("--term-find-active", c.activeMatchBackground)
+  }
+
+  /**
+   * 当前终端是否处于**鼠标上报**模式（`CSI ? 1000/1002/1003 h`）：
+   * 全屏程序（vim set mouse=a / htop / less --mouse）启用后，鼠标事件应归程序——
+   * 中键与右键就不能再被面板的粘贴 / 菜单截走。Shift 仍可强制走面板（xterm 也用 Shift 绕过上报选文本）。
+   */
+  function mouseReporting(): boolean {
+    const t = activeTab()
+    if (!t) return false
+    try {
+      return t.term.modes.mouseTrackingMode !== "none"
+    } catch {
+      return false
+    }
   }
 
   /** 把当前 xterm 尺寸下发给服务端（建会话后补发 / 重连对齐用）。 */

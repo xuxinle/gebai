@@ -624,11 +624,19 @@ export function nextScopeId(prefix: string): string {
 /**
  * 推入一个「Esc 关闭」作用域并返回其 id——绝大多数浮层（弹窗、查看器、菜单、下拉）的全部键位
  * 需求就是这一条。关闭时用返回的 id 调 `popKeyScope`。
+ *
+ * 默认**不包含终端焦点**：终端里的 Esc 属于 shell（vim 退出插入模式、less 取消搜索等）。
+ * 但「浮层已经把终端遮住」的场合（文件工作台的右键菜单/下拉开在面板上、且不搬焦点）必须
+ * 把终端算进来，否则 Esc 会穿透给 shell：菜单关不掉，而且 shell 拿到一枚孤立的 ESC
+ * （readline 进入 ESC 前缀态，后续括号粘贴被它吃掉；vim 则直接退出插入模式）。
+ *
+ * 这时还必须走**捕获阶段**：xterm 在自己的 textarea 上就 `preventDefault + stopPropagation`
+ * 把按键吃掉了（它要把 ESC 发给 shell），document 冒泡阶段的绑定永远收不到。
  */
-export function pushEscScope(prefix: string, label: string, run: () => void, group: KeyGroupId = "main.overlay"): string {
+export function pushEscScope(prefix: string, label: string, run: () => void, group: KeyGroupId = "main.overlay", opts: { includeTerminal?: boolean } = {}): string {
   const id = nextScopeId(prefix)
-  // Esc 要能在浮层自己的输入框里生效（promptDialog 打开即聚焦输入框），但终端内不抢——
-  // 那里的 Esc 属于 shell（vim 等）
-  pushKeyScope({ id, bindings: [{ id: `${prefix}.esc`, keys: "Esc", label, group, focus: ["other", "editor", "input"], run }] })
+  const focus: FocusKind[] = opts.includeTerminal ? ["other", "editor", "input", "terminal"] : ["other", "editor", "input"]
+  const phase = opts.includeTerminal ? ("capture" as const) : undefined
+  pushKeyScope({ id, bindings: [{ id: `${prefix}.esc`, keys: "Esc", label, group, focus, phase, run }] })
   return id
 }

@@ -42,7 +42,10 @@ export const TERM_KEYS = {
   fontDown: ["Ctrl+-"],
   fontReset: ["Ctrl+0"],
   interrupt: ["Ctrl+C"],
-  clear: ["Ctrl+K"],
+  /** 清屏：**不能用 Ctrl+K**——它是 readline 的「删至行尾」（xterm 会把 Ctrl+K 编成 ^K 发给 shell），
+   *  而 Ctrl+Shift+字母在 xterm 里不产生任何字节（只有 Ctrl+Shift+-/2/6 有映射），是干净的空位。
+   *  这也正是 VSCode 在 Windows/Linux 上不给「清屏」绑键的原因（mac 才用 Ctrl+Cmd+K）。 */
+  clear: ["Ctrl+Shift+K"],
   selectAll: ["Ctrl+Shift+A"],
   newTab: ["Ctrl+Shift+`", "Ctrl+Shift+~"],
   closeTab: ["Alt+Shift+W"],
@@ -63,7 +66,7 @@ export function termKeyBindings(get: () => TermActions | null): KeyBinding[] {
     { ...base, id: "wb.term.fontUp", keys: TERM_KEYS.fontUp, label: "终端：放大字号", run: () => get()?.fontSize(1) },
     { ...base, id: "wb.term.fontDown", keys: TERM_KEYS.fontDown, label: "终端：缩小字号", run: () => get()?.fontSize(-1) },
     { ...base, id: "wb.term.fontReset", keys: TERM_KEYS.fontReset, label: "终端：重置字号", run: () => get()?.fontReset() },
-    { ...base, id: "wb.term.clear", keys: TERM_KEYS.clear, label: "终端：清屏", run: () => get()?.clear() },
+    { ...base, id: "wb.term.clear", keys: TERM_KEYS.clear, label: "终端：清屏（清掉回放缓冲）", run: () => get()?.clear() },
     { ...base, id: "wb.term.selectAll", keys: TERM_KEYS.selectAll, label: "终端：全选", run: () => get()?.selectAll() },
     { ...base, id: "wb.term.newTab", keys: TERM_KEYS.newTab, label: "终端：新建终端", run: () => get()?.newTab() },
     { ...base, id: "wb.term.nextTab", keys: TERM_KEYS.nextTab, label: "终端：下一个标签", run: () => get()?.switchTab(1) },

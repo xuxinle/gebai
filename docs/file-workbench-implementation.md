@@ -1567,6 +1567,33 @@ GET  /vendor/tree-sitter/lang/<grammar>.wasm  符号提取的语法 wasm（白�
 
 ---
 
+### 5.42 终端独占模式（vi / watch / less / htop）实测与四处修复（第四十二轮）
+
+问的是「终端独占模式呢，如 vi 和 watch」——备用屏程序是终端能力的硬指标，用真实浏览器又跑了一轮（`term-probe/term-tui.mjs`，23 项断言）。
+
+**证实本来就对（不重复劳动）**
+
+| 能力 | 实测证据 |
+|---|---|
+| 备用屏进入 / 退出与主屏恢复 | `less` 铺满 12/12 行；退出后 `AFTER-LESS` 回到 shell，原主屏历史仍可回滚（滚轮上滚到 PRE-111） |
+| 按键直达程序 | vim 里输中文 `HELLO-VI-中文` 后 `:wq` 真落盘；`less` 内部 `/selectAll` 搜索命中；`q` / `Ctrl+C` 正常退出 |
+| TUI 中改窗口尺寸 | `watch -n 0.3 'stty size'` 逐次跟随：`12 172 → 12 117 → 12 172`（`resize` → `TIOCSWINSZ` → SIGWINCH 整条链通） |
+| 真彩色 / 256 色 | 驱动已 `putenv("TERM=xterm-256color")`，`tput colors` = 256 |
+| 备用屏退出后鼠标模式复位 | vim `set mouse=a` 退出后无 Shift 拖动又能选词了 |
+
+**测出并修掉的真缺陷**
+
+1. **`Ctrl+K` 把我上一轮引入的错误纠正掉**：VSCode 的终端清屏在 Windows/Linux 上 `primary: 0`（**不绑键**，只有 mac 用 `Ctrl+Cmd+K`，源码注释写明是为避开 `Ctrl+K` 和弦），而 xterm 会把 `Ctrl+K` 编成 `^K` 发给 shell（readline 的删至行尾、vi 的 digraph 前缀）。我把清屏改到 `Ctrl+Shift+K`——`Ctrl+Shift+<字母>` 在 xterm 的 `Keyboard.ts` 里**不产生任何字节**，是干净的空位；并加了一条单测：`Ctrl+K/A/E/W/L/U/P/N/B` 一个都不允许出现在终端表里。
+2. **终端焦点下 Esc 关不掉面板菜单**（右键 / 标签 / 设置 / shell 下拉）：菜单不搬焦点，而它的 Esc 作用域只有 `other/editor/input`。更麻烦的是第二层：那枚 Esc 会穿透给 shell，`cat -v` 里看到的 `^[` 就是证据；readline 收到孤立 ESC 后进入 ESC 前缀态，**把随后的括号粘贴吃掉**——用户拿到的是一行 `[200~…` 乱码（这就是本轮“中键粘贴偶发失灵”的真因）。修法：`pushEscScope` 新增 `includeTerminal` 选项（含终端焦点 + **捕获阶段**——xterm 在自己的 textarea 上就 stopPropagation 了，冒泡阶段收不到），菜单用它；并补了一条分发器单测。
+3. **鼠标上报时右键/中键被面板截走**：`term.modes.mouseTrackingMode !== "none"`（vim `set mouse=a`、htop）时右键归程序、中键不再注入剪贴板；Shift+右键强制调出面板菜单，Shift+拖动仍可绕过上报选文本（xterm 自带规则）。
+4. **备用屏里的搜索高亮不可见**：xterm 6 的装饰渲染器对备用屏一律 `display:none`；实测装饰的 `left/top` 与文字位置**完全对齐**（`left=24px` = 3 格 × 8.02px，`top=147px` = 第 7 行），所以显式放开显示（`display: block !important`）——不然在 vi/less 里 Ctrl+F 看上去就是「什么都没找到」。
+
+**顺带纠正一处「空断言」**：上一轮的滚动断言看的是 `.xterm-viewport` 的 `scrollTop/scrollHeight`，而 xterm 6 的滚动条是自绘的（两者恒等，断言永远通过）。现在改看**可见首行**：`Ctrl+Shift+Home` → 首行=1、`Ctrl+Shift+End` → 回到 300 的底部，滚动真的验证到了。
+
+**回归**：TUI 23/23 通过、主 e2e 31/31 通过（清屏键与滚动断言已同步更新）、`packages/web` 单测全绿、typecheck/lint 通过。
+
+---
+
 ## 8. 已知边界与后续可选增强
 
 - Office 预览依赖服务端转换，复杂排版（图表、批注）不保证像素级一致 → 提供「下载打开」兜底。

@@ -116,8 +116,14 @@
 
 /* 搜索命中高亮：xterm 6 的 decoration 渲染器不读 addon 传的 backgroundColor（只按调用方的
  * onRender 设样式，addon 只给当前命中加了一道 1px outline）——不补这一层，命中在滚动缓冲里
- * 就是“看不见”（只有当前命中有一圈细边框）。底色由 JS 写入 --term-find-*（随明暗切）。 */
+ * 就是“看不见”（只有当前命中有一圈细边框）。底色由 JS 写入 --term-find-*（随明暗切）。
+ *
+ * **备用屏（vi / less / htop 这类全屏程序）里必须显式恢复显示**：渲染器在备用屏下把命中装饰
+ * 一律 `display:none`（它按普通屏的行号定位，对备用屏没做校核）；实测备用屏下装饰的 left/top
+ * 与文字位置**完全对齐**（左侧空格数 × 单元格宽），所以放开显示是对的——不然在 vi/less 里
+ * Ctrl+F 看上去就是“什么都没找到”。 */
 .fw-pty-term .xterm-decoration.xterm-find-result-decoration {
+  display: block !important;
   background-color: var(--term-find-match, rgba(245, 245, 67, 0.3));
   border-radius: 2px;
 }
