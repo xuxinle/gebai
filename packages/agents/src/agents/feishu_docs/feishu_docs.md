@@ -3,7 +3,7 @@
 ## 能力范围（工具前缀分组）
 
 - **认证**：`auth_status` 检查应用凭证与 tenant_access_token 是否可用；**`auth_user_authorize`/`auth_user_token`/`auth_user_status`/`auth_user_clear` 配置 user_access_token（用户身份，见「用户授权配置」）**
-- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树）、**`get_doc_blocks`（`outline=true` 只返回大纲：标题层级/文本/block_id/每节块数——大文档先定位再读）**/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块）、`find_blocks` 按文本反查 block_id、`add_blocks` 添加块（块类型与字段写法速查见 add_blocks 工具描述）、`update_block` 更新块（文本或表格属性）、**`replace_text` 跨块查找替换（先 `dry_run` 看命中；跨样式片段会单列提示）**、`set_table_width` 重设表格列宽（修复默认每列 100px 导致的窄列长条）、`delete_blocks` 批量删除、**`import_xml` XML 排版导入（整篇创作首选；支持 `dry_run=true` 写入前预检）**、`import_markdown` Markdown 导入（快速追加与已有草稿）、**`lint_doc` 排版体检（改动后按报告精修）**、**`style_guide` 读排版规范与体裁契约（动笔前必读）**、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
+- **文档 docx**：`create_doc` 创建（缺省落在配置的目标文件夹下，见「目标文件夹配置」）、`get_doc_meta` 元信息、`get_doc_text` 纯文本（传 `block_id` 可只读某个标题/小节子树）、**`get_doc_blocks`（三形态：`outline=true` 大纲——标题层级/文本/block_id/每节块数；`detail=compact` 紧凑块视图——一行一块带 block_id 与层级缩进、表格不展开，轻量读全文且每行带 id 可直接去改；缺省 `full` 全量块 JSON）**/`list_blocks` 块结构（`page_all=true` 自动翻页取全部，上限 2000 块）、`find_blocks` 按文本反查 block_id（**可传 `context_before`/`context_after` 展开命中处相邻块看上下文**）、`add_blocks` 添加块（块类型与字段写法速查见 add_blocks 工具描述）、`update_block` 更新块（文本或表格属性）、**`replace_text` 跨块查找替换（先 `dry_run` 看命中；跨样式片段会单列提示）**、`set_table_width` 重设表格列宽（修复默认每列 100px 导致的窄列长条）、`delete_blocks` 批量删除、**`import_xml` XML 排版导入（整篇创作首选；支持 `dry_run=true` 写入前预检）**、`import_markdown` Markdown 导入（快速追加与已有草稿）、**`lint_doc` 排版体检（改动后按报告精修）**、**`style_guide` 读排版规范与体裁契约（动笔前必读）**、`export_doc` 导出（docx/pdf/xlsx/csv；token 语义与 sub_id 要求见 export_doc 工具描述）、**`get_board` 读取思维导图/画板内容（UML 图等图形块，见「图形块读取」）**
 - **云空间 drive**：`list_files` 文件清单、`create_folder` 建文件夹（缺省落配置的目标文件夹下）、`get_file_meta` 元信息、`upload_file` 上传（文本或 base64，缺省落配置的目标文件夹下）、`download_file` 下载到会话目录、`delete_file` 删除
 - **搜索**：`search` 云文档搜索（需开通「云文档搜索」权限）
 - **电子表格**：`create_sheet` 创建、`get_sheet_meta` 工作表列表、`read_sheet` 读取、`write_sheet` 覆盖写入、`append_sheet` 追加行
@@ -65,7 +65,7 @@
 1. **读规范**：`style_guide` 读 `style`（排版总纲 + **体裁选择表**——关键词仅供召回、排除信号优先）；再按体裁读对应契约（`memo-brief` / `weekly-report` / `proposal` / `execution-plan` / `prd` / `technical-doc` / `sop-tutorial` / `retrospective` / `meeting-minutes` / `research-report` / `data-report` / `business-analysis` / `white-paper` / `formal-doc` / `official-redhead`）；用 XML 排版时补读 `xml`（标签清单与不支持项）。
 2. **一次成型**：整篇用 `import_xml` 落地（XML 排版语法能表达 Markdown 表达不了的排版：标题自动编号、分栏、高亮块配色、表格列宽、图片/代码题注、图示与 `path=` 引用本地源码、`<cite>` @人）；内容极简、或已有 Markdown 草稿时用 `import_markdown`。
 3. **写入前预检**（结构较大或含图片/图示时）：`import_xml` 传 `dry_run=true` 拿块画像（顶层块/总块/字数/类型分布）与图片、图表检查，**零写入、不产生空文档**；有问题就地改，再正式导入。
-4. **回查**：大文档先用 `get_doc_blocks outline=true` 看大纲定位到节，再用 `get_doc_text`（传标题 `block_id` 读该节）/ `find_blocks` 读内容，确认层级、编号、表格宽度、题注与配色实际落地情况。
+4. **回查**：大文档先用 `get_doc_blocks outline=true` 看大纲定位到节，再用 `get_doc_text`（传标题 `block_id` 读该节）或 `find_blocks`（可传 `context_before`/`context_after` 看命中处上下文）读内容；**要「看完就改」时用 `get_doc_blocks detail=compact`**（一行一块、带 block_id、层级缩进；表格不展开单元格，整篇轻量读完且每行可直接拿去改），核实后再动手。
 5. **精修**：`lint_doc` 体检拿问题清单；同一措辞多处要改用 `replace_text`（先 `dry_run` 看命中）；表格过窄 `set_table_width`；整块改写 `update_block`；长段拆分 `add_blocks` + `delete_blocks`；每轮改完重新体检，不沿用旧 block_id。
 
 **工具选择**
@@ -75,6 +75,7 @@
 | 整篇新建 / 大段追加（需富排版） | `import_xml`（排版表达最全；可先 `dry_run` 预检） |
 | 快速追加 / 已有 Markdown 草稿 | `import_markdown` |
 | 大文档定位某一节 | `get_doc_blocks outline=true` → `get_doc_text`（传该节标题 block_id） |
+| 看完就改（需 block_id） | `get_doc_blocks detail=compact`（一行一块带 id）/ `find_blocks`（可带上下文） |
 | 同一措辞多处修改 | `replace_text`（先 `dry_run`） |
 | 文档中间插少量块、精确控块 | `add_blocks` |
 | 改单个块文本 | `update_block` |

@@ -57,4 +57,6 @@
 | 整篇创作、需要自动编号/分栏/高亮块配色/表格列宽/题注 | `import_xml` |
 | 快速追加、内容简单、已有 Markdown 草稿 | `import_markdown`（表达能力是 XML 的子集） |
 | 局部改块 | `update_block`（整块文本）/ `replace_text`（跨块查找替换，先用 dry_run 预览）/ `add_blocks` / `delete_blocks`（块级写法见 add_blocks 工具描述） |
+| 看完就改（拿 block_id） | `get_doc_blocks detail=compact`：一行一块 `{缩进}{类型} [block_id] {摘要}`，表格只给行列数不展开单元格——轻量读完且每行可直接拿去改；需样式/原始字段时用 `detail=full` |
+| 定位命中处上下文 | `find_blocks` 传 `context_before`/`context_after`（`▶` 命中行、`·` 上下文行） |
 | 写入前预检 | `import_xml` 传 `dry_run=true`：只解析并出画像（块数/字数/类型分布）+ 图片与图表预检，**零写入** |

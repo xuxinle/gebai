@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
 import { sessionPath } from "@gebai/sdk/node"
-import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, prepareGridColumns, widthRatioWeights, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, xmlProfile, docOutline, replaceInBlocks, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
+import { createFeishuTools, markdownToBlocks, textElements, stripTableMergeInfo, blockText, blockTypeName, normalizeBlockFields, prepareGridColumns, widthRatioWeights, gridStructureError, expandAppendRange, extractBoardToken, findPlantUmlSource, collectBoardShapes, collectBoardEdges, extractBoardContent, extractOAuthCode, parseFolderToken, displayWidth, tableColumnWidths, tablePropertyOf, codeLangEnum, CODE_LANG_COUNT, dropDuplicateTitleHeading, xmlProfile, docOutline, replaceInBlocks, compactBlocks, TABLE_PAGE_WIDTH, TABLE_MIN_COLUMN_WIDTH, type FeishuDeps, type UserTokenEntry } from "./feishu_api"
 import { def as feishuDef } from "./feishu_docs"
 
 type Req = { url: string; init?: RequestInit }
@@ -3101,5 +3101,105 @@ describe("预检 / 大纲 / 跨块替换（纯函数）", () => {
     expect(r.output).toContain("文档大纲（1 个标题）")
     expect(r.output).toContain("- h1 1 甲  [h1] 节内块 1")
     expect(r.output).toContain("get_doc_text")
+  })
+})
+
+describe("紧凑块视图与命中上下文（读-改闭环）", () => {
+  const docBlocks = [
+    { block_id: "page", block_type: 1, children: ["h1", "p1", "tbl", "cal"] },
+    { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "1 部署" } }] } },
+    { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "先决条件：" + "很长的一段说明文字".repeat(20) } }] } },
+    { block_id: "tbl", block_type: 31, parent_id: "page", children: ["c1"], table: { property: { row_size: 2, column_size: 3, header_row: true } } },
+    { block_id: "c1", block_type: 32, parent_id: "tbl", children: ["t1"], table_cell: {} },
+    { block_id: "t1", block_type: 2, parent_id: "c1", text: { elements: [{ text_run: { content: "单元格内文本不应出现在紧凑视图" } }] } },
+    { block_id: "cal", block_type: 19, parent_id: "page", children: ["t2"], callout: { background_color: 3, emoji_id: "bulb" } },
+    { block_id: "t2", block_type: 2, parent_id: "cal", text: { elements: [{ text_run: { content: "高亮块内容" } }] } },
+  ]
+
+  test("compactBlocks：一行一块（带 id 与缩进），表格不展开、page 不占行、长文本截断", () => {
+    const v = compactBlocks(docBlocks, { textLimit: 20 })
+    expect(v.total).toBe(5) // 不含 page，不含表格单元格子树（c1/t1）
+    expect(v.lines[0]).toBe("- heading1 [h1] 1 部署")
+    expect(v.lines[1]).toMatch(/^- text \[p1\] 先决条件：.*…$/)
+    expect(v.lines[2]).toBe("- table [tbl] table 2×3 表头行")
+    expect(v.lines[3]).toBe("- callout [cal] callout bulb bg=3")
+    expect(v.lines[4]).toBe("  - text [t2] 高亮块内容") // 高亮块子块缩进一层
+    expect(v.lines.join("\n")).not.toContain("单元格内文本")
+  })
+
+  test("compactBlocks：maxLines 截断并标记", () => {
+    const v = compactBlocks(docBlocks, { maxLines: 2 })
+    expect(v.lines).toHaveLength(2)
+    expect(v.truncated).toBe(true)
+    expect(v.total).toBe(5) // 总数仍如实统计
+  })
+
+  test("get_doc_blocks detail=compact：头部计数 + 行格式 + 取 id 提示", async () => {
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: docBlocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.get_doc_blocks.execute({ document_id: "doc_1", detail: "compact" }, ctx())
+    expect(r.output).toContain("紧凑块视图（5 个块")
+    expect(r.output).toContain("- heading1 [h1] 1 部署")
+    expect(r.output).toContain("- table [tbl] table 2×3 表头行")
+    expect(r.output).not.toContain("单元格内文本")
+  })
+
+  test("find_blocks：默认只列命中块并提示上下文参数；传参后展开同父相邻块（▶ 命中 / · 上下文）", async () => {
+    const blocks = [
+      { block_id: "page", block_type: 1, children: ["h1", "p0", "p1", "p2", "p3"] },
+      { block_id: "h1", block_type: 3, parent_id: "page", heading1: { elements: [{ text_run: { content: "部署流程" } }] } },
+      { block_id: "p0", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "前置说明" } }] } },
+      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "命中行：部署需要审批" } }] } },
+      { block_id: "p2", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "后续步骤" } }] } },
+      { block_id: "p3", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "无关" } }] } },
+    ]
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const plain = await tools.find_blocks.execute({ document_id: "doc_1", query: "审批" }, ctx())
+    expect(plain.output).toContain("找到 1 个包含「审批」的块")
+    expect(plain.output).toContain("p1")
+    expect(plain.output).toContain("context_before")
+    expect(plain.output).not.toContain("▶")
+
+    const withCtx = await tools.find_blocks.execute({ document_id: "doc_1", query: "审批", context_before: 1, context_after: 1 }, ctx())
+    expect(withCtx.output).toContain("· [text] p0 前置说明")
+    expect(withCtx.output).toContain("▶ [text] p1 命中行：部署需要审批")
+    expect(withCtx.output).toContain("· [text] p2 后续步骤")
+    expect(withCtx.output.indexOf("p0")).toBeLessThan(withCtx.output.indexOf("▶"))
+    expect(withCtx.output.indexOf("▶")).toBeLessThan(withCtx.output.indexOf("p2"))
+    expect(withCtx.output).not.toContain("p3") // 超出上下文窗口
+  })
+
+  test("blockText：@人与公式等非文本元素取可读占位（不凭空消失）", () => {
+    const b = { block_id: "p", block_type: 2, text: { elements: [
+      { text_run: { content: "请 " } },
+      { mention_user: { user_id: "ou_x" } },
+      { text_run: { content: " 与 " } },
+      { mention_doc: { token: "t" } },
+      { text_run: { content: " 对照" } },
+    ] } }
+    expect(blockText(b)).toBe("请 @用户 与 @文档 对照")
+  })
+
+  test("find_blocks / 紧凑视图：容器块（callout/表格）在上下文行里给出摘要", async () => {
+    const blocks = [
+      { block_id: "page", block_type: 1, children: ["cal", "p1"] },
+      { block_id: "cal", block_type: 19, parent_id: "page", children: ["ct"], callout: { background_color: 3, emoji_id: "bulb" } },
+      { block_id: "ct", block_type: 2, parent_id: "cal", text: { elements: [{ text_run: { content: "高亮块正文" } }] } },
+      { block_id: "p1", block_type: 2, parent_id: "page", text: { elements: [{ text_run: { content: "命中：审批" } }] } },
+    ]
+    const { tools } = makeTools((req) => {
+      if (req.url.includes("/auth/v3/tenant_access_token")) return jsonResponse({ code: 0, msg: "ok", tenant_access_token: "t-abc", expire: 7200 })
+      if (req.url.includes("/blocks")) return jsonResponse({ code: 0, msg: "success", data: { items: blocks, has_more: false } })
+      return jsonResponse({ code: 0, msg: "success", data: {} })
+    })
+    const r = await tools.find_blocks.execute({ document_id: "doc_1", query: "审批", context_before: 1 }, ctx())
+    expect(r.output).toContain("· [callout] cal callout bulb bg=3") // 容器块给出摘要而非空行
   })
 })

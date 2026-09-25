@@ -89,8 +89,8 @@
 4. 结构较大或含图片/图示时，**先跑 `import_xml` 的 `dry_run` 预检**：拿到块画像、图片可达性与图表渲染结果，按问题清单就地改，再正式导入（避免空文档与半成品）。
 
 **阶段 2 · 精修（只做最小范围改动）**
-5. 回查：大文档先用 `get_doc_blocks outline=true` 看大纲定位到节，再用 `get_doc_text`（传标题 `block_id` 只读该节）/ `find_blocks` 读具体内容。
-6. 改一处措辞（可能多处命中）用 `replace_text`（先 `dry_run` 看命中），改整块用 `update_block`，增删块用 `add_blocks` / `delete_blocks`，表格过窄用 `set_table_width`。
+5. 回查：大文档先用 `get_doc_blocks outline=true` 看大纲定位到节，再用 `get_doc_text`（传标题 `block_id` 只读该节）/ `find_blocks`（可带 `context_before`/`context_after` 看命中处上下文）读具体内容。
+6. 改一处措辞（可能多处命中）用 `replace_text`（先 `dry_run` 看命中），改整块用 `update_block`，增删块用 `add_blocks` / `delete_blocks`，表格过窄用 `set_table_width`；**「看完就改」用 `get_doc_blocks detail=compact`**（一行一块带 block_id、表格不展开，轻量读全文且每行可直接拿去改）。
 7. 跑 `lint_doc` 体检，按问题清单逐条修。
 8. 每轮写操作后重新回查，不沿用上一轮 block_id；已正确的内容不重写。
 

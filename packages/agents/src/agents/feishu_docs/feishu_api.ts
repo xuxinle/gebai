@@ -732,10 +732,13 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const getDocBlocks = tool(
     "get_doc_blocks",
-    "获取文档全部块（含块类型/文本元素/子块 id 的富结构 JSON，每块附 type_name 类型标注）。**`outline=true` 只返回大纲**（标题层级/文本/block_id/每节顶层块数）——大文档先看目录定位小节，再用 get_doc_text 传该标题 block_id 读整节。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
+    "获取文档块结构。三种形态任选：**`outline=true` 只返回大纲**（标题层级/文本/block_id/每节顶层块数，大文档先看目录）；**`detail=compact` 返回紧凑块视图**（一行一块 `{缩进}{类型} [block_id] {摘要}`，表格不展开单元格——轻量读全文且每行直接带 id 可去改，适合「看完就改」）；缺省 `detail=full` 返回完整块 JSON（含样式/子块/原始字段，每块附 type_name 与块类型 43 画板占位）。块类型 43（mindnote 思维导图/画板）只返回 board.token 占位，其图形内容（UML 图等）用 get_board 工具读取。",
     {
       document_id: { type: "string" },
       outline: { type: "boolean", description: "只返回文档大纲（标题清单 + block_id + 每节顶层块数），用于先定位再按节读取（默认 false 返回全部块）" },
+      detail: { type: "string", description: "full（默认，完整块 JSON）或 compact（一行一块 + block_id + 缩进层级，表格不展开；也可用 max_lines/text_limit 调整）" },
+      max_lines: { type: "number", description: "detail=compact 时最多输出行数（默认 600，超出截断并提示）" },
+      text_limit: { type: "number", description: "detail=compact 时每块文本摘要长度上限（默认 80 字符）" },
       page_token: { type: "string", description: "分页标记（可选）" },
       page_size: { type: "number", description: "每页块数，默认 100" },
       page_all: { type: "boolean", description: "自动翻页取全部块（默认 false，上限 2000）" },
@@ -743,6 +746,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
     ["document_id"],
     async (args, ctx) => {
       const docId = String(args.document_id)
+      if (args.detail === "compact") {
+        const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
+        if (!items.length) return { output: "文档为空（没有任何块）" }
+        const view = compactBlocks(items, { textLimit: args.text_limit !== undefined ? num(args.text_limit, 80) : undefined, maxLines: args.max_lines !== undefined ? num(args.max_lines, 600) : undefined })
+        const head = `紧凑块视图（${view.total} 个块${truncated ? "，⚠️ 已达 2000 块读取上限" : ""}，格式：类型 [block_id] 摘要）：`
+        const tail = view.truncated ? `\n⚠️ 输出已达 max_lines 上限；用 max_lines 调大，或先 outline=true 定位再用 get_doc_text 读某节` : ""
+        return truncate(`${head}\n${view.lines.join("\n")}${tail}`, "feishu_blocks_compact", ctx)
+      }
       if (args.outline === true) {
         const { items, truncated } = await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 2000)
         const { entries } = docOutline(items)
@@ -799,12 +810,14 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
 
   const findBlocks = tool(
     "find_blocks",
-    "按文本关键词在文档中查找块，返回匹配块的 block_id/块类型(type_name)/文本/所在路径——按标题文本反查 block_id 的首选方式。",
+    "按文本关键词在文档中查找块，返回匹配块的 block_id/块类型(type_name)/文本/所在路径——按标题文本反查 block_id 的首选方式。传 `context_before`/`context_after` 时在命中块下展开同父相邻块（`▶` 标命中行、`·` 标上下文行），看清上下文再决定怎么改。",
     {
       document_id: { type: "string" },
       query: { type: "string", description: "搜索关键词（子串匹配，忽略大小写）" },
       block_type: { type: "string", description: "块类型过滤：数字或名称（heading/text/bullet/ordered/code/quote/todo/table 等）" },
       max_results: { type: "number", description: "最多返回条数（默认 20）" },
+      context_before: { type: "number", description: "命中块前显示几个相邻块（同父兄弟，默认 0 = 只列命中块）" },
+      context_after: { type: "number", description: "命中块后显示几个相邻块（同父兄弟，默认 0）" },
     },
     ["document_id", "query"],
     async (args, ctx) => {
@@ -812,25 +825,55 @@ export function createFeishuTools(deps: FeishuDeps = { fetchFn: feishuFetch, tok
       const q = String(args.query ?? "").toLowerCase()
       if (!q) throw new Error("query 不能为空")
       const maxResults = Math.max(1, num(args.max_results, 20))
+      const ctxBefore = Math.max(0, Math.min(20, num(args.context_before, 0)))
+      const ctxAfter = Math.max(0, Math.min(20, num(args.context_after, 0)))
       let typeFilter: Set<number> | undefined
       if (args.block_type !== undefined) typeFilter = parseBlockTypeFilter(String(args.block_type))
       const items = (await collectPages(ctx, `/open-apis/docx/v1/documents/${docId}/blocks`, 500, 20_000)).items
       const byId = new Map(items.map((b) => [String(b.block_id), b]))
+      // 同父兄弟序列（上下文展开用）：有父块用父的 children 顺序，顶层块用接口返回顺序
+      const siblingsOf = (b: Record<string, unknown>): string[] => {
+        const parent = b.parent_id ? byId.get(String(b.parent_id)) : undefined
+        if (parent && Array.isArray(parent.children)) return (parent.children as unknown[]).map((c) => String(c))
+        return items.map((x) => String(x.block_id ?? ""))
+      }
+      /** 单块一行（带类型/文本/可选 id）；mark 为行首标记（▶ 命中 / · 上下文）。
+       *  容器块（无自身文本）用紧凑摘要补充（如 callout 的配色、表格的行列数）。 */
+      const row = (b: Record<string, unknown>, mark?: string): string => {
+        const type = Number(b.block_type ?? 0)
+        const own = blockText(b).replace(/\s+/g, " ").trim().slice(0, 60)
+        const isTextual = type === 2 || type === 14 || (type >= 3 && type <= 11)
+        const summary = own || (isTextual ? "" : compactSummary(b, 60))
+        return `${mark ? `${mark} ` : ""}[${blockTypeName(type)}] ${String(b.block_id ?? "")}${summary ? ` ${summary}` : ""}`
+      }
       let count = 0
-      const matches: Array<Record<string, unknown>> = []
+      const chunks: string[] = []
       for (const b of items) {
         if (typeFilter && !typeFilter.has(Number(b.block_type ?? 0))) continue
         const t = blockText(b)
         if (!t.toLowerCase().includes(q)) continue
         count++
-        if (matches.length < maxResults) {
-          matches.push({ block_id: b.block_id, block_type: b.block_type, type_name: blockTypeName(Number(b.block_type ?? 0)), text: t.slice(0, 60), path: blockPath(b, byId) })
+        if (chunks.length >= maxResults) continue
+        const head = `${chunks.length + 1}. ${b.block_id} | ${blockTypeName(Number(b.block_type ?? 0))}(${b.block_type}) | ${t.slice(0, 60)} | 路径: ${blockPath(b, byId)}`
+        if (!ctxBefore && !ctxAfter) {
+          chunks.push(head)
+          continue
         }
+        const ids = siblingsOf(b)
+        const idx = ids.indexOf(String(b.block_id ?? ""))
+        const before = idx > 0 ? ids.slice(Math.max(0, idx - ctxBefore), idx) : []
+        const after = idx >= 0 ? ids.slice(idx + 1, idx + 1 + ctxAfter) : []
+        const body = [
+          ...before.map((id) => byId.get(id)).filter(Boolean).map((x) => `   ${row(x as Record<string, unknown>, "·")}`),
+          `   ${row(b, "▶")}`,
+          ...after.map((id) => byId.get(id)).filter(Boolean).map((x) => `   ${row(x as Record<string, unknown>, "·")}`),
+        ]
+        chunks.push(`${head}\n${body.join("\n")}`)
       }
-      if (!count) return { output: `未找到包含「${args.query}」的块。可尝试：换关键词；get_doc_text 查看全文；get_doc_blocks/list_blocks 查看结构。` }
-      const lines = matches.map((m, i) => `${i + 1}. ${m.block_id} | ${m.type_name}(${m.block_type}) | ${m.text} | 路径: ${m.path}`)
-      const tail = count > matches.length ? `\n（共 ${count} 个匹配，仅显示前 ${matches.length} 个）` : ""
-      return truncate(`找到 ${count} 个包含「${args.query}」的块：\n${lines.join("\n")}${tail}`, "feishu_find", ctx)
+      if (!count) return { output: `未找到包含「${args.query}」的块。可尝试：换关键词；get_doc_text 查看全文；get_doc_blocks detail=compact 查看紧凑结构。` }
+      const tail = count > chunks.length ? `\n（共 ${count} 个匹配，仅显示前 ${chunks.length} 个）` : ""
+      const hint = ctxBefore || ctxAfter ? "" : "\n提示：加 context_before/context_after 可在命中处展开相邻块看上下文。"
+      return truncate(`找到 ${count} 个包含「${args.query}」的块：\n${chunks.join("\n")}${tail}${hint}`, "feishu_find", ctx)
     },
   )
 
@@ -2614,10 +2657,21 @@ function blockElements(block: Record<string, unknown>): unknown[] | undefined {
 }
 
 /** 块的纯文本（拼接 text_run content；无文本返回空串）。 */
+/** 块内文本：text_run 取内容，mention_user / mention_doc 取可读占位（@用户 / @文档）——
+ *  纯文本视图里 @人 不能凭空消失，否则查找、紧凑视图、体检文本都看不到它。 */
 export function blockText(block: Record<string, unknown>): string {
   const els = blockElements(block) ?? []
   return els
-    .map((e) => (e && typeof e === "object" && "text_run" in e ? String(((e as Record<string, unknown>).text_run as Record<string, unknown> | undefined)?.content ?? "") : ""))
+    .map((e) => {
+      if (!e || typeof e !== "object") return ""
+      const o = e as Record<string, unknown>
+      if ("text_run" in o) return String((o.text_run as Record<string, unknown> | undefined)?.content ?? "")
+      if (o.mention_user) return "@用户"
+      if (o.mention_doc) return "@文档"
+      if (o.equation) return "[公式]"
+      if (o.reminder) return "[提醒]"
+      return ""
+    })
     .join("")
 }
 
@@ -3819,6 +3873,98 @@ export function xmlProfile(blocks: Array<Record<string, unknown>>): { topLevel: 
   }
   walk(blocks)
   return { topLevel: blocks.length, total, chars, counts }
+}
+
+/** 紧凑块视图：一行一块（带 block_id 与层级缩进），表格不展开单元格。 */
+export interface CompactView {
+  lines: string[]
+  /** 实际输出的块行数。 */
+  total: number
+  truncated: boolean
+}
+
+/** 单块摘要（紧凑视图用）：按块类型取最有信息量的一行描述。 */
+function compactSummary(b: Record<string, unknown>, textLimit: number): string {
+  const type = Number(b.block_type ?? 0)
+  const clip = (s: string): string => {
+    const one = s.replace(/\s+/g, " ").trim()
+    return one.length > textLimit ? `${one.slice(0, textLimit)}…` : one
+  }
+  if (type === BLOCK_TYPE.TABLE) {
+    const prop = ((b.table as Record<string, unknown> | undefined)?.property ?? {}) as Record<string, unknown>
+    return `table ${Number(prop.row_size ?? 0)}×${Number(prop.column_size ?? 0)}${prop.header_row ? " 表头行" : ""}`
+  }
+  if (type === BLOCK_TYPE.IMAGE) {
+    const img = (b.image ?? {}) as Record<string, unknown>
+    const size = img.width && img.height ? ` ${img.width}×${img.height}` : ""
+    return `image${size}${img.token ? "" : "（空槽）"}`
+  }
+  if (type === BLOCK_TYPE.CALLOUT) {
+    const c = (b.callout ?? {}) as Record<string, unknown>
+    const bits = [c.emoji_id, c.background_color !== undefined ? `bg=${c.background_color}` : ""].filter(Boolean)
+    return `callout${bits.length ? ` ${bits.join(" ")}` : ""}`
+  }
+  if (type === BLOCK_TYPE.GRID) return `grid ${Number((b.grid as Record<string, unknown> | undefined)?.column_size ?? 0)} 列`
+  if (type === BLOCK_TYPE.GRID_COLUMN) return `column ratio=${(b.grid_column as Record<string, unknown> | undefined)?.width_ratio ?? 1}`
+  if (type === BLOCK_TYPE.MINDNOTE) {
+    const token = (b.board as Record<string, unknown> | undefined)?.token
+    return `mindnote${token ? ` board=${token}` : ""}`
+  }
+  if (type === BLOCK_TYPE.SHEET || type === BLOCK_TYPE.BITABLE || type === BLOCK_TYPE.EMBED || type === BLOCK_TYPE.FILE) {
+    const field = type === BLOCK_TYPE.SHEET ? "sheet" : type === BLOCK_TYPE.BITABLE ? "bitable" : type === BLOCK_TYPE.EMBED ? "embed" : "file"
+    const o = (b[field] ?? {}) as Record<string, unknown>
+    const token = o.token ?? (o.embed as Record<string, unknown> | undefined)?.url
+    return `${blockTypeName(type)}${token ? ` token=${String(token).slice(0, 24)}` : ""}`
+  }
+  if (type === BLOCK_TYPE.DIVIDER) return "divider"
+  if (type === BLOCK_TYPE.CODE) {
+    const style = ((b.code as Record<string, unknown> | undefined)?.style ?? {}) as Record<string, unknown>
+    const lang = Number(style.language ?? 1)
+    return `code lang=${lang}${lang === 1 ? "(PlainText)" : ""} ${clip(blockText(b).split("\n")[0] ?? "")}`.trimEnd()
+  }
+  return clip(blockText(b))
+}
+
+/**
+ * 紧凑块视图（`get_doc_blocks detail=compact`）：按文档流 DFS，每行 `{缩进}{type} [{block_id}] {摘要}`。
+ * 表格不展开单元格（只给行列数），其余容器展开子块——大文档也能整篇读完并直接拿 id 去改；
+ * 需要样式/原始字段时用 `detail=full`。
+ */
+export function compactBlocks(items: Array<Record<string, unknown>>, opts: { textLimit?: number; maxLines?: number } = {}): CompactView {
+  const textLimit = opts.textLimit !== undefined && opts.textLimit > 0 ? Math.floor(opts.textLimit) : 80
+  const maxLines = opts.maxLines !== undefined && opts.maxLines > 0 ? Math.floor(opts.maxLines) : 600
+  const byId = new Map(items.map((b) => [String(b.block_id ?? ""), b]))
+  const lines: string[] = []
+  let total = 0
+  let truncated = false
+  const visited = new Set<string>()
+  const walk = (id: string, depth: number): void => {
+    if (visited.has(id)) return
+    visited.add(id)
+    const b = byId.get(id)
+    if (!b) return
+    const type = Number(b.block_type ?? 0)
+    // page 根块自身不占行（标题在文档元信息里），直接展开子块
+    if (type !== 1) {
+      total++
+      if (lines.length < maxLines) {
+        const indent = "  ".repeat(Math.min(depth, 12))
+        const name = blockTypeName(type)
+        const summary = compactSummary(b, textLimit)
+        lines.push(`${indent}- ${name} [${id}]${summary ? ` ${summary}` : ""}`)
+      } else {
+        truncated = true
+      }
+    }
+    // 表格不展开（单元格内部文本会让紧凑视图退化）；其余容器展开
+    if (type === BLOCK_TYPE.TABLE) return
+    const kids = Array.isArray(b.children) ? (b.children as unknown[]) : []
+    for (const c of kids) walk(String(c), type === 1 ? depth : depth + 1)
+  }
+  const page = items.find((b) => Number(b.block_type ?? 0) === 1)
+  if (page) walk(String(page.block_id ?? ""), 0)
+  else for (const b of items) walk(String(b.block_id ?? ""), 0)
+  return { lines, total, truncated }
 }
 
 /** 文档大纲条目（outline 模式用）。 */
