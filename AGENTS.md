@@ -58,6 +58,12 @@ bun run typecheck        # 全量：各包 + custom/ 二开域 + 根 scripts/（
 bun run typecheck:custom   # 只检二开域（custom/）
 bun run typecheck:scripts  # 只检根 scripts/（仓库级构建/下载脚本）
 bun run lint
+
+# 端到端验证（Playwright + Chromium，不进 bun test：需要一份在跑的服务端与真终端会话）
+bun run e2e:term         # 文件工作台终端：尺寸/折行/配色/搜索/键位/标签/粘贴/关闭确认/刷新接管（31 项）
+bun run e2e:term:tui     # 终端独占模式：vi / less / watch / htop（备用屏、SIGWINCH、鼠标上报）（23 项）
+bun run e2e:term:edit    # 终端的行内编辑：光标移动与前删/后删、宽字符、折行、输入法整段提交（30 项）
+bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2e（E2E_ARTIFACTS 可指定）
 ```
 
 ## 跨平台作业（Windows 宿主 / WSL 验证）
