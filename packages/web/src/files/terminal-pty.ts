@@ -369,7 +369,7 @@ export function createPtyTerminal(hooks: TerminalHooks): TerminalPanel {
     const t = activeTab()
     t?.term.clear()
   })
-  const intBtn = btn("minus", "中断当前命令（Ctrl+C）", () => void interruptActive(), "danger")
+  const intBtn = btn("stop", "中断当前命令（Ctrl+C）", () => void interruptActive(), "danger")
   const searchBtn = btn("search", "在终端中查找（Ctrl+F）", () => toggleSearch())
   const moreBtn = btn("settings", "终端设置（字号 / 行高 / 光标 / 跟随当前根 / 重启）", () => openMore())
   const closeBtn = btn("close", "关闭工具窗", () => hooks.close())

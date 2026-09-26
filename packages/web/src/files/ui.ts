@@ -79,6 +79,8 @@ const ICONS: Record<string, string> = {
   collapseAll: '<path d="M3 3.6h10M3 12.4h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.4 6.6L8 5l1.6 1.6M6.4 9.4L8 11l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
   more: '<circle cx="3.4" cy="8" r="1.25" fill="currentColor"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/><circle cx="12.6" cy="8" r="1.25" fill="currentColor"/>',
   minus: '<path d="M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  // 停止/中断：实心圆角方块（与主界面发送键的停止态同一语汇；终端标题栏的「中断当前命令」用它）
+  stop: '<rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.5" fill="currentColor"/>',
   // 改动列表的两种视图（一对，形状上互补好认）：缩进层级 vs 等长行
   treeView: '<path d="M2.2 3.5h3.2M2.2 8h3.2M2.2 12.5h3.2M5.4 3.5h2.2v9H5.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M7.6 6.6h2M7.6 12.4h2M9.6 6.6v5.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
   listView: '<path d="M2.6 4h10.8M2.6 8h10.8M2.6 12h10.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',

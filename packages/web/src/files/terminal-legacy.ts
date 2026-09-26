@@ -293,7 +293,7 @@ export function createLegacyTerminalPanel(hooks: TerminalHooks): TerminalPanel {
     if (s) clearScreen(s)
   })
   const intBtn = actionBtn(
-    "minus",
+    "stop",
     "中断当前命令（Ctrl+C）",
     () => {
       const s = activeSession()
