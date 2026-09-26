@@ -966,7 +966,8 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 | **隔离子会话**（spawn） | `false`（缺省） | 新建上下文：子Agent 提示词（+ 全局提示词） + 全局工具 + 子Agent 工具 + 编排工具 | 同步：最终结果作为工具结果返回；异步：`bg_task`（id 前缀 `s`）取回 |
 | **继承子会话**（fork） | `true` | 父消息历史 + 父系统提示词（+ 子会话附注） + 父工具面快照（+ 追加预加载子Agent 工具） | 最终报告**自动合入父上下文**（合并消息 + 过程存档）；同步另回概要与 `bg_task` 均可见 |
 
-- **参数面**：单任务形态 `input`（+ 可选 `agents`/`model`）与多任务并发形态 `subsessions`（每项 `{ name?, input, agents?, model? }`，1-8 项）**二选一**（同时给出报错）；调用级开关 `inherit_context`/`async`/`merge`/`inherit_global_tools`/`inherit_global_prompt`/`timeout` 盖章到本批全部子会话；`agents` **可省略/为空 = 不加载任何子Agent**（纯编排子会话：全局工具 + 编排工具即可完成搜索/汇总/改写类任务）；`timeout`（秒）为**运行时限**：到时进入**快速结束**（注入收敛指令给宽限拿结论，逾期才强制终止，见「子会话快速结束」）而非硬杀
+- **参数面**：单任务形态 `input`（+ 可选 `agents`/`model`）与多任务并发形态 `subsessions`（每项 `{ name?, input, agents?, model? }`，1-8 项）**二选一**（同时给出报错）；调用级开关 `inherit_context`/`async`/`merge`/`inherit_global_tools`/`inherit_global_prompt`/`timeout`/`env_mode`/`env` 盖章到本批全部子会话（`env_mode`/`env` 可在 `subsessions` 每项单独覆写）；`agents` **可省略/为空 = 不加载任何子Agent**（纯编排子会话：全局工具 + 编排工具即可完成搜索/汇总/改写类任务）；`timeout`（秒）为**运行时限**：到时进入**快速结束**（注入收敛指令给宽限拿结论，逾期才强制终止，见「子会话快速结束」）而非硬杀
+- **环境变量自定义（`env_mode` + `env`）**：`inherit`（缺省）= **父任务 env + `env` 自定义项**（后者优先）；`clear` = **仅 `env`**（不继承父任务 env）。它同时决定子会话的**工具可见环境**与 **Provider 解析**（`runSubSession` 内 `resolveProvider(env)`）——因此可用 `env` 把子会话指向另一个端点/模型（`GEBAI_LLM_API_BASE`/`GEBAI_LLM_MODEL`/`GEBAI_LLM_API_KEY`，**优先于 `model` 路由解析**）；`model` 路由仍走 `GEBAI_LLM_ROUTES` 命名解析。两条边界得写清楚：① `clear` 清空的是**工具层可读**的父任务环境（含会话环境与任务级覆盖）；**命令子进程的 OS 基线仍由执行层自 `process.env` 合并**（`sandbox.exec` 的 `{...process.env, ...opts.env}`），所以 PATH/HOME/TEMP 不会丢——`clear` 影响的是工具读到的配置，不是命令的运行环境；② 键名须为标识符形式、值仅允许字符串，非法即报错（**不静默丢弃**——静默丢会让模型以为设了实际没设）；非法 `env_mode` 同样报错不回退。子会话状态行只展示**模式与键名**（值可能含密钥，不回传）。应用点：`engine.buildContext` 的 `subSessions.runner` 回调按 spec 计算有效 env 后交给 `runSubSession`（`core/session/subsessions.ts` 的 `envModeOf`/`envVarsOf` 负责校验）
 - **继承形态的 fork 点**：`subsession_run` 工具调用时的父上下文（含已装载子Agent 的提示词与工具）——fork 快照**同步切片**（父任务此刻阻塞在本工具调用内，消息数组稳定，或并发场景下以切片时刻为准）；快照尾部可能带尚未应答的 `assistant(toolCalls)`（本轮工具批处理进行中），为悬空 toolCall **合成占位 tool 结果**（严格校验的接口要求 tool_calls 后紧跟 tool 响应），再追加子会话任务指令（user 消息）。子会话系统提示词 = 父会话同一系统提示词（单源复用）+ 子会话附注（并行职责/并发写提醒——其他子会话可能并行修改同一文件，写入前先读最新内容/不向用户提问/完成后输出最终报告）。工具面 = 父会话注册表视图快照（全局工具 + 已装载子Agent `{agent}_` 工具 + 会话动态工具）；子会话内装载子Agent 只进本子会话（隔离语义，不写父会话记录）；**已读追踪 fork 快照**——子会话拷贝 fork 点的会话级已读表（防盲写/防陈旧覆盖守卫的隔离：fork 后父会话/兄弟子会话的读写互不串扰，见「防盲写守卫」）
 - **隔离形态的组装**：开场白说明隔离语义与预加载名单（未预加载时明确「未预加载子Agent」）、全局工具继承说明（`inherit_global_tools`）、编排指引（`inherit_global_prompt=false` 时补兜底版）、安全模式注记、预置项目清单与项目绑定注记
 - **多路模型接口（模型路由）**：`model` 参数按名解析——命中 `GEBAI_LLM_ROUTES` 配置的**命名路由**（JSON：`{"路由名": {"model", "api_base"?, "api_key"?, "api_kind"?, "max_context"?}}`）走独立端点/模型；未命中视为字面模型名（主配置基准覆盖）；缺省沿用任务级模型。多子会话各走各的 Provider 并行，分摊单路模型服务的限流与串行速度限制。路由表可配在进程 env 或会话/任务级 env（前端 env 面板同样生效）
@@ -1380,30 +1381,39 @@ export const preload = false
 
 #### `triage`（两级研判：小模型批量粗筛 + 大模型引擎精审兜底）
 
-实现于 `packages/agents/src/agents/triage/`（`triage.ts` 定义入口 + `triage.md` 系统提示词），编排逻辑在 `packages/agents/src/core/triage/`（`pipeline.ts` 管线 + `types.ts` 契约）——**与 REST 接口（`POST /api/v1/triage/analyze`）共用同一份实现**（同 `core/tts` 的「共用逻辑 + 执行通道注入」范式），两侧差异只在 L2 执行器的注入方式：会话内派隔离子会话，REST 侧走 Agent 引擎会话。
+实现于 `packages/agents/src/agents/triage/`（`triage.ts` 定义入口 + `triage.md` 系统提示词），编排与**参数契约**在 `packages/agents/src/core/triage/`（`params.ts` 参数表 + `pipeline.ts` 管线 + `types.ts` 契约）——**与 REST 接口（`POST /api/v1/triage/analyze`）共用同一份实现与同一份参数面**（同 `core/tts` 的「共用逻辑 + 执行通道注入」范式）。
+
+两条通道**只允许两处差异**：① 兜底执行器注入方式（会话内派隔离子会话 / REST 走 `engine.run`）；② `mode`（同步 / 后台）是 REST 的外部调用能力，工具调用天然同步。其余——参数名、别名、缺省值、校验报错、目标解析、schema 信封、分流规则、落盘布局、结论数组形状——全部同源。
 
 场景无关的「先快速分流、再重点深挖」模式：整体成本 = 廉价的 O(N) + 昂贵的 O(k)，k ≪ N。
 
 ```
-条目集合（N 条）→ L1 小模型批量粗筛（结构化 + 置信度）
-                    │  按阈值/证据分流
-                    ▼
-                 L2 大模型精审（装领域工具主动取证，输出证据链）
+全量信息数组（N 条）→ 小模型批量粗筛（结构化输出 + 置信度）
+                        │  按阈值/证据分流
+                        ▼
+                    （escalate 开）大模型精审：装领域工具主动取证，输出证据链
+                        ▼
+                    结论数组（逐条含置信度与 schema 定义的结论，附小模型初判供校准）
 ```
 
-- **工具**：`triage_run`（跑一轮：条目数组或条目文件 + 结果 schema + 阈值 + L1/L2 配置 → 统一形态逐条结果）、`triage_view`（读产物目录看汇总/逐条/未定案：`status`|`results`|`failed`）
-- **L1 输出通道（工具式结构化输出）**：schema 注册为 function tool（缺省 `submit_result`），模型**必须调用该工具**产出结果——不依赖服务端对 `response_format`/GBNF 的支持（异构端点与老引擎通用），且「调用与否」本身是可审计证据；未调用时按 `tool_reminders`（缺省 3）重新提醒，参数不合法则回灌错误重试，**提醒耗尽仍未调用 → 该条失败并带 `tool_call_missing`、强制转 L2**（采集失败的条目往往最难，不能丢）。实现在 `local_infer/api.ts` 的 `chatWithOutputTool`（`generate`/`batch` 的 `output_tool` 参数同源）
+- **工具**：`triage_run`（跑一轮）、`triage_view`（读产物目录看汇总/逐条/未定案：`status`|`results`|`failed`）
+- **参数契约（`core/triage/params.ts`，两条通道共用）**：规范形态是**扁平 snake_case** 的 `TRIAGE_PARAM_SPECS` 字典——工具 schema 由它生成、归一与校验也读它，「参数说明漂移」在结构上不可能发生。核心五项：`items`/`items_file`（全量信息数组）、`target`（推理目标）、`schema`（结构化输出 schema）、`threshold`（置信度阈值）、`escalate`（低置信度是否上升兜底）；执行模式 `mode`（`sync` 缺省 / `async`）；细项 `l1_*`（模型/提示词/并发/token/温度/提醒/超时/思维链）与 `l2_*`（agents/model/api_base/api_key/system/max_items/batch_size/timeout_ms），以及 `job_id`/`job_dir`/`result_limit`。**兼容输入**：嵌套写法（`l1.target`/`l2.enabled`）与旧键名（`l1_target`/`l1.base_url`/`l2_enabled`/`enable_thinking`）都接受，规范名优先（一致性由 `params.test.ts` 把「工具 schema 的 properties == 规范名全集」固定为断言）
+- **异步执行（`mode: "async"`，两条通道同义）**：走**通用后台任务注册表**（id 前缀 `j`）——工具通道绑当前会话（`ctx.bgJobs`，可在 `bg_task` status/wait/stop/list 里管理），REST 通道绑 `api:<user>`（用既有轮询端点），**同一份注册表与同一份执行**，只是不等结果。进度经管线 `onProgress` 上报（阶段/已完成/总数/采纳·待审·失败），`stop` 经 `signal` 协作中止——**已落盘的部分结论保留**；产物目录始终是**跨重启的权威口径**（后台任务记录随进程消失，`triage_view` 仍可读）
+- **推理目标解析同源**：两条通道都走 `local_infer` 的 `resolveTarget`——`local` 按服务状态文件定位端口（不硬编码 8080）、命名目标查 `LOCAL_INFER_TARGETS`、URL 直连；解析结果随响应回传（`target.kind`/`base_url`，便于追溯本批结果出自哪个端点）
+- **`escalate` 语义**：`true`（缺省）= 低置信度交大模型精审；`false` = **只跑小模型，低置信度结论按原样输出**（`ok=true`、`layer=L1`、置信度如实偏低，不标失败/待精审）。「上升但本通道无可用执行器」**显式报错**，不静默降级成小模型直出（工具侧提示改用 `escalate=false` 或走 REST；REST 侧永远有引擎执行器）
+- **结论数组**：`results[]` 逐条 `{id, layer, ok, result(schema 定义), confidence, reason, evidence_index, evidence_chain?, revised?, action?, l1?, model?, error?}`；`result_limit` 缺省 **0 = 全量**（两条通道同一口径，不做静默截断；工具的文字呈现另受 `TRIAGE_TEXT_RENDER_MAX` 约束，`data.results` 始终是完整数组）
+- **小模型输出通道（工具式结构化输出）**：schema 注册为 function tool（缺省 `submit_result`），模型**必须调用该工具**产出结果——不依赖服务端对 `response_format`/GBNF 的支持（异构端点与老引擎通用），且「调用与否」本身是可审计证据；未调用时按 `l1_reminders`（缺省 3）重新提醒，参数不合法则回灌错误重试，**提醒耗尽仍未调用 → 该条失败并带 `tool_call_missing`、强制上升兜底**（采集失败的条目往往最难，不能丢）。实现在 `local_infer/api.ts` 的 `chatWithOutputTool`（`generate`/`batch` 的 `output_tool` 参数同源）
 - **schema 信封**：调用方 schema 描述业务结果；顶层未含 `confidence` 时自动外包 `{result, confidence, reason, evidence_index}`，已含则原样使用；`label_enum` 注入业务 schema 的 `label.enum`
-- **分流规则**（`classifyL1`）：白名单标签命中 → 采纳；未取到结论（未调用工具/解析失败/请求失败）→ 进 L2；置信度 0 或 < 阈值 → 进 L2；无有效证据 → 进 L2。**证据质量下限**（`min_evidence_chars`，缺省 6 字符，0 = 关闭）：至少一条证据达该长度才算有效——挡住弱模型把「任务失败」这类无信息量文本当证据、以高置信度击穿「证据非空」防线（实测 1.5B 会这么做）
+- **分流规则**（`classifyL1`）：白名单标签命中 → 采纳；未取到结论（未调用工具/解析失败/请求失败）→ 上升；置信度 0 或 < 阈值 → 上升；无有效证据 → 上升。**证据质量下限**（`min_evidence_chars`，缺省 6 字符，0 = 关闭）：至少一条证据达该长度才算有效——挡住弱模型把「任务失败」这类无信息量文本当证据、以高置信度击穿「证据非空」防线（实测 1.5B 会这么做）
 - **L2 精审**：注入 L1 初判/判据/证据索引 + 原始信息，要求主动调用领域工具取证、允许明确输出「证据不足」并给待查清单、可推翻或修正 L1；输出 = 同业务结果 + `evidence_chain`（工具名 + 关键发现原文）/`revised`/`action`。**精审铁律随提示词前置送达**（子会话与引擎会话各自带自己的系统提示，不前置会丢失「取证/允许说证据不足」约定）。**id 回填抗改写**：条目块只给 `id=xxx`（不再另加序号，否则模型会把序号当 id 回填），且解析侧有**位置对齐兜底**（无任何 id 命中 + 条数一致时按序回填；条数也不一致则如实报错而不猜）
 - **落盘与续跑**：`{GEBAI_HOME}/users/{user}/triage/{job_id}/` 下 `items.jsonl`/`l1.jsonl`/`l2.jsonl`（精审原始输出）/`results.jsonl`（统一逐条结果）/`job.json`（状态 + 汇总 + 选项快照）；同 `job_id` 再次调用**复用已有 L1 结果**（断点续跑）。结果含 `layer`（L1/L2）/`confidence`/`evidence_index`/`evidence_chain`/`revised`/`action`/`l1`（初判留档，供校准对比）
 - **L2 限界**：`l2_max_items`（缺省 20，超出部分标「待精审」返回，可带更大值续跑）、`l2_batch_size`（缺省 5，按轮精审）、`l2_timeout_ms`（缺省 600000）；超时走**收尾**而非硬杀（子会话快速结束 / REST 侧 `engine.windDown`）
-- **L2 执行形态**：会话内派**隔离子会话**（`inheritContext:false`，不污染父会话，`merge:summary`）；REST 侧 `engine.run` 跑一轮完整会话（领域工具经提示词引导装载）。两者都支持 `l2_model`（路由名/字面模型名）与端点覆盖，「远端大模型兜底」在两条通道上都可指定
+- **精审执行形态**：会话内派**隔离子会话**（`inheritContext:false`，不污染父会话，`merge:summary`）；REST 侧 `engine.run` 跑一轮完整会话。领域工具的装载指引统一由 `buildL2Prompt` 前置（单一来源，两条通道同文案）——会话内还会真实预载 `agents`。`l2_model`/`l2_api_base`/`l2_api_key` **两条通道都支持**：工具侧经**子会话自定义环境变量**（`env_mode=inherit` + `GEBAI_LLM_*`）落实、REST 侧经 `envOverride`——能力对齐（子会话 env 直接参与 Provider 解析，见「子会话运行」的环境变量自定义）
 - **实测要点（跨场景成立）**：
-  - **思考链是 L1 的天敌**：推理型模型开着 thinking 会把输出预算吃光导致正文为空，故 `enable_thinking=false` 为缺省
+  - **思考链是小模型的天敌**：推理型模型开着 thinking 会把输出预算吃光导致正文为空，故 `l1_enable_thinking=false` 为缺省
   - **小模型会过度触发「信息不足」**：默认提示词正反两面都写（有线索 → 0.8~0.95 并抄证据；确实无线索 → 0）——只强调后者时 1.5B 会把「没有额外数据」误判为信息不足，对 OOM 这类明确报错也给 0
-  - **L1 能力决定这套模式是否成立**：同一批 3 条，1.5B/CPU 用 56.3s 且全部给 0（全量溢到 L2，成本结构失效）；35B 用 4.6s、2 条正确采纳（OOM/代码退出 conf=1）、对信息量为零的条目如实给 0 转 L2
-- **REST 接口**：`POST /api/v1/triage/analyze`（body：`items` 或 `items_file` + `schema`/`label_enum`/`threshold`/`min_evidence_chars`/`accept_labels` + `l1{}`/`l2{}`；`mode=async` 立即返回 job_id）、`GET /api/v1/triage/jobs/:id`（进度/汇总）、`GET /api/v1/triage/jobs/:id/results`（逐条，可按 `layer`/`only=ok|failed` 过滤）。每用户限流（10 突发 / 2 每秒）
+  - **小模型能力决定这套模式是否成立**：同一批 3 条，1.5B/CPU 用 56.3s 且全部给 0（全量溢到精审，成本结构失效）；35B 用 4.6s、2 条正确采纳（OOM/代码退出 conf=1）、对信息量为零的条目如实给 0 上升
+- **REST 接口**：`POST /api/v1/triage/analyze`（body = 上述参数契约全集，另加通道专属的 `mode=async`）、`GET /api/v1/triage/jobs/:id`（进度/汇总）、`GET /api/v1/triage/jobs/:id/results`（逐条，可按 `layer`/`only=ok|failed` 过滤）。每用户限流（10 突发 / 2 每秒）
 - **免审批**：两个工具都不改变服务状态（发请求、派生会话、写产物目录）；`triage_view` 声明 `safeMode`
 - **预加载**：`preload = false`，按需装载。
 
@@ -2064,6 +2074,22 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **工作目录标注**：`sh`/`py` 在**非会话默认目录**执行（`workdir` 参数、`project` 参数路由或项目绑定会话）时输出末尾标注「（工作目录: …）」——按 cwd 发现目标的工具（`bun test` 等）目录不对时一眼可辨（「命令在哪个目录跑的」不再靠猜）；`sh` 的退出码直接读返回结果的 `exitCode` 字段（无需 `echo $?` / `%errorlevel%` / `$LASTEXITCODE`——Windows 分支已由命令行包装段带出）
 - **输出大小**：工具输出超过截断阈值走上下文保护（截断落盘），防止内存膨胀
 
+#### 后台任务（三类同一管理面 `bg_task`）
+
+后台执行的长任务按 id 前缀分三类，**同一份管理面**（`bg_task` 的 status/wait/stop/list 自动识别，无需指定类型）：
+
+| 前缀 | 类别 | 启动方式 | 生命周期与权威状态 |
+|------|------|----------|------------------|
+| `t` | 命令任务 | `sh async:true` | 真实子进程 + 日志落盘（**跨服务重启可见**），退出码由进程回调回写 |
+| `s` | 子会话运行 | `subsession_run async:true` | LLM 循环、过程存存档；进程内，重启即中断；支持 `finish` 快速结束 |
+| `j` | 通用后台任务 | 任意工具经 `ctx.bgJobs`（如 `triage_run mode=async`） | 进程内 promise；重启即丢运行记录，**权威进度=被调方自己的产物** |
+
+- **注册表**（`core/session/jobs.ts` 的 `BackgroundJobRegistry`）：与子会话同一分层——**引擎级共享 store（`engine.bgJobStore`）+ 按作用域过滤的薄视图**（`buildContext` 注入 `ctx.bgJobs` 绑定当前会话；REST 等非会话通道用 `engine.backgroundJobs("api:<user>")`，与任何会话隔离，避免跨用户看到对方运行记录）。`start` 立即返回 `{id, status: running, ref}`；任务体经 `onProgress` 上报进度（`phase/done/total/detail`，覆盖式）、经 `signal` 接收协作中止
+- **终态语义**：任务体返回值 → `done`（同时作为 `summary`）；抛错 → `failed`（记原因）；中止后正常返回 → `cancelled`（**保留已产出的 `summary`**——部分结果也要如实展示，否则用户以为什么都没跑出来）。终态记录按作用域保留最近 `BG_JOB_KEEP`（50）条，运行中的不淘汰
+- **中止是协作式的**（与 `t` 杀进程树、`s` 注入收敛指令都不同）：注册表只发 abort 信号并等收尾，任务体自己在循环/批次边界退出——所以“已落盘的部分结果”始终有效，而**不必**担心硬杀导致产物不一致
+- **`finish` 不适用于 `j`**：它不是模型会话、没有可收敛的对话，调用时明确拒绝并指向 `stop`（不静默当成 stop——两者语义不同）
+- **上限**：`wait` 默认/上限 60 秒（与另两类同口径：超时返回当前快照，可再 wait 或改 status）；并发不单独限流（任务体自己负责，如 `sh` 的 8 并发、研判的算力约束）
+
 #### sh 异步后台任务（`async:true`，管理经 `bg_task`）
 
 长耗时命令（全量构建/测试/依赖安装）同步等待会占死一轮工具调用，`sh` 传 `async: true` 转**后台执行**——立即返回 `taskId`（结构化 `data.taskId`/`pid`），模型先处理其他任务，之后经 `bg_task` 回头处理（与 subsession_run 异步运行统一管理面，按 id 前缀分发）：
@@ -2071,7 +2097,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **启动**（`sh async:true`）：经 `Sandbox.spawnBackground` 起进程——与同步 `exec` 同规则的 shell（Windows PowerShell；`cmd` 回落分支 `chcp 65001`）/环境脱敏（沙箱用户剔除敏感变量）/Unix 进程组语义，但 stdout+stderr **合并持续写入日志文件**（WriteStream 落盘，不占内存）且不等待完成；`timeout` 参数在此语义为**任务生命周期上限**（默认 1800 秒、上限 3600 秒，防僵尸进程常驻）
 - **状态落盘**（会话 `tmp/sh-tasks/`，跨工具调用与服务重启可见）：`tasks.json` 记录（命令/cwd/pid/起止时间/退出码，原子写 tmp+rename）+ 每任务 `{id}.log` 合并输出日志；引擎按 `user:sessionId` 复用服务实例（`ToolContext.shTasks`），会话删除时释放（`forgetSession`）
 - **生命周期**：记录**先落盘、后注册** `exited` 回调——命令可能瞬时退出（`echo` 类），回调先于记录落盘会读不到记录而丢弃退出码，任务永久停在 running；回调落盘回写退出码（同进程内准确）；服务重启后 pid 失活而记录无终态 → 判定 `lost`（已结束、退出码未知，日志尾部仍可读）；**本进程持有该 pid 的句柄时不做 pid 探测**（退出由回调回写，中间态探测与 close 竞态会误判 lost），句柄缺失或 pid 不符才走 pid 兜底；生命周期超限在 status/wait/list/kill 时**惰性检查**——终止进程树（本进程内经句柄精确 kill，重启后按 pid 兜底：Windows `taskkill /T`/Unix 进程组）并标记 `timed_out`
-- **查询/等待/终止**（`bg_task`，id 前缀 `t` 分发到本服务）：`status` 立即返回当前状态（running/done/failed/killed/timed_out/lost）与输出尾部；`wait` 阻塞至完成或等待超时（默认/上限 60 秒——上限压到 1 分钟强制按进度轮询，超时返回当前状态可再次 wait）；`stop` 终止进程树并标记；`list` 与子Agent 运行、子会话运行合并列出本会话全部后台任务
+- **查询/等待/终止**（`bg_task`，id 前缀 `t` 分发到本服务）：`status` 立即返回当前状态（running/done/failed/killed/timed_out/lost）与输出尾部；`wait` 阻塞至完成或等待超时（默认/上限 60 秒——上限压到 1 分钟强制按进度轮询，超时返回当前状态可再次 wait）；`stop` 终止进程树并标记；`list` 与子会话运行、通用后台任务合并列出本会话全部后台任务
 - **上限**：单会话并发运行任务 ≤ 8（`SH_TASK_MAX_CONCURRENT`，超限拒绝新任务并引导清理）；输出尾部默认 4000、上限 20000 字符（`tail` 参数）
 - **审批与安全模式**：与同步 `sh` 完全同规则——命令本身照常过动态审批（`approval:false` 免审白名单强制）与安全模式只读白名单（`validateShCommandSafeMode`，降级语义不分同步/异步）；`bg_task` 管理动作（查询/等待/终止本会话后台任务）免审批
 
@@ -2344,8 +2370,8 @@ interface AgentEvent {                  // WS event.* / Webhook 统一载荷
 | `agent_list` | 列出可用子Agent（名称/描述/是否已装载；**不列工具名**，工具名以注册的工具集为准）。**不注册进总Agent 全局工具集**——未装载清单已由 `systemPromptInjection` 注入提示词（模型上下文已有，工具冗余且干扰工具选择）；仅在子会话运行环境注入（纯 md 组合子Agent 自动注入编排工具时，见「子Agent文件格式」） | 否 |
 | `agent_load` | **装载**子Agent 能力模块（类比 import 子模块：工具并入当前工具集、**完整系统提示词作为 system 消息写入会话记录**（持久化，恢复会话自动还原），**不创建独立上下文**；默认使用方式：装载后直接用其工具，仅在需要干净上下文或防膨胀时才改用 `subsession_run` 子会话运行；装载反馈**不枚举工具清单**——`{agent}_*` 工具 schema 已注册进工具集（下一轮请求即全量下发），再列一遍是冗余） | 否 |
 | `subsession_run` | **子会话运行**（无需装载，一套入口覆盖两种形态）：`inherit_context:false`（缺省）= 派生子会话执行独立子任务，`agents` 可省略/为空（不加载任何子Agent），中间过程/推理/内部工具不进父上下文、全程存档可回放，最终结果作为工具结果返回（异步经 `bg_task` 取回）；`inherit_context:true` = 从父会话当前上下文 fork，报告自动合入父上下文。**默认与父会话同构**——`inherit_global_tools` 与 `inherit_global_prompt` 默认均为 true（全局工具同名同参注册 + 父会话全局系统提示词前缀注入，子Agent 只提供独有能力；false 分别裁剪）；**`async` 参数**：true 后台异步执行——立即返回 runId（`s` 前缀）不阻塞，子会话内可 `subsession_merge` 主动合入阶段性成果（长任务先做别的，见「子会话运行」）；默认优先 `agent_load` 装载后直接用其工具 | 否 |
-| `subsession_run` | **子会话运行（统一父子会话模型）**：一套入口覆盖两种形态——`inherit_context:false`（缺省）= 派生子会话执行独立子任务（预加载子Agent 可省略；最终结果作为工具结果返回或经 `bg_task` 取回）；`inherit_context:true` = 从**父会话当前上下文** fork 子会话（父消息历史 + 系统提示词 + 工具面快照），最终报告**自动合入父上下文**（合并消息 + 过程存档，父会话下轮即见）——同一任务的并行多路探索/执行，像 git 一样不停 fork/合并摆脱单轮串行的模型服务速度限制。单任务用 `input`（+可选 `agents`/`model`）、多任务并发用 `subsessions`（1-8 项，每项 `{ name?（缺省 s1..sN，批内唯一，≤32 字符不含空白、中文名合法）, input, agents?, model? }`，两形态二选一）；`model` 走**模型路由**（`GEBAI_LLM_ROUTES` 命名路由走独立端点，多路接口并行）；子会话内用 `subsession_merge`（**仅异步运行注入**）双向同步父会话（传 content 交出阶段性成果并继续运行/不传拉取父会话完整增量），父会话与兄弟子会话进展以通知注入**互相感知**（见「子会话运行」）；`merge` 可选合入粒度（缺省 `full` 全文；`summary` 摘要合入——长报告压成结论要点进父会话、全文留过程存档）；默认阻塞等全部完成（结果为概要，隔离形态附最终结果、继承形态全文在随后的合并消息），`async:true` 后台执行——立即返回 runId（`s` + 8 位 hex），`bg_task`（s 前缀）管理 | 否 |
-| `bg_task` | **后台异步任务统一管理**（三类同构管理面合并，**按 id 前缀自动识别**，无需指定类型——旧 `sh_task`/`agent_task` 已合并为本工具）：**命令任务**（`sh async:true` 启动，taskId 形如 `tXXXXXXXX`，见「sh 异步后台任务」）——`status` 返回状态与 stdout+stderr 合并日志尾部（`tail` 参数默认 4000 上限 20000 字符，完整日志 `sh-tasks/{id}.log`，相对会话工作目录）；**子会话运行**（`subsession_run async:true` 启动，runId 形如 `sXXXXXXXX`，见「子会话运行」）——`status` 返回进度（已执行轮次/工具调用/最近活动，已结束含最终结果），`wait` 完成时取回最终结果与完整存档（挂执行记录扩展字段供历史回放；继承形态报告完成即自动合入父上下文，无需取回动作），`stop` 终止且该子会话不合入（已执行过程保留在存档）。公共动作：`wait` 阻塞等待完成（`timeout` 秒内未完成返回当前状态，默认/上限 60 秒——「先做别的再回头等结果」，上限 1 分钟强制按进度轮询）；`stop` 终止（命令任务杀进程树、子会话运行协作中止且已执行过程保留在存档）；`list` 三类合并列出本会话全部后台任务（按启动顺序） | 否 |
+| `subsession_run` | **子会话运行（统一父子会话模型）**：一套入口覆盖两种形态——`inherit_context:false`（缺省）= 派生子会话执行独立子任务（预加载子Agent 可省略；最终结果作为工具结果返回或经 `bg_task` 取回）；`inherit_context:true` = 从**父会话当前上下文** fork 子会话（父消息历史 + 系统提示词 + 工具面快照），最终报告**自动合入父上下文**（合并消息 + 过程存档，父会话下轮即见）——同一任务的并行多路探索/执行，像 git 一样不停 fork/合并摆脱单轮串行的模型服务速度限制。单任务用 `input`（+可选 `agents`/`model`）、多任务并发用 `subsessions`（1-8 项，每项 `{ name?（缺省 s1..sN，批内唯一，≤32 字符不含空白、中文名合法）, input, agents?, model? }`，两形态二选一）；`model` 走**模型路由**（`GEBAI_LLM_ROUTES` 命名路由走独立端点，多路接口并行）；子会话内用 `subsession_merge`（**仅异步运行注入**）双向同步父会话（传 content 交出阶段性成果并继续运行/不传拉取父会话完整增量），父会话与兄弟子会话进展以通知注入**互相感知**（见「子会话运行」）；`merge` 可选合入粒度（缺省 `full` 全文；`summary` 摘要合入——长报告压成结论要点进父会话、全文留过程存档）；**环境变量自定义** `env` + `env_mode`（`inherit` 缺省＝父任务环境叠加自定义项；`clear`＝仅自定义项；同时决定工具可见环境与 **Provider 解析**，可用它把子会话指向另一端点/模型，优先级高于 `model` 路由）；默认阻塞等全部完成（结果为概要，隔离形态附最终结果、继承形态全文在随后的合并消息），`async:true` 后台执行——立即返回 runId（`s` + 8 位 hex），`bg_task`（s 前缀）管理 | 否 |
+| `bg_task` | **后台异步任务统一管理**（三类同构管理面合并，**按 id 前缀自动识别**，无需指定类型——旧 `sh_task`/`agent_task` 已合并为本工具）：**命令任务**（`sh async:true` 启动，taskId 形如 `tXXXXXXXX`）、**子会话运行**（`subsession_run async:true` 启动，runId 形如 `sXXXXXXXX`）与**通用后台任务**（如 `triage_run mode=async` 启动，jobId 形如 `jXXXXXXXX`）；见「sh 异步后台任务」）——`status` 返回状态与 stdout+stderr 合并日志尾部（`tail` 参数默认 4000 上限 20000 字符，完整日志 `sh-tasks/{id}.log`，相对会话工作目录）；**子会话运行**（`subsession_run async:true` 启动，runId 形如 `sXXXXXXXX`，见「子会话运行」）——`status` 返回进度（已执行轮次/工具调用/最近活动，已结束含最终结果），`wait` 完成时取回最终结果与完整存档（挂执行记录扩展字段供历史回放；继承形态报告完成即自动合入父上下文，无需取回动作），`stop` 终止且该子会话不合入（已执行过程保留在存档）。公共动作：`wait` 阻塞等待完成（`timeout` 秒内未完成返回当前状态，默认/上限 60 秒——「先做别的再回头等结果」，上限 1 分钟强制按进度轮询）；`stop` 终止（命令任务杀进程树、子会话运行协作中止且已执行过程保留在存档）；`list` 三类合并列出本会话全部后台任务（按启动顺序） | 否 |
 | `sh` | 执行Shell命令（**Windows 经 PowerShell、POSIX 经 `bash -c`，命令按所在平台的 shell 语法书写；退出码读返回结果的 `exitCode` 字段，无需在命令里输出**；**`workdir` 参数**：命令工作目录（相对路径基于会话工作目录/项目根解析——替代在命令里串联 `cd`；async 后台任务同以该目录为 cwd；非默认工作目录执行时输出末尾标注「（工作目录: …）」）；**`input` 参数**：stdin 输入，对象/数组自动序列化为 JSON 文本（双引号，脚本 `json.loads` 可解析）；**`timeout` 参数：执行超时秒数，默认 300、上限 540，超时按进程树终止并返回超时结果（`async:true` 时为任务生命周期上限：默认 1800、上限 3600）**；**`strict` 参数**：true 时非 0 退出码抛工具级错误（js 编排「非 0 即中断」，默认 false 非 0 退出作为正常结果返回，exitCode 在结构化输出）；**`async` 参数**：true 后台异步执行——立即返回 taskId 不阻塞（长耗时构建/测试先做其他事再回头查询，见「sh 异步后台任务」）；**`approval` 参数**：本次调用是否需审批，默认 true，明确安全的只读/幂等命令可传 false 按次免审（见「工具审批」）；可运行 `bun run`/`node`；JS/TS 亦可通过内置运行时 `gebai exec` 自执行，见「脚本执行环境」） | **是**（默认；`approval:false` 按次免审） |
 | `py` | 执行Python代码（**`input` 参数同 `sh`**——本地模式工具桥下对象/数组原样注入 `input` 变量（与 js 的 `input` 语义对齐，不再经 schema 强制序列化为 JSON 文本）；**`timeout` 参数同 `sh`**；**`strict` 参数同 `sh`**；`approval` 为**兼容参数**：`code` 为任意代码、无法静态判定安全性，**免审标记不生效——恒需审批**） | **是**（恒需审批，不接受 `approval:false` 免审） |
 | `js` | **执行 JS/TS 脚本（工具动态编程）**：Bun 子进程运行，脚本内工具**像内置函数一样直接调用**——`await read(params)`（已启用工具名即顶层函数，动态名字 `tools.call`）+ `ctx` **注入会话上下文**（user/sessionId/workdir/home/sandboxed/env/projects/messages 最近消息快照）+ `input`（编排传入）；console 输出即工具输出，`return` 值进 `data.result`；`timeout`/`strict`/`approval` 参数同 `sh`（见「js 脚本工具」） | **是**（默认；`approval:false` 按次免审） |
@@ -2767,9 +2793,9 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/sessions/:id/choice` | POST | 选择决策（ask 选项询问分支等待的用户回应，body: choiceId + option 单选 / options 数组多选 / refuse=true 拒绝，option、options、refuse 至少其一，options 不得为空） |
 | `/api/v1/sessions/:id/draw` | POST | 画图渲染结果回传（show 图表分支等待的前端渲染结果，body: renderId + ok + error） |
 | `/api/v1/feedback` | POST/GET | 提交/查询反馈（提交自动补 model/subAgent 关联；管理员 GET 可查全部用户并导出分析） |
-| `/api/v1/triage/analyze` | POST | **两级研判**（小模型批量粗筛 → 低置信度交 Agent 引擎精审兜底）：body `items`（或 `items_file`）+ `schema`/`label_enum`/`threshold`/`min_evidence_chars`/`accept_labels` + `l1{base_url,api_key,model,system,prompt_template,concurrency,max_tokens,reminders,timeout_ms,enable_thinking}` + `l2{enabled,agents,model,api_base,api_key,max_items,batch_size,timeout_ms}`；`mode=async` 立即返 202 + job_id；同步返 `{job_id, job_dir, state, summary, total, results}`。每用户限流（10 突发 / 2 每秒） |
+| `/api/v1/triage/analyze` | POST | **大小模型协同**：body = 与 `triage_run` 工具**同一份参数契约**（`core/triage/params.ts` 的 `TRIAGE_PARAM_SPECS`）——`items`/`items_file`、`target`(+`target_api_key`)、`schema`/`label_enum`、`threshold`/`min_evidence_chars`/`accept_labels`、`escalate`、`l1_*`、`l2_*`、`job_id`/`job_dir`/`result_limit`、`mode`（`async` 立即返 202 + job_id + 后台任务 id `job`；用既有轮询端点跟踪）；嵌套写法（`l1.target`）与旧键名作兼容输入。同步返 `{job_id, job_dir, state, escalate, target, summary, total, returned, results}`。每用户限流（10 突发 / 2 每秒） |
 | `/api/v1/triage/jobs/{id}` | GET | 研判任务进度/汇总（未完成时按 l1.jsonl 行数报进度；`?job_dir=` 可指定目录） |
-| `/api/v1/triage/jobs/{id}/results` | GET | 研判任务逐条结果（`?layer=L1|L2`、`?only=ok|failed`、`?limit=`；全量始终在产物目录的 results.jsonl） |
+| `/api/v1/triage/jobs/{id}/results` | GET | 研判任务逐条结论（`?layer=L1|L2`、`?only=ok|failed`、`?limit=`；全量始终在产物目录的 results.jsonl） |
 | `/api/v1/sessions/:id/env` | GET/PUT | 获取/设置会话环境变量（内存态，不落盘） |
 | `/api/v1/sessions/:id/compact` | POST | 主动压缩会话上下文（body 可指定范围） |
 | `/api/v1/sessions/:id/todos` | GET | 获取会话待办清单 |
@@ -3286,7 +3312,8 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | js 动态工具源码上限 | 100k 字符 | execute 源码长度上限（`JS_DYNAMIC_SOURCE_CAP`，源码随会话持久化，防撑爆 chat.json） |
 | js 动态工具名 | `[a-z][a-z0-9_]{0,39}` | 运行时定义工具命名约束（与全局工具命名一致，`DYNAMIC_TOOL_NAME_RE`）；execute 源码 ≤ 2000 字符描述 |
 | sh/py 结构化 data 文本上限 | 100k 字符 | `data.stdout`/`data.stderr` 超长截断（完整文本以 output 截断文件为准，`SCRIPT_DATA_TEXT_CAP`） |
-| 两级研判 L1 默认上限 | 阈值 0.85 / 证据下限 6 字符 / 提醒 3 次 / max_tokens 300 / 并发 1 | `core/triage` 缺省：置信度阈值（`TRIAGE_DEFAULT_THRESHOLD`）、证据质量下限（`TRIAGE_DEFAULT_MIN_EVIDENCE_CHARS`，挡住「任务失败」这类无信息量证据）、未调用输出工具的提醒上限（`DEFAULT_TOOL_REMINDERS`）、L1 单条输出 token（`TRIAGE_DEFAULT_L1_MAX_TOKENS`）、L1 并发（`TRIAGE_DEFAULT_CONCURRENCY`，仅短 prompt + slot 匹配时才有收益） |
+| 大小模型协同默认值 | 阈值 0.85 / 证据下限 6 字符 / 提醒 3 次 / max_tokens 300 / 并发 1 / **escalate 开** / **结果全量** / **mode=sync** | `core/triage` 缺省（两条通道同源）：置信度阈值（`TRIAGE_DEFAULT_THRESHOLD`）、证据质量下限（`TRIAGE_DEFAULT_MIN_EVIDENCE_CHARS`，挡住「任务失败」这类无信息量证据）、未调用输出工具的提醒上限（`DEFAULT_TOOL_REMINDERS`）、单条输出 token（`TRIAGE_DEFAULT_L1_MAX_TOKENS`）、并发（`TRIAGE_DEFAULT_CONCURRENCY`，仅短 prompt + slot 匹配时才有收益）、低置信度是否上升兜底（`TRIAGE_DEFAULT_ESCALATE`）、结果数组返回条数（`TRIAGE_DEFAULT_RESULT_LIMIT` = 0 全量）、工具文字呈现上限（`TRIAGE_TEXT_RENDER_MAX` = 100，仅影响文本，`data.results` 始终完整） |
+| 后台任务保留上限 | 50 条/作用域 | `core/session/jobs.ts` 的 `BG_JOB_KEEP`：通用后台任务（j 前缀）终态记录每作用域保留数，超出淘汰最旧（运行中的不淘汰；与子会话 `SUBSESSION_KEEP` 同口径防无界增长） |
 | 两级研判 L2 默认上限 | 精审 20 条 / 每轮 5 条 / 超时 600s | `l2_max_items`（超出部分标「待精审」返回，可续跑）、`l2_batch_size`（按轮精审，避免一次提示词过长）、`l2_timeout_ms`（超时走收尾而非硬杀） |
 | 研判 RPC 批上限 | 8 条/次 | 单次 `ctx.subSessions.start` 派生子会话数上限（`SUBSESSION_MAX_PER_CALL`）——L2 精审按 batchSize 分批即受此约 |
 | 后端图表渲染超时 | 20 秒（仅 plantuml） | `feishu-bot/plantuml.ts` 的 `PLANTUML_TIMEOUT_MS`（可注入）——**mermaid 与 d2 的后端渲染无超时**（`core/support/diagram-render.ts` 直接 await；20 秒超时只在前端本地渲染侧，见下行） |

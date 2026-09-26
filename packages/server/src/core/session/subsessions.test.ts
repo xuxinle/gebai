@@ -68,6 +68,46 @@ describe("normalizeSubSessionSpecs", () => {
     expect(() => normalizeSubSessionSpecs({ subsessions: [{ name: "坏 名", input: "x" }] })).toThrow(/name 非法/)
     expect(() => normalizeSubSessionSpecs({ subsessions: Array.from({ length: 9 }, (_, i) => ({ name: `n${i}`, input: "x" })) })).toThrow(/数量超限/)
   })
+
+  test("环境变量：缺省继承模式 + 空自定义项；自定义项盖章到各子会话", () => {
+    const d = normalizeSubSessionSpecs({ input: "x" })[0]
+    expect(d.envMode).toBe("inherit")
+    expect(d.env).toEqual({})
+
+    const specs = normalizeSubSessionSpecs({
+      input: "x",
+      env_mode: "clear",
+      env: { GEBAI_LLM_MODEL: "big" },
+    })
+    expect(specs[0].envMode).toBe("clear")
+    expect(specs[0].env).toEqual({ GEBAI_LLM_MODEL: "big" })
+  })
+
+  test("环境变量：多任务可逐项覆写（未给则沿用调用级）", () => {
+    const specs = normalizeSubSessionSpecs({
+      env: { A: "1", B: "2" },
+      subsessions: [
+        { input: "a" },
+        { name: "u", input: "b", env: { A: "9" } },
+        { name: "c", input: "c", env_mode: "clear" },
+      ],
+    })
+    expect(specs[0].env).toEqual({ A: "1", B: "2" }) // 沿用调用级
+    expect(specs[1].env).toEqual({ A: "9" }) // 整项替换（不是合并）
+    expect(specs[1].envMode).toBe("inherit")
+    expect(specs[2].envMode).toBe("clear")
+    expect(specs[2].env).toEqual({ A: "1", B: "2" })
+  })
+
+  test("环境变量：非法模式/非法名/非字符串值都抛错（不静默丢弃）", () => {
+    expect(() => normalizeSubSessionSpecs({ input: "x", env_mode: "merge" })).toThrow(/env_mode/)
+    expect(() => normalizeSubSessionSpecs({ input: "x", env: { "坏-名": "1" } })).toThrow(/变量名非法/)
+    expect(() => normalizeSubSessionSpecs({ input: "x", env: { A: 1 } })).toThrow(/必须是字符串/)
+    expect(() => normalizeSubSessionSpecs({ input: "x", env: ["A"] })).toThrow(/必须是对象/)
+    // `__proto__` 必须经 JSON.parse 构造才能成为**自有属性**（对象字面量里的 `__proto__:` 是设置原型，不是属性）
+    const protoKey = JSON.parse('{"__proto__": "1"}') as Record<string, unknown>
+    expect(() => normalizeSubSessionSpecs({ input: "x", env: protoKey })).toThrow(/变量名非法/)
+  })
 })
 
 /** 注册表单元：start/wait/cancel/list、视角（进程树）可见性、并发上限、fork 快照切片、终态修剪。 */
@@ -81,6 +121,8 @@ describe("SubSessionRegistry", () => {
     async: false,
     inheritGlobalTools: true,
     inheritGlobalPrompt: true,
+    envMode: "inherit",
+    env: {},
   })
 
   function makeRegistry(store = new Map<string, SubSessionHandle>(), extra: { ownerRunId?: string; onDone?: (h: SubSessionHandle) => void } = {}) {
@@ -116,7 +158,7 @@ describe("SubSessionRegistry", () => {
 
   test("start 返回 s 前缀 id 与派生元信息，wait 等到 done，list 按会话过滤", async () => {
     const { reg, store } = makeRegistry()
-    store.set("szzzzzzzz", { runId: "szzzzzzzz", sessionId: "other", name: "x", input: "p", agents: [], inheritContext: false, async: false, merge: "full", inheritGlobalTools: true, inheritGlobalPrompt: true, depth: 1, startedAt: 0, status: "running", controller: new AbortController(), done: Promise.resolve() })
+    store.set("szzzzzzzz", { runId: "szzzzzzzz", sessionId: "other", name: "x", input: "p", agents: [], inheritContext: false, async: false, merge: "full", inheritGlobalTools: true, inheritGlobalPrompt: true, envMode: "inherit", env: {}, depth: 1, startedAt: 0, status: "running", controller: new AbortController(), done: Promise.resolve() })
     const recs = await reg.start([specOf("a"), specOf("b", "q", false)])
     expect(recs).toHaveLength(2)
     expect(recs[0].runId.startsWith("s")).toBe(true)
@@ -385,7 +427,7 @@ interface Harness {
 
 async function setupSub(
   respond: (msgs: MessageLike[], callIdx: number, opts?: ChatOptions) => LLMChunk[] | Promise<LLMChunk[]>,
-  opts: { resolveModelProvider?: boolean } = {},
+  opts: { resolveModelProvider?: boolean; onResolveProvider?: (env: Record<string, string>) => void } = {},
 ): Promise<Harness> {
   const home = mkdtempSync(join(tmpdir(), "gebai-sub-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
@@ -419,6 +461,8 @@ async function setupSub(
           return provider
         }
       : undefined,
+    // 有效 env 观测点（子会话与环境都经它解析 Provider）：把实际用到的 env 快照传给测试
+    resolveProvider: opts.onResolveProvider ? (e) => (opts.onResolveProvider!(e), undefined) : undefined,
   })
   return { home, store, engine, provider, events: collected, routeNames, cleanup: () => rmSync(home, { recursive: true, force: true }) }
 }
@@ -1040,6 +1084,66 @@ describe("subsession_run 待办隔离与异步合入", () => {
       expect(waitOut).toContain("快速结束结论：进度 60%")
       // 隔离形态：结果经 bg_task 取回，不自动合入父上下文
       expect(msgs.some((m) => m.subSessionMerged)).toBe(false)
+    } finally {
+      h.cleanup()
+    }
+  })
+})
+
+/** 子会话环境变量：env_mode 决定「父任务 env + 自定义项」还是「仅自定义项」，且直接影响 Provider 解析。 */
+describe("子会话环境变量（env_mode / env）", () => {
+  test("inherit（缺省）：父任务 env 保留并叠加自定义项", async () => {
+    const seen: Array<Record<string, string>> = []
+    const h = await setupSub(
+      (msgs) => {
+        if (isSubChat(msgs)) return [{ type: "text", text: "子会话结论" }, { type: "done" }] as LLMChunk[]
+        if (!msgs.some((m) => m.role === "tool")) {
+          return [
+            { type: "tool_call", toolCall: { id: "tc-env1", name: "subsession_run", arguments: { input: "探环境", env_mode: "inherit", env: { SUB_KEY: "v1" } } } } as LLMChunk,
+            { type: "done" } as LLMChunk,
+          ]
+        }
+        return [{ type: "text", text: "父会话收尾" }, { type: "done" }] as LLMChunk[]
+      },
+      { onResolveProvider: (e) => seen.push({ ...e }) },
+    )
+    try {
+      const session = await h.store.createSession("default", "t")
+      // 任务级覆盖：父任务 env 的标志键（子会话 inherit 时应看得到）
+      await h.engine.run(session.id, "default", "起子会话", { envOverride: { PARENT_MARK: "1" } })
+      const sub = seen.filter((e) => e.SUB_KEY === "v1")
+      expect(sub.length).toBeGreaterThan(0)
+      expect(sub[0].PARENT_MARK).toBe("1") // inherit：父任务 env 被继承
+      expect(sub[0].SUB_KEY).toBe("v1")
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test("clear：不继承父任务 env，只用自定义项（含进程环境键也不带入 ctx.env）", async () => {
+    const seen: Array<Record<string, string>> = []
+    const h = await setupSub(
+      (msgs) => {
+        if (isSubChat(msgs)) return [{ type: "text", text: "子会话结论" }, { type: "done" }] as LLMChunk[]
+        if (!msgs.some((m) => m.role === "tool")) {
+          return [
+            { type: "tool_call", toolCall: { id: "tc-env2", name: "subsession_run", arguments: { input: "探环境", env_mode: "clear", env: { SUB_KEY: "v2" } } } } as LLMChunk,
+            { type: "done" } as LLMChunk,
+          ]
+        }
+        return [{ type: "text", text: "父会话收尾" }, { type: "done" }] as LLMChunk[]
+      },
+      { onResolveProvider: (e) => seen.push({ ...e }) },
+    )
+    try {
+      const session = await h.store.createSession("default", "t")
+      await h.engine.run(session.id, "default", "起子会话", { envOverride: { PARENT_MARK: "1" } })
+      const sub = seen.filter((e) => e.SUB_KEY === "v2")
+      expect(sub.length).toBeGreaterThan(0)
+      expect(sub[0].PARENT_MARK).toBeUndefined() // clear：父任务 env 未被继承
+      expect(sub[0].SUB_KEY).toBe("v2")
+      // 语义边界：clear 只影响工具层可见 env，进程环境不随之带入（命令子进程的 OS 基线由执行层合并）
+      expect(Object.keys(sub[0]).length).toBe(1)
     } finally {
       h.cleanup()
     }

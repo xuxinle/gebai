@@ -10,6 +10,7 @@ import {
   type SubSessionSpec,
 } from "../session/subsessions"
 import { shTaskStatus, type ShTaskRecord } from "../exec/sh-tasks"
+import type { BgJobRecord } from "../session/jobs"
 import { truncate, TRUNCATE_THRESHOLD } from "../support/truncate"
 import { schema, type GlobalToolEntry } from "./shared"
 
@@ -49,6 +50,21 @@ function shTaskLine(r: ShTaskRecord, label?: string): string {
   const exit = r.exitCode === undefined ? "（退出码未知）" : `（exit ${r.exitCode}）`
   const suffix = r.timedOut ? " [生命周期超时已终止]" : r.killed ? " [已手动终止]" : r.lost ? " [进程已结束，服务可能重启过]" : r.spawnError ? ` [启动失败: ${r.spawnError.slice(0, 200)}]` : ""
   return `${head}${exit}${suffix} — ${r.command}`
+}
+
+/** 后台任务（j 前缀）的一行呈现：进度与产物引用都是模型判断下一步的依据。 */
+function bgJobLine(r: BgJobRecord): string {
+  const p = r.progress
+  const prog = p
+    ? ` · ${p.phase}${p.total ? ` ${p.done ?? 0}/${p.total}` : p.done !== undefined ? ` ${p.done}` : ""}${p.detail ? `（${p.detail}）` : ""}`
+    : ""
+  const ref = r.ref?.job_dir ? ` · 产物 ${r.ref.job_dir}` : ""
+  const head = `jobId ${r.id} [${r.status}] ${elapsed(r)}s — ${r.kind}「${r.name}」${prog}${ref}`
+  if (r.status === "running") return head
+  if (r.status === "failed") return `${head}（失败: ${r.error ?? "未知原因"}）`
+  // 已终止也可能已有部分产出（任务体在中止时返回的摘要）：如实展示，否则用户以为什么都没跑出来
+  if (r.status === "cancelled") return `${head}（已终止${r.summary ? `；部分结果: ${r.summary}` : ""}）`
+  return `${head}${r.summary ? `（${r.summary}）` : ""}`
 }
 
 export const agentListTool: Tool = {
@@ -92,7 +108,13 @@ export const agentLoadTool: Tool = {
 /** 子会话状态行（subsession_run 结果 / bg_task status/wait/stop/list 共用；进度含轮次/工具调用/最近活动）。 */
 function subSessionLine(r: SubSessionRecord): string {
   const flavor = r.inheritContext ? "继承上下文" : "隔离上下文"
-  const head = `runId ${r.runId}「${r.name}」 [${r.status}${r.finishing ? "·收尾中" : ""}] ${elapsed(r)}s — ${flavor}${r.agents.length ? ` · 子Agent ${r.agents.join("+")}` : ""}${r.model ? ` · ${r.model}` : ""}`
+  // 环境自定义的如实展示（只报模式与**键名**，值不回传——可能含密钥）
+  const envNote = r.envKeys.length
+    ? ` · 环境${r.envMode === "clear" ? "仅自定义" : "继承+"}${r.envKeys.join("+")}`
+    : r.envMode === "clear"
+      ? " · 环境清空"
+      : ""
+  const head = `runId ${r.runId}「${r.name}」 [${r.status}${r.finishing ? "·收尾中" : ""}] ${elapsed(r)}s — ${flavor}${r.agents.length ? ` · 子Agent ${r.agents.join("+")}` : ""}${r.model ? ` · ${r.model}` : ""}${envNote}`
   if (r.status === "running") {
     const progress = `已 ${r.rounds} 轮回复、${r.toolCalls} 次工具调用${r.last ? `，最近: ${r.last}` : ""}`
     return `${head}（${progress}）`
@@ -117,7 +139,8 @@ export const subSessionRunTool: Tool = {
     "④ **同步 / 异步**（`async`，默认 false）——false=阻塞等全部子会话完成（父会话被占住；不注入合并工具）；true=立即返回 runId 后台执行（父会话继续其他工作，子会话注入 `subsession_merge` 可随时把阶段性成果合入父会话并感知父会话进展）。\n" +
     "⑤ **父会话控制**（异步）——`bg_task`（id 以 s 开头）status 查进度 / wait 等完成取结果 / stop 终止 / finish **快速结束**（先注入收敛指令让子会话输出结论，宽限逾期才强制终止）/ list 列全部。\n" +
     "⑥ **运行时限**——`timeout`（秒）：到时进入**快速结束**而非硬杀（先拿结论，宽限逾期才强制终止）；缺省不设限。\n" +
-    `单任务用 \`input\`（可选 \`agents\`/\`model\`）；多任务并发用 \`subsessions\` 数组（每项 { name?, input, agents?, model? }，最多 ${SUBSESSION_MAX_PER_CALL} 个，与 input 二选一）。`,
+    "⑦ **环境变量**（`env_mode` + `env`）——`env_mode=inherit`（缺省）在父任务环境基础上叠加 `env` 自定义项；`env_mode=clear` 只用 `env`（不继承父任务环境）。自定义项对子会话的工具可见环境与**模型解析**同时生效，因此可用 `env` 把子会话指向另一个端点/模型（如 {\"GEBAI_LLM_API_BASE\": \"http://host:port\", \"GEBAI_LLM_MODEL\": \"名字\"}，优先级高于 `model` 路由）；`clear` 清空的是**工具层可读**的父任务环境（含会话环境与任务级覆盖），命令子进程的 OS 基线（PATH/HOME/TEMP）仍由执行层自进程环境合并，不会丢。\n" +
+    `单任务用 \`input\`（可选 \`agents\`/\`model\`/\`env\`）；多任务并发用 \`subsessions\` 数组（每项 { name?, input, agents?, model?, env? }，最多 ${SUBSESSION_MAX_PER_CALL} 个，与 input 二选一）。`,
   card: { titleParams: ["subsessions"], args: "none" },
   parameters: schema(
     {
@@ -126,7 +149,7 @@ export const subSessionRunTool: Tool = {
       model: { type: "string", description: "单任务形态：模型路由名或字面模型名（GEBAI_LLM_ROUTES 命名路由走独立端点；缺省沿用任务级模型）" },
       subsessions: {
         type: "array",
-        description: `多任务并发形态（1-${SUBSESSION_MAX_PER_CALL} 项，与 input 二选一）：每项 { name?: 子会话名（缺省 s1..sN）, input: 任务指令（必填）, agents?, model? }`,
+        description: `多任务并发形态（1-${SUBSESSION_MAX_PER_CALL} 项，与 input 二选一）：每项 { name?: 子会话名（缺省 s1..sN）, input: 任务指令（必填）, agents?, model?, env?, env_mode? }`,
         items: {
           type: "object",
           properties: {
@@ -134,6 +157,8 @@ export const subSessionRunTool: Tool = {
             input: { type: "string" },
             agents: { type: "array", items: { type: "string" } },
             model: { type: "string" },
+            env: { type: "object", description: "本子会话自定义环境变量（值仅允许字符串）" },
+            env_mode: { type: "string", enum: ["inherit", "clear"], description: "本子会话的环境继承模式（缺省沿用调用级 env_mode）" },
           },
         },
       },
@@ -145,6 +170,16 @@ export const subSessionRunTool: Tool = {
       timeout: {
         type: "number",
         description: `可选：运行时限（秒，整数）——到时进入**快速结束**（注入收敛指令让子会话停止扩展性工作、按已有信息给出结论并正常结束，宽限 ${Math.round(SUBSESSION_FINISH_GRACE_MS / 1000)}s），宽限逾期才强制终止；缺省不设限`,
+      },
+      env_mode: {
+        type: "string",
+        enum: ["inherit", "clear"],
+        description: "环境变量继承模式（默认 inherit）：inherit = 父任务环境 + env 自定义项（后者优先）；clear = 仅 env（不继承父任务环境；命令子进程的 OS 基线不受影响）",
+      },
+      env: {
+        type: "object",
+        description:
+          "子会话自定义环境变量 {\"NAME\": \"value\"}（名称须为标识符形式、值仅允许字符串）。对子会话的工具可见环境与模型解析同时生效——可用它把子会话指向另一端点/模型（如 GEBAI_LLM_API_BASE / GEBAI_LLM_MODEL，优先级高于 model 路由）",
       },
     },
     [],
@@ -254,17 +289,17 @@ export const subSessionMergeTool: Tool = {
 export const bgTaskTool: Tool = {
   name: "bg_task",
   description:
-    "统一管理后台异步任务（按 id 前缀自动识别两类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）与子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）。" +
-    "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 sh-tasks/{id}.log），子会话附进度（轮次/工具调用/最近活动，已结束含最终结果与合入状态）；" +
+    "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）、子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）与通用后台任务（如 triage_run mode=async 启动，jobId 形如 jXXXXXXXX）。" +
+    "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 sh-tasks/{id}.log），子会话附进度（轮次/工具调用/最近活动，已结束含最终结果与合入状态），后台任务附进度（阶段/已完成条数）与产物引用；" +
     "action=wait 阻塞等待完成并取回结果（子会话完成时附完整存档；继承上下文形态的报告已自动合入父会话，wait 仅确认终态）；超时上限 1 分钟，超时返回当前状态（可再 wait 或改 status 看进度）；" +
-    "action=stop 终止（命令任务杀进程树、子会话协作中止，已执行过程保留在存档）；" +
+    "action=stop 终止（命令任务杀进程树、子会话与后台任务协作中止——后台任务保留已落盘的部分结果，已执行过程保留在存档/产物）；" +
     "action=finish **快速结束子会话**（先礼后兵：注入收敛指令让其停止扩展性工作、按已有信息输出结论并自然结束——报告照常交付/合入，而非硬杀后只剩过程存档；结束原因用 reason，宽限秒数用 timeout）；" +
     "action=list 列出本会话全部后台任务。",
   card: { titleParams: ["action", "id"], taskIdParam: "id" },
   parameters: schema(
     {
       action: { type: "string", enum: ["status", "wait", "stop", "finish", "list"], description: "操作（必填）：finish 仅子会话运行支持（快速结束）" },
-      id: { type: "string", description: "任务 id——命令任务 taskId（t 开头）或子会话 runId（s 开头），action=list 可省略" },
+      id: { type: "string", description: "任务 id——命令任务 taskId（t 开头）、子会话 runId（s 开头）或后台任务 jobId（j 开头），action=list 可省略" },
       timeout: { type: "number", description: "wait 等待秒数（默认/上限 60——最长阻塞 1 分钟，超时返回当前状态与进度，需要继续等再次 wait 或改用 status 看进度）；finish 的宽限秒数（默认 120，夹取到 10-600）" },
       tail: { type: "number", description: "命令任务返回输出尾部字符数（默认 4000，上限 20000）" },
       reason: { type: "string", description: "finish：结束原因（写入给子会话的收敛指令，如「父会话已拿到关键结论，请收尾」；省略用缺省文案）" },
@@ -274,14 +309,16 @@ export const bgTaskTool: Tool = {
   outputSchema: schema(
     {
       id: { type: "string", description: "任务 id（list 为空）" },
-      kind: { type: "string", description: "sh=命令任务 / subsession=子会话运行" },
-      status: { type: "string", description: "命令任务：running/done/failed/killed/timed_out/lost；子会话：running/done/failed/cancelled" },
+      kind: { type: "string", description: "sh=命令任务 / subsession=子会话运行 / job=通用后台任务" },
+      status: { type: "string", description: "命令任务：running/done/failed/killed/timed_out/lost；子会话与后台任务：running/done/failed/cancelled" },
       exitCode: { type: "integer", description: "命令任务退出码（未知为 null）" },
       rounds: { type: "integer", description: "子会话：已执行模型回复轮次" },
       toolCalls: { type: "integer", description: "子会话：已执行工具调用次数" },
       merged: { type: "boolean", description: "子会话：报告是否已合入父会话" },
-      output: { type: "string", description: "命令任务输出尾部 / 子会话最终结果文本（done 时）" },
-      tasks: { type: "array", description: "list 的任务概要（两类合并，按启动顺序）", items: schema({ id: { type: "string" }, kind: { type: "string", description: "sh/subsession" }, status: { type: "string" }, detail: { type: "string", description: "命令或子会话名" } }, ["id", "kind", "status"]) },
+      progress: { type: "object", description: "后台任务：进度快照（phase/done/total/detail）" },
+      ref: { type: "object", description: "后台任务：业务标识（如 job_id / job_dir），用于回查产物" },
+      output: { type: "string", description: "命令任务输出尾部 / 子会话最终结果文本（done 时）/ 后台任务结果摘要" },
+      tasks: { type: "array", description: "list 的任务概要（三类合并，按启动顺序）", items: schema({ id: { type: "string" }, kind: { type: "string", description: "sh/subsession/job" }, status: { type: "string" }, detail: { type: "string", description: "命令或任务名" } }, ["id", "kind", "status"]) },
     },
     [],
   ),
@@ -290,18 +327,60 @@ export const bgTaskTool: Tool = {
     if (action === "list") {
       const shList = ctx.shTasks ? await ctx.shTasks.list() : []
       const subList = ctx.subSessions ? ctx.subSessions.list() : []
+      const jobList = ctx.bgJobs ? ctx.bgJobs.list() : []
       const merged = [
         ...shList.map((r) => ({ startedAt: r.startedAt, line: shTaskLine(r), data: { id: r.id, kind: "sh" as const, status: shTaskStatus(r), detail: r.command } })),
         ...subList.map((r) => ({ startedAt: r.startedAt, line: subSessionLine(r), data: { id: r.runId, kind: "subsession" as const, status: r.status, detail: r.name } })),
+        ...jobList.map((r) => ({ startedAt: r.startedAt, line: bgJobLine(r), data: { id: r.id, kind: "job" as const, status: r.status, detail: `${r.kind}·${r.name}` } })),
       ].sort((a, b) => a.startedAt - b.startedAt)
-      if (!merged.length) return { output: "本会话暂无后台任务（用 sh async:true 或 subsession_run async:true 启动）。", data: { tasks: [] } }
+      if (!merged.length) return { output: "本会话暂无后台任务（用 sh async:true、subsession_run async:true 或 triage_run mode=async 启动）。", data: { tasks: [] } }
       return {
-        output: `本会话后台任务（${merged.length} 个，按启动顺序——t 开头为命令任务、s 开头为子会话运行）:\n${merged.map((t) => t.line).join("\n")}`,
+        output: `本会话后台任务（${merged.length} 个，按启动顺序——t 开头为命令任务、s 开头为子会话运行、j 开头为通用后台任务）:\n${merged.map((t) => t.line).join("\n")}`,
         data: { tasks: merged.map((t) => t.data) },
       }
     }
     const id = String(args.id ?? "")
-    if (!id) return { output: "缺少任务 id（status/wait/stop 需要传启动时返回的 taskId/runId；列清单用 action=list）。" }
+    if (!id) return { output: "缺少任务 id（status/wait/stop 需要传启动时返回的 taskId/runId/jobId；列清单用 action=list）。" }
+
+    // 通用后台任务分支（id 前缀 j）：进程内异步任务（如两级研判整批）——进度/摘要/协作取消
+    if (id.startsWith("j")) {
+      const jobs = ctx.bgJobs
+      if (!jobs) return { output: "当前环境不支持通用后台任务（bgJobs 服务未注入——嵌套深度已达上限？）。" }
+      const missing = `未找到后台任务: ${id}（jobId 以启动工具的返回为准，形如 jXXXXXXXX；查现有任务用 action=list）。`
+      if (action === "finish") {
+        return { output: `后台任务（j 前缀）不支持快速结束——它不是模型会话，没有可收敛的对话：想停止用 action=stop（协作中止，已落盘的部分结果保留在产物目录）。` }
+      }
+      if (action === "stop") {
+        const rec = await jobs.cancel(id)
+        if (!rec) return { output: missing }
+        if (rec.status === "running") {
+          return { output: `${bgJobLine(rec)}\n（终止指令已下达，任务体仍在收尾——稍后用 action=status 确认。）`, data: { id, kind: "job", status: rec.status, progress: rec.progress, ref: rec.ref } }
+        }
+        return {
+          output: `${bgJobLine(rec)}\n（已终止；已落盘的部分结果保留在产物目录${rec.ref?.job_dir ? `：${rec.ref.job_dir}` : ""}）`,
+          data: { id, kind: "job", status: rec.status, progress: rec.progress, ref: rec.ref, output: rec.summary },
+        }
+      }
+      if (action === "wait") {
+        const rec = await jobs.wait(id, shTaskWaitMs(args.timeout))
+        if (!rec) return { output: missing }
+        if (rec.status === "running") {
+          return {
+            output: `${bgJobLine(rec)}\n（等待超时仍在运行；可再次 wait、用 status 查询进度，或 stop 终止。）`,
+            data: { id, kind: "job", status: rec.status, progress: rec.progress, ref: rec.ref },
+          }
+        }
+        const text =
+          rec.status === "done"
+            ? `${bgJobLine(rec)}\n结果摘要: ${rec.summary ?? "（无摘要；完整结论见产物目录）"}`
+            : `${bgJobLine(rec)}${rec.error ? `: ${rec.error}` : ""}`
+        return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "job", status: rec.status, progress: rec.progress, ref: rec.ref, output: rec.summary } }
+      }
+      // status
+      const rec = jobs.get(id)
+      if (!rec) return { output: missing }
+      return { ...(await truncate(bgJobLine(rec), "bg_task", ctx)), data: { id, kind: "job", status: rec.status, progress: rec.progress, ref: rec.ref, output: rec.summary } }
+    }
 
     // 命令任务分支（id 前缀 t）：状态/输出尾部/进程树终止，磁盘落盘跨重启可见
     if (id.startsWith("t")) {
@@ -379,7 +458,7 @@ export const bgTaskTool: Tool = {
       return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "subsession", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls, output: rec.output, merged: rec.merged } }
     }
 
-    return { output: `未找到后台任务: ${id}（命令任务 taskId 以 sh async:true 返回为准（t 开头）、子会话 runId 以 subsession_run 返回为准（s 开头）；查现有任务用 action=list）。` }
+    return { output: `未找到后台任务: ${id}（命令任务 taskId 以 sh async:true 返回为准（t 开头）、子会话 runId 以 subsession_run 返回为准（s 开头）、后台任务 jobId 以 triage_run mode=async 等返回为准（j 开头）；查现有任务用 action=list）。` }
   },
 }
 

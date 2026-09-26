@@ -28,6 +28,8 @@ export type ToolContext = ContractToolContext & {
   shTasks?: import("../exec/sh-tasks").ShTaskService
   /** 子会话运行服务（subsession_run 工具；sync/async 同径，引擎按上下文注入父子视图）。 */
   subSessions?: import("../session/subsessions").SubSessionService
+  /** 通用后台任务视图（BG_task 的 j 前缀；引擎按会话注入——工具可启动/查询/取消本会话的异步任务）。 */
+  bgJobs?: import("../session/jobs").BackgroundJobRegistry
   /** 子会话向父会话合入/拉取（subsession_merge 工具；仅异步子会话运行上下文注入）。 */
   subSessionMerge?: (content?: string) => Promise<string>
   /** 后端渲染图表源码为 PNG 字节（show 图表分支 render=backend 时用）。 */

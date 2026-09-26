@@ -17,6 +17,7 @@ import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, b
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
 import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, type SubSessionFinishOptions, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionFinishGraceMs, subSessionNoticeHead, requestSubSessionFinish } from "../session/subsessions"
+import { BackgroundJobRegistry, type BgJobStore } from "../session/jobs"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
 import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -349,6 +350,21 @@ export class AgentEngine {
    *  「执行新会话」与「并行分支」两种形态，sync/async 同径（同步=启动后等待、异步=后台）。
    *  运行存活与本进程绑定（重启即中断，不落盘恢复）；SubSessionRegistry 为按视角过滤的薄视图。 */
   private subSessionStore = new Map<string, SubSessionHandle>()
+
+  /**
+   * 通用后台任务句柄（进程内，引擎级共享；DESIGN「后台任务」第三类）：与子会话同一分层方式——
+   * 进程级 store + 按会话过滤的薄视图（`BackgroundJobRegistry`）。服务重启即消失；
+   * 权威进度在被调方自己落盘的产物（如 triage 的 job.json）。
+   */
+  private bgJobStore: BgJobStore = new Map()
+
+  /**
+   * 供非会话通道（REST 接口等）使用的后台任务视图：`scope` 为会话 id 或调用方自定义作用域
+   * （REST 侧传 `api:<user>`，与任何会话隔离，避免跨用户/跨通道看到对方运行记录）。
+   */
+  backgroundJobs(scope: string): BackgroundJobRegistry {
+    return new BackgroundJobRegistry(this.bgJobStore, scope)
+  }
 
   /** 父会话合并队列（DESIGN「子会话运行」）：sessionId → 待合入父上下文的子会话报告消息（继承上下文形态）。
    *  子会话完成/阶段性合入时入队；runLoop 在工具批处理边界排空（tool 结果之后追加，保持 tool_calls 配对完整，
@@ -1771,6 +1787,9 @@ private activeSchemas(sessionId: string) {
         // 原因（含 loadErrors 附因）；已装载（幂等重装）视为成功不抛
         if (!self.opts.subAgents.isLoaded(String(name))) throw new Error(self.opts.subAgents.unknownAgentError(String(name)))
       },
+      // 通用后台任务（bg_task 的 j 前缀）：本视图绑定当前会话——工具在本上下文启动的异步任务
+      // 只能被本会话看到/控制（跨会话不可见）；任务体在进程内跑，服务重启即消失（权威进度在产物）。
+      bgJobs: new BackgroundJobRegistry(self.bgJobStore, sessionId),
       // 子会话运行服务（subsession_run 工具，DESIGN「子会话运行」）：一套注册表覆盖「执行新会话」（隔离
       // 上下文）与「并行分支」（继承上下文）两种形态；本视图绑定当前上下文（live messages 为 fork 源、当前
       // 工具面为 fork 工具面快照、当前深度为嵌套基准），子会话内可再派生子会话（进程树，深度上限 SUBAGENT_DEPTH）。
@@ -1788,7 +1807,21 @@ private activeSchemas(sessionId: string) {
               await self.opts.subAgents.refreshIfChanged().catch(() => {})
               return self.normalizeRunAgents(spec.agents, depth + 1)
             },
-            runner: (spec, runSignal, forkMessages, archiveHolder) => self.runSubSession(sessionId, user, env, spec, runSignal, forkMessages, opts.registry ?? self.opts.registry, archiveHolder),
+            // 子会话 env：按 spec 的 envMode 计算有效 env 再交给 runSubSession——env 同时决定子会话的
+            // 工具可见环境与 **Provider 解析**（runSubSession 内 resolveProvider(env)），因此自定义项
+            // （如 GEBAI_LLM_API_BASE / GEBAI_LLM_MODEL）能把子会话真正指向另一个端点或模型。
+            // inherit（缺省）= 父任务 env + 自定义项；clear = 仅自定义项（命令子进程的 OS 基线仍由执行层合并，不受影响）。
+            runner: (spec, runSignal, forkMessages, archiveHolder) =>
+              self.runSubSession(
+                sessionId,
+                user,
+                spec.envMode === "clear" ? { ...spec.env } : { ...env, ...spec.env },
+                spec,
+                runSignal,
+                forkMessages,
+                opts.registry ?? self.opts.registry,
+                archiveHolder,
+              ),
             // 报告合入父会话：继承上下文形态（fork）经此回调入合并队列/落盘（异步子会话晚于父任务结束时直接落盘）；
             // 隔离形态不经此路径（结果由工具返回值 / bg_task 交付）
             onDone: (handle) => self.mergeToParent(sessionId, user, env, handle, { final: true, content: handle.output ?? "" }),

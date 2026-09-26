@@ -1911,11 +1911,11 @@ describe("global tools", () => {
       subSessions: {
         start: async (specs) => {
           lastInput = specs[0].input
-          return specs.map((sp, i) => ({ runId: `s${i}`, sessionId: "s1", name: sp.name, input: sp.input, agents: sp.agents, ...(sp.model ? { model: sp.model } : {}), inheritContext: sp.inheritContext, async: sp.async, depth: 1, startedAt: 0, status: "done" as const, finishing: false, rounds: 1, toolCalls: 0, merged: sp.inheritContext, output: `result|${sp.input}` }))
+          return specs.map((sp, i) => ({ runId: `s${i}`, sessionId: "s1", name: sp.name, input: sp.input, agents: sp.agents, ...(sp.model ? { model: sp.model } : {}), envMode: sp.envMode, envKeys: Object.keys(sp.env), inheritContext: sp.inheritContext, async: sp.async, depth: 1, startedAt: 0, status: "done" as const, finishing: false, rounds: 1, toolCalls: 0, merged: sp.inheritContext, output: `result|${sp.input}` }))
         },
         get: () => undefined,
         list: () => [],
-        wait: async (id) => ({ runId: id, sessionId: "s1", name: "s1", input: lastInput, agents: [], inheritContext: false, async: false, depth: 1, startedAt: 0, status: "done" as const, finishing: false, rounds: 1, toolCalls: 0, merged: false, output: `result|${lastInput}` }),
+        wait: async (id) => ({ runId: id, sessionId: "s1", name: "s1", input: lastInput, agents: [], envMode: "inherit" as const, envKeys: [], inheritContext: false, async: false, depth: 1, startedAt: 0, status: "done" as const, finishing: false, rounds: 1, toolCalls: 0, merged: false, output: `result|${lastInput}` }),
         cancel: async () => undefined,
         finish: () => undefined,
         result: (id) => ({ output: `result|${lastInput}`, archive: archive(id, lastInput) }),

@@ -25,6 +25,13 @@ export type SubSessionStatus = "running" | "done" | "failed" | "cancelled"
 /** 合入粒度：full=报告全文合入父会话（缺省）；summary=超阈值报告经模型压成要点合入（全文留过程存档）。 */
 export type SubSessionMergeMode = "full" | "summary"
 
+/** 子会话环境变量的继承模式（`env_mode`）。 */
+export type SubSessionEnvMode =
+  /** 缺省：在父任务 env 基础上叠加 `env` 自定义项（后者优先）。 */
+  | "inherit"
+  /** 不继承父任务 env，只用 `env` 自定义项。 */
+  | "clear"
+
 /** 子会话规格（normalizeSubSessionSpecs 规范化后的形态）。 */
 export interface SubSessionSpec {
   /** 展示名（缺省 s1..sN，批内唯一，≤32 字符不含空白）。 */
@@ -47,6 +54,14 @@ export interface SubSessionSpec {
   inheritGlobalPrompt: boolean
   /** 运行时限（毫秒；缺省不设限）：到时进入**快速结束**（注入收敛指令给宽限让模型输出结论，逾期强制终止）。 */
   timeoutMs?: number
+  /**
+   * 环境变量继承模式（缺省 `inherit`）：`inherit` = 父任务 env + `env`；`clear` = 仅 `env`。
+   * `clear` 清空的是**工具层可读的父任务 env**（含会话 env/任务级覆盖等 GEBAI_* 配置）；
+   * 命令子进程的 OS 基线（PATH/HOME/TEMP 等）仍由执行层自进程环境合并，不受影响。
+   */
+  envMode: SubSessionEnvMode
+  /** 子会话自定义环境变量（叠加或替换取决于 `envMode`；键已校验为标识符形式）。 */
+  env: Record<string, string>
 }
 
 /** 子会话运行快照（bg_task/subsection_run 返回给模型的形态；进度从存档活引用实时推导）。 */
@@ -57,6 +72,10 @@ export interface SubSessionRecord {
   input: string
   agents: string[]
   model?: string
+  /** 环境变量继承模式（工具层可读，便于 bg_task status 如实展示）。 */
+  envMode: SubSessionEnvMode
+  /** 已应用的自定义环境变量**键名**（值不回传——可能含密钥）。 */
+  envKeys: string[]
   inheritContext: boolean
   async: boolean
   /** 派生子会话的宿主：主任务的直接子会话为 undefined。 */
@@ -89,6 +108,8 @@ export interface SubSessionHandle {
   input: string
   agents: string[]
   model?: string
+  envMode: SubSessionEnvMode
+  env: Record<string, string>
   inheritContext: boolean
   async: boolean
   merge: SubSessionMergeMode
@@ -198,6 +219,8 @@ export function subSessionFinishGraceMs(v?: number): number {
 }
 /** 子会话名规则（缺省 s1..sN 自动命名）：任意非空白字符、≤32 字符（展示与区分用，中文名合法）。 */
 const NAME_RE = /^\S{1,32}$/u
+/** 自定义环境变量名规则（与引擎侧 validateEnvVars 同一口径）。 */
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
  * 快速结束指令（收敛提示词，注入子会话收件箱）：要求停止扩展性工作、按已有信息给出结论——
@@ -271,6 +294,8 @@ export function normalizeSubSessionSpecs(raw: {
   inherit_global_tools?: unknown
   inherit_global_prompt?: unknown
   timeout?: unknown
+  env_mode?: unknown
+  env?: unknown
 }): SubSessionSpec[] {
   const inheritContext = raw.inherit_context === true
   const async = raw.async === true
@@ -278,7 +303,18 @@ export function normalizeSubSessionSpecs(raw: {
   const inheritGlobalTools = raw.inherit_global_tools !== false
   const inheritGlobalPrompt = raw.inherit_global_prompt !== false
   const timeoutMs = timeoutMsOf(raw.timeout)
-  const shared = { inheritContext, merge, async, inheritGlobalTools, inheritGlobalPrompt, ...(timeoutMs ? { timeoutMs } : {}) }
+  const envMode = envModeOf(raw.env_mode)
+  const env = envVarsOf(raw.env, "env")
+  const shared = {
+    inheritContext,
+    merge,
+    async,
+    inheritGlobalTools,
+    inheritGlobalPrompt,
+    envMode,
+    env,
+    ...(timeoutMs ? { timeoutMs } : {}),
+  }
   const batch = Array.isArray(raw.subsessions) ? raw.subsessions : undefined
   if (batch) {
     if (raw.input !== undefined || raw.agents !== undefined) throw new Error("参数二选一：单任务形态用 input/agents，多任务形态用 subsessions（不可同时给出）")
@@ -295,7 +331,10 @@ export function normalizeSubSessionSpecs(raw: {
       if (!NAME_RE.test(name)) throw new Error(`subsessions[${i}].name 非法（${name}）：不能含空白，≤32 字符（中文名合法）`)
       if (specs.some((s) => s.name === name)) throw new Error(`子会话名批内重复: ${name}（各子会话需唯一命名以便区分报告）`)
       const model = typeof r.model === "string" ? r.model.trim() : ""
-      specs.push({ name, input, agents: strArray(r.agents), ...(model ? { model } : {}), ...shared })
+      // 每项可单独覆写环境配置（未给则沿用调用级共享值）
+      const itemEnvMode = r.env_mode === undefined ? envMode : envModeOf(r.env_mode)
+      const itemEnv = r.env === undefined ? env : envVarsOf(r.env, `subsessions[${i}].env`)
+      specs.push({ name, input, agents: strArray(r.agents), ...(model ? { model } : {}), ...shared, envMode: itemEnvMode, env: itemEnv })
     }
     return specs
   }
@@ -303,6 +342,29 @@ export function normalizeSubSessionSpecs(raw: {
   if (!input) throw new Error("缺少参数 input（单任务形态的任务指令）或 subsessions（多任务形态的任务清单）")
   const model = typeof raw.model === "string" ? raw.model.trim() : ""
   return [{ name: "s1", input, agents: strArray(raw.agents), ...(model ? { model } : {}), ...shared }]
+}
+
+/** `env_mode` 归一：只能是 `inherit` / `clear`（缺省 inherit；给其他值即报错，不静默回退）。 */
+export function envModeOf(v: unknown): SubSessionEnvMode {
+  if (v === undefined || v === null || v === "") return "inherit"
+  if (v === "inherit" || v === "clear") return v
+  throw new Error(`env_mode 取值非法（${String(v)}）：只能是 "inherit"（父任务 env + 自定义项）或 "clear"（仅自定义项）`)
+}
+
+/**
+ * 自定义环境变量归一：取值仅允许 string；名称须为标识符形式且拒绝 `__proto__`
+ * （与引擎侧 `validateEnvVars` 同一口径，非法即抛——不静默丢弃，否则模型以为设了实际没设）。
+ */
+export function envVarsOf(v: unknown, label = "env"): Record<string, string> {
+  if (v === undefined || v === null) return {}
+  if (typeof v !== "object" || Array.isArray(v)) throw new Error(`${label} 必须是对象：{"NAME": "value"}`)
+  const out: Record<string, string> = {}
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (k === "__proto__" || !ENV_NAME_RE.test(k)) throw new Error(`${label} 变量名非法: ${k}`)
+    if (typeof val !== "string") throw new Error(`${label}.${k} 必须是字符串（不设则该键不出现）`)
+    out[k] = val
+  }
+  return out
 }
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms))
@@ -372,6 +434,8 @@ export class SubSessionRegistry implements SubSessionService {
       input: h.input,
       agents: h.agents,
       ...(h.model ? { model: h.model } : {}),
+      envMode: h.envMode,
+      envKeys: Object.keys(h.env).sort(),
       inheritContext: h.inheritContext,
       async: h.async,
       ...(h.parentRunId ? { parentRunId: h.parentRunId } : {}),
@@ -426,6 +490,8 @@ export class SubSessionRegistry implements SubSessionService {
         input: spec.input,
         agents: spec.agents,
         ...(spec.model ? { model: spec.model } : {}),
+        envMode: spec.envMode,
+        env: spec.env,
         inheritContext: spec.inheritContext,
         async: spec.async,
         merge: spec.merge,
