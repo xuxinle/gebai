@@ -19,7 +19,25 @@ export interface ChatMessage {
   name?: string
 }
 
-/** 结构化输出约束（三选一，优先级 schema > grammar > json_object）。 */
+/** 工具式结构化输出：把 schema 注册为 function tool，模型**调用该工具**来产出结果。 */
+export interface OutputTool {
+  /** 工具名（缺省 `submit_result`）。 */
+  name?: string
+  /** 工具描述（缺省内置文案）。 */
+  description?: string
+  /** 未调用工具时的提醒次数上限（缺省 3；0 = 不提醒、首次未调用即失败）。 */
+  reminders?: number
+  /** tool_choice（缺省 `required` = 首次即强制调用；服务端拒绝或模型不配合时由提醒机制兜底）。 */
+  tool_choice?: "auto" | "required"
+}
+
+/** 工具式输出的缺省值（导出供子Agent 参数层与测试共用）。 */
+export const DEFAULT_OUTPUT_TOOL_NAME = "submit_result"
+export const DEFAULT_TOOL_REMINDERS = 3
+export const DEFAULT_OUTPUT_TOOL_DESCRIPTION =
+  "提交本条分析的结构化结果。你必须调用本工具来输出结论；若给定信息不足以判断，请把结果中的置信度字段填 0。"
+
+/** 结构化输出约束（四选一，优先级 output_tool > schema > grammar > json_object）。 */
 export interface StructuredOutput {
   /** JSON Schema：服务端转 GBNF 约束解码（推荐）。 */
   schema?: Record<string, unknown>
@@ -30,6 +48,12 @@ export interface StructuredOutput {
   json_object?: boolean
   /** 校验失败时把错误回灌给模型再试一次（默认 true）。 */
   retry_on_invalid?: boolean
+  /**
+   * 工具式输出：把 schema 注册为 function tool，模型必须调用它以产出结果。
+   * 与 `schema` 的 GBNF 约束解码互斥（二者同时给出时以本项为准），不依赖服务端对
+   * response_format/GBNF 的支持，在异构端点与老引擎上更通用。
+   */
+  output_tool?: OutputTool
 }
 
 /** 采样与模板调参（单条请求与批量条目共用）。 */
@@ -49,6 +73,8 @@ export interface InferRequest extends InferTuning {
   prompt?: string
   /** 系统提示（与 messages 二选一；给出时置前）。 */
   system?: string
+  /** 模型名（OpenAI 兼容端点需要 model 字段时给出；llama-server 忽略它）。 */
+  model?: string
   structured?: StructuredOutput
 }
 
@@ -76,8 +102,14 @@ export interface InferResponse {
   json_raw?: string
   /** 结构化校验/解析错误（ok=true 但有错误 = 解析成功而 schema 校验未通过）。 */
   json_errors?: string[]
-  /** 结构化来源；`none` = 未启用结构化输出。 */
-  structured_via?: "schema" | "grammar" | "json_object" | "none"
+  /** 结构化来源；`none` = 未启用结构化输出，`tool` = 工具式输出（结果取自工具调用参数）。 */
+  structured_via?: "schema" | "grammar" | "json_object" | "tool" | "none"
+  /** 工具式输出：本次被采纳的工具调用（原样保留原始参数文本，便于审计模型直出内容）。 */
+  tool_call?: { name: string; arguments_raw: string }
+  /** 工具式输出：实际消耗的提醒次数（0 = 首次即调用成功）。 */
+  tool_reminders_used?: number
+  /** 工具式输出：提醒耗尽仍未调用输出工具（本项为 true 时 ok=false，上层可据此转更强的模型兜底）。 */
+  tool_call_missing?: boolean
   usage?: InferUsage
   timings?: InferTimings
   /** 实测解码速度（token/s）：服务端 timings 优先，缺失时按墙钟估算。 */
@@ -116,6 +148,7 @@ export function normalizeMessages(req: InferRequest): ChatMessage[] {
 /** 组装 OpenAI 兼容请求体（llama-server 语义）。 */
 export function buildRequestBody(req: InferRequest): Record<string, unknown> {
   const body: Record<string, unknown> = { messages: normalizeMessages(req), temperature: req.temperature ?? 0 }
+  if (req.model) body.model = req.model
   if (req.top_p != null) body.top_p = req.top_p
   // llama.cpp 两种写法都认：max_tokens（OpenAI 兼容）与 n_predict（原生）
   if (req.max_tokens != null) {
@@ -127,6 +160,22 @@ export function buildRequestBody(req: InferRequest): Record<string, unknown> {
   if (req.enable_thinking != null) body.chat_template_kwargs = { enable_thinking: req.enable_thinking }
 
   const s = req.structured
+  // 工具式输出：schema 注册为 function tool，模型调用即产出结果（与 response_format/grammar 互斥）
+  if (s?.output_tool) {
+    const fnName = s.output_tool.name?.trim() || DEFAULT_OUTPUT_TOOL_NAME
+    body.tools = [
+      {
+        type: "function",
+        function: {
+          name: fnName,
+          description: s.output_tool.description?.trim() || DEFAULT_OUTPUT_TOOL_DESCRIPTION,
+          parameters: s.schema ?? { type: "object", additionalProperties: true },
+        },
+      },
+    ]
+    body.tool_choice = s.output_tool.tool_choice ?? "required"
+    return body
+  }
   if (s) {
     if (s.schema) {
       body.response_format = {
@@ -143,9 +192,10 @@ export function buildRequestBody(req: InferRequest): Record<string, unknown> {
 }
 
 /** 结构化约束来源（与请求体一致；无约束为 none）。 */
-export function structuredVia(req: InferRequest): "schema" | "grammar" | "json_object" | "none" {
+export function structuredVia(req: InferRequest): "schema" | "grammar" | "json_object" | "tool" | "none" {
   const s = req.structured
   if (!s) return "none"
+  if (s.output_tool) return "tool"
   if (s.schema) return "schema"
   if (s.grammar) return "grammar"
   if (s.json_object) return "json_object"
@@ -301,8 +351,17 @@ export function validateAgainstSchema(value: unknown, schema: Record<string, unk
 
 // ── 单条推理 ──────────────────────────────────────────────────────────────
 
+interface RawToolCall {
+  id?: string
+  type?: string
+  function?: { name?: string; arguments?: string }
+  /** 部分实现把 name/arguments 平铺在调用对象上。 */
+  name?: string
+  arguments?: string
+}
+
 interface RawChoice {
-  message?: { content?: string; reasoning_content?: string; role?: string }
+  message?: { content?: string; reasoning_content?: string; role?: string; tool_calls?: RawToolCall[] }
   text?: string
   finish_reason?: string
 }
@@ -357,6 +416,8 @@ function decodeTps(timings: InferTimings | undefined, usage: InferUsage | undefi
 
 /** 发一次 chat 请求（含结构化解析与「无效则回灌重试」；服务端不支持约束时自动降级 json_object）。 */
 export async function chatOnce(req: InferRequest, opts: ChatOptions): Promise<InferResponse> {
+  // 工具式输出走独立通道（提醒重试语义与「无效则回灌重试」不同，不与之纠缠）
+  if (req.structured?.output_tool) return chatWithOutputTool(req, opts)
   const fetchImpl = opts.fetchImpl ?? fetch
   const timeoutMs = opts.timeoutMs ?? 600000
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`
@@ -480,6 +541,176 @@ export async function chatOnce(req: InferRequest, opts: ChatOptions): Promise<In
   return { ok: false, content: "", reasoning: "", attempts, elapsed_ms: Date.now() - t0, structured_via: via, error: "重试后仍未取得可用响应" }
 }
 
+/**
+ * 工具式结构化输出：把 schema 注册为 function tool，模型**调用该工具**来产出结果。
+ *
+ * 与 `response_format` 约束解码的区别：不依赖服务端对 JSON Schema/GBNF 的支持（老引擎与异构端点通用），
+ * 且「调用工具」本身是模型对结论的显式声明。模型没调用工具时按 `reminders` 重新提醒；
+ * 提醒耗尽仍未调用 → `ok=false` + `tool_call_missing=true`（由上层决定是否转交更强的模型兜底）。
+ * 工具参数解析/校验不过同样计入提醒额度（每次提醒都把错误原因回灌给模型）。
+ */
+export async function chatWithOutputTool(req: InferRequest, opts: ChatOptions): Promise<InferResponse> {
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const timeoutMs = opts.timeoutMs ?? 600000
+  const url = `${opts.baseUrl.replace(/\/+$/, "")}/v1/chat/completions`
+  const t0 = Date.now()
+  const ot = req.structured?.output_tool ?? {}
+  const fnName = ot.name?.trim() || DEFAULT_OUTPUT_TOOL_NAME
+  const reminders = Math.max(0, Math.floor(ot.reminders ?? DEFAULT_TOOL_REMINDERS))
+  const schema = req.structured?.schema
+
+  let toolChoice: "auto" | "required" = ot.tool_choice ?? "required"
+  let degradedToolChoice = false
+  let messages = normalizeMessages(req)
+  let attempts = 0
+  let lastContent = ""
+  let lastReasoning = ""
+  let usage: InferUsage | undefined
+  let timings: InferTimings | undefined
+  let httpStatus: number | undefined
+  const warnings: string[] = []
+
+  const base = (extra: Partial<InferResponse> & Pick<InferResponse, "ok">): InferResponse => ({
+    content: lastContent,
+    reasoning: lastReasoning,
+    attempts,
+    elapsed_ms: Date.now() - t0,
+    structured_via: "tool",
+    usage,
+    timings,
+    http_status: httpStatus,
+    ...(warnings.length ? { warning: warnings.join("；") } : {}),
+    ...extra,
+  })
+
+  for (let round = 0; round <= reminders; round++) {
+    attempts++
+    const { signal, cleanup } = withTimeout(timeoutMs, opts.signal)
+    let res: Response
+    try {
+      res = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(opts.headers ?? {}) },
+        body: JSON.stringify(
+          buildRequestBody({
+            ...req,
+            messages,
+            prompt: undefined,
+            system: undefined,
+            structured: { ...req.structured, output_tool: { ...ot, tool_choice: toolChoice } },
+          }),
+        ),
+        signal,
+      })
+    } catch (e) {
+      cleanup()
+      const msg = (e as Error).message ?? String(e)
+      return base({
+        ok: false,
+        error: /abort/i.test(msg) ? `请求中止或超时（${timeoutMs} ms）：${msg}` : `请求失败：${msg}`,
+      })
+    }
+    cleanup()
+    const text = await res.text()
+    httpStatus = res.status
+
+    if (!res.ok) {
+      const err = errorText(res.status, text)
+      // 服务端不认 tool_choice=required（部分实现只支持 auto/none）→ 降级为 auto 重发一次，不消耗提醒额度
+      if (!degradedToolChoice && /tool_choice/i.test(err)) {
+        degradedToolChoice = true
+        toolChoice = "auto"
+        warnings.push("服务端拒绝 tool_choice=required，已降级为 auto（调用与否改由提醒机制保证）")
+        round--
+        continue
+      }
+      return base({ ok: false, error: err })
+    }
+
+    let data: RawResponse
+    try {
+      data = JSON.parse(text) as RawResponse
+    } catch {
+      return base({ ok: false, error: `响应不是合法 JSON：${text.slice(0, 200)}` })
+    }
+
+    const choice = data.choices?.[0]
+    const content = choice?.message?.content ?? choice?.text ?? ""
+    const reasoning = choice?.message?.reasoning_content ?? ""
+    lastContent = content || lastContent
+    lastReasoning = reasoning || lastReasoning
+    usage = data.usage ?? usage
+    timings = data.timings ?? timings
+
+    const calls = choice?.message?.tool_calls ?? []
+    const call = calls.find((c) => (c.function?.name ?? c.name ?? "") === fnName) ?? calls[calls.length - 1]
+    const argsRaw = call?.function?.arguments ?? call?.arguments ?? ""
+
+    if (!call) {
+      if (round < reminders) {
+        messages = [
+          ...messages,
+          ...(content ? [{ role: "assistant" as const, content: content.slice(0, 2000) }] : []),
+          { role: "user" as const, content: `你刚才没有调用输出工具 ${fnName}。必须调用该工具提交结果${schema ? "（参数需满足其 JSON Schema）" : ""}，不要在正文里回答。` },
+        ]
+        continue
+      }
+      return base({
+        ok: false,
+        tool_call_missing: true,
+        tool_reminders_used: reminders,
+        error: `模型未调用输出工具 ${fnName}（已提醒 ${reminders} 次）`,
+      })
+    }
+
+    let parsed: unknown
+    let jsonErrors: string[] | undefined
+    if (!argsRaw.trim()) {
+      jsonErrors = ["工具参数为空"]
+    } else {
+      try {
+        parsed = JSON.parse(argsRaw)
+        if (schema) {
+          const errs = validateAgainstSchema(parsed, schema)
+          if (errs.length) jsonErrors = errs.slice(0, 20)
+        }
+      } catch (e) {
+        jsonErrors = [`工具参数不是合法 JSON：${(e as Error).message}`]
+      }
+    }
+
+    if (jsonErrors?.length) {
+      if (round < reminders) {
+        messages = [
+          ...messages,
+          { role: "assistant" as const, content: `（已调用 ${fnName}：${argsRaw.slice(0, 1000)}）` },
+          { role: "user" as const, content: `上一次调用 ${fnName} 的参数无法使用：${jsonErrors.join("; ")}。请重新调用该工具，参数必须满足约定的 JSON Schema。` },
+        ]
+        continue
+      }
+      return base({
+        ok: false,
+        json_raw: argsRaw,
+        json_errors: jsonErrors,
+        tool_call: { name: fnName, arguments_raw: argsRaw },
+        tool_reminders_used: reminders,
+        error: `输出工具参数不合法（已重试 ${reminders} 次）：${jsonErrors.join("; ")}`,
+      })
+    }
+
+    return base({
+      ok: true,
+      json: parsed,
+      json_raw: argsRaw,
+      tool_call: { name: fnName, arguments_raw: argsRaw },
+      tool_reminders_used: round,
+      decode_tps: decodeTps(timings, usage, Date.now() - t0),
+    })
+  }
+
+  return base({ ok: false, tool_call_missing: true, error: `模型未调用输出工具 ${fnName}（已提醒 ${reminders} 次）` })
+}
+
 /** 探活与能力探测：/health（可用性）、/props（n_ctx、slot 数、模型路径——并发与批量的档位依据）。 */
 export interface ProbeResult {
   ok: boolean
@@ -543,6 +774,12 @@ export interface BatchResult extends InferTuning {
   reasoning?: string
   json?: unknown
   json_errors?: string[]
+  /** 工具式输出：本次被采纳的工具调用（原始参数文本）。 */
+  tool_call?: { name: string; arguments_raw: string }
+  /** 工具式输出：实际消耗的提醒次数。 */
+  tool_reminders_used?: number
+  /** 工具式输出：提醒耗尽仍未调用输出工具（上层可据此转更强的模型兜底）。 */
+  tool_call_missing?: boolean
   usage?: InferUsage
   decode_tps?: number
   error?: string
@@ -558,6 +795,8 @@ export interface BatchProgress {
 
 export interface BatchOptions {
   baseUrl: string
+  /** 模型名（远端 OpenAI 兼容端点需要 model 字段时给出）。 */
+  model?: string
   /** 并发度（缺省 1）。仅在 slot 数匹配且 prompt 较短的批量场景才有收益——并发上限按档位 parallel。 */
   concurrency?: number
   timeoutMs?: number
@@ -632,6 +871,7 @@ export async function runBatch(items: BatchItem[], opts: BatchOptions): Promise<
         seed: item.seed ?? opts.defaults?.seed,
         stop: item.stop ?? opts.defaults?.stop,
         enable_thinking: item.enable_thinking ?? opts.defaults?.enable_thinking,
+        model: opts.model,
         structured: item.structured ?? opts.structured,
       }
 
@@ -659,6 +899,9 @@ export async function runBatch(items: BatchItem[], opts: BatchOptions): Promise<
         reasoning: resp?.reasoning,
         json: resp?.json,
         json_errors: resp?.json_errors,
+        tool_call: resp?.tool_call,
+        tool_reminders_used: resp?.tool_reminders_used,
+        tool_call_missing: resp?.tool_call_missing,
         usage: resp?.usage,
         decode_tps: resp?.decode_tps,
         error: ok ? undefined : error,

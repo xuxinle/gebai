@@ -21,6 +21,7 @@ import {
   type ChatMessage,
   type InferResponse,
   type InferTuning,
+  type OutputTool,
   type ProbeResult,
   type StructuredOutput,
 } from "./api"
@@ -40,14 +41,34 @@ const envNum = (v: string | undefined): number | undefined => {
   return Number.isFinite(n) ? n : undefined
 }
 
-/** 参数 → 结构化约束（schema > grammar > json_object；都未给则 undefined = 不约束）。 */
+/** 参数 → 结构化约束（output_tool > schema > grammar > json_object；都未给则 undefined = 不约束）。 */
 function structuredFrom(args: Record<string, unknown>): StructuredOutput | undefined {
   const out: StructuredOutput = {}
   if (args.schema && typeof args.schema === "object" && !Array.isArray(args.schema)) out.schema = args.schema as Record<string, unknown>
   if (typeof args.grammar === "string" && args.grammar.trim()) out.grammar = args.grammar
   if (args.json_object === true) out.json_object = true
   if (args.retry_on_invalid != null) out.retry_on_invalid = args.retry_on_invalid !== false
-  return out.schema || out.grammar || out.json_object ? out : undefined
+  const ot = outputToolFrom(args)
+  if (ot) out.output_tool = ot
+  return out.schema || out.grammar || out.json_object || out.output_tool ? out : undefined
+}
+
+/**
+ * 参数 → 工具式输出配置（`output_tool: true` 或 `{name?, description?, tool_choice?, reminders?}`；
+ * `tool_reminders` 与 items 缺省并行）。未开启则返回 undefined（不注册输出工具）。
+ */
+function outputToolFrom(args: Record<string, unknown>): OutputTool | undefined {
+  const raw = args.output_tool
+  const isObj = Boolean(raw) && typeof raw === "object" && !Array.isArray(raw)
+  if (raw !== true && !isObj) return undefined
+  const cfg = isObj ? (raw as Record<string, unknown>) : {}
+  const ot: OutputTool = {}
+  if (typeof cfg.name === "string" && cfg.name.trim()) ot.name = cfg.name.trim()
+  if (typeof cfg.description === "string" && cfg.description.trim()) ot.description = cfg.description.trim()
+  if (cfg.tool_choice === "auto" || cfg.tool_choice === "required") ot.tool_choice = cfg.tool_choice
+  const reminders = num(args.tool_reminders) ?? num(cfg.reminders)
+  if (reminders != null) ot.reminders = Math.max(0, Math.floor(reminders))
+  return ot
 }
 
 /** 参数 → 采样调参（未给的字段不写入，交给服务端默认/批量默认）。 */
@@ -252,13 +273,19 @@ function textSections(content: string, reasoning: string, limit = 4000): string[
 /** 结构化结果的呈现（成功缩进 JSON，失败给错误与原始输出片段）。 */
 function structuredSections(r: InferResponse): string[] {
   if (!r.structured_via || r.structured_via === "none") return []
-  const out: string[] = [""]
+  const out: string[] = []
+  const via = r.structured_via === "tool" ? `工具式输出（${r.tool_call?.name ?? "工具"}，提醒 ${r.tool_reminders_used ?? 0} 次）` : r.structured_via
+  if (r.tool_call_missing) {
+    out.push("", `工具式输出未完成（${r.tool_call?.name ?? "输出工具"}）：模型始终未调用输出工具，已按提醒上限停止重试。`)
+    return out
+  }
+  out.push("")
   if (r.json_errors?.length) {
-    out.push(`结构化输出校验未通过（${r.json_errors.length} 处，约束来源 ${r.structured_via}）：`)
+    out.push(`结构化输出校验未通过（${r.json_errors.length} 处，约束来源 ${via}）：`)
     for (const e of r.json_errors.slice(0, 10)) out.push(`  - ${e}`)
     out.push("原始输出片段：", (r.json_raw ?? r.content).slice(0, 800))
   } else {
-    out.push(`结构化输出（约束来源 ${r.structured_via}）：`)
+    out.push(`结构化输出（约束来源 ${via}）：`)
     out.push(JSON.stringify(r.json, null, 2).slice(0, 4000))
   }
   return out
@@ -273,7 +300,9 @@ const generate: Tool = {
     '向推理目标提交一条推理任务并取回结果（OpenAI 兼容 /v1/chat/completions）：缺省打本机受管服务，' +
     '也可用 target 指向局域网另一台机器或云端 OpenAI 兼容端点（target="http://host:port" 或 LOCAL_INFER_TARGETS 里声明的目标名）。支持 messages 或单轮 prompt；' +
     "传入 schema（JSON Schema，服务端转 GBNF 约束解码）、grammar（GBNF 语法）或 json_object 可得结构化输出，工具侧做解析与校验，" +
-    "校验不过会把错误回灌给模型重试一次（retry_on_invalid=false 可关）。返回正文（content）、思维链（reasoning_content）、实测解码速度与结构化结果。" +
+    "校验不过会把错误回灌给模型重试一次（retry_on_invalid=false 可关）；output_tool=true 改用**工具式输出**——把 schema 注册为 function tool、" +
+    "模型必须调用它产出结果，未调用则按 tool_reminders（缺省 3）重新提醒，耗尽即失败（tool_call_missing=true）——不依赖服务端 JSON 约束支持，异构端点更通用。" +
+    "返回正文（content）、思维链（reasoning_content）、实测解码速度与结构化结果。" +
     "推理型模型（如 Qwen-AgentWorld）的思维链可占输出九成以上，批量/工具类任务建议 enable_thinking=false；单次调用会占用算力数十秒到数分钟。免审批（不改变服务状态）。",
   parameters: schema({
     prompt: { type: "string", description: "单轮输入（与 messages 二选一）" },
@@ -292,6 +321,14 @@ const generate: Tool = {
     grammar: { type: "string", description: "GBNF 语法文本（llama.cpp 原生约束；注意与 -bs 后端采样不兼容，会回退 CPU 采样）" },
     json_object: { type: "boolean", description: "仅要求合法 JSON（不约束结构；schema 不可用时的降级手段）" },
     retry_on_invalid: { type: "boolean", description: "结构化校验失败时把错误回灌给模型重试一次（缺省 true）" },
+    output_tool: {
+      type: "boolean",
+      description:
+        "工具式结构化输出（缺省关）：把 schema 注册为 function tool，模型必须**调用该工具**来产出结果（缺省工具名 submit_result）。" +
+        "与 schema 的 GBNF 约束解码互斥，不依赖服务端对 response_format/GBNF 的支持，在异构端点与老引擎上更通用；" +
+        "「调用工具」本身即模型对结论的显式声明。未给 schema 时接受任意对象参数。",
+    },
+    tool_reminders: { type: "number", description: "工具式输出：模型未调用输出工具时的提醒次数上限（缺省 3；0 = 首次未调用即失败，失败信息见返回的 tool_call_missing）" },
     port: { type: "number", description: "本机服务端口（只对缺省的本机目标有意义；缺省按状态文件 / LOCAL_INFER_PORT / 8080）" },
     timeout_ms: { type: "number", description: "单条请求超时毫秒数（缺省 600000，本地模型很慢，勿设得过小）" },
     target: {
@@ -362,6 +399,9 @@ const generate: Tool = {
         json: resp.json,
         json_errors: resp.json_errors,
         structured_via: resp.structured_via,
+        tool_call: resp.tool_call,
+        tool_reminders_used: resp.tool_reminders_used,
+        tool_call_missing: resp.tool_call_missing,
         usage: resp.usage,
         timings: resp.timings,
         decode_tps: resp.decode_tps,
@@ -472,6 +512,13 @@ const batch: Tool = {
     schema: { type: "object", description: "全批默认的 JSON Schema（条目可自带 structured 覆盖）" },
     grammar: { type: "string", description: "全批默认的 GBNF 语法" },
     json_object: { type: "boolean", description: "全批仅要求合法 JSON" },
+    output_tool: {
+      type: "boolean",
+      description:
+        "工具式结构化输出（缺省关）：把 schema 注册为 function tool，模型必须调用它来产出结果——不依赖服务端 GBNF/response_format 支持，" +
+        "且调用与否本身就是可审计的证据；未调用时按 tool_reminders 重新提醒，耗尽则该条失败（tool_call_missing=true）。",
+    },
+    tool_reminders: { type: "number", description: "工具式输出：未调用输出工具时的提醒次数上限（缺省 3；0 = 首次未调用即失败）" },
     concurrency: { type: "number", description: "并发度（缺省 1；会与档位 parallel 比对并夹取）" },
     retries: { type: "number", description: "单条失败后的重试次数（缺省 0；结构化校验不过也算失败）" },
     timeout_ms: { type: "number", description: "单条请求超时毫秒数（缺省 600000）" },
@@ -621,7 +668,7 @@ const batch: Tool = {
       done: 0,
       failed: 0,
       skipped,
-      structured: Boolean(args.schema || args.grammar || args.json_object),
+      structured: Boolean(args.schema || args.grammar || args.json_object || args.output_tool),
       started_at: now,
       updated_at: now,
       results_file: resultsPath,
@@ -695,7 +742,7 @@ const batch: Tool = {
     const commonNotes = (structuredFail?: number): string[] => {
       const out: string[] = []
       if (state.structured) {
-        const via = args.schema ? "schema" : args.grammar ? "grammar" : "json_object"
+        const via = args.output_tool ? "output_tool（工具调用）" : args.schema ? "schema" : args.grammar ? "grammar" : "json_object"
         out.push(`结构化输出：已启用（约束 ${via}）${structuredFail != null ? `｜解析/校验失败 ${structuredFail} 条` : ""}`)
       }
       if (datasetChanged) out.push("注意：本次输入数据集与任务目录中留存的 items.jsonl 不同（仍按 id 续跑；如需全新任务请换 job_id）。")

@@ -1378,6 +1378,35 @@ export const preload = false
 - **环境变量**：`TORCH_TRACE_PROJECT`（默认工程根，用于 trace 路径与源码定位基准）。
 - **预加载**：`preload = false`，按需装载；与 `nsight` 同时装载时各自工具面完整可用。
 
+#### `triage`（两级研判：小模型批量粗筛 + 大模型引擎精审兜底）
+
+实现于 `packages/agents/src/agents/triage/`（`triage.ts` 定义入口 + `triage.md` 系统提示词），编排逻辑在 `packages/agents/src/core/triage/`（`pipeline.ts` 管线 + `types.ts` 契约）——**与 REST 接口（`POST /api/v1/triage/analyze`）共用同一份实现**（同 `core/tts` 的「共用逻辑 + 执行通道注入」范式），两侧差异只在 L2 执行器的注入方式：会话内派隔离子会话，REST 侧走 Agent 引擎会话。
+
+场景无关的「先快速分流、再重点深挖」模式：整体成本 = 廉价的 O(N) + 昂贵的 O(k)，k ≪ N。
+
+```
+条目集合（N 条）→ L1 小模型批量粗筛（结构化 + 置信度）
+                    │  按阈值/证据分流
+                    ▼
+                 L2 大模型精审（装领域工具主动取证，输出证据链）
+```
+
+- **工具**：`triage_run`（跑一轮：条目数组或条目文件 + 结果 schema + 阈值 + L1/L2 配置 → 统一形态逐条结果）、`triage_view`（读产物目录看汇总/逐条/未定案：`status`|`results`|`failed`）
+- **L1 输出通道（工具式结构化输出）**：schema 注册为 function tool（缺省 `submit_result`），模型**必须调用该工具**产出结果——不依赖服务端对 `response_format`/GBNF 的支持（异构端点与老引擎通用），且「调用与否」本身是可审计证据；未调用时按 `tool_reminders`（缺省 3）重新提醒，参数不合法则回灌错误重试，**提醒耗尽仍未调用 → 该条失败并带 `tool_call_missing`、强制转 L2**（采集失败的条目往往最难，不能丢）。实现在 `local_infer/api.ts` 的 `chatWithOutputTool`（`generate`/`batch` 的 `output_tool` 参数同源）
+- **schema 信封**：调用方 schema 描述业务结果；顶层未含 `confidence` 时自动外包 `{result, confidence, reason, evidence_index}`，已含则原样使用；`label_enum` 注入业务 schema 的 `label.enum`
+- **分流规则**（`classifyL1`）：白名单标签命中 → 采纳；未取到结论（未调用工具/解析失败/请求失败）→ 进 L2；置信度 0 或 < 阈值 → 进 L2；无有效证据 → 进 L2。**证据质量下限**（`min_evidence_chars`，缺省 6 字符，0 = 关闭）：至少一条证据达该长度才算有效——挡住弱模型把「任务失败」这类无信息量文本当证据、以高置信度击穿「证据非空」防线（实测 1.5B 会这么做）
+- **L2 精审**：注入 L1 初判/判据/证据索引 + 原始信息，要求主动调用领域工具取证、允许明确输出「证据不足」并给待查清单、可推翻或修正 L1；输出 = 同业务结果 + `evidence_chain`（工具名 + 关键发现原文）/`revised`/`action`。**精审铁律随提示词前置送达**（子会话与引擎会话各自带自己的系统提示，不前置会丢失「取证/允许说证据不足」约定）。**id 回填抗改写**：条目块只给 `id=xxx`（不再另加序号，否则模型会把序号当 id 回填），且解析侧有**位置对齐兜底**（无任何 id 命中 + 条数一致时按序回填；条数也不一致则如实报错而不猜）
+- **落盘与续跑**：`{GEBAI_HOME}/users/{user}/triage/{job_id}/` 下 `items.jsonl`/`l1.jsonl`/`l2.jsonl`（精审原始输出）/`results.jsonl`（统一逐条结果）/`job.json`（状态 + 汇总 + 选项快照）；同 `job_id` 再次调用**复用已有 L1 结果**（断点续跑）。结果含 `layer`（L1/L2）/`confidence`/`evidence_index`/`evidence_chain`/`revised`/`action`/`l1`（初判留档，供校准对比）
+- **L2 限界**：`l2_max_items`（缺省 20，超出部分标「待精审」返回，可带更大值续跑）、`l2_batch_size`（缺省 5，按轮精审）、`l2_timeout_ms`（缺省 600000）；超时走**收尾**而非硬杀（子会话快速结束 / REST 侧 `engine.windDown`）
+- **L2 执行形态**：会话内派**隔离子会话**（`inheritContext:false`，不污染父会话，`merge:summary`）；REST 侧 `engine.run` 跑一轮完整会话（领域工具经提示词引导装载）。两者都支持 `l2_model`（路由名/字面模型名）与端点覆盖，「远端大模型兜底」在两条通道上都可指定
+- **实测要点（跨场景成立）**：
+  - **思考链是 L1 的天敌**：推理型模型开着 thinking 会把输出预算吃光导致正文为空，故 `enable_thinking=false` 为缺省
+  - **小模型会过度触发「信息不足」**：默认提示词正反两面都写（有线索 → 0.8~0.95 并抄证据；确实无线索 → 0）——只强调后者时 1.5B 会把「没有额外数据」误判为信息不足，对 OOM 这类明确报错也给 0
+  - **L1 能力决定这套模式是否成立**：同一批 3 条，1.5B/CPU 用 56.3s 且全部给 0（全量溢到 L2，成本结构失效）；35B 用 4.6s、2 条正确采纳（OOM/代码退出 conf=1）、对信息量为零的条目如实给 0 转 L2
+- **REST 接口**：`POST /api/v1/triage/analyze`（body：`items` 或 `items_file` + `schema`/`label_enum`/`threshold`/`min_evidence_chars`/`accept_labels` + `l1{}`/`l2{}`；`mode=async` 立即返回 job_id）、`GET /api/v1/triage/jobs/:id`（进度/汇总）、`GET /api/v1/triage/jobs/:id/results`（逐条，可按 `layer`/`only=ok|failed` 过滤）。每用户限流（10 突发 / 2 每秒）
+- **免审批**：两个工具都不改变服务状态（发请求、派生会话、写产物目录）；`triage_view` 声明 `safeMode`
+- **预加载**：`preload = false`，按需装载。
+
 #### 命名与预加载总览
 
 | 子Agent | 工具 | 审批 | 预加载 | 适用 |
@@ -1400,6 +1429,7 @@ export const preload = false
 | `nsight` | doctor/reports/overview/kernels/timeline/query/findings/compare/kernel_detail/locate/capture + aggregate（客卿 Rust 边车贡献的原生聚合后端；报告路径类工具带 project 参数；全部分析只读） | capture（执行被分析程序） | ✗ | NVIDIA Nsight 报告分析与 GPU 性能问题定位（Nsight Systems 时间线 + Nsight Compute 单内核）：报告 → 问题清单（量化证据 + 根因 + 修复方向）→ 源码 `文件:行`；**多卡按 deviceId 分流**（每卡利用率/空闲/并发 + 不均衡诊断，合并口径会掩盖单卡停滞）；memset 计入 GPU 活动；采集开销按窗口内外区分；CUDA Graph 维度；参数化时间窗；**报告间对比**（改前改后）；结果可导出 Markdown；超大报告流式聚合 + 事实缓存（内存与规模解耦）；聚合有原生（Rust 边车）/ JS 两条同构实现，原生优先、不可用即自动回退；ncu 采集需 GPU 性能计数器权限（工具前置探测并给出开启方法），nsys 采集与报告分析不需要 |
 | `torch` | reports/overview/ops/memory/findings/compare/capture（→ `torch_reports`/`torch_overview`/`torch_ops`/`torch_memory`/`torch_findings`/`torch_compare`/`torch_capture`）**+ aggregate（客卿 Rust 边车贡献的原生聚合后端）**；trace 路径类工具带 project 参数；除 `capture mode=run` 外只读 | `capture mode=run`（执行被分析脚本） | ✗ | PyTorch Profiler trace（Chrome Trace / Kineto）分析与代码定位：trace → 算子/内核热点（含自身耗时与张量形状）· 步级耗时与抖动 · **前向/反向拆分（fwdbwd 配对）** · **内核→发起算子归属（correlation + ac2g 流）** · 显存峰值与碎片率 · 问题清单（同步/CPU 受限/Python/碎片化/autograd/小内核/显存/精度与布局）→ 源码 `文件:行`；**原生聚合后端**（整文件读入 + 字节级扫描，实测 4.7–13× 于 JS、峰值内存约为 1× 文件大小，且逐字段一致；不可用时自动回退 JS 并如实回报原因）；**分块并行**（rayon 分块采集 + 有序归并，实测 224 MB/94 万事件 1.5×、672 MB/279 万事件 1.59×，`TORCH_NATIVE_THREADS` 可调/可关，逐字段一致由同二进制改块数的 A/B 锁定）；**时间预算 + 落盘事实缓存**（超预算返回未完成 + 后台命令，跑完再调毫秒级命中）；**trace 间对比**（改前改后）与结果导出 Markdown；超大 trace 流式扫描 + 缓存；与 `nsight` 零互相引用、可同时装载（Windows 上 PyTorch CUPTI 采集不可用，GPU 内核级时间线由 `nsight` 的 nsys 采集补齐） |
 | `local_infer` | engines/engine_fetch/model_fetch + **sources/source_build（内网源码编译）** + status/models/start/stop/restart/logs/bench/inspect + targets/generate/batch/jobs（→ `local_infer_engines`/`local_infer_engine_fetch`/`local_infer_model_fetch` + `local_infer_sources`/`local_infer_source_build` + `local_infer_status`/`local_infer_models`/`local_infer_start`/`local_infer_stop`/`local_infer_restart`/`local_infer_logs`/`local_infer_bench`/`local_infer_inspect` + `local_infer_targets`/`local_infer_generate`/`local_infer_batch`/`local_infer_jobs`） | start+stop+restart+bench+engine_fetch+model_fetch+source_build | ✗ | 推理引擎的**全生命周期管理 + 统一调用入口**（子项目 `infer/`）——**推理不绑定操作系统、不绑定 GPU、不强制外网**（引擎矩阵覆盖 Windows/Linux/macOS × CPU/CUDA/Vulkan/Metal/ROCm/SYCL；无 GPU 用 CPU 档 + 小模型；**无外网用源码就地编译**）：**引擎供给**（`engines` 列矩阵×本机平台×已安装状态并给设备探测依据，`engine_fetch` 按资产直下（断点续传 + 校验 + 解压 + **递归定位可执行文件** + 写 `.engine.json` 标记）、`model_fetch` 下载模型（含预置小模型，幂等））；**内网/离线：源码发现与自动编译**（`sources` 发现 `{GEBAI_HOME}/resources/src/` 等根下的源码目录/归档并给离线可行性依据（归档预览：CMakeLists、**是否自带 vendor/ 依赖**——采样会假阴性故全量过滤）、`action=toolchain` 给工具链与各设备就绪 + 内网补齐办法（含各工具绝对路径，便携工具链不必改 PATH）；`source_build` 解压 → 工具链与设备门禁 → cmake 配置 → 编译 → 定位 llama-server → 安装到 `vendor/<engine-id>/bin/`（解引用符号链接）→ 写同格式标记（额外记 `build.{from_source,device,offline,log}`）；`background=true` 后台编译，`status/log/list/cancel` 管理；预编译包需外网，内网走这条）；**进程管理**（跨平台 launcher 为缺省启动路径——detached 拉起 + 日志重定向 + `/health` 就绪轮询，**不依赖 PowerShell**；状态文件 `infer/run/server-<port>.json` 记 PID/档位/模型/引擎/启动方式/日志/argv，status 逐个校验 PID 存活，stop 可按 PID/端口/档位精确终止进程树，restart 换档位/换模型/换引擎，logs 尾读日志并给错误特征摘要；Windows 无引擎时回退 `run-server.ps1`）；**统一推理目标**（`targets` 列本机/命名远端目标并可探活（n_ctx/slot/模型名），`generate`/`batch` 的 `target` 可选本机、直连 URL（可带 api_key）或 `LOCAL_INFER_TARGETS` 声明的命名目标——同一套调用面可派到本机 CPU 引擎、局域网机器或云端兼容端点，密钥一律掩码）；**批量提交**（条目数组或 JSONL、worker pool 限流（与档位 `parallel`/服务端 slot 比对）、逐条 append 落盘、按 id 断点续跑、`max_items` 分片，`background=true` 后台跑并立即返回 job_id，`jobs` 从 results.jsonl 实时统计并按 `owner_pid` 探活）；**结构化输出**（`response_format.json_schema` 交服务端转 GBNF 约束解码，工具侧再抽取 + 轻量 Schema 校验，失败回灌重试一次；`grammar` 直传兜底、`json_object` 最弱，服务端不认约束时自动降级并给预警）、模型与档位清单、llama-bench 基准、GGUF 结构与张量布局解析；工具复用子项目配置与脚本不复制逻辑；环境变量 `LOCAL_INFER_HOME`/`LOCAL_INFER_PROFILE`/`LOCAL_INFER_PORT`/`LOCAL_INFER_MODELS_DIR`/`LOCAL_INFER_TIMEOUT_MS`/`LOCAL_INFER_BATCH_MAX_ITEMS`/`LOCAL_INFER_TARGETS`/`LOCAL_INFER_REMOTE_API_KEY`/`LOCAL_INFER_LAUNCH`/`LOCAL_INFER_SOURCE_DIRS` |
+| `triage` | run/view（→ `triage_run`/`triage_view`） | 无（会话内产物落盘；view 支持安全模式） | ✗ | 通用的大小模型协同（两级研判）：小模型批量粗筛（工具式结构化输出 + 置信度）→ 阈值/证据分流 → 低置信度条目交大模型精审兜底（会话内派隔离子会话、REST 侧走 Agent 引擎会话，均可装载领域子Agent 主动取证）；场景无关，接新场景只需把领域数据转成统一特征描述（详见上方 `triage` 节） |
 
 #### 客卿（多语言子代理：边车协议 + 自动发现启动注册）
 
@@ -2737,6 +2767,9 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/sessions/:id/choice` | POST | 选择决策（ask 选项询问分支等待的用户回应，body: choiceId + option 单选 / options 数组多选 / refuse=true 拒绝，option、options、refuse 至少其一，options 不得为空） |
 | `/api/v1/sessions/:id/draw` | POST | 画图渲染结果回传（show 图表分支等待的前端渲染结果，body: renderId + ok + error） |
 | `/api/v1/feedback` | POST/GET | 提交/查询反馈（提交自动补 model/subAgent 关联；管理员 GET 可查全部用户并导出分析） |
+| `/api/v1/triage/analyze` | POST | **两级研判**（小模型批量粗筛 → 低置信度交 Agent 引擎精审兜底）：body `items`（或 `items_file`）+ `schema`/`label_enum`/`threshold`/`min_evidence_chars`/`accept_labels` + `l1{base_url,api_key,model,system,prompt_template,concurrency,max_tokens,reminders,timeout_ms,enable_thinking}` + `l2{enabled,agents,model,api_base,api_key,max_items,batch_size,timeout_ms}`；`mode=async` 立即返 202 + job_id；同步返 `{job_id, job_dir, state, summary, total, results}`。每用户限流（10 突发 / 2 每秒） |
+| `/api/v1/triage/jobs/{id}` | GET | 研判任务进度/汇总（未完成时按 l1.jsonl 行数报进度；`?job_dir=` 可指定目录） |
+| `/api/v1/triage/jobs/{id}/results` | GET | 研判任务逐条结果（`?layer=L1|L2`、`?only=ok|failed`、`?limit=`；全量始终在产物目录的 results.jsonl） |
 | `/api/v1/sessions/:id/env` | GET/PUT | 获取/设置会话环境变量（内存态，不落盘） |
 | `/api/v1/sessions/:id/compact` | POST | 主动压缩会话上下文（body 可指定范围） |
 | `/api/v1/sessions/:id/todos` | GET | 获取会话待办清单 |
@@ -3253,6 +3286,9 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | js 动态工具源码上限 | 100k 字符 | execute 源码长度上限（`JS_DYNAMIC_SOURCE_CAP`，源码随会话持久化，防撑爆 chat.json） |
 | js 动态工具名 | `[a-z][a-z0-9_]{0,39}` | 运行时定义工具命名约束（与全局工具命名一致，`DYNAMIC_TOOL_NAME_RE`）；execute 源码 ≤ 2000 字符描述 |
 | sh/py 结构化 data 文本上限 | 100k 字符 | `data.stdout`/`data.stderr` 超长截断（完整文本以 output 截断文件为准，`SCRIPT_DATA_TEXT_CAP`） |
+| 两级研判 L1 默认上限 | 阈值 0.85 / 证据下限 6 字符 / 提醒 3 次 / max_tokens 300 / 并发 1 | `core/triage` 缺省：置信度阈值（`TRIAGE_DEFAULT_THRESHOLD`）、证据质量下限（`TRIAGE_DEFAULT_MIN_EVIDENCE_CHARS`，挡住「任务失败」这类无信息量证据）、未调用输出工具的提醒上限（`DEFAULT_TOOL_REMINDERS`）、L1 单条输出 token（`TRIAGE_DEFAULT_L1_MAX_TOKENS`）、L1 并发（`TRIAGE_DEFAULT_CONCURRENCY`，仅短 prompt + slot 匹配时才有收益） |
+| 两级研判 L2 默认上限 | 精审 20 条 / 每轮 5 条 / 超时 600s | `l2_max_items`（超出部分标「待精审」返回，可续跑）、`l2_batch_size`（按轮精审，避免一次提示词过长）、`l2_timeout_ms`（超时走收尾而非硬杀） |
+| 研判 RPC 批上限 | 8 条/次 | 单次 `ctx.subSessions.start` 派生子会话数上限（`SUBSESSION_MAX_PER_CALL`）——L2 精审按 batchSize 分批即受此约 |
 | 后端图表渲染超时 | 20 秒（仅 plantuml） | `feishu-bot/plantuml.ts` 的 `PLANTUML_TIMEOUT_MS`（可注入）——**mermaid 与 d2 的后端渲染无超时**（`core/support/diagram-render.ts` 直接 await；20 秒超时只在前端本地渲染侧，见下行） |
 | 后端图表输出尺寸上限 | 1600 × 2400 px | 后端渲染默认 2x 超采样，超出按比例缩放到该上限（防超大 PNG 超飞书图片限制；`DEFAULT_MAX_WIDTH`/`DEFAULT_MAX_HEIGHT`） |
 | 图表语言 | `mermaid` / `plantuml` / `d2` / `echarts` | show 图表分支 `format` 参数四取值（SDK `DiagramFormat`，缺失/非法立即报错）；产物扩展名 `.mmd`/`.puml`/`.d2`/`.echarts`；前端本地渲染与后端组合渲染器（飞书/`render=backend`）均四语言全支持；echarts 源码为 option 的严格 JSON（双引号，容错注释/尾逗号）；服务端合法值域单点真相在 `artifacts.ts`（`DIAGRAM_FORMAT_VALUES` 派生自 `DIAGRAM_EXT_FOR` 键集，show 参数校验/schema enum/飞书桥接透传共用，SDK 新增语言漏项即编译报错） |

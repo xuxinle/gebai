@@ -368,3 +368,168 @@ describe("runBatch", () => {
     expect(summary.decode_tps).toBeGreaterThan(0)
   })
 })
+
+// ── 工具式结构化输出 ──────────────────────────────────────────────────────
+
+/** 模拟「模型调用了输出工具」的响应。 */
+function toolReply(name: string, args: unknown, content = ""): Response {
+  return jsonResponse({
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content,
+          tool_calls: [{ id: "call_1", type: "function", function: { name, arguments: JSON.stringify(args) } }],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+    usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 },
+    timings: { predicted_n: 6, predicted_ms: 60 },
+  })
+}
+
+const ANALYSIS_SCHEMA = {
+  type: "object",
+  properties: { label: { type: "string" }, confidence: { type: "number" } },
+  required: ["label", "confidence"],
+}
+
+describe("工具式结构化输出", () => {
+  test("schema 注册为 function tool，默认强制调用", () => {
+    const body = buildRequestBody({
+      prompt: "p",
+      structured: { schema: ANALYSIS_SCHEMA, output_tool: {} },
+    })
+    expect(body.tools).toEqual([
+      {
+        type: "function",
+        function: { name: "submit_result", description: expect.any(String), parameters: ANALYSIS_SCHEMA },
+      },
+    ])
+    expect(body.tool_choice).toBe("required")
+    // 与 GBNF 约束解码互斥：同一请求不写 response_format
+    expect(body.response_format).toBeUndefined()
+    expect(body.grammar).toBeUndefined()
+    expect(structuredVia({ prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: {} } })).toBe("tool")
+  })
+
+  test("工具名/描述/提醒次数可配", () => {
+    const body = buildRequestBody({
+      prompt: "p",
+      structured: {
+        schema: ANALYSIS_SCHEMA,
+        output_tool: { name: "report", description: "提交研判", tool_choice: "auto" },
+      },
+    })
+    const fn = (body.tools as Array<{ function: { name: string; description: string } }>)[0].function
+    expect(fn.name).toBe("report")
+    expect(fn.description).toBe("提交研判")
+    expect(body.tool_choice).toBe("auto")
+  })
+
+  test("调用成功：结果取自工具参数并按 schema 校验", async () => {
+    const { fetchImpl } = fakeFetch(() => toolReply("submit_result", { label: "OOM", confidence: 0.9 }))
+    const resp = await chatOnce(
+      { prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: {} } },
+      { baseUrl: "http://x", fetchImpl },
+    )
+    expect(resp.ok).toBe(true)
+    expect(resp.structured_via).toBe("tool")
+    expect(resp.json).toEqual({ label: "OOM", confidence: 0.9 })
+    expect(resp.tool_call?.name).toBe("submit_result")
+    expect(resp.tool_reminders_used).toBe(0)
+    expect(resp.tool_call_missing).toBeUndefined()
+  })
+
+  test("未调用工具 → 逐次提醒，达到上限返回失败信息", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => chatReply("我认为是 OOM"))
+    const resp = await chatOnce(
+      { prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: { reminders: 3 } } },
+      { baseUrl: "http://x", fetchImpl },
+    )
+    expect(calls.length).toBe(4) // 首轮 + 3 次提醒
+    expect(resp.ok).toBe(false)
+    expect(resp.tool_call_missing).toBe(true)
+    expect(resp.tool_reminders_used).toBe(3)
+    expect(resp.error).toContain("未调用输出工具")
+    // 提醒以 user 消息下发，且点名工具
+    const lastMsgs = calls[3].body.messages as Array<{ role: string; content: string }>
+    expect(lastMsgs[lastMsgs.length - 1].role).toBe("user")
+    expect(lastMsgs[lastMsgs.length - 1].content).toContain("submit_result")
+  })
+
+  test("提醒 0 次：首次未调用即失败（只发一次请求）", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => chatReply("没有工具"))
+    const resp = await chatOnce(
+      { prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: { reminders: 0 } } },
+      { baseUrl: "http://x", fetchImpl },
+    )
+    expect(calls.length).toBe(1)
+    expect(resp.tool_call_missing).toBe(true)
+  })
+
+  test("补充调用后成功：提醒即可纠正", async () => {
+    const { fetchImpl, calls } = fakeFetch((_call, i) =>
+      i === 0 ? chatReply("我先想想……") : toolReply("submit_result", { label: "网络", confidence: 0.7 }),
+    )
+    const resp = await chatOnce(
+      { prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: {} } },
+      { baseUrl: "http://x", fetchImpl },
+    )
+    expect(calls.length).toBe(2)
+    expect(resp.ok).toBe(true)
+    expect(resp.tool_reminders_used).toBe(1)
+  })
+
+  test("工具参数不合规 → 回灌错误并重试，耗尽仍失败（不算 tool_call_missing）", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => toolReply("submit_result", { label: "X" })) // 缺 confidence
+    const resp = await chatOnce(
+      { prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: { reminders: 2 } } },
+      { baseUrl: "http://x", fetchImpl },
+    )
+    expect(calls.length).toBe(3)
+    expect(resp.ok).toBe(false)
+    expect(resp.tool_call_missing).toBeUndefined()
+    expect(resp.json_errors?.join(" ")).toContain("confidence")
+    expect(resp.error).toContain("参数不合法")
+  })
+
+  test("服务端拒绝 tool_choice=required → 降级 auto 重发，不消耗提醒额度", async () => {
+    let first = true
+    const { fetchImpl, calls } = fakeFetch(() => {
+      if (first) {
+        first = false
+        return jsonResponse({ error: { message: "unsupported tool_choice value" } }, 400)
+      }
+      return toolReply("submit_result", { label: "OOM", confidence: 1 })
+    })
+    const resp = await chatOnce(
+      { prompt: "p", structured: { schema: ANALYSIS_SCHEMA, output_tool: {} } },
+      { baseUrl: "http://x", fetchImpl },
+    )
+    expect(calls.length).toBe(2)
+    expect(calls[1].body.tool_choice).toBe("auto")
+    expect(resp.ok).toBe(true)
+    expect(resp.warning).toContain("tool_choice")
+  })
+
+  test("批量：工具式输出逐条生效，未调用工具记为失败并可交上层兜底", async () => {
+    const { fetchImpl } = fakeFetch((call) => {
+      const msgs = call.body.messages as Array<{ content: string }>
+      return msgs[0].content === "good"
+        ? toolReply("submit_result", { label: "OK", confidence: 0.95 })
+        : chatReply("我答不上来")
+    })
+    const summary = await runBatch([{ id: "g", prompt: "good" }, { id: "b", prompt: "bad" }], {
+      baseUrl: "http://x",
+      fetchImpl,
+      structured: { schema: ANALYSIS_SCHEMA, output_tool: { reminders: 1 } },
+    })
+    expect(summary.results[0].ok).toBe(true)
+    expect(summary.results[0].json).toEqual({ label: "OK", confidence: 0.95 })
+    expect(summary.results[1].ok).toBe(false)
+    expect(summary.results[1].tool_call_missing).toBe(true)
+    expect(summary.failed).toBe(1)
+  })
+})

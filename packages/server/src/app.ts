@@ -33,6 +33,7 @@ import { registerGitRoutes } from "./routes/git"
 import { registerTerminalRoutes } from "./routes/terminal"
 import { registerLspRoutes } from "./routes/lsp"
 import { registerTtsRoutes } from "./routes/tts"
+import { registerTriageRoutes } from "./routes/triage"
 
 export interface AppDeps {
   config: ServerConfig
@@ -200,7 +201,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // 语言服务器（DESIGN「文件工作台·语言服务器」）：本机可用服务器清单；交互走 WS（ws-handlers/lsp.ts）
   registerLspRoutes(rc)
   // 语音朗读（DESIGN「语音合成」）：助手回复的 TTS 接口
-  registerTtsRoutes(rc)
+registerTtsRoutes(rc)
+// 两级研判（DESIGN「大小模型协同」）：批量数据入口——小模型粗筛 + 大模型引擎精审兜底
+registerTriageRoutes(rc)
   registerDocsRoutes(rc)
   registerStaticRoutes(rc)
 

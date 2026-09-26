@@ -29,7 +29,7 @@ export { readFeedbackTool } from "./core/shared/feedback"
 
 // 本机离线语音合成引擎（core/tts）：子Agent 工具与 REST 朗读接口共用同一份脚本与解析逻辑，
 // 执行通道（runCommand/文件读写）经 TtsDeps 注入——server 侧不重写脚本
- export {
+export {
   TTS_CHUNK_CHARS,
   TTS_ENGINES,
   TTS_MAX_TEXT,
@@ -57,3 +57,37 @@ export { readFeedbackTool } from "./core/shared/feedback"
   type TtsScriptResult,
   type TtsVoice,
 } from "./core/tts/speech"
+
+// 两级研判管线（core/triage）：子Agent 工具（会话内）与 REST 接口共用同一份逻辑，
+// L2 精审执行器（隔离子会话 / 引擎会话）由调用方注入——两侧不重写编排
+export {
+  buildL1Prompt,
+  buildL1Schema,
+  buildL2Prompt,
+  classifyL1,
+  defaultJobDir,
+  hasOwnConfidence,
+  parseL2Output,
+  runTriage,
+  toL1Record,
+  DEFAULT_L1_PROMPT,
+  DEFAULT_L1_SYSTEM,
+  DEFAULT_L2_SYSTEM,
+  TRIAGE_DEFAULT_CONCURRENCY,
+  TRIAGE_DEFAULT_L1_MAX_TOKENS,
+  TRIAGE_DEFAULT_L2_BATCH,
+  TRIAGE_DEFAULT_MAX_L2,
+  TRIAGE_DEFAULT_THRESHOLD,
+  TRIAGE_ENVELOPE_FIELDS,
+  type EvidenceLink,
+  type L1Record,
+  type TriageItem,
+  type TriageL1Options,
+  type TriageL2Options,
+  type TriageL2Runner,
+  type TriageOptions,
+  type TriageProgress,
+  type TriageResult,
+  type TriageSummary,
+  type TriageVerdict,
+} from "./core/triage"
