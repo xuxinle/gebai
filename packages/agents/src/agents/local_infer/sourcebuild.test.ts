@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import type { ToolContext } from "@gebai/sdk"
 import { installedEngine } from "./engines"
 import { engineDir, vendorDir } from "./paths"
@@ -29,6 +29,10 @@ import {
 
 const tmp = mkdtempSync(join(tmpdir(), "gebai-infer-sourcebuild-"))
 afterAll(() => rmSync(tmp, { recursive: true, force: true }))
+
+// 本文件的用例都经真子进程代跑命令（假工具链），而每次命令执行都要 spawn 一层 shell；
+// Windows 上单次 spawn 开销明显高于 POSIX，整条「探测 + configure + build + 安装」链路会超过默认 5s。
+setDefaultTimeout(30_000)
 
 const rnd = (): string => Math.random().toString(36).slice(2, 10)
 
@@ -77,76 +81,80 @@ function makeSource(o: { version?: string; cmakeVersion?: string } = {}): { dir:
   return { dir, candidate }
 }
 
-// ── 假 cmake（可执行脚本；行为由环境变量控制，不依赖真实工具链） ──────────
+// ── 假工具链（可执行；行为由环境变量控制，不依赖真实工具链） ──────────────
 
 /**
- * 假 cmake：configure 造出 `build-<device>/bin/llama-server`（shell 脚本，exit 0）与 `libllama.so`；
+ * 假 cmake 的实现（JS，一份两平台共用）：configure 造出 `<build>/bin/llama-server` 与 `libllama.so`；
  * `--build` 直接返回 0。环境变量开关：
  *   FAKE_CMAKE_CONFIGURE_EXIT / FAKE_CMAKE_BUILD_EXIT —— 退出码（默认 0）
  *   FAKE_CMAKE_NO_EXE=1 —— configure 不产出可执行文件（验证「构建完成但没产物」）
  *   FAKE_CMAKE_EXE_AT_ROOT=1 —— 可执行文件落在构建目录根，且造 CMakeFiles/ 与 *.o（验证只抄运行时依赖）
  *   FAKE_CMAKE_LOG_LINES=N —— 先吐 N 行日志（验证 error 里的「日志尾部 60 行」）
+ *
+ * 为什么是 JS 而不是 POSIX sh 脚本：本文件的 ctx.runCommand 用**真子进程**代跑命令，而 `#!/bin/sh`
+ * 脚本在 Windows 的 cmd.exe 下无法执行（无扩展名的文件也不在 cmd 的搜索范围内）。JS 逻辑只写一份，
+ * 由平台薄壳调用（POSIX: sh + exec；Windows: .cmd + bun）。
  */
-function makeFakeCmake(): string {
+const FAKE_CMAKE_JS = [
+  "// 假 cmake（测试专用）：configure 造产物，--build 直接成功",
+  'const fs = require("node:fs")',
+  'const path = require("node:path")',
+  "const argv = process.argv.slice(2)",
+  'const all = argv.join(" ")',
+  'const num = (k) => { const v = Number(process.env[k]); return Number.isFinite(v) ? v : 0 }',
+  'let buildDir = ""',
+  'for (let i = 0; i < argv.length - 1; i++) if (argv[i] === "-B") buildDir = argv[i + 1]',
+  'const noise = () => { for (let i = 1; i <= num("FAKE_CMAKE_LOG_LINES"); i++) console.log(`log-line-${i}`) }',
+  'if (all.includes("--version")) { console.log("cmake version 3.28.0"); process.exit(0) }',
+  'if (all.includes("--build")) { noise(); console.log("fake cmake: build ok"); process.exit(num("FAKE_CMAKE_BUILD_EXIT")) }',
+  "noise()",
+  'if (!buildDir) { console.error("fake cmake: missing -B"); process.exit(2) }',
+  'if (process.env.FAKE_CMAKE_NO_EXE === "1") { console.log(`fake cmake: configured (no exe) in ${buildDir}`); process.exit(num("FAKE_CMAKE_CONFIGURE_EXIT")) }',
+  "const write = (p, c) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, c) }",
+  'if (process.env.FAKE_CMAKE_EXE_AT_ROOT === "1") {',
+  '  write(path.join(buildDir, "CMakeFiles", "junk.txt"), "junk")',
+  '  write(path.join(buildDir, "junk.o"), "obj")',
+  '  write(path.join(buildDir, "libllama.so"), "lib")',
+  '  write(path.join(buildDir, "llama-server"), "fake")',
+  "} else {",
+  '  write(path.join(buildDir, "bin", "libllama.so"), "lib")',
+  '  write(path.join(buildDir, "bin", "libllama.so.0"), "lib0")',
+  '  write(path.join(buildDir, "bin", "llama-server"), "fake")',
+  "}",
+  'console.log(`fake cmake: configured in ${buildDir}`)',
+  'process.exit(num("FAKE_CMAKE_CONFIGURE_EXIT"))',
+  "",
+].join("\n")
+
+/**
+ * 假工具链目录：假 cmake（按平台套壳）+ 假 ninja + 假 cc。
+ *
+ * ninja 与 cc 也要造：工具链门禁要求 cmake + (ninja|make) + cc 三者齐备，缺一就在 configure 前失败；
+ * 造齐后整条编译链路可端到端跑通，且不依赖宿主是否装了真实工具链。
+ */
+function makeFakeToolchain(): string {
   const dir = join(tmp, `fake-bin-${rnd()}`)
   mkdirSync(dir, { recursive: true })
-  const script = `#!/bin/sh
-# 假 cmake（测试专用）：configure 造产物，--build 直接成功
-build_dir=""
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "-B" ]; then build_dir="$a"; fi
-  prev="$a"
-done
-
-noise() {
-  i=1
-  while [ "$i" -le "\${FAKE_CMAKE_LOG_LINES:-0}" ]; do
-    echo "log-line-$i"
-    i=$((i+1))
-  done
-}
-
-case "$*" in
-  *--version*)
-    echo "cmake version 3.28.0"
-    exit 0
-    ;;
-  *--build*)
-    noise
-    echo "fake cmake: build ok"
-    exit "\${FAKE_CMAKE_BUILD_EXIT:-0}"
-    ;;
-esac
-
-noise
-if [ -z "$build_dir" ]; then
-  echo "fake cmake: missing -B" >&2
-  exit 2
-fi
-if [ "\${FAKE_CMAKE_NO_EXE:-0}" = "1" ]; then
-  echo "fake cmake: configured (no exe) in $build_dir"
-  exit "\${FAKE_CMAKE_CONFIGURE_EXIT:-0}"
-fi
-if [ "\${FAKE_CMAKE_EXE_AT_ROOT:-0}" = "1" ]; then
-  mkdir -p "$build_dir/CMakeFiles"
-  echo "junk" > "$build_dir/CMakeFiles/junk.txt"
-  echo "obj" > "$build_dir/junk.o"
-  echo "lib" > "$build_dir/libllama.so"
-  printf '#!/bin/sh\\nexit 0\\n' > "$build_dir/llama-server"
-  chmod +x "$build_dir/llama-server"
-else
-  mkdir -p "$build_dir/bin"
-  echo "lib" > "$build_dir/bin/libllama.so"
-  echo "lib0" > "$build_dir/bin/libllama.so.0"
-  printf '#!/bin/sh\\nexit 0\\n' > "$build_dir/bin/llama-server"
-  chmod +x "$build_dir/bin/llama-server"
-fi
-echo "fake cmake: configured in $build_dir"
-exit "\${FAKE_CMAKE_CONFIGURE_EXIT:-0}"
-`
-  writeFileSync(join(dir, "cmake"), script, "utf-8")
-  chmodSync(join(dir, "cmake"), 0o755)
+  const js = join(dir, "fake-cmake.cjs")
+  writeFileSync(js, FAKE_CMAKE_JS, "utf-8")
+  const bun = process.execPath
+  const isWin = process.platform === "win32"
+  const files: Array<[string, string]> = isWin
+    ? [
+        ["cmake.cmd", `@echo off\r\n"${bun}" "%~dp0fake-cmake.cjs" %*\r\n`],
+        ["ninja.cmd", "@echo off\r\necho 1.11.1\r\n"],
+        ["cl.cmd", "@echo off\r\necho Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35207\r\n"],
+      ]
+    : [
+        ["cmake", `#!/bin/sh\nexec "${bun}" "$(dirname "$0")/fake-cmake.cjs" "$@"\n`],
+        ["ninja", "#!/bin/sh\necho 1.11.1\n"],
+        ["gcc", '#!/bin/sh\necho "gcc (GCC) 13.3.0"\n'],
+      ]
+  for (const [name, body] of files) {
+    const p = join(dir, name)
+    writeFileSync(p, body, "utf-8")
+    if (!isWin) chmodSync(p, 0o755)
+  }
   return dir
 }
 
@@ -227,7 +235,7 @@ function setup(o: { env?: Record<string, string> } = {}): {
   calls: CmdCall[]
 } {
   const home = makeHome()
-  const fake = makeFakeCmake()
+  const fake = makeFakeToolchain()
   const { dir: sourceDir, candidate } = makeSource({ version: "b11100-test" })
   const path = `${fake}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`
   const { ctx, calls } = makeCtx(home, { PATH: path, ...(o.env ?? {}) })
@@ -331,15 +339,10 @@ describe("buildPreset：设备 → llama.cpp CMake 预设", () => {
     writeFileSync(join(ninjaDir, "ninja"), "#!/bin/sh\nexit 0\n", "utf-8")
     expect(hasOnPath("ninja", { env: { PATH: ninjaDir }, platform: "linux" })).toBe(true)
     expect(hasOnPath("ninja", { env: { PATH: join(tmp, `empty-${rnd()}`) }, platform: "linux" })).toBe(false)
-    const oldPath = process.env.PATH
-    try {
-      process.env.PATH = `${ninjaDir}${process.platform === "win32" ? ";" : ":"}${oldPath ?? ""}`
-      expect(buildPreset("cpu", { platform: "linux" }).generator).toBe("Ninja")
-      process.env.PATH = join(tmp, `empty-${rnd()}`)
-      expect(buildPreset("cpu", { platform: "linux" }).generator).toBe("Unix Makefiles")
-    } finally {
-      process.env.PATH = oldPath
-    }
+    // PATH 必须经 env 传入：platform 与宿主不同时，pathDirs 不会回落到 process.env（否则断言测的是宿主）
+    const viaEnv = (path: string) => buildPreset("cpu", { platform: "linux", env: { PATH: path } }).generator
+    expect(viaEnv(ninjaDir)).toBe("Ninja")
+    expect(viaEnv(join(tmp, `empty-${rnd()}`))).toBe("Unix Makefiles")
   })
 
   test("requirements 随生成器与设备变化；notes 记录构建/源码目录", () => {
@@ -442,7 +445,13 @@ describe("buildFromSource：编译 + 安装（假 cmake）", () => {
     expect(marker.build.log).toBe(r.logPath)
     expect(marker.build.host).toBe(`${process.platform}-${process.arch}`)
     expect(marker.build.jobs).toBeGreaterThanOrEqual(1)
-    expect(marker.build.configure_cmd).toContain(`-S ${s.sourceDir} -B ${join(s.sourceDir, "build-cpu")}`)
+    // 路径可能被引号包裹（shell 引用：含 `~` 等特殊字符时必须引，否则 shell 会做波浪号展开）——
+    // 断言引号无关：只校验指向正确的源码目录与构建目录，且顺序为 -S … -B …
+    const cfgCmd = marker.build.configure_cmd
+    expect(cfgCmd).toContain("-S ")
+    expect(cfgCmd).toContain(s.sourceDir)
+    expect(cfgCmd).toContain(join(s.sourceDir, "build-cpu"))
+    expect(cfgCmd.indexOf(s.sourceDir)).toBeLessThan(cfgCmd.indexOf(join(s.sourceDir, "build-cpu")))
     expect(marker.build.build_cmd).toContain("--parallel")
     // 假源码树没有 .git：不写 commit
     expect(marker.build.commit).toBeUndefined()
@@ -459,8 +468,9 @@ describe("buildFromSource：编译 + 安装（假 cmake）", () => {
     expect(existsSync(r.logPath!)).toBe(true)
     const log = readFileSync(r.logPath!, "utf-8")
     expect(log).toContain("local_infer 源码编译安装")
-    // 日志：命令行原文 + 退出码都在（cmake 可能是 PATH 解析名，也可能是探测到的绝对路径）
-    expect(log).toMatch(/\$ \S*cmake -S /)
+    // 日志：命令行原文 + 退出码都在（cmake 可能是 PATH 解析名，也可能是探测到的绝对路径，
+    // Windows 上还带 .cmd/.exe 扩展名——故只断言命令行形态，不写死命令名）
+    expect(log).toMatch(/\$ .*cmake.* -S /)
     expect(log).toContain("configure")
     expect(log).toContain("build")
     expect(log).toContain("exit=0")
@@ -572,7 +582,7 @@ describe("buildFromSource：编译 + 安装（假 cmake）", () => {
 
   test("tag：候选没给版本时用 CMakeLists 的 project VERSION 兜底", async () => {
     const home = makeHome()
-    const fake = makeFakeCmake()
+    const fake = makeFakeToolchain()
     const { dir, candidate } = makeSource({ cmakeVersion: "3.7.2" })
     const { ctx } = makeCtx(home, { PATH: `${fake}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}` })
     const r = await buildFromSource({ home, candidate, spec: cpuSpec("linux-cpu-ver"), ctx })
@@ -685,7 +695,7 @@ describe("buildFromSource：失败路径", () => {
   test("工具链门禁：cuda 缺 nvcc 先失败并给 requirements，不跑 configure/build", async () => {
     // 只把假 cmake 留在 PATH 上（真机装了 nvcc/gcc，这里一并隐藏，才能走「缺工具链」分支）
     const home = makeHome()
-    const fake = makeFakeCmake()
+    const fake = makeFakeToolchain()
     const { dir: sourceDir, candidate } = makeSource({ version: "b11100-cuda" })
     const { ctx, calls } = makeCtx(home, { PATH: fake })
     const r = await buildFromSource({ home, candidate, spec: { engine_id: "linux-cuda-srcbuild", device: "cuda" }, ctx })
@@ -735,7 +745,7 @@ describe("locateBuiltServer", () => {
 describe("buildFromSource：无 ctx 时的本地兜底", () => {
   test.skipIf(process.platform === "win32")("不传 ctx（脚本直调）也能完成编译安装", async () => {
     const home = makeHome()
-    const fake = makeFakeCmake()
+    const fake = makeFakeToolchain()
     const { candidate } = makeSource({ version: "b11100-noc ctx" })
     const oldPath = process.env.PATH
     process.env.PATH = `${fake}${process.platform === "win32" ? ";" : ":"}${oldPath ?? ""}`

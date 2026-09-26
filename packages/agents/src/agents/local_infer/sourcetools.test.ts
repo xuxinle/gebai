@@ -146,7 +146,8 @@ describe("sources：发现与工具链", () => {
       if (/cmake --version/.test(cmd)) return { stdout: "cmake version 3.28.3\n", stderr: "", code: 0 }
       if (/ninja --version/.test(cmd)) return { stdout: "1.11.1\n", stderr: "", code: 0 }
       if (/(^|\s)(cc|gcc) --version/.test(cmd)) return { stdout: "cc (GCC) 13.3.0\n", stderr: "", code: 0 }
-      if (cmd.includes("command -v cmake")) return { stdout: "/usr/bin/cmake\n", stderr: "", code: 0 }
+      // 平台形态：POSIX 走 `command -v`，Windows 走 `where`（两者都要匹配，否则断言只在宿主平台成立）
+      if (/(command -v cmake|where cmake)/.test(cmd)) return { stdout: "/usr/bin/cmake\n", stderr: "", code: 0 }
       return { stdout: "", stderr: "", code: 127 }
     })
     const r = await tools.sources.execute({ action: "toolchain" }, ctx)

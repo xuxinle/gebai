@@ -169,7 +169,7 @@ function backendSwitches(device: BuildDevice): string[] {
   return [`-DGGML_CUDA=${f(on.cuda)}`, `-DGGML_VULKAN=${f(on.vulkan)}`, `-DGGML_METAL=${f(on.metal)}`, `-DGGML_HIP=${f(on.hip)}`]
 }
 
-/** 预设选项（`ninja` 显式注入供测试与工具链探测结果使用；缺省按 PATH 探测）。 */
+/** 预设选项（`ninja` 显式注入供测试与工具链探测结果使用；缺省按 PATH 探测，可用 `env` 注入探测基）。 */
 export interface BuildPresetOptions {
   offline?: boolean
   platform?: NodeJS.Platform
@@ -177,6 +177,8 @@ export interface BuildPresetOptions {
   buildDir?: string
   sourceDir?: string
   ninja?: boolean
+  /** ninja 探测用的环境（内网便携工具链不在进程 PATH 上时由调用方传入；缺省用进程环境）。 */
+  env?: Record<string, string>
 }
 
 /**
@@ -191,7 +193,7 @@ export interface BuildPresetOptions {
  */
 export function buildPreset(device: BuildDevice, o: BuildPresetOptions = {}): BuildPreset {
   const platform = o.platform ?? process.platform
-  const ninja = o.ninja ?? hasOnPath("ninja", { platform })
+  const ninja = o.ninja ?? hasOnPath("ninja", { platform, env: o.env })
   const generator = ninja ? "Ninja" : platform === "win32" ? "MinGW Makefiles" : "Unix Makefiles"
   const jobs = o.jobs != null && Number.isFinite(o.jobs) && o.jobs > 0 ? Math.floor(o.jobs) : defaultJobs()
 
@@ -472,11 +474,14 @@ function phaseError(phase: string, code: number, logPath: string, requirements: 
  * PATH 基准优先取 `ctx.env`（引擎已按会话/用户收敛过），否则进程环境。
  */
 function runEnv(ctx: ToolContext | undefined): Record<string, string> | undefined {
-  const sep = process.platform === "win32" ? ";" : ":"
+  const isWin = process.platform === "win32"
+  const sep = isWin ? ";" : ":"
   const base = ctx?.env?.PATH ?? ctx?.env?.Path ?? process.env.PATH ?? process.env.Path ?? ""
   const entries = [...new Set(String(base).split(sep).filter(Boolean))]
   if (!entries.length) return undefined
-  return { PATH: entries.join(sep) }
+  // 键名按平台惯例（Windows 是 `Path`）：与进程环境同名才能覆盖它——否则子进程会同时收到
+  // `Path`（宿主）与 `PATH`（收敛后），而 Windows 环境变量名不区分大小写，取到哪个取决于实现。
+  return { [isWin ? "Path" : "PATH"]: entries.join(sep) }
 }
 
 // ── 工具链门禁（缺什么先失败，不硬上） ────────────────────────────────────

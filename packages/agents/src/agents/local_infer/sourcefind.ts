@@ -386,11 +386,32 @@ function execFileCapture(cmd: string, args: string[], timeoutMs: number): Promis
   })
 }
 
+/**
+ * 探测命令的环境：显式带上会话 PATH（内网常见做法是把便携工具链放进 `resources/toolchain/bin`
+ * 再加到会话 PATH——探测必须看得见它，否则会出现「探测说缺、构建时又用得上」的自相矛盾；
+ * 构建阶段的 runEnv 同基准）。
+ */
+function probeEnv(ctx?: ToolContext, env?: Record<string, string | undefined>): Record<string, string> | undefined {
+  const isWin = process.platform === "win32"
+  const sep = isWin ? ";" : ":"
+  const raw = env?.PATH ?? env?.Path ?? ctx?.env?.PATH ?? ctx?.env?.Path ?? process.env.PATH ?? process.env.Path
+  if (!raw) return undefined
+  // 键名按平台惯例（Windows 是 `Path`）：与进程环境同名才能覆盖它——否则子进程会同时收到
+  // `Path`（宿主）与 `PATH`（收敛后），而 Windows 环境变量名不区分大小写，取到哪个取决于实现。
+  return { [isWin ? "Path" : "PATH"]: [...new Set(String(raw).split(sep).filter(Boolean))].join(sep) }
+}
+
 /** 执行外部命令：ctx.runCommand 优先（宿主统一审记/超时）；无 ctx 时直连 execFile。两条路径都不抛错。 */
-async function runCmd(cmd: string, args: string[], ctx?: ToolContext, timeoutMs = PROBE_TIMEOUT_MS): Promise<CmdResult> {
+async function runCmd(
+  cmd: string,
+  args: string[],
+  ctx?: ToolContext,
+  timeoutMs = PROBE_TIMEOUT_MS,
+  env?: Record<string, string>,
+): Promise<CmdResult> {
   if (ctx) {
     try {
-      const r = await ctx.runCommand([cmd, ...args].map(shellQuote).join(" "), { timeoutMs })
+      const r = await ctx.runCommand([cmd, ...args].map(shellQuote).join(" "), { timeoutMs, ...(env ? { env } : {}) })
       const stderr = r.stderr ?? ""
       return { code: r.code, stdout: r.stdout ?? "", stderr, missing: isMissingText(stderr) }
     } catch (e) {
@@ -923,16 +944,32 @@ function toolProbes(platform: string): Array<{ key: ToolKey; names: string[] }> 
 }
 
 /** 命令是否存在（版本探不到时的兜底；只用系统自带的 command -v / where，不引第三方）。 */
-async function commandExists(name: string, platform: string, ctx?: ToolContext): Promise<boolean> {
-  const r = platform === "win32" ? await runCmd("where", [name], ctx) : await runCmd("sh", ["-c", `command -v ${name}`], ctx)
+async function commandExists(
+  name: string,
+  platform: string,
+  ctx?: ToolContext,
+  env?: Record<string, string>,
+): Promise<boolean> {
+  const r =
+    platform === "win32"
+      ? await runCmd("where", [name], ctx, undefined, env)
+      : await runCmd("sh", ["-c", `command -v ${name}`], ctx, undefined, env)
   return r.code === 0 && r.stdout.trim().length > 0
 }
 
 /** 工具可执行文件的**绝对路径**（`command -v` / `where` 首行）：内网便携工具链不在默认 PATH 位置时，
  *  编译层可直接拿它调用。探不到返回 undefined（不抛错）。 */
-async function resolveToolPath(names: string[], platform: string, ctx?: ToolContext): Promise<string | undefined> {
+async function resolveToolPath(
+  names: string[],
+  platform: string,
+  ctx?: ToolContext,
+  env?: Record<string, string>,
+): Promise<string | undefined> {
   for (const name of names) {
-    const r = platform === "win32" ? await runCmd("where", [name], ctx) : await runCmd("sh", ["-c", `command -v ${name}`], ctx)
+    const r =
+      platform === "win32"
+        ? await runCmd("where", [name], ctx, undefined, env)
+        : await runCmd("sh", ["-c", `command -v ${name}`], ctx, undefined, env)
     if (r.code === 0) {
       const line = firstLine(r.stdout)
       if (line) return line
@@ -945,14 +982,19 @@ async function resolveToolPath(names: string[], platform: string, ctx?: ToolCont
  * 取工具版本：`<tool> --version` 首行；退出码非 0 时退回「命令是否存在」（部分工具 --version 非 0 退出），
  * 存在但取不到版本 → `名称（版本未知：…）`；探测不到返回 undefined（不抛错）。
  */
-async function probeVersion(names: string[], platform: string, ctx?: ToolContext): Promise<string | undefined> {
+async function probeVersion(
+  names: string[],
+  platform: string,
+  ctx?: ToolContext,
+  env?: Record<string, string>,
+): Promise<string | undefined> {
   for (const name of names) {
-    const r = await runCmd(name, ["--version"], ctx)
+    const r = await runCmd(name, ["--version"], ctx, undefined, env)
     if (r.code === 0) {
       const line = firstLine(r.stdout) || firstLine(r.stderr)
       return line || `${name}（版本未知）`
     }
-    if (await commandExists(name, platform, ctx)) {
+    if (await commandExists(name, platform, ctx, env)) {
       return `${name}（版本未知：${firstLine(r.stderr) || `退出码 ${r.code}`}）`
     }
   }
@@ -964,6 +1006,7 @@ async function vulkanDevReady(
   platform: string,
   ctx: ToolContext | undefined,
   env: Record<string, string | undefined>,
+  probeEnvArg?: Record<string, string>,
 ): Promise<{ ok: boolean; evidence: string[] }> {
   if (platform === "win32") {
     const sdk = env.VULKAN_SDK
@@ -974,7 +1017,7 @@ async function vulkanDevReady(
   const headers = ["/usr/include/vulkan/vulkan.h", "/usr/local/include/vulkan/vulkan.h"]
   const hit = headers.find((h) => existsSync(h))
   if (hit) return { ok: true, evidence: [`Vulkan 头文件 ${hit}`] }
-  const r = await runCmd("pkg-config", ["--exists", "vulkan"], ctx)
+  const r = await runCmd("pkg-config", ["--exists", "vulkan"], ctx, undefined, probeEnvArg)
   if (r.code === 0) return { ok: true, evidence: ["pkg-config --exists vulkan 通过"] }
   return {
     ok: false,
@@ -1005,9 +1048,11 @@ export async function detectToolchainOn(
   }
 
   try {
+    // 探测命令带上会话 PATH（内网便携工具链常不在进程 PATH 上）
+    const penv = probeEnv(ctx, env)
     // 并行探测（各命令相互独立；单条超时/失败都只影响自己）
     const probed = await Promise.all(
-      toolProbes(platform).map(async (p) => [p.key, await probeVersion(p.names, platform, ctx)] as const),
+      toolProbes(platform).map(async (p) => [p.key, await probeVersion(p.names, platform, ctx, penv)] as const),
     )
     const found: Partial<Record<ToolKey, string>> = {}
     for (const [k, v] of probed) if (v) found[k] = v
@@ -1018,13 +1063,13 @@ export async function detectToolchainOn(
     await Promise.all(
       toolProbes(platform).map(async (p) => {
         if (!found[p.key]) return
-        const abs = await resolveToolPath(p.names, platform, ctx)
+        const abs = await resolveToolPath(p.names, platform, ctx, penv)
         if (abs) paths[p.key] = abs
       }),
     )
 
-    const vk = await vulkanDevReady(platform, ctx, e)
-    const xcrun = platform === "darwin" ? await probeVersion(["xcrun"], platform, ctx) : undefined
+    const vk = await vulkanDevReady(platform, ctx, e, penv)
+    const xcrun = platform === "darwin" ? await probeVersion(["xcrun"], platform, ctx, penv) : undefined
 
     // 基准缺口：cmake 生成构建文件、ninja/make 执行构建、cc 编译源码
     const cpuMissing: string[] = []

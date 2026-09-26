@@ -159,8 +159,11 @@ describe("命令组装（平台显式参数）", () => {
   })
 
   test("scriptRun 组装 -File 调用（路径带引号）", () => {
+    // 脚本路径按**宿主**平台拼接（该命令只在本机执行）——期望值同样用 join 生成，
+    // 断言不依赖宿主的分隔符风格
+    const linuxFile = join("/x/infer", "scripts", "run-server.ps1")
     expect(scriptRun("/x/infer", "run-server.ps1", ["-Port 8080"], "linux")).toBe(
-      'pwsh -ExecutionPolicy Bypass -File "/x/infer/scripts/run-server.ps1" -Port 8080',
+      `pwsh -ExecutionPolicy Bypass -File "${linuxFile}" -Port 8080`,
     )
     expect(scriptRun("C:\\infer", "bench.ps1", ["-Reps 2"], "win32")).toContain("pwsh -NoProfile -ExecutionPolicy Bypass")
   })

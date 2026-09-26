@@ -365,7 +365,9 @@ describe("discoverSources", () => {
     const tarCmd = calls.map((x) => x.cmd).find((x) => x.startsWith("tar -t"))
     expect(tarCmd).toBeDefined()
     expect(tarCmd).toContain('tar -tzf "') // 含空格的路径加引号
-    expect(tarCmd).toContain("head -n")
+    // sample 模式的截断：POSIX 经 head；Windows 的 bsdtar 同名可用但未必有 head，故不加管道（见 listTarEntries）
+    if (process.platform === "win32") expect(tarCmd).not.toContain("head -n")
+    else expect(tarCmd).toContain("head -n")
   })
 
   test("条目数远超采样上限时 vendor 判定走全量过滤（真实 tar 管道，不被 head 截断成假阴性）", async () => {
@@ -384,12 +386,19 @@ describe("discoverSources", () => {
     const { ctx, calls } = makeRealCtx(t.home)
     const res = await discoverSources(t.home, t.env, { ctx })
     const c = res.candidates.find((x) => x.id === "big-src")
-    expect(c?.peek?.entries).toBe(2000) // 采样确实被 head 截断
-    expect(calls.some((cmd) => cmd.cmd.includes("grep -aE"))).toBe(true) // 关键判定走全量过滤
+    // 采样：POSIX 经 head 截断到上限；Windows 无 head，列出全量条目
+    if (process.platform === "win32") expect(c?.peek?.entries).toBeGreaterThan(2000)
+    else expect(c?.peek?.entries).toBe(2000)
+    // 关键判定走**全量**过滤（不被截断成假阴性）：POSIX 用 grep、Windows 用 findstr
+    const filterCmd = process.platform === "win32" ? "findstr" : "grep -aE"
+    expect(calls.some((cmd) => cmd.cmd.includes(filterCmd))).toBe(true)
     expect(c?.peek?.has_cmake).toBe(true)
     expect(c?.peek?.has_vendor_deps).toBe(true)
     const pn = (c?.peek?.notes ?? []).join(" | ")
-    expect(pn).toContain("关键判定已全量过滤")
+    // 这条只在「采样被截断、事后再全量修正判定」时出现：POSIX 走 head 会截断；
+    // Windows 的 sample 本就是全量，无需修正
+    if (process.platform === "win32") expect(pn).not.toContain("关键判定已全量过滤")
+    else expect(pn).toContain("关键判定已全量过滤")
     expect(pn).not.toContain("未发现 vendor/ 依赖目录")
     expect((c?.evidence ?? []).join(" | ")).toContain("归档内含 vendor/ 依赖")
   })
@@ -633,22 +642,28 @@ describe("ensureSourceDir", () => {
 // ── detectToolchain ───────────────────────────────────────────────────────
 
 describe("detectToolchain", () => {
-  test("本机真实探测：cmake 有版本、devices 五个后端齐备、offline_hints 非空（不抛错）", async () => {
+  test("本机真实探测：结构完整、如实报告缺口（不抛错）", async () => {
     const info = await detectToolchain()
-    expect(typeof info.cmake).toBe("string")
-    expect(info.cmake).toContain("cmake")
-    expect(typeof info.cc).toBe("string")
+    // 结构完整：五个设备后端都有就绪判定与缺口/说明
     for (const name of ["cpu", "cuda", "vulkan", "metal", "rocm"]) {
       expect(info.devices[name]).toBeDefined()
       expect(Array.isArray(info.devices[name]?.missing)).toBe(true)
       expect(Array.isArray(info.devices[name]?.notes)).toBe(true)
     }
-    // 本机确有 cmake + ninja/make + gcc：CPU 后端就绪
-    expect(info.devices.cpu?.ready).toBe(true)
-    expect(info.devices.cpu?.missing).toEqual([])
     expect(Array.isArray(info.offline_hints)).toBe(true)
     expect(info.offline_hints.length).toBeGreaterThan(0)
-    // 非 macOS 宿主上 Metal 后端不可用（本机是 linux）
+    // 探到的工具给版本描述（不凭空编造；宿主没装就是 undefined——探测的职责是如实报告，
+    // 而不是保证齐备：Windows 未装 MSVC/MinGW 时 cc 缺失是完全正常的状态）
+    if (info.cmake !== undefined) expect(info.cmake).toContain("cmake")
+    if (info.cc !== undefined) expect(typeof info.cc).toBe("string")
+    // cpu 就绪 ⇔ 三项齐备（cmake + ninja/make + cc）：两个字段必须自洽
+    const cpu = info.devices.cpu!
+    if (cpu.ready) expect(cpu.missing).toEqual([])
+    else expect(cpu.missing.length).toBeGreaterThan(0)
+    // 缺什么必须在 offline_hints 里有对应的补齐办法（不只说缺，还要说怎么办）
+    if (!info.cc) expect(info.offline_hints.join(" ")).toContain("编译器")
+    if (!info.cmake) expect(info.offline_hints.join(" ")).toContain("cmake")
+    // 非 macOS 宿主上 Metal 后端不可用
     if (process.platform !== "darwin") expect(info.devices.metal?.ready).toBe(false)
   })
 
