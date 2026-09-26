@@ -181,10 +181,14 @@ export function sentinelCommand(shellId: string, token: string): string {
   return `echo "${token}$?|$PWD"`
 }
 
-/** shell 启动参数：cmd 关命令回显（/q），PowerShell 关版本横幅（-NoLogo）——免得首屏被环境字占满。 */
+/** shell 启动参数：cmd 关命令回显（/q），PowerShell 关版本横幅（-NoLogo）——免得首屏被环境字占满。
+ *
+ * PowerShell 家族另加 `-NoProfile`：本通道没有 TTY，profile 里的交互式假设（原始控制台 API、
+ * 键处理、控制台探测）会让会话刚起来就退出（实测 pwsh 7 加载 profile 后打印一次提示符即以 0 退出，
+ * 命令一条都执行不到）；PTY 通道（core/exec/pty-session.ts）是真控制台，profile 照常加载。 */
 function shellArgs(id: string): string[] {
   if (id === "cmd") return ["/q"]
-  if (id === "pwsh" || id === "powershell") return ["-NoLogo"]
+  if (id === "pwsh" || id === "powershell") return ["-NoProfile", "-NoLogo"]
   return []
 }
 
@@ -277,17 +281,22 @@ function which(cmd: string): string | null {
   return whichInPath(cmd)
 }
 
-/** 按平台探测本机 Shell 清单（只列真实存在的解释器；顺序即默认优先级）。 */
-export function detectShells(): ShellSpec[] {
+/** 按平台探测本机 Shell 清单（只列真实存在的解释器；**顺序即默认优先级，也是回退顺序**）。
+ *  平台与查找函数可注入（测试固定平台差异，不随宿主漂移）。 */
+export function detectShells(
+  platform: NodeJS.Platform = process.platform,
+  find: (cmd: string) => string | null = which,
+): ShellSpec[] {
   const out: ShellSpec[] = []
   const add = (id: string, name: string, cmd: string) => {
-    const p = which(cmd)
+    const p = find(cmd)
     if (p) out.push({ id, name, path: p, available: true })
   }
-  if (process.platform === "win32") {
-    add("cmd", "命令提示符", "cmd.exe")
-    add("powershell", "Windows PowerShell", "powershell.exe")
+  if (platform === "win32") {
+    // Windows 默认 pwsh（PowerShell 7+）；缺失依次回落 Windows PowerShell → cmd（探测不到的不进清单）
     add("pwsh", "PowerShell", "pwsh.exe")
+    add("powershell", "Windows PowerShell", "powershell.exe")
+    add("cmd", "命令提示符", "cmd.exe")
     return out
   }
   // POSIX：常见交互 shell 优先（bash → zsh → fish），兼容性兑底（sh → dash）；$SHELL 去重后补充。
@@ -300,7 +309,7 @@ export function detectShells(): ShellSpec[] {
   const login = process.env.SHELL
   // usrmerge 下 /bin/bash 与 /usr/bin/bash 是同一解释器（路径不同、id 相同）：按 id 去重，避免清单里出现两条 Bash
   if (login && !out.some((s) => s.id === basename(login).replace(/\.[^.]+$/, ""))) {
-    const p = which(login)
+    const p = find(login)
     if (p) out.push({ id: basename(p).replace(/\.[^.]+$/, ""), name: "登录 Shell", path: p, available: true })
   }
   return out
@@ -372,7 +381,7 @@ export class TerminalService {
     if (!shell) {
       const usable = this.shells().filter((s) => s.available)
       if (!usable.length) {
-        throw new FsError(503, "本机未检测到可用的 Shell（Windows 探测 cmd.exe / powershell.exe / pwsh.exe，POSIX 探测 /bin/bash、/bin/sh、$SHELL）")
+        throw new FsError(503, "本机未检测到可用的 Shell（Windows 依次探测 pwsh.exe / powershell.exe / cmd.exe，POSIX 探测 /bin/bash、/bin/sh、$SHELL）")
       }
       throw fsBadRequest(`指定的 Shell 不可用: ${String(opts.shell)}（可用: ${usable.map((s) => s.id).join(" / ")}）`)
     }
@@ -448,7 +457,9 @@ export class TerminalService {
       const seq = (s.scriptSeq = (s.scriptSeq ?? 0) + 1)
       const ext = s.shell.id === "cmd" ? "cmd" : "ps1"
       const file = join(dir, `c${seq}.${ext}`)
-      writeFileSync(file, `${data}\r\n`, "utf8")
+      // PowerShell 脚本带 UTF-8 BOM：Windows PowerShell 5.1 对无 BOM 文件按本地 ANSI 代码页解码，
+      // 脚本内中文会变乱码（pwsh 7 认 BOM；cmd 脚本绝不能带 BOM——call 会把 BOM 当成命令首字符）
+      writeFileSync(file, `${ext === "ps1" ? "\uFEFF" : ""}${data}\r\n`, "utf8")
       if (seq > 20) pruneScripts(dir, seq - 20)
       return s.shell.id === "cmd" ? `call "${file}"` : `& "${file}"`
     } catch {

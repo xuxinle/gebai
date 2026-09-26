@@ -301,7 +301,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     fsMaxDiff: num("GEBAI_FS_MAX_DIFF", 8 * 1024 * 1024),
     gitMaxFile: num("GEBAI_GIT_MAX_FILE", 1_000_000),
     // 终端（DESIGN「文件工作台·终端」）：持久 shell 会话；shell 留空按平台探测
-    // （Windows cmd.exe/powershell.exe/pwsh.exe，POSIX /bin/bash、/bin/sh、$SHELL）
+    // （Windows 依次 pwsh.exe → powershell.exe → cmd.exe，POSIX /bin/bash、/bin/sh、$SHELL）
     terminalEnabled: bool("GEBAI_TERMINAL", true),
     terminalShell: env("GEBAI_TERMINAL_SHELL") || undefined,
     // 语言服务器（DESIGN「文件工作台·语言服务器」）：有则用、没有不影响——探测 PATH 上的

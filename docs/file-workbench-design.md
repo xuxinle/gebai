@@ -221,7 +221,7 @@ root 解析 → 目标绝对路径（root/join(path)）
 
 **TerminalService 关键实现约束**
 
-- **持久 shell 会话**：每条会话一个常驻 shell 子进程（Windows 默认 `cmd.exe`，POSIX 默认 `bash`，`GEBAI_TERMINAL_SHELL` 可指定），stdin 保持打开——`cd`/`set`/`export` 在会话内生效（这是「终端」与「一次性命令」的分界）。
+- **持久 shell 会话**：每条会话一个常驻 shell 子进程（Windows 默认 `pwsh.exe`，探测不到依次回落 `powershell.exe` → `cmd.exe`；POSIX 默认 `bash`，`GEBAI_TERMINAL_SHELL` 可指定），stdin 保持打开——`cd`/`set`/`export` 在会话内生效（这是「终端」与「一次性命令」的分界）。PowerShell 家族以 `-NoProfile -NoLogo` 启动：本通道没有 TTY，profile 里的交互式假设会让 pwsh 刚起来就退出（命令一条都执行不到）。
 - **不引入 PTY**（Windows 需 ConPTY / 原生依赖）：命令回显与提示符由前端渲染，命令边界用**哨兵行**判定——写完命令立即写入一行哨兵命令，其输出形如 `{TOKEN}{退出码}|{cwd}`：
   - `cmd.exe`：`echo {TOKEN}%errorlevel%^|%CD%`
   - `bash`：`echo "{TOKEN}$?|$PWD"`

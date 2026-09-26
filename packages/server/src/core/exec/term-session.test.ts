@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync, rmSync } from "node:fs"
 import { dirname } from "node:path"
-import { TerminalService, newToken, sentinelCommand, type ShellSpec, type TermSpawner } from "./term-session"
+import { TerminalService, detectShells, newToken, sentinelCommand, type ShellSpec, type TermSpawner } from "./term-session"
 
 const SHELLS: ShellSpec[] = [
   { id: "bash", name: "Bash", path: "/bin/bash", available: true },
@@ -83,6 +83,21 @@ describe("终端会话：非 ASCII 命令", () => {
     // 关闭会话时清理脚本目录
     svc.close(s.id)
     expect(() => readFileSync(file, "utf8")).toThrow()
+    rmSync(dirname(file), { recursive: true, force: true })
+  })
+
+  test("PowerShell：脚本带 UTF-8 BOM 落盘（Windows PowerShell 5.1 对无 BOM 文件按 ANSI 解码，中文会变乱码）", () => {
+    const ps: ShellSpec = { id: "powershell", name: "Windows PowerShell", path: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", available: true }
+    const procs = fakeProcesses()
+    const svc = new TerminalService({ spawner: procs.spawner, shells: [ps] })
+    const s = svc.create({ ...CREATE, shell: "powershell" })
+    svc.input({ id: s.id, data: "echo 中文输出测试" })
+    const launcher = commands(procs.spawned[0]).filter((w) => !w.includes("__GBEND_")).at(-1) ?? ""
+    expect(launcher.startsWith('& "')).toBe(true)
+    const file = launcher.trim().replace(/^& "/, "").replace(/"$/, "")
+    expect(file.endsWith(".ps1")).toBe(true)
+    expect(readFileSync(file, "utf8")).toBe("\uFEFFecho 中文输出测试\r\n")
+    svc.close(s.id)
     rmSync(dirname(file), { recursive: true, force: true })
   })
 
@@ -344,6 +359,57 @@ describe("终端会话：缓冲、并发与生命周期", () => {
     expect(catches(() => none.create(CREATE)).status).toBe(503)
   })
 })
+
+describe("Shell 探测：Windows 依次回退", () => {
+  /** 假 PATH：只让点名存在的解释器被找到（不依赖宿主装了什么）。 */
+  const findIn = (...present: string[]) => (cmd: string) => (present.includes(cmd) ? `C:\\Windows\\${cmd}` : null)
+  /** 探测清单里的 shell id（按平台固定，不随宿主漂移）。 */
+  const ids = (...present: string[]) => detectShells("win32", findIn(...present)).map((s) => s.id)
+
+  test("清单顺序即默认与回退顺序：pwsh → Windows PowerShell → cmd", () => {
+    expect(ids("pwsh.exe", "powershell.exe", "cmd.exe")).toEqual(["pwsh", "powershell", "cmd"])
+    expect(ids("powershell.exe", "cmd.exe")).toEqual(["powershell", "cmd"])
+    expect(ids("cmd.exe")).toEqual(["cmd"])
+    expect(ids()).toEqual([])
+  })
+
+  test("默认 shell 取探测顺序的第一个可用项", () => {
+    const def = (...present: string[]) =>
+      new TerminalService({ shells: () => detectShells("win32", findIn(...present)), spawner: fakeProcesses().spawner }).info().defaultShell
+    expect(def("pwsh.exe", "powershell.exe", "cmd.exe")).toBe("pwsh")
+    expect(def("powershell.exe", "cmd.exe")).toBe("powershell")
+    expect(def("cmd.exe")).toBe("cmd")
+  })
+})
+
+// 本机有真 pwsh（Windows）时执行：管道式降级通道用真实 shell 跑一条命令——
+// 启动参数少 -NoProfile 时 pwsh 会打印一次提示符随即退出（命令一条都执行不到），本用例即守护这一点。
+const realPwsh = process.platform === "win32" ? detectShells().find((s) => s.id === "pwsh") : undefined
+
+test.if(!!realPwsh)("真机 pwsh：管道式会话能执行命令并按哨兵行收尾", async () => {
+  const svc = new TerminalService({ shells: [realPwsh!] })
+  const cwd = process.cwd()
+  const s = svc.create({ rootId: "tmp", rootAbs: cwd, cwdAbs: cwd })
+  svc.input({ id: s.id, data: "echo 你好-pwsh" })
+  let cursor = s.cursor
+  let text = ""
+  let code: number | null = null
+  const deadline = Date.now() + 20000
+  while (Date.now() < deadline) {
+    const r = svc.read(s.id, cursor)
+    cursor = r.cursor
+    text += r.text
+    if (r.exits.length) {
+      code = r.exits.at(-1)!.code
+      break
+    }
+    if (!r.alive) break
+    await new Promise((r2) => setTimeout(r2, 100))
+  }
+  svc.close(s.id)
+  expect(code).toBe(0)
+  expect(text).toContain("你好-pwsh")
+}, 30000)
 
 describe("终端会话：输出解码", () => {
   test("UTF-8 多字节序列跨输出块：不留替换字符，行内容按块拼接正确", () => {

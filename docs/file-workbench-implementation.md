@@ -727,7 +727,7 @@ Ctrl+Shift+E 仍能开关分屏；控制台零错误
 - **位置**：与 Git 面板**同槽**——同一个 `.fw-git-dock`、同一高度变量（`--git-dock-h`）与拖拽条；两个面板实例都常驻，切换只切 `.fw-dock-hidden` 类，因此 Git 的滚动位置与终端的滚动缓冲/会话都不会丢。入口：活动栏「终端」按钮（`icon('terminal')`）、`Ctrl+Alt+T`；可见性与当前视图存 `gebai.ui.dockVisible` / `gebai.ui.dockView`（无记忆时按窗口宽度，<1180px 默认收起）。
 - **后端**：`core/exec/term-session.ts`（`TerminalService`：会话表 + 有界滚动缓冲 + 哨兵解析 + 中断/回收）+ `routes/terminal.ts`（7 个端点，见设计稿 3.4）；配置 `GEBAI_TERMINAL` / `GEBAI_TERMINAL_SHELL`；沙箱非豁免用户 403、只读模式拒绝执行、每条命令写 `term.exec` 审计。
 - **前端**：`files/terminal-core.ts`（ANSI SGR / `\r` `\b` `\t` / TermBuffer / 历史，纯函数可测）+ `files/terminal.ts`（多会话标签、输入行 + ↑↓ 历史 + Ctrl+C/Ctrl+L、250ms 增量轮询、回到底部、跟随根）+ `css/terminal.css`（独立文件，与 files.css 分开以免互撞）。
-- **中文命令为什么要落盘执行**：cmd / PowerShell 从**管道**读 stdin 时按控制台 OEM/ANSI 代码页解析，UTF-8 的中文命令会被解成乱码（cmd 会停在 `More?` 未闭合状态并退出 shell）；因此含非 ASCII 的命令落成会话私有临时脚本（`{tmp}/gebai-term/{id}/cN.cmd|ps1`，UTF-8）再以 `call "…"` / `& "…"` 执行（PowerShell 会话启动时另按进程级执行策略 Bypass）。脚本随会话关闭/回收清理，最多保留最近 20 个。
+- **中文命令为什么要落盘执行**：cmd / PowerShell 从**管道**读 stdin 时按控制台 OEM/ANSI 代码页解析，UTF-8 的中文命令会被解成乱码（cmd 会停在 `More?` 未闭合状态并退出 shell）；因此含非 ASCII 的命令落成会话私有临时脚本（`{tmp}/gebai-term/{id}/cN.cmd|ps1`，UTF-8；`.ps1` 带 **UTF-8 BOM**——Windows PowerShell 5.1 对无 BOM 文件按本地 ANSI 代码页解码，脚本内中文会变乱码，pwsh 7 亦认 BOM）再以 `call "…"` / `& "…"` 执行（PowerShell 会话启动时另按进程级执行策略 Bypass）。脚本随会话关闭/回收清理，最多保留最近 20 个。
 
 **Git 面板细节**
 

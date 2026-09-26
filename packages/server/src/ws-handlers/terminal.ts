@@ -95,7 +95,7 @@ export const terminalHandlers: Record<string, WsHandler> = {
     ensureDir(cwdAbs)
     const shell = pickShell(d, String(p.shell ?? ""))
     if (!shell) {
-      return reply(false, undefined, "本机未检测到可用的 Shell（Windows 探测 cmd.exe / powershell.exe / pwsh.exe，POSIX 探测 /bin/bash、/bin/sh、$SHELL）")
+      return reply(false, undefined, "本机未检测到可用的 Shell（Windows 依次探测 pwsh.exe / powershell.exe / cmd.exe，POSIX 探测 /bin/bash、/bin/sh、$SHELL）")
     }
     const cols = Number(p.cols) || 120
     const rows = Number(p.rows) || 30
