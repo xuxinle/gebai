@@ -112,6 +112,23 @@
       ]
     },
     {
+      "id": "model-qwen36-ud-iq3xxs",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf",
+      "size": 14069266720,
+      "sha256": "36f9ec0e4c775f6efd3a61c1ea76f0875128469c3d012e3d9e2495a90e7a7150",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "Qwen3.6-35B-A3B（qwen35moe，41 层含 MTP；unsloth UD-IQ3_XXS 13.10GB）—— **qwen36-a3b 档默认模型**：全 GPU 驻留、加载 11s、解码 127-141 t/s、显存 14.5GB",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/repo?Revision=master&FilePath=Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf"
+        }
+      ]
+    },
+    {
       "id": "model-q2kxl",
       "kind": "file",
       "base": "resources",

@@ -145,6 +145,9 @@ infer/
     smoke-test.ps1       端到端冒烟（引擎→加载→生成→API，小模型秒级回归）
     verify.ps1           质量基线回归（固定种子/提示词，配置间输出对比）
     inspect-gguf.py      GGUF 结构与张量布局解析（支持未下载完成的文件）
+    fetch-hf-parallel.py 大仓库并发分片下载（断点续传 + 预算分批；`--only` 选单文件）
+    run-convert.py       HF→GGUF 转换入口（自动挂 gguf-py 与源码树到 PYTHONPATH）
+    prepare-convert-mirror.py  分片命名不规范的 HF 仓库 → 转换器友好镜像（硬链接 + 重写索引）
   bench/reports/         基准报告与启动记录（argv 全量留档，可审计可回放）
   quant/                 自有量化配方（imatrix 重配比）
   engine/                引擎 fork、构建说明与补丁
@@ -194,6 +197,7 @@ pwsh -File infer/scripts/restore.ps1 -Only model-iq4xs
 | `model-iq2xxs` | 10.71 GB | — | IQ2_XXS —— 显存更紧时的回退（价值只在腾显存换并发） |
 | `model-iq3s` | 13.96 GB | — | IQ3_S —— balanced 档（质量更优） |
 | `model-iq4xs` | 16.56 GB | — | IQ4_XS —— quality 档 |
+| `model-qwen36-ud-iq3xxs` | 13.10 GB | — | **Qwen3.6-35B-A3B（unsloth UD-IQ3_XXS）—— `qwen36-a3b` 档**（见 6.14） |
 | `imatrix-unsloth` | 0.18 GB | — | 重要性矩阵（自有量化配方用） |
 | `engine-vulkan-win` / `engine-cpu-win` | 0.03 / 0.02 GB | — | 回退与对照后端 |
 | `engine-cuda-wsl` / `engine-cudart-wsl` | 0.16 / 0.55 GB | — | WSL2 跨平台对照（解压在 WSL 侧，见 `scripts/wsl-setup-linux.sh`） |
@@ -868,6 +872,29 @@ CPU 采样必须把 logits 回传；这正是 `-bs` 后端采样能消除的那�
 | 质量标尺 | 三档的困惑度/任务级对比（`verify.ps1` 已备好固定种子回归），用于把「档位制」建立在质量数据上而非位宽直觉 |
 | IQ4_XS 的 `-ot` 张量级 offload | 只把 `ffn_down_exps` 留 CPU（而非按层整块），CPU 侧流量 173 MiB/token——需实测是否优于按层方案 |
 
+### 6.14 Qwen3.6-35B-A3B：第二个可用模型（2026-09-25 落地）
+
+同一张 16GB 卡上跑通的**另一个** 35B-A3B MoE（`qwen35moe` 同架构族，官方 Qwen3.6 发布），
+档位 `qwen36-a3b`。与 `fast` 档同量级、可直接互换，便于按任务挑选。
+
+| 项 | 实测值 |
+|---|---|
+| 模型 | `Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf`（13.10 GB，unsloth UD 现成档，来源见 `assets.manifest.json`） |
+| 架构 | 41 层（40 主 + 1 MTP）/ 256 专家激活 8+1 / 上下文原生 262144 |
+| 显存 | **14 779 / 16 376 MiB**（余量约 1.6 GB） |
+| 加载 | **11 s** |
+| 解码 | **127.6 ~ 141.3 t/s**（服务端计时；短输出 127.6、带思维链 141.3） |
+| 中文问答 | ✅ 正常 |
+| 结构化输出 | ✅ schema→GBNF 约束解码，一次通过 |
+| 工具调用 | ✅ `finish=tool_calls`，参数 `{"city":"北京"}` 正确 |
+| 思维链 | ✅ `reasoning_content` 2250 字符，与正文分离 |
+| 数学推理 | ✅ 鸡兔同笼答对（23 鸡 / 12 兔） |
+
+**它也是推理型模型**：思维链可吃掉大部分输出预算（实测 900 token 全被思考占满、正文为空），
+所以 `enable_thinking=false` 仍应是默认（与第十章同结论）。
+
+**选型建议**：`qwen36-a3b` 与 `fast`（AgentWorld）互换；前者为通用/编码向，后者为 AgentWorld 工具调用向。
+
 ---
 
 ## 七、引擎改造的启动条件
@@ -934,6 +961,8 @@ llama.cpp 的 qwen3_5 支持仍有未闭合条目。**当前使用方式下均�
 | #26916 | 混合模型加载报 `tensor 'blk.32.attn_norm.weight' not found` | 加载期校验，锁定 stride/层映射 |
 | #28166 | 混合递归模型的 mrope 位置警告 | 纯文本场景影响小，持续跟踪 |
 | #28879 | GDN 架构上 perplexity 非精度单调（F16 反而不如 Q4_K_M） | **关键**：不盲信"更高精度更好"，用实测质量标尺选档 |
+| （本次新发现）**分片命名探测过窄** | `conversion/base.py:232-236` 先按 `model*.safetensors` 前缀探测分片；若仓库用 `layers-N.safetensors` / `outside.safetensors` 这类命名（Qwen3.6 官方 FP8 仓即如此），会退化为找 `pytorch_model.bin.index.json`，最终 **0 张量**——“转换成功”但只导出词表空壳（10.9MB），不报错 | 用 `scripts/prepare-convert-mirror.py` 造硬链接镜像绕开（零拷贝）；值得提上游 issue |
+| （本次新发现）**i-quant 的 imatrix 覆盖缺口** | `IQ3_XXS` 对每张量强制要求 imatrix（`llama-quant.cpp:1264`）；混用兄弟模型 imatrix 时，对方没有的层（如 Qwen3.6 的 MTP 层 `blk.40.*`，共 40 张量）会跑到末尾才 bail out | `requires_imatrix` 按**覆盖后目标类型**判定（`llama-quant.cpp:1095`）→ `--tensor-type 'blk\.40\..*=q4_K'` 可绕过（代价 0.30→0.44 GiB）；治本是在本模型上自算 imatrix |
 
 **构建工具链注意**：CUDA 12.9 的 nvcc 只支持 MSVC ≤2022（宿主编译器硬校验），
 本机 VS2026（MSVC 14.51）会触发 `unsupported Microsoft Visual Studio version`，

@@ -30,6 +30,25 @@
       "parallel": 1,
       "extra_args": ["--jinja", "-bs"]
     },
+    "qwen36-a3b": {
+      "engine": "win-cuda-12.4-x64",
+      "//": "【Qwen3.6-35B-A3B（unsloth UD-IQ3_XXS 现成档）】13.10 GB 全 GPU 驻留。与 fast 档同量级量化，参数直接沿用 fast（同架构 qwen35moe、同尺寸，仅词表/层结构微异）。",
+      "//source": "来自 modelscope: unsloth/Qwen3.6-35B-A3B-MTP-GGUF（含 imatrix 与 mmproj）；本档仅用文本权重，MTP 头随 GGUF 存在但投机已全局否定（见 //spec）。",
+      "//note": "首次启用的实测数值待回填（显存 / tg / pp）。",
+      "model": "Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf",
+      "ctx": 32768,
+      "n_gpu_layers": 99,
+      "n_cpu_moe": 0,
+      "flash_attn": "on",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q8_0",
+      "threads": 14,
+      "batch": 2048,
+      "ubatch": 512,
+      "spec_type": null,
+      "parallel": 1,
+      "extra_args": ["--jinja", "-bs"]
+    },
     "balanced": {
       "engine": "win-cuda-12.4-x64",
       "//": "【均衡档】IQ3_S（3.96bpw，ffn_down 为 IQ4_XS 同款位宽）全 GPU：bench tg 138 / 服务 118 t/s。",
