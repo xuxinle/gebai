@@ -351,7 +351,7 @@ describe("两级研判端到端", () => {
     expect(job.options.l2.enabled).toBe(true)
   })
 
-  test("未启用 L2：低置信度条目如实标记待精审，不谎报成功", async () => {
+  test("上升但未注入执行器：低置信度条目如实标记待精审，不谎报成功", async () => {
     const jobDir = tempJobDir("nol2")
     const l1 = l1Fetch({ a: () => toolReply({ result: { label: "调度" }, confidence: 0.2, reason: "疑似", evidence_index: ["x"] }) })
     const summary = await runTriage({
@@ -367,8 +367,32 @@ describe("两级研判端到端", () => {
     expect(summary.pending_review).toBe(1)
     const r = summary.results[0]
     expect(r.ok).toBe(false)
-    expect(r.error).toContain("未启用 L2")
-    expect(summary.notes.join(" ")).toContain("未启用 L2")
+    expect(r.error).toContain("待精审")
+    expect(summary.notes.join(" ")).toContain("未注入精审执行器")
+  })
+
+  test("escalate=false：低置信度结论按小模型原样输出（不上升、不标失败）", async () => {
+    const jobDir = tempJobDir("noesc")
+    const l1 = l1Fetch({ a: () => toolReply({ result: { label: "调度" }, confidence: 0.2, reason: "只有部分线索", evidence_index: ["queue=blocked"] }) })
+    const summary = await runTriage({
+      user: "tester",
+      jobId: "noesc",
+      jobDir,
+      items: [{ id: "a", features: "f" }],
+      labelEnum: LABELS,
+      l1: { baseUrl: "http://l1", fetchImpl: l1.fetchImpl },
+      escalate: false, // 不注入 l2：只跑小模型
+    })
+    // 结论按原样输出：置信度如实偏低，但已定案（不待精审、不计失败）
+    expect(summary.adopted).toBe(1)
+    expect(summary.pending_review).toBe(0)
+    expect(summary.failed).toBe(0)
+    const r = summary.results[0]
+    expect(r.ok).toBe(true)
+    expect(r.layer).toBe("L1")
+    expect(r.confidence).toBe(0.2)
+    expect(r.result).toEqual({ label: "调度" })
+    expect(summary.notes.join(" ")).toContain("按小模型原样输出")
   })
 
   test("maxItems 限制精审条数，其余标记待精审", async () => {
@@ -419,7 +443,7 @@ describe("两级研判端到端", () => {
     expect(summary.failed).toBe(1)
     const b = summary.results.find((r) => r.id === "b")!
     expect(b.ok).toBe(false)
-    expect(b.error).toContain("L2 精审未返回")
+    expect(b.error).toContain("精审未返回")
     expect(summary.notes.join(" ")).toContain("不是可解析的 JSON")
   })
 

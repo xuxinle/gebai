@@ -90,7 +90,7 @@ export interface TriageSummary {
   job_id: string
   job_dir: string
   total: number
-  /** L1 即采纳的条数。 */
+  /** 小模型即定案的条数（置信度达标采纳；`escalate=false` 时含低置信度直出）。 */
   adopted: number
   /** 转 L2 精审的条数（O(k)，k ≪ N 是这套模式的价值所在）。 */
   escalated: number
@@ -112,6 +112,9 @@ export type TriageL2Runner = (req: {
   prompt: string
   agents?: string[]
   model?: string
+  /** 独立端点（支持 env 覆盖的通道据此落实；不支持的通道须显式报错而非静默忽略）。 */
+  apiBase?: string
+  apiKey?: string
   timeoutMs?: number
 }) => Promise<string>
 
@@ -149,6 +152,10 @@ export interface TriageL2Options {
   agents?: string[]
   /** 模型/路由名（会话/子会话形态下生效）。 */
   model?: string
+  /** 精审模型的独立端点（缺省沿用当前会话/服务的主模型端点；不支持的通道必须显式报错，不静默忽略）。 */
+  apiBase?: string
+  /** 精审模型端点的鉴权密钥（配合 apiBase）。 */
+  apiKey?: string
   /** 单次研判最多精审多少条（缺省 20；其余按"证据不足"标记，避免无界成本）。 */
   maxItems?: number
   /** 每轮精审送入多少条（缺省 5；条目多时分轮）。 */
@@ -180,6 +187,11 @@ export interface TriageOptions {
   minEvidenceChars?: number
   /** 白名单标签：命中即直接采纳，不看置信度（如"无异常"）。 */
   acceptLabels?: string[]
+  /**
+   * 低置信度是否上升启用 agent 会话兜底（缺省 true）。
+   * `false` = 只跑小模型：低置信度结论按原样输出（置信度如实偏低），不标待精审/失败。
+   */
+  escalate?: boolean
   l2?: TriageL2Options
   /** 落盘目录（缺省 `{GEBAI_HOME}/users/{user}/triage/{job_id}`）。 */
   jobDir?: string

@@ -16,7 +16,7 @@
  *   * 密钥只在本层进出，任何**人读输出**都必须经 `targetSummary`（掩码，如 `sk-***abc`），
  *     job.json 也只落目标名与不含密钥的 base_url。
  */
-import type { Tool, ToolContext, ToolSchema } from "@gebai/sdk"
+import type { Tool, ToolSchema } from "@gebai/sdk"
 import { probe, type ProbeResult } from "./api"
 import { baseUrl, defaultPort, inferHome, readServerStates, type ServerState } from "./paths"
 
@@ -189,7 +189,7 @@ function unknownTargetError(key: string, targets: TargetSpec[], errors: string[]
  */
 export function resolveTarget(
   name: string | undefined,
-  ctx: ToolContext,
+  ctx: { env?: Record<string, string> } | undefined,
   explicitKey?: string,
 ): InferTarget | { error: string } {
   const env = ctx?.env ?? {}

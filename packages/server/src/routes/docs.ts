@@ -113,10 +113,12 @@ const SUMMARIES: Record<string, Record<string, string>> = {
   "/api/v1/git/push": { post: "推送" },
   "/api/v1/git/init": { post: "初始化仓库" },
   "/api/v1/triage/analyze": {
-    post: "两级研判：批量数据 → 小模型粗筛（结构化 + 置信度）→ 低置信度转大模型精审兜底 → 批量结果",
+    post:
+      "大小模型协同：批量数据 → 小模型粗筛（结构化 + 置信度）→ 按 escalate 决定是否交大模型精审兜底 → 结论数组。" +
+      "参数与 triage_run 工具完全一致（items/target/schema/threshold/escalate + l1_*/l2_*）",
   },
   "/api/v1/triage/jobs/{id}": { get: "研判任务进度/汇总" },
-  "/api/v1/triage/jobs/{id}/results": { get: "研判任务逐条结果（可按层/成败过滤）" },
+  "/api/v1/triage/jobs/{id}/results": { get: "研判任务逐条结论（可按层/成败过滤）" },
 }
 
 /** Hono 路由的路径参数形态 `:id` → OpenAPI 的 `{id}`；根路径保持 `/`。 */

@@ -243,7 +243,10 @@ interface ParsedL2 {
 }
 
 /** 组 L2 精审提示词：注入 L1 初判与证据索引，要求取证后给出同 schema 的结论 + 取证链。 */
-export function buildL2Prompt(entries: L2Entry[], opts: { labelEnum?: string[]; businessSchema?: Record<string, unknown> }): string {
+export function buildL2Prompt(
+  entries: L2Entry[],
+  opts: { labelEnum?: string[]; businessSchema?: Record<string, unknown>; agents?: string[] },
+): string {
   const blocks = entries
     .map((e) =>
       [
@@ -264,6 +267,9 @@ export function buildL2Prompt(entries: L2Entry[], opts: { labelEnum?: string[]; 
   // 注意：条目块里只给 `id=xxx`（不再另加“条目 N”序号）——否则模型会把序号当 id 回填。
   return [
     "下面是待复核的条目。请对每一条主动取证后给出最终结论。",
+    opts.agents?.length
+      ? `【准备】先装载以下领域子Agent 以便取证：${opts.agents.join("、")}（用 agent_load；已装载则跳过）。`
+      : "",
     "",
     blocks,
     "",
@@ -487,20 +493,29 @@ export async function runTriage(opts: TriageOptions): Promise<TriageSummary> {
     }
   }
 
+  /** `escalate=false` = 只跑小模型：低置信度结论按原样输出，不上升也不标待精审。 */
+  const escalateOn = opts.escalate !== false
   notes.push(
-    `分流：${adopted} 条 L1 采纳（置信度 ≥ ${threshold} 且证据非空）、${escalate.length} 条转 L2 精审。`,
+    `分流：${adopted} 条小模型采纳（置信度 ≥ ${threshold} 且证据非空）、${escalate.length} 条${
+      escalateOn ? "上升兜底" : "低置信度（未上升兜底）"
+    }。`,
   )
 
   // ── ③ L2 精审兜底（大模型 + 领域工具取证） ──────────────────────────────
   const l2: TriageL2Options | undefined = opts.l2
-  const l2Enabled = Boolean(l2?.runner) && l2?.enabled !== false
+  const l2Enabled = escalateOn && Boolean(l2?.runner) && l2?.enabled !== false
   const maxL2 = Math.max(0, l2?.maxItems ?? TRIAGE_DEFAULT_MAX_L2)
   const queue = l2Enabled ? escalate.slice(0, maxL2) : []
   if (l2Enabled && escalate.length > queue.length) {
     notes.push(`超 maxItems=${maxL2} 的 ${escalate.length - queue.length} 条本次未精审，以「待精审」返回。`)
   }
-  if (!l2Enabled && escalate.length) {
-    notes.push("未启用 L2（未注入精审执行器）：低置信度条目仅标记待精审，未做兜底。")
+  if (!escalateOn && escalate.length) {
+    notes.push(
+      `未上升兜底（escalate=false）：${escalate.length} 条低置信度结论按小模型原样输出，置信度如实偏低、未标失败。`,
+    )
+  }
+  if (escalateOn && !l2Enabled && escalate.length) {
+    notes.push("未注入精审执行器：低置信度条目仅标记待精审，未做兜底。")
   }
 
   const parsedL2 = new Map<string, ParsedL2>()
@@ -517,9 +532,11 @@ export async function runTriage(opts: TriageOptions): Promise<TriageSummary> {
         // 因此这里把系统段落前置进用户提示——否则「主动取证／允许说证据不足／可推翻初判」会丢失。
         const systemBlock = l2?.system ?? DEFAULT_L2_SYSTEM
         const output = await l2!.runner({
-          prompt: `${systemBlock}\n\n${buildL2Prompt(chunk, { labelEnum: opts.labelEnum, businessSchema: opts.schema })}`,
+          prompt: `${systemBlock}\n\n${buildL2Prompt(chunk, { labelEnum: opts.labelEnum, businessSchema: opts.schema, agents: l2!.agents })}`,
           agents: l2!.agents,
           model: l2!.model,
+          apiBase: l2!.apiBase,
+          apiKey: l2!.apiKey,
           timeoutMs: l2!.timeoutMs,
         })
         appendFileSync(l2Path, `${JSON.stringify({ ids: chunk.map((c) => c.id), output })}\n`, "utf-8")
@@ -563,6 +580,24 @@ export async function runTriage(opts: TriageOptions): Promise<TriageSummary> {
       })
       continue
     }
+    // 未上升兜底：小模型结论即最终结论（置信度如实偏低，不因未达标而标失败）
+    if (!escalateOn) {
+      if (e.l1.ok) adopted++
+      await emit({
+        id: e.id,
+        title: e.title,
+        layer: "L1",
+        ok: e.l1.ok,
+        result: e.l1.result,
+        confidence: e.l1.confidence,
+        reason: e.l1.reason,
+        evidence_index: e.l1.evidence_index,
+        l1: e.l1,
+        error: e.l1.ok ? undefined : `小模型未取得可用结论且未上升兜底：${e.l1.error ?? "未调用输出工具"}`,
+        meta: items.find((it) => it.id === e.id)?.meta,
+      })
+      continue
+    }
     if (!queuedIds.has(e.id)) pendingReview++
     else failed++
     await emit({
@@ -576,10 +611,10 @@ export async function runTriage(opts: TriageOptions): Promise<TriageSummary> {
       evidence_index: e.l1.evidence_index,
       l1: e.l1,
       error: queuedIds.has(e.id)
-        ? "L2 精审未返回该条结果"
+        ? "精审未返回该条结论"
         : !l2Enabled
-          ? "低置信度需 L2 精审，但本次未启用 L2"
-          : "转 L2 精审（超出 maxItems，本次未执行）",
+          ? "低置信度待精审（本次未注入精审执行器）"
+          : "低置信度待精审（超出 maxItems，本次未执行）",
       meta: items.find((it) => it.id === e.id)?.meta,
     })
   }
