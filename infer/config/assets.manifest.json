@@ -180,6 +180,57 @@
       ]
     },
     {
+      "id": "model-qwen38-ud-iq4xs",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen3.8-27B-UD-IQ4_XS.gguf",
+      "size": 14252845984,
+      "sha256": "40fac4050e940397dbf13087afd50f4734a11805bf9d65ef8ddd7483470e6199",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "Qwen3.8-27B（dense 27B 视觉语言模型，qwen35 架构、64 层混合 Gated-DeltaNet；unsloth UD-IQ4_XS 13.27GB）—— **qwen38-27b 档默认模型**：16GB 显存下唯一能整卡装进的最高质量档（更高一档 Q4_K_XL 16.35GB 必溢出到 CPU）；加载 11s、解码 42.2 t/s、显存 15 349/16 376 MiB；GEBAI 端到端 8.4~10s（15K prompt，prefill 1870 t/s）。⚠ 虽含 18 个 MTP 张量，但实测开启后 draft context 多吃 657 MiB 会把 prefill 拖垮 10 倍（1870→190 t/s），故本档已关闭 MTP。",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.8-27B-GGUF/repo?Revision=master&FilePath=Qwen3.8-27B-UD-IQ4_XS.gguf"
+        }
+      ]
+    },
+    {
+      "id": "mmproj-qwen38-f16",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/mmproj-F16.gguf",
+      "size": 927607488,
+      "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "Qwen3.8-27B 的视觉投影塔（mmproj，0.86GB）—— 与 Qwen3.8-27B 权重配套；用 --mmproj 挂载后走 llama.cpp mtmd 路径启用图像/视频输入。当前各档位均未挂载（纯文本）。",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.8-27B-GGUF/repo?Revision=master&FilePath=mmproj-F16.gguf"
+        }
+      ]
+    },
+    {
+      "id": "model-qwen38-ud-iq3xxs",
+      "kind": "file",
+      "base": "resources",
+      "path": "models/infer/Qwen3.8-27B-UD-IQ3_XXS.gguf",
+      "size": 10934860704,
+      "sha256": "c0b7c3038681ed2e3040456c1dd45f9858b6c2290bed172c70388a94874f3eee",
+      "required": false,
+      "license": "Apache-2.0",
+      "description": "Qwen3.8-27B 降档量化（10.18 GiB）—— **qwen38-27b-128k 档默认模型**：为 128K 上下文腾显存而降档（IQ4_XS 在 128K 下超显存上限）。实测 ctx 131072 + q4_0 KV + MTP：加载 8~11s、显存 15 628~15 809 MiB、prefill 1600~1626 t/s、decode 52.8~53.5 t/s；长上下文实测 45K/91K/122K token 全通；质量未见退化。比 IQ4_XS 省 2.4 GiB，是 16GB 卡上跑 128K 的关键。",
+      "sources": [
+        {
+          "kind": "modelscope",
+          "url": "https://modelscope.cn/api/v1/models/unsloth/Qwen3.8-27B-GGUF/repo?Revision=master&FilePath=Qwen3.8-27B-UD-IQ3_XXS.gguf"
+        }
+      ]
+    },
+    {
       "id": "model-iq4xs",
       "kind": "file",
       "base": "resources",
