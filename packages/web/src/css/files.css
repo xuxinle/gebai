@@ -804,17 +804,17 @@ button.fw-status-item:hover {
   color: var(--text);
 }
 
+/* 变更计数格（`1暂存` `2改动` `3新增` 这种“数字 + 两字词”）。
+   用着界面字体而不是等宽字体（`--font-mono`）：中文没有等宽字形，混在用等宽的数字里会很难看。 */
 .fw-status-changes {
   color: var(--warning);
-  font-family: var(--font-mono);
   font-size: 10.5px;
 }
 
-/* 冲突计数（`N!`）用危险色 + 加粗：它比其他计数（已暂存/未暂存/未跟踪）高一级——那些是“待处理”，
+/* 冲突计数（`1冲突`）用危险色 + 加粗：它比其他计数（暂存/改动/新增）高一级——那些是“待处理”，
    冲突是“不解决就提交不了”（merge/rebase 卡在半途）。同格里唯一的红字，一眼能担到。 */
 .fw-status-conflict {
   color: var(--danger);
-  font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 600;
 }
