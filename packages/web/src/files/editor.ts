@@ -32,6 +32,8 @@ import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-e
 import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols"
 import { installLspProviders, hasLsp } from "./lsp"
 import { readWordWrap, saveWordWrap } from "./wrap"
+import { readMinimap, saveMinimap } from "./minimap"
+import { installContextMenuPrune } from "./context-menu"
 import { buildChatSnippet, formatAbsRef, normalizeLineRange, type LineRange } from "./editor-ref"
 import { showMenu, toast, type MenuItem } from "./ui"
 
@@ -46,10 +48,13 @@ export interface EditorOptions {
   value: string
   language: string
   readOnly: boolean
-  /** 小地图（文件工作台默认开启，窄屏由 CSS 折衷） */
-  minimap?: boolean
   /** 自动换行覆盖项；缺省用模块级开关（`isWordWrap()`：用户偏好，轮盘 / Alt+Z 切换） */
   wordWrap?: boolean
+  /**
+   * 小地图覆盖项；缺省用模块级开关（`isMinimap()`：用户偏好，轮盘切换，**默认开启**）。
+   * 窄栏里的只读对照（合并 / 暂存窗格）显式传 `false`——那几处不听用户偏好。
+   */
+  minimap?: boolean
   /** 大文件降级阈值（字符数）：超过则关闭小地图/括号彩化/词法高亮，保流畅 */
   largeFileChars?: number
   /**
@@ -131,6 +136,11 @@ export interface EditorHandle {
   isReadOnly(): boolean
   /** 自动换行开关（查看/编辑两态都即时生效） */
   setWordWrap(on: boolean): void
+  /**
+   * 小地图开关（仅**代码编辑器**有效）。
+   * 大文件（超阈值降级）**不会**被打开——那正是为了性能刻意关掉的，偏好不该把它顶回来。
+   */
+  setMinimap(on: boolean): void
   focus(): void
   layout(): void
   revealLine(line: number, column?: number): void
@@ -209,6 +219,8 @@ export interface DiffNav {
 
 let monacoPromise: Promise<Monaco | null> | null = null
 let monacoRef: Monaco | null = null
+/** 是否真的加载失败/超时过（对外读法：`monacoLoadFailed()`）。 */
+let monacoFailed = false
 /** 已插入 head 的 AMD loader script（失败/超时后清理或复用，防重试时叠加多个 loader）。 */
 let monacoScript: HTMLScriptElement | null = null
 let currentTheme = "gebai-dark"
@@ -244,6 +256,39 @@ export function toggleWordWrap(): boolean {
   return wrapOn
 }
 
+/**
+ * 小地图（minimap）：与自动换行**同一套机制**（模块级偏好 + 活动实例注册）——为何是模块级而不走
+ * 每个编辑器的入参，理由见上（用户级偏好、多个切换点、同时可能十几个实例活着）。
+ *
+ * 三处与自动换行不同，都是刻意定的：
+ * ① **默认开启**（偏好模块里存储口径反过来：关闭才写键）；
+ * ② **只作用于代码编辑器**：差异视图恒定关闭小地图（那个视图的“地图”职责由右侧概览尺承担，
+ *    两侧再各挂一张缩略图只是噪声），合并 / 暂存窗格与它们同一取向；
+ * ③ **不覆盖显式传参**：视图自己传了 `minimap`（合并 / 暂存传 false）就不听用户偏好——
+ *    那些是窄栏里的只读对照，再塞一张缩略图真放不下。见下面的 `opts.minimap ?? minimapOn`。
+ */
+let minimapOn = readMinimap()
+type MinimapAware = { setMinimap: (on: boolean) => void }
+const minimapTargets = new Set<MinimapAware>()
+
+/** 当前开关（轮盘按钮据此显示状态）。 */
+export function isMinimap(): boolean {
+  return minimapOn
+}
+
+/** 设置开关：写回偏好并应用到所有活动代码编辑器。 */
+export function setMinimap(on: boolean): void {
+  minimapOn = on
+  saveMinimap(on)
+  for (const t of minimapTargets) t.setMinimap(on)
+}
+
+/** 切换开关并返回新状态（轮盘按钮共用）。 */
+export function toggleMinimap(): boolean {
+  setMinimap(!minimapOn)
+  return minimapOn
+}
+
 /** Monaco vendor 目录（`public/vendor/monaco/vs`）。 */
 export function monacoVsPath(): string {
   return appPath("/vendor/monaco/vs")
@@ -275,9 +320,12 @@ export function loadMonaco(timeoutMs = 25000): Promise<Monaco | null> {
         installLspProviders(m)
       }
       monacoRef = m
+      if (m) monacoFailed = false
       resolve(m)
       if (m) return
-      // 失败/超时：撤销单例缓存（下次调用可重试）并清掉 loader script（重试时重新插入）
+      /* 失败/超时：记下“这次真的没加载出来”（状态栏据此提示降级，见 `monacoLoadFailed`），
+         并撤销单例缓存（下次调用可重试）、清掉 loader script（重试时重新插入）。 */
+      monacoFailed = true
       queueMicrotask(() => {
         if (monacoPromise === promise) monacoPromise = null
         monacoScript?.remove()
@@ -567,7 +615,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     theme: "gebai",
     readOnly: opts.readOnly,
     automaticLayout: true,
-    minimap: { enabled: !large && (opts.minimap ?? true), maxColumn: 90, renderCharacters: false },
+    minimap: { enabled: !large && (opts.minimap ?? minimapOn), maxColumn: 90, renderCharacters: false },
     fontFamily: EDITOR_FONT_FAMILY,
     fontSize: EDITOR_FONT_SIZE,
     lineHeight: 20,
@@ -826,6 +874,8 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     setReadOnly: (ro) => ed.updateOptions({ readOnly: ro }),
     isReadOnly: () => ed.getOption(monaco.editor.EditorOption.readOnly),
     setWordWrap: (on) => ed.updateOptions({ wordWrap: on ? "on" : "off" }),
+    // 大文件仍不给开（`!large` 是性能取舍，偏好不覆盖它）
+    setMinimap: (on) => ed.updateOptions({ minimap: { enabled: on && !large } }),
     focus: () => ed.focus(),
     layout: () => ed.layout(),
     revealLine: (line, column = 1) => {
@@ -896,6 +946,8 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     refreshMenu: () => installMenuActions(handle),
     dispose: () => {
       wrapTargets.delete(handle)
+      minimapTargets.delete(handle)
+      menuPrune.dispose()
       metrics.dispose()
       // 菜单项是**全局注册表**里的条目（见 installMenuActions）：不在这里回收，重建编辑器就多一组重项
       for (const d of menuDisposables) d.dispose()
@@ -911,6 +963,9 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
   // 句柄齐了才装菜单：自定义组的文案/可用性按**编辑器自身能力**定（见 EditorMenuHooks.groups）
   installMenuActions(handle)
   wrapTargets.add(handle)
+  minimapTargets.add(handle)
+  // 剪掉 Monaco 自带、工作台用不到的右键菜单条目（Peek / Copy / Command Palette，见 context-menu.ts）
+  const menuPrune = installContextMenuPrune(ed.getDomNode() ?? edHost)
   return handle
 }
 
@@ -1138,6 +1193,8 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     },
     markClean: () => {},
     setBlame: () => {},
+    // 降级实现（highlight.js / textarea）没有小地图：空实现，也不进 minimapTargets 注册表
+    setMinimap: () => {},
     // 降级实现的自绘菜单每次弹出前现取（见上面的 contextmenu），没有需要重装的东西
     refreshMenu: () => {},
     listSymbols: async () => flattenSymbols((await extractSymbolsAsync(area.value, lang)).symbols),
@@ -1318,6 +1375,7 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
       ed.getOriginalEditor().updateOptions({ wordWrap: v })
       ed.getModifiedEditor().updateOptions({ wordWrap: v })
     },
+    // 差异视图恒无小地图（见 minimapOn 的说明）：开关对它无效，也不进 minimapTargets
     dispose: () => {
       wrapTargets.delete(handle)
       metrics.dispose()
@@ -1337,4 +1395,17 @@ export async function createDiffEditor(host: HTMLElement, opts: DiffOptions): Pr
 /** 是否已在当前页面加载出 Monaco（用于状态栏提示与测试）。 */
 export function monacoReady(): boolean {
   return !!monacoRef
+}
+
+/**
+ * Monaco 是否**真的加载失败/超时**（`loadMonaco()` 返回 null 时为真）。
+ *
+ * 为何要跟 `monacoReady()` 分开：后者问的是“**已经**加载好了吗”，没加载好包含两种情况——
+ * “还在预热（1MB 脚本正在下）”与“vendor 缺失/加载失败”。状态栏原先拿 `!monacoReady()` 当降级依据，
+ * 于是**预热那几十毫秒~几秒里会闪一个「轻量模式」**（实测：只打开目录根、还没打开任何文件时，
+ * 状态栏就挂着「轻量模式」）——用户看到会以为 Monaco 坏了。现在提示只看这个标志：没加载完就什么都不说。
+ * 失败后再次调用 `loadMonaco()` 成功会把它清回 false（重试可用）。
+ */
+export function monacoLoadFailed(): boolean {
+  return monacoFailed
 }

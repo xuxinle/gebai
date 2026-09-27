@@ -131,6 +131,9 @@ const ICONS: Record<string, string> = {
   // 转到符号（大纲）：缩进的短横线 + 名字条，形状与编辑器大纲一致
   symbols: '<path d="M2.6 4h2.2M7 4h6.4M5 8h2.2M9.4 8h4M5 12h2.2M9.4 12h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
   wrap: '<path d="M2 4h12M2 8h8.6a2.4 2.4 0 010 4.8H7.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M9.6 10.7L7.4 12.9l2.2 2.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  /* 小地图（代码右侧缩略图）：编辑区轮廓 + 右缘实心缩略带 + 左侧两行文字示意。
+     与「自动换行」同属**显示开关**，图标不随开关变（开启态靠轮盘的 .active 底色表达，同其他开关）。 */
+  minimap: '<rect x="2" y="3" width="12" height="10" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="10.2" y="4.6" width="2.5" height="6.8" rx="0.7" fill="currentColor"/><path d="M4.3 6.2h4.2M4.3 8.4h3.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
 }
 
 /** 图标元素缓存：目录树每行 1~2 个图标，逐次 `innerHTML` 解析 SVG 是纯浪费（克隆已有节点即可）。 */

@@ -768,6 +768,18 @@ button.fw-status-item {
   border-radius: 3px;
 }
 
+/* 状态栏里的根名限宽 + 省略号。
+   为何要限：会话根的 `name` 就是**会话标题**（可长达几十字），而这一格是 pri1（窄面板下也不隐），
+   不设上限会把它右侧的所有条目全顶出屏幕（状态栏的 `overflow:hidden` 只能兜住溢出、兜不住挤压）。
+   160px ≈ 13 个汉字 / 25 个西文字符——够认出是哪个项目/会话；完整路径在悬浮里。
+   短名字（如「歌白」）不受影响：max-width 只是上限，不会把格子撑宽。 */
+.fw-status-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 button.fw-status-item:hover {
   background: var(--bg-hover);
   color: var(--text);
@@ -796,6 +808,15 @@ button.fw-status-item:hover {
   color: var(--warning);
   font-family: var(--font-mono);
   font-size: 10.5px;
+}
+
+/* 冲突计数（`N!`）用危险色 + 加粗：它比其他计数（已暂存/未暂存/未跟踪）高一级——那些是“待处理”，
+   冲突是“不解决就提交不了”（merge/rebase 卡在半途）。同格里唯一的红字，一眼能担到。 */
+.fw-status-conflict {
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
 }
 
 .fw-grow {

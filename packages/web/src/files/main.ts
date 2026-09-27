@@ -21,10 +21,12 @@ import "../css/wheel.css"
 // 快速打开面板（VSCode Quick Open 同款）的样式
 import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
-import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type EditorMenuGroup, type EditorMenuItem, type BlameLine } from "./editor"
+import { createEditor, isMinimap, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoLoadFailed, toggleMinimap, toggleWordWrap, type EditorHandle, type EditorMenuGroup, type EditorMenuItem, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
 import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, notifySaved, setLspNotifier, setLspOpener, setLspSessionProvider, type LspJumpTarget } from "./lsp"
 import { wordWrapTitle } from "./wrap"
+import { minimapTitle } from "./minimap"
+import { branchTitle, changeParts } from "./git-counts"
 import { installWorkbenchKeys, workbenchKeymap } from "./keymap-wb"
 import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope } from "../keymap"
 import type { KeyBinding } from "../keymap"
@@ -1657,6 +1659,9 @@ function renderTabActions(box: HTMLElement): void {
   // 自动换行是**全局显示开关**（不是这一个文件的属性）：按钮态即当前开关，Alt+Z 同效
   const wrapOn = isWordWrap()
   items.push({ el: wheelBtn("wrap", wordWrapTitle(wrapOn), () => toggleWrapAndReport(), wrapOn ? "active" : "") })
+  // 同理：小地图也是全局显示开关（默认开启，轮盘里能关掉）
+  const minimapOn = isMinimap()
+  items.push({ el: wheelBtn("minimap", minimapTitle(minimapOn), () => toggleMinimapAndReport(), minimapOn ? "active" : "") })
 
   /* 轮盘入口：**不用 btn() 的 13px 图标**——它与标题栏轮盘入口是同一个动作，在那边是 16px + `--text`
      （见 css/overlays.css 的 `#wheel-btn.icon-btn`），13px/--text-muted 的标签栏密度下九宫格点阵会糊成
@@ -1822,18 +1827,18 @@ function renderStatus(): void {
   /*
    * 状态栏是**整条重建**的（清空 + ~10 个节点 + 图标 + 时间串本地化），而它的调用点极密：
    * 光标移动/拖选（拖选时每个 mousemove 一次）、保存、切标签、git 刷新……绝大多数时候什么都没变。
-   * 先做一次 O(1) 快照比对，未变直接返回（`toLocaleString` 与图标解析都不便宜）。
+   * 先做一次 O(1) 快照比对，未变直接返回（`formatSize`、图标解析、逐项建节点都不便宜）。
    * 快照必须覆盖所有影响渲染的输入——新增状态栏条目时同步补字段。
    */
   const sig = [
     tab?.id ?? "-", tab?.kind ?? "", tab?.mode ?? "", tab?.encoding ?? "", tab?.eol ?? "",
-    tab?.stat?.language ?? "", tab?.stat?.size ?? "", tab?.stat?.mtime ?? "", tab?.editor ? 1 : 0,
+    tab?.stat?.language ?? "", tab?.stat?.size ?? "", tab?.editor ? 1 : 0,
     state.cursor.line, state.cursor.column, state.cursor.selected,
     explorer.getRoot(), root?.name ?? "", root?.path ?? "", root?.isRepo ? 1 : 0,
     g?.isRepo ? 1 : 0, g?.branch ?? "", g?.detached ? 1 : 0, g?.ahead ?? 0, g?.behind ?? 0,
     g?.counts ? `${g.counts.staged}/${g.counts.unstaged}/${g.counts.untracked}/${g.counts.conflicted}` : "",
     state.rootsResp?.writable ? 1 : 0,
-    monacoReady() ? 1 : 0,
+    monacoLoadFailed() ? 1 : 0,
     attachedServerOf(tab?.editor?.model?.() ?? null),
   ].join("|")
   if (sig === statusSig) return
@@ -1855,7 +1860,13 @@ function renderStatus(): void {
     el.dataset.pri = String(pri)
     return el
   }
-  const rel = h("button", { class: "fw-status-item", title: root?.path ?? "" }, [icon(root?.isRepo ? "git" : "folderOpen", 12), h("span", { text: root?.name ?? "-" })])
+  /* 当前根（工作区目录）格。**图标恒用文件夹**，不再按“是不是 git 仓库”切成 git 图标——
+     那一格的语义是“我现在在哪个目录下”，而 git 属性紧挨着就有专门的表示（右侧分支格只在
+     仓库下出现，已把「是不是仓库 / 在哪条分支」说清楚了）；在仓库根上挂 git 图标反而像“点它看 git”。
+     图标与资源管理器头部那个根按钮（`.fw-root-btn` 的 `folderOpen`）保持一致。
+     名字走 `.fw-status-name`（限宽 + 省略号）：会话根的名字就是**会话标题**，可以很长，
+     而它是最左的 pri1 格、窄面板下也不会被隐掉，不设上限会把整条状态栏顶开；完整路径在悬浮里。 */
+  const rel = h("button", { class: "fw-status-item", title: root?.path ?? "" }, [icon("folderOpen", 12), h("span", { class: "fw-status-name", text: root?.name ?? "-" })])
   rel.onclick = () => showMenu(...menuAt(rel, state.roots.map((r) => ({ label: r.name, icon: "folder", onClick: () => void explorer.setRoot(r.id) }))))
   statusbar.appendChild(btn(rel, 1))
 
@@ -1868,14 +1879,16 @@ function renderStatus(): void {
 
   if (state.gitStatus?.isRepo) {
     const s = state.gitStatus
-    const branch = h("button", { class: "fw-status-item git", title: "源代码管理工具窗（Alt+G）" }, [
+    /* 变更计数：**非零才显示**、符号各自表意、冲突最先（规则与理由见 git-counts.ts）。
+       旧实现把三个计数一律印出来，于是“一个只有冲突的仓库”会显示成 `0± 0± 0?`（看着像干净）。 */
+    const branch = h("button", { class: "fw-status-item git", title: branchTitle(s) }, [
       icon("branch", 12),
       h("span", { text: s.branch ?? (s.detached ? "(detached)" : "-") }),
       s.ahead ? h("span", { class: "fw-ahead", text: `↑${s.ahead}` }) : null,
       s.behind ? h("span", { class: "fw-behind", text: `↓${s.behind}` }) : null,
-      s.counts.staged + s.counts.unstaged + s.counts.untracked + s.counts.conflicted > 0
-        ? h("span", { class: "fw-status-changes", text: `${s.counts.staged}± ${s.counts.unstaged}± ${s.counts.untracked}?` })
-        : null,
+      ...changeParts(s.counts).map((p) =>
+        h("span", { class: p.kind === "conflicted" ? "fw-status-conflict" : "fw-status-changes", text: p.text }),
+      ),
     ])
     branch.onclick = () => {
       if (!state.gitViewVisible) toggleGitPanel(true)
@@ -1930,23 +1943,31 @@ function renderStatus(): void {
       statusbar.appendChild(item("", { pri: 2, text: `行 ${state.cursor.line}，列 ${state.cursor.column}${state.cursor.selected ? `（选中 ${state.cursor.selected}）` : ""}` }))
     }
     statusbar.appendChild(item("", { pri: 3, text: formatSize(statInfo?.size ?? 0) }))
-    const mtime = statInfo?.mtime ?? 0
-    statusbar.appendChild(item("", { pri: 3, title: formatTime(mtime), text: new Date(mtime).toLocaleString("zh-CN", { hour12: false }) }))
+    /* 这里曾有一个「文件最后修改时间（磁盘 mtime）」格，已移除：它只在“想知道这份文件什么时候被改过”时
+       有用，而那个问题在页面里有更直接的载体——Git 工具窗的提交时间（带提交者与 diff）、
+       以及标签行的脏标记（改没改、存没存）。常驻一个到秒的时间戳占了状态栏最宽的一格，
+       却回答不了一个新问题（看一眼就知道“文件是旧的”，但旧于哪一版要看 Git）。 */
   }
   /*
-   * 引擎格带上当前文件挂到的语言服务器（如「Monaco · rust-analyzer」）：一眼看出该文件有没有语义能力
-   * 在支撑；没挂上（本机没有对应服务器）就仍是「Monaco」，与从前完全一致。
+   * 引擎/语义能力格：**只在“与默认不同”时出现**——默认（Monaco + 该文件没挂语言服务器）什么都不显示：
+   * 编辑器长什么样一眼就知道是 Monaco，常驻一个「Monaco」标签只是噪声（原先那条还兼作 LSP 指示，
+   * 没挂上时就只重复“是 Monaco”这件事）。两种情况才值得占位：
+   *   ① 挂上了语言服务器（如 `rust-analyzer`）→ 显示服务器名，一眼看出该文件有语义能力在支撑；
+   *   ② Monaco **真加载失败/超时**、落到轻量降级模式 → 明确告知（此时高亮/符号等能力受限，不说会以为坏了）。
+   * 注意判断用 `monacoLoadFailed()` 而**不是** `!monacoReady()`：后者在“还在预热”时也为假，
+   * 会在页面刚开、Monaco 那 1MB 还在下的时候闪一个「轻量模式」（实测：只开目录根、未打开任何文件时
+   * 状态栏就挂着它）。没加载完就不说话，只有确实失败才提示。
    */
   const lspServer = attachedServerOf(tab?.editor?.model?.() ?? null)
-  statusbar.appendChild(
-    item("", {
-      pri: 3,
-      title: monacoReady()
-        ? `编辑器内核：Monaco（VSCode 同款）${lspServer ? ` · 语言服务器 ${lspServerDetailOf(tab?.editor?.model?.() ?? null) || lspServer}` : "（该文件没有可用语言服务器）"}`
-        : "编辑器内核：轻量降级模式（Monaco vendor 缺失）",
-      text: monacoReady() ? (lspServer ? `Monaco · ${lspServer}` : "Monaco") : "轻量模式",
-    }),
-  )
+  if (monacoLoadFailed()) {
+    statusbar.appendChild(
+      item("warn", { pri: 3, title: "编辑器内核：轻量降级模式（Monaco 加载失败或 vendor 缺失）——语法高亮/符号跳转等能力受限", text: "轻量模式" }),
+    )
+  } else if (lspServer) {
+    statusbar.appendChild(
+      item("", { pri: 3, title: `语言服务器：${lspServerDetailOf(tab?.editor?.model?.() ?? null) || lspServer}`, text: lspServer }),
+    )
+  }
   if (state.rootsResp && !state.rootsResp.writable) statusbar.appendChild(item("warn", { pri: 1, text: "只读模式" }))
 }
 
@@ -2908,6 +2929,15 @@ function toggleWrapAndReport(): void {
   const on = toggleWordWrap()
   renderTabbar() // 轮盘按钮的图标/高亮与提示文案随之更新
   toast(on ? "已开启自动换行" : "已关闭自动换行", "info", 1600)
+}
+
+/** 切小地图并同步界面（轮盘按钮态 + 轻提示）；模块级开关会应用到全部代码编辑器。
+ * 注：**大文件标签**不受此开关影响（超过降级阈值时本来就不给小地图，那是性能取舍、偏好不覆盖）；
+ * 那种标签上本来就看着“文件较大”的横幅，不再另做一套状态回传。 */
+function toggleMinimapAndReport(): void {
+  const on = toggleMinimap()
+  renderTabbar() // 轮盘按钮高亮与提示文案随之更新
+  toast(on ? "已开启小地图" : "已关闭小地图", "info", 1600)
 }
 
 /* ------------------------------ 键位表 ------------------------------ */

@@ -4,7 +4,7 @@
  * 为什么放 `sessionStorage` 而不是 `localStorage`：这里记的是**本标签页的会话状态**，不是用户级偏好——
  * 独立打开的 `/files` 标签页与主界面分屏里的工作台（同源 iframe，与宿主共享同一份 sessionStorage）
  * 各记各的，互不覆盖；刷新（含 dev-reload）后保留，关掉标签页即随会话一起消失。用户级偏好
- * （自动换行 `gebai.ui.wordWrap`、行尾 blame、主题、面板宽度）仍走 `localStorage`。
+ * （自动换行 `gebai.ui.wordWrap`、小地图 `gebai.ui.minimap`、行尾 blame、主题、面板宽度）仍走 `localStorage`。
  *
  * 为什么只记**普通文件标签**：差异 / 合并 / 暂存 / 比较标签各自需要打开时的上下文（端点对、冲突文件、
  * 比较两端、来源），一个路径恢复不出来；它们本就是由文件派生的临时视图，刷新后重新打开即可。
