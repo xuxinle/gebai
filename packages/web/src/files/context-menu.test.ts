@@ -1,8 +1,10 @@
 /**
- * 编辑器右键菜单剪枝的纯逻辑（`files/context-menu.ts` 的 `menuPrunePlan`）。
+ * 编辑器右键菜单剪枝的纯逻辑（`files/context-menu.ts`）。
  *
- * 只测「删哪些行」——DOM 装配（observer 挂载、shadow root 拿取）由浏览器实测覆盖，
- * 单测的 DOM 桩给不了 shadow DOM 与真实菜单结构。
+ * 这里测「隐哪些行」的**序号**——它不只是“看着对不对”，而是与 Monaco 的序号契约：
+ * 我们只隐藏元素、不删（`ActionBar` 用 DOM 子元素序号去索引它自己的视图表，删了就会悬浮/键盘错位）。
+ * 所以计划返回的下标必须落在**原始**行序上（实现按同一顺序隐那个下标的元素）。
+ * DOM 装配（observer 挂载、shadow root 拿取、方向键接管）由浏览器实测覆盖。
  */
 import { describe, expect, test } from "bun:test"
 import { MENU_DROP_LABELS, menuPrunePlan, type MenuRow } from "./context-menu"
@@ -33,6 +35,17 @@ describe("菜单剪枝计划", () => {
     const plan = menuPrunePlan(REAL_MENU)
     const dropped = plan.map((i) => REAL_MENU[i]!.label || "<sep>")
     expect(dropped.sort()).toEqual(["<sep>", "<sep>", "Command Palette", "Copy", "Peek"].sort())
+  })
+
+  test("计划里的下标指向**原始行序**（调用方按它去隐藏元素，序号必须对得上 Monaco 的视图表）", () => {
+    const plan = menuPrunePlan(REAL_MENU)
+    // Peek 在第 3 行、Copy 在第 5 行、Command Palette 在第 13 行（实测的原始菜单顺序）
+    expect(plan).toContain(3)
+    expect(plan).toContain(5)
+    expect(plan).toContain(13)
+    // 下标排序且不重复（实现按顺序逐条隐藏）
+    expect([...plan].sort((a, b) => a - b)).toEqual(plan)
+    expect(new Set(plan).size).toBe(plan.length)
   })
 
   test("删完条目后收拾分隔线：相邻两条只留一条，末条悬空也去掉", () => {

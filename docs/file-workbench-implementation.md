@@ -1820,13 +1820,63 @@ hover 路径回归：hover 展开 → 17ms 后收到一次 `pointerleave`（扇�
 
 **实现**（`files/context-menu.ts`，纯逻辑与 DOM 装配分开）：
 
-- `installContextMenuPrune(dom)`：先 `MutationObserver` 盯着编辑器 DOM，等 `.shadow-root-host` 出现再挂到它的 shadow root（只对**新增**节点作出反应——我们的删除也会触发回调，不过滤会白跑一遍，虽然幂等）；回调是微任务、在下一帧之前跑完，**看不到“先闪出 Peek 再消失”**。
+- `installContextMenuPrune(dom)`：先 `MutationObserver` 盯着编辑器 DOM，等 `.shadow-root-host` 出现再挂到它的 shadow root（只对**新增**节点作出反应——我们自己的改动也会触发回调，不过滤会白跑一遍，虽然幂等）；回调是微任务、在下一帧之前跑完，**看不到“先闪出 Peek 再消失”**。
 - `readMenuRows(menu)`：读菜单各行——分隔线在 DOM 里是 `.action-item.disabled > .action-label.separator` 的**空行**（11px，不是 `.action-item` 之间的某种分隔节点，也不是只有 1px 高的 `.separator` 元素）。
-- `menuPrunePlan(rows)`（**纯函数，6 例单测**）：算出要删的下标。顺序要紧：**先剔条目、再收拾分隔线**，而分隔线的判据是“**紧跟在另一条已保留的分隔线之后**”而不是“相邻原行是分隔线”——后者会让两条相邻分隔线**互相参照、一起被删**，组边界整条消失（写第一版时就这么错了，单测当场抓出）；末条悬空的分隔线也删。
+- `menuPrunePlan(rows)`（**纯函数，7 例单测**）：算出要隐藏的下标。顺序要紧：**先剔条目、再收拾分隔线**，而分隔线的判据是“**紧跟在另一条已保留的分隔线之后**”而不是“相邻原行是分隔线”——后者会让两条相邻分隔线**互相参照、一起被剔**，组边界整条消失（写第一版时就这么错了，单测当场抓出）；首/末悬空的分隔线也剔。
 
-**实测到的分隔线副作用**（正是“不能只删条目”的理由）：原菜单是「导航×3、SEP、Peek、SEP、Copy、SEP、复制路径、SEP、溯源×3、SEP、Command Palette」——删掉 Peek 与 Copy 后它们之间那两条 SEP 贴成**两条空行**，删掉末位的 Command Palette 后末尾多一道**悬空线**。修复后菜单为：`Go to Definition / Go to References / Go to Symbol... / ── / 复制路径 / ── / 行尾溯源 / 侧边溯源 / 文件历史`（组边界仍在，两条分隔线各就各位）。
+**实测到的分隔线副作用**（正是“不能只剔条目”的理由）：原菜单是「导航×3、SEP、Peek、SEP、Copy、SEP、复制路径、SEP、溯源×3、SEP、Command Palette」——剔掉 Peek 与 Copy 后它们之间那两条 SEP 贴成**两条空行**，剔掉末位的 Command Palette 后末尾多一道**悬空线**。最终菜单为：`Go to Definition / Go to References / Go to Symbol... / ── / 复制路径 / ── / 行尾溯源 / 侧边溯源 / 文件历史`（组边界仍在，两条分隔线各就各位）。
 
 **保留导航三项**的理由：LSP 跳转是刚需，也正是这个菜单存在的意义；三条被剔的各有重复对象（Peek ↔ 工作台跳转、Copy ↔ 自绘的复制路径/发送会话、Command Palette ↔ `Ctrl+P`/`Ctrl+K`）。匹配用 `aria-label` 英文标题（Monaco 单机构建不带中文 NLS），对不上最坏是条目照旧出现、不会坏功能。
+
+#### A2. 修正：悬浮高亮错位（“只能隐藏、不能删”，并接管方向键）
+
+**用户反馈**（原话）：「编辑器自定义的右键菜单悬浮反应错位，在下方悬浮高亮反应到上方的条目上了，点击效果又没问题」——最后半句正是根因的指纹：**点击走元素（准确），高亮走序号（错位）**。
+
+**诊断**（逐行悬停量“谁拿到了高亮类”）：
+
+| 悬停的项（DOM 序号） | 旧实现高亮到 |
+|---|---|
+| 内置前三项（0/1/2） | 正确 |
+| `复制路径`（4）/ `行尾溯源`（6）/ `文件历史`（8） | **完全没有高亮** |
+| `侧边溯源`（7） | **`复制路径`**（即用户看到的“高亮跑到上面那项”） |
+
+**根因**：Monaco 的 `ActionBar` 把焦点记成**子元素序号**，再用它索引自己的视图表：
+
+```js
+setFocusedItem(el) { for (let i = 0; i < this.actionsList.children.length; i++) if (el === this.actionsList.children[i]) { this.focusedItem = i; break } }
+updateFocus() { ... this.viewItems[this.focusedItem] ... }   // ← 用 DOM 序号索引内部表
+```
+
+`viewItems` 是**注册时的原始顺序**（14 项：含 Peek/Copy/Command Palette 与 4 条分隔线），而我当时把 DOM 元素 **`remove()` 掉了、内部表没动**——于是“DOM 序号 k”指向的不是同一个动作：
+
+| DOM 序号（剔后） | 元素 | `viewItems[k]`（原始） | 结果 |
+|---|---|---|---|
+| 0/1/2 | 前三项 | 同一动作 | ✓ 正确 |
+| 4 | 复制路径 | 分隔线（无视图） | 无高亮 |
+| 7 | 侧边溯源 | **复制路径** | **高亮到上面那项** |
+| 8 | 文件历史 | 分隔线 | 无高亮 |
+
+（这块是精简过的实现；`focusNext` 的键盘导航同样走 `viewItems`，所以方向键也会停在没有高亮的空槽上、回车还能触发那个看不见的条目。）
+
+**修法两条**（`files/context-menu.ts`）：
+
+1. **隐藏而非删除**：`el.style.display = "none"`（元素仍在 `children` 里，序号与 `viewItems` 对齐）。分隔线的收拾（相邻重复/首末悬空）同样改为隐藏。
+2. **接管方向键**：序号要对齐，Monaco 的方向键就必然走过被隐藏的项（`focusOnlyEnabledItems` 只跳过禁用项与分隔线，而它眼里那些项并没被禁用）。所以接管 `ArrowUp/Down`、`Home`、`End`，只在**可见项**之间移动——劫持后往目标派发一个 `mouseover`，**复用 Monaco 自己的聚焦路径**（`setFocusedItem` + `updateFocus`，高亮与滚动照旧，不必自己维护状态）；回车/Esc/快捷键一律留给 Monaco。上下文菜单没有助记键（`enableMnemonics` 未开，已核），所以方向键是唯一会踩到隐藏项的路径。
+
+**验证**（`verify-menu-hover-fix-v2.mjs`，**10/10**）：
+
+| 项 | 实测 |
+|---|---|
+| 悬浮逐行（7 行） | 每一行都高亮到自己（`hover "侧边溯源" → 高亮 "侧边溯源"`） |
+| 元素仍在 DOM | 隐藏项：`Peek`、`Copy`、`Command Palette` + 两条重复/悬空分隔线（共 5 项 `display:none`） |
+| 方向键 ×8 | `定义 → 引用 → 符号 → 复制路径 → 行尾 → 侧边 → 文件历史 → 回到定义`（未落在隐藏项或分隔线上，且循环回首项） |
+| `Home` / `End` | 首项 / 末项 |
+| `Enter` | 触发的是高亮项（停在「文件历史」回车 → 弹出「文件历史：main.ts」） |
+| 打开时无高亮 | 第一下方向键才落位（与 Monaco 自身行为一致） |
+
+回归脚本同步：`verify-wheel-v9.mjs` **30/30**——它原先读**全部** `.action-item` 文案，而隐藏项仍在 DOM，已改为按**可见性**过滤，并新增一条「被剔的三条确实被隐藏（元素仍在 DOM，保住序号对齐）」把本修正的契约钉住。
+
+单测同步：`context-menu.test.ts` 增到 **7 例**，新增一条钉住“计划里的下标指向**原始行序**”（这正是“隐藏而不删”的契约，实现按同一顺序隐藏）。
 
 #### B. 状态栏内核格（去掉常驻「Monaco」）
 
