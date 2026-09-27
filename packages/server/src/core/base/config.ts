@@ -1,6 +1,7 @@
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { existsSync, readFileSync } from "node:fs"
+import { combinePromptExtra, loadDomainProfile, readExtraFile, type LoadedDomainProfile } from "./profile"
 
 export type AuthMode = "local" | "server"
 export type SandboxMode = "auto" | "on" | "off"
@@ -52,6 +53,17 @@ export interface ServerConfig {
   /** 子Agent 黑名单（GEBAI_SUB_AGENTS_DISABLE，逗号分隔）：名单内的子Agent unregister（运行时开关，
    *  与构建期选择性打包 GEBAI_BUILD_SUBAGENTS 互补——不改产物按部署裁剪能力面）。 */
   subAgentsDisable?: string[]
+  /** 全局提示词**段落白名单**（`GEBAI_PROMPT_ENABLE`，逗号分隔的段落键）：非空时仅注入名单内段落
+   *  （段落键与含义见 `core/engine/prompt.ts` 的 `PROMPT_SECTION_KEYS`）。 */
+  promptEnable?: string[]
+  /** 全局提示词**段落黑名单**（`GEBAI_PROMPT_DISABLE`，逗号分隔的段落键）：名单内段落不注入；
+   *  与白名单同时配置**先白后黑**（黑名单最终生效）。 */
+  promptDisable?: string[]
+  /** 领域补充提示词（`GEBAI_PROMPT_EXTRA` 内联 / `GEBAI_PROMPT_EXTRA_FILE` 文件，或 `GEBAI_PROFILE` 的
+   *  `prompt.extra`/`prompt.extra_file`）：追加在裁剪后的全局提示词末尾。 */
+  promptExtra?: string
+  /** 领域专用模式档案（`GEBAI_PROFILE`）：档案名（`{GEBAI_HOME}/profiles/{名}.json`）或档案文件路径。 */
+  profile?: string
   uiStyle: string
   logLevel: "debug" | "info" | "warn" | "error"
   toolEnable?: string[]
@@ -194,6 +206,55 @@ function splitList(v: string | undefined): string[] {
 }
 
 /**
+ * 领域补充提示词解析：显式环境变量（`GEBAI_PROMPT_EXTRA_FILE` + `GEBAI_PROMPT_EXTRA`）优先于档案；
+ * 同一来源内文件内容在前、内联文本在后。环境变量的相对路径相对进程 cwd，档案的相对路径相对档案目录。
+ */
+function resolvePromptExtra(loaded: LoadedDomainProfile | undefined): string | undefined {
+  const envFile = env("GEBAI_PROMPT_EXTRA_FILE").trim()
+  const envInline = env("GEBAI_PROMPT_EXTRA").trim()
+  if (envFile || envInline) {
+    return combinePromptExtra(envFile ? readExtraFile(envFile, process.cwd()) : undefined, envInline)
+  }
+  const p = loaded?.profile.prompt
+  if (!loaded || !p || (!p.extra_file && !p.extra)) return undefined
+  return combinePromptExtra(p.extra_file ? readExtraFile(p.extra_file, dirname(loaded.path)) : undefined, p.extra)
+}
+
+/**
+ * 启动裁剪配置解析（DESIGN「启动裁剪与领域专用模式」）：`GEBAI_PROFILE` 档案为**默认值**，
+ * 显式环境变量按字段覆盖（清单为空 = 未配置，用档案值）；四组清单口径一致——白名单非空仅保留名单内，
+ * 黑名单移除名单内（先白后黑）。档案/提示词文件缺失或非法在启动期抛错（本函数即启动配置入口）。
+ */
+function resolveStartupTrim(gebaiHome: string): {
+  profile?: string
+  prompt: { enable: string[]; disable: string[]; extra?: string }
+  tools: { enable: string[]; disable: string[] }
+  subAgents: { enable: string[]; disable: string[]; preload: string[] }
+} {
+  const profile = env("GEBAI_PROFILE").trim() || undefined
+  const loaded = profile ? loadDomainProfile(profile, gebaiHome) : undefined
+  const def = loaded?.profile
+  const pick = (fromEnv: string[], fromProfile?: string[]): string[] => (fromEnv.length ? fromEnv : (fromProfile ?? []))
+  return {
+    profile,
+    prompt: {
+      enable: pick(splitList(env("GEBAI_PROMPT_ENABLE")), def?.prompt?.enable),
+      disable: pick(splitList(env("GEBAI_PROMPT_DISABLE")), def?.prompt?.disable),
+      extra: resolvePromptExtra(loaded),
+    },
+    tools: {
+      enable: pick(splitList(env("GEBAI_TOOL_ENABLE")), def?.tools?.enable),
+      disable: pick(splitList(env("GEBAI_TOOL_DISABLE")), def?.tools?.disable),
+    },
+    subAgents: {
+      enable: pick(splitList(env("GEBAI_SUB_AGENTS_ENABLE")), def?.sub_agents?.enable),
+      disable: pick(splitList(env("GEBAI_SUB_AGENTS_DISABLE")), def?.sub_agents?.disable),
+      preload: pick(splitList(env("GEBAI_PRELOAD_SUB_AGENTS")), def?.sub_agents?.preload),
+    },
+  }
+}
+
+/**
  * 运行形态解析（默认本地模式）：
  * 1. CLI 参数 `--server` 开启服务模式（最高优先，便于二进制直接传参）
  * 2. `GEBAI_MODE=server|local` 环境变量
@@ -228,6 +289,8 @@ export function isolationConfigConflict(config: Pick<ServerConfig, "auth" | "san
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   loadDotEnv()
   const defaultWebDist = join(import.meta.dirname, "..", "..", "..", "..", "web", "dist")
+  const gebaiHome = resolveGebaiHome()
+  const trim = resolveStartupTrim(gebaiHome)
   const config: ServerConfig = {
     host: env("GEBAI_HOST", "127.0.0.1"),
     port: Number(env("GEBAI_PORT", "3000")),
@@ -240,15 +303,19 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
       const v = env("GEBAI_SCRIPT_ISOLATION", "auto").trim().toLowerCase()
       return v === "off" || v === "env" || v === "bwrap" ? (v as "off" | "env" | "bwrap") : "auto"
     })(),
-    preloadSubAgents: splitList(env("GEBAI_PRELOAD_SUB_AGENTS")),
-    subAgentsEnable: splitList(env("GEBAI_SUB_AGENTS_ENABLE")),
-    subAgentsDisable: splitList(env("GEBAI_SUB_AGENTS_DISABLE")),
+    preloadSubAgents: trim.subAgents.preload,
+    subAgentsEnable: trim.subAgents.enable,
+    subAgentsDisable: trim.subAgents.disable,
     uiStyle: env("GEBAI_UI_STYLE", "acrylic"),
     logLevel: env("GEBAI_LOG_LEVEL", "info") as ServerConfig["logLevel"],
-    toolEnable: splitList(env("GEBAI_TOOL_ENABLE")),
-    toolDisable: splitList(env("GEBAI_TOOL_DISABLE")),
+    toolEnable: trim.tools.enable,
+    toolDisable: trim.tools.disable,
+    promptEnable: trim.prompt.enable,
+    promptDisable: trim.prompt.disable,
+    promptExtra: trim.prompt.extra,
+    profile: trim.profile,
     selfModify: bool("GEBAI_SELF_MODIFY", false),
-    gebaiHome: resolveGebaiHome(),
+    gebaiHome,
     binaryMode: isBinaryMode(),
     webDist: defaultWebDist,
     adminPasswordHash: env("GEBAI_ADMIN_PASSWORD_HASH") || undefined,

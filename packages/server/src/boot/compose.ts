@@ -18,6 +18,7 @@ import { AuthService } from "../auth"
 import { SubAgentManager } from "../core/agents/subagents"
 import { RESERVED_PROJECT_TMP } from "../core/tools/projects"
 import { AgentEngine } from "../core/engine/engine"
+import { isPromptSectionKey, PROMPT_SECTION_KEYS } from "../core/engine/prompt"
 import { WebhookManager } from "../webhooks"
 import { GitService } from "../core/git/service"
 import { FsAudit } from "../core/fs/audit"
@@ -75,6 +76,17 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   const config = loadConfig(overrides)
   // 日志级别早于任何装配日志生效（GEBAI_LOG_LEVEL，默认 info；非法值忽略）
   setLogLevel(config.logLevel)
+  // 启动裁剪自检（DESIGN「启动裁剪与领域专用模式」）：领域档案与未知段落键在启动期说清楚——
+  // 静默忽略的配置项看起来就是「裁剪没生效」，比启动失败难排查得多（档案本身非法已在 loadConfig 抛错）
+  if (config.profile) log.info(`[gebai] 领域专用模式档案: ${config.profile}`)
+  for (const [key, list] of [
+    ["GEBAI_PROMPT_ENABLE", config.promptEnable],
+    ["GEBAI_PROMPT_DISABLE", config.promptDisable],
+  ] as const) {
+    for (const k of list ?? []) {
+      if (!isPromptSectionKey(k)) log.warn(`[gebai] ${key} 中的提示词段落不存在: ${k}（可用: ${PROMPT_SECTION_KEYS.join("/")}）`)
+    }
+  }
 
   // 透明浏览器代理（GEBAI_BROWSER_PROXY=1，重启生效）：服务启动即安装 fetch 垫片——平台级
   // 能力，不依赖任何子Agent 的装载/裁剪（桥接基建在 core/browser，见 DESIGN「透明浏览器代理」）
@@ -130,7 +142,9 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   // 复用同一解析逻辑）；任务级 env 覆盖生效：会话/前端配置 GEBAI_VISION_*（或 GEBAI_LLM_MULTIMODAL）时按任务重建视觉 Provider。
   // 全局 vision 工具已移除（架构决策：视觉相关统一走子代理，主会话需视觉时 agent_load 装载或路由自愈，见 DESIGN「视觉工具 vision」）
   setVisionProviderGetter((env) => resolveVisionProvider(mainConfig, visionConfig, env))
-  registry.enableSet(config.toolEnable, config.toolDisable)
+  // 启动级工具启停策略（GEBAI_TOOL_ENABLE/DISABLE 与领域档案）：**注册时判定**——子Agent 在运行期
+  // 装载/热加载进来的 {agent}_* 工具同样受约束（一次性快照会让白名单在装载后失效）
+  registry.setPolicy({ enable: config.toolEnable, disable: config.toolDisable })
 
   // 沙箱/脚本隔离 auto 判定（DESIGN「GEBAI_SANDBOX」「GEBAI_SCRIPT_ISOLATION」）：只看运行形态，不判定监听 IP——
   // 服务模式（多用户公用、远程可达）强制启用沙箱与会话目录隔离（防普通用户越权读写/操控宿主）；

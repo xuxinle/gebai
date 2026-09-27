@@ -176,6 +176,40 @@ export class SubAgentManager {
       this.defs.set(n, parts.length === 1 ? parts[0]! : mergeSubAgentDefs(n, parts))
     }
     for (const n of this.removedDefs) this.defs.delete(n)
+    this.applyTrimPolicy()
+  }
+
+  /**
+   * 启停名单收敛（策略重放）：白名单非空仅保留名单内、黑名单移除名单内（先白后黑）。
+   * **在每次合并视图重建后重放**（而非启动时一次性快照）——客卿定义后台迟到、热加载重扫重新发现、
+   * 运行期 `register` 新增，都按同一份名单收敛，能力面不因到达时序漏裁剪。
+   * 走 `unregister`：连带注销工具注册（注册表不残留「模型可见但引擎不可用」的工具）并写入 `removedDefs`。
+   */
+  private applyTrimPolicy(): void {
+    if (!this.enablePolicy.length && !this.disablePolicy.length) return
+    const enable = new Set(this.enablePolicy)
+    for (const name of [...this.defs.keys()]) {
+      const keep = (!enable.size || enable.has(name)) && !this.disablePolicy.includes(name)
+      if (!keep) this.unregister(name)
+    }
+  }
+
+  /**
+   * 启停/预载名单中的未知名告警（拼写错误不静默失效）。客卿定义后台迟到，故推迟到客卿发现就绪后
+   * 判定一次（`trimWarned` 防重复）——就绪前报未知名会把正常配置（客卿子Agent）报成拼写错误。
+   */
+  private reportTrimUnknowns(): void {
+    if (this.trimWarned || this.nativeReady) return
+    this.trimWarned = true
+    for (const name of this.enablePolicy) {
+      if (!this.defs.has(name)) log.warn(`[subagents] GEBAI_SUB_AGENTS_ENABLE 中的子Agent 不存在: ${name}`)
+    }
+    for (const name of this.disablePolicy) {
+      if (!this.defs.has(name)) log.warn(`[subagents] GEBAI_SUB_AGENTS_DISABLE 中的子Agent 不存在: ${name}`)
+    }
+    for (const name of this.preloadOverride ?? []) {
+      if (!this.defs.has(name)) log.warn(`[subagents] 预载名单中的子Agent 不存在: ${name}`)
+    }
   }
 
   /** 注入 客卿子代理发现选项（boot/compose 接线；roots 覆盖发现根目录供测试隔离）。 */
@@ -185,6 +219,11 @@ export class SubAgentManager {
   /** 运行期显式移除的子Agent 名（如 GEBAI_TASKS_ENABLED=false 时 unregister task）：
    *  热加载重扫/缓存水合后仍保持移除（重扫会重新发现其文件，不过滤会「复活」）。 */
   private removedDefs = new Set<string>()
+  /** 启停名单（`GEBAI_SUB_AGENTS_ENABLE`/`_DISABLE` 与领域档案）：实例级策略，合并视图每次重建时重放。 */
+  private enablePolicy: string[] = []
+  private disablePolicy: string[] = []
+  /** 未知名告警是否已发出（推迟到客卿发现就绪后判定一次）。 */
+  private trimWarned = false
   /** 热加载局限提示（name → 提示文本）：该子Agent 的**辅助模块**在进程运行期间被修改，
    *  而辅助模块无法在进程内失效（仅入口文件带 ?t 可绕缓存）——已按「新入口 + 旧辅助」加载，
    *  结果可能与磁盘上的代码不一致，**重启服务**后才确定生效。 */
@@ -299,6 +338,8 @@ export class SubAgentManager {
    * 客卿发现：`defer` 为真则后台进行（存 nativeReady 供 whenNativeReady 等待），否则同步等待。
    * 在途复用以防重复拉起侧车：同一时刻只会有一份发现（重复发现会各自握手并注册同名边车，
    * 先注册的那份被后写覆盖后无人回收 → 进程泄漏）。
+   * 后台路径在发现收尾后补跑「名单告警 + 预载」：客卿定义此时才进合并视图，早期跑的预载会
+   * 因目标不可见而落空（预载名单里的客卿子Agent 永远不装载）。
    */
   private async runNativeDiscovery(defer: boolean): Promise<void> {
     if (!defer) {
@@ -310,14 +351,23 @@ export class SubAgentManager {
       await this.discoverNativeIfChanged()
       return
     }
-    this.nativeReady ??= this.discoverNativeIfChanged()
-      .catch((err) => {
+    this.nativeReady = (async () => {
+      try {
+        await this.discoverNativeIfChanged()
+      } catch (err) {
         // 后台发现整体失败不阻断启动（与同步路径同语义：单个客卿失败已记 loadErrors）
         log.warn(`[subagents] 客卿子代理后台发现失败（已跳过）: ${err instanceof Error ? err.message : err}`)
-      })
-      .finally(() => {
+      } finally {
+        // 先清在途标记再补跑：补跑的 load 会经 whenNativeReady 等 nativeReady，等自身 promise 即死锁
         this.nativeReady = null
-      })
+      }
+      try {
+        this.reportTrimUnknowns()
+        await this.preload()
+      } catch (err) {
+        log.warn(`[subagents] 客卿就绪后补跑预载失败（已跳过）: ${err instanceof Error ? err.message : err}`)
+      }
+    })()
   }
 
   /**
@@ -476,7 +526,9 @@ export class SubAgentManager {
 
   private async preload(): Promise<void> {
     const targets = this.preloadOverride?.length ? this.preloadOverride : []
-    for (const def of this.defs.values()) {
+    // 快照迭代：load 内部的 refreshIfChanged 可能重建合并视图（defs 清空后重填），
+    // 直接迭代 Map 会因本轮插入的条目再次被访问而永不终止（预载名单非空 + 客卿发现就绪时必现）
+    for (const def of [...this.defs.values()]) {
       const shouldPreload = targets.length ? targets.includes(def.name) : !!def.preload
       if (!shouldPreload) continue
       // 逐个隔离（DESIGN「子代理失败隔离」）：单个预载失败（工具注册抛错/依赖缺失）只记 loadErrors
@@ -633,26 +685,15 @@ export class SubAgentManager {
   /** 按启停名单收敛子Agent 集（GEBAI_SUB_AGENTS_ENABLE 白名单 / GEBAI_SUB_AGENTS_DISABLE 黑名单，
    *  启动 discover 后调用一次）：enable 非空 = 白名单（未列出的全部 unregister）；disable = 黑名单；
    *  两者同时配置先白后黑（黑名单最终生效）。unregister 含工具注销、已预载卸载与热加载防复活
-   *  （removedDefs），agent_list/系统提示词注入/subsession_run 校验随之完全不可见；名单中的未知名告警忽略
-   *  （防拼写错误静默失效，不阻断启动——与选择性打包不同，运行态名单以实际发现的子Agent 为准）。 */
+   *  （removedDefs），agent_list/系统提示词注入/subsession_run 校验随之完全不可见；名单存为实例策略，
+   *  客卿迟到定义与热加载重扫同样收敛（见 applyTrimPolicy），未知名告警推迟到客卿就绪后判定。 */
   applyEnableDisable(enable: string[] = [], disable: string[] = []): void {
     const preloaded = [...this.loaded] // 过滤前已预载的名单（def.preload 与 GEBAI_PRELOAD_SUB_AGENTS），用于移除告警
-    if (enable.length) {
-      const whitelist = new Set(enable)
-      for (const name of [...this.defs.keys()]) {
-        if (!whitelist.has(name)) this.unregister(name)
-      }
-      for (const name of whitelist) {
-        if (!this.defs.has(name)) log.warn(`[subagents] GEBAI_SUB_AGENTS_ENABLE 中的子Agent 不存在: ${name}`)
-      }
-    }
-    for (const name of disable) {
-      if (!this.defs.has(name)) {
-        log.warn(`[subagents] GEBAI_SUB_AGENTS_DISABLE 中的子Agent 不存在: ${name}`)
-        continue
-      }
-      this.unregister(name)
-    }
+    this.enablePolicy = [...enable]
+    this.disablePolicy = [...disable]
+    this.trimWarned = false
+    this.applyTrimPolicy()
+    this.reportTrimUnknowns()
     for (const name of preloaded) {
       if (!this.defs.has(name)) log.warn(`[subagents] 预载的子Agent ${name} 已被启停名单移除（不再预载）`)
     }

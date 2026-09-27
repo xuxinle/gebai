@@ -3,8 +3,9 @@
  * - 按「全局 / 各子Agent」分组展示；未配置的项前端显示为空、请求不携带
  * - 全局组为静态白名单；子Agent 组由各子Agent 导出的 `envVars` 声明汇总（见「子Agent文件格式」），
  *   不在此处硬编码——新增子Agent 环境变量只需在子Agent 定义中声明
- * - 只包含可运行时配置的项；启动级/安全敏感变量（GEBAI_MODE、GEBAI_ADMIN_PASSWORD_HASH、
- *   GEBAI_SAFE_MODE、GEBAI_SANDBOX、GEBAI_HOST/PORT 等）不在目录中，即不可配置
+ * - 只包含可运行时配置的项；启动级/安全敏感变量（GEBAI_MODE、GEBAI_ADMIN_PASSWORD_HASH、GEBAI_SAFE_MODE、
+ *   GEBAI_SANDBOX、GEBAI_HOST/PORT、启动裁剪类 GEBAI_PROFILE / GEBAI_PROMPT_* / GEBAI_TOOL_* /
+ *   GEBAI_SUB_AGENTS_* / GEBAI_PRELOAD_SUB_AGENTS 等）不在目录中，即不可配置
  */
 import type { EnvCatalogVar, SubAgentDef } from "../base/types"
 

@@ -14,6 +14,13 @@ export interface ToolRegistryOptions {
   safeMode?: boolean
 }
 
+/** 启动级启停策略（`GEBAI_TOOL_ENABLE`/`GEBAI_TOOL_DISABLE` 与领域档案）：白名单非空仅启用名单内、
+ *  黑名单移除名单内（先白后黑）；两项均支持 `{agent}_*` 通配（整包启停某子Agent）。 */
+export interface ToolPolicy {
+  enable?: string[]
+  disable?: string[]
+}
+
 function normalize(name: string): string {
   return name.replace(/[-.:]/g, "_")
 }
@@ -22,6 +29,9 @@ export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>()
   private agents = new Map<string, { tools: string[] }>()
   private safeMode: boolean
+  /** 启动级启停策略：**注册时判定**（而非注册后一次性快照）——后注册的工具（子Agent 装载/热加载/
+   *  custom 与客卿后到的定义）同样受约束，能力面不因注册时序回弹。 */
+  private policy: Required<ToolPolicy> = { enable: [], disable: [] }
 
   constructor(opts: ToolRegistryOptions = {}) {
     this.safeMode = !!opts.safeMode
@@ -58,7 +68,7 @@ export class ToolRegistry {
         }
       }
     }
-    this.tools.set(key, { name: key, tool, agent, enabled: true })
+    this.tools.set(key, { name: key, tool, agent, enabled: this.policyAllows(key, agent) })
     if (agent) {
       const a = this.agents.get(agent) || { tools: [] }
       a.tools.push(key)
@@ -93,23 +103,30 @@ export class ToolRegistry {
     if (rt) rt.enabled = enabled
   }
 
+  /**
+   * 设置启动级启停策略（启动装配期调用一次）：立即作用于已注册工具，并作为后续注册的判定基线——
+   * 于是子Agent 在运行期装载/热加载进来的 `{agent}_*` 工具也遵守同一份白/黑名单。
+   * 与运行时开关（`setEnabled`/REST `PATCH /api/v1/tools`）叠加：后者改的是当前注册项，不受策略阻止。
+   */
+  setPolicy(policy: ToolPolicy): void {
+    this.policy = { enable: [...(policy.enable ?? [])], disable: [...(policy.disable ?? [])] }
+    for (const rt of this.tools.values()) rt.enabled = this.policyAllows(rt.name, rt.agent)
+  }
+
+  /** 策略判定（先白后黑；`{agent}_*` 通配按子Agent 命名空间整包匹配）。 */
+  private policyAllows(name: string, agent?: string): boolean {
+    const hit = (pattern: string): boolean => {
+      const p = normalize(pattern)
+      if (p.endsWith("*")) return agent === p.slice(0, -1).replace(/_$/, "")
+      return p === name
+    }
+    if (this.policy.enable.length && !this.policy.enable.some(hit)) return false
+    return !this.policy.disable.some(hit)
+  }
+
+  /** 一次性声明白/黑名单（`setPolicy` 的同义入口，保留既有调用方语义）。 */
   enableSet(enable?: string[], disable?: string[]): void {
-    if (enable?.length) {
-      for (const rt of this.tools.values()) rt.enabled = false
-      for (const n of enable) this.setEnabled(n, true)
-    }
-    if (disable?.length) {
-      for (const n of disable) {
-        if (n.endsWith("*")) {
-          const agent = n.slice(0, -1).replace(/_$/, "")
-          for (const rt of this.tools.values()) {
-            if (rt.agent === agent) rt.enabled = false
-          }
-        } else {
-          this.setEnabled(n, false)
-        }
-      }
-    }
+    this.setPolicy({ enable, disable })
   }
 
   resolve(input: string): RegisteredTool | undefined {

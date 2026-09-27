@@ -86,6 +86,40 @@ describe("ToolRegistry namespace resolution", () => {
     expect(r.resolve("web_get")).toBeUndefined()
     expect(r.resolve("web_post")).toBeUndefined()
   })
+
+  test("启动级策略在注册时判定：白名单对后注册工具同样生效（子Agent 装载/热加载不绕过裁剪）", () => {
+    const r = new ToolRegistry()
+    r.register(tool("read"))
+    r.setPolicy({ enable: ["read"] })
+    expect(r.resolve("read")).toBeDefined()
+    r.register(tool("write"))
+    expect(r.resolve("write")).toBeUndefined()
+    r.registerSubAgentTools("web", { get: tool("get") })
+    expect(r.resolve("web_get")).toBeUndefined()
+  })
+
+  test("策略通配：白名单也支持 {agent}_*（按命名空间整包启用），黑名单同规则", () => {
+    const r = new ToolRegistry()
+    r.setPolicy({ enable: ["web_*"] })
+    r.register(tool("read"))
+    r.registerSubAgentTools("web", { get: tool("get") })
+    expect(r.resolve("web_get")).toBeDefined()
+    expect(r.resolve("read")).toBeUndefined()
+    const r2 = new ToolRegistry()
+    r2.setPolicy({ disable: ["web_*"] })
+    r2.registerSubAgentTools("web", { get: tool("get") })
+    expect(r2.resolve("web_get")).toBeUndefined()
+  })
+
+  test("运行时 setEnabled 不受策略阻断（策略只定注册基线，管理员开关仍可事后再开）", () => {
+    const r = new ToolRegistry()
+    r.register(tool("read"))
+    r.register(tool("write"))
+    r.setPolicy({ disable: ["write"] })
+    expect(r.resolve("write")).toBeUndefined()
+    r.setEnabled("write", true)
+    expect(r.resolve("write")).toBeDefined()
+  })
 })
 
 describe("sharding and sandbox", () => {

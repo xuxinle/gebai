@@ -335,6 +335,8 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 `packages/agents/src/agents/` 下 15 个 TS 子 Agent，另在 `keqing/` 下 5 个客卿目录（其中 `vision` 与 TS 侧同名合并、`nsight`/`torch` 以同名合并贡献原生加速后端，`imgproc`/`disk` 仅客卿侧，运行时可见子 Agent 共 17 个）。全部**按需装载**（`preload=false`），`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单。
 
+**启动裁剪与领域专用模式**：全局提示词段落（`GEBAI_PROMPT_ENABLE`/`GEBAI_PROMPT_DISABLE`）、工具表（`GEBAI_TOOL_ENABLE`/`GEBAI_TOOL_DISABLE`）、子 Agent 可见面（`GEBAI_SUB_AGENTS_ENABLE`/`GEBAI_SUB_AGENTS_DISABLE`）与预载集合四组清单同口径（白名单非空仅保留名单内、黑名单移除名单内，先白后黑）；用 `GEBAI_PROFILE` 指向一份 `{GEBAI_HOME}/profiles/{名}.json` 档案即可把四组声明加领域补充提示词固化为一个开关（环境变量按字段覆盖档案）——启动即得到一个领域专用模式（详见 `DESIGN.md`「启动裁剪与领域专用模式」）。
+
 | 子 Agent | 能力 | 独有工具 | 外部依赖 / 凭证 |
 |-----------|------|----------|------------------|
 | `code` | 代码编写与源码分析（探索→方案→修改→验证） | 6：`search_symbols` `analyze` `git` `preview_server` `env_detect` `system_info` | 无；项目内置（`CODE_PROJECTS`） |

@@ -433,6 +433,25 @@ describe("子Agent 启停名单（applyEnableDisable：GEBAI_SUB_AGENTS_ENABLE �
     expect(m.def("code")).toBeUndefined()
     expect(m.def("task")).toBeDefined()
   })
+
+  test("策略重放：白名单对**后注册**的定义同样生效（客卿迟到定义 / 运行期 register 不漏裁剪）", () => {
+    const mgr = makeManager()
+    mgr.applyEnableDisable(["code"], [])
+    expect(mgr.def("writer")).toBeUndefined()
+    mgr.register(unloadedDef) // 后到定义：运行期注册或客卿后台发现就绪后才进合并视图
+    expect(mgr.def("writer")).toBeUndefined()
+    expect(mgr.list().map((d) => d.name)).toEqual(["code"])
+  })
+
+  test("策略重放：黑名单对后注册的定义保持（已装载工具连带注销）", () => {
+    const registry = new ToolRegistry()
+    const mgr = new SubAgentManager({ registry, preloadOverride: [] })
+    mgr.register(loadedDef)
+    mgr.applyEnableDisable([], ["code"])
+    expect(registry.resolve("code_read")).toBeUndefined()
+    mgr.register(loadedDef)
+    expect(mgr.def("code")).toBeUndefined()
+  })
 })
 
 describe("装载工具会话可见性（visibleTo / 目录会话过滤）", () => {
@@ -902,6 +921,24 @@ describe("客卿发现延迟（deferNative：启动不被 sidecar 阻塞）", ()
     writeFileSync(join(d, "PROMPT.md"), "slowagent 提示词正文")
     return root
   }
+
+  test("预载名单中的客卿子Agent 在发现就绪后补跑装载（早期预载看不到迟到定义）", async () => {
+    if (!pythonAvailable) return test.skip("python 不可用", () => {})
+    const { rmSync } = await import("node:fs")
+    const root = await makeSlowRoot(1.5)
+    try {
+      const m = new SubAgentManager({ registry: new ToolRegistry(), preloadOverride: ["slowagent"] })
+      m.setKeqingOpts({ roots: [root] } as never)
+      await m.discover({ deferNative: true })
+      expect(m.isLoaded("slowagent")).toBe(false) // 定义尚未进合并视图：当时的预载目标不可见
+      await m.whenNativeReady()
+      expect(m.isLoaded("slowagent")).toBe(true) // 客卿就绪后补跑预载
+    } finally {
+      await disposeAllKeqing() // 先回收边车进程：否则它仍占着临时目录
+      await new Promise((r) => setTimeout(r, 50)) // 进程退出窗口
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 20000) // 冷启动首次客卿发现 + TS 域全量扫描，5s 默认超时不够
 
   test("deferNative：discover 不等客卿握手即返回；whenNativeReady 后就绪", async () => {
     if (!pythonAvailable) return test.skip("python 不可用", () => {})

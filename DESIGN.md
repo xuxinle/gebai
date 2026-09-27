@@ -483,12 +483,15 @@ class GebaiClient {
 | `GEBAI_SANDBOX` | 路径沙箱：`auto`（**只看运行形态**——服务模式强制启用，本地模式不限制；不按监听地址/IP 判定）/ `on`（强制限制）/ `off`（不限制）；**admin 豁免仅本地模式**（`isExempt` 判 `auth === "local"`；服务端部署下 admin 同受沙箱约束，见「多用户隔离与安全」） | `auto` |
 | `GEBAI_SCRIPT_ISOLATION` | 脚本运行根隔离：**服务模式默认且强制开启（`off` 与服务模式互斥，启动即拒绝，同 `GEBAI_SANDBOX=off` 防呆）**——`auto`（环境收敛，bubblewrap 可用时升为文件系统隔离）/ `env`（仅环境收敛，不可再降）/ `bwrap`（强制文件系统隔离，不可用时告警并回落 `env`）；本地模式恒不收敛（`off`/`auto` 同效）；收敛项：`HOME`/`TEMP`/`XDG_*` → 会话目录 `script-env/`；容器内可用性取决于容器是否授予 user namespace，见「数据与执行隔离·脚本运行根」 | `auto` |
 | `GEBAI_PRELOAD_SUB_AGENTS` | 启动预载子Agent 名单（逗号分隔）：启动时注册其工具，**每个新会话创建时自动装载**（提示词 system 消息写入会话记录 + 工具注册）；为空 = 默认不预载任何子Agent | 空 |
-| `GEBAI_SUB_AGENTS_ENABLE` | 子Agent **白名单**（逗号分隔）：非空时仅保留名单内子Agent（其余全部 `unregister`——`agent_list`/`agent_load`/`subsession_run`/系统提示词注入均不可见，热加载不复活）；与 `GEBAI_SUB_AGENTS_DISABLE` 同时配置**先白后黑**（黑名单最终生效） | 空（不裁剪） |
+| `GEBAI_SUB_AGENTS_ENABLE` | 子Agent **白名单**（逗号分隔）：非空时仅保留名单内子Agent（其余全部 `unregister`——`agent_list`/`agent_load`/`subsession_run`/系统提示词注入均不可见，热加载不复活）；与 `GEBAI_SUB_AGENTS_DISABLE` 同时配置**先白后黑**（黑名单最终生效）；名单存为实例策略、**合并视图每次重建时重放**（客卿迟到定义同样收敛） | 空（不裁剪） |
 | `GEBAI_SUB_AGENTS_DISABLE` | 子Agent **黑名单**（逗号分隔）：名单内子Agent `unregister`（运行时能力面收敛，与构建期 `GEBAI_BUILD_SUBAGENTS` 打包裁剪互补）；名单未知名启动告警忽略不阻断 | 空 |
+| `GEBAI_PROMPT_ENABLE` / `GEBAI_PROMPT_DISABLE` | **全局提示词段落白/黑名单**（逗号分隔的段落键，键表见「启动裁剪与领域专用模式」）：非空白名单仅注入名单内段落、黑名单移除名单内（先白后黑）；未知键启动告警 | 空（全段落注入） |
+| `GEBAI_PROMPT_EXTRA` / `GEBAI_PROMPT_EXTRA_FILE` | **领域补充提示词**（内联文本 / 文件路径）：追加在裁剪后的全局提示词末尾；文件缺失启动即报错；`GEBAI_PROMPT_EXTRA_FILE` 相对路径相对进程 cwd | 空 |
+| `GEBAI_PROFILE` | **领域专用模式档案**（档案名 → `{GEBAI_HOME}/profiles/{名}.json`；含路径分隔符或以 `.json` 结尾按文件路径）：一个文件同时声明提示词裁剪/补充、工具启停、子Agent 启停与预载（格式与优先级见「启动裁剪与领域专用模式」） | 空（不启用） |
 | `GEBAI_UI_STYLE` | 默认 UI 风格（`acrylic`/`aether`/`matrix`/`tokyo-night`/`cyberpunk`/`synthwave`/`aurora`/`ink`/`cny`/`qinhan`）；**服务端白名单为这 10 项**（须与前端主题表 `packages/web/src/theme-core.ts` 同步——主题增删时两处不同步则该主题经环境变量设置会被静默回落为 `acrylic`，参见 `routes/static.ts` 的 `UI_STYLES`）；可被 URL/用户级覆盖 | `acrylic` |
 | `GEBAI_LOG_LEVEL` | 日志级别：`debug`/`info`/`warn`/`error`——`loadConfig` 后由组合根 `setLogLevel(config.logLevel)` 生效（最小日志器 `@gebai/sdk/node` 的 `log.*`，见「日志系统」）；非法值忽略保持原级别 | `info` |
-| `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具） | 空（全部启用） |
-| `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具） | 空 |
+| `GEBAI_TOOL_ENABLE` | 工具白名单（逗号分隔，配置后仅启用列表内工具；支持 `{agent}_*` 通配）；**注册时判定**——运行期装载/热加载进来的子Agent 工具同样受约束 | 空（全部启用） |
+| `GEBAI_TOOL_DISABLE` | 工具黑名单（逗号分隔，排除指定工具；支持 `{agent}_*` 通配），与白名单同时配置**先白后黑** | 空 |
 | `GEBAI_FEISHU_*` | 飞书集成配置：全局应用凭证 `GEBAI_FEISHU_APP_ID` / `GEBAI_FEISHU_APP_SECRET`（`feishu_docs`/`feishu_group` 子Agent 的全局兜底 + 机器人桥接凭证 + 任务飞书应用消息通知（指定群 chat_id 推送/@人））、云文档目标文件夹 `GEBAI_FEISHU_FOLDER_URL`（`feishu_docs` 创建的资源落用户文件夹下、用户自动有权限；子Agent 前缀 `FEISHU_DOCS_FOLDER_URL` 优先）、机器人桥接开关 `GEBAI_FEISHU_BOT_ENABLED`（`true` 启用长连接事件订阅，见「飞书机器人集成」）、**机器人行为开关 `GEBAI_FEISHU_BOT_NOTIFY_TOOLS`（工具调用过程滚动状态消息）/ `GEBAI_FEISHU_BOT_NOTIFY_ASSISTANT`（助手中间轮文本预览）/ `GEBAI_FEISHU_BOT_AUTO_APPROVE`（需审批工具自动通过，见「飞书机器人集成 → 配置」）**、TLS 策略 `GEBAI_FEISHU_INSECURE_TLS`（`true`/`1` 时所有飞书出站请求禁用证书校验——内网代理场景：机器人桥接 REST/长连接 WebSocket、`feishu_docs` 子Agent 接口与 OAuth 回调兑换，见「飞书 TLS 策略」）；`feishu_group` 专属前缀 `FEISHU_GROUP_APP_ID`/`FEISHU_GROUP_APP_SECRET` 可独立配置 | 不启用 |
 | `GEBAI_PUBLIC_URL` | 对外可访问地址（如 `http://localhost:3000` 或公网域名）：飞书用户授权（user_access_token）自动回调默认取 `{GEBAI_PUBLIC_URL}/api/v1/oauth/feishu/callback`（缺省回落 `http://localhost:{GEBAI_PORT|3000}`），需在开发者后台「安全设置 → 重定向 URL」登记 | 空（回落 localhost） |
 | `GEBAI_SELF_MODIFY` | 是否允许 `self_optimize` 修改服务端源码（`true`/`false`） | `false` |
@@ -545,6 +548,38 @@ class GebaiClient {
 | `--server` | 开启服务模式（等价 `GEBAI_MODE=server`，参数优先） | - |
 
 > 以上为**全局层**环境变量（进程注入），会话层可覆盖其中可运行时变更的项（**模型/Provider 配置全量可覆盖**：`GEBAI_LLM_MODEL`/`API_BASE`/`API_KEY`/`API_KIND`/`MAX_CONTEXT`/`MAX_OUTPUT_TOKENS`/`MULTIMODAL`/`ROUTES` 与 `GEBAI_VISION_*` 任务级生效，按任务重建 Provider，见「环境变量配置」）。
+
+#### 启动裁剪与领域专用模式
+
+**一个机制：启动时按声明裁剪能力面。** 全局提示词、全局工具、子Agent、子Agent 预载四组清单同口径（**白名单非空仅保留名单内、黑名单移除名单内，先白后黑**），在**进程启动时**生效、对所有用户/会话共享；**领域专用模式** = 把一组裁剪声明固化成一个可复用档案，启动时一个变量切换。
+
+| 维度 | 环境变量 | 裁剪对象 | 生效点 |
+|------|---------|---------|--------|
+| **全局提示词** | `GEBAI_PROMPT_ENABLE` / `GEBAI_PROMPT_DISABLE` | 全局系统提示词的命名段落（键表见下） | `buildSystemPrompt`：每次构建提示词时按键过滤 |
+| **领域补充提示词** | `GEBAI_PROMPT_EXTRA` / `GEBAI_PROMPT_EXTRA_FILE` | 追加在裁剪后提示词末尾的领域约束（不参与裁剪） | 同上 |
+| **全局工具** | `GEBAI_TOOL_ENABLE` / `GEBAI_TOOL_DISABLE` | 工具注册表（全局工具 + 子Agent `{agent}_*`，支持 `{agent}_*` 通配） | `ToolRegistry.setPolicy`：**注册时判定**——运行期装载/热加载进来的工具同样受约束（一次性快照会让白名单在装载后失效） |
+| **子Agent** | `GEBAI_SUB_AGENTS_ENABLE` / `GEBAI_SUB_AGENTS_DISABLE` | 子Agent 定义可见性（`agent_list`/装载/子会话运行/提示词注入） | `SubAgentManager.applyEnableDisable`：名单存为实例策略、**合并视图每次重建时重放**（客卿迟到定义、热加载重扫同样收敛） |
+| **子Agent 预载** | `GEBAI_PRELOAD_SUB_AGENTS` | 启动即装载的子Agent（工具进工具集、提示词进会话记录） | `discover()` 尾部 + **客卿发现就绪后补跑**（客卿定义迟到，早期预载看不到它们） |
+| **领域档案** | `GEBAI_PROFILE` | 上述全部清单的一个命名集合 | `loadConfig`：启动期解析并作为**默认值**，显式环境变量按字段覆盖 |
+
+- **提示词段落键**（`GEBAI_PROMPT_ENABLE`/`GEBAI_PROMPT_DISABLE` 取值；未知键启动告警）：`persona`（身份与智体概念模型）、`workspace`（会话工作目录 + 沙箱注记）、`channel`（通道环境注记）、`safe_mode`（安全模式注记）、`orchestration`（js 脚本编排指引）、`batching`（并行工具调用指引）、`planning`（重大任务计划审批）、`artifact_naming`（产物命名纪律）、`agent_routing`（子Agent 用法路由）、`parallel_sessions`（并行多路推进）、`project_bindings`（子Agent 项目绑定）、`builtin_projects`（内置项目）、`subagent_catalog`（可选子Agent 清单）。正文为空串的段落（如未启用安全模式的 `safe_mode`）本就不注入，裁剪它们无副作用——段落键清单以 `core/engine/prompt.ts` 的 `PROMPT_SECTION_KEYS` 为准
+- **领域档案格式**：
+
+```json
+{
+  "name": "coding",
+  "description": "编码助手：极简提示词 + 只留代码类子Agent",
+  "prompt": { "disable": ["artifact_naming", "builtin_projects"], "extra_file": "coding-prompt.md" },
+  "tools": { "disable": ["sh", "py"] },
+  "sub_agents": { "enable": ["code", "explore", "self_optimize"], "preload": ["code"] }
+}
+```
+
+- **优先级**：显式环境变量 > 领域档案 > 缺省（不裁剪）；同一组清单**整体**取一个来源——如 `sub_agents.preload` 与 `GEBAI_PRELOAD_SUB_AGENTS` 同时声明时后者生效（档案的 `prompt.extra`/`extra_file` 同理，环境变量源存在时档案补充提示词不生效）；同一来源内**文件内容在前、内联文本在后**
+- **路径基准**：档案 `prompt.extra_file` 的相对路径相对**档案文件所在目录**（档案与提示词文件可整体迁移）；`GEBAI_PROMPT_EXTRA_FILE` 的相对路径相对进程 cwd；档案或提示词文件缺失、JSON 非法、缺 `name`、含未知字段、字段类型不符 → **启动即报错**（配错档案却按默认能力面运行比启动失败难排查）
+- **未知名告警**：提示词段落键未知 → 启动告警；子Agent 启停/预载名单中的未知名 → 启动告警（客卿名单的未知名推迟到客卿发现就绪后判定，避免把正常配置报成拼写错误）
+- **与运行时开关的关系**：REST `PATCH /api/v1/tools` 与 WS 工具启停仍可事后改单个工具（策略只定注册基线），但**重启后回到裁剪后的能力面**——部署方声明是启动级事实，运行期开关是临时调整
+- **与构建期裁剪的关系**：`GEBAI_BUILD_SUBAGENTS`/`GEBAI_BUILD_EXCLUDE_TOOLS` 在**构建期**把能力移出产物（体积收益、不可运行时恢复）；本节裁剪在**运行时**收敛能力面（不改产物，重启改配置即恢复）
 
 ### 服务端
 - 服务端通过 WebSocket 与客户端通信，Agent 能力（Chat、工具调用、审批等）均在服务端内部实现
@@ -935,14 +970,14 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **按需装载**：默认未预加载的子Agent 仅注册在目录中，总Agent 通过 `agent_load`（或 WS `sub_agent.load` 带 sessionId）按需装载——装载即写入当前会话记录（工具注册 + 提示词消息；**同名子Agent 已被其他会话装载同样写入**——痕迹判定只看本会话记录），后续恢复会话时自动还原
 - 通过 `preload` 字段或环境变量 `GEBAI_PRELOAD_SUB_AGENTS`（逗号分隔）声明预加载集合；未声明者**默认不预载任何子Agent**（按需装载）
 - 预加载少而精：控制系统提示词与工具集规模，降低模型选择噪音；高频/核心子Agent 预加载，低频/重型子Agent 按需装载
-- **内置子Agent 默认全部不预加载**（`preload = false`），完全按需装载；部署方可用 `GEBAI_PRELOAD_SUB_AGENTS` 声明预加载集合
+- **内置子Agent 默认全部不预加载**（`preload = false`），完全按需装载；部署方可用 `GEBAI_PRELOAD_SUB_AGENTS` 声明预加载集合（也可在 `GEBAI_PROFILE` 的 `sub_agents.preload` 中声明）；预载在**客卿发现就绪后补跑一次**——客卿定义后台迟到，早期预载看不到它们，补跑后预载名单里的客卿子Agent 不会落空
 - 会话级可通过环境变量（会话内存态或浏览器本地注入）覆盖预加载集合，按会话定制
 
 #### 子Agent 启停名单（运行时可用性收敛）
 
-- 环境变量 `GEBAI_SUB_AGENTS_ENABLE`（**白名单**，逗号分隔）与 `GEBAI_SUB_AGENTS_DISABLE`（**黑名单**）：启动 `discover()` 后经 `SubAgentManager.applyEnableDisable` 一次收敛——白名单非空时未列出的全部 `unregister`，黑名单移除名单内；两者同时配置**先白后黑**（黑名单最终生效）
+- 环境变量 `GEBAI_SUB_AGENTS_ENABLE`（**白名单**，逗号分隔）与 `GEBAI_SUB_AGENTS_DISABLE`（**黑名单**）：启动 `discover()` 后经 `SubAgentManager.applyEnableDisable` 收敛——白名单非空时未列出的全部 `unregister`，黑名单移除名单内；两者同时配置**先白后黑**（黑名单最终生效）；名单**存为实例策略**，合并视图每次重建（客卿发现就绪、热加载重扫、运行期 `register`）都重放一次，能力面不因定义到达时序回弹（也可在 `GEBAI_PROFILE` 档案的 `sub_agents` 中声明，见「启动裁剪与领域专用模式」）
 - `unregister` 语义复用 `GEBAI_TASKS_ENABLED=false` 的既有机制：已装载/预载的连带卸载工具注册（注册表不残留「模型可见但引擎不可用」的工具）、`agent_list`/系统提示词的「可选子Agent」清单、`subsession_run`/`agent_load` 名字校验、环境变量目录（`envVars` 声明面）随之完全不可见；**热加载重扫后保持移除**（`removedDefs` 过滤防「复活」）
-- 与构建期选择性打包（`GEBAI_BUILD_SUBAGENTS`，见「选择性打包」）互补：打包裁剪产出精简二进制（体积收益，不可运行时恢复），启停名单在完整产物上**按部署收敛能力面**（重启改环境变量即恢复）；名单中的未知名（拼写错误、或该形态未打包）启动 `console.warn` 告警忽略，不阻断启动
+- 与构建期选择性打包（`GEBAI_BUILD_SUBAGENTS`，见「选择性打包」）互补：打包裁剪产出精简二进制（体积收益，不可运行时恢复），启停名单在完整产物上**按部署收敛能力面**（重启改环境变量即恢复）；名单中的未知名（拼写错误、或该形态未打包）启动 `console.warn` 告警忽略，不阻断启动（客卿定义后台迟到，未知名判定推迟到客卿发现就绪后，避免把正常配置报成拼写错误）
 - 预载名单（`GEBAI_PRELOAD_SUB_AGENTS`/`def.preload`）命中被移除的子Agent 时启动告警（该子Agent 不再预载；会话装载保障按未知子Agent 跳过，不中断任务）
 - **启停过滤是实例级视图，不写进程缓存**：`discover()` 的进程级扫描缓存（`discoveredDefsCache`）存**未过滤全集**，`removedDefs` 过滤仅作用于当前实例的 defs——否则一个实例的启停策略会泄漏给同进程所有后续实例（多管理器场景下跨实例污染）
 
@@ -1610,11 +1645,12 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - 作用范围：会话内 LLM 调用（模型/Provider 配置，任务级生效）、工具执行（`sh`/`py` 子进程环境）、子Agent 环境变量读取，均与浏览器本地注入合并后生效
 - 用途：按会话定制（`CODE_PROJECT`/`SELF_OPTIMIZE_PROJECT` 项目绑定、`CODE_PROJECTS` 预置项目注册表、预加载集合覆盖等；服务重启后此类配置由用户浏览器本地随 prompt 重新注入恢复）
 - **历史数据清理**：启动时清理遗留的用户级 `users/{user}/env.json`（`cleanupLegacyUserEnv`）；会话目录遗留的 `env.json` 在该会话首次触达 env 读取时惰性删除——迁移后服务端不留存任何 env 文件
-- **环境变量目录接口**：`GET /api/v1/env/catalog` 返回可配置变量白名单（按「全局 / 各子Agent」分组 + 变量作用说明），供前端设置面板渲染（不可自定义变量名）；启动级与安全敏感变量不在目录中
+- **环境变量目录接口**：`GET /api/v1/env/catalog` 返回可配置变量白名单（按「全局 / 各子Agent」分组 + 变量作用说明），供前端设置面板渲染（不可自定义变量名）；启动级与安全敏感变量（含启动裁剪类 `GEBAI_PROFILE`/`GEBAI_PROMPT_*`/`GEBAI_TOOL_*`/`GEBAI_SUB_AGENTS_*`）不在目录中
 
 #### 覆盖规则
 
 - 生效顺序：**浏览器本地注入（本次任务） > 会话内存态 > 全局**，同名字段取最高优先级的非空值（前端 localStorage 注入仅覆盖当前运行的任务，不修改任何持久化层级）
+- **启动裁剪类变量（`GEBAI_PROFILE`/`GEBAI_PROMPT_*`/`GEBAI_TOOL_*`/`GEBAI_SUB_AGENTS_*`/`GEBAI_PRELOAD_SUB_AGENTS`）不参与上述分层**：它们是**启动级事实**（进程启动时解析一次，决定提示词段落、工具表、子Agent 可见面与预载集合），浏览器/会话层同名键不参与裁剪判定，改配置需重启（见「启动裁剪与领域专用模式」）
 - **模型相关配置（`GEBAI_LLM_*` 全套与 `GEBAI_VISION_*`）任务级生效**：浏览器本地/会话内存态注入在任务启动时按合并后 env 重建 Provider（`applyModelEnvOverrides`/`resolveVisionProvider`），覆盖 Provider 级（进程环境变量）配置——主循环与 `subsession_run` 子会话运行、上下文压缩阈值/摘要、附件图片内联判定、视觉分析均生效；无覆盖键时沿用启动 Provider 实例；非法值（API_KIND 非三类/MAX_CONTEXT 非正数）忽略回退
 - 会话内存态删除某变量 = 恢复为全局的值
 - 修改环境变量（任一来源）后，当前正在运行的任务不受影响，新任务使用新值（运行中的会话内存态开关除外——自动审批等实时判定类按次读取）
@@ -1839,10 +1875,11 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 | 层级 | 配置 | 说明 |
 |------|------|------|
-| 全局 | `GEBAI_TOOL_ENABLE` / `GEBAI_TOOL_DISABLE`（逗号分隔） | 进程启动时生效，所有用户/会话共享 |
+| 全局 | `GEBAI_TOOL_ENABLE` / `GEBAI_TOOL_DISABLE`（逗号分隔） | 进程启动时生效，所有用户/会话共享（可经 `GEBAI_PROFILE` 领域档案声明） |
 
 - **白名单优先**：`GEBAI_TOOL_ENABLE` 声明后仅启用列表内工具；`GEBAI_TOOL_DISABLE` 排除指定工具；两者同时配置时先白名单后黑名单
-- **粒度**：全局工具按名称（`sh`/`read`/`edit`…）；子Agent 工具按 `{agent_name}_{tool_name}` 精确控制，也可按 `{agent_name}_*` 整包禁用
+- **粒度**：全局工具按名称（`sh`/`read`/`edit`…）；子Agent 工具按 `{agent_name}_{tool_name}` 精确控制，也可按 `{agent_name}_*` 整包禁用（白名单同样支持该通配）
+- **策略在注册时判定**（`ToolRegistry.setPolicy`）：启动声明的启停名单是**注册基线**——子Agent 在运行期装载/热加载进来的工具同样受约束，白名单不因注册时序失效；运行期 `setEnabled`（REST/WS）在其上叠加，重启回到裁剪后的能力面（见「启动裁剪与领域专用模式」）
 - **禁用效果**：禁用后工具从总Agent schema 中移除，模型不可见、不可调用；已装载子Agent 中被禁用的工具同样不注入
 - **管理入口**：经 REST `GET/PATCH /api/v1/tools`（SDK `listTools`/`setToolEnabled`）——**前端暂无图形化开关面板**（设置面板注明「工具启停经 API 使用」）；保存后新任务生效
 - **用途**：安全收紧（如生产环境禁用 `sh`/`py`）、裁剪上下文、按业务场景定制能力面

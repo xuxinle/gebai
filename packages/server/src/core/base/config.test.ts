@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { loadConfig, isolationConfigConflict } from "./config"
 
 describe("loadConfig 模式与密钥解析", () => {
@@ -157,5 +160,79 @@ describe("loadConfig 模式与密钥解析", () => {
     expect(isolationConfigConflict({ auth: "server", sandbox: "off", scriptIsolation: "auto" })).toContain("GEBAI_SANDBOX=off")
     // 本地模式：两者都可显式关闭（操作者本人机器）
     expect(isolationConfigConflict({ auth: "local", sandbox: "off", scriptIsolation: "off" })).toBeNull()
+  })
+
+  test("提示词裁剪与领域补充（GEBAI_PROMPT_ENABLE/DISABLE/EXTRA）解析", () => {
+    const saved = { ...process.env }
+    try {
+      // 置空串而非删除（与飞书开关用例同口径）：已定义不触发 .env 回填，对宿主环境封闭
+      for (const k of ["GEBAI_PROMPT_ENABLE", "GEBAI_PROMPT_DISABLE", "GEBAI_PROMPT_EXTRA", "GEBAI_PROMPT_EXTRA_FILE", "GEBAI_PROFILE"]) process.env[k] = ""
+      const off = loadConfig()
+      expect(off.promptEnable).toEqual([])
+      expect(off.promptDisable).toEqual([])
+      expect(off.promptExtra).toBeUndefined()
+      expect(off.profile).toBeUndefined()
+      process.env.GEBAI_PROMPT_ENABLE = "persona, workspace"
+      process.env.GEBAI_PROMPT_DISABLE = "subagent_catalog"
+      process.env.GEBAI_PROMPT_EXTRA = "领域补充：只谈订单。"
+      const on = loadConfig()
+      expect(on.promptEnable).toEqual(["persona", "workspace"])
+      expect(on.promptDisable).toEqual(["subagent_catalog"])
+      expect(on.promptExtra).toBe("领域补充：只谈订单。")
+    } finally {
+      process.env = saved
+    }
+  })
+
+  test("领域专用模式档案（GEBAI_PROFILE）：档案为默认值，显式环境变量按字段覆盖", () => {
+    const saved = { ...process.env }
+    const home = mkdtempSync(join(tmpdir(), "gebai-profile-cfg-"))
+    try {
+      mkdirSync(join(home, "profiles"), { recursive: true })
+      writeFileSync(
+        join(home, "profiles", "coding.json"),
+        JSON.stringify({
+          name: "coding",
+          prompt: { disable: ["artifact_naming"], extra: "只写代码。", extra_file: "coding-prompt.md" },
+          tools: { disable: ["sh"] },
+          sub_agents: { enable: ["code", "explore"], preload: ["code"] },
+        }),
+      )
+      writeFileSync(join(home, "profiles", "coding-prompt.md"), "领域提示词文件内容")
+      for (const k of [
+        "GEBAI_PROMPT_ENABLE",
+        "GEBAI_PROMPT_DISABLE",
+        "GEBAI_PROMPT_EXTRA",
+        "GEBAI_PROMPT_EXTRA_FILE",
+        "GEBAI_TOOL_ENABLE",
+        "GEBAI_TOOL_DISABLE",
+        "GEBAI_SUB_AGENTS_ENABLE",
+        "GEBAI_SUB_AGENTS_DISABLE",
+        "GEBAI_PRELOAD_SUB_AGENTS",
+      ]) process.env[k] = ""
+      process.env.GEBAI_HOME = home
+      process.env.GEBAI_PROFILE = "coding"
+      const byName = loadConfig()
+      expect(byName.profile).toBe("coding")
+      expect(byName.promptDisable).toEqual(["artifact_naming"])
+      expect(byName.promptExtra).toBe("领域提示词文件内容\n只写代码。") // 文件在前、内联在后
+      expect(byName.toolDisable).toEqual(["sh"])
+      expect(byName.subAgentsEnable).toEqual(["code", "explore"])
+      expect(byName.preloadSubAgents).toEqual(["code"])
+      // 显式环境变量按字段覆盖：同名清单用环境变量，未配置的字段仍用档案值
+      process.env.GEBAI_PRELOAD_SUB_AGENTS = "wps"
+      process.env.GEBAI_PROMPT_EXTRA = "只谈订单。"
+      const overridden = loadConfig()
+      expect(overridden.preloadSubAgents).toEqual(["wps"])
+      expect(overridden.promptExtra).toBe("只谈订单。") // 环境变量源整体覆盖档案源（含档案的 extra_file）
+      expect(overridden.toolDisable).toEqual(["sh"])
+      expect(overridden.subAgentsEnable).toEqual(["code", "explore"])
+      // 档案缺失：启动期报错（不静默按默认能力面运行）
+      process.env.GEBAI_PROFILE = "ghost"
+      expect(() => loadConfig()).toThrow(/档案不存在/)
+    } finally {
+      process.env = saved
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
