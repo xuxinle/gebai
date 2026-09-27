@@ -33,7 +33,7 @@ import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols
 import { installLspProviders, hasLsp } from "./lsp"
 import { readWordWrap, saveWordWrap } from "./wrap"
 import { buildChatSnippet, formatAbsRef, normalizeLineRange, type LineRange } from "./editor-ref"
-import { showMenu, toast } from "./ui"
+import { showMenu, toast, type MenuItem } from "./ui"
 
 export type { BlameLine }
 
@@ -55,7 +55,8 @@ export interface EditorOptions {
   /**
    * 右键菜单要用的宿主信息：
    * - `absPath`：「复制路径（含行号）」（**没给就整项不注册**，不留一个点了没用的菜单项）；
-   * - `sendToChat`：「发送会话」——**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发。
+   * - `sendToChat`：「发送会话」——**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发；
+   * - `groups`：宿主自己的**菜单组**（如工作台的 Git 历史），内容与文案全由宿主定。
    */
   menu?: EditorMenuHooks
 }
@@ -66,6 +67,34 @@ export interface EditorMenuHooks {
   absPath?: string | (() => string)
   /** 把一段带出处的代码送进对话输入框（缺省 = 不提供该项）。 */
   sendToChat?: (snippet: EditorSnippet) => void
+  /**
+   * 宿主的附加菜单组（缺省 = 没有）。
+   * 入参是本编辑器的句柄：组内容常要按**编辑器自身能力**定（如降级实现画不出 blame 行装饰，
+   * 那两项就不该出现），而句柄要到装配菜单时才建好。
+   */
+  groups?: (ed: EditorHandle) => EditorMenuGroup[]
+}
+
+/**
+ * 编辑器右键菜单里的一个**自定义组**：一组项自成一段——Monaco 侧组与组之间自动加分隔线
+ * （组名规则见 `installMenuActions`），与内置的「复制路径 / 发送会话」分开。
+ */
+export interface EditorMenuGroup {
+  /** 组标识（短名，如 `git`）：实际组名 `gebai.<id>`，与其它组的先后按组名字典序排 */
+  id: string
+  items: EditorMenuItem[]
+}
+
+/** 自定义组里的一项。 */
+export interface EditorMenuItem {
+  /** 项标识（同组内唯一）：实际动作名 `gebai.<组>.<项>`，Monaco 侧还会再带编辑器前缀 */
+  id: string
+  /**
+   * 菜单文案。**状态要自己带进文案**（如 `✓ 行尾溯源`）——Monaco 的菜单项在注册那一刻定下标题，
+   * 开关类项的状态一变就得重装（见 `EditorHandle.refreshMenu`）。
+   */
+  label: string
+  run: () => void
 }
 
 /** 编辑器当前选区（右键菜单与外部调用共用；行号 1 起始）。 */
@@ -135,6 +164,12 @@ export interface EditorHandle {
    * `gutter` = 左侧作者列（全局）；`inline` = 光标行行尾注释。数据为空则两态都画不出。
    */
   setBlame(lines: BlameLine[], show: { gutter: boolean; inline: boolean }): void
+  /**
+   * 重装右键菜单里的**自定义组**（见 `EditorMenuHooks.groups`）：Monaco 的菜单项标题在注册那一刻
+   * 定下，文案带状态的项（`✓ 行尾溯源`）状态一变就得重装——宿主在状态改变处调一次即可。
+   * 降级实现的自绘菜单每次弹出前现取（没有可重装的东西），这里是空操作。
+   */
+  refreshMenu(): void
   /** 当前 model（LSP 文档同步用；降级编辑器无 model，返回 null）。 */
   model(): import("monaco-editor").editor.ITextModel | null
   /**
@@ -705,57 +740,77 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
   }
 
   /**
-   * 把两项注册进 Monaco 的编辑器右键菜单（`EditorContext`）。
+   * 把宿主给的项注册进 Monaco 的编辑器右键菜单（`EditorContext`）：内置两项（复制路径 / 发送会话）
+   * + `EditorMenuHooks.groups` 的自定义组（如工作台的 Git 历史）。
    *
-   * 两个容易错的地方：
+   * 三个容易错的地方：
    * ① **必须自己 dispose**——`addAction` 返回的句柄会往**全局**菜单注册表里加一条（
    *    带 `editorId` 前提，只在本编辑器弹），而编辑器自己的 `dispose()` 只清它内部的 action 表、
    *    **不动那份注册**。本页每个文件标签各建一个编辑器（切查看/编辑态、重新加载还会重建），
    *    不手回收就是“每重建一次，右键菜单里多一组重项”（实测已验）。
    * ② **分组名** `gebai` 落在 `9_cutcopypaste` 与 `navigation` 之间（菜单分组按名字典序，
    *    而 `navigation` 被硬编码在最前）——即“剪切/复制/粘贴之后、转到定义之前”，正是这两项该在的位置。
+   *    自定义组取名 `gebai.<id>`：字典序排在 `gebai` 之后，于是它们与这两项之间**自带一条组间
+   *    分隔线**（菜单按组画分隔线，组名相同才并成一组）。
+   * ③ **可重装**：菜单项的标题在注册那一刻定下，文案带状态的项（`✓ 行尾溯源`）状态一变就得
+   *    重装一次——所以进来先摘掉上一轮（见 `refreshMenu`）。
    */
-  function installMenuActions(): void {
+  function installMenuActions(handle: EditorHandle): void {
+    for (const d of menuDisposables) d.dispose()
+    menuDisposables = []
+    const disposables: { dispose(): void }[] = []
     // 有 hook 就注册（而**不是**看当前能不能算出绝对路径）：路径是取时现算的，
     // 拿不到时降级为「当前文件:12」也比“菜单项整个不在”好排查。
-    if (!opts.menu?.absPath) return
-    const disposables: { dispose(): void }[] = []
-    disposables.push(
-      ed.addAction({
-        id: "gebai.copyAbsPath",
-        label: "复制路径",
-        contextMenuGroupId: "gebai",
-        contextMenuOrder: 1,
-        run: () => {
-          const sel = selectionNow()
-          if (!sel) return
-          void navigator.clipboard.writeText(sel.ref).then(
-            () => toast(`已复制 ${sel.ref}`, "success"),
-            () => toast("复制失败：剪贴板不可用", "error"),
-          )
-        },
-      }),
-    )
-    const send = opts.menu?.sendToChat
-    if (send) {
+    if (opts.menu?.absPath) {
       disposables.push(
         ed.addAction({
-          id: "gebai.sendToChat",
-          label: "发送会话",
+          id: "gebai.copyAbsPath",
+          label: "复制路径",
           contextMenuGroupId: "gebai",
-          contextMenuOrder: 2,
+          contextMenuOrder: 1,
           run: () => {
             const sel = selectionNow()
             if (!sel) return
-            send({ ...sel, markdown: buildChatSnippet({ absPath: absPathOf(), range: sel.range, text: sel.text, language: sel.language }) })
+            void navigator.clipboard.writeText(sel.ref).then(
+              () => toast(`已复制 ${sel.ref}`, "success"),
+              () => toast("复制失败：剪贴板不可用", "error"),
+            )
           },
         }),
       )
+      const send = opts.menu.sendToChat
+      if (send) {
+        disposables.push(
+          ed.addAction({
+            id: "gebai.sendToChat",
+            label: "发送会话",
+            contextMenuGroupId: "gebai",
+            contextMenuOrder: 2,
+            run: () => {
+              const sel = selectionNow()
+              if (!sel) return
+              send({ ...sel, markdown: buildChatSnippet({ absPath: absPathOf(), range: sel.range, text: sel.text, language: sel.language }) })
+            },
+          }),
+        )
+      }
+    }
+    // 宿主自定义组（如 Git 历史）：文案、可用性、组内顺序全由宿主定，这里只负责落位
+    for (const g of opts.menu?.groups?.(handle) ?? []) {
+      g.items.forEach((it, i) => {
+        disposables.push(
+          ed.addAction({
+            id: `gebai.${g.id}.${it.id}`,
+            label: it.label,
+            contextMenuGroupId: `gebai.${g.id}`,
+            contextMenuOrder: i + 1,
+            run: () => it.run(),
+          }),
+        )
+      })
     }
     menuDisposables = disposables
   }
-
-  installMenuActions()
 
   const handle: EditorHandle = {
     kind: "monaco",
@@ -838,6 +893,7 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       paintBlame()
       updateCursorBlame()
     },
+    refreshMenu: () => installMenuActions(handle),
     dispose: () => {
       wrapTargets.delete(handle)
       metrics.dispose()
@@ -852,6 +908,8 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       wrap.remove()
     },
   }
+  // 句柄齐了才装菜单：自定义组的文案/可用性按**编辑器自身能力**定（见 EditorMenuHooks.groups）
+  installMenuActions(handle)
   wrapTargets.add(handle)
   return handle
 }
@@ -982,18 +1040,18 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     }
   }
 
-  /* 降级编辑器没有 Monaco 的右键菜单（原生菜单又被全站屏蔽），这两项得自绘一份：
+  /* 降级编辑器没有 Monaco 的右键菜单（原生菜单又被全站屏蔽），这几项得自绘一份：
      否则降级部署下右键编辑器就什么都没有（连“复制路径”都指不到）。
      挂在容器而非 pre/textarea 上：两态互切会换可见元素（见 setReadOnly），绑到具体元素上会在切态后失效。
-     只放这两项——文本的剪切/复制/粘贴键位照旧，不在这里重做一套编辑菜单。 */
+     只放这几项——文本的剪切/复制/粘贴键位照旧，不在这里重做一套编辑菜单。 */
   wrap.addEventListener("contextmenu", (ev) => {
-    if (!opts.menu?.absPath) return
     const e = ev as MouseEvent
     e.preventDefault()
     const sel = selectionNow()
-    const items: { label: string; icon: string; onClick: () => void }[] = [
-      { label: "复制路径", icon: "copy", onClick: () => void navigator.clipboard.writeText(sel?.ref ?? "").then(() => toast(`已复制 ${sel?.ref ?? ""}`, "success")) },
-    ]
+    const items: MenuItem[] = []
+    if (opts.menu?.absPath) {
+      items.push({ label: "复制路径", icon: "copy", onClick: () => void navigator.clipboard.writeText(sel?.ref ?? "").then(() => toast(`已复制 ${sel?.ref ?? ""}`, "success")) })
+    }
     const send = opts.menu?.sendToChat
     // 无内容可发时不摆这一项（只读降级态又没选任何东西时：发个空代码块没有意义）
     if (send && sel && sel.text) {
@@ -1003,7 +1061,13 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
         onClick: () => send({ ...sel, markdown: buildChatSnippet({ absPath: absPathOf(), range: sel.range, text: sel.text, language: sel.language }) }),
       })
     }
-    showMenu(e.clientX, e.clientY, items)
+    // 宿主自定义组（如 Git 历史）：与 Monaco 那份同一口径，自成一段（分隔线起头）
+    for (const g of opts.menu?.groups?.(handle) ?? []) {
+      if (!g.items.length) continue
+      items.push({ separator: true })
+      for (const it of g.items) items.push({ label: it.label, onClick: it.run })
+    }
+    if (items.length) showMenu(e.clientX, e.clientY, items)
   })
 
   const render = async () => {
@@ -1074,6 +1138,8 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     },
     markClean: () => {},
     setBlame: () => {},
+    // 降级实现的自绘菜单每次弹出前现取（见上面的 contextmenu），没有需要重装的东西
+    refreshMenu: () => {},
     listSymbols: async () => flattenSymbols((await extractSymbolsAsync(area.value, lang)).symbols),
     supportsSymbols: () => canExtract(lang),
     symbolSource: async () => (await extractSymbolsAsync(area.value, lang)).source,

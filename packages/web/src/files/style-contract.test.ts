@@ -239,3 +239,41 @@ describe("样式契约：变更面板", () => {
     expect(ruleBody(".fw-commit-actions")).toMatch(/flex-wrap:\s*wrap/)
   })
 })
+
+/**
+ * 样式契约：亚克力主题必须接管工作台的**半透明浮层**（给毛玻璃 + 更实的 --pop-bg）。
+ *
+ * 存在的理由（实测过的缺陷）：工作台浮层的底色是 `--bg-elev`（亚克力下是半透明的 0.8 白 /
+ * 0.82 黑），而它们没进亚克力主题的浮层白名单——于是**没有毛玻璃**，背后的编辑器代码**清晰可读地**
+ * 透出来，与弹窗文字叠在一起（白色亚克力下文件历史弹窗几乎没法读）。
+ * 这件事不报错、页面也不出错，只有一眼看才知道；而“新加一个工作台浮层忘了加白名单”
+ * 与“改白名单时删了这几行”都会**静默**退回原症状，所以用测试钉住。
+ *
+ * 只查“有没有被接管”与“是否真给了 backdrop-filter / --pop-bg”，不锁具体色值（那是主题的审美域）。
+ */
+describe("样式契约：亚克力主题接管工作台浮层（否则透出背后正文）", () => {
+  const acrylic = readFileSync(join(SRC, "themes", "acrylic.css"), "utf8")
+  /** 工作台里“压在正文上、且底色是半透明令牌”的浮层类（以后新增同类浮层就补到这里）。
+   *  为何不含菜单类（.fw-menu-pop / .fw-log-ref-pop）：它们本就自己写死了 blur(12px)；
+   *  也不含扇形按钮：那是双背景垫实的实底。 */
+  const WORKBENCH_FLOATS = [".fw-dialog", ".fw-qo", ".fw-toast"]
+
+  test("每个浮层都在亚克力的浮层名单里，且跟随 --pop-bg / --glass", () => {
+    for (const sel of WORKBENCH_FLOATS) {
+      /* 选择器必须**边界匹配**：不能用 indexOf(前缀)——那样 `.fw-dialog` 会命中 `.fw-dialog-XX`、
+         `.fw-toast` 会命中真实存在的 `.fw-toast-close`、`.fw-qo` 会命中 `.fw-qo-overlay`，
+         于是「把这一行从名单里删掉 / 改错」变成静默通过（反向验证实测就掉进去过）。
+         名单是一条逗号分隔的选择器列表，所以选择器之后只能是 `,` 或 ` {`。 */
+      const re = new RegExp(`\\[data-theme="acrylic"\\]\\s*${sel.replace(/\./g, "\\.")}\\s*(?=[,{])`)
+      const m = re.exec(acrylic)
+      expect(m, `${sel} 不在亚克力浮层白名单里（或与别的选择器写在一起了）——会静默退回“背景清晰透出”`).not.toBeNull()
+      // 该选择器所在规则块必须真给了毛玻璃与浮层底色（从命中处截到该规则块的收尾 } 为止）
+      const block = acrylic.slice(m!.index, acrylic.indexOf("}", m!.index))
+      /* 正则必须**行首锚定**：否则 `backdrop-filter: var(--glass)` 会命中
+         `-webkit-backdrop-filter: var(--glass)` 这个子串（两条本来就是一正一前缀，
+         前一条被删掉 / 改值时仍能静默通过——反向验证实测掉进去过）。 */
+      expect(block, `${sel} 所在规则块未设 backdrop-filter`).toMatch(/^[ \t]*backdrop-filter:\s*var\(--glass\)/m)
+      expect(block, `${sel} 所在规则块未设 --pop-bg 底色`).toMatch(/^[ \t]*background:\s*var\(--pop-bg\)/m)
+    }
+  })
+})

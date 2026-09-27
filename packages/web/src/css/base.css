@@ -88,7 +88,10 @@
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace;
   --font-size: 14px;
-  --header-h: 44px;
+  /* 标题栏高度（整条栏的唯一高度来源，经 #app 的 grid-template-rows 固定轨生效，
+     内容不会把它撑大）：桌面 40px —— 32px 图标按钮上下各留 4px，比原 44px 紧凑一档。
+     窄屏另有回写 44px（见 max-width: 860px 媒体查询，触摸目标 44×44 需要满高） */
+  --header-h: 40px;
   --sidebar-w: 264px;
   --msg-max-w: 800px;
   --transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
@@ -701,6 +704,9 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 }
 @media (max-width: 860px) {
   #app { grid-template-columns: 1fr; }
+  /* 窄屏回到 44px：下方触摸目标规则把 .icon-btn 抬到 min-height 44px，行高必须跟上，
+     否则按钮比标题栏还高、上下溢出（桌面 40px 档仅适用于鼠标/指针精确的环境） */
+  :root { --header-h: 44px; }
   /* 刘海屏/圆角屏：左右安全区堆到标题栏与消息区，横屏时内容不被圆角切 */
   header {
     padding-left: max(14px, var(--safe-l));

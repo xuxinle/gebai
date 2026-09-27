@@ -111,11 +111,17 @@ const ICONS: Record<string, string> = {
   warning: '<path d="M8 2l6 11H2L8 2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.4v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
   terminal: '<path d="M3 3h10a1 1 0 011 1v8a1 1 0 01-1 1H3a1 1 0 01-1-1V4a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.6 6.2L7 8.2l-2.4 2M8.4 10.6h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
   wheel: '<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2" fill="currentColor"/>',
-  // 更多操作轮盘入口（3×3 方块点阵，与主界面标题栏轮盘的入口图标同款）
-  apps: '<rect x="2" y="2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="6.2" y="2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="10.4" y="2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="2" y="6.2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="6.2" y="6.2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="10.4" y="6.2" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="2" y="10.4" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="6.2" y="10.4" width="3.6" height="3.6" rx="1" fill="currentColor"/><rect x="10.4" y="10.4" width="3.6" height="3.6" rx="1" fill="currentColor"/>',
+  /* 更多操作轮盘入口（3×3 方块点阵）：与主界面标题栏轮盘入口**同一张图**
+     （index.html 的 `#wheel-btn` 是 24 视框的 `M4 8h4V4H4v4z…`，本表固定 16 视框，故按 2/3 等比换算：
+     方块 4→2.667、间隙 2→1.333、起点 4→2.667）。
+     **直角、不留圆角**：13~16px 下 rx 会把方块四角吃掉大半，点阵糊成一团（实测 8 倍放大对比）；
+     间隙也必须按比例跟着缩，早期 16 视框里用 3.6/0.6（间隙仅 3.75% 边长）在这个字号下几乎看不见。 */
+  apps: [[2.667, 2.667], [6.667, 2.667], [10.667, 2.667], [2.667, 6.667], [6.667, 6.667], [10.667, 6.667], [2.667, 10.667], [6.667, 10.667], [10.667, 10.667]]
+    .map(([x, y]) => `<rect x="${x}" y="${y}" width="2.667" height="2.667" fill="currentColor"/>`)
+    .join(""),
   // 侧边 blame 列（每行出自谁手）：人形 + 归因引线（GitLens 同语汇，与「文件历史」的时钟图标区分开）
   blame: '<circle cx="5.2" cy="4.2" r="2.1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.2 12.8c0-2.3 1.4-3.7 3-3.7s3 1.4 3 3.7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.2 4.6h3.4M10.2 7.8h3.4M10.2 11h3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>',
-  // 行尾 blame（光标行尾的注释）：代码行 + 行尾两段注释（与侧边列的“人形”区分开）
+  /* 行内溯源（光标行尾的注释）：代码行 + 行尾两段注释（与侧边列的“人形”区分开） */
   blameEol: '<path d="M2.2 4.6h5.6M2.2 8h4.2M2.2 11.4h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.4 6.3h3.4M10.4 9.7h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".55"/>',
   copy: '<rect x="5" y="5" width="8" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 10.5V3.8A1.3 1.3 0 014.3 2.5h5" fill="none" stroke="currentColor" stroke-width="1.4"/>',
   // 粘贴（剪贴板板身 + 顶部夹子）：与「复制」成对出现（右键菜单与 Ctrl+V）

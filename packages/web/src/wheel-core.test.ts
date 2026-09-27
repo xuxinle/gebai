@@ -38,6 +38,8 @@ interface StubEl {
   dispatchEvent(ev: { type: string; target?: unknown; key?: string }): boolean
   getBoundingClientRect(): { left: number; top: number; right: number; bottom: number; width: number; height: number }
   listenerCount(): number
+  /** 可覆写的矩形（默认 0,0,32,32）：分圈与可用空间都按圆心位置算，测试要能把它放到真实位置（如右上角）。 */
+  rect: { left: number; top: number; right: number; bottom: number; width: number; height: number }
 }
 
 /** classList 直接读写 className 字符串——`el(tag, cls)` 是**赋 className**，两套存储会互相看不见。 */
@@ -89,7 +91,8 @@ function stub(tag = "div"): StubEl {
       for (const cb of listeners.get(ev.type) ?? []) cb({ preventDefault() {}, ...ev, target: ev.target ?? el })
       return true
     },
-    getBoundingClientRect: () => ({ left: 0, top: 0, right: 32, bottom: 32, width: 32, height: 32 }),
+    getBoundingClientRect: () => el.rect,
+    rect: { left: 0, top: 0, right: 32, bottom: 32, width: 32, height: 32 },
     listenerCount: () => [...listeners.values()].reduce((n, l) => n + l.length, 0),
   }
   return el
@@ -180,8 +183,10 @@ describe("createWheel（按钮轮盘原语）", () => {
     w.destroy()
   })
 
-  test("hover 展开：按钮落在各自弧位上（内弧半径 < 外弧半径，扇形朝下）", async () => {
+  test("hover 展开：按钮落在各自圈位上（内圈半径 < 外圈半径，扇形朝下）", async () => {
     const trigger = stub("button")
+    // 入口放到窗口右上角（真实位置）：分圈要按圆心位置算可用空间，摆在原点会被当成“贴左边界”
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
     const inner1 = stub("button")
     const inner2 = stub("button")
     const outer1 = stub("button")
@@ -192,8 +197,7 @@ describe("createWheel（按钮轮盘原语）", () => {
         { el: asEl(inner2), group: "inner" },
         { el: asEl(outer1) },
       ],
-      innerR: 85,
-      outerR: 145,
+      firstRingR: 85,
     })
     const keep = containers()[0]
     trigger.dispatchEvent({ type: "pointerenter" })
@@ -204,8 +208,9 @@ describe("createWheel（按钮轮盘原语）", () => {
     expect(inner1.style.transitionDelay).toBe("0ms")
     expect(inner2.style.transitionDelay).toBe("14ms")
 
+    // 内圈两项同半径；外圈（组边界）必换圈，半径 = 首圈 + 边长 + 间隙
     for (const el of [inner1, inner2]) expect(offsetOf(el).radius).toBeCloseTo(85, 3)
-    expect(offsetOf(outer1).radius).toBeCloseTo(145, 3)
+    expect(offsetOf(outer1).radius).toBeCloseTo(85 + 32 + 8, 3)
     // 扇形朝下（入口在界面上缘，只有向下有空间）
     for (const el of [inner1, inner2, outer1]) expect(offsetOf(el).dy).toBeGreaterThan(0)
     w.destroy()
@@ -328,59 +333,118 @@ describe("createWheel（按钮轮盘原语）", () => {
     })
     trigger.dispatchEvent({ type: "pointerenter" })
     await tick()
-    // 只剩一个可见项：落在区间中心角度上（单弧只一项时居中），半径仍是内弧半径
+    // 只剩一个可见项：落在区间中心角度上（单圈只一项时居中），半径仍是首圈半径
     expect(offsetOf(shown).radius).toBeCloseTo(85, 3)
     expect(hidden.style.opacity).toBe("0")
     expect(hidden.style.transform).toBe("translate(0, 0) scale(0.4)")
     w.destroy()
   })
 
-  test("弧位：项数变多只撑角度，**半径固定不变**（不为了塞下按钮而扩大圈）", async () => {
-    // 5 个内弧项 @ 32px：默认区间（54°）不够拉开，但半径必须仍是 85
+  test("分圈：同租放不下时**自动落到下一圈**，各圈半径按「边长 + 间隙」步进", async () => {
+    /* 7 个同类项 @ 32px（先全排一圈看看能放几个）：首圈半径 85 在可用张角内最多 3 项，
+       余项落到 85+40=125，再放不下就 165……断言取“实际出现的圈半径”集合，不写死项数分配——
+       容量公式（半径 × 可用张角）改了就跟着变，这正是这份用例要盯住的东西。 */
     const trigger = stub("button")
-    const inner = Array.from({ length: 5 }, () => stub("button"))
-    const outer = [stub("button"), stub("button")]
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
+    const all = Array.from({ length: 7 }, () => stub("button"))
     const w = createWheel({
       trigger: asEl(trigger),
-      items: [...inner.map((e) => ({ el: asEl(e), group: "inner" as const })), ...outer.map((e) => ({ el: asEl(e) }))],
-      innerR: 85,
-      outerR: 145,
+      items: all.map((e) => ({ el: asEl(e) })),
+      firstRingR: 85,
     })
     trigger.dispatchEvent({ type: "pointerenter" })
     await tick()
-    const pts = inner.map((e) => offsetOf(e))
-    // 内弧半径就是上游给的 85，不因项数而变
-    for (const p of pts) expect(p.radius).toBeCloseTo(85, 6)
-    // 角度按从起始角向左撑开排序，全落在角度上限内（不压入口那一行：dy > 0）
-    for (const p of pts) {
-      expect(p.dx).toBeLessThanOrEqual(0)
-      expect(p.dy).toBeGreaterThan(0)
-    }
-    // 外弧半径固定 145，且至少离内弧一个按钮位
-    for (const o of outer) {
-      expect(offsetOf(o).radius).toBeCloseTo(145, 6)
-      expect(offsetOf(o).radius).toBeGreaterThanOrEqual(85 + 32)
+    const radii = all.map((e) => Number(offsetOf(e).radius.toFixed(2)))
+    const rings = [...new Set(radii)].sort((x, y) => x - y)
+    expect(rings[0]).toBe(85)
+    expect(rings.length).toBeGreaterThan(1) // 一圈真放不下：必须用上第二圈
+    for (let i = 1; i < rings.length; i++) expect(rings[i]! - rings[i - 1]!).toBeCloseTo(32 + 8, 2)
+    // 每圈内部：相邻按钮不叠（用方块的实际不重叠条件：|Δx| 或 |Δy| ≥ 边长）
+    for (const r of rings) {
+      const pts = all.map((e) => offsetOf(e)).filter((p) => Math.abs(p.radius - r) < 0.5)
+      for (let i = 1; i < pts.length; i++) {
+        const dx = Math.abs(pts[i]!.dx - pts[i - 1]!.dx)
+        const dy = Math.abs(pts[i]!.dy - pts[i - 1]!.dy)
+        expect(Math.max(dx, dy)).toBeGreaterThanOrEqual(32)
+      }
     }
     w.destroy()
   })
 
-  test("弧位：项少时保持首选半径与区间（不无谓地撑开）", async () => {
+  test("分圈：可用空间不够时**不再往外开圈**，剩余项并进最后一圈（宁可挤也不出屏）", async () => {
     const trigger = stub("button")
-    const a = stub("button")
-    const b = stub("button")
+    // 入口贴近屏幕左缘（cx 只有 20px）：可用半径很小，来不及开第二轮
+    trigger.rect = { left: 8, top: 5, right: 32, bottom: 29, width: 24, height: 24 }
+    const all = Array.from({ length: 6 }, () => stub("button"))
     const w = createWheel({
       trigger: asEl(trigger),
-      items: [{ el: asEl(a), group: "inner" }, { el: asEl(b), group: "inner" }],
-      innerR: 85,
-      innerRange: [93, 147],
+      items: all.map((e) => ({ el: asEl(e) })),
+      firstRingR: 85,
+      margin: 8,
+    })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    for (const e of all) expect(offsetOf(e).radius).toBeCloseTo(85, 3)
+    w.destroy()
+  })
+
+  test("圈位：项少时只占「刚好放下」的跨度（不硬撑到固定张角）", async () => {
+    const trigger = stub("button")
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
+    const a = stub("button")
+    const b = stub("button")
+    const c = stub("button")
+    const w = createWheel({
+      trigger: asEl(trigger),
+      items: [
+        { el: asEl(a), group: "inner" },
+        { el: asEl(b), group: "inner" },
+        { el: asEl(c) },
+      ],
+      firstRingR: 85,
     })
     trigger.dispatchEvent({ type: "pointerenter" })
     await tick()
     expect(offsetOf(a).radius).toBeCloseTo(85, 3)
     expect(offsetOf(b).radius).toBeCloseTo(85, 3)
     // 起始角固定 93°：张角向左撑开，不多占右侧（入口靠窗口右缘时首个按钮不会被顶出屏）
-    expect(Math.atan2(offsetOf(a).dy, offsetOf(a).dx) * (180 / Math.PI)).toBeCloseTo(93, 1)
-    expect(Math.atan2(offsetOf(b).dy, offsetOf(b).dx) * (180 / Math.PI)).toBeCloseTo(147, 1)
+    const degOf = (e: StubEl): number => (Math.atan2(offsetOf(e).dy, offsetOf(e).dx) * 180) / Math.PI
+    expect(degOf(a)).toBeCloseTo(93, 1)
+    // 圆环上只有 2 项：跨度就是“刚好分开”的那一点，不能空出一大截弧
+    // （旧实现固定撑到 54°，实测两个按钮隔了 55px 的弧，看着就不在一圈上）
+    const span = degOf(b) - degOf(a)
+    expect(span).toBeGreaterThan(10)
+    expect(span).toBeLessThan(40)
+    // 相邻按钮实际间隙达标（方块不叠且留出 gap）：|Δx| 或 |Δy| ≥ 边长 + 间隙
+    const dx = Math.abs(offsetOf(b).dx - offsetOf(a).dx)
+    const dy = Math.abs(offsetOf(b).dy - offsetOf(a).dy)
+    expect(Math.max(dx, dy)).toBeGreaterThanOrEqual(32 + 8 - 0.5)
+    // 只一项的圈：落在起始角（与其它圈同方向）
+    expect(degOf(c)).toBeCloseTo(93, 1)
+    w.destroy()
+  })
+
+  test("引导弧线：每圈一条（圈数 = 弧线数），半径等于该圈半径", async () => {
+    const trigger = stub("button")
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
+    const all = Array.from({ length: 7 }, () => stub("button"))
+    const w = createWheel({ trigger: asEl(trigger), items: all.map((e) => ({ el: asEl(e) })), firstRingR: 85 })
+    const keep = containers()[0]
+    // 桩元素的 setAttribute 不回流到 classList，所以按**标签**找弧线 SVG（真实浏览器里它是 .wheel-arc）
+    const svg = keep.children.find((c) => c.tagName === "SVG")!
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    const radii = [...new Set(all.map((e) => Number(offsetOf(e).radius.toFixed(2))))].sort((x, y) => x - y)
+    const paths = svg.children.filter((c) => c.tagName === "PATH")
+    expect(paths.length).toBe(radii.length)
+    // 每条弧线半径 = 对应圈半径（“M x y A r r …” 里的 r）
+    const arcR = paths.map((p) => Number(/A (\d+(?:\.\d+)?) /.exec(p.getAttribute("d") ?? "")?.[1]))
+    for (const r of radii) expect(arcR.some((v) => Math.abs(v - r) < 0.5)).toBe(true)
+    // arcs: false 时一条不画
+    const w2 = createWheel({ trigger: asEl(stub("button")), items: [{ el: asEl(stub("button")) }], arcs: false })
+    const keep2 = containers().at(-1)!
+    expect(keep2.children.some((c) => c.tagName === "SVG")).toBe(false)
+    w2.destroy()
     w.destroy()
   })
 })

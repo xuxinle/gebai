@@ -21,7 +21,7 @@ import "../css/wheel.css"
 // 快速打开面板（VSCode Quick Open 同款）的样式
 import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
-import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type BlameLine } from "./editor"
+import { createEditor, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoReady, toggleWordWrap, type EditorHandle, type EditorMenuGroup, type EditorMenuItem, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
 import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, notifySaved, setLspNotifier, setLspOpener, setLspSessionProvider, type LspJumpTarget } from "./lsp"
 import { wordWrapTitle } from "./wrap"
@@ -1125,6 +1125,8 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
           absPath: () => absOfRepo(rootAbsOf(tab.root), tab.path, IS_WIN),
           // 「发送会话」**仅分屏（被主界面嵌入）时给**：独立标签页里没有对话输入框可发
           sendToChat: EMBEDDED ? requestSendToChat : undefined,
+          // 自定义组（Git 历史）随标签状态变文案，句柄要用来判断编辑器能力：见 gitMenuGroup
+          groups: (ed) => gitMenuGroup(tab, ed.kind),
         },
       })
       if (stale()) {
@@ -1139,6 +1141,8 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
       tab.blameLines = undefined
       tab.blameGutter = false
       tab.blameInline = false
+      // 行内溯源状态刚清零：右键菜单里的溯源项文案带开关态，重装一次让它跟上
+      tab.editor?.refreshMenu()
       void autoBlame(tab) // 行尾态按本地偏好自动恢复（查看态与编辑态都给）
       editor.onChange(() => {
         /*
@@ -1586,8 +1590,9 @@ function scrollActiveTabIntoView(): void {
  * （另外按钮全在标签栏而不是单独一行工具条：面包屑那行已被标签标题与资源管理器表达，
  *   省下一整行纵向空间给代码，且“当前标签能做什么”就在标签旁边。）
  *
- * 轮盘分两弧：内弧 = 看这个文件（文件历史 / blame 行尾 / blame 侧边列），
- * 外弧 = 文件本身的动作与显示开关（保存 / 重载 / 下载 / 复制路径 / 自动换行）。
+ * 轮盘只有**一弧**：文件本身的动作与显示开关（保存 / 重载 / 下载 / 复制路径 / 自动换行）。
+ * 历史相关三项（行尾溯源 / 侧边溯源 / 文件历史）原先占着内弧，现已移入**编辑器右键菜单**
+ * 自成一组（见 gitMenuGroup）——人看着代码时右键就在手边，比扇形更贴手，轮盘也不必为剩项撑第二圈。
  */
 function renderTabActions(box: HTMLElement): void {
   const t = activeTab()
@@ -1641,37 +1646,10 @@ function renderTabActions(box: HTMLElement): void {
     box.appendChild(btn("diff", rendered ? "切换到源码" : "切换到渲染预览", () => toggleRendered(t), rendered ? "active" : ""))
   }
 
-  /* ---------- 其余动作：收进轮盘（内弧 = 历史相关三个，外弧 = 其余） ---------- */
+  /* ---------- 其余动作：收进轮盘（单弧） ---------- */
   const items: WheelItem[] = []
 
-  // 内弧：**历史相关三个**（文件历史 / 行尾 blame / 侧边 blame 列）——都回答「这行、这文件是什么时候、谁改的」，
-  // 是一类动作。行尾态**编辑态也用**（跟随光标的淡色批注，不进模型、不影响保存）；侧边列在编辑态关闭
-  // ——行号随编辑漂移，整列作者指到了别的行比不显示更糟。
-  if (state.gitStatus?.isRepo) {
-    items.push({ group: "inner", el: wheelBtn("history", "文件历史（Git log --follow）", () => void showFileHistoryByPath(t.path, t.root)) })
-    items.push({
-      group: "inner",
-      el: wheelBtn(
-        "blameEol",
-        t.blameInline ? "关闭行尾 blame（光标行尾的作者注释）" : "显示行尾 blame（光标所在行尾标出作者与时间，记住开关）",
-        () => void toggleBlame(t, "inline"),
-        t.blameInline ? "active" : "",
-        !t.editor,
-      ),
-    })
-    items.push({
-      group: "inner",
-      el: wheelBtn(
-        "blame",
-        t.mode === "edit" ? "编辑态下不可用侧边 blame 列（行号会漂移）" : t.blameGutter ? "关闭侧边 blame 列" : "显示侧边 blame 列（编辑器左侧逐行作者，与内容分开）",
-        () => void toggleBlame(t, "gutter"),
-        t.blameGutter ? "active" : "",
-        !t.editor || t.mode === "edit",
-      ),
-    })
-  }
-
-  // 外弧：文件本身的动作（保存 / 重载 / 下载 / 复制路径）+ 显示开关（自动换行）
+  // 文件本身的动作（保存 / 重载 / 下载 / 复制路径）+ 显示开关（自动换行）
   items.push({ el: wheelBtn("save", t.dirty ? "保存（Ctrl+S）· 有未保存的修改" : "保存（Ctrl+S）", () => void saveTab(t), t.dirty ? "primary" : "", !t.dirty || !state.rootsResp?.writable) })
   items.push({ el: wheelBtn("refresh", "重新加载当前文件", () => void loadTab(t)) })
   items.push({ el: wheelBtn("download", "下载", () => window.open(downloadUrl({ api, root: t.root, path: t.path }), "_blank")) })
@@ -1680,7 +1658,17 @@ function renderTabActions(box: HTMLElement): void {
   const wrapOn = isWordWrap()
   items.push({ el: wheelBtn("wrap", wordWrapTitle(wrapOn), () => toggleWrapAndReport(), wrapOn ? "active" : "") })
 
-  const trigger = btn("apps", "更多操作（自动换行 / 文件历史 / blame 行尾 / blame 侧边列 · 保存 / 重载 / 下载 / 复制路径）", () => {})
+  /* 轮盘入口：**不用 btn() 的 13px 图标**——它与标题栏轮盘入口是同一个动作，在那边是 16px + `--text`
+     （见 css/overlays.css 的 `#wheel-btn.icon-btn`），13px/--text-muted 的标签栏密度下九宫格点阵会糊成
+     一团（实测 8 倍放大对比：字形的锅大于字号的锅，两者一起修）。形状只在标签栏里大一号（.fw-wheel-btn，
+     见 css/files.css），与兄弟按钮保持同一个视觉重心。
+
+     **不挂 title**：展开后每个扇形按钮都自带 tooltip，入口再弹一条八项清单是重复且碍事（入口一悬停
+     就展开，提示正好盖在刚弹出的扇形上）；可访问名称改用 `aria-label`——它是无障碍名称，
+     **不产生视觉提示**。要定位这个入口请用 `.fw-tabbar-actions .fw-wheel-btn`（脚本/测试同理，不依赖文案）。 */
+  const trigger = h("button", { class: "fw-icon-btn fw-wheel-btn", "aria-label": "更多操作" })
+  trigger.appendChild(icon("apps", 16))
+  trigger.onclick = () => {}
   box.appendChild(trigger)
   tabWheel = createWheel({ trigger, items, containerClass: "wheel fw-wheel" })
 }
@@ -1719,15 +1707,58 @@ function toggleRendered(t: Tab): void {
   renderStatus()
 }
 
-/** 轮盘里的动作按钮：图标略大（扇形按钮边长统一 32px，13px 图标在里面显小）。 */
+/** 轮盘里的动作按钮：图标略大（扇形按钮边长统一 32px，13px 图标在里面显小）——
+ * 16px 与标题栏轮盘的扇形按钮（index.html 里写 16）一致，两个入口的扇形长得一样。 */
 function wheelBtn(iconName: string, title: string, onClick: () => void, cls = "", disabled = false): HTMLButtonElement {
   const b = h("button", { class: `fw-icon-btn ${cls}`, title })
-  b.appendChild(icon(iconName, 15))
+  b.appendChild(icon(iconName, 16))
   b.disabled = disabled
   b.onclick = onClick
   return b
 }
 
+/**
+ * 编辑器右键菜单里的自定义组：目前是 **Git 溯源**一组（行尾溯源 / 侧边溯源 / 文件历史）。
+ *
+ * 为何挂这里：这三项原先占着标签栏动作轮盘的**内弧**——同属「这行、这文件是什么时候谁改的」，
+ * 低频，但真要用时人正看着代码，右键就在手边（菜单里自成一段，与「复制路径 / 发送会话」
+ * 用分隔线分开，见 editor.ts 的组名规则），轮盘因此回到单弧。
+ *
+ * **两项行内溯源在前、文件历史在后**：右键是“对着某一行”发出的手势，默认意图多是问“这行谁写的”；
+ * 文件级历史退一位（它也是三项里唯一会弹窗的一个）。
+ *
+ * **文案只留三个词，不带括号说明**：组内部的三个项都短、也没有同名前缀混淆，“行尾/侧边/文件”
+ * 三个限定词已足够区分（何时需要长说明，看 `行尾溯源（编辑态不可用）`——那是**状态**不是说明，去不得）。
+ *
+ * **每次装配/重装菜单时现取**（见 EditorMenuHooks.groups）：文案带状态（`✓ 行尾溯源`），
+ * 所以开关或模式一变就调 `editor.refreshMenu()`（调用点：applyBlame / toggleMode / loadTab）。
+ */
+function gitMenuGroup(tab: Tab, kind: EditorHandle["kind"]): EditorMenuGroup[] {
+  if (!state.gitStatus?.isRepo) return [] // 非仓库：整组不给（与原来轮盘三项同一个条件）
+  const items: EditorMenuItem[] = []
+  // 降级编辑器画不出行内溯源（setBlame 是空实现）：那两项不给，免点了没反应
+  if (kind === "monaco") {
+    items.push({
+      id: "blameInline",
+      label: `${tab.blameInline ? "✓ " : ""}行尾溯源`,
+      run: () => void toggleBlame(tab, "inline"),
+    })
+    // 编辑态下侧边列不可用（行号随编辑漂移，整列作者会指到别的行，比不显示更糟）：
+    // 菜单里**保留位置并写明原因**，而不是让它整个消失（消失会让人以为功能没了）。
+    // 这里的括号是**状态**不是说明（去掉就等于一个“看着可点、点了只弹提示”的项）
+    const gutterOK = tab.mode !== "edit"
+    items.push({
+      id: "blameGutter",
+      label: gutterOK ? `${tab.blameGutter ? "✓ " : ""}侧边溯源` : "侧边溯源（编辑态不可用）",
+      run: () => {
+        if (gutterOK) void toggleBlame(tab, "gutter")
+        else toast("编辑态下不可用侧边溯源（行号会随编辑漂移）", "warn")
+      },
+    })
+  }
+  items.push({ id: "fileHistory", label: "文件历史", run: () => void showFileHistoryByPath(tab.path, tab.root) })
+  return [{ id: "git", items }]
+}
 
 /** 按路径看文件历史（工具栏与变更面板右键共用）。 */
 /** 文件历史（`git log --follow`）：入参为**仓库相对**路径（git 侧统一用仓库坐标，与当前根无关）。 */
@@ -2086,9 +2117,9 @@ async function toggleBlame(tab: Tab, which: "gutter" | "inline"): Promise<void> 
     try {
       const res = await api.gitBlame(tab.root, tab.path)
       tab.blameLines = res.lines
-      if (!res.lines.length) toast("该文件没有可用的 blame 信息（未跟踪 / 历史为空）", "info")
+      if (!res.lines.length) toast("该文件没有可用的溯源信息（未跟踪 / 历史为空）", "info")
     } catch (err) {
-      toast(`读取 blame 失败：${(err as Error).message}`, "error")
+      toast(`读取溯源信息失败：${(err as Error).message}`, "error")
       return
     }
   }
@@ -2104,6 +2135,8 @@ async function toggleBlame(tab: Tab, which: "gutter" | "inline"): Promise<void> 
 /** 把两态开关与数据一起交给编辑器（唯一渲染入口，切模式/重载也走它）。 */
 function applyBlame(tab: Tab): void {
   tab.editor?.setBlame(tab.blameLines ?? [], { gutter: !!tab.blameGutter, inline: !!tab.blameInline })
+  // 右键菜单里的溯源项文案带开关态（`✓ 行尾溯源`）：开关一变就得重装一次菜单
+  tab.editor?.refreshMenu()
 }
 
 /** 按本地偏好自动开行尾态（打开文件/切回查看态时调；侧边列不自动开）。 */
@@ -2129,6 +2162,8 @@ function toggleMode(tab: Tab): void {
     tab.blameGutter = false
     applyBlame(tab)
   }
+  // 侧边溯源在编辑态不可用（菜单项文案随模式变）：重装一次菜单
+  tab.editor?.refreshMenu()
   tab.editor?.setReadOnly(tab.mode !== "edit" || !!tab.truncated)
   if (tab.mode === "edit") {
     tab.editor?.focus()

@@ -2753,6 +2753,31 @@ button.fw-status-item:hover {
   cursor: not-allowed;
 }
 
+/* ---------- 轮盘入口（标签栏最右，见 main.ts 的 renderTabActions）----------
+   与标题栏轮盘入口**同一套视觉语言**（对照 css/overlays.css 的 `#wheel-btn.icon-btn`）：图标色提到 --text、
+   静止态不画底色不画框，hover / 展开态才给底色反馈。
+   为何必须单独一条：`.fw-icon-btn` 基线是 24px / 13px 图标 / --text-muted（标签栏的紧凑密度），入口在这个
+   密度下图标会糊（九宫格点阵 @13px 的间隙不足半像素），而它又不像兄弟按钮那样“看一眼就知道是什么”——
+   一次开五个动作的入口值得比其他按钮清楚一档：**28px 按钮 + 16px 图标**。
+   位置：必须排在 `.fw-icon-btn` 基线**之后**（同权重靠源码顺序决胜，放前面会被基线覆盖），
+   并用双类选择器（0,2,0）再压一道，以后谁挪动顺序都不会又变回 24px。 */
+.fw-icon-btn.fw-wheel-btn {
+  width: 28px;
+  height: 28px;
+  color: var(--text);
+}
+
+.fw-icon-btn.fw-wheel-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 展开中（wheel-core 给入口加 .active）：accent 底色作「已开」标识，与标题栏入口一致 */
+.fw-icon-btn.fw-wheel-btn.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 .fw-input {
   padding: 6px 9px;
   border: 1px solid var(--border);
