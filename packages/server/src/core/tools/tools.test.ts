@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname, resolve } from "node:path"
-import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, SHOW_TEXT_MAX_CHARS, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
+import { readTool, writeTool, editTool, systemInfoTool, shTool, bgTaskTool, pyTool, showTool, SHOW_TEXT_MAX_CHARS, pageCaptureTool, normalizePlantUml, injectPlantUmlLayout, truncate, sliceLines, isTruncationNotice, TRUNCATION_MARKER, spillLongUserInput, USER_INPUT_SPILL_THRESHOLD, makePreviewServerTool, assertPublicHttpUrl, fetchWithRedirectGuard, envDetectTool, patchTool, gitTool, agentListTool, agentLoadTool, askTool, planFileName, buildPlanMarkdown } from "."
 import { createAllGlobalTools, createGlobalTools, isGlobalToolExcluded, resolvePythonCmd, _resetPythonCmdCache, _setExcludedGlobalToolsForTest, PAGE_CAPTURE_HTML_LIMIT } from "."
 import { searchSymbolsTool } from "@gebai/agents"
 import { SessionStore } from "../session/store"
@@ -417,6 +417,37 @@ describe("global tools", () => {
     expect(r.output).toBe("1\thello")
     expect((await readTool.execute({ path: "a.txt", line_numbers: false }, c)).output).toBe("hello")
     cleanup(home)
+  })
+
+  test("write 拒绝把 read 的截断提示当内容写回（否则整文件被覆盖成提示语）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-tools-"))
+    const c = ctx(home)
+    // 先建一个「大文件」，并读它的截断输出（read 超长时会返回提示文本；阈值 12000 字符）
+    const big = Array.from({ length: 3000 }, (_, i) => `line ${i} of the big fixture file`).join("\n")
+    await writeTool.execute({ path: "big.txt", content: big }, c)
+    const read = await readTool.execute({ path: "big.txt" }, c)
+    expect(read.truncated).toBe(true)
+    expect(isTruncationNotice(read.output)).toBe(true)
+    // 拿这段提示文本去整体写回 → 必须拒绝（这是实测过的事故：3684 行文件被写成 175 行提示语）
+    const denied = await writeTool.execute({ path: "big.txt", content: read.output }, c)
+    expect(denied.output).toContain("write 拒绝")
+    expect(denied.output).toContain("截断提示文本")
+    // 原文件必须一字未动（**注意**：再整体 read 一次也会被截断——用切片读首行来验，\
+    // 尾注里的「共 N 行」正好是“文件没被覆盖成提示语”的直接证据）
+    const head = (await readTool.execute({ path: "big.txt", limit: 1 }, c)).output
+    expect(head).toContain("line 0 of the big fixture file")
+    expect(head).toContain("共 3000 行")
+    expect((await readTool.execute({ path: "big.txt", offset: 3000, limit: 1 }, c)).output).toContain("line 2999 of the big fixture file")
+    // 追加同样拒绝（把提示语接在文件尾也是无意义的内容）
+    expect((await writeTool.execute({ path: "big.txt", content: read.output, append: true }, c)).output).toContain("write 拒绝")
+    cleanup(home)
+  })
+
+  test("isTruncationNotice 只认「以标记开头」：正文里提到该文案不受影响", () => {
+    expect(isTruncationNotice(`${TRUNCATION_MARKER} truncated/read_x.txt（相对会话工作目录）]\n\n…`)).toBe(true)
+    expect(isTruncationNotice(`  \n${TRUNCATION_MARKER} x]`)).toBe(true) // 前导空白不影响
+    expect(isTruncationNotice("源码里写了 " + TRUNCATION_MARKER + " 这个前缀")).toBe(false)
+    expect(isTruncationNotice("普通内容")).toBe(false)
   })
 
   test("read with offset/limit slices by line", async () => {

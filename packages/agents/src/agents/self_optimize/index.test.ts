@@ -122,6 +122,26 @@ describe("self_optimize sub-agent", () => {
     expect(selfOptimizeDef.systemPrompt).toContain("不留历史痕迹")
   })
 
+  test("写范围**实际状态**行跟随进程环境（策略写在正文、状态写在末尾）", async () => {
+    /* 实测过的坑：提示词正文写的是策略（“默认只读…”），而它是否生效取决于启动级变量
+       GEBAI_SELF_MODIFY——不把状态说清楚时，`.env` 已配 true 的会话里模型仍以为核心源码不可写，
+       白白绕路。两个分支都验：用带查询串的动态 import 拿一份**重新按当前环境求值**的模块。 */
+    const saved = process.env.GEBAI_SELF_MODIFY
+    try {
+      process.env.GEBAI_SELF_MODIFY = "true"
+      const on = await import(`./index.ts?scope=on-${Date.now()}`)
+      expect(on.systemPrompt).toContain("当前写范围状态：已放开")
+      expect(on.systemPrompt).toContain("仓库内任意路径可写")
+      process.env.GEBAI_SELF_MODIFY = ""
+      const off = await import(`./index.ts?scope=off-${Date.now()}`)
+      expect(off.systemPrompt).toContain("当前写范围状态：默认只读")
+      expect(off.systemPrompt).toContain("GEBAI_SELF_MODIFY=true 并重启")
+    } finally {
+      if (saved === undefined) delete process.env.GEBAI_SELF_MODIFY
+      else process.env.GEBAI_SELF_MODIFY = saved
+    }
+  })
+
   test("系统提示词含三类子Agent 开发场景与目录（内置域/二开域/客卿域，与写范围守卫口径一致）", () => {
     const p = selfOptimizeDef.systemPrompt
     // 三个域与入口布局

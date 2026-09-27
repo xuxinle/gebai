@@ -10,7 +10,7 @@ import { applyPatch, parsePatch, PATCH_MAX_FILE_BYTES, PATCH_MAX_HUNKS, type App
 import { concatBytes, decodeTextFile, detectEncoding, encodeText, ENCODING_LABEL, gbkCharOffsets, normalizeEol, type DecodedText } from "../base/file-text"
 import { REGEX_MAX_MATCHES, runRegexMatcher } from "../base/regex-runner"
 import { safeModeWriteCheck } from "../security/safety"
-import { truncate, sliceLines } from "../support/truncate"
+import { isTruncationNotice, truncate, sliceLines, TRUNCATION_MARKER } from "../support/truncate"
 import { walkDirFiles, WALK_SKIP_DIRS } from "../support/walk"
 import { grepEnginePreference, resolveRipgrep, runRipgrep } from "../support/ripgrep"
 import { artifactBlocks, previewLogicalPath } from "../support/artifacts"
@@ -273,7 +273,7 @@ async function withPathWriteLock<T>(absPath: string, fn: () => Promise<T>): Prom
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖——重新 read 后再写；新建文件不受限）。只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
+    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖——重新 read 后再写；新建文件不受限）。**内容护栏**：content 若以「[输出超长，已截断」开头会被拒绝——那是 `read` 的**截断提示文本**、不是文件内容（当内容写回会把整个文件覆盖成一段提示语）；大文件改写用 edit/patch 定点改。只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
   card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
   parameters: schema({
     path: { type: "string" },
@@ -322,6 +322,18 @@ export const writeTool: Tool = {
         }
       }
       const content = stripBom(String(args.content ?? ""))
+      /* 内容护栏：把 `read` 的**截断提示文本**当内容写回，会把整个文件覆盖成一段提示语（实测事故：
+         3684 行的文件被覆盖成 175 行）。截断提示是机器生成、格式固定（见 support/truncate.ts），
+         这里按首部标记特征拒绝——代价近乎零，也不会误伤真实内容（正常源码/文档不会以此开头）。
+         确有必要写入含该文本的内容（如自测夹具），用 `py` 脚本或先拼一个前缀绕过本护栏。 */
+      if (isTruncationNotice(content)) {
+        return {
+          output:
+            `write 拒绝：content 是工具输出的**截断提示文本**，不是文件内容（形如「${TRUNCATION_MARKER} truncated/read_xxx.txt」）。` +
+            `写下去会把 ${args.path} 整个覆盖成一段提示语（内容全丢）。` +
+            `大文件改写请用 edit/patch 定点改；确需整体覆盖先分段 read 拼出全文（或直接读截断落盘文件），并核对行数与原文一致。`,
+        }
+      }
       // 覆盖写保留原文件的 UTF-8 BOM（read 展示的是去 BOM 正文，模型意图即正文；BOM 丢失会改变文件字节内容）；
       // 追加模式接在 existing 之后不动文件头
       const bom = existing !== null && existing.startsWith("\uFEFF") ? "\uFEFF" : ""

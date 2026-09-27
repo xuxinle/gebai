@@ -7,6 +7,20 @@ export const TRUNCATE_THRESHOLD = 12000
 /** 截断消息保留的首/尾字符数（DESIGN「常量参考」）。 */
 export const TRUNCATE_HEAD_CHARS = 4000
 export const TRUNCATE_TAIL_CHARS = 4000
+
+/**
+ * 截断提示的**首部标记**（机器生成、格式固定）。
+ *
+ * 抽成常量是为了给下游护栏共用：`write` 拒绝“把截断提示当内容写回”——那会把整个文件覆盖成
+ * 一段提示语（实测事故：3684 行的文件被覆盖成 175 行）。提示语就在返回值最前面，是最好认的特征；
+ * 文案改这里就跟着改，不会失配。
+ */
+export const TRUNCATION_MARKER = "[输出超长，已截断，完整内容见文件:"
+
+/** 这段文本是不是 `read` / 工具输出的**截断提示**（而非文件内容）。 */
+export function isTruncationNotice(text: string): boolean {
+  return text.trimStart().startsWith(TRUNCATION_MARKER)
+}
 export async function truncate(content: string, toolName: string, ctx: ToolContext): Promise<ToolResult> {
   if (content.length <= TRUNCATE_THRESHOLD) return { output: content }
   // 截断文件写入会话工作目录 truncated/（模型可经 read 读取、UI 文件面板可见）
@@ -45,7 +59,7 @@ export async function truncate(content: string, toolName: string, ctx: ToolConte
   let tail = tailLines.join("\n")
   if (tail.length > TRUNCATE_TAIL_CHARS) tail = tail.slice(-TRUNCATE_TAIL_CHARS)
   const skipped = Math.max(0, lines.length - headLines.length - tailLines.length)
-  const result = `[输出超长，已截断，完整内容见文件: ${filePath}（相对会话工作目录）]\n\n${head}\n\n...（省略 ${skipped} 行）...\n\n${tail}`
+  const result = `${TRUNCATION_MARKER} ${filePath}（相对会话工作目录）]\n\n${head}\n\n...（省略 ${skipped} 行）...\n\n${tail}`
   return { output: result, truncated: true, filePath }
 }
 
