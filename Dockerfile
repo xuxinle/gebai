@@ -119,15 +119,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     BUN_CONFIG_REGISTRY=${NPM_REGISTRY}
 COPY --from=bun-src /opt/gebai-bun/bun /usr/local/bin/bun
 
-# apt 源替换（内网/离线）：只换主机名，保留基础镜像自带的发行版/组件行——整份覆盖会丢掉
-# updates/backports 等组件。deb822（Ubuntu 24.04+ / Debian 12+）与旧式 sources.list 两种布局都处理。
+# apt 源替换（内网/离线）：只换镜像地址，保留基础镜像自带的发行版/组件行——整份覆盖会丢掉
+# updates/backports/security 等套件。deb822（Ubuntu 24.04+ 的 sources.list.d/*.sources）与旧式
+# sources.list 两种布局都扫。注意交替符：sed 用 -E（ERE）时写 `|`，写成 `\|` 会变成字面管道符、
+# 正则永不匹配——替换静默失败而日志照常打印“已替换”，故末尾加**替换后校验**兜底。
 RUN if [ -n "$APT_MIRROR" ]; then \
       m="$(printf '%s' "$APT_MIRROR" | sed 's/[&#\\]/\\&/g')"; \
+      files=""; \
       for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
         [ -f "$f" ] || continue; \
-        sed -i -E "s#https?://(archive\|security)\.ubuntu\.com/ubuntu#${m}#g; s#https?://deb\.debian\.org/debian#${m}#g" "$f"; \
+        files="${files:+$files }$f"; \
+        sed -i -E "s#https?://(archive|security|ports)\.ubuntu\.com/(ubuntu|ubuntu-ports)#${m}#g; s#https?://deb\.debian\.org/debian#${m}#g" "$f"; \
       done; \
-      echo "[docker] apt 源已替换为 $APT_MIRROR"; \
+      if [ -n "$files" ] && grep -lE "https?://(archive|security|ports)\.ubuntu\.com" $files >/dev/null 2>&1; then \
+        echo "[docker] apt 源替换未生效（官方主机名仍在）："; \
+        grep -nE "https?://(archive|security|ports)\.ubuntu\.com" $files | head -5; \
+        exit 1; \
+      fi; \
+      echo "[docker] apt 源已替换为 $APT_MIRROR（$files）"; \
     fi \
  && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git unzip \
@@ -317,12 +326,22 @@ COPY --from=builder /tmp/chromium-deps.txt /etc/gebai/playwright-deps.txt
 #   系统 fonts      fonts-noto-cjk + fontconfig：PDF 中文字体嵌入、图表 PNG 渲染的中文显示
 #   系统 tzdata     定时任务（cron）与容器时区（image.tz）
 #   系统 procps     进程查看（脚本/边车排障）
+# apt 源替换（与构建阶段同一逻辑：交替符写 `|`，末尾做替换后校验）——运行期装包（系统能力组 +
+# chromium 依赖）同样要能走内网源。
 RUN if [ -n "$APT_MIRROR" ]; then \
       m="$(printf '%s' "$APT_MIRROR" | sed 's/[&#\\]/\\&/g')"; \
+      files=""; \
       for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
         [ -f "$f" ] || continue; \
-        sed -i -E "s#https?://(archive\|security)\.ubuntu\.com/ubuntu#${m}#g; s#https?://deb\.debian\.org/debian#${m}#g" "$f"; \
+        files="${files:+$files }$f"; \
+        sed -i -E "s#https?://(archive|security|ports)\.ubuntu\.com/(ubuntu|ubuntu-ports)#${m}#g; s#https?://deb\.debian\.org/debian#${m}#g" "$f"; \
       done; \
+      if [ -n "$files" ] && grep -lE "https?://(archive|security|ports)\.ubuntu\.com" $files >/dev/null 2>&1; then \
+        echo "[docker] apt 源替换未生效（官方主机名仍在）："; \
+        grep -nE "https?://(archive|security|ports)\.ubuntu\.com" $files | head -5; \
+        exit 1; \
+      fi; \
+      echo "[docker] 运行阶段 apt 源已替换为 $APT_MIRROR（$files）"; \
     fi \
  && . /etc/gebai/build-plan.env \
  && apt-get update \

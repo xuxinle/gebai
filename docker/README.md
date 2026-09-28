@@ -142,7 +142,7 @@ docker/build.sh --export-runtimes docker/rt                                  # b
 |---|---|---|
 | `base` | `ubuntu:24.04` | 基础镜像（构建阶段与运行阶段同源）；内网/私有仓库指向自备镜像 |
 | `bun_image` | `oven/bun:1.4.2` | 仅取 bun 可执行文件的来源镜像；**须能解析仓库的 `bun.lock`**（不兼容时构建退回无锁定安装并告警） |
-| `apt_mirror` | 空 | apt 源（内网镜像）；只换主机名，保留基础镜像自带的发行版/组件行（deb822 与旧式 sources.list 两种布局都处理） |
+| `apt_mirror` | 空 | apt 源（内网镜像）；只换镜像地址，保留基础镜像自带的发行版/套件行（deb822 的 `sources.list.d/*.sources` 与旧式 `sources.list` 都扫，含 arm64 的 `ports` 源）；构建与运行两个阶段都换。**替换后会校验**：官方主机名仍在即构建失败并列出残留行（不静默降级） |
 | `npm_registry` | 空 | npm 源（`bun install` 走 `BUN_CONFIG_REGISTRY`） |
 | `proxy` | 空 | 构建期 HTTP(S) 代理（apt/npm/模型下载）；不写进最终镜像的运行环境 |
 | `user` / `uid` / `gid` | `gebai` / `1000` / `1000` | 容器内运行用户；基础镜像里占用同 uid 的用户（如 Ubuntu 的 `ubuntu`）会先让位。改 `user` 时家目录自动跟随（`/home/<用户>`） |
