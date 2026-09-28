@@ -12,6 +12,13 @@
 #   docker/build.sh --base-image registry.internal/ubuntu:24.04 --apt-mirror http://mirror.internal/ubuntu
 #   docker/build.sh --user acme --uid 2001 --data-dir /srv/gebai --port 8080 --tz Asia/Shanghai
 #   docker/build.sh --label owner=acme --label tier=prod --extra-packages vim,less --no-healthcheck
+#   docker/build.sh --with-browser --browser-dir /srv/pw-browsers   # 离线：用预置浏览器目录（零网络）
+#   docker/build.sh --with-browser --browser-source download --browser-download-host http://mirror.internal/playwright
+#   docker/build.sh --export-browsers docker/browsers      # 导出浏览器预置目录（从宿主缓存）
+#   docker/build.sh --export-browsers docker/browsers --from-image gebai:0.1.0   # 从已构建镜像导出（含依赖清单）
+#   docker/build.sh --with-browser --no-browser-deps       # 跳过 chromium 系统依赖（基础镜像已含）
+#   docker/build.sh --with-browser --bun-dir /srv/rt/bun --node-dir /srv/rt/node   # 内网：bun/node 也用预置
+#   docker/build.sh --export-runtimes /srv/rt      # 导出宿主的 bun/node（本机平台）
 #   docker/build.sh --cv-model-base https://…/PP-OCRv4   # 内网镜像源
 #   docker/build.sh --platform linux/arm64           # 目标架构（须与本机架构一致，见 Dockerfile 说明）
 #   docker/build.sh --push -t registry.example.com/gebai:0.1.0
@@ -44,6 +51,12 @@ PROFILE=""
 SETS=()
 LABEL_SPECS=()
 PRINT_PLAN=0
+BROWSER_SRC_DIR=""
+EXPORT_BROWSERS=""
+EXPORT_RUNTIMES=""
+BUN_SRC_DIR=""
+NODE_SRC_DIR=""
+FROM_IMAGE=""
 
 usage() {
   sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -56,6 +69,21 @@ usage() {
       --print-plan           只打印裁剪计划与报告，不构建（需本机有 bun）
       --with-browser         安装 playwright chromium（等价 system.chromium=1 + assets.browser=1）
       --no-browser           不安装浏览器（默认）
+  —— 浏览器供给（离线/内网见 docker/README.md「离线浏览器」）——
+      --browser-source <源>  浏览器来源：download（缺省，下载源拉）/ local（预置目录，零网络）/ off
+      --browser-dir <宿主路径> 浏览器预置目录（自动就位到构建上下文的 docker/browsers/；零网络）
+      --browser-download-host <url> 浏览器下载源（PLAYWRIGHT_DOWNLOAD_HOST；内网自建 CDN 镜像）
+      --browser-deps <清单路径> 按预置依赖清单装 chromium 系统依赖（内网 apt 源）
+      --no-browser-deps      不装 chromium 系统依赖（基础镜像已含依赖时用）
+      --export-browsers <目录> 导出浏览器预置目录（默认从宿主缓存；配 --from-image 从已构建镜像导出）
+      --from-image <镜像>     --export-browsers 的来源镜像（最准：含已实测的系统依赖清单）
+  —— 运行时离线供给（bun 构建必需；node 供浏览器桥接）——
+      --bun-dir <宿主路径>    bun 二进制预置目录（就位到 docker/bun/；零网络）
+      --node-dir <宿主路径>   node 二进制预置目录（就位到 docker/node/；零网络）
+      --bun-source <源>       bun 来源：image（缺省，取 --bun-image）/ local（预置文件）
+      --node-source <源>      node 来源：auto（缺省：启用浏览器则 image，否则 off）/ image / local / apt / off
+      --node-image <镜像>      node 来源镜像（image 通道；缺省 node:22-slim）
+      --export-runtimes <目录> 导出宿主的 bun/node 二进制（本机平台，与浏览器预置同一思路）
       --with-cv              内嵌本地 CV（PP-OCR 模型 + ort 运行时，默认）
       --no-cv                不内嵌本地 CV（等价 assets.cv=0：镜像更小，本地 OCR/视觉定位不可用）
       --cv-model-base <url>  CV 模型下载源（内网镜像；缺省 hf-mirror 的 RapidOCR 托管）
@@ -109,6 +137,19 @@ while [ $# -gt 0 ]; do
     --run-as-root) SETS+=("image.run_as_root=1"); shift ;;
     --with-browser) WITH_BROWSER=1; shift ;;
     --no-browser) WITH_BROWSER=0; shift ;;
+    --browser-source) SETS+=("image.browser_source=${2:?--browser-source 需要值}"); shift 2 ;;
+    --browser-dir) BROWSER_SRC_DIR="${2:?--browser-dir 需要值}"; shift 2 ;;
+    --browser-download-host) SETS+=("image.browser_download_host=${2:?--browser-download-host 需要值}"); shift 2 ;;
+    --no-browser-deps) SETS+=("image.browser_deps=off"); shift ;;
+    --browser-deps) SETS+=("image.browser_deps=${2:?--browser-deps 需要值}"); shift 2 ;;
+    --export-browsers) EXPORT_BROWSERS="${2:?--export-browsers 需要值}"; shift 2 ;;
+    --export-runtimes) EXPORT_RUNTIMES="${2:?--export-runtimes 需要值}"; shift 2 ;;
+    --bun-dir) BUN_SRC_DIR="${2:?--bun-dir 需要值}"; shift 2 ;;
+    --node-dir) NODE_SRC_DIR="${2:?--node-dir 需要值}"; shift 2 ;;
+    --bun-source) SETS+=("image.bun_source=${2:?--bun-source 需要值}"); shift 2 ;;
+    --node-source) SETS+=("image.node_source=${2:?--node-source 需要值}"); shift 2 ;;
+    --node-image) SETS+=("image.node_image=${2:?--node-image 需要值}"); shift 2 ;;
+    --from-image) FROM_IMAGE="${2:?--from-image 需要值}"; shift 2 ;;
     --with-cv) WITH_CV=1; shift ;;
     --no-cv) WITH_CV=0; shift ;;
     --cv-model-base) CV_MODEL_BASE="${2:?--cv-model-base 需要值}"; shift 2 ;;
@@ -139,6 +180,89 @@ if [ -n "${PROFILE}" ]; then
     exit 1
   fi
   PROFILE_NAME="$(basename "${PROFILE_FILE}" .json)"
+fi
+
+# ── --export-runtimes：导出 bun/node 二进制（离线构建/运行用），不进构建 ──
+# 宿主平台必须与目标镜像一致：导出的是**本机平台**的二进制（Windows 上导出的 .exe 放进 Linux
+# 镜像无用），跨平台请在有对应平台的机器上导出。
+if [ -n "${EXPORT_RUNTIMES}" ]; then
+  mkdir -p "${EXPORT_RUNTIMES}/bun" "${EXPORT_RUNTIMES}/node"
+  ok=0
+  for pair in "bun:bun" "node:node"; do
+    name="${pair%%:*}"
+    src="$(command -v "${name}" 2>/dev/null || true)"
+    if [ -n "${src}" ]; then
+      cp "${src}" "${EXPORT_RUNTIMES}/${name}/${name}"
+      chmod +x "${EXPORT_RUNTIMES}/${name}/${name}"
+      echo "    已导出 ${name}：${src} → ${EXPORT_RUNTIMES}/${name}/${name}"
+      "${EXPORT_RUNTIMES}/${name}/${name}" --version 2>/dev/null | sed 's/^/      版本 /' || true
+      ok=1
+    else
+      echo "    未找到 ${name}（宿主 PATH 里没有）——可手动放入 ${EXPORT_RUNTIMES}/${name}/${name}"
+    fi
+  done
+  [ "${ok}" = "1" ] || { echo "错误：bun/node 均未找到" >&2; exit 1; }
+  cat <<EOF
+
+==> 完成：${EXPORT_RUNTIMES}
+    内网构建（把 bun/ 与 node/ 目录放到仓库 docker/ 下，或就地指定）：
+      docker/build.sh --with-browser --bun-dir ${EXPORT_RUNTIMES}/bun --node-dir ${EXPORT_RUNTIMES}/node \\
+        --browser-dir <浏览器预置目录> --browser-deps <依赖清单或 --no-browser-deps>
+EOF
+  exit 0
+fi
+
+# ── --export-browsers：导出浏览器预置目录（离线部署用），不进构建 ──
+if [ -n "${EXPORT_BROWSERS}" ]; then
+  EXPORT_ARGS=("${EXPORT_BROWSERS}")
+  [ -n "${FROM_IMAGE}" ] && EXPORT_ARGS+=(--from-image "${FROM_IMAGE}")
+  bash "${SCRIPT_DIR}/export-browsers.sh" ${EXPORT_ARGS[@]+"${EXPORT_ARGS[@]}"}
+  exit 0
+fi
+
+# ── 运行时预置就位：Docker 只能 COPY 构建上下文内的文件 ──
+# 目标固定为 docker/bun 与 docker/node（档案缺省 bun_dir/node_dir）。
+for pair in "BUN_SRC_DIR:docker/bun:bun" "NODE_SRC_DIR:docker/node:node"; do
+  var="${pair%%:*}"; rest="${pair#*:}"; target="${rest%%:*}"; bin="${rest##*:}"
+  src="${!var}"
+  [ -n "${src}" ] || continue
+  [ -d "${src}" ] || { echo "错误：--${bin}-dir 目录不存在：${src}" >&2; exit 1; }
+  if [ "$(cd "${src}" && pwd)" != "${REPO_ROOT}/${target}" ]; then
+    echo "==> 就位 ${bin} 预置：${src} → ${target}"
+    mkdir -p "${target}"
+    cp -a "${src}/." "${target}/"
+  fi
+done
+
+# ── 浏览器预置目录就位：Docker 只能 COPY 构建上下文内的文件，故把源目录放到约定位置 ──
+# 目标固定为 docker/browsers（档案缺省 browser_dir）。
+if [ -n "${BROWSER_SRC_DIR}" ]; then
+  [ -d "${BROWSER_SRC_DIR}" ] || { echo "错误：--browser-dir 目录不存在：${BROWSER_SRC_DIR}" >&2; exit 1; }
+  if [ "$(cd "${BROWSER_SRC_DIR}" && pwd)" != "${REPO_ROOT}/docker/browsers" ]; then
+    echo "==> 就位浏览器预置目录：${BROWSER_SRC_DIR} → docker/browsers（构建上下文只能拷贝其内的文件）"
+    mkdir -p docker/browsers
+    cp -a "${BROWSER_SRC_DIR}/." docker/browsers/
+  fi
+fi
+# --with-browser 且预置目录已就位、又未显式指定来源时，自动走 local（零网络）——离线部署的意图
+if [ "${WITH_BROWSER}" = "1" ] && [ -d docker/browsers ] && [ -n "$(ls -A docker/browsers 2>/dev/null || true)" ]; then
+  case " ${SETS[*]-} " in
+    *" image.browser_source="*) ;;
+    *) SETS+=("image.browser_source=local"); echo "==> 检测到 docker/browsers 已有预置浏览器 → 自动走 local 通道（零网络；可用 --browser-source download 改回）" ;;
+  esac
+fi
+# 运行时预置文件就位时同样自动走 local（bun 构建必需，node 供浏览器）
+if [ -f docker/bun/bun ]; then
+  case " ${SETS[*]-} " in
+    *" image.bun_source="*) ;;
+    *) SETS+=("image.bun_source=local"); echo "==> 检测到 docker/bun/bun 预置 → bun 走 local 通道（零网络）" ;;
+  esac
+fi
+if [ -f docker/node/node ]; then
+  case " ${SETS[*]-} " in
+    *" image.node_source="*) ;;
+    *) SETS+=("image.node_source=local"); echo "==> 检测到 docker/node/node 预置 → node 走 local 通道（零网络）" ;;
+  esac
 fi
 
 # ── 计划器参数：档案 + 细粒度覆盖 + 兼容开关（宿主侧与镜像内同源同参）──

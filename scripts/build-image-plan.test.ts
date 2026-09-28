@@ -3,7 +3,7 @@
  * 计划器是镜像裁剪的唯一真相源，字段拼错/静默忽略都会让镜像能力面与预期不符，故逐字段覆盖。
  */
 import { describe, expect, test } from "bun:test"
-import { applyOverride, emitBuildArgs, parseProfile, planToEnv, renderReport, type BuildPlan } from "./build-image-plan"
+import { applyOverride, emitBuildArgs, finalizeProvisioning, parseProfile, planToEnv, renderReport, validateProvisioning, type BuildPlan } from "./build-image-plan"
 
 const ALL_ASSETS_ON = { web_ui: true, cv: true, d2: true, analyzer: true, browser: true, ripgrep: true } as const
 
@@ -122,6 +122,100 @@ describe("镜像本体（image 段）", () => {
     expect(img.extraPackages).toEqual(["vim", "less"])
     expect(img.labels).toEqual({ owner: "Acme Inc", "com.example.env": "prod" })
     expect(img.healthcheck).toEqual({ interval: "10s", timeout: "5s", startPeriod: "20s", retries: 3, path: "/healthz" })
+  })
+
+  test("浏览器供给：缺省为下载通道，字段逐项可覆盖", () => {
+    const def = parseProfile({ name: "x" }, "测试").image
+    expect([def.browserSource, def.browserDir, def.browserDeps]).toEqual(["download", "docker/browsers", "auto"])
+    expect(def.browserDownloadHost).toBeUndefined()
+
+    const local = parseProfile(
+      { name: "x", image: { browser_source: "local", browser_dir: "docker/pw", browser_deps: "docker/pw/deps.txt" } },
+      "测试",
+    ).image
+    expect([local.browserSource, local.browserDir, local.browserDeps]).toEqual(["local", "docker/pw", "docker/pw/deps.txt"])
+
+    const dl = parseProfile({ name: "x", image: { browser_download_host: "https://mirror.internal/pw", browser_deps: false } }, "测试").image
+    expect(dl.browserDownloadHost).toBe("https://mirror.internal/pw")
+    expect(dl.browserDeps).toBe("off")
+  })
+
+  test("浏览器供给：非法来源、上下文外的预置目录一律报错", () => {
+    const bad = (image: unknown, re: RegExp) => expect(() => parseProfile({ name: "x", image }, "测试")).toThrow(re)
+    bad({ browser_source: "mirror" }, /browser_source 须为/)
+    bad({ browser_source: "local", browser_dir: "/srv/pw" }, /须为构建上下文内的相对路径/)
+    bad({ browser_deps: 42 }, /browser_deps 必须是非空字符串/)
+  })
+
+  test("浏览器供给：预置目录缺失/开关不一致在计划阶段就报错（不滞到 docker build）", () => {
+    const withBrowser = (extra: Record<string, unknown>) => {
+      const p = parseProfile({ name: "x", system: { chromium: true }, image: extra }, "测试")
+      finalizeProvisioning(p)
+      return p
+    }
+    // 目录不存在 → 提示导出来源
+    const missing = validateProvisioning(withBrowser({ browser_source: "local" }), () => false)
+    expect(missing).toMatch(/预置目录不存在/)
+    expect(missing).toMatch(/--export-browsers/)
+    // 目录存在 → 无问题；下载通道不检查目录
+    expect(validateProvisioning(withBrowser({ browser_source: "local" }), () => true)).toBeNull()
+    expect(validateProvisioning(withBrowser({ browser_source: "download" }), () => false)).toBeNull()
+    // 未启用浏览器却声明 local 来源 → 不一致报错；未启用 + 下载缺省 → 无问题
+    const off = parseProfile({ name: "x", image: { browser_source: "local" } }, "测试")
+    finalizeProvisioning(off)
+    expect(validateProvisioning(off, () => true)).toMatch(/两者需一致/)
+    const idle = parseProfile({ name: "x" }, "测试")
+    finalizeProvisioning(idle)
+    expect(validateProvisioning(idle, () => false)).toBeNull()
+  })
+
+  test("运行时供给：bun/node 缺省与离线通道，node 跟随浏览器需求", () => {
+    const idle = parseProfile({ name: "x" }, "测试")
+    finalizeProvisioning(idle)
+    expect([idle.image.bunSource, idle.image.bunDir]).toEqual(["image", "docker/bun"])
+    expect(idle.image.nodeSource).toBe("off") // 不用浏览器就不装 node
+    expect([idle.image.nodeImage, idle.image.nodeDir]).toEqual(["node:22-slim", "docker/node"])
+
+    // 启用浏览器 → auto 自动要 node（缺省从 node 镜像取）
+    const withBrowser = parseProfile({ name: "x", system: { chromium: true } }, "测试")
+    finalizeProvisioning(withBrowser)
+    expect(withBrowser.image.nodeSource).toBe("image")
+
+    // 离线：bun/node 都预置
+    const offline = parseProfile(
+      { name: "x", system: { chromium: true }, image: { bun_source: "local", node_source: "local" } },
+      "测试",
+    )
+    finalizeProvisioning(offline)
+    expect([offline.image.bunSource, offline.image.nodeSource]).toEqual(["local", "local"])
+
+    // apt 通道：nodejs 自动并入装包清单
+    const apt = parseProfile({ name: "x", system: { chromium: true }, image: { node_source: "apt" } }, "测试")
+    finalizeProvisioning(apt)
+    expect(apt.image.extraPackages).toContain("nodejs")
+  })
+
+  test("运行时供给：启用了浏览器却把 node 关掉 → 报矛盾（装浏览器也没用）", () => {
+    const p = parseProfile({ name: "x", system: { chromium: true }, image: { node_source: "off" } }, "测试")
+    finalizeProvisioning(p)
+    expect(validateProvisioning(p, () => true)).toMatch(/node_source=off/)
+    expect(validateProvisioning(p, () => true)).toMatch(/Bun\.spawn/)
+  })
+
+  test("运行时供给：预置目录缺文件时报错并给出导出途径；非法来源报错", () => {
+    const bunLocal = parseProfile({ name: "x", image: { bun_source: "local" } }, "测试")
+    finalizeProvisioning(bunLocal)
+    expect(validateProvisioning(bunLocal, () => false)).toMatch(/docker\/bun\/bun/)
+    expect(validateProvisioning(bunLocal, () => true)).toBeNull()
+
+    const nodeLocal = parseProfile({ name: "x", system: { chromium: true }, image: { node_source: "local" } }, "测试")
+    finalizeProvisioning(nodeLocal)
+    expect(validateProvisioning(nodeLocal, () => false)).toMatch(/docker\/node\/node/)
+
+    const bad = (image: unknown, re: RegExp) => expect(() => parseProfile({ name: "x", image }, "测试")).toThrow(re)
+    bad({ bun_source: "apt" }, /bun_source 须为/)
+    bad({ node_source: "bundle" }, /node_source 须为/)
+    bad({ bun_dir: "/opt/bun" }, /须为构建上下文内的相对路径/)
   })
 
   test("非法值一律报错（uid/port 越界、data_dir 非绝对路径或根、用户名、标签名、包名、时长、未知字段）", () => {

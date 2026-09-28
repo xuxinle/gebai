@@ -43,7 +43,10 @@
 #                               裁剪档案（base64 JSON）、档案名（写进标签与计划）、细粒度覆盖
 #   WITH_CV / WITH_BROWSER      兼容开关：=0 等价 assets.cv=0；=1 等价 assets.browser=1 + system.chromium=1
 #   CV_MODEL_BASE               CV 模型下载源（内网可换镜像）默认 hf-mirror 的 RapidOCR 托管
-#   PLAYWRIGHT_VERSION          浏览器版本，须与仓库依赖一致  默认 1.62.1
+#   PLAYWRIGHT_SOURCE / PLAYWRIGHT_DIR / PLAYWRIGHT_DOWNLOAD_HOST / PLAYWRIGHT_DEPS
+#                               浏览器供给（见「离线浏览器」）：download（本地 playwright 包 + 可选下载源，
+#                               不用 bunx）/ local（预置目录，零网络）/ off；系统依赖 auto|清单路径|off
+#   浏览器版本由仓库依赖（node_modules/playwright-core/browsers.json）唯一确定，不另设版本参数。
 #   HTTP_PROXY / HTTPS_PROXY / NO_PROXY  Docker 预定义代理 build-arg（按需，仅构建阶段生效）
 #
 # 构建器：不依赖 BuildKit（未用 `RUN --mount`，普通 `docker build` 也能构建）；有 buildx 时
@@ -54,9 +57,42 @@
 
 ARG BASE_IMAGE=ubuntu:24.04
 ARG BUN_IMAGE=oven/bun:1.4.2
+ARG NODE_IMAGE=node:22-slim
 
-# ── bun 可执行文件来源：只为取出 bun 这一个文件，最终镜像不引入该基础镜像 ──
+# ── bun 来源：在线取 `BUN_IMAGE` 自带的 bun，离线取预置文件（`docker/bun/bun`）──
+# 本阶段只负责把 bun 摆到 /opt/gebai-bun/bun（两种来源二选一，由文件是否就位决定）。
+# 离线时 build.sh 会把 BUN_IMAGE 指向 BASE_IMAGE（内网可达）作占位——FROM 不能条件化，
+# 而内网拉不到 oven/bun；该阶段退化为壳，真正的 bun 由预置文件提供。
 FROM ${BUN_IMAGE} AS bun-src
+COPY docker/bun/ /tmp/gebai-bun/
+RUN set -e; mkdir -p /opt/gebai-bun; \
+    if [ -x /tmp/gebai-bun/bun ]; then \
+      echo "[docker] bun 来自预置文件（零网络）：docker/bun/bun"; \
+      install -m755 /tmp/gebai-bun/bun /opt/gebai-bun/bun; \
+    elif [ -x /usr/local/bin/bun ]; then \
+      echo "[docker] bun 来自镜像 ${BUN_IMAGE}"; \
+      install -m755 /usr/local/bin/bun /opt/gebai-bun/bun; \
+    else \
+      echo "[docker] 未取到 bun：既无预置文件 docker/bun/bun，镜像 ${BUN_IMAGE} 里也没有 /usr/local/bin/bun"; exit 1; \
+    fi \
+ && /opt/gebai-bun/bun --version
+
+# ── node 来源：浏览器桥接是 `Bun.spawn(["node", driver])`，没有 node 就没有浏览器能力 ──
+# 在线取 `NODE_IMAGE`，离线取预置文件（`docker/node/node`），或用系统包（node_source=apt，走 apt 装）。
+# 同样只用本阶段把 node 摆到 /opt/gebai-node/node；node_source 非 image 时 build.sh 把 NODE_IMAGE
+# 指向 BASE_IMAGE 作占位（该阶段退化为壳，不从它取 node）。
+FROM ${NODE_IMAGE} AS node-src
+COPY docker/node/ /tmp/gebai-node/
+RUN set -e; mkdir -p /opt/gebai-node; \
+    if [ -x /tmp/gebai-node/node ]; then \
+      echo "[docker] node 来自预置文件（零网络）：docker/node/node"; \
+      install -m755 /tmp/gebai-node/node /opt/gebai-node/node; \
+    elif [ -x /usr/local/bin/node ]; then \
+      echo "[docker] node 来自镜像 ${NODE_IMAGE}"; \
+      install -m755 /usr/local/bin/node /opt/gebai-node/node; \
+    else \
+      echo "[docker] node 未由本阶段提供（改用 apt 或不需要浏览器时属正常）"; \
+    fi
 
 # ══════════════════════════ 构建阶段 ══════════════════════════
 FROM ${BASE_IMAGE} AS builder
@@ -68,7 +104,6 @@ ARG BUILD_PROFILE_NAME=""
 ARG BUILD_SET=""
 ARG WITH_CV=1
 ARG WITH_BROWSER=0
-ARG PLAYWRIGHT_VERSION=1.62.1
 ARG CV_MODEL_BASE
 ARG APT_MIRROR=""
 ARG NPM_REGISTRY=""
@@ -82,7 +117,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HTTPS_PROXY=${HTTPS_PROXY} \
     NO_PROXY=${NO_PROXY} \
     BUN_CONFIG_REGISTRY=${NPM_REGISTRY}
-COPY --from=bun-src /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=bun-src /opt/gebai-bun/bun /usr/local/bin/bun
 
 # apt 源替换（内网/离线）：只换主机名，保留基础镜像自带的发行版/组件行——整份覆盖会丢掉
 # updates/backports 等组件。deb822（Ubuntu 24.04+ / Debian 12+）与旧式 sources.list 两种布局都处理。
@@ -169,28 +204,92 @@ RUN mkdir -p /out \
       --outfile=/out/gebai --external @terrastruct/d2 \
  && ls -lh /out/gebai
 
-# 可选：playwright 浏览器（由计划 PLAN_WITH_BROWSER 决定）。在构建阶段装（这里有 bun；bun 不进
-# 最终镜像），并**记录 install-deps 新装的系统包**供运行阶段按同一份清单复现——避免把依赖表在
-# 两处硬编码而漂移。Ubuntu 24.04 的 chromium 包是指向 snap 的过渡包，容器内不可用，故走
-# playwright 官方下载。
+# 可选：playwright 浏览器（由计划 PLAN_WITH_BROWSER 决定），三条供给通道（见 docker/README.md「离线浏览器」）：
+#   local    ——把预置目录（PLAYWRIGHT_DIR，缺省 docker/browsers）拷入（零网络；离线/内网主通道）
+#   download ——从 PLAYWRIGHT_DOWNLOAD_HOST（缺省 playwright CDN）拉；**不用 bunx**（bunx 会去 npm 取包，
+#              内网无 npm 出口时直接用不了），改用 bun 跑构建阶段 node_modules 里已装的 playwright CLI；
+#              期望的浏览器 revision 从 playwright-core/browsers.json 读，不用会漂移的硬编码版本号
+#   off      ——不装（system.chromium 已置位也不给，用于明确声明）
+# 系统依赖由 PLAYWRIGHT_DEPS 决定：auto（--with-deps）/ 预置清单路径 / off；实际安装的依赖清单写入
+# /etc/gebai/playwright-deps.txt 随镜像保留，可从镜像导出给内网复用。
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN mkdir -p /opt/ms-playwright \
- && touch /tmp/chromium-deps.txt \
- && set -a && . /tmp/gebai-plan.env && set +a \
- && if [ "$PLAN_WITH_BROWSER" = "1" ]; then \
-      dpkg-query -W -f='$${Package}\n' | sort > /tmp/before.txt; \
-      bunx --yes playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium; \
-      dpkg-query -W -f='$${Package}\n' | sort > /tmp/after.txt; \
-      comm -13 /tmp/before.txt /tmp/after.txt > /tmp/chromium-deps.txt; \
-      echo "[docker] 浏览器就绪（新增系统依赖 $(wc -l < /tmp/chromium-deps.txt) 个，见 /tmp/chromium-deps.txt）"; \
+RUN set -e; mkdir -p /opt/ms-playwright; touch /tmp/chromium-deps.txt; \
+    set -a; . /tmp/gebai-plan.env; set +a; \
+    if [ "$PLAN_WITH_BROWSER" != "1" ] || [ "$PLAN_BROWSER_SOURCE" = "off" ]; then \
+      echo "[docker] 计划未启用浏览器（system.chromium=$PLAN_WITH_BROWSER, browser_source=$PLAN_BROWSER_SOURCE）：playwright/reverse_site 等浏览器子Agent 不可用"; \
     else \
-      echo "[docker] 计划未启用浏览器（system.chromium=false）：playwright/reverse_site 等浏览器子Agent 不可用"; \
+      # 期望 revision：由计划器从仓库依赖（playwright-core/browsers.json）算出并写进计划文件——
+      # 与运行期所用模块同一份真相，不用会漂移的硬编码版本号
+      rev="$PLAN_PLAYWRIGHT_REVISION"; \
+      if [ -z "$rev" ]; then echo "[docker] 无法确定期望的 chromium revision（未找到 playwright-core/browsers.json，依赖是否已安装？）"; exit 1; fi; \
+      if [ "$PLAN_BROWSER_SOURCE" = "local" ]; then \
+        # 可用的预置目录：完整 chromium 优先，其次 headless shell（playwright 1.49+ 的无头模式默认用
+        # chromium-headless-shell；driver 以 headless:true 启动，两都可以）。两者都没有则报错。
+        have=""; \
+        for d in chromium-$rev chromium_headless_shell-$rev; do \
+          if [ -d /src/"$PLAN_BROWSER_DIR"/$d ]; then have="$d"; break; fi; \
+        done; \
+        if [ -z "$have" ]; then \
+          echo "[docker] 预置目录 $PLAN_BROWSER_DIR 里没有匹配的浏览器：期望 chromium-$rev 或 chromium_headless_shell-$rev（来自仓库依赖 playwright-core/browsers.json），实际内容："; \
+          ls /src/"$PLAN_BROWSER_DIR" 2>&1 | head -20 || true; \
+          echo "        请用匹配该版本的目录，或 docker/build.sh --export-browsers <目录> 重新导出"; exit 1; \
+        fi; \
+        cp -a /src/"$PLAN_BROWSER_DIR"/. /opt/ms-playwright/; \
+        echo "[docker] 已从预置目录拷贝浏览器（零网络）：$PLAN_BROWSER_DIR → /opt/ms-playwright（$have）"; \
+        if [ "$have" != "chromium-$rev" ]; then \
+          echo "[docker] 提示：只预置了 headless shell（无头模式可用，playwright 默认走它）；若需有头/扩展场景请补 chromium-$rev"; \
+        fi; \
+      else \
+        deps_arg=""; if [ "$PLAN_BROWSER_DEPS" = "auto" ]; then deps_arg="--with-deps"; fi; \
+        if [ -n "$PLAN_BROWSER_DOWNLOAD_HOST" ]; then export PLAYWRIGHT_DOWNLOAD_HOST="$PLAN_BROWSER_DOWNLOAD_HOST"; fi; \
+        dpkg --get-selections | cut -f1 | sort > /tmp/before.txt; \
+        # 用 bun 跑本地已装的 playwright CLI：`./node_modules/.bin/playwright` 的 shebang 是
+        # `#!/usr/bin/env node`，而构建镜像里只有 bun 没有 node（exit 127）；bunx 则会去 npm
+        # 取包（内网无 npm 出口时不可用）——本地 CLI + bun 两者都避开。
+        if [ ! -f node_modules/playwright/cli.js ]; then echo "[docker] 未找到 node_modules/playwright/cli.js（依赖是否已安装？）"; exit 1; fi; \
+        bun node_modules/playwright/cli.js install $deps_arg chromium; \
+        dpkg --get-selections | cut -f1 | sort > /tmp/after.txt; \
+        comm -13 /tmp/before.txt /tmp/after.txt > /tmp/chromium-deps.txt; \
+        echo "[docker] 浏览器就绪（下载源 ${PLAYWRIGHT_DOWNLOAD_HOST:-playwright CDN}，chromium-$rev，新增系统依赖 $(wc -l < /tmp/chromium-deps.txt) 个）"; \
+      fi; \
+    fi
+# 预置通道的系统依赖：浏览器本体不从网络拉，但它的系统库仍要装。
+# **清单必须在目标镜像内算**——在宿主机上算的清单只反映宿主缺什么（宿主已装了一堆库，结果偏少），
+# 拿它去装裸镜像必然缺库（实测：宿主算的 39 个包不够，chrome-headless-shell 报 libatk-1.0.so.0 缺失）。
+# playwright 自带依赖表，`install-deps --dry-run` 在容器内离线算出的是该镜像真正需要的清单：
+#   auto —— 容器内现算（需 apt 可达，内网配 --apt-mirror）
+#   路径 —— 用预置清单文件（完全无 apt 出口时，配合预先下好的 .deb / 自建源）
+#   off  —— 不装（基础镜像已含依赖）
+RUN set -a; . /tmp/gebai-plan.env; set +a; \
+    if [ "$PLAN_WITH_BROWSER" = "1" ] && [ "$PLAN_BROWSER_SOURCE" = "local" ]; then \
+      case "$PLAN_BROWSER_DEPS" in \
+        off) echo "[docker] 预置通道：不装 chromium 系统依赖（browser_deps=off）"; touch /tmp/chromium-deps.txt ;; \
+        auto) \
+          if [ ! -f node_modules/playwright/cli.js ]; then echo "[docker] 未找到 node_modules/playwright/cli.js（依赖是否已安装？）"; exit 1; fi; \
+          # playwright 的依赖解析依赖 apt 的包索引（本阶段前面装完工具后清掉了）——先刷新；\
+          # 装这些依赖本身也需要 apt 可达，所以这一步不额外增加前提
+          apt-get update >/dev/null 2>&1 || { echo "[docker] apt-get update 失败（无法确定 chromium 系统依赖；内网请配 --apt-mirror，或改用 browser_deps=off）"; exit 1; }; \
+          # 注意：无依赖可装时它输出列表并**返回非零**（「还缺这些」的语义），所以不能拿退出码当失败；\
+          # 只认「是否拿到清单」
+          bun node_modules/playwright/cli.js install-deps --dry-run chromium > /tmp/deps-raw.txt 2>/tmp/deps-err.txt || true; \
+          sed -n '/^  /s/^  //p' /tmp/deps-raw.txt | sort -u > /tmp/chromium-deps.txt; \
+          if [ ! -s /tmp/chromium-deps.txt ]; then \
+            echo "[docker] 本镜像内未算出 chromium 系统依赖清单（playwright 依赖表不可用？）——可改用 browser_deps=<清单路径> 或 off；原输出末尾："; \
+            tail -5 /tmp/deps-err.txt /tmp/deps-raw.txt 2>/dev/null; exit 1; \
+          fi; \
+          echo "[docker] 预置通道：依赖清单在镜像内算出（$(wc -l < /tmp/chromium-deps.txt) 个包，需 apt 可达）"; ;; \
+        *) \
+          if [ ! -f "/src/$PLAN_BROWSER_DEPS" ]; then echo "[docker] 依赖清单不存在：$PLAN_BROWSER_DEPS（需为构建上下文内文件路径）"; exit 1; fi; \
+          cp "/src/$PLAN_BROWSER_DEPS" /tmp/chromium-deps.txt; \
+          echo "[docker] 预置通道：按清单装系统依赖 $PLAN_BROWSER_DEPS（$(wc -l < /tmp/chromium-deps.txt) 个）"; ;; \
+      esac; \
     fi
 
 # ══════════════════════════ 运行阶段 ══════════════════════════
 FROM ${BASE_IMAGE} AS runtime
 ARG BUILD_PROFILE_NAME=""
 ARG APT_MIRROR=""
+ARG NODE_IMAGE=node:22-slim
 ARG IMAGE_USER=gebai
 ARG IMAGE_UID=1000
 ARG IMAGE_GID=1000
@@ -205,8 +304,10 @@ ARG IMAGE_HOST=0.0.0.0
 ARG IMAGE_TZ=UTC
 ARG IMAGE_VERSION=""
 ENV DEBIAN_FRONTEND=noninteractive
-# 构建计划随镜像保留（/etc/gebai/build-plan.env）：镜像里究竟裁了什么、定了什么口径，随时可查
+# 构建计划随镜像保留（/etc/gebai/build-plan.env）：镜像里究竟裁了什么、定了什么口径，随时可查；
+# 浏览器系统依赖清单同样保留（可从镜像导出给内网预置构建复用，见 docker/README.md「离线浏览器」）。
 COPY --from=builder /tmp/gebai-plan.env /etc/gebai/build-plan.env
+COPY --from=builder /tmp/chromium-deps.txt /etc/gebai/playwright-deps.txt
 # 运行期系统依赖：按计划装（PLAN_SYSTEM_PACKAGES，含档案声明的额外包）。分组与用途：
 #   【固定基础设施，不参与裁剪】ca-certificates 出站 HTTPS（模型接口）/ curl 健康探针 / tini PID 1 收尸
 #     ——工具会 spawn 大量子进程（脚本/浏览器/边车），且缺少探针会让容器「看起来能起」却无法被编排
@@ -243,6 +344,39 @@ RUN if [ -s /tmp/chromium-deps.txt ]; then \
 COPY --from=builder /opt/ms-playwright /opt/ms-playwright
 
 COPY --from=builder /out/gebai /usr/local/bin/gebai
+
+# node 供给（浏览器桥接依赖：`Bun.spawn(["node", driver])`）。三条通道由计划决定：
+#   local/image —— 从预置文件或 node 镜像取（零网络 / 内网镜像仓库）；
+#   apt        —— 由上面的系统包提供（nodejs 已并入 PLAN_SYSTEM_PACKAGES）；
+#   off        —— 不装（不用浏览器时的缺省，如实说明能力面）。
+# 装完跑一次 `node --version` 自检：node 二进制依赖 libstdc++/glibc，基础镜像缺库时在这里就暴露，
+# 而不是等到浏览器子Agent 报一句看不懂的 spawn 失败。
+COPY --from=node-src /opt/gebai-node/ /tmp/gebai-node-image/
+COPY docker/node/ /tmp/gebai-node-local/
+RUN set -e; . /etc/gebai/build-plan.env; \
+    case "$PLAN_RUNTIME_NODE_SOURCE" in \
+      local) \
+        [ -x /tmp/gebai-node-local/node ] || { echo "[docker] node_source=local 但预置文件缺失（docker/node/node）"; exit 1; }; \
+        install -m755 /tmp/gebai-node-local/node /usr/local/bin/node; \
+        echo "[docker] node 来自预置文件（零网络）"; ;; \
+      image) \
+        [ -x /tmp/gebai-node-image/node ] || { echo "[docker] node_source=image 但未取到 node（${NODE_IMAGE} 里无 /usr/local/bin/node？）"; exit 1; }; \
+        install -m755 /tmp/gebai-node-image/node /usr/local/bin/node; \
+        echo "[docker] node 来自镜像 ${NODE_IMAGE}"; ;; \
+      apt) \
+        command -v node >/dev/null 2>&1 || { echo "[docker] node_source=apt 但系统包未提供 node"; exit 1; }; \
+        echo "[docker] node 来自系统包（$(node --version)）"; ;; \
+      off) \
+        echo "[docker] 未安装 node（node_source=off）：浏览器类子Agent 不可用"; ;; \
+      *) echo "[docker] 未知 node 供给方式：$PLAN_RUNTIME_NODE_SOURCE"; exit 1; ;; \
+    esac; \
+    rm -rf /tmp/gebai-node-image /tmp/gebai-node-local; \
+    if [ -x /usr/local/bin/node ]; then \
+      if ! /usr/local/bin/node --version; then \
+        echo "[docker] node 已就位但无法运行：多为基础镜像缺库（如 libstdc++6）——装齐后再重建，或改用 node_source=apt"; \
+        exit 1; \
+      fi; \
+    fi
 # 健康探针脚本（Dockerfile 里 `$$` 在非 RUN 指令中不转义成字面 `$`，而 `${VAR}` 又会被构建期替换成固定
 # 值；独立脚本两条都避开，且可在宿主 `sh -n` 校验）。装在这里而非 healthcheck 阶段：那边已是非 root
 # 运行用户，改不动 /usr/local/bin 的权限。

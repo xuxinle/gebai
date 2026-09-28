@@ -123,7 +123,7 @@ docker/build.sh --print-plan --profile code                    # 只打印裁剪
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
 - 纯服务端 / Server-only: `packages/desktop/dist/gebai.exe`（Bun `--compile` 单文件，零运行时依赖——Bun 已内嵌；`--server` 切服务模式）
-- 容器镜像 / Container image: `docker/build.sh`（Windows 用 `pwsh -File docker/build.ps1`）——多阶段构建，构建阶段完成上述构建链后 `--compile` 出 Linux 单文件，运行阶段不含 node_modules 与 bun；**能力、前端资源、系统包与镜像本体（基础镜像/用户/数据根/端口/时区/标签/源）均可由一份 JSON 档案（`--profile`）一次声明**，用法与矩阵见 `docker/README.md`
+- 容器镜像 / Container image: `docker/build.sh`（Windows 用 `pwsh -File docker/build.ps1`）——多阶段构建，构建阶段完成上述构建链后 `--compile` 出 Linux 单文件，运行阶段不含 node_modules 与 bun；**能力、前端资源、系统包与镜像本体（基础镜像/用户/数据根/端口/时区/标签/源）均可由一份 JSON 档案（`--profile`）一次声明**；浏览器与 bun/node 运行时均支持**零网络预置**（`--export-browsers` / `--export-runtimes` 导出，内网放入 `docker/browsers`、`docker/bun`、`docker/node` 即自动识别）；用法与矩阵见 `docker/README.md`
 
 ### 服务模式（多用户）| Server Mode (Multi-user)
 

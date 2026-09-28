@@ -6,6 +6,12 @@
 # deps
 node_modules/
 
+# 离线供给预置（docker/browsers|bun|node）：浏览器目录与运行时二进制，均为几百 MB 的本地预置，
+# 由 docker/build.sh --export-browsers / --export-runtimes 在联网侧生成后拷到内网使用——不进版本库。
+docker/browsers/
+docker/bun/
+docker/node/
+
 # build output
 dist/
 build/

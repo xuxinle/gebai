@@ -61,9 +61,53 @@ docker run -d --name gebai -p 3000:3000 \
 | 装依赖 | npm registry | `--npm-registry` 指向内网源（`bun install` 走 `BUN_CONFIG_REGISTRY`） |
 | 装系统包 | Ubuntu apt（`archive.ubuntu.com`） | 用 `--apt-mirror` 指向内网源（只换主机名，保留组件行） |
 | CV 模型（`WITH_CV=1`） | `hf-mirror.com` | `--cv-model-base` 指向自备镜像；也可先 `bun run resources:download` 后把模型放进构建上下文（脚本优先用本地已有模型） |
-| 浏览器（`--with-browser`） | playwright CDN | 内网无出口时不要该开关（浏览器类子Agent 不可用） |
+| 浏览器（`--with-browser`） | playwright CDN | 见下方「离线供给」：预置目录 / 内网 CDN 镜像均可，**不需要** CDN 出口 |
 
 上述任何一项需经代理时，用 `--build-proxy http://proxy:3128`（或宿主 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量，Docker 客户端默认透传）。
+
+### 离线供给（浏览器 / bun / node）
+
+浏览器类子Agent（playwright / reverse_site）在容器里需要三样东西，**在三层各自都能完全离线供给**：
+
+| 需要什么 | 为什么 | 离线供给方式 |
+|---|---|---|
+| 浏览器本体 | chromium / headless shell | `image.browser_source=local` + 预置目录（`docker/browsers/`） |
+| **node 运行时** | 桥接是 `Bun.spawn(["node", driver])`——**没有 node，浏览器子Agent 启动即失败** | `image.node_source=local`（预置 `docker/node/node`）/ `image`（内网镜像仓库）/ `apt`（内网 apt 源） |
+| 浏览器系统依赖 | chromium 需要的 apt 包（libatk/libnss3/字体…） | `browser_deps=auto`（**在目标镜像内现算**，需 apt 可达：配 `--apt-mirror`）；或预置清单路径；基础镜像已含依赖时用 `--no-browser-deps` |
+
+另外 **bun** 是构建必需（编译产物），也可预置：`image.bun_source=local` + `docker/bun/bun`。
+
+三个预置目录（`docker/browsers`、`docker/bun`、`docker/node`）都在构建上下文里，**放进去即自动识别**，无需再指定来源：
+
+```bash
+# 联网侧（一次）：产出三个预置目录
+docker/build.sh --export-browsers docker/browsers --from-image gebai:0.1.0   # 最准：含已实测的依赖清单
+docker/build.sh --export-runtimes docker/rt                                  # bun + node（本机平台）
+# 也可从宿主缓存导出（不含依赖清单，无 --from-image 时）：docker/build.sh --export-browsers docker/browsers
+
+# 内网侧（零网络出口）：三个目录就位后，一条命令
+./docker/build.sh --profile intranet --with-browser --browser-deps docker/browsers/playwright-deps.txt
+# 预置目不在仓库内时：--browser-dir / --bun-dir / --node-dir 指定宿主路径（脚本会就位到 docker/ 下）
+```
+
+**依赖清单的口径（容易踩）**：清单必须**在目标镜像内算**——playwright 的依赖表只列「本机缺什么」，在宿主
+上跑 `install-deps --dry-run` 得到的列表反映的是宿主（通常已装很多库），拿去装裸镜像必然缺库
+（实测：宿主算出的 39 个包不够，`chrome-headless-shell` 报 `libatk-1.0.so.0` 缺失）。因此 `browser_deps=auto`
+是**在构建阶段、容器内**现算（`playwright install-deps --dry-run chromium`，playwright 自带依赖表，不联网），
+这也是缺省行为。需要完全无 apt 出口时，才用预置清单 + 自备 .deb/自建源（`browser_deps=<清单路径>`）。
+另外 `--export-browsers --from-image` 导出的 `/etc/gebai/playwright-deps.txt` 是**那个镜像实测装过的包**，
+在相同基础镜像上复用是准的；换基础镜像则应改用 `auto` 重算。
+
+**平台约束**：`--export-runtimes` 导出的是**本机平台**的二进制（Windows 上导出的 .exe 放进 Linux 镜像无用）——
+跨平台请在目标架构的机器上导出，或从已构建镜像里取。
+
+**边界（如实说明）**：本通道解决的是**浏览器、bun、node 与浏览器系统依赖**的离线供给；
+`bun install` 本身仍需一个 npm 源（内网镜像用 `--npm-registry`，既有能力）——依赖包不在本通道范围内。
+
+**node 自检**：运行阶段装好 node 后会跑一次 `node --version`；基础镜像缺库（如 libstdc++6）时直接**构建失败**
+并说明原因，不会把问题漏到运行期的一句 `spawn node ENOENT`。浏览器系统依赖的缺库同样会暴露：构建后
+可 `docker run --rm <镜像> /opt/ms-playwright/chromium_headless_shell-<rev>/chrome-headless-shell-linux64/chrome-headless-shell --version`
+验证（架构对不上或缺库会直接报错）。
 
 ## 裁剪与镜像本体定制
 
@@ -110,10 +154,15 @@ docker run -d --name gebai -p 3000:3000 \
 | `extra_packages` | `[]` | 裁剪组之外额外安装的 apt 包（并入同一次 apt 安装） |
 | `labels` | `{}` | 额外镜像标签（键 → 值）；经 `docker build --label` 传入 |
 | `healthcheck` | `{ path: "/api/health" }` | `false` = 不写 HEALTHCHECK（改选 `--target runtime-nohealthcheck` 阶段）；`path` 可改（探针端口跟随 `port`）。**间隔/超时/启动期/重试写在 Dockerfile 指令里**（实测 Docker 解析阶段不做变量展开，构建参数注入不了），需调整请用运行期选项 |
+| `browser_source` / `browser_dir` / `browser_download_host` / `browser_deps` | `download` / `docker/browsers` / 空 / `auto` | 浏览器供给：下载（可指内网 CDN）/ **本地预置（零网络）** / 不装；系统依赖 `auto`、清单路径或 `off`。见「离线供给」 |
+| `bun_source` / `bun_dir` | `image` / `docker/bun` | bun（构建必需）：从 `bun_image` 取，或用预置文件（`docker/bun/bun`，零网络） |
+| `node_source` / `node_image` / `node_dir` | `auto` / `node:22-slim` / `docker/node` | node（**浏览器桥接必需**：桥接是 `Bun.spawn(["node", driver])`）：`auto` = 启用浏览器则从 `node_image` 取，否则不装；也可预置文件（`docker/node/node`，零网络）或 `apt` |
 
 对应的命令行开关（等价于 `--set image.<字段>=值`）：`--base-image` `--bun-image` `--user` `--uid` `--gid`
 `--data-dir` `--port` `--mode` `--host` `--tz` `--label`（可多次）`--extra-packages` `--apt-mirror`
-`--npm-registry` `--build-proxy` `--run-as-root` `--no-healthcheck`。
+`--npm-registry` `--build-proxy` `--run-as-root` `--no-healthcheck` `--browser-source` `--browser-dir`
+`--browser-download-host` `--browser-deps` `--no-browser-deps` `--bun-source` `--bun-dir` `--node-source`
+`--node-image` `--node-dir`。
 
 ```bash
 # 内网/私有部署：自备镜像与源，中文时区，三个标签留痕

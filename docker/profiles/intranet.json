@@ -1,6 +1,6 @@
 {
   "name": "intranet",
-  "description": "内网/离线部署：自备基础镜像与 apt/npm 源、构建期代理，标签留痕；能力面取全量",
+  "description": "内网/离线部署：自备基础镜像与 apt/npm 源、构建期代理、标签留痕；浏览器与 bun/node 均走 local 预置（零网络，见 docker/README.md「离线供给」）",
   "image": {
     "base": "registry.internal.example.com/base/ubuntu:24.04",
     "bun_image": "registry.internal.example.com/base/bun:1.4.2",
@@ -12,14 +12,21 @@
     "labels": {
       "org.opencontainers.image.vendor": "Example Corp",
       "com.example.env": "intranet"
-    }
+    },
+    "browser_source": "local",
+    "browser_dir": "docker/browsers",
+    "browser_deps": "auto",
+    "bun_source": "local",
+    "bun_dir": "docker/bun",
+    "node_source": "local",
+    "node_dir": "docker/node"
   },
   "assets": {
     "web_ui": true,
     "cv": false,
     "d2": true,
     "analyzer": true,
-    "browser": false,
+    "browser": true,
     "ripgrep": true
   },
   "system": {
@@ -29,6 +36,6 @@
     "fonts": true,
     "tzdata": true,
     "procps": true,
-    "chromium": false
+    "chromium": true
   }
 }

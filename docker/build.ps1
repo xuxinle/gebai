@@ -49,7 +49,22 @@ param(
   [string]$NpmRegistry = "",
   [string]$BuildProxy = "",
   [switch]$RunAsRoot,
-  [switch]$NoHealthcheck
+  [switch]$NoHealthcheck,
+  # —— 浏览器供给（离线/内网见 docker/README.md「离线浏览器」）——
+  [string]$BrowserSource = "",
+  [string]$BrowserDir = "",
+  [string]$BrowserDownloadHost = "",
+  [string]$BrowserDeps = "",
+  [switch]$NoBrowserDeps,
+  [string]$ExportBrowsers = "",
+  [string]$FromImage = "",
+  # —— 运行时离线供给（bun 构建必需；node 供浏览器桥接）——
+  [string]$BunDir = "",
+  [string]$NodeDir = "",
+  [string]$BunSource = "",
+  [string]$NodeSource = "",
+  [string]$NodeImage = "",
+  [string]$ExportRuntimes = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,8 +90,82 @@ try {
   if ($BuildProxy) { $Set += "image.proxy=$BuildProxy" }
   if ($RunAsRoot) { $Set += "image.run_as_root=1" }
   if ($NoHealthcheck) { $Set += "image.healthcheck=false" }
+  if ($BrowserSource) { $Set += "image.browser_source=$BrowserSource" }
+  if ($BrowserDownloadHost) { $Set += "image.browser_download_host=$BrowserDownloadHost" }
+  if ($BrowserDeps) { $Set += "image.browser_deps=$BrowserDeps" }
+  if ($NoBrowserDeps) { $Set += "image.browser_deps=off" }
+  if ($BunSource) { $Set += "image.bun_source=$BunSource" }
+  if ($NodeSource) { $Set += "image.node_source=$NodeSource" }
+  if ($NodeImage) { $Set += "image.node_image=$NodeImage" }
   # 多个 -Label 累积成一个 image.labels 项（逗号分隔）——多次覆盖同一字段是整体替换
   if ($Label.Count -gt 0) { $Set += "image.labels=$($Label -join ',')" }
+
+  # ── -ExportRuntimes：导出宿主的 bun/node（本机平台），不进构建 ──
+  if ($ExportRuntimes) {
+    foreach ($name in @("bun", "node")) {
+      $dir = Join-Path $ExportRuntimes $name
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      $cmd = Get-Command $name -ErrorAction SilentlyContinue
+      if (-not $cmd) { Write-Host "    未找到 $name（宿主 PATH 里没有）——可手动放入 $dir"; continue }
+      Copy-Item $cmd.Source (Join-Path $dir $name) -Force
+      Write-Host "    已导出 $name：$($cmd.Source) → $dir"
+    }
+    Write-Host ""
+    Write-Host "==> 完成：$ExportRuntimes（内网构建用 -BunDir / -NodeDir 指定）"
+    return
+  }
+
+  # ── -ExportBrowsers：导出浏览器预置目录（离线部署用），不进构建 ──
+  # Windows 上直接实现（不依赖 bash）：期望 revision 从仓库依赖读，源为宿主缓存或已构建镜像。
+  if ($ExportBrowsers) {
+    $outDir = $ExportBrowsers
+    if ((Test-Path $outDir) -and (Get-ChildItem $outDir -Force -ErrorAction SilentlyContinue)) {
+      throw "输出目录已存在且非空：$outDir（先删除或换个目录）"
+    }
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    # 期望 revision（hoisted 与 bun store 两种布局）
+    $cands = @("node_modules/playwright-core/browsers.json", "packages/server/node_modules/playwright-core/browsers.json")
+    $cands += @(Get-ChildItem "node_modules/.bun" -Directory -Filter "playwright-core@*" -ErrorAction SilentlyContinue | ForEach-Object { "node_modules/.bun/$($_.Name)/node_modules/playwright-core/browsers.json" })
+    $browsersJson = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $browsersJson) { throw "找不到 playwright-core/browsers.json（依赖未安装？）——可先 bun install" }
+    $rev = (Get-Content $browsersJson -Raw | ConvertFrom-Json).browsers | Where-Object { $_.name -eq 'chromium' } | Select-Object -First 1 -ExpandProperty revision
+    if (-not $rev) { throw "$browsersJson 里没有 chromium 条目" }
+    $want = @("chromium-$rev", "chromium_headless_shell-$rev")
+    $found = 0
+    if ($FromImage) {
+      docker image inspect $FromImage *> $null
+      if ($LASTEXITCODE -ne 0) { throw "本地无镜像 $FromImage" }
+      $cid = (docker create $FromImage).Trim()
+      try {
+        Write-Host "==> 从镜像 $FromImage 导出浏览器（期望 chromium-$rev）"
+        foreach ($d in $want) {
+          docker cp "${cid}:/opt/ms-playwright/$d" (Join-Path $outDir $d) *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "    已导出 $d"; $found = 1 }
+        }
+        if ($found -eq 0) { throw "该镜像的 /opt/ms-playwright 里没有 chromium-$rev（是否用 -WithBrowser 构建过？）" }
+        docker cp "${cid}:/etc/gebai/playwright-deps.txt" (Join-Path $outDir "playwright-deps.txt") *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Host "    已导出系统依赖清单 playwright-deps.txt" }
+      } finally { docker rm -f $cid *> $null }
+    } else {
+      $cache = $env:PLAYWRIGHT_BROWSERS_PATH
+      if (-not $cache) {
+        foreach ($d in @("$env:LOCALAPPDATA\ms-playwright", "$HOME/.cache/ms-playwright", "$HOME/Library/Caches/ms-playwright")) {
+          if ($d -and (Test-Path $d)) { $cache = $d; break }
+        }
+      }
+      if (-not $cache -or -not (Test-Path $cache)) { throw "找不到宿主 playwright 缓存（可用 PLAYWRIGHT_BROWSERS_PATH 指定，或改用 -FromImage）" }
+      Write-Host "==> 从宿主缓存 $cache 导出浏览器（期望 chromium-$rev）"
+      foreach ($d in $want) {
+        $src = Join-Path $cache $d
+        if (Test-Path $src) { Copy-Item $src (Join-Path $outDir $d) -Recurse; Write-Host "    已导出 $d"; $found = 1 }
+      }
+      if ($found -eq 0) { throw "宿主缓存里没有 chromium-$rev（缓存内容：$((Get-ChildItem $cache).Name -join ' ')）——可在联网机构建一次镜像后用 -FromImage 导出" }
+    }
+    Write-Host ""
+    Write-Host "==> 完成：$outDir"
+    Write-Host "    内网构建：pwsh -File docker/build.ps1 -WithBrowser -BrowserDir $outDir"
+    return
+  }
 
   # ── 档案解析：预置名 → docker/profiles/{名}.json；含分隔符或 .json 结尾 → 按路径 ──
   $profileFile = ""
@@ -93,6 +182,25 @@ try {
 
   $withCv = if ($NoCv) { "0" } else { "1" }
   $withBrowser = if ($WithBrowser) { "1" } else { "0" }
+
+  # ── 浏览器预置目录就位：Docker 只能 COPY 构建上下文内的文件 ──
+  if ($BrowserDir) {
+    if (-not (Test-Path $BrowserDir)) { throw "-BrowserDir 目录不存在：$BrowserDir" }
+    $target = Join-Path $repoRoot "docker/browsers"
+    if ((Resolve-Path $BrowserDir).Path -ne $target) {
+      Write-Host "==> 就位浏览器预置目录：$BrowserDir → docker/browsers（构建上下文只能拷贝其内的文件）"
+      New-Item -ItemType Directory -Force -Path $target | Out-Null
+      Copy-Item (Join-Path $BrowserDir '*') $target -Recurse -Force
+    }
+  }
+  # -WithBrowser 且预置目录已就位、又未显式指定来源时，自动走 local（零网络）
+  $browserDirTarget = Join-Path $repoRoot "docker/browsers"
+  if ($withBrowser -eq "1" -and (Test-Path $browserDirTarget) -and (Get-ChildItem $browserDirTarget -Force -ErrorAction SilentlyContinue)) {
+    if (-not ($Set | Where-Object { $_ -like 'image.browser_source=*' })) {
+      $Set += "image.browser_source=local"
+      Write-Host "==> 检测到 docker/browsers 已有预置浏览器 → 自动走 local 通道（零网络；可用 -BrowserSource download 改回）"
+    }
+  }
 
   $planArgs = @()
   if ($profileFile) { $planArgs += @("--profile", $profileFile) }

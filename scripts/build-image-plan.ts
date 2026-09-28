@@ -106,6 +106,25 @@ export interface ImageSpec {
   labels: Record<string, string>
   /** 健康检查：false = 不写入 HEALTHCHECK（改用 `--target runtime-nohealthcheck`）。 */
   healthcheck: { interval: string; timeout: string; startPeriod: string; retries: number; path: string } | false
+  /** 浏览器来源：`download` 从下载源拉（可指内网镜像）/ `local` 用预置目录（零网络）/ `off` 不装。 */
+  browserSource: "download" | "local" | "off"
+  /** `local` 时的预置目录（相对构建上下文；须是 playwright 本地缓存布局，如 `chromium-1243/`）。 */
+  browserDir: string
+  /** `download` 时的下载源（`PLAYWRIGHT_DOWNLOAD_HOST`；内网自建 CDN 镜像）。 */
+  browserDownloadHost?: string
+  /** 浏览器系统依赖：`auto`（在线走 `--with-deps`）/ 路径（按预置清单装，配合内网 apt 源）/ `off`（跳过）。 */
+  browserDeps: string
+  /** bun 供给：`image`（从 `bun_image` 取）/ `local`（预置文件，零网络）。 */
+  bunSource: "image" | "local"
+  /** bun 预置目录（相对构建上下文；约定放可执行的 `bun`）。 */
+  bunDir: string
+  /** node 供给：`auto`（跟随浏览器需求：启用则 image，否则 off）/ `image` / `local` / `apt` / `off`。
+   *  浏览器桥接是 `Bun.spawn(["node", driver])`，没有 node 就没有浏览器能力。 */
+  nodeSource: "auto" | "image" | "local" | "apt" | "off"
+  /** `image` 通道的 node 来源镜像。 */
+  nodeImage: string
+  /** node 预置目录（相对构建上下文；约定放可执行的 `node`）。 */
+  nodeDir: string
 }
 
 function fail(msg: string): never {
@@ -164,6 +183,14 @@ function defaultImage(): ImageSpec {
     extraPackages: [],
     labels: {},
     healthcheck: { interval: "30s", timeout: "5s", startPeriod: "20s", retries: 3, path: "/api/health" },
+    browserSource: "download",
+    browserDir: "docker/browsers",
+    browserDeps: "auto",
+    bunSource: "image",
+    bunDir: "docker/bun",
+    nodeSource: "auto",
+    nodeImage: "node:22-slim",
+    nodeDir: "docker/node",
   }
 }
 
@@ -187,8 +214,22 @@ const IMAGE_KEYS = [
   "extra_packages",
   "labels",
   "healthcheck",
+  "browser_source",
+  "browser_dir",
+  "browser_download_host",
+  "browser_deps",
+  "bun_source",
+  "bun_dir",
+  "node_source",
+  "node_image",
+  "node_dir",
 ] as const
 const HEALTHCHECK_KEYS = ["interval", "timeout", "start_period", "retries", "path"] as const
+/** 浏览器来源（`image.browser_source`）。 */
+const BROWSER_SOURCES = ["download", "local", "off"] as const
+/** 运行时来源（bun：`image`/`local`；node 多 `auto`/`apt`/`off`）。 */
+const BUN_SOURCES = ["image", "local"] as const
+const NODE_SOURCES = ["auto", "image", "local", "apt", "off"] as const
 /** Docker 标签名允许的字符（过宽的键会在 Dockerfile 里生成非法 LABEL）。 */
 const LABEL_KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 /** 时长值（Docker HEALTHCHECK 接受的时长格式，如 30s / 1m30s）。 */
@@ -277,7 +318,43 @@ function parseImage(v: unknown, label: string): ImageSpec {
   }
   // 数据根与挂载卷不能是 / 或系统目录：那会把 chown -R 打到整个文件系统上
   if (img.dataDir === "/") fail(`${W("data_dir")} 不能是根目录`)
+  // 浏览器：来源 / 预置目录 / 下载源 / 系统依赖
+  if (raw.browser_source !== undefined) {
+    const src = strValue(raw.browser_source, W("browser_source"))
+    if (!(BROWSER_SOURCES as readonly string[]).includes(src)) {
+      fail(`${W("browser_source")} 须为 ${BROWSER_SOURCES.join(" / ")}（收到 "${src}"）`)
+    }
+    img.browserSource = src as ImageSpec["browserSource"]
+  }
+  if (raw.browser_dir !== undefined) img.browserDir = strValue(raw.browser_dir, W("browser_dir"))
+  if (img.browserDir.startsWith("/") && img.browserSource === "local") {
+    // local 预置目录须在构建上下文内（Docker 只能 COPY 上下文里的文件），绝对路径传不进去
+    fail(`${W("browser_dir")} 须为构建上下文内的相对路径（Docker 只能拷贝上下文内的文件）`)
+  }  if (raw.browser_download_host !== undefined) img.browserDownloadHost = strValue(raw.browser_download_host, W("browser_download_host"))
+  if (raw.browser_deps !== undefined) {
+    img.browserDeps = raw.browser_deps === false ? "off" : raw.browser_deps === true ? "auto" : strValue(raw.browser_deps, W("browser_deps"))
+  }
+  // 运行时供给：bun（构建必需）与 node（浏览器桥接必需）
+  if (raw.bun_source !== undefined) {
+    const src = strValue(raw.bun_source, W("bun_source"))
+    if (!(BUN_SOURCES as readonly string[]).includes(src)) fail(`${W("bun_source")} 须为 ${BUN_SOURCES.join(" / ")}（收到 "${src}"）`)
+    img.bunSource = src as ImageSpec["bunSource"]
+  }
+  if (raw.bun_dir !== undefined) img.bunDir = relPath(strValue(raw.bun_dir, W("bun_dir")), W("bun_dir"))
+  if (raw.node_source !== undefined) {
+    const src = strValue(raw.node_source, W("node_source"))
+    if (!(NODE_SOURCES as readonly string[]).includes(src)) fail(`${W("node_source")} 须为 ${NODE_SOURCES.join(" / ")}（收到 "${src}"）`)
+    img.nodeSource = src as ImageSpec["nodeSource"]
+  }
+  if (raw.node_image !== undefined) img.nodeImage = strValue(raw.node_image, W("node_image"))
+  if (raw.node_dir !== undefined) img.nodeDir = relPath(strValue(raw.node_dir, W("node_dir")), W("node_dir"))
   return img
+}
+
+/** 预置目录须在构建上下文内（Docker 只能 COPY 上下文里的文件）。 */
+function relPath(v: string, where: string): string {
+  if (v.startsWith("/")) fail(`${where} 须为构建上下文内的相对路径（Docker 只能拷贝上下文内的文件）`)
+  return v
 }
 function defaultPlan(): BuildPlan {
   return {
@@ -361,6 +438,21 @@ export function parseProfile(raw: unknown, label: string): BuildPlan {
     console.warn(`[build-image-plan] ${label}: 设了 image.tz="${plan.image.tz}" 但 system.tzdata=false —— 时区生效需要 tzdata，已自动启用该项`)
   }
   return plan
+}
+
+/**
+ * 供给收尾：在**档案 + CLI 覆盖都合并完之后**调用，把依赖其他字段的供给决策定下来。
+ * 必须在覆盖之后——否则 `--set system.chromium=1` 这类覆盖看不到效果（auto 会按旧值定型）。
+ * 幂等：已定型的值再跑一次不变。
+ */
+export function finalizeProvisioning(plan: BuildPlan): void {
+  // node 供给 auto：跟随浏览器需求——浏览器桥接是 `Bun.spawn(["node", driver])`，没有 node 就没有
+  // 浏览器能力，所以「装了浏览器却没装 node」是必须报出来的矛盾
+  if (plan.image.nodeSource === "auto") plan.image.nodeSource = plan.system.chromium ? "image" : "off"
+  // node=apt 时把 nodejs 并入装包清单（apt 通道无需额外的阶段逻辑）
+  if (plan.image.nodeSource === "apt" && !plan.image.extraPackages.includes("nodejs")) {
+    plan.image.extraPackages = [...plan.image.extraPackages, "nodejs"]
+  }
 }
 
 /** CLI 覆盖（`--set 点路径=值`）：字段级覆盖档案，未覆盖处保持档案值。 */
@@ -526,8 +618,41 @@ function applyImageOverride(plan: BuildPlan, key: string, value: string, list: s
     case "healthcheck":
       plan.image.healthcheck = bool(value, W) ? plan.image.healthcheck === false ? defaultImage().healthcheck : plan.image.healthcheck : false
       return
+    case "browser_source": {
+      if (!(BROWSER_SOURCES as readonly string[]).includes(value)) fail(`${W} 须为 ${BROWSER_SOURCES.join(" / ")}（收到 "${value}"）`)
+      plan.image.browserSource = value as ImageSpec["browserSource"]
+      return
+    }
+    case "browser_dir":
+      plan.image.browserDir = value || fail(`${W} 需要非空值`)
+      return
+    case "browser_download_host":
+      plan.image.browserDownloadHost = value || undefined
+      return
+    case "browser_deps":
+      plan.image.browserDeps = value === "" ? "off" : value
+      return
+    case "bun_source": {
+      if (!(BUN_SOURCES as readonly string[]).includes(value)) fail(`${W} 须为 ${BUN_SOURCES.join(" / ")}（收到 "${value}"）`)
+      plan.image.bunSource = value as ImageSpec["bunSource"]
+      return
+    }
+    case "bun_dir":
+      plan.image.bunDir = value || fail(`${W} 需要非空值`)
+      return
+    case "node_source": {
+      if (!(NODE_SOURCES as readonly string[]).includes(value)) fail(`${W} 须为 ${NODE_SOURCES.join(" / ")}（收到 "${value}"）`)
+      plan.image.nodeSource = value as ImageSpec["nodeSource"]
+      return
+    }
+    case "node_image":
+      plan.image.nodeImage = value || fail(`${W} 需要非空值`)
+      return
+    case "node_dir":
+      plan.image.nodeDir = value || fail(`${W} 需要非空值`)
+      return
     default:
-      return fail(`${W} 不支持（可用: base / bun_image / apt_mirror / npm_registry / proxy / user / uid / gid / home / shell / run_as_root / data_dir / mode / host / port / tz / extra_packages / labels / healthcheck）`)
+      return fail(`${W} 不支持（可用: base / bun_image / apt_mirror / npm_registry / proxy / user / uid / gid / home / shell / run_as_root / data_dir / mode / host / port / tz / extra_packages / labels / healthcheck / browser_source / browser_dir / browser_download_host / browser_deps / bun_source / bun_dir / node_source / node_image / node_dir）`)
   }
 }
 
@@ -568,6 +693,16 @@ export function planToEnv(plan: BuildPlan, source: string): string {
     `PLAN_APT_MIRROR=${shellQuote(plan.image.aptMirror ?? "")}`,
     `PLAN_NPM_REGISTRY=${shellQuote(plan.image.npmRegistry ?? "")}`,
     `PLAN_IMAGE_BASE=${shellQuote(plan.image.base)}`,
+    // 浏览器供给（构建阶段使用）：来源 / 预置目录 / 下载源 / 系统依赖策略
+    `PLAN_BROWSER_SOURCE=${plan.image.browserSource}`,
+    `PLAN_PLAYWRIGHT_REVISION=${resolvePlaywrightRevision()}`,
+    `PLAN_BROWSER_DIR=${shellQuote(plan.image.browserDir)}`,
+    `PLAN_BROWSER_DOWNLOAD_HOST=${shellQuote(plan.image.browserDownloadHost ?? "")}`,
+    `PLAN_BROWSER_DEPS=${shellQuote(plan.image.browserDeps)}`,
+    `PLAN_RUNTIME_BUN_SOURCE=${plan.image.bunSource}`,
+    `PLAN_RUNTIME_BUN_DIR=${shellQuote(plan.image.bunDir)}`,
+    `PLAN_RUNTIME_NODE_SOURCE=${plan.image.nodeSource}`,
+    `PLAN_RUNTIME_NODE_DIR=${shellQuote(plan.image.nodeDir)}`,
     "",
   ]
   return lines.join("\n")
@@ -589,6 +724,39 @@ function projectVersion(): string {
 }
 
 /**
+ * 期望的 chromium revision：从仓库实际安装的 playwright-core/browsers.json 读——与运行期所用模块
+ * 同一份真相，不另立会漂移的版本参数（曾经硬编码的 playwright 版本已与实际依赖不符）。
+ *
+ * 定位兼顾两种依赖布局：hoisted（`node_modules/playwright-core/`）与 bun 的 store 布局
+ * （`node_modules/.bun/playwright-core@<版本>/node_modules/playwright-core/`）。找不到返回空串。
+ */
+export function resolvePlaywrightRevision(root: string = ROOT): string {
+  const candidates = [
+    join(root, "node_modules", "playwright-core", "browsers.json"),
+    join(root, "packages", "server", "node_modules", "playwright-core", "browsers.json"),
+  ]
+  try {
+    const store = join(root, "node_modules", ".bun")
+    for (const e of readdirSync(store)) {
+      if (e.startsWith("playwright-core@")) candidates.push(join(store, e, "node_modules", "playwright-core", "browsers.json"))
+    }
+  } catch {
+    /* 无 .bun（hoisted 布局） */
+  }
+  for (const p of candidates) {
+    if (!existsSync(p)) continue
+    try {
+      const b = JSON.parse(readFileSync(p, "utf8")) as { browsers?: Array<{ name?: string; revision?: unknown }> }
+      const entry = b.browsers?.find((x) => x.name === "chromium")
+      if (entry?.revision != null) return String(entry.revision)
+    } catch {
+      /* 该候选不可解析，试下一个 */
+    }
+  }
+  return ""
+}
+
+/**
  * 指令级 build-arg（供 `docker/build.sh --emit-args` 读取后传给 `docker build`）。
  * Docker 的 FROM/USER/VOLUME/EXPOSE/ENV/LABEL/HEALTHCHECK 无法在构建过程中条件化，所以这几项的值
  * 必须在宿主侧算好。
@@ -597,6 +765,10 @@ export function emitBuildArgs(plan: BuildPlan): string[] {
   const hc = plan.image.healthcheck
   return [
     `IMAGE_VERSION=${projectVersion()}`,
+    // bun 来源：local 时 FROM 阶段退化为 base 镜像占位（内网拉不到 oven/bun），二进制从预置文件装
+    `BUN_IMAGE=${plan.image.bunSource === "local" ? plan.image.base : plan.image.bunImage}`,
+    // node 来源：仅 image 通道需要拉 node 镜像；local/apt/off 都退化为 base 占位
+    `NODE_IMAGE=${plan.image.nodeSource === "image" ? plan.image.nodeImage : plan.image.base}`,
     `BASE_IMAGE=${plan.image.base}`,
     `BUN_IMAGE=${plan.image.bunImage}`,
     `IMAGE_USER=${plan.image.user}`,
@@ -618,6 +790,14 @@ export function emitBuildArgs(plan: BuildPlan): string[] {
     ...Object.entries(plan.image.labels).map(([k, v]) => `IMAGE_LABEL=${k}=${v}`),
     `HEALTHCHECK_ENABLED=${hc === false ? "0" : "1"}`,
     `HEALTHCHECK_PATH=${hc === false ? "/api/health" : hc.path}`,
+    `PLAYWRIGHT_SOURCE=${plan.image.browserSource}`,
+    `PLAYWRIGHT_DIR=${plan.image.browserDir}`,
+    `PLAYWRIGHT_DOWNLOAD_HOST=${plan.image.browserDownloadHost ?? ""}`,
+    `PLAYWRIGHT_DEPS=${plan.image.browserDeps}`,
+    `RUNTIME_BUN_SOURCE=${plan.image.bunSource}`,
+    `RUNTIME_BUN_DIR=${plan.image.bunDir}`,
+    `RUNTIME_NODE_SOURCE=${plan.image.nodeSource}`,
+    `RUNTIME_NODE_DIR=${plan.image.nodeDir}`,
     `APT_MIRROR=${plan.image.aptMirror ?? ""}`,
     `NPM_REGISTRY=${plan.image.npmRegistry ?? ""}`,
     `BUILD_PROXY=${plan.image.proxy ?? ""}`,
@@ -659,7 +839,42 @@ export function renderReport(plan: BuildPlan, source: string): string {
       ]
         .filter(Boolean)
         .join("｜"),
+    "  浏览器        : " +
+      (plan.system.chromium
+        ? plan.image.browserSource === "local"
+          ? `预置目录 ${plan.image.browserDir}（零网络）｜系统依赖 ${plan.image.browserDeps}`
+          : plan.image.browserSource === "off"
+            ? "不装（system.chromium 已置位但 browser_source=off）"
+            : `下载源 ${plan.image.browserDownloadHost ?? "playwright CDN（缺省）"}｜系统依赖 ${plan.image.browserDeps}`
+        : "未启用（system.chromium=false）"),
+    `  运行时        : bun=${plan.image.bunSource}${plan.image.bunSource === "local" ? `（${plan.image.bunDir}/bun）` : `（${plan.image.bunImage}）`}｜node=${plan.image.nodeSource}${plan.image.nodeSource === "local" ? `（${plan.image.nodeDir}/node）` : plan.image.nodeSource === "image" ? `（${plan.image.nodeImage}）` : ""}`,
   ].join("\n")
+}
+
+/**
+ * 浏览器供给的落地前置检查：预置目录不存在、开关与来源不一致这类问题若漏到 `docker build` 才报，
+ * 错误信息远不如这里清楚（COPY 失败只说「找不到文件」）。`exists` 注入以便单测。
+ */
+export function validateProvisioning(plan: BuildPlan, exists: (p: string) => boolean): string | null {
+  if (plan.system.chromium && plan.image.browserSource !== "off" && plan.image.nodeSource === "off") {
+    return "启用了浏览器（system.chromium=1）但 node_source=off —— 浏览器桥接是 `Bun.spawn([\"node\", driver])`，没有 node 时浏览器子Agent 启动即失败。请把 node_source 设为 auto（默认跟随）/ image / local / apt"
+  }
+  if (plan.image.bunSource === "local" && !exists(`${plan.image.bunDir}/bun`)) {
+    return `bun_source=local 但预置文件不存在：${plan.image.bunDir}/bun —— 放入 bun 可执行文件（如 docker/build.sh --export-runtimes <目录> 导出），或改回 bun_source=image`
+  }
+  if (plan.image.nodeSource === "local" && !exists(`${plan.image.nodeDir}/node`)) {
+    return `node_source=local 但预置文件不存在：${plan.image.nodeDir}/node —— 放入 node 可执行文件（docker/build.sh --export-runtimes <目录>），或改用 node_source=image / apt`
+  }
+  if (!plan.system.chromium) {
+    if (plan.image.browserSource === "local") {
+      return "浏览器未启用（system.chromium=false）却指定了 browser_source=local —— 两者需一致：启用浏览器请加 --with-browser / --set system.chromium=1，或把 browser_source 改回 download"
+    }
+    return null
+  }
+  if (plan.image.browserSource === "local" && !exists(plan.image.browserDir)) {
+    return `browser_source=local 但预置目录不存在：${plan.image.browserDir} —— 把 playwright 浏览器目录（如 chromium-<revision>/，见「离线浏览器」）放到该位置，或用 docker/build.sh --export-browsers <目录> 从已构建镜像/宿主缓存导出`
+  }
+  return null
 }
 
 /** 档案引用解析：名字 → `docker/profiles/{名}.json`；含分隔符或 .json 结尾 → 路径（相对 cwd，其次仓库根）。 */
@@ -735,6 +950,10 @@ function run(): void {
 
   const plan = parseProfile(raw, source || "内联")
   for (const o of overrides) applyOverride(plan, o)
+  finalizeProvisioning(plan)
+  // 浏览器供给前置检查：早失败，错误信息比 docker build 的 COPY 失败清楚得多
+  const browserIssue = validateProvisioning(plan, existsSync)
+  if (browserIssue) fail(browserIssue)
 
   // --emit-args：仅输出指令级 build-arg（KEY=VAL 每行）——宿主侧 build.sh 读入后拼 --build-arg；
   // 报告走 stderr，避免与 build-arg 行混淆

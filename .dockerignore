@@ -37,6 +37,12 @@ vendor
 docs
 feishu
 
+# ── 离线预置（`docker/browsers`、`docker/bun`、`docker/node`；**必须进构建上下文**）──
+# 这是「离线供给」通道的载体：浏览器预置目录（browser_source=local）与 bun/node 二进制
+# （bun_source/node_source=local）都由 Dockerfile 从这几处拷入镜像，全程不联网。三个目录缺省不存在，
+# 因此平时不增加任何上下文体积；一旦放入，几百 MB 会随上下文传给 docker daemon
+# （这是有意为之——不用它就不要放）。
+
 # ── 环境与密钥（**绝不进镜像**：镜像里的配置应经环境变量或 {GEBAI_HOME}/.env 注入）──
 .env
 .env.local
