@@ -1172,47 +1172,57 @@ describe("工具卡片标题与参数区（灵活标题 + 自适应参数格式�
     expect(sfx.title).toContain(url)
   })
 
-  describe("bg_task 卡片标题补任务身份（taskIdParam：等待中也能看出在等什么）", () => {
+  describe("bg_task 卡片任务身份（taskIdParam：身份在参数区单独成块，不挤占卡片头）", () => {
     const BG_META: Array<[string, NonNullable<ToolInfo["card"]>]> = [["bg_task", { titleParams: ["action", "id"], taskIdParam: "id" }]]
 
-    test("已登记的子会话身份入标题后缀（id 与身份都在）", () => {
+    test("已登记的子会话身份入参数区身份块，卡片头只留 action", () => {
       __setToolCardMetaForTest(BG_META)
+      clearTaskLabels()
       rememberTaskLabels("runId s9c2e1b0「调研A」 [running] 8s — 隔离上下文 · 子Agent code（已 3 轮回复、5 次工具调用）")
-      const bubble = toolBubbleFor({ id: "bg1", role: "tool", name: "bg_task", content: "", arguments: { action: "wait", id: "s9c2e1b0" }, createdAt: 0 }, "")
-      const head = bubble.querySelector("div.tool-head")
-      expect(head?.textContent).toContain("action=wait")
-      expect(head?.textContent).toContain("id=s9c2e1b0")
-      expect(head?.textContent).toContain("子会话「调研A」")
+      const bubble = toolBubbleFor({ id: "bg1", role: "tool", name: "bg_task", content: "", arguments: { action: "wait", id: "s9c2e1b0", timeout: 60 }, createdAt: 0 }, "")
+      // 卡片头：工具名 + action（任务 id 无信息量，不再挤在头部）
+      expect(bubble.querySelector("div.tool-head")?.textContent).toBe("🛠bg_task· wait")
+      // 参数区身份块：首行「后台任务 + id」、次行身份文本（分行展示）；其余参数（timeout）键值行照常
+      const task = bubble.querySelector("div.tool-task")
+      expect(task?.querySelector("div.tool-task-meta")?.textContent).toBe("后台任务s9c2e1b0")
+      expect(task?.querySelector("div.tool-task-name")?.textContent).toBe("子会话「调研A」")
+      expect(bubble.querySelector("div.tool-kv-row")?.textContent).toContain("timeout")
     })
 
-    test("实时路径：工具结果到达即登记，随后到达的 bg_task 卡片标题可补全", () => {
+    test("实时路径：工具结果到达即登记，随后到达的 bg_task 卡片身份块可补全", () => {
       __setToolCardMetaForTest(BG_META)
       clearTaskLabels()
       appendToolResult("s1", "tc-sh-launch", "sh", "[后台任务已启动] taskId: t77cc99dd\n命令: bun run typecheck\n（后台执行中不阻塞会话）")
       const bubble = toolBubbleFor({ id: "bg2", role: "tool", name: "bg_task", content: "", arguments: { action: "status", id: "t77cc99dd" }, createdAt: 0 }, "")
-      expect(bubble.querySelector("div.tool-head")?.textContent).toContain("命令 bun run typecheck")
+      expect(bubble.querySelector("div.tool-head")?.textContent).toBe("🛠bg_task· status")
+      expect(bubble.querySelector("div.tool-task")?.textContent).toContain("命令 bun run typecheck")
     })
 
-    test("身份未知时回退为纯 id（不凭空补，action=list 无 id 也不补）", () => {
+    test("身份未登记时身份块只显示 id（不凭空补）；无 id 参数（action=list）无身份块", () => {
       __setToolCardMetaForTest(BG_META)
       clearTaskLabels()
       const unknown = toolBubbleFor({ id: "bg3", role: "tool", name: "bg_task", content: "", arguments: { action: "wait", id: "t00000000" }, createdAt: 0 }, "")
-      const headUnknown = unknown.querySelector("div.tool-head")
-      expect(headUnknown?.textContent).toContain("id=t00000000")
-      expect(headUnknown?.textContent).not.toContain("命令")
+      expect(unknown.querySelector("div.tool-head")?.textContent).toBe("🛠bg_task· wait")
+      const taskUnknown = unknown.querySelector("div.tool-task")
+      expect(taskUnknown?.querySelector("div.tool-task-meta")?.textContent).toBe("后台任务t00000000")
+      // 身份未登记：无身份行（不凭空补）
+      expect(taskUnknown?.querySelector("div.tool-task-name")).toBeNull()
+      expect(taskUnknown?.textContent).not.toContain("命令")
       const list = toolBubbleFor({ id: "bg4", role: "tool", name: "bg_task", content: "", arguments: { action: "list" }, createdAt: 0 }, "")
-      // 无 id 参数：标题仅 action（无后缀补充）
+      // 无 id 参数：标题仅 action，且无身份块
       expect(list.querySelector("div.tool-head")?.textContent).toBe("🛠bg_task· list")
+      expect(list.querySelector("div.tool-task")).toBeNull()
     })
 
-    test("超长命令身份智能截断入标题，悬浮 title 见全文", () => {
+    test("超长命令身份在身份块完整展示（不按标题规则截断）", () => {
       __setToolCardMetaForTest(BG_META)
+      clearTaskLabels()
       const cmd = `bun test ${"packages/server/src/core/".repeat(6)}engine.test.ts`
       rememberTaskLabels(`taskId t1a2b3c4d [running] 5s — ${cmd}`)
       const bubble = toolBubbleFor({ id: "bg5", role: "tool", name: "bg_task", content: "", arguments: { action: "status", id: "t1a2b3c4d" }, createdAt: 0 }, "")
+      expect(bubble.querySelector("div.tool-task-name")?.textContent).toContain(cmd)
       const sfx = bubble.querySelector("span.tool-suffix") as unknown as { textContent: string; title?: string }
-      expect(sfx.textContent).toContain("…")
-      expect(sfx.title).toContain(cmd)
+      expect(sfx.textContent).toBe("· status")
     })
   })
 

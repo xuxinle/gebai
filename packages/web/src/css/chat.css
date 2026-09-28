@@ -350,6 +350,28 @@
 .msg.tool .bubble .tool-kv-key { flex: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-faint); }
 .msg.tool .bubble .tool-kv-val { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .msg.tool .bubble .tool-fold .tool-kv { margin-top: 8px; }
+/* 参数区任务身份块（card.taskIdParam 声明，如 bg_task）：任务 id 无信息量，分行给出「在等什么」——
+   首行「后台任务 + id」（等宽小字、不折行），次行身份文本（长命令/长身份自己换行）；
+   左侧强调色描边与键值行区分，等待中的卡片也一眼可见 */
+.msg.tool .bubble .tool-task {
+  margin-top: 4px;
+  padding: 5px 9px;
+  display: inline-flex; /* 宽度随内容（不拉满整行） */
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  font-size: 12.5px;
+}
+.msg.tool .bubble .tool-task-meta { display: flex; align-items: baseline; gap: 8px; }
+.msg.tool .bubble .tool-task-key { flex: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-faint); }
+.msg.tool .bubble .tool-task-id { flex: none; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); }
+/* 身份文本独占一行（与首行左对齐同列；长命令/长身份自己换行，不挤动 id 行） */
+.msg.tool .bubble .tool-task-name { max-width: 100%; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 /* 文件链接 chip（「弹窗查看」模式下文件工具产物文件卡的替代渲染）：图标 + 文件名 + 路径（弱化）+ 下载，
    点击弹窗查看文件（会话相对与项目绝对路径均经 files/preview 取数）；渲染于 .msg-body（工具卡下方产物块位置） */
 .file-link {

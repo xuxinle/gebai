@@ -678,7 +678,7 @@ export function assistantContent(content: string): HTMLElement {
 /** 工具结果追加：同一卡片内更新头部为完成态，并追加输出区块。sessionId 绑定配对 key（跨会话隔离）；
  *  runId 区分主循环与新会话容器内调用，parent 指定容器内消息的渲染目标。 */
 export function appendToolResult(sessionId: string, toolCallId: string, name: string, output: string, blocks?: ContentBlock[], runId?: string, parent?: HTMLElement) {
-  // 后台任务身份登记（任务结果文本里的 id → 身份）：先于任何渲染分支，随后到达的 bg_task 卡片标题即可补上「在等什么」
+  // 后台任务身份登记（任务结果文本里的 id → 身份）：先于任何渲染分支，随后到达的 bg_task 卡片参数区即可补上「在等什么」
   rememberTaskLabels(output)
   const entry = pendingTools.get(pendingToolsKey(sessionId, toolCallId, runId))
   if (entry) {

@@ -120,7 +120,7 @@ export async function loadMessages(sessionId: string) {
   applyApprovalVisibility() // 审批卡片跟随会话：仅显示当前会话的待审批，切回恢复
   const session = await client.getSession(sessionId)
   if (seq !== loadSeq) return // 已有更新的加载请求：本次结果作废
-  // 后台任务身份表：先从历史工具结果登记（任务 id → 命令/子会话名），卡片标题才能补上「在等什么」——
+  // 后台任务身份表：先从历史工具结果登记（任务 id → 命令/子会话名），卡片参数区才能补上「在等什么」——
   // 消息窗口化按需渲染，不能依赖「启动卡先渲染、等待卡后渲染」的先后顺序兜底
   rememberHistoryTaskLabels(session.messages ?? [])
   resetMsgWindow()

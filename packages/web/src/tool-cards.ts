@@ -161,12 +161,19 @@ function clipTitleValue(v: string): string {
   return `${v.slice(0, head)}…${v.slice(-(keep - head))}`
 }
 
+/** 卡片头部的标题参数键：titleParams 去掉 taskIdParam 声明的任务 id 参数——任务 id 本身无信息量
+ *  （`t`/`s`/`j` + 8 位随机），由参数区任务身份块单独呈现（见 taskArgsBlock），不挤占卡片头。 */
+function headParamKeys(meta: NonNullable<ToolInfo["card"]> | undefined): string[] {
+  return (meta?.titleParams ?? []).filter((k) => k !== meta?.taskIdParam)
+}
+
 /** 标题参数拼接：titleParams 声明的参数值拼入标题——单参数仅显示值（`· src/main.ts`，省略 `key=` 前缀），
  *  多参数 `key=value`（`·` 连接）。超长单值智能截断（悬浮见全文），标题参数始终入头部（不再降级参数气泡）。 */
 function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Record<string, unknown> | null): TitleSuffixInfo | null {
-  if (!meta?.titleParams?.length || !args) return null
+  const keys = headParamKeys(meta)
+  if (!keys.length || !args) return null
   const present: Array<{ k: string; raw: string }> = []
-  for (const k of meta.titleParams) {
+  for (const k of keys) {
     const v = args[k]
     if (v === undefined || v === null || v === "") continue
     present.push({ k, raw: String(v) })
@@ -182,30 +189,38 @@ function titleSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Reco
 }
 
 /** 标题后缀统一入口：subsession_run 专用（头部列出各子会话名，带模型路由后缀，`+` 连接、允许多行）；
- *  声明了 taskIdParam 的工具（bg_task）在 titleParams 之后补上任务身份（等待中也能看出在等什么）；
- *  其余按 titleParams 声明。 */
+ *  其余按 titleParams 声明（任务 id 参数除外——由参数区任务身份块呈现，见 taskArgsBlock）。 */
 function titleSuffixInfo(name: string, args: Record<string, unknown> | null): TitleSuffixInfo | null {
   if (isSubSessionRun(name)) {
     const labels = subSessionItems(args).map((b) => b.label)
     return labels.length ? { text: `· ${labels.join(" + ")}`, wrap: true } : null
   }
-  const meta = metaOf(name)
-  const base = titleSuffix(meta, args)
-  const task = taskIdSuffix(meta, args)
-  if (!task) return base
-  const prefix = base ? `${base.text} · ` : "· "
-  const prefixFull = base ? `${base.full ?? base.text} · ` : "· "
-  const text = `${prefix}${clipTitleValue(task)}`
-  const full = `${prefixFull}${task}`
-  return { text, full: full === text ? undefined : full }
+  return titleSuffix(metaOf(name), args)
 }
 
-/** 任务身份补全（card.taskIdParam 声明的参数）：参数值为后台任务 id 时查身份表补描述——
- *  任务身份由前序工具结果登记（见 task-labels.ts），未知则不加（回退为纯 id）。 */
-function taskIdSuffix(meta: NonNullable<ToolInfo["card"]> | undefined, args: Record<string, unknown> | null): string | null {
+/** 参数区「任务身份」块（card.taskIdParam 声明的参数，如 bg_task 的 `id`）：任务 id 本身无信息量、
+ *  等待中的卡片尚无输出——分两行给出「在等什么」：首行「后台任务 + id」（等宽小字、不折行，任务定位用），
+ *  次行身份文本（命令任务 `命令 <命令首行>`、子会话运行 `子会话「名」`，见 task-labels.ts，长内容自己换行）。
+ *  身份未登记时只显示首行（不凭空补），登记后完成态参数区重渲染时自动补全。 */
+function taskArgsBlock(meta: NonNullable<ToolInfo["card"]> | undefined, obj: Record<string, unknown> | null): HTMLElement | null {
   const key = meta?.taskIdParam
-  const id = key && args ? args[key] : undefined
-  return typeof id === "string" && id ? taskLabel(id) ?? null : null
+  const id = key && obj ? obj[key] : undefined
+  if (typeof id !== "string" || !id) return null
+  const block = el("div", "tool-task")
+  const metaRow = el("div", "tool-task-meta")
+  metaRow.append(el("span", "tool-task-key", "后台任务"), el("code", "tool-task-id", id))
+  block.appendChild(metaRow)
+  const label = taskLabel(id)
+  if (label) block.appendChild(el("div", "tool-task-name", label))
+  return block
+}
+
+/** 参数区主体与任务身份块组合：有身份块时以容器包裹（块型参数元素如 `<pre>` 不能直接插入子元素）。 */
+function withTaskArgs(body: HTMLElement, task: HTMLElement | null): HTMLElement {
+  if (!task) return body
+  const wrap = el("div")
+  wrap.append(task, body)
+  return wrap
 }
 
 /** 头部图标：running 为信号灯圆点（与标题栏信号灯同款闪烁，样式见 chat.css `.tool-ico.running`）、
@@ -329,11 +344,15 @@ function editsArgsBlock(list: EditPair[]): HTMLElement {
   return wrap
 }
 
-/** code/edits 模式共用：其余参数附注（codeField 与已入标题的参数不重复；超长未入标题的标题参数降级为键值行气泡）。
+/** code/edits 模式共用：其余参数附注（codeField、任务 id 参数与已入标题的参数不重复——任务身份由参数区身份块给出）。
  *  扁平标量以键值行展示。返回 null 表示无其余参数。 */
 function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["card"]>, titleInHead: boolean): HTMLElement | null {
+  const headKeys = titleInHead ? headParamKeys(meta) : []
   const rest: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(obj)) if (k !== meta.codeField && !(titleInHead && meta.titleParams?.includes(k))) rest[k] = v
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === meta.codeField || k === meta.taskIdParam || headKeys.includes(k)) continue
+    rest[k] = v
+  }
   if (!Object.keys(rest).length) return null
   return Object.values(rest).every(isScalar) ? kvArgsBlock(rest) : el("div", "tool-rest", JSON.stringify(rest, null, 2))
 }
@@ -341,7 +360,8 @@ function restArgsNote(obj: Record<string, unknown>, meta: NonNullable<ToolInfo["
 /** 参数区渲染：按服务端 card 声明——"none" 不展示；"code" 渲染 codeField 为代码块；"edits" 渲染 codeField 数组为旧/新对比块
  *  （其余参数键值行/JSON 附注；edit 工具无声明时按参数形态内建兜底同样渲染对比块）；"kv" 强制键值行；"json" 强制完整 JSON 高亮（不省略标题参数）；
  *  缺省自适应（扁平标量→键值行，嵌套→JSON 高亮）。
- *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；超长参数按阈值折叠。
+ *  标题参数（titleParams）已入卡片标题时参数区不再重复（显式 "json" 声明除外）；任务 id 参数（taskIdParam）不入卡片头，
+ *  由参数区身份块单独呈现（"json" 声明除外——完整 JSON 已含 id）；超长参数按阈值折叠。
  *  fold=false（执行/审批等待期实时卡）超长参数不折叠、完整直显，结果到达时经 renderToolArgsDone 收敛。
  *  返回 null 表示无参数区。
  *  文件展示方式（嵌入/弹窗）不影响参数区与输出——只作用于下方产物文件卡（见 fileBlockAsLink）。 */
@@ -358,6 +378,8 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
   if (obj && !Object.keys(obj).length) return null
   // 标题参数是否已入头部：是则参数区省略该键；否则（超长降级）以参数气泡形式在参数区展示全文
   const titleInHead = obj ? titleSuffixInfo(name, obj) !== null : false
+  // 任务身份块置于参数区首位——等待中的卡片尚无输出，先看清在等哪个任务
+  const task = meta?.args === "json" ? null : taskArgsBlock(meta, obj)
   if (meta?.args === "code" && obj && meta.codeField) {
     const codeText = obj[meta.codeField]
     if (typeof codeText === "string" && codeText.trim()) {
@@ -365,7 +387,7 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
       wrap.appendChild(codeBlock(meta.codeLang ?? "", codeText))
       const note = restArgsNote(obj, meta, titleInHead)
       if (note) wrap.appendChild(note)
-      return foldIfNeeded(wrap, codeText.length)
+      return foldIfNeeded(withTaskArgs(wrap, task), codeText.length)
     }
   }
   // edits 形态内建兜底：edit 工具 card 声明不可用（工具清单拉取失败/旧服务端未声明）时
@@ -384,26 +406,30 @@ function toolArgsBlock(name: string, args: string, meta?: NonNullable<ToolInfo["
         wrap.appendChild(kvArgsBlock(Object.fromEntries(Object.entries(obj).filter(([k]) => k !== editsField))))
       }
       const chars = list.reduce((n, e) => n + (e.old_string?.length ?? 0) + (e.pattern?.length ?? 0) + e.new_string.length, 0)
-      return foldIfNeeded(wrap, chars)
+      return foldIfNeeded(withTaskArgs(wrap, task), chars)
     }
     /* 形态不符（非 edits 数组）：回退自适应渲染 */
   }
-  // 已入标题的参数不在参数区重复（显式 "json" 声明除外——强制完整 JSON 保真展示）
+  // 已入标题的参数与任务 id 不在参数区重复（taskIdParam 由身份块呈现；显式 "json" 声明除外——强制完整 JSON 保真展示）
   let shown = obj
-  if (shown && meta?.args !== "json" && meta?.titleParams?.length && titleInHead) {
-    shown = Object.fromEntries(Object.entries(shown).filter(([k]) => !meta.titleParams!.includes(k)))
+  if (shown && meta?.args !== "json") {
+    const drop = new Set<string>(headParamKeys(titleInHead ? meta : undefined))
+    if (meta?.taskIdParam) drop.add(meta.taskIdParam)
+    if (drop.size) shown = Object.fromEntries(Object.entries(shown).filter(([k]) => !drop.has(k)))
   }
-  if (shown && !Object.keys(shown).length) return null
+  const rest = shown && Object.keys(shown).length ? shown : null
   // 键值行：显式 "kv" 声明，或缺省自适应（扁平标量参数）
-  if (shown && (meta?.args === "kv" || (meta?.args !== "json" && Object.values(shown).every(isScalar)))) {
-    return foldIfNeeded(kvArgsBlock(shown), JSON.stringify(shown).length)
+  if (rest && (meta?.args === "kv" || (meta?.args !== "json" && Object.values(rest).every(isScalar)))) {
+    return foldIfNeeded(withTaskArgs(kvArgsBlock(rest), task), JSON.stringify(rest).length)
   }
   // JSON 语法高亮：嵌套结构 / 显式 "json" / 非 JSON 纯文本
-  const text = shown ? JSON.stringify(shown, null, 2) : args
+  const text = rest ? JSON.stringify(rest, null, 2) : obj === null ? args : ""
+  // 无其余参数：仅有任务身份块时返回它（否则无参数区）
+  if (!text) return task ? foldIfNeeded(task, 0) : null
   const pre = el("pre")
   pre.className = "tool-code"
   pre.appendChild(highlightedCode("json", text))
-  return foldIfNeeded(pre, text.length)
+  return foldIfNeeded(withTaskArgs(pre, task), text.length)
 }
 
 /** 完成态参数区重渲染（结果到达 appendToolResult 调用）：执行/审批等待期完整直显的超长参数此时收敛为

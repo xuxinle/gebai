@@ -1,11 +1,11 @@
 /**
- * 后台任务身份表（id → 身份描述）：工具卡片标题里只有任务 id 时补上「在等什么」。
+ * 后台任务身份表（id → 身份描述）：工具参数里只有任务 id 时补上「在等什么」。
  *
  * 任务 id 本身无信息量（`t`/`s` + 8 位随机），身份只存在于服务端文本里——后台启动结果
  * （`sh` 的 `async:true`、`subsession_run` 的 `async:true`）与任务状态行（服务端
  * `shTaskLine`/`subSessionLine`，见 packages/server/src/core/tools/{exec,agent}.ts）。
  * 工具结果到达（appendToolResult）与历史加载（loadMessages）时把 id → 身份记入本表，
- * 标题渲染（toolHead）查表补全：**等待中的卡片尚无输出，也一眼看出在等什么**；
+ * 参数区任务身份块（taskArgsBlock）查表补全：**等待中的卡片尚无输出，也一眼看出在等什么**；
  * 历史回放的卡片同样受益（登记在渲染之前完成，窗口化按需渲染不影响）。
  */
 
