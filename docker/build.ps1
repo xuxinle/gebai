@@ -14,6 +14,7 @@
 #   pwsh -File docker/build.ps1 -BaseImage registry.internal/ubuntu:24.04 -AptMirror http://mirror.internal/ubuntu
 #   pwsh -File docker/build.ps1 -User acme -Uid 2001 -DataDir /srv/gebai -Port 8080 -Tz Asia/Shanghai
 #   pwsh -File docker/build.ps1 -Label owner=acme -ExtraPackages vim,less -NoHealthcheck
+#   pwsh -File docker/build.ps1 -Network host                    # 构建容器走宿主网络（大文件传输被 reset 时用）
 #   pwsh -File docker/build.ps1 -Push -Tag registry.example.com/gebai:0.1.0
 #
 # 定制体系见 docker/README.md：一份 JSON 档案描述能力层（子Agent/工具/资产/vendor）、系统层（apt 包组）
@@ -26,6 +27,7 @@ param(
   [string]$CvModelBase = "",
   [string]$Target = "",
   [string]$Platform = "",
+  [string]$Network = "",
   [string]$Profile = "",
   [string[]]$Set = @(),
   [switch]$PrintPlan,
@@ -280,6 +282,9 @@ try {
   if ($Target) { $buildArgs += @("--build-arg", "BUN_TARGET=$Target") }
   if ($CvModelBase) { $buildArgs += @("--build-arg", "CV_MODEL_BASE=$CvModelBase") }
   if ($Platform) { $buildArgs += @("--platform", $Platform) }
+  # 构建容器网络（默认 bridge）：内置 bridge 栈在大文件传输上可能被对端 reset（实测拉 apt
+  # universe 索引 19MB 必复现，换多个源无效而宿主 curl 同 URL 稳定）——用 -Network host 走宿主网络栈。
+  if ($Network) { $buildArgs += @("--network", $Network) }
   if ($NoCache) { $buildArgs += "--no-cache" }
 
   # buildx 优先（同时支持 --platform/--push）；未装则退回 docker build

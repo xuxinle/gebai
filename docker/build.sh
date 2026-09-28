@@ -14,6 +14,7 @@
 #   docker/build.sh --label owner=acme --label tier=prod --extra-packages vim,less --no-healthcheck
 #   docker/build.sh --with-browser --browser-dir /srv/pw-browsers   # 离线：用预置浏览器目录（零网络）
 #   docker/build.sh --with-browser --browser-source download --browser-download-host http://mirror.internal/playwright
+#   docker/build.sh --network host                     # 构建容器走宿主网络（大文件传输被 reset 时用）
 #   docker/build.sh --export-browsers docker/browsers      # 导出浏览器预置目录（从宿主缓存）
 #   docker/build.sh --export-browsers docker/browsers --from-image gebai:0.1.0   # 从已构建镜像导出（含依赖清单）
 #   docker/build.sh --with-browser --no-browser-deps       # 跳过 chromium 系统依赖（基础镜像已含）
@@ -44,6 +45,7 @@ WITH_CV=1
 CV_MODEL_BASE=""
 BUN_TARGET=""
 PLATFORM=""
+NETWORK=""
 NO_CACHE=0
 OUTPUT=""
 SMOKE=0
@@ -105,6 +107,7 @@ usage() {
       --no-healthcheck       不写入 HEALTHCHECK（改用不带探针的阶段构建）
       --target <bun-target>  bun 编译目标（如 bun-linux-arm64；缺省按构建机架构）
       --platform <plat>      docker 目标平台（linux/amd64、linux/arm64）
+      --network <模式>       构建容器网络（缺省 bridge；大文件传输被 reset 时用 --network host 走宿主网络栈）
       --no-cache             不使用构建缓存
       --push / --load        buildx 输出方式（缺省 --load 载入本机镜像库）
       --smoke                构建后起容器跑冒烟自检（健康检查 + 隔离能力探测）并清理
@@ -155,6 +158,7 @@ while [ $# -gt 0 ]; do
     --cv-model-base) CV_MODEL_BASE="${2:?--cv-model-base 需要值}"; shift 2 ;;
     --target) BUN_TARGET="${2:?--target 需要值}"; shift 2 ;;
     --platform) PLATFORM="${2:?--platform 需要值}"; shift 2 ;;
+    --network) NETWORK="${2:?--network 需要值}"; shift 2 ;;
     --no-cache) NO_CACHE=1; shift ;;
     --push) OUTPUT="--push"; shift ;;
     --load) OUTPUT="--load"; shift ;;
@@ -366,12 +370,16 @@ BUILD_ARGS=(
 [ -n "${BUN_TARGET}" ] && BUILD_ARGS+=(--build-arg "BUN_TARGET=${BUN_TARGET}")
 [ -n "${CV_MODEL_BASE}" ] && BUILD_ARGS+=(--build-arg "CV_MODEL_BASE=${CV_MODEL_BASE}")
 [ -n "${PLATFORM}" ] && BUILD_ARGS+=(--platform "${PLATFORM}")
+# 构建容器网络（默认 bridge）：内置的 bridge 栈在大文件传输上可能被对端 reset（实测拉 apt
+# universe 索引 19MB 必复现，换多个源无效，而宿主 curl 同 URL 稳定）——这种环境下用
+# `--network host` 让构建走宿主网络栈。
+[ -n "${NETWORK}" ] && BUILD_ARGS+=(--network "${NETWORK}")
 [ "${NO_CACHE}" = "1" ] && BUILD_ARGS+=(--no-cache)
 [ -n "${OUTPUT}" ] && BUILD_ARGS+=("${OUTPUT}")
 
 echo "==> 构建镜像 ${IMAGE_TAG}"
 echo "    上下文：${REPO_ROOT}（.dockerignore 已排除 node_modules/dist/resources/infer/vendor 等）"
-echo "    参数：WITH_CV=${WITH_CV} WITH_BROWSER=${WITH_BROWSER}${BUN_TARGET:+ BUN_TARGET=${BUN_TARGET}}${PLATFORM:+ PLATFORM=${PLATFORM}}"
+echo "    参数：WITH_CV=${WITH_CV} WITH_BROWSER=${WITH_BROWSER}${BUN_TARGET:+ BUN_TARGET=${BUN_TARGET}}${PLATFORM:+ PLATFORM=${PLATFORM}}${NETWORK:+ NETWORK=${NETWORK}}"
 echo "    裁剪：档案=${PROFILE_FILE:-全量（未指定）}${SETS:+ 覆盖=${SETS[*]}}"
 [ -n "${TARGET_STAGE}" ] && echo "    阶段：${TARGET_STAGE}（无 HEALTHCHECK）"
 

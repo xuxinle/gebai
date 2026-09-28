@@ -42,9 +42,11 @@ docker run -d --name gebai -p 3000:3000 \
 | `WITH_CV`（`--no-cv`） | `1` | 内嵌本地 CV（PP-OCR 模型 + onnxruntime-web 运行时）；`=0` 等价 `assets.cv=0`，本地 OCR/视觉定位不可用 |
 | `CV_MODEL_BASE`（`--cv-model-base`） | hf-mirror 的 RapidOCR 托管 | 内网/离线改自备镜像 |
 | `WITH_BROWSER`（`--with-browser`） | `0` | 安装 playwright chromium（浏览器类子Agent 用）；`=1` 等价 `assets.browser=1 system.chromium=1`，镜像显著增大 |
-| `PLAYWRIGHT_VERSION` | `1.62.1` | 须与仓库依赖一致，否则运行时版本不匹配 |
+| `--network <模式>`（`--network`） | 空（docker 默认 bridge） | 构建容器网络。内置 bridge 栈在**大文件传输**上可能被对端 reset（实测拉 apt `universe` 索引 19MB 必复现，换 aliyun/tuna/huawei 多个源无效，而宿主 `curl` 同一 URL 稳定）——这种环境下用 `--network host` 让构建走宿主网络栈 |
 | `BUN_TARGET`（`--target`） | 空（按构建机架构） | bun 编译目标（如 `bun-linux-arm64`；与 `--target` 阶段选择不同义） |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 空 | Docker 预定义代理 build-arg（客户端默认从宿主环境透传；仅构建阶段生效） |
+
+浏览器版本不通过参数指定：由仓库依赖（`node_modules/playwright-core/browsers.json`）唯一确定，避免与运行时所用模块漂移。
 
 **架构限制**：二进制内嵌 `@resvg/resvg-js`（平台原生模块），跨架构编译会嵌错平台 —— 本镜像只支持
 「构建机架构 = 目标架构」。`linux/arm64` 请在 arm64 机器上构建（或在该架构的 CI runner 上）。
