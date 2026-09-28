@@ -180,7 +180,7 @@ if [ -n "${PROFILE}" ]; then
     PROFILE_FILE="docker/profiles/${PROFILE}.json"
   else
     echo "错误：裁剪档案不存在：${PROFILE}" >&2
-    echo "      预置档案：$(ls docker/profiles/*.json 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.json$//' | tr '\n' ' ')" >&2
+    echo "      预置档案：$(cd docker/profiles 2>/dev/null && for f in *.json; do printf '%s ' "${f%.json}"; done)" >&2
     exit 1
   fi
   PROFILE_NAME="$(basename "${PROFILE_FILE}" .json)"
@@ -226,17 +226,19 @@ fi
 
 # ── 运行时预置就位：Docker 只能 COPY 构建上下文内的文件 ──
 # 目标固定为 docker/bun 与 docker/node（档案缺省 bun_dir/node_dir）。
-for pair in "BUN_SRC_DIR:docker/bun:bun" "NODE_SRC_DIR:docker/node:node"; do
-  var="${pair%%:*}"; rest="${pair#*:}"; target="${rest%%:*}"; bin="${rest##*:}"
-  src="${!var}"
-  [ -n "${src}" ] || continue
-  [ -d "${src}" ] || { echo "错误：--${bin}-dir 目录不存在：${src}" >&2; exit 1; }
+# 显式调用而非间接展开（${!var}）：后者 shellcheck 无法追踪使用点，会误报“变量未使用”。
+locate_preset() {
+  src="$1"; target="$2"; label="$3"
+  [ -n "${src}" ] || return 0
+  [ -d "${src}" ] || { echo "错误：--${label}-dir 目录不存在：${src}" >&2; exit 1; }
   if [ "$(cd "${src}" && pwd)" != "${REPO_ROOT}/${target}" ]; then
-    echo "==> 就位 ${bin} 预置：${src} → ${target}"
+    echo "==> 就位 ${label} 预置：${src} → ${target}"
     mkdir -p "${target}"
     cp -a "${src}/." "${target}/"
   fi
-done
+}
+locate_preset "${BUN_SRC_DIR}" docker/bun bun
+locate_preset "${NODE_SRC_DIR}" docker/node node
 
 # ── 浏览器预置目录就位：Docker 只能 COPY 构建上下文内的文件，故把源目录放到约定位置 ──
 # 目标固定为 docker/browsers（档案缺省 browser_dir）。
