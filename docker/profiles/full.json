@@ -1,6 +1,6 @@
 {
   "name": "full",
-  "description": "全量（缺省）：全部子Agent、全部内嵌资产与前端引擎、全部系统能力",
+  "description": "全量（缺省）：全部子Agent、全部内嵌资产与前端引擎、全部系统能力、镜像本体取默认口径",
   "assets": {
     "web_ui": true,
     "cv": true,
@@ -20,5 +20,23 @@
     "tzdata": true,
     "procps": true,
     "chromium": false
+  },
+  "image": {
+    "base": "ubuntu:24.04",
+    "bun_image": "oven/bun:1.4.2",
+    "user": "gebai",
+    "uid": 1000,
+    "gid": 1000,
+    "home": "/home/gebai",
+    "shell": "/bin/bash",
+    "run_as_root": false,
+    "data_dir": "/data",
+    "mode": "server",
+    "host": "0.0.0.0",
+    "port": 3000,
+    "tz": "UTC",
+    "extra_packages": [],
+    "labels": {},
+    "healthcheck": { "path": "/api/health" }
   }
 }

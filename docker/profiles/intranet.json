@@ -1,0 +1,34 @@
+{
+  "name": "intranet",
+  "description": "内网/离线部署：自备基础镜像与 apt/npm 源、构建期代理，标签留痕；能力面取全量",
+  "image": {
+    "base": "registry.internal.example.com/base/ubuntu:24.04",
+    "bun_image": "registry.internal.example.com/base/bun:1.4.2",
+    "apt_mirror": "http://mirror.internal.example.com/ubuntu",
+    "npm_registry": "http://npm.internal.example.com/",
+    "proxy": "http://proxy.internal.example.com:3128",
+    "tz": "Asia/Shanghai",
+    "extra_packages": ["less", "vim-tiny"],
+    "labels": {
+      "org.opencontainers.image.vendor": "Example Corp",
+      "com.example.env": "intranet"
+    }
+  },
+  "assets": {
+    "web_ui": true,
+    "cv": false,
+    "d2": true,
+    "analyzer": true,
+    "browser": false,
+    "ripgrep": true
+  },
+  "system": {
+    "git": true,
+    "python": true,
+    "bubblewrap": true,
+    "fonts": true,
+    "tzdata": true,
+    "procps": true,
+    "chromium": false
+  }
+}

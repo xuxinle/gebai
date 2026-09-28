@@ -2,26 +2,35 @@
 #
 #   docker compose -f docker/compose.yaml up -d --build
 #
-# 构建参数见 docker/README.md（默认不装浏览器、内嵌本地 CV）。
+# 裁剪与镜像本体定制见 docker/README.md：一份 JSON 档案（docker/profiles/*.json）同时声明能力层
+# （子Agent/工具/资产/vendor）、系统层（apt 包组）与镜像本体（基础镜像/用户/数据根/端口/时区/标签…）。
+# 档案以 base64 经 BUILD_PROFILE_B64 传入——compose 里手写 base64 不便，用档案建议直接走
+# `docker/build.sh --profile <名>`（产出本 compose 可用的镜像标签），再 `docker compose up -d`。
 services:
   gebai:
     build:
       context: ..
       dockerfile: Dockerfile
-      # 构建参数（需要时打开，键值须为字符串）；裁剪档案与可裁剪矩阵见 docker/README.md：
-      #   BUILD_SET: "assets.d2=0 web.vendor=monaco"   # 细粒度裁剪覆盖（空格分隔 键=值，优先于档案）
+      # 构建参数（需要时打开，键值须为字符串）：
+      #   BUILD_SET: "assets.d2=0 web.vendor=monaco"   # 细粒度裁剪/定制覆盖（空格分隔 键=值，优先于档案）
+      #   BASE_IMAGE: "registry.internal/ubuntu:24.04" # 基础镜像（含 bun 来源镜像同理：BUN_IMAGE）
+      #   APT_MIRROR: "http://mirror.internal/ubuntu"  # 内网 apt 源
+      #   NPM_REGISTRY: "http://npm.internal/"         # 内网 npm 源（bun install）
+      #   IMAGE_USER / IMAGE_UID / IMAGE_GID / IMAGE_DATA_DIR / IMAGE_PORT / IMAGE_TZ
+      #                                                # 运行用户、数据根、端口、时区（等价 BUILD_SET 的 image.*）
       #   WITH_BROWSER: "1"     # 装 playwright chromium（镜像显著增大）
       #   WITH_CV: "0"          # 不内嵌本地 CV（等价 assets.cv=0，本地 OCR 不可用）
       #   CV_MODEL_BASE: "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4"
-      # 预置档案（docker/profiles/*.json）以 base64 经 BUILD_PROFILE_B64 传入——compose 里手写 base64 不便，
-      # 用档案建议直接走 docker/build.sh --profile <名>（同样产出本 compose 可用的镜像标签）。
+      # 额外镜像标签请用 Dockerfile 之外的 `docker build --label`（本文件无法表达）；改档案更省事。
     image: gebai:0.1.0
     container_name: gebai
     restart: unless-stopped
     ports:
+      # 与镜像的 image.port 一致（缺省 3000）
       - "3000:3000"
     environment:
       # 服务模式与数据根已固化在镜像里（GEBAI_MODE=server / GEBAI_HOST=0.0.0.0 / GEBAI_HOME=/data）
+      # 时区同样已固化（image.tz，缺省 UTC）——需要不同时区时在此覆盖
       TZ: Asia/Shanghai
       # 模型接入（按需替换；也可写进卷内 /data/.env）
       GEBAI_LLM_API_KEY: "${GEBAI_LLM_API_KEY:-}"
@@ -32,13 +41,16 @@ services:
       # 多实例共用一个数据卷时避免重复调度（本示例单实例，无需设置）
       # GEBAI_SCHEDULER: "off"
     volumes:
+      # 挂载点须与镜像的数据根一致（image.data_dir，缺省 /data）
       - gebai-data:/data
     # 需要脚本文件系统隔离（bubblewrap）时打开：实测默认 seccomp 会拦 user namespace
     # （--cap-add SYS_ADMIN 不够，bwrap 仍会卡在 pivot_root），seccomp=unconfined 实测可用
     # security_opt:
     #   - seccomp:unconfined
+    # 健康检查：镜像自带（探针 /usr/local/bin/gebai-healthcheck，跟随 GEBAI_PORT 与
+    # GEBAI_HEALTHCHECK_PATH）。这里覆盖间隔/重试即可——HEALTHCHECK 的选项在 Dockerfile 解析阶段固定、
+    # 构建参数注入不了，运行期覆盖是唯一途径。
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
       interval: 30s
       timeout: 5s
       start_period: 20s

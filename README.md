@@ -114,14 +114,16 @@ GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build   # 仅打包指�
                                                                 # Bundle only the listed sub-agents
 docker/build.sh --profile minimal -t gebai:minimal             # 镜像裁剪：档案一次裁掉能力层/前端资源层/系统层
                                                                 # Container image trimming via a profile
-docker/build.sh --print-plan --profile code                    # 只打印裁剪计划与报告，不构建
-                                                                # Print the trimming plan only
+docker/build.sh --user acme --uid 2001 --data-dir /srv/gebai   # 镜像本体定制：运行用户/数据根/端口/时区/标签/源
+  --port 8080 --tz Asia/Shanghai --label owner=acme            # Image customisation (user/data dir/port/tz/labels)
+docker/build.sh --print-plan --profile code                    # 只打印裁剪与定制计划，不构建
+                                                                # Print the trimming/customisation plan only
 ```
 
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
 - 纯服务端 / Server-only: `packages/desktop/dist/gebai.exe`（Bun `--compile` 单文件，零运行时依赖——Bun 已内嵌；`--server` 切服务模式）
-- 容器镜像 / Container image: `docker/build.sh`（Windows 用 `pwsh -File docker/build.ps1`）——Ubuntu 24.04 基础镜像，构建阶段完成上述构建链后 `--compile` 出 Linux 单文件，运行阶段不含 node_modules 与 bun；用法、构建参数、隔离前提与能力边界见 `docker/README.md`
+- 容器镜像 / Container image: `docker/build.sh`（Windows 用 `pwsh -File docker/build.ps1`）——多阶段构建，构建阶段完成上述构建链后 `--compile` 出 Linux 单文件，运行阶段不含 node_modules 与 bun；**能力、前端资源、系统包与镜像本体（基础镜像/用户/数据根/端口/时区/标签/源）均可由一份 JSON 档案（`--profile`）一次声明**，用法与矩阵见 `docker/README.md`
 
 ### 服务模式（多用户）| Server Mode (Multi-user)
 
