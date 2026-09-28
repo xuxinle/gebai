@@ -1,0 +1,31 @@
+{
+  "name": "code",
+  "description": "编码场景：code/explore 子Agent + 文件工作台（Monaco 编辑器、终端、符号提取）+ 语法分析与内置 ripgrep，去掉本地识别、后端 D2 与浏览器",
+  "sub_agents": {
+    "enable": ["code", "explore"],
+    "preload": ["code"]
+  },
+  "tools": {
+    "disable": ["show", "fetch_url"]
+  },
+  "assets": {
+    "web_ui": true,
+    "cv": false,
+    "d2": false,
+    "analyzer": true,
+    "browser": false,
+    "ripgrep": true
+  },
+  "web": {
+    "vendor": ["monaco", "xterm", "tree_sitter"]
+  },
+  "system": {
+    "git": true,
+    "python": true,
+    "bubblewrap": true,
+    "fonts": true,
+    "tzdata": true,
+    "procps": true,
+    "chromium": false
+  }
+}

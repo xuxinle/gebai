@@ -568,14 +568,26 @@ type D2Embedded = { version: string; files: Record<string, string> }
 
 let d2EmbeddedLoad: Promise<D2Embedded> | null = null
 
+/** 载入内嵌产物：区分「本构建未内嵌」（裁剪，版本为空）与「产物缺失/损坏」——两者对使用者的含义不同。 */
+async function loadEmbeddedD2(): Promise<D2Embedded> {
+  try {
+    const m = await import("../d2js.embedded.generated.json")
+    const embedded = m.default as D2Embedded
+    if (!embedded?.version) throw new Error("本构建未内嵌 D2.js（构建期裁剪 GEBAI_BUILD_D2=0；前端 D2 渲染走 web 产物 vendor/d2js）")
+    return embedded
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes("未内嵌")) throw new Error(`D2 后端渲染不可用：${msg}`)
+    throw new Error(`D2 后端渲染不可用：内嵌 D2.js 产物缺失或损坏（请先运行 bun run scripts/build-d2js.ts；${msg}）`)
+  }
+}
+
 function loadD2Embedded(): Promise<D2Embedded> {
   if (!d2EmbeddedLoad) {
-    d2EmbeddedLoad = import("../d2js.embedded.generated.json")
-      .then((m) => m.default as D2Embedded)
-      .catch((err) => {
-        d2EmbeddedLoad = null
-        throw new Error(`D2 后端渲染不可用：内嵌 D2.js 产物缺失或损坏（请先运行 bun run scripts/build-d2js.ts；${err instanceof Error ? err.message : String(err)}）`)
-      })
+    d2EmbeddedLoad = loadEmbeddedD2().catch((err) => {
+      d2EmbeddedLoad = null
+      throw err
+    })
   }
   return d2EmbeddedLoad
 }

@@ -1,0 +1,27 @@
+{
+  "name": "minimal",
+  "description": "最小服务面：纯 REST/WebSocket 接入（无 Web UI、无本地识别、无后端图表、无语法分析、无浏览器、无内置 ripgrep）",
+  "sub_agents": {
+    "enable": ["task", "feishu_group", "feishu_docs"]
+  },
+  "assets": {
+    "web_ui": false,
+    "cv": false,
+    "d2": false,
+    "analyzer": false,
+    "browser": false,
+    "ripgrep": false
+  },
+  "web": {
+    "vendor": []
+  },
+  "system": {
+    "git": false,
+    "python": false,
+    "bubblewrap": false,
+    "fonts": false,
+    "tzdata": true,
+    "procps": false,
+    "chromium": false
+  }
+}

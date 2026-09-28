@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
 import { agentsSrcPath } from "./agents-paths"
+import { buildFlag } from "./build-flags"
 import { join } from "node:path"
 
 import { LANG_WASM } from "../../agents/src/core/analyzer/analyzer"
@@ -20,6 +21,12 @@ import { LANG_WASM } from "../../agents/src/core/analyzer/analyzer"
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const wasmDir = join(root, "node_modules", "tree-sitter-wasms", "out")
 const outFile = agentsSrcPath("core", "analyzer", "analyzer-wasm.embedded.generated.json")
+
+if (!buildFlag("GEBAI_BUILD_ANALYZER")) {
+  writeFileIfChanged(outFile, JSON.stringify({ version: "", gzip: true, files: {} }))
+  console.log(`[build-analyzer-wasm] GEBAI_BUILD_ANALYZER=0：写空清单（二进制形态的语法解析回退不可用）-> ${outFile}`)
+  process.exit(0)
+}
 
 if (!existsSync(wasmDir)) {
   console.warn("[build-analyzer-wasm] 未找到 tree-sitter-wasms（analyze/search_symbols 的二进制回退将不可用），跳过生成")

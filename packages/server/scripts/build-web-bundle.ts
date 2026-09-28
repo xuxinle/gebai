@@ -9,14 +9,26 @@
  *
  * 幂等：由 server/desktop 构建前置调用；产物已 gitignore。
  */
-import { readdirSync, readFileSync, existsSync } from "node:fs"
+import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
+import { buildFlag } from "./build-flags"
 
 const webDist = join(import.meta.dirname, "..", "..", "web", "dist")
 const outFile = join(import.meta.dirname, "..", "src", "core", "web.bundle.generated.ts")
 
+/** 空内嵌清单（裁剪或产物缺失）：文件必须存在——static.ts 静态 require 该模块。 */
+function writeEmpty(reason: string): void {
+  writeFileSync(outFile, `// 由 scripts/build-web-bundle.ts 生成（${reason}）\nexport const webBundle: Record<string, string> = {}\n`)
+  console.log(`[build-web] ${reason}：写空内嵌清单 -> ${outFile}`)
+}
+
+if (!buildFlag("GEBAI_BUILD_WEB_UI")) {
+  writeEmpty("GEBAI_BUILD_WEB_UI=0（未内嵌 Web UI）")
+  process.exit(0)
+}
+
 if (!existsSync(webDist)) {
-  console.warn("[build-web] web/dist 不存在，跳过 Web UI 内嵌（桌面端将无法提供 UI）")
+  writeEmpty("web/dist 不存在")
   process.exit(0)
 }
 

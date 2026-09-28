@@ -29,12 +29,16 @@ docker run -d --name gebai -p 3000:3000 \
 | 参数（脚本开关） | 默认 | 说明 |
 |---|---|---|
 | `UBUNTU_VERSION` | `24.04` | 基础镜像版本（构建阶段与运行阶段同版本） |
-| `BUN_VERSION` | `1.3.14` | 取 `oven/bun` 里的 bun 可执行文件用于构建；**最终镜像不含 bun** |
-| `WITH_CV`（`--no-cv`） | `1` | 内嵌本地 CV（PP-OCR 模型 + onnxruntime-web 运行时）；关闭后本地 OCR/视觉定位不可用 |
+| `BUN_VERSION` | `1.4.2` | 取 `oven/bun` 里的 bun 可执行文件用于构建；**最终镜像不含 bun**。须能解析仓库的 `bun.lock`（不兼容时自动退回无锁定安装并告警，可显式提高该版本以锁版本） |
+| `--profile <名\|路径>`（`BUILD_PROFILE_B64`） | 空（全量） | 裁剪档案（见「裁剪」）；预置档案在 `docker/profiles/` |
+| `--set <键=值>`（`BUILD_SET`） | 空 | 裁剪档案的字段级覆盖（可多次；CLI 优先于档案） |
+| `WITH_CV`（`--no-cv`） | `1` | 内嵌本地 CV（PP-OCR 模型 + onnxruntime-web 运行时）；`=0` 等价 `assets.cv=0`，本地 OCR/视觉定位不可用 |
 | `CV_MODEL_BASE`（`--cv-model-base`） | hf-mirror 的 RapidOCR 托管 | 内网/离线改自备镜像 |
-| `WITH_BROWSER`（`--with-browser`） | `0` | 安装 playwright chromium（浏览器类子Agent 用）；镜像显著增大 |
+| `WITH_BROWSER`（`--with-browser`） | `0` | 安装 playwright chromium（浏览器类子Agent 用）；`=1` 等价 `assets.browser=1 system.chromium=1`，镜像显著增大 |
 | `PLAYWRIGHT_VERSION` | `1.62.1` | 须与仓库依赖一致，否则运行时版本不匹配 |
 | `BUN_TARGET`（`--target`） | 空（按构建机架构） | 跨架构时显式指定（如 `bun-linux-arm64`） |
+
+除上述开关外，裁剪还支持 `--print-plan`（只打印计划与报告，不构建；需本机有 bun）。
 
 **架构限制**：二进制内嵌 `@resvg/resvg-js`（平台原生模块），跨架构编译会嵌错平台 —— 本镜像只支持
 「构建机架构 = 目标架构」。`linux/arm64` 请在 arm64 机器上构建（或在该架构的 CI runner 上）。
@@ -52,6 +56,82 @@ docker run -d --name gebai -p 3000:3000 \
 | 装系统包 | Ubuntu apt（`archive.ubuntu.com`） | 在派生镜像里换国内镜像源 |
 | CV 模型（`WITH_CV=1`） | `hf-mirror.com` | `--cv-model-base` 指向自备镜像；也可先 `bun run resources:download` 后把模型放进构建上下文（脚本优先用本地已有模型） |
 | 浏览器（`--with-browser`） | playwright CDN | 内网无出口时不要该开关（浏览器类子Agent 不可用） |
+
+## 裁剪
+
+镜像支持从全量裁到只留所需能力：**能力层**（子Agent / 全局工具 / 内嵌资产）、**前端资源层**
+（vendor 引擎组）、**系统层**（运行期 apt 包）。裁剪只由 `docker/build.sh --profile` 一次声明（或
+`--set` 逐项覆盖）；计划由 `scripts/build-image-plan.ts` 合并生成，**构建日志会打印完整裁剪报告**，
+同一份计划也留在镜像内 `/etc/gebai/build-plan.env`——镜像里到底裁了什么，随时可查。
+
+### 裁剪档案
+
+档案是 JSON（预置在 `docker/profiles/`，也可给任意路径）。字段全部可选，**缺省即全开**：
+
+| 段 | 字段 | 声明什么 | 裁掉后（口径如实） |
+|---|---|---|---|
+| `sub_agents` | `enable[]` / `disable[]`（互斥）/ `preload[]` | 只打包 / 排除指定子Agent；`preload` 烘焙「启动即装载」 | 子Agent 不在产物内（`agent_load` 报未知名）。`enable` 自动连带依赖；`disable` 若使保留者依赖残缺，**构建直接失败**并要求把依赖方一并排除 |
+| `tools` | `disable[]` | 全局工具不注册、不暴露 | 工具 schema 不可见、调用报未知工具（实现仍打包，属能力裁剪而非体积裁剪） |
+| `assets` | `web_ui` `cv` `d2` `analyzer` `browser` `ripgrep` | 是否内嵌 Web UI / 本地 CV 模型 / 后端 D2.js / tree-sitter 语法 / playwright 驱动与 pwcore / 内置 ripgrep | 逐项降级且提示明确：无界面（`/` 返回说明页，API 与 WS 照常）、本地 OCR 不可用（给出 `GEBAI_CV_MODELS_DIR` 指引）、后端 D2 不可用、语法分析不可用（`read` 分段阅读兜底）、浏览器类子Agent 不可用、grep 回退内置遍历引擎（只降速） |
+| `web.vendor` | 组清单 | 前端 vendor 引擎：`monaco` `plantuml` `mermaid` `echarts` `d2js` `xterm` `tree_sitter` | 对应前端渲染/编辑器能力降级（引擎懒加载失败即降级，不破主界面；Monaco 缺失退回轻量编辑器） |
+| `system` | `git` `python` `bubblewrap` `fonts` `tzdata` `procps` `chromium` | 运行期 apt 包组 | git/python 类工具不可用、脚本隔离退回环境收敛（有告警）、PDF/图表中文缺字、时区/进程工具缺失、浏览器类子Agent 不可用 |
+
+`ca-certificates`、`curl`（健康探针）、`tini`（PID 1 收尸）是固定基础设施，**不参与裁剪**——缺了它们
+容器会「看起来能起、实际不可用」。
+
+档案还可携带运行期段（`prompt` / `tools` / `sub_agents`）：**同一份档案既能做镜像构建裁剪、又能作为
+运行期 `GEBAI_PROFILE`**（`assets`/`web`/`system` 三个构建段运行期不解释也不报错），构建与运行的能力面
+因此不会漂移。
+
+### 预置档案
+
+| 档案 | 面向 | 要点 |
+|---|---|---|
+| `full` | 等价于不指定 | 全量（缺省） |
+| `code` | 编码场景 | `code`/`explore` 子Agent（预加载 `code`）+ 编辑器/终端/符号提取 vendor + 语法分析 + 内置 ripgrep；无本地识别、无后端 D2、无浏览器 |
+| `minimal` | 纯 API 服务 | 无 Web UI、无内嵌资产、无前端引擎；系统层只留时区与基础设施 |
+
+```bash
+docker/build.sh --profile code -t gebai:code          # 预置档案
+docker/build.sh --profile ./my-profile.json           # 自定义档案（任意路径）
+docker/build.sh --profile code --set assets.cv=1      # 档案 + 字段级覆盖（CLI 优先）
+docker/build.sh --print-plan --profile minimal        # 只看计划与报告，不构建
+```
+
+`--set` 的键：`assets.<资产>`、`web.vendor`、`system.<组>`、`sub_agents.enable|disable|preload`、
+`tools.disable`、`description`。既有开关继续可用：`--no-cv` 等价 `assets.cv=0`，`--with-browser` 等价
+`assets.browser=1 system.chromium=1`。
+
+### 裁剪与体积
+
+体积大头按顺序是：Web UI 内嵌产物（含前端 vendor 引擎：monaco 约 24MB、d2js 约 8MB、plantuml+viz 约
+8.3MB、mermaid 约 3.5MB、echarts 约 1.1MB）、本地 CV（PP-OCR 模型 + ort 运行时，约 24MB）、D2.js 后端
+产物（约 10MB）、tree-sitter 语法集（约 3.7MB）、playwright-core（约 3.7MB）、内置 ripgrep（约 3.2MB），
+另有子Agent 代码（含 playwright / feishu / wps 等重模块）。
+
+实测（linux/amd64，同一构建机；全量为 `DESIGN.md` 记录的构建值，裁剪值为本次实测）：
+
+| 构建 | 镜像 | 镜像内二进制 |
+|---|---|---|
+| 全量（缺省） | 867MB | 244MB |
+| `--profile code` | **656MB** | **159.9MB** |
+| `--profile minimal` | **338MB** | **124.7MB** |
+
+`code` 裁掉本地 CV、后端 D2、浏览器驱动与 plantuml/mermaid/echarts/d2js 四个前端引擎（保留 monaco/
+xterm/tree_sitter：编辑器、终端与符号提取），仅打包 `code`/`explore` 两个子Agent；`minimal` 再关掉
+Web UI 内嵌产物、语法集、内置 ripgrep 与 git/python/bubblewrap/fonts/procps 系统包组。两者冒烟自检
+均通过（`/api/health` 正常），容器内也可核实：
+
+```bash
+docker exec <容器> cat /etc/gebai/build-plan.env          # 该镜像的完整裁剪面
+docker exec <容器> sh -c 'command -v python3 || echo 已裁'  # 系统层：minimal 下 python3/git/bwrap 均不存在
+# 前端 vendor：被裁引擎的请求回退 SPA 入口（返回 index.html 字节），保留的返回真实资源字节
+docker exec <容器> curl -s localhost:3000/vendor/monaco/vs/loader.js | wc -c   # 真实资源（数万字节）
+docker exec <容器> curl -s localhost:3000/vendor/mermaid.js | head -c 15        # <!doctype html> → 已裁
+```
+
+裁剪项在构建日志与计划文件里逐项可见，不需要靠记忆推断镜像能力面；服务端启动日志、工具输出与
+前端降级提示同样按「本构建未内嵌 X」如实说明。
 
 ## 运行
 
@@ -112,16 +192,22 @@ docker exec <容器> unshare --user --map-root-user echo ok   # 输出 ok = bwra
 
 ## 能力边界（容器内的如实口径）
 
-| 能力 | 状态 | 原因 |
-|---|---|---|
-| 会话/任务/工具/子Agent/文件工作台/图表渲染 | 可用 | 均已内嵌进二进制 |
-| 本地 OCR / 视觉定位 | 默认可用 | `WITH_CV=1` 内嵌模型；`--no-cv` 构建则不可用 |
-| 浏览器类子Agent（playwright / reverse_site） | 需 `--with-browser` | 未装浏览器时报「不可用」并给出指引；且同需 user namespace |
-| `desktop`（截屏/窗口/键鼠） | 不可用 | 服务模式下整体拒绝（宿主桌面操控不对远程用户开放） |
-| `tts_speak`（文本转语音） | 不可用 | 仅 Windows 内置离线语音引擎；工具会如实说明「不做联网合成」。音效/效果/混音为纯计算，可用 |
-| 客卿（多语言）子代理 | 不可用 | 服务模式整体禁用（无会话隔离的原生进程） |
-| `reel`（产品视频制作） | 不可直接使用 | 需 Node 运行时 + ffmpeg + Chrome（镜像未装）；要此能力请派生镜像补装 |
-| `restart_server` 工具 | 不适用 | 容器内请用 `docker restart gebai`（该工具面向宿主机进程拉起的部署，本镜像未验证其在 PID 1 = tini 下的行为） |
+| 能力 | 状态 | 对应裁剪开关（缺省全开） | 说明 |
+|---|---|---|---|
+| 会话/任务/工具/子Agent/文件工作台（前端） | 可用 | `assets.web_ui` / `assets.sub_agents` / `tools.disable` | 按档案可裁到「无界面纯 API」（`/` 返回说明页）；前端 vendor 引擎另由 `web.vendor` 裁 |
+| 图表渲染（Mermaid/PlantUML/D2/ECharts） | 可用 | `web.vendor`（前端）/ `assets.d2`（后端 D2） | 裁掉后对应引擎走前端懒加载失败降级，D2 后端渲染报「本构建未内嵌」 |
+| 本地 OCR / 视觉定位 | 默认可用 | `assets.cv`（`--no-cv`） | 裁掉后工具给出 `GEBAI_CV_MODELS_DIR` 配置指引 |
+| 语法分析 / 符号搜索（`analyze` / `search_symbols`） | 可用 | `assets.analyzer` | 裁掉后报「语法分析不可用」并提示改用 `read` 分段阅读 |
+| `grep`（内置 ripgrep） | 可用 | `assets.ripgrep` | 裁掉后回退内置遍历引擎：功能不降级、只降速 |
+| 浏览器类子Agent（playwright / reverse_site） | 需 `--with-browser` | `assets.browser` + `system.chromium` | 未装浏览器时报「不可用」并给出指引；且同需 user namespace |
+| 脚本文件系统隔离（bubblewrap） | 可用（受容器限制） | `system.bubblewrap` | 裁掉或容器未授予 user namespace 时降级为环境收敛（有告警，见「容器内的隔离与安全」） |
+| PDF / 图表中文 | 可用 | `system.fonts` | 裁掉后字体缺失，中文会缺字（构建后如需可挂载字体） |
+| `py` 工具 / `vision_pip` | 可用 | `system.python` | 裁掉后 Python 解释器不存在，相关工具不可用 |
+| `desktop`（截屏/窗口/键鼠） | 不可用 | — | 服务模式下整体拒绝（宿主桌面操控不对远程用户开放） |
+| `tts_speak`（文本转语音） | 不可用 | — | 仅 Windows 内置离线语音引擎；工具会如实说明「不做联网合成」。音效/效果/混音为纯计算，可用 |
+| 客卿（多语言）子代理 | 不可用 | — | 服务模式整体禁用（无会话隔离的原生进程） |
+| `reel`（产品视频制作） | 不可直接使用 | — | 需 Node 运行时 + ffmpeg + Chrome（镜像未装）；要此能力请派生镜像补装 |
+| `restart_server` 工具 | 不适用 | — | 容器内请用 `docker restart gebai`（该工具面向宿主机进程拉起的部署，本镜像未验证其在 PID 1 = tini 下的行为） |
 
 ## 运维
 
@@ -145,5 +231,7 @@ docker compose -f docker/compose.yaml up -d
 | 登录页无 admin 账号 | 未设 `GEBAI_ADMIN_PASSWORD_HASH`：改用自助注册，或按上文生成哈希后重建容器 |
 | 提示会话目录不可写 | 宿主目录挂载的属主问题（容器 uid 1000）——改用命名卷或调整属主 |
 | 日志出现 bwrap 不可用告警 | 容器未授予 user namespace：按上文加 `--security-opt seccomp=unconfined`，或接受环境收敛档 |
-| 本地 OCR 报模型缺失 | 构建时用了 `--no-cv`，或模型下载失败（看构建日志）；可重建并指定 `--cv-model-base` |
-| 浏览器子Agent 报无浏览器 | 用 `--with-browser` 重建镜像 |
+| 本地 OCR 报模型缺失 | 构建时用了 `--no-cv`（或 `assets.cv=false`），或模型下载失败（看构建日志）；可重建并指定 `--cv-model-base` |
+| 浏览器子Agent 报无浏览器 | 用 `--with-browser` 重建镜像（等价 `system.chromium=1`） |
+| 某能力报「本构建未内嵌 X / 不可用」 | 属裁剪预期：`docker exec <容器> cat /etc/gebai/build-plan.env` 查看该镜像的裁剪面，对照本文「裁剪」逐项确认；需要该能力则用对应开关重建 |
+| 访问 `/` 返回「本构建未内嵌 Web UI」说明页 | 镜像按 `assets.web_ui=false`（如 `minimal` 档案）构建：服务、REST API 与 WebSocket 正常，仅无界面；需界面请用完整构建重建 |

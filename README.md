@@ -112,6 +112,10 @@ bun run build:code            # 裁剪构建示例：code 场景精简单文件�
                               # Trimmed build example: lean single-file binary for the code scenario
 GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build   # 仅打包指定子 Agent（构建期裁剪）
                                                                 # Bundle only the listed sub-agents
+docker/build.sh --profile minimal -t gebai:minimal             # 镜像裁剪：档案一次裁掉能力层/前端资源层/系统层
+                                                                # Container image trimming via a profile
+docker/build.sh --print-plan --profile code                    # 只打印裁剪计划与报告，不构建
+                                                                # Print the trimming plan only
 ```
 
 - 桌面端 / Desktop: `packages/desktop/dist/gebai-desktop.exe`（tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制，物化后拉起，关窗回收）
@@ -393,14 +397,13 @@ Monorepo（Bun workspaces + Turborepo）；核心模块全部接口化 + 依赖�
 
 ## 路线图 | Roadmap
 
-已实现的能力见上文各节（核心主循环、单文件子 Agent 与装载/子会话运行、客卿多语言边车、代码级自我优化、多用户隔离与沙箱、单二进制三形态、飞书机器人与统一任务管理、文件工作台、富内容与图表创作、Webhook/SDK/外部身份）。**尚未实现（DESIGN 明列的已知项）**：
+已实现的能力见上文各节（核心主循环、单文件子 Agent 与装载/子会话运行、客卿多语言边车、代码级自我优化、多用户隔离与沙箱、单二进制三形态、飞书机器人与统一任务管理、文件工作台、富内容与图表创作、Webhook/SDK/外部身份、镜像构建完整裁剪）。**尚未实现（DESIGN 明列的已知项）**：
 
 - **服务端消息分页**：会话消息目前一次性全量返回（前端已做 DOM 窗口化，渲染开销不随历史增长），待实现 `session.get` 的窗口/游标参数与上滚按需拉取，以及极端长会话已渲染节点的 LRU 释放
-- **子 Agent 选择性打包的黑名单形态**：构建期目前只有白名单 `GEBAI_BUILD_SUBAGENTS`，运行时黑名单为 `GEBAI_SUB_AGENTS_DISABLE`
 - **飞书机器人 Webhook 回调模式**（现为长连接模式）
 - **OIDC 身份对接**（现为 HMAC / HTTP 回调两种外部身份验证器）
 
-**English.** Everything described above is implemented. The known open items explicitly listed in `DESIGN.md` are: server-side message pagination (window/cursor parameters plus LRU release of rendered DOM), a blacklist form of sub-agent build trimming (build time currently only supports the `GEBAI_BUILD_SUBAGENTS` whitelist; the runtime blacklist is `GEBAI_SUB_AGENTS_DISABLE`), a webhook-callback mode for the Feishu bot (long connection today) and OIDC identity integration (HMAC / HTTP callback validators today).
+**English.** Everything described above is implemented — including full container-image trimming (capability / frontend-asset / system layers via a build profile). The known open items explicitly listed in `DESIGN.md` are: server-side message pagination (window/cursor parameters plus LRU release of rendered DOM), a webhook-callback mode for the Feishu bot (long connection today) and OIDC identity integration (HMAC / HTTP callback validators today).
 
 ## 参与贡献 | Contributing
 

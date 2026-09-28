@@ -16,10 +16,17 @@ import { readdirSync, readFileSync, statSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
 import { agentsSrcPath } from "./agents-paths"
+import { buildFlag } from "./build-flags"
 import { dirname, join, relative } from "node:path"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const outFile = agentsSrcPath("core", "browser", "pwcore.embedded.generated.json")
+
+if (!buildFlag("GEBAI_BUILD_BROWSER")) {
+  writeFileIfChanged(outFile, JSON.stringify({ version: "", entry: "index.mjs", files: [] }))
+  console.log(`[build-pwcore-embed] GEBAI_BUILD_BROWSER=0：写空产物（浏览器类子Agent 不可用）-> ${outFile}`)
+  process.exit(0)
+}
 
 // 定位 playwright-core：跟随 playwright 包解析位置（显式声明 playwright-core 依赖易与其版本错位）
 const pwEntry = Bun.resolveSync("playwright", root)

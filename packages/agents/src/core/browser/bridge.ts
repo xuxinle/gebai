@@ -39,8 +39,10 @@ export async function resolveDriverFile(): Promise<string> {
     const embedded = await import("./driver.embedded.generated.json")
       .then((m) => m.default as { gzip: true; driver: string })
       .catch(() => null)
-    if (!embedded) {
-      throw new Error("playwright 桥接驱动内嵌产物缺失（构建时请先运行 scripts/build-driver-embed.ts）")
+    if (!embedded || !embedded.driver) {
+      throw new Error(
+        "playwright 桥接驱动未内嵌：本构建可能按裁剪构建（GEBAI_BUILD_BROWSER=0），或构建时未运行 scripts/build-driver-embed.ts——浏览器类子Agent 不可用",
+      )
     }
     mkdirSync(dir, { recursive: true })
     writeFileSync(file, Bun.gunzipSync(Buffer.from(embedded.driver, "base64")))
@@ -112,7 +114,8 @@ async function resolvePlaywrightModule(): Promise<string> {
     const embedded = await import("./pwcore.embedded.generated.json")
       .then((m) => m.default as EmbeddedPwCore)
       .catch(() => null)
-    if (embedded) {
+    // 空 files = 裁剪构建（GEBAI_BUILD_BROWSER=0）写空产物：视为未内嵌，走下方 node_modules 回退
+    if (embedded?.files?.length) {
       await materializePwCore(embedded)
       return pathToFileURL(join(resolveGebaiHome(), "vendor", "playwright-core", embedded.entry)).href
     }
@@ -121,7 +124,7 @@ async function resolvePlaywrightModule(): Promise<string> {
     return playwrightModuleUrl()
   } catch (err) {
     throw new Error(
-      `playwright 模块解析失败（源码/部署形态需安装 playwright 依赖并 bunx playwright install；单二进制形态需构建时运行 scripts/build-pwcore-embed.ts 生成内嵌产物）: ${err instanceof Error ? err.message : err}`,
+      `playwright 模块解析失败（源码/部署形态需安装 playwright 依赖并 bunx playwright install；单二进制形态需构建时运行 scripts/build-pwcore-embed.ts、不可按 GEBAI_BUILD_BROWSER=0 裁剪）: ${err instanceof Error ? err.message : err}`,
     )
   }
 }

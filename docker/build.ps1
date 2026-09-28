@@ -8,6 +8,9 @@
 #   pwsh -File docker/build.ps1                                  # 构建 gebai:<package.json 版本>
 #   pwsh -File docker/build.ps1 -Tag gebai:dev -Smoke            # 指定标签 + 冒烟自检
 #   pwsh -File docker/build.ps1 -WithBrowser -NoCv               # 装浏览器、不内嵌本地 CV
+#   pwsh -File docker/build.ps1 -Profile minimal                 # 预置裁剪档案（docker/profiles/*.json）
+#   pwsh -File docker/build.ps1 -Profile code -Set assets.d2=1   # 档案 + 字段级覆盖（CLI 优先）
+#   pwsh -File docker/build.ps1 -PrintPlan                       # 只打印裁剪计划，不构建
 #   pwsh -File docker/build.ps1 -Push -Tag registry.example.com/gebai:0.1.0
 [CmdletBinding()]
 param(
@@ -17,6 +20,9 @@ param(
   [string]$CvModelBase = "",
   [string]$Target = "",
   [string]$Platform = "",
+  [string]$Profile = "",
+  [string[]]$Set = @(),
+  [switch]$PrintPlan,
   [switch]$NoCache,
   [switch]$Push,
   [switch]$Smoke
@@ -28,18 +34,49 @@ Push-Location $repoRoot
 try {
   if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "未找到 docker 命令" }
 
-  if (-not $Tag) {
-    $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-    $Tag = "gebai:$version"
+  # ── 裁剪档案解析：预置名 → docker/profiles/{名}.json；含分隔符或 .json 结尾 → 按路径 ──
+  $profileFile = ""
+  $profileName = ""
+  if ($Profile) {
+    if (Test-Path -PathType Leaf $Profile) { $profileFile = $Profile }
+    elseif (Test-Path -PathType Leaf "docker/profiles/$Profile.json") { $profileFile = "docker/profiles/$Profile.json" }
+    else {
+      $presets = (Get-ChildItem docker/profiles/*.json -ErrorAction SilentlyContinue | ForEach-Object { $_.BaseName }) -join " "
+      throw "裁剪档案不存在：$Profile（预置档案：$presets）"
+    }
+    $profileName = [IO.Path]::GetFileNameWithoutExtension($profileFile)
   }
 
   $withCv = if ($NoCv) { "0" } else { "1" }
   $withBrowser = if ($WithBrowser) { "1" } else { "0" }
 
+  # ── -PrintPlan：只出计划与报告（需 bun 解析档案与合并覆盖），不构建 ──
+  if ($PrintPlan) {
+    if (-not (Get-Command bun -ErrorAction SilentlyContinue)) { throw "-PrintPlan 需要本机有 bun（解析档案与合并覆盖）" }
+    $planArgs = @()
+    if ($profileFile) { $planArgs += @("--profile", $profileFile) }
+    foreach ($s in $Set) { $planArgs += @("--set", $s) }
+    if ($withCv -eq "0") { $planArgs += @("--set", "assets.cv=0") }
+    if ($withBrowser -eq "1") { $planArgs += @("--set", "assets.browser=1", "--set", "system.chromium=1") }
+    & bun run scripts/build-image-plan.ts @planArgs --print-plan
+    if ($LASTEXITCODE -ne 0) { throw "计划生成失败（退出码 $LASTEXITCODE）" }
+    return
+  }
+
+  if (-not $Tag) {
+    $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+    $Tag = "gebai:$version"
+  }
+
   $buildArgs = @(
     "--build-arg", "WITH_CV=$withCv",
     "--build-arg", "WITH_BROWSER=$withBrowser"
   )
+  if ($profileFile) {
+    $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path $profileFile)))
+    $buildArgs += @("--build-arg", "BUILD_PROFILE_B64=$b64", "--build-arg", "BUILD_PROFILE_NAME=$profileName")
+  }
+  if ($Set.Count -gt 0) { $buildArgs += @("--build-arg", "BUILD_SET=$($Set -join ' ')") }
   if ($Target) { $buildArgs += @("--build-arg", "BUN_TARGET=$Target") }
   if ($CvModelBase) { $buildArgs += @("--build-arg", "CV_MODEL_BASE=$CvModelBase") }
   if ($Platform) { $buildArgs += @("--platform", $Platform) }
@@ -59,6 +96,7 @@ try {
   Write-Host "==> 构建镜像 $Tag"
   Write-Host "    上下文：$repoRoot（.dockerignore 已排除 node_modules/dist/resources/infer/vendor 等）"
   Write-Host "    参数：WITH_CV=$withCv WITH_BROWSER=$withBrowser"
+  Write-Host "    裁剪：档案=$(if ($profileFile) { $profileFile } else { '全量（未指定）' })$(if ($Set.Count -gt 0) { " 覆盖=$($Set -join ' ')" })"
 
   & docker @builder -f Dockerfile -t $Tag @buildArgs .
   if ($LASTEXITCODE -ne 0) { throw "docker build 失败（退出码 $LASTEXITCODE）" }

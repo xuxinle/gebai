@@ -134,7 +134,7 @@ bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2
    **TS 定义形态必须导出 `export const def: SubAgentDef`**（纯提示词 `.md` 形态无需此项）——加载器只读 `mod.def`，未导出即报「未导出 def（须 export const def: SubAgentDef）」加载失败。字段：`name`/`description`/`systemPrompt`/`tools`（省略即纯提示词子 Agent）/`requiresApproval`/`preload`/`dependencies`（依赖名单：装载/预加载/`subsession_run` 自动连带装载，工具与提示词按依赖方命名空间复用，不在本 def 重复声明）/`envVars`（可配置环境变量声明，`{AGENT_NAME_UPPER}_` 前缀，自动汇总进前端面板白名单）/`projectRoot`（默认项目根兜底）/`writeGuard`（写范围守卫）；契约定义见 `packages/sdk/src/agent-contract.ts`，模板见 `DESIGN.md`「子Agent文件格式」（顶层可先导出同名常量再组装，如 `export const preload = false` + `export const def = { ... }`）。
 2. **纯提示词简化定义**：仅需系统提示词的简单/组合式子Agent 可直接放 `{name}/{name}.md`（零 TS，可选 frontmatter `description`/`dependencies`/`preload`/`env_vars`）；`tools` 省略时自动注入编排工具（`agent_list`/`agent_load`/`subsession_run` + `bg_task`），组合式子Agent 在提示词中说明编排策略即可。
 3. 命名符合规则；工具名无需关注前缀，总 Agent 自动加 `{agent}_` 命名空间。
-4. 构建时自动扫描收集（零注册）；可按需选择性打包（构建期环境变量 `GEBAI_BUILD_SUBAGENTS`/`GEBAI_BUILD_PRELOAD`，无 CLI 参数）。
+4. 构建时自动扫描收集（零注册）；可按需选择性打包（构建期环境变量 `GEBAI_BUILD_SUBAGENTS` 包含 / `GEBAI_BUILD_EXCLUDE_SUBAGENTS` 排除（两者互斥）/ `GEBAI_BUILD_PRELOAD`，无 CLI 参数；镜像构建由裁剪档案统一驱动，见 `docker/README.md`「裁剪」）。
 5. 同步在 `DESIGN.md` 中补充该子 Agent 的说明与总览表。
 
 ## 如何新增全局工具

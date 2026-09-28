@@ -12,6 +12,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
 import { gzipDeterministic } from "./gzip-deterministic"
+import { buildFlag } from "./build-flags"
 import { join } from "node:path"
 
 
@@ -21,6 +22,13 @@ const outFile = join(root, "src", "core", "d2js.embedded.generated.json")
 
 /** 运行时 import 图涉及的全部文件（worker.js 读取 wasm/import wasm_exec；index.js import chunk/setup，elk.js 供 elk 布局动态加载）。 */
 const D2JS_FILES = ["index.js", "worker.js", "wasm_exec.js", "setup.js", "chunk-ctcfg68w.js", "elk.js", "d2.wasm"]
+
+// 裁剪：D2 后端渲染不内嵌（写空清单——文件须存在，产物被 diagram-render.ts 静态 import）
+if (!buildFlag("GEBAI_BUILD_D2")) {
+  writeFileIfChanged(outFile, JSON.stringify({ version: "", gzip: true, files: {} }))
+  console.log(`[build-d2js] GEBAI_BUILD_D2=0：写空清单（后端 D2 渲染不可用）-> ${outFile}`)
+  process.exit(0)
+}
 
 const pkg = JSON.parse(readFileSync(join(root, "node_modules", "@terrastruct", "d2", "package.json"), "utf8"))
 if (!existsSync(srcDir)) {

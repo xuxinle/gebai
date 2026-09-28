@@ -8,11 +8,13 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      # 构建参数（需要时打开，键值须为字符串）：
-      # args:
+      # 构建参数（需要时打开，键值须为字符串）；裁剪档案与可裁剪矩阵见 docker/README.md：
+      #   BUILD_SET: "assets.d2=0 web.vendor=monaco"   # 细粒度裁剪覆盖（空格分隔 键=值，优先于档案）
       #   WITH_BROWSER: "1"     # 装 playwright chromium（镜像显著增大）
-      #   WITH_CV: "0"          # 不内嵌本地 CV（本地 OCR 不可用，镜像更小）
+      #   WITH_CV: "0"          # 不内嵌本地 CV（等价 assets.cv=0，本地 OCR 不可用）
       #   CV_MODEL_BASE: "https://hf-mirror.com/SWHL/RapidOCR/resolve/main/PP-OCRv4"
+      # 预置档案（docker/profiles/*.json）以 base64 经 BUILD_PROFILE_B64 传入——compose 里手写 base64 不便，
+      # 用档案建议直接走 docker/build.sh --profile <名>（同样产出本 compose 可用的镜像标签）。
     image: gebai:0.1.0
     container_name: gebai
     restart: unless-stopped

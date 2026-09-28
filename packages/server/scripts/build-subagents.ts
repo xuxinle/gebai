@@ -8,9 +8,11 @@
  *
  * 构建期裁剪/预加载指定（环境变量，二进制形态无法改源码，须在构建时定死）：
  * - `GEBAI_BUILD_SUBAGENTS`：逗号分隔的包含清单（缺省 = 全部打包）——按需产出精简二进制；
+ * - `GEBAI_BUILD_EXCLUDE_SUBAGENTS`：逗号分隔的排除清单（与包含清单互斥）——按需剔除；
  * - `GEBAI_BUILD_PRELOAD`：逗号分隔的预加载清单——烘焙为 def.preload=true（启动即装载，
  *   与运行时 GEBAI_PRELOAD_SUB_AGENTS 覆盖语义一致：运行时配置仍优先）。
- * 两清单中的未知名字直接报错退出（防构建产物静默缺失）。
+ * 各清单中的未知名字直接报错退出（防构建产物静默缺失）。排除清单另行校验依赖完整性——
+ * 被保留者依赖了已排除的子Agent 时构建直接失败（要求依赖方一并排除），不静默产出残缺产物。
  *
  * 该文件为生成产物，已 gitignore，勿手改。
  */
@@ -18,6 +20,7 @@ import { readdir } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { readFileSync } from "node:fs"
 import { writeFileIfChanged } from "./write-if-changed"
+import { buildFlag } from "./build-flags"
 import { AGENTS_SRC, agentsSrcPath } from "./agents-paths"
 import { pathToFileURL } from "node:url"
 import { parseSubAgentMd } from "@gebai/agents"
@@ -35,7 +38,12 @@ const nameList = (v: string | undefined): string[] =>
     .filter(Boolean)
 
 const includeNames = nameList(process.env.GEBAI_BUILD_SUBAGENTS)
+const excludeNames = nameList(process.env.GEBAI_BUILD_EXCLUDE_SUBAGENTS)
 const preloadNames = nameList(process.env.GEBAI_BUILD_PRELOAD)
+if (includeNames.length && excludeNames.length) {
+  console.error("[build-subagents] GEBAI_BUILD_SUBAGENTS（包含清单）与 GEBAI_BUILD_EXCLUDE_SUBAGENTS（排除清单）互斥：请只用其一")
+  process.exit(1)
+}
 
 /** 定义文件判定：内容须导出 `def`（辅助文件如 desktop_tools.ts 不收录）。 */
 function isDefFile(p: string): boolean {
@@ -121,13 +129,17 @@ defs.sort((a, b) => a.name.localeCompare(b.name))
 
 // 清单校验：未知名字直接失败（构建产物静默缺失比构建失败更难排查），并列出可用名单辅助修正
 const known = new Set(defs.map((d) => d.name))
-const unknown = [...includeNames, ...preloadNames].filter((n) => !known.has(n))
+const unknown = [...includeNames, ...excludeNames, ...preloadNames].filter((n) => !known.has(n))
 if (unknown.length) {
   console.error(`[build-subagents] 未知子Agent 名: ${unknown.join(", ")}（可用: ${[...known].join(", ")}）`)
   process.exit(1)
 }
 const preload = new Set(preloadNames)
-const included = includeNames.length ? defs.filter((d) => includeNames.includes(d.name)) : defs
+const included = includeNames.length
+  ? defs.filter((d) => includeNames.includes(d.name))
+  : excludeNames.length
+    ? defs.filter((d) => !excludeNames.includes(d.name))
+    : defs
 
 /** 构建期逐代理导入验证（DESIGN「子代理失败隔离」）：TS 定义真 import 一遍——模块顶层抛错/
  *  缺 def 导出/def 非法的代理剔除出静态 import（否则运行时顶层静态 import 任一模块失败会炸
@@ -139,33 +151,39 @@ function resolveEntry(baseDir: string, d: { name: string; dir?: boolean }): stri
   if (!d.dir) return join(baseDir, `${d.name}.ts`)
   return isDefFile(join(baseDir, d.name, `${d.name}.ts`)) ? join(baseDir, d.name, `${d.name}.ts`) : join(baseDir, d.name, "index.ts")
 }
-for (const d of included) {
-  if (d.inline) continue // md 内联定义无模块导入风险（本脚本解析即验证）
-  // 域内入口解析：每个条目自带 baseDir（内置 srcDir / 二开 customDir）
-  const entryFile = resolveEntry(d.baseDir, d)
-  try {
-    const mod: unknown = await import(pathToFileURL(entryFile).href)
-    const def = (mod as { def?: unknown }).def
-    if (def == null || typeof def !== "object" || !("name" in def) || (def as { name?: unknown }).name !== d.name) {
-      const reason = def == null ? "模块未导出 def" : `def.name 不一致（${String((def as { name?: unknown }).name)} ≠ ${d.name}）`
+/** 逐代理导入验证（裁剪清单与依赖闭包都落定后的最终集合上执行一次）。 */
+async function verifyIncluded(): Promise<void> {
+  for (const d of included) {
+    if (d.inline) continue // md 内联定义无模块导入风险（本脚本解析即验证）
+    // 域内入口解析：每个条目自带 baseDir（内置 srcDir / 二开 customDir）
+    const entryFile = resolveEntry(d.baseDir, d)
+    try {
+      const mod: unknown = await import(pathToFileURL(entryFile).href)
+      const def = (mod as { def?: unknown }).def
+      if (def == null || typeof def !== "object" || !("name" in def) || (def as { name?: unknown }).name !== d.name) {
+        const reason = def == null ? "模块未导出 def" : `def.name 不一致（${String((def as { name?: unknown }).name)} ≠ ${d.name}）`
+        badAgents.push([d.name, reason])
+        console.warn(`[build-subagents] 子Agent ${d.name} 验证失败，已剔除出 bundle: ${reason}`)
+      }
+    } catch (err) {
+      const reason = `模块导入失败: ${err instanceof Error ? err.message : String(err)}`
       badAgents.push([d.name, reason])
-      console.warn(`[build-subagents] 子Agent ${d.name} 验证失败，已剔除出 bundle: ${reason}`)
+      console.warn(`[build-subagents] 子Agent ${d.name} 导入抛错，已剔除出 bundle（其余代理不受影响）: ${reason}`)
     }
-  } catch (err) {
-    const reason = `模块导入失败: ${err instanceof Error ? err.message : String(err)}`
-    badAgents.push([d.name, reason])
-    console.warn(`[build-subagents] 子Agent ${d.name} 导入抛错，已剔除出 bundle（其余代理不受影响）: ${reason}`)
   }
 }
-const bad = new Map(badAgents)
-const good = included.filter((d) => !bad.has(d.name))
 
 /** def 依赖名单读取：TS 定义动态 import 读 def.dependencies（与运行时 discover 同通道，模块按装载
  *  语义设计、import 零副作用）；纯 md 定义用 frontmatter 解析结果。import 失败告警按无依赖处理
  *  （运行时装载侧另有缺失跳过与告警兜底）。读取一律走条目自带 baseDir（内置/二开域各自解析）。 */
 async function defDependencies(d: { name: string; dir?: boolean; baseDir: string }): Promise<string[]> {
   try {
-    const tsPath = d.dir ? join(d.baseDir, d.name, `${d.name}.ts`) : join(d.baseDir, `${d.name}.ts`)
+    // 入口解析与 resolveEntry 同规则：目录形态 {name}/{name}.ts 优先，回退 {name}/index.ts
+    const tsPath = d.dir
+      ? isDefFile(join(d.baseDir, d.name, `${d.name}.ts`))
+        ? join(d.baseDir, d.name, `${d.name}.ts`)
+        : join(d.baseDir, d.name, "index.ts")
+      : join(d.baseDir, `${d.name}.ts`)
     if (isDefFile(tsPath)) {
       const mod = await import(pathToFileURL(tsPath).href)
       const deps = (mod.def as { dependencies?: string[] } | undefined)?.dependencies
@@ -182,9 +200,9 @@ async function defDependencies(d: { name: string; dir?: boolean; baseDir: string
 // 依赖闭包展开（仅包含清单形态）：include reverse_site 自动带上其依赖 playwright——运行时依赖
 // 自动装载（DESIGN「子Agent 依赖与自动装载」）要求依赖方在产物中存在，裁剪清单漏列依赖会产出
 // 能力残缺的二进制；依赖指向不存在的子Agent 名（拼写错误）直接构建失败
+const includedNames = new Set(included.map((d) => d.name))
 if (includeNames.length) {
   const byName = new Map(defs.map((d) => [d.name, d]))
-  const includedNames = new Set(included.map((d) => d.name))
   const queue = [...included]
   while (queue.length) {
     const d = queue.shift()!
@@ -201,6 +219,33 @@ if (includeNames.length) {
       }
     }
   }
+} else if (excludeNames.length) {
+  // 排除清单形态：保留者若依赖被排除者，产物残缺（运行时装载该依赖必然失败）——构建期直接失败，
+  // 要求把依赖方一并排除（不静默连带剔除：那会产出与清单不符的二进制）
+  const broken: string[] = []
+  for (const d of included) {
+    for (const dep of await defDependencies(d)) {
+      if (!includedNames.has(dep)) broken.push(`${d.name} → ${dep}`)
+    }
+  }
+  if (broken.length) {
+    console.error(
+      `[build-subagents] 排除清单使以下子Agent 依赖残缺（须把依赖方一并排除）: ${broken.join(", ")}`,
+    )
+    process.exit(1)
+  }
+}
+// 验证与最终集合：验证在裁剪清单与依赖闭包都落定后执行（闭包新纳入的条目同样受验证保护）
+await verifyIncluded()
+const bad = new Map(badAgents)
+const good = included.filter((d) => !bad.has(d.name))
+
+// 预加载清单必须落在最终产物内：烘焙 preload 指向不存在的子Agent 只会静默失效
+const finalNames = new Set(good.map((d) => d.name))
+const preloadMissing = preloadNames.filter((n) => !finalNames.has(n))
+if (preloadMissing.length) {
+  console.error(`[build-subagents] 预加载清单中的子Agent 不在产物内: ${preloadMissing.join(", ")}（被裁剪清单排除或导入验证失败？）`)
+  process.exit(1)
 }
 
 const lines = [
@@ -237,8 +282,9 @@ const distDir = join(root, "dist")
 try {
   const { copyFile, mkdir, cp } = await import("node:fs/promises")
   await mkdir(distDir, { recursive: true })
-  await copyFile(agentsSrcPath("core", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
-  await copyFile(agentsSrcPath("core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
+  // 被裁剪的产物不复制（对应能力本就不可用；dist 形态下缺文件即走「未内嵌」降级）
+  if (buildFlag("GEBAI_BUILD_BROWSER")) await copyFile(agentsSrcPath("core", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
+  if (buildFlag("GEBAI_BUILD_CV")) await copyFile(agentsSrcPath("core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
   // 客卿源（仓库根 keqing/，按语言分目录）→ dist/keqing/（独立部署的
   // dist 树发现兕底）；过滤运行时数据（venv/__pycache__）与编译产物（driver*.exe/objs）——
   // 只带源码与 manifest，可执行体由目标机构建引导按需生成；driver 跨平台形态：Windows

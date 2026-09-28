@@ -11,7 +11,7 @@
     "dev:desktop": "bun run --cwd packages/desktop dev",
     "dev:web": "bun run --cwd packages/web dev",
     "build": "turbo run build",
-    "test": "turbo run test",
+    "test": "turbo run test && bun test scripts/build-image-plan.test.ts",
     "typecheck": "turbo run typecheck && bun run scripts/typecheck-custom.ts && bun run typecheck:scripts",
     "typecheck:custom": "bun run scripts/typecheck-custom.ts",
     "typecheck:scripts": "bunx tsc -p scripts/tsconfig.json",

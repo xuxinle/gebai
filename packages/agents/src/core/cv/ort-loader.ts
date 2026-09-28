@@ -122,7 +122,7 @@ export async function loadOrtModule(): Promise<{ ort: OrtModule } & CvRuntimeDir
   if (!runtime) {
     throw new Error(
       isBinaryMode()
-        ? "本地识别运行时缺失：单二进制形态未内嵌 CV 资产（构建时运行 packages/server/scripts/build-cv-embed.ts），" +
+        ? "本地识别运行时缺失：单二进制形态未内嵌 CV 资产（构建期按 GEBAI_BUILD_CV=0 裁剪，或构建时未运行 packages/server/scripts/build-cv-embed.ts），" +
             "或设置 GEBAI_CV_MODELS_DIR 指向含 det.onnx/rec.onnx/dict.txt 的目录"
         : `onnxruntime-web 解析失败（源码/部署形态需安装依赖）。若为裁剪部署，请设置 GEBAI_CV_MODELS_DIR 并安装依赖后重试`,
     )

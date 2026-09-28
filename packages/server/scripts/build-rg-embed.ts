@@ -20,6 +20,7 @@ import { gzipSync } from "node:zlib"
 import { statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { npmRipgrepPath } from "../src/core/support/ripgrep"
+import { buildFlag } from "./build-flags"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const outFile = join(root, "src", "core", "rg.embedded.generated.json")
@@ -62,6 +63,14 @@ async function resolveRgBinary(): Promise<{ path: string; source: string } | nul
 }
 
 async function main(): Promise<void> {
+  if (!buildFlag("GEBAI_BUILD_RG")) {
+    writeFileSync(outFile, JSON.stringify({ version: "", platform: "", data: "" }))
+    console.log(
+      `[build-rg-embed] GEBAI_BUILD_RG=0：写空清单（未内嵌 ripgrep）-> ${outFile}\n` +
+        "  运行时 grep 回退内置遍历引擎（功能不降级、只降速）。",
+    )
+    return
+  }
   const found = await resolveRgBinary()
   if (!found) {
     writeFileSync(outFile, JSON.stringify({ version: "", platform: "", data: "" }))

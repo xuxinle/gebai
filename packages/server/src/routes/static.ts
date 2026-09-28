@@ -52,6 +52,12 @@ function buildPlaceholderHtml(): string {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>前端构建中…</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f7;color:#333}.card{text-align:center}.dots{display:inline-block;margin-top:8px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#888;margin:0 3px;animation:pulse 1.2s infinite}.dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}@keyframes pulse{0%,80%,100%{opacity:.25}40%{opacity:1}}</style></head><body><div class="card"><p style="font-size:18px;margin:0">前端构建中<span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></p><p style="color:#999;font-size:13px">构建完成后将自动刷新（bun run dev --reload）</p></div><script>${client}</script></body></html>`
 }
 
+/** 无内嵌 Web UI 的构建（构建期裁剪 GEBAI_BUILD_WEB_UI=0）：`/` 的如实说明页——
+ *  服务本体、API（`/api/*`）与 WebSocket（`/ws`）均正常，仅未内嵌浏览器界面。 */
+function noUiHtml(): string {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>GEBAI · 无 Web UI 构建</title><style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f7;color:#333}.card{max-width:560px;padding:32px;text-align:left;line-height:1.7}.card h1{font-size:20px;margin:0 0 12px}.card p{margin:8px 0;color:#555}.card code{background:#eaeaef;padding:2px 6px;border-radius:4px;font-size:13px}</style></head><body><div class="card"><h1>本构建未内嵌 Web UI</h1><p>镜像在构建期按裁剪参数 <code>GEBAI_BUILD_WEB_UI=0</code> 跳过了前端产物，因此没有浏览器界面。</p><p>服务本体、REST API（<code>/api/*</code>）与 WebSocket（<code>/ws</code>）不受影响，客户端可用 SDK 或 HTTP 直接接入。</p><p>需要界面请用完整构建（不带该裁剪项）重建镜像。</p></div></body></html>`
+}
+
 /** 构建产物资源前缀（其余根文件由 serveStatic 兜底，压缩与缓存策略不覆盖）。 */
 const ASSET_PREFIXES = ["/assets/", "/vendor/", "/fonts/"]
 
@@ -295,5 +301,8 @@ export function registerStaticRoutes(rc: RouteCtx): void {
       return next()
     })
     if (!embedded) app.use("*", serveStatic({ root: d.config.webDist }))
+  } else if (d.config.binaryMode) {
+    // 裁剪构建（GEBAI_BUILD_WEB_UI=0）：二进制形态既无内嵌资源也无磁盘产物，访问 `/` 给出切实说明页而非裸 404
+    app.get("/", (c) => c.html(noUiHtml(), 200, HTML_NO_STORE))
   }
 }

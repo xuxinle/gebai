@@ -182,7 +182,7 @@ export async function analyzeCode(code: string, ext: string, displayPath: string
   if (!parser) {
     // 与「不支持的语言」区分：语法在支持列表内但 wasm 资源加载失败（二进制打包未内嵌/依赖缺失/内嵌损坏），
     // 误导性报错会令模型反复尝试或放弃正确路径
-    return `analyze: 语法分析不可用（tree-sitter wasm 资源加载失败：${ext}）——请确认依赖已安装（dev 模式 bun install）或构建时已内嵌（二进制打包应运行 scripts/build-analyzer-wasm.ts）。可改用 read 分段阅读该文件。`
+    return `analyze: 语法分析不可用（tree-sitter wasm 资源加载失败：${ext}）——dev 模式请确认依赖已安装（bun install）；构建产物若未内嵌语法集（构建期裁剪 GEBAI_BUILD_ANALYZER=0，或未运行 scripts/build-analyzer-wasm.ts）同样如此。可改用 read 分段阅读该文件。`
   }
   const tree = parser.parse(code)!
   const root = tree.rootNode

@@ -1,0 +1,24 @@
+{
+  "name": "full",
+  "description": "全量（缺省）：全部子Agent、全部内嵌资产与前端引擎、全部系统能力",
+  "assets": {
+    "web_ui": true,
+    "cv": true,
+    "d2": true,
+    "analyzer": true,
+    "browser": true,
+    "ripgrep": true
+  },
+  "web": {
+    "vendor": ["monaco", "plantuml", "mermaid", "echarts", "d2js", "xterm", "tree_sitter"]
+  },
+  "system": {
+    "git": true,
+    "python": true,
+    "bubblewrap": true,
+    "fonts": true,
+    "tzdata": true,
+    "procps": true,
+    "chromium": false
+  }
+}

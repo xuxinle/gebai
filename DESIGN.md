@@ -3039,15 +3039,23 @@ env_vars:（可选；可配置环境变量声明，变量名须以 {NAME 大写}
 
 Vite 构建产物（Web UI）、桌面端 WebView 宿主、子Agent 代码一并编译进二进制，运行时按启动参数/环境变量切换形态，无需区分构建，也无需在运行时读取子Agent 文件。
 
-构建时支持**子Agent 选择性打包**（白名单/黑名单，见「子Agent」章节），不同发行规格（桌面全量版、服务端精简版）由同一源码产出：
+构建时支持**选择性打包**，不同发行规格（桌面全量版、服务端精简版、领域专用镜像）由同一源码产出：
 
 ```
-GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build   # 仅打包指定子Agent（依赖闭包自动展开）
-GEBAI_BUILD_PRELOAD=a bun run --cwd packages/server build      # 烘焙 def.preload=true
-bun run --cwd packages/server build                            # 全量（缺省）
+GEBAI_BUILD_SUBAGENTS=a,b bun run --cwd packages/server build      # 仅打包指定子Agent（依赖闭包自动展开）
+GEBAI_BUILD_EXCLUDE_SUBAGENTS=x,y bun run …                       # 排除指定子Agent（与包含清单互斥）
+GEBAI_BUILD_PRELOAD=a bun run …                                   # 烘焙 def.preload=true
+GEBAI_BUILD_EXCLUDE_TOOLS=show,fetch_url bun run …                # 全局工具不注册不暴露
+bun run --cwd packages/server build                              # 全量（缺省）
 # 注：选择性打包是**构建期环境变量**，无 --sub-agents/--exclude-sub-agents CLI；
 #     运行时黑名单用 GEBAI_SUB_AGENTS_ENABLE/DISABLE（见「子Agent 启停名单」）
 ```
+
+排除清单同样校验依赖完整性：保留者依赖了被排除的子Agent 时**构建直接失败**（要求把依赖方一并排除），
+不静默产出残缺产物。内嵌资产也可逐项裁剪（`GEBAI_BUILD_WEB_UI`/`CV`/`D2`/`ANALYZER`/`BROWSER`/`RG=0`
+时对应脚本写**空产物**，运行期按「本构建未内嵌 X」如实降级或走等价回退）；资产被源码静态 import，
+故一律写空产物而非不生成文件。前端 vendor 引擎组（monaco/plantuml/mermaid/echarts/d2js/xterm/
+tree_sitter）由 `GEBAI_WEB_VENDOR` 控制，未包含组会被删除，前端各引擎懒加载失败即降级。
 
 ### 运行模式区分
 
@@ -3062,13 +3070,15 @@ bun run --cwd packages/server build                            # 全量（缺省
 
 ### 容器镜像（服务模式）
 
-以 Ubuntu 24.04 为基础镜像的多阶段构建（`Dockerfile` + `docker/build.sh`/`build.ps1`，用法与边界见 `docker/README.md`）：构建阶段装依赖并跑完整构建链（Web UI 产物、子Agent/工具注册表、D2.js、tree-sitter wasm、playwright 驱动与 pwcore、内置 ripgrep、可选本地 CV），再 `bun build --compile` 产出单文件 Linux 可执行；运行阶段只有系统库加该二进制，**不含 node_modules、不含 bun**。镜像默认 `GEBAI_MODE=server` + `GEBAI_HOME=/data`（挂卷），因此路径沙箱与会话目录脚本隔离均强制开启。系统依赖只为明确用途而装：tini（PID 1 收尸）/ git / python3（py 工具、vision_pip）/ bubblewrap（隔离的文件系统层）/ fonts-noto-cjk（PDF 与图表中文）/ curl（健康探针）/ tzdata（定时任务）。
+以 Ubuntu 24.04 为基础镜像的多阶段构建（`Dockerfile` + `docker/build.sh`/`build.ps1`，用法与边界见 `docker/README.md`）：构建阶段装依赖并跑完整构建链（Web UI 产物、子Agent/工具注册表、D2.js、tree-sitter wasm、playwright 驱动与 pwcore、内置 ripgrep、可选本地 CV），再 `bun build --compile` 产出单文件 Linux 可执行；运行阶段只有系统库加该二进制，**不含 node_modules、不含 bun**。镜像默认 `GEBAI_MODE=server` + `GEBAI_HOME=/data`（挂卷），因此路径沙箱与会话目录脚本隔离均强制开启。系统依赖按裁剪计划安装：tini（PID 1 收尸）/ curl（健康探针）/ ca-certificates 为固定基础设施，其余分组可裁——git（git 工具与文件工作台面板）/ python3（py 工具、vision_pip）/ bubblewrap（隔离的文件系统层）/ fonts-noto-cjk（PDF 与图表中文）/ tzdata（定时任务）/ procps / chromium（浏览器类子Agent）。
+
+- **裁剪体系**：镜像构建支持完整裁剪——**能力层**（子Agent 包含/排除/预加载、全局工具、内嵌资产）、**前端资源层**（vendor 引擎组）、**系统层**（运行期 apt 包组）。入口是 `docker/build.sh --profile <名|路径>`（档案 `docker/profiles/*.json`，预置 `full` / `code` / `minimal`）与字段级覆盖 `--set 键=值`（CLI 优先于档案）；`scripts/build-image-plan.ts` 把档案与覆盖合并成一份构建计划（`GEBAI_BUILD_*` + `PLAN_*`），驱动各构建脚本、vendor 拷贝与运行期装包，并把裁剪报告打进构建日志、留在镜像内 `/etc/gebai/build-plan.env`（镜像裁了什么随时可查）。档案 schema 是运行期 `GEBAI_PROFILE`（见「启动裁剪与领域专用模式」）的**超集**：`assets`/`web`/`system` 三个构建段运行期不解释也不报错，因此同一份领域档案可从构建贯穿到运行，构建面与运行面不会漂移。可裁剪矩阵、档案字段与逐项降级口径见 `docker/README.md`「裁剪」。
 
 - **架构限制**：二进制内嵌的 `@resvg/resvg-js` 是平台原生模块，跨架构编译会嵌错平台——镜像仅支持「构建机架构 = 目标架构」。
 - **脚本文件系统隔离（bubblewrap）的容器前提已实测**：默认 seccomp 下容器内无法创建 user namespace（`unshare: Operation not permitted`），bwrap 不可用——此时自动降级为环境收敛（HOME/TEMP/XDG 仍在会话目录内）；`--cap-add SYS_ADMIN` **不够**（unshare 可用但 bwrap 卡在 `pivot_root: Operation not permitted`）；`--security-opt seccomp=unconfined` 实测可用（系统只读、仅会话目录可写、宿主家目录不可见）。
 - **能力边界**：`desktop`（宿主桌面操控）在服务模式一律不可用；`tts_speak` 仅 Windows；客卿子Agent 在服务模式整体禁用；`reel` 需 Node/ffmpeg/Chrome（未预装）；浏览器类子Agent 需 `--with-browser` 构建；容器内重启用 `docker restart`（而非 `restart_server` 工具）。
 
-架构与体积：`linux/amd64` 实测构建产出的镜像 867MB（二进制 244MB），构建耗时主要在前端构建与依赖安装（首次约数分钟，缓存后秒级）。
+架构与体积：`linux/amd64` 全量构建实测镜像 867MB（二进制 244MB），构建耗时主要在前端构建与依赖安装（首次约数分钟，缓存后秒级）；裁剪档案按维度削减同一份产物（`minimal` 档案同时裁掉 Web UI 内嵌产物、本地 CV、后端 D2、语法集、playwright-core、内置 ripgrep 与多个系统包组）。
 
 ### 升级与兼容
 

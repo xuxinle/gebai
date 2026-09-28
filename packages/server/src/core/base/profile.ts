@@ -6,6 +6,9 @@
  * 档案提供**默认值**，显式环境变量按字段覆盖（空 = 未配置即用档案值，见 `loadConfig`）；
  * 启动配置错误（档案缺失 / JSON 非法 / 字段类型不符 / 未知字段）在启动期直接抛错，
  * 不静默降级——配错档案却按默认能力面运行，比启动失败难排查得多。
+ *
+ * 档案同时可携带**构建期裁剪段**（`assets`/`web`/`system`，由 `scripts/build-image-plan.ts`
+ * 在镜像构建时消费）：运行期不解释也不报错，使同一份领域档案从构建到运行贯穿。
  */
 import { existsSync, readFileSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
@@ -50,7 +53,7 @@ export interface LoadedDomainProfile {
   path: string
 }
 
-const TOP_KEYS = ["name", "description", "prompt", "tools", "sub_agents"] as const
+const TOP_KEYS = ["name", "description", "prompt", "tools", "sub_agents", "assets", "web", "system"] as const
 const PROMPT_KEYS = ["enable", "disable", "extra", "extra_file"] as const
 const TOOLS_KEYS = ["enable", "disable"] as const
 const SUB_AGENT_KEYS = ["enable", "disable", "preload"] as const

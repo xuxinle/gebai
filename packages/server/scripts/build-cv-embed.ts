@@ -20,6 +20,7 @@ import { gzipSync } from "node:zlib"
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { agentsSrcPath } from "./agents-paths"
+import { buildFlag } from "./build-flags"
 
 const root = join(import.meta.dirname, "..") // scripts/ 上一级 = packages/server
 const outFile = agentsSrcPath("core", "cv", "cv.embedded.generated.json")
@@ -99,6 +100,14 @@ function extractDictFromRec(recBytes: Uint8Array): string | null {
 }
 
 async function main(): Promise<void> {
+  if (!buildFlag("GEBAI_BUILD_CV")) {
+    writeFileSync(outFile, JSON.stringify({ version: "", files: [] }))
+    console.log(
+      `[build-cv-embed] GEBAI_BUILD_CV=0：写空清单（本地 OCR/视觉定位不可用）-> ${outFile}\n` +
+        "  运行期工具会给出 GEBAI_CV_MODELS_DIR 配置指引。",
+    )
+    return
+  }
   // 模型：本地已有优先，缺失则下载
   const modelsReady =
     (existsSync(join(ocrDir, "det.onnx")) && existsSync(join(ocrDir, "rec.onnx"))) || (await downloadModels())
