@@ -727,6 +727,8 @@ async function searchWithRipgrep(opts: {
   before: number
   after: number
   maxMatches: number
+  /** 候选文件大小上限（字节）：与调用方的候选过滤同口径（超限文件本就未进 allowlist）。 */
+  maxFileBytes: number
   files: FileEntry[]
   resolveAbs: (display: string) => string
   /** 传给 rg 的排除目录（`-g !<dir>`）：与内置引擎的默认跳过规则同源。 */
@@ -745,7 +747,7 @@ async function searchWithRipgrep(opts: {
     "--no-ignore-dot",
     "--no-ignore-global",
     "--max-filesize",
-    String(GREP_MAX_FILE_BYTES),
+    String(opts.maxFileBytes),
     "--max-count",
     String(opts.maxMatches + 1),
   ]
@@ -975,7 +977,7 @@ async function searchWithBuiltin(opts: {
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。**结构化结果三键齐备**（`data.matches`/`data.files`/`data.counts`）——不论 output 选哪种模式，三键都在：主键为本次形态，其余为同一结果的另一种视图（精确与否读官方 outputSchema 一致），按任一键读取都不会静默得到空数组。" +
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。文件大小上限：目录递归搜索跳过超过 1MB 的文件（被跳过的文件数会在输出末尾注明），**显式指定单个文件路径时上限放宽到 8MB**（再超即明确报错引导分段读取）。**结构化结果三键齐备**（`data.matches`/`data.files`/`data.counts`）——不论 output 选哪种模式，三键都在：主键为本次形态，其余为同一结果的另一种视图（精确与否读官方 outputSchema 一致），按任一键读取都不会静默得到空数组。" +
     "搜索引擎：内置 ripgrep 优先（随包分发、无需系统安装）——rg 直接扫盘不把文件全文读进内存，大范围搜索快百倍；rg 不可用或其正则语法不支持该 pattern（Rust 引擎无后向引用/环视）时自动回退内置遍历引擎，`data.engine` 如实反映本次所用引擎（GEBAI_GREP_ENGINE=rg|builtin 可强制）。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
@@ -1062,8 +1064,20 @@ export const grepTool: Tool = {
     const listing = outside ?? (await ctx.listFiles())
     // path 精确命中单文件时直接内搜该文件（grep 传文件语义），否则按目录前缀过滤（范围外已按给定 path 定界）
     const exact = !outside && relPath ? listing.find((f) => !f.isDir && listPathCandidates(f.path).includes(relPath)) : undefined
+    // 大小上限：目录递归搜索用紧凑上限（候选可达上万，防大量大文件拖慢整体）；**显式指名单个文件**时
+    // 放宽到 read 同口径——调用方已指名要搜的文件，因体积被静默跳过（报「无匹配」）最违背预期
+    const sizeLimit = exact ? READ_MAX_FILE_BYTES : GREP_MAX_FILE_BYTES
+    if (exact && exact.size > sizeLimit) {
+      return { output: `grep: 文件过大（${exact.size} 字节，上限 ${sizeLimit}）——请用 read 的 offset/limit 分段读取定位`, data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
+    }
+    // 目录搜索时被大小上限挡下的文件数：输出末尾附提示，使「跳过」与「确实无命中」可区分
+    let skippedLarge = 0
     const files = (exact ? [exact] : listing).filter((f) => {
-      if (f.isDir || f.size > GREP_MAX_FILE_BYTES) return false
+      if (f.isDir) return false
+      if (f.size > sizeLimit) {
+        skippedLarge++
+        return false
+      }
       const cs = listPathCandidates(f.path)
       if (prefix && !exact && !cs.some((c) => c.startsWith(prefix))) return false
       if (includeRes && !globMatchAny(includeRes, cs)) return false
@@ -1072,7 +1086,11 @@ export const grepTool: Tool = {
       if (!exact && isDefaultExcluded(cs, includeRaw)) return false
       return true
     })
-    if (!files.length) return { output: "（无匹配文件）", data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
+    const sizeNote =
+      skippedLarge > 0
+        ? `\n注：另有 ${skippedLarge} 个文件超过大小上限（${Math.round(sizeLimit / 1024)}KB）未参与搜索——需搜这些文件时直接指定其路径（单文件内搜上限 ${Math.round(READ_MAX_FILE_BYTES / 1024 / 1024)}MB）或缩小 include 范围`
+        : ""
+    if (!files.length) return { output: `（无匹配文件）${sizeNote}`, data: { mode, matches: [], files: [], counts: [], engine: engineLabel } }
     // 引擎调度：rg 优先（rg 视野 ⊇ 过滤结果，回填时按 allowlist 收敛）；运行失败则回退内置遍历，
     // engine 如实反映**实际所用**引擎（可观测：rg 不可用/不支持的正则会静默回退，但不掩盖给调用方）
     const rootAbs = outside ? ctx.resolvePath(path) : ctx.resolvePath(".")
@@ -1093,6 +1111,7 @@ export const grepTool: Tool = {
         before,
         after,
         maxMatches,
+        maxFileBytes: sizeLimit,
         files,
         resolveAbs: (d) => ctx.resolvePath(d),
         // 默认跳过大型/生成目录（与内置引擎同款规则：include 显式点名该目录时不排除；单文件内搜无需）
@@ -1146,7 +1165,7 @@ export const grepTool: Tool = {
     // 三键齐备：任何模式都同时给出 matches（行级）/ files（文件清单）/ counts（每文件命中数）——
     // 此前各模式只给主键（content→matches / files→files / count→counts），调用方（js 编排/子 agent）
     // 统一按 `data.matches` 读取时，files/count 模式会静默得到空数组，把「未找到」误判为「不存在」。
-    const capNote = capped ? "\n…（已达匹配上限，结果可能不完整；可缩小 pattern/path/include 范围）" : ""
+    const capNote = (capped ? "\n…（已达匹配上限，结果可能不完整；可缩小 pattern/path/include 范围）" : "") + sizeNote
     const sortCounts = (list: Array<{ file: string; count: number }>) => [...list].sort((a, b) => b.count - a.count || a.file.localeCompare(b.file))
     const counts = sortCounts(fileCounts)
     const fl = counts.map((c) => c.file)
@@ -1158,7 +1177,7 @@ export const grepTool: Tool = {
       if (!counts.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [], engine } }
       return { ...(await truncate(counts.map((c) => `${c.file}: ${c.count}`).join("\n") + capNote, "grep", ctx)), data: { mode, matches, files: fl, counts, truncated: capped, engine } }
     }
-    if (!matches.length) return { output: "（无匹配）", data: { mode, matches: [], files: [], counts: [], engine } }
+    if (!matches.length) return { output: `（无匹配）${sizeNote}`, data: { mode, matches: [], files: [], counts: [], engine } }
     const truncated = await truncate(blocks.join("\n") + capNote, "grep", ctx)
     return { ...truncated, data: { mode, matches, files: fl, counts, truncated: capped, engine } }
   },

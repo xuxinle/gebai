@@ -2303,6 +2303,44 @@ describe("spillLongUserInput（超长用户输入落盘）", () => {
     cleanup(home)
   })
 
+  test("grep 大小上限：目录搜索跳过超限文件并注明；显式指定单文件路径放宽上限（1MB+ 可搜）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-grep-size-"))
+    const c = ctx(home)
+    const workdir = c.workdir
+    // 1.2MB 文件（> 目录搜索上限 1MB、< 单文件上限 8MB）与小文件同含目标词
+    const bigBody = Array.from({ length: 1300 }, (_, i) => (i === 700 ? "NEEDLE_BIG_HIT" : "x".repeat(1000))).join("\n")
+    writeFileSync(join(workdir, "big.md"), bigBody)
+    writeFileSync(join(workdir, "small.txt"), "NEEDLE_BIG_HIT small\n")
+    const bigSize = Buffer.byteLength(bigBody)
+    c.listFiles = async () => [
+      { path: "small.txt", size: 21, modifiedAt: 0, isDir: false },
+      { path: "big.md", size: bigSize, modifiedAt: 0, isDir: false },
+    ]
+    const tools = createGlobalTools()
+    // 目录搜索：big.md 超限被跳过（命中只来自 small.txt），输出注明跳过数——「被跳过」与「确实无命中」可区分
+    const dir = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT" }, c)
+    expect((dir.data as { files: string[] }).files).toEqual(["small.txt"])
+    expect(dir.output).toContain("另有 1 个文件超过大小上限")
+    // 显式指定单文件路径：上限放宽到 read 同口径（rg 的 --max-filesize 同步放宽），1MB+ 文件可搜到
+    const one = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT", path: "big.md" }, c)
+    expect(one.output).toContain("big.md:701: NEEDLE_BIG_HIT")
+    // rg 可用时确认走的正是 rg 引擎（宽度放宽须同时作用于 rg 侧参数，否则真实环境仍无命中）
+    if (await ripgrepAvailable()) {
+      expect((dir.data as { engine: string }).engine).toBe("rg")
+      expect((one.data as { engine: string }).engine).toBe("rg")
+    }
+    // 目录搜索零候选（全部超限）时同样给出提示，而非静默「（无匹配文件）」
+    c.listFiles = async () => [{ path: "big.md", size: bigSize, modifiedAt: 0, isDir: false }]
+    const onlyBig = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT" }, c)
+    expect(onlyBig.output).toContain("（无匹配文件）")
+    expect(onlyBig.output).toContain("未参与搜索")
+    // 显式指定仍超单文件上限（>8MB）的文件：明确报错引导分段读取，不再静默「无匹配」
+    c.listFiles = async () => [{ path: "huge.bin", size: 9 * 1024 * 1024, modifiedAt: 0, isDir: false }]
+    const tooBig = await tools.grep.execute({ pattern: "NEEDLE_BIG_HIT", path: "huge.bin" }, c)
+    expect(tooBig.output).toContain("文件过大")
+    cleanup(home)
+  })
+
   test("grep literal 按字面匹配正则元字符；head_limit 压低上限并标记 truncated", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-grep-lit-"))
     const c = ctx(home)
