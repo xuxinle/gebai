@@ -34,6 +34,10 @@ interface Fakes {
   sessions: Map<string, SessionData>
   users: Map<string, { id: string; username: string; role: "user" | "admin" }>
   deleted: string[]
+  /** 主动重建调用记录（recreateSession）。 */
+  recreated: string[]
+  /** 模拟外部删除 / GC 归档：会话从存储消失并置移除标记（真实 SessionStore 的 removed 语义）。 */
+  removeSession: (id: string, reason?: "deleted" | "archived") => void
   envSets: Array<{ sessionId: string; vars: Record<string, string> }>
   approvals: Array<{ sessionId: string; toolCallId: string; approve: boolean }>
   choices: Array<{ sessionId: string; choiceId: string; selection: string | string[] | null }>
@@ -77,6 +81,8 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
   const sent: Fakes["sent"] = []
   const runs: Fakes["runs"] = []
   const deleted: string[] = []
+  const recreated: string[] = []
+  const removed = new Map<string, "deleted" | "archived">()
   const envSets: Fakes["envSets"] = []
   const approvals: Fakes["approvals"] = []
   const choices: Fakes["choices"] = []
@@ -101,11 +107,21 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
       return s
     },
     save: async (s: SessionData) => {
+      // 真实 SessionStore 的 fail-closed：已移除会话（删除 / GC 归档）拒绝落盘
+      const reason = removed.get(s.id)
+      if (reason) throw new Error(`session ${reason}: ${s.id}（已从存储移除，不再落盘）`)
+      sessions.set(s.id, s)
+    },
+    recreateSession: async (s: SessionData, o?: { clean?: boolean }) => {
+      if (o?.clean) sessions.delete(s.id)
+      removed.delete(s.id)
+      recreated.push(s.id)
       sessions.set(s.id, s)
     },
     delete: async (id: string) => {
       deleted.push(id)
       sessions.delete(id)
+      removed.set(id, "deleted")
     },
     listSessionInfos: async (userId: string) => [...sessions.values()].filter((s) => s.userId === userId).map(toSessionInfo),
     setEnv: async (sessionId: string, _user: string, vars: Record<string, string | null>) => {
@@ -224,6 +240,11 @@ function makeBot(opts: Partial<{ authMode: "local" | "server"; home: string; han
     sessions,
     users,
     deleted,
+    recreated,
+    removeSession: (id: string, reason: "deleted" | "archived" = "archived") => {
+      sessions.delete(id)
+      removed.set(id, reason)
+    },
     envSets,
     approvals,
     choices,
@@ -1179,8 +1200,42 @@ describe("命令", () => {
     await flush()
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_n", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
     await flush()
-    expect(f.deleted).toContain(sid())
+    expect(f.recreated).toContain(sid())
     expect(f.sessions.get(sid())!.messages).toEqual([])
+  })
+
+  test("会话被删除/GC 归档后再交互：以归属身份重建（移除标记不阻断主动重建）", async () => {
+    const f = makeBot()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    expect(f.sessions.has(sid())).toBe(true)
+    // 外部删除（用户主动删 / 管理员清理）或 GC 归档：会话从存储消失且置移除标记
+    f.removeSession(sid(), "deleted")
+    await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_r1", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "还在吗" }) } }))
+    await flush()
+    expect(f.recreated).toContain(sid())
+    expect(f.sessions.has(sid())).toBe(true)
+    expect(f.runs.at(-1)!.prompt).toBe("还在吗")
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("会话初始化失败"))).toBe(false)
+    // GC 归档同理（会话仍在回收站，通道侧重建为新的空会话）
+    f.removeSession(sid(), "archived")
+    await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_r2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "再来" }) } }))
+    await flush()
+    expect(f.runs.at(-1)!.prompt).toBe("再来")
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("会话初始化失败"))).toBe(false)
+  })
+
+  test("/new 在被删除/归档的会话上仍可清空重建", async () => {
+    const f = makeBot()
+    await f.bot.handleFeishuEvent(receiveEvent())
+    await flush()
+    f.removeSession(sid(), "archived")
+    await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_n4", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
+    await flush()
+    expect(f.recreated).toContain(sid())
+    expect(f.sessions.get(sid())!.messages).toEqual([])
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("已新建会话"))).toBe(true)
+    expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("新建会话失败"))).toBe(false)
   })
 
   test("/sessions 列出会话", async () => {
@@ -1198,16 +1253,17 @@ describe("命令", () => {
     await flush()
     const owner = f.sessions.get(sid())!.userId
     expect(owner).toBe(`uid_${funame("ou_123")}`)
+    const recreatedBefore = f.recreated.length
     // 另一成员 ou_999 触发 /new：被拒（群聊防越权——清空共享会话上下文仅创建者可做）
     await f.bot.handleFeishuEvent(receiveEvent({ sender: { sender_id: { open_id: "ou_999" }, sender_type: "user" }, message: { message_id: "om_n2", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
     await flush()
-    expect(f.deleted).toEqual([])
+    expect(f.recreated).toHaveLength(recreatedBefore)
     expect(f.sent.some((s) => String(JSON.stringify(s.content)).includes("只有创建该会话的用户"))).toBe(true)
     // 创建者 ou_123 触发 /new：成功重建，归属不漂移
     await f.bot.handleFeishuEvent(receiveEvent({ message: { message_id: "om_n3", chat_id: "oc_chat1", message_type: "text", content: JSON.stringify({ text: "/new" }) } }))
     await flush()
     expect(f.sessions.get(sid())!.userId).toBe(owner)
-    expect(f.deleted).toContain(sid())
+    expect(f.recreated).toHaveLength(recreatedBefore + 1)
   })
 
   test("/cancel 群聊：非任务发起者被拒，发起者可取消", async () => {

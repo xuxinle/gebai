@@ -23,7 +23,7 @@ import type { BotPromptAdapter } from "./adapter"
 import { log } from "@gebai/sdk/node"
 
 /** 桥接用到的依赖子集（Pick 结构类型，便于测试注入 fake）。 */
-export type BotStore = Pick<SessionStore, "load" | "save" | "delete" | "listSessionInfos" | "setEnv" | "getTmpDir">
+export type BotStore = Pick<SessionStore, "load" | "save" | "recreateSession" | "delete" | "listSessionInfos" | "setEnv" | "getTmpDir">
 export type BotAuth = Pick<AuthService, "defaultUser" | "listUsers" | "createUser">
 
 /** 长连接客户端最小形状（测试注入 fake）。 */
@@ -562,12 +562,13 @@ export class FeishuBot {
       await this.loadOwners()
       const owner = this.chatOwners.get(chatId)
       if (owner) {
-        // 归属已知：确认会话存在（被外部删除时以归属身份重建，不漂移）
+        // 归属已知：确认会话存在（被外部删除/GC 归档时以归属身份重建，不漂移——
+        // 确定性会话 id 走主动重建通道，清除可能残留的移除标记）
         const existing = await this.opts.store.load(sessionId, owner)
         if (!existing) {
           const name = (await this.api.getChatName(chatId)) ?? "飞书会话"
           const now = this.clock()
-          await this.opts.store.save({ id: sessionId, name, userId: owner, messages: [], todos: [], createdAt: now, updatedAt: now })
+          await this.opts.store.recreateSession({ id: sessionId, name, userId: owner, messages: [], todos: [], createdAt: now, updatedAt: now })
           this.log(`session recreated: ${sessionId} (user=${owner})`)
         }
         return sessionId
@@ -577,7 +578,7 @@ export class FeishuBot {
       if (!userId) throw new Error("无法为该飞书用户创建映射用户（用户注册失败）")
       const name = (await this.api.getChatName(chatId)) ?? "飞书会话"
       const now = this.clock()
-      await this.opts.store.save({ id: sessionId, name, userId, messages: [], todos: [], createdAt: now, updatedAt: now })
+      await this.opts.store.recreateSession({ id: sessionId, name, userId, messages: [], todos: [], createdAt: now, updatedAt: now })
       this.chatOwners.set(chatId, userId)
       this.chatCreators.set(chatId, openId)
       await this.saveOwners()
@@ -1070,12 +1071,20 @@ export class FeishuBot {
         }
         this.cleanupChoices(chatId)
         this.cleanupApprovals(chatId)
-        await this.opts.store.delete(sessionId, owner)
         this.active.delete(sessionId)
         this.runOwners.delete(sessionId)
         const now = this.clock()
         const name = (await this.api.getChatName(chatId)) ?? "飞书会话"
-        await this.opts.store.save({ id: sessionId, name, userId: owner, messages: [], todos: [], createdAt: now, updatedAt: now })
+        try {
+          // 同 id 清空重建：走主动重建通道（清除移除标记），旧目录连同 tmp 附件一并删除
+          await this.opts.store.recreateSession(
+            { id: sessionId, name, userId: owner, messages: [], todos: [], createdAt: now, updatedAt: now },
+            { clean: true },
+          )
+        } catch (err) {
+          outbox.sendText(`⚠️ 新建会话失败：${String((err as Error).message || err)}`)
+          break
+        }
         outbox.sendText("✅ 已新建会话，上下文已清空。")
         break
       }

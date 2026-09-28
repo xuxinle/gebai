@@ -514,6 +514,41 @@ describe("SessionStore ownership", () => {
     cleanup(home)
   })
 
+  test("recreateSession：已删除/已归档会话以同 id 主动重建（清移除标记）；clean 清空旧目录", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-recreate-"))
+    const store = new SessionStore({ home })
+    const s = await store.createSession("alice")
+    await store.appendMessage(s.id, { id: "m1", role: "user", content: "hi", createdAt: Date.now() })
+    const dir = sessionPath(home, "alice", s.id)
+    mkdirSync(join(dir, "tmp"), { recursive: true })
+    await writeFile(join(dir, "tmp", "note.txt"), "attachment")
+    const now = Date.now()
+    const blank = () => ({ id: s.id, name: "重建", userId: "alice", messages: [], todos: [], createdAt: now, updatedAt: now })
+    /** 删除后主动重建：同 id 落盘成功（陈旧引用的 save 仍被拒，两类调用方由此区分）。 */
+    await store.delete(s.id, "alice")
+    expect(existsSync(dir)).toBe(false)
+    await store.recreateSession(blank())
+    const rebuilt = await store.load(s.id, "alice")
+    expect(rebuilt?.messages).toEqual([])
+    expect(rebuilt?.name).toBe("重建")
+    await expect(store.appendMessage(s.id, { id: "m2", role: "user", content: "after", createdAt: Date.now() })).resolves.toBeUndefined()
+    /** GC 归档后：磁盘无目录 + archived 标记，主动重建同样成功。 */
+    const trashDir = join(home, "users", "alice", "trash", "2020-01-01", s.id)
+    mkdirSync(join(home, "users", "alice", "trash", "2020-01-01"), { recursive: true })
+    await rename(dir, trashDir)
+    store.markRemoved(s.id, "archived")
+    // 模拟 GC 归档时一并归档 tmp 附件
+    mkdirSync(join(trashDir, "tmp"), { recursive: true })
+    await writeFile(join(trashDir, "tmp", "note.txt"), "archived attachment")
+    /** clean: true 先删旧目录（含 tmp 附件）再落盘空会话。 */
+    await store.recreateSession(blank(), { clean: true })
+    expect((await store.load(s.id, "alice"))!.messages).toEqual([])
+    expect(existsSync(join(dir, "tmp", "note.txt"))).toBe(false)
+    // 归档副本仍在回收站（恢复通道对已存在会话返回冲突，不覆盖重建后的内容）
+    expect(existsSync(join(trashDir, "chat.json"))).toBe(true)
+    cleanup(home)
+  })
+
   test("legacy session without userId cannot be resolved cross-user via index", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-legacy-"))
     const store = new SessionStore({ home })

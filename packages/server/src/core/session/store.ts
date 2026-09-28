@@ -309,7 +309,8 @@ export class SessionStore {
   private owners = new Map<string, string>()
   /** 会话 id → 移除原因（删除 / GC 归档）：`save()` 拒绝为已移除会话落盘——
    *  移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾/压缩/任务结果写回 等直接 save 路径）
-   *  不会把已删/已归档会话连同数据整体重建；新建会话（新 id 不复用）与回收站恢复会清除该标记。 */
+   *  不会把已删/已归档会话连同数据整体重建；新建会话（新 id 不复用）、回收站恢复与主动重建
+   *  （`recreateSession`——确定性会话 id 的通道在会话消失后重新开始）会清除该标记。 */
   private removed = new Map<string, RemovalReason>()
 
   constructor(private opts: SessionStoreOptions) {}
@@ -504,7 +505,8 @@ export class SessionStore {
    *  已移除会话（删除 / GC 归档）**拒绝落盘**：移除后仍持有旧 `SessionData` 的调用方（运行中任务收尾、
    *  上下文压缩、任务结果写回 等直接 save 路径）会把已删/已归档会话连同数据整体重建——会话已从列表/磁盘
    *  消失，写入应当报错而非静默复活。引用为“已死”是编程错误，按 fail-closed 报出（与 appendMessage
-   *  的 session not found 同口径）。新建会话（新 id 不复用）与回收站恢复（clearRemoved）不受影响。 */
+   *  的 session not found 同口径）。新建会话（新 id 不复用）、回收站恢复（clearRemoved）与主动重建
+   *  （`recreateSession`——调用方显式声明）不受影响。 */
   async save(session: SessionData, opts: { touch?: boolean } = {}): Promise<void> {
     const reason = this.removed.get(session.id)
     if (reason) throw new Error(`session ${reason}: ${session.id}（已从存储移除，不再落盘）`)
@@ -745,6 +747,16 @@ export class SessionStore {
     }
     await rm(this.dir(session.userId, sessionId), { recursive: true, force: true })
     this.markRemoved(sessionId, "deleted")
+  }
+
+  /** 以同一 id 主动重建会话（确定性会话 id 的通道在会话被删除 / GC 归档后重新开始，如飞书 chat_id →
+   *  会话 id）：清除移除标记后落盘——`save()` 的 fail-closed 只针对「移除后仍持有旧 `SessionData` 的
+   *  隐式落盘」（运行中任务收尾/压缩/任务结果写回），主动重建由调用方经本方法显式声明。
+   *  clean: true 先删除旧目录（连同 tmp 附件），即「清空上下文重建」。 */
+  async recreateSession(session: SessionData, opts: { clean?: boolean } = {}): Promise<void> {
+    if (opts.clean) await rm(this.dir(session.userId, session.id), { recursive: true, force: true })
+    this.clearRemoved(session.id)
+    await this.save(session)
   }
 
   /**
