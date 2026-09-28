@@ -3,7 +3,7 @@
  * 发送消息时随 prompt 请求临时注入服务端（仅本次任务生效，不持久化到服务端、不落盘，
  * 防敏感配置在服务端泄露——密钥等只存在用户自己的浏览器）。
  *
- * 来源合并（后者覆盖前者）：独立配置文件预置（`gebai.config.js` 的 env / envFromStorage，见 boot-config）
+ * 来源合并（后者覆盖前者）：二开配置预置（`custom/web/gebai.config.js` 的 env / envFromStorage，见 boot-config）
  * → 本浏览器面板设置（localStorage）。用户在面板里的选择始终为准。
  */
 import { webConfigEnv } from "./boot-config"

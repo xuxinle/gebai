@@ -12,6 +12,9 @@ custom/
 ├── core/            # 二开依赖组件（自动可 import——同 packages/agents/src/core/ 布局）
 │   └── my_lib/                   # ← 自建：{lib}/index.ts，子代理内相对引用 ../../core/{lib}
 │       └── index.ts
+├── web/             # 二开前端脚本（复制示例改名即启用；构建/开发时带到 Web 产物根，在入口脚本之前引入）
+│   ├── gebai.config.example.js   #    配置示例 → 复制为 gebai.config.js 生效
+│   └── init.example.js           #    初始化脚本示例 → 复制为 init.js 生效（产物名 gebai.custom.js）
 └── tsconfig.json    # 已配 paths：@gebai/sdk / @gebai/sdk/node / @gebai/agents 指向上游包
 ```
 
@@ -36,3 +39,23 @@ custom/
 
 新版本歌白发布后：`cp -r custom/ <新仓库根>/`（目录内文件覆盖同名，`.gitkeep` 无碍），重启即生效。
 二开资产与上游升级互不干扰。
+
+## 前端脚本（`custom/web/`）
+
+Web UI 浏览器端的二开入口，**页面加载即执行、先于歌白应用初始化**（普通 script 同步执行，而入口模块
+脚本为 deferred）——承担本地存储初始化、用户注册与登录这类必须先于应用初始化的动作：
+
+- `gebai.config.js`（配置）：经 `window.__GEBAI_WEB_CONFIG__` 预置浏览器环境变量、把宿主 localStorage
+  映射为歌白设置、关闭 URL 携带提示词自动运行、调整二开引导的等待上限（`bootTimeout`）。
+- `init.js`（初始化脚本，产物根名 `gebai.custom.js`）：可执行任意初始化逻辑——直接读写 localStorage、
+  调 `/api/v1/auth/*` 完成注册/登录（令牌写入 `gebai.auth.token`）、或写入宿主登录态供「外部身份兑换」
+  自动换令牌；需要 await 的动作赋给 `window.__GEBAI_WEB_BOOT__`（Promise / 返回 Promise 的函数 /
+  二者组成的数组），歌白会在应用初始化最早期等待其完成（超时与异常只记控制台警告、不阻塞页面）。
+
+**启用方式：复制示例改名**——目录内的 `gebai.config.example.js` 与 `init.example.js` 是带注释的模板，
+**不参与接入**；把它们复制为 `gebai.config.js` / `init.js` 即生效。之所以用示例名：本目录属二开域，
+上游版本更新时会把 `custom/` 整体复制到新仓库根——生效文件不会被覆盖，示例随上游刷新供对照参考。
+
+生效后构建（或 `vite dev`）时由 vite 插件带到前端产物根，`index.html` / `files.html` 自动在入口模块
+脚本之前引入**已启用的那些脚本**（按产物根文件名自动接入、无需清单；`init.js` 以并列命名
+`gebai.custom.js` 输出；未启用的脚本不产出也不注入）。纯前端文件，改完刷新页面即生效（不需要重启服务）。

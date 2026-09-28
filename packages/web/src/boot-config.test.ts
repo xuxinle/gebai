@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import {
+  BOOT_KEY,
   CONFIG_KEY,
+  DEFAULT_BOOT_TIMEOUT,
+  MAX_BOOT_TIMEOUT,
   applyWebConfig,
   applyWebConfigStorage,
+  awaitCustomBoot,
+  bootPromises,
   configEnv,
   normalizeWebConfig,
   readWebConfig,
@@ -21,9 +26,10 @@ function store(init: Record<string, string> = {}) {
 
 describe("normalizeWebConfig（容错归一化）", () => {
   test("非对象/数组/undefined 回落默认（URL 提示词默认开启）", () => {
-    expect(normalizeWebConfig(undefined)).toEqual({ env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true })
-    expect(normalizeWebConfig("x")).toEqual({ env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true })
-    expect(normalizeWebConfig([1, 2])).toEqual({ env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true })
+    const empty = { env: {}, envFromStorage: {}, storage: {}, allowUrlPrompt: true, bootTimeout: DEFAULT_BOOT_TIMEOUT }
+    expect(normalizeWebConfig(undefined)).toEqual(empty)
+    expect(normalizeWebConfig("x")).toEqual(empty)
+    expect(normalizeWebConfig([1, 2])).toEqual(empty)
   })
 
   test("env 丢弃空值与非字符串；键值 trim", () => {
@@ -52,6 +58,16 @@ describe("normalizeWebConfig（容错归一化）", () => {
     expect(normalizeWebConfig({ allowUrlPrompt: false }).allowUrlPrompt).toBe(false)
     expect(normalizeWebConfig({ allowUrlPrompt: 0 }).allowUrlPrompt).toBe(true)
     expect(normalizeWebConfig({}).allowUrlPrompt).toBe(true)
+  })
+
+  test("bootTimeout 归一：0 保留、正数取整且封顶、其余回落默认", () => {
+    expect(normalizeWebConfig({}).bootTimeout).toBe(DEFAULT_BOOT_TIMEOUT)
+    expect(normalizeWebConfig({ bootTimeout: 0 }).bootTimeout).toBe(0)
+    expect(normalizeWebConfig({ bootTimeout: 1200.7 }).bootTimeout).toBe(1200)
+    expect(normalizeWebConfig({ bootTimeout: 999_999 }).bootTimeout).toBe(MAX_BOOT_TIMEOUT)
+    for (const bad of [-5, "3000", Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      expect(normalizeWebConfig({ bootTimeout: bad }).bootTimeout).toBe(DEFAULT_BOOT_TIMEOUT)
+    }
   })
 })
 
@@ -127,5 +143,110 @@ describe("applyWebConfig + urlPromptAllowed（URL 提示词开关）", () => {
     const s = store()
     expect(applyWebConfig({ host: {}, store: s })).toEqual({ written: [], allowUrlPrompt: true })
     expect(s.dump()).toEqual({})
+  })
+})
+
+/** 抑制引导路径的 console.warn（提示类日志，测试只验证行为）。 */
+async function quiet<T>(fn: () => T | Promise<T>): Promise<T> {
+  const orig = console.warn
+  console.warn = () => {}
+  try {
+    return await fn()
+  } finally {
+    console.warn = orig
+  }
+}
+
+describe("bootPromises（二开初始化脚本引导值收集）", () => {
+  test("Promise / 返回 Promise 的函数 / 嵌套数组均收集", async () => {
+    const p1 = Promise.resolve("a")
+    const p2 = Promise.resolve("b")
+    const host = { [BOOT_KEY]: [p1, () => p2, [() => Promise.resolve("c")]] }
+    const got = await quiet(() => bootPromises(host))
+    expect(got.length).toBe(3)
+    expect(got[0]).toBe(p1)
+    expect(got[1]).toBe(p2)
+    await expect(got[2]!).resolves.toBe("c")
+  })
+
+  test("非 Promise 项与缺省值忽略（不抛错）", async () => {
+    await quiet(async () => {
+      expect(bootPromises({})).toEqual([])
+      expect(bootPromises({ [BOOT_KEY]: "not-promise" })).toEqual([])
+      expect(bootPromises({ [BOOT_KEY]: 42 })).toEqual([])
+    })
+  })
+
+  test("引导函数抛错只忽略该值，不向外抛", async () => {
+    const host = {
+      [BOOT_KEY]: (): unknown => {
+        throw new Error("boom")
+      },
+    }
+    expect(await quiet(() => bootPromises(host))).toEqual([])
+  })
+
+  test("宿主取值抛错回落空数组", async () => {
+    const host = {
+      get [BOOT_KEY](): unknown {
+        throw new Error("denied")
+      },
+    }
+    expect(await quiet(() => bootPromises(host))).toEqual([])
+  })
+})
+
+describe("awaitCustomBoot（init 最早期等待二开异步引导）", () => {
+  test("等待引导完成后再继续", async () => {
+    const order: string[] = []
+    const host = {
+      [BOOT_KEY]: (async () => {
+        await Promise.resolve()
+        order.push("boot")
+      })(),
+    }
+    await quiet(() => awaitCustomBoot({ host }))
+    order.push("after")
+    expect(order).toEqual(["boot", "after"])
+  })
+
+  test("无引导值时立即返回", async () => {
+    await awaitCustomBoot({ host: {} })
+  })
+
+  test("引导失败（reject）被吞掉，不向调用方抛出", async () => {
+    const host = { [BOOT_KEY]: Promise.reject(new Error("boom")) }
+    await quiet(() => awaitCustomBoot({ host }))
+  })
+
+  test("超时（bootTimeout）到点即继续，后台引导仍可落定", async () => {
+    let release: () => void = () => {}
+    const pending = new Promise<void>((r) => {
+      release = r
+    })
+    const host = { [CONFIG_KEY]: { bootTimeout: 20 }, [BOOT_KEY]: pending }
+    await quiet(() => awaitCustomBoot({ host }))
+    release()
+    await pending
+  })
+
+  test("bootTimeout: 0 不等待（永不落定的引导不阻塞）", async () => {
+    const host = { [CONFIG_KEY]: { bootTimeout: 0 }, [BOOT_KEY]: new Promise<void>(() => {}) }
+    await quiet(() => awaitCustomBoot({ host }))
+  })
+
+  test("同一宿主重复调用复用同一次等待（引导函数只求值一次）", async () => {
+    let calls = 0
+    const host = {
+      [BOOT_KEY]: (): Promise<void> => {
+        calls++
+        return Promise.resolve()
+      },
+    }
+    await quiet(async () => {
+      await awaitCustomBoot({ host })
+      await awaitCustomBoot({ host })
+    })
+    expect(calls).toBe(1)
   })
 })

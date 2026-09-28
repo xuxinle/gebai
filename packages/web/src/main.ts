@@ -17,7 +17,7 @@ import { bindTodoPop } from "./todo-pop"
 import { bindTasks } from "./tasks"
 import { bindFilesSplit } from "./files-split"
 import { loadLocalEnv } from "./env-local"
-import { applyWebConfig, urlPromptAllowed } from "./boot-config"
+import { applyWebConfig, awaitCustomBoot, urlPromptAllowed } from "./boot-config"
 import { runUrlPromptFromLocation } from "./url-prompt"
 import { bindThemePop, initTheme } from "./theme"
 import { initThemeFx } from "./theme-fx"
@@ -44,7 +44,8 @@ import { bindTooltips, toast } from "./ui"
 // 模块无具名导出，不导入则钩子恒为 null，刷新后运行中会话不恢复（在途流不续接/待决卡片不重建、任务超时）
 import "./attach"
 
-// 独立配置文件（gebai.config.js，二开扩展点）：模块加载即应用——先于任何模块级/初始化期读取 localStorage 的代码
+// 二开前端脚本（custom/web/，产物根 gebai.config.js 与 gebai.custom.js）：配置模块加载即应用——先于任何
+// 模块级/初始化期读取 localStorage 的代码；初始化脚本的异步引导在 init 首行等待（awaitCustomBoot）
 applyWebConfig()
 
 /* ---------- 会话导出 ---------- */
@@ -185,6 +186,8 @@ async function sendUrlPrompt(sessionId: string, text: string): Promise<void> {
 }
 
 async function init() {
+  // 二开初始化脚本（gebai.custom.js）：等其本地存储初始化 / 注册登录完成再继续（超时兜底，见 boot-config）
+  await awaitCustomBoot()
   blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
   initLowPower() // 先于主题：data-low-power 就位后再应用主题（避免切换动画）
   initFxPanels() // 特效面板形态（毛玻璃/实底）：根元素标记先于主题与特效挂载

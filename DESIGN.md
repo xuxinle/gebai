@@ -461,7 +461,7 @@ class GebaiClient {
 | 形态 | 启动方式 | 说明 |
 |------|---------|------|
 | **本地模式**（默认） | 直接运行二进制 / 访问 `http://127.0.0.1:{port}` | 本机使用，直接以 **admin 用户**身份工作，**免登录、不受任何权限限制**（超级权限 + 路径沙箱豁免）；桌面 WebView / 浏览器均可 |
-| **服务模式** | 后台运行二进制 + `GEBAI_MODE=server`（或 `--server` 参数） | 部署在服务器上，多用户公用，**账号密码登录**（密码仅存加盐哈希）；**开放注册**（注册用户为普通角色）；admin 为特权用户，**唯一入口是 `GEBAI_ADMIN_PASSWORD_HASH`**（未设置时 admin 禁用） |
+| **服务模式** | 后台运行二进制 + `GEBAI_MODE=server`（或 `--server` 参数） | 部署在服务器上，多用户公用，**账号密码登录**（密码仅存加盐哈希）；**开放注册**（注册用户为普通角色；策略由 `GEBAI_SIGNUP_MODE` 控制——`open`（默认）= 自助注册、注册即用免审批，`approval` = 注册后待 admin 审批）；admin 为特权用户，**唯一入口是 `GEBAI_ADMIN_PASSWORD_HASH`**（未设置时 admin 禁用） |
 
 核心逻辑完全一致，仅宿主（WebView / 浏览器 / 远程）与用户机制不同。
 
@@ -596,7 +596,7 @@ class GebaiClient {
 - **模型能力声明**：`LLMProvider.capabilities()` 返回 `{ streaming, toolCalling, multimodal, maxContextTokens, maxOutputTokens }`——`maxOutputTokens`（单次响应输出上限）为上下文压缩的触发基准（窗口剩余必须足够支撑一次回复）；`maxContextTokens` 用于上下文占用判定
 - 通过 `GEBAI_MODE`（默认 `local`；兼容旧 `GEBAI_AUTH`，或 CLI `--server`）环境变量切换运行形态：
   - **本地模式**（默认）：无需登录，直接以 **admin 用户**身份工作（**管理员超级权限 + 路径沙箱豁免**，不受任何权限限制），数据仍按用户目录存储
-  - **服务模式**：启用登录鉴权（用户名/密码），密码仅存**加盐哈希**（scrypt，不落明文），会话按用户隔离，多用户公用同一服务端；**开放注册**（注册用户恒为普通角色）；**admin 为特权用户**（不受用户权限限制），**唯一入口是 `GEBAI_ADMIN_PASSWORD_HASH`**（未配置时 admin 禁用，但普通用户可注册使用）
+  - **服务模式**：启用登录鉴权（用户名/密码），密码仅存**加盐哈希**（scrypt，不落明文），会话按用户隔离，多用户公用同一服务端；**开放注册**（注册用户恒为普通角色；策略由 `GEBAI_SIGNUP_MODE` 控制，`open` 默认＝自助注册免审批，见「环境变量」表）；**admin 为特权用户**（不受用户权限限制），**唯一入口是 `GEBAI_ADMIN_PASSWORD_HASH`**（未配置时 admin 禁用，但普通用户可注册使用）
 - 业务系统集成统一走**账号密码认证**：`POST /api/v1/auth/login` 获取令牌后以 `Authorization: Bearer <token>` 调用 REST；或**单次请求直接带 HTTP Basic**（`Authorization: Basic base64(username:password)`，等价隐式登录，复用密码校验与登录限流、不签发令牌）；WS 用 `auth.login { token }` 建立用户上下文——**无独立服务令牌**（原 `GEBAI_SERVICE_API_KEY` 服务身份机制已移除，避免任何服务端密钥进入 Agent 可达环境）
 - **启动加载策略（重依赖惰性化）**：以「服务可用性优先」组织启动——`listening` 之前只加载引擎主循环与装配必需的模块，重第三方依赖一律延迟到首次实际使用（ESM 用 `await import()`，同步 API 用模块级单例 `require` 缓存）：
   - **图表渲染**（`core/support/diagram-render.ts`：echarts/happy-dom/mermaid/plantuml/d2）：引擎（ToolContext `renderDiagram`）与飞书桥接（`FeishuBot.rendererOf`）均惰性取，不在启动路径
@@ -2904,7 +2904,7 @@ WebSocket 消息格式（JSON）：
 - **外部身份扩展点（同源集成）**：服务模式下网站可复用自身登录态作为 GEBAI 用户——配置 `GEBAI_EXTERNAL_AUTH_*` 后，前端把本地登录态经 URL 参数（`?gb_ext_username=&gb_ext_credential=`）或 localStorage（`GEBAI_EXTERNAL_AUTH_STORAGE_KEY`，同源直读）交给 Web UI，Web UI 启动时自动调 `POST /api/v1/auth/exchange` 兑换令牌（HMAC 验签或 HTTP 回调验证，见「认证与鉴权」）；业务系统也可用 SDK `exchangeExternalUser` 自行对接（React/Vue 等任意前端），无需依赖内置 UI
 - **身份对接**：服务模式下支持**外部身份兑换扩展点**（`GEBAI_EXTERNAL_AUTH_SECRET` HMAC / `GEBAI_EXTERNAL_AUTH_URL` 回调，见「多用户隔离与安全」），复用业务系统已有账号体系；**标准 SSO/OIDC 对接未实现**（列于「待实现」）
 - **URL 携带提示词自动运行（`gb_prompt`）**：业务系统跳转链接可直接带任务进来——`?gb_prompt=<文本>`（URL 编码）在页面首屏就绪后自动**新建会话并发送该提示词**，随后把地址栏 `history.replaceState` 为会话地址（`?session=<会话 id>`，其余参数保留、`gb_prompt`/`gb_new` 移除）；刷新因此只打开该会话，**不会重复创建会话、重复执行任务**。`gb_new=1` 强制新建（同链接带 `session` 时也新建）；带 `session=<id>` 且会话存在时改为在该会话续接发送，该会话运行中则不抢占（重定向后把提示词回落输入框并提示）；建会话失败时提示词回落输入框且**不重定向**（刷新重试仍会执行）。关闭入口用独立配置文件的 `allowUrlPrompt: false`（默认开）；解析/重定向/编排见 `packages/web/src/url-prompt.ts`
-- **前端独立配置文件（`gebai.config.js`）**：产物根的可选文件（`packages/web/public/gebai.config.js` 是带注释的模板），`index.html` 与 `files.html` 在模块脚本之前自动引入（相对路径，反代子路径下成立；文件缺失时静默跳过）——二开把「环境变量预置」与「宿主 localStorage → 歌白设置」写成配置即可接入已有系统，**无需改动上游源码**（升级时整文件原样保留）。通过 `window.__GEBAI_WEB_CONFIG__` 暴露：`env`（预置浏览器环境变量，随消息请求注入，与设置面板同一通道）、`envFromStorage`（环境变量 ← 宿主 localStorage 键，运行时读取）、`storage`（歌白设置键 ← 宿主键/字面值，仅在歌白键**未设置**时写入，`force: true` 才覆盖）、`allowUrlPrompt`。应用时机在页面初始化最早期（先于主题/低功耗/文件展示等读取 localStorage 的模块），优先级为 URL 参数 > 用户本次手动选择 > 本地存储既有值 > 配置文件 > 服务端全局配置 > 内置默认；读取与容错归一化见 `packages/web/src/boot-config.ts`（配置写错不使页面失效，按空配置处理）
+- **二开前端脚本（`custom/web/`）**：二开域内的浏览器端脚本，**先于应用初始化执行**——`packages/web/vite.config.ts` 的 `gebai-custom-web` 插件把已启用的脚本（`gebai.config.js` / `init.js`，出厂为同目录 `*.example.js` 示例模板，复制改名即启用；示例不参与接入，上游更新复制 `custom/` 时只刷新示例、不动已启用文件）带到前端产物根（dev 按产物根路径伺服；构建结束时复制），`index.html` / `files.html` 在入口模块脚本之前引入**存在的那几个**（普通 script 同步执行，而 module 为 deferred，故两者都在应用初始化之前运行；`./` 相对路径，反代子路径下成立）。两个文件分工：`gebai.config.js` 是**配置**——经 `window.__GEBAI_WEB_CONFIG__` 暴露 `env`（预置浏览器环境变量，随消息请求注入，与设置面板同一通道）、`envFromStorage`（环境变量 ← 宿主 localStorage 键，运行时读取）、`storage`（歌白设置键 ← 宿主键/字面值，仅在歌白键**未设置**时写入，`force: true` 才覆盖）、`allowUrlPrompt`、`bootTimeout`（二开初始化脚本异步引导的等待上限，默认 3000ms、0 = 不等待）；`init.js`（产物根名 `gebai.custom.js`）是**初始化脚本**——页面加载即执行，承担二开的本地存储初始化、用户注册与登录等（调 `/api/v1/auth/*` 写 `gebai.auth.token`，或写宿主登录态交给外部身份兑换）；需要 await 的动作赋给 `window.__GEBAI_WEB_BOOT__`（Promise / 返回 Promise 的函数 / 二者组成的数组），`awaitCustomBoot` 在两个页面入口的 init 首行等待其完成（异常与超时只记控制台警告、不阻塞页面）。配置应用时机在最早期（先于主题/低功耗/文件展示等读取 localStorage 的模块），优先级为 URL 参数 > 用户本次手动选择 > 本地存储既有值 > 配置文件 > 服务端全局配置 > 内置默认；读取与容错归一化见 `packages/web/src/boot-config.ts`（配置写错不使页面失效，按空配置处理）。目录内脚本按产物根文件名自动接入（无需清单），升级时整个 `custom/` 拷到新仓库根即完成迁移
 - **审批集成**：审批请求可通过 REST/Webhook 转发到业务系统审批流，而非局限于内置 UI
 
 ### 飞书机器人集成

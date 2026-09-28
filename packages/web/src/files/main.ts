@@ -49,10 +49,11 @@ import { createCompareView, WORKTREE, type CompareView } from "./compare"
 import { renderViewer, downloadUrl, type ViewerCtx } from "./viewers"
 import { previewKindOf } from "./preview-kind"
 import { blockNativeContextMenu } from "../native-menu"
-import { applyWebConfig } from "../boot-config"
+import { applyWebConfig, awaitCustomBoot } from "../boot-config"
 import { h, icon, clear, toast, formatSize, formatTime, extOf, confirmDialog, promptDialog, showMenu, dropdown, closeMenu } from "./ui"
 
-// 独立配置文件（gebai.config.js，二开扩展点）：模块加载即应用——先于下面模块级读取 localStorage 的代码
+// 二开前端脚本（custom/web/，产物根 gebai.config.js 与 gebai.custom.js）：配置模块加载即应用——先于下面
+// 模块级读取 localStorage 的代码；初始化脚本的异步引导在 boot 首行等待（awaitCustomBoot）
 applyWebConfig()
 
 /* ------------------------------ 全局状态 ------------------------------ */
@@ -3612,6 +3613,8 @@ function bindUnsavedGuard(): void {
 }
 
 async function boot(): Promise<void> {
+  // 二开初始化脚本（gebai.custom.js）：等其本地存储初始化 / 注册登录完成再继续（超时兜底，见 boot-config）
+  await awaitCustomBoot()
   blockNativeContextMenu() // 全局禁掉浏览器原生右键菜单（自绘菜单不受影响，见 native-menu.ts）
   bindUnsavedGuard() // 有未保存改动时离开先确认（浏览器自己的 Ctrl+W 拦不住，这是兵底）
   installWorkbenchKeys(bindings) // 键盘快捷键：接管 document keydown（键位族与守卫见 ../keymap.ts）

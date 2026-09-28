@@ -130,6 +130,10 @@ GEBAI_MODE=server GEBAI_ADMIN_PASSWORD_HASH=salt:hash ./gebai.exe
 
 **模型配置可以完全由前端完成**：服务端不配任何模型变量，用户在浏览器「设置 → 环境变量」面板填入密钥（**仅存 localStorage，服务端零留存**），随消息临时注入；用户环境变量在服务端不落盘、重启即空，用户之间互不可见。
 
+**注册策略**：默认 `GEBAI_SIGNUP_MODE=open`——**用户可自助注册、注册即用、无需审批**（注册用户恒为普通角色）；置 `approval` 则注册后为待审状态，须 admin 在设置「用户」页批准后才可登录。
+
+**English.** **Registration policy**: `GEBAI_SIGNUP_MODE=open` (default) lets users self-register and sign in immediately with no approval; `approval` puts new accounts in a pending state until an admin approves them in Settings → Users.
+
 **English.** **Model configuration can be done entirely in the frontend**: the server needs no model variables at all — users enter keys in the browser's Settings → Environment Variables panel (stored only in localStorage; the server retains nothing), injected per-message on the fly.
 
 ### 测试与检查 | Tests & Checks
@@ -247,7 +251,7 @@ Web UI、全部子 Agent、tree-sitter 语法、图表引擎（Mermaid/PlantUML/
 - **待办跟踪**：`todo` 清单拆解 → 执行 → 失败恢复续做；用户级待办（`users/{user}/todos.json`）与任务清单相互独立，可随时手动执行（入队按序跑一次），开 ⚡ 闲时自动执行的条目绑定一个闲时任务——队列空闲且无运行中会话时自动按序执行，成功自动勾选、失败 3 次停用
 - **统一任务管理**：用户级任务（`users/{user}/tasks.json`，会话删除后仍按期执行）——**定时 / 普通 / 闲时**三类共用一条队列（定时到期插队首、普通入队按序执行、闲时在队列空闲时串行执行），每用户并发额度 5（`GEBAI_TASK_MAX_CONCURRENT`）；脚本运行或提示词运行 Agent，支持 5 段 cron / `@every` / `@daily` / `@at`、IANA 时区、错过补跑、超时、连续失败自动停用、飞书群与 Webhook 通知、任务资源目录（脚本/文档）；由 `GEBAI_TASKS_ENABLED` 统一开关（默认 true，显式 false 时子 Agent 与调度器整体不可见）
 - **飞书机器人**：`GEBAI_FEISHU_BOT_ENABLED=true` 启用，**长连接模式**（服务端主动出站，无需公网回调地址），协议为自研极简 protobuf 帧实现；文本/图片双向、任务完成回卡片、`show` 图表由桥接后端渲染 PNG 上传、审批与选择用交互卡片、`/help` `/new` `/sessions` `/cancel` `/approve` `/reject` 等命令；飞书身份按 `open_id` 映射用户，单聊/群聊各关联一个独立会话
-- **业务系统集成**：官方 TS SDK（`@gebai/sdk`，WS/REST 双通道）、`/api/docs` OpenAPI 文档（端点表由路由注册自动生成）、Webhook（事件推送，HMAC-SHA256 签名 + 失败指数退避重试 3 次）、外部身份兑换（`POST /api/v1/auth/exchange`，HMAC 或 HTTP 回调验证器可插拔）、iframe 嵌入与同源登录态复用、URL 携带提示词直接起任务（`gb_prompt`，自动建会话运行并重定向到会话地址）、前端独立配置文件（`gebai.config.js`，环境变量与本地存储的扩展点）
+- **业务系统集成**：官方 TS SDK（`@gebai/sdk`，WS/REST 双通道）、`/api/docs` OpenAPI 文档（端点表由路由注册自动生成）、Webhook（事件推送，HMAC-SHA256 签名 + 失败指数退避重试 3 次）、外部身份兑换（`POST /api/v1/auth/exchange`，HMAC 或 HTTP 回调验证器可插拔）、iframe 嵌入与同源登录态复用、URL 携带提示词直接起任务（`gb_prompt`，自动建会话运行并重定向到会话地址）、二开前端脚本（`custom/web/`：`gebai.config.js` 配置 + `init.js` 初始化脚本——环境变量/本地存储扩展点、本地存储初始化与注册登录；出厂为 `*.example.js` 示例，复制改名即启用）
 - **数据生命周期**：会话 90 天闲置归档到 `trash/`、`trash/` 7 天物理删除、反馈 180 天清理（`GEBAI_GC_DISABLED` 可关）
 
 **English.** CLI-style human-in-the-loop approvals (per-tool with argument display, Y/N shortcuts, session-level `/approval-skip`, request-level `autoApprove`; `ask` merges choice prompts, env-var filling and plan approval); three ways to run scripts (`sh` with background tasks via `bg_task`, `py` with a local-mode tool bridge, `js` with first-class `await read(...)` calls and `defineTool`-registered session-scoped dynamic tools); todo tracking with idle-time execution; user-level unattended cron jobs (5-field cron / `@every` / `@daily` / `@at`, time zones, misfire policies, Feishu and webhook notifications); a Feishu bot over a long-lived outbound connection (no public callback URL needed) with interactive approval/render cards; business integration through the official TS SDK, auto-generated OpenAPI docs, HMAC-signed webhooks with retries, external-identity exchange and iframe embedding; plus automatic data lifecycle GC.
