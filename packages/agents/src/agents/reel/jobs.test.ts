@@ -33,10 +33,24 @@ import {
   type Tuning,
 } from "./jobs"
 import { decideProfile, profileKey, type RenderProfile } from "./profile"
+import type { ProbeInput } from "./detect"
 import type { NativeLibs, VideoConfig } from "./runtime"
 import { clearReelEnv, makeCtx } from "./test-ctx"
 
 const COMPOSITION: VideoConfig = { id: "Promo", width: 1080, height: 1920, fps: 30, durationInFrames: 300 }
+
+/** bench 的硬件探测输入（探针失败诊断靠它区分"无 GPU"与"驱动/ffmpeg 缺 NVENC"）。 */
+const PROBE_INPUT: ProbeInput = {
+  platform: "linux",
+  arch: "x64",
+  cpuCount: 8,
+  memoryMB: 16384,
+  nvidia: { name: "RTX 4090", driver: "550.54", memoryMB: 24564 },
+  renderNodes: [],
+  appleSilicon: false,
+  remotionVersion: "4.0.484",
+  webglContent: false,
+}
 
 const SOFTWARE_PROFILE: RenderProfile = decideProfile({
   platform: "linux",
@@ -574,6 +588,7 @@ describe("实测调优 runBench", () => {
         glCandidates: [],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
+        probeInput: PROBE_INPUT,
       })
       expect(calls.length).toBe(3)
       expect(calls[0]!.hardwareAcceleration).toBe("required")
@@ -617,6 +632,7 @@ describe("实测调优 runBench", () => {
         glCandidates: [],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
+        probeInput: PROBE_INPUT,
       })
       const tuning = readTuning(ctx)
       expect(tuning.encoderProbe?.hardware).toBe(false)
@@ -653,6 +669,7 @@ describe("实测调优 runBench", () => {
           glCandidates: [],
           frameRange: [0, 29],
           benchDir: join(home, "bench"),
+        probeInput: PROBE_INPUT,
         }),
       ).rejects.toThrow(/并发实测全部失败/)
       expect(pickTuned(readTuning(ctx), profileKey("/p", "Promo"))).toBeNull()
@@ -686,6 +703,7 @@ describe("实测调优 runBench", () => {
         glCandidates: [],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
+        probeInput: PROBE_INPUT,
       })
       // 探针 1 次 + 默认候选（有效核数与其一半，至少 1 档）
       expect(calls.length).toBeGreaterThanOrEqual(2)
@@ -739,6 +757,7 @@ describe("bench 光栅化后端实测", () => {
         glCandidates: [null, "angle"],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
+        probeInput: PROBE_INPUT,
       })
       // 当前档位（SOFTWARE_PROFILE 非 WebGL → gl 为 null）复用传入浏览器，只给 angle 另开一台
       expect(openedChromiumOptions).toEqual([{ gl: "angle" }])
@@ -774,6 +793,7 @@ describe("bench 光栅化后端实测", () => {
         glCandidates: [null, "angle"],
         frameRange: [0, 29],
         benchDir: join(home, "bench"),
+        probeInput: PROBE_INPUT,
       })
       expect(summary).toContain("gl=angle 实测跳过")
       expect(pickTuned(readTuning(ctx), profileKey("/p", "Promo"))?.gl).toBeNull()

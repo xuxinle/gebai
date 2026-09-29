@@ -12,9 +12,10 @@
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ToolContext } from "@gebai/sdk"
-import { effectiveCpuCount } from "./detect"
+import { effectiveCpuCount, type ProbeInput } from "./detect"
 import { jobIndexPath, jobLogPath, jobsDir, stateDir, tuningPath } from "./paths"
 import { chromiumOf, profileKey, type HardwareAcceleration, type RenderProfile, type ThroughputEntry, type TunedEntry } from "./profile"
+import { diagnoseEncoderProbe, type EncoderDiagnosis } from "./encoder-diagnosis"
 import { concatVideoSegments, muxAudioVideo, splitFrameRange } from "./shards"
 import type { NativeBrowser, NativeLibs, VideoConfig } from "./runtime"
 
@@ -50,6 +51,8 @@ interface EncoderProbe {
   hardware: boolean
   checkedAt: string
   error?: string
+  /** 失败时的**可操作诊断**（结论 + 建议）：只存原生库报错等于把「为什么」交给用户去猜。 */
+  diagnosis?: EncoderDiagnosis
 }
 
 /** 本机调优缓存：机器级硬件编码探针结论 + 按 profileKey 记账的实测档位与实测吞吐。 */
@@ -478,6 +481,9 @@ export interface BenchArgs extends RenderBaseArgs {
   frameRange: [number, number | null]
   /** 实测临时产物目录；缺省落在库根 state/bench（测完即删）。 */
   benchDir?: string
+  /** 硬件探测输入（`collectProbe().input`）：探针失败时的诊断要靠它区分"无 GPU"与"驱动/ffmpeg 缺 NVENC"，
+   *  不能只拿一行原生库报错去猜。 */
+  probeInput: ProbeInput
 }
 
 /** 日志出口：外部注入（startJob 注入的 log）优先，缺省直接写作业日志。 */
@@ -924,7 +930,17 @@ async function probeEncoder(args: BenchArgs, benchDir: string): Promise<EncoderP
     })
     return { hardware: true, checkedAt }
   } catch (err) {
-    return { hardware: false, checkedAt, error: ((err as Error)?.message ?? String(err)).slice(0, 400) }
+    const message = ((err as Error)?.message ?? String(err)).slice(0, 400)
+    // 只存原生库报错等于把「为什么失败」交给用户猜：附上**可操作诊断**（结论 + 建议）
+    const diagnosis = diagnoseEncoderProbe({
+      probeError: message,
+      platform: args.probeInput.platform,
+      // 诊断依据用**探测事实**（不是字符串噭探）：有 NVIDIA 才谈驱动/ffmpeg，没 NVIDIA 就直接下结论
+      gpuForm: args.probeInput.nvidia ? `${args.probeInput.platform} + NVIDIA ${args.probeInput.nvidia.name}` : null,
+      remotionVersion: args.probeInput.remotionVersion,
+      binariesDirectory: args.binariesDirectory ?? null,
+    })
+    return { hardware: false, checkedAt, error: message, diagnosis }
   } finally {
     rmSync(output, { force: true })
   }
@@ -981,9 +997,20 @@ export async function runBench(args: BenchArgs): Promise<string> {
   writeTuning(args.ctx, tuning)
   const probeLine = encoderProbe.hardware
     ? "硬件编码探针：通过（hardwareAcceleration=required 渲染成功，本机编码器可用）"
-    : `硬件编码探针：未通过（${encoderProbe.error ?? "未知原因"}）——本机按软件编码运行`
+    : `硬件编码探针：未通过——${encoderProbe.diagnosis?.verdict ?? "原因未知"}`
   lines.push(probeLine)
   log(probeLine)
+  if (!encoderProbe.hardware) {
+    // 建议逐条进日志与结论："未通过"本身不可行动，"缺什么/怎么补"才可行动
+    if (encoderProbe.error) {
+      lines.push(`  探针报错：${encoderProbe.error}`)
+      log(`  探针报错：${encoderProbe.error}`)
+    }
+    for (const hint of encoderProbe.diagnosis?.hints ?? []) {
+      lines.push(`  → ${hint}`)
+      log(`  → ${hint}`)
+    }
+  }
 
   const benchRange: [number, number] = [
     args.frameRange[0],

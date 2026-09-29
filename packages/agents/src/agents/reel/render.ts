@@ -469,6 +469,7 @@ export const renderTool: Tool = {
           glCandidates: defaultGlCandidates(probe.input, profile.gl),
           browserExecutable: browserExec.path,
           binariesDirectory: binaries.path,
+          probeInput: probe.input,
         }),
       )
       return {

@@ -210,7 +210,10 @@ export const projectTool: Tool = {
         binariesDir ? `原生二进制目录：${binariesDir}（替换内置 compositor/ffmpeg）` : "原生二进制目录：未配置（用项目内 @remotion/compositor-*）",
       )
       for (const note of externalNotes) lines.push(`⚠ ${note}`)
-      lines.push(`调优缓存：${Object.keys(tuning.entries).length} 条实测${tuning.encoderProbe ? ` · 硬件编码实测：${tuning.encoderProbe.hardware ? "通过" : `未通过（${tuning.encoderProbe.error ?? ""}）`}` : ""}`)
+      const probeSummary = tuning.encoderProbe
+        ? ` · 硬件编码实测：${tuning.encoderProbe.hardware ? "通过" : (tuning.encoderProbe.diagnosis?.verdict ?? `未通过（${tuning.encoderProbe.error ?? ""}）`)}`
+        : ""
+      lines.push(`调优缓存：${Object.keys(tuning.entries).length} 条实测${probeSummary}`)
       if (jobs.length) {
         lines.push("最近渲染作业：")
         for (const job of jobs) lines.push(`  ${describeJob(job).split("\n")[0]}`)
