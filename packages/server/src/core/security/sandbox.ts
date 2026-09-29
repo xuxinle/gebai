@@ -23,7 +23,7 @@ export interface SandboxOptions {
 
 /** 脚本隔离模式（GEBAI_SCRIPT_ISOLATION）：
  *  - `off`：不收敛（宿主 HOME/TEMP/XDG 原样传给脚本）；
- *  - `env`：环境收敛——HOME/TEMP/XDG_* 指向会话内目录（跳平台）；
+ *  - `env`：环境收敛——HOME/TEMP/XDG_* 指向会话内目录（跨平台）；
  *  - `bwrap`：环境收敛 + bubblewrap 文件系统隔离（Linux，近似 chroot：系统目录只读、仅会话目录可写）；
  *  - `auto`（默认）：本地模式/豁免用户恒 `off`（操作者本人机器，行为不变）；服务模式走 `env`，
  *    检测到可用的 bubblewrap 时升为 `bwrap`。 */
