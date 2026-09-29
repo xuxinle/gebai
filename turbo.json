@@ -3,11 +3,21 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**"],
+      "inputs": ["$TURBO_DEFAULT$", "../../keqing/**", "../../custom/**", "../../packages/*/src/**"]
     },
     "@gebai/desktop#build": {
       "outputs": ["dist/**"],
-      "inputs": ["src/**", "scripts/**", "launcher/**", "package.json", "../../packages/server/src/**", "../../packages/server/scripts/**", "../../packages/web/src/**", "../../packages/web/package.json"]
+      "inputs": [
+        "src/**",
+        "scripts/**",
+        "launcher/**",
+        "package.json",
+        "../../keqing/**",
+        "../../custom/**",
+        "../../packages/*/src/**",
+        "../../packages/*/package.json"
+      ]
     },
     "dev": {
       "cache": false,
@@ -15,7 +25,8 @@
     },
     "test": {
       "dependsOn": [],
-      "outputs": ["coverage/**"]
+      "outputs": ["coverage/**"],
+      "inputs": ["$TURBO_DEFAULT$", "../../keqing/**", "../../custom/**", "../../packages/*/src/**"]
     },
     "lint": {},
     "typecheck": {

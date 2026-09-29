@@ -48,9 +48,11 @@ bun run build
 bun run check:repo   # 单独跑：确认没有"存在于工作树但从未入库"的源文件
 
 # 测试（bun test，测试文件与被测代码同目录 *.test.ts）
-bun run test
-bun run --cwd packages/server test
+bun run test                 # 经 turbo：**命中缓存时会回放日志而不真跑**（要确信就跑下面两条或加 --force）
+bun run --cwd packages/server test   # 真跑：并行分片（含超时余量，GEBAI_TEST_TIMEOUT 可覆盖）
 bun run --cwd packages/sdk test
+# 客卿 Python 侧：keqing/python/tests/*_test.py（纯标准库运行器，已由 bun test 包装；缺解释器自动跳过）
+python3 keqing/python/tests/run_tests.py
 
 # 覆盖率
 bun run --cwd packages/server test:coverage
@@ -134,6 +136,8 @@ bun run e2e:term:all     # 三者依次跑；失败现场截图落 /tmp/gebai-e2
 ## 测试策略
 
 - 统一 `bun test`，测试文件与被测代码同目录（`*.test.ts`）。
+- **turbo 的 `test`/`build` 是带缓存的：命中时回放日志、不真跑**。要确信“真跑过”就用 `bun run --cwd <pkg> test` 或 `turbo run test --force`。跨包依赖目录（`keqing/`、`custom/`、其他包的 `src/`）已声明进 turbo `inputs`——改它们会让相关包的构建与测试**失效重跑**（否则会拿到陈旧产物与陈旧的 PASS）。
+- **客卿 Python 侧测试**：`keqing/python/tests/*_test.py`（纯标准库运行器 `run_tests.py`；pytest 风格命名但不依赖 pytest，缺依赖的用例用 `skip()` 显式跳过）。已由 `bun test` 包装（`packages/server/src/core/agents/keqing-python.test.ts`），缺 Python 解释器时跳过而非失败（`GEBAI_TEST_PYTHON` 可指定解释器）。
 - **环境封闭**：测试进程不读仓库 `.env`（`packages/server/bunfig.toml` 的 `[test] preload` 清 `GEBAI_`/`CODE_` 变量 + `loadConfig` 的 `loadDotEnv` 在 test 期跳过）；**该 preload 只在包目录下生效**——从仓库根直接跑 `bun test packages/server/...` 不会加载它（工具/脚本跑测试请用 `--cwd packages/server`，否则仓库根 `.env` 会污染断言）。断言不得依赖开发者本地配置或宿主环境变量。
 - **跨平台**：涉及平台分支的用例显式注入平台参数（如 `platform: "win32"`），不随宿主平台漂移。
 - **DOM 桩不跨文件泄漏**（`packages/web`）：该包测试依赖基线 DOM（`packages/web/bunfig.toml` 的 `[test] preload` → `scripts/test-preload.ts`），因为不少页面模块在 **import 期就绑定真实 DOM**。测试文件**不得整体替换** `document`/`window`（会把基线盖掉，而 Bun 同进程跑完全部测试文件，后加载的文件看到的是上一个文件留下的桩），只补自己需要的字段（`doc.documentElement ??= …`）；被用例刻意当作**缺省**验证回退路径的全局（如 `IntersectionObserver`）不装进基线。
