@@ -33,13 +33,16 @@ class ScriptTestTextPort final : public st::ui::TextPort {
   [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
     return st::math::Size{measure_width(utf8, size), line_height(size)};
   }
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override {
+  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
+                     st::text::FontRole role = st::text::FontRole::Proportional) const
+      -> float override {
+      (void)role;  // 桩：等宽与比例同宽，无需区分
     (void)size;
     return 8.0f * static_cast<float>(st::utf8_length(utf8));
   }
   [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
-  void draw(st::raster::Surface&, std::string_view, st::math::Point, float,
-            st::math::Color) const override {}
+  void draw(st::raster::Surface&, std::string_view, st::math::Point, float, st::math::Color,
+            st::text::FontRole = st::text::FontRole::Proportional) const override {}
   [[nodiscard]] auto ellipsize(std::string_view utf8, float, float) const -> std::string override {
     return std::string(utf8);
   }

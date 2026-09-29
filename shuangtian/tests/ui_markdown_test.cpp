@@ -33,7 +33,10 @@ class StubTextPort final : public st::ui::TextPort {
     return st::math::Size{measure_width(utf8, size), line_height(size)};
   }
 
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override {
+  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
+                     st::text::FontRole role = st::text::FontRole::Proportional) const
+      -> float override {
+      (void)role;  // 桩：等宽与比例同宽，无需区分
     float width = 0.0f;
     std::size_t index = 0;
     while (index < utf8.size()) {
@@ -46,7 +49,9 @@ class StubTextPort final : public st::ui::TextPort {
   [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
 
   void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color) const override {
+            st::math::Color color,
+            st::text::FontRole role = st::text::FontRole::Proportional) const override {
+    (void)role;  // 桩
     if (utf8.empty()) return;
     // 落成**整像素**矩形：端口的输出与坐标的像素对齐方式无关，断言只关心颜色与位置
     const float x = std::round(origin.x);

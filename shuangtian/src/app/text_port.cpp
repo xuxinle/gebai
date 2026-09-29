@@ -6,8 +6,9 @@ auto RendererTextPort::measure(std::string_view utf8, float size) const -> math:
   return renderer_.measure(utf8, size);
 }
 
-auto RendererTextPort::measure_width(std::string_view utf8, float size) const -> float {
-  return renderer_.measure_width(utf8, size);
+auto RendererTextPort::measure_width(std::string_view utf8, float size,
+                                     text::FontRole role) const -> float {
+  return renderer_.measure_width(utf8, size, role);
 }
 
 auto RendererTextPort::line_height(float size) const -> float {
@@ -15,8 +16,8 @@ auto RendererTextPort::line_height(float size) const -> float {
 }
 
 void RendererTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin,
-                            float size, math::Color color) const {
-  (void)renderer_.draw(canvas, utf8, origin, size, color);
+                            float size, math::Color color, text::FontRole role) const {
+  (void)renderer_.draw(canvas, utf8, origin, size, color, role);
 }
 
 auto RendererTextPort::ellipsize(std::string_view utf8, float size, float max_width) const

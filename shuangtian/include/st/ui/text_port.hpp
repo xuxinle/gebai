@@ -1,4 +1,5 @@
 #pragma once
+#include "st/text/text.hpp"  // text::FontRole（等宽/正文角色）
 
 /// 文本绘制端口：UI 层对"字体引擎"的唯一依赖面（依赖倒置）。
 /// 目的：`ui` 层不依赖 `text` 层实现（编译解耦、可注入假实现做布局单测）；
@@ -21,11 +22,14 @@ class TextPort {
 
   /// 度量文本尺寸（宽 × 行高）。
   [[nodiscard]] virtual auto measure(std::string_view utf8, float size) const -> math::Size = 0;
-  [[nodiscard]] virtual auto measure_width(std::string_view utf8, float size) const -> float = 0;
+  [[nodiscard]] virtual auto measure_width(
+      std::string_view utf8, float size,
+      text::FontRole role = text::FontRole::Proportional) const -> float = 0;
   [[nodiscard]] virtual auto line_height(float size) const -> float = 0;
   /// `origin` 为行左上角。
   virtual void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-                    math::Color color) const = 0;
+                    math::Color color,
+                    text::FontRole role = text::FontRole::Proportional) const = 0;
   [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string = 0;
   [[nodiscard]] virtual auto wrap(std::string_view utf8, float size, float max_width) const
@@ -39,10 +43,13 @@ class TextPort {
 class NullTextPort final : public TextPort {
  public:
   [[nodiscard]] auto measure(std::string_view utf8, float size) const -> math::Size override;
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override;
+  [[nodiscard]] auto measure_width(
+      std::string_view utf8, float size,
+      text::FontRole role = text::FontRole::Proportional) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
   void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-            math::Color color) const override;
+            math::Color color,
+            text::FontRole role = text::FontRole::Proportional) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const

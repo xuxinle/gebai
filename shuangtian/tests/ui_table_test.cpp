@@ -27,7 +27,10 @@ class TableTestTextPort final : public st::ui::TextPort {
     return st::math::Size{measure_width(utf8, size), line_height(size)};
   }
 
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override {
+  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
+                     st::text::FontRole role = st::text::FontRole::Proportional) const
+      -> float override {
+      (void)role;  // 桩：等宽与比例同宽，无需区分
     (void)size;
     return kAdvance * static_cast<float>(st::utf8_length(utf8));
   }
@@ -35,7 +38,9 @@ class TableTestTextPort final : public st::ui::TextPort {
   [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
 
   void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color) const override {
+            st::math::Color color,
+            st::text::FontRole role = st::text::FontRole::Proportional) const override {
+    (void)role;  // 桩
     (void)canvas;
     (void)origin;
     (void)size;

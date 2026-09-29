@@ -41,15 +41,20 @@ class FontPort final : public st::ui::TextPort {
   [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
     return renderer_.measure(utf8, size);
   }
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override {
-    return renderer_.measure_width(utf8, size);
+  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
+                     st::text::FontRole role = st::text::FontRole::Proportional) const
+      -> float override {
+      (void)role;  // 桩：等宽与比例同宽，无需区分
+    return renderer_.measure_width(utf8, size, role);
   }
   [[nodiscard]] auto line_height(float size) const -> float override {
     return renderer_.line_height(size);
   }
   void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color) const override {
-    (void)renderer_.draw(canvas, utf8, origin, size, color);
+            st::math::Color color,
+            st::text::FontRole role = st::text::FontRole::Proportional) const override {
+    (void)role;  // 桩
+    (void)renderer_.draw(canvas, utf8, origin, size, color, role);
   }
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override {

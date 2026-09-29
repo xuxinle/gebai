@@ -76,6 +76,31 @@ struct FontCandidate {
   return candidates;
 }
 
+/// 等宽候选（代码用）。与正文档**分开探测**：等宽字体失败只是"没有等宽"
+/// （代码块退化成正文字体仍可读），不该让整个字体栈失败。
+[[nodiscard]] auto mono_font_candidates() -> std::vector<FontCandidate> {
+  std::vector<FontCandidate> candidates;
+  const auto push = [&candidates](const std::string& path) {
+    if (path.empty() || !fs::is_regular_file(path)) return;
+    candidates.push_back(FontCandidate{path, false});
+  };
+  if (const auto custom = fs::read_env("ST_FONT_MONO"); custom.has_value()) push(*custom);
+  for (const auto* path : {
+           "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+           "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+           "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+           "C:/Windows/Fonts/CascadiaMono.ttf",
+           "C:/Windows/Fonts/consola.ttf",
+           "C:/Windows/Fonts/cour.ttf",
+           "/System/Library/Fonts/Menlo.ttc",
+           "/System/Library/Fonts/SFNSMono.ttf",
+       }) {
+    push(path);
+  }
+  return candidates;
+}
+
+
 /// 载入字体：CJK 集合字体挑出真正覆盖汉字的 face（NotoSansCJK OTC 的 SC face 常非 0 号）。
 [[nodiscard]] auto load_face(const FontCandidate& candidate) -> Result<FontFace> {
   constexpr char32_t kProbe = U'霜';
@@ -108,12 +133,19 @@ struct FontCandidate {
 
 // —— FontStack ——
 
-FontStack::FontStack(std::vector<FontFace> faces) : faces_(std::move(faces)) {
+FontStack::FontStack(std::vector<FontFace> faces, std::vector<FontFace> mono_faces)
+    : faces_(std::move(faces)), mono_faces_(std::move(mono_faces)) {
   std::uint64_t fingerprint = 1469598103934665603ULL;
   for (const auto& face : faces_) {
     fingerprint ^= st::hash::fnv1a64(face.path());
     fingerprint *= 1099511628211ULL;
     fingerprint ^= static_cast<std::uint64_t>(face.face_index());
+  }
+  // 指纹要覆盖等宽库：字形缓存按指纹分桶，漏掉它会让两套字体互相污染。
+  for (const auto& face : mono_faces_) {
+    fingerprint ^= st::hash::fnv1a64(face.path());
+    fingerprint *= 1099511628211ULL;
+    fingerprint ^= static_cast<std::uint64_t>(face.face_index()) + 0x9E3779B9ULL;
   }
   fingerprint_ = fingerprint;
 }
@@ -133,7 +165,15 @@ auto FontStack::system_default() -> Result<FontStack> {
     return unexpected(ErrorCode::NotFound,
                       std::format("未找到可用系统字体（最后错误：{}）", last_error));
   }
-  return FontStack(std::move(faces));
+  // 等宽库单独探测：失败只是"没有等宽"（代码块退化成正文字体仍可读），
+  // 不该让整个字体栈失败——完全没字体才是什么都渲染不出来。
+  std::vector<FontFace> mono_faces;
+  for (const auto& candidate : mono_font_candidates()) {
+    if (auto face = load_face(candidate); face.has_value()) {
+      mono_faces.push_back(std::move(*face));
+    }
+  }
+  return FontStack(std::move(faces), std::move(mono_faces));
 }
 
 auto FontStack::from_files(const std::vector<std::string>& paths) -> Result<FontStack> {
@@ -145,7 +185,24 @@ auto FontStack::from_files(const std::vector<std::string>& paths) -> Result<Font
     faces.push_back(std::move(*face));
   }
   if (faces.empty()) return unexpected(ErrorCode::Invalid, "字体列表为空");
-  return FontStack(std::move(faces));
+  std::vector<FontFace> mono_faces;
+  for (const auto& candidate : mono_font_candidates()) {
+    if (auto face = load_face(candidate); face.has_value()) {
+      mono_faces.push_back(std::move(*face));
+    }
+  }
+  return FontStack(std::move(faces), std::move(mono_faces));
+}
+
+auto FontStack::find_face(char32_t codepoint, FontRole role) const -> const FontFace* {
+  if (role == FontRole::Monospace) {
+    // 先等宽库，再回退正文档：汉字在多数等宽字体里没有，而代码块里的中文注释
+    // 必须能显示——宁可混排，不可缺字。
+    for (const auto& face : mono_faces_) {
+      if (face.has_glyph(codepoint)) return &face;
+    }
+  }
+  return find_face(codepoint);
 }
 
 auto FontStack::find_face(char32_t codepoint) const -> const FontFace* {
@@ -196,7 +253,7 @@ auto TextRenderer::line_height(float size) const -> float {
   return height > size ? height : size * 1.2f;
 }
 
-auto TextRenderer::shape(std::string_view utf8, float size) const -> ShapedText {
+auto TextRenderer::shape(std::string_view utf8, float size, FontRole role) const -> ShapedText {
   ShapedText shaped;
   if (stack_->empty() || utf8.empty() || size <= 0.0f) {
     shaped.line_height = line_height(size);
@@ -213,7 +270,7 @@ auto TextRenderer::shape(std::string_view utf8, float size) const -> ShapedText 
   while (index < utf8.size()) {
     const Codepoint codepoint = decode_utf8(utf8, index);
     if (codepoint.bytes == 0) break;
-    const FontFace* face = stack_->find_face(codepoint.value);
+    const FontFace* face = stack_->find_face(codepoint.value, role);
     if (face == nullptr) {
       // 无字体覆盖：按空格宽度占位（保证排版不塌陷）
       pen += size * 0.5f;
@@ -253,18 +310,20 @@ auto TextRenderer::shape(std::string_view utf8, float size) const -> ShapedText 
   return shaped;
 }
 
-auto TextRenderer::measure_width(std::string_view utf8, float size) const -> float {
+auto TextRenderer::measure_width(std::string_view utf8, float size, FontRole role) const -> float {
   if (utf8.empty()) return 0.0f;
+  // 缓存键**必须带 role**：同一段文字在等宽/比例下的宽度不同，
+  // 漏掉它会让代码块与正文互相污染（宽度随机对不上）。
   const std::uint64_t key = st::hash::fnv1a64(utf8) ^
                             (static_cast<std::uint64_t>(size_key(size)) << 32U) ^
-                            stack_->fingerprint();
+                            (static_cast<std::uint64_t>(role) << 56U) ^ stack_->fingerprint();
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->widths.find(key); iterator != cache_->widths.end()) {
       return iterator->second;
     }
   }
-  const float width = shape(utf8, size).width;
+  const float width = shape(utf8, size, role).width;
   {
     const std::scoped_lock lock(cache_->mutex);
     if (cache_->widths.size() > 4096) cache_->widths.clear();
@@ -273,13 +332,13 @@ auto TextRenderer::measure_width(std::string_view utf8, float size) const -> flo
   return width;
 }
 
-auto TextRenderer::measure(std::string_view utf8, float size) const -> math::Size {
-  return math::Size{measure_width(utf8, size), line_height(size)};
+auto TextRenderer::measure(std::string_view utf8, float size, FontRole role) const -> math::Size {
+  return math::Size{measure_width(utf8, size, role), line_height(size)};
 }
 
-auto TextRenderer::advance_of(char32_t codepoint, float size) const -> float {
+auto TextRenderer::advance_of(char32_t codepoint, float size, FontRole role) const -> float {
   if (stack_->empty()) return size * 0.5f;
-  const FontFace* face = stack_->find_face(codepoint);
+  const FontFace* face = stack_->find_face(codepoint, role);
   if (face == nullptr) return size * 0.5f;
   auto glyph = face->glyph_for(codepoint);
   if (!glyph) return size * 0.5f;
@@ -419,14 +478,14 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
 }
 
 auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::Point origin,
-                        float size, math::Color color) const -> Status {
+                        float size, math::Color color, FontRole role) const -> Status {
   if (stack_->empty() || utf8.empty() || size <= 0.0f || color.a == 0U) return ok();
   // 文本是跨模块的绘制路径（字形位图直接按覆盖率行混合），在画布上单独记一笔：
   // 否则“绘制 30ms”里看不出文字占多少（界面里文字往往是第一位的调用次数大户）。
   const bool profiling = surface.profiler() != nullptr;
   const std::int64_t profile_start = profiling ? st::time::now_ns() : 0;
   std::uint64_t profile_pixels = 0;
-  const ShapedText shaped = shape(utf8, size);
+  const ShapedText shaped = shape(utf8, size, role);
   const float device_scale = surface.device_scale();
   const float baseline = (origin.y + shaped.ascent) * device_scale;
   const raster::Paint paint = raster::Paint::solid(color);

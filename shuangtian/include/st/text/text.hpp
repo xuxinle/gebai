@@ -40,9 +40,19 @@ struct ShapedText {
 };
 
 /// 字体回退链：按顺序查找首个覆盖该码点的 face。
+/// 字形角色：同一段文本可以要求"正文字体"或"等宽字体"。
+///
+/// 存在的理由：代码（Markdown 代码块 / 行内码）必须对齐——等宽字体里 `i` 与 `M` 同宽，
+/// 用比例字体渲染代码会让缩进与列对齐全部失真。
+/// 回退策略：等宽库里找不到该码点时**回退到正文字体**（汉字在多数等宽字体里没有，
+/// 而中文代码注释必须能显示——宁可混排，不可缺字）。
+enum class FontRole : std::uint8_t { Proportional, Monospace };
+
+/// 字体回退链：按顺序查找首个覆盖该码点的 face。
 class FontStack {
  public:
-  explicit FontStack(std::vector<FontFace> faces);
+  /// `mono_faces` 可以为空：此时等宽角色完全回退正文字体（代码块仍可读）。
+  explicit FontStack(std::vector<FontFace> faces, std::vector<FontFace> mono_faces = {});
 
   /// 系统默认回退链（拉丁 + CJK；探测系统字体目录）。
   /// @return 失败：`NotFound` 未找到任何可用字体。
@@ -52,8 +62,15 @@ class FontStack {
 
   /// 覆盖该码点的 face（无覆盖返回 nullptr）。
   [[nodiscard]] auto find_face(char32_t codepoint) const -> const FontFace*;
+  /// 按角色选 face：`Monospace` 优先等宽库，找不到则**回退正文字体**。
+  [[nodiscard]] auto find_face(char32_t codepoint, FontRole role) const -> const FontFace*;
+  /// 是否真的探测到等宽字体（没有时等宽角色 = 正文字体，调用方可如实告知）。
+  [[nodiscard]] auto has_monospace() const noexcept -> bool { return !mono_faces_.empty(); }
   [[nodiscard]] auto primary() const -> const FontFace& { return faces_.front(); }
   [[nodiscard]] auto faces() const noexcept -> std::span<const FontFace> { return faces_; }
+  [[nodiscard]] auto monospace_faces() const noexcept -> std::span<const FontFace> {
+    return mono_faces_;
+  }
   [[nodiscard]] auto empty() const noexcept -> bool { return faces_.empty(); }
 
   /// 供渲染器使用的共享字节大小（缓存键的一部分）。
@@ -61,6 +78,8 @@ class FontStack {
 
  private:
   std::vector<FontFace> faces_{};
+  /// 等宽库（代码用）。可以为空——没探到等宽字体时等宽角色完全回退正文字体。
+  std::vector<FontFace> mono_faces_{};
   std::uint64_t fingerprint_{0};
 };
 
@@ -72,18 +91,21 @@ class TextRenderer {
   TextRenderer(const TextRenderer&) = delete;
   auto operator=(const TextRenderer&) -> TextRenderer& = delete;
 
-  /// 整形（逻辑单位）。
-  [[nodiscard]] auto shape(std::string_view utf8, float size) const -> ShapedText;
+  /// 整形（逻辑单位；`role` 选字体库，代码用 `Monospace`）。
+  [[nodiscard]] auto shape(std::string_view utf8, float size,
+                           FontRole role = FontRole::Proportional) const -> ShapedText;
   /// 度量：宽 × 行高（逻辑单位）。
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> math::Size;
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float;
+  [[nodiscard]] auto measure(std::string_view utf8, float size,
+                             FontRole role = FontRole::Proportional) const -> math::Size;
+  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
+                                   FontRole role = FontRole::Proportional) const -> float;
   [[nodiscard]] auto line_height(float size) const -> float;
   /// 基线相对行顶的偏移（逻辑单位）。
   [[nodiscard]] auto ascent(float size) const -> float;
 
   /// 绘制：`origin` 为**逻辑坐标**下的行左上角；字形按画布 DPI 物理栅格化。
   auto draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-            math::Color color) const -> Status;
+            math::Color color, FontRole role = FontRole::Proportional) const -> Status;
 
   /// 折行（按空格与 CJK 断点；返回各行原文区间）。
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
@@ -92,7 +114,8 @@ class TextRenderer {
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string;
   /// 单个字符的推进宽度（用于光标定位）。
-  [[nodiscard]] auto advance_of(char32_t codepoint, float size) const -> float;
+  [[nodiscard]] auto advance_of(char32_t codepoint, float size,
+                                FontRole role = FontRole::Proportional) const -> float;
   /// 光标 x 偏移（逻辑单位）。
   [[nodiscard]] auto cursor_x(std::string_view utf8, float size, std::size_t codepoint_index) const
       -> float;

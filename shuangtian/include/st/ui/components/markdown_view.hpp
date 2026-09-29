@@ -16,7 +16,8 @@
 /// 已知受限（如实说明，`TextPort` 能力面所限）
 /// - 端口只有「文本 + 字号 + 颜色」三个通道：**无字重/斜体**——Bold/SemiBold 以亚像素偏移
 ///   二次绘制近似（`draw_text_weighted`），斜体不倾斜（强调只体现在语义上）；
-/// - **无等宽**能力：代码用同字体 + 稍小字号（默认 `font_sm`），非真等宽；
+/// - **代码用等宽字体**（`FontStack` 的等宽库，探测不到时回退正文字体）：
+///   代码块与行内码都走等宽——比例字体下 `i` 与 `M` 宽不同，缩进与列对齐会失真；
 /// - `set_selectable` 本期只记录状态（选择/复制未实现，控制通道可读写该属性）；
 /// - `HtmlBlock` 按 `md` 层约定原样保留、不渲染（也不进入语义文本）。
 
@@ -121,6 +122,15 @@ class MarkdownView : public Element {
     bool underline{false};
     bool strike{false};
     bool inline_code{false};
+    /// 代码文本（代码块行与行内码）：用**等宽字体**渲染。
+    ///
+    /// 与 `inline_code` 分开：后者带“芯片底色”，而代码块行只要求字体。
+    /// 等宽是代码可读性的前提——比例字体下 `i` 与 `M` 宽不同，缩进与列对齐全失真。
+    bool code{false};
+    /// 等宽角色（由 `code` 推导的便捷取值）。
+    [[nodiscard]] auto font_role() const noexcept -> st::text::FontRole {
+      return code ? st::text::FontRole::Monospace : st::text::FontRole::Proportional;
+    }
   };
 
   /// 表格单元格（文本已在布局期按列宽省略）。
@@ -237,7 +247,8 @@ class MarkdownView : public Element {
   /// 绘制文本（端口无字重通道：Bold/SemiBold 以亚像素偏移二次绘制近似）。
   static void draw_text_weighted(const TextPort& port, raster::Surface& canvas,
                                  std::string_view text, math::Point origin, float size,
-                                 math::Color color, FontWeight weight);
+                                 math::Color color, FontWeight weight,
+                                 text::FontRole role = text::FontRole::Proportional);
   /// 顺序绘制行内片段（超宽时以省略号收尾）。
   void draw_spans(const RenderContext& context, raster::Surface& canvas,
                   const std::vector<Span>& spans, math::Point start, float max_right,

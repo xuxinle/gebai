@@ -682,6 +682,7 @@ auto MarkdownView::inline_spans(const std::vector<st::md::Inline>& inlines, Colo
         span.size = metrics_.code;
         span.weight = FontWeight::Regular;
         span.inline_code = true;
+        span.code = true;  // 行内码也等宽
         break;
       case st::md::InlineKind::Emphasis:
         span.text = node.text;
@@ -742,7 +743,11 @@ void MarkdownView::append_code_block(const st::md::Block& block, const RenderCon
     row.clip = math::Rect{text_x, line_y, text_width, line_height};
     row.group = GroupKind::Code;
     row.group_rect = math::Rect{frame.indent, top, box_width, 0.0f};  // 高度稍后回填
-    if (end > begin) row.spans = code_line_spans(block.code, begin, end, tokens, token_index, size);
+    if (end > begin) {
+      row.spans = code_line_spans(block.code, begin, end, tokens, token_index, size);
+      // 代码块行全部走等宽（语法高亮的每个 token 片段都是代码）
+      for (Span& span : row.spans) span.code = true;
+    }
     rows_.push_back(std::move(row));
   };
 
@@ -1058,13 +1063,14 @@ auto MarkdownView::color_of(const Theme& theme, ColorRole role) -> math::Color {
 
 void MarkdownView::draw_text_weighted(const TextPort& port, raster::Surface& canvas,
                                       std::string_view text, math::Point origin, float size,
-                                      math::Color color, FontWeight weight) {
+                                      math::Color color, FontWeight weight,
+                                      text::FontRole role) {
   // 端口无字重通道：SemiBold/Bold 以亚像素偏移二次绘制近似（如实说明见头文件）
-  port.draw(canvas, text, origin, size, color);
+  port.draw(canvas, text, origin, size, color, role);
   if (weight == FontWeight::Bold) {
-    port.draw(canvas, text, math::Point{origin.x + kBoldOffset, origin.y}, size, color);
+    port.draw(canvas, text, math::Point{origin.x + kBoldOffset, origin.y}, size, color, role);
   } else if (weight == FontWeight::SemiBold) {
-    port.draw(canvas, text, math::Point{origin.x + kSemiBoldOffset, origin.y}, size, color);
+    port.draw(canvas, text, math::Point{origin.x + kSemiBoldOffset, origin.y}, size, color, role);
   }
 }
 
@@ -1078,14 +1084,16 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& can
     if (span.text.empty()) continue;
     const float remaining = max_right - x;
     if (remaining < 2.0f) break;
-    const float natural_width = port.measure_width(span.text, span.size);
+    // 量宽与绘制**必须同一角色**：一个用等宽、一个用比例，代码块就会算错宽度。
+    const text::FontRole role = span.font_role();
+    const float natural_width = port.measure_width(span.text, span.size, role);
     std::string text = span.text;
     float width = natural_width;
     const bool truncated = natural_width > remaining;
     if (truncated) {
       text = port.ellipsize(span.text, span.size, remaining);
       if (text.empty()) break;
-      width = port.measure_width(text, span.size);
+      width = port.measure_width(text, span.size, role);
     }
     const math::Color color = color_of(context.theme, span.color);
     if (span.inline_code) {
@@ -1097,7 +1105,8 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& can
       outline.add_rounded_rect(chip.inset(math::Insets::all(0.5f)), kInlineCodeRadius - 0.5f);
       canvas.stroke_path(outline, raster::Paint::solid(colors.code_border), 1.0f);
     }
-    draw_text_weighted(port, canvas, text, math::Point{x, start.y}, span.size, color, span.weight);
+    draw_text_weighted(port, canvas, text, math::Point{x, start.y}, span.size, color, span.weight,
+                     span.font_role());
     if (span.underline) {
       fill_line_shape(canvas, math::Rect{x, start.y + span.size * 1.3f, width, 1.0f}, color);
     }
@@ -1124,7 +1133,7 @@ void MarkdownView::paint_group(const RenderContext& context, raster::Surface& ca
     if (!row.language.empty()) {
       const TextPort& port = text_port_of(context);
       port.draw(canvas, row.language, math::Point{rect.x + kCodePad, rect.y + kCodePad},
-                kLanguageLabelSize, colors.text_faint);
+                kLanguageLabelSize, colors.text_faint, text::FontRole::Monospace);
     }
     return;
   }

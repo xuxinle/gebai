@@ -69,7 +69,8 @@ auto NullTextPort::measure(std::string_view utf8, float size) const -> math::Siz
   return math::Size{0.0f, size * 1.45f};
 }
 
-auto NullTextPort::measure_width(std::string_view utf8, float size) const -> float {
+auto NullTextPort::measure_width(std::string_view utf8, float size, text::FontRole role) const -> float {
+  (void)role;  // 无字体环境：角色无意义
   (void)utf8;
   (void)size;
   return 0.0f;
@@ -78,7 +79,8 @@ auto NullTextPort::measure_width(std::string_view utf8, float size) const -> flo
 auto NullTextPort::line_height(float size) const -> float { return size * 1.45f; }
 
 void NullTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-                        math::Color color) const {
+                        math::Color color, text::FontRole role) const {
+  (void)role;  // 无字体环境：角色无意义
   (void)canvas;
   (void)utf8;
   (void)origin;
