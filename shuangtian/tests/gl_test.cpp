@@ -217,3 +217,77 @@ ST_TEST(gl_scene_rejects_invalid_size) {
   const auto scene = Scene3D::create(0, 128);
   ST_CHECK(!scene.has_value());
 }
+
+ST_TEST(gl_fill_path_handles_holes_via_nonzero_winding) {
+  // "复杂图形"的判据不是"能画个矩形"，而是**带洞与自交仍正确**。
+  // 这里用两个反向环绕的方框：外框顺时针、内框逆时针 →
+  // 非零环绕规则下中间必须是**空的**（这正是软件光栅器的语义）。
+  //
+  // 这条同时钉住实现方式：模板法的 INCR/DECR 恰好按环绕数累加，
+  // 换成"耳切三角化"就得自己处理洞，且自交形状会算错。
+  if (!st::raster::gl::available()) return;
+  auto scene = Scene3D::create(kWidth, kHeight);
+  ST_CHECK(scene.has_value());
+  if (!scene.has_value()) return;
+
+  Canvas canvas{kWidth, kHeight};
+  const Color background{0x10, 0x14, 0x1E, 0xFF};
+  canvas.clear(background);
+
+  st::raster::Path path;
+  // 外框：顺时针（左上 → 右上 → 右下 → 左下）
+  path.move_to(st::math::Point{20.0f, 20.0f});
+  path.line_to(st::math::Point{236.0f, 20.0f});
+  path.line_to(st::math::Point{236.0f, 172.0f});
+  path.line_to(st::math::Point{20.0f, 172.0f});
+  path.close();
+  // 内框：逆时针（洞）
+  path.move_to(st::math::Point{80.0f, 60.0f});
+  path.line_to(st::math::Point{80.0f, 130.0f});
+  path.line_to(st::math::Point{176.0f, 130.0f});
+  path.line_to(st::math::Point{176.0f, 60.0f});
+  path.close();
+
+  (*scene)->begin_frame(background);
+  (*scene)->fill_path(path, Color{0x4A, 0x9E, 0xFF, 0xFF});
+  (*scene)->end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
+                                  static_cast<float>(kHeight)});
+
+  // 环带内应着色（外框边缘与内框之间）
+  const Color band = canvas.pixel_at(50, 96);
+  ST_CHECK(band.b > band.r + 40);           // 明显是那个蓝色
+  // 洞里应是底色（**这是非零环绕的关键断言**）
+  const Color hole = canvas.pixel_at(128, 96);
+  ST_CHECK(std::abs(static_cast<int>(hole.r) - 0x10) <= 3);
+  ST_CHECK(std::abs(static_cast<int>(hole.b) - 0x1E) <= 3);
+  // 外面也是底色
+  const Color outside = canvas.pixel_at(5, 5);
+  ST_CHECK(std::abs(static_cast<int>(outside.r) - 0x10) <= 3);
+  write_png(canvas, "gl/30-path-with-hole.png");
+}
+
+ST_TEST(gl_stroke_path_draws_outline_only) {
+  if (!st::raster::gl::available()) return;
+  auto scene = Scene3D::create(kWidth, kHeight);
+  if (!scene.has_value()) return;
+  Canvas canvas{kWidth, kHeight};
+  const Color background{0x10, 0x14, 0x1E, 0xFF};
+  canvas.clear(background);
+
+  st::raster::Path path;
+  path.move_to(st::math::Point{40.0f, 40.0f});
+  path.line_to(st::math::Point{200.0f, 40.0f});
+  path.line_to(st::math::Point{200.0f, 150.0f});
+  path.close();
+
+  (*scene)->begin_frame(background);
+  (*scene)->stroke_path(path, 6.0f, Color{0xFF, 0xC4, 0x4A, 0xFF});
+  (*scene)->end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
+                                  static_cast<float>(kHeight)});
+  // 描边：边上有着色、内部是空的（若实现退化成填充，这条会失败）
+  const Color edge = canvas.pixel_at(120, 40);
+  ST_CHECK(edge.r > 200);
+  const Color inside = canvas.pixel_at(120, 100);
+  ST_CHECK(std::abs(static_cast<int>(inside.r) - 0x10) <= 3);
+  write_png(canvas, "gl/31-stroked-triangle.png");
+}

@@ -21,6 +21,7 @@
 #include "st/core/error.hpp"
 #include "st/math/color.hpp"
 #include "st/math/matrix.hpp"
+#include "st/raster/path.hpp"
 
 namespace st::raster {
 
@@ -99,6 +100,22 @@ class Scene3D {
   virtual void set_camera(const Camera& camera) = 0;
   /// 画一个网格（可带模型变换）。同一个网格重复绘制会复用已上传的缓冲。
   virtual void draw_mesh(const Mesh& mesh, const math::Mat4& model) = 0;
+  /// 填充一条 2D 路径（**屏幕空间**，坐标 = 物理像素，原点左上）。
+  ///
+  /// 实现是 GPU 上标准的**模板缓冲法**，不是三角化：
+  /// 先把每条轮廓以 `INCR_WRAP`(正面) / `DECR_WRAP`(背面) 累加到模板缓冲，
+  /// 再画一个覆盖包围盒的四边形、只在模板 ≠ 0 处着色。
+  ///
+  /// 为什么选它而不是耳切三角化：
+  /// - **语义与软件光栅器一致**（非零环绕）：自交、重叠轮廓的结果与 CPU 路径完全相同，
+  ///   而耳切只对简单多边形有效，还得额外处理洞与自交；
+  /// - 轮廓只需**扇形展开**（无需真正三角化），代码量与出错面都小得多。
+  virtual void fill_path(const Path& path, math::Color color) = 0;
+
+  /// 描边一条 2D 路径：先按 `width` 转成轮廓（与软件光栅器同一个 `stroke_to_path`），
+  /// 再用同一个模板填充。这样"描边"与"填充"共享一套正确性。
+  virtual void stroke_path(const Path& path, float width, math::Color color) = 0;
+
   /// 结束一帧并把结果**合成**到 `target` 的目的矩形（源像素做预乘、翻 Y）。
   virtual void end_frame(Surface& target, math::Rect destination,
                          float opacity = 1.0f) = 0;

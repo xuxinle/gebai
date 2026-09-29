@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/core/log.hpp"
+#include "rasterize_internal.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/surface.hpp"
 
@@ -209,6 +210,26 @@ void main() {
 ///
 /// 为什么自己算光照而不是只画纯色：三维场景没有明暗就没有**体积感**——
 /// 立方体的相邻面会同色、看起来像一个扁平多边形。光照是"看起来像 3D"的最小代价。
+/// 2D 路径用的顶点着色器：直接收**物理像素**坐标，做正交映射（原点左上、Y 向下）。
+constexpr const char* kPathVertexShader = R"glsl(#version 330 core
+layout(location = 0) in vec2 in_position;
+uniform vec2 u_viewport;
+void main() {
+  // 物理像素 → NDC；Y 取负以匹配"画布原点在左上"的约定
+  vec2 ndc = vec2(in_position.x / u_viewport.x * 2.0 - 1.0,
+                  1.0 - in_position.y / u_viewport.y * 2.0);
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}
+)glsl";
+
+constexpr const char* kPathFragmentShader = R"glsl(#version 330 core
+uniform vec4 u_color;
+out vec4 out_color;
+void main() { out_color = u_color; }
+)glsl";
+
+// 说明：上面的 2D 着色器与下面的 3D 着色器是**两套**，因为它们做的事不同
+// （正交像素映射 + 纯色 vs 透视 + 光照）。合并成一个会让两边都变难读。
 constexpr const char* kFragmentShader = R"glsl(#version 330 core
 in vec3 v_normal;
 in vec3 v_color;
@@ -298,6 +319,11 @@ class GlScene final : public Scene3D {
     if (color_ != 0) glDeleteTextures(1, &color_);
     if (fbo_ != 0) glDeleteFramebuffers(1, &fbo_);
     if (program_ != 0) glDeleteProgram(program_);
+    if (path_program_ != 0) glDeleteProgram(path_program_);
+    if (path_vbo_ != 0) glDeleteBuffers(1, &path_vbo_);
+    if (path_vao_ != 0) glDeleteVertexArrays(1, &path_vao_);
+    if (cover_vbo_ != 0) glDeleteBuffers(1, &cover_vbo_);
+    if (cover_vao_ != 0) glDeleteVertexArrays(1, &cover_vao_);
     if (pixels_.size() > 0) glDeleteBuffers(0, nullptr);  // 占位：像素在 CPU 侧
   }
 
@@ -319,8 +345,11 @@ class GlScene final : public Scene3D {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_, 0);
     glGenRenderbuffers(1, &depth_);
     glBindRenderbuffer(GL_RENDERBUFFER, depth_);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width_, height_);
+    // 用 **DEPTH24_STENCIL8** 而不是纯深度：2D 路径填充走模板缓冲法，
+    // 没有模板位就只能退回三角化（而那会丢掉非零环绕的语义）。
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width_, height_);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth_);
     const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
@@ -341,7 +370,8 @@ class GlScene final : public Scene3D {
     glClearColor(static_cast<float>(clear_color.r) / 255.0f, static_cast<float>(clear_color.g) / 255.0f,
                  static_cast<float>(clear_color.b) / 255.0f,
                  static_cast<float>(clear_color.a) / 255.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     draw_calls_ = 0;
   }
 
@@ -375,11 +405,157 @@ class GlScene final : public Scene3D {
     composite(target, destination, opacity);
   }
 
+  /// 2D 路径填充（模板缓冲法，非零环绕）。
+  ///
+  /// 三个 pass：
+  /// 1. **累加**：每条轮廓以扇形展开（以首点为扇心），正面 `INCR_WRAP`、背面 `DECR_WRAP`
+  ///    —— 这正是"非零环绕"的定义，与软件光栅器同语义；
+  /// 2. **覆盖**：画轮廓包围盒，`glStencilFunc(GL_NOTEQUAL, 0)` 只在模板 ≠ 0 处着色；
+  /// 3. **清理**：把包围盒内的模板清零，供下一次填充复用（否则多次填充会互相污染）。
+  void fill_path(const Path& path, math::Color color) override {
+    if (!gl_context().ok) return;
+    const GLuint program = path_program();
+    if (program == 0 || path.is_empty()) return;
+    const std::vector<Polyline> polylines = path.flatten(kFlattenTolerance);
+    if (polylines.empty()) return;
+
+    // 扇形展开成三角形列表，并求包围盒
+    std::vector<float> fan;
+    float min_x = 1e30f;
+    float min_y = 1e30f;
+    float max_x = -1e30f;
+    float max_y = -1e30f;
+    for (const Polyline& line : polylines) {
+      if (line.points.size() < 3) continue;
+      const math::Point hub = line.points.front();
+      for (std::size_t index = 1; index + 1 < line.points.size(); ++index) {
+        const math::Point a = line.points[index];
+        const math::Point b = line.points[index + 1];
+        fan.insert(fan.end(), {hub.x, hub.y, a.x, a.y, b.x, b.y});
+      }
+      // 闭合轮廓的最后一段到首点（`closed` 为真时）
+      if (line.closed && line.points.size() >= 3) {
+        const math::Point a = line.points.back();
+        fan.insert(fan.end(), {hub.x, hub.y, a.x, a.y, hub.x, hub.y});
+      }
+      for (const math::Point& point : line.points) {
+        min_x = std::min(min_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_x = std::max(max_x, point.x);
+        max_y = std::max(max_y, point.y);
+      }
+    }
+    if (fan.empty()) return;
+    const float pad = 1.0f;
+    min_x -= pad;
+    min_y -= pad;
+    max_x += pad;
+    max_y += pad;
+
+    // 懒创建 VAO/VBO：**必须**在绘制前生成（VAO 0 在核心配置下无效，
+    // 而"声明了成员却没生成"的表现是 GL 错误一串 + 绘制读越界崩溃）。
+    if (path_vao_ == 0) {
+      glGenVertexArrays(1, &path_vao_);
+      glGenBuffers(1, &path_vbo_);
+      glGenVertexArrays(1, &cover_vao_);
+      glGenBuffers(1, &cover_vbo_);
+    }
+    glUseProgram(program);
+    glUniform2f(glGetUniformLocation(program, "u_viewport"), static_cast<float>(width_),
+                static_cast<float>(height_));
+    const float alpha = static_cast<float>(color.a) / 255.0f;
+    glUniform4f(glGetUniformLocation(program, "u_color"),
+                static_cast<float>(color.r) / 255.0f * alpha,
+                static_cast<float>(color.g) / 255.0f * alpha,
+                static_cast<float>(color.b) / 255.0f * alpha, alpha);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, width_, height_);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_STENCIL_TEST);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);   // pass 1：只写模板
+
+    // pass 1：累加模板（正面 +1、背面 -1，环绕进位 → 非零环绕）
+    glStencilFunc(GL_ALWAYS, 0, 0xFF);
+    glStencilOpSeparate(GL_FRONT, GL_INCR_WRAP, GL_INCR_WRAP, GL_INCR_WRAP);
+    glStencilOpSeparate(GL_BACK, GL_DECR_WRAP, GL_DECR_WRAP, GL_DECR_WRAP);
+    glStencilMask(0xFF);
+    draw_triangles(fan, path_vbo_, path_vao_, fan.size() / 2U);
+
+    // pass 2：覆盖包围盒，只在模板非零处着色
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    const std::vector<float> cover{min_x, min_y, max_x, min_y, max_x, max_y,
+                                   min_x, min_y, max_x, max_y, min_x, max_y};
+    draw_triangles(cover, cover_vbo_, cover_vao_, 6);
+
+    // pass 3：清掉包围盒内的模板（否则下一次填充会接着累加）
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glStencilFunc(GL_ALWAYS, 0, 0xFF);
+    glStencilOp(GL_ZERO, GL_ZERO, GL_ZERO);
+    draw_triangles(cover, cover_vbo_, cover_vao_, 6);
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_DEPTH_TEST);
+    ++draw_calls_;
+  }
+
+  void stroke_path(const Path& path, float width, math::Color color) override {
+    if (path.is_empty() || width <= 0.0f) return;
+    // 描边 = 先转轮廓路径，再走同一个填充。
+    // 复用 `stroke_to_path`（软件光栅器也用这一个）意味着两种渲染器对"描边"的
+    // 几何定义完全相同——这是能比较两者的前提。
+    const Path outline = detail::stroke_to_path(path, width, kFlattenTolerance);
+    fill_path(outline, color);
+  }
+
   [[nodiscard]] auto width() const noexcept -> int override { return width_; }
   [[nodiscard]] auto height() const noexcept -> int override { return height_; }
   [[nodiscard]] auto draw_calls() const noexcept -> std::uint64_t override { return draw_calls_; }
 
  private:
+  /// 2D 路径用的程序与缓冲（懒创建）。
+  auto path_program() const -> GLuint {
+    if (path_program_ != 0) return path_program_;
+    auto vertex = compile_shader(GL_VERTEX_SHADER, kPathVertexShader);
+    auto fragment = compile_shader(GL_FRAGMENT_SHADER, kPathFragmentShader);
+    if (!vertex.has_value() || !fragment.has_value()) {
+      if (vertex.has_value()) glDeleteShader(*vertex);
+      if (fragment.has_value()) glDeleteShader(*fragment);
+      return 0;
+    }
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, *vertex);
+    glAttachShader(program, *fragment);
+    glLinkProgram(program);
+    glDeleteShader(*vertex);
+    glDeleteShader(*fragment);
+    GLint status = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+      glDeleteProgram(program);
+      return 0;
+    }
+    path_program_ = program;
+    return path_program_;
+  }
+
+  /// 上传一批屏幕空间顶点并按三角形列表绘制。
+  auto draw_triangles(const std::vector<float>& vertices, GLuint buffer, GLuint vao,
+                      std::size_t vertex_count) const -> void {
+    if (vertex_count == 0) return;
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, buffer);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                 vertices.data(), GL_STREAM_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(2 * sizeof(float)),
+                          reinterpret_cast<void*>(0));
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertex_count));
+    glBindVertexArray(0);
+  }
+
   auto upload(const Mesh& mesh) -> const UploadedMesh& {
     // 按数据地址缓存：`Mesh` 通常由调用方长期持有（如每帧同一个立方体）
     const void* key = mesh.vertices.data();
@@ -469,6 +645,14 @@ class GlScene final : public Scene3D {
   /// CPU 侧暂存（Y 翻转 + 直通→预乘转换）：见 `composite` 的说明。
   mutable std::unique_ptr<Canvas> staging_{};
   mutable std::uint64_t composite_calls_{0};
+  /// 2D 路径资源（懒创建）：程序 + 扇形顶点 + 覆盖矩形。
+  mutable GLuint path_program_{0};
+  mutable GLuint path_vao_{0};
+  mutable GLuint path_vbo_{0};
+  mutable GLuint cover_vao_{0};
+  mutable GLuint cover_vbo_{0};
+  /// 扁平化容差（物理像素）：与软件光栅器同量级，保证曲线→折线的误差一致
+  static constexpr float kFlattenTolerance{0.25f};
   std::uint64_t draw_calls_{0};
 };
 
