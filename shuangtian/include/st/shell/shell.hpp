@@ -82,4 +82,13 @@ class Backend {
 /// 创建后端（`name` 为空=自动选择：有显示则尝试平台后端，失败回退 headless）。
 [[nodiscard]] auto create_backend(std::string_view name = {}) -> Result<std::unique_ptr<Backend>>;
 
+/// 合成负载微基准（真实画布尺寸上跑一组有代表性的原语，返回**中位数**毫秒）。
+///
+/// 用途：`--renderer auto` 的判据。两个后端共用同一份实现——"更快"的定义只能有一处，
+/// 否则窗口与离屏会得出不同结论。
+///
+/// ⚠ 它**不含 `present()`**：窗口呈现的开销（是否走 swapchain）不在这个数字里，
+/// 由 `renderer_note` 如实报出，不混进本基准。
+[[nodiscard]] auto benchmark_surface(raster::Surface& target, int runs) -> double;
+
 }  // namespace st::shell

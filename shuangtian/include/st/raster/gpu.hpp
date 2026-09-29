@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <memory>
 #include <string>
 
 #include "st/core/error.hpp"
@@ -44,6 +45,32 @@ struct Capabilities {
 };
 
 [[nodiscard]] auto capabilities() -> Capabilities;
+
+/// 窗口呈现器：把画布的**最后内容零拷贝送上屏**（Windows 走 DXGI swapchain）。
+///
+/// 存在的理由：没有它，窗口后端只能 `pixels()` 把整帧从 GPU 拉回 CPU、
+/// 逐像素重排通道、再 `BitBlt`——实测（1600×1000 @1.5x = 3.6M 像素）
+/// 这笔"送显"要 **6.55 ms**，而 GPU 自己画完只要 1.61 ms。也就是说**送显占了 80%**，
+/// GPU 渲染的收益全被它吃掉。swapchain 让 GPU 纹理直接上屏，把这笔开销归零。
+class Presenter {
+ public:
+  Presenter() = default;
+  virtual ~Presenter() = default;
+  Presenter(const Presenter&) = delete;
+  auto operator=(const Presenter&) = delete;
+
+  /// 窗口尺寸变化时重建后备缓冲（失败返回错误，调用方可回退软件呈现）。
+  virtual auto resize(int width, int height) -> Status = 0;
+  /// 呈现一次：把 `canvas` 的内容送到窗口。
+  /// **要求 `canvas` 是本进程创建的 GPU 画布**（不同设备间无法直接拷贝）。
+  virtual auto present(Surface& canvas, int width, int height) -> Status = 0;
+  /// 人话描述（哪块卡、几个缓冲、是否撕裂模式），用于 `metrics` 上报与排障。
+  [[nodiscard]] virtual auto note() const -> std::string = 0;
+};
+
+/// 为目标窗口建呈现器（`native_window` 是 HWND；其他平台返回 Unsupported）。
+[[nodiscard]] auto create_presenter(void* native_window, int width, int height)
+    -> Result<std::unique_ptr<Presenter>>;
 
 /// 设备信息（用于上报"这一帧真的是显卡画的"以及是哪一块卡）。
 struct DeviceInfo {

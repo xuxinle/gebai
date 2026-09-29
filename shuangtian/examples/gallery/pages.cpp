@@ -368,8 +368,26 @@ namespace {
 
   auto stats = make_row(12.0f);
   stats->set_id("stats-row");
-  stats->add_child(make_stat_card("stat-backend", "cpu", "渲染后端", "软件光栅器", Tone::Primary));
-  stats->add_child(make_stat_card("stat-dpi", "eye", "DPI 缩放", "1.0x", Tone::Accent));
+  // 前两张是**会变的**事实（渲染器 / DPI）：初值只占位，真实值由应用在刷新时填。
+  // 写死的"软件光栅器"在切到 GPU 后会变成假信息——而这正是这一页要展示的可观测性。
+  {
+    st::ui::Text* renderer_text = nullptr;
+    stats->add_child(make_stat_card("stat-backend", "cpu", "渲染器", "—", Tone::Primary,
+                                    &renderer_text));
+    if (renderer_text != nullptr && hooks.register_runtime_field) {
+      hooks.register_runtime_field("stat_renderer",
+                                   [renderer_text](std::string value) {
+                                     renderer_text->set_content(std::move(value));
+                                   });
+    }
+    st::ui::Text* dpi_text = nullptr;
+    stats->add_child(make_stat_card("stat-dpi", "eye", "DPI 缩放", "—", Tone::Accent, &dpi_text));
+    if (dpi_text != nullptr && hooks.register_runtime_field) {
+      hooks.register_runtime_field("stat_dpi", [dpi_text](std::string value) {
+        dpi_text->set_content(std::move(value));
+      });
+    }
+  }
   stats->add_child(make_stat_card("stat-nodes", "layers", "组件节点", "自绘", Tone::Success));
   stats->add_child(make_stat_card("stat-control", "terminal", "控制通道", "TCP", Tone::Warning));
   page->add_child(std::move(stats));
@@ -790,7 +808,11 @@ namespace {
       });
     }
   };
-  add_runtime_field("backend", "cpu", "渲染后端");
+  // "渲染后端" = 窗口后端（headless/win32）；"渲染器" = 谁在画这一帧（software/gpu）。
+  // 两者是**不同的问题**：同一台机器上 headless+GPU 与 win32+软件都合法。
+  // 之前这里写死"软件光栅器"，切到 GPU 后就成了假信息。
+  add_runtime_field("backend", "cpu", "窗口后端");
+  add_runtime_field("renderer", "zap", "渲染器");
   add_runtime_field("dpi", "eye", "DPI 缩放");
   add_runtime_field("frames", "activity", "累计帧");
   add_runtime_field("port", "terminal", "控制端口");

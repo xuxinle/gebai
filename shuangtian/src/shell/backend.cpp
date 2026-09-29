@@ -29,7 +29,7 @@ namespace {
 /// 或呈现路径仍需 CPU 拷贝时，软件反而更快），所以这里不预设答案：
 /// 由调用方（`Application`）在能测到真实帧耗时时做实测选择，测不到才用下面的保守默认。
 /// 合成负载微基准（定义见下：`create_surface` 的 `auto` 分支要用它）。
-[[nodiscard]] auto benchmark_surface(raster::Surface& target, int runs) -> double;
+[[nodiscard]] auto benchmark_surface_impl(raster::Surface& target, int runs) -> double;
 
 struct SurfaceChoice {
   std::unique_ptr<raster::Surface> surface{};
@@ -54,7 +54,7 @@ struct SurfaceChoice {
     auto software = std::make_unique<raster::Canvas>(
         raster::Canvas::for_logical_size(options.width > 0 ? options.width : 1280,
                                          options.height > 0 ? options.height : 720, scale));
-    const double software_ms = benchmark_surface(*software, 3);
+    const double software_ms = benchmark_surface_impl(*software, 3);
     std::unique_ptr<raster::Surface> gpu{};
     std::string gpu_label{"不可用"};
     if (raster::gpu::available()) {
@@ -65,7 +65,7 @@ struct SurfaceChoice {
         gpu_label = info.has_value() ? info->adapter : std::string("D3D11");
       }
     }
-    const double gpu_ms = gpu != nullptr ? benchmark_surface(*gpu, 3) : 0.0;
+    const double gpu_ms = gpu != nullptr ? benchmark_surface_impl(*gpu, 3) : 0.0;
     const bool pick_gpu = gpu != nullptr && gpu_ms > 0.0 && gpu_ms < software_ms;
     // ⚠ 必须在 move **之前**记下"有没有 GPU"：`std::move(gpu)` 之后那个指针必然为空，
     // 拿它去做判断会得到相反的分支（曾因此出现"名字说 gpu、理由说 GPU 不可用"的自相矛盾）。
@@ -108,15 +108,9 @@ struct SurfaceChoice {
   return choice;
 }
 
-/// 合成负载：在真实画布尺寸上跑一遍**有代表性的原语组合**（圆角矩形 / 渐变 / 覆盖率遮罩），
-/// 取中位数耗时。用于 `auto` 的渲染器选择。
-///
-/// ⚠ 如实说明它**没测什么**：不含 `present()`（窗口呈现）。而当前 win32 呈现仍是
-/// "逐像素重排 + GDI BitBlt"，GPU 画完还要把整帧拉回 CPU 重排——那笔开销不在这里，
-/// 却会落在真实帧上。所以这个微基准是**临时的判据**：
-/// 它在"渲染本身谁更快"这件事上是对的，但端到端归属要等呈现路径换成 DXGI swapchain 后
-/// 用真实帧耗时来定。诚实标注胜过让读者误以为这是端到端结论。
-[[nodiscard]] auto benchmark_surface(raster::Surface& target, int runs) -> double {
+/// 合成负载：真实画布尺寸上跑一组有代表性的原语（圆角矩形 / 渐变 / 覆盖率遮罩），
+/// 取中位数。公共入口 `benchmark_surface` 在文件末尾转发到这里。
+[[nodiscard]] auto benchmark_surface_impl(raster::Surface& target, int runs) -> double {
   const float width = static_cast<float>(target.width());
   const float height = static_cast<float>(target.height());
   if (width < 32.0f || height < 32.0f) return 0.0;
@@ -349,6 +343,13 @@ auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {
 #endif
   }
   return unexpected(ErrorCode::Invalid, std::format("未知后端: {}", requested));
+}
+
+/// 公共入口（声明见 shell.hpp）：两个后端共用的"更快"判据。
+/// 实现留在匿名命名空间里（`benchmark_surface_impl`），这里只做转发——
+/// 于是"更快怎么算"只定义一处，窗口与离屏不会得出不同结论。
+[[nodiscard]] auto benchmark_surface(raster::Surface& target, int runs) -> double {
+  return benchmark_surface_impl(target, runs);
 }
 
 }  // namespace st::shell

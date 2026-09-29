@@ -336,6 +336,13 @@ auto run_app(int argc, char** argv) -> int {
     const st::control::Metrics metrics = app_ptr->metrics();
     for (auto& [field, setter] : runtime_fields) {
       if (field == "backend") setter(std::string(app_ptr->backend_name()));
+      else if (field == "renderer") setter(metrics.renderer);
+      else if (field == "stat_renderer") {
+        // 卡片位置短：写"GPU (D3D11)"这类短名，长描述留在 renderer_note（控制通道可读）
+        setter(metrics.renderer == "gpu" ? "GPU (D3D11)" : "软件光栅器");
+      } else if (field == "stat_dpi") {
+        setter(std::format("{:.1f}x", static_cast<double>(app_ptr->device_scale())));
+      }
       else if (field == "dpi") setter(std::format("{:.1f}x", static_cast<double>(app_ptr->device_scale())));
       else if (field == "frames") setter(std::format("{}", metrics.frames));
       else if (field == "port") setter(std::format("{}", app_ptr->control_port()));

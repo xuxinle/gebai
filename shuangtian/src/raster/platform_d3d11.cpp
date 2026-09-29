@@ -21,6 +21,7 @@ namespace st::raster::gpu {
 auto available() noexcept -> bool { return false; }
 
 /// 非 Windows 平台：一切能力均为空（应用自动回软件）。
+
 auto capabilities() -> Capabilities { return Capabilities{}; }
 auto probe() -> Result<DeviceInfo> {
   return unexpected(ErrorCode::Unsupported, "GPU 渲染当前仅实现了 D3D11（Windows）后端");
@@ -29,6 +30,11 @@ auto create_canvas(int, int, float, const Options&) -> Result<std::unique_ptr<Su
   return unexpected(ErrorCode::Unsupported, "GPU 渲染当前仅实现了 D3D11（Windows）后端");
 }
 auto live_canvas_count() noexcept -> std::uint32_t { return 0; }
+
+auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
+  // 其他平台没有 DXGI：如实报不支持，由窗口后端落回软件呈现
+  return unexpected(ErrorCode::Unsupported, "GPU 呈现当前仅实现了 DXGI（Windows）后端");
+}
 
 }  // namespace st::raster::gpu
 
@@ -84,6 +90,7 @@ using CreateDeviceFn = HRESULT(WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE,
 struct Modules {
   HMODULE d3d11{nullptr};
   HMODULE d3dcompiler{nullptr};
+  HMODULE dxgi{nullptr};   ///< 呈现（DXGI swapchain）用；缺失只是"不能零拷贝上屏"
   CreateDeviceFn create_device{nullptr};
   std::string d3d11_error{};  ///< 具体原因（"缺 d3d11.dll" 与 "缺符号" 是两回事）
 
@@ -104,6 +111,8 @@ struct Modules {
     // 着色器编译器在**另一个** DLL（系统自带 d3dcompiler_47.dll；老系统可能是 43/46/47）
     for (const wchar_t* name : {L"d3dcompiler_47.dll", L"d3dcompiler_46.dll", L"d3dcompiler_43.dll"}) {
       d3dcompiler = ::LoadLibraryW(name);
+  // DXGI：呈现器需要；缺了不影响渲染，只影响"零拷贝上屏"（会落回 GDI 路径）
+  dxgi = ::LoadLibraryW(L"dxgi.dll");
       if (d3dcompiler != nullptr) break;
     }
   }
@@ -1549,6 +1558,169 @@ auto available() noexcept -> bool { return holder().ok; }
 ///
 /// 每一项都必须对应**已验证过**的实现：宁可报缺失（应用会回软件路径）
 /// 也不能报“有”而画出错东西——后者会静默地毁掉一整帧。
+// ————————————————————————————————————————————————————————————————————————————
+// DXGI 呈现器：把画布纹理**零拷贝**送上屏
+// ————————————————————————————————————————————————————————————————————————————
+
+/// DXGI 工厂创建函数（同样动态取，不产生链接期依赖）。
+using CreateFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+
+/// 实现 `gpu::Presenter`：持有 swapchain，`present()` 用 `CopyResource` 把画布纹理
+/// 拷进后备缓冲再 `Present`——**不经过 CPU**。
+///
+/// 为什么 `CopyResource` 而不是直接让画布画进后备缓冲：画布尺寸与窗口尺寸可能不同
+/// （DPI 变化、窗口 resize 的瞬间），且画布还要能被控制通道截图与测试读回；
+/// 保持"画布是权威副本"这条不变量，代价只是一次 GPU 内拷贝（微秒级）。
+class D3dPresenter final : public Presenter {
+ public:
+  D3dPresenter() = default;
+
+  ~D3dPresenter() override {
+    if (backbuffer_ != nullptr) backbuffer_->Release();
+    if (swapchain_ != nullptr) swapchain_->Release();
+    if (factory_ != nullptr) factory_->Release();
+  }
+
+  auto initialize(ID3D11Device* device, HWND window, int width, int height) -> Status {
+    device_ = device;
+    window_ = window;
+    const Modules& mods = modules();
+    if (mods.dxgi == nullptr) {
+      return unexpected(ErrorCode::Unsupported, "找不到 dxgi.dll");
+    }
+    const auto create_factory = reinterpret_cast<CreateFactoryFn>(
+        reinterpret_cast<void*>(::GetProcAddress(mods.dxgi, "CreateDXGIFactory1")));
+    if (create_factory == nullptr) {
+      return unexpected(ErrorCode::Unsupported, "dxgi 中找不到 CreateDXGIFactory1");
+    }
+    if (FAILED(create_factory(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory_))) ||
+        factory_ == nullptr) {
+      return unexpected(ErrorCode::Io, "CreateDXGIFactory1 失败");
+    }
+    return resize(width, height);
+  }
+
+  auto resize(int width, int height) -> Status override {
+    if (factory_ == nullptr || window_ == nullptr) {
+      return unexpected(ErrorCode::Invalid, "呈现器未初始化");
+    }
+    if (width <= 0 || height <= 0) return unexpected(ErrorCode::Invalid, "呈现尺寸非法");
+    if (swapchain_ != nullptr && width == width_ && height == height_) return ok();
+
+    if (backbuffer_ != nullptr) {
+      backbuffer_->Release();
+      backbuffer_ = nullptr;
+    }
+    // 已有 swapchain：只 resize 后备缓冲（重建 swapchain 会让窗口闪一下）
+    if (swapchain_ != nullptr) {
+      const HRESULT result = swapchain_->ResizeBuffers(0, static_cast<UINT>(width),
+                                                       static_cast<UINT>(height),
+                                                       DXGI_FORMAT_UNKNOWN, 0);
+      if (SUCCEEDED(result)) {
+        width_ = width;
+        height_ = height;
+        return acquire_backbuffer();
+      }
+      // resize 失败（例如窗口最小化）：丢掉重建
+      swapchain_->Release();
+      swapchain_ = nullptr;
+    }
+
+    DXGI_SWAP_CHAIN_DESC desc{};
+    desc.BufferCount = 2;
+    desc.BufferDesc.Width = static_cast<UINT>(width);
+    desc.BufferDesc.Height = static_cast<UINT>(height);
+    desc.BufferDesc.Format = kFormat;
+    desc.BufferDesc.RefreshRate.Numerator = 0;  // 0 = 用窗口自带的刷新率
+    desc.BufferDesc.RefreshRate.Denominator = 0;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.OutputWindow = window_;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Windowed = TRUE;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;  // 最兼容；不需要保留后备内容
+    desc.Flags = 0;
+    const HRESULT result = factory_->CreateSwapChain(
+        device_, &desc, reinterpret_cast<IDXGISwapChain**>(&swapchain_));
+    if (FAILED(result) || swapchain_ == nullptr) {
+      swapchain_ = nullptr;
+      return unexpected(ErrorCode::Io, std::format("CreateSwapChain 失败（0x{:08X}）",
+                                                   static_cast<unsigned>(result)));
+    }
+    // 别让 DXGI 截 Alt+Enter（窗口行为由我们自己管）
+    (void)factory_->MakeWindowAssociation(window_, DXGI_MWA_NO_ALT_ENTER);
+    width_ = width;
+    height_ = height;
+    return acquire_backbuffer();
+  }
+
+  auto present(Surface& canvas, int width, int height) -> Status override {
+    if (swapchain_ == nullptr) return unexpected(ErrorCode::Invalid, "呈现器未就绪");
+    if (width != width_ || height != height_) {
+      if (auto resized = resize(width, height); !resized) return resized;
+    }
+    // 画布必须是本进程的 GPU 画布：不同设备之间无法直接拷贝纹理
+    auto* gpu_canvas = dynamic_cast<GpuCanvas*>(&canvas);
+    if (gpu_canvas == nullptr || gpu_canvas->target() == nullptr) {
+      return unexpected(ErrorCode::Invalid, "present 需要本进程创建的 GPU 画布");
+    }
+    if (backbuffer_ == nullptr) {
+      if (auto acquired = acquire_backbuffer(); !acquired) return acquired;
+    }
+    ID3D11DeviceContext* context = holder().context_or_null();
+    if (context == nullptr) return unexpected(ErrorCode::Io, "没有 D3D11 上下文");
+    // 关键一步：GPU → GPU 拷贝，**不经过 CPU**（这就是 M5 的全部价值）
+    context->CopyResource(backbuffer_, gpu_canvas->target());
+    const HRESULT result = swapchain_->Present(0, 0);
+    if (FAILED(result)) {
+      return unexpected(ErrorCode::Io, std::format("Present 失败（0x{:08X}）",
+                                                   static_cast<unsigned>(result)));
+    }
+    return ok();
+  }
+
+  [[nodiscard]] auto note() const -> std::string override {
+    return std::format("DXGI swapchain {}×{} · 双缓冲 · {}",
+                       width_, height_, present_count_ > 0 ? "已上屏" : "待上屏");
+  }
+
+ private:
+  auto acquire_backbuffer() -> Status {
+    const HRESULT result = swapchain_->GetBuffer(
+        0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer_));
+    if (FAILED(result) || backbuffer_ == nullptr) {
+      backbuffer_ = nullptr;
+      return unexpected(ErrorCode::Io, "取 swapchain 后备缓冲失败");
+    }
+    return ok();
+  }
+
+  ID3D11Device* device_{nullptr};  ///< 非拥有（来自进程级 holder）
+  IDXGIFactory1* factory_{nullptr};
+  IDXGISwapChain* swapchain_{nullptr};
+  ID3D11Texture2D* backbuffer_{nullptr};
+  HWND window_{nullptr};
+  int width_{0};
+  int height_{0};
+  std::uint32_t present_count_{0};
+};
+
+auto create_presenter(void* native_window, int width, int height)
+    -> Result<std::unique_ptr<Presenter>> {
+  const DeviceHolder& holder_ref = holder();
+  if (!holder_ref.ok || holder_ref.device_or_null() == nullptr) {
+    return unexpected(ErrorCode::Unsupported, "没有可用的 D3D11 设备");
+  }
+  if (native_window == nullptr) return unexpected(ErrorCode::Invalid, "窗口句柄为空");
+  auto presenter = std::make_unique<D3dPresenter>();
+  if (auto status = presenter->initialize(holder_ref.device_or_null(),
+                                          static_cast<HWND>(native_window), width, height);
+      !status) {
+    return unexpected(status.error().code, status.error().message);
+  }
+  return std::unique_ptr<Presenter>(std::move(presenter));
+}
+
 auto capabilities() -> Capabilities {
   Capabilities caps;
   caps.solid_shapes = true;

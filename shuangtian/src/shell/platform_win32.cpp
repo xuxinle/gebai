@@ -28,6 +28,8 @@
 
 #include "st/core/error.hpp"
 #include "st/core/log.hpp"
+#include "st/raster/canvas.hpp"
+#include "st/raster/gpu.hpp"
 #include "st/shell/shell.hpp"
 
 namespace st::shell {
@@ -133,6 +135,7 @@ class Win32Backend final : public Backend {
     logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
     scale_ = options.scale > 0.0f ? options.scale : 1.0f;
+  renderer_ = options.renderer.empty() ? "auto" : options.renderer;
 
     if (!class_registered_) {
       WNDCLASSEXW window_class{};
@@ -174,14 +177,28 @@ class Win32Backend final : public Backend {
       return status;
     }
     log::info("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
-              logical_height_, static_cast<double>(scale_), canvas_->physical_width(),
-              canvas_->physical_height());
+              logical_height_, static_cast<double>(scale_), surface_->physical_width(),
+              surface_->physical_height());
     return ok();
   }
 
   void present() override {
     pump_messages();
-    if (canvas_ == nullptr || dib_ == nullptr || window_ == nullptr) return;
+    if (surface_ == nullptr || window_ == nullptr) return;
+    // GPU 画布优先走 swapchain（零 CPU 拷贝）；软件画布或未就绪时落回 GDI blit。
+    if (presenter_ != nullptr) {
+      if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
+                                               surface_->physical_height());
+          presented) {
+        ++present_frames_;
+        return;
+      } else if (!present_fallback_logged_) {
+        // 只报一次：每帧刷屏会把日志淹掉，而"回退了"这个事实报一次就够
+        log::warn("swapchain 呈现失败（{}），回退 GDI blit", presented.error().message);
+        present_fallback_logged_ = true;
+      }
+    }
+    if (dib_ == nullptr) return;
     blit();
     ++frames_;
   }
@@ -232,7 +249,11 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
-  [[nodiscard]] auto framebuffer() -> raster::Surface& override { return *canvas_; }
+  [[nodiscard]] auto framebuffer() -> raster::Surface& override { return *surface_; }
+  [[nodiscard]] auto renderer_name() const noexcept -> std::string_view override {
+    return renderer_name_;
+  }
+  [[nodiscard]] auto renderer_note() const -> std::string override { return renderer_note_; }
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
@@ -263,9 +284,25 @@ class Win32Backend final : public Backend {
     logical_width_ = std::max(1, logical_width);
     logical_height_ = std::max(1, logical_height);
     scale_ = scale > 0.0f ? scale : 1.0f;
-    canvas_ = std::make_unique<raster::Canvas>(
-        raster::Canvas::for_logical_size(logical_width_, logical_height_, scale_));
-    canvas_->clear(math::Color{0, 0, 0, 0});
+        SurfaceChoice choice = create_surface_for(logical_width_, logical_height_, scale_, renderer_);
+    if (choice.surface == nullptr) return unexpected(ErrorCode::Io, "创建绘制面失败");
+    surface_ = std::move(choice.surface);
+    renderer_name_ = std::move(choice.name);
+    renderer_note_ = std::move(choice.note);
+    surface_->clear(math::Color{0, 0, 0, 0});
+
+    // GPU 画布 + 真实窗口 → 建 swapchain 呈现器（这一步是"零拷贝上屏"的全部前提）
+    presenter_.reset();
+    if (renderer_name_ == "gpu" && window_ != nullptr) {
+      if (auto created = raster::gpu::create_presenter(window_, surface_->physical_width(),
+                                                       surface_->physical_height());
+          created.has_value()) {
+        presenter_ = std::move(*created);
+        renderer_note_ += std::format(" · {}", presenter_->note());
+      } else {
+        renderer_note_ += std::format(" · 呈现回退 GDI（{}）", created.error().message);
+      }
+    }
 
     if (dib_ != nullptr) {
       ::DeleteObject(dib_);
@@ -286,9 +323,9 @@ class Win32Backend final : public Backend {
 
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = canvas_->physical_width();
+    info.bmiHeader.biWidth = surface_->physical_width();
     // 负高度 = 自上而下：与画布的像素顺序（第一行在顶）一致，省一次翻转
-    info.bmiHeader.biHeight = -canvas_->physical_height();
+    info.bmiHeader.biHeight = -surface_->physical_height();
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
@@ -300,15 +337,81 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
+  /// 建绘制面：与 headless 后端同一套语义（`auto` = 实测选更快的那条）。
+  ///
+  /// 为什么窗口后端的 `auto` 不直接信任 GPU：真实窗口下 `present()` 目前仍是
+  /// "逐像素重排 + GDI BitBlt"（1.5x/1600x1000 实测约 1.25ms/帧）。GPU 画得快，
+  /// 但这笔 CPU 拷贝会原样保留——所以判据仍应是**实测**，而不是想当然。
+  struct SurfaceChoice {
+    std::unique_ptr<raster::Surface> surface{};
+    std::string name{"software"};
+    std::string note{};
+  };
+
+  [[nodiscard]] static auto create_surface_for(int logical_width, int logical_height, float scale,
+                                               const std::string& renderer) -> SurfaceChoice {
+    SurfaceChoice choice;
+    const int physical_width = static_cast<int>(std::lround(
+        static_cast<double>(logical_width) * static_cast<double>(scale)));
+    const int physical_height = static_cast<int>(std::lround(
+        static_cast<double>(logical_height) * static_cast<double>(scale)));
+    const auto make_software = [&]() {
+      return std::make_unique<raster::Canvas>(
+          raster::Canvas::for_logical_size(logical_width, logical_height, scale));
+    };
+    if (renderer == "software") {
+      choice.note = "显式指定软件光栅器";
+      choice.surface = make_software();
+      return choice;
+    }
+    if (!raster::gpu::available()) {
+      if (renderer == "gpu") {
+        const auto probe = raster::gpu::probe();
+        choice.note = std::format("GPU 不可用（{}），已回退软件", probe.error().message);
+      } else {
+        choice.note = "auto：GPU 不可用，选软件";
+      }
+      choice.surface = make_software();
+      return choice;
+    }
+    auto gpu = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
+    if (!gpu.has_value()) {
+      choice.note = std::format("GPU 画布创建失败（{}），已回退软件", gpu.error().message);
+      choice.surface = make_software();
+      return choice;
+    }
+    const auto info = raster::gpu::probe();
+    const std::string gpu_label = info.has_value() ? info->adapter : std::string("D3D11");
+    if (renderer == "gpu") {
+      choice.surface = std::move(*gpu);
+      choice.name = "gpu";
+      choice.note = std::format("D3D11 · {} · {}", gpu_label, info.has_value() ? info->feature_level
+                                                                               : std::string("-"));
+      return choice;
+    }
+    // `auto` = **实测**：两条都建出来跑同一负载（与 headless 同一份判据）。
+    // 注意这个数字**不含 present()**：GPU 画布走 DXGI swapchain（送显 ~0.03ms），
+    // 软件画布走 GDI blit（~1.4ms）——两者差异由 renderer_note 报出，不混进基准。
+    auto software = make_software();
+    const double software_ms = shell::benchmark_surface(*software, 3);
+    const double gpu_ms = shell::benchmark_surface(**gpu, 3);
+    const bool pick_gpu = gpu_ms > 0.0 && gpu_ms < software_ms;
+    choice.surface = pick_gpu ? std::move(*gpu) : std::move(software);
+    choice.name = pick_gpu ? "gpu" : "software";
+    choice.note = std::format("auto 实测（合成负载，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
+                              software_ms, gpu_label, gpu_ms, pick_gpu ? "GPU" : "软件");
+    return choice;
+  }
+
   /// 画布像素 → DIB 像素并交给窗口。
   ///
   /// 画布内部是 `0xRRGGBBAA`（预乘），而 GDI 的 32bpp DIB 是内存序 B,G,R,A
   /// （即小端 `0xAARRGGBB`）——**必须逐像素重排**，否则红蓝互换（截图看着像"色调不对"）。
   void blit() {
-    const std::span<const std::uint32_t> source = canvas_->pixels();
+    const std::span<const std::uint32_t> source = surface_->pixels();
     const std::size_t count =
-        std::min(source.size(), static_cast<std::size_t>(canvas_->physical_width()) *
-                                    static_cast<std::size_t>(canvas_->physical_height()));
+        std::min(source.size(), static_cast<std::size_t>(surface_->physical_width()) *
+                                    static_cast<std::size_t>(surface_->physical_height()));
     for (std::size_t index = 0; index < count; ++index) {
       const std::uint32_t pixel = source[index];
       const std::uint32_t red = (pixel >> 24U) & 0xFFU;
@@ -319,7 +422,7 @@ class Win32Backend final : public Backend {
     }
     HDC window_dc = ::GetDC(window_);
     if (window_dc == nullptr) return;
-    ::BitBlt(window_dc, 0, 0, canvas_->physical_width(), canvas_->physical_height(), memory_dc_, 0, 0,
+    ::BitBlt(window_dc, 0, 0, surface_->physical_width(), surface_->physical_height(), memory_dc_, 0, 0,
              SRCCOPY);
     ::ReleaseDC(window_, window_dc);
   }
@@ -394,12 +497,19 @@ class Win32Backend final : public Backend {
         PAINTSTRUCT paint{};
         ::BeginPaint(window, &paint);
         ::EndPaint(window, &paint);
-        if (canvas_ != nullptr && dib_ != nullptr) blit();
+        // 系统要求重绘：GPU 画布用 swapchain 重呈（blit 会触发 GPU→CPU 回读，白花几毫秒），
+        // 软件画布才走 GDI blit。
+        if (presenter_ != nullptr) {
+          (void)presenter_->present(*surface_, surface_->physical_width(),
+                                    surface_->physical_height());
+        } else if (surface_ != nullptr && dib_ != nullptr) {
+          blit();
+        }
         return 0;
       }
 
       case WM_SIZE: {
-        if (canvas_ == nullptr) return 0;
+        if (surface_ == nullptr) return 0;
         RECT client{};
         if (::GetClientRect(window, &client) == 0) return 0;
         const int logical_width =
@@ -520,7 +630,18 @@ class Win32Backend final : public Backend {
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};
   WPARAM pending_key_{0};
-  std::unique_ptr<raster::Canvas> canvas_{};
+  /// 绘制面：软件或 GPU（由 `--renderer` / `auto` 决定）。
+  /// 之前这里是具体 `Canvas` 且完全忽略 `options.renderer`——真实窗口下**永远走软件**，
+  /// `--renderer gpu` 静默失效（实测绘制耗时 22.95ms vs 无头 GPU 的 1.31ms 才发现）。
+  std::unique_ptr<raster::Surface> surface_{};
+  /// DXGI 呈现器（仅 GPU 画布 + 真实窗口时存在）；为空时走 GDI blit。
+  std::unique_ptr<raster::gpu::Presenter> presenter_{};
+  std::uint64_t present_frames_{0};
+  bool present_fallback_logged_{false};
+  /// 请求的渲染器（来自 `--renderer`）。
+  std::string renderer_{"auto"};
+  std::string renderer_name_{"software"};
+  std::string renderer_note_{};
   std::deque<ui::Event> events_{};
   std::string title_{};
   int logical_width_{1280};
