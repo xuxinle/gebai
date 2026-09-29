@@ -344,6 +344,21 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
   bool has_subpath = false;
   math::Point subpath_start{};
   (void)stroke_width;
+
+  // ⚠️ **每个 `next_number` 必须单独成句**——不要写成
+  // `map(next_number(cursor), next_number(cursor))`。C++ **没有规定函数实参的求值顺序**，
+  // 而 MSVC 是从右往左求值：那样写会把两个数颠倒着取，于是 x/y 被交换。
+  //
+  // 这个缺陷的后果很隐蔽：所有图标都画得出来，只是“转了个方向”——
+  // `check` 交换后仍像对钩、`search` 仍像放大镜，只有把**图形与名字并排看**
+  // （图标全集）才发现 `chevron-down` 指向右、`home` 变成 `<E`；
+  // 而且 GCC/Clang 通常从左往右求值，**Linux 上完全正常**（只在 Windows 上现形）。
+  const auto read_point = [&cursor, &map]() -> math::Point {
+    const float x = next_number(cursor);
+    const float y = next_number(cursor);
+    return map(x, y);
+  };
+
   while (cursor.index < glyph->data.size()) {
     skip_spaces(cursor);
     if (cursor.index >= glyph->data.size()) break;
@@ -351,14 +366,14 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
     ++cursor.index;
     switch (command) {
       case 'M': {
-        const math::Point point = map(next_number(cursor), next_number(cursor));
+        const math::Point point = read_point();
         path.move_to(point);
         subpath_start = point;
         has_subpath = true;
         break;
       }
       case 'L': {
-        const math::Point point = map(next_number(cursor), next_number(cursor));
+        const math::Point point = read_point();
         if (!has_subpath) {
           path.move_to(point);
           has_subpath = true;
@@ -368,9 +383,9 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
         break;
       }
       case 'C': {
-        const math::Point control1 = map(next_number(cursor), next_number(cursor));
-        const math::Point control2 = map(next_number(cursor), next_number(cursor));
-        const math::Point end = map(next_number(cursor), next_number(cursor));
+        const math::Point control1 = read_point();
+        const math::Point control2 = read_point();
+        const math::Point end = read_point();
         if (!has_subpath) {
           path.move_to(control1);
           has_subpath = true;

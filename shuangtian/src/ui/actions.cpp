@@ -1,6 +1,7 @@
 #include "st/ui/actions.hpp"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -55,8 +56,20 @@ auto rect_to_json(math::Rect rect) -> st::Json {
 ///
 /// 控制通道的 `set` 方法与脚本宿主的 `ui.set` **共用这一份实现**——
 /// 否则"两条路径能改的属性不一致"会变成难以察觉的语义分裂。
+///
+/// 属性名由**元素自己声明**（`property_names()`）为准，而不是在这里维护一份全局白名单：
+/// 两处一旦不一致就会出现"读得到、改不了"的静默分裂——
+/// 实测踩到：`Input` 的 `placeholder`（`get` 能读出占位文字，`set` 却返回 `changed: []`
+/// 什么也不改，而调用方看到"成功"的返回就以为改好了）。
+///
+/// `enabled` / `visible` / `focused` 三个是框架级属性（不经 `set_property`，
+/// 因为它们需要 `UiRoot` 参与焦点管理），先单独处理。
 auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props) -> Json {
   Json changed = Json::array();
+  // 少数名字在部分元素上未被声明、但历史上一直可写：并集是"既消除分裂又不倒退"的做法。
+  constexpr std::array<std::string_view, 9> kGenericSettable{
+      "checked", "selected", "value", "text", "label", "icon", "options", "active",
+      "scroll_offset"};
   for (const auto& [name, value] : props.items()) {
     bool applied = false;
     if (name == "enabled") {
@@ -72,11 +85,17 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
         root.set_focus(nullptr);
       }
       applied = true;
-    } else if (name == "checked" || name == "selected" || name == "value" || name == "text" ||
-               name == "label" || name == "icon" || name == "options" || name == "active" ||
-               name == "scroll_offset") {
-      const std::string text = value.is_string() ? st::json_as_string(value) : st::json_dump(value);
-      applied = element.set_property(name, text);
+    } else {
+      // 元素自己声明的属性面优先；未声明时回退到一份通用名（见函数注释）。
+      const auto declared = element.property_names();
+      const bool known =
+          std::ranges::find(declared, name) != declared.end() ||
+          std::ranges::find(kGenericSettable, std::string_view(name)) != kGenericSettable.end();
+      if (known) {
+        const std::string text =
+            value.is_string() ? st::json_as_string(value) : st::json_dump(value);
+        applied = element.set_property(name, text);
+      }
     }
     if (applied) {
       changed.push_back(name);

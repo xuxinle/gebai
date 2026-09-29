@@ -315,9 +315,13 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
       style_.has_explicit_height() ? style_.height - vertical_padding : constraints.max_height;
 
   const bool row = style_.direction == FlexDirection::Row;
+  // **wrap 只在有可用宽约束时才可能生效**：没有上界就永远装得下，自然只有一行。
+  const bool wrapping = row && style_.wrap && available_width < kUnbounded;
   float main_total = 0.0f;
   float cross_max = 0.0f;
   std::size_t visible_children = 0;
+  std::vector<math::Size> child_sizes;
+  if (wrapping) child_sizes.reserve(children_.size());
 
   for (auto& child : children_) {
     if (!child->visible_) continue;
@@ -330,6 +334,7 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
     const math::Size child_size = child->measured_size();
     main_total += main_size(style_.direction, child_size);
     cross_max = std::max(cross_max, cross_size(style_.direction, child_size));
+    if (wrapping) child_sizes.push_back(child_size);
     ++visible_children;
   }
   if (visible_children > 1) main_total += style_.gap * static_cast<float>(visible_children - 1);
@@ -337,8 +342,36 @@ void Element::measure(const RenderContext& context, const Constraints& constrain
   float width = 0.0f;
   float height = 0.0f;
   if (row) {
-    width = main_total;
-    height = cross_max;
+    if (wrapping && !child_sizes.empty()) {
+      // 换行容器的尺寸**不能**把小节点宽高"全累加"（那是单行语义）：
+      // 宽度取最宽的一行、高度取各行高之和。缺了这段，容器高度只等于最高的一行，
+      // 于是第二行起被父容器裁掉——图标全表这类界面会直接少一半（实测踩到）。
+      float line_width = 0.0f;
+      float line_height = 0.0f;
+      float widest_line = 0.0f;
+      float total_height = 0.0f;
+      bool line_empty = true;
+      for (const math::Size& size : child_sizes) {
+        if (!line_empty && line_width + style_.gap + size.width > available_width) {
+          widest_line = std::max(widest_line, line_width);
+          total_height += line_height + style_.gap;
+          line_width = size.width;
+          line_height = size.height;
+        } else {
+          line_width += (line_empty ? 0.0f : style_.gap) + size.width;
+          line_height = std::max(line_height, size.height);
+        }
+        line_empty = false;
+      }
+      widest_line = std::max(widest_line, line_width);
+      total_height += line_height;
+      // 行宽不会超过可用宽（超过就换行了）；夹一刀防止单个超宽子节点把容器撑破
+      width = std::min(widest_line, available_width);
+      height = total_height;
+    } else {
+      width = main_total;
+      height = cross_max;
+    }
   } else {
     width = cross_max;
     height = main_total;
@@ -376,6 +409,67 @@ void Element::layout_children(const RenderContext& context, math::Rect content) 
     if (child->visible_) visible.push_back(child.get());
   }
   if (visible.empty()) return;
+
+  // —— 换行排布（`wrap`）——
+  //
+  // 实现方式：先分行（每行能装下多少），再逐行排。两趟是必要的——
+  // 行高由该行**最高**的子元素决定，而"谁和谁同一行"又取决于行宽，
+  // 一遍扫无法同时知道两件事（试过一遍扫，结果是与 `measure` 的估算不一致）。
+  if (row && style_.wrap && content.width < kUnbounded) {
+    struct Line {
+      std::size_t begin{0};
+      std::size_t end{0};
+      float height{0.0f};
+      float width{0.0f};
+    };
+    std::vector<Line> lines;
+    for (std::size_t index = 0; index < visible.size(); ++index) {
+      Element* child = visible[index];
+      const auto& child_style = child->style();
+      float main_extent = main_size(style_.direction, child->measured_size());
+      if (child_style.width != kAuto) main_extent = child_style.width;
+      const float cross_extent = cross_size(style_.direction, child->measured_size());
+      if (lines.empty()) lines.push_back(Line{});
+      Line& line = lines.back();
+      const float needed = line.end == line.begin
+                               ? main_extent
+                               : line.width + style_.gap + main_extent;
+      if (line.end > line.begin && needed > content.width) {
+        lines.push_back(Line{.begin = index, .end = index + 1, .height = cross_extent,
+                             .width = main_extent});
+        continue;
+      }
+      line.end = index + 1;
+      line.width = needed;
+      line.height = std::max(line.height, cross_extent);
+    }
+
+    float cursor_y = content.y;
+    for (const Line& line : lines) {
+      float cursor_x = content.x;
+      for (std::size_t index = line.begin; index < line.end; ++index) {
+        Element* child = visible[index];
+        const auto& child_style = child->style();
+        float main_extent = main_size(style_.direction, child->measured_size());
+        if (child_style.width != kAuto) main_extent = child_style.width;
+        float cross_extent = cross_size(style_.direction, child->measured_size());
+        if (child_style.height != kAuto) cross_extent = child_style.height;
+
+        const Align align = child_style.align_self != Align::Stretch ? child_style.align_self
+                                                                     : style_.align_items;
+        float cross_offset = 0.0f;
+        if (align == Align::Center) cross_offset = (line.height - cross_extent) * 0.5f;
+        else if (align == Align::End) cross_offset = line.height - cross_extent;
+
+        child->arrange(context, math::Rect{cursor_x, cursor_y + cross_offset, main_extent,
+                                           cross_extent}
+                                      .inset(child_style.margin));
+        cursor_x += main_extent + style_.gap;
+      }
+      cursor_y += line.height + style_.gap;
+    }
+    return;
+  }
 
   const auto count = static_cast<float>(visible.size());
   const float total_gap = style_.gap * (count - 1.0f);

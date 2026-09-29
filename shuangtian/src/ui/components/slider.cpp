@@ -4,6 +4,7 @@
 #include <cmath>
 #include <format>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,15 @@ void paint_outline(raster::Canvas& canvas, math::Rect rect, float radius, math::
   return std::min(k_knob_size * 0.5f, limit);
 }
 
+/// 有标题时给标题让出的高度（无标题则为 0——此时几何与从前完全一致）。
+///
+/// `Slider::set_label` 一直存在，但 **`paint_content` 从未把它画出来**：
+/// 实测表现为"设了 label 却看不见，而且轨道位置也差一截"——与 `Input` 的前置图标
+/// 是同一类缺口（`DESIGN.md` §8.2 第 26/38 条）：API 存在但没接线，编译器不会报。
+[[nodiscard]] auto label_band_height(std::string_view label, float font_size) noexcept -> float {
+  return label.empty() ? 0.0f : font_size * 1.5f;
+}
+
 }  // namespace
 
 Slider::Slider(float value) : value_(math::clamp01(value)) { set_focusable(true); }
@@ -98,6 +108,10 @@ void Slider::measure(const RenderContext& context, const Constraints& constraint
   float width = style_.has_explicit_width() ? style_.width : k_default_width;
   if (constraints.max_width < kUnbounded) width = std::min(width, constraints.max_width);
   float height = style_.has_explicit_height() ? style_.height : metrics.control_height;
+  // 有标题时在控件上方额外留一条：不加的话标题会与轨道叠在一起
+  if (!style_.has_explicit_height()) {
+    height += label_band_height(label_, style_.font_size);
+  }
   if (constraints.max_height < kUnbounded) height = std::min(height, constraints.max_height);
   measured_ = math::Size{std::clamp(width, style_.min_width, style_.max_width),
                          std::clamp(height, style_.min_height, style_.max_height)};
@@ -105,8 +119,12 @@ void Slider::measure(const RenderContext& context, const Constraints& constraint
 
 auto Slider::track_rect(const RenderContext& context) const -> math::Rect {
   (void)context;
-  const float height = std::min(k_track_height, std::max(bounds_.height, 0.0f));
-  return math::Rect{bounds_.x, bounds_.y + (bounds_.height - height) * 0.5f, bounds_.width, height};
+  // 标题占了一条，轨道在**剩余空间**里居中（否则标题会压在轨道上）
+  const float band = label_band_height(label_, style_.font_size);
+  const float top = bounds_.y + band;
+  const float available = std::max(bounds_.height - band, 0.0f);
+  const float height = std::min(k_track_height, available);
+  return math::Rect{bounds_.x, top + (available - height) * 0.5f, bounds_.width, height};
 }
 
 auto Slider::knob_center(const RenderContext& context) const -> math::Point {
@@ -128,6 +146,17 @@ void Slider::paint_content(const RenderContext& context, raster::Canvas& canvas)
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
+
+  // 标题与当前值：标题在左、百分比在右（与框架里的进度条同一套视觉语言）
+  if (!label_.empty() && context.text != nullptr) {
+    context.text->draw(canvas, label_, math::Point{bounds_.x, bounds_.y}, style_.font_size,
+                       enabled_ ? colors.text : colors.text_faint);
+    const std::string percent = std::format("{:.0f}%", static_cast<double>(value_ * 100.0f));
+    const float width = context.text->measure_width(percent, style_.font_size);
+    context.text->draw(canvas, percent, math::Point{bounds_.right() - width, bounds_.y},
+                       style_.font_size, colors.text_muted);
+  }
+
   const math::Rect track = track_rect(context);
   if (track.is_empty()) return;
 

@@ -245,11 +245,31 @@ void ScrollView::measure(const RenderContext& context, const Constraints& constr
 void ScrollView::arrange(const RenderContext& context, math::Rect rect) {
   bounds_ = rect;
   view_height_ = std::max(0.0f, rect.height - style_.padding.vertical());
-  recompute_content_height();
-  offset_ = clamp_scroll(offset_, max_scroll());
 
   const float content_width =
       std::max(0.0f, rect.width - style_.padding.horizontal() - reserved_width());
+  // **用确定的内容宽重测内容**（宽度定下来后才测）。
+  //
+  // 滚动容器常被放进 Row 容器（典型的"侧栏 + 内容区"），而 Row 容器给 grow 子节点的
+  // 是**无宽度约束**（那是 Flex 的 shrink-to-fit 语义）。于是 `measure` 阶段算出的尺寸
+  // 是"宽度未定时"的结果：换行容器（`Style::wrap`）会被误判成单行、高度只有一行，
+  // 内容被裁掉一半（实测：图标全表 72 个只显示 13 个，看着像"列数不够"）。
+  // 到 arrange 时宽度已确定，重测一次即可让依赖宽度的布局得到正确尺寸。
+  //
+  // 代价：每个可见子节点多一次 `measure`（排版阶段，不做绘制）。
+  // 换来的是"内容布局不依赖父容器是 Row 还是 Column"这个稳定语义。
+  for (auto& child : children_) {
+    if (child.get() == bar_ || !child->visible()) continue;
+    Constraints constraints;
+    constraints.max_width = content_width;
+    constraints.max_height = kUnbounded;
+    constraints.available_width = content_width;
+    constraints.available_height = kUnbounded;
+    child->measure(context, constraints);
+  }
+  recompute_content_height();
+  offset_ = clamp_scroll(offset_, max_scroll());
+
   float cursor = rect.y + style_.padding.top - offset_;
   for (auto& child : children_) {
     if (child.get() == bar_ || !child->visible()) continue;

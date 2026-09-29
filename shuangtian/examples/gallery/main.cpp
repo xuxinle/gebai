@@ -2,9 +2,14 @@
 ///
 /// 用法：
 ///   gallery --headless [--frames 3] [--scale 2.0] [--control-port 0] [--control-file path]
-///           [--theme dark] [--shots DIR]
+///           [--theme dark] [--shots DIR] [--bench N]
 /// 无头模式下不创建窗口，控制通道（TCP）承担全部交互：tree / find / get / set / invoke /
 /// input.* / capture / visual / wait / metrics —— 智能体可据此开发与验证界面。
+///
+/// 本文件只负责**装配**（顶部栏 / 侧栏导航 / 滚动容器 / 状态栏 / 导航切页）；
+/// 页面内容在 `pages.cpp`（一页一个函数）。切页用 `set_visible`——
+/// 框架在 measure/arrange/paint/hit_test/semantics/visual 六处都尊重 `visible`，
+/// 所以隐藏页零布局零绘制，且**组件状态不丢**（输入框里的文字、表格选中行切回来还在）。
 
 #include <algorithm>
 #include <chrono>
@@ -15,168 +20,32 @@
 #include <thread>
 #include <vector>
 
-#include "battery/embed.hpp"  // 编译期资源嵌入（stpm 生成；见 third_party/battery/UPSTREAM.md）
+#include "pages.hpp"
+
 #include "st/app/app.hpp"
 #include "st/core/entry.hpp"
-#include "st/core/print.hpp"
 #include "st/core/fs.hpp"
-#include "st/core/string.hpp"
+#include "st/core/print.hpp"
 #include "st/core/time.hpp"
-#include "st/raster/paint.hpp"
 #include "st/ui/components/basic.hpp"
-#include "st/ui/components/input.hpp"
-#include "st/ui/components/list.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/icon.hpp"
 
 namespace {
 
-using st::math::Color;
 using st::math::Insets;
-using st::math::Point;
-using st::math::Rect;
 using st::ui::Align;
 using st::ui::Button;
-using st::ui::Card;
-using st::ui::Divider;
 using st::ui::Element;
 using st::ui::FlexDirection;
-using st::ui::FontWeight;
 using st::ui::Heading;
-using st::ui::Icon;
 using st::ui::IconView;
-using st::ui::Input;
 using st::ui::Justify;
-using st::ui::KeyValueRow;
-using st::ui::List;
 using st::ui::Panel;
 using st::ui::ScrollView;
 using st::ui::Text;
 using st::ui::TextAlign;
 using st::ui::Tone;
-
-/// 自绘组件示例：进度条（示范「组件即代码」——不依赖内置控件也能得到同一套视觉语言）。
-class ProgressRow : public Element {
- public:
-  ProgressRow(std::string label, float value, Tone tone = Tone::Primary)
-      : label_(std::move(label)), value_(value), tone_(tone) {
-    set_id("progress-" + label_);
-  }
-  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "ProgressRow"; }
-  [[nodiscard]] auto role() const noexcept -> st::ui::Role override { return st::ui::Role::ProgressBar; }
-
-  void set_value(float value) {
-    value_ = st::math::clamp01(value);
-    mark_dirty();
-  }
-  [[nodiscard]] auto semantics_value() const -> std::string override {
-    return std::format("{:.0f}%", static_cast<double>(value_ * 100.0f));
-  }
-  [[nodiscard]] auto semantics_text() const -> std::string override { return label_; }
-  [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override {
-    if (name == "value") return std::format("{:.3f}", static_cast<double>(value_));
-    if (name == "label") return label_;
-    return std::nullopt;
-  }
-  auto set_property(std::string_view name, std::string_view value) -> bool override {
-    if (name == "value") {
-      if (const auto parsed = st::parse_f64(value); parsed.has_value()) {
-        set_value(static_cast<float>(*parsed));
-        return true;
-      }
-      return false;
-    }
-    if (name == "label") {
-      label_ = std::string(value);
-      mark_layout_dirty();
-      return true;
-    }
-    return false;
-  }
-  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override {
-    return {"value", "label"};
-  }
-  void apply_theme(const st::ui::Theme& theme) override {
-    style_.font_size = theme.metrics().font_sm;
-    style_.color = theme.colors().text_muted;
-  }
-  void measure(const st::ui::RenderContext& context, const st::ui::Constraints& constraints) override {
-    (void)context;
-    measured_ = st::math::Size{constraints.max_width, 34.0f};
-  }
-  void paint_content(const st::ui::RenderContext& context, st::raster::Canvas& canvas) const override {
-    const auto& colors = context.theme.colors();
-    const float label_height = style_.font_size * 1.4f;
-    const float track_y = bounds_.y + label_height + 2.0f;
-    const float track_height = 6.0f;
-    const Color accent = st::ui::tone_color(context.theme, tone_);
-
-    canvas.fill_rect(Rect{bounds_.x, track_y, bounds_.width, track_height},
-                     st::raster::Paint::solid(colors.surface_sunken), track_height * 0.5f);
-    const float filled = std::max(track_height, bounds_.width * value_);
-    st::raster::Gradient gradient = st::raster::Gradient::linear(
-        Point{bounds_.x, track_y}, Point{bounds_.x + filled, track_y},
-        {{0.0f, accent}, {1.0f, accent.mix(colors.primary_hover, 0.35f)}});
-    canvas.fill_rect(Rect{bounds_.x, track_y, filled, track_height},
-                     st::raster::Paint::with_gradient(std::move(gradient)), track_height * 0.5f);
-
-    if (context.text != nullptr) {
-      context.text->draw(canvas, label_, Point{bounds_.x, bounds_.y}, style_.font_size,
-                         colors.text);
-      const std::string percent = semantics_value();
-      const float width = context.text->measure_width(percent, style_.font_size);
-      context.text->draw(canvas, percent, Point{bounds_.right() - width, bounds_.y},
-                         style_.font_size, accent);
-    }
-  }
-
- private:
-  std::string label_{};
-  float value_{0.0f};
-  Tone tone_{Tone::Primary};
-};
-
-/// 统计卡片：大数字 + 标签 + 图标。
-[[nodiscard]] auto make_stat_card(const std::string& id, std::string_view icon, std::string label,
-                                  std::string value, Tone tone) -> std::unique_ptr<Card> {
-  auto card = std::make_unique<Card>(16.0f);
-  card->set_id(id);
-  card->style().grow = true;
-  card->style().direction = FlexDirection::Column;
-  card->style().gap = 6.0f;
-
-  auto header = std::make_unique<Panel>(FlexDirection::Row);
-  header->style().gap = 8.0f;
-  header->style().align_items = Align::Center;
-  auto icon_view = std::make_unique<IconView>(std::string(icon), 16.0f);
-  icon_view->set_tone(tone);
-  header->add_child(std::move(icon_view));
-  auto label_text = std::make_unique<Text>(std::move(label));
-  label_text->set_tone(Tone::Muted);
-  label_text->set_font_size(12.0f);
-  header->add_child(std::move(label_text));
-  card->add_child(std::move(header));
-
-  auto value_text = std::make_unique<Text>(std::move(value));
-  value_text->set_font_size(26.0f);
-  value_text->set_weight(FontWeight::SemiBold);
-  value_text->set_id(id + "-value");
-  card->add_child(std::move(value_text));
-  return card;
-}
-
-[[nodiscard]] auto make_nav_item(std::string_view icon, std::string label, bool active)
-    -> std::unique_ptr<Button> {
-  auto button = std::make_unique<Button>(std::string(label), active ? Button::Variant::Soft
-                                                                    : Button::Variant::Ghost,
-                                         Button::Size::Medium);
-  button->set_icon(std::string(icon));
-  button->style().justify = Justify::Start;
-  button->style().text_align = TextAlign::Start;
-  auto text = std::make_unique<Text>(std::string(label));
-  (void)text;
-  return button;
-}
 
 struct Options {
   bool headless{false};
@@ -207,15 +76,26 @@ struct Options {
     else if (raw == "--control-file") options.control_file = next("");
     else if (raw == "--shots") options.shots = next("");
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(next("0")));
-  else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(std::stoi(next("0")));
+    else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(std::stoi(next("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(next("0"));
     else if (raw == "--help" || raw == "-h") {
       st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--control-port 0]\n"
-                  "               [--control-file PATH] [--shots DIR] [--frames N] [--ms N]\n");
+                "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n");
       std::exit(0);
     }
   }
   return options;
+}
+
+/// 导航项：图标 + 文字，左对齐（选中态由切页逻辑切 variant）。
+[[nodiscard]] auto make_nav_item(std::string_view icon, const std::string& label)
+    -> std::unique_ptr<Button> {
+  auto button =
+      std::make_unique<Button>(label, Button::Variant::Ghost, Button::Size::Medium);
+  button->set_icon(std::string(icon));
+  button->style().justify = Justify::Start;
+  button->style().text_align = TextAlign::Start;
+  return button;
 }
 
 }  // namespace
@@ -261,7 +141,7 @@ struct Options {
   summarize("排版", layout);
   summarize("绘制", paint);
   summarize("送显", present);
-  // 绘制分解（需 `ST_PAINT_PROFILE=1`）：只看“绘制 30ms”不知道该改哪里
+  // 绘制分解（需 `ST_PAINT_PROFILE=1`）：只看"绘制 30ms"不知道该改哪里
   if (const st::raster::PaintProfiler* profile = app.paint_profile(); profile != nullptr) {
     st::print("绘制分解（最后一帧，按累计耗时排序）：\n");
     std::vector<std::pair<double, std::string>> rows;
@@ -298,12 +178,12 @@ auto run_app(int argc, char** argv) -> int {
 
   st::app::Application app("gallery", "0.1.0", app_options);
 
+  auto* app_ptr = &app;
+  auto* root_ptr = &app.root();
+
   // —— 根布局 ——
   auto root_panel = std::make_unique<Panel>(FlexDirection::Column);
   root_panel->set_id("app-root");
-
-  auto* app_ptr = &app;
-  auto* root_ptr = &app.root();
 
   // 顶部栏
   auto top_bar = std::make_unique<Panel>(FlexDirection::Row);
@@ -354,11 +234,16 @@ auto run_app(int argc, char** argv) -> int {
   nav_label->set_tone(Tone::Faint);
   nav_label->set_font_size(11.0f);
   sidebar->add_child(std::move(nav_label));
-  sidebar->add_child(make_nav_item("grid", "概览", true));
-  sidebar->add_child(make_nav_item("layers", "组件", false));
-  sidebar->add_child(make_nav_item("database", "数据", false));
-  sidebar->add_child(make_nav_item("cpu", "控制通道", false));
-  sidebar->add_child(make_nav_item("info", "关于", false));
+
+  // 导航项与页面一一对应（清单来自 `page_specs()`，不在两处各写一遍）
+  const auto& specs = gallery::page_specs();
+  std::array<Button*, gallery::kPageCount> nav_ptrs{};
+  for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
+    auto item = make_nav_item(specs[index].icon, std::string(specs[index].label));
+    item->set_id(std::format("nav-{}", specs[index].id));
+    nav_ptrs[index] = item.get();
+    sidebar->add_child(std::move(item));
+  }
   auto sidebar_spacer = std::make_unique<Panel>(FlexDirection::Column);
   sidebar_spacer->style().grow = true;
   sidebar->add_child(std::move(sidebar_spacer));
@@ -371,163 +256,37 @@ auto run_app(int argc, char** argv) -> int {
   auto scroll = std::make_unique<ScrollView>();
   scroll->set_id("content-scroll");
   scroll->style().grow = true;
-  auto content = std::make_unique<Panel>(FlexDirection::Column);
-  content->set_id("content");
-  content->style().padding = Insets::all(24.0f);
-  content->style().gap = 16.0f;
+  auto* scroll_ptr = scroll.get();
 
-  auto page_title = std::make_unique<Heading>("概览", 2);
-  content->add_child(std::move(page_title));
-  auto page_sub = std::make_unique<Text>("自绘 UI · 跨平台 · 软硬件渲染兼容 · 无头可控 · DPI 感知");
-  page_sub->set_tone(Tone::Muted);
-  content->add_child(std::move(page_sub));
+  // 页面容器：5 个页面都在里面，用 `visible` 切换（隐藏页零布局零绘制）
+  auto pages_host = std::make_unique<Panel>(FlexDirection::Column);
+  pages_host->set_id("pages");
+  std::array<Element*, gallery::kPageCount> page_ptrs{};
 
-  // 统计行
-  auto stats = std::make_unique<Panel>(FlexDirection::Row);
-  stats->set_id("stats-row");
-  stats->style().gap = 12.0f;
-  stats->add_child(make_stat_card("stat-backend", "cpu", "渲染后端", "软件光栅器", Tone::Primary));
-  stats->add_child(make_stat_card("stat-dpi", "eye", "DPI 缩放", "1.0x", Tone::Accent));
-  stats->add_child(make_stat_card("stat-nodes", "layers", "组件节点", "自绘", Tone::Success));
-  stats->add_child(make_stat_card("stat-control", "terminal", "控制通道", "TCP", Tone::Warning));
-  content->add_child(std::move(stats));
+  // 运行时字段：页面注册"这里要实时值"，应用在刷新时填（两边互不知道细节）
+  std::vector<std::pair<std::string, std::function<void(std::string)>>> runtime_fields;
 
-  // 按钮与图标
-  auto button_card = std::make_unique<Card>(18.0f);
-  button_card->set_id("card-buttons");
-  button_card->style().gap = 14.0f;
-  button_card->style().direction = FlexDirection::Column;
-  auto button_title = std::make_unique<Text>("按钮与图标");
-  button_title->set_weight(FontWeight::SemiBold);
-  button_card->add_child(std::move(button_title));
-  auto button_row = std::make_unique<Panel>(FlexDirection::Row);
-  button_row->style().gap = 8.0f;
-  button_row->style().wrap = true;
-  for (const auto& [label, variant] : std::vector<std::pair<std::string, Button::Variant>>{
-           {"主要操作", Button::Variant::Primary},
-           {"次要", Button::Variant::Secondary},
-           {"轻量", Button::Variant::Ghost},
-           {"柔和", Button::Variant::Soft},
-           {"危险", Button::Variant::Danger}}) {
-    auto button = std::make_unique<Button>(label, variant);
-    button->set_id("btn-" + st::ascii_lower(label));
-    button_row->add_child(std::move(button));
+  gallery::PageHooks hooks;
+  hooks.set_status = [](std::string text) { (void)text; };  // 稍后接上状态栏
+  hooks.add_overlay = [root_ptr](std::unique_ptr<Element> overlay) {
+    root_ptr->add_overlay(std::move(overlay));
+  };
+  hooks.remove_overlay = [root_ptr](Element* overlay) { root_ptr->remove_overlay(overlay); };
+  hooks.viewport = [app_ptr]() {
+    return st::math::Rect{0.0f, 0.0f, app_ptr->viewport().width, app_ptr->viewport().height};
+  };
+  hooks.register_runtime_field =
+      [&runtime_fields](std::string_view field, std::function<void(std::string)> setter) {
+        runtime_fields.emplace_back(std::string(field), std::move(setter));
+      };
+
+  for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
+    auto page = gallery::build_page(index, hooks);
+    page->set_visible(index == 0);  // 默认第一页
+    page_ptrs[index] = page.get();
+    pages_host->add_child(std::move(page));
   }
-  button_card->add_child(std::move(button_row));
-  auto divider = std::make_unique<Divider>(false);
-  button_card->add_child(std::move(divider));
-  auto icon_row = std::make_unique<Panel>(FlexDirection::Row);
-  icon_row->style().gap = 14.0f;
-  icon_row->style().align_items = Align::Center;
-  for (const auto* icon_name :
-       {"search", "settings", "user", "folder", "code", "terminal", "bell", "calendar", "star",
-        "heart", "bolt", "shield", "cloud", "database", "send", "tag"}) {
-    auto icon = std::make_unique<IconView>(icon_name, 18.0f);
-    icon->set_tone(Tone::Muted);
-    icon->set_id(std::string("icon-") + icon_name);
-    icon_row->add_child(std::move(icon));
-  }
-  button_card->add_child(std::move(icon_row));
-  content->add_child(std::move(button_card));
-
-  // 表单
-  auto form_card = std::make_unique<Card>(18.0f);
-  form_card->set_id("card-form");
-  form_card->style().gap = 12.0f;
-  form_card->style().direction = FlexDirection::Column;
-  auto form_title = std::make_unique<Text>("表单");
-  form_title->set_weight(FontWeight::SemiBold);
-  form_card->add_child(std::move(form_title));
-  auto search_input = std::make_unique<Input>();
-  search_input->set_id("input-search");
-  search_input->set_placeholder("搜索组件、图标或文档…");
-  search_input->set_icon_prefix("search");
-  auto* search_ptr = search_input.get();
-  form_card->add_child(std::move(search_input));
-  auto password_input = std::make_unique<Input>();
-  password_input->set_id("input-password");
-  password_input->set_placeholder("密码");
-  password_input->set_password(true);
-  form_card->add_child(std::move(password_input));
-  auto form_actions = std::make_unique<Panel>(FlexDirection::Row);
-  form_actions->style().gap = 8.0f;
-  auto submit_button = std::make_unique<Button>("提交", Button::Variant::Primary,
-                                                Button::Size::Small);
-  submit_button->set_id("btn-submit");
-  auto* submit_ptr = submit_button.get();
-  auto reset_button = std::make_unique<Button>("重置", Button::Variant::Ghost, Button::Size::Small);
-  reset_button->set_id("btn-reset");
-  auto* reset_ptr = reset_button.get();
-  form_actions->add_child(std::move(submit_button));
-  form_actions->add_child(std::move(reset_button));
-  form_card->add_child(std::move(form_actions));
-  content->add_child(std::move(form_card));
-
-  // 列表与数据
-  auto data_card = std::make_unique<Card>(18.0f);
-  data_card->set_id("card-data");
-  data_card->style().gap = 12.0f;
-  data_card->style().direction = FlexDirection::Column;
-  auto data_title = std::make_unique<Text>("列表与数据");
-  data_title->set_weight(FontWeight::SemiBold);
-  data_card->add_child(std::move(data_title));
-  auto data_row = std::make_unique<Panel>(FlexDirection::Row);
-  data_row->style().gap = 20.0f;
-  auto list = std::make_unique<List>();
-  list->set_id("demo-list");
-  list->style().grow = true;
-  list->add_item("布局引擎", "Flex 子集 · 间距/增长/对齐");
-  list->add_item("光栅器", "扫描线覆盖抗锯齿 · SIMD");
-  list->add_item("字体引擎", "TTF/CFF/CID · CJK 回退");
-  list->add_item("控制通道", "组件树 · 视觉树 · 键鼠注入");
-  list->add_item("Markdown", "流式增量 · 代码高亮");
-  auto* list_ptr = list.get();
-  data_row->add_child(std::move(list));
-
-  auto facts = std::make_unique<Panel>(FlexDirection::Column);
-  facts->set_id("demo-facts");
-  facts->style().width = 300.0f;
-  facts->style().gap = 6.0f;
-  facts->add_child(std::make_unique<KeyValueRow>("语言", "C++20"));
-  // 这一行来自**编译期嵌入的真实文件**（`examples/gallery/assets/about.txt`）：
-  // 文案在编辑器里写（有高亮、无需转义），构建时由 stpm 转成字节数组编译进可执行文件。
-  {
-    const auto embedded = b::embed<"examples/gallery/assets/about.txt">();
-    // 启动时打印：与控制通道读回交叉验证（嵌入字节数应与源文件逐一相等）
-    const std::string_view embedded_body(embedded.data(), embedded.length());
-    const std::size_t newline = embedded_body.find('\n');
-    st::print("嵌入资源 about.txt: {} 字节 · 首行「{}」\n", embedded.length(),
-              embedded_body.substr(0, newline == std::string_view::npos ? embedded_body.size() : newline));
-    auto row = std::make_unique<KeyValueRow>(
-        "嵌入资源", std::format("about.txt · {} 字节", embedded.length()));
-    row->set_id("embedded-about");
-    facts->add_child(std::move(row));
-  }
-  facts->add_child(std::make_unique<KeyValueRow>("渲染", "软件光栅器"));
-  facts->add_child(std::make_unique<KeyValueRow>("后端", "headless / x11 / wayland / win32"));
-  facts->add_child(std::make_unique<KeyValueRow>("协议", "st-control/1"));
-  data_row->add_child(std::move(facts));
-  data_card->add_child(std::move(data_row));
-  content->add_child(std::move(data_card));
-
-  // 进度与状态
-  auto progress_card = std::make_unique<Card>(18.0f);
-  progress_card->set_id("card-progress");
-  progress_card->style().gap = 14.0f;
-  progress_card->style().direction = FlexDirection::Column;
-  auto progress_title = std::make_unique<Text>("进度与状态（示例自绘组件）");
-  progress_title->set_weight(FontWeight::SemiBold);
-  progress_card->add_child(std::move(progress_title));
-  progress_card->add_child(std::make_unique<ProgressRow>("光栅器覆盖率", 0.86f, Tone::Primary));
-  progress_card->add_child(std::make_unique<ProgressRow>("字体缓存命中", 0.72f, Tone::Success));
-  progress_card->add_child(std::make_unique<ProgressRow>("协议实现度", 0.94f, Tone::Accent));
-  content->add_child(std::move(progress_card));
-
-  auto content_spacer = std::make_unique<Panel>(FlexDirection::Column);
-  content_spacer->style().height = 8.0f;
-  content->add_child(std::move(content_spacer));
-
-  scroll->add_child(std::move(content));
+  scroll->add_child(std::move(pages_host));
   body->add_child(std::move(scroll));
   root_panel->add_child(std::move(body));
 
@@ -550,6 +309,12 @@ auto run_app(int argc, char** argv) -> int {
   auto status_spacer = std::make_unique<Panel>(FlexDirection::Row);
   status_spacer->style().grow = true;
   status_bar->add_child(std::move(status_spacer));
+  auto refresh_button =
+      std::make_unique<Button>("刷新指标", Button::Variant::Ghost, Button::Size::Small);
+  refresh_button->set_id("btn-refresh");
+  refresh_button->set_icon("activity");
+  auto* refresh_ptr = refresh_button.get();
+  status_bar->add_child(std::move(refresh_button));
   auto status_right = std::make_unique<Text>("等待控制通道…");
   status_right->set_id("status-right");
   status_right->set_tone(Tone::Faint);
@@ -559,6 +324,45 @@ auto run_app(int argc, char** argv) -> int {
   root_panel->add_child(std::move(status_bar));
 
   // —— 交互 ——
+  hooks.set_status = [status_ptr](std::string text) { status_ptr->set_content(std::move(text)); };
+
+  // 运行时字段刷新：从 `metrics` 与 `Application` 回读——界面自己展示自己的可观测性
+  const auto refresh_runtime = [app_ptr, status_right_ptr, &runtime_fields]() {
+    const st::control::Metrics metrics = app_ptr->metrics();
+    for (auto& [field, setter] : runtime_fields) {
+      if (field == "backend") setter(std::string(app_ptr->backend_name()));
+      else if (field == "dpi") setter(std::format("{:.1f}x", static_cast<double>(app_ptr->device_scale())));
+      else if (field == "frames") setter(std::format("{}", metrics.frames));
+      else if (field == "port") setter(std::format("{}", app_ptr->control_port()));
+    }
+    status_right_ptr->set_content(std::format("{} · DPI {:.1f} · {}x{} · 第 {} 帧",
+                                              app_ptr->backend_name(),
+                                              static_cast<double>(app_ptr->device_scale()),
+                                              metrics.physical_width, metrics.physical_height,
+                                              metrics.frames));
+  };
+  refresh_ptr->on_click = [app_ptr, refresh_runtime]() {
+    refresh_runtime();
+    app_ptr->root().mark_dirty_all();
+  };
+
+  // 切页：visible + 导航高亮 + 滚动复位 + 清焦点
+  const auto show_page = [&](std::size_t index) {
+    for (std::size_t each = 0; each < gallery::kPageCount; ++each) {
+      page_ptrs[each]->set_visible(each == index);
+      nav_ptrs[each]->set_variant(each == index ? Button::Variant::Soft : Button::Variant::Ghost);
+    }
+    // 滚动复位：否则切到更短的页面会停在"上一页的中段"，看起来像内容缺失
+    scroll_ptr->scroll_to(0.0f);
+    // 清焦点：焦点元素若随页面被隐藏，键盘事件仍会送到它（"看不见的输入框在收字"）
+    root_ptr->set_focus(nullptr);
+    status_ptr->set_content(std::format("已切到「{}」", specs[index].label));
+    root_ptr->mark_dirty_all();
+  };
+  for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
+    nav_ptrs[index]->on_click = [show_page, index]() { show_page(index); };
+  }
+
   theme_button_ptr->on_click = [app_ptr, theme_button_ptr, status_right_ptr, root_ptr]() {
     const bool dark = app_ptr->root().theme().mode() == st::ui::ThemeMode::Light;
     app_ptr->set_theme_mode(dark ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light);
@@ -588,19 +392,6 @@ auto run_app(int argc, char** argv) -> int {
     }
     root_ptr->mark_dirty_all();
   };
-  submit_ptr->on_click = [search_ptr, status_ptr, root_ptr]() {
-    status_ptr->set_content("已提交: " + search_ptr->value());
-    root_ptr->mark_dirty_all();
-  };
-  reset_ptr->on_click = [search_ptr, status_ptr, root_ptr]() {
-    search_ptr->set_text("");
-    status_ptr->set_content("已重置");
-    root_ptr->mark_dirty_all();
-  };
-  list_ptr->set_on_select([status_ptr, root_ptr](std::size_t index) {
-    status_ptr->set_content(std::format("选中列表项 #{}", index));
-    root_ptr->mark_dirty_all();
-  });
 
   // —— 启动 ——
   app.set_content(std::move(root_panel));
@@ -612,6 +403,7 @@ auto run_app(int argc, char** argv) -> int {
                                             app.backend_name(), app.headless(),
                                             static_cast<double>(app.device_scale()),
                                             app.control_port()));
+  refresh_runtime();
   app.root().mark_dirty_all();
   app.render_frame();
 
@@ -627,7 +419,7 @@ auto run_app(int argc, char** argv) -> int {
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
   }
   st::print("gallery 退出：{} 帧，DPI {:.1f}，后端 {}\n", frames,
-              static_cast<double>(app.device_scale()), std::string(app.backend_name()));
+            static_cast<double>(app.device_scale()), std::string(app.backend_name()));
   return 0;
 }
 
