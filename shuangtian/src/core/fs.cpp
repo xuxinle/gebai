@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <array>
 #include <fstream>
 #include <system_error>
 
@@ -131,12 +132,15 @@ auto read_text(std::string_view path) -> Result<std::string> {
   std::ifstream stream(to_std_path(path), std::ios::binary);
   if (!stream) return unexpected(ErrorCode::NotFound, std::string("read failed '").append(path).append("'"));
   std::string content;
-  stream.seekg(0, std::ios::end);
-  const std::streamoff size = stream.tellg();
-  if (size < 0) return unexpected(ErrorCode::Io, std::string("size failed '").append(path).append("'"));
-  content.resize(static_cast<std::size_t>(size));
-  stream.seekg(0, std::ios::beg);
-  stream.read(content.data(), size);
+  // **读到 EOF，不用 `seekg/tellg` 定长读**：`/proc`、`/sys`、cgroup 的虚拟文件报出的 size 是 0
+  // （内容却非空），按 size 读会静默得到空字符串——而"读系统状态"恰好是这些文件的唯一用途。
+  // 实测后果：cgroup 内存上限探测永远拿到 0，使"按内存推导编译并发"失效。
+  std::array<char, 16 * 1024> buffer{};
+  while (stream) {
+    stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize taken = stream.gcount();
+    if (taken > 0) content.append(buffer.data(), static_cast<std::size_t>(taken));
+  }
   return content;
 }
 

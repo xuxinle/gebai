@@ -17,7 +17,11 @@ struct BuildOptions {
   std::string root{};                 ///< 工程根（空=清单目录）
   std::string profile{"debug"};       ///< debug / release / san
   std::string target{};               ///< 目标名（空=库目标：只编译不链接）
-  std::size_t jobs{0};                ///< 并行编译单元数（0=硬件并发）
+  std::size_t jobs{0};                ///< 并行编译单元数（0=按**内存预算**与硬件并发推导，见 `pkg/memory.hpp`）
+  /// 超大翻译单元的并发上限（0=自动：1）。超大单元按源文件字节数判定。
+  std::size_t jobs_large{0};
+  /// 可用内存预算（MiB；0=自动探测 cgroup/系统上限）。推导并行度用。
+  std::uint64_t max_memory_mb{0};
   /// 交叉编译工具链名（空 = 本机）。命中 `Manifest::toolchains` 中的一项：
   /// 决定编译器、目标系统库、产物后缀与平台宏，并把产物/中间目录与本地档**隔离**。
   std::string toolchain{};
@@ -35,7 +39,13 @@ struct BuildStats {
   std::size_t units_cached{0};
   std::int64_t elapsed_ms{0};
   std::int64_t compile_ms{0};  ///< 编译阶段耗时（不含链接）
-  std::size_t workers{0};      ///< 并行度
+  std::size_t workers{0};      ///< 并行度（按内存预算推导而来，除非显式 `--jobs`）
+  /// 超大翻译单元的并发上限（源文件 ≥ `kLargeUnitBytes` 者走这道窄闸门）。
+  std::size_t workers_large{0};
+  /// 采用的编译内存预算（MiB；0 = 不可知，并发退回硬件数）。
+  std::uint64_t memory_budget_mb{0};
+  /// 并发决策的理由（直接展示给用户："为什么是这个并发数"）。
+  std::string concurrency_reason{};
   bool pch_used{false};        ///< 是否用到预编译头
   bool linked{false};          ///< 本次是否真的执行了链接（产物已最新则跳过）
 };

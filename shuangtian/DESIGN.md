@@ -94,6 +94,9 @@ struct Error { ErrorCode code; std::string message; };
 - `st::json::Value`：自研 JSON（顺序保序对象、UTF-8、解析/序列化、`std::format` 集成）。用于**协议、清单、lock、事件**——一切结构化数据。
 - `st::Log`：级别 + 分类 + 结构化字段，默认输出 stderr。
 - `st::fs`：`read_file`/`write_file`/`list_dir`/`temp_dir`/`path_join` 等（`std::filesystem` 之上的薄封装）。
+  **`read_text` 读到 EOF，不用 `seekg/tellg` 定长读**：`/proc`、`/sys`、cgroup 的虚拟文件报出的
+  size 是 0（内容却非空），按大小读会静默得到空串——而"读系统状态"恰好是这些文件的唯一用途
+  （实测：cgroup 内存上限探测永远拿到 0，使"按内存推导编译并发"失效）。
 - `st::EventLoop`：定时器 + 投递任务 + `std::jthread` worker；`st::Signal`（简易信号槽，`std::function` + RAII 连接）。
 - `st::hash`：SHA-256 / FNV-1a / CRC32 / Adler32。
 
@@ -687,15 +690,30 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 `st build` 结束会打印耗时构成（编译 / 链接 / 总时长 / 并行度 / 是否使用 PCH），便于回归对比。
 `--no-pch` 可关闭预编译头用于排查（例如 PCH 与某编译选项冲突时）。
 
-**并行度与内存峰值（踩过）**：翻译单元的内存占用差了两个数量级——
-`third_party/quickjs/quickjs.c` 单文件 6.5 万行，在 `-O1 -g` 下编译峰值可达 GB 级，
-而普通单元只有几十 MB。于是"28 路并行"在**受限容器**里会撞内存墙：
-实测在 8 GiB cgroup 的容器中全量 `san` 档（ASan/UBSan 插桩，编译期内存更高）
-被 OOM killer 杀掉 `cc1plus`，表现为莫名其妙的链接错误（`.Lubsan_data` 未定义——
-其实是 `.o` 被写了一半）。对策：
+**并发由内存决定，不由核数决定**（实测数据驱动）：编译是内存密集型的，本框架单翻译单元实测峰值
+`-O1 -g` 60–490 MB、`san` 档（ASan/UBSan 插桩）630–700 MB；`nproc` 为 28 的机器满并发就是
+10–20 GB 瞬时占用。两个反直觉的事实：
 
-- 受限环境用 `-j N` 控制并发（8 GiB 内存下全量 san 建议 `-j 6`）；宿主机 100 GB+ 内存时 28 路无压力；
-- 真正的根治是"按单元大小限流"（大单元少并发），已在 self_optimize backlog 登记（#7）。
+1. **峰值与源文件大小不成正比**——`build.cpp`（55 KB）峰值 487 MB，而 `quickjs.c`（2.1 MB / 6.5 万行）
+   只有 335 MB（C++ 单元的头部展开常比"行数多"更贵）。所以**不能只按体积分档**，
+   主机制必须是"内存预算 ÷ 单单元估算"。
+2. **容量与核数无关**——容器限 8 GiB 而宿主机 114 GiB 时 `free` 看起来毫无压力，
+   只有读 cgroup 才知道真实上限。
+
+机制（`pkg/memory.hpp` + `compile_units` 调度处）：
+
+| 环节 | 做法 |
+|---|---|
+| 预算探测 | cgroup v2 `memory.max` → v1 `memory.limit_in_bytes` → `/proc/meminfo`；`ST_MEMORY_MB` 可覆盖 |
+| 推导并发 | `jobs = clamp((预算 × 7/8) / 单单元估算, 1, nproc)`（预留 1/8 给链接与系统） |
+| 单元估算 | `san` 768 MB；`debug`/`quick` 384 MB；`dev`/`release` 512 MB（取实测**上限**而非均值——估偏只是慢，估偏乐观就是 OOM） |
+| 超大单元闸门 | 源文件 ≥ 512 KB 的单元走独立窄闸门（默认**同时 1 个**），且**排到最后提交**——小单元先跑满并发，大块头收尾时独占 |
+| 显式接管 | `--jobs N` / `--jobs-large N` / `--max-memory MiB`（CI 可固定行为） |
+| 可观测 | `st doctor` 报告内存上限与各档推导出的并发（含理由）；每次构建打印一行决策 |
+
+> `st doctor` 曾报"内存上限不可知"——顺着查出一个真缺陷：`fs::read_text` 原先按 `seekg/tellg`
+> 得到的大小定长读，而 `/proc`、`/sys`、cgroup 的虚拟文件 **size 报 0（内容却非空）**，于是读到空串，
+> 内存探测永远失败。已改为读到 EOF（见 §4.1）。
 
 **实测（本仓库当前规模：54 个翻译单元，8 核）**：
 | 场景 | 时间 |

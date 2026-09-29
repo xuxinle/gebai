@@ -1,10 +1,12 @@
 #include "st/pkg/build.hpp"
 #include "st/pkg/embed.hpp"
+#include "st/pkg/memory.hpp"
 #include "st/pkg/framework.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <semaphore>
 #include <set>
 #include <format>
 #include <mutex>
@@ -615,14 +617,42 @@ struct FrameworkFlags {
   rebuilt = pending.size();
   if (pending.empty()) return std::size_t{0};
 
-  const std::size_t workers = options.jobs != 0 ? options.jobs : hardware_concurrency();
+  // 并发方案：默认**按内存预算**推导（而不是按核数）——编译是内存密集型的，
+  // `nproc` 为 28 的机器满并发就是 10–20 GB 瞬时占用，在 cgroup 限 8 GiB 的容器里必被 OOM 杀掉。
+  const ConcurrencyPlan plan = plan_concurrency(options.jobs, options.jobs_large,
+                                                options.max_memory_mb, options.profile,
+                                                hardware_concurrency());
+  const std::size_t workers = plan.jobs;
+  log::info("并行编译 {} 路（{}），超大单元上限 {}", plan.jobs, plan.reason, plan.jobs_large);
+  // 超大单元闸门：超阈值源文件同时最多 `jobs_large` 个在编（默认 1），
+  // 避免"几个大块头叠在一起"这种最坏情形（即便它们的峰值与体积不成正比，串行化也钉住上界）
+  const auto large_gate_limit = static_cast<std::ptrdiff_t>(plan.jobs_large);
+  std::counting_semaphore<1024> large_gate(large_gate_limit);
   ThreadPool pool(workers);
   std::mutex error_mutex;
   std::string first_error;
   std::atomic<std::size_t> done{0};
 
+  // 超大单元排到最后提交：小单元先跑满并发，大块头收尾时独占闸门
+  std::stable_partition(pending.begin(), pending.end(),
+                        [](const CompileUnit* unit) { return !is_large_unit(unit->source); });
+
   for (const auto* unit : pending) {
     pool.submit([&, unit, pch_ptr]() {
+      // 超大单元过闸门（RAII：任何退出路径都释放，否则后续大单元会永久排队）
+      const bool large = is_large_unit(unit->source);
+      struct GateGuard {
+        std::counting_semaphore<1024>* gate{nullptr};
+        explicit GateGuard(std::counting_semaphore<1024>* target) : gate(target) {
+          if (gate != nullptr) gate->acquire();
+        }
+        GateGuard(const GateGuard&) = delete;
+        auto operator=(const GateGuard&) -> GateGuard& = delete;
+        ~GateGuard() {
+          if (gate != nullptr) gate->release();
+        }
+      };
+      const GateGuard gate_guard(large ? &large_gate : nullptr);
       if (auto status = fs::ensure_parent(unit->object); !status) {
         const std::scoped_lock lock(error_mutex);
         if (first_error.empty()) first_error = status.error().to_string();
@@ -920,7 +950,17 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   stats.units_rebuilt = rebuilt;
   stats.units_cached = units.size() - rebuilt;
   stats.compile_ms = compile_ms;
-  stats.workers = options.jobs != 0 ? options.jobs : hardware_concurrency();
+  // 并发方案（与 `compile_units` 里用的是同一个推导）：摘要里如实展示，
+  // 让用户看到"为什么是这个并发数"，而不是只能猜。
+  {
+    const ConcurrencyPlan plan = plan_concurrency(options.jobs, options.jobs_large,
+                                                  options.max_memory_mb, options.profile,
+                                                  hardware_concurrency());
+    stats.workers = plan.jobs;
+    stats.workers_large = plan.jobs_large;
+    stats.memory_budget_mb = plan.budget_mb;
+    stats.concurrency_reason = plan.reason;
+  }
   stats.pch_used = options.use_pch;
   stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
 

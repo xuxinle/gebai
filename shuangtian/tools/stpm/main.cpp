@@ -20,6 +20,7 @@
 #include "st/pkg/fetch.hpp"
 #include "st/pkg/lint.hpp"
 #include "st/pkg/manifest.hpp"
+#include "st/pkg/memory.hpp"
 #include "st/pkg/registry.hpp"
 #include "st/pkg/semver.hpp"
 
@@ -41,6 +42,16 @@ struct Arguments {
   [[nodiscard]] auto number(std::string_view name, double fallback) const -> double {
     if (const auto iterator = options.find(std::string(name)); iterator != options.end()) {
       if (auto parsed = st::parse_f64(iterator->second); parsed.has_value()) return *parsed;
+    }
+    return fallback;
+  }
+  /// 多个别名里任一命中即取（如 `-j` 与 `--jobs`）——只认短形式会让 `--jobs 4` **静默失效**。
+  [[nodiscard]] auto number_any(const std::vector<std::string_view>& names, double fallback) const
+      -> double {
+    for (const auto name : names) {
+      if (const auto iterator = options.find(std::string(name)); iterator != options.end()) {
+        if (auto parsed = st::parse_f64(iterator->second); parsed.has_value()) return *parsed;
+      }
     }
     return fallback;
   }
@@ -115,9 +126,11 @@ void print_usage() {
 
 命令:
   build [target]        构建工程或指定目标（--profile=debug|release|san，-j N，--verbose，--force）
+                        并发默认按**内存预算**推导（读 cgroup 上限，不再默认吃满核数）；
+                        --jobs-large N 限超大单元并发（默认 1）；--max-memory MiB 覆盖预算
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
   run <target> [args]   构建并运行目标（无头演示：run gallery -- --headless --frames 3）
-  test [filter]         构建并运行单元测试（--san 开 ASan/UBSan 档，-j N 控并发）
+  test [filter]         构建并运行单元测试（--san 开 ASan/UBSan 档，-j N 控并发；同支持 --jobs-large/--max-memory）
   lint [--explain RULE] 禁令扫描（CONVENTIONS §8；无参数即扫描工程，--rules 列出规则）
   deps                  解析依赖并打印依赖树（--locked 只读 st.lock）
   fetch                 解析 + 拉取依赖到缓存/工作区，并写 st.lock
@@ -159,8 +172,13 @@ auto command_build(const Arguments& arguments) -> int {
   options.toolchain = arguments.get("toolchain", "");
   options.verbose = arguments.has("verbose") || arguments.has("v");
   options.force = arguments.has("force");
-  const auto jobs = arguments.number("j", 0.0);
+  const auto jobs = arguments.number_any({"j", "jobs"}, 0.0);
   options.jobs = jobs > 0.0 ? static_cast<std::size_t>(jobs) : 0;
+  // 0 = 自动：按内存预算推导（见 `pkg/memory.hpp`）；显式给出则完全接管
+  const auto jobs_large = arguments.number("jobs-large", 0.0);
+  options.jobs_large = jobs_large > 0.0 ? static_cast<std::size_t>(jobs_large) : 0;
+  const auto max_memory = arguments.number("max-memory", 0.0);
+  options.max_memory_mb = max_memory > 0.0 ? static_cast<std::uint64_t>(max_memory) : 0;
   options.use_pch = !arguments.has("no-pch");
 
   const std::int64_t start = st::time::now_ns();
@@ -176,6 +194,11 @@ auto command_build(const Arguments& arguments) -> int {
               st::time::format_duration_ns((stats->elapsed_ms - stats->compile_ms) * 1'000'000),
               st::time::format_duration_ns(st::time::now_ns() - start), stats->workers,
               stats->pch_used ? " · PCH" : "");
+  // 并发决策必须可见："为什么是 14 路而不是 28"是运维/排查会问的第一个问题
+  if (!stats->concurrency_reason.empty()) {
+    st::print("  并发依据: {}（超大单元上限 {}）\n", stats->concurrency_reason,
+                stats->workers_large);
+  }
   if (!stats->artifact.empty()) st::print("产物: {}\n", stats->artifact);
   return 0;
 }
@@ -226,8 +249,13 @@ auto command_test(const Arguments& arguments) -> int {
   // 测试构建同样要能控并发：`san` 档插桩后编译期内存更高，受限容器里需要降并发
   // （实测 8 GiB cgroup 下全量 san 的 28 路并行会被 OOM killer 杀掉 cc1plus，
   //   表现为莫名其妙的链接错误——`.o` 只写了一半）。
-  const auto jobs = arguments.number("j", 0.0);
+  const auto jobs = arguments.number_any({"j", "jobs"}, 0.0);
   options.jobs = jobs > 0.0 ? static_cast<std::size_t>(jobs) : 0;
+  // 测试构建同样跑完整的编译流程：并发默认按内存预算推导（否则大单元照样撞内存墙）
+  const auto test_jobs_large = arguments.number("jobs-large", 0.0);
+  options.jobs_large = test_jobs_large > 0.0 ? static_cast<std::size_t>(test_jobs_large) : 0;
+  const auto test_max_memory = arguments.number("max-memory", 0.0);
+  options.max_memory_mb = test_max_memory > 0.0 ? static_cast<std::uint64_t>(test_max_memory) : 0;
   options.toolchain = arguments.get("toolchain", "");
   const std::string filter = arguments.positional.empty() ? std::string{} : arguments.positional.front();
   st::print("运行测试 [{}]{}\n", options.profile,
@@ -286,6 +314,20 @@ auto command_doctor(const Arguments& arguments) -> int {
     }
   }
   st::print("  逻辑核心        : {}\n", st::hardware_concurrency());
+  // 内存预算与推导出的并发：编译是内存密集型的，这两个数字比核数更能决定能不能跑完
+  {
+    const auto limit = st::pkg::detect_memory_limit();
+    if (limit.limit_mb > 0) {
+      st::print("  内存上限        : {} MiB（{}）\n", limit.limit_mb, limit.source);
+    } else {
+      st::print("  内存上限        : 不可知（并发将退回按核数推导；可用 ST_MEMORY_MB 指定）\n");
+    }
+    for (const auto profile : {"dev", "san"}) {
+      const auto plan = st::pkg::plan_concurrency(0, 0, 0, profile, st::hardware_concurrency());
+      st::print("  默认并发 [{}]    : {} 路（超大单元 {}）· {}\n", profile, plan.jobs,
+                  plan.jobs_large, plan.reason);
+    }
+  }
   // 交叉编译工具链探测：清单里声明了什么、本机是否真的装了
   if (auto manifest = load_manifest(arguments); manifest) {
     if (manifest->toolchains.empty()) {
