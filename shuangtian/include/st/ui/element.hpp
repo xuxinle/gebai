@@ -265,36 +265,53 @@ class Element {
   /// 用 `context.time_seconds` 推进——少一条需要应用驱动的生命周期，也就不存在
   /// "忘了 tick 所以动画不动"这类问题。动画期间会 `mark_dirty` 让下一帧继续。
   auto advance_hover(const RenderContext& context) const -> float {
+    const float target = hovered_ ? 1.0f : 0.0f;
     const double duration = context.theme.metrics().hover_duration;
     const double now = context.time_seconds;
     // `advancing`：时间在走吗？静态帧（首帧/离屏单帧/测试）直接到位，
     // 免得画面停在半程。这条与 `Switch::knob_progress` 同一口径。
     const bool advancing = now > last_hover_time_;
     last_hover_time_ = now;
-    const float target = hovered_ ? 1.0f : 0.0f;
-    if (duration <= 0.0 || !advancing) {
-      hover_t_ = target;
-      hover_start_ = -1.0;
-      hover_animating_ = false;
+
+    // ⚠ 这里必须严格区分"正在过渡"与"已经静止"。
+    // 早先的写法是"只要 elapsed < 1 就声明 animating"，而静止元素每帧都会把
+    // `hover_start_` 重置为当前时间 → elapsed 恒为 0 → **永久声明 animating**
+    // → 根节点每帧都脏 → 应用 100% 占一个核（实测 6 秒耗 6.12 秒 CPU）。
+    // 忙循环对"帧耗时基准"是不可见的，所以当时没被测出来。
+    if (hover_start_ >= 0.0) {   // —— 过渡中 ——
+      if (duration <= 0.0 || !advancing) {
+        hover_t_ = target;
+        hover_start_ = -1.0;
+        hover_animating_ = false;
+        return hover_t_;
+      }
+      const double progress = (now - hover_start_) / duration;
+      if (progress >= 1.0) {
+        hover_t_ = target;
+        hover_start_ = -1.0;
+        hover_animating_ = false;
+      } else {
+        hover_t_ = hover_from_ + (target - hover_from_) * static_cast<float>(progress);
+        hover_animating_ = true;   // 只在这一支声明"还要下一帧"
+      }
       return hover_t_;
     }
-    if (hover_start_ < 0.0) {
-      hover_start_ = now;   // 过渡起点：从当前视觉进度接着动（不跳变）
-      hover_from_ = hover_t_;
+
+    // —— 静止：只有目标与当前值不同才启动过渡 ——
+    if (hover_t_ != target) {
+      if (duration <= 0.0 || !advancing) {
+        hover_t_ = target;   // 静态帧直接落位（不卡半程）
+        hover_animating_ = false;
+        return hover_t_;
+      }
+      hover_from_ = hover_t_;   // 从**当前视觉进度**接着动（不跳变）
+      hover_start_ = now;
+      hover_animating_ = true;
+      return hover_t_;
     }
-    const double elapsed = (now - hover_start_) / duration;
-    const float t = elapsed >= 1.0 ? 1.0f : static_cast<float>(elapsed);
-    hover_t_ = hover_from_ + (target - hover_from_) * t;
-    if (elapsed >= 1.0) {
-      hover_t_ = target;
-      hover_start_ = -1.0;
-      hover_animating_ = false;
-    } else {
-      hover_animating_ = true;  // 还没跑完：请根节点再给一帧
-    }
+    hover_animating_ = false;   // 真正静止：不请求下一帧
     return hover_t_;
-  }
-  /// 当前悬浮进度（不推进，只读；用于布局等非绘制阶段）。
+  }  /// 当前悬浮进度（不推进，只读；用于布局等非绘制阶段）。
   [[nodiscard]] auto hover_progress() const noexcept -> float { return hover_t_; }
   [[nodiscard]] auto pressed() const noexcept -> bool { return pressed_; }
   [[nodiscard]] auto focused() const noexcept -> bool { return focused_; }
@@ -352,8 +369,20 @@ class Element {
   /// "还有人在动"才能拿到下一帧——否则**动画会停在第一帧**（淡入只走一格，
   /// 看起来像"卡住不动"）。这里的标记是 mutable：绘制是 const 方法（与
   /// `Switch::toggle_time_` 同一套做法）。
-  [[nodiscard]] auto hover_animating() const noexcept -> bool { return hover_animating_; }
-  void clear_hover_animating() const noexcept { hover_animating_ = false; }
+  /// 元素是否可以主动请求"再来一帧"（动画）。
+  ///
+  /// 为什么做成**协议**而不是各组件各写一份：帧预算只有一份，
+  /// 谁在动就得由同一个机制汇总——否则会出现"某组件自己在 paint 里标脏，
+  /// 绕过了汇总"这类看不见的循环（实测踩过：逐像素写 GPU 画布导致主线程打满）。
+  /// 规则很硬：**只有真正还在动的元素才请求**，静态时必须停下。
+  void request_animation() const noexcept { animation_requested_ = true; }
+  [[nodiscard]] auto animation_requested() const noexcept -> bool {
+    return animation_requested_ || hover_animating_;
+  }
+  void clear_animation_request() const noexcept {
+    animation_requested_ = false;
+    hover_animating_ = false;
+  }
   void mark_layout_dirty();
   [[nodiscard]] auto dirty() const noexcept -> bool { return dirty_; }
   [[nodiscard]] auto layout_dirty() const noexcept -> bool { return layout_dirty_; }
@@ -390,6 +419,8 @@ class Element {
   /// 静态首帧（time=0）要判成"时间没在走"→ 直接落位，否则画面会停在过渡起点。
   mutable double last_hover_time_{0.0};
   mutable bool hover_animating_{false};
+  /// 组件主动请求的续帧（与悬浮过渡共用汇总链路）。
+  mutable bool animation_requested_{false};
   bool pressed_{false};
   bool focused_{false};
   bool dirty_{true};

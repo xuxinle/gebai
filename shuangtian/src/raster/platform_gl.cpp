@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "st/core/log.hpp"
+#include "st/raster/canvas.hpp"
 #include "st/raster/surface.hpp"
 
 #if defined(_WIN32) && __has_include("opengl/gl.h")
@@ -415,34 +416,44 @@ class GlScene final : public Scene3D {
     return meshes_.back();
   }
 
-  /// 合成：GL 的像素原点在**左下**，画布在左上——必须逐行翻转，
-  /// 否则画面上下颠倒（"字是倒的"那种一眼可见、但很容易在一次性验证里漏掉的错）。
+  /// 合成：GL 的像素原点在**左下**，画布在左上——必须逐行翻转。
+  ///
+  /// ⚠ 这里**不能**逐像素调 `Surface::set_pixel`：
+  /// `GpuCanvas::set_pixel` 每次写入都会触发一次**全屏回读**
+  /// （2560×1600 的 32bpp 就是 16 MB），192k 个像素就是 192k 次全屏回读——
+  /// 表现是主线程 CPU 打满、帧数不增（等价于卡死）。
+  /// 正确做法是先在软件暂存画布上做一次线性转换（直接写内存），
+  /// 再**一次 blit** 交给目标：GPU 目标是"上传一张纹理 + 画一个四边形"。
   void composite(Surface& target, math::Rect destination, float opacity) {
     const int dest_w = static_cast<int>(std::lround(destination.width));
     const int dest_h = static_cast<int>(std::lround(destination.height));
     if (dest_w <= 0 || dest_h <= 0) return;
-    // 逐像素源覆盖（预乘）：GL 输出是**直通** alpha（这里 alpha=1，但保持通用写法）
-    for (int y = 0; y < dest_h; ++y) {
-      const int src_y = height_ - 1 - (y * height_) / dest_h;   // 翻转 Y + 缩放
-      if (src_y < 0 || src_y >= height_) continue;
-      for (int x = 0; x < dest_w; ++x) {
-        const int src_x = (x * width_) / dest_w;
-        if (src_x < 0 || src_x >= width_) continue;
+    if (staging_ == nullptr || staging_->physical_width() != width_ ||
+        staging_->physical_height() != height_) {
+      staging_ = std::make_unique<Canvas>(width_, height_);
+    }
+    // 读回的像素是**直通** RGBA（GL 约定），画布内部是**预乘** 0xRRGGBBAA
+    const std::span<std::uint32_t> out = staging_->pixels();  // 非 const 重载可直接写
+    const auto scale = static_cast<float>(std::clamp(opacity, 0.0f, 1.0f));
+    for (int y = 0; y < height_; ++y) {
+      const int src_y = height_ - 1 - y;   // 翻转 Y
+      for (int x = 0; x < width_; ++x) {
         const std::size_t index =
             (static_cast<std::size_t>(src_y) * static_cast<std::size_t>(width_) +
-             static_cast<std::size_t>(src_x)) *
+             static_cast<std::size_t>(x)) *
             4U;
-        const std::uint32_t r = pixels_[index + 0U];
-        const std::uint32_t g = pixels_[index + 1U];
-        const std::uint32_t b = pixels_[index + 2U];
         const auto alpha = static_cast<std::uint32_t>(
-            static_cast<float>(pixels_[index + 3U]) * std::clamp(opacity, 0.0f, 1.0f));
-        const math::Color source{static_cast<std::uint8_t>(r), static_cast<std::uint8_t>(g),
-                                 static_cast<std::uint8_t>(b), static_cast<std::uint8_t>(alpha)};
-        target.set_pixel(static_cast<int>(destination.x) + x,
-                          static_cast<int>(destination.y) + y, source);
+            static_cast<float>(pixels_[index + 3U]) * scale);
+        const auto premultiply = [alpha](std::uint8_t channel) -> std::uint32_t {
+          return (static_cast<std::uint32_t>(channel) * alpha + 127U) / 255U;
+        };
+        out[static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) +
+            static_cast<std::size_t>(x)] =
+            (premultiply(pixels_[index + 0U]) << 24U) | (premultiply(pixels_[index + 1U]) << 16U) |
+            (premultiply(pixels_[index + 2U]) << 8U) | alpha;
       }
     }
+    target.draw_canvas(*staging_, destination, DrawOptions{.opacity = 1.0f});
   }
 
   int width_{0};
@@ -455,6 +466,9 @@ class GlScene final : public Scene3D {
   math::Mat4 projection_{math::Mat4::identity()};
   std::vector<UploadedMesh> meshes_{};
   std::vector<std::uint8_t> pixels_{};
+  /// CPU 侧暂存（Y 翻转 + 直通→预乘转换）：见 `composite` 的说明。
+  mutable std::unique_ptr<Canvas> staging_{};
+  mutable std::uint64_t composite_calls_{0};
   std::uint64_t draw_calls_{0};
 };
 

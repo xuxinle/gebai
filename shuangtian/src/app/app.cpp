@@ -40,6 +40,8 @@ struct Application::Impl {
   double paint_ms{0.0};
   double present_ms{0.0};
   std::int64_t started_ms{0};
+  /// 应用启动时刻（单调）：动画时间轴的零点。
+  std::int64_t started_ns{0};
   bool quit{false};
   bool repaint{true};
   /// 启动完成回调（`on_ready`）：只跑一次。
@@ -323,6 +325,7 @@ auto Application::start() -> Status {
 
   impl_->device_scale = impl_->backend->device_scale();
   impl_->started_ms = time::now_ms();
+  impl_->started_ns = time::now_ns();  // 动画时间轴零点（与 started_ms 同源）
   started_ = true;
   render_frame();
   return ok();
@@ -341,6 +344,11 @@ void Application::render_frame() {
   root_.layout();
   const ui::Theme& theme = root_.theme();
   canvas.clear(theme.colors().bg);
+  // 时间轴推进：动画（开关/悬浮过渡/3D 旋转）都靠它。
+  // 用**应用启动以来的秒数**而不是系统时间：前者单调、与帧序号同源，
+  // 便于复现（同一帧序列 → 同一动画进度）。
+  root_.set_time(static_cast<double>(start_ns - impl_->started_ns) / 1'000'000'000.0);
+
   const std::int64_t paint_start = time::now_ns();
   root_.paint(canvas);
   const std::int64_t present_start = time::now_ns();

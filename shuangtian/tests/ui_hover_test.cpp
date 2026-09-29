@@ -219,3 +219,43 @@ ST_TEST(hover_survives_subtree_replacement) {
   ST_CHECK(hit != nullptr);
   ST_CHECK(hit->hovered());
 }
+
+ST_TEST(hover_idle_element_never_requests_frames) {
+  // 这条是**忙循环**的回归测试。
+  //
+  // 早先的实现里，静止元素每帧都会把过渡起点重置为当前时间 → elapsed 恒为 0
+  // → 永久声明"还在动画中" → 根节点每帧都脏 → 应用 100% 占一个核。
+  // 忙循环对"帧耗时基准"完全不可见（每帧都很快，只是停不下来），
+  // 所以必须用"是否请求下一帧"来断言，而不是看耗时。
+  Fixture fixture;
+  fixture.layout();
+  // 静止（未悬浮）连续多帧：任何一帧都不该请求续帧
+  for (int frame = 1; frame <= 5; ++frame) {
+    Canvas canvas{kWidth, kHeight};
+    canvas.clear(Color{0x20, 0x20, 0x28, 0xFF});
+    fixture.root.paint(canvas);
+    // 时间在推进（真实应用就是如此），但元素静止 → 不该要求重绘
+    fixture.move_to(280.0f, 140.0f);   // 移到空白处：确保没有元素被悬浮
+    fixture.root.set_time(static_cast<double>(frame) * 0.1);
+    fixture.root.paint(canvas);
+  }
+  fixture.root.clear_dirty();
+  ST_CHECK(!fixture.root.dirty());   // 静止后必须真的能停下来
+}
+
+ST_TEST(hover_transition_stops_requesting_frames_when_done) {
+  // 过渡跑完后也必须停下来（否则动画结束仍在空转）。
+  Fixture fixture;
+  fixture.layout();
+  fixture.move_to(60.0f, 40.0f);   // 悬浮到按钮
+  // 给足时间让过渡走完
+  for (int step = 0; step <= 20; ++step) {
+    Canvas canvas{kWidth, kHeight};
+    canvas.clear(Color{0x20, 0x20, 0x28, 0xFF});
+    fixture.root.set_time(static_cast<double>(step) * 0.05);
+    fixture.root.paint(canvas);
+  }
+  ST_CHECK(fixture.button->hover_progress() > 0.99f);
+  fixture.root.clear_dirty();
+  ST_CHECK(!fixture.root.dirty());
+}

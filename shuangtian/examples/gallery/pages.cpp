@@ -22,6 +22,7 @@
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/toggle.hpp"
+#include "st/ui/components/gl_view.hpp"
 #include "st/ui/icon.hpp"
 #include "st/ui/theme.hpp"
 
@@ -661,6 +662,14 @@ namespace {
     icon_grid->add_child(std::make_unique<IconCell>(std::string(name)));
   }
   icons_card->add_child(std::move(icon_grid));
+  {
+    auto gl_card = make_card("card-gl", "三维视图（OpenGL）");
+    auto view = std::make_unique<st::ui::GlView>(st::ui::GlShape::Cube);
+    view->set_id("gl-view");
+    view->set_preferred_height(200.0f);
+    gl_card->add_child(std::move(view));
+    page->add_child(std::move(gl_card));
+  }
 
   page->add_child(std::move(icons_card));
 

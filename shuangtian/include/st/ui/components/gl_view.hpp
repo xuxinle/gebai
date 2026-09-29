@@ -65,7 +65,6 @@ class GlView : public Element {
   mutable std::unique_ptr<raster::gl::Scene3D> scene_{};
   mutable float angle_{0.0f};
   mutable double last_time_{-1.0};
-  mutable bool animating_{false};
   mutable std::uint64_t frames_{0};
 };
 

@@ -44,6 +44,14 @@ class UiRoot {
   /// 全树绘制（含遮罩裁剪与叠加层）。
   void paint(raster::Surface& canvas);
 
+  /// 设定本帧的时间戳（秒）。
+  ///
+  /// 时间轴必须由应用推进：早先 `time_seconds_` **从未被赋值**（恒为 0），
+  /// 于是所有基于时间的动画在真实应用里都走"静态帧直接落位"分支——
+  /// 即**动画完全不播**（单元测试因为自己构造 RenderContext 而看不出来）。
+  void set_time(double seconds) noexcept { time_seconds_ = seconds; }
+  [[nodiscard]] auto time() const noexcept -> double { return time_seconds_; }
+
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。
   [[nodiscard]] auto dispatch(Event& event) -> bool;
 

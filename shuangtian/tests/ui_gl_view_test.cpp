@@ -12,6 +12,7 @@
 
 #include "st/raster/canvas.hpp"
 #include "st/raster/gl.hpp"
+#include "st/raster/gpu.hpp"
 #include "st/ui/components/gl_view.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
@@ -57,6 +58,17 @@ struct Harness {
     view.paint(st::ui::RenderContext{theme, nullptr, time}, canvas);
   }
 };
+
+/// GPU 画布版：`pixels()` 会触发回读，所以只在断言处调用一次。
+[[nodiscard]] auto inked_ratio_gpu(st::raster::Surface& canvas, Color background) -> double {
+  const std::span<const std::uint32_t> pixels = canvas.pixels();
+  const std::uint32_t bg = st::math::premultiply(background);
+  std::size_t inked = 0;
+  for (const std::uint32_t pixel : pixels) {
+    if (pixel != bg) ++inked;
+  }
+  return pixels.empty() ? 0.0 : static_cast<double>(inked) / static_cast<double>(pixels.size());
+}
 
 }  // namespace
 
@@ -123,4 +135,33 @@ ST_TEST(gl_view_static_frame_is_stable) {
     if (first[index] != second[index]) ++differing;
   }
   ST_CHECK_EQ(static_cast<int>(differing), 0);
+}
+
+ST_TEST(gl_view_composites_into_gpu_canvas_without_hanging) {
+  // 这条是**主线程卡死**的回归测试。
+  //
+  // 早先 `GlScene::composite` 逐像素调 `Surface::set_pixel`，而 GPU 画布的
+  // `set_pixel` 每次写入都会触发一次**全屏回读**（2560×1600 = 16 MB）——
+  // 192k 像素就是 192k 次全屏回读。表现：主线程 CPU 打满、帧数不增（等价于卡死）。
+  //
+  // 所以必须**拿 GPU 画布当目标**测：拿软件画布测这条路径永远不会暴露问题
+  // （软件 set_pixel 是 O(1) 内存写）。
+  if (!st::raster::gl::available()) return;
+  auto target = st::raster::gpu::create_canvas(kWidth, kHeight, 1.0f, {});
+  if (!target.has_value()) return;   // 本机没有 GPU 画布：本用例不适用
+  st::raster::Surface& surface = **target;
+  surface.clear(Color{0x0A, 0x0E, 0x16, 0xFF});
+
+  Theme theme = Theme::light();
+  GlView view(GlShape::Sphere);
+  view.measure(st::ui::RenderContext{theme, nullptr, 0.0},
+               st::ui::Constraints{.max_width = static_cast<float>(kWidth),
+                                   .max_height = static_cast<float>(kHeight)});
+  view.arrange(st::ui::RenderContext{theme, nullptr, 0.0}, Rect{0.0f, 0.0f, kWidth, kHeight});
+  // 能返回就说明没有卡死（早先这里会永远不返回）
+  view.paint(st::ui::RenderContext{theme, nullptr, 1.0}, surface);
+
+  // 而且真的画进去了（不是"跑完了但什么都没画"）
+  const double inked = inked_ratio_gpu(surface, Color{0x0A, 0x0E, 0x16, 0xFF});
+  ST_CHECK(inked > 0.02);
 }

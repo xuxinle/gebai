@@ -1,6 +1,7 @@
 #include "st/ui/components/gl_view.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <format>
 
 #include "st/core/log.hpp"
@@ -48,6 +49,7 @@ void GlView::arrange(const RenderContext& context, math::Rect rect) {
 
 void GlView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const math::Rect box = bounds_.inset(style_.padding);
+  std::fprintf(stderr, "[glv] enter box=%.1f,%.1f %.1fx%.1f scale=%.2f\n", box.x, box.y, box.width, box.height, canvas.device_scale());
   if (box.is_empty()) return;
 
   // GL 不可用：画一块**说明性占位**，而不是静默空白。
@@ -80,7 +82,7 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
   if (spin_ && advancing) {
     angle_ += speed_ * static_cast<float>(now - last_time_);
     if (angle_ > 6.2831853f) angle_ -= 6.2831853f;
-    animating_ = true;   // 请求下一帧（由 UiRoot 汇总）
+    request_animation();   // 走统一的续帧协议（由 UiRoot 汇总决定帧预算）
   }
   last_time_ = now;
 
@@ -89,11 +91,14 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
   camera.target = math::Vec3{0.0f, 0.0f, 0.0f};
   camera.fov_y_degrees = 42.0f;
 
+  std::fprintf(stderr, "[glv] begin_frame w=%d h=%d\n", width, height);
   scene_->begin_frame(background_);
   scene_->set_camera(camera);
   scene_->draw_mesh(shared_shape_mesh(shape_),
                     math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, angle_));
+  std::fprintf(stderr, "[glv] end_frame start\n");
   scene_->end_frame(canvas, box);
+  std::fprintf(stderr, "[glv] end_frame done\n");
   ++frames_;
 }
 

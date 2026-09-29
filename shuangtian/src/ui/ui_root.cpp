@@ -109,9 +109,9 @@ void UiRoot::layout_subtree(Element& element, math::Rect rect) {
 void UiRoot::collect_animation_requests() {
   animation_pending_ = false;
   const auto walk = [this](auto&& self, Element& element) -> void {
-    if (element.hover_animating()) {
+    if (element.animation_requested()) {
       animation_pending_ = true;
-      element.clear_hover_animating();  // 消费：元素在下一次绘制里重新置位
+      element.clear_animation_request();  // 消费：元素在下一次绘制里重新置位
       return;
     }
     for (std::size_t index = 0; index < element.children().size(); ++index) {
