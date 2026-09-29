@@ -130,6 +130,8 @@ auto Application::metrics() const -> control::Metrics {
   }
   metrics.uptime_ms = time::now_ms() - impl_->started_ms;
   metrics.backend = std::string(backend_name());
+  metrics.renderer = std::string(impl_->backend->renderer_name());
+  metrics.renderer_note = impl_->backend->renderer_note();
   metrics.headless = headless();
   metrics.device_scale = impl_->device_scale;
   if (impl_->backend != nullptr) {
@@ -259,6 +261,7 @@ auto Application::start() -> Status {
   window.height = options_.height;
   window.scale = options_.scale;
   window.title = options_.title;
+  window.renderer = options_.renderer;
   window.headless = impl_->backend->headless();
   if (auto status = impl_->backend->create_window(window); !status) {
     // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，

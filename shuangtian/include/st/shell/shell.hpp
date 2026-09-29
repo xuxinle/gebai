@@ -27,6 +27,8 @@ struct WindowOptions {
   std::string title{"霜天应用"};
   bool headless{false};
   bool resizable{true};
+  /// 渲染器：`auto`（按实测性能选）/ `gpu` / `software`。
+  std::string renderer{"auto"};
 };
 
 class Backend {
@@ -51,6 +53,14 @@ class Backend {
   [[nodiscard]] virtual auto frame_count() const noexcept -> std::uint64_t = 0;
   /// 当前 DPI 缩放（物理像素 / 逻辑像素）。
   [[nodiscard]] virtual auto device_scale() const noexcept -> float = 0;
+  /// 当前实际使用的渲染器名（"software" / "gpu"）与选择理由。
+  ///
+  /// 为什么必须可上报：`auto` 是**按实测性能**选的，用户有权知道这一帧是谁画的、
+  /// 以及为什么——"不知道自己用的是哪个渲染器"会让性能问题无从排查。
+  [[nodiscard]] virtual auto renderer_name() const noexcept -> std::string_view {
+    return "software";
+  }
+  [[nodiscard]] virtual auto renderer_note() const -> std::string { return {}; }
   /// 运行时切换 DPI（重分配帧缓冲；无头与窗口模式一致）。
   virtual auto set_device_scale(float scale) -> Status = 0;
   /// 逻辑视口尺寸（窗口尺寸，不含 DPI 放大）。

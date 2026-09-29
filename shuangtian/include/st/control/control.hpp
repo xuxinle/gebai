@@ -52,6 +52,9 @@ struct Metrics {
   double present_ms{0.0};
   std::int64_t uptime_ms{0};
   std::string backend{};
+  /// 实际使用的渲染器（"software" / "gpu"）与选择理由（`auto` 时含实测结果）。
+  std::string renderer{};
+  std::string renderer_note{};
   bool headless{true};
   float device_scale{1.0f};
   int physical_width{0};

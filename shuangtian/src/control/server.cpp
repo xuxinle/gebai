@@ -745,6 +745,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     Metrics metrics = host.metrics();
     Json result = Json::object();
     result["backend"] = metrics.backend;
+    // 渲染器必须可查：`auto` 是按实测选的，用户有权知道这一帧谁画的、以及为什么。
+    result["renderer"] = metrics.renderer;
+    result["renderer_note"] = metrics.renderer_note;
     result["headless"] = metrics.headless;
     result["device_scale"] = static_cast<double>(metrics.device_scale);
     result["physical_width"] = static_cast<std::uint64_t>(metrics.physical_width);

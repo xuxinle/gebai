@@ -51,6 +51,8 @@ struct Options {
   bool headless{false};
   float scale{0.0f};
   std::string theme{"light"};
+  /// 渲染器：auto（按实测帧耗时选更快）/ gpu / software。
+  std::string renderer{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -69,6 +71,7 @@ struct Options {
       return fallback;
     };
     if (raw == "--headless") options.headless = true;
+    else if (raw == "--renderer") options.renderer = next("auto");
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--theme") options.theme = next("light");
@@ -171,6 +174,8 @@ auto run_app(int argc, char** argv) -> int {
   app_options.title = "霜天 · 组件画廊";
   app_options.headless = options.headless;
   app_options.backend = options.headless ? "headless" : std::string{};
+  // 渲染器交给应用选：`auto` 会**实测**两条路径再定（见 shell/backend.cpp 的 create_surface）
+  app_options.renderer = options.renderer;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;

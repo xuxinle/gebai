@@ -23,6 +23,11 @@ struct AppOptions {
   std::string title{"霜天应用"};
   bool headless{false};
   std::string backend{};              ///< 空=自动（无显示则 headless）
+  /// 渲染器：`auto`（**按实测帧耗时选更快的那条**）/ `gpu` / `software`。
+  ///
+  /// 为什么不硬编码 GPU 优先：渲染器优劣与机器强相关（GPU 弱、驱动差、或呈现路径
+  /// 仍需 CPU 拷贝时，软件反而更快）。`auto` 的职责是**测出来**，而不是猜。
+  std::string renderer{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配
   std::string control_file{};         ///< 写入 {port,pid,...} 供客户端发现
