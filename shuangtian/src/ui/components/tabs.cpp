@@ -196,7 +196,7 @@ auto Tabs::resolve_indicator(const RenderContext& context, math::Rect target) co
   return math::Rect{indicator_x_, target.y, indicator_width_, target.height};
 }
 
-void Tabs::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Tabs::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty() || labels_.empty()) return;
   if (widths_.size() != labels_.size()) rebuild_widths(context);
 

@@ -46,7 +46,7 @@ constexpr double k_anim_pending = -2.0;
 /// 焦点环：控件矩形外扩 `metrics.focus_width / 2`，圆角跟随控件（与 Input 同一口径）。
 /// 圆角夹取到「短边一半 - 2」：半径等于半边的圆角路径描边会退化（无极值直线段时描边塌成发丝线，
 /// 圆形指示器/圆形滑块尤其明显），故圆形控件用近似圆的圆角矩形画环。
-void paint_focus_ring(const RenderContext& context, raster::Canvas& canvas, math::Rect rect,
+void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
                       float radius) {
   const float width = context.theme.metrics().focus_width;
   if (width <= 0.0f || rect.is_empty()) return;
@@ -59,7 +59,7 @@ void paint_focus_ring(const RenderContext& context, raster::Canvas& canvas, math
 }
 
 /// 圆角描边：线宽完全落在矩形内侧（1px 发丝在任何 DPI 下都清晰）。
-void paint_outline(raster::Canvas& canvas, math::Rect rect, float radius, math::Color color,
+void paint_outline(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
                    float width) {
   if (width <= 0.0f || color.a == 0U || rect.is_empty()) return;
   const float half = width * 0.5f;
@@ -69,7 +69,7 @@ void paint_outline(raster::Canvas& canvas, math::Rect rect, float radius, math::
 }
 
 /// 左对齐、垂直居中的单行标签（超出以省略号收尾）。
-void paint_label(const RenderContext& context, raster::Canvas& canvas, std::string_view text,
+void paint_label(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                  math::Rect box, float size, math::Color color) {
   if (text.empty() || box.is_empty() || box.width <= 0.0f) return;
   const TextPort& port = text_port_of(context);
@@ -157,7 +157,7 @@ void Checkbox::measure(const RenderContext& context, const Constraints& constrai
   measured_ = fit_size(control_size(context, port, k_box_size, label_), style_, constraints);
 }
 
-void Checkbox::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Checkbox::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
@@ -304,7 +304,7 @@ void Radio::measure(const RenderContext& context, const Constraints& constraints
   measured_ = fit_size(control_size(context, port, k_box_size, label_), style_, constraints);
 }
 
-void Radio::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Radio::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
@@ -483,7 +483,7 @@ void Switch::measure(const RenderContext& context, const Constraints& constraint
   measured_ = fit_size(control_size(context, port, k_track_width, label_), style_, constraints);
 }
 
-void Switch::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Switch::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();

@@ -418,16 +418,16 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   return bitmap;
 }
 
-auto TextRenderer::draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
-                        math::Color color) const -> Status {
+auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::Point origin,
+                        float size, math::Color color) const -> Status {
   if (stack_->empty() || utf8.empty() || size <= 0.0f || color.a == 0U) return ok();
   // 文本是跨模块的绘制路径（字形位图直接按覆盖率行混合），在画布上单独记一笔：
   // 否则“绘制 30ms”里看不出文字占多少（界面里文字往往是第一位的调用次数大户）。
-  const bool profiling = canvas.profiler() != nullptr;
+  const bool profiling = surface.profiler() != nullptr;
   const std::int64_t profile_start = profiling ? st::time::now_ns() : 0;
   std::uint64_t profile_pixels = 0;
   const ShapedText shaped = shape(utf8, size);
-  const float device_scale = canvas.device_scale();
+  const float device_scale = surface.device_scale();
   const float baseline = (origin.y + shaped.ascent) * device_scale;
   const raster::Paint paint = raster::Paint::solid(color);
   const float opacity = static_cast<float>(color.a) / 255.0f;
@@ -443,19 +443,16 @@ auto TextRenderer::draw(raster::Canvas& canvas, std::string_view utf8, math::Poi
     const auto x_begin =
         static_cast<int>(std::lround((origin.x + run.x) * device_scale)) + bitmap->offset_x;
     const auto y_begin = static_cast<int>(std::lround(baseline)) + bitmap->offset_y;
-    for (int row = 0; row < bitmap->height; ++row) {
-      const std::span<const float> span(
-          bitmap->coverage.data() + static_cast<std::size_t>(row) *
-                                        static_cast<std::size_t>(bitmap->width),
-          static_cast<std::size_t>(bitmap->width));
-      canvas.blend_coverage_row(y_begin + row, x_begin, span, paint, opacity,
-                                raster::BlendMode::SrcOver);
-    }
+    // 经**接口**提交字形覆盖率位图（而不是直接调软件内部的行混合 API）：
+    // 这样同一条文字路径在 CPU 与 GPU 上都能画（GPU 把它当 A8 纹理贴）。
+    // 文字是界面里最常见的原语，若它只能走软件，GPU 渲染就名存实亡。
+    surface.blend_coverage_bitmap(x_begin, y_begin, bitmap->coverage, bitmap->width,
+                                  bitmap->height, paint, opacity, raster::BlendMode::SrcOver);
   }
   if (profiling) {
-    canvas.add_profile(raster::PaintOp::Text,
-                       static_cast<double>(st::time::now_ns() - profile_start) / 1'000'000.0,
-                       profile_pixels);
+    surface.add_profile(raster::PaintOp::Text,
+                        static_cast<double>(st::time::now_ns() - profile_start) / 1'000'000.0,
+                        profile_pixels);
   }
   return ok();
 }

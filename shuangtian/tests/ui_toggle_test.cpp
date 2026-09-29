@@ -48,7 +48,7 @@ class FontPort final : public st::ui::TextPort {
   [[nodiscard]] auto line_height(float size) const -> float override {
     return renderer_.line_height(size);
   }
-  void draw(st::raster::Canvas& canvas, std::string_view utf8, st::math::Point origin, float size,
+  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
             st::math::Color color) const override {
     (void)renderer_.draw(canvas, utf8, origin, size, color);
   }

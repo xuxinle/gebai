@@ -43,7 +43,7 @@ class ProgressBar : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
@@ -80,7 +80,7 @@ class Spinner : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override;
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
@@ -110,7 +110,7 @@ class Badge : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return text_; }
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
@@ -154,7 +154,7 @@ class Chip : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   [[nodiscard]] auto hit_test(math::Point point) const noexcept -> bool override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return text_; }
@@ -194,7 +194,7 @@ class Avatar : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return initials(); }
   [[nodiscard]] auto semantics_value() const -> std::string override { return name_; }
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
@@ -230,8 +230,8 @@ class Tooltip : public Element {
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
-  void paint(const RenderContext& context, raster::Canvas& canvas) const override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint(const RenderContext& context, raster::Surface& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto hit_test(math::Point point) const noexcept -> bool override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return text_; }
   [[nodiscard]] auto semantics_value() const -> std::string override { return text_; }

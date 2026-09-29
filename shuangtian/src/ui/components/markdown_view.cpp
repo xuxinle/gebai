@@ -103,7 +103,7 @@ constexpr double kTwoPi{2.0 * kPi};
 }
 
 /// 填充矩形（可圆角）：像素对齐且无圆角时走快速路径，否则走自建正向路径。
-void fill_rect_shape(raster::Canvas& canvas, math::Rect rect, math::Color color,
+void fill_rect_shape(raster::Surface& canvas, math::Rect rect, math::Color color,
                      float radius = 0.0f) {
   if (rect.is_empty() || color.a == 0U) return;
   if (radius <= 0.0f && is_pixel_aligned(rect)) {
@@ -114,7 +114,7 @@ void fill_rect_shape(raster::Canvas& canvas, math::Rect rect, math::Color color,
 }
 
 /// 填充发丝线（1px 分隔线/表格线）：对齐到整像素，保证任何缩放下都锐利。
-void fill_line_shape(raster::Canvas& canvas, math::Rect rect, math::Color color) {
+void fill_line_shape(raster::Surface& canvas, math::Rect rect, math::Color color) {
   if (rect.is_empty() || color.a == 0U) return;
   const math::IntRect aligned = rect.round_out();
   canvas.fill_rect(math::Rect{static_cast<float>(aligned.x), static_cast<float>(aligned.y),
@@ -124,7 +124,7 @@ void fill_line_shape(raster::Canvas& canvas, math::Rect rect, math::Color color)
 }
 
 /// 填充圆点（自建正向多边形，理由同 `rounded_rect_path`）。
-void fill_circle_shape(raster::Canvas& canvas, math::Point center, float radius,
+void fill_circle_shape(raster::Surface& canvas, math::Point center, float radius,
                        math::Color color) {
   if (radius <= 0.0f || color.a == 0U) return;
   constexpr int segments = 24;
@@ -1056,7 +1056,7 @@ auto MarkdownView::color_of(const Theme& theme, ColorRole role) -> math::Color {
   return colors.text;
 }
 
-void MarkdownView::draw_text_weighted(const TextPort& port, raster::Canvas& canvas,
+void MarkdownView::draw_text_weighted(const TextPort& port, raster::Surface& canvas,
                                       std::string_view text, math::Point origin, float size,
                                       math::Color color, FontWeight weight) {
   // 端口无字重通道：SemiBold/Bold 以亚像素偏移二次绘制近似（如实说明见头文件）
@@ -1068,7 +1068,7 @@ void MarkdownView::draw_text_weighted(const TextPort& port, raster::Canvas& canv
   }
 }
 
-void MarkdownView::draw_spans(const RenderContext& context, raster::Canvas& canvas,
+void MarkdownView::draw_spans(const RenderContext& context, raster::Surface& canvas,
                               const std::vector<Span>& spans, math::Point start, float max_right,
                               float line_height) const {
   const TextPort& port = text_port_of(context);
@@ -1109,7 +1109,7 @@ void MarkdownView::draw_spans(const RenderContext& context, raster::Canvas& canv
   }
 }
 
-void MarkdownView::paint_group(const RenderContext& context, raster::Canvas& canvas, const Row& row,
+void MarkdownView::paint_group(const RenderContext& context, raster::Surface& canvas, const Row& row,
                                math::Point origin) const {
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
@@ -1135,7 +1135,7 @@ void MarkdownView::paint_group(const RenderContext& context, raster::Canvas& can
   }
 }
 
-void MarkdownView::paint_marker(const RenderContext& context, raster::Canvas& canvas,
+void MarkdownView::paint_marker(const RenderContext& context, raster::Surface& canvas,
                                 const Row& row, math::Point origin) const {
   if (row.marker.width <= 0.0f) return;
   const Palette& colors = context.theme.colors();
@@ -1172,7 +1172,7 @@ void MarkdownView::paint_marker(const RenderContext& context, raster::Canvas& ca
   }
 }
 
-void MarkdownView::paint_table_row(const RenderContext& context, raster::Canvas& canvas,
+void MarkdownView::paint_table_row(const RenderContext& context, raster::Surface& canvas,
                                    const Row& row, math::Point origin) const {
   const Palette& colors = context.theme.colors();
   const TextPort& port = text_port_of(context);
@@ -1201,7 +1201,7 @@ void MarkdownView::paint_table_row(const RenderContext& context, raster::Canvas&
   }
 }
 
-void MarkdownView::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void MarkdownView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const math::Rect content = content_box();
   const math::Point origin{content.x, content.y - scroll_offset_};

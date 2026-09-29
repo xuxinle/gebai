@@ -50,7 +50,7 @@ class Input : public Element {
   [[nodiscard]] auto cursor_index() const noexcept -> std::size_t { return cursor_; }
 
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   void activate() override;
   [[nodiscard]] auto semantics_text() const -> std::string override;
@@ -110,7 +110,7 @@ class TextArea : public Element {
 
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   void activate() override;
   [[nodiscard]] auto semantics_text() const -> std::string override;

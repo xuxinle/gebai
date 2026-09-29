@@ -166,7 +166,7 @@ auto Application::capture_png(math::IntRect region) -> Result<std::vector<std::u
   if (impl_->backend == nullptr) {
     return unexpected(ErrorCode::Invalid, "应用未启动（无帧缓冲）");
   }
-  raster::Canvas& canvas = impl_->backend->framebuffer();
+  raster::Surface& canvas = impl_->backend->framebuffer();
   // **截图是物理像素口径**（`DESIGN.md` §6：capture 按物理分辨率出图）：
   // - 默认区域 = 整个物理缓冲（不是逻辑尺寸——按逻辑取会把 2x 屏截成左上 1/4）；
   // - 显式 region 是**逻辑坐标**（与协议里其它坐标一致），这里换算到物理像素后取像素。
@@ -328,7 +328,7 @@ auto Application::start() -> Status {
 void Application::render_frame() {
   if (impl_->backend == nullptr) return;
   const std::int64_t start_ns = time::now_ns();
-  raster::Canvas& canvas = impl_->backend->framebuffer();
+  raster::Surface& canvas = impl_->backend->framebuffer();
   // 分阶段计时：没有分段数据就无法判断"帧慢"该改哪里（排版/光栅化/送显三条路完全不同）。
   const std::int64_t layout_start = time::now_ns();
   if (impl_->profiling) {

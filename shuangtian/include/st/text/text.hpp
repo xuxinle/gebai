@@ -82,7 +82,7 @@ class TextRenderer {
   [[nodiscard]] auto ascent(float size) const -> float;
 
   /// 绘制：`origin` 为**逻辑坐标**下的行左上角；字形按画布 DPI 物理栅格化。
-  auto draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
+  auto draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
             math::Color color) const -> Status;
 
   /// 折行（按空格与 CJK 断点；返回各行原文区间）。

@@ -77,7 +77,7 @@ auto NullTextPort::measure_width(std::string_view utf8, float size) const -> flo
 
 auto NullTextPort::line_height(float size) const -> float { return size * 1.45f; }
 
-void NullTextPort::draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
+void NullTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
                         math::Color color) const {
   (void)canvas;
   (void)utf8;
@@ -565,7 +565,7 @@ void Element::layout_children(const RenderContext& context, math::Rect content) 
   }
 }
 
-void Element::paint_box(const RenderContext& context, raster::Canvas& canvas) const {
+void Element::paint_box(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const auto& colors = context.theme.colors();
   (void)colors;
@@ -595,7 +595,7 @@ void Element::paint_box(const RenderContext& context, raster::Canvas& canvas) co
   }
 }
 
-auto Element::paint_text(const RenderContext& context, raster::Canvas& canvas, std::string_view text,
+auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                          math::Rect box) const -> void {
   if (text.empty()) return;
   const TextPort& port = text_port_or_null(context);
@@ -614,7 +614,7 @@ auto Element::paint_text(const RenderContext& context, raster::Canvas& canvas, s
   port.draw(canvas, clipped, math::Point{x, y}, size, style_.color);
 }
 
-void Element::paint(const RenderContext& context, raster::Canvas& canvas) const {
+void Element::paint(const RenderContext& context, raster::Surface& canvas) const {
   if (!visible_) return;
   paint_box(context, canvas);
   paint_content(context, canvas);

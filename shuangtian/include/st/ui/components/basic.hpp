@@ -29,7 +29,7 @@ class Text : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return content_; }
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
@@ -73,7 +73,7 @@ class IconView : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return icon_; }
   [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
   auto set_property(std::string_view name, std::string_view value) -> bool override;
@@ -105,7 +105,7 @@ class Button : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   auto on_event(const RenderContext& context, Event& event) -> bool override;
   void activate() override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return label_; }
@@ -159,7 +159,7 @@ class Divider : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
 
  private:
   bool vertical_{false};
@@ -176,7 +176,7 @@ class KeyValueRow : public Element {
   [[nodiscard]] auto value() const -> const std::string& { return value_; }
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return key_; }
   [[nodiscard]] auto semantics_value() const -> std::string override { return value_; }
 

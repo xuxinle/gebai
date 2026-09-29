@@ -39,7 +39,7 @@ class FixedBox : public Element {
     (void)constraints;
     measured_ = size_;
   }
-  void paint_content(const RenderContext& context, st::raster::Canvas& canvas) const override {
+  void paint_content(const RenderContext& context, st::raster::Surface& canvas) const override {
     (void)context;
     (void)canvas;
   }

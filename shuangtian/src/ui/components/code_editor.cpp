@@ -786,7 +786,7 @@ void CodeEditor::arrange(const RenderContext& context, math::Rect rect) {
   (void)context;
 }
 
-void CodeEditor::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void CodeEditor::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const SyntaxPalette& syntax = context.theme.syntax();
   const Palette& colors = context.theme.colors();

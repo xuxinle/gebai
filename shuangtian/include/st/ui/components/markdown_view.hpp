@@ -79,7 +79,7 @@ class MarkdownView : public Element {
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
-  void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   /// 滚轮滚动、PageUp/PageDown/Home/End/方向键（返回 true 表示已处理）。
   auto on_event(const RenderContext& context, Event& event) -> bool override;
 
@@ -235,21 +235,21 @@ class MarkdownView : public Element {
   [[nodiscard]] static auto role_of_token(st::md::TokenKind kind) -> ColorRole;
   [[nodiscard]] static auto color_of(const Theme& theme, ColorRole role) -> math::Color;
   /// 绘制文本（端口无字重通道：Bold/SemiBold 以亚像素偏移二次绘制近似）。
-  static void draw_text_weighted(const TextPort& port, raster::Canvas& canvas,
+  static void draw_text_weighted(const TextPort& port, raster::Surface& canvas,
                                  std::string_view text, math::Point origin, float size,
                                  math::Color color, FontWeight weight);
   /// 顺序绘制行内片段（超宽时以省略号收尾）。
-  void draw_spans(const RenderContext& context, raster::Canvas& canvas,
+  void draw_spans(const RenderContext& context, raster::Surface& canvas,
                   const std::vector<Span>& spans, math::Point start, float max_right,
                   float line_height) const;
   /// 组背景（代码块：底色 + 边框 + 语言标签；引用：底色 + 左侧竖条），组内首行绘制一次。
-  void paint_group(const RenderContext& context, raster::Canvas& canvas, const Row& row,
+  void paint_group(const RenderContext& context, raster::Surface& canvas, const Row& row,
                    math::Point origin) const;
   /// 项目符号（无序圆点 / 有序序号 / 任务方框）。
-  void paint_marker(const RenderContext& context, raster::Canvas& canvas, const Row& row,
+  void paint_marker(const RenderContext& context, raster::Surface& canvas, const Row& row,
                     math::Point origin) const;
   /// 表格行（表头底色、网格线、单元格文本）。
-  void paint_table_row(const RenderContext& context, raster::Canvas& canvas, const Row& row,
+  void paint_table_row(const RenderContext& context, raster::Surface& canvas, const Row& row,
                        math::Point origin) const;
 };
 

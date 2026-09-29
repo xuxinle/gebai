@@ -199,7 +199,7 @@ class ProgressRow : public Element {
     measured_ = st::math::Size{constraints.max_width, 34.0f};
   }
   void paint_content(const st::ui::RenderContext& context,
-                     st::raster::Canvas& canvas) const override {
+                     st::raster::Surface& canvas) const override {
     const auto& colors = context.theme.colors();
     const float label_height = style_.font_size * 1.4f;
     const float track_y = bounds_.y + label_height + 2.0f;
@@ -254,7 +254,7 @@ class IconCell : public Element {
     measured_ = st::math::Size{kCellWidth, kCellHeight};
   }
   void paint_content(const st::ui::RenderContext& context,
-                     st::raster::Canvas& canvas) const override {
+                     st::raster::Surface& canvas) const override {
     const float icon_size = 18.0f;
     const float icon_x = bounds_.x + (bounds_.width - icon_size) * 0.5f;
     Icon::draw(canvas, name_, Rect{icon_x, bounds_.y + 6.0f, icon_size, icon_size},
@@ -290,7 +290,7 @@ class SwatchCell : public Element {
     measured_ = st::math::Size{kCellWidth, kCellHeight};
   }
   void paint_content(const st::ui::RenderContext& context,
-                     st::raster::Canvas& canvas) const override {
+                     st::raster::Surface& canvas) const override {
     const float swatch = 26.0f;
     const Rect chip{bounds_.x + (bounds_.width - swatch) * 0.5f, bounds_.y + 6.0f, swatch, swatch};
     canvas.fill_rect(chip, st::raster::Paint::solid(color_), 6.0f);
@@ -339,7 +339,7 @@ inline constexpr std::string_view kAboutMarkdown = R"md(
 // 组件只需四个扩展点即可与内置控件共享同一套视觉语言
 void measure(const RenderContext& ctx, const Constraints& box) override;
 void arrange(const RenderContext& ctx, math::Rect rect) override;
-void paint_content(const RenderContext& ctx, raster::Canvas& canvas) const override;
+void paint_content(const RenderContext& ctx, raster::Surface& canvas) const override;
 auto on_event(const RenderContext& ctx, Event& event) -> bool override;
 ```
 

@@ -232,7 +232,7 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
-  [[nodiscard]] auto framebuffer() -> raster::Canvas& override { return *canvas_; }
+  [[nodiscard]] auto framebuffer() -> raster::Surface& override { return *canvas_; }
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {

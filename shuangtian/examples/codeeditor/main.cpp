@@ -59,7 +59,7 @@ struct Sample {
 
 namespace st::raster {
 
-auto fill_path_aa(Canvas& canvas, const Path& path, const Paint& paint) -> void {
+auto fill_path_aa(Surface& canvas, const Path& path, const Paint& paint) -> void {
   const auto polylines = path.flatten(0.25f);
   const Rect bounds = path.flattened_bounds(0.25f);
   // 覆盖率是**带符号**量（非零环绕）：画布侧取绝对值

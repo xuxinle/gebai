@@ -405,7 +405,7 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
   return path;
 }
 
-void Icon::draw(raster::Canvas& canvas, std::string_view name, math::Rect box, math::Color color,
+void Icon::draw(raster::Surface& canvas, std::string_view name, math::Rect box, math::Color color,
                 float stroke_width) {
   const IconGlyph* glyph = find(name);
   if (glyph == nullptr || box.is_empty() || color.a == 0U) return;
@@ -421,7 +421,7 @@ void Icon::draw(raster::Canvas& canvas, std::string_view name, math::Rect box, m
   canvas.stroke_path(path, raster::Paint::solid(color), width);
 }
 
-void Icon::draw_filled(raster::Canvas& canvas, std::string_view name, math::Rect box,
+void Icon::draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
                        math::Color color) {
   if (box.is_empty() || color.a == 0U) return;
   raster::Path path = Icon::path(name, box, 0.0f);

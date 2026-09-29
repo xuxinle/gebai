@@ -14,7 +14,7 @@ auto RendererTextPort::line_height(float size) const -> float {
   return renderer_.line_height(size);
 }
 
-void RendererTextPort::draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin,
+void RendererTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin,
                             float size, math::Color color) const {
   (void)renderer_.draw(canvas, utf8, origin, size, color);
 }

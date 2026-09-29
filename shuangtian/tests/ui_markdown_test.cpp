@@ -45,7 +45,7 @@ class StubTextPort final : public st::ui::TextPort {
 
   [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
 
-  void draw(st::raster::Canvas& canvas, std::string_view utf8, st::math::Point origin, float size,
+  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
             st::math::Color color) const override {
     if (utf8.empty()) return;
     // 落成**整像素**矩形：端口的输出与坐标的像素对齐方式无关，断言只关心颜色与位置

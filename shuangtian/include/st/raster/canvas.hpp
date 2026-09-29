@@ -1,11 +1,16 @@
 #pragma once
 
-/// 离屏画布：预乘 RGBA8 像素缓冲 + 全自绘绘制原语 + 裁剪栈。
+/// 软件光栅画布：预乘 RGBA8 像素缓冲 + 全自绘绘制原语 + 裁剪栈。
+///
+/// 定位：**默认兼底与语义真相源**——无 GPU、无显示服务、非 Windows 平台都靠它，
+/// 且回归测试以它为准。GPU 实现（`raster::gpu::GpuCanvas`）在容差内对齐它。
+///
 /// 设计要点（`DESIGN.md` §4.2）：
-/// - 软件光栅器是唯一真相源（无 GPU 也 100% 可用）；
 /// - 抗锯齿为**扫描线覆盖率**（非 MSAA），1px 发丝边框在任何 DPI 下平滑；
 /// - 裁剪：矩形裁剪走快速路径（区间交集），圆角/路径裁剪走 8 位遮罩；
-/// - 混合在预乘空间做 16 位中间运算，避免 8 位往返误差。
+/// - 混合在预乘空间做 16 位中间运算，避免 8 位往返误差；
+/// - **软硬件共用接口**：绘制原语全部来自 `Surface`（UI 层只认接口，
+///   这样同一条绘制路径既能落到 CPU 也能落到显卡）。
 
 #include <cstdint>
 #include <memory>
@@ -17,45 +22,9 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
+#include "st/raster/surface.hpp"
 
 namespace st::raster {
-
-/// 绘制原语分类（绘制剖析用）。
-///
-/// 为什么要分到这么细：绘制的代价高度不均——一次阴影（遮罩光栅化 + 模糊 + 逐像素混合）
-/// 可能贵过一百次纯色填充。只报“一帧 30ms”无法推出该改哪里。
-enum class PaintOp : std::uint8_t {
-  Clear,      ///< 整屏清色
-  FillRect,   ///< 轴向对齐矩形填充
-  FillRoundRect,  ///< 圆角矩形（走路径光栅化）
-  FillPath,   ///< 任意路径填充（图标、自绘形状）
-  Stroke,     ///< 描边
-  Shadow,     ///< 投影（含遮罩光栅化与模糊）
-  Image,      ///< 位图合成（纹理/离屏画布）
-  ClipMask,   ///< 非矩形裁剪（圆角/路径裁剪的遮罩构建）
-  Text,       ///< 文本（字形位图混合）
-  Count,      ///< 哨兵
-};
-
-[[nodiscard]] auto paint_op_name(PaintOp op) -> std::string_view;
-
-/// 单类原语的累计统计。
-struct PaintOpStat {
-  std::uint64_t calls{0};
-  /// 覆盖的像素数（近似：调用时按各原语的输出面积估算）
-  std::uint64_t pixels{0};
-  double ms{0.0};
-};
-
-/// 绘制剖析器：**默认不挂到画布上**（挂了才计时，不挂零开销）。
-struct PaintProfiler {
-  std::array<PaintOpStat, static_cast<std::size_t>(PaintOp::Count)> ops{};
-
-  void add(PaintOp op, double ms, std::uint64_t pixels = 0);
-  [[nodiscard]] auto op(PaintOp which) const noexcept -> const PaintOpStat&;
-  [[nodiscard]] auto total_ms() const noexcept -> double;
-  void clear() noexcept;
-};
 
 /// 8 位覆盖率遮罩（圆角/路径裁剪、阴影模糊）。
 /// 一行的覆盖率**运行段**：`[x0, x1)` 上的覆盖率为 `weight`（带符号；非零环绕规则下
@@ -64,6 +33,8 @@ struct PaintProfiler {
 /// 为什么不用逐像素覆盖率数组：那样每行都要把整个宽度跑一遍（还要乘上子采样数），
 /// 一个 460×150 的圆角卡片就是 55 万次浮点累加——实测这是路径填充最大的开销。
 /// 运行段表示下，每行的代价是 O(段数) + 段内 SIMD 混合。
+///
+/// 注：这是**软件光栅器内部**的表示，不属于 `Surface` 接口。
 struct CoverageRun {
   float x0{0.0f};
   float x1{0.0f};
@@ -90,7 +61,7 @@ class Mask {
   std::vector<std::uint8_t> values_{};
 };
 
-class Canvas {
+class Canvas final : public Surface {
  public:
   /// 直接指定**物理**缓冲尺寸（`device_scale` 默认 1.0，此时逻辑坐标 = 物理像素）。
   Canvas(int physical_width, int physical_height, float device_scale = 1.0f);
@@ -103,84 +74,79 @@ class Canvas {
   Canvas(Canvas&& other) noexcept;
   auto operator=(Canvas&& other) noexcept -> Canvas&;
 
-  /// 逻辑尺寸（UI 视角；= 物理尺寸 / device_scale）。
-  [[nodiscard]] auto width() const noexcept -> int {
-    return static_cast<int>(std::lround(static_cast<float>(physical_width_) / scale_));
-  }
-  [[nodiscard]] auto height() const noexcept -> int {
-    return static_cast<int>(std::lround(static_cast<float>(physical_height_) / scale_));
-  }
+  /// 逻辑尺寸（UI 视角；= 物理尺寸 / device_scale）——由 `Surface` 基类从物理尺寸折算。
   /// 物理缓冲尺寸（像素存取/编码视角）。
-  [[nodiscard]] auto physical_width() const noexcept -> int { return physical_width_; }
-  [[nodiscard]] auto physical_height() const noexcept -> int { return physical_height_; }
+  [[nodiscard]] auto physical_width() const noexcept -> int override { return physical_width_; }
+  [[nodiscard]] auto physical_height() const noexcept -> int override { return physical_height_; }
   /// DPI 缩放（物理像素 / 逻辑像素）。
-  [[nodiscard]] auto device_scale() const noexcept -> float { return scale_; }
-  void set_device_scale(float scale) noexcept;
-  [[nodiscard]] auto logical_bounds() const noexcept -> math::Rect {
-    return math::Rect{0.0f, 0.0f, static_cast<float>(width()), static_cast<float>(height())};
-  }
-  [[nodiscard]] auto bounds() const noexcept -> math::Rect { return logical_bounds(); }
-  [[nodiscard]] auto int_bounds() const noexcept -> math::IntRect {
-    return math::IntRect{0, 0, width(), height()};
-  }
-  [[nodiscard]] auto physical_bounds() const noexcept -> math::IntRect {
-    return math::IntRect{0, 0, physical_width_, physical_height_};
-  }
+  [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
+  void set_device_scale(float scale) noexcept override;
   /// 逻辑矩形 → 物理整数矩形（向外取整，覆盖完整像素）。
-  [[nodiscard]] auto to_physical(math::Rect rect) const noexcept -> math::IntRect;
-  [[nodiscard]] auto to_physical(math::Point point) const noexcept -> math::Point;
-  /// 逻辑尺寸 → 物理像素数。
-  [[nodiscard]] auto scale_length(float logical) const noexcept -> float { return logical * scale_; }
+  [[nodiscard]] auto to_physical(math::Rect rect) const noexcept -> math::IntRect override;
+  [[nodiscard]] auto to_physical(math::Point point) const noexcept -> math::Point override;
 
-  void clear(math::Color color);
+  void clear(math::Color color) override;
 
   // —— 绘制剖析（可选；`set_profiler(nullptr)` 即关闭，无额外开销） ——
-  void set_profiler(PaintProfiler* profiler) noexcept { profiler_ = profiler; }
-  [[nodiscard]] auto profiler() const noexcept -> PaintProfiler* { return profiler_; }
+  void set_profiler(PaintProfiler* profiler) noexcept override { profiler_ = profiler; }
+  [[nodiscard]] auto profiler() const noexcept -> PaintProfiler* override { return profiler_; }
   /// 手动记账（文本等跨模块绘制路径用）：把一段耗时记到指定原语。
-  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0) noexcept {
+  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0) noexcept override {
     if (profiler_ != nullptr) profiler_->add(op, ms, pixels);
   }
 
   // —— 绘制原语 ——
   void fill_rect(math::Rect rect, const Paint& paint, float radius = 0.0f,
-                 DrawOptions options = {});
-  void fill_path(const Path& path, const Paint& paint, DrawOptions options = {});
+                 DrawOptions options = {}) override;
+  void fill_path(const Path& path, const Paint& paint, DrawOptions options = {}) override;
   /// 描边（圆头圆角连接；宽度为总宽）。
-  void stroke_path(const Path& path, const Paint& paint, float width, DrawOptions options = {});
-  void fill_circle(math::Point center, float radius, const Paint& paint, DrawOptions options = {});
+  void stroke_path(const Path& path, const Paint& paint, float width,
+                   DrawOptions options = {}) override;
+  void fill_circle(math::Point center, float radius, const Paint& paint,
+                   DrawOptions options = {}) override;
   /// 投影（半径 `blur` 的近似高斯模糊，偏移 `offset`）。
   void draw_shadow(math::Rect rect, float radius, float blur, math::Color color,
-                   math::Point offset = {}, DrawOptions options = {});
+                   math::Point offset = {}, DrawOptions options = {}) override;
   /// 位图合成（双线性缩放）。
-  void draw_canvas(const Canvas& source, math::Rect destination, DrawOptions options = {});
-  void draw_canvas_at(const Canvas& source, int x, int y, DrawOptions options = {});
+  void draw_canvas(const Surface& source, math::Rect destination, DrawOptions options = {}) override;
+  void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override;
+  /// 覆盖率位图混合（文字/遮罩）：软件实现逐行走 `blend_coverage_row`。
+  void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
+                             const Paint& paint, float opacity, BlendMode blend) override;
 
   // —— 裁剪 ——
   /// 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素）。
-  void push_clip_rect(math::Rect rect);
+  void push_clip_rect(math::Rect rect) override;
   /// 圆角矩形裁剪（**逻辑坐标**；半径同样按 DPI 缩放）。
-  void push_clip_rounded_rect(math::Rect rect, float radius);
+  void push_clip_rounded_rect(math::Rect rect, float radius) override;
   /// 路径裁剪（**路径按物理像素解释**——与 raster 层其余 API 一致；
   /// 持有逻辑坐标路径时先 `path.scaled(canvas.device_scale())`）。
-  void push_clip_path(const Path& path);
-  void pop_clip();
-  [[nodiscard]] auto clip_rect() const noexcept -> math::IntRect;
-  [[nodiscard]] auto has_mask_clip() const noexcept -> bool;
+  void push_clip_path(const Path& path) override;
+  void pop_clip() override;
+  [[nodiscard]] auto clip_rect() const noexcept -> math::IntRect override;
+  [[nodiscard]] auto has_mask_clip() const noexcept -> bool override;
 
   // —— 像素访问（物理像素；逻辑坐标访问用 pixel_at_point）——
-  [[nodiscard]] auto pixel_at(int x, int y) const -> math::Color;
-  void set_pixel(int x, int y, math::Color color);
+  [[nodiscard]] auto pixel_at(int x, int y) const -> math::Color override;
+  void set_pixel(int x, int y, math::Color color) override;
   /// 逻辑坐标取色（控制通道/测试用）。
-  [[nodiscard]] auto pixel_at_point(math::Point point) const -> math::Color;
-  [[nodiscard]] auto pixels() const noexcept -> std::span<const std::uint32_t> { return pixels_; }
-  [[nodiscard]] auto pixels() noexcept -> std::span<std::uint32_t> { return pixels_; }
+  [[nodiscard]] auto pixel_at_point(math::Point point) const -> math::Color override;
+  [[nodiscard]] auto pixels() const noexcept -> std::span<const std::uint32_t> override {
+    return pixels_;
+  }
+  [[nodiscard]] auto pixels() noexcept -> std::span<std::uint32_t> override { return pixels_; }
   /// 导出为直通 RGBA8 字节流（PNG 编码/截图用；物理分辨率）。
-  [[nodiscard]] auto to_rgba8() const -> std::vector<std::uint8_t>;
+  [[nodiscard]] auto to_rgba8() const -> std::vector<std::uint8_t> override;
   /// 非全透明像素的最小包围盒（**物理**像素；测试与截图裁剪用）。
-  [[nodiscard]] auto content_bounds() const noexcept -> math::IntRect;
+  [[nodiscard]] auto content_bounds() const noexcept -> math::IntRect override;
   /// 同上，但换算到逻辑像素。
-  [[nodiscard]] auto content_bounds_logical() const noexcept -> math::IntRect;
+  [[nodiscard]] auto content_bounds_logical() const noexcept -> math::IntRect override;
+
+  // —— 软件光栅器专用（**不属于 `Surface` 接口**）——
+  //
+  // 这些是 CPU 光栅化的内部机制：路径光栅化逐行交付覆盖率运行段、阴影遮罩构建、
+  // 逐像素混合细节。它们与“绘制一个形状”这个**语义**无关，而是本实现的做法。
+  // 把它们留在接口上会逼 GPU 实现去模拟 CPU 的数据结构（那是错的方向）。
 
   /// 低层：以覆盖率调制画笔颜色混合一行（栅格化器与自定义绘制使用）。
   /// `coverage[0]` 对应该行 `x_begin` 像素。

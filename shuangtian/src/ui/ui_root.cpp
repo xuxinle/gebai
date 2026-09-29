@@ -101,14 +101,14 @@ void UiRoot::layout_subtree(Element& element, math::Rect rect) {
   element.arrange(context, rect);
 }
 
-void UiRoot::paint(raster::Canvas& canvas) {
+void UiRoot::paint(raster::Surface& canvas) {
   layout();
   const RenderContext context = render_context();
   for (auto& overlay : overlays_) overlay->paint(context, canvas);
   if (content_ != nullptr) paint_subtree(context, *content_, canvas);
 }
 
-void UiRoot::paint_subtree(const RenderContext& context, Element& element, raster::Canvas& canvas) {
+void UiRoot::paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas) {
   element.paint(context, canvas);
 }
 

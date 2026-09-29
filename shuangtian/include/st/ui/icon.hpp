@@ -31,10 +31,10 @@ class Icon {
   [[nodiscard]] static auto path(std::string_view name, math::Rect box,
                                  float stroke_width = 2.0f) -> raster::Path;
   /// 按 `color` 绘制到画布（描边式；`stroke_width` 默认 2px）。
-  static void draw(raster::Canvas& canvas, std::string_view name, math::Rect box, math::Color color,
+  static void draw(raster::Surface& canvas, std::string_view name, math::Rect box, math::Color color,
                    float stroke_width = 2.0f);
   /// 填充式绘制（`filled` 图标）。
-  static void draw_filled(raster::Canvas& canvas, std::string_view name, math::Rect box,
+  static void draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
                           math::Color color);
 
   /// 图标在 24×24 视图框内的实际包围盒（布局对齐用）。

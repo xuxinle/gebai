@@ -67,7 +67,7 @@ void sync_control_style(Element& element, const RenderContext& context) {
   if (style.border_color.a == 0U) style.border_color = colors.border;
 }
 
-void paint_border(raster::Canvas& canvas, math::Rect rect, float radius, math::Color color,
+void paint_border(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
                   float width) {
   if (width <= 0.0f || color.a == 0U) return;
   const float half = width * 0.5f;
@@ -84,7 +84,7 @@ void paint_border(raster::Canvas& canvas, math::Rect rect, float radius, math::C
 }
 
 /// 焦点环：控件外侧 2px（`metrics.focus_width`），圆角跟随控件，颜色为 `colors.focus_ring`。
-void paint_focus_ring(const RenderContext& context, raster::Canvas& canvas, math::Rect rect,
+void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
                       float radius) {
   const float width = context.theme.metrics().focus_width;
   if (width <= 0.0f) return;
@@ -261,7 +261,7 @@ void Input::measure(const RenderContext& context, const Constraints& constraints
   measured_ = math::Size{width, height};
 }
 
-void Input::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Input::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
@@ -596,7 +596,7 @@ void TextArea::measure(const RenderContext& context, const Constraints& constrai
   measured_ = math::Size{width, height};
 }
 
-void TextArea::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void TextArea::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();

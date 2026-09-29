@@ -24,7 +24,7 @@ class TextPort {
   [[nodiscard]] virtual auto measure_width(std::string_view utf8, float size) const -> float = 0;
   [[nodiscard]] virtual auto line_height(float size) const -> float = 0;
   /// `origin` 为行左上角。
-  virtual void draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
+  virtual void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
                     math::Color color) const = 0;
   [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string = 0;
@@ -41,7 +41,7 @@ class NullTextPort final : public TextPort {
   [[nodiscard]] auto measure(std::string_view utf8, float size) const -> math::Size override;
   [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
-  void draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
+  void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
             math::Color color) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;

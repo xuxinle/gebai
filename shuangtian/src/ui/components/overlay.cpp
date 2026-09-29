@@ -47,7 +47,7 @@ namespace {
 }
 
 /// 单行文本（省略 + 左对齐；标题不折行）。
-void draw_line(const RenderContext& context, raster::Canvas& canvas, std::string_view text,
+void draw_line(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                math::Rect box, float size, math::Color color) {
   if (text.empty() || box.width <= 0.0f || box.height <= 0.0f) return;
   const TextPort& port = text_port_of(context);
@@ -81,7 +81,7 @@ inline constexpr std::size_t kMaxBodyLines = 12;
 }
 
 /// 矩形/圆角矩形填充（四角独立半径；经 `oriented` 归一后落盘）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float top_left, float top_right,
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float top_left, float top_right,
                      float bottom_right, float bottom_left, const raster::Paint& paint) {
   if (rect.is_empty()) return;
   raster::Path path;
@@ -90,7 +90,7 @@ void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float top_left, fl
 }
 
 /// 四角同半径的纯色填充（`radius == 0` 即普通矩形）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float radius, math::Color color) {
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
   fill_round_rect(canvas, rect, radius, radius, radius, radius, raster::Paint::solid(color));
 }
 
@@ -223,7 +223,7 @@ void Dialog::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void Dialog::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Dialog::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();
@@ -405,7 +405,7 @@ void Toast::measure(const RenderContext& context, const Constraints& constraints
   measured_ = math::Size{width, height};
 }
 
-void Toast::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Toast::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Metrics& metrics = context.theme.metrics();
   // 卡片底（自绘，见 fill_round_rect 说明）+ 左侧 4px 色条（左侧圆角随卡片）。

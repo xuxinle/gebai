@@ -27,7 +27,7 @@ class RendererTextPort final : public ui::TextPort {
   [[nodiscard]] auto measure(std::string_view utf8, float size) const -> math::Size override;
   [[nodiscard]] auto measure_width(std::string_view utf8, float size) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
-  void draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
+  void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
             math::Color color) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;

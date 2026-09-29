@@ -34,7 +34,7 @@ class TableTestTextPort final : public st::ui::TextPort {
 
   [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
 
-  void draw(st::raster::Canvas& canvas, std::string_view utf8, st::math::Point origin, float size,
+  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
             st::math::Color color) const override {
     (void)canvas;
     (void)origin;

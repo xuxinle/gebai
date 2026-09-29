@@ -36,7 +36,7 @@ namespace {
 }
 
 /// 单行单元格文本：按内边距收缩 → 省略 → 按对齐绘制（不修改 `style_`）。
-void draw_cell_text(const RenderContext& context, raster::Canvas& canvas, std::string_view text,
+void draw_cell_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                     math::Rect box, float padding, TextAlign align, float size,
                     math::Color color) {
   const math::Rect area =
@@ -77,7 +77,7 @@ void draw_cell_text(const RenderContext& context, raster::Canvas& canvas, std::s
 }
 
 /// 矩形/圆角矩形填充（四角独立半径；经 `oriented` 归一后落盘）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float top_left, float top_right,
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float top_left, float top_right,
                      float bottom_right, float bottom_left, const raster::Paint& paint) {
   if (rect.is_empty()) return;
   raster::Path path;
@@ -86,7 +86,7 @@ void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float top_left, fl
 }
 
 /// 四角同半径的纯色填充（`radius == 0` 即普通矩形）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float radius, math::Color color) {
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
   fill_round_rect(canvas, rect, radius, radius, radius, radius, raster::Paint::solid(color));
 }
 
@@ -274,7 +274,7 @@ auto Table::row_at(math::Point point) const noexcept -> std::size_t {
   return index < rows_.size() ? index : kNoRow;
 }
 
-void Table::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Table::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   const Metrics& metrics = context.theme.metrics();

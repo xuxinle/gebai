@@ -476,9 +476,27 @@ void Canvas::blend_span(int y, int x_begin, int x_end, math::Color color, float 
   }
 }
 
+void Canvas::blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width,
+                                   int height, const Paint& paint, float opacity,
+                                   BlendMode blend) {
+  if (width <= 0 || height <= 0 || opacity <= 0.0f) return;
+  const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+  if (coverage.size() < expected) return;
+  // 软件实现就是“逐行走行混合”——这正是 `blend_coverage_row` 的用途；
+  // GPU 实现则把这张覆盖率图传成 A8 纹理再画一个四边形（两边语义相同，做法不同）。
+  //
+  // **本函数内部不记账**：归到哪一类原语取决于调用方（字形→`Text`、遮罩→`Image`），
+  // 在这里自己记一笔会让剖析出现双重归属。
+  for (int row = 0; row < height; ++row) {
+    const std::span<const float> line(
+        coverage.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(width),
+        static_cast<std::size_t>(width));
+    blend_coverage_row(y + row, x, line, paint, opacity, blend);
+  }
+}
+
 void Canvas::blend_coverage_row(int y, int x_begin, std::span<const float> coverage,
-                                const Paint& paint, float opacity, BlendMode blend) {
-  if (y < 0 || y >= physical_height_) return;
+                                const Paint& paint, float opacity, BlendMode blend) {  if (y < 0 || y >= physical_height_) return;
   const ClipFrame& clip = current_clip();
   if (y < clip.rect.y || y >= clip.rect.bottom()) return;
   const int begin = std::max(x_begin, clip.rect.x);
@@ -821,9 +839,11 @@ auto Canvas::shadow_mask(float width, float height, float radius, float blur, ma
   return mask;
 }
 
-void Canvas::draw_canvas(const Canvas& source, math::Rect destination, DrawOptions options) {
+void Canvas::draw_canvas(const Surface& source, math::Rect destination, DrawOptions options) {
   OpScope scope(*this, PaintOp::Image);
-  if (destination.is_empty() || source.physical_width_ <= 0 || source.physical_height_ <= 0) return;
+  const int source_width = source.physical_width();
+  const int source_height = source.physical_height();
+  if (destination.is_empty() || source_width <= 0 || source_height <= 0) return;
   // destination 为逻辑坐标 → 物理像素；采样源为其物理缓冲
   const math::IntRect area = to_physical(destination).intersect(clip_rect());
   if (area.is_empty()) return;
@@ -832,8 +852,11 @@ void Canvas::draw_canvas(const Canvas& source, math::Rect destination, DrawOptio
           ? destination
           : math::Rect{destination.x * scale_, destination.y * scale_, destination.width * scale_,
                        destination.height * scale_};
-  const float scale_x = static_cast<float>(source.physical_width_) / physical_destination.width;
-  const float scale_y = static_cast<float>(source.physical_height_) / physical_destination.height;
+  const float scale_x = static_cast<float>(source_width) / physical_destination.width;
+  const float scale_y = static_cast<float>(source_height) / physical_destination.height;
+  // 源像素经接口取（**不假设对方也是软件画布**：GPU 目标会在这里触发回读，
+  // 慢但正确——`draw_canvas` 是截图/离屏合成的路径，不在每帧热路径上）
+  const std::span<const std::uint32_t> source_pixels = source.pixels();
 
   for (int y = area.y; y < area.bottom(); ++y) {
     auto* row = pixels_.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(physical_width_);
@@ -843,19 +866,18 @@ void Canvas::draw_canvas(const Canvas& source, math::Rect destination, DrawOptio
       const float source_x =
           (static_cast<float>(x) + 0.5f - physical_destination.x) * scale_x - 0.5f;
       const float clamped_x =
-          math::clampf(source_x, 0.0f, static_cast<float>(source.physical_width_ - 1));
+          math::clampf(source_x, 0.0f, static_cast<float>(source_width - 1));
       const float clamped_y =
-          math::clampf(source_y, 0.0f, static_cast<float>(source.physical_height_ - 1));
+          math::clampf(source_y, 0.0f, static_cast<float>(source_height - 1));
       const auto x0 = static_cast<int>(clamped_x);
       const auto y0 = static_cast<int>(clamped_y);
-      const int x1 = x0 + 1 < source.physical_width_ ? x0 + 1 : x0;
-      const int y1 = y0 + 1 < source.physical_height_ ? y0 + 1 : y0;
+      const int x1 = x0 + 1 < source.physical_width() ? x0 + 1 : x0;
+      const int y1 = y0 + 1 < source.physical_height() ? y0 + 1 : y0;
       const float fx = clamped_x - static_cast<float>(x0);
       const float fy = clamped_y - static_cast<float>(y0);
-      const auto sample = [&source](int sx, int sy) noexcept -> std::uint32_t {
-        return source.pixels_[static_cast<std::size_t>(sy) *
-                                  static_cast<std::size_t>(source.physical_width_) +
-                              static_cast<std::size_t>(sx)];
+      const auto sample = [&source_pixels, source_width](int sx, int sy) noexcept -> std::uint32_t {
+        return source_pixels[static_cast<std::size_t>(sy) * static_cast<std::size_t>(source_width) +
+                             static_cast<std::size_t>(sx)];
       };
       const auto interpolate = [fx, fy](std::uint32_t a, std::uint32_t b, std::uint32_t cc,
                                         std::uint32_t d, unsigned shift) noexcept -> std::uint32_t {
@@ -886,7 +908,7 @@ void Canvas::draw_canvas(const Canvas& source, math::Rect destination, DrawOptio
   }
 }
 
-void Canvas::draw_canvas_at(const Canvas& source, int x, int y, DrawOptions options) {
+void Canvas::draw_canvas_at(const Surface& source, int x, int y, DrawOptions options) {
   OpScope scope(*this, PaintOp::Image);
   draw_canvas(source,
               math::Rect{static_cast<float>(x), static_cast<float>(y),

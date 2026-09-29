@@ -242,9 +242,9 @@ class Element {
   /// 应用最终矩形并布局子节点。
   virtual void arrange(const RenderContext& context, math::Rect rect);
   /// 绘制自身与子节点（坐标已由 arrange 定好，直接画到画布绝对坐标）。
-  virtual void paint(const RenderContext& context, raster::Canvas& canvas) const;
+  virtual void paint(const RenderContext& context, raster::Surface& canvas) const;
   /// 子类绘制自身内容（在 paint_box 之后、子节点之前）。
-  virtual void paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+  virtual void paint_content(const RenderContext& context, raster::Surface& canvas) const {
     (void)context;
     (void)canvas;
   }
@@ -283,9 +283,9 @@ class Element {
 
  protected:
   /// 子类绘制自身的"盒子"（背景/边框/圆角/阴影）。
-  void paint_box(const RenderContext& context, raster::Canvas& canvas) const;
+  void paint_box(const RenderContext& context, raster::Surface& canvas) const;
   /// 子类绘制文本（自动按 `text_align` 定位）。
-  auto paint_text(const RenderContext& context, raster::Canvas& canvas, std::string_view text,
+  auto paint_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                   math::Rect box) const -> void;
   /// 布局子节点（Flex 子集：方向/间距/增长/对齐）。
   void layout_children(const RenderContext& context, math::Rect content);

@@ -21,10 +21,10 @@
 
 | 场景 | 霜天给的答案 |
 |---|---|
-| **Linux 服务器没有桌面，怎么开发原生界面？** | `--headless` 离屏渲染（软件光栅器是唯一真相源），像素结果与有窗口时逐像素一致；截图经控制通道取回 |
+| **Linux 服务器没有桌面，怎么开发原生界面？** | `--headless` 离屏渲染（GPU 走 D3D11/WARP，不可用则软件光栅器），像素结果与有窗口时逐像素一致；截图经控制通道取回 |
 | **智能体怎么"看见"并"操作"原生界面？** | TCP 控制通道（`st-control/1`）：组件树/选择器查询、属性读写、动作触发、鼠标键盘注入、视觉树、条件等待、运行指标 |
 | **一块代码要在 Windows/Linux/macOS 外观一致** | 全自绘：没有系统控件，所有像素由自己的光栅器产生；平台差异只集中在窗口后端（运行时 `dlopen` 探测，缺失自动回退 headless） |
-| **没有 GPU / 驱动不全** | 软件光栅器（扫描线覆盖率抗锯齿 + SIMD 快路径）为默认且完整可用；硬件后端是**可选加速**，不作为前提 |
+| **没有 GPU / 驱动不全** | 软件光栅器（扫描线覆盖率抗锯齿 + SIMD 快路径）完整可用、且是**语义真相源**；GPU（D3D11）是首选路径，不可用时自动回退，不阻断任何功能 |
 | **HiDPI 屏上字发虚、发丝线糊** | 逻辑像素 / 物理像素分离：`Canvas` 绘制 API 收逻辑坐标，内部按 `device_scale` 在**物理分辨率**上光栅化（字形亦按物理尺寸重栅格化）；运行时 `app.set_scale` 即时切换 |
 | **想让界面逻辑少写 C++** | 内置脚本层（QuickJS，默认关闭）：`$('#status').set({text:'…'})`、`on('#save','click',…)`、`every(1000,…)`——读写与协议 `get`/`set`/`invoke` **同一份实现**；跨语言边界用「快照批量 + 变更集提交」，跨界次数与改了多少属性无关 |
 | **要真的弹出窗口** | Windows 上开箱即用（直接双击 exe）：Win32 窗口后端已实现——DPI 感知、鼠标/键盘/滚轮、剪贴板、窗口缩放跟随；Linux 侧 `x11`/`wayland` 仍是探测 + 明确 `Unsupported` |
@@ -197,13 +197,14 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 |---|---|
 | 无头后端（headless）+ 软件光栅器 | ✅ 完整（本仓库全部示例与验证都在无头下完成） |
 | 窗口后端（x11 / wayland / win32） | ⏳ 运行时探测已就绪，窗口实现在 v0.2（缺失自动回退 headless，不阻断流程） |
-| 硬件合成（Vulkan/GL） | ⏳ 探测与回退已定形（`gpu` 层），实测需有 GPU 的机器 |
+| 硬件合成（Vulkan/GL/Metal） | ⏳ D3D11 已落地设备层（`raster/gpu.hpp` + `platform_d3d11.cpp`）；Vulkan/Metal 待做 |
 | DPI（含非整数 1.5x、运行时切换） | ✅ |
 | 字体（TTF/OTF/OTC-CFF/CID、CJK 回退、SC face 优选） | ✅ |
 | Markdown（解析 / 流式 / 高亮 / 渲染组件） | ✅ |
 | TCP 控制通道（tree/find/get/set/invoke/input.*/capture/visual/wait/metrics/events/theme/app） | ✅ |
 | 自研包管理器 `stpm`（求解/lock/获取/校验/vendor/构建/lint） | ✅ 构建与 lint 完整；第三方源码获取限制见 `DESIGN.md` §7.4 |
-| **Windows 宿主 + MSVC 工具链** | ✅ 首选 MSVC（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；实测自举 20s / 全量构建 32s / 测试 251 用例全绿 |
+| **Windows 宿主 + MSVC 工具链** | ✅ 首选 MSVC（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；实测自举 20s / 全量构建 32s / 测试 312 用例全绿 |
+| **GPU 渲染（D3D11：硬件 → WARP）** | ✅ 设备层 + 离屏渲染 + 像素回读（与软件画布逐字节一致）；⏳ 绘制原语与窗口呈现见 `DESIGN.md` §8.3（M3+） |
 | 动画与过渡系统 | ⏳ v0.2 |
 
 ## 相关文档

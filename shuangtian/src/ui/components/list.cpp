@@ -15,7 +15,7 @@ namespace {
 }
 
 /// 单行文本绘制（省略号截断 + 对齐），不修改 `style_`（同一节点可有多种字号/颜色）。
-void draw_text(const RenderContext& context, raster::Canvas& canvas, std::string_view text,
+void draw_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,
                math::Rect box, float size, math::Color color, TextAlign align) {
   if (text.empty() || box.width <= 0.0f || box.height <= 0.0f) return;
   const TextPort& port = text_port_of(context);
@@ -86,7 +86,7 @@ void ListItem::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void ListItem::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void ListItem::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const auto& colors = context.theme.colors();
   const auto& metrics = context.theme.metrics();

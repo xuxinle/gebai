@@ -78,7 +78,7 @@ void ScrollBar::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void ScrollBar::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void ScrollBar::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const auto& colors = context.theme.colors();
   const float pill = context.theme.metrics().radius_pill;
@@ -288,7 +288,7 @@ void ScrollView::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void ScrollView::paint(const RenderContext& context, raster::Canvas& canvas) const {
+void ScrollView::paint(const RenderContext& context, raster::Surface& canvas) const {
   if (!visible_) return;
   paint_box(context, canvas);
   paint_content(context, canvas);

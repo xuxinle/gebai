@@ -82,7 +82,7 @@ namespace {
 }
 
 /// 矩形/圆角矩形填充（四角独立半径；经 `oriented` 归一后落盘）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float top_left, float top_right,
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float top_left, float top_right,
                      float bottom_right, float bottom_left, const raster::Paint& paint) {
   if (rect.is_empty()) return;
   raster::Path path;
@@ -91,12 +91,12 @@ void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float top_left, fl
 }
 
 /// 四角同半径的纯色填充（`radius == 0` 即普通矩形）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float radius, math::Color color) {
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {
   fill_round_rect(canvas, rect, radius, radius, radius, radius, raster::Paint::solid(color));
 }
 
 /// 四角同半径的画笔填充（渐变压笔用）。
-void fill_round_rect(raster::Canvas& canvas, math::Rect rect, float radius,
+void fill_round_rect(raster::Surface& canvas, math::Rect rect, float radius,
                      const raster::Paint& paint) {
   fill_round_rect(canvas, rect, radius, radius, radius, radius, paint);
 }
@@ -158,7 +158,7 @@ void ProgressBar::measure(const RenderContext& context, const Constraints& const
   measured_ = math::Size{width, height};
 }
 
-void ProgressBar::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void ProgressBar::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Theme& theme = context.theme;
   const Palette& colors = theme.colors();
@@ -264,7 +264,7 @@ void Spinner::measure(const RenderContext& context, const Constraints& constrain
   measured_ = math::Size{side, side};
 }
 
-void Spinner::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Spinner::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const float side = std::min(bounds_.width, bounds_.height);
   if (side <= 0.0f) return;
   const float thickness = std::min(kStroke, side * 0.25f);
@@ -363,7 +363,7 @@ void Badge::measure(const RenderContext& context, const Constraints& constraints
   measured_ = math::Size{width, height};
 }
 
-void Badge::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Badge::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   fill_round_rect(canvas, bounds_, style_.radius, tone_soft_color(context.theme, tone_));
   paint_text(context, canvas, text_, content_box());
 }
@@ -468,7 +468,7 @@ void Chip::measure(const RenderContext& context, const Constraints& constraints)
   measured_ = math::Size{width, height};
 }
 
-void Chip::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Chip::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Palette& colors = context.theme.colors();
   fill_round_rect(canvas, bounds_, style_.radius, tone_soft_color(context.theme, tone_));
@@ -614,7 +614,7 @@ void Avatar::measure(const RenderContext& context, const Constraints& constraint
   measured_ = math::Size{side, side};
 }
 
-void Avatar::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Avatar::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   fill_round_rect(canvas, bounds_, style_.radius, context.theme.colors().primary_soft);
   paint_text(context, canvas, initials(), bounds_);
 }
@@ -681,7 +681,7 @@ void Tooltip::apply_theme(const Theme& theme) {
   style_.padding = math::Insets::symmetric(kPaddingX, kPaddingY);
 }
 
-void Tooltip::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Tooltip::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   fill_round_rect(canvas, bounds_, style_.radius, context.theme.colors().surface);
   paint_text(context, canvas, text_, content_box());
@@ -711,7 +711,7 @@ void Tooltip::arrange(const RenderContext& context, math::Rect rect) {
   layout_dirty_ = false;
 }
 
-void Tooltip::paint(const RenderContext& context, raster::Canvas& canvas) const {
+void Tooltip::paint(const RenderContext& context, raster::Surface& canvas) const {
   if (!active_ && !hovered_) return;
   Element::paint(context, canvas);
 }

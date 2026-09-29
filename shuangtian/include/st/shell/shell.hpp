@@ -46,7 +46,7 @@ class Backend {
   [[nodiscard]] virtual auto clipboard_text() -> Result<std::string> = 0;
   [[nodiscard]] virtual auto set_clipboard_text(std::string_view text) -> Status = 0;
   /// 目标帧缓冲（应用直接绘制到这里）。
-  [[nodiscard]] virtual auto framebuffer() -> raster::Canvas& = 0;
+  [[nodiscard]] virtual auto framebuffer() -> raster::Surface& = 0;
   /// 已提交帧数。
   [[nodiscard]] virtual auto frame_count() const noexcept -> std::uint64_t = 0;
   /// 当前 DPI 缩放（物理像素 / 逻辑像素）。

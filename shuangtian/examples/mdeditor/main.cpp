@@ -123,7 +123,7 @@ class SourceView : public Element {
     (void)line_height;
   }
 
-  void paint_content(const st::ui::RenderContext& context, st::raster::Canvas& canvas) const override {
+  void paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const override {
     const auto& colors = context.theme.colors();
     const auto& metrics = context.theme.metrics();
     if (context.text == nullptr) return;
@@ -191,7 +191,7 @@ class SourceView : public Element {
 
  private:
   /// 行级 Markdown 着色：标题 / 引用 / 列表 / 代码围栏 / 行内码 / 强调 / 链接。
-  void paint_source_line(const st::ui::RenderContext& context, st::raster::Canvas& canvas,
+  void paint_source_line(const st::ui::RenderContext& context, st::raster::Surface& canvas,
                          std::string_view line, Point origin, float line_height) const {
     const auto& colors = context.theme.colors();
     const st::ui::TextPort& port = *context.text;
@@ -312,7 +312,7 @@ class OutlinePanel : public Element {
     (void)context;
   }
 
-  void paint_content(const st::ui::RenderContext& context, st::raster::Canvas& canvas) const override {
+  void paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const override {
     if (context.text == nullptr) return;
     const auto& colors = context.theme.colors();
     float y = bounds_.y + 4.0f;
@@ -430,7 +430,7 @@ class SplitHandle : public Element {
     (void)context;
     measured_ = st::math::Size{10.0f, constraints.max_height};
   }
-  void paint_content(const st::ui::RenderContext& context, st::raster::Canvas& canvas) const override {
+  void paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const override {
     const auto& colors = context.theme.colors();
     const float center = bounds_.width * 0.5f;
     canvas.fill_rect(Rect{bounds_.x + center - 1.0f, bounds_.y, 2.0f, bounds_.height},
@@ -515,7 +515,7 @@ class StatsBar : public Element {
                                          ? context.text->line_height(style_.font_size)
                                          : style_.font_size * 1.5f};
   }
-  void paint_content(const st::ui::RenderContext& context, st::raster::Canvas& canvas) const override {
+  void paint_content(const st::ui::RenderContext& context, st::raster::Surface& canvas) const override {
     if (context.text == nullptr) return;
     context.text->draw(canvas, summary_, Point{bounds_.x, bounds_.y}, style_.font_size,
                        context.theme.colors().text_muted);

@@ -38,7 +38,7 @@ class ScriptTestTextPort final : public st::ui::TextPort {
     return 8.0f * static_cast<float>(st::utf8_length(utf8));
   }
   [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
-  void draw(st::raster::Canvas&, std::string_view, st::math::Point, float,
+  void draw(st::raster::Surface&, std::string_view, st::math::Point, float,
             st::math::Color) const override {}
   [[nodiscard]] auto ellipsize(std::string_view utf8, float, float) const -> std::string override {
     return std::string(utf8);

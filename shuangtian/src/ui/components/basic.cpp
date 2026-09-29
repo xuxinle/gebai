@@ -86,7 +86,7 @@ void Text::measure(const RenderContext& context, const Constraints& constraints)
   measured_ = math::Size{std::min(width, constraints.max_width), line_height};
 }
 
-void Text::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Text::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (content_.empty()) return;
   const TextPort& port = port_of(context);
   const float size = style_.font_size;
@@ -192,7 +192,7 @@ void IconView::measure(const RenderContext& context, const Constraints& constrai
   measured_ = math::Size{size_, size_};
 }
 
-void IconView::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void IconView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   (void)context;
   if (icon_.empty()) return;
   Icon::draw(canvas, icon_, bounds_, style_.color, 0.0f);
@@ -323,7 +323,7 @@ void Button::measure(const RenderContext& context, const Constraints& constraint
   measured_ = math::Size{std::max(width, height), height};
 }
 
-void Button::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Button::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const Metrics& metrics = context.theme.metrics();
   const TextPort& port = port_of(context);
   const float font_size = style_.font_size;
@@ -489,7 +489,7 @@ void Divider::measure(const RenderContext& context, const Constraints& constrain
   measured_ = math::Size{constraints.max_width, context.theme.metrics().border_width};
 }
 
-void Divider::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void Divider::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   (void)context;
   canvas.fill_rect(bounds_, raster::Paint::solid(style_.background));
 }
@@ -517,7 +517,7 @@ void KeyValueRow::measure(const RenderContext& context, const Constraints& const
   measured_ = math::Size{constraints.max_width, line_height + 6.0f};
 }
 
-void KeyValueRow::paint_content(const RenderContext& context, raster::Canvas& canvas) const {
+void KeyValueRow::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const TextPort& port = port_of(context);
   const float size = style_.font_size;
   const float line_height = port.line_height(size);

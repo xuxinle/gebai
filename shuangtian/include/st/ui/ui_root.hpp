@@ -42,7 +42,7 @@ class UiRoot {
   /// 全树布局（脏时才重算）。
   void layout(bool force = false);
   /// 全树绘制（含遮罩裁剪与叠加层）。
-  void paint(raster::Canvas& canvas);
+  void paint(raster::Surface& canvas);
 
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。
   [[nodiscard]] auto dispatch(Event& event) -> bool;
@@ -97,7 +97,7 @@ class UiRoot {
  private:
   void assign_ids(Element& element, const std::string& prefix);
   void layout_subtree(Element& element, math::Rect rect);
-  void paint_subtree(const RenderContext& context, Element& element, raster::Canvas& canvas);
+  void paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas);
   [[nodiscard]] auto hit_test_subtree(Element& element, math::Point point) -> Element*;
   [[nodiscard]] auto dispatch_to(Element& element, Event& event) -> bool;
   /// 清掉已不在树上的 `focused_` / `hovered_` / `pressed_`。
