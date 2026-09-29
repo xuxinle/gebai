@@ -98,6 +98,8 @@ class UiRoot {
   void assign_ids(Element& element, const std::string& prefix);
   void layout_subtree(Element& element, math::Rect rect);
   void paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas);
+  /// 绘制后汇总"还有元素在过渡中"（决定要不要再给一帧）。
+  void collect_animation_requests();
   [[nodiscard]] auto hit_test_subtree(Element& element, math::Point point) -> Element*;
   [[nodiscard]] auto dispatch_to(Element& element, Event& event) -> bool;
   /// 清掉已不在树上的 `focused_` / `hovered_` / `pressed_`。
@@ -121,6 +123,8 @@ class UiRoot {
   EventObserver event_observer_{};
   std::uint64_t version_{1};
   bool dirty_{true};
+  /// 本次绘制后是否还有元素在过渡中（由 `collect_animation_requests` 填）。
+  bool animation_pending_{false};
   math::IntRect dirty_rect_{};
   double time_seconds_{0.0};
 };

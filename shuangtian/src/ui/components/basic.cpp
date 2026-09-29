@@ -224,6 +224,10 @@ auto IconView::set_property(std::string_view name, std::string_view value) -> bo
 Button::Button(std::string label, Variant variant, Size size)
     : label_(std::move(label)), variant_(variant), size_(size) {
   set_focusable(true);
+  // 悬浮特效：背景提亮 + 上浮（"可点"的手感）；参数由主题令牌统一给，
+  // 组件只声明要哪几项——这样按钮/列表/表格的悬浮反馈不会各走一套。
+  set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = true, .lift = true, .glow = false, .cursor = true});
+
 }
 
 void Button::set_label(std::string label) {
@@ -431,6 +435,9 @@ auto Button::invoke_action(std::string_view action, std::string_view argument) -
 
 Card::Card(float padding) : padding_(padding) {
   style_.padding = math::Insets::all(padding);
+  // 卡片默认**不**带悬浮反馈：它多数是容器而非控件。需要交互时（可点卡片）
+  // 调 `set_hover_effect` 打开——发光比背景提亮更适合卡片（不改变卡片自身的语气）。
+  set_hover_effect(HoverEffect{.enabled = false});
 }
 
 void Card::set_padding(float padding) {

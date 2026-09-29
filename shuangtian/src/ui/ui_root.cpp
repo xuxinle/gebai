@@ -101,10 +101,36 @@ void UiRoot::layout_subtree(Element& element, math::Rect rect) {
   element.arrange(context, rect);
 }
 
+/// 绘制后扫一遍：还有元素在悬浮过渡中就请求下一帧。
+///
+/// 为什么要这一次遍历：过渡动画需要**连续帧**，而帧末 `clear_dirty()` 会清脏。
+/// 遍历只做指针判读（元素数量级几百），相对一次绘制可以忽略；
+/// 换来的是"淡入真的是淡入"而不是卡在第一格。
+void UiRoot::collect_animation_requests() {
+  animation_pending_ = false;
+  const auto walk = [this](auto&& self, Element& element) -> void {
+    if (element.hover_animating()) {
+      animation_pending_ = true;
+      element.clear_hover_animating();  // 消费：元素在下一次绘制里重新置位
+      return;
+    }
+    for (std::size_t index = 0; index < element.children().size(); ++index) {
+      self(self, *element.child_at(index));
+      if (animation_pending_) return;
+    }
+  };
+  if (content_ != nullptr) walk(walk, *content_);
+  for (const auto& overlay : overlays_) {
+    if (animation_pending_) break;
+    if (overlay != nullptr) walk(walk, *overlay);
+  }
+}
+
 void UiRoot::paint(raster::Surface& canvas) {
   layout();
   const RenderContext context = render_context();
   for (auto& overlay : overlays_) overlay->paint(context, canvas);
+  collect_animation_requests();
   if (content_ != nullptr) paint_subtree(context, *content_, canvas);
 }
 
@@ -155,6 +181,7 @@ void UiRoot::update_hover(Element* target) {
     hovered_->set_hovered(false);
     Event event;
     event.kind = EventKind::HoverOut;
+    hovered_->notify_hover(false);  // 回调与事件并行：局部逻辑不必自己去解析事件流
     (void)dispatch_to(*hovered_, event);
   }
   hovered_ = target;
@@ -162,6 +189,7 @@ void UiRoot::update_hover(Element* target) {
     hovered_->set_hovered(true);
     Event event;
     event.kind = EventKind::HoverIn;
+    hovered_->notify_hover(true);
     (void)dispatch_to(*hovered_, event);
   }
   for (Element* current = target; current != nullptr; current = current->parent()) {
@@ -425,7 +453,12 @@ void UiRoot::mark_dirty_all() {
 }
 
 void UiRoot::clear_dirty() noexcept {
-  dirty_ = false;
+  // 动画未结束就**保持脏**：元素在本次绘制里声明的"还在动"是下一帧的依据。
+  // 清掉它会让动画停在第一帧；而每帧重新声明，所以动画结束后重绘会自然停下。
+  //
+  // `animation_pending_` 由 `paint()` 在绘制后汇总（遍历一次），这里只消费。
+  dirty_ = animation_pending_;
+  animation_pending_ = false;
   dirty_rect_ = math::IntRect{};
 }
 

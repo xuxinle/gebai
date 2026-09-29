@@ -241,6 +241,10 @@ auto SelectPanel::semantics_flags() const -> SemanticsFlags {
 Select::Select() {
   set_focusable(true);
   style_.direction = FlexDirection::Row;
+  // 选择器触发器：悬浮时描边 + 背景提亮（明显"可点"），不上浮（它常在一行里对齐）
+  // 悬浮特效：背景提亮 + 上浮（"可点"的手感）；参数由主题令牌统一给，
+  // 组件只声明要哪几项——这样按钮/列表/表格的悬浮反馈不会各走一套。
+  set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = true, .lift = false, .glow = false, .cursor = true});
 }
 
 Select::~Select() {

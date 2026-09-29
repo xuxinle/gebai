@@ -32,6 +32,12 @@ auto Theme::light() -> Theme {
   palette.text_faint = hex(0x66768CFFU);
   palette.primary = hex(0x2563EBFFU);
   palette.primary_hover = hex(0x1D4ED8FFU);
+  // 悬浮档位要**看得见**：早先取 0xF2F6FC，与侧栏底色只差 4/2/0（肉眼近乎没有），
+  // 实测像素差才 6/255。现在这一步在浅色底上清晰可辨，又不至于喧宾夺主。
+  palette.surface_hover = hex(0xE6EEFAFFU);
+  palette.surface_pressed = hex(0xD6E2F5FFU);
+  palette.border_hover = hex(0x8FAAD2FFU);
+  palette.glow = hex(0x3B82F62EU);
   palette.primary_active = hex(0x1E40AFFFU);
   palette.primary_soft = hex(0xEAF1FFFFU);
   palette.on_primary = hex(0xFFFFFFFFU);
@@ -88,6 +94,12 @@ auto Theme::dark() -> Theme {
   palette.primary = hex(0x4C8DFFFFU);
   palette.primary_hover = hex(0x6BA1FFFFU);
   palette.primary_active = hex(0x3B7AF0FFU);
+  // 深色主题同样要给这套令牌：漏掉的话默认是全透明，**悬浮在暗色下毫无反馈**——
+  // 而这种"某个主题下静默失效"的问题最难发现（浅色看着一切正常）。
+  palette.surface_hover = hex(0x1D2942FFU);
+  palette.surface_pressed = hex(0x25334FFF);
+  palette.border_hover = hex(0x46608CFFU);
+  palette.glow = hex(0x60A5FA38U);
   palette.primary_soft = hex(0x16233DFFU);
   palette.on_primary = hex(0x08101FFFU);
   palette.accent = hex(0x22D3EEFFU);

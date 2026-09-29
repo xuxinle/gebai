@@ -255,7 +255,11 @@ void Element::collect_visual(VisualNode& node) const {
 }
 
 auto Element::get_property(std::string_view name) const -> std::optional<std::string> {
-  (void)name;
+  // `hovered` 暴露给控制通道：悬浮是**只能看像素、看不出状态**的交互态，
+  // 不给读取口就只能靠截图猜（自动化验证会很脆）。
+  if (name == "hovered") return hovered_ ? "true" : "false";
+  if (name == "hover_progress") return std::format("{:.3f}", static_cast<double>(hover_t_));
+  if (name == "hover_effect") return hover_effect_.enabled ? "true" : "false";
   return std::nullopt;
 }
 
@@ -265,7 +269,9 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
   return false;
 }
 
-auto Element::property_names() const -> std::vector<std::string_view> { return {}; }
+auto Element::property_names() const -> std::vector<std::string_view> {
+  return {"hovered", "hover_progress", "hover_effect"};
+}
 
 auto Element::invoke_action(std::string_view action, std::string_view argument) -> bool {
   (void)argument;
@@ -567,12 +573,50 @@ void Element::layout_children(const RenderContext& context, math::Rect content) 
   }
 }
 
+/// 悬浮特效的**唯一实现点**（基类绘制）：背景提亮 / 描边变色 / 上浮 / 外发光。
+///
+/// 为什么放在基类而不是每个组件里：悬浮反馈是**跨组件一致性**问题——
+/// 按钮、列表项、表格行、标签页各写一套，观感一定会散（间距、时长、色阶都不同）。
+/// 组件只需声明"要哪些效果"（`HoverEffect`），参数由主题令牌统一给。
 void Element::paint_box(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const auto& colors = context.theme.colors();
-  (void)colors;
+  const Metrics& metrics = context.theme.metrics();
+  // 悬浮进度（0..1）：未开特效的组件恒为 0，走的是原有路径，零额外开销
+  const float hover_t = hover_effect_.enabled ? advance_hover(context) : 0.0f;
+  const bool hovering = hover_t > 0.001f;
+  // 上浮：把整块框体（背景/描边/阴影）上移，配合阴影形成"抬起"感。
+  // 只移框体、不移内容？——不移内容会显得文字"陷"在框里。
+  // 因此这里把绘制用的框体整体上移，内容由组件自己的 `paint_content` 决定
+  // （组件若要用上浮，从 `hover_lift_offset()` 取同一个位移）。
+  const math::Rect box = hovering && hover_effect_.lift
+                             ? bounds_.offset(0.0f, -metrics.hover_lift * hover_t)
+                             : bounds_;
+  math::Color background = style_.background;
+  math::Color border = style_.border_color;
+  if (hovering && hover_effect_.background && colors.surface_hover.a != 0U) {
+    // 混合而非直接替换：`Ghost`/`Soft` 这类背景很淡的按钮也需要可见的反馈，
+    // 而直接换成 surface_hover 会把它们的语气抹平（全部变成一个样子的方块）。
+    background = background.a == 0U
+                     ? math::Color{colors.surface_hover.r, colors.surface_hover.g,
+                                   colors.surface_hover.b,
+                                   static_cast<std::uint8_t>(colors.surface_hover.a * hover_t)}
+                     : background.mix(colors.surface_hover, hover_t);
+  }
+  if (hovering && hover_effect_.border && colors.border_hover.a != 0U) {
+    border = border.mix(colors.border_hover, hover_t);
+  }
+  // 外发光：把强调色以低不透明度铺一层**放大**的圆角矩形（v0.2 的阴影/模糊机制复用）
+  if (hovering && hover_effect_.glow && colors.glow.a != 0U) {
+    const float spread = metrics.hover_glow_width * hover_t;
+    const math::Color glow{colors.glow.r, colors.glow.g, colors.glow.b,
+                           static_cast<std::uint8_t>(colors.glow.a * hover_t)};
+    canvas.fill_rect(box.inflate(spread), raster::Paint::solid(glow),
+                     style_.radius + spread, raster::DrawOptions{.opacity = style_.opacity});
+  }
   if (style_.shadow.visible()) {
-    const math::Rect shadow_box = bounds_.inset(style_.margin);
+    // 上浮时阴影跟着走（否则"抬起"会被阴影钉在原地，看着像两层错位）
+    const math::Rect shadow_box = box.inset(style_.margin);
     const auto options = raster::DrawOptions{.opacity = style_.opacity};
     // 先环境层（大而淡）、后关键层（紧而实）：反过来的话紧层会被大层盖住，
     // 叠加后反而比单层更浑。
@@ -583,16 +627,16 @@ void Element::paint_box(const RenderContext& context, raster::Surface& canvas) c
     canvas.draw_shadow(shadow_box, style_.radius, style_.shadow.blur, style_.shadow.color,
                        math::Point{style_.shadow.offset_x, style_.shadow.offset_y}, options);
   }
-  if (style_.background.a != 0U) {
-    canvas.fill_rect(bounds_, raster::Paint::solid(style_.background), style_.radius,
+  if (background.a != 0U) {
+    canvas.fill_rect(box, raster::Paint::solid(background), style_.radius,
                      raster::DrawOptions{.opacity = style_.opacity});
   }
-  if (style_.border_width > 0.0f && style_.border_color.a != 0U) {
+  if (style_.border_width > 0.0f && border.a != 0U) {
     raster::Path outline;
     const float half = style_.border_width * 0.5f;
-    outline.add_rounded_rect(bounds_.inset(math::Insets::all(half)),
+    outline.add_rounded_rect(box.inset(math::Insets::all(half)),
                              style_.radius > half ? style_.radius - half : 0.0f);
-    canvas.stroke_path(outline, raster::Paint::solid(style_.border_color), style_.border_width,
+    canvas.stroke_path(outline, raster::Paint::solid(border), style_.border_width,
                        raster::DrawOptions{.opacity = style_.opacity});
   }
 }

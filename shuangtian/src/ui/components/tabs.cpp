@@ -40,6 +40,8 @@ constexpr double k_anim_pending = -2.0;
 Tabs::Tabs() {
   set_focusable(true);
   style_.direction = FlexDirection::Row;
+  // 标签页本体不悬浮（悬浮的是每个 tab 子项），背景透明
+  set_hover_effect(HoverEffect{.enabled = false});
 }
 
 void Tabs::set_tabs(std::vector<std::string> labels) {

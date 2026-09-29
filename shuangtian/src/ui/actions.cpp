@@ -48,6 +48,13 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   }
   properties["enabled"] = element.enabled();
   properties["visible"] = element.visible();
+  // 核心交互态由**框架统一**提供（不依赖各组件的属性表）：
+  // 悬浮是"只能从像素看出来"的状态——若某个组件忘了导出自己的 `hovered`，
+  // 自动化验证就只能靠截图猜。这类"看不见"的缺口正是最难查的。
+  properties["hovered"] = element.hovered();
+  properties["hover_progress"] =
+      std::format("{:.3f}", static_cast<double>(element.hover_progress()));
+  properties["hover_effect"] = element.hover_effect().enabled;
   snapshot["props"] = std::move(properties);
   return snapshot;
 }

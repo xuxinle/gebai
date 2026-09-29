@@ -42,6 +42,11 @@ constexpr float kTextInset{14.0f};  ///< 文本左边距 = space_md(12) + 指示
 ListItem::ListItem(std::string label, std::string subtitle)
     : label_(std::move(label)), subtitle_(std::move(subtitle)) {
   style_.radius = 6.0f;
+  // 列表项的悬浮反馈是"整行提亮"，不上浮（上浮会让行间跳动、列表看着在抖）
+  // 悬浮特效：背景提亮 + 上浮（"可点"的手感）；参数由主题令牌统一给，
+  // 组件只声明要哪几项——这样按钮/列表/表格的悬浮反馈不会各走一套。
+  set_hover_effect(HoverEffect{.enabled = true, .background = true, .border = false, .lift = false, .glow = false, .cursor = true});
+
 }
 
 void ListItem::set_label(std::string label) {

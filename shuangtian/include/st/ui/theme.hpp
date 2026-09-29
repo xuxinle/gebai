@@ -26,6 +26,13 @@ struct Palette {
   math::Color primary{};
   math::Color primary_hover{};
   math::Color primary_active{};
+  /// 通用交互态（不依赖主色）：任意可交互表面悬浮/按下时的背景与描边。
+  /// 与 `primary_*` 分开：主色是"品牌色按钮"的语气，这两个是"中性表面"的语气。
+  math::Color surface_hover{};
+  math::Color surface_pressed{};
+  math::Color border_hover{};
+  /// 悬浮外发光（"特效"）：一圈低不透明度的强调色，用于卡片/列表项的聚焦提示。
+  math::Color glow{};
   math::Color primary_soft{};
   math::Color on_primary{};
   math::Color accent{};
@@ -77,6 +84,12 @@ struct Metrics {
   float space_lg{16.0f};
   float space_xl{24.0f};
   float space_2xl{32.0f};
+
+  /// 悬浮特效参数（单位：逻辑像素 / 秒）。
+  float hover_lift{1.5f};         ///< 上浮距离（卡片/按钮的"抬起"感）
+  float hover_glow_width{3.0f};   ///< 外发光宽度
+  double hover_duration{0.12};    ///< 悬浮过渡时长（0 = 立即，不做动画）
+  float press_sink{1.0f};         ///< 按下下沉距离（与 lift 形成"按下"的手感）
 
   float radius_sm{6.0f};
   float radius_md{10.0f};

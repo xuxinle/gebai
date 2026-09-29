@@ -3,6 +3,8 @@
 /// 组件树核心：Element 基类（布局/绘制/事件/语义）+ 语义树与视觉树快照（控制通道 tree/visual 用）。
 /// 设计原则：组件是**自绘**的——没有系统控件，全部像素由 renderer 产生，外观跨平台一致。
 
+#include <cmath>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -225,7 +227,75 @@ class Element {
   [[nodiscard]] virtual auto hit_test(math::Point) const noexcept -> bool;
 
   // —— 交互状态 ——
+  /// 悬浮"特效"的声明式开关（组件自己决定怎么用）。
+  ///
+  /// 为什么做成声明而不是让组件各自硬编码：悬浮反馈是**跨组件的一致性**问题
+  /// （按钮、列表项、表格行、标签页若各写一套，观感一定会散）。
+  /// 这里定义"可以有哪些效果"，具体参数由主题令牌给，组件只声明要哪几项。
+  struct HoverEffect {
+    bool enabled{false};       ///< 总开关
+    bool background{true};     ///< 背景提亮/变色
+    bool border{false};        ///< 描边变色
+    bool lift{true};           ///< 上浮（配合阴影，产生"抬起"感）
+    bool glow{false};          ///< 外发光（强调悬浮焦点）
+    bool cursor{true};         ///< 手型光标（窗口后端可据此设置）
+  };
+
   [[nodiscard]] auto hovered() const noexcept -> bool { return hovered_; }
+  [[nodiscard]] auto hover_effect() const noexcept -> const HoverEffect& { return hover_effect_; }
+  void set_hover_effect(HoverEffect effect) noexcept { hover_effect_ = effect; }
+  /// 便捷设置：开启悬浮特效（默认子项）。
+  void set_hover_enabled(bool enabled = true) noexcept { hover_effect_.enabled = enabled; }
+
+  /// 悬浮回调（进入/离开各触发一次）。
+  /// 与 `EventKind::HoverIn/HoverOut` 事件并行提供：事件适合统一处理（如状态栏），
+  /// 回调适合"这个按钮悬浮时要做什么"这类局部逻辑，两者用途不同。
+  void set_on_hover(std::function<void(bool)> callback) { on_hover_ = std::move(callback); }
+  [[nodiscard]] auto has_hover_callback() const noexcept -> bool {
+    return static_cast<bool>(on_hover_);
+  }
+  /// 触发悬浮回调（由 UiRoot 在派发 HoverIn/HoverOut 时调用）。
+  void notify_hover(bool hovered) {
+    if (on_hover_) on_hover_(hovered);
+  }
+
+  /// 推进悬浮动画并返回进度（0 = 完全未悬浮，1 = 完全悬浮）。
+  ///
+  /// 与 `Switch` 的开关动画同一套做法：没用独立的 tick 钩子，而是在 `paint()` 里
+  /// 用 `context.time_seconds` 推进——少一条需要应用驱动的生命周期，也就不存在
+  /// "忘了 tick 所以动画不动"这类问题。动画期间会 `mark_dirty` 让下一帧继续。
+  auto advance_hover(const RenderContext& context) const -> float {
+    const double duration = context.theme.metrics().hover_duration;
+    const double now = context.time_seconds;
+    // `advancing`：时间在走吗？静态帧（首帧/离屏单帧/测试）直接到位，
+    // 免得画面停在半程。这条与 `Switch::knob_progress` 同一口径。
+    const bool advancing = now > last_hover_time_;
+    last_hover_time_ = now;
+    const float target = hovered_ ? 1.0f : 0.0f;
+    if (duration <= 0.0 || !advancing) {
+      hover_t_ = target;
+      hover_start_ = -1.0;
+      hover_animating_ = false;
+      return hover_t_;
+    }
+    if (hover_start_ < 0.0) {
+      hover_start_ = now;   // 过渡起点：从当前视觉进度接着动（不跳变）
+      hover_from_ = hover_t_;
+    }
+    const double elapsed = (now - hover_start_) / duration;
+    const float t = elapsed >= 1.0 ? 1.0f : static_cast<float>(elapsed);
+    hover_t_ = hover_from_ + (target - hover_from_) * t;
+    if (elapsed >= 1.0) {
+      hover_t_ = target;
+      hover_start_ = -1.0;
+      hover_animating_ = false;
+    } else {
+      hover_animating_ = true;  // 还没跑完：请根节点再给一帧
+    }
+    return hover_t_;
+  }
+  /// 当前悬浮进度（不推进，只读；用于布局等非绘制阶段）。
+  [[nodiscard]] auto hover_progress() const noexcept -> float { return hover_t_; }
   [[nodiscard]] auto pressed() const noexcept -> bool { return pressed_; }
   [[nodiscard]] auto focused() const noexcept -> bool { return focused_; }
   void set_hovered(bool value) noexcept { hovered_ = value; }
@@ -276,6 +346,14 @@ class Element {
 
   /// 标记需要重新布局/重绘（由 UiRoot 消费）。
   void mark_dirty();
+  /// 本元素是否还有未跑完的悬浮过渡（每帧绘制时续期，由 `UiRoot` 汇总消费）。
+  ///
+  /// 存在的理由：`UiRoot::clear_dirty()` 在每帧绘制后清脏标记，而过渡要靠
+  /// "还有人在动"才能拿到下一帧——否则**动画会停在第一帧**（淡入只走一格，
+  /// 看起来像"卡住不动"）。这里的标记是 mutable：绘制是 const 方法（与
+  /// `Switch::toggle_time_` 同一套做法）。
+  [[nodiscard]] auto hover_animating() const noexcept -> bool { return hover_animating_; }
+  void clear_hover_animating() const noexcept { hover_animating_ = false; }
   void mark_layout_dirty();
   [[nodiscard]] auto dirty() const noexcept -> bool { return dirty_; }
   [[nodiscard]] auto layout_dirty() const noexcept -> bool { return layout_dirty_; }
@@ -302,6 +380,16 @@ class Element {
   bool enabled_{true};
   bool focusable_{false};
   bool hovered_{false};
+  HoverEffect hover_effect_{};
+  std::function<void(bool)> on_hover_{};
+  /// 悬浮过渡状态（mutable：绘制是 const 方法，与 `Switch::toggle_time_` 同一套做法）。
+  mutable float hover_t_{0.0f};
+  mutable float hover_from_{0.0f};
+  mutable double hover_start_{-1.0};    ///< 过渡起点时间；`-1` = 未在过渡中
+  /// 上一帧的时间戳。初值 0 与 `Switch::last_time_` 同口径：
+  /// 静态首帧（time=0）要判成"时间没在走"→ 直接落位，否则画面会停在过渡起点。
+  mutable double last_hover_time_{0.0};
+  mutable bool hover_animating_{false};
   bool pressed_{false};
   bool focused_{false};
   bool dirty_{true};
