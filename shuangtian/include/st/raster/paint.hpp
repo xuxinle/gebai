@@ -59,6 +59,14 @@ class Gradient {
 
   [[nodiscard]] auto kind() const noexcept -> Kind { return kind_; }
   [[nodiscard]] auto stops() const noexcept -> std::span<const GradientStop> { return stops_; }
+  /// 几何：线性 = 起点/终点；径向与扫掠 = 圆心。
+  ///
+  /// 为什么需要暴露它：GPU 光栅器要**在着色器里**按像素算 `t`
+  /// （线性投影 / 径向距离 / 扫掠角度）。没有几何就只能回到 CPU 逐像素采样，
+  /// 而那正是 GPU 路径要摆脱的开销。
+  [[nodiscard]] auto start() const noexcept -> math::Point { return start_; }
+  [[nodiscard]] auto end() const noexcept -> math::Point { return end_; }
+  [[nodiscard]] auto radius() const noexcept -> float { return radius_; }
 
   /// 采样（`point` 为画布坐标）。
   [[nodiscard]] auto sample(math::Point point) const noexcept -> math::Color;

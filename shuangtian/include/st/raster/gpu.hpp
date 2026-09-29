@@ -23,6 +23,28 @@
 
 namespace st::raster::gpu {
 
+/// 当前 GPU 后端**已落地**的绘制能力。
+///
+/// 为什么要能查而不是“闷着头画”：不完整的实现必须能被**如实识别**——
+/// 应用据此决定要不要把这一帧交给 GPU；测试据此断言“已实现的部分必须对齐”，
+/// 而不是把未实现的东西当成已实现而写出一个永远红的用例（那只会让人删测试）。
+struct Capabilities {
+  bool solid_shapes{false};   ///< 实心矩形/圆角矩形/圆/渐变（SDF 解析抗锯齿）
+  bool gradients{false};      ///< 线性/径向/扫掠渐变
+  bool coverage_masks{false}; ///< 覆盖率遮罩（字形/路径）
+  bool bitmaps{false};        ///< 预乘位图合成
+  bool clips{false};          ///< 矩形（剪裁矩形）与圆角（SDF）裁剪
+  bool shadows{false};        ///< 投影（需多遍模糊）
+  bool paths{false};          ///< 任意路径填充/描边/路径裁剪
+
+  /// 是否具备“完整渲染一个界面”的能力（缺投影与路径就不算）。
+  [[nodiscard]] auto complete() const noexcept -> bool {
+    return solid_shapes && gradients && coverage_masks && bitmaps && clips && shadows && paths;
+  }
+};
+
+[[nodiscard]] auto capabilities() -> Capabilities;
+
 /// 设备信息（用于上报"这一帧真的是显卡画的"以及是哪一块卡）。
 struct DeviceInfo {
   std::string backend{};         ///< 后端名："d3d11" / ""（不可用）
