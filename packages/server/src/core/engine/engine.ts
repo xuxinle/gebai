@@ -1751,6 +1751,8 @@ private activeSchemas(sessionId: string) {
       },
       listSubAgentDefs: () =>
         self.opts.subAgents.list().map((d) => ({ name: d.name, description: self.agentDescription({ name: d.name, description: d.description, tools: d.tools }, user, env), preload: d.preload, loaded: d.loaded, tools: d.tools })),
+      // 热加载局限提示：让 agent_load 的返回能直接说清「本次装载可能服务的是旧辅助模块」（见 sdk 契约注释）
+      subAgentHotReloadNote: (name) => self.hotReloadNoteFor(name),
       loadSubAgent: async (name) => {
         // 装载子Agent 到当前会话：注册工具 + 提示词 system 消息写入会话记录并落盘；
         // 若当前 run 的 messages 可达，提示词消息同时并入系统前置段（紧跟主 system 提示词之后，
@@ -1884,12 +1886,29 @@ private activeSchemas(sessionId: string) {
     return candidates.sort((a, b) => b.length - a.length)[0]
   }
 
-  /** 未知工具错误信息：命中某子Agent 命名空间时列出其可用工具全名（模型拼错工具名时的直接恢复路径）。 */
+  /** 热加载局限提示（若该子Agent 的辅助模块在本进程运行期间被改过）：可能是「新入口 + 旧辅助」。 */
+  private hotReloadNoteFor(agent: string): string | null {
+    for (const [name, note] of this.opts.subAgents.hotReloadWarnings()) {
+      if (name === agent) return note
+    }
+    return null
+  }
+
+  /** 未知工具错误信息：命中某子Agent 命名空间时列出其可用工具全名（模型拼错工具名时的直接恢复路径）。
+   *
+   * 并在「该子Agent 的辅助模块在本进程运行期间被修改过」时附上热加载局限提示——这是开发循环里的
+   * 高频场景（self_optimize 改完子Agent 定义立即自测）：新工具因进程内旧工具表而报「未知工具」，
+   * 只说「可用工具：…（旧列表）」会被误读成「文件没写对/没注册上」，于是反复改文件排查。
+   * 把真实原因写在这里，就地从「工具报错」直达「重启服务」。 */
   private unknownToolMsg(name: string): string {
     const agent = this.subAgentForToolName(name)
     if (!agent) return `未知工具: ${name}`
     const tools = Object.keys(this.opts.subAgents.def(agent)?.tools ?? {}).map((t) => `${agent}_${t}`)
-    return tools.length ? `未知工具: ${name}（${agent} 的可用工具: ${tools.join("、")}）` : `未知工具: ${name}`
+    const reload = this.hotReloadNoteFor(agent)
+    const suffix = reload ? `\n提示：${reload}` : ""
+    return tools.length
+      ? `未知工具: ${name}（${agent} 的可用工具: ${tools.join("、")}）${suffix}`
+      : `未知工具: ${name}${suffix}`
   }
 
   /** 工具注册进指定注册表（幂等：任一工具已可解析则视为已注册；纯提示词子Agent 补注入编排工具；

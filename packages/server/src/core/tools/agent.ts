@@ -97,10 +97,15 @@ export const agentLoadTool: Tool = {
   async execute(args, ctx) {
     const name = String(args.name)
     await ctx.loadSubAgent(name)
-    // 装载反馈不枚举工具清单：{agent}_* 工具 schema 已注册进工具集（下一轮请求即全量下发），再列一遍是冗余
+    // 装载反馈不枚举工具清单：{agent}_* 工具 schema 已注册进工具集（下一轮请求即全量下发），再列一遍是冗余。
+    // 但**热加载局限**必须说：辅助模块改了而进程没重启时，本次装载可能服务的是旧辅助模块
+    //（只见于入口文件的 ?t 绕缓存）——不说就会被误读成「装载没生效」。
+    const reload = ctx.subAgentHotReloadNote?.(name) ?? null
     return {
-      output: `子Agent ${name} 已装载：独有工具（如有）以 ${name}_ 前缀并入当前工具集（schema 直接可见）、完整系统提示词已注入上下文，直接调用其工具即可。`,
-      data: { loaded: name },
+      output:
+        `子Agent ${name} 已装载：独有工具（如有）以 ${name}_ 前缀并入当前工具集（schema 直接可见）、完整系统提示词已注入上下文，直接调用其工具即可。` +
+        (reload ? `\n注意：${reload}` : ""),
+      data: { loaded: name, ...(reload ? { hotReloadNote: reload } : {}) },
     }
   },
 }

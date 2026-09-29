@@ -179,6 +179,14 @@ export type ToolContext = {
   listSubAgentDefs: () => Array<{ name: string; description: string; preload: boolean; loaded: boolean; tools?: string[] }>
   /** 装载子Agent 能力模块（agent_load 工具）：其工具并入当前工具集、能力描述注入系统提示词；不创建新上下文、无独立执行（DESIGN「装载 vs 子会话运行」）。 */
   loadSubAgent: (name: string) => Promise<void>
+  /** 该子Agent 的**热加载局限提示**（辅助模块在本进程运行期间被改过 → 可能「新入口 + 旧辅助」，
+   *  需重启进程才确定生效）；无则 null。
+   *
+   * 为什么需要：改完子Agent 立即自测是开发循环的高频动作，而只有**入口文件**能热重载
+   *（辅助模块被 import 后进程内无法失效）。宿主不把这件事说出来，调用方就会把
+   *「新工具报未知工具」「旧行为回放」误读成「文件没写对」，然后反复改文件排查。
+   * 可选：不支持该信息的宿主可省（工具侧按 null 处理）。 */
+  subAgentHotReloadNote?: (name: string) => string | null
   /** 向用户提出选择并阻塞等待选择结果（ask 选项询问分支用）；multi=true 多选；超时返回 null。
    *  plan 为计划审批分支附加载荷。 */
   waitForChoice: (prompt: string, options: ChoiceOption[], multi?: boolean, plan?: ChoicePlan) => Promise<ChoiceResult>
