@@ -645,12 +645,17 @@ struct FrameworkFlags {
       }
       args.push_back("-pipe");
       args.push_back("-MMD");
+      // **先写临时文件，成功再改名到位**：编译被中断（OOM 杀掉编译器、磁盘写满）时
+      // 产物位置不会留下半截 `.o`——它比源文件新，增量判新会当成最新，
+      // 于是下一次构建报出一堆莫名其妙的链接错误（实测碰到两次）。
+      const std::string temporary_object = unit->object + ".tmp";
+      const std::string temporary_depfile = unit->depfile + ".tmp";
       args.push_back("-MF");
-      args.push_back(unit->depfile);
+      args.push_back(temporary_depfile);
       args.push_back("-c");
       args.push_back(unit->source);
       args.push_back("-o");
-      args.push_back(unit->object);
+      args.push_back(temporary_object);
       if (options.verbose) {
         log::info("compile: {} -> {}", fs::file_name(unit->source), fs::file_name(unit->object));
       }
@@ -661,11 +666,25 @@ struct FrameworkFlags {
         return;
       }
       if (result->exit_code != 0) {
+        // 失败即丢掉半截产物（否则会骗过下一次增量判新）
+        (void)fs::remove_file(temporary_object);
+        (void)fs::remove_file(temporary_depfile);
         const std::scoped_lock lock(error_mutex);
         if (first_error.empty()) {
           first_error = std::format("编译失败: {}\n{}{}", unit->source, result->stdout_text,
                                     result->stderr_text);
         }
+        return;
+      }
+      // 成功：临时文件改名到位（产物位置要么是完整的，要么不存在）
+      if (auto status = fs::rename(temporary_object, unit->object); !status) {
+        const std::scoped_lock lock(error_mutex);
+        if (first_error.empty()) first_error = status.error().to_string();
+        return;
+      }
+      if (auto status = fs::rename(temporary_depfile, unit->depfile); !status) {
+        const std::scoped_lock lock(error_mutex);
+        if (first_error.empty()) first_error = status.error().to_string();
         return;
       }
       // 编译成功：写入共享缓存（失败不影响构建——缓存是加速手段，不是正确性前提）

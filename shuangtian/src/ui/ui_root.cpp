@@ -149,6 +149,7 @@ auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
 
 void UiRoot::update_hover(Element* target) {
   if (hovered_ == target) return;
+  prune_stale_pointers();  // `hovered_` 可能已悬垂（子树被重建）
   const RenderContext context = render_context();
   if (hovered_ != nullptr) {
     hovered_->set_hovered(false);
@@ -171,6 +172,9 @@ void UiRoot::update_hover(Element* target) {
 }
 
 auto UiRoot::dispatch(Event& event) -> bool {
+  // 分发前先清悬垂指针：界面每帧都可能重建子树（列表刷新、页面替换），
+  // 而焦点/悬停/按压指针可能正指着已被销毁的元素
+  prune_stale_pointers();
   layout();
   bool handled = false;
 
@@ -272,8 +276,38 @@ auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<E
   return matches;
 }
 
+void UiRoot::prune_stale_pointers() {  if (focused_ == nullptr && hovered_ == nullptr && pressed_ == nullptr) return;
+  // 只做指针相等比较：候选指针可能已指向销毁的元素，**绝不能解引用**
+  const auto on_tree = [this](const Element* candidate) -> bool {
+    if (candidate == nullptr) return false;
+    const auto walk = [&candidate](auto&& self, const Element& node) -> bool {
+      if (&node == candidate) return true;
+      for (std::size_t index = 0; index < node.children().size(); ++index) {
+        if (self(self, *node.child_at(index))) return true;
+      }
+      return false;
+    };
+    if (content_ != nullptr && walk(walk, *content_)) return true;
+    for (const auto& overlay : overlays_) {
+      if (overlay != nullptr && walk(walk, *overlay)) return true;
+    }
+    return false;
+  };
+  if (!on_tree(focused_)) focused_ = nullptr;
+  if (!on_tree(hovered_)) hovered_ = nullptr;
+  if (!on_tree(pressed_)) pressed_ = nullptr;
+}
+
+auto UiRoot::focused() -> Element* {
+  // 协议/脚本/动作层都靠这个访问器拿焦点元素——它们会**直接解引用**返回值，
+  // 所以悬垂判断必须在这里做（不能指望调用方自己检查）
+  prune_stale_pointers();
+  return focused_;
+}
+
 void UiRoot::set_focus(Element* element) {
   if (focused_ == element) return;
+  prune_stale_pointers();  // `focused_` 可能已悬垂：清掉再走 FocusOut 通告
   const RenderContext context = render_context();
   if (focused_ != nullptr) {
     focused_->set_focused(false);

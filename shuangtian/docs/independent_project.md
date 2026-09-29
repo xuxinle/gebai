@@ -95,6 +95,28 @@ st::app::Application app("myapp", "0.1.0", common.app);
 > 入口推荐用 `ST_MAIN(fn)`（`st/core/entry.hpp`）：Windows 的 `argv` 是 ANSI 编码，
 > 中文参数会乱码；该宏在入口处统一转 UTF-8 并设好控制台代码页。
 
+## 元素 id：动态数据请给 `key`
+
+界面元素的 id 是**外部引用它的唯一凭据**（协议 `get/set/invoke`、选择器 `#id`、脚本）。
+自动 id 默认是路径式的（`tasks/ListItem[2]`）——索引会随插入/删除整体位移，于是"刷新后
+原来看中的那一项变成别的数据"。动态数据请用 `set_key`（或容器的 key 同步接口）标出业务身份：
+
+```cpp
+std::vector<st::ui::List::Entry> rows;
+for (const auto& task : tasks) {
+  st::ui::List::Entry row;
+  row.key = task.id;          // 业务身份（不是显示文案）
+  row.label = task.title;
+  rows.push_back(std::move(row));
+}
+list->sync_items(rows);        // 同 key 的项沿用同一元素与同一 id；选中态也跟着 key 走
+```
+
+- id 变成 `tasks/ListItem@<key>`，与位置无关；文案改了 id 不变。
+- **不要**用 `clear_items()` + 逐个 `add_item()` 做刷新：索引推倒重来、选中态丢失。
+- `key` 里可以有空格/点等业务字符，框架会转义成选择器安全形式（`task 42.v2` → `task-42-v2`）。
+- 同一父节点下 `key` 不要重复（重复会告警，因为 id 会撞车）。
+
 ## 构建速度与共享对象缓存
 
 首次构建要编译框架的 ~60 个源文件（含 QuickJS），**每个工程之后**则近乎零成本：

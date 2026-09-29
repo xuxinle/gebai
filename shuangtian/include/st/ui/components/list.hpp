@@ -9,6 +9,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
@@ -67,6 +68,10 @@ class ListItem : public Element {
 };
 
 /// 垂直列表容器：`add_item` 追加列表项，选中态与键盘导航由容器统一管理。
+///
+/// **刷新数据请用 `sync_items`（而不是 `clear_items` + 逐个 `add_item`）**：
+/// 前者按 key 复用已有子元素，元素 id 与选中态对没变的数据都保持不变；
+/// 后者把索引与选中态全部重置，外部持有的 id 会失效（详见 `sync_items` 注释）。
 class List : public Element {
  public:
   List();
@@ -78,9 +83,30 @@ class List : public Element {
   auto add_item(std::string label, std::string subtitle = {}) -> ListItem*;
   /// 清空全部项（选中态一并复位，不派发 `on_select`）。
   ///
-  /// 有它才能"按最新数据重建列表"——过滤/排序/刷新这类场景无法只靠追加完成
-  /// （写一个真实应用时发现的缺口：列表只能加不能减）。
+  /// 有它才能"按最新数据重建列表"。但**重建会重置索引与选中态**，外部持有的元素 id 也随
+  /// 索引位移而失效；需要"数据变了但同一项仍是同一项"时用 `sync_items`。
   void clear_items();
+
+  /// 一条列表数据（`sync_items` 用）：`key` 是业务身份，同 key 视为同一项。
+  struct Entry {
+    std::string key{};
+    std::string label{};
+    std::function<void()> on_activate{};  ///< 空则用 `set_on_select` 的默认行为
+  };
+
+  /// 按 key 同步数据：**保留同 key 项的 id 与选中态**，只重建真正变化的部分。
+  ///
+  /// 为什么它是"刷新数据"的首选：`clear_items` + 逐个 `add_item` 会把索引推倒重来，
+  /// 于是"刷新后原来看中的那一项变成了另一条数据"（外部按 id 引用时尤其致命），
+  /// 选中态也会静默丢失。`sync_items` 用 key 做对齐：
+  ///
+  /// - 新增的 key → 追加新项（id 取 `key`，与位置无关）；
+  /// - 保留的 key → 更新文案、**沿用同一个子元素与同一个 id**；
+  /// - 消失的 key → 移除该项；
+  /// - 顺序变化 → 按新顺序重排，id 不变（因为 id 来自 key 而非索引）。
+  ///
+  /// 选中态跟随**被选中的那个 key** 走，而不是跟着索引走。
+  void sync_items(const std::vector<Entry>& entries);
   [[nodiscard]] auto item_count() const noexcept -> std::size_t;
   [[nodiscard]] auto item(std::size_t index) const noexcept -> ListItem*;
   /// 当前选中序号（无选中为 `kNoSelection`）。
@@ -101,6 +127,12 @@ class List : public Element {
  private:
   std::size_t selected_{kNoSelection};
   std::function<void(std::size_t)> on_select_{};
+
+  /// 给列表项接上"激活即选中本容器"的链路（`add_item` 与 `sync_items` 共用一处）。
+  ///
+  /// 抽出来是必要的：`sync_items` 新建的项若漏掉这一步，会表现为"点击没反应"，
+  /// 而 `add_item` 建的项一切正常（实测踩到，测试当场揭出）。
+  void bind_item(ListItem& node, std::size_t index);
 };
 
 }  // namespace st::ui

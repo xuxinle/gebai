@@ -183,6 +183,17 @@ class Element {
   // —— 标识与类型 ——
   [[nodiscard]] auto id() const noexcept -> const ElementId& { return id_; }
   void set_id(ElementId id) { id_ = std::move(id); }
+
+  /// 稳定逻辑身份（可选）：同一逻辑元素在**重建/重排后仍拿到同一个 id**。
+  ///
+  /// 自动 id 是路径式的（`Type[index]`），索引会随插入/删除/筛选整体位移，于是
+  /// 「列表刷新后原来看中的那一项变成别的东西」。显式 `set_id` 能解决，但要求调用方
+  /// 同时维护「元素到 id」的映射、重建时把 id 重新贴回去，容易漏。
+  ///
+  /// `key` 与之互补：只描述「这个元素在兄弟之间是谁」（业务身份，如任务 id），
+  /// 路径拼装、去重、选择器安全性交给框架。带 key 的自动 id 形如 `tasks/ListItem@task-42`。
+  [[nodiscard]] auto key() const noexcept -> const std::string& { return key_; }
+  void set_key(std::string key) { key_ = std::move(key); }
   [[nodiscard]] virtual auto type() const noexcept -> std::string_view { return "Element"; }
   [[nodiscard]] virtual auto role() const noexcept -> Role { return Role::None; }
 
@@ -284,6 +295,7 @@ class Element {
   math::Rect bounds_{};
   math::Size measured_{};
   ElementId id_{};
+  std::string key_{};
   Element* parent_{nullptr};
   std::vector<std::unique_ptr<Element>> children_{};
   bool visible_{true};

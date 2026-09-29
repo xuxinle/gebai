@@ -157,6 +157,78 @@ auto List::item(std::size_t index) const noexcept -> ListItem* {
   return static_cast<ListItem*>(child);
 }
 
+void List::bind_item(ListItem& node, std::size_t index) {
+  node.set_index(index);
+  node.set_on_activate([this](std::size_t activated) { select(activated); });
+}
+
+void List::sync_items(const std::vector<Entry>& entries) {
+  // 选中项按 **key** 记住（而不是索引）：顺序变了"选中的那一项"不应该变成别的数据
+  std::string selected_key{};
+  if (selected_ != kNoSelection && selected_ < children_.size()) {
+    if (const auto* item = this->item(selected_); item != nullptr) selected_key = item->key();
+  }
+
+  // 现有项全部摘下（`remove_child` 会把父子关系清干净）——进入候选池，按 key 复用
+  std::vector<std::unique_ptr<ListItem>> pool;
+  std::vector<Element*> existing;
+  existing.reserve(child_count());
+  for (std::size_t position = 0; position < child_count(); ++position) {
+    if (auto* entry = item(position); entry != nullptr) existing.push_back(entry);
+  }
+  pool.reserve(existing.size());
+  for (Element* element : existing) {
+    if (auto detached = remove_child(element); detached != nullptr) {
+      pool.push_back(std::unique_ptr<ListItem>(static_cast<ListItem*>(detached.release())));
+    }
+  }
+
+  std::vector<std::unique_ptr<Element>> next;
+  next.reserve(entries.size());
+  for (const auto& entry : entries) {
+    // 同 key 复用已有元素：**id、选中态、焦点都保持**（这正是 sync 与 clear+add 的区别）
+    std::unique_ptr<ListItem> node;
+    for (auto& candidate : pool) {
+      if (candidate != nullptr && candidate->key() == entry.key) {
+        node = std::move(candidate);
+        break;
+      }
+    }
+    if (node == nullptr) {
+      node = std::make_unique<ListItem>(entry.label, std::string{});
+      node->set_key(entry.key);
+    } else {
+      node->set_label(entry.label);  // 文案可能变了，元素不变
+    }
+    // 无论是新建还是复用，都要接上激活链路（漏了就是"点了没反应"）
+    bind_item(*node, next.size());
+    next.push_back(std::move(node));
+  }
+  // 池里剩下的就是"数据里已消失的 key"：直接丢弃（不留在树里，否则选择器会查到幽灵元素）
+  pool.clear();
+
+  for (auto& node : next) add_child(std::move(node));
+
+  // 重挑索引 + 恢复选中（按 key 找回，而不是按旧索引）
+  std::size_t restored = kNoSelection;
+  for (std::size_t position = 0; position < child_count(); ++position) {
+    auto* entry = item(position);
+    if (entry == nullptr) continue;
+    entry->set_index(position);
+    entry->set_selected(false);
+    if (!selected_key.empty() && entry->key() == selected_key) restored = position;
+  }
+  if (restored != kNoSelection) {
+    selected_ = restored;
+    if (auto* entry = item(restored); entry != nullptr) entry->set_selected(true);
+  } else {
+    selected_ = kNoSelection;
+    // 选中的项被移除时如实告知（而不是静默把选中挪到别的数据上）
+    if (!selected_key.empty() && on_select_) on_select_(kNoSelection);
+  }
+  mark_layout_dirty();
+}
+
 void List::clear_items() {
   clear_children();
   selected_ = kNoSelection;
@@ -164,10 +236,8 @@ void List::clear_items() {
 }
 
 auto List::add_item(std::string label, std::string subtitle) -> ListItem* {
-  const std::size_t index = children_.size();
   auto node = std::make_unique<ListItem>(std::move(label), std::move(subtitle));
-  node->set_index(index);
-  node->set_on_activate([this](std::size_t activated) { select(activated); });
+  bind_item(*node, children_.size());
   ListItem* raw = node.get();
   (void)add_child(std::move(node));
   return raw;

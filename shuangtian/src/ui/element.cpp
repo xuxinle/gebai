@@ -4,6 +4,7 @@
 #include <cmath>
 #include <format>
 
+#include "st/core/log.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 
@@ -21,6 +22,37 @@ namespace {
 
 [[nodiscard]] auto cross_size(FlexDirection direction, math::Size size) noexcept -> float {
   return direction == FlexDirection::Row ? size.height : size.width;
+}
+
+/// 把业务 key 转成 id 安全片段。
+///
+/// 为什么要转：id 会出现在**选择器**里（`#tasks/ListItem@task-42`），而选择器在
+/// `#`/`.`/`:`/`[`/空白 处切词——业务 key 里带一个空格或点，选择器就再也定位不到这个元素。
+/// 而 id 的用途本就是"被外部引用"，所以这里对不安全字符坚决替换，宁可变形不可坏用。
+[[nodiscard]] auto sanitize_key(std::string_view key) -> std::string {
+  std::string out;
+  out.reserve(key.size());
+  for (const char raw : key) {
+    const auto value = static_cast<unsigned char>(raw);
+    const bool safe = (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+                      (value >= '0' && value <= '9') || value == '_' || value == '-';
+    out.push_back(safe ? raw : '-');
+  }
+  return out;
+}
+
+/// 兄弟间 key 撞车检测：撞了会生成**相同的 id**，于是按 id 查找可能命中另一个元素——
+/// 这类错误静默且难查，所以在插入时就如实报出来。
+void warn_on_duplicate_key(const Element& parent, const Element& child) {
+  const std::string sanitized = sanitize_key(child.key());
+  if (sanitized.empty()) return;
+  for (const auto& sibling : parent.children()) {
+    if (sibling.get() == &child || sibling->type() != child.type()) continue;
+    if (sanitize_key(sibling->key()) != sanitized) continue;
+    log::warn("同一父节点下 {} 的 key 重复（'{}'）：自动 id 会撞车，按 id 查找可能命中另一个元素",
+              child.type(), child.key());
+    return;
+  }
 }
 
 }  // namespace
@@ -112,7 +144,13 @@ auto Element::derived_id() const -> ElementId {
         break;
       }
     }
-    parts.push_back(std::format("{}[{}]", current->type(), index));
+    // 有 key 就用 key：索引会随插入/删除/筛选整体位移，key 不会。
+    // 这是"列表刷新后同一项仍能按 id 找到"的关键（选择器安全字符见 `sanitize_key`）。
+    if (const std::string sanitized = sanitize_key(current->key_); !sanitized.empty()) {
+      parts.push_back(std::format("{}@{}", current->type(), sanitized));
+    } else {
+      parts.push_back(std::format("{}[{}]", current->type(), index));
+    }
     current = parent;
     ++depth;
   }
@@ -128,6 +166,7 @@ auto Element::add_child(std::unique_ptr<Element> child) -> Element* {
   if (child == nullptr) return nullptr;
   child->parent_ = this;
   Element* raw = child.get();
+  warn_on_duplicate_key(*this, *raw);
   children_.push_back(std::move(child));
   mark_layout_dirty();
   return raw;
@@ -138,6 +177,7 @@ auto Element::insert_child(std::size_t index, std::unique_ptr<Element> child) ->
   child->parent_ = this;
   Element* raw = child.get();
   const std::size_t position = index > children_.size() ? children_.size() : index;
+  warn_on_duplicate_key(*this, *raw);
   children_.insert(children_.begin() + static_cast<std::ptrdiff_t>(position), std::move(child));
   mark_layout_dirty();
   return raw;

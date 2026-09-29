@@ -67,7 +67,8 @@ class UiRoot {
   [[nodiscard]] auto hit_test(math::Point point) -> Element*;
 
   void set_focus(Element* element);
-  [[nodiscard]] auto focused() const noexcept -> Element* { return focused_; }
+  /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
+  [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);
 
   /// 语义树（`tree` 协议；`max_depth == 0` 表示不限）。
@@ -99,6 +100,13 @@ class UiRoot {
   void paint_subtree(const RenderContext& context, Element& element, raster::Canvas& canvas);
   [[nodiscard]] auto hit_test_subtree(Element& element, math::Point point) -> Element*;
   [[nodiscard]] auto dispatch_to(Element& element, Event& event) -> bool;
+  /// 清掉已不在树上的 `focused_` / `hovered_` / `pressed_`。
+  ///
+  /// 存在的理由：它们是裸指针，而元素能被移除并销毁（列表按数据刷新、页面替换）。
+  /// 元件从树上摘下时无法通知到这里（`Element` 没有 root 反指），因此采用
+  /// "**用前校验**"：只做**指针比较**、不触碰那块内存——树上找不到就说明它已经死了，
+  /// 置空而不是继续持有（继续持有的话，下一次解引用就是未定义行为）。
+  void prune_stale_pointers();
   void collect_focus_order(Element& element, std::vector<Element*>& order);
   void update_hover(Element* target);
 

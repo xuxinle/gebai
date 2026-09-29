@@ -2,8 +2,12 @@
 build/
 
 # 崩溃转储与临时文件
-core
-core.*
+#
+# **不要用裸 `core`**：gitignore 的模式匹配路径的**任意一段**，所以 `core` 会连
+# `include/st/core/`、`src/core/` 一起忽略——框架核心模块曾因此整个没入过库
+#（克隆下来根本编不过）。转储统一是 `core` 或 `core.<pid>`，用下面两条精确匹配。
+/core
+core.[0-9]*
 *.o
 *.d
 *.gch

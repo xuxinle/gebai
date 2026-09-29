@@ -32,6 +32,9 @@
   别把"4 秒构建完"误判为"没编"。
 - 工程能否被驱动，取决于它是否解析通用命令行——模板已包含 `st::app::parse_common_options`；
   自己写入口时**务必解析** `--control-port`/`--control-file`，否则控制通道无从连接。
+- 写动态数据界面（列表/表格/标签页）时，每项给**业务 key**（`set_key` 或 `List::sync_items`），
+  刷新用 sync 而**不是** `clear_items` + 逐个 `add_item`——否则元素 id 随索引漂移，
+  "刷新后按 id 操作到别的数据"这类错很难查（id 形如 `tasks/ListItem@task-42`，与位置无关）。
 
 ## 你的工作循环
 
