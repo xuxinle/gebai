@@ -661,6 +661,7 @@ namespace {
     icon_grid->add_child(std::make_unique<IconCell>(std::string(name)));
   }
   icons_card->add_child(std::move(icon_grid));
+
   page->add_child(std::move(icons_card));
 
   // —— 文字样式 ——
