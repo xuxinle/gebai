@@ -460,7 +460,15 @@ void Card::apply_theme(const Theme& theme) {
   style_.border_width = theme.metrics().border_width;
   style_.radius = radius_override_ > 0.0f ? radius_override_ : theme.metrics().radius_lg;
   style_.padding = math::Insets::all(padding_);
-  style_.shadow = shadow_level_ == 0 ? Shadow{} : (elevated_ ? shadow_lg(theme) : shadow_sm(theme));
+  // 阴影档位：0=无、1=sm、≥2=md；`elevated_` 为真时一律 lg
+  style_.shadow = shadow_level_ == 0   ? Shadow{}
+                  : elevated_          ? shadow_lg(theme)
+                  : shadow_level_ >= 2 ? shadow_md(theme)
+                                       : shadow_sm(theme);
+  // 卡片边框在浅色主题下**淡到几乎看不见**（它只用来在深色主题/高对比场景收边）：
+  // 有阴影的卡片再配一道同等明显的描边，会变成“双层轮廓”，显得脏。
+  style_.border_color = theme.colors().border.with_alpha_f(
+      theme.mode() == ThemeMode::Dark ? 1.0f : 0.55f);
 }
 
 // —— Divider ——

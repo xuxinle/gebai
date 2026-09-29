@@ -10,6 +10,9 @@
 // （对比：X11/Wayland 用运行时 dlopen，所以不需要这个守卫。）
 #if defined(_WIN32)
 
+// `windows.h` 默认把 `min`/`max` 定义成宏：一旦带上，`std::min`/`std::max` 的调用点
+// 会以“C2589 非法标记”报错，与真正原因相隔很远（实测本文件 8 处报错都源于此）。
+#define NOMINMAX 1
 #include <windows.h>
 
 #include <algorithm>

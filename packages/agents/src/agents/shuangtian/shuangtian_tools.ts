@@ -24,6 +24,47 @@ const DEFAULT_FRAMEWORK_DIR = "shuangtian"
 const RUNTIME_DIR = ".shuangtian"
 const DEFAULT_BUILD_TIMEOUT_MS = 600_000
 
+// ————————————————————————————————————————————————————————————————————
+// 宿主平台差异（**集中在这里**，不撒到各处）
+//
+// 这些命令串最终交给 shell 执行：POSIX 走 `sh -c`，Windows 走 PowerShell。
+// 两边至少有四处硬差异（实测在 Windows 上直接报“意外的标记 build”，工具完全不可用）：
+//   ① 可执行文件名：`st` / `st.exe`；
+//   ② 调用运算符：PowerShell 里 `"路径" 参数` 是**语法错误**，必须 `& "路径" 参数`；
+//   ③ 自举脚本：`bootstrap.sh` / `bootstrap.ps1`；
+//   ④ 进程管理：`setsid nohup … &` / `Start-Process -PassThru`，`kill -0` / `Get-Process`。
+// ————————————————————————————————————————————————————————————————————
+const IS_WINDOWS = process.platform === "win32"
+
+/** 框架自带的 `st` 工具链可执行文件（Windows 上是 `st.exe`）。 */
+function stBinary(root: string): string {
+  const windows = join(root, "build/bin/st.exe")
+  if (IS_WINDOWS) return windows
+  return join(root, "build/bin/st")
+}
+
+/** 拼一条“调用可执行文件 + 参数”的命令串（Windows 需要 `&` 调用运算符）。 */
+function invoke(binary: string, args: string): string {
+  return IS_WINDOWS ? `& "${binary}" ${args}` : `"${binary}" ${args}`
+}
+
+/** 自举工具链的命令串（平台各自的脚本）。 */
+async function bootstrapCommand(
+  root: string,
+  run: (command: string, options: { workdir: string; timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+  timeoutMs: number,
+): Promise<{ ok: boolean; text: string }> {
+  const command = IS_WINDOWS ? `pwsh -NoProfile -File "${join(root, "bootstrap.ps1")}"` : `"${join(root, "bootstrap.sh")}"`
+  const result = await run(command, { workdir: root, timeoutMs })
+  return { ok: result.code === 0, text: `${result.stdout}${result.stderr}`.trim().slice(-2000) }
+}
+
+/** 构建产物路径（Windows 带 `.exe`）：覆盖工具链与宿主平台两种拼接。 */
+function appBinary(appDir: string, buildSubdir: string, target: string): string {
+  const base = join(appDir, `build/${buildSubdir}/bin/${target}`)
+  return IS_WINDOWS ? `${base}.exe` : base
+}
+
 type Json = Record<string, unknown>
 
 function asString(args: Json, key: string, fallback = ""): string {
@@ -212,12 +253,11 @@ const runTool: Tool = {
       }
     }
 
-    const ensureToolchain = async (): Promise<{ ok: boolean; text: string }> => {
-      const st = join(root, "build/bin/st")
-      if (existsSync(st)) return { ok: true, text: "已有 st" }
-      const boot = await ctx.runCommand("./bootstrap.sh", { workdir: root, timeoutMs })
-      return { ok: boot.code === 0, text: `${boot.stdout}${boot.stderr}`.trim().slice(-2000) }
-    }
+      const ensureToolchain = async (): Promise<{ ok: boolean; text: string }> => {
+    const st = stBinary(root)
+    if (existsSync(st)) return { ok: true, text: "已有 st" }
+    return bootstrapCommand(root, ctx.runCommand, timeoutMs)
+  }
 
     if (action === "init") {
       // 生成新的独立工程（歌白全链路的起点）。`project` 是目标目录。
@@ -225,15 +265,15 @@ const runTool: Tool = {
       if (!directory) return { output: "action=init 需要 project 参数（目标目录）" }
       const absolute = ctx.resolvePath(directory)
       const name = asString(args, "name") || basename(absolute)
-      const st = join(root, "build/bin/st")
-      if (!existsSync(st)) {
-        const boot = await ctx.runCommand("./bootstrap.sh", { workdir: root, timeoutMs })
-        if (boot.code !== 0) return { output: `引导工具链失败：\n${boot.stdout}${boot.stderr}` }
-      }
-      const created = await ctx.runCommand(
-        `"${st}" init "${absolute}" --name ${name} --framework "${root}"`,
-        { timeoutMs },
-      )
+          const st = stBinary(root)
+    if (!existsSync(st)) {
+      const boot = await bootstrapCommand(root, ctx.runCommand, timeoutMs)
+      if (!boot.ok) return { output: `引导工具链失败：\n${boot.text}` }
+    }
+    const created = await ctx.runCommand(
+      invoke(st, `init "${absolute}" --name ${name} --framework "${root}"`),
+      { timeoutMs },
+    )
       const text = `${created.stdout}${created.stderr}`.trim()
       if (created.code !== 0) return { output: `创建工程失败（exit ${created.code}）：\n${text}` }
       return {
@@ -248,12 +288,12 @@ const runTool: Tool = {
       const bootstrap = await ensureToolchain()
       if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
       // 被构建的是**工程**（可能与框架不同目录）；`st` 始终用框架自己的那份
-      const st = join(root, "build/bin/st")
-      const app = projectDir(ctx, args as Json)
-      const build = await ctx.runCommand(
-        `"${st}" build ${target} --profile ${profile}${toolchainFlag}`,
-        { workdir: app, timeoutMs },
-      )
+          const st = stBinary(root)
+    const app = projectDir(ctx, args as Json)
+    const build = await ctx.runCommand(
+      invoke(st, `build ${target} --profile ${profile}${toolchainFlag}`),
+      { workdir: app, timeoutMs },
+    )
       const tail = `${build.stdout}${build.stderr}`.trim().split("\n").slice(-12).join("\n")
       if (build.code !== 0) return { output: `构建失败（exit ${build.code}）：\n${tail}` }
       if (action === "build") {
@@ -274,29 +314,56 @@ const runTool: Tool = {
       }
       const control_file = controlFileFor(ctx, target)
       const log_file = logFileFor(ctx, target)
-      const binary = join(app, `build/${buildSubdir}/bin/${target}`)
+      const binary = appBinary(app, buildSubdir, target)
       if (!existsSync(binary)) return { output: `构建产物不存在：${binary}` }
-      await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: root })
+      if (IS_WINDOWS) {
+        await ctx.runCommand(
+          `New-Item -ItemType Directory -Force -Path "${dirname(log_file)}" | Out-Null`,
+          { workdir: root },
+        )
+      } else {
+        await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: root })
+      }
 
       const extra = asString(args as Json, "args")
       const scale = asNumber(args as Json, "scale", 0)
       const theme = asString(args as Json, "theme")
-      const flags = [
+      // 参数用**数组**拼（不经 shell 的引号规则）：两条路径对引号的要求相反——
+      // POSIX 需要手动加引号防词分割，PowerShell 的 `-ArgumentList` 数组则不能带引号
+      // （带了就会把引号当作参数内容传过去，控制文件路径变成 `"C:\…"`）。
+      const flagArgs = [
         "--headless",
-        `--control-port 0`,
-        `--control-file "${control_file}"`,
-        `--shots "${join(runtimeDir(ctx), "shots")}"`,
-        scale > 0 ? `--scale ${scale}` : "",
-        theme ? `--theme ${theme}` : "",
-        extra,
+        "--control-port",
+        "0",
+        "--control-file",
+        control_file,
+        "--shots",
+        join(runtimeDir(ctx), "shots"),
+        ...(scale > 0 ? ["--scale", String(scale)] : []),
+        ...(theme ? ["--theme", theme] : []),
+        ...(extra ? extra.split(" ").filter(Boolean) : []),
       ]
-        .filter(Boolean)
-        .join(" ")
-      // setsid + nohup：脱离当前进程组，父进程退出后仍存活（无头常驻应用）
-      const launch = await ctx.runCommand(
-        `setsid nohup "${binary}" ${flags} > "${log_file}" 2>&1 < /dev/null & echo $!`,
-        { workdir: root, timeoutMs: 20_000 },
-      )
+      // POSIX 单引号内不能出现单引号，需拆成 `'\''`（结束-转义-重新开始）
+      const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`
+      const posixFlags = flagArgs.map(shellQuote).join(" ")
+      const powershellFlags = flagArgs.map((piece) => `'${piece.replace(/'/g, "''")}'`).join(", ")
+      // 脱离当前进程组，父进程退出后仍存活（无头常驻应用）。
+      // Windows：Start-Process -PassThru 拿 PID；stdout/stderr 必须分开重定向到不同文件
+      // （PowerShell 不允许两者指向同一个文件），读日志时按先后拼接。
+      const err_file = `${log_file}.err`
+      let launch: { stdout: string; stderr: string }
+      if (IS_WINDOWS) {
+        launch = await ctx.runCommand(
+          `$process = Start-Process -FilePath "${binary}" -ArgumentList @(${powershellFlags}) -PassThru -WindowStyle Hidden -RedirectStandardOutput "${log_file}" -RedirectStandardError "${err_file}"; ` +
+            `$process.Id`,
+          { workdir: root, timeoutMs: 20_000 },
+        )
+      } else {
+        launch = await ctx.runCommand(
+          `setsid nohup "${binary}" ${posixFlags} > "${log_file}" 2>&1 < /dev/null & echo $!`,
+          { workdir: root, timeoutMs: 20_000 },
+        )
+      }
       const pid = Number(launch.stdout.trim().split("\n").pop() ?? "0")
 
       // 轮询控制文件（应用启动后写入 port）
@@ -353,10 +420,24 @@ const runTool: Tool = {
       }
       if (action === "logs") {
         const text = existsSync(log_file) ? await Bun.file(log_file).text() : "(无日志)"
-        return { output: text.slice(-4000), data: { ok: true, action, target, log_file } }
+        const errFile = `${log_file}.err`
+        const errors = existsSync(errFile) ? await Bun.file(errFile).text() : ""
+        return {
+          output: `${text}${errors}`.slice(-4000),
+          data: { ok: true, action, target, log_file },
+        }
       }
       if (action === "status") {
-        const alive = pid > 0 ? (await ctx.runCommand(`kill -0 ${pid} 2>/dev/null; echo $?`, { timeoutMs: 5000 })).stdout.trim() === "0" : false
+        const alive =
+          pid > 0
+            ? IS_WINDOWS
+              ? (await ctx.runCommand(
+                  `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { '0' } else { '1' }`,
+                  { timeoutMs: 5000 },
+                )).stdout.trim() === "0"
+              : (await ctx.runCommand(`kill -0 ${pid} 2>/dev/null; echo $?`, { timeoutMs: 5000 }))
+                  .stdout.trim() === "0"
+            : false
         let responsive = false
         if (port > 0) {
           try {
@@ -382,9 +463,17 @@ const runTool: Tool = {
         }
       }
       if (pid > 0) {
-        await ctx.runCommand(`kill -TERM ${pid} 2>/dev/null; sleep 0.3; kill -0 ${pid} 2>/dev/null && kill -KILL ${pid} 2>/dev/null; true`, {
-          timeoutMs: 8000,
-        })
+        if (IS_WINDOWS) {
+          await ctx.runCommand(
+            `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`,
+            { timeoutMs: 8000 },
+          )
+        } else {
+          await ctx.runCommand(
+            `kill -TERM ${pid} 2>/dev/null; sleep 0.3; kill -0 ${pid} 2>/dev/null && kill -KILL ${pid} 2>/dev/null; true`,
+            { timeoutMs: 8000 },
+          )
+        }
       }
       if (existsSync(control_file)) await ctx.deleteFile(control_file).catch(() => {})
       return { output: `已停止 ${target}（${graceful ? "优雅退出" : "信号终止"}）`, data: { ok: true, action, target, pid, port } }
@@ -395,13 +484,13 @@ const runTool: Tool = {
       // （实测导致 `--toolchain` 变成 `[object Object]` 传下去）
       const bootstrap = await ensureToolchain()
       if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
-      const san = asBool(args as Json, "san")
-      const st = join(root, "build/bin/st")
-      const app = projectDir(ctx, args as Json)
-      const command =
-        action === "test"
-          ? `"${st}" test ${san ? "--san" : ""} ${asString(args as Json, "filter")}`.trim()
-          : `"${st}" lint`
+          const san = asBool(args as Json, "san")
+    const st = stBinary(root)
+    const app = projectDir(ctx, args as Json)
+    const command =
+      action === "test"
+        ? invoke(st, `test ${san ? "--san" : ""} ${asString(args as Json, "filter")}`.trim())
+        : invoke(st, "lint")
       const result = await ctx.runCommand(command, { workdir: app, timeoutMs })
       const text = `${result.stdout}${result.stderr}`.trim()
       const tail = text.split("\n").slice(-25).join("\n")

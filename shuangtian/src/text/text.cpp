@@ -10,6 +10,7 @@
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
 #include "st/core/string.hpp"
+#include "st/core/time.hpp"
 #include "st/raster/paint.hpp"
 
 namespace st::text {
@@ -420,6 +421,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
 auto TextRenderer::draw(raster::Canvas& canvas, std::string_view utf8, math::Point origin, float size,
                         math::Color color) const -> Status {
   if (stack_->empty() || utf8.empty() || size <= 0.0f || color.a == 0U) return ok();
+  // 文本是跨模块的绘制路径（字形位图直接按覆盖率行混合），在画布上单独记一笔：
+  // 否则“绘制 30ms”里看不出文字占多少（界面里文字往往是第一位的调用次数大户）。
+  const bool profiling = canvas.profiler() != nullptr;
+  const std::int64_t profile_start = profiling ? st::time::now_ns() : 0;
+  std::uint64_t profile_pixels = 0;
   const ShapedText shaped = shape(utf8, size);
   const float device_scale = canvas.device_scale();
   const float baseline = (origin.y + shaped.ascent) * device_scale;
@@ -432,6 +438,8 @@ auto TextRenderer::draw(raster::Canvas& canvas, std::string_view utf8, math::Poi
     const std::shared_ptr<const GlyphBitmap> bitmap =
         glyph_bitmap(*run.face, run.glyph, pixel_size);
     if (bitmap == nullptr || bitmap->coverage.empty()) continue;
+    profile_pixels += static_cast<std::uint64_t>(bitmap->width) *
+                      static_cast<std::uint64_t>(bitmap->height);
     const auto x_begin =
         static_cast<int>(std::lround((origin.x + run.x) * device_scale)) + bitmap->offset_x;
     const auto y_begin = static_cast<int>(std::lround(baseline)) + bitmap->offset_y;
@@ -443,6 +451,11 @@ auto TextRenderer::draw(raster::Canvas& canvas, std::string_view utf8, math::Poi
       canvas.blend_coverage_row(y_begin + row, x_begin, span, paint, opacity,
                                 raster::BlendMode::SrcOver);
     }
+  }
+  if (profiling) {
+    canvas.add_profile(raster::PaintOp::Text,
+                       static_cast<double>(st::time::now_ns() - profile_start) / 1'000'000.0,
+                       profile_pixels);
   }
   return ok();
 }

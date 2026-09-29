@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "st/math/color.hpp"
@@ -19,7 +20,56 @@
 
 namespace st::raster {
 
+/// 绘制原语分类（绘制剖析用）。
+///
+/// 为什么要分到这么细：绘制的代价高度不均——一次阴影（遮罩光栅化 + 模糊 + 逐像素混合）
+/// 可能贵过一百次纯色填充。只报“一帧 30ms”无法推出该改哪里。
+enum class PaintOp : std::uint8_t {
+  Clear,      ///< 整屏清色
+  FillRect,   ///< 轴向对齐矩形填充
+  FillRoundRect,  ///< 圆角矩形（走路径光栅化）
+  FillPath,   ///< 任意路径填充（图标、自绘形状）
+  Stroke,     ///< 描边
+  Shadow,     ///< 投影（含遮罩光栅化与模糊）
+  Image,      ///< 位图合成（纹理/离屏画布）
+  ClipMask,   ///< 非矩形裁剪（圆角/路径裁剪的遮罩构建）
+  Text,       ///< 文本（字形位图混合）
+  Count,      ///< 哨兵
+};
+
+[[nodiscard]] auto paint_op_name(PaintOp op) -> std::string_view;
+
+/// 单类原语的累计统计。
+struct PaintOpStat {
+  std::uint64_t calls{0};
+  /// 覆盖的像素数（近似：调用时按各原语的输出面积估算）
+  std::uint64_t pixels{0};
+  double ms{0.0};
+};
+
+/// 绘制剖析器：**默认不挂到画布上**（挂了才计时，不挂零开销）。
+struct PaintProfiler {
+  std::array<PaintOpStat, static_cast<std::size_t>(PaintOp::Count)> ops{};
+
+  void add(PaintOp op, double ms, std::uint64_t pixels = 0);
+  [[nodiscard]] auto op(PaintOp which) const noexcept -> const PaintOpStat&;
+  [[nodiscard]] auto total_ms() const noexcept -> double;
+  void clear() noexcept;
+};
+
 /// 8 位覆盖率遮罩（圆角/路径裁剪、阴影模糊）。
+/// 一行的覆盖率**运行段**：`[x0, x1)` 上的覆盖率为 `weight`（带符号；非零环绕规则下
+/// 顺时针 +、逆时针 −，重叠处的和正好抵消出孔洞）。
+///
+/// 为什么不用逐像素覆盖率数组：那样每行都要把整个宽度跑一遍（还要乘上子采样数），
+/// 一个 460×150 的圆角卡片就是 55 万次浮点累加——实测这是路径填充最大的开销。
+/// 运行段表示下，每行的代价是 O(段数) + 段内 SIMD 混合。
+struct CoverageRun {
+  float x0{0.0f};
+  float x1{0.0f};
+  float weight{0.0f};
+};
+
 class Mask {
  public:
   Mask(int width, int height);
@@ -84,6 +134,14 @@ class Canvas {
 
   void clear(math::Color color);
 
+  // —— 绘制剖析（可选；`set_profiler(nullptr)` 即关闭，无额外开销） ——
+  void set_profiler(PaintProfiler* profiler) noexcept { profiler_ = profiler; }
+  [[nodiscard]] auto profiler() const noexcept -> PaintProfiler* { return profiler_; }
+  /// 手动记账（文本等跨模块绘制路径用）：把一段耗时记到指定原语。
+  void add_profile(PaintOp op, double ms, std::uint64_t pixels = 0) noexcept {
+    if (profiler_ != nullptr) profiler_->add(op, ms, pixels);
+  }
+
   // —— 绘制原语 ——
   void fill_rect(math::Rect rect, const Paint& paint, float radius = 0.0f,
                  DrawOptions options = {});
@@ -128,6 +186,10 @@ class Canvas {
   /// `coverage[0]` 对应该行 `x_begin` 像素。
   void blend_coverage_row(int y, int x_begin, std::span<const float> coverage, const Paint& paint,
                           float opacity, BlendMode blend);
+  /// 低层：按**覆盖率运行段**混合一行（路径光栅化的主路径）。
+  /// 与逐像素覆盖率数组语义一致（端点像素按小数分摊），但只会碰“真的有覆盖”的像素。
+  void blend_coverage_runs(int y, std::span<const CoverageRun> runs, const Paint& paint,
+                           float opacity, BlendMode blend);
 
  private:
   struct ClipFrame {
@@ -140,6 +202,14 @@ class Canvas {
   [[nodiscard]] auto effective_alpha(int x, int y, float coverage) const noexcept -> float;
   void blend_span(int y, int x_begin, int x_end, math::Color color, float opacity, BlendMode mode);
   [[nodiscard]] auto current_clip() const noexcept -> const ClipFrame&;
+  /// 取（或生成并缓存）阴影遮罩。
+  ///
+  /// 阴影形状 + 模糊结果**只取决于几何参数**（宽/高/圆角/模糊半径/偏移），与画布内容、
+  /// 绘制位置无关：同一张卡片每帧重新光栅化 + 模糊同一张遮罩是纯浪费（实测阴影是
+  /// 单帧最重的绘制项，而卡片尺寸在整个界面里往往只有三五种）。
+  /// 参数按 0.25 像素量化后做键——几何量在帧间有浮点噪声，不量化则永远命不中。
+  [[nodiscard]] auto shadow_mask(float width, float height, float radius, float blur,
+                                 math::Point offset) -> std::shared_ptr<const Mask>;
   /// 物理像素坐标 → 逻辑坐标（画笔/渐变采样用）。
   [[nodiscard]] auto to_logical_point(float physical_x, float physical_y) const noexcept
       -> math::Point;
@@ -150,6 +220,9 @@ class Canvas {
   float inverse_scale_{1.0f};
   std::vector<std::uint32_t> pixels_{};
   std::vector<ClipFrame> clip_stack_{};
+  /// 阴影遮罩缓存（键 → 遮罩）。上限 `kShadowMaskCacheLimit`，超限丢弃最早的一项。
+  std::vector<std::pair<std::uint64_t, std::shared_ptr<const Mask>>> shadow_masks_{};
+  PaintProfiler* profiler_{nullptr};  ///< 空 = 不剖析
 };
 
 /// 盒式模糊 ×3 近似高斯（阴影/毛玻璃用）；就地修改遮罩。

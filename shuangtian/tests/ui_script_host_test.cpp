@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>  // `std::this_thread::sleep_for`：libstdc++ 会间接带上，MSVC 不会
 #include <vector>
 
 #include "st/core/string.hpp"

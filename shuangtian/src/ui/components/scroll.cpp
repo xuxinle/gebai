@@ -288,7 +288,11 @@ void ScrollView::paint(const RenderContext& context, raster::Canvas& canvas) con
 auto ScrollView::on_event(const RenderContext& context, Event& event) -> bool {
   if (event.kind == EventKind::Wheel) {
     if (max_scroll() <= 0.0f) return false;
-    scroll_by(event.wheel_delta * step_);
+    // **滚轮方向**：`wheel_delta` 与系统一致——向上为正、向下为负（Win32 的 WM_MOUSEWHEEL
+    // 向上给 +120，X11 的按钮 4 也是上）。偏移量随内容向下增大，所以要取反。
+    // 取错符号的表现是“往下滚滚不动”，且**不报错**：事件仍被处理（handled=true），
+    // 只是偏移一直被夹在 0——页面下半截因此永远看不到。
+    scroll_by(-event.wheel_delta * step_);
     event.handled = true;
     return true;
   }

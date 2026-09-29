@@ -34,10 +34,20 @@ namespace {
 
 ST_TEST(memory_limit_parsing_is_sane) {
   const auto limit = st::pkg::detect_memory_limit();
-  // 本机（容器）必然有 cgroup 或 /proc/meminfo：探测应当成功且数量级合理
+#if defined(_WIN32)
+  // Windows 没有 cgroup 与 /proc/meminfo：探测器的契约是"**拿不到就明确说不知道**"，
+  // 而不是编一个数（并发推导会退回按核数）。因此这里只断言"自描述一致"。
+  if (limit.limit_mb == 0 || limit.source.empty()) {
+    ST_CHECK(limit.limit_mb == 0);   // 未知必须表现为 0，而不是某个拍出来的值
+    return;
+  }
+  ST_CHECK(!limit.source.empty());   // 有值就必须说明来源
+#else
+  // Linux（含容器）：cgroup 或 /proc/meminfo 至少有一个可用，探测应当成功且数量级合理
   ST_CHECK(limit.limit_mb > 0);
   ST_CHECK(limit.limit_mb < 1024ULL * 1024ULL);  // 不超过 1 TiB
   ST_CHECK(!limit.source.empty());
+#endif
 }
 
 ST_TEST(read_text_handles_virtual_size_zero_files) {

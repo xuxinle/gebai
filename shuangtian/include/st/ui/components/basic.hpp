@@ -144,7 +144,9 @@ class Card : public Element {
  private:
   float padding_{16.0f};
   float radius_override_{0.0f};
-  std::uint8_t shadow_level_{1};
+  /// 0=无阴影、1=sm、≥2=md（`elevated_` 为真时一律 lg）。
+  /// 卡片默认用 **md**：浅底上的卡片需要“真的浮起来”，而 sm 更像一道描边。
+  std::uint8_t shadow_level_{2};
   bool elevated_{false};
 };
 

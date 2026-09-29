@@ -35,11 +35,18 @@ struct Application::Impl {
   std::uint64_t frames{0};
   float device_scale{1.0f};
   double last_frame_ms{0.0};
+  /// 最后一帧的分阶段耗时（排版/绘制/送显），用于定位"帧耗时高"到底花在哪里。
+  double layout_ms{0.0};
+  double paint_ms{0.0};
+  double present_ms{0.0};
   std::int64_t started_ms{0};
   bool quit{false};
   bool repaint{true};
   /// 启动完成回调（`on_ready`）：只跑一次。
   std::function<void()> on_ready{};
+  /// 绘制剖析器（`ST_PAINT_PROFILE=1` 时才挂到帧缓冲画布上）。
+  raster::PaintProfiler profiler{};
+  bool profiling{false};
 };
 
 Application::Application(std::string name, std::string version, AppOptions options)
@@ -47,6 +54,11 @@ Application::Application(std::string name, std::string version, AppOptions optio
       options_(std::move(options)) {
   log::set_level(log::level_from_name(options_.log_level));
   root_.set_theme(ui::Theme::by_mode(options_.theme));
+  // 绘制剖析默认关闭：挂了才计时（代价是每次绘制两次时钟读）。
+  if (const auto flag = fs::read_env("ST_PAINT_PROFILE"); flag.has_value() && !flag->empty() &&
+      *flag != "0") {
+    impl_->profiling = true;
+  }
   if (!options_.screenshot_dir.empty()) {
     (void)fs::create_directories(options_.screenshot_dir);
   }
@@ -68,6 +80,10 @@ auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
 
 auto Application::control_port() const noexcept -> std::uint16_t {
   return impl_->server != nullptr ? impl_->server->port() : 0;
+}
+
+auto Application::paint_profile() const -> const raster::PaintProfiler* {
+  return impl_->profiling ? &impl_->profiler : nullptr;
 }
 
 void Application::request_quit() { impl_->quit = true; }
@@ -98,6 +114,9 @@ auto Application::metrics() const -> control::Metrics {
   control::Metrics metrics;
   metrics.frames = impl_->frames;
   metrics.last_frame_ms = impl_->last_frame_ms;
+  metrics.layout_ms = impl_->layout_ms;
+  metrics.paint_ms = impl_->paint_ms;
+  metrics.present_ms = impl_->present_ms;
   if (!impl_->frame_times.empty()) {
     std::vector<double> sorted = impl_->frame_times;
     std::ranges::sort(sorted);
@@ -310,13 +329,26 @@ void Application::render_frame() {
   if (impl_->backend == nullptr) return;
   const std::int64_t start_ns = time::now_ns();
   raster::Canvas& canvas = impl_->backend->framebuffer();
+  // 分阶段计时：没有分段数据就无法判断"帧慢"该改哪里（排版/光栅化/送显三条路完全不同）。
+  const std::int64_t layout_start = time::now_ns();
+  if (impl_->profiling) {
+    impl_->profiler.clear();  // 分解看的是**最后一帧**（与其余阶段指标同一口径）
+    canvas.set_profiler(&impl_->profiler);
+  }
   root_.layout();
   const ui::Theme& theme = root_.theme();
   canvas.clear(theme.colors().bg);
+  const std::int64_t paint_start = time::now_ns();
   root_.paint(canvas);
+  const std::int64_t present_start = time::now_ns();
   impl_->backend->present();
+  const std::int64_t end_ns = time::now_ns();
+  const auto to_ms = [](std::int64_t value) { return static_cast<double>(value) / 1'000'000.0; };
+  impl_->layout_ms = to_ms(paint_start - layout_start);
+  impl_->paint_ms = to_ms(present_start - paint_start);
+  impl_->present_ms = to_ms(end_ns - present_start);
   ++impl_->frames;
-  impl_->last_frame_ms = static_cast<double>(time::now_ns() - start_ns) / 1'000'000.0;
+  impl_->last_frame_ms = to_ms(end_ns - start_ns);
   impl_->frame_times.push_back(impl_->last_frame_ms);
   if (impl_->frame_times.size() > 240) impl_->frame_times.erase(impl_->frame_times.begin());
   impl_->repaint = false;
@@ -396,7 +428,9 @@ auto Application::run_loop() -> Result<int> {
       std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
   }
-  log::info("应用退出：共 {} 帧，最后一帧 {:.2f}ms", impl_->frames, impl_->last_frame_ms);
+  log::info("应用退出：共 {} 帧，最后一帧 {:.2f}ms（排版 {:.2f} / 绘制 {:.2f} / 送显 {:.2f}）",
+            impl_->frames, impl_->last_frame_ms, impl_->layout_ms, impl_->paint_ms,
+            impl_->present_ms);
   return 0;
 }
 

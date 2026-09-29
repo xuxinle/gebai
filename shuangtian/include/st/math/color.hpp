@@ -30,7 +30,12 @@ struct Color {
                                            std::uint8_t alpha) -> Color {
     return Color{red, green, blue, alpha};
   }
-  /// `0xRRGGBB` 或 `0xRRGGBBAA`。
+  /// `0xRRGGBB` 或 `0xRRGGBBAA`（按**数值大小**猜格式）。
+  ///
+  /// ⚠️ 靠数值大小区分两种写法有个陷阱：**带前导零的 `RRGGBBAA` 会被当成 RGB**。
+  /// 例如想写“黑色 55%”的 `0x0000008C`，它的值是 140 ≤ 0xFFFFFF，于是被当作
+  /// `0x00008C`（纯蓝、不透明）——实测就是这条把深色主题的卡片阴影变成了蓝光。
+  /// 只要 alpha 不是 0xFF、且高位字节有 0，就必须用 `from_rgba_hex`。
   [[nodiscard]] static constexpr auto from_hex(std::uint32_t value) noexcept -> Color {
     if (value > 0xFFFFFFU) {
       return Color{static_cast<std::uint8_t>((value >> 24U) & 0xFFU),
@@ -43,10 +48,32 @@ struct Color {
                  static_cast<std::uint8_t>(value & 0xFFU), 255};
   }
 
+  /// 显式 `0xRRGGBBAA`（8 位十六进制）——**不靠数值大小猜格式**。
+  ///
+  /// 设计令牌一律用这个：字面量都写成 8 位、末两位是 alpha，语义只有一种读法。
+  [[nodiscard]] static constexpr auto from_rgba_hex(std::uint32_t value) noexcept -> Color {
+    return Color{static_cast<std::uint8_t>((value >> 24U) & 0xFFU),
+                 static_cast<std::uint8_t>((value >> 16U) & 0xFFU),
+                 static_cast<std::uint8_t>((value >> 8U) & 0xFFU),
+                 static_cast<std::uint8_t>(value & 0xFFU)};
+  }
+
+  /// 角度归一到 [0,360)。
+  ///
+  /// **自实现而不用 `std::fmod`**：MSVC 的 C++20 库实现里 `std::fmod` 不是常量求值可用的，
+  /// 而本函数必须在编译期可求值（主题色表是 `inline constexpr` 数据表）——用了它，
+  /// MSVC 会对**每一个**间接包含本头的翻译单元报 `C3615: constexpr 函数不能生成常量表达式`。
+  /// 顺手修正了旧实现（`fmod(hue + 360, 360)` 对 h 小于 -360 的输入会给出负值）的边界。
+  [[nodiscard]] static constexpr auto wrap_degrees(float degrees) noexcept -> float {
+    const int turns = static_cast<int>(degrees / 360.0f);  // 向零取整
+    const float wrapped = degrees - 360.0f * static_cast<float>(turns);
+    return wrapped < 0.0f ? wrapped + 360.0f : wrapped;
+  }
+
   /// HSL（h ∈ [0,360)，s/l ∈ [0,1]）→ sRGB8。
   [[nodiscard]] static constexpr auto from_hsl(float hue, float saturation, float lightness,
                                                std::uint8_t alpha = 255) noexcept -> Color {
-    const float h = std::fmod(hue < 0.0f ? hue + 360.0f : hue, 360.0f) / 360.0f;
+    const float h = wrap_degrees(hue) / 360.0f;
     const float s = clamp01(saturation);
     const float l = clamp01(lightness);
     const auto channel = [](float p, float q, float t) constexpr noexcept -> float {

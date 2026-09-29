@@ -10,8 +10,8 @@
 
 | 项 | 规定 |
 |---|---|
-| 标准 | `-std=c++20`（GCC 13.3 / Clang 18 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
-| 编译器 | `g++` 或 `clang++`（由 `stpm` 直驱，不经 CMake/Make） |
+| 标准 | `-std=c++20`（GCC 13.3 / Clang 18 / **MSVC 14.5x** 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
+| 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：非 Windows 用 `g++`/`clang++`；**Windows 上 MSVC（`cl`）是首选**——自动经 `vswhere` 定位 + `vcvars64` 注入环境，无 MSVC 时才回退 MinGW/clang。Windows 自举用 `bootstrap.ps1`（对应 `bootstrap.sh`） |
 | 第三方依赖 | 框架本体**零第三方依赖**；后续引入的第三方源码一律由 `stpm` 统一管理（见 `DESIGN.md`「包管理」），不得绕过 |
 | 系统能力 | 一律**运行时 `dlopen` 可选加载**（X11/Wayland/GL/Vulkan/TLS），缺失即回退或明确报错 |
 | 平台分支 | 用 `#if defined(_WIN32)` 等**条件编译指令**（允许），禁止用**函数式宏**做分支 |
@@ -250,6 +250,19 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 2. 新增公共 API → 同步 `DESIGN.md`。
 3. 改动协议/清单格式/设计 token → 先改文档再改代码，并升版本号。
 
+### 9.1 视觉改动的纪律（颜色 / 阴影 / 尺度）
+
+颜色是唯一无法靠代码审查发现问题的领域：`#94A3B8` 与 `#64748B` 在 diff 里看不出差别，
+而前者在白底上只有 2.6:1（11px 小字直接看不清）。因此：
+
+| 项 | 规定 |
+|---|---|
+| 颜色字面量 | 设计令牌用 `Color::from_rgba_hex`（显式 8 位 `0xRRGGBBAA`），**不用 `from_hex`**：后者靠“数值 > 0xFFFFFF”猜格式，带前导零的 RGBA 会被静默误读（`0x0000008C` → 纯蓝不透明）。回归：`tests/math_color_test.cpp` |
+| 对比度 | 文字/背景、语义色/卡片面、`on_primary`/`primary`、焦点环/各底色都必须过 `tests/ui_theme_test.cpp` 的下限（正文 4.5:1、辅助小字 4.0:1）；运行期需要兜底时用 `math::ensure_contrast` |
+| 改调色板/尺度 | 先跑 `st test theme_ color_`——把“好不好看”变成可回归的断言，而不是靠评审口味 |
+| 新增自绘图形 | 必须有**像素级测试**（如输入框图标槽位、焦点环、描边完整性）：只要能画出来就能数像素 |
+| 阴影 | 用 `shadow_sm/md/lg` 三档（两层：关键 + 环境），不自行拼单层阴影；`Element::paint_box` 先环境后关键 |
+
 ## 10. 跨平台强制约束（写代码时逐条自查）
 
 目标平台 **Linux / Windows / macOS**，并支持**交叉编译**。跨平台不是收尾工作：
@@ -261,8 +274,14 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
    调 `getpid()/fork()/dlopen()`。需要这类能力时先在后端加**平台无关封装**（如
    `process::current_id()`），再在平台文件里实现两侧。
 2. **路径一律 UTF-8，进出都经 `st::fs`**：不手写 `base + "/" + leaf`（Windows 用反斜杠、有盘符/UNC）；
-   不用 `std::ifstream(std::string)` 直接构造（Windows 上按 **ANSI** 解释，中文路径必坏）——
-   走 `fs::read_text/read_bytes/write_text` 或 `fs::to_path()`/`fs::to_utf8()`。
+不用 `std::ifstream(std::string)` 直接构造（Windows 上按 **ANSI** 解释，中文路径必坏）——
+走 `fs::read_text/read_bytes/write_text` 或 `fs::to_path()`/`fs::to_utf8()`。
+**`st::fs` 的转换函数一律不得抛异常**：路径字符串的来源极杂（PATH/环境变量/外部清单/文件名），
+Windows 上 `std::filesystem::path` 的两个方向都会抛（UTF-8→宽在字节非法时、宽→窄在代码页
+表达不了时），而调用点全是“查文件存不存在”这类纯查询——一抛就是 `terminate`，
+表现为“工具无声崩掉、连错误信息都没有”。已在两侧加了不抛的回退，并有回归测试
+（`tests/core_fs_test.cpp`）。同理：**列目录/遍历一律用 `generic_u8string()`**，
+不得用 `generic_string()`（后者按本地代码页，中文名会变成 GBK 字节流，与 UTF-8 契约相抵）。
 3. **进程入口用 `ST_MAIN(fn)`**（`st/core/entry.hpp`）：Windows 的 `argv` 是 ANSI
    （中文机器是 GBK），该宏在入口处转 UTF-8 并设好控制台代码页。
 4. **类型与格式化**：需要定宽就用 `std::int32_t/int64_t/std::size_t`，**不用 `long` 表示字节数**；
@@ -271,4 +290,34 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
    linux=`pthread dl m`、windows=`ws2_32`、darwin=按需声明。
    交叉编译在 `st.pkg` 的 `toolchains` 段声明，用 `st build <target> --toolchain=<名>` 启用。
 6. **改了平台分支必须真的编一次**：交叉编译是唯一能发现 Windows 分支问题的途径
-   （实测：从未被编译过的 Windows 分支攒了 `nodiscard` 忽略返回值、未使用变量等一批 `-Werror` 问题）。
+（实测：从未被编译过的 Windows 分支攒了 `nodiscard` 忽略返回值、未使用变量等一批 `-Werror` 问题）。
+
+### 10.1 MSVC 口径（Windows 宿主）
+
+标志分两套，**翻译集中在 `src/pkg/compiler.cpp`**，业务代码与服务清单始终写 GCC 风格：
+
+| 事项 | 规定 |
+|---|---|
+| 字符集 | 恒加 `/utf-8`（不加就按本地代码页读源文件，中文文案静默乱码——编得过、跑出错） |
+| 标准/语言 | `-std=c++20`→`/std:c++20`；C++ 单元加 `/EHsc /permissive- /Zc:__cplusplus /bigobj` |
+| 告警 | `-Wall -Wextra`→`/W4`；`-Werror`→`/WX` |
+| 调试信息 | `-g`→`/Z7`（调试信息留在 `.obj`，不共享 PDB——并行编译下 `cl` 的共享 PDB 是串行瓶颈） |
+| 依赖输出 | `/sourceDependencies <文件>`，**文件名必须以 `.json` 结尾**（否则按本地化文本格式输出，解析必碎） |
+| 链接 | `/link` 之后的才是链接器选项（`/DEBUG` 放前面会被 `cl` 当编译选项丢弃 → “带 `-g` 却没有 PDB”） |
+| 无等价物的标志 | 由 `translate_flags` **登记丢弃并打印**，不得静默消失（否则“以为开了 `-Wconversion`”这种事会骗过所有人） |
+| 系统库 | `pthread/dl/m` 在 `windows` 目标上自动剔除，改用 `ws2_32/user32/gdi32/shell32` |
+
+### 10.2 构建系统的两个**静默失效**点（已用测试钉住）
+
+1. **头文件依赖只能来自编译器**，不能靠“猜”。MSVC 走 `/sourceDependencies` JSON（见 §10.1）。
+依赖清单出错**不会让构建失败**：它只会变短。短到只剩源文件时，改头文件不再触发重编，
+而 `.o` 还是旧的——于是结构体改了成员、依赖它的单元却按旧布局编，**运行期以随机崩溃收场**
+（实测：给 `Canvas` 加一个成员，界面起来就 access violation）。因此：
+`depfile_from_source_dependencies` 有专测试（v1.2 扁平 + 早期嵌套 + 带空格路径 + 坏 JSON），
+**任何依赖产出方式的改动都要同时改测试**。
+2. **共享对象缓存的键必须包含“依赖产出格式版本”**（`<deps:N>`）。缓存项的有效性靠它随身的 `.d` 判定，
+格式一改，旧条目的 `.d` 就可能不完整，而“缓存命中”会把这个错误永久钉住。
+
+> Windows 回退：刚写完的文件可能被索引/杀毒进程短暂占用，`fs::rename` 会以
+> “另一个进程正在使用此文件”失败（并行编译下偶发地把整次构建弄挂）——已在
+> `fs::rename` 里对 `ERROR_SHARING_VIOLATION`/`ERROR_ACCESS_DENIED` 做短暂重试。

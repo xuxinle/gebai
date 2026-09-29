@@ -1,4 +1,5 @@
 #include "st/pkg/build.hpp"
+#include "st/pkg/compiler.hpp"
 #include "st/pkg/embed.hpp"
 #include "st/pkg/memory.hpp"
 #include "st/pkg/framework.hpp"
@@ -26,10 +27,22 @@ auto detect_compiler(std::string_view override_compiler) -> Result<std::string> 
   for (const auto name : {"ST_CXX", "CXX"}) {
     if (const auto value = fs::read_env(name); value.has_value() && !value->empty()) return *value;
   }
+#if defined(_WIN32)
+  // Windows 上**首选 MSVC**（本框架在 Windows 的默认工具链）：
+  // 目标机器上通常只装了 VS 的 C++ 工具集（没有 g++/clang++），而 `cl.exe` **不在 PATH 里**
+  // ——必须先跑 vcvars 才可见，故走 VS 官方查询而不是 `which`（见 `pkg/compiler.hpp`）。
+  if (auto msvc = find_msvc_toolchain(); msvc.has_value()) return msvc->cl;
+#endif
   for (const auto name : {"g++", "clang++", "c++"}) {
     if (auto found = process::which(name); found.has_value()) return *found;
   }
+#if defined(_WIN32)
+  return unexpected(ErrorCode::Unsupported,
+                    "未找到 C++ 编译器：安装 Visual Studio 的「使用 C++ 的桌面开发」工作负载，"
+                    "或用 ST_VCVARS/ST_CL 指定已有的 MSVC 工具集");
+#else
   return unexpected(ErrorCode::Unsupported, "未找到 C++ 编译器（g++/clang++/c++）");
+#endif
 }
 
 namespace {
@@ -410,7 +423,10 @@ struct PchContext {
 /// 用 `#if defined(_WIN32)` 判的是宿主（Linux 上恒为假），必然给 Windows 目标链上
 /// `-lpthread -ldl -lm`——mingw 根本没有这些库，链接必然失败。
 [[nodiscard]] auto default_system_libs(std::string_view platform) -> std::vector<std::string> {
-  if (platform == "windows") return {"ws2_32"};
+  // Windows 目标的默认库：`ws2_32`（winsock）+ `user32`/`gdi32`（Win32 窗口后端）
+  // + `shell32`（`CommandLineToArgvW`：`ST_MAIN` 拿命令行参数用它）。
+  // 少一个就是链接期"无法解析的外部符号"，而报错位置离真正原因（少了哪个库）很远。
+  if (platform == "windows") return {"ws2_32", "user32", "gdi32", "shell32"};
   return {"pthread", "dl", "m"};
 }
 
@@ -427,8 +443,14 @@ struct PchContext {
 
 /// 解析后的工具链：清单描述 → 构建时可直接使用的一组值。
 struct ResolvedToolchain {
-  std::string compiler{};           ///< C++ 编译器（空=自动探测本机）
+  std::string compiler{};           ///< C++ 编译器（清单里的写法；空=自动探测本机）
   std::string c_compiler{};         ///< C 编译器（空=用 compiler + `-x c`）
+  std::string compiler_path{};      ///< 解析后的编译器路径
+  CompilerKind kind{CompilerKind::Gcc};  ///< 编译器族（标志拼法/依赖产出/链接方式由它决定）
+  /// 编译/链接**子进程**需要的环境变量（MSVC 的 `INCLUDE`/`LIB`/`PATH`；GCC 系为空）。
+  /// 显式传递而不是改自身进程环境：同一台机器上可能同时存在多套工具集，
+  /// 而"构建过程中修改自己的环境"会让（并行）编译、链接、测试跑在不同环境里。
+  std::map<std::string, std::string> env{};
   std::string platform{};           ///< 目标平台
   std::string executable_suffix{};  ///< 产物后缀（Windows 为 `.exe`）
   std::vector<std::string> system_libs{};
@@ -457,26 +479,36 @@ struct ResolvedToolchain {
 #if defined(_WIN32)
     resolved.executable_suffix = ".exe";
 #endif
-    return resolved;
+  } else {
+    const ToolchainSpec* spec = manifest.find_toolchain(name);
+    if (spec == nullptr) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("清单未定义工具链 '{}'（在 st.pkg 的 toolchains 段声明）", name));
+    }
+    resolved.compiler = spec->compiler;
+    resolved.c_compiler = spec->c_compiler;
+    resolved.platform = spec->platform.empty() ? std::string("none") : spec->platform;
+    resolved.executable_suffix = spec->executable_suffix;
+    resolved.system_libs = spec->system_libs;
+    resolved.defines = spec->defines;
+    resolved.extra_flags = spec->extra_flags;
+    resolved.directory_tag = std::string(name);
+    // 工具链必须真的存在：错误要早于"编了一半才发现找不到编译器"
+    if (!process::which(resolved.compiler).has_value() && !fs::is_absolute(resolved.compiler)) {
+      return unexpected(ErrorCode::NotFound,
+                        std::format("工具链 '{}' 的编译器不可用: {}（请先安装）", name, resolved.compiler));
+    }
   }
-  const ToolchainSpec* spec = manifest.find_toolchain(name);
-  if (spec == nullptr) {
-    return unexpected(ErrorCode::Invalid,
-                      std::format("清单未定义工具链 '{}'（在 st.pkg 的 toolchains 段声明）", name));
-  }
-  resolved.compiler = spec->compiler;
-  resolved.c_compiler = spec->c_compiler;
-  resolved.platform = spec->platform.empty() ? std::string("none") : spec->platform;
-  resolved.executable_suffix = spec->executable_suffix;
-  resolved.system_libs = spec->system_libs;
-  resolved.defines = spec->defines;
-  resolved.extra_flags = spec->extra_flags;
-  resolved.directory_tag = std::string(name);
-  // 工具链必须真的存在：错误要早于"编了一半才发现找不到编译器"
-  if (!process::which(resolved.compiler).has_value() && !fs::is_absolute(resolved.compiler)) {
-    return unexpected(ErrorCode::NotFound,
-                      std::format("工具链 '{}' 的编译器不可用: {}（请先安装）", name, resolved.compiler));
-  }
+  // 编译器解析只做一次：编译与链接共用同一个路径与族（重复探测既慢、又可能给出不同答案）
+  auto compiler = detect_compiler(resolved.compiler);
+  if (!compiler) return forward_error(compiler.error());
+  resolved.compiler_path = *compiler;
+  resolved.kind = compiler_kind_of(resolved.compiler_path);
+  // MSVC 的头/库/工具路径全部来自环境变量：不注入就是"找不到任何头文件"。
+  // 探测失败要在**构建开始前**报错，而不是让几十个编译进程各自失败一遍。
+  auto environment = compiler_environment(resolved.kind);
+  if (!environment) return forward_error(environment.error());
+  resolved.env = std::move(*environment);
   return resolved;
 }
 
@@ -487,6 +519,9 @@ struct FrameworkFlags {
 };
 
 /// 由框架清单构造框架标志集（框架单元专用：与引用方工程无关）。
+///
+/// MSVC 的处理是**先按 GCC 风格拼好、再整体翻译**：清单（含框架自己的 `st.pkg`）只写一份
+/// 跨平台标志，翻译规则集中在 `pkg/compiler.hpp`——否则"哪个平台漏了哪个开关"会永久发散。
 [[nodiscard]] auto make_framework_flags(const Manifest& framework_manifest,
                                         const std::vector<std::string>& framework_include_dirs,
                                         const std::vector<std::string>& profile_flags_list,
@@ -510,6 +545,16 @@ struct FrameworkFlags {
   for (const auto& item : profile_flags_list) out.c_flags.push_back(item);
   out.c_flags.push_back("-x");
   out.c_flags.push_back("c");
+
+  if (toolchain.kind == CompilerKind::Msvc) {
+    out.flags = translate_flags(toolchain.kind, out.flags, nullptr);
+    out.c_flags = translate_flags(toolchain.kind, out.c_flags, nullptr);
+  }
+  for (const auto language : {SourceLanguage::Cxx, SourceLanguage::C}) {
+    const auto pins = dialect_flags(toolchain.kind, language);
+    auto& target = language == SourceLanguage::Cxx ? out.flags : out.c_flags;
+    target.insert(target.end(), pins.begin(), pins.end());
+  }
   return out;
 }
 
@@ -519,8 +564,12 @@ struct FrameworkFlags {
                                  const ResolvedToolchain& toolchain,
                                  const FrameworkFlags* framework_flags, std::size_t& rebuilt)
     -> Result<std::size_t> {
-  auto compiler = detect_compiler(toolchain.compiler);
-  if (!compiler) return forward_error(compiler.error());
+  // 编译器在工具链解析阶段已经定下（路径 + 族 + 环境），这里只做非空校验：
+  // 重复探测会多花时间，还可能因为环境变化给出与链接阶段不同的答案。
+  if (toolchain.compiler_path.empty()) {
+    return unexpected(ErrorCode::Unsupported, "未解析出 C++ 编译器（见 resolve_toolchain）");
+  }
+  const std::string& compiler_path = toolchain.compiler_path;
   const std::vector<std::string> include_dirs = gather_include_dirs(manifest, options);
   // 目标专属宏（如 `_WIN32_WINNT=0x0601`）：只对目标生效，不污染本机档
   const std::vector<std::string>& target_defines = toolchain.defines;
@@ -548,8 +597,29 @@ struct FrameworkFlags {
   for (const auto& dir : include_dirs) c_flags.push_back(std::format("-I{}", dir));
   for (const auto& item : profile_flags_list) c_flags.push_back(item);
   // `-x c` 强制按 C 编译：同一个编译器二进制即可，无需第二套工具链
+  // （MSVC 由扩展名定语言，翻译层会把这两个参数丢掉，见 `translate_flags`）
   c_flags.push_back("-x");
   c_flags.push_back("c");
+
+  // 编译器族翻译：清单恒为跨平台写法，差异在这里落到具体编译器。
+  // 必须在**缓存键与命令行之前**完成：两者必须来自同一份标志。
+  if (toolchain.kind == CompilerKind::Msvc) {
+    std::vector<std::string> dropped;
+    flags = translate_flags(toolchain.kind, flags, &dropped);
+    c_flags = translate_flags(toolchain.kind, c_flags, nullptr);
+    if (!dropped.empty()) {
+      // 不静默：这些开关在 MSVC 上没有等价物，"以为还在检查"比"没检查"更危险
+      std::string listed;
+      for (const auto& item : dropped) listed.append(" ").append(item);
+      log::info("MSVC 下无等价标志（已丢弃 {} 项）:{}", dropped.size(), listed);
+    }
+  }
+  const auto add_dialect_flags = [&toolchain](std::vector<std::string>& list, SourceLanguage language) {
+    const auto pins = dialect_flags(toolchain.kind, language);
+    list.insert(list.end(), pins.begin(), pins.end());
+  };
+  add_dialect_flags(flags, SourceLanguage::Cxx);
+  add_dialect_flags(c_flags, SourceLanguage::C);
 
   const std::string build_dir = fs::join(
       manifest.directory,
@@ -570,8 +640,8 @@ struct FrameworkFlags {
       }
       return std::string{};
     }();
-    if (!pch_header.empty()) {
-      pch = ensure_pch(*compiler, flags, include_dirs, build_dir, pch_header);
+    if (!pch_header.empty() && toolchain.kind != CompilerKind::Msvc) {
+      pch = ensure_pch(compiler_path, flags, include_dirs, build_dir, pch_header);
     }
   }
   const PchContext* pch_ptr = pch.has_value() ? &*pch : nullptr;
@@ -592,7 +662,14 @@ struct FrameworkFlags {
     return chosen;
   };
   const auto cache_key_for = [&](const CompileUnit& unit) -> std::string {
-    std::string material(*compiler);
+    std::string material(compiler_path);
+    // 编译器族入键：同一路径下的不同族（如 `clang-cl` 与 `clang++`）产物不兼容
+    material.append("\n<").append(compiler_kind_name(toolchain.kind)).append(">");
+    // **依赖清单格式版本**入键：缓存项的有效性靠它自己的 `.d` 判定，一旦依赖产出方式变了
+    // （如 MSVC 从 `/showIncludes` 文本改为 `/sourceDependencies` JSON），旧条目的 `.d`
+    // 可能不完整——“头文件改了不重编”这种静默降级会把错对象缓存永久钉住。
+    // 改动依赖产出方式时**必须**升这个版本号。
+    material.append("\n<deps:2>");
     for (const auto& flag : unit_flags_for(unit)) material.append("\n").append(flag);
     material.append("\n").append(unit.source);
     if (unit.third_party) material.append("\n-w");
@@ -632,6 +709,7 @@ struct FrameworkFlags {
   std::mutex error_mutex;
   std::string first_error;
   std::atomic<std::size_t> done{0};
+  std::atomic<bool> dep_warning{false};  ///< 依赖清单降级的告警只打一次（不是每个单元各打一次）
 
   // 超大单元排到最后提交：小单元先跑满并发，大块头收尾时独占闸门
   std::stable_partition(pending.begin(), pending.end(),
@@ -659,37 +737,57 @@ struct FrameworkFlags {
         return;
       }
       std::vector<std::string> args;
-      args.push_back(*compiler);
+      args.push_back(compiler_path);
       const bool is_c = unit->lang == SourceLang::C;
       // 第三方源码不套我们的告警集，也不做 sanitizer 插桩（理由见 `strip_sanitizers`）；
       // 框架单元用**框架自己的**标志集（与引用方工程无关，缓存才能跨工程命中）。
       const std::vector<std::string> unit_flags = unit_flags_for(*unit);
       for (const auto& flag : unit_flags) args.push_back(flag);
-      for (const auto& dir : unit->extra_include_dirs) args.push_back(std::format("-I{}", dir));
-      if (unit->third_party) args.push_back("-w");
+      for (const auto& dir : unit->extra_include_dirs) {
+        args.push_back(toolchain.kind == CompilerKind::Msvc ? std::format("/I{}", dir)
+                                                              : std::format("-I{}", dir));
+      }
+      if (unit->third_party) args.push_back("-w");  // MSVC 的"关全部告警"恰好也是同一拼法
       // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃
       if (pch_ptr != nullptr && !is_c && !unit->framework_unit) {
         args.push_back(std::format("-I{}", pch_ptr->directory));
         args.push_back("-include");
         args.push_back(pch_ptr->header);
       }
-      args.push_back("-pipe");
-      args.push_back("-MMD");
       // **先写临时文件，成功再改名到位**：编译被中断（OOM 杀掉编译器、磁盘写满）时
       // 产物位置不会留下半截 `.o`——它比源文件新，增量判新会当成最新，
       // 于是下一次构建报出一堆莫名其妙的链接错误（实测碰到两次）。
       const std::string temporary_object = unit->object + ".tmp";
       const std::string temporary_depfile = unit->depfile + ".tmp";
-      args.push_back("-MF");
-      args.push_back(temporary_depfile);
+      const std::string temporary_dependencies = unit->depfile + ".deps.tmp.json";
+      if (toolchain.kind == CompilerKind::Msvc) {
+        // MSVC 的依赖产出：`/sourceDependencies` 吐 JSON。
+        // **文件名必须以 `.json` 结尾**：否则 cl 按 `/showIncludes` 的文本格式写
+        // （中文 VS 上还是本地化文本），解析必然失败——而失败的表现是“头文件改了不重编”，
+        // 这种静默降级比编不过危险得多（实测：结构体加一个成员后其他 .o 未重编 → ABI 不匹配崩溃）。
+        args.push_back(std::format("/sourceDependencies{}", temporary_dependencies));
+      } else {
+        args.push_back("-pipe");
+        args.push_back("-MMD");
+        args.push_back("-MF");
+        args.push_back(temporary_depfile);
+      }
       args.push_back("-c");
       args.push_back(unit->source);
-      args.push_back("-o");
-      args.push_back(temporary_object);
+      if (toolchain.kind == CompilerKind::Msvc) {
+        args.push_back(std::format("/Fo{}", temporary_object));
+      } else {
+        args.push_back("-o");
+        args.push_back(temporary_object);
+      }
       if (options.verbose) {
         log::info("compile: {} -> {}", fs::file_name(unit->source), fs::file_name(unit->object));
       }
-      auto result = process::run(args.front(), std::vector<std::string>(args.begin() + 1, args.end()));
+      // 编译子进程要带上工具链环境（MSVC 的 INCLUDE/LIB/PATH 不注入就是找不到头与库）；
+      // GCC 系该表为空，行为与以前完全一致。
+      const process::Options process_options{.env = toolchain.env};
+      auto result = process::run(args.front(), std::vector<std::string>(args.begin() + 1, args.end()),
+                                 process_options);
       if (!result) {
         const std::scoped_lock lock(error_mutex);
         if (first_error.empty()) first_error = result.error().to_string();
@@ -699,12 +797,37 @@ struct FrameworkFlags {
         // 失败即丢掉半截产物（否则会骗过下一次增量判新）
         (void)fs::remove_file(temporary_object);
         (void)fs::remove_file(temporary_depfile);
+        (void)fs::remove_file(temporary_dependencies);
         const std::scoped_lock lock(error_mutex);
         if (first_error.empty()) {
           first_error = std::format("编译失败: {}\n{}{}", unit->source, result->stdout_text,
                                     result->stderr_text);
         }
         return;
+      }
+      if (toolchain.kind == CompilerKind::Msvc) {
+        // 把 JSON 依赖转成与 GCC 系**同一种** `.d`：
+        // 下游的增量判新与共享对象缓存因此只有一套逻辑（转格式比再加一条分支便宜得多）。
+        auto dependencies = fs::read_text(temporary_dependencies);
+        (void)fs::remove_file(temporary_dependencies);
+        std::string depfile_text = std::format("{}: {}\n", unit->object, unit->source);
+        if (dependencies.has_value()) {
+          auto converted = depfile_from_source_dependencies(*dependencies, unit->object);
+          if (converted.has_value()) {
+            depfile_text = std::move(*converted);
+          } else if (!dep_warning.exchange(true)) {
+            log::warn("MSVC 依赖清单解析失败（本次构建退化为只跟踪源文件）: {}",
+                      converted.error().message);
+          }
+        } else if (!dep_warning.exchange(true)) {
+          log::warn("MSVC 未产出依赖清单（{}）：头文件改动将不再触发重编",
+                    fs::file_name(temporary_dependencies));
+        }
+        if (auto status = fs::write_text(temporary_depfile, depfile_text); !status) {
+          const std::scoped_lock lock(error_mutex);
+          if (first_error.empty()) first_error = status.error().to_string();
+          return;
+        }
       }
       // 成功：临时文件改名到位（产物位置要么是完整的，要么不存在）
       if (auto status = fs::rename(temporary_object, unit->object); !status) {
@@ -736,46 +859,85 @@ struct FrameworkFlags {
                         const std::vector<std::string>& profile_flags_list,
                         const ResolvedToolchain& toolchain,
                         const std::vector<std::string>& extra_sources) -> Result<std::string> {
-  auto compiler = detect_compiler(toolchain.compiler);
-  if (!compiler) return forward_error(compiler.error());
+  if (toolchain.compiler_path.empty()) {
+    return unexpected(ErrorCode::Unsupported, "未解析出链接器（见 resolve_toolchain）");
+  }
   if (auto status = fs::ensure_parent(output); !status) return forward_error(status.error());
 
-  std::vector<std::string> args;
-  for (const auto& flag : profile_flags_list) args.push_back(flag);
-  // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）。
-  // **交叉编译时跳过**：宿主装的 lld/mold 未必支持目标格式，交给交叉工具链自带的链接器最稳。
-  if (!toolchain.cross()) {
-    if (const auto lld = process::which("ld.lld"); lld.has_value()) {
-      args.push_back("-fuse-ld=lld");
-    } else if (const auto mold = process::which("mold"); mold.has_value()) {
-      args.push_back("-fuse-ld=mold");
-    }
-  }
-  for (const auto& unit : units) args.push_back(unit.object);
-  for (const auto& extra : extra_sources) args.push_back(extra);
-  args.push_back("-o");
-  args.push_back(output);
   // 系统库：**交叉工具链声明了 system_libs 就整体接管**——
   // 同一份清单要同时服务多平台，而"本机需要哪些系统库"（Linux 的 pthread/dl/m）
   // 对目标可能是错的甚至不存在（mingw 没有 dl/m，链接直接失败）。
   // 接管后不再追加本机默认，避免把宿主的东西塞进目标产物。
+  std::vector<std::string> libraries;
   const bool toolchain_takes_over = toolchain.cross() && !toolchain.system_libs.empty();
   if (!toolchain_takes_over) {
-    for (const auto& lib : manifest.system_libs) args.push_back(std::format("-l{}", lib));
-    for (const auto& lib : manifest.dependency_system) args.push_back(std::format("-l{}", lib));
-    for (const auto& lib : default_system_libs(toolchain.platform)) {
-      args.push_back(std::format("-l{}", lib));
-    }
+    libraries.insert(libraries.end(), manifest.system_libs.begin(), manifest.system_libs.end());
+    libraries.insert(libraries.end(), manifest.dependency_system.begin(),
+                     manifest.dependency_system.end());
+    const auto defaults = default_system_libs(toolchain.platform);
+    libraries.insert(libraries.end(), defaults.begin(), defaults.end());
   }
-  for (const auto& lib : toolchain.system_libs) args.push_back(std::format("-l{}", lib));
-  for (const auto& flag : toolchain.extra_flags) args.push_back(flag);
+  libraries.insert(libraries.end(), toolchain.system_libs.begin(), toolchain.system_libs.end());
 
-  auto result = process::run(*compiler, args, process::Options{.cwd = manifest.directory});
+  std::vector<std::string> args;
+  if (toolchain.kind == CompilerKind::Msvc) {
+    // MSVC：对象 + 输出 + 调试信息，库一律在 `/link` 之后。
+    // 不用 link.exe 直接调：cl 会把同一个工具集环境与参数翻译先做一遍（路径、CRT 版本），
+    // 自己拼反而容易把"用了哪个 CRT"弄成两套。
+    for (const auto& unit : units) args.push_back(unit.object);
+    for (const auto& extra : extra_sources) args.push_back(extra);
+    args.push_back(std::format("/Fe:{}", output));
+    const bool debug_info = std::ranges::any_of(profile_flags_list, [](const std::string& flag) {
+      return flag.starts_with("-g");
+    });
+    for (const auto& flag : toolchain.extra_flags) args.push_back(flag);
+    args.push_back("/link");
+    // `/DEBUG` 是**链接器**选项，必须在 `/link` 之后：放在前面会被 cl 当成编译选项忽略
+    // （报 D9002 而已），结果是“带 -g 构建却没有 PDB”——崩溃时连栈都符号不出来。
+    if (debug_info) args.push_back("/DEBUG");
+    const auto link_libraries =
+        link_library_arguments(toolchain.kind, toolchain.platform, libraries);
+    args.insert(args.end(), link_libraries.begin(), link_libraries.end());
+  } else {
+    for (const auto& flag : profile_flags_list) args.push_back(flag);
+    // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）。
+    // **交叉编译时跳过**：宿主装的 lld/mold 未必支持目标格式，交给交叉工具链自带的链接器最稳。
+    if (!toolchain.cross()) {
+      if (const auto lld = process::which("ld.lld"); lld.has_value()) {
+        args.push_back("-fuse-ld=lld");
+      } else if (const auto mold = process::which("mold"); mold.has_value()) {
+        args.push_back("-fuse-ld=mold");
+      }
+    }
+    for (const auto& unit : units) args.push_back(unit.object);
+    for (const auto& extra : extra_sources) args.push_back(extra);
+    args.push_back("-o");
+    args.push_back(output);
+    const auto link_arguments =
+        link_library_arguments(toolchain.kind, toolchain.platform, libraries);
+    for (const auto& item : link_arguments) args.push_back(item);
+    for (const auto& flag : toolchain.extra_flags) args.push_back(flag);
+  }
+
+  auto result = process::run(toolchain.compiler_path, args,
+                             process::Options{.cwd = manifest.directory, .env = toolchain.env});
   if (!result) return forward_error(result.error());
   if (result->exit_code != 0) {
+    const std::string diagnostics = result->stdout_text + result->stderr_text;
+    // 产物被正在运行的实例占着（Windows 上必现：exe 被占用时链接器写不进去）。
+    // 原始报错只有一句 `LNK1168 无法打开 …exe 进行写入`，排错的人第一反总不是“那个窗口还开着”——
+    // 直接给出下一步。
+    if (diagnostics.find("LNK1168") != std::string::npos ||
+        diagnostics.find("LNK1104") != std::string::npos ||
+        diagnostics.find("Text file busy") != std::string::npos) {
+      return unexpected(
+          ErrorCode::Io,
+          std::format("链接失败：产物被占用（{}）\n"
+                      "请先结束正在运行的实例（例如 `st stop {}` 或结束进程），再重新构建。\n{}",
+                      output, manifest.name, diagnostics));
+    }
     return unexpected(ErrorCode::Invalid,
-                      std::format("链接失败: {}\n{}{}", output, result->stdout_text,
-                                  result->stderr_text));
+                      std::format("链接失败: {}\n{}", output, diagnostics));
   }
   (void)options;
   return output;

@@ -154,7 +154,7 @@ ST_TEST(font_multi_contour_glyphs_keep_holes_across_scripts) {
   st::text::TextRenderer renderer(*stack);
 
   const auto dark_ratio = [&renderer](std::string_view text) {
-    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(120.0f, 120.0f, 1.0f);
+    st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(120, 120, 1.0f);
     canvas.clear(st::math::Color{0, 0, 0, 0});
     (void)renderer.draw(canvas, text, {8.0f, 8.0f}, 72.0f, st::math::Color::rgb(0, 0, 0));
     std::size_t dark = 0;

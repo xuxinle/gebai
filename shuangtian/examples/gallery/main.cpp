@@ -186,6 +186,8 @@ struct Options {
   std::string control_file{};
   std::string shots{};
   std::uint32_t frames{0};
+  /// 渲染基准帧数（`--bench N`）：每帧**强制全量重绘**并报告分阶段分位耗时。
+  std::uint32_t bench{0};
   int max_ms{0};
 };
 
@@ -205,6 +207,7 @@ struct Options {
     else if (raw == "--control-file") options.control_file = next("");
     else if (raw == "--shots") options.shots = next("");
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(next("0")));
+  else if (raw == "--bench") options.bench = static_cast<std::uint32_t>(std::stoi(next("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(next("0"));
     else if (raw == "--help" || raw == "-h") {
       st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--control-port 0]\n"
@@ -216,6 +219,67 @@ struct Options {
 }
 
 }  // namespace
+
+/// 渲染基准（性能优化的可重复标尺）：连续 `frames` 帧**强制全量重绘**，
+/// 报告总帧耗时与分阶段（排版 / 绘制 / 送显）的 p50、p95。
+///
+/// 为什么放在示例而不是框架：基准要跑的"内容"是应用自己的界面；
+/// 框架只需提供可组合的原语（`root().mark_dirty_all()` + `render_frame()` + `metrics()`）。
+/// 每帧都先标脏整棵树——这是**最坏情况**，也正因为最坏才可复现：
+/// 否则"第二帧开始不重绘"会把排版成本静默地排除在测量之外（实测被坑过）。
+[[nodiscard]] auto run_render_bench(st::app::Application& app, std::uint32_t frames) -> int {
+  std::vector<double> total;
+  std::vector<double> layout;
+  std::vector<double> paint;
+  std::vector<double> present;
+  total.reserve(frames);
+  layout.reserve(frames);
+  paint.reserve(frames);
+  present.reserve(frames);
+  for (std::uint32_t index = 0; index < frames; ++index) {
+    app.root().mark_dirty_all();
+    app.render_frame();
+    const st::control::Metrics metrics = app.metrics();
+    total.push_back(metrics.last_frame_ms);
+    layout.push_back(metrics.layout_ms);
+    paint.push_back(metrics.paint_ms);
+    present.push_back(metrics.present_ms);
+  }
+  const auto summarize = [&frames](const char* name, std::vector<double>& samples) {
+    std::ranges::sort(samples);
+    const auto at = [&samples](double ratio) -> double {
+      const auto index = static_cast<std::size_t>(ratio * static_cast<double>(samples.size() - 1));
+      return samples[index];
+    };
+    double sum = 0.0;
+    for (const double value : samples) sum += value;
+    st::print("  {:<8} p50 {:6.2f} ms · p95 {:6.2f} ms · 均 {:6.2f} ms · 最大 {:6.2f} ms\n", name,
+              at(0.5), at(0.95), sum / static_cast<double>(samples.size()), samples.back());
+  };
+  st::print("渲染基准：{} 帧（每帧强制全量重绘）\n", frames);
+  summarize("总帧", total);
+  summarize("排版", layout);
+  summarize("绘制", paint);
+  summarize("送显", present);
+  // 绘制分解（需 `ST_PAINT_PROFILE=1`）：只看“绘制 30ms”不知道该改哪里
+  if (const st::raster::PaintProfiler* profile = app.paint_profile(); profile != nullptr) {
+    st::print("绘制分解（最后一帧，按累计耗时排序）：\n");
+    std::vector<std::pair<double, std::string>> rows;
+    for (std::size_t index = 0; index < static_cast<std::size_t>(st::raster::PaintOp::Count);
+         ++index) {
+      const auto op = static_cast<st::raster::PaintOp>(index);
+      const st::raster::PaintOpStat& stat = profile->op(op);
+      if (stat.calls == 0) continue;
+      rows.emplace_back(
+          stat.ms, std::format("{:<10} 调用 {:>5} · {:>8.2f} ms · {:>9} 像素 · {:>7.3} ms/次",
+                               st::raster::paint_op_name(op), stat.calls, stat.ms, stat.pixels,
+                               stat.ms / static_cast<double>(stat.calls)));
+    }
+    std::ranges::sort(rows, [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+    for (const auto& [ms, text] : rows) st::print("  {}\n", text);
+  }
+  return 0;
+}
 
 auto run_app(int argc, char** argv) -> int {
   const Options options = parse_options(argc, argv);
@@ -550,6 +614,8 @@ auto run_app(int argc, char** argv) -> int {
                                             app.control_port()));
   app.root().mark_dirty_all();
   app.render_frame();
+
+  if (options.bench > 0) return run_render_bench(app, options.bench);
 
   const std::int64_t started_ms = st::time::now_ms();
   std::uint32_t frames = 1;

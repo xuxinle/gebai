@@ -42,6 +42,14 @@ struct Metrics {
   double last_frame_ms{0.0};
   double frame_p50_ms{0.0};
   double frame_p95_ms{0.0};
+  /// 最后一帧的**分阶段耗时**（同一次 `render_frame` 内的三段）：
+  /// `layout`（测量 + 排版）、`paint`（把控件画进画布）、`present`（清屏 + 送显/翻转）。
+  ///
+  /// 为什么必须分开报："帧耗时 20ms" 本身不指向任何行动——是排版重复算了、
+  /// 还是阴影/文字光栅化太重、还是送显在等垂直同步，只有分段数据能区分。
+  double layout_ms{0.0};
+  double paint_ms{0.0};
+  double present_ms{0.0};
   std::int64_t uptime_ms{0};
   std::string backend{};
   bool headless{true};

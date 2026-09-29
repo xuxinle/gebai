@@ -476,10 +476,16 @@ void Element::paint_box(const RenderContext& context, raster::Canvas& canvas) co
   const auto& colors = context.theme.colors();
   (void)colors;
   if (style_.shadow.visible()) {
-    canvas.draw_shadow(bounds_.inset(style_.margin), style_.radius, style_.shadow.blur,
-                       style_.shadow.color,
-                       math::Point{style_.shadow.offset_x, style_.shadow.offset_y},
-                       raster::DrawOptions{.opacity = style_.opacity});
+    const math::Rect shadow_box = bounds_.inset(style_.margin);
+    const auto options = raster::DrawOptions{.opacity = style_.opacity};
+    // 先环境层（大而淡）、后关键层（紧而实）：反过来的话紧层会被大层盖住，
+    // 叠加后反而比单层更浑。
+    if (style_.shadow.second_visible()) {
+      canvas.draw_shadow(shadow_box, style_.radius, style_.shadow.blur2, style_.shadow.color2,
+                         math::Point{style_.shadow.offset2_x, style_.shadow.offset2_y}, options);
+    }
+    canvas.draw_shadow(shadow_box, style_.radius, style_.shadow.blur, style_.shadow.color,
+                       math::Point{style_.shadow.offset_x, style_.shadow.offset_y}, options);
   }
   if (style_.background.a != 0U) {
     canvas.fill_rect(bounds_, raster::Paint::solid(style_.background), style_.radius,

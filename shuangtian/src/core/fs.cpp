@@ -9,6 +9,8 @@
 #include <array>
 #include <fstream>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 #include "st/core/string.hpp"
 
@@ -24,16 +26,49 @@ namespace {
 /// Windows 必须显式从 UTF-8 转为宽字符（宽字符才是它的真 Unicode 接口）。
 [[nodiscard]] auto to_path(std::string_view utf8) -> std::filesystem::path {
 #if defined(_WIN32)
-  return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+  // **绝不允许抛异常**：路径字符串的来源极杂（PATH 环境变量、外部清单、命令行），
+  // 只要其中任何一条含非法 UTF-8 字节（例如安装器写下的 GBK 目录名），
+  // MSVC 的 `path(u8string)` 就会抛 `filesystem_error`——而本函数在"判断文件存不存在"
+  // 这类纯查询路径上被调用，于是**整个进程直接 terminate**。
+  // 实测：`st build --toolchain=mingw`（编译器不在 PATH 里，要逐条扫 PATH）因此 abort，
+  // 连错误信息都来不及输出。排错成本极高，故此处宁可退化为“按字节放宽”也不抛：
+  // 最差结果是“找不到那个文件”（正常的 NotFound），而不是“工具无声崩掉”。
+  try {
+    return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+  } catch (const std::exception&) {
+    // 非法 UTF-8：逐字节放宽（字节值保留，不解释为多字节序列）
+  }
+  std::wstring widened;
+  widened.reserve(utf8.size());
+  for (const char byte : utf8) {
+    widened.push_back(static_cast<wchar_t>(static_cast<unsigned char>(byte)));
+  }
+  return std::filesystem::path(std::move(widened));
 #else
   return std::filesystem::path(utf8);
 #endif
 }
 
 /// 文件系统路径 → UTF-8 文本（返回的永远是 UTF-8，不会因为平台而变编码）。
+///
+/// **同样不得抛异常**：Windows 上宽→窄（`generic_string()`）会按本地代码页转换，
+/// 遇到代码页表达不了的字符就抛 `filesystem_error`。实测：`st test` 在扫描源码目录时
+/// 因某个文件名转不过去而直接 abort（连测试都没开始跑）；同时它也是**编码错误**——
+/// 中文路径会变成 GBK 字节流，与“路径一律 UTF-8”的契约相抵。
 [[nodiscard]] auto to_utf8(const std::filesystem::path& path) -> std::string {
-  const std::u8string encoded = path.generic_u8string();
-  return std::string(encoded.begin(), encoded.end());
+  try {
+    const std::u8string encoded = path.generic_u8string();
+    return std::string(encoded.begin(), encoded.end());
+  } catch (const std::exception&) {
+    // 宽串含非法 UTF-16（语言对代理项）：退化为“字节保留”，路径会被当不存在处理
+    const std::wstring& wide = path.native();
+    std::string narrow;
+    narrow.reserve(wide.size());
+    for (const wchar_t unit : wide) {
+      narrow.push_back(static_cast<char>(static_cast<unsigned char>(unit & 0xFFU)));
+    }
+    return narrow;
+  }
 }
 
 namespace sys = std::filesystem;
@@ -233,7 +268,7 @@ auto list_dir(std::string_view path) -> Result<std::vector<DirEntry>> {
   std::vector<DirEntry> entries;
   for (const auto& item : iterator) {
     DirEntry entry;
-    entry.name = item.path().filename().generic_string();
+    entry.name = to_utf8(item.path().filename());
     entry.path = from_std_path(item.path());
     entry.is_dir = item.is_directory(ec);
     if (!entry.is_dir && item.is_regular_file(ec)) {
@@ -264,7 +299,7 @@ auto walk(std::string_view root, std::uint32_t max_depth) -> Result<std::vector<
     }
     const auto& item = *iterator;
     DirEntry entry;
-    entry.name = item.path().filename().generic_string();
+    entry.name = to_utf8(item.path().filename());
     entry.path = from_std_path(item.path().lexically_relative(base));
     entry.is_dir = item.is_directory(ec);
     if (!entry.is_dir && item.is_regular_file(ec)) {
@@ -310,9 +345,24 @@ auto remove_file(std::string_view path) -> Status {
 auto rename(std::string_view from, std::string_view to) -> Status {
   if (auto status = ensure_parent(to); !status) return status;
   std::error_code ec;
-  sys::rename(to_std_path(from), to_std_path(to), ec);
-  if (ec) return unexpected(ErrorCode::Io, io_error("rename", from, ec).message);
-  return ok();
+  // Windows：刚写完的文件可能短暂地被索引/杀毒进程占用，`rename` 会以"另一个进程正在
+  // 使用此文件"失败（实测：并行编译时偶发地把整次构建弄挂）。这是可恢复的瞬态错误，
+  // 短暂重试即可——不重试的代价是"构建偶尔神秘失败一次"，最难排查的那类问题。
+  constexpr int kAttempts = 12;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    ec.clear();
+    sys::rename(to_std_path(from), to_std_path(to), ec);
+    if (!ec) return ok();
+#if defined(_WIN32)
+    // 32 = ERROR_SHARING_VIOLATION，5 = ERROR_ACCESS_DENIED（被占用时的典型错误码）
+    if (ec.value() == 32 || ec.value() == 5) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5 * (attempt + 1)));
+      continue;
+    }
+#endif
+    break;
+  }
+  return unexpected(ErrorCode::Io, io_error("rename", from, ec).message);
 }
 
 auto copy_file(std::string_view from, std::string_view to) -> Status {

@@ -752,6 +752,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     result["uptime_ms"] = metrics.uptime_ms;
     result["frames"] = static_cast<std::uint64_t>(metrics.frames);
     result["last_frame_ms"] = metrics.last_frame_ms;
+    result["layout_ms"] = metrics.layout_ms;
+    result["paint_ms"] = metrics.paint_ms;
+    result["present_ms"] = metrics.present_ms;
     result["frame_p50_ms"] = metrics.frame_p50_ms;
     result["frame_p95_ms"] = metrics.frame_p95_ms;
     result["nodes"] = static_cast<std::uint64_t>(metrics.nodes);

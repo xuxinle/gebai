@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <vector>
 
 namespace st::raster::detail {
@@ -21,42 +20,86 @@ struct Edge {
   int direction{1};
 };
 
-/// 把水平区间 [span_start, span_end) 按覆盖率权重累加到逐像素覆盖数组（端点线性分摊）。
-void add_span(std::vector<float>& coverage, int base_x, float span_start, float span_end,
-              float weight) {
-  if (span_end <= span_start) return;
-  const auto total = static_cast<int>(coverage.size());
-  if (total <= 0) return;
-  const float low_limit = static_cast<float>(base_x);
-  const float high_limit = low_limit + static_cast<float>(total);
-  const float x0 = std::max(span_start, low_limit);
-  const float x1 = std::min(span_end, high_limit);
-  if (x1 <= x0) return;
+/// 按 ymin 排序的边表 + 逐行游标（活动边窗口）。
+///
+/// 为什么要这个游标：旧实现对**每一行、每个子采样**都扫全部边，边数一多就是纯粹的浪费
+/// （图标/文字的轮廓动辄上百条边）。排序一次后，每行只需从「第一条可能相关的边」开始扫。
+struct EdgeTable {
+  std::vector<Edge> edges;      ///< 按 ymin 升序
+  std::size_t first_candidate{0};
 
-  int first = static_cast<int>(std::floor(x0)) - base_x;
-  int last = static_cast<int>(std::floor(x1)) - base_x;
-  if (first < 0) first = 0;
-  if (last >= total) last = total - 1;
-  if (first > last) return;
+  void build(std::vector<Edge> source) {
+    std::ranges::sort(source, {}, &Edge::ymin);
+    edges = std::move(source);
+    first_candidate = 0;
+  }
 
-  if (first == last) {
-    coverage[static_cast<std::size_t>(first)] += weight * (x1 - x0);
-    return;
+  void seek(int y) {
+    const float row_top = static_cast<float>(y);
+    while (first_candidate < edges.size() && edges[first_candidate].ymax <= row_top) ++first_candidate;
   }
-  coverage[static_cast<std::size_t>(first)] +=
-      weight * (static_cast<float>(first + base_x + 1) - x0);
-  for (int index = first + 1; index < last; ++index) {
-    coverage[static_cast<std::size_t>(index)] += weight;
+};
+
+/// 把一次子采样的交叉点转成带符号运行段（追加到 `runs`）。
+void emit_runs(std::vector<std::pair<float, int>>& crossings, std::vector<CoverageRun>& runs) {
+  if (crossings.size() < 2) return;
+  std::ranges::sort(crossings, {}, &std::pair<float, int>::first);
+  int winding = 0;
+  for (std::size_t index = 0; index < crossings.size(); ++index) {
+    winding += crossings[index].second;
+    if (winding == 0 || index + 1 >= crossings.size()) continue;
+    const float sign = winding > 0 ? 1.0f : -1.0f;
+    CoverageRun run;
+    run.x0 = crossings[index].first;
+    run.x1 = crossings[index + 1].first;
+    run.weight = sign * kSubsampleWeight;
+    if (run.x1 > run.x0) runs.push_back(run);
   }
-  const float tail = x1 - static_cast<float>(last + base_x);
-  if (tail > 0.0f) coverage[static_cast<std::size_t>(last)] += weight * tail;
 }
 
-/// 扫描线覆盖率光栅化核心：`sink(y, coverage)` 逐行消费覆盖率。
+/// 把同一行里重叠的运行段合并成**互不重叠**的段（权重相加）。
+///
+/// 等价于旧实现里逐像素累加：重叠处正负相加即孔洞（非零环绕规则）。
+/// 用**扫描线 + 事件**而不是两两分割：描边路径（每个顶点一个圆）一行里可能有几十个重叠段，
+/// 两两分割是 O(n²)，实测因此把描边拖慢了近一倍。事件扫描是 O(n log n) 且合并天然彻底。
+void merge_runs(std::vector<CoverageRun>& runs, std::vector<CoverageRun>& out,
+                std::vector<std::pair<float, float>>& events) {
+  out.clear();
+  if (runs.empty()) return;
+  events.clear();
+  events.reserve(runs.size() * 2);
+  for (const auto& run : runs) {
+    events.emplace_back(run.x0, run.weight);
+    events.emplace_back(run.x1, -run.weight);
+  }
+  std::ranges::sort(events, {}, &std::pair<float, float>::first);
+  float accumulated = 0.0f;
+  float previous = events.front().first;
+  std::size_t index = 0;
+  while (index < events.size()) {
+    const float x = events[index].first;
+    if (x > previous && std::abs(accumulated) > 0.004f) {
+      // 与上一段同权重且相接时合并（段数越少，后面的混合调用越便宜）
+      if (!out.empty() && out.back().x1 == previous &&
+          std::abs(out.back().weight - accumulated) < 0.004f) {
+        out.back().x1 = x;
+      } else {
+        out.push_back(CoverageRun{previous, x, accumulated});
+      }
+    }
+    while (index < events.size() && events[index].first == x) {
+      accumulated += events[index].second;
+      ++index;
+    }
+    previous = x;
+  }
+}
+
+/// 扫描线核心：`sink(y, runs)` 逐行消费**合并后的运行段**。
 template <class Sink>
-void rasterize_polylines(const std::vector<Polyline>& polylines, int base_x, int width, int first_y,
-                         int last_y, Sink&& sink) {
-  std::vector<Edge> edges;
+void rasterize_polylines(const std::vector<Polyline>& polylines, int first_y, int last_y,
+                         Sink&& sink) {
+  std::vector<Edge> collected;
   for (const auto& polyline : polylines) {
     if (polyline.points.size() < 2) continue;
     // **填充语义要求隐式闭合子路径**（PostScript/SVG/TrueType 一致）：字体轮廓通常不含
@@ -80,38 +123,43 @@ void rasterize_polylines(const std::vector<Polyline>& polylines, int base_x, int
       edge.ymin = from.y < to.y ? from.y : to.y;
       edge.ymax = from.y < to.y ? to.y : from.y;
       edge.direction = to.y > from.y ? 1 : -1;
-      edges.push_back(edge);
+      collected.push_back(edge);
     }
   }
-  if (edges.empty() || width <= 0 || first_y >= last_y) return;
+  if (collected.empty() || first_y >= last_y) return;
 
-  std::vector<float> coverage(static_cast<std::size_t>(width), 0.0f);
+  EdgeTable table;
+  table.build(std::move(collected));
+
   std::vector<std::pair<float, int>> crossings;
-  crossings.reserve(edges.size());
+  std::vector<CoverageRun> runs;
+  std::vector<CoverageRun> merged;
+  std::vector<std::pair<float, float>> events;
+  crossings.reserve(64);
+  runs.reserve(64);
+  merged.reserve(64);
+  events.reserve(128);
 
   for (int y = first_y; y < last_y; ++y) {
-    std::ranges::fill(coverage, 0.0f);
+    table.seek(y);
+    runs.clear();
     for (int sample = 0; sample < kSubsamples; ++sample) {
       const float sample_y =
           static_cast<float>(y) + (static_cast<float>(sample) + 0.5f) * kSubsampleWeight;
       crossings.clear();
-      for (const auto& edge : edges) {
-        if (sample_y < edge.ymin || sample_y >= edge.ymax) continue;
+      for (std::size_t index = table.first_candidate; index < table.edges.size(); ++index) {
+        const Edge& edge = table.edges[index];
+        if (edge.ymin > sample_y) break;  // 已按 ymin 排序：后面的边都还没开始
+        if (sample_y >= edge.ymax) continue;
         const float ratio = (sample_y - edge.y0) / (edge.y1 - edge.y0);
         crossings.emplace_back(edge.x0 + (edge.x1 - edge.x0) * ratio, edge.direction);
       }
-          if (crossings.size() < 2) continue;
-      std::ranges::sort(crossings, {}, &std::pair<float, int>::first);
-      int winding = 0;
-      for (std::size_t index = 0; index < crossings.size(); ++index) {
-        winding += crossings[index].second;
-        if (winding == 0 || index + 1 >= crossings.size()) continue;
-        const float sign = winding > 0 ? 1.0f : -1.0f;
-        add_span(coverage, base_x, crossings[index].first, crossings[index + 1].first,
-                 sign * kSubsampleWeight);
-      }
+      emit_runs(crossings, runs);
     }
-    sink(y, coverage);
+    if (runs.empty()) continue;
+    merge_runs(runs, merged, events);
+    if (merged.empty()) continue;
+    sink(y, merged);
   }
 }
 
@@ -155,11 +203,9 @@ void fill_path_aa(Canvas& canvas, const Path& path, const Paint& paint,
   const int last_y = std::min(clip.bottom(), static_cast<int>(std::ceil(bounds.bottom())) + 1);
   if (first_y >= last_y) return;
 
-  rasterize_polylines(polylines, clip.x, clip.width, first_y, last_y,
-                      [&canvas, &paint, &options, &clip](int y, const std::vector<float>& coverage) {
-                        canvas.blend_coverage_row(
-                            y, clip.x, std::span<const float>(coverage.data(), coverage.size()),
-                            paint, options.opacity, options.blend);
+  rasterize_polylines(polylines, first_y, last_y,
+                      [&canvas, &paint, &options](int y, const std::vector<CoverageRun>& runs) {
+                        canvas.blend_coverage_runs(y, runs, paint, options.opacity, options.blend);
                       });
 }
 
@@ -174,17 +220,49 @@ void rasterize_mask(Mask& mask, const Path& path, float origin_x, float origin_y
 
   const int first_y = std::max(0, static_cast<int>(std::floor(bounds.y)));
   const int last_y = std::min(mask.height(), static_cast<int>(std::ceil(bounds.bottom())) + 1);
-  auto values = mask.values();
   const int width = mask.width();
+  auto values = mask.values();
 
-  rasterize_polylines(polylines, 0, width, first_y, last_y,
-                      [&values, width](int y, const std::vector<float>& coverage) {
+  rasterize_polylines(polylines, first_y, last_y,
+                      [&values, width](int y, const std::vector<CoverageRun>& runs) {
                         auto* row = values.data() + static_cast<std::size_t>(y) *
                                                         static_cast<std::size_t>(width);
-                        for (std::size_t index = 0; index < coverage.size(); ++index) {
-                          const float value = std::abs(coverage[index]);
-                          const float clamped = value > 1.0f ? 1.0f : value;
-                          row[index] = static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+                        for (const auto& run : runs) {
+                          const float weight = std::abs(run.weight);
+                          if (weight <= 0.002f) continue;
+                          const float a = std::max(run.x0, 0.0f);
+                          const float b = std::min(run.x1, static_cast<float>(width));
+                          if (b <= a) continue;
+                          const int first_pixel = static_cast<int>(std::floor(a));
+                          const int last_pixel = static_cast<int>(std::ceil(b));
+                          const int full_begin =
+                              first_pixel + (static_cast<float>(first_pixel) < a ? 1 : 0);
+                          const int full_end = last_pixel - (static_cast<float>(last_pixel) > b ? 1 : 0);
+                          const auto byte_of = [](float value) -> std::uint8_t {
+                            const float clamped = value > 1.0f ? 1.0f : value;
+                            return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+                          };
+                          const auto cover_at = [&](int x) -> float {
+                            const float left = std::max(a, static_cast<float>(x));
+                            const float right = std::min(b, static_cast<float>(x) + 1.0f);
+                            return right > left ? (right - left) * weight : 0.0f;
+                          };
+                          // 完全覆盖的整段：一个字节写整段（遮罩是字节数组，不必逐像素浮点）
+                          if (full_end > full_begin) {
+                            const std::uint8_t value = byte_of(weight);
+                            for (int x = full_begin > 0 ? full_begin : 0; x < full_end && x < width; ++x) {
+                              if (value > row[x]) row[x] = value;
+                            }
+                          }
+                          if (first_pixel < full_begin && first_pixel >= 0 && first_pixel < width) {
+                            const std::uint8_t value = byte_of(cover_at(first_pixel));
+                            if (value > row[first_pixel]) row[first_pixel] = value;
+                          }
+                          const int tail = last_pixel - 1;
+                          if (tail >= 0 && tail < width && tail >= full_begin) {
+                            const std::uint8_t value = byte_of(cover_at(tail));
+                            if (value > row[tail]) row[tail] = value;
+                          }
                         }
                       });
 }
@@ -210,9 +288,34 @@ auto stroke_to_path(const Path& path, float width, float flatten_tolerance) -> P
       outline.line_to(math::Point{from.x - nx, from.y - ny});
       outline.close();
     }
-    // 圆头/圆角连接：所有顶点补圆（同绕向，非零填充下与线段四边形求并）
-    for (const auto& point : points) {
-      outline.add_circle(point, half);
+    // 圆头连接/端帽：只在**真的需要补角**的顶点补圆。
+    //
+    // 为什么不能“每个顶点都补”：图标/图表的折线往往有几十个点（曲线也是折线逼近的），
+    // 每个顶点补一个圆（4 段三次贝塞尔 → 展开后多条边）会让边数爆炸——实测描边因此吃掉
+    // 一帧的一半绘制时间。而平滑折线的相邻段夹角只有几度，外侧缺口远小于一个像素，
+    // 补不补在屏幕上完全看不出来（阈值取 25°，对应缺口 ≤ half × tan(12.5°)，
+    // 3px 线宽下约 0.33px）。端帽与尖角仍然一律补圆。
+    const bool needs_caps = points.size() >= 2;
+    for (std::size_t index = 0; index < points.size(); ++index) {
+      bool join = true;
+      if (index > 0 && index + 1 < points.size()) {
+        const math::Point before = points[index - 1];
+        const math::Point here = points[index];
+        const math::Point after = points[index + 1];
+        const float ax = here.x - before.x;
+        const float ay = here.y - before.y;
+        const float bx = after.x - here.x;
+        const float by = after.y - here.y;
+        const float length_a = std::sqrt(ax * ax + ay * ay);
+        const float length_b = std::sqrt(bx * bx + by * by);
+        if (length_a > 0.0001f && length_b > 0.0001f) {
+          const float cosine = (ax * bx + ay * by) / (length_a * length_b);
+          join = cosine < 0.9063f;  // cos(25°)
+        }
+      } else if (!needs_caps) {
+        join = false;
+      }
+      if (join) outline.add_circle(points[index], half);
     }
   }
   return outline;

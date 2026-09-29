@@ -10,6 +10,9 @@
 #include "pkg_internal.hpp"
 
 #if defined(_WIN32)
+// `winsock2.h` 会被 `windows.h` 带上，而后者默认把 `min`/`max` 定义成宏（
+// 实测本文件第 519 行的 `std::min` 因此报 C2589“非法标记”）。必须在包含前关掉。
+#define NOMINMAX 1
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else

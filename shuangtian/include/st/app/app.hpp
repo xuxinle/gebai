@@ -95,6 +95,10 @@ class Application final : public control::Host {
   void render_frame();
   /// 查询控制通道端口（0=未启动）。
   [[nodiscard]] auto control_port() const noexcept -> std::uint16_t;
+  /// 最后一帧的绘制分解（**仅当 `ST_PAINT_PROFILE=1` 时非空**）：
+  /// 按原语（填充/路径/描边/阴影/文字/裁剪…）给出调用次数、覆盖像素与累计耗时。
+  /// 存在的理由：“一帧 30ms”本身不指向任何行动——是阴影、文字还是渐变，只能靠分解看。
+  [[nodiscard]] auto paint_profile() const -> const raster::PaintProfiler*;
   /// 受控提前启动（`run` 内部会调用；自检可先启动再注入事件）。
   auto start() -> Status;
   [[nodiscard]] auto started() const noexcept -> bool { return started_; }

@@ -35,7 +35,9 @@
 | **要写代码编辑器（高亮/行号/编辑）** | 内置 30 种主流语言的语法高亮（规则驱动、**可自定义语言**：注册一份规则即可，与内置语言同一台扫描器）；`ui::CodeEditor` 提供编辑/选择/撤销/缩进/注释切换/只读查看器与完整控制通道属性面 |
 | **要写大模型应用（流式 Markdown）** | `st::md`（解析 + 流式增量 + 零依赖代码高亮）+ `ui::MarkdownView` 组件：`append_chunk` 边生成边渲染，前缀稳定不跳变 |
 | **不想引入第三方依赖（含包管理）** | 本体零依赖；`stpm`（`st` CLI）自管构建与**第三方源码依赖**（语义版本回溯求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直接驱动编译器，不经 CMake/Make） |
-| **编译太慢** | 预编译头 + 头依赖增量（`-MMD` 解析）+ 8 路并行 + lld 链接 + 目标级源排除：全量数十秒、改一文件秒级、无改动毫秒级 |
+| **编译太慢** | 预编译头 + 头依赖增量（GCC `-MMD` / MSVC `/sourceDependencies`）+ 多路并行 + 共享对象缓存：全量数十秒、改一文件秒级、无改动毫秒级 |
+| **软件渲染会不会很慢？** | 覆盖率以**运行段**逐行交付（非逐像素数组）+ 逐项 SIMD + 阴影遮罩缓存：画廊全量重绘 1280×800 **≈12 ms**（原 63.2 ms）。性能手法的收益与代价（含一次失败的 SIMD 尝试）全部记在 `DESIGN.md` §4.2.3；`ST_PAINT_PROFILE=1` 可看逐原语分解（§4.2.7） |
+| **界面好不好看、会不会越改越糊？** | 设计令牌带**可断言契约**：正文/辅助小字/语义色/按钮面/焦点环的对比度下限、文字三级的单调层次、阴影三档的两层结构与单调性、尺度阶梯——全部写成测试（`tests/ui_theme_test.cpp`）。改调色板越线立刻红灯，而不是等有人肉眼发现（§4.2.4） |
 
 ## 目录与分层
 
@@ -45,7 +47,8 @@ shuangtian/
 ├── DESIGN.md        # 权威设计（分层、接口、协议、DPI、包管理、里程碑）
 ├── README.md        # 本文件
 ├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / mdeditor / st 自身）
-├── bootstrap.sh     # 自举：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
+├── bootstrap.sh     # 自举（Linux/macOS）：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
+├── bootstrap.ps1    # 自举（Windows）：同上，自动定位 MSVC（vswhere + vcvars64）注入环境
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
 ├── vendor/              # 第三方源码（nlohmann/json + quickjs-ng，见 vendor/README.md 与台账）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
@@ -84,6 +87,32 @@ python3 tools/st_visual_check.py     # 完整视觉验证：dev + san 两档、D
 ```
 
 在歌白智能体里，这一切由 **`shuangtian` 子代理**封装为工具：`shuangtian_run`（构建/测试/lint/启动/停止）、`shuangtian_tree/find/get/set/invoke`、`shuangtian_click/type/key`、`shuangtian_capture`（截图直接可见）、`shuangtian_visual/wait/metrics/call`。
+
+## 快速开始（Windows，MSVC）
+
+```powershell
+cd shuangtian
+
+# ① 自举工具链（自动定位 MSVC：vswhere + vcvars64；本机实测 ~20s）
+pwsh -NoProfile -File .\bootstrap.ps1
+
+# ② 构建示例（首次全量 ~32s；之后增量秒级、无改动毫秒级）
+.\build\bin\st.exe build gallery --profile dev
+
+# ③ 无头启动 + 用控制通道看与操作
+.\build\dev\bin\gallery.exe --headless --control-port 0 --control-file $env:TEMP\st-ctl.json
+
+# ④ 测试与禁令扫描
+.\build\bin\st.exe test
+.\build\bin\st.exe lint
+
+# ⑤ 外挂性能基准（可选：强制全量重绘 N 帧，打印阶段耗时）
+$env:ST_PAINT_PROFILE=1; .\build\dev\bin\gallery.exe --headless --bench 60
+```
+
+Windows 上的工具链口径（详见 `CONVENTIONS.md` §10.1）：**MSVC 首选**（无 MSVC 才回退
+MinGW/clang）；GCC 风格标志由 `stpm` 统一翻译（无等价物的会列出丢弃清单）；符号调试信息用 `/Z7`
+（并行编译下不争 PDB）；依赖追踪走 `/sourceDependencies` JSON（改头文件能正确触发重编）。
 
 ## 控制通道速览（`st-control/1`）
 
@@ -173,6 +202,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | Markdown（解析 / 流式 / 高亮 / 渲染组件） | ✅ |
 | TCP 控制通道（tree/find/get/set/invoke/input.*/capture/visual/wait/metrics/events/theme/app） | ✅ |
 | 自研包管理器 `stpm`（求解/lock/获取/校验/vendor/构建/lint） | ✅ 构建与 lint 完整；第三方源码获取限制见 `DESIGN.md` §7.4 |
+| **Windows 宿主 + MSVC 工具链** | ✅ 首选 MSVC（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；实测自举 20s / 全量构建 32s / 测试 251 用例全绿 |
 | 动画与过渡系统 | ⏳ v0.2 |
 
 ## 相关文档

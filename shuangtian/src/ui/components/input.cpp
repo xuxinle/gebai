@@ -9,6 +9,7 @@
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
+#include "st/ui/icon.hpp"
 
 namespace st::ui {
 namespace {
@@ -17,6 +18,8 @@ namespace {
 constexpr float k_cursor_width = 2.0f;
 constexpr float k_cursor_radius = 1.0f;
 constexpr float k_icon_slot_width = 18.0f;
+/// 前置图标绘制尺寸（比槽位小一点，四周留白；与 `IconView` 的 18 保持同一光学尺度）
+constexpr float k_icon_size = 16.0f;
 constexpr float k_input_min_width = 160.0f;
 constexpr float k_textarea_default_lines = 4.0f;
 constexpr double k_blink_period = 1.0;
@@ -286,6 +289,18 @@ void Input::paint_content(const RenderContext& context, raster::Canvas& canvas) 
   const float line = port.line_height(size);
   const float text_y = box.y + (box.height - line) * 0.5f;
   const std::string shown = display_text();
+
+  // 前置图标：`inner_box` 一直为它留了槽位，但**此前从未被绘制**——
+  // 表现为“设了图标却看不见，文字还莫名右移一段”（空槽位仍然占宽）。
+  if (!icon_prefix_.empty()) {
+    const math::Rect slot{bounds_.x + style_.padding.left + metrics.space_md, bounds_.y,
+                          k_icon_slot_width, bounds_.height};
+    const math::Rect glyph{slot.x + (slot.width - k_icon_size) * 0.5f,
+                           slot.y + (slot.height - k_icon_size) * 0.5f, k_icon_size, k_icon_size};
+    const math::Color icon_color =
+        usable ? (focused() ? colors.primary : colors.text_muted) : colors.text_faint;
+    Icon::draw(canvas, icon_prefix_, glyph, icon_color, 0.0f);
+  }
 
   canvas.push_clip_rect(box);
   if (shown.empty()) {

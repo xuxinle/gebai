@@ -6,6 +6,9 @@
 #include <vector>
 
 #if defined(_WIN32)
+// `windows.h` 默认把 `min`/`max` 定义成宏，会静默破坏 `std::min`/`std::max`/`std::numeric_limits<T>::max()`
+// 的调用点（实测报 C2589“非法标记”，与真正原因相隔很远）。必须在包含前关掉。
+#define NOMINMAX 1
 #include <windows.h>
 // 平台边界：Windows 宽字符 API 与 UTF-8 的转换只能在这里发生（CONVENTIONS §10）。
 // 中文命令行参数在 Windows 上是 ANSI（如 GBK）；不转就必然乱码。

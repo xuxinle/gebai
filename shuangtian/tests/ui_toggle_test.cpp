@@ -18,6 +18,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
+
 #include "st/text/font.hpp"
 #include "st/text/text.hpp"
 #include "st/ui/components/toggle.hpp"
