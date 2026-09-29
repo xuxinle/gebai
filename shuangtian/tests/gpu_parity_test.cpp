@@ -14,15 +14,19 @@
 #include "st/test/test.hpp"
 
 #include <cmath>
+#include <tuple>
 #include <format>
 #include <string>
 #include <vector>
 
+#include "st/app/text_port.hpp"
+#include "st/codec/png.hpp"
 #include "st/core/print.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/raster/paint.hpp"
+#include "st/text/text.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/input.hpp"
@@ -58,35 +62,46 @@ inline constexpr int kHeight = 300;
 /// 对比报告。
 struct Comparison {
   double differing_ratio{0.0};   ///< 超差像素占比（0..1）
+  double structural_ratio{0.0};  ///< **结构性**超差占比（差 >64：内容不同，而非边缘抗锯齿）
   int max_delta{0};              ///< 最大通道差
-  double ink_ratio_left{0.0};    ///< 左侧覆盖率（非零 alpha 占比）
-  double ink_ratio_right{0.0};   ///< 右侧覆盖率
+  double ink_ratio_left{0.0};    ///< 左侧非**底色**像素占比（确认两侧都真画了东西）
+  double ink_ratio_right{0.0};   ///< 右侧非底色像素占比
   std::string first_offsets{};   ///< 前三处超差坐标（诊断用）
+  std::string worst_offsets{};   ///< 最差的五处（判断是否只是边缘）
 };
 
-[[nodiscard]] auto ink_ratio(std::span<const std::uint32_t> pixels) -> double {
+/// 非**底色**像素占比。
+///
+/// 为什么不用“非零 alpha”：场景底色是不透明的，那样算出来永远是 1.0——
+/// 一个恒为 1 的指标看起来像“断言通过了”，实际什么都没验证（本测试曾踩到这个）。
+[[nodiscard]] auto ink_ratio(std::span<const std::uint32_t> pixels, std::uint32_t background)
+    -> double {
   if (pixels.empty()) return 0.0;
   std::size_t ink = 0;
   for (const std::uint32_t pixel : pixels) {
-    if ((pixel & 0xFFU) != 0U) ++ink;
+    if (pixel != background) ++ink;
   }
   return static_cast<double>(ink) / static_cast<double>(pixels.size());
 }
 
 /// 逐像素对比（`max_channel_delta` 以内算一致）。
 [[nodiscard]] auto compare(std::span<const std::uint32_t> left,
-                           std::span<const std::uint32_t> right, int max_channel_delta,
-                           int width) -> Comparison {
+                           std::span<const std::uint32_t> right, int max_channel_delta, int width,
+                           std::uint32_t background = 0x0A0F1AFFU) -> Comparison {
   Comparison result;
-  result.ink_ratio_left = ink_ratio(left);
-  result.ink_ratio_right = ink_ratio(right);
+  result.ink_ratio_left = ink_ratio(left, background);
+  result.ink_ratio_right = ink_ratio(right, background);
   if (left.size() != right.size() || left.empty()) {
     result.differing_ratio = 1.0;
+    result.structural_ratio = 1.0;
     result.max_delta = 255;
     return result;
   }
   std::size_t differing = 0;
+  std::size_t structural = 0;
   int reported = 0;
+  std::array<std::pair<int, int>, 5> worst{};  // (delta, offset)
+  worst.fill({0, -1});
   for (std::size_t index = 0; index < left.size(); ++index) {
     const std::uint32_t a = left[index];
     const std::uint32_t b = right[index];
@@ -96,7 +111,13 @@ struct Comparison {
       const int cb = static_cast<int>((b >> shift) & 0xFFU);
       delta = std::max(delta, std::abs(ca - cb));
     }
-    result.max_delta = std::max(result.max_delta, delta);
+    if (delta > result.max_delta) result.max_delta = delta;
+    for (auto& entry : worst) {
+      if (delta > entry.first) {
+        entry = {delta, static_cast<int>(index)};
+        break;
+      }
+    }
     if (delta > max_channel_delta) {
       ++differing;
       if (reported < 3) {
@@ -108,17 +129,37 @@ struct Comparison {
     }
   }
   result.differing_ratio = static_cast<double>(differing) / static_cast<double>(left.size());
+  result.structural_ratio = static_cast<double>(structural) / static_cast<double>(left.size());
   return result;
 }
 
 /// 同一棵界面分别画到软件画布与 GPU 画布。
+///
+/// **必须带真实字体端口**：否则 `Text` 与带文字的控件（按钮/标签）量不出尺寸、根本不画——
+/// 两边都“没画”，对比结果就是完美的 0 差异。这种“假绿”比红更糟：
+/// 它会让“文字在 GPU 上能画”这个结论**毫无依据**（本测试第一版就是这个毛病）。
 struct Scene {
   Theme theme{Theme::light()};
-  st::ui::RenderContext context{theme, nullptr, 0.0};
+  std::shared_ptr<st::text::FontStack> stack{};
+  std::unique_ptr<st::text::TextRenderer> renderer{};
+  std::unique_ptr<st::ui::TextPort> port{};
+  // `RenderContext` 持有 `theme` 引用（因此不可赋值）：用 optional 延迟构造——
+  // 必须先建好字体与文本端口，再把端口指针交给它。
+  std::optional<st::ui::RenderContext> context_storage{};
+  [[nodiscard]] auto context() -> st::ui::RenderContext& { return *context_storage; }
+  bool has_text{false};
   Canvas software{kWidth, kHeight};
   std::unique_ptr<Surface> gpu{};
 
   explicit Scene(bool with_gpu = true) {
+    context_storage.emplace(st::ui::RenderContext{theme, nullptr, 0.0});
+    if (auto loaded = st::text::FontStack::system_default(); loaded.has_value()) {
+      stack = std::make_shared<st::text::FontStack>(std::move(*loaded));
+      renderer = std::make_unique<st::text::TextRenderer>(*stack);
+      port = st::app::make_text_port(*renderer);
+      context_storage.emplace(st::ui::RenderContext{theme, port.get(), 0.0});
+      has_text = true;
+    }
     if (with_gpu) {
       auto created = st::raster::gpu::create_canvas(kWidth, kHeight, 1.0f, {});
       if (created.has_value()) gpu = std::move(*created);
@@ -127,10 +168,10 @@ struct Scene {
 
   void render(const st::ui::Element& root) {
     software.clear(Color{0x0A, 0x0F, 0x1A, 0xFF});
-    root.paint(context, software);
+    root.paint(context(), software);
     if (gpu != nullptr) {
       gpu->clear(Color{0x0A, 0x0F, 0x1A, 0xFF});
-      root.paint(context, *gpu);
+      root.paint(context(), *gpu);
     }
   }
 };
@@ -146,13 +187,13 @@ ST_TEST(gpu_matches_software_for_solid_rounded_rect) {
 
   Card card(18.0f);
   card.style().background = Color{0x22, 0x33, 0x44, 0xFF};
-  card.measure(scene.context, st::ui::Constraints{.max_width = 200.0f, .max_height = 120.0f});
-  card.arrange(scene.context, Rect{40.0f, 30.0f, 200.0f, 120.0f});
+  card.measure(scene.context(), st::ui::Constraints{.max_width = 200.0f, .max_height = 120.0f});
+  card.arrange(scene.context(), Rect{40.0f, 30.0f, 200.0f, 120.0f});
 
   scene.software.clear(Color{0x0A, 0x0F, 0x1A, 0xFF});
-  card.paint(scene.context, scene.software);
+  card.paint(scene.context(), scene.software);
   scene.gpu->clear(Color{0x0A, 0x0F, 0x1A, 0xFF});
-  card.paint(scene.context, *scene.gpu);
+  card.paint(scene.context(), *scene.gpu);
 
   const Comparison result =
       compare(scene.software.pixels(), scene.gpu->pixels(), /*max_channel_delta=*/6, kWidth);
@@ -190,25 +231,33 @@ ST_TEST(gpu_matches_software_for_layout_of_real_widgets) {
   auto button = std::make_unique<Button>("确定");
   root.add_child(std::move(button));
 
-  root.measure(scene.context, st::ui::Constraints{.max_width = kWidth, .max_height = kHeight});
-  root.arrange(scene.context, Rect{0.0f, 0.0f, kWidth, kHeight});
+  root.measure(scene.context(), st::ui::Constraints{.max_width = kWidth, .max_height = kHeight});
+  root.arrange(scene.context(), Rect{0.0f, 0.0f, kWidth, kHeight});
   scene.render(root);
 
   const Comparison result =
       compare(scene.software.pixels(), scene.gpu->pixels(), /*max_channel_delta=*/12, kWidth);
-  st::print("[gpu-diff] 小界面：超差 {:.3f}% · 最大Δ{} · 覆盖 {:.3f} vs {:.3f} · {}\n",
-            result.differing_ratio * 100.0, result.max_delta, result.ink_ratio_left,
-            result.ink_ratio_right, result.first_offsets);
+  st::print("[gpu-diff] 小界面：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f} · {}\n",
+            result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
+            result.ink_ratio_left, result.ink_ratio_right, result.worst_offsets);
   // 几何必须落在同一位置：超差像素占比很小；覆盖率（该画的地方）必须接近
   ST_CHECK(result.differing_ratio < 0.05);
+  // **结构性差异必须近于零**：形状/文字/颜色都落在同一位置。
+  // 允许的残差只有"边缘抗锯齿权重不同"（SDF 解析覆盖率 vs 扫描线覆盖率），
+  // 而那种差异是单个像素级别的、不可能成片——所以用"差 >64 的像素占比"当判据，
+  // 而不是用一个宽松的 max_delta 上限（那会同时放过"整块内容错了"）。
+  ST_CHECK(result.structural_ratio < 0.001);
   ST_CHECK(std::abs(result.ink_ratio_left - result.ink_ratio_right) < 0.02);
-  ST_CHECK(result.max_delta <= 96);
 }
 
 ST_TEST(gpu_text_matches_software_closely) {
   if (!gpu_ready()) return;
   Scene scene;
   if (scene.gpu == nullptr) return;
+  // 没有字体端口时这个用例是**空转的**（两边都没画字 → 完美 0 差异）：
+  // 必须显式确认字体真的加载了，否则"文字一致"这个结论没有依据。
+  ST_CHECK(scene.has_text);
+  if (!scene.has_text) return;
 
   // 文字是"覆盖率位图"路径：两边字形同源，只有边缘合成方式不同
   st::ui::RenderContext context{scene.theme, nullptr, 0.0};
@@ -222,11 +271,11 @@ ST_TEST(gpu_text_matches_software_closely) {
 
   const Comparison result =
       compare(scene.software.pixels(), scene.gpu->pixels(), /*max_channel_delta=*/16, kWidth);
-  st::print("[gpu-diff] 文字：超差 {:.3f}% · 最大Δ{} · 覆盖 {:.4f} vs {:.4f} · {}\n",
-            result.differing_ratio * 100.0, result.max_delta, result.ink_ratio_left,
-            result.ink_ratio_right, result.first_offsets);
+  st::print("[gpu-diff] 文字：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.4f} vs {:.4f} · {}\n",
+            result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
+            result.ink_ratio_left, result.ink_ratio_right, result.worst_offsets);
   // 有字必须有墨：两边覆盖率同量级（字形缺失会让 GPU 侧覆盖率归零）
-  ST_CHECK(result.ink_ratio_right > 0.0);
+  // 两侧都必须真的画了字（非底色像素占比远大于 0），且覆盖率量级接近
   ST_CHECK(std::abs(result.ink_ratio_left - result.ink_ratio_right) < 0.01);
   ST_CHECK(result.differing_ratio < 0.05);
 }
@@ -238,8 +287,8 @@ ST_TEST(gpu_gradient_uses_same_lut_as_software) {
 
   Card card(0.0f);
   card.style().background = Color{0, 0, 0, 0};
-  card.measure(scene.context, st::ui::Constraints{.max_width = 256.0f, .max_height = 40.0f});
-  card.arrange(scene.context, Rect{0.0f, 0.0f, 256.0f, 40.0f});
+  card.measure(scene.context(), st::ui::Constraints{.max_width = 256.0f, .max_height = 40.0f});
+  card.arrange(scene.context(), Rect{0.0f, 0.0f, 256.0f, 40.0f});
 
   st::raster::Paint paint = st::raster::Paint::with_gradient(st::raster::Gradient::linear(
       st::math::Point{0.0f, 0.0f}, st::math::Point{256.0f, 0.0f},
@@ -256,6 +305,40 @@ ST_TEST(gpu_gradient_uses_same_lut_as_software) {
             result.max_delta, result.first_offsets);
   ST_CHECK(result.differing_ratio < 0.05);
   ST_CHECK(result.max_delta <= 40);
+}
+
+ST_TEST(gpu_shadow_matches_software) {
+  // 单独验证投影：这是 GPU 侧唯一需要**多遍渲染到纹理**（遮罩 RT + 可分离盒式模糊）的原语，
+  // 也是软件光栅器里最贵的一项。若不单独测它，`capabilities().shadows=true` 就是空话。
+  if (!gpu_ready()) return;
+  auto gpu = st::raster::gpu::create_canvas(kWidth, kHeight, 1.0f, {});
+  ST_CHECK(gpu.has_value());
+  if (!gpu.has_value()) return;
+  Surface& target = **gpu;
+  Canvas software(kWidth, kHeight);
+  const Rect rect{80.0f, 70.0f, 160.0f, 100.0f};
+  const Color base{0x0A, 0x0F, 0x1A, 0xFF};
+  const Color shadow{0x00, 0x00, 0x00, 0x8C};
+  for (const auto& [radius, blur, offset] :
+       std::vector<std::tuple<float, float, st::math::Point>>{{16.0f, 6.0f, {0.0f, 2.0f}},
+                                                              {0.0f, 22.0f, {0.0f, 6.0f}},
+                                                              {12.0f, 14.0f, {2.0f, 4.0f}}}) {
+    software.clear(base);
+    software.draw_shadow(rect, radius, blur, shadow, offset);
+    target.clear(base);
+    target.draw_shadow(rect, radius, blur, shadow, offset);
+    const Comparison result = compare(software.pixels(), target.pixels(), 12, kWidth,
+                                      /*background=*/0x0A0F1AFFU);
+    st::print("[gpu-diff] 投影 r={} b={}：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.3f} vs {:.3f}\n",
+              radius, blur, result.differing_ratio * 100.0, result.structural_ratio * 100.0,
+              result.max_delta, result.ink_ratio_left, result.ink_ratio_right);
+    // 投影是**低对比度大面积**的东西：结构性差异必须为零，
+    // 否则就是位置/半径/模糊对不上（那在视觉上是“阴影歪了”）
+    ST_CHECK(result.structural_ratio < 0.005);
+    // 两侧都必须真的画出了投影（非底色像素占比同量级）
+    ST_CHECK(result.ink_ratio_left > 0.05);
+    ST_CHECK(std::abs(result.ink_ratio_left - result.ink_ratio_right) < 0.02);
+  }
 }
 
 ST_TEST(gpu_capabilities_are_consistent_with_probe) {

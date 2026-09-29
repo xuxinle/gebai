@@ -50,6 +50,8 @@ auto live_canvas_count() noexcept -> std::uint32_t { return 0; }
 #include <utility>
 #include <vector>
 
+#include "rasterize_internal.hpp"
+#include "rasterize_internal.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"
 #include "st/core/time.hpp"
@@ -261,11 +263,12 @@ cbuffer Params : register(b0) {
   float4 g_clip;        // 圆角裁剪矩形（物理像素）
   float4 g_clip_radii;
   float4 g_axis;        // 渐变几何：线性=起点/终点，径向=圆心+…，扫掠=圆心
-  float4 g_axis_extra;  // x=渐变种类(0线性/1径向/2扫拂) y=半径
+  float4 g_axis_extra;  // x=渐变种类(0线性/1径向/2扫掠) y=半径 或 模糊半径
   float4 g_viewport;    // 视口（物理像素）
 };
 
 Texture2D g_texture : register(t0);
+Texture2D g_clip_texture : register(t1);
 SamplerState g_sampler : register(s0);
 
 struct VsOut {
@@ -304,6 +307,21 @@ float4 ps_main(VsOut input) : SV_Target {
   float4 source = g_color;
   float coverage = 1.0;
 
+  if (mode == 4) {
+    // 可分离盒式模糊（阴影遮罩）：与 `blur_mask` 同一口径（3 遍 [水平+垂直]）。
+    // 循环上界必须是编译期常量，而半径是运行期参数：取足够大的常量 + 条件跳过。
+    const int radius = (int)g_axis_extra.x;
+    const float2 step = g_axis.xy / g_viewport.xy;
+    float sum = 0.0;
+    float count = 0.0;
+    for (int i = -64; i <= 64; ++i) {
+      if (i < -radius || i > radius) continue;
+      sum += g_texture.SampleLevel(g_sampler, input.local / g_rect.zw + step * (float)i, 0).r;
+      count += 1.0;
+    }
+    return float4(count > 0.0 ? sum / count : 0.0, 0.0, 0.0, 1.0);
+  }
+
   if (mode == 0 || mode == 1) {
     // 实心 / 渐变圆角矩形：SDF 给出解析覆盖率（1px 过渡带）
     coverage = saturate(0.5 - rounded_sdf(input.local, half_size, g_radii));
@@ -332,7 +350,12 @@ float4 ps_main(VsOut input) : SV_Target {
   }
 
   float factor = coverage * g_mode.y;
-  if (g_mode.z > 1.5) {
+  if (g_mode.z > 2.5) {
+    // 路径裁剪：用遮罩纹理采样（t1）。遮罩在区域内的相对位置 = (像素 - 区域左上) / 区域尺寸
+    const float2 uv = (input.pixel - g_clip.xy) / max(g_clip.zw, float2(1.0, 1.0));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
+    factor *= g_clip_texture.SampleLevel(g_sampler, uv, 0).r;
+  } else if (g_mode.z > 1.5) {
     // 圆角裁剪：用同一个 SDF 求覆盖率（不需要额外的遮罩纹理）
     const float2 clip_half = g_clip.zw * 0.5;
     factor *= saturate(0.5 - rounded_sdf(input.pixel - g_clip.xy, clip_half, g_clip_radii));
@@ -364,6 +387,7 @@ enum class DrawMode : std::uint32_t {
   GradientRoundRect = 1,
   CoverageMask = 2,
   Bitmap = 3,
+  BoxBlur = 4,
 };
 
 /// 着色器与固定状态（设备级共享；懒创建）。
@@ -372,6 +396,7 @@ struct Pipeline {
   ID3D11PixelShader* ps{nullptr};
   ID3D11Buffer* constants{nullptr};
   ID3D11BlendState* blend{nullptr};
+  ID3D11BlendState* opaque{nullptr};  ///< 关闭混合（写遮罩时用：要覆盖写入而非叠加）
   ID3D11RasterizerState* raster_scissor{nullptr};
   ID3D11SamplerState* sampler_linear{nullptr};
   ID3D11SamplerState* sampler_point{nullptr};
@@ -401,6 +426,14 @@ struct Pipeline {
     blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     if (FAILED(device->CreateBlendState(&blend_desc, &blend))) {
       error = "创建混合状态失败";
+      return;
+    }
+    // 不混合（写遮罩：要覆盖写入而非叠加）
+    D3D11_BLEND_DESC opaque_desc{};
+    opaque_desc.RenderTarget[0].BlendEnable = FALSE;
+    opaque_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(device->CreateBlendState(&opaque_desc, &opaque))) {
+      error = "创建不混合状态失败";
       return;
     }
     D3D11_RASTERIZER_DESC raster{};
@@ -485,6 +518,7 @@ struct Pipeline {
     if (sampler_linear != nullptr) sampler_linear->Release();
     if (raster_scissor != nullptr) raster_scissor->Release();
     if (blend != nullptr) blend->Release();
+    if (opaque != nullptr) opaque->Release();
     if (constants != nullptr) constants->Release();
     if (ps != nullptr) ps->Release();
     if (vs != nullptr) vs->Release();
@@ -530,6 +564,10 @@ class GpuCanvas final : public Surface {
     for (auto& entry : ramp_cache_) {
       if (entry.view != nullptr) entry.view->Release();
     }
+    for (auto& entry : path_cache_) {
+      if (entry.view != nullptr) entry.view->Release();
+    }
+    for (auto& entry : shadow_cache_) release_shadow_targets(entry.targets);
     release_readback();
     release_resources();
     context_->Release();
@@ -602,16 +640,59 @@ class GpuCanvas final : public Surface {
     }
     draw_gradient(physical, radii, *paint.gradient(), options.opacity, op);
   }
-  void fill_path(const Path&, const Paint&, DrawOptions) override { not_yet("fill_path"); }
-  void stroke_path(const Path&, const Paint&, float, DrawOptions) override { not_yet("stroke"); }
   void fill_circle(math::Point center, float radius, const Paint& paint,
                    DrawOptions options = {}) override {
     // 圆就是“半径等于半边的圆角矩形”——SDF 下两者完全等价，不需要单独的圆图元
     fill_rect(math::Rect{center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f}, paint,
               radius, options);
   }
-  void draw_shadow(math::Rect, float, float, math::Color, math::Point, DrawOptions) override {
-    not_yet("shadow");
+  /// 投影：遮罩 RT → 可分离盒式模糊 ×3 → 缓存 → 合成。
+  ///
+  /// 与软件同一口径（几何按 0.25 量化做缓存键、遮罩在**规范化坐标**下模糊），
+  /// 因此同一张卡片在两者下位置与形状一致。
+  void draw_shadow(math::Rect rect, float radius, float blur, math::Color color,
+                   math::Point offset = {}, DrawOptions options = {}) override {
+    if (rect.is_empty() || color.a == 0U) return;
+    const math::Rect physical = to_physical_rect(rect);
+    const std::int64_t start = st::time::now_ns();
+    const ShadowMask mask =
+        shadow_mask(physical.width, physical.height, radius * scale_, blur * scale_,
+                    math::Point{offset.x * scale_, offset.y * scale_});
+    if (mask.view == nullptr) return;
+    const ShaderParams params = base_params(
+        DrawMode::CoverageMask,
+        math::Rect{physical.x + static_cast<float>(mask.region.x),
+                   physical.y + static_cast<float>(mask.region.y),
+                   static_cast<float>(mask.region.width),
+                   static_cast<float>(mask.region.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, options.opacity, color);
+    submit(params, mask.view, false);
+    log_op(PaintOp::Shadow, start,
+           static_cast<std::uint64_t>(mask.region.width) *
+               static_cast<std::uint64_t>(mask.region.height));
+  }
+
+  // —— 路径：**CPU 覆盖率光栅化 + GPU 合成** ——
+  //
+  // 这是有意为之的混合路径，把理由说清楚：
+  // 任意路径要“与软件光栅器一致”有两条路——
+  //   ① GPU 三角化 + 解析 AA：需要曲线三角化与边缘 AA 权重，而软件侧已实现这套
+  //      且被大量回归测试钉住；在 GPU 侧重写一份，结果是两套不可能一致的抗锯齿，
+  //      而一致性正是本项目的验收口径。
+  //   ② 复用同一套覆盖率光栅化做**遮罩**，交给 GPU 合成。
+  // 选 ②：正确性同源（同一个 `rasterize_mask`），且**静态路径可整块缓存**——
+  // 图标与自绘形状在帧间不变，缓存后每帧只剩一次纹理贴图（软件侧每帧都要重新光栅化）。
+  // 因此路径上的 GPU 收益来自**缓存与合成**，不来自光栅化本身；不假装它是全 GPU 光栅化。
+  void fill_path(const Path& path, const Paint& paint, DrawOptions options = {}) override {
+    rasterize_path(path, path, options.opacity, paint.color(), PaintOp::FillPath);
+  }
+  void stroke_path(const Path& path, const Paint& paint, float width,
+                   DrawOptions options = {}) override {
+    if (path.is_empty() || width <= 0.0f) return;
+    // 先按**物理像素**把路径描边成轮廓，再光栅化为遮罩（与软件同一套 stroke_to_path）
+    const Path outline = detail::stroke_to_path(path.scaled(scale_), width * scale_,
+                                                options.antialias ? 0.25f : 0.5f);
+    rasterize_path(path, outline, options.opacity, paint.color(), PaintOp::Stroke);
   }
   void draw_canvas(const Surface& source, math::Rect destination, DrawOptions options) override {
     const int width = source.physical_width();
@@ -674,7 +755,25 @@ class GpuCanvas final : public Surface {
     frame.mode = 2;
     clip_stack_.push_back(frame);
   }
-  void push_clip_path(const Path&) override { not_yet("push_clip_path"); }
+  /// 阴影裁剪（遮罩纹理）：着色器用 t1 采样遮罩
+  void push_clip_path(const Path& path) override {
+    // 路径裁剪：同样走“覆盖率遮罩 + 纹理裁剪”，与填充/描边同一套（见下方 `rasterize_path`）
+    if (path.is_empty()) return;
+    const Path physical = scale_ == 1.0f ? path : path.scaled(scale_);
+    const math::Rect bounds = physical.flattened_bounds(0.25f);
+    if (bounds.is_empty()) return;
+    const math::IntRect area = bounds.inflate(1.0f).round_out();
+    if (area.is_empty()) return;
+    ID3D11ShaderResourceView* view = path_mask_texture(path, area, &physical);
+    if (view == nullptr) return;
+    ClipFrame frame;
+    frame.rect = area.intersect(current_clip().rect);
+    frame.shape = math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
+                             static_cast<float>(area.width), static_cast<float>(area.height)};
+    frame.mask = view;
+    frame.mode = 3;  // 遮罩纹理裁剪
+    clip_stack_.push_back(frame);
+  }
   void pop_clip() override {
     if (!clip_stack_.empty()) clip_stack_.pop_back();
   }
@@ -761,12 +860,13 @@ class GpuCanvas final : public Surface {
   [[nodiscard]] auto rtv() const noexcept -> ID3D11RenderTargetView* { return rtv_; }
 
  private:
-  /// 裁剪帧：矩形裁剪走剪裁矩形；圆角裁剪额外带一个 SDF 形状（着色器里求覆盖率）。
+  /// 裁剪帧：矩形裁剪走剪裁矩形；圆角裁剪用 SDF；路径裁剪用遮罩纹理。
   struct ClipFrame {
     math::IntRect rect{0, 0, 0, 0};
     math::Rect shape{};
     std::array<float, 4> radii{0.0f, 0.0f, 0.0f, 0.0f};
-    std::uint32_t mode{0};  ///< 0=无 1=矩形（剪裁矩形） 2=圆角（SDF）
+    ID3D11ShaderResourceView* mask{nullptr};  ///< mode 3 时的遮罩纹理（不持有所有权）
+    std::uint32_t mode{0};  ///< 0=无 1=矩形（剪裁矩形） 2=圆角（SDF） 3=遮罩纹理
   };
 
   [[nodiscard]] auto current_clip() const noexcept -> const ClipFrame& {
@@ -821,15 +921,20 @@ class GpuCanvas final : public Surface {
 
   /// 提交一次四边形绘制（设状态 → 绑纹理 → 上传参数 → Draw）。
   /// `point_sample`：小字形纹理必须**点采样**（线性采样会把 ≤1px 的笔画抹糊）。
-  void submit(const ShaderParams& params, ID3D11ShaderResourceView* view, bool point_sample) {
+  void submit(const ShaderParams& params, ID3D11ShaderResourceView* view, bool point_sample,
+              bool opaque = false, int viewport_width = 0, int viewport_height = 0) {
     const Pipeline& pipes = pipeline();
     if (!pipes.ok) return;
     if (rtv_ == nullptr) return;
+    const ClipFrame& clip = current_clip();
+    ID3D11ShaderResourceView* clip_mask = clip.mode > 2 ? clip.mask : nullptr;
+    const int view_w = viewport_width > 0 ? viewport_width : physical_width_;
+    const int view_h = viewport_height > 0 ? viewport_height : physical_height_;
 
     ID3D11RenderTargetView* targets[1] = {rtv_};
     context_->OMSetRenderTargets(1, targets, nullptr);
-    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(physical_width_),
-                                  static_cast<float>(physical_height_), 0.0f, 1.0f};
+    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(view_w),
+                                  static_cast<float>(view_h), 0.0f, 1.0f};
     context_->RSSetViewports(1, &viewport);
     // 矩形裁剪走剪裁矩形（零着色器成本）：圆角裁剪交给 SDF
     const math::IntRect scissor = current_clip().rect;
@@ -838,7 +943,7 @@ class GpuCanvas final : public Surface {
     context_->RSSetScissorRects(1, &rect);
     context_->RSSetState(pipes.raster_scissor);
     const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    context_->OMSetBlendState(pipes.blend, blend_factor, 0xFFFFFFFFU);
+    context_->OMSetBlendState(opaque ? pipes.opaque : pipes.blend, blend_factor, 0xFFFFFFFFU);
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     context_->VSSetShader(pipes.vs, nullptr, 0);
@@ -854,6 +959,9 @@ class GpuCanvas final : public Surface {
 
     ID3D11ShaderResourceView* views[1] = {view};
     context_->PSSetShaderResources(0, 1, views);
+    // 路径裁剪的遮罩绑到 t1（未用时绑 null：不绑就会残留上一个 draw 的绑定）
+    ID3D11ShaderResourceView* clip_views[1] = {clip_mask};
+    context_->PSSetShaderResources(1, 1, clip_views);
     ID3D11SamplerState* samplers[1] = {point_sample ? pipes.sampler_point : pipes.sampler_linear};
     context_->PSSetSamplers(0, 1, samplers);
     context_->Draw(4, 0);
@@ -914,6 +1022,248 @@ class GpuCanvas final : public Surface {
   void log_op(PaintOp op, std::int64_t start_ns, std::uint64_t pixels) {
     if (profiler_ == nullptr) return;
     profiler_->add(op, static_cast<double>(st::time::now_ns() - start_ns) / 1'000'000.0, pixels);
+  }
+
+  // ————————————————————————————————————————————————————————————————————————
+  // 路径遮罩与阴影遮罩（都带缓存）
+  // ————————————————————————————————————————————————————————————————————————
+
+  /// 路径 → 覆盖率遮罩纹理（按**路径几何**缓存）。
+  auto path_mask_texture(const Path& cache_key_source, const math::IntRect& area,
+                         const Path* rasterize) -> ID3D11ShaderResourceView* {
+    const std::uint64_t key = path_key(cache_key_source, area);
+    for (const auto& entry : path_cache_) {
+      if (entry.key == key) return entry.view;
+    }
+    if (rasterize == nullptr || rasterize->is_empty()) return nullptr;
+    st::raster::Mask mask(area.width, area.height);
+    // 路径坐标减去遮罩原点（`rasterize_mask` 的 origin 参数就是干这个的）
+    st::raster::detail::rasterize_mask(mask, *rasterize, static_cast<float>(-area.x),
+                                       static_cast<float>(-area.y));
+    const std::span<const std::uint8_t> values = mask.values();
+    ID3D11ShaderResourceView* view =
+        create_texture(DXGI_FORMAT_R8_UNORM, area.width, area.height, values.data(),
+                       static_cast<std::size_t>(area.width));
+    if (view == nullptr) return nullptr;
+    if (path_cache_.size() >= kPathCacheLimit) {
+      path_cache_.front().view->Release();
+      path_cache_.erase(path_cache_.begin());
+    }
+    path_cache_.push_back(PathCacheEntry{key, view});
+    return view;
+  }
+
+  /// 路径缓存键：命令序列 + 坐标 + 遮罩区域（量化到 1/4 像素）。
+  [[nodiscard]] static auto path_key(const Path& path, const math::IntRect& area) -> std::uint64_t {
+    std::uint64_t hash = 1469598103934665603ULL;
+    const auto mix = [&hash](std::uint64_t value) {
+      hash ^= value;
+      hash *= 1099511628211ULL;
+    };
+    const auto quantize = [](float value) -> std::uint64_t {
+      return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::lround(value * 4.0f)) +
+                                        0x40000000);
+    };
+    mix(static_cast<std::uint64_t>(area.x));
+    mix(static_cast<std::uint64_t>(area.y));
+    mix(static_cast<std::uint64_t>(area.width));
+    mix(static_cast<std::uint64_t>(area.height));
+    for (const st::raster::PathCommand& command : path.commands()) {
+      mix(static_cast<std::uint64_t>(command.kind));
+      for (const st::math::Point& point : {command.p1, command.p2, command.p3}) {
+        mix(quantize(point.x));
+        mix(quantize(point.y));
+      }
+    }
+    return hash;
+  }
+
+  /// 描边/填充的公共部分：光栅化为遮罩 → 合成。
+  void rasterize_path(const Path& cache_key_source, const Path& rasterize, float opacity,
+                      math::Color color, PaintOp op) {
+    if (rasterize.is_empty()) return;
+    const math::Rect bounds = rasterize.flattened_bounds(0.25f);
+    if (bounds.is_empty()) return;
+    const math::IntRect area = bounds.inflate(1.0f).round_out();
+    if (area.is_empty()) return;
+    const std::int64_t start = st::time::now_ns();
+    ID3D11ShaderResourceView* view = path_mask_texture(cache_key_source, area, &rasterize);
+    if (view == nullptr) return;
+    const ShaderParams params = base_params(
+        DrawMode::CoverageMask,
+        math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
+                   static_cast<float>(area.width), static_cast<float>(area.height)},
+        {0.0f, 0.0f, 0.0f, 0.0f}, opacity, color);
+    submit(params, view, false);
+    log_op(op, start,
+           static_cast<std::uint64_t>(area.width) * static_cast<std::uint64_t>(area.height));
+  }
+
+  /// 投影遮罩：建 R8 目标 → 画圆角矩形 → 可分离盒式模糊 ×3 → 缓存。
+  struct ShadowMask {
+    ID3D11ShaderResourceView* view{nullptr};
+    math::IntRect region{};  ///< 物理像素（相对于被投影矩形）
+  };
+
+  /// 影子遮罩的两个 R8 目标（模糊 ping-pong 用）。
+  struct ShadowTargets {
+    ID3D11Texture2D* texture_a{nullptr};
+    ID3D11RenderTargetView* rtv_a{nullptr};
+    ID3D11ShaderResourceView* srv_a{nullptr};
+    ID3D11Texture2D* texture_b{nullptr};
+    ID3D11RenderTargetView* rtv_b{nullptr};
+    ID3D11ShaderResourceView* srv_b{nullptr};
+  };
+  struct ShadowCacheEntry {
+    std::uint64_t key{0};
+    math::IntRect region{};
+    ShadowTargets targets{};
+  };
+  struct PathCacheEntry {
+    std::uint64_t key{0};
+    ID3D11ShaderResourceView* view{nullptr};
+  };
+
+  auto shadow_mask(float width, float height, float radius, float blur, math::Point offset)
+      -> ShadowMask {
+    if (width <= 0.0f || height <= 0.0f) return {};
+    const auto quantize = [](float value) -> std::uint64_t {
+      return static_cast<std::uint64_t>(static_cast<std::int64_t>(std::lround(value * 4.0f)) +
+                                        0x40000000);
+    };
+    std::uint64_t key = 1469598103934665603ULL;
+    for (const std::uint64_t part : {quantize(width), quantize(height), quantize(radius),
+                                     quantize(blur), quantize(offset.x), quantize(offset.y)}) {
+      key ^= part;
+      key *= 1099511628211ULL;
+    }
+    for (const auto& entry : shadow_cache_) {
+      if (entry.key == key) return ShadowMask{entry.targets.srv_a, entry.region};
+    }
+    // 与软件同一口径：region = 矩形（带偏移）外扩 blur*2+2，遮罩在**规范化坐标**下模糊
+    const float padding = blur * 2.0f + 2.0f;
+    const math::Rect region =
+        math::Rect{0.0f, 0.0f, width, height}.offset(offset.x, offset.y).inflate(padding);
+    const math::IntRect area = region.round_out();
+    if (area.is_empty()) return {};
+    ShadowTargets targets;
+    if (!acquire_shadow_targets(area.width, area.height, targets)) return {};
+    const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    context_->ClearRenderTargetView(targets.rtv_a, zero);
+    const float zero_b[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    context_->ClearRenderTargetView(targets.rtv_b, zero_b);
+    // 画圆角矩形（白色 → R 通道就是覆盖率）
+    const math::Rect local{offset.x - static_cast<float>(area.x),
+                           offset.y - static_cast<float>(area.y), width, height};
+    ShaderParams shape = base_params(DrawMode::SolidRoundRect, local,
+                                     {radius, radius, radius, radius}, 1.0f,
+                                     math::Color{255, 255, 255, 255});
+    // **必须**把着色器视口改成遮罩尺寸：顶点阶段用它算 NDC，而 `base_params` 默认填的是
+    // 画布尺寸——渲染到遮罩 RT 时会算错尺度，四边形落到目标外面。
+    // 现象是“投影完全没画出来、也不报任何错”（靠 ink_ratio 断言才捉到）。
+    apply_shadow_viewport(shape, area);
+    submit_to(targets.rtv_a, shape, nullptr, false, true, area.width, area.height);
+    // 可分离盒式模糊 ×3（水平 + 垂直各一遍算一 pass），ping-pong 于 A、B
+    const int box_radius = static_cast<int>(std::lround(blur * 0.5f));
+    ID3D11RenderTargetView* read_rtv = targets.rtv_a;
+    ID3D11ShaderResourceView* read_srv = targets.srv_a;
+    for (int pass = 0; pass < 3 && box_radius > 0; ++pass) {
+      for (const bool along_x : {true, false}) {
+        const bool reading_a = read_rtv == targets.rtv_a;
+        ID3D11RenderTargetView* write_rtv = reading_a ? targets.rtv_b : targets.rtv_a;
+        ShaderParams blur_params = base_params(
+            DrawMode::BoxBlur,
+            math::Rect{0.0f, 0.0f, static_cast<float>(area.width), static_cast<float>(area.height)},
+            {0.0f, 0.0f, 0.0f, 0.0f}, 1.0f);
+        blur_params.axis[0] = along_x ? 1.0f : 0.0f;
+        blur_params.axis[1] = along_x ? 0.0f : 1.0f;
+        blur_params.axis_extra[0] = static_cast<float>(box_radius);
+        apply_shadow_viewport(blur_params, area);
+        submit_to(write_rtv, blur_params, read_srv, false, true, area.width, area.height);
+        read_rtv = write_rtv;
+        read_srv = reading_a ? targets.srv_b : targets.srv_a;
+      }
+    }
+    // 3 pass × 2 遍后结果回到 A（半径为 0 时也直接在 A）
+    const ShadowMask result{targets.srv_a, area};
+    if (shadow_cache_.size() >= kShadowCacheLimit) {
+      ShadowTargets victim = shadow_cache_.front().targets;
+      shadow_cache_.erase(shadow_cache_.begin());
+      release_shadow_targets(victim);
+    }
+    shadow_cache_.push_back(ShadowCacheEntry{key, area, targets});
+    return result;
+  }
+
+  /// 遮罩渲染时把着色器视口改成遮罩尺寸（否则 NDC 尺度错，四边形落到目标外）。
+  static void apply_shadow_viewport(ShaderParams& params, const math::IntRect& area) {
+    params.viewport[0] = static_cast<float>(area.width);
+    params.viewport[1] = static_cast<float>(area.height);
+  }
+
+  /// 提交到指定 RT（影子遮罩用；与 `submit` 的区别是目标不是画布自身的 RT）。
+  void submit_to(ID3D11RenderTargetView* target, const ShaderParams& params,
+                 ID3D11ShaderResourceView* view, bool point_sample, bool opaque, int viewport_width,
+                 int viewport_height) {
+    const Pipeline& pipes = pipeline();
+    if (!pipes.ok || target == nullptr) return;
+    ID3D11RenderTargetView* targets[1] = {target};
+    context_->OMSetRenderTargets(1, targets, nullptr);
+    const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width),
+                                  static_cast<float>(viewport_height), 0.0f, 1.0f};
+    context_->RSSetViewports(1, &viewport);
+    const D3D11_RECT scissor{0, 0, viewport_width, viewport_height};
+    context_->RSSetScissorRects(1, &scissor);
+    context_->RSSetState(pipes.raster_scissor);
+    const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    context_->OMSetBlendState(opaque ? pipes.opaque : pipes.blend, blend_factor, 0xFFFFFFFFU);
+    context_->IASetInputLayout(nullptr);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    context_->VSSetShader(pipes.vs, nullptr, 0);
+    context_->PSSetShader(pipes.ps, nullptr, 0);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(pipes.constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    std::memcpy(mapped.pData, &params, sizeof(params));
+    context_->Unmap(pipes.constants, 0);
+    ID3D11Buffer* buffers[1] = {pipes.constants};
+    context_->VSSetConstantBuffers(0, 1, buffers);
+    context_->PSSetConstantBuffers(0, 1, buffers);
+    ID3D11ShaderResourceView* views[1] = {view};
+    context_->PSSetShaderResources(0, 1, views);
+    ID3D11SamplerState* samplers[1] = {point_sample ? pipes.sampler_point : pipes.sampler_linear};
+    context_->PSSetSamplers(0, 1, samplers);
+    context_->Draw(4, 0);
+  }
+
+  auto acquire_shadow_targets(int width, int height, ShadowTargets& targets) -> bool {
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(width);
+    desc.Height = static_cast<UINT>(height);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    const auto build = [&](ID3D11Texture2D** texture, ID3D11RenderTargetView** rtv,
+                           ID3D11ShaderResourceView** srv) -> bool {
+      if (FAILED(device_->CreateTexture2D(&desc, nullptr, texture))) return false;
+      if (FAILED(device_->CreateRenderTargetView(*texture, nullptr, rtv))) return false;
+      if (FAILED(device_->CreateShaderResourceView(*texture, nullptr, srv))) return false;
+      return true;
+    };
+    if (!build(&targets.texture_a, &targets.rtv_a, &targets.srv_a)) return false;
+    return build(&targets.texture_b, &targets.rtv_b, &targets.srv_b);
+  }
+
+  static void release_shadow_targets(ShadowTargets& targets) {
+    if (targets.srv_b != nullptr) targets.srv_b->Release();
+    if (targets.rtv_b != nullptr) targets.rtv_b->Release();
+    if (targets.texture_b != nullptr) targets.texture_b->Release();
+    if (targets.srv_a != nullptr) targets.srv_a->Release();
+    if (targets.rtv_a != nullptr) targets.rtv_a->Release();
+    if (targets.texture_a != nullptr) targets.texture_a->Release();
+    targets = ShadowTargets{};
   }
 
   // —— 纹理创建与缓存 ——
@@ -1065,6 +1415,10 @@ class GpuCanvas final : public Surface {
   };
   static constexpr std::size_t kMaskCacheLimit{512};
   static constexpr std::size_t kRampCacheLimit{64};
+  static constexpr std::size_t kPathCacheLimit{256};
+  static constexpr std::size_t kShadowCacheLimit{48};
+  std::vector<PathCacheEntry> path_cache_{};
+  std::vector<ShadowCacheEntry> shadow_cache_{};
   /// 未实现的绘制原语**必须出声**：静默画不出东西会让"界面是空的"变成一个谜。
   ///
   /// 每个名字只报一次（用固定数组而不是 `vector<string>`：无分配、无锁竞争面）。
@@ -1202,8 +1556,8 @@ auto capabilities() -> Capabilities {
   caps.coverage_masks = true;
   caps.bitmaps = true;
   caps.clips = true;
-  caps.shadows = false;  // M3b：需多遍模糊（遮罩 RT + 可分离盒式模糊）
-  caps.paths = false;    // M4：任意路径填充/描边/路径裁剪
+  caps.shadows = true;  // M3b：多遍可分离盒式模糊 + 遮罩缓存
+  caps.paths = true;    // M4：CPU 覆盖率光栅化（同一套 rasterize_mask）+ 遮罩缓存 + GPU 合成
   return caps;
 }
 
