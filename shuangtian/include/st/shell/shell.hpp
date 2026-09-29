@@ -1,8 +1,12 @@
 #pragma once
 
-/// 窗口与事件循环后端：`headless`（离屏，默认）/ `x11` / `wayland` / `win32`。
-/// 硬约束：X11/Wayland/Win32 一律**运行时探测**（不产生链接期依赖），缺失或未实现时如实报 `Unsupported`，
+/// 窗口与事件循环后端：`headless`（离屏，默认）/ `win32` / `x11` / `wayland`。
+///
+/// 硬约束：平台后端一律**运行时探测**（不产生链接期依赖），缺失或未实现时如实报 `Unsupported`，
 /// 无桌面环境自动落到 `headless` —— 无头模式下开发/验证闭环完全可用（控制通道承担输入）。
+///
+/// 实现状态（**如实**）：`headless` 与 `win32` 已实现；`x11`/`wayland` 目前只做探测与
+/// 明确的 `Unsupported` 答复（软件光栅器与 UI 层与平台无关，补后端是纯粹的窗口层工作量）。
 
 #include <cstdint>
 #include <memory>
@@ -51,12 +55,20 @@ class Backend {
   virtual auto set_device_scale(float scale) -> Status = 0;
   /// 逻辑视口尺寸（窗口尺寸，不含 DPI 放大）。
   [[nodiscard]] virtual auto logical_size() const noexcept -> math::Size = 0;
+  /// 窗口系统是否请求关闭（用户点关闭按钮）。
+  ///
+  /// 由平台后端实现；应用主循环据此收尾（不能直接 `exit`——进程内还有控制通道、
+  /// 脚本宿主等资源需要正常停止）。
+  [[nodiscard]] virtual auto close_requested() const noexcept -> bool { return false; }
 };
 
 /// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。
 [[nodiscard]] auto has_display() noexcept -> bool;
 /// 探测可用的图形后端名（无显示时返回 "headless"）。
 [[nodiscard]] auto probe_backend() -> std::string;
+/// 创建平台专属后端（各 `platform_*.cpp` 提供；未实现的平台在工厂里如实报 `Unsupported`）。
+[[nodiscard]] auto create_win32_backend() -> Result<std::unique_ptr<Backend>>;
+
 /// 创建后端（`name` 为空=自动选择：有显示则尝试平台后端，失败回退 headless）。
 [[nodiscard]] auto create_backend(std::string_view name = {}) -> Result<std::unique_ptr<Backend>>;
 

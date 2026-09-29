@@ -108,8 +108,8 @@ class PlatformStubBackend final : public Backend {
   auto create_window(const WindowOptions& options) -> Status override {
     (void)options;
     return unexpected(ErrorCode::Unsupported,
-                      std::format("{} 后端（已探测到 {}）的窗口实现规划在 v0.2；"
-                                  "当前请使用 headless 模式：控制通道可完成全部开发与验证",
+                      std::format("{} 后端（已探测到 {}）的窗口实现尚未提供；"
+                                  "请使用 headless 模式：控制通道可完成全部开发与验证",
                                   name_, library_));
   }
 
@@ -191,7 +191,7 @@ auto create_backend(std::string_view name) -> Result<std::unique_ptr<Backend>> {
   }
   if (requested == "win32") {
 #if defined(_WIN32)
-    return std::unique_ptr<Backend>(std::make_unique<PlatformStubBackend>("win32", "user32.dll"));
+    return create_win32_backend();
 #else
     return unexpected(ErrorCode::Unsupported, "win32 后端仅在 Windows 宿主可用");
 #endif

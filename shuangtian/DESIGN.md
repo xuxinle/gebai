@@ -291,7 +291,24 @@ Result<std::unique_ptr<Backend>> create_backend(std::string_view name);   // 自
 }
 ```
 - `headless`：**默认在无 DISPLAY/WAYLAND_DISPLAY 时自动选择**；离屏 Framebuffer，输入事件由控制通道注入。
-- `x11`/`win32`/`wayland`：`dlopen`/`GetProcAddress` 运行时绑定，不产生链接期依赖。
+- 平台后端：运行时探测（`dlopen`/`LoadLibrary`），不产生链接期依赖；缺失或未实现时如实报 `Unsupported`。
+
+**实现状态**：`headless` 与 **`win32` 已实现**；`x11`/`wayland` 目前只做探测与明确的 `Unsupported`
+（UI 层与软件光栅器与平台无关，补后端是纯粹的窗口层工作量）。
+
+Win32 后端的实现要点（**全部来自实际运行，不是读代码能看出来的**）：
+
+| 点 | 教训 |
+|---|---|
+| 像素搬运要**重排通道** | 画布内部是 `0xRRGGBBAA`（预乘），GDI 的 32bpp DIB 是内存序 B,G,R,A——不重排就红蓝互换（表现为"截图色调不对"） |
+| 事件序列要**发全** | 按钮激活在 `UiRoot::dispatch` 的 `Click` 分支；只发 Down/Up 会让按钮"有焦点、有按压效果，**点了没反应**"。对齐协议 `input.mouse{kind:"click"}` 的 Down→Up→**Click**；双击补计数为 2 的 Click |
+| **DPI 感知必须声明** | 不声明 `SetProcessDpiAwarenessContext` 的话，系统会把我们的位图**再拉伸一次**（模糊 + 逻辑坐标与实际位图错位） |
+| 缩放以**窗口实际 DPI** 为准 | 多显示器下 DPI 可能不同（`WM_DPICHANGED` 后重算） |
+| 窗口尺寸归**应用**管 | `WM_SIZE` 只重建帧缓冲；应用在 `tick()` 里比对 `logical_size()` 同步视口——否则拖大窗口只看到左上角旧区域 |
+| 关窗走**收尾路径** | `WM_CLOSE` 置 `close_requested()`，由应用主循环退出（进程内还有控制通道/脚本宿主要正常停止，不能直接 `exit`） |
+
+验证（平台后端**必须实际跑窗口**才算验证）：`python3 tools/st_win_check.py` —— wine + Xvfb 下启动
+真实 exe，断言后端/视口，**真实鼠标点击**、**真实键盘输入**、窗口缩放跟随、优雅退出，并留截图。
 
 ### 4.7 gpu
 ```cpp

@@ -301,6 +301,16 @@ void Application::render_frame() {
 
 void Application::tick() {
   if (impl_->backend == nullptr) return;
+  // 窗口系统请求关闭（用户点 X）：走与应用内 request_quit 相同的收尾路径
+  if (impl_->backend->close_requested()) impl_->quit = true;
+  // 窗口尺寸变化（用户拖拽边框）：视口跟随，否则界面只画在左上角旧尺寸区域
+  const math::Size window_size = impl_->backend->logical_size();
+  if (window_size.width > 0.0f && window_size.height > 0.0f &&
+      (window_size.width != root_.viewport().width ||
+       window_size.height != root_.viewport().height)) {
+    root_.set_viewport(window_size);
+    impl_->repaint = true;
+  }
   if (impl_->repaint || root_.dirty()) render_frame();
   // 脚本定时器与"高频事件合并"的补发：按帧推进，不额外起线程
   if (impl_->script != nullptr) (void)impl_->script->tick(0.0);

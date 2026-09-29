@@ -48,8 +48,8 @@
       "compiler": "x86_64-w64-mingw32-g++",
       "c_compiler": "x86_64-w64-mingw32-gcc",
       "platform": "windows",
-      "system_libs": ["ws2_32", "winpthread"],
-      "defines": ["_WIN32_WINNT=0x0601", "WINVER=0x0601"],
+      "system_libs": ["ws2_32", "winpthread", "gdi32", "user32"],
+      "defines": ["_WIN32_WINNT=0x0A00", "WINVER=0x0A00", "NTDDI_VERSION=0x0A000000"],
       "executable_suffix": ".exe",
       "extra_flags": ["-static-libgcc", "-static-libstdc++"]
     }
