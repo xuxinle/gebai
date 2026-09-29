@@ -45,9 +45,11 @@ struct EmbedOutput {
 /// **必须恰好有一个作用域提供它**：库级嵌入与目标级嵌入若都带上运行时，
 /// 同一个可执行文件里会出现两份全局状态（实测表现为链接期 duplicate symbol / 运行期热重载表分裂）。
 /// 调用约定：库级（`target` 为空）恒为 `true`；目标级仅在**库本身没有嵌入**时才为 `true`。
+/// `build_subdir` 是产物子目录名（`profile` 或 `profile-<toolchain>`）：交叉编译时
+/// 生成物必须与本机档隔离，否则两种工具链的声明头/字节数组会互相覆盖。
 [[nodiscard]] auto generate_embeds(const Manifest& manifest, std::string_view target,
-                                   std::string_view profile, bool with_runtime = true)
-    -> Result<EmbedOutput>;
+                                   std::string_view profile, std::string_view build_subdir,
+                                   bool with_runtime = true) -> Result<EmbedOutput>;
 
 /// 把相对路径转成上游一致的标识符：`tolower(<target>_<path>)`，非 `[a-zA-Z0-9_]` → `_`。
 /// 公开出来是为了让测试能直接锁住这条规则（兼容性契约）。

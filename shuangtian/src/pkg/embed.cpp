@@ -52,12 +52,12 @@ void replace_all(std::string& text, std::string_view placeholder, std::string_vi
   return out;
 }
 
-/// 读取模板文件（vendor/battery/*.in）。
+/// 读取模板文件（third_party/battery/*.in）。
 [[nodiscard]] auto load_template(std::string_view path) -> Result<std::string> {
   auto text = fs::read_text(path);
   if (!text) {
     return unexpected(ErrorCode::NotFound,
-                      std::format("嵌入模板缺失: {}（vendor/battery/ 应随仓库分发）", path));
+                      std::format("嵌入模板缺失: {}（third_party/battery/ 应随仓库分发）", path));
   }
   return text;
 }
@@ -119,7 +119,8 @@ auto embed_identifier(std::string_view target, std::string_view relative_path) -
 }
 
 auto generate_embeds(const Manifest& manifest, std::string_view target,
-                     std::string_view profile, bool with_runtime) -> Result<EmbedOutput> {
+                     std::string_view profile, std::string_view build_subdir, bool with_runtime)
+    -> Result<EmbedOutput> {
   EmbedOutput output;
   if (manifest.directory.empty()) {
     return unexpected(ErrorCode::Invalid, "清单缺少 directory，无法生成嵌入资源");
@@ -177,14 +178,16 @@ auto generate_embeds(const Manifest& manifest, std::string_view target,
   // 3) 定位模板与输出目录
   const std::string scope_dir = scope.empty() ? std::string("lib") : scope;
   const std::string embed_root =
-      fs::join(manifest.directory, std::format("build/{}/embed/{}", profile, scope_dir));
+      fs::join(manifest.directory,
+               std::format("build/{}/embed/{}", build_subdir.empty() ? profile : build_subdir,
+                           scope_dir));
   const std::string include_dir = fs::join(embed_root, "include");
   const std::string source_dir = fs::join(embed_root, "src");
   const std::string header_dir = fs::join(include_dir, "battery");
   if (auto status = ensure_directory(header_dir); !status) return forward_error(status.error());
   if (auto status = ensure_directory(source_dir); !status) return forward_error(status.error());
 
-  const std::string template_root = fs::join(manifest.directory, "vendor/battery");
+  const std::string template_root = fs::join(manifest.directory, "third_party/battery");
   auto header_template = load_template(fs::join(template_root, "embed.hpp.in"));
   if (!header_template) return forward_error(header_template.error());
   auto source_template = load_template(fs::join(template_root, "embed_source.cpp.in"));
@@ -238,12 +241,12 @@ auto generate_embeds(const Manifest& manifest, std::string_view target,
     ++output.regenerated;
   }
 
-  // 6) 运行时实现（vendor 的热重载部分）随目标编译：它 `#include "battery/embed.hpp"`，
+  // 6) 运行时实现（上游的热重载部分）随目标编译：它 `#include "battery/embed.hpp"`，
   //    而那个头是**按目标生成**的（声明集合不同），所以不能放进共享库对象目录。
-  const std::string runtime = fs::join(manifest.directory, "vendor/battery/embed_impl.cpp");
+  const std::string runtime = fs::join(manifest.directory, "third_party/battery/embed_impl.cpp");
   if (!fs::is_regular_file(runtime)) {
     return unexpected(ErrorCode::NotFound,
-                      std::format("battery::embed 运行时缺失: {}（vendor/ 应随仓库分发）", runtime));
+                      std::format("battery::embed 运行时缺失: {}（third_party/ 应随仓库分发）", runtime));
   }
   if (with_runtime) output.sources.push_back(runtime);
 

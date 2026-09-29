@@ -17,6 +17,17 @@
 #include "st/core/time.hpp"
 
 namespace st::pkg {
+auto detect_compiler(std::string_view override_compiler) -> Result<std::string> {
+  if (!override_compiler.empty()) return std::string(override_compiler);
+  for (const auto name : {"ST_CXX", "CXX"}) {
+    if (const auto value = fs::read_env(name); value.has_value() && !value->empty()) return *value;
+  }
+  for (const auto name : {"g++", "clang++", "c++"}) {
+    if (auto found = process::which(name); found.has_value()) return *found;
+  }
+  return unexpected(ErrorCode::Unsupported, "未找到 C++ 编译器（g++/clang++/c++）");
+}
+
 namespace {
 
 /// 源文件语言（决定编译器标志：`.c` 必须按 C 编译，不能用 `-std=c++20`）。
@@ -27,7 +38,7 @@ struct CompileUnit {
   std::string object{};   ///< 绝对路径
   std::string depfile{};  ///< `-MMD` 产出的头依赖清单（`.d`）
   SourceLang lang{SourceLang::Cxx};
-  bool vendor{false};     ///< 第三方源码（放宽告警、不进 PCH）
+  bool third_party{false};     ///< 第三方源码（放宽告警、不进 PCH）
   /// 该单元专属的包含目录。
   ///
   /// 为什么需要"按单元"而不是全局 `-I`：编译期嵌入生成的 `battery/embed.hpp` 是**按目标隔离**的
@@ -120,7 +131,7 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
 
 [[nodiscard]] auto make_units(const Manifest& manifest, const std::vector<std::string>& sources,
                               const std::string& object_dir,
-                              const std::set<std::string>& vendor_paths,
+                              const std::set<std::string>& third_party_paths,
                               const UnitIncludeMap& unit_includes = {})
     -> std::vector<CompileUnit> {
   std::vector<CompileUnit> units;
@@ -131,7 +142,7 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
     unit.object = fs::join(object_dir, sanitize_name(relative).append(".o"));
     unit.depfile = unit.object + ".d";
     unit.lang = language_of(unit.source);
-    unit.vendor = vendor_paths.contains(unit.source);
+    unit.third_party = third_party_paths.contains(unit.source);
     if (const auto found = unit_includes.find(unit.source); found != unit_includes.end()) {
       unit.extra_include_dirs = found->second;
     }
@@ -164,11 +175,13 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
 ///
 /// 目标级嵌入不在这里处理：它按目标隔离，见 `build()` 的目标分支。
 [[nodiscard]] auto attach_library_embeds(const Manifest& manifest, std::string_view profile,
+                                        std::string_view build_subdir,
                                         std::vector<std::string>& library_sources,
-                                        std::set<std::string>& vendor_paths,
+                                        std::set<std::string>& third_party_paths,
                                         UnitIncludeMap& unit_includes) -> Status {
   if (manifest.embed.empty()) return ok();
-  auto embeds = generate_embeds(manifest, /*target=*/{}, profile, /*with_runtime=*/true);
+  auto embeds = generate_embeds(manifest, /*target=*/{}, profile, build_subdir,
+                                /*with_runtime=*/true);
   if (!embeds) return forward_error(embeds.error());
   for (const auto& source : library_sources) {
     const std::string key =
@@ -177,15 +190,15 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
   }
   for (const auto& generated : embeds->sources) {
     library_sources.push_back(generated);
-    vendor_paths.insert(generated);
+    third_party_paths.insert(generated);
     unit_includes[generated].push_back(embeds->include_dir);
   }
   return ok();
 }
 
-/// 展开第三方源码清单（失败按空集处理：清单没声明 vendor 也能构建）。
-[[nodiscard]] auto collect_vendor(const Manifest& manifest) -> std::set<std::string> {
-  auto files = manifest.vendor_files();
+/// 展开第三方源码清单（失败按空集处理：清单没声明第三方源码也能构建）。
+[[nodiscard]] auto collect_third_party(const Manifest& manifest) -> std::set<std::string> {
+  auto files = manifest.third_party_files();
   if (!files) return {};
   return std::set<std::string>(files->begin(), files->end());
 }
@@ -269,26 +282,105 @@ struct PchContext {
   }
   return PchContext{directory, "prefix.hpp"};
 }
+/// 目标平台的默认系统库。
+///
+/// **参数是目标平台名，不是宿主的 `_WIN32`**：交叉编译时宿主与目标不同，
+/// 用 `#if defined(_WIN32)` 判的是宿主（Linux 上恒为假），必然给 Windows 目标链上
+/// `-lpthread -ldl -lm`——mingw 根本没有这些库，链接必然失败。
+[[nodiscard]] auto default_system_libs(std::string_view platform) -> std::vector<std::string> {
+  if (platform == "windows") return {"ws2_32"};
+  return {"pthread", "dl", "m"};
+}
+
+/// 宿主机平台名（编译期常量；仅在未指定工具链时使用）。
+[[nodiscard]] auto host_platform() -> std::string_view {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__APPLE__)
+  return "darwin";
+#else
+  return "linux";
+#endif
+}
+
+/// 解析后的工具链：清单描述 → 构建时可直接使用的一组值。
+struct ResolvedToolchain {
+  std::string compiler{};           ///< C++ 编译器（空=自动探测本机）
+  std::string c_compiler{};         ///< C 编译器（空=用 compiler + `-x c`）
+  std::string platform{};           ///< 目标平台
+  std::string executable_suffix{};  ///< 产物后缀（Windows 为 `.exe`）
+  std::vector<std::string> system_libs{};
+  std::vector<std::string> defines{};
+  std::vector<std::string> extra_flags{};
+  std::string directory_tag{};      ///< 目录隔离标记（空=本机档）
+  [[nodiscard]] auto cross() const noexcept -> bool { return !directory_tag.empty(); }
+};
+
+/// 档位目录名：`dev` 或 `dev-mingw`。
+///
+/// **交叉编译必须与本地档隔离目录**：对象文件、PCH、嵌入生成物都不能与本地档混用
+/// ——PCH 是按"编译器 + 目标"生成的，混用会得到难以理解的编译错误。
+[[nodiscard]] auto profile_directory(std::string_view profile, const ResolvedToolchain& toolchain)
+    -> std::string {
+  if (!toolchain.cross()) return std::string(profile);
+  return std::format("{}-{}", profile, toolchain.directory_tag);
+}
+
+/// 解析工具链（空名 = 本机默认，行为与"没有工具链概念"时完全一致）。
+[[nodiscard]] auto resolve_toolchain(const Manifest& manifest, std::string_view name)
+    -> Result<ResolvedToolchain> {
+  ResolvedToolchain resolved;
+  if (name.empty()) {
+    resolved.platform = std::string(host_platform());
+#if defined(_WIN32)
+    resolved.executable_suffix = ".exe";
+#endif
+    return resolved;
+  }
+  const ToolchainSpec* spec = manifest.find_toolchain(name);
+  if (spec == nullptr) {
+    return unexpected(ErrorCode::Invalid,
+                      std::format("清单未定义工具链 '{}'（在 st.pkg 的 toolchains 段声明）", name));
+  }
+  resolved.compiler = spec->compiler;
+  resolved.c_compiler = spec->c_compiler;
+  resolved.platform = spec->platform.empty() ? std::string("none") : spec->platform;
+  resolved.executable_suffix = spec->executable_suffix;
+  resolved.system_libs = spec->system_libs;
+  resolved.defines = spec->defines;
+  resolved.extra_flags = spec->extra_flags;
+  resolved.directory_tag = std::string(name);
+  // 工具链必须真的存在：错误要早于"编了一半才发现找不到编译器"
+  if (!process::which(resolved.compiler).has_value() && !fs::is_absolute(resolved.compiler)) {
+    return unexpected(ErrorCode::NotFound,
+                      std::format("工具链 '{}' 的编译器不可用: {}（请先安装）", name, resolved.compiler));
+  }
+  return resolved;
+}
 
 [[nodiscard]] auto compile_units(const Manifest& manifest, const BuildOptions& options,
                                  const std::vector<CompileUnit>& units,
                                  const std::vector<std::string>& profile_flags_list,
-                                 std::size_t& rebuilt) -> Result<std::size_t> {
-  auto compiler = detect_compiler();
+                                 const ResolvedToolchain& toolchain, std::size_t& rebuilt)
+    -> Result<std::size_t> {
+  auto compiler = detect_compiler(toolchain.compiler);
   if (!compiler) return forward_error(compiler.error());
   const std::vector<std::string> include_dirs = gather_include_dirs(manifest, options);
+  // 目标专属宏（如 `_WIN32_WINNT=0x0601`）：只对目标生效，不污染本机档
+  const std::vector<std::string>& target_defines = toolchain.defines;
 
   // 顺序语义：工程全局严格集（清单 `flags`）在前，**分档标志在后**——
   // 分档可以针对优化等级做有据可查的例外（如优化档关闭 GCC 误报的 -Wnull-dereference）。
   // **C 与 C++ 各自一套语言标志**：`manifest.flags` 是本工程的 *C++* 严格集
   // （含 `-Wnon-virtual-dtor`/`-Woverloaded-virtual` 这类 C++ 专属告警），给 C 源会直接报
   // 「option is valid for C++ but not for C」。因此 C 源只取 `c_flags` + 档位 + 宏 + 包含路径；
-  // 想让自家 C 源也严格，就在 `c_flags` 里显式写 `-Wall -Werror`（vendor 源则另有 `-w`）。
+  // 想让自家 C 源也严格，就在 `c_flags` 里显式写 `-Wall -Werror`（第三方源则另有 `-w`）。
   std::vector<std::string> flags;  // C++ 标志（PCH 建立与 C++ 单元共用，顺序必须一致）
   flags.push_back("-std=c++20");
   for (const auto& item : manifest.flags) flags.push_back(item);
   for (const auto& item : options.extra_flags) flags.push_back(item);
   for (const auto& item : manifest.defines) flags.push_back(std::format("-D{}", item));
+  for (const auto& item : target_defines) flags.push_back(std::format("-D{}", item));
   for (const auto& dir : include_dirs) flags.push_back(std::format("-I{}", dir));
   for (const auto& item : profile_flags_list) flags.push_back(item);
 
@@ -296,14 +388,16 @@ struct PchContext {
   for (const auto& item : manifest.c_flags) c_flags.push_back(item);
   for (const auto& item : options.extra_flags) c_flags.push_back(item);
   for (const auto& item : manifest.defines) c_flags.push_back(std::format("-D{}", item));
+  for (const auto& item : target_defines) c_flags.push_back(std::format("-D{}", item));
   for (const auto& dir : include_dirs) c_flags.push_back(std::format("-I{}", dir));
   for (const auto& item : profile_flags_list) c_flags.push_back(item);
   // `-x c` 强制按 C 编译：同一个编译器二进制即可，无需第二套工具链
   c_flags.push_back("-x");
   c_flags.push_back("c");
 
-  const std::string build_dir =
-      fs::join(manifest.directory, std::format("build/{}", options.profile));
+  const std::string build_dir = fs::join(
+      manifest.directory,
+      std::format("build/{}", profile_directory(options.profile, toolchain)));
   std::optional<PchContext> pch;
   if (options.use_pch) {
     pch = ensure_pch(*compiler, flags, include_dirs, build_dir,
@@ -336,12 +430,12 @@ struct PchContext {
       args.push_back(*compiler);
       const bool is_c = unit->lang == SourceLang::C;
       // 第三方源码不套我们的告警集，也不做 sanitizer 插桩（理由见 `strip_sanitizers`）；
-      // 因此编译标志按"是否 vendor"分两条路，而不是在原标志上做加法。
+      // 因此编译标志按"是否第三方"分两条路，而不是在原标志上做加法。
       const std::vector<std::string> unit_flags =
-          unit->vendor ? strip_sanitizers(is_c ? c_flags : flags) : (is_c ? c_flags : flags);
+          unit->third_party ? strip_sanitizers(is_c ? c_flags : flags) : (is_c ? c_flags : flags);
       for (const auto& flag : unit_flags) args.push_back(flag);
       for (const auto& dir : unit->extra_include_dirs) args.push_back(std::format("-I{}", dir));
-      if (unit->vendor) args.push_back("-w");
+      if (unit->third_party) args.push_back("-w");
       // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃
       if (pch_ptr != nullptr && !is_c) {
         args.push_back(std::format("-I{}", pch_ptr->directory));
@@ -385,26 +479,41 @@ struct PchContext {
 [[nodiscard]] auto link(const Manifest& manifest, const BuildOptions& options,
                         const std::vector<CompileUnit>& units, const std::string& output,
                         const std::vector<std::string>& profile_flags_list,
+                        const ResolvedToolchain& toolchain,
                         const std::vector<std::string>& extra_sources) -> Result<std::string> {
-  auto compiler = detect_compiler();
+  auto compiler = detect_compiler(toolchain.compiler);
   if (!compiler) return forward_error(compiler.error());
   if (auto status = fs::ensure_parent(output); !status) return forward_error(status.error());
 
   std::vector<std::string> args;
   for (const auto& flag : profile_flags_list) args.push_back(flag);
-  // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）
-  if (const auto lld = process::which("ld.lld"); lld.has_value()) {
-    args.push_back("-fuse-ld=lld");
-  } else if (const auto mold = process::which("mold"); mold.has_value()) {
-    args.push_back("-fuse-ld=mold");
+  // 链接器：存在 mold/lld 时优先（链接是纯 I/O + 符号解析，lld 通常快 2~4 倍）。
+  // **交叉编译时跳过**：宿主装的 lld/mold 未必支持目标格式，交给交叉工具链自带的链接器最稳。
+  if (!toolchain.cross()) {
+    if (const auto lld = process::which("ld.lld"); lld.has_value()) {
+      args.push_back("-fuse-ld=lld");
+    } else if (const auto mold = process::which("mold"); mold.has_value()) {
+      args.push_back("-fuse-ld=mold");
+    }
   }
   for (const auto& unit : units) args.push_back(unit.object);
   for (const auto& extra : extra_sources) args.push_back(extra);
   args.push_back("-o");
   args.push_back(output);
-  for (const auto& lib : manifest.system_libs) args.push_back(std::format("-l{}", lib));
-  for (const auto& lib : manifest.dependency_system) args.push_back(std::format("-l{}", lib));
-  for (const auto& lib : default_system_libs()) args.push_back(std::format("-l{}", lib));
+  // 系统库：**交叉工具链声明了 system_libs 就整体接管**——
+  // 同一份清单要同时服务多平台，而"本机需要哪些系统库"（Linux 的 pthread/dl/m）
+  // 对目标可能是错的甚至不存在（mingw 没有 dl/m，链接直接失败）。
+  // 接管后不再追加本机默认，避免把宿主的东西塞进目标产物。
+  const bool toolchain_takes_over = toolchain.cross() && !toolchain.system_libs.empty();
+  if (!toolchain_takes_over) {
+    for (const auto& lib : manifest.system_libs) args.push_back(std::format("-l{}", lib));
+    for (const auto& lib : manifest.dependency_system) args.push_back(std::format("-l{}", lib));
+    for (const auto& lib : default_system_libs(toolchain.platform)) {
+      args.push_back(std::format("-l{}", lib));
+    }
+  }
+  for (const auto& lib : toolchain.system_libs) args.push_back(std::format("-l{}", lib));
+  for (const auto& flag : toolchain.extra_flags) args.push_back(flag);
 
   auto result = process::run(*compiler, args, process::Options{.cwd = manifest.directory});
   if (!result) return forward_error(result.error());
@@ -449,23 +558,7 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   return unexpected(ErrorCode::Invalid, std::format("未知构建档位: {}", profile));
 }
 
-auto default_system_libs() -> std::vector<std::string> {
-#if defined(_WIN32)
-  return {"ws2_32"};
-#else
-  return {"pthread", "dl", "m"};
-#endif
-}
 
-auto detect_compiler() -> Result<std::string> {
-  for (const auto name : {"ST_CXX", "CXX"}) {
-    if (const auto value = fs::read_env(name); value.has_value() && !value->empty()) return *value;
-  }
-  for (const auto name : {"g++", "clang++", "c++"}) {
-    if (auto found = process::which(name); found.has_value()) return *found;
-  }
-  return unexpected(ErrorCode::Unsupported, "未找到 C++ 编译器（g++/clang++/c++）");
-}
 
 auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats> {
   const std::int64_t start_ns = time::now_ns();
@@ -476,8 +569,12 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   auto sources = manifest.source_files();
   if (!sources) return forward_error(sources.error());
 
-  const std::string object_dir = fs::join(root, std::format("build/{}/obj", options.profile));
-  const std::string bin_dir = fs::join(root, std::format("build/{}/bin", options.profile));
+  auto toolchain = resolve_toolchain(manifest, options.toolchain);
+  if (!toolchain) return forward_error(toolchain.error());
+  const std::string subdir = profile_directory(options.profile, *toolchain);
+  const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
+  const std::string bin_dir = fs::join(
+      root, std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
   if (auto status = fs::create_directories(object_dir); !status) return forward_error(status.error());
   if (auto status = fs::create_directories(bin_dir); !status) return forward_error(status.error());
 
@@ -498,25 +595,25 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     }
   }
 
-  // 第三方源码（vendor/）与库源一起编译：它们不是"可选附加"，而是库的组成部分。
+  // 第三方源码（third_party/）与库源一起编译：它们不是"可选附加"，而是库的组成部分。
   // 同时把路径集合交给 make_units——这些单元编译时会放宽告警并跳过 PCH。
-  std::set<std::string> vendor_paths = collect_vendor(manifest);
+  std::set<std::string> third_party_paths = collect_third_party(manifest);
   UnitIncludeMap library_includes;
-  if (auto status = attach_library_embeds(manifest, options.profile, library_sources, vendor_paths,
+  if (auto status = attach_library_embeds(manifest, options.profile, subdir, library_sources, third_party_paths,
                                           library_includes);
       !status) {
     return forward_error(status.error());
   }
   std::vector<std::string> all_sources = library_sources;
-  for (const auto& path : vendor_paths) all_sources.push_back(path);
+  for (const auto& path : third_party_paths) all_sources.push_back(path);
   std::ranges::sort(all_sources);
   all_sources.erase(std::unique(all_sources.begin(), all_sources.end()), all_sources.end());
 
   std::vector<CompileUnit> units =
-      make_units(manifest, all_sources, object_dir, vendor_paths, library_includes);
+      make_units(manifest, all_sources, object_dir, third_party_paths, library_includes);
   std::size_t rebuilt = 0;
   const std::int64_t compile_start = time::now_ns();
-  auto compiled = compile_units(manifest, options, units, *flags, rebuilt);
+  auto compiled = compile_units(manifest, options, units, *flags, *toolchain, rebuilt);
   if (!compiled) return forward_error(compiled.error());
   const std::int64_t compile_ms = (time::now_ns() - compile_start) / 1'000'000;
 
@@ -544,12 +641,12 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
       for (const auto& item : *matches) target_sources.push_back(item);
     }
     // 编译期嵌入：生成字节数组与声明头，并把它们纳入本目标的编译单元。
-    // 生成的源与 vendor 运行时都按"第三方"对待（`-w`、不插桩）——它们不是本工程的手写代码。
+    // 生成的源与上游运行时都按"第三方"对待（`-w`、不插桩）——它们不是本工程的手写代码。
     UnitIncludeMap unit_includes;
-    std::set<std::string> target_vendor = vendor_paths;  // 本目标的第三方集合（含生成的嵌入源码）
+    std::set<std::string> target_third_party = third_party_paths;  // 本目标的第三方集合（含生成的嵌入源码）
     if (!target->embed.empty()) {
       // 运行时实现只由库级嵌入提供（若库没有嵌入，则由本目标提供）——避免同链接里出现两份全局态
-      auto embeds = generate_embeds(manifest, options.target, options.profile,
+      auto embeds = generate_embeds(manifest, options.target, options.profile, subdir,
                                     /*with_runtime=*/manifest.embed.empty());
       if (!embeds) return forward_error(embeds.error());
       // **目标自身的源也要能 `#include "battery/embed.hpp"`**——只给生成源加包含目录是不够的
@@ -565,23 +662,25 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
       }
       for (const auto& generated : embeds->sources) {
         target_sources.push_back(generated);
-        target_vendor.insert(generated);
+        target_third_party.insert(generated);
         unit_includes[generated].push_back(embeds->include_dir);
       }
     }
     std::ranges::sort(target_sources);
     target_sources.erase(std::unique(target_sources.begin(), target_sources.end()),
                          target_sources.end());
-    target_units = make_units(manifest, target_sources, object_dir, target_vendor, unit_includes);
+    target_units = make_units(manifest, target_sources, object_dir, target_third_party, unit_includes);
     std::size_t target_rebuilt = 0;
-    auto target_compiled = compile_units(manifest, options, target_units, *flags, target_rebuilt);
+    auto target_compiled =
+        compile_units(manifest, options, target_units, *flags, *toolchain, target_rebuilt);
     if (!target_compiled) return forward_error(target_compiled.error());
     stats.units_total += target_units.size();
     stats.units_rebuilt += target_rebuilt;
     stats.units_cached = stats.units_total - stats.units_rebuilt;
   }
 
-  const std::string output = fs::join(bin_dir, target->name);
+  // 产物后缀按目标平台：Windows 必须是 `.exe`（否则系统不认为它是可执行程序）
+  const std::string output = fs::join(bin_dir, target->name + toolchain->executable_suffix);
   std::vector<CompileUnit> link_units = units;
   link_units.insert(link_units.end(), target_units.begin(), target_units.end());
 
@@ -602,7 +701,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     return stats;
   }
 
-  auto linked = link(manifest, options, link_units, output, *flags, {});
+  auto linked = link(manifest, options, link_units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
   stats.linked = true;
   stats.artifact = output;
@@ -621,8 +720,12 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   auto tests = manifest.test_files();
   if (!tests) return forward_error(tests.error());
 
-  const std::string object_dir = fs::join(root, std::format("build/{}/obj", options.profile));
-  const std::string bin_dir = fs::join(root, std::format("build/{}/bin", options.profile));
+  auto toolchain = resolve_toolchain(manifest, options.toolchain);
+  if (!toolchain) return forward_error(toolchain.error());
+  const std::string subdir = profile_directory(options.profile, *toolchain);
+  const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
+  const std::string bin_dir = fs::join(
+      root, std::format("build/{}/bin", profile_directory(options.profile, *toolchain)));
   if (auto status = fs::create_directories(object_dir); !status) return forward_error(status.error());
   if (auto status = fs::create_directories(bin_dir); !status) return forward_error(status.error());
 
@@ -637,10 +740,10 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   if (runner) {
     for (const auto& item : *runner) runner_sources.push_back(item);
   }
-  std::set<std::string> vendor_paths = collect_vendor(manifest);
+  std::set<std::string> third_party_paths = collect_third_party(manifest);
   UnitIncludeMap test_includes;
   // 库级嵌入先接上（它会给 `library_sources` 追加生成源），再拼最终单元列表
-  if (auto status = attach_library_embeds(manifest, options.profile, library_sources, vendor_paths,
+  if (auto status = attach_library_embeds(manifest, options.profile, subdir, library_sources, third_party_paths,
                                           test_includes);
       !status) {
     return forward_error(status.error());
@@ -648,21 +751,26 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   std::vector<std::string> all = library_sources;
   for (const auto& item : *tests) all.push_back(item);
   for (const auto& item : runner_sources) all.push_back(item);
-  for (const auto& path : vendor_paths) all.push_back(path);
+  for (const auto& path : third_party_paths) all.push_back(path);
   std::ranges::sort(all);
   all.erase(std::unique(all.begin(), all.end()), all.end());
-  std::vector<CompileUnit> units = make_units(manifest, all, object_dir, vendor_paths, test_includes);
+  std::vector<CompileUnit> units = make_units(manifest, all, object_dir, third_party_paths, test_includes);
   std::size_t rebuilt = 0;
-  auto compiled = compile_units(manifest, options, units, *flags, rebuilt);
+  auto compiled = compile_units(manifest, options, units, *flags, *toolchain, rebuilt);
   if (!compiled) return forward_error(compiled.error());
   log::info("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
 
-  const std::string output = fs::join(bin_dir, "st_tests");
-  auto linked = link(manifest, options, units, output, *flags, {});
+  const std::string output = fs::join(bin_dir, "st_tests" + toolchain->executable_suffix);
+  auto linked = link(manifest, options, units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
 
   std::vector<std::string> args;
   if (!filter.empty()) args.push_back(std::string(filter));
+  // 交叉编译产物不能在本机执行：明确告知（比 "Exec format error" 可读得多）
+  if (toolchain->cross()) {
+    return unexpected(ErrorCode::Unsupported,
+                      std::format("交叉编译产物无法在宿主执行: {}（请在目标平台运行）", output));
+  }
   auto result = process::run(output, args, process::Options{.capture_output = false});
   if (!result) return forward_error(result.error());
   return result->exit_code;

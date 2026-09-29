@@ -1,6 +1,6 @@
 #pragma once
 
-/// 脚本引擎：**基于 QuickJS**（`vendor/quickjs/`，quickjs-ng 0.17.0，MIT）。
+/// 脚本引擎：**基于 QuickJS**（`third_party/quickjs/`，quickjs-ng 0.17.0，MIT）。
 ///
 /// 定位：给应用与智能体一个**受控的表达式/逻辑层**——主题计算、界面联动、批量属性变换
 /// 这类"用代码描述比用配置描述更短"的场景。它是 ui/core 层的可选依赖，静态库默认链接。
@@ -11,7 +11,7 @@
 ///
 /// | 面 | 本封装的处置 |
 /// |---|---|
-/// | 系统访问（文件/进程/socket） | **不提供**。上游的 `quickjs-libc.c`（`std`/`os` 模块）已被刻意剔除（见 `vendor/README.md`），脚本里 `require('os')` 之类无从谈起 |
+/// | 系统访问（文件/进程/socket） | **不提供**。上游的 `quickjs-libc.c`（`std`/`os` 模块）已被刻意剔除（见 `third_party/SOURCES.md`），脚本里 `require('os')` 之类无从谈起 |
 /// | 内存 | 运行时级硬上限（`JS_SetMemoryLimit`），超限即抛 JS 异常而非拖垮进程 |
 /// | 栈 | 运行时级上限（`JS_SetMaxStackSize`），防深递归爆栈 |
 /// | 执行时长 | 中断回调按截止时间打断（`JS_SetInterruptHandler`），死循环不会挂死调用方 |

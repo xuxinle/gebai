@@ -135,6 +135,11 @@ const runTool: Tool = {
       action: { type: "string", enum: ["build", "test", "lint", "start", "stop", "status", "logs"], description: "动作" },
       target: { type: "string", description: "应用/目标名（默认 mdeditor）" },
       profile: { type: "string", description: "构建档：dev（默认，-O1）/debug/release/san" },
+      toolchain: {
+        type: "string",
+        description:
+          "交叉编译工具链名（在 st.pkg 的 toolchains 段声明，如 mingw）。产物落在 build/<档位>-<工具链>/bin/，Windows 目标带 .exe；产物无法在本机执行（action=start 不适用）",
+      },
       framework: { type: "string", description: "框架工程根（默认仓库根 shuangtian/，可用 SHUANGTIAN_PROJECT 覆盖）" },
       args: { type: "string", description: "start 时附加命令行参数（如 --demo-stream）" },
       scale: { type: "number", description: "DPI 缩放（start 时透传 --scale，2.0 = 200%）" },
@@ -160,6 +165,10 @@ const runTool: Tool = {
     const action = asString(args, "action", "build")
     const target = asString(args, "target", "mdeditor")
     const profile = asString(args, "profile", action === "start" ? "dev" : "dev")
+    const toolchain = asString(args, "toolchain")
+    const toolchainFlag = toolchain ? ` --toolchain=${toolchain}` : ""
+    // 交叉编译产物目录带工具链后缀（与 stpm 的 profile_directory 规则一致）
+    const buildSubdir = toolchain ? `${profile}-${toolchain}` : profile
     const root = frameworkDir(ctx, args as Json)
     const timeoutMs = asNumber(args as Json, "timeout_ms", DEFAULT_BUILD_TIMEOUT_MS)
 
@@ -175,9 +184,11 @@ const runTool: Tool = {
     }
 
     if (action === "build" || action === "start") {
-      const toolchain = await ensureToolchain()
-      if (!toolchain.ok) return { output: `引导工具链失败：\n${toolchain.text}` }
-      const build = await ctx.runCommand(`./build/bin/st build ${target} --profile ${profile}`, {
+      // 变量名不要叫 toolchain：那会遮蔽上面的「交叉编译工具链名」参数
+      // （实测导致 `--toolchain` 变成 `[object Object]` 传下去）
+      const bootstrap = await ensureToolchain()
+      if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
+      const build = await ctx.runCommand(`./build/bin/st build ${target} --profile ${profile}${toolchainFlag}`, {
         workdir: root,
         timeoutMs,
       })
@@ -185,15 +196,23 @@ const runTool: Tool = {
       if (build.code !== 0) return { output: `构建失败（exit ${build.code}）：\n${tail}` }
       if (action === "build") {
         return {
-          output: `构建完成 · ${target} [${profile}]\n${tail}`,
+          output: toolchain
+            ? `交叉编译完成 · ${target} [${profile}] 工具链 ${toolchain}\n` +
+              `产物: build/${buildSubdir}/bin/${target}.exe（Windows 目标，需在目标平台运行）\n${tail}`
+            : `构建完成 · ${target} [${profile}]\n${tail}`,
           data: { ok: true, action, target, output: tail },
         }
       }
 
       // —— start：无头启动 + 等待控制通道就绪 ——
+      if (toolchain) {
+        return {
+          output: `交叉编译产物（${toolchain}）无法在本机启动：请用 action=build 取产物，再到目标平台运行`,
+        }
+      }
       const control_file = controlFileFor(ctx, target)
       const log_file = logFileFor(ctx, target)
-      const binary = join(root, `build/${profile}/bin/${target}`)
+      const binary = join(root, `build/${buildSubdir}/bin/${target}`)
       if (!existsSync(binary)) return { output: `构建产物不存在：${binary}` }
       await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: root })
 
@@ -310,8 +329,10 @@ const runTool: Tool = {
     }
 
     if (action === "test" || action === "lint") {
-      const toolchain = await ensureToolchain()
-      if (!toolchain.ok) return { output: `引导工具链失败：\n${toolchain.text}` }
+      // 变量名不要叫 toolchain：那会遮蔽上面的「交叉编译工具链名」参数
+      // （实测导致 `--toolchain` 变成 `[object Object]` 传下去）
+      const bootstrap = await ensureToolchain()
+      if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
       const san = asBool(args as Json, "san")
       const command =
         action === "test"

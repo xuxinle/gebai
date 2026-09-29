@@ -25,6 +25,16 @@
 5. **视觉核验是硬要求**：任何"改完界面"的结论都必须有 `capture` 截图支撑；截图是物理像素 PNG，无头模式的结果与有窗口模式逐像素一致。
 6. **别猜端口**：`run(action=start)` 会把控制文件写在会话目录 `.shuangtian/<app>-control.json`，后续工具默认自动读取；也可以显式传 `target="127.0.0.1:<port>"`。
 7. **收尾干净**：改动式操作后如需保持环境整洁，用 `run(action=stop)` 结束常驻应用（它会先尝试控制通道 `shutdown` 优雅退出）。
+8. **写 C++ 时必须守跳平台强制约束**（`CONVENTIONS.md` §10，详细版 `docs/cross_platform.md`）——
+   目标是 Linux/Windows/macOS 三平台，而**本机（Linux）看不出跳平台问题**：
+   - 系统头/平台宏/平台 `char*` API **只能出现在 `platform_*` 里**；需要系统能力先加平台无关封装
+     （如 `process::current_id()`），不要在业务代码里直接调 `getpid`/`dlopen`；
+   - 路径一律 UTF-8 且经 `st::fs`（不要手写 `base + "/" + leaf`，也不要用
+     `ifstream(std::string)`——Windows 上按 ANSI 解释，中文路径必坏）；
+   - 示例/工具的入口用 `ST_MAIN(fn)`（Windows 的 `argv` 是 ANSI，中文参数会乱）；
+   - 不用 `long` 表示字节数/偏移（Windows 上是 32 位），打印一律 `std::format`。
+   **改了平台分支就要交叉编译一次验证**：`shuangtian_run(action=build, toolchain="mingw")`
+   （本机编不到 Windows 分支，这是唯一能发现问题的途径）。
 
 ## 常用判据
 

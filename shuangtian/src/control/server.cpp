@@ -431,7 +431,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     app["name"] = host.app_name();
     app["version"] = host.app_version();
     result["app"] = std::move(app);
-    result["pid"] = static_cast<std::uint64_t>(::getpid() == 0 ? 0 : 0);
+    // 之前这里是 `::getpid() == 0 ? 0 : 0`——**永远返回 0**（pid 从未真正上报过），
+    // 且 `getpid` 是 POSIX 接口，Windows 上不存在（交叉编译直接报错）。
+    result["pid"] = process::current_id();
     result["backend"] = std::string(host.backend_name());
     result["headless"] = host.headless();
     Json screen = Json::object();

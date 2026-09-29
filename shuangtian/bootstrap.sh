@@ -18,18 +18,18 @@ if ! command -v "$CXX" >/dev/null 2>&1; then
 fi
 
 JOBS="${ST_JOBS:-$( (command -v nproc >/dev/null && nproc) || echo 4 )}"
-# `-Ivendor`：自举路径也要能看到 vendored 头（nlohmann/json 等）。
-FLAGS=(-std=c++20 -O1 -g -Iinclude -Ivendor -fno-strict-aliasing
+# `-Ithird_party`：自举路径也要能看到 vendored 头（nlohmann/json 等）。
+FLAGS=(-std=c++20 -O1 -g -Iinclude -Ithird_party -fno-strict-aliasing
        -Wall -Wextra -Wconversion -Wshadow -Wpedantic -Wold-style-cast -Wnon-virtual-dtor)
 
 # C 源用独立标志（同一个编译器二进制 + `-x c`，不必引入第二套工具链）：
 # `FLAGS` 里 `-Wnon-virtual-dtor` 等是 C++ 专属，喂给 C 编译会直接报错。
-CFLAGS=(-std=gnu11 -O1 -g -Iinclude -Ivendor -x c)
+CFLAGS=(-std=gnu11 -O1 -g -Iinclude -Ithird_party -x c)
 
 mkdir -p build/bin build/obj/bootstrap
 mapfile -t SOURCES < <(find src/core src/ext src/pkg tools/stpm -name '*.cpp' | sort)
-# 第三方 C 源（vendor/）：st 自身也要链接脚本引擎，故自举必须一并编译
-mapfile -t C_SOURCES < <(find vendor -name '*.c' 2>/dev/null | sort)
+# 第三方 C 源（third_party/）：st 自身也要链接脚本引擎，故自举必须一并编译
+mapfile -t C_SOURCES < <(find third_party -name '*.c' 2>/dev/null | sort)
 
 echo "[bootstrap] 编译器: $CXX · 并行 $JOBS · 源文件 ${#SOURCES[@]} 个（另 C 源 ${#C_SOURCES[@]} 个）"
 START=$(date +%s%N)

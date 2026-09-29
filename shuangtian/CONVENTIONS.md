@@ -202,6 +202,7 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 |---|---|---|
 | L6 | `platform_*.cpp`、`simd*.cpp/.hpp` | 系统 API 与 SIMD intrinsics 的位级重解释只能在这里发生（单点封装） |
 | L3 | `include/st/test/test.hpp` | 断言宏需要在调用点取得文件/行号与表达式原文，是函数式宏唯一被认可的用途 |
+| L3 | `include/st/core/entry.hpp`（`ST_MAIN`）| 需在调用点生成 `main` 并正规化 `argv` 编码（Windows 的 `argv` 是 ANSI）。宏而非函数是语言限制：`main` 的签名与返回语义只能在调用点展开 |
 | L10 | 逐行 `// lint-allow: L10 …` | `Result`/`Value` 的隐式值构造是刻意设计（与 `std::expected` 一致） |
 
 > L12 只收 `.at(` 而不收 `.value()`：`value()` 是自有组件的常见 getter 名（`Slider::value()` 等），
@@ -217,3 +218,26 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 1. 任何新增的「例外」（如新的 SIMD 重路径）必须先在本文档登记。
 2. 新增公共 API → 同步 `DESIGN.md`。
 3. 改动协议/清单格式/设计 token → 先改文档再改代码，并升版本号。
+
+## 10. 跨平台强制约束（写代码时逐条自查）
+
+目标平台 **Linux / Windows / macOS**，并支持**交叉编译**。跨平台不是收尾工作：
+**一处平台假设会让整个目标平台编不过或运行期出错，而在本机（Linux）完全看不出来。**
+以下与 §2 的禁令同等地位（详细版与自查清单：`docs/cross_platform.md`）。
+
+1. **平台差异只能出现在 `platform_*` 里**：系统头（`<windows.h>`/`<unistd.h>`/`<dlfcn.h>`…）、
+   平台宏、平台 `char*` API 边界。其余代码**不得**直接 `#include <unistd.h>`、
+   调 `getpid()/fork()/dlopen()`。需要这类能力时先在后端加**平台无关封装**（如
+   `process::current_id()`），再在平台文件里实现两侧。
+2. **路径一律 UTF-8，进出都经 `st::fs`**：不手写 `base + "/" + leaf`（Windows 用反斜杠、有盘符/UNC）；
+   不用 `std::ifstream(std::string)` 直接构造（Windows 上按 **ANSI** 解释，中文路径必坏）——
+   走 `fs::read_text/read_bytes/write_text` 或 `fs::to_path()`/`fs::to_utf8()`。
+3. **进程入口用 `ST_MAIN(fn)`**（`st/core/entry.hpp`）：Windows 的 `argv` 是 ANSI
+   （中文机器是 GBK），该宏在入口处转 UTF-8 并设好控制台代码页。
+4. **类型与格式化**：需要定宽就用 `std::int32_t/int64_t/std::size_t`，**不用 `long` 表示字节数**；
+   打印一律 `std::format`/`st::print`。
+5. **系统库按目标平台解析**（`default_system_libs(platform)`）而非宿主宏：
+   linux=`pthread dl m`、windows=`ws2_32`、darwin=按需声明。
+   交叉编译在 `st.pkg` 的 `toolchains` 段声明，用 `st build <target> --toolchain=<名>` 启用。
+6. **改了平台分支必须真的编一次**：交叉编译是唯一能发现 Windows 分支问题的途径
+   （实测：从未被编译过的 Windows 分支攒了 `nodiscard` 忽略返回值、未使用变量等一批 `-Werror` 问题）。

@@ -143,13 +143,14 @@ class PlatformStubBackend final : public Backend {
 }  // namespace
 
 auto has_display() noexcept -> bool {
+#if defined(_WIN32)
+  // Windows 有窗口系统是常态（无 DISPLAY 概念）；真正的"无头"由 `--headless` 显式指定。
+  return true;
+#else
   const auto check = [](const char* name) {
     const auto value = fs::read_env(name);
     return value.has_value() && !value->empty();
   };
-#if defined(_WIN32)
-  return true;
-#else
   return check("DISPLAY") || check("WAYLAND_DISPLAY");
 #endif
 }

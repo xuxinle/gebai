@@ -67,6 +67,8 @@ bun run lint
 (cd shuangtian && ./build/bin/st test --san)         # ASan + UBSan 档（发现 UB 即视为 bug）
 (cd shuangtian && ./build/dev/bin/codeeditor --headless --enable-script --frames 3)  # 脚本层示例（默认关闭，需显式开关）
 (cd shuangtian && ./build/bin/st lint)               # 禁用特性静态扫描（须 0 违规；豁免在 CONVENTIONS §8 登记）
+(cd shuangtian && ./build/bin/st doctor)             # 环境自检（编译器/交叉工具链/后端/字体）
+(cd shuangtian && ./build/bin/st build gallery --toolchain=mingw)  # 交叉编译出 Windows 可执行（需 g++-mingw-w64-x86-64）
 (cd shuangtian && python3 tools/st_visual_check.py)  # 无头视觉验证：两档 × 三示例全序列 + 截图 + sanitizer 报告检查
 (cd shuangtian/vendor && sha256sum -c CHECKSUMS.sha256)  # 第三方源码未被就地修改（台账见 sources.json）
 

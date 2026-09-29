@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "st/core/entry.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
 #include "st/core/log.hpp"
@@ -56,7 +57,9 @@ struct Arguments {
         arguments.options[std::string(body.substr(0, equals))] = std::string(body.substr(equals + 1));
         continue;
       }
-      if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("--")) {
+      // 下一个参数只要以 `-` 开头就不当值：否则 `--san -j 6` 会把 `-j` 吃成 `--san` 的值
+      // （表现为"档位变成 debug + filter 变成 6"，两处都不报错，极难察觉）。
+      if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("-")) {
         const std::string_view next = argv[index + 1];
         const bool looks_like_value =
             next.find('/') != std::string_view::npos || next.find('.') != std::string_view::npos ||
@@ -67,6 +70,25 @@ struct Arguments {
           continue;
         }
         arguments.options[std::string(body)] = std::string(next);
+        ++index;
+        continue;
+      }
+      arguments.flags.emplace_back(body);
+      continue;
+    }
+    // 单破折号短选项（`-j 6` / `-j=6`）：不能只认 `--`——
+    // 实测 `st test --san -j 6` 里 `-j` 与 `6` 都落进 positional，`6` 被当成测试过滤器
+    // （表现为"只跑了 4 个测试"），并发设置完全没生效。
+    if (raw.size() > 1 && raw.starts_with("-")) {
+      const std::string_view body = raw.substr(1);
+      const std::size_t equals = body.find('=');
+      if (equals != std::string_view::npos) {
+        arguments.options[std::string(body.substr(0, equals))] =
+            std::string(body.substr(equals + 1));
+        continue;
+      }
+      if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("-")) {
+        arguments.options[std::string(body)] = std::string(argv[index + 1]);
         ++index;
         continue;
       }
@@ -93,8 +115,9 @@ void print_usage() {
 
 命令:
   build [target]        构建工程或指定目标（--profile=debug|release|san，-j N，--verbose，--force）
+                        交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
   run <target> [args]   构建并运行目标（无头演示：run gallery -- --headless --frames 3）
-  test [filter]         构建并运行单元测试（--san 开启 ASan/UBSan 档）
+  test [filter]         构建并运行单元测试（--san 开 ASan/UBSan 档，-j N 控并发）
   lint [--explain RULE] 禁令扫描（CONVENTIONS §8；无参数即扫描工程，--rules 列出规则）
   deps                  解析依赖并打印依赖树（--locked 只读 st.lock）
   fetch                 解析 + 拉取依赖到缓存/工作区，并写 st.lock
@@ -132,6 +155,8 @@ auto command_build(const Arguments& arguments) -> int {
   st::pkg::BuildOptions options;
   options.profile = arguments.get("profile", "debug");
   options.target = arguments.positional.empty() ? std::string{} : arguments.positional.front();
+  // 交叉编译：--toolchain=<名>（命中 st.pkg 的 toolchains 段）
+  options.toolchain = arguments.get("toolchain", "");
   options.verbose = arguments.has("verbose") || arguments.has("v");
   options.force = arguments.has("force");
   const auto jobs = arguments.number("j", 0.0);
@@ -198,6 +223,12 @@ auto command_test(const Arguments& arguments) -> int {
   st::pkg::BuildOptions options;
   options.profile = arguments.has("san") ? "san" : "debug";
   options.verbose = arguments.has("verbose");
+  // 测试构建同样要能控并发：`san` 档插桩后编译期内存更高，受限容器里需要降并发
+  // （实测 8 GiB cgroup 下全量 san 的 28 路并行会被 OOM killer 杀掉 cc1plus，
+  //   表现为莫名其妙的链接错误——`.o` 只写了一半）。
+  const auto jobs = arguments.number("j", 0.0);
+  options.jobs = jobs > 0.0 ? static_cast<std::size_t>(jobs) : 0;
+  options.toolchain = arguments.get("toolchain", "");
   const std::string filter = arguments.positional.empty() ? std::string{} : arguments.positional.front();
   st::print("运行测试 [{}]{}\n", options.profile,
               filter.empty() ? "" : std::format(" 过滤: {}", filter));
@@ -255,6 +286,23 @@ auto command_doctor(const Arguments& arguments) -> int {
     }
   }
   st::print("  逻辑核心        : {}\n", st::hardware_concurrency());
+  // 交叉编译工具链探测：清单里声明了什么、本机是否真的装了
+  if (auto manifest = load_manifest(arguments); manifest) {
+    if (manifest->toolchains.empty()) {
+      st::print("  交叉工具链      : 未声明（st.pkg 的 toolchains 段可声明，如 mingw）\n");
+    }
+    for (const auto& toolchain : manifest->toolchains) {
+      const auto found = st::process::which(toolchain.compiler);
+      st::print("  交叉工具链 [{}]  : {} → {}\n", toolchain.name, toolchain.compiler,
+                  found ? *found : std::string("未安装"));
+      if (found) {
+        auto version = st::process::run(toolchain.compiler, {"--version"});
+        if (version && version->exit_code == 0) {
+          st::print("                    {}\n", st::trim(version->stdout_text).data());
+        }
+      }
+    }
+  }
   const auto display_env = []() -> bool {
     const auto display = st::fs::read_env("DISPLAY");
     const auto wayland = st::fs::read_env("WAYLAND_DISPLAY");
@@ -346,8 +394,19 @@ auto command_init(const Arguments& arguments) -> int {
     std::fprintf(stderr, "错误: init 需要工程名\n");
     return 1;
   }
-  const std::string name = arguments.positional.front();
-  const std::string root = st::fs::join(".", name);
+  const std::string location = arguments.positional.front();
+  // 绝对路径直接用：`fs::join` 会剥离 leaf 的前导 `/`（那是"拼接子路径"的语义），
+  // 拿它拼绝对路径会静默变成相对路径（实测 `st init /tmp/x` 落到了 `./tmp/x`）。
+  const std::string root = st::fs::is_absolute(location) ? location : st::fs::join(".", location);
+  // 工程名：`--name` 优先；否则取目录基名。
+  // **不能拿 `location` 当名字**：那样写进 st.pkg 的 name/target 会是完整路径
+  // （实测 `st init /tmp/x` 生成了 `"name": "/tmp/x"`），既不合法也不好看。
+  std::string name = arguments.get("name", "");
+  if (name.empty()) {
+    const std::size_t slash = root.find_last_of('/');
+    name = slash == std::string::npos ? root : root.substr(slash + 1);
+    if (name.empty()) name = "app";
+  }
   if (st::fs::exists(root)) {
     std::fprintf(stderr, "错误: 目录已存在: %s\n", root.c_str());
     return 1;
@@ -356,12 +415,38 @@ auto command_init(const Arguments& arguments) -> int {
     std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
     return 1;
   }
+  // 清单结构必须与解析器一致——旧模板有三个独立缺陷，导致 `st init` 生成的工程**一律构建不了**
+  // （这条路径原先没有任何测试覆盖）：
+  //   ① `targets` 写成**数组**，而解析器要对象（`parse: targets 必须是 JSON 对象`）；
+  //   ② 工程名用了完整路径（`st init /tmp/x` → `"name": "/tmp/x"`）而非 `--name`；
+  //   ③ 顶层 `sources` 与 target 的源重复匹配 `src/main.cpp` → **符号重复定义**。
+  // 框架头路径也一并写入：`st` 自己知道框架在哪（可执行文件在 `<framework>/build/bin/st`），
+  // 写进去让新工程开箱即可构建（否则用户得手工配 include 路径）。
+  const std::string framework_root = []() -> std::string {
+    auto executable = st::process::executable_path();
+    if (!executable) return {};
+    // `<framework>/build/bin/st` → 上溯三级
+    std::string path = st::fs::normalize(*executable);
+    for (int level = 0; level < 3; ++level) {
+      const std::size_t slash = path.find_last_of('/');
+      if (slash == std::string::npos) return {};
+      path = path.substr(0, slash);
+    }
+    return path;
+  }();
+  const std::string framework_includes =
+      framework_root.empty()
+          ? std::string("\"include\"")
+          : std::format("\"include\", \"{}/include\", \"{}/third_party\"", framework_root,
+                        framework_root);
   const std::string manifest = std::format(
       "{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.0\",\n  \"kind\": \"executable\",\n"
-      "  \"include_dirs\": [\"include\"],\n  \"sources\": [\"src/*.cpp\"],\n"
-      "  \"targets\": [{{ \"name\": \"{}\", \"kind\": \"executable\", \"sources\": [\"src/main.cpp\"] }}],\n"
+      "  \"include_dirs\": [{}],\n"
+      // 顶层 sources 留空：本项目只有一个入口，放在 target 里（两边都匹配会重复定义符号）
+      "  \"sources\": [],\n"
+      "  \"targets\": {{ \"{}\": {{ \"kind\": \"executable\", \"sources\": [\"src/*.cpp\"] }} }},\n"
       "  \"dependencies\": {{ \"modules\": [], \"source\": [], \"system\": [] }}\n}}\n",
-      name, name);
+      name, framework_includes, name);
   if (auto status = st::fs::write_text(st::fs::join(root, "st.pkg"), manifest); !status) {
     std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
     return 1;
@@ -369,9 +454,10 @@ auto command_init(const Arguments& arguments) -> int {
   const std::string main_template = R"CPP(#include <cstdio>
 
 #include "st/app/app.hpp"
+#include "st/core/entry.hpp"
 #include "st/ui/components/basic.hpp"
 
-auto main(int argc, char** argv) -> int {
+auto run_app(int argc, char** argv) -> int {
   (void)argc;
   (void)argv;
   st::app::AppOptions options;
@@ -383,23 +469,40 @@ auto main(int argc, char** argv) -> int {
   auto heading = std::make_unique<st::ui::Heading>("Hello 霜天", 1);
   page->add_child(std::move(heading));
   page->add_child(std::make_unique<st::ui::Text>("控制通道：tree / find / capture / input.*"));
-  return app.run(std::move(page)).value_or(1);
+  // `Application::run` 返回 `Result<int>`（框架不设异常；错误经 Result 返回），
+  // **没有 `value_or`**——旧模板写成 `.value_or(1)` 导致生成的项目一律编译不过。
+  auto outcome = app.run(std::move(page));
+  if (!outcome) {
+    std::fprintf(stderr, "运行失败: %s\n", outcome.error().to_string().c_str());
+    return 1;
+  }
+  return *outcome;
 }
+
+// 跨平台入口（同框架示例）：正规化 argv 编码并设好控制台代码页
+ST_MAIN(run_app)
+
 )CPP";
   const std::string main_source = st::replace_all(main_template, "@NAME@", name);
   if (auto status = st::fs::write_text(st::fs::join(root, "src/main.cpp"), main_source); !status) {
     std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
     return 1;
   }
-  st::print("工程已创建: {}\n  {}\n  {}\n下一步: cd {} && st build\n", root,
-              st::fs::join(root, "st.pkg"), st::fs::join(root, "src/main.cpp"),
-              name);
+  st::print("工程已创建: {}\n  {}\n  {}\n", root, st::fs::join(root, "st.pkg"),
+              st::fs::join(root, "src/main.cpp"));
+  // 如实告知边界：清单里已写入框架的 include 路径，但**框架自身的源**尚未纳入构建
+  // （`dependencies.source` 的解析与构建接线仍未实现——见 DESIGN §7.4 与 self_optimize backlog #8）。
+  // 在框架仓库内开发（或把自己的源与框架源一并构建）即可；不要把"能生成骨架"误解为"能独立构建"。
+  st::print("下一步: cd {} && st build {}\n"
+            "  提示: 清单已写入框架 include 路径；若框架源不在本工程构建范围内，\n"
+            "        链接会缺符号（框架依赖的自动接入尚未实现）。\n",
+            root, name);
   return 0;
 }
 
 }  // namespace
 
-auto main(int argc, char** argv) -> int {
+auto run_app(int argc, char** argv) -> int {
   st::log::set_level(st::log::Level::Warn);
   const Arguments arguments = parse_arguments(argc, argv);
   if (arguments.command.empty() || arguments.command == "help" || arguments.has("help")) {
@@ -427,3 +530,6 @@ auto main(int argc, char** argv) -> int {
   print_usage();
   return 1;
 }
+
+// 跨平台入口：正规化 argv 编码（Windows 的 argv 是 ANSI）并设好控制台代码页
+ST_MAIN(run_app)

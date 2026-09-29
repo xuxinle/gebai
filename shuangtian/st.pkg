@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "static_library",
   "cxx_standard": 20,
-  "include_dirs": ["include", "vendor"],
+  "include_dirs": ["include", "third_party"],
   "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "gpu", "control", "app", "pkg"],
   "sources": [
     "src/core/*.cpp",
@@ -22,7 +22,7 @@
     "src/ext/*.cpp"
   ],
   "embed": ["src/ui/script_api.js"],
-  "vendor_sources": ["vendor/quickjs/*.c"],
+  "third_party_sources": ["third_party/quickjs/*.c"],
   "c_flags": ["-std=gnu11"],
   "tests": ["tests/*_test.cpp"],
   "flags": [
@@ -43,6 +43,17 @@
   ],
   "defines": ["ST_VERSION=\"0.1.0\"", "ST_ENABLE_LINT=1"],
   "system_libs": ["pthread", "dl", "m"],
+  "toolchains": {
+    "mingw": {
+      "compiler": "x86_64-w64-mingw32-g++",
+      "c_compiler": "x86_64-w64-mingw32-gcc",
+      "platform": "windows",
+      "system_libs": ["ws2_32", "winpthread"],
+      "defines": ["_WIN32_WINNT=0x0601", "WINVER=0x0601"],
+      "executable_suffix": ".exe",
+      "extra_flags": ["-static-libgcc", "-static-libstdc++"]
+    }
+  },
   "targets": {
     "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"], "system_libs": ["dl"] },
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"],

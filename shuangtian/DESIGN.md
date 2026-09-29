@@ -73,8 +73,8 @@ shuangtian/
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
 ├── examples/{gallery,mdeditor,codeeditor}/
-├── vendor/<name>/        # 第三方源码（nlohmann/json + quickjs-ng）；台账 sources.json +
-│                         # CHECKSUMS.sha256，`sha256sum -c` 可校验（见 vendor/README.md）
+├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
+│                         # batterycenter/embed；来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
 └── docs/                 # 控制协议规范、设计 token 表等
 ```
 
@@ -450,7 +450,7 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 主题计算、批量属性变换、联动规则这些“用代码写比用配置写短”的场景。
 
 - **能力边界是设计出来的**：上游的 `quickjs-libc.c`（`std`/`os` 模块：文件/进程/socket）
-  **已从 `vendor/` 剔除**，脚本里不存在 "require('os')" 这种东西；
+  **已从 `third_party/` 剔除**，脚本里不存在 "require('os')" 这种东西；
 - **四重配额在运行时层强制**（不是入口处检查参数）：内存上限、栈上限、
   中断回调按截止时间打断（死循环不会挂死调用方）、JSON↔JS 转换深度（挡循环引用）；
 - **宿主函数只来自显式注册**，且失败对脚本是**可捕获异常**（脚本能区分“成功且返回空”与“失败了”）；
@@ -524,9 +524,10 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 ## 7. 包管理（stpm）
 
 ### 7.1 定位
-自研包管理器：不依赖系统包管理器、不用 CMake/Make、不下载二进制（源码级 vendor 优先，保证可审计与可离线）。
-框架本体除 `vendor/` 下两个登记在册的依赖（nlohmann/json、quickjs-ng）外**全部自研**；
-第三方**源码**统一由 stpm 管理：版本求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直驱编译。
+自研包管理器：不依赖系统包管理器、不用 CMake/Make、不下载二进制（源码级内联优先，保证可审计与可离线）。
+框架本体的外部依赖**直接内联在 `third_party/`**（nlohmann/json、quickjs-ng、batterycenter/embed），其余**全部自研**；
+第三方**源码**直接内联在 `third_party/`（来源/许可/校验和见 `third_party/SOURCES.md`）；
+stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直驱编译）。
 
 ### 7.2 清单 `st.pkg`（JSON）
 ```json
@@ -536,9 +537,9 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
   "kind": "static_library",
   "cxx_standard": 20,
   "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "gpu", "control", "app"],
-  "include_dirs": ["include", "vendor"],
+  "include_dirs": ["include", "third_party"],
   "sources": ["src/**/*.cpp"],
-  "vendor_sources": ["vendor/quickjs/*.c"],
+  "third_party_sources": ["third_party/quickjs/*.c"],
   "c_flags": ["-std=gnu11"],
   "tests": ["tests/*_test.cpp"],
   "flags": ["-fno-strict-aliasing"],
@@ -559,7 +560,7 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 
 两个字段专门服务第三方源码：
 
-- **`vendor_sources`**：第三方翻译单元清单。这些单元**不套本工程的告警集（`-w`）、不进 PCH、
+- **`third_party_sources`**：第三方翻译单元清单。这些单元**不套本工程的告警集（`-w`）、不进 PCH、
   不做 sanitizer 插桩**。理由：我们负责自家代码的质量，不负责上游的；
   不插桩还避免了“65k 行的 `quickjs.c` 在 `-O1`+ASan 下单文件就要 GB 级内存，并行构建被 OOM 杀掉”。
   混编不影响对我们的检测能力——ASan 的分配器是全局的。
@@ -580,10 +581,10 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 - 工作区：项目 `.st/work/`（依赖解包与中间产物）；`st vendor` 把依赖源码树固化进 `vendor/<name>/` + `vendor.lock`（**随仓库分发、离线可构建**）。
 - 构建集成：依赖以 **声明式** `st.build` 规则（源文件/包含目录/宏/产出）纳入构建图——**不执行任意脚本**。
 - 隔离：每个依赖独立 include 根与独立中间目录；多版本共存按目录隔离。
-- **手写 vendor 台账**：不是所有依赖都走 stpm 上架。对直接引入源码树的库（如本框架的
-  nlohmann/json 与 quickjs-ng），在 `vendor/sources.json` 登记版本/来源 URL/许可/SHA-256/
-  **剔除清单**，并生成 `CHECKSUMS.sha256`——`cd vendor && sha256sum -c CHECKSUMS.sha256`
-  一命令回答“依赖了什么、什么版本、有没有被就地改过”。升级流程写在 `vendor/README.md`。
+- **依赖直接内联（`third_party/`）**：三个外部依赖的源码**随仓库分发**，不是"需要下载的依赖"。
+  `third_party/SOURCES.md` 记录来源 URL / 版本 / 许可 / **逐文件 SHA-256** / 剔除与修改清单——
+  `cd third_party && sha256sum -c CHECKSUMS.sha256` 一命令回答“依赖了什么、哪些上游代码被动了”。
+  许可合规（MIT 保留版权、Apache-2.0 保留 LICENSE 与修改声明）在同一文档中说明。
 
 ### 7.5 构建图与直驱编译器
 - `st build [target]`：解析清单 → 拓扑排序（依赖先编）→ 生成编译命令 → **直接调用 `g++`/`clang++`**（`-MMD -MF` 依赖文件 + 增量判新旧）。
@@ -606,6 +607,16 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 
 `st build` 结束会打印耗时构成（编译 / 链接 / 总时长 / 并行度 / 是否使用 PCH），便于回归对比。
 `--no-pch` 可关闭预编译头用于排查（例如 PCH 与某编译选项冲突时）。
+
+**并行度与内存峰值（踩过）**：翻译单元的内存占用差了两个数量级——
+`third_party/quickjs/quickjs.c` 单文件 6.5 万行，在 `-O1 -g` 下编译峰值可达 GB 级，
+而普通单元只有几十 MB。于是"28 路并行"在**受限容器**里会撞内存墙：
+实测在 8 GiB cgroup 的容器中全量 `san` 档（ASan/UBSan 插桩，编译期内存更高）
+被 OOM killer 杀掉 `cc1plus`，表现为莫名其妙的链接错误（`.Lubsan_data` 未定义——
+其实是 `.o` 被写了一半）。对策：
+
+- 受限环境用 `-j N` 控制并发（8 GiB 内存下全量 san 建议 `-j 6`）；宿主机 100 GB+ 内存时 28 路无压力；
+- 真正的根治是"按单元大小限流"（大单元少并发），已在 self_optimize backlog 登记（#7）。
 
 **实测（本仓库当前规模：54 个翻译单元，8 核）**：
 | 场景 | 时间 |
@@ -643,8 +654,8 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 
 | 部分 | 处置 |
 |---|---|
-| 运行时（`embed_impl.cpp`，热重载） | **原样 vendor**，编译进目标 |
-| 头模板 / 单文件模板 | vendor 为模板（占位符语义与上游逐字一致） |
+| 运行时（`embed_impl.cpp`，热重载） | **原样内联**（`third_party/battery/`），编译进目标 |
+| 头模板 / 单文件模板 | 内联为模板（占位符语义与上游逐字一致） |
 | 生成逻辑（上游的 CMake） | **由 `st build` 原生实现**（`src/pkg/embed.cpp`） |
 
 于是拿到与上游**相同的 API** 且零 CMake 依赖：
@@ -666,6 +677,52 @@ b::embed<"examples/gallery/assets/about.txt">().str()   // 编译期路径检查
   八进制从语法上不可能歧义；
 - **运行时实现只编译一次**（库有嵌入时归库，否则归目标）：两边都带会让同一个可执行文件
   出现两份进程级全局表（实测链接期 duplicate symbol），热重载表也会分裂。
+
+### 7.9 交叉编译（Linux 上产出 Windows/macOS 程序）
+
+**为什么要有**：框架的目标平台是三平台，而开发机通常只有 Linux。
+"Windows 分支是否正确"这件事在 Linux 上**永远测不出来**——
+本轮实测就抓到了一批只存在于 Windows 分支的问题：
+
+| 类型 | 实例 |
+|---|---|
+| 平台 API 不存在 | `::getpid()`（控制通道 `hello`）→ 交叉编译直接报 `has not been declared` |
+| 从未被编译的代码攒了质量问题 | Windows 分支里的 `nodiscard` 忽略返回值、`-Wunused-but-set-variable`（`-Werror` 下直接失败） |
+| 宿主宏误判目标 | `default_system_libs()` 用 `#if defined(_WIN32)` 判的是**宿主**（Linux 恒为假），给 Windows 目标链上了 `-lpthread -ldl -lm` |
+
+**怎么用**：工具链在 `st.pkg` 的 `toolchains` 段声明，`--toolchain=<名>` 启用。
+
+```jsonc
+"toolchains": {
+  "mingw": {
+    "compiler": "x86_64-w64-mingw32-g++",
+    "c_compiler": "x86_64-w64-mingw32-gcc",
+    "platform": "windows",
+    "system_libs": ["ws2_32", "winpthread"],     // 接管（不再追加 linux 的 pthread/dl/m）
+    "defines": ["_WIN32_WINNT=0x0601", "WINVER=0x0601"],
+    "executable_suffix": ".exe",                  // 产物带后缀，Windows 才认它是程序
+    "extra_flags": ["-static-libgcc", "-static-libstdc++"]
+  }
+}
+```
+
+```bash
+st build gallery --toolchain=mingw        # → build/dev-mingw/bin/gallery.exe（PE32+）
+st doctor                                 # 探测清单声明的工具链是否真的装了
+```
+
+**关键设计点**：
+
+| 点 | 理由 |
+|---|---|
+| 目录隔离 `build/<档位>-<工具链>/` | PCH 是按"编译器 + 目标"生成的；对象/嵌入生成物混用会得到难解的编译错误 |
+| 系统库**整体接管**（工具链声明了就不追加本机默认） | 一份清单服务多平台，"本机需要哪些库"对目标可能是错的甚至不存在 |
+| 交叉编译不套 `-fuse-ld=lld/mold` | 宿主装的链接器不一定支持目标格式 |
+| `st test --toolchain` 明确拒绝执行 | 交叉产物无法在宿主运行；报"请在目标平台运行"比 `Exec format error` 可读 |
+| C 源沿用同一编译器 + `-x c` | 不引入第二套工具链（mingw 的 `g++ -x c` 即可编 QuickJS） |
+
+> 顺带：交叉编译是**平台分支的强制验证手段**。`CONVENTIONS §10` 因此规定
+> "改了平台分支就要交叉编译一次"——这是唯一能发现 Windows 分支问题的途径。
 
 ## 8. 无头开发工作流（Linux 服务器，无桌面）
 

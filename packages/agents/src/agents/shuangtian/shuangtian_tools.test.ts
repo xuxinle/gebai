@@ -365,6 +365,37 @@ describe("run 生命周期", () => {
     expect(result.output).toContain("not declared")
   })
 
+  test("交叉编译：--toolchain 透传给 st，产物目录与 .exe 后缀如实告知", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    const commands: string[] = []
+    const { ctx } = makeCtx(home, (cmd) => {
+      commands.push(cmd)
+      return { stdout: "构建完成 [release]" }
+    })
+    const result = await tools.run.execute(
+      { action: "build", target: "gallery", profile: "release", toolchain: "mingw", framework: root },
+      ctx,
+    )
+    // 命令行必须带上工具链（否则只是"普通构建"，用户以为交叉编译了）
+    expect(commands.some((c) => c.includes("--toolchain=mingw"))).toBe(true)
+    expect(result.output).toContain("交叉编译完成")
+    expect(result.output).toContain("build/release-mingw/bin/gallery.exe")
+  })
+
+  test("交叉编译产物不能在本机启动：start 明确拒绝而非启动失败", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    const { ctx } = makeCtx(home, () => ({ stdout: "构建完成 [release]" }))
+    const result = await tools.run.execute(
+      { action: "start", target: "gallery", toolchain: "mingw", framework: root },
+      ctx,
+    )
+    expect(result.output).toContain("无法在本机启动")
+    // 不能把工具链名渲染成对象（参数与内部引导变量曾同名遮蔽）
+    expect(result.output).not.toContain("[object Object]")
+  })
+
   test("框架目录缺失：明确提示而非静默", async () => {
     const home = mkdtempSync(join(tmpdir(), "st-tools-"))
     const { ctx } = makeCtx(home)

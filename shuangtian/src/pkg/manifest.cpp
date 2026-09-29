@@ -19,11 +19,11 @@ namespace st::pkg {
 namespace {
 
 /// 本层已识别的顶层字段（其余进 `extra_fields`，回写时保留）。
-inline constexpr std::array<std::string_view, 18> known_keys{
+inline constexpr std::array<std::string_view, 19> known_keys{
     "name",       "version",     "kind",        "modules",        "include_dirs",
     "sources",    "tests",       "flags",       "defines",        "system_libs",
     "targets",    "dependencies", "dependency_modules", "dependency_system",
-    "vendor_sources", "c_flags", "embed",
+    "third_party_sources", "c_flags", "embed", "toolchains",
     "shuangtian_pkg_format"};
 
 [[nodiscard]] auto known_key(std::string_view key) -> bool {
@@ -183,12 +183,19 @@ auto Manifest::find_target(std::string_view target_name) const -> const TargetSp
   return nullptr;
 }
 
+auto Manifest::find_toolchain(std::string_view toolchain_name) const -> const ToolchainSpec* {
+  for (const auto& toolchain : toolchains) {
+    if (toolchain.name == toolchain_name) return &toolchain;
+  }
+  return nullptr;
+}
+
 auto Manifest::source_files() const -> Result<std::vector<std::string>> {
   return expand_patterns(directory, sources, "sources");
 }
 
-auto Manifest::vendor_files() const -> Result<std::vector<std::string>> {
-  return expand_patterns(directory, vendor_sources, "vendor_sources");
+auto Manifest::third_party_files() const -> Result<std::vector<std::string>> {
+  return expand_patterns(directory, third_party_sources, "third_party_sources");
 }
 
 auto Manifest::test_files() const -> Result<std::vector<std::string>> {
@@ -214,7 +221,7 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   manifest.modules = json_get_string_array(json, "modules");
   manifest.include_dirs = json_get_string_array(json, "include_dirs");
   manifest.sources = json_get_string_array(json, "sources");
-  manifest.vendor_sources = json_get_string_array(json, "vendor_sources");
+  manifest.third_party_sources = json_get_string_array(json, "third_party_sources");
   manifest.c_flags = json_get_string_array(json, "c_flags");
   if (manifest.c_flags.empty()) manifest.c_flags = {"-std=gnu11"};
   manifest.tests = json_get_string_array(json, "tests");
@@ -222,6 +229,29 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   manifest.embed = json_get_string_array(json, "embed");
   manifest.defines = json_get_string_array(json, "defines");
   manifest.system_libs = json_get_string_array(json, "system_libs");
+
+  const st::Json& toolchains = json_at(json, "toolchains");
+  if (toolchains.is_object()) {
+    for (const auto& [name, value] : toolchains.items()) {
+      if (!value.is_object()) {
+        return unexpected(ErrorCode::Parse, std::format("工具链 {} 必须是 JSON 对象", name));
+      }
+      ToolchainSpec spec;
+      spec.name = name;
+      spec.compiler = json_get_string(value, "compiler");
+      spec.c_compiler = json_get_string(value, "c_compiler");
+      spec.platform = json_get_string(value, "platform");
+      spec.system_libs = json_get_string_array(value, "system_libs");
+      spec.defines = json_get_string_array(value, "defines");
+      spec.executable_suffix = json_get_string(value, "executable_suffix");
+      spec.extra_flags = json_get_string_array(value, "extra_flags");
+      if (spec.compiler.empty()) {
+        return unexpected(ErrorCode::Parse,
+                          std::format("工具链 {} 缺少 compiler（交叉编译必须显式指定编译器）", name));
+      }
+      manifest.toolchains.push_back(std::move(spec));
+    }
+  }
 
   const st::Json& targets = json_at(json, "targets");
   if (!targets.is_null()) {
@@ -312,7 +342,7 @@ auto Manifest::to_json() const -> st::Json {
   json["modules"] = to_array(modules);
   json["include_dirs"] = to_array(include_dirs);
   json["sources"] = to_array(sources);
-  if (!vendor_sources.empty()) json["vendor_sources"] = to_array(vendor_sources);
+  if (!third_party_sources.empty()) json["third_party_sources"] = to_array(third_party_sources);
   if (!c_flags.empty()) json["c_flags"] = to_array(c_flags);
   json["tests"] = to_array(tests);
   json["flags"] = to_array(flags);
@@ -331,6 +361,24 @@ auto Manifest::to_json() const -> st::Json {
     target_map[target.name] = entry;
   }
   json["targets"] = target_map;
+
+  if (!toolchains.empty()) {
+    st::Json toolchain_map = st::Json::object();
+    for (const auto& toolchain : toolchains) {
+      st::Json entry = st::Json::object();
+      entry["compiler"] = toolchain.compiler;
+      if (!toolchain.c_compiler.empty()) entry["c_compiler"] = toolchain.c_compiler;
+      if (!toolchain.platform.empty()) entry["platform"] = toolchain.platform;
+      if (!toolchain.system_libs.empty()) entry["system_libs"] = to_array(toolchain.system_libs);
+      if (!toolchain.defines.empty()) entry["defines"] = to_array(toolchain.defines);
+      if (!toolchain.executable_suffix.empty()) {
+        entry["executable_suffix"] = toolchain.executable_suffix;
+      }
+      if (!toolchain.extra_flags.empty()) entry["extra_flags"] = to_array(toolchain.extra_flags);
+      toolchain_map[toolchain.name] = entry;
+    }
+    json["toolchains"] = toolchain_map;
+  }
 
   st::Json dependency_map = st::Json::object();
   dependency_map["modules"] = to_array(dependency_modules);

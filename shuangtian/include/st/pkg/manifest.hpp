@@ -60,11 +60,26 @@ struct TargetSpec {
   std::vector<std::string> flags{};
   /// 从库源中排除的 glob（如工具链专属的 `src/pkg/*`——应用不需要，排除后少编译若干翻译单元）。
   std::vector<std::string> exclude_sources{};
-  /// 编译期嵌入的资源文件 glob（`battery/embed.hpp`，见 `vendor/battery/UPSTREAM.md`）。
+  /// 编译期嵌入的资源文件 glob（`battery/embed.hpp`，见 `third_party/battery/UPSTREAM.md`）。
   ///
   /// 写在**目标**上而不是工程级：嵌入集合决定生成的声明头内容，而声明头是按目标隔离的
   /// （不同目标嵌入不同资源，且同名资源在不同目标里标识符不同）。
   std::vector<std::string> embed{};
+};
+
+/// 交叉编译工具链描述（`st.pkg` 的 `toolchains` 段）。
+///
+/// 存在的理由：交叉编译时**宿主与目标平台不同**，而"默认系统库/可执行文件后缀/平台宏"
+/// 这些必须按**目标**决定，不能按宿主（`#if defined(_WIN32)` 判的是宿主，必然错）。
+struct ToolchainSpec {
+  std::string name{};
+  std::string compiler{};      ///< C++ 编译器命令（如 `x86_64-w64-mingw32-g++`）
+  std::string c_compiler{};    ///< C 编译器（空则取 compiler 并加 `-x c`）
+  std::string platform{};      ///< 目标平台：`windows` / `linux` / `darwin` / `none`
+  std::vector<std::string> system_libs{};   ///< 目标平台额外系统库（如 `ws2_32`）
+  std::vector<std::string> defines{};       ///< 目标专属宏（如 `_WIN32_WINNT=0x0601`）
+  std::string executable_suffix{};          ///< 产物后缀（Windows 为 `.exe`）
+  std::vector<std::string> extra_flags{};   ///< 目标专属编译/链接标志
 };
 
 /// `st.pkg` 清单。
@@ -76,9 +91,9 @@ struct Manifest {
   std::vector<std::string> modules{};
   std::vector<std::string> include_dirs{};
   std::vector<std::string> sources{};  ///< 支持 glob（`src/**/*.cpp`）
-  /// 第三方源码 glob（`vendor/**`）：这些翻译单元**不套用本工程的严格告警集**（`-w`），也不进 PCH。
-  /// 理由：第三方码不是我们的代码，`-Werror` 会让"升级上游"变成"改上游"——违背 vendor 的可追溯原则。
-  std::vector<std::string> vendor_sources{};
+  /// 第三方源码 glob（`third_party/**`）：这些翻译单元**不套用本工程的严格告警集**（`-w`），也不进 PCH。
+  /// 理由：第三方码不是我们的代码，`-Werror` 会让"升级上游"变成"改上游"——违背上游可追溯原则。
+  std::vector<std::string> third_party_sources{};
   std::vector<std::string> tests{};
   std::vector<std::string> flags{};
   /// 工程级编译期嵌入（随**库**编译，对所有目标可见）。
@@ -92,6 +107,8 @@ struct Manifest {
   std::vector<std::string> defines{};
   std::vector<std::string> system_libs{};
   std::vector<TargetSpec> targets{};
+  /// 交叉编译工具链（按名选取：`st build <target> --toolchain mingw`）。
+  std::vector<ToolchainSpec> toolchains{};
   std::vector<DependencySpec> dependencies{};     ///< 第三方源码依赖
   std::vector<std::string> dependency_modules{};  ///< dependencies.modules
   std::vector<std::string> dependency_system{};   ///< dependencies.system
@@ -104,13 +121,15 @@ struct Manifest {
 
   /// 查目标（不存在返回 nullptr；返回指针非拥有，生命周期同本清单）。
   [[nodiscard]] auto find_target(std::string_view target_name) const -> const TargetSpec*;
+  /// 查工具链（不存在返回 nullptr）。
+  [[nodiscard]] auto find_toolchain(std::string_view toolchain_name) const -> const ToolchainSpec*;
   /// 展开 `sources` 的 glob，返回绝对路径列表（按模式顺序 + 模式内字典序，跨模式去重）。
   /// 错误：`Invalid`（缺 `directory`）、`NotFound`（目录不存在）、`Io`。
   [[nodiscard]] auto source_files() const -> Result<std::vector<std::string>>;
   /// 展开 `tests` 的 glob（语义同 `source_files`）。
   [[nodiscard]] auto test_files() const -> Result<std::vector<std::string>>;
-  /// 展开 `vendor_sources` 的 glob（第三方源码：放宽告警、不进 PCH）。
-  [[nodiscard]] auto vendor_files() const -> Result<std::vector<std::string>>;
+  /// 展开 `third_party_sources` 的 glob（第三方源码：放宽告警、不进 PCH）。
+  [[nodiscard]] auto third_party_files() const -> Result<std::vector<std::string>>;
   /// 解析清单 JSON；`directory` 为清单所在目录（绝对路径）。错误：`Parse`。
   static auto parse_json(const st::Json& json, std::string_view directory) -> Result<Manifest>;
   /// 读取 `st.pkg` 文件（`path` 为文件路径）。错误：`NotFound`/`Io`/`Parse`。

@@ -18,6 +18,9 @@ struct BuildOptions {
   std::string profile{"debug"};       ///< debug / release / san
   std::string target{};               ///< 目标名（空=库目标：只编译不链接）
   std::size_t jobs{0};                ///< 并行编译单元数（0=硬件并发）
+  /// 交叉编译工具链名（空 = 本机）。命中 `Manifest::toolchains` 中的一项：
+  /// 决定编译器、目标系统库、产物后缀与平台宏，并把产物/中间目录与本地档**隔离**。
+  std::string toolchain{};
   bool verbose{false};                ///< 打印每条编译命令
   bool force{false};                  ///< 忽略增量判定，全量重编
   bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
@@ -43,7 +46,9 @@ struct BuildStats {
 [[nodiscard]] auto default_system_libs() -> std::vector<std::string>;
 
 /// 检测编译器（`ST_CXX`/`CXX` 环境变量 → g++ → clang++ → c++）。
-[[nodiscard]] auto detect_compiler() -> Result<std::string>;
+/// 探测 C++ 编译器（`ST_CXX`/`CXX` 环境变量优先，其次 g++/clang++/c++）。
+/// `override_compiler` 非空时直接用它（交叉编译工具链走这条路）。
+[[nodiscard]] auto detect_compiler(std::string_view override_compiler = {}) -> Result<std::string>;
 
 /// 构建库对象与目标产物（`options.target` 为空时只编译库对象）。
 [[nodiscard]] auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats>;

@@ -1,6 +1,6 @@
 #pragma once
 
-/// JSON 能力：**基于 nlohmann/json**（`vendor/nlohmann/json.hpp`，v3.12.0，MIT）。
+/// JSON 能力：**基于 nlohmann/json**（`third_party/nlohmann/json.hpp`，v3.12.0，MIT）。
 ///
 /// 取代原先的自研 `st::json`。替换动因（实测数据见 `CONVENTIONS.md` §3.7）：
 /// 旧实现把所有数字统一存 `double`，`9007199254740993`(2^53+1) 会被写成 `9007199254740992`、

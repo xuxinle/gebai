@@ -15,8 +15,9 @@
 #include <thread>
 #include <vector>
 
-#include "battery/embed.hpp"  // 编译期资源嵌入（stpm 生成；见 vendor/battery/UPSTREAM.md）
+#include "battery/embed.hpp"  // 编译期资源嵌入（stpm 生成；见 third_party/battery/UPSTREAM.md）
 #include "st/app/app.hpp"
+#include "st/core/entry.hpp"
 #include "st/core/print.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"
@@ -216,7 +217,7 @@ struct Options {
 
 }  // namespace
 
-auto main(int argc, char** argv) -> int {
+auto run_app(int argc, char** argv) -> int {
   const Options options = parse_options(argc, argv);
 
   st::app::AppOptions app_options;
@@ -563,3 +564,6 @@ auto main(int argc, char** argv) -> int {
               static_cast<double>(app.device_scale()), std::string(app.backend_name()));
   return 0;
 }
+
+// 跨平台入口：正规化 argv 编码（Windows 的 argv 是 ANSI）并设好控制台代码页
+ST_MAIN(run_app)
