@@ -44,6 +44,13 @@ class ListItem : public Element {
     on_activate_ = std::move(callback);
   }
 
+  /// 激活本项（触发 `on_activate`）。
+  ///
+  /// **必须走 `activate()`**：这是"可激活元素"的统一入口——鼠标点击（`on_event`）、
+  /// 协议 `invoke(click)`、脚本 `ui_invoke` 都落到这里。若把逻辑写在 `on_event` 里而不覆盖
+  /// `activate()`，真实点击有效、`invoke(click)` 却静默无效（实测踩到）。
+  void activate() override;
+
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Canvas& canvas) const override;
@@ -69,6 +76,11 @@ class List : public Element {
 
   /// 追加一项（返回非拥有指针，生命周期随本容器）。
   auto add_item(std::string label, std::string subtitle = {}) -> ListItem*;
+  /// 清空全部项（选中态一并复位，不派发 `on_select`）。
+  ///
+  /// 有它才能"按最新数据重建列表"——过滤/排序/刷新这类场景无法只靠追加完成
+  /// （写一个真实应用时发现的缺口：列表只能加不能减）。
+  void clear_items();
   [[nodiscard]] auto item_count() const noexcept -> std::size_t;
   [[nodiscard]] auto item(std::size_t index) const noexcept -> ListItem*;
   /// 当前选中序号（无选中为 `kNoSelection`）。

@@ -140,6 +140,14 @@ def main() -> int:
     )
     time.sleep(3)
 
+    # 清掉可能残留的 wineserver：它跨进程常驻，若上次是在**已死的 X 显示**上启动的，
+    # 会持续给出 `CreateWindowExW 失败（错误码 1400）`——看起来像应用 bug，其实是环境残留。
+    for candidate in ("wineserver", "/usr/lib/wine/wineserver"):
+        if shutil.which(candidate) or pathlib.Path(candidate).exists():
+            subprocess.run([candidate, "-k"], capture_output=True)
+            break
+    time.sleep(1)
+
     log(f"启动 {pathlib.Path(args.exe).name}（wine + Xvfb）")
     process = subprocess.Popen(
         [wine, args.exe, "--control-port", str(args.port)],

@@ -127,6 +127,22 @@ inline constexpr Result<Unit> ok();          // 无值成功
 **编译期资源嵌入（battery::embed）**：资源用真实文件编写（`assets/`），清单声明 `embed`；
 不要为了"省事"把大段文本塞成 C++ 原始字符串——那正是 embed 要解决的问题。
 
+### 3.9 交互元素：动作一律放在 `activate()`
+
+**可激活元素（按钮、列表项、开关项……）的"动作"必须实现在 `virtual void activate()` 里**，
+`on_event` 收到 `Click` 时调用 `activate()`，不要在 `on_event` 里直接写动作逻辑。
+
+理由：`activate()` 是**所有激活路径的唯一汇聚点**——鼠标点击（`on_event`）、协议
+`invoke(click)`（`Element::invoke_action`）、脚本 `ui_invoke` 全都走它。把逻辑写在 `on_event` 里
+会导致"真实点击有效、`invoke(click)` 静默无效"（实测踩到：列表项点不动，而界面看起来一切正常）。
+对"应用可被智能体驱动"来说这是致命的——自动化流程恰恰只能走 `invoke`。
+
+配套约定：
+- 元素若能被点击激活，就**必须**覆盖 `activate()`（`ListItem` 由此从"只在 on_event 里处理"改过来）。
+- 容器类元素（如 `List`）若要"按新数据重建子项"，提供 `clear_*` + `add_*` 这类成对的接口；
+  只能追加不能清空会让过滤/刷新无法实现（`List::clear_items` 由此而来）。
+- 元素的自动生成 id 必须**稳定、唯一、无控制字符**：选择器、协议消费方、脚本层都依赖它。
+
 ## 4. 编译强制集（写进 `st.pkg`）
 
 ```text

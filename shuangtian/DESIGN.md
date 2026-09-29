@@ -237,6 +237,32 @@ std::vector<HighlightSpan> highlight(std::string_view code, std::string_view lan
 - CommonMark 子集 + GFM：表格、任务列表、删除线、自动链接、围栏代码块（带语言）、嵌套列表、引用、分隔线。
 - 高亮：零依赖词法着色（c/cpp/ts/js/python/json/bash/rust/go/yaml，关键词 + 字符串 + 数字 + 注释 + 函数名）。
 
+### 4.4.1 app：通用命令行与启动契约
+
+`st/app/app.hpp` 提供 `Application`，`st/app/cli.hpp` 提供**所有应用共用的命令行解析**
+（`--headless` / `--backend` / `--width/--height` / `--scale` / `--title` / `--theme` /
+`--control-port` / `--control-file` / `--enable-script` / `--frames` / `--ms`）。
+
+放进框架而不是让每个应用自己写，是因为**控制通道是"应用可被驱动"的入口，而它的端口与控制文件
+是命令行给的**：应用漏解析这两个参数，外部工具就只能去猜端口、等不到控制通道就绪
+（生成的工程模板踩过这个坑，`--control-port 0 --control-file X` 被静默忽略）。
+
+启动契约（推荐写法）：
+
+```cpp
+st::app::Application app("myapp", "0.1.0", common.app);
+build_page(app.root());                 // ① 先建界面
+app.on_ready([&] { load_scripts(app); });// ② 再登记"启动后"初始化（脚本宿主在 start() 里才创建）
+return *app.run();                       // ③ 无参 run()：用已设的根组件
+```
+
+- `run()` 与 `run(content)` 的区别是**实质性的**：后者会先 `set_content(...)`，
+  因此 `run(nullptr)` 会把先前设好的界面**清掉**（踩过：建完界面再 `run(nullptr)`，界面是空的）。
+- `AppOptions::headless` **真的参与后端选择**（`headless=true` 等价于指定 headless 后端）；
+  它原先只在"后端为空时报告用"，是个静默无效的开关。
+- 后端自动选择失败时**回退 headless 而不是报错**：探测到 `libX11` 但没有可用显示服务的机器上，
+  能无头跑起来（控制通道完成开发与验证）远比"启动失败"有用。
+
 ### 4.5 ui
 
 > **脚本驱动的组件控制**见 §6.7（`ui::ScriptHost`）：JS 读写组件、事件桥、定时器，
@@ -271,6 +297,14 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
 - 图标：自绘矢量路径集（`IconName` + 路径数据），零位图资源、任意缩放清晰。
+
+### 4.5.1 交互元素的三条约定（都由实际缺陷换来）
+
+| 约定 | 为什么 |
+|---|---|
+| **动作一律放在 `virtual void activate()`** | 它是所有激活路径的唯一汇聚点：鼠标点击（`on_event`）、协议 `invoke(click)`（`invoke_action`）、脚本 `ui_invoke`。写在 `on_event` 里 → 真实点击有效、`invoke(click)` 静默无效（列表项踩过），而自动化只能走 `invoke` |
+| 容器要提供**成对的**增删接口 | 只能追加不能清空 → 过滤/按新数据刷新无法实现（`List::clear_items` 由此而来） |
+| 自动生成的 id 必须**稳定、唯一、无控制字符** | 选择器、协议消费方、脚本层都拿它当键。生成时用**拥有型**容器拼装（`vector<string>` 而非 `vector<string_view>`——后者会指向临时字符串，拼出垃圾字节与 NUL） |
 
 ### 4.6 shell
 ```cpp
@@ -397,7 +431,7 @@ class Compositor {                                  // UI 图层 → GPU 合成
 |---|---|---|---|
 | `hello` | `{protocol, client, subscribe?}` | `{protocol, app:{name,version}, pid, backend, headless, screen:{w,h,scale}, theme, capabilities}` | 握手；版本不符即拒 |
 | `ping` | — | `{ts}` | 存活 |
-| `tree` | `{root?, depth?, include_hidden?, max_nodes?}` | `{nodes:[...], truncated}` | 组件树快照（id/type/role/bounds/text/value/state/flags/children） |
+| `tree` | `{depth?}` | `{tree:{id,type,role,bounds,state,text,children:[...]}, version}` | **嵌套**语义树快照（`depth` 可限深；`version` 用于判断是否需要重新拉取） |
 | `find` | `{selector, limit?, visible_only?}` | `{matches:[{id,type,role,bounds,text,path}]}` | 选择器查询 |
 | `get` | `{id, props?}` | `{id, type, props:{...}}` | 读取属性（缺省返回全部） |
 | `set` | `{id, props}` | `{changed:[...]}` | 设置属性/文本/值（触发重绘与 `ui.changed`） |
@@ -740,6 +774,48 @@ st doctor                                 # 探测清单声明的工具链是否
 
 > 顺带：交叉编译是**平台分支的强制验证手段**。`CONVENTIONS §10` 因此规定
 > "改了平台分支就要交叉编译一次"——这是唯一能发现 Windows 分支问题的途径。
+
+### 7.10 独立工程引用框架（源码级依赖）
+
+**纳入方式**：清单里写 `"framework": { "path": "…" }`，构建时把框架的**库部分**并入本工程的构建图。
+不做"预编译库 + 安装步骤"：安装位置、ABI/编译器版本、交叉编译两套产物都是持续的麻烦；
+源码级引用**无需安装、始终同版本、离线可构建、交叉编译天然生效**。
+
+| 并入 | 不并入 |
+|---|---|
+| 框架源（排除 `src/pkg/*`）、包含目录、严格标志与宏 | 框架的 `targets`（那是框架自己的示例/工具） |
+| 第三方 C 源（QuickJS：按第三方放宽告警、不插桩） | 框架的 `tests`（引用方不跑框架单测） |
+| 编译期嵌入（`script_api.js`）、系统库 | `src/pkg/*`（工具链实现，应用用不到） |
+| 交叉编译工具链（引用方同名可覆盖） | —— |
+
+**嵌入的按单元分发**（关键约束）：框架与工程各自生成 `battery/embed.hpp`，
+且**只下发给各自的编译单元**。若两者的包含目录同时出现在一个编译单元的命令行上，
+先命中的赢、另一方的资源会 `static_assert` 失败（"No such file"）。
+因此框架目录里有框架的嵌入头，工程目录里有工程的，互不可见——跨边界引用对方资源不受支持。
+
+**工具链继承**：目标平台要哪些系统库（`ws2_32`/`gdi32`/`user32`）、要什么宏（`_WIN32_WINNT`）
+是"框架与平台如何配合"的知识，不该要求引用方知道。工程想覆盖就自己声明同名工具链。
+
+### 7.11 共享对象缓存
+
+**动机**：源码级依赖的代价是"每个工程首次要编框架源"。缓存把这份代价摊掉。
+
+| 项 | 取值 |
+|---|---|
+| 位置 | `{ST_HOME:-~/.shuangtian}/cache/objects/<键>/unit.{o,d}`（`ST_HOME` 缺省 `~/.shuangtian`） |
+| 键 | 编译命令（编译器 + 全部标志/宏/包含目录 + 源路径 + 语言 + 第三方/框架标记），**排除 `-o`/`-MF`** |
+| 有效性 | 复用增量构建那一套：缓存对象带 `.d` 依赖清单，**没有任何依赖比它新**才算命中 |
+| 关闭 | `ST_NO_CACHE=1`（测量干净耗时用） |
+
+**为什么框架单元用"框架自己的标志集"编译**：缓存键里绝不能有工程相关的东西。
+若框架单元照抄工程的 `-I<工程目录>`/`-D<工程宏>`，键会随工程变化 → 缓存永不命中
+（实测：第二个工程 30 s 全量重编）。因此框架单元：
+
+- 只带框架自己的包含目录（`include` / `third_party`）与框架的宏；
+- **不吃工程的 PCH**（PCH 路径里带着工程目录）；
+- 语义上也更对：框架源不该被引用方的同名头影响。
+
+实测：新工程冷构建 ≈ 30 s，第二个工程 ≈ 4 s（59/60 单元命中）。
 
 ## 8. 无头开发工作流（Linux 服务器，无桌面）
 

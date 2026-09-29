@@ -2,6 +2,37 @@
 
 霜天是歌白内置的原生桌面应用框架：C++20、全自绘、软硬件渲染兼容、**支持无头模式**，并对外提供一条 **TCP 控制通道**（协议 `st-control/1`）。因此**在没有桌面的 Linux 服务器上**，你也能完整地构建、运行、观察并操作原生界面。
 
+## 独立项目：你负责全链路
+
+霜天框架与 `st` 工具链是**给独立工程用的**：工程清单里写一句 `framework.path` 即可引用框架
+（框架源/头/标志/嵌入/交叉编译工具链都会自动并入，无需安装、无需 CMake、离线可构建）。
+**`framework` 与 `project` 是两个不同的根**：
+
+- `framework`：提供框架与工具链的霜天仓库（默认仓库根 `shuangtian/`）
+- `project`：你要构建/运行/验证的那个应用工程（不传则等于框架自身）
+
+一个独立项目的完整闭环（**全部由你完成，不需要用户碰命令行**）：
+
+```
+① run(action=init, project="/path/to/app", name="app")     # 建工程（生成 st.pkg/build.sh/.gitignore）
+② 写代码：用文件工具写 project/src/*.cpp（可用 #include "st/app/cli.hpp" 拿到通用命令行）
+   （需要嵌资源就在清单 targets.<名>.embed 里声明，代码里 b::embed<"assets/x.png">()）
+③ run(action=build, project="/path/to/app", target="app")  # 构建（首次编框架源，之后走共享对象缓存）
+④ run(action=start, project=..., target="app")             # 启动（无头；返回端口与控制文件）
+⑤ find/tree/get/set/invoke/capture/wait                    # 观察与验证（截图是硬要求）
+⑥ run(action=build, project=..., target="app", toolchain="mingw")   # 交叉编译出 Windows .exe
+⑦ run(action=stop,  project=..., target="app")             # 收尾
+```
+
+要点：
+
+- **构建/测试/启动都作用于 `project`**，但 `st` 本身始终用框架自带的（`framework/build/bin/st`）。
+- 工程不需要自己声明 mingw 工具链——**继承自框架**（`--toolchain=mingw` 直接可用）。
+- 第二个工程构建会**命中共享对象缓存**（`~/.shuangtian/cache/objects`），框架源不重编：
+  别把"4 秒构建完"误判为"没编"。
+- 工程能否被驱动，取决于它是否解析通用命令行——模板已包含 `st::app::parse_common_options`；
+  自己写入口时**务必解析** `--control-port`/`--control-file`，否则控制通道无从连接。
+
 ## 你的工作循环
 
 ```

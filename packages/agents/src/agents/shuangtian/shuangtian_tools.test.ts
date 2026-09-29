@@ -350,7 +350,9 @@ describe("run 生命周期", () => {
     )
     const result = await tools.run.execute({ action: "build", target: "gallery", framework: root }, ctx)
     expect(commands[0].cmd).toContain("bootstrap.sh")
-    expect(commands[1].cmd).toContain("st build gallery")
+    // `st` 用框架自带的绝对路径（工程可能不在框架目录下），构建发生在**工程目录**
+    expect(commands[1].cmd).toContain("build gallery")
+    expect(commands[1].cmd).toContain("--profile dev")
     expect(result.output).toContain("构建完成")
   })
 
@@ -396,11 +398,55 @@ describe("run 生命周期", () => {
     expect(result.output).not.toContain("[object Object]")
   })
 
+  test("action=init：在指定目录创建独立工程（并告知下一步）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    const { ctx, commands } = makeCtx(home, () => ({ stdout: "工程已创建: /tmp/app" }))
+    const result = await tools.run.execute({ action: "init", project: join(home, "app"), name: "myapp", framework: root }, ctx)
+    const init = commands.find((item) => item.cmd.includes("init"))
+    expect(init).toBeDefined()
+    expect(init!.cmd).toContain("--framework")
+    expect(init!.cmd).toContain("myapp")
+    expect(result.output).toContain("下一步")
+  })
+
+  test("独立工程：project 与 framework 是不同目录时，构建发生在工程目录", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    const app = join(home, "app")
+    mkdirSync(app, { recursive: true })
+    writeFileSync(join(app, "st.pkg"), JSON.stringify({ name: "app", framework: { path: root } }))
+    const { ctx, commands } = makeCtx(home, (cmd) =>
+      cmd.includes("build") ? { stdout: "构建完成 [dev]" } : { stdout: "" },
+    )
+    const result = await tools.run.execute(
+      { action: "build", target: "app", project: app, framework: root },
+      ctx,
+    )
+    const build = commands.find((item) => item.cmd.includes("build app"))
+    expect(build).toBeDefined()
+    // workdir 必须是工程目录（否则 st 会去框架里找目标）
+    expect(build!.workdir).toBe(app)
+    expect(result.output).toContain("构建完成")
+  })
+
+  test("工程清单缺失：提示用 init 创建（而不是含糊失败）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    const { ctx } = makeCtx(home)
+    const result = await tools.run.execute(
+      { action: "build", target: "app", project: join(home, "missing"), framework: root },
+      ctx,
+    )
+    expect(result.output).toContain("未找到工程清单")
+    expect(result.output).toContain("action=init")
+  })
+
   test("框架目录缺失：明确提示而非静默", async () => {
     const home = mkdtempSync(join(tmpdir(), "st-tools-"))
     const { ctx } = makeCtx(home)
     const result = await tools.run.execute({ action: "build", framework: join(home, "nope") }, ctx)
-    expect(result.output).toContain("未找到霜天工程")
+    expect(result.output).toContain("未找到霜天框架")
   })
 
   test("action=start：脱离会话启动并等待控制端口，返回 port/pid/控制文件", async () => {
@@ -449,7 +495,9 @@ describe("run 生命周期", () => {
     const root = makeFramework(home)
     const { ctx, commands } = makeCtx(home, () => ({ code: 0, stdout: "7 passed, 0 failed" }))
     const result = await tools.run.execute({ action: "test", san: true, framework: root }, ctx)
-    expect(commands.some((item) => item.cmd.includes("st test --san"))).toBe(true)
+    expect(commands.some((item) => item.cmd.includes("test") && item.cmd.includes("--san"))).toBe(
+      true,
+    )
     expect(result.output).toContain("7 passed")
   })
 })

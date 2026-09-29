@@ -19,11 +19,11 @@ namespace st::pkg {
 namespace {
 
 /// 本层已识别的顶层字段（其余进 `extra_fields`，回写时保留）。
-inline constexpr std::array<std::string_view, 19> known_keys{
+inline constexpr std::array<std::string_view, 20> known_keys{
     "name",       "version",     "kind",        "modules",        "include_dirs",
     "sources",    "tests",       "flags",       "defines",        "system_libs",
     "targets",    "dependencies", "dependency_modules", "dependency_system",
-    "third_party_sources", "c_flags", "embed", "toolchains",
+    "third_party_sources", "c_flags", "embed", "toolchains", "framework",
     "shuangtian_pkg_format"};
 
 [[nodiscard]] auto known_key(std::string_view key) -> bool {
@@ -230,6 +230,30 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   manifest.defines = json_get_string_array(json, "defines");
   manifest.system_libs = json_get_string_array(json, "system_libs");
 
+  // `framework`：字符串简写或对象形态（`{"path": "...", "inherit_flags": true}`）
+  if (const st::Json* framework = st::json_find(json, "framework"); framework != nullptr &&
+                                                                    !framework->is_null()) {
+    FrameworkSpec spec;
+    if (framework->is_string()) {
+      spec.path = st::json_as_string(*framework);
+    } else if (framework->is_object()) {
+      spec.path = json_get_string(*framework, "path");
+      spec.inherit_flags = st::json_get_bool(*framework, "inherit_flags", true);
+    } else {
+      return unexpected(ErrorCode::Parse, "framework 必须是路径字符串或对象");
+    }
+    if (spec.path.empty()) {
+      return unexpected(ErrorCode::Parse, "framework 缺少 path（框架根目录）");
+    }
+    // 相对路径按**清单所在目录**解析（不是调用者的 cwd）：否则从别的目录构建时框架会找不到
+    if (st::fs::is_absolute(spec.path)) {
+      spec.directory = st::fs::normalize(spec.path);
+    } else {
+      spec.directory = st::fs::normalize(st::fs::join(std::string(directory), spec.path));
+    }
+    manifest.framework = std::move(spec);
+  }
+
   const st::Json& toolchains = json_at(json, "toolchains");
   if (toolchains.is_object()) {
     for (const auto& [name, value] : toolchains.items()) {
@@ -361,6 +385,13 @@ auto Manifest::to_json() const -> st::Json {
     target_map[target.name] = entry;
   }
   json["targets"] = target_map;
+
+  if (framework.has_value()) {
+    st::Json entry = st::Json::object();
+    entry["path"] = framework->path;
+    if (!framework->inherit_flags) entry["inherit_flags"] = false;
+    json["framework"] = std::move(entry);
+  }
 
   if (!toolchains.empty()) {
     st::Json toolchain_map = st::Json::object();

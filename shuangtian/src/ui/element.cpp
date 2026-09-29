@@ -87,7 +87,11 @@ auto Element::child_at(std::size_t index) const noexcept -> Element* {
 
 auto Element::derived_id() const -> ElementId {
   if (!id_.empty()) return id_;
-  std::vector<std::string_view> parts;
+  // **必须是拥有型容器**：下面 `std::format(...)` 产生的是临时 `std::string`，
+  // 若存成 `std::string_view` 会立刻悬垂，拼出来的 id 里就会出现垃圾字节
+  // （实测：列表项 id 变成 `task-list/task-list/\x00`，且相邻项 id 相同——
+  //   选择器/协议/脚本全都拿不到正确的元素）。
+  std::vector<std::string> parts;
   const Element* current = this;
   std::size_t depth = 0;
   while (current != nullptr && depth < 64) {

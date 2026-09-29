@@ -1,5 +1,6 @@
 #include "st/pkg/build.hpp"
 #include "st/pkg/embed.hpp"
+#include "st/pkg/framework.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <unordered_set>
 
 #include "st/core/fs.hpp"
+#include "st/core/hash.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
@@ -39,6 +41,10 @@ struct CompileUnit {
   std::string depfile{};  ///< `-MMD` 产出的头依赖清单（`.d`）
   SourceLang lang{SourceLang::Cxx};
   bool third_party{false};     ///< 第三方源码（放宽告警、不进 PCH）
+  /// 框架单元（来自被引用的框架）。这类单元的编译命令**必须与引用方工程无关**：
+  /// 不含工程的 `-I`/`-D`，也不用工程的 PCH——否则共享对象缓存的键会随工程变化，缓存永不命中。
+  /// 语义上也是对的：框架源只应看到框架自己的头，不该被引用方的同名头影响。
+  bool framework_unit{false};
   /// 该单元专属的包含目录。
   ///
   /// 为什么需要"按单元"而不是全局 `-I`：编译期嵌入生成的 `battery/embed.hpp` 是**按目标隔离**的
@@ -126,13 +132,88 @@ struct CompileUnit {
   return name;
 }
 
+/// 共享对象缓存。
+///
+/// **为什么需要**：独立工程以"源码级依赖"引用框架（无需安装、始终同版本、交叉编译天然生效），
+/// 代价是每个工程首次要把框架的 63 个源文件编一遍。缓存把这份代价摊掉：
+/// 第二个工程起，框架部分直接从缓存取对象，只剩工程自己的源要编。
+///
+/// **键怎么取**：编译命令里除 `-o`/`-MF` 之外的全部内容（编译器、标志、宏、包含目录、源路径）。
+/// 因此"改变产物的任何因素"变了键就变；而 `-o`/`-MF` 是**工程相关**的输出路径，必须排除，
+/// 否则键随工程变、缓存永不命中。框架源的编译命令被刻意保持与工程无关
+/// （不套工程的 `-I`，也不用工程的 PCH），这样键才跨工程稳定。
+///
+/// **有效性判定**：复用增量构建那一套——缓存对象的 `.d` 里记着全部依赖，
+/// 只要没有依赖比缓存对象新，缓存对象就是最新的。**不引入第二套判定逻辑**，
+/// 否则"增量构建"与"缓存"迟早会在边界条件上给出不同答案。
+struct ObjectCache {
+  std::string root{};     ///< 缓存根（空 = 未启用）
+  std::size_t hits{0};
+  std::size_t stores{0};
+  [[nodiscard]] auto enabled() const noexcept -> bool { return !root.empty(); }
+};
+
+/// 解析缓存根：`ST_HOME` 或 `~/.shuangtian` 下的 `cache/objects`；`ST_NO_CACHE=1` 关闭。
+[[nodiscard]] auto resolve_object_cache() -> ObjectCache {
+  ObjectCache cache;
+  if (const auto disabled = fs::read_env("ST_NO_CACHE"); disabled.has_value() && *disabled == "1") {
+    return cache;
+  }
+  std::string home;
+  if (const auto env = fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
+    home = *env;
+  } else {
+    home = fs::join(fs::home_dir(), ".shuangtian");
+  }
+  if (home.empty()) return cache;
+  cache.root = fs::join(home, "cache/objects");
+  return cache;
+}
+
+/// 尝试从缓存恢复对象（命中即把 `.o` 与 `.d` 复制到位）。`-MMD` 的 `.d` 一并带回来，
+/// 后续增量判定才有依赖清单可用。
+[[nodiscard]] auto object_cache_restore(const ObjectCache& cache, std::string_view key,
+                                        const CompileUnit& unit) -> bool {
+  if (!cache.enabled()) return false;
+  const std::string directory = fs::join(cache.root, key);
+  const std::string cached_object = fs::join(directory, "unit.o");
+  const std::string cached_depfile = fs::join(directory, "unit.d");
+  if (!fs::is_regular_file(cached_object) || !fs::is_regular_file(cached_depfile)) return false;
+  const auto cached_time = fs::modified_ns(cached_object);
+  if (!cached_time) return false;
+  // 依赖新鲜度：源文件与 `.d` 里的每个依赖都不得比缓存对象新
+  const auto source_time = fs::modified_ns(unit.source);
+  if (!source_time || *source_time > *cached_time) return false;
+  for (const auto& dep : parse_depfile(cached_depfile)) {
+    const auto dep_time = fs::modified_ns(dep);
+    if (dep_time && *dep_time > *cached_time) return false;
+    if (!dep_time && !fs::exists(dep)) return false;
+  }
+  if (auto status = fs::copy_file(cached_object, unit.object); !status) return false;
+  if (auto status = fs::copy_file(cached_depfile, unit.depfile); !status) return false;
+  return true;
+}
+
+/// 编译成功后写入缓存（失败不影响构建：缓存是加速手段，不是正确性前提）。
+auto object_cache_store(const ObjectCache& cache, std::string_view key, const CompileUnit& unit,
+                        std::atomic<std::size_t>& stores) -> void {
+  if (!cache.enabled()) return;
+  if (!fs::is_regular_file(unit.object) || !fs::is_regular_file(unit.depfile)) return;
+  const std::string directory = fs::join(cache.root, key);
+  if (auto status = fs::create_directories(directory); !status) return;
+  if (auto status = fs::copy_file(unit.object, fs::join(directory, "unit.o")); !status) return;
+  if (auto status = fs::copy_file(unit.depfile, fs::join(directory, "unit.d")); !status) return;
+  stores.fetch_add(1);
+}
+
 /// 单元 → 专属包含目录（编译期嵌入用；未命中即无额外目录）。
 using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
 
 [[nodiscard]] auto make_units(const Manifest& manifest, const std::vector<std::string>& sources,
                               const std::string& object_dir,
                               const std::set<std::string>& third_party_paths,
-                              const UnitIncludeMap& unit_includes = {})
+                              const UnitIncludeMap& unit_includes = {},
+                              const std::set<std::string>& framework_paths = {})
     -> std::vector<CompileUnit> {
   std::vector<CompileUnit> units;
   units.reserve(sources.size());
@@ -143,6 +224,9 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
     unit.depfile = unit.object + ".d";
     unit.lang = language_of(unit.source);
     unit.third_party = third_party_paths.contains(unit.source);
+    // 框架单元：跳过 PCH，让它的编译命令**与引用方工程无关**。
+    // 这样对象缓存键才跨工程稳定（否则 PCH 路径里带着工程目录 → 每个工程都算新键）。
+    unit.framework_unit = framework_paths.contains(unit.source);
     if (const auto found = unit_includes.find(unit.source); found != unit_includes.end()) {
       unit.extra_include_dirs = found->second;
     }
@@ -174,26 +258,62 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
 /// 并把包含目录登记到所有库单元（否则库自身的源码 `#include "battery/embed.hpp"` 找不到）。
 ///
 /// 目标级嵌入不在这里处理：它按目标隔离，见 `build()` 的目标分支。
-[[nodiscard]] auto attach_library_embeds(const Manifest& manifest, std::string_view profile,
-                                        std::string_view build_subdir,
-                                        std::vector<std::string>& library_sources,
-                                        std::set<std::string>& third_party_paths,
-                                        UnitIncludeMap& unit_includes) -> Status {
-  if (manifest.embed.empty()) return ok();
-  auto embeds = generate_embeds(manifest, /*target=*/{}, profile, build_subdir,
-                                /*with_runtime=*/true);
+/// 把一次嵌入生成的结果接进构建输入：生成物加入编译、包含目录**只**下发到指定单元。
+///
+/// `include_for` 是"哪些单元需要这个嵌入头"：**必须精确**——一个编译单元的命令行上
+/// 同时出现两个 `battery/embed.hpp` 时，先命中的赢，另一方的资源会 `static_assert` 失败。
+/// 因此框架的嵌入只给框架单元，工程的嵌入只给工程单元（详见 `embed.hpp` 的说明）。
+[[nodiscard]] auto attach_embeds(const EmbedRequest& request,
+                                 const std::vector<std::string>& include_for,
+                                 std::vector<std::string>& built_sources,
+                                 std::set<std::string>& third_party_paths,
+                                 UnitIncludeMap& unit_includes) -> Status {
+  if (request.contributions.empty()) return ok();
+  bool has_patterns = false;
+  for (const auto& contribution : request.contributions) {
+    if (!contribution.patterns.empty()) has_patterns = true;
+  }
+  if (!has_patterns) return ok();
+
+  auto embeds = generate_embeds(request);
   if (!embeds) return forward_error(embeds.error());
-  for (const auto& source : library_sources) {
-    const std::string key =
-        fs::is_absolute(source) ? source : fs::join(manifest.directory, source);
-    unit_includes[key].push_back(embeds->include_dir);
+  if (embeds->include_dir.empty()) return ok();
+
+  for (const auto& source : include_for) {
+    unit_includes[fs::is_absolute(source) ? source : fs::join(request.work_directory, source)]
+        .push_back(embeds->include_dir);
   }
   for (const auto& generated : embeds->sources) {
-    library_sources.push_back(generated);
+    built_sources.push_back(generated);
     third_party_paths.insert(generated);
     unit_includes[generated].push_back(embeds->include_dir);
   }
   return ok();
+}
+
+/// 构造一次库级嵌入请求（单个贡献方）。
+[[nodiscard]] auto library_embed_request(std::string_view owner_name, std::string_view owner_directory,
+                                        const std::vector<std::string>& patterns,
+                                        std::string_view build_subdir,
+                                        std::string_view template_directory,
+                                        std::string_view runtime_source, bool with_runtime)
+    -> EmbedRequest {
+  EmbedRequest request;
+  request.work_directory = std::string(owner_directory);
+  request.template_directory = std::string(template_directory);
+  request.runtime_source = std::string(runtime_source);
+  request.build_subdir = std::string(build_subdir);
+  request.scope = "lib";
+  request.with_runtime = with_runtime;
+  if (!patterns.empty()) {
+    EmbedContribution contribution;
+    contribution.base_directory = std::string(owner_directory);
+    contribution.patterns = patterns;
+    contribution.identifier_prefix = std::string(owner_name);
+    contribution.origin = std::format("{} {}", owner_name, owner_directory);
+    request.contributions.push_back(std::move(contribution));
+  }
+  return request;
 }
 
 /// 展开第三方源码清单（失败按空集处理：清单没声明第三方源码也能构建）。
@@ -358,10 +478,44 @@ struct ResolvedToolchain {
   return resolved;
 }
 
+/// 框架自己的编译标志集（框架单元专用：与引用方工程无关）。
+struct FrameworkFlags {
+  std::vector<std::string> flags{};    ///< C++：框架的 flags + defines + include_dirs
+  std::vector<std::string> c_flags{};  ///< C：同上但用 c_flags
+};
+
+/// 由框架清单构造框架标志集（框架单元专用：与引用方工程无关）。
+[[nodiscard]] auto make_framework_flags(const Manifest& framework_manifest,
+                                        const std::vector<std::string>& framework_include_dirs,
+                                        const std::vector<std::string>& profile_flags_list,
+                                        const ResolvedToolchain& toolchain) -> FrameworkFlags {
+  FrameworkFlags out;
+  out.flags.push_back("-std=c++20");
+  for (const auto& item : framework_manifest.flags) out.flags.push_back(item);
+  for (const auto& item : framework_manifest.defines) {
+    out.flags.push_back(std::format("-D{}", item));
+  }
+  for (const auto& dir : framework_include_dirs) out.flags.push_back(std::format("-I{}", dir));
+  for (const auto& item : toolchain.defines) out.flags.push_back(std::format("-D{}", item));
+  for (const auto& item : profile_flags_list) out.flags.push_back(item);
+
+  out.c_flags = framework_manifest.c_flags;
+  for (const auto& item : framework_manifest.defines) {
+    out.c_flags.push_back(std::format("-D{}", item));
+  }
+  for (const auto& dir : framework_include_dirs) out.c_flags.push_back(std::format("-I{}", dir));
+  for (const auto& item : toolchain.defines) out.c_flags.push_back(std::format("-D{}", item));
+  for (const auto& item : profile_flags_list) out.c_flags.push_back(item);
+  out.c_flags.push_back("-x");
+  out.c_flags.push_back("c");
+  return out;
+}
+
 [[nodiscard]] auto compile_units(const Manifest& manifest, const BuildOptions& options,
                                  const std::vector<CompileUnit>& units,
                                  const std::vector<std::string>& profile_flags_list,
-                                 const ResolvedToolchain& toolchain, std::size_t& rebuilt)
+                                 const ResolvedToolchain& toolchain,
+                                 const FrameworkFlags* framework_flags, std::size_t& rebuilt)
     -> Result<std::size_t> {
   auto compiler = detect_compiler(toolchain.compiler);
   if (!compiler) return forward_error(compiler.error());
@@ -398,17 +552,65 @@ struct ResolvedToolchain {
   const std::string build_dir = fs::join(
       manifest.directory,
       std::format("build/{}", profile_directory(options.profile, toolchain)));
+  // 预编译头是**框架的**（`include/st/pch.hpp`）：独立工程自己没有这个头，
+  // 因此这里按"框架目录优先、其次工程目录"解析；都找不到就跳过 PCH（不是错误）。
   std::optional<PchContext> pch;
   if (options.use_pch) {
-    pch = ensure_pch(*compiler, flags, include_dirs, build_dir,
-                     fs::join(manifest.directory, "include/st/pch.hpp"));
+    const std::string pch_header = [&]() {
+      const std::vector<std::string> candidates = {
+          fs::join(manifest.directory, "include/st/pch.hpp"),
+          options.extra_include_dirs.empty() ? std::string{}
+                                             : fs::join(options.extra_include_dirs.front(),
+                                                        "st/pch.hpp"),
+      };
+      for (const auto& candidate : candidates) {
+        if (!candidate.empty() && fs::is_regular_file(candidate)) return candidate;
+      }
+      return std::string{};
+    }();
+    if (!pch_header.empty()) {
+      pch = ensure_pch(*compiler, flags, include_dirs, build_dir, pch_header);
+    }
   }
   const PchContext* pch_ptr = pch.has_value() ? &*pch : nullptr;
 
+  const ObjectCache object_cache = resolve_object_cache();
+
+  // 每个单元的**最终编译标志**（第三方放宽 / 框架单元用框架标志集 / C 与 C++ 分派）。
+  // 先统一算好：缓存键与真正的编译命令必须来自同一份标志，否则"键一致但命令不同"必然出问题。
+  const auto unit_flags_for = [&](const CompileUnit& unit) -> std::vector<std::string> {
+    const bool is_c = unit.lang == SourceLang::C;
+    std::vector<std::string> chosen;
+    if (unit.framework_unit && framework_flags != nullptr) {
+      chosen = is_c ? framework_flags->c_flags : framework_flags->flags;
+    } else {
+      chosen = is_c ? c_flags : flags;
+    }
+    if (unit.third_party) chosen = strip_sanitizers(chosen);
+    return chosen;
+  };
+  const auto cache_key_for = [&](const CompileUnit& unit) -> std::string {
+    std::string material(*compiler);
+    for (const auto& flag : unit_flags_for(unit)) material.append("\n").append(flag);
+    material.append("\n").append(unit.source);
+    if (unit.third_party) material.append("\n-w");
+    if (unit.framework_unit) material.append("\n<framework>");
+    for (const auto& dir : unit.extra_include_dirs) material.append("\n-I").append(dir);
+    return st::hash::fnv1a64_hex(material);
+  };
+
+  std::size_t cache_hits = 0;
+  std::atomic<std::size_t> cache_stores{0};
   std::vector<const CompileUnit*> pending;
   pending.reserve(units.size());
   for (const auto& unit : units) {
-    if (options.force || needs_rebuild(unit)) pending.push_back(&unit);
+    if (!options.force && !needs_rebuild(unit)) continue;
+    // 工程内已过期 → 先问共享缓存：命中就不必真编译（跨工程复用框架对象的主要路径）
+    if (!options.force && object_cache_restore(object_cache, cache_key_for(unit), unit)) {
+      ++cache_hits;
+      continue;
+    }
+    pending.push_back(&unit);
   }
   rebuilt = pending.size();
   if (pending.empty()) return std::size_t{0};
@@ -430,14 +632,13 @@ struct ResolvedToolchain {
       args.push_back(*compiler);
       const bool is_c = unit->lang == SourceLang::C;
       // 第三方源码不套我们的告警集，也不做 sanitizer 插桩（理由见 `strip_sanitizers`）；
-      // 因此编译标志按"是否第三方"分两条路，而不是在原标志上做加法。
-      const std::vector<std::string> unit_flags =
-          unit->third_party ? strip_sanitizers(is_c ? c_flags : flags) : (is_c ? c_flags : flags);
+      // 框架单元用**框架自己的**标志集（与引用方工程无关，缓存才能跨工程命中）。
+      const std::vector<std::string> unit_flags = unit_flags_for(*unit);
       for (const auto& flag : unit_flags) args.push_back(flag);
       for (const auto& dir : unit->extra_include_dirs) args.push_back(std::format("-I{}", dir));
       if (unit->third_party) args.push_back("-w");
       // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃
-      if (pch_ptr != nullptr && !is_c) {
+      if (pch_ptr != nullptr && !is_c && !unit->framework_unit) {
         args.push_back(std::format("-I{}", pch_ptr->directory));
         args.push_back("-include");
         args.push_back(pch_ptr->header);
@@ -467,12 +668,17 @@ struct ResolvedToolchain {
         }
         return;
       }
+      // 编译成功：写入共享缓存（失败不影响构建——缓存是加速手段，不是正确性前提）
+      object_cache_store(object_cache, cache_key_for(*unit), *unit, cache_stores);
       ++done;
     });
   }
   pool.wait_idle();
 
   if (!first_error.empty()) return unexpected(ErrorCode::Invalid, first_error);
+  if (cache_hits > 0 || cache_stores.load() > 0) {
+    log::info("对象缓存：命中 {} · 新写入 {}", cache_hits, cache_stores.load());
+  }
   return done.load();
 }
 
@@ -569,7 +775,33 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   auto sources = manifest.source_files();
   if (!sources) return forward_error(sources.error());
 
-  auto toolchain = resolve_toolchain(manifest, options.toolchain);
+  // 框架引用（源码级依赖）：解析出框架贡献，并把它的编译选项合入**局部副本**。
+  // 用副本而非改原件：清单是调用方的只读输入，构建过程不该污染它。
+  std::optional<Framework> framework;
+  if (manifest.framework.has_value()) {
+    auto loaded = load_framework(*manifest.framework);
+    if (!loaded) return forward_error(loaded.error());
+    framework = std::move(*loaded);
+  }
+  Manifest effective = manifest;
+  if (framework.has_value()) {
+    const auto append = [](std::vector<std::string>& target, const std::vector<std::string>& extra) {
+      target.insert(target.end(), extra.begin(), extra.end());
+    };
+    append(effective.include_dirs, framework->include_dirs);
+    append(effective.flags, framework->flags);
+    append(effective.c_flags, framework->c_flags);
+    append(effective.defines, framework->defines);
+    append(effective.system_libs, framework->system_libs);
+    // 工具链：框架的并入，**引用方同名优先**（引用方知道自己环境的编译器叫什么）
+    for (const auto& toolchain : framework->toolchains) {
+      if (effective.find_toolchain(toolchain.name) == nullptr) {
+        effective.toolchains.push_back(toolchain);
+      }
+    }
+  }
+
+  auto toolchain = resolve_toolchain(effective, options.toolchain);
   if (!toolchain) return forward_error(toolchain.error());
   const std::string subdir = profile_directory(options.profile, *toolchain);
   const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
@@ -599,21 +831,68 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 同时把路径集合交给 make_units——这些单元编译时会放宽告警并跳过 PCH。
   std::set<std::string> third_party_paths = collect_third_party(manifest);
   UnitIncludeMap library_includes;
-  if (auto status = attach_library_embeds(manifest, options.profile, subdir, library_sources, third_party_paths,
-                                          library_includes);
-      !status) {
-    return forward_error(status.error());
+
+  // 嵌入的"模板与运行时"来源：有框架就用框架的（工程不必自己内联一份 battery）；
+  // 没有框架时用工程自己的 third_party/battery（自包含工程）。
+  const std::string embed_support =
+      framework.has_value() ? framework->embed_support_directory
+                            : fs::join(manifest.directory, "third_party/battery");
+  const std::string embed_runtime = fs::join(embed_support, "embed_impl.cpp");
+  // 运行时实现（含进程级全局表）**恰好一处**提供：框架有嵌入就归框架，否则归工程库级。
+  const bool framework_owns_runtime = framework.has_value() && !framework->embed.empty();
+
+  // ① 工程自己的库级嵌入：只下发给**当前的工程单元**（此刻框架源还没进来，顺序很关键）
+  {
+    auto request = library_embed_request(manifest.name, manifest.directory, manifest.embed, subdir,
+                                         embed_support, embed_runtime,
+                                         /*with_runtime=*/!framework_owns_runtime);
+    if (auto status = attach_embeds(request, library_sources, library_sources, third_party_paths,
+                                    library_includes);
+        !status) {
+      return forward_error(status.error());
+    }
   }
+
+  // ② 框架源（绝对路径）并入；框架的第三方 C 源按第三方对待
+  std::set<std::string> framework_sources{};
+  if (framework.has_value()) {
+    for (const auto& source : framework->sources) {
+      library_sources.push_back(source);
+      framework_sources.insert(source);
+    }
+    for (const auto& source : framework->third_party_sources) {
+      library_sources.push_back(source);
+      third_party_paths.insert(source);
+      framework_sources.insert(source);
+    }
+    // ③ 框架自己的嵌入：只下发给**框架单元**（否则与工程的同名头在命令行上撞车）
+    auto request = library_embed_request(framework->name, framework->directory, framework->embed,
+                                         subdir, embed_support, embed_runtime,
+                                         /*with_runtime=*/framework_owns_runtime);
+    if (auto status = attach_embeds(request, framework->sources, library_sources, third_party_paths,
+                                    library_includes);
+        !status) {
+      return forward_error(status.error());
+    }
+  }
+
   std::vector<std::string> all_sources = library_sources;
   for (const auto& path : third_party_paths) all_sources.push_back(path);
   std::ranges::sort(all_sources);
   all_sources.erase(std::unique(all_sources.begin(), all_sources.end()), all_sources.end());
 
   std::vector<CompileUnit> units =
-      make_units(manifest, all_sources, object_dir, third_party_paths, library_includes);
+      make_units(effective, all_sources, object_dir, third_party_paths, library_includes,
+                 framework_sources);
+  // 框架单元专用的标志集（框架自己的头/宏/严格集）——它决定框架对象能否跨工程命中缓存
+  std::optional<FrameworkFlags> framework_flags;
+  if (framework.has_value()) {
+    framework_flags = make_framework_flags(manifest, framework->include_dirs, *flags, *toolchain);
+  }
   std::size_t rebuilt = 0;
   const std::int64_t compile_start = time::now_ns();
-  auto compiled = compile_units(manifest, options, units, *flags, *toolchain, rebuilt);
+  auto compiled = compile_units(effective, options, units, *flags, *toolchain,
+                                framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt);
   if (!compiled) return forward_error(compiled.error());
   const std::int64_t compile_ms = (time::now_ns() - compile_start) / 1'000'000;
 
@@ -645,34 +924,40 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     UnitIncludeMap unit_includes;
     std::set<std::string> target_third_party = third_party_paths;  // 本目标的第三方集合（含生成的嵌入源码）
     if (!target->embed.empty()) {
-      // 运行时实现只由库级嵌入提供（若库没有嵌入，则由本目标提供）——避免同链接里出现两份全局态
-      auto embeds = generate_embeds(manifest, options.target, options.profile, subdir,
-                                    /*with_runtime=*/manifest.embed.empty());
-      if (!embeds) return forward_error(embeds.error());
-      // **目标自身的源也要能 `#include "battery/embed.hpp"`**——只给生成源加包含目录是不够的
-      // （踩过：目标源报 "battery/embed.hpp: No such file or directory"）。
-      //
-      // 键必须与 `make_units` 里的 `unit.source` 同形：`expand_glob` 返回的是**相对路径**，
-      // 而 `make_units` 会拼成绝对路径后再查表——不归一就会静默查不到（曾表现为
-      // "包含目录没传"，实际是键不匹配）。
-      for (const auto& existing : target_sources) {
-        const std::string key =
-            fs::is_absolute(existing) ? existing : fs::join(manifest.directory, existing);
-        unit_includes[key].push_back(embeds->include_dir);
-      }
-      for (const auto& generated : embeds->sources) {
-        target_sources.push_back(generated);
-        target_third_party.insert(generated);
-        unit_includes[generated].push_back(embeds->include_dir);
+      // 目标级嵌入（作用域 = 目标名，只下发给本目标的单元）。
+      // 运行时实现由"库级嵌入"提供（框架有嵌入则归框架、否则归工程库级、都没有则归本目标）
+      // ——同链接里出现两份全局态会重复定义符号（踩过）。
+      EmbedRequest request;
+      request.work_directory = manifest.directory;
+      request.template_directory = embed_support;
+      request.runtime_source = embed_runtime;
+      request.build_subdir = subdir;
+      request.scope = options.target;
+      request.with_runtime = !framework_owns_runtime && manifest.embed.empty();
+      EmbedContribution contribution;
+      contribution.base_directory = manifest.directory;
+      contribution.patterns = target->embed;
+      contribution.identifier_prefix = options.target;
+      contribution.origin = std::format("目标 {}", options.target);
+      request.contributions.push_back(std::move(contribution));
+      // `attach_embeds` 会把包含目录下发到 `target_sources` 里的每个单元
+      // （含目标自身的源——只给生成源加会报 "battery/embed.hpp: No such file or directory"），
+      // 键的绝对化也在里面统一处理（曾因相对/绝对不匹配静默查不到）。
+      if (auto status = attach_embeds(request, target_sources, target_sources, target_third_party,
+                                      unit_includes);
+          !status) {
+        return forward_error(status.error());
       }
     }
     std::ranges::sort(target_sources);
     target_sources.erase(std::unique(target_sources.begin(), target_sources.end()),
                          target_sources.end());
-    target_units = make_units(manifest, target_sources, object_dir, target_third_party, unit_includes);
+    target_units =
+        make_units(effective, target_sources, object_dir, target_third_party, unit_includes);
     std::size_t target_rebuilt = 0;
     auto target_compiled =
-        compile_units(manifest, options, target_units, *flags, *toolchain, target_rebuilt);
+        compile_units(effective, options, target_units, *flags, *toolchain,
+                      framework_flags.has_value() ? &*framework_flags : nullptr, target_rebuilt);
     if (!target_compiled) return forward_error(target_compiled.error());
     stats.units_total += target_units.size();
     stats.units_rebuilt += target_rebuilt;
@@ -720,7 +1005,32 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   auto tests = manifest.test_files();
   if (!tests) return forward_error(tests.error());
 
-  auto toolchain = resolve_toolchain(manifest, options.toolchain);
+  // 框架引用同样生效：独立工程的测试要能链接框架代码，且测试框架（`src/test/*.cpp`）来自框架
+  std::optional<Framework> framework;
+  if (manifest.framework.has_value()) {
+    auto loaded = load_framework(*manifest.framework);
+    if (!loaded) return forward_error(loaded.error());
+    framework = std::move(*loaded);
+  }
+  Manifest effective = manifest;
+  if (framework.has_value()) {
+    const auto append = [](std::vector<std::string>& target, const std::vector<std::string>& extra) {
+      target.insert(target.end(), extra.begin(), extra.end());
+    };
+    append(effective.include_dirs, framework->include_dirs);
+    append(effective.flags, framework->flags);
+    append(effective.c_flags, framework->c_flags);
+    append(effective.defines, framework->defines);
+    append(effective.system_libs, framework->system_libs);
+    // 工具链：框架的并入，**引用方同名优先**（引用方知道自己环境的编译器叫什么）
+    for (const auto& toolchain : framework->toolchains) {
+      if (effective.find_toolchain(toolchain.name) == nullptr) {
+        effective.toolchains.push_back(toolchain);
+      }
+    }
+  }
+
+  auto toolchain = resolve_toolchain(effective, options.toolchain);
   if (!toolchain) return forward_error(toolchain.error());
   const std::string subdir = profile_directory(options.profile, *toolchain);
   const std::string object_dir = fs::join(root, std::format("build/{}/obj", subdir));
@@ -729,34 +1039,78 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   if (auto status = fs::create_directories(object_dir); !status) return forward_error(status.error());
   if (auto status = fs::create_directories(bin_dir); !status) return forward_error(status.error());
 
-  // 测试可执行 = 库源（排除框架入口）+ 测试框架 + 用例
+  // 测试可执行 = 库源（排除框架入口）+ 框架源 + 测试框架 + 用例
   std::vector<std::string> library_sources;
   for (const auto& source : *sources) {
     if (source.starts_with("src/test/") || source.starts_with("tools/")) continue;
     library_sources.push_back(source);
   }
+  // 测试框架（`src/test/*.cpp`，含 main）来自框架；无框架时是工程自己的
+  const std::string runner_root = framework.has_value() ? framework->directory : manifest.directory;
   std::vector<std::string> runner_sources;
-  auto runner = fs::expand_glob(manifest.directory, "src/test/*.cpp");
+  auto runner = fs::expand_glob(runner_root, "src/test/*.cpp");
   if (runner) {
-    for (const auto& item : *runner) runner_sources.push_back(item);
+    for (const auto& item : *runner) {
+      runner_sources.push_back(fs::is_absolute(item) ? item : fs::join(runner_root, item));
+    }
   }
   std::set<std::string> third_party_paths = collect_third_party(manifest);
   UnitIncludeMap test_includes;
-  // 库级嵌入先接上（它会给 `library_sources` 追加生成源），再拼最终单元列表
-  if (auto status = attach_library_embeds(manifest, options.profile, subdir, library_sources, third_party_paths,
-                                          test_includes);
-      !status) {
-    return forward_error(status.error());
+
+  const std::string embed_support =
+      framework.has_value() ? framework->embed_support_directory
+                            : fs::join(manifest.directory, "third_party/battery");
+  const std::string embed_runtime = fs::join(embed_support, "embed_impl.cpp");
+  const bool framework_owns_runtime = framework.has_value() && !framework->embed.empty();
+
+  // ① 工程自己的库级嵌入（只下发当前工程单元；框架源此刻还没进来）
+  {
+    auto request = library_embed_request(manifest.name, manifest.directory, manifest.embed, subdir,
+                                         embed_support, embed_runtime,
+                                         /*with_runtime=*/!framework_owns_runtime);
+    if (auto status = attach_embeds(request, library_sources, library_sources, third_party_paths,
+                                    test_includes);
+        !status) {
+      return forward_error(status.error());
+    }
   }
+  // ② 框架源 + ③ 框架嵌入（只下发框架单元）
+  std::set<std::string> framework_sources{};
+  if (framework.has_value()) {
+    for (const auto& source : framework->sources) {
+      library_sources.push_back(source);
+      framework_sources.insert(source);
+    }
+    for (const auto& source : framework->third_party_sources) {
+      library_sources.push_back(source);
+      third_party_paths.insert(source);
+      framework_sources.insert(source);
+    }
+    auto request = library_embed_request(framework->name, framework->directory, framework->embed,
+                                         subdir, embed_support, embed_runtime,
+                                         /*with_runtime=*/framework_owns_runtime);
+    if (auto status = attach_embeds(request, framework->sources, library_sources, third_party_paths,
+                                    test_includes);
+        !status) {
+      return forward_error(status.error());
+    }
+  }
+
   std::vector<std::string> all = library_sources;
   for (const auto& item : *tests) all.push_back(item);
   for (const auto& item : runner_sources) all.push_back(item);
   for (const auto& path : third_party_paths) all.push_back(path);
   std::ranges::sort(all);
   all.erase(std::unique(all.begin(), all.end()), all.end());
-  std::vector<CompileUnit> units = make_units(manifest, all, object_dir, third_party_paths, test_includes);
+  std::vector<CompileUnit> units =
+      make_units(effective, all, object_dir, third_party_paths, test_includes, framework_sources);
+  std::optional<FrameworkFlags> framework_flags;
+  if (framework.has_value()) {
+    framework_flags = make_framework_flags(manifest, framework->include_dirs, *flags, *toolchain);
+  }
   std::size_t rebuilt = 0;
-  auto compiled = compile_units(manifest, options, units, *flags, *toolchain, rebuilt);
+  auto compiled = compile_units(effective, options, units, *flags, *toolchain,
+                                framework_flags.has_value() ? &*framework_flags : nullptr, rebuilt);
   if (!compiled) return forward_error(compiled.error());
   log::info("测试构建：{} 单元（重编 {}）", units.size(), rebuilt);
 

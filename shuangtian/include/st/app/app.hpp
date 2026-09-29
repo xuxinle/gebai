@@ -53,6 +53,19 @@ class Application final : public control::Host {
 
   /// 设置根组件并运行（返回进程退出码）。
   auto run(std::unique_ptr<ui::Element> content) -> Result<int>;
+  /// 直接运行**已设置**的根组件（返回进程退出码）。
+  ///
+  /// 与 `run(content)` 的区别很实在：后者会先 `set_content(...)`，
+  /// 因此 `run(nullptr)` 会把先前 `set_content` 的界面**清掉**（实测踩过：
+  /// 先建好界面再 `run(nullptr)`，结果界面是空的）。
+  /// 「先 set_content 建界面 → 用 on_ready 装依赖启动态的东西 → run()」是推荐写法。
+  auto run() -> Result<int>;
+
+  /// 启动完成后的回调（在 `start()` 成功之后、主循环之前调用一次）。
+  ///
+  /// 用途：那些"需要应用已经起来才能做"的初始化——典型是装载脚本逻辑层
+  /// （脚本宿主在 `start()` 里创建，之前拿不到 `script()`）。
+  void on_ready(std::function<void()> callback);
   /// 设置根组件（`run()` 内部同样调用；用 `start()`+`tick()` 自驱主循环时先调用本方法）。
   void set_content(std::unique_ptr<ui::Element> content);
   /// 请求退出（控制通道 `app.quit`、快捷键、信号均走此处）。
@@ -91,6 +104,9 @@ class Application final : public control::Host {
   [[nodiscard]] auto quit_requested() const noexcept -> bool;
 
  private:
+  /// 主循环（`run()` 的公共部分）。
+  auto run_loop() -> Result<int>;
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::string name_{};

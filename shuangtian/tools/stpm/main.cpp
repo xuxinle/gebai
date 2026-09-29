@@ -124,7 +124,7 @@ void print_usage() {
   vendor                把依赖源码固化进 vendor/（离线可构建）
   doctor                环境自检（编译器/字体/显示后端/GPU/缓存）
   tree                  打印清单概览（目标、源文件数、依赖）
-  init <name>           生成工程骨架
+  init <name>           生成工程骨架（--framework=框架根；默认由 st 位置推断）
   version               版本信息
   help                  本帮助
 )");
@@ -434,19 +434,31 @@ auto command_init(const Arguments& arguments) -> int {
     }
     return path;
   }();
-  const std::string framework_includes =
-      framework_root.empty()
-          ? std::string("\"include\"")
-          : std::format("\"include\", \"{}/include\", \"{}/third_party\"", framework_root,
-                        framework_root);
+  // 框架引用：写进清单的 `framework` 段，由 stpm 在构建时并入框架的源/头/标志/嵌入。
+  // **不再手工塞 include 路径**——那只解决"找得到头"，链接照样缺符号（实测踩过）。
+  const std::string explicit_framework = arguments.get("framework", "");
+  std::string framework_path = explicit_framework;
+  if (framework_path.empty()) framework_path = framework_root;
+  if (framework_path.empty()) {
+    std::fprintf(stderr,
+                 "错误: 无法确定框架位置（用 --framework=<霜天框架根> 显式指定，"
+                 "或从框架的 build/bin/st 运行本命令）\n");
+    return 1;
+  }
+  framework_path = st::fs::normalize(framework_path);
+  if (!st::fs::is_regular_file(st::fs::join(framework_path, "st.pkg"))) {
+    std::fprintf(stderr, "错误: %s 下没有 st.pkg（--framework 应指向霜天框架根目录）\n",
+                 framework_path.c_str());
+    return 1;
+  }
   const std::string manifest = std::format(
       "{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.0\",\n  \"kind\": \"executable\",\n"
-      "  \"include_dirs\": [{}],\n"
+      "  \"framework\": {{ \"path\": \"{}\" }},\n"
       // 顶层 sources 留空：本项目只有一个入口，放在 target 里（两边都匹配会重复定义符号）
       "  \"sources\": [],\n"
       "  \"targets\": {{ \"{}\": {{ \"kind\": \"executable\", \"sources\": [\"src/*.cpp\"] }} }},\n"
       "  \"dependencies\": {{ \"modules\": [], \"source\": [], \"system\": [] }}\n}}\n",
-      name, framework_includes, name);
+      name, framework_path, name);
   if (auto status = st::fs::write_text(st::fs::join(root, "st.pkg"), manifest); !status) {
     std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
     return 1;
@@ -454,16 +466,30 @@ auto command_init(const Arguments& arguments) -> int {
   const std::string main_template = R"CPP(#include <cstdio>
 
 #include "st/app/app.hpp"
+#include "st/app/cli.hpp"
 #include "st/core/entry.hpp"
 #include "st/ui/components/basic.hpp"
 
 auto run_app(int argc, char** argv) -> int {
-  (void)argc;
-  (void)argv;
-  st::app::AppOptions options;
-  options.title = "@NAME@";
-  options.headless = true;
-  st::app::Application app("@NAME@", "0.1.0", options);
+  // 通用命令行（`--headless` / `--control-port` / `--control-file` / `--theme` / …）：
+  // **必须解析**——控制通道的端口与控制文件就是从这里来的，不解析的话
+  // 外部工具（包括歌白）就找不到这个应用，也就谈不上"可被驱动"。
+  st::app::CommonOptions common;
+  if (auto parsed = st::app::parse_common_options(argc, argv, common); !parsed) {
+    std::fprintf(stderr, "%s\n", parsed.error().to_string().c_str());
+    return 1;
+  }
+  if (common.show_help) {
+    std::fputs(st::app::common_options_usage("@NAME@").c_str(), stdout);
+    return 0;
+  }
+  if (common.app.title.empty()) common.app.title = "@NAME@";
+  common.app.max_frames = common.max_frames;
+  // 后端交给框架自动判断：有显示服务就开窗口，没有就落 headless
+  // （**不要**在这里强制 headless——那会让 Windows/Linux 桌面上的应用永远不出窗口；
+  //   自动化流程自己传 `--headless` 即可）
+
+  st::app::Application app("@NAME@", "0.1.0", common.app);
   auto page = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
   page->style().padding = st::math::Insets::all(24.0f);
   auto heading = std::make_unique<st::ui::Heading>("Hello 霜天", 1);
@@ -488,15 +514,29 @@ ST_MAIN(run_app)
     std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
     return 1;
   }
-  st::print("工程已创建: {}\n  {}\n  {}\n", root, st::fs::join(root, "st.pkg"),
-              st::fs::join(root, "src/main.cpp"));
-  // 如实告知边界：清单里已写入框架的 include 路径，但**框架自身的源**尚未纳入构建
-  // （`dependencies.source` 的解析与构建接线仍未实现——见 DESIGN §7.4 与 self_optimize backlog #8）。
-  // 在框架仓库内开发（或把自己的源与框架源一并构建）即可；不要把"能生成骨架"误解为"能独立构建"。
-  st::print("下一步: cd {} && st build {}\n"
-            "  提示: 清单已写入框架 include 路径；若框架源不在本工程构建范围内，\n"
-            "        链接会缺符号（框架依赖的自动接入尚未实现）。\n",
-            root, name);
+  // `build.sh`：让人不必记住 st 的位置与参数（Agent 用绝对路径直接调 st 即可）
+  const std::string build_script = std::format(
+      "#!/bin/sh\n"
+      "# 由 `st init` 生成：把霜天框架的工具链与参数固定下来，便于直接构建/运行。\n"
+      "# 交叉编译：./build.sh --toolchain=mingw\n"
+      "set -e\n"
+      "ST=\"${{ST:-{}/build/bin/st}}\"\n"
+      "\"$ST\" build {} \"$@\"\n",
+      framework_path, name);
+  if (auto status = st::fs::write_text(st::fs::join(root, "build.sh"), build_script); !status) {
+    std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
+    return 1;
+  }
+  // `.gitignore`：构建产物不入库
+  if (auto status = st::fs::write_text(st::fs::join(root, ".gitignore"), "build/\n"); !status) {
+    std::fprintf(stderr, "错误: %s\n", status.error().to_string().c_str());
+    return 1;
+  }
+
+  st::print("工程已创建: {}\n  {}\n  {}\n  {}\n", root, st::fs::join(root, "st.pkg"),
+              st::fs::join(root, "src/main.cpp"), st::fs::join(root, "build.sh"));
+  st::print("引用框架: {}\n", framework_path);
+  st::print("下一步: cd {} && ./build.sh\n", root);
   return 0;
 }
 

@@ -59,6 +59,25 @@ function frameworkDir(ctx: ToolContext, args: Json): string {
   return existsSync(join(vendored, "st.pkg")) ? vendored : candidate
 }
 
+/**
+ * 工程根（含 `st.pkg`）——被构建/运行/测试的**那个工程**。
+ *
+ * 与 `framework` 的区别：`framework` 是"提供框架与工具链的霜天仓库"，
+ * `project` 是"你要构建的应用"。独立工程通过清单里的 `framework.path` 引用框架，
+ * 因此这两个根**可以是不同目录**（歌白全程负责独立项目时就是如此）。
+ * 不传 `project` 时退化为框架根本身（框架自身的示例/测试即此情形）。
+ */
+function projectDir(ctx: ToolContext, args: Json): string {
+  const explicit = asString(args, "project") || String(ctx.env.SHUANGTIAN_APP ?? "").trim()
+  if (explicit) return ctx.resolvePath(explicit)
+  return frameworkDir(ctx, args)
+}
+
+/** 在工程目录里找清单（工程根可能直接给的就是清单目录）。 */
+function projectManifest(ctx: ToolContext, args: Json): string {
+  return join(projectDir(ctx, args), "st.pkg")
+}
+
 function runtimeDir(ctx: ToolContext): string {
   return ctx.resolvePath(RUNTIME_DIR)
 }
@@ -132,7 +151,11 @@ const runTool: Tool = {
     "构建与运行霜天应用（框架生命周期入口）。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 以无头模式启动应用并等待控制通道就绪（返回 port 与 PID）；action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。",
   parameters: schema(
     {
-      action: { type: "string", enum: ["build", "test", "lint", "start", "stop", "status", "logs"], description: "动作" },
+      action: {
+        type: "string",
+        enum: ["init", "build", "test", "lint", "start", "stop", "status", "logs"],
+        description: "动作（init 新建独立工程；其余作用于 project 或框架自身）",
+      },
       target: { type: "string", description: "应用/目标名（默认 mdeditor）" },
       profile: { type: "string", description: "构建档：dev（默认，-O1）/debug/release/san" },
       toolchain: {
@@ -141,6 +164,12 @@ const runTool: Tool = {
           "交叉编译工具链名（在 st.pkg 的 toolchains 段声明，如 mingw）。产物落在 build/<档位>-<工具链>/bin/，Windows 目标带 .exe；产物无法在本机执行（action=start 不适用）",
       },
       framework: { type: "string", description: "框架工程根（默认仓库根 shuangtian/，可用 SHUANGTIAN_PROJECT 覆盖）" },
+      project: {
+        type: "string",
+        description:
+          "被操作的应用工程根（含 st.pkg）。独立工程与框架是不同目录，用本参数指定；不传则操作框架自身（可用 SHUANGTIAN_APP 覆盖）",
+      },
+      name: { type: "string", description: "action=init 时的工程名（缺省取目录名）" },
       args: { type: "string", description: "start 时附加命令行参数（如 --demo-stream）" },
       scale: { type: "number", description: "DPI 缩放（start 时透传 --scale，2.0 = 200%）" },
       theme: { type: "string", enum: ["light", "dark"], description: "主题" },
@@ -173,7 +202,14 @@ const runTool: Tool = {
     const timeoutMs = asNumber(args as Json, "timeout_ms", DEFAULT_BUILD_TIMEOUT_MS)
 
     if (!existsSync(join(root, "st.pkg"))) {
-      return { output: `未找到霜天工程（${root}/st.pkg 不存在）：请用 framework 参数指定框架根，或设置 SHUANGTIAN_PROJECT` }
+      return { output: `未找到霜天框架（${root}/st.pkg 不存在）：请用 framework 参数指定框架根，或设置 SHUANGTIAN_PROJECT` }
+    }
+    if (action !== "init" && !existsSync(projectManifest(ctx, args as Json))) {
+      return {
+        output:
+          `未找到工程清单（${projectManifest(ctx, args as Json)}）：` +
+          `用 project 参数指定工程根；若还没有工程，先用 action=init 创建`,
+      }
     }
 
     const ensureToolchain = async (): Promise<{ ok: boolean; text: string }> => {
@@ -183,15 +219,41 @@ const runTool: Tool = {
       return { ok: boot.code === 0, text: `${boot.stdout}${boot.stderr}`.trim().slice(-2000) }
     }
 
+    if (action === "init") {
+      // 生成新的独立工程（歌白全链路的起点）。`project` 是目标目录。
+      const directory = asString(args, "project")
+      if (!directory) return { output: "action=init 需要 project 参数（目标目录）" }
+      const absolute = ctx.resolvePath(directory)
+      const name = asString(args, "name") || basename(absolute)
+      const st = join(root, "build/bin/st")
+      if (!existsSync(st)) {
+        const boot = await ctx.runCommand("./bootstrap.sh", { workdir: root, timeoutMs })
+        if (boot.code !== 0) return { output: `引导工具链失败：\n${boot.stdout}${boot.stderr}` }
+      }
+      const created = await ctx.runCommand(
+        `"${st}" init "${absolute}" --name ${name} --framework "${root}"`,
+        { timeoutMs },
+      )
+      const text = `${created.stdout}${created.stderr}`.trim()
+      if (created.code !== 0) return { output: `创建工程失败（exit ${created.code}）：\n${text}` }
+      return {
+        output: `${text}\n\n下一步：写 src/*.cpp（用文件工具），再 run(action=build, project="${absolute}")`,
+        data: { ok: true, action, project: absolute, name },
+      }
+    }
+
     if (action === "build" || action === "start") {
       // 变量名不要叫 toolchain：那会遮蔽上面的「交叉编译工具链名」参数
       // （实测导致 `--toolchain` 变成 `[object Object]` 传下去）
       const bootstrap = await ensureToolchain()
       if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
-      const build = await ctx.runCommand(`./build/bin/st build ${target} --profile ${profile}${toolchainFlag}`, {
-        workdir: root,
-        timeoutMs,
-      })
+      // 被构建的是**工程**（可能与框架不同目录）；`st` 始终用框架自己的那份
+      const st = join(root, "build/bin/st")
+      const app = projectDir(ctx, args as Json)
+      const build = await ctx.runCommand(
+        `"${st}" build ${target} --profile ${profile}${toolchainFlag}`,
+        { workdir: app, timeoutMs },
+      )
       const tail = `${build.stdout}${build.stderr}`.trim().split("\n").slice(-12).join("\n")
       if (build.code !== 0) return { output: `构建失败（exit ${build.code}）：\n${tail}` }
       if (action === "build") {
@@ -212,7 +274,7 @@ const runTool: Tool = {
       }
       const control_file = controlFileFor(ctx, target)
       const log_file = logFileFor(ctx, target)
-      const binary = join(root, `build/${buildSubdir}/bin/${target}`)
+      const binary = join(app, `build/${buildSubdir}/bin/${target}`)
       if (!existsSync(binary)) return { output: `构建产物不存在：${binary}` }
       await ctx.runCommand(`mkdir -p "${dirname(log_file)}"`, { workdir: root })
 
@@ -334,11 +396,13 @@ const runTool: Tool = {
       const bootstrap = await ensureToolchain()
       if (!bootstrap.ok) return { output: `引导工具链失败：\n${bootstrap.text}` }
       const san = asBool(args as Json, "san")
+      const st = join(root, "build/bin/st")
+      const app = projectDir(ctx, args as Json)
       const command =
         action === "test"
-          ? `./build/bin/st test ${san ? "--san" : ""} ${asString(args as Json, "filter")}`.trim()
-          : "./build/bin/st lint"
-      const result = await ctx.runCommand(command, { workdir: root, timeoutMs })
+          ? `"${st}" test ${san ? "--san" : ""} ${asString(args as Json, "filter")}`.trim()
+          : `"${st}" lint`
+      const result = await ctx.runCommand(command, { workdir: app, timeoutMs })
       const text = `${result.stdout}${result.stderr}`.trim()
       const tail = text.split("\n").slice(-25).join("\n")
       return {

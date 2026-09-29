@@ -68,6 +68,7 @@ bun run lint
 (cd shuangtian && ./build/dev/bin/codeeditor --headless --enable-script --frames 3)  # 脚本层示例（默认关闭，需显式开关）
 (cd shuangtian && ./build/bin/st lint)               # 禁用特性静态扫描（须 0 违规；豁免在 CONVENTIONS §8 登记）
 (cd shuangtian && python3 tools/st_win_check.py)       # Windows 窗口后端验证（wine+Xvfb：真实鼠标/键盘/缩放 + 截图）
+(cd shuangtian && python3 tools/st_project_check.py)  # 独立工程全链路验收（init→构建→运行→控制通道→缓存→交叉编译）
 (cd shuangtian && ./build/bin/st doctor)             # 环境自检（编译器/交叉工具链/后端/字体）
 (cd shuangtian && ./build/bin/st build gallery --toolchain=mingw)  # 交叉编译出 Windows 可执行（需 g++-mingw-w64-x86-64）
 (cd shuangtian && python3 tools/st_visual_check.py)  # 无头视觉验证：两档 × 三示例全序列 + 截图 + sanitizer 报告检查

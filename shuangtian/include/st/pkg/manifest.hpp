@@ -10,6 +10,7 @@
 /// - `extra_fields` 保存本层未识别的顶层字段，`to_json` 原样回写（与真实清单互操作时不丢字段）。
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -82,6 +83,22 @@ struct ToolchainSpec {
   std::vector<std::string> extra_flags{};   ///< 目标专属编译/链接标志
 };
 
+/// 独立工程对**骨天框架**的引用（`st.pkg` 的 `framework` 段）。
+///
+/// 为什么是"指向框架根目录"而不是"预编译库 + 安装步骤"：
+/// 安装位置、ABI/编译器版本、交叉编译两套产物都是持续的麻烦；而源码级引用
+/// **无需安装、始终同版本、离线可构建、交叉编译天然生效**。代价（每个工程首次要编框架源）
+/// 由对象缓存摊掉（见 `pkg/cache.hpp`）。
+struct FrameworkSpec {
+  /// 框架根目录（含 `st.pkg`）。支持清单里的相对路径（相对清单目录）。
+  std::string path{};
+  /// 解析后的绝对路径（`Manifest::resolve_directories` 后填充）。
+  std::string directory{};
+  /// 是否连框架的编译选项（严格告警集/宏）一起继承。默认继承：
+  /// 独立工程与框架共用同一套质量线，避免"在框架里干净、在工程里漏报"。
+  bool inherit_flags{true};
+};
+
 /// `st.pkg` 清单。
 struct Manifest {
   std::string name{};
@@ -109,6 +126,8 @@ struct Manifest {
   std::vector<TargetSpec> targets{};
   /// 交叉编译工具链（按名选取：`st build <target> --toolchain mingw`）。
   std::vector<ToolchainSpec> toolchains{};
+  /// 引用的霜天框架（空 = 本工程即框架，或不需要框架）。
+  std::optional<FrameworkSpec> framework{};
   std::vector<DependencySpec> dependencies{};     ///< 第三方源码依赖
   std::vector<std::string> dependency_modules{};  ///< dependencies.modules
   std::vector<std::string> dependency_system{};   ///< dependencies.system

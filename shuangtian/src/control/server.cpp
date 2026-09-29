@@ -907,7 +907,9 @@ auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
   if (!options.control_file.empty()) {
     Json info = Json::object();
     info["port"] = static_cast<std::uint64_t>(impl_->listener.port());
-    info["pid"] = static_cast<std::int64_t>(process::executable_path().has_value() ? 0 : 0);
+    // 又一个"恒为 0"的占位写法（同 `hello` 里那处 `getpid()`）：外部工具靠这个 pid
+    // 判断进程是否还活着，写 0 等于让它永远判不出来。
+    info["pid"] = static_cast<std::int64_t>(process::current_id());
     info["app"] = impl_->host.app_name();
     info["version"] = impl_->host.app_version();
     info["backend"] = std::string(impl_->host.backend_name());

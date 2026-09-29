@@ -38,6 +38,8 @@ struct Application::Impl {
   std::int64_t started_ms{0};
   bool quit{false};
   bool repaint{true};
+  /// 启动完成回调（`on_ready`）：只跑一次。
+  std::function<void()> on_ready{};
 };
 
 Application::Application(std::string name, std::string version, AppOptions options)
@@ -202,10 +204,18 @@ auto Application::capture_to_file(std::string_view path, math::IntRect region)
 auto Application::start() -> Status {
   if (started_) return ok();
 
-  auto backend = shell::create_backend(options_.backend);
+  // 后端选择：`backend` 显式指定 > `headless=true`（等价于指定 headless）> 自动探测。
+  //
+  // `headless` 字段**必须真的参与选择**：它原先只在"后端为空时报告用"，于是
+  // `options.headless = true` 是个静默无效的开关——生成的工程写着 headless 却仍去开窗口，
+  // 在没有可用显示服务的机器上直接启动失败（实测踩到）。
+  const std::string requested =
+      options_.backend.empty() ? (options_.headless ? std::string("headless") : std::string{})
+                               : options_.backend;
+  auto backend = shell::create_backend(requested);
   if (!backend) {
     const std::string hint = backend.error().message;
-    if (!options_.backend.empty()) return forward_error(backend.error());
+    if (!requested.empty()) return forward_error(backend.error());
     log::warn("平台后端不可用（{}），回退 headless", hint);
     auto fallback = shell::create_backend("headless");
     if (!fallback) return forward_error(fallback.error());
@@ -232,7 +242,21 @@ auto Application::start() -> Status {
   window.title = options_.title;
   window.headless = impl_->backend->headless();
   if (auto status = impl_->backend->create_window(window); !status) {
-    return forward_error(status.error());
+    // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，
+    // 而不是直接失败：无头模式下控制通道能完成全部开发与验证，比"起不来"有用得多。
+    if (requested.empty()) {
+      log::warn("窗口创建失败（{}），回退 headless", status.error().message);
+      auto fallback = shell::create_backend("headless");
+      if (!fallback) return forward_error(fallback.error());
+      impl_->backend_holder = std::move(*fallback);
+      impl_->backend = impl_->backend_holder.get();
+      window.headless = true;
+      if (auto retry = impl_->backend->create_window(window); !retry) {
+        return forward_error(retry.error());
+      }
+    } else {
+      return forward_error(status.error());
+    }
   }
 
   // 字体：系统回退链（缺失时退化为 NullTextPort，UI 仍可运行）
@@ -333,9 +357,25 @@ void Application::set_content(std::unique_ptr<ui::Element> content) {
   root_.set_content(std::move(content));
 }
 
+void Application::on_ready(std::function<void()> callback) {
+  impl_->on_ready = std::move(callback);
+}
+
+auto Application::run() -> Result<int> {
+  if (auto status = start(); !status) return forward_error(status.error());
+  if (impl_->on_ready) {
+    impl_->on_ready();
+    impl_->on_ready = nullptr;  // 只跑一次
+  }
+  return run_loop();
+}
+
 auto Application::run(std::unique_ptr<ui::Element> content) -> Result<int> {
   set_content(std::move(content));
-  if (auto status = start(); !status) return forward_error(status.error());
+  return run();
+}
+
+auto Application::run_loop() -> Result<int> {
   if (options_.exit_on_ready) return 0;
 
   const auto frame_interval = std::chrono::duration<double, std::milli>(

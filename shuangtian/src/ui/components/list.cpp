@@ -117,10 +117,15 @@ void ListItem::paint_content(const RenderContext& context, raster::Canvas& canva
             TextAlign::Start);
 }
 
+void ListItem::activate() {
+  if (on_activate_) on_activate_(index_);
+}
+
 auto ListItem::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
   if (event.kind != EventKind::Click) return false;
-  if (on_activate_) on_activate_(index_);
+  // 与 `invoke(click)` / 脚本 `ui_invoke` 共用同一条路径（见头文件注释）
+  activate();
   event.handled = true;
   return true;
 }
@@ -150,6 +155,12 @@ auto List::item(std::size_t index) const noexcept -> ListItem* {
   Element* child = child_at(index);
   if (child == nullptr || child->type() != "ListItem") return nullptr;
   return static_cast<ListItem*>(child);
+}
+
+void List::clear_items() {
+  clear_children();
+  selected_ = kNoSelection;
+  mark_layout_dirty();
 }
 
 auto List::add_item(std::string label, std::string subtitle) -> ListItem* {
