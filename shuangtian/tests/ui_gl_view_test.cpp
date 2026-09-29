@@ -165,3 +165,19 @@ ST_TEST(gl_view_composites_into_gpu_canvas_without_hanging) {
   const double inked = inked_ratio_gpu(surface, Color{0x0A, 0x0E, 0x16, 0xFF});
   ST_CHECK(inked > 0.02);
 }
+
+ST_TEST(gl_view_can_display_an_external_mesh) {
+  // 外部模型（如 OBJ 加载结果）必须能显示——否则"能加载"没有落点。
+  if (!GlView::opengl_ready()) return;
+  constexpr const char* kTriangle = "v 0 0.6 0\nv 0.7 -0.4 0\nv -0.7 -0.4 0\nf 1 2 3\n";
+  auto mesh = st::raster::gl::Mesh::load_obj(kTriangle, Color{0x7A, 0xD3, 0x8A, 0xFF});
+  ST_CHECK(mesh.has_value());
+  if (!mesh.has_value()) return;
+
+  Harness harness;
+  harness.view.set_mesh(std::make_shared<const st::raster::gl::Mesh>(std::move(*mesh)));
+  ST_CHECK_EQ(harness.view.get_property("mesh_vertices").value_or("0"), std::string("3"));
+  harness.paint(0.0);
+  const double inked = inked_ratio(harness.canvas, Color{0x0A, 0x0E, 0x16, 0xFF});
+  ST_CHECK(inked > 0.01);   // 真的画出了那个三角形
+}

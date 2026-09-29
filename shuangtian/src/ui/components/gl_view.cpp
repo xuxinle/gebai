@@ -30,6 +30,11 @@ GlView::~GlView() = default;
 
 auto GlView::opengl_ready() noexcept -> bool { return raster::gl::available(); }
 
+void GlView::set_mesh(std::shared_ptr<const raster::gl::Mesh> mesh) {
+  mesh_ = std::move(mesh);
+  mark_dirty();
+}
+
 void GlView::set_shape(GlShape shape) {
   if (shape_ == shape) return;
   shape_ = shape;
@@ -94,8 +99,13 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
   std::fprintf(stderr, "[glv] begin_frame w=%d h=%d\n", width, height);
   scene_->begin_frame(background_);
   scene_->set_camera(camera);
-  scene_->draw_mesh(shared_shape_mesh(shape_),
-                    math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, angle_));
+  // 外部网格优先于内置形状：调用方给了模型就画模型
+  static const raster::gl::Mesh kEmpty{};
+  const raster::gl::Mesh& mesh = mesh_ != nullptr ? *mesh_ : shared_shape_mesh(shape_);
+  if (!mesh.is_empty()) {
+    scene_->draw_mesh(mesh, math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, angle_));
+  }
+  (void)kEmpty;
   std::fprintf(stderr, "[glv] end_frame start\n");
   scene_->end_frame(canvas, box);
   std::fprintf(stderr, "[glv] end_frame done\n");
@@ -107,6 +117,9 @@ auto GlView::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "spin") return spin_ ? "true" : "false";
   if (name == "spin_speed") return std::format("{:.3f}", static_cast<double>(speed_));
   if (name == "gl_frames") return std::format("{}", frames_);
+  if (name == "mesh_vertices") {
+    return std::format("{}", mesh_ != nullptr ? mesh_->vertex_count() : 0U);
+  }
   if (name == "gl_ready") return raster::gl::available() ? "true" : "false";
   return std::nullopt;
 }
@@ -136,7 +149,7 @@ auto GlView::set_property(std::string_view name, std::string_view value) -> bool
 }
 
 auto GlView::property_names() const -> std::vector<std::string_view> {
-  return {"shape", "spin", "spin_speed", "gl_frames", "gl_ready"};
+  return {"shape", "spin", "spin_speed", "gl_frames", "gl_ready", "mesh_vertices"};
 }
 
 }  // namespace st::ui

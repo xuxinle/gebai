@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "st/core/log.hpp"
+#include "st/core/fs.hpp"
+#include "st/core/string.hpp"
 #include "rasterize_internal.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/surface.hpp"
@@ -43,6 +45,12 @@ auto probe() -> Result<DeviceInfo> {
                     "third_party/opengl/（该目录不进版本库）");
 }
 auto Mesh::cube(float) -> Mesh { return {}; }
+auto Mesh::load_obj(std::string_view, math::Color) -> Result<Mesh> {
+  return unexpected(ErrorCode::Unsupported, "OBJ 加载需要 OpenGL 模块（当前未编译进来）");
+}
+auto Mesh::load_obj_file(std::string_view, math::Color) -> Result<Mesh> {
+  return unexpected(ErrorCode::Unsupported, "OBJ 加载需要 OpenGL 模块（当前未编译进来）");
+}
 auto Mesh::sphere(float, int) -> Mesh { return {}; }
 auto Mesh::box(float, float, float) -> Mesh { return {}; }
 auto Scene3D::create(int, int) -> Result<std::unique_ptr<Scene3D>> {
@@ -211,6 +219,11 @@ void main() {
 /// 为什么自己算光照而不是只画纯色：三维场景没有明暗就没有**体积感**——
 /// 立方体的相邻面会同色、看起来像一个扁平多边形。光照是"看起来像 3D"的最小代价。
 /// 2D 路径用的顶点着色器：直接收**物理像素**坐标，做正交映射（原点左上、Y 向下）。
+/// 写一个交错顶点（位置 3 + 法线 3 + 颜色 3）。定义在下方"网格生成"段，
+/// 这里前置声明：OBJ 加载也需要它，而把它复制一份会让"顶点布局"出现两处真相。
+void push_vertex(std::vector<float>& out, math::Vec3 position, math::Vec3 normal,
+                 math::Vec3 color);
+
 constexpr const char* kPathVertexShader = R"glsl(#version 330 core
 layout(location = 0) in vec2 in_position;
 uniform vec2 u_viewport;
@@ -709,6 +722,154 @@ auto Scene3D::create(int width, int height) -> Result<std::unique_ptr<Scene3D>> 
 }
 
 // ——— 网格生成 ———
+
+// ——— OBJ 加载（只取几何）———
+
+namespace {
+
+/// 解析一个 `f` 顶点引用：返回 (位置索引, 法线索引)，均为 **0 基**；法线缺失时 -1。
+/// 支持 `v` / `v/vt` / `v//vn` / `v/vt/vn` 四种写法与负索引（相对当前顶点数）。
+[[nodiscard]] auto parse_face_ref(std::string_view token, int position_count, int normal_count)
+    -> std::optional<std::pair<int, int>> {
+  const std::size_t slash = token.find('/');
+  const std::string_view position_text = slash == std::string_view::npos
+                                             ? token
+                                             : token.substr(0, slash);
+  if (position_text.empty()) return std::nullopt;
+  const auto position = st::parse_i64(position_text);
+  if (!position.has_value()) return std::nullopt;
+  // OBJ 是 1 基；负数表示"从末尾往前数"（-1 = 最后一个）
+  const int position_index = *position > 0
+                                 ? static_cast<int>(*position) - 1
+                                 : position_count + static_cast<int>(*position);
+  if (position_index < 0 || position_index >= position_count) return std::nullopt;
+
+  int normal_index = -1;
+  if (slash != std::string_view::npos) {
+    const std::string_view rest = token.substr(slash + 1);
+    const std::size_t second_slash = rest.find('/');
+    if (second_slash != std::string_view::npos) {
+      const std::string_view normal_text = rest.substr(second_slash + 1);
+      if (!normal_text.empty()) {
+        const auto normal = st::parse_i64(normal_text);
+        if (normal.has_value()) {
+          normal_index = *normal > 0 ? static_cast<int>(*normal) - 1
+                                     : normal_count + static_cast<int>(*normal);
+          if (normal_index < 0 || normal_index >= normal_count) normal_index = -1;  // 越界当缺失
+        }
+      }
+    }
+  }
+  return std::make_pair(position_index, normal_index);
+}
+
+}  // namespace
+
+auto Mesh::load_obj(std::string_view text, math::Color base_color) -> Result<Mesh> {
+  std::vector<math::Vec3> positions;
+  std::vector<math::Vec3> normals;
+  // 先攒面（每面记录引用），因为 OBJ 允许 `f` 出现在 `v`/`vn` 之前
+  std::vector<std::pair<int, int>> face_corners;
+  std::vector<std::size_t> face_sizes;
+
+  for (const std::string_view raw_line : st::split(text, '\n')) {
+    const std::string_view line = st::trim(raw_line);
+    if (line.empty() || line[0] == '#') continue;
+    const std::vector<std::string_view> parts = st::split_whitespace(line);
+    if (parts.empty()) continue;
+    const std::string_view kind = parts[0];
+
+    if (kind == "v" && parts.size() >= 4) {
+      const auto x = st::parse_f64(parts[1]);
+      const auto y = st::parse_f64(parts[2]);
+      const auto z = st::parse_f64(parts[3]);
+      if (x.has_value() && y.has_value() && z.has_value()) {
+        positions.push_back(math::Vec3{static_cast<float>(*x), static_cast<float>(*y),
+                                       static_cast<float>(*z)});
+      }
+    } else if (kind == "vn" && parts.size() >= 4) {
+      const auto x = st::parse_f64(parts[1]);
+      const auto y = st::parse_f64(parts[2]);
+      const auto z = st::parse_f64(parts[3]);
+      if (x.has_value() && y.has_value() && z.has_value()) {
+        normals.push_back(math::Vec3{static_cast<float>(*x), static_cast<float>(*y),
+                                     static_cast<float>(*z)});
+      }
+    } else if (kind == "f" && parts.size() >= 4) {
+      // 面引用是相对**当时已读到的**顶点数（负索引语义如此）
+      const int position_count = static_cast<int>(positions.size());
+      const int normal_count = static_cast<int>(normals.size());
+      std::vector<std::pair<int, int>> corners;
+      for (std::size_t index = 1; index < parts.size(); ++index) {
+        if (auto ref = parse_face_ref(parts[index], position_count, normal_count);
+            ref.has_value()) {
+          corners.push_back(*ref);
+        }
+      }
+      // 坏面只跳过（不整文件失败）：真实导出文件里常有一两个退化面
+      if (corners.size() >= 3) {
+        face_corners.insert(face_corners.end(), corners.begin(), corners.end());
+        face_sizes.push_back(corners.size());
+      }
+    }
+  }
+
+  if (positions.empty() || face_corners.empty()) {
+    return unexpected(ErrorCode::Invalid,
+                      std::format("OBJ 里没有可用几何（顶点 {} 个，面 {} 组）", positions.size(),
+                                  face_sizes.size()));
+  }
+
+  Mesh mesh;
+  mesh.vertices.reserve(face_corners.size() * 9U);
+  const math::Vec3 color{static_cast<float>(base_color.r) / 255.0f,
+                         static_cast<float>(base_color.g) / 255.0f,
+                         static_cast<float>(base_color.b) / 255.0f};
+
+  std::size_t corner = 0;
+  for (const std::size_t size : face_sizes) {
+    // 扇形三角化：(0, i, i+1)——对凸/近似凸面正确；凹面会略有偏差，
+    // 这是"够画出模型"的取舍，已在头文件写明不支持自由曲面。
+    for (std::size_t index = 1; index + 1 < size; ++index) {
+      const std::pair<int, int> a = face_corners[corner];
+      const std::pair<int, int> b = face_corners[corner + index];
+      const std::pair<int, int> c = face_corners[corner + index + 1];
+      // 缺法线：按面算（几何法线），保证光照不会因为法线为 0 而全黑
+      math::Vec3 face_normal = (positions[static_cast<std::size_t>(b.first)] -
+                                positions[static_cast<std::size_t>(a.first)])
+                                   .cross(positions[static_cast<std::size_t>(c.first)] -
+                                          positions[static_cast<std::size_t>(a.first)])
+                                   .normalized();
+      if (face_normal.length() < 0.5f) face_normal = math::Vec3{0.0f, 1.0f, 0.0f};  // 退化面兜底
+      const auto emit = [&](const std::pair<int, int>& ref) {
+        const math::Vec3 position = positions[static_cast<std::size_t>(ref.first)];
+        const math::Vec3 normal = ref.second >= 0
+                                      ? normals[static_cast<std::size_t>(ref.second)].normalized()
+                                      : face_normal;
+        push_vertex(mesh.vertices, position,
+                    normal.length() < 0.5f ? face_normal : normal, color);
+      };
+      const auto base = static_cast<std::uint32_t>(mesh.vertex_count());
+      emit(a);
+      emit(b);
+      emit(c);
+      mesh.indices.insert(mesh.indices.end(), {base, base + 1U, base + 2U});
+    }
+    corner += size;
+  }
+  if (mesh.is_empty()) {
+    return unexpected(ErrorCode::Invalid, "OBJ 的面全部退化（没有可用三角形）");
+  }
+  return mesh;
+}
+
+auto Mesh::load_obj_file(std::string_view path, math::Color base_color) -> Result<Mesh> {
+  auto text = st::fs::read_text(path);
+  if (!text.has_value()) return forward_error(text.error());
+  return load_obj(*text, base_color);
+}
+
+
 
 namespace {
 

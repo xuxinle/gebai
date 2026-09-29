@@ -69,6 +69,13 @@ struct Mesh {
   [[nodiscard]] auto vertex_count() const noexcept -> std::size_t {
     return vertices.size() / 9U;
   }
+  /// 第 `index` 个顶点的 9 个分量（位置 3 + 法线 3 + 颜色 3）。
+  /// 只读访问供测试与导出用；写一律走 `vertices`（避免两套修改路径）。
+  [[nodiscard]] auto operator[](std::size_t index) const -> std::span<const float> {
+    const std::size_t offset = index * 9U;
+    if (offset + 9U > vertices.size()) return {};
+    return std::span<const float>(vertices.data() + offset, 9U);
+  }
   [[nodiscard]] auto is_empty() const noexcept -> bool {
     return vertices.empty() || indices.empty();
   }
@@ -79,6 +86,24 @@ struct Mesh {
   [[nodiscard]] static auto sphere(float radius = 0.6f, int segments = 24) -> Mesh;
   /// 圆角长方体（"复杂图形"的最小样例：把三轴半径当参数）。
   [[nodiscard]] static auto box(float x, float y, float z) -> Mesh;
+
+  /// 从 **OBJ 文本**加载网格（Wavefront OBJ，只取几何：`v` / `vn` / `f`）。
+  ///
+  /// 支持：`f` 的四种写法（`v`、`v/vt`、`v//vn`、`v/vt/vn`）、**负索引**（相对引用）、
+  /// 多边形面（扇形三角化）、缺法线时**按面计算**。
+  /// 不支持（如实说明）：`vt` 纹理坐标、材质库（`mtllib`/`usemtl`）、自由曲面、多对象分组
+  /// —— 取到就跳过，而不是猜。这不是"完整的 OBJ 实现"，是"够画出模型的子集"。
+  ///
+  /// 为什么要有它：只有内置的立方体/球，"三维渲染能力"就只能展示自家造的几何；
+  /// 真实模型（导出目录里的 .obj）进不来，等于能力无法被使用。
+  ///
+  /// @return 失败：空中/无有效面（`Invalid`）。**单个坏面只跳过**，不让整个文件失败。
+  [[nodiscard]] static auto load_obj(std::string_view text, math::Color base_color)
+      -> Result<Mesh>;
+
+  /// 从文件加载（路径按 UTF-8 处理，经 `st::fs`——Windows 下中文路径才不会坏）。
+  [[nodiscard]] static auto load_obj_file(std::string_view path, math::Color base_color)
+      -> Result<Mesh>;
 };
 
 /// 三维场景：离屏渲染 → 合成进画布。
