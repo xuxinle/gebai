@@ -25,7 +25,7 @@ function captureFetch(): { urls: string[]; restore: () => void } {
   }
 }
 
-/** 本文件只关心查询串（`withCtx` 需要 location.origin 才能建 URL）。 */
+/** 本文件只关心查询串（请求地址由 `withCtx` 拼成相对路径，见 url-base）。 */
 if (!(location as { origin?: string }).origin) {
   Object.defineProperty(location, "origin", { value: "http://localhost", configurable: true })
 }

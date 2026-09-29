@@ -8,7 +8,7 @@
  * - 下载/原样字节流不走 fetch（交给浏览器直连 URL，原生支持 Range 与断点续传）。
  */
 import { wireDirs } from "./watch-core"
-import { appBase } from "@gebai/sdk"
+import { wbUrl } from "./url-base"
 
 
 export interface RootInfo {
@@ -269,14 +269,19 @@ export class FsApi {
     private session: () => string | undefined,
   ) {}
 
-  private withCtx(url: string, extra: Record<string, string | undefined> = {}): string {
-    const u = new URL(`${appBase()}${url}`.replace(/\/{2,}/g, "/"), location.origin)
+  /**
+   * 请求地址：工作台相对路径（由页面位置解析，反代子路径免配置）+ 会话上下文与本地 env。
+   * 端点写 `"/api/v1/…"`（带不带前导斜杠等价）。
+   */
+  private withCtx(endpoint: string, extra: Record<string, string | undefined> = {}): string {
+    const q = new URLSearchParams()
     const session = this.session()
-    if (session) u.searchParams.set("session", session)
+    if (session) q.set("session", session)
     const env = this.env()
-    if (env && Object.keys(env).length) u.searchParams.set("env", JSON.stringify(env))
-    for (const [k, v] of Object.entries(extra)) if (v !== undefined && v !== "") u.searchParams.set(k, v)
-    return u.pathname + u.search
+    if (env && Object.keys(env).length) q.set("env", JSON.stringify(env))
+    for (const [k, v] of Object.entries(extra)) if (v !== undefined && v !== "") q.set(k, v)
+    const query = q.toString()
+    return `${wbUrl(endpoint)}${query ? `?${query}` : ""}`
   }
 
   /** 直连 URL（下载 / 原样字节流 / iframe src）：不经 fetch，浏览器原生 Range 与缓存生效。 */
@@ -434,7 +439,7 @@ export class FsApi {
     form.set("overwrite", overwrite ? "1" : "0")
     form.set("paths", JSON.stringify(files.map((f) => f.path)))
     for (const f of files) form.append(f.path, f.file, f.file.name)
-    const res = await fetch(`${appBase()}/api/v1/fs/upload`, { method: "POST", body: form })
+    const res = await fetch(wbUrl("/api/v1/fs/upload"), { method: "POST", body: form })
     const text = await res.text()
     const parsed = text ? JSON.parse(text) : null
     if (!res.ok) throw new ApiError(res.status, parsed?.error ?? `上传失败（${res.status}）`, parsed)

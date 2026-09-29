@@ -9,7 +9,8 @@
  * 文件内容与磁盘一致性用服务端 etag 做乐观锁（保存冲突三选一：覆盖 / 重新加载 / 取消）。
  */
 import { normalizeArtifactPath, resolveDeepLink } from "./deeplink"
-import { appPath, effectiveLanguageOf, languageOfPath } from "@gebai/sdk"
+import { effectiveLanguageOf, languageOfPath } from "@gebai/sdk"
+import { wbUrl } from "./url-base"
 import { createMergeView, type MergeView } from "./merge-view"
 import { createStageView, type StageView } from "./staging"
 import { FsApi, ApiError, type FileStat, type GitStatusInfo, type ReadResponse, type RootInfo, type RootsResponse } from "./api"
@@ -2075,7 +2076,7 @@ function renderRail(): void {
           // shortcut 标 `Ctrl+\`：面板内这个键就是这一项（与活动栏那颗按钮同一个动作、同一标注）
           EMBEDDED
             ? { label: "关闭文件工作台", icon: "arrowLeft", shortcut: "Ctrl+\\", onClick: () => requestCloseSplit() }
-            : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = appPath("/") } },
+            : { label: "返回歌白主界面", icon: "back", onClick: () => { location.href = wbUrl("/") } },
         ])
       }
       return b

@@ -22,7 +22,7 @@
 import { getCurrentSession } from "./state"
 import type { KeyBinding } from "./keymap"
 import { FOCUS_WITH_INPUT } from "./keymap"
-import { appPath } from "@gebai/sdk"
+import { wbUrl } from "./files/url-base"
 
 /** 打开工作台的参数（各字段可选，缺省按当前会话/主题补齐）。 */
 export interface FilesOpenOpts {
@@ -37,7 +37,7 @@ export interface FilesOpenOpts {
   session?: string
 }
 
-/** 文件工作台 URL（保留会话上下文；主题不走 URL）。 */
+/** 文件工作台 URL（相对路径 + 会话上下文；主题不走 URL）。 */
 export function filesUrl(opts: FilesOpenOpts = {}): string {
   const params = new URLSearchParams()
   const session = opts.session ?? getCurrentSession()?.id
@@ -49,7 +49,7 @@ export function filesUrl(opts: FilesOpenOpts = {}): string {
   if (opts.from) params.set("from", opts.from)
   if (opts.to) params.set("to", opts.to)
   const qs = params.toString()
-  return `${appPath("/files")}${qs ? `?${qs}` : ""}`
+  return `${wbUrl("/files")}${qs ? `?${qs}` : ""}`
 }
 
 /** 在当前标签（或新标签）打开文件工作台。 */

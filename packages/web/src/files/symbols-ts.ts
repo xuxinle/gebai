@@ -12,7 +12,7 @@
  * 加载是**懒且按语言缓存**的：打开某个语言的文件时才拉那份语法（首次一次性成本，之后常驻），
  * 解析结果由上层按 model 版本号缓存（见 `symbols.ts`），不在每次按键时重解析。
  */
-import { appPath } from "@gebai/sdk"
+import { wbUrl, wbAbsUrl } from "./url-base"
 import type { Sym, SymKind } from "./symbols-core"
 import { CLASS_LIKE_KINDS, CONTAINER_KINDS, CTOR_NAMES, TS_LANGUAGES, type TsNode, type TsNodeRule } from "./symbols-ts-rules"
 
@@ -43,7 +43,7 @@ const parsers = new Map<string, Promise<TsParserLike | null>>()
  * 别再反复请求）；**其余 HTTP 错误与网络异常**则抛出去（调用方不缓存结果，下次打开文件可重试）。
  */
 async function fetchGrammar(file: string): Promise<Uint8Array | null> {
-  const res = await fetch(appPath(`/vendor/tree-sitter/lang/${file}`))
+  const res = await fetch(wbUrl(`/vendor/tree-sitter/lang/${file}`))
   if (res.status === 404 || res.status === 403) return null
   if (!res.ok) throw new Error(`语法文件请求失败（HTTP ${res.status}）`)
   return new Uint8Array(await res.arrayBuffer())
@@ -63,7 +63,7 @@ export function hasTsSupport(language: string): boolean {
 /**
  * 注入运行时（测试用；传 null 恢复默认的 vendor 加载）。
  *
- * 浏览器里运行时是 `import("/vendor/tree-sitter/tree-sitter.js")`（惰性、失败可重试）；单测里不能走
+ * 浏览器里运行时是从 vendor 静态目录加载的模块（惰性、失败可重试）；单测里不能走
  * 网络/静态资源，改为注入 `web-tree-sitter` 包本体，**与浏览器同一条代码路径**（同样的 Parser/Language
  * 接口、同样的语法加载器）。
  */
@@ -77,11 +77,11 @@ export function setTsRuntimeForTest(runtime: TsRuntime | null): void {
 export function loadTsRuntime(): Promise<TsRuntime | null> {
   if (runtimeOverride) return Promise.resolve(runtimeOverride)
   if (runtimePromise) return runtimePromise
-  const url = appPath("/vendor/tree-sitter/tree-sitter.js")
+  const url = wbAbsUrl("/vendor/tree-sitter/tree-sitter.js")
   runtimePromise = import(/* @vite-ignore */ url)
     .then(async (mod) => {
       const rt = mod as unknown as TsRuntime
-      await rt.Parser.init({ locateFile: () => appPath("/vendor/tree-sitter/tree-sitter.wasm") })
+      await rt.Parser.init({ locateFile: () => wbAbsUrl("/vendor/tree-sitter/tree-sitter.wasm") })
       return rt
     })
     .catch(() => {

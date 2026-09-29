@@ -20,7 +20,7 @@
 import { clear, dropdown, h, icon, toast } from "./ui"
 import { TERM_HISTORY_MAX, TermBuffer, pathTail, pushHistory, samePath, type AnsiColor, type TermLine } from "./terminal-core"
 import { readTermSessions, writeTermSessions } from "./term-sessions"
-import { appPath } from "@gebai/sdk"
+import { wbUrl } from "./url-base"
 import "../css/terminal.css"
 
 export interface TerminalHooks {
@@ -134,18 +134,19 @@ async function request<T>(
   endpoint: string,
   opts: { params?: Record<string, string | number | undefined>; body?: unknown } = {},
 ): Promise<T> {
-  const url = new URL(appPath(endpoint), location.origin)
+  const q = new URLSearchParams()
   const session = hooks.session()
-  if (session) url.searchParams.set("session", session)
+  if (session) q.set("session", session)
   const env = hooks.env()
-  if (env && Object.keys(env).length) url.searchParams.set("env", JSON.stringify(env))
-  for (const [k, v] of Object.entries(opts.params ?? {})) if (v !== undefined) url.searchParams.set(k, String(v))
+  if (env && Object.keys(env).length) q.set("env", JSON.stringify(env))
+  for (const [k, v] of Object.entries(opts.params ?? {})) if (v !== undefined) q.set(k, String(v))
+  const query = q.toString()
   const init: RequestInit = { method, headers: authHeaders() }
   if (opts.body !== undefined) {
     init.body = JSON.stringify(opts.body)
     ;(init.headers as Record<string, string>)["Content-Type"] = "application/json"
   }
-  const res = await fetch(url.pathname + url.search, init)
+  const res = await fetch(`${wbUrl(endpoint)}${query ? `?${query}` : ""}`, init)
   const text = await res.text()
   let parsed: unknown = null
   try {

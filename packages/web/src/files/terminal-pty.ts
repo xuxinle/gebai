@@ -17,7 +17,7 @@
  */
 import { clear, confirmDialog, dropdown, h, icon, promptDialog, showMenu, toast } from "./ui"
 import { pathTail, samePath } from "./terminal-core"
-import { appPath } from "@gebai/sdk"
+import { wbUrl, wbAbsUrl } from "./url-base"
 import { WorkbenchSocket } from "./ws-client"
 import { realSessionIds, readTermSessions, writeTermSessions } from "./term-sessions"
 import { MIN_CONTRAST_RATIO, searchMatchColors, terminalTheme } from "./term-theme"
@@ -174,7 +174,8 @@ let vendorPromise: Promise<XtermVendor> | null = null
 /** 加载 xterm 运行时（样式 + 四个 ESM 模块，并行取回）。 */
 export function loadXterm(): Promise<XtermVendor> {
   if (vendorPromise) return vendorPromise
-  const base = appPath("/vendor/xterm")
+  // 模块与样式都取绝对 URL：`import()` 的相对说明符相对模块文件解析，而这里的 base 还要拼出子路径
+  const base = wbAbsUrl("/vendor/xterm")
   vendorPromise = (async () => {
     loadCss(`${base}/xterm.css`)
     const [core, fit, search, links] = await Promise.all([
@@ -248,14 +249,15 @@ interface TermInfo {
 }
 
 async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
-  const url = new URL(appPath("/api/v1/terminal/info"), location.origin)
+  const q = new URLSearchParams()
   const session = hooks.session()
-  if (session) url.searchParams.set("session", session)
+  if (session) q.set("session", session)
   const env = hooks.env()
-  if (env && Object.keys(env).length) url.searchParams.set("env", JSON.stringify(env))
+  if (env && Object.keys(env).length) q.set("env", JSON.stringify(env))
+  const query = q.toString()
   try {
     const token = readToken()
-    const res = await fetch(url.pathname + url.search, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const res = await fetch(`${wbUrl("/api/v1/terminal/info")}${query ? `?${query}` : ""}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
     if (!res.ok) return null
     return (await res.json()) as TermInfo
   } catch {
@@ -267,7 +269,7 @@ async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
 async function fetchRootInfo(rootId: string): Promise<{ path: string; name: string } | null> {
   try {
     const token = readToken()
-    const res = await fetch(appPath("/api/v1/roots"), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const res = await fetch(wbUrl("/api/v1/roots"), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
     if (!res.ok) return null
     const body = (await res.json()) as { roots?: Array<{ id: string; path: string; name?: string }> }
     const hit = body.roots?.find((r) => r.id === rootId)

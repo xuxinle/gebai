@@ -10,7 +10,7 @@
  */
 import type { FsApi, FileStat } from "./api"
 import { h, icon, toast, formatSize, formatTime, extOf } from "./ui"
-import { appBase } from "@gebai/sdk"
+import { wbUrl, wbAbsUrl } from "./url-base"
 // 扩展名 → 图表类型 的清单在 preview-kind.ts（与「可渲染形态」判定同一处，两边不会漂移）；此处转出保持既有引用路径
 import { diagramKindOf } from "./preview-kind"
 export { diagramKindOf } from "./preview-kind"
@@ -404,10 +404,10 @@ function isDarkTheme(): boolean {
 
 /** 渲染图表源码为 SVG 字符串（懒加载本地引擎；与主界面图表共用同一套 vendor 资源）。 */
 export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise<string> {
-  const base = appBase()
+  const vendor = wbUrl("/vendor")
   if (kind === "mermaid") {
     if (!mermaidReady) {
-      mermaidReady = loadScript(`${base}/vendor/mermaid.js`).then(() => {
+      mermaidReady = loadScript(`${vendor}/mermaid.js`).then(() => {
         const m = (window as unknown as { mermaid?: { initialize: (o: unknown) => void } }).mermaid
         m?.initialize({ startOnLoad: false, theme: isDarkTheme() ? "dark" : "default", securityLevel: "strict" })
       })
@@ -418,7 +418,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     return out.svg
   }
   if (kind === "echarts") {
-    if (!echartsReady) echartsReady = loadScript(`${base}/vendor/echarts.js`)
+    if (!echartsReady) echartsReady = loadScript(`${vendor}/echarts.js`)
     await echartsReady
     const echarts = (window as unknown as { echarts: { init: (el: HTMLElement, theme?: unknown, opts?: unknown) => { setOption: (o: unknown) => void; getDom: () => HTMLElement; dispose: () => void } } }).echarts
     const option = JSON.parse(code) as { option?: unknown; width?: number; height?: number }
@@ -436,10 +436,10 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
     return svg
   }
   if (kind === "plantuml") {
-    if (!vizReady) vizReady = loadScript(`${base}/vendor/viz-global.js`)
+    if (!vizReady) vizReady = loadScript(`${vendor}/viz-global.js`)
     await vizReady
     if (!plantumlMod) {
-      plantumlMod = import(/* @vite-ignore */ `${base}/vendor/plantuml.js`) as unknown as Promise<{ renderToString: (lines: string[], ok: (svg: string) => void, err: (m: string) => void) => void }>
+      plantumlMod = import(/* @vite-ignore */ wbAbsUrl("/vendor/plantuml.js")) as unknown as Promise<{ renderToString: (lines: string[], ok: (svg: string) => void, err: (m: string) => void) => void }>
     }
     const mod = await plantumlMod
     const src = /@start/.test(code) ? code : `@startuml\n${code}\n@enduml`
@@ -449,7 +449,7 @@ export async function renderDiagramSvg(kind: DiagramKind, code: string): Promise
   }
   // d2：浏览器构建为单 Worker，必须串行（并发会互相覆盖回调）
   const run = d2Queue.then(async () => {
-    const mod = (await import(/* @vite-ignore */ `${base}/vendor/d2js/index.js`)) as { D2: new () => { compile: (c: string, o: unknown) => Promise<{ diagram: unknown }>; render: (d: unknown, o: unknown) => Promise<string> } }
+    const mod = (await import(/* @vite-ignore */ wbAbsUrl("/vendor/d2js/index.js"))) as { D2: new () => { compile: (c: string, o: unknown) => Promise<{ diagram: unknown }>; render: (d: unknown, o: unknown) => Promise<string> } }
     const d2 = new mod.D2()
     const opts = { themeID: isDarkTheme() ? 200 : 0, noXMLTag: true }
     const compiled = await d2.compile(code, opts)

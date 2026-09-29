@@ -19,7 +19,7 @@
  * 斜杠——早期实现一律 `replace(/^\//, "")`，在 Linux/macOS 上会把根斜杠吃掉、整条跳转链断掉。
  */
 
-import { appPath } from "@gebai/sdk"
+import { wbUrl } from "./url-base"
 import { WorkbenchSocket, readAuthToken } from "./ws-client"
 import { UnsupportedMethods } from "./lsp-capabilities"
 import type { FlatSym } from "./symbols-core"
@@ -167,10 +167,9 @@ export function initLsp(): Promise<void> {
   initPromise = (async () => {
     try {
       const token = readAuthToken()
-      const url = new URL(appPath("/api/v1/lsp/servers"), location.origin)
       const ctl = new AbortController()
       const timer = setTimeout(() => ctl.abort(), 5000)
-      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: ctl.signal })
+      const res = await fetch(wbUrl("/api/v1/lsp/servers"), { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: ctl.signal })
       clearTimeout(timer)
       if (!res.ok) {
         // 确定性拒绝（404 页面关闭 / 403 沙箱）：本页不再重试

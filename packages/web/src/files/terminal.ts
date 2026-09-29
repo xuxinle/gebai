@@ -8,7 +8,7 @@
  * 选择在首次激活时做一次并缓存：同一页面生命周期内不来回切换实现（避免终端内容重建）。
  */
 import { h } from "./ui"
-import { appPath } from "@gebai/sdk"
+import { wbUrl } from "./url-base"
 import { createPtyTerminal } from "./terminal-pty"
 import { createLegacyTerminalPanel, type TerminalHooks, type TerminalPanel } from "./terminal-legacy"
 
@@ -20,13 +20,14 @@ let ptyPreferred: boolean | null = null
 /** 读服务端能力位：失败/无响应时保守地用降级实现（终端仍要能用）。 */
 async function detectPty(hooks: TerminalHooks): Promise<boolean> {
   if (ptyPreferred !== null) return ptyPreferred
-  const url = new URL(appPath("/api/v1/terminal/info"), location.origin)
+  const q = new URLSearchParams()
   const session = hooks.session()
-  if (session) url.searchParams.set("session", session)
+  if (session) q.set("session", session)
   const env = hooks.env()
-  if (env && Object.keys(env).length) url.searchParams.set("env", JSON.stringify(env))
+  if (env && Object.keys(env).length) q.set("env", JSON.stringify(env))
+  const query = q.toString()
   try {
-    const res = await fetch(url.pathname + url.search, { headers: authHeaders() })
+    const res = await fetch(`${wbUrl("/api/v1/terminal/info")}${query ? `?${query}` : ""}`, { headers: authHeaders() })
     if (res.ok) {
       const body = (await res.json()) as { pty?: boolean }
       ptyPreferred = body.pty === true

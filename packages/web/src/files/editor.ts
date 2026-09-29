@@ -17,7 +17,7 @@
  */
 
 import { cssVarToHex } from "../css-color"
-import { appPath } from "@gebai/sdk"
+import { wbAbsUrl } from "./url-base"
 import {
   createMetricsSync,
   EDITOR_FONT_FAMILY,
@@ -289,9 +289,9 @@ export function toggleMinimap(): boolean {
   return minimapOn
 }
 
-/** Monaco vendor 目录（`public/vendor/monaco/vs`）。 */
+/** Monaco vendor 目录（`public/vendor/monaco/vs`）：loader 的 `paths.vs` 与 worker URL 都要能被内部二次拼接，故取绝对 URL。 */
 export function monacoVsPath(): string {
-  return appPath("/vendor/monaco/vs")
+  return wbAbsUrl("/vendor/monaco/vs")
 }
 
 /**
