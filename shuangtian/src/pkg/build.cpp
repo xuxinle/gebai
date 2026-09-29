@@ -1,7 +1,9 @@
 #include "st/pkg/build.hpp"
+#include "st/pkg/embed.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <set>
 #include <format>
 #include <mutex>
@@ -26,6 +28,11 @@ struct CompileUnit {
   std::string depfile{};  ///< `-MMD` 产出的头依赖清单（`.d`）
   SourceLang lang{SourceLang::Cxx};
   bool vendor{false};     ///< 第三方源码（放宽告警、不进 PCH）
+  /// 该单元专属的包含目录。
+  ///
+  /// 为什么需要"按单元"而不是全局 `-I`：编译期嵌入生成的 `battery/embed.hpp` 是**按目标隔离**的
+  /// （不同目标嵌入不同资源，声明集合不同），无法放进工程的公共包含路径。
+  std::vector<std::string> extra_include_dirs{};
 };
 
 /// 按扩展名判定语言；非 `.c` 一律按 C++ 处理（`.cpp/.cc/.cxx`）。
@@ -108,9 +115,13 @@ struct CompileUnit {
   return name;
 }
 
+/// 单元 → 专属包含目录（编译期嵌入用；未命中即无额外目录）。
+using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
+
 [[nodiscard]] auto make_units(const Manifest& manifest, const std::vector<std::string>& sources,
                               const std::string& object_dir,
-                              const std::set<std::string>& vendor_paths)
+                              const std::set<std::string>& vendor_paths,
+                              const UnitIncludeMap& unit_includes = {})
     -> std::vector<CompileUnit> {
   std::vector<CompileUnit> units;
   units.reserve(sources.size());
@@ -121,6 +132,9 @@ struct CompileUnit {
     unit.depfile = unit.object + ".d";
     unit.lang = language_of(unit.source);
     unit.vendor = vendor_paths.contains(unit.source);
+    if (const auto found = unit_includes.find(unit.source); found != unit_includes.end()) {
+      unit.extra_include_dirs = found->second;
+    }
     units.push_back(std::move(unit));
   }
   return units;
@@ -142,6 +156,31 @@ struct CompileUnit {
     out.push_back(flag);
   }
   return out;
+}
+
+
+/// 把**工程级嵌入**（`manifest.embed`）接进库源集合：生成字节数组 + 声明头，
+/// 并把包含目录登记到所有库单元（否则库自身的源码 `#include "battery/embed.hpp"` 找不到）。
+///
+/// 目标级嵌入不在这里处理：它按目标隔离，见 `build()` 的目标分支。
+[[nodiscard]] auto attach_library_embeds(const Manifest& manifest, std::string_view profile,
+                                        std::vector<std::string>& library_sources,
+                                        std::set<std::string>& vendor_paths,
+                                        UnitIncludeMap& unit_includes) -> Status {
+  if (manifest.embed.empty()) return ok();
+  auto embeds = generate_embeds(manifest, /*target=*/{}, profile, /*with_runtime=*/true);
+  if (!embeds) return forward_error(embeds.error());
+  for (const auto& source : library_sources) {
+    const std::string key =
+        fs::is_absolute(source) ? source : fs::join(manifest.directory, source);
+    unit_includes[key].push_back(embeds->include_dir);
+  }
+  for (const auto& generated : embeds->sources) {
+    library_sources.push_back(generated);
+    vendor_paths.insert(generated);
+    unit_includes[generated].push_back(embeds->include_dir);
+  }
+  return ok();
 }
 
 /// 展开第三方源码清单（失败按空集处理：清单没声明 vendor 也能构建）。
@@ -301,6 +340,7 @@ struct PchContext {
       const std::vector<std::string> unit_flags =
           unit->vendor ? strip_sanitizers(is_c ? c_flags : flags) : (is_c ? c_flags : flags);
       for (const auto& flag : unit_flags) args.push_back(flag);
+      for (const auto& dir : unit->extra_include_dirs) args.push_back(std::format("-I{}", dir));
       if (unit->vendor) args.push_back("-w");
       // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃
       if (pch_ptr != nullptr && !is_c) {
@@ -460,13 +500,20 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
 
   // 第三方源码（vendor/）与库源一起编译：它们不是"可选附加"，而是库的组成部分。
   // 同时把路径集合交给 make_units——这些单元编译时会放宽告警并跳过 PCH。
-  const std::set<std::string> vendor_paths = collect_vendor(manifest);
+  std::set<std::string> vendor_paths = collect_vendor(manifest);
+  UnitIncludeMap library_includes;
+  if (auto status = attach_library_embeds(manifest, options.profile, library_sources, vendor_paths,
+                                          library_includes);
+      !status) {
+    return forward_error(status.error());
+  }
   std::vector<std::string> all_sources = library_sources;
   for (const auto& path : vendor_paths) all_sources.push_back(path);
   std::ranges::sort(all_sources);
   all_sources.erase(std::unique(all_sources.begin(), all_sources.end()), all_sources.end());
 
-  std::vector<CompileUnit> units = make_units(manifest, all_sources, object_dir, vendor_paths);
+  std::vector<CompileUnit> units =
+      make_units(manifest, all_sources, object_dir, vendor_paths, library_includes);
   std::size_t rebuilt = 0;
   const std::int64_t compile_start = time::now_ns();
   auto compiled = compile_units(manifest, options, units, *flags, rebuilt);
@@ -489,17 +536,43 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     return unexpected(ErrorCode::NotFound, std::format("目标不存在: {}", options.target));
   }
   std::vector<CompileUnit> target_units;
-  if (!target->sources.empty()) {
+  if (!target->sources.empty() || !target->embed.empty()) {
     std::vector<std::string> target_sources;
     for (const auto& pattern : target->sources) {
       auto matches = fs::expand_glob(manifest.directory, pattern);
       if (!matches) return forward_error(matches.error());
       for (const auto& item : *matches) target_sources.push_back(item);
     }
+    // 编译期嵌入：生成字节数组与声明头，并把它们纳入本目标的编译单元。
+    // 生成的源与 vendor 运行时都按"第三方"对待（`-w`、不插桩）——它们不是本工程的手写代码。
+    UnitIncludeMap unit_includes;
+    std::set<std::string> target_vendor = vendor_paths;  // 本目标的第三方集合（含生成的嵌入源码）
+    if (!target->embed.empty()) {
+      // 运行时实现只由库级嵌入提供（若库没有嵌入，则由本目标提供）——避免同链接里出现两份全局态
+      auto embeds = generate_embeds(manifest, options.target, options.profile,
+                                    /*with_runtime=*/manifest.embed.empty());
+      if (!embeds) return forward_error(embeds.error());
+      // **目标自身的源也要能 `#include "battery/embed.hpp"`**——只给生成源加包含目录是不够的
+      // （踩过：目标源报 "battery/embed.hpp: No such file or directory"）。
+      //
+      // 键必须与 `make_units` 里的 `unit.source` 同形：`expand_glob` 返回的是**相对路径**，
+      // 而 `make_units` 会拼成绝对路径后再查表——不归一就会静默查不到（曾表现为
+      // "包含目录没传"，实际是键不匹配）。
+      for (const auto& existing : target_sources) {
+        const std::string key =
+            fs::is_absolute(existing) ? existing : fs::join(manifest.directory, existing);
+        unit_includes[key].push_back(embeds->include_dir);
+      }
+      for (const auto& generated : embeds->sources) {
+        target_sources.push_back(generated);
+        target_vendor.insert(generated);
+        unit_includes[generated].push_back(embeds->include_dir);
+      }
+    }
     std::ranges::sort(target_sources);
     target_sources.erase(std::unique(target_sources.begin(), target_sources.end()),
                          target_sources.end());
-    target_units = make_units(manifest, target_sources, object_dir, vendor_paths);
+    target_units = make_units(manifest, target_sources, object_dir, target_vendor, unit_includes);
     std::size_t target_rebuilt = 0;
     auto target_compiled = compile_units(manifest, options, target_units, *flags, target_rebuilt);
     if (!target_compiled) return forward_error(target_compiled.error());
@@ -564,17 +637,21 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   if (runner) {
     for (const auto& item : *runner) runner_sources.push_back(item);
   }
+  std::set<std::string> vendor_paths = collect_vendor(manifest);
+  UnitIncludeMap test_includes;
+  // 库级嵌入先接上（它会给 `library_sources` 追加生成源），再拼最终单元列表
+  if (auto status = attach_library_embeds(manifest, options.profile, library_sources, vendor_paths,
+                                          test_includes);
+      !status) {
+    return forward_error(status.error());
+  }
   std::vector<std::string> all = library_sources;
   for (const auto& item : *tests) all.push_back(item);
   for (const auto& item : runner_sources) all.push_back(item);
-  std::ranges::sort(all);
-  all.erase(std::unique(all.begin(), all.end()), all.end());
-
-  const std::set<std::string> vendor_paths = collect_vendor(manifest);
   for (const auto& path : vendor_paths) all.push_back(path);
   std::ranges::sort(all);
   all.erase(std::unique(all.begin(), all.end()), all.end());
-  std::vector<CompileUnit> units = make_units(manifest, all, object_dir, vendor_paths);
+  std::vector<CompileUnit> units = make_units(manifest, all, object_dir, vendor_paths, test_includes);
   std::size_t rebuilt = 0;
   auto compiled = compile_units(manifest, options, units, *flags, rebuilt);
   if (!compiled) return forward_error(compiled.error());

@@ -28,6 +28,8 @@ struct Application::Impl {
   std::unique_ptr<st::text::TextRenderer> renderer{};
   std::unique_ptr<RendererTextPort> text_port{};
   std::unique_ptr<control::Server> server{};
+  /// 脚本宿主（仅 `AppOptions::enable_script` 时创建；协议层通过 `Application::script()` 取用）
+  std::unique_ptr<ui::ScriptHost> script{};
   std::vector<double> frame_times{};
   std::vector<std::string> log_lines{};
   std::uint64_t frames{0};
@@ -52,8 +54,6 @@ Application::Application(std::string name, std::string version, AppOptions optio
   });
 }
 
-Application::~Application() = default;
-
 auto Application::backend_name() const -> std::string_view {
   return impl_->backend != nullptr ? impl_->backend->name() : std::string_view{"none"};
 }
@@ -61,6 +61,8 @@ auto Application::backend_name() const -> std::string_view {
 auto Application::headless() const -> bool {
   return impl_->backend != nullptr ? impl_->backend->headless() : options_.headless;
 }
+
+auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
 
 auto Application::control_port() const noexcept -> std::uint16_t {
   return impl_->server != nullptr ? impl_->server->port() : 0;
@@ -248,6 +250,19 @@ auto Application::start() -> Status {
   root_.set_viewport(math::Size{static_cast<float>(options_.width),
                                 static_cast<float>(options_.height)});
 
+  if (options_.enable_script) {
+    impl_->script = std::make_unique<ui::ScriptHost>(root_, options_.script_limits);
+    if (!impl_->script->valid()) {
+      impl_->script.reset();
+      return unexpected(ErrorCode::Unsupported,
+                        "脚本宿主初始化失败（QuickJS 运行时或 JS 前置加载异常）");
+    }
+    // 事件桥由 `ScriptHost` 自己在构造时接上（见其构造函数注释）
+    log::info("脚本能力已开启（内存上限 {} MiB / 超时 {} ms）",
+              options_.script_limits.memory_bytes / (1024U * 1024U),
+              options_.script_limits.timeout.count());
+  }
+
   control::ServerOptions server_options;
   server_options.bind = options_.control_bind;
   server_options.port = options_.control_port;
@@ -287,6 +302,9 @@ void Application::render_frame() {
 void Application::tick() {
   if (impl_->backend == nullptr) return;
   if (impl_->repaint || root_.dirty()) render_frame();
+  // 脚本定时器与"高频事件合并"的补发：按帧推进，不额外起线程
+  if (impl_->script != nullptr) (void)impl_->script->tick(0.0);
+  if (impl_->script != nullptr && impl_->script->take_repaint_request()) impl_->repaint = true;
   if (impl_->server != nullptr) impl_->server->poll();
   while (true) {
     auto event = impl_->backend->poll_event();
@@ -294,6 +312,11 @@ void Application::tick() {
     (void)root_.dispatch(*event);
     impl_->repaint = true;
   }
+}
+
+Application::~Application() {
+  // 脚本宿主（若启用）在其析构里摘掉事件观察者；此处只需保证它先于 `root_` 销毁
+  impl_->script.reset();
 }
 
 void Application::set_content(std::unique_ptr<ui::Element> content) {

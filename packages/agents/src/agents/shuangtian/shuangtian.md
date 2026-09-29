@@ -38,6 +38,31 @@
 | 文本/值是否变了 | `get` 的 `props.value`；或 `wait for=text` |
 | 应用是否开了脚本能力 | `hello` 的 `capabilities` 里有没有 `script`（默认没有） |
 
+## 用 JS 控制组件（应用开启脚本能力时）
+
+应用若以 `--enable-script` 启动，你可以用 `shuangtian_call(method="script", params=…)` 直接在应用进程里**读写界面**：
+这比逐次 `set`/`invoke` 更高效（一次脚本里改多项属性只算一次跨界），也适合写"多处联动"的批量调整。
+
+```jsonc
+// ① 一次性执行：读属性 / 批量改 / 触发动作（返回值即最后一条表达式）
+{"code": "$('#status').set({text:'已就绪'}); $('#editor').props.language + '/' + count('Button')"}
+
+// ② 注册事件处理器（**常驻**，返回绑定 id）：用真实事件驱动后续行为
+{"selector": "#save", "event": "click", "on": "() => $('#status').set({text:'已保存'})"}
+
+// ③ 列出 / 注销绑定
+{"bindings": true}
+{"off": "b1"}
+
+// ④ 读回脚本侧状态（确认脚本内部逻辑走到哪一步）
+{"state": true}
+```
+
+选择器语法：`#id`、`Button`（按类型）、`Button[text=保存]`、`Button[id^=tab-]`（`^=` 前缀 / `$=` 后缀 / `*=` 包含）。
+脚本侧还可用 `on/every/after/state/log/now`。
+
+**订约定**：脚本改完界面后，仍然要用 `capture` 截图 / `get` 回读验证——不要只凭脚本返回值就下结论。
+
 ## 边界
 
 - 控制通道**默认没有任意代码执行入口**（没有 eval）：只有数据与动作。需要"跑代码"就用框架自己的能力（`run`/`test`）或全局工具。

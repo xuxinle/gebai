@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "battery/embed.hpp"  // 编译期资源嵌入（stpm 生成；见 vendor/battery/UPSTREAM.md）
 #include "st/app/app.hpp"
 #include "st/core/print.hpp"
 #include "st/core/fs.hpp"
@@ -423,7 +424,20 @@ auto main(int argc, char** argv) -> int {
   facts->style().width = 300.0f;
   facts->style().gap = 6.0f;
   facts->add_child(std::make_unique<KeyValueRow>("语言", "C++20"));
-  facts->add_child(std::make_unique<KeyValueRow>("依赖", "零第三方"));
+  // 这一行来自**编译期嵌入的真实文件**（`examples/gallery/assets/about.txt`）：
+  // 文案在编辑器里写（有高亮、无需转义），构建时由 stpm 转成字节数组编译进可执行文件。
+  {
+    const auto embedded = b::embed<"examples/gallery/assets/about.txt">();
+    // 启动时打印：与控制通道读回交叉验证（嵌入字节数应与源文件逐一相等）
+    const std::string_view embedded_body(embedded.data(), embedded.length());
+    const std::size_t newline = embedded_body.find('\n');
+    st::print("嵌入资源 about.txt: {} 字节 · 首行「{}」\n", embedded.length(),
+              embedded_body.substr(0, newline == std::string_view::npos ? embedded_body.size() : newline));
+    auto row = std::make_unique<KeyValueRow>(
+        "嵌入资源", std::format("about.txt · {} 字节", embedded.length()));
+    row->set_id("embedded-about");
+    facts->add_child(std::move(row));
+  }
   facts->add_child(std::make_unique<KeyValueRow>("渲染", "软件光栅器"));
   facts->add_child(std::make_unique<KeyValueRow>("后端", "headless / x11 / wayland / win32"));
   facts->add_child(std::make_unique<KeyValueRow>("协议", "st-control/1"));

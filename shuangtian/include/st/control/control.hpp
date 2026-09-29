@@ -16,6 +16,7 @@
 #include "st/ext/json.hpp"
 #include "st/ext/script.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/ui/script_host.hpp"
 #include "st/ui/ui_root.hpp"
 
 namespace st::control {
@@ -75,6 +76,11 @@ class Host {
   [[nodiscard]] virtual auto capture_png(math::IntRect region)
       -> Result<std::vector<std::uint8_t>> = 0;
   [[nodiscard]] virtual auto log_lines(std::size_t limit) const -> std::vector<std::string> = 0;
+  /// 脚本宿主（**宿主应用拥有**；未启用脚本能力时返回 `nullptr`）。
+  ///
+  /// 由宿主注入而不是 Server 自建：JS 环境必须是**唯一一份**——否则协议里的 `script` 与
+  /// 应用内部的事件/定时器会落在两个互不可见的 JS 世界里，脚本绑的事件永远收不到 UI 事件。
+  [[nodiscard]] virtual auto script() -> ui::ScriptHost* { return nullptr; }
 };
 
 class Server {

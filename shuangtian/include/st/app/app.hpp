@@ -75,6 +75,8 @@ class Application final : public control::Host {
   [[nodiscard]] auto capture_png(math::IntRect region)
       -> Result<std::vector<std::uint8_t>> override;
   [[nodiscard]] auto log_lines(std::size_t limit) const -> std::vector<std::string> override;
+  /// 脚本宿主（`control::Host` 接口）：未启用脚本能力时为 `nullptr`。
+  [[nodiscard]] auto script() -> ui::ScriptHost* override;
 
   /// 单帧推进（自检与外部驱动用）：布局 → 绘制 → present。
   void render_frame();

@@ -57,6 +57,13 @@ class Input : public Element {
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
 
+  // 属性面：协议 `set` / 脚本 `$('#x').set()` 的**唯一入口**。
+  // 不实现它，`{"value": "x"}` 会被静默忽略——实测踩过：对输入框 set value 一直无效且不报错。
+  [[nodiscard]] auto get_property(std::string_view name) const
+      -> std::optional<std::string> override;
+  auto set_property(std::string_view name, std::string_view value) -> bool override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+
   /// 内容变化回调（实参为最新文本，指向组件内部存储）。
   std::function<void(std::string_view)> on_change{};
   /// `Enter` 提交回调。

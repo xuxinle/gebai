@@ -139,6 +139,45 @@ void Input::set_cursor_index(std::size_t index) {
   mark_dirty();
 }
 
+// —— 属性面：协议 `set` / 脚本 `$('#x').set()` 的唯一入口 ——
+// 不实现它，`{"value": "x"}` 会被静默忽略（实测踩过：对输入框 set value 一直无效且不报错）。
+auto Input::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "value" || name == "text") return text_;
+  if (name == "placeholder") return placeholder_;
+  if (name == "password") return password_ ? "true" : "false";
+  if (name == "enabled") return enabled() ? "true" : "false";
+  if (name == "visible") return visible() ? "true" : "false";
+  return std::nullopt;
+}
+
+auto Input::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "value" || name == "text") {
+    set_text(std::string(value));
+    return true;
+  }
+  if (name == "placeholder") {
+    set_placeholder(std::string(value));
+    return true;
+  }
+  if (name == "password") {
+    set_password(value == "true" || value == "1");
+    return true;
+  }
+  if (name == "enabled") {
+    set_enabled(value == "true" || value == "1");
+    return true;
+  }
+  if (name == "visible") {
+    set_visible(value == "true" || value == "1");
+    return true;
+  }
+  return false;
+}
+
+auto Input::property_names() const -> std::vector<std::string_view> {
+  return {"value", "placeholder", "password", "enabled", "visible"};
+}
+
 auto Input::inner_box(const RenderContext& context) const -> math::Rect {
   const Metrics& metrics = context.theme.metrics();
   const float leading =

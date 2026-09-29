@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "battery/embed.hpp"  // 编译期资源嵌入（示例 JS 逻辑层）
 #include "st/app/app.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/print.hpp"
@@ -468,6 +469,18 @@ ERROR service=net 连接失败 resp=null
   if (auto started = app.start(); !started) {
     std::fprintf(stderr, "启动失败: %s\n", started.error().to_string().c_str());
     return 1;
+  }
+  // 脚本逻辑层（仅在 `--enable-script` 时可用）：**组件控制逻辑用 JS 写**。
+  // 这份 JS 是编译期嵌入的真实资源（`assets/logic.js`）——与 C++ 里那堆 raw string 不同，
+  // 它在编辑器里有高亮、不需要转义，改完重新构建即生效。
+  if (auto* script = app.script(); script != nullptr) {
+    const auto logic = b::embed<"examples/codeeditor/assets/logic.js">();
+    const std::string_view source(logic.data(), logic.length());
+    if (auto loaded = script->eval(source, "assets/logic.js"); !loaded) {
+      st::print("示例 JS 逻辑载入失败: {}\n", loaded.error().message);
+    } else {
+      st::print("示例 JS 逻辑已载入（{} 字节）\n", logic.length());
+    }
   }
   root->set_focus(editor_ptr);
   root->mark_dirty_all();

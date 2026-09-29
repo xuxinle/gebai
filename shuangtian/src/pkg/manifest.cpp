@@ -19,11 +19,11 @@ namespace st::pkg {
 namespace {
 
 /// 本层已识别的顶层字段（其余进 `extra_fields`，回写时保留）。
-inline constexpr std::array<std::string_view, 17> known_keys{
+inline constexpr std::array<std::string_view, 18> known_keys{
     "name",       "version",     "kind",        "modules",        "include_dirs",
     "sources",    "tests",       "flags",       "defines",        "system_libs",
     "targets",    "dependencies", "dependency_modules", "dependency_system",
-    "vendor_sources", "c_flags",
+    "vendor_sources", "c_flags", "embed",
     "shuangtian_pkg_format"};
 
 [[nodiscard]] auto known_key(std::string_view key) -> bool {
@@ -49,6 +49,7 @@ inline constexpr std::array<std::string_view, 17> known_keys{
   target.sources = json_get_string_array(json, "sources");
   target.flags = json_get_string_array(json, "flags");
   target.exclude_sources = json_get_string_array(json, "exclude_sources");
+  target.embed = json_get_string_array(json, "embed");
   return target;
 }
 
@@ -218,6 +219,7 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   if (manifest.c_flags.empty()) manifest.c_flags = {"-std=gnu11"};
   manifest.tests = json_get_string_array(json, "tests");
   manifest.flags = json_get_string_array(json, "flags");
+  manifest.embed = json_get_string_array(json, "embed");
   manifest.defines = json_get_string_array(json, "defines");
   manifest.system_libs = json_get_string_array(json, "system_libs");
 
@@ -314,6 +316,7 @@ auto Manifest::to_json() const -> st::Json {
   if (!c_flags.empty()) json["c_flags"] = to_array(c_flags);
   json["tests"] = to_array(tests);
   json["flags"] = to_array(flags);
+  if (!embed.empty()) json["embed"] = to_array(embed);
   json["defines"] = to_array(defines);
   json["system_libs"] = to_array(system_libs);
 
@@ -324,6 +327,7 @@ auto Manifest::to_json() const -> st::Json {
     entry["sources"] = to_array(target.sources);
     if (!target.flags.empty()) entry["flags"] = to_array(target.flags);
     if (!target.exclude_sources.empty()) entry["exclude_sources"] = to_array(target.exclude_sources);
+    if (!target.embed.empty()) entry["embed"] = to_array(target.embed);
     target_map[target.name] = entry;
   }
   json["targets"] = target_map;

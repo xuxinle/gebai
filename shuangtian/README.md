@@ -11,7 +11,8 @@
 | 依赖 | 用途 | 性质 |
 |---|---|---|
 | [nlohmann/json](https://github.com/nlohmann/json) 3.12.0 | JSON 解析/序列化（清单、锁文件、控制通道协议） | 必需（单头） |
-| [quickjs-ng](https://github.com/quickjs-ng/quickjs) 0.17.0 | 应用内脚本层（可选能力，**默认关闭**） | 可选 |
+| [quickjs-ng](https://github.com/quickjs-ng/quickjs) 0.17.0 | 应用内脚本层：**用 JS 写组件控制逻辑**，AI 经控制通道 `script` 读写界面（可选能力，**默认关闭**） | 可选 |
+| [batterycenter/embed](https://github.com/batterycenter/embed) 1.2.19 | 编译期资源嵌入（`b::embed<"x.png">()`）；**生成期由 stpm 原生实现**，不引入 CMake | 可选 |
 
 渲染、字体（TTF/OTF/CID 解析与整形）、文本布局、Markdown、组件库、包管理器与构建驱动**全部自研**——
 引入的只是两块"不值得自己写"的基础设施。详见 `CONVENTIONS.md` §3.8 与 `vendor/README.md`。
@@ -25,6 +26,8 @@
 | **一块代码要在 Windows/Linux/macOS 外观一致** | 全自绘：没有系统控件，所有像素由自己的光栅器产生；平台差异只集中在窗口后端（运行时 `dlopen` 探测，缺失自动回退 headless） |
 | **没有 GPU / 驱动不全** | 软件光栅器（扫描线覆盖率抗锯齿 + SIMD 快路径）为默认且完整可用；硬件后端是**可选加速**，不作为前提 |
 | **HiDPI 屏上字发虚、发丝线糊** | 逻辑像素 / 物理像素分离：`Canvas` 绘制 API 收逻辑坐标，内部按 `device_scale` 在**物理分辨率**上光栅化（字形亦按物理尺寸重栅格化）；运行时 `app.set_scale` 即时切换 |
+| **想让界面逻辑少写 C++** | 内置脚本层（QuickJS，默认关闭）：`$('#status').set({text:'…'})`、`on('#save','click',…)`、`every(1000,…)`——读写与协议 `get`/`set`/`invoke` **同一份实现**；跨语言边界用「快照批量 + 变更集提交」，跨界次数与改了多少属性无关 |
+| **要把资源文件编进程序** | 编译期嵌入：清单里写 `"embed": ["assets/*"]`，代码里 `b::embed<"assets/logo.png">()`——路径写错**编译期**就报错，开发期文件变了还能热重载 |
 | **要写代码编辑器（高亮/行号/编辑）** | 内置 30 种主流语言的语法高亮（规则驱动、**可自定义语言**：注册一份规则即可，与内置语言同一台扫描器）；`ui::CodeEditor` 提供编辑/选择/撤销/缩进/注释切换/只读查看器与完整控制通道属性面 |
 | **要写大模型应用（流式 Markdown）** | `st::md`（解析 + 流式增量 + 零依赖代码高亮）+ `ui::MarkdownView` 组件：`append_chunk` 边生成边渲染，前缀稳定不跳变 |
 | **不想引入第三方依赖（含包管理）** | 本体零依赖；`stpm`（`st` CLI）自管构建与**第三方源码依赖**（语义版本回溯求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直接驱动编译器，不经 CMake/Make） |

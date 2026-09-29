@@ -60,6 +60,11 @@ struct TargetSpec {
   std::vector<std::string> flags{};
   /// 从库源中排除的 glob（如工具链专属的 `src/pkg/*`——应用不需要，排除后少编译若干翻译单元）。
   std::vector<std::string> exclude_sources{};
+  /// 编译期嵌入的资源文件 glob（`battery/embed.hpp`，见 `vendor/battery/UPSTREAM.md`）。
+  ///
+  /// 写在**目标**上而不是工程级：嵌入集合决定生成的声明头内容，而声明头是按目标隔离的
+  /// （不同目标嵌入不同资源，且同名资源在不同目标里标识符不同）。
+  std::vector<std::string> embed{};
 };
 
 /// `st.pkg` 清单。
@@ -76,6 +81,12 @@ struct Manifest {
   std::vector<std::string> vendor_sources{};
   std::vector<std::string> tests{};
   std::vector<std::string> flags{};
+  /// 工程级编译期嵌入（随**库**编译，对所有目标可见）。
+  ///
+  /// 与目标级 `TargetSpec::embed` 的分工：库级用于"框架自身要用的资源"
+  /// （如脚本运行时前置 `src/ui/script_api.js`——它属于框架实现，不该让每个应用重复嵌入）；
+  /// 目标级用于"应用自己的资源"。标识符前缀分别取工程名与目标名。
+  std::vector<std::string> embed{};
   /// C 源（`.c`）专用标志（默认 `-std=gnu11`）；C 源不得用 `-std=c++20` 编。
   std::vector<std::string> c_flags{};
   std::vector<std::string> defines{};

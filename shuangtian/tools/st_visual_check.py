@@ -86,10 +86,16 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
             ("input.text", {"text": "霜天 · DPI 与流式",
                             "id": {"mdeditor": "editor", "gallery": "input-search", "codeeditor": "editor"}[app]}),
             ("wait", {"for": "stable", "timeout_ms": 2000}),
-            # 脚本路径（仅 codeeditor 开启）：脚本读界面 → 改界面 → 触发动作。
+            # 脚本路径（仅 codeeditor 开启）：读界面 → 改界面 → 绑定事件 → 触发 → 读回状态。
             # 放在"主题切换"之前：改完文本紧接着截图，人眼能立刻确认脚本真的生效了。
-            *([("script", {"code": "ui_set('status', {text: '脚本已驱动界面 ✓'}); "
-                                   "ui_get('editor').type"})] if app == "codeeditor" else []),
+            *([("script", {"code": "$('#status').set({text: '脚本已驱动界面 ✓'}); "
+                                   "$('#editor').props.language"})] if app == "codeeditor" else []),
+            *([("script", {"selector": "#btn-theme", "event": "click",
+                           "on": "() => $('#status').set({text:'JS 捕获了点击 ✓'})"})]
+              if app == "codeeditor" else []),
+            *([("invoke", {"id": "btn-theme", "action": "click"})] if app == "codeeditor" else []),
+            *([("get", {"id": "status"})] if app == "codeeditor" else []),
+            *([("script", {"state": True})] if app == "codeeditor" else []),
             ("theme", {"mode": "dark"}),
             ("capture", {"encode": "file", "path": f"{SHOTS}/{app}-{profile}-dark.png"}),
             ("app", {"action": "set_scale", "scale": 2.0}),

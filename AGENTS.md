@@ -63,8 +63,9 @@ bun run lint
 # 霜天（原生桌面框架，C++20；与 TS 侧测试相互独立）
 (cd shuangtian && ./bootstrap.sh)                    # 自举工具链（首次/工具链改动后）
 (cd shuangtian && ./build/bin/st build codeeditor --profile dev) # 构建示例（增量：改一文件约 3s）
-(cd shuangtian && ./build/bin/st test)               # 框架单元测试
+(cd shuangtian && ./build/bin/st test)               # 框架单元测试（219 项 / 3956 断言）
 (cd shuangtian && ./build/bin/st test --san)         # ASan + UBSan 档（发现 UB 即视为 bug）
+(cd shuangtian && ./build/dev/bin/codeeditor --headless --enable-script --frames 3)  # 脚本层示例（默认关闭，需显式开关）
 (cd shuangtian && ./build/bin/st lint)               # 禁用特性静态扫描（须 0 违规；豁免在 CONVENTIONS §8 登记）
 (cd shuangtian && python3 tools/st_visual_check.py)  # 无头视觉验证：两档 × 三示例全序列 + 截图 + sanitizer 报告检查
 (cd shuangtian/vendor && sha256sum -c CHECKSUMS.sha256)  # 第三方源码未被就地修改（台账见 sources.json）

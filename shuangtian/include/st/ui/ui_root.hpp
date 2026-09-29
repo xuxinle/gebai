@@ -4,6 +4,7 @@
 /// 无头模式与窗口模式走同一条路径：`layout()` + `paint(canvas)`，差异只在 shell 后端。
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -45,6 +46,21 @@ class UiRoot {
 
   /// 事件分发（命中测试 → 捕获链 → 冒泡；焦点/悬停状态随之更新）。
   [[nodiscard]] auto dispatch(Event& event) -> bool;
+
+  /// 事件观察者：每次事件分发到具体元素后回调（事件引用 + 命中元素）。
+  ///
+  /// 用途是让脚本宿主把 UI 事件桥接给 JS，而**不需要 UiRoot 认识 ScriptHost**
+  /// （保持 ui 内核与脚本层的单向依赖）。未设置时零开销。
+  using EventObserver = std::function<void(const Event&, Element&)>;
+  void set_event_observer(EventObserver observer) { event_observer_ = std::move(observer); }
+
+  /// 手动通知事件观察者。
+  ///
+  /// 用途：协议 `invoke(click)` 这类**合成事件**不经过真实输入管线，但语义上就是一次点击，
+  /// 脚本绑定必须能看到（否则"用 invoke 触发按钮、脚本却收不到"会变成难查的行为差异）。
+  void notify_event_observer(const Event& event, Element& target) {
+    if (event_observer_) event_observer_(event, target);
+  }
 
   [[nodiscard]] auto find(std::string_view id) -> Element*;
   [[nodiscard]] auto query(const Selector& selector, std::size_t limit = 0) -> std::vector<Element*>;
@@ -94,6 +110,7 @@ class UiRoot {
   Element* focused_{nullptr};
   Element* hovered_{nullptr};
   Element* pressed_{nullptr};
+  EventObserver event_observer_{};
   std::uint64_t version_{1};
   bool dirty_{true};
   math::IntRect dirty_rect_{};

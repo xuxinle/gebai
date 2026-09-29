@@ -134,6 +134,46 @@
           "sha256": "747a77444ff04a910b57ca51dd998d7ee46895b1b9592d7d6051fd180317c44d"
         }
       ]
+    },
+    {
+      "name": "batterycenter/embed",
+      "version": "1.2.19",
+      "license": "Apache-2.0",
+      "role": "编译期资源嵌入（b::embed<\"path\">()，含开发期热重载）",
+      "url": "https://github.com/batterycenter/embed/archive/refs/tags/v1.2.19.tar.gz",
+      "form": "上游为单 CMakeLists.txt；此处 vendor 其运行时与模板，构建期生成改由 stpm 原生实现（我们不依赖 CMake）——对照说明见 vendor/battery/UPSTREAM.md",
+      "modified": [
+        "embed.hpp.in",
+        "embed_source.cpp.in",
+        "embed_impl.cpp"
+      ],
+      "files": [
+        {
+          "path": "battery/LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "path": "battery/UPSTREAM.md",
+          "bytes": 2663,
+          "sha256": "d05f8faa374e553fab64db64442a135cf554cadc16129c080120fcd8aa810d15"
+        },
+        {
+          "path": "battery/embed.hpp.in",
+          "bytes": 4207,
+          "sha256": "fcb297b8ed28be5f536d877b7d6748d0097deb0f1336e7d1777c0308d2bbb714"
+        },
+        {
+          "path": "battery/embed_impl.cpp",
+          "bytes": 5684,
+          "sha256": "7b8c9c44b8e1e44e2a9bd722b0b5b770efe47f42ed167519e60cf822cfe96d54"
+        },
+        {
+          "path": "battery/embed_source.cpp.in",
+          "bytes": 1394,
+          "sha256": "a26214317ce894c4db1463517b04d9c15748a035f6888d88f09e1726422a6c39"
+        }
+      ]
     }
   ]
 }

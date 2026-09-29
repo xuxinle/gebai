@@ -14,6 +14,7 @@
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/ui/actions.hpp"
 #include "st/ui/selector.hpp"
 
 namespace st::control {
@@ -21,53 +22,6 @@ namespace {
 
 inline constexpr std::uint32_t kProtocolVersion = 1;
 inline constexpr std::size_t kKeepAliveLogLines = 200;
-
-/// 把一批属性应用到元素上，返回实际生效的属性名。
-///
-/// 控制通道的 `set` 方法与脚本宿主的 `ui.set` **共用这一份实现**——
-/// 否则"两条路径能改的属性不一致"会变成难以察觉的语义分裂。
-auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props) -> Json {
-  Json changed = Json::array();
-  for (const auto& [name, value] : props.items()) {
-    bool applied = false;
-    if (name == "enabled") {
-      element.set_enabled(json_as_bool(value, true));
-      applied = true;
-    } else if (name == "visible") {
-      element.set_visible(json_as_bool(value, true));
-      applied = true;
-    } else if (name == "focused") {
-      if (json_as_bool(value)) {
-        root.set_focus(&element);
-      } else if (root.focused() == &element) {
-        root.set_focus(nullptr);
-      }
-      applied = true;
-    } else if (name == "checked" || name == "selected" || name == "value" || name == "text" ||
-               name == "label" || name == "icon" || name == "options" || name == "active" ||
-               name == "scroll_offset") {
-      const std::string text = value.is_string() ? json_as_string(value) : json_dump(value);
-      applied = element.set_property(name, text);
-    }
-    if (applied) {
-      changed.push_back(name);
-      element.mark_dirty();
-    }
-  }
-  return changed;
-}
-
-/// 触发元素动作（控制通道 `invoke` 与脚本宿主 `ui.invoke` 共用）。
-[[nodiscard]] auto invoke_element(ui::UiRoot& root, ui::Element& element, std::string_view action,
-                                  std::string_view argument) -> bool {
-  if (action == "focus" || action == "blur") {
-    // 焦点必须经 UiRoot 设置：键盘事件按 root 的焦点元素派发，
-    // 只改元素自身的 focused 标志会导致后续 input.text/input.key 无处可送。
-    root.set_focus(action == "focus" ? &element : nullptr);
-    return true;
-  }
-  return element.invoke_action(action, argument);
-}
 
 [[nodiscard]] auto bounds_to_json(math::Rect rect) -> Json {
   Json value = Json::object();
@@ -122,39 +76,6 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
     value["children"] = std::move(children);
   }
   return value;
-}
-
-[[nodiscard]] auto element_to_json(ui::Element& element) -> Json {
-  Json value = Json::object();
-  value["id"] = element.derived_id();
-  value["type"] = std::string(element.type());
-  value["role"] = std::string(ui::to_string(element.role()));
-  value["bounds"] = bounds_to_json(element.bounds());
-  const std::string text = element.semantics_text();
-  if (!text.empty()) value["text"] = text;
-  const std::string item_value = element.semantics_value();
-  if (!item_value.empty()) value["value"] = item_value;
-  return value;
-}
-
-/// 元素快照：基本信息（id/type/role/bounds/text/value）+ **属性面**（property_names 逐个读）。
-///
-/// 控制通道的 `get` 与脚本宿主的 `ui_get` **共用这一份实现**——
-/// 否则脚本侧会看不到语言/光标/行数等属性，形成"同一个元素两个样"的认知陷阱
-/// （实践中就踩过：脚本里 `ui_get('editor').language` 是 undefined）。
-[[nodiscard]] auto element_snapshot(ui::Element& element) -> Json {
-  Json snapshot = element_to_json(element);
-  Json properties = Json::object();
-  for (const auto name : element.property_names()) {
-    if (auto value = element.get_property(name); value.has_value()) {
-      // 属性值统一按字符串承载（组件属性面本就是文本协议），但布尔语义要保真
-      properties[std::string(name)] = *value;
-    }
-  }
-  properties["enabled"] = element.enabled();
-  properties["visible"] = element.visible();
-  snapshot["props"] = std::move(properties);
-  return snapshot;
 }
 
 [[nodiscard]] auto parse_modifiers(const Json& params) -> std::array<bool, 4> {
@@ -224,8 +145,7 @@ struct Server::Impl {
 
   Host& host;
   ServerOptions options{};
-  /// 脚本引擎（仅 `options.enable_script` 时创建；未启用则保持 nullptr，`script` 方法直接拒绝）
-  std::unique_ptr<ext::ScriptEngine> script{};
+
   st::net::TcpListener listener{};
   std::vector<std::unique_ptr<Client>> clients{};
   std::vector<PendingWait> waits{};
@@ -292,88 +212,6 @@ struct Server::Impl {
     return host.root().find(id);
   }
 
-  /// 注册脚本可用的宿主能力。
-  ///
-  /// 刻意只给**界面操作**（get/find/set/invoke）与日志——与脚本的定位一致：
-  /// 它是"界面逻辑的表达层"，不是"第二个系统访问入口"。文件/网络/进程一概不暴露，
-  /// 且这些函数名只存在于启用脚本的进程里。
-  auto register_script_hosts() -> Status {
-    if (script == nullptr) return ok();
-    const auto need_element = [this](const std::string& id) -> ui::Element* {
-      const ui::Element* found = find_element(id);
-      return const_cast<ui::Element*>(found);
-    };
-
-    // ui.get(id) → 与 `get` 方法同构的元素快照
-    auto status = script->register_function("ui_get", [this, need_element](
-                                                           const std::vector<Json>& args) -> Result<Json> {
-      const std::string id = args.empty() ? "" : json_as_string(args[0]);
-      ui::Element* element = need_element(id);
-      if (element == nullptr) {
-        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", id));
-      }
-      return element_snapshot(*element);
-    });
-    if (!status) return status;
-
-    // ui.find(selector) → 匹配列表
-    status = script->register_function("ui_find", [this](const std::vector<Json>& args) -> Result<Json> {
-      const std::string selector_text = args.empty() ? "" : json_as_string(args[0]);
-      auto selector = ui::Selector::parse(selector_text);
-      if (!selector) return forward_error(selector.error());
-      const auto matches = host.root().query(*selector, 64);
-      Json list = Json::array();
-      for (auto* element : matches) list.push_back(element_to_json(*element));
-      return list;
-    });
-    if (!status) return status;
-
-    // ui.set(id, propsObject) → 应用属性，返回生效名列表
-    status = script->register_function("ui_set", [this, need_element](
-                                                          const std::vector<Json>& args) -> Result<Json> {
-      const std::string id = args.empty() ? "" : json_as_string(args[0]);
-      if (args.size() < 2 || !args[1].is_object()) {
-        return unexpected(ErrorCode::Invalid, "ui_set(id, {属性...}) 需要对象参数");
-      }
-      ui::Element* element = need_element(id);
-      if (element == nullptr) {
-        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", id));
-      }
-      Json changed = apply_properties(host.root(), *element, args[1]);
-      host.request_repaint();
-      return changed;
-    });
-    if (!status) return status;
-
-    // ui.invoke(id, action[, argument])
-    status = script->register_function(
-        "ui_invoke", [this, need_element](const std::vector<Json>& args) -> Result<Json> {
-          const std::string id = args.empty() ? "" : json_as_string(args[0]);
-          const std::string action = args.size() > 1 ? json_as_string(args[1]) : "click";
-          const std::string argument = args.size() > 2 ? json_as_string(args[2]) : "";
-          ui::Element* element = need_element(id);
-          if (element == nullptr) {
-            return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", id));
-          }
-          const bool handled = invoke_element(host.root(), *element, action, argument);
-          host.request_repaint();
-          Json result = Json::object();
-          result["handled"] = handled;
-          return result;
-        });
-    if (!status) return status;
-
-    // log(...) → 写进应用日志（脚本排障用；不打印到控制通道，避免与协议回包混淆）
-    return script->register_function("log", [](const std::vector<Json>& args) -> Result<Json> {
-      std::string line = "[脚本]";
-      for (const Json& argument : args) {
-        line.push_back(' ');
-        line.append(argument.is_string() ? json_as_string(argument) : json_dump(argument));
-      }
-      log::info("{}", line);
-      return Json();
-    });
-  }
 
   [[nodiscard]] auto wait_satisfied(const PendingWait& wait) -> std::optional<bool> {
     auto& root = host.root();
@@ -617,7 +455,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     // `script` 只在真正启用时上报：能力清单是"这个进程能做什么"的事实说明，
     // 不能列一个一调就报 Unsupported 的方法。
-    if (script != nullptr) capabilities.push_back(Json("script"));
+    if (host.script() != nullptr) capabilities.push_back(Json("script"));
     result["capabilities"] = std::move(capabilities);
     if (json_get_bool(params, "subscribe", false)) {
       client.subscribed = true;
@@ -643,7 +481,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     const auto limit = static_cast<std::size_t>(json_get_i64(params, "limit", 50));
     auto matches = root.query(*selector, limit);
     Json list = Json::array();
-    for (auto* element : matches) list.push_back(element_to_json(*element));
+    for (auto* element : matches) list.push_back(ui::element_to_json(*element));
     Json result = Json::object();
     result["selector"] = json_get_string(params, "selector");
     result["count"] = static_cast<std::uint64_t>(list.size());
@@ -656,7 +494,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       return unexpected(ErrorCode::NotFound,
                         std::format("未找到元素: {}", json_get_string(params, "id")));
     }
-    return element_snapshot(*element);
+    return ui::element_snapshot(*element);
   }
   if (method == "set") {
     ui::Element* element = find_element(json_get_string(params, "id"));
@@ -665,7 +503,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     const Json& props = json_at(params, "props");
     if (!props.is_object()) return unexpected(ErrorCode::Invalid, "props 必须是对象");
-    Json changed = apply_properties(root, *element, props);
+    Json changed = ui::apply_properties(root, *element, props);
     host.request_repaint();
     Json result = Json::object();
     result["changed"] = std::move(changed);
@@ -678,7 +516,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     const std::string action = json_get_string(params, "action", "click");
     const std::string argument = json_get_string(params, "argument");
-    const bool handled = invoke_element(root, *element, action, argument);
+    const bool handled = ui::invoke_element(root, *element, action, argument);
     host.request_repaint();
     Json result = Json::object();
     result["handled"] = handled;
@@ -723,7 +561,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     Json hit = Json::object();
     if (ui::Element* target = root.hit_test(event.position); target != nullptr) {
-      hit = element_to_json(*target);
+      hit = ui::element_to_json(*target);
     }
     const bool handled = root.dispatch(event);
     host.request_repaint();
@@ -830,16 +668,54 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     return result;
   }
   if (method == "script") {
-    // 默认关闭：未开启时明确告知"该能力未启用"，而不是含糊的"未知方法"——
-    // 前者告诉调用方换个开关就能用，后者会让人以为打错了方法名。
+    // 默认关闭：未开启时明确告知"该能力未启用"（而不是含糊的"未知方法"）
+    ui::ScriptHost* script = host.script();
     if (script == nullptr) {
       return unexpected(ErrorCode::Unsupported,
                         "脚本能力未启用（需以 --enable-script 启动；脚本=进程内执行代码，故默认关闭）");
     }
+    // 一个方法覆盖四种用途：执行 / 调用 / 绑定 / 读状态（AI 用同一入口完成"写逻辑 → 触发 → 验证"）
+    const std::string handler = json_get_string(params, "on");
+    if (!handler.empty()) {
+      auto bound = script->bind(json_get_string(params, "selector"),
+                                json_get_string(params, "event", "click"), handler);
+      if (!bound) return forward_error(bound.error());
+      host.request_repaint();
+      Json result = Json::object();
+      result["binding"] = *bound;
+      return result;
+    }
+    const std::string unbind_id = json_get_string(params, "off");
+    if (!unbind_id.empty()) {
+      Json result = Json::object();
+      result["removed"] = script->unbind(unbind_id);
+      return result;
+    }
+    if (json_get_bool(params, "bindings", false)) {
+      Json list = Json::array();
+      for (const auto& binding : script->bindings()) {
+        Json item = Json::object();
+        item["id"] = binding.id;
+        item["selector"] = binding.selector;
+        item["event"] = binding.event;
+        item["handler"] = binding.handler;
+        list.push_back(std::move(item));
+      }
+      Json result = Json::object();
+      result["bindings"] = std::move(list);
+      return result;
+    }
+    if (json_get_bool(params, "state", false)) {
+      auto state = script->state();
+      if (!state) return forward_error(state.error());
+      Json result = Json::object();
+      result["state"] = std::move(*state);
+      return result;
+    }
     const std::string code = json_get_string(params, "code");
     if (!code.empty()) {
       auto evaluated = script->eval(code, json_get_string(params, "filename", "<control>"));
-      host.request_repaint();  // 脚本可能改了界面
+      host.request_repaint();
       if (!evaluated) return forward_error(evaluated.error());
       Json result = Json::object();
       result["result"] = std::move(*evaluated);
@@ -847,10 +723,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       result["memory"] = static_cast<std::uint64_t>(script->last_stats().memory_used);
       return result;
     }
-    // 无 code 时按「调用已定义函数」处理
     const std::string function = json_get_string(params, "function");
     if (function.empty()) {
-      return unexpected(ErrorCode::Invalid, "script 需要 code 或 function 参数");
+      return unexpected(ErrorCode::Invalid, "script 需要 code / function / on / off / bindings / state 之一");
     }
     std::vector<Json> arguments;
     const Json& raw_arguments = json_at(params, "args");
@@ -1020,23 +895,6 @@ Server::~Server() { stop(); }
 
 auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
   impl_->options = options;
-  if (options.enable_script) {
-    // 脚本能力的**唯一入口**：只有显式开启才创建引擎、注册宿主函数。
-    // 关闭时 `script` 方法返回 Unsupported，进程里连 JS 运行时都不存在。
-    impl_->script = std::make_unique<ext::ScriptEngine>(options.script_limits);
-    if (!impl_->script->valid()) {
-      impl_->script.reset();
-      return unexpected(ErrorCode::Unsupported, "脚本引擎初始化失败（QuickJS 运行时创建失败）");
-    }
-    auto registered = impl_->register_script_hosts();
-    if (!registered) {
-      impl_->script.reset();
-      return forward_error(registered.error());
-    }
-    log::info("脚本能力已开启（内存上限 {} MiB / 超时 {} ms）",
-              options.script_limits.memory_bytes / (1024U * 1024U),
-              options.script_limits.timeout.count());
-  }
   auto listener = st::net::TcpListener::bind(options.bind, options.port);
   if (!listener) return forward_error(listener.error());
   listener->set_nonblocking(false);

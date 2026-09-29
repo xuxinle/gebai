@@ -21,6 +21,7 @@
     "src/pkg/*.cpp",
     "src/ext/*.cpp"
   ],
+  "embed": ["src/ui/script_api.js"],
   "vendor_sources": ["vendor/quickjs/*.c"],
   "c_flags": ["-std=gnu11"],
   "tests": ["tests/*_test.cpp"],
@@ -44,9 +45,13 @@
   "system_libs": ["pthread", "dl", "m"],
   "targets": {
     "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"], "system_libs": ["dl"] },
-    "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"], "exclude_sources": ["src/pkg/*"] },
+    "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"],
+                 "exclude_sources": ["src/pkg/*"],
+                 "embed": ["examples/gallery/assets/*"] },
     "mdeditor": { "kind": "executable", "sources": ["examples/mdeditor/*.cpp"], "exclude_sources": ["src/pkg/*"] },
-    "codeeditor": { "kind": "executable", "sources": ["examples/codeeditor/*.cpp"], "exclude_sources": ["src/pkg/*"] }
+    "codeeditor": { "kind": "executable", "sources": ["examples/codeeditor/*.cpp"],
+                  "exclude_sources": ["src/pkg/*"],
+                  "embed": ["examples/codeeditor/assets/*"] }
   },
   "dependencies": {
     "modules": [],

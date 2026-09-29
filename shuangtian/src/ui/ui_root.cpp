@@ -131,10 +131,20 @@ auto UiRoot::hit_test_subtree(Element& element, math::Point point) -> Element* {
 
 auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
   const RenderContext context = render_context();
+  bool handled = false;
   for (Element* current = &element; current != nullptr; current = current->parent()) {
-    if (current->on_event(context, event)) return true;
+    if (current->on_event(context, event)) {
+      handled = true;
+      break;
+    }
   }
-  return false;
+  // 脚本桥：在**元素自身处理之后**通知观察者（各分支都经此函数，命中元素即 `element`）。
+  //
+  // 顺序很关键：若在 C++ 处理**之前**通知，脚本写入会被随后的 C++ 处理器覆盖，
+  // 表现为"用 JS 改了界面却没生效"（实测踩过：语言标签点击后状态栏仍是 C++ 写的文案）。
+  // 放在之后 = 脚本看到的是处理后的状态，且它的写入是最终态。
+  if (event_observer_) event_observer_(event, element);
+  return handled;
 }
 
 void UiRoot::update_hover(Element* target) {
@@ -163,6 +173,7 @@ void UiRoot::update_hover(Element* target) {
 auto UiRoot::dispatch(Event& event) -> bool {
   layout();
   bool handled = false;
+
   switch (event.kind) {
     case EventKind::MouseMove: {
       Element* target = hit_test(event.position);

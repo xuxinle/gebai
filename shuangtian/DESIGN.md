@@ -238,6 +238,10 @@ std::vector<HighlightSpan> highlight(std::string_view code, std::string_view lan
 - 高亮：零依赖词法着色（c/cpp/ts/js/python/json/bash/rust/go/yaml，关键词 + 字符串 + 数字 + 注释 + 函数名）。
 
 ### 4.5 ui
+
+> **脚本驱动的组件控制**见 §6.7（`ui::ScriptHost`）：JS 读写组件、事件桥、定时器，
+> 与协议/C++ 共用同一套读写语义；跨语言边界采用「快照批量 + 变更集提交」。
+
 ```cpp
 namespace st::ui {
 class Element {                                  // 组件基类
@@ -454,17 +458,68 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
   `NaN`/`Infinity` 与函数值**明确报错**而不是静默变 `null`；超出 `int64` 的 `BigInt` 退回字符串保真
   （不能用 `JS_ToBigInt64` 判溢出——它超范围时照样返回“成功”并给出截断值）。
 
-接入界面只需三步（示例 `codeeditor --enable-script`）：
+接入界面：`codeeditor --enable-script`（默认关闭）。脚本 API 与性能模型见下节。
 
-```bash
-codeeditor --enable-script        # 1. 显式开启（默认关闭）
-# 2. 控制通道里执行脚本
-#    {"method":"script","params":{"code":"ui_set('status',{text:'脚本已驱动界面 ✓'})"}}
-# 3. 回读验证：{"method":"get","params":{"id":"status"}} → props.text
+## 6.7 脚本控制组件（`ui::ScriptHost`）
+
+### 目标
+
+1. **组件控制逻辑用 JS 简化**——本可以不用 C++ 写的交互逻辑（联动、校验、状态回显、定时刷新）改用 JS；
+2. **AI 通过 JS 读取与控制 UI**——`script` 从“一次性执行”升级为“可注册事件处理器的常驻逻辑层”。
+
+### 性能模型：跨语言边界是唯一成本
+
+| 反模式 | 本设计 |
+|---|---|
+| 每次读属性跨一次边界 | **快照批量**：首个查询时把整棵元素树（含属性面）一次送进 JS，之后 JS 内自由读写（100 次选择器查询 = 1 次跨界） |
+| 每次改属性立即回写 | **变更集提交**：JS 侧 `set/click/focus` 记入队列，阶段末一次取回并应用（20 个属性 = 1 次提交；有单测锁住这条） |
+| 所有事件都桥接 | 只桥接**被显式监听**的（选择器 × 事件类型）；鼠标移动类高频事件按帧合并 |
+
+一次脚本入口的跨界次数是**常数级**（取变更集 1 次 + 事件派发 1 次），与“改了多少属性”无关。
+
+### 三条路径一套语义
+
+读取走 `ui::element_snapshot`、写入走 `ui::apply_properties`、动作走 `ui::invoke_element`——
+与 C++ 应用代码、协议 `get`/`set`/`invoke` **完全同一份实现**（提到 `st/ui/actions.hpp`）。
+这不是洁癖：实践里因“三份实现”踩过两次（脚本看不到属性面、`set` 白名单不一致）。
+
+### JS API（`src/ui/script_api.js`，编译期嵌入）
+
+```js
+$('#save').text                         // 读属性（支持 #id / Type / Type[prop=v] / [prop^=v]…）
+$$('Button')                            // 列表；count('Button') 只数数
+tree()                                  // 整棵快照（调试用）
+$('#status').set({ text: '已保存 ✓' })     // 排队变更（阶段末统一提交）
+$('#save').click() / .focus() / .invoke(action, arg)
+on('#save', 'click', e => log('clicked'))   // 事件绑定（返回绑定 id，可 off）
+every(1000, () => ...) / after(500, () => ...)   // 定时器（主循环推进，不起线程）
+state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，AI 可读回）
 ```
 
-脚本可用的宿主函数：`ui_get(id)`（元素快照，与控制通道 `get` **同一份实现**）、
-`ui_find(selector)`、`ui_set(id, props)`（与 `set` 同一份实现）、`ui_invoke(id, action)`、`log(...)`。
+选择器未命中时：读属性得 `undefined`、写操作被**忽略但记日志**——
+脚本不必到处判空，而拼错选择器（最常见的错误）也不会静默无效。
+
+### 事件顺序（易错点）
+
+观察者通知放在**元素自身处理之后**（`UiRoot::dispatch_to` 与 `ui::invoke_element` 同序）。
+若放在之前，脚本写入会被随后的 C++ 处理器覆盖，表现为“用 JS 改了界面却没生效”（实测踩过）。
+
+### 控制通道
+
+`script` 方法一个入口覆盖四种用途（AI 用同一入口完成“写逻辑 → 触发 → 验证”）：
+
+| 参数 | 语义 |
+|---|---|
+| `code` | 执行脚本片段（返回最后一条表达式的值） |
+| `function` + `args` | 调用脚本中已定义的函数 |
+| `selector` + `event` + `on` | 注册事件处理器（返回绑定 id），**常驻** |
+| `off` / `bindings` | 注销 / 列出绑定 |
+| `state` | 读回脚本侧状态（检查脚本内部逻辑走到哪一步） |
+
+### 嵌入的 JS 资源
+
+`src/ui/script_api.js`（运行时前置）与示例的 `assets/logic.js` 都是**编译期嵌入的真实文件**
+（battery::embed，见 §7.8）：编辑器里能高亮、无需 C++ 原始字符串转义，改完重新构建即生效。
 
 ## 7. 包管理（stpm）
 
@@ -575,7 +630,42 @@ codeeditor --enable-script        # 1. 显式开启（默认关闭）
 | `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存） |
 
 ### 7.7 引导（bootstrap）
-`st` 自身是 C++ 程序：`bootstrap.sh` 用最朴素的编译器调用把 `tools/stpm/*.cpp` + 所需 `src/core/*` 编成 `build/bin/st`（唯一非 st 构建入口）；此后一切（含 `st` 自身重建）由 `st build` 完成。
+`st` 自身是 C++ 程序：`bootstrap.sh` 用最朴素的编译器调用把 `tools/stpm/*.cpp` + 所需 `src/core/*` + `src/ext/*` 编成 `build/bin/st`（唯一非 st 构建入口）；此后一切（含 `st` 自身重建）由 `st build` 完成。
+
+### 7.8 编译期资源嵌入（battery::embed）
+
+上游 [`batterycenter/embed`](https://github.com/batterycenter/embed)（Apache-2.0，v1.2.19）
+把资源文件在编译期变成字节数组，接口是 `b::embed<"path">()`——**路径写错在编译期就报错**，
+开发期还能热重载（磁盘文件变了就回调）。
+
+它与我们的构建哲学有一处正面冲突：上游是**一个 CMake 文件**，而本框架用 stpm **取代** CMake。
+解法是按职责切开：
+
+| 部分 | 处置 |
+|---|---|
+| 运行时（`embed_impl.cpp`，热重载） | **原样 vendor**，编译进目标 |
+| 头模板 / 单文件模板 | vendor 为模板（占位符语义与上游逐字一致） |
+| 生成逻辑（上游的 CMake） | **由 `st build` 原生实现**（`src/pkg/embed.cpp`） |
+
+于是拿到与上游**相同的 API** 且零 CMake 依赖：
+
+```cpp
+#include "battery/embed.hpp"                 // stpm 生成到 build/<profile>/embed/.../include/
+b::embed<"examples/gallery/assets/about.txt">().str()   // 编译期路径检查 + 嵌好的字节
+```
+
+语义与上游逐项对齐（标识符规则 `tolower(target_path)`、查找键 = 使用者书写的相对路径、
+编译期 `static_assert`、`B_PRODUCTION_MODE` 关闭热重载并去掉绝对路径）。清单声明：
+
+- **目标级** `targets.<名>.embed`：应用自己的资源（标识符前缀 = 目标名）；
+- **工程级** `embed`：框架自身要用的资源（如脚本运行时前置，前缀 = 工程名）。
+
+两个实现要点（都有实际教训）：
+
+- **字节数组用八进制转义**（`\NNN`，固定三位）：C++ 的 `\x` 会**贪婪**吃掉后续十六进制字符，
+  八进制从语法上不可能歧义；
+- **运行时实现只编译一次**（库有嵌入时归库，否则归目标）：两边都带会让同一个可执行文件
+  出现两份进程级全局表（实测链接期 duplicate symbol），热重载表也会分裂。
 
 ## 8. 无头开发工作流（Linux 服务器，无桌面）
 
@@ -635,6 +725,14 @@ codeeditor --enable-script        # 1. 显式开启（默认关闭）
 | 19 | 内存受限时的错误消息是空洞的 `null` | 内存耗尽时 QuickJS 连异常对象都建不出来（构造它也要分配内存） | 识别该情况，直接给出“通常是内存超限：上限 N MiB”与实测值 |
 | 20 | 函数返回值静默变成 `{}` / 超大 `BigInt` 被静默截断 | 转换顺序上函数被当作“无键对象”；`JS_ToBigInt64` 超范围时仍返回成功并给出截断值 | 函数提前识别并报错；BigInt 改按十进制文本 + `from_chars` 精确判定，超范围退回字符串 |
 | 21 | 名字骗人：`max_ops` 声称“指令数”，实际是中断回调次数（且默认量级下永远等不到） | QuickJS 在 VM 周期里回调中断钩子，频度实测约 2 千次/秒，与“CPU 指令数”不是一回事 | 改名 `max_interrupts` 并在文档中写明它是粗粒度兜底（时长控制的主力是 `timeout`） |
+| 22 | 脚本绑定的事件**永远收不到 UI 事件** | 事件观察者要调用方手动 `set_event_observer` 接上；忘了不报错，只是静默失效（写测试时当场踩到） | 改为 `ScriptHost` 构造时**自接**、析构时摘除（消除易漏的人为接线） |
+| 23 | 用 `invoke(click)` 触发按钮时，脚本**收不到**该点击 | `invoke` 直接调元素的 `invoke_action`，不经过事件分发管线；而真实鼠标点击会走 | 点击类动作合成事件并通知观察者（三条路径对监听者表现一致） |
+| 24 | 脚本改了界面却“没生效” | 观察者通知在 C++ 处理**之前**，脚本写入随即被处理器覆盖 | 通知**后置**：脚本看到处理后的状态，其写入是最终态（`dispatch_to` 与 `invoke_element` 同序） |
+| 25 | 脚本前置里 `host` 为 `undefined` | 前置按 `globalThis.__st_host` 取桥，而宿主注册的是**全局函数**（`__snapshot` 等） | 前置改为直接引用宿主全局函数（一处列出“宿主提供了什么”） |
+| 26 | 对输入框 `set {value:...}` **静默无效** | `Input` 从未实现属性面（`get/set_property`），而 `apply_properties` 的文档却把 `value` 列为支持项——协议 `set` 一直受影响 | 补齐 `Input` 属性面（value/placeholder/password/enabled/visible）；教训：声称支持的名字必须有对应实现与测试 |
+| 27 | 拼错选择器（如 `$('brand')` 少了 `#`）**静默丢弃** 整个写入 | 未命中句柄的写操作被无声忽略 | 未命中仍不抛异常（脚本保持简短），但**记日志**给出提示（含正确的 `#id` 写法） |
+| 28 | 库级与目标级都编译 `embed_impl.cpp` → 链接期重复符号 | 运行时含进程级全局表；两边各带一份 | 运行时只编一次：库有嵌入时归库，否则归目标（§7.8） |
+| 29 | 生成的头文件按作用域互相污染（ODR） | 每个作用域的声明/返回链不同，却共享同一个 `EmbeddedFile` 类 | 按范围隔离包含目录；目标自己的源也需这条 `-I`（曾漏加，表现为找不到 `battery/embed.hpp`） |
 
 **方法论**：这十六条里没有一条能从"读代码"看出，全部来自「无头运行 + 控制通道观察 + 截图核验 + ASan 复跑」的闭环。
 
