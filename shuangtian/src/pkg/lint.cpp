@@ -20,7 +20,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 11> kRules{{
+constexpr std::array<RuleSpec, 12> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -43,6 +43,14 @@ constexpr std::array<RuleSpec, 11> kRules{{
      R"(^\s{2}(?!explicit)(?!~)[A-Z]\w*\s*\(\s*(?:const\s+)?[\w:]+(?:<[^>]*>)?\s*[&\w]*\s*\)\s*(?::|=\s*default|\{))",
      true},
     {"L11", "禁止 std::endl（用 '\\n'，避免无谓 flush）", R"(\bstd::endl\b)"},
+    // 为什么单独立一条：`.at()` 是**抛异常**的取值接口（Json 键缺失、std 容器越界都会抛），
+    // 与"错误经 Result 返回"的约定冲突。它极易被误用成"看起来更安全的下标"——
+    // nlohmann 的 `at()` 在键可选时直接终止进程（本框架踩过：鼠标事件的修饰键缺席，整进程挂掉）。
+    //
+    // 规则只收 `.at(`：`.value()` 虽然是 nlohmann 的同类抛异常接口，但 `value()` 是**极常见的
+    // 自有 getter 名**（本框架 `Slider::value()` 等），文本级规则无法区分接收者类型，
+    // 收了就会天天误报。Json 上的 `.value()` 由 `st/ext/json.hpp` 的文档与评审把关。
+    {"L12", "禁止 .at() 取值（键缺失即抛异常；用 json_at/find 或显式检查）", R"(\.at\s*\()"},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。

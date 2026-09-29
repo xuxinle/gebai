@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <set>
 #include <format>
 #include <mutex>
 #include <unordered_set>
@@ -16,11 +17,24 @@
 namespace st::pkg {
 namespace {
 
+/// 源文件语言（决定编译器标志：`.c` 必须按 C 编译，不能用 `-std=c++20`）。
+enum class SourceLang : std::uint8_t { Cxx, C };
+
 struct CompileUnit {
   std::string source{};   ///< 绝对路径
   std::string object{};   ///< 绝对路径
   std::string depfile{};  ///< `-MMD` 产出的头依赖清单（`.d`）
+  SourceLang lang{SourceLang::Cxx};
+  bool vendor{false};     ///< 第三方源码（放宽告警、不进 PCH）
 };
+
+/// 按扩展名判定语言；非 `.c` 一律按 C++ 处理（`.cpp/.cc/.cxx`）。
+[[nodiscard]] auto language_of(std::string_view path) noexcept -> SourceLang {
+  const std::size_t dot = path.find_last_of('.');
+  if (dot == std::string_view::npos) return SourceLang::Cxx;
+  const std::string_view extension = path.substr(dot);
+  return extension == ".c" ? SourceLang::C : SourceLang::Cxx;
+}
 
 /// 解析 GCC/Clang 的 `.d` 文件（`目标: 依赖…`，反斜杠续行；支持转义空格）。
 [[nodiscard]] auto parse_depfile(std::string_view path) -> std::vector<std::string> {
@@ -95,7 +109,9 @@ struct CompileUnit {
 }
 
 [[nodiscard]] auto make_units(const Manifest& manifest, const std::vector<std::string>& sources,
-                              const std::string& object_dir) -> std::vector<CompileUnit> {
+                              const std::string& object_dir,
+                              const std::set<std::string>& vendor_paths)
+    -> std::vector<CompileUnit> {
   std::vector<CompileUnit> units;
   units.reserve(sources.size());
   for (const auto& relative : sources) {
@@ -103,9 +119,36 @@ struct CompileUnit {
     unit.source = fs::is_absolute(relative) ? relative : fs::join(manifest.directory, relative);
     unit.object = fs::join(object_dir, sanitize_name(relative).append(".o"));
     unit.depfile = unit.object + ".d";
+    unit.lang = language_of(unit.source);
+    unit.vendor = vendor_paths.contains(unit.source);
     units.push_back(std::move(unit));
   }
   return units;
+}
+
+/// 过滤掉 sanitizer 相关标志。
+///
+/// 第三方源码**不做插桩**：我们负责自家代码的内存/未定义行为，不负责上游的
+/// （真发现了也是"改上游"而不是"改我们的构建"）。实践上还有两个硬理由：
+/// ① 65k 行的 `quickjs.c` 在 `-O1` + ASan/UBSan 下单文件就要 GB 级内存，
+///    并行构建会被 OOM killer 杀掉 cc1plus（实测）；
+/// ② 混编不影响检测能力——ASan 的分配器是全局的，我们代码里的越界/释放后使用照抓不误。
+[[nodiscard]] auto strip_sanitizers(const std::vector<std::string>& flags)
+    -> std::vector<std::string> {
+  std::vector<std::string> out;
+  out.reserve(flags.size());
+  for (const auto& flag : flags) {
+    if (flag.starts_with("-fsanitize=") || flag.starts_with("-fno-sanitize=")) continue;
+    out.push_back(flag);
+  }
+  return out;
+}
+
+/// 展开第三方源码清单（失败按空集处理：清单没声明 vendor 也能构建）。
+[[nodiscard]] auto collect_vendor(const Manifest& manifest) -> std::set<std::string> {
+  auto files = manifest.vendor_files();
+  if (!files) return {};
+  return std::set<std::string>(files->begin(), files->end());
 }
 
 [[nodiscard]] auto gather_include_dirs(const Manifest& manifest, const BuildOptions& options)
@@ -198,13 +241,27 @@ struct PchContext {
 
   // 顺序语义：工程全局严格集（清单 `flags`）在前，**分档标志在后**——
   // 分档可以针对优化等级做有据可查的例外（如优化档关闭 GCC 误报的 -Wnull-dereference）。
-  std::vector<std::string> flags;
+  // **C 与 C++ 各自一套语言标志**：`manifest.flags` 是本工程的 *C++* 严格集
+  // （含 `-Wnon-virtual-dtor`/`-Woverloaded-virtual` 这类 C++ 专属告警），给 C 源会直接报
+  // 「option is valid for C++ but not for C」。因此 C 源只取 `c_flags` + 档位 + 宏 + 包含路径；
+  // 想让自家 C 源也严格，就在 `c_flags` 里显式写 `-Wall -Werror`（vendor 源则另有 `-w`）。
+  std::vector<std::string> flags;  // C++ 标志（PCH 建立与 C++ 单元共用，顺序必须一致）
   flags.push_back("-std=c++20");
   for (const auto& item : manifest.flags) flags.push_back(item);
   for (const auto& item : options.extra_flags) flags.push_back(item);
   for (const auto& item : manifest.defines) flags.push_back(std::format("-D{}", item));
   for (const auto& dir : include_dirs) flags.push_back(std::format("-I{}", dir));
   for (const auto& item : profile_flags_list) flags.push_back(item);
+
+  std::vector<std::string> c_flags;
+  for (const auto& item : manifest.c_flags) c_flags.push_back(item);
+  for (const auto& item : options.extra_flags) c_flags.push_back(item);
+  for (const auto& item : manifest.defines) c_flags.push_back(std::format("-D{}", item));
+  for (const auto& dir : include_dirs) c_flags.push_back(std::format("-I{}", dir));
+  for (const auto& item : profile_flags_list) c_flags.push_back(item);
+  // `-x c` 强制按 C 编译：同一个编译器二进制即可，无需第二套工具链
+  c_flags.push_back("-x");
+  c_flags.push_back("c");
 
   const std::string build_dir =
       fs::join(manifest.directory, std::format("build/{}", options.profile));
@@ -238,9 +295,15 @@ struct PchContext {
       }
       std::vector<std::string> args;
       args.push_back(*compiler);
-      for (const auto& flag : flags) args.push_back(flag);
-      // 与 PCH 创建端保持相同标志；额外仅 `-include`（消费指令）与依赖输出选项
-      if (pch_ptr != nullptr) {
+      const bool is_c = unit->lang == SourceLang::C;
+      // 第三方源码不套我们的告警集，也不做 sanitizer 插桩（理由见 `strip_sanitizers`）；
+      // 因此编译标志按"是否 vendor"分两条路，而不是在原标志上做加法。
+      const std::vector<std::string> unit_flags =
+          unit->vendor ? strip_sanitizers(is_c ? c_flags : flags) : (is_c ? c_flags : flags);
+      for (const auto& flag : unit_flags) args.push_back(flag);
+      if (unit->vendor) args.push_back("-w");
+      // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃
+      if (pch_ptr != nullptr && !is_c) {
         args.push_back(std::format("-I{}", pch_ptr->directory));
         args.push_back("-include");
         args.push_back(pch_ptr->header);
@@ -395,7 +458,15 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     }
   }
 
-  std::vector<CompileUnit> units = make_units(manifest, library_sources, object_dir);
+  // 第三方源码（vendor/）与库源一起编译：它们不是"可选附加"，而是库的组成部分。
+  // 同时把路径集合交给 make_units——这些单元编译时会放宽告警并跳过 PCH。
+  const std::set<std::string> vendor_paths = collect_vendor(manifest);
+  std::vector<std::string> all_sources = library_sources;
+  for (const auto& path : vendor_paths) all_sources.push_back(path);
+  std::ranges::sort(all_sources);
+  all_sources.erase(std::unique(all_sources.begin(), all_sources.end()), all_sources.end());
+
+  std::vector<CompileUnit> units = make_units(manifest, all_sources, object_dir, vendor_paths);
   std::size_t rebuilt = 0;
   const std::int64_t compile_start = time::now_ns();
   auto compiled = compile_units(manifest, options, units, *flags, rebuilt);
@@ -428,7 +499,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     std::ranges::sort(target_sources);
     target_sources.erase(std::unique(target_sources.begin(), target_sources.end()),
                          target_sources.end());
-    target_units = make_units(manifest, target_sources, object_dir);
+    target_units = make_units(manifest, target_sources, object_dir, vendor_paths);
     std::size_t target_rebuilt = 0;
     auto target_compiled = compile_units(manifest, options, target_units, *flags, target_rebuilt);
     if (!target_compiled) return forward_error(target_compiled.error());
@@ -499,7 +570,11 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   std::ranges::sort(all);
   all.erase(std::unique(all.begin(), all.end()), all.end());
 
-  std::vector<CompileUnit> units = make_units(manifest, all, object_dir);
+  const std::set<std::string> vendor_paths = collect_vendor(manifest);
+  for (const auto& path : vendor_paths) all.push_back(path);
+  std::ranges::sort(all);
+  all.erase(std::unique(all.begin(), all.end()), all.end());
+  std::vector<CompileUnit> units = make_units(manifest, all, object_dir, vendor_paths);
   std::size_t rebuilt = 0;
   auto compiled = compile_units(manifest, options, units, *flags, rebuilt);
   if (!compiled) return forward_error(compiled.error());

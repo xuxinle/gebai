@@ -252,6 +252,8 @@ auto Application::start() -> Status {
   server_options.bind = options_.control_bind;
   server_options.port = options_.control_port;
   server_options.control_file = options_.control_file;
+  server_options.enable_script = options_.enable_script;
+  server_options.script_limits = options_.script_limits;
   impl_->server = std::make_unique<control::Server>(*this);
   auto port = impl_->server->start(server_options);
   if (!port) return forward_error(port.error());

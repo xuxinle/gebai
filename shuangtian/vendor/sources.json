@@ -1,0 +1,139 @@
+{
+  "format": 1,
+  "note": "第三方资产台账。升级或改动任何 vendored 文件都必须同步本文件与 CHECKSUMS.sha256；框架自身代码仍在 core/raster/text/ui 等层，此处仅为外部源码。",
+  "dependencies": [
+    {
+      "name": "nlohmann/json",
+      "version": "3.12.0",
+      "license": "MIT",
+      "role": "JSON 解析/序列化（替代原自研 st::json）",
+      "url": "https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp",
+      "form": "single-header（上游官方分发形态）",
+      "files": [
+        {
+          "path": "nlohmann/json.hpp",
+          "bytes": 953436,
+          "sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"
+        }
+      ]
+    },
+    {
+      "name": "quickjs-ng",
+      "version": "0.17.0",
+      "license": "MIT",
+      "role": "嵌入式 JS 引擎（应用内脚本层，可选）",
+      "url": "https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.17.0.tar.gz",
+      "archive_sha256": "559bc4c420475e55c7ab4510adbc562f55d7524d75e8e89d79ce4bb02f5687d9",
+      "form": "多文件 C 源码（仅保留引擎必需文件；已剔除 tests/CLI/wasm 与 quickjs-libc.c——后者提供 std/os 模块，本框架默认不给脚本系统访问能力）",
+      "excluded": [
+        "qjs.c",
+        "qjsc.c",
+        "ctest.c",
+        "api-test.c",
+        "lre-test.c",
+        "qjs-wasi*.c",
+        "quickjs-libc.c",
+        "quickjs-libc.h",
+        "tests/",
+        "examples/"
+      ],
+      "files": [
+        {
+          "path": "quickjs/LICENSE",
+          "bytes": 1212,
+          "sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171"
+        },
+        {
+          "path": "quickjs/builtin-array-fromasync.h",
+          "bytes": 5639,
+          "sha256": "f41eb2eb028832cff9a5f8d8d2cb438c27771a9d7d85c30dfd16aa78f34fe6de"
+        },
+        {
+          "path": "quickjs/builtin-iterator-zip-keyed.h",
+          "bytes": 15993,
+          "sha256": "24446c6157a043cfeb0b0255c7892f5146809bd3098c70028bfa1ee5311b91f4"
+        },
+        {
+          "path": "quickjs/builtin-iterator-zip.h",
+          "bytes": 16213,
+          "sha256": "fdaef760ecce82c1f8b62dca8d0d424ae05ef88a0037e32221858ab7ac8994c9"
+        },
+        {
+          "path": "quickjs/cutils.h",
+          "bytes": 54740,
+          "sha256": "dffec8bea17f08108da5a91c1178804754698bbbb6202dc100268e78e8c5b770"
+        },
+        {
+          "path": "quickjs/dtoa.c",
+          "bytes": 44854,
+          "sha256": "a8d2cf2d04db406e0c16acdd95ab0e709d309902865722f41dac07a1ba5676af"
+        },
+        {
+          "path": "quickjs/dtoa.h",
+          "bytes": 3357,
+          "sha256": "1c4a4540c0038632c8a4c225472fbc21bd476fb35c4da4a857a11965b58231b9"
+        },
+        {
+          "path": "quickjs/libregexp-opcode.h",
+          "bytes": 2887,
+          "sha256": "2a98d646089f3a72f25480116297c5fdb5b28fd9f815447273951f4ade4a115e"
+        },
+        {
+          "path": "quickjs/libregexp.c",
+          "bytes": 115889,
+          "sha256": "af13e996abb1767fe0cdfda123c45b811d53688d403a2ac47142e97bf79f1fae"
+        },
+        {
+          "path": "quickjs/libregexp.h",
+          "bytes": 3612,
+          "sha256": "53ff95a038f7001b752c455d195d998e2955f0ae4ed62a002c13eca798db3ceb"
+        },
+        {
+          "path": "quickjs/libunicode-table.h",
+          "bytes": 251190,
+          "sha256": "5840a921ac11664b505ee37b1219f518fff2a04972fe848b4bdf1e85c5a0bd83"
+        },
+        {
+          "path": "quickjs/libunicode.c",
+          "bytes": 61406,
+          "sha256": "d755606498ff707dc3a93826713c749f77b9222d8a6b066621d72a308460bf2d"
+        },
+        {
+          "path": "quickjs/libunicode.h",
+          "bytes": 5278,
+          "sha256": "ad13f66aaea3fab1616e84b9c048f2a315e1bdbab628b966617a7a3e55bcba2b"
+        },
+        {
+          "path": "quickjs/list.h",
+          "bytes": 3177,
+          "sha256": "cb6e24e8ee54bccdd66234fe54cd702d1160b9841db2b9b9adeb5003afe301d5"
+        },
+        {
+          "path": "quickjs/quickjs-atom.h",
+          "bytes": 8234,
+          "sha256": "66654ae6533d15073ea527979c453709d7ed83162142c656095a10dcef737a60"
+        },
+        {
+          "path": "quickjs/quickjs-c-atomics.h",
+          "bytes": 2305,
+          "sha256": "29883c742a5c512278fce54d19b1b9af949006e1d7dfc9ffa2e0946b184d8c5c"
+        },
+        {
+          "path": "quickjs/quickjs-opcode.h",
+          "bytes": 15831,
+          "sha256": "0054b0c45fd091afa308c3fb93b5862e0b071235918d3d73e413d23fce388bbc"
+        },
+        {
+          "path": "quickjs/quickjs.c",
+          "bytes": 2148068,
+          "sha256": "9fd0e0e68856d165e2872140ac38889845b53eb1bc55150f8598a53eb86948f5"
+        },
+        {
+          "path": "quickjs/quickjs.h",
+          "bytes": 66974,
+          "sha256": "747a77444ff04a910b57ca51dd998d7ee46895b1b9592d7d6051fd180317c44d"
+        }
+      ]
+    }
+  ]
+}

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "st/control/control.hpp"
+#include "st/ext/script.hpp"
 #include "st/core/error.hpp"
 #include "st/shell/shell.hpp"
 #include "st/ui/ui_root.hpp"
@@ -25,6 +26,13 @@ struct AppOptions {
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配
   std::string control_file{};         ///< 写入 {port,pid,...} 供客户端发现
+  /// 开放控制通道的 `script` 方法与脚本宿主能力（**默认关闭**）。
+  ///
+  /// 脚本 = 在应用进程内执行代码；控制通道的设计前提本是"没有任意代码执行入口"，
+  /// 开启它是一次显式姿态变更，故必须由宿主应用主动决定，不随监听端口联动。
+  bool enable_script{false};
+  /// 脚本配额（仅 `enable_script` 时生效）：内存/栈/单次执行时限/转换深度。
+  ext::ScriptLimits script_limits{};
   std::string screenshot_dir{};       ///< 控制通道 `encode=file` 的落盘目录（空=会话临时目录）
   std::string font_latin{};           ///< 显式指定拉丁字体文件（空=自动探测）
   std::string font_cjk{};             ///< 显式指定 CJK 字体文件（空=自动探测）

@@ -5,9 +5,9 @@
 /// ```cpp
 /// #include "st/test/test.hpp"
 /// ST_TEST(json_parse_basic) {
-///   auto value = st::json::parse(R"({"a":1})");
+///   auto value = st::json_parse(R"({"a":1})");
 ///   ST_REQUIRE(value.has_value());
-///   ST_CHECK_EQ(value->get_i64("a"), 1);
+///   ST_CHECK_EQ(st::json_get_i64(*value, "a"), 1);
 /// }
 /// ```
 /// 约定：本文件是 `CONVENTIONS.md` §3.6 登记的唯一函数式宏例外——断言必须捕获 `__FILE__`/`__LINE__`。

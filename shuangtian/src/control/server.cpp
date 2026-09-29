@@ -22,88 +22,155 @@ namespace {
 inline constexpr std::uint32_t kProtocolVersion = 1;
 inline constexpr std::size_t kKeepAliveLogLines = 200;
 
-[[nodiscard]] auto bounds_to_json(math::Rect rect) -> Value {
-  Value value = Value::object();
-  value.set("x", static_cast<double>(rect.x));
-  value.set("y", static_cast<double>(rect.y));
-  value.set("width", static_cast<double>(rect.width));
-  value.set("height", static_cast<double>(rect.height));
+/// 把一批属性应用到元素上，返回实际生效的属性名。
+///
+/// 控制通道的 `set` 方法与脚本宿主的 `ui.set` **共用这一份实现**——
+/// 否则"两条路径能改的属性不一致"会变成难以察觉的语义分裂。
+auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props) -> Json {
+  Json changed = Json::array();
+  for (const auto& [name, value] : props.items()) {
+    bool applied = false;
+    if (name == "enabled") {
+      element.set_enabled(json_as_bool(value, true));
+      applied = true;
+    } else if (name == "visible") {
+      element.set_visible(json_as_bool(value, true));
+      applied = true;
+    } else if (name == "focused") {
+      if (json_as_bool(value)) {
+        root.set_focus(&element);
+      } else if (root.focused() == &element) {
+        root.set_focus(nullptr);
+      }
+      applied = true;
+    } else if (name == "checked" || name == "selected" || name == "value" || name == "text" ||
+               name == "label" || name == "icon" || name == "options" || name == "active" ||
+               name == "scroll_offset") {
+      const std::string text = value.is_string() ? json_as_string(value) : json_dump(value);
+      applied = element.set_property(name, text);
+    }
+    if (applied) {
+      changed.push_back(name);
+      element.mark_dirty();
+    }
+  }
+  return changed;
+}
+
+/// 触发元素动作（控制通道 `invoke` 与脚本宿主 `ui.invoke` 共用）。
+[[nodiscard]] auto invoke_element(ui::UiRoot& root, ui::Element& element, std::string_view action,
+                                  std::string_view argument) -> bool {
+  if (action == "focus" || action == "blur") {
+    // 焦点必须经 UiRoot 设置：键盘事件按 root 的焦点元素派发，
+    // 只改元素自身的 focused 标志会导致后续 input.text/input.key 无处可送。
+    root.set_focus(action == "focus" ? &element : nullptr);
+    return true;
+  }
+  return element.invoke_action(action, argument);
+}
+
+[[nodiscard]] auto bounds_to_json(math::Rect rect) -> Json {
+  Json value = Json::object();
+  value["x"] = static_cast<double>(rect.x);
+  value["y"] = static_cast<double>(rect.y);
+  value["width"] = static_cast<double>(rect.width);
+  value["height"] = static_cast<double>(rect.height);
   return value;
 }
 
-[[nodiscard]] auto semantics_to_json(const ui::SemanticsNode& node) -> Value {
-  Value value = Value::object();
-  value.set("id", node.id);
-  value.set("type", node.type);
-  value.set("role", std::string(ui::to_string(node.role)));
-  value.set("bounds", bounds_to_json(node.bounds));
-  if (!node.text.empty()) value.set("text", node.text);
-  if (!node.value.empty()) value.set("value", node.value);
+[[nodiscard]] auto semantics_to_json(const ui::SemanticsNode& node) -> Json {
+  Json value = Json::object();
+  value["id"] = node.id;
+  value["type"] = node.type;
+  value["role"] = std::string(ui::to_string(node.role));
+  value["bounds"] = bounds_to_json(node.bounds);
+  if (!node.text.empty()) value["text"] = node.text;
+  if (!node.value.empty()) value["value"] = node.value;
   const ui::SemanticsFlags& flags = node.flags;
-  Value state = Value::object();
-  state.set("visible", flags.visible);
-  state.set("enabled", flags.enabled);
-  state.set("focused", flags.focused);
-  state.set("hovered", flags.hovered);
-  state.set("pressed", flags.pressed);
-  state.set("selected", flags.selected);
-  state.set("checked", flags.checked);
-  state.set("scrollable", flags.scrollable);
-  state.set("editable", flags.editable);
-  value.set("state", std::move(state));
+  Json state = Json::object();
+  state["visible"] = flags.visible;
+  state["enabled"] = flags.enabled;
+  state["focused"] = flags.focused;
+  state["hovered"] = flags.hovered;
+  state["pressed"] = flags.pressed;
+  state["selected"] = flags.selected;
+  state["checked"] = flags.checked;
+  state["scrollable"] = flags.scrollable;
+  state["editable"] = flags.editable;
+  value["state"] = std::move(state);
   if (!node.children.empty()) {
-    Value children = Value::array();
-    for (const auto& child : node.children) children.push(semantics_to_json(child));
-    value.set("children", std::move(children));
+    Json children = Json::array();
+    for (const auto& child : node.children) children.push_back(semantics_to_json(child));
+    value["children"] = std::move(children);
   }
   return value;
 }
 
-[[nodiscard]] auto visual_to_json(const ui::VisualNode& node) -> Value {
-  Value value = Value::object();
-  value.set("id", node.id);
-  value.set("type", node.type);
-  value.set("bounds", bounds_to_json(node.bounds));
-  value.set("visible", node.visible);
-  if (!node.fill.empty()) value.set("fill", node.fill);
-  if (node.radius > 0.0f) value.set("radius", static_cast<double>(node.radius));
-  if (!node.text.empty()) value.set("text", node.text);
-  value.set("hit_target", node.hit_target);
+[[nodiscard]] auto visual_to_json(const ui::VisualNode& node) -> Json {
+  Json value = Json::object();
+  value["id"] = node.id;
+  value["type"] = node.type;
+  value["bounds"] = bounds_to_json(node.bounds);
+  value["visible"] = node.visible;
+  if (!node.fill.empty()) value["fill"] = node.fill;
+  if (node.radius > 0.0f) value["radius"] = static_cast<double>(node.radius);
+  if (!node.text.empty()) value["text"] = node.text;
+  value["hit_target"] = node.hit_target;
   if (!node.children.empty()) {
-    Value children = Value::array();
-    for (const auto& child : node.children) children.push(visual_to_json(child));
-    value.set("children", std::move(children));
+    Json children = Json::array();
+    for (const auto& child : node.children) children.push_back(visual_to_json(child));
+    value["children"] = std::move(children);
   }
   return value;
 }
 
-[[nodiscard]] auto element_to_json(ui::Element& element) -> Value {
-  Value value = Value::object();
-  value.set("id", element.derived_id());
-  value.set("type", std::string(element.type()));
-  value.set("role", std::string(ui::to_string(element.role())));
-  value.set("bounds", bounds_to_json(element.bounds()));
+[[nodiscard]] auto element_to_json(ui::Element& element) -> Json {
+  Json value = Json::object();
+  value["id"] = element.derived_id();
+  value["type"] = std::string(element.type());
+  value["role"] = std::string(ui::to_string(element.role()));
+  value["bounds"] = bounds_to_json(element.bounds());
   const std::string text = element.semantics_text();
-  if (!text.empty()) value.set("text", text);
+  if (!text.empty()) value["text"] = text;
   const std::string item_value = element.semantics_value();
-  if (!item_value.empty()) value.set("value", item_value);
+  if (!item_value.empty()) value["value"] = item_value;
   return value;
 }
 
-[[nodiscard]] auto parse_modifiers(const Value& params) -> std::array<bool, 4> {
+/// 元素快照：基本信息（id/type/role/bounds/text/value）+ **属性面**（property_names 逐个读）。
+///
+/// 控制通道的 `get` 与脚本宿主的 `ui_get` **共用这一份实现**——
+/// 否则脚本侧会看不到语言/光标/行数等属性，形成"同一个元素两个样"的认知陷阱
+/// （实践中就踩过：脚本里 `ui_get('editor').language` 是 undefined）。
+[[nodiscard]] auto element_snapshot(ui::Element& element) -> Json {
+  Json snapshot = element_to_json(element);
+  Json properties = Json::object();
+  for (const auto name : element.property_names()) {
+    if (auto value = element.get_property(name); value.has_value()) {
+      // 属性值统一按字符串承载（组件属性面本就是文本协议），但布尔语义要保真
+      properties[std::string(name)] = *value;
+    }
+  }
+  properties["enabled"] = element.enabled();
+  properties["visible"] = element.visible();
+  snapshot["props"] = std::move(properties);
+  return snapshot;
+}
+
+[[nodiscard]] auto parse_modifiers(const Json& params) -> std::array<bool, 4> {
   // ctrl / shift / alt / meta（也接受逗号分隔的 modifiers 字符串）
   std::array<bool, 4> flags{false, false, false, false};
-  if (const Value* modifiers = params.find("modifiers"); modifiers != nullptr) {
+  if (const Json* modifiers = json_find(params, "modifiers"); modifiers != nullptr) {
     if (modifiers->is_array()) {
-      for (const auto& item : modifiers->items()) {
-        const std::string name = ascii_lower(item.as_string());
+      for (const auto& item : *modifiers) {
+        const std::string name = ascii_lower(json_as_string(item));
         if (name == "ctrl" || name == "control") flags[0] = true;
         if (name == "shift") flags[1] = true;
         if (name == "alt" || name == "option") flags[2] = true;
         if (name == "meta" || name == "cmd" || name == "super") flags[3] = true;
       }
     } else if (modifiers->is_string()) {
-      for (const auto part : split(modifiers->as_string_view(), ',')) {
+      for (const auto part : split(json_as_string(*modifiers), ',')) {
         const std::string name = ascii_lower(trim(part));
         if (name == "ctrl" || name == "control") flags[0] = true;
         if (name == "shift") flags[1] = true;
@@ -113,7 +180,9 @@ inline constexpr std::size_t kKeepAliveLogLines = 200;
     }
   }
   for (const auto name : {"ctrl", "shift", "alt", "meta"}) {
-    if (const Value& flag = params.at(name); flag.is_bool() && flag.as_bool()) {
+    // 注意：这里**不能**用 nlohmann 的 `at()`——它在键缺失时抛 out_of_range，而按修饰键
+    // 是否出现过是可选的（`{"kind":"click"}` 不带任何修饰键）。`json_at` 缺键返回 null 节点。
+    if (const Json& flag = json_at(params, name); flag.is_boolean() && json_as_bool(flag)) {
       const std::string key = name;
       if (key == "ctrl") flags[0] = true;
       if (key == "shift") flags[1] = true;
@@ -155,6 +224,8 @@ struct Server::Impl {
 
   Host& host;
   ServerOptions options{};
+  /// 脚本引擎（仅 `options.enable_script` 时创建；未启用则保持 nullptr，`script` 方法直接拒绝）
+  std::unique_ptr<ext::ScriptEngine> script{};
   st::net::TcpListener listener{};
   std::vector<std::unique_ptr<Client>> clients{};
   std::vector<PendingWait> waits{};
@@ -165,8 +236,8 @@ struct Server::Impl {
   std::int64_t started_ms{0};
   bool active{false};
 
-  [[nodiscard]] auto send(Client& client, const Value& message) -> bool {
-    const std::string body = message.dump();
+  [[nodiscard]] auto send(Client& client, const Json& message) -> bool {
+    const std::string body = json_dump(message);
     if (body.size() > options.max_frame) {
       log::warn("控制通道响应超过帧上限（{} 字节）", body.size());
       return false;
@@ -181,30 +252,30 @@ struct Server::Impl {
     return true;
   }
 
-  void respond(Client& client, std::uint64_t id, Value result) {
-    Value message = Value::object();
-    message.set("id", static_cast<std::uint64_t>(id));
-    message.set("ok", true);
-    message.set("result", std::move(result));
+  void respond(Client& client, std::uint64_t id, Json result) {
+    Json message = Json::object();
+    message["id"] = static_cast<std::uint64_t>(id);
+    message["ok"] = true;
+    message["result"] = std::move(result);
     (void)send(client, message);
   }
 
   void fail(Client& client, std::uint64_t id, ErrorCode code, std::string text) {
-    Value message = Value::object();
-    message.set("id", static_cast<std::uint64_t>(id));
-    message.set("ok", false);
-    Value error = Value::object();
-    error.set("code", std::string(st::to_string(code)));
-    error.set("message", std::move(text));
-    message.set("error", std::move(error));
+    Json message = Json::object();
+    message["id"] = static_cast<std::uint64_t>(id);
+    message["ok"] = false;
+    Json error = Json::object();
+    error["code"] = std::string(st::to_string(code));
+    error["message"] = std::move(text);
+    message["error"] = std::move(error);
     (void)send(client, message);
   }
 
-  void publish_to_clients(std::string_view event, const Value& data) {
-    Value message = Value::object();
-    message.set("event", std::string(event));
-    message.set("seq", ++event_sequence);
-    message.set("data", data);
+  void publish_to_clients(std::string_view event, const Json& data) {
+    Json message = Json::object();
+    message["event"] = std::string(event);
+    message["seq"] = ++event_sequence;
+    message["data"] = data;
     for (auto& client : clients) {
       if (!client->subscribed) continue;
       if (!client->event_kinds.empty()) {
@@ -219,6 +290,89 @@ struct Server::Impl {
   [[nodiscard]] auto find_element(std::string_view id) -> ui::Element* {
     if (!id.empty() && id.front() == '#') id.remove_prefix(1);
     return host.root().find(id);
+  }
+
+  /// 注册脚本可用的宿主能力。
+  ///
+  /// 刻意只给**界面操作**（get/find/set/invoke）与日志——与脚本的定位一致：
+  /// 它是"界面逻辑的表达层"，不是"第二个系统访问入口"。文件/网络/进程一概不暴露，
+  /// 且这些函数名只存在于启用脚本的进程里。
+  auto register_script_hosts() -> Status {
+    if (script == nullptr) return ok();
+    const auto need_element = [this](const std::string& id) -> ui::Element* {
+      const ui::Element* found = find_element(id);
+      return const_cast<ui::Element*>(found);
+    };
+
+    // ui.get(id) → 与 `get` 方法同构的元素快照
+    auto status = script->register_function("ui_get", [this, need_element](
+                                                           const std::vector<Json>& args) -> Result<Json> {
+      const std::string id = args.empty() ? "" : json_as_string(args[0]);
+      ui::Element* element = need_element(id);
+      if (element == nullptr) {
+        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", id));
+      }
+      return element_snapshot(*element);
+    });
+    if (!status) return status;
+
+    // ui.find(selector) → 匹配列表
+    status = script->register_function("ui_find", [this](const std::vector<Json>& args) -> Result<Json> {
+      const std::string selector_text = args.empty() ? "" : json_as_string(args[0]);
+      auto selector = ui::Selector::parse(selector_text);
+      if (!selector) return forward_error(selector.error());
+      const auto matches = host.root().query(*selector, 64);
+      Json list = Json::array();
+      for (auto* element : matches) list.push_back(element_to_json(*element));
+      return list;
+    });
+    if (!status) return status;
+
+    // ui.set(id, propsObject) → 应用属性，返回生效名列表
+    status = script->register_function("ui_set", [this, need_element](
+                                                          const std::vector<Json>& args) -> Result<Json> {
+      const std::string id = args.empty() ? "" : json_as_string(args[0]);
+      if (args.size() < 2 || !args[1].is_object()) {
+        return unexpected(ErrorCode::Invalid, "ui_set(id, {属性...}) 需要对象参数");
+      }
+      ui::Element* element = need_element(id);
+      if (element == nullptr) {
+        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", id));
+      }
+      Json changed = apply_properties(host.root(), *element, args[1]);
+      host.request_repaint();
+      return changed;
+    });
+    if (!status) return status;
+
+    // ui.invoke(id, action[, argument])
+    status = script->register_function(
+        "ui_invoke", [this, need_element](const std::vector<Json>& args) -> Result<Json> {
+          const std::string id = args.empty() ? "" : json_as_string(args[0]);
+          const std::string action = args.size() > 1 ? json_as_string(args[1]) : "click";
+          const std::string argument = args.size() > 2 ? json_as_string(args[2]) : "";
+          ui::Element* element = need_element(id);
+          if (element == nullptr) {
+            return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", id));
+          }
+          const bool handled = invoke_element(host.root(), *element, action, argument);
+          host.request_repaint();
+          Json result = Json::object();
+          result["handled"] = handled;
+          return result;
+        });
+    if (!status) return status;
+
+    // log(...) → 写进应用日志（脚本排障用；不打印到控制通道，避免与协议回包混淆）
+    return script->register_function("log", [](const std::vector<Json>& args) -> Result<Json> {
+      std::string line = "[脚本]";
+      for (const Json& argument : args) {
+        line.push_back(' ');
+        line.append(argument.is_string() ? json_as_string(argument) : json_dump(argument));
+      }
+      log::info("{}", line);
+      return Json();
+    });
   }
 
   [[nodiscard]] auto wait_satisfied(const PendingWait& wait) -> std::optional<bool> {
@@ -268,28 +422,28 @@ struct Server::Impl {
         }
         const std::int64_t stable_ms = now - wait.stable_since_ms;
         if (stable_ms >= 120) {
-          Value result = Value::object();
-          result.set("satisfied", true);
-          result.set("elapsed_ms", static_cast<std::int64_t>(now - (wait.deadline_ms - 20000)));
-          result.set("detail", "画面已稳定");
+          Json result = Json::object();
+          result["satisfied"] = true;
+          result["elapsed_ms"] = static_cast<std::int64_t>(now - (wait.deadline_ms - 20000));
+          result["detail"] = "画面已稳定";
           respond(*clients[wait.client], wait.request_id, std::move(result));
           iterator = waits.erase(iterator);
           continue;
         }
       } else if (satisfied.has_value() && *satisfied) {
-        Value result = Value::object();
-        result.set("satisfied", true);
-        result.set("elapsed_ms", 0);
-        result.set("detail", std::format("条件满足: {}", wait.kind));
+        Json result = Json::object();
+        result["satisfied"] = true;
+        result["elapsed_ms"] = 0;
+        result["detail"] = std::format("条件满足: {}", wait.kind);
         respond(*clients[wait.client], wait.request_id, std::move(result));
         iterator = waits.erase(iterator);
         continue;
       }
       if (now >= wait.deadline_ms) {
-        Value result = Value::object();
-        result.set("satisfied", false);
-        result.set("elapsed_ms", 0);
-        result.set("detail", std::format("等待超时: {}", wait.kind));
+        Json result = Json::object();
+        result["satisfied"] = false;
+        result["elapsed_ms"] = 0;
+        result["detail"] = std::format("等待超时: {}", wait.kind);
         respond(*clients[wait.client], wait.request_id, std::move(result));
         iterator = waits.erase(iterator);
         continue;
@@ -299,26 +453,26 @@ struct Server::Impl {
   }
 
   [[nodiscard]] auto handle(Client& client, std::uint64_t id, std::string_view method,
-                            const Value& params, bool& deferred) -> Result<Value>;
+                            const Json& params, bool& deferred) -> Result<Json>;
 
   void dispatch_frame(Client& client, std::string_view body) {
-    auto message = json::parse(body);
+    auto message = json_parse(body);
     if (!message) {
-      Value error = Value::object();
-      error.set("id", 0);
-      error.set("ok", false);
-      Value detail = Value::object();
-      detail.set("code", "bad_request");
-      detail.set("message", message.error().message);
-      error.set("error", std::move(detail));
+      Json error = Json::object();
+      error["id"] = 0;
+      error["ok"] = false;
+      Json detail = Json::object();
+      detail["code"] = "bad_request";
+      detail["message"] = message.error().message;
+      error["error"] = std::move(detail);
       (void)send(client, error);
       return;
     }
-    const std::uint64_t id = message->get_i64("id", 0) < 0
+    const std::uint64_t id = json_get_i64(*message, "id", 0) < 0
                                  ? 0
-                                 : static_cast<std::uint64_t>(message->get_i64("id", 0));
-    const std::string method = message->get_string("method");
-    const Value& params = message->at("params");
+                                 : static_cast<std::uint64_t>(json_get_i64(*message, "id", 0));
+    const std::string method = json_get_string(*message, "method");
+    const Json& params = json_at(*message, "params");
     if (method.empty()) {
       fail(client, id, ErrorCode::Invalid, "缺少 method");
       return;
@@ -422,165 +576,124 @@ struct Server::Impl {
     const std::uint64_t version = host.root().version();
     if (version == last_published_version) return;
     last_published_version = version;
-    Value data = Value::object();
-    data.set("version", version);
+    Json data = Json::object();
+    data["version"] = version;
     publish_to_clients("ui.changed", data);
   }
 };
 
 auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view method,
-                          const Value& params, bool& deferred) -> Result<Value> {
+                          const Json& params, bool& deferred) -> Result<Json> {
   auto& root = host.root();
 
   if (method == "hello") {
-    Value result = Value::object();
-    result.set("protocol", static_cast<std::uint64_t>(kProtocolVersion));
-    Value app = Value::object();
-    app.set("name", host.app_name());
-    app.set("version", host.app_version());
-    result.set("app", std::move(app));
-    result.set("pid", static_cast<std::uint64_t>(::getpid() == 0 ? 0 : 0));
-    result.set("backend", std::string(host.backend_name()));
-    result.set("headless", host.headless());
-    Value screen = Value::object();
+    Json result = Json::object();
+    result["protocol"] = static_cast<std::uint64_t>(kProtocolVersion);
+    Json app = Json::object();
+    app["name"] = host.app_name();
+    app["version"] = host.app_version();
+    result["app"] = std::move(app);
+    result["pid"] = static_cast<std::uint64_t>(::getpid() == 0 ? 0 : 0);
+    result["backend"] = std::string(host.backend_name());
+    result["headless"] = host.headless();
+    Json screen = Json::object();
     const math::Size viewport = host.viewport();
     // 坐标语义：**协议内一切坐标均为逻辑像素**；物理像素 = 逻辑 × scale
-    screen.set("width", static_cast<double>(viewport.width));
-    screen.set("height", static_cast<double>(viewport.height));
-    screen.set("scale", static_cast<double>(host.device_scale()));
-    screen.set("physical_width", static_cast<double>(viewport.width * host.device_scale()));
-    screen.set("physical_height", static_cast<double>(viewport.height * host.device_scale()));
-    screen.set("coordinate_space", "logical");
-    result.set("screen", std::move(screen));
-    Value theme = Value::object();
-    theme.set("mode", root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light");
-    result.set("theme", std::move(theme));
-    Value capabilities = Value::array();
+    screen["width"] = static_cast<double>(viewport.width);
+    screen["height"] = static_cast<double>(viewport.height);
+    screen["scale"] = static_cast<double>(host.device_scale());
+    screen["physical_width"] = static_cast<double>(viewport.width * host.device_scale());
+    screen["physical_height"] = static_cast<double>(viewport.height * host.device_scale());
+    screen["coordinate_space"] = "logical";
+    result["screen"] = std::move(screen);
+    Json theme = Json::object();
+    theme["mode"] = root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light";
+    result["theme"] = std::move(theme);
+    Json capabilities = Json::array();
     for (const auto name : {"tree", "find", "get", "set", "invoke", "input.mouse", "input.key",
                             "input.text", "capture", "visual", "wait", "metrics", "events",
                             "theme", "app"}) {
-      capabilities.push(Value{name});
+      capabilities.push_back(Json(name));
     }
-    result.set("capabilities", std::move(capabilities));
-    if (params.get_bool("subscribe", false)) {
+    // `script` 只在真正启用时上报：能力清单是"这个进程能做什么"的事实说明，
+    // 不能列一个一调就报 Unsupported 的方法。
+    if (script != nullptr) capabilities.push_back(Json("script"));
+    result["capabilities"] = std::move(capabilities);
+    if (json_get_bool(params, "subscribe", false)) {
       client.subscribed = true;
-      for (const auto& kind : params.get_string_array("kinds")) client.event_kinds.push_back(kind);
+      for (const auto& kind : json_get_string_array(params, "kinds")) client.event_kinds.push_back(kind);
     }
     return result;
   }
   if (method == "ping") {
-    Value result = Value::object();
-    result.set("ts", static_cast<std::int64_t>(time::unix_ms()));
+    Json result = Json::object();
+    result["ts"] = static_cast<std::int64_t>(time::unix_ms());
     return result;
   }
   if (method == "tree") {
-    const auto depth = params.get_i64("depth", 0);
-    Value result = Value::object();
-    result.set("tree", semantics_to_json(root.semantics(static_cast<std::uint32_t>(depth))));
-    result.set("version", root.version());
+    const auto depth = json_get_i64(params, "depth", 0);
+    Json result = Json::object();
+    result["tree"] = semantics_to_json(root.semantics(static_cast<std::uint32_t>(depth)));
+    result["version"] = root.version();
     return result;
   }
   if (method == "find") {
-    auto selector = ui::Selector::parse(params.get_string("selector"));
+    auto selector = ui::Selector::parse(json_get_string(params, "selector"));
     if (!selector) return forward_error(selector.error());
-    const auto limit = static_cast<std::size_t>(params.get_i64("limit", 50));
+    const auto limit = static_cast<std::size_t>(json_get_i64(params, "limit", 50));
     auto matches = root.query(*selector, limit);
-    Value list = Value::array();
-    for (auto* element : matches) list.push(element_to_json(*element));
-    Value result = Value::object();
-    result.set("selector", params.get_string("selector"));
-    result.set("count", static_cast<std::uint64_t>(list.size()));
-    result.set("matches", std::move(list));
+    Json list = Json::array();
+    for (auto* element : matches) list.push_back(element_to_json(*element));
+    Json result = Json::object();
+    result["selector"] = json_get_string(params, "selector");
+    result["count"] = static_cast<std::uint64_t>(list.size());
+    result["matches"] = std::move(list);
     return result;
   }
   if (method == "get") {
-    ui::Element* element = find_element(params.get_string("id"));
+    ui::Element* element = find_element(json_get_string(params, "id"));
     if (element == nullptr) {
       return unexpected(ErrorCode::NotFound,
-                        std::format("未找到元素: {}", params.get_string("id")));
+                        std::format("未找到元素: {}", json_get_string(params, "id")));
     }
-    Value result = element_to_json(*element);
-    Value properties = Value::object();
-    for (const auto name : element->property_names()) {
-      if (auto value = element->get_property(name); value.has_value()) {
-        properties.set(name, *value);
-      }
-    }
-    properties.set("enabled", element->enabled());
-    properties.set("visible", element->visible());
-    result.set("props", std::move(properties));
-    return result;
+    return element_snapshot(*element);
   }
   if (method == "set") {
-    ui::Element* element = find_element(params.get_string("id"));
+    ui::Element* element = find_element(json_get_string(params, "id"));
     if (element == nullptr) {
-      return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", params.get_string("id")));
+      return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", json_get_string(params, "id")));
     }
-    const Value& props = params.at("props");
+    const Json& props = json_at(params, "props");
     if (!props.is_object()) return unexpected(ErrorCode::Invalid, "props 必须是对象");
-    Value changed = Value::array();
-    for (const auto& [name, value] : props.fields()) {
-      bool applied = false;
-      if (name == "enabled") {
-        element->set_enabled(value.as_bool(true));
-        applied = true;
-      } else if (name == "visible") {
-        element->set_visible(value.as_bool(true));
-        applied = true;
-      } else if (name == "focused") {
-        if (value.as_bool()) {
-          root.set_focus(element);
-        } else if (root.focused() == element) {
-          root.set_focus(nullptr);
-        }
-        applied = true;
-      } else if (name == "checked" || name == "selected" || name == "value" || name == "text" ||
-                 name == "label" || name == "icon" || name == "options" || name == "active" ||
-                 name == "scroll_offset") {
-        const std::string text = value.is_string() ? value.as_string() : value.dump();
-        applied = element->set_property(name, text);
-      }
-      if (applied) {
-        changed.push(name);
-        element->mark_dirty();
-      }
-    }
+    Json changed = apply_properties(root, *element, props);
     host.request_repaint();
-    Value result = Value::object();
-    result.set("changed", std::move(changed));
+    Json result = Json::object();
+    result["changed"] = std::move(changed);
     return result;
   }
   if (method == "invoke") {
-    ui::Element* element = find_element(params.get_string("id"));
+    ui::Element* element = find_element(json_get_string(params, "id"));
     if (element == nullptr) {
-      return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", params.get_string("id")));
+      return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", json_get_string(params, "id")));
     }
-    const std::string action = params.get_string("action", "click");
-    const std::string argument = params.get_string("argument");
-    bool handled = false;
-    if (action == "focus" || action == "blur") {
-      // 焦点必须经 UiRoot 设置：键盘事件按 root 的焦点元素派发，
-      // 只改元素自身的 focused 标志会导致后续 input.text/input.key 无处可送。
-      root.set_focus(action == "focus" ? element : nullptr);
-      handled = true;
-    } else {
-      handled = element->invoke_action(action, argument);
-    }
+    const std::string action = json_get_string(params, "action", "click");
+    const std::string argument = json_get_string(params, "argument");
+    const bool handled = invoke_element(root, *element, action, argument);
     host.request_repaint();
-    Value result = Value::object();
-    result.set("handled", handled);
-    result.set("action", action);
-    result.set("id", element->derived_id());
+    Json result = Json::object();
+    result["handled"] = handled;
+    result["action"] = action;
+    result["id"] = element->derived_id();
     return result;
   }
   if (method == "input.mouse") {
-    const std::string kind = params.get_string("kind", "move");
+    const std::string kind = json_get_string(params, "kind", "move");
     ui::Event event;
-    event.position = math::Point{static_cast<float>(params.get_double("x", 0.0)),
-                                 static_cast<float>(params.get_double("y", 0.0))};
-    event.button = static_cast<int>(params.get_i64("button", 1));
-    event.click_count = static_cast<int>(params.get_i64("click_count", 1));
-    event.wheel_delta = static_cast<float>(params.get_double("delta", 0.0));
+    event.position = math::Point{static_cast<float>(json_get_double(params, "x", 0.0)),
+                                 static_cast<float>(json_get_double(params, "y", 0.0))};
+    event.button = static_cast<int>(json_get_i64(params, "button", 1));
+    event.click_count = static_cast<int>(json_get_i64(params, "click_count", 1));
+    event.wheel_delta = static_cast<float>(json_get_double(params, "delta", 0.0));
     const std::array<bool, 4> modifiers = parse_modifiers(params);
     event.ctrl = modifiers[0];
     event.shift = modifiers[1];
@@ -608,16 +721,16 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     } else {
       return unexpected(ErrorCode::Invalid, std::format("未知鼠标消息: {}", kind));
     }
-    Value hit = Value::object();
+    Json hit = Json::object();
     if (ui::Element* target = root.hit_test(event.position); target != nullptr) {
       hit = element_to_json(*target);
     }
     const bool handled = root.dispatch(event);
     host.request_repaint();
-    Value result = Value::object();
-    result.set("handled", handled);
-    result.set("hit", std::move(hit));
-    result.set("kind", kind);
+    Json result = Json::object();
+    result["handled"] = handled;
+    result["hit"] = std::move(hit);
+    result["kind"] = kind;
     return result;
   }
   if (method == "input.key" || method == "input.text") {
@@ -629,15 +742,15 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     event.meta = modifiers[3];
     if (method == "input.text") {
       event.kind = ui::EventKind::TextInput;
-      event.text = params.get_string("text");
-      if (const std::string target = params.get_string("id"); !target.empty()) {
+      event.text = json_get_string(params, "text");
+      if (const std::string target = json_get_string(params, "id"); !target.empty()) {
         if (ui::Element* element = find_element(target); element != nullptr) root.set_focus(element);
       }
     } else {
-      const std::string kind = params.get_string("kind", "press");
-      event.key = params.get_string("key");
-      event.code = params.get_string("code");
-      event.text = params.get_string("text");
+      const std::string kind = json_get_string(params, "kind", "press");
+      event.key = json_get_string(params, "key");
+      event.code = json_get_string(params, "code");
+      event.text = json_get_string(params, "text");
       if (kind == "down") {
         event.kind = ui::EventKind::KeyDown;
       } else if (kind == "up") {
@@ -651,104 +764,139 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     const bool handled = root.dispatch(event);
     host.request_repaint();
-    Value result = Value::object();
-    result.set("handled", handled);
+    Json result = Json::object();
+    result["handled"] = handled;
     const ui::Element* focused = root.focused();
-    result.set("focused", focused != nullptr ? focused->derived_id() : std::string{});
+    result["focused"] = focused != nullptr ? focused->derived_id() : std::string{};
     return result;
   }
   if (method == "capture") {
     math::IntRect region{};
-    if (const std::string target = params.get_string("id"); !target.empty()) {
+    if (const std::string target = json_get_string(params, "id"); !target.empty()) {
       ui::Element* element = find_element(target);
       if (element == nullptr) {
         return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target));
       }
       region = element->bounds().round_out();
-    } else if (const Value* raw = params.find("region"); raw != nullptr && raw->is_object()) {
-      region = math::IntRect{static_cast<int>(raw->get_i64("x", 0)),
-                             static_cast<int>(raw->get_i64("y", 0)),
-                             static_cast<int>(raw->get_i64("width", 0)),
-                             static_cast<int>(raw->get_i64("height", 0))};
+    } else if (const Json* raw = json_find(params, "region"); raw != nullptr && raw->is_object()) {
+      region = math::IntRect{static_cast<int>(json_get_i64(*raw, "x", 0)),
+                             static_cast<int>(json_get_i64(*raw, "y", 0)),
+                             static_cast<int>(json_get_i64(*raw, "width", 0)),
+                             static_cast<int>(json_get_i64(*raw, "height", 0))};
     }
-    const std::string encode = params.get_string("encode", "base64");
-    Value result = Value::object();
+    const std::string encode = json_get_string(params, "encode", "base64");
+    Json result = Json::object();
     if (encode == "file" || params.contains("path")) {
-      auto saved = host.capture_to_file(params.get_string("path"), region);
+      auto saved = host.capture_to_file(json_get_string(params, "path"), region);
       if (!saved) return forward_error(saved.error());
-      result.set("path", *saved);
+      result["path"] = *saved;
     } else {
       auto png = host.capture_png(region);
       if (!png) return forward_error(png.error());
-      result.set("base64", base64_encode(std::span<const std::uint8_t>(*png)));
-      result.set("bytes", static_cast<std::uint64_t>(png->size()));
+      result["base64"] = base64_encode(std::span<const std::uint8_t>(*png));
+      result["bytes"] = static_cast<std::uint64_t>(png->size());
     }
-    result.set("format", "png");
+    result["format"] = "png";
     // 回包标注：region 为**逻辑坐标**（协议口径），pixel_size 为实际导出的**物理像素**尺寸——
     // 两者在 HiDPI 下不同（2x 时像素尺寸是逻辑尺寸的两倍），调用方据此换算而不必猜。
-    result.set("region", bounds_to_json(math::Rect{static_cast<float>(region.x),
+    result["region"] = bounds_to_json(math::Rect{static_cast<float>(region.x),
                                                    static_cast<float>(region.y),
                                                    static_cast<float>(region.width),
-                                                   static_cast<float>(region.height)}));
+                                                   static_cast<float>(region.height)});
     {
       const float scale = host.device_scale();
       const math::Size viewport = host.viewport();
-      Value pixels = Value::object();
+      Json pixels = Json::object();
       if (region.is_empty()) {
-        pixels.set("width", static_cast<std::int64_t>(
-                                std::lround(static_cast<double>(viewport.width) * static_cast<double>(scale))));
-        pixels.set("height", static_cast<std::int64_t>(
-                                 std::lround(static_cast<double>(viewport.height) * static_cast<double>(scale))));
+        pixels["width"] = static_cast<std::int64_t>(
+                                std::lround(static_cast<double>(viewport.width) * static_cast<double>(scale)));
+        pixels["height"] = static_cast<std::int64_t>(
+                                 std::lround(static_cast<double>(viewport.height) * static_cast<double>(scale)));
       } else {
-        pixels.set("width", static_cast<std::int64_t>(
-                                std::lround(static_cast<double>(region.width) * static_cast<double>(scale))));
-        pixels.set("height", static_cast<std::int64_t>(
-                                 std::lround(static_cast<double>(region.height) * static_cast<double>(scale))));
+        pixels["width"] = static_cast<std::int64_t>(
+                                std::lround(static_cast<double>(region.width) * static_cast<double>(scale)));
+        pixels["height"] = static_cast<std::int64_t>(
+                                 std::lround(static_cast<double>(region.height) * static_cast<double>(scale)));
       }
-      pixels.set("device_scale", static_cast<double>(scale));
-      result.set("pixel_size", pixels);
+      pixels["device_scale"] = static_cast<double>(scale);
+      result["pixel_size"] = pixels;
     }
     return result;
   }
   if (method == "visual") {
-    Value result = Value::object();
-    result.set("tree", visual_to_json(root.visual_tree()));
-    result.set("version", root.version());
+    Json result = Json::object();
+    result["tree"] = visual_to_json(root.visual_tree());
+    result["version"] = root.version();
+    return result;
+  }
+  if (method == "script") {
+    // 默认关闭：未开启时明确告知"该能力未启用"，而不是含糊的"未知方法"——
+    // 前者告诉调用方换个开关就能用，后者会让人以为打错了方法名。
+    if (script == nullptr) {
+      return unexpected(ErrorCode::Unsupported,
+                        "脚本能力未启用（需以 --enable-script 启动；脚本=进程内执行代码，故默认关闭）");
+    }
+    const std::string code = json_get_string(params, "code");
+    if (!code.empty()) {
+      auto evaluated = script->eval(code, json_get_string(params, "filename", "<control>"));
+      host.request_repaint();  // 脚本可能改了界面
+      if (!evaluated) return forward_error(evaluated.error());
+      Json result = Json::object();
+      result["result"] = std::move(*evaluated);
+      result["ops"] = static_cast<std::uint64_t>(script->last_stats().ops);
+      result["memory"] = static_cast<std::uint64_t>(script->last_stats().memory_used);
+      return result;
+    }
+    // 无 code 时按「调用已定义函数」处理
+    const std::string function = json_get_string(params, "function");
+    if (function.empty()) {
+      return unexpected(ErrorCode::Invalid, "script 需要 code 或 function 参数");
+    }
+    std::vector<Json> arguments;
+    const Json& raw_arguments = json_at(params, "args");
+    if (raw_arguments.is_array()) {
+      for (const Json& item : raw_arguments) arguments.push_back(item);
+    }
+    auto called = script->call(function, arguments);
+    host.request_repaint();
+    if (!called) return forward_error(called.error());
+    Json result = Json::object();
+    result["result"] = std::move(*called);
     return result;
   }
   if (method == "metrics") {
     Metrics metrics = host.metrics();
-    Value result = Value::object();
-    result.set("backend", metrics.backend);
-    result.set("headless", metrics.headless);
-    result.set("device_scale", static_cast<double>(metrics.device_scale));
-    result.set("physical_width", static_cast<std::uint64_t>(metrics.physical_width));
-    result.set("physical_height", static_cast<std::uint64_t>(metrics.physical_height));
-    result.set("uptime_ms", metrics.uptime_ms);
-    result.set("frames", static_cast<std::uint64_t>(metrics.frames));
-    result.set("last_frame_ms", metrics.last_frame_ms);
-    result.set("frame_p50_ms", metrics.frame_p50_ms);
-    result.set("frame_p95_ms", metrics.frame_p95_ms);
-    result.set("nodes", static_cast<std::uint64_t>(metrics.nodes));
-    result.set("requests", static_cast<std::uint64_t>(requests));
-    result.set("clients", static_cast<std::uint64_t>(clients.size()));
-    Value log_value = Value::array();
-    for (const auto& line : log_ring) log_value.push(Value{line});
-    result.set("log", std::move(log_value));
+    Json result = Json::object();
+    result["backend"] = metrics.backend;
+    result["headless"] = metrics.headless;
+    result["device_scale"] = static_cast<double>(metrics.device_scale);
+    result["physical_width"] = static_cast<std::uint64_t>(metrics.physical_width);
+    result["physical_height"] = static_cast<std::uint64_t>(metrics.physical_height);
+    result["uptime_ms"] = metrics.uptime_ms;
+    result["frames"] = static_cast<std::uint64_t>(metrics.frames);
+    result["last_frame_ms"] = metrics.last_frame_ms;
+    result["frame_p50_ms"] = metrics.frame_p50_ms;
+    result["frame_p95_ms"] = metrics.frame_p95_ms;
+    result["nodes"] = static_cast<std::uint64_t>(metrics.nodes);
+    result["requests"] = static_cast<std::uint64_t>(requests);
+    result["clients"] = static_cast<std::uint64_t>(clients.size());
+    Json log_value = Json::array();
+    for (const auto& line : log_ring) log_value.push_back(Json(line));
+    result["log"] = std::move(log_value);
     return result;
   }
   if (method == "events") {
-    client.subscribed = params.get_bool("enable", true);
-    client.event_kinds = params.get_string_array("kinds");
-    Value result = Value::object();
-    result.set("enabled", client.subscribed);
-    Value kinds = Value::array();
-    for (const auto& kind : client.event_kinds) kinds.push(Value{kind});
-    result.set("kinds", std::move(kinds));
+    client.subscribed = json_get_bool(params, "enable", true);
+    client.event_kinds = json_get_string_array(params, "kinds");
+    Json result = Json::object();
+    result["enabled"] = client.subscribed;
+    Json kinds = Json::array();
+    for (const auto& kind : client.event_kinds) kinds.push_back(Json(kind));
+    result["kinds"] = std::move(kinds);
     return result;
   }
   if (method == "theme") {
-    if (const std::string mode = params.get_string("mode"); !mode.empty()) {
+    if (const std::string mode = json_get_string(params, "mode"); !mode.empty()) {
       if (mode == "light") {
         host.set_theme_mode(ui::ThemeMode::Light);
       } else if (mode == "dark") {
@@ -761,12 +909,12 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       }
       host.request_repaint();
     }
-    Value result = Value::object();
-    result.set("mode", root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light");
+    Json result = Json::object();
+    result["mode"] = root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light";
     return result;
   }
   if (method == "wait") {
-    const std::string kind = params.get_string("for", "element");
+    const std::string kind = json_get_string(params, "for", "element");
     if (kind != "element" && kind != "gone" && kind != "text" && kind != "text_gone" &&
         kind != "stable") {
       return unexpected(ErrorCode::Unsupported, std::format("不支持的等待条件: {}", kind));
@@ -781,9 +929,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     wait.request_id = id;
     wait.kind = kind;
-    wait.selector = params.get_string("selector");
-    wait.text = params.get_string("text");
-    const std::int64_t timeout = params.get_i64("timeout_ms", 5000);
+    wait.selector = json_get_string(params, "selector");
+    wait.text = json_get_string(params, "text");
+    const std::int64_t timeout = json_get_i64(params, "timeout_ms", 5000);
     wait.deadline_ms = time::now_ms() + timeout;
     wait.stable_since_ms = time::now_ms();
     wait.last_version = root.version();
@@ -797,71 +945,70 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     if (kind == "stable") {
       waits.push_back(wait);
       deferred = true;
-      return Value::object();
+      return Json::object();
     }
     const std::optional<bool> satisfied = wait_satisfied(wait);
     if (satisfied.has_value() && *satisfied) {
-      Value result = Value::object();
-      result.set("satisfied", true);
-      result.set("elapsed_ms", 0);
-      result.set("detail", std::format("条件已满足: {}", kind));
+      Json result = Json::object();
+      result["satisfied"] = true;
+      result["elapsed_ms"] = 0;
+      result["detail"] = std::format("条件已满足: {}", kind);
       return result;
     }
     waits.push_back(wait);
     deferred = true;
-    return Value::object();
+    return Json::object();
   }
   if (method == "app") {
-    const std::string action = params.get_string("action");
+    const std::string action = json_get_string(params, "action");
     if (action == "quit" || action == "close") {
       host.request_quit();
-      Value result = Value::object();
-      result.set("ok", true);
-      result.set("action", action);
+      Json result = Json::object();
+      result["ok"] = true;
+      result["action"] = action;
       return result;
     }
     if (action == "reload" || action == "repaint") {
       host.request_repaint();
-      Value result = Value::object();
-      result.set("ok", true);
+      Json result = Json::object();
+      result["ok"] = true;
       return result;
     }
     if (action == "set_scale" || action == "scale") {
-      const double requested = params.get_double("scale", 0.0);
+      const double requested = json_get_double(params, "scale", 0.0);
       if (requested <= 0.0) return unexpected(ErrorCode::Invalid, "set_scale 需要正的 scale 参数");
       if (auto status = host.set_device_scale(static_cast<float>(requested)); !status) {
         return forward_error(status.error());
       }
       host.request_repaint();
-      Value result = Value::object();
-      result.set("scale", static_cast<double>(host.device_scale()));
-      result.set("physical_width", static_cast<double>(host.viewport().width * host.device_scale()));
-      result.set("physical_height",
-                 static_cast<double>(host.viewport().height * host.device_scale()));
+      Json result = Json::object();
+      result["scale"] = static_cast<double>(host.device_scale());
+      result["physical_width"] = static_cast<double>(host.viewport().width * host.device_scale());
+      result["physical_height"] = static_cast<double>(host.viewport().height * host.device_scale());
       return result;
     }
     if (action == "log") {
-      const auto limit = static_cast<std::size_t>(params.get_i64("limit", 50));
-      Value lines = Value::array();
-      for (const auto& line : host.log_lines(limit)) lines.push(Value{line});
-      Value result = Value::object();
-      result.set("lines", std::move(lines));
+      const auto limit = static_cast<std::size_t>(json_get_i64(params, "limit", 50));
+      Json lines = Json::array();
+      for (const auto& line : host.log_lines(limit)) lines.push_back(Json(line));
+      Json result = Json::object();
+      result["lines"] = std::move(lines);
       return result;
     }
     if (action == "focus") {
-      const std::string target = params.get_string("id");
+      const std::string target = json_get_string(params, "id");
       if (target.empty()) return unexpected(ErrorCode::Invalid, "app.focus 需要 id");
       root.set_focus(find_element(target));
-      Value result = Value::object();
-      result.set("ok", true);
+      Json result = Json::object();
+      result["ok"] = true;
       return result;
     }
     return unexpected(ErrorCode::Unsupported, std::format("未知 app 动作: {}", action));
   }
   if (method == "shutdown") {
     host.request_quit();
-    Value result = Value::object();
-    result.set("ok", true);
+    Json result = Json::object();
+    result["ok"] = true;
     return result;
   }
   return unexpected(ErrorCode::Unsupported, std::format("未知方法: {}", method));
@@ -873,6 +1020,23 @@ Server::~Server() { stop(); }
 
 auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
   impl_->options = options;
+  if (options.enable_script) {
+    // 脚本能力的**唯一入口**：只有显式开启才创建引擎、注册宿主函数。
+    // 关闭时 `script` 方法返回 Unsupported，进程里连 JS 运行时都不存在。
+    impl_->script = std::make_unique<ext::ScriptEngine>(options.script_limits);
+    if (!impl_->script->valid()) {
+      impl_->script.reset();
+      return unexpected(ErrorCode::Unsupported, "脚本引擎初始化失败（QuickJS 运行时创建失败）");
+    }
+    auto registered = impl_->register_script_hosts();
+    if (!registered) {
+      impl_->script.reset();
+      return forward_error(registered.error());
+    }
+    log::info("脚本能力已开启（内存上限 {} MiB / 超时 {} ms）",
+              options.script_limits.memory_bytes / (1024U * 1024U),
+              options.script_limits.timeout.count());
+  }
   auto listener = st::net::TcpListener::bind(options.bind, options.port);
   if (!listener) return forward_error(listener.error());
   listener->set_nonblocking(false);
@@ -881,15 +1045,15 @@ auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
   impl_->started_ms = time::now_ms();
 
   if (!options.control_file.empty()) {
-    Value info = Value::object();
-    info.set("port", static_cast<std::uint64_t>(impl_->listener.port()));
-    info.set("pid", static_cast<std::int64_t>(process::executable_path().has_value() ? 0 : 0));
-    info.set("app", impl_->host.app_name());
-    info.set("version", impl_->host.app_version());
-    info.set("backend", std::string(impl_->host.backend_name()));
-    info.set("headless", impl_->host.headless());
-    info.set("protocol", static_cast<std::uint64_t>(kProtocolVersion));
-    if (auto status = json::write_file(options.control_file, info, true); !status) {
+    Json info = Json::object();
+    info["port"] = static_cast<std::uint64_t>(impl_->listener.port());
+    info["pid"] = static_cast<std::int64_t>(process::executable_path().has_value() ? 0 : 0);
+    info["app"] = impl_->host.app_name();
+    info["version"] = impl_->host.app_version();
+    info["backend"] = std::string(impl_->host.backend_name());
+    info["headless"] = impl_->host.headless();
+    info["protocol"] = static_cast<std::uint64_t>(kProtocolVersion);
+    if (auto status = json_write_file(options.control_file, info, true); !status) {
       return forward_error(status.error());
     }
   }
@@ -913,7 +1077,7 @@ void Server::poll() {
   impl_->publish_changes();
 }
 
-void Server::publish(std::string_view event, const Value& data) {
+void Server::publish(std::string_view event, const Json& data) {
   if (!impl_) return;
   impl_->publish_to_clients(event, data);
 }

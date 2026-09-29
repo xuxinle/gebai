@@ -72,10 +72,14 @@ shuangtian/
 ├── src/<层>/*.cpp        # 实现（与头同名优先）
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
-├── examples/{gallery,mdview}/
-├── vendor/<name>/        # stpm vendor 固化的第三方源码（随仓库分发，离线可构建）
+├── examples/{gallery,mdeditor,codeeditor}/
+├── vendor/<name>/        # 第三方源码（nlohmann/json + quickjs-ng）；台账 sources.json +
+│                         # CHECKSUMS.sha256，`sha256sum -c` 可校验（见 vendor/README.md）
 └── docs/                 # 控制协议规范、设计 token 表等
 ```
+
+> `ext/` 层：外部基础设施的适配（JSON 薄封装、脚本引擎）。它与 `core/raster/ui` 的分工是
+> “不值得自己写、但必须控住边界” vs “自己写到底”——详 §6.6。
 
 ## 4. 关键接口
 
@@ -387,6 +391,7 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | `events` | `{enable, kinds?}` | `{enabled, kinds}` | 订阅：`ui.changed` `frame` `input` `log` `theme` |
 | `theme` | `{mode?}` | `{mode, tokens}` | 读/切主题（`light`/`dark`/`system`） |
 | `app` | `{action, args?}` | `{ok}` | `resize` `quit` `reload` `screenshot_dir` `title` |
+| `script` | `{code?, function?, args?, filename?}` | `{result, ops?, memory?}` | **默认禁用**（需 `--enable-script`）。`code` 直接执行；或 `function`+`args` 调用已定义函数；受内存/栈/时长/转换深度四重配额 |
 | `shutdown` | `{graceful?}` | `{ok}` | 关闭服务（应用退出） |
 
 ### 6.3 选择器语法
@@ -408,13 +413,65 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 
 ### 6.5 安全
 - 默认只绑 `127.0.0.1`；`--control-bind` 显式才会监听其他地址。
-- 无任意代码执行入口（**没有** `eval`；只有数据与动作）。
+- **默认无任意代码执行入口**：`script` 方法默认不存在，需宿主应用以 `--enable-script`
+  （`AppOptions::enable_script`）显式开启；开启后仍受四重配额（内存/栈/时长/转换深度）约束，
+  且脚本只能看到**显式注册**的宿主函数（本框架只注册界面操作与日志，无文件/网络/进程）。
+  开启与未开启时 `hello` 的 `capabilities` 如实反映差异。
 - 控制通道的每次调用在应用侧日志留痕（`log` 级别 `info`，含 method 与耗时）。
+
+## 6.6 扩展层（`ext`）：JSON 与脚本
+
+`ext` 是**外部基础设施的适配层**，与自研的 `core/raster/text/ui` 分层明确：这里放的是
+“不值得自己写、但必须控住边界”的能力。两个模块，两种姿态：
+
+**`st/ext/json.hpp`（必需）**——基于 nlohmann/json 的**薄封装**，不是重新实现 JSON。
+封装存在的唯一理由是**把 nlohmann 的抛异常接口收敛成 `Result` 风格**
+（本框架不设通用异常边界，抛出去就是 `std::terminate`）：
+
+| 面 | 接口 | 语义 |
+|---|---|---|
+| 解析/写盘 | `json_parse` / `json_parse_file` / `json_write_file` | 失败即 `Result`；解析前先做**嵌套深度预检**（上限 128，防递归下降爆栈）、失败时用抛出式解析取**字节/行列位置**再翻译成错误 |
+| 读取 | `json_get_*` / `json_find` / `json_at` / `json_path` | **永不抛**：类型不符或键缺失退化为默认值/null 节点（“配置写错不该让进程崩”） |
+| 构造 | 直接用 nlohmann 原生（`Json::object()` / `obj["k"]=v`） | 不再包一层 |
+
+类型用 `ordered_json`（**保留键插入顺序**）：清单与 lock 文件要被人读、被 git diff，
+排序会让一次无关的读取-回写产生满屏 diff。
+
+**为什么换掉自研实现**（实测，非偏好）：旧实现在 `src/core/json.cpp` 里把**所有数字统一存 `double`**，
+于是 `9007199254740993`(2^53+1) 写成 `…992`、雪花 ID `1234567890123456789` 变 `1.2345678901234568e+18`
+且 `as_i64()` 差 21；`1.0` 被吞成 `1`、`-0` 变 `0`（整型/浮点语义不保真）；而且它**没有任何单测**。
+换成 nlohmann 后整数/浮点分型存储，三个失真点全部消失，并顺带获得成熟测试与 fuzz 覆盖。
+
+**`st/ext/script.hpp`（可选）**——嵌入式 JS（QuickJS）。定位是“界面逻辑的表达层”：
+主题计算、批量属性变换、联动规则这些“用代码写比用配置写短”的场景。
+
+- **能力边界是设计出来的**：上游的 `quickjs-libc.c`（`std`/`os` 模块：文件/进程/socket）
+  **已从 `vendor/` 剔除**，脚本里不存在 "require('os')" 这种东西；
+- **四重配额在运行时层强制**（不是入口处检查参数）：内存上限、栈上限、
+  中断回调按截止时间打断（死循环不会挂死调用方）、JSON↔JS 转换深度（挡循环引用）；
+- **宿主函数只来自显式注册**，且失败对脚本是**可捕获异常**（脚本能区分“成功且返回空”与“失败了”）；
+- 数值语义：能被 `double` 精确表示的整数保持整数（`{"line":3}` 不会变 `3.0`）；
+  `NaN`/`Infinity` 与函数值**明确报错**而不是静默变 `null`；超出 `int64` 的 `BigInt` 退回字符串保真
+  （不能用 `JS_ToBigInt64` 判溢出——它超范围时照样返回“成功”并给出截断值）。
+
+接入界面只需三步（示例 `codeeditor --enable-script`）：
+
+```bash
+codeeditor --enable-script        # 1. 显式开启（默认关闭）
+# 2. 控制通道里执行脚本
+#    {"method":"script","params":{"code":"ui_set('status',{text:'脚本已驱动界面 ✓'})"}}
+# 3. 回读验证：{"method":"get","params":{"id":"status"}} → props.text
+```
+
+脚本可用的宿主函数：`ui_get(id)`（元素快照，与控制通道 `get` **同一份实现**）、
+`ui_find(selector)`、`ui_set(id, props)`（与 `set` 同一份实现）、`ui_invoke(id, action)`、`log(...)`。
 
 ## 7. 包管理（stpm）
 
 ### 7.1 定位
-自研包管理器：**框架本体零第三方依赖**，但框架之上/后续引入的第三方**源码**由 stpm 统一管理——不依赖系统包管理器、不用 CMake/Make、不下载二进制（源码级 vendor 优先，保证可审计与可离线）。
+自研包管理器：不依赖系统包管理器、不用 CMake/Make、不下载二进制（源码级 vendor 优先，保证可审计与可离线）。
+框架本体除 `vendor/` 下两个登记在册的依赖（nlohmann/json、quickjs-ng）外**全部自研**；
+第三方**源码**统一由 stpm 管理：版本求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直驱编译。
 
 ### 7.2 清单 `st.pkg`（JSON）
 ```json
@@ -424,15 +481,18 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
   "kind": "static_library",
   "cxx_standard": 20,
   "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "gpu", "control", "app"],
-  "include_dirs": ["include"],
+  "include_dirs": ["include", "vendor"],
   "sources": ["src/**/*.cpp"],
+  "vendor_sources": ["vendor/quickjs/*.c"],
+  "c_flags": ["-std=gnu11"],
   "tests": ["tests/*_test.cpp"],
   "flags": ["-fno-strict-aliasing"],
   "defines": ["ST_VERSION=\"0.1.0\""],
   "targets": {
     "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"] },
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"] },
-    "mdview": { "kind": "executable", "sources": ["examples/mdview/*.cpp"] }
+    "mdeditor": { "kind": "executable", "sources": ["examples/mdeditor/*.cpp"] },
+    "codeeditor": { "kind": "executable", "sources": ["examples/codeeditor/*.cpp"] }
   },
   "dependencies": {
     "modules": [],
@@ -441,6 +501,16 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
   }
 }
 ```
+
+两个字段专门服务第三方源码：
+
+- **`vendor_sources`**：第三方翻译单元清单。这些单元**不套本工程的告警集（`-w`）、不进 PCH、
+  不做 sanitizer 插桩**。理由：我们负责自家代码的质量，不负责上游的；
+  不插桩还避免了“65k 行的 `quickjs.c` 在 `-O1`+ASan 下单文件就要 GB 级内存，并行构建被 OOM 杀掉”。
+  混编不影响对我们的检测能力——ASan 的分配器是全局的。
+- **`c_flags`**：C 源专用标志（默认 `-std=gnu11`）。**C 标志与 C++ 标志彻底分开**：
+  `flags` 里的 `-Wnon-virtual-dtor`/`-Woverloaded-virtual` 是 C++ 专属，喂给 C 会直接报错。
+  两者都得不到 `-std` 串味，`-x c` 保证同一个编译器二进制即可编 C，无需第二套工具链。
 - `source` 依赖项：`{ "name": "...", "version": "^1.2", "source": {"kind":"path|http|git-tarball","url":"..."}, "sha256": "...", "build": {...} }`
 - `system` 仅声明链接/加载项（`dl`/`pthread`/`m`），**不是第三方源码依赖**。
 
@@ -455,11 +525,17 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 - 工作区：项目 `.st/work/`（依赖解包与中间产物）；`st vendor` 把依赖源码树固化进 `vendor/<name>/` + `vendor.lock`（**随仓库分发、离线可构建**）。
 - 构建集成：依赖以 **声明式** `st.build` 规则（源文件/包含目录/宏/产出）纳入构建图——**不执行任意脚本**。
 - 隔离：每个依赖独立 include 根与独立中间目录；多版本共存按目录隔离。
+- **手写 vendor 台账**：不是所有依赖都走 stpm 上架。对直接引入源码树的库（如本框架的
+  nlohmann/json 与 quickjs-ng），在 `vendor/sources.json` 登记版本/来源 URL/许可/SHA-256/
+  **剔除清单**，并生成 `CHECKSUMS.sha256`——`cd vendor && sha256sum -c CHECKSUMS.sha256`
+  一命令回答“依赖了什么、什么版本、有没有被就地改过”。升级流程写在 `vendor/README.md`。
 
 ### 7.5 构建图与直驱编译器
 - `st build [target]`：解析清单 → 拓扑排序（依赖先编）→ 生成编译命令 → **直接调用 `g++`/`clang++`**（`-MMD -MF` 依赖文件 + 增量判新旧）。
 - 产物：`build/<profile>/<target>/…`；`profile` ∈ `debug` / `release` / `san`。
 - 并行：按 `nproc` 并行编译单元（自研 job 池，`std::jthread`）。
+- **按语言分派标志**：`.c` 走 `c_flags`+`-x c`（C 语言标准与 C++ 标志集互不串味），其余走 C++ 标志集；
+  C 源不吃 PCH；第三方单元额外 `-w` 且剥掉 sanitizer 插桩（见 §7.2 两个字段的说明）。
 
 ### 7.5.1 编译效率（工程化硬指标）
 
@@ -554,8 +630,17 @@ state      := visible | hidden | focused | enabled | disabled | checked | select
 | 14 | 根页面里的 `grow` 失效（整页缩在上半截） | `UiRoot::layout` 按内容**自然高度**排布根节点，根层的 `grow` 没有可分配空间 | 根内容按「至少铺满视口」排布（内容更高时保持自然高度） |
 | 15 | 自定义语言的"定义关键字"（`fn`/`def`）着色静默失效 | 扫描器只在**关键字表**里查，未查 `definition_keywords` | 命中定义关键字同样按关键字着色（它同时是"其后标识符是函数名"的判定依据） |
 | 16 | Ctrl+←/→ 按词移动会停在空白处（"回退到词首"落空一格） | 词移动实现只做单步跳过，未先跳过空白再找词边界 | 向左停在词首、向右停在词尾之后（与主流编辑器一致） |
+| 17 | 控制通道 `input.mouse` 直接**终止进程**（nlohmann `at()` 抛异常，无异常边界 → terminate） | JSON 迁移时按“首参是字符串字面量”启发式改写 `at()`，`params.at(name)`（变量键）被漏掉；而修饰键本就是可选的 | 改用 `json_at`；新增 lint 规则 **L12** 机械拦住同类写法（见 §8） |
+| 18 | 脚本里 `ui_get('editor').props` 为空 | `ui_get` 只返回元素基本信息，属性面只在控制通道 `get` 里拼装——同一元素两条路径两个样 | 抽出 `element_snapshot`，`get` 与 `ui_get` 共用 |
+| 19 | 内存受限时的错误消息是空洞的 `null` | 内存耗尽时 QuickJS 连异常对象都建不出来（构造它也要分配内存） | 识别该情况，直接给出“通常是内存超限：上限 N MiB”与实测值 |
+| 20 | 函数返回值静默变成 `{}` / 超大 `BigInt` 被静默截断 | 转换顺序上函数被当作“无键对象”；`JS_ToBigInt64` 超范围时仍返回成功并给出截断值 | 函数提前识别并报错；BigInt 改按十进制文本 + `from_chars` 精确判定，超范围退回字符串 |
+| 21 | 名字骗人：`max_ops` 声称“指令数”，实际是中断回调次数（且默认量级下永远等不到） | QuickJS 在 VM 周期里回调中断钩子，频度实测约 2 千次/秒，与“CPU 指令数”不是一回事 | 改名 `max_interrupts` 并在文档中写明它是粗粒度兜底（时长控制的主力是 `timeout`） |
 
-**方法论**：这十条里没有一条能从"读代码"看出，全部来自「无头运行 + 控制通道观察 + 截图核验 + ASan 复跑」的闭环。
+**方法论**：这十六条里没有一条能从"读代码"看出，全部来自「无头运行 + 控制通道观察 + 截图核验 + ASan 复跑」的闭环。
+
+第 17 条尤其值得记下：它是**引入成熟第三方库时新增的风险面**——“上游抛异常”与本框架
+“不设通用异常边界、错误经 Result 返回”的契约正面冲突。对策不是“小心点”，而是
+① 用一层薄封装把抛异常接口收敛掉，② 加一条 lint 规则把漏网写法机械拦住。
 这也是霜天把"可被智能体驱动"作为一等需求的原因——**能被自动观察和操作的界面，才有资格被自动开发**。
 
 ## 8.3 验证体系（一个可被智能体开发的框架，自己也要可被验证）

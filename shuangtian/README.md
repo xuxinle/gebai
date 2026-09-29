@@ -2,9 +2,19 @@
 
 > 霜天曉角：清冽、开阔、万物自明。
 >
-> **C++20 · 零第三方依赖 · 全自绘 · 软硬件渲染兼容 · 支持无头模式 · TCP 控制通道**
+> **C++20 · 自研实现为体（仅两个可选外部依赖）· 全自绘 · 软硬件渲染兼容 · 支持无头模式 · TCP 控制通道**
 
-霜天是歌白的**原生躯体**：不依赖系统控件、不依赖桌面环境、不依赖第三方库，把"窗口 + 组件 + 绘制 + 字体 + 文本 + 输入 + 远控"这一整套从零做起，并对外提供一条 TCP 控制通道，让智能体可以像操作浏览器一样操作原生应用。
+霜天是歌白的**原生躯体**：不依赖系统控件、不依赖桌面环境，把"窗口 + 组件 + 绘制 + 字体 + 文本 + 输入 + 远控"这一整套从零做起，并对外提供一条 TCP 控制通道，让智能体可以像操作浏览器一样操作原生应用。
+
+外部依赖只有两个，且都在 `vendor/`（版本/来源/许可/SHA-256 全程台账，`sha256sum -c` 可校验）：
+
+| 依赖 | 用途 | 性质 |
+|---|---|---|
+| [nlohmann/json](https://github.com/nlohmann/json) 3.12.0 | JSON 解析/序列化（清单、锁文件、控制通道协议） | 必需（单头） |
+| [quickjs-ng](https://github.com/quickjs-ng/quickjs) 0.17.0 | 应用内脚本层（可选能力，**默认关闭**） | 可选 |
+
+渲染、字体（TTF/OTF/CID 解析与整形）、文本布局、Markdown、组件库、包管理器与构建驱动**全部自研**——
+引入的只是两块"不值得自己写"的基础设施。详见 `CONVENTIONS.md` §3.8 与 `vendor/README.md`。
 
 ## 它解决什么问题
 
@@ -29,7 +39,8 @@ shuangtian/
 ├── README.md        # 本文件
 ├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / mdeditor / st 自身）
 ├── bootstrap.sh     # 自举：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
-├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,gpu}/
+├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
+├── vendor/              # 第三方源码（nlohmann/json + quickjs-ng，见 vendor/README.md 与台账）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
 ├── examples/gallery/    # 示例一：组件集 / 设计系统巡检
 ├── examples/mdeditor/   # 示例二：Markdown 编辑器（含四个自绘定制组件）

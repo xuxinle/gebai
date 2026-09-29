@@ -27,7 +27,7 @@ Bun workspaces + Turborepo 的 Monorepo：
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制 |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `dist/gebai-desktop.exe`（`launcher/`：tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制；构建期可参数化产出场景变体） |
 
-- **原生桌面框架 霜天**：仓库根 `shuangtian/`（与 `custom/`、`keqing/` 平级）——C++20、零第三方依赖、全自绘、支持无头模式，对外提供 TCP 控制通道（协议 `st-control/1`）。自研工具链 `st`（`bootstrap.sh` 自举）负责构建/测试/禁令扫描，不依赖 CMake/Make/ccache。由 `shuangtian` 子代理驱动（开发闭环见 `DESIGN.md`「`shuangtian`（霜天原生桌面框架与智能体操控）」）。**注意**：`shuangtian/build/` 是构建产物目录，不要提交；改动框架代码后按提示跑 `st test` 与 `st lint`。
+- **原生桌面框架 霜天**：仓库根 `shuangtian/`（与 `custom/`、`keqing/` 平级）——C++20、全自绘、支持无头模式，对外提供 TCP 控制通道（协议 `st-control/1`）。**外部依赖仅两个且均在 `vendor/` 并登记台账**（nlohmann/json 必需、quickjs-ng 可选且默认关闭）；其余（渲染/字体/文本/Markdown/组件库/包管理与构建驱动）全部自研。自研工具链 `st`（`bootstrap.sh` 自举）负责构建/测试/禁令扫描，不依赖 CMake/Make/ccache。由 `shuangtian` 子代理驱动（开发闭环见 `DESIGN.md`「`shuangtian`（霜天原生桌面框架与智能体操控）」）。**注意**：`shuangtian/build/` 是构建产物目录，不要提交；改动框架代码后按提示跑 `st test`、`st test --san` 与 `st lint`。
 - **二次开发域**：仓库根 `custom/`（`custom/agents/` 子代理定义 + `custom/core/` 依赖组件 + `custom/web/` 前端脚本，与 `packages/` 平级）——放置即注册、同名覆盖内置；上游更新时整个目录拷到新仓库根即完成迁移。
 - **随包分发的大体积资源**：两类落点，均**不依赖用户系统安装**——① `resources/` 资源子仓库（独立 git 仓库，`{GEBAI_HOME}/resources/`，见其 `README.md`）存模型与运行时依赖——主仓库带下载清单与脚本（`scripts/resources.manifest.json` + `scripts/download-resources.ts`，`bun run resources:download`：多源 modelscope/huggingface/镜像 + sha256 校验），按清单自动拉取即得同构目录，无需克隆子仓库；② 构建期内嵌产物（`*.embedded.generated.json`，gzip base64，已 gitignore）+ 运行时释放到 `{GEBAI_HOME}/vendor/<name>/`（d2js / playwright driver）与资源目录 `{GEBAI_HOME}/resources/vendor/cv/`（CV 运行时）。**内置 ripgrep**（`grep`/`glob` 的 rg 引擎）**只走后者**（内嵌产物）——来源收敛为「npm 包」与「系统」两条，`resources/` 刻意不存第二份二进制副本；解析链与双引擎对齐规则见 `DESIGN.md`「内置 ripgrep」，重新生成用 `bun run --cwd packages/server build:rg`（取 rg 顺序：`GEBAI_RG_PATH` → node_modules 的 `@vscode/ripgrep`（`optionalDependencies`，经 npm registry 分发平台子包，拉不到不阻断 `bun install`）→ 系统 `PATH`；不落盘资源、不联网下载）。
 - 语言：TypeScript，运行时 Bun。
@@ -61,12 +61,13 @@ bun run typecheck:scripts  # 只检根 scripts/（仓库级构建/下载脚本�
 bun run lint
 
 # 霜天（原生桌面框架，C++20；与 TS 侧测试相互独立）
-(cd shuangtian && ./bootstrap.sh)                    # 自举工具链（首次/工具链改动后；8 路并行）
-(cd shuangtian && ./build/bin/st build mdeditor --profile dev)   # 构建示例（增量：改一文件约 3s）
-(cd shuangtian && ./build/bin/st test)               # 框架单元测试（102 项 / 2018 断言）
+(cd shuangtian && ./bootstrap.sh)                    # 自举工具链（首次/工具链改动后）
+(cd shuangtian && ./build/bin/st build codeeditor --profile dev) # 构建示例（增量：改一文件约 3s）
+(cd shuangtian && ./build/bin/st test)               # 框架单元测试
 (cd shuangtian && ./build/bin/st test --san)         # ASan + UBSan 档（发现 UB 即视为 bug）
 (cd shuangtian && ./build/bin/st lint)               # 禁用特性静态扫描（须 0 违规；豁免在 CONVENTIONS §8 登记）
-(cd shuangtian && python3 tools/st_visual_check.py)  # 无头视觉验证：两档 × 两示例全序列 + 截图 + sanitizer 报告检查
+(cd shuangtian && python3 tools/st_visual_check.py)  # 无头视觉验证：两档 × 三示例全序列 + 截图 + sanitizer 报告检查
+(cd shuangtian/vendor && sha256sum -c CHECKSUMS.sha256)  # 第三方源码未被就地修改（台账见 sources.json）
 
 # 端到端验证（Playwright + Chromium，不进 bun test：需要一份在跑的服务端与真终端会话）
 bun run e2e:term         # 文件工作台终端：尺寸/折行/配色/搜索/键位/标签/粘贴/关闭确认/刷新接管（31 项）

@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
-#include "st/core/json.hpp"
+#include "st/ext/json.hpp"
 
 namespace st::pkg {
 
@@ -40,10 +40,10 @@ struct SourceSpec {
 /// 解析来源类型短名；未知名称返回 `Parse`。
 [[nodiscard]] auto parse_source_kind(std::string_view text) -> Result<SourceSpec::Kind>;
 /// 来源规格 → JSON 对象（`{"kind","location","sha256"}`）。
-[[nodiscard]] auto source_to_json(const SourceSpec& spec) -> st::Value;
+[[nodiscard]] auto source_to_json(const SourceSpec& spec) -> st::Json;
 /// 从对象解析来源规格：支持 `{"kind","location"|"url","sha256"}` 平铺形式，
 /// 以及 `{"source":{...},"sha256":"..."}` 嵌套形式（嵌套缺 `sha256` 时取外层）。
-[[nodiscard]] auto source_spec_from_object(const st::Value& json) -> Result<SourceSpec>;
+[[nodiscard]] auto source_spec_from_object(const st::Json& json) -> Result<SourceSpec>;
 
 /// 第三方源码依赖项。
 struct DependencySpec {
@@ -71,15 +71,25 @@ struct Manifest {
   std::vector<std::string> modules{};
   std::vector<std::string> include_dirs{};
   std::vector<std::string> sources{};  ///< 支持 glob（`src/**/*.cpp`）
+  /// 第三方源码 glob（`vendor/**`）：这些翻译单元**不套用本工程的严格告警集**（`-w`），也不进 PCH。
+  /// 理由：第三方码不是我们的代码，`-Werror` 会让"升级上游"变成"改上游"——违背 vendor 的可追溯原则。
+  std::vector<std::string> vendor_sources{};
   std::vector<std::string> tests{};
   std::vector<std::string> flags{};
+  /// C 源（`.c`）专用标志（默认 `-std=gnu11`）；C 源不得用 `-std=c++20` 编。
+  std::vector<std::string> c_flags{};
   std::vector<std::string> defines{};
   std::vector<std::string> system_libs{};
   std::vector<TargetSpec> targets{};
   std::vector<DependencySpec> dependencies{};     ///< 第三方源码依赖
   std::vector<std::string> dependency_modules{};  ///< dependencies.modules
   std::vector<std::string> dependency_system{};   ///< dependencies.system
-  st::json::Object extra_fields{};                ///< 未识别顶层字段（回写保留，互操作用）
+  /// 未识别顶层字段（回写保留，互操作用）。
+  ///
+  /// 必须用 `=` 拷贝初始化：写成 `st::Json extra_fields{st::Json::object()}` 会命中
+  /// nlohmann 的 initializer_list 构造，得到「含一个空对象的**数组**」而非对象，
+  /// 之后按对象使用即抛 `type_error.305`——花括号在 nlohmann 里是「造数组」的信号。
+  st::Json extra_fields = st::Json::object();
 
   /// 查目标（不存在返回 nullptr；返回指针非拥有，生命周期同本清单）。
   [[nodiscard]] auto find_target(std::string_view target_name) const -> const TargetSpec*;
@@ -88,14 +98,16 @@ struct Manifest {
   [[nodiscard]] auto source_files() const -> Result<std::vector<std::string>>;
   /// 展开 `tests` 的 glob（语义同 `source_files`）。
   [[nodiscard]] auto test_files() const -> Result<std::vector<std::string>>;
+  /// 展开 `vendor_sources` 的 glob（第三方源码：放宽告警、不进 PCH）。
+  [[nodiscard]] auto vendor_files() const -> Result<std::vector<std::string>>;
   /// 解析清单 JSON；`directory` 为清单所在目录（绝对路径）。错误：`Parse`。
-  static auto parse_json(const st::Value& json, std::string_view directory) -> Result<Manifest>;
+  static auto parse_json(const st::Json& json, std::string_view directory) -> Result<Manifest>;
   /// 读取 `st.pkg` 文件（`path` 为文件路径）。错误：`NotFound`/`Io`/`Parse`。
   static auto load(std::string_view path) -> Result<Manifest>;
   /// 在目录里查找 `st.pkg` 并读取。错误：`NotFound`（无清单）/`Io`/`Parse`。
   static auto find(std::string_view directory) -> Result<Manifest>;
   /// 序列化为清单 JSON（含 `extra_fields`；不写出 `directory`）。
-  [[nodiscard]] auto to_json() const -> st::Value;
+  [[nodiscard]] auto to_json() const -> st::Json;
   /// 写出清单文件（pretty JSON）。错误：`Io`。
   static auto write(std::string_view path, const Manifest& manifest) -> Status;
 };

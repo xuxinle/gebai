@@ -13,7 +13,7 @@
 #include "st/core/error.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
-#include "st/core/json.hpp"
+#include "st/ext/json.hpp"
 #include "st/core/string.hpp"
 #include "st/pkg/manifest.hpp"
 #include "st/pkg/registry.hpp"
@@ -90,13 +90,13 @@ namespace {
 
 [[nodiscard]] auto write_origin(const std::string& entry, const SourceSpec& spec,
                                 const std::string& key, const std::string& origin) -> Status {
-  st::Value json = st::Value::object();
-  json.set("key", st::Value(key));
-  json.set("kind", st::Value(source_kind_name(spec.kind)));
-  json.set("location", st::Value(spec.location));
-  json.set("origin", st::Value(origin));
-  json.set("sha256", st::Value(key));
-  return st::json::write_file(st::fs::join(entry, "origin.json"), json, true);
+  st::Json json = st::Json::object();
+  json["key"] = key;
+  json["kind"] = std::string(source_kind_name(spec.kind));
+  json["location"] = spec.location;
+  json["origin"] = origin;
+  json["sha256"] = key;
+  return json_write_file(st::fs::join(entry, "origin.json"), json, true);
 }
 
 /// 归档扩展名（用于给出精确的「待 codec」提示）。
@@ -345,10 +345,10 @@ auto vendor_packages(const std::vector<FetchedPackage>& packages, std::string_vi
     return forward_error(created.error());
   }
 
-  st::Value lock = st::Value::object();
-  lock.set("format", st::Value(1));
-  lock.set("vendor_root", st::Value(std::string(vendor_root)));
-  st::Value items = st::Value::array();
+  st::Json lock = st::Json::object();
+  lock["format"] = 1;
+  lock["vendor_root"] = std::string(vendor_root);
+  st::Json items = st::Json::array();
   for (const auto& fetched : packages) {
     const std::string& name = fetched.package.name;
     if (!detail::is_safe_package_name(name)) {
@@ -368,31 +368,31 @@ auto vendor_packages(const std::vector<FetchedPackage>& packages, std::string_vi
       return forward_error(copied.error());
     }
 
-    st::Value item = st::Value::object();
-    item.set("name", st::Value(name));
-    item.set("version", st::Value(fetched.package.version.to_string()));
-    item.set("source", source_to_json(fetched.package.source));
-    item.set("sha256", st::Value(fetched.sha256.empty() ? fetched.package.sha256 : fetched.sha256));
-    item.set("directory", st::Value(name));
-    st::Value dependencies = st::Value::array();
+    st::Json item = st::Json::object();
+    item["name"] = name;
+    item["version"] = fetched.package.version.to_string();
+    item["source"] = source_to_json(fetched.package.source);
+    item["sha256"] = fetched.sha256.empty() ? fetched.package.sha256 : fetched.sha256;
+    item["directory"] = name;
+    st::Json dependencies = st::Json::array();
     for (const auto& dependency : fetched.package.dependencies) {
-      dependencies.push(st::Value(dependency));
+      dependencies.push_back(dependency);
     }
-    item.set("dependencies", dependencies);
-    items.push(item);
+    item["dependencies"] = dependencies;
+    items.push_back(item);
   }
-  lock.set("packages", items);
-  return st::json::write_file(st::fs::join(vendor_root, "vendor.lock"), lock, true);
+  lock["packages"] = items;
+  return json_write_file(st::fs::join(vendor_root, "vendor.lock"), lock, true);
 }
 
 auto lock_write(std::string_view path, const ResolvedGraph& graph) -> Status {
-  return st::json::write_file(path, graph_to_json(graph), true);
+  return json_write_file(path, graph_to_json(graph), true);
 }
 
 auto lock_read(std::string_view path) -> Result<ResolvedGraph> {
   const auto text = st::fs::read_text(path);
   if (!text) return forward_error(text.error());
-  const auto json = st::json::parse(*text);
+  const auto json = st::json_parse(*text);
   if (!json) {
     return unexpected(json.error().code, std::format("锁文件解析失败（{}）：{}", std::string(path),
                                                      json.error().message));

@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "st/core/error.hpp"
-#include "st/core/json.hpp"
+#include "st/ext/json.hpp"
 #include "st/pkg/manifest.hpp"
 #include "st/pkg/semver.hpp"
 
@@ -36,7 +36,7 @@ class Registry {
   /// 错误：`Invalid`（地址为空）、`Unsupported`（`https://` 缺 TLS）、`NotFound`/`Io`、`Parse`（JSON 非法）。
   static auto load(std::string_view location) -> Result<Registry>;
   /// 解析索引 JSON（`location` 仅作为 `location()` 的返回值）。错误：`Parse`。
-  static auto parse_json(const st::Value& json, std::string_view location) -> Result<Registry>;
+  static auto parse_json(const st::Json& json, std::string_view location) -> Result<Registry>;
 
   /// 某包的全部可用版本（降序；无该包返回空）。
   [[nodiscard]] auto versions(std::string_view name) const -> std::vector<Version>;
@@ -81,8 +81,8 @@ auto resolve(const std::vector<DependencySpec>& roots, const Registry& registry,
              const DependencyProvider& provider) -> Result<ResolvedGraph>;
 
 /// 锁定图 → JSON（`st.lock`，含 `lock_version` 与 `build_fingerprint`）。
-[[nodiscard]] auto graph_to_json(const ResolvedGraph& graph) -> st::Value;
+[[nodiscard]] auto graph_to_json(const ResolvedGraph& graph) -> st::Json;
 /// JSON → 锁定图（`build_fingerprint` 不参与读入，由 `graph_to_json` 按内容重算）。错误：`Parse`。
-[[nodiscard]] auto graph_from_json(const st::Value& json) -> Result<ResolvedGraph>;
+[[nodiscard]] auto graph_from_json(const st::Json& json) -> Result<ResolvedGraph>;
 
 }  // namespace st::pkg

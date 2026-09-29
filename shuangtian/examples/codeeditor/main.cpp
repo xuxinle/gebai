@@ -225,6 +225,7 @@ struct Options {
   std::uint32_t frames{0};
   int max_ms{0};
   bool headless{false};
+  bool enable_script{false};
   std::string theme{"light"};
   std::string language{"cpp"};
 };
@@ -245,6 +246,7 @@ struct Options {
     else if (raw == "--theme") options.theme = value("light");
     else if (raw == "--language") options.language = value("cpp");
     else if (raw == "--headless") options.headless = true;
+    else if (raw == "--enable-script") options.enable_script = true;
   }
   return options;
 }
@@ -263,6 +265,8 @@ auto main(int argc, char** argv) -> int {
   app_options.title = "霜天 · 代码编辑器";
   app_options.headless = options.headless;
   app_options.backend = options.headless ? "headless" : std::string{};
+  // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
+  app_options.enable_script = options.enable_script;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;

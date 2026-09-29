@@ -24,10 +24,13 @@ def launch(profile: str, app: str) -> tuple[int, subprocess.Popen]:
     if os.path.exists(ctl):
         os.remove(ctl)
     log = open(log_path, "wb")
-    process = subprocess.Popen(
-        [f"{ROOT}/build/{profile}/bin/{app}", "--headless", "--control-port", "0",
-         "--control-file", ctl, "--shots", SHOTS],
-        stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    command = [f"{ROOT}/build/{profile}/bin/{app}", "--headless", "--control-port", "0",
+               "--control-file", ctl, "--shots", SHOTS]
+    if app == "codeeditor":
+        # 脚本能力默认关闭；codeeditor 支持 `--enable-script`，这里显式开启以便覆盖该路径
+        command.append("--enable-script")
+    process = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                               start_new_session=True)
     for _ in range(160):
         if os.path.exists(ctl):
             try:
@@ -83,6 +86,10 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
             ("input.text", {"text": "霜天 · DPI 与流式",
                             "id": {"mdeditor": "editor", "gallery": "input-search", "codeeditor": "editor"}[app]}),
             ("wait", {"for": "stable", "timeout_ms": 2000}),
+            # 脚本路径（仅 codeeditor 开启）：脚本读界面 → 改界面 → 触发动作。
+            # 放在"主题切换"之前：改完文本紧接着截图，人眼能立刻确认脚本真的生效了。
+            *([("script", {"code": "ui_set('status', {text: '脚本已驱动界面 ✓'}); "
+                                   "ui_get('editor').type"})] if app == "codeeditor" else []),
             ("theme", {"mode": "dark"}),
             ("capture", {"encode": "file", "path": f"{SHOTS}/{app}-{profile}-dark.png"}),
             ("app", {"action": "set_scale", "scale": 2.0}),

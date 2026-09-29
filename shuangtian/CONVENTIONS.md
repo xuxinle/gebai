@@ -80,6 +80,37 @@ inline constexpr Result<Unit> ok();          // 无值成功
 - 格式化一律 `std::format`。
 - 路径用 `st::Path`（封装 `std::filesystem::path`，隔离平台差异）。
 
+### 3.8 JSON 与外部依赖
+
+**JSON 一律走 `st/ext/json.hpp` 的封装面**，不直接调用 nlohmann 的原生接口：
+
+| 场景 | 允许 | 禁止（会抛异常或语义不保真） |
+|---|---|---|
+| 解析 | `st::json_parse` / `json_parse_file` | `Json::parse`（抛 parse_error） |
+| 写盘 | `st::json_write_file` | `Json::dump` 直接写文件（非法 UTF-8 会抛） |
+| 读键 | `json_get_string/i64/double/bool/string_array`、`json_find`、`json_at`、`json_path` | `Json::at()`（L12）、`Json::value()`、const `operator[]`（键缺失是 UB） |
+| 查键存在 | `json_find(x,"k") != nullptr`、`x.contains("k")` | —— |
+| 构造 | nlohmann 原生（`Json::object()` / `obj["k"] = v` / `push_back`） | —— |
+
+两条容易踩的坑（都有实际事故）：
+
+1. **`at()` 会终止进程**。nlohmann 的 `at()` 在键缺失时抛 `out_of_range`，而本框架**不设通用异常边界**，
+   于是它直接冒泡成 `std::terminate`（曾因鼠标事件的修饰键缺席把整个应用干掉）。一律用 `json_at`。
+2. **花括号是“造数组”信号**。`Json x{Json::object()}` 会命中 `initializer_list` 构造，
+   得到「含一个空对象的数组」而不是对象（曾导致控制通道响应构造失败）。要么用 `=` 拷贝初始化，
+   要么用 `Json::object()` 直接初始化。
+
+**第三方源码纪律**（`vendor/`）：
+
+- 只准**原样引入**，不得就地修补——要改就升级版本（否则失去可追溯性）；
+- 每个依赖在 `vendor/sources.json` 登记版本/来源/许可/SHA-256/剔除清单，并可用 `sha256sum -c CHECKSUMS.sha256` 校验；
+- 第三方翻译单元**不套本工程的告警集（`-w`）、不进 PCH、不做 sanitizer 插桩**——
+  我们负责自家代码的质量，不负责上游的；混编不影响 ASan 对我们的检测能力（分配器是全局的）；
+- C 源用 `-x c -std=gnu11` 编译（同一个编译器二进制，不引入第二套工具链），标志集与 C++ 分离。
+
+**脚本能力（QuickJS）的姿态**：默认关闭，须显式开启；不提供任何系统访问
+（`quickjs-libc.c` 已剔除）；内存/栈/时长/转换深度四重配额在运行时层强制。
+
 ## 4. 编译强制集（写进 `st.pkg`）
 
 ```text
@@ -144,6 +175,7 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 | L9 | `\.detach\s*\(`、`\.lock\s*\(`（裸互斥） | 无 |
 | L10 | 单参构造缺 `explicit`（提示级，不导致失败） | `// lint-allow: L10 原因` |
 | L11 | `\bstd::endl\b` | 无 |
+| L12 | `\.at\s*\(`（键缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`，容器用 `find`） |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。
@@ -155,6 +187,9 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 | L6 | `platform_*.cpp`、`simd*.cpp/.hpp` | 系统 API 与 SIMD intrinsics 的位级重解释只能在这里发生（单点封装） |
 | L3 | `include/st/test/test.hpp` | 断言宏需要在调用点取得文件/行号与表达式原文，是函数式宏唯一被认可的用途 |
 | L10 | 逐行 `// lint-allow: L10 …` | `Result`/`Value` 的隐式值构造是刻意设计（与 `std::expected` 一致） |
+
+> L12 只收 `.at(` 而不收 `.value()`：`value()` 是自有组件的常见 getter 名（`Slider::value()` 等），
+> 文本级规则无法区分接收者类型，收进来会天天误报。Json 上的 `.value()` 由 §3.8 的约定与评审把关。
 
 `st lint --explain <rule>` 打印规则详情。lint 亦检查**文件布局**（头/实现同名、目录归属）与**禁用 include**（`<windows.h>`/`<X11/Xlib.h>` 只能出现在 `platform_*`）。
 

@@ -13,7 +13,8 @@
 #include <vector>
 
 #include "st/core/error.hpp"
-#include "st/core/json.hpp"
+#include "st/ext/json.hpp"
+#include "st/ext/script.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/ui_root.hpp"
 
@@ -25,6 +26,14 @@ struct ServerOptions {
   std::string control_file{};         ///< 非空时写入握手信息（port/pid/app），供客户端发现
   std::size_t max_frame{64u * 1024u * 1024u};
   bool log_calls{true};
+  /// 是否开放 `script` 方法与脚本宿主能力。
+  ///
+  /// **默认关闭**且不随其它开关联动：脚本 = 在应用进程内执行任意代码，
+  /// 而控制通道原本的设计前提是"没有任意代码执行入口"。开启它是一次**显式的姿态变更**，
+  /// 必须由宿主应用主动决定（`--enable-script`），而不是"监听端口就顺带有了"。
+  bool enable_script{false};
+  /// 脚本配额（仅 `enable_script` 时生效）。
+  ext::ScriptLimits script_limits{};
 };
 
 struct Metrics {
@@ -80,7 +89,7 @@ class Server {
   /// 非阻塞轮询：接受连接、读取并处理请求、续判等待、推送事件。
   void poll();
   /// 向已订阅客户端推送事件。
-  void publish(std::string_view event, const Value& data);
+  void publish(std::string_view event, const st::Json& data);
   [[nodiscard]] auto port() const noexcept -> std::uint16_t;
   [[nodiscard]] auto client_count() const noexcept -> std::size_t;
   [[nodiscard]] auto running() const noexcept -> bool;

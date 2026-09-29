@@ -16,7 +16,7 @@
 #include "st/core/error.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/hash.hpp"
-#include "st/core/json.hpp"
+#include "st/ext/json.hpp"
 #include "st/core/string.hpp"
 #include "st/pkg/manifest.hpp"
 #include "st/pkg/semver.hpp"
@@ -508,7 +508,7 @@ auto Registry::load(std::string_view location) -> Result<Registry> {
     text = *file;
   }
 
-  const auto json = st::json::parse(text);
+  const auto json = st::json_parse(text);
   if (!json) {
     return unexpected(json.error().code, std::format("索引解析失败（{}）：{}", std::string(location),
                                                      json.error().message));
@@ -516,31 +516,31 @@ auto Registry::load(std::string_view location) -> Result<Registry> {
   return parse_json(*json, location);
 }
 
-auto Registry::parse_json(const st::Value& json, std::string_view location) -> Result<Registry> {
+auto Registry::parse_json(const st::Json& json, std::string_view location) -> Result<Registry> {
   Registry registry;
   registry.location_ = std::string(location);
 
-  const st::Value* packages = nullptr;
+  const st::Json* packages = nullptr;
   if (json.is_array()) {
     packages = &json;
   } else if (json.is_object()) {
-    packages = json.find("packages");
-    if (packages == nullptr) packages = json.find("releases");
+    packages = json_find(json, "packages");
+    if (packages == nullptr) packages = json_find(json, "releases");
     if (packages == nullptr) return unexpected(ErrorCode::Parse, "索引缺少 packages 数组");
   } else {
     return unexpected(ErrorCode::Parse, "索引根节点必须是对象或数组");
   }
   if (!packages->is_array()) return unexpected(ErrorCode::Parse, "索引 packages 必须是数组");
 
-  for (const auto& item : packages->items()) {
+  for (const auto& item : *packages) {
     if (!item.is_object()) return unexpected(ErrorCode::Parse, "索引项必须是 JSON 对象");
-    const std::string name = item.get_string("name");
+    const std::string name = json_get_string(item, "name");
     if (name.empty()) return unexpected(ErrorCode::Parse, "索引项缺少 name");
-    const auto version = Version::parse(item.get_string("version"));
+    const std::string version_text = json_get_string(item, "version");
+    const auto version = Version::parse(version_text);
     if (!version) {
       return unexpected(ErrorCode::Parse, std::format("索引项 {} 的版本非法（{}）：{}", name,
-                                                      item.get_string("version"),
-                                                      version.error().message));
+                                                      version_text, version.error().message));
     }
     const auto source = source_spec_from_object(item);
     if (!source) return forward_error(source.error());
@@ -548,7 +548,7 @@ auto Registry::parse_json(const st::Value& json, std::string_view location) -> R
     release.name = name;
     release.version = *version;
     release.source = *source;
-    release.sha256 = source->sha256.empty() ? item.get_string("sha256") : source->sha256;
+    release.sha256 = source->sha256.empty() ? json_get_string(item, "sha256") : source->sha256;
     registry.releases_.push_back(std::move(release));
   }
   return registry;
@@ -597,22 +597,22 @@ auto resolve(const std::vector<DependencySpec>& roots, const Registry& registry,
   return solver.run(roots);
 }
 
-auto graph_to_json(const ResolvedGraph& graph) -> st::Value {
-  st::Value json = st::Value::object();
-  json.set("lock_version", st::Value(1));
+auto graph_to_json(const ResolvedGraph& graph) -> st::Json {
+  st::Json json = st::Json::object();
+  json["lock_version"] = 1;
 
-  st::Value packages = st::Value::array();
+  st::Json packages = st::Json::array();
   std::string fingerprint_input;
   for (const auto& package : graph.packages) {
-    st::Value entry = st::Value::object();
-    entry.set("name", st::Value(package.name));
-    entry.set("version", st::Value(package.version.to_string()));
-    entry.set("source", source_to_json(package.source));
-    entry.set("sha256", st::Value(package.sha256));
-    st::Value dependencies = st::Value::array();
-    for (const auto& name : package.dependencies) dependencies.push(st::Value(name));
-    entry.set("dependencies", dependencies);
-    packages.push(entry);
+    st::Json entry = st::Json::object();
+    entry["name"] = package.name;
+    entry["version"] = package.version.to_string();
+    entry["source"] = source_to_json(package.source);
+    entry["sha256"] = package.sha256;
+    st::Json dependencies = st::Json::array();
+    for (const auto& name : package.dependencies) dependencies.push_back(name);
+    entry["dependencies"] = dependencies;
+    packages.push_back(entry);
 
     fingerprint_input.append(package.name);
     fingerprint_input.push_back('@');
@@ -630,36 +630,37 @@ auto graph_to_json(const ResolvedGraph& graph) -> st::Value {
     }
     fingerprint_input.push_back('\n');
   }
-  json.set("packages", packages);
+  json["packages"] = packages;
   if (!fingerprint_input.empty()) {
-    json.set("build_fingerprint", st::Value(st::hash::sha256_hex(fingerprint_input)));
+    json["build_fingerprint"] = st::hash::sha256_hex(fingerprint_input);
   }
   return json;
 }
 
-auto graph_from_json(const st::Value& json) -> Result<ResolvedGraph> {
+auto graph_from_json(const st::Json& json) -> Result<ResolvedGraph> {
   if (!json.is_object()) return unexpected(ErrorCode::Parse, "锁文件根节点必须是 JSON 对象");
-  const st::Value& packages = json.at("packages");
+  const st::Json& packages = json_at(json, "packages");
   if (!packages.is_array()) return unexpected(ErrorCode::Parse, "锁文件缺少 packages 数组");
 
   ResolvedGraph graph;
-  for (const auto& item : packages.items()) {
+  for (const auto& item : packages) {
     if (!item.is_object()) return unexpected(ErrorCode::Parse, "锁文件 packages 元素必须是对象");
     ResolvedPackage package;
-    package.name = item.get_string("name");
+    package.name = json_get_string(item, "name");
     if (package.name.empty()) return unexpected(ErrorCode::Parse, "锁文件条目缺少 name");
-    const auto version = Version::parse(item.get_string("version"));
+    const std::string version_text = json_get_string(item, "version");
+    const auto version = Version::parse(version_text);
     if (!version) {
       return unexpected(ErrorCode::Parse,
                         std::format("锁文件条目 {} 的版本非法（{}）：{}", package.name,
-                                    item.get_string("version"), version.error().message));
+                                    version_text, version.error().message));
     }
     package.version = *version;
     const auto source = source_spec_from_object(item);
     if (!source) return forward_error(source.error());
     package.source = *source;
-    package.sha256 = source->sha256.empty() ? item.get_string("sha256") : source->sha256;
-    package.dependencies = item.get_string_array("dependencies");
+    package.sha256 = source->sha256.empty() ? json_get_string(item, "sha256") : source->sha256;
+    package.dependencies = json_get_string_array(item, "dependencies");
     graph.packages.push_back(std::move(package));
   }
   return graph;
