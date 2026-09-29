@@ -27,7 +27,7 @@ Bun workspaces + Turborepo 的 Monorepo：
 | `@gebai/web` | `packages/web/` | Web UI：Vite 构建，打包进二进制 |
 | `@gebai/desktop` | `packages/desktop/` | 桌面端宿主：`dist/gebai.exe`（纯 Bun `--compile` 单文件，浏览器形态）+ `dist/gebai-desktop.exe`（`launcher/`：tao/wry 原生 WebView 启动器，`include_bytes!` 内嵌服务端二进制；构建期可参数化产出场景变体） |
 
-- **原生桌面框架 霜天**：仓库根 `shuangtian/`（与 `custom/`、`keqing/` 平级）——C++20、全自绘、支持无头模式，对外提供 TCP 控制通道（协议 `st-control/1`）。**外部依赖仅两个且均在 `vendor/` 并登记台账**（nlohmann/json 必需、quickjs-ng 可选且默认关闭）；其余（渲染/字体/文本/Markdown/组件库/包管理与构建驱动）全部自研。自研工具链 `st`（`bootstrap.sh` 自举）负责构建/测试/禁令扫描，不依赖 CMake/Make/ccache。由 `shuangtian` 子代理驱动（开发闭环见 `DESIGN.md`「`shuangtian`（霜天原生桌面框架与智能体操控）」）。**注意**：`shuangtian/build/` 是构建产物目录，不要提交；改动框架代码后按提示跑 `st test`、`st test --san` 与 `st lint`。
+- **原生桌面框架 霜天**：仓库根 `shuangtian/`（与 `custom/`、`keqing/` 平级）——C++20、全自绘、支持无头模式，对外提供 TCP 控制通道（协议 `st-control/1`）。**外部依赖共三个且源码随仓库分发在 `third_party/`**（nlohmann/json、quickjs-ng、batterycenter/embed；来源/许可/校验和台账见 `third_party/SOURCES.md`）；其余（渲染/字体/文本/Markdown/组件库/包管理与构建驱动）全部自研。自研工具链 `st`（`bootstrap.sh` 自举）负责构建/测试/禁令扫描，不依赖 CMake/Make/ccache；**编译并发默认按内存预算推导**（读 cgroup 上限，可用 `-j N` / `--max-memory` 覆盖）。独立工程可通过清单一句 `"framework": {"path": …}` 引用框架（源/头/标志/嵌入/工具链自动并入，见 `shuangtian/docs/independent_project.md`）。由 `shuangtian` 子代理驱动（开发闭环见 `DESIGN.md`「`shuangtian`（霜天原生桌面框架与智能体操控）」）。**注意**：`shuangtian/build/` 是构建产物目录，不要提交；改动框架代码后按提示跑 `st test`、`st test --san` 与 `st lint`。
 - **二次开发域**：仓库根 `custom/`（`custom/agents/` 子代理定义 + `custom/core/` 依赖组件 + `custom/web/` 前端脚本，与 `packages/` 平级）——放置即注册、同名覆盖内置；上游更新时整个目录拷到新仓库根即完成迁移。
 - **随包分发的大体积资源**：两类落点，均**不依赖用户系统安装**——① `resources/` 资源子仓库（独立 git 仓库，`{GEBAI_HOME}/resources/`，见其 `README.md`）存模型与运行时依赖——主仓库带下载清单与脚本（`scripts/resources.manifest.json` + `scripts/download-resources.ts`，`bun run resources:download`：多源 modelscope/huggingface/镜像 + sha256 校验），按清单自动拉取即得同构目录，无需克隆子仓库；② 构建期内嵌产物（`*.embedded.generated.json`，gzip base64，已 gitignore）+ 运行时释放到 `{GEBAI_HOME}/vendor/<name>/`（d2js / playwright driver）与资源目录 `{GEBAI_HOME}/resources/vendor/cv/`（CV 运行时）。**内置 ripgrep**（`grep`/`glob` 的 rg 引擎）**只走后者**（内嵌产物）——来源收敛为「npm 包」与「系统」两条，`resources/` 刻意不存第二份二进制副本；解析链与双引擎对齐规则见 `DESIGN.md`「内置 ripgrep」，重新生成用 `bun run --cwd packages/server build:rg`（取 rg 顺序：`GEBAI_RG_PATH` → node_modules 的 `@vscode/ripgrep`（`optionalDependencies`，经 npm registry 分发平台子包，拉不到不阻断 `bun install`）→ 系统 `PATH`；不落盘资源、不联网下载）。
 - 语言：TypeScript，运行时 Bun。
@@ -43,8 +43,9 @@ bun install
 # 开发（脚本调试模式，GEBAI_HOME 为项目根目录）
 bun run dev          # 或 turbo run dev
 
-# 构建
+# 构建（内含仓库自检：存在被 gitignore 误伤的源码则直接失败）
 bun run build
+bun run check:repo   # 单独跑：确认没有"存在于工作树但从未入库"的源文件
 
 # 测试（bun test，测试文件与被测代码同目录 *.test.ts）
 bun run test
