@@ -1495,6 +1495,27 @@ export const preload = false
 
 > 全部按需装载（懒加载）；`GEBAI_PRELOAD_SUB_AGENTS` 可指定启动预加载名单，符合「预加载少而精」原则。
 
+#### `shuangtian`（霜天原生桌面框架与智能体操控）
+
+霜天（`shuangtian/`，与 `keqing/` 平级）是歌白**内置的原生桌面应用框架**，也是"智能体躯体的原生形态"：
+C++20、**零第三方依赖**、全自绘（软硬件渲染兼容）、**支持无头模式**，并对外提供 TCP 控制通道。
+它的存在意义是让智能体在**没有桌面的 Linux 服务器上**也能完整地开发、观察、操作原生界面。
+
+- **框架本体**（`shuangtian/`）：分层 `core → math/codec → raster → text → md → ui → app`，`shell` 提供窗口后端，`control` 提供远控，`pkg` 提供自研工具链（`stpm`，`st build/test/lint`）
+  - **渲染**：软件光栅器（扫描线覆盖率抗锯齿 + SIMD 快路径）为唯一真相源，无头与有窗口逐像素一致；硬件后端（Vulkan/GL）为可选加速，不做前提
+  - **DPI 一等公民**：逻辑/物理像素分离——Canvas 绘制 API 收逻辑坐标、内部按 `device_scale` 在物理分辨率光栅化（字形亦按物理尺寸重栅格化、缓存键含物理尺寸）；支持非整数倍率与运行时切换（`app.set_scale`）
+  - **文本与 Markdown**：自研 TTF/OTF/OTC-CFF/CID 字体解析与整形（CJK 回退、SC face 优选）、软换行/省略号、按物理尺寸栅格化与字形缓存；`st::md` 提供解析 + 流式增量 + 零依赖代码高亮，`ui::MarkdownView` 组件支持 `append_chunk` 流式渲染（面向大模型应用）
+  - **控制通道**（协议 `st-control/1`，TCP + `uint32` 长度前缀 JSON 帧）：`tree`/`find`/`get`/`set`/`invoke`/`input.mouse`/`input.key`/`input.text`/`capture`/`visual`/`wait`/`metrics`/`events`/`theme`/`app`；**协议内坐标一律逻辑像素**；无任意代码执行入口（只有数据与动作）
+  - **构建效率**（自研驱动，不依赖 CMake/Make）：预编译头（**仅标准库**）+ `-MMD` 头依赖增量 + 并行编译 + lld 链接 + 目标级源排除；实测 45 个翻译单元全量 ≈ 55s、改一个文件 ≈ 3s、无改动 ≈ 0.02s（8 核）
+  - **示例**（同时作为"框架完备性/易用性/高阶定制"的实证）：`gallery`（组件集与设计令牌巡检）与 `mdeditor`（Markdown 编辑器：大纲/编辑/预览/语法高亮源码视图/可拖拽分栏/实时统计/流式生成演示；其中四个自绘组件**不改框架一行代码**，只用 `Element` 的 `measure`/`arrange`/`paint_content`/`on_event` 四个扩展点）
+- **子代理**（`packages/agents/src/agents/shuangtian/`：`shuangtian.ts` 定义 + `shuangtian_tools.ts` 工具集 + `shuangtian_client.ts` 控制通道客户端 + `shuangtian.md` 提示词 + 两个测试文件）：把框架当成"可编排的受控进程"
+  - **工具集**（15 个）：`run`（build/test/lint/start/stop/status/logs——首次自动自举 `stpm`；`start` 以无头模式脱离会话启动并**轮询控制文件等端口 → 握手确认**）、`apps`（实例清单 + 端口连通性）、`tree`/`find`/`get`/`visual`/`metrics`（只读观察）、`set`/`invoke`（状态与动作）、`click`/`type`/`key`（真实输入注入，逻辑像素坐标）、`capture`（截图 PNG，**结果直接作为图片块回传**）、`wait`（条件等待，拒绝轮询截图）、`call`（协议逃生门）
+  - **审批姿态**：只读类免审批；`run`/`set`/`invoke`/`click`/`type`/`key`/`call` 需审批（写与输入面）
+  - **环境变量**：`SHUANGTIAN_PROJECT`（框架工程根，缺省仓库 `shuangtian/`，二进制形态回落 `{GEBAI_HOME}/vendor/shuangtian`）、`SHUANGTIAN_TARGET`（默认控制目标）、`SHUANGTIAN_FRAMEWORK`（随包分发位置）
+  - **闭环**：`run(build) → run(start) → find/tree → capture 看 → set/invoke/click/type → capture 复验 → run(stop)`；所有"改完界面"的结论都要求有截图支撑（无头模式像素与有窗口一致）
+- **实战校验（框架自身的硬证据）**：用该子代理在无头环境下开发霜天本身，一轮即暴露并修复了：填充未隐式闭合子路径导致 CJK 字形糊块、覆盖率为带符号量被当成透明度导致圆角/阴影/字形全失效、Type2 子程序负索引（bias）误判、字形缓存"插入后淘汰"返回悬垂指针（ASan 定位）、`process::run` 二次 waitpid 失败把失败退出码当成 0（掩盖编译/链接失败）、非阻塞读把空闲客户端误判断开、PCH 与消费端标志不一致导致 PCH 失效、PCH 塞入项目头反而更慢等 10 类问题——**没有一条能靠读代码发现，全部来自「无头运行 + 控制通道观察 + 截图核验 + sanitizer 复跑」的闭环**（清单见 `shuangtian/DESIGN.md` §8.2）
+- **验证手段**（随框架交付）：`st test`（102 项单测 / 2018 断言）、`st test --san`（ASan+UBSan）、`st lint`（11 条禁用特性规则，0 违规 + 7 处登记豁免）、`tools/st_visual_check.py`（dev/san 两档 × 两个示例 × 查询/操作/输入/主题/DPI 全序列 + 截图 + sanitizer 报告检查）、`tools/ft_compare.cpp`（用 FreeType 对照自研字体引擎的轮廓/包围盒）
+
 ### 自我优化（代码级自改进）
 
 Agent 通过修改**自身代码**来持续改进自己，不使用记忆（memory）、技能文件（skill）等运行时注入的不稳定能力：

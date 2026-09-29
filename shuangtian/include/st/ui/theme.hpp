@@ -1,0 +1,162 @@
+#pragma once
+
+/// 设计系统（`DESIGN.md` §5）：token 表 + 亮/暗主题。
+/// 霜天意象——冷冽清晨：中性色偏冷，品牌色冰蓝，辅以青色点缀。
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+#include "st/math/color.hpp"
+#include "st/ui/style.hpp"
+
+namespace st::ui {
+
+/// 颜色 token（亮/暗各一套）。
+struct Palette {
+  math::Color bg{};
+  math::Color surface{};
+  math::Color surface_alt{};
+  math::Color surface_sunken{};
+  math::Color border{};
+  math::Color border_strong{};
+  math::Color text{};
+  math::Color text_muted{};
+  math::Color text_faint{};
+  math::Color primary{};
+  math::Color primary_hover{};
+  math::Color primary_active{};
+  math::Color primary_soft{};
+  math::Color on_primary{};
+  math::Color accent{};
+  math::Color accent_soft{};
+  math::Color success{};
+  math::Color warning{};
+  math::Color danger{};
+  math::Color focus_ring{};
+  math::Color overlay{};
+  math::Color shadow{};
+  math::Color selection{};
+  math::Color code_bg{};
+  math::Color code_border{};
+};
+
+/// 语法高亮色板（代码编辑器与代码块共用；token 类别 → 颜色）。
+///
+/// 独立于通用 `Palette`：编辑器配色是**高辨识度优先**（关键字/字符串/注释/数字彼此可区分），
+/// 与界面语义色（primary/danger）诉求不同——分开后换主题只需替换这一组。
+struct SyntaxPalette {
+  math::Color plain{};
+  math::Color keyword{};
+  math::Color type{};
+  math::Color string{};
+  math::Color number{};
+  math::Color comment{};
+  math::Color function{};
+  math::Color operator_{};
+  math::Color punctuation{};
+  math::Color preprocessor{};
+  math::Color builtin{};
+  math::Color attribute{};
+  math::Color key{};
+  math::Color tag{};
+  math::Color inserted{};   ///< Diff 新增行
+  math::Color deleted{};    ///< Diff 删除行
+  math::Color line_number{};
+  math::Color current_line{};      ///< 当前行底色（半透明）
+  math::Color selection{};
+  math::Color cursor{};
+  math::Color matching_bracket{};  ///< 括号配对高亮
+};
+
+/// 尺度 token（间距/圆角/字号/动效）。
+struct Metrics {
+  float space_xs{4.0f};
+  float space_sm{8.0f};
+  float space_md{12.0f};
+  float space_lg{16.0f};
+  float space_xl{24.0f};
+  float space_2xl{32.0f};
+
+  float radius_sm{6.0f};
+  float radius_md{10.0f};
+  float radius_lg{14.0f};
+  float radius_xl{20.0f};
+  float radius_pill{999.0f};
+
+  float font_xs{12.0f};
+  float font_sm{13.0f};
+  float font_base{14.0f};
+  float font_lg{16.0f};
+  float font_xl{20.0f};
+  float font_2xl{26.0f};
+  float font_3xl{34.0f};
+
+  float line_height_body{1.45f};
+  float line_height_heading{1.25f};
+
+  float control_height{34.0f};
+  float control_height_sm{28.0f};
+  float control_height_lg{40.0f};
+  float border_width{1.0f};
+  float focus_width{2.0f};
+
+  float motion_fast{120.0f};
+  float motion_normal{180.0f};
+  float motion_slow{260.0f};
+};
+
+enum class ThemeMode : std::uint8_t { Light, Dark };
+
+/// 语义色调（组件用它表达意图，实际颜色由主题解析）。
+enum class Tone : std::uint8_t {
+  Default,
+  Muted,
+  Faint,
+  Primary,
+  Accent,
+  Success,
+  Warning,
+  Danger,
+  OnPrimary,
+};
+
+class Theme {
+ public:
+  [[nodiscard]] static auto light() -> Theme;
+  [[nodiscard]] static auto dark() -> Theme;
+  [[nodiscard]] static auto by_mode(ThemeMode mode) -> Theme;
+
+  [[nodiscard]] auto mode() const noexcept -> ThemeMode { return mode_; }
+  [[nodiscard]] auto colors() const noexcept -> const Palette& { return colors_; }
+  [[nodiscard]] auto colors() noexcept -> Palette& { return colors_; }
+  [[nodiscard]] auto metrics() const noexcept -> const Metrics& { return metrics_; }
+  [[nodiscard]] auto metrics() noexcept -> Metrics& { return metrics_; }
+  [[nodiscard]] auto syntax() const noexcept -> const SyntaxPalette& { return syntax_; }
+  [[nodiscard]] auto syntax() noexcept -> SyntaxPalette& { return syntax_; }
+
+  [[nodiscard]] auto font_family() const -> const std::string& { return font_family_; }
+  void set_font_family(std::string family) { font_family_ = std::move(family); }
+
+  /// 基础间距的倍数（4px 栅格）。
+  [[nodiscard]] auto space(float steps) const noexcept -> float { return 4.0f * steps; }
+
+ private:
+  ThemeMode mode_{ThemeMode::Light};
+  Palette colors_{};
+  SyntaxPalette syntax_{};
+  Metrics metrics_{};
+  std::string font_family_{"Noto Sans CJK SC"};
+};
+
+/// 色调 → 实际颜色（亮/暗主题通用）。
+[[nodiscard]] auto tone_color(const Theme& theme, Tone tone) -> math::Color;
+/// 色调的浅底（徽标/Chip 背景）。
+[[nodiscard]] auto tone_soft_color(const Theme& theme, Tone tone) -> math::Color;
+
+/// 阴影 token（随主题取色）。
+[[nodiscard]] auto shadow_sm(const Theme& theme) -> Shadow;
+[[nodiscard]] auto shadow_md(const Theme& theme) -> Shadow;
+[[nodiscard]] auto shadow_lg(const Theme& theme) -> Shadow;
+
+}  // namespace st::ui

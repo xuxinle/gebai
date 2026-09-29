@@ -1,0 +1,55 @@
+#pragma once
+
+/// 构建驱动：解析清单 → 生成编译命令 → **直接调用编译器**（不经 CMake/Make）→ 增量构建 → 链接。
+/// 产物布局：`<root>/build/<profile>/{obj,bin}/…`。
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "st/core/error.hpp"
+#include "st/pkg/manifest.hpp"
+
+namespace st::pkg {
+
+struct BuildOptions {
+  std::string root{};                 ///< 工程根（空=清单目录）
+  std::string profile{"debug"};       ///< debug / release / san
+  std::string target{};               ///< 目标名（空=库目标：只编译不链接）
+  std::size_t jobs{0};                ///< 并行编译单元数（0=硬件并发）
+  bool verbose{false};                ///< 打印每条编译命令
+  bool force{false};                  ///< 忽略增量判定，全量重编
+  bool use_pch{true};                 ///< 使用预编译头（`include/st/pch.hpp`）加速
+  std::vector<std::string> extra_include_dirs{};
+  std::vector<std::string> extra_flags{};
+};
+
+struct BuildStats {
+  std::string artifact{};
+  std::size_t units_total{0};
+  std::size_t units_rebuilt{0};
+  std::size_t units_cached{0};
+  std::int64_t elapsed_ms{0};
+  std::int64_t compile_ms{0};  ///< 编译阶段耗时（不含链接）
+  std::size_t workers{0};      ///< 并行度
+  bool pch_used{false};        ///< 是否用到预编译头
+  bool linked{false};          ///< 本次是否真的执行了链接（产物已最新则跳过）
+};
+
+/// profile → 编译/链接标志（debug: -O0 -g / release: -O2 -DNDEBUG / san: ASan+UBSan）。
+[[nodiscard]] auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>;
+/// 链接所需的系统库（按平台）。
+[[nodiscard]] auto default_system_libs() -> std::vector<std::string>;
+
+/// 检测编译器（`ST_CXX`/`CXX` 环境变量 → g++ → clang++ → c++）。
+[[nodiscard]] auto detect_compiler() -> Result<std::string>;
+
+/// 构建库对象与目标产物（`options.target` 为空时只编译库对象）。
+[[nodiscard]] auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats>;
+
+/// 构建测试可执行文件（库源 + tests + 测试框架入口）并运行；返回退出码。
+[[nodiscard]] auto run_tests(const Manifest& manifest, const BuildOptions& options,
+                             std::string_view filter) -> Result<int>;
+
+}  // namespace st::pkg
