@@ -631,7 +631,7 @@ export const jsTool: Tool = {
     properties: {
       code: { type: "string", description: "JS/TS 脚本源码（顶层 await 可用；return 返回值进 data.result）" },
       input: { description: "可选：任意输入，脚本内经 input 引用" },
-      timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540）" },
+      timeout: { type: "number", description: "可选：单次执行超时秒数（默认 300、上限 540）——超时杀脚本进程并返回超时结果；与 sh 的同步等待窗口（到期转后台）语义不同" },
       strict: { type: "boolean", description: "可选：true 时脚本失败抛工具级错误（编排「失败即中断」）；默认 false 失败作为正常结果返回" },
       approval: { type: "boolean", description: "可选：本次调用是否需要用户审批（默认 true 需审批）；仅对明确安全的只读/幂等脚本可设 false" },
     },

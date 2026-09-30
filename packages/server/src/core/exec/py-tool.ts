@@ -672,7 +672,7 @@ export const pyTool: Tool = {
     {
       code: { type: "string", description: "Python 程序源码（本地模式下可用工具桥：工具名即函数、tools.call、ctx/input 注入；`result = ...` 作为返回值）" },
       input: { description: "可选：任意输入，脚本内经 `input` 引用（有桥时对象/数组原样注入为 dict/list，与 js 一致；纯脚本降级按 JSON 文本走 stdin）" },
-      timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540）" },
+      timeout: { type: "number", description: "可选：单次执行超时秒数（默认 300、上限 540）——超时杀脚本进程并返回超时结果；与 sh 的同步等待窗口（到期转后台）语义不同" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」）；默认 false 非 0 退出作为正常结果返回" },
       approval: { type: "boolean", description: "兼容参数：py 恒需审批（任意代码无法静态判定），免审标记不生效" },
     },
