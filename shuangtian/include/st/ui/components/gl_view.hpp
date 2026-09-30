@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "st/math/matrix.hpp"
-#include "st/raster/gl.hpp"
+#include "st/raster/scene3d.hpp"
 #include "st/ui/element.hpp"
 
 namespace st::ui {
@@ -59,8 +59,11 @@ class GlView : public Element {
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
 
-  /// GL 是否可用（不可用时组件画一块占位提示，而不是静默空白）。
-  [[nodiscard]] static auto opengl_ready() noexcept -> bool;
+  /// 三维是否可用（不可用时组件画一块占位提示，而不是静默空白）。
+///
+/// 注意它**不再是"OpenGL 是否可用"**：三维能力走平台中立接口
+/// （`raster::Scene3D`），软件实现永远可用——这正是"软件保底跨平台"的落地。
+  [[nodiscard]] static auto rendering_ready() noexcept -> bool;
 
  private:
   GlShape shape_{GlShape::Cube};
@@ -71,7 +74,7 @@ class GlView : public Element {
 
   /// GL 资源按需创建（构造时建会在"没有 GL 的机器"上让整个界面建不起来）
   std::shared_ptr<const raster::Mesh> mesh_{};
-  mutable std::unique_ptr<raster::gl::Scene3D> scene_{};
+  mutable std::unique_ptr<raster::Scene3D> scene_{};
   mutable float angle_{0.0f};
   mutable double last_time_{-1.0};
   mutable std::uint64_t frames_{0};

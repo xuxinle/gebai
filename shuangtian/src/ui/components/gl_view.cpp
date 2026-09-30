@@ -28,7 +28,7 @@ GlView::GlView(GlShape shape) : shape_(shape) {
 
 GlView::~GlView() = default;
 
-auto GlView::opengl_ready() noexcept -> bool { return raster::gl::available(); }
+auto GlView::rendering_ready() noexcept -> bool { return raster::Scene3D::available(); }
 
 void GlView::set_mesh(std::shared_ptr<const raster::Mesh> mesh) {
   mesh_ = std::move(mesh);
@@ -59,7 +59,7 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
 
   // GL 不可用：画一块**说明性占位**，而不是静默空白。
   // "什么都没显示"是最难排查的状态——用户会以为是布局问题，实际是能力缺失。
-  if (!raster::gl::available()) {
+  if (!raster::Scene3D::available()) {
     canvas.fill_rect(box, raster::Paint::solid(context.theme.colors().surface_sunken),
                      style_.radius);
     return;
@@ -70,7 +70,7 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
 
   // 场景按需创建；尺寸变了就重建（GL 的 FBO 尺寸不可原地改）
   if (scene_ == nullptr || scene_->width() != width || scene_->height() != height) {
-    auto created = raster::gl::Scene3D::create(width, height);
+    auto created = raster::Scene3D::create(width, height);
     if (!created.has_value()) {
       log::warn("GlView：创建 3D 场景失败（{}）", created.error().message);
       scene_.reset();
@@ -91,7 +91,7 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
   }
   last_time_ = now;
 
-  raster::gl::Camera camera;
+  raster::Camera camera;
   camera.eye = math::Vec3{2.0f, 1.6f, 2.4f};
   camera.target = math::Vec3{0.0f, 0.0f, 0.0f};
   camera.fov_y_degrees = 42.0f;
@@ -120,7 +120,9 @@ auto GlView::get_property(std::string_view name) const -> std::optional<std::str
   if (name == "mesh_vertices") {
     return std::format("{}", mesh_ != nullptr ? mesh_->vertex_count() : 0U);
   }
-  if (name == "gl_ready") return raster::gl::available() ? "true" : "false";
+  if (name == "rendering_ready" || name == "gl_ready") {
+    return raster::Scene3D::available() ? "true" : "false";
+  }
   return std::nullopt;
 }
 

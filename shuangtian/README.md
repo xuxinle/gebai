@@ -115,18 +115,25 @@ Windows 上的工具链口径（详见 `CONVENTIONS.md` §10.1）：**MSVC 首�
 MinGW/clang）；GCC 风格标志由 `stpm` 统一翻译（无等价物的会列出丢弃清单）；符号调试信息用 `/Z7`
 （并行编译下不争 PDB）；依赖追踪走 `/sourceDependencies` JSON（改头文件能正确触发重编）。
 
-## OpenGL 三维渲染
+## 三维渲染：两条腿走路
 
-三维渲染与复杂图形走 OpenGL，加载器（glad 单头）**随仓库分发**在
-`third_party/opengl/gl.h` —— 克隆下来即可用，无需拉取、无需配置。
+架构原则（**软件保底、系统高阶锦上添花**）：
 
-资源去处的口径：**代码进仓库，二进制与大源码库走资源管理**。
-`third_party/` 里的 quickjs / nlohmann / glad 都是代码，一律内置；
-模型权重那类二进制走主仓库的 `resources/`（见 `resources/README.md`）。
+| 腿 | 角色 | 平台 |
+|---|---|---|
+| **软件光栅器**（自带，含 z-buffer 与逐像素光照） | **保证跨平台可用** · 确定性 · 零依赖 | 所有平台（含无头/CI） |
+| **系统高阶 API** | 锦上添花：有就用、更快 | Windows：D3D11 |
 
-**平台现状**：实现是 Windows（WGL + 离屏 FBO）专用；Linux/macOS 需补 EGL/GLX/CGL，
-在此之前 `has_opengl()` 如实报 false、`probe()` 说明缺什么，框架其余部分照常可用。
-要更多 GL 功能（更高级别/更多扩展）时，用 glad 生成器换掉那份单头即可。
+入口是**平台中立**的 `raster::Scene3D`（`include/st/raster/scene3d.hpp`），
+调用方（`ui::GlView`）不感知用的是哪条腿。
+
+**为什么不统一到某一个图形 API**：统一到 OpenGL 曾是个选项，但它两头都不占——
+在自己的主场（Windows）输给 D3D11，在别的平台又不存在（GL 实现是 Windows 专用，
+macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此**已移除**。
+三维的保证腿是**软件实现**：非 Windows 上三维不会消失，只是慢一些。
+
+资源去处口径不变：**代码进仓库，二进制与大源码库走资源管理**
+（`third_party/` 的 quickjs / nlohmann 内置；模型权重走主仓库 `resources/`）。
 
 ## 控制通道速览（`st-control/1`）
 

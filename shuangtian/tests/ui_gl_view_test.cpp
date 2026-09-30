@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "st/raster/canvas.hpp"
-#include "st/raster/gl.hpp"
+#include "st/raster/scene3d.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/ui/components/gl_view.hpp"
 #include "st/ui/element.hpp"
@@ -84,7 +84,7 @@ ST_TEST(gl_view_reports_property_surface) {
   }
   ST_CHECK_EQ(harness.view.get_property("shape").value_or(""), std::string("cube"));
   ST_CHECK_EQ(harness.view.get_property("gl_ready").value_or(""), 
-              std::string(GlView::opengl_ready() ? "true" : "false"));
+              std::string(GlView::rendering_ready() ? "true" : "false"));
 }
 
 ST_TEST(gl_view_properties_are_writable_and_validated) {
@@ -100,7 +100,7 @@ ST_TEST(gl_view_properties_are_writable_and_validated) {
 }
 
 ST_TEST(gl_view_draws_something_when_opengl_is_available) {
-  if (!GlView::opengl_ready()) return;   // 非 Windows（无 GL 上下文）时本用例无意义（不是失败）
+  if (!GlView::rendering_ready()) return;   // 非 Windows（无 GL 上下文）时本用例无意义（不是失败）
   Harness harness;
   harness.paint(0.0);
   const double inked = inked_ratio(harness.canvas, Color{0x0A, 0x0E, 0x16, 0xFF});
@@ -111,7 +111,7 @@ ST_TEST(gl_view_draws_something_when_opengl_is_available) {
 ST_TEST(gl_view_degrades_to_placeholder_without_opengl) {
   // 没有 GL 时必须画**占位块**而不是空白：空白最难排查
   // （用户会以为是布局问题，实际是能力缺失）。
-  if (GlView::opengl_ready()) return;
+  if (GlView::rendering_ready()) return;
   Harness harness;
   harness.paint(0.0);
   const double inked = inked_ratio(harness.canvas, Color{0x0A, 0x0E, 0x16, 0xFF});
@@ -121,7 +121,7 @@ ST_TEST(gl_view_degrades_to_placeholder_without_opengl) {
 ST_TEST(gl_view_static_frame_is_stable) {
   // 同一时间戳重复绘制，结果必须一致——否则回归截图会每次都不同。
   // （`spin` 只在**时间推进**时改变角度，静态帧不该自己转。）
-  if (!GlView::opengl_ready()) return;
+  if (!GlView::rendering_ready()) return;
   Harness harness;
   harness.paint(1.0);
   const std::vector<std::uint32_t> first(harness.canvas.pixels().begin(),
@@ -146,7 +146,7 @@ ST_TEST(gl_view_composites_into_gpu_canvas_without_hanging) {
   //
   // 所以必须**拿 GPU 画布当目标**测：拿软件画布测这条路径永远不会暴露问题
   // （软件 set_pixel 是 O(1) 内存写）。
-  if (!st::raster::gl::available()) return;
+  if (!st::raster::Scene3D::available()) return;
   auto target = st::raster::gpu::create_canvas(kWidth, kHeight, 1.0f, {});
   if (!target.has_value()) return;   // 本机没有 GPU 画布：本用例不适用
   st::raster::Surface& surface = **target;
@@ -168,7 +168,7 @@ ST_TEST(gl_view_composites_into_gpu_canvas_without_hanging) {
 
 ST_TEST(gl_view_can_display_an_external_mesh) {
   // 外部模型（如 OBJ 加载结果）必须能显示——否则"能加载"没有落点。
-  if (!GlView::opengl_ready()) return;
+  if (!GlView::rendering_ready()) return;
   constexpr const char* kTriangle = "v 0 0.6 0\nv 0.7 -0.4 0\nv -0.7 -0.4 0\nf 1 2 3\n";
   auto mesh = st::raster::Mesh::load_obj(kTriangle, Color{0x7A, 0xD3, 0x8A, 0xFF});
   ST_CHECK(mesh.has_value());
