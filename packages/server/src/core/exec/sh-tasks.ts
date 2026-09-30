@@ -113,7 +113,8 @@ const SH_TASK_POLL_MIN_MS = 20
 /** 前台运行的输出捕获上限（每流字节）：超限停止捕获（不驻留内存），该任务保留记录与日志供回查。 */
 const SH_TASK_CAPTURE_CAP = 4 * 1024 * 1024
 
-/** sh async 超时参数解析（秒 → 毫秒）：默认 1800（30 分钟），上限 3600；与同步超时（默认 300/上限 540）独立。 */
+/** sh 后台任务生命周期上限参数解析（秒 → 毫秒）：默认 1800（30 分钟），上限 3600；与同步等待窗口
+ *  （默认 60/上限 120，`shWaitMs`）独立——前者是任务的活命时长，后者只是前台等多久。 */
 export function shTaskLifetimeMs(v: unknown): number {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return SH_TASK_DEFAULT_MS

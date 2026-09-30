@@ -4,7 +4,7 @@ import type { Tool, ToolContext } from "../base/types"
 import { jsTool } from "../exec/js-tool"
 import { pyTool } from "../exec/py-tool"
 import { shApprovalFreeAllowed, validateShCommandSafeMode } from "../security/safety"
-import { scriptTimeoutMs } from "../support/exec-opts"
+import { shWaitMs } from "../support/exec-opts"
 import { shTaskLifetimeMs } from "../exec/sh-tasks"
 import { truncate } from "../support/truncate"
 import { schema, type GlobalToolEntry } from "./shared"
@@ -68,7 +68,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 bash -c），按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段（无需在命令里输出）。指定工作目录用 workdir 参数或 project 参数（非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，重定向限定用户目录内。命令统一在后台任务机制上执行：同步调用最多等 timeout 秒（默认 300、上限 540），窗口内结束即按同步返回；**超窗口不终止命令**，自动转后台并返回 taskId（用 bg_task 查询/等待/终止）。已知的长耗时命令（构建/测试/安装）直接传 async:true 立即返回 taskId，不必等窗口。",
+  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 bash -c），按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段（无需在命令里输出）。指定工作目录用 workdir 参数或 project 参数（非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，重定向限定用户目录内。命令统一在后台任务机制上执行：同步调用最多等 timeout 秒（默认 60、上限 120），窗口内结束即按同步返回；**超窗口不终止命令**，自动转后台并返回 taskId（用 bg_task 查询/等待/终止）。已知的长耗时命令（构建/测试/安装）直接传 async:true 立即返回 taskId，不必等窗口。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
@@ -76,7 +76,7 @@ export const shTool: Tool = {
       command: { type: "string" },
       workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析）——替代在命令里串联 cd，不传用默认" },
       input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
-      timeout: { type: "number", description: "可选：同步等待窗口秒数（默认 300、上限 540）——窗口内结束按同步返回，超窗口命令自动转后台并返回 taskId（命令不被终止；后台生命周期默认 30 分钟，用 bg_task action=stop 可提前终止）。async:true 时该参数为任务生命周期上限（默认 1800、上限 3600）" },
+      timeout: { type: "number", description: "可选：同步等待窗口秒数（默认 60、上限 120）——窗口内结束按同步返回，超窗口命令自动转后台并返回 taskId（命令不被终止；后台生命周期默认 30 分钟，用 bg_task action=stop 可提前终止）。async:true 时该参数为任务生命周期上限（默认 1800、上限 3600）" },
       strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」）；默认 false 非 0 退出作为正常结果返回。（同步等待超时转后台时退出码未知，strict 不触发）" },
       async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId（适合构建/测试等长命令）；后续用 bg_task 查询输出、等待完成或终止" },
       ...SCRIPT_APPROVAL_PARAM,
@@ -108,8 +108,8 @@ export const shTool: Tool = {
     // 统一执行路径（DESIGN「sh 执行」）：命令一律经后台任务机制执行，同步调用只等一个等待窗口——窗口内结束
     // 按同步语义返回（stdout/stderr 分离、退出码照旧）；窗口到期命令仍在运行则**不终止**，转后台返回 taskId
     // 由 bg_task 继续跟踪（慢命令不再因同步等待超时而白跑一场，模型也不必凭猜测重跑）
+    const waitMs = shWaitMs(args.timeout)
     if (ctx.shTasks && !ctx.safeMode) {
-      const waitMs = scriptTimeoutMs(args.timeout)
       const r = await ctx.shTasks.run(command, { cwd: workdir, env: ctx.env, input, waitMs, signal: ctx.signal })
       if (r.started) {
         if (r.aborted) {
@@ -138,7 +138,8 @@ export const shTool: Tool = {
       }
       // 后台启动失败（并发超限等）：回退下面的同步执行，命令照旧能跑
     }
-    const { stdout, stderr, code } = await ctx.runCommand(command, { workdir, env: ctx.env, input, timeoutMs: scriptTimeoutMs(args.timeout) })
+    // 同步回退路径：同一 `timeout` 在此为**杀进程上限**（无后台服务可用，只有同步执行一条路）
+    const { stdout, stderr, code } = await ctx.runCommand(command, { workdir, env: ctx.env, input, timeoutMs: waitMs })
     // strict：非 0 退出码转工具级异常（js 编排内未捕获即中断整个脚本，try/catch 可容错继续）
     if (args.strict === true && code !== 0) {
       throw new Error(`命令执行失败（exit ${code}）${stderr ? `：\n${stderr.slice(0, 2000)}` : ""}`)

@@ -200,7 +200,7 @@ describe("global tools", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("sh tool timeout param passes through, defaults 300s and clamps to 540s", async () => {
+  test("sh tool timeout param passes through, defaults 60s and clamps to 120s", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-sh-timeout-"))
     const c = ctx(home)
     const seen: Array<number | undefined> = []
@@ -213,7 +213,7 @@ describe("global tools", () => {
     await shTool.execute({ command: "echo hi", timeout: 99999 }, c)
     await shTool.execute({ command: "echo hi", timeout: 0 }, c)
     await shTool.execute({ command: "echo hi", timeout: "abc" }, c)
-    expect(seen).toEqual([10000, 300000, 540000, 300000, 300000])
+    expect(seen).toEqual([10000, 60000, 120000, 60000, 60000])
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -281,7 +281,7 @@ describe("global tools", () => {
     expect(r.output.trim()).toBe("ok")
     expect((r.data as { exitCode: number }).exitCode).toBe(0)
     expect((r.data as { stdout: string }).stdout).toBe("ok\n")
-    expect(runs).toEqual([{ command: "echo hi", cwd: c.workdir, waitMs: 300000 }])
+    expect(runs).toEqual([{ command: "echo hi", cwd: c.workdir, waitMs: 60000 }])
     // 非 0 退出与 strict 语义照旧
     c.shTasks = shTasksStub(async (command) => ({
       started: true, record: shRec({ command, endedAt: Date.now(), exitCode: 3 }), finished: true, aborted: false, stdout: "out", stderr: "boom", truncated: false,
@@ -314,12 +314,12 @@ describe("global tools", () => {
     expect(d.status).toBe("running")
     expect(d.exitCode).toBeNull()
     expect(runs).toEqual([{ waitMs: 10000 }])
-    // 默认 300s、上限 540s 同为等待窗口；strict 在未完成时不误判
+    // 默认 60s、上限 120s 同为等待窗口；strict 在未完成时不误判
     await shTool.execute({ command: "bun run build" }, c)
     await shTool.execute({ command: "bun run build", timeout: 99999 }, c)
     const strict = await shTool.execute({ command: "bun run build", strict: true }, c)
     expect(strict.output).toContain("strict: true 未生效")
-    expect(runs.map((x) => x.waitMs)).toEqual([10000, 300000, 540000, 300000])
+    expect(runs.map((x) => x.waitMs)).toEqual([10000, 60000, 120000, 60000])
     rmSync(home, { recursive: true, force: true })
   })
 
