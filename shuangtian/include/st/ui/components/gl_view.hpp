@@ -34,8 +34,8 @@ class GlView : public Element {
   ///
   /// 为什么用 `shared_ptr<const Mesh>`：网格可能很大且由调用方缓存复用
   /// （同一个模型显示在多处），拷贝一份等于白白复制几万个顶点。
-  void set_mesh(std::shared_ptr<const raster::gl::Mesh> mesh);
-  [[nodiscard]] auto mesh() const noexcept -> const std::shared_ptr<const raster::gl::Mesh>& {
+  void set_mesh(std::shared_ptr<const raster::Mesh> mesh);
+  [[nodiscard]] auto mesh() const noexcept -> const std::shared_ptr<const raster::Mesh>& {
     return mesh_;
   }
   [[nodiscard]] auto shape() const noexcept -> GlShape { return shape_; }
@@ -70,7 +70,7 @@ class GlView : public Element {
   float preferred_height_{180.0f};
 
   /// GL 资源按需创建（构造时建会在"没有 GL 的机器"上让整个界面建不起来）
-  std::shared_ptr<const raster::gl::Mesh> mesh_{};
+  std::shared_ptr<const raster::Mesh> mesh_{};
   mutable std::unique_ptr<raster::gl::Scene3D> scene_{};
   mutable float angle_{0.0f};
   mutable double last_time_{-1.0};

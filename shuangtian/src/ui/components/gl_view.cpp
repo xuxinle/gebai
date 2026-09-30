@@ -12,9 +12,9 @@ namespace {
 
 /// 网格只在进程里生成一次并共享：生成是纯计算、结果不可变，
 /// 每个视图各建一份纯属浪费（单是球体 28 段就有几百个顶点）。
-[[nodiscard]] auto shared_shape_mesh(GlShape shape) -> const raster::gl::Mesh& {
-  static const raster::gl::Mesh cube = raster::gl::Mesh::cube(1.3f);
-  static const raster::gl::Mesh sphere = raster::gl::Mesh::sphere(0.85f, 28);
+[[nodiscard]] auto shared_shape_mesh(GlShape shape) -> const raster::Mesh& {
+  static const raster::Mesh cube = raster::Mesh::cube(1.3f);
+  static const raster::Mesh sphere = raster::Mesh::sphere(0.85f, 28);
   return shape == GlShape::Sphere ? sphere : cube;
 }
 
@@ -30,7 +30,7 @@ GlView::~GlView() = default;
 
 auto GlView::opengl_ready() noexcept -> bool { return raster::gl::available(); }
 
-void GlView::set_mesh(std::shared_ptr<const raster::gl::Mesh> mesh) {
+void GlView::set_mesh(std::shared_ptr<const raster::Mesh> mesh) {
   mesh_ = std::move(mesh);
   mark_dirty();
 }
@@ -100,8 +100,8 @@ void GlView::paint_content(const RenderContext& context, raster::Surface& canvas
   scene_->begin_frame(background_);
   scene_->set_camera(camera);
   // 外部网格优先于内置形状：调用方给了模型就画模型
-  static const raster::gl::Mesh kEmpty{};
-  const raster::gl::Mesh& mesh = mesh_ != nullptr ? *mesh_ : shared_shape_mesh(shape_);
+  static const raster::Mesh kEmpty{};
+  const raster::Mesh& mesh = mesh_ != nullptr ? *mesh_ : shared_shape_mesh(shape_);
   if (!mesh.is_empty()) {
     scene_->draw_mesh(mesh, math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, angle_));
   }

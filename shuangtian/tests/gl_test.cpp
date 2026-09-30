@@ -28,7 +28,7 @@ using st::math::Rect;
 using st::math::Vec3;
 using st::raster::Canvas;
 using st::raster::gl::Camera;
-using st::raster::gl::Mesh;
+using st::raster::Mesh;
 using st::raster::gl::Scene3D;
 
 inline constexpr int kWidth = 256;
@@ -89,15 +89,6 @@ ST_TEST(gl_matrix_perspective_and_look_at_are_sane) {
   const Mat4 view = Mat4::look_at(Vec3{0, 0, 5}, Vec3{0, 0, 0}, Vec3{0, 1, 0});
   const float z = view.value(2, 0) * 0.0f + view.value(2, 1) * 0.0f + view.value(2, 2) * 0.0f + view.value(2, 3);
   ST_CHECK(std::abs(z - (-5.0f)) < 1e-4f);
-}
-
-ST_TEST(gl_mesh_generators_produce_closed_shapes) {
-  const Mesh cube = Mesh::cube(1.0f);
-  ST_CHECK_EQ(static_cast<int>(cube.vertex_count()), 24);   // 每面 4 个独立顶点（法线不同）
-  ST_CHECK_EQ(static_cast<int>(cube.indices.size()), 36);   // 12 个三角形
-  const Mesh sphere = Mesh::sphere(0.5f, 16);
-  ST_CHECK(sphere.vertex_count() > 50);
-  ST_CHECK_EQ(static_cast<int>(sphere.indices.size() % 3), 0);
 }
 
 ST_TEST(gl_probe_is_honest_when_unavailable) {
@@ -322,54 +313,6 @@ f 1 2 99
 )obj";
 
 }  // namespace
-
-ST_TEST(gl_obj_loads_cube_with_normals_and_skips_bad_faces) {
-  // "坏面只跳过、不让整文件失败"是这条的关键断言：真实模型文件里常有越界/退化面。
-  const auto mesh = Mesh::load_obj(kCubeObj, Color{0x60, 0xA5, 0xFA, 0xFF});
-  ST_CHECK(mesh.has_value());
-  if (!mesh.has_value()) return;
-  // 6 个四边形 → 12 个三角形；那个坏面（索引 99 越界）被跳过
-  ST_CHECK_EQ(static_cast<int>(mesh->indices.size()), 36);
-  ST_CHECK_EQ(static_cast<int>(mesh->vertex_count()), 36);
-  // 法线必须归一化（否则光照会整体偏暗/偏亮——这是最容易被忽略的解析错误）
-  for (std::size_t index = 0; index < mesh->vertex_count(); ++index) {
-    const float nx = (*mesh)[index][3];
-    const float ny = (*mesh)[index][4];
-    const float nz = (*mesh)[index][5];
-    const float length = std::sqrt(nx * nx + ny * ny + nz * nz);
-    ST_CHECK(std::abs(length - 1.0f) < 0.01f);
-  }
-}
-
-ST_TEST(gl_obj_supports_negative_indices_and_missing_normals) {
-  // 负索引（相对引用）与"没有 vn"都要能用：前者是 OBJ 规范的一部分，
-  // 后者是大量导出器（尤其只导几何的流水线）的常态。
-  constexpr const char* kTriangle = R"obj(
-v 0 0 0
-v 1 0 0
-v 0 1 0
-f -3 -2 -1
-)obj";
-  const auto mesh = Mesh::load_obj(kTriangle, Color{0xFF, 0xFF, 0xFF, 0xFF});
-  ST_CHECK(mesh.has_value());
-  if (!mesh.has_value()) return;
-  ST_CHECK_EQ(static_cast<int>(mesh->indices.size()), 3);
-  // 缺法线时按面计算 → 必须仍归一化（若是 (0,0,0)，光照会全黑）
-  const float nz = (*mesh)[0][5];
-  ST_CHECK(std::abs(std::abs(nz) - 1.0f) < 0.01f);
-}
-
-ST_TEST(gl_obj_rejects_garbage_without_crashing) {
-  // 空文件、只有注释、只有顶点没有面、完全不是 OBJ —— 都必须**返回错误**而不是崩。
-  for (const char* text : {"", "# just a comment\n", "v 0 0 0\nv 1 0 0\n",
-                           "not an obj at all\n{{{", "f 1 2 3\n"}) {
-    const auto mesh = Mesh::load_obj(text, Color{0xFF, 0xFF, 0xFF, 0xFF});
-    ST_CHECK(!mesh.has_value());
-  }
-  // 只有注释/顶点时也要给**可读的原因**（便于使用者判断是文件问题还是解析问题）
-  const auto empty = Mesh::load_obj("v 0 0 0\n", Color{0xFF, 0xFF, 0xFF, 0xFF});
-  ST_CHECK(!empty.has_value() && !empty.error().message.empty());
-}
 
 ST_TEST(gl_obj_cube_renders_under_lighting) {
   // 从解析到出图整条链：加载 OBJ → 渲染 → 画面里真有东西。
