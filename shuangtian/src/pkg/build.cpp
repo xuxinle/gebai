@@ -123,11 +123,49 @@ struct CompileUnit {
   return deps;
 }
 
-/// 目标是否需要重建：源文件或**任一被包含的头文件**比目标新时重建（增量正确性的关键）。
-[[nodiscard]] auto needs_rebuild(const CompileUnit& unit) -> bool {
+/// 有效编译标志的指纹：**含档位标志**。
+///
+/// 档位标志原先既不在时间戳判据里、也不在工程单元的缓存键里 —— 改档位等于没改。
+/// 这里把它显式纳入，供"增量判新"与"共享缓存键"两处共同使用。
+[[nodiscard]] auto compile_fingerprint(CompilerKind kind,
+                                       const std::vector<std::string>& unit_flags,
+                                       const std::vector<std::string>& profile_flags,
+                                       bool third_party) -> std::string {
+  std::string material(compiler_kind_name(kind));
+  for (const auto& flag : unit_flags) material.append("\n").append(flag);
+  for (const auto& flag : profile_flags) material.append("\n@").append(flag);
+  if (third_party) material.append("\n-w");
+  return std::string(st::hash::fnv1a64_hex(material));
+}
+
+/// 编译标志指纹文件：与对象同目录的 `<对象>.flags`，内容是**有效编译标志**的哈希。
+///
+/// 为什么必须有它（实测踩到的静默降级）：
+/// `needs_rebuild` 原先只看**时间戳**（源文件/依赖头 vs 对象），而**编译标志变了
+/// 并不会让任何源文件变新**——于是"改了档位或 `-D` 定义，产物根本不重建"，
+/// 构建还高高兴兴报"重编 0 / 命中缓存 N"，人以为改动生效了。
+/// 这与本文档 §8.2 第 30 条（改头文件不重编 → ABI 不匹配 → 随机器崩溃）是**同一类缺陷**，
+/// 只是触发键从"头文件"换成了"编译标志"，后果一样：产物与预期不符却一声不响。
+///
+/// 实测：把 `dev` 档的 `-g` 去掉后重建，报"重编 0"，exe 大小一字节没变。
+[[nodiscard]] auto flags_stamp_path(const std::string& object) -> std::string {
+  return object + ".flags";
+}
+
+/// 目标是否需要重建：源文件、**任一被包含的头文件**、或**编译标志**变化时重建。
+[[nodiscard]] auto needs_rebuild(const CompileUnit& unit,
+                                 const std::vector<std::string>& unit_flags,
+                                 const std::vector<std::string>& profile_flags,
+                                 CompilerKind kind) -> bool {
   if (!fs::is_regular_file(unit.object)) return true;
   const auto object_time = fs::modified_ns(unit.object);
   if (!object_time) return true;
+  // 编译标志变了 → 必须重编（时间戳看不出这件事）
+  const auto stamp = fs::read_text(flags_stamp_path(unit.object));
+  if (!stamp.has_value() ||
+      *stamp != compile_fingerprint(kind, unit_flags, profile_flags, unit.third_party)) {
+    return true;
+  }
   const auto source_time = fs::modified_ns(unit.source);
   if (!source_time) return true;
   if (*source_time > *object_time) return true;
@@ -570,6 +608,7 @@ struct FrameworkFlags {
     return unexpected(ErrorCode::Unsupported, "未解析出 C++ 编译器（见 resolve_toolchain）");
   }
   const std::string& compiler_path = toolchain.compiler_path;
+
   const std::vector<std::string> include_dirs = gather_include_dirs(manifest, options);
   // 目标专属宏（如 `_WIN32_WINNT=0x0601`）：只对目标生效，不污染本机档
   const std::vector<std::string>& target_defines = toolchain.defines;
@@ -671,6 +710,11 @@ struct FrameworkFlags {
     // 改动依赖产出方式时**必须**升这个版本号。
     material.append("\n<deps:2>");
     for (const auto& flag : unit_flags_for(unit)) material.append("\n").append(flag);
+    // **档位标志也必须入键**：工程单元（如示例应用自己的 .cpp）的 `unit_flags_for`
+    // 只返回 st.pkg 里的 flags，不含 `-O1/-g/-DNDEBUG/-fsanitize`。
+    // 不入键的话，共享缓存会把**另一个档位**编出来的对象交给本次构建
+    // （实测：去掉 dev 的 `-g` 后重建，报"命中缓存 67"、产物一字节没变）。
+    for (const auto& flag : profile_flags_list) material.append("\n@").append(flag);
     material.append("\n").append(unit.source);
     if (unit.third_party) material.append("\n-w");
     if (unit.framework_unit) material.append("\n<framework>");
@@ -683,10 +727,19 @@ struct FrameworkFlags {
   std::vector<const CompileUnit*> pending;
   pending.reserve(units.size());
   for (const auto& unit : units) {
-    if (!options.force && !needs_rebuild(unit)) continue;
+    if (!options.force &&
+        !needs_rebuild(unit, unit_flags_for(unit), profile_flags_list, toolchain.kind)) {
+      continue;
+    }
     // 工程内已过期 → 先问共享缓存：命中就不必真编译（跨工程复用框架对象的主要路径）
     if (!options.force && object_cache_restore(object_cache, cache_key_for(unit), unit)) {
       ++cache_hits;
+      // 从共享缓存恢复的对象也要补写标志指纹：否则下次构建因"缺指纹"再重编一遍，
+      // 缓存就白命中了（指纹与是否重新编译无关，它是"这个对象是用什么标志编的"的说明）。
+      (void)fs::write_text(
+          flags_stamp_path(unit.object),
+          compile_fingerprint(toolchain.kind, unit_flags_for(unit), profile_flags_list,
+                              unit.third_party));
       continue;
     }
     pending.push_back(&unit);
@@ -840,6 +893,12 @@ struct FrameworkFlags {
         if (first_error.empty()) first_error = status.error().to_string();
         return;
       }
+      // 写下本次编译用的**标志指纹**：下一次增量判新据此发现"标志变了"。
+      // 写失败不影响本次构建（指纹缺失只会导致下次多编一次，不会出错）。
+      (void)fs::write_text(
+          flags_stamp_path(unit->object),
+          compile_fingerprint(toolchain.kind, unit_flags, profile_flags_list,
+                              unit->third_party));
       // 编译成功：写入共享缓存（失败不影响构建——缓存是加速手段，不是正确性前提）
       object_cache_store(object_cache, cache_key_for(*unit), *unit, cache_stores);
       ++done;
@@ -895,6 +954,24 @@ struct FrameworkFlags {
     // `/DEBUG` 是**链接器**选项，必须在 `/link` 之后：放在前面会被 cl 当成编译选项忽略
     // （报 D9002 而已），结果是“带 -g 构建却没有 PDB”——崩溃时连栈都符号不出来。
     if (debug_info) args.push_back("/DEBUG");
+    // **显式打开死代码删除与 COMDAT 折叠**。
+    //
+    // MSVC 的默认值取决于 `/DEBUG`：没有 `/DEBUG` 时 `/OPT:REF` 与 `/OPT:ICF` 是开的，
+    // 一旦带上 `/DEBUG`（即任何 `-g` 档）**两者默认关闭**，于是链接器会保留
+    // 所有"定义了但没人引用"的 COMDAT —— 主要是头文件里的内联函数与模板实例。
+    // 对一个重度使用头文件内联（`std::format` / `std::ranges` / 模板组件）的 C++20 工程，
+    // 这部分远比想象的多。
+    //
+    // 实测（本仓库 gallery）：`-g` 档 6610 KB，加上这两条后 **2987 KB（−55%）**；
+    // 同一份代码 release 档本来就是 2950 KB（那里没有 `/DEBUG`，默认就是开的）。
+    // 也就是说：**这不是"调试信息占地方"，而是"关掉优化留下的死代码"** ——
+    // 加上它不影响调试能力（PDB 照常生成，符号照常可解析）。
+    //
+    // 为什么会踩这条：一开始只看到"dev 比 release 大一倍多"，先怀疑 `-g`、
+    // 又怀疑增量链接，都错了；显式加 `/OPT:REF,ICF` 第一次还因为**没有重建 st 自身**
+    // 而得到"尺寸不变"的假阴性——工具链修完必须先重建工具本身再验证。
+    args.push_back("/OPT:REF");
+    args.push_back("/OPT:ICF");
     const auto link_libraries =
         link_library_arguments(toolchain.kind, toolchain.platform, libraries);
     args.insert(args.end(), link_libraries.begin(), link_libraries.end());
@@ -1191,10 +1268,29 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   link_units.insert(link_units.end(), target_units.begin(), target_units.end());
 
   // 链接跳过：0 个单元重编 + 产物已存在且比全部目标文件新 → 不重链（无改动构建近乎瞬时）
+  //
+  // ⚠ **但只有"参与链接的东西"没变时才能跳**。原先只看"产物的时间戳比现有对象新"，
+  // 于是**删掉一个源文件后永不重链**：被删的对象已不在 `link_units` 里，剩下的对象
+  // 又都比产物旧 → 判为最新 → 产物里那部分代码**一直留着**。
+  // 实测就是用户问的"示例程序怎么有 6MB"：移除 OpenGL 之后每个构建都报"重编 0"、
+  // 从不重链，产物仍带着 GL 后端与 glad 单头编出来的近 3MB 代码；
+  // 强制全量重建后立刻降到 2.99MB（release 是 2.95MB）。
+  //
+  // 因此把"上次链接用了哪些对象 + 什么标志"记成指纹，由它决定能否跳过。
+  const auto link_fingerprint = [&]() -> std::string {
+    std::string material(compiler_kind_name(toolchain->kind));
+    for (const auto& unit : link_units) material.append("\n").append(unit.object);
+    for (const auto& flag : *flags) material.append("\n@").append(flag);
+    return std::string(st::hash::fnv1a64_hex(material));
+  }();
+  const std::string link_stamp_path = output + ".link";
   const bool up_to_date = [&]() {
     if (options.force || rebuilt != 0 || stats.units_rebuilt != 0) return false;
     const auto output_time = fs::modified_ns(output);
     if (!output_time) return false;
+    // 参与链接的集合/标志变了（含"少了某个源文件"）→ 必须重链
+    const auto stamp = fs::read_text(link_stamp_path);
+    if (!stamp.has_value() || *stamp != link_fingerprint) return false;
     for (const auto& unit : link_units) {
       const auto object_time = fs::modified_ns(unit.object);
       if (!object_time || *object_time > *output_time) return false;
@@ -1210,6 +1306,8 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   auto linked = link(manifest, options, link_units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
   stats.linked = true;
+  // 记下本次链接的"成分"，下次据此判断能否跳过（写失败只是下次多链一次，不影响正确性）
+  (void)fs::write_text(link_stamp_path, link_fingerprint);
   stats.artifact = output;
   stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
   return stats;
