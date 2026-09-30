@@ -4,9 +4,7 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <format>
-#include <thread>
 
 #include "st/codec/png.hpp"
 #include "st/core/fs.hpp"
@@ -14,6 +12,7 @@
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/core/wait.hpp"
 #include "st/text/text.hpp"
 
 namespace st::app {
@@ -451,28 +450,31 @@ auto Application::run(std::unique_ptr<ui::Element> content) -> Result<int> {
 auto Application::run_loop() -> Result<int> {
   if (options_.exit_on_ready) return 0;
 
-  const auto frame_interval = std::chrono::duration<double, std::milli>(
-      std::max(1.0, options_.frame_budget_ms));
   while (!impl_->quit) {
     const std::int64_t frame_start = time::now_ns();
     tick();
     if (options_.max_frames > 0 && impl_->frames >= options_.max_frames) break;
-    if (impl_->repaint || root_.dirty()) {
-      const std::int64_t elapsed = time::now_ns() - frame_start;
-      const auto elapsed_ms = static_cast<double>(elapsed) / 1'000'000.0;
-      const double remaining = options_.frame_budget_ms - elapsed_ms;
-      if (remaining > 0.5) {
-        std::this_thread::sleep_for(
-            std::chrono::duration<double, std::milli>(remaining));
-      }
-    } else {
-      std::this_thread::sleep_for(std::chrono::milliseconds(4));
-    }
+    pace_loop(frame_start / 1'000'000);
   }
   log::info("应用退出：共 {} 帧，最后一帧 {:.2f}ms（排版 {:.2f} / 绘制 {:.2f} / 送显 {:.2f}）",
             impl_->frames, impl_->last_frame_ms, impl_->layout_ms, impl_->paint_ms,
             impl_->present_ms);
   return 0;
+}
+
+void Application::pace_loop(std::int64_t tick_start_ms) const {
+  if (impl_->repaint || root_.dirty()) {
+    const double elapsed_ms = static_cast<double>(time::now_ms() - tick_start_ms);
+    const double remaining = options_.frame_budget_ms - elapsed_ms;
+    if (remaining > 0.5) {
+      // 帧预算节流（高精度睡眠：std 的 sleep_for 在 Windows 上受 15.6ms 粒度约束，
+      // 会把这笔"小睡"变成大睡——见 st/core/wait.hpp）
+      platform::sleep_ms(remaining);
+    }
+    return;
+  }
+  // 空闲：短睡一拍，让控制通道命令尽快被 `tick` 处理（响应节拍 = 这个值）
+  platform::sleep_ms(4.0);
 }
 
 }  // namespace st::app

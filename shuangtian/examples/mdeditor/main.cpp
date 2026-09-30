@@ -1069,6 +1069,7 @@ auto run_app(int argc, char** argv) -> int {
   const std::int64_t started_ms = st::time::now_ms();
   std::uint32_t frames = 1;
   while (!app.quit_requested()) {
+    const std::int64_t frame_start_ms = st::time::now_ms();
     app.tick();
     // 流式演示：每 60ms 追加 3~9 个字节（模拟 token 到达节奏）
     if (stream_state->active && !stream_state->remaining.empty()) {
@@ -1091,7 +1092,9 @@ auto run_app(int argc, char** argv) -> int {
     ++frames;
     if (options.frames > 0 && frames >= options.frames) break;
     if (options.max_ms > 0 && st::time::now_ms() - started_ms >= options.max_ms) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    // 节拍交给框架：有活 → 帧预算；空闲 → 4ms（控制通道响应节拍）。
+    // 旧实现固定 `sleep_for(16ms)`：命令延迟被拉到 16~31ms（实测 ping p50=31ms）。
+    app.pace_loop(frame_start_ms);
   }
   st::print("mdeditor 退出：{} 帧，大纲 {} 项，DPI {:.1f}，后端 {}\n", frames,
               outline_ptr->entry_count(), static_cast<double>(app.device_scale()),

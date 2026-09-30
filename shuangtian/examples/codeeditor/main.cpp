@@ -490,11 +490,14 @@ ERROR service=net 连接失败 resp=null
   const std::int64_t started_ms = st::time::now_ms();
   std::uint32_t frames = 1;
   while (!app.quit_requested()) {
+    const std::int64_t frame_start_ms = st::time::now_ms();
     app.tick();
     ++frames;
     if (options.frames > 0 && frames >= options.frames) break;
     if (options.max_ms > 0 && st::time::now_ms() - started_ms >= options.max_ms) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    // 节拍交给框架：有活 → 帧预算；空闲 → 4ms（控制通道响应节拍）。
+    // 旧实现固定 `sleep_for(16ms)`：命令延迟被拉到 16~31ms（实测 ping p50=31ms）。
+    app.pace_loop(frame_start_ms);
   }
   st::print("codeeditor 退出：{} 帧，语言 {}，可用语言 {} 种\n", frames, editor_ptr->language(),
             CodeEditor::available_languages().size());

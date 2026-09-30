@@ -112,6 +112,16 @@ class Application final : public control::Host {
   /// 是否收到退出请求（控制通道 `app.quit` / 自检终止条件）。
   [[nodiscard]] auto quit_requested() const noexcept -> bool;
 
+  /// 主循环节拍（自定义主循环在每轮末尾调用；`run_loop` 用同一实现）：
+  ///
+  /// - **有活干**（待重绘/动画/布局脏）→ 睡到帧预算余量（60fps 节拍）；
+  /// - **空闲** → 只睡 4ms——控制通道命令的响应节拍。固定 `sleep_for(16ms)`
+  ///   会把命令延迟拉到 16~31ms（叠加 Windows 15.6ms 定时器粒度，实测
+  ///   ping p50=31.2ms）——AI 驱动的每次调用都在付这笔看不见的税。
+  ///
+  /// `tick_start_ms`：本轮 `tick()` 开始前的时刻（`st::time::now_ms()`）。
+  void pace_loop(std::int64_t tick_start_ms) const;
+
  private:
   /// 主循环（`run()` 的公共部分）。
   auto run_loop() -> Result<int>;
