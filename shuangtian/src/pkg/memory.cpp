@@ -54,6 +54,16 @@ auto detect_memory_limit() -> MemoryLimit {
     limit.source = "cgroup v1 memory.limit_in_bytes";
     return limit;
   }
+#if defined(_WIN32)
+  // ③.5 Windows：GlobalMemoryStatusEx（封装在 platform_memory.cpp）。原先只探测
+  // cgroup/meminfo，Windows 上恒"不可知" → 退回满核并发——恰好违背本机制
+  // "按内存防 OOM"的初衷（8GiB 机器满并发 dev 档 28 路就是瞬时 14GiB）。
+  if (const std::uint64_t value = platform_memory_limit_mb(); value > 0) {
+    limit.limit_mb = value;
+    limit.source = "GlobalMemoryStatusEx（物理总量与可用量取小）";
+    return limit;
+  }
+#endif
   // ④ 退回系统内存（Linux/POSIX 通用；无则调用方按核数兜底）
   if (const auto text = fs::read_text("/proc/meminfo"); text.has_value()) {
     for (const auto& line : st::split(*text, '\n')) {

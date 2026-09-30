@@ -70,8 +70,14 @@ foreach ($dir in 'src\core', 'src\ext', 'src\pkg', 'tools\stpm') {
 }
 $cSources = Get-ChildItem -Path (Join-Path $Root 'third_party') -Recurse -Filter *.c -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName
-# st.pkg 的 defines 必须一致：版本号与 lint 开关都靠它们
-$defines = @('/DST_VERSION="0.1.0"', '/DST_ENABLE_LINT=1')
+# defines 从 st.pkg 读取（消除双写：版本号改清单忘改这里 → 自举产物版本漂移，实测发生过）。
+# 兼容缺defines/缺字段的清单：回退到默认值。
+$pkg = Get-Content (Join-Path $Root 'st.pkg') -Raw | ConvertFrom-Json
+$pkgVersion = if ($pkg.version) { $pkg.version } else { '0.1.0' }
+$defines = @(("/DST_VERSION=`"$pkgVersion`""), '/DST_ENABLE_LINT=1')
+foreach ($item in @($pkg.defines)) {
+  if ($item -is [string] -and $item -match 'ST_') { $defines += "/D$item" }
+}
 $profileFlags = switch ($Profile) {
   'release' { @('/O2', '/DNDEBUG') }
   'quick'   { @('/Od') }

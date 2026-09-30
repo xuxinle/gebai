@@ -64,7 +64,10 @@ struct BuildStats {
 [[nodiscard]] auto build(const Manifest& manifest, const BuildOptions& options) -> Result<BuildStats>;
 
 /// 构建测试可执行文件（库源 + tests + 测试框架入口）并运行；返回退出码。
+/// `list_only` = 只列出用例名（`st test --list`，仍可带 filter）；
+/// `junit_path` 非空时给测试进程设 `ST_JUNIT_XML`，逐用例结果写成 JUnit XML（CI 消费）。
 [[nodiscard]] auto run_tests(const Manifest& manifest, const BuildOptions& options,
-                             std::string_view filter) -> Result<int>;
+                             std::string_view filter, bool list_only = false,
+                             std::string_view junit_path = {}) -> Result<int>;
 
 }  // namespace st::pkg

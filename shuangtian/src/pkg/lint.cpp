@@ -230,6 +230,25 @@ constexpr std::array<RuleSpec, 12> kRules{{
   return out;
 }
 
+[[nodiscard]] auto compiled_patterns() -> const std::vector<std::regex>& {
+  // 一次性编译（首次调用时）：原先在 scan_text 里逐文件重建 12 个 regex 对象，
+  // 198 文件就是 2376 次 regex 构造——std::regex 构造是出名的贵（每条模式都要编译）。
+  // C++11 起函数局部 static 的初始化线程安全（magic static），多文件并发扫描也安全。
+  static const std::vector<std::regex> patterns = [] {
+    std::vector<std::regex> compiled;
+    compiled.reserve(kRules.size());
+    for (const auto& rule : kRules) {
+      if (rule.pattern.empty()) {
+        compiled.emplace_back("(?!)");  // 永不匹配：该规则由专用检查实现
+        continue;
+      }
+      compiled.emplace_back(std::string(rule.pattern), std::regex::ECMAScript);
+    }
+    return compiled;
+  }();
+  return patterns;
+}
+
 [[nodiscard]] auto scan_text(std::string_view path, std::string_view text,
                              std::size_t& suppressed) -> std::vector<LintViolation> {
   const auto lines = split(text, '\n');
@@ -238,15 +257,7 @@ constexpr std::array<RuleSpec, 12> kRules{{
   bool in_block_comment = false;
   bool in_raw_string = false;
 
-  std::vector<std::regex> patterns;
-  patterns.reserve(kRules.size());
-  for (const auto& rule : kRules) {
-    if (rule.pattern.empty()) {
-      patterns.emplace_back("(?!)");  // 永不匹配：该规则由专用检查实现
-      continue;
-    }
-    patterns.emplace_back(std::string(rule.pattern), std::regex::ECMAScript);
-  }
+  const std::vector<std::regex>& patterns = compiled_patterns();
 
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];

@@ -5,6 +5,7 @@
 #include <set>
 
 #include "st/core/fs.hpp"
+#include "st/core/hash.hpp"
 #include "st/core/log.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
@@ -193,6 +194,56 @@ auto compiler_environment(CompilerKind kind) -> Result<std::map<std::string, std
   auto toolchain = find_msvc_toolchain();
   if (!toolchain) return forward_error(toolchain.error());
 
+  // —— 环境探测结果磁盘缓存 ——
+  // `vcvars64.bat + set` 实测一次 2.8~4.4s（cmd 启动 + vsdevcmd 全套环境脚本），
+  // 而其中真正被用到的只有 PATH/INCLUDE/LIB 等十一个键。每次 `st build` 都重跑一遍
+  // 是「无改动构建 3.3s、其中真实编译只 0.4s」的直接原因（链接跳过早已工作，
+  // 时间全交了 vcvars 税）。环境只随工具集安装变化：按 vcvars 路径+mtime+大小+版本
+  // 做键缓存到 `~/.shuangtian/cache/msvc-env/`，命中即免跑。
+  const auto cache_key = [&]() {
+    std::string material(toolchain->vcvars);
+    if (const auto modified = fs::modified_ns(toolchain->vcvars); modified.has_value()) {
+      material.append("\n").append(std::to_string(*modified));
+    }
+    if (const auto size = fs::file_size(toolchain->vcvars); size.has_value()) {
+      material.append("\n").append(std::to_string(*size));
+    }
+    material.append("\n").append(toolchain->cl).append("\n").append(toolchain->version);
+    return std::string(st::hash::fnv1a64_hex(material));
+  }();
+  const auto cache_root = [&]() -> std::string {
+    std::string home;
+    if (const auto env = fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
+      home = *env;
+    } else {
+      home = fs::join(fs::home_dir(), ".shuangtian");
+    }
+    return home.empty() ? std::string{} : fs::join(fs::join(home, "cache"), "msvc-env");
+  }();
+  if (!cache_root.empty()) {
+    const std::string cache_file = fs::join(cache_root, cache_key + ".json");
+    if (auto text = fs::read_text(cache_file); text.has_value()) {
+      if (auto parsed = json_parse(*text); parsed.has_value()) {
+        std::map<std::string, std::string> cached;
+        bool valid = parsed->is_object();
+        if (valid) {
+          for (const auto& [key, value] : parsed->items()) {
+            if (!value.is_string()) {
+              valid = false;
+              break;
+            }
+            cached[key] = value.get<std::string>();
+          }
+        }
+        // 缓存命中也要求关键键齐全：半截缓存比没有更糟（会以「环境为空」的症状骗人）
+        if (valid && cached.contains("INCLUDE") && cached.contains("LIB")) {
+          log::info("MSVC 环境命中缓存（{}）", cache_key);
+          return cached;
+        }
+      }
+    }
+  }
+
   // 写一个临时 `.bat` 而不是把命令塞进 `cmd /c "call ... && set"`：
   // 后者要穿过 cmd 的两轮解析，路径含空格/括号时极易拼错，而错误表现只是"环境为空"。
   const std::string script =
@@ -233,6 +284,17 @@ auto compiler_environment(CompilerKind kind) -> Result<std::map<std::string, std
     return unexpected(ErrorCode::Internal,
                       std::format("vcvars 未提供 INCLUDE/LIB（{}）：MSVC 编译会找不到任何头文件与库",
                                   toolchain->vcvars));
+  }
+  // 探测成功 → 写缓存（写失败只是下次多跑一次 vcvars，不影响正确性）。
+  // 原子写：半截缓存会在下次被关键键校验拦下，但完整写更省一次试探。
+  if (!cache_root.empty()) {
+    Json dump = Json::object();
+    for (const auto& [key, value] : environment) dump[key] = value;
+    const std::string cache_file = fs::join(cache_root, cache_key + ".json");
+    const std::string temp_file = cache_file + ".tmp";
+    if (fs::write_text(temp_file, dump.dump(2)).has_value()) {
+      (void)fs::rename(temp_file, cache_file);
+    }
   }
   log::info("MSVC 工具集 {}（{}）", toolchain->version, toolchain->cl);
   return environment;

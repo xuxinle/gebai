@@ -26,6 +26,15 @@ struct Case {
   std::function<void()> body{};
 };
 
+/// 单个用例的运行结果（junit 报告与超时标记用）。
+struct CaseResult {
+  std::string name{};
+  bool passed{false};
+  bool timed_out{false};          ///< 超过软超时：用例可能仍在跑，结果标记为失败
+  double elapsed_ms{0.0};
+  std::vector<std::string> failures{};
+};
+
 /// 用例注册表与当前用例的失败收集（进程级；测试基础设施的受控例外，见 CONVENTIONS §3.6）。
 class Registry {
  public:
@@ -42,7 +51,20 @@ class Registry {
 };
 
 /// 运行全部用例（`filter` 非空时按名称子串过滤）；返回失败用例数。
+/// 单用例软超时（默认 10s，`ST_TEST_TIMEOUT_MS` 覆盖）：超时标记 FAIL 但**不硬杀**——
+/// 观察线程只标记，用例线程继续跑完（硬杀会撕裂静态状态；软超时保证单个死循环
+/// 用例不会无声挂住整个测试进程，后续用例仍能拿到结果）。
 auto run_all(std::string_view filter) -> int;
+
+/// 列出全部用例名（`--list`；每行一个，含 filter 语义）。
+auto list_cases(std::string_view filter) -> int;
+
+/// 把上一轮 `run_all` 的逐用例结果写成 JUnit XML（CI 消费）。
+/// 返回写入的字节数；路径为空或上次无结果时返回 0。
+[[nodiscard]] auto write_junit(std::string_view path) -> std::size_t;
+
+/// 上一轮运行的逐用例结果（`write_junit` 的数据源）。
+[[nodiscard]] auto last_results() -> const std::vector<CaseResult>&;
 
 /// 用例注册器（`ST_TEST` 生成的静态对象调用）。
 struct Registrar {

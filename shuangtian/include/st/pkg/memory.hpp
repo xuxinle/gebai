@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace st::pkg {
 
@@ -31,9 +32,13 @@ struct MemoryLimit {
   std::string source{};       ///< 如 `cgroup v2 /sys/fs/cgroup/memory.max`
 };
 
-/// 探测可用内存上限：cgroup v2 → cgroup v1 → `/proc/meminfo` → `sysconf`。
-/// 环境变量 `ST_MEMORY_MB` 可显式覆盖（0/非法值忽略）。
+/// 探测可用内存上限：cgroup v2 → cgroup v1 → Windows `GlobalMemoryStatusEx`（platform_memory.cpp）
+/// → `/proc/meminfo`。环境变量 `ST_MEMORY_MB` 可显式覆盖（0/非法值忽略）。
 [[nodiscard]] auto detect_memory_limit() -> MemoryLimit;
+
+/// Windows 平台内存上限（MiB；非 Windows 返回 0）——总量与可用量取小。
+/// 实现在 `src/pkg/platform_memory.cpp`（`<windows.h>` 只允许出现在 platform_*）。
+[[nodiscard]] auto platform_memory_limit_mb() -> std::uint64_t;
 
 /// 单翻译单元内存估算（MiB），按档位区分：sanitizer 档显著更高（实测 630–700 MB）。
 [[nodiscard]] auto unit_memory_estimate_mb(std::string_view profile) -> std::uint64_t;
