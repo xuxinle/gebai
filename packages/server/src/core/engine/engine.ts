@@ -19,7 +19,7 @@ import { ShTaskRunner } from "../exec/sh-tasks"
 import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, type SubSessionFinishOptions, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionFinishGraceMs, subSessionNoticeHead, requestSubSessionFinish } from "../session/subsessions"
 import { BackgroundJobRegistry, type BgJobStore } from "../session/jobs"
 import { RESERVED_PROJECT_TMP } from "../tools/projects"
-import { basenameName, resolveInSandbox, sessionPath } from "../base/paths"
+import { basenameName, uniqueUploadName, resolveInSandbox, sessionPath } from "../base/paths"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { isToolBlockedInSafeMode, safeModeRestrictionMsg, stripApprovalFlags } from "../security/safety"
 import { runInToolFetchScope } from "../support/fetch-scope"
@@ -3397,29 +3397,24 @@ private activeSchemas(sessionId: string) {
       // 名称消毒：仅取 basename，拒绝路径分隔符与穿越（防止 ../ 逃逸会话目录）
       let name = basenameName(a.name)
       if (!name) throw new Error(`附件名无效: ${a.name}`)
-      // 重名去重：同批两个 data.csv 会在同一路径静默覆盖（前一个内容丢失）；追加序号区分，
-      // 也避免覆盖会话 tmp 下既有同名文件（上一轮任务产物）
-      if (usedNames.has(name)) {
-        const dot = name.lastIndexOf(".")
-        const stem = dot > 0 ? name.slice(0, dot) : name
-        const ext = dot > 0 ? name.slice(dot) : ""
-        let i = 2
-        while (usedNames.has(`${stem}-${i}${ext}`)) i++
-        name = `${stem}-${i}${ext}`
+      await mkdir(tmp, { recursive: true })
+      // 来源路径统一按沙箱规则基于会话根解析：沙箱启用时限定会话目录内（防任意文件读取）；
+      // 本地模式基于会话根解析（绝对路径放行）——修复相对进程 CWD 解析导致附件读取失败的缺陷
+      const src = a.path ? this.opts.sandbox.resolvePath(user, sessionId, a.path) : undefined
+      // 源即目标（引用会话 tmp 内自身路径）且批内未占用：原位引用，不重命名不复制（改名=复制自身）
+      if (!(src && resolve(src) === resolve(tmp, name) && !usedNames.has(name))) {
+        // 重名去重：同批两个 data.csv 会在同一路径静默覆盖（前一个内容丢失）；追加序号区分，
+        // 也避免覆盖会话 tmp 下既有同名文件（上一一轮任务产物/已上传附件）
+        name = uniqueUploadName(tmp, name, usedNames)
+        if (a.data) {
+          await writeFile(`${tmp}/${name}`, a.data)
+        } else if (src) {
+          const buf = await Bun.file(src).arrayBuffer()
+          await writeFile(`${tmp}/${name}`, new Uint8Array(buf))
+        }
       }
       usedNames.add(name)
-      const path = `${tmp}/${name}`
-      await mkdir(tmp, { recursive: true })
-      if (a.data) {
-        await writeFile(path, a.data)
-      } else if (a.path) {
-        // 来源路径统一按沙箱规则基于会话根解析：沙箱启用时限定会话目录内（防任意文件读取）；
-        // 本地模式基于会话根解析（绝对路径放行）——修复相对进程 CWD 解析导致附件读取失败的缺陷
-        const src = this.opts.sandbox.resolvePath(user, sessionId, a.path)
-        const buf = await Bun.file(src).arrayBuffer()
-        await writeFile(path, new Uint8Array(buf))
-      }
-      const size = (await Bun.file(path).size) ?? 0
+      const size = (await Bun.file(`${tmp}/${name}`).size) ?? 0
       // 存储逻辑路径（相对会话根，如 tmp/foo.png，SDK 契约）：模型/工具/前端统一按此解析
       refs.push({ path: `tmp/${name}`, mime: a.mime || "application/octet-stream", name, size })
     }

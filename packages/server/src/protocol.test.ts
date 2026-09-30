@@ -499,6 +499,32 @@ describe("WS protocol additions", () => {
     expect(file).toBe("hello ws")
   })
 
+  test("same-name attachments are deduplicated, not overwritten (REST + WS)", async () => {
+    // 粘贴多张同名图（如 image.png）的回归：上传端点不得互相覆盖只剩最后一张
+    const created = (await (await fetch(`${base(single)}/api/v1/sessions`, { method: "POST" })).json()) as { id: string }
+    const upload = async (content: string) => {
+      const form = new FormData()
+      form.append("file", new Blob([content], { type: "image/png" }), "image.png")
+      const res = await fetch(`${base(single)}/api/v1/sessions/${created.id}/attachments`, { method: "POST", body: form })
+      return (await res.json()) as { name: string; path: string }
+    }
+    let r = await upload("first")
+    expect(r.name).toBe("image.png")
+    r = await upload("second")
+    expect(r.name).toBe("image-2.png")
+    expect(r.path).toBe("tmp/image-2.png")
+    // WS 通道同规则：第三个同名落 image-3.png
+    const b64 = Buffer.from("third").toString("base64")
+    const up = await wsCall(single, "session.attachment.upload", { id: created.id, name: "image.png", data: b64, mime: "image/png" })
+    expect(up.ok).toBe(true)
+    expect((up.payload as { path: string }).path).toBe("tmp/image-3.png")
+    // 三份内容各自完好（未被覆盖）
+    const tmp = single.store.getTmpDir(created.id, "admin")
+    expect(await Bun.file(join(tmp, "image.png")).text()).toBe("first")
+    expect(await Bun.file(join(tmp, "image-2.png")).text()).toBe("second")
+    expect(await Bun.file(join(tmp, "image-3.png")).text()).toBe("third")
+  })
+
   test("session.prompt via WS runs the task and pushes events", async () => {
     // 独立 provider 实例，避免其他测试消耗 calls 计数
     ;(single.engine as unknown as { opts: { provider: LLMProvider } }).opts.provider = new ProtocolFake()

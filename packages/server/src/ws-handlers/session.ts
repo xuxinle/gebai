@@ -2,7 +2,7 @@
 import type { WsHandler } from "./context"
 import { join } from "node:path"
 import { toSessionInfo } from "../core/session/store"
-import { basenameName } from "../core/base/paths"
+import { basenameName, uniqueUploadName } from "../core/base/paths"
 import { validateEnvVars, maskEnv } from "../core/session/env"
 import { findInTrash } from "../core/session/gc"
 import { sessionPath } from "../core/base/paths"
@@ -132,8 +132,9 @@ export const sessionHandlers: Record<string, WsHandler> = {
     const sessionId = String(p.id)
     const data = p.data as string | undefined
     if (!data) return reply(false, undefined, "data required (base64)")
-    const name = basenameName(String(p.name ?? "upload")) || "upload"
     const tmp = d.store.getTmpDir(sessionId, user.id)
+    // 落盘不覆盖：目标名已存在时追加序号（多张同名图各自落独立文件）
+    const name = uniqueUploadName(tmp, basenameName(String(p.name ?? "upload")) || "upload")
     const buf = Buffer.from(data, "base64")
     const safePath = join(tmp, name)
     await mkdir(tmp, { recursive: true })

@@ -1980,6 +1980,30 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     cleanup(s.home)
   })
 
+  test("same-name attachments in one batch land as separate files (no silent overwrite)", async () => {
+    // 粘贴多张同名图的回归：同批三条同名 data 附件各自落盘，内容不被末条覆盖
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    await s.engine.run(session.id, "default", "look", {
+      attachments: [
+        { name: "image.png", mime: "image/png", data: new Uint8Array([1]) },
+        { name: "image.png", mime: "image/png", data: new Uint8Array([2, 2]) },
+        { name: "image.png", mime: "image/png", data: new Uint8Array([3, 3, 3]) },
+      ],
+    })
+    const tmp = s.store.getTmpDir(session.id, "default")
+    const names = readdirSync(tmp).sort()
+    expect(names).toEqual(["image-2.png", "image-3.png", "image.png"])
+    expect((await Bun.file(join(tmp, "image.png")).arrayBuffer()).byteLength).toBe(1)
+    expect((await Bun.file(join(tmp, "image-2.png")).arrayBuffer()).byteLength).toBe(2)
+    expect((await Bun.file(join(tmp, "image-3.png")).arrayBuffer()).byteLength).toBe(3)
+    // 消息引用与磁盘一致
+    const loaded = await s.store.load(session.id)
+    const um = loaded!.messages.find((m) => m.role === "user")!
+    expect(um.attachments?.map((a) => a.path)).toEqual(["tmp/image.png", "tmp/image-2.png", "tmp/image-3.png"])
+    cleanup(s.home)
+  })
+
   test("sandboxed attachments reject out-of-sandbox source paths", async () => {
     const s = await setup("text")
     ;(s.engine as unknown as { opts: { sandbox: import("../security/sandbox").Sandbox } }).opts.sandbox = new Sandbox({ home: s.home, enabled: true })
@@ -2022,6 +2046,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     const tmp = s.store.getTmpDir(session.id, "default")
     mkdirSync(tmp, { recursive: true })
     writeFileSync(join(tmp, "shot.png"), "png-bytes")
+    // 同名已在磁盘：引用自身路径的附件不重命名（源与目标同文件，改名是复制自元）
     await s.engine.run(session.id, "default", "look at this", { attachments: [{ name: "shot.png", mime: "image/png", path: "tmp/shot.png" }] })
     const loaded = await s.store.load(session.id)
     const um = loaded!.messages.find((m) => m.role === "user")!

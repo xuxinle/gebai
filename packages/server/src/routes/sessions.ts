@@ -5,7 +5,7 @@ import type { AttachmentInput, EnvVarSource, TodoItem } from "@gebai/sdk"
 import { existsSync } from "node:fs"
 import { rename } from "node:fs/promises"
 import { join } from "node:path"
-import { basenameName, isValidSessionId, sessionPath } from "../core/base/paths"
+import { basenameName, uniqueUploadName, isValidSessionId, sessionPath } from "../core/base/paths"
 import { findInTrash } from "../core/session/gc"
 import { validateEnvVars, maskEnv, filterEnvInjection } from "../core/session/env"
 import { getEnvCatalog } from "../core/agents/env-catalog"
@@ -136,7 +136,8 @@ export function registerSessionRoutes(rc: RouteCtx): void {
     const tmp = d.store.getTmpDir(c.req.param("id"), user.id)
     // 文件名消毒：仅 basename，拒绝路径穿越
     const rawName = typeof file === "object" && "name" in file ? (file as File).name : "upload"
-    const name = basenameName(rawName) || "upload"
+    // 落盘不覆盖：目标名已存在时追加序号（多张同名图各自落独立文件）
+    const name = uniqueUploadName(tmp, basenameName(rawName) || "upload")
     const buf = await (file as Blob).arrayBuffer()
     await Bun.write(join(tmp, name), new Uint8Array(buf))
     return c.json({ id: name, name, mime: (file as Blob).type, size: buf.byteLength, path: `tmp/${name}` })

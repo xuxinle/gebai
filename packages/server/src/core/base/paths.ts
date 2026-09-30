@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto"
-import { lstatSync, realpathSync } from "node:fs"
+import { lstatSync, realpathSync, readdirSync } from "node:fs"
 import { readdir } from "node:fs/promises"
 import { join, relative, isAbsolute, resolve, sep, dirname } from "node:path"
 
@@ -97,6 +97,29 @@ export function basenameName(name: string): string {
     .pop() ?? ""
   if (!base || base === "." || base === ".." || /[\x00-\x1f]/.test(base)) return ""
   return base
+}
+
+/**
+ * 上传附件落盘不覆盖：目标名已被同批占用或磁盘已存在同名文件时追加序号（a.png → a-2.png）
+ * 直到可用。多张同名图（如复制粘贴的 image.png）各自落独立文件，不再互相覆盖只剩最后一张。
+ * dir 为落盘目录（不存在视为空）；taken 为同批已用名（上传/落盘时目标文件尚未写入，批内去重 + 磁盘去重双保险）。
+ */
+export function uniqueUploadName(dir: string, name: string, taken: ReadonlySet<string> = new Set()): string {
+  const used = new Set(taken)
+  try {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isFile()) used.add(e.name)
+    }
+  } catch {
+    /* 目录不存在：首批上传，无磁盘占用 */
+  }
+  if (!used.has(name)) return name
+  const dot = name.lastIndexOf(".")
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ""
+  let i = 2
+  while (used.has(`${stem}-${i}${ext}`)) i++
+  return `${stem}-${i}${ext}`
 }
 
 /**
