@@ -326,6 +326,35 @@ void Element::mark_dirty() {
   for (Element* current = parent_; current != nullptr; current = current->parent_) {
     current->dirty_ = true;
   }
+  // 增量重绘：把"我变了"上报给所在树的根（UiRoot 帧首收集）
+  record_damage();
+}
+
+void Element::record_damage() const noexcept {
+  const Element* top = this;
+  for (const Element* current = parent_; current != nullptr; current = current->parent_) {
+    top = current;
+  }
+  if (paint_margin_hint_ < 0.0f) {
+    // 从未绘制过 → 绘制外扩（阴影/发光）未知：保守要求整帧，不能只重画 bounds。
+    top->damage_needs_full_ = true;
+    top->damage_valid_ = true;
+    return;
+  }
+  const math::Rect extent = bounds_.inflate(paint_margin_hint_);
+  top->damage_ = top->damage_valid_ ? top->damage_.union_with(extent) : extent;
+  top->damage_valid_ = true;
+}
+
+auto Element::take_damage() const noexcept -> DamageReport {
+  DamageReport report;
+  report.rect = damage_;
+  report.valid = damage_valid_;
+  report.needs_full = damage_needs_full_;
+  damage_ = math::Rect{};
+  damage_valid_ = false;
+  damage_needs_full_ = false;
+  return report;
 }
 
 void Element::mark_layout_dirty() {
@@ -711,6 +740,8 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
                                   static_cast<float>(physical.width) * inv,
                                   static_cast<float>(physical.height) * inv};
     const float margin = paint_margin(context);
+    // 留存本次绘制的外扩量：元素后续标脏时据此算损坏区（增量重绘）。
+    paint_margin_hint_ = margin;
     if (!subtree_may_paint(*this, logical_clip, margin)) return;
   }
   if (context.painted_elements != nullptr) ++*context.painted_elements;

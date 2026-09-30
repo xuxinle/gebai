@@ -942,6 +942,17 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
   // 上一帧实际绘制的元素数：视口剔除的效果**只能**这样观测——
   // 应用跨运行的像素不确定（动画冻结值依赖帧时序），截图 A/B 不可靠。
   result["painted_elements"] = static_cast<std::uint64_t>(host.root().painted_elements());
+  // 增量重绘的可观测性：上一帧是否走局部路径、重绘区域多大（AI/性能回归都用得上）。
+  result["partial_frame"] = host.root().last_frame_partial();
+  {
+    const math::IntRect painted = host.root().dirty_rect();
+    Json rect = Json::object();
+    rect["x"] = painted.x;
+    rect["y"] = painted.y;
+    rect["width"] = painted.width;
+    rect["height"] = painted.height;
+    result["dirty_rect"] = std::move(rect);
+  }
     result["requests"] = static_cast<std::uint64_t>(requests);
     result["clients"] = static_cast<std::uint64_t>(clients.size());
     Json log_value = Json::array();

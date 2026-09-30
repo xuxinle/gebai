@@ -31,6 +31,10 @@ def launch(profile: str, app: str) -> tuple[int, subprocess.Popen]:
     log = open(log_path, "wb")
     command = [f"{ROOT}/build/{profile}/bin/{app}", "--headless", "--control-port", "0",
                "--control-file", ctl, "--shots", SHOTS]
+    # 渲染器可用环境变量钉住（默认 auto）：验证软件腿的**增量重绘**路径时传 software。
+    renderer = os.environ.get("ST_VISUAL_RENDERER", "")
+    if renderer:
+        command.extend(["--renderer", renderer])
     if app == "codeeditor":
         # 脚本能力默认关闭；codeeditor 支持 `--enable-script`，这里显式开启以便覆盖该路径
         command.append("--enable-script")

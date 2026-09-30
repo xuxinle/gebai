@@ -91,6 +91,11 @@ class Surface {
   [[nodiscard]] virtual auto physical_height() const noexcept -> int = 0;
   /// DPI 缩放（物理像素 / 逻辑像素）。
   [[nodiscard]] virtual auto device_scale() const noexcept -> float = 0;
+  /// 是否支持**区域重绘**（清局部 + 按裁剪域局部重绘）。
+  ///
+  /// 软件画布可以直接寻址缓冲，局部路径成本与区域成正比；GPU 画布整帧仅 ~1ms，
+  /// 且局部路径需要另维护一套状态，因此默认不支持（调用方回落整帧语义）。
+  [[nodiscard]] virtual auto supports_partial_repaint() const noexcept -> bool { return false; }
   /// 运行时切换 DPI（重建后端缓冲；软件与 GPU 语义一致）。
   virtual void set_device_scale(float scale) = 0;
   [[nodiscard]] auto logical_bounds() const noexcept -> math::Rect {

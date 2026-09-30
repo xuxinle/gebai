@@ -80,6 +80,9 @@ class Canvas final : public Surface {
   [[nodiscard]] auto physical_height() const noexcept -> int override { return physical_height_; }
   /// DPI 缩放（物理像素 / 逻辑像素）。
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
+  /// 软件光栅器支持“区域重绘”：清局部 + 按裁剪域局部重绘（缓冲可直接寻址）。
+  /// GPU 画布暂不接（整帧仅 ~1ms，局部路径要另维护一套状态，收益不划算）。
+  [[nodiscard]] auto supports_partial_repaint() const noexcept -> bool override { return true; }
   void set_device_scale(float scale) noexcept override;
   /// 逻辑矩形 → 物理整数矩形（向外取整，覆盖完整像素）。
   [[nodiscard]] auto to_physical(math::Rect rect) const noexcept -> math::IntRect override;

@@ -302,6 +302,9 @@ class Element {
       } else {
         hover_t_ = hover_from_ + (target - hover_from_) * static_cast<float>(progress);
         hover_animating_ = true;   // 只在这一支声明"还要下一帧"
+        // 同时上报损坏区：过渡帧只需重画该元素那块（增量重绘；否则下一帧
+        // 损坏区为空 → 回落整帧，实测悬停过渡仍然每帧全屏）。
+        record_damage();
       }
       return hover_t_;
     }
@@ -316,6 +319,7 @@ class Element {
       hover_from_ = hover_t_;   // 从**当前视觉进度**接着动（不跳变）
       hover_start_ = now;
       hover_animating_ = true;
+      record_damage();
       return hover_t_;
     }
     hover_animating_ = false;   // 真正静止：不请求下一帧
@@ -384,7 +388,12 @@ class Element {
   /// 谁在动就得由同一个机制汇总——否则会出现"某组件自己在 paint 里标脏，
   /// 绕过了汇总"这类看不见的循环（实测踩过：逐像素写 GPU 画布导致主线程打满）。
   /// 规则很硬：**只有真正还在动的元素才请求**，静态时必须停下。
-  void request_animation() const noexcept { animation_requested_ = true; }
+  ///
+  /// 同时上报损坏区：动画元素下一帧只需重画它自己那块（增量重绘）。
+  void request_animation() const noexcept {
+    animation_requested_ = true;
+    record_damage();
+  }
   [[nodiscard]] auto animation_requested() const noexcept -> bool {
     return animation_requested_ || hover_animating_;
   }
@@ -396,6 +405,24 @@ class Element {
   [[nodiscard]] auto dirty() const noexcept -> bool { return dirty_; }
   [[nodiscard]] auto layout_dirty() const noexcept -> bool { return layout_dirty_; }
   void clear_dirty() noexcept;
+
+  // —— 增量重绘：元素级损坏区上报 ——
+  //
+  // 元素没有 UiRoot 反指，只能把"我变了"沿 parent 链**累积到所在树的根元素**上
+  // （content 根或 overlay 根），由 UiRoot 在每帧开始时收集消费（见 `paint_frame`）。
+  // 上报的矩形 = `bounds + 上次绘制时的安全外扩`（阴影/发光会画到盒子外，
+  // 外扩量就是 `paint_margin`；从未绘制过的元素外扩未知——保守要求整帧）。
+
+  /// 损坏上报结果（UiRoot 收集用）。
+  struct DamageReport {
+    math::Rect rect{};         ///< 需要重绘的逻辑区域（已并入绘制外扩）
+    bool valid{false};         ///< 有无累积
+    bool needs_full{false};    ///< 外扩未知（从未绘制过）→ 整帧重绘兜底
+  };
+  /// 消费累积的损坏区（调用后清零；mutable：由 UiRoot 在帧首收集，元素只负责记录）。
+  [[nodiscard]] auto take_damage() const noexcept -> DamageReport;
+  /// 把自己的损坏区记到所在树的根元素（内部用；`mark_dirty`/`request_animation` 调用）。
+  void record_damage() const noexcept;
 
  protected:
   /// 子类绘制自身的"盒子"（背景/边框/圆角/阴影）。
@@ -434,6 +461,12 @@ class Element {
   bool focused_{false};
   bool dirty_{true};
   bool layout_dirty_{true};
+  /// 上次绘制时的安全外扩（`paint_margin`；-1 = 尚未绘制过 → 损坏区按整帧兜底）。
+  mutable float paint_margin_hint_{-1.0f};
+  /// 累积的损坏区（记录在**所在树的根元素**上；UiRoot 帧首取走）。
+  mutable math::Rect damage_{};
+  mutable bool damage_valid_{false};
+  mutable bool damage_needs_full_{false};
 };
 
 /// 便捷容器：行/列布局面板。

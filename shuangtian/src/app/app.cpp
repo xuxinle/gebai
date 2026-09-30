@@ -91,8 +91,14 @@ auto Application::paint_profile() const -> const raster::PaintProfiler* {
 void Application::request_quit() { impl_->quit = true; }
 
 void Application::request_repaint() {
+  // 只请求"下一帧"；具体重绘范围交给**损坏区机制**（增量重绘）：
+  //
+  // 旧实现在这里调 `mark_dirty_all()`——把"有东西变了"当成"所有东西都变了"，
+  // 于是每次控制通道 set/invoke/输入都要整树重排 + 整帧重画。现在：
+  // - 元素级状态变更在 setter 里 `mark_dirty()` → 上报损坏区（局部重绘）；
+  // - 需要重排的变更（文本变长等）置 `layout_dirty` → 下一帧重排 + 整帧（保守）；
+  // - 什么都没标（如空悬停移动）→ 损坏区为空 → `paint_frame` 回落整帧（安全兼底）。
   impl_->repaint = true;
-  root_.mark_dirty_all();
 }
 
 void Application::set_theme_mode(ui::ThemeMode mode) {
@@ -366,15 +372,15 @@ void Application::render_frame() {
     canvas.set_profiler(&impl_->profiler);
   }
   root_.layout();
-  const ui::Theme& theme = root_.theme();
-  canvas.clear(theme.colors().bg);
   // 时间轴推进：动画（开关/悬浮过渡/3D 旋转）都靠它。
   // 用**应用启动以来的秒数**而不是系统时间：前者单调、与帧序号同源，
   // 便于复现（同一帧序列 → 同一动画进度）。
   root_.set_time(static_cast<double>(start_ns - impl_->started_ns) / 1'000'000'000.0);
 
   const std::int64_t paint_start = time::now_ns();
-  root_.paint(canvas);
+  // 绘制一帧：`paint_frame` 自动选择全量/局部（损坏区驱动；软件画布走局部，
+  // GPU 画布与全局变化恒走全量——语义与旧路径完全一致，只少了无效的整帧重画）。
+  root_.paint_frame(canvas);
   const std::int64_t present_start = time::now_ns();
   impl_->backend->present();
   const std::int64_t end_ns = time::now_ns();

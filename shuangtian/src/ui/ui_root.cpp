@@ -8,7 +8,7 @@
 
 namespace st::ui {
 
-UiRoot::UiRoot() : theme_(Theme::light()) { dirty_rect_ = math::IntRect{}; }
+UiRoot::UiRoot() : theme_(Theme::light()) {}
 
 UiRoot::~UiRoot() = default;
 
@@ -57,7 +57,7 @@ auto UiRoot::render_context() const -> RenderContext {
 
 void UiRoot::layout(bool force) {
   if (content_ == nullptr) return;
-  if (!force && !dirty_) return;
+  if (!force && !dirty_ && !tree_layout_dirty()) return;
   const RenderContext context = render_context();
   const auto apply_theme_tree = [](auto&& self, Element& element, const Theme& theme) -> void {
     element.apply_theme(theme);
@@ -92,8 +92,8 @@ void UiRoot::layout(bool force) {
   }
 
   dirty_ = false;
-  dirty_rect_ = math::IntRect{0, 0, static_cast<int>(viewport_.width),
-                              static_cast<int>(viewport_.height)};
+  // 重排会挪动任意兄弟（波及范围难界定）→ 保守整帧重绘（与旧行为一致）。
+  pending_full_ = true;
   ++version_;
 }
 
@@ -208,12 +208,12 @@ void UiRoot::update_hover(Element* target) {
   // 漏掉旧目标会留下"卡住的悬浮高亮"：它的 `hover_t_` 还停在 1.0，而悬浮过渡是在
   // `paint` 里推进的——不重绘就永远停在悬浮外观上。现象是侧栏出现**两个**"选中项"
   // （一个真选中、一个卡住的悬浮），看起来像"导航自己在变来变去"。实测踩过。
-  for (Element* current = previous; current != nullptr; current = current->parent()) {
-    current->mark_dirty();
-  }
-  for (Element* current = target; current != nullptr; current = current->parent()) {
-    current->mark_dirty();
-  }
+  //
+  // 只标**两个元素本身**：`mark_dirty()` 内部会把脏标记冒泡到全部祖先（不必逐个链上
+  // 调用）；而逐个链上调用会把**根元素**也记进损坏区——根=整窗口，增量重绘直接
+  // 退化成每帧整帧（实测踩过：悬停一次，全帧重画）。
+  if (previous != nullptr) previous->mark_dirty();
+  if (target != nullptr) target->mark_dirty();
   ++version_;
   (void)context;
 }
@@ -459,6 +459,8 @@ auto UiRoot::visual_tree() const -> VisualNode {
 
 void UiRoot::mark_dirty_all() {
   dirty_ = true;
+  // 整树重排/主题切换等全局变化：整帧重绘（局部路径不适用）。
+  pending_full_ = true;
   ++version_;
   if (content_ != nullptr) {
     const auto walk = [](auto&& self, Element& element) -> void {
@@ -475,10 +477,101 @@ void UiRoot::clear_dirty() noexcept {
   // 动画未结束就**保持脏**：元素在本次绘制里声明的"还在动"是下一帧的依据。
   // 清掉它会让动画停在第一帧；而每帧重新声明，所以动画结束后重绘会自然停下。
   //
-  // `animation_pending_` 由 `paint()` 在绘制后汇总（遍历一次），这里只消费。
-  dirty_ = animation_pending_;
+  // `animation_pending_` 由绘制阶段汇总（遍历一次），这里只消费；
+  // 注意**不动**元素侧新累积的损坏区：绘制期间新产生的（`request_animation`）
+  // 要留给下一帧做增量重绘（帧首由 `paint_frame` 收集消费）。
+  followup_ = animation_pending_;
   animation_pending_ = false;
-  dirty_rect_ = math::IntRect{};
+  // 帧级"整帧"标记的兜底清理：正常流程里 `paint_frame` 已消费（帧首快照）；
+  // 直接调 `layout()/paint()` 的路径（测试/手写循环）没有消费者，留着会让
+  // `dirty()` 永不安静。
+  pending_full_ = false;
+}
+
+auto UiRoot::tree_layout_dirty() const noexcept -> bool {
+  // 元素 mark_layout_dirty 会把标记沿 parent 链冒泡到所在树的根（content/overlay 根），
+  // 因此根上的标记就是"树里有人要重排"的 O(1) 汇总。
+  if (content_ != nullptr && content_->layout_dirty()) return true;
+  for (const auto& overlay : overlays_) {
+    if (overlay != nullptr && overlay->layout_dirty()) return true;
+  }
+  return false;
+}
+
+auto UiRoot::needs_frame() const noexcept -> bool {
+  return dirty_ || followup_ || pending_full_ || !pending_damage_.is_empty() ||
+         tree_layout_dirty();
+}
+
+void UiRoot::collect_tree_damage() {
+  const auto merge = [this](const Element* root) {
+    if (root == nullptr) return;
+    const Element::DamageReport report = root->take_damage();
+    if (!report.valid) return;
+    if (report.needs_full) {
+      pending_full_ = true;
+      return;
+    }
+    pending_damage_ = pending_damage_.is_empty() ? report.rect
+                                                 : pending_damage_.union_with(report.rect);
+  };
+  merge(content_.get());
+  for (const auto& overlay : overlays_) merge(overlay.get());
+}
+
+auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
+  // 1) 收集元素上报的损坏区（上一帧之后到现在的所有变更）。
+  collect_tree_damage();
+  // 2) 必要时重排；真跑了重排 → 保守整帧（见 `layout` 尾部说明）。
+  layout();
+  // 3) 快照并消费本次帧的损坏区（绘制期间新记录的走元素，留给下一帧）。
+  const math::Rect damage = pending_damage_;
+  const bool full_flag = pending_full_;
+  pending_damage_ = math::Rect{};
+  pending_full_ = false;
+
+  const math::Rect viewport_rect{0.0f, 0.0f, viewport_.width, viewport_.height};
+  const math::Rect clipped_damage = damage.intersect(viewport_rect);
+  const float viewport_area =
+      std::max(1.0f, viewport_rect.width * viewport_rect.height);
+  const float damage_area =
+      clipped_damage.is_empty() ? 0.0f : clipped_damage.width * clipped_damage.height;
+  // 全量条件：显式整帧标记 / 画布不支持局部 / 损坏区为空（保守地"什么都画"）/
+  // 损坏区过大（超过视口 55% 时整帧更划算——跳过裁剪开销与小块拼接）。
+  const bool use_full = full_flag || !canvas.supports_partial_repaint() ||
+                        clipped_damage.is_empty() || damage_area > viewport_area * 0.55f;
+
+  painted_elements_ = 0;
+  RenderContext context = render_context();
+  context.painted_elements = &painted_elements_;
+
+  if (use_full) {
+    // 整帧：清屏 + 绘制整树（GPU 画布恒走这条，与旧行为完全一致）。
+    canvas.clear(theme_.colors().bg);
+    for (auto& overlay : overlays_) overlay->paint(context, canvas);
+    if (content_ != nullptr) paint_subtree(context, *content_, canvas);
+    last_frame_partial_ = false;
+    dirty_rect_ = math::IntRect{0, 0, static_cast<int>(viewport_.width),
+                                static_cast<int>(viewport_.height)};
+  } else {
+    // 局部：清损坏区 + 推裁剪 + 绘制整树。
+    //
+    // 为什么"重画整树"而不是只重画变化的元素：区域内可能叠着其他元素（z 序在后的
+    // 邻层），只画变化元素会把邻居盖掉；而 `Element::paint` 自带**按裁剪域剔除**
+    // （与视口剔除同一机制，含阴影/发光外扩），整树遍历里越界分支全部 O(1) 跳过，
+    // 留下的正好是"与损坏区相交的全部元素"——z 序自然正确。
+    canvas.push_clip_rect(clipped_damage);
+    canvas.fill_rect(clipped_damage, raster::Paint::solid(theme_.colors().bg), 0.0f,
+                     raster::DrawOptions{.blend = raster::BlendMode::Src});
+    for (auto& overlay : overlays_) overlay->paint(context, canvas);
+    if (content_ != nullptr) paint_subtree(context, *content_, canvas);
+    canvas.pop_clip();
+    last_frame_partial_ = true;
+    dirty_rect_ = clipped_damage.round_out();
+  }
+  // 绘制后汇总"还有谁在动"（与 `paint()` 同一时机：必须在所有绘制之后）。
+  collect_animation_requests();
+  return last_frame_partial_;
 }
 
 void UiRoot::add_overlay(std::unique_ptr<Element> overlay) {
@@ -508,3 +601,4 @@ void UiRoot::clear_overlays() {
 }
 
 }  // namespace st::ui
+
