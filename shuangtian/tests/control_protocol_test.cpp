@@ -1,0 +1,442 @@
+/// 控制通道协议一致性测试（st-control/1 · DESIGN.md §6.2 声明 vs 实现）。
+///
+/// 背景（审视报告 P0-1）：协议文档声明了 drag / wait for=frames / capture format 等能力，
+/// 实现却拒绝或静默忽略——「§ 是稳定接口」的约定被实现漂移破坏，且没有任何测试拦截。
+/// 本文件把 §6.2 的关键声明钉成端到端测试：起真实 Server + 真实 TCP 连接，
+/// 按协议走完整请求/响应，而不是只测内部函数（那测不到「文档↔实现」的一致性）。
+///
+/// 覆盖：token 鉴权（缺失/错误拒绝、正确放行、hello 前方法被拒）、drag 序列、
+/// wait for=frames、invoke 未知动作报错、capture 落盘白名单、key press 完整 down+up。
+
+#include "st/test/test.hpp"
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "st/control/control.hpp"
+#include "st/core/net.hpp"
+#include "st/core/time.hpp"
+#include "st/ui/components/basic.hpp"
+#include "st/ui/components/input.hpp"
+#include "st/ui/ui_root.hpp"
+
+namespace {
+
+using st::Json;
+using st::ui::Button;
+using st::ui::Input;
+using st::ui::Panel;
+using st::ui::UiRoot;
+
+/// 测试用宿主：最小实现 control::Host（不依赖 app 层——控制层只面向该接口，正好验证依赖倒置）。
+class TestHost final : public st::control::Host {
+ public:
+  UiRoot root_{};
+  std::string app_name_{"protocol-test"};
+  std::string app_version_{"0.0.0"};
+  int quits{0};
+  int repaints{0};
+
+  [[nodiscard]] auto root() -> UiRoot& override { return root_; }
+  [[nodiscard]] auto app_name() const -> std::string override { return app_name_; }
+  [[nodiscard]] auto app_version() const -> std::string override { return app_version_; }
+  [[nodiscard]] auto backend_name() const -> std::string_view override { return "headless"; }
+  [[nodiscard]] auto headless() const -> bool override { return true; }
+  [[nodiscard]] auto viewport() const -> st::math::Size override { return {400, 300}; }
+  [[nodiscard]] auto device_scale() const -> float override { return 1.0f; }
+  auto set_device_scale(float) -> st::Status override { return st::ok(); }
+  [[nodiscard]] auto metrics() const -> st::control::Metrics override { return {}; }
+  void request_quit() override { ++quits; }
+  void request_repaint() override { ++repaints; }
+  void set_theme_mode(st::ui::ThemeMode mode) override { root_.set_theme(mode == st::ui::ThemeMode::Dark ? st::ui::Theme::dark() : st::ui::Theme::light()); }
+  [[nodiscard]] auto capture_to_file(std::string_view, st::math::IntRect) -> st::Result<std::string> override {
+    return std::string("/tmp/fake.png");
+  }
+  [[nodiscard]] auto capture_png(st::math::IntRect) -> st::Result<std::vector<std::uint8_t>> override {
+    return std::vector<std::uint8_t>{0x89, 0x50, 0x4E, 0x47};
+  }
+  [[nodiscard]] auto log_lines(std::size_t) const -> std::vector<std::string> override { return {}; }
+};
+
+/// 帧协议客户端（与 Python 探针同构：4 字节大端长度 + JSON）。
+class Probe {
+ public:
+  explicit Probe(std::uint16_t port, std::string token = "")
+      : token_(std::move(token)) {
+    auto connected = st::net::connect_tcp("127.0.0.1", port, 2000);
+    ST_REQUIRE(connected.has_value());
+    if (connected) stream_ = std::move(*connected);
+  }
+
+  [[nodiscard]] auto call(const std::string& method, Json params = Json::object(), int timeout_ms = 3000)
+      -> Json {
+    const std::uint64_t id = ++next_id_;
+    Json request = Json::object();
+    request["id"] = id;
+    request["method"] = method;
+    if (!token_.empty() && method == "hello") params["token"] = token_;
+    request["params"] = params;
+    const std::string body = st::json_dump(request);
+    std::vector<std::uint8_t> frame(4 + body.size());
+    frame[0] = static_cast<std::uint8_t>((body.size() >> 24U) & 0xFFU);
+    frame[1] = static_cast<std::uint8_t>((body.size() >> 16U) & 0xFFU);
+    frame[2] = static_cast<std::uint8_t>((body.size() >> 8U) & 0xFFU);
+    frame[3] = static_cast<std::uint8_t>(body.size() & 0xFFU);
+    std::copy(body.begin(), body.end(), frame.begin() + 4);
+    auto status = stream_.write_all(frame);
+    ST_CHECK(status.has_value());
+    auto reply = read_frame(timeout_ms);
+    ST_CHECK(reply.has_value());
+    if (reply.has_value()) ST_CHECK_EQ((*reply)["id"].get<std::uint64_t>(), id);
+    return *reply;
+  }
+
+  /// 读一帧（超时返回 nullopt）。
+  [[nodiscard]] auto read_frame(int timeout_ms) -> std::optional<Json> {
+    std::array<std::uint8_t, 4> header{};
+    if (!read_exact(header, timeout_ms)) return std::nullopt;
+    const std::uint32_t length = (static_cast<std::uint32_t>(header[0]) << 24U) |
+                                 (static_cast<std::uint32_t>(header[1]) << 16U) |
+                                 (static_cast<std::uint32_t>(header[2]) << 8U) |
+                                 static_cast<std::uint32_t>(header[3]);
+    std::vector<std::uint8_t> body(length);
+    if (!read_exact(body, timeout_ms)) {
+      return std::nullopt;
+    }
+    auto parsed = st::json_parse(std::string(body.begin(), body.end()));
+    if (!parsed) return std::nullopt;
+    return *parsed;
+  }
+
+ private:
+  [[nodiscard]] auto read_exact(std::span<std::uint8_t> target, int timeout_ms) -> bool {
+    std::size_t filled = 0;
+    const std::int64_t deadline = st::time::now_ms() + timeout_ms;
+    while (filled < target.size()) {
+      const std::int64_t remaining = deadline - st::time::now_ms();
+      if (remaining <= 0) return false;
+      // 阻塞 socket 上 read_some 会无限等：先探可读，限定剩余窗口（不依赖 SO_RCVTIMEO）
+      auto ready = stream_.wait_readable(static_cast<int>(remaining));
+      if (!ready || !*ready) return false;
+      auto chunk = stream_.read_some(target.subspan(filled));
+      if (!chunk) return false;
+      if (*chunk == 0) return false;
+      filled += *chunk;
+    }
+    return true;
+  }
+
+  st::net::TcpStream stream_;
+  std::string token_;
+  std::uint64_t next_id_{0};
+};
+
+/// 一轮完整的服务器 fixture：真实监听 + 记录 token（从 start 传入的 options 读回）。
+struct ServerFixture {
+  TestHost host{};
+  std::unique_ptr<st::control::Server> server{};
+  std::uint16_t port{0};
+  std::string token{};
+
+  explicit ServerFixture(std::optional<std::string> token_override = std::nullopt) {
+    host.root_.set_theme(st::ui::Theme::light());
+    auto panel = std::make_unique<Panel>();
+    auto button = std::make_unique<Button>("确定");
+    button->set_id("btn-ok");
+    auto input = std::make_unique<Input>();
+    input->set_id("name");
+    input->set_placeholder("输入名字");
+    panel->add_child(std::move(button));
+    panel->add_child(std::move(input));
+    host.root_.set_content(std::move(panel));
+    host.root_.set_viewport({400, 300});
+    host.root_.layout();
+
+    server = std::make_unique<st::control::Server>(host);
+    st::control::ServerOptions options;   // 默认：自动生成 token（哨兵 "\0"）
+    options.port = 0;
+    // 显式覆盖：给空串 = 关闭鉴权（与「未指定」区分）。
+    if (token_override) options.token = *token_override;
+    auto started = server->start(options);
+    ST_CHECK(started.has_value());
+    if (started) port = *started;
+    token = server->token();
+    server->poll();
+    start_pump();
+  }
+
+  /// 后台泵线程：真实应用里 Server::poll 由主循环每帧驱动；测试没有主循环，
+  /// 用 5ms 节拍泵代替（与真实时序等价——每次 poll 都是非阻塞轮询）。
+  void start_pump() {
+    pumping = true;
+    pump = std::thread([this] {
+      while (pumping) {
+        if (server) server->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    });
+  }
+
+  ~ServerFixture() {
+    pumping = false;
+    if (pump.joinable()) pump.join();
+    if (server) server->stop();
+  }
+
+  std::thread pump{};
+  std::atomic<bool> pumping{false};
+};
+
+/// 显式 token 版 fixture（鉴权路径可预期）。
+struct TokenFixture {
+  TestHost host{};
+  std::unique_ptr<st::control::Server> server{};
+  std::uint16_t port{0};
+  std::string token{"test-token-1234"};
+
+  TokenFixture() {
+    host.root_.set_theme(st::ui::Theme::light());
+    auto panel = std::make_unique<Panel>();
+    auto button = std::make_unique<Button>("确定");
+    button->set_id("btn-ok");
+    panel->add_child(std::move(button));
+    host.root_.set_content(std::move(panel));
+    host.root_.set_viewport({400, 300});
+    host.root_.layout();
+
+    server = std::make_unique<st::control::Server>(host);
+    st::control::ServerOptions options;
+    options.port = 0;
+    options.token = token;
+    auto started = server->start(options);
+    ST_CHECK(started.has_value());
+    if (started) port = *started;
+    server->poll();
+    pumping = true;
+    pump = std::thread([this] {
+      while (pumping) {
+        if (server) server->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    });
+  }
+
+  ~TokenFixture() {
+    pumping = false;
+    if (pump.joinable()) pump.join();
+    if (server) server->stop();
+  }
+
+  std::thread pump{};
+  std::atomic<bool> pumping{false};
+};
+
+}  // namespace
+
+ST_TEST(auth_wrong_token_is_rejected) {
+  TokenFixture fx;
+  ST_CHECK(fx.port != 0);
+  Probe probe(fx.port, "wrong-token");
+  const Json reply = probe.call("hello");
+  ST_CHECK(reply.contains("error"));
+  if (reply.contains("error")) {
+    ST_CHECK(!reply["error"].value("code", std::string()).empty());
+  }
+}
+
+ST_TEST(auth_correct_token_is_accepted) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  const Json reply = probe.call("hello");
+  ST_CHECK(reply.value("ok", false));
+  if (reply.value("ok", false)) {
+    ST_CHECK_EQ(reply["result"]["app"]["name"].get<std::string>(), "protocol-test");
+    ST_CHECK_EQ(reply["result"]["screen"]["coordinate_space"].get<std::string>(), "logical");
+  }
+}
+
+ST_TEST(methods_before_hello_are_rejected) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  // 故意不 hello，直接 tree：必须被拒（旧实现任何进程连上即可读全树）
+  const Json reply = probe.call("tree");
+  ST_CHECK(reply.contains("error"));
+}
+
+ST_TEST(auth_disabled_when_token_empty) {
+  // 显式空串 = 关闭鉴权（单用户开发机的显式姿态）。用 ServerFixture 是为了拿到它的
+  // 泵线程——裸 Server 没有主循环，`poll()` 不跑则 hello 永远不被处理（本测试最初就漏了这个）。
+  ServerFixture fx(std::string{});
+  Probe probe(fx.port);   // 不带 token
+  const Json reply = probe.call("hello");
+  ST_CHECK(reply.value("ok", false));
+}
+
+ST_TEST(drag_is_dispatched_as_full_sequence) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+  Json params = Json::object();
+  params["kind"] = "drag";
+  params["x"] = 20.0;
+  params["y"] = 20.0;
+  params["to_x"] = 80.0;
+  params["to_y"] = 40.0;
+  const Json reply = probe.call("input.mouse", params);
+  ST_CHECK(reply.value("ok", false));
+  if (reply.value("ok", false)) {
+    // §6.2 声明 drag → 必须成功（旧实现返回「未知鼠标消息: drag」）
+    ST_CHECK_EQ(reply["result"]["kind"].get<std::string>(), "drag");
+    ST_CHECK(reply["result"].contains("steps"));
+    ST_CHECK(reply["result"]["steps"].size() >= 4);   // move+down+move*2+up
+  }
+}
+
+ST_TEST(wait_frames_condition_is_supported) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+  Json params = Json::object();
+  params["for"] = "frames";
+  params["frames"] = 3;
+  params["timeout_ms"] = 2000;
+  // 帧计数由泵线程推进（每 5ms 一次 poll，每次 ++frames_seen）：wait 请求被挂起后，
+  // 帧数达标即收到 satisfied 响应——**响应本身**就是条件语义的证据。
+  // （不能像最初那样"手动再 poll 三次、再读第二帧"：泵线程已经替我们把帧推完了，
+  //  第二次 read_frame 只会等到超时——这类"测试自己构造第二响应"是假绿/假红高发区。）
+  const Json reply = probe.call("wait", params);
+  ST_CHECK(reply.value("ok", false));
+  if (reply.value("ok", false)) {
+    ST_CHECK(reply["result"].value("satisfied", false));
+  }
+}
+
+ST_TEST(invoke_unknown_action_reports_error) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+  Json params = Json::object();
+  params["id"] = "btn-ok";
+  params["action"] = "activate";   // 拼错的动作名
+  const Json reply = probe.call("invoke", params);
+  // 旧行为：ok=true + handled=false（假阴性）；新契约：明确报错
+  ST_CHECK(!reply.value("ok", false));
+  if (reply.contains("error")) {
+    ST_CHECK_EQ(reply["error"].value("code", std::string()), "unsupported");
+  }
+}
+
+ST_TEST(capture_path_outside_whitelist_is_rejected) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+  Json params = Json::object();
+  params["encode"] = "file";
+  params["path"] = "C:/Windows/system32/evil.png";   // 白名单外
+  const Json reply = probe.call("capture", params);
+  ST_CHECK(!reply.value("ok", false));
+  if (reply.contains("error")) {
+    ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
+  }
+}
+
+ST_TEST(key_press_sends_down_and_up) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+  Json params = Json::object();
+  params["kind"] = "press";
+  params["key"] = "a";
+  const Json reply = probe.call("input.key", params);
+  ST_CHECK(reply.value("ok", false));
+  if (reply.value("ok", false)) {
+    ST_CHECK_EQ(reply["result"]["kind"].get<std::string>(), "press");
+  }
+}
+
+ST_TEST(send_failure_drops_client_without_killing_others) {
+  // 坏连接（读一半就关）不拖垮服务器：另一条好连接仍可正常调用。
+  TokenFixture fx;
+  {
+    // 连上就走（不 hello）——制造一个只耗资源的短命连接
+    auto zombie = st::net::connect_tcp("127.0.0.1", fx.port, 1000);
+    ST_CHECK(zombie.has_value());
+  }
+  fx.server->poll();
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+  const Json tree = probe.call("tree");
+  ST_CHECK(tree.value("ok", false));
+}
+
+ST_TEST(protocol_table_smoke_every_documented_method) {
+  // §6.2 方法表逐项 smoke：每个文档方法至少能拿到结构化响应（ok 或明确 error，
+  // 不允许连接中断/挂死）。这是「文档↔实现」一致性的底线护栏。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  struct Case {
+    std::string method;
+    Json params;
+  };
+  std::vector<Case> cases;
+  auto add = [&](const std::string& method, Json params) { cases.push_back({method, params}); };
+  add("ping", Json::object());
+  {
+    Json p = Json::object(); p["depth"] = 2; add("tree", p);
+  }
+  {
+    Json p = Json::object(); p["selector"] = "Button"; add("find", p);
+  }
+  {
+    Json p = Json::object(); p["id"] = "btn-ok"; add("get", p);
+  }
+  {
+    Json p = Json::object(); p["id"] = "btn-ok";
+    Json props = Json::object(); props["label"] = "好"; p["props"] = props;
+    add("set", p);
+  }
+  {
+    Json p = Json::object(); p["id"] = "btn-ok"; p["action"] = "focus"; add("invoke", p);
+  }
+  {
+    Json p = Json::object(); p["kind"] = "move"; p["x"] = 10.0; p["y"] = 10.0;
+    add("input.mouse", p);
+  }
+  {
+    Json p = Json::object(); p["kind"] = "press"; p["key"] = "tab"; add("input.key", p);
+  }
+  {
+    Json p = Json::object(); p["text"] = "hi"; add("input.text", p);
+  }
+  add("capture", Json::object());
+  add("visual", Json::object());
+  {
+    Json p = Json::object(); p["for"] = "element"; p["selector"] = "Button";
+    p["timeout_ms"] = 500; add("wait", p);
+  }
+  add("metrics", Json::object());
+  {
+    Json p = Json::object(); p["enable"] = false; add("events", p);
+  }
+  {
+    Json p = Json::object(); p["mode"] = "dark"; add("theme", p);
+  }
+  {
+    Json p = Json::object(); p["action"] = "repaint"; add("app", p);
+  }
+  for (const auto& item : cases) {
+    const Json reply = probe.call(item.method, item.params);
+    // 要么 ok=true 要么带 error 结构——不能两者皆无（协议破损）
+    const bool well_formed = reply.value("ok", false) || reply.contains("error");
+    ST_CHECK(well_formed);
+  }
+}

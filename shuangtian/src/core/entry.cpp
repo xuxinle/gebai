@@ -13,7 +13,12 @@
 // 平台边界：Windows 宽字符 API 与 UTF-8 的转换只能在这里发生（CONVENTIONS §10）。
 // 中文命令行参数在 Windows 上是 ANSI（如 GBK）；不转就必然乱码。
 #include <shellapi.h>
+#else
+#include <unistd.h>
 #endif
+
+#include <cstdint>
+#include <format>
 
 namespace st {
 namespace {
@@ -31,6 +36,8 @@ namespace {
 #endif
 
 }  // namespace
+
+// 崩溃处理器实现见 platform_crash.cpp（平台 API 与位级重解释单点封装，CONVENTIONS.md §10）。
 
 void startup_configure_console() {
 #if defined(_WIN32)

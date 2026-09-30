@@ -11,10 +11,15 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
-ROOT = "/workspace/gebai/shuangtian"
-SHOTS = "/tmp/st-visual"
+import st_client_lib  # 本地模块（同目录）：带 token/握手的单次调用
+
+# 根目录可参数化（默认：脚本所在目录的上一级），Windows/Linux 通用；SHUANGTIAN_ROOT 可覆盖。
+ROOT = os.environ.get("SHUANGTIAN_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+SHOTS = os.environ.get("SHUANGTIAN_SHOTS", os.path.join(tempfile.gettempdir(), "st-visual"))
+_TOKENS: dict[int, str] = {}  # port → token（控制文件读出；hello 必须携带）
 os.makedirs(SHOTS, exist_ok=True)
 
 
@@ -36,6 +41,7 @@ def launch(profile: str, app: str) -> tuple[int, subprocess.Popen]:
             try:
                 info = json.load(open(ctl))
                 if info.get("port"):
+                    _TOKENS[info["port"]] = info.get("token", "")
                     return info["port"], process
             except Exception:
                 pass
@@ -47,24 +53,8 @@ def launch(profile: str, app: str) -> tuple[int, subprocess.Popen]:
 
 
 def call(port: int, method: str, params=None, timeout=90):
-    sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    body = json.dumps({"id": 1, "method": method, "params": params or {}}).encode()
-    sock.sendall(struct.pack(">I", len(body)) + body)
-    header = b""
-    while len(header) < 4:
-        chunk = sock.recv(4 - len(header))
-        if not chunk:
-            raise RuntimeError("对端关闭（进程可能崩溃）")
-        header += chunk
-    (length,) = struct.unpack(">I", header)
-    payload = b""
-    while len(payload) < length:
-        chunk = sock.recv(length - len(payload))
-        if not chunk:
-            raise RuntimeError("响应截断")
-        payload += chunk
-    sock.close()
-    return json.loads(payload)
+    # 每调用一条连接：非 hello/ping 由公共库自动前置握手（hello 门 + token）
+    return st_client_lib.call_with_token(port, method, params, _TOKENS.get(port, ""), timeout)
 
 
 def sequence(profile: str, app: str, shots: list[str]) -> int:

@@ -37,7 +37,8 @@ def run(command: list[str], cwd: pathlib.Path | None = None, timeout: float = 90
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
-def wait_for_control(control_file: pathlib.Path, timeout: float = 60.0) -> int:
+def wait_for_control(control_file: pathlib.Path, timeout: float = 60.0) -> tuple[int, str]:
+    """返回 (port, token)——token 供 `hello` 鉴权（控制文件读出）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if control_file.exists():
@@ -45,26 +46,19 @@ def wait_for_control(control_file: pathlib.Path, timeout: float = 60.0) -> int:
                 info = json.loads(control_file.read_text())
                 port = info.get("port") or 0
                 if port:
-                    return int(port)
+                    return int(port), info.get("token", "")
             except (json.JSONDecodeError, OSError):
                 pass
         time.sleep(0.2)
-    return 0
+    return 0, ""
+
+
+CONTROL_TOKEN = ""  # main() 从控制文件读出后设置；hello 门 + 鉴权用
 
 
 def call(port: int, method: str, params: dict | None = None) -> dict:
-    connection = socket.create_connection(("127.0.0.1", port), timeout=20)
-    payload = json.dumps({"id": 1, "method": method, "params": params or {}}).encode()
-    connection.sendall(struct.pack(">I", len(payload)) + payload)
-    header = b""
-    while len(header) < 4:
-        header += connection.recv(4 - len(header))
-    (length,) = struct.unpack(">I", header)
-    body = b""
-    while len(body) < length:
-        body += connection.recv(length - len(body))
-    connection.close()
-    return json.loads(body)
+    # 每调用一条连接：非 hello/ping 由公共库自动前置握手（hello 门 + token）
+    return st_client_lib.call_with_token(port, method, params, CONTROL_TOKEN)
 
 
 def main() -> int:
@@ -130,9 +124,11 @@ def main() -> int:
                 start_new_session=True,
             )
             try:
-                port = wait_for_control(control_file)
+                port, token = wait_for_control(control_file)
                 if check(port > 0, "控制通道就绪"):
-                    hello = call(port, "hello")["result"]
+                    global CONTROL_TOKEN
+                    CONTROL_TOKEN = token
+                    hello = call(port, "hello", {"token": token})["result"]
                     check(hello["app"]["name"] == "demoapp", "应用名正确")
                     tree = call(port, "tree")["result"]["tree"]
                     # `tree` 返回**嵌套**语义树（见 DESIGN §6.2）：数一下节点总数

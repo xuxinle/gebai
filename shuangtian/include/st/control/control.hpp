@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,9 +25,22 @@ namespace st::control {
 struct ServerOptions {
   std::string bind{"127.0.0.1"};
   std::uint16_t port{0};              ///< 0 = 由内核分配
-  std::string control_file{};         ///< 非空时写入握手信息（port/pid/app），供客户端发现
+  std::string control_file{};         ///< 非空时写入握手信息（port/pid/app/token），供客户端发现
   std::size_t max_frame{64u * 1024u * 1024u};
   bool log_calls{true};
+  /// 连接鉴权 token：`nullopt`（默认）= `start()` 自动生成随机 token 并写入控制文件。
+  /// 客户端必须在首个 `hello` 的 `params.token` 里携带同值，否则拒绝并断连。
+  /// 为什么必须有：回环绑定只防远程，**不防本机其他进程**——多用户主机上任何本地进程
+  /// 都能连上端口注入键鼠、读屏、杀进程。token 随控制文件分发（文件权限由 OS 管），
+  /// 未拿到文件的进程连不上。显式传空串 `""` 可关闭鉴权（单用户开发机兼容旧客户端）。
+  ///
+  /// 为什么用 `optional` 而不是哨兵字符串：曾用 `std::string token{"\0"}` 当「自动生成」
+  /// 哨兵，但 `std::string` 从 `"\0"` 构造会**坍缩成空串**（遇 NUL 即止），
+  /// 于是「显式空串关闭鉴权」与「未设置」无法区分——鉴权测试当场抓住（无法关闭）。
+  std::optional<std::string> token{};
+  /// `capture` 落盘路径白名单（目录前缀，UTF-8，比较前统一归一化分隔符）。
+  /// 默认：系统 temp 目录 + 可执行文件同目录。空向量 = 禁止一切落盘（仍可 base64 回传）。
+  std::vector<std::string> capture_dirs{};
   /// 是否开放 `script` 方法与脚本宿主能力。
   ///
   /// **默认关闭**且不随其它开关联动：脚本 = 在应用进程内执行任意代码，
@@ -35,6 +49,9 @@ struct ServerOptions {
   bool enable_script{false};
   /// 脚本配额（仅 `enable_script` 时生效）。
   ext::ScriptLimits script_limits{};
+
+  /// 计算默认白名单（temp + 可执行文件目录）。`start()` 内部使用。
+  [[nodiscard]] auto default_capture_dirs() const -> std::vector<std::string>;
 };
 
 struct Metrics {
@@ -108,6 +125,10 @@ class Server {
   /// 向已订阅客户端推送事件。
   void publish(std::string_view event, const st::Json& data);
   [[nodiscard]] auto port() const noexcept -> std::uint16_t;
+  /// 生效的鉴权 token（`start()` 自动生成后由此读回；显式关闭鉴权时为空串）。
+  /// 客户端从控制文件读；测试与嵌入场景可直接取（`start()` 的 options 是 const 引用，
+  /// 调用方拿不到写回值，故提供本访问器）。
+  [[nodiscard]] auto token() const -> std::string;
   [[nodiscard]] auto client_count() const noexcept -> std::size_t;
   [[nodiscard]] auto running() const noexcept -> bool;
 

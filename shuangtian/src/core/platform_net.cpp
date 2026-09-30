@@ -43,6 +43,10 @@ void close_handle(NativeHandle handle) {
 [[nodiscard]] auto would_block(int error) -> bool {
   return error == WSAEWOULDBLOCK;
 }
+/// winsock 不设 errno——socket 错误必须读 WSAGetLastError（审视报告 §4.1：
+/// 非阻塞 socket 的 would-block 若误读 errno 会被错分类成 Io/Timeout，
+/// 表现为连接被静默通忘或无潔等待，是停摆竞态的头号嫌疑）。
+[[nodiscard]] auto get_socket_error() -> int { return WSAGetLastError(); }
 #else
 using NativeHandle = int;
 inline constexpr NativeHandle kInvalidHandle = -1;
@@ -59,6 +63,7 @@ void close_handle(NativeHandle handle) {
 [[nodiscard]] auto would_block(int error) -> bool {
   return error == EAGAIN || error == EWOULDBLOCK || error == EINTR;
 }
+[[nodiscard]] auto get_socket_error() -> int { return errno; }
 #endif
 
 [[nodiscard]] auto to_handle(std::intptr_t value) -> NativeHandle {
@@ -154,7 +159,7 @@ auto TcpStream::write_all(std::span<const std::uint8_t> data) -> Status {
                              MSG_NOSIGNAL);
 #endif
     if (sent <= 0) {
-      if (would_block(errno)) {
+      if (would_block(get_socket_error())) {
         auto ready = wait_handle(to_handle(handle_), false, 5000);
         if (!ready) return forward_error(ready.error());
         if (!*ready) return unexpected(ErrorCode::Timeout, "写超时");
@@ -184,7 +189,7 @@ auto TcpStream::read_some(std::span<std::uint8_t> buffer) -> Result<std::size_t>
 #endif
     if (received == 0) return std::size_t{0};
     if (received < 0) {
-      if (would_block(errno)) {
+      if (would_block(get_socket_error())) {
         auto ready = wait_handle(to_handle(handle_), true, 5000);
         if (!ready) return forward_error(ready.error());
         if (!*ready) return unexpected(ErrorCode::Timeout, "读超时");
@@ -304,7 +309,7 @@ auto TcpListener::accept() -> Result<TcpStream> {
       stream.set_no_delay(true);
       return stream;
     }
-    if (would_block(errno)) {
+    if (would_block(get_socket_error())) {
       auto ready = wait_handle(to_handle(handle_), true, 500);
       if (!ready) return forward_error(ready.error());
       continue;
@@ -334,7 +339,7 @@ auto connect_tcp(std::string_view host, std::uint16_t port, int timeout_ms) -> R
   stream.set_nonblocking(true);
   const int result = ::connect(handle, reinterpret_cast<sockaddr*>(&address), sizeof(address));
   if (result != 0) {
-    if (!would_block(errno)) {
+    if (!would_block(get_socket_error())) {
       return unexpected(ErrorCode::Io, std::string("连接失败: ").append(last_error_text()));
     }
     auto ready = wait_handle(handle, false, timeout_ms);
