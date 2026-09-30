@@ -698,6 +698,18 @@ struct FrameworkFlags {
       chosen = is_c ? c_flags : flags;
     }
     if (unit.third_party) chosen = strip_sanitizers(chosen);
+    // 文件级加速档：SIMD 内核单独启用 AVX2（其余单元不动）。
+    // 为什么不给全工程开：`/arch:AVX2`（GCC `-mavx2`）会改变全局代码生成与 ABI 假设，
+    // 且 CPUID 门控在运行时才发生——编译期全局开关会牺牲老 CPU 兼容性；
+    // 只在运行时按能力分派的文件里启用，其他单元保持默认（SSE2 基线）。
+    if (!is_c && unit.source.find("simd.cpp") != std::string::npos) {
+      // chosen 已在上方经过 MSVC 翻译，这里追加后同样要翻译（GCC 写法 → MSVC 写法）。
+      std::vector<std::string> accel = {"-mavx2"};
+      if (toolchain.kind == CompilerKind::Msvc) {
+        accel = translate_flags(toolchain.kind, accel, nullptr);
+      }
+      chosen.insert(chosen.end(), accel.begin(), accel.end());
+    }
     return chosen;
   };
   const auto cache_key_for = [&](const CompileUnit& unit) -> std::string {
@@ -834,7 +846,10 @@ struct FrameworkFlags {
         args.push_back(temporary_object);
       }
       if (options.verbose) {
-        log::info("compile: {} -> {}", fs::file_name(unit->source), fs::file_name(unit->object));
+        std::string flag_dump;
+        for (const auto& flag : unit_flags) flag_dump.append(" ").append(flag);
+        log::info("compile: {}{} -> {}", fs::file_name(unit->source), flag_dump,
+                  fs::file_name(unit->object));
       }
       // 编译子进程要带上工具链环境（MSVC 的 INCLUDE/LIB/PATH 不注入就是找不到头与库）；
       // GCC 系该表为空，行为与以前完全一致。

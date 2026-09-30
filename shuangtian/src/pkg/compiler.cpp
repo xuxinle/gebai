@@ -278,6 +278,14 @@ auto translate_flags(CompilerKind kind, const std::vector<std::string>& flags,
       if (index + 1 < flags.size()) ++index;
       continue;
     }
+    if (flag == "-mavx2") {
+      out.push_back("/arch:AVX2");
+      continue;
+    }
+    if (flag == "-mavx") {
+      out.push_back("/arch:AVX");
+      continue;
+    }
     if (flag.starts_with("/")) {  // 已是 MSVC 写法：直接透传（`/arch:AVX2` 之类）
       out.push_back(flag);
       continue;
