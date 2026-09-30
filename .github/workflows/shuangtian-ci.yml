@@ -37,7 +37,8 @@ jobs:
       - name: 无头视觉验证（无桌面环境正是霜天的设计场景）
         working-directory: shuangtian
         run: python3 tools/st_visual_check.py
-        continue-on-error: true  # 首期允许失败：脚本正在参数化改造（见 docs/BACKLOG.md）
+        # 首轮允许失败：Linux 字体/无头 GPU 环境与本地差异未知，先收集证据（见 docs/BACKLOG.md）
+        continue-on-error: true
 
   windows:
     runs-on: windows-latest

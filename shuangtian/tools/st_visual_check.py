@@ -46,7 +46,10 @@ def launch(profile: str, app: str) -> tuple[int, subprocess.Popen]:
             except Exception:
                 pass
         if process.poll() is not None:
-            print(f"  进程提前退出（code={process.returncode}）：{open(log_path).read()[-600:]}")
+            # 日志按 UTF-8 读（子进程输出为 UTF-8；默认编码在中文 Windows 上是 GBK，
+            # 此前这里一读就 UnicodeDecodeError，把真正的启动错误盖掉了）
+            text = open(log_path, encoding="utf-8", errors="replace").read()[-600:]
+            print(f"  进程提前退出（code={process.returncode}）：{text}")
             return 0, process
         time.sleep(0.25)
     return 0, process
