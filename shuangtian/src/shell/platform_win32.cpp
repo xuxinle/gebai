@@ -135,6 +135,10 @@ class Win32Backend final : public Backend {
     logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
     scale_ = options.scale > 0.0f ? options.scale : 1.0f;
+    // 显式给了 `--scale` 就**不再被窗口 DPI 覆盖**：它是测试/复现用的覆盖值。
+    // 关键在于"窗口尺寸"与"缓冲尺寸"必须用**同一个** scale——早先窗口按请求值建、
+    // 缓冲按查询值建，两者不一致时 GPU 呈现只能让 DXGI 缩放 → 整屏发糊。
+    const bool explicit_scale = options.scale > 0.0f;
   renderer_ = options.renderer.empty() ? "auto" : options.renderer;
 
     if (!class_registered_) {
@@ -171,14 +175,55 @@ class Win32Backend final : public Backend {
     ::ShowWindow(window_, SW_SHOW);
     ::UpdateWindow(window_);
 
-    // 窗口实际 DPI 可能与请求不同（多显示器/系统缩放）：以窗口为准
-    scale_ = query_window_scale(window_, scale_);
+    // 窗口实际 DPI 可能与请求不同（多显示器/系统缩放）。
+    // 未显式指定时以窗口为准；**但必须连窗口尺寸一起改**——
+    // 上面是按"请求的 scale"建的窗口，若实际 DPI 不同就会出现
+    // "1920×1200 的画布塞进 1280×800 的窗口"：GPU 呈现器只能让 DXGI 缩放，
+    // 结果是**整屏发糊**（软件路径则表现为裁切）。这曾是一个真实缺陷，实测确认。
+    const float requested_scale = scale_;
+    if (!explicit_scale) scale_ = query_window_scale(window_, requested_scale);
+    if (auto status = resize_window_to_scale(); !status) return status;
+    if (!explicit_scale && scale_ != requested_scale) {
+      log::info("win32 窗口 DPI 与请求不同：请求 {:.2f} → 实际 {:.2f}（窗口已按实际缩放调整）",
+                static_cast<double>(requested_scale), static_cast<double>(scale_));
+    }
     if (auto status = allocate_buffers(logical_width_, logical_height_, scale_); !status) {
       return status;
     }
     log::info("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
               logical_height_, static_cast<double>(scale_), surface_->physical_width(),
               surface_->physical_height());
+    return ok();
+  }
+
+  /// 把窗口**客户区**调整到 "逻辑尺寸 × 当前 scale"（保持左上角不动）。
+  ///
+  /// 为什么必须有它：`CreateWindowExW` 用的是创建时的 scale，而窗口落地在哪个显示器、
+  /// 那个显示器是什么 DPI，只有创建之后才知道。两者不一致就会出现画布与窗口尺寸不符，
+  /// 而 GPU 呈现器遇到这种情况会**静默缩放**（不报错，只是糊）。
+  [[nodiscard]] auto resize_window_to_scale() -> Status {
+    if (window_ == nullptr) return ok();
+    const int client_width = std::max(1, static_cast<int>(std::lround(
+        static_cast<double>(logical_width_) * static_cast<double>(scale_))));
+    const int client_height = std::max(1, static_cast<int>(std::lround(
+        static_cast<double>(logical_height_) * static_cast<double>(scale_))));
+    RECT rect{0, 0, client_width, client_height};
+    const DWORD style = static_cast<DWORD>(::GetWindowLongPtrW(window_, GWL_STYLE));
+    if (::AdjustWindowRectEx(&rect, style, FALSE, 0) == 0) {
+      return unexpected(ErrorCode::Io, "AdjustWindowRectEx 失败");
+    }
+    RECT current{};
+    if (::GetWindowRect(window_, &current) == 0) return ok();
+    const int wanted_width = rect.right - rect.left;
+    const int wanted_height = rect.bottom - rect.top;
+    if (current.right - current.left == wanted_width &&
+        current.bottom - current.top == wanted_height) {
+      return ok();   // 已经一致：不做无意义的 SetWindowPos（会引起闪烁）
+    }
+    if (::SetWindowPos(window_, nullptr, current.left, current.top, wanted_width, wanted_height,
+                       SWP_NOZORDER | SWP_NOACTIVATE) == 0) {
+      return unexpected(ErrorCode::Io, "SetWindowPos 失败");
+    }
     return ok();
   }
 
@@ -263,6 +308,11 @@ class Win32Backend final : public Backend {
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
     scale_ = scale;
+    // ⚠ 改 DPI 必须**同时**改窗口尺寸：只改缓冲会让"画布"与"窗口"尺寸不符，
+    // GPU 呈现器遇到这种情况会静默让 DXGI 缩放——表现就是**切换 DPI 后整屏发糊**。
+    // 这与创建时的那个缺陷是同一个根因（尺寸用了两个不同的 scale），
+    // 只是触发路径不同：一个在启动、一个在运行时切换。
+    if (auto status = resize_window_to_scale(); !status) return status;
     return allocate_buffers(logical_width_, logical_height_, scale_);
   }
 
