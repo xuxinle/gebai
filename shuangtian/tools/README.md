@@ -1,0 +1,33 @@
+# tools — 构建与资源工具
+
+## 依赖放哪：代码进仓库，二进制走资源管理
+
+| 类别 | 去处 | 例子 |
+|---|---|---|
+| **代码**（含生成的代码） | 直接进仓库 | `third_party/quickjs`、`nlohmann`、`battery`、`opengl/gl.h` |
+| **二进制 / 大源码库** | 资源管理（不进仓库） | 模型权重走 `resources/`（见 `resources/README.md`）、13–17 GB 的 GGUF 走主仓库 `infer/config/assets.manifest.json` |
+
+界是"它是不是给人读/给编译器读的代码"。`third_party/opengl/gl.h` 是 glad 生成的
+加载器单头（33 万字节）——看着像"生成物"，但它与 quickjs 同量级、同性质，
+按上面这条界就该内置：克隆下来直接能编。
+
+> 这里曾走过弯路：一开始把 glad 单头划成"生成物、不进仓库"，配了拉取脚本 +
+> sha256 清单 + 校验。结果是**凭空多出一条"克隆后还得跑脚本"的路径**，
+> 且多了一套要维护的清单。按上面的口径直接内置，这些都不需要了。
+
+需要更大功能集（更高级别 GL、更多扩展）时，用 glad 在线生成器按需勾选、
+替换 `third_party/opengl/gl.h` 即可——替换文件就是全部操作，没有清单要同步。
+
+## 构建工具
+
+| 文件 | 用途 |
+|---|---|
+| `stpm/` | `st` 工具链本体（构建/测试/lint/清单解析） |
+| `st_probe.py` | 控制通道最小示例客户端 |
+| `st_ctl.py` | 控制通道批量操作脚本 |
+| `ft_compare.py` | 用 FreeType 对照自研 CFF 解释器（仅测试用，不进框架构建） |
+| `st_visual_check.py` | 视觉树与截图核对 |
+| `st_project_check.py` | 独立工程结构检查 |
+| `st_win_check.py` | Windows 后端专项检查 |
+| `st_gdb_probe.py` | 崩溃现场信息提取 |
+| `st_shot_region.py` | 指定区域截图 |

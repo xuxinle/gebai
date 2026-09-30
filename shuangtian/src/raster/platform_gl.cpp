@@ -34,22 +34,24 @@ namespace st::raster::gl {
 
 #if !defined(ST_HAS_OPENGL)
 
-// ——— 没有 OpenGL 源码（未拉取）或非 Windows ———
+// ——— 非 Windows 平台（尚无 EGL/GLX/CGL 上下文实现）———
 // 关键：**编译期整块排除**，接口照常存在并如实报不可用。
 // 这样"缺源码"不会变成"整个框架编不过"——那会把一个可选能力变成硬依赖。
 auto has_opengl() noexcept -> bool { return false; }
 auto available() noexcept -> bool { return false; }
 auto probe() -> Result<DeviceInfo> {
   return unexpected(ErrorCode::Unsupported,
-                    "本机没有 OpenGL 加载器源码：运行 tools/fetch_opengl.ps1（或 .sh）拉取到 "
-                    "third_party/opengl/（该目录不进版本库）");
+                    "OpenGL 3D 目前只有 Windows（WGL + 离屏 FBO）实现；"
+                    "Linux/macOS 需补 EGL/GLX/CGL 上下文后启用");
 }
 auto Mesh::cube(float) -> Mesh { return {}; }
 auto Mesh::load_obj(std::string_view, math::Color) -> Result<Mesh> {
-  return unexpected(ErrorCode::Unsupported, "OBJ 加载需要 OpenGL 模块（当前未编译进来）");
+  return unexpected(ErrorCode::Unsupported,
+                    "OBJ 加载需要 OpenGL 模块（当前平台未启用——见 gl.hpp 的平台说明）");
 }
 auto Mesh::load_obj_file(std::string_view, math::Color) -> Result<Mesh> {
-  return unexpected(ErrorCode::Unsupported, "OBJ 加载需要 OpenGL 模块（当前未编译进来）");
+  return unexpected(ErrorCode::Unsupported,
+                    "OBJ 加载需要 OpenGL 模块（当前平台未启用——见 gl.hpp 的平台说明）");
 }
 auto Mesh::sphere(float, int) -> Mesh { return {}; }
 auto Mesh::box(float, float, float) -> Mesh { return {}; }

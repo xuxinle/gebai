@@ -131,7 +131,3 @@ packages/server/src/core/cv/cvdriver.embedded.generated.json
 /.gebai-local/
 # Go 工具链分发包（本地下载缓存，勿提交）
 go.zip
-
-# OpenGL 加载器源码（glad 单头，生成物）：由 tools/fetch_opengl.{ps1,sh} 在本机拉取，
-# 不进版本库——33 万行生成代码会让 review 无从看起，且随生成器/驱动需求漂移。
-shuangtian/third_party/opengl/

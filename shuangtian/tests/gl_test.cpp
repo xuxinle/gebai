@@ -101,7 +101,7 @@ ST_TEST(gl_mesh_generators_produce_closed_shapes) {
 }
 
 ST_TEST(gl_probe_is_honest_when_unavailable) {
-  // 没拉取加载器源码时，必须是"如实报不可用"，而不是崩溃或静默空帧。
+  // 平台不支持时必须"如实报不可用"，而不是崩溃或静默空帧。
   if (st::raster::gl::has_opengl() && st::raster::gl::available()) {
     const auto info = st::raster::gl::probe();
     ST_CHECK(info.has_value());
@@ -115,7 +115,7 @@ ST_TEST(gl_probe_is_honest_when_unavailable) {
   }
   const auto info = st::raster::gl::probe();
   ST_CHECK(!info.has_value());
-  // 失败原因要能指导下一步（"去跑 fetch_opengl"），而不是一句"失败"
+  // 失败原因必须能指导下一步（缺的是哪个平台能力），而不是一句"失败"
   ST_CHECK(!info.has_value() && !info.error().message.empty());
 }
 

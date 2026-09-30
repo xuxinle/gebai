@@ -1157,13 +1157,23 @@ st doctor                                 # 探测清单声明的工具链是否
 
 ### 8.4.1 源码供给：接口在仓库、生成物在机器上
 
-`glad` 单头（33 万字节**生成代码**）由 `tools/fetch_opengl.{ps1,sh}` 拉到
-`third_party/opengl/`，该目录在 `.gitignore` 里。对比 `third_party/` 里的 quickjs/nlohmann：
-那两个是**上游分发的源码**，而这个是**按需生成的产物**——vendor 进仓库只会让 review 被生成代码淹没，
-且它随生成器与驱动需求漂移。
+`glad` 单头（33 万字节）内置在 `third_party/opengl/gl.h`，**随仓库分发**。
 
-缺源码**不是"编不过"**：`gl.hpp` 用 `__has_include` 整块条件编译，`has_opengl()` 如实报 false，
-`probe()` 给出"去跑 fetch_opengl"的指引。把可选能力做成硬依赖是最糟的处理方式。
+口径是"**代码进仓库、二进制与大源码库走资源管理**"：
+
+| 类别 | 去向 | 例子 |
+|---|---|---|
+| 代码（含生成的代码） | 仓库 | `third_party/quickjs`、`nlohmann`、`opengl/gl.h` |
+| 二进制 / 大源码库 | 资源管理 | 模型权重（`resources/`）、13–17 GB 的 GGUF（主仓库 `infer/config/assets.manifest.json`） |
+
+我一开始把这份加载器划进"生成物、不进仓库"，并配了拉取脚本 + sha256 清单——
+**判断错了**：它与 quickjs 同量级、同性质（都是给人读/给编译器读的代码），
+单独给它一套拉取机制只是凭空多出一条"克隆后还得跑脚本"的路径。
+按上面这条口径，直接内置最省事：克隆下来就能编。
+
+平台门槛仍然存在（实现是 Windows 专用）：`gl.hpp` 用 `__has_include` + 平台宏整块条件编译，
+非 Windows 时 `has_opengl()` 如实报 false、`probe()` 说明缺什么（EGL/GLX/CGL 尚未实现）。
+把可选能力做成硬依赖是最糟的处理方式。
 
 ### 8.4.2 三维：离屏 FBO，无头可用
 

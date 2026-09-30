@@ -115,6 +115,19 @@ Windows 上的工具链口径（详见 `CONVENTIONS.md` §10.1）：**MSVC 首�
 MinGW/clang）；GCC 风格标志由 `stpm` 统一翻译（无等价物的会列出丢弃清单）；符号调试信息用 `/Z7`
 （并行编译下不争 PDB）；依赖追踪走 `/sourceDependencies` JSON（改头文件能正确触发重编）。
 
+## OpenGL 三维渲染
+
+三维渲染与复杂图形走 OpenGL，加载器（glad 单头）**随仓库分发**在
+`third_party/opengl/gl.h` —— 克隆下来即可用，无需拉取、无需配置。
+
+资源去处的口径：**代码进仓库，二进制与大源码库走资源管理**。
+`third_party/` 里的 quickjs / nlohmann / glad 都是代码，一律内置；
+模型权重那类二进制走主仓库的 `resources/`（见 `resources/README.md`）。
+
+**平台现状**：实现是 Windows（WGL + 离屏 FBO）专用；Linux/macOS 需补 EGL/GLX/CGL，
+在此之前 `has_opengl()` 如实报 false、`probe()` 说明缺什么，框架其余部分照常可用。
+要更多 GL 功能（更高级别/更多扩展）时，用 glad 生成器换掉那份单头即可。
+
 ## 控制通道速览（`st-control/1`）
 
 帧 = `uint32` 大端长度 + UTF-8 JSON；请求 `{id, method, params}`，响应 `{id, ok, result|error}`，事件 `{event, seq, data}`。

@@ -100,7 +100,7 @@ ST_TEST(gl_view_properties_are_writable_and_validated) {
 }
 
 ST_TEST(gl_view_draws_something_when_opengl_is_available) {
-  if (!GlView::opengl_ready()) return;   // 没拉取 GL 加载器时本用例无意义（不是失败）
+  if (!GlView::opengl_ready()) return;   // 非 Windows（无 GL 上下文）时本用例无意义（不是失败）
   Harness harness;
   harness.paint(0.0);
   const double inked = inked_ratio(harness.canvas, Color{0x0A, 0x0E, 0x16, 0xFF});
