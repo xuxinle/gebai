@@ -4,6 +4,7 @@
 #include <format>
 
 #include "st/core/log.hpp"
+#include "st/core/print.hpp"
 
 namespace st::ui {
 
@@ -130,8 +131,15 @@ void UiRoot::paint(raster::Surface& canvas) {
   layout();
   const RenderContext context = render_context();
   for (auto& overlay : overlays_) overlay->paint(context, canvas);
-  collect_animation_requests();
   if (content_ != nullptr) paint_subtree(context, *content_, canvas);
+  // ⚠ 必须在**所有绘制之后**汇总。
+  //
+  // 早先这一行放在内容绘制之前（插在了浮层绘制后面）——于是它看不到本帧刚产生的
+  // 动画请求（`hover_animating_` 是绘制时才置位的），下一帧 `dirty_` 被清零后
+  // **永不再重绘**：过渡永久冻结在当时的进度上。
+  // 现象：鼠标划过某项时过渡走到 1.0，移开后开始淡出却停在 1.0 → **该项永久高亮**，
+  // 侧栏看起来有两个"选中项"（实测现象）。
+  collect_animation_requests();
 }
 
 void UiRoot::paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas) {
@@ -177,6 +185,7 @@ void UiRoot::update_hover(Element* target) {
   if (hovered_ == target) return;
   prune_stale_pointers();  // `hovered_` 可能已悬垂（子树被重建）
   const RenderContext context = render_context();
+  Element* const previous = hovered_;   // 旧目标：尾部要给它标脏（见那里的说明）
   if (hovered_ != nullptr) {
     hovered_->set_hovered(false);
     Event event;
@@ -191,6 +200,14 @@ void UiRoot::update_hover(Element* target) {
     event.kind = EventKind::HoverIn;
     hovered_->notify_hover(true);
     (void)dispatch_to(*hovered_, event);
+  }
+  // ⚠ **新旧目标都要标脏**。
+  //
+  // 漏掉旧目标会留下"卡住的悬浮高亮"：它的 `hover_t_` 还停在 1.0，而悬浮过渡是在
+  // `paint` 里推进的——不重绘就永远停在悬浮外观上。现象是侧栏出现**两个**"选中项"
+  // （一个真选中、一个卡住的悬浮），看起来像"导航自己在变来变去"。实测踩过。
+  for (Element* current = previous; current != nullptr; current = current->parent()) {
+    current->mark_dirty();
   }
   for (Element* current = target; current != nullptr; current = current->parent()) {
     current->mark_dirty();

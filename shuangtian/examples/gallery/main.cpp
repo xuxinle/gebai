@@ -374,6 +374,12 @@ auto run_app(int argc, char** argv) -> int {
   for (std::size_t index = 0; index < gallery::kPageCount; ++index) {
     nav_ptrs[index]->on_click = [show_page, index]() { show_page(index); };
   }
+  // 初始页的导航项也要**高亮**。
+  //
+  // `show_page` 只在点击时调用，而初始页是由 `page->set_visible(index == 0)` 定的——
+  // 于是启动时侧栏 5 项全是 Ghost，**完全看不出当前在哪一页**（实测现象）。
+  // 这里只设高亮、不改状态栏文案：启动时"就绪"比"已切到「概览」"更合适。
+  nav_ptrs[0]->set_variant(Button::Variant::Soft);
 
   theme_button_ptr->on_click = [app_ptr, theme_button_ptr, status_right_ptr, root_ptr]() {
     const bool dark = app_ptr->root().theme().mode() == st::ui::ThemeMode::Light;

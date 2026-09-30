@@ -62,6 +62,10 @@ struct Fixture {
   int leaves{0};
   int hover_events{0};
   std::vector<bool> sequence{};
+  /// 单调时钟（秒）。**必须单调**：真实应用的时间只增不减，
+  /// 而用例里若每次从头计时，`advancing`（now > last）会变假，
+  /// 动画走"静态帧落位"分支——测试就绕过了它本要验证的机制。
+  double clock{1.0};
 
   Fixture() {
     root.set_theme(theme);
@@ -258,4 +262,64 @@ ST_TEST(hover_transition_stops_requesting_frames_when_done) {
   ST_CHECK(fixture.button->hover_progress() > 0.99f);
   fixture.root.clear_dirty();
   ST_CHECK(!fixture.root.dirty());
+}
+
+/// 模拟应用的帧循环：`paint` → `clear_dirty` → 若还脏则再画一帧。
+///
+/// 这是**唯一能抓住"过渡冻结"的测法**：显式反复调 `paint()` 会绕过 `clear_dirty`，
+/// 即使续帧机制坏了也会把进度推到终点——那样测不出真实缺陷。
+/// @return 实际画了多少帧（`paint` 是否真的被推进由调用方判断）。
+[[nodiscard]] auto run_frames(Fixture& fixture, Canvas& canvas, int max_frames,
+                              double step) -> int {
+  int frames = 0;
+  while (frames < max_frames) {
+    canvas.clear(Color{0x20, 0x20, 0x28, 0xFF});
+    // ⚠ 时间必须**非零且单调**：首帧 `time_seconds == 0` 或时间回退时
+    // `advancing`（now > last_hover_time_）为假，动画会走"静态帧直接落位"分支，
+    // 从而**绕过续帧机制**——那样这个用例就抓不到"过渡冻结"了（实测踩过：
+    // 第一版用例在缺陷代码上照样通过）。
+    fixture.root.set_time(fixture.clock);
+    fixture.clock += step;
+    fixture.root.paint(canvas);
+    fixture.root.clear_dirty();
+    ++frames;
+    if (!fixture.root.dirty()) break;   // 应用就是这样决定"还需不需要下一帧"
+  }
+  return frames;
+}
+
+ST_TEST(hover_transition_completes_across_frames) {
+  // 回归：`collect_animation_requests()` 曾在**内容绘制之前**调用，看不到本帧刚产生的
+  // 动画请求 → 下一帧不再脏 → **过渡永久冻结**（进度停在 0，或淡出时停在 1.0）。
+  //
+  // 现象就是用户报的"导航变来变去"：鼠标划过的项淡出冻结在半路/满值，
+  // 看起来像第二个选中项。
+  Fixture fixture;
+  fixture.layout();
+  fixture.move_to(60.0f, 40.0f);   // **只给这一次事件**：后续推进必须靠续帧机制
+  Canvas canvas{kWidth, kHeight};
+  const int frames = run_frames(fixture, canvas, 40, 0.016);
+  ST_CHECK(fixture.button->hover_progress() > 0.99f);   // 淡入走完了
+  ST_CHECK(frames < 40);                                // 并且真的停下来了（不空转）
+}
+
+ST_TEST(hover_fade_out_completes_across_frames) {
+  // 同一机制的**淡出**方向：这条对应"永久高亮"（冻结在 1.0 就是永不消失的高亮）。
+  Fixture fixture;
+  fixture.layout();
+  Canvas canvas{kWidth, kHeight};
+  fixture.move_to(60.0f, 40.0f);
+  (void)run_frames(fixture, canvas, 40, 0.016);   // 先淡入完成
+  ST_CHECK(fixture.button->hover_progress() > 0.99f);
+
+  // ⚠ "移开"要用**视口外**的坐标。
+  // `UiRoot::paint()` 内部会 `layout()`，把内容根重排成填满视口——
+  // 因此视口内**没有**点能避开这个按钮（Fixture 里 `arrange` 给的几何在首帧绘制后就被覆盖）。
+  // 实测踩过：用 (280,140) 时 `hovered` 仍为 true，淡出根本没触发。
+  // 视口外等价于"指针移出界面"，同样必须清除悬浮。
+  fixture.move_to(400.0f, 200.0f);
+  ST_CHECK(!fixture.button->hovered());
+  const int frames = run_frames(fixture, canvas, 40, 0.016);
+  ST_CHECK(fixture.button->hover_progress() < 0.01f);   // 高亮彻底消失
+  ST_CHECK(frames < 40);
 }
