@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "st/codec/png.hpp"
+#include "st/core/fs.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/raster/scene3d.hpp"
@@ -55,7 +56,14 @@ inline constexpr int kHeight = 192;
   return count > 0 ? sum / static_cast<double>(count) : 0.0;
 }
 
-void write_png(const Canvas& canvas, const char* path) {
+/// 产物目录：**放在 `build/` 下**（已 gitignore）。
+///
+/// 测试产物不该进仓库：它每次跑都会重写，渲染稍有变化就是一堆二进制 diff；
+/// 而它又不是"黄金文件"（断言不用它比对，只供人眼看）。仓库里曾有一批
+/// `gl/*.png` 就是这类噪声，随 GL 测试一起删掉了。
+constexpr const char* kArtifactDir = "build/test-artifacts";
+
+void write_png_at(const Canvas& canvas, const char* path) {
   st::codec::PngImage image;
   image.width = static_cast<std::uint32_t>(canvas.physical_width());
   image.height = static_cast<std::uint32_t>(canvas.physical_height());
@@ -68,6 +76,14 @@ void write_png(const Canvas& canvas, const char* path) {
     image.rgba[index * 4U + 3U] = static_cast<std::uint8_t>(pixel & 0xFFU);
   }
   (void)st::codec::png_write_file(path, image);
+}
+
+/// 按文件名写到产物目录（自动建目录）。
+void write_png(const Canvas& canvas, const char* leaf) {
+  const std::string directory = std::string(kArtifactDir) + "/scene";
+  (void)st::fs::create_directories(directory);
+  const std::string path = directory + "/" + leaf;
+  write_png_at(canvas, path.c_str());
 }
 
 /// 渲染一帧到画布。
@@ -104,7 +120,7 @@ ST_TEST(software_scene_renders_a_cube) {
   ST_CHECK((*scene)->draw_calls() > 0);
   const double inked = inked_ratio(canvas, background);
   ST_CHECK(inked > 0.05);   // 真画出了东西
-  write_png(canvas, "scene/01-software-cube.png");
+  write_png(canvas, "01-software-cube.png");
 
   // 光照：不同朝向的面亮度必须不同（纯色填充做不到这一点）
   std::vector<double> luma;
@@ -116,7 +132,7 @@ ST_TEST(software_scene_renders_a_cube) {
     render(**scene, face, cube, Mat4::rotation(Vec3{0, 1, 0}, static_cast<float>(index) * 0.7f),
            head_on, background);
     luma.push_back(average_luma(face));
-    if (index == 2) write_png(face, "scene/02-software-cube-rotated.png");
+    if (index == 2) write_png(face, "02-software-cube-rotated.png");
   }
   const double min_luma = *std::min_element(luma.begin(), luma.end());
   const double max_luma = *std::max_element(luma.begin(), luma.end());
@@ -146,7 +162,7 @@ ST_TEST(software_scene_depth_buffer_hides_the_far_face) {
   scene->get()->draw_mesh(far_cube, Mat4::translation(Vec3{0.0f, 0.0f, -1.0f}));
   scene->get()->end_frame(canvas, Rect{0.0f, 0.0f, static_cast<float>(kWidth),
                                        static_cast<float>(kHeight)});
-  write_png(canvas, "scene/03-software-depth.png");
+  write_png(canvas, "03-software-depth.png");
 
   // 远处的立方体在近处立方体后面 → 它**完全不可见**（近块是 2×2、距离 1.5，
   // 视角下足以遮住 0.6 宽、距离 -1 的那个）。取中心区域检查：应只有近块的颜色。
@@ -213,7 +229,7 @@ ST_TEST(software_scene_near_plane_stress_is_deterministic) {
   inside.target = Vec3{0.0f, 0.0f, -1.0f};
   render(**scene, canvas, cube, Mat4::identity(), inside, background);
   ST_CHECK(inked_ratio(canvas, background) > 0.5);
-  write_png(canvas, "scene/04-software-inside.png");
+  write_png(canvas, "04-software-inside.png");
 }
 
 ST_TEST(software_scene_rejects_invalid_size) {
