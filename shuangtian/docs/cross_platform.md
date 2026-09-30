@@ -1,10 +1,15 @@
-# 10. 跨平台强制约束（写代码时必须逐条自查）
+# 跨平台强制约束：详细版与自查清单
+
+> 本文是 `CONVENTIONS.md` **§10 的展开**（那边是必须遵守的红线摘要，这边是逐条的成因、
+> 反例与提交前自查清单）。**两边的编号不一一对应**——CONVENTIONS §10 按"约束类型"分
+> （MSVC 口径 / 语言行为差异 / 构建静默失效），本文按"出错面"分（平台层 / 路径 / 入口 /
+> 类型 / 构建 / 自查）。因此本文用独立编号，避免读者误以为能按号对照。
 
 框架的目标平台是 **Linux / Windows / macOS**，且必须支持**交叉编译**（如 Linux 上产出 Windows 程序）。
 跨平台不是"以后再说"的收尾工作：**一处平台假设会让整个目标平台编不过或运行期出错**，
 而它在本机（Linux）往往完全看不出来。因此这些是**强制约束**，与 §2 的禁令同等地位。
 
-## 10.1 平台差异只能出现在 `platform_*` 里
+## 1. 平台差异只能出现在 `platform_*` 里
 
 | 允许 | 位置 |
 |---|---|
@@ -19,7 +24,7 @@
 > `'::getpid' has not been declared`**；而且那里的写法 `getpid() == 0 ? 0 : 0` 恒为 0，pid 从来没上报对过。
 > 正解：`process::current_id()`，Windows 侧走 `GetCurrentProcessId()`。
 
-## 10.2 路径：一律 UTF-8 文本，进出都经 `st::fs`
+## 2. 路径：一律 UTF-8 文本，进出都经 `st::fs`
 
 - 框架对内对外**统一 UTF-8** `std::string` 表示路径（与源码、JSON、脚本一致）。
 - 路径拼接/比较/绝对路径判定**必须用 `st::fs`**（`join`/`relative_to`/`is_absolute`），
@@ -39,7 +44,7 @@ auto text = st::fs::read_text(path);                // ✓
 auto stream = std::ifstream(st::fs::to_path(path)); // ✓
 ```
 
-## 10.3 进程入口：`argv` 在 Windows 是 ANSI
+## 3. 进程入口：`argv` 在 Windows 是 ANSI
 
 命令行参数在 Windows 是**本地 ANSI 编码**（中文机器是 GBK），Linux/macOS 才是 UTF-8。
 示例与工具程序统一用 `ST_MAIN(fn)`（`st/core/entry.hpp`）：它在入口处把参数正规化成 UTF-8，
@@ -51,7 +56,7 @@ auto run_app(int argc, char** argv) -> int { /* 这里一定是 UTF-8 */ }
 ST_MAIN(run_app)
 ```
 
-## 10.4 类型与格式化
+## 4. 类型与格式化
 
 | 陷阱 | 规则 |
 |---|---|
@@ -61,7 +66,7 @@ ST_MAIN(run_app)
 | 结构体布局/打包 | 不假设 ABI；需要固定布局用显式类型与 `static_assert` |
 | `size_t` 与整数混算 | 保持 `-Wconversion` 干净（本项目已开 `-Werror`，跨平台后更值得保持） |
 
-## 10.5 系统库、工具链与构建
+## 5. 系统库、工具链与构建
 
 - **系统库按目标平台解析**（`default_system_libs(platform)`），**不能**用宿主宏判断：
 
@@ -76,7 +81,7 @@ ST_MAIN(run_app)
 - 交叉编译时**不套用宿主的可选特性**（如 `-fuse-ld=lld`/`mold`：宿主装的不一定支持目标格式）。
 - 交叉产物的**运行时行为**无法在本机验证，因此新增平台分支必须至少做到"交叉编译通过"。
 
-## 10.6 自查清单（提交前逐条过）
+## 6. 自查清单（提交前逐条过）
 
 1. 有没有新增系统头 / 平台宏 / `char*` API？→ 必须在 `platform_*` 里。
 2. 有没有直接构造文件流或用字符串拼路径？→ 换成 `st::fs`。

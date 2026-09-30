@@ -209,18 +209,22 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | 能力 | 状态 |
 |---|---|
 | 无头后端（headless）+ 软件光栅器 | ✅ 完整（本仓库全部示例与验证都在无头下完成） |
-| 窗口后端（x11 / wayland / win32） | ⏳ 运行时探测已就绪，窗口实现在 v0.2（缺失自动回退 headless，不阻断流程） |
-| 硬件合成（Vulkan/GL/Metal） | ⏳ D3D11 已落地设备层（`raster/gpu.hpp` + `platform_d3d11.cpp`）；Vulkan/Metal 待做 |
+| 窗口后端 | ✅ **win32 完整**（真窗口 + 鼠标键盘 + 剪贴板 + DXGI swapchain 呈现 + DPI 感知与切换）；⏳ x11 / wayland 未做（运行时探测缺失即回退 headless，不阻断流程） |
+| 硬件合成 | ✅ **D3D11 全链路**（设备层→着色器原语→路径→DXGI 呈现，`--renderer=auto\|gpu\|software`）；✅ **OpenGL 3D**（离屏 FBO + 模板缓冲非零环绕 + OBJ；Windows 专用）；⏳ Vulkan / Metal 待做 |
 | DPI（含非整数 1.5x、运行时切换） | ✅ |
 | 字体（TTF/OTF/OTC-CFF/CID、CJK 回退、SC face 优选） | ✅ |
 | Markdown（解析 / 流式 / 高亮 / 渲染组件） | ✅ |
 | TCP 控制通道（tree/find/get/set/invoke/input.*/capture/visual/wait/metrics/events/theme/app） | ✅ |
 | 自研包管理器 `stpm`（求解/lock/获取/校验/vendor/构建/lint） | ✅ 构建与 lint 完整；第三方源码获取限制见 `DESIGN.md` §7.4 |
-| **Windows 宿主 + MSVC 工具链** | ✅ 首选 MSVC（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；实测自举 20s / 全量构建 32s / 测试 312 用例全绿 |
-| **GPU 渲染（D3D11：硬件 → WARP）** | ✅ 设备层 + 离屏渲染 + 像素回读（与软件画布逐字节一致）；⏳ 绘制原语与窗口呈现见 `DESIGN.md` §8.3（M3+） |
-| 动画与过渡系统 | ⏳ v0.2 |
+| **Windows 宿主 + MSVC 工具链** | ✅ 首选 MSVC（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；实测自举 20s / 全量构建 32s / 测试 **365 用例 · 10343 断言**全绿 |
+| **GPU 渲染（D3D11：硬件 → WARP）** | ✅ **M1–M6 全部落地**：设备层 / 着色器原语（文字与渐变与软件 **Δ0**）/ 投影（**Δ≤1**）/ 路径填充描边 / **DXGI swapchain 呈现** / `auto` 按实测选优。实测总帧 24.66→**1.53 ms**、送显 6.55→**0.03 ms**（详见 `DESIGN.md` §8.3） |
+| 动画与过渡 | ✅ 悬浮事件与特效（背景/描边/上浮/发光，`HoverEffect` 声明式）、帧驱动过渡（`UiRoot` 时间轴 + 续帧协议）、3D 旋转 |
 
 ## 相关文档
 
-- `DESIGN.md` — 权威设计（架构、接口、协议规范、DPI 契约、设计令牌、包管理、里程碑）
+**完整地图见 `docs/README.md`**（哪份文档答什么问题）。最常用的三份：
+
+- `DESIGN.md` — 权威设计（架构、接口、协议规范、DPI 契约、设计令牌、包管理）。
+  两张表最值得先看：**§8.2 的 47 条实战缺陷**（每条带根因与修复）、**§11 性能目标与实测**
 - `CONVENTIONS.md` — 编码契约（禁用特性清单 + 编译强制集 + `st lint` 规则）
+- `docs/cross_platform.md` — 跨平台强制约束（写 C++ 前必读）；`docs/independent_project.md` — 用本框架建独立工程

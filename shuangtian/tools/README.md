@@ -31,3 +31,4 @@
 | `st_win_check.py` | Windows 后端专项检查 |
 | `st_gdb_probe.py` | 崩溃现场信息提取 |
 | `st_shot_region.py` | 指定区域截图 |
+| `check_docs.py` | **文档引用一致性检查**：扫全部文档/源码里的 `DESIGN.md §X` / `CONVENTIONS.md §X` 引用，确认目标章节真的存在；并核对若干“旧值已清零”与“新内容已到位”。改了章节号或文档结构后跑一下 |
