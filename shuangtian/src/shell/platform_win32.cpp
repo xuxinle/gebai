@@ -256,6 +256,13 @@ class Win32Backend final : public Backend {
   void present() override {
     pump_messages();
     if (surface_ == nullptr || window_ == nullptr) return;
+    // 尺寸脏了：现在重建（每帧至多一次；最大化/还原只重建这一次）
+    if (size_dirty_) {
+      size_dirty_ = false;
+      // 拖动模态中不重建（继续拉伸跟手，`WM_EXITSIZEMOVE` 后由下面这条统一处理——
+      // 那里也会置 size_dirty_，等价的路径，两条入口一处实现）
+      if (!in_size_loop_) (void)sync_buffers_to_client(scale_);
+    }
     // GPU 画布优先走 swapchain（零 CPU 拷贝）；软件画布或未就绪时落回 GDI blit。
     if (presenter_ != nullptr) {
       if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
@@ -619,32 +626,34 @@ class Win32Backend final : public Backend {
       }
       case WM_EXITSIZEMOVE: {
         in_size_loop_ = false;
+        // 只在尺寸真的变了时置脏（只挪了位置 → 不白建）；重建统一发生在 present()
         if (surface_ != nullptr) {
-          // 只在尺寸真的变了时重建（进入/退出移动循环但只挪了位置 → 白建）
           RECT client{};
           if (::GetClientRect(window, &client) != 0 &&
               (client.right != surface_->physical_width() ||
                client.bottom != surface_->physical_height())) {
-            (void)sync_buffers_to_client(scale_);
+            size_dirty_ = true;
           }
         }
         return 0;
       }
       case WM_SIZE: {
         if (surface_ == nullptr) return 0;
-        RECT client{};
-        if (::GetClientRect(window, &client) == 0) return 0;
-        // 最小化（SIZE_MINIMIZED）与"尺寸没真变"都不用管
+        // 最小化不用管（恢复时还会来一次非最小化的 WM_SIZE）
         if (wparam == SIZE_MINIMIZED) return 0;
-        if (client.right == surface_->physical_width() &&
-            client.bottom == surface_->physical_height()) {
-          return 0;
-        }
-        // 尺寸变化由应用在下一帧读取 `logical_size()` 并同步视口（见 Application::tick）。
-        // 一律走 `sync_buffers_to_client`：它保证画布物理尺寸**精确等于**客户区
-        // （手写 `client / scale` 取整会差 1px → DXGI 缩放 → 糊）。
-        // **但拖动/缩放循环中先不重建**（见上）：拉伸跟手，松手一次到位。
-        if (!in_size_loop_) (void)sync_buffers_to_client(scale_);
+        // **只记"尺寸脏"，重建推迟到 `present()`**。
+        //
+        // 为什么不在消息处理里重建（两个真实场景都被这一条覆盖）：
+        // ① 拖动边框：`WM_SIZE` 每个中间尺寸都来一次，同步重建 = 几十次全套资源重建；
+        // ② **最大化/还原**：不进入 `WM_ENTERSIZEMOVE` 模态（那是拖动专属），
+        //    但客户区瞬间从 ~1920×1200 跳到 ~3840×2100（2560×1440 屏幕 @1.5x），
+        //    在窗口过程里同步重建画布+纹理+swapchain，界面就卡在那一下——
+        //    用户实测"最大化切换渲染卡顿"就是它。
+        // 推迟到 present() 后：每帧至多重建一次、且不在窗口过程里阻塞消息泵；
+        // 期间用旧尺寸缓冲呈现（DXGI 拉伸到客户区，瞬间模糊但连续），
+        // 尺寸稳定后一帧内恢复 1:1 锐利。
+        RECT client{};
+        if (::GetClientRect(window, &client) != 0) size_dirty_ = true;
         return 0;
       }
 
@@ -777,6 +786,9 @@ class Win32Backend final : public Backend {
   /// 正处于"移动/缩放"模态循环（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE`）：
   /// 此期间 `WM_SIZE` 只记尺寸、不重建缓冲（拖动跟手），退出时一次性重建。
   bool in_size_loop_{false};
+  /// 客户区尺寸已变化、待 `present()` 重建（每帧至多一次的节流）。
+  /// 最大化/还原不走拖动模态，靠它把重建从窗口过程挪到帧循环里。
+  bool size_dirty_{false};
 };
 
 }  // namespace
