@@ -731,14 +731,21 @@ class GpuCanvas final : public Surface {
   /// CPU 逐行混合、GPU 贴纹理——两边像素结果可达一致（字形位图本身同源于
   /// 同一套字体引擎，所以字的形状完全一样，只有边缘合成方式不同）。
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
-                             const Paint& paint, float opacity, BlendMode blend) override {
+                             const Paint& paint, float opacity, BlendMode blend,
+                             std::uint64_t cache_key = 0) override {
     if (width <= 0 || height <= 0 || opacity <= 0.0f || blend != BlendMode::SrcOver) return;
     const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     if (coverage.size() < expected) return;
     const std::int64_t start = st::time::now_ns();
-    // `cache_by_pointer=true`：字形位图长期存活且指针稳定（字体引擎自己缓存），
-    // 按指针缓存可避免每帧重复上传同一批字形。
-    ID3D11ShaderResourceView* view = mask_texture(coverage.data(), width, height, true);
+    // ⚠ **按稳定身份缓存，不能按指针**。
+    //
+    // 这里原来把 `coverage.data()` 当键，并注释"字形位图长期存活且指针稳定"——
+    // 那个假设是错的：字体引擎的缓存超过上限会 `glyphs.clear()`，位图内存被释放后
+    // **被新字形复用同一地址**，于是"按指针命中"把上一个字形的纹理当成了这个字形的。
+    // 症状：界面文字间歇性变成别的字（`folder`→`folBer`、`概览`→`外测`），
+    // 且只在渲染过足够多字形（触发过一次清空）之后才出现——极难复现。
+    // 稳定身份来自字体引擎（face + 字形号 + 字号档 + 超采样），与内存生命周期无关。
+    ID3D11ShaderResourceView* view = mask_texture(coverage.data(), width, height, cache_key);
     if (view == nullptr) return;
     const ShaderParams params = base_params(
         DrawMode::CoverageMask,
@@ -1278,11 +1285,13 @@ class GpuCanvas final : public Surface {
   // —— 纹理创建与缓存 ——
 
   /// R8 覆盖率纹理（字形/路径遮罩）。`cache_by_pointer` 适合指针稳定的源（字形位图）。
-  auto mask_texture(const float* coverage, int width, int height, bool cache_by_pointer)
+  /// `cache_key` 为**稳定身份**（0 = 没有身份，不做跨帧缓存——正确性优先）。
+  /// 键里同时保留宽高：虽字号已进身份，但宽高是"内容是否真的一样"的直接判据。
+  auto mask_texture(const float* coverage, int width, int height, std::uint64_t cache_key)
       -> ID3D11ShaderResourceView* {
-    if (cache_by_pointer) {
+    if (cache_key != 0) {
       for (const auto& entry : mask_cache_) {
-        if (entry.source == coverage && entry.width == width && entry.height == height) {
+        if (entry.key == cache_key && entry.width == width && entry.height == height) {
           return entry.view;
         }
       }
@@ -1295,13 +1304,13 @@ class GpuCanvas final : public Surface {
     ID3D11ShaderResourceView* view =
         create_texture(DXGI_FORMAT_R8_UNORM, width, height, bytes.data(),
                        static_cast<std::size_t>(width));
-    if (view != nullptr && cache_by_pointer) {
+    if (view != nullptr && cache_key != 0) {
       if (mask_cache_.size() >= kMaskCacheLimit) {
         // 简单淘汰：丢最早一项（字形集在工作集稳定后很少再换）
         mask_cache_.front().view->Release();
         mask_cache_.erase(mask_cache_.begin());
       }
-      mask_cache_.push_back(MaskCacheEntry{coverage, width, height, view});
+      mask_cache_.push_back(MaskCacheEntry{cache_key, width, height, view});
     }
     return view;
   }
@@ -1412,8 +1421,10 @@ class GpuCanvas final : public Surface {
     return SUCCEEDED(result) ? view : nullptr;
   }
 
+  /// 遮罩纹理缓存项。键是调用方给的**稳定身份**（见 `blend_coverage_bitmap` 的说明：
+  /// 按指针缓存会被内存复用骗到），宽高作为内容判据一并保留。
   struct MaskCacheEntry {
-    const float* source{nullptr};
+    std::uint64_t key{0};
     int width{0};
     int height{0};
     ID3D11ShaderResourceView* view{nullptr};

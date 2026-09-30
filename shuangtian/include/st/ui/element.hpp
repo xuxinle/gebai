@@ -173,6 +173,15 @@ struct RenderContext {
   const Theme& theme;
   const TextPort* text{nullptr};  ///< 空时退化为 `NullTextPort`
   double time_seconds{0.0};
+
+  /// 本帧**实际执行了绘制**的元素数（视口剔除会缩小它）。
+  ///
+  /// 为什么要暴露它：视口剔除这类优化的正确性没法靠"看截图"证明——
+  /// 而本应用跨运行的像素**不是确定的**（悬浮过渡的冻结值依赖帧时序，实测同一实例
+  /// 连拍两次仍有上千像素差异），所以"A/B 截图逐像素比对"这条路本身不可用。
+  /// 计数是可复现的结构性证据：既能证明"屏幕外确实没画"，
+  /// 也能配合"每个元素自己声明是否在视口内"来证明"该画的都画了"。
+  std::uint64_t* painted_elements{nullptr};
 };
 
 class Element {

@@ -90,6 +90,10 @@ class UiRoot {
 
   void mark_dirty_all();
   [[nodiscard]] auto dirty() const noexcept -> bool { return dirty_; }
+  /// 上一帧**实际绘制**的元素数（视口剔除后）。诊断与控制通道用。
+  [[nodiscard]] auto painted_elements() const noexcept -> std::uint64_t {
+    return painted_elements_;
+  }
   [[nodiscard]] auto dirty_rect() const noexcept -> math::IntRect { return dirty_rect_; }
   void clear_dirty() noexcept;
 
@@ -131,6 +135,7 @@ class UiRoot {
   EventObserver event_observer_{};
   std::uint64_t version_{1};
   bool dirty_{true};
+  std::uint64_t painted_elements_{0};
   /// 本次绘制后是否还有元素在过渡中（由 `collect_animation_requests` 填）。
   bool animation_pending_{false};
   math::IntRect dirty_rect_{};

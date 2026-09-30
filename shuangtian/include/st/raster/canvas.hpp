@@ -112,7 +112,8 @@ class Canvas final : public Surface {
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override;
   /// 覆盖率位图混合（文字/遮罩）：软件实现逐行走 `blend_coverage_row`。
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
-                             const Paint& paint, float opacity, BlendMode blend) override;
+                             const Paint& paint, float opacity, BlendMode blend,
+                             std::uint64_t cache_key = 0) override;
 
   // —— 裁剪 ——
   /// 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素）。

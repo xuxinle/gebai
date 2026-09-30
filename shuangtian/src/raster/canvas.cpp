@@ -478,7 +478,9 @@ void Canvas::blend_span(int y, int x_begin, int x_end, math::Color color, float 
 
 void Canvas::blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width,
                                    int height, const Paint& paint, float opacity,
-                                   BlendMode blend) {
+                                   BlendMode blend, std::uint64_t cache_key) {
+  // 软件路径逐行混合，不需要稳定身份（身份只服务 GPU 那边的纹理缓存）。
+  (void)cache_key;
   if (width <= 0 || height <= 0 || opacity <= 0.0f) return;
   const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
   if (coverage.size() < expected) return;

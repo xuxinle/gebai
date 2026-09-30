@@ -20,6 +20,7 @@
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/raster/gpu.hpp"
 #include "st/text/text.hpp"
 
 namespace {
@@ -202,4 +203,57 @@ ST_TEST(text_glyphs_are_not_clipped) {
     }
   }
   ST_CHECK_EQ(static_cast<int>(clipped), 0);
+}
+
+ST_TEST(text_glyphs_stay_correct_across_glyph_cache_trim_on_gpu) {
+  // 这条是**"界面文字间歇性变成别的字"**的回归测试（用户实际报的那个缺陷）。
+  //
+  // 根因：GPU 后端把字形覆盖率纹理**按位图地址**缓存，并假设"字形位图长期存活、
+  // 指针稳定"。但字体引擎的缓存超过上限会 `glyphs.clear()` 释放全部位图，
+  // 新字形随后**复用同一批地址** → GPU 端"按地址命中"把上一个字形的纹理当成这个的。
+  // 症状：`folder` 显示成 `folBer`、`概览` 变成 `外测`，且只在渲染过足够多字形
+  // （触发过一次清空）之后才出现——所以单看几行代码或跑几个用例都发现不了。
+  //
+  // 因此用例必须**走 GPU 画布**且**跨过一次缓存清空**：
+  // ① 渲染一小段文字，记下像素；
+  // ② 灌入远超上限（512）的**不同字形**，逼出清空；
+  // ③ 再渲染同一段文字，要求**逐像素与①一致**。
+  // 软件画布永远通不过这条的"检验作用"（它不做纹理缓存），所以必须用 GPU 画布。
+  if (!st::raster::gpu::available()) return;
+  auto target = st::raster::gpu::create_canvas(600, 60, 1.0f, {});
+  if (!target.has_value()) return;
+  st::raster::Surface& surface = **target;
+
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  constexpr std::string_view kProbe = "folder copy download calendar";
+  const auto render_probe = [&]() {
+    surface.clear(Color{0, 0, 0, 0});
+    TextRenderer renderer(*fixture.stack, 1.0f);
+    renderer.draw(surface, kProbe, Point{4.0f, 40.0f}, 13.0f, Color{255, 255, 255, 255});
+    return std::vector<std::uint32_t>(surface.pixels().begin(), surface.pixels().end());
+  };
+
+  const std::vector<std::uint32_t> reference = render_probe();
+
+  // ② 灌入大量不同字形：72 个图标名 + 中文，跨多个字号 → 远超 512 条上限
+  {
+    TextRenderer filler(*fixture.stack, 1.0f);
+    Canvas scratch{1400, 60};
+    for (int round = 0; round < 12; ++round) {
+      scratch.clear(Color{0, 0, 0, 0});
+      const std::string line = std::string(kLongText) + " " + std::string(kUiText) + " " +
+                               std::to_string(round) +
+                               " folder copy download calendar settings share package warning "
+                               "filter circle image send edit upload refresh link lock bell file";
+      filler.draw(scratch, line, Point{4.0f, 40.0f}, 10.0f + static_cast<float>(round % 4),
+                  Color{255, 255, 255, 255});
+      filler.draw(surface, line, Point{4.0f, 40.0f}, 10.0f + static_cast<float>(round % 4),
+                  Color{255, 255, 255, 255});
+    }
+  }
+
+  // ③ 再渲染同一段文字：必须与①逐像素一致
+  const std::vector<std::uint32_t> after = render_probe();
+  ST_CHECK_EQ(static_cast<int>(count_differing(reference, after)), 0);
 }

@@ -129,7 +129,9 @@ void UiRoot::collect_animation_requests() {
 
 void UiRoot::paint(raster::Surface& canvas) {
   layout();
-  const RenderContext context = render_context();
+  RenderContext context = render_context();
+  painted_elements_ = 0;
+  context.painted_elements = &painted_elements_;
   for (auto& overlay : overlays_) overlay->paint(context, canvas);
   if (content_ != nullptr) paint_subtree(context, *content_, canvas);
   // ⚠ 必须在**所有绘制之后**汇总。

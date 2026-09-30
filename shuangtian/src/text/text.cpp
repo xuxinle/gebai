@@ -416,6 +416,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const float scale = effective_size * static_cast<float>(supersample) / units;
 
   auto bitmap = std::make_shared<GlyphBitmap>();
+  bitmap->cache_key = key;   // 稳定身份 = 上面那份缓存键（与内存地址无关）
   auto outline = face.glyph_outline(glyph);
   const bool blank = !outline || outline->is_empty();
 
@@ -526,7 +527,8 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
     // 这样同一条文字路径在 CPU 与 GPU 上都能画（GPU 把它当 A8 纹理贴）。
     // 文字是界面里最常见的原语，若它只能走软件，GPU 渲染就名存实亡。
     surface.blend_coverage_bitmap(x_begin, y_begin, bitmap->coverage, bitmap->width,
-                                  bitmap->height, paint, opacity, raster::BlendMode::SrcOver);
+                                  bitmap->height, paint, opacity, raster::BlendMode::SrcOver,
+                                             bitmap->cache_key), bitmap->cache_key;
   }
   if (profiling) {
     surface.add_profile(raster::PaintOp::Text,

@@ -143,9 +143,14 @@ class Surface {
   /// 若让文字直接依赖软件的行混合 API，GPU 路径就没法画字（而文字是界面里最常见的原语）。
   ///
   /// `coverage` 为**行优先**的紧凑数组（`width × height` 项）。
+  /// `cache_key`：这份覆盖率位图的**稳定身份**（同一形状/字形跨帧、跨缓存重建都不变）。
+  /// GPU 后端据此缓存上传好的纹理——**不能按指针缓存**：
+  /// 位图的宿主容器可能被清空并释放，新位图复用同一地址，于是"按指针命中"
+  /// 会把**上一个形状的纹理**当成这个形状的（实测症状：界面文字间歇性变成别的字）。
+  /// 传 0 表示"没有稳定身份"——此时后端不得缓存，只能每次重建（正确性优先）。
   virtual void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width,
                                      int height, const Paint& paint, float opacity,
-                                     BlendMode blend) = 0;
+                                     BlendMode blend, std::uint64_t cache_key = 0) = 0;
 
   // —— 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素） ——
   virtual void push_clip_rect(math::Rect rect) = 0;
