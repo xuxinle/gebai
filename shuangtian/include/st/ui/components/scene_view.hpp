@@ -1,6 +1,6 @@
 #pragma once
 
-/// `GlView`：把 OpenGL 三维场景嵌进 2D 界面（一个普通组件）。
+/// `SceneView`：把 OpenGL 三维场景嵌进 2D 界面（一个普通组件）。
 ///
 /// 为什么做成组件而不是"另一个应用"：三维内容在界面里几乎总是**一块区域**
 /// （模型预览、数据可视化、产品展示），而不是整屏。做成组件意味着它可以被布局、
@@ -20,16 +20,16 @@
 namespace st::ui {
 
 /// 展示用网格类型。
-enum class GlShape : std::uint8_t { Cube, Sphere };
+enum class SceneShape : std::uint8_t { Cube, Sphere };
 
-class GlView : public Element {
+class SceneView : public Element {
  public:
-  explicit GlView(GlShape shape = GlShape::Cube);
-  ~GlView() override;
-  GlView(const GlView&) = delete;
-  auto operator=(const GlView&) -> GlView& = delete;
+  explicit SceneView(SceneShape shape = SceneShape::Cube);
+  ~SceneView() override;
+  SceneView(const SceneView&) = delete;
+  auto operator=(const SceneView&) -> SceneView& = delete;
 
-  void set_shape(GlShape shape);
+  void set_shape(SceneShape shape);
   /// 显示一个**外部网格**（如 OBJ 加载结果）。设为非空后 `shape` 不再生效。
   ///
   /// 为什么用 `shared_ptr<const Mesh>`：网格可能很大且由调用方缓存复用
@@ -38,7 +38,7 @@ class GlView : public Element {
   [[nodiscard]] auto mesh() const noexcept -> const std::shared_ptr<const raster::Mesh>& {
     return mesh_;
   }
-  [[nodiscard]] auto shape() const noexcept -> GlShape { return shape_; }
+  [[nodiscard]] auto shape() const noexcept -> SceneShape { return shape_; }
   /// 自动旋转（默认开）。关掉用于"定格看一个角度"的场合。
   void set_spin(bool enabled) noexcept { spin_ = enabled; }
   /// 每秒旋转弧度。
@@ -66,7 +66,7 @@ class GlView : public Element {
   [[nodiscard]] static auto rendering_ready() noexcept -> bool;
 
  private:
-  GlShape shape_{GlShape::Cube};
+  SceneShape shape_{SceneShape::Cube};
   bool spin_{true};
   float speed_{0.6f};
   math::Color background_{0x11, 0x16, 0x22, 0xFF};
