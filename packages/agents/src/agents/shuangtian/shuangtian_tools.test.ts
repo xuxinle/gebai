@@ -8,11 +8,16 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
 import { mkdtempSync } from "node:fs"
 import type { ToolContext } from "@gebai/sdk"
 import { tools } from "./shuangtian_tools"
+
+// 平台差异（测试夹具面向 Windows/Linux 两平台；此前只在 POSIX 下跑，Windows 上夹具会拼坏路径）
+const IS_WIN = process.platform === "win32"
+const BOOTSTRAP_SCRIPT = IS_WIN ? "bootstrap.ps1" : "bootstrap.sh"
+const LAUNCH_MARK = IS_WIN ? "Start-Process" : "setsid"
 
 interface MockControl {
   port: number
@@ -40,7 +45,12 @@ async function startControl(): Promise<MockControl> {
           params: Record<string, unknown>
         }
         buffer = buffer.subarray(4 + length)
-        calls.push({ method: message.method, params: message.params ?? {} })
+        // 客户端每次连接会自动前置一个合成 hello（服务端协议门所必需）；
+        // 测试关注的是“用户请求”，故把它过滤出 calls 视图（仍会被应答——
+        // 握手行为本身由 shuangtian_client.test.ts 的专项用例验证）。
+        const synthetic_handshake =
+          message.method === "hello" && (message.params ?? {}).client === "shuangtian-agent"
+        if (!synthetic_handshake) calls.push({ method: message.method, params: message.params ?? {} })
         const result = handler(message.method, message.params ?? {})
         const payload =
           typeof result === "object" && result !== null && "__error" in result
@@ -105,7 +115,8 @@ function makeCtx(
     home,
     env: {},
     sandboxed: false,
-    resolvePath: (p) => (p.startsWith("/") ? p : join(workdir, p)),
+    // 绝对路径必须原样返回：Windows 的 `C:\…` 不以 `/` 开头，旧判定会把它拼到 workdir 后（夹具 bug）
+    resolvePath: (p) => (isAbsolute(p) ? p : join(workdir, p)),
     readFile: async (p) => await Bun.file(p).text(),
     readBinaryFile: async (p) => new Uint8Array(await Bun.file(p).arrayBuffer()),
     writeFile: async (p, content) => {
@@ -144,7 +155,8 @@ function makeFramework(home: string): string {
   const root = join(home, "shuangtian")
   mkdirSync(join(root, "build", "bin"), { recursive: true })
   writeFileSync(join(root, "st.pkg"), JSON.stringify({ name: "shuangtian", version: "0.1.0" }))
-  writeFileSync(join(root, "build", "bin", "st"), "#!/bin/sh\nexit 0\n")
+  // 平台正确的二进制名：Windows 是 st.exe（stBinary 按平台拼名，写错就永远走自举）
+  writeFileSync(join(root, "build", "bin", IS_WIN ? "st.exe" : "st"), "#!/bin/sh\nexit 0\n")
   return root
 }
 
@@ -349,7 +361,7 @@ describe("run 生命周期", () => {
       cmd.includes("bootstrap") ? { stdout: "bootstrap ok" } : { stdout: "构建完成 [dev]" },
     )
     const result = await tools.run.execute({ action: "build", target: "gallery", framework: root }, ctx)
-    expect(commands[0].cmd).toContain("bootstrap.sh")
+    expect(commands[0].cmd).toContain(BOOTSTRAP_SCRIPT)
     // `st` 用框架自带的绝对路径（工程可能不在框架目录下），构建发生在**工程目录**
     expect(commands[1].cmd).toContain("build gallery")
     expect(commands[1].cmd).toContain("--profile dev")
@@ -455,10 +467,10 @@ describe("run 生命周期", () => {
     const home = mkdtempSync(join(tmpdir(), "st-tools-"))
     const root = makeFramework(home)
     mkdirSync(join(root, "build", "dev", "bin"), { recursive: true })
-    writeFileSync(join(root, "build", "dev", "bin", "mdeditor"), "#!/bin/sh\nexit 0\n")
+    writeFileSync(join(root, "build", "dev", "bin", IS_WIN ? "mdeditor.exe" : "mdeditor"), "#!/bin/sh\nexit 0\n")
 
     const { ctx, commands } = makeCtx(home, (cmd) => {
-      if (cmd.includes("setsid")) {
+      if (cmd.includes(LAUNCH_MARK)) {
         // 模拟应用启动后写控制文件
         const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
         mkdirSync(controlDir, { recursive: true })
@@ -471,7 +483,7 @@ describe("run 生命周期", () => {
     expect(result.output).toContain("已启动 mdeditor")
     expect(result.output).toContain(String(server.port))
     expect(result.data).toMatchObject({ ok: true, pid: 777, port: server.port })
-    const launch = commands.find((item) => item.cmd.includes("setsid"))
+    const launch = commands.find((item) => item.cmd.includes(LAUNCH_MARK))
     expect(launch?.cmd).toContain("--headless")
     expect(launch?.cmd).toContain("--control-file")
   })

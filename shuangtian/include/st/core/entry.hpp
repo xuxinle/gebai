@@ -39,6 +39,11 @@ namespace st {
 /// 仅做控制台编码设置（供自行解析参数的场景）。
 void startup_configure_console();
 
+/// 安装崩溃处理器（进程内一次性，幂等）：崩溃时把异常码/信号/地址+模块打到 stderr，
+/// 不吞异常（交给系统默认处置）。无头应用崩溃没有控制台可看——这份记录是
+/// 智能体/开发者事后定位的唯一线索（审视报告 P1-3）。入 ST_MAIN 时自动调用。
+void install_crash_handler();
+
 }  // namespace st
 
 /// 跨平台入口宏：把 `main` 的参数正规化成 UTF-8 后交给 `fn(argc, argv)`。
@@ -49,6 +54,7 @@ void startup_configure_console();
 #define ST_MAIN(fn)  /* lint-allow: L3 入口宏：唯一能在调用点生成 main 的手段 */ \
   auto main(int argc, char** argv) -> int {             \
     st::startup_configure_console();                    \
+    st::install_crash_handler();                        \
     const std::vector<std::string> st_arguments = st::startup_arguments(); \
     (void)argc;                                         \
     (void)argv;                                         \

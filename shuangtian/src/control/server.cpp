@@ -123,22 +123,28 @@ struct Frame {
 
 struct Server::Impl {
   struct Client {
+    std::uint64_t id{0};               ///< 稳定连接 id（自增，不随 vector erase 漂移）
     st::net::TcpStream stream{};
     std::vector<std::uint8_t> buffer{};  ///< 接收缓冲（二进制字节，非文本）
+    std::size_t consumed{0};           ///< 已消费游标（避免头部 erase 的 O(n) 搬移）
     bool subscribed{false};
+    bool greeted{false};               ///< 鉴权门：hello（且 token 校验通过）前拒绝一切其他方法
     std::vector<std::string> event_kinds{};
     std::string peer{};
   };
 
   struct PendingWait {
-    std::size_t client{0};
+    std::uint64_t client{0};           ///< 稳定连接 id（非 vector 下标：erase 后下标会漂移，
+                                       ///< 响应会发给错误的客户端——审视报告 P1-3）
     std::uint64_t request_id{0};
     std::string kind{};
     std::string selector{};
     std::string text{};
+    std::int64_t started_ms{0};        ///< 请求入队时刻（elapsed_ms 的唯一依据）
     std::int64_t deadline_ms{0};
     std::int64_t stable_since_ms{0};
     std::uint64_t last_version{0};
+    std::uint64_t frames_target{0};
   };
 
   explicit Impl(Host& host_ref) : host(host_ref) {}
@@ -150,12 +156,18 @@ struct Server::Impl {
   std::vector<std::unique_ptr<Client>> clients{};
   std::vector<PendingWait> waits{};
   std::vector<std::string> log_ring{};
+  std::vector<std::string> capture_dirs{};   ///< 启动时展开后的落盘白名单
   std::uint64_t requests{0};
   std::uint64_t event_sequence{0};
+  std::uint64_t next_client_id{1};
   std::uint64_t last_published_version{0};
   std::int64_t started_ms{0};
+  std::uint64_t frames_seen{0};           ///< 全局帧计数（wait for=frames 用）
   bool active{false};
 
+  /// 发送失败不再静默：写不进去的连接必然已坏（对端关闭/半开），
+  /// 旧实现 `(void)send` 会把「响应丢失」留给客户端当超时猜——停摆事故里
+  /// 客户端等 60s+ 也不知道发生了什么。现在：失败即返 false，由调用方回收连接。
   [[nodiscard]] auto send(Client& client, const Json& message) -> bool {
     const std::string body = json_dump(message);
     if (body.size() > options.max_frame) {
@@ -167,8 +179,16 @@ struct Server::Impl {
                                        static_cast<std::uint8_t>((length >> 16U) & 0xFFU),
                                        static_cast<std::uint8_t>((length >> 8U) & 0xFFU),
                                        static_cast<std::uint8_t>(length & 0xFFU)};
-    if (auto status = client.stream.write_all(header); !status) return false;
-    if (auto status = client.stream.write_text(body); !status) return false;
+    // 帧头与体合并成一次 send：分两次发在 Nagle/慢网络下多一次拆包机会，
+    // 且只需一次 would-block 判定（Windows 错误码修复后这里是安全路径）。
+    std::vector<std::uint8_t> frame;
+    frame.reserve(body.size() + 4);
+    frame.insert(frame.end(), header.begin(), header.end());
+    frame.insert(frame.end(), body.begin(), body.end());
+    if (auto status = client.stream.write_all(frame); !status) {
+      log::warn("控制通道发送失败（{}）：{}", client.peer, status.error().message);
+      return false;
+    }
     return true;
   }
 
@@ -191,22 +211,65 @@ struct Server::Impl {
     (void)send(client, message);
   }
 
+  /// 按稳定 id 找客户端（erase 后下标会漂移；nullptr = 已断开，挂起 wait 作废）
+  [[nodiscard]] auto client_by_id(std::uint64_t id) -> Client* {
+    for (auto& client : clients) {
+      if (client->id == id) return client.get();
+    }
+    return nullptr;
+  }
+
+  /// 回收已断开的客户端：同时作废它名下所有挂起 wait（旧实现只删客户端不删 wait，
+  /// 悬垂 wait 到期时按漂移后的下标把响应发错人）。
+  void drop_client(Client& client) {
+    std::erase_if(waits, [&](const PendingWait& wait) { return wait.client == client.id; });
+    auto iterator = std::find_if(clients.begin(), clients.end(),
+                                 [&](const std::unique_ptr<Client>& item) { return item.get() == &client; });
+    if (iterator != clients.end()) clients.erase(iterator);
+  }
+
   void publish_to_clients(std::string_view event, const Json& data) {
     Json message = Json::object();
     message["event"] = std::string(event);
     message["seq"] = ++event_sequence;
     message["data"] = data;
-    for (auto& client : clients) {
-      if (!client->subscribed) continue;
+    for (auto iterator = clients.begin(); iterator != clients.end();) {
+      Client* client = iterator->get();
+      if (!client->subscribed) {
+        ++iterator;
+        continue;
+      }
       if (!client->event_kinds.empty()) {
         const auto& kinds = client->event_kinds;
-        if (std::ranges::find(kinds, std::string(event)) == kinds.end()) continue;
+        if (std::ranges::find(kinds, std::string(event)) == kinds.end()) {
+          ++iterator;
+          continue;
+        }
       }
-      (void)send(*client, message);
+      if (!send(*client, message)) {
+        // 事件推送失败 = 连接已坏：立即回收（否则坏连接永远留在列表里，每次推送都再失败一次）
+        drop_client(*client);
+        continue;
+      }
+      ++iterator;
     }
   }
 
   /// 组件定位：接受 `id` 与选择器风格 `#id`（智能体常用后者，容错更省一轮往返）。
+  /// 检查路径是否落在白名单目录内（分隔符归一化后按前缀比较）。
+  [[nodiscard]] auto capture_path_allowed(std::string_view path) -> bool {
+    if (capture_dirs.empty()) return false;
+    std::string normalized(path);
+    std::ranges::replace(normalized, '\\', '/');
+    for (const auto& dir : capture_dirs) {
+      std::string prefix = dir;
+      std::ranges::replace(prefix, '\\', '/');
+      if (!prefix.empty() && !prefix.ends_with('/')) prefix.push_back('/');
+      if (normalized.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+  }
+
   [[nodiscard]] auto find_element(std::string_view id) -> ui::Element* {
     if (!id.empty() && id.front() == '#') id.remove_prefix(1);
     return host.root().find(id);
@@ -247,7 +310,9 @@ struct Server::Impl {
     const std::int64_t now = time::now_ms();
     for (auto iterator = waits.begin(); iterator != waits.end();) {
       PendingWait& wait = *iterator;
-      if (wait.client >= clients.size()) {
+      Client* owner = client_by_id(wait.client);
+      if (owner == nullptr) {
+        // 客户端已断开：挂起 wait 作废（旧实现按下标取 clients，断开漂移后会把响应发错人）
         iterator = waits.erase(iterator);
         continue;
       }
@@ -262,9 +327,19 @@ struct Server::Impl {
         if (stable_ms >= 120) {
           Json result = Json::object();
           result["satisfied"] = true;
-          result["elapsed_ms"] = static_cast<std::int64_t>(now - (wait.deadline_ms - 20000));
+          result["elapsed_ms"] = static_cast<std::int64_t>(now - wait.started_ms);
           result["detail"] = "画面已稳定";
-          respond(*clients[wait.client], wait.request_id, std::move(result));
+          respond(*owner, wait.request_id, std::move(result));
+          iterator = waits.erase(iterator);
+          continue;
+        }
+      } else if (wait.kind == "frames") {
+        if (frames_seen >= wait.frames_target) {
+          Json result = Json::object();
+          result["satisfied"] = true;
+          result["elapsed_ms"] = static_cast<std::int64_t>(now - wait.started_ms);
+          result["detail"] = std::format("已渲染 {} 帧", frames_seen);
+          respond(*owner, wait.request_id, std::move(result));
           iterator = waits.erase(iterator);
           continue;
         }
@@ -273,16 +348,16 @@ struct Server::Impl {
         result["satisfied"] = true;
         result["elapsed_ms"] = 0;
         result["detail"] = std::format("条件满足: {}", wait.kind);
-        respond(*clients[wait.client], wait.request_id, std::move(result));
+        respond(*owner, wait.request_id, std::move(result));
         iterator = waits.erase(iterator);
         continue;
       }
       if (now >= wait.deadline_ms) {
         Json result = Json::object();
         result["satisfied"] = false;
-        result["elapsed_ms"] = 0;
+        result["elapsed_ms"] = static_cast<std::int64_t>(now - wait.started_ms);
         result["detail"] = std::format("等待超时: {}", wait.kind);
-        respond(*clients[wait.client], wait.request_id, std::move(result));
+        respond(*owner, wait.request_id, std::move(result));
         iterator = waits.erase(iterator);
         continue;
       }
@@ -315,6 +390,26 @@ struct Server::Impl {
       fail(client, id, ErrorCode::Invalid, "缺少 method");
       return;
     }
+    // 鉴权门：hello 之前只允许 ping（便于探活）与 hello 本身。token 不匹配直接断连——
+    // 未握手的连接没有资格调用任何方法（旧实现任何本地进程连上就能读屏/注入键鼠）。
+    if (!client.greeted && method != "hello" && method != "ping") {
+      fail(client, id, ErrorCode::Invalid, "必须先 hello（携带 token）");
+      drop_client(client);
+      return;
+    }
+    if (method == "hello" && !client.greeted) {
+      // 鉴权开关：只有「显式设置且非空」的 token 才要求校验（空串 = 显式关闭鉴权）。
+      const bool auth_required = options.token.has_value() && !options.token->empty();
+      const std::string provided = json_get_string(params, "token");
+      if (auth_required && provided != *options.token) {
+        // token 错误：回错误帧后立即断连——未鉴权连接不允许逗留（探活用 ping 即可）。
+        fail(client, id, ErrorCode::Invalid,
+             "token 校验失败：请从控制文件读取 token 并在 hello 参数携带");
+        drop_client(client);
+        return;
+      }
+      client.greeted = true;
+    }
     ++requests;
     bool deferred = false;
     const std::int64_t start_ns = time::now_ns();
@@ -342,10 +437,12 @@ struct Server::Impl {
       auto stream = listener.accept();
       if (!stream) return;
       auto client = std::make_unique<Client>();
+      client->id = next_client_id++;
       client->peer = stream->peer_address();
       client->stream = std::move(*stream);
       client->stream.set_nonblocking(true);
-      log::info("控制通道：客户端接入 {}", client->peer);
+      client->stream.set_no_delay(true);   // 响应是小帧：Nagle 会让后续小包等确认，白添延迟
+      log::info("控制通道：客户端接入 {} (#{})", client->peer, client->id);
       clients.push_back(std::move(client));
     }
   }
@@ -379,31 +476,40 @@ struct Server::Impl {
                              buffer.begin() + static_cast<std::ptrdiff_t>(*chunk));
         if (*chunk < buffer.size()) break;
       }
-      while (client.buffer.size() >= 4) {
-        const auto first = static_cast<std::uint8_t>(client.buffer[0]);
-        const auto second = static_cast<std::uint8_t>(client.buffer[1]);
-        const auto third = static_cast<std::uint8_t>(client.buffer[2]);
-        const auto fourth = static_cast<std::uint8_t>(client.buffer[3]);
+      // 游标消费：帧解析不再从头 erase（每帧 O(n) 搬移），只在游标推进后一次性压实。
+      while (client.buffer.size() - client.consumed >= 4) {
+        const auto base = client.buffer.begin() + static_cast<std::ptrdiff_t>(client.consumed);
+        const auto first = static_cast<std::uint8_t>(base[0]);
+        const auto second = static_cast<std::uint8_t>(base[1]);
+        const auto third = static_cast<std::uint8_t>(base[2]);
+        const auto fourth = static_cast<std::uint8_t>(base[3]);
         const std::uint32_t length = (static_cast<std::uint32_t>(first) << 24U) |
                                      (static_cast<std::uint32_t>(second) << 16U) |
                                      (static_cast<std::uint32_t>(third) << 8U) |
                                      static_cast<std::uint32_t>(fourth);
         if (length == 0 || length > options.max_frame) {
+          log::warn("控制通道：帧长度非法（{} 字节，上限 {}）来自 {}", length, options.max_frame,
+                    client.peer);
           closed = true;
           break;
         }
-        if (client.buffer.size() < static_cast<std::size_t>(length) + 4) break;
-        const std::string body(client.buffer.begin() + 4,
-                               client.buffer.begin() +
-                                   static_cast<std::ptrdiff_t>(static_cast<std::size_t>(length) + 4));
-        client.buffer.erase(client.buffer.begin(),
-                            client.buffer.begin() +
-                                static_cast<std::ptrdiff_t>(static_cast<std::size_t>(length) + 4));
+        if (client.buffer.size() - client.consumed < static_cast<std::size_t>(length) + 4) break;
+        const std::string body(base + 4,
+                               base + 4 + static_cast<std::ptrdiff_t>(length));
+        client.consumed += static_cast<std::size_t>(length) + 4;
         dispatch_frame(client, body);
+        // dispatch 内可能回收本连接（鉴权失败/发送失败）：立即退出，不再触碰 client
+        if (!client_by_id(client.id)) break;
       }
+      if (client.consumed > 0 && !client.buffer.empty()) {
+        client.buffer.erase(client.buffer.begin(),
+                            client.buffer.begin() + static_cast<std::ptrdiff_t>(
+                                std::min(client.consumed, client.buffer.size())));
+      }
+      client.consumed = 0;
       if (closed) {
         log::info("控制通道：客户端断开 {}", client.peer);
-        clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(index));
+        drop_client(client);
         continue;
       }
       ++index;
@@ -469,8 +575,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     Json result = Json::object();
     result["ts"] = static_cast<std::int64_t>(time::unix_ms());
     return result;
-  }
-  if (method == "tree") {
+  }  if (method == "tree") {
     const auto depth = json_get_i64(params, "depth", 0);
     Json result = Json::object();
     result["tree"] = semantics_to_json(root.semantics(static_cast<std::uint32_t>(depth)));
@@ -512,6 +617,22 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     return result;
   }
   if (method == "invoke") {
+    // 动作白名单：拼错动作名曾返回 handled=false 的「成功但没效果」——对自动化是假阴性反馈
+    // （AI 以为触发了实际没有）。白名单外直接报 unsupported。
+    static constexpr std::string_view kActions[] = {"click",  "dblclick", "focus", "blur",
+                                                    "toggle", "select",   "scroll_to",
+                                                    "submit", "open",     "close"};
+    const std::string requested_action = json_get_string(params, "action");
+    if (!requested_action.empty()) {
+      const bool known = std::find(std::begin(kActions), std::end(kActions), requested_action) !=
+                         std::end(kActions);
+      if (!known) {
+        return unexpected(ErrorCode::Unsupported,
+                          std::format("未知动作: {}（可用: click/dblclick/focus/blur/toggle/select/"
+                                      "scroll_to/submit/open/close）",
+                                      requested_action));
+      }
+    }
     ui::Element* element = find_element(json_get_string(params, "id"));
     if (element == nullptr) {
       return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", json_get_string(params, "id")));
@@ -558,6 +679,42 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       event.kind = ui::EventKind::TripleClick;
     } else if (kind == "scroll" || kind == "wheel") {
       event.kind = ui::EventKind::Wheel;
+    } else if (kind == "drag") {
+      // §6.2 声明的 drag：合成 move→down→move(to)→up 序列（拖拽语义 = 按住起点拖到终点）。
+      // 之前文档声明了但实现缺失（审视报告 P0-1）——AI 按文档写 drag 必失败。
+      const double to_x = json_get_double(params, "to_x", 0.0);
+      const double to_y = json_get_double(params, "to_y", 0.0);
+      const math::Point from = event.position;
+      const math::Point to{static_cast<float>(to_x), static_cast<float>(to_y)};
+      Json seq = Json::array();
+      auto step = [&](ui::EventKind kind_value, math::Point at) {
+        ui::Event piece = event;
+        piece.kind = kind_value;
+        piece.position = at;
+        const bool piece_handled = root.dispatch(piece);
+        Json entry = Json::object();
+        entry["kind"] = std::string(kind_value == ui::EventKind::MouseDown ? "down"
+                              : kind_value == ui::EventKind::MouseMove ? "move" : "up");
+        entry["handled"] = piece_handled;
+        seq.push_back(std::move(entry));
+      };
+      step(ui::EventKind::MouseMove, from);
+      step(ui::EventKind::MouseDown, from);
+      // 中间插一步移动（拖拽控件往往在 move 路径上响应，不是只在 up 时）
+      step(ui::EventKind::MouseMove, math::Point{(from.x + to.x) * 0.5f, (from.y + to.y) * 0.5f});
+      step(ui::EventKind::MouseMove, to);
+      step(ui::EventKind::MouseUp, to);
+      host.request_repaint();
+      Json result = Json::object();
+      result["handled"] = true;
+      result["kind"] = kind;
+      result["from"] = bounds_to_json(math::Rect{from.x, from.y, 0, 0});
+      result["to"] = bounds_to_json(math::Rect{to.x, to.y, 0, 0});
+      result["steps"] = std::move(seq);
+      if (ui::Element* target = root.hit_test(to); target != nullptr) {
+        result["hit"] = ui::element_to_json(*target);
+      }
+      return result;
     } else {
       return unexpected(ErrorCode::Invalid, std::format("未知鼠标消息: {}", kind));
     }
@@ -596,7 +753,19 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       } else if (kind == "up") {
         event.kind = ui::EventKind::KeyUp;
       } else {
+        // press = down + up 完整序列（旧实现只发 KeyDown：按住类语义（shift+拖拽、长按）
+        // 与真实事件流不符，且按住状态会泄漏到后续事件——审视报告 P1-4）。
         event.kind = ui::EventKind::KeyDown;
+        const bool down_handled = root.dispatch(event);
+        event.kind = ui::EventKind::KeyUp;
+        const bool up_handled = root.dispatch(event);
+        host.request_repaint();
+        Json result = Json::object();
+        result["handled"] = down_handled || up_handled;
+        const ui::Element* focused_now = root.focused();
+        result["focused"] = focused_now != nullptr ? focused_now->derived_id() : std::string{};
+        result["kind"] = "press";
+        return result;
       }
     }
     if (event.kind == ui::EventKind::TextInput && event.text.empty()) {
@@ -627,7 +796,16 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     const std::string encode = json_get_string(params, "encode", "base64");
     Json result = Json::object();
     if (encode == "file" || params.contains("path")) {
-      auto saved = host.capture_to_file(json_get_string(params, "path"), region);
+      const std::string path = json_get_string(params, "path");
+      // 落盘白名单：capture 是「让应用进程写文件」的原语，不限制路径等于本地越权写
+      // （审视报告 P0：客户端可指定任意 path 覆盖属主可写文件）。空 path = 应用自动命名
+      // （落在自己的 shots 目录，安全）；显式 path 必须落在白名单目录内。
+      if (!path.empty() && !capture_path_allowed(path)) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("截图落盘路径不在白名单目录内: {}（允许：temp 与可执行文件目录）",
+                                      path));
+      }
+      auto saved = host.capture_to_file(path, region);
       if (!saved) return forward_error(saved.error());
       result["path"] = *saved;
     } else {
@@ -802,23 +980,20 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
   if (method == "wait") {
     const std::string kind = json_get_string(params, "for", "element");
     if (kind != "element" && kind != "gone" && kind != "text" && kind != "text_gone" &&
-        kind != "stable") {
+        kind != "stable" && kind != "frames") {
       return unexpected(ErrorCode::Unsupported, std::format("不支持的等待条件: {}", kind));
     }
     PendingWait wait;
-    wait.client = 0;
-    for (std::size_t index = 0; index < clients.size(); ++index) {
-      if (clients[index].get() == &client) {
-        wait.client = index;
-        break;
-      }
-    }
+    wait.client = client.id;   // 稳定连接 id（非下标）
     wait.request_id = id;
     wait.kind = kind;
     wait.selector = json_get_string(params, "selector");
     wait.text = json_get_string(params, "text");
+    wait.frames_target = frames_seen + static_cast<std::uint64_t>(
+                             std::max<std::int64_t>(1, json_get_i64(params, "frames", 1)));
     const std::int64_t timeout = json_get_i64(params, "timeout_ms", 5000);
-    wait.deadline_ms = time::now_ms() + timeout;
+    wait.started_ms = time::now_ms();
+    wait.deadline_ms = wait.started_ms + timeout;
     wait.stable_since_ms = time::now_ms();
     wait.last_version = root.version();
     if (kind == "element" || kind == "gone") {
@@ -827,8 +1002,12 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     if (kind == "text" || kind == "text_gone") {
       if (wait.text.empty()) return unexpected(ErrorCode::Invalid, "wait 需要 text");
     }
+    if (kind == "frames") {
+      const std::int64_t want = json_get_i64(params, "frames", 0);
+      if (want <= 0) return unexpected(ErrorCode::Invalid, "wait for=frames 需要正的 frames 参数");
+    }
     // 立即满足则直接返回，不再挂起
-    if (kind == "stable") {
+    if (kind == "stable" || kind == "frames") {
       waits.push_back(wait);
       deferred = true;
       return Json::object();
@@ -906,6 +1085,18 @@ Server::~Server() { stop(); }
 
 auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
   impl_->options = options;
+  // 鉴权 token：未显式设置（`nullopt`）→ 自动生成。时间戳纳秒 + 指针熵 + 序号的十六进制，
+  // 不追求密码学强度（本地回环 + 控制文件分发），只要求不可猜。
+  if (!impl_->options.token.has_value()) {
+    const std::int64_t ns = time::now_ns();
+    const void* entropy = static_cast<const void*>(&impl_);
+    const auto mix = static_cast<std::uint64_t>(ns) ^
+                     (std::hash<const void*>{}(entropy) << 17U) ^ (impl_->next_client_id << 33U);
+    impl_->options.token = std::format("{:016x}", mix);
+  }
+  // 落盘白名单：显式列表优先，否则默认（temp + 可执行文件目录）。
+  impl_->capture_dirs = options.capture_dirs.empty() ? options.default_capture_dirs()
+                                                      : options.capture_dirs;
   auto listener = st::net::TcpListener::bind(options.bind, options.port);
   if (!listener) return forward_error(listener.error());
   listener->set_nonblocking(false);
@@ -924,11 +1115,18 @@ auto Server::start(const ServerOptions& options) -> Result<std::uint16_t> {
     info["backend"] = std::string(impl_->host.backend_name());
     info["headless"] = impl_->host.headless();
     info["protocol"] = static_cast<std::uint64_t>(kProtocolVersion);
+    // token 随控制文件分发：客户端（智能体/工具）从文件读出后在 hello 携带。
+    // 显式关闭鉴权时不写该字段（客户端据此知道无需 token）。
+    if (impl_->options.token.has_value() && !impl_->options.token->empty()) {
+      info["token"] = *impl_->options.token;
+    }
     if (auto status = json_write_file(options.control_file, info, true); !status) {
       return forward_error(status.error());
     }
   }
-  log::info("控制通道已启动 tcp://{}:{}", options.bind, impl_->listener.port());
+  const bool auth_on = impl_->options.token.has_value() && !impl_->options.token->empty();
+  log::info("控制通道已启动 tcp://{}:{}{}", options.bind, impl_->listener.port(),
+            auth_on ? "（需 token）" : "（鉴权关闭）");
   return impl_->listener.port();
 }
 
@@ -938,10 +1136,16 @@ void Server::stop() {
   impl_->waits.clear();
   impl_->listener.close();
   impl_->active = false;
+  // 退出时清理控制文件：残留文件会让客户端把死实例误判为可控制（审视报告 P0-2）。
+  // best-effort：删除失败（被占用等）不阻断退出。
+  if (!impl_->options.control_file.empty()) {
+    (void)fs::remove_file(impl_->options.control_file);
+  }
 }
 
 void Server::poll() {
   if (!impl_ || !impl_->active) return;
+  ++impl_->frames_seen;   // 每帧推进（wait for=frames 的条件源）
   impl_->accept_clients();
   impl_->read_clients();
   impl_->poll_waits();
@@ -957,10 +1161,27 @@ auto Server::port() const noexcept -> std::uint16_t {
   return impl_ ? impl_->listener.port() : 0;
 }
 
+auto Server::token() const -> std::string {
+  if (!impl_ || !impl_->options.token.has_value()) return {};
+  // 空串 = 显式关闭鉴权；对外同样表现为空串（与「未 start」不可区分，调用方无需区分）。
+  return *impl_->options.token;
+}
+
 auto Server::client_count() const noexcept -> std::size_t {
   return impl_ ? impl_->clients.size() : 0;
 }
 
 auto Server::running() const noexcept -> bool { return impl_ && impl_->active; }
+
+auto ServerOptions::default_capture_dirs() const -> std::vector<std::string> {
+  std::vector<std::string> dirs;
+  dirs.push_back(fs::temp_dir());
+  // 可执行文件同目录（默认 shots 目录的蓄意写应用通常在这里）
+  if (auto exe = process::executable_path(); exe) {
+    const std::size_t slash = exe->find_last_of("\\/");
+    if (slash != std::string::npos) dirs.push_back(exe->substr(0, slash));
+  }
+  return dirs;
+}
 
 }  // namespace st::control

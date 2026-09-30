@@ -32,6 +32,8 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_EXE = ROOT / "build/dev-mingw/bin/gallery.exe"
 SHOT_DIR = ROOT / "build/win-check"
+CONTROL_FILE = SHOT_DIR / "control.json"  # 应用把 token 写这里（--control-file，相对其 cwd）
+TOKEN = ""  # hello 鉴权用（启动后从控制文件读出）
 
 
 def log(message: str) -> None:
@@ -47,18 +49,8 @@ def find_wine() -> str | None:
 
 
 def call(port: int, method: str, params: dict | None = None) -> dict:
-    connection = socket.create_connection(("127.0.0.1", port), timeout=15)
-    payload = json.dumps({"id": 1, "method": method, "params": params or {}}).encode()
-    connection.sendall(struct.pack(">I", len(payload)) + payload)
-    header = b""
-    while len(header) < 4:
-        header += connection.recv(4 - len(header))
-    (length,) = struct.unpack(">I", header)
-    body = b""
-    while len(body) < length:
-        body += connection.recv(length - len(body))
-    connection.close()
-    return json.loads(body)
+    # 每调用一条连接：非 hello/ping 由公共库自动前置握手（hello 门 + token）
+    return st_client_lib.call_with_token(port, method, params, TOKEN, timeout=15)
 
 
 def wait_for_port(port: int, timeout: float = 90.0) -> bool:
@@ -128,6 +120,7 @@ def main() -> int:
             return 0
 
     SHOT_DIR.mkdir(parents=True, exist_ok=True)
+    CONTROL_FILE.unlink(missing_ok=True)
     os.environ["DISPLAY"] = args.display
     os.environ["WINEDEBUG"] = "-all"
     os.environ.setdefault("WINEPREFIX", "/tmp/wineprefix")
@@ -150,11 +143,14 @@ def main() -> int:
 
     log(f"启动 {pathlib.Path(args.exe).name}（wine + Xvfb）")
     process = subprocess.Popen(
-        [wine, args.exe, "--control-port", str(args.port)],
+        # --control-file 用相对路径 + cwd=SHOT_DIR：wine 下 Windows 程序写到其 cwd，
+        # 即 SHOT_DIR/control.json——token 从这里读回（鉴权后 hello 必须携带）。
+        [wine, args.exe, "--control-port", str(args.port), "--control-file", "control.json"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
+        cwd=str(SHOT_DIR),
     )
     try:
         if not wait_for_port(args.port):
@@ -162,6 +158,17 @@ def main() -> int:
             if process.stdout is not None:
                 log(process.stdout.read()[-2000:])
             return 1
+
+        # token：应用启动时已把鉴权 token 写进控制文件（相对其 cwd = SHOT_DIR）。
+        global TOKEN
+        for _ in range(60):
+            if CONTROL_FILE.exists():
+                try:
+                    TOKEN = json.loads(CONTROL_FILE.read_text()).get("token", "")
+                    break
+                except Exception:
+                    pass
+            time.sleep(0.25)
 
         log("① 后端与视口")
         hello = call(args.port, "hello")["result"]

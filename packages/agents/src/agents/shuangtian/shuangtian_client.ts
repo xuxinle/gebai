@@ -36,6 +36,9 @@ export class ControlError extends Error {
 export interface ControlTarget {
   host: string
   port: number
+  /** 鉴权 token（控制文件携出；`hello` 必须携带同值）。
+   * 服务端自 2026-09-30 起默认自动生成 token 并要求握手——不携带会被拒并断连。 */
+  token?: string
 }
 
 export interface ControlResult {
@@ -45,11 +48,13 @@ export interface ControlResult {
   events?: Array<{ event: string; seq: number; data: unknown }>
 }
 
-const MAX_FRAME = 256 * 1024 * 1024
+const MAX_FRAME = 64 * 1024 * 1024  // 与服务端 ServerOptions::max_frame 对齐（避免两端不一致）
 
-/** 解析目标：`host:port` 字符串、`{host,port}`、或控制文件路径（JSON `{port,host}`）。 */
-export async function resolve_target(spec: string | { host?: string; port: number }): Promise<ControlTarget> {
-  if (typeof spec !== "string") return { host: spec.host ?? "127.0.0.1", port: spec.port }
+/** 解析目标：`host:port` 字符串、`{host,port}`、或控制文件路径（JSON `{port,host,token}`）。 */
+export async function resolve_target(
+  spec: string | { host?: string; port: number; token?: string },
+): Promise<ControlTarget> {
+  if (typeof spec !== "string") return { host: spec.host ?? "127.0.0.1", port: spec.port, token: spec.token }
   const text = spec.trim()
   if (/^\d+$/.test(text)) return { host: "127.0.0.1", port: Number(text) }
   const match = text.match(/^(?<host>[^:]+):(?<port>\d+)$/)
@@ -61,11 +66,11 @@ export async function resolve_target(spec: string | { host?: string; port: numbe
   if (!(await file.exists())) {
     throw new ControlError("not_found", `控制目标不可解析（既非 host:port，也不是存在的控制文件）: ${text}`)
   }
-  const payload = (await file.json()) as { port?: number; host?: string }
+  const payload = (await file.json()) as { port?: number; host?: string; token?: string }
   if (typeof payload.port !== "number") {
     throw new ControlError("parse", `控制文件缺少 port 字段: ${text}`)
   }
-  return { host: payload.host ?? "127.0.0.1", port: payload.port }
+  return { host: payload.host ?? "127.0.0.1", port: payload.port, token: payload.token }
 }
 
 function encode_frame(payload: unknown): Buffer {
@@ -77,6 +82,10 @@ function encode_frame(payload: unknown): Buffer {
 
 /**
  * 建立连接、顺序发送请求并收集响应（可在一条连接上多次往返；`wait` 类请求会长时间挂起）。
+ *
+ * **自动握手**：服务端要求每连接首帧必须是 `hello`（或 ping；未握手连接调用其他方法会被拒并断连），
+ * 且默认要求 `hello.params.token` 与控制文件一致。本函数在需要时**把 hello 与用户请求同批写出**——
+ * 不额外等一个往返（同一条 TCP 流内服务端按序处理）；hello 的响应被过滤，不进入调用方结果。
  */
 export async function call_control(
   target: ControlTarget,
@@ -87,15 +96,35 @@ export async function call_control(
   const socket = connect({ host: target.host, port: target.port })
   const results: ControlResult[] = []
   let buffer = Buffer.alloc(0)
-  let expected = 0
   let settled = false
+
+  // 组装帧：必要时前置合成 hello（id=0，响应会被过滤）。
+  const prepend_hello =
+    requests.length > 0 && requests[0].method !== "hello" && requests[0].method !== "ping"
+  const frames: Array<{ id: number; method: string; params: Record<string, unknown> }> = []
+  if (prepend_hello) {
+    const hello_params: Record<string, unknown> = { client: "shuangtian-agent" }
+    if (target.token) hello_params.token = target.token
+    if (options.subscribe) hello_params.subscribe = true
+    frames.push({ id: 0, method: "hello", params: hello_params })
+  }
+  requests.forEach((request, index) => {
+    const params = { ...(request.params ?? {}) }
+    if (!prepend_hello && index === 0 && options.subscribe) params.subscribe = true
+    // 调用方自己的 hello：补上 token（控制文件读出）——缺 token 会被服务端拒。
+    if (request.method === "hello" && target.token !== undefined && params.token === undefined) {
+      params.token = target.token
+    }
+    frames.push({ id: index + 1, method: request.method, params })
+  })
+  const expected = frames.length
 
   const done = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true
         socket.destroy()
-        reject(new ControlError("timeout", `控制通道超时（${timeout_ms}ms，已收到 ${results.length}/${requests.length} 个响应）`))
+        reject(new ControlError("timeout", `控制通道超时（${timeout_ms}ms，已收到 ${results.length}/${expected} 个响应）`))
       }
     }, timeout_ms)
 
@@ -108,11 +137,7 @@ export async function call_control(
     }
 
     socket.on("connect", () => {
-      requests.forEach((request, index) => {
-        const params = { ...(request.params ?? {}) }
-        if (index === 0 && options.subscribe) params.subscribe = true
-        socket.write(encode_frame({ id: index + 1, method: request.method, params }))
-      })
+      for (const frame of frames) socket.write(encode_frame(frame))
     })
 
     socket.on("data", (chunk: Buffer) => {
@@ -133,7 +158,7 @@ export async function call_control(
           const message = JSON.parse(body) as Record<string, unknown>
           if (typeof message.id === "number") {
             results.push(message as unknown as ControlResult)
-            if (results.length >= requests.length) finish()
+            if (results.length >= expected) finish()
           }
         } catch (error) {
           settled = true
@@ -168,12 +193,11 @@ export async function call_control(
       if (results.length > 0) resolve()
       else reject(new ControlError("transport", "控制通道在收到响应前被关闭"))
     })
-
-    void expected
   })
 
   await done
-  return results
+  // 过滤合成 hello 的响应（对调用方不可见）。
+  return prepend_hello ? results.slice(1) : results
 }
 
 /** 单次调用（最常用形态）。 */

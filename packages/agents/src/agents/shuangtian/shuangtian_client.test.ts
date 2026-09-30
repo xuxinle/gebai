@@ -171,6 +171,37 @@ describe("call_control", () => {
     }
   })
 
+  test("自动握手：非 hello 请求前置合成 hello 并过滤其响应", async () => {
+    // 服务端自 2026-09-30 起要求每连接首帧必须是 hello（或 ping），且默认校验 token。
+    // 客户端应把 hello 与用户请求同批写出（不额外等往返），并把 hello 的响应过滤掉。
+    const server = await mock((message) => ({ ok: true, result: { method: message.method } }))
+    const response = await request<{ method: string }>(
+      { host: "127.0.0.1", port: server.port, token: "tk-1" },
+      "tree",
+      { depth: 2 },
+    )
+    expect(response.method).toBe("tree")
+    expect(server.calls.map((call) => call.method)).toEqual(["hello", "tree"])
+    expect(server.calls[0].params.token).toBe("tk-1")
+  })
+
+  test("显式 hello 请求自动补 token（调用方无需手拼）", async () => {
+    const server = await mock((message) => ({ ok: true, result: { method: message.method } }))
+    const response = await request<{ method: string }>(
+      { host: "127.0.0.1", port: server.port, token: "tk-2" },
+      "hello",
+    )
+    expect(response.method).toBe("hello")
+    expect(server.calls).toHaveLength(1)
+    expect(server.calls[0].params.token).toBe("tk-2")
+  })
+
+  test("ping 不前置 hello（协议门允许探测）", async () => {
+    const server = await mock((message) => ({ ok: true, result: { method: message.method } }))
+    await request({ host: "127.0.0.1", port: server.port }, "ping")
+    expect(server.calls.map((call) => call.method)).toEqual(["ping"])
+  })
+
   test("超长帧 → overflow 拒绝（不吞内存）", async () => {
     const server = await mock(() => {
       const header = Buffer.alloc(4)

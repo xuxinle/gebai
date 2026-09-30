@@ -10,10 +10,13 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
-ROOT = "/workspace/gebai/shuangtian"
-SHOTS = "/tmp/st-visual/hi"
+import st_client_lib  # 本地模块（同目录）：带 token/握手的单次调用
+
+ROOT = os.environ.get("SHUANGTIAN_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+SHOTS = os.environ.get("SHUANGTIAN_SHOTS", os.path.join(tempfile.gettempdir(), "st-visual")) + "/hi"
 os.makedirs(SHOTS, exist_ok=True)
 app = sys.argv[1] if len(sys.argv) > 1 else "mdeditor"
 regions = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {"full": None}
@@ -35,10 +38,11 @@ if theme:
 if language:
     suffix += f"-{language}"
 tag = f"{app}{suffix}"
-ctl = f"/tmp/st-visual/hi-{tag}-control.json"
+ctl = f"{SHOTS}/hi-{tag}-control.json"
 if os.path.exists(ctl):
     os.remove(ctl)
-log = open(f"/tmp/st-visual/hi-{tag}.log", "wb")
+log_path = f"{SHOTS}/hi-{tag}.log"
+log = open(log_path, "wb")
 command = [f"{ROOT}/build/{profile}/bin/{app}", "--headless", "--control-port", "0",
            "--control-file", ctl, "--shots", SHOTS]
 if theme:
@@ -48,17 +52,19 @@ if language:
 process = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                            start_new_session=True)
 port = 0
+TOKEN = ""
 for _ in range(160):
     if os.path.exists(ctl):
         try:
             info = json.load(open(ctl))
             if info.get("port"):
                 port = info["port"]
+                TOKEN = info.get("token", "")
                 break
         except Exception:
             pass
     if process.poll() is not None:
-        print(f"进程提前退出（code={process.returncode}）：{open(f'/tmp/st-visual/hi-{tag}.log').read()[-800:]}")
+        print(f"进程提前退出（code={process.returncode}）：{open(log_path).read()[-800:]}")
         sys.exit(1)
     time.sleep(0.25)
 if port == 0:
@@ -68,23 +74,11 @@ print(f"[{tag}] port={port}")
 
 
 def call(method, params=None, timeout=120):
-    sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    body = json.dumps({"id": 1, "method": method, "params": params or {}}).encode()
-    sock.sendall(struct.pack(">I", len(body)) + body)
-    header = b""
-    while len(header) < 4:
-        chunk = sock.recv(4 - len(header))
-        if not chunk:
-            raise RuntimeError("对端关闭")
-        header += chunk
-    (length,) = struct.unpack(">I", header)
-    payload = b""
-    while len(payload) < length:
-        payload += sock.recv(length - len(payload))
-    sock.close()
-    return json.loads(payload)
+    # 每调用一条连接：非 hello/ping 由公共库自动前置握手（hello 门 + token）
+    return st_client_lib.call_with_token(port, method, params, TOKEN, timeout)
 
 
+call("hello")  # 鉴权门：hello 之前只允许 ping/hello 本身
 call("app", {"action": "set_scale", "scale": 2.0})
 for name, region in regions.items():
     path = f"{SHOTS}/{tag}-{name}.png"

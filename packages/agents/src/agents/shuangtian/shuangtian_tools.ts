@@ -131,6 +131,28 @@ function logFileFor(ctx: ToolContext, target: string): string {
   return join(runtimeDir(ctx), `${target}.log`)
 }
 
+/** 结束进程（stop 与启动超时回收共用；Windows 用 Stop-Process，POSIX 先 TERM 后 KILL）。 */
+async function terminateProcess(ctx: ToolContext, pid: number): Promise<void> {
+  if (pid <= 0) return
+  if (IS_WINDOWS) {
+    await ctx.runCommand(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`, { timeoutMs: 8000 })
+  } else {
+    await ctx.runCommand(
+      `kill -TERM ${pid} 2>/dev/null; sleep 0.3; kill -0 ${pid} 2>/dev/null && kill -KILL ${pid} 2>/dev/null; true`,
+      { timeoutMs: 8000 },
+    )
+  }
+}
+
+/** 取进程名（PID 复用防护：应用崩溃后 PID 可能被系统分配给无关进程）；拿不到返回空串。 */
+async function processName(ctx: ToolContext, pid: number): Promise<string> {
+  if (pid <= 0) return ""
+  const result = IS_WINDOWS
+    ? await ctx.runCommand(`(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).ProcessName`, { timeoutMs: 5000 })
+    : await ctx.runCommand(`ps -o comm= -p ${pid} 2>/dev/null`, { timeoutMs: 5000 })
+  return result.stdout.trim()
+}
+
 /**
  * 解析控制目标：显式 `target`（`host:port` / 控制文件路径 / 纯端口）> 环境变量 >
  * 会话运行期控制文件（由 `run` 的 start 动作写入）。
@@ -366,15 +388,17 @@ const runTool: Tool = {
       }
       const pid = Number(launch.stdout.trim().split("\n").pop() ?? "0")
 
-      // 轮询控制文件（应用启动后写入 port）
+      // 轮询控制文件（应用启动后写入 port；token 随文件下发，握手必须携带）
       let port = 0
+      let token = ""
       const deadline = Date.now() + 30_000
       while (Date.now() < deadline) {
         if (existsSync(control_file)) {
           try {
-            const info = (await Bun.file(control_file).json()) as { port?: number }
+            const info = (await Bun.file(control_file).json()) as { port?: number; token?: string }
             if (typeof info.port === "number" && info.port > 0) {
               port = info.port
+              token = typeof info.token === "string" ? info.token : ""
               break
             }
           } catch {
@@ -385,12 +409,14 @@ const runTool: Tool = {
       }
       if (port === 0) {
         const log = existsSync(log_file) ? (await Bun.file(log_file).text()).slice(-1200) : "(无日志)"
-        return { output: `启动超时（未取得控制端口）。进程 PID=${pid}，日志尾部：\n${log}` }
+        // 启动失败不留下孤儿进程（进程可能起来了但控制通道没就绪）
+        if (pid > 0) await terminateProcess(ctx, pid)
+        return { output: `启动超时（未取得控制端口）。进程 PID=${pid} 已回收，日志尾部：\n${log}` }
       }
       // 握手确认
       let handshake = ""
       try {
-        const hello = await request<Json>({ host: "127.0.0.1", port }, "hello", {}, 5000)
+        const hello = await request<Json>({ host: "127.0.0.1", port, token: token || undefined }, "hello", {}, 5000)
         handshake = `已连接：${JSON.stringify(hello.app ?? {})} 后端=${String(hello.backend)} 无头=${String(hello.headless)}`
       } catch (error) {
         handshake = `握手失败：${String(error)}`
@@ -409,11 +435,13 @@ const runTool: Tool = {
       const log_file = logFileFor(ctx, target)
       let pid = 0
       let port = 0
+      let token = ""
       if (existsSync(control_file)) {
         try {
-          const info = (await Bun.file(control_file).json()) as { port?: number; pid?: number }
+          const info = (await Bun.file(control_file).json()) as { port?: number; pid?: number; token?: string }
           port = typeof info.port === "number" ? info.port : 0
           pid = typeof info.pid === "number" ? info.pid : 0
+          token = typeof info.token === "string" ? info.token : ""
         } catch {
           // 忽略
         }
@@ -452,28 +480,28 @@ const runTool: Tool = {
           data: { ok: alive && responsive, action, target, pid, port, control_file, log_file },
         }
       }
-      // stop：优先优雅退出（shutdown），再兜底 SIGTERM
+      // stop：优先优雅退出（shutdown），再兜底终止（含 PID 复用防护）。
+      // PID 复用场景：应用崩溃后控制文件滞留，PID 可能已被系统分配给无关进程——
+      // 先核进程名，明显不匹配时不终止（宁可不清理，不误杀）。
       let graceful = false
       if (port > 0) {
         try {
-          await request({ host: "127.0.0.1", port }, "shutdown", {}, 3000)
+          await request({ host: "127.0.0.1", port, token: token || undefined }, "shutdown", {}, 3000)
           graceful = true
         } catch {
           graceful = false
         }
       }
       if (pid > 0) {
-        if (IS_WINDOWS) {
-          await ctx.runCommand(
-            `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`,
-            { timeoutMs: 8000 },
-          )
-        } else {
-          await ctx.runCommand(
-            `kill -TERM ${pid} 2>/dev/null; sleep 0.3; kill -0 ${pid} 2>/dev/null && kill -KILL ${pid} 2>/dev/null; true`,
-            { timeoutMs: 8000 },
-          )
+        const name = await processName(ctx, pid)
+        const expected = (target.split(/[\\/]/).pop() ?? target).replace(/\.exe$/i, "")
+        if (name && expected && !name.toLowerCase().includes(expected.toLowerCase())) {
+          return {
+            output: `未终止 PID ${pid}：进程名为 "${name}"，与目标 "${expected}" 不符（PID 已被复用？已跳过，避免误杀）`,
+            data: { ok: false, action, target, pid, port, pid_reused: true },
+          }
         }
+        await terminateProcess(ctx, pid)
       }
       if (existsSync(control_file)) await ctx.deleteFile(control_file).catch(() => {})
       return { output: `已停止 ${target}（${graceful ? "优雅退出" : "信号终止"}）`, data: { ok: true, action, target, pid, port } }
@@ -524,11 +552,17 @@ const appsTool = readTool(
           try {
             const info = (await Bun.file(path).json()) as Record<string, unknown>
             const port = typeof info.port === "number" ? info.port : 0
+            const token = typeof info.token === "string" ? info.token : ""
             let responsive = false
             let screen: unknown = null
             if (port > 0) {
               try {
-                const hello = await request<Json>({ host: "127.0.0.1", port }, "hello", {}, 2000)
+                const hello = await request<Json>(
+                  { host: "127.0.0.1", port, token: token || undefined },
+                  "hello",
+                  {},
+                  2000,
+                )
                 responsive = true
                 screen = hello.screen ?? null
               } catch {
