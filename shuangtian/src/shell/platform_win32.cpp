@@ -187,13 +187,39 @@ class Win32Backend final : public Backend {
       log::info("win32 窗口 DPI 与请求不同：请求 {:.2f} → 实际 {:.2f}（窗口已按实际缩放调整）",
                 static_cast<double>(requested_scale), static_cast<double>(scale_));
     }
-    if (auto status = allocate_buffers(logical_width_, logical_height_, scale_); !status) {
-      return status;
-    }
+    // 以**客户区为准**分配：窗口尺寸可能被系统调整过，逻辑尺寸反过来迁就它
+    if (auto status = sync_buffers_to_client(scale_); !status) return status;
     log::info("win32 窗口已创建（逻辑 {}x{} · 缩放 {:.2f} · 物理 {}x{}）", logical_width_,
               logical_height_, static_cast<double>(scale_), surface_->physical_width(),
               surface_->physical_height());
+    // 画布物理尺寸必须**等于**客户区，否则 DXGI 会缩放整块纹理（整屏发糊）。
+    // 这条不变量在此显式核对一次：文件日志里看得见，比事发后再猜省事。
+    if (window_ != nullptr) {
+      RECT client{};
+      if (::GetClientRect(window_, &client) != 0 &&
+          (client.right != surface_->physical_width() || client.bottom != surface_->physical_height())) {
+        log::warn("画布与客户区不一致：画布 {}x{}，客户区 {}x{}（GPU 呈现会被 DXGI 缩放）",
+                  surface_->physical_width(), surface_->physical_height(), client.right,
+                  client.bottom);
+      }
+    }
     return ok();
+  }
+
+  /// 按**当前客户区**分配绘制面，保证 `画布物理尺寸 == 客户区尺寸`。
+  ///
+  /// 所有会影响尺寸的路径（创建 / 改 DPI / WM_SIZE）都必须走这里，
+  /// 否则就会重新引入"画布与客户区差 1px → DXGI 缩放 → 整屏发糊"。
+  [[nodiscard]] auto sync_buffers_to_client(float scale) -> Status {
+    if (window_ == nullptr) return ok();
+    RECT client{};
+    if (::GetClientRect(window_, &client) == 0) {
+      return unexpected(ErrorCode::Io, "GetClientRect 失败");
+    }
+    // 客户区**原样**作为画布物理尺寸：不再做任何"逻辑尺寸 ↔ 物理尺寸"的往返换算，
+    // 因此不可能出现 1 像素的偏差（那个偏差会让 DXGI 拉伸整块纹理 → 整屏发糊）。
+    return allocate_buffers(std::max(1, static_cast<int>(client.right)),
+                            std::max(1, static_cast<int>(client.bottom)), scale);
   }
 
   /// 把窗口**客户区**调整到 "逻辑尺寸 × 当前 scale"（保持左上角不动）。
@@ -302,18 +328,21 @@ class Win32Backend final : public Backend {
   [[nodiscard]] auto frame_count() const noexcept -> std::uint64_t override { return frames_; }
   [[nodiscard]] auto device_scale() const noexcept -> float override { return scale_; }
   [[nodiscard]] auto logical_size() const noexcept -> math::Size override {
-    return math::Size{static_cast<float>(logical_width_), static_cast<float>(logical_height_)};
+    // 用**精确**值（物理 / scale）而不是取整后的整数：布局按它排布，
+    // 取整会让右侧/底部留下 1px 的空隙或溢出，与画布实际可绘区域不符。
+    return math::Size{logical_width_exact_, logical_height_exact_};
   }
 
   auto set_device_scale(float scale) -> Status override {
     if (scale <= 0.0f) return unexpected(ErrorCode::Invalid, "DPI 缩放必须为正数");
     scale_ = scale;
-    // ⚠ 改 DPI 必须**同时**改窗口尺寸：只改缓冲会让"画布"与"窗口"尺寸不符，
-    // GPU 呈现器遇到这种情况会静默让 DXGI 缩放——表现就是**切换 DPI 后整屏发糊**。
-    // 这与创建时的那个缺陷是同一个根因（尺寸用了两个不同的 scale），
-    // 只是触发路径不同：一个在启动、一个在运行时切换。
+    // 改 DPI 要动两处，缺一就糊：
+    // ① 窗口客户区必须跟着变成「逻辑 × 新 scale」（只改缓冲会导致画布与客户区不符）；
+    // ② 缓冲必须**以实际客户区为准**分配——`round(round(client/scale)*scale)` 在分数缩放下
+    //    可能差 1 像素，而 1 像素就足以让 DXGI 拉伸整块纹理（整屏发糊，见
+    //    `logical_for_client` 的说明）。两步都由下面两个函数保证。
     if (auto status = resize_window_to_scale(); !status) return status;
-    return allocate_buffers(logical_width_, logical_height_, scale_);
+    return sync_buffers_to_client(scale_);
   }
 
  private:
@@ -330,11 +359,27 @@ class Win32Backend final : public Backend {
   }
 
   /// 按逻辑尺寸 + 缩放重建帧缓冲与 DIB（32bpp BGRA，正好是 GDI 能直接搬的格式）。
-  auto allocate_buffers(int logical_width, int logical_height, float scale) -> Status {
-    logical_width_ = std::max(1, logical_width);
-    logical_height_ = std::max(1, logical_height);
+  /// 按**物理像素**尺寸分配绘制面（逻辑尺寸由 `物理 / scale` 折算）。
+  ///
+  /// 为什么参数是物理而不是逻辑：逻辑尺寸是整数，而 scale 常是 1.5 / 1.25 这类分数，
+  /// `round(逻辑 × scale)` **取不到所有整数**——例如 1.5x 下奇数宽度根本不可达
+  /// （`741×1.5 = 1111.5` 只能取到 1112）。于是画布与窗口客户区差 1 像素，
+  /// DXGI 就会把整块纹理拉伸到客户区：**整屏发糊**（用户实测："切 DPI 后模糊、
+  /// 重新缩放一下才好"）。把物理尺寸作为输入，这个偏差从根上消失。
+  auto allocate_buffers(int physical_width, int physical_height, float scale) -> Status {
     scale_ = scale > 0.0f ? scale : 1.0f;
-        SurfaceChoice choice = create_surface_for(logical_width_, logical_height_, scale_, renderer_);
+    const int clamped_width = std::max(1, physical_width);
+    const int clamped_height = std::max(1, physical_height);
+    // 逻辑尺寸只用于**报告**（`logical_size()`）与"改窗口尺寸"时的换算，取最接近的整数即可
+    logical_width_ = std::max(1, static_cast<int>(std::lround(
+        static_cast<double>(clamped_width) / static_cast<double>(scale_))));
+    logical_height_ = std::max(1, static_cast<int>(std::lround(
+        static_cast<double>(clamped_height) / static_cast<double>(scale_))));
+    // 长宽比与 scale 无关；这里顺带记下精确值（`logical_size_exact_`），
+    // 供 `logical_size()` 汇报——避免"整数折算"再被下游当成精确值使用
+    logical_width_exact_ = static_cast<float>(clamped_width) / scale_;
+    logical_height_exact_ = static_cast<float>(clamped_height) / scale_;
+        SurfaceChoice choice = create_surface_for(clamped_width, clamped_height, scale_, renderer_);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Io, "创建绘制面失败");
     surface_ = std::move(choice.surface);
     renderer_name_ = std::move(choice.name);
@@ -398,16 +443,13 @@ class Win32Backend final : public Backend {
     std::string note{};
   };
 
-  [[nodiscard]] static auto create_surface_for(int logical_width, int logical_height, float scale,
+  [[nodiscard]] static auto create_surface_for(int physical_width, int physical_height, float scale,
                                                const std::string& renderer) -> SurfaceChoice {
     SurfaceChoice choice;
-    const int physical_width = static_cast<int>(std::lround(
-        static_cast<double>(logical_width) * static_cast<double>(scale)));
-    const int physical_height = static_cast<int>(std::lround(
-        static_cast<double>(logical_height) * static_cast<double>(scale)));
+    // 直接按物理尺寸建面：逻辑尺寸由 `物理 / scale` 折算（`Canvas` 已有这个契约）。
+    // 反过来说"先定逻辑尺寸再乘 scale"就必然在某些尺寸上取不到目标物理值。
     const auto make_software = [&]() {
-      return std::make_unique<raster::Canvas>(
-          raster::Canvas::for_logical_size(logical_width, logical_height, scale));
+      return std::make_unique<raster::Canvas>(physical_width, physical_height, scale);
     };
     if (renderer == "software") {
       choice.note = "显式指定软件光栅器";
@@ -562,13 +604,10 @@ class Win32Backend final : public Backend {
         if (surface_ == nullptr) return 0;
         RECT client{};
         if (::GetClientRect(window, &client) == 0) return 0;
-        const int logical_width =
-            std::max(1, static_cast<int>(std::lround(static_cast<double>(client.right) / static_cast<double>(scale_))));
-        const int logical_height =
-            std::max(1, static_cast<int>(std::lround(static_cast<double>(client.bottom) / static_cast<double>(scale_))));
-        if (logical_width == logical_width_ && logical_height == logical_height_) return 0;
-        // 尺寸变化由应用在下一帧读取 `logical_size()` 并同步视口（见 Application::tick）
-        (void)allocate_buffers(logical_width, logical_height, scale_);
+        // 尺寸变化由应用在下一帧读取 `logical_size()` 并同步视口（见 Application::tick）。
+        // 一律走 `sync_buffers_to_client`：它保证画布物理尺寸**精确等于**客户区
+        // （手写 `client / scale` 取整会差 1px → DXGI 缩放 → 糊）。
+        (void)sync_buffers_to_client(scale_);
         return 0;
       }
 
@@ -580,14 +619,9 @@ class Win32Backend final : public Backend {
                          suggested->right - suggested->left, suggested->bottom - suggested->top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        RECT client{};
-        if (::GetClientRect(window, &client) != 0) {
-          const int logical_width = std::max(
-              1, static_cast<int>(std::lround(static_cast<double>(client.right) / static_cast<double>(new_scale))));
-          const int logical_height = std::max(
-              1, static_cast<int>(std::lround(static_cast<double>(client.bottom) / static_cast<double>(new_scale))));
-          (void)allocate_buffers(logical_width, logical_height, new_scale);
-        }
+        // 与 `set_device_scale` 同一口径：**客户区是唯一真源**。
+        // 手写 `client / scale` 取整再回乘可能差 1px，那会让 DXGI 拉伸整块纹理（整屏发糊）。
+        (void)sync_buffers_to_client(new_scale);
         return 0;
       }
 
@@ -694,8 +728,11 @@ class Win32Backend final : public Backend {
   std::string renderer_note_{};
   std::deque<ui::Event> events_{};
   std::string title_{};
-  int logical_width_{1280};
+  int logical_width_{1280};   ///< 逻辑尺寸（取整；用于"改窗口尺寸"时的换算与日志）
   int logical_height_{720};
+  /// 精确逻辑尺寸 = 物理 / scale（供 `logical_size()` 汇报；布局按它排布）
+  float logical_width_exact_{1280.0f};
+  float logical_height_exact_{720.0f};
   float scale_{1.0f};
   std::uint64_t frames_{0};
   bool class_registered_{false};

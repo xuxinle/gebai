@@ -270,3 +270,47 @@ ST_TEST(dpi_clip_rect_scales_with_device_scale) {
   ST_CHECK_EQ(canvas.pixel_at_point(Point{45.0f, 20.0f}).a, 0U);
   ST_CHECK_EQ(canvas.pixel_at_point(Point{25.0f, 35.0f}).a, 0U);
 }
+
+ST_TEST(dpi_canvas_physical_size_is_exact_for_any_scale) {
+  // 这条是**"切 DPI 后整屏发糊"**的回归测试。
+  //
+  // 背景：窗口后端原先把「逻辑尺寸 × scale」算成物理尺寸，而逻辑尺寸是整数、
+  // scale 常是分数，于是 `round(logical * scale)` **取不到所有整数**——
+  // 1.5x 下奇数宽度根本不可达（`741 × 1.5 = 1111.5` 只能得到 1112）。
+  // 画布与窗口客户区差 1 像素，DXGI 就会**把整块纹理拉伸**到客户区：整屏发糊。
+  // 用户实测："切换 DPI 时会模糊，重新缩放一下才好"（手动缩放恰好落到能整除的尺寸上）。
+  //
+  // 修法：物理尺寸成为**输入**（由客户区直接给出），逻辑尺寸由 `物理 / scale` 折算。
+  // 因此这里必须钉住：**给什么物理尺寸，画布就是什么物理尺寸**——无论 scale 多怪。
+  for (const float scale : {1.0f, 1.25f, 1.5f, 1.75f, 2.0f}) {
+    for (const int physical : {1111, 1112, 1113, 741, 999, 1001, 1280, 1500}) {
+      const Canvas canvas{physical, 900, scale};
+      ST_CHECK_EQ(canvas.physical_width(), physical);
+      ST_CHECK_EQ(canvas.physical_height(), 900);
+      ST_CHECK_EQ(canvas.device_scale(), scale);
+      // 逻辑宽度由物理尺寸折算（`width()` 的契约就是 `round(物理 / scale)`）。
+      // 这里钉住"折算不会反过来改变物理尺寸"——那是本用例的主断言。
+      const int expected_logical = static_cast<int>(std::lround(static_cast<double>(physical) /
+                                                               static_cast<double>(scale)));
+      ST_CHECK_EQ(canvas.width(), expected_logical);
+    }
+  }
+}
+
+ST_TEST(dpi_logical_round_trip_cannot_hit_every_physical_size) {
+  // 把"为什么必须让物理尺寸做输入"这层理由固化成断言：
+  // 在 1.5x 下，**不存在**任何整数逻辑宽度能产出 1111 个物理像素。
+  // 这不是实现的缺陷，是数学事实——所以"先定逻辑、再乘 scale"这条路必然漏尺寸。
+  const auto physical_of = [](int logical, float scale) {
+    return static_cast<int>(std::lround(static_cast<double>(logical) * static_cast<double>(scale)));
+  };
+  bool any_hits_1111 = false;
+  for (int logical = 700; logical <= 760; ++logical) {
+    if (physical_of(logical, 1.5f) == 1111) any_hits_1111 = true;
+  }
+  ST_CHECK(!any_hits_1111);                 // 1.5x 取不到奇数 1111
+  ST_CHECK_EQ(physical_of(741, 1.5f), 1112);   // 最近的只能到 1112（差 1px → 会糊）
+  // 而按物理尺寸直接建画布，就能精确拿到它
+  const Canvas canvas{1111, 900, 1.5f};
+  ST_CHECK_EQ(canvas.physical_width(), 1111);
+}
