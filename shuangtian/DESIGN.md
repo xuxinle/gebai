@@ -1283,7 +1283,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`，**393 用例 / 11348 断言**；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿 |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`，**394 用例 / 11353 断言**；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿 |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
 | 禁令扫描 | **12 条**禁用特性规则（L1–L12）+ 文件布局 + 禁用 include | `st lint` | 0 违规（202 文件、6 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |

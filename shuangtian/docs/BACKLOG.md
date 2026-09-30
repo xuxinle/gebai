@@ -47,6 +47,22 @@
 
 ## 已完成（本轮「全部优化」落地，备查）
 
+### 会话后半段挖出的预存缺陷（由本会话修复）
+
+- [x] **GPU 路径遮罩坐标符号错误**（渲染缺陷，影响一切描边/图标/勾选）：
+  `path_mask_texture` 给 `rasterize_mask` 传了 `-area.xy`（该函数语义是「路径减去 origin」，
+  与 canvas.cpp 调用同约定）→ 图形被画到 `path + 2·area` 处、大半被裁掉。
+  **表现**：GPU 渲染下画廊 72 个图标、复选框勾选、导航图标、输入框边框全部缺失。
+  修复：传正 `area`。前后对比截图 5 页留证。
+- [x] **越界几何导致 bad_alloc 崩进程**：元素把 `kUnbounded`（1e9）当作自身高度时
+  （mdeditor SourceView::measure），GPU 遮罩按包围盒全量分配 ≈1.3 TB → 崩。
+  修复：遮罩与裁剪域取交（软件侧 draw_shadow 同思路）+ 示例固有高度修正 +
+  回归测试 `gpu_huge_path_mask_is_bounded_by_canvas`。
+- [x] **奇偶测试假绿**：`compare()` 的 `structural` 计数器从未自增，
+  `structural_ratio < 0.001` 断言全部空转——上面两个缺陷因此长期潜伏。已补自增。
+
+### 本轮主线落地
+
 - [x] **网络层错误码平台化**（WSAGetLastError/errno 分流）+ **发送失败不静默** + 帧合并单发 +
   accept 关 Nagle + 接收缓冲偏移游标（A1）
 - [x] **鉴权 token 最小集**（自动生成→控制文件→hello 校验→未握手只允许 hello/ping）+
