@@ -256,13 +256,9 @@ class Win32Backend final : public Backend {
   void present() override {
     pump_messages();
     if (surface_ == nullptr || window_ == nullptr) return;
-    // 尺寸脏了：现在重建（每帧至多一次；最大化/还原只重建这一次）
-    if (size_dirty_) {
-      size_dirty_ = false;
-      // 拖动模态中不重建（继续拉伸跟手，`WM_EXITSIZEMOVE` 后由下面这条统一处理——
-      // 那里也会置 size_dirty_，等价的路径，两条入口一处实现）
-      if (!in_size_loop_) (void)sync_buffers_to_client(scale_);
-    }
+    // （尺寸重建已挪到 `framebuffer()`——见那里的说明：重建必须发生在"画"之前，
+    // 否则本帧画在旧画布、present 时才换新画布，新画布要等下一帧才有内容，
+    // 而"下一帧"没有必然的触发（repaint 已消费）→ 屏幕停在拉伸的旧内容上。）
     // GPU 画布优先走 swapchain（零 CPU 拷贝）；软件画布或未就绪时落回 GDI blit。
     if (presenter_ != nullptr) {
       if (auto presented = presenter_->present(*surface_, surface_->physical_width(),
@@ -327,7 +323,22 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
-  [[nodiscard]] auto framebuffer() -> raster::Surface& override { return *surface_; }
+  // **尺寸重建发生在这里**（取画布时），不在 present()。
+  //
+  // 时序原因（真实缺陷）：render_frame 的顺序是"取画布 → 画 → present"。
+  // 重建若放在 present()，本帧画的是**旧**画布，present 时才换新画布——
+  // 新画布是**空的**，而"下一帧重画"没有必然触发（repaint 只在逻辑尺寸
+  // 又变化时置位，已经变过了）→ 屏幕停留在拉伸的旧内容上，直到某个
+  // 输入事件再触发重绘。用户实测"最大化后没有立即变锐利"就是这个时序。
+  // 放在 framebuffer()：重建 → 本帧就画进新画布 → present 一帧到位。
+  // （仍在窗口过程之外：重建发生在帧循环里，消息泵不被阻塞。）
+  [[nodiscard]] auto framebuffer() -> raster::Surface& override {
+    if (size_dirty_ && !in_size_loop_) {
+      size_dirty_ = false;
+      (void)sync_buffers_to_client(scale_);
+    }
+    return *surface_;
+  }
   [[nodiscard]] auto renderer_name() const noexcept -> std::string_view override {
     return renderer_name_;
   }
