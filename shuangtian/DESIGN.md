@@ -879,12 +879,13 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 | `st init <name>` | 生成工程骨架 |
 | `st build [target] [--profile debug\|release\|san] [--locked] [-j N]` | 构建 |
 | `st run <target> [args…]` | 构建并运行 |
-| `st test [filter] [--san]` | 构建并运行单测（含 sanitizer 档） |
+| `st test [filter] [--san]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |
 | `st add <spec>` / `st remove <name>` | 依赖增删（改清单 + 重求解 + 写 lock；**规划中**，CLI 尚未接线） |
 | `st fetch` / `st sync` | 获取依赖 / 同步 lock（**规划中**；当前 HTTP 仅明文 + 解包未实现，实际可用源为 path） |
 | `st tree` / `st audit` / `st outdated` | 依赖树 / 校验和与许可证字段复核 / 版本检查（**规划中**，CLI 尚未接线，见 `docs/BACKLOG.md`） |
-| `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存） |
+| `st clean [--all]` | 删除 `build/` 各档产物（`--all` 连共享对象缓存一起清） |
+| `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存；Windows 下报告内存上限与并发推导） |
 
 ### 7.7 引导（bootstrap）
 `st` 自身是 C++ 程序：`bootstrap.sh` 用最朴素的编译器调用把 `tools/stpm/*.cpp` + 所需 `src/core/*` + `src/ext/*` 编成 `build/bin/st`（唯一非 st 构建入口）；此后一切（含 `st` 自身重建）由 `st build` 完成。
@@ -1282,9 +1283,9 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`，**365 用例 / 10343 断言**） | `st test` | 全绿 |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`，**393 用例 / 11348 断言**；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿 |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **12 条**禁用特性规则（L1–L12）+ 文件布局 + 禁用 include | `st lint` | 0 违规（193 文件、6 处登记豁免） |
+| 禁令扫描 | **12 条**禁用特性规则（L1–L12）+ 文件布局 + 禁用 include | `st lint` | 0 违规（202 文件、6 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯） | 手工运行 | — |
@@ -1322,10 +1323,10 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | GPU 总帧（同上场景） | — | **1.53 ms**（优化前 24.66 ms） |
 | GPU 送显 | — | **0.03 ms**（DXGI swapchain 前 6.55 ms，即 17×） |
 | 渲染器选择 | 按实测选优 | `auto` 实测：软件 47.5 ms vs GPU 0.77 ms（1280×800 基准场景） |
-| 构建：自举 / 增量 / 无改动 | — | 20 s / 秒级 / 毫秒级（Windows MSVC，见 §7.5） |
-| 首帧（无头，1080×720） | < 40 ms | *未测* |
+| 构建：自举 / 增量 / 无改动 | — | 自举 ≈50 s；增量（改 1 单元）秒级；**无改动 dev 档 ≈1.6 s**（链接指纹命中直接跳过；此前每次重链 3.3 s） |
+| 首帧（无头，1280×800） | < 40 ms | **≈2.8 ms（GPU）/ ≈13.3 ms（软件）**（2026-09-30 复测） |
 | 脏区增量重绘 | < 3 ms | *未实现*（`dirty_rect_` 目前只有整视口口径） |
 | 事件 → 画面更新延迟 | < 16 ms | *未测* |
-| 字体：CJK 字形光栅化（首次） | < 2 ms/字 | *未测*（缓存命中路径已在 §4.2.8 剖析内可见） |
+| 字体：CJK 字形光栅化（首次） | < 2 ms/字 | **≈6.6 µs/字**（208 个生僻字首栅格化实测；缓存命中路径见 §4.2.8 剖析） |
 | `tree`（1000 节点） | < 5 ms | *未测* |
 | 内存（空应用） | < 20 MiB | *未测* |
