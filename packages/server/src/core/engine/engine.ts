@@ -1864,7 +1864,7 @@ private activeSchemas(sessionId: string) {
     }
   }
 
-  /** 会话级 sh 异步后台任务服务（按 user:sessionId 复用；记录落盘会话 tmp/sh-tasks/，跨调用/跨重启可见）。 */
+  /** 会话级 sh 后台任务服务（按 user:sessionId 复用；记录落盘会话 tmp/sh-tasks/，跨调用/跨重启可见）。 */
   private shTaskServiceFor(user: string, sessionId: string): ShTaskRunner {
     const key = `${user}:${sessionId}`
     let svc = this.shTaskServices.get(key)
@@ -1872,7 +1872,7 @@ private activeSchemas(sessionId: string) {
       const sandbox = this.opts.sandbox
       svc = new ShTaskRunner({
         dir: join(sandbox.workdir(user, sessionId), "sh-tasks"),
-        spawner: (cmd, o) => sandbox.spawnBackground(cmd, { cwd: o.cwd, env: o.env, logPath: o.logPath, input: o.input, user, sessionId }),
+        spawner: (cmd, o) => sandbox.spawnBackground(cmd, { cwd: o.cwd, env: o.env, logPath: o.logPath, input: o.input, onChunk: o.onChunk, user, sessionId }),
       })
       this.shTaskServices.set(key, svc)
     }

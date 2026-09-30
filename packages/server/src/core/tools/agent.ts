@@ -14,7 +14,7 @@ import type { BgJobRecord } from "../session/jobs"
 import { truncate, TRUNCATE_THRESHOLD } from "../support/truncate"
 import { schema, type GlobalToolEntry } from "./shared"
 
-/** bg_task 命令任务（sh async:true）输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
+/** bg_task 命令任务（sh 的后台任务）输出尾部默认/上限（字符）：后台任务输出可能持续增长，status/wait 仅取尾部。 */
 const SH_TASK_TAIL_DEFAULT = 4000
 const SH_TASK_TAIL_MAX = 20000
 /** bg_task wait 等待秒数（默认与上限相同，均为 1 分钟；命令任务/子会话运行同口径）：阻塞等待是「回头取结果」的
@@ -288,13 +288,13 @@ export const subSessionMergeTool: Tool = {
 }
 
 /** 后台异步任务统一管理（DESIGN「sh 异步后台任务」「子会话运行」）：两类任务同构管理面，按 id 前缀识别——
- *  命令任务（sh async:true 启动，id 形如 tXXXXXXXX：status/wait 附输出尾部，stop 杀进程树，磁盘落盘跨重启可见）
+ *  命令任务（sh 的统一后台机制：async:true 启动或同步等待超时转后台，id 形如 tXXXXXXXX：status/wait 附输出尾部，stop 杀进程树，磁盘落盘跨重启可见）
  *  与子会话运行（subsession_run async:true 启动，id 形如 sXXXXXXXX：继承上下文形态完成即自动合入父会话，
  *  隔离形态 wait 取回结果；status/wait/stop/list 同构管理）。管理动作免审批。 */
 export const bgTaskTool: Tool = {
   name: "bg_task",
   description:
-    "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh async:true 启动，taskId 形如 tXXXXXXXX）、子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）与通用后台任务（如 triage_run mode=async 启动，jobId 形如 jXXXXXXXX）。" +
+    "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh 的统一后台机制：async:true 启动或同步等待超时转后台，taskId 形如 tXXXXXXXX）、子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）与通用后台任务（如 triage_run mode=async 启动，jobId 形如 jXXXXXXXX）。" +
     "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 sh-tasks/{id}.log），子会话附进度（轮次/工具调用/最近活动，已结束含最终结果与合入状态），后台任务附进度（阶段/已完成条数）与产物引用；" +
     "action=wait 阻塞等待完成并取回结果（子会话完成时附完整存档；继承上下文形态的报告已自动合入父会话，wait 仅确认终态）；超时上限 1 分钟，超时返回当前状态（可再 wait 或改 status 看进度）；" +
     "action=stop 终止（命令任务杀进程树、子会话与后台任务协作中止——后台任务保留已落盘的部分结果，已执行过程保留在存档/产物）；" +
@@ -338,7 +338,7 @@ export const bgTaskTool: Tool = {
         ...subList.map((r) => ({ startedAt: r.startedAt, line: subSessionLine(r), data: { id: r.runId, kind: "subsession" as const, status: r.status, detail: r.name } })),
         ...jobList.map((r) => ({ startedAt: r.startedAt, line: bgJobLine(r), data: { id: r.id, kind: "job" as const, status: r.status, detail: `${r.kind}·${r.name}` } })),
       ].sort((a, b) => a.startedAt - b.startedAt)
-      if (!merged.length) return { output: "本会话暂无后台任务（用 sh async:true、subsession_run async:true 或 triage_run mode=async 启动）。", data: { tasks: [] } }
+      if (!merged.length) return { output: "本会话暂无后台任务（用 sh（async:true 或同步等待超时转后台）、subsession_run async:true 或 triage_run mode=async 启动）。", data: { tasks: [] } }
       return {
         output: `本会话后台任务（${merged.length} 个，按启动顺序——t 开头为命令任务、s 开头为子会话运行、j 开头为通用后台任务）:\n${merged.map((t) => t.line).join("\n")}`,
         data: { tasks: merged.map((t) => t.data) },
@@ -393,7 +393,7 @@ export const bgTaskTool: Tool = {
       if (action === "finish") return { output: "命令任务（t 前缀）不支持快速结束——后台命令没有模型可收敛：终止用 action=stop（杀进程树），取输出用 action=wait/status。" }
       const tail = shTaskTailChars(args.tail)
       const rec = action === "wait" ? await ctx.shTasks.wait(id, shTaskWaitMs(args.timeout)) : action === "stop" ? await ctx.shTasks.kill(id) : await ctx.shTasks.refresh(id)
-      if (!rec) return { output: `未找到命令后台任务: ${id}（taskId 以 sh async:true 的返回为准；查现有任务用 action=list）。` }
+      if (!rec) return { output: `未找到命令后台任务: ${id}（taskId 以 sh 的返回为准——async:true 启动或同步等待超时转后台；查现有任务用 action=list）。` }
       if (action === "wait" && !rec.endedAt) {
         const out = await ctx.shTasks.readLog(id, tail)
         const text = `${shTaskLine(rec, "")}\n（等待超时仍在运行；可再次 wait、用 status 查询，或 stop 终止）\n已产出输出（尾部 ${Math.min(out.length, tail)} 字符）:\n${out || "（暂无输出）"}`
@@ -463,7 +463,7 @@ export const bgTaskTool: Tool = {
       return { ...(await truncate(text, "bg_task", ctx)), data: { id, kind: "subsession", status: rec.status, rounds: rec.rounds, toolCalls: rec.toolCalls, output: rec.output, merged: rec.merged } }
     }
 
-    return { output: `未找到后台任务: ${id}（命令任务 taskId 以 sh async:true 返回为准（t 开头）、子会话 runId 以 subsession_run 返回为准（s 开头）、后台任务 jobId 以 triage_run mode=async 等返回为准（j 开头）；查现有任务用 action=list）。` }
+    return { output: `未找到后台任务: ${id}（命令任务 taskId 以 sh 返回为准（t 开头；async:true 启动或同步等待超时转后台）、子会话 runId 以 subsession_run 返回为准（s 开头）、后台任务 jobId 以 triage_run mode=async 等返回为准（j 开头）；查现有任务用 action=list）。` }
   },
 }
 

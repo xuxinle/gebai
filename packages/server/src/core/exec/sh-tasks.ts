@@ -2,9 +2,11 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
+import { decodeOutput } from "../security/sandbox"
 
 /**
- * sh 异步后台任务（DESIGN「sh 异步后台任务」）：`sh async:true` 启动命令进后台并立即返回 taskId，
+ * sh 的后台任务机制（DESIGN「sh 执行」）：命令统统经 `Sandbox.spawnBackground` 起进程并登记为任务——
+ * `sh async:true` 立即返回 taskId；同步调用在等待窗口内等它（`run`），窗口到期仍未结束就转后台返回 taskId。
  * 模型可先处理其他任务，之后经 `bg_task`（status/wait/stop/list，与子Agent 运行统一管理面）回头查询/等待/终止。
  *
  * 状态落盘在会话 tmp/sh-tasks/（tasks.json 记录 + {id}.log 合并输出日志），跨工具调用与服务重启可见：
@@ -43,12 +45,12 @@ export interface ShTaskProcess {
 /** 进程生成器（依赖注入：引擎接 Sandbox.spawnBackground；测试接假实现）。 */
 export type ShTaskSpawner = (
   cmd: string,
-  opts: { cwd?: string; env?: Record<string, string>; logPath: string; input?: string },
+  opts: { cwd?: string; env?: Record<string, string>; logPath: string; input?: string; onChunk?: (stream: "stdout" | "stderr", chunk: Buffer) => void },
 ) => ShTaskProcess
 
 export interface ShTaskService {
   /** 启动后台任务：spawn + 落盘记录，立即返回（不等待完成）。并发超限抛错。 */
-  start(command: string, opts: { cwd?: string; env?: Record<string, string>; input?: string; maxMs?: number }): Promise<ShTaskRecord>
+  start(command: string, opts: ShTaskStartOptions): Promise<ShTaskRecord>
   /** 刷新单任务存活/超时状态并返回（不存在返回 undefined）。 */
   refresh(id: string): Promise<ShTaskRecord | undefined>
   /** 阻塞等待任务结束（或超时返回当前状态；不存在返回 undefined）。 */
@@ -59,7 +61,45 @@ export interface ShTaskService {
   list(): Promise<ShTaskRecord[]>
   /** 读取任务合并输出（stdout+stderr）尾部字符。 */
   readLog(id: string, tailChars: number): Promise<string>
+  /** 前台运行（同步 sh 的统一执行路径）：后台启动 + 窗口内等待；窗口到期仍在运行则原样返回（不终止）。 */
+  run(command: string, opts: ShTaskRunOptions): Promise<ShTaskRunOutcome>
 }
+
+/** 后台任务启动入参（输出旁路与 waitMs/signal 无关启动，单独传）。 */
+export interface ShTaskStartOptions {
+  cwd?: string
+  env?: Record<string, string>
+  input?: string
+  maxMs?: number
+  /** 输出旁路捕获（前台等待路径用，见 run）：日志照常落盘，同时按流分发原始输出块。 */
+  onChunk?: (stream: "stdout" | "stderr", chunk: Buffer) => void
+}
+
+/** 前台运行入参：waitMs 为同步等待窗口（到期不终止任务），maxMs 为任务生命周期上限，signal 中止按进程树终止。 */
+export interface ShTaskRunOptions {
+  cwd?: string
+  env?: Record<string, string>
+  input?: string
+  maxMs?: number
+  waitMs: number
+  signal?: AbortSignal
+}
+
+/** 前台运行结果：窗口内结束 → finished=true（record 为终态）；窗口到期仍在运行 → finished=false（任务继续后台执行）。 */
+export interface ShTaskRunResult {
+  started: true
+  record: ShTaskRecord
+  finished: boolean
+  /** 等待期间被外部取消：任务已按进程树终止（退出码未知）。 */
+  aborted: boolean
+  stdout: string
+  stderr: string
+  /** 输出超过捕获上限（尾部未捕获；该任务保留记录与日志，完整输出见日志文件）。 */
+  truncated: boolean
+}
+
+/** 前台运行整体结果：后台启动失败（并发超限等）返回 started=false，由调用方回退同步执行。 */
+export type ShTaskRunOutcome = ShTaskRunResult | { started: false; error: string }
 
 /** 单会话并发后台任务上限（防失控堆积；超限拒绝新任务）。 */
 export const SH_TASK_MAX_CONCURRENT = 8
@@ -68,6 +108,10 @@ export const SH_TASK_DEFAULT_MS = 30 * 60 * 1000
 export const SH_TASK_MAX_MS = 60 * 60 * 1000
 /** wait 轮询间隔（毫秒）。 */
 const SH_TASK_POLL_MS = 300
+/** 前台运行的等待轮询起步间隔（毫秒）：短命令（echo/git status）结束即返，不白等一轮轮询，随后退避到 SH_TASK_POLL_MS。 */
+const SH_TASK_POLL_MIN_MS = 20
+/** 前台运行的输出捕获上限（每流字节）：超限停止捕获（不驻留内存），该任务保留记录与日志供回查。 */
+const SH_TASK_CAPTURE_CAP = 4 * 1024 * 1024
 
 /** sh async 超时参数解析（秒 → 毫秒）：默认 1800（30 分钟），上限 3600；与同步超时（默认 300/上限 540）独立。 */
 export function shTaskLifetimeMs(v: unknown): number {
@@ -111,11 +155,24 @@ export class ShTaskRunner implements ShTaskService {
   private now: () => number
   /** 运行中任务的进程句柄（本进程内 kill 精确终止用；重启后为空走 pid 兜底）。 */
   private procs = new Map<string, ShTaskProcess>()
+  /** 状态读改写串行队列（见 lock）。 */
+  private queue: Promise<unknown> = Promise.resolve()
 
   constructor(opts: { dir: string; spawner: ShTaskSpawner; now?: () => number }) {
     this.dir = opts.dir
     this.spawner = opts.spawner
     this.now = opts.now ?? Date.now
+  }
+
+  /** 状态读改写串行化：start/finish/refresh/kill/list/purge 依次执行——各自「load → 改 → save」，
+   *  并发执行时后写会覆盖先写（同批并行调用 sh 极常见），任务记录凭空消失、bg_task 再也查不到。 */
+  private lock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn)
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
   }
 
   private get recordsPath(): string {
@@ -203,7 +260,7 @@ export class ShTaskRunner implements ShTaskService {
     return false
   }
 
-  private async refreshAll(): Promise<ShTaskRecord[]> {
+  private async refreshAllLocked(): Promise<ShTaskRecord[]> {
     const records = await this.load()
     let dirty = false
     for (const r of records) {
@@ -213,14 +270,18 @@ export class ShTaskRunner implements ShTaskService {
     return records
   }
 
-  async start(command: string, opts: { cwd?: string; env?: Record<string, string>; input?: string; maxMs?: number }): Promise<ShTaskRecord> {
-    const records = await this.refreshAll()
+  async start(command: string, opts: ShTaskStartOptions): Promise<ShTaskRecord> {
+    return this.lock(() => this.startLocked(command, opts))
+  }
+
+  private async startLocked(command: string, opts: ShTaskStartOptions): Promise<ShTaskRecord> {
+    const records = await this.refreshAllLocked()
     if (records.filter((r) => !r.endedAt).length >= SH_TASK_MAX_CONCURRENT) {
       throw new Error(`并发后台任务超限（≥${SH_TASK_MAX_CONCURRENT}）：请先用 bg_task（action=stop/status）清理已完成的任务再启动。`)
     }
     const id = `t${randomUUID().replace(/-/g, "").slice(0, 8)}`
     await mkdir(this.dir, { recursive: true })
-    const proc = this.spawner(command, { cwd: opts.cwd, env: opts.env, logPath: this.logPath(id), input: opts.input })
+    const proc = this.spawner(command, { cwd: opts.cwd, env: opts.env, logPath: this.logPath(id), input: opts.input, onChunk: opts.onChunk })
     const rec: ShTaskRecord = {
       id,
       command,
@@ -246,7 +307,11 @@ export class ShTaskRunner implements ShTaskService {
   }
 
   /** 进程退出回写：填 endedAt/exitCode；已因失活判定 lost 的仅补退出码（endedAt 保留首次判定）。 */
-  private async finish(id: string, patch: { exitCode: number; spawnError?: string }): Promise<void> {
+  private finish(id: string, patch: { exitCode: number; spawnError?: string }): Promise<void> {
+    return this.lock(() => this.finishLocked(id, patch))
+  }
+
+  private async finishLocked(id: string, patch: { exitCode: number; spawnError?: string }): Promise<void> {
     const records = await this.load()
     const r = records.find((x) => x.id === id)
     if (!r) return
@@ -261,6 +326,10 @@ export class ShTaskRunner implements ShTaskService {
   }
 
   async refresh(id: string): Promise<ShTaskRecord | undefined> {
+    return this.lock(() => this.refreshLocked(id))
+  }
+
+  private async refreshLocked(id: string): Promise<ShTaskRecord | undefined> {
     const records = await this.load()
     const r = records.find((x) => x.id === id)
     if (!r) return undefined
@@ -279,7 +348,11 @@ export class ShTaskRunner implements ShTaskService {
   }
 
   async kill(id: string): Promise<ShTaskRecord | undefined> {
-    const r = await this.refresh(id)
+    return this.lock(() => this.killLocked(id))
+  }
+
+  private async killLocked(id: string): Promise<ShTaskRecord | undefined> {
+    const r = await this.refreshLocked(id)
     if (!r) return undefined
     if (r.endedAt) return r
     const proc = this.procs.get(id)
@@ -299,7 +372,7 @@ export class ShTaskRunner implements ShTaskService {
   }
 
   async list(): Promise<ShTaskRecord[]> {
-    return this.refreshAll()
+    return this.lock(() => this.refreshAllLocked())
   }
 
   async readLog(id: string, tailChars: number): Promise<string> {
@@ -309,6 +382,83 @@ export class ShTaskRunner implements ShTaskService {
       return text.length > tailChars ? text.slice(-tailChars) : text
     } catch {
       return ""
+    }
+  }
+
+  /**
+   * 前台运行（同步 sh 的统一执行路径）：后台启动 + 窗口内等待。窗口内结束则按同步语义返回捕获的 stdout/stderr；
+   * 窗口到期仍在运行则**不终止**命令，按 running 记录返回（由调用方转后台，后续经 bg_task 跟踪）；
+   * 等待期间 signal 中止即按进程树终止任务并标记 aborted。后台启动失败（并发超限等）返回 started=false。
+   *
+   * 记录清理：窗口内结束且输出未超捕获上限的任务**不留痕**（记录与日志一并删除——它从未成为后台任务，
+   * 留在清单里只会污染 bg_task list 并让 tasks.json 无限增长）；转后台（未结束）与输出被截断的任务保留。
+   */
+  async run(command: string, opts: ShTaskRunOptions): Promise<ShTaskRunOutcome> {
+    const chunks = { stdout: [] as Buffer[], stderr: [] as Buffer[], outBytes: 0, errBytes: 0 }
+    let capturing = true
+    let truncated = false
+    const onChunk = (stream: "stdout" | "stderr", chunk: Buffer): void => {
+      if (!capturing || truncated) return
+      const used = stream === "stdout" ? chunks.outBytes : chunks.errBytes
+      if (used + chunk.length > SH_TASK_CAPTURE_CAP) {
+        truncated = true
+        return
+      }
+      if (stream === "stdout") {
+        chunks.stdout.push(chunk)
+        chunks.outBytes += chunk.length
+      } else {
+        chunks.stderr.push(chunk)
+        chunks.errBytes += chunk.length
+      }
+    }
+    let rec: ShTaskRecord
+    try {
+      rec = await this.start(command, { cwd: opts.cwd, env: opts.env, input: opts.input, maxMs: opts.maxMs, onChunk })
+    } catch (err) {
+      return { started: false, error: String((err as Error)?.message ?? err) }
+    }
+    const pack = async (record: ShTaskRecord, finished: boolean, aborted: boolean): Promise<ShTaskRunResult> => {
+      capturing = false
+      const out: ShTaskRunResult = {
+        started: true,
+        record,
+        finished,
+        aborted,
+        stdout: decodeOutput(Buffer.concat(chunks.stdout)),
+        stderr: decodeOutput(Buffer.concat(chunks.stderr)),
+        truncated,
+      }
+      if ((finished || aborted) && !truncated) await this.purge(record.id)
+      return out
+    }
+    const deadline = this.now() + Math.max(0, opts.waitMs)
+    let delay = SH_TASK_POLL_MIN_MS
+    for (;;) {
+      const r = (await this.refresh(rec.id)) ?? rec
+      if (r.endedAt) return pack(r, true, false)
+      if (opts.signal?.aborted) return pack((await this.kill(rec.id)) ?? r, false, true)
+      const remain = deadline - this.now()
+      if (remain <= 0) return pack(r, false, false)
+      await new Promise((res) => setTimeout(res, Math.min(delay, remain)))
+      delay = Math.min(delay * 2, SH_TASK_POLL_MS)
+    }
+  }
+
+  /** 清理任务记录与日志（同步窗口内已结束的任务不留痕）。永不抛错：清理失败不影响已捕获的结果。 */
+  private purge(id: string): Promise<void> {
+    return this.lock(() => this.purgeLocked(id))
+  }
+
+  private async purgeLocked(id: string): Promise<void> {
+    try {
+      const records = await this.load()
+      const rest = records.filter((r) => r.id !== id)
+      if (rest.length !== records.length) await this.save(rest)
+      this.procs.delete(id)
+      await unlink(join(this.dir, `${id}.log`)).catch(() => undefined)
+    } catch {
+      /* 清理尽力而为 */
     }
   }
 }

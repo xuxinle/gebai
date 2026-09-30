@@ -464,9 +464,10 @@ export class Sandbox {
   }
 
   /**
-   * 后台任务进程（sh async:true，DESIGN「sh 异步执行」）：与 exec 同规则的 shell（Windows PowerShell / POSIX bash）/env 脱敏/编码/进程组语义，
+   * 后台任务进程（sh 的后台执行机制，DESIGN「sh 执行」）：与 exec 同规则的 shell（Windows PowerShell / POSIX bash）/env 脱敏/编码/进程组语义，
    * 但不等待完成——stdout+stderr 合并持续写入 opts.logPath（WriteStream 落盘，不占内存），立即返回进程句柄。
    * 无超时（生命周期上限由 ShTaskRunner 惰性检查并 kill）；句柄 kill() 按进程树终止并收尾日志流。
+   * opts.onChunk 为输出旁路：日志照常落盘，同时按流分发原始输出块（同步等待路径据此拿到 stdout/stderr 分离的文本）。
    */
   spawnBackground(
     cmd: string,
@@ -475,6 +476,8 @@ export class Sandbox {
       env?: Record<string, string>
       logPath: string
       input?: string
+      /** 输出旁路捕获（sh 同步等待路径）：日志照常合并落盘，同时把原始输出块按流分发（stdout/stderr 分离）。 */
+      onChunk?: (stream: "stdout" | "stderr", chunk: Buffer) => void
       /** 发起用户：豁免用户脚本子进程不剔除敏感变量（与 exec 同规则）。 */
       user?: string
       /** 会话 id（服务模式）：脚本运行根收敛（同 exec：HOME/TEMP/XDG 会话内目录、bwrap 隔离）。 */
@@ -503,6 +506,11 @@ export class Sandbox {
     const log = createWriteStream(opts.logPath, { flags: "a" })
     child.stdout?.pipe(log)
     child.stderr?.pipe(log)
+    if (opts.onChunk) {
+      const onChunk = opts.onChunk
+      child.stdout?.on("data", (d: Buffer | string) => onChunk("stdout", Buffer.isBuffer(d) ? d : Buffer.from(d)))
+      child.stderr?.on("data", (d: Buffer | string) => onChunk("stderr", Buffer.isBuffer(d) ? d : Buffer.from(d)))
+    }
     if (opts.input != null) child.stdin?.write(opts.input)
     child.stdin?.end()
     const exited = new Promise<number>((resolveExit, rejectExit) => {

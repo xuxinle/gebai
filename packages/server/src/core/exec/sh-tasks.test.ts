@@ -8,12 +8,21 @@ import { Sandbox } from "../security/sandbox"
 /** 假进程生成器：pid 用当前进程（恒存活），退出由测试显式触发；日志直接写目标文件模拟输出。 */
 function fakeSpawner() {
   const calls: Array<{ cmd: string; cwd?: string; logPath: string; input?: string }> = []
-  const handles: Array<{ pid: number | null; killed: boolean; exit: (code: number) => void }> = []
+  const handles: Array<{ pid: number | null; killed: boolean; exit: (code: number) => void; emit: (stream: "stdout" | "stderr", text: string) => void }> = []
   const spawner: ShTaskSpawner = (cmd, opts) => {
     calls.push({ cmd, cwd: opts.cwd, logPath: opts.logPath, input: opts.input })
     mkdirSync(join(opts.logPath, ".."), { recursive: true })
     writeFileSync(opts.logPath, `[fake-start] ${cmd}\n`)
-    const h = { pid: process.pid, killed: false, exit: (_code: number) => {} }
+    const h = {
+      pid: process.pid,
+      killed: false,
+      exit: (_code: number) => {},
+      /** 模拟进程输出：写日志，并按 onChunk 旁路分发（前台捕获路径据此拿到分离的 stdout/stderr）。 */
+      emit: (stream: "stdout" | "stderr", text: string) => {
+        writeFileSync(opts.logPath, text, { flag: "a" })
+        opts.onChunk?.(stream, Buffer.from(text))
+      },
+    }
     const proc: ShTaskProcess = {
       pid: h.pid,
       exited: new Promise<number>((resolve) => {
@@ -131,6 +140,18 @@ describe("sh async background tasks", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("并行 start 不丢记录（状态读改写串行化）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-parallel-"))
+    const f = fakeSpawner()
+    const r = runner(home, f.spawner)
+    // 同批并行启动（同批工具调用并发执行的真实形态）：load→save 无锁会让后写覆盖先写
+    const recs = await Promise.all(Array.from({ length: 6 }, (_, i) => r.start(`job${i}`, {})))
+    const ids = (await r.list()).map((x) => x.id)
+    expect(new Set(ids).size).toBe(6)
+    for (const rec of recs) expect(ids).toContain(rec.id)
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("readLog returns tail; lifetime param parsing defaults 1800s caps 3600s", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-shtask-log-"))
     const f = fakeSpawner()
@@ -217,4 +238,86 @@ describe("sh async background tasks", () => {
       rmSync(home, { recursive: true, force: true })
     }
   })
+})
+
+describe("sh 前台运行（run：同步等待窗口 + 超窗转后台）", () => {
+  test("窗口内结束：返回捕获的 stdout/stderr 与退出码，记录与日志不留痕", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-run-"))
+    const f = fakeSpawner()
+    const r = runner(home, f.spawner)
+    setTimeout(() => {
+      f.handles[0].emit("stdout", "hello\n")
+      f.handles[0].emit("stderr", "warn\n")
+      f.handles[0].exit(3)
+    }, 40)
+    const out = await r.run("echo hi", { waitMs: 5000 })
+    if (!out.started) throw new Error("应已启动")
+    expect(out.finished).toBe(true)
+    expect(out.aborted).toBe(false)
+    expect(out.stdout).toBe("hello\n")
+    expect(out.stderr).toBe("warn\n")
+    expect(out.record.exitCode).toBe(3)
+    // 不留痕：同步调用不污染后台清单与 tasks.json
+    expect(await r.list()).toHaveLength(0)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("窗口到期仍在运行：不终止任务、返回 running 记录（转后台）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-run-out-"))
+    const f = fakeSpawner()
+    const r = runner(home, f.spawner)
+    const out = await r.run("sleep 100", { waitMs: 80 })
+    if (!out.started) throw new Error("应已启动")
+    expect(out.finished).toBe(false)
+    expect(shTaskStatus(out.record)).toBe("running")
+    expect(f.handles[0].killed).toBe(false)
+    expect(await r.list()).toHaveLength(1)
+    await r.kill(out.record.id)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("等待期间 signal 中止：按进程树终止并标记 aborted", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-run-abort-"))
+    const f = fakeSpawner()
+    const r = runner(home, f.spawner)
+    const ac = new AbortController()
+    const p = r.run("sleep 100", { waitMs: 10000, signal: ac.signal })
+    setTimeout(() => ac.abort(), 30)
+    const out = await p
+    if (!out.started) throw new Error("应已启动")
+    expect(out.aborted).toBe(true)
+    expect(f.handles[0].killed).toBe(true)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("后台启动失败（并发超限）：返回 started=false 由调用方回退", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-run-cap-"))
+    const f = fakeSpawner()
+    const r = runner(home, f.spawner)
+    for (let i = 0; i < 8; i++) await r.start(`job${i}`, {})
+    const out = await r.run("echo x", { waitMs: 100 })
+    expect(out.started).toBe(false)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  // 真实 spawn 子进程（同「真实链路」用例：分片并行时机器满载，放宽超时）
+  test("真实链路：run 捕获 echo 输出且不留痕；慢命令转后台保留记录、不终止进程", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-shtask-run-real-"))
+    const sandbox = new Sandbox({ home, enabled: false })
+    const r = new ShTaskRunner({ dir: join(home, "tasks"), spawner: (cmd, o) => sandbox.spawnBackground(cmd, o) })
+    const ok = await r.run("echo gebai-sync-ok", { waitMs: 15000 })
+    if (!ok.started) throw new Error("应已启动")
+    expect(ok.finished).toBe(true)
+    expect(ok.stdout).toContain("gebai-sync-ok")
+    expect(ok.record.exitCode).toBe(0)
+    expect(await r.list()).toHaveLength(0)
+    const slow = await r.run(process.platform === "win32" ? "Start-Sleep -Seconds 5" : "sleep 5", { waitMs: 300 })
+    if (!slow.started) throw new Error("应已启动")
+    expect(slow.finished).toBe(false)
+    expect(shTaskStatus(slow.record)).toBe("running")
+    expect((await r.list()).map((x) => x.id)).toContain(slow.record.id)
+    await r.kill(slow.record.id)
+    expect(shTaskStatus((await r.refresh(slow.record.id))!)).toBe("killed")
+    rmSync(home, { recursive: true, force: true })
+  }, 30000)
 })

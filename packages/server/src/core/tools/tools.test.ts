@@ -9,6 +9,7 @@ import { SessionStore } from "../session/store"
 import { resolveInSandbox, sessionPath, stripTmpPrefix } from "../base/paths"
 import { resetRipgrepCache, ripgrepAvailable } from "../support/ripgrep"
 import type { ToolContext, Tool, ToolResult } from "../base/types"
+import type { ShTaskRecord, ShTaskRunOutcome } from "../exec/sh-tasks"
 
 /** 测试会话 id（合法 32 位 hex，与生产 randomUUID 形态一致——fileRefFor 等按 sessionPath 归属判定依赖格式白名单）。 */
 const SID = "abcdef01abcdef01abcdef01abcdef01"
@@ -87,6 +88,26 @@ function ctx(home: string, sessionId = SID, env: Record<string, string> = {}): T
     waitForDraw: async () => ({ ok: true }),
     waitForCapture: async () => null,
   }
+}
+
+/** shTasks 服务桩（sh 统一执行路径用例）：run 行为由用例注入，其余方法空实现。 */
+function shTasksStub(
+  run: (command: string, opts: { cwd?: string; env?: Record<string, string>; input?: string; waitMs: number; signal?: AbortSignal }) => Promise<ShTaskRunOutcome>,
+): NonNullable<ToolContext["shTasks"]> {
+  return {
+    start: async (command, opts) => shRec({ command, cwd: opts.cwd ?? "" }),
+    refresh: async () => undefined,
+    wait: async () => undefined,
+    kill: async () => undefined,
+    list: async () => [],
+    readLog: async () => "",
+    run,
+  }
+}
+
+/** 后台任务记录桩（默认运行中，按用例覆盖）。 */
+function shRec(over: Partial<ShTaskRecord> = {}): ShTaskRecord {
+  return { id: "trun1234", command: "cmd", cwd: "", pid: 4242, startedAt: Date.now(), maxMs: 1_800_000, ...over }
 }
 
 /** 轻量 mock 工具（flow/编排测试用）。 */
@@ -216,6 +237,7 @@ describe("global tools", () => {
       kill: async (id) => (id === "tabc1234" ? { ...doneRec(), exitCode: undefined, killed: true } : undefined),
       list: async () => [doneRec()],
       readLog: async (id, tail) => (id === "tabc1234" ? "building...\nbuild ok\n".slice(-tail) : ""),
+      run: async () => ({ started: false, error: "测试桩不提供前台运行" }),
     }
     // async 启动：立即返回 taskId，不调用同步 runCommand
     const start = await shTool.execute({ command: "bun run build", async: true, timeout: 600 }, c)
@@ -243,6 +265,93 @@ describe("global tools", () => {
     expect(noId.output).toContain("缺少任务 id")
     const unknown = await bgTaskTool.execute({ action: "status", id: "nope" }, c)
     expect(unknown.output).toContain("未找到后台任务")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("sh 统一后台执行：窗口内结束 → 按同步语义返回，不留后台记录", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-unified-"))
+    const c = ctx(home)
+    c.runCommand = async () => { throw new Error("同步调用不应回退 runCommand") }
+    const runs: Array<{ command: string; cwd?: string; waitMs: number }> = []
+    c.shTasks = shTasksStub(async (command, opts) => {
+      runs.push({ command, cwd: opts.cwd, waitMs: opts.waitMs })
+      return { started: true, record: shRec({ command, endedAt: Date.now(), exitCode: 0 }), finished: true, aborted: false, stdout: "ok\n", stderr: "", truncated: false }
+    })
+    const r = await shTool.execute({ command: "echo hi" }, c)
+    expect(r.output.trim()).toBe("ok")
+    expect((r.data as { exitCode: number }).exitCode).toBe(0)
+    expect((r.data as { stdout: string }).stdout).toBe("ok\n")
+    expect(runs).toEqual([{ command: "echo hi", cwd: c.workdir, waitMs: 300000 }])
+    // 非 0 退出与 strict 语义照旧
+    c.shTasks = shTasksStub(async (command) => ({
+      started: true, record: shRec({ command, endedAt: Date.now(), exitCode: 3 }), finished: true, aborted: false, stdout: "out", stderr: "boom", truncated: false,
+    }))
+    const fail = await shTool.execute({ command: "fail" }, c)
+    expect(fail.output).toContain("[exit 3]")
+    await expect(shTool.execute({ command: "fail", strict: true }, c)).rejects.toThrow(/exit 3[\s\S]*boom/)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("sh 同步等待超时 → 自动转后台返回 taskId（不终止命令），timeout 即等待窗口", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-syncout-"))
+    const c = ctx(home)
+    c.runCommand = async () => { throw new Error("同步调用不应回退 runCommand") }
+    const runs: Array<{ waitMs: number }> = []
+    c.shTasks = shTasksStub(async (_command, opts) => {
+      runs.push({ waitMs: opts.waitMs })
+      return { started: true, record: shRec({ command: "bun run build", pid: 99 }), finished: false, aborted: false, stdout: "building...\n", stderr: "warn: x\n", truncated: false }
+    })
+    const r = await shTool.execute({ command: "bun run build", timeout: 10 }, c)
+    expect(r.output).toContain("[同步等待超时 → 已转后台继续执行]")
+    expect(r.output).toContain("taskId: trun1234")
+    expect(r.output).toContain("bg_task")
+    expect(r.output).toContain("仍在后台运行、未被终止")
+    expect(r.output).toContain("已产出 stdout")
+    expect(r.output).toContain("building...")
+    const d = r.data as { taskId: string; pid: number; status: string; exitCode: number | null }
+    expect(d.taskId).toBe("trun1234")
+    expect(d.pid).toBe(99)
+    expect(d.status).toBe("running")
+    expect(d.exitCode).toBeNull()
+    expect(runs).toEqual([{ waitMs: 10000 }])
+    // 默认 300s、上限 540s 同为等待窗口；strict 在未完成时不误判
+    await shTool.execute({ command: "bun run build" }, c)
+    await shTool.execute({ command: "bun run build", timeout: 99999 }, c)
+    const strict = await shTool.execute({ command: "bun run build", strict: true }, c)
+    expect(strict.output).toContain("strict: true 未生效")
+    expect(runs.map((x) => x.waitMs)).toEqual([10000, 300000, 540000, 300000])
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("sh 等待期间被取消：按中断语义返回（[interrupted by user] / exit 124）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-abort-"))
+    const c = ctx(home)
+    c.runCommand = async () => { throw new Error("同步调用不应回退 runCommand") }
+    c.shTasks = shTasksStub(async () => ({
+      started: true, record: shRec({ command: "sleep 100", killed: true, endedAt: Date.now() }), finished: false, aborted: true, stdout: "partial\n", stderr: "", truncated: false,
+    }))
+    const r = await shTool.execute({ command: "sleep 100" }, c)
+    expect(r.output).toContain("[interrupted by user]")
+    expect(r.output).toContain("[exit 124]")
+    expect((r.data as { exitCode: number }).exitCode).toBe(124)
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("sh 后台启动失败/安全模式：回退既有同步路径", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-sh-fallback-"))
+    const c = ctx(home)
+    const cmds: string[] = []
+    c.runCommand = async (cmd) => {
+      cmds.push(cmd)
+      return { stdout: "sync-ok", stderr: "", code: 0 }
+    }
+    // 后台启动失败（并发超限等）：回退同步执行，命令照旧能跑
+    c.shTasks = shTasksStub(async () => ({ started: false, error: "并发后台任务超限" }))
+    expect((await shTool.execute({ command: "echo a" }, c)).output.trim()).toBe("sync-ok")
+    // 安全模式：只读白名单路径不走后台
+    c.safeMode = true
+    expect((await shTool.execute({ command: "cat a.txt" }, c)).output.trim()).toBe("sync-ok")
+    expect(cmds).toEqual(["echo a", "cat a.txt"])
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -1690,6 +1799,7 @@ describe("global tools", () => {
         return { id: "twd1", command: _command, cwd: opts.cwd ?? "", pid: 1, startedAt: Date.now(), maxMs: 1000 }
       },
       refresh: async () => undefined, wait: async () => undefined, kill: async () => undefined, list: async () => [], readLog: async () => "",
+      run: async () => ({ started: false, error: "测试桩不提供前台运行" }),
     }
     await shTool.execute({ command: "bun test", async: true, workdir: "pkg" }, c)
     expect(started).toEqual([join(c.workdir, "pkg")])
