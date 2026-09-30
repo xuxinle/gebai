@@ -100,10 +100,10 @@ inline constexpr Result<Unit> ok();          // 无值成功
    得到「含一个空对象的数组」而不是对象（曾导致控制通道响应构造失败）。要么用 `=` 拷贝初始化，
    要么用 `Json::object()` 直接初始化。
 
-**第三方源码纪律**（`vendor/`）：
+**第三方源码纪律**（`third_party/`）：
 
 - 只准**原样引入**，不得就地修补——要改就升级版本（否则失去可追溯性）；
-- 每个依赖在 `vendor/sources.json` 登记版本/来源/许可/SHA-256/剔除清单，并可用 `sha256sum -c CHECKSUMS.sha256` 校验；
+- 每个依赖在 `third_party/SOURCES.md` 登记版本/来源/许可/SHA-256/剔除清单，并可用 `sha256sum -c CHECKSUMS.sha256` 校验；
 - 第三方翻译单元**不套本工程的告警集（`-w`）、不进 PCH、不做 sanitizer 插桩**——
   我们负责自家代码的质量，不负责上游的；混编不影响 ASan 对我们的检测能力（分配器是全局的）；
 - C 源用 `-x c -std=gnu11` 编译（同一个编译器二进制，不引入第二套工具链），标志集与 C++ 分离。
@@ -187,7 +187,7 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 | 宏 | **不存在**（`#pragma once` + 平台 `#if` 除外） | — |
 | 头文件 | `include/st/<层>/<模块>.hpp`，**自包含 + `#pragma once`** | `include/st/raster/canvas.hpp` |
 | 实现 | `src/<层>/<模块>.cpp`（与头同名） | `src/raster/canvas.cpp` |
-| 测试 | `tests/<层>_<模块>_test.cpp`，入口 `int main()` 用自研 `st::test` | `tests/core_json_test.cpp` |
+| 测试 | `tests/<层>_<模块>_test.cpp`，入口 `int main()` 用自研 `st::test` | `tests/ext_json_test.cpp` |
 | 枚举 | `enum class Name`，成员 `PascalCase` 或全小写蛇形（同一枚举内一致） | `enum class BlendMode { SrcOver }` |
 
 ## 6. 头文件纪律

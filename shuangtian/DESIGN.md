@@ -51,7 +51,8 @@
 ┌────────────────────────────── ui 层 ───────────────────────┴───────────────────────────────────────┐
 │  Element 树（组件）· FlexLayout（自研布局）· Style/Token/Theme · Component 库 · 矢量图标 · 命中测试   │
 └───────────┬───────────────────────────────────────────────────────────────────────────┬──────────────┘
-            │ 绘制显示列表（DisplayList：fill/round_rect/gradient/text/shadow/image）      │ 事件
+            │ 立即模式直绘：paint(RenderContext, Surface&) —— 原语 fill/圆角矩形/          │ 事件
+            │ 渐变/文本/阴影/图像（Surface 为软件 Canvas 与 GpuCanvas 共同抽象）        │
 ┌───────────▼──────────────────────── raster 层 ────────────────────────────┐   ┌───────▼──────────┐
 │ Canvas（像素缓冲）· 路径填充 + 抗锯齿 · 渐变/阴影/裁剪/合成 · 仿射 · SIMD   │   │ shell 层          │
 └───────────┬───────────────────────────────┬──────────────────────────────┘   │ 事件循环/窗口后端 │
@@ -76,7 +77,7 @@
                     └──────────────────────────────┘
 ```
 
-**分层依赖单向**：`core ← codec/math ← raster ← text ← md ← ui ← app`；`shell` 依赖 `core`+`raster`（把输入事件喂给 app）；`gpu` 依赖 `raster`（消费 Framebuffer）；`control` 依赖 `ui`+`app`（只读语义树 + 派发事件）；`pkg` 只依赖 `core`+`codec`（清单/求解/归档）。
+**分层依赖单向**：`core ← codec/math ← raster ← text ← md ← ui ← app`；`shell` 依赖 `core`+`raster`+`ui`（窗口后端把输入事件以 `ui::Event` 喂给 app）；`gpu`（实现物理上在 raster 层，接口 `include/st/raster/gpu.hpp`）依赖 `raster`；`control` 依赖 `ui`+`ext`，与 `app` 通过**纯虚 `Host` 接口解耦**（依赖倒置：app 实现 Host 并拥有 Server，控制层不反向 include app）；`pkg` 只依赖 `core`+`codec`（清单/求解/归档）。
 
 ## 3. 目录结构
 
@@ -428,7 +429,7 @@ class Element {                                  // 组件基类
   virtual std::string_view type() const = 0;     // 组件类型名（tree 输出）
   virtual Size measure(const Constraints&) = 0;
   virtual void arrange(Rect final_rect) = 0;
-  virtual void paint(DisplayList&) const = 0;
+  virtual void paint(const RenderContext&, raster::Surface&) const = 0;  // 立即模式直绘（Surface 为软件/GPU 共同抽象；保留模式 DisplayList 为 v0.3+ 演进项，见 docs/BACKLOG.md）
   virtual bool on_event(const Event&);           // 命中后的事件处理
   virtual void collect_semantics(SemanticsNode&) const;   // 语义树（tree/find/无障碍）
   ...
@@ -444,7 +445,8 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 };
 }
 ```
-组件库（`include/st/ui/components/*.hpp`）：`Text` `Icon` `Button` `IconButton` `Link` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Dropdown` `Menu` `Tabs` `SegmentedControl` `Table` `List` `ScrollView` `ScrollBar` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `TreeView` `Sparkline` `BarChart` `MarkdownView`。
+组件库（`include/st/ui/components/*.hpp`）——**已实现 28 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView`。
+**规划中 8 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Link` `Dropdown` `Menu` `SegmentedControl` `TreeView` `Sparkline` `BarChart`。
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
 - 图标：自绘矢量路径集（`IconName` + 路径数据），零位图资源、任意缩放清晰。
@@ -879,10 +881,9 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 | `st run <target> [args…]` | 构建并运行 |
 | `st test [filter] [--san]` | 构建并运行单测（含 sanitizer 档） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |
-| `st add <spec>` / `st remove <name>` | 依赖增删（改清单 + 重求解 + 写 lock） |
-| `st fetch` / `st sync` | 获取依赖 / 同步 lock |
-| `st vendor` / `st vendor --offline` | 固化第三方源码到 `vendor/` / 校验离线可构建 |
-| `st tree` / `st audit` / `st outdated` | 依赖树 / 校验和与许可证字段复核 / 版本检查 |
+| `st add <spec>` / `st remove <name>` | 依赖增删（改清单 + 重求解 + 写 lock；**规划中**，CLI 尚未接线） |
+| `st fetch` / `st sync` | 获取依赖 / 同步 lock（**规划中**；当前 HTTP 仅明文 + 解包未实现，实际可用源为 path） |
+| `st tree` / `st audit` / `st outdated` | 依赖树 / 校验和与许可证字段复核 / 版本检查（**规划中**，CLI 尚未接线，见 `docs/BACKLOG.md`） |
 | `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存） |
 
 ### 7.7 引导（bootstrap）
@@ -1234,11 +1235,17 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 两条腿必须**可对照**：`software_scene.cpp` 的光照公式与 GPU 侧保持一致，
 否则"软件保底"就只是"另一种长相"。
 
-### 8.4.2 三维：离屏 FBO，无头可用
+### 8.4.2.1 历史记录：原 OpenGL 三维方案（已移除）
 
-WGL 上下文需要一个窗口句柄（HDC），但那个窗口**从不显示**（`WS_POPUP`、不 `ShowWindow`），
-渲染全在 FBO 上——于是无头环境同样能渲染 3D，与 D3D11 后端同一口径。
-入口点全部**动态解析**（不链接 `opengl32.lib`），缺 DLL 只是"这个后端不可用"。
+> 本节保留的是**已移除方案**的设计记录（为什么当时可行、为什么被删），
+> 供以后评估 Vulkan/Metal 3D 腿时参考。现行方案见上方 §8.4.2「平台现状与两条腿」。
+
+原方案用 WGL 离屏 FBO 实现无头 3D：WGL 上下文需要窗口句柄（HDC），但那个窗口
+**从不显示**（`WS_POPUP`、不 `ShowWindow`），渲染全在 FBO 上——无头环境同样能渲染 3D，
+与 D3D11 后端同一口径。入口点全部**动态解析**（不链接 `opengl32.lib`）。
+
+移除原因（实测，非偏好）：在自己的主场（Windows）输给 D3D11，在其他平台又不存在
+（macOS 上 GL 已废弃）——它既不是"保证腿"也不是"加分腿"。评估记录见 §8.4.1 末尾。
 
 网格（立方体/球/长方体）**每面不同色 + 纬度渐变**：单色立方体转过 90° 看不出来，
 于是"模型矩阵对不对"这类问题会被漏掉。光照（Lambert + 边缘光）是"看起来像 3D"的最小代价。
@@ -1257,9 +1264,9 @@ WGL 上下文需要一个窗口句柄（HDC），但那个窗口**从不显示**
 
 ### 8.4.4 两个只表现为"卡住/崩溃"的坑
 
-1. **逐像素写 GPU 画布 = 每像素一次全屏回读**。`GlScene::composite` 原来逐像素调
-   `Surface::set_pixel`，而 `GpuCanvas::set_pixel` 每次写入都触发一次全屏回读
-   （2560×1600 = 16 MB）→ 192k 像素 = 192k 次回读 → **主线程再也回不来**。
+1. **逐像素写 GPU 画布 = 每像素一次全屏回读**（历史：时为 `GlScene::composite`，现为 D3D11 合成器同理）。
+   GPU 画布的 `set_pixel` 每次写入都触发一次全屏回读（2560×1600 = 16 MB）→ 192k 像素 = 192k 次回读
+   → **主线程再也回不来**。
    症状迷惑：帧数**不增长**（卡在 `++frames` 之前），但控制通道照常应答（它在自己线程上）。
    修法是先在软件暂存画布上做一次转换、再**一次 blit**。
    回归用例必须**拿 GPU 画布当目标**——软件画布的 `set_pixel` 是 O(1)，用软件画布测永远暴露不了。

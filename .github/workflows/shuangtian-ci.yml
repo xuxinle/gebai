@@ -1,0 +1,69 @@
+name: shuangtian-ci
+
+# 霜天持续集成：三平台矩阵（lint + test），Linux 附 mingw 交叉编译验证 Windows 目标。
+# 由 2026-09-30 全面审视补齐（此前零 CI，Linux/macOS 路径三个月无编译验证证据）。
+
+on:
+  push:
+    paths: ['shuangtian/**']
+  pull_request:
+    paths: ['shuangtian/**']
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译器与 mingw（交叉验证 Windows 目标）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ mingw-w64
+      - name: 自举工具链
+        working-directory: shuangtian
+        run: ./bootstrap.sh
+      - name: 单元测试
+        working-directory: shuangtian
+        run: ./build/bin/st test
+      - name: sanitizer（ASan + UBSan）
+        working-directory: shuangtian
+        run: ./build/bin/st test --san
+      - name: 禁令扫描
+        working-directory: shuangtian
+        run: ./build/bin/st lint
+      - name: mingw 交叉编译（验证 Windows 分支可编译）
+        working-directory: shuangtian
+        run: ./build/bin/st build gallery --toolchain=mingw
+      - name: 无头视觉验证（无桌面环境正是霜天的设计场景）
+        working-directory: shuangtian
+        run: python3 tools/st_visual_check.py
+        continue-on-error: true  # 首期允许失败：脚本正在参数化改造（见 docs/BACKLOG.md）
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 自举工具链（自动定位 MSVC）
+        working-directory: shuangtian
+        shell: pwsh
+        run: ./bootstrap.ps1
+      - name: 单元测试
+        working-directory: shuangtian
+        run: ./build/bin/st.exe test
+      - name: 禁令扫描
+        working-directory: shuangtian
+        run: ./build/bin/st.exe lint
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 自举工具链
+        working-directory: shuangtian
+        run: ./bootstrap.sh
+      - name: 单元测试
+        working-directory: shuangtian
+        run: ./build/bin/st test
+      - name: 禁令扫描
+        working-directory: shuangtian
+        run: ./build/bin/st lint

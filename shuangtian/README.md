@@ -2,11 +2,11 @@
 
 > 霜天曉角：清冽、开阔、万物自明。
 >
-> **C++20 · 自研实现为体（仅两个可选外部依赖）· 全自绘 · 软硬件渲染兼容 · 支持无头模式 · TCP 控制通道**
+> **C++20 · 自研实现为体（仅三个外部依赖：一必需两可选）· 全自绘 · 软硬件渲染兼容 · 支持无头模式 · TCP 控制通道**
 
 霜天是歌白的**原生躯体**：不依赖系统控件、不依赖桌面环境，把"窗口 + 组件 + 绘制 + 字体 + 文本 + 输入 + 远控"这一整套从零做起，并对外提供一条 TCP 控制通道，让智能体可以像操作浏览器一样操作原生应用。
 
-外部依赖只有两个，且都在 `vendor/`（版本/来源/许可/SHA-256 全程台账，`sha256sum -c` 可校验）：
+外部依赖三个（一个必需、两个可选），全部内联在 `third_party/`（版本/来源/许可/SHA-256 全程台账，`sha256sum -c` 可校验，见 `third_party/SOURCES.md`）：
 
 | 依赖 | 用途 | 性质 |
 |---|---|---|
@@ -15,7 +15,7 @@
 | [batterycenter/embed](https://github.com/batterycenter/embed) 1.2.19 | 编译期资源嵌入（`b::embed<"x.png">()`）；**生成期由 stpm 原生实现**，不引入 CMake | 可选 |
 
 渲染、字体（TTF/OTF/CID 解析与整形）、文本布局、Markdown、组件库、包管理器与构建驱动**全部自研**——
-引入的只是两块"不值得自己写"的基础设施。详见 `CONVENTIONS.md` §3.8 与 `vendor/README.md`。
+引入的只是三块"不值得自己写"的基础设施。详见 `CONVENTIONS.md` §3.8 与 `third_party/SOURCES.md`。
 
 ## 它解决什么问题
 
@@ -51,7 +51,7 @@ shuangtian/
 ├── bootstrap.sh     # 自举（Linux/macOS）：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
 ├── bootstrap.ps1    # 自举（Windows）：同上，自动定位 MSVC（vswhere + vcvars64）注入环境
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
-├── vendor/              # 第三方源码（nlohmann/json + quickjs-ng，见 vendor/README.md 与台账）
+├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
 ├── examples/gallery/    # 示例一：组件集 / 设计系统巡检
 ├── examples/mdeditor/   # 示例二：Markdown 编辑器（含四个自绘定制组件）
@@ -133,7 +133,7 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 三维的保证腿是**软件实现**：非 Windows 上三维不会消失，只是慢一些。
 
 资源去处口径不变：**代码进仓库，二进制与大源码库走资源管理**
-（`third_party/` 的 quickjs / nlohmann 内置；模型权重走主仓库 `resources/`）。
+（`third_party/` 的 quickjs / nlohmann 内置；模型权重走主仓库 `../../resources/`）。
 
 ## 控制通道速览（`st-control/1`）
 
@@ -217,7 +217,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 |---|---|
 | 无头后端（headless）+ 软件光栅器 | ✅ 完整（本仓库全部示例与验证都在无头下完成） |
 | 窗口后端 | ✅ **win32 完整**（真窗口 + 鼠标键盘 + 剪贴板 + DXGI swapchain 呈现 + DPI 感知与切换）；⏳ x11 / wayland 未做（运行时探测缺失即回退 headless，不阻断流程） |
-| 硬件合成 | ✅ **D3D11 全链路**（设备层→着色器原语→路径→DXGI 呈现，`--renderer=auto\|gpu\|software`）；✅ **OpenGL 3D**（离屏 FBO + 模板缓冲非零环绕 + OBJ；Windows 专用）；⏳ Vulkan / Metal 待做 |
+| 硬件合成 | ✅ **D3D11 全链路**（设备层→着色器原语→路径→DXGI 呈现，`--renderer=auto\|gpu\|software`）；三维为软件腿保底（系统高阶腿按测量触发，见 `DESIGN.md` §8.4）；⏳ Vulkan / Metal 待做 |
 | DPI（含非整数 1.5x、运行时切换） | ✅ |
 | 字体（TTF/OTF/OTC-CFF/CID、CJK 回退、SC face 优选） | ✅ |
 | Markdown（解析 / 流式 / 高亮 / 渲染组件） | ✅ |
