@@ -290,7 +290,24 @@ auto Application::start() -> Status {
     impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, options_.scale);
     impl_->text_port = std::make_unique<RendererTextPort>(*impl_->renderer);
     root_.set_text_port(impl_->text_port.get());
-    log::info("字体已加载：{} 个 face", impl_->fonts->faces().size());
+    // 逐 face 记录**路径 / 序号 / 名称**。
+    // 只记数量在排查"字变了"这类问题时毫无用处：字形由哪个 face 提供，
+    // 决定了该怀疑哪份字体数据（TTC 的多 face、CID-keyed CFF 的 FDSelect 都在这一层）。
+    const auto& loaded_faces = impl_->fonts->faces();
+    log::info("字体已加载：{} 个 face + {} 个等宽 face", loaded_faces.size(),
+              impl_->fonts->monospace_faces().size());
+    // 正文档**按优先级顺序**列出：栈里靠前的先被 `find_face` 选中，
+    // 所以这一行顺序本身就是"某个字最终由谁画"的答案。
+    for (std::size_t index = 0; index < loaded_faces.size(); ++index) {
+      const auto& face = loaded_faces[index];
+      log::info("  [{}] index={} name={} path={}", index, face.face_index(), face.name(),
+                face.path());
+    }
+    for (std::size_t index = 0; index < impl_->fonts->monospace_faces().size(); ++index) {
+      const auto& face = impl_->fonts->monospace_faces()[index];
+      log::info("  mono[{}] index={} name={} path={}", index, face.face_index(), face.name(),
+                face.path());
+    }
   } else {
     log::warn("未找到可用字体（{}），文本将不渲染", stack.error().message);
   }

@@ -374,14 +374,34 @@ void TextRenderer::trim_cache() const {
   cache_->glyphs.clear();
 }
 
+auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRole role) const
+    -> std::shared_ptr<const GlyphBitmap> {
+  const FontFace* face = stack_->find_face(codepoint, role);
+  if (face == nullptr) return nullptr;
+  const auto id = face->glyph_index(codepoint);
+  if (!id.has_value()) return nullptr;
+  return glyph_bitmap(*face, *id, pixel_size);
+}
+
 auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size) const
     -> std::shared_ptr<const GlyphBitmap> {
   const std::uint32_t size_bucket = size_key(pixel_size);
-  const std::uint64_t key = st::hash::fnv1a64(face.path()) ^
-                            (static_cast<std::uint64_t>(face.face_index()) << 8U) ^
-                            (static_cast<std::uint64_t>(glyph) << 24U) ^
-                            (static_cast<std::uint64_t>(size_bucket) << 48U) ^
-                            (static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f)) << 60U);
+  // 缓存键 = 逐字段 FNV-1a 混合，而不是"移位后 XOR 拼装"。
+  //
+  // 两者看起来等价，实际不然：XOR 拼装**只有位段互不重叠**时才等价于元组，
+  // 一旦重叠（或字段被移出 64 位）不同的 (face, glyph, size) 就会落到同一个键，
+  // 症状是**取到别人的字形**——字宽不变（CJK 全角等宽）、肉眼看到的就是"字变了"。
+  // 实测就踩到过：`supersample*8 << 60` 在 supersample ≥ 4 时会整体移出 64 位，
+  // 也就是"没有参与键"。混合式写法对任意位宽的字段都安全，也不需要人肉核对位段。
+  const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t {
+    return (seed ^ value) * 1099511628211ULL;
+  };
+  const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
+  const std::uint64_t key = mix(mix(mix(mix(st::hash::fnv1a64(face.path()),
+                                            static_cast<std::uint64_t>(face.face_index())),
+                                        static_cast<std::uint64_t>(glyph)),
+                                    static_cast<std::uint64_t>(size_bucket)),
+                                supersample_bucket);
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->glyphs.find(key); iterator != cache_->glyphs.end()) {

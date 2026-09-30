@@ -129,7 +129,10 @@ class TextRenderer {
   /// 字形位图缓存条目数（诊断用）。
   [[nodiscard]] auto cache_entries() const noexcept -> std::size_t;
 
- private:
+  /// 字形覆盖率位图。
+  ///
+  /// 与 `glyph_bitmap_of` 一起**公开**：字形位图是"字对不对"的第一现场，
+  /// 藏在私有实现里就只能靠截图比对，写不成可重复的检查。
   struct GlyphBitmap {
     int width{0};
     int height{0};
@@ -138,6 +141,17 @@ class TextRenderer {
     std::vector<float> coverage{};  ///< 物理像素覆盖率（已按超采样下采样）
   };
 
+  /// 取某个**码点**的字形位图（公开的诊断入口）。
+  ///
+  /// 用途：验证"字形没有被裁切"——位图四周必须留白（生成时 padding=1），
+  /// 墨迹一旦贴边就说明包围盒算小了（曲线极值被切掉），
+  /// 而**字宽不变**（advance 不受影响）→ 现象就是"排版完好、字却变了样"。
+  /// 返回 `nullptr` 表示该码点在字体栈里没有对应字形。
+  [[nodiscard]] auto glyph_bitmap_of(char32_t codepoint, float pixel_size,
+                                     FontRole role = FontRole::Proportional) const
+      -> std::shared_ptr<const GlyphBitmap>;
+
+ private:
   /// 取字形覆盖率位图（按 face/字形/物理尺寸/超采样 缓存）。
   /// 返回 `shared_ptr`：即使该条目随后被淘汰，调用方手里的位图依然有效
   /// （曾因缓存「插入后淘汰」并返回裸指针导致 use-after-free，见 text.cpp 注释）。
