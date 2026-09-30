@@ -778,12 +778,16 @@ class GpuCanvas final : public Surface {
     const Path physical = scale_ == 1.0f ? path : path.scaled(scale_);
     const math::Rect bounds = physical.flattened_bounds(0.25f);
     if (bounds.is_empty()) return;
-    const math::IntRect area = bounds.inflate(1.0f).round_out();
+    math::IntRect area = bounds.inflate(1.0f).round_out();
+    if (area.is_empty()) return;
+    // 与 `rasterize_path` 同理：遮罩只需覆盖当前裁剪域（不取交时超界路径裁剪同样
+    // 会要求 TB 级分配）；frame.shape 与遮罩同界，着色器的 UV 映射才一致。
+    area = area.intersect(current_clip().rect);
     if (area.is_empty()) return;
     ID3D11ShaderResourceView* view = path_mask_texture(path, area, &physical);
     if (view == nullptr) return;
     ClipFrame frame;
-    frame.rect = area.intersect(current_clip().rect);
+    frame.rect = area;
     frame.shape = math::Rect{static_cast<float>(area.x), static_cast<float>(area.y),
                              static_cast<float>(area.width), static_cast<float>(area.height)};
     frame.mask = view;
@@ -1053,9 +1057,15 @@ class GpuCanvas final : public Surface {
     }
     if (rasterize == nullptr || rasterize->is_empty()) return nullptr;
     st::raster::Mask mask(area.width, area.height);
-    // 路径坐标减去遮罩原点（`rasterize_mask` 的 origin 参数就是干这个的）
-    st::raster::detail::rasterize_mask(mask, *rasterize, static_cast<float>(-area.x),
-                                       static_cast<float>(-area.y));
+    // `rasterize_mask` 的语义是“路径坐标 **减去** origin”（内部 `add_path(path, -origin)`，
+    // 与 canvas.cpp 的遮罩调用同约定）——因此这里传 **area 本身**。
+    //
+    // 曾经的 `-area.x/-area.y` 是**符号反了**：遮罩内容被画到 `path + 2·area` 处，
+    // 大部分在缓存外的区域被裁掉，表现为“GPU 路径/描边/图标的位置飘移且多半只剩半边”。
+    // 由于当时的奇偶测试的 structural 计数器恒为 0（假绿），这一直没被量化到；
+    // 修复后由 `gpu_huge_path_mask_is_bounded_by_canvas` 与真实控件对比用例钉住。
+    st::raster::detail::rasterize_mask(mask, *rasterize, static_cast<float>(area.x),
+                                       static_cast<float>(area.y));
     const std::span<const std::uint8_t> values = mask.values();
     ID3D11ShaderResourceView* view =
         create_texture(DXGI_FORMAT_R8_UNORM, area.width, area.height, values.data(),
@@ -1100,7 +1110,18 @@ class GpuCanvas final : public Surface {
     if (rasterize.is_empty()) return;
     const math::Rect bounds = rasterize.flattened_bounds(0.25f);
     if (bounds.is_empty()) return;
-    const math::IntRect area = bounds.inflate(1.0f).round_out();
+    math::IntRect area = bounds.inflate(1.0f).round_out();
+    if (area.is_empty()) return;
+    // 遮罩只需覆盖**当前裁剪域内的像素**：与 clip 取交。
+    //
+    // 不取交时的真实事故（2026-09-30 定位）：把无界约束哨兵 kUnbounded（1e9）
+    // 当作自己高度的元素（mdeditor 的 SourceView 边框），其描边路径的包围盒高度
+    // ≈1e9 → `Mask(1362, 999999979)` 试图分配 ~1.3 TB → std::bad_alloc 直接崩掉
+    // 进程（GPU 路径特有：软件光栅器按扫描线裁剪，不受影响；因此无头 GPU 渲染
+    // 下必崩、软件渲染下不崩——差异很迷惑）。
+    // 取交后遮罩与 clip 同界，**clip 外的像素本来就不会被写入，语义完全不变**；
+    // 同时这也是对一切越界几何（NaN/巨大坐标）的通用止血。
+    area = area.intersect(current_clip().rect);
     if (area.is_empty()) return;
     const std::int64_t start = st::time::now_ns();
     ID3D11ShaderResourceView* view = path_mask_texture(cache_key_source, area, &rasterize);

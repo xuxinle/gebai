@@ -127,6 +127,10 @@ struct Comparison {
         ++reported;
       }
     }
+    // 结构性超差：差 >64 是“内容不同”（位置/颜色/形状对不上），不是边缘抗锯齿的权重差。
+    // （此前这里漏了自增——`structural_ratio` 恒为 0，下方所有 `< 0.001` 断言
+    //   都是空转的假绿；补上后这些断言才真的在钉位置/颜色/形状。）
+    if (delta > 64) ++structural;
   }
   result.differing_ratio = static_cast<double>(differing) / static_cast<double>(left.size());
   result.structural_ratio = static_cast<double>(structural) / static_cast<double>(left.size());
@@ -391,4 +395,50 @@ ST_TEST(gpu_clip_rounded_rect_leaves_corners_clear) {
   ST_CHECK_EQ(static_cast<int>(target.pixel_at(9, 9).a), 0);
   ST_CHECK_EQ(static_cast<int>(target.pixel_at(32, 32).a), 0xFF);
   ST_CHECK_EQ(static_cast<int>(target.pixel_at(32, 10).a), 0xFF);
+}
+
+ST_TEST(gpu_huge_path_mask_is_bounded_by_canvas) {
+  // 回归（2026-09-30 定位的真实崩溃）：把无界约束哨兵（kUnbounded≈1e9）当作
+  // 高度的元素，其描边路径包围盒高度 ≈1e9 → GPU 遮罩曾按包围盒全量分配
+  // （实测 1362×999999979 ≈ 1.3 TB）→ std::bad_alloc 直接崩进程。
+  // 软件光栅器按扫描线裁剪不受影响，因此只在「无头 + GPU」组合下暴露。
+  // 修法：遮罩与当前裁剪域取交（默认裁剪=整块画布）。本用例钉两件事：
+  //   ① 巨大几何不再产生巨大分配（能跑完本身就是断言——修复前这里直接崩）；
+  //   ② 可见部分的渲染与软件光栅器语义一致（取交不改变像素结果）。
+  if (!gpu_ready()) return;
+  const int width = 128;
+  const int height = 96;
+  auto gpu = st::raster::gpu::create_canvas(width, height, 1.0f, {});
+  ST_CHECK(gpu.has_value());
+  if (!gpu.has_value()) return;
+  Surface& target = **gpu;
+
+  // 左右两条竖边穿过画布，上下边远在 ±1e9（模拟无界高度元素的边框）
+  st::raster::Path huge;
+  huge.move_to(st::math::Point{30.0f, -1.0e9f});
+  huge.line_to(st::math::Point{98.0f, -1.0e9f});
+  huge.line_to(st::math::Point{98.0f, 1.0e9f});
+  huge.line_to(st::math::Point{30.0f, 1.0e9f});
+  huge.close();
+  const Color stroke{0xE8, 0x40, 0x40, 0xFF};
+  const Color base{0x0A, 0x0F, 0x1A, 0xFF};
+
+  Canvas software(width, height);
+  software.clear(base);
+  software.stroke_path(huge, st::raster::Paint::solid(stroke), 2.0f);
+  target.clear(base);
+  target.stroke_path(huge, st::raster::Paint::solid(stroke), 2.0f);
+
+  // 竖边穿过处必须出现描边像素（x=30 整像素落在 [29,31] 的描边带内）
+  ST_CHECK(target.pixel_at(30, height / 2).r > 150);
+  // 中空区域保持底色
+  ST_CHECK_EQ(static_cast<int>(target.pixel_at(64, height / 2).r), 0x0A);
+  // 与软件光栅器语义一致（仅允许边缘抗锯齿的权重差）
+  const Comparison result = compare(software.pixels(), target.pixels(), 12, width,
+                                    /*background=*/0x0A0F1AFFU);
+  st::print("[gpu-diff] 巨大路径：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · 非底色 {:.4f} vs {:.4f}\n",
+            result.differing_ratio * 100.0, result.structural_ratio * 100.0, result.max_delta,
+            result.ink_ratio_left, result.ink_ratio_right);
+  ST_CHECK(result.structural_ratio < 0.005);
+  ST_CHECK(std::abs(result.ink_ratio_left - result.ink_ratio_right) < 0.02);
 }

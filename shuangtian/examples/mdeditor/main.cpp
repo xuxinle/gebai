@@ -118,7 +118,18 @@ class SourceView : public Element {
   void measure(const st::ui::RenderContext& context, const st::ui::Constraints& constraints) override {
     const float line_height = context.text != nullptr ? context.text->line_height(font_size_)
                                                       : font_size_ * 1.6f;
-    measured_ = st::math::Size{constraints.max_width, std::max(constraints.max_height, 240.0f)};
+    // 固有高度 = 内容行数 × 行高。**不能把 kUnbounded（无界哨兵 1e9）当作自己
+    // 的高度**：那会让元素以 1e9 高进入布局——语义树 bounds 变成 1e9（AI 按
+    // bounds 定位会错），且任何描边路径都会生成 1e9 高的遮罩（GPU 路径实测会
+    // 试图分配 ~1.3 TB 直接崩；框架侧已在 rasterize_path 取交 clip 兼底，
+    // 但正确的做法是元素自己给出固有高度）。
+    std::size_t line_count = 1;
+    for (const char ch : text_) {
+      if (ch == '\n') ++line_count;
+    }
+    const float content_height = static_cast<float>(line_count) * line_height + 24.0f;
+    const float bounded = std::min(std::max(content_height, 240.0f), constraints.max_height);
+    measured_ = st::math::Size{constraints.max_width, std::max(bounded, 0.0f)};
     line_height_ = line_height;
     (void)line_height;
   }
