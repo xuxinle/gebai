@@ -1351,8 +1351,8 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   return stats;
 }
 
-auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter)
-    -> Result<int> {
+auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
+               bool list_only, std::string_view junit_path) -> Result<int> {
   const std::string root = options.root.empty() ? manifest.directory : options.root;
   auto flags = profile_flags(options.profile);
   if (!flags) return forward_error(flags.error());
@@ -1476,13 +1476,18 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   if (!linked) return forward_error(linked.error());
 
   std::vector<std::string> args;
+  // `--list` 交测试进程处理（列出用例名后即退，不跑测试；filter 仍生效）
+  if (list_only) args.push_back("--list");
   if (!filter.empty()) args.push_back(std::string(filter));
   // 交叉编译产物不能在本机执行：明确告知（比 "Exec format error" 可读得多）
   if (toolchain->cross()) {
     return unexpected(ErrorCode::Unsupported,
                       std::format("交叉编译产物无法在宿主执行: {}（请在目标平台运行）", output));
   }
-  auto result = process::run(output, args, process::Options{.capture_output = false});
+  process::Options run_options{.capture_output = false};
+  // JUnit 报告路径经环境变量下发（测试框架入口读取，见 src/test/test_main.cpp）
+  if (!junit_path.empty()) run_options.env["ST_JUNIT_XML"] = std::string(junit_path);
+  auto result = process::run(output, args, run_options);
   if (!result) return forward_error(result.error());
   return result->exit_code;
 }

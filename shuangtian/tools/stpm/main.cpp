@@ -132,6 +132,7 @@ void print_usage() {
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
   run <target> [args]   构建并运行目标（无头演示：run gallery -- --headless --frames 3）
   test [filter]         构建并运行单元测试（--san 开 ASan/UBSan 档，-j N 控并发；同支持 --jobs-large/--max-memory）
+                        --list 只列用例不跑；--format junit [--junit-out 路径] 写逐用例报告（CI）
   lint [--explain RULE] 禁令扫描（CONVENTIONS §8；无参数即扫描工程，--rules 列出规则）
   deps                  解析依赖并打印依赖树（--locked 只读 st.lock）
   fetch                 解析 + 拉取依赖到缓存/工作区，并写 st.lock
@@ -263,9 +264,17 @@ auto command_test(const Arguments& arguments) -> int {
   options.max_memory_mb = test_max_memory > 0.0 ? static_cast<std::uint64_t>(test_max_memory) : 0;
   options.toolchain = arguments.get("toolchain", "");
   const std::string filter = arguments.positional.empty() ? std::string{} : arguments.positional.front();
-  st::print("运行测试 [{}]{}\n", options.profile,
-              filter.empty() ? "" : std::format(" 过滤: {}", filter));
-  auto code = st::pkg::run_tests(*manifest, options, filter);
+  // `--list`：只列用例不跑（交测试框架入口）；`--format junit`：经 ST_JUNIT_XML 写逐用例报告
+  const bool list_only = arguments.has("list");
+  std::string junit_path;
+  if (arguments.get("format", "") == "junit") {
+    junit_path = arguments.get("junit-out", "");
+    if (junit_path.empty()) junit_path = st::fs::join(manifest->directory, "build/test-results.xml");
+  }
+  st::print("{}测试 [{}]{}{}\n", list_only ? "列出" : "运行", options.profile,
+              filter.empty() ? "" : std::format(" 过滤: {}", filter),
+              junit_path.empty() ? "" : std::format(" → {}", junit_path));
+  auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path);
   if (!code) {
     std::fprintf(stderr, "%s\n", code.error().message.c_str());
     return 1;
@@ -598,14 +607,15 @@ ST_MAIN(run_app)
     root = manifest->directory;
   } else {
     // 没有清单也能清：默认当前目录（把"删产物"做成不依赖工程解析的操作）
-    root = fs::current_dir().value_or(std::string{"."});
+    const auto current = st::fs::current_dir();
+    root = current ? *current : std::string{"."};
   }
-  const std::string build_dir = fs::join(root, "build");
+  const std::string build_dir = st::fs::join(root, "build");
   std::uint64_t removed = 0;
-  if (fs::is_directory(build_dir)) {
+  if (st::fs::is_directory(build_dir)) {
     // 先量一下再删：用户应该知道刚才释放了多少
     std::function<void(const std::string&)> visit = [&](const std::string& dir) {
-      const auto entries = fs::list_dir(dir);
+      const auto entries = st::fs::list_dir(dir);
       if (!entries) return;
       for (const auto& entry : *entries) {
         if (entry.is_dir) {
@@ -616,7 +626,7 @@ ST_MAIN(run_app)
       }
     };
     visit(build_dir);
-    if (auto status = fs::remove_all(build_dir); !status) {
+    if (auto status = st::fs::remove_all(build_dir); !status) {
       std::fprintf(stderr, "删除失败: %s\n", status.error().message.c_str());
       return 1;
     }
@@ -629,14 +639,14 @@ ST_MAIN(run_app)
 
   if (arguments.has("all")) {
     std::string home;
-    if (const auto env = fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
+    if (const auto env = st::fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
       home = *env;
     } else {
-      home = fs::join(fs::home_dir(), ".shuangtian");
+      home = st::fs::join(st::fs::home_dir(), ".shuangtian");
     }
-    const std::string cache_dir = fs::join(home, "cache");
-    if (fs::is_directory(cache_dir)) {
-      if (auto status = fs::remove_all(cache_dir); !status) {
+    const std::string cache_dir = st::fs::join(home, "cache");
+    if (st::fs::is_directory(cache_dir)) {
+      if (auto status = st::fs::remove_all(cache_dir); !status) {
         std::fprintf(stderr, "缓存删除失败: %s\n", status.error().message.c_str());
         return 1;
       }
