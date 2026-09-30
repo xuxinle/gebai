@@ -51,6 +51,30 @@ describe("尾部 assistant 降级（防御性归一化）", () => {
     expect(plain.at(-1)!.role).toBe("user")
   })
 
+  test("待办续做模拟工具对（finalText 后接 assistant(toolCalls)+tool）三类 apiKind 序列化均合法", async () => {
+    // 待办续做注入的形态：模型最终回复后接模拟 todo 查询调用对（DESIGN「待办续做」）——
+    // 相邻两条 assistant（finalText + 空 content 带 toolCalls）在 Anthropic 序列化时合并为
+    // text+tool_use 单条（恰是真实工具轮形态），尾消息始终是 tool 结果，不触发达级
+    const msgs: MessageLike[] = [
+      { role: "user", content: "任务" },
+      { role: "assistant", content: "完成了一部分" },
+      { role: "assistant", content: "", toolCalls: [{ id: "todo-cont-1", name: "todo", arguments: { entries: [] } }] },
+      { role: "tool", content: "查询待办：\n当前全部待办（1 项）：\n[pending] 任务A（id: t1）", toolCallId: "todo-cont-1", name: "todo" },
+    ]
+    const oa = await sentMessages(msgs)
+    expect(oa.at(-1)!.role).toBe("tool")
+    expect(oa.at(-1)!.tool_call_id).toBe("todo-cont-1")
+    // 前一条是真实回复文本的 assistant，再前一条是带 tool_calls 的 assistant（均保持原角色）
+    expect(oa.at(-2)!.tool_calls).toBeDefined()
+    const ant = await sentMessages(msgs, "anthropic")
+    expect(ant.at(-1)!.role).toBe("user") // tool_result 包在 user 消息内
+    const resp = await sentMessages(msgs, "responses")
+    // Responses：assistant 文本 + function_call + function_call_output 依次成项
+    const kinds = resp.map((m) => String(m.type ?? m.role ?? ""))
+    expect(kinds).toContain("function_call")
+    expect(kinds).toContain("function_call_output")
+  })
+
   test("Anthropic / Responses 序列化同样受保护（尾 assistant 降级）", async () => {
     const anthropic = await sentMessages([{ role: "user", content: "问题" }, { role: "assistant", content: "结尾助手文本" }], "anthropic")
     expect(anthropic.at(-1)!.role).toBe("user")

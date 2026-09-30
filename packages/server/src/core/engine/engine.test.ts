@@ -3914,34 +3914,35 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "完成待办")
     const loaded = await s.store.load(session.id)
     expect(loaded!.todos[0].status).toBe("completed")
-    // 待办完成后不再续做：总模型调用 = 工具轮 + 收尾轮
+    // 待办完成后不再续做：总模型调用 = 工具轮 + 收尾轮，无模拟 todo 查询注入
     expect(s.provider.calls).toBe(2)
-    const msgs = loaded!.messages.map((m) => String(m.content))
-    expect(msgs.some((c) => c.includes("【智体·待办提醒】"))).toBe(false)
+    const simCalls = loaded!.messages.filter((m) => m.role === "tool" && m.engineNote === "todo")
+    expect(simCalls.length).toBe(0)
     cleanup(s.home)
   })
 
-  test("todo continuation: 提示为 user 软性提醒 + engineNote:todo（落盘与回放同角色），纯文本回应即停", async () => {
+  test("todo continuation: 注入为模拟 todo 查询工具对（assistant(toolCalls)+tool，与真实工具循环同构），纯文本回应即停", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
     await s.engine.run(session.id, "default", "hi")
-    // 软性提醒 + 纯文本回应即停：初始 1 轮 + 提醒 1 次（模型未再行动，视为已决定收尾）
+    // 软性提醒 + 纯文本回应即停：初始 1 轮 + 注入后续跑 1 轮（模型未再行动，视为已决定收尾）
     expect(s.provider.calls).toBe(2)
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
-    expect(contMsgs.length).toBe(1)
-    // 提醒携带未完成清单；事件携带 messageId/text 载荷（前端实时渲染）
-    expect(String(contMsgs[0].content)).toContain("任务A")
-    expect(String(contMsgs[0].content)).toContain("请自行决策")
-    // 消息即 user 角色（与用户输入同角色，随用户消息受上下文保护）+ engineNote 标记——
-    // 思考类模型（DeepSeek thinking）不接受以 assistant 结尾的请求（视为前缀续写、要求回传
-    // reasoning_content），assistant 形态的提醒会让后续调用 400、任务静默中断（实测）；
-    // engineNote 供前端与记录导出区分「引擎写的提示」与「用户输入」
-    expect(contMsgs[0].engineNote).toBe("todo")
+    // 落盘形态：模拟 todo 查询调用对——assistant(toolCalls) + tool（engineNote: "todo" 标记引擎合成）
+    const simToolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.engineNote === "todo")
+    expect(simToolMsgs.length).toBe(1)
+    const simAssistant = loaded!.messages.find((m) => m.role === "assistant" && m.toolCalls?.some((tc) => tc.name === "todo"))
+    expect(simAssistant).toBeDefined()
+    expect(simToolMsgs[0].toolCallId).toBe(simAssistant!.toolCalls![0].id)
+    // 结果携带未完成清单（含 id，与 todo 工具查询分支同口径）与行动指令
+    expect(String(simToolMsgs[0].content)).toContain("[in_progress] 任务A（id: t1）")
+    expect(String(simToolMsgs[0].content)).toContain("请继续执行")
+    // 发送模型的上下文：模拟对同构进上下文（尾消息为 tool 结果，避开思考类模型的尾部 assistant 约束）
     const nudgeCtx = s.provider.seenChats[1]!
-    expect(nudgeCtx[nudgeCtx.length - 1]!.role).toBe("user")
-    expect(String(nudgeCtx[nudgeCtx.length - 1]!.content)).toContain("【智体·待办提醒】")
+    expect(nudgeCtx[nudgeCtx.length - 1]!.role).toBe("tool")
+    expect(nudgeCtx[nudgeCtx.length - 2]!.role).toBe("assistant")
+    expect(String(nudgeCtx[nudgeCtx.length - 1]!.content)).toContain("任务A")
     cleanup(s.home)
   })
 
@@ -3959,8 +3960,8 @@ describe("context compaction", () => {
     cleanup(s.home)
   })
 
-  test("todo continuation: 提醒后行动一轮再纯文本回应，仅再提醒一次后停止", async () => {
-    // tool 模式：首轮工具 → 提醒① → 纯文本回应（本轮未行动）→ 决策收尾停止
+  test("todo continuation: 注入后行动一轮再纯文本回应，仅再注入一次后停止", async () => {
+    // tool 模式：首轮工具 → 注入① → 纯文本回应（本轮未行动）→ 决策收尾停止
     const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
@@ -3972,14 +3973,14 @@ describe("context compaction", () => {
     unsub()
     expect(s.provider.calls).toBe(3)
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
-    expect(contMsgs.length).toBe(1)
-    expect(events.filter((t) => t === "event.todo.continue").length).toBe(1)
+    // 模拟工具对恰好注入 1 次；实时可见走工具事件通道（event.tool.call/result，前端自动建待办卡）
+    const simToolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.engineNote === "todo")
+    expect(simToolMsgs.length).toBe(1)
     cleanup(s.home)
   })
 
   test("todo continuation: 持续行动但从不收尾达到轮次上限后停止", async () => {
-    // alwaysTool（每轮持续调工具）：提醒后模型持续行动不纯文本收尾，达到轮次上限停止
+    // alwaysTool（每轮持续调工具）：注入后模型持续行动不纯文本收尾，达到轮次上限停止
     const s = await setup("tool")
     const session = await s.store.createSession("default", "t")
     await s.store.setTodos(session.id, [{ id: "t1", title: "任务A", status: "in_progress", priority: "medium" }])
@@ -3988,9 +3989,9 @@ describe("context compaction", () => {
     s.provider.toolArgs = {}
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
-    // 每次提醒后均继续行动（未纯文本收尾）：上限 1 轮 → 仅注入 1 次提醒即停止
-    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
-    expect(contMsgs.length).toBe(1)
+    // 每次注入后均继续行动（未纯文本收尾）：上限 1 轮 → 仅注入 1 次即停止
+    const simToolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.engineNote === "todo")
+    expect(simToolMsgs.length).toBe(1)
     cleanup(s.home)
   })
 
@@ -4006,9 +4007,9 @@ describe("context compaction", () => {
     s.provider.replyText = "正在处理"
     await s.engine.run(session.id, "default", "hi")
     const loaded = await s.store.load(session.id)
-    const contMsgs = loaded!.messages.filter((m) => m.role === "user" && m.engineNote === "todo")
-    expect(contMsgs.length).toBe(1)
-    expect(String(contMsgs[0].content)).not.toContain("完全相同")
+    const simToolMsgs = loaded!.messages.filter((m) => m.role === "tool" && m.engineNote === "todo")
+    expect(simToolMsgs.length).toBe(1)
+    expect(String(simToolMsgs[0].content)).not.toContain("完全相同")
     cleanup(s.home)
   })
 
@@ -4022,7 +4023,7 @@ describe("context compaction", () => {
     await s.engine.run(session.id, "default", "hi")
     expect(s.provider.calls).toBe(1)
     const loaded = await s.store.load(session.id)
-    expect(loaded!.messages.some((m) => String(m.content).includes("【智体·待办提醒】"))).toBe(false)
+    expect(loaded!.messages.some((m) => m.role === "tool" && m.engineNote === "todo")).toBe(false)
     cleanup(s.home)
   })
 })

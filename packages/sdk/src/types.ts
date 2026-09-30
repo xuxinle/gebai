@@ -75,14 +75,15 @@ export interface Message {
   /** 子Agent 装载提示词消息标记（role=system）：装载（agent_load/启动预载/WS sub_agent.load）时写入会话记录，
    *  内容为子Agent 完整系统提示词；loadHistory 时按 system 角色透传进模型上下文，UI 渲染为简短装载提示。 */
   loadedAgent?: string
-  /** 引擎软性提示标记：消息**角色为 user**（与用户输入同角色、随用户消息一起受上下文保护），仅用于与用户
-   *  自己发的消息**区分展示**——UI 渲染为弱化的通知条（非用户气泡）。
-   *  取值：`todo` 待办续做提醒、`verify` 收尾验证提醒、`task` 任务结果写回、`subsession` 子会话报告合入、
- *  `interrupted` 服务进程中断导致上一轮任务终止的说明（启动时补写）。
-   *  落 user 的根本原因：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、
-   *  要求回传 `reasoning_content` → 400），而这类系统合成的消息注入位置往往就是模型下一次调用的前一条。
-   *  标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
-   *  （前缀兜底限定 assistant 角色）。 */
+  /** 引擎软性提示标记，用于与用户自己的消息/真实工具调用**区分展示**（弱化通知条或带标记的工具卡）。
+   * 取值：`todo` 待办续做注入（**模拟 todo 查询工具调用对**的 tool 消息携带——引擎合成的调用，非模型真实发起；
+   * 存量数据为 user 形态提醒消息），`verify` 收尾验证提醒（user）、`task` 任务结果写回（user）、
+   * `subsession` 子会话报告合入（user）、`interrupted` 服务进程中断说明（user，启动时补写）。
+   * user 形态标记的根本原因：思考类模型（DeepSeek thinking 等）**不接受以 assistant 结尾的请求**（视为前缀续写、
+   * 要求回传 `reasoning_content` → 400），而这类系统合成的消息注入位置往往就是模型下一次调用的前一条；
+   * 待办续做的模拟工具对尾消息是 tool 结果，天然避开该约束，标记仅作留痕与展示区分。
+   * 标记之前落盘的存量提醒为 assistant 形态，按内容前缀「【待办提醒】/【验证提醒】」兜底识别
+ *  （前缀兜底限定 assistant 角色）。 */
   engineNote?: "todo" | "verify" | "task" | "subsession" | "interrupted"
   /** 上下文压缩产生的摘要消息标记（role=system），UI 渲染为压缩通知 */
   compacted?: boolean

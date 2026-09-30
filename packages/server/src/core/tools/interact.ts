@@ -5,18 +5,21 @@ import type { ChoiceOption, Tool } from "../base/types"
 import { PLAN_DIR, buildPlanMarkdown, planFileName } from "../support/plan"
 import { schema, type GlobalToolEntry } from "./shared"
 
+/** 单行待办：状态/标题/进度/预计耗时/id（id 供 update/delete 精确定位，同名待办区分用；
+ * todo 工具与引擎待办续做注入（模拟 todo 查询调用对）共用同一文案口径）。 */
+export function todoLine(t: TodoItem): string {
+  const progress = t.progress !== undefined ? ` (${t.progress}%)` : ""
+  const eta = t.etaMin !== undefined ? `（预计 ${t.etaMin} 分钟）` : ""
+  return `[${t.status}] ${t.title}${progress}${eta}（id: ${t.id}）`
+}
+
+/** 完整清单文本（操作后随结果返回，让模型一次掌握最新状态，无需再查）。 */
+export function todoSnapshot(todos: TodoItem[]): string {
+  if (!todos.length) return "当前全部待办（0 项）：（无）"
+  return `当前全部待办（${todos.length} 项）：\n${todos.map(todoLine).join("\n")}`
+}
+
 export function makeTodoTool(): Tool {
-  /** 单行待办：状态/标题/进度/预计耗时/id（id 供 update/delete 精确定位，同名待办区分用）。 */
-  const line = (t: TodoItem): string => {
-    const progress = t.progress !== undefined ? ` (${t.progress}%)` : ""
-    const eta = t.etaMin !== undefined ? `（预计 ${t.etaMin} 分钟）` : ""
-    return `[${t.status}] ${t.title}${progress}${eta}（id: ${t.id}）`
-  }
-  /** 完整清单文本（操作后随结果返回，让模型一次掌握最新状态，无需再查）。 */
-  const snapshot = (todos: TodoItem[]): string => {
-    if (!todos.length) return "当前全部待办（0 项）：（无）"
-    return `当前全部待办（${todos.length} 项）：\n${todos.map(line).join("\n")}`
-  }
   /**
    * 定位待办：id 优先（精确）；无 id 时按 title 定位——先精确匹配，唯一时命中；
    * 精确多匹配或无精确时唯一包含匹配兜底；仍不唯一/无匹配返回 undefined。
@@ -70,7 +73,7 @@ export function makeTodoTool(): Tool {
       const todos = await ctx.getTodos()
       const entries = Array.isArray(args.entries) ? (args.entries as Array<Record<string, unknown>>) : []
       // 空列表 = 查询：不落盘不发布事件
-      if (!entries.length) return { output: `查询待办：\n${snapshot(todos)}`, data: { todos } }
+      if (!entries.length) return { output: `查询待办：\n${todoSnapshot(todos)}`, data: { todos } }
       const results: string[] = []
       const failures: string[] = []
       for (const raw of entries) {
@@ -126,7 +129,7 @@ export function makeTodoTool(): Tool {
         `待办操作完成（${results.length} 成功${failures.length ? `，${failures.length} 失败` : ""}）：\n` +
         results.join("\n") +
         (failures.length ? `\n失败：\n${failures.join("\n")}` : "")
-      return { output: `${head}\n${snapshot(todos)}`, data: { todos } }
+      return { output: `${head}\n${todoSnapshot(todos)}`, data: { todos } }
     },
   }
   return tool

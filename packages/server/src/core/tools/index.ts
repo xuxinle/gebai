@@ -39,7 +39,7 @@ export { showTool, fetchUrlTool, SHOW_MAX_BYTES, SHOW_TEXT_DIRECT_BYTES, SHOW_TE
 export { pageCaptureTool, PAGE_CAPTURE_HTML_LIMIT, readFeedbackTool } from "@gebai/agents"
 // git/system_info/env_detect/preview_server（code 域工具）已迁 @gebai/agents（packages/agents/src/core/code-tools.ts）
 export { gitTool, systemInfoTool, envDetectTool, makePreviewServerTool, type PreviewServerEntry } from "@gebai/agents"
-export { makeTodoTool, askTool } from "./interact"
+export { makeTodoTool, askTool, todoLine, todoSnapshot } from "./interact"
 export { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool } from "./agent"
 export { toolSchemasTool } from "./schemas"
 

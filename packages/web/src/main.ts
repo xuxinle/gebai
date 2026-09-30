@@ -289,17 +289,19 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
       })
       scrollIfSticky()
       refreshJumpBottom()
-    } else if (ev.type === "event.todo.continue" || ev.type === "event.verify.nudge") {
-      // 引擎收尾提示实时可见（DESIGN「待办续做」「收尾验证提醒」）：消息落盘为 **user 角色 + engineNote 标记**
+    } else if (ev.type === "event.verify.nudge") {
+      // 收尾验证提醒实时可见（DESIGN「收尾验证提醒」）：消息落盘为 **user 角色 + engineNote 标记**
       // （与用户输入同角色，思考类模型不接受以 assistant 结尾的请求；标记供展示形态区分），
-      // 此处按同款形态实时渲染（引擎提示通知条）；非当前会话由历史回放兜底
+      // 此处按同款形态实时渲染（引擎提示通知条）；非当前会话由历史回放兜底。
+      // 待办续做已改为模拟 todo 查询工具调用对，走 event.tool.call/result（前端自动建待办卡片），
+      // 不再有独立通知条事件
       if (getCurrentSession()?.id !== ev.sessionId) return
       sealSegment(ev.sessionId)
       appendMsg({
         id: String(ev.payload.messageId ?? uuid()),
         role: "user",
         content: String(ev.payload.text ?? ""),
-        engineNote: ev.type === "event.todo.continue" ? "todo" : "verify",
+        engineNote: "verify",
         createdAt: Date.now(),
       })
       scrollIfSticky()

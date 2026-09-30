@@ -13,7 +13,7 @@ import type { SubAgentManager } from "../agents/subagents"
 import type { ToolContext, ToolResult, Tool, PresetProject, ChoiceResult, ChoiceOption, ChoicePlan, InteractionMode, OutputMode, SessionData, DynamicToolDef, SubAgentDef, ToolResultImage } from "../base/types"
 import { ToolRegistry as BaseToolRegistry } from "../base/registry"
 import { normalizeToolArgs, tolerantToolName } from "../base/tool-args"
-import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles } from "../tools"
+import { agentListTool, agentLoadTool, subSessionRunTool, subSessionMergeTool, bgTaskTool, createGlobalTools, isGlobalToolExcluded, toolSchemasTool, PAGE_CAPTURE_HTML_LIMIT, truncate, TRUNCATE_THRESHOLD, spillLongUserInput, walkDirFiles, todoSnapshot } from "../tools"
 import { jsTool, makeDynamicTool } from "../exec/js-tool"
 import { ShTaskRunner } from "../exec/sh-tasks"
 import { SubSessionRegistry, type SubSessionHandle, type SubSessionSpec, type SubSessionArchiveHolder, type SubSessionFinishOptions, SUBSESSION_MERGE_MAX_CHARS, SUBSESSION_MERGE_SUMMARY_SKIP_CHARS, subSessionFinishGraceMs, subSessionNoticeHead, requestSubSessionFinish } from "../session/subsessions"
@@ -1157,12 +1157,11 @@ private activeSchemas(sessionId: string) {
       }
       const messages: MessageLike[] = [{ role: "system", content: systemPrompt }, ...history]
 
-      // 待办续做：每轮会话完成（模型给出最终回复）后检查待办，pending/in_progress 未完成则
-      // 追加提示消息继续会话，直至全部完成或达到续做轮次上限（DESIGN「待办续做」）。
-      // 提示为 **user 角色**的软性提醒（仅陈述未完成事实，继续执行还是直接收尾由模型自行决策）——
-      // user 而非 assistant：思考类模型不接受以 assistant 结尾的请求，而提醒注入点正是下一条模型调用的前一条
-      // （见 DESIGN「引擎注入消息的角色约定」），engineNote: "todo" 标记供 UI 区分展示；
-      // 模型对提示的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入
+      // 待办续做：每轮会话完成（模型给出最终回复）后检查待办，pending/in_progress 未完成则注入
+      // **模拟 todo 查询工具调用对**（assistant(toolCalls)→tool，与真实工具循环同构，DESIGN「待办续做」）
+      // 继续会话，直至全部完成或达到续做轮次上限。软性提醒：仅陈述未完成事实与行动建议，继续执行还是
+      // 直接收尾由模型自行决策；尾消息是 tool 结果，天然避开思考类模型的尾部 assistant 约束；
+      // 模型对注入的回应为纯文本（未执行任何工具）视为已决定收尾，不再注入
       let continueRound = 0
       let verifyRound = 0
       let finalText = ""
@@ -1238,26 +1237,43 @@ private activeSchemas(sessionId: string) {
         // 仅对提醒后的回应判定（初始回复未见过提醒，首次提醒仍注入）
         if (continueRound > 0 && res && res.toolRounds === 0) break
 
-        const titleList = pending.map((t) => `- ${t.title}`).join("\n")
-        // 文本重复检测：回复与上上轮完全相同 → 追加提醒，避免待办续做空转复述（DESIGN「重复检测」）。
-        // 注：需 ≥2 轮才可能触发（lastFinalText 于首次提醒后才有值）——当前 MAX_TODO_CONTINUE = 1
+        // 文本重复检测：回复与上上轮完全相同 → 结果尾部附防复述提示（避免待办续做空转复述，DESIGN「重复检测」）。
+        // 注：需 ≥2 轮才可能触发（lastFinalText 于首次注入后才有值）——当前 MAX_TODO_CONTINUE = 1
         // 下为**休眠路径**（保留：上限调高即自动生效，逻辑本身与轮次无关）
         const repeated = finalText !== "" && finalText === lastFinalText
-        const contMsg = `${agentNoteHead("待办提醒", true)}\n当前会话仍有未完成的待办：\n${titleList}\n请自行决策：继续执行未完成的待办，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
-        const contMsgId = crypto.randomUUID()
-        // 同收尾验证提醒：落盘 user 角色 + engineNote 标记（思考类模型不接受尾部 assistant；标记供 UI 区分展示）
+        // 待办续做注入 = **模拟一次 todo 查询工具调用对**（DESIGN「待办续做」）：与真实工具循环同构的
+        // assistant(toolCalls)→tool 消息对——模型下一轮看到的历史是「自己刚查过待办、结果还有未完成项」，
+        // 自然的行为链而非外部催办。尾消息是 tool 结果，天然避开思考类模型的尾部 assistant 约束；
+        // 行动指令附在结果尾部（保命令性）；引擎合成的事实由 tool 消息的 engineNote: "todo" 标记留痕
+        // （isEngineNote 字段优先命中，UI/审计可区分；assistant(toolCalls) 本身不可带 engineNote——
+        // loadHistory 会把带标记的 assistant 转 user 丢掉 toolCalls，破坏配对）
+        const simCallId = `todo-cont-${crypto.randomUUID()}`
+        const toolOutput = `查询待办：\n${todoSnapshot(todos)}\n以上待办仍未完成：请继续执行，或确认其已无需处理后收尾。${repeated ? "\n注意：你上一次的回复与上上一次完全相同，请勿复述。" : ""}`
         messages.push({ role: "assistant", content: finalText })
-        messages.push({ role: "user", content: contMsg })
+        messages.push({ role: "assistant", content: "", toolCalls: [{ id: simCallId, name: "todo", arguments: { entries: [] } }] })
+        messages.push({ role: "tool", content: toolOutput, toolCallId: simCallId, name: "todo" })
         await this.opts.store.appendMessage(sessionId, {
-          id: contMsgId,
-          role: "user",
-          content: contMsg,
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: simCallId, name: "todo", arguments: { entries: [] } }],
+          createdAt: Date.now(),
+        }, user)
+        await this.opts.store.appendMessage(sessionId, {
+          id: simCallId,
+          role: "tool",
+          content: toolOutput,
+          toolCallId: simCallId,
+          name: "todo",
+          arguments: { entries: [] },
           engineNote: "todo",
           createdAt: Date.now(),
         }, user)
         lastFinalText = finalText
         continueRound++
-        this.publish(sessionId, "event.todo.continue", { round: continueRound, remaining: pending.length, messageId: contMsgId, text: contMsg, sessionId })
+        // 实时可见：复用真实工具事件通道（前端自动建待办占位卡、结果到达刷新为清单，与真实 todo 调用零差异）
+        this.publish(sessionId, "event.tool.call", { name: "todo", arguments: { entries: [] }, toolCallId: simCallId, sessionId })
+        this.publish(sessionId, "event.tool.result", { name: "todo", toolCallId: simCallId, output: toolOutput, sessionId })
       }
 
       // 上下文大小与真实 usage 基线持久化（历史会话列表展示 + 下次 run 压缩判定基线）：
@@ -3404,7 +3420,7 @@ private activeSchemas(sessionId: string) {
       // 源即目标（引用会话 tmp 内自身路径）且批内未占用：原位引用，不重命名不复制（改名=复制自身）
       if (!(src && resolve(src) === resolve(tmp, name) && !usedNames.has(name))) {
         // 重名去重：同批两个 data.csv 会在同一路径静默覆盖（前一个内容丢失）；追加序号区分，
-        // 也避免覆盖会话 tmp 下既有同名文件（上一一轮任务产物/已上传附件）
+        // 也避免覆盖会话 tmp 下既有同名文件（上一轮任务产物/已上传附件）
         name = uniqueUploadName(tmp, name, usedNames)
         if (a.data) {
           await writeFile(`${tmp}/${name}`, a.data)
