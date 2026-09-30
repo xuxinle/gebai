@@ -585,6 +585,9 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
   const bool solid = paint.is_solid();
   if (solid && paint.color().a == 0U) return;
   const std::uint32_t premul = solid ? math::premultiply(paint.color()) : 0U;
+  const Gradient* const gradient = solid ? nullptr : paint.gradient();
+  // 行中心对应的逻辑 y（行内常量；渐变快路径与回退路径共用）
+  const float logical_y = (static_cast<float>(y) + 0.5f) * inverse_scale_;
 
   // 单个像素按覆盖率混合（端点像素与“带遮罩/非常规混合模式”用）
   const auto blend_one = [&](int x, float alpha, math::Color color) {
@@ -642,10 +645,59 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
       continue;
     }
 
-    // 渐变画笔：颜色逐像素采样（**只碰真的相交的像素**），坐标按行递推
+    // 渐变画笔：颜色逐像素采样（**只碰真的相交的像素**）。
+    //
+    // 优化（bench：此原语曾达清屏的 ~160×，是最贵的一块）：
+    // ① **竖直线性渐变**（dx≈0，主题里最常见）：整行颜色恒定——逐像素采样退化为
+    //    每行一次，完全覆盖段直接走 SIMD 整行混合（与纯色同一套 `blend_row`）；
+    // ② 其余线性渐变：位置参数 `t` 沿行**递推**（每像素一次加法），
+    //    不再逐像素做点积 + 除法；
+    // ③ 径向/扫掠：几何非线性，保持逐像素采样（只在真的相交的像素上）。
+    if (gradient != nullptr) {
+      const math::Point from = gradient->start();
+      const math::Point to = gradient->end();
+      const float gdx = to.x - from.x;
+      const float gdy = to.y - from.y;
+      const float length_squared = gdx * gdx + gdy * gdy;
+      const bool vertical = std::abs(gdx) <= 0.0002f * std::max(1.0f, std::abs(gdy));
+      if (vertical && length_squared > 0.0001f) {
+        // t 只随 y 变化：整行一个颜色（直接从几何算，不必构造点再投影）
+        const float row_position = (logical_y - from.y) * gdy / length_squared;
+        const math::Color row_color = gradient->sample_position(row_position);
+        const std::uint32_t row_premul = math::premultiply(row_color);
+        if (!masked && blend == BlendMode::SrcOver && row_color.a != 0U) {
+          if (first_pixel < full_begin) blend_one(first_pixel, cover_of(first_pixel), row_color);
+          if (full_end > full_begin) {
+            const auto alpha_byte =
+                static_cast<std::uint8_t>(math::clamp01(weight * opacity) * 255.0f + 0.5f);
+            simd::blend_row(row + full_begin, static_cast<std::size_t>(full_end - full_begin),
+                            row_premul, alpha_byte);
+          }
+          if (last_pixel > b && last_pixel - 1 >= full_begin) {
+            blend_one(last_pixel - 1, cover_of(last_pixel - 1), row_color);
+          }
+          continue;
+        }
+        for (int x = first_pixel; x < last_pixel; ++x) blend_one(x, cover_of(x), row_color);
+        continue;
+      }
+      if (gradient->kind() == Gradient::Kind::Linear && length_squared > 0.0001f) {
+        // 倾斜线性：t 沿行递推（t += dx·step/len²）；首像素取精确值
+        const float step = inverse_scale_;
+        const float t_step = gdx * step / length_squared;
+        const float first_x = (static_cast<float>(first_pixel) + 0.5f) * inverse_scale_;
+        float position = ((first_x - from.x) * gdx + (logical_y - from.y) * gdy) / length_squared;
+        for (int x = first_pixel; x < last_pixel; ++x, position += t_step) {
+          const float covered = (x >= full_begin && x < full_end) ? weight : cover_of(x);
+          if (covered <= kCoverageEpsilon) continue;
+          blend_one(x, covered, gradient->sample_position(position));
+        }
+        continue;
+      }
+    }
+    // 径向/扫掠（或异常几何）：逐像素采样
     const float step = inverse_scale_;
     float logical_x = (static_cast<float>(first_pixel) + 0.5f) * inverse_scale_;
-    const float logical_y = (static_cast<float>(y) + 0.5f) * inverse_scale_;
     for (int x = first_pixel; x < last_pixel; ++x, logical_x += step) {
       const float covered = (x >= full_begin && x < full_end) ? weight : cover_of(x);
       if (covered <= kCoverageEpsilon) continue;

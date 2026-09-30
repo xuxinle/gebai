@@ -71,6 +71,13 @@ class Gradient {
   /// 采样（`point` 为画布坐标）。
   [[nodiscard]] auto sample(math::Point point) const noexcept -> math::Color;
 
+  /// 按**已算好的位置参数**采样（0..1，内部 clamp 后查 LUT）。
+  ///
+  /// 为什么单独暴露：批量光栅化里位置可沿扫描线**递推**——线性渐变的 t 沿 x
+  /// 每次递增一个常量（dx/len²），比逐像素算点积便宜得多；竖直渐变则整行同 t。
+  /// 径向/扫掠的几何是非线性的，仍逐像素算位置后调它。
+  [[nodiscard]] auto sample_position(float position) const noexcept -> math::Color;
+
   /// 返回按 LUT 采样的颜色（索引 0..255，供批量光栅化复用）。
   [[nodiscard]] auto lut() const noexcept -> std::span<const math::Color> { return lut_; }
 

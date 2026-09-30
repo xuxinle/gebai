@@ -105,6 +105,10 @@ auto Gradient::sample(math::Point point) const noexcept -> math::Color {
       break;
     }
   }
+  return sample_position(position);
+}
+
+auto Gradient::sample_position(float position) const noexcept -> math::Color {
   const float clamped = math::clamp01(position);
   const float scaled = clamped * static_cast<float>(lut_.size() - 1);
   const auto index = static_cast<std::size_t>(scaled);
