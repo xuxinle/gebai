@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <format>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -138,6 +139,7 @@ void print_usage() {
   doctor                环境自检（编译器/字体/显示后端/GPU/缓存）
   tree                  打印清单概览（目标、源文件数、依赖）
   init <name>           生成工程骨架（--framework=框架根；默认由 st 位置推断）
+  clean [--all]         删除 build/ 全部档位与测试产物；--all 连 ~/.shuangtian/cache 一起清
   version               版本信息
   help                  本帮助
 )");
@@ -189,9 +191,12 @@ auto command_build(const Arguments& arguments) -> int {
   }
   st::print("构建完成 [{}] 单元 {}（重编 {} / 命中缓存 {}）\n", options.profile,
               stats->units_total, stats->units_rebuilt, stats->units_cached);
-  st::print("  编译 {} · 链接 {} · 总 {} · 并行 {} 路{}\n",
+  st::print("  编译 {} · {} · 总 {} · 并行 {} 路{}\n",
               st::time::format_duration_ns(stats->compile_ms * 1'000'000),
-              st::time::format_duration_ns((stats->elapsed_ms - stats->compile_ms) * 1'000'000),
+              stats->linked
+                  ? std::format("链接 {}", st::time::format_duration_ns(
+                                    (stats->elapsed_ms - stats->compile_ms) * 1'000'000))
+                  : std::string("链接已跳过（产物最新）"),
               st::time::format_duration_ns(st::time::now_ns() - start), stats->workers,
               stats->pch_used ? " · PCH" : "");
   // 并发决策必须可见："为什么是 14 路而不是 28"是运维/排查会问的第一个问题
@@ -582,6 +587,65 @@ ST_MAIN(run_app)
   return 0;
 }
 
+/// `st clean [--all]`：删除构建产物。
+/// 背景：`build/` 含多个档位（dev/debug/release/san）与测试产物，实测堆积到 1.5GB+
+/// 而此前没有任何清理命令。`--all` 连共享对象缓存（`~/.shuangtian/cache`）一起清——
+/// 下次构建会重新全量编译，只在磁盘告急或怀疑缓存污染时用。
+[[nodiscard]] auto command_clean(const Arguments& arguments) -> int {
+  const auto manifest = load_manifest(arguments);
+  std::string root;
+  if (manifest) {
+    root = manifest->directory;
+  } else {
+    // 没有清单也能清：默认当前目录（把"删产物"做成不依赖工程解析的操作）
+    root = fs::current_dir().value_or(std::string{"."});
+  }
+  const std::string build_dir = fs::join(root, "build");
+  std::uint64_t removed = 0;
+  if (fs::is_directory(build_dir)) {
+    // 先量一下再删：用户应该知道刚才释放了多少
+    std::function<void(const std::string&)> visit = [&](const std::string& dir) {
+      const auto entries = fs::list_dir(dir);
+      if (!entries) return;
+      for (const auto& entry : *entries) {
+        if (entry.is_dir) {
+          visit(entry.path);
+        } else {
+          removed += entry.size;
+        }
+      }
+    };
+    visit(build_dir);
+    if (auto status = fs::remove_all(build_dir); !status) {
+      std::fprintf(stderr, "删除失败: %s\n", status.error().message.c_str());
+      return 1;
+    }
+  }
+  const auto format_mb = [](std::uint64_t bytes) {
+    return bytes >= 1024ULL * 1024ULL ? std::format("{:.1f} MiB", bytes / 1048576.0)
+                                      : std::format("{} KiB", bytes / 1024ULL);
+  };
+  st::print("已清理 {}（释放 {}）\n", build_dir, removed > 0 ? format_mb(removed) : std::string{"0"});
+
+  if (arguments.has("all")) {
+    std::string home;
+    if (const auto env = fs::read_env("ST_HOME"); env.has_value() && !env->empty()) {
+      home = *env;
+    } else {
+      home = fs::join(fs::home_dir(), ".shuangtian");
+    }
+    const std::string cache_dir = fs::join(home, "cache");
+    if (fs::is_directory(cache_dir)) {
+      if (auto status = fs::remove_all(cache_dir); !status) {
+        std::fprintf(stderr, "缓存删除失败: %s\n", status.error().message.c_str());
+        return 1;
+      }
+      st::print("已清理共享缓存 {}（对象缓存与 MSVC 环境缓存；下次构建全量重编）\n", cache_dir);
+    }
+  }
+  return 0;
+}
+
 }  // namespace
 
 auto run_app(int argc, char** argv) -> int {
@@ -607,6 +671,7 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.command == "tree") return command_tree(arguments);
   if (arguments.command == "deps") return command_deps(arguments);
   if (arguments.command == "init") return command_init(arguments);
+  if (arguments.command == "clean") return command_clean(arguments);
 
   std::fprintf(stderr, "未知命令: %s\n\n", arguments.command.c_str());
   print_usage();

@@ -393,8 +393,10 @@ using UnitIncludeMap = std::map<std::string, std::vector<std::string>>;
 }
 
 struct PchContext {
-  std::string directory{};  ///< 含 `st.hpp.gch` 的目录（作为 `-I` 传入）
-  std::string header{};     ///< `-include` 的头名（如 `st.hpp`）
+  std::string directory{};         ///< 含 PCH 产物的目录（GCC：作为 `-I` 传入）
+  std::string header{};            ///< `-include` 的头名（如 `prefix.hpp`）
+  std::string pch_file{};          ///< MSVC：`/Fp` 指向的 .pch 文件（GCC 系为空）
+  bool msvc{false};                ///< 消费端标志拼法不同（/Yu+/FI vs -include）
 };
 
 /// 构建（或复用）预编译头；失败时返回空（不阻断构建，只是慢一点）。
@@ -403,11 +405,13 @@ struct PchContext {
 /// 1. **代理头**：不直接编译 `pch.hpp`——头文件被当作"主文件"编译时 `#pragma once` 必然告警，
 ///    而为了压掉它需要 `-Wno-error`，这又会让 PCH 与消费者**标志不一致 → GCC 判 PCH 无效**。
 ///    改为生成 `prefix.hpp`（仅一行 `#include "st/pch.hpp"`）作为编译入口，问题消失且标志可完全一致。
+///    MSVC 同理（`#pragma once` 作为主文件会报 C4552 系告警，且 `/Yc` 要求入口名与 `/Yu` 一致）。
 /// 2. **标志一致**：PCH 创建与消费必须使用同一套标志（std/优化/告警/宏/包含路径）；
-///    消费端只多 `-include prefix.hpp` 与依赖输出选项（`-MMD -MF`，与 PCH 有效性无关）。
+///    消费端只多 `/Yu`/`/FI`（或 `-include`）与依赖输出选项（与 PCH 有效性无关）。
 [[nodiscard]] auto ensure_pch(const std::string& compiler, const std::vector<std::string>& flags,
                               const std::vector<std::string>& include_dirs,
-                              const std::string& build_dir, const std::string& header_path)
+                              const std::string& build_dir, const std::string& header_path,
+                              CompilerKind kind)
     -> std::optional<PchContext> {
   if (!fs::is_regular_file(header_path)) return std::nullopt;
   const std::string directory = fs::join(build_dir, "pch");
@@ -421,6 +425,40 @@ struct PchContext {
   }
   if (wrapper_changed) {
     if (auto status = fs::write_text(wrapper, wrapper_body); !status) return std::nullopt;
+  }
+
+  if (kind == CompilerKind::Msvc) {
+    // MSVC：`/Yc prefix.hpp` 创建（PCH 落 `/Fp` 指定文件），消费端 `/Yu prefix.hpp /FI prefix.hpp /Fp…`。
+    const std::string pch_file = fs::join(directory, "prefix.pch");
+    bool stale = wrapper_changed;
+    if (!stale) {
+      if (const auto pch_time = fs::modified_ns(pch_file); pch_time.has_value()) {
+        const auto header_time = fs::modified_ns(header_path);
+        stale = !header_time.has_value() || *header_time > *pch_time;
+      } else {
+        stale = true;
+      }
+    }
+    if (stale) {
+      std::vector<std::string> args;
+      for (const auto& flag : flags) args.push_back(flag);
+      for (const auto& dir : include_dirs) args.push_back(std::format("/I{}", dir));
+      args.push_back(std::format("/I{}", directory));
+      args.push_back("/Ycprefix.hpp");
+      args.push_back(std::format("/Fp{}", pch_file));
+      args.push_back(wrapper);
+      args.push_back("/c");
+      auto result = process::run(compiler, args);
+      if (!result || result->exit_code != 0) {
+        const std::string detail =
+            result ? std::string(result->stderr_text).substr(0, 400) : result.error().message;
+        log::warn("MSVC 预编译头构建失败（忽略，按常规编译进行）: {}", detail);
+        (void)fs::remove_file(pch_file);
+        return std::nullopt;
+      }
+      log::info("MSVC 预编译头已生成: {}", pch_file);
+    }
+    return PchContext{directory, "prefix.hpp", pch_file, true};
   }
 
   const std::string gch = wrapper + ".gch";
@@ -453,7 +491,7 @@ struct PchContext {
     }
     log::info("预编译头已生成: {}", gch);
   }
-  return PchContext{directory, "prefix.hpp"};
+  return PchContext{directory, "prefix.hpp", {}, false};
 }
 /// 目标平台的默认系统库。
 ///
@@ -679,8 +717,8 @@ struct FrameworkFlags {
       }
       return std::string{};
     }();
-    if (!pch_header.empty() && toolchain.kind != CompilerKind::Msvc) {
-      pch = ensure_pch(compiler_path, flags, include_dirs, build_dir, pch_header);
+    if (!pch_header.empty()) {
+      pch = ensure_pch(compiler_path, flags, include_dirs, build_dir, pch_header, toolchain.kind);
     }
   }
   const PchContext* pch_ptr = pch.has_value() ? &*pch : nullptr;
