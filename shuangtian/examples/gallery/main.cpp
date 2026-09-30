@@ -272,7 +272,15 @@ auto run_app(int argc, char** argv) -> int {
   std::vector<std::pair<std::string, std::function<void(std::string)>>> runtime_fields;
 
   gallery::PageHooks hooks;
-  hooks.set_status = [](std::string text) { (void)text; };  // 稍后接上状态栏
+  // ⚠ 状态栏回调必须**先接上再建页**：页面按值捕获 PageHooks（拷贝），
+  // 后接的 set_status 对已建页面不可见——旧序（建页后才接）会让所有页面的
+  // set_status 全部落到初始空操作上，状态栏永远不变（实测踩到）。
+  auto status_text_early = std::make_unique<Text>("就绪");
+  status_text_early->set_id("status-text");
+  status_text_early->set_tone(Tone::Muted);
+  status_text_early->set_font_size(12.0f);
+  auto* status_ptr = status_text_early.get();
+  hooks.set_status = [status_ptr](std::string text) { status_ptr->set_content(std::move(text)); };
   hooks.add_overlay = [root_ptr](std::unique_ptr<Element> overlay) {
     root_ptr->add_overlay(std::move(overlay));
   };
@@ -305,12 +313,8 @@ auto run_app(int argc, char** argv) -> int {
   auto status_dot = std::make_unique<IconView>("dot", 8.0f);
   status_dot->set_tone(Tone::Success);
   status_bar->add_child(std::move(status_dot));
-  auto status_text = std::make_unique<Text>("就绪");
-  status_text->set_id("status-text");
-  status_text->set_tone(Tone::Muted);
-  status_text->set_font_size(12.0f);
-  auto* status_ptr = status_text.get();
-  status_bar->add_child(std::move(status_text));
+  // status_text 在建页前已创建（hooks.set_status 需要先拿到指针，见上方注释）
+  status_bar->add_child(std::move(status_text_early));
   auto status_spacer = std::make_unique<Panel>(FlexDirection::Row);
   status_spacer->style().grow = true;
   status_bar->add_child(std::move(status_spacer));
@@ -328,8 +332,7 @@ auto run_app(int argc, char** argv) -> int {
   status_bar->add_child(std::move(status_right));
   root_panel->add_child(std::move(status_bar));
 
-  // —— 交互 ——
-  hooks.set_status = [status_ptr](std::string text) { status_ptr->set_content(std::move(text)); };
+  // —— 交互 ——（set_status 已在建页前接上；此处不再重复赋值）
 
   // 运行时字段刷新：从 `metrics` 与 `Application` 回读——界面自己展示自己的可观测性
   const auto refresh_runtime = [app_ptr, status_right_ptr, &runtime_fields]() {
@@ -346,6 +349,12 @@ auto run_app(int argc, char** argv) -> int {
       else if (field == "dpi") setter(std::format("{:.1f}x", static_cast<double>(app_ptr->device_scale())));
       else if (field == "frames") setter(std::format("{}", metrics.frames));
       else if (field == "port") setter(std::format("{}", app_ptr->control_port()));
+      else if (field == "stat_nodes") {
+        // 语义树节点数（与控制通道 tree 同源）：切页/主题/DPI 变化后都会不同
+        setter(std::format("{}", metrics.nodes));
+      } else if (field == "stat_port") {
+        setter(std::format("127.0.0.1:{}", app_ptr->control_port()));
+      }
     }
     status_right_ptr->set_content(std::format("{} · DPI {:.1f} · {}x{} · 第 {} 帧",
                                               app_ptr->backend_name(),

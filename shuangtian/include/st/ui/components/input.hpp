@@ -117,6 +117,15 @@ class TextArea : public Element {
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
 
+  // 属性面（协议 set / 脚本 $('#x').set() 的唯一入口；v0.1.5 补齐——此前 TextArea
+  // 未实现它，`set value` 被静默忽略，与 Input 踩过的坑同类）。
+  [[nodiscard]] auto get_property(std::string_view name) const
+      -> std::optional<std::string> override;
+  auto set_property(std::string_view name, std::string_view value) -> bool override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+      -> bool override;
+
   /// 内容变化回调（实参为最新文本）。
   std::function<void(std::string_view)> on_change{};
 

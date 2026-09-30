@@ -36,6 +36,7 @@ class Table : public Element {
   static constexpr float kCellPadding{12.0f};       ///< 单元格左右内边距（px，= space_md）
   static constexpr float kScrollStep{48.0f};        ///< 横向滚轮每格距离（px）
   static constexpr float kScrollBarHeight{3.0f};    ///< 横向滚动指示条高（px）
+  static constexpr float kSelectedAccentWidth{3.0f};///< 选中行左缘主色条宽（px）
 
   explicit Table(std::vector<TableColumn> columns = {});
 
@@ -59,6 +60,13 @@ class Table : public Element {
   [[nodiscard]] auto zebra() const noexcept -> bool { return zebra_; }
   void set_row_height(float height);
   [[nodiscard]] auto row_height() const noexcept -> float { return row_height_; }
+  // —— 选中行（v0.1.5：协议可读写、语义树可断言） ——
+  /// 选中行序号（`nullopt` = 无选中）。点击行不自动改选中——选中是**数据语义**，
+  /// 由应用决定（与 `List::selected` 同一口径），避免"点击即选中"在多选/命令面板里错。
+  void set_selected_row(std::optional<std::size_t> row);
+  [[nodiscard]] auto selected_row() const noexcept -> std::optional<std::size_t> {
+    return selected_row_;
+  }
   /// 行点击回调（参数为行序号）。
   void set_on_row_click(std::function<void(std::size_t)> callback) {
     on_row_click_ = std::move(callback);
@@ -114,6 +122,7 @@ class Table : public Element {
   float row_height_{kDefaultRowHeight};
   float scroll_offset_{0.0f};
   std::size_t hovered_row_{kNoRow};
+  std::optional<std::size_t> selected_row_{};
   bool zebra_{false};
 };
 

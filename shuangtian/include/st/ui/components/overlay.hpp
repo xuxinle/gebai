@@ -88,11 +88,15 @@ class Dialog : public Element {
 };
 
 /// 轻提示：`surface` 底 + `shadow_md` + 左侧 4px 色条（高 40、横向内边距 14）。
+/// 自动消失由帧时间轴驱动（`context.time_seconds`）：不额外起线程/定时器，
+/// 无头单帧也能用 `expired()` 判定（详见 `set_auto_dismiss_ms`）。
 class Toast : public Element {
  public:
   static constexpr float kHeight{40.0f};
   static constexpr float kPaddingX{14.0f};
   static constexpr float kAccentWidth{4.0f};
+  /// 默认自动消失时长（ms）；`0` = 常驻（见 `set_auto_dismiss_ms`）。
+  static constexpr double kDefaultDismissMs{2600.0};
 
   explicit Toast(std::string message = {}, Tone tone = Tone::Default);
 
@@ -109,6 +113,10 @@ class Toast : public Element {
 
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
+  /// 到期推演前置到整组件绘制之前（阴影也不落盘；见实现注释）。
+  void paint(const RenderContext& context, raster::Surface& canvas) const override;
+  /// 居中定位：UiRoot 对叠加层的默认排布是顶部左对齐，轻提示习惯上居中（可被覆盖）。
+  void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return message_; }
   [[nodiscard]] auto semantics_value() const -> std::string override;
@@ -116,9 +124,26 @@ class Toast : public Element {
   auto set_property(std::string_view name, std::string_view value) -> bool override;
   [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
 
+  // —— 自动消失（时间轴驱动；v0.1.5） ——
+  /// 设定自动消失时长（ms）。`0` = 常驻；改动会**重置**起算点（仅当已在计时）。
+  void set_auto_dismiss_ms(double milliseconds) noexcept;
+  [[nodiscard]] auto auto_dismiss_ms() const noexcept -> double { return auto_dismiss_ms_; }
+  /// 是否已到期（未启用自动消失或尚未绘制过则恒 false；绘制路径推演）。
+  [[nodiscard]] auto expired() const noexcept -> bool { return expired_; }
+  /// 剩余展示时间（ms；未启用/已过期返回 0）。只读推算，不推进状态。
+  [[nodiscard]] auto remaining_ms() const noexcept -> double;
+
+  /// 到期回调（自动消失触发）：宿主应在此经 `overlay_remove` 摘除本组件。
+  /// 不在绘制回调里直接摘：绘制路径不能在 UiRoot 遍历 overlays 时改动容器
+  /// （与 `Select::flush_dismiss` 同一套"延迟摘除"做法）。
+  std::function<void()> on_dismiss{};
+
  private:
   std::string message_{};
   Tone tone_{Tone::Default};
+  double auto_dismiss_ms_{0.0};      ///< `0` = 常驻
+  mutable double dismiss_at_{-1.0};  ///< 到期时刻（秒；`-1` = 未起算；mutable：绘制是 const 方法
+  mutable bool expired_{false};
 };
 
 }  // namespace st::ui

@@ -278,6 +278,63 @@ ST_TEST(ui_table_hover_row) {
   ST_CHECK_EQ(clicked, 99U);
 }
 
+// —— ⑦ 选中行（v0.1.5：视觉 + 语义 + 属性面 + 越界拒绝）——
+
+ST_TEST(ui_table_selected_row) {
+  st::ui::Theme theme = st::ui::Theme::light();
+  TableTestTextPort port;
+  st::ui::RenderContext context{theme, &port, 0.0};
+
+  st::ui::Table table;
+  table.set_columns({{"名称", 0.0f, st::ui::TextAlign::Start}});
+  table.add_row({"a"});
+  table.add_row({"b"});
+  table.set_zebra(true);  // 选中行应压过斑马纹
+  table.apply_theme(theme);
+  table.arrange(context, st::math::Rect{0.0f, 0.0f, 200.0f, 100.0f});
+
+  // 初始无选中：语义 flags 与属性面
+  ST_CHECK(!table.semantics_flags().selected);
+  ST_CHECK_EQ(table.get_property("selected_row").value_or(""), std::string{"-1"});
+
+  // 属性面选中第 0 行 → 像素（primary_soft 底 + 主色左缘条）+ 语义
+  ST_CHECK(table.set_property("selected_row", "0"));
+  ST_CHECK(table.selected_row().has_value() && *table.selected_row() == 0U);
+  ST_CHECK(table.semantics_flags().selected);
+  ST_CHECK_EQ(table.semantics_value(), std::string{"2x1 sel=0"});
+  ST_CHECK_EQ(table.get_property("selected_row").value_or(""), std::string{"0"});
+
+  st::raster::Canvas canvas(200, 100);
+  canvas.clear(theme.colors().bg);
+  table.paint(context, canvas);
+  ST_CHECK(canvas.pixel_at_point(st::math::Point{100.0f, 52.0f}) == theme.colors().primary_soft);
+  ST_CHECK(canvas.pixel_at_point(st::math::Point{1.0f, 52.0f}) == theme.colors().primary);
+  // 未选中的第 1 行：斑马纹（奇数行 surface_alt）
+  ST_CHECK(canvas.pixel_at_point(st::math::Point{100.0f, 84.0f}) == theme.colors().surface_alt);
+
+  // API 选中第 1 行 → 语义值跟随；旧选中行（第 0 行，偶数 → 无斑马）恢复画布底色
+  table.set_selected_row(1U);
+  ST_CHECK_EQ(table.semantics_value(), std::string{"2x1 sel=1"});
+  st::raster::Canvas canvas2(200, 100);
+  canvas2.clear(theme.colors().bg);
+  table.paint(context, canvas2);
+  ST_CHECK(canvas2.pixel_at_point(st::math::Point{100.0f, 52.0f}) == theme.colors().bg);
+  ST_CHECK(canvas2.pixel_at_point(st::math::Point{100.0f, 84.0f}) == theme.colors().primary_soft);
+
+  // 越界拒绝（不改不变）；-1 清除
+  table.set_selected_row(9U);
+  ST_CHECK(table.selected_row().has_value() && *table.selected_row() == 1U);
+  ST_CHECK(!table.set_property("selected_row", "9"));
+  ST_CHECK(table.set_property("selected_row", "-1"));
+  ST_CHECK(!table.selected_row().has_value());
+  ST_CHECK(!table.semantics_flags().selected);
+
+  // clear_rows 清空选中（索引悬空）
+  table.set_selected_row(0U);
+  table.clear_rows();
+  ST_CHECK(!table.selected_row().has_value());
+}
+
 // —— ⑥ 空 TextPort 下不崩溃（UiRoot 集成路径）——
 
 ST_TEST(ui_table_null_text_port_via_root) {

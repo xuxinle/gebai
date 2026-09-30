@@ -451,6 +451,74 @@ ST_TEST(ui_toast_tone_bar) {
   ST_CHECK_EQ(std::string{st::ui::to_string(toast->role())}, std::string{"panel"});
 }
 
+// —— Toast 自动消失（v0.1.5：帧时间轴驱动 + on_dismiss + 属性面）——
+
+ST_TEST(ui_toast_auto_dismiss) {
+  st::ui::Theme theme = st::ui::Theme::light();
+  FeedbackTestTextPort port;
+  const st::ui::Constraints constraints;
+
+  auto toast = st::ui::Toast::make("已保存", st::ui::Tone::Success);
+  toast->apply_theme(theme);
+  toast->set_auto_dismiss_ms(1000.0);
+  toast->measure(st::ui::RenderContext{theme, &port, 0.0}, constraints);
+  toast->arrange(st::ui::RenderContext{theme, &port, 0.0},
+                 st::math::Rect{0.0f, 0.0f, 80.0f, 40.0f});
+
+  // 属性面读写
+  ST_CHECK_EQ(toast->get_property("auto_dismiss_ms").value_or(""), std::string{"1000"});
+  ST_CHECK_EQ(toast->get_property("expired").value_or(""), std::string{"false"});
+  ST_CHECK(toast->set_property("auto_dismiss_ms", "500"));
+  ST_CHECK_NEAR(toast->auto_dismiss_ms(), 500.0, 0.01);
+  ST_CHECK(!toast->set_property("auto_dismiss_ms", "-3"));  // 负数拒绝
+  ST_CHECK(toast->set_property("auto_dismiss_ms", "1000"));
+
+  st::raster::Canvas canvas(80, 40);
+  canvas.clear(st::math::Color{0, 0, 0, 0});
+
+  // 静态时间轴（now 停滞）：首帧起算但不误触发
+  const double now = 10.0;
+  st::ui::RenderContext t0{theme, &port, now};
+  toast->paint(t0, canvas);
+  ST_CHECK(!toast->expired());
+  toast->paint(t0, canvas);  // 同时刻重复绘制：仍不触发
+  ST_CHECK(!toast->expired());
+
+  // 时间推进到 599ms：未到期，仍绘制
+  st::ui::RenderContext t1{theme, &port, now + 0.599};
+  toast->paint(t1, canvas);
+  ST_CHECK(!toast->expired());
+
+  // 时间推进到 1000ms：到期 → on_dismiss 触发，不再绘制
+  int dismissed = 0;
+  toast->on_dismiss = [&dismissed]() { ++dismissed; };
+  st::raster::Canvas fresh(80, 40);
+  fresh.clear(st::math::Color{255, 0, 0, 255});  // 与 Toast 不同的底色，验证不再绘制
+  st::ui::RenderContext t2{theme, &port, now + 1.000};
+  toast->paint(t2, fresh);
+  ST_CHECK(toast->expired());
+  ST_CHECK_EQ(dismissed, 1);
+  const st::math::Color sentinel{255, 0, 0, 255};
+  ST_CHECK(fresh.pixel_at_point(st::math::Point{40.0f, 20.0f}) == sentinel);  // 未被覆盖：到期帧不再绘制
+  // 到期后重复绘制：不会重复触发
+  toast->paint(t2, fresh);
+  ST_CHECK_EQ(dismissed, 1);
+
+  // 常驻模式（0ms）：永不触发
+  auto stay = st::ui::Toast::make("常驻", st::ui::Tone::Default);
+  stay->apply_theme(theme);
+  stay->measure(st::ui::RenderContext{theme, &port, 0.0}, constraints);
+  stay->arrange(st::ui::RenderContext{theme, &port, 0.0},
+                st::math::Rect{0.0f, 0.0f, 80.0f, 40.0f});
+  int stay_dismissed = 0;
+  stay->on_dismiss = [&stay_dismissed]() { ++stay_dismissed; };
+  const st::ui::RenderContext far{theme, &port, 100000.0};
+  stay->paint(far, canvas);
+  stay->paint(far, canvas);
+  ST_CHECK(!stay->expired());
+  ST_CHECK_EQ(stay_dismissed, 0);
+}
+
 // —— ⑥ 空 TextPort：全部反馈组件不崩溃且形状仍落盘 ——
 
 ST_TEST(ui_feedback_with_null_text_port) {

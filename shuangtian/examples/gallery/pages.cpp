@@ -16,6 +16,7 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
 #include "st/ui/components/markdown_view.hpp"
+#include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/slider.hpp"
@@ -389,8 +390,26 @@ namespace {
       });
     }
   }
-  stats->add_child(make_stat_card("stat-nodes", "layers", "组件节点", "自绘", Tone::Success));
-  stats->add_child(make_stat_card("stat-control", "terminal", "控制通道", "TCP", Tone::Warning));
+  // 组件节点数与控制端口也是**会变的事实**（切页/主题/DPI 都会改）：全部走运行时字段，
+  // 不再写死——静态占位在演示里就是假信息（v0.1.5 补全）。
+  {
+    st::ui::Text* nodes_text = nullptr;
+    stats->add_child(make_stat_card("stat-nodes", "layers", "组件节点", "—", Tone::Success,
+                                    &nodes_text));
+    if (nodes_text != nullptr && hooks.register_runtime_field) {
+      hooks.register_runtime_field("stat_nodes", [nodes_text](std::string value) {
+        nodes_text->set_content(std::move(value));
+      });
+    }
+    st::ui::Text* port_text = nullptr;
+    stats->add_child(make_stat_card("stat-control", "terminal", "控制通道", "—", Tone::Warning,
+                                    &port_text));
+    if (port_text != nullptr && hooks.register_runtime_field) {
+      hooks.register_runtime_field("stat_port", [port_text](std::string value) {
+        port_text->set_content(std::move(value));
+      });
+    }
+  }
   page->add_child(std::move(stats));
 
   // 按钮与图标
@@ -472,7 +491,7 @@ namespace {
 
 [[nodiscard]] auto build_components(const PageHooks& hooks) -> std::unique_ptr<Panel> {
   auto page = make_page("components", "组件",
-                        "选择控件 · 滑块 · 标签页 · 下拉 · 反馈与徽标 · 图标全集 · 文字样式");
+                        "选择控件 · 滑块 · 标签页 · 下拉 · 反馈徽标 · 图标 · 文字 · 浮层 · 多行文本 · 禁用态");
 
   // —— 选择控件 ——
   auto choice_card = make_card("card-choice", "选择控件");
@@ -702,6 +721,133 @@ namespace {
   }
   type_card->add_child(std::move(tone_row));
   page->add_child(std::move(type_card));
+
+  // —— 浮层与反馈（Dialog / Toast / Tooltip；v0.1.5 补全：此前三个组件在画廊零出现） ——
+  auto overlay_card = make_card("card-overlay", "浮层与反馈（对话框 / 轻提示 / 提示气泡）");
+  overlay_card->add_child(make_caption(
+      "Dialog：遮罩 + 居中卡片，Esc / 点遮罩 / 按钮三条关闭路径；Toast：自动消失（时间轴驱动）；Tooltip：悬浮跟随"));
+
+  auto overlay_actions = make_row(8.0f, /*wrap=*/true);
+  // —— Dialog 触发 ——
+  auto dialog_button = std::make_unique<Button>("打开对话框", Button::Variant::Primary,
+                                                Button::Size::Small);
+  dialog_button->set_id("btn-open-dialog");
+  auto* dialog_button_ptr = dialog_button.get();
+  overlay_actions->add_child(std::move(dialog_button));
+  // —— Toast 触发（两种色调 + 自动消失） ——
+  auto toast_ok_button = std::make_unique<Button>("成功 Toast", Button::Variant::Secondary,
+                                                  Button::Size::Small);
+  toast_ok_button->set_id("btn-toast-ok");
+  auto toast_warn_button = std::make_unique<Button>("警告 Toast", Button::Variant::Soft,
+                                                    Button::Size::Small);
+  toast_warn_button->set_id("btn-toast-warn");
+  auto* toast_ok_ptr = toast_ok_button.get();
+  auto* toast_warn_ptr = toast_warn_button.get();
+  overlay_actions->add_child(std::move(toast_ok_button));
+  overlay_actions->add_child(std::move(toast_warn_button));
+  overlay_card->add_child(std::move(overlay_actions));
+
+  auto overlay_state = std::make_unique<Text>("尚未触发浮层");
+  overlay_state->set_id("overlay-state");
+  overlay_state->set_tone(Tone::Faint);
+  overlay_state->set_font_size(12.0f);
+  auto* overlay_state_ptr = overlay_state.get();
+  overlay_card->add_child(std::move(overlay_state));
+  page->add_child(std::move(overlay_card));
+
+  // —— 多行文本（TextArea：折行 / 光标 / 内部滚动；此前画廊零覆盖） ——
+  auto multiline_card = make_card("card-multiline", "多行文本（TextArea）");
+  auto textarea = std::make_unique<st::ui::TextArea>();
+  textarea->set_id("demo-textarea");
+  textarea->set_placeholder("这里支持多行：Enter 换行，方向键移动光标，滚轮滚动…");
+  textarea->set_text("第一行：多行文本域自动折行，\n第二行：光标上下左右可移动，\n"
+                     "第三行：内容超出可视高时内部滚动，光标始终可见。");
+  textarea->style().height = 96.0f;
+  auto* textarea_ptr = textarea.get();
+  multiline_card->add_child(std::move(textarea));
+  auto textarea_state = std::make_unique<Text>("内容 0 字");
+  textarea_state->set_id("textarea-state");
+  textarea_state->set_tone(Tone::Faint);
+  textarea_state->set_font_size(12.0f);
+  auto* textarea_state_ptr = textarea_state.get();
+  multiline_card->add_child(std::move(textarea_state));
+  page->add_child(std::move(multiline_card));
+
+  // —— 禁用态（Button/Input：控件全状态的最后一环） ——
+  auto disabled_card = make_card("card-disabled", "禁用态");
+  auto disabled_row = make_row(10.0f, true);
+  auto disabled_button = std::make_unique<Button>("不可用按钮", Button::Variant::Primary);
+  disabled_button->set_id("btn-disabled");
+  disabled_button->set_enabled(false);
+  disabled_row->add_child(std::move(disabled_button));
+  auto disabled_input = std::make_unique<Input>();
+  disabled_input->set_id("input-disabled");
+  disabled_input->set_placeholder("不可输入的输入框");
+  disabled_input->set_enabled(false);
+  disabled_input->style().width = 200.0f;
+  disabled_row->add_child(std::move(disabled_input));
+  disabled_card->add_child(std::move(disabled_row));
+  disabled_card->add_child(make_caption(
+      "语义树可见 disabled 标记；点击/键盘均不响应（选择器 `Button:disabled` 可命中）"));
+  page->add_child(std::move(disabled_card));
+
+  // —— 浮层交互逻辑（Dialog / Toast：面板挂 UiRoot 叠加层，摘除经 hooks） ——
+  dialog_button_ptr->on_click = [hooks, overlay_state_ptr]() {
+    auto dialog = std::make_unique<st::ui::Dialog>(
+        "确认操作",
+        "对话框经 UiRoot 叠加层挂载：Esc、点击遮罩、底部按钮三条路径都能关闭。\n"
+        "本例验证模态交互与自动测试可行性（tree 可见 Dialog 节点，invoke 可点按钮）。");
+    dialog->set_id("demo-dialog");
+    dialog->set_actions({"取消", "确认"});
+    dialog->set_viewport_rect(hooks.viewport ? hooks.viewport() : st::math::Rect{});
+    auto* dialog_ptr = dialog.get();
+    dialog->on_dismiss = [hooks, dialog_ptr, overlay_state_ptr]() {
+      if (hooks.remove_overlay) hooks.remove_overlay(dialog_ptr);
+      overlay_state_ptr->set_content("对话框已关闭（Esc / 遮罩 / 按钮）");
+    };
+    dialog->on_action = [hooks, dialog_ptr, overlay_state_ptr](std::size_t index) {
+      overlay_state_ptr->set_content(std::format("对话框按钮 #{} 已点", index));
+      if (hooks.remove_overlay) hooks.remove_overlay(dialog_ptr);
+    };
+    if (hooks.add_overlay) hooks.add_overlay(std::move(dialog));
+    overlay_state_ptr->set_content("对话框已打开（叠加层，点遮罩或按钮关闭）");
+  };
+
+  // Toast：自动消失（2600ms 默认）；到期回调里经 hooks 摘除（延迟摘除协议）
+  const auto spawn_toast = [hooks, overlay_state_ptr](std::string message, st::ui::Tone tone) {
+    auto toast = st::ui::Toast::make(std::move(message), tone);
+    toast->set_id("demo-toast");
+    toast->set_auto_dismiss_ms(st::ui::Toast::kDefaultDismissMs);
+    auto* toast_ptr = toast.get();
+    toast->on_dismiss = [hooks, toast_ptr, overlay_state_ptr]() {
+      if (hooks.remove_overlay) hooks.remove_overlay(toast_ptr);
+      overlay_state_ptr->set_content("Toast 已自动消失（2600ms 到期）");
+    };
+    if (hooks.add_overlay) hooks.add_overlay(std::move(toast));
+    overlay_state_ptr->set_content("Toast 展示中…（2.6 秒后自动消失）");
+  };
+  toast_ok_ptr->on_click = [spawn_toast]() { spawn_toast("已保存到本地 ✓", st::ui::Tone::Success); };
+  toast_warn_ptr->on_click =
+      [spawn_toast]() { spawn_toast("磁盘空间不足 10%", st::ui::Tone::Warning); };
+
+  // TextArea：内容变化回显（字符数 + 行数）
+  textarea_ptr->on_change = [textarea_state_ptr](std::string_view text) {
+    std::size_t lines = 1;
+    for (const char ch : text) {
+      if (ch == '\n') ++lines;
+    }
+    textarea_state_ptr->set_content(
+        std::format("内容 {} 字 · {} 行", st::utf8_length(text), lines));
+  };
+  // 初值也回显一次（静态构造时不触发 on_change）
+  if (const std::string& initial = textarea_ptr->value(); !initial.empty()) {
+    std::size_t lines = 1;
+    for (const char ch : initial) {
+      if (ch == '\n') ++lines;
+    }
+    textarea_state_ptr->set_content(
+        std::format("内容 {} 字 · {} 行", st::utf8_length(initial), lines));
+  }
   return page;
 }
 
@@ -740,9 +886,12 @@ namespace {
   auto* table_ptr = table.get();
   table_card->add_child(std::move(table));
   page->add_child(std::move(table_card));
+  // 点击行即选中（数据页语义：单选导航）——选中态由表格自绘（primary_soft 底 + 主色左缘条），
+  // 语义树/协议可断言（get selected_row）。
   table_ptr->set_on_row_click([table_ptr, hooks](std::size_t row) {
-    hooks.set_status(std::format("选中表格第 {} 行（组件列：{}）", row + 1,
-                                 row < table_ptr->row_count() ? "已点" : "越界"));
+    table_ptr->set_selected_row(row);
+    const std::string_view name = table_ptr->cell(row, 0U);
+    hooks.set_status(std::format("选中表格第 {} 行（组件列：{}）", row + 1, name));
   });
 
   // —— 列表 ——
@@ -766,8 +915,11 @@ namespace {
   auto* list_ptr = list.get();
   list_card->add_child(std::move(list));
   page->add_child(std::move(list_card));
-  list_ptr->set_on_select([hooks](std::size_t index) {
-    hooks.set_status(std::format("选中列表项 #{}", index));
+  list_ptr->set_on_select([list_ptr, hooks](std::size_t index) {
+    // 回读真实 label（旧实现只输出索引，自动化拿不到"选了什么"）
+    const st::ui::ListItem* item = list_ptr->item(index);
+    const std::string_view label = item != nullptr ? std::string_view{item->label()} : "?";
+    hooks.set_status(std::format("选中列表项 #{}：{}", index, label));
   });
 
   // —— 键值 ——

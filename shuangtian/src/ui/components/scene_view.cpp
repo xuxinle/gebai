@@ -96,7 +96,6 @@ void SceneView::paint_content(const RenderContext& context, raster::Surface& can
   camera.target = math::Vec3{0.0f, 0.0f, 0.0f};
   camera.fov_y_degrees = 42.0f;
 
-  std::fprintf(stderr, "[glv] begin_frame w=%d h=%d\n", width, height);
   scene_->begin_frame(background_);
   scene_->set_camera(camera);
   // 外部网格优先于内置形状：调用方给了模型就画模型
@@ -106,10 +105,8 @@ void SceneView::paint_content(const RenderContext& context, raster::Surface& can
     scene_->draw_mesh(mesh, math::Mat4::rotation(math::Vec3{0.0f, 1.0f, 0.0f}, angle_));
   }
   (void)kEmpty;
-  std::fprintf(stderr, "[glv] end_frame start\n");
   scene_->end_frame(canvas, box);
-  std::fprintf(stderr, "[glv] end_frame done\n");
-  ++frames_;
+  ++frames_;  // （调试期遗留的逐帧 fprintf 已移除：三维视图常驻动画，逐帧刷 stderr 会淹日志并拖慢软件腿）
 }
 
 auto SceneView::get_property(std::string_view name) const -> std::optional<std::string> {

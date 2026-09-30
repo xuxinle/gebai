@@ -619,9 +619,15 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
   if (method == "invoke") {
     // 动作白名单：拼错动作名曾返回 handled=false 的「成功但没效果」——对自动化是假阴性反馈
     // （AI 以为触发了实际没有）。白名单外直接报 unsupported。
-    static constexpr std::string_view kActions[] = {"click",  "dblclick", "focus", "blur",
-                                                    "toggle", "select",   "scroll_to",
-                                                    "submit", "open",     "close"};
+    // 注意与组件能力对齐：`dismiss`（Dialog）、`action`（Dialog 按钮序号）、`clear`（TextArea）、
+    // `add_row`/`clear_rows`/`scroll_by`（Table）等由组件 `invoke_action` 实现——
+    // 这里的名单是「协议层通用动作 + 组件常见动作」，不在名单内的会被拒。
+    static constexpr std::string_view kActions[] = {"click",     "dblclick", "focus",
+                                                    "blur",      "toggle",   "select",
+                                                    "scroll_to", "submit",   "open",
+                                                    "close",     "dismiss",  "action",
+                                                    "activate",  "add_row",  "clear_rows",
+                                                    "scroll_by", "clear"};
     const std::string requested_action = json_get_string(params, "action");
     if (!requested_action.empty()) {
       const bool known = std::find(std::begin(kActions), std::end(kActions), requested_action) !=
@@ -629,7 +635,8 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       if (!known) {
         return unexpected(ErrorCode::Unsupported,
                           std::format("未知动作: {}（可用: click/dblclick/focus/blur/toggle/select/"
-                                      "scroll_to/submit/open/close）",
+                                      "scroll_to/submit/open/close/dismiss/action 等；"
+                                      "组件自定义动作见各组件 invoke 面）",
                                       requested_action));
       }
     }

@@ -470,6 +470,16 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
 - 图标：自绘矢量路径集（`IconName` + 路径数据），零位图资源、任意缩放清晰。
 
+**v0.1.5 补全的组件能力**（画廊全场景覆盖反推）：
+- `Toast::set_auto_dismiss_ms`：自动消失（帧时间轴驱动，`expired()` 可查、`on_dismiss` 回调、属性面
+  `auto_dismiss_ms`/`expired` 可读写）；到期那帧**连阴影都不落盘**（推演前置在 `paint()`）。默认 `0`=常驻。
+- `Table::set_selected_row/selected_row`：选中行（`primary_soft` 底 + 主色左缘条 + 主色文字，压过斑马纹/hover）；
+  属性面 `selected_row`（`-1` 清除、越界拒绝）；语义值 `8x5 sel=2` 可断言；`clear_rows` 一并清选中。
+- `TextArea` 属性面补齐（`value/text/placeholder/cursor_index/scroll_offset` + 动作 `clear/submit`）——
+  此前未实现，`set value` 被静默忽略（与 `Input` 踩过的坑同类）。
+- 叠加层 z 序修正：`paint`/`paint_frame` 中 overlay 改在内容**之后**绘制（浮层在景上）；
+  `UiRoot::find/query` 同步覆盖叠加层（对话框/轻提示/下拉面板此前从选择器里消失）。
+
 ### 4.5.1 交互元素与元素身份（每条都由实际缺陷换来）
 
 | 约定 | 为什么 |
@@ -1307,7 +1317,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 禁令扫描 | **12 条**禁用特性规则（L1–L12）+ 文件布局 + 禁用 include | `st lint` | 0 违规（202 文件、6 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
-| 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯） | 手工运行 | — |
+| 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
 
 **为什么把"验证脚本"当交付物**：无头框架的正确性证据只能来自"跑起来看"。这几个脚本把
 "启动 → 操作 → 截图 → 断言 → 收尾"固化成可重复命令，任何人（或任何智能体）改完代码都能一键复现同一套证据链。
@@ -1327,6 +1337,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 |---|---|---|
 | **v0.1** | core / codec / raster（含 **DPI 缩放**）/ text / md / ui（组件库）/ shell(headless) / control(TCP) / stpm / gallery + mdeditor / 子代理 / 文档 | ✅ 已完成 |
 | **v0.1+（本期追加）** | ① **Windows 宿主 + MSVC 首选**（自举 / 标志翻译 / 依赖追踪）② **GPU 渲染全链路**（D3D11 设备层 → 着色器原语 → 路径 → **DXGI swapchain 呈现**，见 §8.3）③ **三维与网格**（平台中立的 `Scene3D` + **软件实现**：z-buffer / 逐像素光照 / 近面裁剪；`Mesh` 生成与 OBJ 加载；原 OpenGL 方案经评估后移除，见 §8.4）④ **动画与过渡**（悬浮特效、时间轴推进、续帧协议）⑤ 性能优化（整帧重绘 63.2→≈12 ms）⑥ **视口剔除**（屏幕外不再绘制）| ✅ 已完成 |
+| **v0.1.5（画廊全场景）** | ① 画廊补齐 Dialog/Toast/Tooltip/TextArea/禁用态/表格选中行/实时统计卡（28 组件全部有可视化场景）② `Toast` 自动消失（帧时间轴）③ `Table` 选中行（视觉+语义+属性）④ `TextArea` 属性面补齐 ⑤ **叠加层 z 序修正**（浮层在景上）+ `find/query` 覆盖叠加层 ⑥ `SceneView` 逐帧调试输出移除 | ✅ 已完成 |
 | v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 待做 |
 | v0.3 | Vulkan 合成后端、**图层缓存与局部重绘**（当前 `dirty_rect_` 只有整视口口径）、多窗口 | 待做 |
 | v0.4 | 原生源码依赖生态（`st-packages` 索引）、`st publish` | 待做 |

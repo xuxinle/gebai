@@ -324,7 +324,7 @@ ST_TEST(invoke_unknown_action_reports_error) {
   ST_CHECK(probe.call("hello").value("ok", false));
   Json params = Json::object();
   params["id"] = "btn-ok";
-  params["action"] = "activate";   // 拼错的动作名
+  params["action"] = "klik";   // 拼错的动作名（真正未知；`activate` 已是 TextArea 合法动作）
   const Json reply = probe.call("invoke", params);
   // 旧行为：ok=true + handled=false（假阴性）；新契约：明确报错
   ST_CHECK(!reply.value("ok", false));

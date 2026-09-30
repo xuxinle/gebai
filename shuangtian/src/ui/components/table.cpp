@@ -120,6 +120,7 @@ void Table::clear_rows() {
   if (rows_.empty()) return;
   rows_.clear();
   hovered_row_ = kNoRow;
+  selected_row_ = std::nullopt;  // 数据没了：选中索引必然悬空
   mark_layout_dirty();
 }
 
@@ -146,6 +147,16 @@ void Table::set_scroll_offset(float offset) {
   const float clamped = std::clamp(offset, 0.0f, limit);
   if (clamped == scroll_offset_) return;
   scroll_offset_ = clamped;
+  mark_dirty();
+}
+
+void Table::set_selected_row(std::optional<std::size_t> row) {
+  // 越界拒绝（除 nullopt）：静默夹取会掩盖调用方错误（数据刷新后旧索引失效）。 
+    if (row.has_value()) {
+    if (*row >= rows_.size()) return;
+  }
+  if (row == selected_row_) return;
+  selected_row_ = row;
   mark_dirty();
 }
 
@@ -281,12 +292,17 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
 
   canvas.push_clip_rect(bounds_);
 
-  // 行底：斑马纹 + hover 高亮（均取 token 色，不做硬编码）。
+  // 行底：选中行（primary_soft + 主色左缘条）优先于斑马纹与 hover。
   for (std::size_t index = 0; index < rows_.size(); ++index) {
     const math::Rect row = row_rect(index);
     if (row.y >= bounds_.bottom()) break;
-    const bool striped = (zebra_ && index % 2U == 1U) || index == hovered_row_;
-    if (striped) {
+    const bool is_selected = selected_row_.has_value() && index == *selected_row_;
+    const bool striped = !is_selected && (zebra_ && index % 2U == 1U || index == hovered_row_);
+    if (is_selected) {
+      canvas.fill_rect(row, raster::Paint::solid(colors.primary_soft));
+      const math::Rect accent{row.x, row.y, kSelectedAccentWidth, row.height};
+      canvas.fill_rect(accent, raster::Paint::solid(colors.primary));
+    } else if (striped) {
       canvas.fill_rect(row, raster::Paint::solid(colors.surface_alt));
     }
   }
@@ -302,13 +318,15 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
                     0.0f, colors.border);
   }
 
-  // 单元格文本。
+  // 单元格文本（选中行文本用主色，与选中底同语义）。
   for (std::size_t row = 0; row < rows_.size(); ++row) {
     const math::Rect band = row_rect(row);
     if (band.y >= bounds_.bottom()) break;
+    const bool is_selected = selected_row_.has_value() && row == *selected_row_;
+    const math::Color text_color = is_selected ? colors.primary : colors.text;
     for (std::size_t column = 0; column < columns_.size(); ++column) {
       draw_cell_text(context, canvas, cell(row, column), cell_rect(row, column), kCellPadding,
-                     columns_[column].align, metrics.font_base, colors.text);
+                     columns_[column].align, metrics.font_base, text_color);
     }
   }
   // 表头文本。
@@ -392,12 +410,17 @@ auto Table::semantics_text() const -> std::string {
 }
 
 auto Table::semantics_value() const -> std::string {
+  // 选中行入语义值：自动化可用 `get`/`tree` 断言"选中了第 N 行"而不必看像素。
+  if (selected_row_.has_value()) {
+    return std::format("{}x{} sel={}", rows_.size(), columns_.size(), *selected_row_);
+  }
   return std::format("{}x{}", rows_.size(), columns_.size());
 }
 
 auto Table::semantics_flags() const -> SemanticsFlags {
   SemanticsFlags flags = Element::semantics_flags();
   flags.scrollable = max_scroll() > 0.0f;
+  flags.selected = selected_row_.has_value();
   return flags;
 }
 
@@ -416,6 +439,9 @@ auto Table::get_property(std::string_view name) const -> std::optional<std::stri
   if (name == "zebra") return std::string(zebra_ ? kFlagTrue : "false");
   if (name == "scroll_offset") return std::format("{}", scroll_offset_);
   if (name == "max_scroll") return std::format("{}", max_scroll());
+  if (name == "selected_row") {
+    return selected_row_.has_value() ? std::format("{}", *selected_row_) : std::string("-1");
+  }
   if (name == "value") return semantics_value();
   if (name == "text") return semantics_text();
   return std::nullopt;
@@ -458,11 +484,23 @@ auto Table::set_property(std::string_view name, std::string_view value) -> bool 
     set_scroll_offset(static_cast<float>(*parsed));
     return true;
   }
+  if (name == "selected_row" || name == "select") {
+    // `-1` / 空串 = 清除选中；越界拒绝（静默改写会掩盖调用方错误）。
+    if (value == "-1" || value.empty()) {
+      set_selected_row(std::nullopt);
+      return true;
+    }
+    const auto parsed = st::parse_u64(value);
+    if (!parsed.has_value() || *parsed >= rows_.size()) return false;
+    set_selected_row(static_cast<std::size_t>(*parsed));
+    return true;
+  }
   return false;
 }
 
 auto Table::property_names() const -> std::vector<std::string_view> {
-  return {"columns", "rows", "row_height", "zebra", "scroll_offset", "max_scroll", "value"};
+  return {"columns", "rows", "row_height", "zebra", "scroll_offset", "max_scroll",
+          "selected_row", "value"};
 }
 
 auto Table::invoke_action(std::string_view action, std::string_view argument) -> bool {

@@ -132,8 +132,9 @@ void UiRoot::paint(raster::Surface& canvas) {
   RenderContext context = render_context();
   painted_elements_ = 0;
   context.painted_elements = &painted_elements_;
-  for (auto& overlay : overlays_) overlay->paint(context, canvas);
+  // 叠加层在内容之后绘制（浮层在景上；与 paint_frame 同一 z 序，见其注释）。
   if (content_ != nullptr) paint_subtree(context, *content_, canvas);
+  for (auto& overlay : overlays_) overlay->paint(context, canvas);
   // ⚠ 必须在**所有绘制之后**汇总。
   //
   // 早先这一行放在内容绘制之前（插在了浮层绘制后面）——于是它看不到本帧刚产生的
@@ -271,7 +272,17 @@ auto UiRoot::dispatch(Event& event) -> bool {
         handled = true;
         break;
       }
-      handled = focused_ != nullptr && dispatch_to(*focused_, event);
+      // 模态语义：有叠加层（Dialog/Toast/下拉面板）时键盘事件先给最上层浮层——
+      // 否则「Esc 关对话框」永远送不进去（焦点还在被遮住的内容元素上）。
+      // 浮层不处理再回落焦点元素（浅层浮层如 Toast 不拦截正常输入）。
+      for (auto iterator = overlays_.rbegin(); iterator != overlays_.rend(); ++iterator) {
+        if (*iterator == nullptr) continue;
+        if (dispatch_to(**iterator, event)) {
+          handled = true;
+          break;
+        }
+      }
+      if (!handled) handled = focused_ != nullptr && dispatch_to(*focused_, event);
       break;
     }
     case EventKind::KeyUp:
@@ -291,7 +302,9 @@ auto UiRoot::dispatch(Event& event) -> bool {
 }
 
 auto UiRoot::find(std::string_view id) -> Element* {
-  if (content_ == nullptr) return nullptr;
+  // 叠加层（Dialog/Toast/Select 面板）与内容树同属语义面：按 id 定位必须两者都搜——
+  // 只搜内容会让"打开的对话框/轻提示"从协议 `get/set/invoke` 里消失
+  // （2026-09-30 审视发现：gallery 打开 Dialog 后 find/#demo-dialog 永远 not_found）。
   Element* found = nullptr;
   const auto walk = [&](auto&& self, Element& element) -> void {
     if (found != nullptr) return;
@@ -304,13 +317,19 @@ auto UiRoot::find(std::string_view id) -> Element* {
       if (found != nullptr) return;
     }
   };
-  walk(walk, *content_);
+  if (content_ != nullptr) walk(walk, *content_);
+  if (found != nullptr) return found;
+  for (auto& overlay : overlays_) {
+    if (overlay == nullptr) continue;
+    walk(walk, *overlay);
+    if (found != nullptr) return found;
+  }
   return found;
 }
 
 auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<Element*> {
+  // 同 find(id)：选择器也要覆盖叠加层，否则 `Dialog`/`Toast`/`Select 面板` 全部选不到。
   std::vector<Element*> matches;
-  if (content_ == nullptr) return matches;
   const auto walk = [&](auto&& self, Element& element) -> void {
     if (limit != 0 && matches.size() >= limit) return;
     if (selector.matches_with_ancestors(element)) matches.push_back(&element);
@@ -319,7 +338,11 @@ auto UiRoot::query(const Selector& selector, std::size_t limit) -> std::vector<E
       if (limit != 0 && matches.size() >= limit) return;
     }
   };
-  walk(walk, *content_);
+  if (content_ != nullptr) walk(walk, *content_);
+  for (auto& overlay : overlays_) {
+    if (overlay == nullptr) continue;
+    walk(walk, *overlay);
+  }
   return matches;
 }
 
@@ -547,9 +570,12 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
 
   if (use_full) {
     // 整帧：清屏 + 绘制整树（GPU 画布恒走这条，与旧行为完全一致）。
+    // ⠇叠加层在内容之后绘制（浮层在景上：遮罩/对话框/轻提示必须盖住内容）。
+    //   旧序（先 overlay 后 content）会让内容把 Dialog 卡片/遮罩全部盖住
+    //   （2026-09-30 画廊补全时实测发现：dialog-open 截图里什么都看不到）。
     canvas.clear(theme_.colors().bg);
-    for (auto& overlay : overlays_) overlay->paint(context, canvas);
     if (content_ != nullptr) paint_subtree(context, *content_, canvas);
+    for (auto& overlay : overlays_) overlay->paint(context, canvas);
     last_frame_partial_ = false;
     dirty_rect_ = math::IntRect{0, 0, static_cast<int>(viewport_.width),
                                 static_cast<int>(viewport_.height)};
@@ -563,8 +589,8 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
     canvas.push_clip_rect(clipped_damage);
     canvas.fill_rect(clipped_damage, raster::Paint::solid(theme_.colors().bg), 0.0f,
                      raster::DrawOptions{.blend = raster::BlendMode::Src});
-    for (auto& overlay : overlays_) overlay->paint(context, canvas);
     if (content_ != nullptr) paint_subtree(context, *content_, canvas);
+    for (auto& overlay : overlays_) overlay->paint(context, canvas);
     canvas.pop_clip();
     last_frame_partial_ = true;
     dirty_rect_ = clipped_damage.round_out();

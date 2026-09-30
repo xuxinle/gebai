@@ -3,6 +3,24 @@
 > 本文件是唯一权威清单，完成后移入「已完成」并在 DESIGN.md 更新里程碑。
 > **诚实原则**：写着「待做」却已完成的条目会误导读者；写着「已完成」却没落地的条目更糟。
 
+### 画廊全场景补全（v0.1.5，2026-09-30 第二轮审视）
+
+- [x] **叠加层 z 序修正**（P0 级缺陷）：`paint`/`paint_frame` 中 overlay 先于内容绘制，
+  导致 Dialog 遮罩/卡片、Toast 全部被内容盖住（画廊补全时实测发现：dialog-open 截图里
+  什么都看不到）。改为内容先画、浮层后画。
+- [x] **`find`/`query` 覆盖叠加层**（同源缺陷）：`UiRoot::find(id)`/`query(selector)` 只遍历
+  content 树——打开的 Dialog/Toast/Select 面板从选择器里永久 not_found。
+- [x] **`TextArea` 属性面补齐**：未实现 `get/set_property`，`set value` 被静默忽略
+  （与 Input 踩过的坑同类）。
+- [x] **`Toast` 自动消失**：`set_auto_dismiss_ms`（帧时间轴驱动，`on_dismiss` 回调 +
+  `expired`/`auto_dismiss_ms` 属性面；到期帧连阴影都不落盘）。
+- [x] **`Table` 选中行**：`set_selected_row`（视觉 primary_soft+主色左缘条、语义值
+  `sel=N`、属性面读写、越界拒绝、clear_rows 清除）。
+- [x] **`SceneView` 逐帧调试 fprintf 移除**（常驻动画下 stderr 被淹、软件腿被拖慢）。
+- [x] **画廊新增场景**：浮层与反馈卡（Dialog 三关闭路径/Toast 自动消失）、
+  多行文本卡（TextArea 折行/行数回显）、禁用态卡（Button/Input disabled）、
+  数据页表格点击选中+真实 label 回读、概览页四张统计卡全部改实时值（消灭占位假数据）。
+
 ## P0（当前无——上轮的四项渲染地基已全部落地，见「已完成」）
 
 ## P1

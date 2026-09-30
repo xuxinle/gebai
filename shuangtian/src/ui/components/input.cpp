@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <utility>
 
+#include "st/core/string.hpp"
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/paint.hpp"
@@ -785,6 +787,54 @@ auto TextArea::semantics_flags() const -> SemanticsFlags {
   flags.editable = enabled();
   flags.scrollable = true;
   return flags;
+}
+
+auto TextArea::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "value" || name == "text") return text_;
+  if (name == "placeholder") return placeholder_;
+  if (name == "cursor_index") return std::format("{}", cursor_);
+  if (name == "scroll_offset") return std::format("{:.1f}", static_cast<double>(scroll_));
+  return std::nullopt;
+}
+
+auto TextArea::set_property(std::string_view name, std::string_view value) -> bool {
+  if (name == "value" || name == "text") {
+    set_text(std::string(value));
+    return true;
+  }
+  if (name == "placeholder") {
+    set_placeholder(std::string(value));
+    return true;
+  }
+  if (name == "cursor_index") {
+    const auto parsed = st::parse_u64(value);
+    if (!parsed.has_value()) return false;
+    set_cursor_index(static_cast<std::size_t>(*parsed));
+    return true;
+  }
+  if (name == "scroll_offset" || name == "scroll") {
+    const auto parsed = st::parse_f64(value);
+    if (!parsed.has_value()) return false;
+    set_scroll_offset(static_cast<float>(*parsed));
+    return true;
+  }
+  return false;
+}
+
+auto TextArea::property_names() const -> std::vector<std::string_view> {
+  return {"value", "text", "placeholder", "cursor_index", "scroll_offset"};
+}
+
+auto TextArea::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  if (action == "clear") {
+    set_text({});
+    return true;
+  }
+  if (action == "submit" || action == "activate") {
+    activate();
+    return true;
+  }
+  return Element::invoke_action(action, argument);
 }
 
 }  // namespace st::ui

@@ -405,6 +405,38 @@ void Toast::measure(const RenderContext& context, const Constraints& constraints
   measured_ = math::Size{width, height};
 }
 
+void Toast::arrange(const RenderContext& context, math::Rect rect) {
+  // 居中：UiRoot 对叠加层的默认排布是顶部左对齐，轻提示习惯上水平居中。
+  // 宽度用自己量得的（rect 宽可能被拉满可用宽），保持胶囊尺寸后居中。
+  const float width = std::min(measured_.width, rect.width);
+  const float x = rect.x + (rect.width - width) * 0.5f;
+  Element::arrange(context, math::Rect{x, rect.y, width, rect.height});
+}
+
+void Toast::paint(const RenderContext& context, raster::Surface& canvas) const {
+  // —— 自动消失推演（先于一切绘制：连阴影都不落盘） ——
+  // 不额外起线程/定时器：到期时刻由帧时间轴（context.time_seconds）推演，
+  // 到期即置位并调 on_dismiss（宿主负责在下一帧前经 overlay_remove 摘除；
+  // 与 Select::flush_dismiss 同一套"延迟摘除"约定：绘制路径不能在 UiRoot 遍历 overlays 时改动容器）。
+  // 放在 paint_content 里做不到"什么都不画"——基类 Element::paint 会先画盒子（阴影），
+  // 到期那帧就会残留一块阴影。
+  if (auto_dismiss_ms_ > 0.0 && !expired_) {
+    const double now = context.time_seconds;
+    if (dismiss_at_ < 0.0) {
+      dismiss_at_ = now + auto_dismiss_ms_ / 1000.0;  // 首次绘制起算
+      request_animation();
+    } else if (now >= dismiss_at_) {
+      expired_ = true;
+      record_damage();  // 摘除后需要一帧把旧内容抹掉（mark_dirty 非 const；绘制路径用损坏区上报）
+      if (on_dismiss) on_dismiss();
+      return;  // 到期：整组件不绘制（含阴影）
+    } else {
+      request_animation();  // 计时中：续帧，到期那帧才会真的触发
+    }
+  }
+  Element::paint(context, canvas);
+}
+
 void Toast::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   if (bounds_.is_empty()) return;
   const Metrics& metrics = context.theme.metrics();
@@ -416,11 +448,28 @@ void Toast::paint_content(const RenderContext& context, raster::Surface& canvas)
   paint_text(context, canvas, message_, content_box());
 }
 
+void Toast::set_auto_dismiss_ms(double milliseconds) noexcept {
+  if (milliseconds < 0.0) milliseconds = 0.0;
+  if (milliseconds == auto_dismiss_ms_) return;
+  auto_dismiss_ms_ = milliseconds;
+  dismiss_at_ = -1.0;  // 重置起算：下一次绘制重新起表
+  expired_ = false;
+  mark_dirty();
+}
+
+auto Toast::remaining_ms() const noexcept -> double {
+  // 只读推算：无"当前时间"输入，返回配置上限；精确剩余看 expired()/绘制时刻。
+  if (auto_dismiss_ms_ <= 0.0 || expired_ || dismiss_at_ < 0.0) return 0.0;
+  return auto_dismiss_ms_;
+}
+
 auto Toast::semantics_value() const -> std::string { return std::string(tone_name(tone_)); }
 
 auto Toast::get_property(std::string_view name) const -> std::optional<std::string> {
   if (name == "message" || name == "text" || name == "value") return message_;
   if (name == "tone") return std::string(tone_name(tone_));
+  if (name == "auto_dismiss_ms") return std::format("{:.0f}", auto_dismiss_ms_);
+  if (name == "expired") return expired_ ? "true" : "false";
   return std::nullopt;
 }
 
@@ -435,11 +484,17 @@ auto Toast::set_property(std::string_view name, std::string_view value) -> bool 
     set_tone(*parsed);
     return true;
   }
+  if (name == "auto_dismiss_ms") {
+    const auto parsed = st::parse_f64(value);
+    if (!parsed.has_value() || *parsed < 0.0) return false;
+    set_auto_dismiss_ms(*parsed);
+    return true;
+  }
   return false;
 }
 
 auto Toast::property_names() const -> std::vector<std::string_view> {
-  return {"message", "text", "value", "tone"};
+  return {"message", "text", "value", "tone", "auto_dismiss_ms", "expired"};
 }
 
 }  // namespace st::ui
