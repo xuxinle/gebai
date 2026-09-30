@@ -94,6 +94,10 @@ class TextRenderer {
   /// 整形（逻辑单位；`role` 选字体库，代码用 `Monospace`）。
   [[nodiscard]] auto shape(std::string_view utf8, float size,
                            FontRole role = FontRole::Proportional) const -> ShapedText;
+  /// 整形（共享指针版：命中缓存零拷贝；调用方可持有到缓存淘汰之后）。
+  [[nodiscard]] auto shape_cached(std::string_view utf8, float size,
+                                  FontRole role = FontRole::Proportional) const
+      -> std::shared_ptr<const ShapedText>;
   /// 度量：宽 × 行高（逻辑单位）。
   [[nodiscard]] auto measure(std::string_view utf8, float size,
                              FontRole role = FontRole::Proportional) const -> math::Size;
@@ -165,7 +169,12 @@ class TextRenderer {
   /// （曾因缓存「插入后淘汰」并返回裸指针导致 use-after-free，见 text.cpp 注释）。
   [[nodiscard]] auto glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size) const
       -> std::shared_ptr<const GlyphBitmap>;
-  void trim_cache() const;
+  /// 无缓存版整形（`shape_cached` 未命中时的计算体）。
+  [[nodiscard]] auto shape_uncached(std::string_view utf8, float size, FontRole role) const
+      -> ShapedText;
+  /// 淘汰超出预算的字形条目（**调用方须持有锁**，且在插入之前调用）。
+  /// `incoming_bytes` 是即将插入条目的内存量——先腾出它的位置。
+  void trim_cache(std::size_t incoming_bytes) const;
 
   const FontStack* stack_{nullptr};
   float supersample_{1.0f};

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <list>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -216,11 +217,42 @@ auto FontStack::find_face(char32_t codepoint) const -> const FontFace* {
 
 struct TextRenderer::Cache {
   mutable std::mutex mutex{};
-  /// 字形位图缓存：值用 `shared_ptr` 而非 `unique_ptr`——淘汰时仍持有该位图的调用方不受影响
+  /// 字形位图缓存条目。
+  /// 值用 `shared_ptr` 而非 `unique_ptr`——淘汰时仍持有该位图的调用方不受影响
   /// （曾因"插入后清空缓存 + 返回裸指针"导致 heap-use-after-free，ASan 实测定位）。
-  std::unordered_map<std::uint64_t, std::shared_ptr<const GlyphBitmap>> glyphs{};
+  struct GlyphEntry {
+    std::shared_ptr<const GlyphBitmap> bitmap{};
+    std::size_t bytes{0};                  ///< 位图内存估计（淘汰预算用）
+    std::list<std::uint64_t>::iterator lru{};  ///< 指向 `lru_order` 中自己的位置
+  };
+  std::unordered_map<std::uint64_t, GlyphEntry> glyphs{};
+  /// LRU 顺序：front = 最近使用。
+  ///
+  /// 旧实现超限时 `glyphs.clear()` 全清——CJK 大文档（>上限字形）滚动时
+  /// 周期性"全清 → 全部重栅格化"造成帧尖峰。真 LRU 后淘汰是增量的。
+  std::list<std::uint64_t> lru_order{};
+  std::size_t glyph_bytes{0};
   std::unordered_map<std::uint64_t, float> widths{};  ///< 文本宽度缓存（键：文本 + 字号档）
-  static constexpr std::size_t kMaxEntries = 512;
+  /// 整形结果缓存（键：文本 + 字号档 + role + 字体栈指纹，与 widths 同构）。
+  ///
+  /// 为什么值得缓存：`draw()` 每帧对每段文本重新整形（逐码点 face 查找 + 字距 +
+  /// runs 向量分配）。静态界面的文字跨帧不变，重复整形是纯浪费（§4.3 声称的
+  /// 「缓存：整形结果」此前并未实现）。
+  struct ShapedEntry {
+    std::shared_ptr<const ShapedText> text{};
+    std::size_t bytes{0};
+    std::list<std::uint64_t>::iterator lru{};
+  };
+  std::unordered_map<std::uint64_t, ShapedEntry> shaped{};
+  std::list<std::uint64_t> shaped_lru{};
+  std::size_t shaped_bytes{0};
+  static constexpr std::size_t kShapedMaxBytes = 16 * 1024 * 1024;
+  static constexpr std::size_t kShapedMaxEntries = 4096;
+  /// 淘汰预算：按**内存**而不是条目数（字形位图大小差异极大——空白字形与 64px 汉字
+  /// 差三个数量级；512 条目的旧上限对 16px 汉字只值 ~800 KiB，对 64px 却要 32 MiB）。
+  static constexpr std::size_t kMaxBytes = 24 * 1024 * 1024;
+  /// 条目数硬上限（防小位图海量时的 map 开销）。
+  static constexpr std::size_t kMaxEntries = 32768;
 };
 
 TextRenderer::TextRenderer(const FontStack& stack, float supersample)
@@ -233,6 +265,8 @@ void TextRenderer::set_supersample(float factor) {
   supersample_ = factor < 1.0f ? 1.0f : factor;
   const std::scoped_lock lock(cache_->mutex);
   cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
 }
 
 auto TextRenderer::cache_entries() const noexcept -> std::size_t { return cache_->glyphs.size(); }
@@ -254,6 +288,48 @@ auto TextRenderer::line_height(float size) const -> float {
 }
 
 auto TextRenderer::shape(std::string_view utf8, float size, FontRole role) const -> ShapedText {
+  // 拷贝返回（公开 API 保持值语义）；缓存命中时省下的是整形本身，
+  // 拷贝只是一次 runs 向量复制（远低于逐码点 face 查找 + 字距的开销）。
+  return *shape_cached(utf8, size, role);
+}
+
+auto TextRenderer::shape_cached(std::string_view utf8, float size, FontRole role) const
+    -> std::shared_ptr<const ShapedText> {
+  const std::uint64_t key = st::hash::fnv1a64(utf8) ^
+                            (static_cast<std::uint64_t>(size_key(size)) << 32U) ^
+                            (static_cast<std::uint64_t>(role) << 56U) ^ stack_->fingerprint();
+  {
+    const std::scoped_lock lock(cache_->mutex);
+    if (const auto iterator = cache_->shaped.find(key); iterator != cache_->shaped.end()) {
+      // 命中：提到 LRU 头部
+      cache_->shaped_lru.splice(cache_->shaped_lru.begin(), cache_->shaped_lru,
+                                iterator->second.lru);
+      return iterator->second.text;
+    }
+  }
+  auto shaped = std::make_shared<ShapedText>(shape_uncached(utf8, size, role));
+  const std::size_t bytes = shaped->runs.size() * sizeof(TextRun) + utf8.size() + 64;
+  if (bytes <= Cache::kShapedMaxBytes) {  // 超大文本不入缓存（一跳进就会出现"刚插就淘汰"）
+    const std::scoped_lock lock(cache_->mutex);
+    while (!cache_->shaped_lru.empty() &&
+           (cache_->shaped_bytes + bytes > Cache::kShapedMaxBytes ||
+            cache_->shaped.size() >= Cache::kShapedMaxEntries)) {
+      const std::uint64_t victim = cache_->shaped_lru.back();
+      cache_->shaped_lru.pop_back();
+      const auto iterator = cache_->shaped.find(victim);
+      if (iterator == cache_->shaped.end()) continue;
+      cache_->shaped_bytes -= iterator->second.bytes;
+      cache_->shaped.erase(iterator);
+    }
+    cache_->shaped_lru.push_front(key);
+    cache_->shaped_bytes += bytes;
+    cache_->shaped.emplace(key, Cache::ShapedEntry{shaped, bytes, cache_->shaped_lru.begin()});
+  }
+  return shaped;
+}
+
+auto TextRenderer::shape_uncached(std::string_view utf8, float size, FontRole role) const
+    -> ShapedText {
   ShapedText shaped;
   if (stack_->empty() || utf8.empty() || size <= 0.0f) {
     shaped.line_height = line_height(size);
@@ -323,7 +399,7 @@ auto TextRenderer::measure_width(std::string_view utf8, float size, FontRole rol
       return iterator->second;
     }
   }
-  const float width = shape(utf8, size, role).width;
+  const float width = shape_cached(utf8, size, role)->width;
   {
     const std::scoped_lock lock(cache_->mutex);
     if (cache_->widths.size() > 4096) cache_->widths.clear();
@@ -368,10 +444,23 @@ auto TextRenderer::index_at_x(std::string_view utf8, float size, float local_x) 
   return total;
 }
 
-/// 淘汰超出上限的条目（**调用方须持有锁**，且在插入之前调用）。
-void TextRenderer::trim_cache() const {
-  if (cache_->glyphs.size() <= Cache::kMaxEntries) return;
-  cache_->glyphs.clear();
+/// 淘汰超出预算的条目（**调用方须持有锁**，且在插入之前调用）。
+///
+/// 按 LRU 从尾部逐出；预算按字节（见 `Cache::kMaxBytes`）。
+/// `incoming_bytes` 是即将插入条目的内存量——先腾出它的位置再插入，
+/// 保持"先淘汰、后插入"的顺序（反过来曾出现"插入后清空"把新位图一起销毁，
+/// `return slot.get()` 返回悬垂指针，ASan 实测 heap-use-after-free）。
+void TextRenderer::trim_cache(std::size_t incoming_bytes) const {
+  while (!cache_->lru_order.empty() &&
+         (cache_->glyph_bytes + incoming_bytes > Cache::kMaxBytes ||
+          cache_->glyphs.size() >= Cache::kMaxEntries)) {
+    const std::uint64_t victim = cache_->lru_order.back();
+    cache_->lru_order.pop_back();
+    const auto iterator = cache_->glyphs.find(victim);
+    if (iterator == cache_->glyphs.end()) continue;
+    cache_->glyph_bytes -= iterator->second.bytes;
+    cache_->glyphs.erase(iterator);
+  }
 }
 
 auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRole role) const
@@ -405,7 +494,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->glyphs.find(key); iterator != cache_->glyphs.end()) {
-      return iterator->second;
+      // 命中：提到 LRU 头部（真 LRU——被复用的字形永远不会被"周期性全清"波及）
+      cache_->lru_order.splice(cache_->lru_order.begin(), cache_->lru_order,
+                               iterator->second.lru);
+      return iterator->second.bitmap;
     }
   }
 
@@ -493,8 +585,12 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // **先淘汰、后插入**：反过来会在插入后清空缓存，把刚插入的位图一起销毁，
   // 于是 `return slot.get()` 返回悬垂指针（ASan 实测 heap-use-after-free）。
   const std::scoped_lock lock(cache_->mutex);
-  trim_cache();
-  cache_->glyphs[key] = bitmap;
+  const std::size_t entry_bytes =
+      bitmap->coverage.size() * sizeof(float) + sizeof(Cache::GlyphEntry) + 32;
+  trim_cache(entry_bytes);
+  cache_->lru_order.push_front(key);
+  cache_->glyph_bytes += entry_bytes;
+  cache_->glyphs.emplace(key, Cache::GlyphEntry{bitmap, entry_bytes, cache_->lru_order.begin()});
   return bitmap;
 }
 
@@ -506,7 +602,8 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
   const bool profiling = surface.profiler() != nullptr;
   const std::int64_t profile_start = profiling ? st::time::now_ns() : 0;
   std::uint64_t profile_pixels = 0;
-  const ShapedText shaped = shape(utf8, size, role);
+  const std::shared_ptr<const ShapedText> shaped_ptr = shape_cached(utf8, size, role);
+  const ShapedText& shaped = *shaped_ptr;
   const float device_scale = surface.device_scale();
   const float baseline = (origin.y + shaped.ascent) * device_scale;
   const raster::Paint paint = raster::Paint::solid(color);
