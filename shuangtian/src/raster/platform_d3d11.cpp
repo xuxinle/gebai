@@ -1667,6 +1667,9 @@ class D3dPresenter final : public Presenter {
 
   auto present(Surface& canvas, int width, int height) -> Status override {
     if (swapchain_ == nullptr) return unexpected(ErrorCode::Invalid, "呈现器未就绪");
+    // 拖动期间 win32 后端不重建画布（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE` 节流），
+    // 因此这里的 `width/height` 与后备缓冲一致 → 不触发 ResizeBuffers，
+    // 呈现的是旧尺寸内容、由 DXGI 拉伸到新客户区（模糊但跟手，松手后恢复锐利）。
     if (width != width_ || height != height_) {
       if (auto resized = resize(width, height); !resized) return resized;
     }

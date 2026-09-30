@@ -248,7 +248,14 @@ auto Application::start() -> Status {
   }
   impl_->backend = impl_->backend_holder.get();
 
-  // DPI 解析：显式选项 > ST_SCALE 环境变量 > 1.0（无头默认 1x；有显示时由平台后端提供）
+  // DPI 解析：显式选项 > ST_SCALE 环境变量 > **后端默认**（不要在这里填 1.0）。
+  //
+  // ⚠ 这里原先的 `if (options_.scale <= 0) options_.scale = 1.0f;` 是个真缺陷：
+  // win32 后端靠 `options.scale > 0` 区分"用户显式指定"与"用系统 DPI"，
+  // 被 app 层预先填成 1.0 后**每个窗口都被当成显式 1x**，
+  // `query_window_scale`（GetDpiForWindow → 系统缩放）永远不会被走到——
+  // 实测：系统 1.5x（144 DPI）下窗口仍按 1.0x 建，内容全部偏小。
+  // 语义应为：0 = "未指定"，交给后端（win32 查窗口 DPI；headless 无显示器，缺省 1x）。
   if (options_.scale <= 0.0f) {
     if (const auto env_scale = fs::read_env("ST_SCALE"); env_scale.has_value()) {
       if (const auto parsed = parse_f64(*env_scale); parsed.has_value() && *parsed > 0.0) {
@@ -256,7 +263,7 @@ auto Application::start() -> Status {
       }
     }
   }
-  if (options_.scale <= 0.0f) options_.scale = 1.0f;
+  // 未指定（仍为 0）就传 0 给后端，由后端决定（win32 = 查系统 DPI）
 
   shell::WindowOptions window;
   window.width = options_.width;

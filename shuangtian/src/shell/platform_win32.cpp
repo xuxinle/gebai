@@ -348,6 +348,7 @@ class Win32Backend final : public Backend {
  private:
   /// 窗口实际 DPI 缩放（优先 `GetDpiForWindow`，Win10 以下退回屏幕 DC 的 LOGPIXELSX）。
   [[nodiscard]] static auto query_window_scale(HWND window, float fallback) -> float {
+
     const UINT window_dpi = ::GetDpiForWindow(window);
     if (window_dpi > 0) return static_cast<float>(window_dpi) / 96.0f;
     if (HDC dc = ::GetDC(nullptr); dc != nullptr) {
@@ -600,14 +601,50 @@ class Win32Backend final : public Backend {
         return 0;
       }
 
+      // ── 调整窗口大小的"节流"：进入移动/缩放循环时置标志，退出时一次性重建 ──
+      //
+      // 为什么必须节流：拖动边框时 `WM_SIZE` **每个中间尺寸都发一次**（一次拖动几十上百次），
+      // 而每次 `sync_buffers_to_client` 都会走完整的 `allocate_buffers`——
+      // 重建画布、D3D11 纹理/渲染目标、**整个 swapchain**、DIB。实测一次拖动期间
+      // 几十次全套重建，界面明显卡顿。
+      //
+      // 节流后的行为：
+      // - 拖动中：只记下"尺寸脏了"，**不重建**。呈现时用现有缓冲区**拉伸贴满**客户区
+      //   （`WM_PAINT` 里 `present` 已按当前客户区尺寸输出）——瞬间是糊的，但跟手；
+      // - 松手（`WM_EXITSIZEMOVE`）：按最终客户区重建一次，恢复 1:1 锐利。
+      // 这正是原生应用的通用做法（"resize 时拉伸、放开后重建"）。
+      case WM_ENTERSIZEMOVE: {
+        in_size_loop_ = true;
+        return 0;
+      }
+      case WM_EXITSIZEMOVE: {
+        in_size_loop_ = false;
+        if (surface_ != nullptr) {
+          // 只在尺寸真的变了时重建（进入/退出移动循环但只挪了位置 → 白建）
+          RECT client{};
+          if (::GetClientRect(window, &client) != 0 &&
+              (client.right != surface_->physical_width() ||
+               client.bottom != surface_->physical_height())) {
+            (void)sync_buffers_to_client(scale_);
+          }
+        }
+        return 0;
+      }
       case WM_SIZE: {
         if (surface_ == nullptr) return 0;
         RECT client{};
         if (::GetClientRect(window, &client) == 0) return 0;
+        // 最小化（SIZE_MINIMIZED）与"尺寸没真变"都不用管
+        if (wparam == SIZE_MINIMIZED) return 0;
+        if (client.right == surface_->physical_width() &&
+            client.bottom == surface_->physical_height()) {
+          return 0;
+        }
         // 尺寸变化由应用在下一帧读取 `logical_size()` 并同步视口（见 Application::tick）。
         // 一律走 `sync_buffers_to_client`：它保证画布物理尺寸**精确等于**客户区
         // （手写 `client / scale` 取整会差 1px → DXGI 缩放 → 糊）。
-        (void)sync_buffers_to_client(scale_);
+        // **但拖动/缩放循环中先不重建**（见上）：拉伸跟手，松手一次到位。
+        if (!in_size_loop_) (void)sync_buffers_to_client(scale_);
         return 0;
       }
 
@@ -737,6 +774,9 @@ class Win32Backend final : public Backend {
   std::uint64_t frames_{0};
   bool class_registered_{false};
   bool close_requested_{false};
+  /// 正处于"移动/缩放"模态循环（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE`）：
+  /// 此期间 `WM_SIZE` 只记尺寸、不重建缓冲（拖动跟手），退出时一次性重建。
+  bool in_size_loop_{false};
 };
 
 }  // namespace
