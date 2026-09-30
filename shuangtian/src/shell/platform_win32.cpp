@@ -652,19 +652,26 @@ class Win32Backend final : public Backend {
         if (surface_ == nullptr) return 0;
         // 最小化不用管（恢复时还会来一次非最小化的 WM_SIZE）
         if (wparam == SIZE_MINIMIZED) return 0;
-        // **只记"尺寸脏"，重建推迟到 `present()`**。
+        // **只记"尺寸脏"与"待定尺寸"，重建推迟到 `framebuffer()`**（不在窗口过程里做）。
+        // 同时**立即**更新 `logical_size()` 的数据源——这是打破"等待输入"死锁的关键：
         //
-        // 为什么不在消息处理里重建（两个真实场景都被这一条覆盖）：
-        // ① 拖动边框：`WM_SIZE` 每个中间尺寸都来一次，同步重建 = 几十次全套资源重建；
-        // ② **最大化/还原**：不进入 `WM_ENTERSIZEMOVE` 模态（那是拖动专属），
-        //    但客户区瞬间从 ~1920×1200 跳到 ~3840×2100（2560×1440 屏幕 @1.5x），
-        //    在窗口过程里同步重建画布+纹理+swapchain，界面就卡在那一下——
-        //    用户实测"最大化切换渲染卡顿"就是它。
-        // 推迟到 present() 后：每帧至多重建一次、且不在窗口过程里阻塞消息泵；
-        // 期间用旧尺寸缓冲呈现（DXGI 拉伸到客户区，瞬间模糊但连续），
-        // 尺寸稳定后一帧内恢复 1:1 锐利。
+        //   tick 的渲染条件是 `logical_size() != root.viewport()`；若 logical_size
+        //   仍报旧值（等重建时才更新），则 viewport 也是旧值 → 两者相等 →
+        //   repaint 不置位 → render_frame 不执行 → framebuffer() 不被调 →
+        //   重建永不发生 → 屏幕停在拉伸的旧内容上，直到某个输入事件置 repaint。
+        //   （用户实测："要鼠标动一下才清晰"——就是这个死锁。）
+        // 尺寸信息**先**于缓冲更新：布局/视口可以立即跟随新尺寸，缓冲在
+        // 本帧取画布时一次重建到位。
         RECT client{};
-        if (::GetClientRect(window, &client) != 0) size_dirty_ = true;
+        if (::GetClientRect(window, &client) != 0 && client.right > 0 && client.bottom > 0) {
+          size_dirty_ = true;
+          pending_width_ = static_cast<int>(client.right);
+          pending_height_ = static_cast<int>(client.bottom);
+          logical_width_exact_ = static_cast<float>(client.right) / scale_;
+          logical_height_exact_ = static_cast<float>(client.bottom) / scale_;
+          logical_width_ = std::max(1, static_cast<int>(std::lround(logical_width_exact_)));
+          logical_height_ = std::max(1, static_cast<int>(std::lround(logical_height_exact_)));
+        }
         return 0;
       }
 
@@ -797,9 +804,12 @@ class Win32Backend final : public Backend {
   /// 正处于"移动/缩放"模态循环（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE`）：
   /// 此期间 `WM_SIZE` 只记尺寸、不重建缓冲（拖动跟手），退出时一次性重建。
   bool in_size_loop_{false};
-  /// 客户区尺寸已变化、待 `present()` 重建（每帧至多一次的节流）。
+  /// 客户区尺寸已变化、待 `framebuffer()` 重建（每帧至多一次的节流）。
   /// 最大化/还原不走拖动模态，靠它把重建从窗口过程挪到帧循环里。
   bool size_dirty_{false};
+  /// 待重建的目标尺寸（`WM_SIZE` 里记下，`sync_buffers_to_client` 用）。
+  int pending_width_{0};
+  int pending_height_{0};
 };
 
 }  // namespace
