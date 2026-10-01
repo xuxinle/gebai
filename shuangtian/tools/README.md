@@ -27,6 +27,7 @@
 | `st_ctl.py` | 控制通道批量操作脚本 |
 | `ft_compare.py` | 用 FreeType 对照自研 CFF 解释器（仅测试用，不进框架构建） |
 | `lcd_compare.cpp` | 文字抗锯齿对照：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG + 扫描行边缘剖面（仅验证用；手工编译命令见文件头） |
+| `stem_phase_probe.cpp` | **小字锐度量尺**：统计竖笔画的边缘相位与过渡带像素数（“边缘落在整数网格”占比、“最糊相位”占比），用于量化网格拟合/hinting 的收益与验收（仅验证用，编译同 `lcd_compare.cpp`） |
 | `st_visual_check.py` | 视觉树与截图核对 |
 | `st_project_check.py` | 独立工程结构检查 |
 | `st_win_check.py` | Windows 后端专项检查 |
