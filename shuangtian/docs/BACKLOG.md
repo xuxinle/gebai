@@ -25,6 +25,15 @@
 
 ## P1
 
+- [ ] **小字锐度：笔画网格拟合（hinting / stem snapping）** —— 2026-10-01 由 vsedit 反馈
+  逐像素对照定位：13.5px @125% 下笔画宽 1.2~1.7px 且落在**分数相位**上，边缘必然摊成
+  2~3 像素的缓坡，这是「字看着糊」的**主因**（已落地的亚像素渲染解决的是另外两件事：
+  1/3 像素的边缘定位与彩边，实测不改变过渡带宽度，见 DESIGN §4.3.1）。
+  方向：按 `size` 档做**网格拟合**（横向笔画起止吸附到像素边界、笔画保持整数像素宽），
+  或引入 `FT_LOAD_TARGET_*` 式的 hinting（自研 charstring 解释器已具备指令流，
+  但 TrueType `fpgm/prep/glyf` 指令执行器尚未实现——是这一条的主要工作量）。
+  验收：同一段 13.5px 正文的「过渡带像素数」相对当前下降，且字宽/排版不变。
+  在**窗口模式**下才默认开启（无头截图仍需可逐像素断言）。
 - [ ] **窗口模式 vsync / 空闲阻塞**（帧调度的最后一截）：`present()` 仍 `Present(0,0)`
   不等 vsync（无头验证不了撕裂/节奏，标为待真机窗口测试）；空闲仍 4ms 轮询
   （实测 0.57% 单核，已够低；`MsgWaitForMultipleObjects` 事件阻塞属锦上添花）。
@@ -57,6 +66,27 @@
 - [ ] check_docs.py 纳入 CI 常跑（本轮已升级为事实核对；防复发机制已建）。
 
 ## 已完成（本轮「全部优化」落地，备查）
+
+### 文字亚像素渲染（LCD / ClearType 类）—— 2026-10-01（vsedit 反馈 P1）
+
+- [x] **`CoverageFormat` 进 `Surface` 接口**：覆盖率位图两种通道布局（`Grayscale` 1 项/像素、
+  `Lcd` 3 项/像素），`blend_coverage_bitmap` 按布局选混合公式；既有调用零改动。
+- [x] **`TextRenderer::set_subpixel`**：字形按 **3× 水平超采样**（`3·supersample 列 × supersample 行`）
+  光栅化后逐子像素聚合 → 每像素 R/G/B 三个覆盖率（= `FT_RENDER_MODE_LCD` 口径）；
+  包围盒由灰度口径 ×3 推导 ⇒ **两种模式位图网格逐像素重合（不挪字）**；
+  5-tap 低通滤波（`FT_LCD_FILTER_DEFAULT` 权重，可 `ST_TEXT_LCD_FILTER=0` 关）；
+  **缓存键含渲染模式位**（两种位图共存不混用）。
+- [x] **软件混合**：逐通道 α 的 src-over（`out_c = S_c·α_c + D_c·(1-a_s·α_c)`），
+  非 `SrcOver` 模式如实退化为三通道均值。
+- [x] **GPU（D3D11）**：`R8G8B8A8` 覆盖率纹理（缓存项带三通道标志）+ 着色器 `CoverageMaskLcd`
+  + **两遍混合**（`ZERO/INV_SRC_COLOR` 逐通道衰减目标，`ONE/ONE` 加性加回源项）；
+  `Capabilities::lcd_text` 如实上报；顺带把「管线建不起来」变成显式失败
+  （`capabilities()`/`create_canvas()` 挡住着色器编译失败与混合状态创建失败）。
+- [x] **开关与可观测**：`--text-lcd auto|on|off`（三个示例 + 通用命令行都接）、`ST_TEXT_LCD`、
+  启动日志一行、协议 `metrics.text_renderer`；默认「有窗口→亚像素 / 无头→灰度」。
+- [x] **验证**：新增 `tests/text_subpixel_test.cpp`（6 用例：网格重合 / 墨量守恒 / 亮度 profile 守恒 /
+  彩边只在边缘 / 滤波取舍 / 缓存不混用）+ `gpu_parity` 的亚像素对比用例（Windows 侧真跑）；
+  实测数据与**诚实的边界**（亚像素不缩小过渡带）记在 `DESIGN.md §4.3.1`。
 
 ### 渲染性能地基（本轮会话后半段落地）
 

@@ -73,6 +73,12 @@ struct Metrics {
   /// 实际使用的渲染器（"software" / "gpu"）与选择理由（`auto` 时含实测结果）。
   std::string renderer{};
   std::string renderer_note{};
+  /// 文字抗锯齿形态："lcd"（亚像素）或 "grayscale"。
+  ///
+  /// 为什么上报而不是只写日志："字看着糊/看着带彩边"这类观感问题，
+  /// 第一件要确认的事就是**当前到底在用哪种形态**——它跟后端（有窗口/无头）
+  /// 与启动参数都相关，不报就变成猜。
+  std::string text_renderer{};
   bool headless{true};
   float device_scale{1.0f};
   int physical_width{0};

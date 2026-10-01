@@ -46,8 +46,9 @@ auto common_options_usage(std::string_view program) -> std::string {
       "  --scale F             DPI 缩放（物理像素 = 逻辑 × scale）\n"
       "  --title TEXT          窗口标题\n"
       "  --theme MODE          light / dark / system\n"
-      "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
-  "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
+              "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
+        "  --text-lcd MODE       文字抗锯齿：auto（窗口→LCD 亚像素，无头→灰度）/ on / off\n"
+    "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
       "  --control-file PATH   把端口等写入该文件（自动化流程据此连接）\n"
       "  --enable-script       开启进程内脚本能力（默认关闭）\n"
       "  --frames N            跑够 N 帧后退出\n"
@@ -96,6 +97,17 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
                           std::format("--renderer 只接受 auto / gpu / software，收到「{}」", mode));
       }
       options.app.renderer = mode;
+    } else if (argument == "--text-lcd") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      const std::string mode = *parsed;
+      // 与 `--renderer` 同口径：拼错就报错，不静默落回 auto——
+      // “我明明开了亚像素”变成谜案，比直接报错贵得多。
+      if (mode != "auto" && mode != "on" && mode != "off") {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("--text-lcd 只接受 auto / on / off，收到「{}」", mode));
+      }
+      options.app.text_lcd = mode;
     } else if (argument == "--title") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());

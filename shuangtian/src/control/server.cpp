@@ -955,6 +955,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     // 渲染器必须可查：`auto` 是按实测选的，用户有权知道这一帧谁画的、以及为什么。
     result["renderer"] = metrics.renderer;
     result["renderer_note"] = metrics.renderer_note;
+    // 文字抗锯齿形态："字看着糊/带彩边"这类观感问题，第一件要确认的就是它在用哪一种
+    // （它随“有无窗口”与启动参数而变，不报就只能猜）
+    result["text_renderer"] = metrics.text_renderer;
     result["headless"] = metrics.headless;
     result["device_scale"] = static_cast<double>(metrics.device_scale);
     result["physical_width"] = static_cast<std::uint64_t>(metrics.physical_width);

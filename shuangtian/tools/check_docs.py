@@ -156,7 +156,7 @@ print(f"用例数核对: 实际 ST_TEST {st_test_count} 个；源文件约 {len(
 
 # ── ⑥ 新内容就位 ──
 expect = {
-    'DESIGN.md': ['## 目录', '### 8.2.1 这批缺陷说明了什么', '12 条**禁用特性规则'],
+    'DESIGN.md': ['## 目录', '### 8.2.1 这批缺陷说明了什么', '13 条**禁用特性规则'],
     'README.md': ['M1–M6 全部落地', 'docs/README.md'],
     'docs/README.md': ['霜天文档地图', '按意图索引'],
     'docs/BACKLOG.md': ['停摆竞态根因定位'],

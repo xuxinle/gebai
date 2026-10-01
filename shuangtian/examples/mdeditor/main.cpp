@@ -593,6 +593,8 @@ struct Options {
   int max_ms{0};
   bool headless{false};
   bool demo_stream{false};
+  /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
+  std::string text_lcd{"auto"};
 };
 
 [[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
@@ -608,6 +610,7 @@ struct Options {
     else if (raw == "--control-file") options.control_file = value({});
     else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(value("0")));
     else if (raw == "--theme") options.theme = value("light");
+    else if (raw == "--text-lcd") options.text_lcd = value("auto");
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(value("1")));
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(value("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
@@ -616,7 +619,7 @@ struct Options {
     else if (raw == "--help" || raw == "-h") {
       st::print("用法: mdeditor [--open FILE] [--out FILE] [--theme dark] [--scale 2.0]\n"
                   "                [--headless] [--control-port 0] [--control-file PATH]\n"
-                  "                [--frames N] [--ms N] [--demo-stream]\n");
+                  "                [--frames N] [--ms N] [--demo-stream] [--text-lcd auto|on|off]\n");
       std::exit(0);
     }
   }
@@ -699,6 +702,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
+  app_options.text_lcd = options.text_lcd;
   app_options.theme = options.theme == "dark" ? st::ui::ThemeMode::Dark : st::ui::ThemeMode::Light;
 
   st::app::Application app("mdeditor", "0.1.0", app_options);

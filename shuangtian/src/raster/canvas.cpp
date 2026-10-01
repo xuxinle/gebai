@@ -116,6 +116,31 @@ struct OpScope {
               scale(channel(src, 0)));
 }
 
+/// 逐通道 α 的预乘 src-over：`out_c = S_c·α_c + D_c·(1 - a_s·α_c)`。
+///
+/// 亚像素渲染的全部内容就是这条式子：**目标衰减也按通道**。若把它写成
+/// `S_c·α_c + D_c·(1 - ā)`（硬件混合只能给一个标量 α），黑字压白底时 `S_c = 0`，
+/// 结果退化成 `D_c·(1-ā)`——**彩边一个都不剩**，等于白做。
+/// GPU 侧因此必须走两遍混合（先把目标按 `1-α_c` 衰减，再加性加回源项）。
+[[nodiscard]] constexpr auto over_premul_lcd(std::uint32_t dst, std::uint32_t src,
+                                             std::uint32_t a_r, std::uint32_t a_g,
+                                             std::uint32_t a_b) noexcept -> std::uint32_t {
+  const std::uint32_t source_alpha = channel(src, 0);
+  const auto blend = [source_alpha](std::uint32_t source, std::uint32_t destination,
+                                    std::uint32_t alpha) constexpr noexcept {
+    // 源项按 α_c 缩放；目标衰减按 a_s·α_c（源自身不透明时二者相同）
+    const std::uint32_t attenuation = fast_div255(source_alpha * alpha + 127U);
+    return fast_div255(source * alpha + 127U) +
+           fast_div255(destination * (255U - attenuation) + 127U);
+  };
+  // α 通道是**标量**，无法逐通道：取三通道均值（不透明画布上与逐通道等价）
+  const std::uint32_t a_a = (a_r + a_g + a_b + 1U) / 3U;
+  return pack(blend(channel(src, 24), channel(dst, 24), a_r),
+              blend(channel(src, 16), channel(dst, 16), a_g),
+              blend(channel(src, 8), channel(dst, 8), a_b),
+              blend(source_alpha, channel(dst, 0), a_a));
+}
+
 /// 直通 α 混合算子（非 SrcOver 模式在直通空间计算）。
 [[nodiscard]] constexpr auto blend_channel(BlendMode mode, std::uint32_t backdrop,
                                            std::uint32_t source) noexcept -> std::uint32_t {
@@ -478,22 +503,28 @@ void Canvas::blend_span(int y, int x_begin, int x_end, math::Color color, float 
 
 void Canvas::blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width,
                                    int height, const Paint& paint, float opacity,
-                                   BlendMode blend, std::uint64_t cache_key) {
+                                   BlendMode blend, std::uint64_t cache_key,
+                                   CoverageFormat format) {
   // 软件路径逐行混合，不需要稳定身份（身份只服务 GPU 那边的纹理缓存）。
   (void)cache_key;
   if (width <= 0 || height <= 0 || opacity <= 0.0f) return;
-  const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+  const std::size_t channels = format == CoverageFormat::Lcd ? 3U : 1U;
+  const std::size_t stride = static_cast<std::size_t>(width) * channels;
+  const std::size_t expected = static_cast<std::size_t>(height) * stride;
   if (coverage.size() < expected) return;
   // 软件实现就是“逐行走行混合”——这正是 `blend_coverage_row` 的用途；
-  // GPU 实现则把这张覆盖率图传成 A8 纹理再画一个四边形（两边语义相同，做法不同）。
+  // GPU 实现则把这张覆盖率图传成纹理再画一个四边形（两边语义相同，做法不同）。
   //
   // **本函数内部不记账**：归到哪一类原语取决于调用方（字形→`Text`、遮罩→`Image`），
   // 在这里自己记一笔会让剖析出现双重归属。
   for (int row = 0; row < height; ++row) {
-    const std::span<const float> line(
-        coverage.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(width),
-        static_cast<std::size_t>(width));
-    blend_coverage_row(y + row, x, line, paint, opacity, blend);
+    const std::span<const float> line(coverage.data() + static_cast<std::size_t>(row) * stride,
+                                      stride);
+    if (format == CoverageFormat::Lcd) {
+      blend_coverage_row_subpixel(y + row, x, line, paint, opacity, blend);
+    } else {
+      blend_coverage_row(y + row, x, line, paint, opacity, blend);
+    }
   }
 }
 
@@ -573,8 +604,75 @@ void Canvas::blend_coverage_row(int y, int x_begin, std::span<const float> cover
   }
 }
 
+void Canvas::blend_coverage_row_subpixel(int y, int x_begin, std::span<const float> coverage,
+                                         const Paint& paint, float opacity, BlendMode blend) {
+  if (y < 0 || y >= physical_height_) return;
+  const ClipFrame& clip = current_clip();
+  if (y < clip.rect.y || y >= clip.rect.bottom()) return;
+  const int pixels = static_cast<int>(coverage.size() / 3U);
+  const int begin = std::max(x_begin, clip.rect.x);
+  const int end = std::min(x_begin + pixels, clip.rect.right());
+  if (begin >= end) return;
+  auto* row = pixels_.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(physical_width_);
+  const bool masked = has_mask_clip();
+  const auto coverage_at = [&coverage, x_begin](int x, std::size_t channel) -> float {
+    return coverage[static_cast<std::size_t>(x - x_begin) * 3U + channel];
+  };
+
+  if (blend != BlendMode::SrcOver) {
+    // 非常规混合模式（Multiply/Overlay/…）的定义建立在**标量**覆盖率上，没有逐通道版本：
+    // 退化成三通道均值走单通道路径——宁可少一点彩边，不可错一点颜色。
+    std::vector<float> averaged(static_cast<std::size_t>(end - begin));
+    for (int x = begin; x < end; ++x) {
+      averaged[static_cast<std::size_t>(x - begin)] =
+          (std::abs(coverage_at(x, 0U)) + std::abs(coverage_at(x, 1U)) +
+           std::abs(coverage_at(x, 2U))) /
+          3.0f;
+    }
+    blend_coverage_row(y, begin, averaged, paint, opacity, blend);
+    return;
+  }
+
+  // 逐通道 α（含 opacity 与遮罩裁剪）
+  const auto alpha_of = [&](int x, std::size_t channel) -> std::uint32_t {
+    float alpha = std::abs(coverage_at(x, channel)) * opacity;
+    if (masked) alpha = effective_alpha(x, y, alpha);
+    if (alpha <= 0.0f) return 0U;
+    return static_cast<std::uint32_t>(math::clamp01(alpha) * 255.0f + 0.5f);
+  };
+
+  if (paint.is_solid()) {
+    const math::Color color = paint.color();
+    if (color.a == 0U) return;
+    const std::uint32_t premul = math::premultiply(color);
+    for (int x = begin; x < end; ++x) {
+      const std::uint32_t a_r = alpha_of(x, 0U);
+      const std::uint32_t a_g = alpha_of(x, 1U);
+      const std::uint32_t a_b = alpha_of(x, 2U);
+      // 三通道全零 = 这个像素一点墨都没有（空白区占绝大多数）——直接跳过
+      if (a_r == 0U && a_g == 0U && a_b == 0U) continue;
+      row[x] = over_premul_lcd(row[x], premul, a_r, a_g, a_b);
+    }
+    return;
+  }
+
+  // 渐变画笔：颜色仍须逐像素采样（坐标递推与单通道版同一口径）
+  const float step = inverse_scale_;
+  float logical_x = (static_cast<float>(begin) + 0.5f) * inverse_scale_;
+  const float logical_y = (static_cast<float>(y) + 0.5f) * inverse_scale_;
+  for (int x = begin; x < end; ++x, logical_x += step) {
+    const std::uint32_t a_r = alpha_of(x, 0U);
+    const std::uint32_t a_g = alpha_of(x, 1U);
+    const std::uint32_t a_b = alpha_of(x, 2U);
+    if (a_r == 0U && a_g == 0U && a_b == 0U) continue;
+    const math::Color color = paint.sample(math::Point{logical_x, logical_y});
+    if (color.a == 0U) continue;
+    row[x] = over_premul_lcd(row[x], math::premultiply(color), a_r, a_g, a_b);
+  }
+}
+
 void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const Paint& paint,
-                                 float opacity, BlendMode blend) {
+                                float opacity, BlendMode blend) {
   if (y < 0 || y >= physical_height_ || runs.empty()) return;
   const ClipFrame& clip = current_clip();
   if (y < clip.rect.y || y >= clip.rect.bottom()) return;

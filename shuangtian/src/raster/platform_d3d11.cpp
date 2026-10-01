@@ -317,6 +317,8 @@ float4 ps_main(VsOut input) : SV_Target {
   const float2 half_size = g_rect.zw * 0.5;
   float4 source = g_color;
   float coverage = 1.0;
+  // 亚像素（LCD）覆盖率：每像素独立的 R/G/B 三个覆盖度（模式 5）
+  float3 coverage_rgb = float3(1.0, 1.0, 1.0);
 
   if (mode == 4) {
     // 可分离盒式模糊（阴影遮罩）：与 `blur_mask` 同一口径（3 遍 [水平+垂直]）。
@@ -355,25 +357,45 @@ float4 ps_main(VsOut input) : SV_Target {
   } else if (mode == 2) {
     // 覆盖率遮罩（R8）× 纯色：字形与路径遮罩走这条
     coverage = g_texture.Sample(g_sampler, input.local / g_rect.zw).r;
+  } else if (mode == 5) {
+    // 亚像素覆盖率（R8G8B8）× 纯色：桌面字形走这条（两遍混合，见 g_mode.w）
+    coverage_rgb = g_texture.Sample(g_sampler, input.local / g_rect.zw).rgb;
   } else if (mode == 3) {
     // 预乘 RGBA 位图（离屏画布合成）
     source = g_texture.Sample(g_sampler, input.local / g_rect.zw);
   }
 
-  float factor = coverage * g_mode.y;
+  // 覆盖率**逐通道**：灰度模式下三通道相同（factor3 = coverage.xxx），
+  // 亚像素模式下三通道各自独立——彩边就是从这里的差异来的。
+  float3 factor3 = (mode == 5) ? coverage_rgb : float3(coverage, coverage, coverage);
+  factor3 *= g_mode.y;
+  float clip_factor = 1.0;
   if (g_mode.z > 2.5) {
     // 路径裁剪：用遮罩纹理采样（t1）。遮罩在区域内的相对位置 = (像素 - 区域左上) / 区域尺寸
     const float2 uv = (input.pixel - g_clip.xy) / max(g_clip.zw, float2(1.0, 1.0));
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
-    factor *= g_clip_texture.SampleLevel(g_sampler, uv, 0).r;
+    clip_factor = g_clip_texture.SampleLevel(g_sampler, uv, 0).r;
   } else if (g_mode.z > 1.5) {
     // 圆角裁剪：用同一个 SDF 求覆盖率（不需要额外的遮罩纹理）
     const float2 clip_half = g_clip.zw * 0.5;
-    factor *= saturate(0.5 - rounded_sdf(input.pixel - g_clip.xy, clip_half, g_clip_radii));
+    clip_factor = saturate(0.5 - rounded_sdf(input.pixel - g_clip.xy, clip_half, g_clip_radii));
   }
-  if (factor <= 0.0) discard;
+  // 裁剪是**标量**（几何遮罩），乘进三个通道
+  factor3 *= clip_factor;
+  if (max(factor3.r, max(factor3.g, factor3.b)) <= 0.0) discard;
+  if (mode == 5 && g_mode.w < 0.5) {
+    // 亚像素第一遍：把**目标**按 (1 - α_c) 逐通道衰减（DestBlend = INV_SRC_COLOR），
+    // 源项由第二遍加性加回。为什么要两遍：硬件混合的 α 是标量，而彩边恰恰长在
+    // “逐通道的目标衰减”上——黑字压白底时源项为 0，用标量衰减就等于什么都没做。
+    return float4(factor3, 1.0);
+  }
   // 预乘输出（与软件画布同一混合空间）
-  return float4(source.rgb * factor, source.a * factor);
+  // α 通道是**标量**：亚像素取三通道均值（不透明画布上与逐通道等价），
+  // 与软件侧 `over_premul_lcd` 同一口径。
+  const float alpha = (mode == 5)
+                          ? source.a * (factor3.r + factor3.g + factor3.b) / 3.0
+                          : source.a * factor3.r;
+  return float4(source.rgb * factor3, alpha);
 }
 )hlsl";
 
@@ -399,6 +421,8 @@ enum class DrawMode : std::uint32_t {
   CoverageMask = 2,
   Bitmap = 3,
   BoxBlur = 4,
+  /// 亚像素（LCD）覆盖率遮罩：纹理是 R8G8B8，混合走**两遍**（`g_mode.w` 选遍次）。
+  CoverageMaskLcd = 5,
 };
 
 /// 着色器与固定状态（设备级共享；懒创建）。
@@ -408,6 +432,12 @@ struct Pipeline {
   ID3D11Buffer* constants{nullptr};
   ID3D11BlendState* blend{nullptr};
   ID3D11BlendState* opaque{nullptr};  ///< 关闭混合（写遮罩时用：要覆盖写入而非叠加）
+  /// 亚像素混合的**第一遍**：`Src=ZERO / Dest=INV_SRC_COLOR` ⇒ `D ← D·(1-α_c)`，逐通道。
+  /// 硬件混合唯一做不到的就是“逐通道 α”，而把它拆成两步就绕过去了：
+  /// 这一步只做目标衰减，α 通道保持不动（`SrcAlpha=ZERO / DestAlpha=ONE`）。
+  ID3D11BlendState* lcd_attenuate{nullptr};
+  /// 亚像素混合的**第二遍**：`ONE/ONE` 加性加回源项 `S_c·α_c`；α 走正常 src-over。
+  ID3D11BlendState* lcd_add{nullptr};
   ID3D11RasterizerState* raster_scissor{nullptr};
   ID3D11SamplerState* sampler_linear{nullptr};
   ID3D11SamplerState* sampler_point{nullptr};
@@ -447,6 +477,33 @@ struct Pipeline {
       error = "创建不混合状态失败";
       return;
     }
+    // 亚像素两遍混合：第一遍逐通道衰减目标，第二遍加性加回源
+    D3D11_BLEND_DESC attenuate_desc{};
+    attenuate_desc.RenderTarget[0].BlendEnable = TRUE;
+    attenuate_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+    attenuate_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_COLOR;
+    attenuate_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    attenuate_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    attenuate_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    attenuate_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    attenuate_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(device->CreateBlendState(&attenuate_desc, &lcd_attenuate))) {
+      error = "创建亚像素衰减混合状态失败";
+      return;
+    }
+    D3D11_BLEND_DESC add_desc{};
+    add_desc.RenderTarget[0].BlendEnable = TRUE;
+    add_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    add_desc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    add_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    add_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    add_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    add_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    add_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(device->CreateBlendState(&add_desc, &lcd_add))) {
+      error = "创建亚像素加性混合状态失败";
+      return;
+    }
     D3D11_RASTERIZER_DESC raster{};
     raster.FillMode = D3D11_FILL_SOLID;
     raster.CullMode = D3D11_CULL_NONE;
@@ -469,7 +526,8 @@ struct Pipeline {
     };
     sampler_linear = make_sampler(D3D11_FILTER_MIN_MAG_MIP_LINEAR);
     sampler_point = make_sampler(D3D11_FILTER_MIN_MAG_MIP_POINT);
-    ok = vs != nullptr && ps != nullptr && sampler_linear != nullptr;
+    ok = vs != nullptr && ps != nullptr && sampler_linear != nullptr && blend != nullptr &&
+         opaque != nullptr && lcd_attenuate != nullptr && lcd_add != nullptr;
   }
 
   auto compile_shaders(ID3D11Device* device) -> bool {
@@ -528,6 +586,8 @@ struct Pipeline {
     if (sampler_point != nullptr) sampler_point->Release();
     if (sampler_linear != nullptr) sampler_linear->Release();
     if (raster_scissor != nullptr) raster_scissor->Release();
+    if (lcd_add != nullptr) lcd_add->Release();
+    if (lcd_attenuate != nullptr) lcd_attenuate->Release();
     if (blend != nullptr) blend->Release();
     if (opaque != nullptr) opaque->Release();
     if (constants != nullptr) constants->Release();
@@ -727,16 +787,23 @@ class GpuCanvas final : public Surface {
                            static_cast<float>(source.width()), static_cast<float>(source.height())},
                 options);
   }
-  /// 覆盖率位图混合（字形/路径遮罩）：上传成 R8 纹理，当一个四边形画。
+  /// 覆盖率位图混合（字形/路径遮罩）：上传成 **R8**（灰度）或 **R8G8B8A8**（亚像素）纹理，
+  /// 当一个四边形画。
   ///
   /// 这是**软件与 GPU 共享语义**的关键原语：字形渲染产出的就是覆盖率位图，
   /// CPU 逐行混合、GPU 贴纹理——两边像素结果可达一致（字形位图本身同源于
   /// 同一套字体引擎，所以字的形状完全一样，只有边缘合成方式不同）。
+  ///
+  /// `CoverageFormat::Lcd` 时走**两遍混合**（见下方实现注释）：硬件混合的 α 是标量，
+  /// 而亚像素的彩边恰恰长在“逐通道的目标衰减”上——一次绘制做不到，两次可以。
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
                              const Paint& paint, float opacity, BlendMode blend,
-                             std::uint64_t cache_key = 0) override {
+                             std::uint64_t cache_key = 0,
+                             CoverageFormat format = CoverageFormat::Grayscale) override {
     if (width <= 0 || height <= 0 || opacity <= 0.0f || blend != BlendMode::SrcOver) return;
-    const std::size_t expected = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const bool lcd = format == CoverageFormat::Lcd;
+    const std::size_t expected = static_cast<std::size_t>(width) *
+                                 static_cast<std::size_t>(height) * (lcd ? 3U : 1U);
     if (coverage.size() < expected) return;
     const std::int64_t start = st::time::now_ns();
     // ⚠ **按稳定身份缓存，不能按指针**。
@@ -747,15 +814,30 @@ class GpuCanvas final : public Surface {
     // 症状：界面文字间歇性变成别的字（`folder`→`folBer`、`概览`→`外测`），
     // 且只在渲染过足够多字形（触发过一次清空）之后才出现——极难复现。
     // 稳定身份来自字体引擎（face + 字形号 + 字号档 + 超采样），与内存生命周期无关。
-    ID3D11ShaderResourceView* view = mask_texture(coverage.data(), width, height, cache_key);
+    // 亚像素模式下身份里还带**渲染模式位**（灰度与 LCD 位图排布不同，不能互相顶替）。
+    ID3D11ShaderResourceView* view =
+        mask_texture(coverage.data(), width, height, cache_key, format);
     if (view == nullptr) return;
-    const ShaderParams params = base_params(
-        DrawMode::CoverageMask,
+    ShaderParams params = base_params(
+        lcd ? DrawMode::CoverageMaskLcd : DrawMode::CoverageMask,
         math::Rect{static_cast<float>(x), static_cast<float>(y), static_cast<float>(width),
                    static_cast<float>(height)},
         {0.0f, 0.0f, 0.0f, 0.0f}, opacity, paint.color());
-    submit(params, view, /*point_sample=*/true);
-    log_op(PaintOp::Text, start, expected);
+    if (!lcd) {
+      submit(params, view, /*point_sample=*/true);
+    } else {
+      // 亚像素：**两遍**。第一遍把目标按 (1-α_c) 逐通道衰减，第二遍加性加回 S_c·α_c。
+      // 合成式与软件侧 `over_premul_lcd` 完全一致：out_c = S_c·α_c + D_c·(1 - a_s·α_c)。
+      const Pipeline& pipes = pipeline();
+      params.mode[3] = 0.0f;  // g_mode.w = 0 → 衰减遍
+      submit(params, view, /*point_sample=*/true, /*opaque=*/false, /*viewport_width=*/0,
+             /*viewport_height=*/0, pipes.lcd_attenuate);
+      params.mode[3] = 1.0f;  // g_mode.w = 1 → 源项加回遍
+      submit(params, view, /*point_sample=*/true, /*opaque=*/false, /*viewport_width=*/0,
+             /*viewport_height=*/0, pipes.lcd_add);
+    }
+    log_op(PaintOp::Text, start,
+           static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height));
   }
 
   // —— 裁剪 ——
@@ -943,7 +1025,8 @@ class GpuCanvas final : public Surface {
   /// 提交一次四边形绘制（设状态 → 绑纹理 → 上传参数 → Draw）。
   /// `point_sample`：小字形纹理必须**点采样**（线性采样会把 ≤1px 的笔画抹糊）。
   void submit(const ShaderParams& params, ID3D11ShaderResourceView* view, bool point_sample,
-              bool opaque = false, int viewport_width = 0, int viewport_height = 0) {
+              bool opaque = false, int viewport_width = 0, int viewport_height = 0,
+              ID3D11BlendState* blend_override = nullptr) {
     const Pipeline& pipes = pipeline();
     if (!pipes.ok) return;
     if (rtv_ == nullptr) return;
@@ -964,7 +1047,11 @@ class GpuCanvas final : public Surface {
     context_->RSSetScissorRects(1, &rect);
     context_->RSSetState(pipes.raster_scissor);
     const float blend_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    context_->OMSetBlendState(opaque ? pipes.opaque : pipes.blend, blend_factor, 0xFFFFFFFFU);
+    // 亚像素文字的两遍混合需要**换混合状态**（一次绘制内唯一的变量，其余状态相同；
+    // 第二处同名调用在 mask 绘制路径上，不接这个开关）。
+    ID3D11BlendState* blend_state = opaque ? pipes.opaque : pipes.blend;
+    if (blend_override != nullptr) blend_state = blend_override;
+    context_->OMSetBlendState(blend_state, blend_factor, 0xFFFFFFFFU);
     context_->IASetInputLayout(nullptr);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     context_->VSSetShader(pipes.vs, nullptr, 0);
@@ -1309,30 +1396,51 @@ class GpuCanvas final : public Surface {
   /// R8 覆盖率纹理（字形/路径遮罩）。`cache_by_pointer` 适合指针稳定的源（字形位图）。
   /// `cache_key` 为**稳定身份**（0 = 没有身份，不做跨帧缓存——正确性优先）。
   /// 键里同时保留宽高：虽字号已进身份，但宽高是"内容是否真的一样"的直接判据。
-  auto mask_texture(const float* coverage, int width, int height, std::uint64_t cache_key)
-      -> ID3D11ShaderResourceView* {
+  ///
+  /// `CoverageFormat::Lcd` 时上传成 **R8G8B8A8** 纹理（A 写满）：一张纹理同时带 R/G/B
+  /// 三个覆盖度，着色器采样一次拿全——这是亚像素在 GPU 上唯一划算的做法
+  /// （三条平面纹理要多两次采样与三张缓存项）。
+  auto mask_texture(const float* coverage, int width, int height, std::uint64_t cache_key,
+                    CoverageFormat format) -> ID3D11ShaderResourceView* {
+    const bool lcd = format == CoverageFormat::Lcd;
     if (cache_key != 0) {
       for (const auto& entry : mask_cache_) {
-        if (entry.key == cache_key && entry.width == width && entry.height == height) {
+        if (entry.key == cache_key && entry.width == width && entry.height == height &&
+            entry.lcd == lcd) {
           return entry.view;
         }
       }
     }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    for (std::size_t index = 0; index < bytes.size(); ++index) {
-      const float value = coverage[index];
-      bytes[index] = static_cast<std::uint8_t>(std::lround(std::max(0.0f, std::min(1.0f, value)) * 255.0f));
+    const auto clamp_byte = [](float value) -> std::uint8_t {
+      return static_cast<std::uint8_t>(
+          std::lround(std::max(0.0f, std::min(1.0f, value)) * 255.0f));
+    };
+    const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<std::uint8_t> bytes(pixels * (lcd ? 4U : 1U));
+    if (lcd) {
+      for (std::size_t index = 0; index < pixels; ++index) {
+        bytes[index * 4U + 0U] = clamp_byte(coverage[index * 3U + 0U]);
+        bytes[index * 4U + 1U] = clamp_byte(coverage[index * 3U + 1U]);
+        bytes[index * 4U + 2U] = clamp_byte(coverage[index * 3U + 2U]);
+        bytes[index * 4U + 3U] = 255U;  // α 不参与混合（着色器只读 .rgb）
+      }
+    } else {
+      for (std::size_t index = 0; index < pixels; ++index) {
+        bytes[index] = clamp_byte(coverage[index]);
+      }
     }
+    const DXGI_FORMAT texture_format = lcd ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R8_UNORM;
+    const std::size_t row_pitch = lcd ? static_cast<std::size_t>(width) * 4U
+                                      : static_cast<std::size_t>(width);
     ID3D11ShaderResourceView* view =
-        create_texture(DXGI_FORMAT_R8_UNORM, width, height, bytes.data(),
-                       static_cast<std::size_t>(width));
+        create_texture(texture_format, width, height, bytes.data(), row_pitch);
     if (view != nullptr && cache_key != 0) {
       if (mask_cache_.size() >= kMaskCacheLimit) {
         // 简单淘汰：丢最早一项（字形集在工作集稳定后很少再换）
         mask_cache_.front().view->Release();
         mask_cache_.erase(mask_cache_.begin());
       }
-      mask_cache_.push_back(MaskCacheEntry{cache_key, width, height, view});
+      mask_cache_.push_back(MaskCacheEntry{cache_key, width, height, lcd, view});
     }
     return view;
   }
@@ -1449,6 +1557,8 @@ class GpuCanvas final : public Surface {
     std::uint64_t key{0};
     int width{0};
     int height{0};
+    /// 纹理是三通道（亚像素）还是单通道（灰度）：两种排布**绝不能互相顶替**。
+    bool lcd{false};
     ID3D11ShaderResourceView* view{nullptr};
   };
   struct RampCacheEntry {
@@ -1759,6 +1869,10 @@ auto create_presenter(void* native_window, int width, int height)
 
 auto capabilities() -> Capabilities {
   Capabilities caps;
+  // **能力声明以管线真的建起来为前提**：着色器编译失败（HLSL 写错是运行期才发现的那种）
+  // 却声称一切可用，上层会选中 GPU 然后画出一片空白——而“什么都不画”看起来还特别快。
+  const Pipeline& pipes = pipeline();
+  if (!pipes.ok) return caps;
   caps.solid_shapes = true;
   caps.gradients = true;
   caps.coverage_masks = true;
@@ -1766,6 +1880,7 @@ auto capabilities() -> Capabilities {
   caps.clips = true;
   caps.shadows = true;  // M3b：多遍可分离盒式模糊 + 遮罩缓存
   caps.paths = true;    // M4：CPU 覆盖率光栅化（同一套 rasterize_mask）+ 遮罩缓存 + GPU 合成
+  caps.lcd_text = true;  // 亚像素文字：RGB 覆盖率纹理 + 两遍混合（见 blend_coverage_bitmap）
   return caps;
 }
 
@@ -1795,6 +1910,14 @@ auto create_canvas(int physical_width, int physical_height, float device_scale,
   }
   if (physical_width <= 0 || physical_height <= 0) {
     return unexpected(ErrorCode::Invalid, "GPU 画布尺寸必须为正");
+  }
+  // 管线建不起来（着色器编译失败/固定状态创建失败）就在这里担下来：
+  // 建一个“能建但画不出东西”的画布，会把问题变成“界面一片空白”的谜案。
+  const Pipeline& pipes = pipeline();
+  if (!pipes.ok) {
+    return unexpected(ErrorCode::Unsupported,
+                      pipes.error.empty() ? std::string("GPU 渲染管线不可用")
+                                          : std::format("GPU 渲染管线不可用：{}", pipes.error));
   }
   auto canvas = std::make_unique<GpuCanvas>(device.device_or_null(), device.context_or_null(),
                                             physical_width, physical_height, device_scale);

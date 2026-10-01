@@ -129,6 +129,26 @@ class TextRenderer {
 
   void set_supersample(float factor);
   [[nodiscard]] auto supersample() const noexcept -> float { return supersample_; }
+
+  /// **亚像素（LCD）文字渲染开关**。
+  ///
+  /// 开启后字形按 **3× 水平超采样**光栅化，再按每像素的 R/G/B 三个子像素分别聚合出
+  /// 覆盖率（等价于 FreeType 的 `FT_RENDER_MODE_LCD`）：水平分辨率变成 3 倍，
+  /// 笔画边缘能落在 1/3 像素上（带 RGB 彩边）——这是桌面系统文字“看着锐”的来源。
+  /// 关闭 = 灰度抗锯齿：像素对像素可与截图/回归断言直接比对。
+  ///
+  /// **位图网格与开关无关**：两种模式算出的 `width/height/offset_x/offset_y` 完全相同，
+  /// 所以开与关只改变边缘合成方式，不会让文字挪位（排版稳定是硬约束）。
+  /// 缓存键含模式位：两种位图**共存而不混淆**（切换无需清缓存）。
+  void set_subpixel(bool enabled) noexcept { subpixel_ = enabled; }
+  [[nodiscard]] auto subpixel() const noexcept -> bool { return subpixel_; }
+  /// 亚像素的 **5-tap 低通滤波**（FreeType `FT_LCD_FILTER_DEFAULT` 权重 `{8,77,86,77,8}/256`）。
+  ///
+  /// 存在的理由：三通道独立采样会让笔画边缘出现强烈的彩色条纹；
+  /// 这个滤波器在**子像素轴**上做一次带内平滑，把“红边/蓝边”压到接近 ClearType 的观感。
+  /// 关掉它彩边更浓、单像素对比更硬（对照实验用；默认开）。
+  void set_subpixel_filter(bool enabled) noexcept { subpixel_filter_ = enabled; }
+  [[nodiscard]] auto subpixel_filter() const noexcept -> bool { return subpixel_filter_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
   /// 字形位图缓存条目数（诊断用）。
   [[nodiscard]] auto cache_entries() const noexcept -> std::size_t;
@@ -142,6 +162,10 @@ class TextRenderer {
     int height{0};
     int offset_x{0};  ///< 相对笔位的物理像素偏移（左上角）
     int offset_y{0};  ///< 相对基线的物理像素偏移（向上为负）
+    /// 通道布局（与 `coverage` 的长度一一对应）：
+    /// `Grayscale` = `width×height` 项；`Lcd` = `width×height×3` 项（像素内 R→G→B 交错）。
+    /// 它同时是**混合公式的开关**：调用方必须把它原样交给 `blend_coverage_bitmap`。
+    raster::CoverageFormat format{raster::CoverageFormat::Grayscale};
     std::vector<float> coverage{};  ///< 物理像素覆盖率（已按超采样下采样）
     /// 该字形的**稳定身份**（face + 字形号 + 字号档 + 超采样）。
     ///
@@ -178,6 +202,10 @@ class TextRenderer {
 
   const FontStack* stack_{nullptr};
   float supersample_{1.0f};
+  /// 亚像素（LCD）渲染开关；默认**关**——灰度是可逐像素断言的参考口径。
+  bool subpixel_{false};
+  /// 亚像素 5-tap 低通滤波开关（见 `set_subpixel_filter`）。
+  bool subpixel_filter_{true};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

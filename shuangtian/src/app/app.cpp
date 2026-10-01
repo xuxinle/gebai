@@ -18,6 +18,22 @@
 namespace st::app {
 namespace {
 
+/// 文字抗锯齿形态的解析（命令行 > 环境变量 > 默认）。
+///
+/// `auto` 的语义：**有窗口 → 亚像素（LCD）；无头 → 灰度**。
+/// - 亚像素是桌面系统文字“看着锐”的来源（水平有效分辨率 3 倍）；
+/// - 灰度是可逐像素断言的参考口径（无头截图/回归测试的基准），二者不能兼得；
+/// - 需要看亚像素效果的无头验证：`--text-lcd=on`（或 `ST_TEXT_LCD=on`）。
+[[nodiscard]] auto resolve_text_lcd(std::string_view mode, bool has_window) -> bool {
+  if (mode == "on") return true;
+  if (mode == "off") return false;
+  if (const auto value = fs::read_env("ST_TEXT_LCD"); value.has_value() && !value->empty()) {
+    if (*value == "1" || *value == "on" || *value == "true") return true;
+    if (*value == "0" || *value == "off" || *value == "false") return false;
+  }
+  return has_window;
+}
+
 }  // namespace
 
 struct Application::Impl {
@@ -139,6 +155,9 @@ auto Application::metrics() const -> control::Metrics {
   metrics.backend = std::string(backend_name());
   metrics.renderer = std::string(impl_->backend->renderer_name());
   metrics.renderer_note = impl_->backend->renderer_note();
+  if (impl_->renderer != nullptr) {
+    metrics.text_renderer = impl_->renderer->subpixel() ? "lcd" : "grayscale";
+  }
   metrics.headless = headless();
   metrics.device_scale = impl_->device_scale;
   if (impl_->backend != nullptr) {
@@ -300,6 +319,12 @@ auto Application::start() -> Status {
   if (stack) {
     impl_->fonts = std::make_unique<st::text::FontStack>(std::move(*stack));
     impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, options_.scale);
+    // 文字抗锯齿形态：命令行 > 环境变量 > 默认（有窗口→亚像素，无头→灰度）。
+    impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd, !impl_->backend->headless()));
+    // 如实说清这一帧的宇是用哪种形态画的：“字看着糊/带彩边”的第一个分歧点就在这里。
+    log::info("文字渲染：{}", impl_->renderer->subpixel()
+                                   ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）"
+                                   : "灰度抗锯齿");
     impl_->text_port = std::make_unique<RendererTextPort>(*impl_->renderer);
     root_.set_text_port(impl_->text_port.get());
     // 逐 face 记录**路径 / 序号 / 名称**。

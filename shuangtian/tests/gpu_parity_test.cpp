@@ -284,6 +284,74 @@ ST_TEST(gpu_text_matches_software_closely) {
   ST_CHECK(result.differing_ratio < 0.05);
 }
 
+ST_TEST(gpu_subpixel_text_matches_software) {
+  // 亚像素文字在 GPU 上必须走**两遍混合**（第一遍把目标按 `1-α_c` 逐通道衰减，
+  // 第二遍加性加回 `S_c·α_c`）——硬件混合的 α 是标量，做不到逐通道衰减，
+  // 而黑字压白底时 `S_c = 0`，彩边全在目标衰减那一路：单 α 的做法会“什么都没做”。
+  //
+  // 因此这条用例要看两件事：① 两侧逐像素一致（两遍混合的合成式与软件同式）；
+  // ② **两侧的彩边量级接近**——只比一致是不够的：一个“退化回灰度”的实现
+  // 只要两边都退化也照样一致，而用户要的是彩边与 1/3 像素定位。
+  if (!gpu_ready()) return;
+  const st::raster::gpu::Capabilities caps = st::raster::gpu::capabilities();
+  if (!caps.lcd_text) {
+    st::print("[gpu-diff] 跳过：后端未声明 lcd_text\n");
+    return;
+  }
+  Scene scene;
+  if (scene.gpu == nullptr || !scene.has_text || scene.renderer == nullptr) return;
+  scene.renderer->set_subpixel(true);
+
+  // 两个方向都测：**深底浅字**与**浅底深字**各走一遍
+  // （后者 `S_c = 0`，只有目标衰减那一路在起作用，正是两遍混合最容易做错的方向）
+  struct Case {
+    Color background;
+    std::uint32_t packed;
+    Color color;
+  };
+  for (const Case& item :
+       {Case{Color{0x0A, 0x0F, 0x1A, 0xFF}, 0x0A0F1AFFU, Color{0xF0, 0xF4, 0xF8, 0xFF}},
+        Case{Color{0xF5, 0xF7, 0xFA, 0xFF}, 0xF5F7FAFFU, Color{0x1A, 0x20, 0x2A, 0xFF}}}) {
+    st::ui::RenderContext context{scene.theme, nullptr, 0.0};
+    Panel root(FlexDirection::Column);
+    auto text = std::make_unique<Text>("霜天 Shuangtian 0123 win32");
+    text->set_font_size(18.0f);
+    root.add_child(std::move(text));
+    root.measure(context, st::ui::Constraints{.max_width = kWidth, .max_height = kHeight});
+    root.arrange(context, Rect{10.0f, 10.0f, 380.0f, 40.0f});
+
+    scene.software.clear(item.background);
+    root.paint(scene.context(), scene.software);
+    scene.gpu->clear(item.background);
+    root.paint(scene.context(), *scene.gpu);
+
+    const Comparison result = compare(scene.software.pixels(), scene.gpu->pixels(),
+                                      /*max_channel_delta=*/16, kWidth, item.packed);
+    const auto colored_pixels = [](std::span<const std::uint32_t> pixels) {
+      std::size_t count = 0;
+      for (const std::uint32_t pixel : pixels) {
+        const int r = static_cast<int>((pixel >> 24U) & 0xFFU);
+        const int g = static_cast<int>((pixel >> 16U) & 0xFFU);
+        const int b = static_cast<int>((pixel >> 8U) & 0xFFU);
+        if (std::max({r, g, b}) - std::min({r, g, b}) > 16) ++count;
+      }
+      return count;
+    };
+    const std::size_t software_colored = colored_pixels(scene.software.pixels());
+    const std::size_t gpu_colored = colored_pixels(scene.gpu->pixels());
+    st::print("[gpu-diff] 亚像素文字（bg={:08X}）：超差 {:.3f}% · 结构性 {:.3f}% · 最大Δ{} · "
+              "彩边像素 {} vs {}\n",
+              item.packed, result.differing_ratio * 100.0, result.structural_ratio * 100.0,
+              result.max_delta, software_colored, gpu_colored);
+    ST_CHECK(result.structural_ratio < 0.005);
+    ST_CHECK(result.differing_ratio < 0.08);
+    // 两侧都必须真的有彩边（亚像素渲染的可见证据），且量级接近
+    ST_CHECK(software_colored > 40);
+    ST_CHECK(gpu_colored > static_cast<std::size_t>(software_colored) * 8U / 10U);
+    ST_CHECK(gpu_colored < static_cast<std::size_t>(software_colored) * 12U / 10U);
+  }
+}
+
 ST_TEST(gpu_gradient_uses_same_lut_as_software) {
   if (!gpu_ready()) return;
   Scene scene;
@@ -358,9 +426,10 @@ ST_TEST(gpu_capabilities_are_consistent_with_probe) {
   ST_CHECK(caps.coverage_masks);
   ST_CHECK(caps.clips);
   // 未落地的部分必须**报缺失**（如实优于好看）
-  st::print("[gpu] 能力：shapes={} gradients={} masks={} bitmaps={} clips={} shadows={} paths={}\n",
+  st::print("[gpu] 能力：shapes={} gradients={} masks={} bitmaps={} clips={} shadows={} paths={} "
+            "lcd_text={}\n",
             caps.solid_shapes, caps.gradients, caps.coverage_masks, caps.bitmaps, caps.clips,
-            caps.shadows, caps.paths);
+            caps.shadows, caps.paths, caps.lcd_text);
 }
 
 ST_TEST(gpu_clip_rect_stays_inside_bounds) {

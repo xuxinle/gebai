@@ -113,10 +113,12 @@ class Canvas final : public Surface {
   /// 位图合成（双线性缩放）。
   void draw_canvas(const Surface& source, math::Rect destination, DrawOptions options = {}) override;
   void draw_canvas_at(const Surface& source, int x, int y, DrawOptions options = {}) override;
-  /// 覆盖率位图混合（文字/遮罩）：软件实现逐行走 `blend_coverage_row`。
+  /// 覆盖率位图混合（文字/遮罩）：软件实现逐行走 `blend_coverage_row`
+  /// （`CoverageFormat::Lcd` 时走 `blend_coverage_row_subpixel`）。
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
                              const Paint& paint, float opacity, BlendMode blend,
-                             std::uint64_t cache_key = 0) override;
+                             std::uint64_t cache_key = 0,
+                             CoverageFormat format = CoverageFormat::Grayscale) override;
 
   // —— 裁剪 ——
   /// 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素）。
@@ -156,6 +158,14 @@ class Canvas final : public Surface {
   /// `coverage[0]` 对应该行 `x_begin` 像素。
   void blend_coverage_row(int y, int x_begin, std::span<const float> coverage, const Paint& paint,
                           float opacity, BlendMode blend);
+  /// 低层：**亚像素**版——每像素三个覆盖率（`[R,G,B]` 交错）。
+  /// `coverage[0..2]` 对应该行 `x_begin` 像素的三个子像素。
+  ///
+  /// 与单通道版的唯一区别是混合公式：`out_c = S_c·α_c + D_c·(1 - a_s·α_c)`，
+  /// 即**目标衰减也逐通道**。非 `SrcOver` 模式没有逐通道语义，本函数退化为
+  /// 三通道均值（等价于灰度路径）并在文档里如实说明，不假装支持。
+  void blend_coverage_row_subpixel(int y, int x_begin, std::span<const float> coverage,
+                                   const Paint& paint, float opacity, BlendMode blend);
   /// 低层：按**覆盖率运行段**混合一行（路径光栅化的主路径）。
   /// 与逐像素覆盖率数组语义一致（端点像素按小数分摊），但只会碰“真的有覆盖”的像素。
   void blend_coverage_runs(int y, std::span<const CoverageRun> runs, const Paint& paint,

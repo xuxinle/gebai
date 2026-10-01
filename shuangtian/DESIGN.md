@@ -145,6 +145,10 @@ class Canvas {                      // 像素缓冲（RGBA8888 预乘 alpha）
 - `Paint`：纯色 / 线性渐变 / 径向渐变 / 扫掠渐变。
 - 抗锯齿：扫描线 + 覆盖率（每像素面积采样，非 MSAA），保证 1px 边框在任意 DPI 下平滑。
 覆盖率以**运行段**（`CoverageRun{x0,x1,weight}`）逐行交付，不是逐像素浮点数组（见 §4.2.3）。
+- **覆盖率位图有两种通道布局**（`CoverageFormat`）：`Grayscale`（每像素 1 个覆盖率，
+  路径遮罩/无头口径）与 `Lcd`（每像素 R/G/B 三个覆盖率，亚像素文字）。
+  `Surface::blend_coverage_bitmap` 按它选混合公式——**灰度是单 α、亚像素是逐通道 α**
+  （见 §4.3.1），把布局留成调用方的口头约定，后端就只能猜，猜错的表现是「字变糊」或「字变形」。
 - `Image`：RGBA 位图 + 缩放（双线性）+ 九宫格绘制。
 - SIMD：`simd_*.cpp` 提供 fill/composite/blend 的 SSE2/AVX2/NEON 快路径，标量路径为语义基准（两者须逐像素一致，单测断言）。
 
@@ -162,6 +166,7 @@ class Canvas {                      // 像素缓冲（RGBA8888 预乘 alpha）
 2. `device_scale == 1.0` 时走零开销路径（不做任何换算），行为与无 DPI 完全一致。
 3. **几何按物理分辨率光栅化**：路径在扁平化前先 `Path::scaled(scale)`，覆盖率在物理像素空间计算——2x 屏上得到的是**真实两倍采样**，而不是把 1x 位图插值放大（后者会糊）。描边宽度同比例放大，故 1px 发丝线在 2x 屏上占 2 物理像素，视觉等宽且更锐利。
 4. **字形按物理尺寸栅格化**：`text::TextRenderer::draw` 取 `canvas.device_scale()`，以 `size × dpr` 生成字形覆盖率位图（可选 `supersample` 超采样后下采样），缓存键含物理尺寸 —— 排版在逻辑单位下稳定（换 DPI 不重排版），像素密度随 DPI 提升。
+   桌面模式下再按 §4.3.1 走**亚像素（LCD）**：水平 3 倍子像素采样，缓存键另含渲染模式位。
 5. **非整数 DPI 支持**：缓冲尺寸 `round(logical × scale)`（如 1.5x 下 101 逻辑宽 → 152 物理宽），逻辑尺寸由物理尺寸反算，不做累积取整。
 6. **运行时切换**：`app.set_scale`（控制通道）/`Application::set_device_scale` 重建帧缓冲 + 清空字形缓存 + 全量标脏；无需重启。
 7. **像素访问语义**：`pixel_at/set_pixel/pixels()/content_bounds()` 是**物理**口径（缓冲/编码视角）；逻辑口径用 `pixel_at_point()/content_bounds_logical()`。
@@ -390,6 +395,70 @@ class TextRenderer {                               // 字形 → 位图缓存（
   尾部增量淘汰）——旧实现超 512 条目全清，CJK 大文档滚动时会有周期性重栅格化尖峰
   （由 2026-09-30 审视定位并修复）。
 - 回退链默认：`ST_FONT_LATIN` / `ST_FONT_CJK` / 系统探测（`/usr/share/fonts`、`C:\Windows\Fonts`、`/System/Library/Fonts`）。
+
+### 4.3.1 文字抗锯齿：灰度 vs 亚像素（LCD）
+
+**起因**：屏幕上 125% DPI、13.5px 正文「看着就是糊的」，而 Chrome/VSCode 的字看着锐。
+把两台机器的文字边缘逐像素取样后，差异很清楚：
+
+```
+Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ← 1 像素陡变 + RGB 彩边
+霜天 边缘：    背景(38,53,82) → (43,57,86) → (110,121,146) → 亮   ← 缓坡、纯灰
+```
+
+前者是 **ClearType 类亚像素渲染**（把显示器像素的 R/G/B 三层分别当采样点用，
+水平有效分辨率 ×3），后者是灰度抗锯齿。人眼的参照系是前者，于是后者显糊。
+
+**实现（`TextRenderer::set_subpixel`）**
+1. 字形轮廓按 **x × 3** 光栅化到 `3·supersample 列 × supersample 行` 的 scratch
+   （每个物理像素横跨三个子像素），逐子像素聚合成覆盖率 → 每像素 R/G/B 三个值
+   （`CoverageFormat::Lcd`，等价于 FreeType 的 `FT_RENDER_MODE_LCD`）。
+2. **位图网格与灰度模式逐像素重合**：LCD 的包围盒由灰度口径 **×3 推导**，
+   于是 `width/height/offset_x/offset_y` 两种模式完全相同——开/关只改边缘合成方式，
+   **不挪字**（`tests/text_subpixel_test.cpp` 钉住这一点）。
+3. 可选 5-tap 低通滤波（FreeType `FT_LCD_FILTER_DEFAULT` 权重 `{8,77,86,77,8}/256`，
+   在**子像素轴**上滤波、边界夹取），压彩边。默认开；`ST_TEXT_LCD_FILTER=0` 关闭。
+4. 缓存键含**渲染模式位**（灰度与亚像素的排布不同：1 项/像素 vs 3 项/像素，
+   混用等于按错误长度解读）。
+
+**合成公式（软件与 GPU 必须同式）**：`out_c = S_c·α_c + D_c·(1 - a_s·α_c)`
+（`S` 预乘源色、`a_s` 源 alpha、`α_c` 该通道覆盖率）。关键是**目标衰减也逐通道**：
+黑字压白底时 `S_c = 0`，彩边全在 `D_c·(1-α_c)` 那一项上，用标量 α 就等于什么都没做。
+- 软件（`Canvas::blend_coverage_row_subpixel`）：逐像素按三通道 α 混合；
+  非 `SrcOver` 模式（Multiply/Overlay…）没有逐通道语义，**如实退化**为三通道均值。
+- GPU（D3D11）：硬件混合的 α 是标量，做不到逐通道衰减，因此**分两遍**——
+  ① `SrcBlend=ZERO / DestBlend=INV_SRC_COLOR`（逐通道衰减目标，α 通道不动），
+  ② `SrcBlend=ONE / DestBlend=ONE`（加性加回 `S_c·α_c`）。覆盖率上传成 `R8G8B8A8` 纹理
+  一次采样拿三通道；`blend_coverage_bitmap` 的纹理缓存另一并带上“是否三通道”标志。
+  能力上报多一条 `gpu::Capabilities::lcd_text`（**不支持的后端必须如实报 false**，
+  上层据此退回灰度，而不是悄悄画成灰度却声称支持）。
+
+**开关与口径**
+
+| 场景 | 形态 | 理由 |
+|---|---|---|
+| 有窗口（win32） | 默认 **LCD 亚像素** | 桌面观感对齐系统级文字渲染 |
+| 无头（`--headless`） | 默认 **灰度** | 像素对像素可断言（截图/回归基准） |
+| 显式指定 | `--text-lcd auto\|on\|off`、`ST_TEXT_LCD=1\|0` | 无头也能出亚像素截图做对照 |
+
+运行期可查：启动日志一行「文字渲染：…」、控制协议 `metrics.text_renderer`（`lcd`/`grayscale`）。
+
+**诚实的实测结论（本机 Linux + 软件光栅器，110 个字形的统计）**
+
+| 指标 | 灰度 | LCD（滤波） | LCD（不滤波） |
+|---|---|---|---|
+| 墨量（三通道和 ÷ 3） | 基准 | **+1.4%**（逐字形最坏 +6.8%） | 同左 |
+| 子像素亮度 profile 平均差 | — | 0.016 | 0.02 |
+| 亮度最大斜率（相对灰度） | 1.00 | 0.87~1.00 | **1.11** |
+| 边缘 10→90% 过渡宽度 | 基准 | 1.00×（不变） | 1.00× |
+| 彩边能量 | 0 | 基准 | +9%（滤波把它压掉 8.3%） |
+
+也就是说：**亚像素换来的是「1/3 像素的边缘定位精度 + 彩边」，不是「过渡带变窄」**
+——逐样本统计（中间调占比、过渡带长度、亮度 profile）与灰度基本一致（±2% 以内），
+那 +1.4% 的墨量差来自水平光栅化分辨率不同（曲线扁平化容差在 3 倍细网格上更精细）。
+**13.5px 小字「发糊」的主因另有其人：笔画未对齐像素网格（无 hinting / 网格拟合）**
+——Stem 宽 1.2~1.7px 落在分数相位上，边缘必然摊成 2~3 个像素的缓坡。
+那是一条独立的 P1（见 `docs/BACKLOG.md`），与本条互不替代。
 
 ### 4.4 md
 ```cpp
@@ -691,7 +760,7 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | `capture` | `{id?, region?, scale?, format?, encode?}` | `{width,height,format,base64? ,path?}` | 截图（元素区域或全屏；`encode=file` 直接落盘） |
 | `visual` | `{id?, depth?, include_paint?}` | `{layers:[{id,type,bounds,z,visible,opacity,fill,radius,text,hit_region}], hits:[...]}` | **视觉元素树**：绘制层与实际命中区（区别于语义树） |
 | `wait` | `{for, selector?, text?, timeout_ms?, stable_ms?}` | `{satisfied, elapsed_ms, detail}` | `for`: `element` `gone` `text` `text_gone` `stable` `frames` |
-| `metrics` | — | `{backend, headless, uptime_ms, frames, fps, frame_ms:{p50,p95}, dirty_ratio, nodes, allocations}` | 运行时指标 |
+| `metrics` | — | `{backend, headless, renderer, text_renderer, uptime_ms, frames, fps, frame_ms:{p50,p95}, dirty_ratio, nodes, allocations}` | 运行时指标 |
 | `events` | `{enable, kinds?}` | `{enabled, kinds}` | 订阅：`ui.changed` `frame` `input` `log` `theme` |
 | `theme` | `{mode?}` | `{mode, tokens}` | 读/切主题（`light`/`dark`/`system`） |
 | `app` | `{action, args?}` | `{ok}` | `resize` `quit` `reload` `screenshot_dir` `title` |
@@ -1216,6 +1285,7 @@ mingw 交叉编译——这是 Windows 分支唯一的持续验证手段。
 | M4 | 任意路径填充/描边/路径裁剪（CPU 覆盖率 → GPU 合成 + 缓存） | 已落地（**混合路径**，见下） |
 | M5 | win32 换 DXGI swapchain 呈现 | **已落地**：送显 6.55ms → 0.03ms |
 | M6 | `--renderer=auto\|gpu\|software` + 基准对比 | **已落地**：`auto` 实测选优（软件 47.5ms vs GPU 0.77ms） |
+| M7 | 亚像素文字合成（`CoverageMaskLcd`：`R8G8B8A8` 覆盖率纹理 + **两遍混合**） | 已落地：与软件**同式**（`out_c = S_c·α_c + D_c·(1-a_s·α_c)`）。本机为 Linux（无 D3D11）→ 只能交叉编译 + 由 `tests/gpu_parity_test.cpp::gpu_subpixel_text_matches_software` 在 Windows 侧真跑；为此把「管线建不起来」变成**显式失败**：`capabilities()`/`create_canvas()` 会挡住着色器编译失败，避免「画不出来却看起来很快」 |
 
 ### 8.3.1 路径为什么是“CPU 光栅化 + GPU 合成”
 
@@ -1361,11 +1431,12 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**467 用例 / 11944 断言**） |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**474 用例 / 12450 断言**） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（221 文件、6 处登记豁免） |
+| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（224 文件、6 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
+| 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
 | 编辑器形态冒烟 | `tools/st_editor_smoke.py`：点击即聚焦（焦点链路）+ `input.text` 送达焦点元素 + 退格复原 + `FillViewport` 浮层铺满视口 + Esc 关闭 | `python3 tools/st_editor_smoke.py all` | 全通过（9 项断言） |
 

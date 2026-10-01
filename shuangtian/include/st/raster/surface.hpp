@@ -68,6 +68,22 @@ struct PaintProfiler {
   void clear() noexcept;
 };
 
+/// 覆盖率位图的**通道布局**（决定 `blend_coverage_bitmap` 如何解释那张图）。
+///
+/// 为什么要把它带进接口：同一张「覆盖率图」有两种物理含义完全不同的排布，
+/// 而它们的**混合公式不一样**（灰度是单 α，亚像素是逐通道 α）——
+/// 把它留成调用方的口头约定，后端就只能靠猜，猜错的表现是「字变糊」或「字变形」。
+enum class CoverageFormat : std::uint8_t {
+  /// 每像素 1 个覆盖率（`w × h`）——灰度抗锯齿（路径遮罩、无头/截图口径）。
+  Grayscale,
+  /// 每像素 R/G/B 三个覆盖率（`w × h × 3`，行优先、像素内 R→G→B 交错）——
+  /// LCD 亚像素（ClearType 类）渲染。
+  ///
+  /// 为什么是「交错三值」而不是三条平面：GPU 侧要把它直接传成一张 RGB 纹理
+  /// （采样一次就拿到三个通道），交错是唯一能零拷贝对齐纹理格式的排布。
+  Lcd,
+};
+
 /// 绘制目标：所有绘制原语、裁剪与像素读回的统一入口。
 class Surface {
  public:
@@ -153,9 +169,15 @@ class Surface {
   /// 位图的宿主容器可能被清空并释放，新位图复用同一地址，于是"按指针命中"
   /// 会把**上一个形状的纹理**当成这个形状的（实测症状：界面文字间歇性变成别的字）。
   /// 传 0 表示"没有稳定身份"——此时后端不得缓存，只能每次重建（正确性优先）。
+  ///
+  /// `format`：覆盖率的通道布局（见 `CoverageFormat`）。`Lcd` 时每像素三个值，
+  /// 混合按**逐通道 α**做：`out_c = S_c·α_c + D_c·(1 - a_s·α_c)`（`S` 预乘源色、
+  /// `a_s` 源 alpha）——这正是亚像素渲染的彩边来源，`α_c` 不能退化成标量
+  /// （黑字压白底时彩边全在 `D_c·(1-α_c)` 那一项上，退化了就等于什么都没做）。
   virtual void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width,
                                      int height, const Paint& paint, float opacity,
-                                     BlendMode blend, std::uint64_t cache_key = 0) = 0;
+                                     BlendMode blend, std::uint64_t cache_key = 0,
+                                     CoverageFormat format = CoverageFormat::Grayscale) = 0;
 
   // —— 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素） ——
   virtual void push_clip_rect(math::Rect rect) = 0;

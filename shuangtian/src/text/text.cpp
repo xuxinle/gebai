@@ -130,6 +130,34 @@ struct FontCandidate {
   return static_cast<std::uint32_t>(std::lround(clamped * 4.0f));
 }
 
+/// 亚像素光栅化的水平采样倍数（每个物理像素 3 个子像素：R/G/B）。
+inline constexpr int kSubpixelColumns = 3;
+
+/// 亚像素 scratch 的宽度上限（防荒诞字号把内存吃光；超出则该字形退回灰度——
+/// 位图的 `format` 字段会随之写成 Grayscale，所以混合端不会按 3 通道去读）。
+inline constexpr int kMaxSubpixelWidth = 4096;
+
+/// 子像素轴低通滤波（权重同 FreeType `FT_LCD_FILTER_DEFAULT`：`{8,77,86,77,8}/256`）。
+///
+/// 输入/输出都是**子像素序列**（三值交错、长度 = 3 × 像素数），就地修改；
+/// 边缘按夹取处理（FreeType 同样复制边界，否则笔画端部会凭空变暗）。
+void apply_lcd_filter(std::span<float> subpixels) {
+  constexpr int kWeights[5] = {8, 77, 86, 77, 8};
+  const std::size_t count = subpixels.size();
+  if (count == 0) return;
+  const std::vector<float> source(subpixels.begin(), subpixels.end());
+  const auto last = static_cast<std::ptrdiff_t>(count) - 1;
+  for (std::size_t index = 0; index < count; ++index) {
+    float sum = 0.0f;
+    for (int tap = -2; tap <= 2; ++tap) {
+      const std::ptrdiff_t position = static_cast<std::ptrdiff_t>(index) + tap;
+      const std::ptrdiff_t clamped = std::clamp(position, std::ptrdiff_t{0}, last);
+      sum += source[static_cast<std::size_t>(clamped)] * static_cast<float>(kWeights[tap + 2]);
+    }
+    subpixels[index] = sum / 256.0f;
+  }
+}
+
 }  // namespace
 
 // —— FontStack ——
@@ -257,7 +285,12 @@ struct TextRenderer::Cache {
 
 TextRenderer::TextRenderer(const FontStack& stack, float supersample)
     : stack_(&stack), supersample_(supersample < 1.0f ? 1.0f : supersample),
-      cache_(std::make_unique<Cache>()) {}
+      cache_(std::make_unique<Cache>()) {
+  // 亚像素低通滤波可由环境变量关掉（对照实验/排障用）：`ST_TEXT_LCD_FILTER=0`。
+  if (const auto value = fs::read_env("ST_TEXT_LCD_FILTER"); value.has_value()) {
+    subpixel_filter_ = !(*value == "0" || *value == "off" || *value == "false");
+  }
+}
 
 TextRenderer::~TextRenderer() = default;
 
@@ -486,11 +519,14 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     return (seed ^ value) * 1099511628211ULL;
   };
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
+  // 渲染模式**必须进键**：灰度与亚像素的覆盖率位图排布不同（1 项/像素 vs 3 项/像素），
+  // 混用等于按错误长度解读（表现是"字缺一块"或"字整片消失"，且只在切换模式的那一刻出现）。
+  const bool lcd = subpixel_;
   const std::uint64_t key = mix(mix(mix(mix(st::hash::fnv1a64(face.path()),
                                             static_cast<std::uint64_t>(face.face_index())),
                                         static_cast<std::uint64_t>(glyph)),
                                     static_cast<std::uint64_t>(size_bucket)),
-                                supersample_bucket);
+                                mix(supersample_bucket, lcd ? 1ULL : 0ULL));
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->glyphs.find(key); iterator != cache_->glyphs.end()) {
@@ -509,34 +545,42 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
 
   auto bitmap = std::make_shared<GlyphBitmap>();
   bitmap->cache_key = key;   // 稳定身份 = 上面那份缓存键（与内存地址无关）
+  // 通道布局先按当前模式写好；下面若因尺寸护栏退回灰度，这里会同步改掉
+  // （blend 端读的是**位图自带的** format，不是渲染器的当前模式，所以两者必须一致）。
+  bitmap->format = lcd ? raster::CoverageFormat::Lcd : raster::CoverageFormat::Grayscale;
   auto outline = face.glyph_outline(glyph);
   const bool blank = !outline || outline->is_empty();
 
   if (!blank) {
-    // 字体单位（y 向上）→ 物理像素（y 向下，笔位为原点）
-    raster::Path transformed;
-    const auto map_point = [scale](math::Point point) noexcept -> math::Point {
-      return math::Point{point.x * scale, -point.y * scale};
-    };
-    for (const auto& command : outline->commands()) {
-      switch (command.kind) {
-        case raster::PathCommand::Kind::MoveTo:
-          transformed.move_to(map_point(command.p1));
-          break;
-        case raster::PathCommand::Kind::LineTo:
-          transformed.line_to(map_point(command.p1));
-          break;
-        case raster::PathCommand::Kind::QuadTo:
-          transformed.quad_to(map_point(command.p1), map_point(command.p2));
-          break;
-        case raster::PathCommand::Kind::CubicTo:
-          transformed.cubic_to(map_point(command.p1), map_point(command.p2), map_point(command.p3));
-          break;
-        case raster::PathCommand::Kind::Close:
-          transformed.close();
-          break;
+    // 字体单位（y 向上）→ 物理像素（y 向下，笔位为原点）。
+    // `horizontal`：亚像素模式下水平坐标再乘 3——同一份几何、两种采样密度。
+    const auto build_path = [&outline, scale](float horizontal) {
+      raster::Path path;
+      const auto map_point = [scale, horizontal](math::Point point) noexcept -> math::Point {
+        return math::Point{point.x * scale * horizontal, -point.y * scale};
+      };
+      for (const auto& command : outline->commands()) {
+        switch (command.kind) {
+          case raster::PathCommand::Kind::MoveTo:
+            path.move_to(map_point(command.p1));
+            break;
+          case raster::PathCommand::Kind::LineTo:
+            path.line_to(map_point(command.p1));
+            break;
+          case raster::PathCommand::Kind::QuadTo:
+            path.quad_to(map_point(command.p1), map_point(command.p2));
+            break;
+          case raster::PathCommand::Kind::CubicTo:
+            path.cubic_to(map_point(command.p1), map_point(command.p2), map_point(command.p3));
+            break;
+          case raster::PathCommand::Kind::Close:
+            path.close();
+            break;
+        }
       }
-    }
+      return path;
+    };
+    const raster::Path transformed = build_path(1.0f);
 
     const math::Rect bounds = transformed.flattened_bounds(0.2f);
     const int padding = 1;
@@ -547,36 +591,87 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     const int width = max_x - min_x;
     const int height = max_y - min_y;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
-      raster::Canvas scratch(width, height);
-      raster::Path local =
-          transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
-      scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
-
       const int out_width = std::max(1, width / supersample);
       const int out_height = std::max(1, height / supersample);
       bitmap->width = out_width;
       bitmap->height = out_height;
       bitmap->offset_x = min_x / supersample;
       bitmap->offset_y = min_y / supersample;
-      bitmap->coverage.assign(
-          static_cast<std::size_t>(out_width) * static_cast<std::size_t>(out_height), 0.0f);
+      const std::size_t output_pixels =
+          static_cast<std::size_t>(out_width) * static_cast<std::size_t>(out_height);
 
-      for (int y = 0; y < out_height; ++y) {
-        for (int x = 0; x < out_width; ++x) {
-          float total = 0.0f;
-          int samples = 0;
-          for (int sy = 0; sy < supersample; ++sy) {
-            for (int sx = 0; sx < supersample; ++sx) {
-              const int px = x * supersample + sx;
-              const int py = y * supersample + sy;
-              const math::Color pixel = scratch.pixel_at(px, py);
-              total += static_cast<float>(pixel.a) / 255.0f;
-              ++samples;
+      if (!lcd || width * kSubpixelColumns > kMaxSubpixelWidth) {
+        if (lcd) {
+          // 荒唐字号（子像素 scratch 会超宽）→ 退回灰度：**如实退回**，
+          // 连 `format` 一起改成灰度，混合端才不会按 3 通道去读一张单通道图。
+          bitmap->format = raster::CoverageFormat::Grayscale;
+        }
+        raster::Canvas scratch(width, height);
+        raster::Path local =
+            transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
+        scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
+        bitmap->coverage.assign(output_pixels, 0.0f);
+        for (int y = 0; y < out_height; ++y) {
+          for (int x = 0; x < out_width; ++x) {
+            float total = 0.0f;
+            int samples = 0;
+            for (int sy = 0; sy < supersample; ++sy) {
+              for (int sx = 0; sx < supersample; ++sx) {
+                const int px = x * supersample + sx;
+                const int py = y * supersample + sy;
+                const math::Color pixel = scratch.pixel_at(px, py);
+                total += static_cast<float>(pixel.a) / 255.0f;
+                ++samples;
+              }
+            }
+            bitmap->coverage[static_cast<std::size_t>(y) * static_cast<std::size_t>(out_width) +
+                             static_cast<std::size_t>(x)] =
+                samples > 0 ? total / static_cast<float>(samples) : 0.0f;
+          }
+        }
+      } else {
+        // —— 亚像素（LCD）分支 ——
+        // 几何按 x×3 光栅化到 **3×supersample 列 × supersample 行** 的 scratch：
+        // 每个物理像素横跨 3·supersample 列，其中第 c 个子像素占连续 supersample 列。
+        // 覆盖率逐子像素聚合 ⇒ 水平分辨率 3 倍（这就是 ClearType 类渲染的全部机理）。
+        //
+        // 包围盒**按灰度口径 ×3 推导**（而不是把 3 倍坐标重新算一遍 bounds）：
+        // 两种模式的位图网格由此**逐像素重合**——开/关亚像素只改边缘合成方式，不挪字。
+        raster::Canvas scratch(width * kSubpixelColumns, height);
+        raster::Path local = build_path(static_cast<float>(kSubpixelColumns))
+                                 .translated(static_cast<float>(-min_x * kSubpixelColumns),
+                                             static_cast<float>(-min_y));
+        scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
+
+        bitmap->coverage.assign(
+            output_pixels * static_cast<std::size_t>(kSubpixelColumns), 0.0f);
+        const float sample_count =
+            static_cast<float>(supersample) * static_cast<float>(supersample);
+        std::vector<float> row_subpixels(static_cast<std::size_t>(out_width) *
+                                         static_cast<std::size_t>(kSubpixelColumns));
+        for (int y = 0; y < out_height; ++y) {
+          for (int x = 0; x < out_width; ++x) {
+            for (int channel = 0; channel < kSubpixelColumns; ++channel) {
+              float total = 0.0f;
+              for (int sy = 0; sy < supersample; ++sy) {
+                const int py = y * supersample + sy;
+                for (int sx = 0; sx < supersample; ++sx) {
+                  const int px = (x * kSubpixelColumns + channel) * supersample + sx;
+                  total += static_cast<float>(scratch.pixel_at(px, py).a) / 255.0f;
+                }
+              }
+              row_subpixels[static_cast<std::size_t>(x) * static_cast<std::size_t>(kSubpixelColumns) +
+                            static_cast<std::size_t>(channel)] =
+                  sample_count > 0.0f ? total / sample_count : 0.0f;
             }
           }
-          bitmap->coverage[static_cast<std::size_t>(y) * static_cast<std::size_t>(out_width) +
-                           static_cast<std::size_t>(x)] =
-              samples > 0 ? total / static_cast<float>(samples) : 0.0f;
+          // 滤波在**子像素轴**上做（像素边界对它无意义），所以整行 3×out_width 一起过。
+          if (subpixel_filter_) apply_lcd_filter(row_subpixels);
+          std::copy(row_subpixels.begin(), row_subpixels.end(),
+                    bitmap->coverage.begin() +
+                        static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) *
+                                                        static_cast<std::size_t>(out_width) *
+                                                        static_cast<std::size_t>(kSubpixelColumns)));
         }
       }
     }
@@ -621,11 +716,14 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
         static_cast<int>(std::lround((origin.x + run.x) * device_scale)) + bitmap->offset_x;
     const auto y_begin = static_cast<int>(std::lround(baseline)) + bitmap->offset_y;
     // 经**接口**提交字形覆盖率位图（而不是直接调软件内部的行混合 API）：
-    // 这样同一条文字路径在 CPU 与 GPU 上都能画（GPU 把它当 A8 纹理贴）。
+    // 这样同一条文字路径在 CPU 与 GPU 上都能画（GPU 把它当纹理贴一个四边形）。
     // 文字是界面里最常见的原语，若它只能走软件，GPU 渲染就名存实亡。
+    //
+    // `bitmap->format` 必须原样传出（而不是看渲染器当前模式）：灰度是 1 项/像素、
+    // 亚像素是 3 项/像素，混合公式与纹理格式都随它变——传错就是“按错误长度解读”。
     surface.blend_coverage_bitmap(x_begin, y_begin, bitmap->coverage, bitmap->width,
                                   bitmap->height, paint, opacity, raster::BlendMode::SrcOver,
-                                             bitmap->cache_key), bitmap->cache_key;
+                                  bitmap->cache_key, bitmap->format);
   }
   if (profiling) {
     surface.add_profile(raster::PaintOp::Text,

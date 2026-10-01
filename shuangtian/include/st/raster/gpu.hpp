@@ -37,6 +37,12 @@ struct Capabilities {
   bool clips{false};          ///< 矩形（剪裁矩形）与圆角（SDF）裁剪
   bool shadows{false};        ///< 投影（需多遍模糊）
   bool paths{false};          ///< 任意路径填充/描边/路径裁剪
+  /// 亚像素（LCD）文字：`CoverageFormat::Lcd` 的覆盖率位图能**逐通道**合成。
+  ///
+  /// 为什么单独列一条：它靠“两遍混合”实现（逐通道目标衰减 + 加性加回源项），
+  /// 是覆盖率遮罩的一个特例，而不是它的子集——不支持的后端必须**如实报 false**，
+  /// 上层据此退回灰度，而不是悄悄画成灰度却声称支持亚像素。
+  bool lcd_text{false};
 
   /// 是否具备“完整渲染一个界面”的能力（缺投影与路径就不算）。
   [[nodiscard]] auto complete() const noexcept -> bool {

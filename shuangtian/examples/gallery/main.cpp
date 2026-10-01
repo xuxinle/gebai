@@ -54,6 +54,8 @@ struct Options {
   std::string theme{"light"};
   /// 渲染器：auto（按实测帧耗时选更快）/ gpu / software。
   std::string renderer{"auto"};
+  /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
+  std::string text_lcd{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -73,6 +75,7 @@ struct Options {
     };
     if (raw == "--headless") options.headless = true;
     else if (raw == "--renderer") options.renderer = next("auto");
+    else if (raw == "--text-lcd") options.text_lcd = next("auto");
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--theme") options.theme = next("light");
@@ -84,7 +87,8 @@ struct Options {
     else if (raw == "--ms") options.max_ms = std::stoi(next("0"));
     else if (raw == "--help" || raw == "-h") {
       st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--control-port 0]\n"
-                "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n");
+                "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
+                "               [--renderer auto|gpu|software] [--text-lcd auto|on|off]\n");
       std::exit(0);
     }
   }
@@ -177,6 +181,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.backend = options.headless ? "headless" : std::string{};
   // 渲染器交给应用选：`auto` 会**实测**两条路径再定（见 shell/backend.cpp 的 create_surface）
   app_options.renderer = options.renderer;
+  app_options.text_lcd = options.text_lcd;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
