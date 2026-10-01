@@ -339,7 +339,16 @@ auto connect_tcp(std::string_view host, std::uint16_t port, int timeout_ms) -> R
   stream.set_nonblocking(true);
   const int result = ::connect(handle, reinterpret_cast<sockaddr*>(&address), sizeof(address));
   if (result != 0) {
-    if (!would_block(get_socket_error())) {
+    const int error = get_socket_error();
+    // POSIX 非阻塞 connect 返回 EINPROGRESS = 连接进行中而非失败
+    // （Win32 对应 WSAEWOULDBLOCK，已在 would_block 内）；漏掉会让本机回环连接
+    // 被误判成 Io 错误直接放弃，控制协议测试全部连不上。
+#if defined(_WIN32)
+    const bool pending = would_block(error);
+#else
+    const bool pending = would_block(error) || error == EINPROGRESS;
+#endif
+    if (!pending) {
       return unexpected(ErrorCode::Io, std::string("连接失败: ").append(last_error_text()));
     }
     auto ready = wait_handle(handle, false, timeout_ms);

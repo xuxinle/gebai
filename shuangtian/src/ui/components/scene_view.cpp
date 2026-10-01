@@ -54,7 +54,6 @@ void SceneView::arrange(const RenderContext& context, math::Rect rect) {
 
 void SceneView::paint_content(const RenderContext& context, raster::Surface& canvas) const {
   const math::Rect box = bounds_.inset(style_.padding);
-  std::fprintf(stderr, "[glv] enter box=%.1f,%.1f %.1fx%.1f scale=%.2f\n", box.x, box.y, box.width, box.height, canvas.device_scale());
   if (box.is_empty()) return;
 
   // GL 不可用：画一块**说明性占位**，而不是静默空白。

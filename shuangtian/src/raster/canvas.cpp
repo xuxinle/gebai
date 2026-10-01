@@ -636,7 +636,7 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
         // 尾部端点**只在它的右边界超出区间时**才单独处理：
         // 写成“无条件把 last_pixel-1 再画一次”会让像素对齐的区间把末尾像素**混合两次**
         // （表现为焦点环/描边一端明显更深——实测被单像素比对的用例抓出来）。
-        if (last_pixel > b && last_pixel - 1 >= full_begin) {
+        if (static_cast<float>(last_pixel) > b && last_pixel - 1 >= full_begin) {
           blend_one(last_pixel - 1, cover_of(last_pixel - 1), {});
         }
         continue;
@@ -673,7 +673,7 @@ void Canvas::blend_coverage_runs(int y, std::span<const CoverageRun> runs, const
             simd::blend_row(row + full_begin, static_cast<std::size_t>(full_end - full_begin),
                             row_premul, alpha_byte);
           }
-          if (last_pixel > b && last_pixel - 1 >= full_begin) {
+          if (static_cast<float>(last_pixel) > b && last_pixel - 1 >= full_begin) {
             blend_one(last_pixel - 1, cover_of(last_pixel - 1), row_color);
           }
           continue;

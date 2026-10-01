@@ -128,11 +128,9 @@ auto run_all(std::string_view filter) -> int {
 }
 
 auto list_cases(std::string_view filter) -> int {
-  int count = 0;
   for (const auto& item : Registry::instance().cases()) {
     if (!filter.empty() && item.name.find(filter) == std::string::npos) continue;
     std::fprintf(stdout, "%s\n", item.name.c_str());
-    ++count;
   }
   return 0;
 }

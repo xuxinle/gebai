@@ -983,9 +983,16 @@ struct FrameworkFlags {
   std::vector<std::string> libraries;
   const bool toolchain_takes_over = toolchain.cross() && !toolchain.system_libs.empty();
   if (!toolchain_takes_over) {
-    libraries.insert(libraries.end(), manifest.system_libs.begin(), manifest.system_libs.end());
-    libraries.insert(libraries.end(), manifest.dependency_system.begin(),
-                     manifest.dependency_system.end());
+    for (const auto& lib : manifest.system_libs) {
+      // POSIX 专属库在 Windows 目标不存在（mingw 没有 dl/rt），照单全收会直接
+      // 链接失败（cannot find -ldl）；同一份清单要同时服务多平台，在这里过滤。
+      if (toolchain.platform == "windows" && (lib == "dl" || lib == "rt")) continue;
+      libraries.push_back(lib);
+    }
+    for (const auto& lib : manifest.dependency_system) {
+      if (toolchain.platform == "windows" && (lib == "dl" || lib == "rt")) continue;
+      libraries.push_back(lib);
+    }
     const auto defaults = default_system_libs(toolchain.platform);
     libraries.insert(libraries.end(), defaults.begin(), defaults.end());
   }

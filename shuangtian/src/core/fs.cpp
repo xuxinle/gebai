@@ -60,6 +60,7 @@ namespace {
     const std::u8string encoded = path.generic_u8string();
     return std::string(encoded.begin(), encoded.end());
   } catch (const std::exception&) {
+#if defined(_WIN32)
     // 宽串含非法 UTF-16（语言对代理项）：退化为“字节保留”，路径会被当不存在处理
     const std::wstring& wide = path.native();
     std::string narrow;
@@ -68,6 +69,10 @@ namespace {
       narrow.push_back(static_cast<char>(static_cast<unsigned char>(unit & 0xFFU)));
     }
     return narrow;
+#else
+    // POSIX：native 本身就是字节串（char），“字节保留”直接取原值
+    return path.native();
+#endif
   }
 }
 

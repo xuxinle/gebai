@@ -699,7 +699,8 @@ namespace {
     heading->set_id(std::format("type-heading-{}", level));
     type_card->add_child(std::move(heading));
   }
-  const auto& metrics = st::ui::Theme::light().metrics();
+  const st::ui::Theme light_theme = st::ui::Theme::light();
+  const auto& metrics = light_theme.metrics();
   for (const auto& [label, size] : std::vector<std::pair<std::string, float>>{
            {"font_base 14 · 正文", metrics.font_base},
            {"font_sm 13 · 次要", metrics.font_sm},

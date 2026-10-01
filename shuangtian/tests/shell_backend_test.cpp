@@ -34,7 +34,7 @@ ST_TEST(backend_surface_size_always_matches_logical_times_scale) {
   if (backend == nullptr) return;
 
   for (const float scale : {1.0f, 1.5f, 2.0f, 1.25f}) {
-    for (const auto [logical_w, logical_h] : {std::pair{1280, 800}, std::pair{640, 480}}) {
+    for (const auto& [logical_w, logical_h] : {std::pair{1280, 800}, std::pair{640, 480}}) {
       WindowOptions options;
       options.width = logical_w;
       options.height = logical_h;
@@ -45,8 +45,8 @@ ST_TEST(backend_surface_size_always_matches_logical_times_scale) {
       if (auto status = backend->create_window(options); !status) continue;
 
       st::raster::Surface& surface = backend->framebuffer();
-      const int expected_w = static_cast<int>(std::lround(static_cast<double>(logical_w) * scale));
-      const int expected_h = static_cast<int>(std::lround(static_cast<double>(logical_h) * scale));
+        const int expected_w = static_cast<int>(std::lround(static_cast<float>(logical_w) * scale));
+  const int expected_h = static_cast<int>(std::lround(static_cast<float>(logical_h) * scale));
       // 这条断言就是"不缩放"的前提：物理截图尺寸必须等于渲染尺寸
       ST_CHECK_EQ(surface.physical_width(), expected_w);
       ST_CHECK_EQ(surface.physical_height(), expected_h);

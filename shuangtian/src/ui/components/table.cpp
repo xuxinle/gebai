@@ -297,7 +297,7 @@ void Table::paint_content(const RenderContext& context, raster::Surface& canvas)
     const math::Rect row = row_rect(index);
     if (row.y >= bounds_.bottom()) break;
     const bool is_selected = selected_row_.has_value() && index == *selected_row_;
-    const bool striped = !is_selected && (zebra_ && index % 2U == 1U || index == hovered_row_);
+    const bool striped = !is_selected && ((zebra_ && index % 2U == 1U) || index == hovered_row_);
     if (is_selected) {
       canvas.fill_rect(row, raster::Paint::solid(colors.primary_soft));
       const math::Rect accent{row.x, row.y, kSelectedAccentWidth, row.height};

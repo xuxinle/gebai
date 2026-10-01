@@ -41,7 +41,7 @@ using st::math::Rect;
 
 ST_TEST(scroll_view_max_scroll_matches_overflow) {
   st::ui::ScrollView view;
-  const st::ui::RenderContext context = make_tall_scroll(view);
+  (void)make_tall_scroll(view);
   ST_CHECK_EQ(static_cast<int>(view.content_height()), 1000);
   ST_CHECK_EQ(static_cast<int>(view.view_height()), 200);
   ST_CHECK_EQ(static_cast<int>(view.max_scroll()), 800);
@@ -125,7 +125,7 @@ ST_TEST(scroll_view_keyboard_page_and_home_end) {
 
 ST_TEST(scroll_view_scroll_to_clamps_and_notifies) {
   st::ui::ScrollView view;
-  const st::ui::RenderContext context = make_tall_scroll(view);
+  (void)make_tall_scroll(view);
   float reported = -1.0f;
   view.set_on_scroll([&reported](float offset) { reported = offset; });
 

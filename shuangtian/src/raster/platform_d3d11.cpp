@@ -40,7 +40,9 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 
 #else
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -107,7 +109,7 @@ struct Modules {
       d3d11_error = "d3d11.dll 中找不到 D3D11CreateDevice";
       return;
     }
-    create_device = reinterpret_cast<CreateDeviceFn>(symbol);
+    create_device = reinterpret_cast<CreateDeviceFn>(reinterpret_cast<void*>(symbol));
     // 着色器编译器在**另一个** DLL（系统自带 d3dcompiler_47.dll；老系统可能是 43/46/47）
     for (const wchar_t* name : {L"d3dcompiler_47.dll", L"d3dcompiler_46.dll", L"d3dcompiler_43.dll"}) {
       d3dcompiler = ::LoadLibraryW(name);
@@ -890,7 +892,6 @@ class GpuCanvas final : public Surface {
   };
 
   [[nodiscard]] auto current_clip() const noexcept -> const ClipFrame& {
-    static const ClipFrame none{};
     if (clip_stack_.empty()) {
       // 默认裁剪 = 整块目标（用函数内静态量避免每次构造）
       static thread_local ClipFrame full;

@@ -71,6 +71,7 @@ namespace {
 
 /// CPU 是否支持 AVX2（首次调用缓存，进程生命周期内不变）。
 [[nodiscard]] auto cpu_has_avx2() noexcept -> bool {
+#if defined(_MSC_VER)
   static const bool supported = [] {
     std::array<int, 4> cpuinfo1{};
     std::array<int, 4> cpuinfo7{};
@@ -86,6 +87,10 @@ namespace {
     return (cpuinfo7[1] & (1 << 5)) != 0;  // EBX.AVX2
   }();
   return supported;
+#else
+  // GCC/Clang：内建已含 OS YMM 状态检查（等价于上方的 CPUID+XGETBV 序列）。
+  return __builtin_cpu_supports("avx2") != 0;
+#endif
 }
 #endif
 
