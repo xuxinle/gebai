@@ -1448,6 +1448,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
+| 小字锐度量尺 | `tools/stem_phase_probe.cpp`（竖笔画边缘相位与过渡带）、`tools/hinting_gain_probe.cpp`（用 FreeType 量各 hinting 档的网格对齐率） | 手工编译运行 | 见 §4.3.1 与 `docs/BACKLOG.md` P1 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
 | 编辑器形态冒烟 | `tools/st_editor_smoke.py`：点击即聚焦（焦点链路）+ `input.text` 送达焦点元素 + 退格复原 + `FillViewport` 浮层铺满视口 + Esc 关闭 | `python3 tools/st_editor_smoke.py all` | 全通过（9 项断言） |
 
