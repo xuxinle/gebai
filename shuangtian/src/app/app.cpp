@@ -18,29 +18,24 @@
 namespace st::app {
 namespace {
 
-/// 文字抗锯齿形态的解析（命令行 > 环境变量 > 默认）。
-///
-/// `auto` 的语义：**有窗口 → 亚像素（LCD）；无头 → 灰度**。
-/// - 亚像素是桌面系统文字“看着锐”的来源（水平有效分辨率 3 倍）；
-/// - 灰度是可逐像素断言的参考口径（无头截图/回归测试的基准），二者不能兼得；
-/// - 需要看亚像素效果的无头验证：`--text-lcd=on`（或 `ST_TEXT_LCD=on`）。
-[[nodiscard]] auto resolve_text_lcd(std::string_view mode, bool has_window) -> bool {
-  if (mode == "on") return true;
-  if (mode == "off") return false;
-  if (const auto value = fs::read_env("ST_TEXT_LCD"); value.has_value() && !value->empty()) {
-    if (*value == "1" || *value == "on" || *value == "true") return true;
-    if (*value == "0" || *value == "off" || *value == "false") return false;
-  }
-  return has_window;
+/// 字符串 → 布尔（`ST_TEXT_LCD` 等环境变量的取值解析）。
+[[nodiscard]] auto parse_bool_word(std::string_view value) -> std::optional<bool> {
+  if (value == "1" || value == "on" || value == "true") return true;
+  if (value == "0" || value == "off" || value == "false") return false;
+  return std::nullopt;
 }
 
-/// 网格拟合模式的解析（命令行 > 环境变量 > 默认）。
-///
-/// `auto`：**有窗口 → `Normal`；无头 → `Off`**。理由与亚像素同一套：
-/// 拟合约等于“按像素网格重排笔画”，它**刻意**改变字形边沿；而无头截图与回归断言
-/// 需要一个可逐像素复现的基准。两者不可兼得，所以默认按“有没有窗口”分。
-[[nodiscard]] auto resolve_text_fit(std::string_view mode, bool has_window)
-    -> st::text::GridFitMode {
+}  // namespace
+
+auto resolve_text_lcd(std::string_view mode) -> bool {
+  if (const auto parsed = parse_bool_word(mode); parsed.has_value()) return *parsed;
+  if (const auto value = fs::read_env("ST_TEXT_LCD"); value.has_value() && !value->empty()) {
+    if (const auto parsed = parse_bool_word(*value); parsed.has_value()) return *parsed;
+  }
+  return true;
+}
+
+auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   const auto from_word = [](std::string_view value) -> std::optional<st::text::GridFitMode> {
     if (value == "off" || value == "0" || value == "false") return st::text::GridFitMode::Off;
     if (value == "light") return st::text::GridFitMode::Light;
@@ -55,10 +50,8 @@ namespace {
   if (const auto value = fs::read_env("ST_TEXT_FIT"); value.has_value() && !value->empty()) {
     if (const auto parsed = from_word(*value); parsed.has_value()) return *parsed;
   }
-  return has_window ? st::text::GridFitMode::Normal : st::text::GridFitMode::Off;
+  return st::text::GridFitMode::Normal;
 }
-
-}  // namespace
 
 struct Application::Impl {
   shell::Backend* backend{nullptr};
@@ -350,10 +343,9 @@ auto Application::start() -> Status {
   if (stack) {
     impl_->fonts = std::make_unique<st::text::FontStack>(std::move(*stack));
     impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, options_.scale);
-    // 文字抗锯齿形态：命令行 > 环境变量 > 默认（有窗口→亚像素，无头→灰度）。
-    impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd, !impl_->backend->headless()));
-    impl_->renderer->set_grid_fit(
-        resolve_text_fit(options_.text_fit, !impl_->backend->headless()));
+    // 文字形态：命令行 > 环境变量 > 默认（两侧同源，见 resolve_text_* 的说明）。
+    impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
+    impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
     // 如实说清这一帧的字是怎么画的：“字看着糊”的第一个分歧点就在这里。
     const char* fit_name = impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
                                ? "normal"

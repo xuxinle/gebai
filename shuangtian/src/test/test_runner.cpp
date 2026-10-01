@@ -17,7 +17,19 @@ std::vector<Case> case_list{};
 std::vector<std::string> current_failures{};
 std::vector<CaseResult> last_case_results{};
 std::uint64_t total_checks{0};
-std::mutex registry_mutex{};
+
+/// 注册表互斥锁（**函数内静态**，不能用命名空间作用域的 `std::mutex`）。
+///
+/// 为什么要这样：`ST_TEST` 生成的 `Registrar` 是**其他翻译单元的静态对象**，
+/// 在各自 TU 的静态初始化阶段就调用 `Registry::add` → 需要这把锁；而命名空间作用域的
+/// `std::mutex` 与它们的构造顺序**跨 TU 未定义**——一旦锁未构造就被锁，
+/// 在 Windows/`__gthr_win32_mutex_lock` 下是启动即段错误（g++ 按链接顺序踩中，
+/// MSVC 侥幸顺序正确而长期掩盖了它）。函数内静态由 C++ 保证**首次使用时构造**，
+/// 与调用方的初始化顺序无关。
+[[nodiscard]] auto registry_mutex() -> std::mutex& {
+  static std::mutex instance;
+  return instance;
+}
 
 }  // namespace
 
@@ -27,19 +39,19 @@ auto Registry::instance() -> Registry& {
 }
 
 void Registry::add(std::string name, std::function<void()> body) {
-  const std::scoped_lock lock(registry_mutex);
+  const std::scoped_lock lock(registry_mutex());
   case_list.push_back(Case{std::move(name), std::move(body)});
 }
 
 auto Registry::cases() -> std::vector<Case>& { return case_list; }
 
 void Registry::record_failure(std::string_view file, int line, std::string message) {
-  const std::scoped_lock lock(registry_mutex);
+  const std::scoped_lock lock(registry_mutex());
   current_failures.push_back(std::format("{}:{}: {}", file, line, message));
 }
 
 void Registry::clear_failures() {
-  const std::scoped_lock lock(registry_mutex);
+  const std::scoped_lock lock(registry_mutex());
   current_failures.clear();
 }
 
@@ -114,7 +126,7 @@ auto run_all(std::string_view filter) -> int {
       }
     }
     {
-      const std::scoped_lock lock(registry_mutex);
+      const std::scoped_lock lock(registry_mutex());
       last_case_results.push_back(std::move(result));
     }
     std::fflush(stdout);
@@ -139,7 +151,7 @@ auto last_results() -> const std::vector<CaseResult>& { return last_case_results
 
 auto write_junit(std::string_view path) -> std::size_t {
   if (path.empty() || last_case_results.empty()) return 0;
-  const std::scoped_lock lock(registry_mutex);
+  const std::scoped_lock lock(registry_mutex());
   std::string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites>\n";
   std::size_t failed = 0;
   for (const auto& result : last_case_results) {

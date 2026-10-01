@@ -940,7 +940,7 @@ namespace {
   facts_card->add_child(std::make_unique<KeyValueRow>("渲染", "软件光栅器"));
   facts_card->add_child(std::make_unique<KeyValueRow>("后端", "headless / x11 / wayland / win32"));
   facts_card->add_child(std::make_unique<KeyValueRow>("协议", "st-control/1"));
-  facts_card->add_child(std::make_unique<KeyValueRow>("编译", "stpm 直驱（MSVC 首选 / GCC / Clang）"));
+  facts_card->add_child(std::make_unique<KeyValueRow>("编译", "stpm 直驱（g++ 默认 / MSVC 回退）"));
   page->add_child(std::move(facts_card));
   return page;
 }

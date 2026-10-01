@@ -30,8 +30,8 @@ using st::raster::Surface;
 
 [[nodiscard]] auto make_scaled_surface(int logical_width, int logical_height, float scale)
     -> std::unique_ptr<Surface> {
-  const int physical_width = static_cast<int>(logical_width * scale);
-  const int physical_height = static_cast<int>(logical_height * scale);
+  const int physical_width = static_cast<int>(static_cast<float>(logical_width) * scale);
+  const int physical_height = static_cast<int>(static_cast<float>(logical_height) * scale);
   auto surface = st::raster::gpu::create_canvas(physical_width, physical_height, scale, {});
   return surface.has_value() ? std::move(*surface) : nullptr;
 }

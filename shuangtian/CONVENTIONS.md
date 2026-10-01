@@ -10,8 +10,8 @@
 
 | 项 | 规定 |
 |---|---|
-| 标准 | `-std=c++20`（GCC 13.3 / Clang 18 / **MSVC 14.5x** 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
-| 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：非 Windows 用 `g++`/`clang++`；**Windows 上 MSVC（`cl`）是首选**——自动经 `vswhere` 定位 + `vcvars64` 注入环境，无 MSVC 时才回退 MinGW/clang。Windows 自举用 `bootstrap.ps1`（对应 `bootstrap.sh`） |
+| 标准 | `-std=c++20`（**GCC 13.3 / 16.2** / Clang 18 / MSVC 14.5x 实测基线；`<format>`/`<expected>`/concepts/ranges/span 均须可用） |
+| 编译器 | 由 `stpm` 直驱（不经 CMake/Make）：**Windows 上默认 g++（MinGW-w64）**——同一套 GCC 口径横跨 Linux/macOS/Windows，跟进最新 C++ 标准不受 VS 版本牵制；`g++` 缺席或主版本 < 13 时自动回退 MSVC（`vswhere` 定位 + `vcvars64` 注入环境）或 clang++。Windows 自举用 `bootstrap.ps1`（g++ 优先，MSVC 回退；对应 `bootstrap.sh`） |
 | 第三方依赖 | 框架本体**零第三方依赖**；后续引入的第三方源码一律由 `stpm` 统一管理（见 `DESIGN.md`「包管理」），不得绕过 |
 | 系统能力 | 一律**运行时 `dlopen` 可选加载**（X11/Wayland/GL/Vulkan/TLS），缺失即回退或明确报错 |
 | 平台分支 | 用 `#if defined(_WIN32)` 等**条件编译指令**（允许），禁止用**函数式宏**做分支 |
@@ -325,9 +325,16 @@ Windows 上 `std::filesystem::path` 的两个方向都会抛（UTF-8→宽在字
 6. **改了平台分支必须真的编一次**：交叉编译是唯一能发现 Windows 分支问题的途径
 （实测：从未被编译过的 Windows 分支攒了 `nodiscard` 忽略返回值、未使用变量等一批 `-Werror` 问题）。
 
-### 10.1 MSVC 口径（Windows 宿主）
+### 10.1 编译器口径（Windows 宿主：g++ 默认，MSVC 回退）
 
-标志分两套，**翻译集中在 `src/pkg/compiler.cpp`**，业务代码与服务清单始终写 GCC 风格：
+**默认 g++（MinGW-w64）**：探测优先序 `ST_CXX/CXX 显式指定 → g++（主版本 ≥ 13）→ clang++/c++ → MSVC`。
+选择理由：同一套 GCC 口径横跨三平台（标志、行为、依赖产出不分裂）；跟进最新 C++ 标准不必等
+VS 更新；只有 MinGW 的机器无需先装 VS。低于 13 的 g++ 缺 C++20 关键项，会被跳过并告警。
+Windows 目标的 GCC 链接**默认静态 libgcc/libstdc++**（产物不要求 dll 在 PATH 上）；
+san 档需要 sanitizer 运行库，MinGW 发行版多数不带——构建前会探测并给出可行动的报错。
+
+MSVC 作为回退路径完整可用；两族标志分两套，**翻译集中在 `src/pkg/compiler.cpp`**，
+业务代码与服务清单始终写 GCC 风格：
 
 | 事项 | 规定 |
 |---|---|

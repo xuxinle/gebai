@@ -39,7 +39,7 @@
   锐笔画 0% → **54.7%**（auto-hinter 基准的 2.8 倍）；拉丁 87.3% → 44.0%；
   中间调占比 71.1% → 49.5%；聚合墨量变化 −0.3%~+2.5%。
   **字宽与位图网格逐字段不变**（测试钉死）。开关 `--text-fit auto|off|light|normal`，
-  默认「有窗口 → normal，无头 → off」；协议 `metrics.text_fit` 可查。
+  默认 **`normal`（所有场景；内置通道与桌面同源）**；协议 `metrics.text_fit` 可查。
 - [ ] **网格拟合的后续打磨**（非阻塞；当前效果已达标）
   ① 同组内按位置排序做**最优平移**（现在是每组独立吸附）——相邻 stem 在小字号下可能互相挤压；
   ② 横笔画（`Normal` 档已生效）的收益尚未单独量化；
@@ -93,7 +93,7 @@
   `Capabilities::lcd_text` 如实上报；顺带把「管线建不起来」变成显式失败
   （`capabilities()`/`create_canvas()` 挡住着色器编译失败与混合状态创建失败）。
 - [x] **开关与可观测**：`--text-lcd auto|on|off`（三个示例 + 通用命令行都接）、`ST_TEXT_LCD`、
-  启动日志一行、协议 `metrics.text_renderer`；默认「有窗口→亚像素 / 无头→灰度」。
+  启动日志一行、协议 `metrics.text_renderer`；默认 **亚像素（所有场景；内置通道与桌面同源）**。
 - [x] **验证**：新增 `tests/text_subpixel_test.cpp`（6 用例：网格重合 / 墨量守恒 / 亮度 profile 守恒 /
   彩边只在边缘 / 滤波取舍 / 缓存不混用）+ `gpu_parity` 的亚像素对比用例（Windows 侧真跑）；
   实测数据与**诚实的边界**（亚像素不缩小过渡带）记在 `DESIGN.md §4.3.1`。
@@ -172,6 +172,10 @@
   **Windows 内存探测**（GlobalMemoryStatusEx）；**st clean**；**测试框架** per-case 超时
   + `--list` + `--format junit`（并完成 CLI 接线）；lint 正则一次性编译；
   bootstrap.ps1 读 st.pkg 去双写（A3）
+- [x] **Windows 默认编译器统一 g++（MinGW-w64）**（MSVC 可回退）+ **内置通道与桌面一致性**
+  （文本/DPI 默认同源；`tools/st_consistency_check.py`）——含四处真实缺陷修复：
+  测试注册表静态初始化顺序（g++ 下启动即崩）、MSVC PCH 创建静默空转（C1083 假阴/假阳）、
+  第三方运行时的 STL 弃用警告被 `/WX` 拦截、PCH 身份未入编译指纹与缓存键（LNK2011）。
 - [x] **CI 三平台矩阵**（.github/workflows/shuangtian-ci.yml：linux/windows/macos
   test+lint，Linux 附 mingw 交叉编译）
 - [x] **文档漂移全修** + check_docs.py v2（§ 引用/路径实存/组件清单/用例数四类自动核对）

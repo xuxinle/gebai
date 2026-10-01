@@ -49,7 +49,7 @@ shuangtian/
 ├── README.md        # 本文件
 ├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / codeeditor / st 自身）
 ├── bootstrap.sh     # 自举（Linux/macOS）：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
-├── bootstrap.ps1    # 自举（Windows）：同上，自动定位 MSVC（vswhere + vcvars64）注入环境
+├── bootstrap.ps1    # 自举（Windows）：同上，g++（MinGW-w64）优先、MSVC 回退（vswhere + vcvars64）
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
 ├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
@@ -87,15 +87,15 @@ python3 tools/st_visual_check.py     # 完整视觉验证：dev + san 两档、D
 
 在歌白智能体里，这一切由 **`shuangtian` 子代理**封装为工具：`shuangtian_run`（构建/测试/lint/启动/停止）、`shuangtian_tree/find/get/set/invoke`、`shuangtian_click/type/key`、`shuangtian_capture`（截图直接可见）、`shuangtian_visual/wait/metrics/call`。
 
-## 快速开始（Windows，MSVC）
+## 快速开始（Windows）
 
 ```powershell
 cd shuangtian
 
-# ① 自举工具链（自动定位 MSVC：vswhere + vcvars64；本机实测 ~20s）
+# ① 自举工具链（g++ 优先、MSVC 回退；本机实测 ~27s）
 pwsh -NoProfile -File .\bootstrap.ps1
 
-# ② 构建示例（首次全量 ~32s；之后增量秒级、无改动毫秒级）
+# ② 构建示例（首次全量 ~31s；之后增量秒级、无改动毫秒级）
 .\build\bin\st.exe build gallery --profile dev
 
 # ③ 无头启动 + 用控制通道看与操作
@@ -109,9 +109,10 @@ pwsh -NoProfile -File .\bootstrap.ps1
 $env:ST_PAINT_PROFILE=1; .\build\dev\bin\gallery.exe --headless --bench 60
 ```
 
-Windows 上的工具链口径（详见 `CONVENTIONS.md` §10.1）：**MSVC 首选**（无 MSVC 才回退
-MinGW/clang）；GCC 风格标志由 `stpm` 统一翻译（无等价物的会列出丢弃清单）；符号调试信息用 `/Z7`
-（并行编译下不争 PDB）；依赖追踪走 `/sourceDependencies` JSON（改头文件能正确触发重编）。
+Windows 上的工具链口径（详见 `CONVENTIONS.md` §10.1）：**默认 g++（MinGW-w64）**——同一套 GCC
+口径横跨三平台，跟进最新 C++ 标准不受 VS 版本牵制；g++ 缺席或主版本 < 13 时自动回退 MSVC
+（无 MSVC 才到这一步）；GCC 风格标志由 `stpm` 统一翻译（MSVC 无等价物的会列出丢弃清单）；
+Windows 目标的 GCC 链接默认静态 libgcc/libstdc++（产物双击即跑，不依赖 PATH 上的 dll）。
 
 ## 三维渲染：两条腿走路
 
@@ -205,7 +206,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | Markdown（解析 / 流式 / 高亮 / 渲染组件） | ✅ |
 | TCP 控制通道（tree/find/get/set/invoke/input.*/capture/visual/wait/metrics/events/theme/app） | ✅ |
 | 自研包管理器 `stpm`（求解/lock/获取/校验/vendor/构建/lint） | ✅ 构建与 lint 完整；第三方源码获取限制见 `DESIGN.md` §7.4 |
-| **Windows 宿主 + MSVC 工具链** | ✅ 首选 MSVC（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；实测自举 20s / 全量构建 32s / 测试 **365 用例 · 10343 断言**全绿 |
+| **Windows 宿主 + g++（MinGW-w64）默认编译器** | ✅ g++ 优先（版本护栏 ≥ 13）、MSVC 可回退（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；Windows 目标默认静态 libgcc/libstdc++（产物不要求 mingw dll）；实测 g++ 自举 27s / 全量构建 ~31s / 测试全绿 |
 | **GPU 渲染（D3D11：硬件 → WARP）** | ✅ **M1–M6 全部落地**：设备层 / 着色器原语（文字与渐变与软件 **Δ0**）/ 投影（**Δ≤1**）/ 路径填充描边 / **DXGI swapchain 呈现** / `auto` 按实测选优。实测总帧 24.66→**1.53 ms**、送显 6.55→**0.03 ms**（详见 `DESIGN.md` §8.3） |
 | 动画与过渡 | ✅ 悬浮事件与特效（背景/描边/上浮/发光，`HoverEffect` 声明式）、帧驱动过渡（`UiRoot` 时间轴 + 续帧协议）、3D 旋转 |
 
@@ -214,6 +215,6 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 **完整地图见 `docs/README.md`**（哪份文档答什么问题）。最常用的三份：
 
 - `DESIGN.md` — 权威设计（架构、接口、协议规范、DPI 契约、设计令牌、包管理）。
-  两张表最值得先看：**§8.2 的 47 条实战缺陷**（每条带根因与修复）、**§11 性能目标与实测**
+  两张表最值得先看：**§8.2 的 50 条实战缺陷**（每条带根因与修复）、**§11 性能目标与实测**
 - `CONVENTIONS.md` — 编码契约（禁用特性清单 + 编译强制集 + `st lint` 规则）
 - `docs/cross_platform.md` — 跨平台强制约束（写 C++ 前必读）；`docs/independent_project.md` — 用本框架建独立工程

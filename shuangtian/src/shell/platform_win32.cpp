@@ -814,6 +814,23 @@ class Win32Backend final : public Backend {
 
 }  // namespace
 
+auto win32_display_scale() noexcept -> float {
+  // 先声明 DPI 感知：不声明的话本进程被虚拟化为 96 DPI，`GetDpiForSystem` 返回 96——
+  // 系统实际 150% 缩放时无头会拿到 1.0，与窗口（1.5）再度分家。
+  // 与 `create_window` 的内声明同一口径（弱加载语义：老系统上退回 Vista 版 API）。
+  if (::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == 0) {
+    (void)::SetProcessDPIAware();
+  }
+  const UINT dpi = ::GetDpiForSystem();
+  if (dpi > 0) return static_cast<float>(dpi) / 96.0f;
+  if (HDC dc = ::GetDC(nullptr); dc != nullptr) {
+    const int screen_dpi = ::GetDeviceCaps(dc, LOGPIXELSX);
+    ::ReleaseDC(nullptr, dc);
+    if (screen_dpi > 0) return static_cast<float>(screen_dpi) / 96.0f;
+  }
+  return 1.0f;
+}
+
 auto create_win32_backend() -> Result<std::unique_ptr<Backend>> {
   return std::unique_ptr<Backend>(std::make_unique<Win32Backend>());
 }

@@ -16,10 +16,21 @@
 
 namespace st::app {
 
+/// 解析文字抗锯齿形态（命令行 `--text-lcd` 取值；`auto` 时再看 `ST_TEXT_LCD`）。
+///
+/// 默认 `true`（亚像素）：**内置通道（无头）与桌面窗口同一默认**——两种运行形态
+/// 的画字方式必须同源，截图与实际运行才可比。灰度基准用 `--text-lcd=off` 显式取得。
+[[nodiscard]] auto resolve_text_lcd(std::string_view mode) -> bool;
+
+/// 解析字形网格拟合模式（命令行 `--text-fit` 取值；`auto` 时再看 `ST_TEXT_FIT`）。
+/// 默认 `Normal`，与 `text_lcd` 同一理由（内置通道与桌面同源）。
+[[nodiscard]] auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode;
+
 struct AppOptions {
   int width{1280};   ///< 逻辑宽（UI 坐标）
   int height{720};   ///< 逻辑高
-  float scale{0.0f}; ///< DPI 缩放：0 = 自动（ST_SCALE 环境变量 → 1.0）；2.0 = 200%（HiDPI）
+  float scale{0.0f}; ///< DPI 缩放：0 = 自动（ST_SCALE 环境变量 → 后端默认：win32 查窗口 DPI，
+                    ///< headless 查系统显示缩放（Windows）/1.0（其它）；显式值不被覆盖）
   std::string title{"霜天应用"};
   bool headless{false};
   std::string backend{};              ///< 空=自动（无显示则 headless）
@@ -28,19 +39,18 @@ struct AppOptions {
   /// 为什么不硬编码 GPU 优先：渲染器优劣与机器强相关（GPU 弱、驱动差、或呈现路径
   /// 仍需 CPU 拷贝时，软件反而更快）。`auto` 的职责是**测出来**，而不是猜。
   std::string renderer{"auto"};
-  /// 文字抗锯齿形态：`auto`（有窗口 → LCD 亚像素；无头 → 灰度）/ `on` / `off`。
+  /// 文字抗锯齿形态：`auto` / `on`（亚像素）/ `off`（灰度）。
   ///
-  /// 为什么要分默认：**灰度是可逐像素断言的参考口径**——无头截图与回归测试靠它
-  /// 做像素对像素比较；亚像素渲染带 RGB 彩边，那是给人看的，不是给断言看的。
-  /// 需要看亚像素效果的无头验证，显式传 `--text-lcd=on` 即可（协议/工具链不变）。
+  /// 默认**亚像素（LCD）**，且**内置通道（无头）与桌面窗口同一默认**——
+  /// 截图里的文字与实际运行看到的是同一种合成方式，开发闭环的视觉判断才成立。
+  /// 需要可逐像素断言的灰度基准（跨版本回归对比等）时显式传 `--text-lcd=off`。
   std::string text_lcd{"auto"};
-  /// 字形网格拟合（hinting）：`auto`（有窗口 → normal；无头 → 关）/ `off` / `light` / `normal`。
+  /// 字形网格拟合（hinting）：`auto` / `off` / `light` / `normal`。
   ///
-  /// 实测收益（`tools/stem_phase_probe.cpp`，同一把尺子）：**中文「每边一个过渡像素」
-  /// 的糊笔画 90.9% → 21.8%、锐笔画 0% → 54.7%**；拉丁 87.3% → 44.0%。
-  /// 原因：13.5px 正文的笔画边缘 100% 落在分数相位上（与抗锯齿模式无关）。
-  /// 与 `text_lcd` 同样分默认：**灰度 + 无拟合是可逐像素断言的参考口径**（无头/回归），
-  /// 窗口模式才要“看着锐”（拟合会微调字形，这是它的目的，也是它不能当基准的原因）。
+  /// 默认 `normal`，与 `text_lcd` 同一理由：内置通道与桌面同源（拟合**刻意**
+  /// 改变字形边沿，两侧不同源时截图与实机就是两种字）。实测收益见
+  /// `tools/stem_phase_probe.cpp`：中文「每边一个过渡像素」的糊笔画 90.9% → 21.8%。
+  /// 需要不改变字形边沿的基准时显式传 `--text-fit=off`。
   std::string text_fit{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配

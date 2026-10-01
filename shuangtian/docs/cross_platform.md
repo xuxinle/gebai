@@ -101,3 +101,16 @@ ST_MAIN(run_app)
 5. Windows 分支改了？→ 跑 `st build <target> --toolchain=mingw` 确认**编得过**
    （本机编不到 Windows 分支，这是唯一能发现问题的途径）。
 6. 新增系统库依赖？→ 在 `toolchains` 里为目标平台声明。
+
+## 7. 内置通道（无头）与桌面的**一致性**约束（验收口径）
+
+「无头截图看着好、实际运行发糊/错位」这类问题全部来自两侧**默认口径不同源**，
+因此两侧的默认必须逐项对齐（已全部落实）：
+
+| 维度 | 口径 | 保证方式 |
+|---|---|---|
+| 文本形态 | 亚像素 LCD + 网格拟合 normal（两通道同一默认） | `resolve_text_lcd` / `resolve_text_fit` 不读“有没有窗口”（`src/app/app.cpp`） |
+| 像素密度 | 未显式指定时：窗口取窗口实际 DPI，无头取**系统显示缩放**（Windows） | `shell::system_display_scale()`；显式 `--scale`/`ST_SCALE` 两侧接管 |
+| 呈现路径 | 窗口侧帧缓冲 →（DXGI swapchain / GDI blit）→ 客户区必须逐像素一致 | `tools/st_consistency_check.py`：`PrintWindow(PW_CLIENTONLY\|PW_RENDERFULLCONTENT)` 与帧缓冲逐像素比对 |
+
+**改了默认口径就要同步这个表**，并用一致性脚本重测（不是靠“看起来一样”）。

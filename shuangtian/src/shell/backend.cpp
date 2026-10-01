@@ -155,9 +155,16 @@ class HeadlessBackend final : public Backend {
   auto create_window(const WindowOptions& options) -> Status override {
     width_ = options.width > 0 ? options.width : 1280;
     height_ = options.height > 0 ? options.height : 720;
-    scale_ = options.scale > 0.0f ? options.scale : 1.0f;
+    // 未显式指定 `scale` 时**跟随系统显示缩放**：内置通道（无头）与桌面窗口默认
+    // 同一像素密度——这是“内置截图与实际运行效果一致”在 DPI 维度上的前提。
+    // 显式值（`--scale`/`ST_SCALE`）完全接管，用于回归与复现。
+    scale_ = options.scale > 0.0f ? options.scale : system_display_scale();
     title_ = options.title;
-    SurfaceChoice choice = create_surface(options, options.renderer);
+    // 把**解析后的** scale 传下去：`create_surface` 里的物理尺寸要从它算，
+    // 继续传原始的 0 会让画布按 1x 建、而 device_scale 报 1.5（尺寸与声明不一致）。
+    WindowOptions resolved = options;
+    resolved.scale = scale_;
+    SurfaceChoice choice = create_surface(resolved, options.renderer);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Unsupported, "创建绘制面失败");
     surface_ = std::move(choice.surface);
     renderer_name_ = std::move(choice.name);
@@ -309,6 +316,15 @@ auto probe_backend() -> std::string {
   if (!library_available("libX11.so.6:libX11.so").empty()) return "x11";
   if (!library_available("libwayland-client.so.0").empty()) return "wayland";
   return "headless";
+#endif
+}
+
+auto system_display_scale() noexcept -> float {
+#if defined(_WIN32)
+  return win32_display_scale();
+#else
+  // 无“系统显示缩放”概念：1.0（与窗口后端在无 DPI 概念平台上的默认一致）。
+  return 1.0f;
 #endif
 }
 

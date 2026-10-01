@@ -76,6 +76,14 @@ class Backend {
 [[nodiscard]] auto has_display() noexcept -> bool;
 /// 探测可用的图形后端名（无显示时返回 "headless"）。
 [[nodiscard]] auto probe_backend() -> std::string;
+/// 系统显示缩放（物理像素 / 逻辑像素）：Windows 取主显示器 DPI/96（不声明 DPI 感知
+/// 的进程会被虚拟化为 96，因此实现里先声明感知）；其它平台无系统级缩放概念，返回 1.0。
+///
+/// 用途：无头后端在未显式指定 `scale` 时**跟随系统**——内置通道的截图/坐标
+/// 与桌面窗口取同一像素密度，“内置里看着对不对”与“实机跑起来”才不会两套。
+[[nodiscard]] auto system_display_scale() noexcept -> float;
+/// Windows 实现（platform_win32.cpp）。经 `system_display_scale` 调用，非 Windows 不会触达。
+[[nodiscard]] auto win32_display_scale() noexcept -> float;
 /// 创建平台专属后端（各 `platform_*.cpp` 提供；未实现的平台在工厂里如实报 `Unsupported`）。
 [[nodiscard]] auto create_win32_backend() -> Result<std::unique_ptr<Backend>>;
 
