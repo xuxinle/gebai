@@ -40,7 +40,7 @@
 
 ```
 ① shuangtian_run(action=build)          # 构建（首次自动自举 stpm 工具链）
-② shuangtian_run(action=start)          # 无头启动：返回 端口/PID/控制文件，并已握手确认
+② shuangtian_run(action=start)          # 无头启动：返回 端口/PID/控制文件（**已验证就绪**：握手成功才算）
 ③ shuangtian_tree / shuangtian_find      # 看清结构（拿到组件 id）
    shuangtian_metrics                   # 确认后端/无头/DPI/物理尺寸
 ④ shuangtian_capture                    # 截图（回归后会直接显示图片，肉眼核对"看起来对不对"）
@@ -58,6 +58,8 @@
 4. **改代码走框架工作流**：框架工程根默认是仓库根下的 `shuangtian/`（可用环境变量 `SHUANGTIAN_PROJECT` 或工具参数 `framework` 指定）。改动后 `shuangtian_run(action=build)`（`:dev` 档增量构建通常数秒），测试用 `action=test`（`san=true` 开 ASan/UBSan），禁令扫描用 `action=lint`。
 5. **视觉核验是硬要求**：任何"改完界面"的结论都必须有 `capture` 截图支撑；截图是物理像素 PNG，无头模式的结果与有窗口模式逐像素一致。
 6. **别猜端口**：`run(action=start)` 会把控制文件写在会话目录 `.shuangtian/<app>-control.json`，后续工具默认自动读取；也可以显式传 `target="127.0.0.1:<port>"`。
+   - **同一个应用只允许一个实例**：控制通道还在应答时 `start` 会**明确拒绝**（多实例抢同一个控制文件，会让后续每次操作都落到另一个界面上）。想重开先 `stop`。
+   - 应用崩溃/退出后控制文件会滞留：此时工具**快速失败**并提示重新 `start`，不会拿滞留的端口去连。
 7. **收尾干净**：改动式操作后如需保持环境整洁，用 `run(action=stop)` 结束常驻应用（它会先尝试控制通道 `shutdown` 优雅退出）。
 8. **写 C++ 时必须守跨平台强制约束**（`CONVENTIONS.md` §10，详细版 `docs/cross_platform.md`）——
    目标是 Linux/Windows/macOS 三平台，而**本机（Linux）看不出跨平台问题**：

@@ -13,6 +13,7 @@ type Handler = (message: { id: number; method: string; params: Record<string, un
   | { ok: true; result: unknown }
   | { ok: false; error: { code: string; message: string } }
   | { defer: true }
+  | { close: true }  // 直接关闭连接（模拟"应用在命令执行中退出"）
   | { frames: Buffer[] }  // 直接给原始帧字节（事件帧/超长帧等协议级场景）
 
 interface MockServer {
@@ -40,6 +41,7 @@ async function startMock(handler: Handler): Promise<MockServer> {
         calls.push({ method: message.method, params: message.params ?? {} })
         const reply = handler(message)
         if ("defer" in reply) continue
+        if ("close" in reply) { socket.destroy(); continue }
         if ("frames" in reply) {
           socket.write(Buffer.concat(reply.frames))
           continue
@@ -200,6 +202,48 @@ describe("call_control", () => {
     const server = await mock((message) => ({ ok: true, result: { method: message.method } }))
     await request({ host: "127.0.0.1", port: server.port }, "ping")
     expect(server.calls.map((call) => call.method)).toEqual(["ping"])
+  })
+
+  test("合成的 hello 被拒 → 带着服务端原文报错（不静默成“未收到响应”）", async () => {
+    // 实测踩到的场景：控制文件陈旧 → 连到了**上一个实例**的端口 → token 不匹配 → 服务端拒握手并断连。
+    // 旧实现把握手响应静默丢掉（`results.slice(1)`），调用方只能看到
+    // 「未收到 capture 的响应」——一条完全指不出方向的错误。
+    const server = await mock((message) =>
+      message.method === "hello"
+        ? { ok: false, error: { code: "permission", message: "token 不匹配" } }
+        : { ok: true, result: {} },
+    )
+    const started = Date.now()
+    try {
+      await request({ host: "127.0.0.1", port: server.port }, "tree", {}, 10_000)
+      throw new Error("应当抛出")
+    } catch (error) {
+      expect(error).toBeInstanceOf(ControlError)
+      expect((error as ControlError).message).toContain("握手被拒")
+      expect((error as ControlError).message).toContain("token 不匹配")
+      expect((error as ControlError).message).toContain("status")
+    }
+    // 立刻失败，不等满超时（握手失败是确定性事件，没有理由挂 10s）
+    expect(Date.now() - started).toBeLessThan(3000)
+  })
+
+  test("握手过了但业务请求没回包、连接被关闭 → transport 且说清收到几个", async () => {
+    // 旧实现只看“有没有收到过任何响应”：收过 hello 就 resolve，接着把 hello 过滤掉，
+    // 于是调用方拿到空结果 → “未收到 X 的响应”。现在必须报出“收齐响应前被关闭”。
+    const server = await mock((message) =>
+      message.method === "hello"
+        ? { ok: true, result: { app: { name: "mdeditor" } } }
+        : { close: true },
+    )
+    try {
+      await request({ host: "127.0.0.1", port: server.port }, "capture", {}, 5000)
+      throw new Error("应当抛出")
+    } catch (error) {
+      expect(error).toBeInstanceOf(ControlError)
+      expect((error as ControlError).code).toBe("transport")
+      expect((error as ControlError).message).toContain("收齐响应前被关闭")
+      expect((error as ControlError).message).toContain("0/1")
+    }
   })
 
   test("超长帧 → overflow 拒绝（不吞内存）", async () => {

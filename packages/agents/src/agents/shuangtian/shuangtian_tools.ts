@@ -5,7 +5,7 @@
  * 所有工具经 TCP 控制通道（`st-control/1`）与进程管理落地，不依赖宿主机桌面环境——
  * 无头模式（`--headless`）下 Linux 服务器无显示服务也能完整开发与验证界面。
  */
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
 import type { SubAgentDef, Tool, ToolContext, ToolResult } from "@gebai/sdk"
 import { artifactBlocks, schema } from "@gebai/sdk/node"
@@ -131,6 +131,62 @@ function logFileFor(ctx: ToolContext, target: string): string {
   return join(runtimeDir(ctx), `${target}.log`)
 }
 
+/** 控制文件里我们真正需要的三个字段（其余字段由应用自用）。 */
+interface ControlInfo {
+  port: number
+  pid: number
+  token: string
+}
+
+/**
+ * 读控制文件（形状校验）；不存在/损坏/正在写入返回 `null`。
+ *
+ * 单独抽出来的理由：控制文件是**跨进程的共享状态**，它的"陈旧"是本工具最隐蔽的故障源
+ * （见 `start` 里的长注释）——读它的地方必须用**同一套**判定。
+ */
+async function readControlFile(path: string): Promise<ControlInfo | null> {
+  if (!existsSync(path)) return null
+  try {
+    const info = (await Bun.file(path).json()) as { port?: unknown; pid?: unknown; token?: unknown }
+    return {
+      port: typeof info.port === "number" && info.port > 0 ? info.port : 0,
+      pid: typeof info.pid === "number" && info.pid > 0 ? info.pid : 0,
+      token: typeof info.token === "string" ? info.token : "",
+    }
+  } catch {
+    return null  // 写了一半/内容损坏：按"不可用"处理（不要把半截 JSON 当端口用）
+  }
+}
+
+/** 文件修改时间（毫秒）；取不到返回 0。 */
+function mtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/** 端口上是否真有控制通道在应答（`ping` 不需 token，协议门允许探测）。 */
+async function controlResponsive(port: number, timeout_ms = 1500): Promise<boolean> {
+  if (port <= 0) return false
+  try {
+    await request({ host: "127.0.0.1", port }, "ping", {}, timeout_ms)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 目标名 → 进程名比对（去路径与 `.exe`）；`comm` 在 Linux 上截断到 15 字符，故前缀也算匹配。 */
+function processMatchesTarget(name: string, target: string): boolean {
+  if (!name) return false
+  const base = (target.split(/[\\/]/).pop() ?? target).replace(/\.exe$/i, "").toLowerCase()
+  if (!base) return true
+  const actual = name.toLowerCase()
+  return actual.includes(base) || base.startsWith(actual)
+}
+
 /** 结束进程（stop 与启动超时回收共用；Windows 用 Stop-Process，POSIX 先 TERM 后 KILL）。 */
 async function terminateProcess(ctx: ToolContext, pid: number): Promise<void> {
   if (pid <= 0) return
@@ -162,10 +218,24 @@ async function controlTarget(ctx: ToolContext, args: Json, target?: string): Pro
   if (explicit) return resolve_target(explicit)
   const fromEnv = String(ctx.env.SHUANGTIAN_TARGET ?? "").trim()
   if (fromEnv) return resolve_target(fromEnv)
-  const fallback = controlFileFor(ctx, asString(args, "app", "mdeditor"))
-  if (existsSync(fallback)) return resolve_target(fallback)
+  const requested = controlFileFor(ctx, asString(args, "app", "mdeditor"))
   const gallery = controlFileFor(ctx, "gallery")
-  if (existsSync(gallery)) return resolve_target(gallery)
+  const file = existsSync(requested) ? requested : existsSync(gallery) ? gallery : ""
+  if (file) {
+    // **先判活再连**：应用退出/崩溃后控制文件会滞留，连上去只能得到一条
+    // “连接被关闭”的传输错误。而这条错误里真正该说清的是
+    // “这个实例已经不在了，去重新 start”——处理成一句可行动的话。
+    const info = await readControlFile(file)
+    const app = basename(file).replace(/-control\.json$/, "")
+    if (info && info.pid > 0 && !processMatchesTarget(await processName(ctx, info.pid), app)) {
+      throw new ControlError(
+        "not_found",
+        `${app} 的实例已不在运行（控制文件滞留，对应 PID ${info.pid}）：` +
+          `run(action=stop) 清理后重新 start；或手动传 target="<host:port>"。控制文件：${file}`,
+      )
+    }
+    return resolve_target(file)
+  }
   throw new ControlError(
     "not_found",
     `未找到运行中的应用：请先 shuangtian_run（action=start）启动，或用 target 参数指定 "host:port"/控制文件路径；` +
@@ -211,7 +281,7 @@ function readTool(
 const runTool: Tool = {
   name: "run",
   description:
-    "构建与运行霜天应用（框架生命周期入口）。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 以无头模式启动应用并等待控制通道就绪（返回 port 与 PID）；action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。",
+    "构建与运行霜天应用（框架生命周期入口）。action=build 构建（自动自举 stpm 工具链）；action=test 跑框架单元测试（可选 san=true 开 ASan/UBSan）；action=lint 跑禁用特性静态扫描；action=start 以无头模式启动应用并等待控制通道**验证就绪**（文件新鲜 + 握手成功才算；返回 port 与 PID；已有存活实例时明确拒绝，先 stop）；action=stop 结束进程；action=status 查看进程与端口；action=logs 取运行日志尾部。target 为应用名（gallery/mdeditor 或自带工程的目标名），profile 为构建档（dev/debug/release/san）。",
   parameters: schema(
     {
       action: {
@@ -350,6 +420,30 @@ const runTool: Tool = {
       const extra = asString(args as Json, "args")
       const scale = asNumber(args as Json, "scale", 0)
       const theme = asString(args as Json, "theme")
+      // ⚠ **启动前必须处理陈旧控制文件**（本条由一次真实误连换来）。
+      //
+      // 就绪轮询的判据曾是"文件存在 + 端口 > 0"——而上一轮遗留的文件**立刻满足它**：
+      // 刚起的进程还没来得及写自己的端口，工具已经把**上一个实例的端口**当成本次结果返回。
+      // 实测症状分两级：轻则握手失败（旧实例 token 与新文件里的不一致），
+      // 重则**连到旧实例并"成功"**——之后的 capture/tree 操作的全是另一个应用实例。
+      // 而旧客户端把握手被拒的响应静默丢掉，最终只报一句"未收到 capture 的响应"。
+      //
+      // 所以：① 通道还活着 → 明确拒绝（不许静默双实例）；② 通道不应答 → 那是陈旧文件，删掉。
+      const existing = await readControlFile(control_file)
+      if (existing) {
+        if (await controlResponsive(existing.port)) {
+          return {
+            output:
+              `已有一个存活的 ${target} 实例：PID ${existing.pid || "未知"} · 控制通道 127.0.0.1:${existing.port}\n` +
+              `  想重开：先 run(action=stop, target="${target}")；\n` +
+              `  想用它：tree/capture/set 等工具省略 target 即走会话控制文件（也可显式传 target="${existing.port}"）`,
+            data: { ok: false, action, target, pid: existing.pid, port: existing.port, already_running: true },
+          }
+        }
+        // 通道不应答（进程已退出/崩溃）→ 文件陈旧：清掉，否则下面会拿到它的端口
+        await ctx.deleteFile(control_file).catch(() => {})
+      }
+      const launched_at = Date.now()
       // 参数用**数组**拼（不经 shell 的引号规则）：两条路径对引号的要求相反——
       // POSIX 需要手动加引号防词分割，PowerShell 的 `-ArgumentList` 数组则不能带引号
       // （带了就会把引号当作参数内容传过去，控制文件路径变成 `"C:\…"`）。
@@ -388,21 +482,33 @@ const runTool: Tool = {
       }
       const pid = Number(launch.stdout.trim().split("\n").pop() ?? "0")
 
-      // 轮询控制文件（应用启动后写入 port；token 随文件下发，握手必须携带）
+      // 轮询控制文件（应用启动后写入 port；token 随文件下发，握手必须携带）。
+      //
+      // 判据有三条，缺一不可：① 文件是**本次启动之后**写的（pid 相符或 mtime 新于启动时刻）；
+      // ② 端口可用；③ **握手真的成功**——只有第③条能证明"这个端口是我们在跟它说话"，
+      // 也就是说本工具承诺的"等待控制通道就绪"是**验证过的**，而不是"文件出现了"。
       let port = 0
-      let token = ""
+      let handshake = ""
       const deadline = Date.now() + 30_000
       while (Date.now() < deadline) {
-        if (existsSync(control_file)) {
-          try {
-            const info = (await Bun.file(control_file).json()) as { port?: number; token?: string }
-            if (typeof info.port === "number" && info.port > 0) {
+        const info = await readControlFile(control_file)
+        if (info && info.port > 0) {
+          const fresh = pid <= 0 || info.pid === pid || mtimeMs(control_file) >= launched_at
+          if (fresh) {
+            try {
+              const hello = await request<Json>(
+                { host: "127.0.0.1", port: info.port, token: info.token || undefined },
+                "hello",
+                {},
+                2000,
+              )
               port = info.port
-              token = typeof info.token === "string" ? info.token : ""
+              handshake =
+                `已连接：${JSON.stringify(hello.app ?? {})} 后端=${String(hello.backend)} 无头=${String(hello.headless)}`
               break
+            } catch {
+              // 还没就绪（文件先于通道就绪）或 token 尚未写入：继续等，不要把它当成功。
             }
-          } catch {
-            // 文件正在写入，稍后重试
           }
         }
         await Bun.sleep(200)
@@ -411,15 +517,12 @@ const runTool: Tool = {
         const log = existsSync(log_file) ? (await Bun.file(log_file).text()).slice(-1200) : "(无日志)"
         // 启动失败不留下孤儿进程（进程可能起来了但控制通道没就绪）
         if (pid > 0) await terminateProcess(ctx, pid)
-        return { output: `启动超时（未取得控制端口）。进程 PID=${pid} 已回收，日志尾部：\n${log}` }
-      }
-      // 握手确认
-      let handshake = ""
-      try {
-        const hello = await request<Json>({ host: "127.0.0.1", port, token: token || undefined }, "hello", {}, 5000)
-        handshake = `已连接：${JSON.stringify(hello.app ?? {})} 后端=${String(hello.backend)} 无头=${String(hello.headless)}`
-      } catch (error) {
-        handshake = `握手失败：${String(error)}`
+        return {
+          output:
+            `启动超时（30s 内控制通道未就绪：需文件新鲜 + 端口可用 + 握手成功）。` +
+            `进程 PID=${pid} 已回收，日志尾部：\n${log}`,
+          data: { ok: false, action, target, pid },
+        }
       }
       return {
         output:
@@ -433,19 +536,10 @@ const runTool: Tool = {
     if (action === "stop" || action === "status" || action === "logs") {
       const control_file = controlFileFor(ctx, target)
       const log_file = logFileFor(ctx, target)
-      let pid = 0
-      let port = 0
-      let token = ""
-      if (existsSync(control_file)) {
-        try {
-          const info = (await Bun.file(control_file).json()) as { port?: number; pid?: number; token?: string }
-          port = typeof info.port === "number" ? info.port : 0
-          pid = typeof info.pid === "number" ? info.pid : 0
-          token = typeof info.token === "string" ? info.token : ""
-        } catch {
-          // 忽略
-        }
-      }
+      const info = await readControlFile(control_file)
+      const pid = info?.pid ?? 0
+      const port = info?.port ?? 0
+      const token = info?.token ?? ""
       if (action === "logs") {
         const text = existsSync(log_file) ? await Bun.file(log_file).text() : "(无日志)"
         const errFile = `${log_file}.err`
@@ -495,7 +589,9 @@ const runTool: Tool = {
       if (pid > 0) {
         const name = await processName(ctx, pid)
         const expected = (target.split(/[\\/]/).pop() ?? target).replace(/\.exe$/i, "")
-        if (name && expected && !name.toLowerCase().includes(expected.toLowerCase())) {
+        // 比对规则与“实例是否在跑”共用一处（`comm` 在 Linux 上截断到 15 字符，
+        // 朴素 `includes` 会把长名字的**活实例**判成 PID 复用而拒绝终止）。
+        if (name && expected && !processMatchesTarget(name, target)) {
           return {
             output: `未终止 PID ${pid}：进程名为 "${name}"，与目标 "${expected}" 不符（PID 已被复用？已跳过，避免误杀）`,
             data: { ok: false, action, target, pid, port, pid_reused: true },

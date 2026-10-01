@@ -174,6 +174,16 @@ async function control(): Promise<MockControl> {
   return server
 }
 
+/** 取一个**当前无人监听**的端口（绑完立即释放）：用来制造“陈旧控制文件”。 */
+async function closedPort(): Promise<number> {
+  const server: Server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  const port = typeof address === "object" && address !== null ? address.port : 0
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return port
+}
+
 describe("只读查询工具", () => {
   test("tree/find/get/visual/metrics 透传参数并返回结构化 data", async () => {
     const server = await control()
@@ -500,6 +510,91 @@ describe("run 生命周期", () => {
     const result = await tools.run.execute({ action: "status", target: "gallery", framework: root }, ctx)
     expect(result.output).toContain("存活")
     expect(result.output).toContain("响应正常")
+  })
+
+  test("action=start：陈旧控制文件不得被当成“本次启动的结果”（回归：误连旧实例）", async () => {
+    // 真机踩到的坑：就绪轮询的判据曾是“文件存在 + 端口 > 0”，而**上一轮遗留的文件立即满足它**——
+    // 刚起的进程还没写自己的端口，工具已经把旧实例的端口返回了。
+    // 轻则握手失败，重则连到另一个实例并“成功”（后续 capture/tree 操作的全是它）。
+    const server = await control()
+    server.setHandler(() => ({ app: { name: "mdeditor" }, backend: "headless", headless: true }))
+    const stale_port = await closedPort()
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    mkdirSync(join(root, "build", "dev", "bin"), { recursive: true })
+    writeFileSync(join(root, "build", "dev", "bin", IS_WIN ? "mdeditor.exe" : "mdeditor"), "#!/bin/sh\nexit 0\n")
+
+    const { ctx } = makeCtx(home, (cmd) => {
+      if (cmd.includes(LAUNCH_MARK)) {
+        // **延迟写入**：复现真实时序——进程启动到写控制文件之间有一段窗口，
+        // 而轮询在这一窗口里看到的只能是上一轮遗留的文件（正是误连的根因）。
+        // 同步写入会让这个用例失去鉴别力（旧实现也能“蒙对”）。
+        setTimeout(() => {
+          const controlDir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+          mkdirSync(controlDir, { recursive: true })
+          writeFileSync(
+            join(controlDir, "mdeditor-control.json"),
+            JSON.stringify({ port: server.port, pid: 777 }),
+          )
+        }, 600)
+        return { stdout: "777" }
+      }
+      return { stdout: "构建完成 [dev]" }
+    })
+    // 预置一个陈旧文件（端口无人监听、pid 也不是本轮的）
+    const dir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "mdeditor-control.json"),
+      JSON.stringify({ port: stale_port, pid: 4242, token: "stale-token" }),
+    )
+
+    const result = await tools.run.execute({ action: "start", target: "mdeditor", framework: root }, ctx)
+    expect(result.data).toMatchObject({ ok: true, pid: 777, port: server.port })
+    expect(result.data).not.toMatchObject({ port: stale_port })
+    expect(result.output).toContain("已启动 mdeditor")
+  })
+
+  test("action=start：已有存活实例时明确拒绝（不允许静默双实例）", async () => {
+    // 静默起第二个实例的后果比“起不来”严重得多：两个进程抢同一个控制文件，
+    // 后续每个工具调用都可能落到另一个实例上（截图/改属性看似成功却是另一个界面）。
+    const server = await control()
+    server.setHandler(() => ({ ok: true, ts: 1 }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const root = makeFramework(home)
+    mkdirSync(join(root, "build", "dev", "bin"), { recursive: true })
+    writeFileSync(join(root, "build", "dev", "bin", IS_WIN ? "mdeditor.exe" : "mdeditor"), "#!/bin/sh\nexit 0\n")
+    const { ctx, commands } = makeCtx(home, () => ({ stdout: "构建完成 [dev]" }))
+    const dir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "mdeditor-control.json"), JSON.stringify({ port: server.port, pid: 5150 }))
+
+    const result = await tools.run.execute({ action: "start", target: "mdeditor", framework: root }, ctx)
+    expect(result.output).toContain("已有一个存活的")
+    expect(result.output).toContain("action=stop")
+    expect(result.data).toMatchObject({ ok: false, already_running: true, port: server.port })
+    // 关键：**没有真的去启动**（否则就又是双实例）
+    expect(commands.some((item) => item.cmd.includes(LAUNCH_MARK))).toBe(false)
+  })
+
+  test("控制文件对应实例已不在：快速失败并给出可行动提示（而非传输错误）", async () => {
+    const server = await control()
+    server.setHandler(() => ({ ts: 1 }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    // 进程名查询返回空（进程不存在）→ 文件陈旧
+    const { ctx } = makeCtx(home, () => ({ stdout: "" }))
+    const dir = join(ctx.sessionWorkdir ?? ctx.workdir, ".shuangtian")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, "mdeditor-control.json"),
+      JSON.stringify({ port: server.port, pid: 999_999, token: "tk" }),
+    )
+    const result = await tools.tree.execute({}, ctx)
+    expect(result.output).toContain("已不在运行")
+    expect(result.output).toContain("start")
+    // 不应把“连不上”抛成难以理解的传输错误
+    expect(result.output).not.toContain("transport")
+    expect(server.calls).toHaveLength(0)
   })
 
   test("action=test：san 开关与退出码透传", async () => {

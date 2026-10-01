@@ -93,6 +93,7 @@ export async function call_control(
   options: { timeout_ms?: number; keep_events?: boolean; subscribe?: string[] } = {},
 ): Promise<ControlResult[]> {
   const timeout_ms = options.timeout_ms ?? 10_000
+  if (requests.length === 0) return []
   const socket = connect({ host: target.host, port: target.port })
   const results: ControlResult[] = []
   let buffer = Buffer.alloc(0)
@@ -117,9 +118,26 @@ export async function call_control(
     }
     frames.push({ id: index + 1, method: request.method, params })
   })
-  const expected = frames.length
+  // 只计**调用方**的请求：合成的 hello（id=0）单独跟踪，它失败时必须**报错**而不是被丢掉
+  // （见下方 `id === 0` 分支）。
+  const expected = requests.length
+  /** 合成的 hello 是否已被服务端接受（未前置 hello 时为 true——没有握手可等）。 */
+  let handshake_ok = !prepend_hello
 
   const done = new Promise<void>((resolve, reject) => {
+    /**
+     * 构造"连得上但答不出来"的诊断信息。
+     *
+     * 实测踩到的场景：控制文件陈旧 → 连到了**上一个实例**的端口 → token 不匹配 →
+     * 服务端拒绝握手并断连。旧实现把 hello 的响应静默丢掉，于是调用方只能看到
+     * 「未收到 capture 的响应」——一条完全指不出方向的错误。
+     */
+    const transport_note = (): string => {
+      if (handshake_ok) {
+        return `控制通道在收齐响应前被关闭（已收到 ${results.length}/${expected} 个响应；应用可能已退出或崩溃——用 run(action=status) 确认，必要时重新 start）`
+      }
+      return `控制通道在握手阶段被关闭：token 可能不匹配（控制文件陈旧 → 连到了别的实例？用 run(action=status) 确认）`
+    }
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true
@@ -156,10 +174,29 @@ export async function call_control(
         buffer = buffer.subarray(4 + length)
         try {
           const message = JSON.parse(body) as Record<string, unknown>
-          if (typeof message.id === "number") {
-            results.push(message as unknown as ControlResult)
-            if (results.length >= expected) finish()
+          if (typeof message.id !== "number") continue  // 事件帧：不参与请求/响应配对
+          // id=0 是**合成的** hello（调用方请求从 1 开始）：握手被拒必须立刻带着服务端
+          // 原文报错——否则整类"连错实例/token 不匹配"都会退化成"未收到 X 的响应"。
+          if (message.id === 0) {
+            if (message.ok === false) {
+              const error = message.error as { code?: string; message?: string } | undefined
+              settled = true
+              clearTimeout(timer)
+              socket.destroy()
+              reject(
+                new ControlError(
+                  (error?.code ?? "permission") as ControlErrorCode,
+                  `握手被拒：${error?.message ?? "服务端未说明原因"}（控制文件可能已陈旧——连到了另一个实例；` +
+                    `用 run(action=status) 确认，或重新 start 取新 token）`,
+                ),
+              )
+              return
+            }
+            handshake_ok = true
+            continue
           }
+          results.push(message as unknown as ControlResult)
+          if (results.length >= expected) finish()
         } catch (error) {
           settled = true
           clearTimeout(timer)
@@ -190,14 +227,16 @@ export async function call_control(
       if (settled) return
       settled = true
       clearTimeout(timer)
-      if (results.length > 0) resolve()
-      else reject(new ControlError("transport", "控制通道在收到响应前被关闭"))
+      // 收齐才算成功：只收到一部分（例如握手过了、业务请求没回来）也是失败，
+      // 且必须**说清收到几个**——这正是"应用在命令执行中悄悄退出"的特征信号。
+      if (results.length >= expected) resolve()
+      else reject(new ControlError("transport", transport_note()))
     })
   })
 
   await done
-  // 过滤合成 hello 的响应（对调用方不可见）。
-  return prepend_hello ? results.slice(1) : results
+  // 合成的 hello 响应已在上面单独处理（不进 `results`），这里直接返回调用方的响应。
+  return results
 }
 
 /** 单次调用（最常用形态）。 */
@@ -208,7 +247,8 @@ export async function call_once(
   timeout_ms = 10_000,
 ): Promise<ControlResult> {
   const [first] = await call_control(target, [{ method, params }], { timeout_ms })
-  if (!first) throw new ControlError("internal", `未收到 ${method} 的响应`)
+  // 走到这里说明连接正常关闭却没拿到响应：如实说明，别退回一个无指向的"未收到"。
+  if (!first) throw new ControlError("internal", `未收到 ${method} 的响应（控制通道正常关闭但无回包）`)
   return first
 }
 
