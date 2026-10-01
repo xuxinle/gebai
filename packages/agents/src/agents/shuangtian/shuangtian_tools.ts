@@ -810,7 +810,7 @@ const keyTool: Tool = {
 
 const captureTool = readTool(
   "capture",
-  "截图（PNG）。无头模式下这是唯一的「看见界面」通道——回归截图会作为图片直接呈现，可直接判断美观与布局。可传 id 截单个组件，或 region 截指定区域；scale/DPI 不影响截图分辨率（截的是物理像素）。",
+  "截图（PNG）。无头模式下这是唯一的「看见界面」通道——回归截图会作为图片直接呈现，可直接判断美观与布局。可传 id 截单个组件，或 region 截指定区域；scale/DPI 不影响截图分辨率（截的是物理像素）。固定 encode=file 落盘返回路径（大图 base64 回传会被工具输出护栏截断，不要改用 encode=base64）。",
   schema(
     {
       id: { type: "string", description: "可选：只截该组件区域" },
@@ -885,7 +885,7 @@ const waitTool = readTool(
 const callTool: Tool = {
   name: "call",
   description:
-    "通用控制通道调用（未封装方法的逃生门）：method 如 app/theme/events/shutdown，params 为对象。协议 `st-control/1`，坐标一律逻辑像素。",
+    "通用控制通道调用（未封装方法的逃生门）：method 如 app/theme/events/shutdown，params 为对象。协议 `st-control/1`，坐标一律逻辑像素。注意：响应文本超过 12K 字符会被工具输出护栏截断（头尾各 4K）——capture 的 base64 大图请改用 capture 工具（encode=file 落盘，不回传 base64）。",
   parameters: schema(
     {
       method: { type: "string", description: "方法名（tree/find/get/set/invoke/input.mouse/input.key/input.text/capture/visual/wait/metrics/events/theme/app/hello/ping/shutdown）" },
