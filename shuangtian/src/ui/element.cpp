@@ -758,7 +758,8 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
 
 auto Element::on_event(const RenderContext& context, Event& event) -> bool {
   (void)context;
-  (void)event;
+  // 基类不消费；但行为注入的 handler 仍要给机会（组件覆写若已消费则不会走到这里）。
+  if (event_handler_) return event_handler_(event);
   return false;
 }
 

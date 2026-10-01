@@ -1,6 +1,7 @@
 #include "st/ui/ui_root.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 
 #include "st/core/log.hpp"
@@ -158,12 +159,41 @@ auto UiRoot::hit_test(math::Point point) -> Element* {
 }
 
 auto UiRoot::hit_test_subtree(Element& element, math::Point point) -> Element* {
-  if (!element.visible()) return nullptr;
+  if (!element.visible() || !element.intercepts_input()) return nullptr;
   const auto children = element.children();
   for (auto iterator = children.rbegin(); iterator != children.rend(); ++iterator) {
     if (Element* hit = hit_test_subtree(**iterator, point); hit != nullptr) return hit;
   }
   return element.hit_test(point) ? &element : nullptr;
+}
+
+auto UiRoot::register_shortcut(const std::string& key, Shortcut mods,
+                               std::function<bool()> handler) -> bool {
+  if (key.empty() || !handler) return false;
+  std::string normalized(key);
+  std::ranges::transform(normalized, normalized.begin(),
+                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  for (auto iterator = shortcuts_.rbegin(); iterator != shortcuts_.rend(); ++iterator) {
+    if (iterator->first == normalized &&
+        iterator->second.mods.ctrl == mods.ctrl && iterator->second.mods.shift == mods.shift &&
+        iterator->second.mods.alt == mods.alt && iterator->second.mods.meta == mods.meta) {
+      iterator->second.handler = std::move(handler);  // 同键位重复注册：覆盖（不叠加）
+      return true;
+    }
+  }
+  shortcuts_.emplace_back(std::move(normalized), ShortcutEntry{mods, std::move(handler)});
+  return true;
+}
+
+void UiRoot::unregister_shortcut(const std::string& key, Shortcut mods) {
+  std::string normalized(key);
+  std::ranges::transform(normalized, normalized.begin(),
+                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::erase_if(shortcuts_, [&](const auto& entry) {
+    return entry.first == normalized &&
+           entry.second.mods.ctrl == mods.ctrl && entry.second.mods.shift == mods.shift &&
+           entry.second.mods.alt == mods.alt && entry.second.mods.meta == mods.meta;
+  });
 }
 
 auto UiRoot::dispatch_to(Element& element, Event& event) -> bool {
@@ -267,22 +297,51 @@ auto UiRoot::dispatch(Event& event) -> bool {
       break;
     }
     case EventKind::KeyDown: {
-      if (event.key == "Tab" && focused_ != nullptr) {
-        focus_next(event.shift);
-        handled = true;
-        break;
+      // ① 全局快捷键**最先**：编辑器形态的 Ctrl+S/Ctrl+W 需要先于一切组件的落点
+      //    （文本组件合法吞键时，快捷键仍是全局语义；handler 返回 false 则放弃下沉继续）。
+      if (!shortcuts_.empty()) {
+        std::string key(event.key);
+        std::ranges::transform(key, key.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        for (auto iterator = shortcuts_.rbegin(); iterator != shortcuts_.rend(); ++iterator) {
+          if (iterator->first != key) continue;
+          const Shortcut& mods = iterator->second.mods;
+          if (mods.ctrl != event.ctrl || mods.shift != event.shift || mods.alt != event.alt ||
+              mods.meta != event.meta) {
+            continue;
+          }
+          if (iterator->second.handler && iterator->second.handler()) {
+            handled = true;
+            break;
+          }
+        }
+        if (handled) break;
       }
-      // 模态语义：有叠加层（Dialog/Toast/下拉面板）时键盘事件先给最上层浮层——
-      // 否则「Esc 关对话框」永远送不进去（焦点还在被遮住的内容元素上）。
-      // 浮层不处理再回落焦点元素（浅层浮层如 Toast 不拦截正常输入）。
+      // ② 模态语义：有叠加层（Dialog/Toast/下拉面板）时键盘事件先给最上层浮层——
+      //    否则「Esc 关对话框」永远送不进去（焦点还在被遮住的内容元素上）。
+      //    浮层不处理再回落焦点元素（浅层浮层如 Toast 不拦截正常输入）。
+      //    不拦截命中的浮层（`intercepts_input()` 为假，如已隐藏的命令面板）跳过。
       for (auto iterator = overlays_.rbegin(); iterator != overlays_.rend(); ++iterator) {
-        if (*iterator == nullptr) continue;
+        if (*iterator == nullptr || !(*iterator)->visible()) continue;
+        if (!(*iterator)->intercepts_input()) continue;
         if (dispatch_to(**iterator, event)) {
           handled = true;
           break;
         }
       }
-      if (!handled) handled = focused_ != nullptr && dispatch_to(*focused_, event);
+      if (handled) break;
+      // ③ 焦点元素优先处理（含冒泡）：组件对自己认识的键返回 true。
+      if (focused_ != nullptr && dispatch_to(*focused_, event)) {
+        handled = true;
+        break;
+      }
+      // ④ Tab 焦点环**最后**：焦点元素未消费（如文本编辑器声明 Tab 自含、或无焦点）时，
+      //    Tab 才作为全局焦点遍历语义生效；带 Shift 的 Tab 同样先给焦点元素机会
+      //    （反向切标签等用户语义优先）。
+      if (event.key == "Tab" && focused_ != nullptr) {
+        focus_next(event.shift);
+        handled = true;
+      }
       break;
     }
     case EventKind::KeyUp:

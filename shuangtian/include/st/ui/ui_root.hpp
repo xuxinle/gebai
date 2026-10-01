@@ -74,6 +74,29 @@ class UiRoot {
   [[nodiscard]] auto query(const Selector& selector, std::size_t limit = 0) -> std::vector<Element*>;
   [[nodiscard]] auto hit_test(math::Point point) -> Element*;
 
+  // —— 全局快捷键 ——
+  //
+  // 编辑器形态的 Ctrl+S/Ctrl+W/Ctrl+Tab 需要一个**先于焦点链**的落点：文本组件吞键
+  // （只对认识的键返回 true 之外还有已消费的合法场景），事后猜测不可靠。
+  // 派发顺序：快捷键表 → 浮层 → 焦点元素 → Tab 焦点环；命中即消费，不再下沉。
+  /// 修饰键组合（与 `Event` 同名四位全真才命中；`register_shortcut("s", {true}, …)` = Ctrl+S）。
+  struct Shortcut {
+    std::string key{};                        ///< 主键（区分大小写归一：比对前统一小写）
+    bool ctrl{false};
+    bool shift{false};
+    bool alt{false};
+    bool meta{false};
+  };
+  /// 注册全局快捷键（后注册者优先）；handler 返回 false 表示放弃消费，继续下沉。
+  /// `key` 为空或 handler 为空时不注册（返回 false）。
+  [[nodiscard]] auto register_shortcut(const std::string& key, Shortcut mods,
+                                       std::function<bool()> handler) -> bool;
+  /// 移除全部同名同修饰键的快捷键。
+  void unregister_shortcut(const std::string& key, Shortcut mods);
+  [[nodiscard]] auto shortcut_count() const noexcept -> std::size_t {
+    return shortcuts_.size();
+  }
+
   void set_focus(Element* element);
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
@@ -156,6 +179,12 @@ class UiRoot {
   Element* hovered_{nullptr};
   Element* pressed_{nullptr};
   EventObserver event_observer_{};
+  /// 全局快捷键表（后注册优先）。
+  struct ShortcutEntry {
+    Shortcut mods{};
+    std::function<bool()> handler{};
+  };
+  std::vector<std::pair<std::string, ShortcutEntry>> shortcuts_{};
   std::uint64_t version_{1};
   /// 需要重新布局（mark_dirty_all 置位；布局跑过后清）。
   bool dirty_{true};

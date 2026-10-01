@@ -70,6 +70,12 @@ class CodeEditor : public Element {
     mark_highlight_dirty();
   }
   [[nodiscard]] auto highlight_enabled() const noexcept -> bool { return highlight_enabled_; }
+
+  /// Tab 在编辑器内自含（缩进/块缩进），不参加 Tab 焦点环——但仅当可编辑；
+  /// 只读态下 Tab 不再有编辑语义，交回焦点环。
+  [[nodiscard]] auto consumes_key(std::string_view key) const -> bool override {
+    return !(key == "Tab" && !read_only_);
+  }
   void set_tab_width(int width);
   [[nodiscard]] auto tab_width() const noexcept -> int { return tab_width_; }
   /// 插入空格而非制表符（默认 true）。
@@ -189,7 +195,9 @@ class CodeEditor : public Element {
   void notify_change();
   void notify_cursor();
   void ensure_cursor_visible(const RenderContext& context);
-  void handle_key(const RenderContext& context, const Event& event);
+  /// 处理按键：返回是否为本编辑器认识的键（false = 未识别，UiRoot 侧继续冒泡/下沉，
+  /// 全局快捷键由此获得落点）。
+  [[nodiscard]] auto handle_key(const RenderContext& context, const Event& event) -> bool;
   void insert_newline();
   void erase_backward();
   void erase_forward();

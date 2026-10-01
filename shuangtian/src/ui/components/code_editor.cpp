@@ -970,84 +970,87 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       insert_text(event.text);
       return true;
     case EventKind::KeyDown:
-      handle_key(context, event);
-      return true;
+      // 未识别的键返回 false 冒泡（全局快捷键/焦点环由此获得落点）；
+      // 认识的键（含未产生变更的合法处理，如 read_only 下 Ctrl+C）返回 true。
+      return handle_key(context, event);
     default:
       return false;
   }
 }
 
-void CodeEditor::handle_key(const RenderContext& context, const Event& event) {
+auto CodeEditor::handle_key(const RenderContext& context, const Event& event) -> bool {
   const std::string& key = event.key;
   const bool extend = event.shift;
 
   if (event.ctrl || event.meta) {
     if (key == "a" || key == "A") {
       select_all();
-      return;
+      return true;
     }
     if (key == "c" || key == "C") {
       const std::string picked = selected_text();
       if (!picked.empty()) editor_clipboard() = picked;
-      return;
+      return true;
     }
     if (key == "x" || key == "X") {
-      if (read_only_) return;
+      if (read_only_) return true;
       const std::string picked = selected_text();
-      if (picked.empty()) return;
+      if (picked.empty()) return true;
       editor_clipboard() = picked;
       push_undo(false);
       delete_selection();
       notify_change();
-      return;
+      return true;
     }
     if (key == "v" || key == "V") {
-      if (read_only_) return;
+      if (read_only_) return true;
       insert_text(editor_clipboard());
-      return;
+      return true;
     }
     if (key == "z" || key == "Z") {
       (event.shift ? redo() : undo());
-      return;
+      return true;
     }
     if (key == "y" || key == "Y") {
       redo();
-      return;
+      return true;
     }
     if (key == "/") {
       toggle_comment();
-      return;
+      return true;
     }
     if (key == "s" || key == "S") {
       if (on_submit) on_submit(text_);
-      return;
+      return true;
     }
     if (key == "Enter") {
       if (on_submit) on_submit(text_);
-      return;
+      return true;
     }
     if (key == "Home") {
       cursor_ = 0;
       anchor_ = extend ? anchor_ : cursor_;
       ensure_cursor_visible(context);
       mark_dirty();
-      return;
+      return true;
     }
     if (key == "End") {
       cursor_ = text_.size();
       anchor_ = extend ? anchor_ : cursor_;
       ensure_cursor_visible(context);
       mark_dirty();
-      return;
+      return true;
     }
     if (key == "ArrowLeft") {
       move_word(-1, extend);
-      return;
+      return true;
     }
     if (key == "ArrowRight") {
       move_word(1, extend);
-      return;
+      return true;
     }
+    // 未识别的 Ctrl/Alt/Meta 组合（Ctrl+S 保存、Ctrl+W 关标签等全局语义）：放行冒泡
+    return false;
   }
 
   if (key == "Enter") {
@@ -1085,11 +1088,12 @@ void CodeEditor::handle_key(const RenderContext& context, const Event& event) {
     clear_selection();
     mark_dirty();
   } else {
-    return;
+    return false;  // 未认识的裸键：放行冒泡（全局快捷键/焦点环）
   }
   ensure_cursor_visible(context);
   mark_dirty();
   if (on_cursor_change) on_cursor_change();
+  return true;
 }
 
 void CodeEditor::move_horizontal(int direction, bool extend) {

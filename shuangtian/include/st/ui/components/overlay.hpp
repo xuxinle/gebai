@@ -36,6 +36,9 @@ class Dialog : public Element {
 
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "Dialog"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Dialog; }
+  /// 模态对话框只有在场时才拦截输入：`set_visible(false)` 后不再截住下层内容
+  /// （不可见浮层的命中穿透；见 `Element::intercepts_input` 契约）。
+  [[nodiscard]] auto intercepts_input() const noexcept -> bool override { return visible(); }
 
   void set_title(std::string title);
   [[nodiscard]] auto title() const noexcept -> const std::string& { return title_; }
