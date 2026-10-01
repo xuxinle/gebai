@@ -158,6 +158,38 @@ ID 是**外部引用元素的唯一凭据**（协议 `get`/`set`/`invoke`、选�
 - id 会进入选择器，而选择器在 `#`/`.`/`:`/`[`/空白 处切词；key 由框架转义成安全字符，
   但**不要**把 id 拼成依赖这些字符的样子。
 
+### 3.11 自绘组件契约（坐标系、状态成员、焦点）
+
+**坐标系**：`paint_content(context, canvas)` 拿到的是**视口绝对坐标系**的画布——
+自绘必须从 `bounds_.x/y` 起算（`canvas.fill_rect({bounds_.x + …})`），不得按局部坐标画。
+按局部坐标画会整块位移（实测：自绘树按局部坐标画 → 上移 70px 压住标题、标签画进顶栏）。
+基线接口（`paint_box`/`paint_text`/子节点绘制）已按 `bounds_` 落位，只有自己的几何需手动偏移。
+
+**状态成员**：组件**不得**声明与 `Element` 保护成员同名的成员（`style_` `bounds_` `id_` `key_`
+`visible_` `enabled_` `focusable_` `hovered_` `pressed_` `focused_` `dirty_` …）——那是
+**遮蔽**（shadowing），而编译器**不给任何警告**：焦点写基类、读遮蔽副本时，症状是
+「功能静默失效但测试全绿」（`CodeEditor` 自带 `bool focused_{false}` → 光标永不绘制、
+括号高亮失效；而直接调 `set_focused` 的组件级单测读写落在同一侧，全部通过）。
+确有独立语义时**改名**并显式桥接（如行组件的显示标签叫 `label_`：基类 `key_` 是**稳定
+逻辑身份**、参与自动 id，不是显示文案）。守规则：lint `L13`。
+
+**语义标志**：`semantics_flags()` 覆写必须以 `SemanticsFlags flags = Element::semantics_flags();`
+起手再覆写特有字段。以 `SemanticsFlags flags{}` 重建会丢掉基类的
+visible/enabled/focused/hovered/pressed —— 焦点经 `UiRoot::set_focus` 设置时，
+控制通道语义树与 `:focused` 选择器恒报 false。守规则：`L13`。
+
+**焦点**：
+- 文本编辑类（`Input`/`TextArea`/`CodeEditor`）构造函数就 `set_focusable(true)`：
+  点击聚焦路径是 `hit_test → focusable() && set_focus`，而 `activate()`（Enter/Space）
+  又要求先有焦点——默认 `false` 是个死循环：**点击永远聚焦不了编辑器**。
+- 焦点一律经 `UiRoot::set_focus` 设置（只改元素自己的 `focused_` 标志会让后续
+  `input.text`/`input.key` 无处可送）；它按 `focusable()` **严格裁决**：不可聚焦元素
+  拒绝接受焦点并返回 `false`，调用方（控制通道/脚本）必须如实上报。
+  `focusable()` 是「能否持有焦点」的契约，Tab 焦点环按它筛选；无条件赋值会产生
+  「root 焦点指向它、键盘派发给它、Tab 环跳过它」的状态分裂。
+  （例外：浮层不靠焦点拿键盘——`UiRoot` 把 KeyDown 先派给可见浮层，因此
+  `SelectPanel`/`MenuPanel` 即使不可聚焦也能收键盘。）
+
 ## 4. 编译强制集（写进 `st.pkg`）
 
 ```text
@@ -223,6 +255,7 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 | L10 | 单参构造缺 `explicit`（提示级，不导致失败） | `// lint-allow: L10 原因` |
 | L11 | `\bstd::endl\b` | 无 |
 | L12 | `\.at\s*\(`（键缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`，容器用 `find`） |
+| L13 | 组件**遮蔽** `Element` 保护成员（`focused_`/`key_`…）；`semantics_flags` 覆写以 `SemanticsFlags flags{}` 起手 | 无（专用检查：需判断「当前类是否继承 `Element`」与「是否在覆写体内」，单行正则表达不了；同类先例 L8） |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。

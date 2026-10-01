@@ -20,7 +20,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 12> kRules{{
+constexpr std::array<RuleSpec, 13> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -51,6 +51,9 @@ constexpr std::array<RuleSpec, 12> kRules{{
     // 自有 getter 名**（本框架 `Slider::value()` 等），文本级规则无法区分接收者类型，
     // 收了就会天天误报。Json 上的 `.value()` 由 `st/ext/json.hpp` 的文档与评审把关。
     {"L12", "禁止 .at() 取值（键缺失即抛异常；用 json_at/find 或显式检查）", R"(\.at\s*\()"},
+    // L13 需要作用域判断（「当前类是否继承 Element」「这行是否在 semantics_flags 覆写
+    // 体内」都表达不成单行正则），由 `check_element_state()` 单独实现。
+    {"L13", "组件不得遮蔽 Element 保护成员、semantics_flags 覆写不得重建标志", ""},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
@@ -230,8 +233,107 @@ constexpr std::array<RuleSpec, 12> kRules{{
   return out;
 }
 
+/// Element 保护成员名（L13 用）。
+///
+/// **与 `include/st/ui/element.hpp` 的成员表保持同步**：基类新增保护成员时
+/// 往这里补一笔，否则新成员被遮蔽时规则漏报。
+constexpr std::array<std::string_view, 17> kElementStateMembers{
+    "style_",   "bounds_",        "measured_",      "id_",          "key_",
+    "parent_",  "children_",      "visible_",       "enabled_",     "focusable_",
+    "hovered_", "pressed_",       "focused_",       "dirty_",       "layout_dirty_",
+    "hover_t_", "hover_effect_",
+};
+
+/// L13：组件不得**遮蔽** `Element` 的保护成员；`semantics_flags` 覆写不得重建标志。
+///
+/// 为何单独立一条：这两类缺陷**编译零警告**，且症状具有欺骗性——焦点写基类、
+/// 读遮蔽副本（或语义标志被重建）时，直接调 `set_focused` 的组件级单测读写落在同一侧，
+/// 只有真实应用（`UiRoot::set_focus`）才暴露。实测代价：`CodeEditor` 自带
+/// `bool focused_{false}` → 光标永不绘制、括号高亮失效，而测试全绿。
+///
+/// 为何专用检查：需判断「当前类是否继承 `Element`」与「这行是否在 `semantics_flags`
+/// 覆写体内」——单行正则表达不了。类继承状态按花括号深度跟踪（类头行记下当时的深度，
+/// 深度回落即类结束）。
+[[nodiscard]] auto check_element_state(const std::vector<std::string_view>& lines,
+                                       std::string_view path, std::size_t& suppressed)
+    -> std::vector<LintViolation> {
+  static const std::regex class_header(R"(^\s*(?:class|struct)\s+\w+([^;{]*)\{)");
+  // 覆写头的两种形态：类外定义 `Type::semantics_flags()` 与类内 inline 定义
+  static const std::regex semantics_override(R"((?:::)?semantics_flags\s*\(\s*\)[^{;]*\{)");
+  static const std::regex flags_rebuild(R"(\bSemanticsFlags\s+\w+\s*\{\s*\})");
+  static const std::regex member_decl(
+      R"(^\s*(?:mutable\s+)?(?:static\s+)?[\w:][\w:<>,\s\*&]*?\b(\w+_)\s*(?:\{[^;]*\})?;)");
+  // 语句行（成员函数体内的 `return children_;` 之类）不是成员声明：不参与遮蔽判定
+  static const std::regex statement_prefix(
+      R"(^\s*(?:return|if|else|for|while|switch|do|case|break|continue|goto|throw|using|typedef|friend)\b)");
+
+  std::vector<LintViolation> violations;
+  bool in_block_comment = false;
+  bool in_raw_string = false;
+  bool class_is_element = false;
+  int depth = 0;
+  int class_depth = -1;      // 当前类开始时的深度（-1 = 不在类内）
+  int override_remaining = 0;  // `semantics_flags` 覆写体内剩余扫描行数
+  const auto report = [&](std::size_t index, std::string_view body) {
+    violations.push_back(LintViolation{std::string(path), static_cast<int>(index) + 1, "L13",
+                                       std::string(body), false});
+  };
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    const std::string_view raw = lines[index];
+    const std::string uncommented = strip_comments(raw, in_block_comment);
+    const std::string stripped = strip_string_literals(uncommented, in_raw_string);
+    const std::string body = std::string(trim(stripped));
+    if (body.empty()) continue;
+    // 类头（进入新类：**基类子句**里提到 Element 才算「Element 子类」——
+    // 只看整行会连 `class Element {` 自己（类名含 Element）也当成子类）
+    std::smatch header;
+    if (std::regex_search(stripped, header, class_header)) {
+      const std::string bases = header[1].str();
+      const std::size_t colon = bases.find(':');
+      class_is_element =
+          colon != std::string::npos && bases.find("Element", colon) != std::string::npos;
+      class_depth = depth;
+    }
+    bool hit = false;
+    // ① 遮蔽：Element 子类里声明与基类同名的成员
+    if (class_is_element && !std::regex_search(stripped, statement_prefix)) {
+      std::smatch matched;
+      if (std::regex_search(stripped, matched, member_decl)) {
+        const std::string name = matched[1].str();
+        if (std::find(kElementStateMembers.begin(), kElementStateMembers.end(), name) !=
+            kElementStateMembers.end()) {
+          hit = true;
+        }
+      }
+    }
+    // ② 语义标志重建：覆写体内以 `SemanticsFlags flags{}` 起手
+    if (!hit && override_remaining > 0 && std::regex_search(stripped, flags_rebuild)) hit = true;
+    if (hit) {
+      if (has_allow_comment(raw, "L13")) {
+        ++suppressed;
+      } else {
+        report(index, body);
+      }
+    }
+    // semantics_flags 覆写开启（同一行的花括号即函数体开始；扫描到首个 `}` 行为止）
+    if (std::regex_search(stripped, semantics_override)) override_remaining = 40;
+    else if (override_remaining > 0) --override_remaining;
+    if (override_remaining > 0 && body == "}") override_remaining = 0;
+    // 深度跟踪（在行末更新：类头行开括号后深度才 +1）
+    for (const char glyph : stripped) {
+      if (glyph == '{') ++depth;
+      else if (glyph == '}') depth = depth > 0 ? depth - 1 : 0;
+    }
+    if (class_depth >= 0 && depth <= class_depth) {
+      class_is_element = false;
+      class_depth = -1;
+    }
+  }
+  return violations;
+}
+
 [[nodiscard]] auto compiled_patterns() -> const std::vector<std::regex>& {
-  // 一次性编译（首次调用时）：原先在 scan_text 里逐文件重建 12 个 regex 对象，
+  // 一次性编译（首次调用时）：原先在 scan_text 里逐文件重建 regex 对象，
   // 198 文件就是 2376 次 regex 构造——std::regex 构造是出名的贵（每条模式都要编译）。
   // C++11 起函数局部 static 的初始化线程安全（magic static），多文件并发扫描也安全。
   static const std::vector<std::regex> patterns = [] {
@@ -285,6 +387,9 @@ constexpr std::array<RuleSpec, 12> kRules{{
   for (auto& violation : check_mutable_globals(lines, path, suppressed)) {
     violations.push_back(std::move(violation));
   }
+  for (auto& violation : check_element_state(lines, path, suppressed)) {
+    violations.push_back(std::move(violation));
+  }
   return violations;
 }
 
@@ -327,8 +432,11 @@ auto lint_project(std::string_view root) -> Result<LintReport> {
 auto explain_rule(std::string_view rule) -> std::string {
   for (const auto& spec : kRules) {
     if (spec.id != rule) continue;
+    const std::string pattern =
+        spec.pattern.empty() ? std::string{"由专用检查实现（见 src/pkg/lint.cpp）"}
+                             : std::string(spec.pattern);
     return std::format("{}: {}{}\n  正则: {}", spec.id, spec.description,
-                       spec.advisory ? "（提示级，不导致失败）" : "", spec.pattern);
+                       spec.advisory ? "（提示级，不导致失败）" : "", pattern);
   }
   return std::format("未知规则: {}", rule);
 }

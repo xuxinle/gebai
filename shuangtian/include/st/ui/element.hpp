@@ -352,6 +352,11 @@ class Element {
   /// 绘制自身与子节点（坐标已由 arrange 定好，直接画到画布绝对坐标）。
   virtual void paint(const RenderContext& context, raster::Surface& canvas) const;
   /// 子类绘制自身内容（在 paint_box 之后、子节点之前）。
+  ///
+  /// **坐标系**：画布是**视口绝对坐标**——自绘几何必须从 `bounds_.x/y` 起算
+  /// （`canvas.fill_rect({bounds_.x + …, bounds_.y + …})`），不得按局部坐标画：
+  /// 按局部坐标会整块位移（实测：自绘树按局部坐标画 → 上移 70px 压住标题）。
+  /// 基线接口（`paint_box`/`paint_text`/子节点）已按 `bounds_` 落位，只有自己的几何需手动偏移。
   virtual void paint_content(const RenderContext& context, raster::Surface& canvas) const {
     (void)context;
     (void)canvas;

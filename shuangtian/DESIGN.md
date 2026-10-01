@@ -498,6 +498,12 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 - **Tabs 编辑器化**：`Tab{key,label,modified,closable}` + `sync_tabs`（key 复用、活动态跟
   key 走）+ `on_close`（点 × 触发，不删标签）+ 溢出滚动（箭头/滚轮/夹取，
   `scroll_offset()` 可读写，active 项自动滚回可见）。
+- **文本编辑类默认可聚焦**：`Input`/`TextArea`/`CodeEditor` 构造即 `set_focusable(true)`——
+  点击聚焦只认 `focusable()`，而键盘激活（`activate()`）又要求先有焦点，默认 `false` 是
+  死循环（点击永远聚焦不了编辑器）；宿主不再需要 `set_focusable(true)` 的集成 workaround。
+- **焦点语义严格化**：`UiRoot::set_focus` 按 `focusable()` 裁决并返回 `bool`（不可聚焦即拒绝），
+  消除「焦点在它、Tab 环跳过它」的状态分裂；`input.text`/`app.focus` 遇到不可聚焦目标
+  直接报错（不再默默把文本送给旧焦点元素）。
 - **Tree**：扁平可见行数组 + `sync_nodes`（key 复用、选中态跟 key）+ `on_toggle(key,
   expanded)` 懒加载（目录展开时才 list_dir）+ ↑↓/Enter/←→ 键盘导航。
 - **MenuBar / ContextMenu**：声明式 `Menu{id,label,items[]}`；`make_panel(i)` 锚定标题
@@ -520,6 +526,11 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 | 自动生成的 id 必须**稳定、唯一、无控制字符** | 选择器、协议消费方、脚本层都拿它当键。生成时用**拥有型**容器拼装（`vector<string>` 而非 `vector<string_view>`——后者会指向临时字符串，拼出垃圾字节与 NUL） |
 | 刷新数据用 `sync_items` 而非 `clear_items` + 逐个 `add_item` | 前者按 `key` 复用子元素，**id 与选中态都保持**；后者索引推倒重来，外部按 id 引用会错位、选中态静默丢失 |
 | `UiRoot` 的 `focused_`/`hovered_`/`pressed_` 必须**用前校验** | 它们是裸指针，而子树会被重建/替换。元件从树上摘下时无法通知到 root（`Element` 没有 root 反指），所以每次使用前做"仍不在树上"的检查——**只比较指针、不解引用**（指向已销毁元素时解引用即 UB）。校验点：`dispatch()`、`update_hover()`、`set_focus()`、`focused()` |
+| 组件不得声明与 `Element` 保护成员**同名**的成员 | 遮蔽（shadowing）**编译零警告**，且症状静默：焦点写基类、读遮蔽副本时功能失效而测试全绿（`CodeEditor` 自带 `bool focused_{false}` → 光标永不绘制、括号高亮失效；而直接调 `set_focused` 的组件级单测读写落在同一侧，全体通过）。有独立语义就**改名**（`KeyValueRow` 的显示标签 `key_` → `label_`：基类 `key_` 是稳定逻辑身份、参与自动 id，不是显示文案）。守规则：lint `L13` |
+| `semantics_flags()` 覆写必须以 `Element::semantics_flags()` 起手 | 用 `SemanticsFlags flags{}` 重建会丢掉 visible/enabled/focused/hovered/pressed → 焦点经 `UiRoot::set_focus` 设置时，语义树与 `:focused` 选择器恒报 false（控制通道看到的元素状态与真实不符，`tree`/`:focused` 全不可信）。守规则：lint `L13` |
+| 焦点只能经 `UiRoot::set_focus`，且它按 `focusable()` **严格裁决** | `focusable()` 是「能否持有焦点」的契约，Tab 焦点环按它筛选；无条件赋值 →「root 焦点指向它、键盘派发给它、Tab 环跳过它」的状态分裂。不可聚焦即拒绝并返回 `false`，调用方如实上报（`input.text`/`app.focus` 目标不可聚焦直接报错——此前会静默不聚焦、**把文本送给旧焦点元素**，写错元素比报错危险） |
+| 文本编辑类构造即 `set_focusable(true)` | 点击聚焦路径只认 `focusable()`（`hit_test → focusable() && set_focus`），而 `activate()`（Enter/Space）又要求先有焦点——默认 `false` 是个死循环：**点击永远聚焦不了编辑器**（`Input`/`TextArea` 早已如此，`CodeEditor` 补上） |
+| 自绘组件的 `paint_content` 画布是**视口绝对坐标** | 必须以 `bounds_.x/y` 为原点偏移；按局部坐标画会整块位移（实测：自绘树上移 70px 压住标题、标签画进顶栏）。基线接口（`paint_box`/`paint_text`/子节点）已按 `bounds_` 落位，只有自己的几何需手动偏移（长期选项：绘制前自动 translate+clip 改为局部坐标，需全组件迁移，单独立项） |
 
 #### 4.5.1.1 元素身份：`id` 与 `key` 的分工
 
@@ -1348,9 +1359,9 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`，**401 用例 / 11372 断言**；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿 |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**465 用例 / 11922 断言**） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **12 条**禁用特性规则（L1–L12）+ 文件布局 + 禁用 include | `st lint` | 0 违规（202 文件、6 处登记豁免） |
+| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（221 文件、6 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
