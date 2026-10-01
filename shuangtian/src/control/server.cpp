@@ -452,6 +452,11 @@ struct Server::Impl {
       Client& client = *clients[index];
       std::array<std::uint8_t, 8192> buffer{};
       bool closed = false;
+      // dispatch 可能在**本轮迭代中途**回收本连接（鉴权失败/发送失败 → `drop_client`
+      // 把元素从 `clients` 里 erase 掉）：此时 `client` 引用已悬垂，后续任何访问都是
+      // use-after-free，包括“检查是否还在”本身（`client_by_id(client.id)` 要先读已释放的 id）。
+      // 因此 id 必须在 dispatch **之前**拷出来，用拷贝判定存活。
+      bool recycled = false;
       // **先探可读再读**：客户端是非阻塞的，直接 read_some 在无数据时会走「等待可读」分支，
       // 空转 5 秒后被判超时——既拖慢主循环，又会把"只是没说话"的连接误判为断开（曾因此丢掉 wait 挂起连接）。
       while (true) {
@@ -497,10 +502,17 @@ struct Server::Impl {
         const std::string body(base + 4,
                                base + 4 + static_cast<std::ptrdiff_t>(length));
         client.consumed += static_cast<std::size_t>(length) + 4;
+        const std::uint64_t live_id = client.id;   // dispatch 之前拷出（见上方注释）
         dispatch_frame(client, body);
-        // dispatch 内可能回收本连接（鉴权失败/发送失败）：立即退出，不再触碰 client
-        if (!client_by_id(client.id)) break;
+        // 已被回收：立即跳出，且**不得再触碰 client**
+        if (!client_by_id(live_id)) {
+          recycled = true;
+          break;
+        }
       }
+      // 连接已被回收：它后面的客户端已前移到当前下标，因此**不 ++index**（否则会跳过一个），
+      // 同时跳过下面所有对 `client` 的访问（缓冲区压实/断开口志/回收都已完成或不再适用）。
+      if (recycled) continue;
       if (client.consumed > 0 && !client.buffer.empty()) {
         client.buffer.erase(client.buffer.begin(),
                             client.buffer.begin() + static_cast<std::ptrdiff_t>(
