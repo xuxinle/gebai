@@ -30,9 +30,10 @@ namespace gallery {
 /// 组件提供 `overlay_host` 注入点，宿主由调用方提供，这里就是那条链路。
 struct PageHooks {
   std::function<void(std::string)> set_status{};
+  /// 挂叠加层：应用侧统一用 `FillViewport` 形态（模态遮罩/宽通知的标准形态）——
+  /// 组件在 `arrange` 里自行定位卡片，页面不必注入视口尺寸。
   std::function<void(std::unique_ptr<st::ui::Element>)> add_overlay{};
   std::function<void(st::ui::Element*)> remove_overlay{};
-  std::function<st::math::Rect()> viewport{};
 
   /// 页面声明"这里需要应用提供的实时值"（如 `"dpi"`、`"frames"`）。
   ///

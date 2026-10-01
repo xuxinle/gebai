@@ -55,6 +55,11 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   properties["hover_progress"] =
       std::format("{:.3f}", static_cast<double>(element.hover_progress()));
   properties["hover_effect"] = element.hover_effect().enabled;
+  // `focused` 与 `enabled`/`visible` 同为**框架级**属性（`set` 也支持它）：
+  // 只写不读会让自动化无法验证焦点落在哪——“点一下再看焦点”是最常见的验证动作，
+  // 而焦点决定键盘输入的去向（读不到就只剩截图猜）。
+  properties["focused"] = element.focused();
+  properties["pressed"] = element.pressed();
   snapshot["props"] = std::move(properties);
   return snapshot;
 }

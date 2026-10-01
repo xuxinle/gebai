@@ -29,6 +29,7 @@
 
 #include "st/math/color.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/input.hpp"
@@ -250,6 +251,40 @@ ST_TEST(semantics_flags_preserve_base_state_for_every_override) {
     // 悬停标志同样来自基类（语义标志重建时会丢）
     element->set_hovered(true);
     ST_CHECK(element->semantics_flags().hovered);
+  }
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// ⑤ 自动化读得到的框架级状态（`get` 的 props）
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(element_snapshot_exposes_framework_state_including_focus) {
+  // `get` 的 props 是自动化看元素状态的入口。框架级属性必须齐备：`set` 支持
+  // `enabled`/`visible`/`focused` 而 `get` 读不到时，「点一下再看焦点」这类验证动作
+  // 就只剩截图猜（同族缺陷：只写不读的静默缺口）。
+  UiRoot root;
+  mount(root, std::make_unique<st::ui::Input>());
+  auto* input = static_cast<st::ui::Input*>(root.content());
+  ST_REQUIRE(input != nullptr);
+
+  const auto focused_before = st::ui::element_snapshot(*input);
+  const st::Json* props = st::json_find(focused_before, "props");
+  ST_REQUIRE(props != nullptr);
+  const st::Json* focused = st::json_find(*props, "focused");
+  ST_REQUIRE(focused != nullptr);
+  ST_CHECK(!st::json_as_bool(*focused, true));
+
+  ST_CHECK(root.set_focus(input));
+  const auto focused_after = st::ui::element_snapshot(*input);
+  const st::Json* props_after = st::json_find(focused_after, "props");
+  ST_REQUIRE(props_after != nullptr);
+  const st::Json* focused_now = st::json_find(*props_after, "focused");
+  ST_REQUIRE(focused_now != nullptr);
+  ST_CHECK(st::json_as_bool(*focused_now));
+
+  // 其余框架级属性同样在（enabled/visible/pressed/hovered）
+  for (const std::string_view key : {"enabled", "visible", "pressed", "hovered"}) {
+    ST_CHECK(st::json_find(*props_after, key) != nullptr);
   }
 }
 

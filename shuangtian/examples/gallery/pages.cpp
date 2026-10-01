@@ -800,7 +800,6 @@ namespace {
         "本例验证模态交互与自动测试可行性（tree 可见 Dialog 节点，invoke 可点按钮）。");
     dialog->set_id("demo-dialog");
     dialog->set_actions({"取消", "确认"});
-    dialog->set_viewport_rect(hooks.viewport ? hooks.viewport() : st::math::Rect{});
     auto* dialog_ptr = dialog.get();
     dialog->on_dismiss = [hooks, dialog_ptr, overlay_state_ptr]() {
       if (hooks.remove_overlay) hooks.remove_overlay(dialog_ptr);

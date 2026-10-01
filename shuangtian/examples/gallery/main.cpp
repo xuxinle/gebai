@@ -46,6 +46,7 @@ using st::ui::ScrollView;
 using st::ui::Text;
 using st::ui::TextAlign;
 using st::ui::Tone;
+using st::ui::UiRoot;
 
 struct Options {
   bool headless{false};
@@ -282,12 +283,10 @@ auto run_app(int argc, char** argv) -> int {
   auto* status_ptr = status_text_early.get();
   hooks.set_status = [status_ptr](std::string text) { status_ptr->set_content(std::move(text)); };
   hooks.add_overlay = [root_ptr](std::unique_ptr<Element> overlay) {
-    root_ptr->add_overlay(std::move(overlay));
+    // FillViewport：模态遮罩/宽通知的标准形态（组件在 arrange 里自定位卡片）
+    root_ptr->add_overlay(std::move(overlay), UiRoot::OverlayLayout::FillViewport);
   };
   hooks.remove_overlay = [root_ptr](Element* overlay) { root_ptr->remove_overlay(overlay); };
-  hooks.viewport = [app_ptr]() {
-    return st::math::Rect{0.0f, 0.0f, app_ptr->viewport().width, app_ptr->viewport().height};
-  };
   hooks.register_runtime_field =
       [&runtime_fields](std::string_view field, std::function<void(std::string)> setter) {
         runtime_fields.emplace_back(std::string(field), std::move(setter));

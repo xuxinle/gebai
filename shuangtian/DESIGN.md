@@ -1365,6 +1365,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
+| 编辑器形态冒烟 | `tools/st_editor_smoke.py`：点击即聚焦（焦点链路）+ `input.text` 送达焦点元素 + 退格复原 + `FillViewport` 浮层铺满视口 + Esc 关闭 | `python3 tools/st_editor_smoke.py all` | 全通过（9 项断言） |
 
 **为什么把"验证脚本"当交付物**：无头框架的正确性证据只能来自"跑起来看"。这几个脚本把
 "启动 → 操作 → 截图 → 断言 → 收尾"固化成可重复命令，任何人（或任何智能体）改完代码都能一键复现同一套证据链。
