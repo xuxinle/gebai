@@ -584,3 +584,241 @@ ST_TEST(ui_select_focus_ring_pixels) {
   ST_CHECK_EQ(ring_pixels_in(plain, top_band, root.theme()), 0);
   ST_CHECK(focus_ring_pixels(focused, plain, top_band, root.theme()) >= 20);
 }
+
+// ————————————————— Tabs 升级（关闭×/修改点/溢出滚动/业务 key）—————————————————
+
+namespace {
+
+/// 结构化标签夹具：父面板显式宽度，标签条可溢出（`narrow` 时 120 宽装不下多个标签）。
+struct MetaTabsFixture {
+  Harness harness{};
+  st::ui::Tabs* tabs{nullptr};
+
+  explicit MetaTabsFixture(bool narrow = false) {
+    harness.root.set_viewport(st::math::Size{400.0f, 160.0f});
+    auto content = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+    content->style().padding = st::math::Insets::all(12.0f);
+    tabs = static_cast<st::ui::Tabs*>(content->add_child(std::make_unique<st::ui::Tabs>()));
+    // 窄形态给标签条设显式宽 + 退出交叉轴拉伸（Column 面板默认 Stretch 会把子项拉满面板宽，
+    // 显式宽被覆盖——溢出场景就造不出来了）。
+    tabs->style().width = narrow ? 120.0f : 336.0f;
+    tabs->style().align_self = narrow ? st::ui::Align::Start : st::ui::Align::Stretch;
+    harness.root.set_content(std::move(content));
+  }
+
+  void sync(std::vector<st::ui::Tabs::Tab> items) {
+    tabs->sync_tabs(items);
+    harness.root.layout(true);
+  }
+};
+
+[[nodiscard]] auto make_tabs(std::vector<std::pair<std::string, std::string>> key_labels)
+    -> std::vector<st::ui::Tabs::Tab> {
+  std::vector<st::ui::Tabs::Tab> out;
+  out.reserve(key_labels.size());
+  for (auto& [key, label] : key_labels) {
+    out.push_back(st::ui::Tabs::Tab{.key = key, .label = label});
+  }
+  return out;
+}
+
+}  // namespace
+
+ST_TEST(ui_tabs_sync_keeps_active_by_key) {
+  MetaTabsFixture fixture;
+  auto* tabs = fixture.tabs;
+  ST_REQUIRE(tabs != nullptr);
+
+  fixture.sync(make_tabs({{"a.md", "Alpha"}, {"b.md", "Beta"}, {"c.md", "Gamma"}}));
+  ST_CHECK_EQ(tabs->tab_count(), std::size_t{3});
+  tabs->set_active(1, false);
+  ST_CHECK_EQ(tabs->active_key(), std::string_view("b.md"));
+
+  // 数据刷新（顺序打乱 + 文案更新）：次序随新数据，活动态跟 key 走（不跟索引）。
+  std::vector<st::ui::Tabs::Tab> next;
+  next.push_back(st::ui::Tabs::Tab{.key = "c.md", .label = "Gamma*"});
+  next.push_back(st::ui::Tabs::Tab{.key = "a.md", .label = "Alpha*"});
+  next.push_back(st::ui::Tabs::Tab{.key = "b.md", .label = "Beta*"});
+  fixture.sync(next);
+  ST_CHECK_EQ(tabs->tab_count(), std::size_t{3});
+  ST_CHECK_EQ(tabs->active_key(), std::string_view("b.md"));
+  ST_CHECK_EQ(tabs->active_label(), std::string_view("Beta*"));
+  // 次序以新数据为准：c a b
+  ST_CHECK_EQ(*tabs->index_of_key("c.md"), std::size_t{0});
+  ST_CHECK_EQ(*tabs->index_of_key("a.md"), std::size_t{1});
+  ST_CHECK_EQ(*tabs->index_of_key("b.md"), std::size_t{2});
+  ST_CHECK_EQ(tabs->active_index(), std::size_t{2});  // 活动态跟 key 到新位置
+}
+
+ST_TEST(ui_tabs_sync_add_remove_follows_active_key) {
+  MetaTabsFixture fixture;
+  auto* tabs = fixture.tabs;
+  ST_REQUIRE(tabs != nullptr);
+
+  fixture.sync(make_tabs({{"a", "A"}, {"b", "B"}, {"c", "C"}}));
+  tabs->set_active(2, false);  // 活动项是 c
+
+  // 移除活动项 c：活动态落到夹取位置，不派发回调。
+  std::size_t notified = 0;
+  tabs->on_change = [&notified](std::size_t) { ++notified; };
+  fixture.sync(make_tabs({{"a", "A"}, {"b", "B"}}));
+  ST_CHECK_EQ(tabs->tab_count(), std::size_t{2});
+  ST_CHECK(tabs->active_index() < std::size_t{2});
+  ST_CHECK_EQ(notified, std::size_t{0});
+
+  // 新增 key 按数据次序就位：b a d。
+  fixture.sync(make_tabs({{"b", "B"}, {"a", "A"}, {"d", "D"}}));
+  ST_CHECK_EQ(tabs->tab_count(), std::size_t{3});
+  ST_CHECK_EQ(*tabs->index_of_key("b"), std::size_t{0});
+  ST_CHECK_EQ(*tabs->index_of_key("a"), std::size_t{1});
+  ST_CHECK_EQ(*tabs->index_of_key("d"), std::size_t{2});
+}
+
+ST_TEST(ui_tabs_meta_flags_and_close_geometry) {
+  MetaTabsFixture fixture;
+  auto* tabs = fixture.tabs;
+  ST_REQUIRE(tabs != nullptr);
+
+  fixture.sync(make_tabs({{"a", "Alpha"}, {"b", "Beta"}}));
+  tabs->set_tab_meta(0, true, true);
+  ST_CHECK(tabs->tab_modified(0));
+  ST_CHECK(tabs->tab_closable(0));
+  ST_CHECK(!tabs->tab_modified(1));
+  ST_CHECK(!tabs->tab_closable(1));
+  tabs->set_tab_meta(9, true, true);  // 越界忽略
+  ST_CHECK(!tabs->tab_modified(9));
+
+  fixture.harness.root.layout(true);
+  // modified/closable 占宽：带 meta 的标签比同文案的裸标签宽。
+  ST_CHECK(tabs->tabs_width() > 0.0f);
+  const Rect with_meta = tabs->tab_rect(0);
+  ST_REQUIRE(!with_meta.is_empty());
+  ST_CHECK(with_meta.width > 36.0f);
+
+  // × 命中区：closable 项有，非 closable 项为空。
+  const Rect close = tabs->close_rect(0);
+  ST_REQUIRE(!close.is_empty());
+  ST_CHECK(close.right() <= with_meta.right() + 0.01f);
+  ST_CHECK(tabs->close_rect(1).is_empty());
+}
+
+ST_TEST(ui_tabs_close_click_fires_callback_not_switch) {
+  MetaTabsFixture fixture;
+  auto* tabs = fixture.tabs;
+  auto& root = fixture.harness.root;
+  ST_REQUIRE(tabs != nullptr);
+
+  fixture.sync(make_tabs({{"a", "Alpha"}, {"b", "Beta"}}));
+  tabs->set_tab_meta(0, false, true);
+  root.layout(true);
+
+  std::vector<std::size_t> closed;
+  std::size_t changed = 0;
+  tabs->on_close = [&closed](std::size_t index) { closed.push_back(index); };
+  tabs->on_change = [&changed](std::size_t) { ++changed; };
+
+  // 点 ×：触发 on_close，不切换活动项。
+  const Rect close = tabs->close_rect(0);
+  ST_REQUIRE(!close.is_empty());
+  ST_CHECK(click_at(root, close.center()));
+  ST_REQUIRE(closed.size() == 1U);
+  ST_CHECK_EQ(closed[0], std::size_t{0});
+  ST_CHECK_EQ(tabs->active_index(), std::size_t{0});
+  ST_CHECK_EQ(changed, std::size_t{0});
+  // 标签仍在（组件不删除，由调用方决定）。
+  ST_CHECK_EQ(tabs->tab_count(), std::size_t{2});
+}
+
+ST_TEST(ui_tabs_overflow_scroll_clamps) {
+  MetaTabsFixture fixture(/*narrow=*/true);
+  auto* tabs = fixture.tabs;
+  auto& root = fixture.harness.root;
+  ST_REQUIRE(tabs != nullptr);
+
+  // 窄容器装 5 个标签：必然溢出。
+  fixture.sync(make_tabs({{"1", "One"}, {"2", "Two"}, {"3", "Three"}, {"4", "Four"}, {"5", "Five"}}));
+  ST_CHECK(tabs->max_scroll() > 0.0f);
+  ST_CHECK_EQ(tabs->scroll_offset(), 0.0f);
+
+  // 写入负值：夹取到 0。
+  tabs->set_scroll_offset(-50.0f);
+  ST_CHECK_EQ(tabs->scroll_offset(), 0.0f);
+
+  // tab_rect 反映滚动偏移：滚到最右后首标签左移（位移量 = 滚动偏移）。
+  const Rect first_at_zero = tabs->tab_rect(0);
+  ST_CHECK_NEAR(first_at_zero.x, tabs->bounds().x, 0.01f);
+  tabs->set_scroll_offset(1e6f);  // 超大值 → 夹到 max
+  ST_CHECK_NEAR(tabs->scroll_offset(), tabs->max_scroll(), 0.001f);
+  const Rect first_at_max = tabs->tab_rect(0);
+  ST_CHECK(first_at_max.x < first_at_zero.x);
+  ST_CHECK_NEAR(first_at_zero.x - first_at_max.x, tabs->scroll_offset(), 0.01f);
+
+  // 滚到最右后把活动项设回 0：自动滚回可见（active 项尽量可见）。
+  tabs->set_active(0, false);
+  ST_CHECK(tabs->tab_rect(0).x >= tabs->bounds().x - 0.01f);
+  (void)root;
+}
+
+ST_TEST(ui_tabs_wheel_scrolls_horizontally) {
+  MetaTabsFixture fixture(/*narrow=*/true);
+  auto* tabs = fixture.tabs;
+  auto& root = fixture.harness.root;
+  ST_REQUIRE(tabs != nullptr);
+
+  fixture.sync(make_tabs({{"1", "One"}, {"2", "Two"}, {"3", "Three"}, {"4", "Four"}, {"5", "Five"}}));
+  root.set_focus(tabs);
+  ST_REQUIRE(tabs->max_scroll() > 0.0f);
+
+  // 滚轮向下（delta 负）= 向右滚动（看后面的标签）。
+  st::ui::Event wheel;
+  wheel.kind = st::ui::EventKind::Wheel;
+  wheel.position = tabs->bounds().center();
+  wheel.wheel_delta = -1.0f;
+  ST_CHECK(root.dispatch(wheel));
+  ST_CHECK(tabs->scroll_offset() > 0.0f);
+
+  // 滚轮向上（delta 正）= 向左回滚；回到顶后夹在 0。
+  wheel.wheel_delta = 1.0f;
+  for (int i = 0; i < 10; ++i) (void)root.dispatch(wheel);
+  ST_CHECK_EQ(tabs->scroll_offset(), 0.0f);
+
+  // 属性面：scroll 可读写。
+  ST_CHECK(tabs->set_property("scroll", "12.5"));
+  ST_CHECK_NEAR(tabs->scroll_offset(), 12.5f, 0.001f);
+  const auto value = tabs->get_property("scroll").value_or("0");
+  ST_CHECK_NEAR(std::stof(value), 12.5f, 0.01f);
+}
+
+ST_TEST(ui_tabs_overflow_arrow_click_scrolls) {
+  MetaTabsFixture fixture(/*narrow=*/true);
+  auto* tabs = fixture.tabs;
+  auto& root = fixture.harness.root;
+  ST_REQUIRE(tabs != nullptr);
+
+  fixture.sync(make_tabs({{"1", "One"}, {"2", "Two"}, {"3", "Three"}, {"4", "Four"}, {"5", "Five"}}));
+  ST_REQUIRE(tabs->max_scroll() > 0.0f);
+
+  // 箭头命中区：溢出时两侧都有。
+  const Rect right_arrow = tabs->overflow_arrow_rect(/*right=*/true);
+  const Rect left_arrow = tabs->overflow_arrow_rect(/*right=*/false);
+  ST_REQUIRE(!right_arrow.is_empty());
+  ST_REQUIRE(!left_arrow.is_empty());
+
+  // 点右箭头：向右滚动。
+  const float before = tabs->scroll_offset();
+  ST_CHECK(click_at(root, right_arrow.center()));
+  ST_CHECK(tabs->scroll_offset() > before);
+
+  // 点左箭头：向左回滚（夹到 0）。
+  ST_CHECK(click_at(root, left_arrow.center()));
+  ST_CHECK_EQ(tabs->scroll_offset(), 0.0f);
+
+  // 箭头点击不改变活动项（不是标签命中）。
+  ST_CHECK_EQ(tabs->active_index(), std::size_t{0});
+
+  // 不溢出时箭头区为空。
+  fixture.sync(make_tabs({{"1", "One"}}));
+  ST_CHECK(tabs->max_scroll() <= 0.0f);
+  ST_CHECK(tabs->overflow_arrow_rect(true).is_empty());
+  ST_CHECK(tabs->overflow_arrow_rect(false).is_empty());
+}

@@ -1,0 +1,133 @@
+#pragma once
+
+/// 通用文件对话框（打开/保存）：目录浏览 + 文件列表 + 文件名输入 + 确认/取消。
+///
+/// 形态：挂 `UiRoot` 为 `OverlayLayout::FillViewport` 浮层——遮罩铺满分到的矩形、
+/// 居中卡片自绘（视觉规格与 `Dialog` 同源：`radius_xl`/`shadow_lg`/`surface`）。
+/// 卡片内的目录行/文件列表/文件名输入全部**自绘**（不产生子 Element，与 Tree/List
+/// 组件零耦合）；底部按钮行用 `Button` 子组件（与 `Dialog` 同一套做法）。
+///
+/// 交互：
+/// - 目录导航：双击目录进入（`fs::list_dir` 重读）、`..` 返回上级；
+/// - 列表键盘 ↑↓ 移动选中、Enter 确认（目录则进入、文件则确认全路径）；
+/// - 文件名行可编辑（点击聚焦、TextInput 插入、Backspace 删除）；
+/// - Esc/取消触发 `on_cancel`；确认时文件名为空则不触发 `on_confirm`。
+/// `fs` 失败（不存在/无权限）呈现错误行，不崩溃。
+///
+/// 依赖纪律：文本经 `RenderContext::text`（空 → `NullTextPort`），颜色/间距/字号一律
+/// 取 `theme` token；不 include text 层与 Tree/List 组件。
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "st/core/fs.hpp"
+#include "st/ui/components/basic.hpp"
+#include "st/ui/element.hpp"
+#include "st/ui/theme.hpp"
+
+namespace st::ui {
+
+class FileDialog : public Element {
+ public:
+  enum class Mode : std::uint8_t { Open, Save };
+
+  static constexpr float kMinWidth{560.0f};
+  static constexpr float kMaxWidth{640.0f};
+  static constexpr float kMinHeight{380.0f};
+  static constexpr float kMaxHeight{420.0f};
+  static constexpr float kPadding{20.0f};
+  static constexpr float kRowHeight{32.0f};
+
+  explicit FileDialog(Mode mode = Mode::Open, std::string title = {});
+
+  /// 工厂：`FileDialog::make(Mode::Open, "打开文件")`。
+  [[nodiscard]] static auto make(Mode mode, std::string title) -> std::unique_ptr<FileDialog>;
+
+  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "FileDialog"; }
+  [[nodiscard]] auto role() const noexcept -> Role override { return Role::Dialog; }
+  /// 模态浮层：不可见时不拦截输入（与 `Dialog` 同一契约）。
+  [[nodiscard]] auto intercepts_input() const noexcept -> bool override { return visible(); }
+
+  /// 进入目录（同步 `fs::list_dir` 刷新列表；失败置错误行，列表清空不崩溃）。
+  void set_directory(const std::string& path);
+  [[nodiscard]] auto directory() const noexcept -> const std::string& { return directory_; }
+
+  /// 文件名（输入行内容；`Mode::Save` 下构造时预填）。
+  void set_filename(std::string name);
+  [[nodiscard]] auto filename() const noexcept -> const std::string& { return filename_; }
+
+  /// 当前选中条目（未选中返回 nullptr）。
+  [[nodiscard]] auto selected_entry() const noexcept -> const st::fs::DirEntry* {
+    return selected_ < entries_.size() ? &entries_[selected_] : nullptr;
+  }
+  [[nodiscard]] auto entry_count() const noexcept -> std::size_t { return entries_.size(); }
+  [[nodiscard]] auto entry(std::size_t index) const noexcept -> const st::fs::DirEntry*;
+
+  /// 错误行文本（`fs` 失败时呈现；空 = 无错误）。
+  [[nodiscard]] auto error_text() const noexcept -> const std::string& { return error_; }
+
+  /// 确认（按钮/Enter/双击文件）：文件名空则不触发。参数为「目录/文件名」拼好的全路径。
+  std::function<void(const std::string& full_path)> on_confirm{};
+  /// 取消（Esc/按钮/遮罩点击）。
+  std::function<void()> on_cancel{};
+
+  void apply_theme(const Theme& theme) override;
+  void measure(const RenderContext& context, const Constraints& constraints) override;
+  void arrange(const RenderContext& context, math::Rect rect) override;
+  void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
+  auto on_event(const RenderContext& context, Event& event) -> bool override;
+  [[nodiscard]] auto semantics_text() const -> std::string override { return title_; }
+  [[nodiscard]] auto semantics_value() const -> std::string override;
+  [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
+  auto set_property(std::string_view name, std::string_view value) -> bool override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  [[nodiscard]] auto invoke_action(std::string_view action, std::string_view argument)
+      -> bool override;
+
+  // —— 布局几何（测试与命中共用；arrange 后有效） ——
+  [[nodiscard]] auto card_rect() const noexcept -> math::Rect { return card_; }
+  /// 文件列表区（卡片内）。
+  [[nodiscard]] auto list_rect() const noexcept -> math::Rect { return list_; }
+  /// 文件名输入行区。
+  [[nodiscard]] auto input_rect() const noexcept -> math::Rect { return input_; }
+  /// `..`（上级）行矩形——列表首行。
+  [[nodiscard]] auto parent_row_rect() const noexcept -> math::Rect;
+  /// 第 index 个条目行矩形（含滚动偏移；越界返回空矩形）。
+  [[nodiscard]] auto entry_rect(std::size_t index) const noexcept -> math::Rect;
+
+ private:
+  /// 重读当前目录（`list_dir` 失败置 `error_` 并清空条目）。
+  void reload();
+  /// 进入条目（目录）或选中（文件）。
+  void activate_entry(std::size_t index);
+  void move_selection(int delta);
+  /// 确认语义：拼全路径触发 `on_confirm`（文件名空则不触发）。
+  void confirm();
+  /// 输入行文本插入/删除（自绘单行编辑）。
+  void input_insert(std::string_view text);
+  void input_backspace();
+
+  Mode mode_{Mode::Open};
+  std::string title_{};
+  std::string directory_{};
+  std::vector<st::fs::DirEntry> entries_{};
+  std::size_t selected_{static_cast<std::size_t>(-1)};
+  std::string filename_{};
+  std::string error_{};
+  float scroll_y_{0.0f};             ///< 列表纵向滚动（自绘行滚轮）
+  bool input_focused_{false};        ///< 文件名行聚焦态（自绘光标依据）
+  double last_click_ms_{-1.0e9};     ///< 上次点击时刻（双击判定；墙钟 ms）
+  std::size_t last_click_index_{static_cast<std::size_t>(-1)};
+  math::Rect card_{};
+  math::Rect list_{};
+  math::Rect input_{};
+  Element* confirm_button_{nullptr};  ///< 非拥有（生命周期随子节点）
+  Element* cancel_button_{nullptr};
+};
+
+}  // namespace st::ui
