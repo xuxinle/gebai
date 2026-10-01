@@ -490,9 +490,9 @@ describe("global tools", () => {
     const raPy = pyTool.requiresApproval as (args: Record<string, unknown>, ctx?: unknown) => boolean
     expect(raPy({})).toBe(true)
     expect(raPy({ code: "print(1)", approval: false }, c)).toBe(true)
-    // 参数 schema 暴露 approval 开关
+    // 参数 schema：sh 暴露 approval 开关；py 无 approval 参数（恒需审批由 requiresApproval 函数形态表达）
     expect(shTool.parameters.properties).toHaveProperty("approval")
-    expect(pyTool.parameters.properties).toHaveProperty("approval")
+    expect(pyTool.parameters.properties).not.toHaveProperty("approval")
     cleanup(home)
   })
 

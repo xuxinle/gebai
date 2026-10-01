@@ -50,6 +50,7 @@ import {
   BRIDGE_TOOL_MAX_CALLS,
   collectBridgeBlocks,
   dispatchBridgeTool,
+  unwrapInput,
   type BridgeCallCounter,
 } from "./tool-bridge"
 import { schema } from "../tools/shared"
@@ -671,7 +672,7 @@ export const pyTool: Tool = {
   parameters: schema(
     {
       code: { type: "string", description: "Python 程序源码（本地模式下可用工具桥：工具名即函数、tools.call、ctx/input 注入；`result = ...` 作为返回值）" },
-      input: { description: "任意输入，脚本内经 `input` 引用（有桥时对象/数组原样注入，与 js 一致；纯脚本降级按 JSON 文本走 stdin）" },
+      input: { description: "任意输入，脚本内经 `input` 引用（有桥时对象/数组原样注入；传 JSON 文本字符串亦自动解析为对象/数组；纯脚本降级按 JSON 文本走 stdin）" },
       timeout: { type: "number", description: "执行超时秒数" },
       strict: { type: "boolean" },
     },
@@ -687,18 +688,19 @@ export const pyTool: Tool = {
     // 另一种语言首次进入时照常注桥（py→js / js→py 一层混合编排合法，重入由链封死）。
     const chain = ctx.bridgeLangs ?? []
     const useBridge = !ctx.sandboxed && ctx.safeMode !== true && !chain.includes("py")
+    const input = unwrapInput(args.input)
     let result: ToolResult
     if (useBridge) {
-      const run = await runPythonBridge(ctx, { userCode: code, input: args.input, timeoutMs })
+      const run = await runPythonBridge(ctx, { userCode: code, input, timeoutMs })
       if (run.bridgeUnavailable) {
         // 降级（fail-closed）：桥不可用时不退回 stdio 桥，改纯脚本执行并说明
-        const legacy = await runLegacyPy(code, pyScriptInput(args.input), timeoutMs, ctx)
+        const legacy = await runLegacyPy(code, pyScriptInput(input), timeoutMs, ctx)
         result = { ...legacy, output: `（脚本桥不可用，本次降级为纯脚本执行：无工具调用与 ctx 注入）\n${legacy.output}` }
       } else {
         result = await formatBridgeRun(run, timeoutMs, ctx)
       }
     } else {
-      result = await runLegacyPy(code, pyScriptInput(args.input), timeoutMs, ctx)
+      result = await runLegacyPy(code, pyScriptInput(input), timeoutMs, ctx)
     }
     const data = result.data as { exitCode?: number; stderr?: string } | undefined
     const exit = data?.exitCode

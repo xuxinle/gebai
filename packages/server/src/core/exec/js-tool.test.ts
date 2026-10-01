@@ -183,6 +183,32 @@ console.log("input:", JSON.stringify(input))`,
     rmSync(home, { recursive: true, force: true })
   })
 
+  test("input 为 JSON 文本字符串时兜底解包为对象（模型直调常按无 type 即字符串惯例传 JSON 文本）；普通字符串不解包", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-js-input-unwrap-"))
+    const c = ctxWithTools(home)
+    const r = await jsTool.execute(
+      { code: `return { t: Array.isArray(input) ? "array" : typeof input, v: input }`, input: '{"k": 1}' },
+      c,
+    )
+    const data = r.data as { result: { t: string; v: unknown } }
+    expect(data.result.t).toBe("object")
+    expect(data.result.v).toEqual({ k: 1 })
+    const r2 = await jsTool.execute(
+      { code: `return { t: typeof input, v: input }`, input: "plain text not json" },
+      c,
+    )
+    const data2 = r2.data as { result: { t: string; v: string } }
+    expect(data2.result.t).toBe("string")
+    expect(data2.result.v).toBe("plain text not json")
+    const r3 = await jsTool.execute(
+      { code: `return { t: Array.isArray(input) ? "array" : typeof input }`, input: '[1, 2]' },
+      c,
+    )
+    const data3 = r3.data as { result: { t: string } }
+    expect(data3.result.t).toBe("array")
+    rmSync(home, { recursive: true, force: true })
+  })
+
   test("沙箱模式 ctx.env 与子进程 env 剔除敏感变量", async () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-js-sens-"))
     const c = ctxWithTools(home)

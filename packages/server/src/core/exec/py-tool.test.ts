@@ -183,6 +183,43 @@ describe("py 工具桥（本地模式）", () => {
     await rmTemp(home)
   })
 
+  test.if(!!PY)("input 为 JSON 文本字符串时兜底解包为 dict（模型直调常按无 type 即字符串惯例传 JSON 文本）", async () => {
+    _resetPythonCmdCache()
+    const home = tmpHome("bridge-input-unwrap")
+    const c = ctx(home)
+    const r = await pyTool.execute(
+      {
+        code: 'print("type:", type(input).__name__)\nresult = {"t": type(input).__name__, "v": input}',
+        input: '{"k": 1}',
+      },
+      c,
+    )
+    expect(r.output).toContain("type: dict")
+    const data = r.data as { exitCode: number; result: { t: string; v: unknown } }
+    expect(data.exitCode).toBe(0)
+    expect(data.result.t).toBe("dict")
+    expect(data.result.v).toEqual({ k: 1 })
+    await rmTemp(home)
+  })
+
+  test.if(!!PY)("普通字符串 input 不解包（仅 JSON 对象/数组字面量兜底）", async () => {
+    _resetPythonCmdCache()
+    const home = tmpHome("bridge-input-plain")
+    const c = ctx(home)
+    const r = await pyTool.execute(
+      {
+        code: 'result = {"t": type(input).__name__, "v": input}',
+        input: "plain text not json",
+      },
+      c,
+    )
+    const data = r.data as { exitCode: number; result: { t: string; v: string } }
+    expect(data.exitCode).toBe(0)
+    expect(data.result.t).toBe("str")
+    expect(data.result.v).toBe("plain text not json")
+    await rmTemp(home)
+  })
+
   test.if(!!PY)("工具异常可按名 except _G_ToolError（异常类已注入用户命名空间）", async () => {
     _resetPythonCmdCache()
     const home = tmpHome("bridge-toolerror")
@@ -430,7 +467,8 @@ describe("py 工具桥（本地模式）", () => {
     expect(typeof pyTool.requiresApproval).toBe("function")
     expect(ra({ code: "print(1)", approval: false })).toBe(true)
     expect(ra({})).toBe(true)
-    expect(pyTool.parameters.properties).toHaveProperty("approval")
+    // py 无 approval 参数（恒需审批由 requiresApproval 函数形态表达，f7ec883 删除）
+    expect(pyTool.parameters.properties).not.toHaveProperty("approval")
     expect(pyTool.parameters.properties).toHaveProperty("code")
     expect((pyTool.outputSchema as { required: string[] }).required).toEqual(["stdout", "stderr", "exitCode"])
   })

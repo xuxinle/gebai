@@ -37,6 +37,7 @@ import {
   BRIDGE_TOOL_MAX_CALLS,
   collectBridgeBlocks,
   dispatchBridgeTool,
+  unwrapInput,
   type BridgeCallCounter,
 } from "./tool-bridge"
 import { truncate } from "../support/truncate"
@@ -617,7 +618,7 @@ export const jsTool: Tool = {
   description:
     "执行 JS/TS 脚本（Bun 运行时，支持 TS/await/fetch/Bun API），可直接调用其他工具并注入会话上下文——完整语言能力编排工具链（复杂变换/动态参数/错误分支重试/跨步骤聚合均可表达）。\n" +
     "- **工具即内置函数**：`const r = await read({ path: \"a.txt\" })`（当前已启用的每个工具名都是一个可直接 await 的函数，无需前缀）；动态名字用 `await tools.call(name, params)` 或 `await tools.xxx(params)`。返回 `{ output, data, blocks, truncated, filePath }`（data 为结构化输出，结构可先用 tool_schemas 查询）；工具抛错 = Promise reject（可 try/catch 容错）。并行用 `Promise.all`；调用总数上限 100 次。内部工具产生的图片/图表/文件块与 subsession_run 的新会话存档透传到 js 结果（UI 可见、历史回放不丢）。\n" +
-    "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；编排传入的 `input` 参数可直接引用（JSON 文本需自行 JSON.parse）。\n" +
+    "- **会话上下文**：`ctx` = `{ user, sessionId, workdir, home, sandboxed, env, projects, messages }`（messages 为最近会话消息快照）；编排传入的 `input` 参数可直接引用（JSON 文本字符串自动解析为对象/数组）。\n" +
     "- **输出与返回值**：console.log 输出即工具输出；脚本 `return` 的值进结构化 data.result（并附输出预览）。\n" +
     "- **运行时定义工具（defineTool）**：`await defineTool({ name, description, parameters, execute: async (args, ctx) => ({ output: \"...\" }) })`——与子Agent 工具同签名，把脚本能力固化为**会话内新工具**：注册后模型后续轮次可直接调用、脚本内也可像内置函数一样调用；execute 源码经序列化保存、每次调用在子进程执行（须自包含，不闭包脚本局部变量）；多轮要复用的加工/查询流程写成 defineTool 而非每轮重贴脚本。`requiresApproval` 默认 true 需审批（仅明确安全的只读/幂等工具传 false）；`overwrite: true` 覆盖本会话同名**动态**工具（占用全局/子Agent 工具名仍拒绝）；`await undefineTool(name)` 注销。\n" +
     "- 注意：import 语句不可用（代码包在函数体内），模块加载用 `await import(\"...\")`；写文件可用 write 工具或 Bun.write。**脚本进程 cwd 即会话 tmp/**：裸 fs/Bun.write 的相对路径直接用文件名（如 `a.txt`）——不要再带 `tmp/` 前缀（会多套一层写入 `tmp/tmp/…`）；工具函数（read/write 等）两种写法等价（`tmp/` 前缀自动剥离，仅工具参数层生效）。",
@@ -630,7 +631,7 @@ export const jsTool: Tool = {
     type: "object",
     properties: {
       code: { type: "string", description: "JS/TS 脚本源码（顶层 await 可用；return 返回值进 data.result）" },
-      input: { description: "任意输入，脚本内经 input 引用" },
+      input: { description: "任意输入，脚本内经 input 引用（JSON 文本字符串自动解析为对象/数组）" },
       timeout: { type: "number", description: "执行超时秒数" },
       strict: { type: "boolean" },
       approval: { type: "boolean", description: "安全脚本设为 false 跳过用户审批" },
@@ -670,9 +671,10 @@ export const jsTool: Tool = {
       if (deny) return { output: deny }
     }
     const scriptPath = join(ctx.workdir, `.gebai_js_${randomUUID().replace(/-/g, "")}.ts`)
+    const input = unwrapInput(args.input)
     // 已启用工具名列表 → 生成内置函数声明（脚本内直接 await read(...) 调用）
     const toolNames = ctx.registry.schemas().map((s) => s.name)
-    await writeFile(scriptPath, buildChildScript(userCode, { ctx: scriptSessionContext(ctx), input: args.input }, toolNames, "", ctx.safeMode === true))
+    await writeFile(scriptPath, buildChildScript(userCode, { ctx: scriptSessionContext(ctx), input }, toolNames, "", ctx.safeMode === true))
     try {
       // approvalFree：免审运行的脚本体未经用户审阅，内部需审批工具在 RPC 分发层拦截
       const run = await runJsScript(scriptPath, ctx, { timeoutMs: scriptTimeoutMs(args.timeout), approvalFree: args.approval === false })

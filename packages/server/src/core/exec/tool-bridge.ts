@@ -31,6 +31,22 @@ export const BRIDGE_FIELD_CAP = 100_000
 /** 内层工具 blocks 透传上限（去重后；图片/图表等重内容限量，防巨量 blocks 撑爆结果）。 */
 export const BRIDGE_BLOCKS_CAP = 10
 
+/** 脚本 input 参数兜底解包：值为 JSON 文本字符串且可解析为对象/数组时自动解析注入——
+ *  js/py 的 input 参数均无 schema type（接受任意形态），模型侧常按「无 type 即字符串」惯例
+ *  传 JSON 文本；不兜底则脚本内 input 恒为字符串、与「对象/数组原样注入」的契约不符。
+ *  普通字符串（非 JSON 对象/数组字面量）原样保留。 */
+export function unwrapInput(v: unknown): unknown {
+  if (typeof v !== "string") return v
+  const s = v.trim()
+  if (!s.startsWith("{") && !s.startsWith("[")) return v
+  try {
+    const parsed = JSON.parse(s)
+    return parsed !== null && typeof parsed === "object" ? parsed : v
+  } catch {
+    return v
+  }
+}
+
 /** 调用计数（跨一次脚本运行共享；调用方负责新建与上限，`max` 缺省 BRIDGE_TOOL_MAX_CALLS）。 */
 export interface BridgeCallCounter {
   n: number
