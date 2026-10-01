@@ -23,6 +23,11 @@ struct Codepoint {
 [[nodiscard]] auto ascii_iequals(std::string_view a, std::string_view b) noexcept -> bool;
 [[nodiscard]] auto ascii_starts_with_ci(std::string_view text, std::string_view prefix) noexcept -> bool;
 
+/// 大小写归一（ASCII 快路径）：纯 ASCII 输入等价 `ascii_lower/upper`；含非 ASCII 时
+/// 其余字节原样保留（UI 场景的 key/扩展名归一用，不做 Unicode 语义折叠）。
+[[nodiscard]] auto lower(std::string_view text) -> std::string;
+[[nodiscard]] auto upper(std::string_view text) -> std::string;
+
 [[nodiscard]] auto trim(std::string_view text) -> std::string_view;
 [[nodiscard]] auto trim_start(std::string_view text) -> std::string_view;
 [[nodiscard]] auto trim_end(std::string_view text) -> std::string_view;

@@ -104,6 +104,14 @@ class Result {
   /// 前置条件：`!has_value()`。
   [[nodiscard]] auto error() const noexcept -> const Error& { return std::get<1>(storage_); }
 
+  /// 有值取值，失败取给定的替代（免 `has_value()` 三行样板）。
+  [[nodiscard]] auto value_or(const T& fallback) const& -> T {
+    return has_value() ? std::get<0>(storage_) : fallback;
+  }
+  [[nodiscard]] auto value_or(T&& fallback) && -> T {
+    return has_value() ? std::get<0>(std::move(storage_)) : std::move(fallback);
+  }
+
  private:
   std::variant<T, Error> storage_;
 };

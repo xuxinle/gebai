@@ -39,7 +39,8 @@ struct ServerOptions {
   /// 于是「显式空串关闭鉴权」与「未设置」无法区分——鉴权测试当场抓住（无法关闭）。
   std::optional<std::string> token{};
   /// `capture` 落盘路径白名单（目录前缀，UTF-8，比较前统一归一化分隔符）。
-  /// 默认：系统 temp 目录 + 可执行文件同目录。空向量 = 禁止一切落盘（仍可 base64 回传）。
+  /// 默认：系统 temp 目录 + 可执行文件同目录 + **控制文件所在目录**（智能体会话
+  /// 目录在那里——截图直落会话免搬运）。空向量 = 禁止一切落盘（仍可 base64 回传）。
   std::vector<std::string> capture_dirs{};
   /// 是否开放 `script` 方法与脚本宿主能力。
   ///
@@ -50,7 +51,7 @@ struct ServerOptions {
   /// 脚本配额（仅 `enable_script` 时生效）。
   ext::ScriptLimits script_limits{};
 
-  /// 计算默认白名单（temp + 可执行文件目录）。`start()` 内部使用。
+  /// 计算默认白名单（temp + 可执行文件目录 + 控制文件目录）。`start()` 内部使用。
   [[nodiscard]] auto default_capture_dirs() const -> std::vector<std::string>;
 };
 

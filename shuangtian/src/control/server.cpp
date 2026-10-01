@@ -809,7 +809,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       // （落在自己的 shots 目录，安全）；显式 path 必须落在白名单目录内。
       if (!path.empty() && !capture_path_allowed(path)) {
         return unexpected(ErrorCode::Invalid,
-                          std::format("截图落盘路径不在白名单目录内: {}（允许：temp 与可执行文件目录）",
+                          std::format("截图落盘路径不在白名单目录内: {}（允许：temp、可执行文件目录与控制文件目录）",
                                       path));
       }
       auto saved = host.capture_to_file(path, region);
@@ -1198,6 +1198,21 @@ auto ServerOptions::default_capture_dirs() const -> std::vector<std::string> {
   if (auto exe = process::executable_path(); exe) {
     const std::size_t slash = exe->find_last_of("\\/");
     if (slash != std::string::npos) dirs.push_back(exe->substr(0, slash));
+  }
+  // 控制文件所在目录：智能体会话目录通常在这里（客户端凭控制文件发现本服务，
+  // 截图直落会话目录免二次搬运——否则工作流断一截：只能先落 temp 再搬）。
+  // 持有控制文件 = 已持有 token（文件权限由 OS 管），放行该目录不扩大攻击面。
+  if (!control_file.empty()) {
+    const std::size_t slash = control_file.find_last_of("\\/");
+    if (slash != std::string::npos) {
+      std::string dir = control_file.substr(0, slash == 0 ? 1 : slash);
+      if (dir.size() == 1 && (dir == "/" || dir == "\\")) {
+        // 控制文件在根目录：只放行根目录本身（前缀比较语义即如此，无需转殊）
+      }
+      dirs.push_back(std::move(dir));
+    } else {
+      dirs.push_back(".");  // 相对路径无分隔符：当前目录
+    }
   }
   return dirs;
 }

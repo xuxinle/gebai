@@ -44,6 +44,11 @@ auto ascii_upper(std::string_view text) -> std::string {
   return out;
 }
 
+// `lower/upper`：ASCII 快路径（与 ascii_* 同实现；不做 Unicode 语义折叠，见头文件注释）。
+auto lower(std::string_view text) -> std::string { return ascii_lower(text); }
+
+auto upper(std::string_view text) -> std::string { return ascii_upper(text); }
+
 auto ascii_iequals(std::string_view a, std::string_view b) noexcept -> bool {
   if (a.size() != b.size()) return false;
   for (std::size_t i = 0; i < a.size(); ++i) {

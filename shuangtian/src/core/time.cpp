@@ -1,6 +1,7 @@
 #include "st/core/time.hpp"
 
 #include <array>
+#include <ctime>
 
 namespace st::time {
 namespace {
@@ -59,6 +60,38 @@ auto iso8601_utc(std::int64_t unix_millis) -> std::string {
 }
 
 auto iso8601_now() -> std::string { return iso8601_utc(unix_ms()); }
+
+auto format_now(std::string_view format) -> std::string {
+  // 本地时间的字段分解（状态栏/日志前缀用途，时区跟随系统）。
+  const std::time_t now = static_cast<std::time_t>(unix_ms() / 1000);
+  std::tm fields{};
+  (void)localtime_r(&now, &fields);
+  std::string out;
+  out.reserve(format.size() + 4);
+  for (std::size_t index = 0; index < format.size(); ++index) {
+    // 占位形如 `{Y}`/`{m}`：遇 `{` 且其后两字符为 `X}` 时替换，其余原样。
+    if (format[index] == '{' && index + 2 < format.size() && format[index + 2] == '}') {
+      const char token = format[index + 1];
+      int value = -1;
+      switch (token) {
+        case 'Y': value = fields.tm_year + 1900; break;
+        case 'm': value = fields.tm_mon + 1; break;
+        case 'd': value = fields.tm_mday; break;
+        case 'H': value = fields.tm_hour; break;
+        case 'M': value = fields.tm_min; break;
+        case 'S': value = fields.tm_sec; break;
+        default: break;
+      }
+      if (value >= 0) {
+        out += token == 'Y' ? std::format("{:04d}", value) : std::format("{:02d}", value);
+        index += 2;
+        continue;
+      }
+    }
+    out.push_back(format[index]);
+  }
+  return out;
+}
 
 auto format_duration_ns(std::int64_t nanos) -> std::string {
   const double value = static_cast<double>(nanos);

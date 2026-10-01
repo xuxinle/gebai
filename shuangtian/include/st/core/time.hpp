@@ -21,6 +21,13 @@ using SystemClock = std::chrono::system_clock;
 [[nodiscard]] auto iso8601_utc(std::int64_t unix_millis) -> std::string;
 [[nodiscard]] auto iso8601_now() -> std::string;
 
+/// 当前时间按简单占位模板格式化：`YYYY-MM-DD HH:MM:SS` 与 `HH:MM:SS` 两个预设
+/// （`kFormatDateTime` / `kFormatTime`），模板里 `Y m d H M S` 逐字替换
+/// （其余字符原样）。状态栏/日志前缀够用，不做完整 strftime。
+inline constexpr std::string_view kFormatDateTime{"{Y}-{m}-{d} {H}:{M}:{S}"};
+inline constexpr std::string_view kFormatTime{"{H}:{M}:{S}"};
+[[nodiscard]] auto format_now(std::string_view format) -> std::string;
+
 /// 人类可读时长（`12.3ms` / `1.20s` / `1m02s`）。
 [[nodiscard]] auto format_duration_ns(std::int64_t nanos) -> std::string;
 
