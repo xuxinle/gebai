@@ -213,12 +213,57 @@ function demoteTailAssistant<T extends { role: string; toolCalls?: unknown }>(ms
 }
 
 /**
+ * 相邻 assistant 消息合并为单条（发送前归一化，镜像 Anthropic 序列化的同角色合并）。
+ *
+ * 引擎写入的 assistant 文本消息会与紧随其后的模型工具轮消息相邻（待办续做的模拟工具对
+ * `assistant(最终回复) + assistant(toolCalls) + tool`、配对修复补的 assistant 桩），
+ * 而服务端按**单条 assistant 轮**校验与续写：相邻形态下只有首条的内容生效（工具调用取全组并集），
+ * 第二条自己的字段（含 `reasoning_content`）被丢弃。合并后请求形态与真实工具轮一致（文本 + 调用同条），
+ * 不复存在该歧义。
+ */
+type AssistantTurn = { role: string; content: string | Array<Record<string, unknown>>; toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> | string }> }
+
+function mergeAssistantTurns<T extends AssistantTurn>(msgs: T[]): T[] {
+  const out: T[] = []
+  for (const m of msgs) {
+    const prev = out[out.length - 1]
+    if (m.role !== "assistant" || prev?.role !== "assistant") {
+      out.push(m)
+      continue
+    }
+    const merged = { ...prev }
+    merged.content = joinAssistantContent(prev.content, m.content) as T["content"]
+    const calls = [...(prev.toolCalls ?? []), ...(m.toolCalls ?? [])]
+    if (calls.length) merged.toolCalls = calls
+    out[out.length - 1] = merged
+  }
+  return out
+}
+
+/** 合并两条相邻 assistant 的 content：两侧均为文本按行拼接；出现块数组（多模态内容）时按块拼接不丢内容。 */
+function joinAssistantContent(a: unknown, b: unknown): unknown {
+  const empty = (x: unknown) => x === undefined || x === null || x === "" || (Array.isArray(x) && x.length === 0)
+  if (empty(a)) return empty(b) ? "" : b
+  if (empty(b)) return a
+  if (typeof a === "string" && typeof b === "string") return `${a}\n${b}`
+  const blocks = (x: unknown) => (Array.isArray(x) ? x : [{ type: "text", text: String(x) }])
+  return [...blocks(a), ...blocks(b)]
+}
+
+/**
  * 内部消息 → OpenAI 兼容格式。
+ *
+ * **工具轮必须携带 `reasoning_content`**（思考类模型，DeepSeek thinking 实测）：服务端认得**自己签发**的
+ * tool_call id（改一位即失效），据此放行「模型真实产出的工具轮」；其余一切 assistant 工具轮——引擎注入的
+ * 模拟工具对（待办续做）、配对修复桩、换模型后回放的历史工具轮——都被视为客户端构造，缺该字段即整请求
+ * 400 `The reasoning_content in the thinking mode must be passed back to the API`。故统一补空串（字段存在性
+ * 即满足校验，无 token 开销）；真实推理仍不进模型上下文（见 `Message.reasoning` 的取值口径）。
+ *
  * 尾部形态约束见 demoteTailAssistant（发送前自动降级，新增“以助手消息注入再续跑”的机制同样受此保护）。
  */
 function toOpenAIMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
-  for (const m of demoteTailAssistant(repairToolPairing(msgs, { flushTail: true }))) {
+  for (const m of mergeAssistantTurns(demoteTailAssistant(repairToolPairing(msgs, { flushTail: true })))) {
     if (m.role === "tool") {
       // 工具结果多模态（DESIGN「多模态支持」read 图片内联）：块数组映射为内容部件（text/image_url）；
       // 纯字符串保持原样（绝大多数工具结果零开销直传）
@@ -235,7 +280,7 @@ function toOpenAIMessages(msgs: MessageLike[]): Array<Record<string, unknown>> {
         type: "function",
         function: { name: tc.name, arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments) },
       }))
-      const msg: Record<string, unknown> = { role: "assistant", content: typeof m.content === "string" ? (m.content || null) : "", tool_calls: calls }
+      const msg: Record<string, unknown> = { role: "assistant", content: typeof m.content === "string" ? (m.content || null) : "", tool_calls: calls, reasoning_content: "" }
       if (m.toolCalls[0]?.name) msg.name = m.toolCalls[0].name
       out.push(msg)
     } else {

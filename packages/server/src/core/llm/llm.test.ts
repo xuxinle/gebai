@@ -18,22 +18,22 @@ function withFetch(mock: (url?: string | URL, init?: RequestInit) => Promise<Res
   })
 }
 
-describe("尾部 assistant 降级（防御性归一化）", () => {
-  /** 捕获请求体 messages 数组。 */
-  async function sentMessages(msgs: MessageLike[], apiKind: ProviderConfig["apiKind"] = "openai"): Promise<Array<Record<string, unknown>>> {
-    let body: Record<string, unknown> = {}
-    await withFetch(
-      async (_url, init) => {
-        body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
-        return new Response(OK_STREAM, { status: 200 })
-      },
-      async () => {
-        for await (const _ of createProvider({ ...BASE_CFG, apiKind }).chat(msgs)) void _
-      },
-    )
-    return (body.messages ?? body.input) as Array<Record<string, unknown>>
-  }
+/** 捕获 provider.chat 实际发出的请求体 messages/input 数组（序列化结果断言用）。 */
+async function sentMessages(msgs: MessageLike[], apiKind: ProviderConfig["apiKind"] = "openai"): Promise<Array<Record<string, unknown>>> {
+  let body: Record<string, unknown> = {}
+  await withFetch(
+    async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+      return new Response(OK_STREAM, { status: 200 })
+    },
+    async () => {
+      for await (const _ of createProvider({ ...BASE_CFG, apiKind }).chat(msgs)) void _
+    },
+  )
+  return (body.messages ?? body.input) as Array<Record<string, unknown>>
+}
 
+describe("尾部 assistant 降级（防御性归一化）", () => {
   test("以 assistant 纯文本结尾的请求：末条降级为 user（思考类模型会 400 拒绝该形态）", async () => {
     const sent = await sentMessages([{ role: "user", content: "问题" }, { role: "assistant", content: "【待办提醒】还有未完成待办" }])
     expect(sent.at(-1)!.role).toBe("user")
@@ -53,8 +53,8 @@ describe("尾部 assistant 降级（防御性归一化）", () => {
 
   test("待办续做模拟工具对（finalText 后接 assistant(toolCalls)+tool）三类 apiKind 序列化均合法", async () => {
     // 待办续做注入的形态：模型最终回复后接模拟 todo 查询调用对（DESIGN「待办续做」）——
-    // 相邻两条 assistant（finalText + 空 content 带 toolCalls）在 Anthropic 序列化时合并为
-    // text+tool_use 单条（恰是真实工具轮形态），尾消息始终是 tool 结果，不触发达级
+    // 相邻两条 assistant（finalText + 空 content 带 toolCalls）归一化为单条工具轮
+    // （Anthropic 合并为 text+tool_use 单条；OpenAI 兼容同理，见下一个 describe），尾消息始终是 tool 结果，不触发达级
     const msgs: MessageLike[] = [
       { role: "user", content: "任务" },
       { role: "assistant", content: "完成了一部分" },
@@ -64,8 +64,9 @@ describe("尾部 assistant 降级（防御性归一化）", () => {
     const oa = await sentMessages(msgs)
     expect(oa.at(-1)!.role).toBe("tool")
     expect(oa.at(-1)!.tool_call_id).toBe("todo-cont-1")
-    // 前一条是真实回复文本的 assistant，再前一条是带 tool_calls 的 assistant（均保持原角色）
+    // 前一条是合并后的工具轮（最终回复文本 + 模拟调用的 tool_calls 同条）
     expect(oa.at(-2)!.tool_calls).toBeDefined()
+    expect(oa.at(-2)!.content).toBe("完成了一部分")
     const ant = await sentMessages(msgs, "anthropic")
     expect(ant.at(-1)!.role).toBe("user") // tool_result 包在 user 消息内
     const resp = await sentMessages(msgs, "responses")
@@ -80,6 +81,41 @@ describe("尾部 assistant 降级（防御性归一化）", () => {
     expect(anthropic.at(-1)!.role).toBe("user")
     const responses = await sentMessages([{ role: "user", content: "问题" }, { role: "assistant", content: "结尾助手文本" }], "responses")
     expect(responses.at(-1)!.role).toBe("user")
+  })
+})
+
+describe("工具轮序列化归一化（相邻 assistant 合并 + reasoning_content 补齐）", () => {
+  /** 待办续做注入形态：模型最终回复 + 模拟 todo 查询调用对（落盘为两条 assistant，发送前归一化）。 */
+  const injected: MessageLike[] = [
+    { role: "user", content: "任务" },
+    { role: "assistant", content: "完成了一部分" },
+    { role: "assistant", content: "", toolCalls: [{ id: "todo-cont-1", name: "todo", arguments: { entries: [] } }] },
+    { role: "tool", content: "查询待办：\n[pending] 任务A", toolCallId: "todo-cont-1", name: "todo" },
+  ]
+
+  test("相邻 assistant 合并为单条工具轮（文本 + 调用同条，与真实工具轮同形）", async () => {
+    const sent = await sentMessages(injected)
+    const assistants = sent.filter((m) => m.role === "assistant")
+    expect(assistants).toHaveLength(1)
+    expect(assistants[0]!.content).toBe("完成了一部分")
+    const calls = assistants[0]!.tool_calls as Array<{ id: string }>
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.id).toBe("todo-cont-1")
+  })
+
+  test("工具轮一律携带 reasoning_content（客户端构造的调用不被思考类模型 400 拒绝）", async () => {
+    const sent = await sentMessages(injected)
+    // 相邻 assistant 的字段合并后归位首条：字段存在但为空（真实推理不进上下文）
+    expect(sent.at(-2)!.reasoning_content).toBe("")
+    const plain = await sentMessages([
+      { role: "user", content: "任务" },
+      { role: "assistant", content: "", toolCalls: [{ id: "call_x", name: "ls", arguments: {} }] },
+      { role: "tool", content: "结果", toolCallId: "call_x", name: "ls" },
+    ])
+    expect(plain.at(-2)!.reasoning_content).toBe("")
+    // 无工具调用的 assistant 不带该字段（保持原有形态）
+    const textOnly = await sentMessages([{ role: "user", content: "问" }, { role: "assistant", content: "答" }, { role: "user", content: "再问" }])
+    expect(textOnly[1]!.reasoning_content).toBeUndefined()
   })
 })
 
