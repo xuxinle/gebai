@@ -464,8 +464,8 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 };
 }
 ```
-组件库（`include/st/ui/components/*.hpp`）——**已实现 28 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView`。
-**规划中 8 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Link` `Dropdown` `Menu` `SegmentedControl` `TreeView` `Sparkline` `BarChart`。
+组件库（`include/st/ui/components/*.hpp`）——**已实现 32 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog`。
+**规划中 5 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Link` `Dropdown` `SegmentedControl` `Sparkline`。
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
 - 图标：自绘矢量路径集（`IconName` + 路径数据），零位图资源、任意缩放清晰。
@@ -479,6 +479,37 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   此前未实现，`set value` 被静默忽略（与 `Input` 踩过的坑同类）。
 - 叠加层 z 序修正：`paint`/`paint_frame` 中 overlay 改在内容**之后**绘制（浮层在景上）；
   `UiRoot::find/query` 同步覆盖叠加层（对话框/轻提示/下拉面板此前从选择器里消失）。
+
+**vsedit 反馈驱动的编辑器形态能力**（类编辑器应用反推）：
+- **事件派发契约**：`on_event` 返回 `true` = 消费（冒泡停止）、`false` = 放行（继续冒泡到
+  父级；到达根后进入全局语义）。组件只对**认识的键**返回 true——未识别组合键必须放行
+  （否则全局快捷键没有落点）。`Element::consumes_key(key)` 声明「该键自含」（如编辑器的
+  Tab 缩进）：不参加 Tab 焦点环。
+- **全局快捷键**：`UiRoot::register_shortcut(key, {ctrl,shift,alt,meta}, handler)`；
+  KeyDown 派发顺序固定为**快捷键表 → 浮层 → 焦点元素 → Tab 焦点环**（后注册优先；
+  handler 返回 false 放弃消费继续下沉）。
+- **命中拦截**：`Element::intercepts_input()`（默认 true）——不可见/不拦截的浮层不再
+  截住下层内容（`Dialog` 覆写为 `visible()`）。
+- **行为注入**：`Element::set_event_handler(fn)`（组件实现之后、冒泡之前调用；免子类化
+  的小交互，如拖拽把手改宽度）。
+- **叠加层排布形态**：`add_overlay(el, OverlayLayout::Stack|FillViewport)`——
+  FillViewport 时 overlay 分到全视口矩形自行定位卡片（模态遮罩/命令面板标准形态；
+  `Dialog` 免 `set_viewport_rect`，`Toast` 底部居中且不遮内容；Stack 保持历史堆叠行为）。
+- **Tabs 编辑器化**：`Tab{key,label,modified,closable}` + `sync_tabs`（key 复用、活动态跟
+  key 走）+ `on_close`（点 × 触发，不删标签）+ 溢出滚动（箭头/滚轮/夹取，
+  `scroll_offset()` 可读写，active 项自动滚回可见）。
+- **Tree**：扁平可见行数组 + `sync_nodes`（key 复用、选中态跟 key）+ `on_toggle(key,
+  expanded)` 懒加载（目录展开时才 list_dir）+ ↑↓/Enter/←→ 键盘导航。
+- **MenuBar / ContextMenu**：声明式 `Menu{id,label,items[]}`；`make_panel(i)` 锚定标题
+  正下方（Stack overlay 不锚定，面板自己落到 anchor）；ContextMenu 挂 FillViewport、
+  dismiss barrier（面板外点击关闭并消费，MouseMove 照常穿透）、越界翻转/夹入视口。
+- **FileDialog**：打开/保存（目录导航 + 自绘文件列表 + 自绘文件名输入行 +
+  `on_confirm(full_path)`/`on_cancel`；fs 失败呈现错误行不崩溃）。
+- **工具链（stpm）**：MSVC PCH 消费端按族分派（`pch_consume_args`：`/Yu+/FI+/Fp`，
+  不再把 GCC 语法漏给 cl）；`-Werror→/WX` 附带 `/w35105`（旧 Windows SDK 系统头
+  C5105 已知误报降级）。
+- **控制通道**：`capture` 落盘白名单默认含**控制文件所在目录**（智能体会话目录直落
+  截图，免二次搬运）。
 
 ### 4.5.1 交互元素与元素身份（每条都由实际缺陷换来）
 
