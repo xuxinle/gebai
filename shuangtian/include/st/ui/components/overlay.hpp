@@ -6,8 +6,9 @@
 ///   标题 `font_xl` SemiBold、正文 `font_base`/`text_muted`、底部右对齐按钮行；打开时先铺
 ///   半透明遮罩（`colors.overlay` 覆盖整个视口）；
 /// - `Toast`：`radius_md` + `shadow_md` + 左侧 4px 色条（`tone_color`），高 40、横向内边距 14。
-/// 用法：把 `Dialog` / `Toast` 作为 `UiRoot` 的 overlay 挂载（`add_overlay`），
-/// `Dialog` 需由调用方注入视口矩形（`set_viewport_rect`）以铺满遮罩并居中卡片。
+/// 用法：把 `Dialog` / `Toast` 作为 `UiRoot` 的 overlay 挂载（`add_overlay`，`Dialog`
+/// 建议 `OverlayLayout::FillViewport`）：`Dialog` 的遮罩铺满分到的矩形并居中卡片，
+/// 不再需要调用方注入视口（`set_viewport_rect` 保留为旧代码兼容：设置后以其为准）。
 /// 依赖纪律：文本一律经 `RenderContext::text`（可为空 → `NullTextPort`），不 include text 层。
 
 #include <cstddef>
@@ -48,7 +49,9 @@ class Dialog : public Element {
   void set_actions(std::vector<std::string> actions);
   [[nodiscard]] auto actions() const noexcept -> const std::vector<std::string>& { return actions_; }
 
-  /// 视口矩形（遮罩覆盖范围；由调用方注入）。
+  /// 视口矩形兼容注入（旧代码路径）：设置后 `measure`/`arrange` 以它为准。
+  /// 新代码用 `add_overlay(dialog, OverlayLayout::FillViewport)`——遮罩直接铺满分到的
+  /// 矩形，无需注入。
   void set_viewport_rect(math::Rect rect);
   [[nodiscard]] auto viewport_rect() const noexcept -> math::Rect { return viewport_; }
   /// 居中卡片矩形（arrange 后有效）。
@@ -98,6 +101,8 @@ class Toast : public Element {
   static constexpr float kHeight{40.0f};
   static constexpr float kPaddingX{14.0f};
   static constexpr float kAccentWidth{4.0f};
+  /// FillViewport 挂载时与视口底边的留白。
+  static constexpr float kBottomMargin{32.0f};
   /// 默认自动消失时长（ms）；`0` = 常驻（见 `set_auto_dismiss_ms`）。
   static constexpr double kDefaultDismissMs{2600.0};
 
@@ -119,6 +124,8 @@ class Toast : public Element {
   /// 到期推演前置到整组件绘制之前（阴影也不落盘；见实现注释）。
   void paint(const RenderContext& context, raster::Surface& canvas) const override;
   /// 居中定位：UiRoot 对叠加层的默认排布是顶部左对齐，轻提示习惯上居中（可被覆盖）。
+  /// `OverlayLayout::FillViewport` 挂载时改为**底部居中**（习惯的 Toast 位置），
+  /// 遮罩不绘制（浅层浮层不遮内容）。
   void arrange(const RenderContext& context, math::Rect rect) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
   [[nodiscard]] auto semantics_text() const -> std::string override { return message_; }

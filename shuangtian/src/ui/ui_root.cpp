@@ -84,10 +84,18 @@ void UiRoot::layout(bool force) {
   layout_subtree(*content_, math::Rect{0.0f, 0.0f, width, height});
 
   float overlay_offset = 0.0f;
-  for (auto& overlay : overlays_) {
-    overlay->measure(context, constraints);
-    const math::Size overlay_size = overlay->measured_size();
-    layout_subtree(*overlay,
+  for (std::size_t index = 0; index < overlays_.size(); ++index) {
+    Element& overlay = *overlays_[index];
+    overlay.measure(context, constraints);
+    if (index < overlay_layouts_.size() &&
+        overlay_layouts_[index] == OverlayLayout::FillViewport) {
+      // 铺满视口：遮罩/命令面板自定位形态——组件在 arrange 里自行计算卡片矩形，
+      // 不再需要调用方注入视口尺寸（每个应用重复造轮子的历史缺口）。
+      layout_subtree(overlay, math::Rect{0.0f, 0.0f, viewport_.width, viewport_.height});
+      continue;
+    }
+    const math::Size overlay_size = overlay.measured_size();
+    layout_subtree(overlay,
                    math::Rect{0.0f, overlay_offset, overlay_size.width, overlay_size.height});
     overlay_offset += overlay_size.height;
   }
@@ -659,11 +667,11 @@ auto UiRoot::paint_frame(raster::Surface& canvas) -> bool {
   return last_frame_partial_;
 }
 
-void UiRoot::add_overlay(std::unique_ptr<Element> overlay) {
+void UiRoot::add_overlay(std::unique_ptr<Element> overlay, OverlayLayout layout) {
   if (overlay == nullptr) return;
   assign_ids(*overlay, std::format("overlay[{}]", overlays_.size()));
   overlays_.push_back(std::move(overlay));
-  mark_dirty_all();
+  overlay_layouts_.push_back(layout);  mark_dirty_all();
 }
 
 auto UiRoot::overlay_at(std::size_t index) const noexcept -> Element* {
@@ -673,7 +681,9 @@ auto UiRoot::overlay_at(std::size_t index) const noexcept -> Element* {
 void UiRoot::remove_overlay(Element* overlay) {
   for (auto iterator = overlays_.begin(); iterator != overlays_.end(); ++iterator) {
     if (iterator->get() == overlay) {
+      const auto index = static_cast<std::size_t>(std::distance(overlays_.begin(), iterator));
       overlays_.erase(iterator);
+      if (index < overlay_layouts_.size()) overlay_layouts_.erase(overlay_layouts_.begin() + index);
       mark_dirty_all();
       return;
     }
@@ -682,7 +692,17 @@ void UiRoot::remove_overlay(Element* overlay) {
 
 void UiRoot::clear_overlays() {
   overlays_.clear();
+  overlay_layouts_.clear();
   mark_dirty_all();
+}
+
+auto UiRoot::overlay_layout(const Element* overlay) const -> OverlayLayout {
+  for (std::size_t index = 0; index < overlays_.size(); ++index) {
+    if (overlays_[index].get() == overlay) {
+      return index < overlay_layouts_.size() ? overlay_layouts_[index] : OverlayLayout::Stack;
+    }
+  }
+  return OverlayLayout::Stack;
 }
 
 }  // namespace st::ui

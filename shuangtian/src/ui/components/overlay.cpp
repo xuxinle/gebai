@@ -406,6 +406,15 @@ void Toast::measure(const RenderContext& context, const Constraints& constraints
 }
 
 void Toast::arrange(const RenderContext& context, math::Rect rect) {
+  // FillViewport 挂载（分到整视口）：底部居中（习惯的 Toast 位），其余留空不遮内容。
+  // 判据：分到的高度远超自身量得高度（Stack 形态分到的高度恰好等于自身）。
+  if (measured_.height > 0.0f && rect.height > measured_.height * 2.0f) {
+    const float width = std::min(measured_.width, rect.width);
+    const float x = rect.x + (rect.width - width) * 0.5f;
+    const float y = rect.bottom() - measured_.height - kBottomMargin;
+    Element::arrange(context, math::Rect{x, y, width, measured_.height});
+    return;
+  }
   // 居中：UiRoot 对叠加层的默认排布是顶部左对齐，轻提示习惯上水平居中。
   // 宽度用自己量得的（rect 宽可能被拉满可用宽），保持胶囊尺寸后居中。
   const float width = std::min(measured_.width, rect.width);

@@ -138,8 +138,16 @@ class UiRoot {
   /// `request_animation`）留给下一帧。
   auto paint_frame(raster::Surface& canvas) -> bool;
 
+  /// 叠加层排布形态：`Stack`（自上而下堆叠，历史行为）或 `FillViewport`
+  /// （铺满视口，由 overlay 自己在 bounds 内定位卡片——模态遮罩/命令面板的标准形态）。
+  enum class OverlayLayout { Stack, FillViewport };
+
   /// 叠加层（对话框 / Toast / 菜单）：绘制在内容之上，事件优先命中。
-  void add_overlay(std::unique_ptr<Element> overlay);
+  /// `layout` 选排布形态：`FillViewport` 时 measure 拿到完整视口约束、arrange 全视口矩形，
+  /// 组件在 `arrange` 里自行计算遮罩与卡片（不再需要调用方注入视口尺寸）。
+  void add_overlay(std::unique_ptr<Element> overlay, OverlayLayout layout = OverlayLayout::Stack);
+  /// 某个浮层的排布形态（不在浮层列表中返回 Stack）。
+  [[nodiscard]] auto overlay_layout(const Element* overlay) const -> OverlayLayout;
   [[nodiscard]] auto overlay_count() const noexcept -> std::size_t { return overlays_.size(); }
   [[nodiscard]] auto overlay_at(std::size_t index) const noexcept -> Element*;
   void remove_overlay(Element* overlay);
@@ -173,6 +181,8 @@ class UiRoot {
   Theme theme_{};
   std::unique_ptr<Element> content_{};
   std::vector<std::unique_ptr<Element>> overlays_{};
+  /// 与 `overlays_` 同序的排布形态。
+  std::vector<OverlayLayout> overlay_layouts_{};
   const TextPort* text_port_{nullptr};
   math::Size viewport_{1280.0f, 720.0f};
   Element* focused_{nullptr};
