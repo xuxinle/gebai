@@ -29,6 +29,7 @@
 | `lcd_compare.cpp` | 文字抗锯齿对照：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG + 扫描行边缘剖面（仅验证用；手工编译命令见文件头） |
 | `stem_phase_probe.cpp` | **小字锐度量尺**：统计竖笔画的边缘相位与过渡带像素数（“边缘落在整数网格”占比、“最糊相位”占比），用于量化网格拟合/hinting 的收益与验收（仅验证用，编译同 `lcd_compare.cpp`） |
 | `hinting_gain_probe.cpp` | **hinting 收益测量台**：用 FreeType 把「无 hinting / TARGET_LIGHT / 完整 TT 指令 / auto-hinter / MONO」各档对竖笔画边缘网格对齐率的改善量出来，用来**选实现方向**而不是拍脑袋选最大的那个（需 `-I/usr/include/freetype2 -lfreetype`） |
+| `grid_fit_report.cpp` | 网格拟合**收益量尺**：中间调占比（越低越锐）+ 墨量变化（形变护栏），逐字号逐文字类型 |
 | `st_visual_check.py` | 视觉树与截图核对 |
 | `st_project_check.py` | 独立工程结构检查 |
 | `st_win_check.py` | Windows 后端专项检查 |

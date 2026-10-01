@@ -522,11 +522,15 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 渲染模式**必须进键**：灰度与亚像素的覆盖率位图排布不同（1 项/像素 vs 3 项/像素），
   // 混用等于按错误长度解读（表现是"字缺一块"或"字整片消失"，且只在切换模式的那一刻出现）。
   const bool lcd = subpixel_;
-  const std::uint64_t key = mix(mix(mix(mix(st::hash::fnv1a64(face.path()),
-                                            static_cast<std::uint64_t>(face.face_index())),
-                                        static_cast<std::uint64_t>(glyph)),
-                                    static_cast<std::uint64_t>(size_bucket)),
-                                mix(supersample_bucket, lcd ? 1ULL : 0ULL));
+  // 网格拟合模式同样要进键：拟合前后是两份不同的位图（边缘相位不同），
+  // 与亚像素同理——混用会取到“不符合当前模式”的字形（症状是“开关看起来没生效”）。
+  const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_);
+  const std::uint64_t key = mix(mix(mix(mix(mix(st::hash::fnv1a64(face.path()),
+                                                static_cast<std::uint64_t>(face.face_index())),
+                                            static_cast<std::uint64_t>(glyph)),
+                                        static_cast<std::uint64_t>(size_bucket)),
+                                    supersample_bucket),
+                                mix(lcd ? 1ULL : 0ULL, fit_bucket + 1ULL));
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->glyphs.find(key); iterator != cache_->glyphs.end()) {
@@ -582,6 +586,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     };
     const raster::Path transformed = build_path(1.0f);
 
+    // 包围盒**必须在拟合之前算**：拟合会把墨迹边界推到新的整数位置，
+    // 于是 `floor`/`ceil` 的结果可能差 1px——位图尺寸随“拟合开关”跳变，
+    // 就是“开一下同一个字就挪了半像素”的来源。**网格稳定是硬不变式**
+    // （排版与缓存都靠它），所以网格取自未拟合的轮廓。
     const math::Rect bounds = transformed.flattened_bounds(0.2f);
     const int padding = 1;
     const auto min_x = static_cast<int>(std::floor(bounds.x)) - padding;
@@ -590,6 +598,9 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     const auto max_y = static_cast<int>(std::ceil(bounds.bottom())) + padding;
     const int width = max_x - min_x;
     const int height = max_y - min_y;
+    // **网格拟合**：把笔画边缘吸附到像素网格。在像素空间做（坐标变换之后、
+    // 栅格化之前），且用上一步的稳定网格——拟合只改边缘相位，不改位图尺寸。
+    const raster::Path fitted = st::text::grid_fit(transformed, {.mode = grid_fit_}).path;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
       const int out_width = std::max(1, width / supersample);
       const int out_height = std::max(1, height / supersample);
@@ -608,7 +619,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         }
         raster::Canvas scratch(width, height);
         raster::Path local =
-            transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
+            fitted.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
         scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
         bitmap->coverage.assign(output_pixels, 0.0f);
         for (int y = 0; y < out_height; ++y) {
@@ -638,9 +649,32 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         // 包围盒**按灰度口径 ×3 推导**（而不是把 3 倍坐标重新算一遍 bounds）：
         // 两种模式的位图网格由此**逐像素重合**——开/关亚像素只改边缘合成方式，不挪字。
         raster::Canvas scratch(width * kSubpixelColumns, height);
-        raster::Path local = build_path(static_cast<float>(kSubpixelColumns))
-                                 .translated(static_cast<float>(-min_x * kSubpixelColumns),
-                                             static_cast<float>(-min_y));
+        // **只能水平放大**：用 `build_path(horizontal=3)` 重新构一次，
+        // 而不是 `Path::scaled(3)`——后者会把 x 与 y **一起**乘 3，
+        // 于是字形被纵向拉到 3 倍高、只有上半部分落在画布里
+        // （症状：文字像被切成两半。实测就踩到了，靠 1:1 截图对比定位）。
+        // 只因为“反正是同一个轮廓”而换成 scaled 是错的：那两个函数的语义不同。
+        raster::Path local = build_path(static_cast<float>(kSubpixelColumns));
+        // 网格拟合的位移是**灰度口径**的，水平放大后同步 ×3；竖直方向不动。
+        // （不这么做的话，亚像素路径会把拟合后的轮廓直接放大，
+        //   位移也跟着被乘 3——相位就完全错了。）
+        if (grid_fit_ != GridFitMode::Off) {
+          const auto base_points = transformed.raw_points();
+          const auto fitted_points = fitted.raw_points();
+          if (base_points.size() == fitted_points.size() &&
+              fitted_points.size() == local.raw_points().size()) {
+            const float horizontal = static_cast<float>(kSubpixelColumns);
+            auto scaled_points = local.raw_points();
+            for (std::size_t index = 0; index < scaled_points.size(); ++index) {
+              scaled_points[index].x +=
+                  (fitted_points[index].x - base_points[index].x) * horizontal;
+              scaled_points[index].y += fitted_points[index].y - base_points[index].y;
+            }
+            (void)local.set_raw_points(scaled_points);
+          }
+        }
+        local = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
+                                 static_cast<float>(-min_y));
         scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
 
         bitmap->coverage.assign(

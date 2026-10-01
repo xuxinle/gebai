@@ -958,6 +958,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     // 文字抗锯齿形态："字看着糊/带彩边"这类观感问题，第一件要确认的就是它在用哪一种
     // （它随“有无窗口”与启动参数而变，不报就只能猜）
     result["text_renderer"] = metrics.text_renderer;
+    // 网格拟合模式（off/light/normal）：同一段文字在不同档下**字形边沿不同**，
+    // 它与 text_renderer 一起构成“这一帧的字是怎么画的”。
+    result["text_fit"] = metrics.text_fit;
     result["headless"] = metrics.headless;
     result["device_scale"] = static_cast<double>(metrics.device_scale);
     result["physical_width"] = static_cast<std::uint64_t>(metrics.physical_width);

@@ -18,6 +18,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/text/font.hpp"
+#include "st/text/grid_fit.hpp"
 
 namespace st::text {
 
@@ -149,6 +150,20 @@ class TextRenderer {
   /// 关掉它彩边更浓、单像素对比更硬（对照实验用；默认开）。
   void set_subpixel_filter(bool enabled) noexcept { subpixel_filter_ = enabled; }
   [[nodiscard]] auto subpixel_filter() const noexcept -> bool { return subpixel_filter_; }
+
+  /// **字形网格拟合（grid fitting / hinting）模式**。
+  ///
+  /// 存在的理由（实测，见 `DESIGN.md §4.3.1` 与 `include/st/text/grid_fit.hpp`）：
+  /// 13.5px 正文的笔画边缘 100% 落在分数相位上（91.8% 是“每边各一个过渡像素”的缓坡），
+  /// 所以小字“看着糊”——这是**与抗锯齿模式无关**的主因（灰度/亚像素都过不了这一关）。
+  /// 而实测又证明读字体自带 hinting 指令等于没做（中文是 CFF，根本没有那套指令），
+  /// 唯一有效的是**从轮廓几何自推笔画位置再吸附**（对齐 FreeType auto-hinter 的口径）。
+  ///
+  /// 默认 `Off`：拟合会微调字形（这是它的目的），而**无头截图/回归断言需要一个
+  /// 可逐像素复现的基准**——两者不能兼顾，所以默认关、由应用按“有无窗口”开。
+  /// 缓存键含该模式位（拟合前后是两份不同的位图，不能混用）。
+  void set_grid_fit(GridFitMode mode) noexcept { grid_fit_ = mode; }
+  [[nodiscard]] auto grid_fit() const noexcept -> GridFitMode { return grid_fit_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
   /// 字形位图缓存条目数（诊断用）。
   [[nodiscard]] auto cache_entries() const noexcept -> std::size_t;
@@ -206,6 +221,8 @@ class TextRenderer {
   bool subpixel_{false};
   /// 亚像素 5-tap 低通滤波开关（见 `set_subpixel_filter`）。
   bool subpixel_filter_{true};
+  /// 网格拟合模式（见 `set_grid_fit`）；默认关，保证无头/回归的可复现性。
+  GridFitMode grid_fit_{GridFitMode::Off};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

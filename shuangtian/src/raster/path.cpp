@@ -286,6 +286,72 @@ auto Path::translated(float dx, float dy) const -> Path {
   return out;
 }
 
+/// 单条命令携带的控制点数（与 `Path::raw_points()` 的展开顺序一致）。
+[[nodiscard]] constexpr auto point_count(PathCommand::Kind kind) noexcept -> int {
+  switch (kind) {
+    case PathCommand::Kind::MoveTo:
+    case PathCommand::Kind::LineTo: return 1;
+    case PathCommand::Kind::QuadTo: return 2;
+    case PathCommand::Kind::CubicTo: return 3;
+    case PathCommand::Kind::Close: return 0;
+  }
+  return 0;
+}
+
+auto Path::raw_points() const -> std::vector<math::Point> {
+  std::vector<math::Point> points;
+  points.reserve(commands_.size() * 2U);
+  for (const auto& command : commands_) {
+    switch (command.kind) {
+      case PathCommand::Kind::MoveTo:
+      case PathCommand::Kind::LineTo:
+        points.push_back(command.p1);
+        break;
+      case PathCommand::Kind::QuadTo:
+        points.push_back(command.p1);
+        points.push_back(command.p2);
+        break;
+      case PathCommand::Kind::CubicTo:
+        points.push_back(command.p1);
+        points.push_back(command.p2);
+        points.push_back(command.p3);
+        break;
+      case PathCommand::Kind::Close:
+        break;
+    }
+  }
+  return points;
+}
+
+auto Path::set_raw_points(std::span<const math::Point> points) -> bool {
+  // 先**数一遍**再写：命令流与我们手里的点数不一致时绝不能半途写一半
+  // （那会得到一个几何自相矛盾的路径，而且报错时已经晚了）。
+  std::size_t needed = 0;
+  for (const auto& command : commands_) needed += static_cast<std::size_t>(point_count(command.kind));
+  if (points.size() != needed) return false;
+  std::size_t cursor = 0;
+  for (auto& command : commands_) {
+    switch (command.kind) {
+      case PathCommand::Kind::MoveTo:
+      case PathCommand::Kind::LineTo:
+        command.p1 = points[cursor++];
+        break;
+      case PathCommand::Kind::QuadTo:
+        command.p1 = points[cursor++];
+        command.p2 = points[cursor++];
+        break;
+      case PathCommand::Kind::CubicTo:
+        command.p1 = points[cursor++];
+        command.p2 = points[cursor++];
+        command.p3 = points[cursor++];
+        break;
+      case PathCommand::Kind::Close:
+        break;
+    }
+  }
+  return true;
+}
+
 auto Path::flatten(float tolerance) const -> std::vector<Polyline> {
   std::vector<Polyline> polylines;
   Polyline current;

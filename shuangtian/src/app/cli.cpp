@@ -48,6 +48,7 @@ auto common_options_usage(std::string_view program) -> std::string {
       "  --theme MODE          light / dark / system\n"
               "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
         "  --text-lcd MODE       文字抗锯齿：auto（窗口→LCD 亚像素，无头→灰度）/ on / off\n"
+        "  --text-fit MODE       字形网格拟合：auto（窗口→normal，无头→off）/ off / light / normal\n"
     "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
       "  --control-file PATH   把端口等写入该文件（自动化流程据此连接）\n"
       "  --enable-script       开启进程内脚本能力（默认关闭）\n"
@@ -108,6 +109,17 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
                           std::format("--text-lcd 只接受 auto / on / off，收到「{}」", mode));
       }
       options.app.text_lcd = mode;
+    } else if (argument == "--text-fit") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      const std::string mode = *parsed;
+      // 白名单同口径：拼错就报错（静默落回 auto 会把“我明明开了”变成谜案）。
+      if (mode != "auto" && mode != "off" && mode != "light" && mode != "normal") {
+        return unexpected(
+            ErrorCode::Invalid,
+            std::format("--text-fit 只接受 auto / off / light / normal，收到「{}」", mode));
+      }
+      options.app.text_fit = mode;
     } else if (argument == "--title") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());

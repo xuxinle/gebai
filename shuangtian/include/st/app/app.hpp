@@ -34,6 +34,14 @@ struct AppOptions {
   /// 做像素对像素比较；亚像素渲染带 RGB 彩边，那是给人看的，不是给断言看的。
   /// 需要看亚像素效果的无头验证，显式传 `--text-lcd=on` 即可（协议/工具链不变）。
   std::string text_lcd{"auto"};
+  /// 字形网格拟合（hinting）：`auto`（有窗口 → normal；无头 → 关）/ `off` / `light` / `normal`。
+  ///
+  /// 实测收益（`tools/stem_phase_probe.cpp`，同一把尺子）：**中文「每边一个过渡像素」
+  /// 的糊笔画 90.9% → 21.8%、锐笔画 0% → 54.7%**；拉丁 87.3% → 44.0%。
+  /// 原因：13.5px 正文的笔画边缘 100% 落在分数相位上（与抗锯齿模式无关）。
+  /// 与 `text_lcd` 同样分默认：**灰度 + 无拟合是可逐像素断言的参考口径**（无头/回归），
+  /// 窗口模式才要“看着锐”（拟合会微调字形，这是它的目的，也是它不能当基准的原因）。
+  std::string text_fit{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配
   std::string control_file{};         ///< 写入 {port,pid,...} 供客户端发现

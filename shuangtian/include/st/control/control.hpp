@@ -79,6 +79,11 @@ struct Metrics {
   /// 第一件要确认的事就是**当前到底在用哪种形态**——它跟后端（有窗口/无头）
   /// 与启动参数都相关，不报就变成猜。
   std::string text_renderer{};
+  /// 字形网格拟合模式：`"off"` / `"light"` / `"normal"`（见 `AppOptions::text_fit`）。
+  ///
+  /// 与 `text_renderer` 并列上报的理由一样：同一段文字在不同拟合档下**字形边沿不同**，
+  /// 它是一份渲染结果的组成部分——不报就无法复现一个像素现场。
+  std::string text_fit{};
   bool headless{true};
   float device_scale{1.0f};
   int physical_width{0};

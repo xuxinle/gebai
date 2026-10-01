@@ -468,8 +468,61 @@ Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ←
 
 即**当前没有一条竖笔画的边缘落在整数网格上**，一半以上正好落在像素正中间；
 一个 1.2~1.7px 宽的笔画因此必然摊成两端各一个过渡像素的缓坡。这与抗锯齿模式**无关**
-（灰度/亚像素都过不了这一关），修复方向见 `docs/BACKLOG.md` 的 P1（网格拟合 / hinting），
-与本条互不替代。
+（灰度/亚像素都过不了这一关）——它由 **§4.3.2 网格拟合**解决，与本条互不替代。
+
+### 4.3.2 字形网格拟合（grid fitting / hinting）
+
+**先量后做**（`tools/hinting_gain_probe.cpp`，判据 = 竖笔画边缘落在整数网格的比例，
+
+| 路径 | 拉丁（TrueType，DejaVu） | 中文（CFF，Noto CJK） |
+|---|---|---|
+| 现状（无 hinting） | 3.2% | 5.2% |
+| `FT_LOAD_TARGET_LIGHT` / `NORMAL`（读字体自带指令） | 3.2% | 4.3% |
+| **auto-hinter（normal）** | **49.0%** | **20.6%** |
+| `TARGET_MONO`（强制整数网格） | 97.0% | 4.3% |
+
+**三条决定性结论**（改变了实现方向，省下几千行无用功）：
+1. **读字体自带 hinting 指令 ≈ 什么都没做**（拉丁 3.2%→3.2%）；
+2. **中文界面字体是 CFF**（只有 stem hint，没有 TT 那套指令），`TARGET_MONO` 对它无效
+   ——**给中文实现 TrueType 指令解释器（`fpgm`/`prep`/`glyf`）是白工**；
+3. 唯一有效的是 **auto-hinter 式的几何网格拟合**：不看字体指令，从轮廓几何自推笔画位置。
+
+**实现**（`include/st/text/grid_fit.hpp` + `src/text/grid_fit.cpp`）：
+1. **抽笔画**：轮廓里近垂直/近水平的**直线边**两两配对成窄条（宽度 ≤ `max_stem_width`，
+   span 重叠），按 span 重叠归组；
+2. **两侧各自吸附**到最近的整数（不对称处理）：只把整条笔画平移的话，另一侧的边缘仍留在
+   分数相位上——那只解决一半问题；
+3. **曲线控制点按参数权重跟随两端**（二次 1:3 / 三次 1:4 的 Bernstein 系数）：
+   只挪端点会让曲线走样，那比不拟合更糟；
+4. **护栏**：单边位移 > `max_shift`（0.5px）拒绝该边；整字平均位移（**按全部点摊销**）
+   > `max_mean_shift` 时整体放弃；一点都没动就如实报 `applied=false`。
+
+**实测收益**（`tools/stem_phase_probe.cpp`，同一把尺子量拟合前后；13.5px @1.25 DPI）：
+
+| 判据 | 现状 | 拟合后（Normal） |
+|---|---|---|
+| 中文：每边一个过渡像素（最糊） | **90.9%** | **21.8%** |
+| 中文：锐笔画（0 个过渡像素） | 0% | **54.7%** |
+| 拉丁：每边一个过渡像素 | 87.3% | 44.0% |
+| 边缘落在整数网格（拉丁 / 中文） | 1.3% / 7.5% | **41~51% / 57.8%** |
+| 中间调像素占比（13.5px 中文） | 71.1% | **49.5%** |
+| 墨量变化（聚合） | — | **−0.3%~+2.5%**（字号越大越接近恒等） |
+
+中文的收益（20.6% → 57.8%）是 **FreeType auto-hinter 基准的 2.8 倍**；
+拉丁（50.9%）与基准（49.0%）持平。**字宽与位图网格逐字段不变**（拟合只动轮廓点、
+不动 `hmtx`，且包围盒在拟合**之前**算好）——这条有测试钉死
+（`tests/text_grid_fit_test.cpp::grid_fit_bitmap_grid_matches_unfitted`）。
+
+**踩过的两个真回归**（都由测试/截图抓回，记在这里防复发）：
+1. **亚像素路径不能用 `Path::scaled(3)` 做水平放大**——它会把 x 与 y **一起**乘 3，
+   字形被纵向拉成 3 倍高、只有上半部分落在画布里，表现为「文字像被切成两半」。
+   必须用 `build_path(horizontal=3)` 重新构一次（只乘 x），再把拟合位移的 x 分量 ×3 叠上去。
+2. **包围盒必须在拟合之前算**：否则拟合把墨迹推到新的整数位置后 `floor`/`ceil` 差 1px，
+   位图尺寸随开关跳变 ——「开一下同一个字就挪了半像素」。
+
+**开关**：`--text-fit auto|off|light|normal`（三个示例 + 通用命令行）、`ST_TEXT_FIT`；
+默认 **有窗口 → `normal`；无头 → `off`**（与亚像素同一套理由：无头截图与回归断言需要一个
+可逐像素复现的基准，而拟合**刻意**改变字形边沿）。启动日志与协议 `metrics.text_fit` 可查。
 
 ### 4.4 md
 ```cpp
@@ -1442,13 +1495,13 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**474 用例 / 12450 断言**） |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**481 用例 / 13468 断言**） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（224 文件、6 处登记豁免） |
+| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（230 文件、6 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
-| 小字锐度量尺 | `tools/stem_phase_probe.cpp`（竖笔画边缘相位与过渡带）、`tools/hinting_gain_probe.cpp`（用 FreeType 量各 hinting 档的网格对齐率） | 手工编译运行 | 见 §4.3.1 与 `docs/BACKLOG.md` P1 |
+| 小字锐度量尺 | `tools/stem_phase_probe.cpp`（竖笔画边缘相位与过渡带，支持 `--fit=normal` 对比拟合前后）、`tools/hinting_gain_probe.cpp`（用 FreeType 量各 hinting 档的网格对齐率）、`tools/grid_fit_report.cpp`（中间调占比 + 墨量变化） | 手工编译运行 | 见 §4.3.2 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
 | 编辑器形态冒烟 | `tools/st_editor_smoke.py`：点击即聚焦（焦点链路）+ `input.text` 送达焦点元素 + 退格复原 + `FillViewport` 浮层铺满视口 + Esc 关闭 | `python3 tools/st_editor_smoke.py all` | 全通过（9 项断言） |
 

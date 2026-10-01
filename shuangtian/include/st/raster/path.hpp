@@ -62,6 +62,17 @@ class Path {
   /// 逆时针（负向）绘制为正向——用于修正图标数据的绕向。
   void reverse();
 
+  /// **逐控制点只读访问**：顺序为「按命令流展开」——
+  /// `MoveTo`→1 点、`LineTo`→1 点、`QuadTo`→2 点（控制点、终点）、`CubicTo`→3 点、
+  /// `Close`→0 点。调用方因此可以沿 `commands()` 同步推导每个点的**角色**
+  /// （直线端点还是贝塞尔控制点），比额外维护一张角色表可靠。
+  ///
+  /// 用途：字形网格拟合要在像素空间微调**直线端点**的位置（把笔画边缘吸附到
+  /// 像素网格），而曲线控制点只能跟着平移——那就必须先能区分两者，并能按同一顺序写回。
+  [[nodiscard]] auto raw_points() const -> std::vector<math::Point>;
+  /// 按 `raw_points()` 的同一顺序写回（数量不一致时不修改并返回 false）。
+  auto set_raw_points(std::span<const math::Point> points) -> bool;
+
   /// 扁平化为折线（`tolerance` 为最大弦高误差，像素；0.1~0.3 通常足够）。
   [[nodiscard]] auto flatten(float tolerance) const -> std::vector<Polyline>;
   /// 扁平化并计算精确包围盒（基于折线）。

@@ -34,6 +34,30 @@ namespace {
   return has_window;
 }
 
+/// 网格拟合模式的解析（命令行 > 环境变量 > 默认）。
+///
+/// `auto`：**有窗口 → `Normal`；无头 → `Off`**。理由与亚像素同一套：
+/// 拟合约等于“按像素网格重排笔画”，它**刻意**改变字形边沿；而无头截图与回归断言
+/// 需要一个可逐像素复现的基准。两者不可兼得，所以默认按“有没有窗口”分。
+[[nodiscard]] auto resolve_text_fit(std::string_view mode, bool has_window)
+    -> st::text::GridFitMode {
+  const auto from_word = [](std::string_view value) -> std::optional<st::text::GridFitMode> {
+    if (value == "off" || value == "0" || value == "false") return st::text::GridFitMode::Off;
+    if (value == "light") return st::text::GridFitMode::Light;
+    if (value == "normal" || value == "on" || value == "1" || value == "true") {
+      return st::text::GridFitMode::Normal;
+    }
+    return std::nullopt;
+  };
+  if (mode != "auto") {
+    if (const auto parsed = from_word(mode); parsed.has_value()) return *parsed;
+  }
+  if (const auto value = fs::read_env("ST_TEXT_FIT"); value.has_value() && !value->empty()) {
+    if (const auto parsed = from_word(*value); parsed.has_value()) return *parsed;
+  }
+  return has_window ? st::text::GridFitMode::Normal : st::text::GridFitMode::Off;
+}
+
 }  // namespace
 
 struct Application::Impl {
@@ -157,6 +181,13 @@ auto Application::metrics() const -> control::Metrics {
   metrics.renderer_note = impl_->backend->renderer_note();
   if (impl_->renderer != nullptr) {
     metrics.text_renderer = impl_->renderer->subpixel() ? "lcd" : "grayscale";
+    // 把拟合模式一并上报：它不是“开关”而是三档（off/light/normal），
+    // 只说“开了”不足以复现一个渲染结果。
+    switch (impl_->renderer->grid_fit()) {
+      case st::text::GridFitMode::Off: metrics.text_fit = "off"; break;
+      case st::text::GridFitMode::Light: metrics.text_fit = "light"; break;
+      case st::text::GridFitMode::Normal: metrics.text_fit = "normal"; break;
+    }
   }
   metrics.headless = headless();
   metrics.device_scale = impl_->device_scale;
@@ -321,10 +352,17 @@ auto Application::start() -> Status {
     impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, options_.scale);
     // 文字抗锯齿形态：命令行 > 环境变量 > 默认（有窗口→亚像素，无头→灰度）。
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd, !impl_->backend->headless()));
-    // 如实说清这一帧的宇是用哪种形态画的：“字看着糊/带彩边”的第一个分歧点就在这里。
-    log::info("文字渲染：{}", impl_->renderer->subpixel()
-                                   ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）"
-                                   : "灰度抗锯齿");
+    impl_->renderer->set_grid_fit(
+        resolve_text_fit(options_.text_fit, !impl_->backend->headless()));
+    // 如实说清这一帧的字是怎么画的：“字看着糊”的第一个分歧点就在这里。
+    const char* fit_name = impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
+                               ? "normal"
+                               : (impl_->renderer->grid_fit() == st::text::GridFitMode::Light
+                                      ? "light"
+                                      : "关");
+    log::info("文字渲染：{} · 网格拟合 {}（中文字形为 CFF：只做几何拟合，不依赖字体自带指令）",
+              impl_->renderer->subpixel() ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）" : "灰度抗锯齿",
+              fit_name);
     impl_->text_port = std::make_unique<RendererTextPort>(*impl_->renderer);
     root_.set_text_port(impl_->text_port.get());
     // 逐 face 记录**路径 / 序号 / 名称**。

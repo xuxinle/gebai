@@ -232,6 +232,8 @@ struct Options {
   std::string language{"cpp"};
   /// 文字抗锯齿：auto（有窗口 → LCD 亚像素；无头 → 灰度）/ on / off。
   std::string text_lcd{"auto"};
+  /// 字形网格拟合：auto/off/light/normal（见 AppOptions::text_fit）。
+  std::string text_fit{"auto"};
 };
 
 [[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
@@ -249,6 +251,7 @@ struct Options {
     else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
     else if (raw == "--theme") options.theme = value("light");
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
+    else if (raw == "--text-fit") options.text_fit = value("auto");
     else if (raw == "--language") options.language = value("cpp");
     else if (raw == "--headless") options.headless = true;
     else if (raw == "--enable-script") options.enable_script = true;
@@ -273,6 +276,7 @@ auto run_app(int argc, char** argv) -> int {
   // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
   app_options.enable_script = options.enable_script;
   app_options.text_lcd = options.text_lcd;
+  app_options.text_fit = options.text_fit;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;
