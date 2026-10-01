@@ -466,51 +466,138 @@ describe("收尾验证提醒（改代码未跑测试的任务结束注入一次�
     expect(msgs2.some((m) => m.engineNote === "verify")).toBe(false)
     rmSync(home, { recursive: true, force: true })
   })
-  test("命名空间验证工具与 js 编排跑验证算已验证（不提醒）；js 仅提及关键词/非验证命令仍提醒", async () => {
-    // 代码文件写在**会话工作区之外**：本用例只验证「是否算已验证」的判定，而会话 tmp/ 内的写入不计入代码改动
-    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-ns-"))
-    // 假工具：只需参数/名称命中判定，不真跑（sh/js/run_tests 均替身）
+  test("命令白名单四类口径：自研工具链 / 通用构建入口 / ×test 形态脚本命中；无验证语义的常规命令不误判", async () => {
+    const fakeRegistry = new ToolRegistry()
+    const noopParams = { type: "object" as const, properties: {} }
+    for (const [n, t] of Object.entries(createGlobalTools())) if (n !== "sh") fakeRegistry.register(t)
+    fakeRegistry.register({ name: "sh", description: "fake sh", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-cmd-"))
+    const verifiedCmds = [
+      "cd app && ./st build gallery", // 自研工具链：build
+      "export ST_CXX=g++ && ./build/bin/st test", // 自研：test
+      "st.exe lint", // 自研：带扩展名形态
+      "cmake --build build -j 8", // 通用构建入口
+      "mingw32-make check", // make + check
+      "cargo build --release", // cargo build
+      "python tools/run_checks.py", // ×check 形态验证脚本
+      "bash tools/verify_all.sh", // ×verify 形态验证脚本
+      "bun run --cwd packages/server test", // bun run（任意脚本）
+    ]
+    for (const [index, command] of verifiedCmds.entries()) {
+      const provider = new HardenProvider()
+      provider.script = [
+        { mode: "tool", tool: "write", args: { path: join(proj, "src", `a-${index}.ts`), content: "const x = 1\n" } },
+        { mode: "tool", tool: "sh", args: { command, approval: false } },
+        { mode: "text", text: "完成并已验证" },
+      ]
+      const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
+      const session = await store.createSession("default", "t")
+      await engine.run(session.id, "default", "hi")
+      const nudged = (await store.load(session.id, "default"))!.messages.some((m) => m.engineNote === "verify")
+      expect(nudged).toBe(false)
+      rmSync(home, { recursive: true, force: true })
+    }
+    for (const [index, command] of [
+      "./build/debug/bin/gallery --headless --frames 3", // 运行产物非验证
+      "git add -A && git commit -m 'latest fixes'", // git 提交（latest 含 test 字面不得误命中）
+      "ls -la && cat build/log.txt",
+      "curl -s http://localhost:3000/api/health",
+    ].entries()) {
+      const provider = new HardenProvider()
+      provider.script = [
+        { mode: "tool", tool: "write", args: { path: join(proj, "src", `b-${index}.ts`), content: "const y = 2\n" } },
+        { mode: "tool", tool: "sh", args: { command, approval: false } },
+        { mode: "text", text: "完成" },
+        { mode: "text", text: "好，我补跑测试" },
+      ]
+      const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
+      const session = await store.createSession("default", "t")
+      await engine.run(session.id, "default", "hi")
+      const nudged = (await store.load(session.id, "default"))!.messages.some((m) => m.engineNote === "verify")
+      expect(nudged).toBe(true)
+      rmSync(home, { recursive: true, force: true })
+    }
+    rmSync(proj, { recursive: true, force: true })
+  })
+
+  test("验证工具名后缀扩容：×test/×check/×verify/×lint 后缀算已验证，无关后缀不误判", async () => {
+    // 自研验证工具不一定叫 run_tests（如 st_check / ns_verify）；名称后缀口径扩容后应命中。
+    const fakeRegistry = new ToolRegistry()
+    const noopParams = { type: "object" as const, properties: {} }
+    for (const [n, t] of Object.entries(createGlobalTools())) if (n !== "sh") fakeRegistry.register(t)
+    fakeRegistry.register({ name: "st_check", description: "fake st check", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    fakeRegistry.register({ name: "ns_verify", description: "fake verify", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    fakeRegistry.register({ name: "checklist", description: "fake checklist", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-tool-"))
+    const runCase = async (tool: string) => {
+      const provider = new HardenProvider()
+      provider.script = [
+        { mode: "tool", tool: "write", args: { path: join(proj, "src", `${tool}.ts`), content: "const x = 1\n" } },
+        { mode: "tool", tool, args: {} },
+        { mode: "text", text: "完成" },
+        { mode: "text", text: "好，我补跑测试" },
+      ]
+      const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
+      const session = await store.createSession("default", "t")
+      await engine.run(session.id, "default", "hi")
+      const nudged = (await store.load(session.id, "default"))!.messages.some((m) => m.engineNote === "verify")
+      rmSync(home, { recursive: true, force: true })
+      return nudged
+    }
+    expect(await runCase("st_check")).toBe(false) // ×check 后缀 → 已验证
+    expect(await runCase("ns_verify")).toBe(false) // ×verify 后缀 → 已验证
+    expect(await runCase("checklist")).toBe(true) // 无验证语义 → 仍提醒
+    rmSync(proj, { recursive: true, force: true })
+  })
+
+  test("js 编排：tools.call 动态名执行验证算已验证；bg_task 查询/仅提及关键词不算", async () => {
     const fakeRegistry = new ToolRegistry()
     const noopParams = { type: "object" as const, properties: {} }
     for (const [n, t] of Object.entries(createGlobalTools())) if (n !== "sh" && n !== "js") fakeRegistry.register(t)
     fakeRegistry.register({ name: "sh", description: "fake sh", parameters: noopParams, execute: async () => ({ output: "ok" }) })
     fakeRegistry.register({ name: "js", description: "fake js", parameters: noopParams, execute: async () => ({ output: "ok" }) })
-    fakeRegistry.register({ name: "self_optimize_run_tests", description: "fake run_tests", parameters: noopParams, execute: async () => ({ output: "ok" }) })
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-js-"))
+    const cases: Array<{ code: string; expectNudge: boolean }> = [
+      { code: 'const r = await tools.call("sh", { command: "./st test" })\nreturn r.output', expectNudge: false },
+      { code: 'const r = await bg_task({ action: "wait", id: "t1" })\nreturn r.output', expectNudge: true },
+      { code: 'return await grep({ pattern: "typecheck|eslint" })', expectNudge: true },
+    ]
+    for (const [index, { code, expectNudge }] of cases.entries()) {
+      const provider = new HardenProvider()
+      provider.script = [
+        { mode: "tool", tool: "write", args: { path: join(proj, "src", `a-${index}.ts`), content: "const x = 1\n" } },
+        { mode: "tool", tool: "js", args: { code } },
+        { mode: "text", text: "完成" },
+        ...(expectNudge ? [{ mode: "text" as const, text: "好，我补跑测试" }] : []),
+      ]
+      const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
+      const session = await store.createSession("default", "t")
+      await engine.run(session.id, "default", "hi")
+      const nudged = (await store.load(session.id, "default"))!.messages.some((m) => m.engineNote === "verify")
+      expect(nudged).toBe(expectNudge)
+      rmSync(home, { recursive: true, force: true })
+    }
+    rmSync(proj, { recursive: true, force: true })
+  })
+
+  test("提醒文案不否定已运行的验证：含「未识别到」口径与「指明已跑命令」出口", async () => {
+    // 全程跑过验证但未被识别的任务不应收到「尚未运行任何测试」这种与事实相反的断言——文案用「未识别到」
+    // （判定口径的局限而非否认事实）并给「指明已跑过的命令」出口，避免模型被迫接受错误前提
+    const proj = mkdtempSync(join(tmpdir(), "gebai-nudge-text-"))
     const provider = new HardenProvider()
     provider.script = [
-      // ① 命名空间验证工具：self_optimize_run_tests（旧实现按短名 "tests" 判定 → 漏 → 误报提醒）
       { mode: "tool", tool: "write", args: { path: join(proj, "src", "a.ts"), content: "const x = 1\n" } },
-      { mode: "tool", tool: "self_optimize_run_tests", args: { checks: ["test"] } },
-      { mode: "text", text: "已改并跑过测试" },
-      // ② js 编排内跑验证命令（脚本内 sh(...) 调用 + 验证关键词）
-      { mode: "tool", tool: "write", args: { path: join(proj, "src", "b.ts"), content: "const y = 2\n" } },
-      { mode: "tool", tool: "js", args: { code: 'const r = await sh({ command: "bun test src/a.test.ts" })\nreturn r.output' } },
-      { mode: "text", text: "js 编排跑过测试" },
-      // ③ js 仅提及关键词（grep 搜 lint/typecheck 字样）→ 不得算已验证，仍提醒
-      { mode: "tool", tool: "write", args: { path: join(proj, "src", "c.ts"), content: "const z = 3\n" } },
-      { mode: "tool", tool: "js", args: { code: 'return await grep({ pattern: "typecheck|eslint" })' } },
-      { mode: "text", text: "只是搜了下关键词" },
-      { mode: "text", text: "好，我补跑测试" },
-      // ④ 非验证命令（dir）→ 仍提醒
-      { mode: "tool", tool: "write", args: { path: join(proj, "src", "d.ts"), content: "const w = 4\n" } },
-      { mode: "tool", tool: "sh", args: { command: "dir /b src", approval: false } },
-      { mode: "text", text: "列了下目录" },
-      { mode: "text", text: "好，我补跑测试" },
+      { mode: "text", text: "改完了" },
+      { mode: "text", text: "已跑过，见上" },
     ]
-    const { home, store, engine } = await setupEngine(provider, { registry: fakeRegistry })
-    const hasNudge = async (sid: string) => ((await store.load(sid, "default"))!.messages.some((m) => m.engineNote === "verify"))
-    const s1 = await store.createSession("default", "t1")
-    await engine.run(s1.id, "default", "hi")
-    expect(await hasNudge(s1.id)).toBe(false) // ①
-    const s2 = await store.createSession("default", "t2")
-    await engine.run(s2.id, "default", "hi")
-    expect(await hasNudge(s2.id)).toBe(false) // ②
-    const s3 = await store.createSession("default", "t3")
-    await engine.run(s3.id, "default", "hi")
-    expect(await hasNudge(s3.id)).toBe(true) // ③
-    const s4 = await store.createSession("default", "t4")
-    await engine.run(s4.id, "default", "hi")
-    expect(await hasNudge(s4.id)).toBe(true) // ④
+    const { home, store, engine } = await setupEngine(provider)
+    const session = await store.createSession("default", "t")
+    await engine.run(session.id, "default", "hi")
+    const nudge = (await store.load(session.id, "default"))!.messages.find((m) => m.engineNote === "verify")
+    expect(nudge).toBeDefined()
+    expect(nudge!.content).toContain("未识别到针对这些改动的验证")
+    expect(nudge!.content).toContain("确已运行过验证，请指明具体命令与结果")
+    expect(nudge!.content).not.toContain("尚未运行任何")
     rmSync(home, { recursive: true, force: true })
     rmSync(proj, { recursive: true, force: true })
   })

@@ -79,13 +79,20 @@ const MAX_VERIFY_NUDGE = 1
 /** 收尾验证提醒——代码文件判定（write/edit/patch 命中这些扩展名的 path 才计入；md/txt 等文档不触发；
  *  **会话工作区（session tmp/）内的文件另行排除**——见 inSessionTmp：那是临时产物/测试夹具，非代码改动）。 */
 const VERIFY_CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|c|h|cpp|hpp|cc|cs|rb|php|swift|scala|vue|svelte|dart|lua|sh|bash|sql)$/i
-/** 收尾验证提醒——测试/检查类命令判定（sh/py 的 command 文本匹配；宽匹配宁漏勿紧：误判已验证只少一次提醒）。 */
-const VERIFY_CMD_RE = /\b(bun test|bun run test|npm test|npm run test|yarn test|pnpm test|pytest|vitest|jest|go test|cargo test|deno test|gradle test|gradlew\s+\S*test|mvn test|tsc|typecheck|type-check|eslint|biome check|ruff|mypy|flake8|clang-tidy|lint)\b/i
+/** 收尾验证提醒——测试/检查类命令判定（sh/py 的 command 文本匹配；宽匹配宁漏勿紧：误判已验证只少一次提醒）。
+ *  口径四类：① 主流测试 runner 与类型检查/lint 工具；② 通用构建入口（make/cmake/ninja/cargo build/
+ *  msbuild 等——编译型语言的构建即全量类型检查）；③ 自研工具链 `st`（霜天的 build/test/lint/check
+ *  子命令——漏判时全程跑过 `st test` 的任务收尾仍被误报「尚未运行任何测试」）；④ 任意 ×test/×check/
+ *  ×verify/×lint 形态的命令与脚本名（工程自研验证脚本 run_checks.py / verify_all.sh；分隔符或扩展名
+ *  限定，`latest` 这类字面包含不误命中）。 */
+const VERIFY_CMD_RE = /\b(?:bun test|bun run|npm test|npm run|yarn test|yarn run|pnpm test|pnpm run|npx|pytest|vitest|jest|ctest|go test|go vet|cargo (?:test|build|check|clippy)|deno (?:test|lint)|gradle(?:w)?\s+\S*(?:test|check)|mvn (?:test|verify)|dotnet test|phpunit|mix test|busted|tsc|typecheck|type-check|eslint|biome check|ruff|mypy|flake8|clang-tidy|cppcheck|make|cmake|meson|ninja|zig (?:build|test)|bazel|buck2|msbuild|xcodebuild|lint)\b|\bst(?:\.exe)?(?=\s+(?:build|test|lint|check|run\s+\S*(?:test|check|lint|verify)))|\b\w+[-_](?:tests?|checks?|lint|verify)\b|\b(?:verify|test|check|lint)[-_]\w+\.(?:sh|py|js|mjs|ts|lua)\b/i
 /** 收尾验证提醒——验证类工具判定：**名称后缀**（不能取「最后一段短名」——`self_optimize_run_tests` 的短名是
- *  `tests`，按短名相等判定会漏，实测导致 5 次误报提醒；后缀口径让命名空间形态与全局同名工具一视同仁）。 */
-const VERIFY_TOOL_RE = /(^|_)run_tests$/
-/** 收尾验证提醒——js 编排脚本的**命令调用点**（脚本内真去执行命令/子进程，而非仅仅提及关键词）。 */
-const JS_EXEC_MARK_RE = /\b(?:sh|py|bg_task)\s*\(|["']?command["']?\s*:/
+ *  `tests`，按短名相等判定会漏，实测导致 5 次误报提醒；后缀口径让命名空间形态与全局同名工具一视同仁；
+ *  后缀不止 `run_tests`——`st_check`/`xxx_verify` 等自研工具链探针同样以名表达验证语义）。 */
+const VERIFY_TOOL_RE = /(^|_)(run_tests|run_test|tests?|verify|checks?|lint)$/
+/** 收尾验证提醒——js 编排脚本的**命令调用点**（脚本内真去执行命令/子进程，而非仅仅提及关键词；
+ *  `tools.call("sh", …)` 动态名形态同样是执行点）。 */
+const JS_EXEC_MARK_RE = /\b(?:sh|py|bg_task|tools\.\w+)\s*\(|["']?command["']?\s*:/
 /** 收尾验证提醒——写类工具的拒绝形态（守卫/安全模式拦截未落盘，不计入修改文件）。 */
 const MOD_REJECTED_RE = /^(write|edit|patch) 拒绝|安全模式|受限模式/
 /** 重复检测滚动窗口：记录最近 N 次工具调用签名（工具名+参数 JSON），窗口尾部连续相同签名达到阈值判定为无效重复。 */
@@ -1213,7 +1220,7 @@ private activeSchemas(sessionId: string) {
           if (mods && mods.files.size > 0 && !mods.verified && verifyRound < MAX_VERIFY_NUDGE) {
             const list = [...mods.files].slice(0, 5).map((f) => `- ${f}`).join("\n")
             const more = mods.files.size > 5 ? `\n…（共 ${mods.files.size} 个文件）` : ""
-            const verifyMsg = `${agentNoteHead("收尾验证", true)}\n本任务修改了 ${mods.files.size} 个代码文件，但尚未运行任何测试/类型检查/lint 类命令：\n${list}${more}\n请先运行与改动相关的测试或检查（如 bun test 指定相关测试文件、bun run typecheck / lint、pytest、go test 等）确认无回归后再给出最终回复；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
+            const verifyMsg = `${agentNoteHead("收尾验证", true)}\n本任务修改了 ${mods.files.size} 个代码文件，但未识别到针对这些改动的验证（测试/类型检查/lint）：\n${list}${more}\n请先运行与改动相关的测试或检查（项目自带的验证命令优先——如 bun test 指定相关测试文件、bun run typecheck / lint、make / cmake、pytest、go test、cargo test、st test / st lint 等；在子会话/脚本内跑过同样算）确认无回归后再给出最终回复；若你确已运行过验证，请指明具体命令与结果；若改动确不影响代码行为（生成产物/临时脚本等），请在回复中简要说明。`
             // 提醒落盘即 **user 角色**（与用户输入同角色、同受上下文保护）：思考类模型不接受以 assistant 结尾的
             // 请求（前缀续写）；engineNote 标记供 UI 区分展示（弱化「引擎提示」通知条，非用户气泡）
             messages.push({ role: "assistant", content: finalText })
