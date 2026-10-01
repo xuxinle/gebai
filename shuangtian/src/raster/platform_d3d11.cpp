@@ -755,7 +755,13 @@ class GpuCanvas final : public Surface {
   // 图标与自绘形状在帧间不变，缓存后每帧只剩一次纹理贴图（软件侧每帧都要重新光栅化）。
   // 因此路径上的 GPU 收益来自**缓存与合成**，不来自光栅化本身；不假装它是全 GPU 光栅化。
   void fill_path(const Path& path, const Paint& paint, DrawOptions options = {}) override {
-    rasterize_path(path, path, options.opacity, paint.color(), PaintOp::FillPath);
+    if (path.is_empty()) return;
+    // 逻辑→物理：与软件 Canvas::fill_path 同口径（内部 `path.scaled(scale_)`）。
+    // 缺了这步，非整数 DPI 下路径类绘制（菜单面板/勾选/图标）整体缩成 1/scale——
+    // hit_test 按逻辑坐标算，画出来缩小错位（实测 1.5x 下菜单面板缩 2/3，光标视觉错位）。
+    const Path physical = scale_ == 1.0f ? path : path.scaled(scale_);
+    // 缓存键：直接用逻辑 path（与缩放后几何一一对应，不会误命中）。
+    rasterize_path(path, physical, options.opacity, paint.color(), PaintOp::FillPath);
   }
   void stroke_path(const Path& path, const Paint& paint, float width,
                    DrawOptions options = {}) override {
@@ -1203,7 +1209,7 @@ class GpuCanvas final : public Surface {
     // 遮罩只需覆盖**当前裁剪域内的像素**：与 clip 取交。
     //
     // 不取交时的真实事故（2026-09-30 定位）：把无界约束哨兵 kUnbounded（1e9）
-    // 当作自己高度的元素（mdeditor 的 SourceView 边框），其描边路径的包围盒高度
+    // 当作自己高度的元素（早期 mdeditor 示例的 SourceView 边框，示例已删、教训保留），其描边路径的包围盒高度
     // ≈1e9 → `Mask(1362, 999999979)` 试图分配 ~1.3 TB → std::bad_alloc 直接崩掉
     // 进程（GPU 路径特有：软件光栅器按扫描线裁剪，不受影响；因此无头 GPU 渲染
     // 下必崩、软件渲染下不崩——差异很迷惑）。

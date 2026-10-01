@@ -266,6 +266,13 @@ auto UiRoot::dispatch(Event& event) -> bool {
 
   switch (event.kind) {
     case EventKind::MouseMove: {
+      // 拖拽归属：按下时锁定的元素在释放前持续接收 move（即使指针已拖出它）——
+      // 否则 CodeEditor 拖选、ScrollBar 拖滑块一出边界就断（事件按命中转发，
+      // 而拖拽语义属于"按下的那个元素"，与 Web/Qt 的隐式捕获一致）。
+      if (pressed_ != nullptr) {
+        handled = dispatch_to(*pressed_, event);
+        break;
+      }
       Element* target = hit_test(event.position);
       update_hover(target);
       handled = dispatch_to(target != nullptr ? *target : *content_, event);

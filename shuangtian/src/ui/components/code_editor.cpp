@@ -610,7 +610,7 @@ auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
   if (!show_line_numbers_) return 0.0f;
   const TextPort& port = text_port_of(context);
   const std::size_t digits = std::to_string(std::max<std::size_t>(line_count(), 1)).size();
-  return port.measure_width(std::string(digits, '0'), font_size_) + kGutterPadding * 2.0f;
+  return port.measure_width(std::string(digits, '0'), font_size_, text::FontRole::Monospace) + kGutterPadding * 2.0f;
 }
 
 auto CodeEditor::rebuild_line_geometry(const RenderContext& context) const -> void {
@@ -621,7 +621,7 @@ auto CodeEditor::rebuild_line_geometry(const RenderContext& context) const -> vo
   max_line_width_cache_ = 0.0f;
   const TextPort& port = text_port_of(context);
   for (const auto& [begin, end] : line_spans_) {
-    const float width = port.measure_width(std::string_view(text_).substr(begin, end - begin), font_size_);
+    const float width = port.measure_width(std::string_view(text_).substr(begin, end - begin), font_size_, text::FontRole::Monospace);
     max_line_width_cache_ = std::max(max_line_width_cache_, width);
   }
   geometry_dirty_ = false;
@@ -678,7 +678,7 @@ auto CodeEditor::index_at_point(const RenderContext& context, math::Point point)
   std::size_t index = begin;
   while (index < end) {
     const std::size_t next = utf8_next(text_, index);
-    const float advance = port.measure_width(std::string_view(text_).substr(index, next - index), font_size_);
+    const float advance = port.measure_width(std::string_view(text_).substr(index, next - index), font_size_, text::FontRole::Monospace);
     if (width + advance * 0.5f > target) return index;
     width += advance;
     index = next;
@@ -833,9 +833,9 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
         const std::size_t from = std::max(slice_begin, begin);
         const std::size_t to = std::min(std::max(slice_end, from), end);
         const float x0 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, from - begin), font_size_);
+                                       std::string_view(text_).substr(begin, from - begin), font_size_, text::FontRole::Monospace);
         const float x1 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, to - begin), font_size_);
+                                       std::string_view(text_).substr(begin, to - begin), font_size_, text::FontRole::Monospace);
         const float width = std::max(x1 - x0, (to == from && to < end) ? 2.0f : 0.0f);
         if (width > 0.0f) {
           canvas.fill_rect(math::Rect{x0, row_top, width, height},
@@ -849,10 +849,10 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       for (const std::size_t position : {brackets->first, brackets->second}) {
         if (position < begin || position >= end) continue;
         const float x0 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, position - begin), font_size_);
+                                       std::string_view(text_).substr(begin, position - begin), font_size_, text::FontRole::Monospace);
         const std::size_t next = utf8_next(text_, position);
         const float x1 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, next - begin), font_size_);
+                                       std::string_view(text_).substr(begin, next - begin), font_size_, text::FontRole::Monospace);
         canvas.fill_rect(math::Rect{x0 - 1.0f, row_top, x1 - x0 + 2.0f, height},
                          raster::Paint::solid(syntax.matching_bracket), 2.0f);
       }
@@ -862,34 +862,36 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     float pen = origin_x;
     const auto& tokens = line < line_tokens_.size() ? line_tokens_[line] : LineTokens{};
     if (tokens.empty()) {
-      port.draw(canvas, row, math::Point{pen, row_top}, font_size_, syntax.plain);
+      port.draw(canvas, row, math::Point{pen, row_top}, font_size_, syntax.plain, text::FontRole::Monospace);
     } else {
       std::size_t consumed = 0;
       for (const auto& token : tokens) {
         if (token.begin > consumed) {
           const std::string_view gap = row.substr(consumed, token.begin - consumed);
-          port.draw(canvas, gap, math::Point{pen, row_top}, font_size_, syntax.plain);
-          pen += port.measure_width(gap, font_size_);
+          port.draw(canvas, gap, math::Point{pen, row_top}, font_size_, syntax.plain, text::FontRole::Monospace);
+          pen += port.measure_width(gap, font_size_, text::FontRole::Monospace);
         }
         const std::size_t length = std::min(token.end, row.size()) - std::min(token.begin, row.size());
         if (length == 0 || token.begin >= row.size()) continue;
         const std::string_view slice = row.substr(token.begin, length);
-        port.draw(canvas, slice, math::Point{pen, row_top}, font_size_, token_color(syntax, token.kind));
-        pen += port.measure_width(slice, font_size_);
+        port.draw(canvas, slice, math::Point{pen, row_top}, font_size_, token_color(syntax, token.kind),
+                   text::FontRole::Monospace);
+        pen += port.measure_width(slice, font_size_, text::FontRole::Monospace);
         consumed = token.begin + length;
       }
       if (consumed < row.size()) {
-        port.draw(canvas, row.substr(consumed), math::Point{pen, row_top}, font_size_, syntax.plain);
+        port.draw(canvas, row.substr(consumed), math::Point{pen, row_top}, font_size_, syntax.plain, text::FontRole::Monospace);
       }
     }
 
     // 行号
     if (show_line_numbers_ && gutter_cache_ > 0.0f) {
       const std::string number = std::to_string(line + 1);
-      const float number_width = port.measure_width(number, font_size_);
+      const float number_width = port.measure_width(number, font_size_, text::FontRole::Monospace);
       port.draw(canvas, number,
                 math::Point{bounds_.x + gutter_cache_ - kGutterPadding - number_width, row_top},
-                font_size_, line == current ? syntax.plain : syntax.line_number);
+                font_size_, line == current ? syntax.plain : syntax.line_number,
+                text::FontRole::Monospace);
     }
   }
 
@@ -932,6 +934,7 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       rebuild_line_geometry(context);
       cursor_ = index_at_point(context, event.position);
       anchor_ = cursor_;
+      if (event.button == 0 || event.button == 1) selecting_ = true;  // 左键开拖
       mark_dirty();
       if (on_cursor_change) on_cursor_change();
       return true;
@@ -953,8 +956,9 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       return true;
     }
     case EventKind::MouseMove: {
-      // 拖拽选择（按钮按下时才扩选）
-      if (event.button != 0) {
+      // 拖拽选择：用 selecting_ 状态而非 `event.button`——Win32 的 `WM_MOUSEMOVE`
+      // 不携带按键状态（后端恒传 0），按 button 判定在真窗口永远不触发（实测踩过）。
+      if (selecting_) {
         cursor_ = index_at_point(context, event.position);
         mark_dirty();
         if (on_cursor_change) on_cursor_change();
@@ -962,6 +966,10 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
       }
       return false;
     }
+    case EventKind::MouseUp:
+    case EventKind::Click:
+      selecting_ = false;
+      return false;  // 不吞：Click 的激活语义照常走
     case EventKind::Wheel: {
       scroll_y_ = std::max(0.0f, scroll_y_ - event.wheel_delta * 48.0f);
       const float max_scroll = std::max(0.0f, content_height() - bounds_.height);

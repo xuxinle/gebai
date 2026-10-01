@@ -122,13 +122,38 @@
   **表现**：GPU 渲染下画廊 72 个图标、复选框勾选、导航图标、输入框边框全部缺失。
   修复：传正 `area`。前后对比截图 5 页留证。
 - [x] **越界几何导致 bad_alloc 崩进程**：元素把 `kUnbounded`（1e9）当作自身高度时
-  （mdeditor SourceView::measure），GPU 遮罩按包围盒全量分配 ≈1.3 TB → 崩。
+  （早期 mdeditor 示例的 SourceView::measure；该示例已删除，教训保留），GPU 遮罩按包围盒全量分配 ≈1.3 TB → 崩。
   修复：遮罩与裁剪域取交（软件侧 draw_shadow 同思路）+ 示例固有高度修正 +
   回归测试 `gpu_huge_path_mask_is_bounded_by_canvas`。
 - [x] **奇偶测试假绿**：`compare()` 的 `structural` 计数器从未自增，
   `structural_ratio < 0.001` 断言全部空转——上面两个缺陷因此长期潜伏。已补自增。
 
 ### 本轮主线落地
+
+- [x] **D3D11 fill_path 缺 DPI 缩放**（真窗口 1.5x 实测发现）：`fill_path` 直接光栅化逻辑坐标路径，
+  非 1x DPI 下一切路径类绘制（菜单面板/勾选/图标）整体缩成 1/scale——hit_test 按逻辑算、
+  画出来缩小错位，表现为"菜单高亮与光标错位、面板残缺"。修复：与软件 `Canvas::fill_path`
+  同口径，内部 `path.scaled(scale_)`（缓存键仍用逻辑路径）。
+- [x] **CodeEditor 鼠标拖选失效**（真窗口实测发现）：拖选判定用 `event.button != 0`，
+  而 Win32 `WM_MOUSEMOVE` 不携带按键（后端恒传 0）→ 真窗口永远不扩选（协议驱动的 move
+  默认 button=1 才"能用"，掩盖了缺陷）。修复：改 `selecting_` 状态机（Down 置位/Move 扩选/Up 清除）；
+  同时 `UiRoot` 的 MouseMove 分派增加**拖拽归属**（pressed_ 元素在释放前持续接收 move，
+  拖出边界不断选——与 ScrollBar 拖滑块同一受益）。
+- [x] **CodeEditor 代码正文未用等宽字体**：`port.draw/measure_width` 全部走默认 Proportional
+  角色（比例字体），代码编辑器字形宽度不齐且小字号发糊。修复：全部调用点传
+  `FontRole::Monospace`（等宽栈 Cascadia/Consolas 本就存在，只是没接上）。
+- [x] **示例精简与 VSCode 式重写**（2026-10）：删除 mdeditor 示例；codeeditor 按 VSCode 信息架构
+  重写（标题栏/菜单栏/活动栏+侧栏/多标签编辑区/底部面板/状态栏，全内置组件零自绘）。
+  重写中反推出的框架缺口（详见 DESIGN.md §8.1.1）：
+  - [ ] **SplitView 内置化**：拖拽分栏仍是示例级自绘能力，应升为框架组件；
+  - [ ] **命令面板通用组件**：CommandPalette（FillViewport + 过滤列表 + 键盘导航）值得内置；
+  - [ ] **单行 Input 动作面**：`TextArea` 有 `invoke submit`，`Input` 没有（实测发现，§8.2 第 26 条同族）；
+  - [ ] **虚拟化长列表**：终端/输出面板的 ScrollView+Text 累积全文，日志长了退化；
+  - [ ] **桌面窗框**：平台 shell 层的系统标题栏融入/自绘窗框；
+  - [ ] **编辑器分组**：VSCode 式左右分屏各持独立标签组需容器级支持。
+- [ ] **text_subpixel_ink_matches_grayscale 回归**（主线存量，与示例重写无关）：
+  hinting 提交（a34699b）后 worst_mean 断言超阈（实测 0.08 上限被超出，
+  HEAD 上可复现）。需 text 层重新校准阈值或修 ink 度量。
 
 - [x] **网络层错误码平台化**（WSAGetLastError/errno 分流）+ **发送失败不静默** + 帧合并单发 +
   accept 关 Nagle + 接收缓冲偏移游标（A1）

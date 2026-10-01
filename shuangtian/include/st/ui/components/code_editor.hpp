@@ -218,6 +218,11 @@ class CodeEditor : public Element {
   bool read_only_{false};
   bool show_line_numbers_{true};
   bool highlight_enabled_{true};
+  /// 拖选进行中（Mouse(左)Down 置位、MouseUp 清除；Move 期间扩选）。
+  ///
+  /// 不用 `event.button` 判定：Win32 的 `WM_MOUSEMOVE` 不携带按键状态（后端恒传 0），
+  /// 按它判定拖选在真窗口永远不触发（实测发现；协议驱动的 move 默认 button=1 才"能用"）。
+  bool selecting_{false};
 
   // 渲染缓存（`mutable`：`paint_content` 为 const，但需要惰性重建）。
   //

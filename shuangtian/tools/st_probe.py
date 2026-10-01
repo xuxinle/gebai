@@ -14,7 +14,7 @@ ROOT = os.environ.get("SHUANGTIAN_ROOT", os.path.abspath(os.path.join(os.path.di
 PROFILE = os.environ.get("ST_PROFILE", "dev")
 SHOTS = os.environ.get("SHUANGTIAN_SHOTS", os.path.join(tempfile.gettempdir(), "st-visual"))
 os.makedirs(SHOTS, exist_ok=True)
-app = os.environ.get("ST_APP", "mdeditor")
+app = os.environ.get("ST_APP", "gallery")
 ctl = f"{SHOTS}/seq-{app}-control.json"
 if os.path.exists(ctl):
     os.remove(ctl)

@@ -59,7 +59,6 @@
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"],
                  "exclude_sources": ["src/pkg/*"],
                  "embed": ["examples/gallery/assets/*"] },
-    "mdeditor": { "kind": "executable", "sources": ["examples/mdeditor/*.cpp"], "exclude_sources": ["src/pkg/*"] },
     "codeeditor": { "kind": "executable", "sources": ["examples/codeeditor/*.cpp"],
                   "exclude_sources": ["src/pkg/*"],
                   "embed": ["examples/codeeditor/assets/*"] }

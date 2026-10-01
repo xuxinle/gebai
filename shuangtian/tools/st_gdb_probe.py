@@ -15,7 +15,7 @@ ROOT = os.environ.get("SHUANGTIAN_ROOT", os.path.abspath(os.path.join(os.path.di
 PROFILE = os.environ.get("ST_PROFILE", "dev")
 SHOTS = os.environ.get("SHUANGTIAN_SHOTS", os.path.join(tempfile.gettempdir(), "st-visual"))
 os.makedirs(SHOTS, exist_ok=True)
-app = sys.argv[1] if len(sys.argv) > 1 else "mdeditor"
+app = sys.argv[1] if len(sys.argv) > 1 else "gallery"
 ctl = f"{SHOTS}/gdb-{app}-control.json"
 for path in (ctl, f"{SHOTS}/gdb-{app}.log"):
     if os.path.exists(path):

@@ -2,7 +2,7 @@
 """霜天视觉与稳定性验证：
 ① dev 档跑完整交互序列（查询/操作/输入/DPI 切换/主题切换）；
 ② san 档（ASan+UBSan）跑同一序列，确认零 sanitizer 报告；
-③ 产出多张截图供人眼核验（DPI 1x/2x、亮/暗主题、mdeditor 与 gallery）。
+③ 产出多张截图供人眼核验（DPI 1x/2x、亮/暗主题、gallery 与 codeeditor）。
 """
 import glob
 import json
@@ -77,11 +77,11 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
             ("find", {"selector": "Button", "limit": 50}),
             ("visual", {}),
             ("capture", {"encode": "file", "path": f"{SHOTS}/{app}-{profile}-light.png"}),
-            ("invoke", {"id": {"mdeditor": "tool-bold", "gallery": "btn-submit", "codeeditor": "btn-theme"}[app],
+            ("invoke", {"id": {"gallery": "btn-submit", "codeeditor": "btn-theme"}[app],
                         "action": "click"}),
             ("input.mouse", {"kind": "click", "x": 420, "y": 720}),
             ("input.text", {"text": "霜天 · DPI 与流式",
-                            "id": {"mdeditor": "editor", "gallery": "input-search", "codeeditor": "editor"}[app]}),
+                            "id": {"gallery": "input-search", "codeeditor": "editor"}[app]}),
             ("wait", {"for": "stable", "timeout_ms": 2000}),
             # 脚本路径（仅 codeeditor 开启）：读界面 → 改界面 → 绑定事件 → 触发 → 读回状态。
             # 放在"主题切换"之前：改完文本紧接着截图，人眼能立刻确认脚本真的生效了。
@@ -126,7 +126,7 @@ def sequence(profile: str, app: str, shots: list[str]) -> int:
 total = 0
 shots: list[str] = []
 for profile, note in [("dev", "常规档"), ("san", "ASan+UBSan")]:
-    for app in ("mdeditor", "gallery", "codeeditor"):
+    for app in ("gallery", "codeeditor"):
         print(f"[{profile}/{app}] {note}")
         total += sequence(profile, app, shots)
 

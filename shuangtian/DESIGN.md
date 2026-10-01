@@ -92,7 +92,7 @@ shuangtian/
 ├── src/<层>/*.cpp        # 实现（与头同名优先）
 │   └── **/platform_*.cpp # 平台/系统 API 单点封装（禁令受控例外）
 ├── tests/<层>_<模块>_test.cpp
-├── examples/{gallery,mdeditor,codeeditor}/
+ ├── examples/{gallery,codeeditor}/
 ├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
 │                         # batterycenter/embed；来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
 └── docs/                 # 控制协议规范、设计 token 表等
@@ -980,7 +980,6 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
   "targets": {
     "st": { "kind": "executable", "sources": ["tools/stpm/*.cpp"] },
     "gallery": { "kind": "executable", "sources": ["examples/gallery/*.cpp"] },
-    "mdeditor": { "kind": "executable", "sources": ["examples/mdeditor/*.cpp"] },
     "codeeditor": { "kind": "executable", "sources": ["examples/codeeditor/*.cpp"] }
   },
   "dependencies": {
@@ -1250,13 +1249,33 @@ mingw 交叉编译——这是 Windows 分支唯一的持续验证手段。
 | 示例 | 定位 | 检验点 |
 |---|---|---|
 | `gallery` | **组件集 / 设计系统巡检**：导航、统计卡、按钮矩阵、图标墙、表单、列表、进度条、主题与 DPI 切换、截图 | 组件库完整度、设计令牌一致性、DPI 正确性、控制通道可达性 |
-| `mdeditor` | **Markdown 编辑器**：工具栏、大纲、编辑区、实时预览、语法高亮源码视图、可拖拽分栏、实时统计、文件保存/打开对话框、**流式生成演示**（模拟 LLM token 流逐块喂给预览） | **完备性**（编辑→解析→高亮→预览→读写→对话框→主题→DPI→控制通道全链路）、**易用性**（一个可用编辑器 ≈ 数百行组装代码）、**高阶定制**（四个自绘组件全部只依赖 `Element` 的四个扩展点） |
+| `codeeditor` | **VSCode 式代码编辑器**：标题栏/菜单栏/活动栏+侧栏（资源管理器·搜索·源代码管理·运行·扩展）/多标签编辑区（修改点、可关闭）/底部面板（问题·输出·终端）/状态栏；命令面板（Ctrl+Shift+P）、全局快捷键、8 种内置语言 + 自定义语言 `stlog` | **易用性**（一个 IDE 形态界面 ≈ 数百行声明式组装，全部用内置组件，零自绘）、**组件库覆盖度**（MenuBar/Tabs/Tree/List/Overlay/快捷键在同一真实形态下的协同）、**控制通道全链路**（多编辑器实例的属性面与动作） |
 
-`mdeditor` 里的四个定制组件是"高阶定制能力"的实证：
-`SourceView`（带行号与 Markdown 语法着色的源码视图）、`OutlinePanel`（解析 `st::md` 语法树得到可点击大纲）、
-`SplitHandle`（可拖拽分栏）、`StatsBar`（实时字数/词数/行数/块数与阅读时长）。
-它们**没有改动框架任何一行代码**——只用 `measure`/`arrange`/`paint_content`/`on_event` 四个扩展点，
-复用同一套主题令牌与文本端口，即获得与内置组件一致的视觉语言。这正是"组合式扩展点 + 统一令牌"的设计目标。
+`codeeditor` 的重写史本身是框架演进的一个注脚（详见 §8.1.1）：早期版本靠**自绘定制组件**（Markdown 编辑器 `mdeditor` 的 SourceView/OutlinePanel/SplitHandle/StatsBar）验证扩展点闭环；重写后同样的 IDE 形态**全部由内置组件组装**——证明组件库覆盖度已从"能扩展出来"进化到"开箱即有"。
+
+### 8.1.1 演进反推：从两个示例看组件库的下一步
+
+把示例更替当成一次**对框架的测量**：同一形态（桌面 IDE）在两个时代用两种写法实现，差值就是框架这两年的实际演进；而新写法里仍然要"绕一绕"的地方，就是下一步该长的能力。反推结论（按证据强度排序）：
+
+**① 已经闭环的：扩展点 → 内置化**
+- mdeditor 时代（已删除）：四个自绘组件（SourceView/OutlinePanel/SplitHandle/StatsBar）只用 `Element` 四扩展点写成——证明"框架没给的也能长出来"；
+- VSCode 重写：同样的编辑器形态零自绘——Tabs（key 同步/修改点/可关闭/溢出滚动）、Tree、MenuBar+MenuPanel、List、Overlay、register_shortcut 全部内置；
+- 演进方向被验证：**组件先在示例里自绘验证形态，形态稳定后内置化**。这条路径本身就是框架的扩展策略。
+
+**② 被编辑器形态逼出来的能力（ui_root.hpp 注释自证）**
+- `register_shortcut`（快捷键表先于焦点链）：注释明写"编辑器形态的 Ctrl+S/Ctrl+W/Ctrl+Tab 需要先于一切组件的落点"——没有这个，文本组件吞键后全局快捷键永远不可靠；
+- `Tabs::sync_tabs`（按 key 对齐、保留修改点与活动态）：多标签编辑是它存在的直接理由；
+- `OverlayLayout::FillViewport`：注释明写"每个应用重复造轮子的历史缺口"——命令面板/模态遮罩的标准形态。
+
+**③ 重写中暴露、仍需演进的缺口**
+- **桌面窗框/标题栏**：示例只能用装饰性图标模拟窗口控制（— □ ×）——平台 shell 层应提供系统标题栏融入或自绘窗框，目前应用层无从谈起；
+- **SplitView 内置化**：SplitHandle 曾是 mdeditor 的自绘组件，重写后编辑器侧栏/主区/面板仍无拖拽分栏——它该从"示例级自绘"升为框架组件；
+- **命令面板通用组件**：本次在示例里手写了 CommandPalette（FillViewport + 过滤列表 + 键盘导航）——与 MenuPanel/SelectPanel 同族，值得内置为 `CommandPalette`；
+- **单行 Input 的动作面**：`TextArea` 支持 `invoke submit`，单行 `Input` 没有（本次交互验证发现）——DESIGN §8.2 第 26 条同族缺口（API 存在但动作面未实现）；
+- **虚拟化长列表**：终端/输出面板用 ScrollView + Text 累积全文，日志长了会退化——需要虚拟化 List（按可见行复用元素）；
+- **编辑器分组**：VSCode 的编辑器组（左右分屏各持独立标签组）当前无法用 Panel 组合自然表达，需要容器级支持。
+
+**④ 文档口径**：本节描述的是"从代码反推的方向"，不是承诺——各项进入 BACKLOG.md 后按实际需要排期。
 
 ### 8.2 实战缺陷与修复（无头协同开发暴露的真实问题）
 
@@ -1498,7 +1517,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**481 用例 / 13468 断言**） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
 | 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（230 文件、6 处登记豁免） |
-| 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/mdeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
+| 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/codeeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
 | 小字锐度量尺 | `tools/stem_phase_probe.cpp`（竖笔画边缘相位与过渡带，支持 `--fit=normal` 对比拟合前后）、`tools/hinting_gain_probe.cpp`（用 FreeType 量各 hinting 档的网格对齐率）、`tools/grid_fit_report.cpp`（中间调占比 + 墨量变化） | 手工编译运行 | 见 §4.3.2 |
@@ -1521,7 +1540,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
-| **v0.1** | core / codec / raster（含 **DPI 缩放**）/ text / md / ui（组件库）/ shell(headless) / control(TCP) / stpm / gallery + mdeditor / 子代理 / 文档 | ✅ 已完成 |
+| **v0.1** | core / codec / raster（含 **DPI 缩放**）/ text / md / ui（组件库）/ shell(headless) / control(TCP) / stpm / gallery + codeeditor / 子代理 / 文档 | ✅ 已完成 |
 | **v0.1+（本期追加）** | ① **Windows 宿主 + MSVC 首选**（自举 / 标志翻译 / 依赖追踪）② **GPU 渲染全链路**（D3D11 设备层 → 着色器原语 → 路径 → **DXGI swapchain 呈现**，见 §8.3）③ **三维与网格**（平台中立的 `Scene3D` + **软件实现**：z-buffer / 逐像素光照 / 近面裁剪；`Mesh` 生成与 OBJ 加载；原 OpenGL 方案经评估后移除，见 §8.4）④ **动画与过渡**（悬浮特效、时间轴推进、续帧协议）⑤ 性能优化（整帧重绘 63.2→≈12 ms）⑥ **视口剔除**（屏幕外不再绘制）| ✅ 已完成 |
 | **v0.1.5（画廊全场景）** | ① 画廊补齐 Dialog/Toast/Tooltip/TextArea/禁用态/表格选中行/实时统计卡（28 组件全部有可视化场景）② `Toast` 自动消失（帧时间轴）③ `Table` 选中行（视觉+语义+属性）④ `TextArea` 属性面补齐 ⑤ **叠加层 z 序修正**（浮层在景上）+ `find/query` 覆盖叠加层 ⑥ `SceneView` 逐帧调试输出移除 | ✅ 已完成 |
 | v0.2 | 文本选择与复制、更多组件（日期选择、图表）、X11 / Wayland 窗口后端 | 待做 |

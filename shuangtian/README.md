@@ -47,15 +47,14 @@ shuangtian/
 ├── CONVENTIONS.md   # 编码契约：全现代 C++20 + 禁用易错特性（编译器强制 + st lint 扫描）
 ├── DESIGN.md        # 权威设计（分层、接口、协议、DPI、包管理、里程碑）
 ├── README.md        # 本文件
-├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / mdeditor / st 自身）
+├── st.pkg           # 工程清单（由 stpm 读取；目标：gallery / codeeditor / st 自身）
 ├── bootstrap.sh     # 自举（Linux/macOS）：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
 ├── bootstrap.ps1    # 自举（Windows）：同上，自动定位 MSVC（vswhere + vcvars64）注入环境
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
 ├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
 ├── examples/gallery/    # 示例一：组件集 / 设计系统巡检
-├── examples/mdeditor/   # 示例二：Markdown 编辑器（含四个自绘定制组件）
-├── examples/codeeditor/ # 示例三：代码编辑器（语法高亮 / 自定义语言 / 只读查看器）
+├── examples/codeeditor/ # 示例二：代码编辑器（VSCode 式布局 / 多标签 / 语法高亮 / 自定义语言）
 ├── tests/               # 自研测试框架（ST_TEST/ST_CHECK…），st test 运行
 └── tools/               # stpm 源码 + 联调脚本（Python）
 ```
@@ -72,10 +71,9 @@ cd shuangtian
 
 # ② 构建示例（首次全量；增量通常秒级）
 ./build/bin/st build gallery --profile dev
-./build/bin/st build mdeditor --profile dev
 
 # ③ 无头启动（自动分配控制端口并写控制文件）
-./build/dev/bin/mdeditor --headless --control-port 0 --control-file /tmp/st-ctl.json &
+./build/dev/bin/gallery --headless --control-port 0 --control-file /tmp/st-ctl.json &
 
 # ④ 用控制通道看与操作（tools/st_probe.py 是最小示例客户端）
 python3 tools/st_probe.py            # 或以控制文件为参数
@@ -169,7 +167,7 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 |---|---|---|
 | 全量（dev，PCH + 8 路并行 + lld） | `st build gallery --profile dev` | **≈ 56 s**（编译 51.4 s + 链接 4.5 s） |
 | 全量（quick，`-O0`，最快迭代） | `st build gallery --profile quick` | **≈ 33 s**（实测 30 s 编译 + 3 s 链接） |
-| 换一个应用目标（复用库对象） | `st build mdeditor --profile dev` | **5.0 s**（仅链接） |
+| 换一个应用目标（复用库对象） | `st build codeeditor --profile dev` | **5.0 s**（仅链接） |
 | 改 1 个 `.cpp` | 同上 | **3.1 s**（只重编该单元 + 重链） |
 | 无改动 | 同上 | **≈ 0.02 s**（跳编译与链接：实测 22 ms） |
 | 改 1 个公共头 | 同上 | 只重编依赖该头的单元（依据 `.d` 依赖图） |
@@ -181,24 +179,8 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 ### `gallery` — 组件集 / 设计系统巡检
 导航栏、统计卡、按钮矩阵（5 变体 × 3 尺寸）、图标墙（50+ 自绘矢量图标）、表单、列表、进度条、主题切换、DPI 切换、截图按钮；覆盖组件库与设计令牌的一致性检查（`png` 中 DPI 2x 截图）。
 
-### `codeeditor` — 代码编辑器（语法高亮 + 自定义语言）
-左侧可写编辑器、右侧只读查看器；顶部一键切换 8 种内置语言样例（C++/Python/Rust/JSON/YAML/HTML/SQL/Diff）
-加一个**运行时注册的自定义语言** `stlog`（业务日志格式）；亮/暗主题、DPI 切换、Ctrl+/ 注释、拖拽选择等。
-既是能力演示，也是"文件编辑器"这一形态的最小完整实现。
-
-### `mdeditor` — Markdown 编辑器（完备性 / 易用性 / 高阶定制）
-左侧大纲 + 中间编辑区 + 右侧实时预览 + 底部语法高亮源码视图 + 工具栏 + 状态栏；文件保存/打开对话框、主题与 DPI 切换、**流式生成演示**（按 token 节奏 `append_chunk` 进预览）。
-
-其中四个**框架里没有的组件**全部只靠 `Element` 的四个扩展点（`measure`/`arrange`/`paint_content`/`on_event`）写成，并复用同一套主题令牌与文本端口：
-
-| 定制组件 | 做什么 | 说明 |
-|---|---|---|
-| `SourceView` | 带行号 + Markdown 语法着色的源码视图 | 逐行分层着色（标题/引用/围栏/行内码/强调），自带滚动 |
-| `OutlinePanel` | 可点击文档大纲 | 消费 `st::md` 解析树，点击跳转预览 |
-| `SplitHandle` | 可拖拽左右分栏 | 拖拽中实时改比例 |
-| `StatsBar` | 实时字数/词数/行数/块数/阅读时长 | 每次编辑即时重算 |
-
-这正是"高阶定制能力"的判据：**不需改动框架代码，也不需新增内置控件**。
+### `codeeditor` — 代码编辑器（VSCode 式布局 + 多标签 + 语法高亮）
+按 VSCode 的信息架构组装：标题栏 / 菜单栏 / 活动栏 + 侧栏（资源管理器·搜索·源代码管理·运行·扩展）/ 标签页编辑区（修改点、可关闭）/ 底部面板（问题·输出·终端）/ 状态栏（分支、错误警告计数、光标位置、语言、主题）。多标签编辑、命令面板（Ctrl+Shift+P）、Ctrl+S/W/Tab 全局快捷键、8 种内置语言样例 + 运行时注册的自定义语言 `stlog`；全部用内置组件组装，零自绘定制控件。
 
 ## 与歌白协同（智能体开发闭环）
 
