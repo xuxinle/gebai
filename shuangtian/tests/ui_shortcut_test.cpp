@@ -4,7 +4,7 @@
 /// 1. 快捷键表**先于**焦点链：文本编辑器持有焦点时 Ctrl+S 仍能触发全局保存；
 /// 2. 未识别组合键必须放行冒泡（`on_event` 返回值契约：true=消费/false=放行）；
 /// 3. Ctrl+Shift+Tab 不被 Tab 焦点遍历截胡：先给焦点元素，未消费才进焦点环
-///    （且 `consumes_key` 声明「Tab 自含」的编辑器不参加焦点环）；
+///    （「Tab 自含」由 `on_event` 返回值表达：可编辑的编辑器消费它，只读时交回焦点环）；
 /// 4. 不可见/不拦截的浮层不截命中与键盘（关闭的命令面板不再挡住文件树）。
 
 #include "st/test/test.hpp"
@@ -190,13 +190,47 @@ ST_TEST(shift_tab_reaches_focused_element_first) {
 }
 
 ST_TEST(code_editor_tab_stays_inside_until_read_only) {
-  CodeEditor editor;
-  // 可编辑：Tab 自含（缩进），焦点环跳过它
-  ST_CHECK(!editor.consumes_key("Tab"));
-  ST_CHECK(editor.consumes_key("Enter"));
-  // 只读：Tab 交回焦点环
-  editor.set_read_only(true);
-  ST_CHECK(editor.consumes_key("Tab"));
+  // **行为**断言（不是声明）：Tab 是否交回焦点环，由 `on_event` 的返回值决定。
+  const auto make_root = [](CodeEditor*& editor, st::ui::Element*& sibling) {
+    auto root = std::make_unique<UiRoot>();
+    auto panel = std::make_unique<st::ui::Panel>(st::ui::FlexDirection::Column);
+    auto editor_ptr = std::make_unique<CodeEditor>();
+    editor = editor_ptr.get();
+    auto plain = std::make_unique<Plain>();
+    sibling = plain.get();
+    sibling->set_focusable(true);
+    panel->add_child(std::move(editor_ptr));
+    panel->add_child(std::move(plain));
+    root->set_content(std::move(panel));
+    root->layout(true);
+    return root;
+  };
+
+  // 可编辑：Tab 自含（插入缩进），焦点不动
+  {
+    CodeEditor* editor = nullptr;
+    st::ui::Element* sibling = nullptr;
+    auto root = make_root(editor, sibling);
+    root->set_focus(editor);
+    ST_CHECK(press(*root, "Tab"));
+    ST_CHECK(root->focused() == editor);                // 被组件消费：焦点不动
+    ST_CHECK_EQ(editor->text(), std::string("    "));    // 确实插入了缩进（默认 4 空格）
+    (void)sibling;
+  }
+
+  // 只读：Tab 不再有编辑语义 → **必须交回焦点环**。否则键盘焦点被永久扣在只读视图上：
+  // Tab/Shift+Tab 均无响应（只读编辑器把键报成“已消费”，而它什么也不做）——
+  // 而只读视图恰恰是焦点环里能被 Tab 走到的那种元素。
+  {
+    CodeEditor* editor = nullptr;
+    st::ui::Element* sibling = nullptr;
+    auto root = make_root(editor, sibling);
+    editor->set_read_only(true);
+    root->set_focus(editor);
+    ST_CHECK(press(*root, "Tab"));
+    ST_CHECK(root->focused() == sibling);        // 焦点已移走（无键盘陷阱）
+    ST_CHECK_EQ(editor->text(), std::string{});  // 只读：文本未被改动
+  }
 }
 
 // ————————————————————————————————————————————————————————————————————————————

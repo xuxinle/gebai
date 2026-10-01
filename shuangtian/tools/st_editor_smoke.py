@@ -142,6 +142,14 @@ def smoke_codeeditor(shots: pathlib.Path) -> None:
         shot = client.ok("capture", {"id": "editor", "encode": "file",
                                      "path": str(shots / "editor-smoke-cursor.png")})
         check(bool(shot.get("path")), f"编辑区截图已落盘: {shot.get('path')}（人工看光标竖线）")
+
+        # 只读视图不得成为键盘陷阱：Tab 必须能把焦点送出去
+        # （只读组件在焦点环里走得到，若仍把 Tab 报成“已消费”就再也出不来了）
+        client.ok("invoke", {"id": "viewer", "action": "focus"})
+        focused_before = client.ok("input.key", {"kind": "press", "key": "Shift"}).get("focused")
+        check(focused_before == "viewer", f"只读视图可聚焦: {focused_before}")
+        after_tab = client.ok("input.key", {"kind": "press", "key": "Tab"}).get("focused")
+        check(after_tab not in ("", "viewer"), f"只读视图上 Tab 逃出（焦点移到 {after_tab}）")
         client.close()
     finally:
         stop(process)

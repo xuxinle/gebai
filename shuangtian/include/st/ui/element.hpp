@@ -374,12 +374,6 @@ class Element {
   /// 默认 `true`；「逻辑上在场但不应拦截输入」的形态（隐藏浮层、透明遮罩）覆写为
   /// `false` 或返回 `visible()`——不可见的浮层不再截住下层内容。
   [[nodiscard]] virtual auto intercepts_input() const noexcept -> bool { return true; }
-  /// 是否参加 Tab 焦点环：文本编辑类（Tab 有自含语义——缩进/焦点内移动）覆写为
-  /// `false`，Tab 键将穿透它们继续焦点遍历。
-  [[nodiscard]] virtual auto consumes_key(std::string_view key) const -> bool {
-    (void)key;
-    return true;
-  }
   /// 行为注入：在组件自身实现**之后**、冒泡**之前**追加一次回调（免子类化的小交互，
   /// 如「拖拽把手改宽度」）。返回 true = 已消费（冒泡停止）。仅对直接派发到本元素的
   /// 事件调用（祖先/后代的不经过本 handler）。

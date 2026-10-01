@@ -1060,9 +1060,13 @@ auto CodeEditor::handle_key(const RenderContext& context, const Event& event) ->
   if (key == "Enter") {
     insert_newline();
   } else if (key == "Tab") {
+    // 只读：Tab 无编辑语义 → **放行冒泡**，由 UiRoot 交回焦点环。
+    // 若仍报“已消费”，焦点会被永久扣在只读视图上（Tab/Shift+Tab 都无响应）——
+    // 只读视图恰恰是焦点环里走得进的元素。
+    if (read_only_) return false;
     if (has_selection()) {
       indent_selection(extend);
-    } else if (!read_only_) {
+    } else {
       insert_text(indent_unit());
     }
   } else if (key == "Backspace") {

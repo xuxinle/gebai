@@ -70,12 +70,6 @@ class CodeEditor : public Element {
     mark_highlight_dirty();
   }
   [[nodiscard]] auto highlight_enabled() const noexcept -> bool { return highlight_enabled_; }
-
-  /// Tab 在编辑器内自含（缩进/块缩进），不参加 Tab 焦点环——但仅当可编辑；
-  /// 只读态下 Tab 不再有编辑语义，交回焦点环。
-  [[nodiscard]] auto consumes_key(std::string_view key) const -> bool override {
-    return !(key == "Tab" && !read_only_);
-  }
   void set_tab_width(int width);
   [[nodiscard]] auto tab_width() const noexcept -> int { return tab_width_; }
   /// 插入空格而非制表符（默认 true）。
