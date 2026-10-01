@@ -51,6 +51,10 @@ enum class Role : std::uint8_t {
   Image,
   Markdown,
   Code,
+  Tree,
+  TreeItem,
+  Menu,
+  MenuItem,
 };
 
 [[nodiscard]] constexpr auto to_string(Role role) noexcept -> std::string_view {
@@ -82,6 +86,10 @@ enum class Role : std::uint8_t {
     case Role::Image: return "image";
     case Role::Markdown: return "markdown";
     case Role::Code: return "code";
+    case Role::Tree: return "tree";
+    case Role::TreeItem: return "tree_item";
+    case Role::Menu: return "menu";
+    case Role::MenuItem: return "menu_item";
   }
   return "none";
 }
