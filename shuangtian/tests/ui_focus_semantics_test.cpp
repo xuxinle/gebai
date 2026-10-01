@@ -254,6 +254,33 @@ ST_TEST(semantics_flags_preserve_base_state_for_every_override) {
   }
 }
 
+ST_TEST(input_and_textarea_render_focus_ring_when_focused_via_root) {
+  // 有焦点绘制的组件都要经 `UiRoot::set_focus`（真实路径）验证**可见变化**：
+  // 直接 set_focused 会读写同侧，遮蔽缺陷下双双通过。
+  const std::vector<std::pair<const char*, std::unique_ptr<Element> (*)()>> cases = {
+      {"Input", []() -> std::unique_ptr<Element> { return std::make_unique<st::ui::Input>(); }},
+      {"TextArea", []() -> std::unique_ptr<Element> { return std::make_unique<st::ui::TextArea>(); }},
+  };
+  for (const auto& [name, factory] : cases) {
+    (void)name;
+    UiRoot root;
+    mount(root, factory());
+    Element* element = root.content();
+    ST_REQUIRE(element != nullptr);
+
+    const Canvas blurred = render(root);
+    ST_CHECK(root.set_focus(element));
+    const Canvas focused = render(root);
+
+    // 焦点环 + 边框/图标提色：两帧必须有可见差异
+    const PixelDiff diff = diff_pixels(blurred, focused);
+    ST_CHECK(diff.any);
+    // 其后的失焦渲染回到未聚焦帧（同一路径可逆）
+    ST_CHECK(root.set_focus(nullptr));
+    ST_CHECK(!diff_pixels(blurred, render(root)).any);
+  }
+}
+
 // ————————————————————————————————————————————————————————————————————————————
 // ⑤ 自动化读得到的框架级状态（`get` 的 props）
 // ————————————————————————————————————————————————————————————————————————————
