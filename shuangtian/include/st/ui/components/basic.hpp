@@ -177,11 +177,13 @@ class KeyValueRow : public Element {
   void apply_theme(const Theme& theme) override;
   void measure(const RenderContext& context, const Constraints& constraints) override;
   void paint_content(const RenderContext& context, raster::Surface& canvas) const override;
-  [[nodiscard]] auto semantics_text() const -> std::string override { return key_; }
+  [[nodiscard]] auto semantics_text() const -> std::string override { return label_; }
   [[nodiscard]] auto semantics_value() const -> std::string override { return value_; }
 
  private:
-  std::string key_{};
+  /// 显示标签（**不是** `Element::key_`）：基类的 key 是稳定逻辑身份（参与自动 id
+  /// `Type@key`），把界面文案当身份会让 id 随文案变动而漂移。
+  std::string label_{};
   std::string value_{};
 };
 

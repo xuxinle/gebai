@@ -504,7 +504,7 @@ void Divider::paint_content(const RenderContext& context, raster::Surface& canva
 // —— KeyValueRow ——
 
 KeyValueRow::KeyValueRow(std::string key, std::string value)
-    : key_(std::move(key)), value_(std::move(value)) {
+    : label_(std::move(key)), value_(std::move(value)) {
   style_.direction = FlexDirection::Row;
 }
 
@@ -529,7 +529,7 @@ void KeyValueRow::paint_content(const RenderContext& context, raster::Surface& c
   const float size = style_.font_size;
   const float line_height = port.line_height(size);
   const float y = bounds_.y + (bounds_.height - line_height) * 0.5f;
-  port.draw(canvas, key_, math::Point{bounds_.x, y}, size, context.theme.colors().text_muted);
+  port.draw(canvas, label_, math::Point{bounds_.x, y}, size, context.theme.colors().text_muted);
   const float value_width = port.measure_width(value_, size);
   port.draw(canvas, value_, math::Point{bounds_.right() - value_width, y}, size,
             context.theme.colors().text);

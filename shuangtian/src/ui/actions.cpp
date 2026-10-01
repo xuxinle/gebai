@@ -86,12 +86,12 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
       element.set_visible(st::json_as_bool(value, true));
       applied = true;
     } else if (name == "focused") {
+      // 接受与否如实回传：不可聚焦元素被 set_focus 拒绝时不能报「已应用」
       if (st::json_as_bool(value)) {
-        root.set_focus(&element);
-      } else if (root.focused() == &element) {
-        root.set_focus(nullptr);
+        applied = root.set_focus(&element);
+      } else {
+        applied = root.focused() != &element || root.set_focus(nullptr);
       }
-      applied = true;
     } else {
       // 元素自己声明的属性面优先；未声明时回退到一份通用名（见函数注释）。
       const auto declared = element.property_names();
@@ -118,8 +118,8 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
   if (action == "focus" || action == "blur") {
     // 焦点必须经 UiRoot 设置：键盘事件按 root 的焦点元素派发，
     // 只改元素自身的 focused 标志会导致后续 input.text/input.key 无处可送。
-    root.set_focus(action == "focus" ? &element : nullptr);
-    return true;
+    // 返回值 = 是否真的应用（不可聚焦元素返回 false，调用方据此报未生效）。
+    return action == "blur" ? root.set_focus(nullptr) : root.set_focus(&element);
   }
   // 先让元素处理动作，**再**通知观察者（与 `UiRoot::dispatch_to` 同序）：
   // 否则脚本写入会被 C++ 处理器随即覆盖，表现为"JS 改了没生效"。

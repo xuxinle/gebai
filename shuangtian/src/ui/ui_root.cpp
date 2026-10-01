@@ -442,8 +442,11 @@ auto UiRoot::focused() -> Element* {
   return focused_;
 }
 
-void UiRoot::set_focus(Element* element) {
-  if (focused_ == element) return;
+auto UiRoot::set_focus(Element* element) -> bool {
+  // 不可聚焦元素拒绝接受焦点（见头文件声明处）：`focusable()` 是「能否持有焦点」的
+  // 契约，Tab 焦点环按它筛选——无条件赋值会产生「焦点在这、Tab 环里没它」的状态分裂。
+  if (element != nullptr && !element->focusable()) return false;
+  if (focused_ == element) return true;
   prune_stale_pointers();  // `focused_` 可能已悬垂：清掉再走 FocusOut 通告
   const RenderContext context = render_context();
   if (focused_ != nullptr) {
@@ -463,6 +466,7 @@ void UiRoot::set_focus(Element* element) {
   }
   ++version_;
   (void)context;
+  return true;
 }
 
 void UiRoot::collect_focus_order(Element& element, std::vector<Element*>& order) {

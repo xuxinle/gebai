@@ -335,7 +335,9 @@ ST_TEST(code_editor_highlight_renders_tokens) {
   fx.editor.set_font_size(14.0f);
   fx.editor.set_language("cpp");
   fx.editor.set_text("// 注释\nint value = 42;");
-  fx.editor.set_focusable(true);
+  // 组件级单测（不挂根）：这里直接置位即可。**焦点相关的回归不能这么写**——
+  // 直接 set_focused 会让「组件遮蔽了基类成员」这类缺陷读写落在同一侧而被掩盖，
+  // 必须经 UiRoot::set_focus（见 tests/ui_focus_semantics_test.cpp）。
   fx.editor.set_focused(true);
 
   st::raster::Canvas canvas = st::raster::Canvas::for_logical_size(800, 400, 1.0f);

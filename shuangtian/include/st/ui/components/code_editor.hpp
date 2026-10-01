@@ -224,7 +224,6 @@ class CodeEditor : public Element {
   bool read_only_{false};
   bool show_line_numbers_{true};
   bool highlight_enabled_{true};
-  bool focused_{false};
 
   // 渲染缓存（`mutable`：`paint_content` 为 const，但需要惰性重建）。
   //

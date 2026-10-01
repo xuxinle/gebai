@@ -372,8 +372,6 @@ FATAL service=core 磁盘写入失败，进程退出
   auto dark_button = std::make_unique<Button>("暗色", Button::Variant::Ghost, Button::Size::Small);
   dark_button->set_id("btn-theme");
   dark_button->set_icon("moon");
-  auto editor_ref = editor_ptr;
-  auto viewer_ref = viewer_ptr;
   auto* dark_ptr = dark_button.get();
   dark_button->on_click = [&app, dark_ptr, root]() {
     const bool dark = app.root().theme().mode() == st::ui::ThemeMode::Light;
@@ -461,10 +459,6 @@ DEBUG service=gateway 命中缓存 true
 WARN  service=renderer 字形缓存接近上限
 ERROR service=net 连接失败 resp=null
 )");
-  if (auto* focus = editor_ptr; focus != nullptr) {
-    editor_ref->set_focusable(true);
-    viewer_ref->set_focusable(true);
-  }
 
   app.set_content(std::move(page));
   if (auto started = app.start(); !started) {
@@ -501,8 +495,6 @@ ERROR service=net 连接失败 resp=null
   }
   st::print("codeeditor 退出：{} 帧，语言 {}，可用语言 {} 种\n", frames, editor_ptr->language(),
             CodeEditor::available_languages().size());
-  (void)editor_ref;
-  (void)viewer_ref;
   return 0;
 }
 

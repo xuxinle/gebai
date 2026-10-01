@@ -93,6 +93,10 @@ inline constexpr std::size_t kMaxUndoDepth{256};
 
 CodeEditor::CodeEditor() {
   set_id("code-editor");
+  // 文本编辑类默认可聚焦（与 Input/TextArea 同口径）：“先有焦点才能键盘激活、
+  // 键盘激活又要求先有焦点”是死循环——鼠标点击的聚焦路径只认 focusable()，
+  // 默认 false 会让点击永远聚焦不了编辑器。
+  set_focusable(true);
   style_.direction = FlexDirection::Column;
   style_.clip_children = true;
   style_.background = math::Color{0, 0, 0, 0};
@@ -1159,7 +1163,10 @@ auto CodeEditor::semantics_value() const -> std::string {
 }
 
 auto CodeEditor::semantics_flags() const -> SemanticsFlags {
-  SemanticsFlags flags{};
+  // 起手式必须是基类结果：`SemanticsFlags flags{}` 会**丢掉** visible/enabled/focused/
+  // hovered/pressed —— 焦点经 UiRoot::set_focus 设置时，语义树与 `:focused` 选择器
+  // 恒报 false（只直接调 set_focused 的单元测试看不出来）。
+  SemanticsFlags flags = Element::semantics_flags();
   flags.editable = !read_only_;
   flags.scrollable = true;
   flags.selected = has_selection();

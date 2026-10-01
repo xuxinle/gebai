@@ -97,7 +97,14 @@ class UiRoot {
     return shortcuts_.size();
   }
 
-  void set_focus(Element* element);
+  /// 设置键盘焦点（`nullptr` = 清除焦点）。
+  ///
+  /// **不可聚焦元素（`focusable() == false`）拒绝接受焦点**：返回 `false` 且焦点不变。
+  /// `focusable()` 是「能否持有焦点」的契约（Tab 焦点环按它筛选），无条件赋值会让状态
+  /// 分裂——root 焦点指向它、键盘派发给它，而 Tab 环跳过它。
+  /// 返回 `true` = 焦点状态已按请求应用（含「本就如此」的幂等情形）；
+  /// **调用方应当检查返回值**（控制通道/脚本据此如实报告，而不是静默丢弃焦点请求）。
+  auto set_focus(Element* element) -> bool;
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);

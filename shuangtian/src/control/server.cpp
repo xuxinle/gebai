@@ -748,7 +748,17 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       event.kind = ui::EventKind::TextInput;
       event.text = json_get_string(params, "text");
       if (const std::string target = json_get_string(params, "id"); !target.empty()) {
-        if (ui::Element* element = find_element(target); element != nullptr) root.set_focus(element);
+        // 指定了目标就必须真把文本送进去：目标不存在或不可聚焦时**明确报错**——
+        // 默默不回，事件会落到旧焦点元素上（写错元素比报告失败危险得多）。
+        ui::Element* element = find_element(target);
+        if (element == nullptr) {
+          return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target));
+        }
+        if (!root.set_focus(element)) {
+          return unexpected(ErrorCode::Invalid,
+                            std::format("元素不可聚焦（focusable() == false），文本无法送达: {}",
+                                        target));
+        }
       }
     } else {
       const std::string kind = json_get_string(params, "kind", "press");
@@ -1081,7 +1091,12 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     if (action == "focus") {
       const std::string target = json_get_string(params, "id");
       if (target.empty()) return unexpected(ErrorCode::Invalid, "app.focus 需要 id");
-      root.set_focus(find_element(target));
+      ui::Element* element = find_element(target);
+      if (element == nullptr) return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target));
+      if (!root.set_focus(element)) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("元素不可聚焦（focusable() == false）: {}", target));
+      }
       Json result = Json::object();
       result["ok"] = true;
       return result;
