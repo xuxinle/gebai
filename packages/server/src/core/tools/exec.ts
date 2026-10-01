@@ -55,10 +55,6 @@ function scriptRequiresApproval(args: Record<string, unknown>, ctx?: ToolContext
   return true
 }
 
-const SCRIPT_APPROVAL_PARAM = {
-  approval: { type: "boolean", description: "可选：本次调用是否需审批（默认 true）；仅对明确安全的只读命令（cat/ls/git status 等）或测试/静态检查类（bun test、pytest、tsc、eslint 等）可设 false（服务端强制白名单校验，不满足仍会弹审批）；风险命令勿关闭" },
-}
-
 /** 脚本 stdin 序列化：对象/数组转 JSON 文本（双引号，Python json.loads 可直接解析），其余按字符串。 */
 function scriptInput(v: unknown): string | undefined {
   if (v == null) return undefined
@@ -68,18 +64,18 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令（Windows 经 PowerShell；POSIX 经 bash -c），按所在平台的 shell 语法书写。输出以 stdout 为准；退出码读返回结果的 exitCode 字段（无需在命令里输出）。指定工作目录用 workdir 参数或 project 参数（非默认目录执行时输出末尾标注实际目录）。安全模式下降级为只读命令白名单，重定向限定用户目录内。命令统一在后台任务机制上执行：同步调用最多等 timeout 秒（默认 60、上限 120），窗口内结束即按同步返回；**超窗口不终止命令**，自动转后台并返回 taskId（用 bg_task 查询/等待/终止）。已知的长耗时命令（构建/测试/安装）直接传 async:true 立即返回 taskId，不必等窗口。",
+  description: "执行 Shell 命令（Windows 经 PowerShell，POSIX 经 bash -c），按平台 shell 语法书写；stdout 为输出，退出码读 exitCode 字段。两种执行模式：① 同步（默认）——timeout 窗口（默认 60、上限 120 秒）内结束直接返回结果；超窗不终止命令，转后台返回 taskId。② 后台（async:true）——长耗时命令（构建/测试/安装）直接后台执行，立即返回 taskId。后台任务用 bg_task 查询/等待/终止。strict:true 时非 0 退出抛工具级错误（默认 false；转后台时退出码未知、不触发）。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(
     {
       command: { type: "string" },
-      workdir: { type: "string", description: "可选：命令工作目录（相对路径基于会话工作目录/项目根解析）——替代在命令里串联 cd，不传用默认" },
-      input: { type: "string", description: "可选：作为命令 stdin 的输入数据" },
-      timeout: { type: "number", description: "可选：同步等待窗口秒数（默认 60、上限 120）——窗口内结束按同步返回，超窗口命令自动转后台并返回 taskId（命令不被终止；后台生命周期默认 30 分钟，用 bg_task action=stop 可提前终止）。async:true 时该参数为任务生命周期上限（默认 1800、上限 3600）" },
-      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」）；默认 false 非 0 退出作为正常结果返回。（同步等待超时转后台时退出码未知，strict 不触发）" },
-      async: { type: "boolean", description: "可选：true 后台异步执行——立即返回 taskId（适合构建/测试等长命令）；后续用 bg_task 查询输出、等待完成或终止" },
-      ...SCRIPT_APPROVAL_PARAM,
+      workdir: { type: "string", description: "工作目录（相对路径基于会话工作目录/项目根解析），替代在命令里串联 cd" },
+      input: { type: "string", description: "作为命令 stdin 的输入数据" },
+      timeout: { type: "number", description: "超时秒数" },
+      strict: { type: "boolean" },
+      async: { type: "boolean" },
+      approval: { type: "boolean", description: "安全命令设为 false 跳过用户审批" },
     },
     ["command"],
   ),

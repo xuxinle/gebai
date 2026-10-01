@@ -671,10 +671,9 @@ export const pyTool: Tool = {
   parameters: schema(
     {
       code: { type: "string", description: "Python 程序源码（本地模式下可用工具桥：工具名即函数、tools.call、ctx/input 注入；`result = ...` 作为返回值）" },
-      input: { description: "可选：任意输入，脚本内经 `input` 引用（有桥时对象/数组原样注入为 dict/list，与 js 一致；纯脚本降级按 JSON 文本走 stdin）" },
-      timeout: { type: "number", description: "可选：执行超时秒数（默认 300，上限 540）" },
-      strict: { type: "boolean", description: "可选：true 时退出码非 0 抛工具级错误（js 编排「非 0 即中断」）；默认 false 非 0 退出作为正常结果返回" },
-      approval: { type: "boolean", description: "兼容参数：py 恒需审批（任意代码无法静态判定），免审标记不生效" },
+      input: { description: "任意输入，脚本内经 `input` 引用（有桥时对象/数组原样注入，与 js 一致；纯脚本降级按 JSON 文本走 stdin）" },
+      timeout: { type: "number", description: "执行超时秒数" },
+      strict: { type: "boolean" },
     },
     ["code"],
   ),
