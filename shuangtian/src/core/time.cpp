@@ -62,10 +62,10 @@ auto iso8601_utc(std::int64_t unix_millis) -> std::string {
 auto iso8601_now() -> std::string { return iso8601_utc(unix_ms()); }
 
 auto format_now(std::string_view format) -> std::string {
-  // 本地时间的字段分解（状态栏/日志前缀用途，时区跟随系统）。
+  // 本地时间的字段分解（状态栏/日志前缀用途，时区跟随系统）：平台差异下沉在
+  // platform_time.cpp（MSVC/MinGW 无 localtime_r；CONVENTIONS §10 第 1 条——差异只进平台层）。
   const std::time_t now = static_cast<std::time_t>(unix_ms() / 1000);
-  std::tm fields{};
-  (void)localtime_r(&now, &fields);
+  const std::tm fields = local_fields(now);
   std::string out;
   out.reserve(format.size() + 4);
   for (std::size_t index = 0; index < format.size(); ++index) {

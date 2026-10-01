@@ -33,7 +33,11 @@ jobs:
         run: ./build/bin/st lint
       - name: mingw 交叉编译（验证 Windows 分支可编译）
         working-directory: shuangtian
-        run: ./build/bin/st build gallery --toolchain=mingw
+        run: |
+          ./build/bin/st build gallery --toolchain=mingw
+          # 工具链自身也编一遍：`st` 链接的是框架平台层（core/platform_*、core/time 等），
+          # 只编 gallery 会漏掉只被 stpm 用到的平台代码（如 st::time 的本地时间分解）。
+          ./build/bin/st build st --toolchain=mingw
       - name: 无头视觉验证（无桌面环境正是霜天的设计场景）
         working-directory: shuangtian
         run: python3 tools/st_visual_check.py

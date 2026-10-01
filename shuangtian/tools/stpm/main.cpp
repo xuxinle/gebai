@@ -222,6 +222,8 @@ auto command_run(const Arguments& arguments) -> int {
   st::pkg::BuildOptions options;
   options.profile = arguments.get("profile", "release");
   options.target = arguments.positional.front();
+  // 交叉编译：`--toolchain=<名>`（与 build/test 同一口径）——不带此参数才走本机档
+  options.toolchain = arguments.get("toolchain", "");
   auto stats = st::pkg::build(*manifest, options);
   if (!stats) {
     std::fprintf(stderr, "%s\n", stats.error().message.c_str());
@@ -233,6 +235,12 @@ auto command_run(const Arguments& arguments) -> int {
   }
   st::print("运行: {}\n", stats->artifact);
   std::fflush(stdout);
+  // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 BuildStats.runs_on_host）
+  if (!stats->runs_on_host) {
+    std::fprintf(stderr, "错误: 交叉编译产物无法在宿主执行: %s（请在目标平台运行）\n",
+                 stats->artifact.c_str());
+    return 1;
+  }
   st::process::Options run_options;
   run_options.capture_output = false;
   auto result = st::process::run(stats->artifact, app_args, run_options);

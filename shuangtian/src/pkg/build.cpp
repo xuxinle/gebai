@@ -534,6 +534,12 @@ struct ResolvedToolchain {
   std::vector<std::string> extra_flags{};
   std::string directory_tag{};      ///< 目录隔离标记（空=本机档）
   [[nodiscard]] auto cross() const noexcept -> bool { return !directory_tag.empty(); }
+  /// 交叉产物能否在宿主直接执行：**目标平台 == 宿主平台**即放行（Windows 宿主上的
+  /// mingw 交叉档产出的是本机可执行的 PE——`st test --toolchain=mingw` 应照常跑）；
+  /// 目标与宿主不同（Linux 宿主编 mingw）仍拒绝，比 "Exec format error" 可读得多。
+  [[nodiscard]] auto runs_on_host() const noexcept -> bool {
+    return !cross() || platform == host_platform();
+  }
 };
 
 /// 档位目录名：`dev` 或 `dev-mingw`。
@@ -1362,6 +1368,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   }();
   if (up_to_date) {
     stats.artifact = output;
+    stats.runs_on_host = toolchain->runs_on_host();
     stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
     return stats;
   }
@@ -1372,6 +1379,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   // 记下本次链接的"成分"，下次据此判断能否跳过（写失败只是下次多链一次，不影响正确性）
   (void)fs::write_text(link_stamp_path, link_fingerprint);
   stats.artifact = output;
+  stats.runs_on_host = toolchain->runs_on_host();
   stats.elapsed_ms = (time::now_ns() - start_ns) / 1'000'000;
   return stats;
 }
@@ -1504,8 +1512,8 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   // `--list` 交测试进程处理（列出用例名后即退，不跑测试；filter 仍生效）
   if (list_only) args.push_back("--list");
   if (!filter.empty()) args.push_back(std::string(filter));
-  // 交叉编译产物不能在本机执行：明确告知（比 "Exec format error" 可读得多）
-  if (toolchain->cross()) {
+  // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 runs_on_host）
+  if (!toolchain->runs_on_host()) {
     return unexpected(ErrorCode::Unsupported,
                       std::format("交叉编译产物无法在宿主执行: {}（请在目标平台运行）", output));
   }

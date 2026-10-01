@@ -24,6 +24,15 @@
 > `'::getpid' has not been declared`**；而且那里的写法 `getpid() == 0 ? 0 : 0` 恒为 0，pid 从来没上报对过。
 > 正解：`process::current_id()`，Windows 侧走 `GetCurrentProcessId()`。
 
+> 反例（真实缺陷）：`st::time::format_now` 直接用 POSIX `localtime_r` → Linux/macOS 编得过，
+> **Windows（MSVC 与 MinGW）都没有这个函数**，交叉编译直接报未声明。
+> 正解：平台无关封装 `st::time::local_fields()`，实现在 `src/core/platform_time.cpp`
+> （POSIX `localtime_r`；Windows `localtime_s`，参数顺序相反）。回归 `tests/core_time_test.cpp`。
+>
+> **为什么公共代码里也该警惕**：`<ctime>` 是标准头、函数看着"通用"，很容易当成平台无关——
+> 而 C 运行时里的 **`*_s`/`localtime_r`/`gmtime_r` 这类可重入变体恰恰是平台分裂最严重的一类**。
+> 判断标准不是"头文件是否标准"，而是"两侧是否同名同参"。
+
 ## 2. 路径：一律 UTF-8 文本，进出都经 `st::fs`
 
 - 框架对内对外**统一 UTF-8** `std::string` 表示路径（与源码、JSON、脚本一致）。
@@ -80,6 +89,8 @@ ST_MAIN(run_app)
   用 `st build <target> --toolchain=<名>` 启用；**产物与中间目录隔离**为 `build/<档位>-<工具链>/`。
 - 交叉编译时**不套用宿主的可选特性**（如 `-fuse-ld=lld`/`mold`：宿主装的不一定支持目标格式）。
 - 交叉产物的**运行时行为**无法在本机验证，因此新增平台分支必须至少做到"交叉编译通过"。
+- **交叉 ≠ 一定不可在本机执行**：目标平台与宿主相同时（Windows 宿主上编 mingw 档）产物就是本机程序，
+  `st test`/`st run --toolchain=<名>` 照常执行；仅当目标≠宿主才拒绝并提示在目标平台运行。
 
 ## 6. 自查清单（提交前逐条过）
 

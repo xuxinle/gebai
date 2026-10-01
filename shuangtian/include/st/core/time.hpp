@@ -4,7 +4,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <string>
+#include <string_view>
 
 namespace st::time {
 
@@ -20,6 +22,11 @@ using SystemClock = std::chrono::system_clock;
 /// ISO-8601 UTC 时间串（`2026-01-31T04:05:06.789Z`）。
 [[nodiscard]] auto iso8601_utc(std::int64_t unix_millis) -> std::string;
 [[nodiscard]] auto iso8601_now() -> std::string;
+
+/// Unix 秒 → 本地时区的字段分解（时区跟随系统）。
+/// 平台实现集中在 `src/core/platform_time.cpp`（POSIX `localtime_r`；Windows 的
+/// MSVC/MinGW 无 `localtime_r`，用 `localtime_s`）；失败时返回全零字段（不抛异常）。
+[[nodiscard]] auto local_fields(std::time_t unix_seconds) -> std::tm;
 
 /// 当前时间按简单占位模板格式化：`YYYY-MM-DD HH:MM:SS` 与 `HH:MM:SS` 两个预设
 /// （`kFormatDateTime` / `kFormatTime`），模板里 `Y m d H M S` 逐字替换

@@ -48,6 +48,10 @@ struct BuildStats {
   std::string concurrency_reason{};
   bool pch_used{false};        ///< 是否用到预编译头
   bool linked{false};          ///< 本次是否真的执行了链接（产物已最新则跳过）
+  /// 产物能否在宿主直接执行：交叉档里**目标平台 == 宿主平台**的产物可跑
+  /// （Windows 宿主上 mingw 交叉档产出本机 PE）；目标≠宿主（Linux 宿主编 mingw）
+  /// 为 false——`st run`/`st test` 拒绝执行并提示在目标平台运行。
+  bool runs_on_host{false};
 };
 
 /// profile → 编译/链接标志（debug: -O0 -g / release: -O2 -DNDEBUG / san: ASan+UBSan）。

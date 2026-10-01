@@ -1015,8 +1015,13 @@ b::embed<"examples/gallery/assets/about.txt">().str()   // 编译期路径检查
 
 ```bash
 st build gallery --toolchain=mingw        # → build/dev-mingw/bin/gallery.exe（PE32+）
+st build st --toolchain=mingw             # 工具链自身也交叉编一遍（覆盖只被 stpm 用到的平台层）
+st run gallery --toolchain=mingw          # 宿主==目标才执行；否则拒绝并提示在目标平台运行
 st doctor                                 # 探测清单声明的工具链是否真的装了
 ```
+
+CI（`.github/workflows/shuangtian-ci.yml`）在 Linux 作业里对 **gallery 与 `st` 自身**都做
+mingw 交叉编译——这是 Windows 分支唯一的持续验证手段。
 
 **关键设计点**：
 
@@ -1025,7 +1030,7 @@ st doctor                                 # 探测清单声明的工具链是否
 | 目录隔离 `build/<档位>-<工具链>/` | PCH 是按"编译器 + 目标"生成的；对象/嵌入生成物混用会得到难解的编译错误 |
 | 系统库**整体接管**（工具链声明了就不追加本机默认） | 一份清单服务多平台，"本机需要哪些库"对目标可能是错的甚至不存在 |
 | 交叉编译不套 `-fuse-ld=lld/mold` | 宿主装的链接器不一定支持目标格式 |
-| `st test --toolchain` 明确拒绝执行 | 交叉产物无法在宿主运行；报"请在目标平台运行"比 `Exec format error` 可读 |
+| `st test`/`st run --toolchain` 按**目标平台是否等于宿主**决定能否执行 | 目标≠宿主：拒绝并提示"请在目标平台运行"（比 `Exec format error` 可读）；**目标==宿主放行**——Windows 宿主上的 mingw 档产出本机可执行的 PE，`st test --toolchain=mingw` 应照常跑（此前按"交叉即不可执行"一刀切，误拒了 Windows→Windows 场景） |
 | C 源沿用同一编译器 + `-x c` | 不引入第二套工具链（mingw 的 `g++ -x c` 即可编 QuickJS） |
 
 > 顺带：交叉编译是**平台分支的强制验证手段**。`CONVENTIONS §10` 因此规定
