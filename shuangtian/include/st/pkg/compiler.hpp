@@ -67,6 +67,18 @@ struct MsvcToolchain {
                                    std::vector<std::string>* dropped = nullptr)
     -> std::vector<std::string>;
 
+/// 预编译头**消费端**的追加标志（创建端在构建器里，见 `ensure_pch`）。
+///
+/// 两族拼法不同，且 GCC 语法在 MSVC 下是**三重灾难**（实测）：`-include` 被忽略
+/// （D9002）、后面的头名被当对象文件（D9024）、真正的源文件被挤掉（D9027），
+/// PCH 完全失效且后续单元包含链错乱。必须按族分派：
+/// - MSVC：`/Yu<header> /FI<header> /Fp<pch_file>`（`/I` 由调用方统一追加）；
+/// - GCC/Clang：`-include <header>`（PCH 靠 `.gch` 同名查找，无需显式指向）。
+/// `pch_file` 仅 MSVC 使用（GCC 系传空）。
+[[nodiscard]] auto pch_consume_args(CompilerKind kind, std::string_view directory,
+                                  std::string_view header, std::string_view pch_file)
+    -> std::vector<std::string>;
+
 /// 库名 → 该族/该目标平台的链接参数。
 /// `platform` 是**目标**平台（不是宿主）：`pthread`/`dl`/`m` 在 `windows` 上被丢弃。
 [[nodiscard]] auto link_library_arguments(CompilerKind kind, std::string_view platform,

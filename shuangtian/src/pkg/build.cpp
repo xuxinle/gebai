@@ -851,11 +851,14 @@ struct FrameworkFlags {
                                                               : std::format("-I{}", dir));
       }
       if (unit->third_party) args.push_back("-w");  // MSVC 的"关全部告警"恰好也是同一拼法
-      // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃
+      // PCH 只服务 C++ 单元；C 源是另一套语言标准，且与 PCH 创建端标志不同，不能吃。
+      // 标志拼装按族分派（见 `pch_consume_args`）：MSVC 必须用 `/Yu+/FI+/Fp`，
+      // GCC 写法 `-include` 在 cl 下是 D9002/D9024/D9027 三重错误（PCH 失效且包含链错乱）。
       if (pch_ptr != nullptr && !is_c && !unit->framework_unit) {
-        args.push_back(std::format("-I{}", pch_ptr->directory));
-        args.push_back("-include");
-        args.push_back(pch_ptr->header);
+        const std::vector<std::string> pch_args =
+            pch_consume_args(toolchain.kind, pch_ptr->directory, pch_ptr->header,
+                             pch_ptr->pch_file);
+        args.insert(args.end(), pch_args.begin(), pch_args.end());
       }
       // **先写临时文件，成功再改名到位**：编译被中断（OOM 杀掉编译器、磁盘写满）时
       // 产物位置不会留下半截 `.o`——它比源文件新，增量判新会当成最新，

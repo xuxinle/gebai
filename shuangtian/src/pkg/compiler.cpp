@@ -391,6 +391,11 @@ auto translate_flags(CompilerKind kind, const std::vector<std::string>& flags,
     }
     if (flag == "-Werror") {
       push_once("/WX");
+      // 旧 Windows SDK 系统头的 C5105（宏展开未定义行为）会被 /WX 升成错误，阻断整个
+      // 构建——这是 rust-lang 同款已知误报（新编译器 + 旧 SDK），且系统头位置不经过
+      // `-isystem`、`/external` 也管不到，无法从包含路径豁免。降为普通告警：
+      // `/WX` 仍约束本仓库代码，仅放过系统头这一条已知误报（无该告警的 SDK 上零影响）。
+      push_once("/w35105");
       continue;
     }
     if (flag.starts_with("-W")) {  // `-Wconversion`/`-Wshadow`/`-Wno-*`：MSVC 无对应项
@@ -436,6 +441,28 @@ auto translate_flags(CompilerKind kind, const std::vector<std::string>& flags,
     }
     out.push_back(flag);  // 不以 `-`/`/` 开头的（如裸路径/对象）原样透传
   }
+  return out;
+}
+
+auto pch_consume_args(CompilerKind kind, std::string_view directory, std::string_view header,
+                      std::string_view pch_file) -> std::vector<std::string> {
+  std::vector<std::string> out;
+  const std::string_view separator = directory.ends_with('/') || directory.ends_with('\\')
+                                         ? ""
+                                         : "/";
+  if (kind == CompilerKind::Msvc) {
+    // MSVC 消费端三件套：`/Yu` 指定 PCH 名、`/FI` 在每个单元强制包含代理头、
+    // `/Fp` 指向 PCH 产物；`/I` 与其余包含目录一起由调用方统一追加。
+    out.push_back(std::format("/I{}{}", directory, separator));
+    out.push_back(std::format("/Yu{}", header));
+    out.push_back(std::format("/FI{}", header));
+    if (!pch_file.empty()) out.push_back(std::format("/Fp{}", pch_file));
+    return out;
+  }
+  // GCC/Clang：`-I` 指向 PCH 目录 + `-include` 代理头；`.gch` 靠同名规则命中。
+  out.push_back(std::format("-I{}{}", directory, separator));
+  out.push_back("-include");
+  out.push_back(std::string(header));
   return out;
 }
 

@@ -48,11 +48,47 @@ ST_TEST(compiler_flag_translation_msvc) {
   ST_CHECK(contains("/Iinclude"));
   ST_CHECK(contains("/W4"));
   ST_CHECK(contains("/WX"));
+  // 旧 Windows SDK 系统头 C5105 误报降级：/WX 仍在，但该条不升错
+  ST_CHECK(contains("/w35105"));
   ST_CHECK(contains("/Oy-"));
   ST_CHECK(contains("/w"));
   // 无等价物者必须被记录（调用方会打印），不能悄悄消失
   ST_CHECK(std::ranges::find(dropped, "-Wshadow") != dropped.end());
   ST_CHECK(std::ranges::find(dropped, "-fno-strict-aliasing") != dropped.end());
+  // 未启用 -Werror 时不应出现 /w35105（降级只随 /WX 生效）
+  const auto no_werror =
+      st::pkg::translate_flags(CompilerKind::Msvc, {"-std=c++20", "-Wall"}, &dropped);
+  ST_CHECK(std::ranges::find(no_werror, "/w35105") == no_werror.end());
+}
+
+// PCH 消费端标志拼装：两族各自正确，且绝不能把 GCC 语法漏给 MSVC
+ST_TEST(pch_consume_args_per_compiler_kind) {
+  const auto msvc = st::pkg::pch_consume_args(CompilerKind::Msvc, "build/dev/pch",
+                                              "prefix.hpp", "build/dev/pch/prefix.pch");
+  const auto contains = [](const std::vector<std::string>& args, std::string_view flag) {
+    return std::ranges::find(args, flag) != args.end();
+  };
+  ST_CHECK(contains(msvc, "/Ibuild/dev/pch/"));
+  ST_CHECK(contains(msvc, "/Yuprefix.hpp"));
+  ST_CHECK(contains(msvc, "/FIprefix.hpp"));
+  ST_CHECK(contains(msvc, "/Fpbuild/dev/pch/prefix.pch"));
+  // GCC 语法（D9002/D9024/D9027 三重错误）绝不能出现在 MSVC 命令里
+  ST_CHECK(!contains(msvc, "-include"));
+
+  const auto gcc = st::pkg::pch_consume_args(CompilerKind::Gcc, "build/dev/pch",
+                                             "prefix.hpp", "");
+  ST_CHECK(contains(gcc, "-Ibuild/dev/pch/"));
+  ST_CHECK(contains(gcc, "-include"));
+  ST_CHECK(contains(gcc, "prefix.hpp"));
+  // GCC 系不吃 /Yu /FI /Fp
+  ST_CHECK(!contains(gcc, "/Yuprefix.hpp"));
+  ST_CHECK(!contains(gcc, "/FIprefix.hpp"));
+
+  // 目录已带尾分隔符时不双写
+  const auto trailing = st::pkg::pch_consume_args(CompilerKind::Msvc, "build/dev/pch/",
+                                                  "prefix.hpp", "");
+  ST_CHECK(contains(trailing, "/Ibuild/dev/pch/"));
+  ST_CHECK(!contains(trailing, "/Ibuild/dev/pch//"));
 }
 
 ST_TEST(compiler_link_libraries_msvc_drops_posix) {

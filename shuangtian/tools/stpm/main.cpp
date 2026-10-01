@@ -632,8 +632,9 @@ ST_MAIN(run_app)
     }
   }
   const auto format_mb = [](std::uint64_t bytes) {
-    return bytes >= 1024ULL * 1024ULL ? std::format("{:.1f} MiB", bytes / 1048576.0)
-                                      : std::format("{} KiB", bytes / 1024ULL);
+    return bytes >= 1024ULL * 1024ULL
+               ? std::format("{:.1f} MiB", static_cast<double>(bytes) / 1048576.0)
+               : std::format("{} KiB", bytes / 1024ULL);
   };
   st::print("已清理 {}（释放 {}）\n", build_dir, removed > 0 ? format_mb(removed) : std::string{"0"});
 
