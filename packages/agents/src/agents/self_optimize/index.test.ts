@@ -118,7 +118,7 @@ describe("self_optimize sub-agent", () => {
 
   test("系统提示词含产物纯净原则（产物只述当前能力与限制，历史注记归 journal/git）", () => {
     expect(selfOptimizeDef.systemPrompt).toContain("产物纯净")
-    expect(selfOptimizeDef.systemPrompt).toContain("只描述当前完整的能力与限制")
+    expect(selfOptimizeDef.systemPrompt).toContain("只述当前完整的能力与限制")
     expect(selfOptimizeDef.systemPrompt).toContain("不留历史痕迹")
   })
 
@@ -156,8 +156,18 @@ describe("self_optimize sub-agent", () => {
     expect(p).toContain("GEBAI_KEQING=off")
     expect(p).toContain("改写内置行为而不动上游代码")
     // 写范围口径与守卫一致（三域可写、核心引擎只读）
-    expect(p).toContain("二开域（custom/）与客卿域（keqing/）")
+    expect(p).toContain("二开域 custom/、客卿域 keqing/")
     expect(p).toContain("核心引擎源码（core/engine/app/ws 等）写入会被拒绝")
+  })
+
+  test("提示词含歌白仓定位定制（步骤 0），通用取证规则不自复刻而引用 code", () => {
+    const p = selfOptimizeDef.systemPrompt
+    expect(p).toContain("0) 定位定制（歌白仓活体自查）")
+    expect(p).toContain("前端/交互类缺陷先开页面复现")
+    expect(p).toContain("改了 `packages/web/src` 必须重建")
+    expect(p).toContain("独立实例 + 独立 GEBAI_HOME")
+    expect(p).toContain("直接遵循 code 子Agent 提示词")
+    expect(p).not.toContain("先取证、后推断")
   })
 })
 
