@@ -21,6 +21,7 @@
 
 import { wbUrl } from "./url-base"
 import { WorkbenchSocket, readAuthToken } from "./ws-client"
+import { requestHeaders as contractHeaders } from "@gebai/sdk"
 import { UnsupportedMethods } from "./lsp-capabilities"
 import type { FlatSym } from "./symbols-core"
 import {
@@ -169,7 +170,7 @@ export function initLsp(): Promise<void> {
       const token = readAuthToken()
       const ctl = new AbortController()
       const timer = setTimeout(() => ctl.abort(), 5000)
-      const res = await fetch(wbUrl("/api/v1/lsp/servers"), { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: ctl.signal })
+      const res = await fetch(wbUrl("/api/v1/lsp/servers"), { headers: contractHeaders(token), signal: ctl.signal })
       clearTimeout(timer)
       if (!res.ok) {
         // 确定性拒绝（404 页面关闭 / 403 沙箱）：本页不再重试

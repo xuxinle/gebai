@@ -27,6 +27,7 @@ import { registerFeedbackRoutes, registerWebhookRoutes } from "./routes/misc"
 import { registerDocsRoutes } from "./routes/docs"
 import { registerStaticRoutes } from "./routes/static"
 import { originAllowed } from "./core/base/origin"
+import { credentialContext, defaultCredentialSources, resolveCredential, type CredentialSource } from "./credential-sources"
 import { registerRootRoutes } from "./routes/roots"
 import { registerFsRoutes } from "./routes/fs"
 import { registerGitRoutes } from "./routes/git"
@@ -52,6 +53,12 @@ export interface AppDeps {
   todos?: import("./core/schedule/todos").UserTodoManager | null
   /** 外部身份验证器（GEBAI_EXTERNAL_AUTH_* 配置；未配置为 null）。 */
   externalAuth: ExternalAuthProvider | null
+  /**
+   * 凭证来源链（服务模式鉴权入口；DESIGN「凭证来源扩展点」）。
+   * 缺省为 bearer → basic → cookie `gebai.auth.token`（见 defaultCredentialSources）；
+   * 部署方可经 GEBAI_CREDENTIAL_SOURCES 或 custom/auth/ 定制。
+   */
+  credentialSources?: readonly CredentialSource[]
   /** WS 状态服务（MVC 模型层：事件日志/连接状态/快照）；由 startServer 注入。 */
   state?: import("./ws-state").WsStateService
   /** 文件工作台：写操作审计（组合根注入；缺省不审计）。 */
@@ -84,20 +91,17 @@ export const SERVICE_USER: AuthUser = {
 
 async function resolveUser(d: AppDeps, c: Context): Promise<AuthUser | null> {
   if (d.config.auth === "local") return d.auth.defaultUser()
-  const auth = c.req.header("Authorization")
-  if (auth && /^bearer /i.test(auth)) {
-    return d.auth.authorize(auth.slice(7))
-  }
-  // HTTP Basic（RFC 7617）：`Authorization: Basic base64(username:password)`，等价隐式登录——
-  // 复用密码校验与登录限流（verifyCredentials 不签发令牌，适合单次调用场景）；失败统一 401 不泄露原因。
-  // 注意：base64 非加密，须经 HTTPS 传输。scheme 大小写不敏感（RFC 7235）。
-  if (auth && /^basic /i.test(auth)) {
-    const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8")
-    const idx = decoded.indexOf(":")
-    if (idx <= 0) return null
-    return d.auth.verifyCredentials(decoded.slice(0, idx), decoded.slice(idx + 1))
-  }
-  return null
+  // 凭证来源链（DESIGN「凭证来源扩展点」）：Bearer / Basic / cookie 为内置缺省，
+  // 部署方可经 GEBAI_CREDENTIAL_SOURCES 或 custom/auth/ 增删——见 credential-sources.ts。
+  // 取值与校验分离：来源只取凭证，身份一律经 authorize/verifyCredentials/userByName 校验。
+  return resolveCredential(
+    d.credentialSources ?? defaultCredentialSources(),
+    credentialContext({
+      method: c.req.method,
+      header: (name) => c.req.header(name),
+      auth: d.auth,
+    }),
+  )
 }
 
 export function createApp(deps: AppDeps): Hono<AppEnv> {

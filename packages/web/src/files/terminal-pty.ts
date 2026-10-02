@@ -17,8 +17,9 @@
  */
 import { clear, confirmDialog, dropdown, h, icon, promptDialog, showMenu, toast } from "./ui"
 import { pathTail, samePath } from "./terminal-core"
+import { requestHeaders as contractHeaders } from "@gebai/sdk"
 import { wbUrl, wbAbsUrl } from "./url-base"
-import { WorkbenchSocket } from "./ws-client"
+import { WorkbenchSocket, readAuthToken } from "./ws-client"
 import { realSessionIds, readTermSessions, writeTermSessions } from "./term-sessions"
 import { MIN_CONTRAST_RATIO, searchMatchColors, terminalTheme } from "./term-theme"
 import {
@@ -133,9 +134,6 @@ function saveSearchOpts(o: TermSearchOptions): void {
   }
 }
 
-/** 认证令牌（服务模式登录后写入，与聊天页共享）。 */
-const AUTH_TOKEN_KEY = "gebai.auth.token"
-
 /** xterm 运行时（UMD 全局：`Terminal` 与各 addon 都直接挂构造函数本身）。 */
 interface XtermVendor {
   Terminal: new (opts: Record<string, unknown>) => XTerm
@@ -230,11 +228,7 @@ function terminalFontFamily(): string {
 }
 
 function readToken(): string | null {
-  try {
-    return localStorage.getItem(AUTH_TOKEN_KEY)
-  } catch {
-    return null
-  }
+  return readAuthToken()
 }
 
 /** 服务端 info（能力/Shell 清单）：终端面板打开时探测一次。 */
@@ -257,7 +251,7 @@ async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
   const query = q.toString()
   try {
     const token = readToken()
-    const res = await fetch(`${wbUrl("/api/v1/terminal/info")}${query ? `?${query}` : ""}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const res = await fetch(`${wbUrl("/api/v1/terminal/info")}${query ? `?${query}` : ""}`, { headers: contractHeaders(token) })
     if (!res.ok) return null
     return (await res.json()) as TermInfo
   } catch {
@@ -269,7 +263,7 @@ async function fetchInfo(hooks: TerminalHooks): Promise<TermInfo | null> {
 async function fetchRootInfo(rootId: string): Promise<{ path: string; name: string } | null> {
   try {
     const token = readToken()
-    const res = await fetch(wbUrl("/api/v1/roots"), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const res = await fetch(wbUrl("/api/v1/roots"), { headers: contractHeaders(token) })
     if (!res.ok) return null
     const body = (await res.json()) as { roots?: Array<{ id: string; path: string; name?: string }> }
     const hit = body.roots?.find((r) => r.id === rootId)

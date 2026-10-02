@@ -17,10 +17,12 @@
  *
  * ANSI / `\r` / `\b` / 缓冲 / 历史的规则都在 core 里（无 DOM 可单测），本文件只做 DOM 与网络。
  */
+import { requestHeaders as contractHeaders } from "@gebai/sdk"
 import { clear, dropdown, h, icon, toast } from "./ui"
 import { TERM_HISTORY_MAX, TermBuffer, pathTail, pushHistory, samePath, type AnsiColor, type TermLine } from "./terminal-core"
 import { readTermSessions, writeTermSessions } from "./term-sessions"
 import { wbUrl } from "./url-base"
+import { readAuthToken } from "./ws-client"
 import "../css/terminal.css"
 
 export interface TerminalHooks {
@@ -53,9 +55,8 @@ export interface TerminalPanel {
  * 最小客户端（函数形式，不扩 `api.ts`）：终端是独立能力域，且 `api.ts` 归 FsApi 的
  * 文件/Git 端点。约定与 FsApi 完全一致——`session`/`env` 透传进 query（服务端据此解析
  * 预置项目与会话环境）、非 2xx 抛错（带 `code`）、失败只 toast 不抛未捕获异常；
- * 令牌取本地持久化的那一份（`gebai.auth.token`，服务模式登录后写入，与聊天页共享）。
+ * 凭证经**凭证契约**携带（默认读 localStorage `gebai.auth.token` 拼 `Authorization: Bearer`）。
  */
-const AUTH_TOKEN_KEY = "gebai.auth.token"
 /** 输出轮询：活跃 250ms；连续 3 次无新输出后降频到 1000ms（长命令不必挤 4 倍请求） */
 const POLL_FAST_MS = 250
 const POLL_SLOW_MS = 1000
@@ -118,14 +119,9 @@ class TermError extends Error {
   }
 }
 
-/** 认证头：服务模式下 localStorage 有令牌（与聊天页同一份），本地模式无令牌则不加。 */
+/** 认证头：经凭证契约（默认 localStorage 令牌 → Bearer；本地模式无令牌则不加）。 */
 function authHeaders(): Record<string, string> {
-  try {
-    const t = localStorage.getItem(AUTH_TOKEN_KEY)
-    return t ? { Authorization: `Bearer ${t}` } : {}
-  } catch {
-    return {}
-  }
+  return contractHeaders(readAuthToken())
 }
 
 async function request<T>(

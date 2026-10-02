@@ -1,3 +1,4 @@
+import { appBase, clearTokenState, readToken, requestHeaders, writeToken } from "@gebai/sdk"
 import { client, loginErr, loginForm, loginOverlay, loginPass, loginPass2, loginSubmit, loginToggle, loginUser, logoutBtn, runs, sessionList, setCurrentSession } from "./state"
 import { loadMessages, refreshSessions, enterDraftView, resetMsgWindow } from "./sessions"
 import { toast } from "./ui"
@@ -6,18 +7,55 @@ import { parseExternalCredential } from "./external-auth"
 /* ---------- 认证（服务模式） ---------- */
 
 const AUTH_TOKEN_KEY = "gebai.auth.token"
+/** 令牌 cookie 有效期：与服务端令牌 TTL 一致（packages/server/src/auth.ts，7 天）。 */
+const AUTH_TOKEN_COOKIE_MAX_AGE = 7 * 24 * 3600
 
-/** 恢复本地持久化的登录态（服务模式）。 */
-export function restoreToken() {
+/**
+ * 把登录态同步到同源 cookie（与令牌同一份值、同一键名）。
+ *
+ * 为什么需要：页面里的图片/视频/iframe/下载是**浏览器原生请求**（`<img src>`/`<video src>`/
+ * `<a download>`），由浏览器自行发出，前端脚本没有插入请求头的机会——只存本地存储的令牌带不上去，
+ * 服务模式下消息流里的图片一律 401。写一份同名 cookie 后这类请求自动带上凭证（服务端
+ * credential-sources 的 cookie 来源校验同一令牌，且**只对 GET/HEAD 生效**，写端点仍只认 Bearer）。
+ *
+ * **不写空值**：`token` 为空时直接返回——未登录实例的页面加载**不得**清掉同 host 另一个实例的
+ * cookie（cookie 按 host 共享、不隔离端口，同 IP 多实例会互相看见）；清 cookie 只发生在显式登出
+ * （`clearTokenCookie`）。部署方自定义了非 Bearer 载体（`window.__GEBAI_AUTH__.requestHeaders`）时
+ * 同样不写——载体选择是部署方的决定，框架不自作主张增开通道。
+ */
+export function syncTokenCookie(token: string) {
+  if (!token) return
   try {
-    const t = localStorage.getItem(AUTH_TOKEN_KEY)
-    if (t) {
-      client.setToken(t)
-      // 已登录直进聊天页（不经 showLogin）：登出按钮同步显示
-      logoutBtn.hidden = false
-    }
+    if (!requestHeaders(token).Authorization) return
+    const path = appBase() || "/"
+    document.cookie = `${AUTH_TOKEN_KEY}=${encodeURIComponent(token)}; path=${path}; max-age=${AUTH_TOKEN_COOKIE_MAX_AGE}; SameSite=Lax`
+  } catch {
+    /* 忽略：cookie 不可写（隐私模式等）时退化为仅请求头通道 */
+  }
+}
+
+/** 清除令牌 cookie（显式登出）。 */
+export function clearTokenCookie() {
+  try {
+    const path = appBase() || "/"
+    document.cookie = `${AUTH_TOKEN_KEY}=; path=${path}; max-age=0`
   } catch {
     /* 忽略 */
+  }
+}
+
+/**
+ * 恢复本地持久化的登录态（服务模式）。
+ * 令牌的存放位置由**凭证契约**决定（默认 localStorage `gebai.auth.token`，见 @gebai/sdk
+ * auth-contract）——部署方可用 `window.__GEBAI_AUTH__` 换成自己的载体（如 sessionStorage、
+ * 宿主系统登录态），此处与登录/登出一并改走契约，保证「存哪」与「读哪」始终一致。
+ */
+export function restoreToken() {
+  const t = readToken()
+  if (t) {
+    client.setToken(t)
+    // 已登录直进聊天页（不经 showLogin）：登出按钮同步显示
+    logoutBtn.hidden = false
   }
 }
 
@@ -52,10 +90,11 @@ export async function tryExternalAuth(): Promise<boolean> {
     /* 忽略 */
   }
   try {
-    localStorage.setItem(AUTH_TOKEN_KEY, client.getToken() ?? "")
+    writeToken(client.getToken() ?? "")
   } catch {
     /* 忽略 */
   }
+  syncTokenCookie(client.getToken() ?? "")
   logoutBtn.hidden = false
   return true
 }
@@ -82,10 +121,11 @@ export async function doLogout() {
     /* 忽略 */
   }
   try {
-    localStorage.removeItem(AUTH_TOKEN_KEY)
+    clearTokenState()
   } catch {
     /* 忽略 */
   }
+  clearTokenCookie() // 登出显式清 cookie：原生资源请求不再带任何凭证
   setCurrentSession(null)
   runs.clear()
   resetMsgWindow()
@@ -138,10 +178,11 @@ export function bindAuth() {
         await client.login(loginUser.value.trim(), loginPass.value)
       }
       try {
-        localStorage.setItem(AUTH_TOKEN_KEY, client.getToken() ?? "")
+        writeToken(client.getToken() ?? "")
       } catch {
         /* 忽略 */
       }
+      syncTokenCookie(client.getToken() ?? "")
       hideLogin()
       await refreshSessions()
       const sessions = await client.listSessions()

@@ -6,8 +6,9 @@
     "paths": {
       "@gebai/sdk": ["../packages/sdk/src"],
       "@gebai/sdk/node": ["../packages/sdk/src/node.ts"],
-      "@gebai/agents": ["../packages/agents/src"]
+      "@gebai/agents": ["../packages/agents/src"],
+      "@gebai/server/credential-sources": ["../packages/server/src/credential-sources.ts"]
     }
   },
-  "include": ["agents", "core"]
+  "include": ["agents", "core", "auth"]
 }

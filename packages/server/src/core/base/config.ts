@@ -105,6 +105,12 @@ export interface ServerConfig {
   externalAuthAutocreate: boolean
   /** 外部身份扩展点：Web UI 同源直读宿主 localStorage 的凭证 key（可选，不设则仅支持 URL 参数注入）。 */
   externalAuthStorageKey?: string
+  /**
+   * 凭证来源链（GEBAI_CREDENTIAL_SOURCES）：逗号分隔，如 `bearer,basic,cookie:gebai.auth.token`。
+   * 缺省（未设置）= bearer → basic → cookie `gebai.auth.token`；设置为空值即清空链路、并按代码级
+   * 来源（custom/auth/）重建。名称语法 bearer / basic / cookie:<名> / header:<名>，见 credential-sources.ts。
+   */
+  credentialSources?: string
   /** 开发模式热刷新（bun run dev --reload 或 GEBAI_DEV_RELOAD=1）：Web 源码变更自动重建并广播页面刷新。 */
   devReload: boolean
   /** 飞书机器人对话桥接（GEBAI_FEISHU_BOT_ENABLED=true 时启用长连接事件订阅）。 */
@@ -339,6 +345,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     externalAuthUrl: env("GEBAI_EXTERNAL_AUTH_URL") || undefined,
     externalAuthAutocreate: bool("GEBAI_EXTERNAL_AUTH_AUTOCREATE", true),
     externalAuthStorageKey: env("GEBAI_EXTERNAL_AUTH_STORAGE_KEY") || undefined,
+    credentialSources: env("GEBAI_CREDENTIAL_SOURCES").trim() || undefined,
     // 开发模式热刷新：bun run dev --reload 或 GEBAI_DEV_RELOAD=1
     devReload: process.argv.includes("--reload") || env("GEBAI_DEV_RELOAD") === "1",
     // 飞书机器人对话桥接（长连接模式）：需同时配置 GEBAI_FEISHU_APP_ID / GEBAI_FEISHU_APP_SECRET

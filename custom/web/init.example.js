@@ -18,10 +18,16 @@
  *      应用初始化期读同一批键，因此这里写入的值先于应用生效（用户此后的设置面板改动照常覆盖）。
  *   ② 用户注册与登录：调歌白 REST 接口（`/api/v1/auth/login`、`/api/v1/auth/register`、
  *      `/api/v1/auth/exchange`），拿到令牌写入 `localStorage["gebai.auth.token"]` 即完成登录
- *      （歌白启动时从该键恢复登录态）；也可只写宿主登录态，交给同源「外部身份兑换」流程自动兑换。
+ *      （歌白启动时从该键恢复登录态），**同时写一份同名 cookie**：页面里的图片/视频/iframe/下载是
+ *      浏览器原生请求（`<img src>` 等），前端脚本无法为其插入请求头，只存 localStorage 的令牌
+ *      带不上去、服务模式下取图 401；`gebaiSyncToken` 就是干这件事的（歌白内置的登录/恢复/登出
+ *      路径同样写同一份 cookie）。也可只写宿主登录态，交给同源「外部身份兑换」流程自动兑换。
  *   ③ 配置预置：给 `window.__GEBAI_WEB_CONFIG__` 赋值，语义与 `gebai.config.js` 完全一致（见
  *      `gebai.config.example.js` 头注释）。两个文件可同时使用：`gebai.config.js`（配置）先执行，
  *      本脚本（初始化逻辑）后执行。
+ *   ④ 自定义鉴权载体（可选）：不想用 localStorage + cookie 时，给 `window.__GEBAI_AUTH__` 赋值即可
+ *      整体接管「令牌读/写/清 + 请求头构造」（见文末例 4）。典型场景：同一个 IP 上并排多套歌白——
+ *      cookie 按 host 共享会互相覆盖，改用 sessionStorage 或自定义请求头即可完全隔离。
  *
  * 异步初始化（登录换取令牌、拉取远端配置等需要 await 的动作）：
  *   把 Promise 赋给 `window.__GEBAI_WEB_BOOT__`（支持 Promise、返回 Promise 的函数、或二者组成的数组），
@@ -57,8 +63,32 @@
 // })()
 
 /**
+ * 把令牌同步到歌白登录态：`localStorage`（歌白启动时据此恢复登录态）+ 同名 cookie。
+ *
+ * **cookie 是原生资源请求的唯一凭证通道**：`<img>`/`<video>`/`<a download>`/`<iframe>` 的请求由
+ * 浏览器自行发出，前端脚本没有插入请求头的机会；只写 localStorage 时服务模式下取图/下载一律 401。
+ * 服务端在无请求头凭证时按同源 cookie `gebai.auth.token` 兜底校验同一令牌（且**仅 GET/HEAD**，
+ * 写端点仍只认 Bearer/Basic，防 CSRF——见服务端 credential-sources.ts）。
+ *
+ * path 取应用挂载根：歌白部署在反代子路径（如 `/gebai/`）时与 REST 前缀一致，不外泄给同源其他应用。
+ * **未登录时不要调本函数传空值**：cookie 按 host 共享、不隔离端口，同一个 IP 上另一套歌白的 cookie
+ * 会被误清（登出场景才需要清，传 `null` 走 max-age=0 分支）。
+ */
+function gebaiSyncToken(token) {
+  try {
+    if (token) localStorage.setItem("gebai.auth.token", token)
+  } catch (e) { /* 忽略：存储不可用 */ }
+  try {
+    const path = location.pathname.replace(/\/(index\.html|files)?$/, "") || "/"
+    document.cookie = token
+      ? "gebai.auth.token=" + encodeURIComponent(token) + "; path=" + path + "; max-age=" + 7 * 24 * 3600 + "; SameSite=Lax"
+      : "gebai.auth.token=; path=" + path + "; max-age=0"
+  } catch (e) { /* 忽略：cookie 不可写时退化为仅请求头通道，服务模式下原生资源请求会 401 */ }
+}
+
+/**
  * 例 2：直接调登录接口换取令牌（服务模式；用户名密码登录）。
- * 成功即写入 `gebai.auth.token`——歌白启动时据此恢复登录态，无需用户再填登录框。
+ * 成功即写入 `gebai.auth.token`（localStorage + cookie）——歌白启动时据此恢复登录态，无需再填登录框。
  */
 // async function gebaiLogin(username, password) {
 //   const res = await fetch("/api/v1/auth/login", {
@@ -67,7 +97,7 @@
 //     body: JSON.stringify({ username, password }),
 //   })
 //   if (!res.ok) throw new Error("登录失败：" + res.status)
-//   localStorage.setItem("gebai.auth.token", (await res.json()).token)
+//   gebaiSyncToken((await res.json()).token)
 // }
 
 /**
@@ -82,8 +112,21 @@
 //   const data = await res.json()
 //   if (!res.ok) throw new Error(data.error || "注册失败")
 //   if (data.pending) return { pending: true }
-//   localStorage.setItem("gebai.auth.token", data.token)
+//   gebaiSyncToken(data.token)
 //   return { pending: false }
+// }
+
+/* ── 例 4：自定义鉴权载体（可选）────────────────────────────────────────────
+ * 不想用默认的 localStorage + cookie 时，给 `window.__GEBAI_AUTH__` 赋值即可整体接管。
+ * 四个动作均可选，未提供的回落到默认实现。下面用 sessionStorage + 自定义请求头（服务端需配套把
+ * `GEBAI_CREDENTIAL_SOURCES` 配成 `header:X-Gebai-Token`）——同一个 IP 上并排多套歌白时，
+ * 每套用不同的头名即天然隔离，不会像 cookie 那样按 host 互相覆盖。
+ */
+// window.__GEBAI_AUTH__ = {
+//   readToken: () => sessionStorage.getItem("gebai.auth.token"),
+//   writeToken: (t) => sessionStorage.setItem("gebai.auth.token", t),
+//   clearToken: () => sessionStorage.removeItem("gebai.auth.token"),
+//   requestHeaders: (t) => (t ? { "X-Gebai-Token": t } : {}),
 // }
 
 /* ── ③ 异步初始化入口 ─────────────────────────────────────────────────────────

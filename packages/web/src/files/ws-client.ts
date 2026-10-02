@@ -6,10 +6,12 @@
  *
  * 连接是**惰性**的：第一次 request/send 才建连；断线后由调用方决定是否重建（closed 后不再重连）。
  */
-import { appWsUrl } from "@gebai/sdk"
+import { appWsUrl, readToken as readContractToken } from "@gebai/sdk"
 
-/** 认证令牌（服务模式登录后写入，与聊天页共享）。 */
-const AUTH_TOKEN_KEY = "gebai.auth.token"
+/** 认证令牌：经**凭证契约**读取（默认 localStorage `gebai.auth.token`，部署方可整体替换载体）。 */
+export function readAuthToken(): string | null {
+  return readContractToken()
+}
 
 export interface WsReply {
   ok: boolean
@@ -187,13 +189,5 @@ export class WorkbenchSocket {
 
   get isClosed(): boolean {
     return this.closed
-  }
-}
-
-export function readAuthToken(): string | null {
-  try {
-    return localStorage.getItem(AUTH_TOKEN_KEY)
-  } catch {
-    return null
   }
 }

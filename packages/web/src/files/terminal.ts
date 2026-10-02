@@ -7,6 +7,8 @@
  * 判定来自 `/api/v1/terminal/info` 的 `pty` 能力位（服务端探测驱动可用性，附中文原因）。
  * 选择在首次激活时做一次并缓存：同一页面生命周期内不来回切换实现（避免终端内容重建）。
  */
+import { requestHeaders as contractHeaders } from "@gebai/sdk"
+import { readAuthToken } from "./ws-client"
 import { h } from "./ui"
 import { wbUrl } from "./url-base"
 import { createPtyTerminal } from "./terminal-pty"
@@ -41,12 +43,9 @@ async function detectPty(hooks: TerminalHooks): Promise<boolean> {
 }
 
 function authHeaders(): Record<string, string> {
-  try {
-    const t = localStorage.getItem("gebai.auth.token")
-    return t ? { Authorization: `Bearer ${t}` } : {}
-  } catch {
-    return {}
-  }
+  // 经凭证契约构造（默认 Authorization: Bearer <localStorage 令牌>）：
+  // 部署方替换 `window.__GEBAI_AUTH__` 后终端请求自动跟随，无需改本文件
+  return contractHeaders(readAuthToken())
 }
 
 export function createTerminalPanel(hooks: TerminalHooks): TerminalPanel {

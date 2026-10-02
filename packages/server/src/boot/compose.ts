@@ -26,6 +26,8 @@ import { TerminalService } from "../core/exec/term-session"
 import { PtySessionService } from "../core/exec/pty-session"
 import { LspService } from "../core/lsp/service"
 import { createExternalAuthProvider } from "../external-auth"
+import { defaultCredentialSources, parseCredentialSources } from "../credential-sources"
+import { loadCustomCredentialSources } from "../custom-auth"
 import { applyModelEnvOverrides, createProvider, parseExtraParams, resolveModelRouteProvider, resolveVisionProvider, type ApiKind, type ProviderConfig } from "../core/llm/llm"
 import { setVisionProviderGetter } from "@gebai/agents"
 import { scheduleGC } from "../core/session/gc"
@@ -384,6 +386,14 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
   }
   // 外部身份验证器（GEBAI_EXTERNAL_AUTH_SECRET / GEBAI_EXTERNAL_AUTH_URL 配置；两者同设会抛错）
   const externalAuth = createExternalAuthProvider(config)
+  // 凭证来源链（DESIGN「凭证来源扩展点」）：数据级（GEBAI_CREDENTIAL_SOURCES）+ 代码级（custom/auth/）
+  // 合并——环境变量显式设置即以其为准（代码级前置，便于改写内置行为）；未设置则内置缺省
+  // （bearer → basic → cookie）在前、代码级追加在后。二开来源加载失败不阻断启动（写日志）。
+  const customSources = await loadCustomCredentialSources()
+  for (const e of customSources.errors) console.warn(`[custom/auth] 凭证来源加载失败 —— ${e}`)
+  const credentialSources = config.credentialSources
+    ? [...customSources.sources, ...parseCredentialSources(config.credentialSources)]
+    : [...defaultCredentialSources(), ...customSources.sources]
   // WS 状态服务（MVC 模型层）：每用户事件日志（断线可重放）+ 连接状态持久化 + 快照；
   // state 自持 deps 前身（不递归引用自身）
   const baseDeps: AppDeps = {
@@ -398,6 +408,7 @@ export async function composeServer(overrides: Partial<Parameters<typeof loadCon
     subAgents,
     webhooks,
     externalAuth,
+    credentialSources,
     tasks,
     todos,
     // 文件工作台（DESIGN「文件工作台」）：Git 服务（宿主 git CLI，写/远程分别受开关约束）

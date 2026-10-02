@@ -24,6 +24,7 @@ import type {
 } from "./types"
 import type { Task, TaskCreateInput, TaskFileEntry, TaskKind, TaskQueueState, TaskQueueView, TaskRunHandle, TaskRunRecord, TaskUpdateInput } from "./task-types"
 import { appPath, docLocation, resolveWsUrl } from "./app-base"
+import { requestHeaders } from "./auth-contract"
 
 /** WS 地址解析（页面基准语义见 app-base）。 */
 export { resolveWsUrl }
@@ -599,9 +600,10 @@ export class GebaiClient {
   }
 
   private headers(): Record<string, string> {
-    const h: Record<string, string> = { "Content-Type": "application/json" }
-    if (this.token) h["Authorization"] = `Bearer ${this.token}`
-    return h
+    // 凭证头经契约构造（DESIGN「凭证契约」）：默认 `Authorization: Bearer <token>`；
+    // 部署方（custom/web 脚本）可给 window.__GEBAI_AUTH__ 赋值整体替换携带方式。
+    // 客户端自身不落盘（仅内存令牌）——持久化与通道选择由凭证契约与调用方决定。
+    return { "Content-Type": "application/json", ...requestHeaders(this.token ?? null) }
   }
 
   /** REST 地址：显式 baseUrl 优先，缺省按页面基准解析（子路径部署无需配置）。 */
@@ -919,7 +921,7 @@ export class GebaiClient {
     form.append("file", part, name)
     const res = await fetch(this.apiUrl(`/api/v1/sessions/${sessionId}/attachments`), {
       method: "POST",
-      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+      headers: requestHeaders(this.token ?? null),
       body: form,
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)

@@ -9,6 +9,8 @@
  */
 import { wireDirs } from "./watch-core"
 import { wbUrl } from "./url-base"
+import { requestHeaders as contractHeaders } from "@gebai/sdk"
+import { readAuthToken } from "./ws-client"
 
 
 export interface RootInfo {
@@ -301,7 +303,9 @@ export class FsApi {
       extra[k] = v === true ? "1" : String(v)
     }
     const url = this.withCtx(endpoint, extra)
-    const init: RequestInit = { method, headers: {} }
+    // 凭证经**凭证契约**携带（DESIGN「凭证契约」）：工作台是独立页面，与主界面共享同一份
+    // 登录态，但请求不经过 GebaiClient——未带头时服务模式只能依赖浏览器 cookie（同 host 多实例会互相覆盖）。
+    const init: RequestInit = { method, headers: { ...contractHeaders(readAuthToken()) } }
     if (opts.body !== undefined) {
       init.body = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)
       ;(init.headers as Record<string, string>)["Content-Type"] = "application/json"
@@ -372,7 +376,7 @@ export class FsApi {
       wait: opts.wait === undefined ? undefined : String(opts.wait),
       git: opts.git === false ? "0" : undefined,
     })
-    const res = await fetch(url, { signal: opts.signal })
+    const res = await fetch(url, { headers: contractHeaders(readAuthToken()), signal: opts.signal })
     if (!res.ok) throw new ApiError(res.status, (await res.text()).slice(0, 200))
     return (await res.json()) as WatchResponse
   }
@@ -380,7 +384,7 @@ export class FsApi {
   stat(root: string, paths: string[]): Promise<{ items: FileStat[] }> {
     const u = this.withCtx("/api/v1/fs/stat", { root })
     const q = paths.map((p) => `path=${encodeURIComponent(p)}`).join("&")
-    return fetch(`${u}${u.includes("?") ? "&" : "?"}${q}`).then(async (r) => {
+    return fetch(`${u}${u.includes("?") ? "&" : "?"}${q}`, { headers: contractHeaders(readAuthToken()) }).then(async (r) => {
       if (!r.ok) throw new ApiError(r.status, (await r.text()).slice(0, 200))
       return (await r.json()) as { items: FileStat[] }
     })
@@ -439,7 +443,7 @@ export class FsApi {
     form.set("overwrite", overwrite ? "1" : "0")
     form.set("paths", JSON.stringify(files.map((f) => f.path)))
     for (const f of files) form.append(f.path, f.file, f.file.name)
-    const res = await fetch(wbUrl("/api/v1/fs/upload"), { method: "POST", body: form })
+    const res = await fetch(wbUrl("/api/v1/fs/upload"), { method: "POST", headers: contractHeaders(readAuthToken()), body: form })
     const text = await res.text()
     const parsed = text ? JSON.parse(text) : null
     if (!res.ok) throw new ApiError(res.status, parsed?.error ?? `上传失败（${res.status}）`, parsed)

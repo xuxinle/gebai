@@ -296,6 +296,24 @@ export class AuthService {
     return Object.values(reg).sort((a, b) => a.createdAt - b.createdAt)
   }
 
+  /**
+   * 按用户名取**已启用**用户（用户名型凭证来源的映射入口，见 credential-sources.ts）。
+   * 用户名经 normalizeUsername 规范化（与注册/登录同一口径）；未命中、已禁用、待审批一律 null——
+   * 凭证来源只能「引用」已存在的账号，不得凭空构造身份或绕过 disabled/pending。
+   */
+  async userByName(username: string): Promise<AuthUser | null> {
+    if (this.mode === "local") return null
+    let name: string
+    try {
+      name = normalizeUsername(username)
+    } catch {
+      return null
+    }
+    const user = (await this.readRegistry())[name]
+    if (!user || user.disabled || user.pending) return null
+    return user
+  }
+
   async createUser(username: string, password: string, role: "user" | "admin" = "user", init?: { disabled?: boolean; pending?: boolean }): Promise<AuthUser> {
     return this.createUserEntry(normalizeUsername(username), password, role, init)
   }

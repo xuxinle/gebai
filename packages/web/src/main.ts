@@ -7,7 +7,7 @@ import "./css/composer.css"
 import "./css/overlays.css"
 import "./css/wheel.css"
 import "./css/files-split.css"
-import { restoreToken, bindAuth, showLogin, tryExternalAuth } from "./auth"
+import { restoreToken, bindAuth, showLogin, syncTokenCookie, tryExternalAuth } from "./auth"
 import { bindApprovalSkip, applyApprovalSkip } from "./approval-skip"
 import { autosize, bindComposer, bindInputBehavior, recordInput, syncSendButton, takeInterruptNext } from "./composer"
 import { bindSettings } from "./settings"
@@ -217,6 +217,10 @@ bindShortcutSheet() // 轮盘「快捷键」按钮 → 由键位表生成的快�
   // 工具卡片元数据（titleParams/args 模式，须先于历史消息渲染就绪）与外部身份兑换（同源集成，本地无令牌
   // 且服务端启用时用 URL 参数/宿主 localStorage 的登录态兑换令牌）互不依赖：并行发起，缩短首屏初始化串行链
   await Promise.all([loadToolCardMeta(), tryExternalAuth()])
+  // 登录态补写 cookie（原生资源请求凭证通道）：免登/外部兑换与 restoreToken 各自已同步一次，
+  // 此处兜底「令牌由其他路径进入 client 而未经以上任一处」的情形；无令牌时 syncTokenCookie 直接
+  // 返回——未登录页面**不得**清掉同 host 其他实例的 cookie（cookie 按 host 共享、不隔离端口）。
+  syncTokenCookie(client.getToken() ?? "")
   bindSettings()
   bindAuth()
   bindComposer()

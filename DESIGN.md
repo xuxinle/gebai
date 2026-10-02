@@ -545,6 +545,7 @@ class GebaiClient {
 | `GEBAI_EXTERNAL_AUTH_URL` | 外部身份扩展点：HTTP 回调验证 URL（与 `GEBAI_EXTERNAL_AUTH_SECRET` 互斥，同设启动报错；**必须 HTTPS**，localhost/127.0.0.1 例外防中间人伪造）；GEBAI 把 `{username, credential}` POST 给回调（5s 超时），业务系统自行校验（如查自己 localStorage 对应的服务端态），**必须核验 username 与凭证归属一致**，响应 2xx 且 `{"ok":true}` 即通过，可用 `username` 字段覆盖映射（仅应在明确校验后使用） | 空（不启用） |
 | `GEBAI_EXTERNAL_AUTH_AUTOCREATE` | 外部用户名不存在时自动创建 GEBAI 用户（普通角色、随机密码不可密码登录）；`false` 时仅允许管理员预建的同名用户 | `true` |
 | `GEBAI_EXTERNAL_AUTH_STORAGE_KEY` | Web UI 同源直读宿主 localStorage 的凭证 key（值支持 JSON `{"username","credential"}` 或 `"username:credential"` 字符串）；不设则仅支持 URL 参数注入 | 空 |
+| `GEBAI_CREDENTIAL_SOURCES` | REST 凭证来源链（逗号分隔）：`bearer` / `basic` / `cookie:<名>` / `header:<名>`；非法项启动报错。不设 = `bearer,basic,cookie:gebai.auth.token`（cookie 仅 GET/HEAD）；设置为空值即只用代码级来源（`custom/auth/`） | 空 |
 | `--server` | 开启服务模式（等价 `GEBAI_MODE=server`，参数优先） | - |
 
 > 以上为**全局层**环境变量（进程注入），会话层可覆盖其中可运行时变更的项（**模型/Provider 配置全量可覆盖**：`GEBAI_LLM_MODEL`/`API_BASE`/`API_KEY`/`API_KIND`/`MAX_CONTEXT`/`MAX_OUTPUT_TOKENS`/`MULTIMODAL`/`ROUTES` 与 `GEBAI_VISION_*` 任务级生效，按任务重建 Provider，见「环境变量配置」）。
@@ -801,6 +802,12 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - **外部身份扩展点**：服务模式下支持「外部身份 → GEBAI 令牌」兑换（`POST /api/v1/auth/exchange`），同源部署网站可直接复用其本地登录态（localStorage）作为 GEBAI 用户，免二次登录。验证器可插拔（`external-auth.ts`）：配置 `GEBAI_EXTERNAL_AUTH_SECRET` 走 HMAC 验签（凭证 `{exp}.{sig}`，±10 分钟窗口 + **一次性消费**——签名无 nonce，已消费凭证摘要缓存防窗口内重放），配置 `GEBAI_EXTERNAL_AUTH_URL` 走 HTTP 回调（业务系统自行校验凭证真实性；**回调返回的用户名必须与请求一致**——允许规范化去空白，拒绝不一致，防宽松回调被利用接管任意用户）；两者互斥，验证失败统一 401 不泄露原因。**外部身份禁止命中本地 admin 账号**（外部系统同名 `admin` 用户兑换不得继承本地 admin 角色——admin 唯一入口是启动参数口令）。用户映射：`GEBAI_EXTERNAL_AUTH_AUTOCREATE=true`（默认）自动创建普通角色用户（随机密码不可密码登录），`false` 仅允许已存在用户；外部用户名经 `normalizeUsername` 规范化（同上：小写折叠 + 白名单 + 保留名拒绝）。前端注入：Web UI 启动时若本地无令牌，先取 URL 参数 `?gb_ext_username=&gb_ext_credential=`，再按 `GEBAI_EXTERNAL_AUTH_STORAGE_KEY` 直读宿主 localStorage（JSON 或 `username:credential` 字符串）；`GET /api/v1/auth/external-config` 供前端探测启用状态（不泄露密钥）
 - **登录限流**：连续失败 5 次锁定该用户名 60 秒（内存计数），防在线爆破；**登录/兑换/注册端点另加令牌桶**（REST：登录/兑换全局桶 60 突发/2 每秒 + 来源桶 10 突发/0.2 每秒，注册独立桶 30/0.5 + 10/0.1；WS `auth.login` 密码路径同款桶 30/1——scrypt 即使异步化仍耗 CPU，轮换用户名即可绕过按用户名锁定，防 CPU DoS 放大器；`GEBAI_TRUST_PROXY=true` 时 REST 按 `X-Forwarded-For` 首段区分来源）
 - **令牌机制**：登录后签发会话令牌（HMAC 签名，7 天 TTL），后续 WebSocket 连接携带令牌建立用户上下文；**令牌表持久化到 `{GEBAI_HOME}/auth-tokens.json`**（签发/撤销/过期清理时落盘，进程重启后已签发令牌仍有效——单机部署下重启不掉线；过期令牌在 authorize/保存时顺带清理，不无界增长）
+- **凭证来源扩展点（REST 认身份的可插拔入口）**：`resolveUser` 不再写死 Bearer/Basic，而是按**来源链**依次尝试（`credential-sources.ts`）——每个来源只负责「从请求里取出身份」，**校验一律下沉**（令牌型交 `authorize()` 验签+TTL+disabled；用户名型必须经 `userByName()` 命中注册表中**已启用**用户，不得凭空构造身份）。两条提供途径，可同时使用：
+  - **数据级**：`GEBAI_CREDENTIAL_SOURCES`（逗号分隔），名称语法 `bearer` / `basic` / `cookie:<名>` / `header:<名>`；非法项**启动期报错**（不静默降级为「少了一道鉴权」）。
+  - **代码级**：仓库根 `custom/auth/*.ts|js` 默认导出凭证来源（或来源数组），与 `custom/agents/` 同一套「放文件即注册」模型；单个文件加载失败只记 warning、不影响其余来源（失败隔离）。
+  - **缺省链**：`bearer` → `basic` → `cookie:gebai.auth.token`——页面里的图片/视频/iframe/下载是浏览器**原生请求**，前端脚本无法插 `Authorization` 头，不带 cookie 通道时服务模式下消息流的图片一律 401。
+  - **安全边界**：cookie 载体**默认仅 GET/HEAD**（cookie 是浏览器自动携带的凭证，写端点若也认即 CSRF）；需全方法生效由来源显式声明 `safeMethodsOnly: false`。来源链顺序即优先级，全部未命中才 401；来源抛错按未命中处理（单个扩展点故障不使鉴权瘫痪）
+- **前端凭证契约（`window.__GEBAI_AUTH__`）**：前端一切「带身份去请求」收敛到单一出口（`@gebai/sdk` auth-contract）——读/写/清令牌与请求头构造四个动作，缺省实现就是既有行为（localStorage `gebai.auth.token` + `Authorization: Bearer`），未覆盖时行为不变；部署方在 `custom/web/init.js` 赋值即可整体替换（逐项回落，抛错按未提供处理）。**顺带修复既有缺口**：文件工作台 `FsApi` 原先不携带任何凭证（服务模式下只能靠浏览器 cookie），现与主界面走同一契约。**同 IP 多实例**：cookie 不隔离端口、按 host 共享，多实例并排时可用本契约改 `sessionStorage`/自定义头完全隔离；框架自身**不再在未登录页面写空 cookie**（只登录写、登出清），避免 B 实例页面加载误清 A 实例的登录态
 - **WS 未登录拦截**：服务模式下未登录（无令牌）的 WS 连接仅允许 `auth.login`，其余消息一律拒绝
 - **跨站来源防护（本地/桌面免登录形态）**：WebSocket 不受同源策略约束且本地模式免登录——恶意网页可直连 `ws://127.0.0.1:*` 以 admin 身份建会话执行命令（REST 通道因 CORS `*` 同样暴露）。防护：WS upgrade 与 REST `/api/*` 均校验 **Origin 与 Host 同源**（浏览器发起的跨站请求必带 Origin，不同源即 403；非浏览器客户端无 Origin 不受限）。**两侧豁免面一致**（`wsOriginAllowed` 与 REST CORS 中间件同规则）：服务模式（令牌鉴权）不拦、显式配置 `GEBAI_CORS_ORIGINS`（不含 `*`）视为有意开放的跨源白名单不拦；仅「本地/桌面免登录形态 + 缺省 `*`」才要求同源——避免「白名单放开了 REST 却连不上 WS」「服务模式异域前端能调 REST 不能开 WS」的配置陷阱
 - **WS 全局子Agent 装载/卸载管理员门槛**：`sub_agent.load`/`sub_agent.unload` 不带 `sessionId` 的**全局形态**（变更所有用户的工具注册面）服务模式下仅 admin（与 REST 工具启停同门槛）；带 `sessionId` 的会话级装载/卸载不受限（只影响本人会话）；模型侧 `agent_load` 装载进当前会话（会话级引用，见「子Agent」引用计数）
@@ -2927,7 +2934,7 @@ WebSocket 消息格式（JSON）：
 | `/api/v1/webhooks` | GET/POST/DELETE | Webhook 注册/管理 |
 | `/api/v1/tts` | POST | 语音朗读：`{ text, voice?, rate?, pitch?, volume? }` → `audio/wav` 字节流（不落盘；长文本按句分片合成后拼接，同文同参进程内缓存；平台无内置离线引擎时 503 并说明不做联网合成）；`/api/v1/tts/status` 探测可用性与缓存现状 |
 
-- 认证方式：`Authorization: Bearer <token>`（用户令牌，登录获取）或 `Authorization: Basic base64(username:password)`（HTTP Basic 单次请求直验，等价隐式登录——复用密码校验与登录限流，不签发令牌，适合简单单次调用；**base64 非加密，须 HTTPS**）；无独立服务密钥
+- 认证方式：`Authorization: Bearer <token>`（用户令牌，登录获取）、`Authorization: Basic base64(username:password)`（HTTP Basic 单次请求直验，等价隐式登录——复用密码校验与登录限流，不签发令牌，适合简单单次调用；**base64 非加密，须 HTTPS**），以及部署方经**凭证来源扩展点**增开的载体（缺省另含同源 cookie `gebai.auth.token`，**仅 GET/HEAD**：浏览器原生资源请求无法带 `Authorization` 头，服务端据此取令牌并走同一 `authorize()` 校验）；无独立服务密钥
 - 全端点支持 CORS，可通过环境变量配置允许的来源
 - 会话操作与 WebSocket 共用同一套归属校验与隔离逻辑
 - 消息发送与流式输出统一走 WebSocket：`sendPrompt` 经 WS `session.prompt` 发起任务，引擎事件经连接级订阅推送，SDK 转换为 `ChatChunk` 迭代返回（`wsEventToChunk`，与原 SSE 契约字段一致：文本增量/工具调用/审批请求/任务完成/错误）
@@ -2950,7 +2957,7 @@ WebSocket 消息格式（JSON）：
 - **OpenAPI 规范**：`/api/docs` 的**端点表由路由注册自动生成**（请求时遍历 `app.routes`，故注册顺序无关；只取 `/api/` 域、跳过 Hono 派生的 `HEAD` 与中间件 `ALL`，路径参数 `:id` → `{id}`），**摘要取自补充表**（未登记的端点仍列出并标注「未登记摘要」，不隐藏）——手写清单会与实现漂移（新增忘登记、删掉的仍列着），生成器保证「有哪些端点」永远与代码一致；响应含 `x-endpoints-total`/`x-summary-covered` 便于判断摘要覆盖度。业务系统可据此生成任意语言客户端（Java/Go/Python 等）
 - **任意前端接入**：任何支持 WebSocket/HTTP 的前端（React/Vue/小程序/App 等）均可直接对接双通道 API，不绑定 UI
 - **Web UI 嵌入**：内置 Web UI 支持 iframe 嵌入业务系统页面，可通过 URL 参数指定 UI 风格/自定义主题变量（`gb_style`/`gb_vars`/`gb_cny`）；**无「URL 参数携带令牌免登录」**——登录态只存浏览器本地（`localStorage`），跨系统免登录走外部身份兑换（`gb_ext_username`/`gb_ext_credential`）
-- **接口认证**：REST 支持 `Authorization: Bearer <token>`（先登录获取令牌）与 HTTP Basic（单次请求直验账号密码，复用登录限流、不签发令牌）两种方式，WS 统一 `auth.login`；不提供独立服务令牌（原 `X-API-Key` 服务身份机制已移除）
+- **接口认证**：REST 支持 `Authorization: Bearer <token>`（先登录获取令牌）、HTTP Basic（单次请求直验账号密码，复用登录限流、不签发令牌）与部署方自定义的凭证来源（缺省含同源 cookie，仅 GET/HEAD；见「凭证来源扩展点」）三种形态，WS 统一 `auth.login`；不提供独立服务令牌（原 `X-API-Key` 服务身份机制已移除）
 - **外部身份扩展点（同源集成）**：服务模式下网站可复用自身登录态作为 GEBAI 用户——配置 `GEBAI_EXTERNAL_AUTH_*` 后，前端把本地登录态经 URL 参数（`?gb_ext_username=&gb_ext_credential=`）或 localStorage（`GEBAI_EXTERNAL_AUTH_STORAGE_KEY`，同源直读）交给 Web UI，Web UI 启动时自动调 `POST /api/v1/auth/exchange` 兑换令牌（HMAC 验签或 HTTP 回调验证，见「认证与鉴权」）；业务系统也可用 SDK `exchangeExternalUser` 自行对接（React/Vue 等任意前端），无需依赖内置 UI
 - **身份对接**：服务模式下支持**外部身份兑换扩展点**（`GEBAI_EXTERNAL_AUTH_SECRET` HMAC / `GEBAI_EXTERNAL_AUTH_URL` 回调，见「多用户隔离与安全」），复用业务系统已有账号体系；**标准 SSO/OIDC 对接未实现**（列于「待实现」）
 - **URL 携带提示词自动运行（`gb_prompt`）**：业务系统跳转链接可直接带任务进来——`?gb_prompt=<文本>`（URL 编码）在页面首屏就绪后自动**新建会话并发送该提示词**，随后把地址栏 `history.replaceState` 为会话地址（`?session=<会话 id>`，其余参数保留、`gb_prompt`/`gb_new` 移除）；刷新因此只打开该会话，**不会重复创建会话、重复执行任务**。`gb_new=1` 强制新建（同链接带 `session` 时也新建）；带 `session=<id>` 且会话存在时改为在该会话续接发送，该会话运行中则不抢占（重定向后把提示词回落输入框并提示）；建会话失败时提示词回落输入框且**不重定向**（刷新重试仍会执行）。关闭入口用独立配置文件的 `allowUrlPrompt: false`（默认开）；解析/重定向/编排见 `packages/web/src/url-prompt.ts`

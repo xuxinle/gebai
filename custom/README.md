@@ -12,6 +12,8 @@ custom/
 ├── core/            # 二开依赖组件（自动可 import——同 packages/agents/src/core/ 布局）
 │   └── my_lib/                   # ← 自建：{lib}/index.ts，子代理内相对引用 ../../core/{lib}
 │       └── index.ts
+├── auth/            # 二开凭证来源（自动扫描域——鉴权链的可插拔入口，详见下节）
+│   └── my_source.ts              # ← 自建：export default 单个 CredentialSource 或来源数组
 ├── web/             # 二开前端脚本（复制示例改名即启用；构建/开发时带到 Web 产物根，在入口脚本之前引入）
 │   ├── gebai.config.example.js   #    配置示例 → 复制为 gebai.config.js 生效
 │   └── init.example.js           #    初始化脚本示例 → 复制为 init.js 生效（产物名 gebai.custom.js）
@@ -48,9 +50,12 @@ Web UI 浏览器端的二开入口，**页面加载即执行、先于歌白应�
 - `gebai.config.js`（配置）：经 `window.__GEBAI_WEB_CONFIG__` 预置浏览器环境变量、把宿主 localStorage
   映射为歌白设置、关闭 URL 携带提示词自动运行、调整二开引导的等待上限（`bootTimeout`）。
 - `init.js`（初始化脚本，产物根名 `gebai.custom.js`）：可执行任意初始化逻辑——直接读写 localStorage、
-  调 `/api/v1/auth/*` 完成注册/登录（令牌写入 `gebai.auth.token`）、或写入宿主登录态供「外部身份兑换」
+  调 `/api/v1/auth/*` 完成注册/登录（令牌写 `gebai.auth.token`，**同时写同名 cookie**——图片/视频/下载等
+  原生资源请求只能靠 cookie 带凭证，示例里的 `gebaiSyncToken` 即此）、或写入宿主登录态供「外部身份兑换」
   自动换令牌；需要 await 的动作赋给 `window.__GEBAI_WEB_BOOT__`（Promise / 返回 Promise 的函数 /
   二者组成的数组），歌白会在应用初始化最早期等待其完成（超时与异常只记控制台警告、不阻塞页面）。
+  另可给 `window.__GEBAI_AUTH__` 赋值整体接管「令牌读/写/清 + 请求头构造」（见示例例 4），
+  典型场景：同一个 IP 上并排多套歌白——cookie 按 host 共享会互相覆盖，改 sessionStorage/自定义头即完全隔离。
 
 **启用方式：复制示例改名**——目录内的 `gebai.config.example.js` 与 `init.example.js` 是带注释的模板，
 **不参与接入**；把它们复制为 `gebai.config.js` / `init.js` 即生效。之所以用示例名：本目录属二开域，
@@ -59,3 +64,28 @@ Web UI 浏览器端的二开入口，**页面加载即执行、先于歌白应�
 生效后构建（或 `vite dev`）时由 vite 插件带到前端产物根，`index.html` / `files.html` 自动在入口模块
 脚本之前引入**已启用的那些脚本**（按产物根文件名自动接入、无需清单；`init.js` 以并列命名
 `gebai.custom.js` 输出；未启用的脚本不产出也不注入）。纯前端文件，改完刷新页面即生效（不需要重启服务）。
+
+## 凭证来源（`custom/auth/`）
+
+服务端鉴权链的可插拔入口：REST 请求「从哪里认出用户」默认是 Bearer → Basic → cookie
+`gebai.auth.token`（见 DESIGN「凭证来源扩展点」），本目录可增删来源。目录里每个 `*.ts`/`*.js`
+（非 `*.test.*`、非 `_` 前缀）**默认导出**一个凭证来源或来源数组即注册，无需清单：
+
+```ts
+// custom/auth/gateway_header.ts —— 企业网关注入的身份头
+import type { CredentialSource } from "@gebai/server/credential-sources"
+const source: CredentialSource = {
+  name: "gateway-header",
+  safeMethodsOnly: false, // 该头由网关剥离外部伪造，故可全方法生效
+  resolve: (c) => c.userByName(c.header("x-gateway-user") ?? ""),
+}
+export default source
+```
+
+- 与数据级 `GEBAI_CREDENTIAL_SOURCES`（`bearer`/`basic`/`cookie:<名>`/`header:<名>`）可同时使用：
+  环境变量**显式设置**即以其为准、代码级来源前置（便于改写内置行为）；未设置则内置缺省链在前、
+  代码级追加在后。
+- **安全边界（代码级来源不例外）**：来源只负责取出身份，校验一律下沉（令牌型交 `c.authorize()`
+  验签+TTL+disabled；用户名型经 `c.userByName()` 只能命中**已启用**用户）；`cookie` 类默认仅 GET/HEAD。
+- **失败隔离**：单个文件 import/导出形态出错只记启动 warning，不影响其余来源与框架可用性。
+- **仅源码形态生效**：二进制/镜像部署无源码树，该配置改用 `GEBAI_CREDENTIAL_SOURCES`。
