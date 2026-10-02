@@ -9,11 +9,13 @@
 
 #include "st/core/base64.hpp"
 #include "st/core/fs.hpp"
+#include "st/core/hash.hpp"
 #include "st/core/log.hpp"
 #include "st/core/net.hpp"
 #include "st/core/process.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
+#include "st/codec/png.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/selector.hpp"
@@ -276,6 +278,26 @@ struct Server::Impl {
     return host.root().find(id);
   }
 
+  /// 解析 `capture` / `capture.hash` / `visual.diff` 共用的区域参数：
+  /// `id`（元素边框，逻辑坐标）> `region`（显式逻辑矩形）> 空（全屏）。
+  /// 三处必须同一口径——分开写会让「同一个 region 在三个方法里含义不同」。
+  [[nodiscard]] auto capture_region_of(const Json& params) -> Result<math::IntRect> {
+    if (const std::string target = json_get_string(params, "id"); !target.empty()) {
+      ui::Element* element = find_element(target);
+      if (element == nullptr) {
+        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target));
+      }
+      return element->bounds().round_out();
+    }
+    if (const Json* raw = json_find(params, "region"); raw != nullptr && raw->is_object()) {
+      return math::IntRect{static_cast<int>(json_get_i64(*raw, "x", 0)),
+                           static_cast<int>(json_get_i64(*raw, "y", 0)),
+                           static_cast<int>(json_get_i64(*raw, "width", 0)),
+                           static_cast<int>(json_get_i64(*raw, "height", 0))};
+    }
+    return math::IntRect{};
+  }
+
 
   [[nodiscard]] auto wait_satisfied(const PendingWait& wait) -> std::optional<bool> {
     auto& root = host.root();
@@ -535,6 +557,13 @@ struct Server::Impl {
     last_published_version = version;
     Json data = Json::object();
     data["version"] = version;
+    // 变更元素 id 清单（BACKLOG「事件流完整消费」）：
+    // 只报"状态/内容变了的元素"（set/invoke/输入/焦点/增删），不报纯悬浮过渡与光标闪烁——
+    // 后者逐帧都在动，混进来会把事件流的信噪比拉到零。
+    // 仅在发布时取走：版本未变时让它继续累积，避免"变了但还没发"的窗口里丢清单。
+    Json changed = Json::array();
+    for (auto& id : host.root().take_changed_ids()) changed.push_back(Json(std::move(id)));
+    if (!changed.empty()) data["changed"] = std::move(changed);
     publish_to_clients("ui.changed", data);
   }
 };
@@ -570,8 +599,8 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     result["theme"] = std::move(theme);
     Json capabilities = Json::array();
     for (const auto name : {"tree", "find", "get", "set", "invoke", "ui.create", "ui.remove",
-                            "input.mouse", "input.key", "input.text", "capture", "visual",
-                            "wait", "metrics", "events", "theme", "app"}) {
+                            "input.mouse", "input.key", "input.text", "capture", "capture.hash",
+                            "visual", "visual.diff", "wait", "metrics", "events", "theme", "app"}) {
       capabilities.push_back(Json(name));
     }
     // `script` 只在真正启用时上报：能力清单是"这个进程能做什么"的事实说明，
@@ -691,6 +720,8 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     Json result = Json::object();
     result["id"] = mounted != nullptr ? mounted->derived_id() : std::string();
     result["type"] = mounted != nullptr ? std::string(mounted->type()) : std::string();
+    // 增删元素是结构变更：新元素登记进变更清单（客户端可据此增量处理）。
+    if (mounted != nullptr) root.note_changed(*mounted);
     return result;
   }
   if (method == "ui.remove") {
@@ -703,8 +734,12 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     if (element->parent() == nullptr) {
       root.set_content(nullptr);
     } else {
-      auto removed = element->parent()->remove_child(element);
+      // 先记父元素再删子元素（删完子指针就悬垂了，不能再去读）：
+      // 父的 children 变了 = 父这块区域变了。
+      ui::Element* parent = element->parent();
+      auto removed = parent->remove_child(element);
       (void)removed;
+      root.note_changed(*parent);
     }
     host.request_repaint();
     Json result = Json::object();
@@ -723,7 +758,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
                                                     "scroll_to", "submit",   "open",
                                                     "close",     "dismiss",  "action",
                                                     "activate",  "add_row",  "clear_rows",
-                                                    "scroll_by", "clear"};
+                                                    "scroll_by", "clear",    "step_forward",
+                                                    "step_backward", "reset",  "set",
+                                                    "increment", "decrement"};
     const std::string requested_action = json_get_string(params, "action");
     if (!requested_action.empty()) {
       const bool known = std::find(std::begin(kActions), std::end(kActions), requested_action) !=
@@ -826,6 +863,12 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       hit = ui::element_to_json(*target);
     }
     const bool handled = root.dispatch(event);
+    // 输入是状态变更源（点击选中/拖拽/键入）：把命中元素登记进变更清单。
+    if (handled) {
+      if (ui::Element* target = root.hit_test(event.position); target != nullptr) {
+        root.note_changed(*target);
+      }
+    }
     host.request_repaint();
     Json result = Json::object();
     result["handled"] = handled;
@@ -885,6 +928,12 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       return unexpected(ErrorCode::Invalid, "input.text 需要 text 参数");
     }
     const bool handled = root.dispatch(event);
+    // 键盘/文本输入是状态变更源（编辑内容/焦点移动）：焦点元素登记进变更清单。
+    if (handled) {
+      if (ui::Element* focused_now = root.focused(); focused_now != nullptr) {
+        root.note_changed(*focused_now);
+      }
+    }
     host.request_repaint();
     Json result = Json::object();
     result["handled"] = handled;
@@ -893,19 +942,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     return result;
   }
   if (method == "capture") {
-    math::IntRect region{};
-    if (const std::string target = json_get_string(params, "id"); !target.empty()) {
-      ui::Element* element = find_element(target);
-      if (element == nullptr) {
-        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target));
-      }
-      region = element->bounds().round_out();
-    } else if (const Json* raw = json_find(params, "region"); raw != nullptr && raw->is_object()) {
-      region = math::IntRect{static_cast<int>(json_get_i64(*raw, "x", 0)),
-                             static_cast<int>(json_get_i64(*raw, "y", 0)),
-                             static_cast<int>(json_get_i64(*raw, "width", 0)),
-                             static_cast<int>(json_get_i64(*raw, "height", 0))};
-    }
+    auto region_result = capture_region_of(params);
+    if (!region_result) return forward_error(region_result.error());
+    const math::IntRect region = *region_result;
     const std::string encode = json_get_string(params, "encode", "base64");
     Json result = Json::object();
     if (encode == "file" || params.contains("path")) {
@@ -952,6 +991,135 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
       pixels["device_scale"] = static_cast<double>(scale);
       result["pixel_size"] = pixels;
     }
+    return result;
+  }
+  if (method == "capture.hash") {
+    // 像素哈希："画面变了没有"的快速判定（比传回 PNG 再比对便宜几个量级）。
+    //
+    // 口径：对**物理像素的 RGBA 字节**做 FNV-1a 64——含 alpha，因为"同一颜色、不同
+    // 透明度"在合成上不是同一画面；区域取 id/region（与 capture 同一口径，
+    // 见 capture_region_of）。回包带宽高与像素字节数，调用方可断言"同区域"再比哈希。
+    // 注意：哈希只回答"完全一致吗"——"差多少"用 visual.diff。
+    auto region_result = capture_region_of(params);
+    if (!region_result) return forward_error(region_result.error());
+    auto pixels = host.capture_pixels(*region_result);
+    if (!pixels) return forward_error(pixels.error());
+    Json result = Json::object();
+    result["hash"] = std::format("{:016x}", st::hash::fnv1a64_bytes(pixels->rgba));
+    result["algorithm"] = "fnv1a64";
+    result["width"] = static_cast<std::int64_t>(pixels->width);
+    result["height"] = static_cast<std::int64_t>(pixels->height);
+    result["bytes"] = static_cast<std::uint64_t>(pixels->rgba.size());
+    return result;
+  }
+  if (method == "visual.diff") {
+    // 与基线图对比：「改代码→看图→断言」闭环的最后一公里（BACKLOG）；
+    // 以 `path` 指向的 PNG 为基线（无基线时 `write_baseline=true` 将当前帧落盘为基线），
+    // 结果给出差异像素占比/均值/最大差/差异包围盒——布尔断言之外的量化证据。
+    //
+    // 口径细节：
+    // - 基线 PNG 是**物理像素**（与 capture 一致）；两侧尺寸必须一致（不等即 Invalid，
+    //   不缩放对齐——缩放本身会引入差异，把「界面变了」混入）；
+    // - 逐像素算 RGBA 四通道最大绝对差，`threshold`（默认 0）不计入"差异像素"；
+    // - `tolerance`（默认 0）允许少量差异像素（抗锯齿/字体版本的微差），超限时才 `changed=true`。
+    const std::string path = json_get_string(params, "path");
+    if (path.empty()) {
+      return unexpected(ErrorCode::Invalid, "visual.diff 需要 path 参数（基线 PNG 路径）");
+    }
+    const bool write_baseline = json_get_bool(params, "write_baseline", false);
+    auto region_result = capture_region_of(params);
+    if (!region_result) return forward_error(region_result.error());
+    auto current = host.capture_pixels(*region_result);
+    if (!current) return forward_error(current.error());
+
+    if (write_baseline || !fs::exists(path)) {
+      if (!write_baseline) {
+        return unexpected(ErrorCode::NotFound,
+                          std::format("基线不存在: {}（先以 write_baseline=true 写入当前帧，或检查路径）", path));
+      }
+      if (!capture_path_allowed(path)) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("基线写入路径不在白名单目录内: {}（同 capture 落盘白名单）", path));
+      }
+      codec::PngImage image;
+      image.width = static_cast<std::uint32_t>(current->width);
+      image.height = static_cast<std::uint32_t>(current->height);
+      image.rgba = current->rgba;
+      if (auto status = codec::png_write_file(path, image); !status) {
+        return forward_error(status.error());
+      }
+      Json result = Json::object();
+      result["written"] = true;
+      result["path"] = path;
+      result["width"] = static_cast<std::int64_t>(current->width);
+      result["height"] = static_cast<std::int64_t>(current->height);
+      result["hash"] = std::format("{:016x}", st::hash::fnv1a64_bytes(current->rgba));
+      return result;
+    }
+
+    auto baseline = codec::png_read_file(path);
+    if (!baseline) return forward_error(baseline.error());
+    const std::uint32_t width = baseline->width;
+    const std::uint32_t height = baseline->height;
+    if (static_cast<int>(width) != current->width || static_cast<int>(height) != current->height) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("基线尺寸与当前截图不一致: 基线 {}x{} vs 当前 {}x{}（不缩放对齐——缩放会引入伪差异）",
+                                    width, height, current->width, current->height));
+    }
+    const double threshold = json_get_double(params, "threshold", 0.0);
+    const double tolerance = json_get_double(params, "tolerance", 0.0);
+    const std::size_t pixels_total = static_cast<std::size_t>(width) * height;
+    std::size_t diff_pixels = 0;
+    double diff_sum = 0.0;
+    int diff_max = 0;
+    math::IntRect diff_bounds{};
+    bool bounds_valid = false;
+    // IntRect 无 union_with（那是 float Rect 的方法）：手写并集（取 min/max 边界）。
+    const auto include_pixel = [&](int x, int y) {
+      if (!bounds_valid) {
+        diff_bounds = math::IntRect{x, y, 1, 1};
+        bounds_valid = true;
+        return;
+      }
+      const int left = std::min(diff_bounds.x, x);
+      const int top = std::min(diff_bounds.y, y);
+      const int right = std::max(diff_bounds.right(), x + 1);
+      const int bottom = std::max(diff_bounds.bottom(), y + 1);
+      diff_bounds = math::IntRect{left, top, right - left, bottom - top};
+    };
+    for (std::size_t index = 0; index < pixels_total; ++index) {
+      int channel_max = 0;
+      for (int channel = 0; channel < 4; ++channel) {
+        const std::size_t offset = index * 4U + static_cast<std::size_t>(channel);
+        const int a = baseline->rgba[offset];
+        const int b = current->rgba[offset];
+        channel_max = std::max(channel_max, std::abs(a - b));
+      }
+      if (static_cast<double>(channel_max) <= threshold) continue;
+      ++diff_pixels;
+      diff_sum += static_cast<double>(channel_max);
+      diff_max = std::max(diff_max, channel_max);
+      include_pixel(static_cast<int>(index % width), static_cast<int>(index / width));
+    }
+    const double ratio =
+        pixels_total > 0 ? static_cast<double>(diff_pixels) / static_cast<double>(pixels_total) : 0.0;
+    Json result = Json::object();
+    result["changed"] = ratio > tolerance;
+    result["diff_pixels"] = static_cast<std::uint64_t>(diff_pixels);
+    result["total_pixels"] = static_cast<std::uint64_t>(pixels_total);
+    result["diff_ratio"] = ratio;
+    result["mean_diff"] = diff_pixels > 0 ? diff_sum / static_cast<double>(diff_pixels) : 0.0;
+    result["max_diff"] = diff_max;
+    result["threshold"] = threshold;
+    result["tolerance"] = tolerance;
+    result["width"] = static_cast<std::int64_t>(width);
+    result["height"] = static_cast<std::int64_t>(height);
+    if (bounds_valid) result["diff_bounds"] = bounds_to_json(math::Rect{static_cast<float>(diff_bounds.x),
+                                                                        static_cast<float>(diff_bounds.y),
+                                                                        static_cast<float>(diff_bounds.width),
+                                                                        static_cast<float>(diff_bounds.height)});
+    result["baseline_hash"] = std::format("{:016x}", st::hash::fnv1a64_bytes(baseline->rgba));
+    result["current_hash"] = std::format("{:016x}", st::hash::fnv1a64_bytes(current->rgba));
     return result;
   }
   if (method == "visual") {

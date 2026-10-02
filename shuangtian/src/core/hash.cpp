@@ -222,6 +222,28 @@ auto fnv1a32(std::string_view text) noexcept -> std::uint32_t {
   return value;
 }
 
+void Fnv1a64::update(std::span<const std::uint8_t> data) noexcept {
+  for (const std::uint8_t byte : data) {
+    state_ ^= static_cast<std::uint64_t>(byte);
+    state_ *= 0x100000001b3ULL;
+  }
+}
+
+void Fnv1a64::update(std::string_view text) noexcept {
+  // 不 reinterpret_cast 指针：逐字符转 `unsigned char` 后与字节路径同一算法。
+  // （`update(span)` 的循环体完全一样，不抽公共函数是因为代价只在字面量循环里。）
+  for (const char raw : text) {
+    state_ ^= static_cast<std::uint64_t>(static_cast<unsigned char>(raw));
+    state_ *= 0x100000001b3ULL;
+  }
+}
+
+auto fnv1a64_bytes(std::span<const std::uint8_t> data) noexcept -> std::uint64_t {
+  Fnv1a64 hasher;
+  hasher.update(data);
+  return hasher.value();
+}
+
 auto crc32(std::span<const std::uint8_t> data) noexcept -> std::uint32_t {
   std::uint32_t value = 0xFFFFFFFFU;
   for (const std::uint8_t byte : data) {

@@ -158,6 +158,9 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
       element.mark_dirty();
     }
   }
+  // 变更清单登记（`ui.changed` 事件携带）：只在**真的改到了**属性时登记，
+  // 各路径（协议 set / 脚本写入 / 声明式 diff）共用同一入口。
+  if (!changed.empty()) root.note_changed(element);
   return changed;
 }
 
@@ -173,6 +176,12 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
   // 先让元素处理动作，**再**通知观察者（与 `UiRoot::dispatch_to` 同序）：
   // 否则脚本写入会被 C++ 处理器随即覆盖，表现为"JS 改了没生效"。
   const bool handled = element.invoke_action(action, argument);
+  if (handled) {
+    // 动作是状态变更源（toggle/open/close/select…）：登记进变更清单。
+    // 无条件登记（不检查"确实改了"）——元素自己知道得比这里多，误报的代价
+    // 只是一条冗余 id（去重过的集合），漏报的代价是通知链断掉。
+    root.note_changed(element);
+  }
   // 点击类动作：语义就是一次点击——合成事件通知观察者（脚本桥），
   // 让"协议 invoke / 脚本 ui_invoke / 真实鼠标点击"三条路径对事件监听者表现一致。
   if (action == "click" || action == "dblclick" || action == "tripleclick") {

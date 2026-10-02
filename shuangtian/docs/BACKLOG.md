@@ -55,10 +55,20 @@
   仅旧连接饿死、>60s 不自愈；两次命中后 ~4800 次调用未再复现）。已加固：
   错误码平台化（头号嫌疑：winsock 不设 errno）、发送失败不静默、心跳可探。
   若再复现：用 tools/ 下探针的取证路径继续查（表征见审视报告 §4.1）。
-- [ ] **视觉断言原语**：`visual.diff` / `capture.hash`（区域像素哈希/模板相似度）进协议——
-  「改代码→看图→断言」闭环最后一公里。
-- [ ] **事件流 TS 端完整消费**：客户端常驻连接与事件队列已做；
-  待补：`shuangtian_wait_event` 工具暴露 + 服务端 `ui.changed` 携带变更元素 id 清单。
+- [x] **视觉断言原语**（2026-10-02 落地）：`capture.hash`（区域像素 FNV-1a 64——同区域两次一致
+  即逐像素完全一致）与 `visual.diff`（与基线 PNG 逐像素比对：diff_pixels/diff_ratio/mean_diff/
+  max_diff/diff_bounds；`write_baseline=true` 存基线、`threshold`/`tolerance` 双旋钮；
+  尺寸不一致即报错不缩放对齐）进协议——「改代码→看图→断言」闭环最后一公里。
+  Host 新增 `capture_pixels`（RGBA8 原始字节，不编码 PNG）与共享区域解析（id/region 同口径）；
+  测试：`control_protocol_test.cpp` 3 用例 + `tools/visual_assert_e2e.py` 真实应用 7 项端到端；
+  TS 侧 `capture_hash` / `visual_diff` 工具（免审批）+ 3 用例。
+- [x] **事件流完整消费**（2026-10-02 落地）：`ui.changed` 事件携带**变更元素 id 清单**
+  （`UiRoot::note_changed` 登记：set/apply_properties、invoke、输入命中/焦点、ui.create/ui.remove 五路；
+  去重 + 单帧上限 64；不报悬浮过渡/光标闪烁这类逐帧噪声）；
+  TS 侧新增 `wait_event` 工具（单次调用内订阅收集，无跨调用状态）——
+  客户端此前 `keep_events` 是死参数（BACKLOG 写「已做」是文档漂移，本次补实）。
+  测试：`ui_changed_event_carries_changed_ids` 协议用例 + `tools/events_e2e.py` 三路
+  （set/invoke/input.text）+ TS 两用例。
 - [ ] **script_host 提交链仍调 `mark_dirty_all`**（控制通道路径已改损坏区驱动）：
   JS 写入目前仍整帧；待脚本路径补上元素级标脏验证后再同样收敛。
 - [ ] **声明式 UI 后续里程碑**（M1–M4 主体已落地，设计与路线见 `docs/declarative.md`）：
@@ -175,15 +185,24 @@
 - [x] **示例精简与 VSCode 式重写**（2026-10）：删除 mdeditor 示例；codeeditor 按 VSCode 信息架构
   重写（标题栏/菜单栏/活动栏+侧栏/多标签编辑区/底部面板/状态栏，全内置组件零自绘）。
   重写中反推出的框架缺口（详见 DESIGN.md §8.1.1）：
-  - [ ] **SplitView 内置化**：拖拽分栏仍是示例级自绘能力，应升为框架组件；
-  - [ ] **命令面板通用组件**：CommandPalette（FillViewport + 过滤列表 + 键盘导航）值得内置；
-  - [ ] **单行 Input 动作面**：`TextArea` 有 `invoke submit`，`Input` 没有（实测发现，§8.2 第 26 条同族）；
+  - [x] **SplitView 内置化**（2026-10-02 落地）：框架组件 `SplitView`（拖拽分栏，
+  见 DESIGN §4.5 v0.1.5 组件能力）；codeeditor 侧栏/编辑区已迁移；测试 7 用例
+  （`ui_split_view_test.cpp`）+ `tools/split_view_e2e.py`（拖拽/夹取/动作面/截图）。
+  迁移中发现并修复框架交互缺口：`MouseUp` 未按拖拽归属投递（拖出手柄后释放丢失）。
+- [ ] **命令面板通用组件**：CommandPalette（FillViewport + 过滤列表 + 键盘导航）值得内置；
+- [x] **单行 Input 动作面**（2026-10-02 落地）：`invoke submit/activate/clear` 与 TextArea 对齐；
+  测试 `ui_input_invoke_*` 3 用例 + `tools/input_action_e2e.py` 真实应用端到端。
   - [ ] **虚拟化长列表**：终端/输出面板的 ScrollView+Text 累积全文，日志长了退化；
   - [ ] **桌面窗框**：平台 shell 层的系统标题栏融入/自绘窗框；
   - [ ] **编辑器分组**：VSCode 式左右分屏各持独立标签组需容器级支持。
-- [ ] **text_subpixel_ink_matches_grayscale 回归**（主线存量，与示例重写无关）：
-  hinting 提交（a34699b）后 worst_mean 断言超阈（实测 0.08 上限被超出，
-  HEAD 上可复现）。需 text 层重新校准阈值或修 ink 度量。
+- [x] **text_subpixel_ink_matches_grayscale 长期红修复**（2026-10-02；此前归因有误）：
+  此前台账写"hinting 提交（a34699b）后超阈"——本次对照实验证明**与 hinting 无关**
+  （把 text.cpp 回退到 LCD 提交可复现同样的 0.1083）。真因：超阈来自 **LCD 5-tap 滤波的
+  横向摊墨**（'I'@11px 窄笔画：未滤波 0.0163、滤波后 0.1083），而摊墨是滤波存在的目的
+  （压彩边），不是字形走样——旧断言把"设计行为"当成了"缺陷"。
+  修复：把"形状保真"（未滤波 vs 灰度）与"滤波摊墨有界"与"墨量守恒"拆成三个互不混同的
+  断言（实测 0.0163 / 0.1083 / 聚合 1.34%，滤波对未滤波墨量差 0.00%）；新增
+  `tools/lcd_ink_probe.cpp` 量尺（逐字形偏差分解，滤波开/关两栏）。
 
 - [x] **网络层错误码平台化**（WSAGetLastError/errno 分流）+ **发送失败不静默** + 帧合并单发 +
   accept 关 Nagle + 接收缓冲偏移游标（A1）

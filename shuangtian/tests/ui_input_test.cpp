@@ -149,3 +149,47 @@ ST_TEST(ui_input_disabled_background_differs_from_enabled) {
   ST_CHECK(enabled_fixture.canvas.pixel_at(kWidth / 2, kHeight / 2) !=
             disabled_fixture.canvas.pixel_at(kWidth / 2, kHeight / 2));
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 动作面（invoke submit/activate/clear）
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(ui_input_invoke_submit_triggers_on_submit) {
+  // 此前单行 Input 只有键盘路径（Enter）能提交，`invoke submit` 返回 unsupported——
+  // 自动化只能模拟真实回车才能提交，与 TextArea 的动作面不对称（DESIGN §8.1.1 同族缺口）。
+  Input input;
+  input.set_text("命令面板");
+  std::string submitted;
+  int calls = 0;
+  input.on_submit = [&](std::string_view value) {
+    submitted = std::string(value);
+    ++calls;
+  };
+
+  ST_CHECK(input.invoke_action("submit", {}));
+  ST_CHECK_EQ(calls, 1);
+  ST_CHECK_EQ(submitted, std::string("命令面板"));
+
+  // activate 同义（与 Enter 键的 `activate()` 同源）
+  ST_CHECK(input.invoke_action("activate", {}));
+  ST_CHECK_EQ(calls, 2);
+}
+
+ST_TEST(ui_input_invoke_clear_empties_text) {
+  Input input;
+  input.set_text("要清掉的内容");
+  int changes = 0;
+  input.on_change = [&](std::string_view) { ++changes; };
+
+  ST_CHECK(input.invoke_action("clear", {}));
+  ST_CHECK_EQ(input.value(), std::string{});
+  // `on_change` **不**发：`clear` 经 `set_text`，而程序化写入从不冒充用户编辑
+  // （与 `set value` 属性面同语义：只有键盘/粘贴等用户路径才触发 on_change）。
+  ST_CHECK_EQ(changes, 0);
+}
+
+ST_TEST(ui_input_invoke_unknown_action_falls_through) {
+  Input input;
+  // 未知动作回落到基类（返回 false 而非假装成功——假成功会让自动化误判）
+  ST_CHECK(!input.invoke_action("definitely_not_an_action", {}));
+}

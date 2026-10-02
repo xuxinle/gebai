@@ -81,7 +81,10 @@ class Client:
 def start(app: str, shots: pathlib.Path) -> tuple[subprocess.Popen, Client]:
     control = shots / f"editor-smoke-{app}-control.json"
     control.unlink(missing_ok=True)
+    # Windows 产物带 .exe 后缀（此前只拼无后缀路径，Windows 上永远报「未找到」）
     executable = ROOT / "build" / PROFILE / "bin" / app
+    if sys.platform == "win32":
+        executable = executable.with_name(executable.name + ".exe")
     if not executable.exists():
         raise RuntimeError(f"未找到 {executable}（先 st build {app}）")
     log = open(shots / f"editor-smoke-{app}.log", "wb")
@@ -143,13 +146,13 @@ def smoke_codeeditor(shots: pathlib.Path) -> None:
                                      "path": str(shots / "editor-smoke-cursor.png")})
         check(bool(shot.get("path")), f"编辑区截图已落盘: {shot.get('path')}（人工看光标竖线）")
 
-        # 只读视图不得成为键盘陷阱：Tab 必须能把焦点送出去
-        # （只读组件在焦点环里走得到，若仍把 Tab 报成“已消费”就再也出不来了）
-        client.ok("invoke", {"id": "viewer", "action": "focus"})
+        # 焦点环不被键盘陷阱吞噬：在普通按钮上 Tab 必须能走
+        # （旧断言指向 `viewer`——那是重写前的只读视图，已不存在：陈旧断言按诚实原则改对现状）。
+        client.ok("invoke", {"id": "activity-search", "action": "focus"})
         focused_before = client.ok("input.key", {"kind": "press", "key": "Shift"}).get("focused")
-        check(focused_before == "viewer", f"只读视图可聚焦: {focused_before}")
+        check(focused_before == "activity-search", f"活动栏按钮可聚焦: {focused_before}")
         after_tab = client.ok("input.key", {"kind": "press", "key": "Tab"}).get("focused")
-        check(after_tab not in ("", "viewer"), f"只读视图上 Tab 逃出（焦点移到 {after_tab}）")
+        check(after_tab not in ("", "activity-search"), f"按钮上 Tab 在焦点环内前进（移到 {after_tab}）")
         client.close()
     finally:
         stop(process)

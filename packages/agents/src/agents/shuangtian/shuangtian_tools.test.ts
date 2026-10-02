@@ -261,10 +261,10 @@ describe("写类工具", () => {
     expect(tools.click.requiresApproval).toBe(true)
     expect(tools.type.requiresApproval).toBe(true)
     expect(tools.key.requiresApproval).toBe(true)
-    // 只读类免审批
-    for (const name of ["tree", "find", "get", "visual", "metrics", "capture", "wait", "apps"] as const) {
-      expect(tools[name].requiresApproval ?? false).toBe(false)
-    }
+      // 只读类免审批
+  for (const name of ["tree", "find", "get", "visual", "metrics", "capture", "capture_hash", "visual_diff", "wait", "apps"] as const) {
+    expect(tools[name].requiresApproval ?? false).toBe(false)
+  }
   })
 
   test("click 坐标与修饰键按协议整形（逻辑像素）", async () => {
@@ -358,6 +358,101 @@ describe("capture", () => {
     const result = await tools.capture.execute({ target: `127.0.0.1:${server.port}` }, ctx)
     expect(result.blocks).toBeUndefined()
     expect(result.output).toContain("invalid")
+  })
+})
+
+describe("视觉断言（capture_hash / visual_diff）", () => {
+  test("capture_hash：默认全屏、region 随宽高下发（逻辑坐标）", async () => {
+    const server = await control()
+    server.setHandler(() => ({ hash: "abc", algorithm: "fnv1a64", width: 100, height: 50 }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const target = `127.0.0.1:${server.port}`
+
+    const full = await tools.capture_hash.execute({ target }, ctx)
+    expect(server.calls[0]).toEqual({ method: "capture.hash", params: {} })
+    expect(full.data).toMatchObject({ hash: "abc" })
+
+    await tools.capture_hash.execute({ id: "#panel", x: 1, y: 2, width: 8, height: 9, target }, ctx)
+    expect(server.calls[1].params).toEqual({ id: "#panel", region: { x: 1, y: 2, width: 8, height: 9 } })
+  })
+
+  test("visual_diff：path 解析为绝对路径，写基线/参数透传", async () => {
+    const server = await control()
+    server.setHandler((method, params) => ({ method, params }))
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const result = await tools.visual_diff.execute(
+      { path: "baselines/home.png", write_baseline: true, threshold: 2, tolerance: 0.001, target: `127.0.0.1:${server.port}` },
+      ctx,
+    )
+    expect(server.calls[0].method).toBe("visual.diff")
+    expect(String(server.calls[0].params.path)).toContain("baselines")
+    expect(server.calls[0].params).toMatchObject({ write_baseline: true, threshold: 2, tolerance: 0.001 })
+    expect(result.data).toMatchObject({ method: "visual.diff" })
+  })
+
+  test("视觉断言工具免审批（只读）", () => {
+    expect(tools.capture_hash.requiresApproval ?? false).toBe(false)
+    expect(tools.visual_diff.requiresApproval ?? false).toBe(false)
+  })
+})
+
+describe("wait_event（事件流）", () => {
+  test("订阅 hello 后收到推送的 ui.changed 事件（含 changed 清单）", async () => {
+    // 自建一个会**推送事件**的 mock：客户端连上后先回 hello 响应，再主动推事件帧。
+    const sockets = new Set<Socket>()
+    const server: Server = createServer((socket) => {
+      sockets.add(socket)
+      socket.on("close", () => sockets.delete(socket))
+      socket.on("data", () => {
+        // hello 响应（id=0 会被客户端当合成握手忽略；无论 id 都会忽略响应帧
+        // —— wait_for_event 只收事件帧；这里 id 填 7 也无所谓）
+        const hello = JSON.stringify({ id: 7, ok: true, result: { protocol: 1 } })
+        const header = Buffer.alloc(4)
+        header.writeUInt32BE(Buffer.byteLength(hello), 0)
+        socket.write(Buffer.concat([header, Buffer.from(hello, "utf8")]))
+        // 紧接两帧事件（先给一个无 changed 的版本事件，再给带 changed 的）
+        for (const data of [{ version: 2 }, { version: 3, changed: ["#save"] }]) {
+          const body = JSON.stringify({ event: "ui.changed", seq: 1, data })
+          const eventHeader = Buffer.alloc(4)
+          eventHeader.writeUInt32BE(Buffer.byteLength(body), 0)
+          socket.write(Buffer.concat([eventHeader, Buffer.from(body, "utf8")]))
+        }
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const address = server.address()
+    const port = typeof address === "object" && address !== null ? address.port : 0
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+
+    try {
+      const result = await tools.wait_event.execute(
+        { kinds: ["ui.changed"], count: 2, timeout_ms: 3000, target: `127.0.0.1:${port}` },
+        ctx,
+      )
+      const data = result.data as { count: number; events: Array<{ event: string; data: unknown }> }
+      expect(data.count).toBe(2)
+      expect(data.events[0]).toMatchObject({ event: "ui.changed", data: { version: 2 } })
+      expect(data.events[1]).toMatchObject({ event: "ui.changed", data: { changed: ["#save"] } })
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  test("超时无事件：返回空列表而不报错（由调用方判 satisfied）", async () => {
+    const server = await control()
+    const home = mkdtempSync(join(tmpdir(), "st-tools-"))
+    const { ctx } = makeCtx(home)
+    const result = await tools.wait_event.execute(
+      { timeout_ms: 300, target: `127.0.0.1:${server.port}` },
+      ctx,
+    )
+    const data = result.data as { count: number; events: unknown[] }
+    expect(data.count).toBe(0)
+    expect(data.events).toEqual([])
   })
 })
 
@@ -631,8 +726,11 @@ describe("框架与提示词装配", () => {
     expect(prompt).toContain("逻辑像素")
     expect(prompt).toContain("capture")
     expect(prompt).toContain("stop")
-    expect(prompt).toContain("st-control/1")
-  })
+      expect(prompt).toContain("st-control/1")
+  // 视觉断言原语已进提示词（"改代码→看图→断言"闭环）
+  expect(prompt).toContain("capture_hash")
+  expect(prompt).toContain("visual_diff")
+})
 
   test("README/客户端导出面可用（协议常量与错误类型）", async () => {
     const client = await import("./shuangtian_client")

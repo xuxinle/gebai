@@ -14,6 +14,7 @@ import {
   call_control,
   request,
   resolve_target,
+  wait_for_event,
   type ControlResult,
   type ControlTarget,
 } from "./shuangtian_client"
@@ -947,6 +948,73 @@ const captureTool = readTool(
   },
 )
 
+const captureHashTool = readTool(
+  "capture_hash",
+  "像素哈希：对指定区域的**物理像素 RGBA 字节**算 FNV-1a 64（比传回 PNG 便宜几个量级）。用途：「画面变了没有」的快速断言——同区域两次调用哈希一致即逐像素完全一致。只回答「完全一致吗」；「差多少」用 visual_diff。默认全屏，可传 id 或 region。",
+  schema(
+    {
+      id: { type: "string", description: "可选：只算该组件区域" },
+      x: { type: "number", description: "region 左上 X（逻辑坐标）" },
+      y: { type: "number", description: "region 左上 Y" },
+      width: { type: "number", description: "region 宽" },
+      height: { type: "number", description: "region 高" },
+      target: { type: "string", description: "host:port 或控制文件路径" },
+    },
+    [],
+  ),
+  async (args, ctx) => {
+    const params: Json = {}
+    if (asString(args, "id")) params.id = asString(args, "id")
+    if (typeof args.width === "number" && typeof args.height === "number") {
+      params.region = {
+        x: asNumber(args, "x", 0),
+        y: asNumber(args, "y", 0),
+        width: asNumber(args, "width", 0),
+        height: asNumber(args, "height", 0),
+      }
+    }
+    const result = await controlCall(ctx, args, "capture.hash", params, 20_000)
+    return { output: result.text, data: result.data }
+  },
+)
+
+const visualDiffTool = readTool(
+  "visual_diff",
+  "视觉回归断言：把当前画面与基线 PNG 逐像素比对，返回 diff_pixels/diff_ratio/mean_diff/max_diff/diff_bounds（可做量化断言，而非只看图）。首次用 write_baseline=true 存基线（落在白名单目录内）；基线缺失且未写时明确报错。threshold 忽略微小差异不计入差异像素；tolerance 允许的差异像素占比上限（超限才 changed=true）——典型用法：tolerance=0.001 吸收抗锯齿抖动。基线尺寸与当前截图不一致会报错（不做缩放对齐）。",
+  schema(
+    {
+      path: { type: "string", description: "基线 PNG 路径（需在截图白名单目录内才能写入）" },
+      write_baseline: { type: "boolean", description: "true=把当前帧写为基线（覆盖路径）" },
+      threshold: { type: "number", description: "像素差异阈值 0-255（默认 0；≤ 阈值的通道差不计入差异像素）" },
+      tolerance: { type: "number", description: "允许的差异像素占比（默认 0；超过才 changed=true）" },
+      id: { type: "string", description: "可选：只比对组件区域（需与基线写入时同区域）" },
+      x: { type: "number", description: "region 左上 X（逻辑坐标）" },
+      y: { type: "number", description: "region 左上 Y" },
+      width: { type: "number", description: "region 宽" },
+      height: { type: "number", description: "region 高" },
+      target: { type: "string", description: "host:port 或控制文件路径" },
+    },
+    ["path"],
+  ),
+  async (args, ctx) => {
+    const params: Json = { path: ctx.resolvePath(asString(args, "path")) }
+    if (asBool(args, "write_baseline")) params.write_baseline = true
+    if (typeof args.threshold === "number") params.threshold = args.threshold
+    if (typeof args.tolerance === "number") params.tolerance = args.tolerance
+    if (asString(args, "id")) params.id = asString(args, "id")
+    if (typeof args.width === "number" && typeof args.height === "number") {
+      params.region = {
+        x: asNumber(args, "x", 0),
+        y: asNumber(args, "y", 0),
+        width: asNumber(args, "width", 0),
+        height: asNumber(args, "height", 0),
+      }
+    }
+    const result = await controlCall(ctx, args, "visual.diff", params, 30_000)
+    return { output: result.text, data: result.data }
+  },
+)
+
 const waitTool = readTool(
   "wait",
   "等待界面条件（比轮询截图高效）：for=element/gone（按选择器）· text/text_gone（文本出现/消失）· stable（画面稳定）。超时返回 satisfied=false，不报错。",
@@ -975,6 +1043,43 @@ const waitTool = readTool(
       timeout + 5000,
     )
     return { output: result.text, data: result.data }
+  },
+)
+
+const waitEventTool = readTool(
+  "wait_event",
+  '等待控制通道事件（推送语义，与 wait 的条件轮询互补）：连上订阅后收集事件直到凑满 count 个或超时。最常用 kinds=["ui.changed"]——事件 data 含 version 与 changed（变更元素 id 清单），用于「等界面真的变了」而不是靠轮询。超时返回空数组（不报错）；返回的 events 数组每项 {event, seq, data}。',
+  schema(
+    {
+      kinds: {
+        type: "array",
+        description: "订阅的事件类型（缺省全部；常用 [\"ui.changed\"]）",
+        items: { type: "string" },
+      },
+      count: { type: "number", description: "收集多少个事件后返回（默认 1）" },
+      timeout_ms: { type: "number", description: "超时（默认 5000；超时返回已收集的事件，不报错）" },
+      target: { type: "string", description: "host:port 或控制文件路径" },
+    },
+    [],
+  ),
+  async (args, ctx) => {
+    const timeout = asNumber(args, "timeout_ms", 5000)
+    try {
+      const resolved = await controlTarget(ctx, args)
+      const kinds = Array.isArray(args.kinds) ? args.kinds.filter((k): k is string => typeof k === "string") : []
+      const events = await wait_for_event(resolved, {
+        kinds: kinds.length > 0 ? kinds : undefined,
+        count: asNumber(args, "count", 1),
+        timeout_ms: timeout,
+      })
+      return {
+        output: JSON.stringify({ count: events.length, events }, null, 2),
+        data: { count: events.length, events },
+      }
+    } catch (error) {
+      const message = error instanceof ControlError ? `${error.code}: ${error.message}` : String(error)
+      return { output: `等待事件失败：${message}` }
+    }
   },
 )
 
@@ -1012,8 +1117,11 @@ export const tools = {
   type: typeTool,
   key: keyTool,
   capture: captureTool,
+  capture_hash: captureHashTool,
   visual: visualTool,
+  visual_diff: visualDiffTool,
   wait: waitTool,
+  wait_event: waitEventTool,
   metrics: metricsTool,
   call: callTool,
 }

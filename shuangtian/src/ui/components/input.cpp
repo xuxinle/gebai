@@ -183,6 +183,25 @@ auto Input::property_names() const -> std::vector<std::string_view> {
   return {"value", "placeholder", "password", "enabled", "visible"};
 }
 
+// —— 动作面（与 `TextArea` 对齐）——
+//
+// 此前只存在于键盘路径（`Enter` → `on_submit`）与 `activate()`：自动化只能造一次真实
+// 回车事件才能提交，`invoke submit` 返回 `unsupported`（DESIGN §8.1.1「API 存在但
+// 动作面未实现」——`TextArea` 支持而单行 `Input` 没有，同族不对称）。
+// 语义与 `Click` 路径的 `activate()`（Enter 同源）一致：提交是 **Input 自己的动作**，
+// 不经由外部模拟键盘。
+auto Input::invoke_action(std::string_view action, std::string_view argument) -> bool {
+  if (action == "clear") {
+    set_text({});
+    return true;
+  }
+  if (action == "submit" || action == "activate") {
+    activate();
+    return true;
+  }
+  return Element::invoke_action(action, argument);
+}
+
 auto Input::inner_box(const RenderContext& context) const -> math::Rect {
   const Metrics& metrics = context.theme.metrics();
   const float leading =

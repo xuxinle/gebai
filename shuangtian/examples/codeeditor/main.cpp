@@ -48,6 +48,7 @@
 #include "st/ui/components/menu.hpp"
 #include "st/ui/components/overlay.hpp"
 #include "st/ui/components/scroll.hpp"
+#include "st/ui/components/split_view.hpp"
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/tree.hpp"
 #include "st/ui/icon.hpp"
@@ -63,6 +64,7 @@ using st::ui::FlexDirection;
 using st::ui::FontWeight;
 using st::ui::IconView;
 using st::ui::Input;
+using st::ui::SplitView;
 using st::ui::List;
 using st::ui::MenuBar;
 using st::ui::Panel;
@@ -757,7 +759,7 @@ auto run_app(int argc, char** argv) -> int {
 
   auto sidebar = std::make_unique<Panel>(FlexDirection::Column);
   sidebar->set_id("sidebar");
-  sidebar->style().width = 240.0f;
+  // 宽度不再硬编码：由 `sidebar-split` 的比例决定（可拖拽）。
 
   // 侧栏面板 ×5（同一时刻只显示一个）
   // —— 3a. 资源管理器：工作区树（目录 + 文件，点击打开标签）——
@@ -883,7 +885,15 @@ auto run_app(int argc, char** argv) -> int {
   settings_button->style().height = 40.0f;
   activity_bar->add_child(std::move(settings_button));
   main_row->add_child(std::move(activity_bar));
-  main_row->add_child(std::move(sidebar));
+  // 侧栏与编辑区之间用 **SplitView**（侧栏宽度可拖拽）——
+  // 此前是硬编码 240px 不可调（「SplitView 内置化」正是由此反推的框架缺口）。
+  // 活动栏不进分栏（VSCode 里它固定 48px），分栏只包侧栏 + 编辑区。
+  auto sidebar_split = std::make_unique<SplitView>();
+  sidebar_split->set_id("sidebar-split");
+  sidebar_split->style().grow = true;
+  sidebar_split->set_min_ratio(0.12f);
+  sidebar_split->set_ratio(0.22f, false);   // ≈240px / (1360-48) 【与旧硬编码宽度同量级】
+  sidebar_split->set_first(std::move(sidebar));
 
   // —— 编辑区：Tabs + 编辑器 ——
   auto editor_column = std::make_unique<Panel>(FlexDirection::Column);
@@ -918,7 +928,8 @@ auto run_app(int argc, char** argv) -> int {
   wb.empty_hint = empty_hint_ptr;
   wb.editor_host->style().grow = true;
 
-  main_row->add_child(std::move(editor_column));
+  sidebar_split->set_second(std::move(editor_column));
+  main_row->add_child(std::move(sidebar_split));
   page->add_child(std::move(main_row));
 
   // —— 4. 底部面板：问题 / 输出 / 终端 ——

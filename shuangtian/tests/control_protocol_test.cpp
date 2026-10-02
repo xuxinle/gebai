@@ -6,7 +6,8 @@
 /// 按协议走完整请求/响应，而不是只测内部函数（那测不到「文档↔实现」的一致性）。
 ///
 /// 覆盖：token 鉴权（缺失/错误拒绝、正确放行、hello 前方法被拒）、drag 序列、
-/// wait for=frames、invoke 未知动作报错、capture 落盘白名单、key press 完整 down+up。
+/// wait for=frames、invoke 未知动作报错、capture 落盘白名单、key press 完整 down+up、
+/// capture.hash（像素哈希）/ visual.diff（基线比对）。
 
 #include "st/test/test.hpp"
 
@@ -20,7 +21,9 @@
 #include <thread>
 #include <vector>
 
+#include "st/codec/png.hpp"
 #include "st/control/control.hpp"
+#include "st/core/fs.hpp"
 #include "st/core/net.hpp"
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
@@ -61,6 +64,27 @@ class TestHost final : public st::control::Host {
   }
   [[nodiscard]] auto capture_png(st::math::IntRect) -> st::Result<std::vector<std::uint8_t>> override {
     return std::vector<std::uint8_t>{0x89, 0x50, 0x4E, 0x47};
+  }
+  /// 合成像素视图：微小渐变图案（视觉断言测试用——内容可预测、足够区分）。
+  [[nodiscard]] auto capture_pixels(st::math::IntRect region) -> st::Result<st::control::PixelView> override {
+    const int width = region.is_empty() ? 64 : region.width;
+    const int height = region.is_empty() ? 48 : region.height;
+    st::control::PixelView view;
+    view.width = width;
+    view.height = height;
+    view.rgba.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U);
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        const std::size_t index = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                                   static_cast<std::size_t>(x)) *
+                                  4U;
+        view.rgba[index] = static_cast<std::uint8_t>((x * 4) & 0xFF);
+        view.rgba[index + 1] = static_cast<std::uint8_t>((y * 4) & 0xFF);
+        view.rgba[index + 2] = static_cast<std::uint8_t>(((x + y) * 2) & 0xFF);
+        view.rgba[index + 3] = 0xFF;
+      }
+    }
+    return view;
   }
   [[nodiscard]] auto log_lines(std::size_t) const -> std::vector<std::string> override { return {}; }
 };
@@ -400,6 +424,132 @@ ST_TEST(capture_path_outside_whitelist_is_rejected) {
   }
 }
 
+ST_TEST(capture_hash_is_stable_and_region_sensitive) {
+  // 像素哈希：同区域两次调用一致；同方法换区域/换内容即变——这是"画面变了没有"的快速判定。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  // 默认区域（全屏合成帧）两次调一致
+  const Json first = probe.call("capture.hash");
+  ST_CHECK(first.value("ok", false));
+  const Json second = probe.call("capture.hash");
+  ST_CHECK(second.value("ok", false));
+  ST_CHECK_EQ(first["result"]["hash"].get<std::string>(),
+              second["result"]["hash"].get<std::string>());
+  ST_CHECK_EQ(first["result"]["algorithm"].get<std::string>(), "fnv1a64");
+  ST_CHECK(first["result"]["bytes"].get<std::int64_t>() > 0);
+
+  // 换区域 → 哈希不同（合成像素是 x/y 渐变，任意不同区域内容都不同）
+  Json region = Json::object();
+  region["x"] = 0; region["y"] = 0; region["width"] = 8; region["height"] = 8;
+  Json params = Json::object();
+  params["region"] = region;
+  const Json small = probe.call("capture.hash", params);
+  ST_CHECK(small.value("ok", false));
+  ST_CHECK(small["result"]["hash"].get<std::string>() !=
+            first["result"]["hash"].get<std::string>());
+  ST_CHECK_EQ(small["result"]["width"].get<std::int64_t>(), 8);
+  ST_CHECK_EQ(small["result"]["height"].get<std::int64_t>(), 8);
+
+  // 缺元素 → 明确 not_found（与 capture 同口径）
+  Json missing = Json::object();
+  missing["id"] = "#no-such-element";
+  const Json missing_reply = probe.call("capture.hash", missing);
+  ST_CHECK(!missing_reply.value("ok", false));
+  if (missing_reply.contains("error")) {
+    ST_CHECK_EQ(missing_reply["error"].value("code", std::string()), "not_found");
+  }
+}
+
+ST_TEST(visual_diff_baseline_write_and_compare) {
+  // 基线写盘 → 同帧比对（changed=false、diff_pixels=0）→ 人为改基线图→ 检测到差异。
+  //
+  // 为什么用测试自己造基线：真基线图属版本数据，不应让协议测试依赖工作区文件；
+  // 用合成图可把"比对逻辑本身"钉住（写盘/读回/逐像素差/阈值/尺寸不符）。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  const auto dir_result = st::fs::make_temp_dir("st-visual-diff");
+  ST_REQUIRE(dir_result.has_value());
+  const std::string dir = *dir_result;
+  const std::string baseline = st::fs::join(dir, "baseline.png");
+
+  // ① 写基线
+  Json write = Json::object();
+  write["path"] = baseline;
+  write["write_baseline"] = true;
+  const Json written = probe.call("visual.diff", write);
+  ST_CHECK(written.value("ok", false));
+  ST_CHECK(written["result"].value("written", false));
+  ST_CHECK(st::fs::exists(baseline));
+
+  // ② 同帧自比：无差异
+  Json compare = Json::object();
+  compare["path"] = baseline;
+  const Json same = probe.call("visual.diff", compare);
+  ST_CHECK(same.value("ok", false));
+  ST_CHECK(!same["result"].value("changed", true));
+  ST_CHECK_EQ(same["result"]["diff_pixels"].get<std::int64_t>(), 0);
+  ST_CHECK_EQ(same["result"]["max_diff"].get<std::int64_t>(), 0);
+
+  // ③ 修改磁盘基线（改一个像素的蓝色通道）→ 比对检测到差异
+  {
+    auto image = st::codec::png_read_file(baseline);
+    ST_REQUIRE(image.has_value());
+    image->rgba[0] = static_cast<std::uint8_t>(image->rgba[0] ^ 0x80U);
+    auto status = st::codec::png_write_file(baseline, *image);
+    ST_CHECK(status.has_value());
+  }
+  const Json different = probe.call("visual.diff", compare);
+  ST_CHECK(different.value("ok", false));
+  ST_CHECK(different["result"].value("changed", false));
+  ST_CHECK_EQ(different["result"]["diff_pixels"].get<std::int64_t>(), 1);
+  ST_CHECK_EQ(different["result"]["max_diff"].get<std::int64_t>(), 128);
+  ST_CHECK(different["result"]["diff_ratio"].get<double>() > 0.0);
+  ST_CHECK(different["result"].contains("diff_bounds"));
+
+  // ④ 基线不存在且不写 → not_found（不静默把当前帧当基线）
+  Json fresh = Json::object();
+  fresh["path"] = st::fs::join(dir, "absent.png");
+  const Json absent = probe.call("visual.diff", fresh);
+  ST_CHECK(!absent.value("ok", false));
+  if (absent.contains("error")) {
+    ST_CHECK_EQ(absent["error"].value("code", std::string()), "not_found");
+  }
+
+  (void)st::fs::remove_all(dir);
+}
+
+ST_TEST(visual_diff_rejects_size_mismatch) {
+  // 基线尺寸与当前截图不一致 → 明确报错（不做缩放对齐：缩放本身会引入伪差异）。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  const auto dir_result = st::fs::make_temp_dir("st-visual-mismatch");
+  ST_REQUIRE(dir_result.has_value());
+  const std::string dir = *dir_result;
+  const std::string baseline = st::fs::join(dir, "wrong-size.png");
+  {
+    st::codec::PngImage image;
+    image.width = 5;
+    image.height = 7;
+    image.rgba.assign(5U * 7U * 4U, 0x20U);
+    auto status = st::codec::png_write_file(baseline, image);
+    ST_CHECK(status.has_value());
+  }
+  Json compare = Json::object();
+  compare["path"] = baseline;
+  const Json reply = probe.call("visual.diff", compare);
+  ST_CHECK(!reply.value("ok", false));
+  if (reply.contains("error")) {
+    ST_CHECK_EQ(reply["error"].value("code", std::string()), "invalid");
+  }
+  (void)st::fs::remove_all(dir);
+}
+
 ST_TEST(key_press_sends_down_and_up) {
   TokenFixture fx;
   Probe probe(fx.port, fx.token);
@@ -471,7 +621,11 @@ ST_TEST(protocol_table_smoke_every_documented_method) {
     Json p = Json::object(); p["text"] = "hi"; add("input.text", p);
   }
   add("capture", Json::object());
+  add("capture.hash", Json::object());
   add("visual", Json::object());
+  {
+    Json p = Json::object(); p["path"] = "<nonexistent-baseline>"; add("visual.diff", p);
+  }
   {
     Json p = Json::object(); p["for"] = "element"; p["selector"] = "Button";
     p["timeout_ms"] = 500; add("wait", p);
@@ -492,4 +646,53 @@ ST_TEST(protocol_table_smoke_every_documented_method) {
     const bool well_formed = reply.value("ok", false) || reply.contains("error");
     ST_CHECK(well_formed);
   }
+}
+
+ST_TEST(ui_changed_event_carries_changed_ids) {
+  // 事件流完整消费（BACKLOG）：订阅 `ui.changed` 后，`set` 一个元素应收到
+  // 带**变更 id 清单**的事件（而不只是版本号）——客户端据此知道"哪些元素变了"，
+  // 不必整树重拉。
+  //
+  // 关键口径：清单只报"状态/内容变了"的元素；纯悬浮过渡与光标闪烁不进清单
+  // （否则逐帧刷屏，「变更清单」就失去了信噪比）。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+
+  Json hello_params = Json::object();
+  hello_params["subscribe"] = true;
+  Json kinds = Json::array();
+  kinds.push_back("ui.changed");
+  hello_params["kinds"] = std::move(kinds);
+  const Json hello = probe.call("hello", hello_params);
+  ST_CHECK(hello.value("ok", false));
+
+  // 改一个元素 → 等带 changed 清单的事件
+  Json set_params = Json::object();
+  set_params["id"] = "btn-ok";
+  Json props = Json::object();
+  props["label"] = "已改";
+  set_params["props"] = std::move(props);
+  const Json set_reply = probe.call("set", set_params);
+  ST_CHECK(set_reply.value("ok", false));
+
+  // 最多等 2 秒；期间可能先收到无 changed 的事件（其它版本变化）——只认带清单的
+  bool saw_changed = false;
+  for (int attempt = 0; attempt < 40 && !saw_changed; ++attempt) {
+    const auto frame = probe.read_frame(500);
+    if (!frame.has_value()) continue;
+    if (!frame->contains("event")) continue;
+    if ((*frame)["event"].get<std::string>() != "ui.changed") continue;
+    const Json& data = st::json_at(*frame, "data");
+    if (!data.contains("changed")) continue;
+    const Json& changed = data["changed"];
+    ST_CHECK(changed.is_array());
+    bool has_button = false;
+    for (const auto& item : changed) {
+      if (item.is_string() && item.get<std::string>() == "btn-ok") has_button = true;
+    }
+    ST_CHECK(has_button);
+    ST_CHECK(data.contains("version"));
+    saw_changed = true;
+  }
+  ST_CHECK(saw_changed);
 }

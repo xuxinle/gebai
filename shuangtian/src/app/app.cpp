@@ -214,7 +214,7 @@ auto Application::set_device_scale(float scale) -> Status {
   return ok();
 }
 
-auto Application::capture_png(math::IntRect region) -> Result<std::vector<std::uint8_t>> {
+auto Application::capture_pixels(math::IntRect region) -> Result<control::PixelView> {
   if (impl_->backend == nullptr) {
     return unexpected(ErrorCode::Invalid, "应用未启动（无帧缓冲）");
   }
@@ -232,21 +232,31 @@ auto Application::capture_png(math::IntRect region) -> Result<std::vector<std::u
   area = area.intersect(physical_bounds);
   if (area.is_empty()) return unexpected(ErrorCode::Invalid, "截图区域为空或超出画布");
 
-  codec::PngImage image;
-  image.width = static_cast<std::uint32_t>(area.width);
-  image.height = static_cast<std::uint32_t>(area.height);
-  image.rgba.resize(static_cast<std::size_t>(area.width) * static_cast<std::size_t>(area.height) * 4U);
+  control::PixelView view;
+  view.width = area.width;
+  view.height = area.height;
+  view.rgba.resize(static_cast<std::size_t>(area.width) * static_cast<std::size_t>(area.height) * 4U);
   std::size_t index = 0;
   for (int y = 0; y < area.height; ++y) {
     for (int x = 0; x < area.width; ++x) {
       const math::Color color = canvas.pixel_at(area.x + x, area.y + y);
-      image.rgba[index] = color.r;
-      image.rgba[index + 1] = color.g;
-      image.rgba[index + 2] = color.b;
-      image.rgba[index + 3] = color.a;
+      view.rgba[index] = color.r;
+      view.rgba[index + 1] = color.g;
+      view.rgba[index + 2] = color.b;
+      view.rgba[index + 3] = color.a;
       index += 4;
     }
   }
+  return view;
+}
+
+auto Application::capture_png(math::IntRect region) -> Result<std::vector<std::uint8_t>> {
+  auto view = capture_pixels(region);
+  if (!view) return forward_error(view.error());
+  codec::PngImage image;
+  image.width = static_cast<std::uint32_t>(view->width);
+  image.height = static_cast<std::uint32_t>(view->height);
+  image.rgba = std::move(view->rgba);
   auto encoded = codec::png_encode(image, 6);
   if (!encoded) return forward_error(encoded.error());
   return encoded;

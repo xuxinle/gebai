@@ -44,8 +44,11 @@
 ③ shuangtian_tree / shuangtian_find      # 看清结构（拿到组件 id）
    shuangtian_metrics                   # 确认后端/无头/DPI/物理尺寸
 ④ shuangtian_capture                    # 截图（回归后会直接显示图片，肉眼核对"看起来对不对"）
+   shuangtian_capture_hash               # 像素哈希："画面变了没有"的快速断言（同区域两次一致=逐像素一致）
 ⑤ shuangtian_set / invoke / click / type / key   # 改状态、触发动作、输入
    shuangtian_wait                      # 等条件成立，不要反复轮询截图
+   shuangtian_wait_event                # 等事件推送（ui.changed 带变更 id 清单），比轮询省
+   shuangtian_visual_diff                # 视觉回归断言：与基线比对，拿 diff_ratio/diff_bounds 做量化断言
 ⑥ 改代码 → shuangtian_run(action=build) → 重启或 reload → 回到 ③ 复验
 ⑦ shuangtian_run(action=stop)           # 收尾（优雅 shutdown）
 ```
@@ -59,6 +62,10 @@
 5. **视觉核验是硬要求**：任何"改完界面"的结论都必须有 `capture` 截图支撑；截图是物理像素 PNG。
    **内置通道（无头）与桌面窗口默认同源**——文本形态（亚像素 + 网格拟合）与 DPI 默认两侧一致，
    因此截图所见就是实际运行所见；显式传 `--text-lcd=off --text-fit=off` / `--scale` 才是对照/基准口径。
+   - **像素级断言用 `capture_hash` / `visual_diff`**，不要只靠肉眼：前者判"变了没有"（快），
+     后者与基线比对给出差异量（`visual_diff(path=基线, write_baseline=true)` 首次存基线；
+     `tolerance` 吸收抗锯齿抖动，如 `tolerance=0.001`）。回归循环：改代码→build→重启→
+     `visual_diff` 比对基线→差异超限才看截图人工定位。
 6. **别猜端口**：`run(action=start)` 会把控制文件写在会话目录 `.shuangtian/<app>-control.json`，后续工具默认自动读取；也可以显式传 `target="127.0.0.1:<port>"`。
    - **同一个应用只允许一个实例**：控制通道还在应答时 `start` 会**明确拒绝**（多实例抢同一个控制文件，会让后续每次操作都落到另一个界面上）。想重开先 `stop`。
    - 应用崩溃/退出后控制文件会滞留：此时工具**快速失败**并提示重新 `start`，不会拿滞留的端口去连。
@@ -84,6 +91,9 @@
 | 组件是否存在 | `find` 的 `count`；或 `wait for=element` |
 | 点击是否命中 | `click` 返回的 `hit` 与 `handled` |
 | 文本/值是否变了 | `get` 的 `props.value`；或 `wait for=text` |
+| 哪些元素变了（推送） | `wait_event` 的 `events[].data.changed`（变更 id 清单，不用整树重拉） |
+| 画面变了没有（快） | `capture_hash`——同区域两次哈希一致 = 逐像素完全一致 |
+| 画面差多少（对基线） | `visual_diff`——`diff_ratio` / `diff_bounds` / `max_diff` 量化断言 |
 | 应用是否开了脚本能力 | `hello` 的 `capabilities` 里有没有 `script`（默认没有） |
 
 ## 用 JS 控制组件（应用开启脚本能力时）

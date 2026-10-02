@@ -30,9 +30,14 @@
 | `stem_phase_probe.cpp` | **小字锐度量尺**：统计竖笔画的边缘相位与过渡带像素数（“边缘落在整数网格”占比、“最糊相位”占比），用于量化网格拟合/hinting 的收益与验收（仅验证用，编译同 `lcd_compare.cpp`） |
 | `hinting_gain_probe.cpp` | **hinting 收益测量台**：用 FreeType 把「无 hinting / TARGET_LIGHT / 完整 TT 指令 / auto-hinter / MONO」各档对竖笔画边缘网格对齐率的改善量出来，用来**选实现方向**而不是拍脑袋选最大的那个（需 `-I/usr/include/freetype2 -lfreetype`） |
 | `grid_fit_report.cpp` | 网格拟合**收益量尺**：中间调占比（越低越锐）+ 墨量变化（形变护栏），逐字号逐文字类型 |
+| `lcd_ink_probe.cpp` | **ink 口径分解探针**：逐字形打印「亚像素 vs 灰度」的逐像素平均偏差（滤波开/关两栏），用于定位 ink 口径超阈的构成（2026-10-02 用它确认超阈来自滤波摊墨而非字形走样） |
 | `st_visual_check.py` | 视觉树与截图核对 |
 | `st_project_check.py` | 独立工程结构检查 |
 | `st_win_check.py` | Windows 后端专项检查 |
 | `st_gdb_probe.py` | 崩溃现场信息提取 |
 | `st_shot_region.py` | 指定区域截图 |
 | `check_docs.py` | **文档引用一致性检查**：扫全部文档/源码里的 `DESIGN.md §X` / `CONVENTIONS.md §X` 引用，确认目标章节真的存在；并核对若干“旧值已清零”与“新内容已到位”。改了章节号或文档结构后跑一下 |
+| `visual_assert_e2e.py` | **视觉断言原语端到端**：真实应用上验证 `capture.hash`（稳定性/区域敏感）与 `visual.diff`（写基线/同帧零差异/改动检出/tolerance/错误码） |
+| `events_e2e.py` | **事件流端到端**：验证订阅后 `ui.changed` 携带 changed 清单（set/invoke/input.text 三路）且 version 递增 |
+| `split_view_e2e.py` | **SplitView 端到端**：真实应用上验证初始比例/拖拽改比例/越界夹取/动作面/截图留证 |
+| `input_action_e2e.py` | **Input 动作面端到端**：`invoke submit`（不经键盘 Enter）/ `clear` / 未知动作拒绝 |

@@ -92,6 +92,13 @@ struct Metrics {
   std::uint64_t requests{0};
 };
 
+/// 像素缓冲（截图像素口径：**物理像素**、RGBA8、行优先无填充）。
+struct PixelView {
+  int width{0};
+  int height{0};
+  std::vector<std::uint8_t> rgba{};
+};
+
 /// 应用侧能力（由 `app::App` 实现）——控制层不直接触碰具体组件类型。
 class Host {
  public:
@@ -112,6 +119,11 @@ class Host {
   /// 截图并写 PNG 到 `path`（空=自动命名；`region` 为空=全屏）；返回实际路径。
   [[nodiscard]] virtual auto capture_to_file(std::string_view path, math::IntRect region)
       -> Result<std::string> = 0;
+  /// 截取像素（`region` 为空=全屏；逻辑坐标入参、物理像素回传）。
+  ///
+  /// 与 `capture_png` 的区别：不编码 PNG，直接给 RGBA8 原始字节——供**视觉断言**
+  /// （`capture.hash` / `visual.diff`）在应用进程内比较像素用，省去编解码一圈。
+  [[nodiscard]] virtual auto capture_pixels(math::IntRect region) -> Result<PixelView> = 0;
   /// 截图 PNG 字节（`region` 为空=全屏；base64 回传用）。
   [[nodiscard]] virtual auto capture_png(math::IntRect region)
       -> Result<std::vector<std::uint8_t>> = 0;

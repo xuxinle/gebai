@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <format>
+#include <ranges>
 
 #include "st/core/log.hpp"
 #include "st/core/print.hpp"
@@ -295,7 +296,28 @@ auto UiRoot::dispatch(Event& event) -> bool {
       handled = target != nullptr && dispatch_to(*target, event);
       break;
     }
-    case EventKind::MouseUp:
+    case EventKind::MouseUp: {
+      // **拖拽归属（释放侧）**：按下时锁定的元素**先**收 MouseUp——
+      // 拖出手柄/滑块后释放不再丢失（SplitView 拖分栏、ScrollBar 拖滑块同属此类；
+      // 与上方 MouseMove 的 `pressed_` 分支同一契约：拖拽语义属于「按下的那个元素」）。
+      // 它不处理时回落命中元素（普通点击的释放路径完全不变）。
+      Element* target = hit_test(event.position);
+      Element* pressed = pressed_;
+      if (pressed_ != nullptr) {
+        pressed_->set_pressed(false);
+        pressed_->mark_dirty();
+      }
+      pressed_ = nullptr;
+      if (pressed != nullptr) {
+        handled = dispatch_to(*pressed, event);
+        if (!handled && target != nullptr && target != pressed) {
+          handled = dispatch_to(*target, event);
+        }
+      } else {
+        handled = target != nullptr && dispatch_to(*target, event);
+      }
+      break;
+    }
     case EventKind::Click:
     case EventKind::DoubleClick:
     case EventKind::TripleClick: {
@@ -477,6 +499,8 @@ auto UiRoot::set_focus(Element* element) -> bool {
     (void)dispatch_to(*focused_, event);
     focused_->mark_dirty();
   }
+  // 焦点变更是状态变更源（"哪个元素被选中/可输入"是界面状态的一部分）：登记进变更清单。
+  if (element != nullptr) note_changed(*element);
   ++version_;
   (void)context;
   return true;
@@ -578,6 +602,24 @@ void UiRoot::mark_dirty_all() {
     };
     walk(walk, *content_);
   }
+}
+
+void UiRoot::note_changed(const Element& element) {
+  if (changed_ids_.size() >= kMaxChangedIds) return;
+  const ElementId id = element.derived_id();
+  if (id.empty()) return;
+  // 去重：同一元素在一帧内多次变化只报一次（"哪些元素变了"是集合语义，不是计数）
+  if (std::ranges::find(changed_ids_, id) != changed_ids_.end()) return;
+  changed_ids_.push_back(id);
+  // 状态变更也是版本变更：`ui.changed` 事件与 `wait for=stable` 都靠版本号
+  // 感知"界面变了"——只登记清单而不动版本，事件永远发不出去。
+  ++version_;
+}
+
+auto UiRoot::take_changed_ids() -> std::vector<ElementId> {
+  std::vector<ElementId> taken = std::move(changed_ids_);
+  changed_ids_.clear();
+  return taken;
 }
 
 void UiRoot::clear_dirty() noexcept {

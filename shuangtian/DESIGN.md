@@ -602,13 +602,19 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 };
 }
 ```
-组件库（`include/st/ui/components/*.hpp`）——**已实现 32 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog`。
+组件库（`include/st/ui/components/*.hpp`）——**已实现 33 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog`。
 **规划中 5 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Link` `Dropdown` `SegmentedControl` `Sparkline`。
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
 - 图标：自绘矢量路径集（`IconName` + 路径数据），零位图资源、任意缩放清晰。
 
 **v0.1.5 补全的组件能力**（画廊全场景覆盖反推）：
+- **`SplitView`（可拖拽分栏）**：两个面板 + 中间手柄，拖拽改比例（`ratio` 夹取到
+  `[min_ratio, 1-min_ratio]`）；悬停/拖拽三档视觉（发丝线 → `border_strong` → `primary`）；
+  键盘 ←/→（左右分栏）或 ↑/↓（上下分栏）步进、Home/End 到两端、双击归位；
+  属性面 `ratio/min_ratio/step/orientation`，动作面 `step_forward/step_backward/reset/set`；
+  **单面板优雅退化**（占满全空间）；面板住在 `children_`（id/绘制/命中/语义树全部在树上）。
+  由来：示例级自绘 `SplitHandle`（DESIGN §8.1.1 反推的框架缺口）——「该从示例级自绘升为框架组件」。
 - `Toast::set_auto_dismiss_ms`：自动消失（帧时间轴驱动，`expired()` 可查、`on_dismiss` 回调、属性面
   `auto_dismiss_ms`/`expired` 可读写）；到期那帧**连阴影都不落盘**（推演前置在 `paint()`）。默认 `0`=常驻。
 - `Table::set_selected_row/selected_row`：选中行（`primary_soft` 底 + 主色左缘条 + 主色文字，压过斑马纹/hover）；
@@ -944,7 +950,7 @@ class Compositor {                                  // UI 图层 → GPU 合成
 {"id": 7, "ok": true, "result": {...}}
 {"id": 7, "ok": false, "error": {"code": "not_found", "message": "no element matches"}}
 // 事件（无 id）
-{"event": "ui.changed", "seq": 42, "data": {"changed": ["#btn-save"]}}
+{"event": "ui.changed", "seq": 42, "data": {"version": 9, "changed": ["#btn-save"]}}
 ```
 错误码：`bad_request` `not_found` `ambiguous` `unsupported` `timeout` `busy` `internal`。
 
@@ -973,10 +979,12 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | `input.key` | `{kind, key?, code?, text?, modifiers?, repeat?}` | `{handled, focused}` | kind: `press` `down` `up` `text` |
 | `input.text` | `{text, id?}` | `{handled, inserted}` | 便捷输入（聚焦或指定输入框追加文本） |
 | `capture` | `{id?, region?, scale?, format?, encode?}` | `{width,height,format,base64? ,path?}` | 截图（元素区域或全屏；`encode=file` 直接落盘） |
+| `capture.hash` | `{id?, region?}` | `{hash, algorithm, width, height, bytes}` | 区域像素的 FNV-1a 64 哈希（RGBA 字节；「画面变了没有」的快速判定） |
 | `visual` | `{id?, depth?, include_paint?}` | `{layers:[{id,type,bounds,z,visible,opacity,fill,radius,text,hit_region}], hits:[...]}` | **视觉元素树**：绘制层与实际命中区（区别于语义树） |
+| `visual.diff` | `{path, write_baseline?, threshold?, tolerance?, id?, region?}` | `{changed, diff_pixels, total_pixels, diff_ratio, mean_diff, max_diff, diff_bounds?, baseline_hash, current_hash}` 或写基线时 `{written, path, width, height, hash}` | **视觉回归断言**：与基线 PNG 逐像素比对（尺寸必须一致，不做缩放对齐）；`threshold` 不计入差异像素、`tolerance` 允许的差异占比 |
 | `wait` | `{for, selector?, text?, timeout_ms?, stable_ms?}` | `{satisfied, elapsed_ms, detail}` | `for`: `element` `gone` `text` `text_gone` `stable` `frames` |
 | `metrics` | — | `{backend, headless, renderer, text_renderer, uptime_ms, frames, fps, frame_ms:{p50,p95}, dirty_ratio, nodes, allocations}` | 运行时指标 |
-| `events` | `{enable, kinds?}` | `{enabled, kinds}` | 订阅：`ui.changed` `frame` `input` `log` `theme` |
+| `events` | `{enable, kinds?}` | `{enabled, kinds}` | 订阅：`ui.changed` `frame` `input` `log` `theme`。`ui.changed` 事件 data = `{version, changed?:[id…]}`——变更元素 id 清单（去重、单帧上限 64；只报状态/内容变更，不含悬浮过渡/光标闪烁这类逐帧噪声） |
 | `theme` | `{mode?}` | `{mode, tokens}` | 读/切主题（`light`/`dark`/`system`） |
 | `app` | `{action, args?}` | `{ok}` | `resize` `quit` `reload` `screenshot_dir` `title` |
 | `script` | `{code?, function?, args?, filename?}` | `{result, ops?, memory?}` | **默认禁用**（需 `--enable-script`）。`code` 直接执行；或 `function`+`args` 调用已定义函数；受内存/栈/时长/转换深度四重配额 |
@@ -1419,10 +1427,15 @@ mingw 交叉编译——这是 Windows 分支唯一的持续验证手段。
 - `OverlayLayout::FillViewport`：注释明写"每个应用重复造轮子的历史缺口"——命令面板/模态遮罩的标准形态。
 
 **③ 重写中暴露、仍需演进的缺口**
+- ~~**SplitView 内置化**~~（2026-10-02 已落地：框架组件 `SplitView` + codeeditor 迁移，
+  见 §4.5 `v0.1.5 补全的组件能力`；迁移中发现并修复一个框架交互缺口——
+  `MouseUp` 此前只投递给**释放点的命中元素**，拖出手柄后释放会"卡在拖拽态"，
+  现与 `MouseMove` 同契约：`pressed_` 元素优先收 MouseUp）；
+- ~~**单行 Input 的动作面**~~（2026-10-02 已落地：`invoke submit/activate/clear`
+  与 TextArea 对齐；此前只有键盘 Enter 路径能提交，自动化 `invoke submit` 返回
+  unsupported——测试 `ui_input_invoke_*` 3 用例 + `tools/input_action_e2e.py` 端到端）；
 - **桌面窗框/标题栏**：示例只能用装饰性图标模拟窗口控制（— □ ×）——平台 shell 层应提供系统标题栏融入或自绘窗框，目前应用层无从谈起；
-- **SplitView 内置化**：SplitHandle 曾是 mdeditor 的自绘组件，重写后编辑器侧栏/主区/面板仍无拖拽分栏——它该从"示例级自绘"升为框架组件；
 - **命令面板通用组件**：本次在示例里手写了 CommandPalette（FillViewport + 过滤列表 + 键盘导航）——与 MenuPanel/SelectPanel 同族，值得内置为 `CommandPalette`；
-- **单行 Input 的动作面**：`TextArea` 支持 `invoke submit`，单行 `Input` 没有（本次交互验证发现）——DESIGN §8.2 第 26 条同族缺口（API 存在但动作面未实现）；
 - **虚拟化长列表**：终端/输出面板用 ScrollView + Text 累积全文，日志长了会退化——需要虚拟化 List（按可见行复用元素）；
 - **编辑器分组**：VSCode 的编辑器组（左右分屏各持独立标签组）当前无法用 Panel 组合自然表达，需要容器级支持。
 

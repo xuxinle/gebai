@@ -116,6 +116,9 @@ class Application final : public control::Host {
       -> Result<std::string> override;
   [[nodiscard]] auto capture_png(math::IntRect region)
       -> Result<std::vector<std::uint8_t>> override;
+  /// 截取像素（RGBA8、物理分辨率）——视觉断言（像素哈希/基线比对）的取数口。
+  [[nodiscard]] auto capture_pixels(math::IntRect region)
+      -> Result<control::PixelView> override;
   [[nodiscard]] auto log_lines(std::size_t limit) const -> std::vector<std::string> override;
   /// 脚本宿主（`control::Host` 接口）：未启用脚本能力时为 `nullptr`。
   [[nodiscard]] auto script() -> ui::ScriptHost* override;

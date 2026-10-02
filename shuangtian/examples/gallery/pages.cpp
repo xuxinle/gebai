@@ -20,6 +20,7 @@
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/slider.hpp"
+#include "st/ui/components/split_view.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/toggle.hpp"
@@ -58,6 +59,7 @@ using st::ui::Radio;
 using st::ui::Select;
 using st::ui::Slider;
 using st::ui::Spinner;
+using st::ui::SplitView;
 using st::ui::Switch;
 using st::ui::Table;
 using st::ui::TableColumn;
@@ -722,6 +724,76 @@ namespace {
   }
   type_card->add_child(std::move(tone_row));
   page->add_child(std::move(type_card));
+
+  // —— 分栏（SplitView；v0.1.5 补全：由「示例级自绘升为框架组件」）——
+  auto split_card = make_card("card-split", "可拖拽分栏（SplitView）");
+  split_card->add_child(make_caption(
+      "拖拽中间手柄改比例（悬停变粗、拖拽主色）；键盘 ←/→ 步进、双击归位；"
+      "控制通道：set ratio / invoke step_forward·reset——两个面板是真实子元素（tree 可查）"));
+  auto split_demo = std::make_unique<SplitView>();
+  split_demo->set_id("demo-split");
+  split_demo->style().height = 140.0f;
+  split_demo->set_ratio(0.4f, false);
+  split_demo->set_min_ratio(0.15f);
+  {
+    auto left = std::make_unique<Panel>(FlexDirection::Column);
+    left->set_id("demo-split-left");
+    left->style().padding = Insets::all(10.0f);
+    left->style().gap = 6.0f;
+    auto left_title = std::make_unique<Text>("左面板");
+    left_title->set_weight(FontWeight::SemiBold);
+    left_title->set_font_size(12.5f);
+    left->add_child(std::move(left_title));
+    auto left_note = std::make_unique<Text>("拖右边的手柄\n改变两侧比例");
+    left_note->set_tone(Tone::Faint);
+    left_note->set_font_size(12.0f);
+    left->add_child(std::move(left_note));
+    split_demo->set_first(std::move(left));
+  }
+  {
+    auto right = std::make_unique<Panel>(FlexDirection::Column);
+    right->set_id("demo-split-right");
+    right->style().padding = Insets::all(10.0f);
+    right->style().gap = 6.0f;
+    auto right_title = std::make_unique<Text>("右面板");
+    right_title->set_weight(FontWeight::SemiBold);
+    right_title->set_font_size(12.5f);
+    right->add_child(std::move(right_title));
+    auto right_note = std::make_unique<Text>("双击手柄回 50%；\n上下方向用 orientation=vertical");
+    right_note->set_tone(Tone::Faint);
+    right_note->set_font_size(12.0f);
+    right->add_child(std::move(right_note));
+    split_demo->set_second(std::move(right));
+  }
+  SplitView* split_demo_ptr = split_demo.get();
+  auto split_actions = make_row(8.0f, /*wrap=*/true);
+  const auto make_split_button = [&](const char* id, const char* label,
+                                     const char* argument) {
+    auto button = std::make_unique<Button>(label, Button::Variant::Secondary,
+                                           Button::Size::Small);
+    button->set_id(id);
+    button->on_click = [split_demo_ptr, argument]() {
+      (void)split_demo_ptr->invoke_action("set", argument);
+    };
+    return button;
+  };
+  split_actions->add_child(make_split_button("split-set-30", "30%", "0.3"));
+  split_actions->add_child(make_split_button("split-set-50", "50%", "0.5"));
+  split_actions->add_child(make_split_button("split-set-70", "70%", "0.7"));
+  auto vertical_button = std::make_unique<Button>("切上下分栏", Button::Variant::Ghost,
+                                                 Button::Size::Small);
+  vertical_button->set_id("split-toggle-orientation");
+  vertical_button->on_click = [split_demo_ptr]() {
+    const bool horizontal =
+        split_demo_ptr->get_property("orientation").value_or("horizontal") == "horizontal";
+    (void)split_demo_ptr->set_property("orientation", horizontal ? "vertical" : "horizontal");
+    split_demo_ptr->style().height = horizontal ? 220.0f : 140.0f;
+    split_demo_ptr->mark_layout_dirty();
+  };
+  split_actions->add_child(std::move(vertical_button));
+  split_card->add_child(std::move(split_actions));
+  split_card->add_child(std::move(split_demo));
+  page->add_child(std::move(split_card));
 
   // —— 浮层与反馈（Dialog / Toast / Tooltip；v0.1.5 补全：此前三个组件在画廊零出现） ——
   auto overlay_card = make_card("card-overlay", "浮层与反馈（对话框 / 轻提示 / 提示气泡）");

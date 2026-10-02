@@ -252,6 +252,104 @@ export async function call_once(
   return first
 }
 
+/**
+ * 订阅并等待事件（常驻连接、收满或超时即归）。
+ *
+ * 用途：`ui.changed`（含变更 id 清单）这类**推送**语义——`wait` 方法只能等
+ * 服务端可判定的条件（元素/文本/帧），等不了事件流本身（如"等界面变更通知"）。
+ *
+ * 实现选择（有意的）：不维护跨调用的常驻连接（那需要模块级状态/生命周期管理，
+ * 在多工具实例/重启场景下容易变味），而是在单次调用内完成
+ * 「连上 → hello(subscribe) → 收集事件 → 达标或超时 → 断开」。
+ * 对"等一个事件"的典型用法足够，且无隐藏状态。
+ */
+export async function wait_for_event(
+  target: ControlTarget,
+  options: { kinds?: string[]; count?: number; timeout_ms?: number } = {},
+): Promise<Array<{ event: string; seq: number; data: unknown }>> {
+  const timeout_ms = options.timeout_ms ?? 10_000
+  const wanted = options.count ?? 1
+  const kinds = options.kinds ?? []
+  const socket = connect({ host: target.host, port: target.port })
+  const collected: Array<{ event: string; seq: number; data: unknown }> = []
+  let buffer = Buffer.alloc(0)
+  let settled = false
+  const done = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      // 超时不算失败：返回已收集（可能为空）的事件，由调用方判 satisfied
+      resolve()
+    }, timeout_ms)
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      resolve()
+    }
+    socket.on("connect", () => {
+      const hello: Record<string, unknown> = { client: "shuangtian-agent", subscribe: true }
+      if (target.token) hello.token = target.token
+      if (kinds.length > 0) hello.kinds = kinds
+      socket.write(encode_frame({ id: 0, method: "hello", params: hello }))
+    })
+    socket.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk])
+      while (buffer.length >= 4) {
+        const length = buffer.readUInt32BE(0)
+        if (length > MAX_FRAME) {
+          settled = true
+          clearTimeout(timer)
+          socket.destroy()
+          reject(new ControlError("overflow", `帧长度超限: ${length}`))
+          return
+        }
+        if (buffer.length < 4 + length) break
+        const body = buffer.subarray(4, 4 + length).toString("utf8")
+        buffer = buffer.subarray(4 + length)
+        try {
+          const message = JSON.parse(body) as Record<string, unknown>
+          // 事件帧（无 id）：收集；响应帧（带 id，如 hello 确认）忽略
+          if (typeof message.id !== "number" && typeof message.event === "string") {
+            collected.push({
+              event: message.event,
+              seq: typeof message.seq === "number" ? message.seq : 0,
+              data: message.data,
+            })
+            if (collected.length >= wanted) {
+              finish()
+              return
+            }
+          }
+        } catch (error) {
+          settled = true
+          clearTimeout(timer)
+          socket.destroy()
+          reject(new ControlError("parse", `事件帧 JSON 解析失败: ${(error as Error).message}`))
+          return
+        }
+      }
+    })
+    socket.on("error", (error: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      reject(new ControlError("transport", `事件连接失败: ${error.message}`))
+    })
+    socket.on("close", () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+  await done
+  return collected
+}
+
 /** 取出成功结果；失败抛 `ControlError`（错误信息含服务端原文，便于诊断）。 */
 export function unwrap<T = unknown>(response: ControlResult, method: string): T {
   if (response.ok) return (response.result ?? {}) as T

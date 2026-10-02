@@ -121,6 +121,15 @@ class UiRoot {
   [[nodiscard]] auto version() const noexcept -> std::uint64_t { return version_; }
   void bump_version() noexcept { ++version_; }
 
+  /// 登记"这个元素变了"（供 `ui.changed` 事件携带变更 id 清单）。
+  ///
+  /// 语义边界：登记的是**状态/内容变化**（set/invoke/输入/增删）——不是"重绘"。
+  /// 悬浮过渡、光标闪烁这类每帧都在动的视觉变化不该登记（否则事件流会变成逐帧刷屏，
+  /// "变更清单"就失去了"哪些元素真的变了"的信噪比）。去重、上限截断（见 kMaxChangedIds）。
+  void note_changed(const Element& element);
+  /// 取走累积的变更 id 清单（调用后清零；控制通道 `ui.changed` 事件消费）。
+  [[nodiscard]] auto take_changed_ids() -> std::vector<ElementId>;
+
   void mark_dirty_all();
   [[nodiscard]] auto dirty() const noexcept -> bool { return needs_frame(); }
   /// 帧是否需要渲染：布局脏 / 有损坏区待重绘 / 动画续帧。
@@ -205,6 +214,10 @@ class UiRoot {
     std::function<bool()> handler{};
   };
   std::vector<std::pair<std::string, ShortcutEntry>> shortcuts_{};
+  /// 上限：单帧变更清单超过它即截断——事件流是对"改了什么"的提示，
+  /// 不是全量日志；无界清单会把一次批量操作变成巨型事件帧。
+  static constexpr std::size_t kMaxChangedIds = 64;
+  std::vector<ElementId> changed_ids_{};   ///< 累积的变更元素 id（见 note_changed）
   std::uint64_t version_{1};
   /// 需要重新布局（mark_dirty_all 置位；布局跑过后清）。
   bool dirty_{true};

@@ -42,6 +42,21 @@ class Sha256 {
 [[nodiscard]] auto fnv1a64_hex(std::string_view text) -> std::string;
 [[nodiscard]] auto fnv1a32(std::string_view text) noexcept -> std::uint32_t;
 
+/// 增量 FNV-1a 64（流式字节指纹）：像素缓冲/大文件等不能一次给全的数据用它累积。
+/// `value()` 可重复读取（不消耗内部状态）。
+class Fnv1a64 {
+ public:
+  void update(std::span<const std::uint8_t> data) noexcept;
+  void update(std::string_view text) noexcept;
+  [[nodiscard]] auto value() const noexcept -> std::uint64_t { return state_; }
+
+ private:
+  std::uint64_t state_{0xcbf29ce484222325ULL};
+};
+
+/// 一次性计算字节缓冲的 FNV-1a 64。
+[[nodiscard]] auto fnv1a64_bytes(std::span<const std::uint8_t> data) noexcept -> std::uint64_t;
+
 [[nodiscard]] auto crc32(std::span<const std::uint8_t> data) noexcept -> std::uint32_t;
 [[nodiscard]] auto crc32(std::string_view text) noexcept -> std::uint32_t;
 [[nodiscard]] auto adler32(std::span<const std::uint8_t> data) noexcept -> std::uint32_t;

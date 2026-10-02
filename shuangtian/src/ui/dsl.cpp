@@ -22,6 +22,7 @@
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/slider.hpp"
+#include "st/ui/components/split_view.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/toggle.hpp"
@@ -787,6 +788,7 @@ ST_DSL_TYPE(Table, "Table")
 ST_DSL_TYPE(Tree, "Tree")
 ST_DSL_TYPE(ScrollView, "ScrollView")
 ST_DSL_TYPE(ScrollBar, "ScrollBar")
+ST_DSL_TYPE(SplitView, "SplitView")
 ST_DSL_TYPE(Tabs, "Tabs")
 ST_DSL_TYPE(ProgressBar, "ProgressBar")
 ST_DSL_TYPE(Spinner, "Spinner")
@@ -828,6 +830,7 @@ auto make_element(std::string type) -> std::unique_ptr<Element> {
   // 容器/滚动/标签
   if (type == "ScrollView") return std::make_unique<ScrollView>();
   if (type == "ScrollBar") return std::make_unique<ScrollBar>();
+  if (type == "SplitView") return std::make_unique<SplitView>();
   if (type == "Tabs") return std::make_unique<Tabs>();
   // 反馈类
   if (type == "ProgressBar") return std::make_unique<ProgressBar>();

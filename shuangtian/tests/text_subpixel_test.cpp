@@ -231,50 +231,79 @@ ST_TEST(text_subpixel_bitmap_grid_matches_grayscale) {
   ST_CHECK_EQ(static_cast<int>(mismatched), 0);
 }
 
-/// ② 墨量守恒：三通道之和 ≈ 3 × 灰度覆盖率（亚像素是重新分配，不是加墨）。
+/// ② 墨量守恒 + 形状保真（**两个口径，不混同**）。
 ///
-/// 注意口径：逐字形的**最坏**偏差会到 ~7%（两端用的是不同的水平光栅化分辨率，
-/// 曲线扁平化容差在 3 倍细网格上更精细，小字号字形因此会有零点几个百分点的面积差），
-/// 所以这里断言的是**聚合墨量**与**逐像素平均偏差**——量级错了才会红。
+/// 口径修订（2026-10-02）：本用例曾长期红（worst_mean 0.1083 > 0.08），根因实测——
+/// 超阈来自 **LCD 5-tap 低通滤波的横向摊墨**（'I'@11px：未滤波时逐像素均值偏差
+/// 0.0163、滤波后 0.1083），**与 hinting 无关**（把 text.cpp 回退到 LCD 提交可复现同样的
+/// 数字）。摊墨是滤波器存在的目的（压彩边，见用例⑤），不是字形走样——
+/// 把它算进"形状保真"会把设计行为误判成缺陷。所以拆成三条互不混同的断言：
+///   ① **形状保真**（未滤波位图 vs 灰度）：几何重采样之差——实测 0.0163、逐像素最大 0.2078；
+///   ② **滤波摊墨有界**（滤波位图 vs 灰度）：量级护栏（权重写坏/边界处理错会显著超出），
+///      不是"必须很小"——实测 0.1083；
+///   ③ **墨量守恒**：聚合误差与逐字形最坏比例（实测 1.34% / 6.23%；逐字形 ~7% 的量级
+///      来自两端不同的水平光栅化分辨率下曲线扁平化容差的差异），
+///      外加"滤波只重新分配墨"（滤波 vs 未滤波的墨量差，实测 ~0%）。
 ST_TEST(text_subpixel_ink_matches_grayscale) {
   FontFixture fixture;
   if (!fixture.ok) return;
   TextRenderer gray(*fixture.stack, 1.0f);
   TextRenderer lcd(*fixture.stack, 1.0f);
   lcd.set_subpixel(true);
+  TextRenderer lcd_raw(*fixture.stack, 1.0f);
+  lcd_raw.set_subpixel(true);
+  lcd_raw.set_subpixel_filter(false);
 
-  double worst_mean = 0.0;
-  double worst_max = 0.0;
-  double worst_per_glyph = 0.0;
+  double worst_shape = 0.0;         // ① 未滤波 vs 灰度：形状保真
+  double worst_shape_max = 0.0;
+  double worst_filtered = 0.0;      // ② 滤波 vs 灰度：摊墨量级
+  double worst_per_glyph = 0.0;     // ③ 逐字形墨量比例（对灰度）
+  double worst_redistribute = 0.0;  // ③ 滤波 vs 未滤波：只重新分配
   double gray_total = 0.0;
   double lcd_total = 0.0;
+  double raw_total = 0.0;
   std::size_t compared = 0;
   for (const float size : {11.0f, 13.5f, 15.0f, 22.0f, 40.0f}) {
     for (const char32_t codepoint : st::utf8_decode(kSamples)) {
       const auto a = gray.glyph_bitmap_of(codepoint, size);
       const auto b = lcd.glyph_bitmap_of(codepoint, size);
-      if (a == nullptr || b == nullptr || a->coverage.empty()) continue;
+      const auto raw = lcd_raw.glyph_bitmap_of(codepoint, size);
+      if (a == nullptr || b == nullptr || raw == nullptr || a->coverage.empty()) continue;
       ++compared;
-      const Deviation deviation = compare_with_grayscale(*a, *b);
-      worst_mean = std::max(worst_mean, deviation.mean_abs);
-      worst_max = std::max(worst_max, deviation.max_abs);
+      const Deviation shape = compare_with_grayscale(*a, *raw);
+      worst_shape = std::max(worst_shape, shape.mean_abs);
+      worst_shape_max = std::max(worst_shape_max, shape.max_abs);
+      worst_filtered = std::max(worst_filtered, compare_with_grayscale(*a, *b).mean_abs);
       const double gray_ink = ink_sum(*a);
+      const double raw_ink = ink_sum(*raw);
       if (gray_ink > 1.0) {
         worst_per_glyph = std::max(worst_per_glyph, std::abs(ink_sum(*b) / (3.0 * gray_ink) - 1.0));
       }
+      if (raw_ink > 1.0) {
+        worst_redistribute =
+            std::max(worst_redistribute, std::abs(ink_sum(*b) / raw_ink - 1.0));
+      }
       gray_total += gray_ink;
       lcd_total += ink_sum(*b) / 3.0;
+      raw_total += raw_ink / 3.0;
     }
   }
   const double aggregate_error =
       gray_total > 0.0 ? std::abs(lcd_total / gray_total - 1.0) : 1.0;
-  st::print("[lcd] 墨量：{} 个字形，聚合误差 {:.2f}%、逐字形最坏 {:.2f}%、"
-            "逐像素平均偏差 ≤{:.4f}（最大 ≤{:.4f}）\n",
-            compared, aggregate_error * 100.0, worst_per_glyph * 100.0, worst_mean, worst_max);
+  const double redistribute_error =
+      raw_total > 0.0 ? std::abs(lcd_total / raw_total - 1.0) : 1.0;
+  st::print("[lcd] 墨量：{} 个字形，聚合误差 {:.2f}%（对灰度）/ {:.2f}%（滤波对未滤波）、"
+            "逐字形最坏 {:.2f}%；形状：未滤波逐像素均值偏差 ≤{:.4f}（最大 ≤{:.4f}）、"
+            "滤波后摊墨 ≤{:.4f}\n",
+            compared, aggregate_error * 100.0, redistribute_error * 100.0,
+            worst_per_glyph * 100.0, worst_shape, worst_shape_max, worst_filtered);
   ST_CHECK(compared > 20);
   ST_CHECK(aggregate_error < 0.03);
-  ST_CHECK(worst_mean < 0.08);
-  ST_CHECK(worst_max < 0.5);
+  ST_CHECK(redistribute_error < 0.01);
+  ST_CHECK(worst_per_glyph < 0.12);
+  ST_CHECK(worst_shape < 0.05);
+  ST_CHECK(worst_shape_max < 0.5);
+  ST_CHECK(worst_filtered < 0.15);
 }
 
 /// ③ 亮度守恒（感知口径）：亚像素不改变字的位置、粗细与亮度分布。
