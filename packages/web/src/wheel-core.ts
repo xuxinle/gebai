@@ -7,14 +7,20 @@
  * 这里只放**几何与交互**，按钮长什么样、有哪些，全部由调用方给（`items` 里是已经绑好事件的元素）。
  *
  * 布局：**按空间自动分圈**——第一圈半径 = `firstRingR`，之后每圈 = 上一圈 + 按钮边长 + 间隙（步进不再写死）；
- * 每圈**容量**由「该圈半径 × 可用张角」算（相邻按钮不叠，见 `capacityAt`），当前圈放不下的项**自动落到下一圈**；
+ * 每圈**容量**由「该圈半径 × 可用半张角」算（相邻按钮不叠，见 `capacityAt`）。
+ * **分圈均衡**：按组分段后，每组先算**最少圈数**（k 圈容量之和能装下），再把该组项数尽量均分到 k 圈
+ * （每圈项数差 ≤ 1）——不是贪心填圈。贪心会出现「剩 1 项单独挂一圈」的**孤项圈**（4 项、容量 3 → 3+1），
+ * 那个孤零零的 1 看起来就像没排布。
  * 分组边界（`inner` → 其它）**必换圈**，语义分组不会被拆散在同一圈里。
  * 可用空间以入口为圆心向左/下取（视口边界 + `margin`）：半径再往外就超空间的那些圈并进最后一圈
  * （宁可挤一点也不出屏 / 不压入口那一行）。
  * 屏幕角 0°=正右、90°=正下，扇形朝**下（左）方**展开（入口都在界面上缘，只有向下有空间）。
- * 角度**从起始角向左侧长**（起始角固定，对称外扩会把首个按钮顶出屏幕右缘），
- * 张角取**刚好放下**（满足相邻方块「边长 + 间隙」的最小跨度，见 `fitArc`）——
- * 一圈只有两三项时按钮就挨在一起，不会空出一大截弧；真放不下时才停在上限（宁可挤一点）。
+ * **各圈围绕共同轴心对称展开**（`FAN_AXIS_DEG` = 90°，即正下方；同心扇面）——项围绕轴心**双向**拉开，
+ * 张角取**刚好放下**（满足相邻方块「边长 + 间隙」的最小半张角，见 `fitArc`），一圈只有两三项时
+ * 按钮就挨在一起，不会空出一大截弧；真放不下时才停在上限（宁可挤一点）。
+ * 为什么不是「统一起始角 + 向左长」：不压入口行的角度上限是**绝对角**，起点越靠右可用跨度越小
+ * （实测起始角 93° 时只剩 64.9°，内圈容量被低估成 3）；各圈都从 93° 起还会让首项叠成右缘竖列。
+ * 围绕轴心对中后可用跨度翻倍、容量回到真实值，孤项圈与竖列同时消失。
  * 每圈画一条**引导弧线**（半径 = 该圈半径，穿过按钮圆心、画在按钮之下——看得见的是按钮之间那几段短弧），
  * “一圈圈”的结构据此自己显出来。
  *
@@ -71,8 +77,6 @@ export interface WheelOptions {
   buttonGap?: number
   /** 单圈最大张角（度）：超过则不再拉大角度（宁可挤一点，也不把弧撑到不该去的方向） */
   maxSpan?: number
-  /** 扇形起始角（屏幕角，度；0=正右、90=正下）：扇形**从起始角向左侧长** */
-  startAngle?: number
   /** 可用空间相对视口的内边距（px）：按钮不贴边、不出屏 */
   margin?: number
   /** 每圈是否画一条引导弧线（穿过该圈按钮圆心的细弧，画在按钮之下） */
@@ -93,6 +97,20 @@ export interface WheelHandle {
 
 /** 引导弧线画布的最小边长（弧线用 SVG 画，圆心在画布中心；实际按最大圈半径放大）。 */
 const ARC_SVG_MIN = 300
+/** 屏幕右缘的安全留白（px）：按钮中心到右缘至少留这么多，扇形不会探出屏外。 */
+const EDGE_PAD = 6
+
+/**
+ * 角度窗口内均布 count 项：从 lo 到 hi 均匀铺开。
+ * 各圈用**自己的**窗口对中（见下方 angleWindow）——不用全局轴心，因为窗口是**不对称**的：
+ * 右缘约束只压右半边（角度小于 90° 那侧），上界（不压入口行）只压左半边，
+ * 围着 90° 对称铺开会把半数按钮送出右缘。
+ */
+function spreadAngles(lo: number, hi: number, count: number): number[] {
+  if (count <= 1) return [(lo + hi) / 2]
+  return Array.from({ length: count }, (_, i) => lo + ((hi - lo) * i) / (count - 1))
+}
+
 /** 保持区相对边界盒的外扩（px）。 */
 const KEEP_PAD = 8
 /** 同圈相邻按钮之间的**最小**视觉间隙（px）：容量判定用「边长 + 它」，比这个还小就算挤。 */
@@ -122,12 +140,6 @@ interface ArcFit {
 /** 角度（度）转弧度。 */
 const rad = (deg: number): number => (deg * Math.PI) / 180
 
-/** 在起始角 start 起、张角 span 上均布 count 项的角度。 */
-function spreadAngles(start: number, span: number, count: number): number[] {
-  if (count <= 1) return [start]
-  return Array.from({ length: count }, (_, i) => start + (span * i) / (count - 1))
-}
-
 /**
  * 该角度序列在半径 r 上是否「两两不叠」。
  *
@@ -143,49 +155,120 @@ function arcFits(r: number, angles: number[], minGap: number): boolean {
   return true
 }
 
+/** 已落位点（屏幕坐标）：圈间避让的参照。 */
+interface PlacedPoint {
+  x: number
+  y: number
+}
+
+/** 两方块（边长 size）是否重叠：坐标差在 x 与 y 两轴上都小于边长即重叠。 */
+function hitsAny(x: number, y: number, size: number, placed: ReadonlyArray<PlacedPoint>): boolean {
+  for (const p of placed) {
+    if (Math.abs(p.x - x) < size && Math.abs(p.y - y) < size) return true
+  }
+  return false
+}
+
 /**
- * 算一弧的角度：让相邻按钮方块尽量拉开到「边长 + 间隙」。
+ * 算一弧的角度：在可用角窗口内均布 count 项，尽量拉开到「边长 + 间隙」，并**避开已落位的圈**。
  *
  * **半径固定不动**（上游给多少就是多少）：为了多塞按钮而把弧撑大，是在用“看着还是两圈吗”换“一排能放下”——
- * 弧位拥挤的正确解法是减项或改分组（内圈往外挪按钮），不是拿半径去让路。所以本函数只调**角度**。
+ * 弧位拥挤的正确解法是减项或改分组，不是拿半径去让路。所以只调**角度**。
  *
- * 张角取**刚好放下**（紧凑）：二分出满足「相邻方块间隙 ≥ size+gap」的最小跨度——不硬撑到某个固定值。
- * 这一条是实测逼出来的：工作台第二圈只有 2 项时，旧实现（下界 = 首选张角 54°）会把两个按钮推到
- * 93° 与 147°，中间空出 55px 的弧——看上去就不在一圈上。上限内真放不下时停在上限（宁可挤一点）。
+ * **角窗口对中**：各圈在**自己的窗口**内居中——窗口下界由「右缘不越屏」定、上界由「不压入口行」定，
+ * 两者对 90° 不一定对称，所以不能用一个全局轴心铺（会把靠右那半送出屏）。
  *
- * 张角**从起始角向左侧长**（起始角固定）——对称外扩会在入口靠窗口右缘时把首个按钮顶出屏幕。
- * 张角上限 = min(maxSpan, 终点角不超过 dyMin 对应的角)，后者保证最上方那个按钮仍落在锚点行**下方**。
- *
- * 纯函数（不读闭包状态）：几何是轮盘最容易被改坏的部分，参数化后能直接单测。
+ * **圈间避让**：径向步进（边长 + 间隙）只保证径向上分开；相邻圈角度接近、方向又偏 45° 时，
+ * 两按钮的 x/y 坐标差会被压到小于边长（实测内圈斜向相邻的两圈重叠 3~5px）。
+ * 修法不是把半径再推远（那是拿“还是两圈吗”换“不重叠”），而是**整圈在当前窗口内滑动**
+ * （微调中心角）找无碰撞位置，找不到才退回窗口中心（重叠最小优先）。
  */
 function fitArc(o: {
   count: number
   size: number
   gap: number
   r: number
-  start: number
-  maxSpan: number
-  /** 终点角处的最小纵向偏移（px）：按钮中心相对圆心的 dy 不得小于它（否则压住锚点行） */
-  dyMin: number
+  /** 本圈的可用角窗口下/上界（度，屏幕角）：右缘不越屏 → 上界不压入口行 */
+  winLo: number
+  winHi: number
+  /** 圆心（入口中心）屏幕坐标：把角度转成坐标比碰撞用 */
+  cx: number
+  cy: number
+  /** 已落位点（内圈已排完的按钮中心） */
+  placed: ReadonlyArray<PlacedPoint>
 }): ArcFit {
-  const { count, size, gap, r, start, maxSpan, dyMin } = o
+  const { count, size, gap, r, winLo, winHi, cx, cy, placed } = o
   if (count <= 0) return { r, angles: [] }
-  // 只一项就不必“排开”：落在起始角（正下方偏左一点），与其它圈同一方向
-  if (count === 1) return { r, angles: [start] }
-  const endLimit = dyMin <= 0 || dyMin >= r ? 180 : 180 - (Math.asin(dyMin / r) * 180) / Math.PI
-  const cap = Math.max(0, Math.min(maxSpan, endLimit - start))
   const need = size + gap
-  // 在 [0, 上限] 里二分出「刚好拉开到间隙要求」的最小张角（紧凑：不要空出多余的弧）
-  let lo = 0
-  let hi = cap
-  if (arcFits(r, spreadAngles(start, hi, count), need)) {
+  const center0 = (winLo + winHi) / 2
+  const halfWin = Math.max(0, (winHi - winLo) / 2)
+  /** 以 center0 为中心、半张角 half，算 count 项角度。 */
+  const at = (half: number, center = center0): number[] => spreadAngles(center - half, center + half, count)
+  /** 该角度序列在半径 r 上的落点是否与已落位点不重叠。 */
+  const clear = (angles: number[]): boolean =>
+    angles.every((deg) => {
+      const [dx, dy] = polar(r, deg)
+      return !hitsAny(cx + dx, cy + dy, size, placed)
+    })
+  // 半张角：先取「刚好拉开到间隙要求」的最小值（紧凑），但也得避开已落位点
+  let half = halfWin
+  if (arcFits(r, at(half), need)) {
+    let lo = 0
+    let hi = halfWin
     for (let i = 0; i < 16; i++) {
       const mid = (lo + hi) / 2
-      if (arcFits(r, spreadAngles(start, mid, count), need)) hi = mid
+      if (arcFits(r, at(mid), need)) hi = mid
       else lo = mid
     }
+    half = hi
   }
-  return { r, angles: spreadAngles(start, hi, count) }
+  if (count === 1) {
+    // 单按钮：先试窗口中心，不清晰再在整个窗口内扫描
+    let best = center0
+    if (!clear(at(half, center0))) {
+      let bestHits = Infinity
+      for (let d = -halfWin; d <= halfWin; d += 2) {
+        const c = center0 + d
+        const hits = placed.filter((p) => {
+          const [dx, dy] = polar(r, c)
+          return Math.abs(p.x - (cx + dx)) < size && Math.abs(p.y - (cy + dy)) < size
+        }).length
+        if (hits === 0) {
+          best = c
+          bestHits = 0
+          break
+        }
+        if (hits < bestHits) {
+          bestHits = hits
+          best = c
+        }
+      }
+    }
+    return { r, angles: [best] }
+  }
+  // 多按钮：整圈在窗口内滑动，找无碰撞的中心角（步进 4°，够细且不贵）
+  let bestCenter = center0
+  if (!clear(at(half, center0))) {
+    let bestHits = Infinity
+    for (let d = -halfWin; d <= halfWin; d += 4) {
+      const c = Math.min(winHi - half, Math.max(winLo + half, center0 + d))
+      const angles = at(half, c)
+      const hits = angles.filter((deg) => {
+        const [dx, dy] = polar(r, deg)
+        return hitsAny(cx + dx, cy + dy, size, placed)
+      }).length
+      if (hits === 0) {
+        bestCenter = c
+        bestHits = 0
+        break
+      }
+      if (hits < bestHits) {
+        bestHits = hits
+        bestCenter = c
+      }
+    }
+  }
+  return { r, angles: at(half, bestCenter) }
 }
 
 /** 半径 + 屏幕角 → [dx, dy] 偏移。 */
@@ -200,7 +283,6 @@ export function createWheel(opts: WheelOptions): WheelHandle {
   const firstRingR0 = opts.firstRingR ?? 85
   const gap = opts.buttonGap ?? 8
   const maxSpan = opts.maxSpan ?? 100
-  const startAngle = opts.startAngle ?? 93
   const margin = opts.margin ?? 8
   const fallbackSize = opts.buttonSize ?? 32
   const openDelay = opts.openDelay ?? 0
@@ -262,27 +344,50 @@ export function createWheel(opts: WheelOptions): WheelHandle {
     const visible = items.filter((it) => !it.el.hidden)
     /** 扇形里最大的按钮边长（分圈步进、容量与可用角度均按最大者算，大小不一也不会叠）。 */
     const size = visible.reduce((m, it) => { const s = sizeOf(it.el); return Math.max(m, s.w, s.h) }, fallbackSize)
-    const step = size + gap
+    /** 圈间步进：**取最坏情况的下界**——相邻两圈同角度时，两按钮坐标差为 (step·cosθ, step·sinθ)，
+     *  要任两轴中至少一轴 ≥ 边长，则 step·max(|cosθ|,|sinθ|) ≥ size 恒成立。
+     *  max(|cos|,|sin|) 在 45° 处取最小 √2/2，故 **step ≥ size·√2** 才能保证斜向 45° 也不叠。
+     *  用旧值 size + gap（40px）时，45° 处两轴差仅 28px < 32 → 相邻圈重叠 3~5px，
+     *  只能靠整圈滑动避让补救（各圈中心被挤散、看着不像同心扇形）。取对角落差后
+     *  同角度即天然分开，各圈可共享同一中心角。 */
+    const step = Math.ceil((size * Math.SQRT2 + gap) / 2) * 2
     /**
      * 终点角处按钮中心的最小纵向偏移：按钮顶边不得超过入口按钮的底边（否则压到入口那一行）。
      * 半径越小这个约束越紧（@r=85 时大约只能用到 155°），所以**跨度上限得逐圈算**，不能一次算好。
      */
     const dyMin = (rect.bottom - cy) + size / 2 + 4
-    /** 半径 r 那一圈的可用张角（受 maxSpan 与「不压入口行」两条约束）。 */
-    const spanCap = (r: number): number => {
-      const endLimit = dyMin <= 0 || dyMin >= r ? 180 : 180 - (Math.asin(dyMin / r) * 180) / Math.PI
-      return Math.max(0, Math.min(maxSpan, endLimit - startAngle))
-    }
+    /** 半径 r 那一圈的**可用角窗口** [下界, 上界]（度）：
+     *  ① 下界（最小角，靠右上）：按钮不得探出屏幕右缘——按钮宽 size，其中心在 cx + r·cos(θ) 处，
+     *     要求 cx + r·cos(θ) + size/2 ≤ vw - EDGE_PAD；
+     *  ② 上界（最大角，靠左下）：按钮不得压入口那一行——dy = r·sin(θ) ≥ dyMin；
+     *  两者不一定对称于 90°，所以各圈的窗口中心各不相同，不能用一个全局轴心。 */
+    const vw = typeof window === "undefined" ? Infinity : window.innerWidth
     /**
-     * 半径 r 那一圈的容量：相邻按钮不叠（且留 MIN_BUTTON_GAP）的前提下最多几项。
-     * 角度取该圈的**可用上限**（张角越大越容易拉开，是容量最宽松的取法），
-     * 实际排布再按首选张角收紧（见下面 fitArc）。
+     * 半径 r 那一圈的**可用角窗口** [lo, hi]（度，屏幕角）。两条硬约束：
+     *  ① 右缘不越屏：按钮中心 cx + r·cosθ、宽 size，要求 cx + r·cosθ + size/2 ≤ vw - EDGE_PAD
+     *     → cosθ ≤ C，即 **θ ≥ acos(C)**（靠右/上的一侧被削掉）；
+     *  ② 不压入口行：按钮顶边须在入口底边之下（dyMin = 入口底到圆心的距离 + 半按钮 + 余量）
+     *     → r·sinθ ≥ dyMin，即 sinθ ≥ S → **θ ∈ [asin(S), 180 - asin(S)]**
+     *     （θ 接近 0° 与 180° 时 sin 小、按钮贴近水平线，两侧都要排）。
+     *  两约束对 90° **不一定对称**（入口在右上角，右缘约束只削一侧），
+     *  所以窗口中心逐圈不同，不能用一个全局扇面轴心去对中。
      */
-    const capacityAt = (r: number, span: number): number => {
+    const angleWindow = (r: number): [number, number] => {
+      const cosMax = Number.isFinite(vw) ? (vw - EDGE_PAD - size / 2 - cx) / r : 1
+      const loEdge = cosMax >= 1 ? 0 : cosMax <= -1 ? 180 : (Math.acos(cosMax) * 180) / Math.PI
+      const sinMin = dyMin <= 0 || dyMin >= r ? 0 : dyMin / r
+      const dev = (Math.asin(Math.max(-1, Math.min(1, sinMin))) * 180) / Math.PI
+      const lo = Math.max(loEdge, dev)
+      const hi = Math.min(180, 180 - dev, lo + maxSpan)
+      return [lo, Math.max(lo, hi)]
+    }
+    /** 半径 r 那一圈的容量：在角窗口内均布时不叠（且留 MIN_BUTTON_GAP）前提下最多几项。 */
+    const capacityAt = (r: number): number => {
+      const [lo, hi] = angleWindow(r)
       let n = 0
       while (n < 32) {
         const next = n + 1
-        if (!arcFits(r, spreadAngles(startAngle, span, next), size + MIN_BUTTON_GAP)) break
+        if (!arcFits(r, spreadAngles(lo, hi, next), size + MIN_BUTTON_GAP)) break
         n = next
       }
       return Math.max(1, n)
@@ -297,43 +402,64 @@ export function createWheel(opts: WheelOptions): WheelHandle {
     const roomX = cx - margin
     const maxR = Math.max(firstRingR0, Math.min(roomX, roomY))
 
-    /* ---------- 第一步：把可见项分圈 ---------- */
+    /* ---------- 第一步：把可见项分圈（**组内均衡**，不出孤项圈） ----------
+     * 贪心填圈（能塞几个塞几个）会把「剩 1 项」单独挂一圈（如 4 项、容量 3 → 3+1），
+     * 那个孤零零的 1 看着就像没排布。改为：按组分段 → 每组先算**最少圈数**（k 圈需容量之和能装下），
+     * 再把该组项数**尽量均分**到 k 圈（前 remainder 圈各多 1）——每圈项数差 ≤ 1，不出孤项圈。 */
     const rings: { r: number; list: WheelItem[] }[] = []
-    let i = 0
-    let r = firstRingR0
-    while (i < visible.length && rings.length < MAX_RINGS) {
-      const cap = capacityAt(r, spanCap(r))
-      let take = Math.min(cap, visible.length - i)
-      // 组边界必换圈：分组语义（会话操作 / 应用操作）不能混进同一圈
-      const firstInner = visible[i]!.group === "inner"
-      for (let k = i + 1; k < i + take; k++) {
-        if ((visible[k]!.group === "inner") !== firstInner) {
-          take = k - i
-          break
-        }
-      }
-      // 半径再往外就超出可用空间：剩余项全并进这一圈（宁可挤一点也不出屏 / 不压入口行）
-      if (r + step > maxR) take = visible.length - i
-      rings.push({ r, list: visible.slice(i, i + Math.max(1, take)) })
-      i += Math.max(1, take)
-      r += step
+    /** 从首圈半径出发，第 n 圈的半径（圈半径按「边长 + 间隙」步进）。 */
+    const ringR = (n: number): number => firstRingR0 + n * step
+    // 按组切成连续段（分组语义：会话操作 / 应用操作）
+    const segments: WheelItem[][] = []
+    for (const it of visible) {
+      const g = it.group === "inner" ? "inner" : "outer"
+      const last = segments[segments.length - 1]
+      if (last && (last[0]!.group === "inner") === (g === "inner")) last.push(it)
+      else segments.push([it])
     }
-    // 兜底：圈数撞上 MAX_RINGS 而还有剩余时，并进最后一圈（极端项数下的降级）
-    if (i < visible.length && rings.length) rings[rings.length - 1]!.list = rings[rings.length - 1]!.list.concat(visible.slice(i))
+    let ringIdx = 0
+    for (const seg of segments) {
+      // 每段的最少圈数：逐步加圈直到已开出的圈容量之和能装下这一段
+      let k = 1
+      const capSum = (n: number): number => {
+        let s = 0
+        for (let j = 0; j < n; j++) {
+          // 半径超出可用空间时不再往外开圈：该圈容量按「装得下剩余全部」算（宁可挤也不出屏）
+          s += (ringR(ringIdx + j) + step > maxR ? seg.length : capacityAt(ringR(ringIdx + j)))
+        }
+        return s
+      }
+      while (k < MAX_RINGS && capSum(k) < seg.length) k++
+      // 均衡分配：把 seg.length 项尽量均分到 k 圈（前 remainder 圈各多 1）
+      const base = Math.floor(seg.length / k)
+      const remainder = seg.length % k
+      for (let j = 0; j < k && rings.length < MAX_RINGS; j++) {
+        const take = base + (j < remainder ? 1 : 0)
+        if (take <= 0) continue
+        rings.push({ r: ringR(ringIdx + j), list: seg.splice(0, take) })
+      }
+      ringIdx = rings.length
+      // 半径再往外就超出可用空间：剩余项并进最后一圈（宁可挤一点也不出屏 / 不压入口行）
+      if (seg.length && rings.length) {
+        const over = rings[rings.length - 1]!
+        if (ringR(rings.length) + step > maxR) over.list = over.list.concat(seg.splice(0))
+      }
+      // 兜底：圈数撞上 MAX_RINGS 而还有剩余时，并进最后一圈（极端项数下的降级）
+      if (seg.length && rings.length) rings[rings.length - 1]!.list = rings[rings.length - 1]!.list.concat(seg.splice(0))
+    }
 
-    /* ---------- 第二步：逐圈定角（半径由分圈定死，不为塞按钮而变） ---------- */
-    const plans: RingPlan[] = rings.map((ring) => {
-      const fit = fitArc({
-        count: ring.list.length,
-        size,
-        gap,
-        r: ring.r,
-        start: startAngle,
-        maxSpan,
-        dyMin,
-      })
-      return { r: fit.r, list: ring.list, angles: fit.angles }
-    })
+    /* ---------- 第二步：逐圈定角（各自角窗口内均布 + 避让已落位的圈） ---------- */
+    const plans: RingPlan[] = []
+    const placed: PlacedPoint[] = [] // 已排完的圈：按钮中心屏幕坐标（圈间避让参照）
+    for (const ring of rings) {
+      const [winLo, winHi] = angleWindow(ring.r)
+      const fit = fitArc({ count: ring.list.length, size, gap, r: ring.r, winLo, winHi, cx, cy, placed })
+      plans.push({ r: fit.r, list: ring.list, angles: fit.angles })
+      for (const deg of fit.angles) {
+        const [dx, dy] = polar(ring.r, deg)
+        placed.push({ x: cx + dx, y: cy + dy })
+      }
+    }
 
     /* ---------- 第三步：落位 + 保持区收紧为扇形边界盒（入口按钮 ∪ 各可见扇形按钮） ---------- */
     let minX = rect.left
@@ -343,7 +469,11 @@ export function createWheel(opts: WheelOptions): WheelHandle {
     for (const plan of plans) {
       plan.list.forEach((it, k) => {
         const { w, h } = sizeOf(it.el)
-        const [dx, dy] = polar(plan.r, plan.angles[k]!)
+        const [dx0, dy0] = polar(plan.r, plan.angles[k])
+        // 定精度：cos/sin 在 90°/180° 上会算出 1e-15 量级的浮点残差，直接拼进 translate 会写出
+        // `7.6e-15px`（科学计数法）——浏览器能解析，但可读性差、消费方（距离解析）容易踩坑，取 3 位小数。
+        const dx = Number(dx0.toFixed(3))
+        const dy = Number(dy0.toFixed(3))
         it.el.dataset.wheel = `translate(${dx}px, ${dy}px)`
         minX = Math.min(minX, cx - w / 2 + dx)
         minY = Math.min(minY, cy - h / 2 + dy)

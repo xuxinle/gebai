@@ -136,6 +136,20 @@ afterEach(() => {
   ;(document as unknown as { dispatchEvent: unknown }).dispatchEvent = origDispatch
 })
 
+/** 在测试里给一个视口（layout 读 window.innerWidth 算右缘约束；测试环境无 window）：
+ *  展开是异步的（openDelay → setTimeout → layout），所以传入的回调可以 await。 */
+async function withViewport(width: number, fn: () => Promise<void>): Promise<void> {
+  const had = "window" in globalThis
+  const prev = (globalThis as { window?: unknown }).window
+  ;(globalThis as { window?: unknown }).window = { innerWidth: width, innerHeight: 720, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+  try {
+    await fn()
+  } finally {
+    if (had) (globalThis as { window?: unknown }).window = prev
+    else delete (globalThis as { window?: unknown }).window
+  }
+}
+
 /** 桩 → HTMLElement（createWheel 面向真实元素，测试只关心它用到的那些成员）。 */
 const asEl = (e: StubEl): HTMLElement => e as unknown as HTMLElement
 
@@ -210,7 +224,9 @@ describe("createWheel（按钮轮盘原语）", () => {
 
     // 内圈两项同半径；外圈（组边界）必换圈，半径 = 首圈 + 边长 + 间隙
     for (const el of [inner1, inner2]) expect(offsetOf(el).radius).toBeCloseTo(85, 3)
-    expect(offsetOf(outer1).radius).toBeCloseTo(85 + 32 + 8, 3)
+    // 圈间步进 = ceil((size·√2 + gap)/2)·2（最坏情况 45° 对角下也不叠，见 wheel-core.ts 的 step）
+    const STEP = Math.ceil((32 * Math.SQRT2 + 8) / 2) * 2
+    expect(offsetOf(outer1).radius).toBeCloseTo(85 + STEP, 3)
     // 扇形朝下（入口在界面上缘，只有向下有空间）
     for (const el of [inner1, inner2, outer1]) expect(offsetOf(el).dy).toBeGreaterThan(0)
     w.destroy()
@@ -358,7 +374,9 @@ describe("createWheel（按钮轮盘原语）", () => {
     const rings = [...new Set(radii)].sort((x, y) => x - y)
     expect(rings[0]).toBe(85)
     expect(rings.length).toBeGreaterThan(1) // 一圈真放不下：必须用上第二圈
-    for (let i = 1; i < rings.length; i++) expect(rings[i]! - rings[i - 1]!).toBeCloseTo(32 + 8, 2)
+    // 圈间步进按「最坏情况 45° 对角」下界取值（size·√2 + gap 向上取偶），不是 size + gap
+    const STEP = Math.ceil((32 * Math.SQRT2 + 8) / 2) * 2
+    for (let i = 1; i < rings.length; i++) expect(rings[i]! - rings[i - 1]!).toBeCloseTo(STEP, 2)
     // 每圈内部：相邻按钮不叠（用方块的实际不重叠条件：|Δx| 或 |Δy| ≥ 边长）
     for (const r of rings) {
       const pts = all.map((e) => offsetOf(e)).filter((p) => Math.abs(p.radius - r) < 0.5)
@@ -407,9 +425,11 @@ describe("createWheel（按钮轮盘原语）", () => {
     await tick()
     expect(offsetOf(a).radius).toBeCloseTo(85, 3)
     expect(offsetOf(b).radius).toBeCloseTo(85, 3)
-    // 起始角固定 93°：张角向左撑开，不多占右侧（入口靠窗口右缘时首个按钮不会被顶出屏）
+    // 角窗口内均布（同心扇面）：两项以窗口中心为中线对称展开；窗口受右缘约束整体靠右上，
+    // 不再固定 90°（围绕 90° 对称会把一半按钮送出屏右缘）
     const degOf = (e: StubEl): number => (Math.atan2(offsetOf(e).dy, offsetOf(e).dx) * 180) / Math.PI
-    expect(degOf(a)).toBeCloseTo(93, 1)
+    expect((degOf(a) + degOf(b)) / 2).toBeLessThan(90) // 窗口中心靠右上（右缘约束）
+    expect((degOf(a) + degOf(b)) / 2).toBeGreaterThan(60)
     // 圆环上只有 2 项：跨度就是“刚好分开”的那一点，不能空出一大截弧
     // （旧实现固定撑到 54°，实测两个按钮隔了 55px 的弧，看着就不在一圈上）
     const span = degOf(b) - degOf(a)
@@ -419,8 +439,41 @@ describe("createWheel（按钮轮盘原语）", () => {
     const dx = Math.abs(offsetOf(b).dx - offsetOf(a).dx)
     const dy = Math.abs(offsetOf(b).dy - offsetOf(a).dy)
     expect(Math.max(dx, dy)).toBeGreaterThanOrEqual(32 + 8 - 0.5)
-    // 只一项的圈：落在起始角（与其它圈同方向）
-    expect(degOf(c)).toBeCloseTo(93, 1)
+    // 只一项的圈：落在该圈角窗口的中心（受右缘与入口行两约束，不再固定 90°）
+    expect(degOf(c)).toBeLessThan(90)
+    expect(degOf(c)).toBeGreaterThan(60)
+    w.destroy()
+  })
+
+  test("同心扇面：各圈围绕同一轴心对中（不出竖列、圈内项数均衡不出孤项圈）", async () => {
+    const trigger = stub("button")
+    trigger.rect = { left: 1100, top: 5, right: 1124, bottom: 29, width: 24, height: 24 }
+    // 内圈 4 项（容量 3 的真实旧例）：旧贪心填圈会装成 3+1，那个孤零零的 1 看着就像没排布
+    const els = Array.from({ length: 4 }, () => stub("button"))
+    const w = createWheel({
+      trigger: asEl(trigger),
+      items: els.map((e) => ({ el: asEl(e), group: "inner" as const })),
+      firstRingR: 85,
+    })
+    trigger.dispatchEvent({ type: "pointerenter" })
+    await tick()
+    const degOf = (e: StubEl): number => (Math.atan2(offsetOf(e).dy, offsetOf(e).dx) * 180) / Math.PI
+    const byRing = new Map<number, StubEl[]>()
+    for (const e of els) {
+      const r = Number(offsetOf(e).radius.toFixed(2))
+      byRing.set(r, [...(byRing.get(r) ?? []), e])
+    }
+    const radii = [...byRing.keys()].sort((x, y) => x - y)
+    // 均衡分圈：4 项两圈 → 2+2（不是 3+1 的孤项圈）；每圈项数差 ≤ 1
+    const counts = radii.map((r) => byRing.get(r)!.length)
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1)
+    // 同心扇面：每圈项在**自己的角窗口**内对中——窗口中心受右缘/入口行约束逐圈微调，
+    // 同一窗口下各圈中心相近（不再是“各圈都从 93° 向左长”也不叠成竖列）
+    for (const r of radii) {
+      const avg = byRing.get(r)!.reduce((s, e) => s + degOf(e), 0) / byRing.get(r)!.length
+      expect(avg).toBeGreaterThan(60)
+      expect(avg).toBeLessThanOrEqual(90)
+    }
     w.destroy()
   })
 
@@ -445,6 +498,55 @@ describe("createWheel（按钮轮盘原语）", () => {
     const keep2 = containers().at(-1)!
     expect(keep2.children.some((c) => c.tagName === "SVG")).toBe(false)
     w2.destroy()
+    w.destroy()
+  })
+
+  test("右缘约束：入口靠屏右缘时所有按钮留在屏内（角窗口下界抬高，不向 90° 右侧对称铺开）", async () => {
+    // 复现真实缺陷：入口在窗口右上角（cx = 1256, vw = 1280），若各圈围绕 90° 对称展开，
+    // 靠右那半（角度 < 90°）的按钮中心会跑到 cx + r·cosθ，内圈就探出右缘。
+    // 角窗口把下界抬到「右缘不越屏」对应的 acos 上，整圈整体向左上偏移。
+    const trigger = stub("button")
+    trigger.rect = { left: 1244, top: 5, right: 1268, bottom: 29, width: 24, height: 24 }
+    const els = Array.from({ length: 6 }, () => stub("button"))
+    const w = createWheel({ trigger: asEl(trigger), items: els.map((e) => ({ el: asEl(e) })), firstRingR: 85 })
+    await withViewport(1280, async () => {
+      trigger.dispatchEvent({ type: "pointerenter" })
+      await tick()
+    })
+    const cx = trigger.rect.left + trigger.rect.width / 2
+    // 每个按钮中心的 x 坐标都在右缘内（中心 + 半按钮 ≤ vw）
+    for (const e of els) {
+      const centerX = cx + offsetOf(e).dx
+      expect(centerX + 32 / 2).toBeLessThanOrEqual(1280)
+    }
+    w.destroy()
+  })
+
+  test("圈间避让：跨圈不重叠（同角度斜向 45° 也不叠）", async () => {
+    // 复现真实缺陷：径向 step = size + gap = 40px 只保证径向分开；相邻圈角度接近且方向偏 45° 时，
+    // 两按钮的 x/y 坐标差会被压到 28px < 边长（实测重叠 3~5px）。
+    // 修法：圈间步进取最坏情况下界 size·√2 + gap（同角度即天然分开），
+    // 单个偶发拥挤由整圈滑动避让补救。本用例只盯跨圈（同圈拥挤是容量降级、另有用例覆盖）。
+    const trigger = stub("button")
+    trigger.rect = { left: 1244, top: 5, right: 1268, bottom: 29, width: 24, height: 24 }
+    const els = Array.from({ length: 8 }, () => stub("button"))
+    const w = createWheel({ trigger: asEl(trigger), items: els.map((e) => ({ el: asEl(e) })), firstRingR: 85 })
+    await withViewport(1280, async () => {
+      trigger.dispatchEvent({ type: "pointerenter" })
+      await tick()
+    })
+    const cx = trigger.rect.left + trigger.rect.width / 2
+    const cy = trigger.rect.top + trigger.rect.height / 2
+    const pts = els.map((e) => ({ x: cx + offsetOf(e).dx, y: cy + offsetOf(e).dy, r: Math.round(offsetOf(e).radius) }))
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        if (pts[i]!.r === pts[j]!.r) continue // 同圈：拥挤是容量降级（见“分圈”用例）
+        const dx = Math.abs(pts[i]!.x - pts[j]!.x)
+        const dy = Math.abs(pts[i]!.y - pts[j]!.y)
+        // 方块边长 32：跨圈任意两项至少一轴差 ≥ 32 才算不重叠
+        expect(Math.max(dx, dy)).toBeGreaterThanOrEqual(32 - 0.5)
+      }
+    }
     w.destroy()
   })
 })
