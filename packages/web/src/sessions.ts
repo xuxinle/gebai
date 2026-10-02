@@ -44,6 +44,7 @@ import { renderShortcutButtons } from "./shortcuts"
 import { clearMsgNav, setMsgNavJumper, setMsgNavLocator, setMsgNavSegs, updateMsgNav, type MsgNavSeg } from "./msg-nav"
 import { isRunMessage, planMessageChunks, runIdOfMessage } from "./history-chunk"
 import { DEFAULT_PER_MSG } from "./virtual-window"
+import { dismissOnScroll } from "./scroll-dismiss"
 import { msgWindow, setBlockRenderer } from "./msg-window"
 import { renderAttachments } from "./attachments"
 import { clearQueue, renderQueue } from "./queue"
@@ -1016,6 +1017,8 @@ function showBatchDeleteConfirm() {
 let ctxMenu: HTMLDivElement | null = null
 /** 右键菜单打开时的键位作用域 id（Esc 只关最上层浮层，不再广播式连关）。 */
 let ctxMenuScope: string | null = null
+/** 菜单锚点容器（会话列表）：只有它自身（或页面级）滚动才收菜单，见 scroll-dismiss.ts。 */
+let ctxMenuHost: HTMLElement | null = null
 
 function closeSessionMenu(): void {
   if (ctxMenuScope) {
@@ -1024,6 +1027,7 @@ function closeSessionMenu(): void {
   }
   ctxMenu?.remove()
   ctxMenu = null
+  ctxMenuHost = null
 }
 
 function openSessionMenu(e: { clientX: number; clientY: number }, s: SessionInfo, li: HTMLElement): void {
@@ -1055,6 +1059,7 @@ function openSessionMenu(e: { clientX: number; clientY: number }, s: SessionInfo
   }
   document.body.appendChild(menu)
   ctxMenu = menu
+  ctxMenuHost = sessionList
   // 定位 + 视口边缘翻转（菜单不超出可视区）
   const rect = menu.getBoundingClientRect()
   menu.style.left = `${Math.max(8, Math.min(e.clientX, window.innerWidth - rect.width - 8))}px`
@@ -1343,10 +1348,12 @@ export function bindSessionActions() {
       if (files.length) runImport(files)
     })
   }
-  // 右键菜单关闭：任意点击 / 新右键 / 滚动 / 窗口缩放（Esc 见 openSessionMenu 的作用域绑定）
+  // 右键菜单关闭：任意点击 / 新右键 / 锚点容器（会话列表）滚动 / 窗口缩放（Esc 见 openSessionMenu 的作用域绑定）。
+  // 滚动不按「任意容器一律关」：生成中的消息流为咬住底部每帧写 scrollTop，那是另一个容器、
+  // 菜单并不会跟着漂移，一律关会让菜单在运行中会话里刚打开就被冲掉（见 scroll-dismiss.ts）
   document.addEventListener("click", () => closeSessionMenu())
   document.addEventListener("contextmenu", () => closeSessionMenu(), true) // 捕获：新右键先关旧菜单，再走 li 打开新菜单
-  document.addEventListener("scroll", () => closeSessionMenu(), true)
+  document.addEventListener("scroll", (e) => { if (dismissOnScroll(e.target, ctxMenuHost)) closeSessionMenu() }, true)
   window.addEventListener("resize", () => closeSessionMenu())
   // 新会话：进入空白草稿页（不立即创建会话——避免落盘大量空会话，首条消息发送时才真正创建）；
   // 已处于草稿页时无操作（防误触快捷键清掉正在输入的草稿）
