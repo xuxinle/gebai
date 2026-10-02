@@ -17,6 +17,7 @@
 /// 2. 一套语义——`tree`/`get`/`set`/`invoke` 对 DSL 元素照常可用；
 /// 3. 不挂即零开销——不 mount 声明式根时帧循环无任何额外成本。
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -136,6 +137,31 @@ struct AsyncValue {
   auto operator==(const AsyncValue& other) const -> bool = default;
 };
 
+/// 取消牌：一次异步执行的「还要不要这结果」。（≈ JS `AbortSignal`）
+///
+/// 两处用到：
+/// - **输入变化**：`resource` 开新代时翻牌——旧代的结果丢弃（不再写状态），
+///   旧代的工作线程可在耗时点调 `is_cancelled()` 提前放弃；
+/// - **Composer 销毁**：全牌翻掉（未开始的任务丢弃，已开始的在下一个检查点退出）。
+///
+/// 为何用 `shared_ptr<atomic<bool>>` 而不是 Composer 里的一个标记：取消牌的生命周期
+/// 长于 Composer（线程可能还在跑），引用计数保证牌总是有效——销毁时翻牌即可，
+/// 不需要等线程结束（避免析构阻塞在长任务上）。
+class AsyncCancel {
+ public:
+  AsyncCancel() : flag_(std::make_shared<std::atomic<bool>>(false)) {}
+  /// 是否已被取消（工作线程在耗时点调；fetcher 可接收它以提前退出）。
+  [[nodiscard]] auto is_cancelled() const noexcept -> bool {
+    return flag_ != nullptr && flag_->load(std::memory_order_relaxed);
+  }
+  void cancel() noexcept {
+    if (flag_ != nullptr) flag_->store(true, std::memory_order_relaxed);
+  }
+
+ private:
+  std::shared_ptr<std::atomic<bool>> flag_{};
+};
+
 /// 订阅登记辅助（Composer 侧调用）。
 void detail_subscribe(StateBase& state);
 
@@ -212,22 +238,24 @@ class Composer {
   void register_sub_scope(std::shared_ptr<Component> component, const std::string& key);
 
   // —─ 异步（`resource` 的底座）—─
-  /// 输入指纹变化时开新一代（返回新 token）；未变化返回 0（不重发）。
+  /// 输入指纹变化时开新一代：**旧代翻牌取消**，返回新 token；未变化返回 0（不重发）。
   [[nodiscard]] auto async_begin(std::size_t slot, std::string fingerprint) -> std::uint64_t;
-  /// 代次是否仍为当前（结果写回前的校验——旧代次丢弃）。
+  /// 代次是否仍为当前（结果写回前的校验——旧代丢弃）。
   [[nodiscard]] auto async_token_current(std::uint64_t token) -> bool;
+  /// 取某代次的取消牌（`resource` 交给 fetcher，供其在耗时点提前退出）。
+  [[nodiscard]] auto async_cancel_for(std::uint64_t token) -> AsyncCancel;
 
   /// 开一次异步任务：`work` 在**工作线程**执行，结果回主线程校验代次后写入 `cell`。
   /// `cell` 必须是本 Composer 的 `state_slot` 持有的状态（生命周期与 Composer 对齐）。
   template <class T>
   void async_run(std::function<AsyncValue<T>()> work, std::uint64_t token,
                  State<AsyncValue<T>>* cell) {
-    // ① 工序（工作线程）：两个投递路径分开写，不用共享标记位（线程读它 = 数据竞争）
+    // ① 工序（工作线程）：结果经 `post_to_main` 回主线程
     run_on_worker([this, work = std::move(work), token, cell]() mutable {
       AsyncValue<T> result = work();
-      // ② 回主线程：入 inbox（`pump_async` 执行）——代次校验 + 写状态
+      // ② 回主线程：代次校验 + 写状态
       post_to_main([this, result = std::move(result), token, cell]() {
-        if (!async_token_current(token)) return;   // 旧代次：丢弃
+        if (!async_token_current(token)) return;   // 旧代次（已被取消）：丢弃
         cell->set(std::move(result));
       });
     });
@@ -574,12 +602,24 @@ auto mount(UiRoot& root, std::shared_ptr<Component> root_component, Guardrails g
 /// if (data.value().status == AsyncStatus::Ok) text(c, [&]{ return data.value().value.size(); });
 /// ```
 ///
-/// - `input` 变化 → 重发（旧代次结果丢弃）；相等则不重发；
+/// - `input` 变化 → 重发（**旧代翻牌取消**：迟到结果丢弃）；相等则不重发；
 /// - fetcher 在**工作线程**执行，结果经 `Composer::pump_async()` 回主线程写状态
 ///   （跨线程写 State 会与遍历中的树竞争——硬约束）；
 /// - `T` 是资源值的类型（fetcher 的返回类型）。
 ///
-/// 用法要点：`pump_async()` 由宿主在主循环每帧调用（与 `tick()` 并列）。
+/// **取消**：需要提前退出长任务时，让 fetcher 收 `AsyncCancel` 参数——
+/// 在耗时点检查 `cancel.is_cancelled()` 并返回（这是 C++ 里唯一安全的取消方式，
+/// 强杀线程会留下锁/堆损坏）：
+///
+/// ```cpp
+/// resource<Data>(c, [](const std::string& q, AsyncCancel cancel) {
+///   for (auto& chunk : chunks(q)) {
+///     if (cancel.is_cancelled()) return Data{};   // 输入已变，不必算完
+///     accumulate(chunk);
+///   }
+///   return result;
+/// }, query.value());
+/// ```
 template <class T, class Fetcher, class Input>
 [[nodiscard]] auto resource(Composer& c, Fetcher fetcher, const Input& input)
     -> State<AsyncValue<T>>& {
@@ -602,14 +642,17 @@ template <class T, class Fetcher, class Input>
     AsyncValue<T> pending{};
     pending.status = AsyncStatus::Pending;
     cell.set(std::move(pending));
-    // 投递两段：① 工作线程执行 fetcher；② 回主线程校验代次后写状态。
-    // 注意：全部捕获**值**（fetcher/input 的引用在 build 结束后失效）。
+    const AsyncCancel cancel = c.async_cancel_for(token);   // 交给 fetcher：耗时点可提前退出
     Input input_copy = input;
     c.async_run<T>(
-        [fetcher, input_copy]() -> AsyncValue<T> {
+        [fetcher, input_copy, cancel]() -> AsyncValue<T> {
           AsyncValue<T> result;
           try {
-            result.value = fetcher(input_copy);
+            if constexpr (std::is_invocable_v<Fetcher, Input, AsyncCancel>) {
+              result.value = fetcher(input_copy, cancel);   // fetcher 想收取消牌
+            } else {
+              result.value = fetcher(input_copy);            // 常规 fetcher
+            }
             result.status = AsyncStatus::Ok;
           } catch (const std::exception& error) {
             result.status = AsyncStatus::Error;

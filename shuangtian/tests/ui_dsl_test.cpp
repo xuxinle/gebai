@@ -237,6 +237,113 @@ ST_TEST(dsl_tabs_data_driven) {
   ST_CHECK_EQ(std::string(tabs->active_key()), std::string("z"));
 }
 
+// ── 5g. 嵌套作用域树 + 取消语义 ───────────────────────────
+
+ST_TEST(dsl_nested_scopes_and_cancel) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+
+  // 三层：Page → Panel(子) → Leaf(孙)；每层有自己状态
+  struct Leaf : Component {
+    State<int> value{0};
+    int builds{0};
+    void build(Composer& c) override {
+      ++builds;
+      column(c, {}, [&] { text(c, [&] { return "叶:" + std::to_string(value.value()); }); });
+    }
+  };
+  struct Panel : Component {
+    State<int> value{0};
+    int builds{0};
+    std::shared_ptr<Leaf> leaf{std::make_shared<Leaf>()};
+    void build(Composer& c) override {
+      ++builds;
+      column(c, {}, [&] {
+        text(c, [&] { return "面板:" + std::to_string(value.value()); });
+        dsl::sub_component(c, leaf, "leaf");
+      });
+    }
+  };
+  struct Page : Component {
+    int builds{0};
+    std::shared_ptr<Panel> panel{std::make_shared<Panel>()};
+    void build(Composer& c) override {
+      ++builds;
+      column(c, {}, [&] { dsl::sub_component(c, panel, "panel"); });
+    }
+  };
+  auto page = std::make_shared<Page>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+  ST_CHECK(page->panel->builds > 0);
+  ST_CHECK(page->panel->leaf->builds > 0);   // 孙也跑了（嵌套生效）
+
+  // —— 改孙状态：只跑孙（页、面板都不跑）——
+  const int page_b = page->builds;
+  const int panel_b = page->panel->builds;
+  const int leaf_b = page->panel->leaf->builds;
+  page->panel->leaf->value.set(5);
+  const auto stats = host->tick();
+  root.layout(true);
+  ST_CHECK_EQ(page->panel->leaf->builds, leaf_b + 1);   // 孙跑
+  ST_CHECK_EQ(page->panel->builds, panel_b);            // 子不跑
+  ST_CHECK_EQ(page->builds, page_b);                    // 页不跑
+  ST_CHECK_EQ(stats.scopes_rerun, 1);
+  // 内容：页 → 列 → 面板（面板 → 列 → 叶）
+  Element* panel_panel = root.content()->child_at(0);
+  Element* leaf_panel = panel_panel->child_at(1);
+  ST_CHECK_EQ(leaf_panel->child_at(0)->semantics_text(), std::string("叶:5"));
+
+  // —— 改子状态：子跑（连带孙跑——父重建了子树）——
+  const int leaf_b2 = page->panel->leaf->builds;
+  page->panel->value.set(9);
+  (void)host->tick();
+  root.layout(true);
+  ST_CHECK_EQ(page->panel->builds, panel_b + 1);
+  ST_CHECK_EQ(page->panel->leaf->builds, leaf_b2 + 1);   // 孙随之重跑（对齐）
+  ST_CHECK_EQ(root.content()->child_at(0)->child_at(0)->semantics_text(), std::string("面板:9"));
+
+  // —— 取消：输入变化后旧代的结果不得写入 ——
+  struct AsyncPage : Component {
+    State<std::string> query{"a"};
+    void build(Composer& c) override {
+      // fetcher 收取消牌：模拟耗时任务（睡眠后检查取消）
+      const auto& data = resource<std::string>(
+          c,
+          [](const std::string& key, AsyncCancel cancel) {
+            for (int step = 0; step < 50; ++step) {
+              if (cancel.is_cancelled()) return std::string("[cancelled]") + key;
+              std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            return std::string("完成:") + key;
+          },
+          query.value());
+      column(c, {}, [&] {
+        text(c, [&] {
+          const auto& current = data.value();
+          return current.status == AsyncStatus::Ok ? current.value : std::string("[pending]");
+        });
+      });
+    }
+  };
+  auto async_page = std::make_shared<AsyncPage>();
+  auto async_host = dsl::mount(root, async_page);
+  ST_REQUIRE(async_host != nullptr);
+  // 首挂 → 开始取 "a"；立即改输入 → 旧代翻牌
+  async_page->query.set("b");
+  std::string got;
+  for (int attempt = 0; attempt < 400; ++attempt) {
+    (void)async_host->tick();
+    got = root.content()->child_at(0)->semantics_text();
+    if (got == "完成:b" || got == "[cancelled]") break;   // 注：取消是给 fetcher 的提示，可能不来
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  // 关键：最终值必须是**新输入**的结果，旧代（完成:a）不得覆写
+  ST_CHECK_EQ(got, std::string("完成:b"));
+  ST_CHECK(got.find("完成:a") == std::string::npos);
+}
+
 // ── 5f. 多作用域细粒度重组（子组件独立作用域）────────────
 
 ST_TEST(dsl_multi_scope_fine_grained) {

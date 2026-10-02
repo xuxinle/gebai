@@ -745,14 +745,18 @@ compose('TodoPage', () => Column([
   （默认 4ms）超时标记 `budget_exceeded`。
 - **全局快捷键**：`Composer::register_shortcut(key, mods, handler)` 转调 `UiRoot`
   （先于焦点链派发，文本组件吞键也拦得住）——声明式组件不必碰 root。
-- **多作用域细粒度重组**：`sub_component(c, child, key)` 给子组件**独立作用域**——
-  子组件订阅的状态变化**只重跑它自己**，父不重跑（实测：改子状态 → `scopes_rerun=1`
-  且父组件 `build()` 未被调用）。机制：依赖登记到当前 scope（`add_dependency` 按
-  `active_scope` 分流）；重跑时恢复宿主位置并**重置子树游标**（否则旧元素残留）。
+- **多作用域细粒度重组（作用域树）**：`sub_component(c, child, key)` 给子组件**独立作用域**
+  ——子组件订阅的状态变化**只重跑它自己**，父不重跑（实测：改子状态 → `scopes_rerun=1`
+  且父组件 `build()` 未被调用）。**可任意嵌套**（页 → 面板 → 叶），每层独立失效；
+  父跑后子树标脏（对齐）而条件分支去掉的作用域被剪枝。机制：依赖登记到当前 scope
+  （根 → `subscribed_states`，子 → 自己的 `deps`）；重跑时恢复宿主位置并**重置子树游标**
+  （否则旧元素残留），遍历自顶向下但**根不脏也继续下钻**（子可独立脏）。
 - **异步资源 `resource<T>(c, fetcher, input)`**：≈ JS 侧 `useResource` —— 输入变化
-  才重发（指纹比对）、代次计数（旧结果丢弃）、fetcher 在**工作线程**跑、结果经
-  `pump_async()` 回主线程写状态（跨线程写 State 会与遍历中的树竞争，硬约束）；
+  才重发（指纹比对）、**取消牌**（`AsyncCancel`，可收第二个参数的 fetcher 能在耗时点提前退出）、
+  代次计数（旧结果丢弃）、fetcher 在**线程池**（固定 N 个线程，1~8 按核数）跑、
+  结果经 `pump_async()` 回主线程写状态（跨线程写 State 会与遍历中的树竞争，硬约束）；
   `DeclarativeHost::tick()` 内部先 `pump_async`，异步结果同帧可见。
+  撤销语义：输入变化翻旧代的牌；Composer 析构翻全部的牌并丢弃未开始任务（不死等）。
 - **构造期属性组件包装**：`dsl::select` / `dsl::table` / `dsl::tree` —— 选项/列/节点
   数据驱动（内部走 `set_options` / `set_columns+add_row` / `sync_nodes` 等构造期接口）。
 - **协议在线建删元素**：控制通道 `ui.create`（工厂 + props + parent/index/key）与
@@ -828,8 +832,8 @@ if (palette_open_.value()) {          // 条件声明
 + **`examples/codeeditor-dsl`（IDE 形态界面的声明式重写：五层布局 + 多标签编辑
 + 菜单栏下拉 + 命令面板 + 全局快捷键 + 终端 + 主题，~700 行；端到端验证
 + `tools/codeeditor_dsl_e2e.py` 八项）**；
-测试：`tests/ui_dsl_test.cpp`（C++ 十二用例：含 overlay 生命周期 / 异步 resource /
-构造期属性组件 / 多作用域细粒度）、`tests/ui_declarative_host_test.cpp`（JS 十用例）、
+测试：`tests/ui_dsl_test.cpp`（C++ 十三用例：含 overlay 生命周期 / 异步 resource 与取消 /
+嵌套作用域树 / 构造期属性组件 / 多作用域细粒度）、`tests/ui_declarative_host_test.cpp`（JS 十用例）、
 `tests/ui_declarative_parity_test.cpp`（双宿主一致性两用例）、
 `tests/control_protocol_test.cpp`（协议 `ui.create`/`ui.remove` 用例）。
 

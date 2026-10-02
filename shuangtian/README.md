@@ -209,7 +209,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | **Windows 宿主 + g++（MinGW-w64）默认编译器** | ✅ g++ 优先（版本护栏 ≥ 13）、MSVC 可回退（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；Windows 目标默认静态 libgcc/libstdc++（产物不要求 mingw dll）；实测 g++ 自举 27s / 全量构建 ~31s / 测试全绿 |
 | **GPU 渲染（D3D11：硬件 → WARP）** | ✅ **M1–M6 全部落地**：设备层 / 着色器原语（文字与渐变与软件 **Δ0**）/ 投影（**Δ≤1**）/ 路径填充描边 / **DXGI swapchain 呈现** / `auto` 按实测选优。实测总帧 24.66→**1.53 ms**、送显 6.55→**0.03 ms**（详见 `DESIGN.md` §8.3） |
 | 动画与过渡 | ✅ 悬浮事件与特效（背景/描边/上浮/发光，`HoverEffect` 声明式）、帧驱动过渡（`UiRoot` 时间轴 + 续帧协议）、3D 旋转 |
-| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost，属性批量落地、事件走 on/off 管线）——≈ Jetpack Compose / 鸿蒙 ArkTS；**ArkTS 风格链式修饰**、**`useResource`/`resource` 异步**（双宿主；工作线程 + 代次取消）、**key 对齐复用**、**多作用域细粒度重组**、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、状态驱动重组、条件裁剪、异常冻结；**双宿主一致性 fixture**；示例 `counter` / `counter-js` / `todo-js` / **`codeeditor-dsl`（IDE 形态声明式重写）**；协议 `ui.create`/`ui.remove` 在线建删；路线图见 `docs/declarative.md` |
+| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、key 对齐复用、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、异常冻结；双宿主一致性 fixture；示例 `counter` / `counter-js` / `todo-js` / **`codeeditor-dsl`**；协议 `ui.create`/`ui.remove` 在线建删 |
 
 ## 相关文档
 

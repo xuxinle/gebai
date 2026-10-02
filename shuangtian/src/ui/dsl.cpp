@@ -1,6 +1,10 @@
 #include "st/ui/dsl.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -80,19 +84,28 @@ struct Composer::Impl {
   std::vector<std::unique_ptr<StateBase>> hook_states{};
   std::size_t hook_cursor{0};
 
-  // —─ 作用域（多作用域细粒度重组）—─
+  // —─ 作用域树（多作用域细粒度重组）—─
   //
-  // 全局 `scope_dirty` 只能表达“整根重跑”。
-  // 子作用域（`sub_component`）有自己的依赖集与脏标记：
-  // 只订阅了自己的状态变时，**只重跑子作用域**，父不重跑。
+  // 全局 `scope_dirty` 只能表达“整根重跑”。子作用域（`sub_component`）有自己的依赖集
+  // 与脏标记：只订阅了自己的状态变时，**只重跑子作用域**，父不重跑。
+  //
+  // 嵌套：子作用域的 build 里可以再声明子作用域（孙），形成作用域树——
+  // 每层各自独立失效，粒度细到“改哪块只重跑哪块”。
+  //
+  // 位置与失效的关系（关键设计）：
+  // - scope 记「宿主父元素 + 该父元素下的第几个子位」，重跑时先把游标回到那个位置；
+  // - **父重跑时刷新子 scope 的位置**（条件分支可能增删前面的兄弟，位置会漂）；
+  // - 父重跑会连带把子树 scope 标脏（父的 build 重建了子树，子必须重跑才能对齐）；
+  // - `declared` 标记：父重跑后仍未重新声明的子 scope = 被条件分支剪掉 → 递归移除。
   struct Scope {
     std::shared_ptr<Component> component{};
-    std::string key{};                              // 兄弟间身份（重复则复用同一 scope）
+    std::string key{};                              // 兄弟间身份（同 key 复用同一 scope）
     std::unordered_set<StateBase*> deps{};
     bool dirty{true};
-    /// 宿主位置：挂到哪个父元素下的第几个子位（nullptr 父 = 根槽位）。
+    /// 宿主位置：挂到哪个父元素下的第几个子位（宿主为 nullptr = 根层）。
     Element* host_parent{nullptr};
     std::size_t slot{0};
+    bool declared{false};                           // 本次父重跑是否又见到它
     Scope* parent{nullptr};
     std::vector<std::unique_ptr<Scope>> children{};
 
@@ -102,66 +115,147 @@ struct Composer::Impl {
       }
       return nullptr;
     }
-  };
-  std::unique_ptr<Scope> root_scope{};
-  /// 已注册的子作用域（按 key 查找；真值树位置记录在 scope 里）。
-  std::vector<std::unique_ptr<Scope>> sub_scopes{};
 
-  [[nodiscard]] auto find_sub_scope(std::string_view key) -> Scope* {
-    for (auto& scope : sub_scopes) {
-      if (scope->key == key) return scope.get();
+    /// 整棵子树标脏（父重跑后子必须重跑才能对齐）。
+    void mark_subtree_dirty() {
+      dirty = true;
+      for (auto& child : children) child->mark_subtree_dirty();
     }
-    return nullptr;
+  };
+  /// 根作用域（持有顶层 Component）。
+  std::unique_ptr<Scope> root_scope{};
+
+  /// 当前构建的 scope（状态读登记到它；`sub_component` 据此确定父子关系）。
+  Scope* active_scope{nullptr};
+  Composer* owner{nullptr};
+
+  /// 声明/复用子作用域，并**刷新其宿主位置**（父重跑时结构可能变了）。
+  /// 位置来源：当前构建父元素（`parent_stack.back()`）+ 该父元素当前游标。
+  auto declare_child_scope(Scope* parent, std::shared_ptr<Component> child_component,
+                           const std::string& key) -> Scope* {
+    if (parent == nullptr) parent = root_scope.get();
+    if (parent == nullptr) return nullptr;
+    Scope* scope = parent->find_child(key);
+    if (scope == nullptr) {
+      auto fresh = std::make_unique<Scope>();
+      fresh->component = std::move(child_component);
+      fresh->key = key;
+      fresh->dirty = true;   // 首次要跑一次
+      fresh->parent = parent;
+      scope = fresh.get();
+      parent->children.push_back(std::move(fresh));
+    } else {
+      scope->component = std::move(child_component);   // 组件实例可替换（重建后仍同槽）
+    }
+    // 宿主位置：栈顶是根槽位哨兵时记录 nullptr（= 根层），否则记录该元素
+    Element* top = parent_stack.empty() ? nullptr : parent_stack.back();
+    if (top != nullptr && is_root_slot(top)) {
+      scope->host_parent = nullptr;
+      scope->slot = root_replaced ? 1 : 0;   // 根层：子作用域接在首层元素之后
+    } else {
+      scope->host_parent = top;
+      scope->slot = top != nullptr ? child_cursor[top] : 0;
+    }
+    scope->declared = true;
+    return scope;
   }
 
-  /// 重跑一个子作用域：把构建父栈恢复成它的宿主位置，再跑它的 build。
+  /// 重跑一个作用域（含其内的子作用域声明）：把构建父栈恢复成它的宿主位置，再跑它的 build。
   ///
-  /// 关键：**重置子作用域子树内的游标**。父元素的游标记录“下一个子位”，
-  /// 上次跑完停在 N；若不重置，本次就会从 N 往后追加（旧元素残留、新元素重复）。
-  /// 根作用域靠 `child_cursor.clear()` 达成同一目的，子作用域只清自己那棵。
-  void run_sub_scope(Scope& scope) {
+  /// 关键一：**重置作用域子树内的游标**。父元素的游标记录“下一个子位”，上次跑完停在 N；
+  /// 若不重置，本次就会从 N 往后追加（旧元素残留、新元素重复）。根作用域靠
+  /// `child_cursor.clear()` 达成同一目的，子作用域只清自己那棵。
+  ///
+  /// 关键二：**标记本次声明**（`declared=false` 预清，build 中重新声明置 true），
+  /// 跑完后未认领的子作用域 = 被条件分支剪掉 → 递归移除（否则残留的 scope 会
+  /// 在下次 tick 里对着不存在的宿主位置跑）。
+  void run_scope(Scope& scope) {
     scope.deps.clear();
-    const std::size_t saved_cursor = child_cursor[scope.host_parent];
-    child_cursor[scope.host_parent] = scope.slot;   // 回到注册时的位置
+    const Element* host_parent = scope.host_parent;
+    const std::size_t saved_cursor = child_cursor[host_parent];
+    child_cursor[host_parent] = scope.slot;
     reset_subtree_cursor(scope.host_parent, scope.slot);
+    // 清声明标记（build 中重新声明的会被置回 true）
+    for (auto& child : scope.children) child->declared = false;
+
     parent_stack.clear();
-    parent_stack.push_back(scope.host_parent);
+    if (scope.host_parent != nullptr) {
+      parent_stack.push_back(scope.host_parent);
+    } else {
+      parent_stack.push_back(root_slot_marker());
+    }
     tls_composer = owner;
+    Scope* const saved_active = active_scope;
     active_scope = &scope;
     try {
       scope.component->build(*owner);
     } catch (const std::exception& error) {
-      log_sub_scope_error(scope, error.what());
+      log_scope_error(scope, error.what());
     } catch (...) {
-      log_sub_scope_error(scope, "未知异常");
+      log_scope_error(scope, "未知异常");
     }
-    active_scope = nullptr;
+    active_scope = saved_active;
     tls_composer = nullptr;
     parent_stack.clear();
-    child_cursor[scope.host_parent] = saved_cursor;
+    child_cursor[host_parent] = saved_cursor;
     scope.dirty = false;
+
+    // 剪枝：本次未重新声明的子作用域（条件分支去掉了它）
+    std::erase_if(scope.children,
+                  [](std::unique_ptr<Scope>& child) { return !child->declared; });
   }
 
-  /// 重置某个父元素下第 `slot` 个子元素及其全部后代的游标（子作用域的清理）。
+  /// 重置某个宿主元素下第 `slot` 个子元素及其全部后代的游标（子作用域的清理）。
+  /// `parent == nullptr` 表示根层：扫根内容。
   void reset_subtree_cursor(Element* parent, std::size_t slot) {
-    if (parent == nullptr || slot >= parent->child_count()) return;
     const auto walk = [&](auto&& self, Element& element) -> void {
       child_cursor[&element] = 0;
       for (std::size_t index = 0; index < element.children().size(); ++index) {
         if (Element* child = element.child_at(index); child != nullptr) self(self, *child);
       }
     };
-    if (Element* root_element = parent->child_at(slot); root_element != nullptr) {
-      walk(walk, *root_element);
-    }
+    Element* root_element = parent != nullptr ? parent->child_at(slot) : nullptr;
+    if (parent == nullptr) root_element = root_element_of_scope();
+    if (root_element != nullptr) walk(walk, *root_element);
   }
 
-  Composer* owner{nullptr};
-  /// 当前构建的 scope（状态读登记到它）。nullptr = 根作用域。
-  Scope* active_scope{nullptr};
+  /// 根层子作用域的宿主元素：根内容（子作用域接在它后面）。
+  [[nodiscard]] auto root_element_of_scope() const -> Element* {
+    return root.content() != nullptr ? root.content()->child_at(0) : nullptr;
+  }
 
-  void log_sub_scope_error(const Scope& scope, std::string_view message) {
-    std::fprintf(stderr, "[dsl] 子作用域 %s 构建失败：%s\n", scope.key.c_str(),
+  /// 递归跑脏的作用域（自顶向下）。
+  ///
+  /// 注意：**根不脏也要继续递归**——子作用域可以独立脏（这正是细粒度重组的意义）。
+  /// 反过来，父跑了会先把整棵子树标脏（`mark_subtree_dirty`），所以父跑过的子必然也跑。
+  void run_dirty_scopes(Scope& scope) {
+    if (scope.dirty) {
+      run_scope(scope);
+      ++last_stats.scopes_rerun;
+    }
+    for (auto& child : scope.children) run_dirty_scopes(*child);
+  }
+
+  /// 递归收集作用域内的依赖（`notify_state_written` 用）。
+  static auto scope_depends(const Scope& scope, StateBase* state) -> bool {
+    if (scope.deps.count(state) > 0) return true;
+    for (const auto& child : scope.children) {
+      if (scope_depends(*child, state)) return true;
+    }
+    return false;
+  }
+
+  /// 找出直接依赖 `state` 的作用域（递归；返回值可能是任意深度）。
+  static auto find_owner_scope(Scope& scope, StateBase* state) -> Scope* {
+    if (scope.deps.count(state) > 0) return &scope;
+    for (auto& child : scope.children) {
+      if (Scope* found = find_owner_scope(*child, state)) return found;
+    }
+    return nullptr;
+  }
+
+  void log_scope_error(const Scope& scope, std::string_view message) {
+    std::fprintf(stderr, "[dsl] 作用域 %s 构建失败：%s\n", scope.key.c_str(),
                  std::string(message).c_str());
   }
 
@@ -175,19 +269,84 @@ struct Composer::Impl {
   std::uint64_t next_token{1};
   /// 当前有效 token（代次校验：旧 token 的结果丢弃）。
   std::unordered_set<std::uint64_t> live_tokens{};
+  /// 各代次的取消牌（`async_begin` 翻旧代的牌；析构翻全部的牌）。
+  std::unordered_map<std::uint64_t, AsyncCancel> async_cancels{};
   /// 主线程任务队列（工作线程投递；`pump_async` 在主循环取走执行）。
   std::mutex inbox_mutex{};
   std::vector<std::function<void()>> inbox{};
-  /// 在飞工作线程；析构时 join（保证线程不再访问本结构）。
-  std::vector<std::thread> workers{};
 
-  /// 析构：join 全部在飞线程。线程可能仍在 `post_to_main`（投到 inbox）——inbox 与
-  /// workers 同属 Impl，join 保证线程结束后才释放本结构。
-  ~Impl() {
-    for (auto& worker : workers) {
-      if (worker.joinable()) worker.join();
+  // —─ 工作线程池 —─
+  //
+  // 为何不用「每任务一线程」：密集场景（列表里几十个 `resource`）会瞬间开几十个线程，
+  // 上下文切换与栈开销压倒实际工作（每个任务往往只是一次 IO 或一次计算）。
+  // 固定 N 个线程 + 队列：开销与并发度都可控，且**线程数有上限**（不会打满系统）。
+  //
+  // N 的取值：`std::thread::hardware_concurrency()`（拿不到则 2），下限 1、上限 8——
+  // 声明式 UI 的异步任务多数是 IO 等待，超过核数收益递减而调度开销上升。
+  std::mutex queue_mutex{};
+  std::condition_variable queue_cv{};
+  std::deque<std::function<void()>> work_queue{};
+  std::vector<std::thread> pool{};
+  bool pool_stopping{false};
+
+  /// 启动线程池（首次 `run_on_worker` 时懒建——不跑异步的应用不为它付代价）。
+  void ensure_pool() {
+    if (!pool.empty()) return;
+    unsigned count = std::thread::hardware_concurrency();
+    if (count == 0) count = 2;
+    count = std::clamp(count, 1U, 8U);
+    for (unsigned index = 0; index < count; ++index) {
+      pool.emplace_back([this] { pool_loop(); });
     }
   }
+
+  /// 工作线程主循环：取队列 → 执行；队列空则等待（不忙轮询）。
+  void pool_loop() {
+    for (;;) {
+      std::function<void()> job;
+      {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        queue_cv.wait(lock, [this] { return pool_stopping || !work_queue.empty(); });
+        if (pool_stopping && work_queue.empty()) return;
+        job = std::move(work_queue.front());
+        work_queue.pop_front();
+      }
+      if (job) {
+        // 任务自身的异常不得杀掉工作线程（否则后续任务全部饿死）——
+        // `async_run` 已把 fetcher 调用包在 try 里，这里是二道保险。
+        try {
+          job();
+        } catch (...) {
+        }
+      }
+    }
+  }
+
+  /// 析构：停池并 join。
+  /// 关于「取消」：已在执行的任务**跑完**（C++ 无法安全强杀线程），
+  /// 未开始的任务在本函数里被丢弃——这正好是「销毁即不再干活」的语义。
+  void stop_pool() {
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex);
+      pool_stopping = true;
+      pending_cancelled += work_queue.size();   // 未开始的任务 = 被取消
+      work_queue.clear();
+    }
+    queue_cv.notify_all();
+    // 翻掉全部在飞代次的牌：已开始的任务在下一个检查点退出（不必等它跑完）。
+    for (auto& entry : async_cancels) entry.second.cancel();
+    async_cancels.clear();
+    live_tokens.clear();
+    for (auto& thread : pool) {
+      if (thread.joinable()) thread.join();
+    }
+    pool.clear();
+  }
+
+  ~Impl() { stop_pool(); }
+
+  /// 已取消的任务计数（诊断/测试用）。
+  std::size_t pending_cancelled{0};
 
   std::unordered_map<const Element*, std::size_t> child_cursor{};  // 每父元素的子游标
 
@@ -211,22 +370,10 @@ Composer::Composer(UiRoot& root, Guardrails guardrails)
 Composer::~Composer() { active_composers.erase(this); }
 
 void Composer::register_sub_scope(std::shared_ptr<Component> component, const std::string& key) {
-  const std::string name = key.empty() ? std::to_string(impl_->sub_scopes.size()) : key;
-  // 首次：登记（记录宿主位置——当前父元素 + 当前游标）
-  if (Impl::Scope* existing = impl_->find_sub_scope(name); existing != nullptr) {
-    existing->component = std::move(component);   // 组件实例可被替换（重建后仍同槽）
-    return;
-  }
-  auto scope = std::make_unique<Impl::Scope>();
-  scope->component = std::move(component);
-  scope->key = name;
-  scope->dirty = true;   // 首次要跑一次
-  Element* host = current_parent();
-  scope->host_parent = host;
-  // 宿主槽位：子作用域在自己宿主下占一个槽（根重跑时子组件声明的**那个位置**）。
-  // 记录当前游标（本子组件是该父元素下的第几个子），重跑时从它开始建。
-  scope->slot = host != nullptr ? impl_->child_cursor[host] : impl_->root_replaced ? 1 : 0;
-  impl_->sub_scopes.push_back(std::move(scope));
+  // 兄弟间身份：未给 key 时用当前父下的出现序号（位置稳定即可）
+  const std::string name = key.empty() ? std::to_string(impl_->child_cursor[current_parent()]) : key;
+  // 父 = 当前构建的 scope（嵌套的关键：孙的父是子，不是根）
+  impl_->declare_child_scope(impl_->active_scope, std::move(component), name);
 }
 
 void sub_component(Composer& c, std::shared_ptr<Component> component, std::string_view key) {
@@ -242,6 +389,10 @@ auto Composer::guardrails() const noexcept -> const Guardrails& { return impl_->
 auto Composer::mount(std::shared_ptr<Component> root_component) -> bool {
   if (root_component == nullptr) return false;
   impl_->component = std::move(root_component);
+  impl_->root_scope = std::make_unique<Impl::Scope>();
+  impl_->root_scope->component = impl_->component;
+  impl_->root_scope->key = "@root";
+  impl_->root_scope->dirty = true;
   impl_->mounted = true;
   impl_->scope_dirty = true;
   (void)reconcile();
@@ -250,10 +401,15 @@ auto Composer::mount(std::shared_ptr<Component> root_component) -> bool {
 
 auto Composer::dirty() const noexcept -> bool {
   if (impl_->scope_dirty) return true;
-  for (const auto& scope : impl_->sub_scopes) {
-    if (scope->dirty) return true;
-  }
-  return false;
+  if (impl_->root_scope == nullptr) return false;
+  const auto any_dirty = [](const auto& self, const Impl::Scope& scope) -> bool {
+    if (scope.dirty) return true;
+    for (const auto& child : scope.children) {
+      if (self(self, *child)) return true;
+    }
+    return false;
+  };
+  return any_dirty(any_dirty, *impl_->root_scope);
 }
 
 void Composer::rebuild_all() {
@@ -265,10 +421,17 @@ void Composer::rebuild_all() {
 auto Composer::reconcile() -> ReconcileStats {
   impl_->last_stats = ReconcileStats{};
   if (!impl_->mounted) return impl_->last_stats;
-  // 脏判定：根脏 _或_ 任一子作用域脏（后者只重跑子作用域——细粒度）
+  // 脏判定：根脏 _或_ 作用域树里任一作用域脏（后者只重跑脏的那些——细粒度）
   bool any_dirty = impl_->scope_dirty;
-  for (const auto& scope : impl_->sub_scopes) {
-    if (scope->dirty) any_dirty = true;
+  if (!any_dirty && impl_->root_scope != nullptr) {
+    const auto any_scope_dirty = [](const auto& self, const Impl::Scope& scope) -> bool {
+      if (scope.dirty) return true;
+      for (const auto& child : scope.children) {
+        if (self(self, *child)) return true;
+      }
+      return false;
+    };
+    any_dirty = any_scope_dirty(any_scope_dirty, *impl_->root_scope);
   }
   if (!any_dirty) return impl_->last_stats;
   const auto start = std::chrono::steady_clock::now();
@@ -276,7 +439,7 @@ auto Composer::reconcile() -> ReconcileStats {
   // —— ① 根作用域（仅在根脏时跑）——
   if (impl_->scope_dirty) {
     tls_composer = this;
-    impl_->active_scope = nullptr;   // 根作用域的读归 subscribed_states
+    impl_->active_scope = impl_->root_scope.get();   // 根声明也登记到根 scope
     // 重跑前清空订阅（build 期间重新收集）；overlay 认领集也重置
     impl_->subscribed_states.clear();
     impl_->claimed_overlays.clear();
@@ -284,6 +447,12 @@ auto Composer::reconcile() -> ReconcileStats {
     impl_->parent_stack.clear();
     impl_->child_cursor.clear();
     impl_->root_replaced = false;
+    // 根重跑会重建整棵子树 → 所有子作用域必须重跑才能对齐
+    if (impl_->root_scope != nullptr) {
+      for (auto& child : impl_->root_scope->children) child->mark_subtree_dirty();
+      for (auto& child : impl_->root_scope->children) child->declared = false;
+      impl_->root_scope->deps.clear();
+    }
     impl_->parent_stack.push_back(Impl::root_slot_marker());
     try {
       impl_->component->build(*this);
@@ -300,14 +469,20 @@ auto Composer::reconcile() -> ReconcileStats {
     impl_->parent_stack.clear();
     // 清理未认领的 overlay：本次 build 没声明它 = 它应该消失
     sweep_overlays();
+    // 剪枝：根重跑后未重新声明的子作用域（条件分支去掉了它）
+    if (impl_->root_scope != nullptr) {
+      std::erase_if(impl_->root_scope->children,
+                    [](std::unique_ptr<Impl::Scope>& child) { return !child->declared; });
+    }
     impl_->scope_dirty = false;
   }
 
-  // —— ② 子作用域（只跑脏的；父不重跑）——
-  for (auto& scope : impl_->sub_scopes) {
-    if (!scope->dirty) continue;
-    impl_->run_sub_scope(*scope);
-    ++impl_->last_stats.scopes_rerun;
+  // —— ② 作用域树（递归跑脏的；父不重跑则子独立跑）——
+  //
+  // 遍历顺序：自顶向下。父未跑则子各自判断；父跑了（它已把子树标脏）则子必然跑。
+  // 这样保证「父重建了子树 → 子随后对齐」，且不重复跑（父跑时子被标脏一次、跑一次）。
+  if (impl_->root_scope != nullptr) {
+    impl_->run_dirty_scopes(*impl_->root_scope);
   }
 
   const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -322,8 +497,9 @@ auto Composer::reconcile() -> ReconcileStats {
 
 void Composer::add_dependency(StateBase* state) {
   if (state == nullptr) return;
-  // 依赖登记到**当前 scope**（子作用域内的读不脏父）——这是细粒度重组的关键。
-  if (impl_->active_scope != nullptr) {
+  // 依赖登记到**当前作用域**：根作用域 → `subscribed_states`（跑整根）；
+  // 子作用域 → 它自己的 `deps`（跑它自己，父不跑）——细粒度重组的根基。
+  if (impl_->active_scope != nullptr && impl_->active_scope != impl_->root_scope.get()) {
     impl_->active_scope->deps.insert(state);
     return;
   }
@@ -360,14 +536,31 @@ auto Composer::async_begin(std::size_t slot, std::string fingerprint) -> std::ui
   if (entry.fingerprint == fingerprint && entry.token != 0) {
     return 0;   // 输入未变：不重发（已发出的继续在飞）
   }
+  // **取消旧代**（关键修正）：只把旧 token 从 live_tokens 里摸掉是不够的——
+  // 旧代的结果回到主线程时才能发现“自己已过期”。这里额外**翻牌**，
+  // 让仍在跑的旧代能在下一个检查点提前退出（不等它自然结束）。
+  if (entry.token != 0) {
+    auto cancel = impl_->async_cancels.find(entry.token);
+    if (cancel != impl_->async_cancels.end()) {
+      cancel->second.cancel();
+      impl_->async_cancels.erase(cancel);
+    }
+    impl_->live_tokens.erase(entry.token);
+  }
   entry.fingerprint = std::move(fingerprint);
   entry.token = impl_->next_token++;
   impl_->live_tokens.insert(entry.token);
+  impl_->async_cancels.emplace(entry.token, AsyncCancel{});
   return entry.token;
 }
 
 auto Composer::async_token_current(std::uint64_t token) -> bool {
   return impl_->live_tokens.count(token) > 0;
+}
+
+auto Composer::async_cancel_for(std::uint64_t token) -> AsyncCancel {
+  const auto found = impl_->async_cancels.find(token);
+  return found != impl_->async_cancels.end() ? found->second : AsyncCancel{};
 }
 
 void Composer::post_to_main(std::function<void()> task) {
@@ -376,19 +569,13 @@ void Composer::post_to_main(std::function<void()> task) {
 }
 
 void Composer::run_on_worker(std::function<void()> task) {
-  // 起短命线程（示例规模：任务数少、一趟往返）。线程入表，析构时 join。
-  std::thread worker([task = std::move(task)]() {
-    if (task) task();
-  });
-  std::lock_guard<std::mutex> guard(impl_->inbox_mutex);
-  // 回收已结束的（joinable 且已 return 的无法直接探测；这里只控制总数量上限）
-  if (impl_->workers.size() > 64) {
-    for (auto& existing : impl_->workers) {
-      if (existing.joinable()) existing.join();
-    }
-    impl_->workers.clear();
+  impl_->ensure_pool();
+  {
+    std::lock_guard<std::mutex> lock(impl_->queue_mutex);
+    if (impl_->pool_stopping) return;   // 已停：不再接受新任务
+    impl_->work_queue.push_back(std::move(task));
   }
-  impl_->workers.push_back(std::move(worker));
+  impl_->queue_cv.notify_one();
 }
 
 auto Composer::pump_async() -> std::size_t {
@@ -410,9 +597,11 @@ void Composer::notify_state_written(StateBase* state) {
     impl_->scope_dirty = true;
     return;
   }
-  // ② 子作用域订阅了它：只脏那个子作用域（**细粒度**：父不重跑）
-  for (auto& scope : impl_->sub_scopes) {
-    if (scope->deps.count(state) > 0) scope->dirty = true;
+  // ② 某个子作用域（任意深度）订阅了它：只脏那个作用域（**细粒度**：父不重跑）
+  if (impl_->root_scope != nullptr) {
+    if (Impl::Scope* owner = Impl::find_owner_scope(*impl_->root_scope, state); owner != nullptr) {
+      owner->mark_subtree_dirty();
+    }
   }
 }
 
