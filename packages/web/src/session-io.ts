@@ -86,11 +86,16 @@ export function singleExportFileName(sessionId: string): string {
   return `gebai-session-${sessionId}.json`
 }
 
-/** 批量导出文件名：`gebai-sessions-{N}会话-{yyyymmdd}.json`。 */
+/** 批量导出文件名：`gebai-sessions-{N}会话-{yyyymmdd}-{HHmmss}.json`。
+ *
+ *  批量没有单一会话 ID 可用（里面是多个会话），且用会话名拼名字同样有「超长/特殊字符/重名」
+ *  问题（所以不走单会话那套 ID 命名）。改用「条数 + 导出时刻」：条数让人一眼知道导了几个，
+ *  时间戳精确到**秒**——只写日期的话，同一天导两次、条数又相同就是完全同名，
+ *  浏览器只能依次变成 `…(1).json`、`…(2).json`，事后分不清哪批是哪批。 */
 export function batchExportFileName(count: number): string {
   const d = new Date()
-  const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`
-  return `gebai-sessions-${count}会话-${ymd}.json`
+  const p = (n: number): string => String(n).padStart(2, "0")
+  return `gebai-sessions-${count}会话-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.json`
 }
 
 /** 下载 JSON 文本为文件（与 exportSession 的下载路径同构：Blob + 临时 a + 延迟回收）。 */

@@ -107,9 +107,11 @@ describe("导出文件名", () => {
     expect(singleExportFileName(id)).toHaveLength("gebai-session-".length + 32 + ".json".length)
   })
 
-  test("批量命名含条数与日期", () => {
+  test("批量命名：条数 + 导出时刻（到秒，同日同条数不重名）", () => {
     const name = batchExportFileName(7)
-    expect(name).toMatch(/^gebai-sessions-7会话-\d{8}\.json$/)
+    expect(name).toMatch(/^gebai-sessions-7会话-\d{8}-\d{6}\.json$/)
+    // 两次调用同秒内可能同名（不可避免），但格式含时分秒——不再只有日期
+    expect(name).toHaveLength("gebai-sessions-7会话-".length + 8 + 1 + 6 + ".json".length)
   })
 
   test("消毒（仅 Markdown 导出仍用标题命名，故保留该助手）：非法字符、首尾点空格、超长、空名", () => {
