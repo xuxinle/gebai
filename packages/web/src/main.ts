@@ -29,7 +29,7 @@ import { initTokenRate, noteTpsFrame } from "./token-rate"
 import { initFileDisplay } from "./file-display"
 import { installMainKeys } from "./keymap-main"
 import { initFxPanels } from "./fx-panels"
-import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSession, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
+import { attachRunningIfNeeded, bindSessionActions, enterDraftView, exportSessionJson, hideEmptyState, loadMessages, markSessionRunning, maybeAutoTitle, refreshSessions, setRuntimeInfo, updateSessionCtx } from "./sessions"
 import { appendMsg, bindMessagesSessions, sealSegment } from "./messages"
 import { sendPending } from "./attachments"
 import { loadToolCardMeta } from "./tool-cards"
@@ -48,13 +48,15 @@ import "./attach"
 // 模块级/初始化期读取 localStorage 的代码；初始化脚本的异步引导在 init 首行等待（awaitCustomBoot）
 applyWebConfig()
 
-/* ---------- 会话导出 ---------- */
+/* ---------- 会话导出（轮盘按钮）：导出 JSON 往返文件 ---------- */
 
+// 轮盘「导出」= 导出 JSON（可再导入的往返格式，与右键菜单「导出会话」同格式）；
+// 人读版 Markdown 导出仍在会话行右键菜单（「导出 Markdown」）
 exportBtn.onclick = async () => {
   const cur = getCurrentSession()
   if (!cur) return
   try {
-    await exportSession(cur.id)
+    await exportSessionJson(cur.id)
   } catch (err) {
     setConn(`导出失败: ${(err as Error).message}`, false)
   }

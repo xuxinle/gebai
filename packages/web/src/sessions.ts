@@ -1215,18 +1215,19 @@ export async function exportSession(sessionId: string): Promise<void> {
 
 /* ---------- 会话导出（JSON 往返格式）与导入：纯逻辑在 session-io.ts，此处为 DOM 流程 ---------- */
 
-/** 导出会话为 JSON 导出文件（单会话「批量包」；与 Markdown 导出并存：给人看的 vs 给歌白吃的）。 */
+/** 导出会话为 JSON 导出文件（单会话「批量包」；与 Markdown 导出并存：给人看的 vs 给歌白吃的）。
+ *  文件名以**会话 ID** 命名（标题作文件名不可靠：超长/特殊字符/重名/Windows 保留名）。 */
 export async function exportSessionJson(sessionId: string): Promise<void> {
   const detail = await client.getSession(sessionId)
-  downloadJson(singleExportFileName(detail.name), buildExportFile([detailToImportData(detail)]))
+  downloadJson(singleExportFileName(sessionId), buildExportFile([detailToImportData(detail)]))
 }
 
-/** 批量导出选中会话（单个 JSON「批量包」文件；勾选清单由调用方给，逐个拉取正文）。 */
-export async function exportSessionsJson(ids: string[], nameOf: (id: string) => string): Promise<void> {
+/** 批量导出选中会话（单个 JSON「批量包」文件；勾选清单由调用方给，逐个拉取正文）。
+ *  批量无单一 ID 可依，文件名按「条数 + 日期」（选中项全为会话名时用户不需要从文件名认它们）。 */
+export async function exportSessionsJson(ids: string[]): Promise<void> {
   if (!ids.length) return
   const details = await Promise.all(ids.map((id) => client.getSession(id)))
   downloadJson(batchExportFileName(details.length), buildExportFile(details.map(detailToImportData)))
-  void nameOf // 名称由选中清单展示用，文件名不依赖（批量包按条数+日期命名）
 }
 
 /** 导入会话文件（轮盘入口）：多文件 + 单文件多会话统一为载荷数组 → 确认 → 逐个导入。
@@ -1313,7 +1314,7 @@ export function bindSessionActions() {
     const ids = [...selected]
     if (!ids.length) return
     batchExportBtn.disabled = true
-    void exportSessionsJson(ids, (id) => selectedNames.get(id) || id)
+    void exportSessionsJson(ids)
       .then(() => toast(`已导出 ${ids.length} 个会话`, "ok"))
       .catch((err) => toast(`导出失败: ${(err as Error).message}`, "error"))
       .finally(() => {

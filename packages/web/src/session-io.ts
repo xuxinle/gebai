@@ -7,9 +7,10 @@
  * 统计**——导入时服务端分配新 id、导入者成为 owner（`SessionStore.parseImport`），跨实例导出/导入
  * 不存在 id 冲突，也不给「指名注入某会话 id」开口子。
  *
- * 与轮盘既有的「导出会话」（Markdown 阅读版，`exportSession`）并存：那是给人看的，本文件是
- * 给歌白自己吃的（往返无损：Message 全字段——blocks/toolCalls/reasoning/subSessionArchive——
- * 原样进 JSON，导入后回放渲染与原会话一致）。
+ * 两个导出入口共用本文件的格式与逻辑：
+ * - **轮盘「导出」按钮** → JSON 往返文件（本格式；导出的文件可再经轮盘「导入」倒回歌白）；
+ * - **会话行右键「导出 Markdown」** → 人读版（`exportSession`，不进导入通道）。
+ * 即「轮盘导出与轮盘导入是同一套格式的两端」，不会出现“导出来的东西导不回去”。
  */
 import type { SessionDetail, SessionImportData, SessionsExportFile } from "@gebai/sdk"
 
@@ -75,9 +76,14 @@ export function safeFileStem(name: string, fallback: string): string {
   )
 }
 
-/** 单会话导出文件名：`gebai-session-{名称}.json`。 */
-export function singleExportFileName(name: string): string {
-  return `gebai-session-${safeFileStem(name, "未命名")}.json`
+/** 单会话导出文件名：**以会话 ID 命名**（`gebai-session-{id}.json`）。
+ *
+ *  为什么不用会话名：标题里什么都可能有——超长（正文式标题常见）、特殊字符、重名、
+ *  纯符号、乃至 `CON`/`PRN` 这类 Windows 保留名。ID 是本系统内 32 位小写 hex
+ *  （`isValidSessionId` 白名单同样只认它），天然无非法字符、不重名、长度恒定，
+ *  也便于从文件名直接回查会话（复制会话 ID 功能给的就是它）。 */
+export function singleExportFileName(sessionId: string): string {
+  return `gebai-session-${sessionId}.json`
 }
 
 /** 批量导出文件名：`gebai-sessions-{N}会话-{yyyymmdd}.json`。 */

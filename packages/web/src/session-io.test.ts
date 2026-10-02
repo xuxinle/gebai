@@ -100,8 +100,11 @@ describe("批量包打包/解析", () => {
 })
 
 describe("导出文件名", () => {
-  test("单会话命名：gebai-session-{名称}.json", () => {
-    expect(singleExportFileName("我的会话")).toBe("gebai-session-我的会话.json")
+  test("单会话命名：以会话 ID 命名（标题不入文件名）", () => {
+    const id = "cafe1234cafe1234cafe1234cafe1234"
+    expect(singleExportFileName(id)).toBe("gebai-session-cafe1234cafe1234cafe1234cafe1234.json")
+    // 长标题/特殊字符不再影响文件名（文件名只由 ID 决定，长度恒定）
+    expect(singleExportFileName(id)).toHaveLength("gebai-session-".length + 32 + ".json".length)
   })
 
   test("批量命名含条数与日期", () => {
@@ -109,7 +112,7 @@ describe("导出文件名", () => {
     expect(name).toMatch(/^gebai-sessions-7会话-\d{8}\.json$/)
   })
 
-  test("消毒：Windows 非法字符替换、首尾点空格去除、超长截断、空名回退", () => {
+  test("消毒（仅 Markdown 导出仍用标题命名，故保留该助手）：非法字符、首尾点空格、超长、空名", () => {
     expect(safeFileStem('a<b>:c/"d|e?f*g', "fb")).toBe("a_b__c__d_e_f_g")
     expect(safeFileStem("  .名字. ", "fb")).toBe("名字")
     expect(safeFileStem("x".repeat(300), "fb")).toHaveLength(80)
