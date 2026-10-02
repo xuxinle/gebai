@@ -20,6 +20,9 @@ export interface PromptDeps {
   presetProjectsFor: (user: string, env: Record<string, string>, agentName: string) => PresetProject[]
   /** 读取项目根 AGENTS.md（无项目根/文件缺失返回空串）。 */
   loadProjectAgentsMd: (projectRoot: string | undefined) => Promise<string>
+  /** 会话工作目录段（独立 system 消息）：buildSystemPrompt 不再包含它（见 PROMPT_SECTION_ORDER 注释）；
+   *  由 loadHistory 置于主提示词之后、装载提示词之前（与 SystemPrompt 同拼接顺序 = 逐字节同前缀）。 */
+  workspaceSection?: (sessionId: string, user: string) => string
 }
 
 /** 全局提示词段落键（启动期裁剪口径，`GEBAI_PROMPT_ENABLE`/`GEBAI_PROMPT_DISABLE` 与领域档案 `prompt.*` 取值）：
@@ -45,6 +48,44 @@ export const PROMPT_SECTION_KEYS = [
 
 export type PromptSectionKey = (typeof PROMPT_SECTION_KEYS)[number]
 
+/** 段落渲染顺序（**前缀缓存契约**，见 DESIGN「前缀缓存稳定性」）：按变更频率分层，使所有会话的最长公共
+ *  前缀最大化——服务端前缀缓存（OpenAI 自动前缀缓存 / DeepSeek 上下文缓存 / Anthropic 等同机制）按请求
+ *  前缀逐字节匹配，任一字节变化即从该点起全部失配，故「最不常变的内容排最前」。
+ *  分层：① 启动常量（进程生命周期内恒定，跨会话跨用户共享）；② per-user（歌白家目录路径，同用户多会话恒定）；
+ *  ③ 任务级易变（通道注记、`{AGENT}_PROJECT` 项目绑定）；④ 会话级易变（子Agent 未装载清单——`agent_load`
+ *  装载即改写）。
+ *  **subagent_catalog 必须保持在最后**：它是唯一「同一会话内必然变化」的段落，排最后使装载只截断末尾；
+ *  前移会让其后所有段落的正文一起失配，工具 schema 与整个历史前缀随之重算。
+ *  workspace（会话工作目录）不并入主提示词——其正文含会话 ID、每会话必然唯一，由 workspaceSection 独立成
+ *  紧随其后的第二条 system 消息，同用户多会话因此共享整段主提示词。 */
+export const PROMPT_SECTION_ORDER: readonly PromptSectionKey[] = [
+  // ① 启动常量
+  "persona",
+  "safe_mode",
+  "orchestration",
+  "batching",
+  "planning",
+  "artifact_naming",
+  "agent_routing",
+  "parallel_sessions",
+  // ② per-user
+  "builtin_projects",
+  // ③ 任务级
+  "channel",
+  "project_bindings",
+  // ④ 会话级（必须最后）
+  "subagent_catalog",
+  // 不并入主提示词（独立 system 消息）
+  "workspace",
+]
+
+/** 跨会话稳定前缀段（PROMPT_SECTION_ORDER 的 ①② 层）：同一用户的所有会话逐字节相同。
+ *  守卫测试据此断言最长公共前缀下限，防止易变段被插到常量段之前（领域补充提示词紧随其后，同属稳定前缀）。 */
+export const PROMPT_STABLE_PREFIX_KEYS: readonly PromptSectionKey[] = PROMPT_SECTION_ORDER.slice(
+  0,
+  PROMPT_SECTION_ORDER.indexOf("channel"),
+)
+
 /** 段落键判定（`GEBAI_PROMPT_*` 与领域档案清单的未知名校验用）。 */
 export function isPromptSectionKey(v: string): v is PromptSectionKey {
   return (PROMPT_SECTION_KEYS as readonly string[]).includes(v)
@@ -65,20 +106,13 @@ interface PromptSection {
 }
 
 export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: string, env: Record<string, string>): string {
-  const workdir = sessionPath(deps.config.gebaiHome, user, sessionId)
-  const channelNote = deps.channelNote(sessionId)
-  const sandboxNote = deps.sandbox.enforcedFor(user)
-    ? `（文件读写限定在此目录内，禁止越界）`
-    : `（本地模式：不限制文件目录，可访问本机任意路径）`
-  const safeModeNote = deps.config.safeMode
-    ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；任务调度（task_*）不可用。`
-    : ""
   const sections: PromptSection[] = [
     // 智能与智体概念模型（DESIGN「定位」）：行为化措辞（状态落盘、调用担责），非装饰性身份说明
     { key: "persona", text: `你是歌白智能体（GEBAI Agent）：目标是融合旧世界IT的所有技术，打造新世界智能的躯体——以极致动态扩展的能力把任意语言、任意进程的外部技术收编为工具。你是智体：智能（模型）负责思考、无状态、可替换，记忆与责任都长在智体——需跨轮次/跨会话保留的结论与状态写入文件或会话记录；你的每次工具调用都是智体的行为，经审批执行、留痕可审计` },
-    { key: "workspace", text: `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略；操作项目文件用文件工具的 project 参数——项目名或项目根路径，路径即相对所选项目根解析）${sandboxNote}` },
-    { key: "channel", text: channelNote ?? "" },
-    { key: "safe_mode", text: safeModeNote },
+    // 安全模式注记（启动级常量）：紧接身份行——能力边界与身份同为「此次运行不变」的事实，且不含易变路径
+    { key: "safe_mode", text: deps.config.safeMode
+      ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；任务调度（task_*）不可用。`
+      : "" },
     { key: "orchestration", text: `复杂/多步操作优先用 js 脚本编排一次执行，避免大量单步工具调用浪费往返与词元（脚本内工具像内置函数一样直接 await 调用、可用变量/分支/循环/错误处理表达任意流程，编排前可用 tool_schemas 查询工具输出结构，语法见 js 工具描述）；纯系统操作用 sh/py 脚本。` },
     { key: "batching", text: `同一次回复返回的多个工具调用会并行执行（互不等待）：互不依赖的操作放进同批调用可显著加速（多文件读取/多路查询/独立子任务等尽量同批发出）；有先后依赖、需严格串行的操作不要同批发出——用 js 脚本按序编排（await 前一步结果再决定下一步），或拆分到多轮逐步执行；对同一文件的写/改尤其必须串行编排（并行修改会相互覆盖）。` },
     { key: "planning", text: `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。` },
@@ -86,22 +120,38 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     { key: "artifact_naming", text: `产物命名：同一用途的每次产出起**可区分的新名**（带目的或版本，如 qa/s2-frame190.png、promo-v3-final.mp4），不要在同一个名字上反复重写——对话里的产物（图片/文件卡/视频）是**按路径引用**的，同名覆盖会让历史消息里的产物跟着变成新内容，刷新后当时那一版就看不到了（历史不可回看）；需要保留多版就是为了回看与对比。` },
     { key: "agent_routing", text: `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染父上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 subsession_run 派生子会话——inherit_context 缺省 false 即隔离新上下文，agents 传需预加载的子Agent（可省略/为空 = 不加载任何子Agent），只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或派生子会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）` },
     { key: "parallel_sessions", text: `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 subsession_run 的 inherit_context:true（fork 父会话上下文）——各子会话掌握父会话全部背景与工具，可用 subsessions 数组一次派生多个（每个可单独传 model 走不同模型接口并行更快），报告完成即自动合入父会话；长耗时子会话传 async:true 后台执行（bg_task 管理，子会话内可用 subsession_merge 随时合入阶段性成果），可不断派生合并像 git 一样推进——并行多线是摆脱单轮串行等待、加速大体量任务的主要手段。` },
-    // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
-    // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
-    { key: "project_bindings", text: subAgentProjectNote(deps, user, env) },
     // 内置项目（歌白自身）：与文件工作台的项目列表同源——工作台能看到的项目，模型可按名寻址
     { key: "builtin_projects", text: builtinProjects(deps, user)
       .map((p) => `内置项目「${p.name}」：${p.path}（project 参数可按名寻址）`)
       .join("") },
+    { key: "channel", text: deps.channelNote(sessionId) ?? "" },
+    // 项目绑定声明：装载模式下总Agent 直接使用子Agent 工具时按名操作绑定项目；
+    // 未装载清单描述动态体现预置项目（方便总Agent 按项目名关联任务，完整清单注记仍只注入子Agent 提示词）
+    { key: "project_bindings", text: subAgentProjectNote(deps, user, env) },
     // 会话级过滤（DESIGN「装载工具会话可见性」）：目录按「对本会话可见」判定未装载——其他会话装载过
     // 不代表本会话已装载（防跨会话泄漏：A 装载后 B 的目录仍应列出该子Agent 供 B 装载）
     { key: "subagent_catalog", text: deps.subAgents.systemPromptInjection((d) => agentDescription(deps, { name: d.name, description: d.description, tools: Object.keys(d.tools ?? {}) }, user, env), sessionId) },
   ]
-  const parts = sections.filter((s) => promptSectionEnabled(deps.config, s.key)).map((s) => s.text)
-  // 领域补充提示词（GEBAI_PROMPT_EXTRA / GEBAI_PROFILE 的 prompt.extra）：追加在裁剪后的全局提示词末尾
-  const extra = deps.config.promptExtra?.trim()
-  if (extra) parts.push(extra)
-  return parts.filter(Boolean).join("\n")
+  const byKey = new Map(sections.map((s) => [s.key, s]))
+  const text = (key: PromptSectionKey): string => {
+    const s = byKey.get(key)
+    return s && promptSectionEnabled(deps.config, key) ? s.text : ""
+  }
+  // 稳定组（跨会话共享前缀）→ 领域补充提示词（启动级配置，不含会话变量）→ 易变组（任务级/会话级）
+  const volatileKeys = PROMPT_SECTION_ORDER.filter((key) => key !== "workspace" && !PROMPT_STABLE_PREFIX_KEYS.includes(key))
+  const extra = deps.config.promptExtra?.trim() ?? ""
+  return [...PROMPT_STABLE_PREFIX_KEYS.map(text), extra, ...volatileKeys.map(text)].filter(Boolean).join("\n")
+}
+
+/** 会话工作目录段落（独立 system 消息，紧跟在主提示词之后）：正文含会话 ID、每会话必然唯一，
+ *  并入主提示词会让所有会话在第 200 字节内分叉。独立成条使主提示词对同一用户的所有会话逐字节相同。
+ *  与历史消息同拼接顺序（紧随主提示词），故压缩的「缓存友好前缀请求」逐字节同前缀不变。 */
+export function buildWorkspaceSection(deps: PromptDeps, sessionId: string, user: string): string {
+  const workdir = sessionPath(deps.config.gebaiHome, user, sessionId)
+  const sandboxNote = deps.sandbox.enforcedFor(user)
+    ? `（文件读写限定在此目录内，禁止越界）`
+    : `（本地模式：不限制文件目录，可访问本机任意路径）`
+  return `当前会话工作目录: ${workdir}/tmp（所有文件工具的相对路径以此为基准，tmp/ 前缀可省略；操作项目文件用文件工具的 project 参数——项目名或项目根路径，路径即相对所选项目根解析）${sandboxNote}`
 }
 
 /** 项目绑定注入总Agent 系统提示词（{AGENT_NAME_UPPER}_PROJECT 环境变量，DESIGN「项目内置」；

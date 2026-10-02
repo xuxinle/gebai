@@ -435,6 +435,7 @@ export class ContextCompressor {
 
   /** 构造（并判断是否可用）缓存友好摘要请求的前缀：engine 提供 system 提示词与工具 schema，
    *  历史前缀经 deps.loadHistory(upToIndex) 渲染（与主循环同渲染路径）。
+   *  会话工作目录段由 loadHistory 产出（紧随主提示词之后），与本处拼接顺序一致——前缀逐字节相同因此自动成立。
    *  不可用时返回 undefined，summarize 退回骨架行 + 分块路径。 */
   private async cachedPrefix(
     llm: LLMProvider,

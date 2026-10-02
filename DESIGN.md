@@ -857,7 +857,7 @@ session.prompt → 组装上下文（历史+系统提示词+临时文件提示�
 - 系统提示词内置**并行多路引导**：同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 `subsession_run` 的 `inherit_context:true`（fork 父会话上下文）——一次 fork 多个子会话同时执行（各子会话掌握父会话全部背景与工具，可各自传 `model` 走不同模型接口并行），报告完成即自动合入父会话，长耗子会话 `async:true` 后台执行；并行多线是摆脱单轮串行等待、加速大体量任务的主要手段（见「子会话运行」）
 - 桌面/浏览器子Agent 系统提示词内置**验证多通道降级策略**：截图黑屏/失败时切换 DOM/content、窗口状态、数据文件等通道，任一失效立即降级并告知用户，不盲目重试单一通道
 - 浏览器子Agent 系统提示词内置**性能/动画采样的可见性前提**：rAF 帧间隔与 longtask 采样只在可见页有效——后台标签页 rAF 被节流到 ~1fps，采出来是「单帧 800ms+、longtask 0 个」的假数据（极易读成「动画走了合成器」）；多标签先关掉前台页，并把 `visibilityState` 记进采样结果（hidden 即作废），计时用 rAF 自排队而非 setInterval
-- **系统提示词中声明会话工作目录**（会话 `tmp/`，如 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/tmp/`）并说明**所有文件工具的相对路径以此为基准（`tmp/` 前缀可省略）**；服务端部署模式下大模型读写限定在该目录，桌面/本地浏览器模式不限制目录（同路径沙箱规则）
+- **系统提示词中声明会话工作目录**（会话 `tmp/`，如 `{GEBAI_HOME}/users/{user}/sessions/{s0}/{s1}/{session_id}/tmp/`）并说明**所有文件工具的相对路径以此为基准（`tmp/` 前缀可省略）**；服务端部署模式下大模型读写限定在该目录，桌面/本地浏览器模式不限制目录（同路径沙箱规则）。该声明由 `buildWorkspaceSection` 产出、作为**紧随主提示词之后的独立 system 消息**（不并入主提示词——正文含会话 ID，混入会让所有会话的前缀在会话工作目录处即分叉，见「前缀缓存稳定性」）
 - 系统提示词中引导模型：复杂/多步操作优先用 `js` 脚本编排一次执行（脚本内工具像内置函数直接 await、可用变量/分支/循环表达任意流程），纯系统操作用 `sh`/`py` 脚本
 - 系统提示词中引导模型：**重大任务（多步骤/有风险/不可逆/用户需要把关）先制定计划**——调用 `ask` 的计划审批分支（title+steps）把计划文档写入会话文件并在界面展示，阻塞等待用户批准后再执行（被拒绝则按修改意见修订后重新提交）；简单任务无需计划审批，`todo` 跟踪即可
 - 子Agent 装载后，系统提示词实时更新；**声明依赖的子Agent 装载即连带装载其依赖**（`def.dependencies` 驱动的级联，`SubAgentManager.load` 幂等，WS `sub_agent.load`/`agent_load`/预加载所有装载路径均生效，如 `self_optimize`→`code`+`vision`、`reverse_site`→`playwright`，见「子Agent 依赖与自动装载」）；**`subsession_run` 预加载时同样连带预加载依赖**（`normalizeRunAgents` 同规则展开——装载方 def 只声明独有工具，依赖的工具与工作流提示词由依赖方 def 提供，不重复注册）
@@ -2291,6 +2291,18 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - **展示值随上下文改写失效**：压缩（`compactMessages`）与溢出护栏降级（`degradeProtectedMessages`）改写了历史，真值基线与展示值同时失效——清基线并把 `ctxTokens` 重算为当前消息估算（与 `truncateMessages` 同口径）；压缩成功后引擎还**立即补发一次** `event.session.ctx`（压缩后估算 + schema 段），圆环当场回落——不补发则 UI 停在「压缩前」的百分比上直到下一轮调用（观感：压缩了但百分比没掉）
   - **输出预留取值**（`outputReserveTokens`）：模型单次响应输出上限（能力声明 `maxOutputTokens`），未声明时缺省 16384，并夹在 `[1024, 窗口一半]` 内——预留不能超过窗口一半，否则小窗口模型会永远处于「剩余不足」而反复压缩
   - **提示词缓存命中度量（展示口径）**：usage 中的缓存命中字段统一提取为 `LLMUsage.cachedTokens`（OpenAI chat/responses 的 `prompt_tokens_details`/`input_tokens_details.cached_tokens` 已含在 input 内，Anthropic 的 `cache_read_input_tokens` 在 `input_tokens` 之外——pickUsage 折算并入 inputTokens 统一「cached ⊆ input」口径）；随真实 usage 基线同点位流转：每轮经 `event.session.ctx` 携带 `ctxCachedTokens` 推送、任务结束持久化为 `SessionData.ctxCachedTokens`（接口不返回缓存字段时 undefined，撤回/压缩清基线时一并清除），前端上下文圆环悬浮展示「缓存命中 tokens（占比）」。仅度量不改变请求构造——三家接口均未发送缓存控制标记（Anthropic `cache_control` / OpenAI 自动前缀缓存），命中率由服务端自动前缀缓存自然产生
+
+#### 前缀缓存稳定性（请求前缀的字节级契约）
+
+服务端前缀缓存（OpenAI 自动前缀缓存 / DeepSeek 上下文缓存 / Anthropic 等同机制）按**请求前缀逐字节匹配**：任一字节变化即从该点起全部失配。三家接口的请求体拼装顺序均为 `tools`（字段序在前）→ `messages`（首条 system 即主提示词，其后为工作目录、装载提示词、历史）→ Anthropic 侧为 `system`（多条 system 按出现顺序 `\n` 拼接）→ `messages`。因此**主提示词内部的分叉点位置**与**tools 段的插入位置**共同决定缓存命中面积，二者都由本节的顺序契约锁定：
+
+- **主提示词按变更频率分层**（`PROMPT_SECTION_ORDER`，`prompt.ts`）：① 启动常量（persona / safe_mode / orchestration / batching / planning / artifact_naming / agent_routing / parallel_sessions，进程生命周期内逐字节恒定）→ ② per-user（builtin_projects：歌白家目录，同用户多会话恒定）→ 领域补充提示词（`GEBAI_PROMPT_EXTRA`/档案，启动级配置）→ ③ 任务级易变（channel 通道注记、project_bindings 项目绑定）→ ④ 会话级易变（subagent_catalog 未装载清单）。
+- **`subagent_catalog` 恒为最后一段**：它是唯一「同一会话内必然变化」的段落（`agent_load` 装载即改写），压尾使装载只截断末尾——先前会让其后所有内容失效。顺序由 `prompt.test.ts` 的守卫用例锁死（断言末段、稳定前缀段不含易变段、不同会话主提示词逐字节相同、未装载清单变化只影响末尾、共享前缀 ≥ 1200 字符）。
+- **workspace（会话工作目录）不并入主提示词**，由 `buildWorkspaceSection` 独立成紧随其后的第二条 system 消息：其正文含会话 ID、每会话必然唯一，混入主提示词会让所有会话在约第 200 字节处分叉（不足以跨过 OpenAI 的 1024 token 缓存粒度，等于零共享）。外移后同一用户的所有会话主提示词逐字节相同。
+- **前置段顺序契约：主提示词 → 工作目录 → 装载提示词 → 历史**。工作目录段由 `loadHistory` 产出并置于历史最前（`agentSystems` 之前），因此 **run 主循环、压缩的「缓存友好前缀请求」、子会话 fork/exec 三处装配同源**——压缩摘要请求与主循环逐字节同前缀自动成立（`compressor.deps.loadHistory`），无需各自维护拼接逻辑。fork 形态的快照自带该段（缺时补一条，防老记录前缀错位）；exec 形态把同一段挂在子会话首条 system 内。
+- **tools 段分组排序**（`sessionRegistry.schemas`）：全局工具在前（按名）→ 本会话可见的子Agent 工具按名 → 本会话动态工具（`defineTool`）按定义先后排尾。子Agent 工具名是 `{agent}_*`，若沿用注册表的统一字典序会插进全局工具中间（`code_*` 落在 `bg_task` 之后），装载一个子Agent 即令其后全部 schema 后移、tools 段（通常占请求大头）大面积重算。分组后装载只追加尾部，全局工具段逐字节不变；动态工具同理不插队（新定义不应改写已有工具的相对次序）。**注册表内部顺序不受影响**——`PATCH /api/v1/tools`、管理视图与 `registry.schemas()` 照旧按名排序，排序只在会话视图这一层施加。
+
+度量与验收：`ctxCachedTokens / ctxTokens`（上一小节的圆环命中率）是现成指标——固定同一操作序列（新会话 → 首轮 → `agent_load` → 二轮）对比改前改后的每轮命中率曲线即可。
 - 压缩策略（按序使用）：
   0. **超长用户输入落盘（预防）**：发送时超过阈值的用户输入自动全文写入会话工作目录 `user_inputs/{内容哈希}.txt`（原文不丢——文件面板可见、模型可经 `read` 工具读取全文；按内容哈希命名，相同输入映射同一文件），消息正文保留头尾预览 + 文件引用，避免大段粘贴撑爆上下文；未超阈值原样不变，落盘失败降级为原样保留（不改变优先）
   1. **工具大输出截断**：工具返回超过截断阈值自动截取头尾摘要（**按行保留完整行**，避免切断半行/半条目；单行巨长如 minified 时该行按字符兜底），完整内容写入文件，截断消息中附带文件路径供大模型后续读取。**引擎兜底（不依赖工具自觉）**：工具未自行截断的超长输出，由引擎在主循环统一截断落盘——凡 `output` 超过截断阈值且未带 `truncated` 标记的结果，自动复用同一截断逻辑（含内容块保留），保证任何第三方/新工具都不会撑爆上下文；已自行截断的工具结果不重复处理

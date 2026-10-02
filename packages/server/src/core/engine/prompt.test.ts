@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { buildSystemPrompt, isPromptSectionKey, PROMPT_SECTION_KEYS, promptSectionEnabled, type PromptDeps } from "./prompt"
+import { buildSystemPrompt, buildWorkspaceSection, isPromptSectionKey, PROMPT_SECTION_KEYS, PROMPT_SECTION_ORDER, PROMPT_STABLE_PREFIX_KEYS, promptSectionEnabled, type PromptDeps } from "./prompt"
 import type { ServerConfig } from "../base/config"
 import { sessionPath } from "../base/paths"
 
@@ -21,6 +21,16 @@ function makeDeps(overrides: Partial<ServerConfig> = {}): PromptDeps {
 }
 
 const build = (overrides: Partial<ServerConfig> = {}, env: Record<string, string> = {}) => buildSystemPrompt(makeDeps(overrides), SID, "admin", env)
+const buildFor = (sid: string, user = "admin") => buildSystemPrompt(makeDeps(), sid, user, {})
+const workdir = (sid: string, user = "admin") => buildWorkspaceSection(makeDeps(), sid, user)
+
+/** 最长公共前缀长度（前缀缓存按逐字节匹配，此为「跨会话共享前缀」的直接度量）。 */
+function commonPrefixLen(a: string, b: string): number {
+  const n = Math.min(a.length, b.length)
+  let i = 0
+  while (i < n && a[i] === b[i]) i++
+  return i
+}
 
 describe("全局提示词段落键（启动裁剪口径）", () => {
   test("段落键判定与白/黑名单（先白后黑）", () => {
@@ -39,7 +49,8 @@ describe("buildSystemPrompt 段落裁剪与领域补充", () => {
   test("默认注入全段落（未配置裁剪时行为不变）", () => {
     const out = build()
     expect(out).toContain("你是歌白智能体（GEBAI Agent）")
-    expect(out).toContain(`当前会话工作目录: ${sessionPath(HOME, "admin", SID)}/tmp`)
+    // 会话工作目录不在主提示词内（独立 system 消息，见 PROMPT_SECTION_ORDER）
+    expect(out).not.toContain("当前会话工作目录")
     expect(out).toContain("复杂/多步操作优先用 js 脚本编排")
     expect(out).toContain("重大任务（多步骤/有风险/不可逆/用户需要把关）")
     expect(out).toContain("产物命名：同一用途的每次产出起")
@@ -61,7 +72,9 @@ describe("buildSystemPrompt 段落裁剪与领域补充", () => {
   test("白名单仅注入名单内段落（领域专用模式的极简提示词）", () => {
     const out = build({ promptEnable: ["persona", "workspace"] })
     expect(out).toContain("你是歌白智能体（GEBAI Agent）")
-    expect(out).toContain("当前会话工作目录:")
+    // workspace 段由独立入口渲染（白名单命中也走该入口，不进主提示词）
+    expect(workdir(SID)).toContain("当前会话工作目录:")
+    expect(out).not.toContain("当前会话工作目录")
     expect(out).not.toContain("任务类型路由")
     expect(out).not.toContain("可选子Agent（未装载）")
   })
@@ -75,5 +88,63 @@ describe("buildSystemPrompt 段落裁剪与领域补充", () => {
     const out = build({ promptEnable: ["persona"], promptExtra: "领域约束：只处理订单相关请求。" })
     expect(out.endsWith("领域约束：只处理订单相关请求。")).toBe(true)
     expect(out).not.toContain("任务类型路由")
+  })
+
+  test("工作目录段（buildWorkspaceSection）：路径与沙箱注记，与主提示词分离", () => {
+    expect(workdir(SID)).toContain(`当前会话工作目录: ${sessionPath(HOME, "admin", SID)}/tmp`)
+    expect(workdir(SID)).toContain("本地模式：不限制文件目录")
+    // 沙箱启用（服务端部署）时注记切换
+    const sandboxed = buildWorkspaceSection({ ...makeDeps(), sandbox: { enforcedFor: () => true } as unknown as PromptDeps["sandbox"] }, SID, "admin")
+    expect(sandboxed).toContain("文件读写限定在此目录内")
+    // 会话不同 → 工作目录段不同（这正是它不能并入主提示词的原因）
+    expect(workdir(SID)).not.toBe(workdir("fedcba9876543210fedcba9876543210"))
+  })
+})
+
+/** 前缀缓存稳定性契约（DESIGN「前缀缓存稳定性」）：段落顺序按变更频率分层，主提示词的最长公共前缀
+ *  是跨会话/跨用户共享的缓存区。这些断言把顺序锁死——任何人把易变段插到常量段之前，测试当场失败。 */
+describe("前缀缓存稳定性（段落分层顺序）", () => {
+  test("subagent_catalog 是最后一段（装载只截断末尾，不动其余段）", () => {
+    const order = PROMPT_SECTION_ORDER.filter((k) => k !== "workspace")
+    expect(order[order.length - 1]).toBe("subagent_catalog")
+  })
+
+  test("稳定前缀段（启动常量 + per-user）不含任务级/会话级段落", () => {
+    expect(PROMPT_STABLE_PREFIX_KEYS).toContain("persona")
+    expect(PROMPT_STABLE_PREFIX_KEYS).toContain("orchestration")
+    expect(PROMPT_STABLE_PREFIX_KEYS).toContain("builtin_projects")
+    for (const k of ["channel", "project_bindings", "subagent_catalog", "workspace"]) {
+      expect(PROMPT_STABLE_PREFIX_KEYS).not.toContain(k)
+    }
+  })
+
+  test("不同会话的主提示词逐字节相同（共享前缀 = 全段）", () => {
+    const a = buildFor(SID)
+    const b = buildFor("fedcba9876543210fedcba9876543210")
+    expect(commonPrefixLen(a, b)).toBe(Math.min(a.length, b.length))
+    // 跨用户同样稳定（本地模式下 builtin_projects 是安装级路径，不含用户名）
+    const c = buildFor("fedcba9876543210fedcba9876543210", "other")
+    expect(a).toBe(c)
+  })
+
+  test("未装载清单变化只影响末尾（装载子Agent 时前缀不被重写）", () => {
+    const before = buildSystemPrompt(makeDeps(), SID, "admin", {})
+    // 模拟本会话装载 code：该子Agent 从「未装载」清单消失
+    const after = buildSystemPrompt(
+      { ...makeDeps(), subAgents: { list: () => [], systemPromptInjection: () => "" } as unknown as PromptDeps["subAgents"] },
+      SID,
+      "admin",
+      {},
+    )
+    expect(before.startsWith(after)).toBe(true) // after 是 before 的前缀
+  })
+
+  test("任务级易变段（通道注记）位于稳定前缀之后：共享前缀 ≥ 1200 字符", () => {
+    const base = buildSystemPrompt(makeDeps(), SID, "admin", {})
+    const withChannel = buildSystemPrompt({ ...makeDeps(), channelNote: () => "当前对话经飞书机器人通道进行。" }, SID, "admin", {})
+    // 实测基线（旧实现）：workspace 紧跟 persona，共享前缀仅约 181 字符——不足以跨过 OpenAI 的
+    // 1024 token 缓存粒度，等于零命中；重排 + workspace 外移后共享前缀为整段稳定组
+    expect(commonPrefixLen(base, withChannel)).toBeGreaterThanOrEqual(1200)
+    expect(withChannel).toContain("当前对话经飞书机器人通道进行。")
   })
 })

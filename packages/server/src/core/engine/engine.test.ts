@@ -3004,7 +3004,8 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     const session = await s.store.createSession("default", "t")
     let sysPrompt = ""
     s.provider.chat = async function* (msgs: import("@gebai/sdk").MessageLike[]) {
-      for (const m of msgs) if (m.role === "system") sysPrompt = String(m.content)
+      // 主提示词 = 不含工作目录段的那条 system（工作目录已独立成条，见 DESIGN「前缀缓存稳定性」）
+      for (const m of msgs) if (m.role === "system" && !String(m.content).startsWith("当前会话工作目录:")) sysPrompt = String(m.content)
       yield { type: "text", text: "ok" }
       yield { type: "done", stopReason: "stop" }
     }
@@ -3017,12 +3018,32 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     cleanup(s.home)
   })
 
+  test("系统前置段顺序契约：主提示词 → 工作目录 → 装载提示词（前缀缓存稳定性）", async () => {
+    const s = await setup("text")
+    const session = await s.store.createSession("default", "t")
+    let last: import("@gebai/sdk").MessageLike[] = []
+    s.provider.chat = async function* (msgs: import("@gebai/sdk").MessageLike[]) {
+      last = msgs
+      yield { type: "text", text: "ok" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    await s.engine.run(session.id, "default", "hi")
+    const systems = last.filter((m) => m.role === "system").map((m) => String(m.content))
+    expect(systems.length).toBeGreaterThanOrEqual(2)
+    expect(systems[0]!.startsWith("你是歌白智能体")).toBe(true) // 主提示词首条
+    expect(systems[1]!.startsWith("当前会话工作目录:")).toBe(true) // 工作目录次条
+    // 主提示词不含会话 ID（否则跨会话前缀在第 200 字节内分叉）
+    expect(systems[0]).not.toContain(session.id)
+    expect(systems[1]).toContain(session.id)
+    cleanup(s.home)
+  })
+
   test("main system prompt includes task-type routing guide (D1 子 Agent 自动推荐)", async () => {
     const s = await setup("text")
     const session = await s.store.createSession("default", "t")
     let sysPrompt = ""
     s.provider.chat = async function* (msgs: import("@gebai/sdk").MessageLike[]) {
-      for (const m of msgs) if (m.role === "system") sysPrompt = String(m.content)
+      for (const m of msgs) if (m.role === "system" && !String(m.content).startsWith("当前会话工作目录:")) sysPrompt = String(m.content)
       yield { type: "text", text: "ok" }
       yield { type: "done", stopReason: "stop" }
     }
@@ -3482,8 +3503,9 @@ describe("context compaction", () => {
     expect(loaded!.trimmed?.count).toBe(MAX_CACHE_MESSAGES + 1 - TRIM_LOW_WATER_MESSAGES)
     const histFn = (s.engine as unknown as { loadHistory(sessionId: string, user: string): Promise<import("@gebai/sdk").MessageLike[]> }).loadHistory
     const history = await histFn.call(s.engine, session.id, "default")
-    expect(String(history[0]!.content)).toContain("[历史裁剪]")
-    expect(String(history[0]!.content)).toContain(`${loaded!.trimmed!.count} 条`)
+    // 主提示词 → 工作目录 → 裁剪提示（工作目录为独立 system 消息，见 DESIGN「前缀缓存稳定性」）
+    expect(String(history[1]!.content)).toContain("[历史裁剪]")
+    expect(String(history[1]!.content)).toContain(`${loaded!.trimmed!.count} 条`)
     cleanup(s.home)
   })
 
@@ -4206,10 +4228,12 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     const session = await store.createSession("default", "t")
     await engine.run(session.id, "default", "load code please")
     const second = provider.seenChats[1] as Array<MessageLike & { toolCalls?: Array<{ id: string }> }>
-    // 装载提示词紧跟主 system 提示词之后（系统前置段）
+    // 系统前置段顺序：主提示词 → 工作目录 → 装载提示词
     expect(second[0]!.role).toBe("system")
     expect(second[1]!.role).toBe("system")
-    expect(String(second[1]!.content)).toContain("你是源码分析与修改专家")
+    expect(String(second[1]!.content)).toContain("当前会话工作目录:")
+    expect(second[2]!.role).toBe("system")
+    expect(String(second[2]!.content)).toContain("你是源码分析与修改专家")
     // assistant(tool_calls) 后必须紧跟 tool 结果（接口校验要求，防止装载 system 夹在中间）
     const toolCallIdx = second.findIndex((m) => m.role === "assistant" && m.toolCalls?.length)
     expect(toolCallIdx).toBeGreaterThanOrEqual(0)
@@ -4236,15 +4260,44 @@ describe("会话级子Agent 装载持久化与恢复", () => {
     await store.appendMessage(session.id, { id: "u2", role: "user", content: "继续", createdAt: Date.now() } as never)
     const msg = (engine as unknown as { loadHistory(sessionId: string, user: string): Promise<MessageLike[]> }).loadHistory
     const history = await msg.call(engine, session.id, "default")
-    // 装载提示词全部前置且顺序保持
-    expect(String(history[0]!.content)).toContain("### code（")
-    expect(String(history[1]!.content)).toContain("### self_optimize（")
+    // 前置顺序：工作目录 → 装载提示词（均前置且顺序保持）
+    expect(String(history[0]!.content)).toContain("当前会话工作目录:")
+    expect(String(history[1]!.content)).toContain("### code（")
+    expect(String(history[2]!.content)).toContain("### self_optimize（")
     // assistant(tool_calls) 与 tool 结果相邻（无 system 夹在中间）
     const toolCallIdx = history.findIndex((m) => m.role === "assistant" && (m as { toolCalls?: unknown[] }).toolCalls?.length)
     expect(toolCallIdx).toBeGreaterThanOrEqual(0)
     expect(history[toolCallIdx + 1]!.role).toBe("tool")
     // 会话内容完整保留
     expect(history.some((m) => m.role === "user" && m.content === "继续")).toBe(true)
+    cleanup(home)
+  })
+
+  /** tools 段也是请求前缀的一部分（多数服务商的前缀缓存含 tools）：全局工具在前、子Agent 工具分组在后、
+   *  动态工具排尾——装载一个子Agent 只追加尾部而不重写全局工具段（见 DESIGN「前缀缓存稳定性」）。 */
+  test("schema 排序契约：全局工具在前、子Agent 工具在后、动态工具排尾", async () => {
+    const { home, engine, store, provider } = await setup("tool")
+    const session = await store.createSession("default", "t")
+    await engine.loadAgentToSession(session.id, "default", "code")
+    const seen: string[][] = []
+    provider.chat = async function* (_msgs: import("@gebai/sdk").MessageLike[], opts: { tools?: Array<{ name: string }> } = {}) {
+      seen.push((opts.tools ?? []).map((t) => t.name))
+      yield { type: "text", text: "ok" }
+      yield { type: "done", stopReason: "stop" }
+    }
+    await engine.run(session.id, "default", "hi")
+    const names = seen[0] ?? []
+    expect(names.length).toBeGreaterThan(0)
+    // 子Agent 工具（code_*）不得插进全局工具之间：它之后只应有其他子Agent 工具/动态工具
+    const agentIdx = names.findIndex((n) => n.startsWith("code_"))
+    expect(agentIdx).toBeGreaterThan(0)
+    const afterAgent = names.slice(agentIdx)
+    expect(afterAgent.every((n) => n.startsWith("code_") || n.includes("_"))).toBe(true)
+    // 全局工具前缀段严格按名排序（装载子Agent 不改写它）
+    const globals = names.slice(0, agentIdx)
+    expect([...globals].sort()).toEqual(globals)
+    expect(globals).toContain("read")
+    expect(globals).not.toContain("code_sh")
     cleanup(home)
   })
 

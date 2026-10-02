@@ -56,6 +56,7 @@ import {
   buildAgentSection as buildAgentSectionFn,
   buildPresetNote as buildPresetNoteFn,
   buildSystemPrompt as buildSystemPromptFn,
+  buildWorkspaceSection as buildWorkspaceSectionFn,
   withBuiltinProjects as withBuiltinProjectsFn,
   type PromptDeps,
 } from "./prompt"
@@ -412,6 +413,7 @@ export class AgentEngine {
       resolveSubAgentProject: (user, env, name) => this.resolveSubAgentProject(user, env, name),
       presetProjectsFor: (user, env, name) => this.presetProjectsFor(user, env, name),
       loadProjectAgentsMd: (projectRoot) => this.loadProjectAgentsMd(projectRoot),
+      workspaceSection: (id, u) => this.buildWorkspaceSection(id, u),
     }
   }
 
@@ -569,9 +571,15 @@ export class AgentEngine {
     return this.compressor.degradeProtectedMessages(sessionId, user)
   }
 
-  // ---- 系统提示词构建（实现见 prompt.ts）----
+  /** 系统提示词构建（实现见 prompt.ts）。 */
   private buildSystemPrompt(sessionId: string, user: string, env: Record<string, string>): string {
     return buildSystemPromptFn(this.promptDeps, sessionId, user, env)
+  }
+
+  /** 会话工作目录段（独立 system 消息，由 loadHistory 置于主提示词之后——见 DESIGN「前缀缓存稳定性」）：
+   *  与主提示词分开是因为它含会话 ID、每会话必然唯一，混在一起会让所有会话的前缀在第 200 字节内分叉。 */
+  private buildWorkspaceSection(sessionId: string, user: string): string {
+    return buildWorkspaceSectionFn(this.promptDeps, sessionId, user)
   }
 
   /**
@@ -660,6 +668,12 @@ private activeSchemas(sessionId: string) {
     const base = this.opts.registry
     const self = this
     return {
+      /** schema 排序（**前缀缓存契约**，见 DESIGN「前缀缓存稳定性」）：全局工具在前（按名）→ 本会话可见的
+       *  子Agent 工具按名 → 本会话动态工具（defineTool）按定义先后排最后。
+       *  Why：tools 段是请求前缀的一部分（多数服务商的前缀缓存含 tools），而子Agent 工具名是 `{agent}_*`、
+       *  按字母序会插进全局工具中间（如 code_* 落在 bg_task 之后），装载一个子Agent 即令其后所有 schema 后移、
+       *  tools 段大面积重算；分组后装载只追加尾部，全局工具段逐字节不变。动态工具同理不插队（定义一个新工具
+       *  不应改写已有工具 schema 的相对次序）。注册表内部顺序不受影响（PATCH /api/v1/tools、管理视图照旧）。 */
       schemas: (enabledOnly = true) => {
         const visible = self.sessionVisibleAgents(sessionId)
         const dyn = [...(self.dynamicTools.get(sessionId)?.values() ?? [])].map(({ tool }) => ({
@@ -667,12 +681,14 @@ private activeSchemas(sessionId: string) {
           description: tool.description,
           parameters: tool.parameters as unknown as Record<string, unknown>,
         }))
-        const out = [...dyn]
+        const globals: typeof dyn = []
+        const agentTools: typeof dyn = []
         for (const rt of base.list(enabledOnly)) {
           if (rt.agent && !visible.has(rt.agent)) continue // 其他会话装载的子Agent 工具：本会话不可见（未装载时路由自愈接管）
-          out.push({ name: rt.name, description: rt.tool.description, parameters: rt.tool.parameters as unknown as Record<string, unknown> })
+          const entry = { name: rt.name, description: rt.tool.description, parameters: rt.tool.parameters as unknown as Record<string, unknown> }
+          ;(rt.agent ? agentTools : globals).push(entry)
         }
-        return out
+        return [...globals, ...agentTools, ...dyn]
       },
       resolve: (name: string) => {
         const dyn = self.dynamicTools.get(sessionId)?.get(name.replace(/[-.:]/g, "_"))
@@ -1420,7 +1436,13 @@ private activeSchemas(sessionId: string) {
           },
         ]
       : []
-    return [...agentSystems, ...trimNote, ...out]
+    // 会话工作目录段（独立 system 消息）：紧随主提示词之后、装载提示词之前——主提示词因此不含会话 ID
+    // （同一用户多会话逐字节相同），前缀缓存跨会话可命中；压缩的「缓存友好前缀请求」经本方法渲染历史，
+    // 故与主循环逐字节同前缀自动成立
+    const workdirNote: MessageLike[] = this.promptDeps.workspaceSection
+      ? [{ role: "system", content: this.promptDeps.workspaceSection(sessionId, user) }]
+      : []
+    return [...workdirNote, ...agentSystems, ...trimNote, ...out]
   }
 
   /**
@@ -2782,7 +2804,11 @@ private activeSchemas(sessionId: string) {
           : `本子会话为同步运行（父会话正在等待结果）：阶段性发现直接写入最终报告即可，运行完成时报告自动合入父会话。`
       }收到进展后据此调整分工，避免重复工作或冲突。完成后直接输出最终报告（结论/产物/关键发现），报告将合入父会话——不要输出与子会话任务无关的内容。`
       const sysContent = (typeof fork[0]?.content === "string" ? fork[0].content : this.buildSystemPrompt(sessionId, user, env)) + addendum
-      messages = [{ role: "system", content: `${sysContent}${sections.length ? `\n\n${sections.join("\n\n")}` : ""}` }, ...fork.slice(1), { role: "user", content: spec.input }]
+      // 会话工作目录段：fork 快照自带（父主循环装配点的首条 system）；缺失时补一条——
+      // 顺序固定为「主提示词 → 工作目录 → 装载提示词 → 历史」，与父会话逐字节同前缀
+      const hasWorkspaceNote = fork.slice(1).some((m) => typeof m.content === "string" && m.content.startsWith("当前会话工作目录:"))
+      const workspaceNote: MessageLike[] = hasWorkspaceNote || !this.promptDeps.workspaceSection ? [] : [{ role: "system", content: this.promptDeps.workspaceSection(sessionId, user) }]
+      messages = [{ role: "system", content: `${sysContent}${sections.length ? `\n\n${sections.join("\n\n")}` : ""}` }, ...workspaceNote, ...fork.slice(1), { role: "user", content: spec.input }]
       // 已读追踪 fork 快照（防误覆盖/防陈旧覆盖的子会话隔离）：拷贝 fork 点父会话已读表——此后父会话/
       // 兄弟子会话的读写互不串扰（fork 后他人读过的文件不视为本子会话已读）
       const forkReads = new Map(this.readFiles.get(sessionId) ?? [])
@@ -2851,6 +2877,8 @@ private activeSchemas(sessionId: string) {
       const globalPromptPart = spec.inheritGlobalPrompt !== false
         ? `以下为总Agent 全局系统提示词（父会话行为约定与全局能力说明；路径基准与工具可用性以本会话上文为准）:\n${this.buildSystemPrompt(sessionId, user, env)}\n\n`
         : ""
+      // 会话工作目录段：与父会话同口径（独立 system 消息，紧随本子会话首条 system 之后）
+      const workspaceNote = this.promptDeps.workspaceSection ? `\n${this.promptDeps.workspaceSection(sessionId, user)}` : ""
       // 编排指引（js 优先）防重复注入：注入全局提示词时其编排段已含同款内容，开场白不再复述
       const orchestrationNote =
         spec.inheritGlobalPrompt !== false
@@ -2859,7 +2887,7 @@ private activeSchemas(sessionId: string) {
       messages = [
         {
           role: "system",
-          content: `你正在一个子会话中执行任务（与父会话隔离，执行过程不进入父会话上下文；运行结束其结果交付父会话）。子会话「${spec.name}」${modelNote}${spec.agents.length ? `，已预加载子Agent: ${spec.agents.join(", ")}，其完整系统提示词如下` : "，未预加载子Agent"}。\n${globalsNote}${orchestrationNote ? `\n${orchestrationNote}` : ""}${safeNote}\n\n${globalPromptPart}${sections.join("\n\n")}`,
+          content: `你正在一个子会话中执行任务（与父会话隔离，执行过程不进入父会话上下文；运行结束其结果交付父会话）。子会话「${spec.name}」${modelNote}${spec.agents.length ? `，已预加载子Agent: ${spec.agents.join(", ")}，其完整系统提示词如下` : "，未预加载子Agent"}。\n${globalsNote}${orchestrationNote ? `\n${orchestrationNote}` : ""}${safeNote}${workspaceNote}\n\n${globalPromptPart}${sections.join("\n\n")}`,
         },
         { role: "user", content: spec.input },
       ]
