@@ -15,6 +15,7 @@
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
 #include "st/ui/actions.hpp"
+#include "st/ui/dsl.hpp"
 #include "st/ui/selector.hpp"
 
 namespace st::control {
@@ -568,9 +569,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     theme["mode"] = root.theme().mode() == ui::ThemeMode::Dark ? "dark" : "light";
     result["theme"] = std::move(theme);
     Json capabilities = Json::array();
-    for (const auto name : {"tree", "find", "get", "set", "invoke", "input.mouse", "input.key",
-                            "input.text", "capture", "visual", "wait", "metrics", "events",
-                            "theme", "app"}) {
+    for (const auto name : {"tree", "find", "get", "set", "invoke", "ui.create", "ui.remove",
+                            "input.mouse", "input.key", "input.text", "capture", "visual",
+                            "wait", "metrics", "events", "theme", "app"}) {
       capabilities.push_back(Json(name));
     }
     // `script` 只在真正启用时上报：能力清单是"这个进程能做什么"的事实说明，
@@ -626,6 +627,89 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     host.request_repaint();
     Json result = Json::object();
     result["changed"] = std::move(changed);
+    return result;
+  }
+  // `ui.create` / `ui.remove`：在线建/删元素（AI 搭建与改造界面的能力）。
+  //
+  // 与声明式层共用 `dsl::make_element` 工厂（同一个注册表）——避免“两处各列一份类型名单”
+  // 的老问题（过去白名单分裂导致过 `set` 静默无效）。元素 id 返回给调用方，后续经
+  // `set`/`invoke`/`get` 照常引用（真值树的一员，不是特例）。
+  if (method == "ui.create") {
+    const std::string type = json_get_string(params, "type");
+    if (type.empty()) return unexpected(ErrorCode::Invalid, "type 不能为空");
+    auto created = ui::dsl::make_element(type);
+    if (created == nullptr) {
+      return unexpected(ErrorCode::Unsupported,
+                        std::format("未知组件类型: {}（见 factory 注册表）", type));
+    }
+    // 属性（可选）：在建树前先应用，行为与 `set` 一致
+    if (const Json* props = json_find(params, "props"); props != nullptr && props->is_object()) {
+      (void)ui::apply_properties(root, *created, *props);
+    }
+    // 父元素：缺省挂到 root 内容；指定 parent 时挂为子元素。
+    //
+    // 注意「挂到 root 内容」的语义：**不替换**已有内容——改为包一层匿名容器？
+    // 不行（那会改变上层布局）。准确的做法是**追加到根内容容器**（若根内容是容器）
+    // 或把两者都放进一个新的纵向容器（保持两者都可见）。
+    // 这里选前者：根内容是容器 → 追加；否则（单元素根）→ 把旧内容与新元素
+    // 包进一个新建的纵向 Panel（两者都可见，不丢界面）。
+    const std::string parent_id = json_get_string(params, "parent");
+    const std::string key = json_get_string(params, "key");
+    if (!key.empty()) created->set_key(key);
+    const std::string explicit_id = json_get_string(params, "id");
+    if (!explicit_id.empty()) created->set_id(explicit_id);
+    ui::Element* mounted = nullptr;
+    if (parent_id.empty()) {
+      ui::Element* root_content = root.content();
+      if (root_content == nullptr) {
+        mounted = created.get();
+        root.set_content(std::move(created));
+      } else if (dynamic_cast<ui::Panel*>(root_content) != nullptr) {
+        // 根是容器：追加（不破坏已有界面）
+        mounted = root_content->add_child(std::move(created));
+      } else {
+        // 单元素根：包一层纵向容器（旧内容 + 新元素都保留）
+        auto wrapper = std::make_unique<ui::Panel>(ui::FlexDirection::Column);
+        wrapper->set_id("ui-create-wrapper");
+        auto detached = root.take_content();
+        ui::Panel* wrapper_raw = wrapper.get();
+        if (detached != nullptr) wrapper_raw->add_child(std::move(detached));
+        mounted = wrapper_raw->add_child(std::move(created));
+        root.set_content(std::move(wrapper));
+      }
+    } else {
+      ui::Element* parent = find_element(parent_id);
+      if (parent == nullptr) {
+        return unexpected(ErrorCode::NotFound, std::format("父元素未找到: {}", parent_id));
+      }
+      const std::int64_t index = json_get_i64(params, "index", -1);
+      mounted = index < 0 ? parent->add_child(std::move(created))
+                          : parent->insert_child(static_cast<std::size_t>(index),
+                                                 std::move(created));
+    }
+    host.request_repaint();
+    Json result = Json::object();
+    result["id"] = mounted != nullptr ? mounted->derived_id() : std::string();
+    result["type"] = mounted != nullptr ? std::string(mounted->type()) : std::string();
+    return result;
+  }
+  if (method == "ui.remove") {
+    const std::string target_id = json_get_string(params, "id");
+    ui::Element* element = find_element(target_id);
+    if (element == nullptr) {
+      return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target_id));
+    }
+    // 根元素：清空内容（与 `ui.create` 的 parent 缺省配对）
+    if (element->parent() == nullptr) {
+      root.set_content(nullptr);
+    } else {
+      auto removed = element->parent()->remove_child(element);
+      (void)removed;
+    }
+    host.request_repaint();
+    Json result = Json::object();
+    result["removed"] = true;
+    result["id"] = target_id;
     return result;
   }
   if (method == "invoke") {

@@ -25,6 +25,12 @@ void UiRoot::set_content(std::unique_ptr<Element> content) {
   mark_dirty_all();
 }
 
+auto UiRoot::take_content() -> std::unique_ptr<Element> {
+  // 取出根内容：不清焦点/不标脏（调用方会立即重新 set_content，避免中间态闪烁）。
+  // 注意：不动 `assign_ids`（元素 id 保持——重新挂回时 setId 已非空，不会被重写）。
+  return std::move(content_);
+}
+
 void UiRoot::set_theme(Theme theme) {
   theme_ = std::move(theme);
   mark_dirty_all();

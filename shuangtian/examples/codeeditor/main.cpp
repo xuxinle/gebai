@@ -373,10 +373,10 @@ void bind_editor(Workbench& wb, st::ui::UiRoot& root) {
     };
     editor->on_cursor_change = [&wb, &root]() {
       if (wb.active >= wb.buffers.size()) return;
-      CodeEditor* editor = wb.buffers[wb.active].editor;
-      if (editor == nullptr) return;
-      wb.cursor_label->set_content(std::format("Ln {}, Col {}", editor->cursor_line() + 1,
-                                               editor->cursor_column() + 1));
+      CodeEditor* active_editor = wb.buffers[wb.active].editor;
+      if (active_editor == nullptr) return;
+      wb.cursor_label->set_content(std::format("Ln {}, Col {}", active_editor->cursor_line() + 1,
+                                               active_editor->cursor_column() + 1));
       root.mark_dirty_all();
     };
     wb.editor_host->add_child(std::move(editor));
@@ -1166,9 +1166,9 @@ auto run_app(int argc, char** argv) -> int {
             entry.key = sample.name + ":" + std::to_string(line_no);
             entry.label = sample.name + ":" + std::to_string(line_no) + "  " + std::string(line);
             entry.on_activate = [&files, &wb, root, name = sample.name]() {
-              for (const auto& sample : files) {
-                if (sample.name == name) {
-                  open_sample(wb, sample, *root);
+              for (const auto& candidate : files) {
+                if (candidate.name == name) {
+                  open_sample(wb, candidate, *root);
                   return;
                 }
               }
@@ -1343,10 +1343,10 @@ auto run_app(int argc, char** argv) -> int {
                           });
   (void)root->register_shortcut("b", ctrl, [root]() {
     // 折叠/展开侧栏：侧栏与活动栏一起切（VSCode 的 Ctrl+B 只藏侧栏，这里联动活动栏演示）
-    Element* sidebar = root->find("sidebar");
-    if (sidebar == nullptr) return false;
-    const bool show = !sidebar->visible();
-    sidebar->set_visible(show);
+    Element* sidebar_element = root->find("sidebar");
+    if (sidebar_element == nullptr) return false;
+    const bool show = !sidebar_element->visible();
+    sidebar_element->set_visible(show);
     if (auto* activity = root->find("activitybar"); activity != nullptr) {
       activity->set_visible(show);
     }

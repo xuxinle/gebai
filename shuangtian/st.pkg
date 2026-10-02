@@ -21,7 +21,7 @@
     "src/pkg/*.cpp",
     "src/ext/*.cpp"
   ],
-  "embed": ["src/ui/script_api.js"],
+  "embed": ["src/ui/script_api.js", "src/ui/declarative.js"],
   "third_party_sources": ["third_party/quickjs/*.c"],
   "c_flags": ["-std=gnu11"],
   "tests": ["tests/*_test.cpp"],
@@ -61,7 +61,15 @@
                  "embed": ["examples/gallery/assets/*"] },
     "codeeditor": { "kind": "executable", "sources": ["examples/codeeditor/*.cpp"],
                   "exclude_sources": ["src/pkg/*"],
-                  "embed": ["examples/codeeditor/assets/*"] }
+                  "embed": ["examples/codeeditor/assets/*"] },
+    "counter": { "kind": "executable", "sources": ["examples/counter/*.cpp"],
+                 "exclude_sources": ["src/pkg/*"] },
+    "counter-js": { "kind": "executable", "sources": ["examples/counter-js/*.cpp"],
+                    "exclude_sources": ["src/pkg/*"] },
+    "todo-js": { "kind": "executable", "sources": ["examples/todo-js/*.cpp"],
+                 "exclude_sources": ["src/pkg/*"] },
+    "codeeditor-dsl": { "kind": "executable", "sources": ["examples/codeeditor-dsl/*.cpp"],
+                        "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],

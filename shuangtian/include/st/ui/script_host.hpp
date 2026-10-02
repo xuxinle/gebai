@@ -116,6 +116,21 @@ class ScriptHost {
   /// 引擎版本（诊断用）。
   [[nodiscard]] auto engine_version() const -> std::string;
 
+  /// 泵 Promise 微任务（异步回调不会自己跑；宿主每帧调一次）。返回执行的 job 数。
+  auto pump_jobs() -> std::size_t;
+
+  /// 注册宿主桥函数（转发到引擎；名字以 `__` 开头避免与脚本 API 冲突）。
+  ///
+  /// 这是给**内建扩展层**用的口子（如 DeclarativeHost 的 `__d_*` 树操作窄桥）——
+  /// 应用级自定义桥也走它，但要在首段脚本执行前注册。
+  [[nodiscard]] auto register_function(std::string name, ext::ScriptHostFunction function)
+      -> Status;
+
+  /// 求值一段**前置级**代码（不重建快照、不提交变更集——前置是运行时基础设施，
+  /// 不参与页面状态语义）。declarative.js 等内建扩展层加载用它。
+  [[nodiscard]] auto eval_prelude(std::string_view source, std::string_view filename)
+      -> Result<st::Json>;
+
   /// 已提交的变更次数与条目数（性能观测：验证"批量"确实生效）。
   [[nodiscard]] auto commit_count() const noexcept -> std::size_t;
   [[nodiscard]] auto committed_properties() const noexcept -> std::size_t;

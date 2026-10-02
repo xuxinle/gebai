@@ -61,6 +61,31 @@
   待补：`shuangtian_wait_event` 工具暴露 + 服务端 `ui.changed` 携带变更元素 id 清单。
 - [ ] **script_host 提交链仍调 `mark_dirty_all`**（控制通道路径已改损坏区驱动）：
   JS 写入目前仍整帧；待脚本路径补上元素级标脏验证后再同样收敛。
+- [ ] **声明式 UI 后续里程碑**（M1–M4 主体已落地，设计与路线见 `docs/declarative.md`）：
+  - [x] M1 元素工厂：`dsl::make_element`（27 个内置类型）。
+  - [x] M2 C++ 宿主：`dsl.hpp/cpp` + 重组器 + `examples/counter`。
+  - [x] M3 JS 宿主：`declarative.js` + `ui::DeclarativeHost` 窄桥 + `examples/counter-js`
+    + 双宿主一致性 fixture（结构签名逐字节相等）。
+  - [x] M4 补全：ArkTS 风格链式修饰（大写组件 + `.padding().onClick()`）、`useResource`
+    异步状态（引擎 `pump_jobs` 泵微任务）、`ForEach` 按 key 复用（`__d_move` 重排）、
+    `examples/todo-js`（异步 + 列表 + 过滤，`tools/todo_js_e2e.py` 端到端验收）。
+  - [x] **`custom<T>` 逃生舱**：任意组件 + 一等接口的通用入口（`type_name<T>` 特化表，
+    工厂补齐全部 32 类型）；`icon`/`overlay`/`dsl::tabs` 数据驱动。
+  - [x] **IDE 形态界面声明式重写**：`examples/codeeditor-dsl`（五层布局 + 多标签 +
+    菜单栏下拉 + 命令面板 + 全局快捷键 + 终端 + 主题，~700 行 vs 命令式 1417 行；
+    `tools/codeeditor_dsl_e2e.py` 八项端到端）。
+  - [x] **浮层生命周期**：`overlay(c, key, ...)` / `menu_panel_overlay`——按 key 认领，
+    未声明即回收（重组末尾 sweep）；`menu_bar` 数据驱动 + `Composer::register_shortcut`。
+  - [x] **多作用域细粒度重组**：`sub_component` 子组件独立作用域（子状态变化只重跑子，
+    父不重跑）；依赖按 scope 分流 + 宿主位置/子树游标恢复。
+  - [x] **C++ 侧异步 `resource<T>`**：工作线程执行 + `pump_async` 回主线程写状态，
+    输入指纹节流 + 代次计数丢旧结果。
+  - [x] **构造期属性组件包装**：`dsl::select`/`dsl::table`/`dsl::tree`。
+  - [x] **协议 `ui.create`/`ui.remove`**：在线建删元素（与声明式共用工厂）。
+  - [x] 旧版 `examples/codeeditor` 编译修复（三处 `-Werror=shadow`）。
+  - [ ] 遗留：`resource` 的线程数控制（现每任务一线程，密集场景应上线程池）/
+    异步任务在 Composer 析构时的取消语义（现 join 等待）/ 嵌套子作用域的作用域树
+    （现扁平一层，足够示例规模）。
 
 ## P2
 

@@ -116,6 +116,13 @@ class ScriptEngine {
   /// 错误：`Parse`（语法错误，消息含行号）。
   [[nodiscard]] auto check_syntax(std::string_view source) -> Status;
 
+  /// 泵一轮 Promise 微任务（`JS_ExecutePendingJob`），返回执行的 job 数。
+  ///
+  /// 为什么需要它：异步回调（`Promise.then`）不会自己跑——宿主必须显式驱动。
+  /// 声明式层的 `useResource` 与 AI 写的异步逻辑都依赖这条泵；
+  /// 宿主在主循环每帧调用一次即可（无挂起 job 时零开销）。
+  auto pump_jobs() -> std::size_t;
+
   /// 上次执行的统计。
   [[nodiscard]] auto last_stats() const noexcept -> const ScriptStats& { return stats_; }
 

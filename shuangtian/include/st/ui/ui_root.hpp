@@ -27,6 +27,9 @@ class UiRoot {
 
   void set_content(std::unique_ptr<Element> content);
   [[nodiscard]] auto content() const noexcept -> Element* { return content_.get(); }
+  /// 取出根内容（调用方接管所有权；用于「包一层」重建）。无内容时返回 nullptr。
+  /// 注：取出的元素**保留**其 id 与子树（不会被 assign_ids 重写）。
+  [[nodiscard]] auto take_content() -> std::unique_ptr<Element>;
 
   [[nodiscard]] auto theme() noexcept -> Theme& { return theme_; }
   [[nodiscard]] auto theme() const noexcept -> const Theme& { return theme_; }

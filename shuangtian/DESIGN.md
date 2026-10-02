@@ -11,7 +11,7 @@
 | [1](#1-目标与非目标) | 目标与非目标 |
 | [2](#2-总体架构) | 总体架构 |
 | [3](#3-目录结构) | 目录结构 |
-| [4](#4-关键接口) | 关键接口（core / raster / text / md / ui / shell / gpu / control / pkg，含 DPI 契约、填充语义、令牌契约、后端选择） |
+| [4](#4-关键接口) | 关键接口（core / raster / text / md / ui / shell / gpu / control / pkg，含 DPI 契约、填充语义、令牌契约、声明式 UI、后端选择） |
 | [5](#5-设计系统token) | 设计系统（token） |
 | [6](#6-控制协议规范st-control1) | 控制协议规范 `st-control/1`（含扩展层、脚本宿主） |
 | [7](#7-包管理stpm) | 包管理（stpm） |
@@ -695,6 +695,144 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 list.sync_items({{.key = task.id, .label = task.title}});   // 同 key 的项沿用同一元素与同一 id
 ```
 
+### 4.5.2 声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）——状态驱动的编排层
+
+> 完整设计：`docs/declarative.md`（双宿主路线图）；本节钉住已落地部分的形态与铁律。
+
+对标 Jetpack Compose（remember/mutableStateOf/重组）与鸿蒙 ArkTS（@Component/@State/build）。
+一句话：**描述界面随状态变化的最终形态，框架把状态变化翻译成对真值树的最小修改**。
+**C++ 与 JS 双宿主均已落地**——同一语义规范，同一组一致性 fixture 钉住。
+
+```cpp
+// C++ 宿主（st::ui::dsl）——struct 风格 ≈ ArkTS @Component
+struct CounterPage : dsl::Component {
+  dsl::State<int> count{0};                     // ≈ @State count = 0
+  void build(dsl::Composer& c) override {       // ≈ build()
+    column(c, {.gap = 12.0f, .padding = 24.0f}, [&] {
+      text(c, [&] { return std::format("点击了 {} 次", count.value()); }, {.key = "count"});
+      button(c, "+1", [this] { count.set(count.value() + 1); }, {.key = "inc"});
+    });
+  }
+};
+// dsl::mount(app.root(), std::make_shared<CounterPage>())；主循环帧首 host->tick()
+```
+
+```js
+// JS 宿主（ui::DeclarativeHost + declarative.js）——两种风格，同一 VNode
+compose('CounterJs', () => {
+  const count = useState(0);                    // ≈ remember { mutableStateOf(0) }
+  return column({gap: 12, padding: 24}, [
+    text(() => '点击了 ' + count.value + ' 次'),  // 闭包 = 状态读取点
+    button('+1', () => { count.value = count.value + 1; }),
+  ]);
+});
+
+// ArkTS 风格（大写组件 + 链式修饰，≈ ArkUI `.width().onClick()`）
+compose('TodoPage', () => Column([
+  Text('待办清单'),
+  Row([Input(draft.value).onInput(setDraft), Button('添加').onClick(add)]).gap(8),
+  ForEach(items, (it) => it.id, (it) => Text(it.text)),   // key 对齐复用
+]).gap(10).padding(20));
+```
+
+**C++ 宿主机制**：
+- **依赖收集**：`State::value()` 读时登记当前 Composer（thread-local）；`set` 写时仅失效
+  **订阅过它**的 Composer。事件回调在重组之外 → 全局活跃 Composer 注册表通知。
+- **单根语义**：build 的首个顶层声明直接落在 `UiRoot::content()` 槽位（不预建容器层）。
+- **位置对齐复用**：每个父元素一个子游标，重跑 build 时按位置+类型对齐——同位同型只
+  更新（经 `ui::apply_properties`），异型替换，声明变少裁残。条件分支因此天然工作。
+- **护栏**：build 抛异常 → 冻结该作用域（保留上一帧 UI）+ `stats.error` 上报；单帧预算
+  （默认 4ms）超时标记 `budget_exceeded`。
+- **全局快捷键**：`Composer::register_shortcut(key, mods, handler)` 转调 `UiRoot`
+  （先于焦点链派发，文本组件吞键也拦得住）——声明式组件不必碰 root。
+- **多作用域细粒度重组**：`sub_component(c, child, key)` 给子组件**独立作用域**——
+  子组件订阅的状态变化**只重跑它自己**，父不重跑（实测：改子状态 → `scopes_rerun=1`
+  且父组件 `build()` 未被调用）。机制：依赖登记到当前 scope（`add_dependency` 按
+  `active_scope` 分流）；重跑时恢复宿主位置并**重置子树游标**（否则旧元素残留）。
+- **异步资源 `resource<T>(c, fetcher, input)`**：≈ JS 侧 `useResource` —— 输入变化
+  才重发（指纹比对）、代次计数（旧结果丢弃）、fetcher 在**工作线程**跑、结果经
+  `pump_async()` 回主线程写状态（跨线程写 State 会与遍历中的树竞争，硬约束）；
+  `DeclarativeHost::tick()` 内部先 `pump_async`，异步结果同帧可见。
+- **构造期属性组件包装**：`dsl::select` / `dsl::table` / `dsl::tree` —— 选项/列/节点
+  数据驱动（内部走 `set_options` / `set_columns+add_row` / `sync_nodes` 等构造期接口）。
+- **协议在线建删元素**：控制通道 `ui.create`（工厂 + props + parent/index/key）与
+  `ui.remove` ——建出的元素是**真值树的一员**（`get/set/invoke` 照常可用），
+  与声明式层共用同一个 `dsl::make_element` 注册表（避免两处类型名单分裂）。
+
+**C++ 宿主的关键原语：`custom<T>` 逃生舱**
+
+32 个内置组件各有**构造参数与一等接口**（`Tabs::sync_tabs`、`CodeEditor::on_change`、
+`MenuBar::on_action`…）——为每个都写专用包装是无穷尽的追尾（新组件就要新包装），
+而属性面只覆盖可序列化值。`custom<T>` 给出**一个**通用入口：
+
+```cpp
+auto& ed = custom<CodeEditor>(c, [](CodeEditor& e) {   // 声明式创建
+  e.set_property("language", "cpp");                    // 属性面（协议可见）
+  e.on_change = [&] { ... };                            // 一等接口（属性面表达不了的）
+});
+```
+
+这是「声明式描述结构与生命周期 + 必要处下探强类型」的诚实分工：不做属性面穷举，
+也不阻断真组件能力。类型名经 `type_name<T>` 特化表给出（源文件里一行一个，
+不用 `T{}.type()`——组件构造函数参数各异，`T{}` 不成立）；工厂已覆盖全部内置类型。
+
+**浮层生命周期（`overlay` / `menu_panel_overlay`）**
+
+浮层挂在 root 而不是声明树当前位置，「这一帧还要不要」推不出来。解法是**按 key 认领**：
+重组开头把所有声明式 overlay 标为未认领，build 里重新声明的 key 被认领（复用同一元素，
+帧间状态保持），**末尾仍未认领的被移除**——「关掉」的表达就是「不声明」：
+
+```cpp
+if (palette_open_.value()) {          // 条件声明
+  overlay(c, "palette", {...}, [&] { /* 面板内容 */ });
+}
+// 下一帧 palette_open_=false → 不声明 → 框架 sweep 回收（无需手写移除）
+```
+
+菜单栏同理：`menu_bar(...)` 声明 + `on_open_menu` 写状态，面板由 `menu_panel_overlay`
+按状态声明（面板内容首次认领时构造，同 key 复用）。
+
+实测：一个 1417 行的命令式 IDE 界面（`examples/codeeditor`）用声明式重写为 **~700 行**
+（`examples/codeeditor-dsl`，含菜单栏 + 命令面板 + 全局快捷键 + 终端），差的不是控件数
+而是**同步代码**——声明式里所有「改完要点哪里」的手工同步都不存在了（写状态 → 框架 diff）。
+
+**JS 宿主机制**：
+- VDOM/重组器纯 JS（`src/ui/declarative.js`，编译期嵌入，与 `script_api.js` 同机制）；
+- 树操作走**窄桥**（`__d_create/__d_set_root/__d_mount/__d_unmount/__d_move/__d_slot_root`）；
+- 属性在重组末尾经 `__d_apply_batch` **一次跨界批量落地**（走 `ui::apply_properties`）；
+- 事件复用 `on()/off()` 管线（VNode 持绑定 id，卸载时反注册）；观察者在元素处理后收到事件
+  → 勾选/开关类回调读回 `checked` 即终态；
+- 帧驱动：`DeclarativeHost::tick()` → 泵 Promise 微任务 → JS `__d_reconcile()`（dirty 才重跑）；
+- **两种声明风格**：compose（小写函数 + props）与 ArkTS（大写组件 + 链式修饰，
+  `Text('hi').padding(8).onClick(fn)`）产出同一 VNode，可混用——**不做块级 `struct` 语法**
+  （`struct X { @State n; build(){} }` 在本运行时不是合法表达式，要支持就得写真解析器；
+  正则级切块在嵌套/字符串里会误判并静默产出垃圾代码。链式修饰用合法 JS 表达同一心智模型）；
+- **ForEach / key 对齐**：有 `key` 的节点按 key 匹配复用（身份/事件绑定保持，
+  语义同 `List::sync_items`）——插入/删除/重排后"那一项"还是同一元素；顺序变化经
+  `__d_move` 修正；无 key 退回位置对齐；
+- **异步**：`useResource(fetcher, input)` 返回 `{status: pending|ok|error, value?, error?}` 的
+  State（代次计数：输入变化丢旧结果）；靠引擎的 `pump_jobs()` 驱动 Promise 微任务，
+  `tick()` 内泵两轮（防"请求→重组→再请求"拖成无限帧）。
+
+**共用约定（不变式 2/4 的落点）**：
+- **布局属性回归属性面**：`gap/padding/margin/width/height/grow/radius/direction` 进
+  `ui::apply_properties`（与协议 `set`/脚本 `set` 同一份实现）——声明式不另立旁路；
+- **id/key 集成**：VNode 的 key → `Element::set_key`，自动 id 规则照旧——声明式产出的树在
+  `tree/find/get/set/invoke` 层面与手搭的不可区分；
+- **双宿主一致性 fixture**：`tests/ui_declarative_parity_test.cpp` 同场景两侧各建一遍，
+  结构签名（type + 语义文本递归）**必须逐字节相等**（含状态推进与条件裁剪后的形态）；
+- **元素工厂 `dsl::make_element`**：类型名 → 构造（27 个内置类型），JS 窄桥就复用它。
+
+示例：`examples/counter`（C++）+ `examples/counter-js`（JS）+ `examples/todo-js`
+（真实复杂度：异步取数 + key 对齐列表 + 过滤，端到端脚本 `tools/todo_js_e2e.py`）
++ **`examples/codeeditor-dsl`（IDE 形态界面的声明式重写：五层布局 + 多标签编辑
++ 菜单栏下拉 + 命令面板 + 全局快捷键 + 终端 + 主题，~700 行；端到端验证
++ `tools/codeeditor_dsl_e2e.py` 八项）**；
+测试：`tests/ui_dsl_test.cpp`（C++ 十二用例：含 overlay 生命周期 / 异步 resource /
+构造期属性组件 / 多作用域细粒度）、`tests/ui_declarative_host_test.cpp`（JS 十用例）、
+`tests/ui_declarative_parity_test.cpp`（双宿主一致性两用例）、
+`tests/control_protocol_test.cpp`（协议 `ui.create`/`ui.remove` 用例）。
+
 ### 4.6 shell
 ```cpp
 namespace st::shell {
@@ -824,6 +962,8 @@ class Compositor {                                  // UI 图层 → GPU 合成
 | `find` | `{selector, limit?, visible_only?}` | `{matches:[{id,type,role,bounds,text,path}]}` | 选择器查询 |
 | `get` | `{id, props?}` | `{id, type, props:{...}}` | 读取属性（缺省返回全部） |
 | `set` | `{id, props}` | `{changed:[...]}` | 设置属性/文本/值（触发重绘与 `ui.changed`） |
+| `ui.create` | `{type, props?, parent?, index?, key?, id?}` | `{id, type}` | **在线建元素**（与声明式共用工厂注册表；缺省 parent 挂 root 内容，指定则挂为子元素） |
+| `ui.remove` | `{id}` | `{removed, id}` | **在线删元素**（根元素时清空内容） |
 | `invoke` | `{id, action, args?}` | `{ok, state?}` | 动作：`click` `dblclick` `focus` `blur` `toggle` `select` `scroll_to` `submit` `open` `close` |
 | `input.mouse` | `{kind, x, y, button?, buttons?, modifiers?, delta?, to?}` | `{handled, hit}` | kind: `move` `down` `up` `click` `dblclick` `triple` `scroll` `drag` |
 | `input.key` | `{kind, key?, code?, text?, modifiers?, repeat?}` | `{handled, focused}` | kind: `press` `down` `up` `text` |

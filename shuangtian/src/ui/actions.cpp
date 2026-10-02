@@ -82,6 +82,48 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
   constexpr std::array<std::string_view, 9> kGenericSettable{
       "checked", "selected", "value", "text", "label", "icon", "options", "active",
       "scroll_offset"};
+  // 布局属性（容器通用，任何元素可设；落到 `Style` 并标脏布局）：声明式 UI 的
+  // Row/Column 与手搭代码/协议 `set` 共用同一份布局语义——不另立旁路（不变式 2）。
+  const auto apply_layout_property = [&element](const std::string& name,
+                                                const st::Json& value) -> bool {
+    Style& style = element.style();
+    const auto as_float = [&value]() -> float {
+      return value.is_number() ? static_cast<float>(value.get<double>())
+                               : std::strtof(st::json_as_string(value, "").c_str(), nullptr);
+    };
+    if (name == "gap") {
+      style.gap = as_float();
+    } else if (name == "padding") {
+      const float inset = as_float();
+      style.padding = math::Insets::all(inset);
+    } else if (name == "padding_x") {
+      const float inset = as_float();
+      style.padding.left = inset;
+      style.padding.right = inset;
+    } else if (name == "padding_y") {
+      const float inset = as_float();
+      style.padding.top = inset;
+      style.padding.bottom = inset;
+    } else if (name == "margin") {
+      const float inset = as_float();
+      style.margin = math::Insets::all(inset);
+    } else if (name == "width") {
+      style.width = as_float();
+    } else if (name == "height") {
+      style.height = as_float();
+    } else if (name == "grow") {
+      style.grow = st::json_as_bool(value, style.grow);
+    } else if (name == "radius") {
+      style.radius = as_float();
+    } else if (name == "direction") {
+      style.direction =
+          st::json_as_string(value, "") == "row" ? FlexDirection::Row : FlexDirection::Column;
+    } else {
+      return false;
+    }
+    element.mark_layout_dirty();
+    return true;
+  };
   for (const auto& [name, value] : props.items()) {
     bool applied = false;
     if (name == "enabled") {
@@ -97,6 +139,8 @@ auto apply_properties(ui::UiRoot& root, ui::Element& element, const Json& props)
       } else {
         applied = root.focused() != &element || root.set_focus(nullptr);
       }
+    } else if (apply_layout_property(name, value)) {
+      applied = true;
     } else {
       // 元素自己声明的属性面优先；未声明时回退到一份通用名（见函数注释）。
       const auto declared = element.property_names();

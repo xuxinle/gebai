@@ -262,6 +262,59 @@ ST_TEST(auth_correct_token_is_accepted) {
   }
 }
 
+ST_TEST(ui_create_and_remove_elements) {
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_REQUIRE(probe.call("hello").value("ok", false));
+
+  // 建：面板 → 按钮（带属性/key）
+  Json root_params = Json::object();
+  root_params["type"] = "Panel";
+  root_params["id"] = "created-root";
+  Json root_reply = probe.call("ui.create", root_params);
+  ST_CHECK(root_reply.value("ok", false));
+  ST_CHECK_EQ(root_reply["result"]["id"].get<std::string>(), "created-root");
+
+  Json button_params = Json::object();
+  button_params["type"] = "Button";
+  button_params["parent"] = "created-root";
+  button_params["key"] = "go";
+  Json button_props = Json::object();
+  button_props["label"] = "开始";
+  button_params["props"] = button_props;
+  Json button_reply = probe.call("ui.create", button_params);
+  ST_CHECK(button_reply.value("ok", false));
+  const std::string button_id = button_reply["result"]["id"].get<std::string>();
+
+  // 建出来的元素是**真值树的一员**：get/set 照常可用（同一份语义）
+  Json got = probe.call("get", Json{{"id", button_id}});
+  ST_CHECK(got.value("ok", false));
+  ST_CHECK_EQ(got["result"]["props"]["label"].get<std::string>(), "开始");
+  Json set_params = Json::object();
+  set_params["id"] = button_id;
+  Json new_props = Json::object();
+  new_props["label"] = "已改";
+  set_params["props"] = new_props;
+  ST_CHECK(probe.call("set", set_params).value("ok", false));
+  Json again = probe.call("get", Json{{"id", button_id}});
+  ST_CHECK_EQ(again["result"]["props"]["label"].get<std::string>(), "已改");
+
+  // 未知类型：明确报错（不静默成功）
+  Json bad = Json::object();
+  bad["type"] = "NoSuchWidget";
+  const Json bad_reply = probe.call("ui.create", bad);
+  ST_CHECK(bad_reply.contains("error"));
+
+  // 删：元素消失（find 不再命中）
+  Json remove_params = Json::object();
+  remove_params["id"] = button_id;
+  ST_CHECK(probe.call("ui.remove", remove_params).value("ok", false));
+  Json find_params = Json::object();
+  find_params["selector"] = "Button[label=已改]";
+  const Json find_reply = probe.call("find", find_params);
+  ST_CHECK_EQ(find_reply["result"]["matches"].size(), 0U);
+}
+
 ST_TEST(methods_before_hello_are_rejected) {
   TokenFixture fx;
   Probe probe(fx.port, fx.token);

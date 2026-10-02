@@ -388,6 +388,24 @@ auto ScriptHost::engine_version() const -> std::string {
                                                      : std::string();
 }
 
+auto ScriptHost::register_function(std::string name, ext::ScriptHostFunction function)
+    -> Status {
+  if (!valid()) return st::unexpected(st::ErrorCode::Unsupported, "脚本宿主未就绪");
+  return impl_->engine->register_function(std::move(name), std::move(function));
+}
+
+auto ScriptHost::pump_jobs() -> std::size_t {
+  if (!valid()) return 0;
+  return impl_->engine->pump_jobs();
+}
+
+auto ScriptHost::eval_prelude(std::string_view source, std::string_view filename)
+    -> Result<st::Json> {
+  if (!valid()) return st::unexpected(st::ErrorCode::Unsupported, "脚本宿主未就绪");
+  // 前置级：绕过 run_entry（不重建快照、不提交变更集）——基础设施不是页面逻辑
+  return impl_->engine->eval(source, filename);
+}
+
 auto ScriptHost::commit_count() const noexcept -> std::size_t {
   return impl_ != nullptr ? impl_->commit_count : 0;
 }

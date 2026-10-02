@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -514,6 +515,24 @@ auto ScriptEngine::check_syntax(std::string_view source) -> Status {
 // ————————————————————————————————————————————————————————————————————————————
 // 宿主绑定
 // ————————————————————————————————————————————————————————————————————————————
+
+auto ScriptEngine::pump_jobs() -> std::size_t {
+  if (!valid()) return 0;
+  std::size_t executed = 0;
+  // 把已入队的微任务全部跑完（job 里再排新 job 也一并处理）——挂起 job 不驱动就
+  // 永远不会跑（Promise.then 无人调用）。
+  JSContext* context = nullptr;
+  while (JS_IsJobPending(impl_->runtime)) {
+    if (JS_ExecutePendingJob(impl_->runtime, &context) < 0) {
+      // 不引 core/log（ext 层此前零日志依赖）——微任务失败经 stderr 可见即可
+      std::fprintf(stderr, "[script] 微任务失败: %s\n",
+                   describe_exception(impl_->context, limits_).c_str());
+      break;
+    }
+    ++executed;
+  }
+  return executed;
+}
 
 auto ScriptEngine::register_function(std::string name, ScriptHostFunction function) -> Status {
   if (!valid()) return unexpected(ErrorCode::Unsupported, "脚本引擎未就绪");
