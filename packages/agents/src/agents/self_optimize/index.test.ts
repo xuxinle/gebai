@@ -446,9 +446,14 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     expect(noIds.output).toContain("需要 ids")
     const bad = await selfOptimizeDef.tools!.backlog.execute({ action: "xx" }, c)
     expect(bad.output).toContain("无效的 action")
-    // 描述与提示词含离线优化引导（触发场景 + 暂存→ask 确认时机→全面优化流程）
+    // 描述与提示词含离线优化引导（触发场景 + 暂存→ask 确认时机→全面优化流程）。
+    // 分工：description 是**每次请求都注入**的固定成本，只留触发场景（工具名由 systemPrompt 给全）；
+    // systemPrompt 在装载时注入，承担精确工具名与流程细节——全名断言因此落在 systemPrompt 上。
     expect(selfOptimizeDef.description).toContain("重复试错")
-    expect(selfOptimizeDef.description).toContain("self_optimize_backlog")
+    expect(selfOptimizeDef.description).toContain("集中全面优化")
+    expect(selfOptimizeDef.systemPrompt).toContain("self_optimize_backlog")
+    expect(selfOptimizeDef.systemPrompt).toContain("self_optimize_journal")
+    expect(selfOptimizeDef.systemPrompt).toContain("self_optimize_read_feedback")
     expect(selfOptimizeDef.systemPrompt).toContain("离线优化（暂存 → 集中全面优化）")
     expect(selfOptimizeDef.systemPrompt).toContain("action=resolve")
     expect(selfOptimizeDef.systemPrompt).toContain("当场修复")
