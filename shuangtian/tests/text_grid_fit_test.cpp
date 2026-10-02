@@ -279,9 +279,12 @@ ST_TEST(grid_fit_guard_refuses_excessive_shift) {
   const auto accepted = st::text::grid_fit(original, {.mode = GridFitMode::Normal});
   ST_CHECK(accepted.applied);
   const auto points = accepted.path.raw_points();
-  // `round(0.5)` 向上取整（`std::round` 的“远离零”规则），所以左沿 → 1、右沿 → 2
-  ST_CHECK(std::fabs(points[0].x - 1.0f) < 0.01f);
+  // **锚点取位移更小的一侧**：右沿 2.0 已在网格上（位移 0），左沿 0.5 距离网格 0.5。
+  // 于是右沿不动，宽度量化到整数（round(1.5)=2）后**左沿**被推到 0.0。
+  // 两条边都在物理像素网格上，且宽度是整数——这正是“宽度一致性”的保证。
+  ST_CHECK(std::fabs(points[0].x - 0.0f) < 0.01f);
   ST_CHECK(std::fabs(points[1].x - 2.0f) < 0.01f);
+  ST_CHECK(std::fabs((points[0].x + points[1].x) * 0.5f - 1.0f) < 0.01f);
 
   // 收紧 max_shift 到 0.1 → 必须**拒绝**（保持原样）
   GridFitOptions strict;
@@ -415,4 +418,76 @@ ST_TEST(grid_fit_moves_curve_controls_with_endpoints) {
   if (std::fabs(start_delta - end_delta) < 1.0e-4f) {
     ST_CHECK(std::fabs(control_delta - start_delta) < 0.01f);
   }
+}
+
+/// ⑧ **吸附格点锚在物理像素上，与超采样倍率无关**（2026-10-02 修复的真回归）。
+///
+/// 起因：用户反馈「字体渲染远不如浏览器」。逐像素取样后定位到——拟合在**超采样坐标空间**
+/// 里吸整数，而本机 1.5× DPI 让渲染器用 `supersample=2`，于是吸附目标是“半个物理像素”，
+/// 拟合反而把边缘推入像素正中间（实测「霜」@20.25px 的 0.5 覆盖率像素由 25 涨到 **96**）；
+/// 阈值 `max_stem_width`/`max_shift` 也按采样单位比较，实际只剩一半宽。
+///
+/// 这条钉住三件事：
+/// 1. `grid=S` 时，拟合后的边缘落在 **S 的整数倍**上（= 物理像素边界）；
+/// 2. 同一笔画在 `grid=1`（等效 ss=1）与 `grid=2`（等效 ss=2）下**都**被吸到网格；
+/// 3. `grid` 不影响**物理像素**口径的形状语义：`max_stem_width` 等阈值在任何倍率下
+///    都放行同样的物理宽度。
+ST_TEST(grid_fit_snaps_to_physical_pixel_lattice_at_any_supersample) {
+  const auto build = [](float grid) {
+    // 一条竖笔画：宽 1.6 物理像素，两边缘落在 .42/.02 相位上
+    const float left = 4.42f * grid;
+    const float right = left + 1.6f * grid;
+    st::raster::Path path;
+    path.move_to(Point{left, 0.0f});
+    path.line_to(Point{right, 0.0f});
+    path.line_to(Point{right, 12.0f * grid});
+    path.line_to(Point{left, 12.0f * grid});
+    path.close();
+    return path;
+  };
+  for (const float grid : {1.0f, 2.0f}) {
+    const auto fitted = st::text::grid_fit(build(grid), {.mode = GridFitMode::Normal, .grid = grid});
+    ST_CHECK(fitted.applied);
+    const auto points = fitted.path.raw_points();
+    // 两条竖边的 x 都必须在 **grid 的整数倍**上（= 物理像素边界）
+    const float left_x = points[0].x;
+    const float right_x = points[1].x;
+    const float left_error = std::fabs(left_x / grid - std::round(left_x / grid));
+    const float right_error = std::fabs(right_x / grid - std::round(right_x / grid));
+    ST_CHECK(left_error < 0.01f);
+    ST_CHECK(right_error < 0.01f);
+    // 且宽度按**物理像素**计不少于 1px（不塌成零宽）
+    ST_CHECK((right_x - left_x) / grid >= 0.99f);
+  }
+
+  // **负例**（防止有人把参数改回 grid=1）：在 2 倍采样坐标里用整数格点，
+  // 边缘会落到**半个物理像素**上（半个采样格 = 物理像素非整数倍）。
+  const auto half_pixel = build(2.0f);
+  const auto old = st::text::grid_fit(half_pixel, {.mode = GridFitMode::Normal, .grid = 1.0f});
+  if (old.applied) {
+    const float old_left = old.path.raw_points()[0].x;
+    const float physical = old_left / 2.0f;
+    ST_CHECK(std::fabs(physical - std::round(physical)) > 0.3f);  // 确在非物理像素相位
+  }
+
+  // 3) 阈值物理口径：一条 **2.4 物理像素**宽的笔画（在 max_stem_width=2.6 以内）
+  //    在 2 倍采样下必须能被识别出来。旧口径（阈值不乘 grid）有效阈值只剩 1.3px，
+  //    会漏掉它——实测就靠这条定位了“2 倍采样下笔画几乎全漏”。
+  const auto wide = [](float grid) {
+    st::raster::Path path;
+    const float left = 3.2f * grid;
+    const float right = left + 2.4f * grid;
+    path.move_to(Point{left, 0.0f});
+    path.line_to(Point{right, 0.0f});
+    path.line_to(Point{right, 10.0f * grid});
+    path.line_to(Point{left, 10.0f * grid});
+    path.close();
+    return path;
+  };
+  ST_CHECK(st::text::grid_fit(wide(2.0f), {.mode = GridFitMode::Light, .grid = 2.0f}).vertical_stems >=
+           1);
+  // 阈值确实随 grid 换算：同一轮廓在 grid=1 口径下（2.4px → 4.8 采样单位）超过 2.6 阈值，
+  // 不被当作笔画——这正是“阈值必须乘 grid”的反面证据。
+  ST_CHECK(st::text::grid_fit(wide(2.0f), {.mode = GridFitMode::Light, .grid = 1.0f}).vertical_stems ==
+           0);
 }

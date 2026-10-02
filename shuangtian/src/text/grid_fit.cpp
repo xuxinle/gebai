@@ -20,8 +20,9 @@ struct Stem {
 };
 
 /// 沿笔画方向是否重叠（同一竖列的多个笔画一起处理）。
-[[nodiscard]] auto overlaps(const Stem& a, const Stem& b) -> bool {
-  return std::min(a.span_hi, b.span_hi) - std::max(a.span_lo, b.span_lo) > 1.0f;
+/// `grid` = 坐标空间相对物理像素的倍率（阈值按物理像素给，比较时换算）。
+[[nodiscard]] auto overlaps(const Stem& a, const Stem& b, float grid) -> bool {
+  return std::min(a.span_hi, b.span_hi) - std::max(a.span_lo, b.span_lo) > grid;
 }
 
 /// 逐轴位移（每个点一份；`active` 表示该点是否被任何一个笔画引用）。
@@ -43,13 +44,13 @@ void record(Shifts& shifts, std::size_t point, float delta) {
   shifts.active[point] = true;
 }
 
-/// 吸附目标：把 `value` 移到最近的整数（或半整数）。
-[[nodiscard]] auto snap_target(float value, GridFitMode mode) -> float {
-  // Light/Normal 都按"最近整数"吸附：这正是让边缘落在像素边界上的动作。
-  // （FreeType 的 center 策略是给等宽/CJK 用的，本框架的字形不含 hinting 指令，
-  //   直接对齐边缘的收益最大且形变可控。）
-  (void)mode;
-  return std::round(value);
+/// 吸附目标：把 `value` 移到最近的**物理像素网格**（`grid` = 采样单位/物理像素）。
+///
+/// `grid` 是这条链路上的关键：入参轮廓在**超采样空间**里（1 物理像素 = `supersample` 个单位）
+/// 时，吸附目标必须是 `supersample` 的整数倍。传 1 会吸到"半个物理像素"上——
+/// 拟合反而把边缘推进像素正中间（0.5 覆盖率糊边），笔画宽度还会随相位在 1px/2px 间跳。
+[[nodiscard]] auto snap_target(float value, float grid) -> float {
+  return std::round(value / grid) * grid;
 }
 
 /// 一条边（可能是直线，也可能是曲线）：`lo`/`hi` 是它沿**横轴**的范围（由 `axis` 决定
@@ -74,15 +75,18 @@ struct Edge {
 /// 宽度会直接超出 `max_stem_width`，而这些字真正的竖笔画（`b`/`d`/`h` 的主干）反而配不上对。
 /// 实测过带曲线边的版本：拉丁收益从 50.9% 掉到 22.1%。所以曲线**不进配对**，
 /// 只有直线边参与；曲线控制点仍会**跟随其端点**移动（见 `follow`），保住形状。
-[[nodiscard]] auto collect_stems(const std::vector<Edge>& edges, float max_width)
+///
+/// 阈值**都按采样单位**传入（调用方已用 `grid` 换算）：本函数在采样空间里工作，
+/// 只有吸附格点用 `grid` 回到物理像素。
+[[nodiscard]] auto collect_stems(const std::vector<Edge>& edges, float max_width, float grid)
     -> std::vector<Stem> {
   std::vector<Edge> candidates;
   for (const Edge& edge : edges) {
     if (edge.points.size() != 2U) continue;  // 只用**直线边**（见下方注释）
     const float across = edge.hi - edge.lo;
     const float along = edge.span_hi - edge.span_lo;
-    // 沿笔画方向要够长；横向范围要够窄（直线是 0，近垂直的曲线也不超过 0.25px）
-    if (along < 1.0f || across > 0.25f) continue;
+    // 沿笔画方向要够长（1 物理像素）；横向范围要够窄（直线是 0，近垂直的曲线也不超过 0.25px）
+    if (along < grid || across > 0.25f * grid) continue;
     candidates.push_back(edge);
   }
 
@@ -109,7 +113,7 @@ struct Edge {
       if (width <= 0.0f || width > max_width || width >= best_width) continue;
       const float span =
           std::min(low.span_hi, high.span_hi) - std::max(low.span_lo, high.span_lo);
-      if (span < 1.0f) continue;
+      if (span < grid) continue;
       best = other;
       best_width = width;
       best_x = high.lo;
@@ -244,11 +248,22 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
   shift_y.value.assign(points.size(), 0.0f);
   shift_y.active.assign(points.size(), false);
 
+  // 坐标空间 → 物理像素的换算：`grid` = 该空间下 1 物理像素占几个单位。
+  //
+  // 入参 `path` 由调用方按需要缩放（`TextRenderer` 在**超采样空间**里调用），
+  // 而拟合的**语义必须锚在物理像素上**：吸附格点、笔画宽度阈值、位移护栏
+  // 三件事全部按物理像素定义，再乘 `grid` 换算到当前空间。
+  // 曾经这些量直接用原始单位比较，于是超采样倍率一变，实际生效的阈值就随之减半
+  // （2 倍采样下只剩 1.3 物理像素宽的“笔画”能配对），拟合几乎全程袖手——
+  // 且吸附格点落在**半个物理像素**上，反而把边缘推入像素正中间。
+  const float grid = options.grid > 0.0f ? options.grid : 1.0f;
+  const float max_stem_width = options.max_stem_width * grid;  // 采样单位
+  const float max_shift = options.max_shift * grid;            // 采样单位
+
   const int axes = options.mode == GridFitMode::Normal ? 2 : 1;  // Light 只拟合竖笔画
   for (int axis = 0; axis < axes; ++axis) {
     Shifts& shifts = axis == 0 ? shift_x : shift_y;
-    std::vector<Stem> stems = collect_stems(collect_edges(path, offsets, axis),
-                                            options.max_stem_width);
+    std::vector<Stem> stems = collect_stems(collect_edges(path, offsets, axis), max_stem_width, grid);
     if (stems.empty()) continue;
     std::ranges::sort(stems, {}, &Stem::edge_lo);
     // 归组：沿笔画方向重叠者同组（同一竖列的多个笔画要一起动，否则间距会乱）
@@ -256,7 +271,7 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
     for (const Stem& stem : stems) {
       bool merged = false;
       for (auto& group : groups) {
-        if (overlaps(group.front(), stem)) {
+        if (overlaps(group.front(), stem, grid)) {
           group.push_back(stem);
           merged = true;
           break;
@@ -265,20 +280,37 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
       if (!merged) groups.push_back({stem});
     }
     for (const auto& group : groups) {
-      // **两侧边缘各自吸附**（而不是整条笔画一起平移）：
-      // 只平移的话右边缘仍在分数相位上，等于只解决一半——实测那样做
-      // "每边各一个过渡像素"的缓坡只消失一半。
+      // **宽度量化 + 单边锚定**（而不是整条笔画平移，也不是两侧各自吸整数）：
+      // 只平移的话另一侧仍在分数相位上（只解决一半）；两侧各自独立吸整数又会
+      // 让宽度随相位跳——量化宽度才同时满足"边缘在网格"与"宽度一致"。
       for (const Stem& stem : group) {
-        const float lo_target = snap_target(stem.edge_lo, options.mode);
-        const float hi_target = snap_target(stem.edge_hi, options.mode);
-        // 吸附后不能塌成零宽（亚像素笔画确实存在）：不足 1px 就撑到 1px
-        const float lo_delta = lo_target - stem.edge_lo;
-        float hi_delta = hi_target - stem.edge_hi;
-        if (hi_target - lo_target < 1.0f) hi_delta = lo_target + 1.0f - stem.edge_hi;
-        if (std::abs(lo_delta) <= options.max_shift) {
+        // **宽度先量化到整数**（下限 1 物理像素）——这是"宽度一致性"的来源。
+        //
+        // 只让两侧各自吸到最近网格的话，1.5px 的笔画会在 1px 与 2px 之间
+        // 随该字形的相位跳——同类笔画粗细不齐，且墨量随相位波动
+        //（实测拉丁 @16px 墨量 +8.7%，就是这一步的产物）。
+        // 量化宽度后，**同类笔画的宽度恒等**，另一侧也跟着落在网格上（整数宽）。
+        const float width_px = (stem.edge_hi - stem.edge_lo) / grid;
+        const float quantized = std::max(1.0f, std::round(width_px)) * grid;
+        // 锚点取**移动更小**的一侧：吸住它，另一侧由量化后的宽度推出
+        // （整数宽度 ⇒ 两边都在网格上）。选更小的一侧是为了少动字形。
+        const float lo_anchor = snap_target(stem.edge_lo, grid);
+        const float hi_anchor = snap_target(stem.edge_hi, grid);
+        const float lo_anchor_delta = lo_anchor - stem.edge_lo;
+        const float hi_anchor_delta = hi_anchor - stem.edge_hi;
+        float lo_delta = 0.0f;
+        float hi_delta = 0.0f;
+        if (std::abs(lo_anchor_delta) <= std::abs(hi_anchor_delta)) {
+          lo_delta = lo_anchor_delta;
+          hi_delta = (stem.edge_lo + lo_delta + quantized) - stem.edge_hi;
+        } else {
+          hi_delta = hi_anchor_delta;
+          lo_delta = (stem.edge_hi + hi_delta - quantized) - stem.edge_lo;
+        }
+        if (std::abs(lo_delta) <= max_shift) {
           for (const std::size_t point : stem.lo_points) record(shifts, point, lo_delta);
         }
-        if (std::abs(hi_delta) <= options.max_shift) {
+        if (std::abs(hi_delta) <= max_shift) {
           for (const std::size_t point : stem.hi_points) record(shifts, point, hi_delta);
         }
       }
@@ -287,20 +319,28 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
     }
   }
 
-  // 护栏①：平均位移超限 → 放弃（宁可保持原样，也不让字形走样）。
+  // 护栏①：**整体平移**超限 → 放弃。
   //
-  // **必须按全部点摊销**，而不是只算“被移动的点”：笔画本来就该动 0..0.5px，
-  // 只按移动点平均的话，任何有笔画的字都会算出 0.25~0.31 而被护栏误拒
-  // （实测：H/N/m/霜 全部被拒，拉丁收益因此只剩一半）。
-  // 按全部点摊销得到的才是“字形整体被挪了多少”，这才是形变的正确度量。
+  // 度量 = 各轴位移的**有符号均值**（= 字形整体被平移了多少像素）。
+  //
+  // 为什么不是“每点 |位移| 的均值”：那个量**随笔画密度单调上升**——笔画越多的字
+  // （国/回/目/霜 这类最需要锐化的 CJK）必然算出更大的值，于是**恰恰把收益最大的字形
+  // 全部拒之门外**（实测 ss=2：口 0.27 / 国 0.27 / 回 0.32 / 目 0.33 / 霜 0.26，全部超阈）。
+  // 而护栏的初衷是“不许把字挪出去”（见头文件）——那就该量“整体平移”本身：
+  // 各边向两侧吸附时正负抵消，符号均值接近零；真平移（全往一边跑）才会顶到阈值。
+  // 局部形变另有护栏：单边位移 ≤ `max_shift`。
+  float sum_x = 0.0f;
+  float sum_y = 0.0f;
   float total = 0.0f;
   std::size_t moved = 0;
   for (std::size_t point = 0; point < points.size(); ++point) {
     if (shift_x.active[point]) {
+      sum_x += shift_x.value[point];
       total += std::abs(shift_x.value[point]);
       if (std::abs(shift_x.value[point]) > 1.0e-4f) ++moved;
     }
     if (shift_y.active[point]) {
+      sum_y += shift_y.value[point];
       total += std::abs(shift_y.value[point]);
       if (std::abs(shift_y.value[point]) > 1.0e-4f) ++moved;
     }
@@ -309,8 +349,13 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
   // 如实报 `applied=false`。曾经这里只看“有没有被标记为 active”，
   // 于是零位移也被当成“已拟合”（调用方无从区分）。
   if (moved == 0) return result;
-  result.mean_shift = total / static_cast<float>(points.size());
-  if (result.mean_shift > options.max_mean_shift) return result;
+  // 两个口径都报**物理像素**（与阈值同口径，跨采样倍率可比较）：
+  // - `mean_shift`：形变量（逐点 |位移| 均值），只作诊断；
+  // - `drift`：整体平移量（有符号均值），护栏用的是它。
+  const float point_count = static_cast<float>(points.size());
+  result.mean_shift = total / point_count / grid;
+  result.drift = std::max(std::abs(sum_x), std::abs(sum_y)) / point_count / grid;
+  if (result.drift > options.max_drift) return result;
 
   // 曲线控制点**按参数权重跟随两端点**：只挪端点不动控制点会让曲线形状变样，
   // 那比不拟合更糟。二次贝塞尔控制点权重 1:2，三次贝塞尔 1:3（标准 Bernstein 系数），

@@ -600,7 +600,14 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     const int height = max_y - min_y;
     // **网格拟合**：把笔画边缘吸附到像素网格。在像素空间做（坐标变换之后、
     // 栅格化之前），且用上一步的稳定网格——拟合只改边缘相位，不改位图尺寸。
-    const raster::Path fitted = st::text::grid_fit(transformed, {.mode = grid_fit_}).path;
+    //
+    // 在**输出位图局部坐标**里拟合（先平移 `-min_x/-min_y`）：吸附格点因此锚定在
+    // **位图自己的物理像素边界**上。直接在轮廓坐标里用整数格点会错位——
+    // 位图原点是 `floor(bounds)-1`，与轮廓坐标的整数格点相差一个任意小数部分。
+    const raster::Path local_unfitted =
+        transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
+    const raster::Path fitted = st::text::grid_fit(
+        local_unfitted, {.mode = grid_fit_, .grid = static_cast<float>(supersample)}).path;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
       const int out_width = std::max(1, width / supersample);
       const int out_height = std::max(1, height / supersample);
@@ -618,9 +625,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           bitmap->format = raster::CoverageFormat::Grayscale;
         }
         raster::Canvas scratch(width, height);
-        raster::Path local =
-            fitted.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
-        scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
+        scratch.fill_path(fitted, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
         bitmap->coverage.assign(output_pixels, 0.0f);
         for (int y = 0; y < out_height; ++y) {
           for (int x = 0; x < out_width; ++x) {
@@ -659,10 +664,12 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         // （不这么做的话，亚像素路径会把拟合后的轮廓直接放大，
         //   位移也跟着被乘 3——相位就完全错了。）
         if (grid_fit_ != GridFitMode::Off) {
-          const auto base_points = transformed.raw_points();
+          const auto base_points = local_unfitted.raw_points();
           const auto fitted_points = fitted.raw_points();
           if (base_points.size() == fitted_points.size() &&
               fitted_points.size() == local.raw_points().size()) {
+            // `fit_dx` 是**位图局部**位移（拟合在局部坐标里做的），与轮廓坐标
+            // 只差平移：delta 逐点相减后平移量自然消去。水平放大 3 倍同步。
             const float horizontal = static_cast<float>(kSubpixelColumns);
             auto scaled_points = local.raw_points();
             for (std::size_t index = 0; index < scaled_points.size(); ++index) {

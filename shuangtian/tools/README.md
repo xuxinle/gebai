@@ -30,6 +30,9 @@
 | `stem_phase_probe.cpp` | **小字锐度量尺**：统计竖笔画的边缘相位与过渡带像素数（“边缘落在整数网格”占比、“最糊相位”占比），用于量化网格拟合/hinting 的收益与验收（仅验证用，编译同 `lcd_compare.cpp`） |
 | `hinting_gain_probe.cpp` | **hinting 收益测量台**：用 FreeType 把「无 hinting / TARGET_LIGHT / 完整 TT 指令 / auto-hinter / MONO」各档对竖笔画边缘网格对齐率的改善量出来，用来**选实现方向**而不是拍脑袋选最大的那个（需 `-I/usr/include/freetype2 -lfreetype`） |
 | `grid_fit_report.cpp` | 网格拟合**收益量尺**：中间调占比（越低越锐）+ 墨量变化（形变护栏），逐字号逐文字类型 |
+| `grid_fit_sampling_diag.cpp` | **拟合采样格量尺**：逐 supersample 档打印笔画数/生效数/**边缘命中物理像素网格的比例**（比 `grid=1` 与 `grid=supersample`）——用户反馈「拟合没生效/反而更糊」时先跑它 |
+| `fit_apply_diag.cpp` | **逐字形生效性量尺**：打印每个字的 `applied`/`vertical_stems`/`mean_shift`/`drift`——护栏是否把 CJK 整体拒掉（`drift` 是判定量）一眼可见 |
+| `text_quality_probe.cpp` | **文字质量量尺**：字形覆盖率矩阵（ASCII 直接看轮廓连续性）+ 笔画横截面（宽度一致性：沿长 sd/质心漂移/过渡像素）+ **覆盖率档位直方图**（50% 像素过多 = 拟合把边缘推进了像素正中间）；支持与浏览器截图对照 |
 | `lcd_ink_probe.cpp` | **ink 口径分解探针**：逐字形打印「亚像素 vs 灰度」的逐像素平均偏差（滤波开/关两栏），用于定位 ink 口径超阈的构成（2026-10-02 用它确认超阈来自滤波摊墨而非字形走样） |
 | `st_visual_check.py` | 视觉树与截图核对 |
 | `st_project_check.py` | 独立工程结构检查 |
