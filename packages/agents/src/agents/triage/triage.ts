@@ -20,13 +20,9 @@ import systemPromptBase from "./triage.md"
 
 export const name = "triage"
 export const description =
-  "通用的大小模型协同：把大量条目交给便宜的小模型批量粗筛（结构化输出 + 置信度），" +
-  "低置信度、0 置信度、证据为空或未按约定输出结果的条目，按 escalate 决定是否交给大模型精审兜底——由歌白 Agent 引擎执行，" +
-  "可装载领域子Agent 主动取证并给出证据链；escalate=false 时只跑小模型，低置信度结论按原样输出。" +
-  "适用于训练任务失败分析、日志异常分类、工单分诊、舆情研判、代码缺陷定位等「先快速分流、再重点深挖」的场景；" +
-  "接入新场景只需写一个把领域数据转成统一特征描述的适配器。" +
-  "输入：全量信息数组（或条目文件）+ 推理目标 + 结构化输出 schema + 置信度阈值 + 兜底开关；" +
-  "输出：结论数组（逐条含置信度与由 schema 定义的结论，L2 额外带取证链与修正标记）。"
+  "通用的大小模型协同：把大量条目交给便宜的小模型批量粗筛（结构化输出 + 置信度），低置信度、0 置信度、证据为空或未按约定输出结果的条目按 escalate 交大模型精审兜底（可装载领域子Agent 主动取证并给出证据链）；escalate=false 时只跑小模型。" +
+  "适用于训练任务失败分析、日志异常分类、工单分诊、舆情研判、代码缺陷定位等「先快速分流、再重点深挖」的场景。" +
+  "逐条落盘、同 job_id 续跑复用已有小模型结果。输入：全量信息数组（或条目文件）+ 推理目标 + 结构化输出 schema + 置信度阈值 + 兜底开关。"
 export const systemPrompt = systemPromptBase
 
 function schema(properties: Record<string, unknown>, required: string[] = []): ToolSchema {

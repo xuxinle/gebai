@@ -349,31 +349,30 @@ async function showHtml(ctx: ToolContext, html: string, base: string, width: unk
 export const showTool: Tool = {
   name: "show",
   description:
-    "向用户展示内容（聊天界面内联呈现）——内容与路径二选一：①创作——content（内容）+ format 指定格式（图表语言 Mermaid/PlantUML/D2/ECharts、html 页面、或文本型 markdown/code/text，选型见 format 参数）：图表分支前端实时渲染验证，渲染成功才返回成功、失败返回错误供修正；html 分支沙箱 iframe 域隔离预览（仅 Web 前端通道）；文本型分支（markdown/code/text）内容在文件内容卡内联呈现（markdown 渲染为文档、code 按语言高亮、text 纯文本），并落盘会话 tmp/ 产物供下载/回看。②交付已有文件——path（路径）按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件（.puml/.mmd/.d2/.echarts）渲染成图表、.html 页面预览、markdown（.md/.markdown）渲染为文档（而非源码高亮）、音频/视频在文件卡内联播放（可拖进度）、其余文本/代码语法高亮内联、无扩展名纯文本（LICENSE/Makefile 等）按内容探测后内联、其余类型给查看/下载卡片（显式传 format 时按该格式解释，不按扩展名推断）。产物保存到会话 tmp/ 并返回内容块。",
+    "向用户展示内容（聊天界面内联呈现）——content（内容）与 path（已有文件）二选一：content 须同时传 format（图表语言 Mermaid/PlantUML/D2/ECharts、html 页面、文本型 markdown/code/text），图表分支渲染成功才返回成功、失败返回错误供修正；path 按**文件真实类型**直显（与 name 无关），适合交付产物或需用户过目的文件。产物落盘会话 tmp/ 并返回内容块。",
   card: { args: "block" },
   parameters: schema(
     {
-      name: { type: "string", description: "展示名/产物主名（不含扩展名；未传时图表默认 diagram、HTML 默认 page、path 模式默认取文件主名）。**仅影响展示名与产物文件名，不参与类型/语言判断**（类型按真实文件路径或 format 推断）" },
+      name: { type: "string", description: "展示名/产物主名（不含扩展名；未传时图表默认 diagram、HTML 默认 page、path 模式取文件主名）。**仅影响展示名与产物文件名，不参与类型判断**" },
       format: {
         enum: [...SHOW_FORMAT_VALUES],
         description:
-          "内容格式（content 必选；path 可选，未传时按文件真实类型/扩展名推断）：\n" +
-          "【html】HTML 页面——内容按页面渲染（沙箱 iframe 域隔离预览，仅 Web 前端实时通道；width/height 可指定预览尺寸）。\n" +
-          "【mermaid】流程图/时序图/状态图/甘特图/用户旅程、Markdown 文档嵌入、简单架构；语法最简。\n" +
-          "【plantuml】类图/组件图/部署图/用例图/活动图/ER 图等标准 UML 与严谨建模，功能最全。\n" +
-          "【d2】系统架构/云架构/网络拓扑/微服务等对外展示场景（PPT/汇报），默认布局最现代。\n" +
-          "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等数据可视化与统计图表；content 传 option 的严格 JSON（键名与字符串一律双引号，值禁止函数），可选信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸（默认 960×600）；图例默认在画布底部，与标题同顶冲突时渲染器自动下移避让，无需手动设置 legend.top。\n" +
-          "【markdown】markdown 文档（标题/列表/表格/引用/代码块）——content 传 markdown 源码，渲染为排版文档；也可把任意文本文件经 path + format:\"markdown\" 按文档解释。\n" +
-          "【code】源码/配置文件——content 传源码，可选 `language` 指定高亮语言（如 typescript/python/bash/json/yaml/sql），缺省按路径扩展名推断；产物文件名按语言带扩展名。\n" +
-          "【text】纯文本（日志/命令输出/配置片段等）——不做语法高亮，原样内联呈现。\n" +
-          "组合场景：设计文档=plantuml 类图/组件图 + mermaid 流程图；架构汇报=d2 全景架构图 + plantuml 详细组件图；数据分析=echarts 统计图表；长文/说明=markdown 文档。",
+          "内容格式（content 必选；path 可选，未传时按扩展名推断）：\n" +
+          "【html】HTML 页面（沙箱 iframe 预览，仅 Web 实时通道；width/height 可指定尺寸）。\n" +
+          "【mermaid】流程图/时序图/状态图/甘特图/用户旅程、Markdown 嵌入、简单架构；语法最简。\n" +
+          "【plantuml】类图/组件图/部署图/用例图/活动图/ER 图等标准 UML，功能最全。\n" +
+          "【d2】系统架构/云架构/网络拓扑/微服务等对外展示（PPT/汇报），默认布局最现代。\n" +
+          "【echarts】柱状/折线/饼图/散点/雷达/仪表盘/热力图/地图等统计图表；content 传 option 的严格 JSON（键与字符串双引号，值禁止函数），可用信封 {\"option\": {...}, \"width\": 960, \"height\": 600} 指定画布尺寸。\n" +
+          "【markdown】文档：content 传源码；也可把文本文件经 path + format:\"markdown\" 按文档解释。\n" +
+          "【code】源码/配置：content 传源码，可选 language 指定高亮语言。\n" +
+          "【text】纯文本：不语法高亮，原样内联。",
       },
-      content: { type: "string", description: "内容（与 path 二选一：直接给内容用 content，已有文件用 path），解释方式由 format 决定；必须同时传 format。**图表源码**——PlantUML 布局：流程/时序类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包；勿手动添加 @startuml/@enduml（自动补全）。ECharts 源码要求见 format 说明。**HTML 源码**——完整文档或片段均可（自动补全为完整页面）；沙箱 iframe 域隔离预览：脚本可执行但运行在隔离源内，无法访问宿主页面 DOM/存储/顶层导航；适合网页原型、数据报表、卡片、可视化组件等；样式用内联 CSS，图片用 data: URI 或外部 URL。**文本型源码**——markdown/code/text 直接传文本内容（长文档/源码交付用，避免在回复正文里堆长文）。" },
-      path: { type: "string", description: "已有文件路径（与 content 二选一），按**文件真实类型**直显（与 name 无关）：图片内联、图表源文件渲染成图表、.html 页面预览、markdown 渲染为文档、其余文本/代码语法高亮内联、无扩展名纯文本按内容探测后内联、其余查看/下载卡片——适合交付产物或需用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给工作区/绝对路径（会话外文件会复制一份，≤100MB）；显式传 format 时按该格式解释文件内容" },
-      language: { type: "string", description: "语法高亮语言（可选，仅 `format: \"code\"` 用；如 typescript/python/bash/json/yaml/sql——缺省按 path 的文件扩展名推断，无法推断时由前端自动识别）。" },
-      render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（可选微调，仅图表分支；默认 frontend，首选前端渲染降低服务端负载）：frontend（浏览器本地渲染 SVG，可交互缩放、零服务端开销）/ backend（服务端渲染成 PNG 图片落盘 tmp/，仅导出/分享图片等确需 PNG 文件时使用，四语言均支持；前端渲染不可用（收到「画图能力受限」）时改用 backend 重试）" },
-      width: { type: "number", description: "HTML 预览宽度（px，可选微调，仅 html 分支，默认铺满消息流宽度）" },
-      height: { type: "number", description: "HTML 预览高度（px，可选微调，仅 html 分支，不传默认取会话区域高度的 2/3）" },
+      content: { type: "string", description: "内容（与 path 二选一；须同时传 format）。**图表源码**——PlantUML 布局：流程/时序类显式 `left to right direction` 或保持默认纵向，勿逐条连线硬控方向；关系紧密的节点用 `together { … }` 保持相邻；节点 ≤20 个，大图按层拆包；勿手动加 @startuml/@enduml（自动补全）。**HTML 源码**——完整文档或片段均可；沙箱 iframe 预览无法访问宿主 DOM/存储；样式用内联 CSS。**文本型**——markdown/code/text 直接传文本。" },
+      path: { type: "string", description: "已有文件路径（与 content 二选一），按**文件真实类型**直显（与 name 无关）——适合交付产物或需用户过目的文件。会话内路径（tmp/ 前缀可省略）；本地模式也可给绝对路径（会话外文件会复制一份，≤100MB）；显式传 format 时按该格式解释。" },
+      language: { type: "string", description: "语法高亮语言（仅 format:\"code\" 用；缺省按 path 扩展名推断）。" },
+      render: { enum: ["frontend", "backend"], default: "frontend", description: "渲染通道（仅图表分支，默认 frontend 降服务端负载）：frontend（浏览器本地渲染 SVG）/ backend（服务端渲染 PNG 落盘 tmp/，仅导出/分享图片时用；前端不可用时改用它重试）" },
+      width: { type: "number", description: "HTML 预览宽度（px，仅 html 分支，默认铺满消息流）" },
+      height: { type: "number", description: "HTML 预览高度（px，仅 html 分支，缺省取会话区域高度 2/3）" },
     },
     [],
   ),

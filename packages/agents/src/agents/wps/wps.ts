@@ -9,7 +9,8 @@ import systemPromptBase from "./wps.md"
 
 export const name = "wps"
 export const description =
-  "涉及 Word/Excel/PPT/PDF 文档时装载本子Agent：.docx/.xlsx/.pptx 的创建/读取/追加/编辑与富排版（标题层级、表格、图表、图片嵌入、单元格样式、母版布局、页眉页脚），csv/tsv 读取；PDF 的创建（中文字体嵌入）/读取/合并/拆分/页面编辑；旧版 .doc/.xls/.ppt 不支持。输入：文档需求或现有文档路径；输出：产物文件路径与内容摘要。"
+  "涉及 Word/Excel/PPT/PDF 文档时装载本子Agent：.docx/.xlsx/.pptx 的创建/读取/追加/编辑与富排版（标题层级、表格、图表、图片嵌入、单元格样式、母版布局、页眉页脚），csv/tsv 读取；PDF 的创建（中文字体嵌入）/读取/合并/拆分/页面编辑；旧版 .doc/.xls/.ppt 不支持。" +
+  "输入：文档需求或现有文档路径。"
 export const systemPrompt = systemPromptBase
 export const tools = {
   word_create: projectAware(wordCreateTool),

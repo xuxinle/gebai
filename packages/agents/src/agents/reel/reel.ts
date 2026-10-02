@@ -10,7 +10,8 @@ import systemPromptBase from "./reel.md"
 
 export const name = "reel"
 export const description =
-  "产品视频制作（电影感宣传片/demo reel，也支持单镜头动效复刻）：把前端项目/网页/桌面产品做成成片——分镜、2.5D 真实页面运镜、节奏卡点与声音设计，配音与字幕全程本地（本机离线语音引擎 + 帧号同源的字幕烧入与 SRT 交付，不联网）。创作能力内置于本包（设计 token、18 个镜头原语、2.5D 相机、时间线骨架），reel_project init 落位成可编辑工程；渲染进程内直连 @remotion/renderer（热打包 + 热浏览器复用，有 GPU 自动启用 NVENC/VideoToolbox 硬件编码与 Chrome GPU 光栅化，无 GPU 落软件档并如实说明）。浏览器可执行文件与原生二进制目录均可配置（参数/环境变量/.reel.json），内网/离线环境不依赖联网下载。输入：产品/页面/素材与视频需求；输出：成片、静帧/预览与渲染档报告。"
+  "产品视频制作（电影感宣传片/demo reel，也支持单镜头动效复刻）：把前端项目/网页/桌面产品做成成片——分镜、2.5D 真实页面运镜、节奏卡点与声音设计，配音与字幕全程本地（离线语音引擎 + 字幕烧入与 SRT 交付，不联网）。创作能力内置于本包（设计 token、18 个镜头原语、2.5D 相机、时间线骨架），reel_project init 落位成可编辑工程。浏览器可执行文件与原生二进制目录可配置（参数/环境变量/.reel.json），内网/离线不依赖联网下载。" +
+  "输入：产品/页面/素材与视频需求；输出：成片、静帧/预览与渲染档报告。"
 export const systemPrompt = systemPromptBase
 export const tools = {
   setup: setupTool,

@@ -152,7 +152,7 @@ function normalizeChoiceOption(o: unknown): ChoiceOption {
 export const askTool: Tool = {
   name: "ask",
   description:
-    "向用户询问并**阻塞等待回应**（统一入口，按参数三选一）：①选项询问——prompt + options（multi=true 可多选），用户点选/输入自定义文本/拒绝，适合方案确认与方向决策。②环境变量填值——name（+description 用途说明、secret 敏感掩码），前端弹窗填值后注入本次任务环境并保存浏览器本地，适合缺必需凭证（API 密钥/Token）时索取。③计划审批——title + steps（或 content 完整 Markdown），计划写入会话文件并展示全文，批准后严格按计划执行、拒绝可附修改意见修订重提（多步骤/有风险/需用户把关的任务用；简单任务用 todo 跟踪即可）。",
+    "向用户询问并**阻塞等待回应**（统一入口，按参数三选一）：①选项询问——prompt + options（multi=true 可多选），适合方案确认与方向决策。②环境变量填值——name（+description 用途说明、secret 敏感掩码），前端弹窗填值后注入本次任务环境并保存浏览器本地，适合缺必需凭证时索取。③计划审批——title + steps（或 content），批准后严格按计划执行、拒绝可附修改意见重提（多步骤/有风险/需用户把关的任务用；简单任务用 todo）。",
   card: { args: "none" },
   parameters: schema(
     {
@@ -168,12 +168,12 @@ export const askTool: Tool = {
         },
       },
       multi: { type: "boolean", description: "选项询问是否多选（默认单选）" },
-      name: { type: "string", description: "环境变量填值分支（触发填值分支）：变量名（如 FEISHU_DOCS_APP_ID，仅字母/数字/下划线）" },
+      name: { type: "string", description: "（填值分支）变量名（如 FEISHU_DOCS_APP_ID，仅字母/数字/下划线）" },
       description: { type: "string", description: "（填值分支）变量用途说明（展示给用户）" },
-      secret: { type: "boolean", description: "（填值分支）是否敏感值（掩码显示，默认 false）" },
-      title: { type: "string", description: "计划审批分支（触发计划分支）：计划标题（如「重构订单模块」）" },
+      secret: { type: "boolean", description: "（填值分支）敏感值掩码显示（默认 false）" },
+      title: { type: "string", description: "（计划分支）计划标题" },
       steps: { type: "array", items: { type: "string" }, description: "（计划分支）执行步骤清单（每步一句可执行动作；与 content 二选一）" },
-      content: { type: "string", description: "（计划分支）可选：完整计划 Markdown 正文（提供时覆盖 steps 自动拼装，用于复杂嵌套/表格）" },
+      content: { type: "string", description: "（计划分支）可选：完整计划 Markdown 正文（提供时覆盖 steps，用于复杂嵌套/表格）" },
     },
     [],
   ),

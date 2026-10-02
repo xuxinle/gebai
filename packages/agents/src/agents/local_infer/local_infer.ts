@@ -9,7 +9,8 @@ import { requiresApproval as taskApproval, tools as taskTools } from "./tasks"
 
 export const name = "local_infer"
 export const description =
-  "本地推理引擎（llama.cpp，跨平台跨设备）的全生命周期管理与统一调用入口：**引擎供给**（引擎矩阵/设备探测/下载安装，覆盖 Windows/Linux/macOS × CPU/CUDA/Vulkan/Metal/ROCm/SYCL；**内网/离线时发现 resources 下的源码就地自动编译**）、**进程管理**（状态/启停/重启/日志，不依赖 PowerShell）、**统一推理目标**（本机 / 局域网端点 / 云端 OpenAI 兼容端点，命名目标与鉴权）、**批量提交推理任务**（generate/batch/jobs，含后台执行、进度与断点续跑）、**结构化输出**（JSON Schema 约束解码 + 校验重试）。需要跑本地或自建大模型、批量跑结构化抽取/分类/生成任务、或在无 GPU / 非 Windows / 无外网环境部署推理时装载。输入：运维意图或推理任务；输出：引擎与任务状态、结构化结果、实测吞吐。"
+  "本地推理引擎（llama.cpp，跨平台跨设备）的全生命周期管理与统一调用入口：**引擎供给**（引擎矩阵/设备探测/下载安装，覆盖 Windows/Linux/macOS × CPU/CUDA/Vulkan/Metal/ROCm/SYCL；**内网/离线时发现 resources 下的源码就地自动编译**）、**进程管理**（状态/启停/重启/日志）、**统一推理目标**（本机/局域网端点/云端 OpenAI 兼容端点）、**批量推理任务**（后台执行、进度与断点续跑）、**结构化输出**（JSON Schema 约束解码 + 校验重试）。" +
+  "需要跑本地或自建大模型、批量跑结构化抽取/分类/生成任务、或在无 GPU/非 Windows/无外网环境部署推理时装载。输入：运维意图或推理任务。"
 export const systemPrompt =
   "你负责 GEBAI 的推理引擎（子项目 infer/）。**核心设计：推理不绑定操作系统、不绑定 GPU**——引擎矩阵覆盖 Windows/Linux/macOS × CPU/CUDA/Vulkan/Metal/ROCm/SYCL，调用面统一为 OpenAI 兼容端点，目标可以是本机、局域网另一台机器或云端端点。\n" +
   "**工具**：\n" +

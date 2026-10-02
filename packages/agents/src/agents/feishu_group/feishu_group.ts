@@ -25,7 +25,7 @@ export interface FeishuGroupDeps {
 
 export const name = "feishu_group"
 export const description =
-  "飞书群基础能力：查询机器人所在的群列表/群详情/群成员（open_id+姓名，@特定人与任务通知的取材来源）、按 open_id 查用户信息、向群发文本消息，以及群维护（建群/改群名描述/拉人/移人/解散）。需要群成员名单、群管理或为任务通知配 @ 人/指定群时装载本子Agent。需配置 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_APP_ID/SECRET。"
+  "飞书群基础能力：查询机器人所在的群列表/群详情/群成员（open_id+姓名，@特定人与任务通知的取材来源）、按 open_id 查用户信息、向群发文本消息，以及群维护（建群/改群名描述/拉人/移人/解散）。需配置 FEISHU_GROUP_APP_ID/SECRET 或全局 GEBAI_FEISHU_APP_ID/SECRET。"
 export const systemPrompt =
   "你是飞书群管理助手，以应用身份（tenant_access_token）操作飞书群基础能力。工具经本子Agent 命名空间暴露（feishu_group_ 前缀）。工作要点：\n" +
   "1) 查询类（免审批）：chats_list 列出机器人所在的群（chat_id/名称/描述，分页）；chat_info 群详情（名称/描述/群主/成员数）；members_list 群成员分页列表（open_id + 姓名——@ 特定人与任务通知 at 名单的 open_id 来源）；user_info 按 open_id 查用户姓名等信息；\n" +

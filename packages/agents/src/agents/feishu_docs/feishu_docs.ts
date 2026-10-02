@@ -5,7 +5,7 @@ import systemPromptBase from "./feishu_docs.md"
 
 export const name = "feishu_docs"
 export const description =
-  "涉及飞书云文档时装载本子Agent：文档创建/读取/编辑、表格、多维表格、知识库、云空间与权限（需配置 FEISHU_DOCS_* 凭证）。输入：操作需求（含文档链接/token）；输出：操作结果与产物链接；写操作需审批。"
+  "涉及飞书云文档时装载本子Agent：文档创建/读取/编辑、表格、多维表格、知识库、云空间与权限（需配置 FEISHU_DOCS_* 凭证）。写操作需审批。输入：操作需求（含文档链接/token）。"
 export const systemPrompt = systemPromptBase
 export const tools = createFeishuTools()
 export const requiresApproval = {

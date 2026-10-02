@@ -5,7 +5,7 @@ import { gitTool, makePreviewServerTool, envDetectTool, systemInfoTool } from ".
 
 export const name = "code"
 export const description =
-  "涉及代码编写与源码分析时装载本子Agent（不处理歌白自身代码，自我优化用 self_optimize）：新建/修改项目与功能实现、代码分析、问题定位修复；装载后按 探索→方案→修改→验证 流程执行，改动较多时优先 patch。输入：需求/问题描述；输出：代码修改方案与验证结果。"
+  "涉及代码编写与源码分析时装载本子Agent（不处理歌白自身代码，自我优化用 self_optimize）：新建/修改项目与功能实现、代码分析、问题定位修复；装载后按 探索→方案→修改→验证 流程执行，改动较多时优先 patch。输入：需求/问题描述。"
 export const systemPrompt =
   "你是源码分析与修改专家（工作流参考 opencode 编码助手）。文件读写查询（read/write/edit/patch/ls/grep/glob/file/sh/py）与交互编排（ask/todo/subsession_run/fetch_url）为全局工具，直接用全局名调用；本子Agent 补充编码专属工具（search_symbols/analyze/git/preview_server/env_detect/system_info，以 code_ 前缀调用）。工作流程：\n" +
   "0) 环境确认：开工前先读本提示词开头注入的项目环境注记（项目根/工作目录、预置项目清单、受限模式说明）——目标代码所在项目与 project 参数取值由此确定；分析某系统/服务源码时，先在预置项目清单（名称/说明/路径）中定位系统本体，警惕与目标同名的 API 封装/适配层（网关封装 ≠ 被管理系统源码），不要在其上浪费时间；清单确无对应项目时用文件工具的 project 参数直接传项目根路径（自由项目），此后相对路径即相对该根解析；\n" +

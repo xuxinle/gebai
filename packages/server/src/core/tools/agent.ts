@@ -136,16 +136,14 @@ function subSessionLine(r: SubSessionRecord): string {
 export const subSessionRunTool: Tool = {
   name: "subsession_run",
   description:
-    "子会话运行（父子会话模型，一个入口覆盖「执行新会话」与「并行分支」两种用法）：派生一个或多个子会话执行任务，" +
+    "子会话运行（一个入口覆盖「执行新会话」与「并行分支」两种用法）：派生一个或多个子会话执行任务，" +
     "每个子会话是独立 LLM 循环（独立上下文与工具面、可各自指定模型路由走不同接口并行）。\n" +
-    "① **是否继承父会话上下文**（`inherit_context`，默认 false）——false=派生**隔离新上下文**（子Agent 提示词 + 全局工具，适合委派独立子任务、防父上下文膨胀）；true=从**当前上下文 fork**（父消息历史 + 系统提示词 + 工具面快照，适合同一任务的并行多路探索/执行，各子会话都掌握父会话全部背景）。\n" +
-    "② **是否加载子Agent**（`agents`，可省略/为空 = 不加载任何子Agent）——只提供该子Agent 的独有工具与系统提示词，执行语义与装载一致。\n" +
-    "③ **结果交付**——继承上下文形态：子会话最终报告**自动合入父会话**（合并消息在本次工具结果之后进入上下文，过程存档可回放）；隔离形态：最终结果作为本次工具结果返回（异步则用 bg_task 取回）。\n" +
-    "④ **同步 / 异步**（`async`，默认 false）——false=阻塞等全部子会话完成（父会话被占住；不注入合并工具）；true=立即返回 runId 后台执行（父会话继续其他工作，子会话注入 `subsession_merge` 可随时把阶段性成果合入父会话并感知父会话进展）。\n" +
-    "⑤ **父会话控制**（异步）——`bg_task`（id 以 s 开头）status 查进度 / wait 等完成取结果 / stop 终止 / finish **快速结束**（先注入收敛指令让子会话输出结论，宽限逾期才强制终止）/ list 列全部。\n" +
-    "⑥ **运行时限**——`timeout`（秒）：到时进入**快速结束**而非硬杀（先拿结论，宽限逾期才强制终止）；缺省不设限。\n" +
-    "⑦ **环境变量**（`env_mode` + `env`）——`env_mode=inherit`（缺省）在父任务环境基础上叠加 `env` 自定义项；`env_mode=clear` 只用 `env`（不继承父任务环境）。自定义项对子会话的工具可见环境与**模型解析**同时生效，因此可用 `env` 把子会话指向另一个端点/模型（如 {\"GEBAI_LLM_API_BASE\": \"http://host:port\", \"GEBAI_LLM_MODEL\": \"名字\"}，优先级高于 `model` 路由）；`clear` 清空的是**工具层可读**的父任务环境（含会话环境与任务级覆盖），命令子进程的 OS 基线（PATH/HOME/TEMP）仍由执行层自进程环境合并，不会丢。\n" +
-    `单任务用 \`input\`（可选 \`agents\`/\`model\`/\`env\`）；多任务并发用 \`subsessions\` 数组（每项 { name?, input, agents?, model?, env? }，最多 ${SUBSESSION_MAX_PER_CALL} 个，与 input 二选一）。`,
+    "① `inherit_context`（默认 false）——false=**隔离新上下文**（子Agent 提示词 + 全局工具，适合委派独立子任务、防父上下文膨胀）；true=从**当前上下文 fork**（父消息历史 + 系统提示词 + 工具面快照，适合同一任务的并行多路探索/执行）。\n" +
+    "② `agents`（可省略/为空 = 不加载）——只提供该子Agent 的独有工具与系统提示词，执行语义与装载一致。\n" +
+    "③ **结果交付**——继承上下文形态：最终报告**自动合入父会话**；隔离形态：结果作为本次工具结果返回（异步则用 bg_task 取回）。\n" +
+    "④ `async`（默认 false）——false=阻塞等全部完成；true=立即返回 runId 后台执行（子会话注入 subsession_merge 可随时合入阶段性成果并感知父会话进展）。\n" +
+    "⑤ **父会话控制**（异步）——用 `bg_task`（id 以 s 开头）；`timeout` 到时进入**快速结束**而非硬杀；`env_mode`+`env` 可覆盖子会话环境（含把子会话指向另一端点/模型）。\n" +
+    `单任务用 \`input\`；多任务并发用 \`subsessions\` 数组（最多 ${SUBSESSION_MAX_PER_CALL} 个，与 input 二选一）。`,
   card: { titleParams: ["subsessions"], args: "none" },
   parameters: schema(
     {
@@ -154,7 +152,7 @@ export const subSessionRunTool: Tool = {
       model: { type: "string", description: "单任务形态：模型路由名或字面模型名（GEBAI_LLM_ROUTES 命名路由走独立端点；缺省沿用任务级模型）" },
       subsessions: {
         type: "array",
-        description: `多任务并发形态（1-${SUBSESSION_MAX_PER_CALL} 项，与 input 二选一）：每项 { name?: 子会话名（缺省 s1..sN）, input: 任务指令（必填）, agents?, model?, env?, env_mode? }`,
+        description: `多任务并发形态（1-${SUBSESSION_MAX_PER_CALL} 项，与 input 二选一）：每项 { name?, input, agents?, model?, env?, env_mode? }`,
         items: {
           type: "object",
           properties: {
@@ -162,29 +160,29 @@ export const subSessionRunTool: Tool = {
             input: { type: "string" },
             agents: { type: "array", items: { type: "string" } },
             model: { type: "string" },
-            env: { type: "object", description: "本子会话自定义环境变量（值仅允许字符串）" },
-            env_mode: { type: "string", enum: ["inherit", "clear"], description: "本子会话的环境继承模式（缺省沿用调用级 env_mode）" },
+            env: { type: "object" },
+            env_mode: { type: "string", enum: ["inherit", "clear"] },
           },
         },
       },
       inherit_context: { type: "boolean", description: "默认 false：false=隔离新上下文；true=从当前上下文 fork" },
-      async: { type: "boolean", description: "默认 false（阻塞等全部子会话完成）；true=后台运行（立即返回 runId，bg_task 管理，子会话可用 subsession_merge 合入阶段性成果）" },
-      merge: { type: "string", enum: ["full", "summary"], description: "继承上下文形态的报告合入粒度：默认 full 全文合入；summary 摘要合入（超长报告压成「结论+关键发现+产物清单+建议」，全文保留在过程存档）" },
-      inherit_global_tools: { type: "boolean", description: "隔离形态：是否继承全局工具（默认 true——与父会话同名同参）" },
-      inherit_global_prompt: { type: "boolean", description: "隔离形态：是否注入总Agent 全局系统提示词（默认 true；false 上下文最省）" },
+      async: { type: "boolean", description: "默认 false（阻塞等待）；true=后台运行（立即返回 runId，bg_task 管理）" },
+      merge: { type: "string", enum: ["full", "summary"], description: "继承上下文形态的报告合入粒度：默认 full 全文；summary 摘要（压成「结论+关键发现+产物清单+建议」，全文保留在过程存档）" },
+      inherit_global_tools: { type: "boolean", description: "隔离形态：是否继承全局工具（默认 true）" },
+      inherit_global_prompt: { type: "boolean", description: "隔离形态：是否注入全局系统提示词（默认 true；false 上下文最省）" },
       timeout: {
         type: "number",
-        description: `可选：运行时限（秒，整数）——到时进入**快速结束**（注入收敛指令让子会话停止扩展性工作、按已有信息给出结论并正常结束，宽限 ${Math.round(SUBSESSION_FINISH_GRACE_MS / 1000)}s），宽限逾期才强制终止；缺省不设限`,
+        description: `可选：运行时限（秒，整数）——到时进入**快速结束**（让子会话按已有信息给出结论并正常结束，宽限 ${Math.round(SUBSESSION_FINISH_GRACE_MS / 1000)}s），宽限逾期才强制终止；缺省不设限`,
       },
       env_mode: {
         type: "string",
         enum: ["inherit", "clear"],
-        description: "环境变量继承模式（默认 inherit）：inherit = 父任务环境 + env 自定义项（后者优先）；clear = 仅 env（不继承父任务环境；命令子进程的 OS 基线不受影响）",
+        description: "环境变量继承模式（默认 inherit）：inherit = 父任务环境 + env 自定义项（后者优先）；clear = 仅 env",
       },
       env: {
         type: "object",
         description:
-          "子会话自定义环境变量 {\"NAME\": \"value\"}（名称须为标识符形式、值仅允许字符串）。对子会话的工具可见环境与模型解析同时生效——可用它把子会话指向另一端点/模型（如 GEBAI_LLM_API_BASE / GEBAI_LLM_MODEL，优先级高于 model 路由）",
+          "子会话自定义环境变量 {\"NAME\": \"value\"}（名称须为标识符、值仅字符串）。对子会话的工具可见环境与模型解析同时生效——可把子会话指向另一端点/模型（如 GEBAI_LLM_API_BASE / GEBAI_LLM_MODEL，优先级高于 model 路由）",
       },
     },
     [],
@@ -294,20 +292,17 @@ export const subSessionMergeTool: Tool = {
 export const bgTaskTool: Tool = {
   name: "bg_task",
   description:
-    "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh 的统一后台机制：async:true 启动或同步等待超时转后台，taskId 形如 tXXXXXXXX）、子会话运行（subsession_run async:true 启动，runId 形如 sXXXXXXXX）与通用后台任务（如 triage_run mode=async 启动，jobId 形如 jXXXXXXXX）。" +
-    "action=status 立即返回状态——命令任务附输出尾部（stdout+stderr 合并日志，完整日志 sh-tasks/{id}.log），子会话附进度（轮次/工具调用/最近活动，已结束含最终结果与合入状态），后台任务附进度（阶段/已完成条数）与产物引用；" +
-    "action=wait 阻塞等待完成并取回结果（子会话完成时附完整存档；继承上下文形态的报告已自动合入父会话，wait 仅确认终态）；超时上限 1 分钟，超时返回当前状态（可再 wait 或改 status 看进度）；" +
-    "action=stop 终止（命令任务杀进程树、子会话与后台任务协作中止——后台任务保留已落盘的部分结果，已执行过程保留在存档/产物）；" +
-    "action=finish **快速结束子会话**（先礼后兵：注入收敛指令让其停止扩展性工作、按已有信息输出结论并自然结束——报告照常交付/合入，而非硬杀后只剩过程存档；结束原因用 reason，宽限秒数用 timeout）；" +
-    "action=list 列出本会话全部后台任务。",
+    "统一管理后台异步任务（按 id 前缀自动识别三类，无需指定类型）：命令任务（sh 的 async:true 启动或同步等待超时转后台，taskId 以 t 开头）、子会话运行（subsession_run async:true 启动，runId 以 s 开头）与通用后台任务（jobId 以 j 开头）。" +
+    "action=status 立即返回状态；action=wait 阻塞等待完成并取回结果（子会话附完整存档）；最长阻塞 1 分钟，超时返回当前状态；action=stop 终止（命令任务杀进程树；后台任务保留已落盘的部分结果）；" +
+    "action=finish **快速结束子会话**（注入收敛指令让其停止扩展性工作、按已有信息输出结论并自然结束——报告照常交付/合入，而非硬杀）；action=list 列出本会话全部后台任务。",
   card: { titleParams: ["action", "id"], taskIdParam: "id" },
   parameters: schema(
     {
       action: { type: "string", enum: ["status", "wait", "stop", "finish", "list"], description: "操作（必填）：finish 仅子会话运行支持（快速结束）" },
       id: { type: "string", description: "任务 id——命令任务 taskId（t 开头）、子会话 runId（s 开头）或后台任务 jobId（j 开头），action=list 可省略" },
-      timeout: { type: "number", description: "wait 等待秒数（默认/上限 60——最长阻塞 1 分钟，超时返回当前状态与进度，需要继续等再次 wait 或改用 status 看进度）；finish 的宽限秒数（默认 120，夹取到 10-600）" },
+      timeout: { type: "number", description: "wait 等待秒数（默认/上限 60；超时返回当前状态，可再 wait 或用 status）；finish 的宽限秒数（默认 120，夹取 10-600）" },
       tail: { type: "number", description: "命令任务返回输出尾部字符数（默认 4000，上限 20000）" },
-      reason: { type: "string", description: "finish：结束原因（写入给子会话的收敛指令，如「父会话已拿到关键结论，请收尾」；省略用缺省文案）" },
+      reason: { type: "string", description: "finish：结束原因（写入给子会话的收敛指令；省略用缺省文案）" },
     },
     ["action"],
   ),

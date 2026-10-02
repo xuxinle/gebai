@@ -3049,7 +3049,7 @@ test("usage 真值：event.session.ctx 推送与任务结束持久化以真实 i
     }
     await s.engine.run(session.id, "default", "hi")
     expect(sysPrompt).toContain("任务类型路由")
-    expect(sysPrompt).toContain("按任务类型从下方「可选子Agent」清单选用")
+    expect(sysPrompt).toContain("按下方「可选子Agent」清单选用")
     // 路由信息由子Agent description（触发场景）承载，不再硬编码映射表
     expect(sysPrompt).not.toContain("→ code")
     expect(sysPrompt).not.toContain("→ playwright")

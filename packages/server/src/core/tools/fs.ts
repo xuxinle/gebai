@@ -140,13 +140,14 @@ function stripBom(s: string): string {
 export const readTool: Tool = {
   name: "read",
   description:
-    "读取文件内容。默认每行前缀真实行号（cat -n 风格「行号→制表符」；构造 patch 与 文件:行号 引用用，复制原文给 edit/patch 时须去掉；不需要可传 line_numbers:false）。编码自动识别（BOM/UTF-16/GBK），也可传 encoding 指定。图片（png/jpg/jpeg/gif/webp）不以文本读取：主模型多模态时内联进上下文供直接查看，非多模态返回说明与 vision 指引（svg 按文本读）。图片/图表等二进制或结构化文件另返回内容块供 UI 展示。",
+    "读取文件内容。默认每行前缀真实行号（cat -n 风格；复制原文给 edit/patch 时须去掉；不需要可传 line_numbers:false）。编码自动识别（BOM/UTF-16/GBK），也可传 encoding 指定。图片（png/jpg/jpeg/gif/webp）不以文本读取：主模型多模态时内联供查看，非多模态返回 vision 指引。",
   card: { titleParams: ["path"], file: "path" },
   parameters: schema({
     path: { type: "string", description: "文件路径" },
-    offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
-    limit: { type: "integer", description: "读取行数（正数取 offset 起 N 行；负数取末尾 N 行）" },
-    line_numbers: { type: "boolean", description: "每行前缀真实行号（默认 true；offset/limit 切片仍对应文件真实行号）" },
+          offset: { type: "integer", description: "起始行号（1 起始，默认 1）" },
+      limit: { type: "integer", description: "读取行数（正数取 offset 起 N 行；负数取末尾 N 行）" },
+      line_numbers: { type: "boolean", description: "每行前缀行号（默认 true；offset/limit 切片仍对应真实行号）" },
+
     encoding: { type: "string", description: "可选：按指定编码解码（如 gbk；缺省自动识别；支持 TextDecoder 编码名）。仅解码不转码，改写文件用 py" },
   }, ["path"]),
   async execute(args, ctx) {
@@ -273,7 +274,7 @@ async function withPathWriteLock<T>(absPath: string, fn: () => Promise<T>): Prom
 export const writeTool: Tool = {
   name: "write",
   description:
-    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖——重新 read 后再写；新建文件不受限）。**内容护栏**：content 若以「[输出超长，已截断」开头会被拒绝——那是 `read` 的**截断提示文本**、不是文件内容（当内容写回会把整个文件覆盖成一段提示语）；大文件改写用 edit/patch 定点改。只改局部优先 edit/patch。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被模型输出上限截断或接口超时。",
+    "写入文件（默认整体覆盖；append:true 追加到文件末尾、不存在则新建）。目标文件**已存在且本会话未 read 过**、或**自上次读取/写入后已被改动**（并行分支、脚本命令、外部编辑）时拒绝写入（防盲覆盖与陈旧覆盖；新建文件不受限）。**内容护栏**：content 若以「[输出超长，已截断」开头会被拒绝——那是 `read` 的**截断提示文本**、不是文件内容。**大文件（约 300 行以上）分段写入**：先 write 首段，再以 append:true 续写（每段 200~300 行），避免单次输出过长被截断或接口超时。",
   card: { titleParams: ["path"], args: "code", codeField: "content", file: "path" },
   parameters: schema({
     path: { type: "string" },
@@ -507,7 +508,7 @@ const FILE_COPY_MAX_BYTES = 100 * 1024 * 1024
 export const fileTool: Tool = {
   name: "file",
   description:
-    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 为目标路径含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，需审批）/ info 查看文件信息——**按内容探测**（类似 file 命令）：魔数识别实际类型、文本/二进制判定（二进制勿盲 read）、编码（GBK 等非 UTF-8 用 read 的 encoding 读）、**扩展名与实际内容不符时显式提示**、大小与修改时间（目录附直接子条目数）。",
+    "文件管理（单工具多动作）：copy 复制文件（支持二进制，to 含文件名，父目录自动创建）/ rename 重命名 / move 移动或跨目录改名 / mkdir 新建目录（递归）/ delete 删除文件或目录（递归，不可恢复，需审批）/ info 查看文件信息——**按内容探测**：魔数识别类型、文本/二进制判定（二进制勿盲 read）、编码、**扩展名与实际内容不符时提示**、大小与修改时间。",
   card: { titleParams: ["action", "path"] },
   // delete 递归且不可恢复（能力上甚于一次 sh rm，sh 一律审批）：与审批矩阵对齐，delete 动态需审批
   requiresApproval: (args) => args.action === "delete",
@@ -977,22 +978,21 @@ async function searchWithBuiltin(opts: {
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具；本地模式 path 可传 tmp/ 外绝对/相对路径，实际遍历搜索）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处（head_limit 可压低先看一部分）。文件大小上限：目录递归搜索跳过超过 1MB 的文件（被跳过的文件数会在输出末尾注明），**显式指定单个文件路径时上限放宽到 8MB**（再超即明确报错引导分段读取）。**结构化结果三键齐备**（`data.matches`/`data.files`/`data.counts`）——不论 output 选哪种模式，三键都在：主键为本次形态，其余为同一结果的另一种视图（精确与否读官方 outputSchema 一致），按任一键读取都不会静默得到空数组。" +
-    "搜索引擎：内置 ripgrep 优先（随包分发、无需系统安装）——rg 直接扫盘不把文件全文读进内存，大范围搜索快百倍；rg 不可用或其正则语法不支持该 pattern（Rust 引擎无后向引用/环视）时自动回退内置遍历引擎，`data.engine` 如实反映本次所用引擎（GEBAI_GREP_ENGINE=rg|builtin 可强制）。",
+    "按正则表达式在会话工作目录（tmp/）中递归搜索文本内容，返回 文件:行号: 匹配行（路径带 tmp/ 前缀，可直接用于 read 等文件工具）。宽泛摸底优先 output=files。node_modules/.git/dist 等大型目录默认跳过（显式 include 点名除外）。搜索含正则元字符的代码片段（如 foo.bar(）传 literal:true 按字面匹配。include/exclude 支持逗号分隔多模式与花括号（如 *.{ts,tsx}、tests/**,*.md）。匹配上限 200 处。文件大小上限：目录递归跳过超过 1MB 的文件，**显式指定单个文件时放宽到 8MB**。内置 ripgrep 优先，rg 不可用或其正则语法不支持该 pattern 时自动回退内置遍历引擎。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
       pattern: { type: "string" },
-      path: { type: "string", description: "搜索起点：目录（递归）或单个文件（直接内搜）（默认 .，相对会话工作目录，tmp/ 前缀可省略）" },
+      path: { type: "string", description: "搜索起点：目录（递归）或单个文件（直接内搜）（默认 .；tmp/ 前缀可省略）" },
       ignore_case: { type: "boolean", description: "true 时大小写不敏感" },
       literal: { type: "boolean", description: "true 时按字面字符串匹配（正则元字符自动转义；默认 false 正则）" },
       output: { enum: ["content", "files", "count"], description: "结果形态（默认 content；大范围定位优先 files，只看命中文件不刷内容）" },
-      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式；行前缀 文件:行号: / 文件-行号-，组间 -- 分隔，同 grep -n -C；context_before/after 指定时覆盖对应侧）" },
-      context_before: { type: "integer", description: "匹配行**前**附上下文行数（0-10，仅 content 模式；与 context 独立指定非对称上下文，如同 grep -B）" },
-      context_after: { type: "integer", description: "匹配行**后**附上下文行数（0-10，仅 content 模式；与 context 独立指定非对称上下文，如同 grep -A——看定义后的实现体常用）" },
+      context: { type: "integer", description: "匹配行前后各附上下文行数（0-10，默认 0；仅 content 模式；行前缀 文件:行号: / 文件-行号-，组间 -- 分隔，同 grep -n -C）" },
+      context_before: { type: "integer", description: "匹配行**前**附上下文行数（0-10，同 grep -B）" },
+      context_after: { type: "integer", description: "匹配行**后**附上下文行数（0-10，同 grep -A——看定义后的实现体常用）" },
       include: { type: "string", description: "文件路径 glob 过滤（如 *.ts、src/**、*.{ts,tsx}，逗号分隔多模式；** 跨目录、* 任意、? 单字符、{a,b} 交替）" },
-      exclude: { type: "string", description: "排除的路径 glob（与 include 同语法，命中即排除；如 tests/**,*.{json,md}、dist——无 / 的模式按目录/文件名匹配任意层级）" },
-      head_limit: { type: "integer", description: "匹配上限（默认 200；先只看前面一部分时压低，达上限结果标记 truncated——files/count 模式的计数同口径截断）" },
+      exclude: { type: "string", description: "排除的路径 glob（同 include 语法，命中即排除；无 / 的模式按目录/文件名匹配任意层级）" },
+      head_limit: { type: "integer", description: "匹配上限（默认 200；达上限结果标 truncated——files/count 计数同口径截断）" },
     },
     ["pattern"],
   ),
@@ -1285,12 +1285,12 @@ function isDefaultExcluded(candidates: string[], rawPattern: string): boolean {
 export const globTool: Tool = {
   name: "glob",
   description:
-    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。path 可限定起点，也支持 tmp/ 外的绝对/相对路径（本地模式实际遍历该目录，结果路径带给定前缀；沙箱部署仍限范围内；路径不存在时明确报错）。",
+    "按文件名模式（glob，如 *.ts、**/test/*.js、*.{ts,tsx}——花括号交替）递归查找文件，返回相对路径（带 tmp/ 前缀，可直接用于 read 等文件工具）。node_modules/.git/dist 等大型目录默认跳过（模式显式点名除外）。path 可限定起点，也支持 tmp/ 外的绝对/相对路径（本地模式实际遍历该目录）。",
   card: { titleParams: ["pattern"] },
   parameters: schema(
     {
-      pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替；`**/` 可匹配零层目录——`**/*.ts` 同时命中根级与子目录的 ts 文件）" },
-      path: { type: "string", description: "搜索起点（默认 .；本地模式可传 tmp/ 外绝对/相对路径，按该目录实际遍历）" },
+      pattern: { type: "string", description: "文件名 glob 模式（** 跨目录、* 任意、? 单字符、{a,b} 交替；`**/*.ts` 同时命中根级与子目录）" },
+      path: { type: "string", description: "搜索起点（默认 .；本地模式可传 tmp/ 外绝对/相对路径）" },
       exclude: { type: "string", description: "排除的路径 glob（逗号分隔多模式；与 grep exclude 同语法——无 / 的模式按目录/文件名匹配任意层级）" },
     },
     ["pattern"],
@@ -1454,7 +1454,7 @@ interface EditItem {
 export const editTool: Tool = {
   name: "edit",
   description:
-    "精确修改文件：old_string → new_string 定点替换（或 pattern 正则），可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配/命中区域重叠）则整体不落盘。目标文件须本会话已 read（防盲改）；编码与行尾自适应（GBK 仅支持纯 ASCII 替换）；old_string 误携行号前缀时自动剥离。改动较多或行号易偏移时改用 patch；改前先 read 目标区域。",
+    "精确修改文件：old_string → new_string 定点替换（或 pattern 正则），可一次多处，适合小范围改动；任一编辑项校验失败（不唯一/不匹配/重叠）则整体不落盘。目标文件须本会话已 read（防盲改）；编码与行尾自适应；old_string 误携行号前缀时自动剥离。改动较多或行号易偏移时改用 patch。",
   card: { titleParams: ["path"], args: "edits", codeField: "edits", file: "path" },
   parameters: schema(
     {
@@ -1694,7 +1694,7 @@ function describeAppliedPatch(applied: Array<{ line: number; delta: number; fuzz
 export const patchTool: Tool = {
   name: "patch",
   description:
-    "应用 unified diff 补丁（一次多 hunk；以文件内容定位，行号不强求）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行（空行内容写作单个空格，直接写空行亦可）、-前缀=删除行、+前缀=新增行（如 @@ -2,1 +2,1 @@\\n-旧行\\n+新行）。**行号用于多候选消歧**：内容唯一时不看行号，文件里有重复代码块时请写准 @@ 旧侧行号或补足上下文行，否则按「歧义」报错而非任选一处。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位目标（a/、b/ 前缀自动剥离）逐文件应用；单文件补丁文件头可省略、以 path 参数定位（传了 path 时优先 path）。匹配容错：精确 → 忽略空白 → 头尾上下文裁剪（≤3 行）→ 仅按删除行定位（宽松档会标注，请复核落位）；未匹配时报失败 hunk 序号、原因与相近位置。全部 hunk 校验通过才整体落盘（原子），任一不匹配整体失败不修改。目标文件须本会话已 read（防盲改，同 write/edit）。",
+    "应用 unified diff 补丁（一次多 hunk；以文件内容定位，行号不强求）。patch 参数为 unified diff 文本：@@ -旧起行,旧行数 +新起行,新行数 @@ 后接行内容——空格前缀=上下文行（空行内容写作单个空格）、-前缀=删除行、+前缀=新增行。**行号用于多候选消歧**：内容唯一时不看行号；有重复代码块时请写准 @@ 旧侧行号或补足上下文行，否则报错。**多文件补丁**：带 ---/+++ 文件头的段落按各文件头定位（a/、b/ 前缀自动剥离）；单文件补丁文件头可省略、以 path 参数定位。匹配容错：精确 → 忽略空白 → 头尾上下文裁剪 → 仅按删除行定位；未匹配时报失败 hunk 序号与相近位置。全部 hunk 校验通过才整体落盘。目标文件须本会话已 read。",
   card: { titleParams: ["path"], args: "code", codeField: "patch", codeLang: "diff", file: "path" },
   parameters: schema(
     {

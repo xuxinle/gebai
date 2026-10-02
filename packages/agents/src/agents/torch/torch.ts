@@ -27,7 +27,8 @@ import { torchTools } from "./torch-tools"
 export const name = "torch"
 
 export const description =
-  "PyTorch Profiler trace（Chrome Trace / Kineto）分析：索引 trace、解析 .pt.trace.json(.gz) 给出算子与内核热点（含自身耗时、张量形状与 dtype）、前向/反向拆分、步级耗时与抖动、显存峰值与碎片率、GPU 空闲缝与 CPU 受限判定，输出量化问题清单（同步阻塞/算子碎片化/autograd 开销/小内核/显存/反向占比等）并把热点定位到工程源码 文件:行；可生成并执行 PyTorch Profiler 采集脚本（需审批）。超大 trace 走流式扫描、时间预算与缓存（不整文件解析，内存与规模解耦；超预算转后台执行）。输入：trace 路径（可带 gz）+ 源码工程；输出：问题清单、代码位置、修复优先级。"
+  "PyTorch Profiler trace（Chrome Trace / Kineto）分析：解析 .pt.trace.json(.gz) 给出算子与内核热点（自身耗时、张量形状与 dtype）、前向/反向拆分、步级耗时与抖动、显存峰值与碎片率、GPU 空闲缝与 CPU 受限判定，输出量化问题清单并把热点定位到工程源码 文件:行；可生成并执行 Profiler 采集脚本（需审批）。超大 trace 走流式扫描与缓存，超预算转后台。" +
+  "输入：trace 路径（可带 gz）+ 源码工程。"
 
 export const systemPrompt = systemPromptBase
 

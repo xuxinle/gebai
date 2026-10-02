@@ -7,7 +7,8 @@ import { isBinaryMode } from "../../core/shared/config"
 
 export const name = "self_optimize"
 export const description =
-  "优化歌白自身（自身代码/子Agent/提示词/配置；外部项目用 code）：改进定义、修复缺陷、验证修改。任务中因知识/工具不足或错误重复试错、低效时也装载：不便立即优化的先 self_optimize_backlog add 暂存问题与方向，后续集中全面优化。输入：改进点/失败案例/用户反馈（self_optimize_read_feedback）；修改须过测试（run_tests）并同步 DESIGN.md，失败可 rollback 回滚，优化历史经 self_optimize_journal 沉淀。"
+  "优化歌白自身（自身代码/子Agent/提示词/配置；外部项目用 code）：改进定义、修复缺陷、验证修改。任务中因知识/工具不足或错误重复试错、低效时也装载：不便立即优化的先 backlog add 暂存问题与方向，后续集中全面优化。修改须过测试（run_tests）并同步 DESIGN.md，失败可 rollback，优化历史经 journal 沉淀。" +
+  "输入：改进点/失败案例/用户反馈。"
 export const systemPrompt =
   "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内）；文件读写查询（read/write/edit/patch/grep/sh 等）为全局工具直接用全局名（带 project 参数路由项目），分析/验证类工具由 code 提供（search_symbols/analyze/git/preview_server，以 code_ 前缀调用）；本提示词只补充自我优化特有的流程与约束：\n" +
   "1) 输入：改进点/失败案例；用户反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 工具读取（全局集无 read_feedback，本命名空间为唯一入口），作为优化输入；开工先用 self_optimize_journal action=list 查相关历史与教训（跨会话优化记忆，不重复踩坑），并 self_optimize_backlog action=list 查待优化暂存项（任务执行中暂存的改进点——有积压且本次目标就是优化时以此为工作清单，见 2)）；\n" +

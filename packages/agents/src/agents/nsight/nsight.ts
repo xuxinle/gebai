@@ -20,7 +20,8 @@ import { captureTool } from "./capture"
 export const name = "nsight"
 
 export const description =
-  "NVIDIA Nsight 报告分析与 GPU 性能问题定位（Nsight Systems 时间线 + Nsight Compute 单内核）：解析 .nsys-rep/.ncu-rep 给出瓶颈与问题清单（量化证据 + 根因 + 修复方向），并把报告里的内核/NVTX 符号定位到工程源码的文件:行；支持对目标程序做 nsys/ncu 采集（需审批），超大报告（GB 级、千万级事件）走流式聚合与缓存，首次扫描后秒回。输入：报告路径或采集需求 + 源码工程；输出：问题清单、代码位置、修复优先级。"
+  "NVIDIA Nsight 报告分析与 GPU 性能问题定位（Nsight Systems 时间线 + Nsight Compute 单内核）：解析 .nsys-rep/.ncu-rep 给出瓶颈与问题清单（量化证据 + 根因 + 修复方向），并把报告里的内核/NVTX 符号定位到工程源码的文件:行；支持对目标程序做 nsys/ncu 采集（需审批），超大报告（GB 级、千万级事件）走流式聚合与缓存。" +
+  "输入：报告路径或采集需求 + 源码工程。"
 
 export const systemPrompt = systemPromptBase
 

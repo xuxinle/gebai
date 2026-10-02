@@ -6,7 +6,8 @@ import systemPromptBase from "./reverse_site.md"
 
 export const name = "reverse_site"
 export const description =
-  "涉及网站/接口逆向时装载本子Agent：分析站点结构、捕获网络请求（含 WebSocket 帧）还原接口、拦截/mock 验证、带登录态改参重放，输出站点地图与 API 文档（可转交 self_optimize 生成子Agent）；依赖 playwright（装载时自动连带装载，浏览器自动化工具以 playwright_ 前缀复用，与接口录制共享同一浏览器会话）；仅限授权站点，浏览器交互与接口探测需审批。输入：目标 URL 与逆向目标；输出：分析文档与接口清单。"
+  "涉及网站/接口逆向时装载本子Agent：分析站点结构、捕获网络请求（含 WebSocket 帧）还原接口、拦截/mock 验证、带登录态改参重放，输出站点地图与 API 文档（可转交 self_optimize 生成子Agent）；依赖 playwright（装载时自动连带装载，浏览器自动化工具以 playwright_ 前缀复用）；仅限授权站点，浏览器交互与接口探测需审批。" +
+  "输入：目标 URL 与逆向目标。"
 export const systemPrompt = systemPromptBase
 
 // 工具集只含接口逆向专属工具（capture_* / route 经 createLazyBridge 共享 playwright 的同一桥接

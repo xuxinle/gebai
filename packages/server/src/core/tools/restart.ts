@@ -636,10 +636,10 @@ export function makeRestartServerTool(overrides: Partial<RestartDeps> = {}): Too
   return {
     name: "restart_server",
     description:
-      "重启本歌白服务进程（仅本地模式可用）。执行后当前连接（飞书/Web）会短暂中断，几秒后自动恢复——外部拉起器等旧进程退出与端口释放后，以同端口/同配置启动新服务并确认就绪；Web 页面自动重新加载（无需刷新），dev-reload（--reload）能力随重启继承。" +
-      "可传 prompt 指定「重启后续跑」：新服务就绪后自动把这段提示词作为用户消息注入本会话并继续执行（重启会中断在途任务，续跑指令告知重启后接着干什么）。" +
-      "重启动作一旦执行本轮任务即结束（引擎不再调用模型）——重启前的收尾动作（说明、落盘等）需在调用前完成；重启后要接着干活必须用 prompt 传续跑指令。" +
-      "结果写入系统临时目录 gebai-restart/state.json，续跑情况见同目录 continue.result.json，日志在 server.log.*。action=status 查看最近一次重启与续跑状态（不重启；并提示拉起器代码是否落后于磁盘源码）。服务模式（多用户部署）不提供本工具。",
+      "重启本歌白服务进程（仅本地模式可用）。执行后当前连接（飞书/Web）会短暂中断，几秒后自动恢复——以同端口/同配置启动新服务并确认就绪，Web 页面自动重新加载（无需刷新）。" +
+      "可传 prompt 指定「重启后续跑」：新服务就绪后自动把该提示词作为用户消息注入本会话并继续执行。" +
+      "重启动作一旦执行本轮任务即结束——**收尾动作（说明、落盘等）必须在调用前完成**；重启后要接着干活必须用 prompt 传续跑指令。" +
+      "action=status 查看最近一次重启与续跑状态（不重启）。服务模式（多用户部署）不提供本工具。",
     parameters: schema({
       action: { type: "string", enum: ["restart", "status"], description: "restart=执行重启（默认）；status=只读最近一次重启状态与续跑情况" },
       prompt: {

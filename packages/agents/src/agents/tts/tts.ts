@@ -196,7 +196,7 @@ export const voicesTool: Tool = {
 
 export const name = "tts"
 export const description =
-  "语音合成（文本转语音）与音效：把文本合成为可播放的音频文件，本机离线完成（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装），支持音色选择与语速/音调/音量调节，可同时在运行 GEBAI 这台机器的扬声器上播报（仅本地模式）；另含音效合成（提示音/转场音/系统音等预设与自定义波形）、音频效果处理（变速不变调/变调/变速/回声/混响/滤波/机器人音等）与多轨混音拼接（把提示音、语音、结束音一次成段）——音效与处理为纯本地计算，任何平台可用。产物 WAV 直接在聊天内播放。输入：待合成文本 / 音效需求 / 音频处理需求；输出：音频文件路径、时长与大小。"
+  "语音合成（文本转语音）与音效：文本合成可播放音频，本机离线完成（Windows 系统语音 WinRT OneCore 优先、SAPI5 回退——不联网、不耗配额、无需安装），支持音色选择与语速/音调/音量调节，可在运行 GEBAI 的机器扬声器播报（仅本地模式）；另含音效合成（提示音/转场音等预设与自定义波形）、音频效果处理（变速不变调/变调/回声/混响/滤波等）与多轨混音拼接。产物 WAV 直接在聊天内播放。输入：待合成文本 / 音效需求 / 音频处理需求。"
 export const systemPrompt = systemPromptBase
 
 export const tools = { speak: speakTool, voices: voicesTool, sfx: sfxTool, effect: effectTool, mix: mixTool }

@@ -64,7 +64,7 @@ function scriptInput(v: unknown): string | undefined {
 
 export const shTool: Tool = {
   name: "sh",
-  description: "执行 Shell 命令（Windows 经 PowerShell，POSIX 经 bash -c），按平台 shell 语法书写；stdout 为输出，退出码读 exitCode 字段。两种执行模式：① 同步（默认）——timeout 窗口（默认 60、上限 120 秒）内结束直接返回结果；超窗不终止命令，转后台返回 taskId。② 后台（async:true）——长耗时命令（构建/测试/安装）直接后台执行，立即返回 taskId。后台任务用 bg_task 查询/等待/终止。strict:true 时非 0 退出抛工具级错误（默认 false；转后台时退出码未知、不触发）。",
+  description: "执行 Shell 命令（Windows 经 PowerShell，POSIX 经 bash -c），按平台 shell 语法书写；stdout 为输出，退出码读 exitCode 字段。两种模式：① 同步（默认）——timeout 窗口（默认 60、上限 120 秒）内结束直接返回；超窗不终止命令、转后台返回 taskId。② 后台（async:true）——长耗时命令（构建/测试/安装）直接后台执行，立即返回 taskId。后台任务用 bg_task 查询/等待/终止。strict:true 时非 0 退出抛工具级错误（默认 false）。",
   requiresApproval: scriptRequiresApproval,
   card: { args: "code", codeField: "command", codeLang: "bash" },
   parameters: schema(

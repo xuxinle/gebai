@@ -741,7 +741,7 @@ export class SubAgentManager {
     const unloaded = [...this.defs.values()].filter((d) => (visibleToOwner ? !this.visibleTo(d.name, visibleToOwner) : !this.loaded.has(d.name)))
     if (unloaded.length) {
       lines.push("可选子Agent（未装载）:")
-      lines.push("（装载后其工具以 `{名}_` 前缀并入本工具集；文件读写查询等通用工具仍用全局名）")
+      lines.push("（装载后其工具以 `{名}_` 前缀并入本工具集）")
       for (const d of unloaded) {
         lines.push(`- ${d.name}: ${describe ? describe(d) : d.description}`)
       }

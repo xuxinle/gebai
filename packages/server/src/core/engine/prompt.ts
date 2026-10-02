@@ -113,13 +113,13 @@ export function buildSystemPrompt(deps: PromptDeps, sessionId: string, user: str
     { key: "safe_mode", text: deps.config.safeMode
       ? `安全模式已启用（风险能力降级而非禁用）：sh 仅允许只读命令白名单（cat/grep/find/git 读类等，输出重定向限定用户目录）；py/js 为只读运行时（写文件/子进程/网络屏蔽，仅保留文件读取）；write/edit/patch/file 限定用户目录内；任务调度（task_*）不可用。`
       : "" },
-    { key: "orchestration", text: `复杂/多步操作优先用 js 脚本编排一次执行，避免大量单步工具调用浪费往返与词元（脚本内工具像内置函数一样直接 await 调用、可用变量/分支/循环/错误处理表达任意流程，编排前可用 tool_schemas 查询工具输出结构，语法见 js 工具描述）；纯系统操作用 sh/py 脚本。` },
-    { key: "batching", text: `同一次回复返回的多个工具调用会并行执行（互不等待）：互不依赖的操作放进同批调用可显著加速（多文件读取/多路查询/独立子任务等尽量同批发出）；有先后依赖、需严格串行的操作不要同批发出——用 js 脚本按序编排（await 前一步结果再决定下一步），或拆分到多轮逐步执行；对同一文件的写/改尤其必须串行编排（并行修改会相互覆盖）。` },
+    { key: "orchestration", text: `复杂/多步操作优先用 js 脚本编排一次执行，避免大量单步工具调用浪费往返与词元（脚本内工具像内置函数一样直接 await 调用；编排前可用 tool_schemas 查询工具输出结构）；纯系统操作用 sh/py 脚本。` },
+    { key: "batching", text: `同一次回复返回的多个工具调用会并行执行（互不等待）：互不依赖的操作放进同批调用可显著加速；有先后依赖/需严格串行的操作不要同批发出——用 js 脚本按序编排或拆分多轮；对同一文件的写改尤其必须串行（并行修改会相互覆盖）。` },
     { key: "planning", text: `重大任务（多步骤/有风险/不可逆/用户需要把关）先用 ask 的计划审批分支（title+steps）制定计划并等待用户批准后再执行（被拒绝则按修改意见修订重新提交）；简单任务无需计划审批，直接用 todo 跟踪即可。` },
     // 产物命名纪律（结构化兵底在 show/reel：内容寻址与 -vN 唯一化；此处让模型主动起可区分的名）
-    { key: "artifact_naming", text: `产物命名：同一用途的每次产出起**可区分的新名**（带目的或版本，如 qa/s2-frame190.png、promo-v3-final.mp4），不要在同一个名字上反复重写——对话里的产物（图片/文件卡/视频）是**按路径引用**的，同名覆盖会让历史消息里的产物跟着变成新内容，刷新后当时那一版就看不到了（历史不可回看）；需要保留多版就是为了回看与对比。` },
-    { key: "agent_routing", text: `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集，装载后直接调用、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离、不污染父上下文）、防止上下文膨胀（中间过程多、输出大）或长任务并行时，才用 subsession_run 派生子会话——inherit_context 缺省 false 即隔离新上下文，agents 传需预加载的子Agent（可省略/为空 = 不加载任何子Agent），只返回最终结果，长任务传 async:true 后台执行、bg_task 回头查进度/收结果/终止；拿不准时先判断任务类型再选。按任务类型从下方「可选子Agent」清单选用——每个子Agent 的描述即其触发场景，匹配任务类型即装载或派生子会话；纯文本问答（无需工具）时直接回答，不装载子Agent。）` },
-    { key: "parallel_sessions", text: `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等多条互不依赖的线）用 subsession_run 的 inherit_context:true（fork 父会话上下文）——各子会话掌握父会话全部背景与工具，可用 subsessions 数组一次派生多个（每个可单独传 model 走不同模型接口并行更快），报告完成即自动合入父会话；长耗时子会话传 async:true 后台执行（bg_task 管理，子会话内可用 subsession_merge 随时合入阶段性成果），可不断派生合并像 git 一样推进——并行多线是摆脱单轮串行等待、加速大体量任务的主要手段。` },
+    { key: "artifact_naming", text: `产物命名：同一用途的每次产出起**可区分的新名**（带目的或版本，如 qa/s2-frame190.png、promo-v3-final.mp4），不要在同一个名字上反复重写——对话里的产物是按**路径引用**的，同名覆盖会让历史消息里的产物变成新内容（历史不可回看）。` },
+    { key: "agent_routing", text: `任务类型路由（子Agent 两种用法语义不同：默认 agent_load 装载——其工具并入当前工具集、全程在当前上下文完成，不创建独立执行；仅当需要干净上下文（结果隔离）、防止上下文膨胀（中间过程多/输出大）或长任务并行时，才用 subsession_run 派生子会话。按下方「可选子Agent」清单选用——描述即触发场景；纯文本问答（无需工具）时直接回答，不装载子Agent。）` },
+    { key: "parallel_sessions", text: `同一任务的并行多路推进（多方案对比、多文件并行修改、多角度调研等互不依赖的线）用 subsession_run 的 inherit_context:true（fork 父会话上下文）——可用 subsessions 数组一次派生多个（每个可单独传 model 走不同模型接口并行更快），报告完成即自动合入父会话；长耗子会话传 async:true 后台执行，可用 subsession_merge 随时合入阶段性成果。` },
     // 内置项目（歌白自身）：与文件工作台的项目列表同源——工作台能看到的项目，模型可按名寻址
     { key: "builtin_projects", text: builtinProjects(deps, user)
       .map((p) => `内置项目「${p.name}」：${p.path}（project 参数可按名寻址）`)
@@ -218,7 +218,9 @@ export function agentDescription(deps: PromptDeps, d: { name: string; descriptio
   if (projects.length) parts.push(`预置项目：${projects.map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}（${p.path}）`).join("、")}`)
   const tools = d.tools ?? []
   if (tools.length) {
-    parts.push(`装载后工具：${tools.slice(0, 10).join("、")}${tools.length > 10 ? ` 等 ${tools.length} 个` : ""}`)
+    // 只列前 3 个工具名 + 总数：能力面已由静态 description 承载，摘要是路由补充信号（全列会让清单体积
+    // 随子Agent 数量线性膨胀；完整清单装载后即得，或经 agent_list 查）
+    parts.push(`工具 ${tools.length} 个`)
   }
   return parts.join(" ")
 }
