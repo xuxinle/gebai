@@ -10,6 +10,7 @@ import { findInTrash } from "../core/session/gc"
 import { validateEnvVars, maskEnv, filterEnvInjection } from "../core/session/env"
 import { getEnvCatalog } from "../core/agents/env-catalog"
 import { TokenBucket } from "../core/security/ratelimit"
+import { toSessionInfo } from "../core/session/store"
 
 export function registerSessionRoutes(rc: RouteCtx): void {
   const { app, d } = rc
@@ -18,11 +19,27 @@ export function registerSessionRoutes(rc: RouteCtx): void {
   // 会话 ID 格式白名单（多用户隔离防线）：`:id` 段必须为 32 位小写 hex，
   // 畸形/穿越形态一律 400。Hono 路由匹配前已整体 decodeURI，`%2F` 不可能进入单段，
   // 此处兜底 `..`/非 hex 等异常形态（与 WS/存储层同规则）。
+  // 注意：具名路由（如 POST /sessions/import）须先于本中间件注册——use("/sessions/:id") 会把
+  // 单段路径词当成 :id 拦下（见下方 import 路由的注册位置）。
   const validateSessionId = async (c: { req: { param: (k: string) => string | undefined }; json: (b: unknown, s: number) => Response }, next: () => Promise<void>) => {
     const id = c.req.param("id") ?? ""
     if (!isValidSessionId(id)) return c.json({ error: `invalid session id: ${id}` }, 400)
     await next()
   }
+
+  // 会话导入（导出文件单会话条目；WS session.import 同载荷）：**先于 /sessions/:id 白名单中间件注册**——
+  // 中间件的 use("/api/v1/sessions/:id") 会把 `import` 当 :id 拦下返回 400；载荷校验不过 400（与 WS reject 同规则）
+  app.post("/api/v1/sessions/import", async (c) => {
+    const user = await userOf(c)
+    const body = await c.req.json().catch(() => null)
+    try {
+      const session = await d.store.importSession(user.id, body)
+      return c.json(toSessionInfo(session), 201)
+    } catch (err) {
+      return c.json({ error: String((err as Error).message || err) }, 400)
+    }
+  })
+
   app.use("/api/v1/sessions/:id", validateSessionId)
   app.use("/api/v1/sessions/:id/*", validateSessionId)
 

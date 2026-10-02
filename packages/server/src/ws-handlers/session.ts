@@ -19,6 +19,11 @@ export const sessionHandlers: Record<string, WsHandler> = {
     const s = await d.store.createSession(user.id, p.name ? String(p.name) : undefined)
     return reply(true, { session: toSessionInfo(s) })
   },
+  // 导入会话（导出文件单会话条目 → 新会话；校验失败 reject，见 store.importSession）
+  "session.import": async ({ d, user, p, reply }) => {
+    const s = await d.store.importSession(user.id, p.session)
+    return reply(true, { session: toSessionInfo(s) })
+  },
   "session.get": async ({ d, user, p, reply }) => {
     const s = await d.store.load(String(p.id), user.id)
     return reply(true, { session: s })

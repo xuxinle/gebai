@@ -33,6 +33,7 @@ import {
   clearDraft,
 } from "./state"
 import { markdownBlock } from "./markdown"
+import { batchExportFileName, buildExportFile, detailToImportData, downloadJson, parseImportText, singleExportFileName } from "./session-io"
 import { appendMsg, appendTodoCard, beginMsgBatch, engineNoteOf, finishSubSession, isEngineNoteMsg, reasoningBlock, renderLegacySubAgentArchive, renderSubSessionArchive, subSessionBox, takeMsgBatch } from "./messages"
 import { clearUnread, isFollowing, lockToBottom, restoreScroll, stopFollowing } from "./jump-bottom"
 import { applyApprovalSkip } from "./approval-skip"
@@ -54,6 +55,7 @@ export type LoadMessagesFn = (sessionId: string) => Promise<void>
 const batchBar = document.getElementById("batch-bar")!
 const batchCountEl = document.getElementById("batch-count")!
 const batchDelBtn = document.getElementById("batch-del") as HTMLButtonElement
+const batchExportBtn = document.getElementById("batch-export") as HTMLButtonElement
 const batchCancelBtn = document.getElementById("batch-cancel")!
 const searchInputEl = document.getElementById("session-search") as HTMLInputElement
 
@@ -497,6 +499,7 @@ function toggleSelect(id: string, li: HTMLElement) {
 function updateBatchCount() {
   batchCountEl.textContent = `已选 ${selected.size} 项`
   batchDelBtn.disabled = selected.size === 0
+  batchExportBtn.disabled = selected.size === 0
 }
 
 /** 批量模式切换后的延迟重渲染（展开/恢复分组折叠）：可取消——批量删除后紧随的正式刷新
@@ -1037,6 +1040,9 @@ function openSessionMenu(e: { clientX: number; clientY: number }, s: SessionInfo
     { label: "复制会话 ID", action: () => { void copyTextToClipboard(s.id).then((ok) => toast(ok ? `已复制会话 ID: ${s.id}` : "复制失败", ok ? "ok" : "error")) } },
     { label: s.pinned ? "取消置顶" : "置顶", action: () => togglePin(s) },
     { label: "重命名", action: () => startRename(s, li.querySelector<HTMLElement>(".session-name")!) },
+    // 导出：Markdown 阅读版（原有）+ JSON 往返格式（可导入回歌白，与轮盘导入联动）
+    { label: "导出 Markdown", action: () => { void exportSession(s.id).catch((err) => toast(`导出失败: ${(err as Error).message}`, "error")) } },
+    { label: "导出会话", action: () => { void exportSessionJson(s.id).then(() => toast("已导出会话文件", "ok")).catch((err) => toast(`导出失败: ${(err as Error).message}`, "error")) } },
     { label: "删除", danger: true, action: () => showDeleteConfirm(s.id, s.name) },
   )
   for (const it of items) {
@@ -1207,6 +1213,62 @@ export async function exportSession(sessionId: string): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+/* ---------- 会话导出（JSON 往返格式）与导入：纯逻辑在 session-io.ts，此处为 DOM 流程 ---------- */
+
+/** 导出会话为 JSON 导出文件（单会话「批量包」；与 Markdown 导出并存：给人看的 vs 给歌白吃的）。 */
+export async function exportSessionJson(sessionId: string): Promise<void> {
+  const detail = await client.getSession(sessionId)
+  downloadJson(singleExportFileName(detail.name), buildExportFile([detailToImportData(detail)]))
+}
+
+/** 批量导出选中会话（单个 JSON「批量包」文件；勾选清单由调用方给，逐个拉取正文）。 */
+export async function exportSessionsJson(ids: string[], nameOf: (id: string) => string): Promise<void> {
+  if (!ids.length) return
+  const details = await Promise.all(ids.map((id) => client.getSession(id)))
+  downloadJson(batchExportFileName(details.length), buildExportFile(details.map(detailToImportData)))
+  void nameOf // 名称由选中清单展示用，文件名不依赖（批量包按条数+日期命名）
+}
+
+/** 导入会话文件（轮盘入口）：多文件 + 单文件多会话统一为载荷数组 → 确认 → 逐个导入。
+ *  成功后刷新列表并切到最后一个导入成功的会话（导入即达：不需再去找刚导入的那条）。
+ *  返回导入结果（成功数/失败数/最后成功的会话 id），供调用方 toast。 */
+export async function importSessionFiles(files: File[]): Promise<{ ok: number; failed: number; lastId: string | null }> {
+  // 解析阶段：任一文件损坏即整体报错中止（部分导入后才发现坏文件，用户难以分辨哪些已导入）
+  const payloads: import("@gebai/sdk").SessionImportData[] = []
+  for (const f of files) {
+    payloads.push(...parseImportText(await f.text()))
+  }
+  const names = payloads.map((s) => s.name)
+  if (!(await confirmDialog({ title: `导入 ${payloads.length} 个会话`, okLabel: "导入", list: names }))) {
+    return { ok: 0, failed: 0, lastId: null }
+  }
+  let ok = 0
+  let failed = 0
+  let lastId: string | null = null
+  for (const data of payloads) {
+    try {
+      const s = await client.importSession(data)
+      ok++
+      lastId = s.id
+    } catch {
+      failed++
+    }
+  }
+  if (ok) {
+    await refreshSessions()
+    if (lastId) {
+      const s = (await client.listSessions()).find((x) => x.id === lastId) ?? null
+      if (s) {
+        const prev = getCurrentSession()
+        if (prev) saveSessionViewState(prev.id)
+        setCurrentSession(s)
+        await loadMessages(s.id)
+      }
+    }
+  }
+  return { ok, failed, lastId }
+}
+
 /** 内容块 → Markdown 文本（导出用）。 */
 function blockToMarkdown(b: ContentBlock): string {
   switch (b.type) {
@@ -1245,6 +1307,40 @@ export function bindSessionActions() {
   batchDelBtn.onclick = () => {
     if (!selected.size) return
     showBatchDeleteConfirm()
+  }
+  // 批量导出（JSON 批量包，与右键「导出会话」/轮盘导入同一格式）：逐个拉正文打包单文件下载
+  batchExportBtn.onclick = () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    batchExportBtn.disabled = true
+    void exportSessionsJson(ids, (id) => selectedNames.get(id) || id)
+      .then(() => toast(`已导出 ${ids.length} 个会话`, "ok"))
+      .catch((err) => toast(`导出失败: ${(err as Error).message}`, "error"))
+      .finally(() => {
+        batchExportBtn.disabled = selected.size === 0
+      })
+  }
+  // 导入会话（轮盘入口也触发这里）：隐藏 input[type=file]，选文件后走统一导入流程
+  const importInput = document.getElementById("session-import-input") as HTMLInputElement | null
+  const importBtn = document.getElementById("import-session-btn")
+  const runImport = (files: File[]) => {
+    void importSessionFiles(files)
+      .then((r) => {
+        if (r.ok && !r.failed) toast(`已导入 ${r.ok} 个会话`, "ok")
+        else if (r.ok && r.failed) toast(`已导入 ${r.ok} 个、失败 ${r.failed} 个`, "error")
+        else if (r.failed) toast(`导入失败（${r.failed} 个）`, "error")
+      })
+      .catch((err) => toast(`导入失败: ${(err as Error).message}`, "error"))
+  }
+  if (importBtn) {
+    importBtn.addEventListener("click", () => importInput?.click())
+  }
+  if (importInput) {
+    importInput.addEventListener("change", () => {
+      const files = [...importInput.files ?? []]
+      importInput.value = "" // 允许重复选同一文件（同名再选也触发 change）
+      if (files.length) runImport(files)
+    })
   }
   // 右键菜单关闭：任意点击 / 新右键 / 滚动 / 窗口缩放（Esc 见 openSessionMenu 的作用域绑定）
   document.addEventListener("click", () => closeSessionMenu())

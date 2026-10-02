@@ -1,6 +1,6 @@
 import { mkdir, writeFile, readFile, rm, readdir, stat, unlink, rename } from "node:fs/promises"
 import { join, resolve, sep, isAbsolute, relative, dirname } from "node:path"
-import type { FileEntry, Message, SessionInfo, TodoItem } from "@gebai/sdk"
+import type { FileEntry, Message, SessionImportData, SessionInfo, TodoItem } from "@gebai/sdk"
 import { assertNoSymlinkEscape, isValidSessionId, resolveInSandbox, sessionPath, walkDir } from "../base/paths"
 import { randomUUID } from "node:crypto"
 
@@ -339,6 +339,62 @@ export class SessionStore {
     const dir = this.dir(userId, id)
     await this.ensureDir(join(dir, "tmp"))
     await this.save(session)
+    return session
+  }
+
+  /* ---------- 会话导入（导出文件 → 新会话；见 DESIGN「会话管理·会话导入/导出」） ---------- */
+
+  /** 导入校验的会话名长度上限（与 UI 重命名 maxLength=80 对齐）。 */
+  static readonly IMPORT_NAME_MAX = 80
+
+  /** 导入载荷 → 会话数据（校验 + 规范化；不落盘）。
+   *  只收 name/createdAt/updatedAt/pinned/messages/todos/loadedSubAgents——id/userId/ctx 统计不收：
+   *  id 由服务端新分配（跨实例不冲突，也不给「指名注入某会话 id」开口子）、导入者成为 owner、
+   *  ctx 用量由 toSessionInfo 按消息重新估算（导出侧本就不携带）。非法载荷执 error（WS reject / REST 400）。 */
+  static parseImport(userId: string, data: unknown): SessionData {
+    if (typeof data !== "object" || data === null) throw new Error("session payload must be an object")
+    const d = data as Partial<SessionImportData> & Record<string, unknown>
+    const name = typeof d.name === "string" ? d.name.trim().slice(0, SessionStore.IMPORT_NAME_MAX) : ""
+    if (!name) throw new Error("session name required")
+    const now = Date.now()
+    if (d.messages !== undefined && !Array.isArray(d.messages)) throw new Error("messages must be an array")
+    const messages = ((d.messages ?? []) as Message[]).slice(-MAX_CACHE_MESSAGES) // 超上限保留末尾（最新消息更有价值，与 append 裁剪丢头部同向）
+    for (const m of messages) {
+      if (m && typeof m === "object" && typeof m.role === "string" && m.role !== "user" && m.role !== "assistant" && m.role !== "tool" && m.role !== "system") {
+        throw new Error(`invalid message role: ${String(m.role)}`)
+      }
+    }
+    if (d.todos !== undefined && !Array.isArray(d.todos)) throw new Error("todos must be an array")
+    const todoStatuses = new Set(["pending", "in_progress", "completed", "failed", "cancelled"])
+    const todos = ((d.todos ?? []) as TodoItem[]).filter((t) => t && typeof t === "object" && typeof t.title === "string" && !!t.title.trim()).map((t, i) => ({
+      ...t,
+      id: typeof t.id === "string" && t.id ? t.id.slice(0, 64) : `imported-${i + 1}`,
+      status: (t.status && todoStatuses.has(t.status) ? t.status : "pending") as TodoItem["status"],
+    }))
+    if (d.loadedSubAgents !== undefined && !Array.isArray(d.loadedSubAgents)) throw new Error("loadedSubAgents must be an array")
+    const loadedSubAgents = ((d.loadedSubAgents ?? []) as unknown[]).filter((x): x is string => typeof x === "string" && !!x)
+    // 导入时间与导出侧字段约定：createdAt/updatedAt 不晚于当前时间（手改文件给未来值会打乱列表排序）
+    const ts = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), now) : now)
+    const createdAt = ts(d.createdAt)
+    return {
+      id: randomUUID().replace(/-/g, ""),
+      name,
+      userId,
+      messages,
+      todos,
+      ...(loadedSubAgents.length ? { loadedSubAgents } : {}),
+      ...(d.pinned === true ? { pinned: true } : {}),
+      createdAt,
+      updatedAt: Math.max(createdAt, ts(d.updatedAt)),
+    }
+  }
+
+  /** 导入会话（校验 → 新 id → 落盘）：返回新建会话；重名不合并（每次导入都是新会话）。 */
+  async importSession(userId: string, data: unknown): Promise<SessionData> {
+    const session = SessionStore.parseImport(userId, data)
+    const dir = this.dir(userId, session.id)
+    await this.ensureDir(join(dir, "tmp"))
+    await this.save(session, { touch: false }) // 导入不动排序基线（保留导出侧时间，列表按原时间归组）
     return session
   }
 

@@ -4,7 +4,7 @@ import { readFile, rename, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve, sep } from "node:path"
 import { ToolRegistry } from "./registry"
-import { shardPath, sessionPath, resolveInSandbox, sha256Hex } from "./paths"
+import { shardPath, sessionPath, resolveInSandbox, sha256Hex, isValidSessionId } from "./paths"
 import { EnvManager, isSensitive, filterEnvInjection, cleanupLegacyUserEnv } from "../session/env"
 import { Sandbox, resolveWinShell } from "../security/sandbox"
 import { SessionStore, toSessionInfo, estimateCtxTokens, isProtectedMessage, MAX_CACHE_MESSAGES, TRIM_LOW_WATER_MESSAGES } from "../session/store"
@@ -582,6 +582,91 @@ describe("SessionStore ownership", () => {
     const victimChat = join(sessionPath(home, "victim", victim.id), "chat.json")
     expect(JSON.parse(await readFile(victimChat, "utf8"))).toHaveProperty("id", victim.id)
     expect(await store.load(victim.id, "victim")).not.toBeNull()
+    cleanup(home)
+  })
+})
+
+describe("SessionStore 导入会话（importSession，见 DESIGN「会话管理·会话导入/导出」）", () => {
+  test("合法载荷：新 id、导入者为 owner、messages/todos/装载名单落盘可读回", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-import-"))
+    const store = new SessionStore({ home })
+    const s = await store.importSession("alice", {
+      name: "  从别处导出的会话  ",
+      pinned: true,
+      messages: [
+        { id: "m1", role: "user", content: "你好", createdAt: 1 },
+        { id: "m2", role: "assistant", content: "好的", toolCalls: [{ id: "tc1", name: "ls", arguments: {} }], createdAt: 2 },
+      ],
+      todos: [{ id: "t1", title: "任务", status: "in_progress" }],
+      loadedSubAgents: ["code", ""], // 空串过滤
+    })
+    // 名称去空白；id 新分配且合法；归属导入者
+    expect(s.name).toBe("从别处导出的会话")
+    expect(isValidSessionId(s.id)).toBe(true)
+    expect(s.userId).toBe("alice")
+    expect(s.pinned).toBe(true)
+    // 磁盘可读回（chat.json 全量持久化，含装载名单）
+    const loaded = await store.load(s.id, "alice")
+    expect(loaded!.messages).toHaveLength(2)
+    expect(loaded!.messages[1]!.toolCalls![0]!.name).toBe("ls")
+    expect(loaded!.todos).toHaveLength(1)
+    expect(loaded!.loadedSubAgents).toEqual(["code"])
+    // 列表可见（meta 缓存随 save 同步建立）
+    const infos = await store.listSessionInfos("alice")
+    expect(infos.some((x) => x.id === s.id)).toBe(true)
+    cleanup(home)
+  })
+
+  test("载荷剥离：id/userId/ctx 统计字段不收（跨实例导入不冲突、不可指名注入会话 id）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-import-strip-"))
+    const store = new SessionStore({ home })
+    // 预置同 id 会话，导入同名同 id 不应命中它
+    const existing = await store.createSession("alice")
+    const s = await store.importSession("alice", {
+      id: existing.id, // 恶意/巧合携带：应被忽略
+      userId: "bob", // 同上
+      name: "x",
+      messages: [],
+      ctxTokens: 999,
+    } as Record<string, unknown>)
+    expect(s.id).not.toBe(existing.id)
+    expect(s.userId).toBe("alice")
+    expect(s.ctxTokens).toBeUndefined()
+    cleanup(home)
+  })
+
+  test("非法载荷拒收：非对象/缺名/角色非法/messages 非数组", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-import-bad-"))
+    const store = new SessionStore({ home })
+    await expect(store.importSession("alice", null)).rejects.toThrow("object")
+    await expect(store.importSession("alice", { name: " " })).rejects.toThrow("name required")
+    await expect(store.importSession("alice", { name: "x", messages: "no" })).rejects.toThrow("messages")
+    await expect(store.importSession("alice", { name: "x", messages: [{ id: "m", role: "hacker", content: "" }] })).rejects.toThrow("role")
+    // todos 宽容归一：缺 id 补号、非法状态归 pending（与 messages 严格角色校验不同——todo 坏一条不值得拒整个会话）
+    const s = await store.importSession("alice", { name: "x", todos: [{ title: "t", status: "weird" }] })
+    expect(s.todos).toEqual([{ title: "t", status: "pending", id: "imported-1" }])
+    cleanup(home)
+  })
+
+  test("时间与缺失字段规范化：未来时间夹列当前、缺省补齐、消息超上限截断", async () => {
+    const home = mkdtempSync(join(tmpdir(), "gebai-import-norm-"))
+    const store = new SessionStore({ home })
+    const future = Date.now() + 10_000_000
+    const s = await store.importSession("alice", { name: "x", createdAt: future, updatedAt: future })
+    expect(s.createdAt).toBeLessThanOrEqual(Date.now())
+    expect(s.updatedAt).toBe(s.createdAt)
+    // 空载荷：messages/todos 补空数组（可正常打开的空会话）
+    const s2 = await store.importSession("alice", { name: "y" })
+    expect(s2.messages).toEqual([])
+    expect(s2.todos).toEqual([])
+    // 超上限截断（保留末尾：最新消息更有价值，与 append 裁剪丢头部同向）
+    const big = await store.importSession("alice", {
+      name: "z",
+      messages: Array.from({ length: MAX_CACHE_MESSAGES + 50 }, (_, i) => ({ id: `m${i}`, role: "user", content: "x", createdAt: i })),
+    })
+    expect(big.messages).toHaveLength(MAX_CACHE_MESSAGES)
+    expect(big.messages[0]!.id).toBe("m50")
+    expect(big.messages[MAX_CACHE_MESSAGES - 1]!.id).toBe(`m${MAX_CACHE_MESSAGES + 49}`)
     cleanup(home)
   })
 })

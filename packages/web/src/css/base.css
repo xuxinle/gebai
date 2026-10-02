@@ -327,7 +327,7 @@ aside {
 #new-session:hover { background: var(--accent-hover); }
 #new-session:active { transform: scale(0.98); }
 #new-session:disabled { opacity: 0.5; cursor: default; transform: none; }
-/* 批量操作条：已选计数 + 删除所选 + 取消 */
+/* 批量操作条：已选计数 + 导出所选 + 删除所选 + 取消 */
 .batch-bar {
   display: flex;
   align-items: center;
@@ -339,6 +339,7 @@ aside {
 }
 .batch-bar[hidden] { display: none; }
 #batch-count { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#batch-export,
 #batch-del,
 #batch-cancel {
   flex: none;
@@ -349,6 +350,10 @@ aside {
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
 }
+/* 导出所选：中性主操作（非危险）；与右键「导出会话」/轮盘导入同一 JSON 格式 */
+#batch-export { background: var(--bg-inset); color: var(--text); }
+#batch-export:hover { background: var(--bg-hover); }
+#batch-export:disabled { opacity: 0.5; cursor: default; }
 #batch-del { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
 #batch-del:hover { background: color-mix(in srgb, var(--danger) 30%, transparent); }
 #batch-del:disabled { opacity: 0.5; cursor: default; }

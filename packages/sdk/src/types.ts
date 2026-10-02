@@ -270,8 +270,34 @@ export interface SessionInfo {
   pinned?: boolean
 }
 
+/** 会话详情（`session.get` / REST GET /sessions/:id 返回）。
+ *  todos/loadedSubAgents 为服务端实际落盘字段（chat.json）——UI 导入/导出与其余消费方按可选处理（旧数据/裁剪形态可能缺省）。 */
 export interface SessionDetail extends SessionInfo {
   messages: Message[]
+  /** 会话级待办清单（agent 任务跟踪；引擎运行中维护，落盘随会话保存）。 */
+  todos?: TodoItem[]
+  /** 已装载子Agent 名单（恢复历史会话时据此重新注册工具，见 DESIGN「会话管理」）。 */
+  loadedSubAgents?: string[]
+}
+
+/** 会话导入载荷（`session.import` / REST POST /sessions/import 请求体；导出文件的单会话条目同构）。
+ *  不携带 id/userId/ctx 统计：导入时分配新 id、导入者成为 owner、上下文用量重新估算——避免跨实例 id 冲突。 */
+export interface SessionImportData {
+  name: string
+  createdAt?: number
+  updatedAt?: number
+  pinned?: boolean
+  messages?: Message[]
+  todos?: TodoItem[]
+  loadedSubAgents?: string[]
+}
+
+/** 会话导出文件（单/批量统一「批量包」格式：单个 = sessions 数组一项）。见 session-io.ts `SESSION_EXPORT_FORMAT`。 */
+export interface SessionsExportFile {
+  format: "gebai-sessions"
+  version: 1
+  exportedAt: number
+  sessions: SessionImportData[]
 }
 
 export interface TodoItem {

@@ -936,3 +936,87 @@ describe("multi-user REST authorization", () => {
     expect(adminOk.status).toBe(200)
   })
 })
+
+describe("会话导入（导出文件 → 新会话；WS session.import / REST POST /sessions/import，见 DESIGN「会话管理·会话导入/导出」）", () => {
+  /** multi 实例管理员鉴权（Basic 单次凭据，见「REST Basic auth」用例）：登录接口有 TokenBucket 限流，
+   *   反复跑测试套件会 429，Basic 不占登录限流且等价隐式登录。 */
+  const adminBasic = `Basic ${Buffer.from("admin:admin123").toString("base64")}`
+
+  /** 导出文件单会话载荷（与前端 session-io.ts 的「批量包」条目同构）。 */
+  const payload = {
+    name: "导入的会话",
+    createdAt: 1000,
+    updatedAt: 2000,
+    pinned: true,
+    messages: [
+      { id: "m1", role: "user", content: "你好", createdAt: 1 },
+      { id: "m2", role: "assistant", content: "好的", createdAt: 2 },
+    ],
+    todos: [{ id: "t1", title: "任务", status: "pending" }],
+    loadedSubAgents: ["code"],
+  }
+
+  test("WS：导入成功返回新 SessionInfo，正文/待办/装载名单可读回", async () => {
+    const r = await wsCall(single, "session.import", { session: payload })
+    expect(r.ok).toBe(true)
+    const s = r.payload?.session as { id: string; name: string; pinned?: boolean }
+    expect(s.name).toBe("导入的会话")
+    expect(s.pinned).toBe(true)
+    const detail = await wsCall(single, "session.get", { id: s.id })
+    const d = detail.payload?.session as { messages: Array<{ role: string }>; todos?: Array<{ title: string }>; loadedSubAgents?: string[] }
+    expect(d.messages).toHaveLength(2)
+    expect(d.todos?.[0]?.title).toBe("任务")
+    expect(d.loadedSubAgents).toEqual(["code"])
+    // 清理：导入的会话不留在后续用例的列表里
+    await wsCall(single, "session.delete", { id: s.id })
+  })
+
+  test("WS：非法载荷 reject（缺名）", async () => {
+    const r = await wsCall(single, "session.import", { session: { messages: [] } })
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain("name required")
+  })
+
+  test("REST：POST /api/v1/sessions/import 建会话（201）且路由不被 :id 白名单拦截；坏载荷 400", async () => {
+    const res = await fetch(`${base(single)}/api/v1/sessions/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    if (res.status !== 201) console.log("DEBUG import body:", await res.clone().text())
+    expect(res.status).toBe(201)
+    const s = (await res.json()) as { id: string }
+    const get = await fetch(`${base(single)}/api/v1/sessions/${s.id}`)
+    expect(get.status).toBe(200)
+    const bad = await fetch(`${base(single)}/api/v1/sessions/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "" }),
+    })
+    expect(bad.status).toBe(400)
+    await fetch(`${base(single)}/api/v1/sessions/${s.id}`, { method: "DELETE" })
+  })
+
+  test("多用户：导入归属导入者，未登录拒绝（服务模式隔离）", async () => {
+    const auth = adminBasic
+    const res = await fetch(`${base(multi)}/api/v1/sessions/import`, {
+      method: "POST",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, name: "多用户导入" }),
+    })
+    expect(res.status).toBe(201)
+    const s = (await res.json()) as { id: string; userId: string }
+    // userId 为内部 id（非用户名）：与 /auth/me 返回的 id 一致（归属导入者）
+    const me = (await (await fetch(`${base(multi)}/api/v1/auth/me`, { headers: { Authorization: auth } })).json()) as { id: string }
+    expect(s.userId).toBe(me.id)
+    // 未登录拒绝（不匿名落盘）
+    const anon = await fetch(`${base(multi)}/api/v1/sessions/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    expect(anon.status).toBe(401)
+    // 清理
+    await fetch(`${base(multi)}/api/v1/sessions/${s.id}`, { method: "DELETE", headers: { Authorization: auth } })
+  })
+})

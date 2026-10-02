@@ -11,6 +11,7 @@ import type {
   FeedbackInput,
   FileEntry,
   SessionDetail,
+  SessionImportData,
   SessionInfo,
   SubAgentInfo,
   TodoItem,
@@ -636,6 +637,10 @@ export class GebaiClient {
   }
   createSession(name?: string): Promise<SessionInfo> {
     return this.request<{ session: SessionInfo }>("session.create", name ? { name } : {}).then((r) => r.session)
+  }
+  /** 导入会话（WS `session.import`）：按导出载荷新建会话（新 id、导入者为 owner）；服务端校验不过时 reject。 */
+  importSession(session: SessionImportData): Promise<SessionInfo> {
+    return this.request<{ session: SessionInfo }>("session.import", { session }).then((r) => r.session)
   }
   getSession(id: string): Promise<SessionDetail> {
     return this.request<{ session: SessionDetail }>("session.get", { id }).then((r) => r.session)
