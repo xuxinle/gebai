@@ -1245,16 +1245,22 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   // 说明：优化档（dev/release）关闭 `-Wnull-dereference`——GCC 13 在本项目的
   // 「优化 + 预编译头」组合下会对 libstdc++ 内联代码（vector::insert 等）产生**误报**，
   // 而该警告在 -O0（debug 档）与 sanitizer 档（san，ASan/UBSan 实际检测）下仍然全部保留。
+  //
+  // **调试信息用 `-g1`（仅行号表）而非 `-g`**：迭代档（dev/quick）的目标是「看一眼栈回溯」，
+  // 只需文件:行号，不需要逐变量单步的完整 DWARF；完整调试信息（局部变量/类型/内联展开）
+  // 占编译时间的 25–33%、占对象体积 73%（实测 build.cpp：9.1 MB → 2.4 MB，9.6 s → 6.4 s）。
+  // 全量调试信息留给显式的 `debug`/`san` 档：把便宜的默认给日常，把贵的给真需要的场合。
   if (profile == "dev") {
-    // 快速迭代档：-O1 兼顾编译速度与运行帧率（日常开发/无头验证用）
-    return std::vector<std::string>{"-O1", "-g", "-fno-omit-frame-pointer",
+    // 快速迭代档（默认）：-O1 兼顾编译速度与运行帧率（日常开发/无头验证用）
+    return std::vector<std::string>{"-O1", "-g1", "-fno-omit-frame-pointer",
                                     "-Wno-null-dereference"};
   }
   if (profile == "quick") {
-    // 最速迭代档：-O0（编译最快；帧率够用即可，适合"改一行看一眼"的循环）
-    return std::vector<std::string>{"-O0", "-g"};
+    // 最速迭代档：-O0（单文件编译最快，适合"改一行看一眼"的内循环）
+    return std::vector<std::string>{"-O0", "-g1"};
   }
   if (profile == "debug") {
+    // 全量调试档：-O0 + 完整 `-g`（逐变量单步、完整类型信息）——只在真的需要调试时用
     return std::vector<std::string>{"-O0", "-g", "-fno-omit-frame-pointer"};
   }
   if (profile == "release") {
@@ -1264,6 +1270,7 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
     // sanitizer 档同样关掉两个"优化 + 系统头"下的 GCC 误报：
     // `-Wmaybe-uninitialized` 会在 libstdc++ `<regex>`（lint 规则用到）里对 `std::function`
     // 的控制块报"可能未初始化"；真实未初始化读由 UBSan/ASan 在运行期抓，防护强度不受影响。
+    // 保留完整 `-g`：崩溃报告里的变量值是可行动信息，不属于"迭代速度"可牺牲的部分。
     return std::vector<std::string>{"-O1", "-g", "-fno-omit-frame-pointer",
                                     "-fsanitize=address,undefined", "-Wno-maybe-uninitialized",
                                     "-Wno-null-dereference"};
@@ -1490,10 +1497,13 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     target_units =
         make_units(effective, target_sources, object_dir, target_third_party, unit_includes);
     std::size_t target_rebuilt = 0;
+    const std::int64_t target_compile_start = time::now_ns();
     auto target_compiled =
         compile_units(effective, options, target_units, *flags, *toolchain,
                       framework_flags.has_value() ? &*framework_flags : nullptr, target_rebuilt);
     if (!target_compiled) return forward_error(target_compiled.error());
+    // 目标单元也是编译：计入编译耗时（否则它会潜进"链接"里，把主时段的账全打乱）
+    stats.compile_ms += (time::now_ns() - target_compile_start) / 1'000'000;
     stats.units_total += target_units.size();
     stats.units_rebuilt += target_rebuilt;
     stats.units_cached = stats.units_total - stats.units_rebuilt;
@@ -1541,9 +1551,11 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
     return stats;
   }
 
+  const std::int64_t link_start = time::now_ns();
   auto linked = link(manifest, options, link_units, output, *flags, *toolchain, {});
   if (!linked) return forward_error(linked.error());
   stats.linked = true;
+  stats.link_ms = (time::now_ns() - link_start) / 1'000'000;
   // 记下本次链接的"成分"，下次据此判断能否跳过（写失败只是下次多链一次，不影响正确性）
   (void)fs::write_text(link_stamp_path, link_fingerprint);
   stats.artifact = output;

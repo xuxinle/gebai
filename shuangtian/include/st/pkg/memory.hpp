@@ -40,6 +40,17 @@ struct MemoryLimit {
 /// 实现在 `src/pkg/platform_memory.cpp`（`<windows.h>` 只允许出现在 platform_*）。
 [[nodiscard]] auto platform_memory_limit_mb() -> std::uint64_t;
 
+/// 容器/系统的 **CPU 配额**（可用核数；0 = 不可知，调用方退回硬件并发）。
+///
+/// 与内存上限同理：`std::thread::hardware_concurrency()` 报的是**宿主机**核数，
+/// 容器里真正能用的是 cgroup 配额。按宿主机核数开并发落在小配额的容器上就是纯亏损——
+/// 每个 `cc1plus` 都被 CFS 限流，时间花在上下文切换上。实测本框架（4 核配额容器）：
+/// 默认 10 路 109 s、6 路 101 s、4 路 **96.7 s**（越少越快）。
+///
+/// 探测顺序：cgroup v2 `cpu.max`（`quota period` 或 `max`）→ cgroup v1 `cpu.cfs_quota_us`/
+/// `cpu.cfs_period_us` → 0（不可知）。取整向上（零头也值得占一个 worker）。
+[[nodiscard]] auto detect_cpu_quota() -> std::size_t;
+
 /// 单翻译单元内存估算（MiB），按档位区分：sanitizer 档显著更高（实测 630–700 MB）。
 [[nodiscard]] auto unit_memory_estimate_mb(std::string_view profile) -> std::uint64_t;
 
@@ -57,6 +68,7 @@ struct ConcurrencyPlan {
   std::size_t jobs{1};        ///< 并行编译单元数
   std::size_t jobs_large{1};  ///< 超大单元的并发上限
   std::uint64_t budget_mb{0}; ///< 采用的预算（0=未知）
+  std::size_t cpu_quota{0};   ///< 采用的 CPU 配额核数（0=不可知）
   std::string reason{};       ///< 如 `内存预算 8192MiB / 单单元 512MiB（san）→ 13` 或 `--jobs 显式指定`
 };
 
@@ -64,8 +76,11 @@ struct ConcurrencyPlan {
 ///
 /// - `requested_jobs != 0`：显式指定，直接采用（`reason` 说明），仍推导 `jobs_large`；
 /// - 否则按内存预算推导；预算未知时退回 `hardware_concurrency`（并说明是退回）。
+/// `cpu_quota` 是容器 CPU 配额（0 = 不可知）；最终 `jobs` 取「内存推导」与「CPU 配额」的
+/// **较小值**——内存不够会 OOM，CPU 不够只是变慢，两个上界都必须尊重。
 [[nodiscard]] auto plan_concurrency(std::size_t requested_jobs, std::size_t requested_jobs_large,
                                     std::uint64_t requested_budget_mb, std::string_view profile,
-                                    std::size_t hardware) -> ConcurrencyPlan;
+                                    std::size_t hardware, std::size_t cpu_quota = 0)
+    -> ConcurrencyPlan;
 
 }  // namespace st::pkg

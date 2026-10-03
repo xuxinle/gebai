@@ -1227,7 +1227,7 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 
 ### 7.5 构建图与直驱编译器
 - `st build [target]`：解析清单 → 拓扑排序（依赖先编）→ 生成编译命令 → **直接调用 `g++`/`clang++`**（`-MMD -MF` 依赖文件 + 增量判新旧）。
-- 产物：`build/<profile>/<target>/…`；`profile` ∈ `debug` / `release` / `san`。
+- 产物：`build/<profile>/<target>/…`；`profile` ∈ `dev` / `quick` / `debug` / `release` / `san`。
 - 并行：按 `nproc` 并行编译单元（自研 job 池，`std::jthread`）。
 - **按语言分派标志**：`.c` 走 `c_flags`+`-x c`（C 语言标准与 C++ 标志集互不串味），其余走 C++ 标志集；
   C 源不吃 PCH；第三方单元额外 `-w` 且剥掉 sanitizer 插桩（见 §7.2 两个字段的说明）。
@@ -1235,14 +1235,15 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 ### 7.5.1 编译效率（工程化硬指标）
 
 霜天零第三方依赖，但**标准库头部解析**占单文件编译耗时的一半以上（`<format>`/`<filesystem>`/`<thread>` 尤重）。
-构建驱动因此做了四件事，全部由 `st build` 自动完成，无需额外工具（不用 ccache / 不用 distcc）：
+构建驱动因此做了五件事，全部由 `st build` 自动完成，无需额外工具（不用 ccache / 不用 distcc）：
 
 | 机制 | 做法 | 效果 |
 |---|---|---|
-| **预编译头（PCH）** | 框架头 `include/st/pch.hpp` 汇总高频标准库与核心头 → 一次编译为 `build/<profile>/pch/` 下的 PCH，其后每个 TU 复用（GCC 按 `-I` 命中 `.gch`；MSVC `/Yu+/FI+/Fp`） | 消除重复头部解析（首选加速项） |
-| **并行编译** | 自研 `ThreadPool` 按 `nproc` 并行调度翻译单元（`--jobs N` 可覆盖） | 8 核约 6~8× |
+| **预编译头（PCH）** | 框架头 `include/st/pch.hpp` 汇总高频标准库与核心头 → 一次编译为 `build/<profile>/pch/` 下的 PCH，其后每个 TU 复用（GCC 按 `-I` 命中 `.gch`；MSVC `/Yu+/FI+/Fp`） | 消除重复标准库头部解析；重 TU 实测 `build.cpp` 28.7 s → 14.0 s |
+| **轻量调试信息** | 迭代档（`dev`/`quick`）用 `-g1`（仅行号表）而非 `-g`（局部变量/类型/内联展开） | 重 TU 编译 **-25%~-33%**、对象体积 **-73%**（`build.cpp` 9.1 MB → 2.4 MB），链接随之变快；全量调试信息留给 `debug`/`san` 档 |
+| **并行编译** | 自研 `ThreadPool` 按「内存预算 + CPU 配额」推导并发（`--jobs N` 可覆盖） | 见下方「并发由内存与 CPU 两个上界共同决定」 |
 | **头依赖增量** | 每个 TU 产出 `-MMD -MF <obj>.d`，重建判定取「源文件 + **全部被包含头文件**」的 mtime 最大值——改一个头文件只重编真正受影响的单元 | 增量构建从"全量重编"变为"精确重编" |
-| **分档构建** | `dev`（-O1 -g，日常迭代）/ `debug`（-O0 -g）/ `release`（-O2 -DNDEBUG）/ `san`（ASan+UBSan） | 开发档编译时间约减半 |
+| **分档构建** | `dev`（-O1 -g1，日常迭代）/ `quick`（-O0 -g1，最速迭代）/ `debug`（-O0 -g，全量调试信息）/ `release`（-O2 -DNDEBUG）/ `san`（ASan+UBSan，完整 `-g`） | 开发档编译时间约减半 |
 | **产物原子写** | 编译先写 `<obj>.tmp` / `<dep>.tmp`，进程成功退出后才 `fs::rename` 到位 | 中断（OOM 杀编译器、磁盘满）不会在产物位置留下**半截 `.o`** |
 
 产物原子写的理由：半截 `.o` 比源文件新，增量判新会把它当最新的，于是**下一次**构建报出
@@ -1250,46 +1251,60 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 实测被这个现象骗过两次，才改成"要么完整、要么不存在"。
 
 `st build` 结束会打印耗时构成（编译 / 链接 / 总时长 / 并行度 / 是否使用 PCH），便于回归对比。
+其中"编译"含库单元与**目标单元**（应用自身源码）两轮，"链接"只计真正的链接子进程耗时——
+两者不会互相污染（目标单元的编译时间不会潜进"链接"里）。
 `--no-pch` 可关闭预编译头用于排查（例如 PCH 与某编译选项冲突时）。
 
-**并发由内存决定，不由核数决定**（实测数据驱动）：编译是内存密集型的，本框架单翻译单元实测峰值
-`-O1 -g` 60–490 MB、`san` 档（ASan/UBSan 插桩）630–700 MB；`nproc` 为 28 的机器满并发就是
-10–20 GB 瞬时占用。两个反直觉的事实：
+**并发由内存与 CPU 两个上界共同决定**（实测数据驱动）：编译是内存密集型的，本框架单翻译单元实测峰值
+`-O1 -g1` 60–490 MB、`san` 档（ASan/UBSan 插桩）630–700 MB；`nproc` 为 28 的机器满并发就是
+10–20 GB 瞬时占用。三个反直觉的事实：
 
-1. **峰值与源文件大小不成正比**——`build.cpp`（55 KB）峰值 487 MB，而 `quickjs.c`（2.1 MB / 6.5 万行）
-   只有 335 MB（C++ 单元的头部展开常比"行数多"更贵）。所以**不能只按体积分档**，
-   主机制必须是"内存预算 ÷ 单单元估算"。
+1. **峰值与源文件大小不成正比**——`build.cpp`（92 KB）峰值 522 MB，而 `quickjs.c`（2.1 MB / 6.5 万行）
+   只有 176 MB（C++ 单元的头部展开常比"行数多"更贵），因此 `is_large_unit` 的 512 KB 体积阈值
+   只对 `quickjs.c` 生效，不能拿它当"贵单元"的判据（参见下方超大单元闸门）。
 2. **容量与核数无关**——容器限 8 GiB 而宿主机 114 GiB 时 `free` 看起来毫无压力，
    只有读 cgroup 才知道真实上限。
+3. **CPU 配额也独立于核数**——`hardware_concurrency()` 报宿主机核数，容器真正能用的是
+   `cpu.max`。按宿主机核数开并发落在小配额容器上纯亏损：每个 `cc1plus` 都被 CFS 限流，
+   时间花在上下文切换上。实测本框架（4 核配额容器）全量：
+   **默认（按硬件 10 路）109 s → 4 路 96.7 s**（越少越快），采用 CPU 配额后稳定在 4 路。
 
 机制（`pkg/memory.hpp` + `compile_units` 调度处）：
 
 | 环节 | 做法 |
 |---|---|
 | 预算探测 | cgroup v2 `memory.max` → v1 `memory.limit_in_bytes` → `/proc/meminfo`；`ST_MEMORY_MB` 可覆盖 |
-| 推导并发 | `jobs = clamp((预算 × 7/8) / 单单元估算, 1, nproc)`（预留 1/8 给链接与系统） |
+| CPU 配额探测 | cgroup v2 `cpu.max`（`"quota period"` / `max`）→ v1 `cpu.cfs_quota_us`/`cpu.cfs_period_us`；`ST_CPU_LIMIT` 可覆盖；配额非整数核**向上取整** |
+| 推导并发 | `jobs = min( clamp((预算 × 7/8) / 单单元估算, 1, min(硬件核数, CPU 配额)), … )`——内存不够会 OOM，CPU 不够只是变慢，两个上界都尊重 |
 | 单元估算 | `san` 768 MB；`debug`/`quick` 384 MB；`dev`/`release` 512 MB（取实测**上限**而非均值——估偏只是慢，估偏乐观就是 OOM） |
-| 超大单元闸门 | 源文件 ≥ 512 KB 的单元走独立窄闸门（默认**同时 1 个**），且**排到最后提交**——小单元先跑满并发，大块头收尾时独占 |
-| 显式接管 | `--jobs N` / `--jobs-large N` / `--max-memory MiB`（CI 可固定行为） |
-| 可观测 | `st doctor` 报告内存上限与各档推导出的并发（含理由）；每次构建打印一行决策 |
+| 超大单元闸门 | 源文件 ≥ 512 KB 的单元走独立闸门（默认**同时 2 个**）——它们是**内存轻量型**大块头（`dsl.cpp` 10 s / 638 MB、`build.cpp` 11 s / 553 MB），串行化只制造长尾；确需独占（如 `quickjs.c`）用 `--jobs-large 1` 钉住 |
+| 显式接管 | `--jobs N` / `--jobs-large N` / `--max-memory MiB`（CI 可固定行为；显式 `--jobs` 不被配额压低） |
+| 可观测 | `st doctor` 报告内存/CPU 上限与各档推导出的并发（含理由）；每次构建打印一行决策 |
 
 > `st doctor` 曾报"内存上限不可知"——顺着查出一个真缺陷：`fs::read_text` 原先按 `seekg/tellg`
 > 得到的大小定长读，而 `/proc`、`/sys`、cgroup 的虚拟文件 **size 报 0（内容却非空）**，于是读到空串，
 > 内存探测永远失败。已改为读到 EOF（见 §4.1）。
 
-**实测（本仓库当前规模：54 个翻译单元，8 核）**：
+**实测（本仓库当前规模：83 个翻译单元，4 核配额容器）**：
 | 场景 | 时间 |
 |---|---|
-| 串行全量（无 PCH，基线） | ≈ 49 s |
-| 并行全量（8 路 + PCH） | 见 README「实测数据」（由 `st build` 自报） |
-| 改 1 个 .cpp 后增量 | 亚秒级（仅重编该单元 + 链接） |
-| 改 1 个公共头后增量 | 只重编依赖该头的单元（依据 `.d` 依赖图） |
+| 冷全量（dev，禁共享缓存、81 单元全重编） | ≈ 75 s（编译 67 s + 链接 0.1 s） |
+| 冷全量（quick，`-O0 -g1`） | ≈ 53 s |
+| 改 1 个 .cpp 后增量 | ≈ 2.9 s（仅重编该单元 + 重链） |
+| 改 1 个公共头后增量（`element.hpp`：32 单元受影响） | ≈ 38 s |
+| 无改动 | ≈ 0.6 s（跳编译与链接） |
+
+> 这三个数字与模块结构强相关：单文件编译最重的是模板展开密集的单元
+> （`build.cpp` 14 s、`dsl.cpp` 8.7 s、`server.cpp` 9.2 s），而 `element.hpp` 被 32/81 个单元包含——
+> 改它的成本主要是"重编多少个单元"，不是"单个单元多快"。
+> 因此迭代时优先改 `.cpp`（只重编 1 个单元）；必须动公共头时，用 **`quick` 档**（`-O0 -g1`）
+> 把单单元成本再压一档。
 
 ### 7.6 CLI
 | 命令 | 作用 |
 |---|---|
 | `st init <name>` | 生成工程骨架 |
-| `st build [target] [--profile debug\|release\|san] [--locked] [-j N]` | 构建 |
+| `st build [target] [--profile dev\|quick\|debug\|release\|san] [--locked] [-j N] [--jobs-large N] [--max-memory MiB]` | 构建 |
 | `st run <target> [args…]` | 构建并运行 |
 | `st test [filter] [--san]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |
@@ -1297,7 +1312,7 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 | `st fetch` / `st sync` | 获取依赖 / 同步 lock（**规划中**；当前 HTTP 仅明文 + 解包未实现，实际可用源为 path） |
 | `st tree` / `st audit` / `st outdated` | 依赖树 / 校验和与许可证字段复核 / 版本检查（**规划中**，CLI 尚未接线，见 `docs/BACKLOG.md`） |
 | `st clean [--all]` | 删除 `build/` 各档产物（`--all` 连共享对象缓存一起清） |
-| `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存；Windows 下报告内存上限与并发推导） |
+| `st doctor` | 环境自检（编译器、字体、显示后端、GPU、TLS、缓存；报告内存上限、CPU 配额与推导出的并发） |
 
 ### 7.7 引导（bootstrap）
 `st` 自身是 C++ 程序：`bootstrap.sh` 用最朴素的编译器调用把 `tools/stpm/*.cpp` + 所需 `src/core/*` + `src/ext/*` 编成 `build/bin/st`（唯一非 st 构建入口）；此后一切（含 `st` 自身重建）由 `st build` 完成。

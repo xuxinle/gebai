@@ -74,34 +74,52 @@ ST_TEST(large_unit_threshold_discriminates_by_size) {
 }
 
 ST_TEST(concurrency_derives_from_memory_not_cores) {
-  // 8 GiB 预算、san 档（单单元 768 MiB）：推导应远低于 28 核，而不是照抄核数
-  const auto plan = st::pkg::plan_concurrency(0, 0, 8192, "san", 28);
+  // 8 GiB 预算、san 档（单单元 768 MiB）：推导应远低于 28 核，而不是照抄核数。
+  // 显式传 cpu_quota=28（无 CPU 约束）——否则本机容器的 cgroup 配额会参与推导，测试随环境变。
+  const auto plan = st::pkg::plan_concurrency(0, 0, 8192, "san", 28, 28);
   ST_CHECK(plan.jobs < 28);
   ST_CHECK(plan.jobs >= 1);
-  ST_CHECK_EQ(plan.jobs_large, 1U);  // 超大单元默认串行
+  ST_CHECK_EQ(plan.jobs_large, 2U);  // 超大单元默认 2 路（内存轻量型大块头无需完全串行）
   ST_CHECK(plan.reason.find("8192MiB") != std::string::npos);
   // 预算越小，并发越低（单调性）
-  const auto tighter = st::pkg::plan_concurrency(0, 0, 2048, "san", 28);
+  const auto tighter = st::pkg::plan_concurrency(0, 0, 2048, "san", 28, 28);
   ST_CHECK(tighter.jobs <= plan.jobs);
   ST_CHECK(tighter.jobs >= 1);
 }
 
+// CPU 配额是并发的第二个上界：内存允许再多，超出配额的 worker 只会互相抢 CPU。
+ST_TEST(concurrency_respects_cpu_quota) {
+  // 内存充裕（预算极大）但容器只给 4 核：并发必须收到 4，而不是硬件 28
+  const auto plan = st::pkg::plan_concurrency(0, 0, 1024ULL * 1024ULL, "dev", 28, 4);
+  ST_CHECK_EQ(plan.jobs, 4U);
+  ST_CHECK(plan.reason.find("CPU") != std::string::npos);  // 理由必须说明是配额收的
+  // 配额宽于硬件（不一致的环境）时以硬件为准，不放大
+  const auto wider = st::pkg::plan_concurrency(0, 0, 1024ULL * 1024ULL, "dev", 4, 16);
+  ST_CHECK_EQ(wider.jobs, 4U);
+  // 配额不是整数核时向上取整：1.5 核 → 2
+  const auto fractional = st::pkg::plan_concurrency(0, 0, 1024ULL * 1024ULL, "dev", 8, 2);
+  ST_CHECK_EQ(fractional.jobs, 2U);
+  // 显式 --jobs 完全接管，不被配额压低
+  const auto explicit_plan = st::pkg::plan_concurrency(6, 0, 0, "dev", 28, 2);
+  ST_CHECK_EQ(explicit_plan.jobs, 6U);
+}
+
 ST_TEST(concurrency_respects_explicit_and_unknown_budget) {
-  // 显式 --jobs 完全接管（CI 固定行为）
-  const auto explicit_plan = st::pkg::plan_concurrency(6, 0, 8192, "dev", 28);
+  // 显式 --jobs 完全接管（CI 固定行为）；cpu_quota 固定以便测试不受运行环境影响
+  const auto explicit_plan = st::pkg::plan_concurrency(6, 0, 8192, "dev", 28, 28);
   ST_CHECK_EQ(explicit_plan.jobs, 6U);
   ST_CHECK(explicit_plan.reason.find("--jobs 6") != std::string::npos);
   // 显式 --jobs-large 也接管
-  const auto explicit_large = st::pkg::plan_concurrency(0, 3, 8192, "dev", 28);
+  const auto explicit_large = st::pkg::plan_concurrency(0, 3, 8192, "dev", 28, 28);
   ST_CHECK_EQ(explicit_large.jobs_large, 3U);
   // 预算不可知：退回硬件并发（而不是崩或给 0）
-  const auto unknown = st::pkg::plan_concurrency(0, 0, 1, "dev", 8);
+  const auto unknown = st::pkg::plan_concurrency(0, 0, 1, "dev", 8, 8);
   ST_CHECK_EQ(unknown.jobs, 1U);  // 1 MiB 预算 → 至少 1 路，不能是 0
   ST_CHECK(unknown.jobs >= 1U);
 }
 
 ST_TEST(concurrency_never_exceeds_hardware) {
-  // 预算极大时也不该超过核数（多开线程没有收益）
-  const auto plan = st::pkg::plan_concurrency(0, 0, 1024ULL * 1024ULL, "dev", 8);
+  // 预算极大时也不该超过核数（多开线程没有收益）；cpu_quota 取与硬件同值（无额外约束）
+  const auto plan = st::pkg::plan_concurrency(0, 0, 1024ULL * 1024ULL, "dev", 8, 8);
   ST_CHECK_EQ(plan.jobs, 8U);
 }

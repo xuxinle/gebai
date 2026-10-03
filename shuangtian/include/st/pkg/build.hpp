@@ -39,6 +39,10 @@ struct BuildStats {
   std::size_t units_cached{0};
   std::int64_t elapsed_ms{0};
   std::int64_t compile_ms{0};  ///< 编译阶段耗时（不含链接）
+  /// 纯链接阶段耗时。**不等同于 `elapsed - compile`**：后者还包含目标单元（应用源码）的
+  /// 编译——应用单元在库编译**之后**另起一轮，两者之间还夹着链接指纹比对，
+  /// 把它算成"链接"会让耗时分解失真（改一个应用 .cpp 后"链接 9 s"其实是编译 8.5 s）。
+  std::int64_t link_ms{0};
   std::size_t workers{0};      ///< 并行度（按内存预算推导而来，除非显式 `--jobs`）
   /// 超大翻译单元的并发上限（源文件 ≥ `kLargeUnitBytes` 者走这道窄闸门）。
   std::size_t workers_large{0};

@@ -196,10 +196,9 @@ auto command_build(const Arguments& arguments) -> int {
               stats->units_total, stats->units_rebuilt, stats->units_cached);
   st::print("  编译 {} · {} · 总 {} · 并行 {} 路{}\n",
               st::time::format_duration_ns(stats->compile_ms * 1'000'000),
-              stats->linked
-                  ? std::format("链接 {}", st::time::format_duration_ns(
-                                    (stats->elapsed_ms - stats->compile_ms) * 1'000'000))
-                  : std::string("链接已跳过（产物最新）"),
+              stats->linked ? std::format("链接 {}",
+                                          st::time::format_duration_ns(stats->link_ms * 1'000'000))
+                            : std::string("链接已跳过（产物最新）"),
               st::time::format_duration_ns(st::time::now_ns() - start), stats->workers,
               stats->pch_used ? " · PCH" : "");
   // 并发决策必须可见："为什么是 14 路而不是 28"是运维/排查会问的第一个问题
@@ -343,6 +342,12 @@ auto command_doctor(const Arguments& arguments) -> int {
     }
   }
   st::print("  逻辑核心        : {}\n", st::hardware_concurrency());
+  // 容器/系统 CPU 配额：与核数不同的第二个并发上界（配额小于核数时以配额为准）
+  if (const std::size_t quota = st::pkg::detect_cpu_quota(); quota > 0) {
+    st::print("  CPU 配额        : {} 核（cgroup/ST_CPU_LIMIT）\n", quota);
+  } else {
+    st::print("  CPU 配额        : 不可知（容器 CFS 配额探测失败，按逻辑核心数；可用 ST_CPU_LIMIT 指定）\n");
+  }
   // 内存预算与推导出的并发：编译是内存密集型的，这两个数字比核数更能决定能不能跑完
   {
     const auto limit = st::pkg::detect_memory_limit();
@@ -698,6 +703,7 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.command == "deps") return command_deps(arguments);
   if (arguments.command == "init") return command_init(arguments);
   if (arguments.command == "clean") return command_clean(arguments);
+
 
   std::fprintf(stderr, "未知命令: %s\n\n", arguments.command.c_str());
   print_usage();
