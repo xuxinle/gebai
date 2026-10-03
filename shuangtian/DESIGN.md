@@ -652,6 +652,17 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
   属性面 `ratio/min_ratio/step/orientation`，动作面 `step_forward/step_backward/reset/set`；
   **单面板优雅退化**（占满全空间）；面板住在 `children_`（id/绘制/命中/语义树全部在树上）。
   由来：示例级自绘 `SplitHandle`（DESIGN §8.1.1 反推的框架缺口）——「该从示例级自绘升为框架组件」。
+- **`svg`（SVG 图标子集渲染，2026-10-03）**：图标数据源从私有路径表升级为 **SVG**（业界图标库
+  的通用语）：path `d` 全指令（含 A 圆弧→贝塞尔、S/T 平滑反射、相对坐标、隐式重复、科学计数法）、
+  基本形状、`viewBox`→目标矩形变换（preserveAspectRatio meet/slice）、`<g>` 样式级联 +
+  `transform`、`<symbol>`/`<use>` sprite + defs 形状引用（防环）、`fill-rule=evenodd`（孔环拆分
+  到非零绕向——不用 `Path::reverse`，它语义是断开非反转）。**颜色语义对齐图标库惯例**：无 fill
+  = 缺省黑（Codicons）；`fill="none" stroke="currentColor"` = 描边 + 环境色着色（Lucide/Feather）；
+  显式色不被 override 覆盖（多色图标不破坏）。`svg::IconSet` sprite 装载 + `IconSetPainter`
+  按 (id,物理尺寸,颜色) LRU 缓存位图（同尺寸零重栅、尺寸变了重新矢量光栅——任意缩放清晰的
+  根源）；`Icon::draw` 统一入口「内置表优先、SVG 补位」，`svg:` 前缀强制 SVG 源。实测踩过：
+  sprite 根的 presentation 属性在 symbol 包外壳时丢失 → 整集塌成黑色实心剪影（视觉断言抓出）。
+  画廊「SVG 图标集」卡 17 图标 ×三档尺寸逐个可核对；codeeditor 活动栏/状态栏/标题栏已切 SVG 源。
 - `Toast::set_auto_dismiss_ms`：自动消失（帧时间轴驱动，`expired()` 可查、`on_dismiss` 回调、属性面
   `auto_dismiss_ms`/`expired` 可读写）；到期那帧**连阴影都不落盘**（推演前置在 `paint()`）。默认 `0`=常驻。
 - `Table::set_selected_row/selected_row`：选中行（`primary_soft` 底 + 主色左缘条 + 主色文字，压过斑马纹/hover）；

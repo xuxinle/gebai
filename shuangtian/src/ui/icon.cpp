@@ -309,8 +309,6 @@ auto Icon::find(std::string_view name) noexcept -> const IconGlyph* {
   return nullptr;
 }
 
-auto Icon::has(std::string_view name) noexcept -> bool { return find(name) != nullptr; }
-
 auto Icon::view_bounds(std::string_view name) -> math::Rect {
   const IconGlyph* glyph = find(name);
   if (glyph == nullptr) return math::Rect{0.0f, 0.0f, 24.0f, 24.0f};
@@ -405,9 +403,78 @@ auto Icon::path(std::string_view name, math::Rect box, float stroke_width) -> ra
   return path;
 }
 
+void Icon::draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
+                       math::Color color) {
+  if (box.is_empty() || color.a == 0U) return;
+  raster::Path path = Icon::path(name, box, 0.0f);
+  if (path.is_empty()) return;
+  canvas.fill_path(path, raster::Paint::solid(color));
+}
+
+namespace {
+
+/// 图标名解包：`svg:name` → (true, name)；裸名 → (false, name)。
+auto unpack_svg_name(std::string_view name) -> std::pair<bool, std::string_view> {
+  if (name.size() > 4 && name.substr(0, 4) == "svg:") {
+    return {true, name.substr(4)};
+  }
+  return {false, name};
+}
+
+}  // namespace
+
+// —— SVG 图标注册表 ——
+
+bool Icon::has(std::string_view name) noexcept {
+  const auto [is_svg, id] = unpack_svg_name(name);
+  if (is_svg) return svg_registry().has(id);
+  if (find(name) != nullptr) return true;
+  return svg_registry().has(name);
+}
+
+auto svg_registry() -> SvgIconRegistry& {
+  static SvgIconRegistry instance;  // NOLINT(cppcoreguidelines-avoid-non-const-global-vars)
+  return instance;
+}
+
+auto SvgIconRegistry::load_sprite(std::string_view source) -> bool {
+  return set_->load(source);
+}
+
+auto SvgIconRegistry::add_single(std::string_view id, std::string_view source) -> bool {
+  return set_->load_single(id, source);
+}
+
+auto SvgIconRegistry::has(std::string_view id) const -> bool {
+  return set_->has(id);
+}
+
+auto SvgIconRegistry::ids() const -> std::vector<std::string> {
+  return set_->ids();
+}
+
+auto SvgIconRegistry::draw(raster::Surface& canvas, std::string_view id, math::Rect box,
+                           math::Color color) const -> bool {
+  return painter_.draw(canvas, id, box, color), true;
+}
+
+void SvgIconRegistry::clear_cache() const { painter_.clear_cache(); }
+
+auto SvgIconRegistry::cache_entries() const -> std::size_t {
+  return painter_.cache_stats().entries;
+}
+
+
 void Icon::draw(raster::Surface& canvas, std::string_view name, math::Rect box, math::Color color,
                 float stroke_width) {
   const IconGlyph* glyph = find(name);
+  if (glyph == nullptr) {
+    // 回退：SVG 注册表（裸名无 `svg:` 前缀也查——内置表优先，SVG 补位）
+    const auto [is_svg, id] = unpack_svg_name(name);
+    if (is_svg || !id.empty()) {
+      if (svg_registry().draw(canvas, id, box, color)) return;
+    }
+  }
   if (glyph == nullptr || box.is_empty() || color.a == 0U) return;
   const float scale = std::min(box.width, box.height) / 24.0f;
   const float effective_stroke = glyph->stroke * scale;
@@ -419,14 +486,6 @@ void Icon::draw(raster::Surface& canvas, std::string_view name, math::Rect box, 
     return;
   }
   canvas.stroke_path(path, raster::Paint::solid(color), width);
-}
-
-void Icon::draw_filled(raster::Surface& canvas, std::string_view name, math::Rect box,
-                       math::Color color) {
-  if (box.is_empty() || color.a == 0U) return;
-  raster::Path path = Icon::path(name, box, 0.0f);
-  if (path.is_empty()) return;
-  canvas.fill_path(path, raster::Paint::solid(color));
 }
 
 }  // namespace st::ui

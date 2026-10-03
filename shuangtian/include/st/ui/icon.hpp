@@ -4,6 +4,7 @@
 /// 数据结构为 `inline constexpr` 表（`CONVENTIONS.md` §3.6 允许的数据表形态）。
 
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -11,6 +12,7 @@
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/raster/path.hpp"
+#include "st/ui/svg.hpp"
 
 namespace st::ui {
 
@@ -43,5 +45,40 @@ class Icon {
  private:
   [[nodiscard]] static auto find(std::string_view name) noexcept -> const IconGlyph*;
 };
+
+/// SVG 图标注册表：进程级共享一份 IconSet + 每调用点一份位图缓存。
+///
+/// 用法：应用启动时 `svg_registry().load(sprite_text)` 装载一份 sprite（或逐个
+/// `add_single`）；此后任何 `IconView`/`Icon::draw` 遇到**表里没有的图标名**都会先查这里。
+/// 图标名带 `svg:` 前缀（如 `svg:folder`）则强制走 SVG 源。矢量按目标尺寸重新光栅化
+/// （任意缩放清晰），位图按 (id, 物理尺寸, 颜色) LRU 缓存（同尺寸零重栅）。
+///
+/// `registry()` 返回的共享实例由首次调用惰性构造（ Meyers singleton，进程生存期、
+/// 无退出期析构顺序问题——只持有不可变数据与缓存位图）。
+class SvgIconRegistry {
+ public:
+  /// 装载 sprite（`<symbol id>` 形态；已有同名 id 会被覆盖语义：追加新图标为主）。
+  auto load_sprite(std::string_view source) -> bool;
+  /// 追加单图标（`<svg>` 根形态）。
+  auto add_single(std::string_view id, std::string_view source) -> bool;
+  [[nodiscard]] auto has(std::string_view id) const -> bool;
+  [[nodiscard]] auto ids() const -> std::vector<std::string>;
+  /// 绘制（带位图缓存）；返回 false = id 不存在或尺寸非法。
+  auto draw(raster::Surface& canvas, std::string_view id, math::Rect box,
+            math::Color color) const -> bool;
+  /// 丢弃全部位图缓存（矢量数据保留；主题切换不需要——颜色在缓存键里）。
+  void clear_cache() const;
+  [[nodiscard]] auto cache_entries() const -> std::size_t;
+
+ private:
+  SvgIconRegistry() = default;
+  friend auto svg_registry() -> SvgIconRegistry&;
+
+  std::shared_ptr<svg::IconSet> set_{std::make_shared<svg::IconSet>()};
+  mutable svg::IconSetPainter painter_{set_};
+};
+
+/// 进程级 SVG 图标注册表（见 `SvgIconRegistry`）。
+auto svg_registry() -> SvgIconRegistry&;
 
 }  // namespace st::ui

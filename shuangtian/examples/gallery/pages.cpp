@@ -279,6 +279,51 @@ class IconCell : public Element {
   st::math::Color border_{};
 };
 
+/// SVG 图标格：名字 + 同图标三档尺寸（16/32/64px）——矢量重栅的直观对照。
+/// 画法走 `Icon::draw("svg:<id>")`（与内置表同一入口；注册表补位）。
+class SvgIconCell : public Element {
+ public:
+  explicit SvgIconCell(std::string id) : icon_id_(std::move(id)) {
+    set_id("svg-cell-" + icon_id_);
+  }
+  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "SvgIconCell"; }
+  [[nodiscard]] auto semantics_text() const -> std::string override { return icon_id_; }
+  void apply_theme(const st::ui::Theme& theme) override {
+    style_.color = theme.colors().text;
+    style_.font_size = 9.0f;
+    border_ = theme.colors().border;
+  }
+  void measure(const st::ui::RenderContext& context,
+               const st::ui::Constraints& constraints) override {
+    (void)context;
+    (void)constraints;
+    measured_ = st::math::Size{kCellWidth, kCellHeight};
+  }
+  void paint_content(const st::ui::RenderContext& context,
+                     st::raster::Surface& canvas) const override {
+    // 三档尺寸纵向排：16（基线对齐名区）/ 32 / 64——宽度按最大档占位
+    const std::string name = "svg:" + icon_id_;
+    float x = bounds_.x + 6.0f;
+    const float top = bounds_.y + 6.0f;
+    Icon::draw(canvas, name, Rect{x, top, 16.0f, 16.0f}, style_.color, 0.0f);
+    Icon::draw(canvas, name, Rect{x + 20.0f, top, 32.0f, 32.0f}, style_.color, 0.0f);
+    Icon::draw(canvas, name, Rect{x + 56.0f, top, 64.0f, 64.0f}, style_.color, 0.0f);
+    if (context.text != nullptr) {
+      const float width = context.text->measure_width(icon_id_, style_.font_size);
+      context.text->draw(canvas, icon_id_,
+                         Point{bounds_.x + (bounds_.width - width) * 0.5f, top + 64.0f + 2.0f},
+                         style_.font_size, context.theme.colors().text_faint);
+    }
+  }
+
+  static constexpr float kCellWidth{132.0f};
+  static constexpr float kCellHeight{86.0f};
+
+ private:
+  std::string icon_id_{};  // 不叫 id_——遮蔽 Element::id_ 是 L13 违规（实测踩过）
+  st::math::Color border_{};
+};
+
 /// 色板格：颜色块 + 名字（令牌核对用）。
 class SwatchCell : public Element {
  public:
@@ -683,6 +728,33 @@ namespace {
     icon_grid->add_child(std::make_unique<IconCell>(std::string(name)));
   }
   icons_card->add_child(std::move(icon_grid));
+
+  // —— SVG 图标集（矢量数据源：同一图标多尺寸渲染，任意缩放清晰）——
+  // 首次构建该卡时把编译期嵌入的 sprite 装进进程级注册表（幂等；随后
+  // IconView/Icon::draw 走「内置表优先、SVG 补位」的统一入口）。
+  static const bool sprite_loaded = [] {
+    const auto sprite = b::embed<"examples/gallery/assets/icons.svg">();
+    return st::ui::svg_registry().load_sprite(
+        std::string_view(sprite.data(), sprite.length()));
+  }();
+  const auto svg_ids = st::ui::svg_registry().ids();
+  auto svg_card = make_card("card-svg-icons",
+                            std::format("SVG 图标集（{} 个：矢量数据源 · 按目标尺寸重新光栅化 · "
+                                        "任意缩放清晰 · Lucide 风格 sprite）",
+                                        svg_ids.size() - (sprite_loaded ? 0 : 0)));
+  auto svg_head = std::make_unique<st::ui::Text>(
+      std::format("装载 {} 个图标；同一图标从 16px 到 64px 逐级放大——边缘始终平滑（位图放大会糊）",
+                  svg_ids.size()));
+  svg_head->set_font_size(11.5f);
+  svg_head->set_tone(st::ui::Tone::Muted);
+  svg_card->add_child(std::move(svg_head));
+  auto svg_grid = make_row(2.0f, /*wrap=*/true);
+  svg_grid->set_id("svg-icon-grid");
+  for (const auto& id : svg_ids) {
+    svg_grid->add_child(std::make_unique<SvgIconCell>(id));
+  }
+  svg_card->add_child(std::move(svg_grid));
+  page->add_child(std::move(svg_card));
   {
     auto gl_card = make_card("card-gl", "三维视图（OpenGL）");
     auto view = std::make_unique<st::ui::SceneView>(st::ui::SceneShape::Cube);
