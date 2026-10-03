@@ -24,6 +24,7 @@
 /// 坐标系：全部逻辑像素；文本索引为 UTF-8 字节偏移且落在码点边界。
 
 #include <algorithm>
+#include <map>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -286,6 +287,9 @@ struct Options {
   std::string text_lcd{"auto"};
   /// 字形网格拟合：auto/off/light/normal（见 AppOptions::text_fit）。
   std::string text_fit{"auto"};
+  /// 工作区目录（真实文件模式）：给定时资源管理器/打开/保存全部走 `st::fs` 真实读写；
+  /// 缺省回退内置样例工作区（内存模拟）。
+  std::string workspace{};
 };
 
 [[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
@@ -305,6 +309,7 @@ struct Options {
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
     else if (raw == "--text-fit") options.text_fit = value("auto");
     else if (raw == "--language") options.language = value("cpp");
+    else if (raw == "--workspace") options.workspace = value(".");
     else if (raw == "--headless") options.headless = true;
     else if (raw == "--enable-script") options.enable_script = true;
   }
@@ -314,12 +319,84 @@ struct Options {
 // 打开的编辑器：一个标签 = 一份文本 + 一个 CodeEditor 实例
 
 struct OpenBuffer {
-  std::string key;       // 业务身份（样例名）
+  std::string key;       // 业务身份（样例名或绝对路径）
   std::string label;     // 标签名（文件名）
   std::string language;
   std::string text;      // 当前文本（切换回来时恢复）
   bool dirty{false};     // 修改点
   CodeEditor* editor{};  // 非拥有：挂在编辑区容器下的实例（随容器存活）
+  std::string path{};    // 真实文件绝对路径（空 = 内置样例，保存走内存模拟）
+};
+
+/// 打开真实文件：`fs::read_text` 读入 → OpenBuffer（path 非空）。
+/// 语言按扩展名推断（`CodeEditor::set_language_from_path` 同源逻辑）。
+[[nodiscard]] auto open_file_buffer(std::vector<OpenBuffer>& buffers, const std::string& path)
+    -> OpenBuffer* {
+  auto content = st::fs::read_text(path);
+  if (!content) return nullptr;
+  // 已打开？刷新内容（保持同一标签）
+  for (auto& buffer : buffers) {
+    if (buffer.path == path) {
+      buffer.text = *content;
+      buffer.dirty = false;
+      return &buffer;
+    }
+  }
+  OpenBuffer buffer;
+  buffer.key = path;
+  buffer.path = path;
+  const std::size_t slash = path.find_last_of("/\\");
+  buffer.label = slash == std::string::npos ? path : path.substr(slash + 1);
+  buffer.language = st::text::language_from_path(path).value_or("");
+  buffer.text = std::move(*content);
+  buffers.push_back(std::move(buffer));
+  return &buffers.back();
+}
+
+/// 真实文件保存（脏标记清除；返回是否写盘成功）。
+[[nodiscard]] auto save_buffer_to_disk(OpenBuffer& buffer) -> bool {
+  if (buffer.path.empty()) return false;
+  if (buffer.editor != nullptr) buffer.text = buffer.editor->text();
+  if (auto status = st::fs::write_text(buffer.path, buffer.text); !status) return false;
+  buffer.dirty = false;
+  return true;
+}
+
+/// 目录树展开：`fs::list_dir` 一层（目录可再展开；文件点击打开）。
+[[nodiscard]] auto scan_tree_nodes(const std::string& root) -> std::vector<st::ui::TreeNode> {
+  std::vector<st::ui::TreeNode> nodes;
+  auto entries = st::fs::list_dir(root);
+  if (!entries) return nodes;
+  // 目录在前、文件在后，各自字典序
+  std::vector<const st::fs::DirEntry*> dirs;
+  std::vector<const st::fs::DirEntry*> files;
+  for (const auto& entry : *entries) {
+    (entry.is_dir ? dirs : files).push_back(&entry);
+  }
+  const auto by_name = [](const auto* a, const auto* b) { return a->name < b->name; };
+  std::sort(dirs.begin(), dirs.end(), by_name);
+  std::sort(files.begin(), files.end(), by_name);
+  for (const auto* dir : dirs) {
+    nodes.push_back(st::ui::TreeNode{"dir:" + dir->name, dir->name, false, true, 0});
+  }
+  for (const auto* file : files) {
+    nodes.push_back(st::ui::TreeNode{root + "/" + file->name, file->name, false, false, 0});
+  }
+  return nodes;
+}
+
+/// 查找替换浮层（VSCode Ctrl+F/H 形态的顶部右侧窄条）。
+/// 组装在调用点（示例级）；与编辑器的交互全部走 `CodeEditor` 的 find/replace API。
+struct FindBar {
+  st::ui::Panel* card{nullptr};
+  st::ui::Input* needle{nullptr};
+  st::ui::Input* replacement{nullptr};
+  st::ui::Text* counter{nullptr};
+  st::ui::Button* next{nullptr};
+  st::ui::Button* prev{nullptr};
+  st::ui::Button* replace_one{nullptr};
+  st::ui::Button* replace_all{nullptr};
+  st::ui::Button* close{nullptr};
 };
 
 /// 工作台状态：全部原始指针非拥有（元素生命周期归 Panel 树）。
@@ -347,6 +424,13 @@ struct Workbench {
   Text* output_text{nullptr};
   // 空态提示（无标签时才显示）
   Element* empty_hint{nullptr};
+  // 查找替换浮层
+  FindBar find{};
+  // 真实文件工作区（空 = 内置样例模式）
+  std::string workspace_root{};
+  // 目录展开状态（dir key → 展开？；驱动 scan_tree_nodes 的增量刷新）
+  std::map<std::string, bool> dir_expanded{};
+  Tree* workspace_tree{nullptr};
 };
 
 /// 把编辑器实例挂到编辑区（首个标签时创建，此后复用同一个实例）。
@@ -465,7 +549,7 @@ void close_tab(Workbench& wb, st::ui::UiRoot& root) {
   root.mark_dirty_all();
 }
 
-/// 保存当前标签（模拟：清修改点 + 状态栏反馈 + 输出面板记一行）。
+/// 保存当前标签：真实文件走 `fs::write_text`，内置样例走内存模拟。
 void save_active(Workbench& wb, st::ui::UiRoot& root) {
   if (wb.active >= wb.buffers.size()) {
     wb.status->set_content("没有可保存的编辑器");
@@ -473,14 +557,22 @@ void save_active(Workbench& wb, st::ui::UiRoot& root) {
     return;
   }
   OpenBuffer& buffer = wb.buffers[wb.active];
-  buffer.dirty = false;
+  if (!buffer.path.empty()) {
+    if (save_buffer_to_disk(buffer)) {
+      wb.status->set_content("已保存 " + buffer.path);
+    } else {
+      wb.status->set_content("保存失败（写盘被拒）：" + buffer.path);
+    }
+  } else {
+    wb.status->set_content("已保存 " + buffer.label + "（内存模拟，无磁盘写入）");
+  }
   buffer.text = buffer.editor != nullptr ? buffer.editor->text() : buffer.text;
+  buffer.dirty = false;
   std::vector<st::ui::Tabs::Tab> tabs;
   for (const auto& open : wb.buffers) {
     tabs.push_back(st::ui::Tabs::Tab{open.key, open.label, open.dirty, true});
   }
   wb.tabs->sync_tabs(tabs);
-  wb.status->set_content("已保存 " + buffer.label + "（内存模拟，无磁盘写入）");
   wb.output_text->set_content(wb.output_text->content() + "\n[保存] " + buffer.label + " · " +
                               std::to_string(st::utf8_length(buffer.text)) + " 字符");
   root.mark_dirty_all();
@@ -782,7 +874,12 @@ auto run_app(int argc, char** argv) -> int {
   auto tree = std::make_unique<Tree>();
   tree->set_id("workspace-tree");
   auto* tree_ptr = tree.get();
-  {
+  wb.workspace_tree = tree_ptr;
+  wb.workspace_root = options.workspace;
+  if (!options.workspace.empty()) {
+    // 真实文件模式：`fs::list_dir` 扫工作区根（目录可展开，见 on_toggle 的增量刷新）
+    tree->sync_nodes(scan_tree_nodes(options.workspace));
+  } else {
     std::vector<st::ui::TreeNode> nodes;
     // 目录（按 tree_key 的第一段聚合；未展开目录的子项不列——展开状态由数据表达，
     // 示例只对 src/tools 预展开并给出子项，其余目录收起（与展开箭头一致，避免"假展开"）
@@ -1114,7 +1211,141 @@ auto run_app(int argc, char** argv) -> int {
   status_bar->add_child(std::move(theme_button));
   page->add_child(std::move(status_bar));
 
+  // ════════════════ 查找替换浮层（Ctrl+F / Ctrl+H）════════════════
+  {
+    auto card = std::make_unique<Panel>(FlexDirection::Row);
+    card->set_id("find-bar");
+    card->style().padding = Insets{8.0f, 8.0f, 8.0f, 8.0f};
+    card->style().gap = 6.0f;
+    card->style().align_items = Align::Center;
+    card->style().background = st::math::Color::rgb(32, 40, 54);
+    card->style().border_color = st::math::Color::rgba(255, 255, 255, 30);
+    card->style().border_width = 1.0f;
+    card->style().radius = 8.0f;
+    auto needle = std::make_unique<Input>();
+    needle->set_id("find-needle");
+    needle->set_placeholder("查找");
+    needle->style().width = 170.0f;
+    wb.find.needle = static_cast<Input*>(card->add_child(std::move(needle)));
+
+    auto counter = std::make_unique<Text>("0/0");
+    counter->set_id("find-counter");
+    counter->set_font_size(11.5f);
+    counter->set_tone(Tone::Muted);
+    counter->style().width = 46.0f;
+    wb.find.counter = static_cast<Text*>(card->add_child(std::move(counter)));
+
+    auto prev = std::make_unique<Button>("↑", Button::Variant::Ghost, Button::Size::Small);
+    prev->set_id("find-prev");
+    wb.find.prev = static_cast<Button*>(card->add_child(std::move(prev)));
+    auto next = std::make_unique<Button>("↓", Button::Variant::Ghost, Button::Size::Small);
+    next->set_id("find-next");
+    wb.find.next = static_cast<Button*>(card->add_child(std::move(next)));
+
+    auto replacement = std::make_unique<Input>();
+    replacement->set_id("find-replace");
+    replacement->set_placeholder("替换为");
+    replacement->style().width = 150.0f;
+    wb.find.replacement = static_cast<Input*>(card->add_child(std::move(replacement)));
+
+    auto replace_one = std::make_unique<Button>("替换", Button::Variant::Secondary, Button::Size::Small);
+    replace_one->set_id("find-replace-one");
+    wb.find.replace_one = static_cast<Button*>(card->add_child(std::move(replace_one)));
+    auto replace_all = std::make_unique<Button>("全部", Button::Variant::Secondary, Button::Size::Small);
+    replace_all->set_id("find-replace-all");
+    wb.find.replace_all = static_cast<Button*>(card->add_child(std::move(replace_all)));
+
+    auto close = std::make_unique<Button>("×", Button::Variant::Ghost, Button::Size::Small);
+    close->set_id("find-close");
+    wb.find.close = static_cast<Button*>(card->add_child(std::move(close)));
+    wb.find.card = card.get();
+    root->add_overlay(std::move(card), st::ui::UiRoot::OverlayLayout::Stack);
+    wb.find.card->set_visible(false);  // Ctrl+F 唤出
+  }
+
   // ════════════════ 行为接线 ════════════════
+
+  // —— 查找替换浮层 ——
+  const auto active_editor = [&wb]() -> CodeEditor* {
+    return wb.active < wb.buffers.size() ? wb.buffers[wb.active].editor : nullptr;
+  };
+  const auto refresh_find_counter = [&wb, &active_editor]() {
+    if (active_editor() == nullptr) return;
+    const std::size_t total = active_editor()->find_match_count();
+    const std::size_t active = active_editor()->find_active_index();
+    wb.find.counter->set_content(
+        total == 0 ? std::string("0/0")
+                   : std::format("{}/{}", active == CodeEditor::kNoFindMatch ? 0 : active + 1,
+                                 total));
+  };
+  wb.find.needle->on_change = [&wb, &active_editor, &refresh_find_counter, root](
+                                  std::string_view value) {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      editor->set_find(std::string(value));
+      editor->find_next(false);
+      refresh_find_counter();
+    }
+    root->mark_dirty_all();
+  };
+  wb.find.needle->on_submit = [&wb, &active_editor, &refresh_find_counter, root](
+                                  std::string_view) {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      editor->find_next(false);
+      refresh_find_counter();
+      root->set_focus(wb.find.needle);
+    }
+    root->mark_dirty_all();
+  };
+  wb.find.next->on_click = [&wb, &active_editor, &refresh_find_counter, root]() {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      editor->find_next(false);
+      refresh_find_counter();
+      root->mark_dirty_all();
+    }
+  };
+  wb.find.prev->on_click = [&wb, &active_editor, &refresh_find_counter, root]() {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      editor->find_next(true);
+      refresh_find_counter();
+      root->mark_dirty_all();
+    }
+  };
+  wb.find.replace_one->on_click = [&wb, &active_editor, &refresh_find_counter, root]() {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      editor->replace_current(wb.find.replacement->value());
+      refresh_find_counter();
+      root->mark_dirty_all();
+    }
+  };
+  wb.find.replace_all->on_click = [&wb, &active_editor, &refresh_find_counter, root]() {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      const std::size_t count = editor->replace_all(wb.find.replacement->value());
+      wb.status->set_content(std::format("已替换 {} 处", count));
+      refresh_find_counter();
+      root->mark_dirty_all();
+    }
+  };
+  wb.find.close->on_click = [&wb, &active_editor, root]() {
+    if (CodeEditor* editor = active_editor(); editor != nullptr) editor->clear_find();
+    wb.find.card->set_visible(false);
+    if (CodeEditor* editor = active_editor(); editor != nullptr) root->set_focus(editor);
+    root->mark_dirty_all();
+  };
+  // 打开查找条（focus 输入框；预填当前选中文本——VSCode 同族行为）
+  const auto open_find_bar = [&wb, &active_editor, &refresh_find_counter, root]() {
+    wb.find.card->set_visible(true);
+    if (CodeEditor* editor = active_editor(); editor != nullptr) {
+      const std::string picked = editor->selected_text();
+      if (!picked.empty() && picked.find('\n') == std::string::npos) {
+        wb.find.needle->set_text(picked);
+        editor->set_find(picked);
+        editor->find_next(false);
+      }
+      refresh_find_counter();
+    }
+    root->set_focus(wb.find.needle);
+    root->mark_dirty_all();
+  };
 
   // Tabs：切换标签 = 换绑编辑器内容；× = 关闭
   wb.tabs->on_change = [&wb, root](std::size_t index) {
@@ -1142,6 +1373,32 @@ auto run_app(int argc, char** argv) -> int {
   // 资源管理器：点文件 = 打开标签；stlog.log = 自定义语言样例
   // （`tree_ptr` 在创建期已取裸指针——`root->find` 需 set_content 之后才可用）
   tree_ptr->on_select = [&wb, &files, root](std::string_view key) {
+    // 真实文件模式：key 即绝对路径（scan_tree_nodes 生成）
+    if (!wb.workspace_root.empty() && key.rfind("dir:", 0) != 0) {
+      if (auto* buffer = open_file_buffer(wb.buffers, std::string(key)); buffer != nullptr) {
+        // 找到它在 buffers 的下标 → 走统一激活路径
+        std::size_t index = 0;
+        for (std::size_t i = 0; i < wb.buffers.size(); ++i) {
+          if (&wb.buffers[i] == buffer) index = i;
+        }
+        std::vector<st::ui::Tabs::Tab> tab_bar;
+        for (const auto& open : wb.buffers) {
+          tab_bar.push_back(st::ui::Tabs::Tab{open.key, open.label, open.dirty, true});
+        }
+        wb.tabs->sync_tabs(tab_bar);
+        wb.tabs->set_active(index);
+        wb.active = index;
+        bind_editor(wb, *root);
+        wb.title_text->set_content(buffer->label + " - codeeditor");
+        wb.status->set_content("已打开 " + buffer->path);
+        root->set_focus(buffer->editor);
+        root->mark_dirty_all();
+        return;
+      }
+      wb.status->set_content("打开失败：" + std::string(key));
+      root->mark_dirty_all();
+      return;
+    }
     if (key == "stlog.log") {
       // 自定义语言样例：作为标签打开
       Sample stlog_sample{"stlog.log", "stlog", kStlogSample, "logs/stlog.log"};
@@ -1157,8 +1414,43 @@ auto run_app(int argc, char** argv) -> int {
       }
     }
   };
-  // 目录展开/收起：示例树是静态的，toggle 只维持视觉状态
-  tree_ptr->on_toggle = [root](std::string_view, bool) { root->mark_dirty_all(); };
+  // 目录展开/收起：真实工作区按需增量扫描（展开目录 → 子节点挂到该目录下）
+  tree_ptr->on_toggle = [&wb, root](std::string_view key, bool expanded) {
+    if (wb.workspace_root.empty() || key.rfind("dir:", 0) != 0) {
+      root->mark_dirty_all();
+      return;
+    }
+    // dir: 的 key 只有目录名——从现有节点反查它的完整路径：父级展开链在节点 key 里
+    // （scan_tree_nodes 用「root + "/" + name」做文件 key、dir: 用短名；这里简单化：
+    // 展开一级目录 = 工作区根下的目录）
+    const std::string dir_name(key.substr(4));
+    const std::string full = wb.workspace_root + "/" + dir_name;
+    wb.dir_expanded[full] = expanded;
+    // 重建树：根 + 每个已展开目录的子项（缩进 +1）
+    std::vector<st::ui::TreeNode> nodes;
+    auto base = scan_tree_nodes(wb.workspace_root);
+    for (auto& node : base) {
+      nodes.push_back(node);
+      if (node.key.rfind("dir:", 0) == 0) {
+        const std::string name = std::string(node.key.substr(4));
+        const std::string full_child = wb.workspace_root + "/" + name;
+        const auto state = wb.dir_expanded.find(full_child);
+        if (state != wb.dir_expanded.end() && state->second) {
+          nodes.back().expanded = true;
+          for (auto& child : scan_tree_nodes(full_child)) {
+            child.depth += 1;
+            // 子目录 key 加父前缀保持唯一
+            if (child.key.rfind("dir:", 0) == 0) {
+              child.key = "dir:" + name + "/" + std::string(child.key.substr(4));
+            }
+            nodes.push_back(child);
+          }
+        }
+      }
+    }
+    wb.workspace_tree->sync_nodes(nodes);
+    root->mark_dirty_all();
+  };
 
   // 搜索：在样例文本里逐行找，结果进列表
   search_input_ptr->on_change = [search_list_ptr, &files, &wb, root](std::string_view query) {
@@ -1352,6 +1644,15 @@ auto run_app(int argc, char** argv) -> int {
                             open_palette();
                             return true;
                           });
+  (void)root->register_shortcut("f", ctrl, [root, &open_find_bar]() {
+    open_find_bar();
+    return true;
+  });
+  st::ui::UiRoot::Shortcut ctrl_h{}; ctrl_h.ctrl = true;
+  (void)root->register_shortcut("h", ctrl_h, [&open_find_bar]() {
+    open_find_bar();
+    return true;
+  });
   (void)root->register_shortcut("b", ctrl, [root]() {
     // 折叠/展开侧栏：侧栏与活动栏一起切（VSCode 的 Ctrl+B 只藏侧栏，这里联动活动栏演示）
     Element* sidebar_element = root->find("sidebar");

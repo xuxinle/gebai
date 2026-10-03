@@ -25,6 +25,26 @@
 
 ## P1
 
+- [x] **codeeditor「平替 VSCode」第二批：查找替换 + 真实文件工作区 + 命令面板内置** —— 2026-10-03
+  - `CodeEditor` find/replace 组件能力：`set_find`（全部命中高亮，主题新增 find_highlight/
+    find_active 两枚 token）/`find_next`（环绕、就近起步）/`replace_current`（替换后跳下一
+    命中）/`replace_all`（走撤销栈可回滚）；编辑后命中表保持重建；动作面
+    find/find_next/find_prev/replace/replace_all/replace 进协议白名单；属性面
+    find_needle/find_matches/find_active。7 用例。
+  - `CommandPalette` 内置为框架组件（此前 backlog 挂账）：数据驱动（Command 表）+
+    大小写不敏感过滤（title/detail）+ 键盘环绕导航 + Esc/遮罩关闭 + 属性面/动作面
+    （select 支持序号与命令 id）；7 用例。codeeditor 示例的私有实现退役（下批迁移调用点）。
+  - codeeditor `--workspace <dir>`：真实文件模式——资源树 `fs::list_dir` 扫描（目录增量
+    展开）、点文件 `fs::read_text` 打开（语言按扩展名推断）、Ctrl+S `fs::write_text`
+    真实写盘（脏标记/标题栏/状态栏全联动）；缺省回退内置样例工作区（行为不变）。
+  - 查找替换浮条（Ctrl+F/Ctrl+H）：输入即查（预填选中文本）、计数 n/m、↑↓ 环绕、
+    替换/全部替换。
+  - e2e 实证：协议改文本 → Ctrl+S → 磁盘内容更新；find 高亮命中 → replace_all →
+    保存落盘（视觉验证：黄色命中 + 浮条完整 + 真实文件树）。
+  - 顺带修 Input 程序 `set_text` 不触发 `on_change` 的语义澄清（保持——外部赋值不算
+    用户输入，e2e 走 invoke 动作面/真实键入）。
+  - `st test` 557 用例全绿（+14）；lint 0 违规。
+
 - [x] **图标系统改用 SVG（矢量数据源，任意缩放清晰）** —— 2026-10-03 落地
   起因：内置图标表是私有路径格式（M/L/C/Z 简化语法），矢量可缩放但**生态为零**——
   业界图标库（Codicons/Lucide/Feather/Tabler）全是 SVG。自研 SVG 图标子集渲染器

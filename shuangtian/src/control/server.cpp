@@ -760,7 +760,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
                                                     "activate",  "add_row",  "clear_rows",
                                                     "scroll_by", "clear",    "step_forward",
                                                     "step_backward", "reset",  "set",
-                                                    "increment", "decrement"};
+                                                    "increment", "decrement",
+                                                    "find",      "clear_find", "find_next",
+                                                    "find_prev", "replace",     "replace_all"};
     const std::string requested_action = json_get_string(params, "action");
     if (!requested_action.empty()) {
       const bool known = std::find(std::begin(kActions), std::end(kActions), requested_action) !=
