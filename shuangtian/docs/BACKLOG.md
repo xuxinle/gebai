@@ -262,6 +262,12 @@
   - [x] **构造期属性组件包装**：`dsl::select`/`dsl::table`/`dsl::tree`。
   - [x] **协议 `ui.create`/`ui.remove`**：在线建删元素（与声明式共用工厂）。
   - [x] 旧版 `examples/codeeditor` 编译修复（三处 `-Werror=shadow`）。
+  - [x] **启动黑框消除**（真窗口）：`create_window` 原先 `CreateWindowExW` 后立即
+    `ShowWindow`，而画布分配（含渲染器实测基准 ~590ms）与 DPI 尺寸调整还没做——
+    用户看到「白区 1280×800 + 黑框」约 0.6 秒。改为**建窗不显 + 首帧画完才
+    `show_when_ready()`**（`Backend` 新增接口，无头为空实现）；
+    同时把 `auto` 选型改为**缩尺负载**（选型只需序关系，不需绝对帧耗时）——
+    启动到可见 680ms → 440ms，露面即完整（黑占 0.00%）。
   - [x] **线程池**：固定工作线程（`hardware_concurrency` 夹取 1~8）+ 任务队列，
     替代「每任务一线程」（密集场景不再瞬间开几十个线程）；懒建——不跑异步的应用不付代价。
   - [x] **异步取消语义**：`AsyncCancel` 取消牌（≈ JS `AbortSignal`）——输入变化翻旧代的牌

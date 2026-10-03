@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -172,8 +173,8 @@ class Win32Backend final : public Backend {
       return unexpected(ErrorCode::Unsupported,
                         std::format("CreateWindowExW 失败（错误码 {}）", ::GetLastError()));
     }
-    ::ShowWindow(window_, SW_SHOW);
-    ::UpdateWindow(window_);
+    // 注意：**不在这里 `ShowWindow`**——见 `show_when_ready` 的说明。
+    // 先建窗口（不显示）才能拿到它落在哪个显示器、那个显示器的 DPI 是多少。
 
     // 窗口实际 DPI 可能与请求不同（多显示器/系统缩放）。
     // 未显式指定时以窗口为准；**但必须连窗口尺寸一起改**——
@@ -251,6 +252,28 @@ class Win32Backend final : public Backend {
       return unexpected(ErrorCode::Io, "SetWindowPos 失败");
     }
     return ok();
+  }
+
+  /// 首帧画完后把窗口显出来（见接口声明处的说明）。
+  ///
+  /// 幂等：重复调用只在第一次生效。
+  void show_when_ready() override {
+    if (window_ == nullptr || shown_) return;
+    shown_ = true;
+    // 先设为**不激活**显示，避免系统在窗口还没内容时把焦点/重绘抢过去；
+    // 内容贴好后再真正前置。
+    ::ShowWindow(window_, SW_SHOWNOACTIVATE);
+    // 把当前画布内容同步贴上去。`ShowWindow` 返回时窗口已被映射，此时呈现才有效。
+    if (presenter_ != nullptr) {
+      (void)presenter_->present(*surface_, surface_->physical_width(), surface_->physical_height());
+    } else if (surface_ != nullptr && dib_ != nullptr) {
+      blit();
+    }
+    ::UpdateWindow(window_);
+    ::SetForegroundWindow(window_);
+    // 让主循环下一帧再重画一次：`framebuffer()` 见到 `size_dirty_` 会重建缓冲，
+    // 确保呈现路径与最终尺寸一致（也是失败时的保底重画）。
+    size_dirty_ = true;
   }
 
   void present() override {
@@ -503,14 +526,36 @@ class Win32Backend final : public Backend {
     // `auto` = **实测**：两条都建出来跑同一负载（与 headless 同一份判据）。
     // 注意这个数字**不含 present()**：GPU 画布走 DXGI swapchain（送显 ~0.03ms），
     // 软件画布走 GDI blit（~1.4ms）——两者差异由 renderer_note 报出，不混进基准。
-    auto software = make_software();
-    const double software_ms = shell::benchmark_surface(*software, 3);
-    const double gpu_ms = shell::benchmark_surface(**gpu, 3);
-    const bool pick_gpu = gpu_ms > 0.0 && gpu_ms < software_ms;
-    choice.surface = pick_gpu ? std::move(*gpu) : std::move(software);
-    choice.name = pick_gpu ? "gpu" : "software";
-    choice.note = std::format("auto 实测（合成负载，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
-                              software_ms, gpu_label, gpu_ms, pick_gpu ? "GPU" : "软件");
+    //
+    // **缩尺测量**：选型要的是序关系，不是绝对帧耗时。按真实尺寸（1920×1200）各跑
+    // 3 轮时软件光栅 86ms/轮，仅这一步 261ms，而它全在**窗口可见之前**——用户看到
+    // 的就是白底 + 黑框（实测启动延迟 680ms 的主体）。光栅耗时对面积近似线性，
+    // 缩小尺寸不改变两条的相对次序，代价却降到几毫秒。
+    constexpr int kProbeLongEdge = 320;
+    const double long_edge = static_cast<double>(std::max(physical_width, physical_height));
+    const double shrink =
+        long_edge > static_cast<double>(kProbeLongEdge)
+            ? static_cast<double>(kProbeLongEdge) / long_edge
+            : 1.0;
+    const int probe_width = std::max(32, static_cast<int>(std::lround(physical_width * shrink)));
+    const int probe_height = std::max(32, static_cast<int>(std::lround(physical_height * shrink)));
+    std::unique_ptr<raster::Surface> probe_software =
+        std::make_unique<raster::Canvas>(probe_width, probe_height, scale);
+    const double software_ms = shell::benchmark_surface(*probe_software, 3);
+    auto probe_gpu = raster::gpu::create_canvas(probe_width, probe_height, scale, {});
+    const double gpu_ms = probe_gpu.has_value() ? shell::benchmark_surface(**probe_gpu, 3) : 0.0;
+    const bool pick_gpu = probe_gpu.has_value() && gpu_ms > 0.0 && gpu_ms < software_ms;
+    // 测速画布丢弃，交付**真实尺寸**的那块（`gpu` 已在上面按真实尺寸建好）
+    if (pick_gpu) {
+      choice.surface = std::move(*gpu);
+      choice.name = "gpu";
+    } else {
+      choice.surface = make_software();
+      choice.name = "software";
+    }
+    choice.note = std::format(
+        "auto 实测（缩尺合成负载 {}x{}，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
+        probe_width, probe_height, software_ms, gpu_label, gpu_ms, pick_gpu ? "GPU" : "软件");
     return choice;
   }
 
@@ -774,6 +819,8 @@ class Win32Backend final : public Backend {
   }
 
   HWND window_{nullptr};
+  /// 是否已 `ShowWindow`（与 `create_window` 分离，见 `show_when_ready`）。
+  bool shown_{false};
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};

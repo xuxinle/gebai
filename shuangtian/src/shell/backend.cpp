@@ -50,32 +50,62 @@ struct SurfaceChoice {
 
   // `auto` = 实测：两条都建出来，各跑一遍同样的负载，取更快的那条。
   // 不做"GPU 优先"的硬编码——GPU 弱、驱动差、或呈现仍需 CPU 拷贝时，软件反而更快。
+  //
+  // **测量用缩尺画布**：选型要的是「谁更快」这个序关系，不是绝对帧耗时。
+  // 早先按真实尺寸（1920×1200）各跑 3 轮：软件光栅 86ms/轮 → 仅这一步就 261ms，
+  // 而它全在**窗口可见之前**（实测启动延迟 680ms 的主体，用户看到的是白底+黑框）。
+  // 光栅与合成的耗时对面积基本是线性的，缩小尺寸不改变两条的相对次序，
+  // 代价却从几百毫秒降到几毫秒——**启动路径上不该为选型付这种代价**。
   if (renderer == "auto") {
-    auto software = std::make_unique<raster::Canvas>(
-        raster::Canvas::for_logical_size(options.width > 0 ? options.width : 1280,
-                                         options.height > 0 ? options.height : 720, scale));
-    const double software_ms = benchmark_surface_impl(*software, 3);
-    std::unique_ptr<raster::Surface> gpu{};
+    // 长边夹取到 320：足够盖住固定开销（状态切换/提交/遮罩上传）与面积的转折点，
+    // 又不至于把时间花在像素上。保持长宽比，否则测的是另一种负载形状。
+    constexpr int kProbeLongEdge = 320;
+    const double long_edge = static_cast<double>(std::max(physical_width, physical_height));
+    const double shrink = long_edge > static_cast<double>(kProbeLongEdge)
+                              ? static_cast<double>(kProbeLongEdge) / long_edge
+                              : 1.0;
+    const int probe_width = std::max(32, static_cast<int>(std::lround(physical_width * shrink)));
+    const int probe_height = std::max(32, static_cast<int>(std::lround(physical_height * shrink)));
+    std::unique_ptr<raster::Surface> probe_software =
+        std::make_unique<raster::Canvas>(probe_width, probe_height, scale);
+    const double software_ms = benchmark_surface_impl(*probe_software, 3);
+    std::unique_ptr<raster::Surface> probe_gpu{};
     std::string gpu_label{"不可用"};
     if (raster::gpu::available()) {
-      if (auto created = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
+      if (auto created = raster::gpu::create_canvas(probe_width, probe_height, scale, {});
           created.has_value()) {
-        gpu = std::move(*created);
+        probe_gpu = std::move(*created);
         const auto info = raster::gpu::probe();
         gpu_label = info.has_value() ? info->adapter : std::string("D3D11");
       }
     }
-    const double gpu_ms = gpu != nullptr ? benchmark_surface_impl(*gpu, 3) : 0.0;
-    const bool pick_gpu = gpu != nullptr && gpu_ms > 0.0 && gpu_ms < software_ms;
-    // ⚠ 必须在 move **之前**记下"有没有 GPU"：`std::move(gpu)` 之后那个指针必然为空，
-    // 拿它去做判断会得到相反的分支（曾因此出现"名字说 gpu、理由说 GPU 不可用"的自相矛盾）。
-    const bool had_gpu = gpu != nullptr;
-    choice.surface = pick_gpu ? std::move(gpu) : std::move(software);
-    choice.name = pick_gpu ? "gpu" : "software";
+    const double gpu_ms = probe_gpu != nullptr ? benchmark_surface_impl(*probe_gpu, 3) : 0.0;
+    bool pick_gpu = probe_gpu != nullptr && gpu_ms > 0.0 && gpu_ms < software_ms;
+    // ⚠ `had_gpu` 要在探测阶段就记下：它是「这台机器上 GPU 能不能用」的事实，
+    // 与「最后选了谁」是两件事（早先拿交付指针反推，move 之后必然得到相反的分支，
+    // 于是出现"名字说 gpu、理由说 GPU 不可用"的自相矛盾）。
+    const bool had_gpu = probe_gpu != nullptr;
+    // 测速画布丢弃，交付**真实尺寸**的那块。
+    if (pick_gpu) {
+      if (auto full = raster::gpu::create_canvas(physical_width, physical_height, scale, {});
+          full.has_value()) {
+        choice.surface = std::move(*full);
+        choice.name = "gpu";
+      } else {
+        pick_gpu = false;   // 真实尺寸建不出来 → 退软件（不影响已测出的序关系）
+      }
+    }
+    if (!pick_gpu) {
+      choice.surface = std::make_unique<raster::Canvas>(
+          raster::Canvas::for_logical_size(options.width > 0 ? options.width : 1280,
+                                           options.height > 0 ? options.height : 720, scale));
+      choice.name = "software";
+    }
     choice.note = !had_gpu
-                      ? std::format("auto：GPU 不可用，选软件（实测软件 {:.2f} ms）", software_ms)
-                      : std::format("auto 实测（合成负载，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
-                                    software_ms, gpu_label, gpu_ms, pick_gpu ? "GPU" : "软件");
+                      ? std::format("auto：GPU 不可用，选软件（缩尺实测软件 {:.2f} ms）", software_ms)
+                      : std::format("auto 实测（缩尺合成负载 {}x{}，不含呈现）：软件 {:.2f} ms vs GPU {} {:.2f} ms → 选{}",
+                                    probe_width, probe_height, software_ms, gpu_label, gpu_ms,
+                                    pick_gpu ? "GPU" : "软件");
     return choice;
   }
 

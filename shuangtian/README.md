@@ -228,7 +228,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | 能力 | 状态 |
 |---|---|
 | 无头后端（headless）+ 软件光栅器 | ✅ 完整（本仓库全部示例与验证都在无头下完成） |
-| 窗口后端 | ✅ **win32 完整**（真窗口 + 鼠标键盘 + 剪贴板 + DXGI swapchain 呈现 + DPI 感知与切换）；⏳ x11 / wayland 未做（运行时探测缺失即回退 headless，不阻断流程） |
+| 窗口后端 | ✅ **win32 完整**（真窗口 + 鼠标键盘 + 剪贴板 + DXGI swapchain 呈现 + DPI 感知与切换 + **首帧画完才显窗**，无启动黑框/白底）；⏳ x11 / wayland 未做（运行时探测缺失即回退 headless，不阻断流程） |
 | 硬件合成 | ✅ **D3D11 全链路**（设备层→着色器原语→路径→DXGI 呈现，`--renderer=auto\|gpu\|software`）；三维为软件腿保底（系统高阶腿按测量触发，见 `DESIGN.md` §8.4）；⏳ Vulkan / Metal 待做 |
 | DPI（含非整数 1.5x、运行时切换） | ✅ |
 | 字体（TTF/OTF/OTC-CFF/CID、CJK 回退、SC face 优选） | ✅ |

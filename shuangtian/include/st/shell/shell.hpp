@@ -70,6 +70,18 @@ class Backend {
   /// 由平台后端实现；应用主循环据此收尾（不能直接 `exit`——进程内还有控制通道、
   /// 脚本宿主等资源需要正常停止）。
   [[nodiscard]] virtual auto close_requested() const noexcept -> bool { return false; }
+
+  /// 把窗口显式展示出来（首帧画完之后调）。
+  ///
+  /// **为什么窗口不能建完就显**：`CreateWindowExW` 后立即 `ShowWindow` 会让窗口
+  /// 先露出「系统预备的白底 / 未初始化内容」，而此时画布还在分配（内含渲染器实测
+  /// 基准，实测 ~570ms）；`resize_window_to_scale` 放大到真实 DPI 尺寸时，多出来
+  /// 的区域又没任何东西可贴 → **启动时右下/底部一大块黑**（实测 0.6 秒后自行消失，
+  /// 因为主循环第一帧终于画上了）。
+  ///
+  /// 约定：`create_window` 只建不显；应用在**首帧 `present()` 之后**调本函数。
+  /// 无头后端不需观感，默认空实现即可。
+  virtual void show_when_ready() {}
 };
 
 /// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。
