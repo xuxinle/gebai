@@ -69,7 +69,9 @@
     "todo-js": { "kind": "executable", "sources": ["examples/todo-js/*.cpp"],
                  "exclude_sources": ["src/pkg/*"] },
     "codeeditor-dsl": { "kind": "executable", "sources": ["examples/codeeditor-dsl/*.cpp"],
-                        "exclude_sources": ["src/pkg/*"] }
+                        "exclude_sources": ["src/pkg/*"] },
+    "caret_ink_probe": { "kind": "executable", "sources": ["tools/caret_ink_probe.cpp"],
+                         "exclude_sources": ["src/pkg/*"] }
   },
   "dependencies": {
     "modules": [],

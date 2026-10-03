@@ -43,6 +43,11 @@ class TcpStream {
 
   [[nodiscard]] auto peer_address() const -> std::string;
 
+  /// 平台等待句柄（POSIX fd / Windows SOCKET）——供**统一事件等待**用：
+  /// 主循环的空闲等待可把控制通道的句柄交给内核，新请求到达即醒（而不是盲睡一拍）。
+  /// 返回值仅原样下传给 `platform` 层等待原语，不做算术；无效时 < 0。
+  [[nodiscard]] auto native_handle() const noexcept -> std::intptr_t { return handle_; }
+
  private:
   friend class TcpListener;
   friend auto connect_tcp(std::string_view host, std::uint16_t port, int timeout_ms)
@@ -73,6 +78,8 @@ class TcpListener {
   [[nodiscard]] auto accept() -> Result<TcpStream>;
   [[nodiscard]] auto wait_readable(int timeout_ms) -> Result<bool>;
   void set_nonblocking(bool enabled);
+  /// 平台等待句柄：参考 `TcpStream::native_handle`（主循环统一事件等待用）。
+  [[nodiscard]] auto native_handle() const noexcept -> std::intptr_t { return handle_; }
 
  private:
   std::intptr_t handle_{-1};

@@ -25,6 +25,12 @@ auto rect_to_json(math::Rect rect) -> st::Json {
   value["type"] = std::string(element.type());
   value["role"] = std::string(ui::to_string(element.role()));
   value["bounds"] = rect_to_json(element.bounds());
+  // `visible` / `enabled` 必须在**查询结果里**就带上：`find` 会连不可见元素一起返回
+  // （选择器语义如此），而调用方（尤其是 AI）拿到一条记录就想去点/改——
+  // 不先看看可不可见，就会点到不在屏上的东西（本会话实测因它踩过“点了没反应”）。
+  const ui::SemanticsFlags flags = element.semantics_flags();
+  value["visible"] = flags.visible;
+  value["enabled"] = flags.enabled;
   const std::string text = element.semantics_text();
   if (!text.empty()) value["text"] = text;
   const std::string item_value = element.semantics_value();

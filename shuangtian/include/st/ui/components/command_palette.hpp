@@ -70,6 +70,12 @@ class CommandPalette : public Element {
   auto move_highlight(int delta) -> std::size_t;
   /// 执行当前高亮命令（回调在组件外派发；触发 `on_command`）。返回是否执行了。
   auto activate_highlighted() -> bool;
+  /// 把键盘焦点交给过滤输入框（**显示面板后必须调一次**）。
+  ///
+  /// 不调的话：根上的全局快捷键（Ctrl+Shift+P / Ctrl+P）负责把面板显示出来，
+  /// 而焦点仍在底层编辑器上——**敲进去的字会跑到编辑器里**，面板看着开着却打不了字。
+  /// 焦点属于宿主决定的事（框架不替宿主抢焦点），所以这里只提供入口。
+  void grab_focus();
 
   // —— 几何（arrange 后有效；测试/命中用）——
 
@@ -96,6 +102,10 @@ class CommandPalette : public Element {
  private:
   void rebuild();
   void select(std::size_t index);
+  /// 执行第 `commands_` 下标处的命令：**handler 与 `on_command` 的唯一出口**。
+  /// Enter（`activate_highlighted`）与鼠标点击（列表项回调）共用它——
+  /// 两条路径各拼一份执行链，必然有一边漏掉一环。
+  auto run_command(std::size_t command_index) -> bool;
 
   std::vector<Command> commands_{};
   std::vector<std::size_t> matched_{};  // 命中命令在 commands_ 的下标（按表序）

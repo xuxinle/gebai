@@ -4,7 +4,9 @@
 验证（DESIGN §8.1.1「API 存在但动作面未实现」同族缺口的修复）：
   1. `invoke submit` 触发 on_submit（终端输出更新——不经键盘回车）
   2. `invoke clear` 清空输入框
-  3. 未知动作被协议白名单拒绝（unsupported，而不是假成功）
+  3. 未知动作如实返回 handled=false（不再假装成功，也不再被协议白名单误拒）
+     ——旧实现用一份协议层白名单拦动作，把 `CodeEditor` 的 undo/redo/set_text
+     这类**组件自定义动作**一起挡在门外（能力存在却报“未知动作”，反向假阴性）。
 
 用法: python3 tools/input_action_e2e.py <binary> <ctl.json> <port>
 """
@@ -89,10 +91,25 @@ def main():
         assert value == "", value
         print("[2] invoke clear：输入框已清空")
 
-        # ③ 未知动作 → unsupported
+        # ③ 未知动作 → handled=false（显式失败，而不是假成功）
         r3 = call(sock, nid(), "invoke", {"id": "terminal-input", "action": "no_such_action"}, token)
-        assert r3.get("error", {}).get("code") == "unsupported", r3
-        print("[3] 未知动作被拒：unsupported（而非假成功）")
+        assert r3["result"]["handled"] is False, r3
+        print("[3] 未知动作如实返回 handled=false（而非假成功）")
+
+        # ④ 组件自定义动作可达：CodeEditor 的 insert / undo 不再被白名单误拒。
+        #    注意 `set_text` 是**载入文档**语义（清空撤销栈），拿它接 undo 是测不到的
+        #    ——所以这里用 `insert`（可撤销的编辑），再 undo 回滚。
+        call(sock, nid(), "set", {"id": "editor", "props": {"text": ""}}, token)
+        r4 = call(sock, nid(), "invoke",
+                  {"id": "editor", "action": "insert", "argument": "alpha beta"}, token)
+        assert r4["result"]["handled"] is True, r4
+        text = call(sock, nid(), "get", {"id": "editor"}, token)["result"]["props"]["text"]
+        assert text == "alpha beta", text
+        r5 = call(sock, nid(), "invoke", {"id": "editor", "action": "undo"}, token)
+        assert r5["result"]["handled"] is True, r5
+        undone = call(sock, nid(), "get", {"id": "editor"}, token)["result"]["props"]["text"]
+        assert undone == "", undone
+        print("[4] 组件自定义动作可达：insert/undo 生效（白名单误拒已修）")
 
         print("\n[OK] Input 动作面端到端全部通过")
         return 0

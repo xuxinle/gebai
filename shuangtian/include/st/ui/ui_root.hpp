@@ -181,6 +181,11 @@ class UiRoot {
 
  private:
   void assign_ids(Element& element, const std::string& prefix);
+  /// 回收“分发期间摘除的叠加层”（延迟析构的墓场）。
+  void reap_overlays();
+  /// 把宿主指针（`this`）写到整棵子树（`Element::set_owner`）。
+  /// 子组件据此请求焦点/找根，同时保持 `element.hpp` 不反向依赖 `ui_root.hpp`。
+  void wire_owner(Element& element);
   void layout_subtree(Element& element, math::Rect rect);
   void paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas);
   /// 绘制后汇总"还有元素在过渡中"（决定要不要再给一帧）。
@@ -202,6 +207,13 @@ class UiRoot {
   std::vector<std::unique_ptr<Element>> overlays_{};
   /// 与 `overlays_` 同序的排布形态。
   std::vector<OverlayLayout> overlay_layouts_{};
+  /// 事件分发期间被摘除的叠加层（**延迟析构**）。
+  ///
+  /// 分发栈里可能还持着该子树内元素的裸指针（`dispatch_to` 沿 `parent()` 链回溯），
+  /// 立即释放就是 use-after-free（实测 SIGSEGV）。用 `dispatching_` 标记 +
+  /// 分发末尾 `reap_overlays()` 统一回收。
+  std::vector<std::unique_ptr<Element>> graveyard_{};
+  bool dispatching_{false};
   const TextPort* text_port_{nullptr};
   math::Size viewport_{1280.0f, 720.0f};
   Element* focused_{nullptr};

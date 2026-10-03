@@ -25,6 +25,107 @@
 
 ## P1
 
+- [x] **智能体×框架协同：把“一次交互意图”变便宜（P0+P1 六项）** —— 2026-10-03
+  起因：逐项实测开发循环的摩擦，**先量化再动手**——过程中推翻了自己的两个错结论，也挖出两个真缺陷。
+
+  **① 控制通道被帧节拍量化（最大的那笔）**
+  实测：写操作 p50 **15.8 ms** vs 读操作 **4.1 ms**，差值 = 帧节拍 − 距上次命令的间隔
+  （间隔 0→15.7、8→8.5、16→3.8、100→2.4 ms）——连续操作（AI 的常态）几乎每次白等一拍。
+  服务端 handler 只有 30–100 µs，代价全在**盲睡**：`tick()` 是
+  `render_frame() → poll() → pace_loop()`，命令在睡眠期间到达就只能等睡醒。
+  修法：把控制通道句柄交给内核等（`platform::wait_any_readable`，一次 `poll`/`WSAPoll`
+  覆盖监听套接字 + **所有已连接客户端**，超时上限不变）。
+  → `ping` 4.10→**0.06**、`get` 4.14→**0.11**、`find` 4.15→**0.16** ms；
+  `set`/`invoke` 15.8→**3.8–5.2 ms**（剩下的是真正绘制那一帧）。
+  - 踩坑一：**只等监听套接字没用**——新请求走的是已接受的那个连接（改完延迟纹丝不动）。
+  - 踩坑二：挂起 `wait` 的连接要挡后续请求，但门必须**只盖住等待期**——忘了在
+    满足/超时后清标志，这条连接以后每次调用都被拒（实测：等完之后连 `get` 都失败）。
+    两条都补了回归用例（`wait_connection_is_reusable_after_satisfied`）。
+  - 连带修：`remove_overlay` 在**事件分发栈内**析构正在被分发的子树 → use-after-free
+    （`ui_select_opens_via_overlay_host` 当场 SIGSEGV；之前靠“下一帧布局才摘除”侥幸不崩，
+    等待变快后立即暴露）。改为**延迟析构**（激活列表立即摘掉，对象延到分发结束/下一帧）。
+
+  **② 按 id 点击**（`input.mouse{id}`）：服务端算 `bounds` 中心；找不到/未布局/不可见
+  → **明确拒绝**。旧路径要先 `find` 再手算中心，而 `find` 连不可见元素也返回
+  （本会话实测因此点空两次）。同时 `find` 结果补上 `visible`/`enabled`。
+
+  **③ `invoke` 回带 `state`**：动作之后几乎总要看“变成什么了”，不带就得再发一次 `get`。
+
+  **④ 列表类通用视口契约**：`Tree`/`List`/`ScrollView` 之前**完全没有属性面**
+  （`get_property` 计数 = 0）——而“用户现在看得到哪一块”正是 AI 最常问的。
+  统一为 `rows`/`items`/`lines` + `first_visible*` + `visible_rows`/`visible_items`/`visible_lines` + `scroll`。
+
+  **⑤ `wait{for:"property"}`**：等“某元素的某属性等于某值”。旧的 `text` 条件要拼整棵
+  语义树且只能匹配文本子串（数字/布尔/复合值表达不了）；新条件只查命中元素。
+  并发证明脚本实测：真挂起 801 ms 后在条件成立瞬间返回（不是 0 也不是超时）。
+
+  **⑥ 删掉两个我自己的错误结论**（记录以免后人重踩）：
+  - “`find` 比 `get` 慢 6 倍（20.3ms）”——**假象**。热调用下两者都是 4.1ms；
+    20.3ms 是首次调用的冷启动代价。改正后 `find` 无需优化。
+  - “`capture` 没把 device_scale 契约写清”——**已经写了**（`pixel_size.device_scale`
+    + region 逻辑坐标注释）。没动手改，只验证。
+
+  **验证**：`st test` **589 用例全绿**（+6）/ lint 0 违规 /
+  `st_visual_check.py` dev+san × 两应用 × 亮/暗 × DPI2.0 **0 失败步、无 sanitizer 报告** /
+  mingw 交叉编译通过（顺带修了 `winsock2.h` 必须在 `windows.h` 之前——Linux 本机看不见）。
+
+- [x] **codeeditor「平替 VSCode」第三批：编辑手感 + 视口可驱动 + 三个真缺陷** —— 2026-10-03
+
+  **先说缺陷（都是实测出来的，不是推演）**：
+  - **光标漂移（用户报的）**：`CodeEditor::x_for_index()` 漏传 `text::FontRole::Monospace`
+    —— 它是光标/选择/查找高亮/缩进线/鼠标命中的共同量尺，而正文按等宽**绘制**。
+    于是“量宽用比例字体、绘字用等宽字体”，x 误差随列号线性累积：
+    实测量尺 `tools/caret_ink_probe.cpp` 给出 **45 列处 7.6992px**（比例字体 vs 等宽的逐字累加差）。
+    修后新增 3 条回归用例（逐列步进 / 光标↔命中回环 / DPI 不变），
+    并**逆向验证**：把 role 改回 Proportional，其中 2 条当即失败（含“点在第 n 列附近却落到别的字符”）。
+  - **协议动作白名单误拒组件动作**：`kActions` 名单把 `CodeEditor` 的
+    `undo`/`redo`/`set_text`/`goto_line`/`select_all`/`copy`/`paste`/`scroll_to_line`… 全挡在门外
+    ——能力存在却报“未知动作”（**反向假阴性**）；名单还要跟着每个新组件手改。
+    改为“动作直接交给元素，`handled` 即权威答复”（拼错动作名仍是 `handled=false`）。
+    e2e `tools/input_action_e2e.py` 新增第 ④ 步（insert/undo 可达）实证。
+  - **`CommandPalette` 三个交互缺陷**（迁移示例调用点时逐项暴露）：
+    ① **鼠标点条目不执行**——执行链曾挂在元素层 `ListItem::on_activate` 上，而那一槽位
+       被 `List` 用来“点击即选中本容器”，两者争用 ⇒ 命令被静默覆盖（只有 Enter 能用）。
+       改为数据层 `List::Entry::on_activate`（`sync_items` 建项时接上）。
+    ② **打开后面板打不了字**——焦点仍在底层编辑器，敲的字跑进了代码里；
+       新增 `grab_focus()`（经 `Element::owner_as<UiRoot>()` → `UiRoot::set_focus`）。
+    ③ **点与回车效果不等价**——两条路径各拼一份执行链（点只发外部通知、回车才调 handler），
+       宿主把通知当“已执行”就出现“状态栏说执行了、文件其实没打开”。统一收敛到 `run_command()`。
+    新增 3 条回归用例（含“点≡回车逐字段等价比对”）。
+  - **`MenuBar` 下拉面板选完不消失 / 再开就叠两张**：`make_panel` 把面板的 `on_close`
+    接到自己的 `set_open_index`，**调用方永远收不到关闭通知** → overlay 摘不掉。
+    新增 `on_menu_close` 通道 + 打开状态下悬停其它标题即切换（VSCode/浏览器惯例）；
+    点菜单栏空白也视为关闭请求。新增 3 条用例。
+  - **`scroll_to_line` 不夹取** → 超界时把视口推成**空白屏**（示例“跳转到行”与控制通道都踩得到）；
+    现统一经 `clamp_scroll`。
+
+  **编辑手感**：自动配对（补右半 / 选中包裹 / 敲闭符**跳过**不重复 / 空对一次退格全删 /
+  引号仅在词外配对）、**智能 Home**（两段式）、**Ctrl+Backspace/Delete 按词删除**
+  （含“只剩空白时清空白”这条不留死按键的细节）、**Shift+滚轮**水平滚动。
+
+  **视觉细节**：**缩进参考线**（Tab 按 `tab_width` 展开到**视觉列**对齐；颜色用
+  `border_strong`——实测 `border` 只带来 ~7% 亮度变化，AA 后基本看不见，“看不见就等于没有”；
+  像素级断言 `sum|Δ| ≥ 120` 守住这条）、悬停行底纹、行号槽内当前行高亮、
+  竖向 + 横向**两条可拖拽滚动条**（悬停加宽）。
+
+  **视口可驱动**（智能体可断言）：属性 `first_visible_line`/`last_visible_line`/`visible_lines`/
+  `scroll`/`indent_guides`/`auto_pairs`，动作 `scroll_to_line`/`reveal_line`。
+  > 注：视口属性**刻意不缓存 `RenderContext` 指针**——`UiRoot::render_context()` 按值返回，
+  > 缓存它的指针会悬垂（实测：控制通道 `get` 当场 SIGSEGV，崩在字体度量里）。
+  > 改用行高缓存（绘制过一次就有值）推算，拿不到就如实退化。
+
+  **示例侧（codeeditor）UX**：私有 `CommandPalette` 退役改用框架组件（−130 行）；
+  **Ctrl+P 真实快速打开**（把面板表换成文件表，88 个文件里打字过滤）；
+  搜索面板改**真实递归搜工作区**（跳隐藏目录/二进制/大文件，命中给「文件:行 + 片段」，
+  点一下**跳到该行并选中命中**）；问题面板接**真实轻量检查**（行尾空白 / Tab 缩进 /
+  TODO·FIXME / 超长行，点问题跳行），状态栏错误·警告计数与面板**同源**；
+  状态栏补选区计数；标题栏加脏点（`window_title()` 单一来源，7 处赋值收敛）；
+  终端补 `ls`/`find <词>`/`goto <行>`/`stats` 真实命令；查找条 Esc 可关（此前关不掉）。
+
+  **验证**：`st test` **583 用例全绿**（+26）/ `st lint` 0 违规 /
+  `tools/st_visual_check.py` **dev+san × gallery+codeeditor × 亮/暗 × DPI 2.0 全部 0 失败步、
+  无 sanitizer 报告** / mingw 交叉编译通过 / `tools/caret_ink_probe.cpp` 作为量尺入库。
+
 - [x] **codeeditor「平替 VSCode」第二批：查找替换 + 真实文件工作区 + 命令面板内置** —— 2026-10-03
   - `CodeEditor` find/replace 组件能力：`set_find`（全部命中高亮，主题新增 find_highlight/
     find_active 两枚 token）/`find_next`（环绕、就近起步）/`replace_current`（替换后跳下一
@@ -247,7 +348,13 @@
   见 DESIGN §4.5 v0.1.5 组件能力）；codeeditor 侧栏/编辑区已迁移；测试 7 用例
   （`ui_split_view_test.cpp`）+ `tools/split_view_e2e.py`（拖拽/夹取/动作面/截图）。
   迁移中发现并修复框架交互缺口：`MouseUp` 未按拖拽归属投递（拖出手柄后释放丢失）。
-- [ ] **命令面板通用组件**：CommandPalette（FillViewport + 过滤列表 + 键盘导航）值得内置；
+- [x] **命令面板通用组件**（2026-10-03 落地）：`ui::CommandPalette`（FillViewport 遮罩 +
+  顶部居中卡片 + 过滤列表 + 键盘环绕导航 + Esc/点遮罩关闭 + `query`/`command_count`/
+  `match_count`/`active` 属性面与 `activate`/`select` 动作面）。codeeditor 示例已迁移
+  （退役 130 行私有实现），并新增 `grab_focus()`——**打开面板后必须调它**，否则全局
+  快捷键只把面板显示出来、焦点仍在底层编辑器上（敲的字跑进代码里）。
+  迁移中把鼠标链路也提上来了：点条目走数据层 `List::Entry::on_activate`
+  （与 Enter 共用 `run_command`），不再与 `List` 的“点击即选中”争同一个槽位。
 - [x] **单行 Input 动作面**（2026-10-02 落地）：`invoke submit/activate/clear` 与 TextArea 对齐；
   测试 `ui_input_invoke_*` 3 用例 + `tools/input_action_e2e.py` 真实应用端到端。
   - [ ] **虚拟化长列表**：终端/输出面板的 ScrollView+Text 累积全文，日志长了退化；

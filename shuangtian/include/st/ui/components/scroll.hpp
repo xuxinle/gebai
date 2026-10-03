@@ -6,6 +6,8 @@
 /// 内容超出视口时以 `push_clip_rect` / `push_clip_rounded_rect` 裁剪子节点。
 
 #include <functional>
+#include <vector>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -80,6 +82,11 @@ class ScrollView : public Element {
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Panel; }
 
   [[nodiscard]] auto scroll_offset() const noexcept -> float { return offset_; }
+
+  // —— 列表类通用视口契约（与 Tree/List 同口径）——
+  // 滚动容器是**唯一真正持有视口**的组件，所以 `first_visible` 这类量的权威来源在这。
+  [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
   /// 滚动到指定偏移（夹取到 `[0, max_scroll]`）；会重排子节点。
   void scroll_to(float offset);
   void scroll_by(float delta) { scroll_to(offset_ + delta); }

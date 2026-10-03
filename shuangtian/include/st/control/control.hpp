@@ -7,6 +7,7 @@
 /// - **默认只绑回环**：`ServerOptions::bind` 默认 `127.0.0.1`，绑定其他地址需显式指定。
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -149,6 +150,11 @@ class Server {
   /// 向已订阅客户端推送事件。
   void publish(std::string_view event, const st::Json& data);
   [[nodiscard]] auto port() const noexcept -> std::uint16_t;
+  /// **会在空闲等待里唤醒我们的平台句柄**：监听套接字 + 每个已连接客户端。
+  ///
+  /// 两者都必须给：新请求走的是**已接受的那个连接**，只等监听套接字根本不会被唤醒
+  /// （实测踩到——改完等待机制延迟纹丝不动，就是漏了这一条）。
+  [[nodiscard]] auto wait_handles() const -> std::vector<std::intptr_t>;
   /// 生效的鉴权 token（`start()` 自动生成后由此读回；显式关闭鉴权时为空串）。
   /// 客户端从控制文件读；测试与嵌入场景可直接取（`start()` 的 options 是 const 引用，
   /// 调用方拿不到写回值，故提供本访问器）。

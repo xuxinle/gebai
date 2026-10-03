@@ -76,6 +76,7 @@ struct Application::Impl {
   std::int64_t started_ns{0};
   bool quit{false};
   bool repaint{true};
+  bool pacing{false};   ///< `pace_loop` 已进入空闲节拍（= “接下来空等一段”）
   /// 启动完成回调（`on_ready`）：只跑一次。
   std::function<void()> on_ready{};
   /// 绘制剖析器（`ST_PAINT_PROFILE=1` 时才挂到帧缓冲画布上）。
@@ -528,18 +529,49 @@ auto Application::run_loop() -> Result<int> {
 }
 
 void Application::pace_loop(std::int64_t tick_start_ms) const {
+  // 两种节拍都**可被控制通道打断**：
+  //
+  // 为什么“有活干”那一路也必须可打断：本轮 `tick()` 的次序是
+  // `render_frame()` → `server->poll()` → `pace_loop()`，而 `poll()` 收到命令会置
+  // `repaint`——于是**刚刚处理完一条命令**的那一轮就会进入帧预算睡眠（~16ms），
+  // 下一条命令只好等到它睡醒。实测延迟分布 = **帧节拍 − 距上次命令的间隔**：
+  //   间隔 0ms → 15.7ms；2ms → 13.8ms；8ms → 8.5ms；16ms → 3.8ms；100ms → 2.4ms。
+  // 即“连续操作”的命令几乎总是白等一拍（每次 ~12ms）——AI 驱动开发的常见形态
+  // （改状态→看图→再改）恰好就是连续操作。
+  //
+  // 现在：把控制通道的监听句柄交给内核等，**新请求一到就醒**（微秒级），
+  // 同时保留原来的时长作为上限——帧计时（动画/悬浮过渡）一分不少。
+  const auto interruptible_wait = [this](int timeout_ms) {
+    if (impl_->server == nullptr) {
+      platform::sleep_ms(static_cast<double>(timeout_ms));
+      return;
+    }
+    // 句柄每次现取：客户端集合会变（接入/断开），缓存列表会失效。
+    const std::vector<std::intptr_t> handles = impl_->server->wait_handles();
+    if (handles.empty()) {
+      platform::sleep_ms(static_cast<double>(timeout_ms));
+      return;
+    }
+    impl_->pacing = true;
+    (void)platform::wait_any_readable(handles, timeout_ms);
+    impl_->pacing = false;
+  };
   if (impl_->repaint || root_.dirty()) {
     const double elapsed_ms = static_cast<double>(time::now_ms() - tick_start_ms);
     const double remaining = options_.frame_budget_ms - elapsed_ms;
-    if (remaining > 0.5) {
-      // 帧预算节流（高精度睡眠：std 的 sleep_for 在 Windows 上受 15.6ms 粒度约束，
-      // 会把这笔"小睡"变成大睡——见 st/core/wait.hpp）
-      platform::sleep_ms(remaining);
-    }
+    if (remaining > 0.5) interruptible_wait(static_cast<int>(remaining));
     return;
   }
-  // 空闲：短睡一拍，让控制通道命令尽快被 `tick` 处理（响应节拍 = 这个值）
-  platform::sleep_ms(4.0);
+  // 空闲：等控制通道可读（或 4ms 超时），而不是盲睡固定拍
+  interruptible_wait(4);
+}
+
+void Application::wake_control() {
+  // 控制通道有数据到达：若正处于等待中，立即结束它（下一轮 `tick()` 就能处理）。
+  // 非等待期不动——已经在干活，等完这一段自然会去 poll。
+  if (!impl_->pacing || impl_->server == nullptr) return;
+  const std::vector<std::intptr_t> handles = impl_->server->wait_handles();
+  if (!handles.empty()) (void)platform::wait_any_readable(handles, 0);
 }
 
 }  // namespace st::app

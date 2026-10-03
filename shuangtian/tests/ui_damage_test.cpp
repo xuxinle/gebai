@@ -188,3 +188,44 @@ ST_TEST(damage_idle_frame_is_quiet) {
   ST_CHECK(!root.needs_frame());
   ST_CHECK(!root.dirty());
 }
+
+ST_TEST(damage_steady_state_settles_into_partial_frames) {
+  // 回归用例（开发循环实测发现）：**静止的界面每帧都在整帧重绘**。
+  //
+  // 现象：codeeditor 里 `invoke` 的 p50 是 **15.9 ms**，而 `get` 只有 4.1 ms——
+  // 差值恰好等于整帧绘制（paint 11.5 ms）+ 控制通道节拍（4.1 ms）。
+  // 根因：`UiRoot::layout()` 跑完会 `pending_full_ = true`，而 `layout()` 的进入条件是
+  // `dirty_ || tree_layout_dirty()`，其中 `tree_layout_dirty()` 读的是**根元素上的
+  // 累积 layout 标记**——一旦树里有人置过 `mark_layout_dirty()` 而标记没被清，
+  // 之后**每一帧**都重排 + 整帧重绘。
+  //
+  // 本用例钉住的不变式：静止状态下连续两帧，第二帧必须是**局部**且损坏区为空
+  // （没有任何东西变 → 不该重画 1280×800）。
+  UiRoot root;
+  root.set_viewport({kWidth, kHeight});
+  auto page = std::make_unique<Panel>();
+  page->style().background = Color{0x10, 0x14, 0x18, 0xFF};
+  auto* box = page->add_child(
+      std::make_unique<FixedBox>("box", Rect{40, 40, 100, 60}, Color{0x88, 0x44, 0xCC, 0xFF}));
+  root.set_content(std::move(page));
+
+  Canvas canvas(kWidth, kHeight);
+  root.paint_frame(canvas);   // 首帧：整帧（合理——还没有上一帧）
+  root.clear_dirty();
+
+  // 静止：没有任何变更 → 不该要求重排，也不该要求整帧
+  ST_CHECK(!root.tree_layout_dirty());
+  ST_CHECK(!root.needs_frame());
+
+  // 一次真实但**纯绘制**的变更（只改颜色，不动几何）→ 必须走局部
+  box->style().background = Color{0x30, 0x70, 0xE0, 0xFF};
+  box->mark_dirty();
+  const bool partial = root.paint_frame(canvas);
+  ST_CHECK(partial);            // 局部：不是整帧
+  ST_CHECK(root.last_frame_partial());
+  root.clear_dirty();
+
+  // 关键：**这一帧跑完，树不该又变成 layout dirty**——否则下一帧又要整帧
+  ST_CHECK(!root.tree_layout_dirty());
+  ST_CHECK(!root.needs_frame());
+}

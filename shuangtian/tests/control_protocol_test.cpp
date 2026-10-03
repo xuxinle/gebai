@@ -10,6 +10,7 @@
 /// capture.hash（像素哈希）/ visual.diff（基线比对）。
 
 #include "st/test/test.hpp"
+#include <cstdio>
 
 #include <array>
 #include <atomic>
@@ -27,6 +28,7 @@
 #include "st/core/net.hpp"
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/code_editor.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/ui_root.hpp"
 
@@ -171,14 +173,24 @@ struct ServerFixture {
 
   explicit ServerFixture(std::optional<std::string> token_override = std::nullopt) {
     host.root_.set_theme(st::ui::Theme::light());
+    // 子节点必须在 **set_content 之前** 挂好：`set_content` 里的 `assign_ids` 会把根
+    // 内容自身的 id 写成 "root"（与虚拟根同名），而 `UiRoot::find` 的遍历先查父后查子——
+    // 一个与虚拟根同名的容器会**遮蔽整棵子树**，子树里所有 id 都变成 not_found
+    // （实测踩到：面板恰好抢到 "root" 后，`#btn-ok`/`#code` 都突然找不到了）。
     auto panel = std::make_unique<Panel>();
+    panel->set_id("root-panel");
     auto button = std::make_unique<Button>("确定");
     button->set_id("btn-ok");
     auto input = std::make_unique<Input>();
     input->set_id("name");
     input->set_placeholder("输入名字");
+    // 带**组件自定义动作**的元素（`insert`/`undo` 不在通用动作表里）——
+    // 用来钉住「协议不得用白名单误拒组件动作」这条契约。
+    auto code = std::make_unique<st::ui::CodeEditor>();
+    code->set_id("code");
     panel->add_child(std::move(button));
     panel->add_child(std::move(input));
+    panel->add_child(std::move(code));
     host.root_.set_content(std::move(panel));
     host.root_.set_viewport({400, 300});
     host.root_.layout();
@@ -227,10 +239,19 @@ struct TokenFixture {
 
   TokenFixture() {
     host.root_.set_theme(st::ui::Theme::light());
+    // 注意 `assign_ids` 会把根内容自身的 id 写成 "root"（与虚拟根同名），
+    // 而 `UiRoot::find` 先查父后查子——同名容器会**遮蔽整棵子树**，
+    // 子树里的 id 全部 not_found。面板必须给一个不是 "root" 的显式 id。
     auto panel = std::make_unique<Panel>();
+    panel->set_id("root-panel");
     auto button = std::make_unique<Button>("确定");
     button->set_id("btn-ok");
+    // 带**组件自定义动作**的元素（`insert`/`undo` 不在通用动作集里）——
+    // 用来钉住「协议不得用白名单误拒组件动作」这条契约。
+    auto code = std::make_unique<st::ui::CodeEditor>();
+    code->set_id("code");
     panel->add_child(std::move(button));
+    panel->add_child(std::move(code));
     host.root_.set_content(std::move(panel));
     host.root_.set_viewport({400, 300});
     host.root_.layout();
@@ -395,7 +416,7 @@ ST_TEST(wait_frames_condition_is_supported) {
   }
 }
 
-ST_TEST(invoke_unknown_action_reports_error) {
+ST_TEST(invoke_unknown_action_reports_failure_without_rejecting_component_actions) {
   TokenFixture fx;
   Probe probe(fx.port, fx.token);
   ST_CHECK(probe.call("hello").value("ok", false));
@@ -403,11 +424,71 @@ ST_TEST(invoke_unknown_action_reports_error) {
   params["id"] = "btn-ok";
   params["action"] = "klik";   // 拼错的动作名（真正未知；`activate` 已是 TextArea 合法动作）
   const Json reply = probe.call("invoke", params);
-  // 旧行为：ok=true + handled=false（假阴性）；新契约：明确报错
-  ST_CHECK(!reply.value("ok", false));
-  if (reply.contains("error")) {
-    ST_CHECK_EQ(reply["error"].value("code", std::string()), "unsupported");
+  // 契约（两轮修正后的最终口径）：
+  //   ① 不得**假装成功**——`handled=false` 是权威答复（自动化据此判定动作没发生）；
+  //   ② 不得用协议层白名单**误拒组件自定义动作**——旧实现就是被这份名单挡住的，
+  //      导致 `CodeEditor::undo/redo/set_text` 这类已实现的动作报“未知动作”。
+  // 因此：协议层返回 ok=true（请求被正常处理），而 `handled` 如实为 false。
+  ST_CHECK(reply.value("ok", false));
+  if (reply.value("ok", false)) {
+    ST_CHECK(!reply["result"].value("handled", true));
+    ST_CHECK_EQ(reply["result"].value("action", std::string()), std::string("klik"));
   }
+}
+
+ST_TEST(invoke_reaches_component_custom_actions) {
+  // 回归用例：协议层曾用一份 `kActions` 白名单拦动作，`CodeEditor` 的
+  // `undo`/`redo`/`set_text`/`goto_line`/`select_all`/`scroll_to_line`… 全部被拦在门外。
+  // 症状极其隐蔽：**能力存在却报“未知动作”**——AI 从此以为编辑器不支持这些操作，
+  // 只能改用 set `text` 整篇重写（丢掉撤销历史、丢掉光标语义）。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  // nlohmann 的 `operator[] const` 在缺键时直接 assert 崩掉（不是抛异常），
+  // 所以测试侧一律先 contains 再取值——否则一个失败响应会把整个测试进程带走。
+  const auto handled_of = [](const Json& reply) -> bool {
+    if (!reply.contains("result")) return false;
+    return reply["result"].value("handled", false);
+  };
+  const auto invoke = [&probe, &handled_of](const char* id, const char* action,
+                                            const char* argument = "") -> bool {
+    Json params = Json::object();
+    params["id"] = id;
+    params["action"] = action;
+    if (argument[0] != '\0') params["argument"] = argument;
+    const Json reply = probe.call("invoke", params);
+    return reply.value("ok", false) && handled_of(reply);
+  };
+  const auto text_of = [&probe](const char* id) -> std::string {
+    Json params = Json::object();
+    params["id"] = id;
+    const Json reply = probe.call("get", params);
+    if (!reply.contains("result") || !reply["result"].contains("props")) return {};
+    return reply["result"]["props"].value("text", std::string());
+  };
+
+  // `insert` 是 CodeEditor 的动作（不在通用动作集里）：旧实现会报 unsupported
+  ST_CHECK(invoke("code", "insert", "hello"));
+  ST_CHECK_EQ(text_of("code"), std::string("hello"));
+
+  // `undo` 同样：证明动作真的作用到了组件上
+  ST_CHECK(invoke("code", "undo"));
+  ST_CHECK_EQ(text_of("code"), std::string());
+
+  // 另一个自定义动作面：select_all + 属性面回读选区
+  ST_CHECK(invoke("code", "set_text", "abc"));
+  ST_CHECK(invoke("code", "select_all"));
+  Json get_params = Json::object();
+  get_params["id"] = "code";
+  const Json get_reply = probe.call("get", get_params);
+  ST_CHECK(get_reply.value("ok", false));
+  if (get_reply.contains("result") && get_reply["result"].contains("props")) {
+    ST_CHECK_EQ(get_reply["result"]["props"].value("selection", std::string()), std::string("0:3"));
+  }
+
+  // 而真正未实现的动作仍然如实报 handled=false（不假装成功）
+  ST_CHECK(!invoke("code", "teleport"));
 }
 
 ST_TEST(capture_path_outside_whitelist_is_rejected) {
@@ -695,4 +776,206 @@ ST_TEST(ui_changed_event_carries_changed_ids) {
     saw_changed = true;
   }
   ST_CHECK(saw_changed);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 开发效率原语：按 id 输入 / invoke 回带状态 / 属性等待 / 列表视口属性
+// ———————————————————————————————————————————————————————————————————————————
+
+ST_TEST(input_mouse_by_id_uses_element_center) {
+  // 回归用例：AI 的意图是“点这个元素”，而不是“点在 (x,y)”。
+  // 旧路径必须先 `find` 取 `bounds` 再自己算中心——而 `find` 连**不可见**元素也会返回，
+  // 本会话实测因此点空两次（“点了没反应”）。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  Json find_params = Json::object();
+  find_params["selector"] = "#btn-ok";
+  const Json found = probe.call("find", find_params);
+  ST_REQUIRE(found.value("ok", false));
+  ST_REQUIRE(found["result"]["matches"].is_array() && !found["result"]["matches"].empty());
+  const Json& box = found["result"]["matches"][0]["bounds"];
+  const double cx = box["x"].get<double>() + box["width"].get<double>() * 0.5;
+  const double cy = box["y"].get<double>() + box["height"].get<double>() * 0.5;
+
+  Json click = Json::object();
+  click["kind"] = "click";
+  click["id"] = "btn-ok";
+  const Json reply = probe.call("input.mouse", click);
+  ST_CHECK(reply.value("ok", false));
+  // 服务端自己算的中心点应与我们算的一致
+  if (reply.contains("result") && reply["result"].contains("position")) {
+    const Json& at = reply["result"]["position"];
+    ST_CHECK_NEAR(at["x"].get<double>(), cx, 1.0);
+    ST_CHECK_NEAR(at["y"].get<double>(), cy, 1.0);
+  }
+
+  // 不可见元素必须**明确拒绝**，而不是点到别处
+  Json hidden = Json::object();
+  hidden["kind"] = "click";
+  hidden["id"] = "no-such-element";
+  const Json missing = probe.call("input.mouse", hidden);
+  ST_CHECK(!missing.value("ok", false));
+}
+
+ST_TEST(invoke_returns_post_action_state) {
+  // 回归用例：`invoke` 之后几乎总要看一眼“变成什么了”。不带状态就得再发一次 `get`
+  // ——每个动作多一次往返。这里断言 `state` 与随后 `get` 的结果一致（同一个属性面）。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  Json invoke_params = Json::object();
+  invoke_params["id"] = "code";
+  invoke_params["action"] = "set_text";
+  invoke_params["argument"] = "hello world";
+  const Json reply = probe.call("invoke", invoke_params);
+  ST_REQUIRE(reply.value("ok", false));
+  const Json& result = reply["result"];
+  ST_CHECK(result.value("handled", false));
+  ST_REQUIRE(result.contains("state"));
+  ST_CHECK_EQ(result["state"].value("text", std::string()), std::string("hello world"));
+  ST_CHECK_EQ(result["state"].value("lines", std::string()), std::string("1"));
+
+  // 与 `get` 的属性面对齐（同一份 `property_names`，不另立白名单）
+  Json get_params = Json::object();
+  get_params["id"] = "code";
+  const Json got = probe.call("get", get_params);
+  ST_REQUIRE(got.value("ok", false));
+  ST_CHECK_EQ(got["result"]["props"].value("text", std::string()), std::string("hello world"));
+}
+
+ST_TEST(wait_property_condition_becomes_true) {
+  // 新增等待条件：等**某元素的某属性等于某值**——真实开发里绝大多数等待是这个形状
+  // （“文字变成 X”“列表有 N 项”）。旧的 `text` 条件只能匹配文本子串，且要拼整棵语义树。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  Json wait_params = Json::object();
+  wait_params["for"] = "property";
+  wait_params["selector"] = "#code";
+  wait_params["property"] = "text";
+  wait_params["value"] = "ready";
+  wait_params["timeout_ms"] = 1500;
+
+  // 后台改属性：**必须另开一条连接**。
+  // 挂起的 `wait` 会把该连接上后续的请求**一起押着**（它们不构成“新条件”），
+  // 在同一个连接里“挂起等待 + 随后写入”必然死等到超时——实测踩到，花了 6 秒才发现。
+  // （协议层面这是有意的背压：等待期间不排队新请求，见 `Server::dispatch_frame`
+  //   的 busy-connection 检查；本用例正是它的行为注解。）
+  Probe writer(fx.port, fx.token);
+  ST_CHECK(writer.call("hello").value("ok", false));
+  std::thread writer_thread([&writer]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Json params = Json::object();
+    params["id"] = "code";
+    params["action"] = "set_text";
+    params["argument"] = "ready";
+    (void)writer.call("invoke", params);
+  });
+  const Json reply = probe.call("wait", wait_params);
+  writer_thread.join();
+  ST_CHECK(reply.value("ok", false));
+  ST_CHECK(reply["result"].value("satisfied", false));
+
+  // 条件永远不成立时必须**超时返回 false**，而不是假装满足
+  Json never = wait_params;
+  never["value"] = "never-happens";
+  never["timeout_ms"] = 200;
+  const Json missed = probe.call("wait", never);
+  ST_CHECK(missed.value("ok", false));
+  ST_CHECK(!missed["result"].value("satisfied", true));
+
+  // 元素没声明这个属性 → 如实不满足（不静默当成满足）
+  Json unknown = wait_params;
+  unknown["property"] = "no_such_property";
+  unknown["timeout_ms"] = 150;
+  const Json bogus = probe.call("wait", unknown);
+  ST_CHECK(bogus.value("ok", false));
+  ST_CHECK(!bogus["result"].value("satisfied", true));
+}
+
+ST_TEST(list_components_expose_viewport_properties) {
+  // 列表类组件的**通用视口契约**：`get_property` 之前在这些组件上是完全缺失的
+  // （`Tree`/`List`/`ScrollView` 计数为 0），而“用户看得到哪一块”恰是 AI 最常问的。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  const auto props_of = [&probe](const char* id) {
+    Json params = Json::object();
+    params["id"] = id;
+    const Json reply = probe.call("get", params);
+    // 不用 ST_REQUIRE：它在 lambda 里会展开成 `return;`（返回类型不符）
+    if (!reply.value("ok", false)) return Json::object();
+    return reply["result"]["props"];
+  };
+  // `CodeEditor` 是列表类里最先补齐的：视口四件套 + 滚动
+  const Json editor = props_of("code");
+  ST_CHECK(editor.contains("first_visible_line"));
+  ST_CHECK(editor.contains("visible_lines"));
+  ST_CHECK(editor.contains("scroll"));
+  ST_CHECK(editor.contains("lines"));
+  ST_CHECK(editor.contains("indent_guides"));
+  ST_CHECK(editor.contains("auto_pairs"));
+}
+
+ST_TEST(wait_connection_is_reusable_after_satisfied) {
+  // 回归用例（自伤）：给“挂起 wait 的连接”加背压门时，**忘了在等待结束时清标志**——
+  // 于是这条连接以后每次调用都被拒（实测：等完之后连 `get` 都失败）。
+  // 门必须只覆盖“正在等待”那一段。
+  TokenFixture fx;
+  Probe probe(fx.port, fx.token);
+  ST_CHECK(probe.call("hello").value("ok", false));
+
+  Json params = Json::object();
+  params["id"] = "code";
+  params["action"] = "set_text";
+  params["argument"] = "seed";
+  ST_CHECK(probe.call("invoke", params).value("ok", false));
+
+  // 立即满足的 wait（属性已等于目标）→ 走同步返回分支
+  Json wait_params = Json::object();
+  wait_params["for"] = "property";
+  wait_params["selector"] = "#code";
+  wait_params["property"] = "text";
+  wait_params["value"] = "seed";
+  wait_params["timeout_ms"] = 500;
+  ST_CHECK(probe.call("wait", wait_params).value("ok", false));
+
+  // 等待结束后，同一条连接必须能继续干活
+  Json get_params = Json::object();
+  get_params["id"] = "code";
+  const Json after = probe.call("get", get_params);
+  ST_CHECK(after.value("ok", false));
+  ST_CHECK_EQ(after["result"]["props"].value("text", std::string()), std::string("seed"));
+
+  // 超时结束的 wait 同样不能把连接锁死
+  Json miss = wait_params;
+  miss["value"] = "never";
+  miss["timeout_ms"] = 120;
+  ST_CHECK(probe.call("wait", miss).value("ok", false));
+  ST_CHECK(probe.call("get", get_params).value("ok", false));
+
+  // 等待期间（挂起中）复用同一连接 → **当场拒绝**，而不是静默挂起
+  Probe writer(fx.port, fx.token);
+  ST_CHECK(writer.call("hello").value("ok", false));
+  Json change = Json::object();
+  change["id"] = "code";
+  change["action"] = "set_text";
+  change["argument"] = "changed";
+  std::thread writer_thread([&writer, &change]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    (void)writer.call("invoke", change);
+  });
+  Json slow = wait_params;
+  slow["value"] = "changed";
+  slow["timeout_ms"] = 3000;
+  const Json waited = probe.call("wait", slow, 5000);
+  writer_thread.join();
+  ST_CHECK(waited.value("ok", false));
+  ST_CHECK(waited["result"].value("satisfied", false));
+  ST_CHECK(probe.call("get", get_params).value("ok", false));
 }

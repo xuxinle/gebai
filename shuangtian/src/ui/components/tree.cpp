@@ -299,4 +299,39 @@ auto Tree::semantics_flags() const -> SemanticsFlags {
   return flags;
 }
 
+// —— 列表类通用视口契约（详见头文件）——
+
+auto Tree::visible_row_count() const noexcept -> std::size_t {
+  if (bounds_.is_empty()) return rows_.empty() ? 1 : rows_.size();
+  const auto count = static_cast<std::size_t>(std::max(1.0f, bounds_.height / kRowHeight));
+  return std::max<std::size_t>(1, count);
+}
+
+auto Tree::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "rows" || name == "count") return std::to_string(rows_.size());
+  // 树自身不滚动（由外部 ScrollView 承载）；`first_visible` 因此恒为 0，
+  // 但它在**契约里仍然必须存在**——“这个组件有没有视口概念”是调用方要问的问题。
+  if (name == "first_visible") return std::string("0");
+  if (name == "visible_rows") return std::to_string(visible_row_count());
+  if (name == "scroll") return std::string("0.0");
+  if (name == "selected_key") return std::string(selected_key_);
+  if (name == "selected") {
+    const auto index = selected_index();
+    return index == kNoSelection ? std::string("-1") : std::to_string(index);
+  }
+  return Element::get_property(name);
+}
+
+auto Tree::property_names() const -> std::vector<std::string_view> {
+  auto names = Element::property_names();
+  names.push_back("rows");
+  names.push_back("count");
+  names.push_back("first_visible");
+  names.push_back("visible_rows");
+  names.push_back("scroll");
+  names.push_back("selected_key");
+  names.push_back("selected");
+  return names;
+}
+
 }  // namespace st::ui

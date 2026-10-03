@@ -357,12 +357,36 @@ CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
   撤销重做（按键合并 600ms 窗口，深度上限 256）、Tab 缩进/Shift+Tab 反缩进、
   **Ctrl+/ 注释切换**（用该语言的行注释标记，无标记的语言返回 false）、
   **回车自动缩进**（`{`/`(`/`[`/`:` 后自动 +1 级；`{|}` 处回车展开为三行）、括号配对高亮
+- **自动配对**（`set_auto_pairs`，默认开）：输入 `(`/`[`/`{` 补右半并把光标留在中间、
+  选中文本被一对包裹、光标已在闭符前再输入同符则**跳过**（`()` 不会变成 `())`）、
+  空对处一次退格把两边一起吃掉；引号只在“不在词中”时配对（`isn't` 不被越修改越乱）
+- **键位手感**：**智能 Home**（两段式：先跳行首非空列、再跳列 0）、**Ctrl+Backspace/Delete**
+  按词删除（词首处 Ctrl+Delete 吃掉整词；只剩空白时清掉空白，不留“按了没反应”）、
+  **Shift+滚轮**水平滚动
+- **视觉**：**缩进参考线**（每级一条竖线，Tab 按 `tab_width` 展开到视觉列对齐；可关）、
+  悬停行底纹、行号槽内的当前行高亮、竖向 + 横向**两条可拖拽滚动条**（悬停加宽）
+- **视口可驱动**：属性 `first_visible_line`/`last_visible_line`/`visible_lines`/`scroll`、
+  动作 `scroll_to_line`/`reveal_line`——智能体可断言“视口停在哪一行”
+
+> **x 坐标的唯一量尺**：`x_for_index()` 是光标/选择/查找高亮/缩进线/鼠标命中的共同量尺，
+> 它必须与**绘制同源**（同 `FontRole`、同一种量宽口径）。这一条踩过真缺陷：漏传
+> `FontRole::Monospace` 后落到接口默认的 Proportional，于是“量宽用比例字体、绘字用等宽字体”，
+> x 误差随列号线性累积（实测 45 列处偏 7.7px）——用户侧看到的就是“**光标漂移**”。
+> 回归断言在 `tests/ui_code_editor_test.cpp`：逐列推进的增量必须等于该字符的等宽步进，
+> 且“光标 x → 命中回环”必须回到同一列（DPI 换挡后逐字段不变）。
+> 量尺：`tools/caret_ink_probe.cpp`（把两类分家直接量出来）。
 - **只读模式**：`set_read_only(true)` 即"带高亮的代码查看器"（选择与复制仍可用）——
   示例 `codeeditor` 左侧可写、右侧只读，同一组件两种形态
 - **语言**：`set_language(name)`（名字/别名/扩展名）、`set_language_from_path(path)`、
   `set_language_spec(spec)`（直接绑定自定义规则）
-- **控制通道**：属性面 `text/language/cursor/line/column/lines/selection/selected_text/read_only/highlight/show_line_numbers/tab_width/font_size/goto_line`；
-  动作 `focus/select_all/undo/redo/clear_selection/insert/copy/cut/paste/comment/indent/dedent/goto_line/set_text`
+- **控制通道**：属性面 `text/language/cursor/line/column/lines/selection/selected_text/read_only/highlight/show_line_numbers/tab_width/indent_guides/auto_pairs/font_size/scroll/first_visible_line/last_visible_line/visible_lines/goto_line`；
+  动作 `focus/select_all/undo/redo/clear_selection/insert/copy/cut/paste/comment/indent/dedent/goto_line/scroll_to_line/reveal_line/set_text`
+
+> **协议动作白名单已移除**。它曾把**组件自定义动作**整体挡在门外：`CodeEditor` 的
+> `undo`/`redo`/`set_text`/`goto_line`… 都实现了 `invoke_action`，却因不在协议名单里
+> 被报成“未知动作”——能力存在却不可达（对自动化是反向假阴性），而名单还要跟着每个
+> 新组件手改、天然滞后。新口径：动作直接交给元素，`handled` 就是权威答复——
+> 拼错的动作名仍是 `handled=false`（不假装成功），真正的组件动作终于可达。
 - **语义值**：`semantics_value()` 给**当前行内容**（整篇代码塞进语义树既无意义也会撑爆控制通道响应）
 
 **剪贴板**：使用进程内剪贴板而非系统剪贴板——无头模式没有系统剪贴板（服务器无 X/Wayland），
@@ -945,6 +969,45 @@ class Compositor {                                  // UI 图层 → GPU 合成
 
 ### 4.8 control（TCP 控制通道）
 见 §6 协议规范。服务端在 `App` 启动时按 `--control-port`（0 = 自动分配并写入 `--control-file`）监听；只监听回环地址（`127.0.0.1`）由默认策略保证安全（`--control-bind` 可改，需显式）。
+
+#### 4.8.1 响应延迟：控制通道不能被帧节拍量化
+
+**问题**（实测）：写操作的 p50 是 **15.8 ms**，而读操作只有 **4.1 ms**——差值恰好
+是“帧节拍 − 距上次命令的间隔”：间隔 0ms → 15.7ms、2ms → 13.8ms、8ms → 8.5ms、
+16ms → 3.8ms、100ms → 2.4ms。即 **连续操作**（改状态→看图→再改，正是 AI 驱动开发的常见形态）
+几乎每次都白等一拍，每次 ~12ms。
+
+**根因**：主循环 `tick()` 的次序是 `render_frame() → server->poll() → pace_loop()`，
+而 `pace_loop` 在“有活干”时会睡到帧预算余量（~16ms）、空闲时睡 4ms——两种都是
+**盲睡**：命令在睡眠期间到达，只能等睡醒后才被处理。服务端 handler 本身只有 30–100 µs。
+
+**修法**：把**控制通道的句柄交给内核等**（`platform::wait_any_readable`，一次
+`poll`/`WSAPoll` 覆盖监听套接字 + 所有已连接客户端），超时上限保留原时长。
+
+| case | 修复前 | 修复后 |
+|---|---|---|
+| `ping` | 4.10 ms | **0.06 ms** |
+| `get` | 4.14 ms | **0.11 ms** |
+| `find` | 4.15 ms | **0.16 ms** |
+| `set` / `invoke` | 15.8 ms | **3.8–5.2 ms**（剩下的是真正绘制那一帧） |
+
+两个容易踩空的点，都写在代码注释里：
+- **必须等客户端套接字，不能只等监听套接字**——新请求走的是**已接受的那个连接**（改了只等 listener 的版本，延迟纹丝不动）。
+- **挂起 `wait` 的连接要挡后续请求**（它们不构成“新条件”），但门必须**只盖住等待期**：
+  忘了在等待结束（满足/超时）时清标志，这条连接以后每次调用都被拒——实测：等完之后连 `get` 都失败。
+
+#### 4.8.2 为 AI 调用方优化的原语
+
+| 原语 | 解决的问题 |
+|---|---|
+| `input.mouse{id}` | 按 **id** 点击/移动（服务端算 `bounds` 中心）。无此路径时调用方要先 `find` 拿 bounds 再自己算中心，而 `find` 连**不可见**元素也返回（本会话实测因此点空两次）。找不到 / 未布局 / 不可见 → **明确拒绝**，不默默点到别处 |
+| `find` 结果带 `visible`/`enabled` | 同上——拿到一条记录就想去点/改之前，先能看出它在不在屏上 |
+| `invoke` 回带 `state` | 动作之后几乎总要看“变成什么了”。只回 `handled` 就得再发一次 `get`，每个动作多一次往返 |
+| `wait{for:"property", selector, property, value}` | 真实开发里绝大多数等待是“某元素的某属性变成期望值”。旧的 `text` 条件要把**整棵语义树**拼一遍且只能匹配文本子串——属性是数字/布尔/复合值时根本表达不了。新条件只查命中元素，代价与元素数无关 |
+| 列表类**通用视口契约** | `rows`/`items`/`lines`（总数）+ `first_visible*`（首可见）+ `visible_rows`/`visible_items`/`visible_lines`（视口容量）+ `scroll`。四个量回答同一类问题：**用户现在看得到哪一块**——这是 AI 驱动界面时最常做的判断（“跳过去了吗”“列表多长”“还要不要再滚”），而之前这些组件**完全没有属性面**，只能靠截图猜 |
+
+> **口径**：不可断言的效果 = 不可复用。列表类组件补齐属性面，不是为了好看，
+> 而是把“看起来对”变成“量出来对”。
 
 ### 4.9 pkg（stpm）
 见 §7。

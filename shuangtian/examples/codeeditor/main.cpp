@@ -43,6 +43,7 @@
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
@@ -431,7 +432,117 @@ struct Workbench {
   // 目录展开状态（dir key → 展开？；驱动 scan_tree_nodes 的增量刷新）
   std::map<std::string, bool> dir_expanded{};
   Tree* workspace_tree{nullptr};
+  // 问题面板（真实轻量检查的报告与计数）
+  List* problems_list{nullptr};
+  Text* problem_error_label{nullptr};
+  Text* problem_warning_label{nullptr};
+  // 状态栏附加信息（选区/脏标记）
+  Text* selection_label{nullptr};
+  // 状态栏错误/警告计数（与问题面板同源——两边都来自 `lint_text`）
+  Text* status_error_count{nullptr};
+  Text* status_warning_count{nullptr};
 };
+
+/// 一条轻量检查结果（**真检查**，不是占位数据）。
+struct Problem {
+  std::size_t line{0};       ///< 1 起行号
+  bool warning{true};        ///< true = 警告，false = 错误
+  std::string message{};
+};
+
+/// 便宜的逐行检查（不引入分析器）：行尾空白 / Tab 缩进 / TODO·FIXME / 超长行。
+///
+/// 为什么值得做：状态栏的「错误 · 警告」计数与问题面板若没有真实来源，
+/// 就只是摆设——改完代码什么都不会变，读者也无法验证计数联动是对的。
+/// 这组规则几行就能跑完，且对真实的 C++/Python 文件都有意义。
+[[nodiscard]] auto lint_text(std::string_view text) -> std::vector<Problem> {
+  std::vector<Problem> problems;
+  std::size_t line_no = 0;
+  std::size_t begin = 0;
+  while (begin <= text.size()) {
+    const std::size_t eol = text.find('\n', begin);
+    const std::size_t end = eol == std::string_view::npos ? text.size() : eol;
+    std::string_view line = text.substr(begin, end - begin);
+    ++line_no;
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    if (!line.empty() && (line.back() == ' ' || line.back() == '\t')) {
+      problems.push_back(Problem{line_no, true, "行尾有多余空白"});
+    }
+    // Tab 缩进：与前导内容无关，只要行首是 Tab 就提醒（编辑器默认插空格）
+    if (!line.empty() && line.front() == '\t') {
+      problems.push_back(Problem{line_no, true, "用 Tab 缩进（本工程约定空格）"});
+    }
+    const std::size_t todo = line.find("TODO");
+    const std::size_t fixme = line.find("FIXME");
+    if (todo != std::string_view::npos || fixme != std::string_view::npos) {
+      problems.push_back(Problem{line_no, true, "待办标记（TODO/FIXME）"});
+    }
+    if (line.size() > 120) {
+      problems.push_back(Problem{line_no, true, "行超长（>120 列）"});
+    }
+    if (eol == std::string_view::npos) break;
+    begin = eol + 1;
+  }
+  return problems;
+}
+
+/// 重跑当前编辑器的检查 → 刷新问题列表与状态栏计数（编辑与切标签后都调）。
+void refresh_problems(Workbench& wb, st::ui::UiRoot& root) {
+  if (wb.problems_list == nullptr) return;
+  std::vector<Problem> problems;
+  if (wb.active < wb.buffers.size() && wb.buffers[wb.active].editor != nullptr) {
+    problems = lint_text(wb.buffers[wb.active].editor->text());
+  }
+  std::size_t errors = 0;
+  std::size_t warnings = 0;
+  std::vector<st::ui::List::Entry> entries;
+  for (const auto& problem : problems) {
+    (problem.warning ? warnings : errors) += 1;
+    st::ui::List::Entry entry;
+    entry.key = std::format("problem:{}", problem.line);
+    entry.label = std::format("{}  第 {} 行  {}", problem.warning ? "警告" : "错误",
+                              problem.line, problem.message);
+    // 点问题 → 跳到那一行（与搜索命中同一条跳转语义）
+    entry.on_activate = [&wb, root = &root, line = problem.line]() {
+      if (wb.active >= wb.buffers.size() || wb.buffers[wb.active].editor == nullptr) return;
+      wb.buffers[wb.active].editor->goto_line(line);
+      wb.buffers[wb.active].editor->scroll_to_line(line);
+      root->set_focus(wb.buffers[wb.active].editor);
+      root->mark_dirty_all();
+    };
+    entries.push_back(std::move(entry));
+  }
+  if (entries.empty()) {
+    st::ui::List::Entry clean;
+    clean.key = "no-problems";
+    clean.label = "工作区干净，没有发现问题";
+    entries.push_back(std::move(clean));
+  }
+  wb.problems_list->sync_items(entries);
+  if (wb.problem_error_label != nullptr) {
+    wb.problem_error_label->set_content(std::format("{} 个错误", errors));
+  }
+  if (wb.problem_warning_label != nullptr) {
+    wb.problem_warning_label->set_content(std::format("{} 个警告", warnings));
+  }
+  // 状态栏计数与问题面板**同源**（同一份 lint 结果）——
+  // 两边不同源的话，会出现“状态栏 0 警告、面板列着两条”这类自相矛盾。
+  if (wb.status_error_count != nullptr) {
+    wb.status_error_count->set_content(std::to_string(errors));
+  }
+  if (wb.status_warning_count != nullptr) {
+    wb.status_warning_count->set_content(std::to_string(warnings));
+  }
+}
+
+/// 标题栏文案：脏时加一个圆点前缀（VSCode 同族的"未保存"提示）。
+///
+/// 抽成一个函数是必须的——标题栏在 7 处被赋值，散着写必然有几处漏掉脏标记。
+[[nodiscard]] auto window_title(const Workbench& wb) -> std::string {
+  if (wb.active >= wb.buffers.size()) return "codeeditor";
+  const OpenBuffer& buffer = wb.buffers[wb.active];
+  return std::string(buffer.dirty ? "● " : "") + buffer.label + " - codeeditor";
+}
 
 /// 把编辑器实例挂到编辑区（首个标签时创建，此后复用同一个实例）。
 void bind_editor(Workbench& wb, st::ui::UiRoot& root) {
@@ -446,15 +557,17 @@ void bind_editor(Workbench& wb, st::ui::UiRoot& root) {
         auto& buffer = wb.buffers[wb.active];
         if (!buffer.dirty) {
           buffer.dirty = true;
-          // 同步 Tabs 修改点
+          // 同步 Tabs 修改点 + 标题栏脏点（两者都是“这份内容还没存”的可见信号）
           std::vector<st::ui::Tabs::Tab> tabs;
           for (const auto& open : wb.buffers) {
             tabs.push_back(st::ui::Tabs::Tab{open.key, open.label, open.dirty, true});
           }
           wb.tabs->sync_tabs(tabs);
+          if (wb.title_text != nullptr) wb.title_text->set_content(window_title(wb));
         }
       }
-      wb.cursor_label->set_content("编辑中…");
+      // 每次编辑后重跑轻量检查（几百行是亚毫秒；大文件本来也不在示例的工作量里）
+      refresh_problems(wb, root);
       root.mark_dirty_all();
     };
     editor->on_cursor_change = [&wb, &root]() {
@@ -463,6 +576,15 @@ void bind_editor(Workbench& wb, st::ui::UiRoot& root) {
       if (active_editor == nullptr) return;
       wb.cursor_label->set_content(std::format("Ln {}, Col {}", active_editor->cursor_line() + 1,
                                                active_editor->cursor_column() + 1));
+      // 选区计数：有选项时看得到「选了多少」（VSCode 同族状态栏项）
+      if (wb.selection_label != nullptr) {
+        if (const std::string picked = active_editor->selected_text(); !picked.empty()) {
+          wb.selection_label->set_content(
+              std::format("已选 {} 字符", st::utf8_length(picked)));
+        } else {
+          wb.selection_label->set_content({});
+        }
+      }
       root.mark_dirty_all();
     };
     wb.editor_host->add_child(std::move(editor));
@@ -505,7 +627,8 @@ void open_sample(Workbench& wb, const Sample& sample, st::ui::UiRoot& root) {
   wb.tabs->sync_tabs(tabs);
   wb.tabs->set_active(found);
   bind_editor(wb, root);
-  wb.title_text->set_content(sample.name + " - codeeditor");
+  refresh_problems(wb, root);
+  wb.title_text->set_content(window_title(wb));
   wb.status->set_content(sample.name + " · " +
                          std::to_string(st::utf8_length(sample.code)) + " 字符 · 已打开");
   root.set_focus(wb.buffers[found].editor);
@@ -542,8 +665,9 @@ void close_tab(Workbench& wb, st::ui::UiRoot& root) {
   if (wb.editor_host != nullptr) wb.editor_host->set_visible(true);
   wb.tabs->set_active(wb.active);
   bind_editor(wb, root);
+  refresh_problems(wb, root);
   const OpenBuffer& buffer = wb.buffers[wb.active];
-  wb.title_text->set_content(buffer.label + " - codeeditor");
+  wb.title_text->set_content(window_title(wb));
   wb.status->set_content("已关闭标签 · 当前 " + buffer.label);
   root.set_focus(buffer.editor);
   root.mark_dirty_all();
@@ -587,144 +711,6 @@ void select_activity(Workbench& wb, std::size_t index) {
   }
 }
 
-/// 命令（命令面板里的一个条目）。
-struct Command {
-  std::string title;
-  std::string detail;
-  std::function<void()> run;
-};
-// 命令面板（overlay：FillViewport + 顶部居中卡片 + 过滤列表）
-
-class CommandPalette : public st::ui::Element {
- public:
-  CommandPalette(std::string query, std::vector<Command> commands,
-                 std::function<void()> on_close)
-      : commands_(std::move(commands)), close_(std::move(on_close)) {
-    set_id("command-palette");
-    style().background = st::math::Color{0, 0, 0, 110};
-    query_ = query.empty() ? "" : query;
-    auto box = std::make_unique<Panel>(FlexDirection::Column);
-    box->set_id("palette-card");
-    box->style().width = 520.0f;
-    box->style().background = st::math::Color::rgba(26, 34, 48, 255);  // 深底（亮暗主题下都是"浮层"）
-    box->style().radius = 10.0f;
-    box->style().border_color = st::math::Color::rgba(255, 255, 255, 26);
-    box->style().border_width = 1.0f;
-    box->style().shadow = st::ui::Shadow{};
-    box->style().clip_children = true;
-    auto input_row = std::make_unique<Panel>(FlexDirection::Row);
-    input_row->style().padding = Insets{12.0f, 10.0f, 12.0f, 10.0f};
-    input_row->style().gap = 8.0f;
-    input_row->style().align_items = Align::Center;
-    input_row->add_child(std::make_unique<st::ui::IconView>("chevron-right", 16.0f));
-    input_ = static_cast<Input*>(input_row->add_child(std::make_unique<Input>()));
-    box->add_child(std::move(input_row));
-    list_ = static_cast<st::ui::List*>(box->add_child(std::make_unique<st::ui::List>()));
-    list_->style().max_height = 300.0f;
-    card_ = box.get();
-    add_child(std::move(box));
-    rebuild("");
-    input_->set_placeholder("输入命令名过滤，Enter 执行，Esc 关闭");
-    input_->on_change = [this](std::string_view value) {
-      rebuild(std::string(value));
-    };
-    input_->on_submit = [this](std::string_view) { activate_highlighted(); };
-  }
-
-  [[nodiscard]] auto type() const noexcept -> std::string_view override { return "CommandPalette"; }
-  [[nodiscard]] auto role() const noexcept -> st::ui::Role override { return st::ui::Role::Dialog; }
-  [[nodiscard]] auto intercepts_input() const noexcept -> bool override { return true; }
-
-  void arrange(const st::ui::RenderContext& context, st::math::Rect rect) override {
-    // 卡片顶部居中（VSCode 命令面板形态）：FillViewport 给的是全视口矩形，
-    // 子卡片的位置由本组件重排——直接用 layout_children 把内容放到目标矩形。
-    const st::math::Size card_size = card_->measured_size();
-    const float x = rect.x + (rect.width - card_size.width) * 0.5f;
-    const float y = rect.y + 48.0f;
-    card_rect_ = st::math::Rect{x, y, card_size.width, card_size.height};
-    card_->measure(context, st::ui::Constraints{});
-    card_->arrange(context, card_rect_);
-    bounds_ = rect;
-  }
-
-  auto on_event(const st::ui::RenderContext& context, st::ui::Event& event) -> bool override {
-    if (event.kind == st::ui::EventKind::KeyDown) {
-      if (event.key == "Escape") {
-        if (close_) close_();
-        return true;
-      }
-      if (event.key == "ArrowDown" || event.key == "ArrowUp") {
-        move_highlight(event.key == "ArrowDown" ? 1 : -1);
-        return true;
-      }
-      if (event.key == "Enter") {
-        activate_highlighted();
-        return true;
-      }
-    }
-    // 面板外点击 → 关闭
-    if (event.kind == st::ui::EventKind::MouseDown && !card_rect_.contains(event.position)) {
-      if (close_) close_();
-      return true;
-    }
-    return Element::on_event(context, event);
-  }
-
- private:
-  void rebuild(const std::string& query) {
-    std::vector<st::ui::List::Entry> entries;
-    for (const Command& command : commands_) {
-      if (!query.empty() && command.title.find(query) == std::string::npos &&
-          command.detail.find(query) == std::string::npos) {
-        continue;
-      }
-      st::ui::List::Entry entry;
-      entry.key = command.title;
-      entry.label = command.title;
-      Command captured = command;
-      entry.on_activate = [this, captured]() {
-        if (close_) close_();
-        captured.run();
-      };
-      entries.push_back(std::move(entry));
-    }
-    list_->sync_items(entries);
-    highlight_ = entries.empty() ? st::ui::kNoSelection : 0;
-    if (highlight_ != st::ui::kNoSelection) list_->select(highlight_, false);
-  }
-
-  void move_highlight(int delta) {
-    if (list_->item_count() == 0) return;
-    std::size_t current = list_->selected_index();
-    if (current == st::ui::kNoSelection) current = 0;
-    if (delta > 0) {
-      current = current + 1 >= list_->item_count() ? 0 : current + 1;
-    } else {
-      current = current == 0 ? list_->item_count() - 1 : current - 1;
-    }
-    list_->select(current, false);
-    highlight_ = current;
-  }
-
-  void activate_highlighted() {
-    if (highlight_ == st::ui::kNoSelection || highlight_ >= list_->item_count()) {
-      if (close_) close_();
-      return;
-    }
-    if (auto* item = list_->item(highlight_); item != nullptr) {
-      item->activate();
-    }
-  }
-
-  std::vector<Command> commands_{};
-  std::function<void()> close_{};
-  std::string query_{};
-  Input* input_{nullptr};
-  st::ui::List* list_{nullptr};
-  Panel* card_{nullptr};
-  st::math::Rect card_rect_{};
-  std::size_t highlight_{st::ui::kNoSelection};
-};
 // 主装配
 
 auto run_app(int argc, char** argv) -> int {
@@ -1041,34 +1027,49 @@ auto run_app(int argc, char** argv) -> int {
   auto* bottom_tabs_ptr = bottom_tabs.get();
   bottom_panel->add_child(std::move(bottom_tabs));
 
-  // 问题面板
-  auto problems_panel = std::make_unique<Panel>(FlexDirection::Row);
+  // —— 问题面板：**真实轻量检查**报告 ——
+  //
+  // 旧版是“0 个错误 / 0 个警告”的假数据（写着 0 却什么都没查），既无信息量也
+  // 无法验证状态栏计数联动。现在跑一组便宜的逐行检查（行尾空白 / Tab 缩进 /
+  // TODO·FIXME / 超长行），报告行号与原因；列表项可点，点了**跳到那一行**。
+  auto problems_panel = std::make_unique<Panel>(FlexDirection::Column);
   problems_panel->set_id("panel-problems");
   problems_panel->style().grow = true;
   problems_panel->style().padding = Insets{8.0f, 6.0f, 8.0f, 6.0f};
-  problems_panel->style().gap = 16.0f;
-  const auto make_problem = [&problems_panel](const char* icon, st::ui::Tone tone,
-                                              const std::string& text) {
+  problems_panel->style().gap = 6.0f;
+  auto problems_head = std::make_unique<Panel>(FlexDirection::Row);
+  problems_head->style().gap = 16.0f;
+  problems_head->style().align_items = Align::Center;
+  const auto make_problem_count = [&problems_head](const char* icon, st::ui::Tone tone) {
     auto row = std::make_unique<Panel>(FlexDirection::Row);
     row->style().gap = 6.0f;
     row->style().align_items = Align::Center;
     auto mark = std::make_unique<st::ui::IconView>(icon, 14.0f);
     mark->set_tone(tone);
     row->add_child(std::move(mark));
-    auto label = std::make_unique<Text>(text);
+    auto label = std::make_unique<Text>("0");
     label->set_font_size(12.0f);
-    row->add_child(std::move(label));
-    problems_panel->add_child(std::move(row));
+    Text* label_ptr = static_cast<Text*>(row->add_child(std::move(label)));
+    problems_head->add_child(std::move(row));
+    return label_ptr;
   };
-  make_problem("error", st::ui::Tone::Danger, "0 个错误");
-  make_problem("warning", st::ui::Tone::Warning, "0 个警告");
-  auto problems_gap = std::make_unique<Panel>(FlexDirection::Row);
-  problems_gap->style().grow = true;
-  problems_panel->add_child(std::move(problems_gap));
-  auto problems_note = std::make_unique<Text>("工作区干净，没有发现问题");
-  problems_note->set_tone(Tone::Faint);
-  problems_note->set_font_size(12.0f);
-  problems_panel->add_child(std::move(problems_note));
+  wb.problem_error_label = make_problem_count("error", st::ui::Tone::Danger);
+  wb.problem_warning_label = make_problem_count("warning", st::ui::Tone::Warning);
+  auto problems_title = std::make_unique<Text>("当前编辑器");
+  problems_title->set_tone(Tone::Faint);
+  problems_title->set_font_size(11.5f);
+  problems_head->add_child(std::move(problems_title));
+  auto problems_head_gap = std::make_unique<Panel>(FlexDirection::Row);
+  problems_head_gap->style().grow = true;
+  problems_head->add_child(std::move(problems_head_gap));
+  problems_panel->add_child(std::move(problems_head));
+  auto problems_scroll = std::make_unique<ScrollView>();
+  problems_scroll->set_id("problems-scroll");
+  problems_scroll->style().grow = true;
+  auto problems_list = std::make_unique<List>();
+  problems_list->set_id("problems-list");
+  wb.problems_list = static_cast<List*>(problems_scroll->add_child(std::move(problems_list)));
+  problems_panel->add_child(std::move(problems_scroll));
   auto* problems_ptr = bottom_panel->add_child(std::move(problems_panel));
 
   // 输出面板
@@ -1150,14 +1151,16 @@ auto run_app(int argc, char** argv) -> int {
   error_icon->set_tone(Tone::Danger);
   status_bar->add_child(std::move(error_icon));
   auto error_count = std::make_unique<Text>("0");
+  error_count->set_id("status-errors");
   error_count->set_font_size(11.5f);
-  status_bar->add_child(std::move(error_count));
+  wb.status_error_count = static_cast<Text*>(status_bar->add_child(std::move(error_count)));
   auto warn_icon = std::make_unique<st::ui::IconView>("warning", 12.0f);
   warn_icon->set_tone(Tone::Warning);
   status_bar->add_child(std::move(warn_icon));
   auto warn_count = std::make_unique<Text>("0");
+  warn_count->set_id("status-warnings");
   warn_count->set_font_size(11.5f);
-  status_bar->add_child(std::move(warn_count));
+  wb.status_warning_count = static_cast<Text*>(status_bar->add_child(std::move(warn_count)));
 
   auto status_gap = std::make_unique<Panel>(FlexDirection::Row);
   status_gap->style().grow = true;
@@ -1186,6 +1189,13 @@ auto run_app(int argc, char** argv) -> int {
   language_label->set_id("language-label");
   language_label->set_font_size(11.5f);
   wb.language_label = static_cast<Text*>(status_bar->add_child(std::move(language_label)));
+
+  // 选区计数（有选中时才显示文字；空串即“不占视觉位置”）
+  auto selection_label = std::make_unique<Text>("");
+  selection_label->set_id("selection-label");
+  selection_label->set_tone(Tone::Primary);
+  selection_label->set_font_size(11.5f);
+  wb.selection_label = static_cast<Text*>(status_bar->add_child(std::move(selection_label)));
 
   // 状态文案（左半区）：兼容钩子——id 沿用旧版 `status`
   auto status = std::make_unique<Text>("就绪");
@@ -1325,12 +1335,14 @@ auto run_app(int argc, char** argv) -> int {
       root->mark_dirty_all();
     }
   };
-  wb.find.close->on_click = [&wb, &active_editor, root]() {
+  // 关闭查找条（× 按钮与 Esc 共用一条路径——此前 Esc 关不掉：浮层本身不认 Esc）
+  const auto close_find_bar = [&wb, &active_editor, root]() {
     if (CodeEditor* editor = active_editor(); editor != nullptr) editor->clear_find();
     wb.find.card->set_visible(false);
     if (CodeEditor* editor = active_editor(); editor != nullptr) root->set_focus(editor);
     root->mark_dirty_all();
   };
+  wb.find.close->on_click = [&close_find_bar]() { close_find_bar(); };
   // 打开查找条（focus 输入框；预填当前选中文本——VSCode 同族行为）
   const auto open_find_bar = [&wb, &active_editor, &refresh_find_counter, root]() {
     wb.find.card->set_visible(true);
@@ -1347,6 +1359,16 @@ auto run_app(int argc, char** argv) -> int {
     root->mark_dirty_all();
   };
 
+  // Esc 关闭查找条：注册在**根**上的全局快捷键（先于焦点链），
+  // 因 `Input` 不认 Esc。只在白可见时接管，以免吃掉其他场景的 Esc。
+  st::ui::UiRoot::Shortcut plain_key{};
+  (void)root->register_shortcut(
+      "escape", plain_key, [&wb, &close_find_bar]() {
+        if (!wb.find.card->visible()) return false;
+        close_find_bar();
+        return true;
+      });
+
   // Tabs：切换标签 = 换绑编辑器内容；× = 关闭
   wb.tabs->on_change = [&wb, root](std::size_t index) {
     if (index >= wb.buffers.size()) return;
@@ -1356,7 +1378,8 @@ auto run_app(int argc, char** argv) -> int {
     }
     wb.active = index;
     bind_editor(wb, *root);
-    wb.title_text->set_content(wb.buffers[index].label + " - codeeditor");
+    refresh_problems(wb, *root);
+    wb.title_text->set_content(window_title(wb));
     root->set_focus(wb.buffers[index].editor);
     root->mark_dirty_all();
   };
@@ -1389,7 +1412,8 @@ auto run_app(int argc, char** argv) -> int {
         wb.tabs->set_active(index);
         wb.active = index;
         bind_editor(wb, *root);
-        wb.title_text->set_content(buffer->label + " - codeeditor");
+        refresh_problems(wb, *root);
+        wb.title_text->set_content(window_title(wb));
         wb.status->set_content("已打开 " + buffer->path);
         root->set_focus(buffer->editor);
         root->mark_dirty_all();
@@ -1452,51 +1476,218 @@ auto run_app(int argc, char** argv) -> int {
     root->mark_dirty_all();
   };
 
-  // 搜索：在样例文本里逐行找，结果进列表
+  // —— 搜索：**真实递归**搜工作区文件（无工作区时回退到内置样例文本）——
+  //
+  // 旧实现只搜内嵌的几份样例字符串，与资源管理器“真实文件模式”自相矛盾；
+  // 也无法回答“这个词到底在不在这份工作区里”。现在递归 `fs::list_dir` 读文件、
+  // 逐行匹配，结果给「文件:行号 + 片段」，点一下**跳到该行并选中命中**。
   search_input_ptr->on_change = [search_list_ptr, &files, &wb, root](std::string_view query) {
     std::vector<List::Entry> entries;
     if (!query.empty()) {
-      for (const auto& sample : files) {
-        std::size_t line_no = 0;
-        std::size_t cursor = 0;
-        while (cursor <= sample.code.size()) {
-          const std::size_t eol = sample.code.find('\n', cursor);
-          const std::string_view line = std::string_view(sample.code).substr(
-              cursor, eol == std::string::npos ? std::string_view::npos : eol - cursor);
-          ++line_no;
-          if (line.find(query) != std::string_view::npos) {
-            List::Entry entry;
-            entry.key = sample.name + ":" + std::to_string(line_no);
-            entry.label = sample.name + ":" + std::to_string(line_no) + "  " + std::string(line);
-            entry.on_activate = [&files, &wb, root, name = sample.name]() {
-              for (const auto& candidate : files) {
-                if (candidate.name == name) {
+      const auto add_hit = [&](const std::string& path, const std::string& label,
+                               std::size_t line_no, std::size_t column,
+                               std::size_t length) {
+        List::Entry entry;
+        entry.key = label;
+        entry.label = label;
+        // 命中即可跳转（真实文件走 fs 打开；样例按名字找）
+        entry.on_activate = [&wb, root, path, line_no, column, length]() {
+          OpenBuffer* buffer = nullptr;
+          if (!wb.workspace_root.empty()) {
+            buffer = open_file_buffer(wb.buffers, path);
+          }
+          st::ui::Tabs::Tab unused{};
+          (void)unused;
+          if (buffer != nullptr) {
+            std::size_t index = 0;
+            for (std::size_t i = 0; i < wb.buffers.size(); ++i) {
+              if (&wb.buffers[i] == buffer) index = i;
+            }
+            std::vector<st::ui::Tabs::Tab> tab_bar;
+            for (const auto& open : wb.buffers) {
+              tab_bar.push_back(st::ui::Tabs::Tab{open.key, open.label, open.dirty, true});
+            }
+            wb.tabs->sync_tabs(tab_bar);
+            wb.tabs->set_active(index);
+            wb.active = index;
+            bind_editor(wb, *root);
+            refresh_problems(wb, *root);
+          }
+          if (wb.active < wb.buffers.size() && wb.buffers[wb.active].editor != nullptr) {
+            CodeEditor* editor = wb.buffers[wb.active].editor;
+            // 跳行 → 选中命中词（两者都是命中后“我到底要看哪里”的一部分）
+            editor->goto_line(line_no);
+            const std::size_t start =
+                editor->cursor_index() + column;
+            editor->set_selection(start, start + length);
+            editor->scroll_to_line(line_no);
+            root->set_focus(editor);
+            wb.status->set_content(
+                std::format("已跳到 {}:{}", path, line_no));
+          }
+          root->mark_dirty_all();
+        };
+        entries.push_back(std::move(entry));
+      };
+
+      if (!wb.workspace_root.empty()) {
+        // 递归扫描（跳过二进制/隐藏目录/超大文件）；限量避免大工作区把示例拖卡
+        constexpr std::size_t kMaxHits = 200;
+        constexpr std::size_t kMaxFileBytes = 1U << 20U;
+        std::vector<std::pair<std::string, int>> stack{{wb.workspace_root, 0}};
+        while (!stack.empty() && entries.size() < kMaxHits) {
+          const auto [dir, depth] = stack.back();
+          stack.pop_back();
+          if (depth > 6) continue;
+          auto listing = st::fs::list_dir(dir);
+          if (!listing) continue;
+          for (const auto& item : *listing) {
+            if (entries.size() >= kMaxHits) break;
+            const std::string full = dir + "/" + item.name;
+            if (item.is_dir) {
+              if (!item.name.empty() && item.name.front() == '.') continue;  // 隐藏目录
+              stack.emplace_back(full, depth + 1);
+              continue;
+            }
+            if (item.size > kMaxFileBytes) continue;  // 二进制/大文件不搜
+            auto content = st::fs::read_text(full);
+            if (!content) continue;                    // 非 UTF-8/读不了：跳过而不是硬猜
+            std::size_t line_no = 0;
+            std::size_t line_begin = 0;
+            while (line_begin <= content->size() && entries.size() < kMaxHits) {
+              const std::size_t eol = content->find('\n', line_begin);
+              const std::size_t line_end =
+                  eol == std::string::npos ? content->size() : eol;
+              const std::string_view line(content->data() + line_begin, line_end - line_begin);
+              ++line_no;
+              const std::size_t column = line.find(query);
+              if (column != std::string_view::npos) {
+                const std::string leaf = item.name;
+                add_hit(full,
+                        std::format("{}:{}  {}", leaf, line_no,
+                                    st::trim(line).substr(0, 60)),
+                        line_no, column, query.size());
+              }
+              if (eol == std::string::npos) break;
+              line_begin = eol + 1;
+            }
+          }
+        }
+        if (entries.empty()) {
+          List::Entry no_match;
+          no_match.key = "no-match";
+          no_match.label = std::string("没有匹配：") + std::string(query);
+          entries.push_back(std::move(no_match));
+        }
+      } else {
+        // 内置样例回退（无 --workspace 时的原行为，保持示例自包含）
+        for (const auto& sample : files) {
+          std::size_t line_no = 0;
+          std::size_t cursor = 0;
+          while (cursor <= sample.code.size() && entries.size() < 200) {
+            const std::size_t eol = sample.code.find('\n', cursor);
+            const std::string_view line = std::string_view(sample.code).substr(
+                cursor, eol == std::string::npos ? std::string_view::npos : eol - cursor);
+            ++line_no;
+            const std::size_t column = line.find(query);
+            if (column != std::string_view::npos) {
+              const std::string name = sample.name;
+              List::Entry entry;
+              entry.key = name + ":" + std::to_string(line_no);
+              entry.label = std::format("{}:{}  {}", name, line_no,
+                                        st::trim(line).substr(0, 60));
+              entry.on_activate = [&files, &wb, root, name, line_no, column, query_len = query.size()]() {
+                for (const auto& candidate : files) {
+                  if (candidate.name != name) continue;
                   open_sample(wb, candidate, *root);
+                  if (wb.active < wb.buffers.size() && wb.buffers[wb.active].editor != nullptr) {
+                    CodeEditor* editor = wb.buffers[wb.active].editor;
+                    editor->goto_line(line_no);
+                    const std::size_t start = editor->cursor_index() + column;
+                    editor->set_selection(start, start + query_len);
+                    editor->scroll_to_line(line_no);
+                    root->set_focus(editor);
+                  }
+                  wb.status->set_content(std::format("已跳到 {}:{}", name, line_no));
+                  root->mark_dirty_all();
                   return;
                 }
-              }
-            };
-            entries.push_back(std::move(entry));
+              };
+              entries.push_back(std::move(entry));
+            }
+            if (eol == std::string::npos) break;
+            cursor = eol + 1;
           }
-          if (eol == std::string::npos) break;
-          cursor = eol + 1;
         }
       }
     }
     search_list_ptr->sync_items(entries);
+    wb.status->set_content(entries.empty()
+                               ? std::string("搜索：输入关键词（递归搜工作区）")
+                               : std::format("搜索命中 {} 处", entries.size()));
     root->mark_dirty_all();
   };
   // 终端：Enter 提交 → 回显命令与模拟输出
   wb.terminal_input->on_submit = [&wb, &files, root](std::string_view command) {
     std::string reply;
     if (command == "help") {
-      reply = "可用命令：help · langs · open <file> · save · theme · clear";
+      reply =
+          "可用命令：\n"
+          "  help           本帮助\n"
+          "  langs          已注册语言列表\n"
+          "  ls             工作区根目录（真实文件模式）\n"
+          "  find <词>      在工作区里搜（打到搜索面板 + 报告命中数）\n"
+          "  goto <行>      当前编辑器跳到该行\n"
+          "  stats          当前编辑器统计（行/字符/匹配数）\n"
+          "  save / theme / clear / open <文件>";
     } else if (command == "langs") {
       std::string names;
       for (const auto& name : CodeEditor::available_languages()) {
         names += name + " ";
       }
       reply = "已注册语言：" + names;
+    } else if (command == "ls") {
+      if (wb.workspace_root.empty()) {
+        reply = "当前为内置样例模式（启动时加 --workspace <目录> 可用真实文件）";
+      } else if (auto listing = st::fs::list_dir(wb.workspace_root); listing.has_value()) {
+        reply = "工作区 " + wb.workspace_root + "：";
+        for (const auto& item : *listing) {
+          reply += "\n  " + item.name + (item.is_dir ? "/" : std::format("  {} B", item.size));
+        }
+      } else {
+        reply = "目录读不了：" + wb.workspace_root;
+      }
+    } else if (command.starts_with("goto ")) {
+      try {
+        const auto line = static_cast<std::size_t>(std::stoull(std::string(command.substr(5))));
+        if (wb.active < wb.buffers.size() && wb.buffers[wb.active].editor != nullptr) {
+          wb.buffers[wb.active].editor->goto_line(line);
+          wb.buffers[wb.active].editor->scroll_to_line(line);
+          reply = std::format("已跳到第 {} 行", line);
+        } else {
+          reply = "没有打开的编辑器";
+        }
+      } catch (...) {
+        reply = "用法：goto <行号>";
+      }
+    } else if (command.starts_with("find ")) {
+      const std::string needle(command.substr(5));
+      // 复用搜索面板的真实路径：填入关键词 → on_change 跑递归搜索
+      if (auto* search = root->find("search-input"); search != nullptr) {
+        (void)search->set_property("value", needle);
+        reply = std::format("已在工作区搜索「{}」，结果见搜索面板", needle);
+        select_activity(wb, 1);  // 切到搜索面板让结果可见
+      } else {
+        reply = "搜索面板不可用";
+      }
+    } else if (command == "stats") {
+      if (wb.active < wb.buffers.size() && wb.buffers[wb.active].editor != nullptr) {
+        CodeEditor* editor = wb.buffers[wb.active].editor;
+        reply = std::format("{} · {} 行 · {} 字符", wb.buffers[wb.active].label,
+                            editor->line_count(), st::utf8_length(editor->text()));
+      } else {
+        reply = "没有打开的编辑器";
+      }
     } else if (command == "save") {
       save_active(wb, *root);
       reply = "已执行保存（见输出面板）";
@@ -1531,40 +1722,96 @@ auto run_app(int argc, char** argv) -> int {
     root->mark_dirty_all();
   };
 
-  // 命令面板条目
-  std::vector<Command> commands;
-  commands.push_back(Command{"文件: 全部保存", "把所有打开的编辑器标记为已保存", [&wb, root]() {
-                               save_active(wb, *root);
-                             }});
-  commands.push_back(Command{"查看: 切换侧栏可见性", "显示/隐藏活动栏与侧栏（Ctrl+B）", []() {}});
-  commands.push_back(Command{"查看: 切换亮/暗主题", "主题令牌整体切换", [&wb]() {
-                               wb.theme_button->activate();
-                             }});
-  commands.push_back(Command{"帮助: 关于", "codeeditor · 霜天示例", [&wb, root]() {
-                               wb.status->set_content("codeeditor 0.1.0 · 霜天框架示例 · 全内置组件组装");
-                               root->mark_dirty_all();
-                             }});
+  // —— 命令面板条目 ——
+  //
+  // 迁移到**框架内置** `ui::CommandPalette`（DESIGN §8.1.1 反推的框架缺口已落地）：
+  // 此前示例自带一份私有实现（遮罩 + 卡片 + 过滤列表 + 高亮导航共 130 行），
+  // 与框架组件能力重叠——示例的职责是展示组件库，不是复制它。
+  // 受益面：大小写不敏感过滤、属性/动作面（`query`/`select`）都可被控制通道驱动。
+  std::vector<st::ui::CommandPalette::Command> commands;
+  const auto add_command = [&commands](std::string id, std::string title, std::string detail,
+                                       std::function<void()> run) {
+    st::ui::CommandPalette::Command item;
+    item.id = std::move(id);
+    item.title = std::move(title);
+    item.detail = std::move(detail);
+    item.handler = std::move(run);
+    commands.push_back(std::move(item));
+  };
+  add_command("file.save-all", "文件: 全部保存", "把所有打开的编辑器标记为已保存",
+              [&wb, root]() { save_active(wb, *root); });
+  add_command("file.close-tab", "文件: 关闭当前编辑器", "Ctrl+W",
+              [&wb, root]() { close_tab(wb, *root); });
+  add_command("view.toggle-sidebar", "查看: 切换侧栏可见性", "Ctrl+B", []() {});
+  add_command("view.toggle-theme", "查看: 切换亮/暗主题", "主题令牌整体切换",
+              [&wb]() { wb.theme_button->activate(); });
+  add_command("view.toggle-indent-guides", "查看: 切换缩进参考线",
+              "每级缩进一条竖线（对齐大段代码的层次）", [&wb, root]() {
+                if (wb.active >= wb.buffers.size() || wb.buffers[wb.active].editor == nullptr) return;
+                CodeEditor* editor = wb.buffers[wb.active].editor;
+                editor->set_indent_guides(!editor->indent_guides());
+                wb.status->set_content(editor->indent_guides() ? "缩进参考线：开" : "缩进参考线：关");
+                root->mark_dirty_all();
+              });
+  add_command("help.about", "帮助: 关于", "codeeditor · 霜天示例", [&wb, root]() {
+    wb.status->set_content("codeeditor 0.1.0 · 霜天框架示例 · 全内置组件组装");
+    root->mark_dirty_all();
+  });
   for (const auto& sample : files) {
-    Command command{"文件: 打开 " + sample.name, "语言 " + sample.language,
-                    [&wb, &sample, root]() { open_sample(wb, sample, *root); }};
-    commands.push_back(std::move(command));
+    add_command("file.open." + sample.name, "文件: 打开 " + sample.name, "语言 " + sample.language,
+                [&wb, &sample, root]() { open_sample(wb, sample, *root); });
   }
-  commands.push_back(Command{"语言: 打开 stlog 样例", "自定义语言（运行时注册）", [&wb, root]() {
-                               Sample stlog_sample{"stlog.log", "stlog", kStlogSample, "logs/stlog.log"};
-                               open_sample(wb, stlog_sample, *root);
-                             }});
+  add_command("lang.stlog", "语言: 打开 stlog 样例", "自定义语言（运行时注册）", [&wb, root]() {
+    Sample stlog_sample{"stlog.log", "stlog", kStlogSample, "logs/stlog.log"};
+    open_sample(wb, stlog_sample, *root);
+  });
 
-  const auto open_palette = [&app, &commands, root](std::string query = {}) {
-    auto* existing = root->find("command-palette");
-    if (existing != nullptr) root->remove_overlay(existing);
-    auto palette = std::make_unique<CommandPalette>(
-        std::move(query), commands, [root]() {
-          if (auto* panel = root->find("command-palette"); panel != nullptr) {
-            root->remove_overlay(panel);
-          }
-          root->mark_dirty_all();
-        });
-    root->add_overlay(std::move(palette), st::ui::UiRoot::OverlayLayout::FillViewport);
+  // 全量命令表快照：Ctrl+P 会把面板表换成文件表，Ctrl+Shift+P / 菜单再换回来
+  const std::vector<st::ui::CommandPalette::Command> all_commands = commands;
+
+  // 浮层只造一次，反复开关只翻可见性——避免每次「关→摘除→再建」
+  // （旧实现每次重建整棵子树，控制通道拿到的元素 id 会跟着漂）。
+  auto palette = std::make_unique<st::ui::CommandPalette>(commands);
+  auto* palette_ptr = palette.get();
+  palette_ptr->set_id("command-palette");
+  palette_ptr->on_command = [&wb, root](std::string_view id) {
+    if (auto* panel = root->find("command-palette"); panel != nullptr) {
+      panel->set_visible(false);
+    }
+    // 状态文案只做“兜底”与收尾：命令 handler 自己写过的更具体的信息（如“已打开 X”）
+    // 不要被盖掉——否则用户看到的是内部命令 id（对读者毫无意义）。
+    const std::string marker = "已执行命令：";
+    const bool handler_wrote = wb.status->content().rfind(marker, 0) != 0 &&
+                               !wb.status->content().empty();
+    if (!handler_wrote) {
+      // 打开文件类命令的 id 就是绝对路径：展示文件名比展示 id 有意义
+      const std::size_t slash = id.find_last_of("/\\");
+      const std::string leaf(slash == std::string_view::npos ? id : id.substr(slash + 1));
+      wb.status->set_content(
+          id.find('/') != std::string_view::npos ? "已打开 " + leaf : "已执行：" + leaf);
+    }
+    if (auto* editor = wb.active < wb.buffers.size() ? wb.buffers[wb.active].editor : nullptr;
+        editor != nullptr) {
+      root->set_focus(editor);
+    }
+    root->mark_dirty_all();
+  };
+  palette_ptr->on_close = [root]() {
+    if (auto* panel = root->find("command-palette"); panel != nullptr) panel->set_visible(false);
+    root->mark_dirty_all();
+  };
+  root->add_overlay(std::move(palette), st::ui::UiRoot::OverlayLayout::FillViewport);
+  palette_ptr->set_visible(false);
+
+  // 打开命令面板：先把命令表恢复为**全量命令**（Ctrl+P 可能刚把它换成了文件表），
+  // 再预填过滤词（如菜单「新建/打开」走 `文件: 打开 `）。
+  const auto open_palette = [palette_ptr, root, &all_commands](std::string query = {}) {
+    palette_ptr->set_commands(all_commands);
+    palette_ptr->set_visible(true);
+    palette_ptr->set_query(std::move(query));
+    // 键盘直达过滤框。不调这句的话焦点还在底层编辑器上：
+    // 面板开着、字却打进了右边的代码里（实测踩到的“面板打不了字”）。
+    palette_ptr->grab_focus();
     root->mark_dirty_all();
   };
 
@@ -1601,10 +1848,24 @@ auto run_app(int argc, char** argv) -> int {
     root->mark_dirty_all();
   };
   menu_bar_ptr->on_open_menu = [menu_bar_ptr, root](std::size_t index) {
+    // 先尽掉旧面板再挂新的——悬停切换标题 / 键盘 ←→ 都走这里；
+    // 不清的话每切一次就多叠一张面板（实测：菜单选完后浮层不消失/叠成两层）。
+    for (std::size_t i = root->overlay_count(); i > 0; --i) {
+      st::ui::Element* overlay = root->overlay_at(i - 1);
+      if (overlay != nullptr && overlay->type() == "MenuPanel") root->remove_overlay(overlay);
+    }
     if (auto panel = menu_bar_ptr->make_panel(index); panel != nullptr) {
       root->add_overlay(std::move(panel), st::ui::UiRoot::OverlayLayout::FillViewport);
-      root->mark_dirty_all();
     }
+    root->mark_dirty_all();
+  };
+  menu_bar_ptr->on_menu_close = [root]() {
+    // 面板内部已把 open_index 清干净；这里只需要把 overlay 摘掉（否则留在屏上）。
+    for (std::size_t i = root->overlay_count(); i > 0; --i) {
+      st::ui::Element* overlay = root->overlay_at(i - 1);
+      if (overlay != nullptr && overlay->type() == "MenuPanel") root->remove_overlay(overlay);
+    }
+    root->mark_dirty_all();
   };
   (void)empty_hint_ptr;
   empty_hint_ptr->set_visible(false);  // 空态提示默认隐藏（有初始文件；无标签时显示）
@@ -1629,7 +1890,8 @@ auto run_app(int argc, char** argv) -> int {
     wb.active = index;
     wb.tabs->set_active(index);
     bind_editor(wb, *root);
-    wb.title_text->set_content(wb.buffers[index].label + " - codeeditor");
+    refresh_problems(wb, *root);
+    wb.title_text->set_content(window_title(wb));
     root->set_focus(wb.buffers[index].editor);
     root->mark_dirty_all();
   };
@@ -1644,6 +1906,78 @@ auto run_app(int argc, char** argv) -> int {
                             open_palette();
                             return true;
                           });
+  // Ctrl+P 快速打开文件（VSCode 同款）：把面板的命令表临时换成**文件表**——
+  // 与 Ctrl+Shift+P 有实质区别（后者是全部命令），也顺带验证了
+  // `CommandPalette::set_commands` 的整表替换能力。
+  auto files_for_quick_open = std::vector<st::ui::CommandPalette::Command>{};
+  // 无工作区时快速打开列内置样例；有工作区时列真实文件（递归、限量）。
+  if (!wb.workspace_root.empty()) {
+    std::vector<std::pair<std::string, int>> stack{{wb.workspace_root, 0}};
+    while (!stack.empty() && files_for_quick_open.size() < 300) {
+      const auto [dir, depth] = stack.back();
+      stack.pop_back();
+      if (depth > 5) continue;
+      auto listing = st::fs::list_dir(dir);
+      if (!listing) continue;
+      for (const auto& item : *listing) {
+        const std::string full = dir + "/" + item.name;
+        if (item.is_dir) {
+          if (!item.name.empty() && item.name.front() == '.') continue;
+          stack.emplace_back(full, depth + 1);
+          continue;
+        }
+        st::ui::CommandPalette::Command entry;
+        entry.id = full;
+        entry.title = item.name;
+        // detail 参与过滤：打路径片段也能搜到（如 “ui/components”）
+        entry.detail = full.substr(wb.workspace_root.size() + 1);
+        entry.handler = [&wb, root, full]() {
+          if (auto* buffer = open_file_buffer(wb.buffers, full); buffer != nullptr) {
+            std::size_t index = 0;
+            for (std::size_t i = 0; i < wb.buffers.size(); ++i) {
+              if (&wb.buffers[i] == buffer) index = i;
+            }
+            std::vector<st::ui::Tabs::Tab> tab_bar;
+            for (const auto& open : wb.buffers) {
+              tab_bar.push_back(st::ui::Tabs::Tab{open.key, open.label, open.dirty, true});
+            }
+            wb.tabs->sync_tabs(tab_bar);
+            wb.tabs->set_active(index);
+            wb.active = index;
+            bind_editor(wb, *root);
+            refresh_problems(wb, *root);
+            wb.title_text->set_content(window_title(wb));
+            wb.status->set_content("已打开 " + buffer->path);
+            root->set_focus(buffer->editor);
+          } else {
+            wb.status->set_content("打开失败：" + full);
+          }
+          root->mark_dirty_all();
+        };
+        files_for_quick_open.push_back(std::move(entry));
+      }
+    }
+  } else {
+    for (const auto& sample : files) {
+      st::ui::CommandPalette::Command entry;
+      entry.id = sample.name;
+      entry.title = sample.name;
+      entry.detail = "语言 " + sample.language;
+      entry.handler = [&wb, &sample, root]() { open_sample(wb, sample, *root); };
+      files_for_quick_open.push_back(std::move(entry));
+    }
+  }
+
+  (void)root->register_shortcut("p", ctrl,
+                                [palette_ptr, root, &all_commands, &files_for_quick_open]() {
+                                  palette_ptr->set_commands(files_for_quick_open);
+                                  palette_ptr->set_visible(true);
+                                  palette_ptr->set_query({});
+                                  palette_ptr->grab_focus();  // 同命令面板：直接开始打字过滤
+                                  root->mark_dirty_all();
+                                  return true;
+                                });
+  (void)all_commands;
   (void)root->register_shortcut("f", ctrl, [root, &open_find_bar]() {
     open_find_bar();
     return true;

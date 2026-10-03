@@ -205,8 +205,13 @@ void List::sync_items(const std::vector<Entry>& entries) {
     } else {
       node->set_label(entry.label);  // 文案可能变了，元素不变
     }
-    // 无论是新建还是复用，都要接上激活链路（漏了就是"点了没反应"）
-    bind_item(*node, next.size());
+    // 无论是新建还是复用，都要接上激活链路（漏了就是"点了没反应"）；
+    // 数据层给了 `on_activate` 就用它（否则用 `set_on_select` 的默认行为）。
+    if (entry.on_activate) {
+      node->set_on_activate([callback = entry.on_activate](std::size_t) { callback(); });
+    } else {
+      bind_item(*node, next.size());
+    }
     next.push_back(std::move(node));
   }
   // 池里剩下的就是"数据里已消失的 key"：直接丢弃（不留在树里，否则选择器会查到幽灵元素）
@@ -296,6 +301,50 @@ auto List::semantics_flags() const -> SemanticsFlags {
   SemanticsFlags flags = Element::semantics_flags();
   flags.selected = selected_ != kNoSelection;
   return flags;
+}
+
+// —— 列表类通用视口契约（与 `Tree` 同口径）——
+
+auto List::visible_item_count() const noexcept -> std::size_t {
+  const std::size_t total = children_.size();
+  if (bounds_.is_empty()) return total == 0 ? 1 : total;
+  const auto count = static_cast<std::size_t>(std::max(1.0f, bounds_.height / ListItem::kHeight));
+  return std::max<std::size_t>(1, count);
+}
+
+auto List::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "items" || name == "count" || name == "rows") {
+    return std::to_string(children_.size());
+  }
+  // 列表由外部 ScrollView 承载，自身不滚动（同 Tree）。
+  if (name == "first_visible") return std::string("0");
+  if (name == "visible_rows" || name == "visible_items") {
+    return std::to_string(visible_item_count());
+  }
+  if (name == "scroll") return std::string("0.0");
+  if (name == "selected") {
+    return selected_ == kNoSelection ? std::string("-1") : std::to_string(selected_);
+  }
+  if (name == "selected_key") {
+    if (selected_ == kNoSelection || selected_ >= children_.size()) return std::string();
+    const Element* child = child_at(selected_);
+    return child != nullptr ? child->key() : std::string();
+  }
+  return Element::get_property(name);
+}
+
+auto List::property_names() const -> std::vector<std::string_view> {
+  auto names = Element::property_names();
+  names.push_back("items");
+  names.push_back("count");
+  names.push_back("rows");
+  names.push_back("first_visible");
+  names.push_back("visible_items");
+  names.push_back("visible_rows");
+  names.push_back("scroll");
+  names.push_back("selected");
+  names.push_back("selected_key");
+  return names;
 }
 
 }  // namespace st::ui

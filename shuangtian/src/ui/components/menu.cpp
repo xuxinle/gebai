@@ -316,7 +316,16 @@ auto MenuBar::make_panel(std::size_t index) -> std::unique_ptr<MenuPanel> {
     if (item_index >= menus_[menu_index].items.size()) return;
     if (on_action) on_action(menu_id, menus_[menu_index].items[item_index].id);
   };
-  panel->on_close = [this, menu_index]() { set_open_index(menu_index == open_index_ ? kNoIndex : open_index_); };
+  // 关闭的两条路径（激活条目 / Esc / 点面板外）都走 `on_menu_close` 通知调用方
+  // 摘掉 overlay。
+  //
+  // 这里踩过一个**真缺陷**：早期把 `panel->on_close` 直接接到 `set_open_index`，
+  // 于是“关闭”只更新了菜单栏自己的状态，调用方**永远收不到通知** →
+  // overlay 留在屏上（再加一次 `on_open_menu` 叠成两张，实测菜单选完不消失）。
+  panel->on_close = [this, menu_index]() {
+    if (open_index_ == menu_index) set_open_index(kNoIndex);
+    if (on_menu_close) on_menu_close();
+  };
   // 锚定：标题正下方、与标题左对齐。
   panel->set_anchor(title_rect(index));
   open_index_ = index;
@@ -376,9 +385,14 @@ auto MenuBar::on_event(const RenderContext& context, Event& event) -> bool {
         return kNoIndex;
       }(event.position);
       const int next = index == kNoIndex ? -1 : static_cast<int>(index);
-      if (next != hover_index_) {
-        hover_index_ = next;
-        mark_dirty();
+      const bool changed = next != hover_index_;
+      hover_index_ = next;
+      if (changed) mark_dirty();
+      // 已打开面板时，悬停到**另一个**标题就切过去（VSCode/浏览器菜单栏惯例）。
+      // 没有这一步，用户从“文件”移到“编辑”时旧面板不换——只能点开新的（然后就叠了两张）。
+      if (index != kNoIndex && open_index_ != kNoIndex && index != open_index_) {
+        set_open_index(index);
+        if (on_open_menu) on_open_menu(index);
       }
       return false;
     }
@@ -389,6 +403,12 @@ auto MenuBar::on_event(const RenderContext& context, Event& event) -> bool {
         event.handled = true;
         set_open_index(index);
         if (on_open_menu) on_open_menu(index);
+        return true;
+      }
+      // 点菜单栏空白：视为关闭请求（否则面板留在屏上没人摘）
+      if (open_index_ != kNoIndex) {
+        set_open_index(kNoIndex);
+        event.handled = true;
         return true;
       }
       return false;

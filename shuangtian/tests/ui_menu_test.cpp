@@ -255,3 +255,88 @@ ST_TEST(context_menu_item_click_activates) {
   ST_CHECK_EQ(picked, std::string("remove"));
   ST_CHECK_EQ(closed, 1);
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 面板生命周期：关闭必须通知调用方（否则 overlay 留在屏上）
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(menu_bar_panel_close_notifies_caller) {
+  // 回归用例：`make_panel` 曾把面板的 `on_close` 接到自己的 `set_open_index` 上，
+  // 于是激活条目 / Esc 只改了菜单栏内部状态，**调用方收不到通知** →
+  // 挂上去的 overlay 永远摘不掉（实测：菜单选完之后面板叠在界面上不消失）。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  int closed = 0;
+  std::string action;
+  bar_ptr->on_action = [&action](const std::string&, const std::string& item) { action = item; };
+  bar_ptr->on_menu_close = [&closed]() { ++closed; };
+
+  auto panel = bar_ptr->make_panel(0);
+  ST_CHECK(panel != nullptr);
+  MenuPanel* panel_ptr = panel.get();
+  root.add_overlay(std::move(panel), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  // 激活“保存”（第 4 项）→ 动作派发 + 关闭通知
+  const st::math::Rect row = panel_ptr->item_rect(3);
+  ST_CHECK(click_at(root, row.x + 20.0f, row.y + 16.0f));
+  ST_CHECK_EQ(action, std::string("save"));
+  ST_CHECK_EQ(closed, 1);
+  ST_CHECK_EQ(bar_ptr->open_index(), MenuBar::kNoIndex);
+}
+
+ST_TEST(menu_bar_escape_notifies_close_but_does_not_swallow) {
+  // Esc 的两条约定：① 通知调用方（走 on_close → on_menu_close）；
+  // ② **不吞键**（返回 false）——调用方可能还有自己的 Esc 语义要处理。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  int closed = 0;
+  bar_ptr->on_menu_close = [&closed]() { ++closed; };
+  auto panel = bar_ptr->make_panel(1);
+  root.add_overlay(std::move(panel), UiRoot::OverlayLayout::FillViewport);
+  root.layout(true);
+
+  (void)press(root, "Escape");
+  ST_CHECK_EQ(closed, 1);
+  ST_CHECK_EQ(bar_ptr->open_index(), MenuBar::kNoIndex);
+}
+
+ST_TEST(menu_bar_hover_switches_open_menu) {
+  // 已打开面板时悬停到另一标题：应当**发起切换**（on_open_menu 被再次调用），
+  // 而不是什么都不做——否则用户从“文件”滑到“编辑”时面板不换，
+  // 再点一下就把两张面板叠在一起（实测缺陷）。
+  UiRoot root;
+  root.set_viewport(st::math::Size{800.0f, 600.0f});
+  auto bar = std::make_unique<MenuBar>();
+  bar->set_menus(sample_menus());
+  MenuBar* bar_ptr = bar.get();
+  root.set_content(std::move(bar));
+  root.layout(true);
+
+  std::vector<std::size_t> opened;
+  bar_ptr->on_open_menu = [&opened](std::size_t index) { opened.push_back(index); };
+  (void)bar_ptr->make_panel(0);
+  ST_CHECK_EQ(bar_ptr->open_index(), static_cast<std::size_t>(0));
+
+  const st::math::Rect second = bar_ptr->title_rect(1);
+  Event move;
+  move.kind = EventKind::MouseMove;
+  move.position = st::math::Point{second.x + second.width * 0.5f, second.y + second.height * 0.5f};
+  (void)root.dispatch(move);
+
+  ST_CHECK_EQ(opened.size(), static_cast<std::size_t>(1));
+  ST_CHECK_EQ(opened[0], static_cast<std::size_t>(1));
+  ST_CHECK_EQ(bar_ptr->open_index(), static_cast<std::size_t>(1));
+}

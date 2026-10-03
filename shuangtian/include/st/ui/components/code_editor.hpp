@@ -77,6 +77,16 @@ class CodeEditor : public Element {
   [[nodiscard]] auto tab_width() const noexcept -> int { return tab_width_; }
   /// 插入空格而非制表符（默认 true）。
   void set_insert_spaces(bool value) noexcept { insert_spaces_ = value; }
+
+  /// 缩进参考线（每级缩进一条竖线；默认 true）——
+  /// 小字号下的层次感主要靠它，缩进宽度折叠成**视觉列**（Tab 按 `tab_width` 展开）后对齐。
+  void set_indent_guides(bool value);
+  [[nodiscard]] auto indent_guides() const noexcept -> bool { return indent_guides_; }
+  /// 自动配对（输入 `(`/`[`/`{`/引号自动补右半、选中文本被包裹、
+  /// 光标已在闭符前再输入同符则**跳过**、`(` 后回车展开三行；默认 true）。
+  /// 关闭后输入完全照原样落盘（面向「不要替我改」的场景）。
+  void set_auto_pairs(bool value) noexcept { auto_pairs_ = value; }
+  [[nodiscard]] auto auto_pairs() const noexcept -> bool { return auto_pairs_; }
   [[nodiscard]] auto insert_spaces() const noexcept -> bool { return insert_spaces_; }
   void set_font_size(float size);
   [[nodiscard]] auto font_size() const noexcept -> float { return font_size_; }
@@ -137,7 +147,21 @@ class CodeEditor : public Element {
 
   void set_scroll_offset(float x, float y);
   [[nodiscard]] auto scroll_offset() const noexcept -> math::Point { return {scroll_x_, scroll_y_}; }
+  /// 滚动增量（越界夹取到内容边界；正 dy 向下）。
+  void scroll_by(float dx, float dy);
+  /// 把第 `line` 行（从 1 起）滚到视野**顶部**（越界夹取，不会滚过内容末尾）。
   void scroll_to_line(std::size_t line);
+  /// 首行可见行号（**从 1 起**；空文档为 1）——控制通道据此断言「视口停在哪一行」。
+  [[nodiscard]] auto first_visible_line(const RenderContext& context) const -> std::size_t;
+  /// 当前视口能完整展示的行数（至少 1）——断言视口容量用。
+  [[nodiscard]] auto visible_line_count(const RenderContext& context) const -> std::size_t;
+  /// 末行可见行号（**从 1 起**）——与 `first_visible_line` 配对断言「内容末尾在视口内」。
+  [[nodiscard]] auto last_visible_line(const RenderContext& context) const -> std::size_t;
+  /// 光标 x（相对控件左缘的逻辑像素；即“屏幕上那根竖线在哪”）。
+  ///
+  /// 与绘制同源（同一条量宽路径）；存在的理由是可断言：
+  /// 「光标画在 x」与「按 x 反查落点」必须回环到同一个字符索引。
+  [[nodiscard]] auto caret_offset_x(const RenderContext& context) const -> float;
 
   // —— 回调 ——
 
@@ -178,6 +202,14 @@ class CodeEditor : public Element {
   };
 
   [[nodiscard]] auto current_spec() const -> std::shared_ptr<const text::LanguageSpec>;
+  /// 上下标量滚动夹取（垂直/水平共用一处；`scroll_to_line`/滚轮/动作面全部经此）。
+  void clamp_scroll(const RenderContext& context);
+  /// 智能 Home：光标不在行首非空列时先跳该列，已在则跳列 0（VSCode 同款两段式）。
+  void smart_home(bool extend);
+  /// 按词删除：`backward` = Ctrl+Backspace（删到上一词首），否则 Ctrl+Delete（删到下一词尾）。
+  void erase_word(bool backward);
+  /// 自动配对落笔：返回 true 表示本次输入已被配对逻辑接管（调用方不再原样插入）。
+  auto insert_with_pairs(std::string_view inserted) -> bool;
   void mark_highlight_dirty();
   /// 重建**纯文本行索引**（一趟扫描，便宜）。
   void rebuild_spans() const;
@@ -205,6 +237,13 @@ class CodeEditor : public Element {
   [[nodiscard]] auto index_at_column(std::size_t line, std::size_t column) const -> std::size_t;
   [[nodiscard]] auto word_bounds(std::size_t index) const -> std::pair<std::size_t, std::size_t>;
   [[nodiscard]] auto matching_bracket() const -> std::optional<std::pair<std::size_t, std::size_t>>;
+  /// 鼠标位置落在第几行（不在文本区则 -1）。
+  [[nodiscard]] auto hover_line_at(const RenderContext& context, math::Point point) const -> int;
+  /// 水平滚动条轨道矩形（空 = 无溢出/未布局）。
+  [[nodiscard]] auto h_scroll_bar_rect() const -> math::Rect;
+  /// 可达最大水平偏移。
+  [[nodiscard]] auto max_scroll_x(const RenderContext& context) const -> float;
+  void apply_h_scroll_drag(const RenderContext& context, float pointer_x);
   [[nodiscard]] auto line_indent(std::size_t line) const -> std::string;
 
   void push_undo(bool coalesce);
@@ -214,6 +253,11 @@ class CodeEditor : public Element {
   /// 处理按键：返回是否为本编辑器认识的键（false = 未识别，UiRoot 侧继续冒泡/下沉，
   /// 全局快捷键由此获得落点）。
   [[nodiscard]] auto handle_key(const RenderContext& context, const Event& event) -> bool;
+  /// 覆写基类：**只标自己**，不把 layout 脏标记冒泡到根。
+  /// 本组件的几何只由自身 `bounds_` + 字号决定，父容器无需重新 measure/arrange。
+  /// 冒泡的代价实测极大：根一变脏 → `UiRoot::layout()` → `pending_full_ = true`
+  /// → 每次编辑都整帧重绘（1280×800 下 11.5 ms），增量重绘完全失效。
+  void mark_layout_dirty() override;
   void insert_newline();
   void erase_backward();
   void erase_forward();
@@ -240,6 +284,8 @@ class CodeEditor : public Element {
   bool read_only_{false};
   bool show_line_numbers_{true};
   bool highlight_enabled_{true};
+  bool indent_guides_{true};
+  bool auto_pairs_{true};
   /// 拖选进行中（Mouse(左)Down 置位、MouseUp 清除；Move 期间扩选）。
   ///
   /// 不用 `event.button` 判定：Win32 的 `WM_MOUSEMOVE` 不携带按键状态（后端恒传 0），
@@ -252,12 +298,16 @@ class CodeEditor : public Element {
   // 贵一个数量级。分开后"取行号/算列"这类高频操作不会触发高亮重算（否则批量编辑退化为 O(n²)）。
   mutable bool spans_dirty_{true};
   mutable bool tokens_dirty_{true};
-  mutable bool geometry_dirty_{true};
-  mutable std::vector<std::pair<std::size_t, std::size_t>> line_spans_{};
+  mutable bool geometry_dirty_{true};  mutable std::vector<std::pair<std::size_t, std::size_t>> line_spans_{};
   mutable std::vector<LineTokens> line_tokens_{};
   mutable float line_height_cache_{0.0f};
   mutable float gutter_cache_{0.0f};
   mutable float max_line_width_cache_{0.0f};
+  /// 悬停行（鼠标所在行；-1 = 无）——行底纹用，不参与内容缓存。
+  int hover_line_{-1};
+  /// 水平滚动条拖拽中（左键在滑块/轨道上按下后跟 move）。
+  bool h_dragging_{false};
+  float h_drag_offset_{0.0f};
   mutable std::shared_ptr<const text::LanguageSpec> spec_cache_{};
   mutable bool spec_resolved_{false};
 

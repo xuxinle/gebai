@@ -87,6 +87,19 @@ class Tree : public Element {
   [[nodiscard]] auto semantics_value() const -> std::string override;
   [[nodiscard]] auto semantics_flags() const -> SemanticsFlags override;
 
+  // —— 属性面：**列表类组件的通用视口契约** ——
+  //
+  // `rows`（总行数）/ `first_visible`（首可见行，0 起）/ `visible_rows`（视口能容几行）/
+  // `scroll`（滚动偏移像素）。四个量回答同一类问题：**用户现在看得到哪一块**。
+  //
+  // 为什么值得统一成契约：这是 AI 驱动界面时最常做的判断（“跳过去了吗”“列表多长”
+  // “还要不要再滚”），而之前**列表类组件完全没有属性面**（`get_property` 计数为 0），
+  // 只能靠截图猜——“不可断言的效果 = 不可复用”。
+  [[nodiscard]] auto get_property(std::string_view name) const -> std::optional<std::string> override;
+  [[nodiscard]] auto property_names() const -> std::vector<std::string_view> override;
+  /// 视口能整行容纳的行数（至少 1；未布局时退化为总行数）。
+  [[nodiscard]] auto visible_row_count() const noexcept -> std::size_t;
+
   /// 目录行展开状态切换（点击目录行 / Enter / ← →）：调用方据此加载子节点并
   /// 重新 `sync_nodes`。`expanded` 是**目标状态**。
   std::function<void(std::string_view key, bool expanded)> on_toggle{};

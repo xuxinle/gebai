@@ -351,4 +351,32 @@ auto ScrollView::semantics_flags() const -> SemanticsFlags {
   return flags;
 }
 
+// —— 滚动容器的视口属性（列表类契约的权威来源）——
+
+auto ScrollView::get_property(std::string_view name) const -> std::optional<std::string> {
+  if (name == "scroll" || name == "offset") {
+    return std::format("{:.1f}", static_cast<double>(offset_));
+  }
+  if (name == "max_scroll") {
+    return std::format("{:.1f}", static_cast<double>(max_scroll()));
+  }
+  if (name == "viewport_height") {
+    return std::format("{:.1f}", static_cast<double>(bounds_.height));
+  }
+  if (name == "content_height") {
+    return std::format("{:.1f}", static_cast<double>(content_height_));
+  }
+  return Element::get_property(name);
+}
+
+auto ScrollView::property_names() const -> std::vector<std::string_view> {
+  auto names = Element::property_names();
+  names.push_back("scroll");
+  names.push_back("offset");
+  names.push_back("max_scroll");
+  names.push_back("viewport_height");
+  names.push_back("content_height");
+  return names;
+}
+
 }  // namespace st::ui

@@ -139,8 +139,14 @@ class MenuBar : public Element {
 
   /// 菜单动作回调（顶级菜单 id + 条目 id；分隔线不会激活）。
   std::function<void(const std::string&, const std::string&)> on_action{};
-  /// 标题被点击/键盘打开（调用方在此 `make_panel` + `add_overlay`）。
+  /// 标题被点击/键盘打开/悬停切换（调用方在此 `make_panel` + `add_overlay`）。
+  ///
+  /// **先关旧后开新**：实现会在调用前把 `open_index_` 改到目标标题并触发
+  /// `on_menu_close`（若有旧面板），因此调用方只需“尽掉当前面板 + 挂上新面板”。
   std::function<void(std::size_t)> on_open_menu{};
+  /// 下拉面板关闭请求（激活条目 / Esc / 点面板外 / 点菜单栏空白）：调用方应尽除面板。
+  /// 不接它 = 关闭路径彻底静默（面板留在屏上）。
+  std::function<void()> on_menu_close{};
 
   static constexpr std::size_t kNoIndex{static_cast<std::size_t>(-1)};
 

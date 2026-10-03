@@ -132,6 +132,10 @@ struct Server::Impl {
     std::size_t consumed{0};           ///< 已消费游标（避免头部 erase 的 O(n) 搬移）
     bool subscribed{false};
     bool greeted{false};               ///< 鉴权门：hello（且 token 校验通过）前拒绝一切其他方法
+    /// 本连接上刚提交了一个挂起的 `wait`：之后的请求一律**如实拒绝**。
+    /// 静默挂起是最坏的形态——调用方以为“先 wait、再改状态”在做两件事，
+    /// 实际第二件事永远不会被处理（本会话实测白等 6 秒），而错误里一个字都没提。
+    bool waiting{false};
     std::vector<std::string> event_kinds{};
     std::string peer{};
   };
@@ -143,6 +147,11 @@ struct Server::Impl {
     std::string kind{};
     std::string selector{};
     std::string text{};
+    /// `kind == "property"` 的期望：命中 `selector` 的元素上，`get_property(name) == value`。
+    std::string property_name{};
+    std::string property_value{};
+    /// 该属性是否只做“存在”判定（`value` 为空时）。
+    bool property_any{false};
     std::int64_t started_ms{0};        ///< 请求入队时刻（elapsed_ms 的唯一依据）
     std::int64_t deadline_ms{0};
     std::int64_t stable_since_ms{0};
@@ -323,6 +332,27 @@ struct Server::Impl {
       search(search, node);
       return wait.kind == "text" ? found : !found;
     }
+    if (wait.kind == "property") {
+      // 等**某个元素的某个属性变成期望值**——真实开发里绝大多数等待是这个形状：
+      // “文字变成 X”“列表有 N 项”“滚动到某行”。
+      //
+      // 旧办法只能拿 `text` 条件去碰：它把整棵语义树拼一遍（大界面上昂贵）且**只能匹配
+      // 文本子串**——属性是数字/布尔/复合值时根本表达不了。
+      //
+      // 这里只查命中元素（选择器 + 一次 `get_property`），代价与元素数无关。
+      auto selector = ui::Selector::parse(wait.selector);
+      if (!selector) return false;
+      const auto matches = root.query(*selector, 1);
+      if (matches.empty()) return false;
+      ui::Element* element = matches.front();
+      if (element == nullptr) return false;
+      const auto current = element->get_property(wait.property_name);
+      if (!current.has_value()) {
+        // 该元素没声明这个属性：如实报不满足（而不是默默当成满足）。
+        return false;
+      }
+      return wait.property_any || *current == wait.property_value;
+    }
     if (wait.kind == "stable") {
       return false;  // 由时间判定（见 poll_waits）
     }
@@ -336,6 +366,7 @@ struct Server::Impl {
       Client* owner = client_by_id(wait.client);
       if (owner == nullptr) {
         // 客户端已断开：挂起 wait 作废（旧实现按下标取 clients，断开漂移后会把响应发错人）
+        owner->waiting = false;  // 等待结束：这条连接恢复可用
         iterator = waits.erase(iterator);
         continue;
       }
@@ -353,6 +384,7 @@ struct Server::Impl {
           result["elapsed_ms"] = static_cast<std::int64_t>(now - wait.started_ms);
           result["detail"] = "画面已稳定";
           respond(*owner, wait.request_id, std::move(result));
+          owner->waiting = false;  // 等待结束：这条连接恢复可用
           iterator = waits.erase(iterator);
           continue;
         }
@@ -363,6 +395,7 @@ struct Server::Impl {
           result["elapsed_ms"] = static_cast<std::int64_t>(now - wait.started_ms);
           result["detail"] = std::format("已渲染 {} 帧", frames_seen);
           respond(*owner, wait.request_id, std::move(result));
+          owner->waiting = false;  // 等待结束：这条连接恢复可用
           iterator = waits.erase(iterator);
           continue;
         }
@@ -372,6 +405,9 @@ struct Server::Impl {
         result["elapsed_ms"] = 0;
         result["detail"] = std::format("条件满足: {}", wait.kind);
         respond(*owner, wait.request_id, std::move(result));
+        // 等待到此结束：这条连接必须**立刻恢复可用**（不清的话它以后每次调用
+        // 都会被 `Client::waiting` 那道门拒掉——实测踩到：等完之后连 `get` 都失败）。
+        owner->waiting = false;
         iterator = waits.erase(iterator);
         continue;
       }
@@ -381,6 +417,9 @@ struct Server::Impl {
         result["elapsed_ms"] = static_cast<std::int64_t>(now - wait.started_ms);
         result["detail"] = std::format("等待超时: {}", wait.kind);
         respond(*owner, wait.request_id, std::move(result));
+        // 等待到此结束：这条连接必须**立刻恢复可用**（不清的话它以后每次调用
+        // 都会被 `Client::waiting` 那道门拒掉——实测踩到：等完之后连 `get` 都失败）。
+        owner->waiting = false;
         iterator = waits.erase(iterator);
         continue;
       }
@@ -434,9 +473,31 @@ struct Server::Impl {
       client.greeted = true;
     }
     ++requests;
+    // —— 挂起 wait 与“同一连接重复使用”的两条硬约束 ——
+    //
+    // ① 等待期间**不再受理其它请求**。它们不构成“新条件”（条件由服务端每帧自查），
+    //    盲区地抱在队列里就是“静默挂起”：调用方以为“先 wait、再改状态”在做两件事，
+    //    实际第二件事永远不会被处理——本会话实测白等 6 秒，而错误里一个字都没提。
+    //    现在当场拒绝，把“要边等边改请另开连接”说清楚。
+    //
+    // ② 一个连接**同时只能有一个挂起的 wait**：多个 wait 会互相抢“谁先满足”的语义，
+    //    而“哪些请求会被拒”也随之变得难以推理。要并行等多个条件就开多条连接。
+    if (client.waiting) {
+      fail(client, id,
+           ErrorCode::Invalid,
+           method == "wait"
+               ? "本连接已有挂起的 wait（同时只允许一个）"
+               : "本连接有挂起的 wait：等待期间不再受理其它请求（它们不会构成新条件），"
+                 "要边等边改请另开一条连接");
+      return;
+    }
     bool deferred = false;
     const std::int64_t start_ns = time::now_ns();
+    client.waiting = (method == "wait");
     auto result = handle(client, id, method, params, deferred);
+    // 等待已满足/超时（都走 respond 分支）→ 标志必须**立即清掉**，否则这条连接
+    // 以后每次调用都被上面那道门拒掉（实测踩到：等完之后连 `get` 都失败）。
+    if (!deferred) client.waiting = false;
     if (deferred) {
       // 已挂起（wait）：不立即响应
     } else if (result) {
@@ -526,8 +587,7 @@ struct Server::Impl {
                                base + 4 + static_cast<std::ptrdiff_t>(length));
         client.consumed += static_cast<std::size_t>(length) + 4;
         const std::uint64_t live_id = client.id;   // dispatch 之前拷出（见上方注释）
-        dispatch_frame(client, body);
-        // 已被回收：立即跳出，且**不得再触碰 client**
+        dispatch_frame(client, body);        // 已被回收：立即跳出，且**不得再触碰 client**
         if (!client_by_id(live_id)) {
           recycled = true;
           break;
@@ -748,33 +808,15 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     return result;
   }
   if (method == "invoke") {
-    // 动作白名单：拼错动作名曾返回 handled=false 的「成功但没效果」——对自动化是假阴性反馈
-    // （AI 以为触发了实际没有）。白名单外直接报 unsupported。
-    // 注意与组件能力对齐：`dismiss`（Dialog）、`action`（Dialog 按钮序号）、`clear`（TextArea）、
-    // `add_row`/`clear_rows`/`scroll_by`（Table）等由组件 `invoke_action` 实现——
-    // 这里的名单是「协议层通用动作 + 组件常见动作」，不在名单内的会被拒。
-    static constexpr std::string_view kActions[] = {"click",     "dblclick", "focus",
-                                                    "blur",      "toggle",   "select",
-                                                    "scroll_to", "submit",   "open",
-                                                    "close",     "dismiss",  "action",
-                                                    "activate",  "add_row",  "clear_rows",
-                                                    "scroll_by", "clear",    "step_forward",
-                                                    "step_backward", "reset",  "set",
-                                                    "increment", "decrement",
-                                                    "find",      "clear_find", "find_next",
-                                                    "find_prev", "replace",     "replace_all"};
-    const std::string requested_action = json_get_string(params, "action");
-    if (!requested_action.empty()) {
-      const bool known = std::find(std::begin(kActions), std::end(kActions), requested_action) !=
-                         std::end(kActions);
-      if (!known) {
-        return unexpected(ErrorCode::Unsupported,
-                          std::format("未知动作: {}（可用: click/dblclick/focus/blur/toggle/select/"
-                                      "scroll_to/submit/open/close/dismiss/action 等；"
-                                      "组件自定义动作见各组件 invoke 面）",
-                                      requested_action));
-      }
-    }
+    // 动作合法性：**不用协议层白名单拦**，直接把动作交给元素。
+    //
+    // 旧的 `kActions` 名单把「组件自定义动作」挡在外面：`CodeEditor` 的
+    // `undo`/`redo`/`set_text`/`goto_line`/`select_all`/`copy`/`paste`/`scroll_to_line`…
+    // 都实现了 `invoke_action`，却因不在名单里被拒（`Unsupported`）——对自动化是
+    // **反向假阴性**：能力存在却报“未知动作”；而且名单要跟着每个新组件手改，天然滞后。
+    //
+    // 新口径与「动作必须能得到显式答复」的目标相容得更好：`handled` 就是权威答复，
+    // 拼错的动作名仍是 `handled=false`（不假装成功），而真正的组件动作终于可达。
     ui::Element* element = find_element(json_get_string(params, "id"));
     if (element == nullptr) {
       return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", json_get_string(params, "id")));
@@ -787,13 +829,47 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     result["handled"] = handled;
     result["action"] = action;
     result["id"] = element->derived_id();
+    // **回带变更后的属性快照**：`invoke` 之后几乎总要看一眼“变成什么了”。
+    // 不随身带就得再发一次 `get`——每个动作多一次往返（实测本地回环 0.1ms 可忽略，
+    // 但跨主机/批处理场景是实打实的一倍开销；更重要的是调用方少一步就能自查）。
+    // 只带**元素自己声明的属性面**（同一个 `property_names`，不另立白名单）。
+    Json state = Json::object();
+    for (const auto name : element->property_names()) {
+      if (auto value = element->get_property(name); value.has_value()) {
+        state[std::string(name)] = *value;
+      }
+    }
+    if (!state.empty()) result["state"] = std::move(state);
+    const ui::SemanticsFlags flags = element->semantics_flags();
+    result["visible"] = flags.visible;
+    result["enabled"] = flags.enabled;
     return result;
   }
   if (method == "input.mouse") {
     const std::string kind = json_get_string(params, "kind", "move");
     ui::Event event;
-    event.position = math::Point{static_cast<float>(json_get_double(params, "x", 0.0)),
-                                 static_cast<float>(json_get_double(params, "y", 0.0))};
+    // —— 按 **id** 点击/移动：AI 的常见意图是“点这个元素”，而不是“点在 (x,y)” ——
+    // 没有这条快捷路径时，调用方必须先 `find` 拿 `bounds`、再自己算中心点，
+    // 而 `find` 连**不可见**元素也会返回（本会话实测因此点空两次）。
+    // 这里在服务端直接解析 bounds 中心，并如实拒绝“找不到 / 尺寸为空 / 不可见”。
+    if (const std::string target = json_get_string(params, "id"); !target.empty()) {
+      ui::Element* element = find_element(target);
+      if (element == nullptr) {
+        return unexpected(ErrorCode::NotFound, std::format("未找到元素: {}", target));
+      }
+      const math::Rect box = element->bounds();
+      if (box.is_empty()) {
+        return unexpected(ErrorCode::Invalid,
+                          std::format("元素 {} 尚未布局（bounds 为空）——先让界面跑一帧", target));
+      }
+      if (!element->visible()) {
+        return unexpected(ErrorCode::Invalid, std::format("元素 {} 不可见，拒绝点击", target));
+      }
+      event.position = math::Point{box.center().x, box.center().y};
+    } else {
+      event.position = math::Point{static_cast<float>(json_get_double(params, "x", 0.0)),
+                                   static_cast<float>(json_get_double(params, "y", 0.0))};
+    }
     event.button = static_cast<int>(json_get_i64(params, "button", 1));
     event.click_count = static_cast<int>(json_get_i64(params, "click_count", 1));
     event.wheel_delta = static_cast<float>(json_get_double(params, "delta", 0.0));
@@ -1280,7 +1356,7 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
   if (method == "wait") {
     const std::string kind = json_get_string(params, "for", "element");
     if (kind != "element" && kind != "gone" && kind != "text" && kind != "text_gone" &&
-        kind != "stable" && kind != "frames") {
+        kind != "stable" && kind != "frames" && kind != "property") {
       return unexpected(ErrorCode::Unsupported, std::format("不支持的等待条件: {}", kind));
     }
     PendingWait wait;
@@ -1289,6 +1365,9 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     wait.kind = kind;
     wait.selector = json_get_string(params, "selector");
     wait.text = json_get_string(params, "text");
+    wait.property_name = json_get_string(params, "property");
+    wait.property_value = json_get_string(params, "value");
+    wait.property_any = json_get_string(params, "value").empty() && !params.contains("value");
     wait.frames_target = frames_seen + static_cast<std::uint64_t>(
                              std::max<std::int64_t>(1, json_get_i64(params, "frames", 1)));
     const std::int64_t timeout = json_get_i64(params, "timeout_ms", 5000);
@@ -1301,6 +1380,13 @@ auto Server::Impl::handle(Client& client, std::uint64_t id, std::string_view met
     }
     if (kind == "text" || kind == "text_gone") {
       if (wait.text.empty()) return unexpected(ErrorCode::Invalid, "wait 需要 text");
+    }
+    if (kind == "property") {
+      if (wait.selector.empty() || wait.property_name.empty()) {
+        return unexpected(ErrorCode::Invalid,
+                          "wait for=property 需要 selector 与 property（可选 value：给了就等相等，"
+                          "不给只等“该属性可读”）");
+      }
     }
     if (kind == "frames") {
       const std::int64_t want = json_get_i64(params, "frames", 0);
@@ -1464,6 +1550,16 @@ void Server::publish(std::string_view event, const Json& data) {
 
 auto Server::port() const noexcept -> std::uint16_t {
   return impl_ ? impl_->listener.port() : 0;
+}
+
+auto Server::wait_handles() const -> std::vector<std::intptr_t> {
+  std::vector<std::intptr_t> handles;
+  if (!impl_) return handles;
+  handles.push_back(impl_->listener.native_handle());
+  for (const auto& client : impl_->clients) {
+    if (client != nullptr) handles.push_back(client->stream.native_handle());
+  }
+  return handles;
 }
 
 auto Server::token() const -> std::string {

@@ -10,6 +10,7 @@
 #include "st/ui/components/code_editor.hpp"
 #include "st/ui/theme.hpp"
 
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -590,4 +591,440 @@ ST_TEST(code_editor_read_only_blocks_replace) {
   ST_CHECK(!fx.editor.replace_current("x"));
   ST_CHECK_EQ(fx.editor.replace_all("x"), static_cast<std::size_t>(0));
   ST_CHECK_EQ(fx.editor.text(), "data data");
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 光标位置不变式（防止量宽/绘制口径再度分家）
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 这三条用例的**共同口径**：文字是按 Monospace 画的，所以一切 x 坐标
+// （光标、选择、查找高亮、缩进线）必须也用 Monospace 量。逐一列断言既抓
+// “漏传 role”，也抓“前缀量宽与逐字累加混用”两类分家。
+
+ST_TEST(code_editor_caret_advance_uses_the_drawn_font_role) {
+  // 回归用例：`x_for_index` 曾经漏传 Monospace，掉到接口默认的 Proportional——
+  // 量宽用比例字体、绘字用等宽字体，x 误差随列号线性累积（实测 45 列 7.7px）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  const std::string row = "AVATAR = Wave.Offset * Total;";
+  fx.editor.set_text(row);
+  fx.editor.set_cursor_index(0);
+  const float origin = fx.editor.caret_offset_x(fx.context);
+  const auto advance = [&](std::size_t column) {
+    return fx.port->measure_width(row.substr(column, 1), fx.editor.font_size(),
+                                  st::text::FontRole::Monospace);
+  };
+  // 逐列推进：每前进一列，光标 x 的增量必须等于该字符的**等宽**步进
+  for (std::size_t column = 0; column < row.size(); ++column) {
+    const float before = fx.editor.caret_offset_x(fx.context);
+    fx.editor.set_cursor_index(column + 1);
+    const float after = fx.editor.caret_offset_x(fx.context);
+    ST_CHECK(std::abs((after - before) - advance(column)) < 0.5f);
+  }
+  // 行尾总宽：比例字体与等宽在这句上差 ~5px，口径一致时误差在亚像素级
+  fx.editor.set_cursor_index(row.size());
+  ST_CHECK(std::abs((fx.editor.caret_offset_x(fx.context) - origin) -
+                    fx.port->measure_width(row, fx.editor.font_size(),
+                                           st::text::FontRole::Monospace)) < 0.5f);
+}
+
+ST_TEST(code_editor_caret_is_monotonic_and_consistent_with_hit_test) {
+  // 回环不变式：把光标放在 x，再用同一个 x 反查落点，必须回到同一列。
+  // 抓的是“画的地方”与“点的地方”不同源（两类分家的合集症状）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  const std::string row = "foo(bar, baz) + qux;";
+  fx.editor.set_text(row);
+  fx.editor.set_cursor_index(0);
+  float previous = fx.editor.caret_offset_x(fx.context);
+  for (std::size_t column = 1; column <= row.size(); ++column) {
+    fx.editor.set_cursor_index(column);
+    const float caret = fx.editor.caret_offset_x(fx.context);
+    ST_CHECK(caret >= previous - 0.01f);  // 单调不减
+    previous = caret;
+    Event event;
+    event.kind = EventKind::MouseDown;
+    event.button = 1;
+    event.position = st::math::Point{fx.editor.bounds().x + caret,
+                                     fx.editor.bounds().y + 4.0f};
+    (void)fx.editor.on_event(fx.context, event);
+    // 允许 ±1 列的边界歧义（格点半个字宽归属），但不得漂到别的字符上
+    const std::size_t landed = fx.editor.cursor_index();
+    ST_CHECK(landed + 1 >= column && landed <= column + 1);
+  }
+}
+
+ST_TEST(code_editor_caret_is_independent_of_device_scale) {
+  // DPI 是用户报的线索。量宽口径与 `device_scale` 无关（字形按物理像素栅格化，
+  // 布局保持逻辑坐标）；本用例把这条不变式钉死：换 scale 后 caret x 逐字段不变。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.type("scale invariant");
+  const float base = fx.editor.caret_offset_x(fx.context);
+  Theme scaled{Theme::light()};
+  RenderContext context{scaled, fx.port.get(), 0.0};
+  fx.editor.arrange(context, st::math::Rect{0.0f, 0.0f, 800.0f, 400.0f});
+  const float again = fx.editor.caret_offset_x(context);
+  ST_CHECK(std::abs(base - again) < 0.01f);
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// 编辑体验：自动配对 / 智能 Home / 按词删除 / 滚动
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(code_editor_auto_pairs_close_brackets_and_quotes) {
+  Fixture fx;
+  fx.type_text("(");
+  ST_CHECK_EQ(fx.editor.text(), std::string("()"));
+  ST_CHECK_EQ(fx.editor.cursor_index(), 1U);  // 光标留在中间，接着敲内容
+  fx.type_text(")");                         // 已是闭符：**跳过**而不是再插一个
+  ST_CHECK_EQ(fx.editor.text(), std::string("()"));
+  ST_CHECK_EQ(fx.editor.cursor_index(), 2U);
+
+  fx.editor.set_text("");
+  fx.type_text("{");
+  ST_CHECK_EQ(fx.editor.text(), std::string("{}"));
+  fx.editor.set_text("");
+  fx.type_text("\"");
+  ST_CHECK_EQ(fx.editor.text(), std::string("\"\""));
+  // 词中的引号不配对（`isn't` 这类文本不被越修越乱）
+  fx.editor.set_text("isn");
+  fx.editor.set_cursor_index(3);
+  fx.type_text("'");
+  ST_CHECK_EQ(fx.editor.text(), std::string("isn'"));
+}
+
+ST_TEST(code_editor_auto_pairs_wrap_selection) {
+  Fixture fx;
+  fx.type("value");
+  fx.editor.select_all();
+  fx.type_text("(");
+  ST_CHECK_EQ(fx.editor.text(), std::string("(value)"));
+  // 包裹后选中内部文本仍保留（方便继续改写）
+  ST_CHECK(fx.editor.has_selection());
+  ST_CHECK_EQ(fx.editor.selected_text(), std::string("value"));
+}
+
+ST_TEST(code_editor_auto_pairs_delete_empty_pair_atomically) {
+  Fixture fx;
+  fx.type_text("(");
+  fx.press("Backspace");
+  // 一次退格把空对一起吃掉（否则要按两下，且第二下看着像“什么都没删”）
+  ST_CHECK_EQ(fx.editor.text(), std::string());
+  ST_CHECK_EQ(fx.editor.cursor_index(), 0U);
+}
+
+ST_TEST(code_editor_auto_pairs_can_be_disabled) {
+  Fixture fx;
+  fx.editor.set_auto_pairs(false);
+  fx.type_text("(");
+  ST_CHECK_EQ(fx.editor.text(), std::string("("));
+  ST_CHECK(!fx.editor.auto_pairs());
+  fx.editor.set_auto_pairs(true);
+  ST_CHECK(fx.editor.auto_pairs());
+}
+
+ST_TEST(code_editor_smart_home_toggles_between_indent_and_column_zero) {
+  // 两段式 Home：第一次落在行首非空列，第二次落到列 0。
+  Fixture fx;
+  fx.editor.set_text("    indented code");
+  fx.editor.set_cursor_index(17);  // 行尾
+  fx.press("Home");
+  ST_CHECK_EQ(fx.editor.cursor_index(), 4U);   // 缩进后（代码开始处）
+  fx.press("Home");
+  ST_CHECK_EQ(fx.editor.cursor_index(), 0U);   // 再按一次：真行首
+  fx.press("Home");
+  ST_CHECK_EQ(fx.editor.cursor_index(), 4U);   // 再按：回到代码开始处
+}
+
+ST_TEST(code_editor_ctrl_backspace_deletes_by_word) {
+  Fixture fx;
+  fx.type("alpha beta gamma");
+  fx.press("Backspace", /*ctrl=*/true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("alpha beta "));
+  fx.press("Backspace", true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("alpha "));
+  // Ctrl+Delete 在词首：吃掉整词，**尾随空白保留**（VSCode 同款——
+  // 空白属于下一段的“空缺”，不由上一个词的删除吃掉）
+  fx.editor.set_cursor_index(0);
+  fx.press("Delete", true);
+  ST_CHECK_EQ(fx.editor.text(), std::string(" "));
+}
+
+ST_TEST(code_editor_ctrl_delete_clears_whitespace_only_tail) {
+  // 光标之后只剩下空白：Ctrl+Delete 应当把剩下的空白清掉，而不是“什么也不删”
+  // （不能无反应——用户会以为按键坏了）。
+  Fixture fx;
+  fx.type("alpha   ");
+  fx.editor.set_cursor_index(5);
+  fx.press("Delete", true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("alpha"));
+  fx.editor.set_cursor_index(5);
+  fx.press("Delete", true);  // 已在文末：无动作（不越界）
+  ST_CHECK_EQ(fx.editor.text(), std::string("alpha"));
+}
+
+ST_TEST(code_editor_ctrl_delete_removes_to_next_word_end) {
+  Fixture fx;
+  fx.type("one two three");
+  fx.editor.set_cursor_index(4);  // 位于 "two" 的词首
+  fx.press("Delete", true);
+  ST_CHECK_EQ(fx.editor.text(), std::string("one  three"));
+}
+
+ST_TEST(code_editor_scroll_to_line_clamps_and_reports_viewport) {
+  Fixture fx;
+  if (!fx.has_font()) return;
+  for (int index = 0; index < 200; ++index) {
+    fx.editor.insert_text("line " + std::to_string(index) + "\n");
+  }
+  // 超出内容末尾的行号：不得把视口推到空白屏（旧实现直接相乘，滚过去什么都不显示）
+  fx.editor.scroll_to_line(100000);
+  ST_CHECK(fx.editor.last_visible_line(fx.context) + 1 >= fx.editor.line_count());
+  const std::size_t first = fx.editor.first_visible_line(fx.context);
+  const std::size_t last = first + fx.editor.visible_line_count(fx.context) - 1;
+  ST_CHECK(last + 1 >= fx.editor.line_count());  // 末尾仍在视口内
+
+  fx.editor.scroll_to_line(10);
+  ST_CHECK_EQ(fx.editor.first_visible_line(fx.context), static_cast<std::size_t>(10));
+  ST_CHECK(fx.editor.visible_line_count(fx.context) >= static_cast<std::size_t>(1));
+
+  // 负方向也不越界
+  fx.editor.scroll_by(0.0f, -100000.0f);
+  ST_CHECK_EQ(fx.editor.scroll_offset().y, 0.0f);
+  ST_CHECK_EQ(fx.editor.first_visible_line(fx.context), static_cast<std::size_t>(1));
+}
+
+ST_TEST(code_editor_scroll_and_indent_guides_are_drivable) {
+  Fixture fx;
+  // 属性面（智能体据此断言视口/行为）
+  ST_CHECK(fx.editor.set_property("indent_guides", "false"));
+  ST_CHECK(!fx.editor.indent_guides());
+  ST_CHECK(fx.editor.set_property("indent_guides", "true"));
+  ST_CHECK(fx.editor.indent_guides());
+  ST_CHECK(fx.editor.set_property("scroll", "12,34"));
+  const auto point = fx.editor.scroll_offset();
+  ST_CHECK(std::abs(point.x - 12.0f) < 0.01f);
+  ST_CHECK(std::abs(point.y - 34.0f) < 0.01f);
+  ST_CHECK(fx.editor.invoke_action("scroll_to_line", "3"));
+  ST_CHECK(!fx.editor.invoke_action("scroll_to_line", "not-a-number"));
+  fx.editor.set_text("one\ntwo\nthree\nfour");
+  ST_CHECK(fx.editor.invoke_action("reveal_line", "3"));
+  const auto [begin, end] = fx.editor.selection();
+  ST_CHECK_EQ(begin, end);  // reveal 只移光标不选中
+  ST_CHECK_EQ(fx.editor.cursor_line(), static_cast<std::size_t>(2));
+}
+
+ST_TEST(code_editor_reveal_line_uses_the_clamped_scroll_path) {
+  // `reveal_line` = goto_line + scroll_to_line；两条路径都走同一夹取。
+  // 旧实现里 `scroll_to_line` 不夹取，`reveal_line` 会把视口推到内容之外的空白。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  for (int index = 0; index < 60; ++index) fx.editor.insert_text("row " + std::to_string(index) + "\n");
+  ST_CHECK(fx.editor.invoke_action("reveal_line", "99999"));
+  ST_CHECK(fx.editor.first_visible_line(fx.context) <= fx.editor.line_count());
+  ST_CHECK(fx.editor.last_visible_line(fx.context) + 1 >= fx.editor.line_count());
+  ST_CHECK_EQ(fx.editor.cursor_line() + 1, fx.editor.line_count());
+}
+
+
+// ————————————————————————————————————————————————————————————————————————————
+// 绘制细节（像素级）：缩进参考线 / 当前行高亮 / 滚动条
+// ————————————————————————————————————————————————————————————————————————————
+//
+// 口径与 `ui_toggle_test.cpp` 同族：**渲染两帧做差**，而不是断言绝对颜色——
+// 绝对颜色断言会把主题 token 的改变误判成渲染缺陷。
+
+ST_TEST(code_editor_indent_guides_paint_pixels_where_expected) {
+  // 回归用例：缩进参考线是"看不见就等于没有"的那类功能（无子元素、无语义，
+  // 只能靠像素断言）。曾经把线的颜色取成 `colors.border`——在浅色主题下几乎与
+  // 编辑区底色同值，等于白画。本用例把"参考线确实出现在缩进列上"钉死。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  const std::string body = "    indented\n        deeper\n";
+  fx.editor.set_text(body);
+  fx.editor.arrange(fx.context, st::math::Rect{0.0f, 0.0f, 400.0f, 120.0f});
+
+  const auto render = [&](bool guides) {
+    fx.editor.set_indent_guides(guides);
+    st::raster::Canvas canvas(400, 120);
+    canvas.clear(fx.theme.colors().surface);
+    fx.editor.paint_content(fx.context, canvas);
+    return canvas;
+  };
+  const st::raster::Canvas with_guides = render(true);
+  const st::raster::Canvas without = render(false);
+  fx.editor.set_indent_guides(true);
+
+  // 逐列统计"有参考线 vs 无参考线"的差异像素：至少要从 1 级、2 级缩进列上各取到一条竖线。
+  const st::math::Rect box = fx.editor.bounds();
+  int diff_pixels = 0;
+  std::vector<int> diff_columns;
+  for (int x = static_cast<int>(box.x); x < static_cast<int>(box.right()); ++x) {
+    int column_diff = 0;
+    for (int y = static_cast<int>(box.y); y < static_cast<int>(box.bottom()); ++y) {
+      const st::math::Point p{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f};
+      if (with_guides.pixel_at_point(p) != without.pixel_at_point(p)) ++column_diff;
+    }
+    if (column_diff > 0) {
+      diff_pixels += column_diff;
+      diff_columns.push_back(x);
+    }
+  }
+  ST_CHECK(diff_pixels > 0);           // 画了（不是"设了开关却什么也没变"）
+  {
+    // 参考线必须**看得见**：与相邻背景的亮度差要有意义（不是 1/255 的不可辨差）
+    // 取 max 而不是 min：只有**有缩进的那几行**会画线，没有缩进的行本来就该是 0。
+    int best_delta = 0;
+    for (const int column : diff_columns) {
+      for (int y = static_cast<int>(box.y) + 4; y < static_cast<int>(box.bottom()) - 4; ++y) {
+        const st::math::Point on{static_cast<float>(column) + 0.5f, static_cast<float>(y) + 0.5f};
+        const st::math::Point off{static_cast<float>(column) + 3.5f, static_cast<float>(y) + 0.5f};
+        const st::math::Color a = with_guides.pixel_at_point(on);
+        const st::math::Color b = with_guides.pixel_at_point(off);
+        const int delta = std::abs(static_cast<int>(a.r) - static_cast<int>(b.r)) +
+                          std::abs(static_cast<int>(a.g) - static_cast<int>(b.g)) +
+                          std::abs(static_cast<int>(a.b) - static_cast<int>(b.b));
+        best_delta = std::max(best_delta, delta);
+      }
+    }
+    // 可见性阈值（sum|Δ| 三通道）：
+    //   · `border`（旧值）实测 ~57 —— 那就是“画了但看不见”；
+    //   · `border_strong`（现值）实测 ~150。
+    // 取 120 卡在中间：再淡回去就红。
+    ST_CHECK(best_delta >= 120);
+  }
+  ST_CHECK(diff_columns.size() >= 2);  // 两级缩进 → 至少两条竖线所在列
+  // 参考线必须落在文本区的缩进列上，而不是贴着行号槽（坐标也要对）
+  const float gutter = fx.editor.bounds().x + 30.0f;
+  for (const int column : diff_columns) {
+    ST_CHECK(static_cast<float>(column) >= gutter);
+  }
+  // 关掉开关后，与"从头就没开"逐像素一致（开关语义干净）
+  const st::raster::Canvas again = render(false);
+  std::size_t same = 0;
+  std::size_t total = 0;
+  for (int y = 0; y < 120; ++y) {
+    for (int x = 0; x < 400; ++x) {
+      ++total;
+      if (again.pixel_at(x, y) == without.pixel_at(x, y)) ++same;
+    }
+  }
+  ST_CHECK_EQ(same, total);
+}
+
+ST_TEST(code_editor_current_line_is_highlighted_in_gutter_and_row) {
+  // 当前行高亮：行底色 + 行号槽都要变（行号槽高亮是"我在哪一行"的锚点）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  fx.editor.set_text("one\ntwo\nthree\nfour\nfive\n");
+  fx.editor.set_cursor_index(0);       // 第 1 行
+  const auto render = [&]() {
+    st::raster::Canvas canvas(400, 120);
+    canvas.clear(fx.theme.colors().surface);
+    fx.editor.paint_content(fx.context, canvas);
+    return canvas;
+  };
+  const st::raster::Canvas first_row = render();
+  fx.editor.set_cursor_index(9);       // 第 3 行
+  const st::raster::Canvas third_row = render();
+
+  // 两帧应当在"光标所在行"的区域上有差异（行号槽也在内）
+  int diff = 0;
+  for (int y = 0; y < 120; ++y) {
+    for (int x = 0; x < 100; ++x) {  // 只看行号槽一带：这里最干净（没有文字抗锯齿）
+      if (first_row.pixel_at(x, y) != third_row.pixel_at(x, y)) ++diff;
+    }
+  }
+  ST_CHECK(diff > 0);
+}
+
+ST_TEST(code_editor_scrollbars_appear_only_when_content_overflows) {
+  // 画布必须覆盖元素 bounds——否则滚动条（贴在 bounds 右/下缘）落在画布外，
+  // 断言会以“没画”的假象失败（写这条测试时先踩了一次：画布 400x120 而元素 800x400）。
+  Fixture fx;
+  if (!fx.has_font()) return;
+  const st::math::Rect box = fx.editor.bounds();
+  const int width = static_cast<int>(box.right());
+  const int height = static_cast<int>(box.bottom());
+  const auto render = [&]() {
+    st::raster::Canvas canvas(width, height);
+    canvas.clear(fx.theme.colors().surface);
+    fx.editor.paint_content(fx.context, canvas);
+    return canvas;
+  };
+
+  // 判据用「滑动条带里最长的一段连续非底色」而不是「有多少非底色像素」：
+  // 当前行底色会横贯到最右侧（那是另一条正确的行为），纯计数会把两者混在一起。
+  // 滑块有最小长度（`kMinThumbLength` 语义 ≥ 24px），当前行底色只有一行高（≈16px）。
+  const int bar_x = width - 6;
+  const auto longest_run = [&](const st::raster::Canvas& canvas) {
+    int best = 0;
+    int run = 0;
+    for (int y = 0; y < height; ++y) {
+      if (canvas.pixel_at(bar_x, y) == fx.theme.colors().surface) {
+        run = 0;
+      } else {
+        ++run;
+        best = std::max(best, run);
+      }
+    }
+    return best;
+  };
+
+  fx.editor.set_text("short\n");
+  const st::raster::Canvas short_doc = render();
+  const int short_run = longest_run(short_doc);
+  ST_CHECK(short_run < 24);  // 没有滑块（顶多是一行当前行底色）
+
+  // 长内容：出现滑块；滚到中段后滑块位置必须跟着动
+  std::string long_doc;
+  for (int index = 0; index < 400; ++index) long_doc += "line\n";
+  fx.editor.set_text(long_doc);
+  const st::raster::Canvas long_top = render();
+  const int top_bar_pixels = longest_run(long_top);
+  ST_CHECK(top_bar_pixels >= 24);
+
+  fx.editor.set_scroll_offset(0.0f, 3000.0f);
+  const st::raster::Canvas long_mid = render();
+  int moved = 0;
+  for (int y = 0; y < height; ++y) {
+    if (long_top.pixel_at(bar_x, y) != long_mid.pixel_at(bar_x, y)) ++moved;
+  }
+  ST_CHECK(moved > 0);
+}
+
+ST_TEST(code_editor_horizontal_scrollbar_tracks_long_lines) {
+  Fixture fx;
+  if (!fx.has_font()) return;
+  const st::math::Rect box = fx.editor.bounds();
+  const int width = static_cast<int>(box.right());
+  const int height = static_cast<int>(box.bottom());
+  const auto render = [&]() {
+    st::raster::Canvas canvas(width, height);
+    canvas.clear(fx.theme.colors().surface);
+    fx.editor.paint_content(fx.context, canvas);
+    return canvas;
+  };
+  fx.editor.set_text(std::string(400, 'x'));   // 超长单行 → 必须出现水平条
+  const st::raster::Canvas at_left = render();
+  fx.editor.set_scroll_offset(600.0f, 0.0f);
+  const st::raster::Canvas at_right = render();
+
+  // 水平条在文本区底部：滑块位置变了
+  int bar_diff = 0;
+  for (int y = height - 12; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      if (at_left.pixel_at(x, y) != at_right.pixel_at(x, y)) ++bar_diff;
+    }
+  }
+  ST_CHECK(bar_diff > 0);
+  // 水平偏移也真的作用到了正文（文字区域跟着横移）
+  int text_diff = 0;
+  for (int y = 0; y < 40; ++y) {
+    for (int x = 0; x < width; ++x) {
+      if (at_left.pixel_at(x, y) != at_right.pixel_at(x, y)) ++text_diff;
+    }
+  }
+  ST_CHECK(text_diff > 0);
 }

@@ -231,6 +231,21 @@ class Element {
   [[nodiscard]] auto child_count() const noexcept -> std::size_t { return children_.size(); }
   [[nodiscard]] auto child_at(std::size_t index) const noexcept -> Element*;
 
+  /// 宿主（`UiRoot`）的非拥有指针，未上树时为 `nullptr`。
+  ///
+  /// 用途：子树里的组件需要主动**改变焦点**时（例如命令面板要求“打开后键盘直达
+  /// 过滤框”），而焦点簿记归根所有——`UiRoot::set_focus` 是唯一入口（它要发
+  /// FocusOut/FocusIn 并维护 Tab 环）。直接把 `UiRoot` 写进头文件会造成
+  /// `element.hpp ↔ ui_root.hpp` 循环依赖，因此这里存**类型擦除的 `void*`**，
+  /// 由 `UiRoot` 在挂载/摘除时维护；需要根的子组件在自己的 .cpp 里包含
+  /// `ui_root.hpp` 并强转（依赖方向仍然单向）。`owner_as<T>()` 把这步收成一行。
+  [[nodiscard]] auto owner() const noexcept -> void* { return owner_; }
+  void set_owner(void* owner) noexcept { owner_ = owner; }
+  template <typename T>
+  [[nodiscard]] auto owner_as() const noexcept -> T* {
+    return static_cast<T*>(owner_);
+  }
+
   // —— 样式 ——
   [[nodiscard]] auto style() noexcept -> Style& { return style_; }
   [[nodiscard]] auto style() const noexcept -> const Style& { return style_; }
@@ -428,7 +443,16 @@ class Element {
     animation_requested_ = false;
     hover_animating_ = false;
   }
-  void mark_layout_dirty();
+  /// 标记“本元素（及其祖先）需要重新 measure/arrange”。
+  ///
+  /// **虚函数**，子组件可收紧冒泡范围：默认实现沿 `parent_` 链把标记写到所在树的根
+  /// （根上的标记是 `UiRoot::tree_layout_dirty()` 的 O(1) 汇总），而 `UiRoot::layout()`
+  /// 一旦真的跑起来就会 `pending_full_ = true`——**整帧重绘**。
+  ///
+  /// 因此“几何只取决于自身”的组件（如 `CodeEditor`：行高/行宽都是惰性重算的）应当
+  /// 覆写成**不冒泡**——否则每一次编辑都会拖出一次整帧重绘（实测 1280×800 下 11.5 ms，
+  /// 增量重绘形同虚设；控制通道表现为写操作 15.9 ms vs 读操作 4.1 ms）。
+  virtual void mark_layout_dirty();
   [[nodiscard]] auto dirty() const noexcept -> bool { return dirty_; }
   [[nodiscard]] auto layout_dirty() const noexcept -> bool { return layout_dirty_; }
   void clear_dirty() noexcept;
@@ -496,6 +520,8 @@ class Element {
   mutable math::Rect damage_{};
   mutable bool damage_valid_{false};
   mutable bool damage_needs_full_{false};
+  /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
+  void* owner_{nullptr};
 };
 
 /// 便捷容器：行/列布局面板。
