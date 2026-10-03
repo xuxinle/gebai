@@ -493,3 +493,101 @@ ST_TEST(code_editor_double_click_selects_word) {
   const std::string picked = fx.editor.selected_text();
   ST_CHECK(picked == "alpha" || picked == "lpha" || picked == "alph");
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 查找与替换
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(code_editor_find_counts_and_highlights_matches) {
+  Fixture fx;
+  fx.type("foo bar foo baz foo");
+  const std::size_t count = fx.editor.set_find("foo");
+  ST_CHECK_EQ(count, static_cast<std::size_t>(3));
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(3));
+  // 大小写不敏感
+  ST_CHECK_EQ(fx.editor.set_find("FOO"), static_cast<std::size_t>(3));
+  // 大小写敏感：只剩小写
+  ST_CHECK_EQ(fx.editor.set_find("FOO", true), static_cast<std::size_t>(0));
+  // 中文
+  ST_CHECK_EQ(fx.editor.set_find("\u4e2d\u6587"), fx.editor.find_match_count());  // 无中文命中=0
+  fx.editor.clear_find();
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(0));
+}
+
+ST_TEST(code_editor_find_next_selects_and_wraps) {
+  Fixture fx;
+  fx.type("aa bb aa cc aa");
+  ST_CHECK_EQ(fx.editor.set_find("aa"), static_cast<std::size_t>(3));
+  // 光标在 0：第一个命中 [0,2)
+  ST_CHECK_EQ(fx.editor.find_next(false), static_cast<std::size_t>(0));
+  const auto [b1, e1] = fx.editor.selection();
+  ST_CHECK_EQ(b1, static_cast<std::size_t>(0));
+  ST_CHECK_EQ(e1, static_cast<std::size_t>(2));
+  ST_CHECK_EQ(fx.editor.find_next(false), static_cast<std::size_t>(1));
+  ST_CHECK_EQ(fx.editor.find_next(false), static_cast<std::size_t>(2));
+  // 环绕
+  ST_CHECK_EQ(fx.editor.find_next(false), static_cast<std::size_t>(0));
+  // 反向
+  ST_CHECK_EQ(fx.editor.find_next(true), static_cast<std::size_t>(2));
+  ST_CHECK_EQ(fx.editor.find_active_index(), static_cast<std::size_t>(2));
+}
+
+ST_TEST(code_editor_replace_current_and_advance) {
+  Fixture fx;
+  fx.type("one two one two one");
+  fx.editor.set_find("two");
+  fx.editor.find_next(false);  // 选中第一个 two
+  ST_CHECK(fx.editor.replace_current("XX"));
+  ST_CHECK_EQ(fx.editor.text(), "one XX one two one");
+  // 替换后跳到下一个命中（第二个 two）
+  ST_CHECK_EQ(fx.editor.find_active_index(), static_cast<std::size_t>(0));
+  const auto [b, e] = fx.editor.selection();
+  ST_CHECK_EQ(fx.editor.text().substr(b, e - b), "two");
+}
+
+ST_TEST(code_editor_replace_all_and_undo) {
+  Fixture fx;
+  fx.type("k1 v k1 v k1");
+  fx.editor.set_find("k1");
+  ST_CHECK_EQ(fx.editor.replace_all("KEY"), static_cast<std::size_t>(3));
+  ST_CHECK_EQ(fx.editor.text(), "KEY v KEY v KEY");
+  // 全部替换可一次撤销
+  ST_CHECK(fx.editor.undo());
+  ST_CHECK_EQ(fx.editor.text(), "k1 v k1 v k1");
+}
+
+ST_TEST(code_editor_edit_refreshes_matches) {
+  Fixture fx;
+  fx.type("abc abc");
+  fx.editor.set_find("abc");
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(2));
+  fx.type("abc ");  // 光标在文末追加 → 3 个命中
+  ST_CHECK_EQ(fx.editor.find_match_count(), static_cast<std::size_t>(3));
+}
+
+ST_TEST(code_editor_find_actions_via_invoke) {
+  Fixture fx;
+  fx.type("lorem ipsum lorem");
+  // find 动作（argument 语法 "needle" / "needle|1"）
+  ST_CHECK(fx.editor.invoke_action("find", "lorem"));
+  ST_CHECK_EQ(fx.editor.get_property("find_matches").value(), "2");
+  ST_CHECK(fx.editor.invoke_action("find_next", ""));
+  ST_CHECK_EQ(fx.editor.get_property("find_active").value(), "0");
+  ST_CHECK(fx.editor.invoke_action("replace", "X"));
+  ST_CHECK_EQ(fx.editor.text(), "X ipsum lorem");
+  ST_CHECK(fx.editor.invoke_action("replace_all", "Y"));
+  ST_CHECK_EQ(fx.editor.text(), "X ipsum Y");
+  ST_CHECK(fx.editor.invoke_action("clear_find", ""));
+  ST_CHECK_EQ(fx.editor.get_property("find_matches").value(), "0");
+}
+
+ST_TEST(code_editor_read_only_blocks_replace) {
+  Fixture fx;
+  fx.type("data data");
+  fx.editor.set_read_only(true);
+  fx.editor.set_find("data");
+  fx.editor.find_next(false);
+  ST_CHECK(!fx.editor.replace_current("x"));
+  ST_CHECK_EQ(fx.editor.replace_all("x"), static_cast<std::size_t>(0));
+  ST_CHECK_EQ(fx.editor.text(), "data data");
+}

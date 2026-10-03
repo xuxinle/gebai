@@ -74,6 +74,8 @@ struct SyntaxPalette {
   math::Color selection{};
   math::Color cursor{};
   math::Color matching_bracket{};  ///< 括号配对高亮
+  math::Color find_highlight{};    ///< 查找命中底色（全部匹配）
+  math::Color find_active{};       ///< 查找当前命中（更强）
 };
 
 /// 尺度 token（间距/圆角/字号/动效）。

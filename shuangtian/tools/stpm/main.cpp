@@ -169,7 +169,9 @@ auto command_build(const Arguments& arguments) -> int {
     return 1;
   }
   st::pkg::BuildOptions options;
-  options.profile = arguments.get("profile", "debug");
+  // 默认 dev（快速迭代档：-O1 兼顾编译速度与运行帧率）——与 README「日常开发/无头验证用」
+  // 一致；此前默认 debug（-O0），跑得慢且与示例构建产出不同档。
+  options.profile = arguments.get("profile", "dev");
   options.target = arguments.positional.empty() ? std::string{} : arguments.positional.front();
   // 交叉编译：--toolchain=<名>（命中 st.pkg 的 toolchains 段）
   options.toolchain = arguments.get("toolchain", "");
@@ -258,7 +260,12 @@ auto command_test(const Arguments& arguments) -> int {
     return 1;
   }
   st::pkg::BuildOptions options;
-  options.profile = arguments.has("san") ? "san" : "debug";
+  // 默认 **dev 档**（与 `st build` 日常档同档）：库对象与日常构建**全复用**，
+  // `st test` 只需编测试源文件本身——此前默认 debug（-O0）与 dev（-O1）指纹不同，
+  // 两套对象各编各的，改一行代码跑测试要等全量重编（实测 250 单元 59s）。
+  // UB/内存检测的主力是 `--san`（ASan+UBSan 插桩）显式档；需要 -O0 调试时
+  // `--profile debug` 仍在。
+  options.profile = arguments.has("san") ? "san" : arguments.get("profile", "dev");
   options.verbose = arguments.has("verbose");
   // 测试构建同样要能控并发：`san` 档插桩后编译期内存更高，受限容器里需要降并发
   // （实测 8 GiB cgroup 下全量 san 的 28 路并行会被 OOM killer 杀掉 cc1plus，

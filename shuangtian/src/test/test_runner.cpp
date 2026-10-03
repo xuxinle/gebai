@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <thread>
@@ -84,26 +85,39 @@ auto run_all(std::string_view filter) -> int {
     // 用例在独立线程上跑，主线程带软超时探测：超时记 FAIL 并**继续等它跑完**
     // （不 detach、不杀——静态状态不允许）。观察者只做标记，主线程最多等
     // timeout_ms + 一个宽限窗，之后按「疑似挂死」打印诊断并继续下一个用例。
-    std::atomic<bool> done{false};
+    //
+    // **唤醒方式是条件变量而非 5ms 轮询**：549 个用例 × 每例固定等一轮 5ms ≈ 2.7s
+    // 的纯轮询税（用例本身再快也要付），`wait_for` 到点即醒——快用例（<1ms）的
+    // 观测开销从恒定 5ms 降到微秒级。
+    std::mutex done_mutex;
+    std::condition_variable done_signal;
+    bool done_flag = false;
     std::atomic<bool> timed_out{false};
     std::thread worker([&]() {
       item.body();
-      done.store(true);
+      {
+        const std::scoped_lock lock(done_mutex);
+        done_flag = true;
+      }
+      done_signal.notify_all();
     });
     bool joined = false;
     while (!joined) {
-      if (worker.joinable() && done.load()) {
+      {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        done_signal.wait_for(lock, std::chrono::milliseconds(50), [&] { return done_flag; });
+      }
+      if (done_flag) {
         worker.join();
         joined = true;
         break;
       }
-      if (!done.load() && time::now_ns() - start_ns > timeout_ms * 1'000'000LL &&
+      if (time::now_ns() - start_ns > timeout_ms * 1'000'000LL &&
           !timed_out.exchange(true)) {
         std::fprintf(stdout, "  \x1b[33mTIME\x1b[0m %-44s 超过 %lld ms 仍在运行（软超时标记 FAIL，继续等待）\n",
                      item.name.c_str(), static_cast<long long>(timeout_ms));
         std::fflush(stdout);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     // 走到这说明用例已结束（join 完成）。超时但最终结束的用例按失败计。
     if (timed_out.load()) registry.record_failure("timeout", 0, "用例超过软超时上限");

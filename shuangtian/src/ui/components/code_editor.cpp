@@ -145,6 +145,11 @@ void CodeEditor::set_text(std::string text) {
   scroll_y_ = 0.0f;
   undo_stack_.clear();
   redo_stack_.clear();
+  if (find_enabled_) {
+    rebuild_find_matches();
+    find_active_set_ = false;
+    find_active_ = kNoFindMatch;
+  }
   mark_highlight_dirty();
   if (on_change) on_change(text_);
 }
@@ -389,6 +394,7 @@ void CodeEditor::push_undo(bool coalesce) {
 }
 
 void CodeEditor::notify_change() {
+  if (find_enabled_) refresh_find_after_edit();
   mark_highlight_dirty();
   clamp_cursor();
   if (on_change) on_change(text_);
@@ -825,6 +831,27 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
                        raster::Paint::solid(syntax.current_line), 0.0f);
     }
 
+    // 查找命中高亮（先于选择：选中态压在命中态上）
+    if (find_enabled_ && !find_matches_.empty()) {
+      for (std::size_t m = 0; m < find_matches_.size(); ++m) {
+        const auto& [hit_begin, hit_end] = find_matches_[m];
+        // 与该行有交集才画
+        if (hit_end <= begin || hit_begin >= end) continue;
+        const std::size_t from = std::max(hit_begin, begin);
+        const std::size_t to = std::min(hit_end, end);
+        const float x0 = origin_x + port.measure_width(
+                                         std::string_view(text_).substr(begin, from - begin),
+                                         font_size_, text::FontRole::Monospace);
+        const float x1 = origin_x + port.measure_width(
+                                         std::string_view(text_).substr(begin, to - begin),
+                                         font_size_, text::FontRole::Monospace);
+        canvas.fill_rect(math::Rect{x0, row_top, std::max(x1 - x0, 2.0f), height},
+                         raster::Paint::solid(m == find_active_ ? syntax.find_active
+                                                                : syntax.find_highlight),
+                         2.0f);
+      }
+    }
+
     // 选择底色（该行与选择区间的交集）
     if (sel_begin != sel_end) {
       const std::size_t slice_begin = std::max(sel_begin, begin);
@@ -1202,6 +1229,11 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
   if (name == "show_line_numbers") return show_line_numbers_ ? "true" : "false";
   if (name == "tab_width") return std::to_string(tab_width_);
   if (name == "font_size") return std::format("{}", font_size_);
+  if (name == "find_needle") return find_needle_;
+  if (name == "find_matches") return std::to_string(find_matches_.size());
+  if (name == "find_active") {
+    return find_active_ == kNoFindMatch ? std::string("-1") : std::to_string(find_active_);
+  }
   return std::nullopt;
 }
 
@@ -1272,7 +1304,171 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
 auto CodeEditor::property_names() const -> std::vector<std::string_view> {
   return {"text",   "language",  "cursor",   "line",       "column",     "lines",
           "selection", "selected_text", "read_only", "highlight", "show_line_numbers",
-          "tab_width", "font_size", "goto_line"};
+          "tab_width", "font_size", "goto_line", "find_needle", "find_matches", "find_active"};
+}
+
+// —— 查找与替换 ——
+
+auto CodeEditor::set_find(std::string needle, bool case_sensitive) -> std::size_t {
+  find_needle_ = std::move(needle);
+  find_case_ = case_sensitive;
+  find_enabled_ = !find_needle_.empty();
+  find_active_set_ = false;
+  find_active_ = kNoFindMatch;
+  rebuild_find_matches();
+  mark_dirty();
+  return find_matches_.size();
+}
+
+void CodeEditor::clear_find() {
+  find_needle_.clear();
+  find_matches_.clear();
+  find_enabled_ = false;
+  find_active_set_ = false;
+  find_active_ = kNoFindMatch;
+  mark_dirty();
+}
+
+void CodeEditor::rebuild_find_matches() {
+  find_matches_.clear();
+  if (find_needle_.empty()) return;
+  // 大小写不敏感：ASCII 折叠后逐位置比较（图标/编辑器场景的务实口径；
+  // Unicode case-fold 超出子集范围，CJK 不受影响）
+  const auto fold = [](std::string& text) {
+    for (char& ch : text) {
+      if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+  };
+  std::string haystack = text_;
+  std::string needle = find_needle_;
+  if (!find_case_) {
+    fold(haystack);
+    fold(needle);
+  }
+  std::size_t at = 0;
+  while (at + needle.size() <= haystack.size()) {
+    const std::size_t hit = haystack.find(needle, at);
+    if (hit == std::string::npos) break;
+    find_matches_.emplace_back(hit, hit + needle.size());
+    at = hit + needle.size();  // 不重叠
+  }
+}
+
+void CodeEditor::select_find_match(std::size_t index) {
+  if (index >= find_matches_.size()) return;
+  const auto [begin, end] = find_matches_[index];
+  cursor_ = end;
+  anchor_ = begin;
+  find_active_ = index;
+  find_active_set_ = true;
+  clamp_cursor();
+  mark_dirty();
+}
+
+auto CodeEditor::find_next(bool backward) -> std::size_t {
+  if (find_matches_.empty() || !find_enabled_) return static_cast<std::size_t>(-1);
+  if (!find_active_set_) {
+    // 从光标位置就近起步（VSCode 同族：从光标向下找第一个）
+    std::size_t best = 0;
+    for (std::size_t i = 0; i < find_matches_.size(); ++i) {
+      if (find_matches_[i].first >= cursor_) {
+        best = i;
+        break;
+      }
+      best = i;  // 一直到最后都没 >= cursor → 环绕到最后命中（backward 语义起点）
+    }
+    if (!backward) {
+      // 光标之后第一个；若全在光标前 → 环绕到 0
+      best = 0;
+      bool found = false;
+      for (std::size_t i = 0; i < find_matches_.size(); ++i) {
+        if (find_matches_[i].first >= cursor_) {
+          best = i;
+          found = true;
+          break;
+        }
+      }
+      if (!found) best = 0;
+    }
+    select_find_match(best);
+    return best;
+  }
+  std::size_t next = find_active_;
+  if (backward) {
+    next = next == 0 ? find_matches_.size() - 1 : next - 1;
+  } else {
+    next = next + 1 >= find_matches_.size() ? 0 : next + 1;
+  }
+  select_find_match(next);
+  return next;
+}
+
+auto CodeEditor::replace_current(std::string_view replacement) -> bool {
+  if (read_only_ || !find_active_set_ || find_active_ >= find_matches_.size()) {
+    return false;
+  }
+  const auto [begin, end] = find_matches_[find_active_];
+  push_undo(false);
+  text_.replace(text_.begin() + static_cast<std::ptrdiff_t>(begin),
+                text_.begin() + static_cast<std::ptrdiff_t>(end), replacement);
+  cursor_ = begin + replacement.size();
+  anchor_ = cursor_;
+  // 重算命中，然后跳到「被替换处的下一个命中」（VSCode 语义：替换 → 前进）。
+  // 注意不能先 notify_change（它也会刷新命中表）——统一走这里的语义。
+  rebuild_find_matches();
+  find_active_set_ = !find_matches_.empty();
+  if (find_active_set_) {
+    std::size_t next = kNoFindMatch;
+    for (std::size_t i = 0; i < find_matches_.size(); ++i) {
+      if (find_matches_[i].first >= cursor_) {
+        next = i;
+        break;
+      }
+    }
+    if (next == kNoFindMatch) next = 0;  // 环绕
+    select_find_match(next);
+  } else {
+    find_active_ = kNoFindMatch;
+  }
+  clamp_cursor();
+  mark_layout_dirty();
+  mark_highlight_dirty();
+  mark_dirty();
+  notify_change();
+  return true;
+}
+
+auto CodeEditor::replace_all(std::string_view replacement) -> std::size_t {
+  if (read_only_ || find_matches_.empty()) return 0;
+  push_undo(false);
+  std::string out;
+  out.reserve(text_.size());
+  std::size_t at = 0;
+  for (const auto& [begin, end] : find_matches_) {
+    out.append(text_, at, begin - at);
+    out.append(replacement);
+    at = end;
+  }
+  out.append(text_, at, text_.size() - at);
+  const std::size_t count = find_matches_.size();
+  text_ = std::move(out);
+  cursor_ = std::min(cursor_, text_.size());
+  anchor_ = cursor_;
+  refresh_find_after_edit();
+  notify_change();
+  return count;
+}
+
+void CodeEditor::refresh_find_after_edit() {
+  if (!find_enabled_) return;
+  // 记住旧选中的文本位置附近：编辑后命中表重建，当前命中就近重定位
+  rebuild_find_matches();
+  find_active_ = find_matches_.empty() ? kNoFindMatch : 0;
+  find_active_set_ = !find_matches_.empty();
+  clamp_cursor();
+  mark_layout_dirty();
+  mark_highlight_dirty();
+  mark_dirty();
 }
 
 auto CodeEditor::invoke_action(std::string_view action, std::string_view argument) -> bool {
@@ -1332,6 +1528,24 @@ auto CodeEditor::invoke_action(std::string_view action, std::string_view argumen
     set_text(std::string(argument));
     return true;
   }
+  if (action == "find") {
+    // argument: "needle" 或 "needle|case"（case: 0/1）
+    const std::size_t bar = argument.find('|');
+    if (bar == std::string_view::npos) {
+      set_find(std::string(argument), false);
+    } else {
+      set_find(std::string(argument.substr(0, bar)), argument.substr(bar + 1) == "1");
+    }
+    return true;
+  }
+  if (action == "clear_find") {
+    clear_find();
+    return true;
+  }
+  if (action == "find_next") return find_next(false) != static_cast<std::size_t>(-1);
+  if (action == "find_prev") return find_next(true) != static_cast<std::size_t>(-1);
+  if (action == "replace") return replace_current(argument);
+  if (action == "replace_all") return replace_all(argument) > 0;
   return false;
 }
 

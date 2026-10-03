@@ -72,6 +72,8 @@ auto Theme::light() -> Theme {
   theme.syntax_.line_number = hex(0xA0AEC0FFU);
   theme.syntax_.current_line = hex(0x2563EB0AU);
   theme.syntax_.selection = hex(0x2563EB33U);
+  theme.syntax_.find_highlight = hex(0xF5D76E66U);  // 黄系：全部命中（VSCode 同族）
+  theme.syntax_.find_active = hex(0xF0A72EFFU);     // 当前命中更深
   theme.syntax_.cursor = hex(0x2563EBFFU);
   theme.syntax_.matching_bracket = hex(0xF59E0B55U);
   theme.metrics_ = Metrics{};
@@ -135,6 +137,8 @@ auto Theme::dark() -> Theme {
   theme.syntax_.line_number = hex(0x54637AFFU);
   theme.syntax_.current_line = hex(0x4C8DFF1AU);
   theme.syntax_.selection = hex(0x4C8DFF44U);
+  theme.syntax_.find_highlight = hex(0x6B5B1E99U);  // 暗色下的黄系命中
+  theme.syntax_.find_active = hex(0x9A7B1FFFU);
   theme.syntax_.cursor = hex(0x9CC0FFFFU);
   theme.syntax_.matching_bracket = hex(0xFBBF2455U);
   theme.metrics_ = Metrics{};

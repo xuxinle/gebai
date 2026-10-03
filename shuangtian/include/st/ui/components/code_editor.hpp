@@ -11,10 +11,13 @@
 /// - **编辑**：插入/删除、UTF-8 光标移动（含 Ctrl+词移动）、Home/End、跨行选择（鼠标拖选 /
 ///   双击选词 / 三击选行 / Shift+方向键）、全选、复制剪切粘贴、撤销重做、Tab 缩进/
 ///   Shift+Tab 反缩进、Ctrl+/ 注释切换、回车自动缩进、括号配对高亮；
+/// - **查找替换**：`set_find` 全部命中高亮、`find_next` 环绕跳转（选中+滚入视野）、
+///   `replace_current`/`replace_all`（走撤销栈，Ctrl+Z 可回滚）；
 /// - **只读模式**：`set_read_only(true)` 即"带高亮的代码查看器"（选择与复制仍可用）；
 /// - **滚动**：垂直 + 水平（代码不折行），行号槽固定；
 /// - **控制通道**：属性面（text/language/cursor/selection/read_only/…）与动作
-///   （focus/select_all/undo/redo/goto_line/insert/copy/cut/paste/comment）齐全，
+///   （focus/select_all/undo/redo/goto_line/insert/copy/cut/paste/comment/
+///   find/find_next/replace/replace_all）齐全，
 ///   智能体可据此读写编辑器内容。
 ///
 /// 坐标系：全部为**逻辑像素**（与协议一致）；文本索引为 **UTF-8 字节偏移**且落在码点边界。
@@ -110,6 +113,25 @@ class CodeEditor : public Element {
   void indent_selection(bool reverse);
   /// 注释/取消注释选中行（用语言的第一个行注释标记；无行注释的语言返回 false）。
   auto toggle_comment() -> bool;
+
+  // —— 查找与替换（VSCode 同族语义；`case_sensitive=false` 大小写不敏感）——
+
+  /// 设置查找词：重建命中表并绘制高亮（不移动光标）。返回命中数。
+  auto set_find(std::string needle, bool case_sensitive = false) -> std::size_t;
+  /// 清除查找态（高亮/命中表/当前命中）。
+  void clear_find();
+  [[nodiscard]] auto find_needle() const -> const std::string& { return find_needle_; }
+  [[nodiscard]] auto find_match_count() const noexcept -> std::size_t { return find_matches_.size(); }
+  /// 当前命中序号（无命中为 `kNoFindMatch`）。
+  [[nodiscard]] auto find_active_index() const noexcept -> std::size_t { return find_active_; }
+  /// 跳到下一/上一命中（环绕；选中该命中并滚入视野）。返回命中序号，无命中返回 npos。
+  auto find_next(bool backward = false) -> std::size_t;
+  /// 替换**当前命中**（无当前命中时先 `find_next`）；替换后跳下一命中。返回是否发生替换。
+  auto replace_current(std::string_view replacement) -> bool;
+  /// 替换全部命中。返回替换处数。
+  auto replace_all(std::string_view replacement) -> std::size_t;
+
+  static constexpr std::size_t kNoFindMatch = static_cast<std::size_t>(-1);
 
   // —— 滚动 ——
 
@@ -242,6 +264,19 @@ class CodeEditor : public Element {
   std::vector<Snapshot> undo_stack_{};
   std::vector<Snapshot> redo_stack_{};
   std::int64_t last_edit_ms_{0};
+
+  // —— 查找态（命中表为字符区间，绘制与跳转共用；文本变化即失效重建）——
+  std::string find_needle_{};
+  bool find_case_{false};
+  bool find_active_set_{false};                 ///< find_active_ 是否有效（空命中表也有"无选中"态）
+  std::vector<std::pair<std::size_t, std::size_t>> find_matches_{};  ///< 升序 [begin,end)
+  std::size_t find_active_{kNoFindMatch};
+  bool find_enabled_{false};                    ///< set_find 后为 true（clear_find 置 false）
+
+  void rebuild_find_matches();
+  void select_find_match(std::size_t index);
+  /// 文本被编辑后保持查找态：重建命中表、当前命中夹取。
+  void refresh_find_after_edit();
 };
 
 }  // namespace st::ui
