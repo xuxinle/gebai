@@ -732,6 +732,23 @@ describe("框架与提示词装配", () => {
   expect(prompt).toContain("visual_diff")
 })
 
+  test("系统提示词含框架协同自进化机制（发现框架问题→当场修/写 BACKLOG）", async () => {
+    const mod = await import("./shuangtian")
+    const prompt = mod.def.systemPrompt
+    // 协同的“写入”端：开头读积压、收尾写积压
+    expect(prompt).toContain("shuangtian/docs/BACKLOG.md")
+    expect(prompt).toContain("发现框架问题时")
+    // 三类判定（应用写错 / 框架设计如此 / 框架缺陷）是行为分岔的根，不能省
+    expect(prompt).toContain("框架缺陷")
+    expect(prompt).toContain("用法错")
+    // 写积压的格式要求：现象 + 实测数据 + 方向
+    expect(prompt).toContain("实测数据")
+    // 改框架时的硬约束不能软：禁令扫描、设计同步、回退验证
+    expect(prompt).toContain("CONVENTIONS.md")
+    expect(prompt).toContain("DESIGN.md")
+    expect(prompt).toContain("回退")
+  })
+
   test("README/客户端导出面可用（协议常量与错误类型）", async () => {
     const client = await import("./shuangtian_client")
     expect(typeof client.resolve_target).toBe("function")

@@ -169,6 +169,15 @@ describe("self_optimize sub-agent", () => {
     expect(p).toContain("直接遵循 code 子Agent 提示词")
     expect(p).not.toContain("先取证、后推断")
   })
+
+  test("提示词把霜天框架的 BACKLOG 列为一等输入（协同：霜天侧记录 → self_optimize 取用）", () => {
+    const p = selfOptimizeDef.systemPrompt
+    // 协同闭环的“回读”端：霜天子Agent 写进去的积压，self_optimize 必须知道去读它。
+    expect(p).toContain("shuangtian/docs/BACKLOG.md")
+    expect(p).toContain("一等输入")
+    // 与歌白自身的 backlog 明确区分（两者是不同清单，不能混用）
+    expect(p).toContain("self_optimize_backlog")
+  })
 })
 
 describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强制而非仅提示词）", () => {
@@ -187,10 +196,14 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
     return c
   }
 
-  test("默认只读模式：子Agent 扩展面（内置域/二开域/客卿域）与仓库级文档放行，核心引擎源码拒绝（writeGuard 政策直测）", () => {
+  test("默认只读模式：子Agent 扩展面（内置域/二开域/客卿域/霜天）+ 仓库级文档放行，核心引擎源码拒绝（writeGuard 政策直测）", () => {
     const { root, sub } = makeRepo()
     mkdirSync(join(root, "custom", "agents", "my_agent"), { recursive: true })
     mkdirSync(join(root, "keqing", "python", "vision"), { recursive: true })
+    // 霜天框架：与子Agent 同属「自身扩展面」——用霜天写应用时发现的框架问题属自我优化，
+    // 不是“改外部项目”（外部项目走 code 子Agent）。
+    mkdirSync(join(root, "shuangtian", "src", "ui"), { recursive: true })
+    mkdirSync(join(root, "shuangtian", "docs"), { recursive: true })
     delete process.env.GEBAI_SELF_MODIFY
     const c = guardedCtx(root)
     try {
@@ -201,6 +214,9 @@ describe("self_optimize 写范围守卫（SubAgentDef.writeGuard，代码级强�
       expect(c.writeGuard!([join(root, "custom", "agents", "my_agent", "my_agent.ts")])).toBeNull()
       expect(c.writeGuard!([join(root, "custom", "core", "my_lib", "index.ts")])).toBeNull()
       expect(c.writeGuard!([join(root, "keqing", "python", "vision", "tools.py")])).toBeNull()
+      // 霜天框架：框架源码与它的待优化积压（BACKLOG）都可写
+      expect(c.writeGuard!([join(root, "shuangtian", "src", "ui", "dsl.cpp")])).toBeNull()
+      expect(c.writeGuard!([join(root, "shuangtian", "docs", "BACKLOG.md")])).toBeNull()
       const denied = c.writeGuard!([join(root, "packages", "server", "src", "core", "engine.ts")])
       expect(denied).toContain("拒绝写入")
       // 核心引擎与前端/包外代码仍只读（放宽仅覆盖子Agent 扩展面）

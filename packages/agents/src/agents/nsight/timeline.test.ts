@@ -23,7 +23,15 @@ beforeAll(async () => {
 
 afterAll(() => {
   fixture.report.close()
-  rmSync(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  // Windows 上 SQLite 释放文件句柄**晚于** `close()` 返回：紧接着 `rmSync` 会撞 EBUSY
+  // （`maxRetries` 也盖不住——重试窗口内句柄可能还没放）。
+  // 临时目录删不掉不是测试要证明的东西（系统迟早会清），因此这里**容忍失败**：
+  // 否则一个环境性的清理问题会把整个测试文件判为失败，掩盖真正的回归。
+  try {
+    rmSync(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  } catch {
+    // 留给系统临时目录清理
+  }
 })
 
 describe("computeTimelineFacts（合成事件库）", () => {

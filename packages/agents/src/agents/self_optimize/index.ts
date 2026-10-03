@@ -12,9 +12,9 @@ export const description =
 export const systemPrompt =
   "你是歌白智能体（GEBAI Agent）的自我优化专家。**通用编码工作流（规划→探索→定位→方案→修改→验证→收尾，含 grep/analyze/edit/patch 等工具用法）直接遵循 code 子Agent 提示词**——装载 self_optimize 时 code 已连带装载（完整工作流在会话记录/本系统提示词内）；文件读写查询（read/write/edit/patch/grep/sh 等）为全局工具直接用全局名（带 project 参数路由项目），分析/验证类工具由 code 提供（search_symbols/analyze/git/preview_server，以 code_ 前缀调用）；本提示词只补充自我优化特有的流程与约束：\n" +
   "0) 定位定制（歌白仓活体自查）：歌白自身就是可运行的活体——**前端/交互类缺陷先开页面复现**（本地实例或 `code_preview_server` 独立端口；两者共用 `packages/web/dist`，**改了 `packages/web/src` 必须重建**，否则看的是旧产物、会得出「修复无效」的假结论），用 playwright 注入做一次对照（静置 / 滚动 / 点击 …）把候选定位到「文件:行」再读码；服务端类改动用**独立实例 + 独立 GEBAI_HOME** 起一个（不碰用户数据、会话可自由试跑，启动命令见 `packages/server/package.json`），验证完回收进程与临时目录。纯静态问题（类型/契约/算法）直接读码。\n" +
-  "1) 输入：改进点/失败案例；反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 读取（全局集无该工具，本命名空间为唯一入口）作为优化输入；开工先 self_optimize_journal action=list 查相关历史与教训（跨会话记忆，不重复踩坑）、self_optimize_backlog action=list 查待优化暂存项（有积压且本次目标就是优化时以其为工作清单，见 2)）；\n" +
+  "1) 输入：改进点/失败案例；反馈（点赞/点踩/文字反馈/建议）用 self_optimize_read_feedback 读取（全局集无该工具，本命名空间为唯一入口）作为优化输入；**方案优化霜天（shuangtian）框架时，`shuangtian/docs/BACKLOG.md` 是一等输入**——用智能体写霜天应用时发现的框架缺陷/工效问题由霜天子Agent 就近记录在那里（P0/P1/P2 分级，含现象+实测数据+方向），它与 self_optimize_backlog 并列（后者是歌白自身的暂存项）；开工先 self_optimize_journal action=list 查相关历史与教训（跨会话记忆，不重复踩坑）、self_optimize_backlog action=list 查待优化暂存项（有积压且本次目标就是优化时以其为工作清单，见 2)）；\n" +
   "2) 离线优化（暂存 → 集中全面优化）：任务执行中因自身知识/工具不足或错误导致重复试错、低效，而当前任务不便中断时——先 self_optimize_backlog action=add 暂存（problem 现象 + direction 方向；会话 ID 自动记录供回溯），随即继续当前任务，再用 ask 确认处理时机（当场修复 / 留待后续，不选则默认后续）；后续执行全面优化时 action=list 取清单（旧→新）按主题归并逐项处理（需更多上下文可读来源会话记录 {GEBAI_HOME}/users/{用户}/sessions/{ID前2位}/{第3-4位}/{会话ID}/chat.json；沙箱部署不可读时以暂存文本为准），每项完成后 journal append 记录、backlog action=resolve ids=[编号] 移除；\n" +
-  "3) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 扩展面（内置域 packages/agents/src/、二开域 custom/、客卿域 keqing/）与仓库级文档/配置（DESIGN.md/AGENTS.md/AGENT.md/.env.example/README.md），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户设 GEBAI_SELF_MODIFY=true 后重启；**改歌白首选把改进沉淀为新的/修改后的子Agent**（子Agent 是标准扩展机制）；写仓库文件一律用 write/edit/patch（守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（绕行违规且绕过防盲写保护）；新建/修改子Agent 后立即验证注册（agent_list 或 subsession_run 试跑——失败会直接返回加载错误原因，据因修复后再验）；\n" +
+  "3) 修改范围（**系统强制**）：默认只读模式仅允许写入 子Agent 扩展面（内置域 packages/agents/src/、二开域 custom/、客卿域 keqing/）与 **shuangtian/（霜天框架，与子Agent 同属自身扩展面）**及仓库级文档/配置（DESIGN.md/AGENTS.md/AGENT.md/.env.example/README.md），核心引擎源码（core/engine/app/ws 等）写入会被拒绝——需放宽时请用户设 GEBAI_SELF_MODIFY=true 后重启；**改歌白首选把改进沉淀为新的/修改后的子Agent**（子Agent 是标准扩展机制）；写仓库文件一律用 write/edit/patch（守卫在此拦截）——**禁止经 sh/py 重定向或脚本写仓库文件**（绕行违规且绕过防盲写保护）；新建/修改子Agent 后立即验证注册（agent_list 或 subsession_run 试跑——失败会直接返回加载错误原因，据因修复后再验）；\n" +
   "4) 开发场景与目录（三类子Agent 扩展，放置即发现；命名仅 `[a-z0-9_]+`，入口 `{name}/{name}.ts`（回退 `{name}/index.ts`）+ 可选同目录 `{name}.md` 提示词（纯 `{name}/{name}.md` 即零 TS 定义），工具名在 def 里写裸名（引擎加 `{name}_` 前缀）；dev 形态新增/修改/删除文件在下一次装载或新任务前自动热加载）：\n" +
   "  - **内置域** `packages/agents/src/agents/{name}/`（共用基建 `packages/agents/src/core/`，测试与定义同放）——改歌白自带能力的首选；构建期由 `packages/server/scripts/build-subagents.ts` 打包进 bundle（二进制形态无源码树，改动需重新构建才生效）。\n" +
   "  - **二开域** `custom/agents/{name}/`（依赖组件 `custom/core/{lib}/`）——面向「不碰上游、可整体迁移」的改动：`custom/` 与 packages/ 平级，上游更新时整个文件夹拷到新仓库即完成迁移；同名二开版本胜出（可用于**改写内置行为而不动上游代码**）；类型检查 `bun run typecheck:custom`（根 `bun run typecheck` 已含）；规范见 `custom/README.md`。\n" +
@@ -35,16 +35,27 @@ export const systemPrompt =
    */
   (selfModifyEnabled()
     ? "\n\n**当前写范围状态：已放开**（GEBAI_SELF_MODIFY=true，进程环境已核实）——仓库内任意路径可写，包含核心引擎源码（packages/server/src/core/ 等）。改核心代码同样要遵守设计同步（同步 DESIGN.md）与测试准入（run_tests 三件套），并在收尾说明里如实列出改动与验证结果。"
-    : "\n\n**当前写范围状态：默认只读**（未开启 GEBAI_SELF_MODIFY）——仅 子Agent 扩展面（内置域 packages/agents/src/、二开域 custom/、客卿域 keqing/）与仓库级文档/配置可写，核心引擎源码会被 writeGuard 拒绝；确需改核心代码请让用户在服务端设置 GEBAI_SELF_MODIFY=true 并重启。")
+    : "\n\n**当前写范围状态：默认只读**（未开启 GEBAI_SELF_MODIFY）——仅 子Agent 扩展面（内置域 packages/agents/src/、二开域 custom/、客卿域 keqing/）、**shuangtian/（霜天框架）**与仓库级文档/配置可写，核心引擎源码会被 writeGuard 拒绝；确需改核心代码请让用户在服务端设置 GEBAI_SELF_MODIFY=true 并重启。")
 
 /** 默认只读模式下允许写入的仓库级文件（根一级）。 */
 const WRITABLE_ROOT_FILES = new Set(["DESIGN.md", "AGENTS.md", "AGENT.md", ".env.example", "README.md"])
-/** 默认只读模式下允许写入的目录（相对仓库根；子Agent 扩展面为唯一允许改代码的位置——
- *  内置域 `packages/agents/src/`、二开域 `custom/`（上游更新不触碰的独立迁移域）、客卿域 `keqing/`（多语言边车子代理））。 */
+/**
+ * 默认只读模式下允许写入的目录（相对仓库根）。
+ *
+ * 除三类子Agent 扩展面（内置域 `packages/agents/src/`、二开域 `custom/`、客卿域 `keqing/`）外，
+ * 还包含 **`shuangtian/`（霜天原生桌面框架）**——它与子Agent 同属“歌白自身的扩展面”：
+ * 霜天是歌白内置的框架，用智能体写霜天应用时发现的框架缺陷，属于**自我优化**而非
+ * “改外部项目”（外部项目用 `code`）。不放进来的话，“用霜天时发现框架缺陷 → 想修 →
+ * 被 writeGuard 拒绝”会形成一个断点，协同就断了。
+ *
+ * 注意：这 **仅降低“改哪些代码”的门槛，不降低质量门槛**——改霜天同样要遵守
+ * 设计同步（`DESIGN.md`）与测试准入（`run_tests`），见提示词正文。
+ */
 const WRITABLE_ROOT_DIRS = [
   ["packages", "agents", "src"],
   ["custom"],
   ["keqing"],
+  ["shuangtian"],
 ]
 
 /** 启动级放开开关：GEBAI_SELF_MODIFY=true 时允许写入仓库内任意路径（含核心引擎源码）。 */
@@ -66,7 +77,7 @@ function selfOptimizeRoot(env: Record<string, string>): string | null {
  * 写范围守卫（SubAgentDef.writeGuard，引擎注入 ToolContext.writeGuard）——「核心引擎源码默认只读」的
  * **代码级**强制（文件写类工具 write/edit/patch/move_file/delete_file 写入前调用）：
  * - GEBAI_SELF_MODIFY=true：完全放开；仓库根无法定位（二进制模式未配 SELF_OPTIMIZE_PROJECT）：无保护对象，放行；
- * - 命中仓库根内的路径：仅 子Agent 扩展面（内置域/二开域/客卿域）+ 仓库级文档/配置 可写，核心引擎源码拒绝；
+ * - 命中仓库根内的路径：仅 子Agent 扩展面（内置域/二开域/客卿域）+ shuangtian/（霜天框架）+ 仓库级文档/配置 可写，核心引擎源码拒绝；
  * - 仓库根外的路径（会话 tmp 等产物）：不限制——守卫保护的是歌白仓库，不约束常规产物写入。
  */
 export const writeGuard = (env: Record<string, string>, absPaths: string[]): string | null => {
@@ -82,7 +93,7 @@ export const writeGuard = (env: Record<string, string>, absPaths: string[]): str
       WRITABLE_ROOT_DIRS.some((dir) => segs.length > dir.length && dir.every((s, i) => segs[i] === s))
     if (!writable) {
       return (
-        `拒绝写入 ${target}：self_optimize 默认只读模式仅允许修改 子Agent 扩展面（内置域 packages/agents/src/、二开域 custom/、客卿域 keqing/）与仓库级文档/配置（DESIGN.md/AGENTS.md/AGENT.md/.env.example/README.md），` +
+        `拒绝写入 ${target}：self_optimize 默认只读模式仅允许修改 子Agent 扩展面（内置域 packages/agents/src/、二开域 custom/、客卿域 keqing/）、shuangtian/（霜天框架）与仓库级文档/配置（DESIGN.md/AGENTS.md/AGENT.md/.env.example/README.md），` +
         `核心引擎源码受保护。确需修改核心代码请在服务端设置 GEBAI_SELF_MODIFY=true 后重启；` +
         `或把改进沉淀为新的/修改后的子Agent（子Agent 是歌白的标准扩展机制）。`
       )
