@@ -40,7 +40,7 @@ import type { AgentEngine } from "../engine/engine"
 import type { SessionStore } from "../session/store"
 import type { EnvManager } from "../session/env"
 import { isSensitive } from "../session/env"
-import { ENC_PREFIX, isSealed, seal, unseal } from "../support/crypto"
+import { seal, unseal } from "../support/crypto"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
 import type { NotifyDeps, TaskMessageNotification } from "./notify"
@@ -1579,8 +1579,8 @@ export class TaskManager {
    *  （如把旧版内联的 `runs` 字段从定义文件里清掉——归一化已剥离，恒等变更默认会被跳过）。 */
   private async persist(user: string, mutate: (disk: Task[]) => Task[], opts: { forceWrite?: boolean } = {}): Promise<Task[]> {
     // 磁盘真值为**密文态**（内存态为明文）：读取时解封供变更函数使用，写入前封存回密文
-    const next = await mutateJsonList(this.userTaskFile(user), (disk) => mutate(disk.map((e) => this.unsealEnv(e))).map((e) => this.sealEnv(e)), {
-      normalize: (raw) => {
+    const next = await mutateJsonList<Task>(this.userTaskFile(user), (disk) => mutate(disk.map((e) => this.unsealEnv(e))).map((e) => this.sealEnv(e)), {
+      normalize: (raw): Task | null => {
         const entry = this.normalizeEntry(raw)
         return entry ? this.unsealEnv(entry) : null
       },

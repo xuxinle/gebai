@@ -282,6 +282,12 @@ const distDir = join(root, "dist")
 try {
   const { copyFile, mkdir, cp } = await import("node:fs/promises")
   await mkdir(distDir, { recursive: true })
+  /* 跨进程互斥：本脚本被 `build` 与 `typecheck` 两处调用，而 turbo 把它们当**独立任务并行**跑，
+   * 于是两个进程同时往同一棵 `dist/keqing` 递归复制——`cp` 在覆盖时先 unlink 目标，另一个进程
+   * 正好把该文件拿走就报 ENOENT，整棵树的复制半途而废（对应能力在 dist 形态下悄悄不可用）。
+   * 锁文件放在**被复制目录之外**（否则会被自己复制的树带走）。 */
+  const { withFileLock } = await import("../src/core/support/json-store")
+  await withFileLock(join(distDir, "keqing-copy.lock"), async () => {
   // 被裁剪的产物不复制（对应能力本就不可用；dist 形态下缺文件即走「未内嵌」降级）
   if (buildFlag("GEBAI_BUILD_BROWSER")) await copyFile(agentsSrcPath("core", "browser", "driver.mjs"), join(distDir, "driver.mjs"))
   if (buildFlag("GEBAI_BUILD_CV")) await copyFile(agentsSrcPath("core", "cv", "cv-driver.mjs"), join(distDir, "cv-driver.mjs"))
@@ -301,6 +307,7 @@ try {
     )
   }
   await cp(join(root, "..", "..", "keqing"), join(distDir, "keqing"), { recursive: true, filter: nativeFilter })
+  })
   console.log(`[build-subagents] copied browser driver + cv sidecar driver + keqing -> ${distDir}`)
 } catch (err) {
   console.warn(`[build-subagents] 驱动复制失败（dist 模式下对应能力将不可用）: ${err instanceof Error ? err.message : err}`)

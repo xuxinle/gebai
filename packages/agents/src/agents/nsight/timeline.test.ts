@@ -3,7 +3,8 @@
  * 断言流式聚合结果（并集忙碌时间、并发、空闲缝、分组统计、类型标签、NVTX 两种存储形态）
  * 与诊断结论——验证「报告规模无关」的聚合正确性，且不依赖 GPU 与 nsys 安装。
  */
-import { describe, expect, test, beforeEach } from "bun:test"
+import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import { rmSync } from "node:fs"
 import { computeTimelineFacts, timelineFacts, apiFacts, syncFacts, nvtxFacts, deviceFacts, reportScale, gapNeighbours, timelineScale } from "./nsys-analysis"
 import { _resetFactsCache } from "../../core/perf/agg"
 import { makeSyntheticReport, type Fixture } from "./test-fixture"
@@ -12,9 +13,17 @@ import { diagnoseNsys, shortSymbol } from "./findings"
 
 let fixture: Fixture
 
-beforeEach(async () => {
+/* 夹具**只读**（用例不改库）、聚合缓存以「报告」为键而非每次新建的实例，故整文件共建一次即可。
+   早先放在 beforeEach 里每个用例重建，在满载并行（bun test 多文件同跑）时会造成 hook 超时——
+   聚合是按行扫过整张事件库的，单次建库 + 13 次重扫把测试窗口挤满。 */
+beforeAll(async () => {
   _resetFactsCache()
   fixture = await makeSyntheticReport()
+})
+
+afterAll(() => {
+  fixture.report.close()
+  rmSync(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
 })
 
 describe("computeTimelineFacts（合成事件库）", () => {

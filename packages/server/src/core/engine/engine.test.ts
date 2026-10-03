@@ -4116,7 +4116,7 @@ describe("AgentEngine task integration", () => {
     const sandbox = new Sandbox({ home, enabled: false })
     const env = new EnvManager(store)
     const events = new EventBus()
-    const subAgents = new SubAgentManager({ registry, preloadSubAgents: [] })
+    const subAgents = new SubAgentManager({ registry, preloadOverride: [] })
     await subAgents.discover()
     const provider = new FakeProvider("tool")
     // sh（需审批）读任务环境变量：一步同时验证「env 注入到工具子进程」与「服务模式免审批」

@@ -1898,7 +1898,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **最小日志器**（`@gebai/sdk/node` 的 `logger.ts`）：`log.debug/info/warn/error` 按 `GEBAI_LOG_LEVEL` 过滤（`debug` < `info` 默认 < `warn` < `error`；`setLogLevel` 由组合根在 `loadConfig` 后立即调用，早于任何装配日志）；另导出 `logEnabled(level)` 供调用点短路昂贵的参数构造。**只做级别过滤**，不做结构化日志、不引依赖——保持既有排障习惯（stdout/stderr 分流、宿主重定向到 `server.log.*`）。
 - 日志走**标准输出/错误**（`log.*` 内部仍是 `console.log/warn/error`），无文件 sink、无轮转；二进制形态由宿主收集（如桌面侧车重定向到 `server.log.*`）
 - **协议性输出不走日志器**：宿主/工具据以解析的行直接 `console.*`——启动就绪行 `[gebai] listening on http://…`（桌面启动器靠它取端口）、拉起器状态文件与 `server.log.*`、`dev-reload` 子进程 stderr 转发、启动期致命错误：它们不是「可调级别」的东西，被级别静默会让外部依赖方失效
-- 日志脱敏：不记录密码、令牌、密钥明文，敏感字段以 `***` 替代（env 回显经 `maskEnv`）；会话内容默认不落日志
+- 日志脱敏：不记录密码、令牌、密钥明文，敏感字段以 `***` 替代（会话 env 回显经 `maskEnv` 掩码；任务级 env 回显为固定占位 `***`，与通知 `secret` 同惯例且可往返，见「统一任务管理 → 任务级环境变量」）；会话内容默认不落日志
 
 ### 数据生命周期
 

@@ -749,8 +749,8 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     scrollbar: { verticalScrollbarSize: 11, horizontalScrollbarSize: 11, useShadows: false },
     overviewRulerBorder: false,
     // 概览标尺（右侧窄条）：Git 修改标记的滚动条地图落在这里，无标记时它是纯背景不碍眼。
-    // standalone create() 的 renderOverviewRuler 缺省是 false（与 createDiffEditor 不同），必须显式开
-    renderOverviewRuler: true,
+    // standalone create() 缺省即渲染标尺（宽度由 lanes 决定），没有开关项——`renderOverviewRuler`
+    // 只属 diff 编辑器（IDiffEditorBaseOptions），传进来不生效。窄条宽度与 CSS 一并决定观感。
     overviewRulerLanes: 2,
     contextmenu: true,
     quickSuggestions: !opts.readOnly,
