@@ -628,7 +628,13 @@ struct CodeEditorPage : Component {
     row(c, {.gap = 8.0f, .padding = 12.0f, .height = 36.0f, .id = "titlebar"}, [&] {
       (void)icon(c, "code", 16.0f);
       (void)text(c, [this] { return window_title(); }, {.id = "title-text"});
-      (void)spacer(c, 0.0f);   // 弹性空隙把窗口控制推到右侧
+      // 弹性空隙：把窗口控制推到**右侧**。
+      //
+      // ⚠ 不能用 `spacer(c, 0.0f)`：它设的是固定 `width=0/height=0`，不参与弹性伸缩，
+      // 结果是右对齐失败（三个图标紧跟在标题文字后面，实测 x=209 而非右缘）。
+      // 原命令式版用的是「`grow=true` 的空 Panel」，这里也要一样
+      // （`column` 显式指定方向，避免依赖默认值）。
+      (void)column(c, {.grow = true, .key = "title-gap"}, [] {});
       for (const char* glyph : {"minus", "square", "close"}) (void)icon(c, glyph, 14.0f);
     });
   }

@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <format>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,6 +16,7 @@
 
 #include "st/core/string.hpp"
 #include "st/math/geometry.hpp"
+#include "st/raster/canvas.hpp"
 #include "st/test/test.hpp"
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/dsl.hpp"
@@ -284,4 +287,112 @@ ST_TEST(ui_split_view_single_pane_and_dsl_factory) {
   auto made = st::ui::dsl::make_element("SplitView");
   ST_REQUIRE(made != nullptr);
   ST_CHECK_EQ(std::string(made->type()), "SplitView");
+}
+
+// ── 分隔线必须画在**两面板之间**（不是画在面板内部）───────────────
+//
+// 回归：`paint_content` 里 `handle_rect()` 返回的已经是**绝对坐标**，
+// 旧代码又加了一次 `bounds_.x` —— 分隔线整整偏出一个 `bounds_.x`，
+// 跑到第二个面板**内部**去（实测：分栏落在 x=44 时线被画到 361.66，
+// 而两面板交界只在 314..322；在 codeeditor 里就表现为“标签下方一条
+// 穿过代码行号栏的竖线”，用户报的正是这个）。
+//
+// 这里用离屏画布扫像素——几何断言（`handle_rect`）单独看是**发现不了**
+// 这个错的（错在“把绝对量又当相对量用了一次”，几何本身没矛盾）。
+ST_TEST(ui_split_view_divider_paints_between_panes) {
+  // ⚠ 分栏必须**不落在原点**：`bounds_.x == 0` 时「多加一次 bounds_.x」与不加等价，
+  // 缺陷根本不会显形（第一版测试就是这么写的，回退修复后依然是绿的——假绿）。
+  // 真实场景里分栏几乎总在某层容器内部（codeeditor 里 x=44），这里用一个
+  // 带左内边距的宿主把它推到非零位置。
+  st::ui::UiRoot root{};
+  root.set_viewport(st::math::Size{800.0f, 400.0f});
+  auto host = std::make_unique<Panel>();
+  host->set_id("host");
+  host->style().padding = st::math::Insets{44.0f, 30.0f, 0.0f, 30.0f};  // 左 44
+  host->style().direction = st::ui::FlexDirection::Row;
+  auto split_view = std::make_unique<SplitView>(SplitView::Orientation::Horizontal);
+  split_view->set_id("split");
+  split_view->set_ratio(0.3f, false);
+  auto left = std::make_unique<Panel>();
+  left->set_id("pane-first");
+  auto right = std::make_unique<Panel>();
+  right->set_id("pane-second");
+  SplitView* split = split_view.get();
+  Element* left_ptr = left.get();
+  Element* right_ptr = right.get();
+  split_view->set_first(std::move(left));
+  split_view->set_second(std::move(right));
+  host->add_child(std::move(split_view));
+  root.set_content(std::move(host));
+  root.layout(true);
+  ST_REQUIRE(split->bounds().x > 40.0f);   // 确保确实非原点（防测试自身退化）
+  const Rect a = left_ptr->bounds();
+  const Rect b = right_ptr->bounds();
+
+  st::raster::Canvas canvas(800, 400);
+  root.paint_frame(canvas);
+
+  // 沿一条水平扫描线找**分隔线**（颜色 = 主题 `border`）。
+  //
+  // 判据必须是**精确颜色**：用「与背景不同」会把面板自己的边界像素也算进来，
+  // `inked` 横跨整行，中心值毫无意义（实测差 278.9，纯属把两边边界的中点当成了线）。
+  const Rect whole = split->bounds();
+  const float y = whole.center().y;
+  // 判据 = 「不是根背景色」。
+  //
+  // 不能要求精确等于 `theme.border`：`paint_frame` 是在根背景（`surface`）上做
+  // **alpha 混合**的，线的落盘像素是 `D6DFEB` 而非 `D3DCE9`（实测 dump 确认），
+  // 精确比色会永远扫不到（得到一个恒空的假绿）。
+  const st::math::Color background =
+      canvas.pixel_at_point(st::math::Point{a.x + a.width * 0.5f, y});
+  const auto is_line = [&](float x) {
+    const st::math::Color c = canvas.pixel_at_point(st::math::Point{x, y});
+    return c.r != background.r || c.g != background.g || c.b != background.b;
+  };
+
+  // 在**整个分栏宽度**内找线——这一点至关重要：缺陷的表现是「线偏到编辑器
+  // 面板内部」，若只扫交界附近，**线不在范围内就扫出空集**，被前置断言一挡，
+  // 测试反而“通过”（实测踩到：把修复回退后测试仍绿，是个假绿）。
+  // 步长必须**细于线宽**（常态 1px 发丝线）——用 2.0 会整条跳过。
+  //
+  // 两点面板本身是纯色（无背景、无边界），所以除线之外不会有其他非背景像素：
+  // `inked` 只可能来自分隔线。
+  std::vector<float> inked;
+  for (float x = whole.x; x <= whole.right(); x += 0.25f) {
+    if (is_line(x)) inked.push_back(x);
+  }
+  ST_REQUIRE(!inked.empty());   // 分隔线必须被画出来
+
+  // 把非背景像素**聚类**（沿 x 连续 = 同一段）。一条分隔线是一段；把
+  // `front/back` 直接当端点是不行的——画面里可能还有别的非背景像素
+  // （实测有一个在 x≈520 处，会让端点跨到那里、中心值彻底失真）。
+  struct Span {
+    float first;
+    float last;
+  };
+  std::vector<Span> spans;
+  for (float x : inked) {
+    if (!spans.empty() && x - spans.back().last <= 0.76f) {
+      spans.back().last = x;
+    } else {
+      spans.push_back(Span{x, x});
+    }
+  }
+  // 分隔线 = 落在两面板交界带内的那一段
+  const Span* divider = nullptr;
+  for (const Span& span : spans) {
+    if (span.first >= a.right() - 1.5f && span.last <= b.x + 1.5f) divider = &span;
+  }
+  ST_REQUIRE(divider != nullptr);   // 交界带里必须有一段 = 分隔线
+
+  // ① 线的中心**必须**等于 `handle_rect().center().x`（同一几何，不容偏移）。
+  // 这一条是**主断言**：偏移一个 `bounds_.x` 会立刻被它抓到。
+  const float painted_center = (divider->first + divider->last) * 0.5f;
+  ST_CHECK_NEAR(painted_center, split->handle_rect().center().x, 1.0f);
+  // ② 线必须落在两面板交界区（首面板右缘 .. 次面板左缘）
+  ST_CHECK(painted_center >= a.right() - 0.5f);
+  ST_CHECK(painted_center <= b.x + 0.5f);
+  // ③ 首面板内部与次面板内部都不得出现分隔线
+  ST_CHECK(!is_line(a.x + a.width * 0.5f));
+  ST_CHECK(!is_line(b.x + b.width * 0.5f));
 }

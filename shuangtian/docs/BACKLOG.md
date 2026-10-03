@@ -262,6 +262,16 @@
   - [x] **构造期属性组件包装**：`dsl::select`/`dsl::table`/`dsl::tree`。
   - [x] **协议 `ui.create`/`ui.remove`**：在线建删元素（与声明式共用工厂）。
   - [x] 旧版 `examples/codeeditor` 编译修复（三处 `-Werror=shadow`）。
+  - [x] **`SplitView` 分隔线偏移修正**（用户报修）：`paint_content` 里 `handle_rect()`
+    返回的已是**绝对坐标**，旧代码又加了一次 `bounds_.x`——线整整偏出一个 `bounds_.x`，
+    在 codeeditor 里表现为“标签下方一条穿过代码行号栏的竖线”（分栏 x=44 时线落到
+    361.66，而两面板交界只在 314..322）。纵向分支、`grip_rect` 同错。
+    回归测试 `ui_split_view_divider_paints_between_panes`：**宿主必须把分栏推到
+    非原点**——`bounds_.x == 0` 时“多加一次”与不加等价，缺陷不会显形
+    （第一版测试就落在原点，回退修复后仍然绿，是个假绿）。
+  - [x] **codeeditor 标题栏的窗口控制未右对齐**：重写时把原实现的
+    「`grow=true` 的空 Panel」误用成了 `dsl::spacer(c, 0.0f)`（固定 `width=0`，
+    不参与弹性伸缩）——`— □ ×` 紧跟在标题文字后面（x=209）而非最右（x=1268）。
   - [x] **启动黑框消除**（真窗口）：`create_window` 原先 `CreateWindowExW` 后立即
     `ShowWindow`，而画布分配（含渲染器实测基准 ~590ms）与 DPI 尺寸调整还没做——
     用户看到「白区 1280×800 + 黑框」约 0.6 秒。改为**建窗不显 + 首帧画完才

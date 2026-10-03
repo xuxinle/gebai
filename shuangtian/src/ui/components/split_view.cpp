@@ -240,13 +240,16 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
                                : (hovered_ ? std::max(width * 2.0f, 2.0f) : width);
   const math::Color color =
       dragging_ ? colors.primary : (hovered_ ? colors.border_strong : colors.border);
+  // ⚠ `center` 已经是**绝对坐标**（`handle_rect()` 返回的矩形已含 `bounds_.x/y`）。
+  // 这里再写 `bounds_.x + center` 就是**加了两次**：分栏落在 x=44 时，线被画到
+  // 361.66 而非 317.66——整整偏出一个 `bounds_.x`，**穿进编辑区的行号栏**，
+  // 看起来就是"标签下方多了一条莫名其妙的竖线"（用户实测报的就是这条）。
+  // 纵向分支同理（`bounds_.y + center`）。
   if (horizontal) {
-    const math::Rect line_rect{bounds_.x + center - line * 0.5f, bounds_.y, line,
-                               bounds_.height};
+    const math::Rect line_rect{center - line * 0.5f, bounds_.y, line, bounds_.height};
     canvas.fill_rect(line_rect, raster::Paint::solid(color));
   } else {
-    const math::Rect line_rect{bounds_.x, bounds_.y + center - line * 0.5f, bounds_.width,
-                               line};
+    const math::Rect line_rect{bounds_.x, center - line * 0.5f, bounds_.width, line};
     canvas.fill_rect(line_rect, raster::Paint::solid(color));
   }
   // 拖拽把手（居中的短粗条）：hover/拖拽时出现，静态时隐藏（安静的分隔线形态）。
@@ -255,13 +258,13 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
     const float thickness = 3.0f;
     const math::Color grip_color = dragging_ ? colors.primary : colors.border_strong;
     if (horizontal) {
-      const math::Rect grip_rect{bounds_.x + center - thickness * 0.5f,
+      const math::Rect grip_rect{center - thickness * 0.5f,
                                  bounds_.center().y - grip * 0.5f, thickness, grip};
       canvas.fill_rect(grip_rect, raster::Paint::solid(grip_color),
                        thickness * 0.5f);
     } else {
       const math::Rect grip_rect{bounds_.center().x - grip * 0.5f,
-                                 bounds_.y + center - thickness * 0.5f, grip, thickness};
+                                 center - thickness * 0.5f, grip, thickness};
       canvas.fill_rect(grip_rect, raster::Paint::solid(grip_color),
                        thickness * 0.5f);
     }
