@@ -29,6 +29,7 @@
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
+#include "st/ui/dsl.hpp"   // 声明式页的宿主（`dsl::mount_into`）
 #include "st/ui/icon.hpp"
 
 namespace {
@@ -434,6 +435,24 @@ auto run_app(int argc, char** argv) -> int {
     std::fprintf(stderr, "启动失败: %s\n", status.error().to_string().c_str());
     return 1;
   }
+
+  // —— 声明式页：把声明式子树挂到该页的宿主容器下 ——
+  //
+  // `dsl::mount()` 是**单根语义**（会替掉 `UiRoot::content()`），gallery 是手搭壳，
+  // 所以用 `mount_into()`：声明式树只占 `#declarative-host` 那一块。
+  // 主循环每帧调一次 `decl_host->tick()`——帧首推进（先泵异步结果，再重组有失效的作用域）。
+  // 时机在 `set_content` 之后：锚点得先上树，才拿得到稳定地址。
+  st::ui::dsl::DeclarativeHost* decl_ptr = nullptr;
+  std::unique_ptr<st::ui::dsl::DeclarativeHost> decl_host{};
+  if (Element* decl_anchor = app.root().find("declarative-host"); decl_anchor != nullptr) {
+    decl_host = st::ui::dsl::mount_into(app.root(), *decl_anchor,
+                                        gallery::make_declarative_component());
+    if (decl_host == nullptr) {
+      st::print("声明式页挂载失败（该页将只显示壳）\n");
+    } else {
+      decl_ptr = decl_host.get();
+    }
+  }
   status_right_ptr->set_content(std::format("{} · headless={} · DPI {:.1f} · 控制通道 127.0.0.1:{}",
                                             app.backend_name(), app.headless(),
                                             static_cast<double>(app.device_scale()),
@@ -448,6 +467,18 @@ auto run_app(int argc, char** argv) -> int {
   std::uint32_t frames = 1;
   while (!app.quit_requested()) {
     const std::int64_t frame_start_ms = st::time::now_ms();
+    // 声明式页：帧首推进。
+    //
+    // 先 `pump_async()` 再判脏——**顺序不能反**：异步结果到达时状态还没写
+    // （scope 不脏），只在 dirty 时才调 tick 的话 `pump_async` 永远不会被调到，
+    // 任务结果就永远停在“计算中…”（实测踩到）。先泵再判，同帧就能落地。
+    if (decl_ptr != nullptr) {
+      (void)decl_ptr->pump_async();
+      if (decl_ptr->dirty()) {
+        (void)decl_ptr->tick();
+        app.request_repaint();
+      }
+    }
     app.tick();
     ++frames;
     if (options.frames > 0 && frames >= options.frames) break;

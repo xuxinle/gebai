@@ -153,6 +153,19 @@ ScrollView::ScrollView() {
   (void)add_child(std::move(bar));
 }
 
+auto ScrollView::add_child(std::unique_ptr<Element> child) -> Element* {
+  // 内容的插入位置恒在**滚动条之前**（约定见 `content_child_count` 注释）
+  if (bar_ == nullptr) return Element::add_child(std::move(child));
+  const std::size_t position = children_.empty() ? 0 : children_.size() - 1;
+  return Element::insert_child(position, std::move(child));
+}
+
+auto ScrollView::insert_child(std::size_t index, std::unique_ptr<Element> child) -> Element* {
+  // 外部索引语义只覆盖内容子元素（滚动条不可见）——夹取到 [0, content_child_count()]
+  const std::size_t content = content_child_count();
+  return Element::insert_child(std::min(index, content), std::move(child));
+}
+
 auto ScrollView::reserved_width() const noexcept -> float {
   // 滚动条占位：条宽 + 4px 间隙（与 ScrollBar 的视觉规格保持一致）
   return show_bar_ ? ScrollBar::kBarWidth + 4.0f : 0.0f;

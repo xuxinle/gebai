@@ -1,8 +1,12 @@
 #include "pages.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <format>
+#include <memory>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,6 +29,7 @@
 #include "st/ui/components/tabs.hpp"
 #include "st/ui/components/toggle.hpp"
 #include "st/ui/components/scene_view.hpp"
+#include "st/ui/dsl.hpp"          // 声明式页（声明式 UI 的演示）
 #include "st/ui/icon.hpp"
 #include "st/ui/theme.hpp"
 
@@ -1243,7 +1248,184 @@ namespace {
   return page;
 }
 
+// ————————————————————————————————————————————————————————————
+// 声明式页：壳（手搭） + 内容区（声明式组件）
+//
+// 这一页同时承担两件事：
+// ① 演示声明式 UI（状态驱动重组 / key 对齐列表 / 条件内容 / 异步 resource）；
+// ② 验证「声明式与手搭可以待在同一个界面里」——这是它区别于独立示例的意义：
+//    声明式不是一个只能写整个应用的孤岛，而是可以填进任何容器的编排层。
+// ————————————————————————————————————————————————————————————
+
+/// 页壳：标题 + 说明卡 + 一个**空的锚点容器**（`declarative-host`）——
+/// 声明式树由应用侧 `dsl::mount_into` 挂到它下面（框架的单根语义见 pages.hpp 注释）。
+[[nodiscard]] auto build_declarative_shell(const PageHooks& hooks) -> std::unique_ptr<Panel> {
+  (void)hooks;
+  auto page = make_page("declarative", "声明式",
+                        "描述 |状态 → 界面|，重组由框架做（对标 Compose / ArkTS）");
+
+  auto intro = make_card("card-declarative-intro", "为什么值得这样写");
+  intro->add_child(make_caption(
+      "下面的内容不是手搭的：它由一段 `Component::build()` 描述，改状态 → 下一帧重组 → "
+      "真值树按 diff 更新。再也不会有「改了数据忘了同步界面」这类漂移。"));
+  page->add_child(std::move(intro));
+
+  // 声明式宿主：空容器，挂载点（应用侧填）。用 `Column` 包一层避免锚点自身被裁剪语义影响。
+  auto host = std::make_unique<Panel>(FlexDirection::Column);
+  host->set_id("declarative-host");
+  host->style().gap = 12.0f;
+  page->add_child(std::move(host));
+
+  auto note = make_card("card-declarative-note", "控制通道照常可驱动");
+  note->add_child(make_caption(
+      "声明式产出的元素与手搭的**在同一棵真值树上**——tree / find / get / set / invoke "
+      "对它们完全一致（不变式 2：一套语义、多个入口）。"));
+  page->add_child(std::move(note));
+  return page;
+}
+
+// —— 声明式内容：一个带表单 + 列表 + 异步 + 条件卡片的页 ——
+//
+// 四种典型形态各占一块（每一块都对应 docs/declarative.md 里的一项能力）：
+//   ① 表单：输入 → 状态 → 回显（状态驱动重组的最小闭环）；
+//   ② 列表：key 对齐复用（增删不悳动已有项的元素身份）；
+//   ③ 异步：`resource` 在工作线程上算，结果回主线程写状态；
+//   ④ 条件内容：开关控制一块卡片的在场与缺席（裁剪，不是隐藏）。
+
+struct TodoRow {
+  std::string key;
+  std::string text;
+  bool done{false};
+  auto operator==(const TodoRow& other) const -> bool = default;
+};
+
+struct DeclarativePage : st::ui::dsl::Component {
+  using Component::Component;
+
+  // —— 状态（≈ @State）——
+  st::ui::dsl::State<std::string> name{"霜天"};
+  st::ui::dsl::State<int> clicks{0};
+  st::ui::dsl::State<std::vector<TodoRow>> todos{std::vector<TodoRow>{
+      TodoRow{"a", "读 DESIGN.md", true},
+      TodoRow{"b", "写一个声明式页面", false},
+      TodoRow{"c", "跑通控制通道验证", false},
+  }};
+  st::ui::dsl::State<std::string> draft{""};
+  st::ui::dsl::State<bool> show_stats{true};
+  st::ui::dsl::State<std::string> query{"shuangtian"};
+
+  void build(st::ui::dsl::Composer& c) override {
+    using namespace st::ui::dsl;
+
+    // ① 表单 + 计数（状态驱动重组）
+    (void)card(c, {.gap = 10.0f, .padding = 16.0f, .key = "form"}, [&] {
+      (void)heading(c, "① 状态驱动：输入即回显", 3);
+      (void)input(c, name.value(),
+                  [this](std::string next) { name.set(std::move(next)); },
+                  {.id = "decl-name", .key = "name-input"});
+      (void)text(c, [&] { return "你好，" + name.value() + "！（改上面输入框，这行自己变）"; },
+                 {.id = "decl-greeting", .key = "greeting"});
+      (void)row(c, {.gap = 8.0f}, [&] {
+        (void)button(c, "点击 +1", [this] { clicks.set(clicks.value() + 1); },
+                     {.id = "decl-inc", .key = "inc"});
+        (void)button(c, "重置", [this] { clicks.set(0); }, {.id = "decl-reset", .key = "reset"});
+        (void)text(c, [&] { return "计数 " + std::to_string(clicks.value()); },
+                   {.id = "decl-clicks", .key = "clicks"});
+      });
+    });
+
+    // ② 列表：key 对齐复用 + 增删
+    (void)card(c, {.gap = 10.0f, .padding = 16.0f, .key = "list"}, [&] {
+      (void)heading(c, "② 列表：key 对齐复用", 3);
+      (void)row(c, {.gap = 8.0f}, [&] {
+        (void)input(c, draft.value(), [this](std::string next) { draft.set(std::move(next)); },
+                    {.id = "decl-draft", .key = "draft"});
+        (void)button(c, "添加", [this] { add_item(); }, {.id = "decl-add", .key = "add"});
+        (void)button(c, "清空", [this] { todos.set({}); }, {.id = "decl-clear", .key = "clear"});
+      });
+      const auto items = todos.value();
+      if (items.empty()) {
+        (void)text(c, [] { return std::string("（空列表）"); }, {.key = "empty"});
+      }
+      for (const auto& item : items) {
+        (void)row(c, {.gap = 8.0f, .key = item.key}, [&, key = item.key] {
+          (void)checkbox(c, item.text, item.done,
+                         [this, key](bool next) { set_done(key, next); },
+                         {.key = key + "-box"});
+          (void)button(c, "×", [this, key] { remove_item(key); }, {.key = key + "-del"});
+        });
+      }
+    });
+
+    // ③ 异步 resource：工作线程算，结果回主线程写状态
+    (void)card(c, {.gap = 10.0f, .padding = 16.0f, .key = "async"}, [&] {
+      (void)heading(c, "③ 异步资源：工作线程上算", 3);
+      (void)input(c, query.value(), [this](std::string next) { query.set(std::move(next)); },
+                  {.id = "decl-query", .key = "query"});
+      const auto& data = resource<std::string>(c, [](const std::string& input,
+                                                     AsyncCancel cancel) -> std::string {
+          // 模拟一个不快的计算（改输入会翻旧代的牌——旧任务提前退出）
+          for (int step = 0; step < 20; ++step) {
+            if (cancel.is_cancelled()) return "（已取消）";
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+          }
+          return "「" + input + "」长度 = " + std::to_string(input.size());
+        }, query.value());
+      const auto state = data.value();
+      const std::string line = state.status == AsyncStatus::Pending ? std::string("计算中…")
+                               : state.status == AsyncStatus::Error ? "出错：" + state.error
+                                                                    : state.value;
+      (void)text(c, [line] { return line; }, {.id = "decl-async", .key = "async-result"});
+    });
+
+    // ④ 条件内容：关掉 = 本帧不声明 = 框架裁剪掉（不是 hidden）
+    (void)card(c, {.gap = 10.0f, .padding = 16.0f, .key = "cond"}, [&] {
+      (void)heading(c, "④ 条件内容：不声明即移除", 3);
+      (void)checkbox(c, "显示统计卡", show_stats.value(),
+                     [this](bool next) { show_stats.set(next); }, {.key = "toggle-stats"});
+      if (show_stats.value()) {
+        (void)card(c, {.gap = 6.0f, .padding = 12.0f, .key = "stats"}, [&] {
+          (void)text(c, [&] { return "待办 " + std::to_string(todos.value().size()) + " 项"; });
+          (void)text(c, [&] { return "点击 " + std::to_string(clicks.value()) + " 次"; });
+        });
+      }
+    });
+  }
+
+ private:
+  void add_item() {
+    std::string text = draft.value();
+    if (text.empty()) return;
+    auto list = todos.value();
+    list.push_back(TodoRow{std::to_string(next_key_++), std::move(text), false});
+    todos.set(std::move(list));
+    draft.set({});
+  }
+
+  void set_done(const std::string& key, bool done) {
+    auto list = todos.value();
+    for (auto& item : list) {
+      if (item.key == key) item.done = done;
+    }
+    todos.set(std::move(list));
+  }
+
+  void remove_item(const std::string& key) {
+    auto list = todos.value();
+    std::erase_if(list, [&key](const TodoRow& item) { return item.key == key; });
+    todos.set(std::move(list));
+  }
+
+  int next_key_{100};
+};
+
 }  // namespace
+
+// 工厂在 `gallery` 命名空间（与 pages.hpp 的声明对应）——组件定义在匿名空间无妨：
+// 返回类型是基类指针，定义与使用都在本翻译单元内。
+[[nodiscard]] auto make_declarative_component() -> std::shared_ptr<st::ui::dsl::Component> {
+  return std::make_shared<DeclarativePage>();
+}
 
 auto page_specs() -> const std::array<PageSpec, kPageCount>& {
   static const std::array<PageSpec, kPageCount> specs{{
@@ -1253,6 +1435,8 @@ auto page_specs() -> const std::array<PageSpec, kPageCount>& {
        .subtitle = "控件全集"},
       {.id = "data", .icon = "database", .label = "数据",
        .subtitle = "表格 / 列表 / 键值"},
+      {.id = "declarative", .icon = "sparkles", .label = "声明式",
+       .subtitle = "状态驱动（Compose / ArkTS 风）"},
       {.id = "control", .icon = "cpu", .label = "控制通道",
        .subtitle = "远程可驱动"},
       {.id = "about", .icon = "info", .label = "关于",
@@ -1266,7 +1450,10 @@ auto build_page(std::size_t index, const PageHooks& hooks) -> std::unique_ptr<El
     case 0: return build_overview(hooks);
     case 1: return build_components(hooks);
     case 2: return build_data(hooks);
-    case 3: return build_control(hooks);
+    // 声明式页：页壳（标题/说明卡）手搭，内容区交给声明式子树（应用侧 mount_into 挂）——
+    // 两者边界清楚：页面模块管「页里有什么」，应用管「声明式宿主接在哪」。
+    case 3: return build_declarative_shell(hooks);
+    case 4: return build_control(hooks);
     default: return build_about(hooks);
   }
 }

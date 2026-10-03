@@ -53,8 +53,8 @@ shuangtian/
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
 ├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
-├── examples/gallery/    # 示例一：组件集 / 设计系统巡检
-├── examples/codeeditor/ # 示例二：代码编辑器（VSCode 式布局 / 多标签 / 语法高亮 / 自定义语言）
+├── examples/gallery/    # 示例一：组件集 / 设计系统巡检（含「声明式」页）
+├── examples/codeeditor/ # 示例二：代码编辑器（声明式组装的 VSCode 式布局）
 ├── tests/               # 自研测试框架（ST_TEST/ST_CHECK…），st test 运行
 └── tools/               # stpm 源码 + 联调脚本（Python）
 ```
@@ -179,12 +179,24 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 
 ## 示例
 
-### `gallery` — 组件集 / 设计系统巡检
-导航栏、统计卡、按钮矩阵（5 变体 × 3 尺寸）、图标墙（50+ 自绘矢量图标）、表单、列表、进度条、主题切换、DPI 切换、截图按钮；覆盖组件库与设计令牌的一致性检查（`png` 中 DPI 2x 截图）。
+**两个示例、两个职责面**（示例只留「一看就懂 + 能当靶场」的那两个；
+其余能力由单元测试钉住，不另起示例重复验证）：
 
-### `codeeditor` — 代码编辑器（VSCode 式布局 + 多标签 + 语法高亮）
+### `gallery` — 组件集 / 设计系统巡检（能力面）
+导航栏、统计卡、按钮矩阵（5 变体 × 3 尺寸）、图标墙、表单、列表、进度条、主题切换、DPI 切换、截图按钮；覆盖组件库与设计令牌的一致性检查（DPI 2x 截图）。
+
+**六页**：概览 / 组件 / 数据 / **声明式** / 控制通道 / 关于。其中「声明式」页演示
+`st::ui::dsl` 的四种典型形态（**页壳手搭 + 内容区声明式子树**，`dsl::mount_into`）：
+① 状态驱动表单（改输入 → 另一处文本自己变）；② key 对齐列表（增删不悳动已有项身份）；
+③ 异步 `resource`（工作线程算，结果回主线程写状态）；④ 条件内容（关掉即从树中裁剪，不是 hidden）。
+
+### `codeeditor` — 代码编辑器（应用面；**整个界面由声明式描述**）
 
 按 VSCode 的信息架构组装：标题栏（含**脏点**）/ 菜单栏 / 活动栏 + 侧栏（资源管理器·搜索·源代码管理·运行·扩展）/ 标签页编辑区（修改点、可关闭）/ 底部面板（问题·输出·终端）/ 状态栏（分支、错误警告计数、光标位置、选区计数、语言、主题）。
+
+这份界面是一份 `Component::build()` 描述出来的（对标 Compose / ArkTS）：改状态 → 下一帧重组 →
+真值树按 diff 更新，「改完要点哪里」的手工同步全部消失（对比同功能的命令式写法：同目录
+曾经的 `codeeditor-dsl` 分身已在示例整合中并入本文档——两份合计 2758 行 → 1605 行）。
 
 **内容都是真的，不是占位数据**：
 
@@ -226,7 +238,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | **Windows 宿主 + g++（MinGW-w64）默认编译器** | ✅ g++ 优先（版本护栏 ≥ 13）、MSVC 可回退（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；Windows 目标默认静态 libgcc/libstdc++（产物不要求 mingw dll）；实测 g++ 自举 27s / 全量构建 ~31s / 测试全绿 |
 | **GPU 渲染（D3D11：硬件 → WARP）** | ✅ **M1–M6 全部落地**：设备层 / 着色器原语（文字与渐变与软件 **Δ0**）/ 投影（**Δ≤1**）/ 路径填充描边 / **DXGI swapchain 呈现** / `auto` 按实测选优。实测总帧 24.66→**1.53 ms**、送显 6.55→**0.03 ms**（详见 `DESIGN.md` §8.3） |
 | 动画与过渡 | ✅ 悬浮事件与特效（背景/描边/上浮/发光，`HoverEffect` 声明式）、帧驱动过渡（`UiRoot` 时间轴 + 续帧协议）、3D 旋转 |
-| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、key 对齐复用、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、异常冻结；双宿主一致性 fixture；示例 `counter` / `counter-js` / `todo-js` / **`codeeditor-dsl`**；协议 `ui.create`/`ui.remove` 在线建删 |
+| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、key 对齐复用、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、异常冻结、**子树挂载 `mount_into`**（宿主界面里的一页用声明式）；双宿主一致性 fixture；示例见上方两个（codeeditor 整页 + gallery 声明式页）；协议 `ui.create`/`ui.remove` 在线建删 |
 
 ## 相关文档
 

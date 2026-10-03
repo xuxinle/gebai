@@ -874,9 +874,15 @@ if (palette_open_.value()) {          // 条件声明
 菜单栏同理：`menu_bar(...)` 声明 + `on_open_menu` 写状态，面板由 `menu_panel_overlay`
 按状态声明（面板内容首次认领时构造，同 key 复用）。
 
-实测：一个 1417 行的命令式 IDE 界面（`examples/codeeditor`）用声明式重写为 **~700 行**
-（`examples/codeeditor-dsl`，含菜单栏 + 命令面板 + 全局快捷键 + 终端），差的不是控件数
-而是**同步代码**——声明式里所有「改完要点哪里」的手工同步都不存在了（写状态 → 框架 diff）。
+实测：一个 2063 行的命令式 IDE 界面（`examples/codeeditor`）用声明式重写后，**连同它原本的
+声明式分身（当时叫 `codeeditor-dsl`，695 行，已在整合中删除）一起合并成 1605 行**（−40%）
+——差的不是控件数而是**同步代码**：声明式里所有「改完要点哪里」的手工同步都不存在了
+（写状态 → 框架 diff）。
+
+**声明式可以是局部**：`dsl::mount()` 是单根语义（替掉 `UiRoot::content()`），
+而 `dsl::mount_into(host, component)` 把声明式树挂到**既有元素的子位**——
+宿主界面（如 gallery）里的一页用声明式描述、其余部分仍手搭。两者边界清楚：
+`build()` 只管自己那块，锚点之外的树与它无关。
 
 **JS 宿主机制**：
 - VDOM/重组器纯 JS（`src/ui/declarative.js`，编译期嵌入，与 `script_api.js` 同机制）；
@@ -905,13 +911,19 @@ if (palette_open_.value()) {          // 条件声明
   结构签名（type + 语义文本递归）**必须逐字节相等**（含状态推进与条件裁剪后的形态）；
 - **元素工厂 `dsl::make_element`**：类型名 → 构造（27 个内置类型），JS 窄桥就复用它。
 
-示例：`examples/counter`（C++）+ `examples/counter-js`（JS）+ `examples/todo-js`
-（真实复杂度：异步取数 + key 对齐列表 + 过滤，端到端脚本 `tools/todo_js_e2e.py`）
-+ **`examples/codeeditor-dsl`（IDE 形态界面的声明式重写：五层布局 + 多标签编辑
-+ 菜单栏下拉 + 命令面板 + 全局快捷键 + 终端 + 主题，~700 行；端到端验证
-+ `tools/codeeditor_dsl_e2e.py` 八项）**；
-测试：`tests/ui_dsl_test.cpp`（C++ 十三用例：含 overlay 生命周期 / 异步 resource 与取消 /
-嵌套作用域树 / 构造期属性组件 / 多作用域细粒度）、`tests/ui_declarative_host_test.cpp`（JS 十用例）、
+示例：**`examples/codeeditor`（整个 IDE 就是声明式：五层布局 + 多标签编辑 + 真实文件工作区
++ 查找替换 + 菜单栏下拉 + 命令面板 + 全局快捷键 + 终端 + 主题；端到端 `tools/codeeditor_e2e.py` 九项）
++ `examples/gallery` 的「**声明式**」页（`dsl::mount_into` 子树挂载：状态驱动表单 + key 对齐列表
++ 异步 `resource` + 条件内容）**——两者共同覆盖「整页声明式」与「页内一块声明式」两种形态。
+
+> 曾经的四个声明式小示例（`counter` / `counter-js` / `todo-js` / `codeeditor-dsl`）已在示例整合中
+> 删除：语义已被 `tests/ui_dsl_test.cpp`（C++ 十六用例）+ `tests/ui_declarative_host_test.cpp`
+> （JS 十一用例）+ `tests/ui_declarative_parity_test.cpp`（双宿主一致性）完整钉住，
+> 界面演示由上面两个示例承载——示例不再重复单测已覆盖的验证。
+
+测试：`tests/ui_dsl_test.cpp`（C++ 十六用例：含 overlay 生命周期 / 异步 resource 与取消 /
+嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 / 载体内部件不被裁剪）、
+`tests/ui_declarative_host_test.cpp`（JS 十一用例）、
 `tests/ui_declarative_parity_test.cpp`（双宿主一致性两用例）、
 `tests/control_protocol_test.cpp`（协议 `ui.create`/`ui.remove` 用例）。
 

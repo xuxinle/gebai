@@ -20,6 +20,10 @@
 #include "st/math/geometry.hpp"
 #include "st/ui/element.hpp"
 
+namespace st::ui::dsl {
+class Component;   // 声明式组件基类（完整定义在 st/ui/dsl.hpp；头文件只用到指针）
+}
+
 namespace gallery {
 
 /// 页面 → 应用的回调：页面内交互统一经它触达应用。
@@ -51,12 +55,20 @@ struct PageSpec {
   std::string_view subtitle{};  ///< 页副标题
 };
 
-inline constexpr std::size_t kPageCount = 5;
+inline constexpr std::size_t kPageCount = 6;
 
 [[nodiscard]] auto page_specs() -> const std::array<PageSpec, kPageCount>&;
 
 /// 构建每个页面（返回 `Panel(Column)`，自带页标题与内边距）。
 [[nodiscard]] auto build_page(std::size_t index, const PageHooks& hooks)
     -> std::unique_ptr<st::ui::Element>;
+
+/// 声明式页的演示组件（≈ Compose / ArkTS 风格的 |状态 → 界面| 描述）。
+///
+/// 为什么由页面模块提供：它演示的就是「一页界面用声明式写」——内容属页面，
+/// 挂载由应用做（`dsl::mount_into`，见 `examples/gallery/main.cpp`）：
+/// 框架的 `mount()` 是**单根语义**（会替掉 `UiRoot::content()`），
+/// 而 gallery 是手搭壳 + 声明式页的混合形态。
+[[nodiscard]] auto make_declarative_component() -> std::shared_ptr<st::ui::dsl::Component>;
 
 }  // namespace gallery

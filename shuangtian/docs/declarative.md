@@ -39,7 +39,7 @@
 **ArkTS 风格（struct + State 成员 + build()）——C++ 的自然映射**：
 
 ```cpp
-// examples/counter/main.cpp
+// 形态示意（完整实例见 examples/codeeditor —— 整个 IDE 就是一份 Component）
 #include "st/ui/dsl.hpp"
 
 struct CounterPage : st::ui::dsl::Component {
@@ -328,8 +328,17 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
   C++ 声明式在 `ST_FEATURE_SCRIPT` 关闭时完整可用）；
 - JS 腿整体打在 `ST_FEATURE_SCRIPT` 条件编译内；C++ 重组器不 mount 声明式根时，
   帧循环无额外成本（无注册即无回调）；
-- 示例：`examples/counter/`（C++ struct 风格）+ `examples/counter-js/`（JS 双风格）
-  ——同一界面多写法，互为语义一致性验证。
+- 示例（2026-10-03 示例整合后的现状）：**`examples/codeeditor/`（整个 IDE 由一份
+  `Component::build()` 描述）+ `examples/gallery/` 的「声明式」页**（用 `mount_into`
+  把声明式子树挂进手搭页壳——演示状态驱动表单 / key 对齐列表 / 异步 `resource` / 条件内容）。
+  两者覆盖「整页声明式」与「页内一块声明式」两种形态。
+
+> **早先的四个小示例（`counter` / `counter-js` / `todo-js` / `codeeditor-dsl`）已删除**：
+> 它们的验证价值已被 `tests/ui_dsl_test.cpp`（C++ 十六用例，含 overlay 生命周期 /
+> 异步 resource 与取消 / 嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 /
+> 载体内部件不被裁剪）、`tests/ui_declarative_host_test.cpp`（JS 十一用例）、
+> `tests/ui_declarative_parity_test.cpp`（双宿主一致性）完整覆盖。
+> 保留示例的门槛是「演示形态 + 能当靶场」，而不是「把单测再跑一遍」。
 
 ## 9. 测试与验证策略
 
@@ -339,23 +348,30 @@ C++ 侧 struct 风格是**原生形态**（无需转译）；JS 侧 struct 风�
 | C++ 重组器 | `st test` 单测：作用域对齐/props diff/for_each key 复用/调度护栏（预算/深度/连锁/冻结） |
 | JS 重组器 | QuickJS 宿主内单测：同上场景 + 「跨界次数」断言（N 次状态写 → 每帧 ≤1 次批量提交） |
 | **双宿主一致性** | 同一组场景 fixture（JSON 描述：状态序列 → 期望 tree 快照），C++/JS 各跑，结果必须逐字节一致（不变式 4 的可验证形态） |
-| 集成（无头） | counter×3 风格：`tree` 断言结构、`invoke click` 后 `get text` 断言传播、连续 100 次点击 → 恰 100 次变化 |
+| 集成（无头） | 声明式应用照常可被协议驱动：`tree` 断言结构、`invoke click` 后 `get text` 断言传播、连续 100 次点击 → 恰 100 次变化（见 `tools/codeeditor_e2e.py` 与 `tools/framework_gaps_e2e.py`） |
 | 回归 | gallery/codeeditor 全场景截图对比（不挂声明式时零差异） |
 | 谬误注入 | build 抛异常 → 冻结 + 事件；递归 build → 深度拦截；悬垂捕获 → lint 报警 |
 
-**验收标准**：① counter 三形态（C++ struct / JS compose / JS struct）无头+窗口跑通，
-协议对声明式元素照常可用；② gallery 新增「声明式页」（C++ DSL 写的表单+列表+异步），
-与手搭 C++ 页像素级无差；③ 双宿主一致性 fixture 全绿；④ 测试全绿 + DESIGN.md 新章节
-（§4.5.2）+ README 特性表 + BACKLOG 勾销。
+**验收标准**（2026-10-03 全部达成，记录如下）：① ~~counter 三形态无头+窗口跑通~~
+→ **改为**：声明式语义由 `tests/ui_dsl_test.cpp` + `ui_declarative_host_test.cpp`
++ `ui_declarative_parity_test.cpp` 三大件全绿（示例不再承担单测职责）；
+② **gallery 新增「声明式页」**（状态驱动表单 + key 对齐列表 + 异步 `resource` + 条件内容，
+经 `dsl::mount_into` 子树挂载）——✅ 已落地（页壳手搭 + 内容区声明式，两者共存于同一界面）；
+③ 双宿主一致性 fixture 全绿——✅；④ 测试全绿（592 用例）+ DESIGN.md §4.5.2 + README 特性表
++ BACKLOG 勾销——✅。
+
+> 超出原计划的部分：**`examples/codeeditor` 整份界面也改成了声明式**（与 `codeeditor-dsl`
+> 合并为一份，两份合计 2758 行 → 1605 行）；`counter` / `counter-js` / `todo-js`
+> 三个小示例随整合删除。
 
 ## 10. 实施计划（四阶段，每阶段独立可验证）
 
 | 阶段 | 内容 | 交付物 | 验收 |
 |---|---|---|---|
 | **M1 元素工厂**（地基） | `element_factory` + 32 组件注册 + 构造参数差距表 | 工厂单测全绿 | create/apply 往返一致 |
-| **M2 C++ 声明式核心** | `dsl.hpp/cpp`（Composer/State/Component/Props）+ C++ 重组器 + `examples/counter`（C++） | C++ 单测 + counter 跑通 | 点击/状态传播/护栏生效 |
-| **M3 JS 宿主** | `declarative.js` + ScriptHost 集成 + compose 风格 + `examples/counter-js` | JS 单测 + 跨界次数断言 | 双宿主一致性 fixture 全绿 |
-| **M4 补全与示例** | resource/persisted + 调度护栏全量 + `arkts_compat.js` + gallery 声明式页 + 文档 | examples×N + 声明式 gallery 页 | ArkTS 风格跑通；像素级无差 |
+| **M2 C++ 声明式核心** | `dsl.hpp/cpp`（Composer/State/Component/Props）+ C++ 重组器 | C++ 单测全绿 | 点击/状态传播/护栏生效 |
+| **M3 JS 宿主** | `declarative.js` + ScriptHost 集成 + compose 风格 | JS 单测 + 跨界次数断言 | 双宿主一致性 fixture 全绿 |
+| **M4 补全与示例** | resource/persisted + 调度护栏全量 + `arkts_compat.js` + gallery 声明式页 + 文档 | gallery 声明式页 + codeeditor 整页声明式 | ArkTS 风格跑通；端到端全绿 |
 
 依赖链：M1 → M2 → M3 → M4（M2 完成时 C++ 应用已可全量使用声明式；M3/M4 服务 JS 与
 迁移体验）。

@@ -396,8 +396,21 @@ auto MenuBar::on_event(const RenderContext& context, Event& event) -> bool {
       }
       return false;
     }
-    case EventKind::Click:
     case EventKind::MouseDown: {
+      // 只做“按下”视觉态与命中标记：**打开面板的动作留给 Click**。
+      //
+      // 曾经把 Click 与 MouseDown 合在一个 case 里（两边都调 on_open_menu）——
+      // 一次物理点击会触发**两次**回调（down + click），于是“打开 → 又切回关闭”，
+      // 菜单面板永远不出现（实测：控制通道 input.mouse click 与真实鼠标都不出面板）。
+      // Button 的约定也是这一套：MouseDown 只标脏，Click 才 activate。
+      for (std::size_t index = 0; index < menus_.size(); ++index) {
+        if (!title_rect(index).contains(event.position)) continue;
+        event.handled = true;
+        return true;
+      }
+      return false;
+    }
+    case EventKind::Click: {
       for (std::size_t index = 0; index < menus_.size(); ++index) {
         if (!title_rect(index).contains(event.position)) continue;
         event.handled = true;

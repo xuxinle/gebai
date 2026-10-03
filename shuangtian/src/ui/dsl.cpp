@@ -12,6 +12,7 @@
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
+#include "st/ui/components/command_palette.hpp"
 #include "st/ui/components/feedback.hpp"
 #include "st/ui/components/file_dialog.hpp"
 #include "st/ui/components/input.hpp"
@@ -76,6 +77,9 @@ struct Composer::Impl {
   // 已建元素追踪：v1 简化——根 Panel 持久，build 只更新既有元素（位置对齐）。
   Element* root_panel{nullptr};       // 已废弃（单根语义后不再预建）
   bool root_replaced{false};          // 本次 reconcile 是否已落根元素
+  /// 子树挂载锚点（`mount_into`）：非空时根层声明落在它的子位（不碰 `UiRoot::content()`）。
+  /// 用途：宿主界面（gallery）里的一页用声明式描述，其余部分仍手搭。
+  Element* anchor{nullptr};
   /// 声明式叠加层：key → 宿主元素（挂在 root overlay 通道上）。
   /// 生命周期 = 「本次 build 有没有认领它」（见 Composer::overlay_slot/sweep_overlays）。
   std::unordered_map<std::string, Element*> overlays{};
@@ -400,6 +404,11 @@ auto Composer::mount(std::shared_ptr<Component> root_component) -> bool {
   return true;
 }
 
+auto Composer::mount_into(Element& host, std::shared_ptr<Component> root_component) -> bool {
+  impl_->anchor = &host;   // 根层声明改落到 host 的子位（单根语义换成多子）
+  return mount(std::move(root_component));
+}
+
 auto Composer::dirty() const noexcept -> bool {
   if (impl_->scope_dirty) return true;
   if (impl_->root_scope == nullptr) return false;
@@ -454,7 +463,8 @@ auto Composer::reconcile() -> ReconcileStats {
       for (auto& child : impl_->root_scope->children) child->declared = false;
       impl_->root_scope->deps.clear();
     }
-    impl_->parent_stack.push_back(Impl::root_slot_marker());
+    impl_->parent_stack.push_back(impl_->anchor != nullptr ? impl_->anchor
+                                                           : Impl::root_slot_marker());
     try {
       impl_->component->build(*this);
       impl_->last_stats.scopes_rerun = 1;
@@ -464,6 +474,18 @@ auto Composer::reconcile() -> ReconcileStats {
     } catch (...) {
       impl_->last_stats.error = "未知异常";
       if (impl_->guardrails.freeze_on_error) impl_->scope_dirty = false;
+    }
+    // 锚点形态：末尾裁剪（本次未声明的残留子元素移除）——根槽位形态由单根语义代替。
+    if (impl_->anchor != nullptr) {
+      const std::size_t declared = impl_->child_cursor.count(impl_->anchor) > 0
+                                       ? impl_->child_cursor[impl_->anchor]
+                                       : 0;
+      while (impl_->anchor->content_child_count() > declared) {
+        auto removed = impl_->anchor->remove_child(impl_->anchor->child_at(
+            impl_->anchor->content_child_count() - 1));
+        (void)removed;
+        ++impl_->last_stats.elements_removed;
+      }
     }
     tls_composer = nullptr;
     impl_->active_scope = nullptr;
@@ -475,6 +497,15 @@ auto Composer::reconcile() -> ReconcileStats {
       std::erase_if(impl_->root_scope->children,
                     [](std::unique_ptr<Impl::Scope>& child) { return !child->declared; });
     }
+    // 根作用域本次已跑过：清脏标记。
+    //
+    // 不清的后果（实测踩到，且被“构建幂等”掩盖了很久）：②的 `run_dirty_scopes`
+    // 会**再跑一次根作用域**，而那条路径用的是根槽位语义（`set_content`）——
+    // 于是根内容元素被**销毁重建**：`UiRoot::content()` 的指针身份变了，
+    // 从此前 build 里存下的任何元素指针（如子树挂载的锚点）全部悬垂。
+    // 正常单根形态下两次构建结果一样，看不出问题（只白跑一遍 + 指针身份漂流）；
+    // 子树挂载（`mount_into`）一旦踩到就是非法访问。
+    if (impl_->root_scope != nullptr) impl_->root_scope->dirty = false;
     impl_->scope_dirty = false;
   }
 
@@ -621,8 +652,9 @@ void Composer::pop_parent() {
     if (Element* parent = impl_->parent_stack.back(); parent != nullptr &&
         !Impl::is_root_slot(parent)) {
       const std::size_t declared = impl_->child_cursor[parent];
-      while (parent->child_count() > declared) {
-        auto removed = parent->remove_child(parent->child_at(parent->child_count() - 1));
+      // 只裁到「内容子元素」边界：载体内部件（ScrollView 的滚动条等）永远保留
+      while (parent->content_child_count() > declared) {
+        auto removed = parent->remove_child(parent->child_at(parent->content_child_count() - 1));
         (void)removed;
         ++impl_->last_stats.elements_removed;
       }
@@ -670,9 +702,15 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
     return element;
   }
 
-  // 位置对齐：按父元素内游标取「该位置既有子元素」
+  // 位置对齐：按父元素内游标取「该位置既有子元素」。
+  //
+  // 只对齐**内容子元素**（`content_child_count`）：少数组件把自己的内部件
+  // （如 `ScrollView` 的滚动条）也放在 `children_` 末尾，它们不归调用方管——
+  // 当成「上一帧多声明的残留」移除会让组件持有的裸指针悬垂
+  // （实测：声明式里 ScrollView 与 List 分支互切 → `bar_->arrange` 段错误）。
   auto& cursor = impl_->child_cursor[parent];
-  Element* existing = cursor < parent->child_count() ? parent->child_at(cursor) : nullptr;
+  const std::size_t content_count = parent->content_child_count();
+  Element* existing = cursor < content_count ? parent->child_at(cursor) : nullptr;
   const bool type_matches = existing != nullptr && existing->type() == type;
   Element* element = nullptr;
   if (type_matches) {
@@ -682,7 +720,7 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
     auto created = make_element(std::string(type));
     if (created == nullptr) return nullptr;
     element = created.get();
-    if (cursor < parent->child_count()) {
+    if (cursor < content_count) {
       auto old = parent->remove_child(parent->child_at(cursor));
       (void)old;  // 释放旧元素
       ++impl_->last_stats.elements_removed;
@@ -801,6 +839,7 @@ ST_DSL_TYPE(Toast, "Toast")
 ST_DSL_TYPE(MenuBar, "MenuBar")
 ST_DSL_TYPE(FileDialog, "FileDialog")
 ST_DSL_TYPE(CodeEditor, "CodeEditor")
+ST_DSL_TYPE(CommandPalette, "CommandPalette")
 ST_DSL_TYPE(MarkdownView, "MarkdownView")
 
 auto make_element(std::string type) -> std::unique_ptr<Element> {
@@ -847,6 +886,7 @@ auto make_element(std::string type) -> std::unique_ptr<Element> {
   if (type == "FileDialog") return std::make_unique<FileDialog>();
   // 文本/多媒体
   if (type == "CodeEditor") return std::make_unique<CodeEditor>();
+  if (type == "CommandPalette") return std::make_unique<CommandPalette>();
   if (type == "MarkdownView") return std::make_unique<MarkdownView>();
   return nullptr;
 }
@@ -981,7 +1021,10 @@ auto input(Composer& c, std::string value, std::function<void(std::string)> on_i
   }
   apply_box(*element, props);
   if (auto* input_element = dynamic_cast<Input*>(element); input_element != nullptr) {
-    input_element->set_text(std::move(value));
+    // 幂等写入：内容相同就不写——`Input::set_text` 会把光标推到末尾，
+    // 而声明式下 build 随时可能重跑（任一状态变更）；无条件写会让
+    // 「打字中光标乱跳」（输入框回归到上一次 set 时的末尾）——实测踩到过。
+    if (input_element->value() != value) input_element->set_text(value);
     if (on_input) {
       input_element->on_change = [on_input](std::string_view v) { on_input(std::string(v)); };
     }
@@ -1292,6 +1335,11 @@ auto DeclarativeHost::mount(std::shared_ptr<Component> root_component) -> bool {
   return composer_->mount(std::move(root_component));
 }
 
+auto DeclarativeHost::mount_into(Element& host, std::shared_ptr<Component> root_component)
+    -> bool {
+  return composer_->mount_into(host, std::move(root_component));
+}
+
 auto DeclarativeHost::tick() -> ReconcileStats {
   // 先执行已投递的异步结果（它们写 State 会标脏）——同帧可见
   (void)composer_->pump_async();
@@ -1309,6 +1357,13 @@ auto mount(UiRoot& root, std::shared_ptr<Component> root_component, Guardrails g
     -> std::unique_ptr<DeclarativeHost> {
   auto host = std::make_unique<DeclarativeHost>(root, guardrails);
   if (!host->mount(std::move(root_component))) return nullptr;
+  return host;
+}
+
+auto mount_into(UiRoot& root, Element& host_element, std::shared_ptr<Component> root_component,
+                Guardrails guardrails) -> std::unique_ptr<DeclarativeHost> {
+  auto host = std::make_unique<DeclarativeHost>(root, guardrails);
+  if (!host->mount_into(host_element, std::move(root_component))) return nullptr;
   return host;
 }
 

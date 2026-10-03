@@ -81,6 +81,20 @@ class ScrollView : public Element {
   [[nodiscard]] auto type() const noexcept -> std::string_view override { return "ScrollView"; }
   [[nodiscard]] auto role() const noexcept -> Role override { return Role::Panel; }
 
+  /// 载体子元素：**调用方声明的内容在前，自持滚动条在末尾**（不计数）。
+  ///
+  /// 声明式的「位置对齐 + 末尾裁剪」只看前面这些，不会动我们的滚动条——
+  /// 否则它会把自己的滚动条当成「上一帧多声明的残留」移除掉，
+  /// 而本组件持有的 `bar_` 裸指针随即悬垂（实测：声明式里 ScrollView 与 List
+  /// 两个分支互切 → `ScrollView::arrange` 在 `bar_->arrange` 上段错误）。
+  [[nodiscard]] auto content_child_count() const noexcept -> std::size_t override {
+    return children_.empty() ? 0 : children_.size() - 1;   // 滚动条恒在末尾
+  }
+
+  /// 内容子元素插到滚动条**之前**（滚动条恒在末尾；见 `content_child_count`）。
+  auto add_child(std::unique_ptr<Element> child) -> Element* override;
+  auto insert_child(std::size_t index, std::unique_ptr<Element> child) -> Element* override;
+
   [[nodiscard]] auto scroll_offset() const noexcept -> float { return offset_; }
 
   // —— 列表类通用视口契约（与 Tree/List 同口径）——

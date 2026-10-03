@@ -199,6 +199,10 @@ class Composer {
 
   /// 挂载根组件（替换之前的根）。返回是否成功。
   auto mount(std::shared_ptr<Component> root_component) -> bool;
+  /// 挂载到**既有元素的子树**（不替换 `UiRoot::content()`）——宿主元素由调用方提供，
+  /// 声明式产出的顶层元素成为它的子元素（位置对齐 + 末尾裁剪同普通容器）。
+  /// 用途：宿主界面（如 gallery）里的一页用声明式描述，其余部分仍手搭。
+  auto mount_into(Element& host, std::shared_ptr<Component> root_component) -> bool;
   /// 重组一帧：失效作用域重跑 build → diff → 落地。返回统计。
   auto reconcile() -> ReconcileStats;
   /// 是否有失效作用域待重组。
@@ -555,6 +559,8 @@ class DeclarativeHost {
  public:
   explicit DeclarativeHost(UiRoot& root, Guardrails guardrails = {});
   auto mount(std::shared_ptr<Component> root_component) -> bool;
+  /// 子树挂载：声明式树挂到 `host` 的子位（宿主元素已在真值树上）。
+  auto mount_into(Element& host, std::shared_ptr<Component> root_component) -> bool;
   /// 帧首推进（reconcile 有失效才做事；UiRoot 布局前调用）。
   /// 内部会先执行已投递的异步结果（`pump_async`）——异步任务的结果同帧可见。
   auto tick() -> ReconcileStats;
@@ -592,6 +598,11 @@ void sub_component(Composer& c, std::shared_ptr<Component> component,
 /// 便捷挂载：root + component → 挂载并立即重组一次（无头测试/简单场景）。
 auto mount(UiRoot& root, std::shared_ptr<Component> root_component, Guardrails guardrails = {})
     -> std::unique_ptr<DeclarativeHost>;
+
+/// 便捷挂载（子树形态）：声明式树挂到既有元素 `host` 下并立即重组一次。
+/// 宿主界面里「一页用声明式描述」的场景用它（整根语义见 `mount`）。
+auto mount_into(UiRoot& root, Element& host, std::shared_ptr<Component> root_component,
+                Guardrails guardrails = {}) -> std::unique_ptr<DeclarativeHost>;
 
 /// 异步资源 hook（≈ JS 侧 `useResource`）：
 ///

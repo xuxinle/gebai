@@ -7,7 +7,9 @@
 #include "st/test/test.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
+#include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
+#include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
@@ -25,7 +27,7 @@ namespace {
 using namespace st::ui;
 using namespace st::ui::dsl;
 
-/// 计数器页（与 examples/counter 同形）：验证「声明式描述 + 状态驱动重组」全链路。
+/// 计数器页（最小形态）：验证「声明式描述 + 状态驱动重组」全链路。
 struct CounterPage : Component {
   State<int> count{0};
   State<bool> show_extra{false};
@@ -600,6 +602,150 @@ ST_TEST(dsl_list_data_driven) {
     item->activate();
   }
   ST_CHECK(page->selection.value() == 1);
+}
+
+// ── 子树挂载（`mount_into`）：宿主界面里的一页用声明式描述 ───────────────
+//
+// 动机：示例整合把声明式小示例收进 gallery 的一页——而 `mount()` 是**单根语义**
+// （替换 `UiRoot::content()`），宿主界面必须能只把一个子树交给声明式。
+struct AnchoredPage : Component {
+  State<int> hits{0};
+  void build(Composer& c) override {
+    column(c, {.gap = 4.0f, .padding = 6.0f}, [&] {
+      text(c, [&] { return "命中 " + std::to_string(hits.value()); }, {.key = "label"});
+      button(c, "+1", [this] { hits.set(hits.value() + 1); }, {.key = "inc"});
+      if (hits.value() >= 2) {
+        text(c, [] { return std::string("条件内容"); }, {.key = "extra"});
+      }
+    });
+  }
+};
+
+ST_TEST(dsl_mount_into_host_element) {
+  UiRoot root;
+  root.set_viewport({400.0f, 300.0f});
+
+  // 宿主界面：根内容是一个手搭的列容器，声明式树挂到「其中一个子容器」下。
+  auto host_panel = std::make_unique<Panel>(FlexDirection::Column);
+  host_panel->set_id("host-page");
+  host_panel->add_child(std::make_unique<Text>("宿主手搭的标题"));
+  auto anchor = std::make_unique<Panel>(FlexDirection::Column);
+  anchor->set_id("anchor");
+  Panel* anchor_ptr = anchor.get();
+  host_panel->add_child(std::move(anchor));
+  root.set_content(std::move(host_panel));
+
+  auto page = std::make_shared<AnchoredPage>();
+  auto decl_host = dsl::mount_into(root, *anchor_ptr, page);
+  ST_REQUIRE(decl_host != nullptr);
+  root.layout();
+
+  // ① 宿主根未被替换（单根语义 vs 子树形态的分界）
+  ST_CHECK(root.content() != nullptr && root.content()->id() == std::string_view("host-page"));
+  ST_CHECK(root.content()->child_count() == 2);
+  // ② 声明式树落在锚点下
+  ST_REQUIRE(anchor_ptr->child_count() == 1);
+  Element* decl_column = anchor_ptr->child_at(0);
+  ST_CHECK(decl_column->child_count() == 2);   // label + button
+  // ③ 锚点元素本身仍在真值树上（协议 id 寻址不变）
+  ST_CHECK(root.find("anchor") != nullptr);
+
+  // ④ 状态驱动重组（子树内）：阈值前 2 子、达阈值 3 子、回落再见 2 子（裁剪）
+  page->hits.set(1);
+  (void)decl_host->tick();
+  ST_CHECK(decl_column->child_count() == 2);
+  page->hits.set(2);
+  (void)decl_host->tick();
+  ST_CHECK(decl_column->child_count() == 3);   // label + button + 条件内容
+  page->hits.set(0);
+  (void)decl_host->tick();
+  ST_CHECK(decl_column->child_count() == 2);
+
+  // ⑤ 锚点之外的宿主内容不受影响
+  ST_CHECK(root.content()->child_count() == 2);
+}
+
+// ── 声明式 input 的幂等写入（光标不被重组推走）──────────────────────────
+//
+// `Input::set_text` 把光标推到末尾（程序化写入语义）；声明式每次重组都重写
+// value 的话，打字中的光标会被推走（build 因任一状态变更而重跑）。
+ST_TEST(dsl_input_write_is_idempotent_for_cursor) {
+  struct InputPage : Component {
+    State<std::string> value{"abc"};
+    void build(Composer& c) override {
+      input(c, value.value(), [this](std::string next) { value.set(std::move(next)); },
+            {.key = "field"});
+    }
+  };
+  UiRoot root;
+  root.set_viewport({400.0f, 200.0f});
+  auto page = std::make_shared<InputPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+
+  auto* field = dynamic_cast<Input*>(root.content());
+  ST_REQUIRE(field != nullptr);
+  ST_CHECK(field->value() == std::string("abc"));
+  // 模拟用户在中间落光标（真实编辑路径）
+  field->set_cursor_index(1);
+  ST_CHECK_EQ(field->cursor_index(), 1U);
+  // 重组（状态未变）——不该把光标推走
+  (void)host->tick();
+  ST_CHECK_EQ(field->cursor_index(), 1U);
+  // 状态真变了 → 写下去（set_text 会把光标回到末尾，属预期）
+  page->value.set(std::string("abcd"));
+  (void)host->tick();
+  ST_CHECK(field->value() == std::string("abcd"));
+}
+
+// ── 载体内部子元素不被声明式裁剪（`ScrollView` 的滚动条）──────────────
+//
+// 回归：`ScrollView` 把自己的滚动条放进 `children_`（构造时加的），
+// 而声明式的「位置对齐 + 末尾裁剪」原先按 `child_count()` 算——切到另一个
+// 分支时把滚动条当成「上一帧多声明的残留」移除，组件持有的 `bar_` 裸指针
+// 随即悬垂。下一个 layout 在 `bar_->arrange` 上段错误（实测：声明式里
+// ScrollView 分支 ↔ List 分支互切）。
+// 修法：引入 `Element::content_child_count()`（含量 = 调用方子元素数，
+// 载体内部件在末尾不计入），声明式的对齐/裁剪全改用它。
+ST_TEST(dsl_scrollview_internal_scrollbar_survives_branch_switch) {
+  struct BranchPage : Component {
+    State<int> which{0};
+    void build(Composer& c) override {
+      column(c, {.gap = 0.0f, .id = "page"}, [&] {
+        text(c, [] { return std::string("头"); }, {.key = "head"});
+        if (which.value() == 0) {
+          // 分支 A：ScrollView（自持滚动条）包一段文本
+          (void)custom_container<ScrollView>(
+              c, [&] { text(c, [] { return std::string("终端输出"); }, {.key = "out"}); },
+              [](ScrollView& s) { s.set_id("scroller"); }, {.grow = true, .key = "scroller"});
+        } else {
+          // 分支 B：数据驱动 List（与 A 的类型不同 → 走「移除旧位 + 插新位」路径）
+          std::vector<ListItemData> items{{.key = "x", .label = "X"}};
+          (void)list(c, items, [](std::size_t) {}, {.grow = true, .id = "lister"});
+        }
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({400.0f, 300.0f});
+  auto page = std::make_shared<BranchPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+
+  // 互切两次（A → B → A）；若滚动条被裁掉，此处的 layout 就会段错误
+  page->which.set(1);
+  (void)host->tick();
+  root.layout();
+  page->which.set(0);
+  (void)host->tick();
+  root.layout();
+  // 回到 A：滚动条还在（载体子元素 1 个 = 内容；再为滚动条 1 个）
+  Element* scroller = root.find("scroller");
+  ST_REQUIRE(scroller != nullptr);
+  ST_CHECK(scroller->child_count() == 2);          // 内容 + 滚动条
+  ST_CHECK(scroller->content_child_count() == 1);  // 内容只算 1
 }
 
 }  // namespace

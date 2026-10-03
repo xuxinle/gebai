@@ -224,12 +224,27 @@ class Element {
     return children_;
   }
   [[nodiscard]] auto children() noexcept -> std::span<std::unique_ptr<Element>> { return children_; }
-  auto add_child(std::unique_ptr<Element> child) -> Element*;
-  auto insert_child(std::size_t index, std::unique_ptr<Element> child) -> Element*;
+  /// 追加子元素（**载体内部件在后**：如 `ScrollView` 重写它把内容插到滚动条之前）。
+  virtual auto add_child(std::unique_ptr<Element> child) -> Element*;
+  /// 在指定位置插入子元素（同上：少数组件会重写以保持内部件位置）。
+  virtual auto insert_child(std::size_t index, std::unique_ptr<Element> child) -> Element*;
   auto remove_child(Element* child) -> std::unique_ptr<Element>;
   void clear_children();
   [[nodiscard]] auto child_count() const noexcept -> std::size_t { return children_.size(); }
   [[nodiscard]] auto child_at(std::size_t index) const noexcept -> Element*;
+
+  /// **载体子元素数**（默认 1——每个子元素都是调用方的）。
+  ///
+  /// 少数组件会把自己的内部件放进 `children_`（如 `ScrollView` 的滚动条），
+  /// 它们**不归调用方管**：声明式的「位置对齐 + 末尾裁剪」必须跳过它们，
+  /// 否则会把自己的滚动条当成「上一帧多声明的残留」移除掉——
+  /// 而组件持有的 `bar_` 裸指针随即悬垂（实测：声明式里 ScrollView 与 List
+  /// 分支互切 → `ScrollView::arrange` 在 `bar_->arrange` 上段错误）。
+  ///
+  /// 子元素布局约定：**调用方的子元素在前，载体内部件在后**（本仓库统一遵守）。
+  [[nodiscard]] virtual auto content_child_count() const noexcept -> std::size_t {
+    return children_.size();
+  }
 
   /// 宿主（`UiRoot`）的非拥有指针，未上树时为 `nullptr`。
   ///
