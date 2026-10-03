@@ -748,4 +748,68 @@ ST_TEST(dsl_scrollview_internal_scrollbar_survives_branch_switch) {
   ST_CHECK(scroller->content_child_count() == 1);  // 内容只算 1
 }
 
+// ── `spacer()` 默认是**弹性空隙**（不是 0 宽固定块）────────────────────
+//
+// 回归：`spacer()` 是右对齐的惯用写法（`… 左侧内容 … spacer() … 右侧内容 …`），
+// 而早先它把 `size` 直接写进 `width/height`——默认 `size = 0` 就得到一个
+// **固定 0 宽的块**，在布局里等同于“不存在”，右对齐静默失效。
+// 实测：codeeditor 标题栏的 — □ × 紧跟在标题文字后面（x=209），而非贴右缘（1268）。
+// 现在 `size <= 0` ⇒ `grow = true`（真弹性）；`size > 0` 仍为固定块。
+ST_TEST(dsl_spacer_default_is_elastic_and_pushes_to_edges) {
+  struct SpacerPage : Component {
+    void build(Composer& c) override {
+      row(c, {.width = 400.0f, .height = 40.0f, .id = "bar"}, [&] {
+        text(c, [] { return std::string("左"); }, {.key = "left"});
+        (void)spacer(c);   // 默认参数：必须弹性
+        text(c, [] { return std::string("右"); }, {.key = "right"});
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({400.0f, 100.0f});
+  auto page = std::make_shared<SpacerPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+
+  Element* bar = root.find("bar");
+  ST_REQUIRE(bar != nullptr);
+  ST_REQUIRE(bar->child_count() == 3);
+  const auto left = bar->child_at(0)->bounds();
+  const auto gap = bar->child_at(1)->bounds();
+  const auto right = bar->child_at(2)->bounds();
+
+  // ① 空隙真的把两侧推开了：宽度远大于 0
+  ST_CHECK(gap.width > 100.0f);
+  // ② 右侧内容**贴右缘**（这正是 `spacer()` 存在的意义；0 宽固定块这里会失败）
+  ST_CHECK(gap.right() <= right.x + 0.5f);
+  ST_CHECK_NEAR(right.right(), bar->bounds().right(), 0.5f);
+  // ③ 左侧内容仍在左端
+  ST_CHECK_NEAR(left.x, bar->bounds().x, 0.5f);
+}
+
+// `size > 0` 仍然是固定尺寸的占位（旧语义保留）。
+ST_TEST(dsl_spacer_positive_size_is_fixed) {
+  struct FixedPage : Component {
+    void build(Composer& c) override {
+      row(c, {.width = 400.0f, .height = 40.0f, .id = "bar"}, [&] {
+        (void)spacer(c, 24.0f);
+        text(c, [] { return std::string("后"); }, {.key = "after"});
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({400.0f, 100.0f});
+  auto page = std::make_shared<FixedPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  Element* bar = root.find("bar");
+  ST_REQUIRE(bar != nullptr);
+  ST_REQUIRE(bar->child_count() == 2);
+  ST_CHECK_NEAR(bar->child_at(0)->bounds().width, 24.0f, 0.5f);
+  // 固定块不弹性 → 后续内容紧跟其后，不贴右缘
+  ST_CHECK(bar->child_at(1)->bounds().x < bar->bounds().right() - 50.0f);
+}
+
 }  // namespace

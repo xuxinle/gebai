@@ -390,7 +390,16 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 /// 卡片容器。
 [[nodiscard]] auto card(Composer& c, const BoxProps& props, std::function<void()> children)
     -> Element&;
-/// 弹性占位。
+/// 弹性/固定占位。
+///
+/// - `size > 0`：固定尺寸的空块。
+/// - `size <= 0`（**含默认参数**）：**弹性空隙**（`grow = true`），把同行/同列的
+///   其余内容推到两端。
+///
+/// 为什么默认值必须是弹性而不是“0 宽固定块”：`spacer()` 是右对齐的惯用写法，
+/// “固定 0 宽”与“什么也不做”在观感上完全一样——而调用方要的是**推开**。
+/// 早先默认 `size = 0` 且直接把它当尺寸写入，于是 `spacer()` 静默失效：
+/// 标题栏的窗口控制按钮紧跟在标题文字后面，而不是贴右缘（实测 x=209 而非 1268）。
 [[nodiscard]] auto spacer(Composer& c, float size = 0.0f) -> Element&;
 /// 图标（自绘矢量集；`name` 是 IconName）。
 [[nodiscard]] auto icon(Composer& c, std::string name, float size = 18.0f,

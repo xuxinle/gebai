@@ -1101,8 +1101,16 @@ auto spacer(Composer& c, float size) -> Element& {
     static Element* none = nullptr;
     return *none;
   }
-  element->style().width = size;
-  element->style().height = size;
+  // `size <= 0` = **弹性空隙**（不是“0 宽固定块”）：
+  // `spacer()` 是右对齐的惯用写法，而固定宽度为 0 的块在布局里等同于“不存在”
+  // ——调用方要的是「把其余内容推开」，写成固定 0 宽只会静默失效
+  // （实测：标题栏的 — □ × 因此挤在标题文字后面）。
+  if (size > 0.0f) {
+    element->style().width = size;
+    element->style().height = size;
+  } else {
+    element->style().grow = true;
+  }
   return *element;
 }
 

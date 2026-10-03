@@ -628,13 +628,10 @@ struct CodeEditorPage : Component {
     row(c, {.gap = 8.0f, .padding = 12.0f, .height = 36.0f, .id = "titlebar"}, [&] {
       (void)icon(c, "code", 16.0f);
       (void)text(c, [this] { return window_title(); }, {.id = "title-text"});
-      // 弹性空隙：把窗口控制推到**右侧**。
-      //
-      // ⚠ 不能用 `spacer(c, 0.0f)`：它设的是固定 `width=0/height=0`，不参与弹性伸缩，
-      // 结果是右对齐失败（三个图标紧跟在标题文字后面，实测 x=209 而非右缘）。
-      // 原命令式版用的是「`grow=true` 的空 Panel」，这里也要一样
-      // （`column` 显式指定方向，避免依赖默认值）。
-      (void)column(c, {.grow = true, .key = "title-gap"}, [] {});
+      // 弹性空隙：把窗口控制推到**右侧**（`spacer()` 默认就是弹性的）。
+      // 注：早先这里写成 `spacer(c, 0.0f)` 且当时它=固定 0 宽 → 右对齐静默失效
+      // （三个图标跟在标题后面，实测 x=209 而非 1268）。现在 `size<=0` = `grow=true`。
+      (void)spacer(c);
       for (const char* glyph : {"minus", "square", "close"}) (void)icon(c, glyph, 14.0f);
     });
   }
@@ -957,7 +954,7 @@ struct CodeEditorPage : Component {
       (void)text(c, [this] { return std::to_string(error_count()); }, {.id = "status-errors"});
       (void)icon(c, "warning", 12.0f);
       (void)text(c, [this] { return std::to_string(warning_count()); }, {.id = "status-warnings"});
-      (void)spacer(c, 0.0f);
+      (void)spacer(c);   // 弹性空隙：右侧信息组贴右缘（同标题栏）
       (void)text(c, [this] { return cursor_text_.value(); }, {.id = "cursor-label"});
       (void)text(c, [this] { return selection_text_.value(); }, {.id = "selection-label"});
       (void)text(c, [] { return std::string("·  空格: 4  ·  UTF-8"); });
