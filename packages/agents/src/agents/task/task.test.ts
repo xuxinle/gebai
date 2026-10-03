@@ -127,12 +127,17 @@ describe("task sub-agent", () => {
     const home = mkdtempSync(join(tmpdir(), "gebai-task-subagent-"))
     try {
       let captured: TaskCreateInput | undefined
+      let updatedPatch: TaskUpdateInput | undefined
       const c = ctx(
         home,
         service({
           add: async (input) => {
             captured = input
             return task({ id: "new1", name: "daily" })
+          },
+          update: async (_id, patch) => {
+            updatedPatch = patch
+            return task({ id: "t1", name: "daily" })
           },
         }),
       )
@@ -148,6 +153,7 @@ describe("task sub-agent", () => {
           max_consecutive_errors: 5,
           notify_on: "model",
           notify: [{ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/x", secret: "s3cr3t", at: ["ou_a"] }],
+          env: { REPORT_DIR: "data", PORT: 8080 },
           front: true,
           run_now: false,
         },
@@ -168,7 +174,19 @@ describe("task sub-agent", () => {
       })
       // 工具面用 snake_case 入参，契约是 camelCase：secret/at 原样透传（secret 不下发脱敏占位）
       expect(captured!.notify).toEqual([{ type: "feishu", target: "https://open.feishu.cn/open-apis/bot/v2/hook/x", secret: "s3cr3t", at: ["ou_a"] }])
+      // env：任务级环境变量透传（非字符串值字符串化，模型常把端口写成数字）
+      expect(captured!.env).toEqual({ REPORT_DIR: "data", PORT: "8080" })
       expect(r.output).toContain("new1")
+
+      // env 非对象：明确报错（不静默丢失用户配置）
+      await expect(tools.add.execute({ runner: "script", script: "echo", env: "A=1" }, c)).rejects.toThrow(/env 须为/)
+
+      // update：env 传空对象清除，未传不改动
+      // update：env 传空对象清除，未传不改动
+      await tools.update.execute({ id: "t1", env: { ONLY: "1" } }, c)
+      expect(updatedPatch!.env).toEqual({ ONLY: "1" })
+      await tools.update.execute({ id: "t1", name: "renamed" }, c)
+      expect(updatedPatch!.env).toBeUndefined()
 
       // agents：单值也归一为数组；prompt 型目标与预载名单透传
       await tools.add.execute({ runner: "prompt", prompt: "跑一次巡检", target: "sticky", agents: ["code"] }, c)

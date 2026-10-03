@@ -8,7 +8,7 @@ function schema(properties: Record<string, unknown>, required: string[] = []): T
 
 export const name = "task"
 export const description =
-  "统一任务管理（定时/普通/闲时三类任务的无人值守执行）：创建（脚本运行 / 提示词运行 agent）/查看/修改/手动执行/取消/删除/资源文件管理/主动通知，任务为用户级资源（不随会话删除消失）。三类任务共用一条队列：定时任务到期自动插队首，普通任务入队按序执行，闲时任务仅在队列空闲时串行执行；并发额度默认 5（GEBAI_TASK_MAX_CONCURRENT）。" +
+  "统一任务管理（定时/普通/闲时三类任务的无人值守执行）：创建（脚本运行 / 提示词运行 agent）/查看/修改/手动执行/取消/删除/资源文件管理/主动通知，任务为用户级资源（不随会话删除消失）。支持任务级环境变量（服务端持久化，任务触发不依赖浏览器本地注入）、无人值守执行免审批（含服务模式）。三类任务共用一条队列：定时任务到期自动插队首，普通任务入队按序执行，闲时任务仅在队列空闲时串行执行；并发额度默认 5（GEBAI_TASK_MAX_CONCURRENT）。" +
   "需要周期性脚本、批量任务、无人值守 Agent 任务时装载。输入：任务需求或管理指令。"
 export const systemPrompt =
   "你是任务管理助手。任务 = 用户级无人值守执行单元（持久化于用户目录 tasks.json，与会话生命周期解耦——会话删除后任务仍在），三类由 kind 区分：\n" +
@@ -19,12 +19,13 @@ export const systemPrompt =
   "执行体 runner 二选一（三类任务通用）：\n" +
   "- script（脚本运行）：shell 命令在**任务资源目录**（users/{用户}/tasks/{任务id}/）以用户环境执行，产物写在该目录跨次保留，结果写入任务历史并可选通知；\n" +
   "- prompt（提示词运行 agent）：以给定提示词触发一次完整 Agent 会话。\n" +
-  "prompt 型执行目标 target：ephemeral（缺省，每次执行新建独立会话，上下文不累积——例行检查/报告首选）、sticky（专用会话跨次复用，上下文延续——需要延续记忆的任务用）、session（绑定既有会话执行，缺省为创建任务时的当前会话）；ephemeral/sticky 可配 agents 预载子Agent 名单。执行会话的交互能力随目标不同：ephemeral/sticky 为**无人值守**（无交互通道）——需审批工具在本地模式自动通过、服务模式直接拒绝（向用户说明时不要承诺需审批的步骤），ask 询问与前端渲染/页面捕获不可用；target=session 绑定用户会话（可能有人在场当场审批）保持实时交互。\n" +
+  "prompt 型执行目标 target：ephemeral（缺省，每次执行新建独立会话，上下文不累积——例行检查/报告首选）、sticky（专用会话跨次复用，上下文延续——需要延续记忆的任务用）、session（绑定既有会话执行，缺省为创建任务时的当前会话）；ephemeral/sticky 可配 agents 预载子Agent 名单。执行会话的交互能力随目标不同：ephemeral/sticky 为**无人值守**（无交互通道）——需审批工具**自动通过**（含服务模式），ask 询问与前端渲染/页面捕获不可用；target=session 绑定用户会话（可能有人在场）保持实时交互与实时审批。\n" +
   "定时表达式 schedule（kind=scheduled 必填）：5 段 cron（分 时 日 月 周，如 0 9 * * * 每天 9:00）、@every 30m、@daily/@hourly/@weekly/@monthly、@at 2026-09-01T09:00（一次性，入队后自动停用）；可配 timezone（IANA 名如 Asia/Shanghai，缺省服务器本地时区）；非法表达式创建即拒绝。\n" +
   "队列与度：所有手动执行（task_run）默认排普通任务队尾（front=true 置顶）；定时任务到期自动插队首；额度满或目标会话忙时任务排队等待（运行中的任务不会被中断让出额度）；队列视图用 task_list 的队列信息或 REST /api/v1/tasks/queue 查看。\n" +
   "通知 notify（无人值守任务建议配置）：通道数组，每条 {type,target,webhook_id,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhook_id 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名）、feishu（群机器人 webhook 地址，或直接填群 chat_id（oc_ 前缀）以应用身份推送指定群——后者需服务端配置飞书应用凭证，chat_id 可装载 feishu_group 子Agent 用 chats_list 查询；secret 为加签密钥可选）、feishu_chat（同 feishu 的 chat_id 形态）；飞书默认以 markdown 卡片发送，可配 at 名单 @特定人（open_id，或 \"all\"=@所有人——at 含 all 时自动降级文本消息）；通知时机 notify_on（两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发，由执行会话的模型用 task_notify 决定）。服务端可配全局默认通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU），任务未配 notify 时自动走全局通道（自配则不叠加）；用户未要求特定通道且未拒绝通知时可不传 notify。\n" +
   "通知由谁决定（notify_on，两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发——通知完全由执行会话的模型用 task_notify 决定与撑写，例行正常保持静默、异常/需用户知晓时主动推送）。任何模式下模型都可用 task_notify 主动补充通知；无可用通道时通知不可用（任务配 notify 或服务端配全局默认通道）。prompt 型任务有可用通道时，执行会话自动预载本子Agent 并在触发消息里注入任务 ID——执行任务期间不要用 task 的其它工具管理任务。\n" +
   "可靠性参数：misfire=skip（缺省，停机错过即跳过）/run（启动后立即补跑一次）；timeoutMs 单次执行超时（缺省脚本 5 分钟、提示词 30 分钟，到时终止）；maxConsecutiveErrors 连续失败 N 次自动停用（防错误任务无限重试刷屏，建议通知类任务配置如 5）。\n" +
+  "任务级环境变量 env（可选，两类执行体通用）：服务端持久化于任务定义，每次执行注入——脚本型注进子进程环境、提示词型注入执行会话的任务 env（模型 Provider 与子Agent 环境读取一并生效），优先级高于进程全局与会话环境。这是无人值守任务获得配置的**正路**：浏览器本地 env 只随交互会话的 prompt 到达服务端，任务触发时无人发包，不注入即拿不到。敏感键名（含 KEY/TOKEN/SECRET/PASSWORD 等）的**值加密后落盘**（AES-256-GCM，密钥内置），回显时为掩码 `***`——掩码原样回传即保留原值（不改动就不要填新值）。加密只防「随手看到」（文件被浏览/被 grep/随备份外带/被模型读进上下文），不防能读取整个数据目录的攻击者；强度要求更高时把配置写进任务资源目录由脚本自行加载。\n" +
   "资源文件：每个任务有独立资源目录，脚本型任务的工作目录即它（相对路径直接读写），文档/配置放这里跨次保留。用 task_files 列目录/读/写/删；也可用通用文件工具直接操作该目录（task_list 输出含目录路径）。\n" +
   "执行记录：每次执行（含定时到期未启动的 skipped）各存一个文件：users/{用户}/task-runs/{任务ID}/{时间}.json（UTC ISO 为名，内容为完整记录：状态/耗时/输出/错误/执行会话）；任务定义文件不含记录，按时间倒序最多保留 200 条（超出删最旧）。需要回看历史时读该目录（或 REST GET /api/v1/tasks/:id/runs?limit=）。\n" +
   "工作要点：\n" +
@@ -34,8 +35,9 @@ export const systemPrompt =
   "4) 手动执行（task_run，需审批）：立即入队执行一次用于验证或临时需要（不改动既定调度节奏），front=true 插队；\n" +
   "5) 取消（task_cancel，需审批）：排队中的执行可出队；正在运行的可终止（脚本型任务需等其自身结束或超时）；\n" +
   "6) 删除（task_remove，需审批）：按 id 删除，不可恢复，删前向用户确认；\n" +
-  "7) 主动通知（task_notify，无需审批）：把自撰 markdown 正文推到任务的通知通道（id 缺省=当前正在执行的任务）；仅当用户需要知晓时才推送（结论先行、简明），例行正常保持静默。\n" +
-  "任务为用户级资源：任何会话创建后全局可见可管（跨会话不再隔离）；创建/修改/删除/手动执行/取消均需用户审批（任务 = 无人值守的任意命令/会话执行）。用户级待办（todo）是独立的清单资源，其闲时自动执行会绑定一个闲时任务，但待办本身不经本子Agent 管理。"
+  "7) 主动通知（task_notify，无需审批）：把自撰 markdown 正文推到任务的通知通道（id 缺省=当前正在执行的任务）；仅当用户需要知晓时才推送（结论先行、简明），例行正常保持静默；\n" +
+  "8) 环境变量（env 参数，创建/修改时传）：任务需要脱离当前会话独立运行（定时触发/无人值守）时，把依赖的配置随任务一起创建或更新——不要指望浏览器本地 env。\n" +
+  "任务为用户级资源：任何会话创建后全局可见可管（跨会话不再隔离）；创建/修改/删除/手动执行/取消均需用户审批（任务 = 无人值守的任意命令/会话执行）。无人值守执行的需审批工具自动通过（含服务模式），管理动作仍需逐次审批。用户级待办（todo）是独立的清单资源，其闲时自动执行会绑定一个闲时任务，但待办本身不经本子Agent 管理。"
 
 function notifyParam(): Record<string, unknown> {
   return {
@@ -68,6 +70,28 @@ function parseAgents(raw: unknown): string[] | undefined {
   const list = Array.isArray(raw) ? raw : [raw]
   const out = list.map((a) => String(a ?? "").trim()).filter(Boolean)
   return out.length ? out : undefined
+}
+
+/** 任务级环境变量参数归一：值为字符串化（数字/布尔也接受，模型常把端口写成数字）；非对象报错。 */
+function parseEnv(raw: unknown): Record<string, string> | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("env 须为 { 变量名: 值 } 对象")
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (v === null || v === undefined) continue
+    out[k] = typeof v === "string" ? v : String(v)
+  }
+  return out
+}
+
+/** env 参数 schema（add/update 共用）。 */
+function envParam(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: { type: "string" },
+    description:
+      "任务级环境变量（可选，服务端持久化于任务定义，每次执行注入）：脚本型注进子进程环境、提示词型注入执行会话的任务 env（模型与子Agent 一并生效），优先级高于进程全局与会话环境；无人值守运行不依赖浏览器本地注入。敏感键名的值加密落盘（AES-256-GCM）、回显为掩码 `***`——**掩码原样回传即保留原值**（只改其它项时不要为敏感项填新值）；传空对象 {} 清除。",
+  }
 }
 
 function parseNotify(raw: unknown): TaskNotifyChannel[] | undefined {
@@ -111,7 +135,7 @@ const add: Tool = {
   description:
     "创建任务（需审批）。" +
     KIND_NOTE +
-    "。runner 二选一：script（shell 在任务资源目录执行）/ prompt（提示词触发一次 Agent 会话）。kind=scheduled 必须给 schedule（5 段 cron / @every 30m / @daily / @at 2026-09-01T09:00）；kind=manual 缺省创建即入队（run_now=false 则只创建）；kind=idle 在队列空闲时执行。可配 timezone/misfire/timeout_ms/max_consecutive_errors/notify 与 prompt 型 target（ephemeral/sticky/session）+ agents。",
+    "。runner 二选一：script（shell 在任务资源目录执行）/ prompt（提示词触发一次 Agent 会话）。kind=scheduled 必须给 schedule（5 段 cron / @every 30m / @daily / @at 2026-09-01T09:00）；kind=manual 缺省创建即入队（run_now=false 则只创建）；kind=idle 在队列空闲时执行。可配 timezone/misfire/timeout_ms/max_consecutive_errors/env/notify 与 prompt 型 target（ephemeral/sticky/session）+ agents。",
   requiresApproval: true,
   parameters: schema(
     {
@@ -127,6 +151,7 @@ const add: Tool = {
       session_id: { type: "string", description: "target=session 绑定的会话 id（缺省=当前会话）" },
       agents: { type: "array", description: "target=ephemeral/sticky 的预载子Agent 名单", items: { type: "string" } },
       timeout_ms: { type: "number", description: "单次执行超时毫秒（缺省脚本 5 分钟 / 提示词 30 分钟）" },
+      env: envParam(),
       max_consecutive_errors: { type: "number", description: "连续失败 N 次自动停用（0=不停用）" },
       notify_on: { enum: ["auto", "model"], description: "通知时机（缺省 auto=执行结束自动发；model=由执行会话的模型用 task_notify 决定）" },
       notify: notifyParam(),
@@ -151,6 +176,7 @@ const add: Tool = {
       sessionId: args.session_id != null ? String(args.session_id) : undefined,
       agents: parseAgents(args.agents),
       timeoutMs: args.timeout_ms != null ? Number(args.timeout_ms) : undefined,
+      env: parseEnv(args.env),
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
       notifyOn: args.notify_on != null ? (String(args.notify_on) as "auto" | "model") : undefined,
       notify: parseNotify(args.notify),
@@ -188,7 +214,7 @@ const list: Tool = {
 
 const update: Tool = {
   name: "update",
-  description: "修改任务配置（需审批）：名称/启用状态/执行体与内容/定时表达式与时区/补跑策略/执行目标与预载子Agent/超时/通知/连续失败阈值。仅传需要修改的字段。",
+  description: "修改任务配置（需审批）：名称/启用状态/执行体与内容/定时表达式与时区/补跑策略/执行目标与预载子Agent/超时/环境变量/通知/连续失败阈值。仅传需要修改的字段；env 传空对象 {} 清除。",
   requiresApproval: true,
   parameters: schema(
     {
@@ -205,6 +231,7 @@ const update: Tool = {
       session_id: { type: "string", description: "target=session 绑定的会话 id" },
       agents: { type: "array", description: "预载子Agent 名单（空数组清除）", items: { type: "string" } },
       timeout_ms: { type: "number", description: "单次执行超时毫秒" },
+      env: envParam(),
       max_consecutive_errors: { type: "number", description: "连续失败自动停用阈值（0=不停用）" },
       notify_on: { enum: ["auto", "model"], description: "通知时机（auto=执行结束自动发 / model=由执行会话的模型用 task_notify 决定）" },
       notify: notifyParam(),
@@ -226,6 +253,7 @@ const update: Tool = {
       sessionId: args.session_id != null ? String(args.session_id) : undefined,
       agents: args.agents !== undefined ? parseAgents(args.agents) : undefined,
       timeoutMs: args.timeout_ms != null ? Number(args.timeout_ms) : undefined,
+      env: args.env !== undefined ? parseEnv(args.env) : undefined,
       maxConsecutiveErrors: args.max_consecutive_errors != null ? Number(args.max_consecutive_errors) : undefined,
       notifyOn: args.notify_on != null ? (String(args.notify_on) as "auto" | "model") : undefined,
       notify: parseNotify(args.notify),

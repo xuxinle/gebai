@@ -6,6 +6,7 @@ import {
   canRun,
   canStop,
   emptyForm,
+  envLines,
   filterTasks,
   formFromTask,
   formToCreateInput,
@@ -18,6 +19,7 @@ import {
   metaLine,
   notifyLines,
   notifySummary,
+  parseEnvLines,
   parseNotifyLines,
   runLine,
   scheduleSummary,
@@ -236,5 +238,41 @@ describe("通知通道行文本", () => {
       `webhook ${"b".repeat(32)}\nfeishu_chat oc_x s`,
     )
     expect(notifyLines(mk())).toBe("")
+  })
+})
+
+describe("任务环境变量行文本", () => {
+  test("环境变量 → 行文本（每行 NAME=值）", () => {
+    expect(envLines(mk())).toBe("")
+    expect(envLines(mk({ env: { API_BASE: "https://e.com", REPORT_DIR: "data" } }))).toBe("API_BASE=https://e.com\nREPORT_DIR=data")
+    expect(envLines(mk({ env: { EMPTY: "" } }))).toBe("EMPTY=")
+  })
+
+  test("行文本 → 环境变量（空文本 undefined；值含 = 保留；非法行拒绝）", () => {
+    expect(parseEnvLines("")).toBeUndefined()
+    expect(parseEnvLines("\n   \n")).toBeUndefined()
+    expect(parseEnvLines("A=1\nB=two words")).toEqual({ A: "1", B: "two words" })
+    expect(parseEnvLines("TOKEN=abc=def")).toEqual({ TOKEN: "abc=def" })
+    expect(parseEnvLines("EMPTY=")).toEqual({ EMPTY: "" })
+    expect(() => parseEnvLines("NO_EQ")).toThrow(/缺少/)
+    expect(() => parseEnvLines("1BAD=1")).toThrow(/变量名非法/)
+  })
+
+  test("创建请求体携带 env；编辑态反填后更新为全量视图（清空即 {}）", () => {
+    const created = formToCreateInput({ ...emptyForm(), kind: "manual", runner: "prompt", prompt: "x", envText: "A=1" })
+    expect(created.env).toEqual({ A: "1" })
+    expect(formToCreateInput({ ...emptyForm(), kind: "manual", runner: "prompt", prompt: "x" }).env).toBeUndefined()
+
+    const t = mk({ env: { A: "1", B: "2" } })
+    const form = formFromTask(t)
+    expect(form.envText).toBe("A=1\nB=2")
+    expect(formToUpdateInput(form).env).toEqual({ A: "1", B: "2" })
+    // 表单是环境变量的全量视图：清空后更新补丁为 {}（清除），而非「未提供不改动」
+    expect(formToUpdateInput({ ...form, envText: "" }).env).toEqual({})
+  })
+
+  test("校验：环境变量行非法拦截", () => {
+    expect(validateForm({ ...emptyForm(), runner: "prompt", prompt: "x", schedule: "0 9 * * *", envText: "NO_EQ" })).toContain("缺少")
+    expect(validateForm({ ...emptyForm(), runner: "prompt", prompt: "x", schedule: "0 9 * * *", envText: "1BAD=1" })).toContain("变量名非法")
   })
 })

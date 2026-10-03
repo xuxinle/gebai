@@ -1282,17 +1282,18 @@ export const preload = false
 实现于 `packages/agents/src/agents/task/task.ts`（工具名经命名空间为 `task_*`），管理与执行**用户级**任务——定时（`scheduled`）/普通（`manual`）/闲时（`idle`）三类共用一份存储与一条队列（能力实现见「统一任务管理」），支持脚本运行与提示词运行 agent、执行目标（新会话/专用会话/绑定会话）、时区、一次性 `@at`、错过补跑、执行记录（按文件落盘，见「统一任务管理 → 执行记录」）、连续失败自动停用、飞书群与 Webhook 通知（含模型主动推送 `task_notify`）、任务资源文件：
 
 - **工具集**（八工具，命名空间内单字 `add`/`list`/`update`/`run`/`cancel`/`remove`/`files`/`notify`）：
-  - `add`（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断）：创建任务；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`，返回任务行与资源目录提示
+  - `add`（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断）：创建任务；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`env`/`notify`/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`，返回任务行与资源目录提示
   - `list`：查看**当前用户全部**任务（ID/名称/类别/执行体/启用状态/运行态/周期/下次执行/次数/最近错误）+ 队列概览（并发额度、排队顺序与等待原因、运行中条目）
-  - `update`（`id`）：按 id 修改（全部可变字段），定时任务改后重算下次执行时间；`notify` 的 `secret` 传 `***` 表示保持原值；重新启用重置连续失败计数
+  - `update`（`id`）：按 id 修改（全部可变字段，含 `env`——传空对象 `{}` 清除），定时任务改后重算下次执行时间；`notify` 的 `secret` 传 `***` 表示保持原值；重新启用重置连续失败计数
   - `run`（`id`，可选 `front`）：手动执行一次（入队；不改动既定调度节奏），返回队列位置
   - `cancel`（`id`，`mode=dequeue|stop`）：出队（排队中）或终止运行中的那次执行
   - `remove`（`id`）：按 id 删除（不可恢复；任务资源目录文件保留）
   - `files`（`id`，`op=list|read|write|delete`）：任务资源目录（脚本/文档）读写，越界路径拒绝
   - `notify`（`text` 必填，可选 `title`/`id`/`at`）：主动推送一条通知——自撰 markdown 正文投递到任务配置的通道（未配则全局默认通道）；`id` 缺省时按当前会话反查正在运行的任务（任务执行中调用无需传 id）；投递目标限定为用户已配置的通道（不接受任意 URL），无可用通道时返回配置指引
-- **审批**：`add`/`update`/`run`/`cancel`/`remove`/`files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 与 `notify` 免审批——无人值守执行等不到人工审批，且通知的投递目标被限定为用户已配置的通道（任务创建时已经过审批，不新增任意外发面）
+- **审批**：`add`/`update`/`run`/`cancel`/`remove`/`files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务）；`list` 与 `notify` 免审批——无人值守执行等不到人工审批，且通知的投递目标被限定为用户已配置的通道（任务创建时已经过审批，不新增任意外发面）。**执行期**（调度器触发的 prompt 型任务，`target=ephemeral/sticky`）需审批工具**一律自动通过**（含服务模式）——管理动作逐次确认、执行职责由任务授权承担（见「统一任务管理 → 执行免审批」）
 - **能力开关**：`GEBAI_TASKS_ENABLED` 默认 `true`；显式 `false` 时 `task` 子Agent 不注册（定义从子Agent 清单移除——`agent_list`/`agent_load`/`subsession_run` 均不可见，与调度器、REST 管理面一致完全隐藏）；`ctx.tasks` 未注入（引擎未挂调度器）时工具返回「能力未启用」提示
 - **用户级绑定**：任务经 ToolContext 绑定**当前用户**（与会话解耦——任何会话创建后该用户全局可见可管，`TaskManager` 校验用户归属，跨用户不可见不可操作；`originSessionId` 仅记录创建来源会话供结果消息写回）；执行记录同样按用户归属校验（读非本人任务记录报「任务不存在」）
+- **环境变量**：任务级 `env`（可选，两类执行体通用）由工具参数 / REST body 传入并服务端持久化；敏感键名的值 AES-256-GCM 加密落盘（非敏感明文）、回显为掩码 `***`（回传掩码即保留原值）；无人值守任务不依赖浏览器本地 env 注入（见「统一任务管理 → 任务级环境变量」）
 - **预加载**：`preload = false`，按需装载（与其余子Agent 一致）
 
 
@@ -1645,13 +1646,14 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 ### 环境变量配置
 
-所有配置统一采用**环境变量**形式（`GEBAI_*` / `OPENAI_*` / 子Agent `{AGENT_NAME_UPPER}_*` 等），无独立配置文件（`.env` 仅是环境变量的文件来源：脚本调试=仓库根、二进制=`{GEBAI_HOME}/.env`，真实环境变量恒优先）。**用户/会话环境变量服务端零留存**（不落任何 env 文件），层级与存储：
+所有配置统一采用**环境变量**形式（`GEBAI_*` / `OPENAI_*` / 子Agent `{AGENT_NAME_UPPER}_*` 等），无独立配置文件（`.env` 仅是环境变量的文件来源：脚本调试=仓库根、二进制=`{GEBAI_HOME}/.env`，真实环境变量恒优先）。**用户/会话环境变量服务端零留存**（不落任何 env 文件；**例外**：任务级 `env` 是用户显式随任务保存的配置，持久化于 `users/{user}/tasks.json`——敏感键名的值加密落盘，见「统一任务管理 → 任务级环境变量」），层级与存储：
 
 | 层级 | 来源 | 存储 | 说明 |
 |------|------|------|------|
 | 全局 | 进程环境变量（启动时注入，`.env`/系统环境） | 服务端启动配置 | 服务端默认配置，所有用户/会话共享 |
 | 浏览器本地 | 前端设置面板 | **浏览器 localStorage（`gebai.ui.env`）——用户环境变量唯一持久化位置** | 随每条 prompt 临时注入为任务级覆盖，清除站点数据即清除 |
 | 会话内存态 | env 接口 / 飞书命令运行中设置 | **服务端内存（不落盘，进程重启即空）** | 仅供运行中即时生效类开关（如自动审批）；由前端每次加载会话自行重新同步所需键 |
+| 任务级 | 任务定义（`task_add`/`task_update` 的 `env`、REST body、前端任务表单） | **服务端用户目录 `users/{user}/tasks.json`（用户显式保存的配置；敏感键值 AES-256-GCM 加密落盘）** | 仅该任务的每次执行注入（脚本子进程 / prompt 型执行会话），优先级最高；无人值守运行不依赖浏览器发包（见「统一任务管理 → 任务级环境变量」） |
 
 **admin 密码引导**：服务模式不设注册表引导（**不落明文密码**）——启动参数 `GEBAI_ADMIN_PASSWORD_HASH="salt:hash"`（scrypt 加盐哈希，`bun run --cwd packages/server hash-password` 生成）**设置则启用 admin（覆盖其哈希），不设置则 admin 被禁用**——admin 唯一入口即此参数（不可注册创建）；admin 禁用不影响普通用户（登录页可自助注册，注册用户恒为普通角色）。
 
@@ -1687,7 +1689,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 #### 覆盖规则
 
-- 生效顺序：**浏览器本地注入（本次任务） > 会话内存态 > 全局**，同名字段取最高优先级的非空值（前端 localStorage 注入仅覆盖当前运行的任务，不修改任何持久化层级）
+- 生效顺序：**任务级（任务定义） > 浏览器本地注入（本次任务） > 会话内存态 > 全局**，同名字段取最高优先级的非空值（浏览器本地注入仅覆盖当前运行的任务，不修改任何持久化层级；任务级 env 仅在其所属任务的执行中生效）
 - **启动裁剪类变量（`GEBAI_PROFILE`/`GEBAI_PROMPT_*`/`GEBAI_TOOL_*`/`GEBAI_SUB_AGENTS_*`/`GEBAI_PRELOAD_SUB_AGENTS`）不参与上述分层**：它们是**启动级事实**（进程启动时解析一次，决定提示词段落、工具表、子Agent 可见面与预载集合），浏览器/会话层同名键不参与裁剪判定，改配置需重启（见「启动裁剪与领域专用模式」）
 - **模型相关配置（`GEBAI_LLM_*` 全套与 `GEBAI_VISION_*`）任务级生效**：浏览器本地/会话内存态注入在任务启动时按合并后 env 重建 Provider（`applyModelEnvOverrides`/`resolveVisionProvider`），覆盖 Provider 级（进程环境变量）配置——主循环与 `subsession_run` 子会话运行、上下文压缩阈值/摘要、附件图片内联判定、视觉分析均生效；无覆盖键时沿用启动 Provider 实例；非法值（API_KIND 非三类/MAX_CONTEXT 非正数）忽略回退
 - 会话内存态删除某变量 = 恢复为全局的值
@@ -1912,7 +1914,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 ### 工具审批
 - 全局工具：`sh`、`py` 默认需要审批；`read`/`write`/`edit` 默认无需审批（`file` 的 `delete` 动作**动态需审批**——递归且不可恢复，能力上甚于一次 `sh rm`）
 - **免审白名单强制（`approval:false` 不再无条件生效）**：`sh` 的免审标记经服务端强制校验（`shApprovalFreeAllowed`）——只读命令（`validateShCommandSafeMode` 全量解析通过）或测试/静态检查/包管理器 test 子命令（`bun test`/`npm run <脚本名>`/`pytest`/`tsc`/`eslint`/`go test` 等，`run` 仅脚本名形态、禁文件直跑）放行免审，其余（含 `curl`/`wget`、命令替换、输出重定向、无法识别结构）一律仍走审批——防提示词注入诱导模型自行声明免审执行任意命令；**安全模式例外**：sh 在工具内按只读白名单降级（风险已由白名单约束），免审标记直接生效；**`py`/`js` 的 code 为任意代码**：`py` 免审标记不生效（恒需审批）；`js` 按词元扫描放行——纯数据加工/工具编排代码（无 `fetch`/`WebSocket`/`Bun.*`（除 `Bun.file`）/`process.env`/动态 import 等网络外发、进程、敏感读取通道）免审生效，含上述通道仍需审批（fail-closed，字符串误报只是多一次审批）
-- 子Agent工具：通过 `requiresApproval` 声明（仅对**独有工具**生效——编码类子Agent 不再重复定义文件工具，全局 write/edit/patch 维持默认免审批姿态；静态 `true` 会覆盖工具自身的函数形态声明，须保留动态判定的工具不要静态声明）；`task` 子Agent 的 `task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`/`task_files` 默认需要审批（任务 = 无人值守执行，见「统一任务管理」）
+- 子Agent工具：通过 `requiresApproval` 声明（仅对**独有工具**生效——编码类子Agent 不再重复定义文件工具，全局 write/edit/patch 维持默认免审批姿态；静态 `true` 会覆盖工具自身的函数形态声明，须保留动态判定的工具不要静态声明）；`task` 子Agent 的 `task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`/`task_files` 默认需要审批（任务 = 无人值守执行，**管理动作**逐次确认；执行期需审批工具在无人值守任务中自动通过，见「统一任务管理 → 执行免审批」）
 ^- `js`：**默认审批一次覆盖整个脚本含内部工具调用**（代码已经用户审阅；`approval:false` 免审运行时内部需审批工具在 RPC 分发层被拒——脚本体未经审阅不得免审执行审批工具）；**动态审批机制**：`Tool.requiresApproval` 支持函数形态 `(args, ctx) => boolean`，引擎在审批点解析（函数异常按需审批 fail-safe））；嵌套调用的 params 中自带 `approval: false` 不改变外层审批姿态（分发层按剥离免审标记后的姿态解析，防脚本内自我免审）
 - 会话级跳过：`/approval-skip` 命令；**会话运行中开启即时生效**——引擎审批点实时判定（任务 env 快照或会话内存态 env 任一为 `true` 即跳过，前端开启时自动通过当前等待中的审批卡片，后续审批直接跳过；关闭需下次任务生效）；**用户本人可设置自己的会话**（`GEBAI_APPROVAL_SKIP` 写入会话内存态 env，不落盘——非管理员仍受路径/脚本/网络沙箱完整约束；ask 填值分支模型驱动通道服务模式下一律拒绝）
 - 请求级跳过/收紧（REST `prompt`/`chat` body 的 `autoApprove` 布尔，任务级生效不持久化）：`true` 映射任务级 `approvalPolicy=auto`（需审批工具自动通过，含服务模式——调用方即用户本人，与会话级跳过同一授权面）；`false` 映射 `deny`（无交互通道下需审批工具直接拒绝，本地模式同样生效，不空等超时）；见「交互模式 → 审批策略按模式分级」
@@ -1940,15 +1942,15 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 | 模式 | 语义 | 通道 | 可用工具 |
 |------|------|------|----------|
-| `none`（**无交互**） | 单次请求：一次调用执行完返回结果，无前端、无往返；**本地模式需审批工具自动通过**（无人可询问）；**服务模式需审批工具直接拒绝**（防普通用户经 REST 免审批执行敏感工具） | REST `POST /sessions/:id/prompt` | 仅 `none` 声明（文件/网络/脚本等） |
+| `none`（**无交互**） | 单次请求：一次调用执行完返回结果，无前端、无往返；**本地模式需审批工具自动通过**（无人可询问）；**服务模式需审批工具直接拒绝**（防普通用户经 REST 免审批执行敏感工具；**无人值守任务执行例外**——任务经用户审批创建，以 `autoApprove=true` 运行，见「统一任务管理 → 执行免审批」） | REST `POST /sessions/:id/prompt` | 仅 `none` 声明（文件/网络/脚本等） |
 | `multi_turn`（**多轮交互**） | 多轮请求-响应往返（非流式），有往返但无前端页面；**仅关键操作（requiresApproval）询问用户**（如飞书审批回调卡片），非关键操作自动 | 飞书机器人 | `none` + `multi_turn` 声明（ask 选择/计划分支走飞书选择卡片；show 图表分支走飞书后端渲染） |
 | `realtime`（**实时交互**） | 实时流式交互：完整前端，关键操作询问用户 | WebSocket（Web UI，默认） | 全部 |
 
 - **工具声明**（`interaction: "realtime"` 仅实时前端）：`page_capture`（依赖前端页面配合）；`interaction: "multi_turn"`（至少多轮交互）：无（原 ask_user/plan 的飞书适配由 ask 分支承接）；其余工具缺省 `none`；**合并型工具不做工具级声明**——`show`（图表/HTML/文件三分支）与 `ask`（选择/填值/计划三分支）全模式可见，按 `ctx.interactionMode` 在分支内校验通道能力（show：html 分支仅 realtime、图表分支 none 下引导 `render=backend`；ask：填值分支仅 realtime、选择/计划分支 none 下报「无交互能力」），见「内容展示」/「用户询问」
-- **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行）；**请求级 `autoApprove` 显式覆盖**（REST `prompt`/`chat` body 布尔字段，映射引擎任务级 `approvalPolicy`）：`true` = 需审批工具自动通过（**含服务模式**——调用方即用户本人，等价其自设 `GEBAI_APPROVAL_SKIP` 会话 env，模型驱动的 ask 填值通道仍拒绝该键，防提示词注入）；`false` = 无交互通道下需审批工具直接拒绝（**本地模式同样生效**——单次调用无人可审批，不空等 5 分钟超时）；缺省 = 通道默认姿态（本地自动/服务拒绝）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书审批交互卡片，见「飞书机器人集成 → 审批交互卡片」），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
+- **审批策略按模式分级**：无交互模式 `isApprovalSkipped`——**本地模式恒真**（`sh`/`py`/`write`/`edit` 等需审批工具**自动通过**，任务不会卡在审批等待）；**服务模式返回拒绝**（需审批工具在审批点直接拒绝执行，返回「需审批但当前通道无交互」说明，不进入等待——REST 无人可审批，普通用户不得借此免审批执行 shell/任务；管理员可经正式通道设置 `GEBAI_APPROVAL_SKIP` 后执行；**无人值守任务执行例外**：调度器触发时以 `autoApprove=true` 运行——任务经用户审批创建，执行即其授权的无人值守落地，服务模式同样自动通过，见「统一任务管理 → 执行免审批」）；**请求级 `autoApprove` 显式覆盖**（REST `prompt`/`chat` body 布尔字段，映射引擎任务级 `approvalPolicy`）：`true` = 需审批工具自动通过（**含服务模式**——调用方即用户本人，等价其自设 `GEBAI_APPROVAL_SKIP` 会话 env，模型驱动的 ask 填值通道仍拒绝该键，防提示词注入）；`false` = 无交互通道下需审批工具直接拒绝（**本地模式同样生效**——单次调用无人可审批，不空等 5 分钟超时）；缺省 = 通道默认姿态（本地自动/服务拒绝）；`sh`/`py` 的 `approval:false` 按次免审**只作用于交互审批**，服务模式无交互通道按剥离免审标记后的默认审批姿态照常拒绝（引擎 `stripApprovalFlags` 递归删键解析，防模型自行声明免审绕过硬门槛）；多轮交互模式关键操作（requiresApproval）经审批卡片询问用户（飞书审批交互卡片，见「飞书机器人集成 → 审批交互卡片」），非关键操作不打扰；实时交互模式维持询问用户（前端审批卡片）
 - **飞书通道** = `interactionMode: "multi_turn"`：realtime 声明的工具（`page_capture`）自动禁用（原 `FEISHU_DISABLED_TOOLS` 名单已移除，由声明统一驱动）；`ask`/`show` 不做工具级禁用（ask 选择/计划分支经飞书选择卡片作答、填值分支明确报错；show html 分支明确报错、图表分支经飞书后端渲染出图），关键操作经审批卡片询问
-- **REST 通道** = `interactionMode: "none"`：实时前端工具自动禁用，不再等待至超时；`ask`/`show` 不做工具级禁用（ask 选择/计划分支报「无交互能力」、填值分支引导设置面板；show html 分支明确报错、图表分支直接引导 `render=backend`，均不空等超时）；本地模式需审批工具自动通过，**服务模式需审批工具直接拒绝**（防免审批执行）；审批姿态可经请求级 `autoApprove` 显式覆盖（见上方「审批策略按模式分级」）；需要完整交互能力请走 WS 通道
-- **定时/普通/闲时任务执行**（调度器触发的 prompt 型）按**无人值守与否**分流（见「统一任务管理」）：`ephemeral`/`sticky` = `interactionMode: "none"`——无人盯着执行会话，故按无交互语义运行（本地模式需审批工具**自动通过**、不空等 5 分钟审批超时后跳过；服务模式需审批工具在审批点**直接拒绝**并落因；`page_capture` 自动禁用、`show` 图表分支引导后端渲染、`ask` 直接报「无交互能力」），同时触发消息注入一行「无人值守执行」上下文告知模型；`target=session`（绑定用户会话，可能有人在场当场审批）= `realtime` 维持现状
+- **REST 通道** = `interactionMode: "none"`：实时前端工具自动禁用，不再等待至超时；`ask`/`show` 不做工具级禁用（ask 选择/计划分支报「无交互能力」、填值分支引导设置面板；show html 分支明确报错、图表分支直接引导 `render=backend`，均不空等超时）；本地模式需审批工具自动通过，**服务模式需审批工具直接拒绝**（防免审批执行；**无人值守任务执行例外**：调度器触发时以 `autoApprove=true` 运行，任务经用户审批创建即其授权，见「统一任务管理 → 执行免审批」）；审批姿态可经请求级 `autoApprove` 显式覆盖（见上方「审批策略按模式分级」）；需要完整交互能力请走 WS 通道
+- **定时/普通/闲时任务执行**（调度器触发的 prompt 型）按**无人值守与否**分流（见「统一任务管理」）：`ephemeral`/`sticky` = `interactionMode: "none"` + `autoApprove: true`——无人盯着执行会话，故按无交互语义运行（需审批工具**自动通过**、不空等 5 分钟审批超时后跳过，本地与服务模式无差别；任务经用户审批创建，即其授权的无人值守落地），同时触发消息注入一行「无人值守执行」上下文告知模型；`page_capture` 自动禁用、`show` 图表分支引导后端渲染、`ask` 直接报「无交互能力」。`target=session`（绑定用户会话，可能有人在场当场审批）= `realtime` 维持现状
 - 禁用判定同时匹配子Agent 命名空间工具（`{agent}_page_capture` 等同名工具同样禁用）；与 `disabledTools` 名单（部署方可另行指定）叠加生效
 
 #### 输出方式（与交互模式正交，同样请求层配置）
@@ -2027,7 +2029,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - `idle` **闲时**：仅当队列中无 scheduled/manual 条目、且没有运行中的任务、且该用户没有运行中的会话时启动，**同时只跑 1 个**（串行推进）；用户级待办开启 ⚡ 闲时自动执行时即绑定此类任务（见「用户级待办」）。闲时条目**一次入队即一次执行**：成功执行后自动停用（防空闲时无限重复跑；下一次由待办重开开关或手动执行恢复启用），失败/超时按 tick 周期节流后才重试（`nextRunAt = 结束时刻 + 30s`）；排队顺序由外部清单序提供（待办场景按其清单顺序，其他场景按创建时间）
 - **执行体（`runner`）**：
   - `script` **脚本运行**：执行 shell 命令（在任务资源目录 `users/{user}/tasks/{task_id}/` 以用户环境运行——目录跨次运行保留产物；环境为进程环境 + 尽力解析的关联会话环境，不依赖会话存活），执行结果（成功/失败 + 输出）写入任务运行历史，并在**来源会话仍存在时**作为消息写回其消息流（`【智体·{类别}「名称」执行结果（成功/失败）】`，如 `【智体·定时任务「日报」执行结果（成功）】`；历史可见、模型可感知；来源会话已删除则静默跳过）。**写回消息为 `role: "user"` + `engineNote: "task"`**（前端渲染为「任务」通知条）——与引擎提醒同规则：思考类模型不接受以 assistant 结尾的请求（写回后它往往成为尾消息，会话下次带工具面的请求会被 400 拒绝，实测）
-  - `prompt` **提示词运行 agent**：以指定提示词触发一次完整 Agent 会话（复用主循环），过程与结果在该执行会话的消息流呈现，末条 assistant 消息作为结果摘要进任务记录/通知；**交互模式按执行目标分流**——`ephemeral`/`sticky` 无人值守形态跑 `interactionMode: "none"`（见「交互模式」：本地模式需审批工具自动通过，不空等 5 分钟审批超时后跳过；服务模式直接拒绝并落因；`page_capture`/前端渲染/ask 询问不可用），触发消息附一行「无人值守执行」上下文告知模型；`target=session` 可能有人在场当场审批，保持 `realtime`
+  - `prompt` **提示词运行 agent**：以指定提示词触发一次完整 Agent 会话（复用主循环），过程与结果在该执行会话的消息流呈现，末条 assistant 消息作为结果摘要进任务记录/通知；**交互模式按执行目标分流**——`ephemeral`/`sticky` 无人值守形态跑 `interactionMode: "none"`（见「交互模式」：需审批工具**自动通过**、不空等 5 分钟审批超时后跳过，脚本模式同样生效；`page_capture`/前端渲染/ask 询问不可用），触发消息附一行「无人值守执行」上下文告知模型；`target=session` 可能有人在场当场审批，保持 `realtime`
 - **执行目标（`target`，prompt 型，解耦会话的核心设计）**：
   - `ephemeral`（缺省）：每次执行**新建独立会话**（会话名 `{类别}「名称」`，进入用户会话列表，上下文每次全新不累积、随正常数据生命周期清理）——例行检查/报告类首选；可选 `agents` 预载子Agent 名单（写入新会话 `loadedSubAgents`，装载保障按此注册工具与提示词）
   - `sticky`：**专用会话跨次复用**（首次触发惰性创建并记 `stickySessionId`，后续在同一会话续跑——上下文延续，适合需要记住上次状态的任务）
@@ -2037,6 +2039,16 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - `misfire` 停机错过补跑策略：`skip`（缺省，错过即跳过、下次从当前时间重算）/ `run`（服务启动后发现触发点已过期则立即补跑**一次**——加载时保留过期 `nextRunAt`，首个 tick 执行后按当前时间重算）
   - `timeoutMs` 单次执行超时（缺省脚本 5 分钟（与 `sh`/`py` 同级）/ 提示词 30 分钟；合法区间 1s~24h）——提示词型到时走 `engine.windDown`：先让运行中的子会话**快速结束**拿结论（注入收敛指令 + 宽限，见「子会话快速结束」），再取消会话任务，并记 `status=timeout`（注意超时定时器不可 `unref`：await 挂起的 Promise 不保活事件循环）
   - `maxConsecutiveErrors` 连续失败自动停用阈值（缺省 0 不停用；连续 error/timeout 达阈值即 `enabled=false` 并在 `lastError` 记因——防错误任务无限重试刷屏/刷通知；成功清零，重新启用也清零）
+- **任务级环境变量（`env`）**：任务定义内的环境变量表（`Record<string,string>`，可选，两类执行体通用），服务端持久化于 `users/{user}/tasks.json`：
+  - **注入点**：脚本型与继承环境（关联会话环境 ?? 进程环境）合并后传入 `sandbox.exec`，提示词型作为 `engine.run` 的 `envOverride` 注入执行会话——模型 Provider 重建、脚本子进程、子Agent 环境读取均生效；优先级**高于**进程全局与会话环境（任务专用配置覆盖宽口径默认值）
+  - **无人值守可用性**：浏览器本地 env 只随交互会话的 `prompt` 请求到达服务端（见「前端环境变量」），任务触发时无人发包——任务级 `env` 是无人值守任务获得配置的唯一服务端持久通道（不依赖浏览器、不依赖创建来源会话存活）
+  - **校验与持久化边界**：变量名须为标识符（拒绝 `__proto__`）、值须为字符串；创建/修改时非法即拒，启动加载遇外部编辑损坏的条目**整条丢弃**（不阻断任务加载）；修改为**整集覆盖**语义（传空对象 `{}` 清除）
+  - **敏感值加密落盘**（`core/support/crypto.ts`）：键名判为敏感的项（`isSensitive`，即 `*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`/`*_HASH` 等）以 **AES-256-GCM 封存**后写入 `tasks.json`（格式 `enc:v1:<iv>:<密文||标签>`，随机 IV，同一明文两次封存结果不同）；非敏感值保持明文（运维直接查看任务配置）。**密钥为内置常量**（随产物分发，部署方可在构建前替换种子）——无人值守任务必须无条件自解密，密钥不可能来自交互输入，故只能「同机常量」；解密失败（换密钥/数据损坏/旧明文）一律**降级为原样返回**，不抛错打断调度
+  - **威胁边界（如实口径）**：本机制防的是「随手看到」——文件被浏览/被 grep/随备份或同步外带/被模型经 `read`·`grep` 读进上下文；**不防**已能读取整个数据目录与产物的攻击者（密钥与数据同机，他一起读）。与「内置模型 Key 随二进制分发」同档强度：提高门槛，非密码学保证
+  - **掩码往返**：`task_list`/`get`/REST 回显时敏感键值替换为固定占位 `***`——**掩码原样回传即保留原值**（与通知 `secret` 的 `***` 惯例一致，且**必须**如此：前端任务表单是 env 全集视图，回传占位若被当作新值写回就会用掩码覆盖真值）；显式传新值即轮换
+  - **归属与口径**：明文（内存态）与密文（磁盘）都落在用户自己的用户目录，属**用户自持数据**——「用户环境变量服务端零留存」约束的是浏览器本地配置不落服务端，任务级 env 是用户显式随任务保存的配置，二者边界见「环境变量配置」
+  - **传输面**：`task_add`/`task_update` 的 `env` 参数、REST `POST/PATCH /api/v1/tasks` body 的 `env`、前端任务表单的「环境变量」多行文本框（每行 `NAME=值`）
+- **执行免审批**：无人值守执行（`target=ephemeral/sticky`）的需审批工具**一律自动通过**（本地模式与服务模式无差别）——任务经用户审批创建/修改，执行即其授权的无人值守落地，与 REST `autoApprove: true`（调用方即用户本人）同一授权面；`target=session` 绑定用户会话可能有人在场，保持实时审批不改姿态。管理动作（`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files`）仍逐次需审批（见下「安全」）
 - **执行记录**（`users/{user}/task-runs/{task_id}/{时间}.json`，按文件落盘、不内联在任务定义里）：每次运行（含定时到期未启动的 `skipped`）各写一个记录文件，内容为完整 `TaskRunRecord`——触发/结束时间/状态（success/error/skipped/timeout）/耗时/输出摘要/执行会话 id/手动标记/未启动即跳过的原因 `reason`；**文件名为记录时间**（UTC ISO，`:` → `-` 以适配 Windows 文件名；同毫秒多条追加 `_N`），字典序即时序——列表无需读内容排序、清理按名删最旧；单任务保留最近 `TASK_RUNS_KEEP`（200）条，超出按时间删除最旧；**旧数据自愈**：启动加载时把定义文件里遗留的 `runs` 数组一次性导入记录目录（幂等：目录已有记录则跳过），随后经 `forceWrite` 沉降把该字段从定义文件清掉。读取入口：`ctx.tasks.runs`（工具侧）、`GET /api/v1/tasks/:id/runs?limit=`（REST）与前端任务详情「运行历史」（异步拉取，运行次数变化即失效重取）
 - **队列与额度**（每个用户一条队列，三类任务与待办手动执行同队列统一调度）：
   - **额度**：每用户 `GEBAI_TASK_MAX_CONCURRENT`（缺省 5）个同时运行的任务会话；额度只约束任务，用户对话会话不占额度；**运行中的任务不因额度不足被中断**（新条目排队等待）
@@ -2057,9 +2069,9 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - **主动通知（`task_notify`）**：任何模式下模型都可主动推送自撑正文——`TaskManager.notify(user, id?, {text,title?,at?}, {sessionId})` 解析投递通道 = 任务 `notify` ?? 全局默认通道（webhookId 引用即时解析、secret 用真值、`at` 可由调用方覆盖通道配置），逐通道在**用户已配置的通道**上投递（不接受调用方传入任意 URL），尽力而为返回 `{taskId, delivered, errors}` 并记 `lastNotifyError`；`id` 缺省时按**执行会话**反查正在运行的任务（引擎适配层注入 sessionId，模型无需回显任务 ID）；安全模式拒绝、无可用通道报配置指引。**执行会话可用性**：prompt 型任务存在可用通道时，会话解析自动把 `task` 追加进执行会话的装载名单（不改任务自身 `agents` 配置），触发消息附任务 ID 与 `task_notify` 用法提示（并限定：执行任务期间不要用 task 的其它工具管理任务）——否则执行中的模型拿不到该工具
   - **全局默认通道**（环境变量 `GEBAI_TASK_NOTIFY_WEBHOOK` / `GEBAI_TASK_NOTIFY_FEISHU`）：任务未配置自己的 `notify` 时自动经全局通道推送（运营兜底——无人值守任务忘配通知不至失联）；**任务自配 `notify` 则只走任务自己的通道、不与全局叠加**（防重复推送）；全局通道在**投递时**解析（不写入任务数据，环境变量改动重启后即时生效），`notifyOn=model` 时不自动发（其余与 at/卡片形态规则同款）；启动构建期逐条校验（SSRF/域名/chat_id 形态、chat_id 形态需飞书应用凭证），非法配置告警忽略不阻断启动
 - **工具**（`task` 子Agent 命名空间暴露 `task_*`）：
-  - `task_add`：创建任务（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`notify`（webhook 支持直配 URL/`webhook_id` 引用注册通道，含全通道 `at` @ 人名单）/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`）
+  - `task_add`：创建任务（`runner` 必填，`kind` 缺省按是否给 `schedule` 推断；可选 `name`/`script`/`prompt`/`schedule`/`timezone`/`misfire`/`target`/`session_id`/`agents`/`timeout_ms`/`env`（任务级环境变量）/`notify`（webhook 支持直配 URL/`webhook_id` 引用注册通道，含全通道 `at` @ 人名单）/`notify_on`/`max_consecutive_errors`/`enabled`/`run_now`/`front`）
   - `task_list`：查看当前用户全部任务（含类别/执行体/运行态/周期/下次执行/次数/最近错误）+ 队列概览（并发额度、排队顺序与等待原因、运行中条目）
-  - `task_update`：按 id 修改（全部可变字段）
+  - `task_update`：按 id 修改（全部可变字段，含 `env`——空对象清除）
   - `task_run`：手动执行一次（入队，可置顶；不改动既定调度节奏——`nextRunAt` 不变）
   - `task_cancel`：出队（排队中）或终止运行中的那次执行（`mode=dequeue|stop`）
   - `task_remove`：按 id 删除（不可删资源目录文件）
@@ -2071,9 +2083,9 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | 端点 | 语义 |
 |---|---|
 | `GET /api/v1/tasks?kind=&state=` | 任务清单（可按类别/运行态过滤） |
-| `POST /api/v1/tasks` | 创建（body 同 `task_add`；可选 `originSessionId`），201 |
+| `POST /api/v1/tasks` | 创建（body 同 `task_add`，含 `env` 任务级环境变量；可选 `originSessionId`），201 |
 | `GET /api/v1/tasks/:id` | 单任务 |
-| `PATCH /api/v1/tasks/:id` | 修改 |
+| `PATCH /api/v1/tasks/:id` | 修改（body 为补丁，含 `env`——空对象清除） |
 | `DELETE /api/v1/tasks/:id` | 删除 |
 | `POST /api/v1/tasks/:id/run` | 手动执行（入队；body `{front?}`）→ `{task, queued, position?, reason?}` |
 | `POST /api/v1/tasks/:id/front` | 排队中置顶 |
@@ -2087,7 +2099,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 | `DELETE /api/v1/tasks/:id/files?path=` | 删除文件/目录 |
 
   写操作已有身份认证边界、不再叠加审批；按认证用户过滤（用户级归属校验），任务 id 走 32 位 hex 格式白名单，能力关闭时 503
-- **用户级归属**：任务经 ToolContext/REST 绑定**当前用户**，`task_list`/`task_update`/`task_remove`/`task_run`/`task_cancel` 均校验用户归属，跨用户不可见、不可操作；`originSessionId` 记录创建来源会话（脚本结果写回目标）
+- **用户级归属**：任务经 ToolContext/REST 绑定**当前用户**，`task_list`/`task_update`/`task_remove`/`task_run`/`task_cancel` 均校验用户归属，跨用户不可见、不可操作；`originSessionId` 记录创建来源会话（脚本结果写回目标）；任务级 `env` 随任务归属（仅本人可见可改，回显脱敏，明文存于本人用户目录）
 - **执行规则**：
   - 调度器每 30 秒 tick 检查到期定时任务 + 推进队列；**入队即推进 `nextRunAt`**（执行排队不阻塞后续调度），入队与运行结束也立即触发一次推进
   - **启动加载校验 schedule/timezone 合法性**——tasks.json 被外部编辑改坏且任务 enabled 时直接禁用该任务并落 `lastError`（否则时间解析失败回退 +30s 会形成每 30 秒触发一次的热循环）；`queued` 条目重建进队列、`running` 条目标记中断
@@ -2096,7 +2108,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
   - 任务记录保留上次执行状态/输出（输出限 4000 字符）；脚本输出写回会话消息限 8000 字符；`skipped` 不计入连续失败计数；**执行记录落盘失败只告警**（同持久化降级策略：结果与调度不得因记录写入失败而降级）
 - **执行结果回写**：执行结束由调度器回调通知待办侧（`recordTaskResult`，仅在任务携带 `todoId` 时）——待办据此自动勾选完成、停用绑定任务或累计失败计次；回写以**落盘后的真值**判定（避免用陈旧计数把失败待办误判为正常）。
 - **存储**：用户级 `users/{user}/tasks.json`（任务定义，随用户目录生命周期，不随会话分片清理；**不含执行记录**——记录在 `users/{user}/task-runs/{task_id}/` 下按文件落盘），服务端重启时扫描加载；落盘走 RMW + 跨进程写锁（单条 upsert 合并进磁盘真值，见下「写路径」）；**旧用户级 `cron.json` 启动时一次性迁移**（任务转 `kind=scheduled`、`runner` 取原 `type`，旧文件改名 `cron.json.migrated.bak` 保留；脚本工作目录 `cron-workspace/{id}` 并入 `tasks/{id}`），迁移仅在该用户尚无 `tasks.json` 时执行；旧会话级布局（`sessions/{s0}/{s1}/{id}/cron.json`）不再支持——启动遇之忽略（任务删除后资源目录与执行记录保留，不主动清理）
-- **安全**：`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；`task_list` 与 `task_notify` 免审批（`task_list` 安全模式下仍提供；`task_notify` 无人值守执行等不到人工审批，投递目标限定为用户已配置的通道——任务创建时已经过审批、不新增任意外发面，安全模式下不注册）；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务资源目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped），任务调度类工具（`task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`）硬阻断；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_TASKS_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
+- **安全**：`task_add`/`task_update`/`task_run`/`task_cancel`/`task_remove`/`task_files` **默认需审批**（任务 = 无人值守的任意命令/会话执行，创建/修改/删除/立即执行/资源文件写入均须用户确认，服务模式下防普通用户绕过审批边界创建后门任务；**管理动作逐次确认，执行期免审批**——无人值守执行的需审批工具自动通过（见「执行免审批」，二者共用同一审批判定面：创建时的确认即执行授权的来源）；`task_list` 与 `task_notify` 免审批（`task_list` 安全模式下仍提供；`task_notify` 无人值守执行等不到人工审批，投递目标限定为用户已配置的通道——任务创建时已经过审批、不新增任意外发面，安全模式下不注册）；REST 管理面已有身份认证边界、写操作不再叠加审批）；脚本以任务所属用户身份、任务资源目录与用户环境运行（与 `sh` 工具同隔离级别，沙箱模式下脚本环境同样剔除敏感变量，见「脚本执行环境」）；安全模式下脚本执行与通知投递均跳过（记 skipped），任务调度类工具（`task_add`/`task_update`/`task_remove`/`task_run`/`task_cancel`）硬阻断；通知 URL 经 SSRF 校验防内网探测；能力整体由 `GEBAI_TASKS_ENABLED` 开关管控（默认开启，显式 false 完全不可见）
 - **事件**：入队推 `event.task.queued`（含来源与队列位置）、启动推 `event.task.start`、结束推 `event.task.result`（成功/失败/跳过/超时与输出摘要、prompt 型含执行会话 id、自动停用标记）、队列变化推 `event.task.queue`（额度/排队/运行中计数）——前端任务视图与队列面板据此实时刷新（prompt 型详细过程在该会话消息流）
 - **注入链路**：构造顺序为 `AgentEngine` 先建、`TaskManager` 后建（两者互相需要——调度器要 engine 执行 prompt 型任务、engine 要调度器绑定 `task_*` 工具，避免循环构造依赖）——`tasks.attach(engine)` 为**双向绑定**：调度器持有 engine，同时引擎侧 `opts.tasks` 经 `setTasks()` 回填（`task_*` 工具的 ToolContext 绑定源；单向注入不回填会使能力开启下工具仍恒报「能力未启用」）；通知依赖（fetch/飞书应用消息发送器）、子Agent 名校验器（`agentExists`）、每用户额度（`maxConcurrent`）与任务结束回调（待办联动）随构造注入
 - **多实例**：定时任务到期判定与队列推进全在**进程内**（内存队列 + 任务状态持久化），同一 `GEBAI_HOME` 下多实例并存会重复调度——由「调度器主实例锁」收敛（见下）：只有主实例跑 tick 与队列，其余实例只加载任务（REST/工具读写正常）不跑调度；闲时任务的**自动进场**另受 `schedulerActive` 门控（从实例不领闲时活，用户显式手动执行仍会在接到请求的实例上执行）

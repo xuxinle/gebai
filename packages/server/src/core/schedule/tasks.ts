@@ -39,6 +39,8 @@ import type {
 import type { AgentEngine } from "../engine/engine"
 import type { SessionStore } from "../session/store"
 import type { EnvManager } from "../session/env"
+import { isSensitive } from "../session/env"
+import { ENC_PREFIX, isSealed, seal, unseal } from "../support/crypto"
 import type { Sandbox } from "../security/sandbox"
 import type { EventBus } from "../base/event-bus"
 import type { NotifyDeps, TaskMessageNotification } from "./notify"
@@ -49,6 +51,9 @@ import { mutateJsonList, writeJsonListAtomic } from "../support/json-store"
 import { sessionPath, walkDir } from "../base/paths"
 import { agentNoteHead } from "../support/agent-note"
 import { log } from "@gebai/sdk/node"
+
+/** 环境变量掩码占位（回显用；回传占位即保留原值）。 */
+export const MASKED_ENV_VALUE = "***"
 
 /** 任务调度 tick 周期（DESIGN「常量参考」）：到期检查与队列推进。 */
 export const TASK_TICK_INTERVAL_MS = 30_000
@@ -291,7 +296,8 @@ export class TaskManager {
     if (!Array.isArray(raw)) return
     let migrated = 0
     for (const item of raw) {
-      const entry = this.normalizeLoaded(item, now)
+      // 磁盘条目为密文态：先解封再归一化（内存态为明文）
+      const entry = this.normalizeLoaded(this.unsealEnv(item as Task), now)
       if (!entry) continue
       // 旧内联执行记录（Task.runs）一次性迁移到执行记录目录（记录文件以时间为名）
       const legacyRuns = (item as { runs?: unknown } | null)?.runs
@@ -328,6 +334,14 @@ export class TaskManager {
       enabled: e.enabled !== false,
       state: e.state === "queued" || e.state === "running" ? e.state : "idle",
       runCount: typeof e.runCount === "number" ? e.runCount : 0,
+    }
+    // 任务级环境变量（外部编辑可能损坏）：非法名/非字符串值整条丢弃（不阻断任务加载）
+    if (e.env !== undefined) {
+      try {
+        entry.env = this.validateTaskEnv(e.env)
+      } catch {
+        entry.env = undefined
+      }
     }
     // 执行记录不属任务定义（存于 `task-runs/{taskId}/{时间}.json`）：剥离旧数据的 `runs` 字段——
     // 它仅在启动迁移时由 loadUser 从磁盘原文读取，不会经归一化流入内存态与落盘
@@ -409,6 +423,7 @@ export class TaskManager {
       script: input.runner === "script" ? script : undefined,
       prompt: input.runner === "prompt" ? prompt : undefined,
       timeoutMs: this.validateTimeout(input.timeoutMs),
+      env: this.validateTaskEnv(input.env),
       notify: this.validateNotify(input.notify, undefined, user),
       notifyOn: normalizeNotifyWhen(input.notifyOn),
       maxConsecutiveErrors: this.validateMaxConsecutiveErrors(input.maxConsecutiveErrors),
@@ -483,6 +498,7 @@ export class TaskManager {
     }
     if (patch.agents !== undefined) entry.agents = entry.runner === "prompt" ? this.validateAgents(patch.agents) : undefined
     if (patch.timeoutMs !== undefined) entry.timeoutMs = this.validateTimeout(patch.timeoutMs)
+    if (patch.env !== undefined) entry.env = this.validateTaskEnv(patch.env, live.env)
     if (patch.notify !== undefined) entry.notify = this.validateNotify(patch.notify, entry.notify, user)
     if (patch.notifyOn !== undefined) entry.notifyOn = normalizeNotifyWhen(patch.notifyOn) ?? "auto"
     if (patch.maxConsecutiveErrors !== undefined) entry.maxConsecutiveErrors = this.validateMaxConsecutiveErrors(patch.maxConsecutiveErrors)
@@ -603,11 +619,57 @@ export class TaskManager {
     return n
   }
 
-  /** 输出视图（通知密钥脱敏——REST/工具回显不泄露 secret）。 */
+  /** 任务级环境变量归一：名须为标识符（拒绝 __proto__）、值须为字符串，重复名后写覆盖；空对象视为未配置。
+   *  掩码占位：敏感键值在回显时替换为 `***`（与通知 secret 同惯例；前端表单是 env 全集视图，
+   *  不改动即原样回传）——据此保留原值，避免掩码被当作新值写回而覆盖真值。 */
+  private validateTaskEnv(env: unknown, prev?: Record<string, string>): Record<string, string> | undefined {
+    if (env === undefined || env === null) return undefined
+    if (typeof env !== "object" || Array.isArray(env)) return undefined
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(env as Record<string, unknown>)) {
+      if (k === "__proto__" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`无效的环境变量名: ${k}`)
+      if (typeof v !== "string") throw new Error(`环境变量 ${k} 的值必须是字符串`)
+      // 掩码占位回传 + 有原值：保留原值（占位在往返中视为「保持不变」）
+      if (MASKED_ENV_VALUE && v === MASKED_ENV_VALUE && prev?.[k] !== undefined) {
+        out[k] = prev[k]
+        continue
+      }
+      out[k] = v
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+
+  /** 输出视图（通知密钥脱敏 + 环境变量敏感键掩码——REST/工具回显不泄露 secret）。
+   *  掩码用固定占位 `***`（非真值片段）：前端表单回传占位即保留原值，与会话 env 的展示器脱敏不同——
+   *  后者仅作展示（不可编辑回存），此处必须可往返。 */
   private publicView(entry: Task): Task {
     const copy = { ...entry }
     if (copy.notify?.length) copy.notify = copy.notify.map((ch) => ({ ...ch, secret: ch.secret ? "***" : undefined }))
+    if (copy.env) {
+      const masked: Record<string, string> = {}
+      for (const [k, v] of Object.entries(copy.env)) masked[k] = isSensitive(k) ? MASKED_ENV_VALUE : v
+      copy.env = masked
+    }
     return copy
+  }
+
+  /** 落盘前封存敏感值（磁盘密文）；非敏感值保持明文，便于直接查看任务配置。 */
+  private sealEnv(entry: Task): Task {
+    if (!entry.env) return entry
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(entry.env)) out[k] = isSensitive(k) ? seal(v) : v
+    return { ...entry, env: out }
+  }
+
+  /** 读盘后解封敏感值（内存明文；密钥不符/数据损坏的密文原样保留，不阻断加载）。 */
+  private unsealEnv(entry: Task): Task {
+    if (!entry.env) return entry
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(entry.env)) {
+      const plain = unseal(v)
+      out[k] = plain ?? v
+    }
+    return { ...entry, env: out }
   }
   // ---- 队列与推进 ----
 
@@ -1075,6 +1137,8 @@ export class TaskManager {
         } catch {
           env = processEnvSnapshot()
         }
+        // 任务级环境变量最后合并（优先级最高，且不依赖浏览器本地注入与会话存活）
+        if (entry.env) env = { ...env, ...entry.env }
         try {
           const { stdout, stderr, code } = await this.deps.sandbox.exec(entry.script ?? "", {
             cwd,
@@ -1101,15 +1165,16 @@ export class TaskManager {
         error = "任务执行引擎未就绪"
       } else {
         const sid = runSessionId
-        // 无人值守执行（ephemeral/sticky：无人盯着执行会话）按**无交互通道**运行：本地模式需审批工具
-        // 自动通过（不空等 5 分钟超时后跳过），服务模式直接拒绝；ask/show/page_capture 等依赖前端的
+        // 无人值守执行（ephemeral/sticky：无人盯着执行会话）按**无交互通道**运行：**需审批工具自动
+        // 通过**（含服务模式）——任务经用户审批创建，执行即其授权的无人值守落地（与 REST autoApprove:true
+        // 同一授权面）；不空等 5 分钟超时后跳过。ask/show/page_capture 等依赖前端的
         // 能力按 none 语义降级。target=session 绑定用户会话（可能有人在场审批），保持 realtime。
         const unattended = (entry.target ?? "ephemeral") !== "session"
         const hints: string[] = []
         if (unattended) {
           hints.push(
             "本次为无人值守执行（无交互通道）：不要依赖询问用户与前端渲染（ask、show 的页面预览、页面捕获不可用）；" +
-              "需审批工具在本地模式自动通过、服务模式直接拒绝——不要为此重试同一调用。",
+              "需审批工具自动通过（任务创建时已经过审批判定）——不需要为工具审批等待或重试。",
           )
         }
         // 通知通道可用时（resolveSession 已预载 task）补一行执行上下文：任务 ID + task_notify 用法，
@@ -1131,7 +1196,14 @@ export class TaskManager {
         }, timeoutMs)
         let runError: string | undefined
         try {
-          await engine.run(sid, entry.user, promptText, { interactionMode: unattended ? "none" : "realtime" })
+          await engine.run(sid, entry.user, promptText, {
+            interactionMode: unattended ? "none" : "realtime",
+            // 任务级环境变量注入执行会话（模型 Provider / 脚本子进程 / 子Agent 环境读取一并生效）
+            ...(entry.env ? { envOverride: entry.env } : {}),
+            // 无人值守任务免审批（含服务模式）：任务经用户审批创建，执行即其授权的无人值守落地；
+            // target=session 可能有人在场，保持实时审批
+            ...(unattended ? { autoApprove: true } : {}),
+          })
         } catch (err) {
           // 超时主动取消的拒绝不算异常（按 timeout 记录）；其余运行失败记为本次运行 error
           if (!timedOut) runError = String((err as Error).message || err).slice(0, 500)
@@ -1506,10 +1578,15 @@ export class TaskManager {
   /** 以某用户**磁盘真值**为基准落盘（跨进程写锁 + 原子写 + 滚动备份）。forceWrite 用于结构沉降
    *  （如把旧版内联的 `runs` 字段从定义文件里清掉——归一化已剥离，恒等变更默认会被跳过）。 */
   private async persist(user: string, mutate: (disk: Task[]) => Task[], opts: { forceWrite?: boolean } = {}): Promise<Task[]> {
-    return await mutateJsonList(this.userTaskFile(user), mutate, {
-      normalize: (raw) => this.normalizeEntry(raw),
+    // 磁盘真值为**密文态**（内存态为明文）：读取时解封供变更函数使用，写入前封存回密文
+    const next = await mutateJsonList(this.userTaskFile(user), (disk) => mutate(disk.map((e) => this.unsealEnv(e))).map((e) => this.sealEnv(e)), {
+      normalize: (raw) => {
+        const entry = this.normalizeEntry(raw)
+        return entry ? this.unsealEnv(entry) : null
+      },
       forceWrite: opts.forceWrite,
     })
+    return next.map((e) => this.unsealEnv(e))
   }
 
   /** 单条 upsert：以磁盘真值为基准合并本条改动（其余条目原样保留，磁盘上本进程未知的条目也不会丢）。

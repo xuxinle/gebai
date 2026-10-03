@@ -1,9 +1,10 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startServer, type ServerHandle } from "./index"
 import type { Task } from "@gebai/sdk"
+import { unseal } from "./core/support/crypto"
 
 let handle: ServerHandle
 const home = mkdtempSync(join(tmpdir(), "gebai-tasks-rest-"))
@@ -103,6 +104,42 @@ describe("tasks REST（统一任务管理面）", () => {
       expect(res.status).toBe(400)
       expect(String(((await res.json()) as { error: string }).error)).toContain(c.expect)
     }
+  })
+
+  test("任务级环境变量：敏感值加密落盘、回显掩码、掩码回传保留原值、非法名 400", async () => {
+    const bad = await fetch(`${base()}/api/v1/tasks`, req("POST", { runner: "script", script: "echo x", env: { "1BAD": "v" } }))
+    expect(bad.status).toBe(400)
+    expect(String(((await bad.json()) as { error: string }).error)).toContain("无效的环境变量名")
+
+    const created = await createTask({
+      kind: "manual",
+      runner: "script",
+      script: "echo $API_TOKEN",
+      runNow: false,
+      env: { API_TOKEN: "secret-value", PLAIN: "ok" },
+    })
+    const id = String(created.id)
+    // 回显：敏感键固定占位（可往返），非敏感键原样
+    const got = await getTask(id)
+    expect(got.env!.PLAIN).toBe("ok")
+    expect(got.env!.API_TOKEN).toBe("***")
+    // 磁盘：敏感键为密文（不回读真值），非敏感键明文
+    const diskFile = [join(home, "users", "default", "tasks.json"), join(home, "users", "admin", "tasks.json")].find((f) => existsSync(f))!
+    const onDisk = JSON.parse(readFileSync(diskFile, "utf8")) as Array<{ id: string; env?: Record<string, string> }>
+    const stored = onDisk.find((t) => t.id === id)!.env!
+    expect(stored.API_TOKEN).toMatch(/^enc:v1:/)
+    expect(stored.API_TOKEN).not.toContain("secret-value")
+    expect(stored.PLAIN).toBe("ok")
+    // 掩码回传（前端表单原样回传未改动项）→ 保留原值，真值仍可用
+    const echoed = (await (await fetch(`${base()}/api/v1/tasks/${id}`, req("PATCH", { env: { API_TOKEN: "***", PLAIN: "changed" } }))).json()) as { env?: Record<string, string> }
+    expect(echoed.env!.PLAIN).toBe("changed")
+    const afterEcho = JSON.parse(readFileSync(diskFile, "utf8")) as Array<{ id: string; env?: Record<string, string> }>
+    const kept = afterEcho.find((t) => t.id === id)!.env!
+    // 原值未被占位覆盖：解封回真值仍是 secret-value（密文每次随机 IV 不同，故比明文而非密文）
+    expect(unseal(kept.API_TOKEN)).toBe("secret-value")
+    // 修改：空对象清除（未提供则不改动）
+    const cleared = (await (await fetch(`${base()}/api/v1/tasks/${id}`, req("PATCH", { env: {} }))).json()) as { env?: Record<string, string> }
+    expect(cleared.env).toBeUndefined()
   })
 
   test("查询/修改/删除；通知密钥脱敏；非法 id 400", async () => {

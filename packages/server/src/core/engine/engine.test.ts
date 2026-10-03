@@ -17,6 +17,15 @@ import { sessionPath } from "../base/paths"
 import { SubAgentManager } from "../agents/subagents"
 import { loadConfig } from "../base/config"
 
+/** 等待调度器队列静默（无运行中任务）：任务为「出队即异步跑」。 */
+async function waitForTasks(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const start = Date.now()
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("等待任务完成超时")
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
 class FakeProvider implements LLMProvider {
   readonly id = "fake"
   calls = 0
@@ -4089,6 +4098,49 @@ describe("AgentEngine task integration", () => {
       // 引擎输出提及任务 id
       const loaded = await store.load(session.id)
       expect(loaded!.messages.some((m) => String(m.content).includes("daily-backup"))).toBe(true)
+    } finally {
+      tasks.stop()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("任务级 env 与无人值守免审批端到端（服务模式）：任务 env 直达工具子进程，需审批工具自动通过", async () => {
+    const { TaskManager } = await import("../schedule/tasks")
+    const home = mkdtempSync(join(tmpdir(), "gebai-engine-task-env-"))
+    mkdirSync(join(home, "users", "default"), { recursive: true })
+    // 服务模式（authMode=server）：无交互通道默认需审批工具直接拒绝；无人值守任务应当例外
+    const config = loadConfig({ gebaiHome: home, auth: "server", sandbox: "off", preloadSubAgents: [], binaryMode: false })
+    const store = new SessionStore({ home })
+    const registry = new ToolRegistry()
+    for (const tool of Object.values(createGlobalTools())) registry.register(tool)
+    const sandbox = new Sandbox({ home, enabled: false })
+    const env = new EnvManager(store)
+    const events = new EventBus()
+    const subAgents = new SubAgentManager({ registry, preloadSubAgents: [] })
+    await subAgents.discover()
+    const provider = new FakeProvider("tool")
+    // sh（需审批）读任务环境变量：一步同时验证「env 注入到工具子进程」与「服务模式免审批」
+    provider.toolName = "sh"
+    provider.toolArgs = { command: "echo flag=$TASK_FLAG" }
+    const tasks = new TaskManager({ home, store, env, sandbox, events, now: () => 1_780_000_000_000, maxConcurrent: 1 })
+    try {
+      tasks.attach(new AgentEngine({ provider, registry, store, env, sandbox, events, config, subAgents }))
+      const task = await tasks.add("default", {
+        kind: "manual",
+        runner: "prompt",
+        prompt: "带环境跑一次",
+        env: { TASK_FLAG: "from-task-env" },
+        runNow: false,
+      })
+      await tasks.run("default", task.id)
+      await waitForTasks(() => tasks["running"].size === 0)
+      const execSession = (await tasks.runs("default", task.id))[0].sessionId!
+      const loaded = await store.load(execSession)
+      const shResult = loaded!.messages.find((m) => m.role === "tool" && m.name === "sh")
+      expect(shResult).toBeDefined()
+      // 任务 env 已注入（未注入则为空值）；服务模式下未落入「无交互拒绝」
+      expect(String(shResult!.content)).toContain("flag=from-task-env")
+      expect(String(shResult!.content)).not.toContain("需要审批")
     } finally {
       tasks.stop()
       rmSync(home, { recursive: true, force: true })

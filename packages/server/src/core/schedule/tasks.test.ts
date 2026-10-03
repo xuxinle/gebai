@@ -31,8 +31,8 @@ interface Harness {
   tasks: TaskManager
   /** 虚拟时钟（测试推进）。 */
   clock: { t: number }
-  execCalls: Array<{ cmd: string; cwd: string }>
-  runCalls: Array<{ sid: string; user: string; prompt: string; interactionMode?: string }>
+  execCalls: Array<{ cmd: string; cwd: string; env?: Record<string, string> }>
+  runCalls: Array<{ sid: string; user: string; prompt: string; interactionMode?: string; autoApprove?: boolean; envOverride?: Record<string, string> }>
   cancelCalls: string[]
   windDownCalls: string[]
   /** 挂起中的 engine.run 解挂回调（runHang 时登记）。 */
@@ -97,8 +97,8 @@ function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean
     if (ev.type === "event.task.result") h.results.push(String((ev.payload as { id?: unknown })?.id ?? ""))
   })
   // 脚本执行：默认记录调用并成功返回（用例可替换为失败/自定义输出）
-  sandbox.exec = (async (cmd: string, o: { cwd?: string }) => {
-    h.execCalls.push({ cmd, cwd: o.cwd ?? "" })
+  sandbox.exec = (async (cmd: string, o: { cwd?: string; env?: Record<string, string> }) => {
+    h.execCalls.push({ cmd, cwd: o.cwd ?? "", env: o.env })
     return { stdout: `out:${cmd}`, stderr: "", code: 0 }
   }) as unknown as Sandbox["exec"]
   const fakeEngine = {
@@ -113,8 +113,8 @@ function setup(opts: { now?: number; tickIntervalMs?: number; safeMode?: boolean
       h.windDownCalls.push(sid)
       h.runResolvers.splice(0).forEach((f) => f())
     },
-    run: async (sid: string, user: string, prompt: string, opts?: { interactionMode?: string }) => {
-      h.runCalls.push({ sid, user, prompt, interactionMode: opts?.interactionMode })
+    run: async (sid: string, user: string, prompt: string, opts?: { interactionMode?: string; autoApprove?: boolean; envOverride?: Record<string, string> }) => {
+      h.runCalls.push({ sid, user, prompt, interactionMode: opts?.interactionMode, autoApprove: opts?.autoApprove, envOverride: opts?.envOverride })
       if (h.runHang) await new Promise<void>((resolve) => h.runResolvers.push(resolve))
       if (h.runFail) throw new Error(h.runFail)
       if (h.appendReply) {
@@ -1011,6 +1011,101 @@ describe("prompt 型执行目标与会话解析", () => {
       await h.tasks.tick()
       await waitDone(h, task.id, 2)
       expect((await h.store.listSessions("default")).filter((s) => s.name === "定时任务「日报」")).toHaveLength(2)
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("无人值守执行免审批（含服务模式）：prompt 任务以 autoApprove 运行、脚本任务注入任务级环境变量", async () => {
+    const h = setup()
+    try {
+      // prompt 型无人值守：interactionMode=none + autoApprove=true（服务模式下同样自动通过需审批工具）
+      const t = await h.tasks.add("default", { kind: "manual", runner: "prompt", prompt: "跑一次", name: "免审", runNow: false })
+      await h.tasks.run("default", t.id)
+      await waitDone(h, t.id, 1)
+      expect(h.runCalls[0].interactionMode).toBe("none")
+      expect(h.runCalls[0].autoApprove).toBe(true)
+      expect(h.runCalls[0].prompt).toContain("需审批工具自动通过")
+
+      // 脚本型：任务级 env 合并进子进程环境（高于会话/进程环境），两类执行体通用
+      const s = await h.tasks.add("default", {
+        kind: "manual",
+        runner: "script",
+        script: "echo $REPORT_DIR",
+        env: { REPORT_DIR: "data/reports", GEBAI_LLM_MODEL: "task-model" },
+      })
+      await waitDone(h, s.id, 1)
+      const env = h.execCalls.at(-1)!.env!
+      expect(env.REPORT_DIR).toBe("data/reports")
+      expect(env.GEBAI_LLM_MODEL).toBe("task-model")
+
+      // prompt 型：任务级 env 作为执行会话的 envOverride 注入（模型/子Agent 一并生效）
+      const p = await h.tasks.add("default", { kind: "manual", runner: "prompt", prompt: "带环境执行", env: { REPORT_DIR: "x" }, runNow: false })
+      await h.tasks.run("default", p.id)
+      await waitDone(h, p.id, 1)
+      expect(h.runCalls.at(-1)!.envOverride).toEqual({ REPORT_DIR: "x" })
+
+      // 绑定会话（可能有人在场）保持实时交互与实时审批，不叠加 autoApprove
+      const sid = await createSession(h, "有人会话")
+      const b = await h.tasks.add("default", { kind: "manual", runner: "prompt", prompt: "x", target: "session", sessionId: sid, runNow: false })
+      await h.tasks.run("default", b.id)
+      await waitDone(h, b.id, 1)
+      expect(h.runCalls.at(-1)!.interactionMode).toBe("realtime")
+      expect(h.runCalls.at(-1)!.autoApprove).toBeUndefined()
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("任务级环境变量：敏感值加密落盘、非敏感明文、回显掩码、掩码回传保留原值", async () => {
+    const h = setup()
+    try {
+      await expect(h.tasks.add("default", { kind: "manual", runner: "script", script: "echo", runNow: false, env: { "1BAD": "x" } })).rejects.toThrow(/无效的环境变量名/)
+      await expect(h.tasks.add("default", { kind: "manual", runner: "script", script: "echo", runNow: false, env: { A: 1 as unknown as string } })).rejects.toThrow(/必须是字符串/)
+
+      const t = await h.tasks.add("default", {
+        kind: "manual",
+        runner: "script",
+        script: "echo",
+        runNow: false,
+        env: { API_TOKEN: "secret-value", PLAIN: "ok" },
+      })
+      // 磁盘：敏感键为密文（enc:v1: 前缀），非敏感键保持明文（便于直接查看任务配置）
+      const onDisk = readTasks(h).find((x) => x.id === t.id)!.env!
+      expect(onDisk.API_TOKEN).toMatch(/^enc:v1:/)
+      expect(onDisk.API_TOKEN).not.toContain("secret-value")
+      expect(onDisk.PLAIN).toBe("ok")
+      // 内存态为明文（执行时脚本/Provider 需要真值）
+      expect(internal(h, t.id).env).toEqual({ API_TOKEN: "secret-value", PLAIN: "ok" })
+      const view = await h.tasks.get("default", t.id)
+      // 回显：敏感键固定占位（与通知 secret 同惯例），非敏感键原样
+      expect(view!.env!.PLAIN).toBe("ok")
+      expect(view!.env!.API_TOKEN).toBe("***")
+      // 掩码回传（前端表单不改动即原样回传）→ 保留原值，不被占位覆盖
+      await h.tasks.update("default", t.id, { env: { API_TOKEN: "***", PLAIN: "changed" } })
+      expect(internal(h, t.id).env).toEqual({ API_TOKEN: "secret-value", PLAIN: "changed" })
+      // 显式改新值照常生效
+      await h.tasks.update("default", t.id, { env: { API_TOKEN: "rotated" } })
+      expect(internal(h, t.id).env).toEqual({ API_TOKEN: "rotated" })
+
+      await h.tasks.update("default", t.id, { env: { SECOND: "2" } })
+      expect(internal(h, t.id).env).toEqual({ SECOND: "2" })
+      await h.tasks.update("default", t.id, { env: {} })
+      expect(internal(h, t.id).env).toBeUndefined()
+      // 重启加载：密文解密回明文；外部编辑损坏的条目整条丢弃（不阻断任务加载）
+      await h.tasks.update("default", t.id, { env: { KEEP_TOKEN: "keep-secret" } })
+      const file = taskFile(h)
+      const bad = { ...internal(h, t.id), id: "b".repeat(32), env: { "1BAD": "x" } }
+      writeFileSync(file, JSON.stringify([...JSON.parse(readFileSync(file, "utf8")), bad]))
+      h.tasks.stop()
+      const mgr = new TaskManager({ ...h.deps, home: h.home })
+      await mgr.start()
+      try {
+        expect(mgr["entries"].get(t.id)!.env).toEqual({ KEEP_TOKEN: "keep-secret" })
+        expect(mgr["entries"].get("b".repeat(32))!.env).toBeUndefined()
+      } finally {
+        mgr.stop()
+      }
     } finally {
       await cleanup(h)
     }

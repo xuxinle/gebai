@@ -148,6 +148,8 @@ export interface Task {
   agents?: string[]
   /** 单次执行超时（缺省 script 5 分钟 / prompt 30 分钟）。 */
   timeoutMs?: number
+  /** 任务级环境变量（持久化于任务定义）：脚本型注入子进程环境、提示词型注入执行会话的任务 env，均**高于**继承的会话/全局环境。 */
+  env?: Record<string, string>
   /** 通知通道（可配多条）。 */
   notify?: TaskNotifyChannel[]
   /** 通知时机：auto=执行结束自动发（缺省）/ model=由模型经 task_notify 主动发。 */
@@ -196,6 +198,8 @@ export interface TaskCreateInput {
   sessionId?: string
   agents?: string[]
   timeoutMs?: number
+  /** 任务级环境变量（无人值守执行时注入，不依赖浏览器会话）。 */
+  env?: Record<string, string>
   notify?: TaskNotifyInput[]
   notifyOn?: TaskNotifyWhen
   maxConsecutiveErrors?: number
@@ -224,6 +228,8 @@ export interface TaskUpdateInput {
   sessionId?: string
   agents?: string[]
   timeoutMs?: number
+  /** 任务级环境变量（传空对象 {} 清除，未提供不改动）。 */
+  env?: Record<string, string>
   notify?: TaskNotifyInput[]
   notifyOn?: TaskNotifyWhen
   maxConsecutiveErrors?: number

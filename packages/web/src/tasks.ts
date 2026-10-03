@@ -326,6 +326,7 @@ interface EditorRefs {
   agents: HTMLInputElement
   timeoutMs: HTMLInputElement
   maxConsecutiveErrors: HTMLInputElement
+  envText: HTMLTextAreaElement
   notifyOn: HTMLSelectElement
   notifyText: HTMLTextAreaElement
   enabled: HTMLInputElement
@@ -395,6 +396,7 @@ function collectForm(r: EditorRefs): TaskFormValues {
     agents: r.agents.value,
     timeoutMs: r.timeoutMs.value,
     maxConsecutiveErrors: r.maxConsecutiveErrors.value,
+    envText: r.envText.value,
     notifyOn: r.notifyOn.value as TaskFormValues["notifyOn"],
     notifyText: r.notifyText.value,
     enabled: r.enabled.checked,
@@ -467,6 +469,8 @@ function buildEditor(): HTMLElement {
   refs.fields.timeoutMs = field("单次执行超时", refs.timeoutMs)
   refs.maxConsecutiveErrors = textInput(base.maxConsecutiveErrors, "0=不停用")
   refs.fields.maxConsecutiveErrors = field("连续失败自动停用", refs.maxConsecutiveErrors)
+  refs.envText = textArea(base.envText, 3, "每行一条：NAME=值，如\nAPI_BASE=https://example.com\nREPORT_DIR=data/reports")
+  refs.fields.envText = field("环境变量", refs.envText, "服务端持久化（无人值守执行不依赖浏览器本地配置）；脚本型注入子进程、提示词型注入执行会话，优先级高于全局/会话环境；敏感键值回显为掩码")
 
   refs.notifyOn = selectInput(
     [
@@ -517,7 +521,7 @@ function buildEditor(): HTMLElement {
     grid.appendChild(refs.fields[key])
   }
   const wide = el("div", "tasks-form-wide")
-  wide.append(refs.fields.script, refs.fields.prompt, refs.fields.notifyText, refs.fields.enabled, refs.fields.runNow, refs.fields.front)
+  wide.append(refs.fields.script, refs.fields.prompt, refs.fields.envText, refs.fields.notifyText, refs.fields.enabled, refs.fields.runNow, refs.fields.front)
   form.append(grid, wide)
 
   const actions = el("div", "tasks-form-actions")

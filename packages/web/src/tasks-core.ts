@@ -98,6 +98,8 @@ export function metaLine(t: Task): string {
   const schedule = scheduleSummary(t)
   if (schedule) parts.push(`周期 ${schedule}`)
   if (t.kind === "scheduled" && t.enabled && t.nextRunAt) parts.push(`下次 ${formatTime(t.nextRunAt)}`)
+  const envCount = t.env ? Object.keys(t.env).length : 0
+  if (envCount) parts.push(`环境变量 ${envCount} 项`)
   parts.push(`已运行 ${t.runCount} 次`)
   if (t.lastRunAt) parts.push(`上次 ${formatTime(t.lastRunAt)}`)
   return parts.filter(Boolean).join(" · ")
@@ -144,6 +146,8 @@ export interface TaskFormValues {
   notifyOn: TaskNotifyWhen
   /** 通知通道（每行一条：`type target [secret]`；webhook 通道第二段为 32 位 hex 时视为已注册 Webhook 引用）。 */
   notifyText: string
+  /** 任务级环境变量（每行一条：`NAME=值`）。 */
+  envText: string
   enabled: boolean
   runNow: boolean
   front: boolean
@@ -166,6 +170,7 @@ export function emptyForm(): TaskFormValues {
     maxConsecutiveErrors: "",
     notifyOn: "auto",
     notifyText: "",
+    envText: "",
     enabled: true,
     runNow: true,
     front: false,
@@ -190,10 +195,34 @@ export function formFromTask(t: Task): TaskFormValues {
     maxConsecutiveErrors: t.maxConsecutiveErrors !== undefined ? String(t.maxConsecutiveErrors) : "",
     notifyOn: t.notifyOn ?? "auto",
     notifyText: notifyLines(t),
+    envText: envLines(t),
     enabled: t.enabled,
     runNow: false,
     front: false,
   }
+}
+
+/** 任务环境变量 → 行文本（每行 `NAME=值`；空值为 `NAME=`）。 */
+export function envLines(t: Pick<Task, "env">): string {
+  if (!t.env) return ""
+  return Object.entries(t.env)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n")
+}
+
+/** 行文本 → 任务环境变量（空文本返回 undefined；非法行拒绝并给出定位）。 */
+export function parseEnvLines(raw: string): Record<string, string> | undefined {
+  const lines = raw.split("\n").map((s) => s.trim()).filter(Boolean)
+  if (!lines.length) return undefined
+  const out: Record<string, string> = {}
+  lines.forEach((line, i) => {
+    const eq = line.indexOf("=")
+    const name = (eq < 0 ? line : line.slice(0, eq)).trim()
+    if (eq < 0) throw new Error(`环境变量第 ${i + 1} 行缺少 \"=\"（格式 NAME=值）`)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`环境变量第 ${i + 1} 行变量名非法: ${name || "（空）"}`)
+    out[name] = line.slice(eq + 1).trim()
+  })
+  return Object.keys(out).length ? out : undefined
 }
 
 function numOrUndefined(raw: string, label: string): number | undefined {
@@ -246,6 +275,7 @@ export function validateForm(v: TaskFormValues): string | null {
     numOrUndefined(v.timeoutMs, "执行超时")
     numOrUndefined(v.maxConsecutiveErrors, "连续失败阈值")
     parseNotifyLines(v.notifyText)
+    parseEnvLines(v.envText)
   } catch (err) {
     return (err as Error).message
   }
@@ -283,6 +313,8 @@ export function formToCreateInput(v: TaskFormValues): TaskCreateInput {
   input.notifyOn = v.notifyOn
   const notify = parseNotifyLines(v.notifyText)
   if (notify) input.notify = notify
+  const env = parseEnvLines(v.envText)
+  if (env) input.env = env
   if (v.kind === "manual") {
     input.runNow = v.runNow
     if (v.front) input.front = true
@@ -316,6 +348,8 @@ export function formToUpdateInput(v: TaskFormValues): TaskUpdateInput {
   if (maxErr !== undefined) patch.maxConsecutiveErrors = maxErr
   patch.notifyOn = v.notifyOn
   patch.notify = parseNotifyLines(v.notifyText)
+  // 编辑态表单是环境变量的全量视图：解析为空即清除（与后端「未提供不改动」区分）
+  patch.env = parseEnvLines(v.envText) ?? {}
   return patch
 }
 
