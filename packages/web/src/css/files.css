@@ -3268,6 +3268,44 @@ button.fw-status-item:hover {
   font-style: normal;
 }
 
+/* Git 修改标记（dirty-diff gutter）：行号右侧的窄色条（VSCode 同款位置与宽高）。
+   这些类由编辑器装饰挂出（见 files/editor.ts 的 setGitBase）：added 绿 / modified 蓝 / deleted 红三角。
+   三色与主题令牌同源（success / accent / danger），暗亮主题各自合适。 */
+.fw-git-added::before,
+.fw-git-modified::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  width: 3px;
+  top: 0;
+  bottom: 0;
+}
+
+.fw-git-added::before {
+  background: var(--success);
+}
+
+.fw-git-modified::before {
+  background: var(--accent);
+}
+
+/* 删除标记画在行号上（删除处没有新行可标，与 VSCode 同位置）：红色小三角指向删除点 */
+.fw-git-deleted-ln {
+  color: var(--danger) !important;
+  opacity: 0.9;
+}
+
+.fw-git-deleted-ln::after {
+  content: "▼";
+  position: absolute;
+  left: 50%;
+  margin-left: -3.5px;
+  bottom: -2px;
+  font-size: 7px;
+  color: var(--danger);
+}
+
+
 /* 滚动条（与主界面同构：静止透明、指针进入滚动容器或滚动中才显形）
 
    工作台里树/列表/日志都是常驻长列表，滚动条若是常显就变成一根赖在面板边缘的亮竖条——

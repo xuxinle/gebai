@@ -27,6 +27,7 @@ import {
   type MetricsSync,
 } from "./editor-metrics"
 import { blameHover, blameLabel, toBlameIndex, type BlameLine } from "./blame"
+import { marksFromLineChanges, type GitMark } from "./git-gutter"
 import { flattenSymbols, type FlatSym } from "./symbols-core"
 import { canExtract, extractSymbolsAsync, type ExtractSource } from "./symbols-extract"
 import { flatSymbolsOf, installSymbolProviders, symbolSourceOf } from "./symbols"
@@ -174,6 +175,13 @@ export interface EditorHandle {
    * `gutter` = 左侧作者列（全局）；`inline` = 光标行行尾注释。数据为空则两态都画不出。
    */
   setBlame(lines: BlameLine[], show: { gutter: boolean; inline: boolean }): void
+  /**
+   * 设置 Git 修改标记（dirty-diff gutter）：`base` = HEAD 基线文本（null = 不标，
+   * 非仓库/未跟踪/降级等由调用方判定，见 git-gutter.ts 的 `gutterEligible`）。
+   * 打字时 Monaco 内部重算差异（隐藏 diff 引擎，见 createGitDiffTracker），这里只挂基线。
+   * 降级编辑器画不出装饰：空操作。
+   */
+  setGitBase(base: string | null): void
   /**
    * 重装右键菜单里的**自定义组**（见 `EditorMenuHooks.groups`）：Monaco 的菜单项标题在注册那一刻
    * 定下，文案带状态的项（`✓ 行尾溯源`）状态一变就得重装——宿主在状态改变处调一次即可。
@@ -445,6 +453,11 @@ export function defineTheme(monaco: Monaco): void {
   const danger = pick("--danger", "#f85149", bg)
   const warning = pick("--warning", "#d29922", bg)
 
+  // Git 修改标记的概览标尺/小地图色：与 gutter 条同源（success/danger/accent 令牌，见 files.css 的 .fw-git-*）
+  GitMarkColor.added = success
+  GitMarkColor.deleted = danger
+  GitMarkColor.modified = accent
+
   // 明暗判定：合成后的编辑器底色亮度（不依赖 data-theme，任何主题/黑白变体都能自适应）
   const rgb = bg.match(/\w\w/g) ?? []
   const lum = rgb.length === 3 ? (parseInt(rgb[0], 16) * 0.299 + parseInt(rgb[1], 16) * 0.587 + parseInt(rgb[2], 16) * 0.114) / 255 : 0
@@ -509,6 +522,9 @@ export function defineTheme(monaco: Monaco): void {
       "diffEditor.removedLineBackground": alpha(danger, 0.09),
       "diffEditorGutter.insertedLineBackground": alpha(success, 0.2),
       "diffEditorGutter.removedLineBackground": alpha(danger, 0.2),
+      // Git 修改标记的概览标尺底色与主编辑器概览宽度（右侧窄条，与差异视图同口径）
+      "editorOverviewRuler.background": bg,
+      "editorOverviewRuler.border": alpha(border, 0.6),
     },
   })
 }
@@ -560,6 +576,107 @@ export function refreshEditorTheme(): void {
 }
 
 export { currentTheme }
+
+/* --------------------------- Git 修改标记（dirty-diff）差异引擎 --------------------------- */
+
+/**
+ * 共享的隐藏 diff 引擎：一个不进 DOM 的 Monaco diff editor，原侧 = HEAD 基线，改侧 = 目标编辑器的活 model。
+ *
+ * 为什么不自算差异：本页的 Monaco 是 **AMD min bundle**（无内部模块路径可 require），
+ * `linesDiffComputers` 等内部 diff 算法拿不到；而 `IDiffEditor.getLineChanges()` 是公开 API
+ * （差异视图的导航早已在用），Monaco 会在改侧 model 内容变化时自动重算——引擎本身免费。
+ *
+ * 惰性单例：首个仓库内文件需要标记时才建（非仓库/未跟踪用户分文不花）。同一时间只跟踪
+ * **一个** model（与编辑器标签页形态对齐：主编辑器常驻、同一时刻只有一个在前）；标记关闭或
+ * 标签重建时 `attach` 新 model 自动取代旧的（旧订阅已 dispose，不会双回调）。
+ */
+interface GitDiffTrackerHandle {
+  /** 换基线（null = 撤掉标记：清空两侧 model，差异归零）。 */
+  setBase(base: string | null): void
+  /** 退订（标签关闭/重建时调；引擎留在内存，重开零成本）。 */
+  detach(): void
+}
+
+interface GitDiffTracker {
+  attach(model: import("monaco-editor").editor.ITextModel, onDiff: (changes: import("./git-gutter").GitLineChange[] | null) => void): GitDiffTrackerHandle
+}
+
+let gitDiffTracker: GitDiffTracker | null = null
+
+function getGitDiffTracker(): GitDiffTracker {
+  if (gitDiffTracker) return gitDiffTracker
+  const monaco = monacoRef!
+  const host = document.createElement("div")
+  host.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;visibility:hidden;pointer-events:none"
+  document.body.appendChild(host)
+  const baseModel = monaco.editor.createModel("")
+  const engine = monaco.editor.createDiffEditor(host, {
+    // legacy 算法重算快（打字即触发），胜在稳定；高级算法的 move 检测对 gutter 标记无意义
+    diffAlgorithm: "legacy",
+    ignoreTrimWhitespace: false,
+    // 隐藏实例只借差异计算、不渲染：关掉一切渲染相关开销
+    renderOverviewRuler: false,
+    renderSideBySide: false,
+    automaticLayout: false,
+    minimap: { enabled: false },
+  })
+  /** 当前订阅（同一时间只一个）：diff 重算完成时回调。model 字段用于 attach 判重。 */
+  let active: { model: import("monaco-editor").editor.ITextModel; onDiff: (c: import("./git-gutter").GitLineChange[] | null) => void; unsub: () => void } | null = null
+  const tracker: GitDiffTracker = {
+    attach(model, onDiff) {
+      // 同一 model 重复 attach：直接接上新回调（订阅是引擎级的，不必重建）
+      if (active && active.model === model) {
+        active.onDiff = onDiff
+        return { setBase: (b) => setBase(model, b), detach: () => release(model) }
+      }
+      active?.unsub()
+      const sub = engine.onDidUpdateDiff(() => {
+        // getLineChanges 可能短暂为 null（差异还在算）：回调方按「先清空」处理，下档事件补上
+        const changes = engine.getLineChanges()
+        active?.onDiff(changes ? (changes as unknown as import("./git-gutter").GitLineChange[]) : null)
+      })
+      active = { model, onDiff, unsub: () => sub.dispose() }
+      return { setBase: (b) => setBase(model, b), detach: () => release(model) }
+    },
+  }
+  function setBase(model: import("monaco-editor").editor.ITextModel, base: string | null): void {
+    if (!active || active.model !== model) return
+    if (base === null) {
+      // 撤掉标记：清空两侧（不拆 setModel，避免「从有到无」的一次全量 diff 假回调）
+      baseModel.setValue("")
+      engine.setModel({ original: baseModel, modified: emptyModel(monaco) })
+      active.onDiff([])
+      return
+    }
+    baseModel.setValue(base)
+    engine.setModel({ original: baseModel, modified: model })
+  }
+  function release(model: import("monaco-editor").editor.ITextModel): void {
+    if (!active || active.model !== model) return
+    active.unsub()
+    active = null
+    // 摘掉 model：引擎不会继续持有已 dispose 的编辑器 model
+    engine.setModel(null)
+  }
+  return (gitDiffTracker = tracker)
+}
+
+/** setBase(null) 时挂到改侧的空 model（diff editor 不接受 null 单侧）。 */
+const emptyModelCache: { model: import("monaco-editor").editor.ITextModel | null } = { model: null }
+function emptyModel(monaco: Monaco): import("monaco-editor").editor.ITextModel {
+  return (emptyModelCache.model ??= monaco.editor.createModel(""))
+}
+
+/**
+ * 三类标记的概览标尺/小地图颜色（CSS 色串，随主题令牌更新）。
+ * gutter 条色不走这里（那是 className + CSS）；只有 overviewRuler/minimap 要求**结构化颜色**
+ * （Monaco 装饰 API 只认 color 值，不能引用 CSS 类）。defineTheme 时同步刷新。
+ */
+const GitMarkColor: Record<GitMark["kind"], string> = {
+  added: "#3fb950",
+  modified: "#6366f1",
+  deleted: "#f85149",
+}
 
 /* --------------------------- 编辑器实现 --------------------------- */
 
@@ -631,6 +748,10 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
     unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false },
     scrollbar: { verticalScrollbarSize: 11, horizontalScrollbarSize: 11, useShadows: false },
     overviewRulerBorder: false,
+    // 概览标尺（右侧窄条）：Git 修改标记的滚动条地图落在这里，无标记时它是纯背景不碍眼。
+    // standalone create() 的 renderOverviewRuler 缺省是 false（与 createDiffEditor 不同），必须显式开
+    renderOverviewRuler: true,
+    overviewRulerLanes: 2,
     contextmenu: true,
     quickSuggestions: !opts.readOnly,
     suggestOnTriggerCharacters: !opts.readOnly,
@@ -658,6 +779,41 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
   let blameRaf = 0
   /** 光标行行尾注释（单独一个集合：只随光标移动更新一行）。 */
   let cursorBlame: DecoCollection | null = null
+
+  /* ---------- Git 修改标记（dirty-diff gutter） ---------- */
+
+  /** 标记装饰集合（null = 从未启用过）。 */
+  let gitDeco: DecoCollection | null = null
+  /** 差异引擎句柄（null = 未启用：非仓库/未跟踪/降级时不建引擎）。 */
+  let gitTracker: GitDiffTrackerHandle | null = null
+
+  /** 把行级差异画成装饰：gutter 三色条 + 概览标尺 + 小地图，三处一体。 */
+  function renderGitMarks(changes: import("./git-gutter").GitLineChange[] | null): void {
+    const marks: GitMark[] = changes ? marksFromLineChanges(changes, model.getLineCount()) : []
+    const decos = marks.map((m) => ({
+      range: new monaco.Range(m.line, 1, m.line, 1),
+      options: {
+        description: "git-dirty-diff",
+        showIfCollapsed: true,
+        // 行号右侧的窄色条（VSCode 同款位置）：宽度由 CSS 控制，不影响行号宽度
+        linesDecorationsClassName: `fw-git-${m.kind}`,
+        // 删除没有可标的新行：红三角画在行号上（与 VSCode 删除标记同位置）
+        lineNumberClassName: m.kind === "deleted" ? "fw-git-deleted-ln" : undefined,
+        // 滚动条概览标尺 + 小地图（颜色随主题，见 defineTheme 与 files.css）
+        overviewRuler: {
+          color: GitMarkColor[m.kind],
+          position: monaco.editor.OverviewRulerLane.Right,
+        },
+        minimap: {
+          color: GitMarkColor[m.kind],
+          position: monaco.editor.MinimapPosition.Gutter,
+        },
+      },
+    }))
+    if (gitDeco) gitDeco.set(decos)
+    else if (decos.length) gitDeco = ed.createDecorationsCollection(decos)
+  }
+
 
   /**
    * 重画侧边列：只渲染**当前可见行**（含折行时按行遍历）。
@@ -943,6 +1099,22 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       paintBlame()
       updateCursorBlame()
     },
+    setGitBase: (base) => {
+      /*
+       * 数据流：基线文本 → 隐藏 diff 引擎（改侧 = 本编辑器的 model，打字即重算）
+       *        → onDidUpdateDiff → renderGitMarks（装饰，不进模型）。
+       * base = null 表示「不标」（非仓库/未跟踪/降级等）：清空装饰并摘下 model，
+       * 引擎与装饰集合都留在内存——同一个标签反复开关标记零重建成本。
+       */
+      if (base === null) {
+        gitTracker?.detach()
+        gitTracker = null
+        renderGitMarks([])
+        return
+      }
+      if (!gitTracker) gitTracker = getGitDiffTracker().attach(model, renderGitMarks)
+      gitTracker.setBase(base)
+    },
     refreshMenu: () => installMenuActions(handle),
     dispose: () => {
       wrapTargets.delete(handle)
@@ -955,6 +1127,9 @@ export async function createEditor(host: HTMLElement, opts: EditorOptions): Prom
       cursorBlame?.clear()
       for (const sub of blameSubs) sub.dispose()
       if (blameRaf) cancelAnimationFrame(blameRaf)
+      // 摘下 diff 引擎对 model 的引用（装饰集合随 model 一起消亡，无需另清）
+      gitTracker?.detach()
+      gitTracker = null
       ed.dispose()
       model.dispose()
       wrap.remove()
@@ -1193,6 +1368,8 @@ async function createFallbackEditor(host: HTMLElement, opts: EditorOptions): Pro
     },
     markClean: () => {},
     setBlame: () => {},
+    // 降级实现画不出装饰：Git 修改标记不给（资格判定在接线处，见 git-gutter.ts）
+    setGitBase: () => {},
     // 降级实现（highlight.js / textarea）没有小地图：空实现，也不进 minimapTargets 注册表
     setMinimap: () => {},
     // 降级实现的自绘菜单每次弹出前现取（见上面的 contextmenu），没有需要重装的东西

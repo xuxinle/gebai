@@ -24,6 +24,7 @@ import "../css/quick-open.css"
 import { createWheel, type WheelHandle, type WheelItem } from "../wheel-core"
 import { createEditor, isMinimap, isWordWrap, prewarmMonaco, refreshEditorTheme, monacoLoadFailed, toggleMinimap, toggleWordWrap, type EditorHandle, type EditorMenuGroup, type EditorMenuItem, type BlameLine } from "./editor"
 import { readInlineBlame, saveInlineBlame } from "./blame-prefs"
+import { gutterEligible } from "./git-gutter"
 import { attachDocument, attachedServerOf, hasLsp, initLsp, lspServerDetailOf, notifySaved, setLspNotifier, setLspOpener, setLspSessionProvider, type LspJumpTarget } from "./lsp"
 import { wordWrapTitle } from "./wrap"
 import { minimapTitle } from "./minimap"
@@ -33,7 +34,7 @@ import { FOCUS_ALL_FIELDS, validateKeymap, helpGroups, popKeyScope, pushEscScope
 import type { KeyBinding } from "../keymap"
 import { loadSession, saveSession, tabKey, type FwSessionState, type FwTabState } from "./session-state"
 import { fingerprint } from "./refresh-guard"
-import { absOfRepo, normPath, repoPrefixOfAbs, resolveAbsPath, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
+import { absOfRepo, normPath, relWithin, repoPrefixOfAbs, resolveAbsPath, resolveRepoPath as resolveRepoPathPure, rootAbsFromId, toRepoRel, type ResolvedRepoPath } from "./repo-paths"
 import { createExplorer } from "./explorer"
 import { createFsWatcher } from "./watch"
 import { invalidateQuickOpenIndex, isQuickOpenOpen, openQuickOpen } from "./quick-open"
@@ -168,6 +169,8 @@ interface Tab {
   blameGutter?: boolean
   blameInline?: boolean
   blameLines?: BlameLine[]
+  /** Git 修改标记：HEAD 基线是否已应用到编辑器（false = 未应用，标签就绪/状态到达后补）；切换/重建后重置 */
+  gitGutterOn?: boolean
   /** 最近的光标行/列与滚动位置（切标签时记下；状态记忆据此回到刷新前的位置） */
   cursorLine?: number
   cursorColumn?: number
@@ -644,6 +647,8 @@ async function refreshGit(force = false): Promise<GitStatusInfo | null> {
     renderStatus()
     // 变更面板与状态栏同源：状态一变就同步（只在它已创建时刷新，避免无谓重渲染）
     changesPanel?.refresh()
+    // Git 修改标记：HEAD oid 变了要作废基线缓存（提交/重置后标记跟新基线）
+    noteGitOidForGutter()
     return state.gitStatus
   })()
   gitStatusInFlight = { root, promise }
@@ -660,6 +665,82 @@ function onDiffChanged(): void {
     if (state.gitViewVisible && gitPanel) void gitPanel.refresh()
   })
 }
+
+/* ------------------------------ Git 修改标记（dirty-diff gutter） ------------------------------ */
+
+/**
+ * HEAD 基线缓存：`root|repoRel` → { oid, text }。oid 变（新提交/重置/ amend）即失效重取；
+ * 同 oid 下多标签共享（切换标签不重复请求）。文本量与文件本体同量级，只缓存当前文件一项，
+ * 标签关闭时清（见 forceClose 处的 gitBaseCache.delete）。
+ */
+const gitBaseCache = new Map<string, { oid: string; text: string | null }>()
+/** 同一标签进行中的基线请求（防抖：编辑/保存/git 事件密集时只发一次）。 */
+const gitBaseInflight = new Map<string, Promise<string | null>>()
+/** 上次应用基线时的 HEAD oid（refreshGit 后对比，变了才作废缓存——提交/重置后标记自动跟上）。 */
+let gitBaseOid = ""
+
+/** 仓库相对路径（当前根内）：不在仓库里返回 null（与路径换算同口径，见 repo-paths.ts）。 */
+function repoRelOfTab(tab: Tab): string | null {
+  if (!state.gitStatus?.isRepo || !state.gitStatus.repoRoot) return null
+  const abs = absOfRepo(rootAbsOf(tab.root), tab.path, IS_WIN)
+  const rel = relWithin(state.gitStatus.repoRoot, abs, IS_WIN)
+  return rel
+}
+
+/** 把 HEAD 基线应用到编辑器（或撒下标记）：标签就绪、git 状态到达、切标签时调。 */
+async function applyGitGutter(tab: Tab): Promise<void> {
+  if (activeTab()?.id !== tab.id || !tab.editor) return
+  const repoRel = tab.kind === "file" ? repoRelOfTab(tab) : null
+  const oid = state.gitStatus?.oid ?? ""
+  if (!repoRel || !oid) {
+    tab.gitGutterOn = false
+    tab.editor.setGitBase(null)
+    return
+  }
+  if (tab.gitGutterOn && oid === gitBaseOid) return // 已按当前 HEAD 应用过：无需重复
+  const key = `${tab.root}|${repoRel}`
+  let cached = gitBaseCache.get(key)
+  if (!cached || cached.oid !== oid) {
+    let p = gitBaseInflight.get(key)
+    if (!p) {
+      p = (async () => {
+        try {
+          const r = await api.gitContent(tab.root, "HEAD", repoRel)
+          return r.missing || r.binary || r.tooLarge ? null : r.content
+        } catch {
+          return undefined as never // 请求失败：用 undefined 区分「不可用」（null）与「未知」（不撒标记，下次再试）
+        }
+      })()
+      gitBaseInflight.set(key, p)
+      void p.finally(() => gitBaseInflight.delete(key))
+    }
+    const text = await p
+    if (activeTab()?.id !== tab.id) return // 等待期间切走了：切回来时 activate 会再触发
+    if (text === undefined) return
+    cached = { oid, text }
+    gitBaseCache.set(key, cached)
+  }
+  // 资格终判（editorKind / truncated 在这里才齐）：不满足时撒标记，但缓存留给下次（切回同文件复用）
+  const eligible = gutterEligible({ isRepo: true, headAvailable: cached.text !== null, truncated: !!tab.truncated, editorKind: tab.editor.kind })
+  tab.gitGutterOn = eligible
+  tab.editor.setGitBase(eligible ? cached.text : null)
+}
+
+/** refreshGit 尾部：HEAD oid 变了 → 缓存逐项作废（提交/重置后标记自动跟上新基线）。 */
+function noteGitOidForGutter(): void {
+  const oid = state.gitStatus?.oid ?? ""
+  if (oid && oid !== gitBaseOid) {
+    gitBaseOid = oid
+    // oid 变化但缓存项的 oid 已不同 → 惰性作废即可（applyGitGutter 里比对），这里只主动清当前标签外的项
+    for (const [k, v] of gitBaseCache) if (v.oid !== oid) gitBaseCache.delete(k)
+    const t = activeTab()
+    if (t && t.kind === "file" && t.editor) {
+      t.gitGutterOn = false
+      void applyGitGutter(t)
+    }
+  }
+}
+
 
 /* ------------------------------ 变更监听（长轮询 + 后端 fs.watch） ------------------------------ */
 
@@ -1145,6 +1226,9 @@ async function loadTab(tab: Tab, opts: { line?: number; column?: number; forceTe
       tab.blameLines = undefined
       tab.blameGutter = false
       tab.blameInline = false
+      // Git 修改标记同理（diff 引擎挂在旧编辑器的 model 上）：重建后重置，就绪后重新应用
+      tab.gitGutterOn = false
+      void applyGitGutter(tab)
       // 行内溯源状态刚清零：右键菜单里的溯源项文案带开关态，重装一次让它跟上
       tab.editor?.refreshMenu()
       void autoBlame(tab) // 行尾态按本地偏好自动恢复（查看态与编辑态都给）
@@ -1458,6 +1542,8 @@ function activate(id: string): void {
   restoreView(tab)
   // 行尾 blame 的本地偏好：编辑器就绪或 git 状态后到（启动期）时补上
   void autoBlame(tab)
+  // Git 修改标记：切到哪个标签，diff 引擎就跟哪个 model（同一时间只一个）
+  void applyGitGutter(tab)
   scheduleEditorLayout()
   renderTabbar()
   renderStatus()
@@ -1489,6 +1575,11 @@ function forceClose(id: string): void {
   if (idx < 0) return
   const tab = state.tabs[idx]
   tab.editor?.dispose()
+  // Git 修改标记的 HEAD 基线缓存只留当前文件一项：关标签时顺手清（重开时按需重取）
+  if (tab.kind === "file") {
+    const rel = repoRelOfTab(tab)
+    if (rel) gitBaseCache.delete(`${tab.root}|${rel}`)
+  }
   tab.viewDispose?.()
   tab.diffDispose?.()
   viewHosts.get(id)?.remove()
