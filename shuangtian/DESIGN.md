@@ -825,10 +825,22 @@ compose('TodoPage', () => Column([
   改它不触发重组）、`persisted<T>(c, key, init)`（**按名字**取槽：会话级持久，
   条件剪掉再声明能拿回旧值）。`Deps{{&a, &b}}` 的指纹是 `(指针, 写版本)`。
 - **单根语义**：build 的首个顶层声明直接落在 `UiRoot::content()` 槽位（不预建容器层）。
-- **位置对齐复用**：每个父元素一个子游标，重跑 build 时按位置+类型对齐——同位同型只
+- **位置对齐复用 + key 复用**：每个父元素一个子游标，重跑 build 时按位置+类型对齐——同位同型只
   更新（经 `ui::apply_properties`），异型替换，声明变少裁残。条件分支因此天然工作。
-- **护栏**：build 抛异常 → 冻结该作用域（保留上一帧 UI）+ `stats.error` 上报；单帧预算
-  （默认 4ms）超时标记 `budget_exceeded`。
+  **keyed 项（`for_each` / `.key` 显式传入）的复用依据是 key 而不是位置**：命中 key 就把该元素
+  挪到当前游标位（`elements_moved` 计数可观测），未命中才新建——同一 key 的项在增删/重排后
+  仍是同一个元素（id `Type@key` 稳定、事件/元素级状态不丢）。
+- **`for_each` 的 key 复用契约**：`for_each(c, items, key_fn, item_fn)` 先交**整份 key 集合**给
+  重组器（`begin_keyed_region`），再逐项声明（`begin_keyed_item`）——新项顶到游标位时，
+  那个位置上的兄弟可能只是「还没轮到」（它的 key 在本区段里，待会儿会被复用），
+  **分不清这一点就会把它当残留销毁**（实测：头插一项后其余项全部重建、id 漂移）。
+  契约：`item_fn` 为每个 item 恰好声明一个顶层元素；`key_fn` 的返回值一帧内不要重复。
+  需要 item 级细粒度失效时改用 `sub_component`（`for_each` 不为每项建独立作用域）。
+- **护栏**：build 抛异常 → 冻结该作用域（保留上一帧 UI）+ `stats.error` 上报；
+  **作用域嵌套深度** 超 `Guardrails::max_depth`（默认 64）→ **拒绝声明** + 写 `stats.error`
+  （递归 build 在此被截住，不是靠栈撞上限——见 `tests/ui_dsl_test.cpp` 的谬误注入用例）；
+  **单帧预算**（默认 4ms）按作用域计：超了就停手，剩下的**留在树上顺延下一帧**
+  （各自仍带脏标记，`dirty()` 为真 → 下一帧补跑，不是丢弃）+ `budget_exceeded` 标记。
 - **全局快捷键**：`Composer::register_shortcut(key, mods, handler)` 转调 `UiRoot`
   （先于焦点链派发，文本组件吞键也拦得住）——声明式组件不必碰 root。
 - **多作用域细粒度重组（作用域树）**：`sub_component(c, child, key)` 给子组件**独立作用域**
@@ -894,10 +906,26 @@ if (palette_open_.value()) {          // 条件声明
 
 **JS 宿主机制**：
 - VDOM/重组器纯 JS（`src/ui/declarative.js`，编译期嵌入，与 `script_api.js` 同机制）；
-- 树操作走**窄桥**（`__d_create/__d_set_root/__d_mount/__d_unmount/__d_move/__d_slot_root`）；
+- 树操作走**窄桥**（`__d_create/__d_set_root/__d_mount/__d_unmount/__d_move/__d_slot_root/__d_clear_slot`）；
+  **桥名纪律**：宿主桥与本运行时入口（`__d_reconcile/__d_stats/__d_dispose*/__d_run_effects`）
+  处于同一全局命名空间——本文件的同名赋值会**盖掉宿主桥**，调用点随即指向本层（最容易的表现
+  是递归）。实测踩过：整棵卸载曾取名 `__d_unmount`，于是 `unmountVNode` 里那行
+  `__d_unmount(node.el)` 变成对「整棵卸载」的递归调用（条件分支收不回、换页叠树）。
+  新增本层全局名前先确认宿主桥里没有它；
 - 属性在重组末尾经 `__d_apply_batch` **一次跨界批量落地**（走 `ui::apply_properties`）；
-- 事件复用 `on()/off()` 管线（VNode 持绑定 id，卸载时反注册）；观察者在元素处理后收到事件
-  → 勾选/开关类回调读回 `checked` 即终态；
+- **事件绑定按元素身份持有**（`eventHolders[id] = {node, kinds, bindings}`，宿主处理器只把事件
+  转给「当前这一帧」的 VNode）：绑定只在**该元素首次出现回调时**登记、卸载时反注册——
+  复用帧**零事件成本**，而「回调是最新一帧的」由指针更新保证。为何不能按「回调变了就重绑」
+  实现：回调闭包每帧重建（`() => { n.value++ }` 是 build 里的新函数对象），那等价于
+  **每帧把全树事件注销重绑**（实测：三帧的绑定 id 是 b1..b3 → b4..b6 → b7..b9）；
+  观察者在元素处理后收到事件 → 勾选/开关类回调读回 `checked` 即终态；
+- **片段摊平**：`forEach()` 返回子节点列表，**数组与 `__fragment` 都摊平**到父级
+  （`column({}, [text('头'), forEach(...)])` 是 compose 风格最常见的写法；只认 `__fragment`
+  的话这个数组会被当成一个 VNode（type 是 undefined），创建环节报一行错就整段消失——
+  **静默失效**：界面少一块而不崩）；
+- **场景卸载**：`compose()` 再挂载一页时**先卸上一层**（旧元素树 + hook 槽 + 事件登记），
+  避免「新页叠在旧页下面」「hook 槽从旧页第 N+1 个往后取」；`DeclarativeHost::unmount_declarative()`
+  供调用方主动整棵卸载（析构只释放桥与引擎，**不会回 JS 跑 effect 清理**）；
 - 帧驱动：`DeclarativeHost::tick()` → 泵 Promise 微任务 → JS `__d_reconcile()`（dirty 才重跑）；
 - **两种声明风格**：compose（小写函数 + props）与 ArkTS（大写组件 + 链式修饰，
   `Text('hi').padding(8).onClick(fn)`）产出同一 VNode，可混用——**不做块级 `struct` 语法**
@@ -934,12 +962,15 @@ if (palette_open_.value()) {          // 条件声明
 > （JS 十一用例）+ `tests/ui_declarative_parity_test.cpp`（双宿主一致性）完整钉住，
 > 界面演示由上面两个示例承载——示例不再重复单测已覆盖的验证。
 
-测试：`tests/ui_dsl_test.cpp`（C++ **二十一**用例：含 overlay 生命周期 / 异步 resource 与取消 /
+测试：`tests/ui_dsl_test.cpp`（C++ **二十八**用例：含 overlay 生命周期 / 异步 resource 与取消 /
 嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 / 载体内部件不被裁剪 /
-**memo·effect·ref·persisted 四个原语**，含「memo 命中缓存仍保持订阅」的反向验收）、
-`tests/ui_declarative_host_test.cpp`（JS **十五**用例，含 `useMemo`/`useEffect`/`useRef`/
-`usePersisted` 与「五个 hook 混用不串槽」）、
-`tests/ui_declarative_parity_test.cpp`（双宿主一致性两用例）、
+**memo·effect·ref·persisted 四个原语**（含「memo 命中缓存仍保持订阅」的反向验收）/ `for_each` key 复用 /
+递归 build 深度拦截与预算顺延的谬误注入）、
+`tests/ui_declarative_host_test.cpp`（JS **二十**用例，含 `useMemo`/`useEffect`/`useRef`/
+`usePersisted`、「五个 hook 混用不串槽」、片段摊平、事件绑定跨帧不重绑与卸载反注册、
+换页不叠树与卸载跑 effect 清理）、
+`tests/ui_declarative_parity_test.cpp`（双宿主一致性**四**用例：静态结构 / 状态推进 /
+列表与条件裁剪 / key 身份跨插入保持）、
 `tests/control_protocol_test.cpp`（协议 `ui.create`/`ui.remove` 用例）。
 
 ### 4.6 shell
@@ -1871,7 +1902,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**625 用例 / 15059 断言**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的字形墨量阈值存量项待校准） |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**637 用例 / 15192 断言**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的字形墨量阈值存量项待校准） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
 | 内置通道一致性 | `tools/st_consistency_check.py`：窗口帧缓冲 vs 客户区实际像素（逐像素） + 无头 vs 窗口同参数（scale/文本形态/拟合/截图接近度） | `python tools/st_consistency_check.py`（Windows 真机） | 5 项全过（呈现 0.000%、同源项全等） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |

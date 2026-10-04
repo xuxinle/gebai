@@ -577,3 +577,208 @@ ST_TEST(declarative_hook_slots_do_not_mix) {
   ST_CHECK_EQ(root->child_at(1)->semantics_text(), std::string("seen=e3"));
   ST_CHECK_EQ(root->child_at(2)->semantics_text(), std::string("res=r3"));
 }
+
+// ── 片段摊平：`forEach()` 的结果塞进 kids 数组（compose 风格最常见的写法）──
+//
+// `forEach()` 返回的是**子节点列表**，写法上常被直接放进数组：
+// `column({}, [text('头'), forEach(...)])`。若只认 `__fragment` 容器而不摊平数组，
+// 这个数组会被当成一个 VNode（`type` 是 `undefined`）——创建环节报一行错就整段消失，
+// 且**不崩**：界面少一块（实测：顶层子元素 0 个、Text 计数 0，而大写
+// `Column([ForEach(...)])` 同写法正常）。这类静默失效最难查，必须有用例钉住。
+ST_TEST(declarative_for_each_result_flattens_inside_array) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    const rows = [{id: 'a', n: 'Alpha'}, {id: 'b', n: 'Beta'}];
+    compose('Flat', () => column({gap: 2}, [
+      text('头部'),
+      forEach(rows, (it) => it.id, (it) => text(it.n)),
+      text('尾部'),
+    ]))
+  )JS");
+  if (!status.has_value()) ST_FAIL(status.error().message);
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  st::ui::Element* root = fx.root.content();
+  // 头部 + Alpha + Beta + 尾部（片段摊平后与兄弟同级，不多套一层）
+  ST_REQUIRE(root != nullptr);
+  ST_CHECK_EQ(root->child_count(), 4U);
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("头部"));
+  ST_CHECK_EQ(root->child_at(1)->semantics_text(), std::string("Alpha"));
+  ST_CHECK_EQ(root->child_at(2)->semantics_text(), std::string("Beta"));
+  ST_CHECK_EQ(root->child_at(3)->semantics_text(), std::string("尾部"));
+
+  // 嵌套片段：数组里再嵌数组，同样摊平
+  Fixture nested;
+  ST_REQUIRE(nested.ready());
+  auto nested_status = nested.decl->run(R"JS(
+    compose('Nest', () => column({}, [
+      [text('内层一'), [text('内层二')]],
+    ]))
+  )JS");
+  ST_REQUIRE(nested_status.has_value());
+  nested.root.layout(true);
+  ST_CHECK_EQ(nested.root.content()->child_count(), 2U);
+}
+
+// ── 事件绑定身份：跨帧复用**不得**重绑 ──────────────────────────────────
+//
+// 回调闭包每帧重建（`() => { n.value++ }` 是 build 里的新函数对象）。若实现按
+// 「回调变了就重绑」，等价于每帧把整棵树的事件全部注销重绑——实测三帧的绑定
+// id 是 b1..b3 → b4..b6 → b7..b9（codeeditor 整页声明式每帧都在付这笔钱）。
+//
+// 现在绑定按**元素 id** 持有、只在首次出现回调时登记：跨帧的绑定 id 必须不变
+// （反向验证：把 `ensureEventBinding` 改回无条件 release+on，本用例立即红）。
+ST_TEST(declarative_event_bindings_survive_reuse_frames) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let n = null;
+    compose('Bind', () => {
+      if (n === null) n = useState(0);
+      return column({}, [
+        text(() => 'n=' + n.value),
+        button('a', () => { n.value = n.value + 1; }),
+        button('b', () => { n.value = n.value + 1; }),
+        button('c', () => { n.value = n.value + 1; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  auto binding_ids = [&]() {
+    std::vector<std::string> ids;
+    for (const auto& binding : fx.script->bindings()) ids.push_back(binding.id);
+    return ids;
+  };
+  const std::vector<std::string> first = binding_ids();
+  ST_CHECK_EQ(first.size(), 3U);
+
+  // 连续重组三帧：绑定集合必须**逐项不变**
+  for (int index = 0; index < 3; ++index) {
+    ST_CHECK(st::ui::invoke_element(fx.root, *fx.root.content()->child_at(1), "click", ""));
+    ST_CHECK(fx.decl->tick());
+  }
+  fx.root.layout(true);
+  const std::vector<std::string> after = binding_ids();
+  ST_CHECK_EQ(after.size(), first.size());
+  for (std::size_t index = 0; index < first.size() && index < after.size(); ++index) {
+    ST_CHECK_EQ(after[index], first[index]);   // 绑定 id 逐项不变：复用帧不重绑
+  }
+  // 且回调仍是**本帧**的（n 已推进 3 次 → 文本跟着走）
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(), std::string("n=3"));
+
+  // 事件仍可用：再点一次（间接层派发到最新 VNode 的回调）
+  ST_CHECK(st::ui::invoke_element(fx.root, *fx.root.content()->child_at(2), "click", ""));
+  ST_CHECK(fx.decl->tick());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(), std::string("n=4"));
+}
+
+// ── 事件绑定随卸载反注册（不泄漏）──────────────────────────────────────
+ST_TEST(declarative_event_bindings_release_on_unmount) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let open = null;
+    compose('Release', () => {
+      if (open === null) open = useState(true);
+      const kids = [button('切换', () => { open.value = !open.value; })];
+      if (open.value) kids.push(button('临时', () => log('tmp')));
+      return column({}, kids);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.script->bindings().size(), 2U);
+
+  // 收起：临时按钮的绑定应被反注册（1 个切换按钮 + 1 个临时 → 剩 1）
+  ST_CHECK(st::ui::invoke_element(fx.root, *fx.root.content()->child_at(0), "click", ""));
+  ST_CHECK(fx.decl->tick());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_count(), 1U);
+  ST_CHECK_EQ(fx.script->bindings().size(), 1U);
+
+  // 再展开：重新登记（不是复用已失效的旧绑定）
+  ST_CHECK(st::ui::invoke_element(fx.root, *fx.root.content()->child_at(0), "click", ""));
+  ST_CHECK(fx.decl->tick());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_count(), 2U);
+  ST_CHECK_EQ(fx.script->bindings().size(), 2U);
+}
+
+// ── 场景卸载：再 compose 一页不叠树、hook 槽不复用旧界面 ────────────────
+//
+// 卸载路径有三件事必须做对，漏一件都不报错：
+// ① 真值树：新一页直接挂在旧一页下面（旧界面的元素不会自己消失）；
+// ② effect 槽：hook 槽按**调用点序号**对齐，不清就跳到旧界面的第 N+1 个槽
+//    （新页面第 1 个 hook 拿到旧页面的缓存）——同一类「静默串味」；
+// ③ effect 清理：被卸掉的界面里的清理函数永不被调（连接/定时器泄漏）。
+ST_TEST(declarative_compose_replaces_previous_page) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  ST_CHECK(fx.decl->run(R"JS(
+    compose('First', () => column({}, [text('第一页'), text('甲的'), text('乙的')]))
+  )JS").has_value());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_count(), 3U);
+
+  // 换一页：旧的整棵卸掉（不是叠上去）
+  ST_CHECK(fx.decl->run(R"JS(
+    compose('Second', () => column({}, [text('第二页')]))
+  )JS").has_value());
+  fx.root.layout(true);
+  ST_REQUIRE(fx.root.content() != nullptr);
+  ST_CHECK_EQ(fx.root.content()->child_count(), 1U);
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(), std::string("第二页"));
+
+  // hook 槽不复用旧页：新页第一个 hook 是崭新的计数（从 1 起，不是接在旧页后面）
+  ST_CHECK(fx.decl->run(R"JS(
+    let n = null;
+    compose('Third', () => {
+      if (n === null) n = useState(1);
+      return column({}, [
+        text(() => 'n=' + n.value),
+        button('inc', () => { n.value = n.value + 1; }),
+      ]);
+    })
+  )JS").has_value());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(), std::string("n=1"));
+  ST_CHECK(st::ui::invoke_element(fx.root, *fx.root.content()->child_at(1), "click", ""));
+  ST_CHECK(fx.decl->tick());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(), std::string("n=2"));
+}
+
+// effect 清理：卸载时跑（`unmount_declarative`），且只跑一次。
+ST_TEST(declarative_unmount_runs_effect_cleanups) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  ST_CHECK(fx.decl->run(R"JS(
+    state.cleaned = 0;
+    compose('Lifecycle', () => {
+      const ref = useRef(null);
+      useEffect(() => {
+        ref.current = 'open';                      // 模拟「建立连接」
+        return () => { state.cleaned = state.cleaned + 1; };   // 「关闭连接」
+      }, []);
+      return column({}, [text('资源页')]);
+    })
+  )JS").has_value());
+  fx.root.layout(true);
+  (void)fx.decl->tick();   // effect 在重组末尾跑（首挂那次已在 compose 内跑过）
+
+  ST_CHECK(fx.decl->unmount_declarative());
+  ST_CHECK_EQ(fx.run("state.cleaned"), std::string("1"));
+  // 再卸一次：没有东西可卸（幂等，不重复清理）
+  ST_CHECK(!fx.decl->unmount_declarative());
+  ST_CHECK_EQ(fx.run("state.cleaned"), std::string("1"));
+
+  // 卸完还能装新的一页（状态干净）
+  ST_CHECK(fx.decl->run(R"JS(
+    compose('Again', () => column({}, [text('重装页')]))
+  )JS").has_value());
+  fx.root.layout(true);
+  ST_CHECK_EQ(fx.root.content()->child_at(0)->semantics_text(), std::string("重装页"));
+}

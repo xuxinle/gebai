@@ -130,6 +130,10 @@ struct Composer::Impl {
     std::size_t slot{0};
     bool declared{false};                           // 本次父重跑是否又见到它
     Scope* parent{nullptr};
+    /// 嵌套深度（根 = 0；子 = 父 + 1）。超 `Guardrails::max_depth` 时拒绝声明——
+    /// 递归 build（组件在自己 build 里又声明自己）会让深度无界增长，
+    /// 直到爆栈（实测形态：栈溢出 SIGSEGV，现场只剩一大堆 run_scope 帧）。
+    int depth{0};
     std::vector<std::unique_ptr<Scope>> children{};
 
     [[nodiscard]] auto find_child(std::string_view wanted) -> Scope* {
@@ -158,6 +162,16 @@ struct Composer::Impl {
                            const std::string& key) -> Scope* {
     if (parent == nullptr) parent = root_scope.get();
     if (parent == nullptr) return nullptr;
+    // 深度护栏：递归 build 在这里被截住（不是靠栈自己撞上限）。
+    // 超限 = 声明被拒（本帧不建这个子作用域），错误写进 stats 供宿主/测试断言。
+    if (parent->depth + 1 > guardrails.max_depth) {
+      if (last_stats.error.empty()) {
+        last_stats.error = std::format("作用域嵌套超过 {} 层（疑似递归 build）",
+                                       guardrails.max_depth);
+      }
+      std::fprintf(stderr, "[dsl] %s\n", last_stats.error.c_str());
+      return nullptr;
+    }
     Scope* scope = parent->find_child(key);
     if (scope == nullptr) {
       auto fresh = std::make_unique<Scope>();
@@ -165,6 +179,7 @@ struct Composer::Impl {
       fresh->key = key;
       fresh->dirty = true;   // 首次要跑一次
       fresh->parent = parent;
+      fresh->depth = parent->depth + 1;
       scope = fresh.get();
       parent->children.push_back(std::move(fresh));
     } else {
@@ -247,16 +262,28 @@ struct Composer::Impl {
     return root.content() != nullptr ? root.content()->child_at(0) : nullptr;
   }
 
-  /// 递归跑脏的作用域（自顶向下）。
+  /// 递归跑脏的作用域（自顶向下），带**单帧预算**：
   ///
-  /// 注意：**根不脏也要继续递归**——子作用域可以独立脏（这正是细粒度重组的意义）。
-  /// 反过来，父跑了会先把整棵子树标脏（`mark_subtree_dirty`），所以父跑过的子必然也跑。
-  void run_dirty_scopes(Scope& scope) {
+  /// 超预算时把剩下的脏作用域**留在树上顺延下一帧**（而不是硬跑完）——
+  /// 掉帧优于卡死（`docs/declarative.md` §4.2）。判据按作用域计：
+  /// 根重跑后剩下的子作用域往往很多，一刀切会退化成“一帧只跑一块”；
+  /// 按预算切才真正兼顾「大页面冻住」与「小页面一帧到位」。
+  ///
+  /// 返回是否因预算而中断（调用方据此把 `budget_exceeded` 置位）。
+  auto run_dirty_scopes(Scope& scope, const std::chrono::steady_clock::time_point& start,
+                        double budget_ms) -> bool {
     if (scope.dirty) {
+      if (static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - start).count()) / 1000.0 > budget_ms) {
+        return true;   // 本作用域留脏：下一帧再跑（孩子也留着）
+      }
       run_scope(scope);
       ++last_stats.scopes_rerun;
     }
-    for (auto& child : scope.children) run_dirty_scopes(*child);
+    for (auto& child : scope.children) {
+      if (run_dirty_scopes(*child, start, budget_ms)) return true;
+    }
+    return false;
   }
 
   /// 递归收集作用域内的依赖（`notify_state_written` 用）。
@@ -384,6 +411,14 @@ struct Composer::Impl {
   /// 生命周期 = Composer（即整个会话期）：条件剪掉再声明能拿回旧值。
   std::unordered_map<std::string, std::unique_ptr<StateBase>> persisted_states{};
 
+  /// 正在构建的 keyed item（`for_each`）：没有显式传入 key 的首个声明自动带上它。
+  /// 空 = 不在 keyed 区段（或该 item 还没声明元素）。
+  std::string keyed_item_key{};
+  /// 当前 keyed 区段（`for_each`）用到的全部 key：区分「还没轮到的兄弟」（待复用）
+  /// 与「真残留」（本次数据里没有它——可释放）。
+  std::unordered_set<std::string> keyed_region{};
+  bool keyed_region_active{false};
+
   std::unordered_map<const Element*, std::size_t> child_cursor{};  // 每父元素的子游标
 
   /// 根槽位哨兵：parent_stack 的栈底。current_parent() 返回它时，create_element
@@ -461,6 +496,10 @@ void Composer::rebuild_all() {
   impl_->subscribed_states.clear();
   impl_->scope_dirty = true;
   (void)reconcile();
+}
+
+auto Composer::last_reconcile_stats() const noexcept -> const ReconcileStats& {
+  return impl_->last_stats;
 }
 
 auto Composer::reconcile() -> ReconcileStats {
@@ -548,8 +587,11 @@ auto Composer::reconcile() -> ReconcileStats {
   //
   // 遍历顺序：自顶向下。父未跑则子各自判断；父跑了（它已把子树标脏）则子必然跑。
   // 这样保证「父重建了子树 → 子随后对齐」，且不重复跑（父跑时子被标脏一次、跑一次）。
+  // 预算：超了就停手，剩下的留在树上顺延下一帧（它们的 dirty 仍为真）。
   if (impl_->root_scope != nullptr) {
-    impl_->run_dirty_scopes(*impl_->root_scope);
+    const bool cut = impl_->run_dirty_scopes(*impl_->root_scope, start,
+                                             impl_->guardrails.frame_budget_ms);
+    if (cut) impl_->last_stats.budget_exceeded = true;
   }
 
   const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -558,6 +600,8 @@ auto Composer::reconcile() -> ReconcileStats {
       impl_->guardrails.frame_budget_ms) {
     impl_->last_stats.budget_exceeded = true;
   }
+  // 注意：`scope_dirty = false` 只清**根**。被预算顺延的子作用域各自还带脏标记，
+  // 所以下一帧 `dirty()` 仍为真——顺延是真顺延，不是丢弃。
   impl_->scope_dirty = false;
   // —— ③ 副作用（effect）——
   //
@@ -831,29 +875,64 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
   // （如 `ScrollView` 的滚动条）也放在 `children_` 末尾，它们不归调用方管——
   // 当成「上一帧多声明的残留」移除会让组件持有的裸指针悬垂
   // （实测：声明式里 ScrollView 与 List 分支互切 → `bar_->arrange` 段错误）。
+  //
+  // keyed 项（`begin_keyed_item` 背书）**复用依据是 key 而不是位置**：同一 key 的
+  // 项在数据重排/中间插入后仍命中同一个元素（id/事件/元素级状态都跟着 key 走）。
+  // 两套机制共用同一份对齐代码：命中 key ⇒ 把元素挪到当前游标位；**优先挪**——
+  // 先挪开，被释放的那格恰好就是新元素要落的位置（于是不必做中间缓冲）。
   auto& cursor = impl_->child_cursor[parent];
   const std::size_t content_count = parent->content_child_count();
-  Element* existing = cursor < content_count ? parent->child_at(cursor) : nullptr;
+  const std::string wanted_key = !key.empty() ? std::string(key) : impl_->keyed_item_key;
+  // ① 按 key 找既有元素（**只取第一个**：同 key 重复时后一个退回位置对齐，不歧义）
+  Element* existing = nullptr;
+  if (!wanted_key.empty()) {
+    for (std::size_t index = 0; index < content_count; ++index) {
+      Element* candidate = parent->child_at(index);
+      if (candidate != nullptr && candidate->key() == wanted_key) {
+        existing = candidate;
+        break;
+      }
+    }
+  }
+  // ② 命中且不在游标位：挪到游标位（其余元素相对顺序不变；挪出的那格留给本项）
+  if (existing != nullptr && existing != parent->child_at(cursor)) {
+    auto moved = parent->remove_child(existing);
+    if (moved != nullptr) {
+      parent->insert_child(cursor, std::move(moved));
+      ++impl_->last_stats.elements_moved;
+    }
+  }
+  // ③ 未命中：退回位置对齐（无 key 的声明走的就是这条；keyed 新增落到游标位）
+  if (existing == nullptr) {
+    existing = cursor < parent->content_child_count() ? parent->child_at(cursor) : nullptr;
+  }
   const bool type_matches = existing != nullptr && existing->type() == type;
+  const bool key_matches = wanted_key.empty() || existing == nullptr ||
+                           existing->key() == wanted_key;
   Element* element = nullptr;
-  if (type_matches) {
-    element = existing;  // 复用：只更新 props
+  if (type_matches && key_matches) {
+    element = existing;   // 复用：只更新 props
   } else {
-    // 新建（或类型变了）：先移除旧位置元素再插入新元素
+    // 新建（或类型/key 对不上）：腾出游标位，把新元素插进那一格。
+    //
+    // **腾位只释放真正的残留**（`keyed_region` 里没有它的 key）：占着这一格的兄弟
+    // 很可能只是「还没轮到」（它的 key 在本区段里，待会儿自己会被复用）——
+    // 把它摘掉就毁掉了 key 复用。实测踩到：头插一项后其余项全部重建、id 漂移。
     auto created = make_element(std::string(type));
     if (created == nullptr) return nullptr;
     element = created.get();
-    if (cursor < content_count) {
-      auto old = parent->remove_child(parent->child_at(cursor));
-      (void)old;  // 释放旧元素
+    Element* occupant = cursor < parent->content_child_count() ? parent->child_at(cursor) : nullptr;
+    if (occupant != nullptr && impl_->keyed_region.count(occupant->key()) == 0) {
+      auto removed = parent->remove_child(occupant);
+      (void)removed;   // 释放旧元素（它的 key 不在本次列表里 = 已被数据移除）
       ++impl_->last_stats.elements_removed;
     }
-    parent->insert_child(cursor, std::move(created));
+    parent->insert_child(std::min(cursor, parent->content_child_count()), std::move(created));
     ++impl_->last_stats.elements_created;
   }
   ++cursor;
   // key/id 先行截获（id 的本职是被外部引用——保持选择器安全）
-  if (!key.empty()) element->set_key(std::string(key));
+  if (!wanted_key.empty() && element->key() != wanted_key) element->set_key(wanted_key);
   if (props.is_object() && !props.empty()) {
     auto applied = ui::apply_properties(impl_->root, *element, props);
     if (applied.is_array()) {
@@ -1457,18 +1536,47 @@ auto tabs(Composer& c, const std::vector<TabData>& items, std::size_t active,
   return *element;
 }
 
-// ── DeclarativeHost ───────────────────────────────────────────────────────
-
 DeclarativeHost::DeclarativeHost(UiRoot& root, Guardrails guardrails)
     : composer_(std::make_unique<Composer>(root, guardrails)) {}
 
+// keyed 区段（`for_each`）：置上当前项的 key——随后该 item 声明的首个元素
+// 自动按这个 key 跨位置复用（也可以显式传 `.key`，显式优先）。
+void Composer::begin_keyed_item(const std::string& key, std::size_t index) {
+  (void)index;   // 身份是 key；数据位置只在诊断里用
+  impl_->keyed_item_key = key;
+}
+
+void Composer::end_keyed_item() { impl_->keyed_item_key.clear(); }
+
+void Composer::begin_keyed_region(const std::vector<std::string>& keys) {
+  // 本区段用到的全部 key：新建项顶到游标位时「那个位置上的兄弟是否还有归宿」靠它判断。
+  impl_->keyed_region.clear();
+  for (const std::string& key : keys) {
+    if (!key.empty()) impl_->keyed_region.insert(key);
+  }
+  // 本区段游标从当前子位数起（区段前的兄弟已经声明过了）——区段结束前不动它。
+  impl_->keyed_region_active = true;
+}
+
+void Composer::end_keyed_region() {
+  impl_->keyed_region.clear();
+  impl_->keyed_region_active = false;
+  impl_->keyed_item_key.clear();
+}
+
 auto DeclarativeHost::mount(std::shared_ptr<Component> root_component) -> bool {
-  return composer_->mount(std::move(root_component));
+  const bool mounted = composer_->mount(std::move(root_component));
+  // 记下挂载帧的统计：`mount` 本身就跑了一次重组（元素新建/嵌套护栏错误都在里面）
+  // ——不记的话 `stats()` 在首次 `tick()` 之前永远是空默认值（调用方看不到刚发生的事）。
+  last_ = composer_->last_reconcile_stats();
+  return mounted;
 }
 
 auto DeclarativeHost::mount_into(Element& host, std::shared_ptr<Component> root_component)
     -> bool {
-  return composer_->mount_into(host, std::move(root_component));
+  const bool mounted = composer_->mount_into(host, std::move(root_component));
+  last_ = composer_->last_reconcile_stats();
+  return mounted;
 }
 
 auto DeclarativeHost::tick() -> ReconcileStats {

@@ -57,6 +57,12 @@ class DeclarativeHost {
   /// 返回是否发生了重组（发生则调用方应 request_repaint——变更集提交已标脏）。
   auto tick() -> bool;
 
+  /// 整棵卸载（场景切换 / 调用方主动收尾）：事件反注册 + effect 清理 + 真值树摘除。
+  /// 返回是否有东西被卸。之后可再 `run()` 装新的一页（不复用旧槽位）。
+  /// 仅析构不够：析构只释放桥与引擎，**不会回 JS 跑 effect 清理**——
+  /// 「组件卸载时关连接/停定时器」这类清理会静默漏掉。
+  auto unmount_declarative() -> bool;
+
   /// JS 侧状态（诊断）：{ scopes, mounted, dirty }
   [[nodiscard]] auto stats() const -> st::Json;
 

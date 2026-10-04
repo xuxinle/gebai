@@ -1032,3 +1032,214 @@ ST_TEST(dsl_memo_keeps_subscription_on_cache_hit) {
 }
 
 }  // namespace
+
+// ── `for_each` 的 key 对齐复用（与 `List::sync_items` / JS `ForEach` 同一语义）──
+//
+// 这条路径此前是**半成品**：模板里两个参数声明未使用（真实调用直接
+// `-Werror=unused-parameter` 编译不过），且注释自承「v1 每次重组重建 items 区段」。
+// 现在按 key 复用：同一 key 的项在增删/重排后仍是**同一个元素**（id 形如 `Type@key`，
+// 与位置无关），中间插入只新建那一个。
+struct Task {
+  std::string id{};
+  std::string name{};
+  auto operator==(const Task& other) const -> bool = default;
+};
+
+struct ForEachPage : Component {
+  State<std::vector<Task>> tasks{std::vector<Task>{{"a", "甲"}, {"b", "乙"}, {"c", "丙"}}};
+  State<int> noise{0};
+
+  void build(Composer& c) override {
+    column(c, {.id = "list"}, [&] {
+      for_each<Task>(
+          c, tasks.value(), [](const Task& task) { return task.id; },
+          [&](const Task& task) {
+            row(c, {.gap = 4.0f, .key = task.id}, [&] {
+              text(c, [task] { return task.name; }, {.key = task.id + "-label"});
+            });
+          });
+      (void)noise.value();   // 无关状态：用于触发重组
+    });
+  }
+};
+
+ST_TEST(dsl_for_each_reuses_by_key) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto page = std::make_shared<ForEachPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+  Element* list = root.find("list");
+  ST_REQUIRE(list != nullptr);
+  ST_CHECK_EQ(list->child_count(), 3U);
+  ST_CHECK_EQ(list->child_at(0)->key(), std::string("a"));
+  ST_CHECK_EQ(list->child_at(1)->key(), std::string("b"));
+  ST_CHECK_EQ(list->child_at(2)->key(), std::string("c"));
+
+  // 记下「key=a」那一项的 id 与元素地址：后续无论怎么重排，它都不该变。
+  const std::string id_a = list->child_at(0)->derived_id();
+  const std::string id_b = list->child_at(1)->derived_id();
+  Element* element_a = list->child_at(0);
+  Element* element_b = list->child_at(1);
+  Element* element_c = list->child_at(2);
+  ST_CHECK(id_a.find("a") != std::string::npos);   // 自动 id 带业务 key（Type@key 形态）
+
+  // ① 头部插入一项：既有项一个都不重建（元素地址不变）
+  auto rows = page->tasks.value();
+  rows.insert(rows.begin(), Task{"z", "新"});
+  page->tasks.set(rows);
+  (void)host->tick();
+  root.layout(true);
+  list = root.find("list");
+  ST_REQUIRE(list != nullptr);
+  ST_CHECK_EQ(list->child_count(), 4U);
+  ST_CHECK_EQ(list->child_at(0)->key(), std::string("z"));
+  ST_CHECK_EQ(list->child_at(1)->key(), std::string("a"));
+  ST_CHECK(list->child_at(1) == element_a);        // 同一个元素（不是重建的）
+  ST_CHECK(list->child_at(2) == element_b);
+  ST_CHECK_EQ(list->child_at(1)->derived_id(), id_a);
+
+  // ② 重排（把末项提到最前）：身份跟 key 走，且**不新建**（只是挪位）
+  rows = page->tasks.value();
+  rows.insert(rows.begin(), rows.back());
+  rows.pop_back();   // [z,a,b,c] → [c,z,a,b]
+  page->tasks.set(rows);
+  const ReconcileStats reorder = host->tick();
+  root.layout(true);
+  list = root.find("list");
+  ST_CHECK_EQ(list->child_at(0)->key(), std::string("c"));
+  ST_CHECK(list->child_at(0) == element_c);
+  ST_CHECK(list->child_at(2) == element_a);        // 甲 只是换了个位置
+  ST_CHECK_EQ(list->child_at(2)->derived_id(), id_a);
+  ST_CHECK_EQ(reorder.elements_created, 0);        // 纯重排：一个都不新建
+  ST_CHECK_EQ(reorder.elements_removed, 0);
+  ST_CHECK(reorder.elements_moved > 0);            // 挪位是可观测的（诊断计数）
+
+  // ③ 删除一项：只有它消失，其余身份不动
+  rows = page->tasks.value();
+  rows.erase(std::remove_if(rows.begin(), rows.end(),
+                            [](const Task& task) { return task.id == "b"; }),
+             rows.end());
+  page->tasks.set(rows);
+  (void)host->tick();
+  root.layout(true);
+  list = root.find("list");
+  ST_CHECK_EQ(list->child_count(), 3U);
+  for (std::size_t index = 0; index < list->child_count(); ++index) {
+    ST_CHECK(list->child_at(index)->key() != std::string("b"));
+  }
+  ST_CHECK(list->child_at(2) == element_a);        // 甲 仍在原位
+  ST_CHECK_EQ(list->child_at(2)->derived_id(), id_a);
+
+  // ④ 无关状态变化不得新建/移除任何元素
+  const ReconcileStats stats_before = host->stats();
+  page->noise.set(page->noise.value() + 1);
+  const ReconcileStats stats = host->tick();
+  root.layout(true);
+  ST_CHECK_EQ(stats.elements_created, 0);
+  ST_CHECK_EQ(stats.elements_removed, 0);
+  ST_CHECK_EQ(stats.elements_moved, 0);
+  (void)stats_before;
+}
+
+// ── 谬误注入：递归 build 被深度护栏截住（不是靠栈自己撞上限）──────────────
+//
+// 形态：组件在自己的 `build` 里又声明一个**自己**（写成状态计数就很容易踩到——
+// 「列表里每一项再渲染一个同样的组件」写漏了终止条件）。没有护栏时深度无界增长，
+// 最后是栈溢出（SIGSEGV），现场信息只有一大堆 `run_scope` 帧，很难指到真正的错处。
+//
+// `Guardrails::max_depth` 是为此存在的：超限即**拒绝声明**并记错误（不是崩）。
+// 反向验证：把 `declare_child_scope` 里的深度判断去掉，本用例会直接崩进程。
+struct RecursivePage : Component {
+  State<int> depth_probe{0};
+
+  void build(Composer& c) override {
+    column(c, {.id = "recursive"}, [&] {
+      text(c, [] { return "层"; });
+      sub_component(c, std::make_shared<RecursivePage>(), "self");
+    });
+  }
+};
+
+ST_TEST(dsl_recursive_build_is_stopped_by_depth_guard) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  dsl::Guardrails guardrails{};
+  guardrails.max_depth = 4;   // 收紧上限便于断言（默认 64）
+  auto host = dsl::mount(root, std::make_shared<RecursivePage>(), guardrails);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  // 没崩 = 护栏生效；错误信息给到调用方（诊断用）。
+  // 注意：`ReconcileStats` 是**当帧**的（每次 reconcile 开头重置）——
+  // 所以要在这之后额外 tick 之前读，否则读到的是一次“已经不再触发”的新统计。
+  const dsl::ReconcileStats& stats = host->stats();
+  ST_CHECK(!stats.error.empty());
+  ST_CHECK(stats.error.find("嵌套") != std::string::npos);
+
+  // 不会无限递归下去：状态里不再有任何“新一层”抱错以外的异常
+  ST_CHECK(host->tick().error.empty());   // 再跑一帧：深度已达上限，不再触发（稳定，不每帧刷错）
+}
+
+// ── 单帧预算：超预算的作用域**顺延下一帧**（不是丢弃）────────────────────
+//
+// 文档承诺「超预算的失效作用域顺延下一帧（掉帧优于卡死）」。这里用一个**故意慢**
+// 的中间作用域把预算耗尽，验证两层结论：
+// ① 被切掉的孙作用域本帧不跑，但**仍带脏标记**（`dirty()` 为真 → 下一帧补上），
+//    而不是被清掉（那会表现为“界面永远少一块”，比掉帧难查得多）；
+// ② 下一帧预算重新计时 → 补跑完成，最终态与预算充足时一致。
+struct SlowGrandChild : Component {
+  void build(Composer& c) override { text(c, [] { return "孙节点"; }, {.key = "grand"}); }
+};
+
+struct SlowChild : Component {
+  void build(Composer& c) override {
+    // 故意拖过预算：模拟「大列表/复杂子树」在真实应用里的样子
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    text(c, [] { return "慢子树"; }, {.key = "slow"});
+    sub_component(c, std::make_shared<SlowGrandChild>(), "grand");
+  }
+};
+struct BudgetPage : Component {
+  std::shared_ptr<SlowChild> child = std::make_shared<SlowChild>();
+  void build(Composer& c) override {
+    column(c, {.id = "budget"}, [&] {
+      text(c, [] { return "根"; }, {.key = "root"});
+      sub_component(c, child, "child");
+    });
+  }
+};
+
+ST_TEST(dsl_frame_budget_defers_instead_of_dropping) {
+  // 按业务 key 找元素（自动 id 是路径形态 `面板id/Type@key`，按 key 找才是稳的）
+  const auto find_by_key = [](auto&& self, Element& element, const std::string& key) -> Element* {
+    if (element.key() == key) return &element;
+    for (std::size_t index = 0; index < element.child_count(); ++index) {
+      if (Element* hit = self(self, *element.child_at(index), key)) return hit;
+    }
+    return nullptr;
+  };
+
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  dsl::Guardrails guardrails{};
+  guardrails.frame_budget_ms = 1.0;   // 中间那层要睡 3ms → 必然超
+  auto page = std::make_shared<BudgetPage>();
+  auto host = dsl::mount(root, page, guardrails);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+  ST_REQUIRE(root.content() != nullptr);
+
+  // 首帧：中间层跑了（睡了 3ms），孙节点被顺延
+  ST_CHECK(host->stats().budget_exceeded);
+  ST_CHECK(find_by_key(find_by_key, *root.content(), "slow") != nullptr);
+  ST_CHECK(find_by_key(find_by_key, *root.content(), "grand") == nullptr);   // 本帧没跑
+  ST_CHECK(host->dirty());                       // 顺延 = 还脏着（不是丢弃）
+
+  // 第二帧：预算重新计时，孙节点补上
+  (void)host->tick();
+  root.layout(true);
+  ST_REQUIRE(root.content() != nullptr);
+  ST_CHECK(find_by_key(find_by_key, *root.content(), "grand") != nullptr);
+}

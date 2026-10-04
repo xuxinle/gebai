@@ -229,6 +229,7 @@ struct ReconcileStats {
   int scopes_rerun{0};        ///< 本次重组重跑的作用域数
   int elements_created{0};    ///< 新建元素数
   int elements_removed{0};    ///< 移除元素数
+  int elements_moved{0};      ///< 因 key 重排而换位的元素数（诊断：增量对齐的代价）
   int properties_applied{0};  ///< 经 apply_properties 落地的属性数
   int effects_run{0};         ///< 本次执行的 effect 数（依赖变化的）
   bool budget_exceeded{false};///< 预算耗尽（剩余作用域顺延）
@@ -257,7 +258,27 @@ class Composer {
   /// 是否有失效作用域待重组。
   [[nodiscard]] auto dirty() const noexcept -> bool;
   /// 强制全量重建（调试/主题切换后的兜底路径）。
-  void rebuild_all();
+void rebuild_all();
+
+/// 最近一次重组的统计（含 `mount` 那一次；`stats()` 的宿主侧读数）。
+[[nodiscard]] auto last_reconcile_stats() const noexcept -> const ReconcileStats&;
+
+  /// 进入一个「按 key 对齐的区段」（`for_each` 用）：先把本区段全部 key 交给重组器。
+  ///
+  /// 为何要整集合而不只当前 item：新建项顶到游标位时，那个位置上的兄弟可能**只是
+  /// 还没轮到**（它的 key 在本区段里，待会儿会被复用）——分不清这一点就会把它当残留
+  /// 销毁，key 复用整个失效（实测：头插一项后其余项全部重建、id 漂移）。
+  /// 与 `end_keyed_region()` 成对。
+  void begin_keyed_region(const std::vector<std::string>& keys);
+  /// 收尾一个 keyed 区段（与 `begin_keyed_region` 成对）。
+  void end_keyed_region();
+
+  /// 进入一个「按 key 对齐的项」（`for_each` 用）：随后本次声明的首个元素
+  /// 自动带上这个业务 key（显式传 `.key` 时以显式为准），并按 key 跨位置复用既有元素。
+  /// 与 `end_keyed_item()` 成对（`for_each` 已包好；手写区段时才需要直接调）。
+  void begin_keyed_item(const std::string& key, std::size_t index);
+  /// 收尾一个 keyed item（与 `begin_keyed_item` 成对）。
+  void end_keyed_item();
 
   // —— build() 内可用的声明 API（由组件包装函数调用；也可直接用）——
   /// 登记一个状态订阅（State::value() 读时自动调到这里）。
@@ -629,16 +650,42 @@ auto tree(Composer& c, const std::vector<TreeNodeData>& nodes,
           std::function<void(const std::string& key, bool expanded)> on_toggle = {},
           std::function<void(const std::string& key)> on_select = {}, const BoxProps& props = {})
     -> Element&;
-/// For 控制流：数据数组按 key 对齐复用子元素（每个 item 声明一个子作用域）。
-/// key_fn 取业务身份；item_fn 声明该项内容。
-template <class T>
-void for_each(Composer& c, const std::vector<T>& items,
-              std::function<std::string(const T&)> key_fn,
-              std::function<void(const T&)> item_fn) {
-  // v1 实现：每次重组重建 items 区段（key 对齐复用在 M2 重组器成熟后接入；
-  // 数据型组件优先走 list() 的 sync_items 路径）
-  for (const auto& item : items) item_fn(item);
+/// For 控制流：数据数组按 key 对齐复用子元素。
+///
+/// **按 key 复用**（与 JS 侧 `ForEach`、与 `List::sync_items` 同一语义）：
+/// 同一 key 的项在增删/重排后仍拿到**同一个元素**（id 形如 `Type@key`，与位置无关），
+/// 于是外部按 id 引用（选择器/协议/脚本）不会因为“前面插了一项”而指到别的数据。
+/// 中间插入/删除只动变化的那几项，已有元素不重建（元素级状态如滚动位置、
+/// 编辑光标得以保留）。
+///
+/// ```cpp
+/// for_each<Row>(c, rows.value(), [](const Row& r) { return r.id; }, [&](const Row& r) {
+///   list_item(c, {.text = r.name});
+/// });
+/// ```
+///
+/// 契约（与 hooks 同一类，不知道就会写错）：
+/// - **`item_fn` 必须为每个 item 恰好声明一个顶层元素**（对齐单位是「一个子元素 ↔ 一个 key」）；
+/// - `key_fn` 返回的业务身份在一帧内**不得重复**（重复时后一个按位置落位）；
+/// - 与 `sub_component` 不同，这里**不为每个 item 建独立作用域**——独立作用域需要
+///   「每个 item 一个 Component」，而 `for_each` 的形态是就地声明（避免为简单列表
+///   逼用户把 item 抽成组件）。需要 item 级细粒度失效时用 `sub_component`。
+template <class T, class KeyFn, class ItemFn>
+void for_each(Composer& c, const std::vector<T>& items, KeyFn key_fn, ItemFn item_fn) {
+  // 先交整集合给重组器：它据此区分「还没轮到的兄弟」与「真残留」。
+  std::vector<std::string> keys;
+  keys.reserve(items.size());
+  for (const T& item : items) keys.push_back(std::string(key_fn(item)));
+  c.begin_keyed_region(keys);
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    c.begin_keyed_item(keys[index], index);
+    item_fn(items[index]);
+    c.end_keyed_item();
+  }
+  c.end_keyed_region();
 }
+
+// ──────────────────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────────────────
 // 宿主：挂在应用上驱动重组

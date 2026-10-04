@@ -235,6 +235,21 @@ auto DeclarativeHost::attach(ScriptHost& script, UiRoot& root, Element* host_ele
     return nullptr;
   }
 
+  // __d_clear_slot()：清掉子树形态的宿主槽位（`__d_unmount` 在根元素非本层创建时用——
+  // 单根形态的卸载走 `__d_unmount(root_id)`，子树形态得知道“槽”是谁）。
+  if (auto status = script.register_function(
+          "__d_clear_slot", [impl](const std::vector<st::Json>&) -> Result<st::Json> {
+            if (impl->host_element == nullptr || impl->host_element->child_count() == 0) {
+              return st::Json(false);
+            }
+            auto removed = impl->host_element->remove_child(impl->host_element->child_at(0));
+            (void)removed;
+            return st::Json(true);
+          });
+      !status) {
+    return nullptr;
+  }
+
   // __d_move(id, parent_id, index)：重排子元素（key 对齐复用的配套——复用元素
   // 保持旧树位置，key 重排后需按新序落位）。已在位时无操作（幂等）。
   if (auto status = script.register_function(
@@ -321,6 +336,12 @@ auto DeclarativeHost::tick() -> bool {
   }
   if (rerun) impl_->script->request_repaint();
   return rerun;
+}
+
+auto DeclarativeHost::unmount_declarative() -> bool {
+  if (impl_ == nullptr || !impl_->ready) return false;
+  auto outcome = impl_->script->call("__d_dispose", {});
+  return outcome.has_value() && st::json_as_bool(*outcome);
 }
 
 auto DeclarativeHost::pump_jobs() -> std::size_t {

@@ -56,11 +56,13 @@
   }
 
   // ── VDOM ────────────────────────────────────────────────────────────────
-  // VNode：{ type, props, key, children: [], el: id|null, bound: [] }
+  // VNode：{ type, props, key, children: [], el: id|null }
   // 描述性节点；`el` 是真值树上元素的 id（挂载后回填，diff 的对齐锚点）。
+  // 事件绑定不在 VNode 上（回调闭包每帧重建）——由 `eventHolders` 按**元素 id** 持有，
+  // 见「事件绑定（绑定身份 = 元素）」一节。
 
   function vnode(type, props, children) {
-    return { type, props: props || {}, key: props && props.key || '', children: children || [], el: null, bound: [] };
+    return { type, props: props || {}, key: props && props.key || '', children: children || [], el: null };
   }
 
   // ── 声明函数（build() 里用；等价 C++ 侧的 row/column/text/button…）──────
@@ -164,19 +166,31 @@
     if (node == null) return node;
     return node._vnode !== undefined ? node._vnode : node;
   }
-  /// 归一化 + 片段展开：`ForEach(...)` 返回的 `__fragment` 容器把子项**摊平**到父级
+  /// 归一化 + 片段展开：**数组**与 `__fragment` 容器都摊平到父级
   /// （≈ ArkUI：ForEach 直接当作兄弟列表用，不多套一层）。
+  ///
+  /// 为何数组也要摊平：`forEach()` 的返回值是子节点列表，AI 与人都常写成
+  /// `column({}, [text('头'), forEach(...)])`（把列表结果直接塞进 kids 数组）。
+  /// 只认 `__fragment` 的话，这个数组会被当成一个 VNode——`type` 是 `undefined`，
+  /// 创建环节报一行错就整段消失（**静默失效**：界面少一块而不崩）。
   function normalizeAll(kids) {
     const out = [];
-    for (const raw of kids || []) {
-      const node = normalize(raw);
-      if (node == null) continue;
-      if (node.type === '__fragment') {
-        for (const inner of node.children || []) out.push(normalize(inner));
-      } else {
-        out.push(node);
+    /// 递归摊平：数组 = 兄弟列表；`__fragment` 容器 = 它的 children。
+    function flatten(raw) {
+      if (raw == null) return;
+      if (Array.isArray(raw)) {
+        for (const inner of raw) flatten(inner);
+        return;
       }
+      const node = normalize(raw);
+      if (node == null) return;
+      if (node.type === '__fragment') {
+        flatten(node.children);
+        return;
+      }
+      out.push(node);
     }
+    flatten(kids);
     return out;
   }
 
@@ -259,7 +273,7 @@
     },
     /// ForEach（≈ ArkUI 的 ForEach）：数据数组 → 子节点，key 取业务身份
     ForEach: function (items, keyFn, itemFn) {
-      return chainOf({ type: '__fragment', props: {}, key: '', children: forEach(items, keyFn, itemFn), el: null, bound: [] });
+      return chainOf({ type: '__fragment', props: {}, key: '', children: forEach(items, keyFn, itemFn), el: null });
     },
     /// Slider（拖拽回调）
     Slider: function (value, onChange) {
@@ -287,36 +301,69 @@
     applyQueue.length = 0;
   }
 
-  function ensureEventBinding(node) {
-    // 事件：on()/off() 管线（绑定 id 记在 node.bound，diff 后释放消失的）。
-    // 事件名对齐 EventKind 映射（script_host 的 event_name）：
-    //   点击 click；文本输入 input（=TextInput）；勾选/开关没有独立 change 事件——
-    //   Click 已在元素自身处理（toggle 完成后）才到观察者，回调里读回 checked 即终态。
-    if (node.onClick) {
-      const id = on('#' + node.el, 'click', function () { node.onClick(); });
-      node.bound.push(id);
-    }
-    if (node.onChange) {
-      const id = on('#' + node.el, 'click', function () {
-        // 观察者在元素处理之后：此刻 checked 已是新值（properties 面可读回）
-        node.onChange(!!($('#' + node.el).prop('checked')));
-      });
-      node.bound.push(id);
-    }
-    if (node.onInput) {
-      const id = on('#' + node.el, 'input', function (event) {
-        // TextInput 事件带 text 字段（尚未落到元素——观察者先于属性面写入？
-        // 实测以事件携带的 text 为准，缺失时读属性面）
-        const fresh = event && event.text !== undefined ? event.text : String($('#' + node.el).prop('value') || '');
-        node.onInput(fresh);
-      });
-      node.bound.push(id);
-    }
+  // ── 事件绑定（绑定身份 = **元素**，不是每帧重建的 VNode）──────────────
+  //
+  // `eventHolders[el] = { node, kinds, bindings }`：宿主注册的处理器只做一件事——
+  // 把事件转给 `holder.node` 上**当前这一帧**的回调。
+  //
+  // 为什么要这层间接：回调闭包每帧重建（`() => { n.value++ }` 是 build 里的新函数对象），
+  // 若按「回调变了就重绑」实现，等价于**每帧把整棵树的事件全部注销重绑**
+  // （实测：三帧的绑定 id 是 b1..b3 → b4..b6 → b7..b9，codeeditor 整页声明式每帧在付这笔钱）。
+  // 间接一层之后：绑定只在**该元素第一次出现事件回调时**登记一次、卸载时反注册
+  // ——复用帧零事件成本，而「回调是最新一帧的」由 `holder.node` 的更新保证。
+  const eventHolders = new Map();   // 元素 id → { node, kinds, bindings }
+
+  /// 事件转发体：读 `holder.node`（本帧的 VNode）上的回调。
+  function handlerFor(holder, kind) {
+    return function (event) {
+      const node = holder.node;
+      if (node == null) return;
+      if (kind === 'click') {
+        if (node.onClick) node.onClick();
+      } else if (kind === 'change') {
+        // 观察者在元素处理之后：此刻 checked 已是新值（属性面可读回）
+        if (node.onChange) node.onChange(!!($('#' + node.el).prop('checked')));
+      } else if (kind === 'input') {
+        // TextInput 事件带 text 字段（尚未落到元素）；缺失时读属性面
+        const fresh = event && event.text !== undefined
+            ? event.text
+            : String($('#' + node.el).prop('value') || '');
+        if (node.onInput) node.onInput(fresh);
+      }
+    };
   }
 
+  function bindKind(holder, kind, event) {
+    if (holder.kinds[kind]) return;   // 已登记：不重绑
+    holder.kinds[kind] = true;
+    holder.bindings.push(on('#' + holder.node.el, event, handlerFor(holder, kind)));
+  }
+
+  function ensureEventBinding(node) {
+    if (node.el == null) return;
+    let holder = eventHolders.get(node.el);
+    if (holder === undefined) {
+      holder = { node: node, kinds: Object.create(null), bindings: [] };
+      eventHolders.set(node.el, holder);
+    }
+    holder.node = node;   // 间接层的「指针更新」：本帧回调生效
+    // 反向验证挂点：把下一行换成「先 releaseEvents(node) 再无条件 bind」，
+    // `declarative_event_bindings_survive_reuse_frames` 立即红（绑定 id 每帧都换）。
+    // 按需登记：每种事件只在这一帧确实有回调、且尚未登记时绑一次。
+    // 为何不一次绑齐三种：宿主的事件分发要扫全部绑定（选择器解析 + 匹配），
+    // 白绑的条目会让每个事件多付一次无意义的匹配。
+    if (node.onClick) bindKind(holder, 'click', 'click');
+    if (node.onChange) bindKind(holder, 'change', 'click');
+    if (node.onInput) bindKind(holder, 'input', 'input');
+  }
+
+  /// 反注册某元素的事件绑定（卸载时调；holder 随之丢弃）。
   function releaseEvents(node) {
-    for (const id of node.bound) off(id);
-    node.bound = [];
+    if (node == null || node.el == null) return;
+    const holder = eventHolders.get(node.el);
+    if (holder === undefined) return;
+    for (const id of holder.bindings) off(id);
+    eventHolders.delete(node.el);
   }
 
   function isContainer(node) { return node.type === 'Row' || node.type === 'Column' || node.type === 'Card'; }
@@ -422,8 +469,7 @@
       } else {
         newNode._applied = prev;
       }
-      // 事件回调：重建绑定（回调闭包每帧重建——旧的全放，新的重接）
-      releaseEvents(oldNode);
+      // 事件绑定按元素身份持有（`eventHolders`）：这里只更新间接层的指针，不重绑。
       ensureEventBinding(newNode);
       // 容器：递归子节点
       if (isContainer(newNode)) reconcileChildren(newNode.el, oldNode.children, newNode.children, stats);
@@ -470,7 +516,8 @@
     if (node == null || node.el == null) return;
     releaseEvents(node);
     if (isContainer(node)) {
-      for (const child of node.children) unmountVNode(child, stats);
+      const kids = normalizeAll(node.children);   // 片段已摊平：递归用摊平后的列表
+      for (const child of kids) unmountVNode(child, stats);
     }
     __d_unmount(node.el);
     ++stats.removed;
@@ -491,6 +538,19 @@
   for (const name of Object.keys(ArkUI)) globalThis[name] = ArkUI[name];
 
   globalThis.compose = function (name, buildFn) {
+    // 重新挂载 = 新一层界面：先卸掉上一层（否则两次 compose 的元素树叠在一起——
+    // 旧界面不会自己消失，而新界面的根只是「又挂了一个根」）。
+    if (rootVdom !== null) {
+      unmountVNode(rootVdom, { created: 0, removed: 0, props: 0 });
+      rootVdom = null;
+    }
+    // 卸载清理：effect 的清理函数先跑（≈ 组件卸载），hook 槽与事件登记随之清空。
+    // 不清的话：同一会话里再 compose 会**累加** effect 槽——被卸掉的界面里的
+    // effect 清理永不被调、且新界面的 hook 从第 N+1 个槽往后取（槽位错位）。
+    globalThis.__d_dispose_effects();
+    hookSlots.length = 0;
+    scopes.length = 0;
+    eventHolders.clear();   // 事件登记随场景走（旧树的已在 unmountVNode 里逐个反注册）
     const scope = { name: name, build: buildFn, alive: true };
     scopes.push(scope);
     mounted = true;
@@ -593,6 +653,18 @@
     return runPendingEffects();
   };
 
+  // ── 桥名纪律（写这里时最容易踩的坑）────────────────────────────────────
+  //
+  // 宿主窄桥以 `__d_` 开头注入：`__d_create/__d_set_root/__d_mount/__d_unmount/`
+  // `__d_move/__d_apply_batch/__d_slot_root/__d_clear_slot`；本文件以**同一个全局命名空间**
+  // 暴露运行时入口（`__d_reconcile/__d_stats/__d_dispose*/__d_run_effects`）。
+  // 两边一旦撞名，后写的那个静默胜出——而宿主桥在本文件之前注入，
+  // **本文件的同名赋值会盖掉宿主桥**，调用点随即指向本层（最容易的表现是递归）。
+  // 实测踩到：整棵卸载曾经叫 `__d_unmount`，于是 `unmountVNode` 里那行
+  // `__d_unmount(node.el)` 变成对「整棵卸载」的递归调用，裁子元素/摘事件全失效，
+  // 表现为条件分支收不回、换页叠树、绑定计数归零（四处用例同时红）。
+  // 新增本层的全局名前，先确认宿主桥里没有它。
+
   /// 卸载清理：切换 compose 根 / 宿主销毁时把已登记 effect 的清理都跑掉。
   /// （单根 v1：重建根时调用；子作用域级清理随 C++ 侧对齐。）
   globalThis.__d_dispose_effects = function () {
@@ -605,6 +677,28 @@
       }
       slot.cleanup = null;
     }
+  };
+
+  /// 宿主/外部请求整棵卸载（场景切换、宿主析构前）：事件反注册 + effect 清理。
+  /// 返回是否真的卸了东西。
+  ///
+  /// 命名陷阱：本函数名与宿主窄桥同处一个全局命名空间——**不能叫 `__d_unmount`**
+  /// （那是「摘单个元素」的桥，一盖就变成递归；详见上面的「桥名纪律」）。
+  globalThis.__d_dispose = function () {
+    if (!mounted) return false;
+    if (rootVdom !== null) {
+      unmountVNode(rootVdom, { created: 0, removed: 0, props: 0 });
+      rootVdom = null;
+    } else if (typeof __d_clear_slot === 'function') {
+      __d_clear_slot();   // 子树形态：根是宿主槽位里的元素（不是我们创建的）
+    }
+    globalThis.__d_dispose_effects();
+    hookSlots.length = 0;
+    scopes.length = 0;
+    eventHolders.clear();
+    mounted = false;
+    dirty = false;
+    return true;
   };
 
   // ── useRef：跨重组稳定的可变槽（**改它不触发重组**）────────────────────
@@ -718,7 +812,7 @@
         const slotRoot = __d_slot_root();
         if (slotRoot) {
           rootVdom = { type: fresh.type, props: {}, key: '', children: [], el: slotRoot,
-                       bound: [], _applied: {} };
+                       _applied: {} };
         }
       }
       if (rootVdom === null || rootVdom.type !== fresh.type) {
@@ -739,10 +833,8 @@
         } else {
           fresh._applied = prev;
         }
-        // 事件重绑：扩散到子树的活由 `reconcileChildren` → `reconcileAt` 做
-        // （每个复用节点都先 releaseEvents(旧) 再 ensureEventBinding(新)）——
-        // 这里只处理根节点自身。
-        releaseEvents(rootVdom);
+        // 事件：按元素身份持有（`eventHolders`）——这里只更新间接层的指针。
+        // 子树里的同型复用节点由 `reconcileAt` 各自处理。
         ensureEventBinding(fresh);
         if (isContainer(fresh)) reconcileChildren(fresh.el, rootVdom.children, fresh.children, stats);
         rootVdom = fresh;

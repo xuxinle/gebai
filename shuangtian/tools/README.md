@@ -44,3 +44,4 @@
 | `events_e2e.py` | **事件流端到端**：验证订阅后 `ui.changed` 携带 changed 清单（set/invoke/input.text 三路）且 version 递增 |
 | `split_view_e2e.py` | **SplitView 端到端**：真实应用上验证初始比例/拖拽改比例/越界夹取/动作面/截图留证 |
 | `input_action_e2e.py` | **Input 动作面端到端**：`invoke submit`（不经键盘 Enter）/ `clear` / 未知动作拒绝 |
+| `gallery_declarative_e2e.py` | **gallery 声明式页端到端**（`mount_into` 子树挂载路径）：进页 → 声明式元素在树上 → 状态驱动回显 → 列表增项（key 对齐：既有项 id 不变）→ 条件内容裁剪与重新进场 → 截图 |
