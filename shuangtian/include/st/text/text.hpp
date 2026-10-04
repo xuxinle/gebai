@@ -246,6 +246,13 @@ class TextRenderer {
   void set_coverage_gamma(float gamma) noexcept;
   [[nodiscard]] auto coverage_gamma() const noexcept -> float { return coverage_gamma_; }
 
+  /// 该**物理字号**实际生效的 gamma：小字号分档命中则用分档值，否则用 `coverage_gamma_`。
+  /// 缓存键与位图映射都必须用它——只用 `coverage_gamma_` 无法区分两个字号档。
+  [[nodiscard]] auto effective_gamma(float pixel_size) const noexcept -> float {
+    return fitted_gamma_size_ > 0.0f && pixel_size <= fitted_gamma_size_ ? fitted_gamma_
+                                                                        : coverage_gamma_;
+  }
+
   /// 覆盖率预校正模式（默认 `Gamma`）。
   ///
   /// `Gamma`：整体映射 `α' = 1 − (1−α)^(1/γ)`（见 `set_coverage_gamma`）。
@@ -296,6 +303,23 @@ class TextRenderer {
   /// “物理上正确的线性合成”）并被用户实测驳回。默认值**不得靠推演改**，
   /// 必须用真机参照 + 朴素像素口径量过，并同时看**实心占比**与**过渡带宽度**两个判据。
   static constexpr float kDefaultCoverageGamma = 0.6f;
+
+  /// **按物理字号覆盖 gamma**（可选）：非零时，`pixel_size` 用 fitted 值。
+  ///
+  /// 存在理由（2026-10-04 与浏览器逐像素对照实测）：**单一 gamma 消不掉
+  /// 「小字比正文更偏重」**——它是把**整条曲线同比例平移**，两端一起压：
+  ///
+  /// | γ | 小字(11/12/13px) 墨量比 | 正文(15/17/20px) 墨量比 | 落差 |
+  /// |---|---|---|---|
+  /// | 0.60 | 1.243 | 1.105 | **+12.5%** |
+  /// | 0.90 | 1.113 | 1.030 | **+8.1%** |
+  /// | 1.00 | 1.080 | 1.005 | **+7.5%** |
+  ///
+  /// 差值随 γ 变化很慢（12.5%→7.5%），所以**分档**才是对症的：小字号单独压一档。
+  /// 归零用 `set_fitted_gamma(0, 0)`（= 落回 `coverage_gamma_`）。
+  void set_fitted_gamma(float pixel_size, float gamma) noexcept;
+  [[nodiscard]] auto fitted_gamma() const noexcept -> float { return fitted_gamma_size_; }
+  [[nodiscard]] auto fitted_gamma_value() const noexcept -> float { return fitted_gamma_; }
 
   /// 把任意输入夹取到合法区间（`[0.3, 4]`；NaN 取默认值）。
   ///
@@ -448,6 +472,9 @@ class TextRenderer {
   bool subpixel_filter_{true};
   /// 覆盖率 gamma 预校正指数（见 `set_coverage_gamma`）；1.0 = 关（旧行为）。
   float coverage_gamma_{kDefaultCoverageGamma};
+  /// 按物理字号覆盖 gamma 的阈值（0 = 不覆盖）与取值，见 `set_fitted_gamma`。
+  float fitted_gamma_size_{0.0f};
+  float fitted_gamma_{0.0f};
   /// 覆盖率预校正模式（见 `set_coverage_correct`）。
   CoverageCorrect coverage_correct_{CoverageCorrect::Gamma};
   /// Skia 模式的对比度（只影响深字浅底）。

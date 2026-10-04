@@ -62,6 +62,7 @@ struct Options {
   std::string text_fit{"auto"};
   /// 覆盖率 gamma 预校正：auto/off/数值（见 AppOptions::text_gamma）。
   std::string text_gamma{"auto"};
+  std::string text_gamma_small{};
 /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
 std::string ui_font_scale{"auto"};
   std::uint16_t control_port{0};
@@ -91,6 +92,7 @@ std::string ui_font_scale{"auto"};
     // 漏接的字段会被静默忽略——日志里打印的还是默认值，而“我明明传了”无从察觉。
     // 这正是本工程反复记录的那类缺陷（静默失效字段），所以每加一个文字开关都要两处一起加。
     else if (raw == "--text-gamma") options.text_gamma = next("auto");
+    else if (raw == "--text-gamma-small") options.text_gamma_small = next("auto");
     else if (raw == "--ui-font-scale") options.ui_font_scale = next("auto");
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
@@ -202,6 +204,7 @@ auto run_app(int argc, char** argv) -> int {
   app_options.text_lcd = options.text_lcd;
       app_options.text_fit = options.text_fit;
     app_options.text_gamma = options.text_gamma;
+  app_options.text_gamma_small = options.text_gamma_small;
   app_options.ui_font_scale = options.ui_font_scale;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;

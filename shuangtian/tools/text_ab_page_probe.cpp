@@ -63,6 +63,22 @@ auto main(int argc, char** argv) -> int {
   const float scale = argc > 2 ? std::stof(argv[2]) : 1.5f;
   // 覆盖率 gamma：0 = 用渲染器出厂默认（与应用程序同源，便于同台对比）。
   const float gamma = argc > 3 ? std::stof(argv[3]) : 0.0f;
+  // 档位对照开关：定位“小字号偏粗”到底来自**栅格化本身**还是**网格拟合**。
+  // 不提供这组开关时，任何调参都无法区分“笔画画宽了”与“拟合吸宽了”。
+  std::string fit = "light";
+  bool compensate = true;
+  bool subpixel = true;
+  // 小字号分档：单档 gamma 消不掉“小字比正文偏重”，需要单独压一档。
+  float small_gamma = 0.0f;
+  float small_max = 21.0f;
+  for (int i = 4; i < argc; ++i) {
+    const std::string_view a = argv[i];
+    if (a.starts_with("--fit=")) fit = std::string(a.substr(6));
+    else if (a.starts_with("--gamma-small=")) small_gamma = std::stof(std::string(a.substr(14)));
+    else if (a.starts_with("--gamma-small-max=")) small_max = std::stof(std::string(a.substr(18)));
+    else if (a == "--nocomp") compensate = false;
+    else if (a == "--gray") subpixel = false;
+  }
   auto stack = FontStack::system_default();
   if (!stack) {
     st::print("未找到可用字体\n");
@@ -74,9 +90,12 @@ auto main(int argc, char** argv) -> int {
   Canvas canvas{static_cast<int>(kWidth * scale), static_cast<int>(kHeight * scale), scale};
   canvas.clear(kBackground);
   TextRenderer renderer(fonts, scale);
-  renderer.set_subpixel(true);
-  renderer.set_grid_fit(GridFitMode::Light);
-  renderer.set_ink_compensation(true);
+  renderer.set_subpixel(subpixel);
+  renderer.set_grid_fit(fit == "off" ? GridFitMode::Off
+                        : fit == "normal" ? GridFitMode::Normal
+                                           : GridFitMode::Light);
+  renderer.set_ink_compensation(compensate);
+  if (small_gamma > 0.0f) renderer.set_fitted_gamma(small_max, small_gamma);
   if (gamma > 0.0f) renderer.set_coverage_gamma(gamma);
   for (const Line& line : kLines) {
     (void)renderer.draw(canvas, line.text, Point{4.0f, line.top}, line.size, line.color,

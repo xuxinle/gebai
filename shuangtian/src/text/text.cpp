@@ -502,6 +502,19 @@ void TextRenderer::set_coverage_gamma(float gamma) noexcept {
   cache_->glyph_bytes = 0;
 }
 
+void TextRenderer::set_fitted_gamma(float pixel_size, float gamma) noexcept {
+  const float size = pixel_size > 0.0f ? pixel_size : 0.0f;
+  const float value = size > 0.0f ? sanitize_coverage_gamma(gamma) : 0.0f;
+  if (size == fitted_gamma_size_ && value == fitted_gamma_) return;
+  fitted_gamma_size_ = size;
+  fitted_gamma_ = value;
+  // 与 `set_coverage_gamma` 同理：它改的是**位图内容**，旧位图留着只会白占预算。
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
 void TextRenderer::set_supersample(float factor) {
   supersample_ = factor < 1.0f ? 1.0f : factor;
   const std::scoped_lock lock(cache_->mutex);
@@ -765,7 +778,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
   // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
   // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
-  const auto gamma_bucket = static_cast<std::uint64_t>(std::lround(coverage_gamma_ * 100.0f));
+  // **用逐字形实际生效值**：分档覆盖生效时，`coverage_gamma_` 不足以区分两个字号档。
+  // **用逐字形实际生效值**：分档覆盖生效时，`coverage_gamma_` 不足以区分两个字号档。
+  // 这里必须用 `size_bucket` 自己换算（`effective_size` 到后面才定义——缓存键在函数前段）。
+  const auto gamma_bucket = static_cast<std::uint64_t>(
+      std::lround(effective_gamma(static_cast<float>(size_bucket) / 4.0f) * 100.0f));
   // 校正模式与 Skia 模式的对比度也要进键：同理由——不同映射 = 不同位图。
   const auto correct_bucket =
       static_cast<std::uint64_t>(coverage_correct_) * 1000U +
@@ -860,7 +877,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
       coverage_correct_ == CoverageCorrect::Skia ? build_skia_lut(text_color_, coverage_contrast_)
                                                  : std::array<float, 256>{};
   const bool use_skia_lut = coverage_correct_ == CoverageCorrect::Skia;
-  const auto correct = [this, &skia_lut, use_skia_lut](float value) noexcept -> float {
+  // **按物理字号**取该字形实际生效的 gamma（见 `set_fitted_gamma`）：
+  // 小字号笔画细，单档压两端消不掉“小字偏重”，必须能分档。
+  const float glyph_gamma = effective_gamma(effective_size);
+  const auto correct = [this, &skia_lut, use_skia_lut, glyph_gamma](float value) noexcept -> float {
     if (value <= 0.0f || value >= 1.0f) return value;
     if (use_skia_lut) {
       const float scaled = value * 255.0f;
@@ -869,10 +889,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
       const float frac = scaled - static_cast<float>(index);
       return skia_lut[index] * (1.0f - frac) + skia_lut[next] * frac;
     }
-    if (coverage_gamma_ == 1.0f) return value;
+    if (glyph_gamma == 1.0f) return value;
     // 1 − (1−α)^(1/g)：黑字白底时码值 code' = (1−α)^(1/g) = linear_to_srgb(1−α)（近似）。
     // 即把“code 空间混合”的结果换成“线性空间混合”（从而更浅/更细）——方向见头文件说明。
-    return 1.0f - std::pow(1.0f - value, 1.0f / coverage_gamma_);
+    return 1.0f - std::pow(1.0f - value, 1.0f / glyph_gamma);
   };
   const float scale = effective_size * static_cast<float>(supersample) / units;
   /// 宽度量化的适用上限（**物理像素**）。

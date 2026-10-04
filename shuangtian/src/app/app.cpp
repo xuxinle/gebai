@@ -505,6 +505,12 @@ auto Application::start() -> Status {
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
     impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
     impl_->renderer->set_coverage_gamma(resolve_text_gamma(options_.text_gamma));
+    // **小字号分档**（见 `AppOptions::text_gamma_small`）：单档 gamma 消不掉“小字比正文
+    // 偏重”的落差，小字号单独压一档。未配置就不动（行为与以前完全一致）。
+    if (!options_.text_gamma_small.empty()) {
+      const float small = resolve_text_gamma(options_.text_gamma_small);
+      impl_->renderer->set_fitted_gamma(options_.text_gamma_small_max, small);
+    }
   // **拟合墨量补偿**：拟合对每个字的墨量改变幅度不一致（−27%~+10%），是“有的字清晰、
   // 有的字发灰”的来源。打开它把墨量归一化回不拟合基准（只改墨色、不动几何）。
   // 应用层实测（codeeditor 菜单栏逐项墨量极差）：fit=off 18% / normal 34%

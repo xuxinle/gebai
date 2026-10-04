@@ -86,6 +86,14 @@ struct AppOptions {
   /// 理由见 `Metrics::scale_fonts`。默认 1.0（不改基准），可用命令行或 `ST_UI_FONT_SCALE`
   /// 在不重编的前提下调档。
   std::string ui_font_scale{"auto"};
+  /// **小字号覆盖率 gamma 分档**：`--text-gamma-small` / `ST_TEXT_GAMMA_SMALL`。
+  ///
+  /// 为什么需要分档（实测）：单档 gamma 是把整条曲线同比例平移，**消不掉“小字比正文
+  /// 偏重”**——γ 从 0.6 到 1.0，小字/正文字重落差只从 12.5% 收到 7.5%。
+  /// 所以小字号单独压一档、正文维持原档。空 = 不分档（行为与以前完全一致）。
+  std::string text_gamma_small{};
+  /// 分档适用的**物理**字号上限（`--text-gamma-small-max`）。默认 21 ≈ 14 逻辑 px × 1.5。
+  float text_gamma_small_max{21.0f};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配
   std::string control_file{};         ///< 写入 {port,pid,...} 供客户端发现

@@ -123,20 +123,23 @@ def main() -> int:
         y0, y1 = boxes[i][1], boxes[i][2]
         a = coverage(st_img[y0:y1, :, :], fg)
         b = coverage(br_img[y0:y1, :, :], fg)
-        # 各自取墨迹紧包围盒（垂直+水平），只比“字的形状”，不比排版位置。
+        # 各自取墨迹紧包围盒（仅**水平**），只比“字的形状”，不比排版位置。
+        #
+        # ⚠ **垂直不能按各自包围盒裁剪**（实测踩到）：两侧字形盒高不同（霜天 ≈ 浏览器的
+        # 82%——那是行高/em 盒差异，不是字形差异），各自裁剪再取 `min` 会把**较高那侧的墨
+        # 截掉**，于是较低那侧被低估、比值系统性偏高（实测把所有行都抬到 1.03~1.33，
+        # 据此得出的“小字偏重”结论是**量尺偏差**而非渲染事实）。
         def tight(c):
-            ry = np.where((c > 0.12).any(axis=1))[0]
             rx = np.where((c > 0.12).any(axis=0))[0]
-            if ry.size == 0 or rx.size == 0:
+            if rx.size == 0:
                 return None
-            return c[ry[0]:ry[-1] + 1, rx[0]:rx[-1] + 1]
+            return c[:, rx[0]:rx[-1] + 1]
         ta, tb = tight(a), tight(b)
         if ta is None or tb is None:
             print(f"{label:<24}—— 一侧无墨迹（霜天={'有' if ta is not None else '无'}）")
             continue
         w = min(ta.shape[1], tb.shape[1])
-        n2 = min(ta.shape[0], tb.shape[0])
-        a2, b2 = ta[:n2, :w], tb[:n2, :w]
+        a2, b2 = ta[:, :w], tb[:, :w]
         sa, ma, ia = stats(a2)
         sb_, mb, ib = stats(b2)
         sig = float((np.abs(a2 - b2) > 0.15).mean()) * 100.0
