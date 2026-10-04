@@ -1,0 +1,122 @@
+# Skia 字体渲染调研（2026-10-04）
+
+> 目的：搞清 Skia/Chromium 这条「大家都说好」的渲染链到底怎么处理覆盖率与网格拟合，
+> 给霜天「中文线条粗细不均匀」（DESIGN §4.3.7）找一个**有依据的方向**，而不是继续猜。
+
+**版本**：`google/skia` @ `8643b1d`（`--depth 1 --filter=blob:none` 加 SSH-over-443 通道克隆，
+工作树未检出——按需 `git show HEAD:<path>` 惰性取单文件；关键文件副本在
+`C:\Users\Administrator\code\skia-read\`）。
+
+---
+
+## 一、最关键发现：Skia 的覆盖率校正是**两个机制叠加**，而且**逐颜色算**
+
+`src/core/SkMaskGamma.cpp` 的 `SkTMaskGamma_build_correcting_lut()`（全文 128 行）做三件事：
+
+```cpp
+// ① 在**真线性光**下混合
+const float linOut = (linSrc * srca + dsta * linDst);
+float out = dstConvert.fromLuma(dstGamma, linOut);
+// ② 反解出「设备空间该用的 alpha」——即把 blitter 会做错的混合抵消掉
+float result = (out - dst) / (src - dst);
+```
+
+**② 对黑字白底是「减墨」**（把 α 调小）——这正是霜天上一轮 γ=2.2 被用户驳回的那个方向。
+Skia 确实在做它，但**紧接着叠了第二步**：
+
+```cpp
+// ③ 人为对比度（这才是“加墨”的那一步）
+static float apply_contrast(float srca, float contrast) {
+    return srca + ((1.0f - srca) * contrast * srca);
+}
+const float adjustedContrast = contrast * linDst;   // ← 随背景暗度**渐强**
+```
+
+**逐位复刻出的曲线**（黑墨白底，输入覆盖率 α → 输出表值；`tools/skia_lut_compare.py` 可复算）：
+
+| 输入 α×255 | 恒等 | **Skia contrast=0** | Skia contrast=1 | 霜天 γ=2.2 | 霜天 γ=1 | 霜天 γ=0.6 |
+|---|---|---|---|---|---|---|
+| 64 | 64 | **31** | 58 | 31 | 64 | 97 |
+| 128 | 128 | **68** | 119 | 69 | 128 | 175 |
+| 192 | 192 | **119** | 185 | 120 | 192 | 230 |
+
+三条实测结论（**修正了本文件第一版的错误提法**）：
+
+1. **Skia 的「反解」就是霜天的 γ=2.2**——31/68/119 vs 31/69/120，逐位吻合。
+   所以上一轮被用户驳回的那个实现，**数学上没错，错在它是 Skia 链条里的半截**：
+   Skia 紧接着又用 `apply_contrast` 把墨补回来（contrast=1 时回到 58/119/185，接近恒等）。
+2. **`adjustedContrast = contrast · linDst` 不是“随背景变暗而渐强”**（本文件第一版说反了）：
+   `dst = 1 − src` 是**对背景的猜测**，所以黑字（src=0）时 `linDst = 1`（对比度**全量生效**），
+   白字（src=255）时 `linDst = 0`（**对比度完全失效**，实测三个 contrast 值输出完全相同：
+   137/188/225）。
+3. 因此**校正必须是方向性的**：深字浅底＝「先用 stage② 减墨、再用 stage③ 按 contrast 补回」；
+   浅字深底只走 stage②（且只按通道算，无对比度项）。**霜天的全局 γ 无法表达这个方向性**。
+
+> **对霜天的直接含义**：我们当前的 γ=0.6（97/175/230）在**深字浅底**上比 Skia 的**全区间**都重
+> （Skia 上限约 58/119/185）——用户认可的“加墨”其实比 Skia 更黑。
+> 而**浅字深底**（用户实际用的编辑器深色主题）Skia 只做减墨，我们却仍在加墨——
+> 这是可查证的方向性缺陷，也可能是「中文线条粗细不均匀」观感的来源之一。
+
+## 二、与霜天现状的对照
+
+| 维度 | Skia | 霜天（当前 = `b43dc0c`） |
+|---|---|---|
+| 覆盖率校正 | 逐 (src,dst) 色 LUT + 线性反解 + 对比度增强 | 单一全局 γ=0.6 |
+| 主题感知 | 有（`linDst` 渐强） | 无 |
+| 网格拟合 | FreeType auto-hinter（Win 走 DirectWrite） | 自研几何拟合（更激进：量化宽度、吸附未配对边） |
+| 拉丁/汉字策略 | 同一套（依赖字体自带 hinting + auto-hinter） | 同一套（**用户建议分开**，见下） |
+
+## 三、对霜天的可执行结论
+
+### 已确认的架构缺口：**校正必须是方向性的，而霜天的位图不带颜色**
+
+Skia 的 `preBlend(SkColor)` 是**在绘制时**按文字色取的——Skia 的位图只存**线性 alpha**，
+颜色信息在绘制阶段还在。而霜天把校正施加在**位图生成**阶段，那一刻**只有字形与字号，
+没有文字色**（同一个字形的位图要在所有文字色之间共享）。
+
+实测证据（`--theme dark` + `ST_TEXT_SKIA_LUT=1`，代码区浅字深底）：
+
+| | 字像素 | 平均亮度 | 亮核占比 |
+|---|---|---|---|
+| 霜天 γ=0.6 | 17748 | 0.610 | 14.7% |
+| Skia 模式（用默认“黑字”索引） | 15957 | 0.601 | 14.0% |
+
+**反而更细**——因为拿“黑字”去索引 LUT 得到的是**减墨**那条曲线，
+而深色主题需要的是 **137/188/225 那条加墨曲线**。
+
+> 这不是一个参数没调对，而是**施加阶段错位**：方向性校正必须在**有颜色信息的地方**做。
+> 两个可行出口：
+> 1. **移到绘制阶段**（与 Skia 同构）：位图存线性 alpha，绘制时用逐像素 LUT 映射；
+>    代价是软/硬两条渲染路径（CPU 逐行混合 + GPU 遮罩纹理）都要带 LUT，
+>    而“两个后端天然同源”正是当初选位图阶段的原因（见 `set_coverage_gamma` 头注）。
+> 2. **位图仍存未校正 alpha，把校正做成绘制时的形态参数**：保留同源优势，
+>    但同样要改两条路径。
+
+### 其它已确认结论
+
+1. **γ 是错的抽象**（但方向对了一半）：γ=0.6 等价于一道“固定方向的对比度增强”，
+   它在**深字浅底**上有效；而 Skia 把“线性反解”（减墨）与“对比度增强”（加墨）
+   拆成两个独立、可观测、可按颜色取值的阶段。
+2. **字母/汉字分开策略有依据**（用户 2026-10-04 提出）：实测拉丁 `peak` **0.929**
+   （笔画几乎占满像素）而汉字只有 **0.779**，说明汉字的问题**不在边缘相位**、
+   而在**笔画墨量未占满像素**；而 Skia 的做法正是**按颜色（进而按场景）分别给 LUT**，
+   机制上支持分策略。
+3. **不要继续走“靠吸附网格改字形”的路**（`912e98d`/`32d8f05` 的教训）：
+   指标（`crisp`/`w_off`）只看“边缘落没落网格”，**完全不看字形有没有被改变**，
+   会奖励“把字吸歪但吸齐了”；用户看真实画面直接判定“更差了”。
+4. **“只读公式不算曲线”**：本文件第一版把 `adjustedContrast = contrast · linDst` 的方向
+   推错了（以为“随背景变暗而渐强”），**算过才知恰相反**。凡是从源码反推结论，
+   必须把它变成可复算的尺子（`tools/skia_lut_compare.py` 就是这个产物）。
+
+## 四、待取的关键文件（本仓库工作树未检出，按需拉）
+
+```powershell
+cd C:\Users\Administrator\code\skia
+git show HEAD:src/ports/SkFontHost_FreeType_common.cpp > C:\Users\Administrator\code\skia-read\SkFontHost_FreeType_common.cpp
+```
+
+优先看：
+- `src/ports/SkFontHost_FreeType_common.cpp` —— FreeType 路径的**实际栅格化与 gamma 应用点**；
+- `src/ports/fontations/src/hinting.rs` —— Rust 版 hinting 实现（可作为「现代做法」对照）；
+- `third_party/freetype2` 的 `src/autofit/` —— auto-hinter 的**笔画分组与宽度量化**（与霜天最像）；
+- `src/core/SkScalerContext.cpp` 的 `GetMaskPreBlend` / `CachedMaskGamma` —— 缓存与失效口径。

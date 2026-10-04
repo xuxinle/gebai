@@ -221,6 +221,45 @@ class TextRenderer {
   void set_coverage_gamma(float gamma) noexcept;
   [[nodiscard]] auto coverage_gamma() const noexcept -> float { return coverage_gamma_; }
 
+  /// 覆盖率预校正模式（默认 `Gamma`）。
+  ///
+  /// `Gamma`：整体映射 `α' = 1 − (1−α)^(1/γ)`（见 `set_coverage_gamma`）。
+  /// `Skia`：**逐颜色方向性曲线**（复刻 `skia@8643b1d` 的
+  /// `SkTMaskGamma_build_correcting_lut`；逐位对照见 `tools/skia_lut_compare.py`）。
+  /// 两者**互斥**——它们是两条完整的映射，不是叠加关系。
+  ///
+  /// | 输入 α | Skia 黑墨/白底 | Skia 白墨/黑底 | 霜天 γ=0.6 |
+  /// |---|---|---|---|
+  /// | 64 | 31 (contrast=0) → 58 (contrast=1) | **137** | 97 |
+  /// | 128 | 68 → 119 | **188** | 175 |
+  /// | 192 | 119 → 185 | **225** | 230 |
+  ///
+  /// 三条实测结论：
+  /// 1. Skia 的**黑墨/白底 contrast=0 就是我们的 γ=2.2**（31/68/119 vs 31/69/120）——
+  ///    上一轮被驳回的方向确实是它链条里的**一截**；它紧接着用 `apply_contrast`
+  ///    （`a + (1−a)·c·a`）把墨补回来。
+  /// 2. **`adjustedContrast = contrast · linDst` 只服务深字浅底**：`dst = 1 − src`
+  ///    是“对背景的猜测”，黑字时 `linDst = 1`（全量生效）、白字时 `linDst = 0`
+  ///    （**完全失效**，实测三个 contrast 输出逐位相同）。
+  /// 3. **浅字深底走的是完全另一条曲线**（64→137、128→188）。用户的编辑器是
+  ///    **深色主题（浅字深底）**——这正是两者分岔之处，也是全局 γ 表达不了的方向性。
+  ///
+  /// `mode = Skia` 时 `coverage_gamma` 不生效。缓存键含模式与对比度分档。
+  enum class CoverageCorrect : std::uint8_t { Gamma, Skia };
+  void set_coverage_correct(CoverageCorrect mode) noexcept;
+  [[nodiscard]] auto coverage_correct() const noexcept -> CoverageCorrect {
+    return coverage_correct_;
+  }
+  /// Skia 模式的对比度 `[0, 1]`（见上表）。**只影响深字浅底**。
+  void set_coverage_contrast(float contrast) noexcept;
+  [[nodiscard]] auto coverage_contrast() const noexcept -> float { return coverage_contrast_; }
+  /// 文字色 / 背景色（`0xRRGGBB`）。Skia 模式按**文字色**索引 LUT、
+  /// 按 `dst = 1 − src`（感知反色）猜背景——与 `SkTMaskGamma::preBlend` 同口径。
+  void set_text_colors(std::uint32_t text, std::uint32_t background) noexcept {
+    text_color_ = text;
+    background_color_ = background;
+  }
+
   /// 出厂默认的覆盖率预校正指数 = **加墨方向的部分校正**（见 `set_coverage_gamma` 的实测依据）。
   ///
   /// **0.6 是用可信参照量出来的，不是拍的**：真机（非无头）Edge 对照页 + 朴素像素口径，
@@ -359,6 +398,13 @@ class TextRenderer {
   bool subpixel_filter_{true};
   /// 覆盖率 gamma 预校正指数（见 `set_coverage_gamma`）；1.0 = 关（旧行为）。
   float coverage_gamma_{kDefaultCoverageGamma};
+  /// 覆盖率预校正模式（见 `set_coverage_correct`）。
+  CoverageCorrect coverage_correct_{CoverageCorrect::Gamma};
+  /// Skia 模式的对比度（只影响深字浅底）。
+  float coverage_contrast_{1.0f};
+  /// 文字色 / 背景色（仅 Skia 模式用于索引 LUT；默认黑字白底）。
+  std::uint32_t text_color_{0xFF000000U};
+  std::uint32_t background_color_{0xFFFFFFFFU};
   /// 网格拟合模式（见 `set_grid_fit`）；默认关，保证无头/回归的可复现性。
   GridFitMode grid_fit_{GridFitMode::Off};
   /// 拟合的直线边最大横向斜率（物理像素；见 `set_fit_slant`）。

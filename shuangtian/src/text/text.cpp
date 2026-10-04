@@ -293,6 +293,26 @@ TextRenderer::TextRenderer(const FontStack& stack, float supersample)
 
 TextRenderer::~TextRenderer() = default;
 
+void TextRenderer::set_coverage_correct(CoverageCorrect mode) noexcept {
+  if (mode == coverage_correct_) return;
+  coverage_correct_ = mode;
+  // 与 `set_coverage_gamma` 同理：位图随映射变，旧位图留着只会白占预算。
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
+void TextRenderer::set_coverage_contrast(float contrast) noexcept {
+  const float clamped = std::clamp(contrast, 0.0f, 1.0f);
+  if (clamped == coverage_contrast_) return;
+  coverage_contrast_ = clamped;
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
 void TextRenderer::set_coverage_gamma(float gamma) noexcept {
   const float clamped = sanitize_coverage_gamma(gamma);
   if (clamped == coverage_gamma_) return;
@@ -549,6 +569,12 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
   // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
   const auto gamma_bucket = static_cast<std::uint64_t>(std::lround(coverage_gamma_ * 100.0f));
+  // 校正模式与 Skia 模式的对比度也要进键：同理由——不同映射 = 不同位图。
+  const auto correct_bucket =
+      static_cast<std::uint64_t>(coverage_correct_) * 1000U +
+      (coverage_correct_ == CoverageCorrect::Skia
+           ? static_cast<std::uint64_t>(std::lround(coverage_contrast_ * 100.0f))
+           : 0U);
   // 渲染模式**必须进键**：灰度与亚像素的覆盖率位图排布不同（1 项/像素 vs 3 项/像素），
   // 混用等于按错误长度解读（表现是"字缺一块"或"字整片消失"，且只在切换模式的那一刻出现）。
   const bool lcd = subpixel_;
@@ -563,8 +589,9 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   std::uint64_t key = st::hash::fnv1a64(face.path());
   for (const std::uint64_t field :
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
-        static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
-        lcd ? 1ULL : 0ULL, fit_bucket, static_cast<std::uint64_t>(steps)}) {
+                         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
+                 correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket,
+                 static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
   {
@@ -585,8 +612,53 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 若先把每个子样本拉到线性光再平均、再回 gamma 空间，两次变换的开销就落到字形栅格化的内层循环
   // （一个 CJK 字形 ss=2 时有 3×2×2 = 12 次每像素）。两种口径的差异在 α∈[0.2,0.8] 处最大约 3%，
   // 低于本校正要消的 13.6% 一个数量级，所以取便宜的那个。
-  const auto correct = [this](float value) noexcept -> float {
-    if (coverage_gamma_ == 1.0f || value <= 0.0f || value >= 1.0f) return value;
+  /// Skia 模式的 LUT（256 项，`[0,1]` 浮点）。逐行复刻 `skia@8643b1d`
+  /// `SkTMaskGamma_build_correcting_lut`，与 `tools/skia_lut_compare.py` 同口径。
+  ///
+  /// 与 gama 模式的根本区别：**它是方向性的**。`dst = 1 − src` 是“对背景的猜测”，
+  /// 所以黑字（src=0）走「线性反解 + 对比度补回」、白字（src=255）只走线性反解。
+  /// 实测：黑字 contrast=0 时输出 31/68/119（≈ 我们的 γ=2.2）；
+  /// 白字时输出 137/188/225（另一条曲线，且 contrast 完全无效）。
+  const auto build_skia_lut = [](std::uint32_t argb, float contrast) noexcept
+      -> std::array<float, 256> {
+    const auto srgb_to_linear = [](float u) noexcept -> float {
+      return u <= 0.04045f ? u / 12.92f : std::pow((u + 0.055f) / 1.055f, 2.4f);
+    };
+    const auto linear_to_srgb = [](float u) noexcept -> float {
+      return u <= 0.0031308f ? u * 12.92f : 1.055f * std::pow(u, 1.0f / 2.4f) - 0.055f;
+    };
+    // 只用**绿通道**当亮度索引（SkTMaskGamma<3,3,3> 也是每通道一张小表；
+    // 而覆盖率是三通道同一个标量，按亮度选表才是正确口径，见 `correct` 的说明）。
+    const float src = static_cast<float>((argb >> 8) & 0xFFU) / 255.0f;
+    const float lin_src = srgb_to_linear(src);
+    const float dst = 1.0f - src;
+    const float lin_dst = srgb_to_linear(dst);
+    const float adjusted = contrast * lin_dst;   // ← 只对深字浅底生效的那一项
+    std::array<float, 256> lut{};
+    for (int i = 0; i < 256; ++i) {
+      const float raw = static_cast<float>(i) / 255.0f;
+      const float srca = raw + (1.0f - raw) * adjusted * raw;   // apply_contrast
+      const float dsta = 1.0f - srca;
+      const float out = linear_to_srgb(lin_src * srca + dsta * lin_dst);
+      const float result = (out - dst) / (src - dst);            // 反解 blit 会做的事
+      lut[static_cast<std::size_t>(i)] = std::clamp(result, 0.0f, 1.0f);
+    }
+    return lut;
+  };
+  const std::array<float, 256> skia_lut =
+      coverage_correct_ == CoverageCorrect::Skia ? build_skia_lut(text_color_, coverage_contrast_)
+                                                 : std::array<float, 256>{};
+  const bool use_skia_lut = coverage_correct_ == CoverageCorrect::Skia;
+  const auto correct = [this, &skia_lut, use_skia_lut](float value) noexcept -> float {
+    if (value <= 0.0f || value >= 1.0f) return value;
+    if (use_skia_lut) {
+      const float scaled = value * 255.0f;
+      const auto index = static_cast<std::size_t>(std::clamp(scaled, 0.0f, 255.0f));
+      const std::size_t next = std::min<std::size_t>(index + 1U, 255U);
+      const float frac = scaled - static_cast<float>(index);
+      return skia_lut[index] * (1.0f - frac) + skia_lut[next] * frac;
+    }
+    if (coverage_gamma_ == 1.0f) return value;
     // 1 − (1−α)^(1/g)：黑字白底时码值 code' = (1−α)^(1/g) = linear_to_srgb(1−α)（近似）。
     // 即把“code 空间混合”的结果换成“线性空间混合”（从而更浅/更细）——方向见头文件说明。
     return 1.0f - std::pow(1.0f - value, 1.0f / coverage_gamma_);
@@ -824,7 +896,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           // 标量取三通道均值而不是逐通道各自映射：逐通道会把彩边信息“各自拉直”，
           // 破坏“三通道覆盖率按同一比例缩放”的前提（而那个前提正是本模式的物理含义——
           // 一个像素只有一个几何覆盖率，R/G/B 只是同一条边的三种采样）。
-          if (coverage_gamma_ != 1.0f) {
+          if (coverage_gamma_ != 1.0f || use_skia_lut) {
             for (int x = 0; x < out_width; ++x) {
               const std::size_t base = static_cast<std::size_t>(x) * kSubpixelColumns;
               const float mean = (row_subpixels[base] + row_subpixels[base + 1U] +

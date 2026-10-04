@@ -440,6 +440,13 @@ auto Application::start() -> Status {
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
     impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
     impl_->renderer->set_coverage_gamma(resolve_text_gamma(options_.text_gamma));
+  // **Skia 式逐颜色校正**（见 `docs/SKIA_TEXT_RENDERING_STUDY.md`）：默认仍走 Gamma 模式，
+  // 因为它是已验证过的现网观感；这条曲线留作对照与深色主题的候选。
+  if (impl_->renderer->coverage_gamma() == 1.0f) {
+    // `--text-gamma off` 语义就是“不校正”——不要被 Skia 模式覆盖。
+  } else if (std::getenv("ST_TEXT_SKIA_LUT") != nullptr) {
+    impl_->renderer->set_coverage_correct(st::text::TextRenderer::CoverageCorrect::Skia);
+  }
     // 如实说清这一帧的字是怎么画的：“字看着糊”的第一个分歧点就在这里。
     const char* fit_name = impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
                                ? "normal"
