@@ -311,6 +311,13 @@ class TextRenderer {
   /// `tools/grid_fit_coverage_scan.cpp`（同时看应用率与双峰组占比）。
   /// 负值 = 用 `GridFitOptions` 的默认值。
   void set_min_stem_coverage(float coverage) noexcept { min_stem_coverage_ = coverage; }
+  /// **拟合墨量补偿**开关（默认关；`app.cpp` 按需打开）。
+  ///
+  /// 开启后：把「拟合造成的逐字墨量变化」归一化回不拟合基准——几何（边缘相位）不动、
+  /// 只改墨色深浅；**只提亮不压暗**（拟合主要让字变轻，反向压暗会弄坏本来就对的字）。
+  /// 依据与应用层数据见 `app.cpp` 的 `resolve_text_fit` 与 DESIGN「字间不一致」一节。
+  void set_ink_compensation(bool enabled) noexcept;
+  [[nodiscard]] auto ink_compensation() const noexcept -> bool { return ink_compensation_; }
   [[nodiscard]] auto min_stem_coverage() const noexcept -> float { return min_stem_coverage_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
   /// 合成加粗的**档位数**（`embolden_steps` 的上限）。
@@ -374,6 +381,9 @@ class TextRenderer {
   /// 最后到底被拟合了没有”——护栏（一未动 / 平移超限 / 覆盖率不足）都会把它置 false
   /// 而 `fit_stems` 依旧非零。量“应用率”必须用本字段。
   bool fit_applied{false};
+  /// 格子补偿的**幂指数**（1.0 = 未补偿；见 `text.cpp` 的实现说明）。
+  /// 供量尺/诊断回答“这个字被调了多少”——没有它，“字变黑了”无法归因。
+  float ink_compensation{1.0f};
   st::text::GridFitResult::Funnel fit_funnel{};
     /// 被拒笔画里最坏的单边位移需求（**物理像素**）——`max_shift` 要放到多大才收得下它。
     float fit_worst_rejected_shift{0.0f};
@@ -425,6 +435,8 @@ class TextRenderer {
   float fit_slant_{0.0f};
   /// 拟合的最低笔画抽取覆盖率（<0 = 用 `GridFitOptions` 的默认值）。
   float min_stem_coverage_{-1.0f};
+  /// 拟合墨量补偿开关（见 `set_ink_compensation`）。
+  bool ink_compensation_{false};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

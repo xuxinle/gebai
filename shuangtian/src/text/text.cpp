@@ -157,6 +157,40 @@ void apply_lcd_filter(std::span<float> subpixels) {
   }
 }
 
+/// **把一份轮廓栅格化成覆盖率**（灰度分支）——1 个输出像素 = `supersample²` 个采样。
+///
+/// 抽出来的理由：它是「同一字形、不同轮廓 → 两份位图」的那一步，而**墨量补偿**
+/// 需要对同一字形栅格化两次（基准 + 拟合后）后比墨量（见 `TextRenderer::glyph_bitmap`）。
+/// 复刻两份会把"两模式各做一次加粗"这类细节漏在副本里。
+[[nodiscard]] auto rasterize_grayscale(const raster::Path& local, int width, int height,
+                                       int out_width, int out_height, int supersample,
+                                       int steps) -> std::vector<float> {
+  raster::Canvas scratch(width, height);
+  const raster::Paint fill = raster::Paint::solid(math::Color::rgb(255, 255, 255));
+  scratch.fill_path(local, fill);
+  for (int step = 1; step <= steps; ++step) {
+    scratch.fill_path(local.translated(static_cast<float>(step), 0.0f), fill);
+  }
+  std::vector<float> coverage(static_cast<std::size_t>(out_width) *
+                              static_cast<std::size_t>(out_height));
+  const float sample_count = static_cast<float>(supersample) * static_cast<float>(supersample);
+  for (int y = 0; y < out_height; ++y) {
+    for (int x = 0; x < out_width; ++x) {
+      float total = 0.0f;
+      for (int sy = 0; sy < supersample; ++sy) {
+        for (int sx = 0; sx < supersample; ++sx) {
+          total +=
+              static_cast<float>(scratch.pixel_at(x * supersample + sx, y * supersample + sy).a) /
+              255.0f;
+        }
+      }
+      coverage[static_cast<std::size_t>(y) * static_cast<std::size_t>(out_width) +
+               static_cast<std::size_t>(x)] = sample_count > 0.0f ? total / sample_count : 0.0f;
+    }
+  }
+  return coverage;
+}
+
 }  // namespace
 
 // —— FontStack ——
@@ -307,6 +341,16 @@ void TextRenderer::set_coverage_contrast(float contrast) noexcept {
   const float clamped = std::clamp(contrast, 0.0f, 1.0f);
   if (clamped == coverage_contrast_) return;
   coverage_contrast_ = clamped;
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
+
+void TextRenderer::set_ink_compensation(bool enabled) noexcept {
+  if (enabled == ink_compensation_) return;
+  ink_compensation_ = enabled;
+  // 与 gamma 同理：补偿改变的是**位图内容**，旧位图留着只会白占预算。
   const std::scoped_lock lock(cache_->mutex);
   cache_->glyphs.clear();
   cache_->lru_order.clear();
@@ -577,6 +621,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   ///
   /// 本常量**按物理像素定义**（与头文件口径一致），不随采样倍率变。
   const float fit_max_shift = 0.5f;
+  // 墨量补偿由渲染器开关决定（`set_ink_compensation`）：它是**位图内容**的一部分，
+  // 所以既进缓存键、也由调用方（app）按默认档位设置，而不是在这里读环境变量——
+  // 读写环境变量的开关既不可测、也不会进键。
+  const bool ink_compensate = ink_compensation_ && grid_fit_ != GridFitMode::Off;
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
   // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
   // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
@@ -598,6 +646,8 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 实测踩到：加了 `ST_TEXT_MAXSHIFT` 对照开关后扫描四个值得到**逐位相同**的结果，
   // 排查半天才发现是取到了缓存里同一份位图——“参数改了却看不出变化”。
   const auto fit_shift_bucket = static_cast<std::uint64_t>(std::lround(fit_max_shift * 100.0f));
+  // 墨量补偿同样进键：它改变位图内容（同 gamma 一类的映射变化）。
+  const auto ink_bucket = ink_compensation_ ? 1ULL : 0ULL;
   // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
   // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
   // **逐字段顺序混合**（不是“移位后 XOR 拼装”）——六层嵌套的 `mix(mix(...))` 写起来
@@ -607,7 +657,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   for (const std::uint64_t field :
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
-        correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket, fit_shift_bucket,
+        correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket, fit_shift_bucket, ink_bucket,
         static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
@@ -824,32 +874,13 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           // 连 `format` 一起改成灰度，混合端才不会按 3 通道去读一张单通道图。
           bitmap->format = raster::CoverageFormat::Grayscale;
         }
-        raster::Canvas scratch(width, height);
-        raster::Paint fill = raster::Paint::solid(math::Color::rgb(255, 255, 255));
-        scratch.fill_path(fitted, fill);
-        // 合成加粗（同亚像素分支：位图内按采样格平移叠填）——
-        // 灰度模式下 1 个采样格 = 1/supersample 物理像素。
-        for (int step = 1; step <= steps; ++step) {
-          scratch.fill_path(fitted.translated(static_cast<float>(step), 0.0f), fill);
-        }
-        bitmap->coverage.assign(output_pixels, 0.0f);
-        for (int y = 0; y < out_height; ++y) {
-          for (int x = 0; x < out_width; ++x) {
-            float total = 0.0f;
-            int samples = 0;
-            for (int sy = 0; sy < supersample; ++sy) {
-              for (int sx = 0; sx < supersample; ++sx) {
-                const int px = x * supersample + sx;
-                const int py = y * supersample + sy;
-                const math::Color pixel = scratch.pixel_at(px, py);
-                total += static_cast<float>(pixel.a) / 255.0f;
-                ++samples;
-              }
-            }
-            bitmap->coverage[static_cast<std::size_t>(y) * static_cast<std::size_t>(out_width) +
-                             static_cast<std::size_t>(x)] =
-                samples > 0 ? correct(total / static_cast<float>(samples)) : 0.0f;
-          }
+        // 合成加粗在**位图内按采样格平移叠填**（灰度下 1 个采样格 = 1/supersample 物理像素）
+        // ——与亚像素分支同一套口径，见 `rasterize_grayscale`。
+        const std::vector<float> raw =
+            rasterize_grayscale(fitted, width, height, out_width, out_height, supersample, steps);
+        bitmap->coverage.resize(raw.size());
+        for (std::size_t index = 0; index < raw.size(); ++index) {
+          bitmap->coverage[index] = correct(raw[index]);
         }
       } else {
         // —— 亚像素（LCD）分支 ——
@@ -954,8 +985,79 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         }
       }
     }
+    // **拟合墨量补偿**（见 `ink_compensate` 的说明）。
+    //
+    // 比一次“不拟合”基准的墨量，把差用**幂次**归一化回 1.0——几何（边缘相位）不动，
+    // 只改墨色深浅，所以锐度不受影响、而字间墨量一致拿回来。
+    //
+    // 幂次保持端点（0→0、1→1），因而**不会把背景提黑**；且与 gamma 同一口径——
+    // 对亚像素也必须**整像素同一标量**（逐通道会破坏“三通道覆盖率按同一比例缩放”
+    // 的物理前提，那是彩边的来源）。
+    if (ink_compensate && bitmap->width > 0 && bitmap->height > 0) {
+      const std::vector<float> reference_raw =
+          rasterize_grayscale(local_unfitted, width, height, bitmap->width, bitmap->height, supersample,
+                              steps);
+      double fitted_ink = 0.0;
+      double reference_ink = 0.0;
+      const int channels = subpixel_ ? kSubpixelColumns : 1;
+      for (int y = 0; y < bitmap->height; ++y) {
+        for (int x = 0; x < bitmap->width; ++x) {
+          const std::size_t base_index =
+              static_cast<std::size_t>(y) * static_cast<std::size_t>(bitmap->width) *
+                  static_cast<std::size_t>(channels) +
+              static_cast<std::size_t>(x) * static_cast<std::size_t>(channels);
+          float mean_reference = 0.0f;
+          for (int channel = 0; channel < channels; ++channel) {
+            fitted_ink += static_cast<double>(bitmap->coverage[base_index +
+                                                             static_cast<std::size_t>(channel)]);
+            mean_reference +=
+                correct(reference_raw[static_cast<std::size_t>(y) *
+                                          static_cast<std::size_t>(bitmap->width) +
+                                      static_cast<std::size_t>(x)]);
+          }
+          reference_ink += static_cast<double>(mean_reference) / static_cast<double>(channels);
+        }
+      }
+      // **口径对齐**：子像素路径的覆盖率有 3 个通道，逐通道求和 ≈ 3 × 几何覆盖率，
+      // 而灰度基准是 1 通道——不在同一口径上比会得到恒为 ~3 的 ratio
+      // （实测踩到：ratio 全在 2.47~3.03，遂把补偿幂次算成荒唐值）。
+      // 因此把主路径墨量除以通道数，与基准同口径。
+      if (channels > 0) fitted_ink /= static_cast<double>(channels);
+      if (fitted_ink > 0.0 && reference_ink > 0.0) {
+        // 映射已发生（gamma/skia 已在其上）——幂次把**平均墨量**改回基准。
+        // 界限防极端字形（如只有一根细竖）把幂次拉爆；0.01 的不敏感带避开浮点抖动。
+        // **只提亮、不压暗**（`ST_TEXT_INK_DIRECTION=up`，默认）：
+        // 拟合主要让字**变轻**（实测平均 −13%），把轻的补回基准即可修正观感上的
+        // “有的字发灰”；而反向压暗一个**本来就对**的字，只会把另一个字弄坏——
+        // 应用层实测：整向补偿让菜单栏极差从 34% 反而升到 40%，单向则站在 fit=off 的 18%。
+        double ratio = fitted_ink / reference_ink;
+        if (ratio > 1.0) ratio = 1.0;
+        ratio = std::clamp(ratio, 0.5, 2.0);
+        if (std::abs(ratio - 1.0) > 0.01) {
+          // 通道均值口径：映射用同一标量 ⇒ 平均墨量 M' ≈ M^k ⇒ k = ln(M'/M) / ln(M)。
+          double mean_mapped = 0.0;
+          std::size_t counted = 0;
+          for (const float value : bitmap->coverage) {
+            if (value > 0.02f && value < 0.98f) {
+              mean_mapped += static_cast<double>(value);
+              ++counted;
+            }
+          }
+          if (counted > 0) {
+            mean_mapped /= static_cast<double>(counted);
+            const double target = std::clamp(mean_mapped / ratio, 1.0e-3, 0.999);
+            const double exponent = std::log(target) / std::log(mean_mapped);
+            if (std::isfinite(exponent) && exponent > 0.0) {
+              for (float& value : bitmap->coverage) {
+                value = static_cast<float>(std::pow(static_cast<double>(value), exponent));
+              }
+              bitmap->ink_compensation = static_cast<float>(exponent);
+            }
+          }
+        }
+      }
+    }
   }
-
   // **先淘汰、后插入**：反过来会在插入后清空缓存，把刚插入的位图一起销毁，
   // 于是 `return slot.get()` 返回悬垂指针（ASan 实测 heap-use-after-free）。
   const std::scoped_lock lock(cache_->mutex);

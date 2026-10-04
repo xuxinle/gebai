@@ -235,6 +235,10 @@ ST_TEST(text_coverage_gamma_changes_rendered_weight) {
     TextRenderer renderer(*fixture.stack, 1.0f);
     renderer.set_subpixel(true);
     renderer.set_grid_fit(st::text::GridFitMode::Normal);
+    // 本用例度量的是 **gamma 本身**的墨量方向：显式关掉拟合墨量补偿，
+    // 否则补偿会为了归一化墨量而重分布中间调，把 gamma 的方向淹掉
+    //（补偿另有自己的用例 `text_ink_compensation_evens_out_glyph_weight`）。
+    renderer.set_ink_compensation(false);
     renderer.set_coverage_gamma(gamma);
     (void)renderer.draw(canvas, kText, st::math::Point{2.0f, 2.0f}, 13.5f,
                         st::math::Color{0, 0, 0, 0xFF});
@@ -288,4 +292,70 @@ ST_TEST(text_coverage_gamma_changes_rendered_weight) {
   ST_CHECK(dark.solid_ratio > base.solid_ratio);
   ST_CHECK(dark.band_ratio < base.band_ratio);
   ST_CHECK(dark.linear_ink > base.linear_ink);
+}
+
+/// **拟合墨量补偿**：开启后「逐字墨量」应当向**不拟合基准**靠拢（字间更一致），
+/// 而几何（边缘相位）不动——所以用“与基准的相对墨量”本身当判据，而不是平均亮度。
+///
+/// 为什么这个量是对的判据（此前的教训）：应用层实测「同一菜单栏里有的字清晰、有的字发灰」
+/// （用户线索：「运行」比其它项黑 34%），而根因是**拟合对每个字的墨量改变幅度不一致**
+/// （−27%~+10%）。平均亮度看不见它——它把字间差异平均掉了。
+ST_TEST(text_ink_compensation_evens_out_glyph_weight) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  constexpr std::string_view kText = "文件编辑选择查看运行帮助";
+  constexpr std::size_t kWidth = 320;
+  constexpr std::size_t kHeight = 60;
+
+  /// 逐字墨量：每个字形单独渲染，返回（该字墨量, 该字不拟合基准墨量）。
+  const auto ratios = [&](bool compensate) {
+    std::vector<double> out;
+    for (const char32_t codepoint : st::utf8_decode(kText)) {
+      const std::string single = st::utf8_encode(std::u32string(1, codepoint));
+      const auto ink_of = [&](st::text::GridFitMode fit, bool comp) -> double {
+        st::raster::Canvas canvas{static_cast<int>(kWidth), static_cast<int>(kHeight), 1.0f};
+        canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
+        TextRenderer renderer(*fixture.stack, 1.0f);
+        renderer.set_subpixel(true);
+        renderer.set_grid_fit(fit);
+        renderer.set_ink_compensation(comp);
+        renderer.set_coverage_gamma(0.6f);
+        (void)renderer.draw(canvas, single, st::math::Point{2.0f, 2.0f}, 20.25f,
+                            st::math::Color{0, 0, 0, 0xFF});
+        double ink = 0.0;
+        for (const std::uint32_t pixel : canvas.pixels()) {
+          const st::math::Color color = st::math::unpremultiply(pixel);
+          ink += 1.0 - static_cast<double>(color.r) / 255.0;
+        }
+        return ink;
+      };
+      const double reference = ink_of(st::text::GridFitMode::Off, false);
+      const double fitted =
+          ink_of(st::text::GridFitMode::Normal, compensate);
+      if (reference > 0.0) out.push_back(fitted / reference);
+    }
+    return out;
+  };
+  const auto spread = [](const std::vector<double>& values) {
+    if (values.empty()) return 0.0;
+    const auto [low, high] = std::minmax_element(values.begin(), values.end());
+    return *high - *low;
+  };
+
+  const std::vector<double> without = ratios(false);
+  const std::vector<double> with = ratios(true);
+  if (without.empty() || with.empty()) return;
+  st::print("[ink] 补偿关：逐字变化率 {} 个，极差 {:.3f}\n", without.size(), spread(without));
+  st::print("[ink] 补偿开：逐字变化率 {} 个，极差 {:.3f}\n", with.size(), spread(with));
+  // 拟合确实扰乱了字间墨量（否则这条用例与补偿都没有存在的理由）
+  ST_CHECK(spread(without) > 0.15);
+  // 补偿把它收窄——这是本补偿的全部目的
+  ST_CHECK(spread(with) < spread(without) * 0.8);
+  // 只提亮不压暗：补偿后的均值不应低于补偿前（不得把本来对的字压暗）
+  const auto mean_of = [](const std::vector<double>& v) {
+    double sum = 0.0;
+    for (const double x : v) sum += x;
+    return v.empty() ? 0.0 : sum / static_cast<double>(v.size());
+  };
+  ST_CHECK(mean_of(with) >= mean_of(without) - 1.0e-3);
 }

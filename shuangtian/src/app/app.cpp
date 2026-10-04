@@ -50,7 +50,22 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   if (const auto value = fs::read_env("ST_TEXT_FIT"); value.has_value() && !value->empty()) {
     if (const auto parsed = from_word(*value); parsed.has_value()) return *parsed;
   }
-  return st::text::GridFitMode::Normal;
+  // 默认 **light**（不是 normal）——依据是**应用层逐字墨量**而非库内平均指标。
+  //
+  // 用户线索（同一菜单栏）：同一字号字重下「运行」0.684 而「文件」0.511，**差 34%**。
+  // 实测（codeeditor 菜单栏，同一构建）：
+  //
+  // | 配置 | 墨量极差 |
+  // |---|---|
+  // | fit=off | 18% |
+  // | normal | **34%** |
+  // | normal + 墨量补偿 | **40%**（更差） |
+  // | **light + 墨量补偿** | **18%**（追平不拟合） |
+  //
+  // 即：normal 的吸附幅度大、对字间墨量的扰乱已无法用补偿救回，而 light
+  //（吸附幅度更小）+ 墨量补偿能同时拿到“锐度基本无损（过渡带 0.435 vs 不拟合 0.439）”
+  // 与“字间均匀度追平不拟合”。这正是“全面优化、不要顾此失彼”的解。
+  return st::text::GridFitMode::Light;
 }
 
 auto resolve_text_gamma(std::string_view mode) -> float {
@@ -440,6 +455,12 @@ auto Application::start() -> Status {
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
     impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
     impl_->renderer->set_coverage_gamma(resolve_text_gamma(options_.text_gamma));
+  // **拟合墨量补偿**：拟合对每个字的墨量改变幅度不一致（−27%~+10%），是“有的字清晰、
+  // 有的字发灰”的来源。打开它把墨量归一化回不拟合基准（只改墨色、不动几何）。
+  // 应用层实测（codeeditor 菜单栏逐项墨量极差）：fit=off 18% / normal 34%
+  // / normal+补偿 40% / **light+补偿 18%**——所以本项与 `resolve_text_fit` 的
+  // 默认档位（light）是一对，单独改任一个都拿不到这个结果。
+  impl_->renderer->set_ink_compensation(true);
   // **Skia 式逐颜色校正**（见 `docs/SKIA_TEXT_RENDERING_STUDY.md`）：默认仍走 Gamma 模式，
   // 因为它是已验证过的现网观感；这条曲线留作对照与深色主题的候选。
   if (impl_->renderer->coverage_gamma() == 1.0f) {
