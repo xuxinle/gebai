@@ -110,9 +110,11 @@ auto NullTextPort::measure_width(std::string_view utf8, float size, text::FontRo
 auto NullTextPort::line_height(float size) const -> float { return size * 1.45f; }
 
 void NullTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-                        math::Color color, text::FontRole role, float embolden) const {
+                        math::Color color, text::FontRole role, float embolden,
+                        bool bold) const {
   (void)role;  // 无字体环境：角色与字重都无意义
   (void)embolden;
+  (void)bold;
   (void)canvas;
   (void)utf8;
   (void)origin;
@@ -724,9 +726,13 @@ auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, 
   //
   // 端口只持有物理口径的语义量（半径），采样格步数由渲染器按自己的模式换算。
   const float physical = size * canvas.device_scale();
-  const float embolden = embolden_radius(physical, style_.font_weight);
+  // **Bold 档优先走真粗体字体面**（实测比合成加粗锐 36~37%、英文字间离散 14.1%→0%，
+  // 见 `prefers_real_bold`）：此时**不再叠加合成加粗**——叠了会把真粗体的字再撑开、
+  // 字腔粘住。探不到真粗体面时自动回退常规面，此时仍用合成加粗补足（Medium/SemiBold 同理）。
+  const bool real_bold = prefers_real_bold(style_.font_weight) && port.has_real_bold();
+  const float embolden = real_bold ? 0.0f : embolden_radius(physical, style_.font_weight);
   port.draw(canvas, clipped, math::Point{x, y}, size, style_.color, text::FontRole::Proportional,
-            embolden);
+            embolden, real_bold);
 }
 
 void Element::paint(const RenderContext& context, raster::Surface& canvas) const {

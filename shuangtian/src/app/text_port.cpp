@@ -20,10 +20,10 @@ auto RendererTextPort::line_height(float size) const -> float {
 
 void RendererTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin,
                             float size, math::Color color, text::FontRole role,
-                            float embolden) const {
+                            float embolden, bool bold) const {
   // 字重已由 `Element::paint_text` 换算成**物理像素半径**，采样格步数由渲染器
   // 按自己的模式换算（端口无从得知采样格）——此处只负责转发。
-  (void)renderer_.draw(canvas, utf8, origin, size, color, role, embolden);
+  (void)renderer_.draw(canvas, utf8, origin, size, color, role, embolden, bold);
 }
 
 auto RendererTextPort::ellipsize(std::string_view utf8, float size, float max_width) const

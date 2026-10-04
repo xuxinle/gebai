@@ -41,7 +41,9 @@ class TextPort {
   /// 那是渲染器自己的状态；端口只转递物理口径的语义量（半径由 `embolden_radius` 给出）。
   virtual void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
                     math::Color color, text::FontRole role = text::FontRole::Proportional,
-                    float embolden = 0.0f) const = 0;
+                    float embolden = 0.0f, bool bold = false) const = 0;
+  /// 字体栈是否提供**真粗体面**（没有时调用方仍可用合成加粗补足；默认无）。
+  [[nodiscard]] virtual auto has_real_bold() const -> bool { return false; }
   [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string = 0;
   [[nodiscard]] virtual auto wrap(std::string_view utf8, float size, float max_width) const
@@ -59,9 +61,11 @@ class NullTextPort final : public TextPort {
       std::string_view utf8, float size,
       text::FontRole role = text::FontRole::Proportional) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
+  /// `bold=true` = 该字重**已由真粗体字体面承担**（见 `prefers_real_bold`）：
+  /// 此时合成加粗不要叠加（叠了会把已加粗的字再撑开，字腔粘住）。
   void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
             math::Color color, text::FontRole role = text::FontRole::Proportional,
-            float embolden = 0.0f) const override;
+            float embolden = 0.0f, bool bold = false) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
@@ -91,6 +95,25 @@ class NullTextPort final : public TextPort {
     case FontWeight::Regular: break;
   }
   return 0.0f;
+}
+
+/// 该字重是否应当改用**真粗体字体面**（`FontStack::find_face(…, bold=true)`）。
+///
+/// 依据（2026-10-04 实测）：用户报「中文粗体有点糊、英文不够均匀锐利」，根因是
+/// 粗体靠**合成加粗**（同轮廓水平平移重复填充），而系统里**本来就有真粗体面**。
+/// 同一口径实测（逻辑字号 20.25 / 缩放 1.5）：
+///
+/// | 指标 | 合成加粗 | 真粗体面 |
+/// |---|---|---|
+/// | 中文过渡带占比 | 0.246 | **0.155**（锐 37%） |
+/// | 中文过渡/墨像素 | 0.433 | **0.369** |
+/// | 英文字间离散 | 14.1% | **0.0%** |
+/// | 英文过渡带占比 | 0.204 | **0.131**（锐 36%） |
+///
+/// 因此 **Bold 档优先用真粗体面**（探不到时 `find_face` 自动回退常规面，此时仍可
+/// 叠加合成加粗补足）；`Medium`/`SemiBold` 在系统里没有对应字体面，仍走合成加粗。
+[[nodiscard]] inline auto prefers_real_bold(FontWeight weight) noexcept -> bool {
+  return weight == FontWeight::Bold;
 }
 
 }  // namespace st::ui

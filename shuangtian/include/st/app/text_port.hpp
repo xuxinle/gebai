@@ -29,9 +29,12 @@ class RendererTextPort final : public ui::TextPort {
       std::string_view utf8, float size,
       text::FontRole role = text::FontRole::Proportional) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
+  [[nodiscard]] auto has_real_bold() const -> bool override {
+    return renderer_.stack().has_bold();
+  }
   void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
             math::Color color, text::FontRole role = text::FontRole::Proportional,
-            float embolden = 0.0f) const override;
+            float embolden = 0.0f, bool bold = false) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const

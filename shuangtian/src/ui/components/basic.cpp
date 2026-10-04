@@ -111,7 +111,13 @@ void Text::paint_content(const RenderContext& context, raster::Surface& canvas) 
     } else if (style_.text_align == TextAlign::End) {
       x = bounds_.right() - width;
     }
-    port.draw(canvas, line, math::Point{x, y}, size, style_.color);
+    // **字重必须一起传**（与 `Element::paint_text` 同口径）：多行分支漏传会让
+    // 段落/多行文本的粗体**静默退回 Regular**——实测踩到过。
+    const float physical = size * canvas.device_scale();
+    const bool real_bold = prefers_real_bold(style_.font_weight) && port.has_real_bold();
+    const float embolden = real_bold ? 0.0f : embolden_radius(physical, style_.font_weight);
+    port.draw(canvas, line, math::Point{x, y}, size, style_.color,
+              text::FontRole::Proportional, embolden, real_bold);
     y += line_height;
   }
 }

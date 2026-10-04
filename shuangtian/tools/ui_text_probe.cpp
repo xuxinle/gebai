@@ -58,10 +58,10 @@ struct Stats {
 };
 
 auto measure(const TextRenderer& renderer, char32_t codepoint, float pixel_size, float embolden_px,
-             int width, int height) -> Stats {
+             int width, int height, bool real_bold = false) -> Stats {
   const int steps = renderer.embolden_steps(embolden_px);
   const auto bitmap = renderer.glyph_bitmap_of(codepoint, pixel_size, st::text::FontRole::Proportional,
-                                               steps);
+                                               steps, real_bold);
   Stats stats;
   if (bitmap == nullptr) return stats;
   for (const float value : bitmap->coverage) {
@@ -115,11 +115,14 @@ auto main(int argc, char** argv) -> int {
   /// 用途：把 `ST_FONT_CJK` 指向**真粗体面**（如 msyhbd.ttc）时用 `--bold=0`，
   /// 这样比较的是「真粗体」而不是「常规体 + 合成加粗」。
   float bold_override = -1.0f;
+  /// 用**真粗体字体面**（而不是合成加粗）——粗体档的正解，见 `prefers_real_bold`。
+  bool real_bold = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view arg = argv[index];
     if (arg == "--size" && index + 1 < argc) size = std::stof(argv[++index]);
     else if (arg == "--scale" && index + 1 < argc) scale = std::stof(argv[++index]);
     else if (arg == "--bold" && index + 1 < argc) bold_override = std::stof(argv[++index]);
+    else if (arg == "--realbold") real_bold = true;
     else if (arg.starts_with("--fit=")) {
       const std::string_view v = arg.substr(6);
       fit = v == "off" ? GridFitMode::Off : (v == "light" ? GridFitMode::Light : GridFitMode::Normal);
@@ -133,9 +136,9 @@ auto main(int argc, char** argv) -> int {
   // 与 app 一致：亚像素 + LCD 滤波 + 拟合 + 墨量补偿（gamma/Fit 档位按参数）。
   const std::vector<Sample> samples = {
       {"中文常规", "概览组件数据控制通道已就绪刷新指标", 0.0f},
-      {"中文粗体", "概览组件数据控制通道已就绪刷新指标", 0.75f},
+      {"中文粗体", "概览组件数据控制通道已就绪刷新指标", real_bold ? 0.0f : 0.75f},
       {"英文常规", "Renderer Pipeline Overview Settings Ggpq", 0.0f},
-      {"英文粗体", "Renderer Pipeline Overview Settings Ggpq", 0.75f},
+      {"英文粗体", "Renderer Pipeline Overview Settings Ggpq", real_bold ? 0.0f : 0.75f},
   };
   st::print("逻辑字号={} 缩放={} fit={}\n\n", size, scale,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"));
@@ -165,8 +168,10 @@ auto main(int argc, char** argv) -> int {
     const float embolden_px = bold_override >= 0.0f ? bold_override : sample.embolden_px;
     for (const char32_t codepoint : st::utf8_decode(sample.text)) {
       if (codepoint == U' ') continue;
-      const Stats fitted = measure(renderer, codepoint, size * scale, embolden_px, 1, 1);
-      const Stats base = measure(reference, codepoint, size * scale, embolden_px, 1, 1);
+      const Stats fitted = measure(renderer, codepoint, size * scale, embolden_px, 1, 1, real_bold);
+      // 基准必须用**同一个字体面**（真粗体档就用真粗体）——否则 ratio 比的是两个不同设计
+      // 的字体，字间离散会被字体设计差异淹没（本探针第二版就踩到：离散虚高到 21.8%/46.9%）。
+      const Stats base = measure(reference, codepoint, size * scale, embolden_px, 1, 1, real_bold);
       if (fitted.ink_pixels == 0 || base.ink <= 0.0) continue;
       ratios.push_back(fitted.ink / base.ink);
       band_ratio += static_cast<double>(fitted.band_pixels) /
