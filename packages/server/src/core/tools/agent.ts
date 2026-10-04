@@ -221,6 +221,19 @@ export const subSessionRunTool: Tool = {
     } catch (err) {
       return { output: `子会话运行未启动（参数或环境问题，请修正后重试）：${err instanceof Error ? err.message : String(err)}` }
     }
+    // **热加载局限提示**（与 agent_load 同口径）：装载名单里该子Agent 的辅助模块在本进程运行期间
+    // 被改过（`.md` 系统提示词、辅助 `.ts`）时，本次子会话**服务的是旧版内容**（辅助模块无法在进程内
+    // 重载）。实测代价：改完子Agent 提示词立即用 subsession_run 验证，子会话如实回答“提示词里没有这一节”，
+    // 于是改动者以为“写错了/路径不对”而反复改文件（实测，2026-10-04）——真实原因只需重启服务。
+    // 与 agent_load 的差异：那条路径本来就带提示（tools/agent.ts 的 agentLoadTool），
+    // 而 subsession_run 是**子Agent 开发循环里更常用的验证入口**（隔离上下文 + 看它是否收到新提示词），
+    // 反而没有提示——提示只在“错误”路径上，而这里的失败是**静默的**（工具成功、内容旧版）。
+    const reloadNotes = [...new Set(specs.flatMap((s) => s.agents))]
+      .map((name) => [name, ctx.subAgentHotReloadNote?.(name) ?? null] as const)
+      .filter((entry): entry is readonly [string, string] => entry[1] !== null)
+    const reloadHint = reloadNotes.length
+      ? `\n注意：${reloadNotes.map(([name, note]) => `${name}：${note}`).join("\n")}`
+      : ""
     const isAsync = specs[0].async
     const fork = specs[0].inheritContext
     if (isAsync) {
@@ -229,8 +242,9 @@ export const subSessionRunTool: Tool = {
       return {
         output:
           `[子会话已后台启动] 共 ${started.length} 个并行执行（${fork ? "继承上下文" : "隔离上下文"}），${tail}（过程实时推送到前端）:\n${lines.join("\n")}\n` +
-          `（本会话可继续其他工作；子会话内可用 subsession_merge 随时合入阶段性成果；用 bg_task action=status id=${started[0].runId} 查进度、action=wait 等完成、action=stop 终止、action=finish 快速结束（先注入收敛指令拿结论再结束），action=list 列全部后台任务。）`,
-        data: { subsessions: started.map((r) => ({ runId: r.runId, name: r.name, status: r.status, inheritContext: r.inheritContext, rounds: r.rounds, toolCalls: r.toolCalls, merged: r.merged })) },
+          `（本会话可继续其他工作；子会话内可用 subsession_merge 随时合入阶段性成果；用 bg_task action=status id=${started[0].runId} 查进度、action=wait 等完成、action=stop 终止、action=finish 快速结束（先注入收敛指令拿结论再结束），action=list 列全部后台任务。）` +
+          reloadHint,
+        data: { subsessions: started.map((r) => ({ runId: r.runId, name: r.name, status: r.status, inheritContext: r.inheritContext, rounds: r.rounds, toolCalls: r.toolCalls, merged: r.merged })), ...(reloadNotes.length ? { hotReloadNotes: Object.fromEntries(reloadNotes) } : {}) },
       }
     }
     // 同步 fan-in：等待全部子会话终态（继承上下文形态的报告在终态时经引擎合入队列入父上下文——
@@ -251,13 +265,13 @@ export const subSessionRunTool: Tool = {
     const head = fork
       ? `[子会话执行完成] 共 ${recs.length} 个子会话${failed.length ? `（${failed.length} 个未正常完成，详情见各状态行）` : "，全部成功"}。各子会话完整报告已作为合并消息追加进本会话上下文（随后的消息，过程存档可回放）:`
       : `[子会话执行完成] 共 ${recs.length} 个子会话${failed.length ? `（${failed.length} 个未正常完成，详情见各状态行）` : "，全部成功"}:`
-    const body = `${head}\n${lines.join("\n")}${outputs.length ? `\n\n最终结果:\n${outputs.join("\n\n")}` : ""}`
+    const body = `${head}\n${lines.join("\n")}${outputs.length ? `\n\n最终结果:\n${outputs.join("\n\n")}` : ""}${reloadHint}`
     const safe = body.length <= TRUNCATE_THRESHOLD ? { output: body } : await truncate(body, "subsession_run", ctx)
     return {
       output: safe.output,
       // 单子会话运行：过程存档挂到本次调用记录（历史回放渲染折叠容器）；多子会话不挂（继承上下文形态的存档随合并消息）
       ...(single && !fork ? { subSessionArchive: single.archive } : {}),
-      data: { subsessions: recs.map((r) => ({ runId: r.runId, name: r.name, status: r.status, inheritContext: r.inheritContext, rounds: r.rounds, toolCalls: r.toolCalls, merged: r.merged, ...(single ? { output: single.output } : {}) })) },
+      data: { subsessions: recs.map((r) => ({ runId: r.runId, name: r.name, status: r.status, inheritContext: r.inheritContext, rounds: r.rounds, toolCalls: r.toolCalls, merged: r.merged, ...(single ? { output: single.output } : {}) })), ...(reloadNotes.length ? { hotReloadNotes: Object.fromEntries(reloadNotes) } : {}) },
     }
   },
 }

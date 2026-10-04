@@ -7,7 +7,15 @@
  * 于是很容易被误读成「文件没写对 / 注册失败」，然后反复改文件排查。
  *
  * 判定早已存在（`SubAgentManager.hotReloadWarnings()`），但此前没有任何消费方——
- * 本测试钉住两条出口：① 未知工具报错；② `agent_load` 成功返回。
+ * 本测试钉住**三条**出口：① 未知工具报错；② `agent_load` 成功返回；
+ * ③ `subsession_run` 成功返回（子Agent 开发循环里**最常用的验证入口**）。
+ *
+ * 为什么必须有 ③（实测再次踩到，2026-10-04）：改完子Agent 的 `.md` 系统提示词，
+ * 用 `subsession_run` 验证（隔离上下文、看它是否收到新提示词）——子会话**如实回答“提示词里
+ * 没有这一节”**，且工具返回**一切正常、无任何提示**。这里的失败是**静默的**：
+ * 工具成功、子会话也成功，只是服务的是旧版辅助模块（`.md` 被 import 后进程内无法失效）。
+ * 于是改动者只能得出“改动写错了”的结论——真实原因只需重启服务。
+ * 对比 `agent_load`：那条路径本来就带提示，而更常用的验证入口反而没有。
  */
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
@@ -20,7 +28,8 @@ import { createGlobalTools } from "../tools"
 import { Sandbox } from "../security/sandbox"
 import { EnvManager } from "../session/env"
 import { EventBus } from "../base/event-bus"
-import { agentLoadTool } from "../tools/agent"
+import { agentLoadTool, subSessionRunTool } from "../tools/agent"
+import type { SubSessionRecord } from "../session/subsessions"
 import { SubAgentManager } from "../agents/subagents"
 import type { ToolContext } from "@gebai/sdk"
 import type { LLMProvider, LLMChunk, ChatOptions } from "../llm/llm"
@@ -29,6 +38,27 @@ import { AgentEngine } from "./engine"
 
 const RELOAD_NOTE =
   "辅助模块在进程运行期间被修改过，但辅助模块无法在进程内重载（仅入口文件带 ?t 可绕模块缓存）——当前可能是「新入口 + 旧辅助」的混合版本；请重启服务后再使用本子Agent"
+
+/** 子会话记录桩（子会话工具的状态行会读 envKeys/rounds 等字段；只填谓词用到的）。 */
+function makeRecord(): SubSessionRecord {
+  return {
+    runId: "s1",
+    sessionId: "sess",
+    name: "s1",
+    input: "x",
+    agents: [],
+    envMode: "inherit" as const,
+    envKeys: [],
+    inheritContext: false,
+    async: false,
+    depth: 1,
+    status: "done" as const,
+    rounds: 1,
+    toolCalls: 0,
+    merged: false,
+    startedAt: 0,
+  } as unknown as SubSessionRecord
+}
 
 /** 真实管理器 + 注入的探针子Agent：热加载提示路径需要一个已注册的 `probe`（前缀匹配与工具清单都用它），
  *  而 `refreshIfChanged` 等其余方法走真实实现（`run` 生命周期要用）。 */
@@ -127,5 +157,52 @@ describe("热加载局限提示", () => {
     expect(loaded.output).toContain("已装载")
     expect(loaded.output).not.toContain("重启服务")
     expect((loaded.data as { hotReloadNote?: string }).hotReloadNote).toBeUndefined()
+  })
+
+  test("subsession_run 成功返回：装载名单里有已改辅助模块的子Agent 时附同一提示", async () => {
+    // 隔离形态（inherit_context=false）同步运行：单任务形态，agents 指向已改辅助模块的 probe。
+    const started = [makeRecord()]
+    const ctx = {
+      subAgentHotReloadNote: (name: string) => (name === "probe" ? RELOAD_NOTE : null),
+      subSessions: {
+        start: async (specs: Array<{ agents: string[] }>) => started.map((r, i) => ({ ...r, agents: specs[i]?.agents ?? [] })),
+        wait: async () => started[0],
+        result: () => ({ output: "子会话结论" }),
+      },
+    } as unknown as ToolContext
+    const res = await subSessionRunTool.execute({ input: "看你的提示词里有没有那一节", agents: ["probe"] }, ctx)
+    expect(res.output).toContain("子会话执行完成")
+    // 真实原因必须出现：否则改动者会把「子会话说没收到新提示词」误读成改动写错了
+    expect(res.output).toContain("重启服务")
+    expect((res.data as { hotReloadNotes?: Record<string, string> }).hotReloadNotes?.probe).toBe(RELOAD_NOTE)
+  })
+
+  test("subsession_run：无热加载改动时不附提示（避免噪声与误判）", async () => {
+    const started = [makeRecord()]
+    const ctx = {
+      subAgentHotReloadNote: () => null,
+      subSessions: {
+        start: async () => started,
+        wait: async () => started[0],
+        result: () => ({ output: "子会话结论" }),
+      },
+    } as unknown as ToolContext
+    const res = await subSessionRunTool.execute({ input: "x", agents: ["probe"] }, ctx)
+    expect(res.output).not.toContain("重启服务")
+    expect((res.data as { hotReloadNotes?: Record<string, string> }).hotReloadNotes).toBeUndefined()
+  })
+
+  test("subsession_run：宿主未注入该能力时沉默降级（可选契约，不报错）", async () => {
+    const started = [makeRecord()]
+    const ctx = {
+      subSessions: {
+        start: async () => started,
+        wait: async () => started[0],
+        result: () => ({ output: "ok" }),
+      },
+    } as unknown as ToolContext
+    const res = await subSessionRunTool.execute({ input: "x", agents: ["probe"] }, ctx)
+    expect(res.output).toContain("子会话执行完成")
+    expect(res.output).not.toContain("重启服务")
   })
 })
