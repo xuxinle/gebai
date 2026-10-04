@@ -315,7 +315,9 @@ ST_TEST(ui_tooltip_target_and_visibility) {
   tip.set_active(true);
   tip.measure(context, constraints);
   ST_CHECK_NEAR(tip.measured_size().width, 48.0f, 0.01f);
-  ST_CHECK_NEAR(tip.measured_size().height, 12.0f * 1.45f + 8.0f, 0.01f);
+  // 字号取自主题（`Tooltip` 用 `metrics.font_xs`）——断言跟着主题走，
+  // 不写死数字：字号阶梯是设计 token，写死会让“调字号”变成改测试。
+  ST_CHECK_NEAR(tip.measured_size().height, theme.metrics().font_xs * 1.45f + 8.0f, 0.01f);
 
   tip.arrange(context, st::math::Rect{0.0f, 0.0f, 0.0f, 0.0f});
   ST_CHECK_NEAR(tip.bounds().center().x, 130.0f, 0.01f);

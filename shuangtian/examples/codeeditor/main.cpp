@@ -1470,6 +1470,11 @@ struct Options {
   /// 与 `--text-lcd`/`--text-fit` 同一姿态：应用层有自己的参数解析，
   /// 框架侧的 `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
   std::string text_gamma{"auto"};
+  /// 界面字号缩放：auto/数值（见 `AppOptions::ui_font_scale`）。
+  ///
+  /// 与 `--text-*` 同一姿态：应用层有自己的参数解析，框架侧的
+  /// `st::app::parse_cli` 到不了这里——**漏接就是静默忽略**。
+  std::string ui_font_scale{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -1498,6 +1503,7 @@ struct Options {
     else if (raw == "--text-lcd") options.text_lcd = value("auto");
     else if (raw == "--text-fit") options.text_fit = value("auto");
     else if (raw == "--text-gamma") options.text_gamma = value("auto");
+    else if (raw == "--ui-font-scale") options.ui_font_scale = value("auto");
     else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(value("0")));
     else if (raw == "--control-file") options.control_file = value({});
     else if (raw == "--shots") options.shots = value({});
@@ -1526,8 +1532,9 @@ auto run_app(int argc, char** argv) -> int {
   // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
   app_options.enable_script = options.enable_script;
   app_options.text_lcd = options.text_lcd;
-      app_options.text_fit = options.text_fit;
-    app_options.text_gamma = options.text_gamma;
+  app_options.text_fit = options.text_fit;
+  app_options.text_gamma = options.text_gamma;
+  app_options.ui_font_scale = options.ui_font_scale;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;

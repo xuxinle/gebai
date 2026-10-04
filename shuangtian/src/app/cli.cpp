@@ -141,6 +141,28 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
         }
       }
       options.app.text_gamma = mode;
+    } else if (argument == "--ui-font-scale") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      // 与 `--text-gamma` 同口径：连续量没有白名单，只查“能不能整串解析成一个数”——
+      // 拼错就报错，静默回落会让“我明明设了 1.2”变成谜案。范围校验在
+      // `resolve_ui_font_scale`（夹到 [0.5, 3]，那是可用性边界而非合法性边界）。
+      const std::string mode = *parsed;
+      if (mode != "auto") {
+        try {
+          std::size_t consumed = 0;
+          (void)std::stof(mode, &consumed);
+          if (consumed != mode.size()) {
+            return unexpected(ErrorCode::Invalid,
+                              std::format("--ui-font-scale 只接受 auto / 数值，收到「{}」",
+                                          mode));
+          }
+        } catch (const std::exception&) {
+          return unexpected(ErrorCode::Invalid,
+                            std::format("--ui-font-scale 只接受 auto / 数值，收到「{}」", mode));
+        }
+      }
+      options.app.ui_font_scale = mode;
     } else if (argument == "--title") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());

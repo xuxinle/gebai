@@ -99,10 +99,10 @@ struct Metrics {
   float radius_xl{20.0f};
   float radius_pill{999.0f};
 
-  float font_xs{12.0f};
-  float font_sm{13.0f};
-  float font_base{14.0f};
-  float font_lg{16.0f};
+  float font_xs{13.0f};
+  float font_sm{14.0f};
+  float font_base{15.0f};
+  float font_lg{17.0f};
   float font_xl{20.0f};
   float font_2xl{26.0f};
   float font_3xl{34.0f};
@@ -119,6 +119,31 @@ struct Metrics {
   float motion_fast{120.0f};
   float motion_normal{180.0f};
   float motion_slow{260.0f};
+
+  /// **整条字号阶梯统一放大/缩小**（默认 1.0 = 不动）。
+  ///
+  /// 为什么是"整条阶梯"而不是单档：字号之间是**相对关系**（正文 vs 次要 vs 标题），
+  /// 只动一档会把层次拉平（例如 sm 与 base 都是 14 就分不出主次）。
+  /// 缩放作用在 `font_*` 上，**间距/控件高度不动**——它们有自己的视觉基准，
+  /// 跟着字号一起放大只会让界面变松散。
+  ///
+  /// 调用时机：构造主题之后、组件 `apply_theme` 之前（见 `scale_fonts`）。
+  float font_scale{1.0f};
+
+  /// 按 `factor` 缩放全部 `font_*` 档位（结果写回各字段，并记录 `font_scale`）。
+  /// 只接受正数；非正值忽略（不要静默把字号变成 0——那会让整屏文字消失）。
+  void scale_fonts(float factor) noexcept {
+    if (!(factor > 0.0f)) return;
+    const float ratio = factor / font_scale;
+    font_xs *= ratio;
+    font_sm *= ratio;
+    font_base *= ratio;
+    font_lg *= ratio;
+    font_xl *= ratio;
+    font_2xl *= ratio;
+    font_3xl *= ratio;
+    font_scale = factor;
+  }
 };
 
 enum class ThemeMode : std::uint8_t { Light, Dark };

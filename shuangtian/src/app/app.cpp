@@ -94,6 +94,35 @@ auto resolve_text_gamma(std::string_view mode) -> float {
   return st::text::TextRenderer::kDefaultCoverageGamma;
 }
 
+auto resolve_ui_font_scale(std::string_view mode) -> float {
+  const auto from_word = [](std::string_view value) -> std::optional<float> {
+    if (value.empty() || value == "auto") return std::nullopt;
+    try {
+      std::size_t consumed = 0;
+      const float parsed = std::stof(std::string(value), &consumed);
+      if (consumed != value.size()) return std::nullopt;
+      return parsed;
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+  };
+  // 范围限定：字号缩放超出 [0.5, 3] 只会把界面变得不可用（文字挤出控件或小到看不清），
+  // 那是拼写错误而不是意图——夹取而不是静默接受。
+  const auto clamp = [](float value) { return std::clamp(value, 0.5f, 3.0f); };
+  if (const auto parsed = from_word(mode); parsed.has_value()) return clamp(*parsed);
+  if (const auto value = fs::read_env("ST_UI_FONT_SCALE"); value.has_value() && !value->empty()) {
+    if (const auto parsed = from_word(*value); parsed.has_value()) return clamp(*parsed);
+  }
+  return 1.0f;
+}
+
+/// 构造主题并按 `factor` 缩放整条字号阶梯（`factor == 1` 时等同 `Theme::by_mode`）。
+[[nodiscard]] auto scaled_theme(ui::ThemeMode mode, float factor) -> ui::Theme {
+  ui::Theme theme = ui::Theme::by_mode(mode);
+  theme.metrics().scale_fonts(factor);
+  return theme;
+}
+
 struct Application::Impl {
   shell::Backend* backend{nullptr};
   std::unique_ptr<shell::Backend> backend_holder{};
@@ -107,6 +136,8 @@ struct Application::Impl {
   std::vector<std::string> log_lines{};
   std::uint64_t frames{0};
   float device_scale{1.0f};
+  /// 界面字号缩放（构造时解析一次，切主题时复用）——见 `Metrics::scale_fonts`。
+  float font_scale{1.0f};
   double last_frame_ms{0.0};
   /// 最后一帧的分阶段耗时（排版/绘制/送显），用于定位"帧耗时高"到底花在哪里。
   double layout_ms{0.0};
@@ -129,7 +160,8 @@ Application::Application(std::string name, std::string version, AppOptions optio
     : impl_(std::make_unique<Impl>()), name_(std::move(name)), version_(std::move(version)),
       options_(std::move(options)) {
   log::set_level(log::level_from_name(options_.log_level));
-  root_.set_theme(ui::Theme::by_mode(options_.theme));
+  impl_->font_scale = resolve_ui_font_scale(options_.ui_font_scale);
+  root_.set_theme(scaled_theme(options_.theme, impl_->font_scale));
   // 绘制剖析默认关闭：挂了才计时（代价是每次绘制两次时钟读）。
   if (const auto flag = fs::read_env("ST_PAINT_PROFILE"); flag.has_value() && !flag->empty() &&
       *flag != "0") {
@@ -225,7 +257,9 @@ void Application::request_repaint() {
 }
 
 void Application::set_theme_mode(ui::ThemeMode mode) {
-  root_.set_theme(ui::Theme::by_mode(mode));
+  // **必须带上字号缩放**：主题对象自带 `Metrics`，直接 `Theme::by_mode` 会把
+  // `--ui-font-scale` 调好的字号悄悄还原（切主题 → 字号跳回去）。
+  root_.set_theme(scaled_theme(mode, impl_->font_scale));
   options_.theme = mode;
 }
 

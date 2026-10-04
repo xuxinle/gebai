@@ -38,6 +38,12 @@ namespace st::app {
 /// `st::text::TextRenderer::set_coverage_gamma` 的事故记录与验收口径。
 [[nodiscard]] auto resolve_text_gamma(std::string_view mode) -> float;
 
+/// 解析界面字号缩放（命令行 `--ui-font-scale` 取值；`auto` 时再看 `ST_UI_FONT_SCALE`）。
+///
+/// 取值：`auto`（→ `ST_UI_FONT_SCALE` → 1.0）/ 数值字面量（限定在 `[0.5, 3]`——
+/// 超出范围会让界面无法使用，属于拼写错误而非意图）。
+[[nodiscard]] auto resolve_ui_font_scale(std::string_view mode) -> float;
+
 struct AppOptions {
   int width{1280};   ///< 逻辑宽（UI 坐标）
   int height{720};   ///< 逻辑高
@@ -74,6 +80,12 @@ struct AppOptions {
   /// 该默认值由**真机非无头浏览器**参照 + 朴素像素口径定出；曾被设成 2.2（提亮）
   /// 并引发回归——依据与教训见 `st::text::TextRenderer::set_coverage_gamma`。
   std::string text_gamma{"auto"};
+  /// **界面字号缩放**：`auto` / 数值字面量（见 `resolve_ui_font_scale`）。
+  ///
+  /// 作用在整条字号阶梯上（xs/sm/base/lg/xl/2xl/3xl 同乘），间距与控件高度不动——
+  /// 理由见 `Metrics::scale_fonts`。默认 1.0（不改基准），可用命令行或 `ST_UI_FONT_SCALE`
+  /// 在不重编的前提下调档。
+  std::string ui_font_scale{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配
   std::string control_file{};         ///< 写入 {port,pid,...} 供客户端发现
