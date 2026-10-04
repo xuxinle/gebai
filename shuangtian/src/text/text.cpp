@@ -565,6 +565,24 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t {
     return (seed ^ value) * 1099511628211ULL;
   };
+  /// **吸附幅度上限**（物理像素）——本仓库“字间不一致”的核心旋钮。
+  ///
+  /// 实测（`tools/weight_spread_probe.cpp`，汉字菜单串 @物理 20.25px）：拟合对
+  /// **每个字**的改变幅度从 −27% 到 +10% 不等（`ratio_spread` 37%），
+  /// 而它买的锐度只有过渡带 0.439→0.363（17%）。根因：1.5px 的笔画每边各动 0.25px
+  /// 就是 ±33% 墨量，而每个字落的相位不同——**吸附幅度越大，字间差异越大**。
+  ///
+  /// 所以这里把幅度做成可调，用 Pareto 扫找平衡点（ST_TEXT_MAXSHIFT 可覆盖，便于实验）。
+  const float fit_max_shift = [] {
+    if (const auto value = fs::read_env("ST_TEXT_MAXSHIFT"); value.has_value() && !value->empty()) {
+      try {
+        const float parsed = std::stof(*value);
+        if (parsed > 0.0f) return parsed;
+      } catch (...) {
+      }
+    }
+    return 1.0f;
+  }();
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
   // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
   // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
@@ -580,7 +598,12 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const bool lcd = subpixel_;
   // 网格拟合模式同样要进键：拟合前后是两份不同的位图（边缘相位不同），
   // 与亚像素同理——混用会取到“不符合当前模式”的字形（症状是“开关看起来没生效”）。
-  const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_);
+    const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_);
+  // **拟合的数值参数也必须进键**（`max_shift` 等）：它们改变的是**位图内容**
+  //（边缘吸附到哪、吸不吸），与模式位同理。
+  // 实测踩到：加了 `ST_TEXT_MAXSHIFT` 对照开关后扫描四个值得到**逐位相同**的结果，
+  // 排查半天才发现是取到了缓存里同一份位图——“参数改了却看不出变化”。
+  const auto fit_shift_bucket = static_cast<std::uint64_t>(std::lround(fit_max_shift * 100.0f));
   // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
   // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
   // **逐字段顺序混合**（不是“移位后 XOR 拼装”）——六层嵌套的 `mix(mix(...))` 写起来
@@ -589,9 +612,9 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   std::uint64_t key = st::hash::fnv1a64(face.path());
   for (const std::uint64_t field :
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
-                         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
-                 correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket,
-                 static_cast<std::uint64_t>(steps)}) {
+        static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
+        correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket, fit_shift_bucket,
+        static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
   {
@@ -685,7 +708,6 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     }
     return true;
   }();
-
   auto bitmap = std::make_shared<GlyphBitmap>();
   bitmap->cache_key = key;   // 稳定身份 = 上面那份缓存键（与内存地址无关）
   // 通道布局先按当前模式写好；下面若因尺寸护栏退回灰度，这里会同步改掉
@@ -772,6 +794,8 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
                                                // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
                                                // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
                                                .quantize_width = quantize_enabled && effective_size <= kQuantizeBelowPx,
+                                               // **吸附幅度上限**（物理像素）：见下方常量说明。
+                                               .max_shift = fit_max_shift,
                                                .grid = static_cast<float>(supersample)};
     // `fit_slant_ == 0` = 不覆盖，用头文件的默认值（不在两处各写一份常数）。
     st::text::GridFitOptions effective_options = fit_options;
