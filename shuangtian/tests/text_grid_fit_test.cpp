@@ -214,11 +214,19 @@ ST_TEST(grid_fit_sharpens_stems) {
 }
 
 /// ③ 墨量守恒：拟合不该显著改变字的粗细（大字号更严——那里的形变余量更小）。
+///
+/// **必须在 γ = 1 下量**（2026-10-04 补）：本用例的口径是“Σ覆盖率 ≈ 几何墨量”，
+/// 而那个相等关系只在**恒等映射**下成立（Σ 是线性算子）。叠加覆盖率 gamma 后，
+/// 拟合与不拟合分别作用于不同的齿位，Σ 之差就混入了非线性映射的残差
+/// （实测拟合后墨量变化从 ±5% 跳到 +16.5%），把真正的几何形变量污染掉。
+/// 所以这里刻意关掉 gamma：**它量的是几何，不是合成空间**。
 ST_TEST(grid_fit_preserves_ink) {
   FontFixture fixture;
   if (!fixture.ok) return;
   TextRenderer off(*fixture.stack, 1.0f);
   TextRenderer normal(*fixture.stack, 1.0f);
+  off.set_coverage_gamma(1.0f);
+  normal.set_coverage_gamma(1.0f);
   normal.set_grid_fit(GridFitMode::Normal);
 
   for (const auto& [name, text] : {std::pair{"中文", kCjk}, std::pair{"拉丁", kLatin}}) {
@@ -317,12 +325,18 @@ ST_TEST(grid_fit_guard_refuses_excessive_shift) {
 /// 这条是实测踩到的一个真回归：亚像素路径需要把轮廓水平放大 3 倍，
 /// 当时用 `Path::scaled(3)` 实现——它会把 x 与 y **一起**乘 3，
 /// 于是字形被纵向拉成 3 倍高、只有上半部分落在画布里（表现为“文字像被切成两半”）。
+///
+/// **墨量断言在 γ = 1 下量**：这里的“墨量”是 Σ 覆盖率，而 Σ 只在恒等映射下等于几何墨量——
+/// 覆盖率 gamma 是非线性的，拟合改变了相位就改变了 Σ 分布，非线性映射会把这点差异放大成
+/// 两位数的偏差（实测 γ=2.2 时 +21.7%）。网格/形变那几条断言与 gamma 无关，保持原样。
 ST_TEST(grid_fit_combines_with_subpixel_without_distortion) {
   FontFixture fixture;
   if (!fixture.ok) return;
   TextRenderer subpixel_only(*fixture.stack, 1.0f);
+  subpixel_only.set_coverage_gamma(1.0f);
   subpixel_only.set_subpixel(true);
   TextRenderer both(*fixture.stack, 1.0f);
+  both.set_coverage_gamma(1.0f);
   both.set_subpixel(true);
   both.set_grid_fit(GridFitMode::Normal);
 

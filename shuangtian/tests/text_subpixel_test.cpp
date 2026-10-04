@@ -103,6 +103,12 @@ struct Deviation {
 }
 
 /// 彩边能量：`|R-G| + |G-B|` 的总和（“彩边有多浓”的直接量化）。
+///
+/// **按像素归一**（不是整幅求和）：`TextRenderer` 的覆盖率 gamma 预校正（见
+/// `text_coverage_gamma_test.cpp`）对三个通道施加同一个缩放，于是**同一像素内**的
+/// 通道差被等比放大——而 γ 越大、中间调越浅，放大倍数越大。整幅求和的口径下
+/// “滤波降彩边”会被这个放大盖过去（实测：滤波 140% × 原始），得到的结论是假的。
+/// 除以像素数只去掉“字形大小”这个无关变量，通道间的相对关系原样保留。
 [[nodiscard]] auto fringe_energy(const TextRenderer::GlyphBitmap& lcd) -> double {
   double total = 0.0;
   const std::size_t pixels = lcd.coverage.size() / 3U;
@@ -112,7 +118,7 @@ struct Deviation {
     const double b = lcd.coverage[index * 3U + 2U];
     total += std::abs(r - g) + std::abs(g - b);
   }
-  return total;
+  return pixels > 0 ? total / static_cast<double>(pixels) : 0.0;
 }
 
 /// **子像素分辨率的亮度 profile**（每行 3×宽度 个样本）。
@@ -411,15 +417,24 @@ ST_TEST(text_subpixel_edges_carry_color_and_core_stays_neutral) {
 }
 
 /// ⑤ 滤波确实在起作用；且关掉滤波锐度更高（两条一起钉住这个取舍）。
+///
+/// **在 γ = 1 下量**：本用例量的是“滤波这个几何/信号处理步骤”的取舍，
+/// 而覆盖率 gamma 是一个逐像素的非线性映射，它会同时压低两侧的斜率与彩边，
+/// 使“最大斜率”这种极值统计量失去可比性（实测 γ=2.2 时两侧最大斜率都落到 0.643、
+/// 比值记成 1.00×，而 DESIGN §4.3.1 记录的原始事实是 1.11×）。
+/// 关掉 gamma = 把这一层变量摘掉，量的才是滤波本身。
 ST_TEST(text_subpixel_filter_trades_fringe_for_sharpness) {
   FontFixture fixture;
   if (!fixture.ok) return;
   TextRenderer filtered(*fixture.stack, 1.0f);
+  filtered.set_coverage_gamma(1.0f);
   filtered.set_subpixel(true);
   TextRenderer raw(*fixture.stack, 1.0f);
+  raw.set_coverage_gamma(1.0f);
   raw.set_subpixel(true);
   raw.set_subpixel_filter(false);
   TextRenderer gray(*fixture.stack, 1.0f);
+  gray.set_coverage_gamma(1.0f);
 
   double filtered_energy = 0.0;
   double raw_energy = 0.0;

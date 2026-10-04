@@ -138,7 +138,6 @@ inline constexpr int kSubpixelColumns = 3;
 inline constexpr int kMaxSubpixelWidth = 4096;
 
 /// 子像素轴低通滤波（权重同 FreeType `FT_LCD_FILTER_DEFAULT`：`{8,77,86,77,8}/256`）。
-///
 /// 输入/输出都是**子像素序列**（三值交错、长度 = 3 × 像素数），就地修改；
 /// 边缘按夹取处理（FreeType 同样复制边界，否则笔画端部会凭空变暗）。
 void apply_lcd_filter(std::span<float> subpixels) {
@@ -293,6 +292,18 @@ TextRenderer::TextRenderer(const FontStack& stack, float supersample)
 }
 
 TextRenderer::~TextRenderer() = default;
+
+void TextRenderer::set_coverage_gamma(float gamma) noexcept {
+  const float clamped = sanitize_coverage_gamma(gamma);
+  if (clamped == coverage_gamma_) return;
+  coverage_gamma_ = clamped;
+  // 覆盖率位图随指数变（见头文件），旧位图不能留着——留着不会出错（键已区分），
+  // 但会白占最多 24 MiB 预算把当前指数下的热字形挤出去。
+  const std::scoped_lock lock(cache_->mutex);
+  cache_->glyphs.clear();
+  cache_->lru_order.clear();
+  cache_->glyph_bytes = 0;
+}
 
 void TextRenderer::set_supersample(float factor) {
   supersample_ = factor < 1.0f ? 1.0f : factor;
@@ -535,6 +546,9 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     return (seed ^ value) * 1099511628211ULL;
   };
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
+  // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
+  // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
+  const auto gamma_bucket = static_cast<std::uint64_t>(std::lround(coverage_gamma_ * 100.0f));
   // 渲染模式**必须进键**：灰度与亚像素的覆盖率位图排布不同（1 项/像素 vs 3 项/像素），
   // 混用等于按错误长度解读（表现是"字缺一块"或"字整片消失"，且只在切换模式的那一刻出现）。
   const bool lcd = subpixel_;
@@ -543,14 +557,16 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_);
   // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
   // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
-  const std::uint64_t key = mix(mix(mix(mix(mix(st::hash::fnv1a64(face.path()),
-                                                static_cast<std::uint64_t>(face.face_index())),
-                                            static_cast<std::uint64_t>(glyph)),
-                                        static_cast<std::uint64_t>(size_bucket)),
-                                    supersample_bucket),
-                                mix(lcd ? 1ULL : 0ULL,
-                                    mix(fit_bucket + 1ULL,
-                                        static_cast<std::uint64_t>(steps) + 1ULL)));
+  // **逐字段顺序混合**（不是“移位后 XOR 拼装”）——六层嵌套的 `mix(mix(...))` 写起来
+  // 极易多一个或少一个括号（改这条链时就当场出现过：多了一层）。折成列表既不可能数错括号，
+  // 也让“键里到底有哪几个字段”一眼可数——而这份字段表就是缓存正确性的全部依据。
+  std::uint64_t key = st::hash::fnv1a64(face.path());
+  for (const std::uint64_t field :
+       {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
+        static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
+        lcd ? 1ULL : 0ULL, fit_bucket, static_cast<std::uint64_t>(steps)}) {
+    key = mix(key, field);
+  }
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->glyphs.find(key); iterator != cache_->glyphs.end()) {
@@ -565,6 +581,16 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const float units = metrics.units_per_em > 0.0f ? metrics.units_per_em : 1000.0f;
   const float effective_size = static_cast<float>(size_bucket) / 4.0f;
   const int supersample = std::max(1, static_cast<int>(std::lround(supersample_)));
+  // **降采样在 gamma 空间做**（见 `set_coverage_gamma`）：子样本平均是 gamma 空间的线性操作，
+  // 若先把每个子样本拉到线性光再平均、再回 gamma 空间，两次变换的开销就落到字形栅格化的内层循环
+  // （一个 CJK 字形 ss=2 时有 3×2×2 = 12 次每像素）。两种口径的差异在 α∈[0.2,0.8] 处最大约 3%，
+  // 低于本校正要消的 13.6% 一个数量级，所以取便宜的那个。
+  const auto correct = [this](float value) noexcept -> float {
+    if (coverage_gamma_ == 1.0f || value <= 0.0f || value >= 1.0f) return value;
+    // 1 − (1−α)^(1/g)：黑字白底时码值 code' = (1−α)^(1/g) = linear_to_srgb(1−α)（近似）。
+    // 即把“code 空间混合”的结果换成“线性空间混合”（从而更浅/更细）——方向见头文件说明。
+    return 1.0f - std::pow(1.0f - value, 1.0f / coverage_gamma_);
+  };
   const float scale = effective_size * static_cast<float>(supersample) / units;
   /// 宽度量化的适用上限（**物理像素**）。
   ///
@@ -710,7 +736,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
             }
             bitmap->coverage[static_cast<std::size_t>(y) * static_cast<std::size_t>(out_width) +
                              static_cast<std::size_t>(x)] =
-                samples > 0 ? total / static_cast<float>(samples) : 0.0f;
+                samples > 0 ? correct(total / static_cast<float>(samples)) : 0.0f;
           }
         }
       } else {
@@ -786,7 +812,27 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
                   sample_count > 0.0f ? total / sample_count : 0.0f;
             }
           }
+          // **gamma 校正整像素施加，且用同一个标量**（见下方说明）。
+          // 标量取三通道均值而不是逐通道各自映射：逐通道会把彩边信息“各自拉直”，
+          // 破坏“三通道覆盖率按同一比例缩放”的前提（而那个前提正是本模式的物理含义——
+          // 一个像素只有一个几何覆盖率，R/G/B 只是同一条边的三种采样）。
+          if (coverage_gamma_ != 1.0f) {
+            for (int x = 0; x < out_width; ++x) {
+              const std::size_t base = static_cast<std::size_t>(x) * kSubpixelColumns;
+              const float mean = (row_subpixels[base] + row_subpixels[base + 1U] +
+                                  row_subpixels[base + 2U]) /
+                                 3.0f;
+              const float gain =
+                  mean > 0.0f ? correct(mean) / mean : 0.0f;  // 0 → 保持全 0
+              for (int channel = 0; channel < kSubpixelColumns; ++channel) {
+                row_subpixels[base + static_cast<std::size_t>(channel)] *= gain;
+              }
+            }
+          }
           // 滤波在**子像素轴**上做（像素边界对它无意义），所以整行 3×out_width 一起过。
+          // 顺序：先 gamma 后滤波（不是相反）——滤波是“把墨在相邻子像素间摊开”的物理过程，
+          // 发生在我们已经决定每个子像素该多黑的**之后**；反过来做会先把彩边摊平再映射，
+          // 得到的不是任何一个真实混合空间的结果。
           if (subpixel_filter_) apply_lcd_filter(row_subpixels);
           std::copy(row_subpixels.begin(), row_subpixels.end(),
                     bitmap->coverage.begin() +

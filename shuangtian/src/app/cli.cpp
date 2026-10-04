@@ -120,6 +120,27 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
             std::format("--text-fit 只接受 auto / off / light / normal，收到「{}」", mode));
       }
       options.app.text_fit = mode;
+    } else if (argument == "--text-gamma") {
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      // 与 `--text-lcd`/`--text-fit` 的“拼错就报错”不同：这是连续量，
+      // 白名单不成立（1.35 也是合法值）。因此只查“能不能解析出一个数”，
+      // 解析不了就报错——静默回落会让“我明明设了 gamma=2”变成谜案。
+      const std::string mode = *parsed;
+      if (mode != "auto" && mode != "off") {
+        try {
+          std::size_t consumed = 0;
+          (void)std::stof(mode, &consumed);
+          if (consumed != mode.size()) {
+            return unexpected(ErrorCode::Invalid,
+                              std::format("--text-gamma 只接受 auto / off / 数值，收到「{}」", mode));
+          }
+        } catch (const std::exception&) {
+          return unexpected(ErrorCode::Invalid,
+                            std::format("--text-gamma 只接受 auto / off / 数值，收到「{}」", mode));
+        }
+      }
+      options.app.text_gamma = mode;
     } else if (argument == "--title") {
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());

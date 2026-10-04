@@ -121,12 +121,18 @@ ST_TEST(grid_fit_quantized_stems_keep_both_edges) {
 /// 大字号本来就有满黑像素，量化只剩代价（墨量偏差最大 0.5px）。
 /// 反例：把 `kQuantizeBelowPx` 调到很大（全字号量化），22px 中文会从 +0.4% 涨到 +3.5%，
 /// 超过本用例的 2% 容差。
+///
+/// **在 γ = 1 下量**：本用例的判据是“Σ 覆盖率 ≈ 几何墨量”，而该等式只对恒等映射成立；
+/// 覆盖率 gamma（非线性，默认 2.2）会把拟合带来的相位差异折算成假的墨量变化
+/// （实测 33px 中文 +10.2%），把真正的几何护栏（2%）淹没。关掉 gamma 才是本用例的原口径。
 ST_TEST(grid_fit_keeps_ink_identity_for_large_glyphs) {
   FontFixture fixture;
   if (!fixture.ok) return;
   for (const float pixel_size : {33.0f, 60.0f}) {
     TextRenderer off(*fixture.stack, 1.0f);
+    off.set_coverage_gamma(1.0f);
     TextRenderer fitted(*fixture.stack, 1.0f);
+    fitted.set_coverage_gamma(1.0f);
     fitted.set_grid_fit(GridFitMode::Normal);
     for (const auto& [name, text] : {std::pair{"中文", kCjk}, std::pair{"拉丁", kLatin}}) {
       const Sharpness base = scan(off, text, pixel_size);

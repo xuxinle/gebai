@@ -65,6 +65,10 @@ void save(const std::vector<std::uint8_t>& rgba, float scale, const std::string&
 auto main(int argc, char** argv) -> int {
   const std::string out_dir = argc > 1 ? argv[1] : ".";
   const float scale = argc > 2 ? std::stof(argv[2]) : 1.5f;
+  // 覆盖率 gamma：`--text-gamma` 的同一口径（默认 0 = 用渲染器的出厂默认）。
+  // 量尺必须能**关掉**校正（传 1.0）才能量出它带来了多少变化——
+  // “默认值写死”的量尺只能证明现状，证明不了收益。
+  const float gamma = argc > 3 ? std::stof(argv[3]) : 0.0f;
   auto stack = FontStack::system_default();
   if (!stack) {
     st::print("未找到可用字体\n");
@@ -88,6 +92,7 @@ auto main(int argc, char** argv) -> int {
   };
   for (const Mode& mode : modes) {
     std::vector<std::uint8_t> pixels;
+    float renderer_gamma = 0.0f;
     {
       Canvas canvas{static_cast<int>(kWidth * scale), static_cast<int>(kHeight * scale), scale};
       canvas.clear(kBackground);
@@ -95,6 +100,8 @@ auto main(int argc, char** argv) -> int {
       renderer.set_subpixel(mode.lcd);
       renderer.set_subpixel_filter(mode.filter);
       renderer.set_grid_fit(mode.fit);
+      if (gamma > 0.0f) renderer.set_coverage_gamma(gamma);
+      renderer_gamma = renderer.coverage_gamma();
       (void)renderer.draw(canvas, kLine14, Point{4.0f, 2.0f}, 14.0f, kForeground,
                           FontRole::Proportional);
       (void)renderer.draw(canvas, kLine135, Point{4.0f, 30.0f}, 13.5f, kForeground,
@@ -106,8 +113,9 @@ auto main(int argc, char** argv) -> int {
       pixels = canvas.to_rgba8();
     }
     save(pixels, scale, out_dir + std::string("/ab-") + mode.tag + ".png");
-    st::print("  已写 ab-{}.png（{}x{} 物理像素）\n", mode.tag,
-              static_cast<int>(kWidth * scale), static_cast<int>(kHeight * scale));
+    st::print("  已写 ab-{}.png（{}x{} 物理像素，coverage_gamma={}）\n", mode.tag,
+              static_cast<int>(kWidth * scale), static_cast<int>(kHeight * scale),
+              renderer_gamma);
   }
   return 0;
 }

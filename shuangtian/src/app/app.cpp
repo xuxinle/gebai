@@ -53,6 +53,32 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   return st::text::GridFitMode::Normal;
 }
 
+auto resolve_text_gamma(std::string_view mode) -> float {
+  const auto from_word = [](std::string_view value) -> std::optional<float> {
+    if (value.empty() || value == "auto") return std::nullopt;
+    if (value == "off" || value == "none" || value == "0" || value == "1") return 1.0f;
+    // `std::stof` 对 "1.4abc" 也会成功（只读前缀）——但那个容错只惠及拼写错误，
+    // 而参数值是要写进日志与复现步骤的，所以宁可**整串严格**：读到尾部才算数。
+    try {
+      std::size_t consumed = 0;
+      const float parsed = std::stof(std::string(value), &consumed);
+      if (consumed != value.size()) return std::nullopt;
+      return parsed;
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+  };
+  if (const auto parsed = from_word(mode); parsed.has_value()) {
+    return st::text::TextRenderer::sanitize_coverage_gamma(*parsed);
+  }
+  if (const auto value = fs::read_env("ST_TEXT_GAMMA"); value.has_value() && !value->empty()) {
+    if (const auto parsed = from_word(*value); parsed.has_value()) {
+      return st::text::TextRenderer::sanitize_coverage_gamma(*parsed);
+    }
+  }
+  return st::text::TextRenderer::kDefaultCoverageGamma;
+}
+
 struct Application::Impl {
   shell::Backend* backend{nullptr};
   std::unique_ptr<shell::Backend> backend_holder{};
@@ -226,11 +252,15 @@ auto Application::metrics() const -> control::Metrics {
     metrics.text_renderer = impl_->renderer->subpixel() ? "lcd" : "grayscale";
     // 把拟合模式一并上报：它不是“开关”而是三档（off/light/normal），
     // 只说“开了”不足以复现一个渲染结果。
-    switch (impl_->renderer->grid_fit()) {
-      case st::text::GridFitMode::Off: metrics.text_fit = "off"; break;
-      case st::text::GridFitMode::Light: metrics.text_fit = "light"; break;
-      case st::text::GridFitMode::Normal: metrics.text_fit = "normal"; break;
-    }
+      metrics.text_fit = "";
+  switch (impl_->renderer->grid_fit()) {
+    case st::text::GridFitMode::Off: metrics.text_fit = "off"; break;
+    case st::text::GridFitMode::Light: metrics.text_fit = "light"; break;
+    case st::text::GridFitMode::Normal: metrics.text_fit = "normal"; break;
+  }
+  // 覆盖率 gamma 同样如实上报：它是“字看着多重”的直接决定量，
+  // 不报就无法从一个现场截图复现同一种字。
+  metrics.text_gamma = impl_->renderer->coverage_gamma();
   }
   metrics.headless = headless();
   metrics.device_scale = impl_->device_scale;
@@ -409,15 +439,16 @@ auto Application::start() -> Status {
     // 文字形态：命令行 > 环境变量 > 默认（两侧同源，见 resolve_text_* 的说明）。
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
     impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
+    impl_->renderer->set_coverage_gamma(resolve_text_gamma(options_.text_gamma));
     // 如实说清这一帧的字是怎么画的：“字看着糊”的第一个分歧点就在这里。
     const char* fit_name = impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
                                ? "normal"
                                : (impl_->renderer->grid_fit() == st::text::GridFitMode::Light
                                       ? "light"
                                       : "关");
-    log::info("文字渲染：{} · 网格拟合 {}（中文字形为 CFF：只做几何拟合，不依赖字体自带指令）",
+    log::info("文字渲染：{} · 网格拟合 {} · 覆盖率 gamma {}（中文字形为 CFF：只做几何拟合，不依赖字体自带指令）",
               impl_->renderer->subpixel() ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）" : "灰度抗锯齿",
-              fit_name);
+              fit_name, impl_->renderer->coverage_gamma());
     impl_->text_port = std::make_unique<RendererTextPort>(*impl_->renderer);
     root_.set_text_port(impl_->text_port.get());
     // 逐 face 记录**路径 / 序号 / 名称**。

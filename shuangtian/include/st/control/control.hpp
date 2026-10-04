@@ -85,6 +85,11 @@ struct Metrics {
   /// 与 `text_renderer` 并列上报的理由一样：同一段文字在不同拟合档下**字形边沿不同**，
   /// 它是一份渲染结果的组成部分——不报就无法复现一个像素现场。
   std::string text_fit{};
+  /// 覆盖率 gamma 预校正指数（见 `AppOptions::text_gamma`）。
+  ///
+  /// 与 `text_fit` 并列上报的理由更强：它决定“同一个覆盖率映射成多重的像素”，
+  /// 是“字看着多重/多糊”的直接参数——不同值的两份截图**必然**逐像素不同。
+  float text_gamma{0.0f};
   bool headless{true};
   float device_scale{1.0f};
   int physical_width{0};

@@ -105,22 +105,48 @@ foreach ($dir in 'src\core', 'src\ext', 'src\pkg', 'tools\stpm') {
   $sources += Get-ChildItem -Path (Join-Path $Root $dir) -Recurse -Filter *.cpp |
               Select-Object -ExpandProperty FullName
 }
-$cSources = Get-ChildItem -Path (Join-Path $Root 'third_party') -Recurse -Filter *.c -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName
-# defines 从 st.pkg 读取（消除双写：版本号改清单忘改这里 → 自举产物版本漂移，实测发生过）。
-# 兼容缺defines/缺字段的清单：回退到默认值。
+# 第三方 C 源见下方（清单驱动，需先读 st.pkg）——此处不再全量扫描 third_party。
+# 清单是**唯一权威**：版本号、宏、包含路径、第三方 C 源、C 源专用标志全部从 st.pkg 读。
+# 历史教训：这些值曾在本脚本里第二遍手写，于是「清单改了脚本没改」当场把自举打崩
+# （SQLite 内置那次：c_flags 的 `-include st_sqlite3_config.h` 与 include 目录
+#  `third_party/sqlite` 只进了清单，bootstrap 仍按硬编码的 `-Iinclude -Ithird_party`
+#  编译 `third_party/**/*.c`，sqlite3.c 找不到 sqlite3.h 直接 fatal error）。
+# 口径同 `src/pkg/build.cpp`：include_dirs + 清单宏 + c_flags 是 C 源的完整标志前缀，
+# `-x c` 由本脚本补（清单里不写，因为 st 那边是**按语言分派**而非拼在标志里）。
 $pkg = Get-Content (Join-Path $Root 'st.pkg') -Raw | ConvertFrom-Json
 $pkgVersion = if ($pkg.version) { $pkg.version } else { '0.1.0' }
+$pkgIncludes = if ($pkg.include_dirs) { @($pkg.include_dirs) } else { @('include', 'third_party') }
+$pkgDefines = if ($pkg.defines) { @($pkg.defines) } else { @('ST_VERSION="' + $pkgVersion + '"', 'ST_ENABLE_LINT=1') }
+$pkgCFlags = if ($pkg.c_flags) { @($pkg.c_flags) } else { @('-std=gnu11') }
+# `third_party_sources` 是 glob 清单（`third_party/sqlite/*.c`）：只编清单点名的第三方 C 源。
+# 旧脚本对所有 `third_party/**/*.c` 全编——third_party 一旦放进「有 C 源但不是编译单元」
+# 的东西（参考实现、上游自测），就会替它们挑错甚至编出重复符号。
+$thirdPartySources = @()
+if ($pkg.third_party_sources) {
+  foreach ($pattern in $pkg.third_party_sources) {
+    $dir = Split-Path -Parent $pattern
+    $filter = Split-Path -Leaf $pattern
+    $thirdPartySources += Get-ChildItem -Path (Join-Path $Root $dir) -Filter $filter -ErrorAction SilentlyContinue |
+                          Select-Object -ExpandProperty FullName
+  }
+} else {
+  $thirdPartySources = @(Get-ChildItem -Path (Join-Path $Root 'third_party') -Recurse -Filter *.c -ErrorAction SilentlyContinue |
+                         Select-Object -ExpandProperty FullName)
+}
 
 if ($CXX_FAMILY -eq 'gcc') {
   # ————— GCC（MinGW-w64）分支 —————
-  $defines = @('-DST_VERSION="' + $pkgVersion + '"', '-DST_ENABLE_LINT=1',
-               '-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-DNTDDI_VERSION=0x0A000000')
-  $common = @('-Iinclude', '-Ithird_party') + $defines
+  # 平台宏不进 st.pkg（那是运行平台的事实，不是清单的选择）：CLI 与构建驱动各自带。
+  $platformDefines = @('-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-DNTDDI_VERSION=0x0A000000')
+  $defines = @($pkgDefines | ForEach-Object { "-D$_" }) + $platformDefines
+  $includeFlags = @($pkgIncludes | ForEach-Object { "-I$_" })
+  $common = $includeFlags + $defines
   $cxxFlags = @('-std=c++20', '-fno-strict-aliasing',
                 '-Wall', '-Wextra', '-Wconversion', '-Wshadow', '-Wpedantic',
                 '-Wold-style-cast', '-Wnon-virtual-dtor') + $common
-  $cFlags = @('-std=gnu11', '-x', 'c') + $common
+  # C 源标志与构建驱动同源：清单的 c_flags（含 SQLite 的 `-include`）+ 宏 + 包含路径。
+  # `-include st_sqlite3_config.h` 要能被找到，靠的正是上面 `third_party/sqlite` 那条 `-I`。
+  $cFlags = @($pkgCFlags) + $defines + $includeFlags + @('-x', 'c')
   $profileFlags = switch ($Profile) {
     'release' { @('-O2', '-DNDEBUG') }
     'quick'   { @('-O0') }
@@ -129,14 +155,14 @@ if ($CXX_FAMILY -eq 'gcc') {
   $cxxFlags = $cxxFlags + $profileFlags
   $cFlags = $cFlags + $profileFlags
 
-  Write-Host "[bootstrap] 编译 $($sources.Count) 个 C++ 单元 + $($cSources.Count) 个 C 单元（并行 $Jobs，档位 $Profile）"
+  Write-Host "[bootstrap] 编译 $($sources.Count) 个 C++ 单元 + $($thirdPartySources.Count) 个 C 单元（并行 $Jobs，档位 $Profile）"
   $started = Get-Date
   $results = @($sources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
       $src = $_; $objDir = $using:objDir; $flags = $using:cxxFlags; $CXX = $using:CXX
       $name = ($src -replace '[:\\/]', '_')
       $output = & $CXX @flags '-MMD' '-MF' (Join-Path $objDir ($name + '.d')) '-c' $src ('-o' + (Join-Path $objDir ($name + '.o'))) 2>&1
       [pscustomobject]@{ source = $src; code = $LASTEXITCODE; output = ($output | Out-String) }
-  }) + @($cSources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
+  }) + @($thirdPartySources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
       $src = $_; $objDir = $using:objDir; $flags = $using:cFlags; $CXX = $using:CXX
       $name = ($src -replace '[:\\/]', '_')
       $output = & $CXX @flags '-c' $src ('-o' + (Join-Path $objDir ($name + '.o'))) 2>&1
@@ -150,7 +176,7 @@ if ($CXX_FAMILY -eq 'gcc') {
     }
     Write-Error "$($failed.Count) 个翻译单元编译失败"
   }
-  $objects = @($sources + $cSources | ForEach-Object {
+  $objects = @($sources + $thirdPartySources | ForEach-Object {
       Join-Path $objDir (($_ -replace '[:\\/]', '_') + '.o')
   })
   $exe = Join-Path $binDir 'st.exe'
@@ -175,7 +201,7 @@ if ($CXX_FAMILY -eq 'gcc') {
                           '/D_CRT_SECURE_NO_WARNINGS', '/D_CRT_NONSTDC_NO_DEPRECATE', '/W4') + $profileFlags
   $cFlags   = $common + @('/std:c11', '/bigobj', '/D_CRT_SECURE_NO_WARNINGS', '/D_CRT_NONSTDC_NO_DEPRECATE', '/w') + $profileFlags
 
-  Write-Host "[bootstrap] 编译 $($sources.Count) 个 C++ 单元 + $($cSources.Count) 个 C 单元（并行 $Jobs，档位 $Profile）"
+  Write-Host "[bootstrap] 编译 $($sources.Count) 个 C++ 单元 + $($thirdPartySources.Count) 个 C 单元（并行 $Jobs，档位 $Profile）"
   $started = Get-Date
   $results = @($sources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
       $src = $_; $objDir = $using:objDir; $flags = $using:cxxFlags
@@ -184,7 +210,7 @@ if ($CXX_FAMILY -eq 'gcc') {
       $output = & cl.exe @flags '/c' $src ('/Fo:' + (Join-Path $objDir ($name + '.obj'))) 2>&1
       if ($LASTEXITCODE -ne 0) { Set-Content -Path $log -Value ($output | Out-String) -Encoding utf8 }
       [pscustomobject]@{ source = $src; code = $LASTEXITCODE; output = ($output | Out-String) }
-  } ) + @($cSources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
+  } ) + @($thirdPartySources | ForEach-Object -ThrottleLimit $Jobs -Parallel {
       $src = $_; $objDir = $using:objDir; $flags = $using:cFlags
       $name = ($src -replace '[:\\/]', '_')
       $log = Join-Path $objDir ($name + '.log')

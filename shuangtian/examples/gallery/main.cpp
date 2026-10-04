@@ -60,6 +60,8 @@ struct Options {
   std::string text_lcd{"auto"};
   /// 字形网格拟合：auto/off/light/normal（见 AppOptions::text_fit）。
   std::string text_fit{"auto"};
+  /// 覆盖率 gamma 预校正：auto/off/数值（见 AppOptions::text_gamma）。
+  std::string text_gamma{"auto"};
   std::uint16_t control_port{0};
   std::string control_file{};
   std::string shots{};
@@ -83,6 +85,10 @@ struct Options {
     else if (raw == "--renderer") options.renderer = next("auto");
     else if (raw == "--text-lcd") options.text_lcd = next("auto");
     else if (raw == "--text-fit") options.text_fit = next("auto");
+    // `--text-gamma` 必须接上：应用层有**自己的**参数解析（不经过 `st::app::parse_cli`），
+    // 漏接的字段会被静默忽略——日志里打印的还是默认值，而“我明明传了”无从察觉。
+    // 这正是本工程反复记录的那类缺陷（静默失效字段），所以每加一个文字开关都要两处一起加。
+    else if (raw == "--text-gamma") options.text_gamma = next("auto");
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--theme") options.theme = next("light");
@@ -96,7 +102,8 @@ struct Options {
     else if (raw == "--help" || raw == "-h") {
       st::print("用法: gallery [--headless] [--scale 2.0] [--theme dark] [--control-port 0]\n"
                 "               [--control-file PATH] [--shots DIR] [--frames N] [--bench N] [--ms N]\n"
-                "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n");
+                "               [--renderer auto|gpu|software] [--text-lcd auto|on|off] [--text-fit auto|off|light|normal]\n"
+                "               [--text-gamma auto|off|<数值>]\n");
       std::exit(0);
     }
   }
@@ -190,7 +197,8 @@ auto run_app(int argc, char** argv) -> int {
   // 渲染器交给应用选：`auto` 会**实测**两条路径再定（见 shell/backend.cpp 的 create_surface）
   app_options.renderer = options.renderer;
   app_options.text_lcd = options.text_lcd;
-  app_options.text_fit = options.text_fit;
+      app_options.text_fit = options.text_fit;
+    app_options.text_gamma = options.text_gamma;
   app_options.control_port = options.control_port;
   app_options.control_file = options.control_file;
   app_options.screenshot_dir = options.shots;

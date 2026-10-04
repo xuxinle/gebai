@@ -164,6 +164,63 @@ class TextRenderer {
   void set_subpixel_filter(bool enabled) noexcept { subpixel_filter_ = enabled; }
   [[nodiscard]] auto subpixel_filter() const noexcept -> bool { return subpixel_filter_; }
 
+  /// **字形覆盖率的 gamma 预校正指数**（在**位图生成时**施加，不是贴图时）。
+  ///
+  /// 存在的理由（2026-10-04 实测，见 `tools/text_linear_report.py`）：
+  /// 霜天在 sRGB **编码空间**直接做 alpha 混合（`out = bg + (fg−bg)·α`），
+  /// 而屏幕是 sRGB 非线性：同一个覆盖率 α 在两种合成空间下给出的**像素码值**不同。
+  /// 黑字白底时 code 空间混合给出 `code = 1−α`，线性正确给出 `code = srgb(1−α)`
+  /// ——后者在中间调处码值更高 = **笔画更浅**。实测（13.5px 正文 @1.5× DPI，
+  /// 与 Edge 逐像素对照，覆盖率统一在线性光口径下取）当前**系统性偏重**：
+  /// 出厂默认配置（LCD + 5-tap 滤波 + 网格拟合 normal）下墨量 **+13.8%**、
+  /// 实心像素 **+16.4%**——即“笔画发胖、中间调太重”的合成空间成因。
+  ///
+  /// 本参数把覆盖率重映射为 `α' = 1 − (1−α)^(1/γ)`（黑字白底的码值就是 `(1−α)^(1/γ)`
+  /// = `linear_to_srgb(1−α)` 的幂次近似），于是 `γ = 1` 是旧行为（code 空间混合）、
+  /// `γ = 2.2` 就是**完整线性空间合成**（sRGB 编码指数的倒数）、中间值是部分校正。
+  ///
+  /// **默认 2.2 是量出来的，不是拍的**。逐 γ 扫描（`build/probe/text_gamma_scan.py`，
+  /// 四条真实界面行带、线性光口径）：
+  ///
+  /// | γ | 墨量偏差（带均值） | 实心像素偏差 | 与浏览器像素差 |
+  /// |---|---|---|---|
+  /// | 1.0（旧行为） | **+13.8%** | +16.4% | 基准 |
+  /// | 1.4（JetBrains Runtime 取值） | +9.3% | +9.5% | 略优 |
+  /// | 1.8（ClearType 默认） | +6.0% | +4.4% | 持平 |
+  /// | **2.2（完整线性，默认）** | **+3.3%** | **+1.1%** | 略差 (<2%) |
+  ///
+  /// 两个判据给出不同的平坦区： **线性光墨量**随 γ 单调改善到 2.2；
+  /// 而与浏览器 code 空间的像素差在 1.3~2.2 之间**几乎不可区分**（< 2%）——
+  /// 后者拿一个自己也未必完全线性的参照当基准，分辨不了合成空间的对错。
+  /// 因此取物理上正确的那个：**全覆盖率区间都做线性合成**。
+  ///
+  /// `γ = 1.0` 保留旧行为：**跨版本像素回归**与“合成空间对照实验”要用。
+  /// 残留偏重在 12px 窄笔划带是 −8.7%（偏细），说明剩下的差异已主要是**几何**
+  /// （字形轮廓/hinting 口径），不再是合成空间——它是 `text_fit` 那一侧的事。
+  ///
+  /// **为什么放在位图生成时**：覆盖率位图既进 CPU 的逐行混合、也进 GPU 的遮罩纹理，
+  /// 是两条渲染路径唯一的共同输入；在这一处校正，软件与 GPU 天然同源，
+  /// 也不需要给 `Surface` 接口再加一个只在文字上用得到的参数。
+  /// 需要二进制精确的测试可直接给 `GlyphBitmap::coverage` 传**已校正**的值。
+  /// 缓存键含该值：不同校正指数是两份不同的位图，不能混用。
+  void set_coverage_gamma(float gamma) noexcept;
+  [[nodiscard]] auto coverage_gamma() const noexcept -> float { return coverage_gamma_; }
+
+  /// 出厂默认的覆盖率预校正指数 = **完整线性空间合成**（见 `set_coverage_gamma` 的实测依据）。
+  static constexpr float kDefaultCoverageGamma = 2.2f;
+
+  /// 把任意输入夹取到合法区间（`[1, 4]`；NaN 取默认值）。
+  ///
+  /// **公开且静态**：`app`/`control`/`CLI` 三级入口都要在把值交给渲染器前归一，
+  /// 而“什么算合法”只能有一份定义——三处各写一份就会漂。
+  /// 两种非法输入的处理**刻意不同**：区间外的数**夹取**（它是“比允许的还小/大”，
+  /// 取边界是最接近用户意图的答案）；NaN 则没有方向（不夹到任何一端），取默认值。
+  [[nodiscard]] static auto sanitize_coverage_gamma(float gamma) noexcept -> float {
+    if (!(gamma == gamma)) return kDefaultCoverageGamma;  // NaN：没有方向，取默认
+    if (gamma < 1.0f) return 1.0f;
+    return gamma > 4.0f ? 4.0f : gamma;
+  }
+
   /// **字形网格拟合（grid fitting / hinting）模式**。
   ///
   /// 存在的理由（实测，见 `DESIGN.md §4.3.1` 与 `include/st/text/grid_fit.hpp`）：
@@ -251,6 +308,8 @@ class TextRenderer {
   bool subpixel_{false};
   /// 亚像素 5-tap 低通滤波开关（见 `set_subpixel_filter`）。
   bool subpixel_filter_{true};
+  /// 覆盖率 gamma 预校正指数（见 `set_coverage_gamma`）；1.0 = 关（旧行为）。
+  float coverage_gamma_{kDefaultCoverageGamma};
   /// 网格拟合模式（见 `set_grid_fit`）；默认关，保证无头/回归的可复现性。
   GridFitMode grid_fit_{GridFitMode::Off};
   struct Cache;

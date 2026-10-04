@@ -27,6 +27,17 @@ namespace st::app {
 /// 默认 `Normal`，与 `text_lcd` 同一理由（内置通道与桌面同源）。
 [[nodiscard]] auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode;
 
+/// 解析覆盖率 gamma 预校正指数（命令行 `--text-gamma` 取值）。
+///
+/// 取值：`auto`（→ `ST_TEXT_GAMMA` → 默认 `2.2`）/ `off`（= 1.0，旧行为）/ 数值字面量。
+/// 默认 **2.2**（完整线性空间合成）：实测（`build/probe/text_gamma_scan.py`）在 sRGB 编码空间
+/// 混合使霜天的字在线性光口径下比浏览器重 **+13.8%**（墨量）/ **+16.4%**（实心像素），
+/// 表现为“发糊/发胖”；γ=2.2 时降到 +3.3% / +1.1%。
+/// 详细依据与 γ 扫描表见 `st::text::TextRenderer::set_coverage_gamma`。
+/// 传 `off` 得到跨版本可逐像素比对的基准。
+/// 解析失败（拼错/非数）不报错而**回落到默认**：它是连续量，没有“拼错”这个概念。
+[[nodiscard]] auto resolve_text_gamma(std::string_view mode) -> float;
+
 struct AppOptions {
   int width{1280};   ///< 逻辑宽（UI 坐标）
   int height{720};   ///< 逻辑高
@@ -57,6 +68,15 @@ struct AppOptions {
   /// `tools/stem_phase_probe.cpp`：中文「每边一个过渡像素」的糊笔画 90.9% → 21.8%。
   /// 需要不改变字形边沿的基准时显式传 `--text-fit=off`。
   std::string text_fit{"auto"};
+  /// 覆盖率 gamma 预校正：`auto` / `off` / 数值字面量（见 `resolve_text_gamma`）。
+  ///
+  /// 默认 2.2：覆盖率 gamma 预校正（见 `st::text::TextRenderer::set_coverage_gamma`）。
+  ///
+  /// 霜天在 sRGB 编码空间做 alpha 混合，而屏幕是 sRGB 非线性——实测（与 Edge 逐像素对照、
+  /// 覆盖率在线性光口径下取）当前**系统性偏重**：墨量 +13.8%、实心像素 +16.4%，
+  /// 即“笔画发胖、中间调太重”的合成空间成因（另一半是几何，归 `text_fit`）。
+  /// 默认值取**完整线性空间合成**（γ = sRGB 编码指数 2.2），实测残留偏差降到 +3.3% / +1.1%。
+  std::string text_gamma{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配
   std::string control_file{};         ///< 写入 {port,pid,...} 供客户端发现
