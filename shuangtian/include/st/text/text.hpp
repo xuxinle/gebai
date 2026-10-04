@@ -395,8 +395,8 @@ class TextRenderer {
   /// 墨迹一旦贴边就说明包围盒算小了（曲线极值被切掉），
   /// 而**字宽不变**（advance 不受影响）→ 现象就是"排版完好、字却变了样"。
   /// 返回 `nullptr` 表示该码点在字体栈里没有对应字形。
-  [[nodiscard]] auto glyph_bitmap_of(char32_t codepoint, float pixel_size,
-                                     FontRole role = FontRole::Proportional) const
+    [[nodiscard]] auto glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRole role = FontRole::Proportional,
+                                     int embolden_steps = 0) const
       -> std::shared_ptr<const GlyphBitmap>;
 
  private:

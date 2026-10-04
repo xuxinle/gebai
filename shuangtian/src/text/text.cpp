@@ -571,13 +571,14 @@ void TextRenderer::trim_cache(std::size_t incoming_bytes) const {
   }
 }
 
-auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRole role) const
+auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRole role,
+                                    int embolden_steps) const
     -> std::shared_ptr<const GlyphBitmap> {
   const FontFace* face = stack_->find_face(codepoint, role);
   if (face == nullptr) return nullptr;
   const auto id = face->glyph_index(codepoint);
   if (!id.has_value()) return nullptr;
-  return glyph_bitmap(*face, *id, pixel_size, 0);
+  return glyph_bitmap(*face, *id, pixel_size, embolden_steps);
 }
 
 /// 合成加粗的步数换算：把物理像素半径换成**当前模式下的采样格步数**。
