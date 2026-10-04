@@ -22,6 +22,7 @@
 
 > 想看「有哪些坑、别重蹈」直接跳 **§8.2**（50 条真实缺陷，每条都带根因与修复）；
 > 想看「怎么上手 / 建独立工程」看 `README.md` 与 `docs/`（见 `docs/README.md` 的文档地图）。
+> 想看「SQLite 是怎么被内置进来的」看 `docs/sqlite_integration.md`（开关、边界与取舍）。
 
 ## 1. 目标与非目标
 
@@ -94,11 +95,12 @@ shuangtian/
 ├── tests/<层>_<模块>_test.cpp
  ├── examples/{gallery,codeeditor}/
 ├── third_party/<name>/   # 外部依赖源码（直接内联、随仓库分发）：nlohmann/json、quickjs-ng、
-│                         # batterycenter/embed；来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
+│                         # batterycenter/embed、sqlite（amalgamation 源码内置）；
+│                         # 来源/许可/校验和见 SOURCES.md 与 CHECKSUMS.sha256
 └── docs/                 # 控制协议规范、设计 token 表等
 ```
 
-> `ext/` 层：外部基础设施的适配（JSON 薄封装、脚本引擎）。它与 `core/raster/ui` 的分工是
+> `ext/` 层：外部基础设施的适配（JSON 薄封装、脚本引擎、嵌入式数据库）。它与 `core/raster/ui` 的分工是
 > “不值得自己写、但必须控住边界” vs “自己写到底”——详 §6.6。
 
 ## 4. 关键接口
@@ -1240,7 +1242,7 @@ state.count = (state.count ?? 0) + 1     // 脚本侧状态（跨执行保留，
 
 ### 7.1 定位
 自研包管理器：不依赖系统包管理器、不用 CMake/Make、不下载二进制（源码级内联优先，保证可审计与可离线）。
-框架本体的外部依赖**直接内联在 `third_party/`**（nlohmann/json、quickjs-ng、batterycenter/embed），其余**全部自研**；
+框架本体的外部依赖**直接内联在 `third_party/`**（nlohmann/json、quickjs-ng、batterycenter/embed、sqlite），其余**全部自研**；
 第三方**源码**直接内联在 `third_party/`（来源/许可/校验和见 `third_party/SOURCES.md`）；
 stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直驱编译）。
 
@@ -1252,10 +1254,10 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
   "kind": "static_library",
   "cxx_standard": 20,
   "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "gpu", "control", "app"],
-  "include_dirs": ["include", "third_party"],
+  "include_dirs": ["include", "third_party", "third_party/sqlite"],
   "sources": ["src/**/*.cpp"],
-  "third_party_sources": ["third_party/quickjs/*.c"],
-  "c_flags": ["-std=gnu11"],
+  "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c"],
+  "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
   "tests": ["tests/*_test.cpp"],
   "flags": ["-fno-strict-aliasing"],
   "defines": ["ST_VERSION=\"0.1.0\""],
@@ -1275,7 +1277,10 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 两个字段专门服务第三方源码：
 
 - **`third_party_sources`**：第三方翻译单元清单。这些单元**不套本工程的告警集（`-w`）、不进 PCH、
-  不做 sanitizer 插桩**。理由：我们负责自家代码的质量，不负责上游的；
+  不做 sanitizer 插桩**。SQLite 的 amalgamation（`third_party/sqlite/*.c`）走的就是这条通道——
+  它正是“大块头 C 源码不值得自己写、但必须控住边界”的标准形态；
+- **`c_flags`**：C 源专用标志。SQLite 的编译期开关就挂在这里（`-include st_sqlite3_config.h`），
+  而不是插进上游 9 MB 的源码里——「我们动了上游什么」因此始终是一份可读的 diff。理由：我们负责自家代码的质量，不负责上游的；
   不插桩还避免了“65k 行的 `quickjs.c` 在 `-O1`+ASan 下单文件就要 GB 级内存，并行构建被 OOM 杀掉”。
   混编不影响对我们的检测能力——ASan 的分配器是全局的。
 - **`c_flags`**：C 源专用标志（默认 `-std=gnu11`）。**C 标志与 C++ 标志彻底分开**：
@@ -1295,10 +1300,10 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 - 工作区：项目 `.st/work/`（依赖解包与中间产物）；`st vendor` 把依赖源码树固化进 `vendor/<name>/` + `vendor.lock`（**随仓库分发、离线可构建**）。
 - 构建集成：依赖以 **声明式** `st.build` 规则（源文件/包含目录/宏/产出）纳入构建图——**不执行任意脚本**。
 - 隔离：每个依赖独立 include 根与独立中间目录；多版本共存按目录隔离。
-- **依赖直接内联（`third_party/`）**：三个外部依赖的源码**随仓库分发**，不是"需要下载的依赖"。
+- **依赖直接内联（`third_party/`）**：四个外部依赖的源码**随仓库分发**，不是"需要下载的依赖"。
   `third_party/SOURCES.md` 记录来源 URL / 版本 / 许可 / **逐文件 SHA-256** / 剔除与修改清单——
   `cd third_party && sha256sum -c CHECKSUMS.sha256` 一命令回答“依赖了什么、哪些上游代码被动了”。
-  许可合规（MIT 保留版权、Apache-2.0 保留 LICENSE 与修改声明）在同一文档中说明。
+  许可合规（MIT 保留版权、Apache-2.0 保留 LICENSE 与修改声明、SQLite 附公有领域声明）在同一文档中说明。
 
 ### 7.5 构建图与直驱编译器
 - `st build [target]`：解析清单 → 拓扑排序（依赖先编）→ 生成编译命令 → **直接调用 `g++`/`clang++`**（`-MMD -MF` 依赖文件 + 增量判新旧）。
@@ -1853,11 +1858,11 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**483 用例**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的字形墨量阈值存量项待校准） |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**625 用例 / 15059 断言**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的字形墨量阈值存量项待校准） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
 | 内置通道一致性 | `tools/st_consistency_check.py`：窗口帧缓冲 vs 客户区实际像素（逐像素） + 无头 vs 窗口同参数（scale/文本形态/拟合/截图接近度） | `python tools/st_consistency_check.py`（Windows 真机） | 5 项全过（呈现 0.000%、同源项全等） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（230 文件、6 处登记豁免） |
+| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（254 文件、12 处登记豁免） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/codeeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |

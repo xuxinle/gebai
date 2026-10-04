@@ -2,20 +2,21 @@
 
 > 霜天曉角：清冽、开阔、万物自明。
 >
-> **C++20 · 自研实现为体（仅三个外部依赖：一必需两可选）· 全自绘 · 软硬件渲染兼容 · 支持无头模式 · TCP 控制通道**
+> **C++20 · 自研实现为体（仅四个外部依赖：一必需三可选）· 全自绘 · 软硬件渲染兼容 · 支持无头模式 · TCP 控制通道**
 
 霜天是歌白的**原生躯体**：不依赖系统控件、不依赖桌面环境，把"窗口 + 组件 + 绘制 + 字体 + 文本 + 输入 + 远控"这一整套从零做起，并对外提供一条 TCP 控制通道，让智能体可以像操作浏览器一样操作原生应用。
 
-外部依赖三个（一个必需、两个可选），全部内联在 `third_party/`（版本/来源/许可/SHA-256 全程台账，`sha256sum -c` 可校验，见 `third_party/SOURCES.md`）：
+外部依赖四个（一个必需、三个可选），全部内联在 `third_party/`（版本/来源/许可/SHA-256 全程台账，`sha256sum -c` 可校验，见 `third_party/SOURCES.md`）：
 
 | 依赖 | 用途 | 性质 |
 |---|---|---|
 | [nlohmann/json](https://github.com/nlohmann/json) 3.12.0 | JSON 解析/序列化（清单、锁文件、控制通道协议） | 必需（单头） |
 | [quickjs-ng](https://github.com/quickjs-ng/quickjs) 0.17.0 | 应用内脚本层：**用 JS 写组件控制逻辑**，AI 经控制通道 `script` 读写界面（可选能力，**默认关闭**） | 可选 |
 | [batterycenter/embed](https://github.com/batterycenter/embed) 1.2.19 | 编译期资源嵌入（`b::embed<"x.png">()`）；**生成期由 stpm 原生实现**，不引入 CMake | 可选 |
+| [SQLite](https://sqlite.org/) 3.50.2 | 嵌入式数据库（`st::ext::Database`）——**amalgamation 源码内置**（上游官方推荐的用法），跨三平台同版本、零安装 | 可选（源码内置） |
 
 渲染、字体（TTF/OTF/CID 解析与整形）、文本布局、Markdown、组件库、包管理器与构建驱动**全部自研**——
-引入的只是三块"不值得自己写"的基础设施。详见 `CONVENTIONS.md` §3.8 与 `third_party/SOURCES.md`。
+引入的只是四块"不值得自己写"的基础设施。详见 `CONVENTIONS.md` §3.8 与 `third_party/SOURCES.md`。
 
 ## 它解决什么问题
 
@@ -34,6 +35,7 @@
 | **要把资源文件编进程序** | 编译期嵌入：清单里写 `"embed": ["assets/*"]`，代码里 `b::embed<"assets/logo.png">()`——路径写错**编译期**就报错，开发期文件变了还能热重载 |
 | **要写代码编辑器（高亮/行号/编辑）** | 内置 30 种主流语言的语法高亮（规则驱动、**可自定义语言**：注册一份规则即可，与内置语言同一台扫描器）；`ui::CodeEditor` 提供编辑/选择/撤销/缩进/注释切换/只读查看器与完整控制通道属性面 |
 | **要写大模型应用（流式 Markdown）** | `st::md`（解析 + 流式增量 + 零依赖代码高亮）+ `ui::MarkdownView` 组件：`append_chunk` 边生成边渲染，前缀稳定不跳变 |
+| **要把数据存下来（本地库/索引/缓存）** | `st::ext::Database`：**SQLite 源码内置**（amalgamation 随仓库分发，3.50.2，跨三平台同版本、零安装、无 ABI 版本问题），封装成 `Result` 风格的 C++20 面（预处理语句、事务与嵌套（SAVEPOINT）、五种值类型与 BLOB）；编译期开关集中在 `third_party/sqlite/st_sqlite3_config.h`（上游文件一字未改）。见 `docs/sqlite_integration.md` |
 | **不想引入第三方依赖（含包管理）** | 本体零依赖；`stpm`（`st` CLI）自管构建与**第三方源码依赖**（语义版本回溯求解 + SHA-256 校验 + 缓存 + vendor 固化 + 直接驱动编译器，不经 CMake/Make） |
 | **编译太慢** | 预编译头 + **轻量调试信息**（迭代档 `-g1`：重单元 -25%~-33%、对象 -73%）+ 头依赖增量（GCC `-MMD` / MSVC `/sourceDependencies`）+ 并行编译（**并发按内存与 CPU 配额两个上界推导**）+ 共享对象缓存：全量数十秒、改一文件秒级、无改动亚秒级 |
 | **软件渲染会不会很慢？** | 覆盖率以**运行段**逐行交付（非逐像素数组）+ 逐项 SIMD + 阴影遮罩缓存：画廊全量重绘 1280×800 **≈12 ms**（原 63.2 ms）。性能手法的收益与代价（含一次失败的 SIMD 尝试）全部记在 `DESIGN.md` §4.2.3；`ST_PAINT_PROFILE=1` 可看逐原语分解（§4.2.8） |
@@ -51,7 +53,7 @@ shuangtian/
 ├── bootstrap.sh     # 自举（Linux/macOS）：用编译器直接编出 st（唯一非 st 构建入口，8 路并行）
 ├── bootstrap.ps1    # 自举（Windows）：同上，g++（MinGW-w64）优先、MSVC 回退（vswhere + vcvars64）
 ├── include/st/{core,math,codec,raster,text,md,ui,shell,gpu,control,app,pkg,ext}/
-├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
+├── third_party/        # 第三方源码内联（nlohmann/json + quickjs-ng + battery/embed + sqlite，见 third_party/SOURCES.md 与 CHECKSUMS.sha256）
 ├── src/<层>/…       # 实现（与头同名；platform_*.cpp 为系统 API 单点封装）
 ├── examples/gallery/    # 示例一：组件集 / 设计系统巡检（含「声明式」页）
 ├── examples/codeeditor/ # 示例二：代码编辑器（声明式组装的 VSCode 式布局）

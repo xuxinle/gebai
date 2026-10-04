@@ -1,8 +1,8 @@
 # 霜天文档地图
 
-**哪份文档答哪个问题。** 五份文档按"读者的意图"分工，而不是按"内容类型"堆在一起。
+**哪份文档答哪个问题。** 六份文档按"读者的意图"分工，而不是按"内容类型"堆在一起。
 
-## 五份文档各管什么
+## 六份文档各管什么
 
 | 文档 | 回答的问题 | 什么时候看 |
 |---|---|---|
@@ -12,12 +12,14 @@
 | [`cross_platform.md`](cross_platform.md) | 跨平台会怎么错、提交前逐条自查什么 | 碰系统 API / 路径 / 入口 / 构建时 |
 | [`independent_project.md`](independent_project.md) | 怎么用本框架建**自己的**应用工程 | 要写自己的应用而不是改框架时 |
 
-另外两份在各自目录里：
+另外四份在各自目录里：
 
 | 文档 | 回答的问题 |
 |---|---|
 | [`tools/README.md`](../tools/README.md) | 依赖放哪（代码进仓库 / 二进制走资源管理）、构建工具有哪些 |
 | [`../resources/README.md`](../../resources/README.md)（主仓库） | 模型与运行时资源怎么获取（**二进制资源**的集中地） |
+| [`../third_party/SOURCES.md`](../third_party/SOURCES.md) | 随仓库分发的第三方源码有哪些、版本/来源/许可、哪些上游代码被动了 |
+| [`../third_party/sqlite/PROVENANCE.md`](../third_party/sqlite/PROVENANCE.md) | SQLite 这个具体依赖的取数路径、改动面、裁剪结果 |
 
 ## 按意图索引
 

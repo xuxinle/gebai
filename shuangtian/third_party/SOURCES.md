@@ -8,11 +8,13 @@
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 | MIT | JSON 解析/序列化（替代原自研 st::json） | single-header（上游官方分发形态） |
 | [quickjs-ng](https://github.com/quickjs-ng/quickjs) | 0.17.0 | MIT | 嵌入式 JS 引擎（应用内脚本层，可选） | 多文件 C 源码（仅保留引擎必需文件；已剔除 tests/CLI/wasm 与 quickjs-libc.c——后者提供 std/os 模块，本框架默认不给脚本系统访问能力） |
 | [batterycenter/embed](https://github.com/batterycenter/embed) | 1.2.19 | Apache-2.0 | 编译期资源嵌入（b::embed<"path">()，含开发期热重载） | 上游为单 CMakeLists.txt；此处 vendor 其运行时与模板，构建期生成改由 stpm 原生实现（我们不依赖 CMake）——对照说明见 vendor/battery/UPSTREAM.md |
+| [SQLite](https://sqlite.org/) | 3.50.2 | Public domain | 嵌入式数据库（`st::ext::Database`） | **amalgamation**（上游官方推荐的源码内置形态）：`sqlite3.c` + `sqlite3.h` + `sqlite3ext.h`；**编译期开关集中在 `sqlite/st_sqlite3_config.h`**（上游文件一字未改） |
 
 ## 合规要求（保留声明与许可）
 
 - **Apache-2.0**（batterycenter/embed）：保留 `LICENSE` 与修改声明，见 `battery/UPSTREAM.md`
 - **MIT**（nlohmann/json、quickjs-ng）：保留版权与许可文本，见各自目录 `LICENSE`
+- **Public domain**（SQLite）：保留官方声明，见 `sqlite/SQLITE_PUBLIC_DOMAIN.txt`（无强制署名义务，但仍随源码附上）
 
 ## 逐文件校验和
 
@@ -50,6 +52,9 @@ cd shuangtian/third_party && sha256sum -c CHECKSUMS.sha256
 | `battery/embed.hpp.in` | 4207 | `fcb297b8ed28be5f...` |
 | `battery/embed_impl.cpp` | 5684 | `7b8c9c44b8e1e44e...` |
 | `battery/embed_source.cpp.in` | 1394 | `a26214317ce894c4...` |
+| `sqlite/sqlite3.c` | 9281384 | `c9a0b6829b81d5f1...` |
+| `sqlite/sqlite3.h` | 661946 | `7db44ac3e95c465c...` |
+| `sqlite/sqlite3ext.h` | 38149 | `b184dd1586d93513...` |
 
 ## 来源与裁剪记录
 
@@ -67,4 +72,17 @@ cd shuangtian/third_party && sha256sum -c CHECKSUMS.sha256
 
 - 来源：`https://github.com/batterycenter/embed/archive/refs/tags/v1.2.19.tar.gz`
 - 已修改（附声明）： `embed.hpp.in`, `embed_source.cpp.in`, `embed_impl.cpp`
+
+### SQLite 3.50.2
+
+- 上游发布位：`https://sqlite.org/2025/sqlite-amalgamation-3500200.zip`
+- 本次取数路径：crates.io 的 `libsqlite3-sys 0.35.0` 内 bundled 副本（`sqlite3/`）——
+  该副本即由上述官方 zip 按文件 `unzip -p` 原样导出（见其 `upgrade.sh`），
+  并以版本宏 + `SQLITE_SOURCE_ID` 交叉确认（均为 `3.50.2` / `2025-06-28 …`）。
+  走这条路的原因：本机直连 sqlite.org 超时，而 SQLite 官方不授权镜像作权威分发。
+- **未修改**：`sqlite3.c` / `sqlite3.h` / `sqlite3ext.h` 三件套保持上游原样。
+- 本仓库新增（不改上游）：`sqlite/st_sqlite3_config.h`（编译期开关，经 `st.pkg` 的
+  `c_flags` 以 `-include` 前置）、`sqlite/PROVENANCE.md`（来源与集成点）、
+  `sqlite/SQLITE_PUBLIC_DOMAIN.txt`（上游声明誊录）。
+- 复现与取舍记录：`docs/sqlite_integration.md`。
 

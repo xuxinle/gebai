@@ -106,10 +106,20 @@ inline constexpr Result<Unit> ok();          // 无值成功
 - 每个依赖在 `third_party/SOURCES.md` 登记版本/来源/许可/SHA-256/剔除清单，并可用 `sha256sum -c CHECKSUMS.sha256` 校验；
 - 第三方翻译单元**不套本工程的告警集（`-w`）、不进 PCH、不做 sanitizer 插桩**——
   我们负责自家代码的质量，不负责上游的；混编不影响 ASan 对我们的检测能力（分配器是全局的）；
-- C 源用 `-x c -std=gnu11` 编译（同一个编译器二进制，不引入第二套工具链），标志集与 C++ 分离。
+- C 源用 `-x c -std=gnu11` 编译（同一个编译器二进制，不引入第二套工具链），标志集与 C++ 分离；
+- **上游大块头（SQLite）的编译期配置写在我们自己的头里**（`third_party/sqlite/st_sqlite3_config.h`），
+  清单的 `c_flags` 以 `-include` 前置它——上游文件保持一字未改，
+  「我们动了上游什么」因此是一份可读的 diff（见 `docs/sqlite_integration.md`）。
 
 **脚本能力（QuickJS）的姿态**：默认关闭，须显式开启；不提供任何系统访问
 （`quickjs-libc.c` 已剔除）；内存/栈/时长/转换深度四重配额在运行时层强制。
+
+**数据库（SQLite）的姿态**：源码内置（amalgamation）；**公共头不外泄任何 `sqlite3_*` 符号**
+（`include/st/ext/database.hpp` 只前置声明，实现文件是唯一包含 `sqlite3.h` 的翻译单元）；
+一切失败经 `Result` 返回；错误码 → 框架错误分类的映射只有一处（`map_sqlite_code`）并由测试逐条断言；
+**编译期开关集中在 `third_party/sqlite/st_sqlite3_config.h`**（经 `st.pkg` 的 `c_flags` 以 `-include` 前置）——
+禁止就地修改上游三件套；**不提供运行时加载原生扩展**（`SQLITE_OMIT_LOAD_EXTENSION`），
+与上述脚本层姿态一致：可执行代码入口必须显式设计。见 `docs/sqlite_integration.md`。
 
 **脚本层（`ui::ScriptHost`）的编码约定**：
 

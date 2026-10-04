@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "kind": "static_library",
   "cxx_standard": 20,
-  "include_dirs": ["include", "third_party"],
+  "include_dirs": ["include", "third_party", "third_party/sqlite"],
   "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "gpu", "control", "app", "pkg"],
   "sources": [
     "src/core/*.cpp",
@@ -22,8 +22,8 @@
     "src/ext/*.cpp"
   ],
   "embed": ["src/ui/script_api.js", "src/ui/declarative.js"],
-  "third_party_sources": ["third_party/quickjs/*.c"],
-  "c_flags": ["-std=gnu11"],
+  "third_party_sources": ["third_party/quickjs/*.c", "third_party/sqlite/*.c"],
+  "c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"],
   "tests": ["tests/*_test.cpp"],
   "flags": [
     "-fno-strict-aliasing",
