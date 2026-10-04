@@ -305,6 +305,13 @@ class TextRenderer {
   /// （看 `crisp` 与**墨量直方图的非整数堆积**）与 `tools/fit_reject_probe.cpp`。
   void set_fit_slant(float pixels) noexcept { fit_slant_ = pixels; }
   [[nodiscard]] auto fit_slant() const noexcept -> float { return fit_slant_; }
+  /// 拟合的**最低笔画抽取覆盖率**（见 `GridFitOptions::min_stem_coverage`）。
+  ///
+  /// 低于它就把该字形整体放弃（不产出“吸一半”的混合字形）——量尺：
+  /// `tools/grid_fit_coverage_scan.cpp`（同时看应用率与双峰组占比）。
+  /// 负值 = 用 `GridFitOptions` 的默认值。
+  void set_min_stem_coverage(float coverage) noexcept { min_stem_coverage_ = coverage; }
+  [[nodiscard]] auto min_stem_coverage() const noexcept -> float { return min_stem_coverage_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
   /// 合成加粗的**档位数**（`embolden_steps` 的上限）。
   ///
@@ -360,8 +367,14 @@ class TextRenderer {
     /// `funnel.straight` 小 ⇒ **识别不足**（边大多不是直线，或不够直/不够长）；
     /// `funnel.pairs_failed` 大 ⇒ **配对失败**（宽度超 `max_stem_width` / 跨度不重叠）；
     /// `fit_rejected_stems` 大 ⇒ **预算不足**（调 `max_shift`）。
-    int fit_stems{0};
-    st::text::GridFitResult::Funnel fit_funnel{};
+      int fit_stems{0};
+  /// 本次渲染**是否真的做了拟合**（`GridFitResult::applied`）。
+  ///
+  /// 与 `fit_stems` 的区别很重要：`fit_stems` 是“找到多少条笔画”，而它才是“这个字形
+  /// 最后到底被拟合了没有”——护栏（一未动 / 平移超限 / 覆盖率不足）都会把它置 false
+  /// 而 `fit_stems` 依旧非零。量“应用率”必须用本字段。
+  bool fit_applied{false};
+  st::text::GridFitResult::Funnel fit_funnel{};
     /// 被拒笔画里最坏的单边位移需求（**物理像素**）——`max_shift` 要放到多大才收得下它。
     float fit_worst_rejected_shift{0.0f};
   };
@@ -410,6 +423,8 @@ class TextRenderer {
   /// 拟合的直线边最大横向斜率（物理像素；见 `set_fit_slant`）。
   /// 0 = 用 `GridFitOptions` 的默认值（不在渲染器里另立一份常数）。
   float fit_slant_{0.0f};
+  /// 拟合的最低笔画抽取覆盖率（<0 = 用 `GridFitOptions` 的默认值）。
+  float min_stem_coverage_{-1.0f};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

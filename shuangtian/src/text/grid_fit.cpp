@@ -402,6 +402,28 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
   // 如实报 `applied=false`。曾经这里只看“有没有被标记为 active”，
   // 于是零位移也被当成“已拟合”（调用方无从区分）。
   if (moved == 0) return result;
+
+  // 护栏③：**覆盖率门槛——要么大多数字形笔画都被吸附，要么整个字形放弃**。
+  //
+  // 存在理由：“看着粗细不均”的直接形态是**双峰**——同一字里一部分笔画被吸成满黑、
+  // 另一部分留在原相位（摊成灰边）。根因是**抽取召回有限**。
+  //
+  // ⚠ **当前默认 0（禁用），因为实测覆盖率只有 ~19%**：每字形约 43 条候选边只成 8 对笔画，
+  // 所以任何 ≥0.5 的门槛都会放弃**全部**中文字形（`tools/grid_fit_coverage_scan.cpp`：
+  // 应用率 100% → 0%）。即目前只能二选一：全部拟合（更锐但 24.6% 笔画带双峰）
+  // 或全部不拟合（更均匀但更糊）。本旋钮等**召回改善后**才能起到区分作用。
+  // 代码保留（不是死代码）——它是“同一判据的可用形态”，且量尺已在 (grid_fit_coverage_scan)。
+  if (options.min_stem_coverage > 0.0f) {
+    const int found = result.vertical_stems + result.horizontal_stems;
+    const int tried = result.funnel.straight;
+    if (tried > 0 &&
+        static_cast<float>(found) < options.min_stem_coverage * static_cast<float>(tried)) {
+      result.path = path;
+      result.applied = false;
+      result.coverage_abandoned = true;
+      return result;
+    }
+  }
   // 两个口径都报**物理像素**（与阈值同口径，跨采样倍率可比较）：
   // - `mean_shift`：形变量（逐点 |位移| 均值），只作诊断；
   // - `drift`：整体平移量（有符号均值），护栏用的是它。

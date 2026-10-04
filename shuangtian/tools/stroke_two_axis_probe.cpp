@@ -126,6 +126,15 @@ struct Stats {
   double peak_sd{0.0};
   double span_sd{0.0};
   int samples{0};
+  /// **双峰度**：一组笔画里“实心”（peak ≥ 0.9）与“发灰”（peak ≤ 0.7）**同时存在**的组数。
+  ///
+  /// 为什么要这个量：拟合的召回有限（漏斗实测每字形 43 条候选只成 8 对），
+  /// 于是同一字里**有些笔画被吸成满黑、有些留在原相位**——分布成双峰。
+  /// 双峰正是“看着粗细不均”的直接形态；单一峰（全实心或全半调）观感是**自洽**的。
+  int bimodal_groups{0};
+  int solid_only_groups{0};   ///< 全实心的组（理想态）
+  int soft_only_groups{0};    ///< 全半调的组（自洽但偏糊）
+  int mixed_groups{0};        ///< 既非全实心也非全半调
 };
 
 auto spread(const std::vector<Cross>& values, double Cross::*field) -> double {
@@ -158,6 +167,20 @@ auto spread(const std::vector<Cross>& values, double Cross::*field) -> double {
         variance += d * d;
       }
       stats.span_sd += std::sqrt(variance / static_cast<double>(group.size()));
+      // 双峰判定：同一组里实心与发灰的笔画是否共存——这是“看着粗细不均”的直接形态。
+      // 单一峰（全实心或全半调）观感自洽，双峰才刺眼；因此它比 sd 更贴近观感。
+      int solid = 0;
+      int soft = 0;
+      int mid = 0;
+      for (const Cross& cross : group) {
+        if (cross.peak >= 0.9) ++solid;
+        else if (cross.peak <= 0.7) ++soft;
+        else ++mid;
+      }
+      if (solid > 0 && soft > 0) ++stats.bimodal_groups;
+      else if (soft == 0 && mid == 0) ++stats.solid_only_groups;
+      else if (solid == 0 && mid == 0) ++stats.soft_only_groups;
+      else ++stats.mixed_groups;
       ++stats.samples;
     }
     group.clear();
@@ -241,10 +264,18 @@ auto main(int argc, char** argv) -> int {
               avg(v.peak_sd, h.peak_sd));
     st::print("  几何 span_sd = {:.4f}   ← **同一字里“有的笔画宽、有的窄”**\n",
               avg(v.span_sd, h.span_sd));
+    const int samples = v.samples + h.samples;
+    const int bimodal = v.bimodal_groups + h.bimodal_groups;
+    st::print("  **双峰组 = {} / {}（{:.1f}%）** ← 同组内实心与发灰共存（“看着不均”的直接形态）\n",
+              bimodal, samples, samples ? 100.0 * bimodal / samples : 0.0);
+    st::print("    全实心 {} 组 · 全半调 {} 组 · 混合 {} 组\n",
+              v.solid_only_groups + h.solid_only_groups,
+              v.soft_only_groups + h.soft_only_groups, v.mixed_groups + h.mixed_groups);
   }
   st::print("\n判读：哪个 _sd 大，用户看到的“不均匀”就主要是哪一路。\n"
             "  span_sd 大 ⇒ 几何（轮廓相位）——该动的是字形/落点；\n"
-            "  peak_sd 大 ⇒ 墨色（覆盖率达不满）——该动的是覆盖率映射。\n"
+            "  peak_sd 大 ⇒ 墨色（覆盖率达不满）——该动的是覆盖率映射；\n"
+            "  **双峰组占比高 ⇒ 部分笔画被处理、部分原样**（拟合召回不足的典型形态）；\n"
             "  两者都小而观感仍不均匀 ⇒ 问题在**字间**（不同字形的相位差），不在字内。\n");
   return 0;
 }

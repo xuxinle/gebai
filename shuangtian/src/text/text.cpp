@@ -764,6 +764,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // `fit_slant_ == 0` = 不覆盖，用头文件的默认值（不在两处各写一份常数）。
     st::text::GridFitOptions effective_options = fit_options;
     if (fit_slant_ > 0.0f) effective_options.max_edge_slant = fit_slant_;
+    if (min_stem_coverage_ >= 0.0f) effective_options.min_stem_coverage = min_stem_coverage_;
     const st::text::GridFitResult fit_result = st::text::grid_fit(local_unfitted, effective_options);
     const raster::Path& fitted = fit_result.path;
     // 把“本可以对齐却没对”的漏网报出来（见 `GlyphBitmap::fit_rejected_stems`）：
@@ -771,6 +772,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     bitmap->fit_rejected_stems = fit_result.rejected_stems;
     bitmap->fit_worst_rejected_shift = fit_result.worst_rejected_shift;
     bitmap->fit_stems = fit_result.vertical_stems + fit_result.horizontal_stems;
+    bitmap->fit_applied = fit_result.applied;
     bitmap->fit_funnel = fit_result.funnel;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
       const int out_width = std::max(1, width / supersample);
