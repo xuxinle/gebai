@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- 本文件由 `tools/gen_text_ab.py` 生成——**不要手改**（改了会在下次生成时丢失，
+     而且两侧会漂移，漂移会被误读成"渲染差异"）。
+     配套：`tools/text_ab_page_probe.cpp`（含同一张行表）与 `tools/text_ab_diff.py`。 -->
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: #FFFFFF; }
+  /* 高度必须显式给：子元素全是 `position:absolute`、不撑开父容器，
+     而 `overflow:hidden` 会按父容器**实际盒子**裁剪——body 高度 0 时整页被裁空
+     （实测：截图全白、DOM 却完好）。 */
+  body { position: relative; width: 700px; height: 1024px; overflow: hidden; }
+  .t { position: absolute; left: 4px; white-space: nowrap; line-height: 1; }
+</style>
+<div class="t" id="r00" style="top:4px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">中文标题：组件画廊·资源管理器</div>
+<div class="t" id="r01" style="top:40px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">ABC abc 0123 Il1| O0 ꞁ</div>
+<div class="t" id="r02" style="top:76px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">标点，。、；：？！“”‘’（）《》—…</div>
+<div class="t" id="r03" style="top:112px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">符号 →←↑↓ ✓✗ ●○■□ ★☆ §¶†‡ °±×÷ ≠≤≥ ∞≈</div>
+<div class="t" id="r04" style="top:148px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">路径 src/raster/renderer.cpp:128</div>
+<div class="t" id="r05" style="top:184px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">全角ＡＢＣ１２３　全角空格</div>
+<div class="t" id="r06" style="top:220px; font-size:12px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">font_xs 12 · 辅助信息 · 版本号 v0.1.0</div>
+<div class="t" id="r07" style="top:256px; font-size:13px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">font_sm 13 · 次要说明文字</div>
+<div class="t" id="r08" style="top:292px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">font_base 15 · 正文默认字号</div>
+<div class="t" id="r09" style="top:328px; font-size:17px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">font_lg 17 · 大号正文</div>
+<div class="t" id="r10" style="top:364px; font-size:20px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">font_xl 20 · 小节标题</div>
+<div class="t" id="r11" style="top:400px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">text #0F172A 正文</div>
+<div class="t" id="r12" style="top:436px; font-size:15px; color:#56647C; font-family:'Segoe UI','Microsoft YaHei'">text_muted #56647C 次要</div>
+<div class="t" id="r13" style="top:472px; font-size:15px; color:#66768C; font-family:'Segoe UI','Microsoft YaHei'">text_faint #66768C 辅助</div>
+<div class="t" id="r14" style="top:508px; font-size:15px; color:#2563EB; font-family:'Segoe UI','Microsoft YaHei'">primary #2563EB 主色</div>
+<div class="t" id="r15" style="top:544px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">常规 霜天组件画廊 Regular 15px</div>
+<div class="t" id="r16" style="top:580px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'; font-weight:700">粗体 霜天组件画廊 Bold 15px</div>
+<div class="t" id="r17" style="top:616px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'; font-weight:600">半粗 霜天组件画廊 SemiBold 15px</div>
+<div class="t" id="r18" style="top:652px; font-size:13.5px; color:#0F172A; font-family:'Cascadia Mono',Consolas,monospace">const auto polylines = p</div>
+<div class="t" id="r19" style="top:688px; font-size:13.5px; color:#0F172A; font-family:'Cascadia Mono',Consolas,monospace">namespace st::raster { return a->b; }</div>
+<div class="t" id="r20" style="top:724px; font-size:13.5px; color:#0F172A; font-family:'Cascadia Mono',Consolas,monospace">0123456789 => (){}[];: iIl1|0O</div>
+<div class="t" id="r21" style="top:760px; font-size:13.5px; color:#0F172A; font-family:'Cascadia Mono',Consolas,monospace">中文注释必须能显示</div>
+<div class="t" id="r22" style="top:796px; font-size:11px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">11px 最小字号 · 菜单项 · 状态栏</div>
+<div class="t" id="r23" style="top:832px; font-size:12px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">12px 小字 · 混合 m4 S2 W3 · 日月水火</div>
+<div class="t" id="r24" style="top:868px; font-size:13px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">13px 小字 · iliI1l 边界 · 明暗ab</div>
+<div class="t" id="r25" style="top:904px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">AVATAR To Wa fi fl ffi 连字测试</div>
+<div class="t" id="r26" style="top:940px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">行高测试第一行：重影是否出现</div>
+<div class="t" id="r27" style="top:976px; font-size:15px; color:#0F172A; font-family:'Segoe UI','Microsoft YaHei'">行高测试第二行：重影是否出现</div>

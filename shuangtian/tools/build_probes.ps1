@@ -20,7 +20,8 @@ $probes = @(
   'text_sharpness_probe', 'stem_phase_probe', 'text_quality_probe', 'text_ink_conserve',
   'text_fit_by_size', 'fit_shift_probe', 'text_weight_probe', 'text_phase_probe',
   'lcd_compare', 'grid_fit_report', 'text_weight_cost', 'text_ab_probe', 'weight_spread_probe', 'dpi_raster_probe', 'ui_text_probe',
-  'grid_fit_sampling_diag', 'fit_apply_diag', 'glyph_phase_probe', 'stroke_uniformity_probe', 'stroke_two_axis_probe', 'fit_reject_probe', 'fit_recall_probe'
+  'grid_fit_sampling_diag', 'fit_apply_diag', 'glyph_phase_probe', 'stroke_uniformity_probe', 'stroke_two_axis_probe', 'fit_reject_probe', 'fit_recall_probe',
+  'text_ab_page_probe'
 )
 if ($Only) { $probes = @($Only) }
 
@@ -29,7 +30,9 @@ foreach ($name in $probes) {
   if (-not (Test-Path $source)) { Write-Host "-- 跳过（无源文件）: $name"; continue }
   $exe = Join-Path $outDir "$name.exe"
   if (Test-Path $exe) { Remove-Item $exe -Force -ErrorAction SilentlyContinue }
-  $flags = @('-std=c++20', '-O1', '-Iinclude', '-Ithird_party', '-Ithird_party/sqlite')
+  # `-Itools`：`text_ab_page_probe` 要 `#include "text_ab_page_rows.inc"`（与 HTML 同源的行表，
+  # 由 `tools/gen_text_ab.py` 生成）。
+  $flags = @('-std=c++20', '-O1', '-Iinclude', '-Itools', '-Ithird_party', '-Ithird_party/sqlite')
   $log = & g++ @flags $source @objs '-o' $exe '-lws2_32' '-lwinpthread' 2>&1
   if ($LASTEXITCODE -ne 0) {
     Write-Host "== 失败: $name" -ForegroundColor Red

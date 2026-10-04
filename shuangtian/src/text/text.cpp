@@ -116,6 +116,19 @@ struct FontCandidate {
        }) {
     push(path, true);
   }
+  // **符号回退**：拉丁与 CJK 字体都缺的几何/箭头/勾叉符号（✓ U+2713、✗ U+2717
+  // 这类），在 Windows 上只有 Segoe UI Symbol 覆盖。
+  //
+  // 为什么必须显式加（2026-10-04 与浏览器逐像素对照时发现）：缺的回退表现为
+  // **该字符整块空白**——界面里写 "✓ 已通过" 只见「已通过」，而浏览器能显示。
+  // 单独放**最后**：它是符号字体、字面风格与正文不同，只应在别的字体都没有时才接管。
+  for (const auto* path : {
+           "C:/Windows/Fonts/seguisym.ttf",
+           "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+           "/System/Library/Fonts/Apple Symbols.ttf",
+       }) {
+    push(path, false);
+  }
   return candidates;
 }
 
