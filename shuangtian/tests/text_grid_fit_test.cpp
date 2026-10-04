@@ -286,9 +286,15 @@ ST_TEST(grid_fit_guard_refuses_excessive_shift) {
   ST_CHECK(std::fabs(points[1].x - 2.0f) < 0.01f);
   ST_CHECK(std::fabs((points[0].x + points[1].x) * 0.5f - 1.0f) < 0.01f);
 
-  // 收紧 max_shift 到 0.1 → 必须**拒绝**（保持原样）
+  // 护栏的**可配置性**：关掉量化后，两条边各自吸到最近网格（各 0.5），
+  // 此时 max_shift 收紧到 0.1 就必须**拒绝**（保持原样）。
+  //
+  // 注意：量化开着时预算会被抬到 `max_shift + grid/2`（量化把宽度取整时
+  // 远边要额外叠上半像素，几何必需）——那时 0.1 的 max_shift 不足以拒绝
+  // 位移 0.5 的吸附。所以这个反例要在 `quantize_width = false` 下测。
   GridFitOptions strict;
   strict.mode = GridFitMode::Normal;
+  strict.quantize_width = false;
   strict.max_shift = 0.1f;
   const auto refused = st::text::grid_fit(original, strict);
   ST_CHECK(!refused.applied);

@@ -110,8 +110,9 @@ auto NullTextPort::measure_width(std::string_view utf8, float size, text::FontRo
 auto NullTextPort::line_height(float size) const -> float { return size * 1.45f; }
 
 void NullTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-                        math::Color color, text::FontRole role) const {
-  (void)role;  // 无字体环境：角色无意义
+                        math::Color color, text::FontRole role, float embolden) const {
+  (void)role;  // 无字体环境：角色与字重都无意义
+  (void)embolden;
   (void)canvas;
   (void)utf8;
   (void)origin;
@@ -717,7 +718,15 @@ auto Element::paint_text(const RenderContext& context, raster::Surface& canvas, 
   }
   const float height = port.line_height(size);
   const float y = box.y + (box.height - height) * 0.5f;
-  port.draw(canvas, clipped, math::Point{x, y}, size, style_.color);
+  // **字重落像素**：框架没有独立字重的字体面，非 Regular 档用合成加粗（沿水平外扩）。
+  // 不读 `style_.font_weight` 时，界面里所有 SemiBold/Bold 都与 Regular 逐像素相同——
+  // 「字重」就只是个落不到画面上的属性。
+  //
+  // 端口只持有物理口径的语义量（半径），采样格步数由渲染器按自己的模式换算。
+  const float physical = size * canvas.device_scale();
+  const float embolden = embolden_radius(physical, style_.font_weight);
+  port.draw(canvas, clipped, math::Point{x, y}, size, style_.color, text::FontRole::Proportional,
+            embolden);
 }
 
 void Element::paint(const RenderContext& context, raster::Surface& canvas) const {

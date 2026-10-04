@@ -29,6 +29,7 @@
 #include "st/core/time.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/scroll.hpp"
+#include "st/ui/components/window_frame.hpp"   // 自绘外壳（标题栏 + 内容槽 + 缩放边缘）
 #include "st/ui/dsl.hpp"   // 声明式页的宿主（`dsl::mount_into`）
 #include "st/ui/icon.hpp"
 
@@ -66,6 +67,8 @@ struct Options {
   /// 渲染基准帧数（`--bench N`）：每帧**强制全量重绘**并报告分阶段分位耗时。
   std::uint32_t bench{0};
   int max_ms{0};
+  /// 请求系统标题栏/边框（默认关：窗框一律自绘，见 `CONVENTIONS.md` §10 第 7 条）。
+  bool decorations{false};
 };
 
 [[nodiscard]] auto parse_options(int argc, char** argv) -> Options {
@@ -83,6 +86,7 @@ struct Options {
     else if (raw == "--scale") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--dpi") options.scale = static_cast<float>(std::stod(next("1")));
     else if (raw == "--theme") options.theme = next("light");
+    else if (raw == "--decorations") options.decorations = true;
     else if (raw == "--control-port") options.control_port = static_cast<std::uint16_t>(std::stoi(next("0")));
     else if (raw == "--control-file") options.control_file = next("");
     else if (raw == "--shots") options.shots = next("");
@@ -198,25 +202,34 @@ auto run_app(int argc, char** argv) -> int {
   auto* root_ptr = &app.root();
 
   // —— 根布局 ——
-  auto root_panel = std::make_unique<Panel>(FlexDirection::Column);
-  root_panel->set_id("app-root");
-
-  // 顶部栏
-  auto top_bar = std::make_unique<Panel>(FlexDirection::Row);
-  top_bar->set_id("top-bar");
-  top_bar->style().height = 60.0f;
-  top_bar->style().padding = Insets{24.0f, 0.0f, 24.0f, 0.0f};
-  top_bar->style().gap = 10.0f;
-  top_bar->style().align_items = Align::Center;
-  auto brand_icon = std::make_unique<IconView>("sparkles", 22.0f);
-  brand_icon->set_tone(Tone::Primary);
-  top_bar->add_child(std::move(brand_icon));
-  auto title = std::make_unique<Heading>("霜天 · 组件画廊", 3);
-  title->set_id("app-title");
-  top_bar->add_child(std::move(title));
-  auto top_spacer = std::make_unique<Panel>(FlexDirection::Row);
-  top_spacer->style().grow = true;
-  top_bar->add_child(std::move(top_spacer));
+  //
+  // 外壳用 `WindowFrame`（**组件化的窗口**：标题栏 + 内容槽 + 八向缩放边缘）。
+  // 为什么不再手搭一条"顶部栏"：
+  //   ① 窗框是**框架**该提供的东西（`CONVENTIONS.md` §10 第 7 条：装饰一律自绘）；
+  //   ② 无边框窗口**只能**靠窗框提供拖动/缩放区域——手搭 shell 时窗口拖不动；
+  //   ③ 主题/DPI/截图这些控件本来就长在标题栏那一行（VSCode / 浏览器同构），
+  //      挂进标题栏的尾部槽即可，不必再叠一条 60px 的横条。
+  auto frame = std::make_unique<st::ui::WindowFrame>("概览");
+  frame->set_id("app-root");                       // 兼容钩子：原来的根 id 保持在根元素上
+  auto root_panel = std::make_unique<Panel>(FlexDirection::Column);   // 内容槽内的主体
+  root_panel->set_id("content-root");
+  // 内容主体**铺满内容槽**：不声明 grow 时它按自身测量高排（导航 + 页 + 状态栏），
+  // 而窗框的内容区是"扣掉标题栏之后的那一块"，主体本就该占满它。
+  root_panel->style().grow = true;
+  st::ui::WindowFrame* frame_ptr = frame.get();
+  if (frame_ptr->title_bar() != nullptr) {
+    frame_ptr->title_bar()->set_id("titlebar");
+    frame_ptr->title_bar()->set_icon("sparkles");
+    frame_ptr->title_bar()->set_window_control(&app);
+  }
+  // 品牌：挂标题栏**前部槽**（图标之后、标题之前）——与真实应用同一形态：
+  //   `[图标][霜天 · 组件画廊][……][主题 DPI 截图 | — □ ×]`
+  // 控制通道兼容钩子 `#app-title` 就落在这块品牌标题上。
+  // 而标题栏自身的标题文本留作"当前位置"（切页时更新，与 VSCode 显示当前文件名同构）。
+  auto brand = std::make_unique<Heading>("霜天 · 组件画廊", 3);
+  brand->set_id("app-title");
+  brand->style().font_size = 14.0f;
+  if (frame_ptr->title_bar() != nullptr) frame_ptr->title_bar()->add_leading(std::move(brand));
 
   auto theme_button = std::make_unique<Button>("暗色", Button::Variant::Ghost, Button::Size::Small);
   theme_button->set_id("theme-toggle");
@@ -231,16 +244,21 @@ auto run_app(int argc, char** argv) -> int {
   shot_button->set_icon("image");
   auto* shot_button_ptr = shot_button.get();
 
-  top_bar->add_child(std::move(theme_button));
-  top_bar->add_child(std::move(scale_button));
-  top_bar->add_child(std::move(shot_button));
-  root_panel->add_child(std::move(top_bar));
+  // 三个按钮进标题栏尾部槽（顺序：主题 · DPI · 截图，与控制按钮同排不重叠）。
+  if (frame_ptr->title_bar() != nullptr) {
+    frame_ptr->title_bar()->add_trailing(std::move(theme_button));
+    frame_ptr->title_bar()->add_trailing(std::move(scale_button));
+    frame_ptr->title_bar()->add_trailing(std::move(shot_button));
+  }
+
+  // —— 内容槽：主体（导航 + 页 + 状态栏）——
+  // 子节点声明进**内容区**：`WindowFrame::add_child` 已按此语义转发，
+  // 所以这里照旧写 `root_panel->add_child(...)`，但最后把 root_panel 挂到窗框内容槽。
 
   // 主体
   auto body = std::make_unique<Panel>(FlexDirection::Row);
   body->set_id("body");
   body->style().grow = true;
-
   auto sidebar = std::make_unique<Panel>(FlexDirection::Column);
   sidebar->set_id("sidebar");
   sidebar->style().width = 224.0f;
@@ -297,6 +315,9 @@ auto run_app(int argc, char** argv) -> int {
     root_ptr->add_overlay(std::move(overlay), UiRoot::OverlayLayout::FillViewport);
   };
   hooks.remove_overlay = [root_ptr](Element* overlay) { root_ptr->remove_overlay(overlay); };
+  // 窗框的窗口动作出口（页面把它注入 `ui::TitleBar`）。
+  // ⚠ 同样必须在**建页之前**接上：页面按值捕获 `PageHooks`（与 `set_status` 同一个坑）。
+  hooks.window_control = &app;
   hooks.register_runtime_field =
       [&runtime_fields](std::string_view field, std::function<void(std::string)> setter) {
         runtime_fields.emplace_back(std::string(field), std::move(setter));
@@ -382,6 +403,11 @@ auto run_app(int argc, char** argv) -> int {
       page_ptrs[each]->set_visible(each == index);
       nav_ptrs[each]->set_variant(each == index ? Button::Variant::Soft : Button::Variant::Ghost);
     }
+    // 窗框标题跟随当前页：与编辑器把当前文件名写进标题栏同构
+    // （标题栏不只是装饰——它回答"我现在在哪"）。
+    if (frame_ptr != nullptr && frame_ptr->title_bar() != nullptr) {
+      frame_ptr->title_bar()->set_title(std::string(specs[index].label));
+    }
     // 滚动复位：否则切到更短的页面会停在"上一页的中段"，看起来像内容缺失
     scroll_ptr->scroll_to(0.0f);
     // 清焦点：焦点元素若随页面被隐藏，键盘事件仍会送到它（"看不见的输入框在收字"）
@@ -430,7 +456,12 @@ auto run_app(int argc, char** argv) -> int {
   };
 
   // —— 启动 ——
-  app.set_content(std::move(root_panel));
+  //
+  // 窗框接管根内容（**单根**）：`WindowFrame` 自带标题栏与内容槽，
+  // 主体（`root_panel`）进内容槽。窗口动作端口已在上面注入（`set_window_control(&app)`），
+  // 三个控制按钮与八向边缘条因此都接了真实后端。
+  frame->content()->add_child(std::move(root_panel));
+  app.set_content(std::move(frame));
   if (auto status = app.start(); !status) {
     std::fprintf(stderr, "启动失败: %s\n", status.error().to_string().c_str());
     return 1;

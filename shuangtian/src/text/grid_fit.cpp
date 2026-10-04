@@ -291,6 +291,7 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
         //（实测拉丁 @16px 墨量 +8.7%，就是这一步的产物）。
         // 量化宽度后，**同类笔画的宽度恒等**，另一侧也跟着落在网格上（整数宽）。
         const float width_px = (stem.edge_hi - stem.edge_lo) / grid;
+        const bool quantize = options.quantize_width;
         const float quantized = std::max(1.0f, std::round(width_px)) * grid;
         // 锚点取**移动更小**的一侧：吸住它，另一侧由量化后的宽度推出
         // （整数宽度 ⇒ 两边都在网格上）。选更小的一侧是为了少动字形。
@@ -298,19 +299,32 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
         const float hi_anchor = snap_target(stem.edge_hi, grid);
         const float lo_anchor_delta = lo_anchor - stem.edge_lo;
         const float hi_anchor_delta = hi_anchor - stem.edge_hi;
-        float lo_delta = 0.0f;
-        float hi_delta = 0.0f;
-        if (std::abs(lo_anchor_delta) <= std::abs(hi_anchor_delta)) {
-          lo_delta = lo_anchor_delta;
-          hi_delta = (stem.edge_lo + lo_delta + quantized) - stem.edge_hi;
-        } else {
-          hi_delta = hi_anchor_delta;
-          lo_delta = (stem.edge_hi + hi_delta - quantized) - stem.edge_lo;
+        float lo_delta = lo_anchor_delta;
+        float hi_delta = hi_anchor_delta;
+        if (quantize) {
+          if (std::abs(lo_anchor_delta) <= std::abs(hi_anchor_delta)) {
+            hi_delta = (stem.edge_lo + lo_delta + quantized) - stem.edge_hi;
+          } else {
+            lo_delta = (stem.edge_hi + hi_delta - quantized) - stem.edge_lo;
+          }
         }
-        if (std::abs(lo_delta) <= max_shift) {
+        // 护栏的**预算**：量化把宽度取到整数像素时，远边要额外叠上取整量，
+        // 几何上最坏就是半个像素（`round` 的最大偏差）——所以量化时预算必须
+        // 至少是 `max_shift + grid/2`，否则会出现「近边通过、远边被拒」：
+        // 笔画被平移了却没被改宽，既拿不到网格对齐又把字形推歪
+        //（实测 ss=2：CJK 13.5px 半覆盖像素 310 / 中间调占比 1.04；
+        //  预算放到 1.0 后是 171 / 0.549）。
+        //
+        // 未量化时不加：那时两条边各自吸到最近网格（位移 ≤ grid/2，
+        // 已在 `max_shift` 范围内），加宽预算只会白改墨量。
+        const float budget = quantize ? max_shift + grid * 0.5f : max_shift;
+        // 两侧要么**一起动**、要么都不动。
+        //
+        // 为什么不能“各自独立判定”：宽度量化必然让两侧的位移不等。若近边通过、
+        // 远边被拒，这条笔画就只被**平移**而没被改宽——既拿不到网格对齐，
+        // 又把字形推了一点，净效果是更糊。
+        if (std::abs(lo_delta) <= budget && std::abs(hi_delta) <= budget) {
           for (const std::size_t point : stem.lo_points) record(shifts, point, lo_delta);
-        }
-        if (std::abs(hi_delta) <= max_shift) {
           for (const std::size_t point : stem.hi_points) record(shifts, point, hi_delta);
         }
       }

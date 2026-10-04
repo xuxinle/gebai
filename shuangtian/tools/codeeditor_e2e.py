@@ -58,6 +58,9 @@ class Client:
     def text(self, element_id):
         return self.ok("get", {"id": element_id})["props"].get("text", "")
 
+    def title(self, element_id):
+        return self.ok("get", {"id": element_id})["props"].get("title", "")
+
     def click_at(self, x, y):
         self.ok("input.mouse", {"kind": "click", "x": x, "y": y, "button": 1})
         time.sleep(0.45)          # 等下一帧重组
@@ -109,7 +112,12 @@ def main():
         # —— 2. 初始标签与编辑器 ——
         check(client.ok("get", {"id": "editor"})["props"].get("language") == "cpp",
               "初始语言不是 cpp")
-        check("renderer.cpp" in client.text("title-text"), "标题栏未显示初始文件")
+        # 标题栏已换成自绘窗框组件（`ui::TitleBar`，id 仍为 `#titlebar`）。
+        # ⚠ 读标题**必须查属性的 `title`，不能查 `text`**：`get` 的 `props` 里 `text`
+        # 只在字段非空时写入，而组件声明的属性名是 `title`（`text` 是它的同义名——
+        # `get_property` 认，但快照按 `property_names()` 逐个写）。
+        # 旧写法查的是 `#title-text` 那个 Text 子元素——它已随窗框组件退役。
+        check("renderer.cpp" in client.title("titlebar"), "标题栏未显示初始文件")
         print("[2] 初始标签 renderer.cpp 已打开（语言 cpp）")
 
         # —— 3. 打开第二个文件（资源管理器按钮）——
@@ -135,7 +143,7 @@ def main():
         client.ok("invoke", {"id": "editor", "action": "focus"})
         client.ok("input.text", {"id": "editor", "text": "ADDED_TOKEN"})
         check("ADDED_TOKEN" in client.text("editor"), "编辑器未收到输入")
-        check(client.text("title-text").startswith("●"), "脏标记未出现在标题栏")
+        check(client.title("titlebar").startswith("●"), "脏标记未出现在标题栏")
         client.ok("invoke", {"id": "editor", "action": "undo"})
         time.sleep(0.3)
         check("ADDED_TOKEN" not in client.text("editor"), "撤销未回退输入")

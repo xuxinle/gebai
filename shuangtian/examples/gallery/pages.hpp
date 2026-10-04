@@ -19,6 +19,7 @@
 
 #include "st/math/geometry.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/window_control.hpp"  // 窗框动作出口（`ui::WindowControl` 端口）
 
 namespace st::ui::dsl {
 class Component;   // 声明式组件基类（完整定义在 st/ui/dsl.hpp；头文件只用到指针）
@@ -45,6 +46,11 @@ struct PageHooks {
   /// 应用也不必知道每个值被画在哪一个控件上——两边各自只做自己知道的事。
   std::function<void(std::string_view field, std::function<void(std::string)> setter)>
       register_runtime_field{};
+  /// 窗口控制端口（自绘窗框的动作出口；无窗口时为空）。
+  ///
+  /// 为什么走 hooks 而不是让页面自己去找：与 `add_overlay` 同理——页面不该知道
+  /// `Application`/后端的存在（依赖方向），而"窗口动作"只有应用側做得了。
+  st::ui::WindowControl* window_control{nullptr};
 };
 
 /// 页面清单（导航、切页、自动验证共用同一份，避免"两处各写一遍"走偏）。

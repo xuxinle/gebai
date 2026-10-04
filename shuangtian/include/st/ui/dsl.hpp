@@ -37,7 +37,9 @@
 #include "st/ui/ui_root.hpp"
 
 namespace st::ui {
-class MenuBar;   // 菜单栏（组件头在实现文件；声明式这里只用引用）
+class MenuBar;      // 菜单栏（组件头在实现文件；声明式这里只用引用）
+class TitleBar;     // 自绘标题栏（`title_bar()` 包装用）
+class WindowFrame;  // 窗框容器（`window_frame()` 包装用）
 }
 
 namespace st::ui::dsl {
@@ -493,6 +495,19 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 /// 卡片容器。
 [[nodiscard]] auto card(Composer& c, const BoxProps& props, std::function<void()> children)
     -> Element&;
+/// 窗框容器（自绘窗框的**声明式入口**）：标题栏置顶 + 内容槽 + 八向缩放边缘。
+///
+/// 它是把"无系统窗框的窗口"写成一行的基础：应用外壳只声明一次，而边缘判定
+/// 与平台后端同源（见 `st/ui/components/window_frame.hpp`）。
+/// 窗口动作端口经 `configure` 注入（`WindowFrame::set_window_control`），与手搭同一套。
+/// `children()` 声明在**内容槽**里（不是标题栏——标题栏用 `configure` 里的 `add_trailing`）。
+[[nodiscard]] auto window_frame(Composer& c, std::string title,
+                                std::function<void(WindowFrame&)> configure, const BoxProps& props,
+                                std::function<void()> children) -> Element&;
+/// 自绘标题栏（独立使用时用；窗框内置已带一根，通常不需要单独声明）。
+[[nodiscard]] auto title_bar(Composer& c, std::string title,
+                             std::function<void(TitleBar&)> configure = {},
+                             const BoxProps& props = {}) -> Element&;
 /// 弹性/固定占位。
 ///
 /// - `size > 0`：固定尺寸的空块。

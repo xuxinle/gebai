@@ -13,6 +13,7 @@
 #include "st/core/error.hpp"
 #include "st/shell/shell.hpp"
 #include "st/ui/ui_root.hpp"
+#include "st/ui/window_control.hpp"
 
 namespace st::app {
 
@@ -39,6 +40,10 @@ struct AppOptions {
   /// 为什么不硬编码 GPU 优先：渲染器优劣与机器强相关（GPU 弱、驱动差、或呈现路径
   /// 仍需 CPU 拷贝时，软件反而更快）。`auto` 的职责是**测出来**，而不是猜。
   std::string renderer{"auto"};
+  /// 是否让窗口系统画标题栏/边框（默认 `false` = 自绘，见 `CONVENTIONS.md` §10 第 7 条）。
+  bool decorations{false};
+  /// 是否可缩放（拖边改尺寸）。
+  bool resizable{true};
   /// 文字抗锯齿形态：`auto` / `on`（亚像素）/ `off`（灰度）。
   ///
   /// 默认**亚像素（LCD）**，且**内置通道（无头）与桌面窗口同一默认**——
@@ -72,8 +77,14 @@ struct AppOptions {
   double frame_budget_ms{16.0};       ///< 帧间隔目标
 };
 
-/// 应用：实现控制通道所需的宿主能力（`control::Host`）。
-class Application final : public control::Host {
+/// 应用：实现控制通道所需的宿主能力（`control::Host`）+ 自绘窗框所需的窗口控制
+/// （`ui::WindowControl`）。
+///
+/// 为什么两个接口都在这一层收口：`control` 与 `ui` 都不该认识 `shell::Backend`
+/// （依赖方向），而平台差异只能住 `platform_*`（`CONVENTIONS.md` §10 第 1 条）——
+/// `Application` 本来就同时认识后端与 UI 树，把窗口动作在这里"折"一次，
+/// 应用代码与组件就都不需要平台分支。
+class Application final : public control::Host, public ui::WindowControl {
  public:
   Application(std::string name, std::string version, AppOptions options = {});
   ~Application() override;
@@ -122,6 +133,15 @@ class Application final : public control::Host {
   [[nodiscard]] auto log_lines(std::size_t limit) const -> std::vector<std::string> override;
   /// 脚本宿主（`control::Host` 接口）：未启用脚本能力时为 `nullptr`。
   [[nodiscard]] auto script() -> ui::ScriptHost* override;
+
+  // —— ui::WindowControl（自绘窗框的动作出口；实现见 app.cpp，全是对后端的转发）——
+  [[nodiscard]] auto window_control_available() const -> bool override;
+  [[nodiscard]] auto window_minimize() -> bool override;
+  [[nodiscard]] auto window_toggle_maximize() -> bool override;
+  [[nodiscard]] auto window_request_close() -> bool override;
+  [[nodiscard]] auto window_begin_move() -> bool override;
+  [[nodiscard]] auto window_begin_resize(ui::WindowEdge edge) -> bool override;
+  [[nodiscard]] auto window_maximized() const -> bool override;
 
   /// 单帧推进（自检与外部驱动用）：布局 → 绘制 → present。
   void render_frame();

@@ -1,5 +1,8 @@
 #include "st/app/text_port.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace st::app {
 
 auto RendererTextPort::measure(std::string_view utf8, float size) const -> math::Size {
@@ -16,8 +19,11 @@ auto RendererTextPort::line_height(float size) const -> float {
 }
 
 void RendererTextPort::draw(raster::Surface& canvas, std::string_view utf8, math::Point origin,
-                            float size, math::Color color, text::FontRole role) const {
-  (void)renderer_.draw(canvas, utf8, origin, size, color, role);
+                            float size, math::Color color, text::FontRole role,
+                            float embolden) const {
+  // 字重已由 `Element::paint_text` 换算成**物理像素半径**，采样格步数由渲染器
+  // 按自己的模式换算（端口无从得知采样格）——此处只负责转发。
+  (void)renderer_.draw(canvas, utf8, origin, size, color, role, embolden);
 }
 
 auto RendererTextPort::ellipsize(std::string_view utf8, float size, float max_width) const

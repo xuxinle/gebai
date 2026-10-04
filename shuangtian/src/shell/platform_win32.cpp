@@ -32,11 +32,21 @@
 #include "st/raster/canvas.hpp"
 #include "st/raster/gpu.hpp"
 #include "st/shell/shell.hpp"
+#include "st/ui/window_control.hpp"
 
 namespace st::shell {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"ShuangtianWindow";
+
+/// 自绘窗框的缩放命中带宽与最小客户区尺寸（**逻辑**像素；物理尺寸 = × scale）。
+///
+/// 最小尺寸取值的依据：标题栏要放得下"图标 + 标题 + 三个控制按钮"（约 140px），
+/// 再留出一点正文宽度。低于它时自绘窗框会被裁掉一截，而**窗口一旦比内容还小就再也"
+/// 拖不回来"**（边缘落在已画区域之外），必须靠最小尺寸护栏堵住。
+constexpr float kResizeBorder = 6.0f;
+constexpr float kMinClientWidth = 240.0f;
+constexpr float kMinClientHeight = 120.0f;
 
 [[nodiscard]] auto to_wide(std::string_view utf8) -> std::wstring {
   if (utf8.empty()) return {};
@@ -58,6 +68,37 @@ constexpr wchar_t kWindowClass[] = L"ShuangtianWindow";
                         nullptr, nullptr);
   return out;
 }
+
+/// `WM_NCHITTEST` 的 `lparam` → **未缩放的屏幕像素**坐标。
+///
+/// 为什么要手拆而不是用 `GET_X_LPARAM` 宏：那两个宏在 `windowsx.h` 里，带不进 `-Wpedantic`；
+/// 而 `LOWORD/HIWORD` 给的是 16 位无符号，直接赋给 `LONG` 会把负坐标（副显示器在主屏左侧）
+/// 变成 +65000——于是"在左副屏上点窗口"会落到屏幕外，命中全是 `HTCLIENT`。
+[[nodiscard]] constexpr auto hit_point(LPARAM lparam) noexcept -> math::Point {
+  const auto raw_x = static_cast<std::int16_t>(static_cast<std::uint16_t>(lparam & 0xFFFFU));
+  const auto raw_y =
+      static_cast<std::int16_t>(static_cast<std::uint16_t>((lparam >> 16U) & 0xFFFFU));
+  return math::Point{static_cast<float>(raw_x), static_cast<float>(raw_y)};
+}
+
+/// 窗口边缘/角落（自绘窗框的缩放命中区）——**定义在 `st/ui/window_control.hpp`**。
+///
+/// 为什么不在这里另立一个：判定规则必须只有一份，而**两端都要用它**——后端拿它决定
+/// `HT*` 命中码，UI 层（`ui::TitleBar`）拿它决定"这次按下是拖动还是缩放"。依赖方向
+/// 决定了落点：`shell.hpp` 已经包含 ui 头，反向包含会成环，所以枚举与纯函数
+/// （`ui::WindowEdge` / `ui::resize_edge_at`）住 ui 层，后端包含它并用它。
+using ui::WindowEdge;
+
+/// 缩放命中带（逻辑像素）：与 UI 层同一常量（`ui::kWindowResizeBorder`）。
+///
+/// 自绘窗框的边缘没有系统边框可"看着抓"——太窄会让它变得难用（实测手感阈值 ~6px）；
+/// 两端取同一个值，"判定只有一份"才算落实。
+constexpr float k_resize_border = ui::kWindowResizeBorder;
+/// 最小客户区尺寸（逻辑像素）：窗框要放得下"图标 + 标题 + 三个控制按钮"（约 140px），
+/// 再留出正文宽度。低于它时窗框会被裁掉一截，而**窗口一旦比内容还小就再也拖不回来**
+/// （边缘落在已画区域之外）——必须靠最小尺寸护栏堵住。
+constexpr float k_min_client_width = 240.0f;
+constexpr float k_min_client_height = 120.0f;
 
 /// 虚拟键 → 框架键名（与 X11 后端 / 控制通道使用同一套名字，UI 逻辑跨平台一致）。
 [[nodiscard]] auto key_name(WPARAM key) -> std::string {
@@ -125,6 +166,55 @@ class Win32Backend final : public Backend {
   [[nodiscard]] auto headless() const noexcept -> bool override { return false; }
   [[nodiscard]] auto close_requested() const noexcept -> bool override { return close_requested_; }
 
+  // —— 自绘窗框所需的窗口控制（契约见 `shell.hpp`）——
+  //
+  // 实现方式一律走**系统原语**而不是自己重造：拖动/缩放交给 `WM_NCLBUTTONDOWN` 的模态
+  // 循环（Aero Snap、双屏间拖动、贴边吸附全部随之生效），最小化/最大化交给 `ShowWindow`。
+  // 自己算窗口位置看似简单，实则要重实现吸附、多显示器 DPI 变化、任务栏避让——那是纯亏。
+  [[nodiscard]] auto supports_window_control() const noexcept -> bool override {
+    return window_ != nullptr;
+  }
+
+  [[nodiscard]] auto minimize() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    ::ShowWindow(window_, SW_MINIMIZE);
+    return ok();
+  }
+
+  [[nodiscard]] auto toggle_maximize() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    ::ShowWindow(window_, ::IsZoomed(window_) != 0 ? SW_RESTORE : SW_MAXIMIZE);
+    return ok();
+  }
+
+  [[nodiscard]] auto request_close() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    // 与用户点关闭按钮**同一条路**：发 WM_CLOSE，由窗口过程置 `close_requested_`，
+    // 应用主循环收尾（进程内还有控制通道/脚本宿主要正常停止）。
+    if (::PostMessageW(window_, WM_CLOSE, 0, 0) == 0) {
+      return unexpected(ErrorCode::Io, "PostMessage(WM_CLOSE) 失败");
+    }
+    return ok();
+  }
+
+  [[nodiscard]] auto begin_move() -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    start_system_caption(HTCAPTION);
+    return ok();
+  }
+
+  [[nodiscard]] auto begin_resize(WindowEdge edge) -> Status override {
+    if (window_ == nullptr) return unexpected(ErrorCode::Io, "窗口未创建");
+    const int hit = hit_code(edge);
+    if (hit == HTCLIENT) return unexpected(ErrorCode::Invalid, "非边缘（无可缩放方向）");
+    start_system_caption(hit);
+    return ok();
+  }
+
+  [[nodiscard]] auto maximized() const noexcept -> bool override {
+    return window_ != nullptr && ::IsZoomed(window_) != 0;
+  }
+
   auto create_window(const WindowOptions& options) -> Status override {
     // DPI 感知：不声明的话系统会把我们的窗口位图**再拉伸一次**（模糊 + 坐标错位）。
     // 目标为 Win10 1703+（`SetProcessDpiAwarenessContext`）；更老的系统上该导入不存在，
@@ -135,6 +225,8 @@ class Win32Backend final : public Backend {
 
     logical_width_ = options.width > 0 ? options.width : 1280;
     logical_height_ = options.height > 0 ? options.height : 720;
+    decorations_ = options.decorations;
+    window_resizable_ = options.resizable;
     scale_ = options.scale > 0.0f ? options.scale : 1.0f;
     // 显式给了 `--scale` 就**不再被窗口 DPI 覆盖**：它是测试/复现用的覆盖值。
     // 关键在于"窗口尺寸"与"缓冲尺寸"必须用**同一个** scale——早先窗口按请求值建、
@@ -162,7 +254,26 @@ class Win32Backend final : public Backend {
     const int physical_width = static_cast<int>(std::lround(static_cast<float>(logical_width_) * scale_));
     const int physical_height = static_cast<int>(std::lround(static_cast<float>(logical_height_) * scale_));
     RECT rect{0, 0, physical_width, physical_height};
-    const DWORD style = WS_OVERLAPPEDWINDOW;
+    // —— 窗口风格：装饰默认**自绘**（`CONVENTIONS.md` §10 第 7 条）——
+    //
+    // 为什么不沿用 `WS_OVERLAPPEDWINDOW`：它自带 `WS_CAPTION`/`WS_SYSMENU`，系统标题栏
+    // 会在客户区之上再画一条，而应用层（`ui::TitleBar`）另有一条自绘的 —— **两条标题栏并存**；
+    // 且系统标题栏的字号/高度/按钮形态由系统决定，三平台各不相同，"一块代码三平台外观一致"
+    // 正是从窗框处漏掉。去掉 `WS_CAPTION`/`WS_SYSMENU`，客户区即整窗，窗框完全由 UI 画。
+    //
+    // 保留 `WS_THICKFRAME`：它是"窗口可缩放"的标志，**Aero Snap（拖到屏幕边缘吸附）与
+    // 边缘缩放的系统实现都挂在它上面**。客户区覆盖整窗后边缘不再可见，但命中由
+    // `WM_NCHITTEST` 接管（见那里）——**外观自绘、行为仍用系统**，不重造一遍拖拽手势。
+    // （这一条是自绘窗框最容易做坏的地方：把 `WS_THICKFRAME` 一起去掉，拖动吸附与边缘缩放
+    //   就同时消失，而它不会报错，只表现为"变得不好用"。）
+    DWORD style = 0;
+    if (decorations_) {
+      style = WS_OVERLAPPEDWINDOW;
+      if (!options.resizable) style &= ~static_cast<DWORD>(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    } else {
+      style = WS_POPUP | WS_CLIPCHILDREN | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+      if (options.resizable) style |= WS_THICKFRAME;
+    }
     ::AdjustWindowRectEx(&rect, style, FALSE, 0);
     const std::wstring title = to_wide(options.title);
 
@@ -207,7 +318,56 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
-  /// 按**当前客户区**分配绘制面，保证 `画布物理尺寸 == 客户区尺寸`。
+  /// 缩放命中带宽（逻辑像素）：比系统默认的 `GetSystemMetricsForDpi(SM_CXSIZEFRAME)` 略宽，
+  /// 因为窗口边缘没有系统边框可“看着抓”——太窄会让自绘窗框变得难用（实测手感阈值 ~6px）。
+  [[nodiscard]] auto resize_border() const noexcept -> float {
+        return k_resize_border / (scale_ > 0.0f ? scale_ : 1.0f);
+  }
+
+  /// `WindowEdge` → `WM_NCHITTEST` 命中码（两张表同源，判定规则只有 `resize_edge_at` 一份）。
+  [[nodiscard]] static auto hit_code(WindowEdge edge) noexcept -> int {
+    switch (edge) {
+      case WindowEdge::Left: return HTLEFT;
+      case WindowEdge::Right: return HTRIGHT;
+      case WindowEdge::Top: return HTTOP;
+      case WindowEdge::Bottom: return HTBOTTOM;
+      case WindowEdge::TopLeft: return HTTOPLEFT;
+      case WindowEdge::TopRight: return HTTOPRIGHT;
+      case WindowEdge::BottomLeft: return HTBOTTOMLEFT;
+      case WindowEdge::BottomRight: return HTBOTTOMRIGHT;
+      case WindowEdge::None: break;
+    }
+    return HTCLIENT;
+  }
+
+  /// 交给系统开始"移动/缩放"模态循环（`begin_move` / `begin_resize` 共用）。
+  ///
+  /// 释放鼠标捕获：我们自己 `SetCapture` 过，不释放的话模态循环期间按下的键状态是脏的
+  /// （表现为"拖完窗口后鼠标像是一直按着"）。
+  void start_system_caption(int hit) {
+    ::ReleaseCapture();
+    // 坐标传 (0,0)：命中码已定方向，坐标仅供系统内部做像素跟踪（传实测屏幕坐标反而会让
+    // 缩放起点从屏幕原点算起，表现为"一按下窗口就跳到角落"）。
+    (void)::SendMessageW(window_, WM_NCLBUTTONDOWN, static_cast<WPARAM>(hit), MAKELPARAM(0, 0));
+  }
+
+  /// 按当前窗口状态手工给最大化尺寸（**去装饰后才需要这一步**）。
+  ///
+  /// 为什么必须自己做：`WS_POPUP` + `WM_NCCALCSIZE` 返回 0 之后，系统算最大化矩形时
+  /// 拿不到"该给非客户区留多少"，结果窗口会**盖住任务栏**、并且比工作区多出边框那几像素。
+  /// 这是无边框窗口最经典的副作用（“最大化后任务栏被盖住 / 底部多一条”）。
+  void apply_maximized_bounds() {
+    if (window_ == nullptr) return;
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    const HMONITOR monitor = ::MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    if (::GetMonitorInfoW(monitor, &info) == 0) return;
+    const RECT& work = info.rcWork;
+    (void)::SetWindowPos(window_, nullptr, work.left, work.top, work.right - work.left,
+                         work.bottom - work.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  }
+
+  /// 按**当前客户区**分配绘制面（收缩后可在调整尺寸/最大化前后复用）。
   ///
   /// 所有会影响尺寸的路径（创建 / 改 DPI / WM_SIZE）都必须走这里，
   /// 否则就会重新引入"画布与客户区差 1px → DXGI 缩放 → 整屏发糊"。
@@ -693,10 +853,122 @@ class Win32Backend final : public Backend {
         }
         return 0;
       }
+      case WM_GETMINMAXINFO: {
+        if (!decorations_) {
+          // 无边框下系统给的默认最小宽度/高度来自"可见框"，与我们的自绘窗框无关；
+          // 不接管的话窗口能被拖到比标题栏按钮还窄（按钮被裁掉一半，且再也拖不回来）。
+          auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+          if (info != nullptr) {
+            const int min_width = static_cast<int>(std::lround(k_min_client_width * scale_));
+            const int min_height = static_cast<int>(std::lround(k_min_client_height * scale_));
+            if (info->ptMinTrackSize.x < min_width) info->ptMinTrackSize.x = min_width;
+            if (info->ptMinTrackSize.y < min_height) info->ptMinTrackSize.y = min_height;
+          }
+          return 0;
+        }
+        break;
+      }
+
+      case WM_NCCALCSIZE: {
+        // 去装饰的关键一步：把**整个窗口**都算作客户区。
+        //
+        // `WS_POPUP` 已无标题栏，但 `WS_THICKFRAME` 仍会让系统为"不可见边框"预留几像素
+        // （那是给鼠标抓边用的），客户区就比窗口小一圈 —— 表现为自绘窗框的右/下边缘
+        // 被系统裁掉、且画布与窗口尺寸不一致（GPU 呈现会静默拉伸整块纹理 → 整屏发糊）。
+        // 返回 0 = 客户区 = 整个窗口矩形。
+        if (!decorations_ && wparam != 0) return 0;
+        break;
+      }
+
+      case WM_NCHITTEST: {
+        // 外观自绘、**命中也自绘**：系统按 `HT*` 码决定"这次按下是拖动还是缩放"，
+        // 于是自绘窗框的边缘拖动与 Aero Snap 全部走系统实现（不重造手势、不丢手势）。
+        //
+        // 坐标：`lparam` 给的是**未缩放的屏幕像素**，要先换成客户区再除 scale
+        // （与 `to_logical` 同一口径——协议/UI/脚本一律逻辑坐标）。
+        const math::Point screen = hit_point(lparam);
+        POINT point{static_cast<LONG>(screen.x), static_cast<LONG>(screen.y)};
+        ::ScreenToClient(window, &point);
+        RECT client{};
+        if (::GetClientRect(window, &client) == 0) break;
+        const float safe_scale = scale_ > 0.0f ? scale_ : 1.0f;
+        const math::Point logical{static_cast<float>(static_cast<double>(point.x) /
+                                                    static_cast<double>(safe_scale)),
+                                  static_cast<float>(static_cast<double>(point.y) /
+                                                    static_cast<double>(safe_scale))};
+        const math::Size client_size{static_cast<float>(client.right) / safe_scale,
+                                     static_cast<float>(client.bottom) / safe_scale};
+        if (window_resizable_) {
+          const WindowEdge edge = ui::resize_edge_at(logical, client_size, resize_border());
+          if (edge != WindowEdge::None) return hit_code(edge);
+        }
+        // 最大化后不该再能拖边缩放（与系统行为一致：最大化窗口没有可见边缘）。
+        if (::IsZoomed(window) != 0) return HTCLIENT;
+        // 其余落点交回默认处理（系统会按位置给出 HTCLIENT/HTCAPTION 等）。
+        break;
+      }
+
+      case WM_NCLBUTTONDOWN: {
+        // 命中码是我们自己回给系统的（拖拖动/缩放区域）：系统此时会发 WM_NCLBUTTONDOWN
+        // 启动模态循环——非客户区被我们去掉了，不转发的话拖动**根本不会开始**
+        // （表现为"按在标题栏上没反应"）。
+        if (!decorations_) {
+          const int hit = static_cast<int>(wparam);
+          switch (hit) {
+            case HTCAPTION:
+            case HTLEFT:
+            case HTRIGHT:
+            case HTTOP:
+            case HTBOTTOM:
+            case HTTOPLEFT:
+            case HTTOPRIGHT:
+            case HTBOTTOMLEFT:
+            case HTBOTTOMRIGHT:
+              return ::DefWindowProcW(window, WM_NCLBUTTONDOWN, wparam, lparam);
+            default: break;
+          }
+        }
+        break;
+      }
+
+      case WM_SYSCOMMAND: {
+        // 最大化交给系统的默认实现会在"无装饰"下算出错误尺寸（见 `apply_maximized_bounds`），
+        // 因此在这里拦下并给工作区矩形。其余系统命令（最小化/还原/系统菜单）原样下传——
+        // 它们不依赖边框，按默认路径走才不会丢 `Alt+Space` 等系统手势。
+        if (!decorations_) {
+          const WPARAM command = wparam & 0xFFF0U;
+          if (command == SC_MAXIMIZE) {
+            apply_maximized_bounds();
+            return 0;
+          }
+        }
+        break;
+      }
+
       case WM_SIZE: {
         if (surface_ == nullptr) return 0;
         // 最小化不用管（恢复时还会来一次非最小化的 WM_SIZE）
         if (wparam == SIZE_MINIMIZED) return 0;
+        // 最大化/还原后重新校正一次尺寸：`WM_SYSCOMMAND` 拦下的是"用户点最大化"，
+        // 而 `ShowWindow(SW_MAXIMIZE)`（自绘按钮路径）与系统手势绕过它——统一在这里兜底，
+        // 否则那条路径下窗口会盖住任务栏。
+        if (!decorations_ && (wparam == SIZE_MAXIMIZED) && ::IsZoomed(window) != 0) {
+          MONITORINFO info{};
+          info.cbSize = sizeof(info);
+          const HMONITOR monitor = ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+          RECT current{};
+          if (::GetMonitorInfoW(monitor, &info) != 0 && ::GetWindowRect(window, &current) != 0) {
+            const RECT& work = info.rcWork;
+            const int width = current.right - current.left;
+            const int height = current.bottom - current.top;
+            if (current.left != work.left || current.top != work.top ||
+                width != work.right - work.left || height != work.bottom - work.top) {
+              (void)::SetWindowPos(window, nullptr, work.left, work.top, work.right - work.left,
+                                   work.bottom - work.top,
+                                   SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            }
+          }
+        }
         // **只记"尺寸脏"与"待定尺寸"，重建推迟到 `framebuffer()`**（不在窗口过程里做）。
         // 同时**立即**更新 `logical_size()` 的数据源——这是打破"等待输入"死锁的关键：
         //
@@ -821,6 +1093,10 @@ class Win32Backend final : public Backend {
   HWND window_{nullptr};
   /// 是否已 `ShowWindow`（与 `create_window` 分离，见 `show_when_ready`）。
   bool shown_{false};
+  /// 是否让窗口系统画标题栏/边框（默认 `false` = 自绘，见 `CONVENTIONS.md` §10 第 7 条）。
+  bool decorations_{false};
+  /// 窗口是否可缩放（`WindowOptions::resizable`）：关掉后边缘命中不参与缩放。
+  bool window_resizable_{true};
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};

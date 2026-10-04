@@ -280,6 +280,12 @@ class HeadlessBackend final : public Backend {
 }
 
 /// 平台后端桩：诚实报告"已探测到/未探测到 + 本期实现范围"。
+///
+/// 自绘窗框的契约（`CONVENTIONS.md` §10 第 7 条）它同样受约束：`supports_window_control()`
+/// 默认 `false`（基类实现），窗口动作由基类**如实报 `Unsupported`**——因此 x11/wayland
+/// 未实现期间，`ui::TitleBar` 的按钮会返回"未生效"而不是静默假装成功。
+/// 补后端时要做的只有两件：起一个无装饰窗口 + 实现本文档声明的窗口控制（含
+/// `ui::resize_edge_at` 的边缘命中，Wayland 下交合成器）——组件與应用**一行不用改**。
 class PlatformStubBackend final : public Backend {
  public:
   PlatformStubBackend(std::string name, std::string library) noexcept

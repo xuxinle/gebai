@@ -198,6 +198,10 @@ inline constexpr auto kIcons = std::to_array<IconGlyph>({
                "16.7 3.5 12 C3.5 7.3 7.3 3.5 12 3.5 Z",
      1.6f, false},
     {"square", "M5 5 L19 5 L19 19 L5 19 Z", 1.6f, false},
+    // 还原（窗口已最大化时"最大化"按钮的形态）：**两个叠放的方框**。
+    // 之前它复用 `square`，于是"最大化"与"还原"两种形态在像素上**完全一样**——
+    // 用户看不出这个按钮此刻是哪个动作。图形与名字并排的图标墙（gallery）才能看出这类问题。
+    {"restore", "M8 8 L20 8 L20 20 L8 20 Z M4 4 L16 4 L16 16", 1.6f, false},
     {"triangle", "M12 4.5 L20.5 19.5 L3.5 19.5 Z", 1.6f, false},
 });
 

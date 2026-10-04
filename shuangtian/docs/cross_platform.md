@@ -101,6 +101,9 @@ ST_MAIN(run_app)
 5. Windows 分支改了？→ 跑 `st build <target> --toolchain=mingw` 确认**编得过**
    （本机编不到 Windows 分支，这是唯一能发现问题的途径）。
 6. 新增系统库依赖？→ 在 `toolchains` 里为目标平台声明。
+7. 有没有让窗口系统画标题栏/边框？→ **不允许**：窗口装饰一律 UI 层自绘（`CONVENTIONS.md` §10 第 7 条）。
+   需要平台能力（去边框建窗、拖拽与八向缩放接管、最小化/最大化/关闭）时，先在 `st::shell`
+   契约里加接口，再在 `platform_*` 里两侧实现——**不要在应用层各写一套 `#if`**。
 
 ## 7. 内置通道（无头）与桌面的**一致性**约束（验收口径）
 
@@ -112,5 +115,6 @@ ST_MAIN(run_app)
 | 文本形态 | 亚像素 LCD + 网格拟合 normal（两通道同一默认） | `resolve_text_lcd` / `resolve_text_fit` 不读“有没有窗口”（`src/app/app.cpp`） |
 | 像素密度 | 未显式指定时：窗口取窗口实际 DPI，无头取**系统显示缩放**（Windows） | `shell::system_display_scale()`；显式 `--scale`/`ST_SCALE` 两侧接管 |
 | 呈现路径 | 窗口侧帧缓冲 →（DXGI swapchain / GDI blit）→ 客户区必须逐像素一致 | `tools/st_consistency_check.py`：`PrintWindow(PW_CLIENTONLY\|PW_RENDERFULLCONTENT)` 与帧缓冲逐像素比对 |
+| 窗口装饰 | **无系统标题栏/边框**，窗框内每个像素都来自帧缓冲 | 平台后端去装饰建窗（`CONVENTIONS.md` §10 第 7 条）；✅ Win32 已落地（`tools/title_bar_win_check.py` 真窗口断言：**客户区 == 窗口矩形**），⏳ x11/wayland 待补 |
 
 **改了默认口径就要同步这个表**，并用一致性脚本重测（不是靠“看起来一样”）。

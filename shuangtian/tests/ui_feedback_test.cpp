@@ -42,8 +42,10 @@ class FeedbackTestTextPort final : public st::ui::TextPort {
 
   void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
             st::math::Color color,
-            st::text::FontRole role = st::text::FontRole::Proportional) const override {
-    (void)role;  // 桩
+            st::text::FontRole role = st::text::FontRole::Proportional,
+            float embolden = 0.0f) const override {
+    (void)role;      // 桩
+    (void)embolden;  // 桩（桩不模拟字重：断言只关心布局与颜色）
     (void)canvas;
     (void)origin;
     (void)size;

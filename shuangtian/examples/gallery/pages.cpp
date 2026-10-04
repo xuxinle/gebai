@@ -27,6 +27,7 @@
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
+#include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/toggle.hpp"
 #include "st/ui/components/scene_view.hpp"
 #include "st/ui/dsl.hpp"          // 声明式页（声明式 UI 的演示）
@@ -722,6 +723,27 @@ namespace {
     feedback_card->add_child(std::move(bar));
   }
   page->add_child(std::move(feedback_card));
+
+  // —— 窗框（自绘标题栏）——
+  //
+  // 为什么摆在这一页：窗框是**组件**而不是平台特性（`CONVENTIONS.md` §10 第 7 条），
+  // 而它跨平台长得一样——正是本页"组件集巡检"要盯的东西。
+  //
+  // ⚠ 这里的三个按钮在无头/不支持窗口控制时**照样画、动作如实拒绝**：
+  // 这就是"画面跨平台一致、能力如实上报"那份契约在示例里的可见形态。
+  auto titlebar_card = make_card("card-titlebar", "窗框（自绘标题栏）");
+  titlebar_card->add_child(make_caption(
+      "窗口装饰一律自绘：不依赖系统标题栏。标题区可拖动/双击最大化，边缘 6px 内为缩放带；"
+      "右侧三按钮经 WindowControl 端口生效（无窗口时如实拒绝，但画面不变）"));
+  auto demo_bar = std::make_unique<st::ui::TitleBar>("gallery · 霜天");
+  demo_bar->set_id("demo-titlebar");
+  demo_bar->set_icon("layers");
+  demo_bar->set_window_control(hooks.window_control);
+  demo_bar->style().width = 640.0f;
+  titlebar_card->add_child(std::move(demo_bar));
+  titlebar_card->add_child(make_caption(
+      "注：真实窗口的窗框在应用最顶层（`codeeditor` 示例）；此处是同一个组件在卡片里的一面"));
+  page->add_child(std::move(titlebar_card));
 
   // —— 图标全集（逐个核对描边完整性）——
   auto icons_card = make_card("card-icons", std::format("图标全集（{} 个：描边由线段四边形与顶点圆求并，"

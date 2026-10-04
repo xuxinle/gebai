@@ -26,8 +26,10 @@
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/components/table.hpp"
 #include "st/ui/components/tabs.hpp"
+#include "st/ui/components/title_bar.hpp"
 #include "st/ui/components/toggle.hpp"
 #include "st/ui/components/tree.hpp"
+#include "st/ui/components/window_frame.hpp"
 
 namespace st::ui::dsl {
 
@@ -1042,6 +1044,8 @@ ST_DSL_TYPE(MenuBar, "MenuBar")
 ST_DSL_TYPE(FileDialog, "FileDialog")
 ST_DSL_TYPE(CodeEditor, "CodeEditor")
 ST_DSL_TYPE(CommandPalette, "CommandPalette")
+ST_DSL_TYPE(TitleBar, "TitleBar")
+ST_DSL_TYPE(WindowFrame, "WindowFrame")
 ST_DSL_TYPE(MarkdownView, "MarkdownView")
 
 auto make_element(std::string type) -> std::unique_ptr<Element> {
@@ -1090,6 +1094,9 @@ auto make_element(std::string type) -> std::unique_ptr<Element> {
   if (type == "CodeEditor") return std::make_unique<CodeEditor>();
   if (type == "CommandPalette") return std::make_unique<CommandPalette>();
   if (type == "MarkdownView") return std::make_unique<MarkdownView>();
+  // 窗框（自绘标题栏 + 内容槽 + 缩放边缘；窗口控制由 ui::WindowControl 端口注入）
+  if (type == "TitleBar") return std::make_unique<TitleBar>();
+  if (type == "WindowFrame") return std::make_unique<WindowFrame>();
   return nullptr;
 }
 
@@ -1136,6 +1143,29 @@ auto column(Composer& c, const BoxProps& props, std::function<void()> children) 
   BuildScope scope(c, element);
   if (children) children();
   return *element;
+}
+
+auto window_frame(Composer& c, std::string title, std::function<void(WindowFrame&)> configure,
+                  const BoxProps& props, std::function<void()> children) -> Element& {
+  auto& frame = custom<WindowFrame>(c, [title = std::move(title)](WindowFrame& it) {
+    // 标题在构造后设（声明式要求**无参构造**，而标题是业务数据）
+    if (it.title_bar() != nullptr) it.title_bar()->set_title(title);
+  }, props);
+  if (configure) configure(frame);
+  // 子节点声明进**内容槽**（`WindowFrame::add_child` 已按此语义转发）：
+  // 于是声明式里写 `window_frame(c, "标题", …, [&]{ ...内容... })` 就得到完整外壳。
+  BuildScope scope(c, frame.content());
+  if (children) children();
+  return frame;
+}
+
+auto title_bar(Composer& c, std::string title, std::function<void(TitleBar&)> configure,
+               const BoxProps& props) -> Element& {
+  return custom<TitleBar>(c, [title = std::move(title), configure = std::move(configure)](
+                                   TitleBar& it) {
+    it.set_title(title);
+    if (configure) configure(it);
+  }, props);
 }
 
 auto text(Composer& c, std::function<std::string()> content, const BoxProps& props) -> Element& {

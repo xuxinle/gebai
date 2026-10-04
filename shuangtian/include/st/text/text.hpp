@@ -109,8 +109,21 @@ class TextRenderer {
   [[nodiscard]] auto ascent(float size) const -> float;
 
   /// 绘制：`origin` 为**逻辑坐标**下的行左上角；字形按画布 DPI 物理栅格化。
+  ///
+  /// `embolden` 为合成加粗的**笔画外扩半径（物理像素）**，0 = 不加粗。
+  /// 存在的理由：框架没有独立字重的字体面（字体栈是单面的），而界面里的标题/按钮/
+  /// 大数字都标了非 Regular 字重——不提供这条路，「字重」就只是一个落不到像素上的属性
+  /// （实测：`Element::paint_text` 原先完全不读 `style_.font_weight`，
+  /// SemiBold 与 Regular 渲染逐像素相同）。
+  /// 做法与 Skia `SkFont::setEmbolden` / `FT_GlyphSlot_Embolden` 同一取向：
+  /// 同一份轮廓沿水平正方向按**采样格**平移后重复填充，再一起栅格化。  /// `embolden` 为**合成加粗的笔画外扩半径（物理像素）**，0 = 不加粗。
+  ///
+  /// 用**步数**而不是像素半径作为渲染器接口：步数是整数，能直接进缓存键，
+  /// 也能保证平移落在采样格上（像素半径在两种模式下换算出的格宽不同，
+  /// 由 `embolden_steps()` 统一换算）。
   auto draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-            math::Color color, FontRole role = FontRole::Proportional) const -> Status;
+            math::Color color, FontRole role = FontRole::Proportional,
+            float embolden = 0.0f) const -> Status;
 
   /// 折行（按空格与 CJK 断点；返回各行原文区间）。
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
@@ -165,6 +178,14 @@ class TextRenderer {
   void set_grid_fit(GridFitMode mode) noexcept { grid_fit_ = mode; }
   [[nodiscard]] auto grid_fit() const noexcept -> GridFitMode { return grid_fit_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
+  /// 合成加粗的**档位数**（`embolden_steps` 的上限）。
+  ///
+  /// 单位是**采样格**，不是物理像素：亚像素 + supersample=2 时一个采样格只有
+  /// 1/6 物理像素。上限取 16 才能覆盖最大的 Bold（1/24 em）在 48px 上的外扩量；
+  /// 它只是防荒唐值的护栏，实际步数由 `embolden_steps(radius)` 算出。
+  static constexpr int kMaxEmboldenSteps = 16;
+  /// 把「合成加粗半径（**物理像素**）」换算成当前模式下可生效的**采样格步数**。
+  [[nodiscard]] auto embolden_steps(float pixel_radius) const noexcept -> int;
   /// 字形位图缓存条目数（诊断用）。
   [[nodiscard]] auto cache_entries() const noexcept -> std::size_t;
 
@@ -190,6 +211,14 @@ class TextRenderer {
     /// 会把上一个字形的纹理当成这个字形的。实测症状就是界面文字间歇性地变成别的字。
     /// 稳定身份不受内存生命周期影响，重算同一个字形得到同一个键。
     std::uint64_t cache_key{0};
+    /// 位图原点在**采样空间**的坐标（= 输出像素 X 平均的采样列起点）。
+    ///
+    /// 本字段存在的唯一理由是**可断言性**：该值必须是 `supersample` 的整数倍
+    /// （否则输出像素平均的采样窗口横跨两个物理像素，等于把墨迹糊开），
+    /// 而不看内部值就无法写出钉住它的回归测试——实测踩到过
+    /// 「凭外观写的测试回退修复后依然全绿」。
+    int origin_x{0};
+    int origin_y{0};
   };
 
   /// 取某个**码点**的字形位图（公开的诊断入口）。
@@ -206,7 +235,8 @@ class TextRenderer {
   /// 取字形覆盖率位图（按 face/字形/物理尺寸/超采样 缓存）。
   /// 返回 `shared_ptr`：即使该条目随后被淘汰，调用方手里的位图依然有效
   /// （曾因缓存「插入后淘汰」并返回裸指针导致 use-after-free，见 text.cpp 注释）。
-  [[nodiscard]] auto glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size) const
+  [[nodiscard]] auto glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size,
+                                  int embolden_steps) const
       -> std::shared_ptr<const GlyphBitmap>;
   /// 无缓存版整形（`shape_cached` 未命中时的计算体）。
   [[nodiscard]] auto shape_uncached(std::string_view utf8, float size, FontRole role) const

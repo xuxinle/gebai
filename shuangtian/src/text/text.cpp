@@ -502,12 +502,28 @@ auto TextRenderer::glyph_bitmap_of(char32_t codepoint, float pixel_size, FontRol
   if (face == nullptr) return nullptr;
   const auto id = face->glyph_index(codepoint);
   if (!id.has_value()) return nullptr;
-  return glyph_bitmap(*face, *id, pixel_size);
+  return glyph_bitmap(*face, *id, pixel_size, 0);
 }
 
-auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size) const
-    -> std::shared_ptr<const GlyphBitmap> {
+/// 合成加粗的步数换算：把物理像素半径换成**当前模式下的采样格步数**。
+///
+/// 采样格 = 一次叠填位移的最小有效量。水平方向的采样密度在两种模式下不同：
+/// 灰度是 `supersample`（1 物理像素 / supersample），亚像素是 `3 × supersample`
+/// （每物理像素三个子像素）。按采样格取整才能保证位移真的生效
+/// （否则会被栅格化取整吃成 0——症状是「字重档位看起来没有任何区别」）。
+auto TextRenderer::embolden_steps(float pixel_radius) const noexcept -> int {
+  if (pixel_radius <= 0.0f) return 0;
+  const int supersample = std::max(1, static_cast<int>(std::lround(supersample_)));
+  const int cells_per_pixel = supersample * (subpixel_ ? kSubpixelColumns : 1);
+  const int steps =
+      static_cast<int>(std::lround(pixel_radius * static_cast<float>(cells_per_pixel)));
+  return std::clamp(steps, 0, TextRenderer::kMaxEmboldenSteps);
+}
+
+auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel_size,
+                                int embolden_steps) const -> std::shared_ptr<const GlyphBitmap> {
   const std::uint32_t size_bucket = size_key(pixel_size);
+  const int steps = std::clamp(embolden_steps, 0, TextRenderer::kMaxEmboldenSteps);
   // 缓存键 = 逐字段 FNV-1a 混合，而不是"移位后 XOR 拼装"。
   //
   // 两者看起来等价，实际不然：XOR 拼装**只有位段互不重叠**时才等价于元组，
@@ -525,12 +541,16 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 网格拟合模式同样要进键：拟合前后是两份不同的位图（边缘相位不同），
   // 与亚像素同理——混用会取到“不符合当前模式”的字形（症状是“开关看起来没生效”）。
   const auto fit_bucket = static_cast<std::uint64_t>(grid_fit_);
+  // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
+  // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
   const std::uint64_t key = mix(mix(mix(mix(mix(st::hash::fnv1a64(face.path()),
                                                 static_cast<std::uint64_t>(face.face_index())),
                                             static_cast<std::uint64_t>(glyph)),
                                         static_cast<std::uint64_t>(size_bucket)),
                                     supersample_bucket),
-                                mix(lcd ? 1ULL : 0ULL, fit_bucket + 1ULL));
+                                mix(lcd ? 1ULL : 0ULL,
+                                    mix(fit_bucket + 1ULL,
+                                        static_cast<std::uint64_t>(steps) + 1ULL)));
   {
     const std::scoped_lock lock(cache_->mutex);
     if (const auto iterator = cache_->glyphs.find(key); iterator != cache_->glyphs.end()) {
@@ -546,6 +566,15 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const float effective_size = static_cast<float>(size_bucket) / 4.0f;
   const int supersample = std::max(1, static_cast<int>(std::lround(supersample_)));
   const float scale = effective_size * static_cast<float>(supersample) / units;
+  /// 宽度量化的适用上限（**物理像素**）。
+  ///
+  /// 量化（把宽度取到整数像素 + 放宽远边位移预算）的收益是「整根笔画落成满黑像素」——
+  /// 这只在笔画本身细到无法自己盖满一个像素时才有意义。笔画粗了之后自己就有满黑像素，
+  /// 量化只剩代价（墨量偏差最大 0.5px，实测 22px CJK 会从 +0.4% 升到 +3.5%）。
+  ///
+  /// 边界值 21 不是拍的：UI 正文最大 14 逻辑 px × 1.5 DPI = **21 物理像素**，
+  /// 而 22 以上（大标题/大数字）已经不需要量化——两个区间的实测各有依据。
+  constexpr float kQuantizeBelowPx = 21.0f;
 
   auto bitmap = std::make_shared<GlyphBitmap>();
   bitmap->cache_key = key;   // 稳定身份 = 上面那份缓存键（与内存地址无关）
@@ -590,12 +619,34 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // 于是 `floor`/`ceil` 的结果可能差 1px——位图尺寸随“拟合开关”跳变，
     // 就是“开一下同一个字就挪了半像素”的来源。**网格稳定是硬不变式**
     // （排版与缓存都靠它），所以网格取自未拟合的轮廓。
+    //
+    // **位图原点必须锢定物理像素边界**（本函数里最容易被忽略的一条硬约束）。
+    // 坐标处在**超采样空间**（1 物理像素 = `supersample` 单位）：若原点只是
+    // `floor(bounds) - padding`，它就落在采样单位上，而 `supersample > 1` 时
+    // 它多半**不是** `supersample` 的整数倍——后果有两个，都不是小事：
+    // ① 输出像素 x 平均的是采样列 `[x·ss, (x+1)·ss)`，当原点错半个物理像素时
+    //    这个窗口**横跨两个物理像素**，等于把墨迹向水平方向糊开；
+    // ② `offset_x = min_x / supersample` 是整数截断（向零），负的奇数原点会与
+    //    `floor` 差 1，位图落点再错一像素。
+    // 症状：同一字形的锐度随字号**奇偶交替**（实测「三」在 21.5px 的中间调占比
+    // 1.788、22.0px 只有 0.037），且与抗锯齿模式、网格拟合全都无关——
+    // 所以它必须在这里修，而不是在拟合里修。
     const math::Rect bounds = transformed.flattened_bounds(0.2f);
     const int padding = 1;
-    const auto min_x = static_cast<int>(std::floor(bounds.x)) - padding;
-    const auto min_y = static_cast<int>(std::floor(bounds.y)) - padding;
-    const auto max_x = static_cast<int>(std::ceil(bounds.right())) + padding;
-    const auto max_y = static_cast<int>(std::ceil(bounds.bottom())) + padding;
+    // 向下/向上对齐到 `supersample` 的整数倍（负数也按 floor 语义，不用整数截断）。
+    const auto align_down = [supersample](int value) -> int {
+      const int remainder = value % supersample;
+      return remainder == 0 ? value : value - (remainder < 0 ? remainder + supersample : remainder);
+    };
+    const auto align_up = [&align_down, supersample](int value) -> int {
+      const int down = align_down(value);
+      return down == value ? value : down + supersample;
+    };
+    const int pad = padding * supersample;
+    const auto min_x = align_down(static_cast<int>(std::floor(bounds.x)) - pad);
+    const auto min_y = align_down(static_cast<int>(std::floor(bounds.y)) - pad);
+    const auto max_x = align_up(static_cast<int>(std::ceil(bounds.right())) + pad);
+    const auto max_y = align_up(static_cast<int>(std::ceil(bounds.bottom())) + pad);
     const int width = max_x - min_x;
     const int height = max_y - min_y;
     // **网格拟合**：把笔画边缘吸附到像素网格。在像素空间做（坐标变换之后、
@@ -607,7 +658,14 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     const raster::Path local_unfitted =
         transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
     const raster::Path fitted = st::text::grid_fit(
-        local_unfitted, {.mode = grid_fit_, .grid = static_cast<float>(supersample)}).path;
+        local_unfitted,
+        {.mode = grid_fit_,
+         // **细笔画才量化宽度**：量化的收益（根笔画落成满黑像素）只存在于
+         // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
+         // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
+         .quantize_width = effective_size <= kQuantizeBelowPx,
+         .grid = static_cast<float>(supersample)})
+                                   .path;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
       const int out_width = std::max(1, width / supersample);
       const int out_height = std::max(1, height / supersample);
@@ -615,6 +673,10 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
       bitmap->height = out_height;
       bitmap->offset_x = min_x / supersample;
       bitmap->offset_y = min_y / supersample;
+      // 把**采样空间原点**一并报出：它必须是 `supersample` 的整数倍，
+      // 否则输出像素平均的采样窗口横跨两个物理像素（诊断字段见头文件）。
+      bitmap->origin_x = min_x;
+      bitmap->origin_y = min_y;
       const std::size_t output_pixels =
           static_cast<std::size_t>(out_width) * static_cast<std::size_t>(out_height);
 
@@ -625,7 +687,13 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
           bitmap->format = raster::CoverageFormat::Grayscale;
         }
         raster::Canvas scratch(width, height);
-        scratch.fill_path(fitted, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
+        raster::Paint fill = raster::Paint::solid(math::Color::rgb(255, 255, 255));
+        scratch.fill_path(fitted, fill);
+        // 合成加粗（同亚像素分支：位图内按采样格平移叠填）——
+        // 灰度模式下 1 个采样格 = 1/supersample 物理像素。
+        for (int step = 1; step <= steps; ++step) {
+          scratch.fill_path(fitted.translated(static_cast<float>(step), 0.0f), fill);
+        }
         bitmap->coverage.assign(output_pixels, 0.0f);
         for (int y = 0; y < out_height; ++y) {
           for (int x = 0; x < out_width; ++x) {
@@ -682,7 +750,19 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
         }
         local = local.translated(static_cast<float>(-min_x * kSubpixelColumns),
                                  static_cast<float>(-min_y));
+        // **合成加粗**：把同一份轮廓沿水平正方向按**采样格**平移后重复填充。
+        //
+        // 为什么在**位图内**做而不是在贴图外层叠绘：位图的采样格固定（1 个 scratch 列
+        // = 1 个子像素的 supersample 分之一），位移落在格点上、结果精确可缓存；
+        // 而且**灰度与亚像素两条分支各做一次**，不会出现「亚像素下生效、
+        // 灰度下被取整吃成 0」这类静默失效。
         scratch.fill_path(local, raster::Paint::solid(math::Color::rgb(255, 255, 255)));
+        for (int step = 1; step <= steps; ++step) {
+          const float shift = static_cast<float>(step);  // 采样格
+          scratch.fill_path(
+              local.translated(shift, 0.0f),
+              raster::Paint::solid(math::Color::rgb(255, 255, 255)));
+        }
 
         bitmap->coverage.assign(
             output_pixels * static_cast<std::size_t>(kSubpixelColumns), 0.0f);
@@ -731,7 +811,8 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
 }
 
 auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::Point origin,
-                        float size, math::Color color, FontRole role) const -> Status {
+                        float size, math::Color color, FontRole role, float embolden) const
+    -> Status {
   if (stack_->empty() || utf8.empty() || size <= 0.0f || color.a == 0U) return ok();
   // 文本是跨模块的绘制路径（字形位图直接按覆盖率行混合），在画布上单独记一笔：
   // 否则“绘制 30ms”里看不出文字占多少（界面里文字往往是第一位的调用次数大户）。
@@ -744,12 +825,22 @@ auto TextRenderer::draw(raster::Surface& surface, std::string_view utf8, math::P
   const float baseline = (origin.y + shaped.ascent) * device_scale;
   const raster::Paint paint = raster::Paint::solid(color);
   const float opacity = static_cast<float>(color.a) / 255.0f;
+  // 半径 → **采样格步数**：换算依赖当前渲染模式（亚像素/灰度）与超采样倍率，
+  // 而这两种状态都只存在于渲染器内部——调用方无从自算，所以放在这里。
+  const int embolden_steps = this->embolden_steps(embolden);
 
+  // **合成加粗已在字形位图内部完成**（见 `glyph_bitmap` 的两条分支）：
+  // 同一份轮廓沿水平正方向按**采样格**平移后重复填充，再一起栅格化。
+  //
+  // 为什么不在贴图时叠绘多次：那会让**灰度模式静默失效**（位移被栅格化取整吃成 0，
+  // 表现为「字重档位完全一样」），而且每条文本要多次跨界提交。位图内做则两条模式
+  // 各做一次、位移精确落在格点上，代价只是缓存多一份带加粗的条目
+  // （缓存键含步数，不会与 Regular 的位图混用）。
   for (const auto& run : shaped.runs) {
     if (run.face == nullptr) continue;
     const float pixel_size = size * device_scale;
     const std::shared_ptr<const GlyphBitmap> bitmap =
-        glyph_bitmap(*run.face, run.glyph, pixel_size);
+        glyph_bitmap(*run.face, run.glyph, pixel_size, embolden_steps);
     if (bitmap == nullptr || bitmap->coverage.empty()) continue;
     profile_pixels += static_cast<std::uint64_t>(bitmap->width) *
                       static_cast<std::uint64_t>(bitmap->height);

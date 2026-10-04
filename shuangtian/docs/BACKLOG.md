@@ -199,6 +199,72 @@
   桌面真实窗口与 Edge 同屏 1:1 比对，21px 标题中间调占比 30.5% vs Edge 27.1%，
   13px 正文 **10.4%** vs Edge 44.2%（更锐且无偏色）。
   新增测试 `grid_fit_snaps_to_physical_pixel_lattice_at_any_supersample`（含负例）。
+- [x] **字形位图的采样格锚定（真正的「还不清晰」元凶）** —— 2026-10-04（`DESIGN.md §4.3.3`）
+  起因：用户再次反馈「字体渲染还是不够清晰」。先立**与浏览器同口径**的量尺再动手
+  （`tools/text_sharpness_probe.cpp` 全组合 + `text_ab_probe.cpp`/`text_ab_report.py` 逐像素 A/B），
+  把观感拆成可分别修的几何项与色调项——本条的发现是**与拟合无关**的那一项。
+  缺陷：位图原点 `floor(bounds) - padding` 只锚在**采样单位**上，而 1.5× DPI → `supersample=2`
+  时它多半不是 2 的整数倍 → 输出像素平均的采样窗口**横跨两个物理像素**（横向糊墨）；
+  且 `offset_x = min_x / supersample` 是整数**截断**，负奇数原点再错 1 像素。
+  症状：同一字形的锐度随字号**奇偶交替**（实测「三」21.5px 中间调占比 **1.788** vs
+  22.0px **0.037**；相位抖动 0.348），与抗锯齿模式、网格拟合全都无关。
+  修法：原点上下对齐到 `supersample` 整数倍（负数按 floor 语义），并报出
+  `GlyphBitmap::origin_x/origin_y`。
+  **为什么必须报出内部值**：最初写的用例断言「渲染随笔位整数平移而平移」——把修复
+  **临时回退**后它**依然全绿**（`CONVENTIONS.md §7.1` 警告的恒绿测试）。加诊断字段后
+  `origin % supersample == 0` 才是可断言的抓手（回退后当场变红，已实测）。
+  实测收益（同一口径，1.5× DPI）：与 Edge 的 `mean|Δ|` 13.5px 正文 0.345 → **0.295**（−14.5%）；
+  实心像素均值 0.761/0.772（霜天/浏览器）→ **0.809/0.819**。
+  量尺入 `tools/README.md`（含「画布 DPI 口径必须与实际一致」这条踩坑说明）。
+- [x] **字重（FontWeight）从「只是个属性」到「落到像素」** —— 2026-10-04（`DESIGN.md §4.3.4`）
+  缺陷：`Element::paint_text` **完全不读** `style_.font_weight`——界面里所有
+  `SemiBold`/`Bold`/`Medium`（Heading/卡片标题/按钮/统计卡大数字/标签栏）与 `Regular`
+  **逐像素相同**，标题不显眼、层次全靠字号与颜色撑。
+  修法：合成加粗（Skia `setEmbolden`/FreeType `FT_GlyphSlot_Embolden` 取向），
+  在**字形位图内部**按采样格平移叠填（不在贴图层做——那会让**灰度模式静默失效**，
+  因为两种模式的采样格宽度不同）；换算链 `embolden_radius`（物理字号×档位比例）→
+  `TextRenderer::embolden_steps`（按模式与超采样倍率换成采样格步数）；
+  步数**进缓存键**（否则 Regular 与加粗命中同一份位图，症状是「一会儿生效一会儿不生效」）。
+  幅度校准（`tools/text_weight_probe.cpp`，20.25px 中英混排）：Medium +17% / SemiBold +30% /
+  Bold +42% 墨量，**峰值覆盖率不变**（这条判据把「变粗」与「变糊」分开）。
+  参照：Chrome 切真 Bold 字体面是 +55%~+79%——背后是另一套轮廓，合成加粗不该追那个数。
+  代价：稳态 **+2%**（一屏约 2000 字形；量这个数必须用同一渲染器连量多帧，
+  反复新建画布会把缓存抖掉、量出 +264% 的假数）。
+  测试：`tests/ui_text_weight_test.cpp` **走 `Element::paint` 真实路径**——
+  缺陷在 UI 层，只测 `TextRenderer` 的用例在缺陷存在时依然全绿（已实测确认，
+  回退后该用例变红）。
+- [x] **网格拟合的护栏预算：小字号“发虚”的真因** —— 2026-10-04（`DESIGN.md §4.3.5`）
+  起因：用户反馈「编辑器字体效果很好，UI 字体还差点意思」——
+  同帧里等宽（代码）与比例（UI）走同一条 `TextRenderer`，唯一差别是字号与字体面。
+  先把四个假设逐个量掉（等宽字体面更锐 ✗；拟合在 UI 字号是负收益 ✗——
+  实测 12px 中文中间调占比 2.54→0.73，拟合是大正收益；浏览器做了色调映射 ✗——
+  identity 即最优），最后落在：**宽度量化与位移护栏不自洽**。
+  代码对笔画两侧**各自独立**判 `|delta| <= max_shift`（默认 0.5），而量化必然让两侧
+  位移不等（远边额外叠上宽度取整量，最坏到 1.0）——近边通过、远边被拒，
+  笔画被**平移了却没被改宽**：没拿到网格对齐，还把字形推歪。
+  修法：① 两侧要么一起动、要么都不动；② 量化时 `budget = max_shift + grid/2`
+  （半个像素是 `round` 的最大偏差，即几何必需量）；③ 新增 `quantize_width` 开关，
+  `TextRenderer` 按**物理尺寸**分档（> 21px 关掉——UI 正文最大 14 逻辑 px × 1.5 DPI；
+  大字号自己就有满黑像素，量化只剩墨量代价）。
+  实测（ss=2）：CJK 13.5px 半覆盖像素 310 → **171**（−45%）、中间调占比 1.04 → **0.549**；
+  拉丁 12px 半覆盖 243 → **114**（−52%）；22px 中文墨量回到 **+0.37%**（不关量化是 +3.5%）。
+  端到端（真实 codeeditor 截图逐区域量）：侧栏 12px 半覆盖 **−9%**、实心 **+10%**、墨量 +1.7%。
+  测试 `tests/text_fit_guard_test.cpp`（三条断言均经**回退验证**）。
+  新增量尺：`fit_shift_probe.cpp`（扫 `max_shift` 取值）、`text_ink_conserve.cpp`
+  （与超采样 8 档的真值比墨量）、`text_fit_by_size.cpp`（拟合逐字号收益）、
+  `text_role_compare.py`（真实截图逐区域归一）。
+- [ ] **文字渲染的后续打磨**（非阻塞；本轮已把三处确凿缺陷修完）
+  ① **色调映射已量过、结论是不做**：ClearType/Skia 的 `a^gamma` + 对比度预混合，
+     施加到霜天现有覆盖率上做 5×7 参数寻优（`tools/text_preblend_fit.py`），
+     最优只比 identity 好 0.7~1.8%——提升全在几何。若将来几何再次变好，
+     可以重跑这个脚本确认结论是否还成立（而不是重头再追一遍）。
+  ② **横向子像素定位（Skia 的 1/4 像素量化）**：现在笔位取整到整数物理像素后贴图，
+     字距因此有 ±0.5 物理像素的量化误差（浏览器用分档位图消掉它）。
+     代价是字形位图缓存 ×4（或 ×3）；本机实测的**锐度**相位敏感度极低
+     （见 `tools/text_phase_sensitivity.cpp` 的结论），所以收益主要在**字距均匀度**
+     而非锐度——要不要做取决于「排版精度」是否成为下一个反馈点。
+  ③ `embolden` 目前只外扩水平方向（Skia 亦如此）。CJK 竖笔画多的字形，
+     纵向外扩没有对应处理——斜向观感是否够，待真机窗口目视验收。
 - [ ] **网格拟合的后续打磨**（非阻塞；当前效果已达标）
   ① 同组内按位置排序做**最优平移**（现在是每组独立吸附）——相邻 stem 在小字号下可能互相挤压；
   ② 横笔画（`Normal` 档已生效）的收益尚未单独量化；
@@ -434,7 +500,37 @@
 - [x] **单行 Input 动作面**（2026-10-02 落地）：`invoke submit/activate/clear` 与 TextArea 对齐；
   测试 `ui_input_invoke_*` 3 用例 + `tools/input_action_e2e.py` 真实应用端到端。
   - [ ] **虚拟化长列表**：终端/输出面板的 ScrollView+Text 累积全文，日志长了退化；
-  - [ ] **桌面窗框**：平台 shell 层的系统标题栏融入/自绘窗框；
+  - [x] **桌面窗框：自绘标题栏（跨平台无差异）**（**2026-10-04 落地，Win32 先行**）：
+    ① **平台层去装饰建窗** ✅：`WS_POPUP|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX`（去
+    `WS_CAPTION`/`WS_SYSMENU`，**保留** `WS_THICKFRAME`），`WM_NCCALCSIZE` 客户区覆盖整窗，
+    `WM_NCHITTEST` 用 `ui::resize_edge_at` 接管八向缩放与拖动（**Aero Snap 随之保留**——
+    它就是挂在 `WS_THICKFRAME` 上的）；最大化在 `WM_SYSCOMMAND`/`WM_SIZE` 两处按 `rcWork`
+    校正（**不盖任务栏**）、`WM_GETMINMAXINFO` 给最小尺寸护栏（否则能拖到窗框按钮被裁、
+    且再也拖不回来）；
+    ② **`st::shell` 窗口控制接口** ✅：`supports_window_control/minimize/toggle_maximize/
+    request_close/begin_move/begin_resize/maximized`（契约方言“不支持就如实报 `Unsupported`”），
+    与 `ui::WindowEdge`/`resize_edge_at` 判定（**定义住 ui 层**：`shell.hpp` 已包含 ui 头，
+    反向成环；而两端都要用这份判定）；
+    ③ **窗框做成框架组件** ✅：`ui::TitleBar`（图标/标题/三按钮/拖动/双击最大化 + **附属槽**
+    `add_leading`/`add_trailing`：菜单·主题·DPI 这类宿主控件本就长在标题栏那一行）
+    + `ui::WindowFrame`（**组件化的窗口**：标题栏置顶 + 内容槽 + 八向缩放边缘条；
+    它解决的是通用缺陷——无边框窗口**只能**靠界面提供拖动/缩放区域，只有 TitleBar 时
+    窗口拖不动）+ `ui::WindowControl` 端口（依赖倒置，与 `TextPort` 同一手法）+ 应用装配
+    （`Application` 实现端口并转发后端）；**两个示例都已换壳**：codeeditor 的 `#titlebar`
+    换成窗框内置标题栏（旧三个装饰图标退役），gallery 的“60px 顶部栏 + 无标题栏外壳”
+    换成 `WindowFrame`（品牌名挂前部槽、当前页名作标题、主题/DPI/截图挂尾部槽）；
+    gallery 组件页保留「窗框」巡检卡；
+    ④ **x11/wayland** ⏳ 仍待补（当下是探测 + `Unsupported`，`supports_window_control()` 返回
+    `false`、动作如实拒绝）；补的活只剩“起无装饰窗口 + 实现那几个动作”，**组件与应用无需改动**。
+    顺带清账 ✅：`WindowOptions::resizable` 那个**静默失效字段**已接上（`false` → 不带
+    `WS_THICKFRAME` 且边缘不参与缩放命中），并新增 `decorations`（默认 false = 自绘）；
+    新增 `fill_width/fill_height`——“铺满父级”的组件不能拿行布局的 `max_width`（1e9）当尺寸。
+    验证：`tests/ui_title_bar_test.cpp` **18 用例**（判定纯函数 3 + 几何/命中/动作面/无宿主降级
+    + 附属槽 2 + 窗框容器 4 + 还原图标 1）、`tools/title_bar_probe.py`（无头，
+    **动作如实拒绝**）、`tools/title_bar_win_check.py`（真窗口：**客户区 == 窗口矩形**、
+    最大化 == 工作区、三动作生效、`--decorations` 对照分支）、`tools/gallery_frame_shot.py`
+    （示例换壳几何取证）；`st test` 667 用例全绿 / lint 0 违规 /
+    mingw 交叉编译通过 / `st_visual_check.py` 全序列 0 失败步。
   - [ ] **编辑器分组**：VSCode 式左右分屏各持独立标签组需容器级支持。
 - [x] **text_subpixel_ink_matches_grayscale 长期红修复**（2026-10-02；此前归因有误）：
   此前台账写"hinting 提交（a34699b）后超阈"——本次对照实验证明**与 hinting 无关**

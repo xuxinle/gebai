@@ -143,6 +143,30 @@ struct Constraints {
   float available_height{kUnbounded};
 };
 
+/// 「填满父级」的组件在测量时该取什么宽/高。
+///
+/// ⚠ 为什么必须有这个函数：`max_width` 是**上界**，而行布局给子节点的上界是
+/// `kUnbounded`（1e9）——标题栏/窗框这类"铺满父级"的组件直接拿它当尺寸，
+/// 就会量出天文数字（父容器再把整行撞爆，表现为布局整个错位）。
+/// `available_*` 才是父级**实际可用**的尺寸，这正是该取的值。
+/// 两个字段的语义差异很容易被忽略（它们在列布局里恰好相等），故收成一个函数
+/// 并在注释里写清楚。
+[[nodiscard]] constexpr auto fill_width(const Constraints& constraints, float explicit_width,
+                                       float fallback = 0.0f) noexcept -> float {
+  if (explicit_width >= 0.0f && explicit_width != kAuto) return explicit_width;
+  if (constraints.max_width < kUnbounded) return constraints.max_width;
+  if (constraints.available_width < kUnbounded) return constraints.available_width;
+  return fallback;
+}
+
+[[nodiscard]] constexpr auto fill_height(const Constraints& constraints, float explicit_height,
+                                        float fallback = 0.0f) noexcept -> float {
+  if (explicit_height >= 0.0f && explicit_height != kAuto) return explicit_height;
+  if (constraints.max_height < kUnbounded) return constraints.max_height;
+  if (constraints.available_height < kUnbounded) return constraints.available_height;
+  return fallback;
+}
+
 enum class EventKind : std::uint8_t {
   MouseMove,
   MouseDown,

@@ -13,6 +13,7 @@
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
+#include "st/ui/style.hpp"  // FontWeight（合成加粗档位）
 
 namespace st::ui {
 
@@ -27,9 +28,20 @@ class TextPort {
       text::FontRole role = text::FontRole::Proportional) const -> float = 0;
   [[nodiscard]] virtual auto line_height(float size) const -> float = 0;
   /// `origin` 为行左上角。
+  ///
+  /// `embolden` 为**合成加粗的笔画外扩半径（物理像素）**，0 = 不加粗。
+  /// 存在的理由：框架没有独立字重的字体面（字体栈是单面的），而界面里的标题/按钮/
+  /// 大数字都标了非 Regular 字重——不提供这条路，「字重」就只是一个落不到像素上的属性
+  /// （实测：`Element::paint_text` 原先完全不读 `style_.font_weight`，
+  /// SemiBold 与 Regular 渲染逐像素相同）。
+  /// 做法与 Skia `SkFont::setEmbolden` / FreeType `FT_GlyphSlot_Embolden` 同一取向：
+  /// 把同一份字形沿**水平方向**外扩。
+  ///
+  /// 为什么传半径而不是采样格步数：步数取决于**渲染模式**（亚像素/灰度）与超采样倍率，
+  /// 那是渲染器自己的状态；端口只转递物理口径的语义量（半径由 `embolden_radius` 给出）。
   virtual void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-                    math::Color color,
-                    text::FontRole role = text::FontRole::Proportional) const = 0;
+                    math::Color color, text::FontRole role = text::FontRole::Proportional,
+                    float embolden = 0.0f) const = 0;
   [[nodiscard]] virtual auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string = 0;
   [[nodiscard]] virtual auto wrap(std::string_view utf8, float size, float max_width) const
@@ -48,8 +60,8 @@ class NullTextPort final : public TextPort {
       text::FontRole role = text::FontRole::Proportional) const -> float override;
   [[nodiscard]] auto line_height(float size) const -> float override;
   void draw(raster::Surface& canvas, std::string_view utf8, math::Point origin, float size,
-            math::Color color,
-            text::FontRole role = text::FontRole::Proportional) const override;
+            math::Color color, text::FontRole role = text::FontRole::Proportional,
+            float embolden = 0.0f) const override;
   [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
       -> std::string override;
   [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
@@ -59,5 +71,26 @@ class NullTextPort final : public TextPort {
 
   [[nodiscard]] static auto instance() -> const NullTextPort&;
 };
+
+/// 合成加粗（fake bold）在**物理像素**下的笔画外扩半径。
+///
+/// 与 Skia `SkFont::setEmbolden` / FreeType `FT_GlyphSlot_Embolden` 同一取向：
+/// 按**字号**给比例值，而不是固定像素——固定像素在 11px 上会把字糊死、
+/// 在 48px 上又完全看不出来。
+///
+/// 三档比例经实测校准（`tools/text_weight_probe.cpp`）：以 20.25px 中英混排为例，
+/// 墨量增幅 Medium ≈ +17%、SemiBold ≈ +30%、Bold ≈ +42%（**峰值覆盖率不变**，
+/// 即“变粗”而不是“变糊”）；作为对照，Chrome 在同一字体上切**真 Bold 字体面**
+/// 的墨量增幅是 +55%~+79%——那背后是另一套字形轮廓，合成加粗不该去追那个数，
+/// 否则 CJK 小字的笔画会粘在一起。
+[[nodiscard]] inline auto embolden_radius(float pixel_size, FontWeight weight) noexcept -> float {
+  switch (weight) {
+    case FontWeight::Medium: return pixel_size / 48.0f;
+    case FontWeight::SemiBold: return pixel_size / 28.0f;
+    case FontWeight::Bold: return pixel_size / 18.0f;
+    case FontWeight::Regular: break;
+  }
+  return 0.0f;
+}
 
 }  // namespace st::ui

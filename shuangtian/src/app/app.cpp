@@ -113,6 +113,55 @@ auto Application::headless() const -> bool {
 
 auto Application::script() -> ui::ScriptHost* { return impl_->script.get(); }
 
+// —— ui::WindowControl：窗框动作 → 后端（**只做转发**，平台差异全在 `platform_*`）——
+//
+// 为什么不在这里分平台：`CONVENTIONS.md` §10 第 1 条要求平台差异只能出现在 `platform_*`；
+// 而 `Backend` 已经把"去装饰建窗、拖拽、最小化/最大化"封装成平台中立的接口。
+// 把 `Status` 折成 `bool` 也是有意为之：窗口控制端口的契约是"这一下生效了吗"。
+// 具体错误经 `log` 如实落盘（静默吞错误会让"点了没反应"变成谜案）。
+[[nodiscard]] auto Application::window_control_available() const -> bool {
+  return impl_->backend != nullptr && impl_->backend->supports_window_control();
+}
+
+[[nodiscard]] auto Application::window_minimize() -> bool {
+  if (impl_->backend == nullptr) return false;
+  const auto status = impl_->backend->minimize();
+  if (!status) log::warn("最小化窗口失败：{}", status.error().message);
+  return status.has_value();
+}
+
+[[nodiscard]] auto Application::window_toggle_maximize() -> bool {
+  if (impl_->backend == nullptr) return false;
+  const auto status = impl_->backend->toggle_maximize();
+  if (!status) log::warn("最大化/还原窗口失败：{}", status.error().message);
+  return status.has_value();
+}
+
+[[nodiscard]] auto Application::window_request_close() -> bool {
+  if (impl_->backend == nullptr) return false;
+  const auto status = impl_->backend->request_close();
+  if (!status) log::warn("请求关闭窗口失败：{}", status.error().message);
+  return status.has_value();
+}
+
+[[nodiscard]] auto Application::window_begin_move() -> bool {
+  if (impl_->backend == nullptr) return false;
+  const auto status = impl_->backend->begin_move();
+  // 拖动失败**不报 warn**：无头/桩后端下这是常态（没窗口可拖），
+  // 而它每次按下都会发生——刷屏会把真正值得看的日志淹掉。
+  return status.has_value();
+}
+
+[[nodiscard]] auto Application::window_begin_resize(ui::WindowEdge edge) -> bool {
+  if (impl_->backend == nullptr) return false;
+  const auto status = impl_->backend->begin_resize(edge);
+  return status.has_value();
+}
+
+[[nodiscard]] auto Application::window_maximized() const -> bool {
+  return impl_->backend != nullptr && impl_->backend->maximized();
+}
+
 auto Application::control_port() const noexcept -> std::uint16_t {
   return impl_->server != nullptr ? impl_->server->port() : 0;
 }
@@ -330,6 +379,9 @@ auto Application::start() -> Status {
   window.scale = options_.scale;
   window.title = options_.title;
   window.renderer = options_.renderer;
+  // 窗框一律自绘（`CONVENTIONS.md` §10 第 7 条）：把开关如实交给后端。
+  window.decorations = options_.decorations;
+  window.resizable = options_.resizable;
   window.headless = impl_->backend->headless();
   if (auto status = impl_->backend->create_window(window); !status) {
     // 自动选择的后端开不出窗口（例如探测到 libX11 但没有可用显示服务）→ 按约定回退 headless，

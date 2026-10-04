@@ -592,6 +592,148 @@ Chrome 边缘：  背景(24,24,29) → 蓝(24,24,133) → 亮(172,205,211)   ←
 默认 **`normal`（所有场景，与亚像素同一口径：内置通道与桌面同源；需要不改字形边沿的
 可断言基准时显式传 `off`）**。启动日志与协议 `metrics.text_fit` 可查。
 
+### 4.3.3 字形位图的采样格锢定（与拟合同量级的锐度项）
+
+**起因**：2026-10-04 用户再次反馈「字体渲染还是不够清晰」。先按浏览器 1:1 对照取证
+（`tools/text_sharpness_probe.cpp` 全组合量尺 + `text_ab_probe.cpp`/`text_ab_report.py`
+与 Edge 逐像素 A/B），把「糊」拆成可分别修的两项，本条的发现是其中**与拟合无关**的那一项。
+
+**缺陷**：`TextRenderer::glyph_bitmap` 的位图原点原来是
+`min_x = floor(bounds.x) - padding`——它落在**采样单位**上，而 `supersample > 1` 时
+（本机 1.5× DPI → `supersample = 2`）多半**不是** `supersample` 的整数倍。后果两条：
+
+1. 输出像素 x 平均的采样列是 `[x·ss, (x+1)·ss)`；原点错半个物理像素时这个窗口
+   **横跨两个物理像素**，等于把墨迹向水平方向糊开；
+2. `offset_x = min_x / supersample` 是 C++ 的整数**截断**（向零），
+   负的奇数原点会与 `floor` 差 1，位图落点再错一像素。
+
+症状：同一字形的锐度随字号**奇偶交替**（实测「三」在 21.5px 的中间调占比 **1.788**、
+22.0px 只有 **0.037**；相位抖动 0.348），且**与抗锯齿模式、网格拟合全都无关**。
+
+**修法**：原点向上/下对齐到 `supersample` 的整数倍（负数按 `floor` 语义，不用整数截断），
+并把该值作为 `GlyphBitmap::origin_x/origin_y` **报出来**。
+
+> **为什么必须报出内部值**：最初写的回归测试断言的是「渲染外观随笔位整数平移而平移」——
+> 把修复**临时回退**后它**依然全绿**（位图原点在不在采样格上时，平移一整格的渲染结果
+> 恰好都自洽）。这正是 `CONVENTIONS.md §7.1` 警告的恒绿测试。
+> 加上 `origin_x/origin_y` 后断言才有抓手：`origin % supersample == 0`
+> （回退后当场变红，已实测）。
+
+**实测收益**（`tools/text_ab_report.py` 同一口径，1.5× DPI）：
+
+| 判据（13.5px 正文） | 修复前 | 修复后 |
+|---|---|---|
+| 与 Edge 的 `mean|Δ|` | 0.345 | **0.295**（−14.5%） |
+| 实心像素均值（霜天 / 浏览器） | 0.761 / 0.772 | **0.809 / 0.819** |
+
+**色调映射这一路已量过，结论是不做**：ClearType / Skia 在 Windows LCD 上还会对覆盖率做
+一次 `a^gamma` + 对比度拉伸的预混合。把该模型施加到霜天现有覆盖率上做参数寻优
+（`tools/text_preblend_fit.py`，5×7 组网格），**最优只比 identity 好 0.7~1.8%**——
+提升全在几何（其中心拟合最优的 ⌀ 参数就是 `gamma=1, contrast=0`）。
+因此该方向在当前几何质量下**不值得做**，数字留在量尺里，避免下次又去追。
+
+### 4.3.4 字重（`FontWeight`）——从「只是个属性」到「落到像素」
+
+**缺陷**：`Element::paint_text`（`src/ui/element.cpp`）**完全不读** `style_.font_weight`。
+后果：界面里所有 `SemiBold`/`Bold`/`Medium`（`Heading`、卡片标题、按钮、统计卡大数字、
+标签栏）与 `Regular` **逐像素相同**——标题不显眼、层次全靠字号与颜色撑（实测确认）。
+
+**修法**：合成加粗（fake bold），与 Skia `SkFont::setEmbolden` / FreeType
+`FT_GlyphSlot_Embolden` 同一取向。三处关键口径：
+
+1. **在位图内做，不在贴图时叠绘**：同一份轮廓沿水平正方向按**采样格**平移后重复填充，
+   再一起栅格化。放贴图层会让**灰度模式静默失效**（位移被栅格化取整吃成 0），
+   因为两种模式的采样格宽度不同（亚像素 = 1/(3·ss) 物理像素，灰度 = 1/ss）。
+2. **换算链**：`embolden_radius(物理字号, 档位)`（`ui` 层，纯比例） →
+   `TextRenderer::embolden_steps(半径)`（按当前模式与超采样倍率换成采样格步数，
+   上限 `kMaxEmboldenSteps = 16`）。分开的原因是**采样格只存在于渲染器内部**，
+   端口只能转递物理口径的语义量。
+3. **步数必须进缓存键**：否则 `Regular` 与加粗会命中同一份位图
+   （症状是「字重一会儿生效一会儿不生效」，且取决于谁先被取）。
+
+**幅度校核**（`tools/text_weight_probe.cpp`，20.25px 中英混排）：
+
+| 档位 | 半径 | 墨量增幅 | 峰值覆盖率 |
+|---|---|---|---|
+| Medium | `px/48` | +17% | 不变 |
+| SemiBold | `px/28` | +30% | 不变 |
+| Bold | `px/18` | +42% | 不变 |
+
+**峰值覆盖率不变**是这里的硬判据：它把「变粗」与「变糊」分开
+（把笔画摊平也会让墨量上升，但峰值会下降）。作为参照，Chrome 在同一字体上切
+**真 Bold 字体面**的墨量增幅是 +55%~+79%——那背后是另一套轮廓，
+合成加粗不该去追那个数，否则 CJK 小字的笔画会粘在一起。
+
+**代价**（`tools/text_weight_cost.cpp`，一屏约 2000 字形）：稳态**约 +2%**。
+首次栅格化会贵（位图内多填 2~16 次），但字形位图是缓存的，一帧后就摊平了。
+> 量这个数必须**用同一个渲染器连量多帧**：反复新建画布会把字形缓存抖掉，
+> 量出 +264% 的假数（实测踩到过）。
+
+**测试**：`tests/text_pixel_lattice_test.cpp`（位图原点锢定 + 加粗不变式，含回退验证）与
+`tests/ui_text_weight_test.cpp`（走 `Element::paint` 真实路径——缺陷在 UI 层，
+只测 `TextRenderer` 的用例在缺陷存在时依然全绿，已实测确认）。
+
+### 4.3.5 网格拟合的**护栏预算**（小字号“发虚”的真因）
+
+**起因**：2026-10-04 用户反馈「编辑器字体效果很好，UI 字体还差点意思」。
+这句观感里信息量最大的是**对比**：同帧里等宽（代码，13.5px）与比例（UI，12~14px）
+走的是同一条 `TextRenderer`，唯一差别是**字号与字体面**——所以先把“几何”与“渲染”分开。
+
+**排查过程**（每一步都有量尺，避免凭观感归因；也踩了两个口径坑）：
+
+| 假设 | 量尺 | 结论 |
+|---|---|---|
+| 等宽字体面对比字体面更锐 | `tools/fit_shift_probe.cpp` 等宽/比例竖线扫描 | 两者峰值都到 1.000；字号才是变量 |
+| 拟合在 UI 字号上是负收益 | `tools/text_fit_by_size.cpp` | 反了：12px 中文中间调占比 **2.54 → 0.73**，拟合是大正收益 |
+| 浏览器做了色调映射而我们没有 | `tools/text_preblend_fit.py` 参数寻优 | 否，identity 就是最优（已在 §4.3.3 结论过） |
+| **护栏拦掉了量化本身需要的位移** | `tools/fit_shift_probe.cpp` | **是**——见下 |
+
+> **两个口径坑**（都记在量尺的注释里）：
+> ① 拿“相对背景的暗化量”当覆盖率，会把 `Tone::Muted`（#56647C，亮度本就 103）
+> 误判成「笔画没到满黑」；正确口径是 `(bg−lum)/(bg−fg)`，且**前景要逐区域取**。
+> ② HTML 对照页的字体族会静默回退（`Segoe UI` 缺字时落到 `Microsoft YaHei`），
+> 于是「拉丁用错字面」被当成「渲染差」——对照页必须显式写 `.latin{font-family:'Segoe UI'}`。
+
+**缺陷**：`grid_fit` 的宽度量化与位移护栏**不自洽**。
+
+- 量化把宽度取到整数像素（`round(width_px)`），同时把**移动更小的一侧**锚到网格；
+- 但代码对两侧**各自独立**判定 `|delta| <= max_shift`（默认 0.5），
+- 而量化必然让两侧位移不等：近边 ≤ 0.5，**远边还要额外叠上宽度的取整量**，
+  最坏可到 1.0。
+
+于是常见情况是：近边（0.1px）通过并被应用，远边（0.6~1.0px）被拒——
+笔画被**平移了却没被改宽**：既没拿到网格对齐，又把字形整体推歪一点。
+净效果是更糊，而且**只在细笔画上显形**（字号的相对量化量小）。
+
+**修法**（两条，都是「让量化成对落地」）：
+
+1. **两侧要么一起动、要么都不动**（取消逐边独立判定）；
+2. **预算按需放宽**：量化时 `budget = max_shift + grid/2`（半个像素是 `round` 的
+   最大偏差，即几何必需量）；未量化时不加。
+   另新增 `GridFitOptions::quantize_width` 开关（默认 on），由 `TextRenderer`
+   按**物理尺寸**分档：超过 `kQuantizeBelowPx = 21`（UI 正文最大 14 逻辑 px × 1.5 DPI）
+   就关掉——大字号自己就有满黑像素，量化只剩墨量代价。
+
+**实测**（`tools/fit_shift_probe.cpp`，ss=2，同一把尺子）：
+
+| 判据 | 修复前 | 修复后 |
+|---|---|---|
+| CJK 13.5px：0.45~0.55 **半覆盖**像素 | 310 | **171**（−45%） |
+| CJK 13.5px：中间调占比 | 1.04 | **0.549** |
+| 拉丁 12px：半覆盖像素 | 243 | **114**（−52%） |
+| 22px 中文：墨量变化 | — | **+0.37%**（量化关闭后回到恒等；不关则 +3.5%） |
+
+**端到端**（`tools/text_role_compare.py` 量真实 codeeditor 截图，逐区域归一）：
+侧栏 12px 半覆盖像素 **−9%**、实心像素 **+10%**、墨量 **+1.7%**；
+菜单 14px 墨量 +3.4%（笔画真正占满像素，而不是被摊成灰）。
+
+**测试**：`tests/text_fit_guard_test.cpp`（护栏自洽 + 大字号墨量恒等 + 位图网格稳定，
+三条都做了**回退验证**：把 `budget` 改回 `max_shift` 后第一条当场变红）。
+
+> 一处测试自身的修正：`grid_fit_guard_refuses_excessive_shift` 原本用默认参数验证
+> 「`max_shift=0.1` 时拒绝拟合」。护栏放宽后该反例不再成立——这是**有意**的语义变化，
+> 所以把它改成在 `quantize_width = false` 下测（那里两条边各自吸网格，位移就是 0.5）。
+
 ### 4.4 md
 ```cpp
 namespace st::md {
@@ -665,7 +807,7 @@ class UiRoot {                                   // 树根：布局 → 绘制 �
 };
 }
 ```
-组件库（`include/st/ui/components/*.hpp`）——**已实现 33 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog`。
+组件库（`include/st/ui/components/*.hpp`）——**已实现 35 个**：`Text` `Icon` `Button` `Input` `TextArea` `Checkbox` `Radio` `Switch` `Slider` `Select` `Tabs` `Table` `List` `ScrollView` `ScrollBar` `SplitView` `TitleBar` `WindowFrame` `ProgressBar` `Spinner` `Badge` `Avatar` `Chip` `Card` `Panel` `Divider` `Dialog` `Toast` `Tooltip` `CodeEditor` `MarkdownView` `Tree` `MenuBar` `MenuPanel` `ContextMenu` `FileDialog`。
 **规划中 5 个**（勿在文档外引用，待实现后移入上行）：`IconButton` `Link` `Dropdown` `SegmentedControl` `Sparkline`。
 - 布局：自研 flex 子集（`direction`/`gap`/`padding`/`margin`/`grow`/`shrink`/`align`/`justify`/`wrap`/百分比/固定尺寸/自适应内容）。
 - 样式：`Style` 结构体 + `Theme`（token 表）；状态 `:hover`/`:active`/`:focus`/`:disabled`/`:selected` 由组件按 token 插值。
@@ -976,7 +1118,8 @@ if (palette_open_.value()) {          // 条件声明
 ### 4.6 shell
 ```cpp
 namespace st::shell {
-struct WindowOptions { int width, height; float scale; std::string title; bool headless; bool resizable; };
+struct WindowOptions { int width, height; float scale; std::string title; bool headless;
+                      bool resizable; bool decorations; };   // decorations 默认 false = 自绘窗框
 class Backend {                                   // 纯抽象
  public:
   virtual ~Backend() = default;
@@ -987,6 +1130,14 @@ class Backend {                                   // 纯抽象
   virtual void set_title(std::string_view) = 0;
   virtual Result<void> set_clipboard_text(std::string_view);
   virtual Result<std::string> clipboard_text();
+  // —— 自绘窗框所需的窗口控制（平台中立；不支持时如实报 Unsupported）——
+  virtual bool supports_window_control() const;   // 无头 false
+  virtual Result<void> minimize();                // 最小化
+  virtual Result<void> toggle_maximize();         // 最大化/还原（切换）
+  virtual Result<void> request_close();           // 走与点窗口关闭同一条收尾路径
+  virtual Result<void> begin_move();              // 开始拖动（系统移动模态循环）
+  virtual Result<void> begin_resize(WindowEdge);  // 开始缩放（边缘方向）
+  virtual bool maximized() const;                 // 窗框据此切换按钮形态
 };
 Result<std::unique_ptr<Backend>> create_backend(std::string_view name);   // 自动选择：非 headless 时逐个尝试
 }
@@ -996,6 +1147,49 @@ Result<std::unique_ptr<Backend>> create_backend(std::string_view name);   // 自
 
 **实现状态**：`headless` 与 **`win32` 已实现**；`x11`/`wayland` 目前只做探测与明确的 `Unsupported`
 （UI 层与软件光栅器与平台无关，补后端是纯粹的窗口层工作量）。
+
+**窗口装饰契约（已落地）**：窗框与标题栏**一律由 UI 层自绘，任何平台都不使用系统标题栏**
+（强制约束见 `CONVENTIONS.md` §10 第 7 条）。平台后端的职责因此收窄为三件：贴客户区像素、
+把输入翻译成 `ui::Event`、提供窗口控制（最小化/最大化/关闭/拖拽/边缘缩放）。
+
+落地的接口归属（"一份契约、各处只做自己的事"）：
+
+| 层 | 承担什么 | 为什么在这一层 |
+|---|---|---|
+| `ui::WindowEdge` + `resize_edge_at` | 边缘/角落**判定**（纯函数） | 判定只能有一份（两端都要用），而 `ui` 不能依赖 `shell`（成环）——故住 ui，shell 转发 |
+| `ui::TitleBar`（组件库） | 窗框**标题那一条**：图标/标题/三控制按钮/附属槽（菜单·主题等宿主控件）/拖动/双击/边缘 | 它是界面，与设计令牌/DPI/截图同源；平台层不该碰像素 |
+| `ui::WindowFrame`（组件库） | **组件化的窗口**：标题栏（置顶）+ 内容槽 + **八向缩放边缘条** | 窗口无系统边框后，"可拖动/可缩放"必须由界面提供；做成容器才能一次写好、所有应用一致 |
+| `ui::WindowControl`（端口） | 组件看到窗口动作的**抽象** | `ui` 不认识 `shell::Backend`（依赖倒置，与 `TextPort` 同一手法） |
+| `shell::Backend` | 平台能力（去装饰建窗、`WM_*` 接管、窗口动作） | 平台差异只能住 `platform_*`（§10 第 1 条） |
+| `st::app::Application` | 把两者接起来（转发 + `Status` → `bool`） | 它同时认识后端与 UI 树，且**应用代码零平台分支** |
+
+Win32 侧的做法要点（**"外观自绘、行为仍用系统"**——不重造一遍拖拽手势）：
+
+| 点 | 做法 | 不这么做会怎样（实测/已知） |
+|---|---|---|
+| 建窗风格 | `WS_POPUP \| WS_THICKFRAME \| WS_MINIMIZEBOX \| WS_MAXIMIZEBOX`（去 `WS_CAPTION`/`WS_SYSMENU`） | 留着 `WS_CAPTION` 就是**两条标题栏并存** |
+| `WS_THICKFRAME` | **保留** | 一起去掉 → Aero Snap（拖边吸附）与边缘缩放同时消失，且不报错 |
+| `WM_NCCALCSIZE` | 返回 0（客户区 = 整窗） | 不接管则客户区比窗口小一圈 → 窗框边缘被裁 + DXGI 拉伸整屏发糊 |
+| `WM_NCHITTEST` | 用 `resize_edge_at` 判八向边缘→`HT*`；最大化后不再给边 | 少了它：边缘既不是拖动也不是缩放（"自绘换来功能倒退"） |
+| 最大化尺寸 | `WM_SYSCOMMAND`/`WM_SIZE` 里按 `MonitorFromWindow().rcWork` 校正 | 无边框下系统算不对：**盖住任务栏**、底部多一条（经典副作用） |
+| 最小尺寸 | `WM_GETMINMAXINFO` 给 `240×120`（逻辑） | 能拖到比窗框按钮还窄，且**再也拖不回来** |
+| 拖动/缩放起点 | `WM_NCLBUTTONDOWN` + `HT*`（先 `ReleaseCapture`） | 自己算窗口位置 = 重实现吸附/双屏/任务栏避让 |
+| 标题栏附属槽 | `TitleBar::add_leading/add_trailing`（单行横排由标题栏自己算） | 否则示例只能另建一条与窗框**并列**的顶部栏：两份高度、两个拖拽区 |
+| 「铺满父级」的测量 | `fill_width/fill_height`（取 `available_*` 而非 `max_*`） | 行布局里 `max_width` 是 1e9：直接拿它当尺寸会量出天文宽度，把整行撞爆 |
+
+落地状态（**如实**）：**Win32 已落地**——去装饰建窗 + `WM_NCCALCSIZE`/`WM_NCHITTEST` 接管 +
+窗口控制接口齐备（真窗口验证：客户区 == 窗口矩形、最大化 == 工作区、三动作生效）；
+两个示例都已换壳为 `ui::WindowFrame`（gallery：标题栏内含品牌名 + 当前页名 + 主题/DPI/截图三控件；
+codeeditor：标题栏内含文件名与脏点），旧的装饰性图标与自建顶部栏退役。
+`x11`/`wayland` 仍是探测 + `Unsupported`：它们的 `Backend` 走桩实现，`supports_window_control()`
+返回 `false`、动作如实拒绝——**组件与应用一行不用改**，补后端的活只剩“起无装饰窗口 + 实现那几个动作”。
+
+验证（三道，见 §8.5）：`tests/ui_title_bar_test.cpp`（判定纯函数 + 几何/命中/动作面/无宿主降级 +
+窗框容器：内容槽/边缘条/附属槽）；
+`tools/title_bar_probe.py`（无头：类型/属性面/**动作如实拒绝**）；
+`tools/title_bar_win_check.py`（真窗口：去装饰建窗、**客户区 == 窗口矩形**、最大化 == 工作区、
+三动作生效、`--decorations` 对照分支）；`tools/gallery_frame_shot.py`（示例换壳后取证：
+标题栏/品牌/三控件/内容槽的几何与截图）。
 
 Win32 后端的实现要点（**全部来自实际运行，不是读代码能看出来的**）：
 
@@ -1621,7 +1815,9 @@ mingw 交叉编译——这是 Windows 分支唯一的持续验证手段。
 - ~~**单行 Input 的动作面**~~（2026-10-02 已落地：`invoke submit/activate/clear`
   与 TextArea 对齐；此前只有键盘 Enter 路径能提交，自动化 `invoke submit` 返回
   unsupported——测试 `ui_input_invoke_*` 3 用例 + `tools/input_action_e2e.py` 端到端）；
-- **桌面窗框/标题栏**：示例只能用装饰性图标模拟窗口控制（— □ ×）——平台 shell 层应提供系统标题栏融入或自绘窗框，目前应用层无从谈起；
+ - ~~**桌面窗框/标题栏**~~（**已落地**：窗框一律自绘——`ui::TitleBar` + `ui::WindowControl` 端口 +
+   `shell::Backend` 窗口控制接口；`CONVENTIONS.md` §10 第 7 条，实现要点与验证见 §4.6）；
+
 - **命令面板通用组件**：本次在示例里手写了 CommandPalette（FillViewport + 过滤列表 + 键盘导航）——与 MenuPanel/SelectPanel 同族，值得内置为 `CommandPalette`；
 - **虚拟化长列表**：终端/输出面板用 ScrollView + Text 累积全文，日志长了会退化——需要虚拟化 List（按可见行复用元素）；
 - **编辑器分组**：VSCode 的编辑器组（左右分屏各持独立标签组）当前无法用 Panel 组合自然表达，需要容器级支持。
@@ -1902,7 +2098,10 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
-| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case 超时护栏） | `st test` | 全绿（**637 用例 / 15192 断言**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的字形墨量阈值存量项待校准） |
+| 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
+ 超时护栏） | `st test` | 全绿（**667 用例 / 16661 断言**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的
+字形墨量阈值存
+量项待校准） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
 | 内置通道一致性 | `tools/st_consistency_check.py`：窗口帧缓冲 vs 客户区实际像素（逐像素） + 无头 vs 窗口同参数（scale/文本形态/拟合/截图接近度） | `python tools/st_consistency_check.py`（Windows 真机） | 5 项全过（呈现 0.000%、同源项全等） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
@@ -1912,6 +2111,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
 | 小字锐度量尺 | `tools/stem_phase_probe.cpp`（竖笔画边缘相位与过渡带，支持 `--fit=normal` 对比拟合前后）、`tools/hinting_gain_probe.cpp`（用 FreeType 量各 hinting 档的网格对齐率）、`tools/grid_fit_report.cpp`（中间调占比 + 墨量变化） | 手工编译运行 | 见 §4.3.2 |
 | 控制通道联调 | `tools/st_probe.py`（顺序序列）、`tools/st_shot_region.py`（区域高清截图）、`tools/st_gdb_probe.py`（崩溃复现 + 回溯）、`tools/st_project_check.py`（独立工程闭环：init→写码→构建→驱动→交叉编译）、`tools/st_win_check.py`（win32 窗口路径：wine+Xvfb 下真实键鼠/缩放/退出断言） | 手工运行 | — |
+| 窗框（自绘标题栏） | `tools/title_bar_probe.py`（无头：类型/属性面/动作如实拒绝）+ `tools/title_bar_win_check.py`（真窗口：去装饰建窗、**客户区 == 窗口矩形**、最大化 == 工作区、三动作生效、`--decorations` 对照）+ `tools/gallery_frame_shot.py`（示例换壳取证） | 手工运行 | 全通过（两分支） |
 | 编辑器形态冒烟 | `tools/st_editor_smoke.py`：点击即聚焦（焦点链路）+ `input.text` 送达焦点元素 + 退格复原 + `FillViewport` 浮层铺满视口 + Esc 关闭 | `python3 tools/st_editor_smoke.py all` | 全通过（9 项断言） |
 
 **为什么把"验证脚本"当交付物**：无头框架的正确性证据只能来自"跑起来看"。这几个脚本把

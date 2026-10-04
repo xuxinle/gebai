@@ -15,8 +15,10 @@
 #include <string_view>
 
 #include "st/core/error.hpp"
+#include "st/math/geometry.hpp"
 #include "st/raster/canvas.hpp"
 #include "st/ui/element.hpp"
+#include "st/ui/window_control.hpp"  // 窗框契约（WindowEdge / 缩放带）——定义在 ui 层，理由见该头文件
 
 namespace st::shell {
 
@@ -26,10 +28,32 @@ struct WindowOptions {
   float scale{1.0f};    ///< DPI 缩放（物理像素 = 逻辑 × scale；1.0 = 传统 96dpi）
   std::string title{"霜天应用"};
   bool headless{false};
+  /// 是否可缩放（拖边改尺寸）。
+  ///
+  /// ⚠ 长期是个**静默失效字段**（只有声明、无人读取，建窗恒用 `WS_OVERLAPPEDWINDOW`）；
+  /// 自绘窗框落地时一并接上：`false` = 不带 `WS_THICKFRAME`、边缘不参与缩放命中。
   bool resizable{true};
+  /// 是否让窗口系统画标题栏/边框。
+  ///
+  /// **默认 `false`（窗框一律自绘）**——这是框架契约（`CONVENTIONS.md` §10 第 7 条）：
+  /// 三平台自带标题栏的字号/高度/圆角/配色各不相同，"一块代码三平台外观一致"会从窗框
+  /// 处漏掉；而自绘窗框才与 UI 共用同一套设计令牌、同一套 DPI 口径与**同一份无头截图**。
+  /// `true` 仅留给"确实想要系统窗框"的宿主（如系统级调试工具），不是常规路径。
+  bool decorations{false};
   /// 渲染器：`auto`（按实测性能选）/ `gpu` / `software`。
   std::string renderer{"auto"};
 };
+
+/// 窗口边缘/角落枚举由 `st/ui/window_control.hpp` 定义并在本命名空间**转发**：
+///
+/// 为什么不在这里另立一个：平台中立的判定规则必须只有一份（Win32 的 `HT*` 命中码、
+/// X11 自算、Wayland 交合成器，API 各不相同——"同一次拖拽在两平台差几像素"是最难查的
+/// 那类幽灵）。而**两端都要用它**：后端起窗/命中要用，UI 层（`ui::TitleBar`）决定
+/// "这次按下是拖动还是缩放"也要用。依赖方向决定了落点——`shell.hpp` 已包含 ui 头，
+/// 反向包含会成环，故定义住 ui，这里只转发（调用方仍可写 `shell::WindowEdge`）。
+using ui::WindowEdge;
+/// 缩放命中带（逻辑像素）：与 UI 层同一常量（见 `ui::kWindowResizeBorder`）。
+inline constexpr float k_resize_border = ui::kWindowResizeBorder;
 
 class Backend {
  public:
@@ -82,6 +106,47 @@ class Backend {
   /// 约定：`create_window` 只建不显；应用在**首帧 `present()` 之后**调本函数。
   /// 无头后端不需观感，默认空实现即可。
   virtual void show_when_ready() {}
+
+  // —— 自绘窗框所需的窗口控制 ——
+  //
+  // 存在的理由（`CONVENTIONS.md` §10 第 7 条）：窗框一律自绘，而"最小化/最大化/关闭/
+  // 拖动/缩放"只有窗口系统能做。两端之间必须有**一份平台中立的契约**，否则每个应用
+  // 都要自己写三份平台分支（那正是 §10 第 1 条禁止的）。
+  //
+  // 与 UI 层的 `ui::WindowControl` 端口是**两件事**：这一层是平台后端的能力，
+  // `ui::WindowControl` 是组件看到的抽象（`ui` 不认识 `shell`，依赖方向见
+  // `st/ui/window_control.hpp`）。`st::app::Application` 把两者接上（转发 + 把
+  // `Status` 折成 `bool`），因此 UI 与后端之间不产生任何直接依赖。
+  //
+  // 契约：**所有平台语义一致**；不支持时**如实**报 `Unsupported`（不静默无效——
+  // "点了没反应"与"压根没这个能力"是两件事，调用方要靠返回值区分）。
+
+  /// 是否具备窗口控制能力（无头后端为 `false`；UI 据此如实禁用按钮而不是画一个点不动的装饰）。
+  [[nodiscard]] virtual auto supports_window_control() const noexcept -> bool { return false; }
+  /// 最小化。
+  [[nodiscard]] virtual auto minimize() -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口控制");
+  }
+  /// 最大化/还原（切换）。
+  [[nodiscard]] virtual auto toggle_maximize() -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口控制");
+  }
+  /// 请求关闭——走与用户点窗口关闭按钮**同一条收尾路径**（置 `close_requested`，
+  /// 由应用主循环退出；不能直接 `exit`，进程内还有控制通道/脚本宿主要正常停止）。
+  [[nodiscard]] virtual auto request_close() -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口控制");
+  }
+  /// 开始拖动窗口（自绘标题栏按下时调用）：进入窗口系统的移动模态循环。
+  [[nodiscard]] virtual auto begin_move() -> Status {
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口控制");
+  }
+  /// 开始缩放窗口（自绘窗框边缘按下时调用；`edge` 为 `ui::resize_edge_at` 的判定结果）。
+  [[nodiscard]] virtual auto begin_resize(WindowEdge edge) -> Status {
+    (void)edge;
+    return unexpected(ErrorCode::Unsupported, "该后端不支持窗口控制");
+  }
+  /// 窗口当前是否最大化（自绘窗框据此切换按钮形态）。
+  [[nodiscard]] virtual auto maximized() const noexcept -> bool { return false; }
 };
 
 /// 是否检测到显示服务（DISPLAY / WAYLAND_DISPLAY）。

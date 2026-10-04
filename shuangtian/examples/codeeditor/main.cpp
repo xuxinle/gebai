@@ -30,6 +30,7 @@
 /// 控制通道兼容钩子（`tools/*.py` 与子代理依赖，**不可改名**）：
 /// `#btn-theme`（主题）、`#editor`（活动编辑器）、`#status`（状态栏文案）、
 /// `#sidebar-split`（可拖分栏）、`#sidebar`、`#activity-search`（活动栏）、
+/// `#titlebar`（自绘窗框：`ui::TitleBar`，属性面 `title`、动作面 `minimize`/`maximize`/`close`）、
 /// `#terminal-input` / `#terminal-output`（终端）、`#command-palette`。
 ///
 /// 坐标系：全部逻辑像素；文本索引为 UTF-8 字节偏移且落在码点边界。
@@ -61,6 +62,8 @@
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/split_view.hpp"
 #include "st/ui/components/tabs.hpp"
+#include "st/ui/components/title_bar.hpp"
+#include "st/ui/components/window_frame.hpp"  // 自绘外壳（与 gallery 同一形态）
 #include "st/ui/components/tree.hpp"
 #include "st/ui/dsl.hpp"
 #include "st/ui/icon.hpp"
@@ -380,6 +383,12 @@ struct CodeEditorPage : Component {
   CodeEditorPage(std::vector<Sample> files, std::string workspace)
       : files_(std::move(files)), workspace_(std::move(workspace)) {}
 
+  /// 窗口动作出口（由 `run_app` 注入 `Application`；为空时窗框**如实拒绝**动作，
+  /// 但画面照旧——这正是 `ui::WindowControl` 端口要分离的那两件事）。
+  WindowControl* window_control_{nullptr};
+  /// 外层窗框（由 `run_app` 装配后回填）：标题栏归它所有，本页只负责推标题。
+  WindowFrame* frame_{nullptr};
+
   // —— 状态 ——
   State<std::vector<OpenBuffer>> buffers_{std::vector<OpenBuffer>{}};
   State<std::size_t> active_{0};
@@ -623,17 +632,18 @@ struct CodeEditorPage : Component {
     }
   }
 
-  // —— 1. 标题栏 ——
+  // —— 1. 标题栏：**推给窗框**（本页是内容槽子树，窗框在外层由应用装配）——
+  //
+  // 为什么不再自建：窗框（`ui::WindowFrame`）自带标题栏，标题栏内部的分区排版
+  // （标题带 / 附属槽 / 控制按钮）是它自己的责任；示例里再手写一遍就是两份真相。
+  // 页面只需要把"现在该显示什么"推过去（文件名 + 脏点），与 VSCode 把当前文件名
+  // 写进标题栏同构。旧实现里那句注释留着，因为它是那个坑的原始记录：
+  //   早先这里写成 `spacer(c, 0.0f)` 且当时它=固定 0 宽 → 右对齐静默失效
+  //   （三个图标跟在标题后面，实测 x=209 而非 1268）。现在 `size<=0` = `grow=true`。
   void build_title_bar(Composer& c) {
-    row(c, {.gap = 8.0f, .padding = 12.0f, .height = 36.0f, .id = "titlebar"}, [&] {
-      (void)icon(c, "code", 16.0f);
-      (void)text(c, [this] { return window_title(); }, {.id = "title-text"});
-      // 弹性空隙：把窗口控制推到**右侧**（`spacer()` 默认就是弹性的）。
-      // 注：早先这里写成 `spacer(c, 0.0f)` 且当时它=固定 0 宽 → 右对齐静默失效
-      // （三个图标跟在标题后面，实测 x=209 而非 1268）。现在 `size<=0` = `grow=true`。
-      (void)spacer(c);
-      for (const char* glyph : {"minus", "square", "close"}) (void)icon(c, glyph, 14.0f);
-    });
+    (void)c;
+    if (frame_ == nullptr || frame_->title_bar() == nullptr) return;
+    frame_->title_bar()->set_title(window_title());
   }
 
   // —— 2. 菜单栏（下拉面板经 overlay：`menu_panel_overlay` 是声明式入口）——
@@ -1455,6 +1465,8 @@ struct Options {
   std::uint32_t frames{0};
   int max_ms{0};
   bool enable_script{false};
+  /// 请求系统标题栏/边框（默认关：窗框一律自绘）。仅给排查用。
+  bool decorations{false};
   /// 工作区目录（真实文件模式）：资源管理器/打开/保存全部走 `st::fs` 真实读写；
   /// 缺省回退内置样例工作区（内存模拟）。
   std::string workspace{};
@@ -1480,6 +1492,7 @@ struct Options {
     else if (raw == "--frames") options.frames = static_cast<std::uint32_t>(std::stoi(value("0")));
     else if (raw == "--ms") options.max_ms = std::stoi(value("0"));
     else if (raw == "--workspace") options.workspace = value(".");
+    else if (raw == "--decorations") options.decorations = true;
   }
   return options;
 }
@@ -1494,6 +1507,9 @@ auto run_app(int argc, char** argv) -> int {
   app_options.scale = options.scale;
   app_options.title = "codeeditor · 霜天";
   app_options.headless = options.headless;
+  // 窗框一律自绘：窗口不带系统标题栏（`CONVENTIONS.md` §10 第 7 条）。
+  // 装饰开关仍留给宿主——`--decorations` 是给"就想看系统窗框"的排查场景用的。
+  app_options.decorations = options.decorations;
   app_options.backend = options.headless ? "headless" : std::string{};
   // 脚本能力显式开启：默认关闭，控制通道的 `script` 方法仅在开启后可用
   app_options.enable_script = options.enable_script;
@@ -1506,10 +1522,27 @@ auto run_app(int argc, char** argv) -> int {
 
   st::app::Application app("codeeditor", "0.1.0", app_options);
 
-  // 声明式挂载：整个 IDE 是一个 Component（`mount` 的单根语义正合适——
-  // 这个应用的全部界面都由声明式描述，没有手搭外壳）。
+  // 声明式页面（整个 IDE 是一个 Component：内容槽里的一切由 `build()` 描述）。
   auto page = std::make_shared<CodeEditorPage>(samples(), options.workspace);
-  auto host = dsl::mount(app.root(), page);
+  // 窗框的窗口动作出口：`Application` 实现了 `ui::WindowControl`（转发给后端）。
+  // 在这一处"装"进去，页面内的组件就不需要知道应用/后端的存在（依赖方向单向）。
+  page->window_control_ = &app;
+  // 外壳：`WindowFrame`（与 gallery 同一形态：标题栏 + 内容槽 + 八向缩放边缘）。
+  // 为什么由应用装配而不是写进 `build()`：窗框是**外壳**（也是窗口唯一的拖动/缩放区），
+  // 应当先于声明式内容存在、且不随页面重组而重建；页面只把标题推给它。
+  auto frame = std::make_unique<WindowFrame>("codeeditor · 霜天");
+  frame->set_id("window-frame");
+  frame->set_window_control(&app);       // 三控制按钮 + 边缘条接真实后端
+  if (frame->title_bar() != nullptr) {
+    frame->title_bar()->set_id("titlebar");
+    frame->title_bar()->set_icon("code");
+  }
+  // 内容挂进**窗框内容槽**（`mount_into` 的子树语义正好：声明式只占内容槽）。
+  // 指针在 `set_content` 搬移前取好——之后从根部按 id 取回（与容器无关、更稳）。
+  Element* slot = frame->content();
+  app.set_content(std::move(frame));
+  page->frame_ = dynamic_cast<WindowFrame*>(app.root().find("window-frame"));
+  auto host = dsl::mount_into(app.root(), *slot, page);
   if (host == nullptr) {
     std::fprintf(stderr, "声明式挂载失败\n");
     return 1;
