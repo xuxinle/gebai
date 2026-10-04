@@ -673,6 +673,18 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   /// 边界值 21 不是拍的：UI 正文最大 14 逻辑 px × 1.5 DPI = **21 物理像素**，
   /// 而 22 以上（大标题/大数字）已经不需要量化——两个区间的实测各有依据。
   constexpr float kQuantizeBelowPx = 21.0f;
+  /// **宽度量化开关的环境变量覆写**（对照实验用，`ST_TEXT_QUANTIZE=0/1`）。
+  ///
+  /// 为什么要这个口子：实测发现在 20.25px 上**字间墨量极差从 18%（fit=off）
+  /// 涨到 34%（fit=normal）**——而本档（≤21px）正好开着宽度量化，
+  /// 它是“逐条笔画各自 `round`”且**逐字独立**，因此是“字间不一致”的首要嫌疑。
+  /// 用这个开关把它单独二分（其余拟合逻辑不动），而不是靠推断。
+  const bool quantize_enabled = [] {
+    if (const auto value = fs::read_env("ST_TEXT_QUANTIZE"); value.has_value() && !value->empty()) {
+      return !(*value == "0" || *value == "false" || *value == "off");
+    }
+    return true;
+  }();
 
   auto bitmap = std::make_shared<GlyphBitmap>();
   bitmap->cache_key = key;   // 稳定身份 = 上面那份缓存键（与内存地址无关）
@@ -759,7 +771,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
                                                // **细笔画才量化宽度**：量化的收益（根笔画落成满黑像素）只存在于
                                                // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
                                                // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
-                                               .quantize_width = effective_size <= kQuantizeBelowPx,
+                                               .quantize_width = quantize_enabled && effective_size <= kQuantizeBelowPx,
                                                .grid = static_cast<float>(supersample)};
     // `fit_slant_ == 0` = 不覆盖，用头文件的默认值（不在两处各写一份常数）。
     st::text::GridFitOptions effective_options = fit_options;
