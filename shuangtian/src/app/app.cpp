@@ -450,7 +450,23 @@ auto Application::start() -> Status {
   auto stack = st::text::FontStack::system_default();
   if (stack) {
     impl_->fonts = std::make_unique<st::text::FontStack>(std::move(*stack));
-    impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, options_.scale);
+    // **超采样用后端解析出的真实 DPI，而不是 `options_.scale`**（真缺陷，2026-10-04）。
+    //
+    // 为什么：`options_.scale` 在“自动”模式下到这一步**仍是 0**（见上面的 DPI 解析：
+    // 只有显式指定或 ST_SCALE 才赋值，否则留给后端决定）。而超采样是
+    // `max(1, lround(scale))` ⇒ **真窗口 1.5x 下超采样塌成 1**，
+    // 每轴只有 2 级覆盖率、边缘出现可见阶梯 —— 用户反馈的「不够光滑锐利」正是它。
+    //
+    // 而**测试/截图都显式传了 `--scale 1.5`**，于是超采样是 2、看起来比用户实际更光滑：
+    // “感觉没差别”的根源就在这里（量与用不是同一条链路）。
+    //
+    // 后端在 `create_window` 之后已解析出 scale（win32 查窗口 DPI / headless 查系统缩放），
+    // 所以这里读 `backend->device_scale()`；它对显式指定同样返回该值（不改变既有语义）。
+    const float resolved_scale =
+        impl_->backend != nullptr && impl_->backend->device_scale() > 0.0f
+            ? impl_->backend->device_scale()
+            : (options_.scale > 0.0f ? options_.scale : 1.0f);
+    impl_->renderer = std::make_unique<st::text::TextRenderer>(*impl_->fonts, resolved_scale);
     // 文字形态：命令行 > 环境变量 > 默认（两侧同源，见 resolve_text_* 的说明）。
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
     impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
