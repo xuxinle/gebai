@@ -124,7 +124,7 @@ auto resolve_ui_font_scale(std::string_view mode) -> float {
 /// 该主题模式下的**默认覆盖率 gamma**。
 ///
 /// 两个主题的默认值必须不同：预校正的方向按**黑字白底**推导，白字黑底的观感由反方向
-/// 的对比决定。真窗口实测（`tools/realwin_ink_dark.py`）深底理想 γ≈**0.57~0.77**，
+/// 的对比决定。真窗口实测（`tools/calibrate_text_gamma.py measure --theme dark`）深底理想 γ≈**0.57~0.77**，
 /// 而浅底是 **1.05~1.6**——相差近 2 倍，单一默认值必然错一个主题。
 [[nodiscard]] auto default_gamma_for(ui::ThemeMode mode) noexcept -> float {
   return mode == ui::ThemeMode::Dark ? st::text::TextRenderer::kDefaultCoverageGammaOnDark

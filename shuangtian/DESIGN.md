@@ -1290,7 +1290,7 @@ Windows 上只有 `seguisym.ttf`（Segoe UI Symbol）覆盖——而它不在字
 `kDefaultCoverageGamma` 的明文要求（默认值必须用**真机、非无头**参照量过）复核，
 发现该结论是**无头浏览器伪影**。
 
-**方法**（`tools/gen_realwin_page.py` + `tools/realwin_ink2.py`）：
+**方法**（`tools/gen_realwin_page.py` + `tools/realwin_ink.py`）：
 真窗口 Edge/Chrome、`--force-device-scale-factor=1.5`（与系统 150% 缩放一致）、
 一框一行（框 640×96、红描边）、从截图**行投影**自动找文字带、比整幅总墨量。
 真窗口截图的三个坑都记在脚本注释里（工具栏要裁、列范围要取"连续白区"而非全图比例、
@@ -1328,7 +1328,7 @@ Windows 上只有 `seguisym.ttf`（Segoe UI Symbol）覆盖——而它不在字
 γ>1 推向**空**。这个方向是按**黑字白底**推导的；白字黑底时"看起来够不够实"由**反方向**
 的对比决定，所以浅底标出的 γ 不能沿用。
 
-**真窗口实测**（`tools/gen_realwin_page.py --dark` + `tools/realwin_ink_dark.py`；
+**真窗口实测**（`tools/gen_realwin_page.py --dark` + `tools/realwin_ink.py --dark`；
 底 `#0A0F1A` 字 `#E8EEF9`，均为主题 token 原值）：
 
 | 逻辑px | 10 | 11 | 12 | 14 | 16 |
@@ -1355,6 +1355,34 @@ Windows 上只有 `seguisym.ttf`（Segoe UI Symbol）覆盖——而它不在字
 1. 深底页上与浏览器工具栏**都是深色**，靠"接近底色"找内容起点会把工具栏并进来
    （实测多出一条 142px 假带）→ 改靠**框边框色**（深底页用青色 `#00E5FF`）定位。
 2. 深底量尺的覆盖率必须换成 `[深底, 浅字]` 连线；直接沿用浅底的前景/背景会算出负值。
+
+#### 4.3.7.19 gamma 标定**一条命令可复跑**（换 DPI / 字体 / 后端后必须重标）
+
+`kDefaultCoverageGamma`（浅底 1.10）与 `kDefaultCoverageGammaOnDark`（深底 0.60）都是真窗口
+标定值。换 DPI、换字体、换渲染后端之后这两个值**需要重标**——重标流程有七步
+（生成对照页 → 编译探针 → 渲染霜天侧 → 起真窗口浏览器 → 摆窗口 → 截图 → 逐字号插值求根），
+散着做必然漏步或口径漂移。入口：
+
+```sh
+python tools/calibrate_text_gamma.py prepare --theme light   # 或 dark
+#   → 生成对照页、编译探针、渲染霜天侧 5γ×5 字号，并打印**浏览器启动命令**
+#   → 照打印的命令起真窗口浏览器、指向对照页、摆好窗口、截图
+python tools/calibrate_text_gamma.py measure --theme light --ref <截图.png>
+#   → 出行表：逐字号在 5 档 γ 下的墨量比与**理想 γ**（插值求根）
+```
+
+**分工是刻意的**：自动的部分是"确定性的重活"（生成/渲染/量尺/插值），
+**起浏览器与截图留给人**——因为"把真窗口摆到前台且不被遮挡"依赖当前桌面状态，
+而这正是真窗口基准的意义所在（实测：`Start-Process` 起的浏览器会被已有全屏窗口盖住，
+自动化点自绘 UI 的菜单也不可靠，`desktop_locate` 置信度 0.71 的那次点击没打开菜单）。
+
+**量尺已统一为一条路径**（`tools/realwin_ink.py`，浅/深共用；`--dark` 切主题 token）：
+对照页边框**一律青色 `#00E5FF`**（两主题都靠边框色定位内容起点），
+底色/字色由 `--dark` 取 `src/ui/theme.cpp` 的 token 原值。
+
+**自校验**：本入口在落地后立刻复跑了一遍两主题，复现出标定值——
+深底理想 γ 0.604~0.802（中位 0.611，与常量 0.60 一致）、
+浅底 1.079~1.115（与常量 1.10 一致）。**若复跑值与常量差 > 5%，说明参照链路变了，需要重标。**
 
 #### 4.3.7.9 仍未做（下一步方向）
 

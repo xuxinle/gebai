@@ -24,8 +24,9 @@ W, H, TOP, GAP = 640, 96, 8, 12
 BG_DARK = "#0A0F1A"
 FG_DARK = "#E8EEF9"
 FAMILY = "'Segoe UI','Microsoft YaHei'"
-# 框边线用**青色**：深底上红色边框会与主题的 warm 色混，且青色在暗底上更易被
-# 阈值分离（行投影靠它区分"内容起点"）。
+# 框边线一律用**青色**（浅底深底都用它）：量尺靠边框色定位内容起点，
+# 统一颜色才能只维护一条定位路径。青在浅底与深底上都与背景相差极大，
+# 红色的 R 通道在浅底上反而与暗字相近、阈值不易分离。
 EDGE = "#00E5FF"
 
 
@@ -38,7 +39,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     bg = BG_DARK if dark else "#FFFFFF"
     fg = FG_DARK if dark else "#0F172A"
-    edge = EDGE if dark else "#FF0000"
+    edge = EDGE
     rows, y = [], 0
     for size in sizes:
         rows.append(

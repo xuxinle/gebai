@@ -295,7 +295,7 @@ class TextRenderer {
   /// 出厂默认的覆盖率预校正指数。
   ///
   /// **1.10 是拿真窗口浏览器的整幅总墨量标定的**（`tools/gen_realwin_page.py` +
-  /// `tools/realwin_ink2.py`：真窗口、`device-scale-factor 1.5`、一框一行、行投影分带）。
+  /// `tools/realwin_ink.py`：真窗口、`device-scale-factor 1.5`、一框一行、行投影分带）。
   /// 各字号在 γ=1.10 时墨量比落在 **0.99~1.03**；小字号端与正文端的理想 γ 中位数
   /// 只差 **−0.034**，即**理想 γ 与字号无关**——所以只有这一个全局值，没有字号分档。
   ///
@@ -314,7 +314,7 @@ class TextRenderer {
   /// 这个方向是按**黑字白底**定的。白字黑底时，"看起来够不够实"由反方向的对比决定，
   /// 所以浅底标出来的 γ 不能直接沿用。
   ///
-  /// 真窗口实测（`tools/realwin_ink_dark.py`；底色 `#0A0F1A`、字色 `#E8EEF9`）：
+  /// 真窗口实测（`tools/calibrate_text_gamma.py measure --theme dark`；底色 `#0A0F1A`、字色 `#E8EEF9`）：
   ///
   /// | 逻辑px | 10 | 11 | 12 | 14 | 16 |
   /// |---|---|---|---|---|---|
