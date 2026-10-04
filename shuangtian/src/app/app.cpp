@@ -68,7 +68,11 @@ auto resolve_text_fit(std::string_view mode) -> st::text::GridFitMode {
   return st::text::GridFitMode::Light;
 }
 
-auto resolve_text_gamma(std::string_view mode) -> float {
+/// 解析覆盖率 gamma：命令行 > 环境变量 > `fallback`。
+///
+/// `fallback` 由调用方按**当前主题**给（见 `default_gamma_for`）——浅底/深底的正确值
+/// 相差近 2 倍，写死一个必然错一个主题。
+auto resolve_text_gamma(std::string_view mode, float fallback) -> float {
   const auto from_word = [](std::string_view value) -> std::optional<float> {
     if (value.empty() || value == "auto") return std::nullopt;
     if (value == "off" || value == "none" || value == "0" || value == "1") return 1.0f;
@@ -91,7 +95,7 @@ auto resolve_text_gamma(std::string_view mode) -> float {
       return st::text::TextRenderer::sanitize_coverage_gamma(*parsed);
     }
   }
-  return st::text::TextRenderer::kDefaultCoverageGamma;
+  return fallback;
 }
 
 auto resolve_ui_font_scale(std::string_view mode) -> float {
@@ -117,6 +121,16 @@ auto resolve_ui_font_scale(std::string_view mode) -> float {
 }
 
 /// 构造主题并按 `factor` 缩放整条字号阶梯（`factor == 1` 时等同 `Theme::by_mode`）。
+/// 该主题模式下的**默认覆盖率 gamma**。
+///
+/// 两个主题的默认值必须不同：预校正的方向按**黑字白底**推导，白字黑底的观感由反方向
+/// 的对比决定。真窗口实测（`tools/realwin_ink_dark.py`）深底理想 γ≈**0.57~0.77**，
+/// 而浅底是 **1.05~1.6**——相差近 2 倍，单一默认值必然错一个主题。
+[[nodiscard]] auto default_gamma_for(ui::ThemeMode mode) noexcept -> float {
+  return mode == ui::ThemeMode::Dark ? st::text::TextRenderer::kDefaultCoverageGammaOnDark
+                                     : st::text::TextRenderer::kDefaultCoverageGamma;
+}
+
 [[nodiscard]] auto scaled_theme(ui::ThemeMode mode, float factor) -> ui::Theme {
   ui::Theme theme = ui::Theme::by_mode(mode);
   theme.metrics().scale_fonts(factor);
@@ -261,6 +275,11 @@ void Application::set_theme_mode(ui::ThemeMode mode) {
   // `--ui-font-scale` 调好的字号悄悄还原（切主题 → 字号跳回去）。
   root_.set_theme(scaled_theme(mode, impl_->font_scale));
   options_.theme = mode;
+  // **gamma 跟着主题走**：不切的话深色会拿到浅色标定的值（偏亮）、浅色拿到深色的（偏暗）。
+  // 只在用户没显式配置时覆盖——显式值是他自己要的，不该被主题悄悄改掉。
+  if (impl_->renderer != nullptr && options_.text_gamma.empty()) {
+    impl_->renderer->set_coverage_gamma(default_gamma_for(mode));
+  }
 }
 
 auto Application::quit_requested() const noexcept -> bool { return impl_->quit; }
@@ -504,11 +523,13 @@ auto Application::start() -> Status {
     // 文字形态：命令行 > 环境变量 > 默认（两侧同源，见 resolve_text_* 的说明）。
     impl_->renderer->set_subpixel(resolve_text_lcd(options_.text_lcd));
     impl_->renderer->set_grid_fit(resolve_text_fit(options_.text_fit));
-    impl_->renderer->set_coverage_gamma(resolve_text_gamma(options_.text_gamma));
+    impl_->renderer->set_coverage_gamma(
+      resolve_text_gamma(options_.text_gamma, default_gamma_for(options_.theme)));
     // **小字号分档**（见 `AppOptions::text_gamma_small`）：单档 gamma 消不掉“小字比正文
     // 偏重”的落差，小字号单独压一档。未配置就不动（行为与以前完全一致）。
     if (!options_.text_gamma_small.empty()) {
-      const float small = resolve_text_gamma(options_.text_gamma_small);
+      const float small =
+          resolve_text_gamma(options_.text_gamma_small, default_gamma_for(options_.theme));
       impl_->renderer->set_fitted_gamma(options_.text_gamma_small_max, small);
     }
   // **拟合墨量补偿**：拟合对每个字的墨量改变幅度不一致（−27%~+10%），是“有的字清晰、

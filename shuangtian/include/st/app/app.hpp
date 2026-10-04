@@ -36,7 +36,7 @@ namespace st::app {
 /// 四条真实行带全部显示参照比霜天更黑更实（实心像素 75.6/67.5/78.2/79.4% vs 67.0/58.3/50.8/65.6%）。
 /// ⚠ 该默认值曾被改成 2.2（提亮方向）并被用户实测驳回；改动前请读
 /// `st::text::TextRenderer::set_coverage_gamma` 的事故记录与验收口径。
-[[nodiscard]] auto resolve_text_gamma(std::string_view mode) -> float;
+[[nodiscard]] auto resolve_text_gamma(std::string_view mode, float fallback) -> float;
 
 /// 解析界面字号缩放（命令行 `--ui-font-scale` 取值；`auto` 时再看 `ST_UI_FONT_SCALE`）。
 ///

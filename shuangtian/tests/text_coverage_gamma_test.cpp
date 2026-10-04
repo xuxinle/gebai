@@ -78,6 +78,18 @@ struct FontFixture {
 ///     ClearType 调校，覆盖率分布不同，参照一变"理想 γ"跟着变，见 `DESIGN.md §4.3.7.17`）。
 /// 方向由**真窗口参照的整幅总墨量**定，不由用例锁死；用例只守住
 /// "取值合法 + 与常量一致 + 夹取口径正确"。
+/// ② 深底默认值与浅底**不同**：预校正方向按黑字白底推导，白字黑底的观感由反方向
+/// 对比决定，真窗口实测两者理想 γ 相差近 2 倍（浅 1.05~1.6 / 深 0.57~0.77）。
+/// 本用例守住"两个常量同时存在且都合法"，防止有人把深底值删掉退回单一默认。
+ST_TEST(text_coverage_gamma_has_distinct_dark_default) {
+  constexpr float light = TextRenderer::kDefaultCoverageGamma;
+  constexpr float dark = TextRenderer::kDefaultCoverageGammaOnDark;
+  ST_CHECK(light >= 0.3f && light <= 4.0f);
+  ST_CHECK(dark >= 0.3f && dark <= 4.0f);
+  ST_CHECK(light != dark);
+  ST_CHECK(dark < light);  // 深底需要更"加墨"的一档，方向不是自由的
+}
+
 ST_TEST(text_coverage_gamma_default_in_range) {
   FontFixture fixture;
   if (!fixture.ok) return;
