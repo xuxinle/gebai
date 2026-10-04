@@ -28,6 +28,7 @@
 | `ft_compare.py` | 用 FreeType 对照自研 CFF 解释器（仅测试用，不进框架构建） |
 | `lcd_compare.cpp` | 文字抗锯齿对照：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG + 扫描行边缘剖面（仅验证用；手工编译命令见文件头） |
 | `stem_phase_probe.cpp` | **小字锐度量尺**：统计竖笔画的边缘相位与过渡带像素数（“边缘落在整数网格”占比、“最糊相位”占比），用于量化网格拟合/hinting 的收益与验收（仅验证用，编译同 `lcd_compare.cpp`） |
+| `glyph_phase_probe.cpp` | **字形落点相位量尺**：逐字形比“理想浮点笔位”与“实际整数落点”，报**笔位相位分布**、取整挪动量、**相邻字距误差的标准差/最坏值**——用来量化「有无子像素定位」。2026-10-04 实测：字距误差标准差 **0.406 物理像素**（最坏 0.905），即 `draw` 的 `lround` 把整形保留的浮点笔位抹掉了（见 BACKLOG 的“子像素定位”条） |
 | `hinting_gain_probe.cpp` | **hinting 收益测量台**：用 FreeType 把「无 hinting / TARGET_LIGHT / 完整 TT 指令 / auto-hinter / MONO」各档对竖笔画边缘网格对齐率的改善量出来，用来**选实现方向**而不是拍脑袋选最大的那个（需 `-I/usr/include/freetype2 -lfreetype`） |
 | `grid_fit_report.cpp` | 网格拟合**收益量尺**：中间调占比（越低越锐）+ 墨量变化（形变护栏），逐字号逐文字类型 |
 | `grid_fit_sampling_diag.cpp` | **拟合采样格量尺**：逐 supersample 档打印笔画数/生效数/**边缘命中物理像素网格的比例**（比 `grid=1` 与 `grid=supersample`）——用户反馈「拟合没生效/反而更糊」时先跑它 |
