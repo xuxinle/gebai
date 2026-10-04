@@ -10,6 +10,10 @@
  *  误触丢失）；打开状态与位置一起持久化（`gebai.ui.todo.open` / `gebai.ui.todo.pos`），页面刷新
  *  （含 dev-reload）后自动恢复打开与位置。数据源 REST /api/v1/todos；打开期间每 15s 静默同步状态
  *  （列表无变化时不重绘，不打断滚动/编辑）。
+ *
+ *  闲时自动执行**一次执行即终**：成功自动勾选完成，失败（含超时）关闭 ⚡ 并保留失败原因，
+ *  点行内 ⚡ 重新开启后下次队列空闲继续执行。
+ *
  *  拖动范式照 cny-cat.ts（pointerdown + setPointerCapture + 位移钳制 + 丢失捕获兜底）。 */
 import type { UserTodo } from "@gebai/sdk"
 import { autosize, syncSendButton } from "./composer"
@@ -112,7 +116,7 @@ export function closeTodoPop(): void {
 
 /** 数据签名：id/文本/状态任一变化才重绘（定时同步不打断滚动与编辑）。 */
 function signature(): string {
-  return todos.map((t) => `${t.id}:${t.done ? 1 : 0}:${t.idle ? 1 : 0}:${t.idleState ?? ""}:${t.idleResult ?? ""}:${t.idleError ?? ""}:${t.text}`).join("|")
+  return todos.map((t) => `${t.id}:${t.done ? 1 : 0}:${t.idle ? 1 : 0}:${t.idleState ?? ""}:${t.idleAttempts ?? 0}:${t.idleResult ?? ""}:${t.idleError ?? ""}:${t.text}`).join("|")
 }
 
 async function refresh(force = false): Promise<void> {
@@ -249,7 +253,7 @@ function actionBtn(kind: keyof typeof ICON, tip: string, active: boolean, onClic
 function idleMeta(t: UserTodo): HTMLElement | null {
   let text = ""
   if (t.idleState === "running") text = "⚡ 正在执行…（执行会话运行中，完成后自动回写结果）"
-  else if (t.idleState === "failed") text = `⚡ 已停止自动执行：${t.idleError ?? "多次失败"}`
+  else if (t.idleState === "failed") text = `⚡ 已停止闲时自动执行（失败不重试）：${t.idleError ?? "执行失败"}。重新开启 ⚡ 可继续，下次队列空闲时再执行`
   else if (t.done && t.idleResult) text = `⚡ 已完成：${t.idleResult}`
   else if (t.idleError) text = `⚡ 上次失败：${t.idleError}`
   else if (t.idle && t.idleState === "pending") text = "⚡ 闲时自动执行：队列空闲且没有运行中的会话时按顺序执行"
@@ -436,7 +440,7 @@ async function setDone(t: UserTodo, done: boolean): Promise<void> {
 async function setIdle(t: UserTodo, idle: boolean): Promise<void> {
   try {
     patchLocal(await client.updateUserTodo(t.id, { idle }))
-    if (idle) toast("已开启闲时自动执行：队列空闲且没有运行中的会话时自动执行", "ok")
+    if (idle) toast("已开启闲时自动执行：队列空闲且没有运行中的会话时自动执行；单次执行超时 3 小时，失败会关闭本开关并保留失败原因", "ok")
   } catch (err) {
     toast(`修改失败: ${(err as Error).message}`)
     await refresh(true)

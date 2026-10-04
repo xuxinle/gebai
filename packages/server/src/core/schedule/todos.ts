@@ -8,8 +8,9 @@
  * - 闲时自动执行（`todo.idle`）—— 开启时为待办**绑定一个闲时任务**（kind=idle，`todoId` 关联），由任务
  *   调度器在队列空闲且该用户无运行中会话时串行执行；关闭开关即删除绑定任务。
  *
- * 执行结果由任务调度器回调回写（`recordTaskResult`）：成功自动勾选完成并停用绑定任务；失败累计达上限
- * （TODO_MAX_ATTEMPTS）置 failed 并停用，防死循环重试。
+ * 执行结果由任务调度器回调回写（`recordTaskResult`）：成功自动勾选完成并停用绑定任务；失败（含超时）
+ * **关闭闲时自动执行**（`idle=false`、`idleState=failed`、记 `idleError`）并停用绑定任务——不自动重试，
+ * 用户重新开启 ⚡ 即重置状态、下次队列空闲继续执行。
  *
  * 存储范式与任务一致：启动 walkDir 扫描加载 + Map 驻留 + **磁盘真值 RMW** 落盘（跨进程写锁 + 原子写）。
  */
@@ -28,12 +29,12 @@ export const TODO_TEXT_MAX = 2000
 export const TODO_RESULT_MAX = 1000
 /** 单用户待办条数上限（防无限增长；超出拒绝新增）。 */
 export const TODO_MAX_ITEMS = 500
-/** 闲时自动执行连续失败上限（达上限自动停用绑定任务，保留待办与错误原因待人工处理）。 */
-export const TODO_MAX_ATTEMPTS = 3
+/** 待办闲时任务单次执行超时（闲时执行常为长任务，缺省给足 3 小时；可按任务 timeoutMs 覆盖）。 */
+export const TODO_IDLE_TIMEOUT_MS = 3 * 60 * 60 * 1000
 /** 执行会话标题里待办摘要的长度。 */
 const TODO_HEADLINE_MAX = 40
 
-/** 待办执行状态：pending 排队中 / running 执行中 / done 已成功执行 / failed 已放弃（达失败上限）。 */
+/** 待办执行状态：pending 排队中 / running 执行中 / done 已成功执行 / failed 已失败停执行（需重新开启 ⚡）。 */
 export type UserTodoIdleState = "pending" | "running" | "done" | "failed"
 
 /** 用户级待办条目（持久化于 users/{user}/todos.json；数组顺序即清单顺序）。 */
@@ -101,8 +102,6 @@ export interface UserTodoManagerDeps {
   tasks?: TaskManager
   /** 可注入时钟（测试用），默认 Date.now。 */
   now?: () => number
-  /** 闲时执行连续失败上限（缺省 TODO_MAX_ATTEMPTS）。 */
-  maxAttempts?: number
 }
 
 /** 取待办摘要（任务名/会话标题用）：首行 + 截断。 */
@@ -116,12 +115,10 @@ export class UserTodoManager {
   private entries = new Map<string, UserTodo>()
   private tasks: TaskManager | undefined
   private now: () => number
-  private maxAttempts: number
 
   constructor(private deps: UserTodoManagerDeps) {
     this.tasks = deps.tasks
     this.now = deps.now ?? (() => Date.now())
-    this.maxAttempts = deps.maxAttempts ?? TODO_MAX_ATTEMPTS
   }
 
   /** 后挂任务调度器（构造期缺省时调用）。 */
@@ -262,7 +259,7 @@ export class UserTodoManager {
       if (typeof patch?.idle === "boolean" && patch.idle !== next.idle) {
         next.idle = patch.idle
         if (patch.idle) {
-          // 开启闲时自动执行：重置失败计数与状态，重新排队
+          // 开启（或重新开启）闲时自动执行：重置状态与计数，下一轮空闲重新执行
           next.idleState = "pending"
           next.idleAttempts = 0
           next.idleError = undefined
@@ -335,9 +332,9 @@ export class UserTodoManager {
     if (taskId) {
       bound = await tasks.get(user, taskId)
       if (!bound) taskId = undefined
-      else if (!bound.enabled || bound.prompt !== entry.text) {
-        // 勾选/停用后的重新执行：恢复启用并同步文本
-        await tasks.update(user, taskId, { enabled: true, prompt: entry.text })
+      else if (!bound.enabled || bound.prompt !== entry.text || bound.timeoutMs !== TODO_IDLE_TIMEOUT_MS) {
+        // 停用后的重新执行：恢复启用并同步文本/闲时超时缺省
+        await tasks.update(user, taskId, { enabled: true, prompt: entry.text, timeoutMs: TODO_IDLE_TIMEOUT_MS })
       }
     }
     if (!taskId) {
@@ -390,26 +387,24 @@ export class UserTodoManager {
             updatedAt: run.endedAt,
           }
         }
-        const failed = attempts >= this.maxAttempts
         const base = run.error ?? run.status
+        // 闲时自动执行的待办：一次失败即关闭闲时运行（idle=false、idleState=failed、记因）——
+        // 不自动重试；用户重新开启 ⚡ 即重置状态继续（普通待办手动执行只记因，不改开关）
         return {
           ...e,
           idleAttempts: attempts,
           idleRunAt: run.endedAt,
           updatedAt: run.endedAt,
           ...(e.idle
-            ? {
-                idleState: failed ? ("failed" as const) : ("pending" as const),
-                idleError: failed ? `${base}；已累计失败 ${attempts} 次，已停止闲时自动执行（可关闭再开启以重试）` : base,
-              }
+            ? { idle: false, idleState: "failed" as const, idleError: `${base}（重新开启 ⚡ 可继续，下次队列空闲再执行）` }
             : { idleError: base }),
         }
       }),
     )
-    // 成功或达失败上限：停用绑定任务（避免闲时反复重跑；重新执行待办会自动恢复启用）。
+    // 成功或失败：停用绑定任务（一次执行即终，不自动重跑；重新开启闲时或手动执行会自动恢复启用）。
     // 判定用**落盘后的最新状态**——`entry` 是 persist 之前的对象，计数与 idle 标记可能已被本次写入改动
     const fresh = this.entries.get(todoId)
-    if (fresh?.idle && fresh.idleTaskId && (ok || (fresh.idleAttempts ?? 0) >= this.maxAttempts)) {
+    if (fresh?.idleTaskId && (ok || !fresh.idle)) {
       await this.tasks?.update(fresh.user, fresh.idleTaskId, { enabled: false }).catch(() => {})
     }
   }
@@ -441,9 +436,11 @@ export class UserTodoManager {
     if (todo.idleTaskId) {
       const existing = await tasks.get(todo.user, todo.idleTaskId)
       if (existing) {
-        const patch: { prompt?: string; enabled?: boolean } = {}
+        const patch: { prompt?: string; enabled?: boolean; timeoutMs?: number } = {}
         if (existing.prompt !== todo.text) patch.prompt = todo.text
         if (!existing.enabled) patch.enabled = true
+        // 超时统一为待办闲时缺省（3 小时）：旧任务在重新开启时校正
+        if (existing.timeoutMs !== TODO_IDLE_TIMEOUT_MS) patch.timeoutMs = TODO_IDLE_TIMEOUT_MS
         if (Object.keys(patch).length) await tasks.update(todo.user, existing.id, patch).catch(() => {})
         return existing.id
       }
@@ -455,6 +452,7 @@ export class UserTodoManager {
       prompt: todo.text,
       target: "ephemeral",
       todoId: todo.id,
+      timeoutMs: TODO_IDLE_TIMEOUT_MS,
       enabled: true,
     })
     await this.persist(todo.user, (disk) => disk.map((e) => (e.id === todo.id ? { ...e, idleTaskId: created.id } : e)))

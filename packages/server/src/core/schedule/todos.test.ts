@@ -10,12 +10,12 @@ import { Sandbox } from "../security/sandbox"
 import { EnvManager } from "../session/env"
 import { SessionStore } from "../session/store"
 import { TaskManager } from "./tasks"
-import { TODO_MAX_ATTEMPTS, TODO_MAX_ITEMS, TODO_TEXT_MAX, UserTodoManager, type UserTodo } from "./todos"
+import { TODO_IDLE_TIMEOUT_MS, TODO_MAX_ITEMS, TODO_TEXT_MAX, UserTodoManager, type UserTodo } from "./todos"
 
 /**
  * 用户级待办（core/schedule/todos.ts）单测：清单 CRUD 与排序持久化、闲时自动执行的绑定联动
  * （建/删/校正绑定的闲时任务）、手动执行入队（复用绑定任务或建一次性任务）、
- * 执行结果回写（自动勾选 / 失败计次达上限停用）、启动加载与多实例 RMW。
+ * 执行结果回写（自动勾选 / 失败关闭闲时运行并停用绑定任务）、启动加载与多实例 RMW。
  *
  * 范式同 tasks.test.ts：注入 now（虚拟时钟）与 fake AgentEngine，任务执行由真实 TaskManager
  * （maxConcurrent 限 1）驱动，断言执行收尾状态时用 waitFor 轮询而非等真实定时器。
@@ -40,7 +40,7 @@ interface Harness {
   busyUsers: Set<string>
 }
 
-function setup(opts: { now?: number; maxAttempts?: number; maxConcurrent?: number } = {}): Harness {
+function setup(opts: { now?: number; maxConcurrent?: number } = {}): Harness {
   const home = mkdtempSync(join(tmpdir(), "gebai-todos-"))
   mkdirSync(join(home, "users", "default"), { recursive: true })
   const store = new SessionStore({ home })
@@ -92,7 +92,7 @@ function setup(opts: { now?: number; maxAttempts?: number; maxConcurrent?: numbe
     tickIntervalMs: 3600_000,
     maxConcurrent: opts.maxConcurrent ?? 1,
   })
-  const todos = new UserTodoManager({ home, store, tasks, now: () => h.clock.t, maxAttempts: opts.maxAttempts ?? TODO_MAX_ATTEMPTS })
+  const todos = new UserTodoManager({ home, store, tasks, now: () => h.clock.t })
   // 执行结果回写链路（生产接线：任务调度器收尾 → 待办回写）
   tasks.onFinished((task: Task, run: TaskRunRecord) => todos.recordTaskResult(task, run))
   h.tasks = tasks
@@ -221,6 +221,7 @@ describe("闲时自动执行的绑定联动", () => {
       expect(task?.todoId).toBe(t.id)
       expect(task?.prompt).toBe("闲时跑一遍")
       expect(task?.runner).toBe("prompt")
+      expect(task?.timeoutMs).toBe(TODO_IDLE_TIMEOUT_MS) // 待办闲时缺省 3 小时超时
       expect(task?.enabled).toBe(true)
       expect(h.todos.boundIdleTaskIds("default")).toEqual([boundId!])
 
@@ -373,8 +374,8 @@ describe("手动执行（入队）", () => {
     }
   })
 
-  test("执行失败按次计回写待办（不静默吞掉）", async () => {
-    const h = setup({ maxAttempts: 2 })
+  test("执行失败回写待办（不静默吞掉）：闲时条目关闭 idle，普通条目只记因", async () => {
+    const h = setup()
     try {
       const t = await h.todos.add("default", { text: "会失败的待办" })
       h.runFail = "模型不可用"
@@ -384,6 +385,8 @@ describe("手动执行（入队）", () => {
       expect(cur.done).toBe(false)
       expect(cur.idleAttempts).toBe(1)
       expect(cur.idleError).toContain("模型不可用")
+      // 未开启闲时自动执行的条目：失败只记因，不涉及 idle 开关
+      expect(cur.idle).toBe(false)
     } finally {
       await cleanup(h)
     }
@@ -418,8 +421,8 @@ describe("执行结果回写（recordTaskResult）", () => {
     }
   })
 
-  test("失败：累计次数，达上限置 failed 并停用绑定任务", async () => {
-    const h = setup({ maxAttempts: 2 })
+  test("失败：关闭闲时运行（idle=false）并停用绑定任务；重新开启后继续执行", async () => {
+    const h = setup()
     try {
       const t = await h.todos.add("default", { text: "回写失败", idle: true })
       const boundId = entryOf(await h.todos.list("default"), t.id).idleTaskId!
@@ -431,20 +434,25 @@ describe("执行结果回写（recordTaskResult）", () => {
         durationMs: 500,
         error: "脚本退出码 1",
       }
-      const task = (await h.tasks.get("default", boundId))!
-      await h.todos.recordTaskResult(task, fail)
+      await h.todos.recordTaskResult((await h.tasks.get("default", boundId))!, fail)
       let cur = entryOf(await h.todos.list("default"), t.id)
       expect(cur.idleAttempts).toBe(1)
-      expect(cur.idleState).toBe("pending")
-      expect(cur.idleError).toContain("脚本退出码 1")
-      expect((await h.tasks.get("default", boundId))?.enabled).toBe(true)
-
-      await h.todos.recordTaskResult(task, fail)
-      cur = entryOf(await h.todos.list("default"), t.id)
-      expect(cur.idleAttempts).toBe(2)
+      expect(cur.idle).toBe(false) // 失败即关闭闲时运行（不重试）
       expect(cur.idleState).toBe("failed")
-      expect(cur.idleError).toContain("已停止闲时自动执行")
+      expect(cur.idleError).toContain("脚本退出码 1")
+      expect(cur.idleError).toContain("重新开启")
       expect((await h.tasks.get("default", boundId))?.enabled).toBe(false)
+
+      // 用户重新开启 ⚡：状态与计数重置、绑定任务复用并恢复启用，下次队列空闲继续执行
+      h.runFail = null
+      h.busyUsers.delete("default")
+      cur = (await h.todos.update("default", t.id, { idle: true }))!
+      expect(cur.idle).toBe(true)
+      expect(cur.idleState).toBe("pending")
+      expect(cur.idleAttempts ?? 0).toBe(0)
+      expect(cur.idleTaskId).toBe(boundId) // 复用原绑定任务
+      await waitFor(async () => entryOf(await h.todos.list("default"), t.id).done === true)
+      expect(h.runCalls.at(-1)?.prompt).toContain("回写失败")
     } finally {
       await cleanup(h)
     }

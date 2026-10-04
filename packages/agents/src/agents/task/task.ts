@@ -14,7 +14,7 @@ export const systemPrompt =
   "你是任务管理助手。任务 = 用户级无人值守执行单元（持久化于用户目录 tasks.json，与会话生命周期解耦——会话删除后任务仍在），三类由 kind 区分：\n" +
   "1) kind=scheduled（定时任务）：按 schedule 表达式到期自动执行；\n" +
   "2) kind=manual（普通任务）：创建即入队（run_now，缺省 true）按顺序执行，也可随时 task_run 再次入队；\n" +
-  "3) kind=idle（闲时任务）：仅在队列空闲（无排队/运行的定时与普通任务）且该用户没有运行中的会话时执行，同时只跑一个。\n" +
+  "3) kind=idle（闲时任务）：仅在队列空闲（无排队/运行的定时与普通任务）且该用户没有运行中的会话时执行，同时只跑一个；**一次执行即终**——成功或失败/超时都停用，不自动重试（失败原因留在 lastError，重新启用即恢复），缺省单次执行超时 3 小时。\n" +
   "工具经本子Agent 命名空间暴露：task_add 创建、task_list 查看、task_update 修改、task_run 手动执行、task_cancel 取消/终止、task_remove 删除、task_files 任务资源文件、task_notify 主动推送通知。\n" +
   "执行体 runner 二选一（三类任务通用）：\n" +
   "- script（脚本运行）：shell 命令在**任务资源目录**（users/{用户}/tasks/{任务id}/）以用户环境执行，产物写在该目录跨次保留，结果写入任务历史并可选通知；\n" +
@@ -23,8 +23,8 @@ export const systemPrompt =
   "定时表达式 schedule（kind=scheduled 必填）：5 段 cron（分 时 日 月 周，如 0 9 * * * 每天 9:00）、@every 30m、@daily/@hourly/@weekly/@monthly、@at 2026-09-01T09:00（一次性，入队后自动停用）；可配 timezone（IANA 名如 Asia/Shanghai，缺省服务器本地时区）；非法表达式创建即拒绝。\n" +
   "队列与度：所有手动执行（task_run）默认排普通任务队尾（front=true 置顶）；定时任务到期自动插队首；额度满或目标会话忙时任务排队等待（运行中的任务不会被中断让出额度）；队列视图用 task_list 的队列信息或 REST /api/v1/tasks/queue 查看。\n" +
   "通知 notify（无人值守任务建议配置）：通道数组，每条 {type,target,webhook_id,secret,at}——type=webhook（任意 http(s) 回调 POST JSON，可直配 target URL 或以 webhook_id 引用 REST /api/v1/webhooks 已注册的事件 Webhook——投递自动带注册密钥的 X-Gebai-Signature HMAC 签名）、feishu（群机器人 webhook 地址，或直接填群 chat_id（oc_ 前缀）以应用身份推送指定群——后者需服务端配置飞书应用凭证，chat_id 可装载 feishu_group 子Agent 用 chats_list 查询；secret 为加签密钥可选）、feishu_chat（同 feishu 的 chat_id 形态）；飞书默认以 markdown 卡片发送，可配 at 名单 @特定人（open_id，或 \"all\"=@所有人——at 含 all 时自动降级文本消息）；通知时机 notify_on（两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发，由执行会话的模型用 task_notify 决定）。服务端可配全局默认通道（GEBAI_TASK_NOTIFY_WEBHOOK / GEBAI_TASK_NOTIFY_FEISHU），任务未配 notify 时自动走全局通道（自配则不叠加）；用户未要求特定通道且未拒绝通知时可不传 notify。\n" +
-  "通知由谁决定（notify_on，两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发——通知完全由执行会话的模型用 task_notify 决定与撑写，例行正常保持静默、异常/需用户知晓时主动推送）。任何模式下模型都可用 task_notify 主动补充通知；无可用通道时通知不可用（任务配 notify 或服务端配全局默认通道）。prompt 型任务有可用通道时，执行会话自动预载本子Agent 并在触发消息里注入任务 ID——执行任务期间不要用 task 的其它工具管理任务。\n" +
-  "可靠性参数：misfire=skip（缺省，停机错过即跳过）/run（启动后立即补跑一次）；timeoutMs 单次执行超时（缺省脚本 5 分钟、提示词 30 分钟，到时终止）；maxConsecutiveErrors 连续失败 N 次自动停用（防错误任务无限重试刷屏，建议通知类任务配置如 5）。\n" +
+  "通知由谁决定（notify_on，两种）：auto（缺省，执行结束自动把最后回复/输出作为通知发出）/ model（调度器不自动发——通知完全由执行会话的模型用 task_notify 决定与撑写，例行正常保持静默、异常/需用户知晓时主动推送）。任何模式下模型都可用 task_notify 主动补充通知；无可用通道时通知不可用（任务配 notify 或服务端配全局默认通道）。prompt 型任务有可用通道时，执行会话自动预载本子Agent 并在触发消息里注入任务 ID——执行任务期间不要用 task 的其它工具管理任务。闲时任务失败不自动重试，需知晓失败时给闲时任务配 notify 通道（notify_on=auto 在执行结束时发出）。\n" +
+  "可靠性参数：misfire=skip（缺省，停机错过即跳过）/run（启动后立即补跑一次）；timeoutMs 单次执行超时（缺省脚本 5 分钟、提示词 30 分钟、闲时 3 小时，到时终止）；maxConsecutiveErrors 连续失败 N 次自动停用（防错误任务无限重试刷屏，建议通知类任务配置如 5）。\n" +
   "任务级环境变量 env（可选，两类执行体通用）：服务端持久化于任务定义，每次执行注入——脚本型注进子进程环境、提示词型注入执行会话的任务 env（模型 Provider 与子Agent 环境读取一并生效），优先级高于进程全局与会话环境。这是无人值守任务获得配置的**正路**：浏览器本地 env 只随交互会话的 prompt 到达服务端，任务触发时无人发包，不注入即拿不到。敏感键名（含 KEY/TOKEN/SECRET/PASSWORD 等）的**值加密后落盘**（AES-256-GCM，密钥内置），回显时为掩码 `***`——掩码原样回传即保留原值（不改动就不要填新值）。加密只防「随手看到」（文件被浏览/被 grep/随备份外带/被模型读进上下文），不防能读取整个数据目录的攻击者；强度要求更高时把配置写进任务资源目录由脚本自行加载。\n" +
   "资源文件：每个任务有独立资源目录，脚本型任务的工作目录即它（相对路径直接读写），文档/配置放这里跨次保留。用 task_files 列目录/读/写/删；也可用通用文件工具直接操作该目录（task_list 输出含目录路径）。\n" +
   "执行记录：每次执行（含定时到期未启动的 skipped）各存一个文件：users/{用户}/task-runs/{任务ID}/{时间}.json（UTC ISO 为名，内容为完整记录：状态/耗时/输出/错误/执行会话）；任务定义文件不含记录，按时间倒序最多保留 200 条（超出删最旧）。需要回看历史时读该目录（或 REST GET /api/v1/tasks/:id/runs?limit=）。\n" +
@@ -63,7 +63,7 @@ function notifyParam(): Record<string, unknown> {
 }
 
 /** 任务类别语义说明（工具描述复用）。 */
-const KIND_NOTE = "任务类别：scheduled=定时（到期自动执行，需 schedule）；manual=普通（创建即入队，可再次手动执行）；idle=闲时（队列空闲且无运行中会话时串行执行）"
+const KIND_NOTE = "任务类别：scheduled=定时（到期自动执行，需 schedule）；manual=普通（创建即入队，可再次手动执行）；idle=闲时（队列空闲且无运行中会话时串行执行；一次执行即终，失败停用不重试）"
 
 function parseAgents(raw: unknown): string[] | undefined {
   if (raw === undefined || raw === null) return undefined
@@ -135,7 +135,7 @@ const add: Tool = {
   description:
     "创建任务（需审批）。" +
     KIND_NOTE +
-    "。runner 二选一：script（shell 在任务资源目录执行）/ prompt（提示词触发一次 Agent 会话）。kind=scheduled 必须给 schedule（5 段 cron / @every 30m / @daily / @at 2026-09-01T09:00）；kind=manual 缺省创建即入队（run_now=false 则只创建）；kind=idle 在队列空闲时执行。可配 timezone/misfire/timeout_ms/max_consecutive_errors/env/notify 与 prompt 型 target（ephemeral/sticky/session）+ agents。",
+    "。runner 二选一：script（shell 在任务资源目录执行）/ prompt（提示词触发一次 Agent 会话）。kind=scheduled 必须给 schedule（5 段 cron / @every 30m / @daily / @at 2026-09-01T09:00）；kind=manual 缺省创建即入队（run_now=false 则只创建）；kind=idle 在队列空闲时执行（一次执行即终，失败停用不重试；缺省超时 3 小时）。可配 timezone/misfire/timeout_ms/max_consecutive_errors/env/notify 与 prompt 型 target（ephemeral/sticky/session）+ agents。",
   requiresApproval: true,
   parameters: schema(
     {
@@ -150,7 +150,7 @@ const add: Tool = {
       target: { enum: ["ephemeral", "sticky", "session"], description: "runner=prompt 执行目标（缺省 ephemeral=每次新建会话；sticky=专用会话复用；session=绑定既有会话）" },
       session_id: { type: "string", description: "target=session 绑定的会话 id（缺省=当前会话）" },
       agents: { type: "array", description: "target=ephemeral/sticky 的预载子Agent 名单", items: { type: "string" } },
-      timeout_ms: { type: "number", description: "单次执行超时毫秒（缺省脚本 5 分钟 / 提示词 30 分钟）" },
+      timeout_ms: { type: "number", description: "单次执行超时毫秒（缺省脚本 5 分钟 / 提示词 30 分钟 / 闲时 3 小时）" },
       env: envParam(),
       max_consecutive_errors: { type: "number", description: "连续失败 N 次自动停用（0=不停用）" },
       notify_on: { enum: ["auto", "model"], description: "通知时机（缺省 auto=执行结束自动发；model=由执行会话的模型用 task_notify 决定）" },
@@ -230,7 +230,7 @@ const update: Tool = {
       target: { enum: ["ephemeral", "sticky", "session"], description: "执行目标" },
       session_id: { type: "string", description: "target=session 绑定的会话 id" },
       agents: { type: "array", description: "预载子Agent 名单（空数组清除）", items: { type: "string" } },
-      timeout_ms: { type: "number", description: "单次执行超时毫秒" },
+      timeout_ms: { type: "number", description: "单次执行超时毫秒（缺省脚本 5 分钟 / 提示词 30 分钟 / 闲时 3 小时）" },
       env: envParam(),
       max_consecutive_errors: { type: "number", description: "连续失败自动停用阈值（0=不停用）" },
       notify_on: { enum: ["auto", "model"], description: "通知时机（auto=执行结束自动发 / model=由执行会话的模型用 task_notify 决定）" },

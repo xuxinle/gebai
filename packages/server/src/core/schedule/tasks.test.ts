@@ -10,7 +10,7 @@ import { Sandbox } from "../security/sandbox"
 import { EnvManager } from "../session/env"
 import { SessionStore } from "../session/store"
 import { isOneShotSchedule, parseSchedule } from "./expr"
-import { TASK_FILE_MAX_BYTES, TASK_MAX_CONCURRENT_DEFAULT, TASK_RUNS_HISTORY, TaskManager, type TaskManagerDeps } from "./tasks"
+import { TASK_FILE_MAX_BYTES, TASK_IDLE_TIMEOUT_MS, TASK_MAX_CONCURRENT_DEFAULT, TASK_RUNS_HISTORY, TaskManager, type TaskManagerDeps } from "./tasks"
 import { TASK_RUNS_KEEP, trimTaskRuns } from "./task-runs"
 
 /**
@@ -974,6 +974,31 @@ describe("闲时任务", () => {
       await waitFor(() => h.runCalls.length === 1)
       await waitDone(h, task.id, 1)
       expect(internal(h, task.id).lastStatus).toBe("success")
+    } finally {
+      await cleanup(h)
+    }
+  })
+
+  test("闲时任务一次执行即终：缺省超时 3 小时，失败不重试（重新启用才继续）", async () => {
+    const h = setup()
+    try {
+      h.runFail = "模型不可用"
+      const task = await h.tasks.add("default", { kind: "idle", runner: "prompt", prompt: "会失败的闲时任务" })
+      expect(task.timeoutMs).toBe(TASK_IDLE_TIMEOUT_MS)
+      await waitDone(h, task.id, 1)
+      expect(internal(h, task.id).lastStatus).toBe("error")
+      expect(internal(h, task.id).enabled).toBe(false) // 失败即停用（不自动重试）
+      expect(internal(h, task.id).nextRunAt).toBeUndefined() // 闲时任务无触发时刻
+      // 时间流逝 + tick 都不会再拉起（此前失败重试路径已移除）
+      h.clock.t += 3600_000
+      await h.tasks.tick()
+      await new Promise((r) => setTimeout(r, 20))
+      expect(h.runCalls).toHaveLength(1)
+      // 显式重新启用后恢复执行
+      h.runFail = null
+      await h.tasks.update("default", task.id, { enabled: true })
+      await waitDone(h, task.id, 2)
+      expect(h.runCalls).toHaveLength(2)
     } finally {
       await cleanup(h)
     }

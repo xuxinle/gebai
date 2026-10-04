@@ -2026,7 +2026,7 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 - **类别（`kind`）只决定何时入队**，执行体与其余参数完全通用：
   - `scheduled` **定时**：按 `schedule` 表达式到期**自动插入队首**（优先级最高；不抢占正在运行的任务，无空槽就在队首等待）
   - `manual` **普通**：创建即入队（`runNow`，缺省 true）按序执行，也可随时手动 `run` 再次入队；入队默认排普通任务队尾，`front=true` 置顶
-  - `idle` **闲时**：仅当队列中无 scheduled/manual 条目、且没有运行中的任务、且该用户没有运行中的会话时启动，**同时只跑 1 个**（串行推进）；用户级待办开启 ⚡ 闲时自动执行时即绑定此类任务（见「用户级待办」）。闲时条目**一次入队即一次执行**：成功执行后自动停用（防空闲时无限重复跑；下一次由待办重开开关或手动执行恢复启用），失败/超时按 tick 周期节流后才重试（`nextRunAt = 结束时刻 + 30s`）；排队顺序由外部清单序提供（待办场景按其清单顺序，其他场景按创建时间）
+  - `idle` **闲时**：仅当队列中无 scheduled/manual 条目、且没有运行中的任务、且该用户没有运行中的会话时启动，**同时只跑 1 个**（串行推进）；用户级待办开启 ⚡ 闲时自动执行时即绑定此类任务（见「用户级待办」）。闲时条目**一次入队即一次执行、一次执行即终**：无论成功还是失败/超时都自动停用，**失败不重试**（原因留在 `lastError`，重新启用——待办重开 ⚡ 或手动执行——即恢复）；缺省单次执行超时 3 小时（`TASK_IDLE_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖）；排队顺序由外部清单序提供（待办场景按其清单顺序，其他场景按创建时间）
 - **执行体（`runner`）**：
   - `script` **脚本运行**：执行 shell 命令（在任务资源目录 `users/{user}/tasks/{task_id}/` 以用户环境运行——目录跨次运行保留产物；环境为进程环境 + 尽力解析的关联会话环境，不依赖会话存活），执行结果（成功/失败 + 输出）写入任务运行历史，并在**来源会话仍存在时**作为消息写回其消息流（`【智体·{类别}「名称」执行结果（成功/失败）】`，如 `【智体·定时任务「日报」执行结果（成功）】`；历史可见、模型可感知；来源会话已删除则静默跳过）。**写回消息为 `role: "user"` + `engineNote: "task"`**（前端渲染为「任务」通知条）——与引擎提醒同规则：思考类模型不接受以 assistant 结尾的请求（写回后它往往成为尾消息，会话下次带工具面的请求会被 400 拒绝，实测）
   - `prompt` **提示词运行 agent**：以指定提示词触发一次完整 Agent 会话（复用主循环），过程与结果在该执行会话的消息流呈现，末条 assistant 消息作为结果摘要进任务记录/通知；**交互模式按执行目标分流**——`ephemeral`/`sticky` 无人值守形态跑 `interactionMode: "none"`（见「交互模式」：需审批工具**自动通过**、不空等 5 分钟审批超时后跳过，脚本模式同样生效；`page_capture`/前端渲染/ask 询问不可用），触发消息附一行「无人值守执行」上下文告知模型；`target=session` 可能有人在场当场审批，保持 `realtime`
@@ -2134,10 +2134,10 @@ export const projectRoot = (env) => string | undefined        // 默认项目根
 
 **用户级**待办清单（标题栏轮盘「待办」按钮打开的可拖动弹窗）：与引擎**会话级**待办（`todo` 工具，agent 自己维护的任务清单，随会话走）语义不同——用户待办属于**用户**（`users/{user}/todos.json`），跨会话/重启保留，供用户自己记事项，可**一键填入输入框**或**入队执行一次**。待办清单与任务清单是**两份独立资源**（待办不等同于任务）：任何待办都随时可手动执行（入队按序跑一次，不要求开启任何开关），只有开启 ⚡ **闲时自动执行**的条目才**绑定一个闲时任务**、由任务调度器在队列空闲且没有运行中的会话时按清单顺序串行执行（见「统一任务管理」→ 闲时类别）。能力由 `GEBAI_IDLE_TODO_ENABLED`（**默认 `true`**）开关：显式 `false` 时 REST 返回 503。
 
-- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留；**落盘走 RMW**（读磁盘真值 → 在真值上应用本次变更函数 → 跨进程写锁内原子写 + 滚动备份，见「统一任务管理」→「多实例」下的写路径；落盘后用真值刷新本地镜像，本进程仅贡献变更）；条目字段 `id`（32 位 hex）/`user`（归属用户）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + `idleTaskId`（绑定的闲时任务 id）+ 执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是执行时的提示词）；开启闲时标记时重置失败计数重新排队，取消勾选完成视作重新排队；启动加载时执行中的状态复位为 pending，并为开启 ⚡ 的未完成待办补齐绑定任务
+- **存储与归属**：用户级 `users/{user}/todos.json`（**数组顺序即清单顺序**），启动 `walkDir` 扫描加载 + Map 驻留；**落盘走 RMW**（读磁盘真值 → 在真值上应用本次变更函数 → 跨进程写锁内原子写 + 滚动备份，见「统一任务管理」→「多实例」下的写路径；落盘后用真值刷新本地镜像，本进程仅贡献变更）；条目字段 `id`（32 位 hex）/`user`（归属用户）/`text`/`done`/`idle`/`createdAt`/`updatedAt` + `idleTaskId`（绑定的闲时任务 id）+ 执行记录（`idleState` pending|running|done|failed / `idleAttempts` / `idleError` / `idleRunAt` / `idleSessionId` / `idleResult`）；单用户上限 500 条、单条文本上限 2000 字符（也是执行时的提示词）；开启（或重新开启）闲时标记时重置状态与计数、重新排队，取消勾选完成视作重新排队；执行失败（含超时）时闲时标记自动关闭（`idle=false` + `idleState=failed` + `idleError` 记因），重新开启 ⚡ 即重置后继续；启动加载时执行中的状态复位为 pending，并为开启 ⚡ 的未完成待办补齐绑定任务
 - **REST 管理面**（前端弹窗与第三方集成共用，写操作不经审批——REST 已有身份认证边界，与任务域同姿态）：`GET /api/v1/todos`（清单）、`POST /api/v1/todos`（新增 `{text, idle?}`，201）、`PATCH /api/v1/todos`（**清单级批量重排** `{ids: [...]}`，拖动排序落库；未列出的条目按原序追加在后防丢失）、`PATCH /api/v1/todos/:id`（`{text?, done?, idle?}`）、`DELETE /api/v1/todos/:id`、`POST /api/v1/todos/:id/run`（**立即执行：入队跑一次**——body `{front?}`，返回 `{todo, queued, position?, reason?, taskId, ephemeral}`；任务能力未启用 503）；条目 id 走 32 位 hex 格式白名单（`:id` 与其子路径 `/run` 同规则），按认证用户过滤（跨用户不可见不可操作），能力关闭时 503
-- **执行链路（统一任务队列）**：手动执行时——待办已有关联任务则把该任务入队（必要时恢复启用并同步文本），否则**建一条一次性普通任务**（`kind=manual`、`runner=prompt`、`prompt=待办文本`、`ephemeral=true`、绑定 `todoId`）入队，执行完自动删除（任务清单不被一次性执行塞满）；闲时自动执行 = 绑定闲时任务的调度行为。两种路径的执行结果都由任务调度器回调 `recordTaskResult` 回写：**成功自动勾选完成**（`done=true`、`idleState=done`、记 `idleResult`/`idleSessionId`，并停用绑定任务）；失败累计 `idleAttempts`，达上限（3 次）置 `idleState=failed` 并停用绑定任务（防死循环重试）。执行会话标题为 `{类别}「任务名」`（如 `普通任务「待办：xxx」`），完整过程与产物在该会话回看
-- **与闲时任务的绑定联动**：开启 ⚡ → 创建（或校正）绑定闲时任务（`kind=idle`、`todoId=待办 id`、`prompt=待办文本`、`target=ephemeral`）；待办文本变更 → 同步任务提示词；关闭 ⚡ → 删除绑定任务；待办勾选完成 → 停用绑定任务（重新手动执行时自动恢复启用）；待办删除 → 连带删除绑定任务
+- **执行链路（统一任务队列）**：手动执行时——待办已有关联任务则把该任务入队（必要时恢复启用并同步文本），否则**建一条一次性普通任务**（`kind=manual`、`runner=prompt`、`prompt=待办文本`、`ephemeral=true`、绑定 `todoId`）入队，执行完自动删除（任务清单不被一次性执行塞满）；闲时自动执行 = 绑定闲时任务的调度行为。两种路径的执行结果都由任务调度器回调 `recordTaskResult` 回写：**成功自动勾选完成**（`done=true`、`idleState=done`、记 `idleResult`/`idleSessionId`，并停用绑定任务）；**失败（含超时）关闭闲时运行**（`idle=false`、`idleState=failed`、`idleError` 记因，并停用绑定任务）——不自动重试，用户重新开启 ⚡ 即重置状态、下次队列空闲继续执行。执行会话标题为 `{类别}「任务名」`（如 `普通任务「待办：xxx」`），完整过程与产物在该会话回看
+- **与闲时任务的绑定联动**：开启 ⚡ → 创建（或校正）绑定闲时任务（`kind=idle`、`todoId=待办 id`、`prompt=待办文本`、`target=ephemeral`、`timeoutMs=3 小时`，旧任务在重新开启时校正超时）；待办文本变更 → 同步任务提示词；关闭 ⚡ → 删除绑定任务；待办勾选完成 → 停用绑定任务（重新手动执行时自动恢复启用）；待办执行失败 → 待办关闭 ⚡（见上）且绑定任务停用（保留绑定，重新开启时复用并恢复启用）；待办删除 → 连带删除绑定任务
 - **弹窗交互（`packages/web/src/todo-pop.ts`）**：
 - **弹窗交互（`packages/web/src/todo-pop.ts`）**：
   - **尺寸**：`min(680px, 94vw) × min(78vh, 860px)`（宽/高各有下限保底）——待办正文即模型提示词（可多行长文），窗口要同时容得下“读全文”与“写长文”；长文本在列表内**折叠展示**（超阈值高度截断 + 「展开全文」/「收起」），避免单条长提示词把列表打爆
@@ -3431,13 +3431,13 @@ COMPACT_E2E_LINES=60 bun run --cwd packages/server scripts/compact-e2e.ts   # �
 | 附件大小上限 | 无强制上限 | 附件上传端点**未做尺寸判定**（原文「20MB」无对应实现；代码中仅飞书图片 20MB 与浏览器桥响应体 20MB 两处，属不同场景） |
 | 任务 tick 周期 | 30 秒 | 调度器检查周期（`TASK_TICK_INTERVAL_MS`：到期入队 + 队列推进） |
 | 任务并发额度 | 每用户 5 | `GEBAI_TASK_MAX_CONCURRENT` 可调（`TASK_MAX_CONCURRENT_DEFAULT`）；定时/普通任务并行上限，闲时任务另受「队列空闲 + 每用户仅 1 个」约束 |
-| 任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 | 单次执行缺省上限（`TASK_SCRIPT_TIMEOUT_MS`/`TASK_PROMPT_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.windDown`——先快速结束运行中的子会话拿结论，再取消会话任务） |
+| 任务执行超时 | 脚本 5 分钟 / 提示词 30 分钟 / 闲时 3 小时 | 单次执行缺省上限（`TASK_SCRIPT_TIMEOUT_MS`/`TASK_PROMPT_TIMEOUT_MS`/`TASK_IDLE_TIMEOUT_MS`，任务 `timeoutMs` 可覆盖，范围 1s~24h；提示词型到时 `engine.windDown`——先快速结束运行中的子会话拿结论，再取消会话任务） |
 | 任务超时上下限 | 1 秒 / 24 小时 | `timeoutMs` 合法区间（`TASK_TIMEOUT_MIN_MS`/`TASK_TIMEOUT_MAX_MS`） |
 | 任务输出保留 | 4000 / 8000 字符 | 任务记录保留输出长度 / 写入会话消息的脚本输出上限 |
 | 任务执行记录 | 每任务 200 条 | 执行记录按文件落盘，保留上限 `TASK_RUNS_KEEP`（超出按时间删最旧）；`TASK_RUNS_HISTORY`（10）仅为展示默认条数；单记录文件读取上限 1 MB（`TASK_RUN_FILE_MAX_BYTES`） |
 | 任务名长度上限 | 100 字符 | `TASK_NAME_MAX`（单用户条数上限 500，`TASK_MAX_ITEMS`） |
 | 任务资源文件上限 | 4 MB | 单文件写入/读取上限（`TASK_FILE_MAX_BYTES`），递归列目录深度上限 6 |
-| 用户待办失败上限 | 3 次 | 待办执行连续失败上限（`TODO_MAX_ATTEMPTS`，达上限停用绑定的闲时任务，`idleError` 记因待人工处理） |
+| 用户待办失败处理 | 一次失败即关闭闲时运行 | 待办闲时自动执行失败（含超时）即 `idle=false`、`idleState=failed`、`idleError` 记因并停用绑定任务——不自动重试，重新开启 ⚡ 重置状态后继续 |
 | 任务通知正文/投递 | 2000 字符 / 10 秒 | 通知卡片单字段（执行结果摘要的输出/错误、`task_notify` 主动通知正文）的保留长度（`NOTIFY_TEXT_MAX`；卡片整体限 12000——`NOTIFY_CARD_MAX`，1.0 lark_md / 2.0 markdown 组件上限，与对话桥接 `truncateForFeishu` 同额）/ 通知 HTTP 投递超时（`NOTIFY_TIMEOUT_MS`） |
 | show html 预览尺寸上限 | 4000 × 2000 px | `width`/`height` 显式预览尺寸上限，超限忽略回退默认 |
 | 脚本桥调用总数上限 | 100 | 单次脚本（js/py 桥）内工具调用总数（`BRIDGE_TOOL_MAX_CALLS`；js 侧别名 `JS_TOOL_MAX_CALLS`） |

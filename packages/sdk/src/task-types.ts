@@ -53,7 +53,7 @@ export interface TaskNotifyResult {
   errors: string[]
 }
 
-/** 任务类别：scheduled=定时（按表达式触发）；manual=普通（入队即按顺序执行）；idle=闲时（队列空闲时串行执行）。 */
+/** 任务类别：scheduled=定时（按表达式触发）；manual=普通（入队即按顺序执行）；idle=闲时（队列空闲时执行一次，成功或失败/超时均停用，失败不重试）。 */
 export type TaskKind = "scheduled" | "manual" | "idle"
 /** 执行体：script=脚本（shell 在任务目录执行）；prompt=提示词（触发一次完整 Agent 会话）。 */
 export type TaskRunner = "script" | "prompt"
@@ -146,7 +146,7 @@ export interface Task {
   stickySessionId?: string
   /** target=ephemeral/sticky 的预载子Agent 名单。 */
   agents?: string[]
-  /** 单次执行超时（缺省 script 5 分钟 / prompt 30 分钟）。 */
+  /** 单次执行超时（缺省 script 5 分钟 / prompt 30 分钟 / idle 3 小时）。 */
   timeoutMs?: number
   /** 任务级环境变量（持久化于任务定义）：脚本型注入子进程环境、提示词型注入执行会话的任务 env，均**高于**继承的会话/全局环境。 */
   env?: Record<string, string>

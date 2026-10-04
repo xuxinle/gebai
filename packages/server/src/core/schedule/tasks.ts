@@ -3,7 +3,8 @@
  * （`users/{user}/tasks.json`）与一条调度队列（每用户一条，并发额度 `GEBAI_TASK_MAX_CONCURRENT`，缺省 5）。
  *
  * 三类任务的差别只在**何时入队**：定时任务到期自动入队（队首）、普通任务由用户/接口入队（队尾，可置顶）、
- * 闲时任务仅在队列空闲（无待定/运行的定时与普通任务）且该用户无运行中的会话时串行执行（占一个额度）。
+ * 闲时任务仅在队列空闲（无待定/运行的定时与普通任务）且该用户无运行中的会话时串行执行（占一个额度），
+ * 且**一次执行即终**——成功或失败均停用、不自动重试（失败等待显式重新启用：待办重开 ⚡ 或手动执行）。
  * 运行中的任务**不因额度不足被中断**：额度满或目标会话忙都只排队等待，下一轮再评估。
  *
  * 执行体两类：script（shell 在任务资源目录执行，结果消息写回来源会话）与 prompt（触发一次完整 Agent 会话，
@@ -61,6 +62,8 @@ export const TASK_TICK_INTERVAL_MS = 30_000
 export const TASK_SCRIPT_TIMEOUT_MS = 5 * 60 * 1000
 /** 提示词型任务单次执行超时缺省（到时取消会话任务）。 */
 export const TASK_PROMPT_TIMEOUT_MS = 30 * 60 * 1000
+/** 闲时任务单次执行超时缺省（待办自动执行多为长任务，给足 3 小时；仍可按任务 timeoutMs 覆盖）。 */
+export const TASK_IDLE_TIMEOUT_MS = 3 * 60 * 60 * 1000
 /** 单次执行超时上下限。 */
 export const TASK_TIMEOUT_MIN_MS = 1_000
 export const TASK_TIMEOUT_MAX_MS = 24 * 60 * 60 * 1000
@@ -363,6 +366,8 @@ export class TaskManager {
     }
     if (entry.state === "queued" && !entry.queue) entry.queue = { source: "manual", enqueuedAt: now }
     if (entry.state !== "queued") entry.queue = undefined
+    // 闲时任务无触发时刻（单次执行即终）：外部写入的陈旧 nextRunAt 在加载时清除
+    if (entry.kind === "idle") entry.nextRunAt = undefined
     // 表达式/时区合法性（add/update 时已拒，此处防外部编辑损坏）：非法直接禁用，
     // 否则时间解析失败回退 +30s 会形成每 30s 触发一次的热循环
     if (entry.kind === "scheduled" && entry.enabled) {
@@ -422,7 +427,7 @@ export class TaskManager {
       name: this.normalizeName(input.name),
       script: input.runner === "script" ? script : undefined,
       prompt: input.runner === "prompt" ? prompt : undefined,
-      timeoutMs: this.validateTimeout(input.timeoutMs),
+      timeoutMs: input.timeoutMs !== undefined ? this.validateTimeout(input.timeoutMs) : kind === "idle" ? TASK_IDLE_TIMEOUT_MS : undefined,
       env: this.validateTaskEnv(input.env),
       notify: this.validateNotify(input.notify, undefined, user),
       notifyOn: normalizeNotifyWhen(input.notifyOn),
@@ -483,6 +488,8 @@ export class TaskManager {
     }
     if (patch.timezone !== undefined) entry.timezone = patch.timezone ? String(patch.timezone).trim() : undefined
     if (patch.misfire !== undefined) entry.misfire = patch.misfire === "run" ? "run" : "skip"
+    // 闲时任务无触发时刻：nextRunAt 不参与调度（单次执行即终，由 enabled 表达可执行性）
+    if (entry.kind === "idle") entry.nextRunAt = undefined
     if (patch.target !== undefined || patch.sessionId !== undefined || patch.runner !== undefined) {
       if (entry.runner === "prompt") {
         entry.target = this.validateTarget(patch.target !== undefined ? patch.target : entry.target)
@@ -733,13 +740,11 @@ export class TaskManager {
 
   /** 闲时任务进场（drain 调用）：仅当该用户无定时/普通任务排队或运行时，把可执行的闲时任务按清单顺序入队。
    *  顺序优先取外部提供的清单顺序（`idleOrder`，用户级待办按其清单序），缺省按创建时间；
-   *  失败重试按 nextRunAt 节流；入队后由 drain 逐个拉起（同时只跑一个）。 */
+   *  入队后由 drain 逐个拉起（同时只跑一个）。 */
   private async enqueueIdle(now: number): Promise<void> {
     for (const user of new Set([...this.entries.values()].map((e) => e.user))) {
       if (!this.idleEligible(user)) continue
-      const idles = [...this.entries.values()].filter(
-        (e) => e.user === user && e.kind === "idle" && e.enabled && e.state === "idle" && (typeof e.nextRunAt !== "number" || e.nextRunAt <= now),
-      )
+      const idles = [...this.entries.values()].filter((e) => e.user === user && e.kind === "idle" && e.enabled && e.state === "idle")
       const order = this.deps.idleOrder?.(user)
       const rank = (e: Task) => {
         const i = order ? order.indexOf(e.id) : -1
@@ -999,6 +1004,11 @@ export class TaskManager {
     entry.startedAt = undefined
     entry.lastStatus = "error"
     entry.lastError = `执行链异常：${msg}`
+    // 闲时任务单次执行即终：异常路径同样停用并落盘，不随队列推进自动重试
+    if (entry.kind === "idle") {
+      entry.enabled = false
+      void this.persistEntry(entry.user, entry).catch(() => {})
+    }
     this.running.delete(entry.id)
     this.publish(entry, "event.task.result", {
       id: entry.id,
@@ -1184,7 +1194,8 @@ export class TaskManager {
         }
         const hintText = hints.length ? `\n\n（${hints.join("")}）` : ""
         const promptText = `${agentNoteHead(`${this.sessionTitle(entry)}触发`)}\n${entry.prompt ?? ""}${hintText}`
-        const timeoutMs = entry.timeoutMs ?? TASK_PROMPT_TIMEOUT_MS
+        // 闲时任务缺省超时 3 小时（旧数据未携带 timeoutMs 时也生效）
+        const timeoutMs = entry.timeoutMs ?? (entry.kind === "idle" ? TASK_IDLE_TIMEOUT_MS : TASK_PROMPT_TIMEOUT_MS)
         let timedOut = false
         // 注意不可 unref：await 挂起的 Promise 不保活事件循环，unref 定时器在「仅剩本定时器」场景
         // （测试/空闲进程）永不触发；finally 必 clear，无泄漏
@@ -1252,15 +1263,11 @@ export class TaskManager {
     } else if (ok) {
       entry.consecutiveErrors = 0
     }
-    // 闲时任务：执行成功即完成使命（自动停用，等待显式重新启用——待办重开开关或手动执行会自动恢复）；
-    // 失败/超时按 tick 周期节流后再试，避免每轮 drain 立即重试
+    // 闲时任务**一次执行即终**：成功或失败/超时都停用（失败不自动重试，原因留在 lastError），
+    // 等待显式重新启用——待办重开 ⚡ 或手动执行会自动恢复
     if (entry.kind === "idle") {
-      if (ok) {
-        entry.enabled = false
-        disabled = true
-      } else {
-        entry.nextRunAt = endedAt + TASK_TICK_INTERVAL_MS
-      }
+      entry.enabled = false
+      disabled = true
     }
     // 一次性定时任务（@at）：触发并入队后即完成调度使命，执行结束停用（不再重算时间）
     if (entry.kind === "scheduled" && isOneShotSchedule(entry.schedule ?? "")) {

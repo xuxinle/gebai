@@ -759,11 +759,11 @@ export class GebaiClient {
   listUserTodos(): Promise<UserTodo[]> {
     return this.get<UserTodo[]>("/api/v1/todos")
   }
-  /** 新增待办（idle=true 表示闲时自动执行：服务端空闲时按清单顺序自动执行）。 */
+  /** 新增待办（idle=true 表示闲时自动执行：服务端空闲时按清单顺序执行一次；失败关闭该标记）。 */
   createUserTodo(input: { text: string; idle?: boolean }): Promise<UserTodo> {
     return this.post<UserTodo>("/api/v1/todos", input)
   }
-  /** 修改待办（文本/完成/闲时标记）。 */
+  /** 修改待办（文本/完成/闲时标记；开启闲时即重置状态，下次队列空闲执行一次）。 */
   updateUserTodo(id: string, patch: { text?: string; done?: boolean; idle?: boolean }): Promise<UserTodo> {
     return fetch(this.apiUrl(`/api/v1/todos/${id}`), {
       method: "PATCH",

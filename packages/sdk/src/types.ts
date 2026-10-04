@@ -313,19 +313,19 @@ export interface TodoItem {
 
 /** 用户级待办（DESIGN「用户级待办」）：用户自己的清单条目，与会话级 TodoItem（agent 自己
  *  维护的任务跟踪）无关。待办可随时手动执行（统一入队）；仅当标记 idle（闲时自动执行）时才
- *  绑定一个闲时任务，由空闲调度按清单顺序串行推进。 */
+ *  绑定一个闲时任务，由空闲调度按清单顺序串行推进（一次执行即终：成功勾选完成，失败关闭 idle）。 */
 export interface UserTodo {
   id: string
   /** 待办内容（执行时同时作为提示词）。 */
   text: string
   done: boolean
-  /** 是否闲时自动执行（开启后由服务端空闲时自动执行）。 */
+  /** 是否闲时自动执行（开启后由服务端空闲时自动执行；执行一次即终，失败时服务端关闭本开关）。 */
   idle: boolean
   createdAt: number
   updatedAt: number
   /** 绑定的闲时任务 id（开启闲时自动执行时生成，关闭即删除）。 */
   idleTaskId?: string
-  /** 执行状态：pending 排队 / running 执行中 / done 已成功 / failed 已放弃（达失败上限）。 */
+  /** 执行状态：pending 排队 / running 执行中 / done 已成功 / failed 已失败停执行（重新开启 idle 继续）。 */
   idleState?: "pending" | "running" | "done" | "failed"
   /** 已尝试执行次数。 */
   idleAttempts?: number

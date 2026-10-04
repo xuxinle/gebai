@@ -418,7 +418,7 @@ function buildEditor(): HTMLElement {
     [
       ["scheduled", "定时任务（按表达式到期执行）"],
       ["manual", "普通任务（入队按序执行）"],
-      ["idle", "闲时任务（队列空闲时串行执行）"],
+      ["idle", "闲时任务（队列空闲时串行执行；一次执行即终，失败停用）"],
     ],
     base.kind,
   )
