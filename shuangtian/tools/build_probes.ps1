@@ -20,7 +20,7 @@ $probes = @(
   'text_sharpness_probe', 'stem_phase_probe', 'text_quality_probe', 'text_ink_conserve',
   'text_fit_by_size', 'fit_shift_probe', 'text_weight_probe', 'text_phase_probe',
   'lcd_compare', 'grid_fit_report', 'text_weight_cost', 'text_ab_probe',
-  'grid_fit_sampling_diag', 'fit_apply_diag', 'glyph_phase_probe', 'stroke_uniformity_probe', 'fit_reject_probe', 'fit_recall_probe'
+  'grid_fit_sampling_diag', 'fit_apply_diag', 'glyph_phase_probe', 'stroke_uniformity_probe', 'stroke_two_axis_probe', 'fit_reject_probe', 'fit_recall_probe'
 )
 if ($Only) { $probes = @($Only) }
 
@@ -38,6 +38,7 @@ foreach ($name in $probes) {
     Write-Host "== OK: $name"
   }
 }
+
 
 
 
