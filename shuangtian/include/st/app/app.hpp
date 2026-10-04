@@ -29,13 +29,13 @@ namespace st::app {
 
 /// 解析覆盖率 gamma 预校正指数（命令行 `--text-gamma` 取值）。
 ///
-/// 取值：`auto`（→ `ST_TEXT_GAMMA` → 默认 `2.2`）/ `off`（= 1.0，旧行为）/ 数值字面量。
-/// 默认 **2.2**（完整线性空间合成）：实测（`build/probe/text_gamma_scan.py`）在 sRGB 编码空间
-/// 混合使霜天的字在线性光口径下比浏览器重 **+13.8%**（墨量）/ **+16.4%**（实心像素），
-/// 表现为“发糊/发胖”；γ=2.2 时降到 +3.3% / +1.1%。
-/// 详细依据与 γ 扫描表见 `st::text::TextRenderer::set_coverage_gamma`。
-/// 传 `off` 得到跨版本可逐像素比对的基准。
-/// 解析失败（拼错/非数）不报错而**回落到默认**：它是连续量，没有“拼错”这个概念。
+/// 取值：`auto`（→ `ST_TEXT_GAMMA` → 默认 `1.0`）/ `off`（= 1.0）/ 数值字面量（`[0.3, 4]`）。
+/// **γ > 1 提亮/减墨，γ < 1 压黑/加墨**。
+///
+/// 默认 **1.0（不做校正）**：该值曾被设为 2.2（完整线性空间合成）并因此引发回归
+/// （用户实测「代码编辑器还不如优化前」：实心像素少 19%、过渡带反而变宽），
+/// 完整事故记录与两条口径教训见 `st::text::TextRenderer::set_coverage_gamma`。
+/// 设施保留是因为方向正确的用法（**加墨**）仍需它——但改默认值前必须先拿到可信参照。
 [[nodiscard]] auto resolve_text_gamma(std::string_view mode) -> float;
 
 struct AppOptions {
@@ -70,12 +70,9 @@ struct AppOptions {
   std::string text_fit{"auto"};
   /// 覆盖率 gamma 预校正：`auto` / `off` / 数值字面量（见 `resolve_text_gamma`）。
   ///
-  /// 默认 2.2：覆盖率 gamma 预校正（见 `st::text::TextRenderer::set_coverage_gamma`）。
-  ///
-  /// 霜天在 sRGB 编码空间做 alpha 混合，而屏幕是 sRGB 非线性——实测（与 Edge 逐像素对照、
-  /// 覆盖率在线性光口径下取）当前**系统性偏重**：墨量 +13.8%、实心像素 +16.4%，
-  /// 即“笔画发胖、中间调太重”的合成空间成因（另一半是几何，归 `text_fit`）。
-  /// 默认值取**完整线性空间合成**（γ = sRGB 编码指数 2.2），实测残留偏差降到 +3.3% / +1.1%。
+  /// **默认 1.0（不校正）**。γ > 1 提亮减墨、γ < 1 压黑加墨。
+  /// 该默认值曾被设为 2.2（完整线性空间合成）并引发回归（实心像素少 19%、
+  /// 过渡带反而变宽）——依据与教训见 `st::text::TextRenderer::set_coverage_gamma`。
   std::string text_gamma{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配

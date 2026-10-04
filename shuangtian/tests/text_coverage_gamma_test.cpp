@@ -69,19 +69,20 @@ struct FontFixture {
 
 }  // namespace
 
-/// ① 默认值：出厂就该开着校正（这是本次修复的行为本身）。
+/// ① 默认值：出厂**不做**校正。
 ///
-/// 为什么值得单独立一条：默认值悄悄改回 1.0（= 回到 code 空间混合）是本缺陷的**原状**，
-/// 而它不会有任何编译或运行错误——只有这条用例会变红。
-ST_TEST(text_coverage_gamma_is_on_by_default) {
+/// 为什么是 1.0 而不是别的：默认值曾被设为 2.2（“完整线性空间合成”，理论正确），
+/// 但用户实测驳回——“代码编辑器还不如优化前”（实心像素 −19%、过渡带反而变宽）。
+/// 本用例就是那个驳回结论的**回归护栏**：谁再把默认值改成提亮方向，这里当场变红。
+ST_TEST(text_coverage_gamma_is_off_by_default) {
   FontFixture fixture;
   if (!fixture.ok) return;
   TextRenderer renderer(*fixture.stack, 1.0f);
-  ST_CHECK_NEAR(renderer.coverage_gamma(), TextRenderer::kDefaultCoverageGamma, 1.0e-6);
-  ST_CHECK(renderer.coverage_gamma() > 1.0f);
-  // 夹取口径：区间外**夹到边界**、NaN 取默认（不是一路 NaN 传下去）。
-  renderer.set_coverage_gamma(0.5f);
   ST_CHECK_NEAR(renderer.coverage_gamma(), 1.0f, 1.0e-6);
+  ST_CHECK_NEAR(renderer.coverage_gamma(), TextRenderer::kDefaultCoverageGamma, 1.0e-6);
+  // 夹取口径：区间外**夹到边界**（下界 0.3 允许压黑方向）、NaN 取默认。
+  renderer.set_coverage_gamma(0.1f);
+  ST_CHECK_NEAR(renderer.coverage_gamma(), 0.3f, 1.0e-6);
   renderer.set_coverage_gamma(99.0f);
   ST_CHECK_NEAR(renderer.coverage_gamma(), 4.0f, 1.0e-6);
   renderer.set_coverage_gamma(std::nanf(""));
@@ -100,9 +101,8 @@ ST_TEST(text_coverage_gamma_maps_linear_light) {
 
   double worst_endpoint = 0.0;
   double worst_mid_error = 0.0;
-  double worst_decrease = 0.0;   // 中段“变浅”的最大逆差（应为 0）
   std::size_t mid_count = 0;
-  std::size_t brightened = 0;
+  std::size_t lightened = 0;
   for (std::size_t index = 0; index < identity.size(); ++index) {
     // 全程用 double 做算术：`-Wdouble-promotion` 在这个工程是错误（本文件初版就因此编不过），
     // 而且这里的判据精度本来就该离 float 远一点（端点要精确到 1e-6）。
@@ -119,24 +119,52 @@ ST_TEST(text_coverage_gamma_maps_linear_light) {
     if (a <= 1.0e-6) worst_endpoint = std::max(worst_endpoint, std::abs(b - a));
     if (a >= 1.0 - 1.0e-6) worst_endpoint = std::max(worst_endpoint, std::abs(b - a));
     if (a <= 1.0e-6 || a >= 1.0 - 1.0e-6) continue;
-    // 中间调：必须变浅（α' ≤ α），且与 sRGB 编码口径吻合。
-    if (b > a + 1.0e-4) {
-      ++brightened;
-      worst_decrease = std::max(worst_decrease, b - a);
-    }
+    // 中间调：γ>1 必须**变浅**（α' ≤ α）——这是它的定义；反向（变黑）说明符号错了。
+    if (b > a + 1.0e-4) ++lightened;
     if (a > 0.15 && a < 0.85) {
       ++mid_count;
       worst_mid_error = std::max(worst_mid_error, std::abs(b - (1.0 - srgb_encode(1.0 - a))));
     }
   }
   st::print("[gamma] 像素 {}，中间调 {}，端点最大偏差 {:.6f}，与 sRGB 编码最大偏差 {:.4f}"
-            "（反向变墨最大 {:.6f}）\n",
-            identity.size(), mid_count, worst_endpoint, worst_mid_error, worst_decrease);
+            "（反向变墨计数 {}）\n",
+            identity.size(), mid_count, worst_endpoint, worst_mid_error, lightened);
   ST_CHECK(mid_count > 20);
-  ST_CHECK_EQ(brightened, static_cast<std::size_t>(0));   // 一个都不许反向变黑
+  // γ=2.2 在中间调**一个都不该变黑**——若出现，说明映射被写反了符号。
+  ST_CHECK_EQ(lightened, static_cast<std::size_t>(0));
   ST_CHECK_NEAR(worst_endpoint, 0.0, 1.0e-6);
   // 3% 是“幂次近似 vs 精确 sRGB 曲线”的固有差（γ=2.2 是 1/2.4 的常用近似）。
   ST_CHECK(worst_mid_error < 0.03);
+}
+
+/// ②b **压黑方向**（γ < 1）也必须成立：中间调变黑、端点仍不动。
+///
+/// 这一条比提亮方向更重要：如果将来要把默认值改成加墨（用户实测偏好的方向），
+/// 靠的就是 γ<1。映射写错方向时“字反而更虚”会很难归因，所以两个方向都钉住。
+ST_TEST(text_coverage_gamma_can_darken) {
+  FontFixture fixture;
+  if (!fixture.ok) return;
+  const std::vector<float> identity = coverage_at(*fixture.stack, U'霜', 1.0f);
+  const std::vector<float> darkened = coverage_at(*fixture.stack, U'霜', 0.7f);
+  ST_REQUIRE(!identity.empty());
+  ST_REQUIRE(identity.size() == darkened.size());
+  std::size_t changed = 0;
+  double worst_endpoint = 0.0;
+  for (std::size_t index = 0; index < identity.size(); ++index) {
+    const double a = static_cast<double>(identity[index]);
+    const double b = static_cast<double>(darkened[index]);
+    if (a <= 1.0e-6 || a >= 1.0 - 1.0e-6) {
+      worst_endpoint = std::max(worst_endpoint, std::abs(b - a));
+      continue;
+    }
+    // γ<1 是**加墨**：α' 必须**变大**（本用例初版就把方向写反了，量出 0 个变黑——
+    // 而库侧一直是对的，画布口径的 ④ 用例同时在跑、当场排除了库的嫌疑）。
+    if (b > a + 1.0e-4) ++changed;
+  }
+  st::print("[gamma] γ=0.7 压黑：{} / {} 个中间调像素变黑，端点最大偏差 {:.6f}\n", changed,
+            identity.size(), worst_endpoint);
+  ST_CHECK(changed > 20);
+  ST_CHECK_NEAR(worst_endpoint, 0.0, 1.0e-6);
 }
 
 /// ③ 缓存分桶：不同 γ 必须拿到**不同**的位图。
@@ -177,19 +205,25 @@ ST_TEST(text_coverage_gamma_is_part_of_cache_key) {
               static_cast<int>(coverage_before.size()));
 }
 
-/// ④ 与混合空间的因果关系：画到画布上时，校正后的字在**线性光口径**下更轻。
+/// ④ 与混合空间的因果关系：γ=2.2 提亮（减墨）、γ=0.7 压黑（加墨），两者都变。
 ///
-/// 口径：黑字白底、13.5px、LCD + 滤波 + 拟合（= 出厂默认那一套）。
-/// 判据用**线性光下的墨量**（Σ 每像素的线性覆盖率），因为它与合成空间无关，
-/// 是和浏览器可比的那个量（实测偏重 +13.8% → +3.3%）。
-ST_TEST(text_coverage_gamma_lightens_rendered_text) {
+/// 口径用**朴素像素亮度**（不做覆盖率反解）：上一轮的教训是反解会带进口径假设，
+/// 而“字看着多黑”是个不需要假设的量。
+/// 另附**线性光口径**的墨量，供与历史数字衔接。
+ST_TEST(text_coverage_gamma_changes_rendered_weight) {
   FontFixture fixture;
   if (!fixture.ok) return;
   constexpr std::string_view kText = "Settings 间距 12 text";
   constexpr std::size_t kWidth = 320;
   constexpr std::size_t kHeight = 60;
 
-  const auto ink_of = [&](float gamma) -> double {
+  struct Stats {
+    double raw_mean_lum{0.0};   ///< 文字像素的平均亮度（越低越黑/越实）
+    double solid_ratio{0.0};    ///< 亮度 <50% 的墨像素占比
+    double band_ratio{0.0};     ///< 亮度 50~90% 的过渡带占比（越高越“灰”）
+    double linear_ink{0.0};     ///< 线性光墨量（Σ(1−线性亮度)）
+  };
+  const auto measure = [&](float gamma) -> Stats {
     st::raster::Canvas canvas{static_cast<int>(kWidth), static_cast<int>(kHeight), 1.0f};
     canvas.clear(st::math::Color{0xFF, 0xFF, 0xFF, 0xFF});
     TextRenderer renderer(*fixture.stack, 1.0f);
@@ -198,27 +232,53 @@ ST_TEST(text_coverage_gamma_lightens_rendered_text) {
     renderer.set_coverage_gamma(gamma);
     (void)renderer.draw(canvas, kText, st::math::Point{2.0f, 2.0f}, 13.5f,
                         st::math::Color{0, 0, 0, 0xFF});
-    // 线性光口径：code/255 的 sRGB 解码；黑字白底时“线性覆盖率”= 1 − 线性亮度。
-    double sum = 0.0;
+    Stats stats;
+    std::size_t inked = 0;
     for (const std::uint32_t pixel : canvas.pixels()) {
       const st::math::Color color = st::math::unpremultiply(pixel);
-      const double linear_norm = static_cast<double>(color.r) / 255.0;
-      const double linear = linear_norm <= 0.04045 ? linear_norm / 12.92
-                                                    : std::pow((linear_norm + 0.055) / 1.055, 2.4);
-      sum += 1.0 - linear;
+      const double lum = (0.2126 * static_cast<double>(color.r) +
+                          0.7152 * static_cast<double>(color.g) +
+                          0.0722 * static_cast<double>(color.b)) /
+                         255.0;
+      const double norm = static_cast<double>(color.r) / 255.0;
+      const double linear = norm <= 0.04045 ? norm / 12.92
+                                            : std::pow((norm + 0.055) / 1.055, 2.4);
+      stats.linear_ink += 1.0 - linear;
+      if (lum >= 0.95) continue;   // 背景不参与
+      ++inked;
+      if (lum < 0.5) stats.solid_ratio += 1.0;
+      else if (lum < 0.90) stats.band_ratio += 1.0;
+      stats.raw_mean_lum += lum;
     }
-    return sum;
+    if (inked > 0) {
+      stats.solid_ratio /= static_cast<double>(inked);
+      stats.band_ratio /= static_cast<double>(inked);
+      stats.raw_mean_lum /= static_cast<double>(inked);
+    }
+    return stats;
   };
 
-  const double identity = ink_of(1.0f);
-  const double corrected = ink_of(TextRenderer::kDefaultCoverageGamma);
-  st::print("[gamma] 线性光墨量：γ=1.0 → {:.1f}，γ={} → {:.1f}（{:+.1f}%）\n", identity,
-            TextRenderer::kDefaultCoverageGamma, corrected,
-            (corrected / identity - 1.0) * 100.0);
-  ST_CHECK(identity > 0.0);
-  // 校正后必须显著更轻；且不能轻到“笔画被抽掉”（>-40% 的护栏）。
-  ST_CHECK(corrected < identity * 0.9);
-  ST_CHECK(corrected > identity * 0.6);
-  // γ = 1.0 必须真是恒等（关掉校正 = 回归旧行为，这条保证“旧行为”真的可取得）。
-  ST_CHECK_NEAR(ink_of(1.0f), identity, 1.0e-6);
+  const Stats base = measure(1.0f);
+  const Stats bright = measure(TextRenderer::kDefaultCoverageGamma > 1.0f
+                                   ? TextRenderer::kDefaultCoverageGamma
+                                   : 2.2f);
+  const Stats dark = measure(0.7f);
+  st::print("[gamma] γ=1.0  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+            base.raw_mean_lum, base.solid_ratio * 100.0, base.band_ratio * 100.0,
+            base.linear_ink);
+  st::print("[gamma] γ=2.2  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+            bright.raw_mean_lum, bright.solid_ratio * 100.0, bright.band_ratio * 100.0,
+            bright.linear_ink);
+  st::print("[gamma] γ=0.7  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+            dark.raw_mean_lum, dark.solid_ratio * 100.0, dark.band_ratio * 100.0, dark.linear_ink);
+  ST_CHECK(base.solid_ratio > 0.0);
+  // 提亮方向：字变浅、实心像素变少、线性墨量变少
+  ST_CHECK(bright.raw_mean_lum > base.raw_mean_lum);
+  ST_CHECK(bright.solid_ratio < base.solid_ratio);
+  ST_CHECK(bright.linear_ink < base.linear_ink * 0.95);
+  // 压黑方向：字变黑、实心像素变多、过渡带变窄（不是“越黑越糊”）
+  ST_CHECK(dark.raw_mean_lum < base.raw_mean_lum);
+  ST_CHECK(dark.solid_ratio > base.solid_ratio);
+  ST_CHECK(dark.band_ratio < base.band_ratio);
+  ST_CHECK(dark.linear_ink > base.linear_ink);
 }

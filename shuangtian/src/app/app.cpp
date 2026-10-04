@@ -448,7 +448,10 @@ auto Application::start() -> Status {
                                       : "关");
     log::info("文字渲染：{} · 网格拟合 {} · 覆盖率 gamma {}（中文字形为 CFF：只做几何拟合，不依赖字体自带指令）",
               impl_->renderer->subpixel() ? "LCD 亚像素（每像素 R/G/B 三重覆盖率）" : "灰度抗锯齿",
-              fit_name, impl_->renderer->coverage_gamma());
+              fit_name,
+              impl_->renderer->coverage_gamma() == 1.0f
+                  ? std::string("关（1.0，不校正）")
+                  : std::format("{}", impl_->renderer->coverage_gamma()));
     impl_->text_port = std::make_unique<RendererTextPort>(*impl_->renderer);
     root_.set_text_port(impl_->text_port.get());
     // 逐 face 记录**路径 / 序号 / 名称**。
