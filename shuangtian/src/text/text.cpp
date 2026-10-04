@@ -1,3 +1,4 @@
+#include <array>
 #include "st/text/text.hpp"
 
 #include <algorithm>
@@ -178,11 +179,55 @@ inline constexpr int kSubpixelColumns = 3;
 /// 位图的 `format` 字段会随之写成 Grayscale，所以混合端不会按 3 通道去读）。
 inline constexpr int kMaxSubpixelWidth = 4096;
 
-/// 子像素轴低通滤波（权重同 FreeType `FT_LCD_FILTER_DEFAULT`：`{8,77,86,77,8}/256`）。
+/// **可选的亚像素轴低通滤波权重**（5 抽头，和应为 256）。
+///
+/// 存在理由：滤波强度是**锐度与彩边的取舍**，而且**代码编辑器的等宽路径对亮度最敏感**
+/// （细笔画在小字号下本来就只有一个过渡像素宽）。同一构建实测（等宽 Cascadia Mono
+/// @物理 20.25px）：
+///
+/// | 滤波 | 过渡带占比 | 彩边强度 |
+/// |---|---|---|
+/// | 默认 `{8,77,86,77,8}` | 0.224 | 0.776 |
+/// | 关闭 | **0.160**（锐 29%） | 1.458（+88%） |
+///
+/// 即只关滤波是“顾此失彼”；这条口子让**中间强度**可测（`ST_TEXT_LCD_TAPS`，
+/// 形如 `8,77,86,77,8`），据此挑一个彩边可接受而又明显更锐的点。
+[[nodiscard]] inline auto resolve_lcd_taps() -> const std::array<float, 5>& {
+  static const std::array<float, 5> taps = [] {
+    std::array<float, 5> result{8.0f, 77.0f, 86.0f, 77.0f, 8.0f};
+    const auto value = fs::read_env("ST_TEXT_LCD_TAPS");
+    if (!value.has_value() || value->empty()) return result;
+    std::array<float, 5> parsed{};
+    int count = 0;
+    std::string_view text = *value;
+    while (!text.empty() && count < 5) {
+      const std::size_t comma = text.find(',');
+      const std::string_view piece = text.substr(0, comma);
+      try {
+        parsed[static_cast<std::size_t>(count)] = std::stof(std::string(piece));
+        ++count;
+      } catch (...) {
+        return result;   // 解析失败就用默认（不静默变成别的滤波器）
+      }
+      if (comma == std::string_view::npos) break;
+      text.remove_prefix(comma + 1U);
+    }
+    if (count != 5) return result;
+    float sum = 0.0f;
+    for (const float tap : parsed) sum += tap;
+    if (sum <= 0.0f) return result;
+    for (float& tap : parsed) tap = tap / sum * 256.0f;   // 归一化到 256
+    return parsed;
+  }();
+  return taps;
+}
+
+/// 子像素轴低通滤波（默认权重同 FreeType `FT_LCD_FILTER_DEFAULT`：`{8,77,86,77,8}/256`，
+/// 可用 `ST_TEXT_LCD_TAPS` 覆盖强度——取舍见 `resolve_lcd_taps`）。
 /// 输入/输出都是**子像素序列**（三值交错、长度 = 3 × 像素数），就地修改；
 /// 边缘按夹取处理（FreeType 同样复制边界，否则笔画端部会凭空变暗）。
 void apply_lcd_filter(std::span<float> subpixels) {
-  constexpr int kWeights[5] = {8, 77, 86, 77, 8};
+  const auto& kWeights = resolve_lcd_taps();
   const std::size_t count = subpixels.size();
   if (count == 0) return;
   const std::vector<float> source(subpixels.begin(), subpixels.end());
@@ -192,7 +237,7 @@ void apply_lcd_filter(std::span<float> subpixels) {
     for (int tap = -2; tap <= 2; ++tap) {
       const std::ptrdiff_t position = static_cast<std::ptrdiff_t>(index) + tap;
       const std::ptrdiff_t clamped = std::clamp(position, std::ptrdiff_t{0}, last);
-      sum += source[static_cast<std::size_t>(clamped)] * static_cast<float>(kWeights[tap + 2]);
+      sum += source[static_cast<std::size_t>(clamped)] * kWeights[static_cast<std::size_t>(tap + 2)];
     }
     subpixels[index] = sum / 256.0f;
   }
@@ -727,6 +772,12 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const auto fit_shift_bucket = static_cast<std::uint64_t>(std::lround(fit_max_shift * 100.0f));
   // 墨量补偿同样进键：它改变位图内容（同 gamma 一类的映射变化）。
   const auto ink_bucket = ink_compensation_ ? 1ULL : 0ULL;
+  // **亚像素滤波强度也进键**：它直接改位图的子像素值（锐度与彩边的取舍），
+  // 漏掉就会“改了 ST_TEXT_LCD_TAPS 看不出变化”（与 gamma/墨量补偿同一类疏漏）。
+  std::uint64_t taps_bucket = 0;
+  for (const float tap : resolve_lcd_taps()) {
+    taps_bucket = taps_bucket * 31ULL + static_cast<std::uint64_t>(std::lround(tap * 16.0f));
+  }
   // **合成加粗步数必须进键**：它是同一字形的不同笔画宽度版本，
   // 混用等于把 Regular 的位图当成 SemiBold 的（症状：“字重一会儿生效一会儿不生效”）。
   // **逐字段顺序混合**（不是“移位后 XOR 拼装”）——六层嵌套的 `mix(mix(...))` 写起来
@@ -737,6 +788,7 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
         correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket, fit_shift_bucket, ink_bucket,
+        taps_bucket,
         static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }

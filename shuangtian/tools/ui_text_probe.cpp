@@ -52,13 +52,18 @@ struct Stats {
   /// 增量只落在右侧 ⇒ 同一根竖笔画的**右边被摊开、左边保持锐利**，字形右重、
   /// 观感发糊。本量直接测这件事：统计所有水平实心游程的**左端覆盖率**与**右端覆盖率**，
   /// 两端都该是过渡像素；若右边系统性更低（更软）就是单向右扩的实证。
+  /// **彩边强度**：亚像素渲染下相邻子像素被不同强度点亮 → 边缘出现红/蓝偏色。
+  /// R 与 B 通道差的最大值（0 = 完全灰度）——关掉 LCD 低通滤波的代价就长在这里，
+  /// 必须与“变锐”一起看，否则又是一次“顾此失彼”。
+  double fringe_max{0.0};
   double left_edge{0.0};
   double right_edge{0.0};
   int edge_runs{0};
 };
 
 auto measure(const TextRenderer& renderer, char32_t codepoint, float pixel_size, float embolden_px,
-             int width, int height, bool real_bold = false) -> Stats {
+             int width, int height, bool real_bold = false,
+             st::text::FontRole role = st::text::FontRole::Proportional) -> Stats {
   const int steps = renderer.embolden_steps(embolden_px);
   const auto bitmap = renderer.glyph_bitmap_of(codepoint, pixel_size, st::text::FontRole::Proportional,
                                                steps, real_bold);
@@ -75,6 +80,13 @@ auto measure(const TextRenderer& renderer, char32_t codepoint, float pixel_size,
   // 逐行找**长度 ≥ 2 的水平实心游程**，取其左右端像素的覆盖率：
   // 若是“按原始轮廓正常渲染”，两端大致对称；若是“单向右扩”，右端系统性更软。
   const int channels = bitmap->format == st::raster::CoverageFormat::Lcd ? 3 : 1;
+  if (channels == 3) {
+    for (std::size_t base = 0; base + 2U < bitmap->coverage.size(); base += 3U) {
+      const double fring = std::abs(static_cast<double>(bitmap->coverage[base]) -
+                                    static_cast<double>(bitmap->coverage[base + 2U]));
+      stats.fringe_max = std::max(stats.fringe_max, fring);
+    }
+  }
   const auto value_at = [&](int x, int y) {
     const std::size_t base =
         (static_cast<std::size_t>(y) * static_cast<std::size_t>(bitmap->width) +
@@ -114,6 +126,9 @@ auto main(int argc, char** argv) -> int {
   /// 合成加粗半径覆盖（物理像素）。默认 -1 = 用样本自带值。
   /// 用途：把 `ST_FONT_CJK` 指向**真粗体面**（如 msyhbd.ttc）时用 `--bold=0`，
   /// 这样比较的是「真粗体」而不是「常规体 + 合成加粗」。
+  /// 用**等宽**角色量（代码编辑器的路径）：比例字体调好后等宽可能完全不同——
+  /// 等宽字形更窄、笔画更细，且同一字串里每字宽度相同（笔画落相位更规律）。
+  bool mono = false;
   float bold_override = -1.0f;
   /// 用**真粗体字体面**（而不是合成加粗）——粗体档的正解，见 `prefers_real_bold`。
   bool real_bold = false;
@@ -123,6 +138,7 @@ auto main(int argc, char** argv) -> int {
     else if (arg == "--scale" && index + 1 < argc) scale = std::stof(argv[++index]);
     else if (arg == "--bold" && index + 1 < argc) bold_override = std::stof(argv[++index]);
     else if (arg == "--realbold") real_bold = true;
+    else if (arg == "--mono") mono = true;
     else if (arg.starts_with("--fit=")) {
       const std::string_view v = arg.substr(6);
       fit = v == "off" ? GridFitMode::Off : (v == "light" ? GridFitMode::Light : GridFitMode::Normal);
@@ -134,17 +150,23 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
   // 与 app 一致：亚像素 + LCD 滤波 + 拟合 + 墨量补偿（gamma/Fit 档位按参数）。
-  const std::vector<Sample> samples = {
-      {"中文常规", "概览组件数据控制通道已就绪刷新指标", 0.0f},
-      {"中文粗体", "概览组件数据控制通道已就绪刷新指标", real_bold ? 0.0f : 0.75f},
-      {"英文常规", "Renderer Pipeline Overview Settings Ggpq", 0.0f},
-      {"英文粗体", "Renderer Pipeline Overview Settings Ggpq", real_bold ? 0.0f : 0.75f},
-  };
+  const std::vector<Sample> samples =
+      mono ? std::vector<Sample>{
+                 {"等宽代码", "namespace st::raster { return fill_path_aa(x); }", 0.0f},
+                 {"等宽中文", "霜天光栅器扫描线覆盖率抗锯齿", 0.0f},
+                 {"等宽数字", "0123456789 ff(){}[];", 0.0f},
+             }
+           : std::vector<Sample>{
+                 {"中文常规", "概览组件数据控制通道已就绪刷新指标", 0.0f},
+                 {"中文粗体", "概览组件数据控制通道已就绪刷新指标", real_bold ? 0.0f : 0.75f},
+                 {"英文常规", "Renderer Pipeline Overview Settings Ggpq", 0.0f},
+                 {"英文粗体", "Renderer Pipeline Overview Settings Ggpq", real_bold ? 0.0f : 0.75f},
+             };
   st::print("逻辑字号={} 缩放={} fit={}\n\n", size, scale,
             fit == GridFitMode::Off ? "off" : (fit == GridFitMode::Light ? "light" : "normal"));
   st::print("{:<10s} {:>8s} {:>10s} {:>10s} {:>10s} {:>11s} {:>10s} {:>10s} {:>10s}\n", "样本",
             "字形数", "墨量均值", "过渡带占比", "过渡/墨像素", "字间离散", "左端覆盖", "右端覆盖",
-            "右-左");
+            "右-左", "彩边");
   for (const Sample& sample : samples) {
     TextRenderer renderer(*stack, static_cast<int>(std::lround(scale)));
     renderer.set_subpixel(true);
@@ -161,6 +183,7 @@ auto main(int argc, char** argv) -> int {
     double band_ratio = 0.0;
     double edge_ratio = 0.0;
     double ink_mean = 0.0;
+    double fringe_max = 0.0;
     double left_edge = 0.0;
     double right_edge = 0.0;
     int edge_runs = 0;
@@ -168,10 +191,12 @@ auto main(int argc, char** argv) -> int {
     const float embolden_px = bold_override >= 0.0f ? bold_override : sample.embolden_px;
     for (const char32_t codepoint : st::utf8_decode(sample.text)) {
       if (codepoint == U' ') continue;
-      const Stats fitted = measure(renderer, codepoint, size * scale, embolden_px, 1, 1, real_bold);
+      const auto role =
+          mono ? st::text::FontRole::Monospace : st::text::FontRole::Proportional;
+      const Stats fitted = measure(renderer, codepoint, size * scale, embolden_px, 1, 1, real_bold, role);
       // 基准必须用**同一个字体面**（真粗体档就用真粗体）——否则 ratio 比的是两个不同设计
       // 的字体，字间离散会被字体设计差异淹没（本探针第二版就踩到：离散虚高到 21.8%/46.9%）。
-      const Stats base = measure(reference, codepoint, size * scale, embolden_px, 1, 1, real_bold);
+      const Stats base = measure(reference, codepoint, size * scale, embolden_px, 1, 1, real_bold, role);
       if (fitted.ink_pixels == 0 || base.ink <= 0.0) continue;
       ratios.push_back(fitted.ink / base.ink);
       band_ratio += static_cast<double>(fitted.band_pixels) /
@@ -179,6 +204,7 @@ auto main(int argc, char** argv) -> int {
       edge_ratio += static_cast<double>(fitted.edge_pixels) /
                     static_cast<double>(std::max(1, fitted.ink_pixels));
       ink_mean += fitted.ink;
+      fringe_max = std::max(fringe_max, fitted.fringe_max);
       left_edge += fitted.left_edge;
       right_edge += fitted.right_edge;
       edge_runs += fitted.edge_runs;
@@ -189,11 +215,11 @@ auto main(int argc, char** argv) -> int {
     const double l_mean = edge_runs ? left_edge / static_cast<double>(edge_runs) : 0.0;
     const double r_mean = edge_runs ? right_edge / static_cast<double>(edge_runs) : 0.0;
     st::print("{:<10s} {:>8d} {:>10.1f} {:>10.3f} {:>10.3f} {:>10.1f}% {:>10.3f} {:>10.3f} "
-              "{:>10.3f}\n",
+              "{:>10.3f} {:>8.3f}\n",
               sample.title, count, ink_mean / static_cast<double>(count),
               count ? band_ratio / static_cast<double>(count) : 0.0,
               count ? edge_ratio / static_cast<double>(count) : 0.0, 100.0 * (*high - *low), l_mean,
-              r_mean, r_mean - l_mean);
+              r_mean, r_mean - l_mean, fringe_max);
   }
   st::print("\n判读：**分三类各看各的**——中文常规 / 中文粗体 / 英文的几何不同，\n"
             "      拿一类的结果代表全部正是“顾此失彼”的来源。\n"
