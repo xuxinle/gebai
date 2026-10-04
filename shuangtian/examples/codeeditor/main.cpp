@@ -1181,7 +1181,13 @@ struct CodeEditorPage : Component {
     };
 
     if (!query.empty() && !workspace_.empty()) {
-      std::vector<std::pair<std::string, int>> stack{{workspace_, 0}};
+      std::vector<std::pair<std::string, int>> stack;
+      // 先占位再 `emplace_back`（而不是用初始化列表直接构造）：
+      // 一是搜索循环里少几次扩容，二是绕开 GCC 16 在 release 内联下的
+      // `-Wfree-nonheap-object` **误报**（它把初始化列表构造的 vector 析构
+      // 误判成释放了带偏移的指针，配合 `-Werror` 会直接挡住 release 构建）。
+      stack.reserve(64);
+      stack.emplace_back(workspace_, 0);
       while (!stack.empty() && hits.size() < kMaxHits) {
         const auto [dir, depth] = stack.back();
         stack.pop_back();
