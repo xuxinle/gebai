@@ -683,15 +683,23 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
     // 位图原点是 `floor(bounds)-1`，与轮廓坐标的整数格点相差一个任意小数部分。
     const raster::Path local_unfitted =
         transformed.translated(static_cast<float>(-min_x), static_cast<float>(-min_y));
-    const raster::Path fitted = st::text::grid_fit(
-        local_unfitted,
-        {.mode = grid_fit_,
-         // **细笔画才量化宽度**：量化的收益（根笔画落成满黑像素）只存在于
-         // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
-         // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
-         .quantize_width = effective_size <= kQuantizeBelowPx,
-         .grid = static_cast<float>(supersample)})
-                                   .path;
+    const st::text::GridFitOptions fit_options{.mode = grid_fit_,
+                                               // **细笔画才量化宽度**：量化的收益（根笔画落成满黑像素）只存在于
+                                               // 「宽度 < 2 物理像素」的字号区间；粗笔画自己就有满黑像素，
+                                               // 量化只剩墨量偏差（实测 22px CJK 从 +2.5% 升到 +3.5%）。
+                                               .quantize_width = effective_size <= kQuantizeBelowPx,
+                                               .grid = static_cast<float>(supersample)};
+    // `fit_slant_ == 0` = 不覆盖，用头文件的默认值（不在两处各写一份常数）。
+    st::text::GridFitOptions effective_options = fit_options;
+    if (fit_slant_ > 0.0f) effective_options.max_edge_slant = fit_slant_;
+    const st::text::GridFitResult fit_result = st::text::grid_fit(local_unfitted, effective_options);
+    const raster::Path& fitted = fit_result.path;
+    // 把“本可以对齐却没对”的漏网报出来（见 `GlyphBitmap::fit_rejected_stems`）：
+    // 被拒笔画多的字形就是“同一字里粗细不一”的现场。
+    bitmap->fit_rejected_stems = fit_result.rejected_stems;
+    bitmap->fit_worst_rejected_shift = fit_result.worst_rejected_shift;
+    bitmap->fit_stems = fit_result.vertical_stems + fit_result.horizontal_stems;
+    bitmap->fit_funnel = fit_result.funnel;
     if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
       const int out_width = std::max(1, width / supersample);
       const int out_height = std::max(1, height / supersample);

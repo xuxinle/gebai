@@ -200,11 +200,19 @@ class TextRenderer {
   ///    GPU 合成与字体渲染链路，它渲染出的字比用户实际看到的浏览器字**更浅**
   ///    （即使同一台机器、同一 DPI）——拿它当“浏览器基准”本身就偏。
   ///
-  /// 所以当前默认值取 **1.0（不做校正）**：这是与真实桌面渲染链路一致的姿态，
-  /// 也是用户认可的旧观感。要往前走的正确方向是**加墨 + 拉陡过渡带**（γ < 1
-  /// 或等效的对比度增强，ClearType/Skia 的 `SkMaskGamma` 正是干这个的），
-  /// 但必须先找到**可信参照**（真机非无头截图的浏览器，或系统渲染器输出），
-  /// 且必须用**朴素像素口径 + 过渡带宽度**双判据验收。
+  /// 所以默认值一度回退到 **1.0（不做校正）**，随后又根据**可信参照**（真机非无头浏览器）
+  /// 定为 **0.6**——加墨方向的部分校正。当前证据：
+  ///
+  /// | 行带 | 参照 平均亮度 / <50% | 霜天 γ=1 | 霜天 γ=0.6 |
+  /// |---|---|---|---|
+  /// | 14px CJK | 0.306 / 75.6% | 0.376 / 67.0% | 0.344 / **72.3%** |
+  /// | 13.5px 拉丁 | 0.338 / 67.5% | 0.443 / 58.3% | 0.402 / **61.1%** |
+  /// | 12px 路径 | 0.281 / 78.2% | 0.518 / 50.8% | 0.464 / **56.1%** |
+  /// | 13.5px 等宽 | 0.263 / 79.4% | 0.388 / 65.6% | 0.348 / **71.3%** |
+  ///
+  /// 12px 那行即使加墨仍差 21 个百分点——那部分已属**几何**（笔画未落网格 +
+  /// 落点相位抖动 0.406px，见 `tools/glyph_phase_probe.cpp` 与 BACKLOG 的“子像素定位”条），
+  /// 不是加墨能补的；不要为了追它就继续压 γ（会在低覆盖率区把边缘推成实心而走样）。
   ///
   /// **为什么放在位图生成时**：覆盖率位图既进 CPU 的逐行混合、也进 GPU 的遮罩纹理，
   /// 是两条渲染路径唯一的共同输入；在这一处校正，软件与 GPU 天然同源，
@@ -213,18 +221,22 @@ class TextRenderer {
   void set_coverage_gamma(float gamma) noexcept;
   [[nodiscard]] auto coverage_gamma() const noexcept -> float { return coverage_gamma_; }
 
-  /// 出厂默认的覆盖率预校正指数。
+  /// 出厂默认的覆盖率预校正指数 = **加墨方向的部分校正**（见 `set_coverage_gamma` 的实测依据）。
   ///
-  /// **当前为 1.0（不校正）**：上一轮把它设成 2.2 是一次**经用户实测驳回的过度优化**
-  /// （“字变灰变虚、代码编辑器还不如以前”），完整的事故记录与两条口径教训见
-  /// `set_coverage_gamma` 的注释。设施保留（映射、开关、缓存键、回归用例都在），
-  /// 因为方向正确的用法（加墨）仍需它，但**默认值不得在找到可信参照前改动**。
-  static constexpr float kDefaultCoverageGamma = 1.0f;
+  /// **0.6 是用可信参照量出来的，不是拍的**：真机（非无头）Edge 对照页 + 朴素像素口径，
+  /// 四条真实行带**全部**显示浏览器比霜天更黑更实（实心像素 75.6/67.5/78.2/79.4% vs
+  /// 霜天的 67.0/58.3/50.8/65.6%）——即霜天偏轻，该**加墨**。
+  /// 逐 γ 扫描后 0.6 把实心像素差从 8.6~27.4 个百分点收到 **1.3~6.7**，过渡带同时收窄。
+  ///
+  /// ⚠ **改动它之前先读 `set_coverage_gamma` 的事故记录**：本参数曾被设成 2.2（提亮、
+  /// “物理上正确的线性合成”）并被用户实测驳回。默认值**不得靠推演改**，
+  /// 必须用真机参照 + 朴素像素口径量过，并同时看**实心占比**与**过渡带宽度**两个判据。
+  static constexpr float kDefaultCoverageGamma = 0.6f;
 
   /// 把任意输入夹取到合法区间（`[0.3, 4]`；NaN 取默认值）。
   ///
-  /// **区间要含 < 1**：小于 1 是把字**压黑**（`α' = 1−(1−α)^(1/γ)`，γ<1 时 α' > α），
-  /// 而不等于 1 是提亮。方向哪边对是实测定下来的（见 `kDefaultCoverageGamma`）。
+  /// **区间双向都要用**：γ<1 是把字**压黑/加墨**（`α' = 1−(1−α)^(1/γ)`，γ<1 时 α' > α），
+  /// γ>1 是提亮/减墨。哪个方向对由**真机参照 + 朴素像素口径**定（见 `kDefaultCoverageGamma`）。
   /// 下界 0.3 是护栏：再小会在低覆盖率区直接把边缘推成实心（形状走样）。
   [[nodiscard]] static auto sanitize_coverage_gamma(float gamma) noexcept -> float {
     if (!(gamma == gamma)) return kDefaultCoverageGamma;  // NaN：没有方向，取默认
@@ -245,6 +257,15 @@ class TextRenderer {
   /// 缓存键含该模式位（拟合前后是两份不同的位图，不能混用）。
   void set_grid_fit(GridFitMode mode) noexcept { grid_fit_ = mode; }
   [[nodiscard]] auto grid_fit() const noexcept -> GridFitMode { return grid_fit_; }
+
+  /// 拟合时认定的**直线边最大横向斜率**（物理像素，整条边的横跨量）。
+  ///
+  /// 这是“线条粗细不均匀”的关键旋钮（2026-10-04）：阈值内紧时，CJK 里大量微斜直线
+  /// 不被当成笔画，于是**没被吸附**、留着分数相位——同字里就出现“有的笔画实、有的灰”。
+  /// 默认用 `GridFitOptions::max_edge_slant` 的值；量尺：`tools/stroke_uniformity_probe.cpp`
+  /// （看 `crisp` 与**墨量直方图的非整数堆积**）与 `tools/fit_reject_probe.cpp`。
+  void set_fit_slant(float pixels) noexcept { fit_slant_ = pixels; }
+  [[nodiscard]] auto fit_slant() const noexcept -> float { return fit_slant_; }
   [[nodiscard]] auto stack() const noexcept -> const FontStack& { return *stack_; }
   /// 合成加粗的**档位数**（`embolden_steps` 的上限）。
   ///
@@ -287,6 +308,23 @@ class TextRenderer {
     /// 「凭外观写的测试回退修复后依然全绿」。
     int origin_x{0};
     int origin_y{0};
+    /// 网格拟合**因预算不足被拒**的笔画数（诊断口径，2026-10-04 新增）。
+    ///
+    /// 被拒的笔画 = 没被吸附到网格的那一根 = 同字里“看着更细更灰”的笔画，
+    /// 也就是用户反馈的「线条粗细不均匀」。与 `origin_x` 同理：不看内部值，
+    /// 这类“本可以对齐却没对”的漏网只能靠肉眼发现——所以把它报出来。
+    /// 拟合关时为 0。
+    int fit_rejected_stems{0};
+    /// 拟合**找到并参与**的笔画数（竖 + 横），以及抽取漏斗（回答“为什么没找到”）。
+    ///
+    /// 四个数一起看才能定位“不均匀”的类型：
+    /// `funnel.straight` 小 ⇒ **识别不足**（边大多不是直线，或不够直/不够长）；
+    /// `funnel.pairs_failed` 大 ⇒ **配对失败**（宽度超 `max_stem_width` / 跨度不重叠）；
+    /// `fit_rejected_stems` 大 ⇒ **预算不足**（调 `max_shift`）。
+    int fit_stems{0};
+    st::text::GridFitResult::Funnel fit_funnel{};
+    /// 被拒笔画里最坏的单边位移需求（**物理像素**）——`max_shift` 要放到多大才收得下它。
+    float fit_worst_rejected_shift{0.0f};
   };
 
   /// 取某个**码点**的字形位图（公开的诊断入口）。
@@ -323,6 +361,9 @@ class TextRenderer {
   float coverage_gamma_{kDefaultCoverageGamma};
   /// 网格拟合模式（见 `set_grid_fit`）；默认关，保证无头/回归的可复现性。
   GridFitMode grid_fit_{GridFitMode::Off};
+  /// 拟合的直线边最大横向斜率（物理像素；见 `set_fit_slant`）。
+  /// 0 = 用 `GridFitOptions` 的默认值（不在渲染器里另立一份常数）。
+  float fit_slant_{0.0f};
   struct Cache;
   std::unique_ptr<Cache> cache_{};
 };

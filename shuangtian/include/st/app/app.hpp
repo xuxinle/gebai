@@ -29,13 +29,13 @@ namespace st::app {
 
 /// 解析覆盖率 gamma 预校正指数（命令行 `--text-gamma` 取值）。
 ///
-/// 取值：`auto`（→ `ST_TEXT_GAMMA` → 默认 `1.0`）/ `off`（= 1.0）/ 数值字面量（`[0.3, 4]`）。
-/// **γ > 1 提亮/减墨，γ < 1 压黑/加墨**。
+/// 取值：`auto`（→ `ST_TEXT_GAMMA` → 默认 `0.6`）/ `off`（= 1.0）/ 数值字面量（`[0.3, 4]`）。
+/// **γ < 1 加墨（压黑），γ > 1 提亮/减墨**。
 ///
-/// 默认 **1.0（不做校正）**：该值曾被设为 2.2（完整线性空间合成）并因此引发回归
-/// （用户实测「代码编辑器还不如优化前」：实心像素少 19%、过渡带反而变宽），
-/// 完整事故记录与两条口径教训见 `st::text::TextRenderer::set_coverage_gamma`。
-/// 设施保留是因为方向正确的用法（**加墨**）仍需它——但改默认值前必须先拿到可信参照。
+/// 默认 **0.6（加墨方向的部分校正）**：由**真机非无头浏览器**对照页 + 朴素像素口径定出——
+/// 四条真实行带全部显示参照比霜天更黑更实（实心像素 75.6/67.5/78.2/79.4% vs 67.0/58.3/50.8/65.6%）。
+/// ⚠ 该默认值曾被改成 2.2（提亮方向）并被用户实测驳回；改动前请读
+/// `st::text::TextRenderer::set_coverage_gamma` 的事故记录与验收口径。
 [[nodiscard]] auto resolve_text_gamma(std::string_view mode) -> float;
 
 struct AppOptions {
@@ -70,9 +70,9 @@ struct AppOptions {
   std::string text_fit{"auto"};
   /// 覆盖率 gamma 预校正：`auto` / `off` / 数值字面量（见 `resolve_text_gamma`）。
   ///
-  /// **默认 1.0（不校正）**。γ > 1 提亮减墨、γ < 1 压黑加墨。
-  /// 该默认值曾被设为 2.2（完整线性空间合成）并引发回归（实心像素少 19%、
-  /// 过渡带反而变宽）——依据与教训见 `st::text::TextRenderer::set_coverage_gamma`。
+  /// **默认 0.6（加墨）**：γ < 1 压黑加墨、γ > 1 提亮减墨。
+  /// 该默认值由**真机非无头浏览器**参照 + 朴素像素口径定出；曾被设成 2.2（提亮）
+  /// 并引发回归——依据与教训见 `st::text::TextRenderer::set_coverage_gamma`。
   std::string text_gamma{"auto"};
   std::string control_bind{"127.0.0.1"};
   std::uint16_t control_port{0};      ///< 0=自动分配

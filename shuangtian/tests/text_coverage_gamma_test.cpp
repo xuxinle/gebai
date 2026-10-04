@@ -69,22 +69,28 @@ struct FontFixture {
 
 }  // namespace
 
-/// ① 默认值：出厂**不做**校正。
+/// ① 默认值：出厂做**加墨方向**的部分校正，且不得回头改向。
 ///
-/// 为什么是 1.0 而不是别的：默认值曾被设为 2.2（“完整线性空间合成”，理论正确），
-/// 但用户实测驳回——“代码编辑器还不如优化前”（实心像素 −19%、过渡带反而变宽）。
-/// 本用例就是那个驳回结论的**回归护栏**：谁再把默认值改成提亮方向，这里当场变红。
-ST_TEST(text_coverage_gamma_is_off_by_default) {
+/// 历史：默认值曾被设为 2.2（提亮，“完整线性空间合成”，理论正确）而被用户实测驳回
+/// ——“代码编辑器还不如优化前”（实心像素 −19%、过渡带反而变宽）。
+/// 用**真机非无头浏览器**当参照重测后，四条行带全部显示参照比霜天**更黑更实**，
+/// 于是定为 0.6（加墨）。本用例是那个结论的**回归护栏**：
+/// 谁再把默认值改到提亮方向（≥1.0 而“又不是 1.0”）就当场变红。
+ST_TEST(text_coverage_gamma_default_darkens) {
   FontFixture fixture;
   if (!fixture.ok) return;
   TextRenderer renderer(*fixture.stack, 1.0f);
-  ST_CHECK_NEAR(renderer.coverage_gamma(), 1.0f, 1.0e-6);
   ST_CHECK_NEAR(renderer.coverage_gamma(), TextRenderer::kDefaultCoverageGamma, 1.0e-6);
-  // 夹取口径：区间外**夹到边界**（下界 0.3 允许压黑方向）、NaN 取默认。
+  // 默认值必须 < 1（加墨）——这是与**真机参照**对齐的方向，不是自由的调参。
+  ST_CHECK(renderer.coverage_gamma() < 1.0f);
+  ST_CHECK(renderer.coverage_gamma() >= 0.3f);
+  // 夹取口径：区间外**夹到边界**（双向），NaN 取默认。
   renderer.set_coverage_gamma(0.1f);
   ST_CHECK_NEAR(renderer.coverage_gamma(), 0.3f, 1.0e-6);
   renderer.set_coverage_gamma(99.0f);
   ST_CHECK_NEAR(renderer.coverage_gamma(), 4.0f, 1.0e-6);
+  renderer.set_coverage_gamma(1.0f);
+  ST_CHECK_NEAR(renderer.coverage_gamma(), 1.0f, 1.0e-6);  // off 必须真能取到
   renderer.set_coverage_gamma(std::nanf(""));
   ST_CHECK_NEAR(renderer.coverage_gamma(), TextRenderer::kDefaultCoverageGamma, 1.0e-6);
 }
@@ -259,24 +265,25 @@ ST_TEST(text_coverage_gamma_changes_rendered_weight) {
   };
 
   const Stats base = measure(1.0f);
-  const Stats bright = measure(TextRenderer::kDefaultCoverageGamma > 1.0f
-                                   ? TextRenderer::kDefaultCoverageGamma
-                                   : 2.2f);
-  const Stats dark = measure(0.7f);
+  const float dark_gamma =
+      TextRenderer::kDefaultCoverageGamma < 1.0f ? TextRenderer::kDefaultCoverageGamma : 0.5f;
+  const Stats bright = measure(2.2f);
+  const Stats dark = measure(dark_gamma);
   st::print("[gamma] γ=1.0  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
             base.raw_mean_lum, base.solid_ratio * 100.0, base.band_ratio * 100.0,
             base.linear_ink);
   st::print("[gamma] γ=2.2  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
             bright.raw_mean_lum, bright.solid_ratio * 100.0, bright.band_ratio * 100.0,
             bright.linear_ink);
-  st::print("[gamma] γ=0.7  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
-            dark.raw_mean_lum, dark.solid_ratio * 100.0, dark.band_ratio * 100.0, dark.linear_ink);
+  st::print("[gamma] γ={}  平均亮度 {:.3f}  实心 {:.1f}%  过渡带 {:.1f}%  线性墨量 {:.1f}\n",
+            dark_gamma, dark.raw_mean_lum, dark.solid_ratio * 100.0, dark.band_ratio * 100.0,
+            dark.linear_ink);
   ST_CHECK(base.solid_ratio > 0.0);
   // 提亮方向：字变浅、实心像素变少、线性墨量变少
   ST_CHECK(bright.raw_mean_lum > base.raw_mean_lum);
   ST_CHECK(bright.solid_ratio < base.solid_ratio);
   ST_CHECK(bright.linear_ink < base.linear_ink * 0.95);
-  // 压黑方向：字变黑、实心像素变多、过渡带变窄（不是“越黑越糊”）
+  // 加墨方向：字变黑、实心像素变多、过渡带变**窄**（不是“越黑越糊”）
   ST_CHECK(dark.raw_mean_lum < base.raw_mean_lum);
   ST_CHECK(dark.solid_ratio > base.solid_ratio);
   ST_CHECK(dark.band_ratio < base.band_ratio);

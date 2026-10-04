@@ -66,6 +66,14 @@ struct Edge {
   std::vector<std::size_t> points{};
 };
 
+/// 笔画抽取的**漏斗计数**（诊断口径，2026-10-04）。
+///
+/// 存在的理由：定位“中文线条粗细不均匀”时，必须回答“那么多笔画为什么没被找到”。
+/// 只看“最终找到几条”，分不清是**没被识别为笔画**还是**找到了但配不上对**——
+/// 而这两者的修法完全不同。漏斗把两级都报出来。结构定义在头文件里
+/// （`GridFitResult::Funnel`），因为调用方（位图诊断字段）要能读到它。
+using Funnel = GridFitResult::Funnel;
+
 /// 轴对齐笔画抽取。
 ///
 /// `axis == 0`：竖笔画（边缘取 x、跨度取 y）；`axis == 1`：横笔画（换轴）。
@@ -78,15 +86,29 @@ struct Edge {
 ///
 /// 阈值**都按采样单位**传入（调用方已用 `grid` 换算）：本函数在采样空间里工作，
 /// 只有吸附格点用 `grid` 回到物理像素。
-[[nodiscard]] auto collect_stems(const std::vector<Edge>& edges, float max_width, float grid)
-    -> std::vector<Stem> {
+///
+/// `edges_seen`：被抽查的边数（漏斗口诊断，见 `GridFitResult::edges_seen`）。
+[[nodiscard]] auto collect_stems(const std::vector<Edge>& edges, float max_width,
+                                 float max_slant, float grid, Funnel& funnel) -> std::vector<Stem> {
   std::vector<Edge> candidates;
+  funnel.edges_seen += static_cast<int>(edges.size());
   for (const Edge& edge : edges) {
     if (edge.points.size() != 2U) continue;  // 只用**直线边**（见下方注释）
+    ++funnel.line;
     const float across = edge.hi - edge.lo;
     const float along = edge.span_hi - edge.span_lo;
-    // 沿笔画方向要够长（1 物理像素）；横向范围要够窄（直线是 0，近垂直的曲线也不超过 0.25px）
-    if (along < grid || across > 0.25f * grid) continue;
+    // 沿笔画方向要够长（1 物理像素）；横向跨度限制由 `max_edge_slant` 给。
+    //
+    // ⚠ 这里原来是**写死的 0.25px**（= 20px 高的笔画只容 0.7° 倾斜）。
+    // CJK 字形里大量笔画是微斜直线，于是绝大多数边在这一行被丢掉——
+    // 没被找到的笔画就不会被吸附、留着分数相位，渲染出来就是
+    // 同一字里有的笔画实、有的笔画灰（用户反馈的“线条粗细不均匀”）。
+    // 阈值现已参数化（见 `GridFitOptions::max_edge_slant`），由端效果定值。
+    ++funnel.line;
+    if (along < grid) continue;
+    ++funnel.long_enough;
+    if (across > max_slant) continue;
+    ++funnel.straight;
     candidates.push_back(edge);
   }
 
@@ -118,7 +140,10 @@ struct Edge {
       best_width = width;
       best_x = high.lo;
     }
-    if (best == candidates.size()) continue;
+    if (best == candidates.size()) {
+      ++funnel.pairs_failed;
+      continue;
+    }
     const Edge& high = candidates[best];
     used[index] = true;
     used[best] = true;
@@ -260,10 +285,13 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
   const float max_stem_width = options.max_stem_width * grid;  // 采样单位
   const float max_shift = options.max_shift * grid;            // 采样单位
 
+  const float max_slant = options.max_edge_slant * grid;       // 采样单位（按物理像素定义）
   const int axes = options.mode == GridFitMode::Normal ? 2 : 1;  // Light 只拟合竖笔画
   for (int axis = 0; axis < axes; ++axis) {
     Shifts& shifts = axis == 0 ? shift_x : shift_y;
-    std::vector<Stem> stems = collect_stems(collect_edges(path, offsets, axis), max_stem_width, grid);
+    std::vector<Stem> stems =
+        collect_stems(collect_edges(path, offsets, axis), max_stem_width, max_slant, grid,
+                      result.funnel);
     if (stems.empty()) continue;
     std::ranges::sort(stems, {}, &Stem::edge_lo);
     // 归组：沿笔画方向重叠者同组（同一竖列的多个笔画要一起动，否则间距会乱）
@@ -326,6 +354,17 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
         if (std::abs(lo_delta) <= budget && std::abs(hi_delta) <= budget) {
           for (const std::size_t point : stem.lo_points) record(shifts, point, lo_delta);
           for (const std::size_t point : stem.hi_points) record(shifts, point, hi_delta);
+        } else {
+          // **预算不足时如实上报**（2026-10-04 新增，为定位“线条粗细不均匀”）。
+          //
+          // 不要小看这个分支：被拒的笔画在画面上就是「没被网格对齐的那一根」——
+          // 同一字里其余笔画落在网格上（满黑），它却摊成两个灰边，于是**看着粗细不一**。
+          // 在它之前只数“生效数”，分不清「找不到笔画」与「找到了但推不动」——
+          // 而两者要调的参数完全不同（前者调 `max_stem_width`，后者调 `max_shift`）。
+          ++result.rejected_stems;
+          const float overshoot =
+              std::max(std::abs(lo_delta), std::abs(hi_delta)) / grid;
+          result.worst_rejected_shift = std::max(result.worst_rejected_shift, overshoot);
         }
       }
       if (axis == 0) result.vertical_stems += static_cast<int>(group.size());
