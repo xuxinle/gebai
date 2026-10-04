@@ -74,6 +74,44 @@ struct Edge {
 /// （`GridFitResult::Funnel`），因为调用方（位图诊断字段）要能读到它。
 using Funnel = GridFitResult::Funnel;
 
+/// 宽度聚类的容差（物理像素）：类内宽度差 ≤ 本值的笔画，统一取同一个整数宽度。
+///
+/// 取 0.35 的依据：要同类的两根笔画（如 1.4 / 1.6）落进同一类，
+/// 而要设计上真不同宽的（1.5 主竖 vs 1.0 细横）保持分属两类。
+/// 实测（汉字 @物理 20.25px）主笔类宽度散布 0.008~0.024 物理像素（约 1~2%），
+/// 而粗细两类的中心相距 ≥ 0.4px——0.35 刚好卡在中间。
+inline constexpr float kWidthClassTolerancePx = 0.35f;
+
+/// 按宽度聚类取样——每类取一个整数（物理像素）。
+///
+/// 存在理由（2026-10-04）：宽度量化原来是**每条笔画各自 `round`**，
+/// 于是同类的 1.4 与 1.6 会各自变成 1 与 2——**同字里同类笔画宽窄不一**，
+/// 正是用户反馈的「线条粗细不均匀」的直接来源。改法是按宽度聚类，
+/// 每类只取一个整数，类内全部笔画共用它。
+///
+/// 聚法是**贪心分段**：按宽度排序后从头扫，与当前类中心相差超过容差就开新类——
+/// 一维最简聚类，且**不改变类内顺序**（类中心取类内均值后再 `round`）。
+[[nodiscard]] auto quantized_width_for(float width_px, const std::vector<float>& sorted_widths)
+    -> float {
+  std::size_t index = 0;
+  while (index < sorted_widths.size()) {
+    // 当前类的起点（与当前笔画最近的类边界），逐类累积成员再定中心。
+    const float seed = sorted_widths[index];
+    std::size_t end = index;
+    double sum = 0.0;
+    while (end < sorted_widths.size() && sorted_widths[end] - seed <= kWidthClassTolerancePx) {
+      sum += static_cast<double>(sorted_widths[end]);
+      ++end;
+    }
+    const float center = static_cast<float>(sum / static_cast<double>(end - index));
+    if (width_px >= seed && width_px <= sorted_widths[end - 1U]) {
+      return std::max(1.0f, std::round(center));
+    }
+    index = end;
+  }
+  return std::max(1.0f, std::round(width_px));
+}
+
 /// 轴对齐笔画抽取。
 ///
 /// `axis == 0`：竖笔画（边缘取 x、跨度取 y）；`axis == 1`：横笔画（换轴）。
@@ -307,20 +345,32 @@ auto grid_fit(const raster::Path& path, const GridFitOptions& options) -> GridFi
       }
       if (!merged) groups.push_back({stem});
     }
+    // **按整个字形（而不是按组）建宽度类表**——这是结构修复的关键：
+    // 组 = 沿笔画方向重叠的同一竖列，通常只 1~2 条笔画（配对率低）——在组内聚类
+    // 等于什么都没做（类就是自己，`round` 原样）。而“同类笔画”是**跨组**的概念
+    //（同一个字里的两根竖画），所以类表必须跨字形统计。
+    std::vector<float> axis_widths;
+    if (options.quantize_width) {
+      axis_widths.reserve(stems.size());
+      for (const Stem& stem : stems) axis_widths.push_back((stem.edge_hi - stem.edge_lo) / grid);
+      std::ranges::sort(axis_widths);
+    }
     for (const auto& group : groups) {
       // **宽度量化 + 单边锚定**（而不是整条笔画平移，也不是两侧各自吸整数）：
       // 只平移的话另一侧仍在分数相位上（只解决一半）；两侧各自独立吸整数又会
       // 让宽度随相位跳——量化宽度才同时满足"边缘在网格"与"宽度一致"。
+      //
+      // ⚠ **量化值必须按「宽度类」而非按「每条笔画」决定**（2026-10-04 结构修复）：
+      // 同类的两根笔画若宽度是 1.4 与 1.6，各自的 `round` 会得到 1 与 2——
+      // 同字里同类笔画宽窄不一，正是用户反馈的「线条粗细不均匀」的直接来源
+      // （实测：字内离散变成 2.2 倍 / 24.6% 长笔画内部“实心与发灰共存”）。
+      // 改法是**先按宽度聚类，每类统一取一个整数**（类内宽度差 ≤ `kWidthClassPx`，
+      // 远小于 1px，所以设计上真不同宽的主笔与细横仍分属不同类、不会被拉平）。
       for (const Stem& stem : group) {
-        // **宽度先量化到整数**（下限 1 物理像素）——这是"宽度一致性"的来源。
-        //
-        // 只让两侧各自吸到最近网格的话，1.5px 的笔画会在 1px 与 2px 之间
-        // 随该字形的相位跳——同类笔画粗细不齐，且墨量随相位波动
-        //（实测拉丁 @16px 墨量 +8.7%，就是这一步的产物）。
-        // 量化宽度后，**同类笔画的宽度恒等**，另一侧也跟着落在网格上（整数宽）。
-        const float width_px = (stem.edge_hi - stem.edge_lo) / grid;
         const bool quantize = options.quantize_width;
-        const float quantized = std::max(1.0f, std::round(width_px)) * grid;
+        const float quantized =
+            quantize ? quantized_width_for((stem.edge_hi - stem.edge_lo) / grid, axis_widths) * grid
+                     : 0.0f;
         // 锚点取**移动更小**的一侧：吸住它，另一侧由量化后的宽度推出
         // （整数宽度 ⇒ 两边都在网格上）。选更小的一侧是为了少动字形。
         const float lo_anchor = snap_target(stem.edge_lo, grid);
