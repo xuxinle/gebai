@@ -565,24 +565,18 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t {
     return (seed ^ value) * 1099511628211ULL;
   };
-  /// **吸附幅度上限**（物理像素）——本仓库“字间不一致”的核心旋钮。
+  /// 吸附幅度上限（物理像素）——**恒为网格拟合的默认值 0.5**。
   ///
-  /// 实测（`tools/weight_spread_probe.cpp`，汉字菜单串 @物理 20.25px）：拟合对
-  /// **每个字**的改变幅度从 −27% 到 +10% 不等（`ratio_spread` 37%），
-  /// 而它买的锐度只有过渡带 0.439→0.363（17%）。根因：1.5px 的笔画每边各动 0.25px
-  /// 就是 ±33% 墨量，而每个字落的相位不同——**吸附幅度越大，字间差异越大**。
+  /// 为什么要有这个具名常量而不是直接把默认值写在选项里：它是**被实测排除过的旋钮**，
+  /// 留个名字与依据，免得下一个人重复摸它。
   ///
-  /// 所以这里把幅度做成可调，用 Pareto 扫找平衡点（ST_TEXT_MAXSHIFT 可覆盖，便于实验）。
-  const float fit_max_shift = [] {
-    if (const auto value = fs::read_env("ST_TEXT_MAXSHIFT"); value.has_value() && !value->empty()) {
-      try {
-        const float parsed = std::stof(*value);
-        if (parsed > 0.0f) return parsed;
-      } catch (...) {
-      }
-    }
-    return 1.0f;
-  }();
+  /// 实测（`tools/weight_spread_probe.cpp` + `ST_TEXT_MAXSHIFT` 对照，汉字 @物理 20.25px）：
+  /// 把它从 0.5 扫到 0.05，**逐字墨量分布逐位不变**——因为宽度量化分支给护栏的预算是
+  /// `max_shift + grid/2`，`grid/2`（ss=2 时 = 1.0 物理像素）把差异全淹没了。
+  /// 即**它不是“字间不一致”的杠杆**；真正的杠杆见 DESIGN §4.3.7.8。
+  ///
+  /// 本常量**按物理像素定义**（与头文件口径一致），不随采样倍率变。
+  const float fit_max_shift = 0.5f;
   const auto supersample_bucket = static_cast<std::uint64_t>(std::lround(supersample_ * 8.0f));
   // 覆盖率 gamma 同样进键：它是对**同一字形**的位图做不同映射，不进键就会取到上一个指数的字
   // （症状是“改了参数却看不出变化”，直到某个字形被淘汰才“突然生效”）。
