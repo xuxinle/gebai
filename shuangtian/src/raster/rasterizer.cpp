@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 namespace st::raster::detail {
@@ -189,12 +190,37 @@ void rasterize_polylines(const std::vector<Polyline>& polylines, int first_y, in
 
 }  // namespace
 
+/// 曲线扁平化容差（采样单位）——**仅用于对照实验**（环境变量 `ST_TEXT_FLATTEN`）。
+///
+/// 背景（2026-10-04）：怀疑「中文笔画粗细不均」来自曲线轮廓被扁平化成折线后，
+/// 笔画侧边的近似位置随字形漂移（中文是 CFF 立方曲线，侧边大量是微弯曲线）。
+/// 曲线扁平化容差（采样单位）——**仅用于对照实验**（环境变量 `ST_TEXT_FLATTEN`）。
+///
+/// 背景（2026-10-04）：怀疑「中文笔画粗细不均」来自曲线轮廓被扁平化成折线后，
+/// 笔画侧边的近似位置随字形漂移（中文是 CFF 立方曲线，侧边大量是微弯曲线）。
+/// ⚠ **实测结论：容差不是瓶颈**（它们发生在超采样空间，0.25 采样单位 ≈ 0.125 物理像素，
+/// 对 1.5px 笔画是 8% 量级；扫描 0.25→0.02 端指标无提升）。
+/// 保留这个开关是为了把假设量成数据，而不是又一次“看起来像”。
+///
+/// 探针放在本文件而不是公共头文件：它是诊断开关，不应成为公开 API。
+/// 每帧读一次 environ 的成本可忽略（且不进入内层循环）。
+[[nodiscard]] auto flatten_tolerance_override() noexcept -> float {
+  const char* value = std::getenv("ST_TEXT_FLATTEN");
+  if (value == nullptr || *value == '\0') return 0.0f;
+  char* end = nullptr;
+  const float parsed = std::strtof(value, &end);
+  return (end != value && parsed > 0.0f) ? parsed : 0.0f;
+}
+
 void fill_path_aa(Canvas& canvas, const Path& path, const Paint& paint,
                   const DrawOptions& options) {
   if (path.is_empty()) return;
   const math::IntRect clip = canvas.clip_rect();
   if (clip.is_empty()) return;
-  const auto polylines = path.flatten(options.antialias ? 0.25f : 0.5f);
+  const float override_tolerance = flatten_tolerance_override();
+  const float tolerance =
+      override_tolerance > 0.0f ? override_tolerance : (options.antialias ? 0.25f : 0.5f);
+  const auto polylines = path.flatten(tolerance);
   if (polylines.empty()) return;
   const math::Rect bounds = polyline_bounds(polylines);
   if (bounds.is_empty()) return;

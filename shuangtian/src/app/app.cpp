@@ -447,6 +447,9 @@ auto Application::start() -> Status {
   } else if (std::getenv("ST_TEXT_SKIA_LUT") != nullptr) {
     impl_->renderer->set_coverage_correct(st::text::TextRenderer::CoverageCorrect::Skia);
   }
+  // **扁平化容差的对照实验**：中文是 CFF 立方曲线轮廓，笔画侧边大量是微弯曲线，
+  // 扁平化成折线后近似位置会随字形漂移。开关在 `rasterizer.cpp` 里直接读
+  // `ST_TEXT_FLATTEN`（诊断项不进公共 API）。实测结论：**容差不是瓶颈**（见该处注释）。
     // 如实说清这一帧的字是怎么画的：“字看着糊”的第一个分歧点就在这里。
     const char* fit_name = impl_->renderer->grid_fit() == st::text::GridFitMode::Normal
                                ? "normal"
