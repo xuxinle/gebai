@@ -29,7 +29,7 @@
     }
   }
 
-  function state(initial) {
+  function state(initial, onWrite) {
     const cell = {
       _value: initial,
       _subs: [],
@@ -40,11 +40,15 @@
       set value(next) {
         if (next === cell._value) return;
         cell._value = next;
+        if (typeof onWrite === 'function') onWrite(next);   // 写穿透（`usePersisted` 用）
         markDirty(cell);
       },
     };
     return cell;
   }
+
+  /// State 工厂别名（hooks 内部用；与 `useState` 同一实现）。
+  const state_cell = state;
 
   function markDirty() {
     dirty = true;
@@ -497,6 +501,148 @@
 
   globalThis.useState = state;    // build 闭包内可用（与 C++ State<T> 同语义）
 
+  // ── hooks 槽位（按调用点序号对齐）──────────────────────────────────────
+  //
+  // `useResource` / `useMemo` / `useEffect` / `useRef` / `usePersisted` **共用一个游标**：
+  // 同一 build 里第 N 个 hook 调用 ↔ 第 N 个槽，跨重组复用（与 C++ 侧 `hook_index` 同规则）。
+  // 后果（同 React Hooks）：hook 不能写在条件分支里——调用点顺序一变，槽就错位
+  // （错位不是崩溃而是**静默串味**：第 2 个 hook 拿到第 1 个的缓存值）。
+  const hookSlots = [];
+  let hookCursor = 0;
+
+  /// 取/建当前调用点的槽（对象由调用方按需补字段）。
+  function hookSlot(kind) {
+    const index = hookCursor++;
+    let slot = hookSlots[index];
+    if (slot === undefined || slot.kind !== kind) {
+      // 槽类型变了 = 调用点顺序变了：新建（旧缓存丢弃，不静默串味）
+      slot = { kind: kind };
+      hookSlots[index] = slot;
+    }
+    return slot;
+  }
+
+  // ── 依赖指纹（memo/effect 用）：值按 JSON 比较 ───────────────────────────
+  //
+  // 与 C++ 侧 `deps_signature`（指针 + 写版本）同一语义：**依赖没变就不重算**。
+  // JS 侧没有「状态版本」可拿（值是任意 JS 值），退化为值比较——
+  // `JSON.stringify` 对 undefined/函数/循环引用不成立，故：不可序列化的依赖
+  // 一律视为「变了」（保守重算，宁可多算不漏算）。
+  function depsKey(deps) {
+    const list = deps === undefined ? [] : (Array.isArray(deps) ? deps : [deps]);
+    try {
+      return JSON.stringify(list.map(function (item) { return item === undefined ? 0 : item; }));
+    } catch (error) {
+      return 'vary:' + Math.random();   // 循环引用等：每次都当变了
+    }
+  }
+
+  // ── useMemo：依赖未变则复用上次结果 ─────────────────────────────────────
+  function useMemo(factory, deps) {
+    const slot = hookSlot('memo');
+    const key = depsKey(deps);
+    if (slot.key !== key) {
+      slot.key = key;
+      slot.value = factory();
+    }
+    return slot.value;
+  }
+
+  // ── useEffect：依赖变化时执行一次（返回清理函数）──────────────────────
+  //
+  // 执行时机是**重组结束之后**（宿主 `tick()` 末尾调 `__d_run_effects`）：
+  // 副作用里写状态属于「连锁写」，隔帧生效——在 build 中途执行的话，
+  // 那次写会被同帧的 dirty 清理吞掉（界面停在旧值）。
+  const pendingEffects = [];   // 本帧待执行（重跑 build 时重填）
+  let effectSeq = 0;           // 登记序号（执行顺序 = 声明顺序）
+
+  function useEffect(fn, deps) {
+    const slot = hookSlot('effect');
+    const key = depsKey(deps);
+    if (slot.key === key && slot.ran) return;   // 依赖未变且已跑过：跳过
+    slot.key = key;
+    pendingEffects.push({ seq: effectSeq++, slot: slot, fn: fn });
+  }
+
+  // 宿主在重组末尾调：先跑旧清理，再跑新体（体返回函数则记为下次的清理）。
+  //
+  // 与 C++ 侧 `Composer::reconcile` 末尾的 `run_pending_effects` 严格同序：
+  // **重组结束后**才跑（副作用里写状态 = 连锁写，隔帧生效）。
+  function runPendingEffects() {
+    if (pendingEffects.length === 0) return 0;
+    const jobs = pendingEffects.splice(0, pendingEffects.length);
+    jobs.sort(function (a, b) { return a.seq - b.seq; });
+    let ran = 0;
+    for (const job of jobs) {
+      try {
+        if (job.slot.cleanup) job.slot.cleanup();
+        job.slot.cleanup = null;
+        const result = job.fn();
+        if (typeof result === 'function') job.slot.cleanup = result;
+        job.slot.ran = true;
+        ++ran;
+      } catch (error) {
+        log('[declarative] effect 异常: ' + error);
+      }
+    }
+    return ran;
+  }
+
+  // 宿主/外部手动推进（`tick` 之外单独跑 effect 的场合）。
+  globalThis.__d_run_effects = function () {
+    return runPendingEffects();
+  };
+
+  /// 卸载清理：切换 compose 根 / 宿主销毁时把已登记 effect 的清理都跑掉。
+  /// （单根 v1：重建根时调用；子作用域级清理随 C++ 侧对齐。）
+  globalThis.__d_dispose_effects = function () {
+    for (const slot of hookSlots) {
+      if (slot === undefined || slot.kind !== 'effect' || !slot.cleanup) continue;
+      try {
+        slot.cleanup();
+      } catch (error) {
+        log('[declarative] effect 清理异常: ' + error);
+      }
+      slot.cleanup = null;
+    }
+  };
+
+  // ── useRef：跨重组稳定的可变槽（**改它不触发重组**）────────────────────
+  function useRef(initial) {
+    const slot = hookSlot('ref');
+    if (!slot.init) {
+      slot.init = true;
+      slot.value = { current: initial };
+    }
+    return slot.value;
+  }
+
+  // ── usePersisted：会话级持久状态（写穿透宿主状态仓）────────────────────
+  //
+  // 与 `useState` 同一接口（返回 State 形态：`.value` 读写）；区别只在**初值与落盘**：
+  // 值同步到宿主 `state` 对象（协议 `script.state` 可读回——AI 可观测），
+  // 重启同一次会话时从那里恢复。持久化是**尽力而为**：宿主没提供 state 就退化为普通状态。
+  function usePersisted(key, initial) {
+    const slot = hookSlot('persisted');
+    if (slot.cell === undefined) {
+      // 宿主状态仓：协议 `script.state` 读回的同一个对象。
+      // **必须走 `globalThis.state`**：本文件里有个同名局部函数 `state`（State 工厂），
+      // 裸写 `state` 会解析到函数而不是宿主仓（实测：初值永远 fallback）。
+      const store = globalThis.state;
+      let start = initial;
+      if (typeof store === 'object' && store !== null &&
+          Object.prototype.hasOwnProperty.call(store, key)) {
+        start = store[key];
+      } else if (typeof store === 'object' && store !== null) {
+        store[key] = initial;
+      }
+      const cell = state_cell(start, function (next) { store[key] = next; });   // 写穿透宿主状态仓
+      slot.cell = cell;
+      slot.key = key;
+    }
+    return slot.cell;
+  }
+
   // ── useResource：异步状态（≈ produceState / LaunchedEffect）────────────
   //
   // 语义（与 docs/declarative.md §3.1 一致）：
@@ -505,15 +651,12 @@
   // - 结果落地写内部 State → 自动标脏（下一帧重组）；
   // - 依赖微任务泵：宿主每帧 `pump_jobs()`（Promises 不会自己跑）。
 
-  const resourceCache = [];   // 按调用点序号复用（build 重跑时同一 useResource 调用拿回旧槽）
-  let resourceCursor = 0;
-
   function useResource(fetcher, input) {
-    const slotIndex = resourceCursor++;
-    let slot = resourceCache[slotIndex];
-    if (slot === undefined) {
-      slot = { token: 0, input: undefined, cell: state({ status: 'pending' }) };
-      resourceCache[slotIndex] = slot;
+    const slot = hookSlot('resource');
+    if (slot.cell === undefined) {
+      slot.token = 0;
+      slot.input = undefined;
+      slot.cell = state({ status: 'pending' });
     }
     const sameInput = JSON.stringify(slot.input) === JSON.stringify(input);
     if (!sameInput) {
@@ -534,65 +677,86 @@
   }
 
   globalThis.useResource = useResource;
+  globalThis.useMemo = useMemo;
+  globalThis.useEffect = useEffect;
+  globalThis.useRef = useRef;
+  globalThis.usePersisted = usePersisted;
 
   // 宿主每帧调：dirty 才重跑（依赖 v1 全量重跑——JS 侧依赖收集已就位，
   // 但单根语义下 scope 粒度 = 根组件，细粒度跳过是 M4）
   globalThis.__d_reconcile = function () {
     if (!mounted || !dirty) return { rerun: 0 };
-    dirty = false;
-    resourceCursor = 0;   // hooks 调用点游标：每次重组从 0 起（build 里第 N 次 useResource = 第 N 个槽）
     const stats = { rerun: 0, created: 0, removed: 0, props: 0 };
-    const scope = scopes[scopes.length - 1];
-    enterScope(scope);
-    let fresh;
-    try {
-      fresh = scope.build();
-    } catch (error) {
+    // 收敛循环（最多 4 轮）：
+    // - 第 1 轮 = 普通重组（build → diff → 落地）；
+    // - 每轮末尾跑 effect；若 effect 写了状态，dirty 会重新置真 → 再跑一轮，
+    //   直到收敛（无新写入）或触上限。
+    //
+    // 为何要循环：`useEffect` 里写状态是常规写法（取数落地/同步派生），只跑一帧的
+    // 话调一次 tick 只能推半拍——界面永远滞后一帧（实测：log= 而不是 log=1）。
+    // 为何要上限：防「effect 每轮都写状态」的链子把一帧拖成死循环（未收敛的留给下一帧）。
+    for (let round = 0; round < 4 && mounted && dirty; ++round) {
+      dirty = false;
+      hookCursor = 0;   // hooks 调用点游标：本次重组从 0 起（第 N 个 hook 调用 = 第 N 个槽）
+      pendingEffects.length = 0;   // 本次 build 重新登记（旧登记作废——槽的 ran 标记保留）
+      const scope = scopes[scopes.length - 1];
+      enterScope(scope);
+      let fresh;
+      try {
+        fresh = scope.build();
+      } catch (error) {
+        exitScope();
+        log('[declarative] build 异常，冻结上一帧: ' + error);
+        return { rerun: 0, error: String(error) };
+      }
       exitScope();
-      log('[declarative] build 异常，冻结上一帧: ' + error);
-      return { rerun: 0, error: String(error) };
-    }
-    exitScope();
-    fresh = normalize(fresh);   // 链式修饰者：取回真 VNode
-    // 首次挂载或根类型变了：整树重建；否则根节点复用 diff。
-    // 子树形态：宿主槽位可能已有根（前一个 host 已挂）——采纳它进 rootVdom，
-    // 让下面的「同型复用」分支接管（不重复创建）。
-    if (rootVdom === null && typeof __d_slot_root === 'function') {
-      const slotRoot = __d_slot_root();
-      if (slotRoot) {
-        rootVdom = { type: fresh.type, props: {}, key: '', children: [], el: slotRoot,
-                     bound: [], _applied: {} };
+      fresh = normalize(fresh);   // 链式修饰者：取回真 VNode
+      // 首次挂载或根类型变了：整树重建；否则根节点复用 diff。
+      // 子树形态：宿主槽位可能已有根（前一个 host 已挂）——采纳它进 rootVdom，
+      // 让下面的「同型复用」分支接管（不重复创建）。
+      if (rootVdom === null && typeof __d_slot_root === 'function') {
+        const slotRoot = __d_slot_root();
+        if (slotRoot) {
+          rootVdom = { type: fresh.type, props: {}, key: '', children: [], el: slotRoot,
+                       bound: [], _applied: {} };
+        }
       }
-    }
-    if (rootVdom === null || rootVdom.type !== fresh.type) {
-      if (rootVdom !== null) unmountVNode(rootVdom, stats);
-      mountVNode(null, 0, fresh, stats);
-      rootVdom = fresh;
-    } else {
-      fresh.el = rootVdom.el;
-      const apply = propsToApply(fresh);
-      const prev = rootVdom._applied || {};
-      const changed = {};
-      for (const key of Object.keys(apply)) {
-        if (apply[key] !== prev[key]) changed[key] = apply[key];
-      }
-      if (Object.keys(changed).length > 0) {
-        queueApply(fresh.el, changed);
-        fresh._applied = apply;
+      if (rootVdom === null || rootVdom.type !== fresh.type) {
+        if (rootVdom !== null) unmountVNode(rootVdom, stats);
+        mountVNode(null, 0, fresh, stats);
+        rootVdom = fresh;
       } else {
-        fresh._applied = prev;
+        fresh.el = rootVdom.el;
+        const apply = propsToApply(fresh);
+        const prev = rootVdom._applied || {};
+        const changed = {};
+        for (const key of Object.keys(apply)) {
+          if (apply[key] !== prev[key]) changed[key] = apply[key];
+        }
+        if (Object.keys(changed).length > 0) {
+          queueApply(fresh.el, changed);
+          fresh._applied = apply;
+        } else {
+          fresh._applied = prev;
+        }
+        // 事件重绑：扩散到子树的活由 `reconcileChildren` → `reconcileAt` 做
+        // （每个复用节点都先 releaseEvents(旧) 再 ensureEventBinding(新)）——
+        // 这里只处理根节点自身。
+        releaseEvents(rootVdom);
+        ensureEventBinding(fresh);
+        if (isContainer(fresh)) reconcileChildren(fresh.el, rootVdom.children, fresh.children, stats);
+        rootVdom = fresh;
       }
-      releaseEvents(rootVdom);
-      ensureEventBinding(fresh);
-      if (isContainer(fresh)) reconcileChildren(fresh.el, rootVdom.children, fresh.children, stats);
-      rootVdom = fresh;
+      flushApply();   // 一次跨界批量落地（新建元素挂树后也在这里补属性）
+      stats.rerun = 1;
+      // 副作用在重组**结束之后**执行（与 C++ 侧 reconcile 末尾同序）：
+      // effect 里写状态会重新置 dirty——下面的循环条件于是再跑一轮。
+      runPendingEffects();
     }
-    flushApply();   // 一次跨界批量落地（新建元素挂树后也在这里补属性）
-    stats.rerun = 1;
     return stats;
   };
 
   globalThis.__d_stats = function () {
-    return { scopes: scopes.length, mounted: mounted, dirty: dirty };
+    return { scopes: scopes.length, mounted: mounted, dirty: dirty, hooks: hookSlots.length };
   };
 })();

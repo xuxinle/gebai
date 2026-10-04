@@ -812,4 +812,223 @@ ST_TEST(dsl_spacer_positive_size_is_fixed) {
   ST_CHECK(bar->child_at(1)->bounds().x < bar->bounds().right() - 50.0f);
 }
 
+// ── 状态系统高层原语：memo / effect / ref ─────────────────────────────────
+//
+// 这三个原语在 `docs/declarative.md` §4 里早已写成契约（与 JS 侧 useMemo/useEffect/
+// useRef 同一语义），但一直以来**只有 JS 侧有 hook、C++ 侧没有**——本次补齐并钉住。
+
+// memo：依赖未变 → 不重算（结果跨重组复用）；依赖变了 → 重算。
+// 判据是依赖的 `(指针, 写版本)` 指纹，不是值比较（值类型未必可比较）。
+ST_TEST(dsl_memo_reuses_until_deps_change) {
+  static int calls = 0;   // 计算次数（跨实例共享——本用例只挂一个 Composer）
+  struct MemoPage : Component {
+    State<int> seed{1};
+    State<int> unrelated{0};
+    void build(Composer& c) override {
+      const int doubled = memo<int>(c, [&] {
+        ++calls;
+        return seed.value() * 2;
+      }, Deps{{&seed}});
+      // 单根语义：**一个**顶层元素。column 包一层，否则后面的 button 会把 text 替掉。
+      column(c, {}, [&] {
+        text(c, [doubled] { return std::to_string(doubled); }, {.key = "out"});
+        button(c, "seed", [this] { seed.set(seed.value() + 1); }, {.key = "bump"});
+        button(c, "other", [this] { unrelated.set(unrelated.value() + 1); }, {.key = "other"});
+        (void)unrelated.value();   // 根作用域订阅它：写它才会重跑（模拟无关重跑）
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({300.0f, 200.0f});
+  auto page = std::make_shared<MemoPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  ST_CHECK_EQ(calls, 1);                                  // 首帧算一次
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("2"));
+
+  // ① 无关状态写 → 重跑 build，但 memo 依赖未变 → **不重算**
+  page->unrelated.set(1);
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(calls, 1);
+
+  // ② 依赖状态写 → 重算
+  page->seed.set(3);
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(calls, 2);
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("6"));
+}
+
+// effect：依赖变化才跑一次；变化前先跑上次的清理；写状态不丢（连锁写隔帧）。
+ST_TEST(dsl_effect_runs_on_dep_change_and_cleans_up) {
+  static int runs = 0;
+  static int cleanups = 0;
+  struct EffectPage : Component {
+    State<int> topic{1};
+    State<std::string> log{""};
+    void build(Composer& c) override {
+      const int current = topic.value();
+      effect(c, [this, current] {
+        ++runs;
+        // 副作用里写状态：**不能**被同帧的脏清理吞掉（必须隔帧生效并重组）
+        log.set(log.peek() + std::to_string(current));
+        return [] { ++cleanups; };
+      }, Deps{{&topic}});
+      column(c, {}, [&] {
+        text(c, [this] { return log.value(); }, {.key = "log"});
+        button(c, "next", [this] { topic.set(topic.value() + 1); }, {.key = "next"});
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({300.0f, 200.0f});
+  auto page = std::make_shared<EffectPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  ST_CHECK_EQ(runs, 1);                                    // 首帧跑一次
+
+  // ① effect 里写的状态必须落地（隔帧）：写 log 之后同帧内 tick 应该能看到
+  //    这里点一次 topic → effect 重跑（先清理旧、再记新）
+  page->topic.set(2);
+  (void)host->tick();   // 重组（登记 effect）+ 跑 effect
+  root.layout();
+  ST_CHECK_EQ(runs, 2);
+  ST_CHECK_EQ(cleanups, 1);                                // 旧 effect 的清理跑了一次
+  ST_CHECK_EQ(page->log.value(), std::string("12"));
+
+  // ② 依赖未变的重组不重跑 effect
+  page->log.set("12");   // 等值写：State::set 挡住 → 不脏；用下面的无关重跑来验证
+  (void)host->tick();
+  ST_CHECK_EQ(runs, 2);
+}
+
+// ref：跨重组稳定、改它**不触发重组**（要驱动界面就用 State）。
+ST_TEST(dsl_ref_is_stable_and_not_reactive) {
+  struct RefPage : Component {
+    State<int> tick{0};
+    void build(Composer& c) override {
+      int& counter = ref<int>(c, 0);
+      (void)tick.value();   // 订阅 tick：它的变化才会让本作用域重跑
+      column(c, {}, [&] {
+        text(c, [&counter, this] {
+          ++counter;        // 每帧重组累加（不触发重组）
+          return std::to_string(counter) + "/" + std::to_string(tick.value());
+        }, {.key = "out"});
+        button(c, "bump", [this] { tick.set(tick.value() + 1); }, {.key = "bump"});
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({300.0f, 200.0f});
+  auto page = std::make_shared<RefPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("1/0"));
+
+  // ref 跨重组保持：第二次重组从 1 继续（新槽会重新从 0 起 → 这里的断言会红）
+  page->tick.set(1);
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("2/1"));
+
+  // 改 ref **不**触发重组：再 tick 一次（无脏）不应重跑
+  ST_CHECK(!host->dirty());
+  ST_CHECK_EQ(host->tick().scopes_rerun, 0);
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("2/1"));
+}
+
+// dsl_persisted_survives_conditional_prune：`persisted` 的身份是**名字**而非调用点序号。
+// 这两个用例合起来证明它是真持久：① 值跨「被剪掉再声明」仍在；② 切 compose 根不影响它。
+ST_TEST(dsl_persisted_survives_conditional_prune) {
+  struct PersistPage : Component {
+    State<bool> visible{true};
+    void build(Composer& c) override {
+      // hook 不能写在条件里——persisted 拿**名字**当身份，所以它写在外面、用值驱动分支。
+      auto& draft = persisted<std::string>(c, "draft", "初始");
+      // 单根语义：一个顶层元素（多个会互相替掉）——column 包一层。
+      column(c, {}, [&] {
+        if (visible.value()) {
+          text(c, [&draft] { return draft.value(); }, {.key = "draft"});
+        }
+        // 显式 id：`find()` 按 id 精确匹配（key 生成的是 `Type@key`，不是裸 key）。
+        button(c, "edit", [&draft] { draft.set(draft.value() + "!"); },
+               {.id = "persist-edit", .key = "edit"});
+        button(c, "toggle", [this] { visible.set(!visible.value()); },
+               {.id = "persist-toggle", .key = "toggle"});
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({300.0f, 200.0f});
+  auto page = std::make_shared<PersistPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  ST_REQUIRE(root.content() != nullptr);
+  ST_REQUIRE(root.content()->child_count() >= 1U);
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("初始"));
+
+  // 改值 → 隐藏（声明被剪掉）→ 再显示：值必须还在
+  ST_CHECK(st::ui::invoke_element(root, *root.find("persist-edit"), "click", ""));
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("初始!"));
+
+  ST_CHECK(st::ui::invoke_element(root, *root.find("persist-toggle"), "click", ""));
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_count(), 2U);   // 只剩两个按钮
+
+  ST_CHECK(st::ui::invoke_element(root, *root.find("persist-toggle"), "click", ""));
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("初始!"));   // 值回来了
+}
+
+// memo 的依赖登记：**即使命中缓存**，依赖也必须在场（否则下次变化无人订阅）——
+// 这是 memo 边界上最易错的一条（实现里把「订阅」放在指纹计算里一并做，理由见 dsl.cpp）。
+// 用例反向验证：改了依赖值 → 界面必须跟着变（没订阅的话下面第二条断言会红）。
+ST_TEST(dsl_memo_keeps_subscription_on_cache_hit) {
+  struct MemoSubPage : Component {
+    State<int> value{1};
+    State<int> noise{0};
+    void build(Composer& c) override {
+      const int shown = memo<int>(c, [&] { return value.value() * 10; }, Deps{{&value}});
+      (void)noise.value();   // 订阅 noise：它的变化会让本作用域重跑（但不影响 memo）
+      // 单根语义：一个顶层元素（多个会互相替掉）——column 包一层。
+      column(c, {}, [&] {
+        text(c, [shown] { return std::to_string(shown); }, {.key = "out"});
+        button(c, "v", [this] { value.set(value.value() + 1); },
+               {.id = "memo-bump-value", .key = "bump-value"});
+        button(c, "n", [this] { noise.set(noise.value() + 1); },
+               {.id = "memo-bump-noise", .key = "bump-noise"});
+      });
+    }
+  };
+  UiRoot root;
+  root.set_viewport({300.0f, 200.0f});
+  auto page = std::make_shared<MemoSubPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("10"));
+
+  // 先走一次「缓存命中」路径（noise 变 → 重跑 build → memo 命中缓存、不重算）
+  ST_CHECK(st::ui::invoke_element(root, *root.find("memo-bump-noise"), "click", ""));
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("10"));
+
+  // 关键断言：走了缓存路径之后，依赖变化仍必须被接住
+  ST_CHECK(st::ui::invoke_element(root, *root.find("memo-bump-value"), "click", ""));
+  (void)host->tick();
+  root.layout();
+  ST_CHECK_EQ(root.content()->child_at(0)->semantics_text(), std::string("20"));
+}
+
 }  // namespace

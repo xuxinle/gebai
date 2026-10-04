@@ -206,16 +206,42 @@ struct ElementFactory {
 ## 4. 状态系统（两宿主同一语义）
 
 ```cpp
-// C++                                     // JS（同一语义的 JS 形态）
-State<T> s{init};                          const s = useState(init)
-s.value()                    // 读：登记当前作用域依赖    s.value
-s.set(v)                     // 写：失效 + 调度重组       s.value = v
-c.memo(fn, deps)                                         useMemo(fn, deps)
-c.effect(fn, deps)  // 副作用，返回清理                    useEffect(fn, deps)
-c.ref(init)          // 跨重组稳定引用（非响应式）          useRef(init)
-c.resource(fetch, input)  // 异步状态                      useResource(fetch, input)
-c.persisted(key, init)  // 会话级持久                      usePersisted(key, init)
+// C++                                        // JS（同一语义的 JS 形态）
+State<T> s{init};                             const s = useState(init)
+s.value()                    // 读：登记依赖      s.value
+s.set(v)                     // 写：失效 + 调度    s.value = v
+memo<T>(c, fn, deps)         // 依赖未变不重算       useMemo(fn, deps)
+effect(c, fn, deps)          // 副作用，可返回清理   useEffect(fn, deps)
+ref<T>(c, init)              // 跨重组稳定（非响应式） useRef(init)
+resource<T>(c, fetch, input) // 异步状态            useResource(fetch, input)
+persisted<T>(c, key, init)   // 会话级持久（按名字） usePersisted(key, init)
 ```
+
+### 4.0 两个契约（不知道就会写错）
+
+**① hooks 按调用点序号对齐槽位——不能写在条件分支里。**
+
+`memo`/`effect`/`ref`/`resource` 共享一个游标（C++ 侧 `Composer::hook_index()`，JS 侧
+`hookCursor`）：同一 build 里第 N 个 hook 调用 ↔ 第 N 个槽，跨重组复用。条件分支里
+调用它就会错位——错位不是崩溃而是**静默串味**（第 2 个 hook 拿第 1 个的缓存）。
+唯一按**名字**取槽的是 `persisted`：它的身份是业务 key，条件剪掉再声明也能拿回旧值。
+
+**② `memo` 的依赖集同时承担“订阅”职责。**
+
+`Deps{{&a, &b}}` 不只是比较用的指纹——它同时把 `a`/`b` 登记为本作用域的依赖。
+若只在“真的重算”那帧才登记，命中缓存那帧作用域就会“忘了”依赖，依赖下一次
+变化时无人订阅 → 界面静默停在旧值（实测踩到：`calls` 值停在 1 不动）。
+
+### 4.0.1 副作用（effect）的执行时机
+
+`effect` 在**本帧重组结束之后**执行（C++ 侧 `Composer::reconcile()` 末尾；JS 侧
+`__d_reconcile()` 末尾），不在 build 中途。为何：副作用里写状态属于**连锁写**，
+而本次重组的脏标记清理就在 build 之后——内联执行的那次写会被当成“本次已处理”
+而吞掉，界面停在旧值（代码看着对、日志也没错，最难查的一类）。
+
+重组末尾执行则写状态自然标脏；JS 侧还多一层**收敛循环**（≤4 轮，防 effect 每轮都写
+状态的链子拖成死循环）——否则调一次 `tick()` 只能推进半拍（`useEffect` 里写的界面
+永远滞后一帧；实测：`log=` 而不是 `log=1`）。依赖变化时**先跑上次的清理**再跑本次的体。
 
 ### 4.1 依赖收集与重组范围
 

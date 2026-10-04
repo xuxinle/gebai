@@ -231,6 +231,15 @@
 - [ ] **script_host 提交链仍调 `mark_dirty_all`**（控制通道路径已改损坏区驱动）：
   JS 写入目前仍整帧；待脚本路径补上元素级标脏验证后再同样收敛。
 - [ ] **声明式 UI 后续里程碑**（M1–M4 主体已落地，设计与路线见 `docs/declarative.md`）：
+  - [x] **状态系统高层原语（双宿主）**：C++ `memo`/`effect`/`ref`/`persisted`
+    与 JS `useMemo`/`useEffect`/`useRef`/`usePersisted`（§4 的契约全部落实）。
+    实现中挖出两个真缺陷（均由新回归测试拓住）：
+    - **`memo` 命中缓存那帧丢了依赖订阅**：指纹只在“要重算”时登记依赖，于是
+      命中缓存的一帧作用域“忘了”依赖 → 依赖下一次变化无人订阅，界面**静默停在旧值**
+      （实测：`calls` 值停在 1 不动）。修法：指纹计算里一并 `subscribe()`。
+    - **`useEffect` 里写的界面永远滞后一帧**：effect 原在首次重组末尾跑、但结果要等
+      下一次 tick 才重组（实测 `log=` 而不是 `log=1`）。修法：重组末尾跑 effect +
+      **≤4 轮收敛循环**（effect 里的写在本帧内收敛，又不会把一帧拖成死循环）。
   - [x] M1 元素工厂：`dsl::make_element`（27 个内置类型）。
   - [x] M2 C++ 宿主：`dsl.hpp/cpp` + 重组器（示例已随整合删去，语义由 `tests/ui_dsl_test.cpp` 钉住）。
   - [x] M3 JS 宿主：`declarative.js` + `ui::DeclarativeHost` 窄桥

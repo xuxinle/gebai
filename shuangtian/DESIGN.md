@@ -818,6 +818,12 @@ compose('TodoPage', () => Column([
 **C++ 宿主机制**：
 - **依赖收集**：`State::value()` 读时登记当前 Composer（thread-local）；`set` 写时仅失效
   **订阅过它**的 Composer。事件回调在重组之外 → 全局活跃 Composer 注册表通知。
+- **状态系统高层原语**：`memo<T>(c, fn, deps)`（依赖指纹未变则复用上次结果；命中缓存
+  **也仍然登记依赖**——否则依赖下次变化无人订阅、界面静默停在旧值）、
+  `effect(c, fn, deps)`（依赖变化时执行、可返回清理；在**重组末尾**跑，
+  见 `docs/declarative.md` §4.0.1）、`ref<T>(c, init)`（跨重组稳定、**不响应式**：
+  改它不触发重组）、`persisted<T>(c, key, init)`（**按名字**取槽：会话级持久，
+  条件剪掉再声明能拿回旧值）。`Deps{{&a, &b}}` 的指纹是 `(指针, 写版本)`。
 - **单根语义**：build 的首个顶层声明直接落在 `UiRoot::content()` 槽位（不预建容器层）。
 - **位置对齐复用**：每个父元素一个子游标，重跑 build 时按位置+类型对齐——同位同型只
   更新（经 `ui::apply_properties`），异型替换，声明变少裁残。条件分支因此天然工作。
@@ -903,6 +909,11 @@ if (palette_open_.value()) {          // 条件声明
 - **异步**：`useResource(fetcher, input)` 返回 `{status: pending|ok|error, value?, error?}` 的
   State（代次计数：输入变化丢旧结果）；靠引擎的 `pump_jobs()` 驱动 Promise 微任务，
   `tick()` 内泵两轮（防"请求→重组→再请求"拖成无限帧）。
+- **状态系统高层原语**：`useMemo(fn, deps)`（依赖按值 JSON 比较；不可序列化的依赖
+  一律视为变了——保守重算）、`useEffect(fn, deps)`（返回清理函数；在重组末尾跑，
+  并带 ≤4 轮**收敛循环**——否则调一次 tick 只能推半拍）、`useRef(init)`（返回
+  `{current}`，改它不触发重组）、`usePersisted(key, init)`（写穿透宿主状态仓——
+  协议 `script.state` 可读回）；四者与 `useResource` **共用同一个调用点游标**。
 
 **共用约定（不变式 2/4 的落点）**：
 - **布局属性回归属性面**：`gap/padding/margin/width/height/grow/radius/direction` 进
@@ -923,9 +934,11 @@ if (palette_open_.value()) {          // 条件声明
 > （JS 十一用例）+ `tests/ui_declarative_parity_test.cpp`（双宿主一致性）完整钉住，
 > 界面演示由上面两个示例承载——示例不再重复单测已覆盖的验证。
 
-测试：`tests/ui_dsl_test.cpp`（C++ 十六用例：含 overlay 生命周期 / 异步 resource 与取消 /
-嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 / 载体内部件不被裁剪）、
-`tests/ui_declarative_host_test.cpp`（JS 十一用例）、
+测试：`tests/ui_dsl_test.cpp`（C++ **二十一**用例：含 overlay 生命周期 / 异步 resource 与取消 /
+嵌套作用域树 / 构造期属性组件 / 多作用域细粒度 / 子树挂载 / 载体内部件不被裁剪 /
+**memo·effect·ref·persisted 四个原语**，含「memo 命中缓存仍保持订阅」的反向验收）、
+`tests/ui_declarative_host_test.cpp`（JS **十五**用例，含 `useMemo`/`useEffect`/`useRef`/
+`usePersisted` 与「五个 hook 混用不串槽」）、
 `tests/ui_declarative_parity_test.cpp`（双宿主一致性两用例）、
 `tests/control_protocol_test.cpp`（协议 `ui.create`/`ui.remove` 用例）。
 

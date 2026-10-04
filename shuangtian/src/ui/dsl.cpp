@@ -60,6 +60,24 @@ void on_state_write(StateBase* state) {
 
 }  // namespace detail
 
+auto deps_signature(const Deps& deps) -> std::string {
+  // 指纹 = 逐项 `指针:写版本`。为何要版本而不只看指针：依赖「变了没有」才是
+  // 重算/重跑的判据，而同一个 State 对象可以反复写（指针不变）。
+  //
+  // **顺带订阅**（关键）：把依赖列入 `Deps` 就是声明「本作用域依赖它」——
+  // 若不在这里登记，`memo` 命中缓存那帧就不会读依赖，作用域于是「忘了」它，
+  // 依赖下一次变化时无人订阅 → 界面再也不更新（静默停在旧值，实测踩到）。
+  std::string out;
+  for (StateBase* item : deps.items) {
+    if (item != nullptr) item->subscribe();
+    out += std::to_string(reinterpret_cast<std::uintptr_t>(item));  // lint-allow: L6 作指纹，不解引用
+    out += ':';
+    out += item != nullptr ? std::to_string(item->version()) : std::string("-");
+    out += ';';
+  }
+  return out;
+}
+
 // ── Composer::Impl ────────────────────────────────────────────────────────
 
 struct Composer::Impl {
@@ -280,6 +298,17 @@ struct Composer::Impl {
   std::mutex inbox_mutex{};
   std::vector<std::function<void()>> inbox{};
 
+  // —─ effect：待执行的副作用（重组末尾跑）—─
+  //
+  // 为何不在 build 里直接跑：副作用里写状态属于连锁，而**本次重组的脏标记清理**
+  // 在 build 之后——内联执行的那次写会被当成"本次已处理"而吞掉（界面停在旧值）。
+  // 登记到队列、重组末尾统一跑，写状态自然标脏下一帧（§4.2 连锁写隔帧）。
+  struct PendingEffect {
+    State<EffectSlot>* slot{nullptr};
+    std::function<std::function<void()>()> body{};
+  };
+  std::vector<PendingEffect> pending_effects{};
+
   // —─ 工作线程池 —─
   //
   // 为何不用「每任务一线程」：密集场景（列表里几十个 `resource`）会瞬间开几十个线程，
@@ -327,9 +356,7 @@ struct Composer::Impl {
     }
   }
 
-  /// 析构：停池并 join。
-  /// 关于「取消」：已在执行的任务**跑完**（C++ 无法安全强杀线程），
-  /// 未开始的任务在本函数里被丢弃——这正好是「销毁即不再干活」的语义。
+  /// 析构：先跑 effect 清理，再停池并 join。
   void stop_pool() {
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
@@ -353,6 +380,10 @@ struct Composer::Impl {
   /// 已取消的任务计数（诊断/测试用）。
   std::size_t pending_cancelled{0};
 
+  /// 会话级持久状态仓（`persisted_slot` 的落点）：名字 → 状态。
+  /// 生命周期 = Composer（即整个会话期）：条件剪掉再声明能拿回旧值。
+  std::unordered_map<std::string, std::unique_ptr<StateBase>> persisted_states{};
+
   std::unordered_map<const Element*, std::size_t> child_cursor{};  // 每父元素的子游标
 
   /// 根槽位哨兵：parent_stack 的栈底。current_parent() 返回它时，create_element
@@ -372,7 +403,11 @@ Composer::Composer(UiRoot& root, Guardrails guardrails)
   active_composers.insert(this);
 }
 
-Composer::~Composer() { active_composers.erase(this); }
+Composer::~Composer() {
+  // 先跑 effect 清理（≈ 组件卸载）：清理里可能读/写状态，故在摘掉活跃注册表之前。
+  run_all_effect_cleanups();
+  active_composers.erase(this);
+}
 
 void Composer::register_sub_scope(std::shared_ptr<Component> component, const std::string& key) {
   // 兄弟间身份：未给 key 时用当前父下的出现序号（位置稳定即可）
@@ -524,6 +559,13 @@ auto Composer::reconcile() -> ReconcileStats {
     impl_->last_stats.budget_exceeded = true;
   }
   impl_->scope_dirty = false;
+  // —— ③ 副作用（effect）——
+  //
+  // 必须在**脏标记清理之后**跑：effect 里写状态是连锁写（隔帧生效）——
+  // 写在清理之前的话，那次 `invalidate` 会被下一行的 `scope_dirty = false` 吞掉，
+  // 界面永远停在旧值（这类假死最难查：代码看着对、日志也没错）。
+  // 副作用体在 build 之外执行 ⇒ 它的 `State::value()` 读不会误登记依赖。
+  impl_->last_stats.effects_run = static_cast<int>(run_pending_effects());
   return impl_->last_stats;
 }
 
@@ -560,6 +602,87 @@ void Composer::hook_state_push(std::unique_ptr<StateBase> state) {
   impl_->hook_states.push_back(std::move(state));
 }
 
+// —─ effect ──
+
+void Composer::effect_impl(std::function<std::function<void()>()> body, const Deps& deps) {
+  const std::string signature = deps_signature(deps);
+  State<EffectSlot>& slot =
+      state_slot<EffectSlot>(hook_index(), EffectSlot{});
+  EffectSlot& current = slot.peek_mut();
+  if (current.valid && current.signature == signature) return;   // 依赖未变：不重跑
+  current.valid = true;
+  current.signature = signature;
+  impl_->pending_effects.push_back(Impl::PendingEffect{&slot, std::move(body)});
+}
+
+auto Composer::run_pending_effects() -> std::size_t {
+  if (impl_->pending_effects.empty()) return 0;
+  std::vector<Impl::PendingEffect> jobs;
+  jobs.swap(impl_->pending_effects);
+  std::size_t ran = 0;
+  for (auto& job : jobs) {
+    if (job.slot == nullptr) continue;
+    // 先跑旧清理（≈ 上一次依赖的订阅关闭），再跑新体并记下本次清理。
+    EffectSlot& slot = job.slot->peek_mut();
+    if (slot.cleanup) {
+      std::function<void()> previous = std::move(slot.cleanup);
+      slot.cleanup = {};
+      try {
+        previous();
+      } catch (...) {
+        std::fprintf(stderr, "[dsl] effect 清理异常\n");
+      }
+    }
+    try {
+      slot.cleanup = job.body();
+      ++ran;
+    } catch (const std::exception&
+                  error) {   // lint-allow: L5 捕获合法（副作用体不得拖垮重组）
+      std::fprintf(stderr, "[dsl] effect 异常：%s\n", error.what());
+    } catch (...) {
+      std::fprintf(stderr, "[dsl] effect 未知异常\n");
+    }
+  }
+  return ran;
+}
+
+auto Composer::pending_effect_count() const noexcept -> std::size_t {
+  return impl_->pending_effects.size();
+}
+
+auto Composer::persisted_lookup(const std::string& key) -> StateBase* {
+  const auto found = impl_->persisted_states.find(key);
+  return found != impl_->persisted_states.end() ? found->second.get() : nullptr;
+}
+
+void Composer::persisted_store(const std::string& key, std::unique_ptr<StateBase> state) {
+  impl_->persisted_states[key] = std::move(state);
+}
+
+auto Composer::persisted_keys() const -> std::vector<std::string> {
+  std::vector<std::string> keys;
+  keys.reserve(impl_->persisted_states.size());
+  for (const auto& entry : impl_->persisted_states) keys.push_back(entry.first);
+  std::sort(keys.begin(), keys.end());
+  return keys;
+}
+
+void Composer::run_all_effect_cleanups() {
+  impl_->pending_effects.clear();
+  for (auto& state : impl_->hook_states) {
+    auto* slot = dynamic_cast<State<EffectSlot>*>(state.get());
+    if (slot == nullptr) continue;
+    EffectSlot& value = slot->peek_mut();
+    if (!value.cleanup) continue;
+    std::function<void()> cleanup = std::move(value.cleanup);
+    value.cleanup = {};
+    try {
+      cleanup();
+    } catch (...) {
+      std::fprintf(stderr, "[dsl] effect 清理异常\n");
+    }
+  }
+}
 // —─ 异步—─
 
 auto Composer::async_begin(std::size_t slot, std::string fingerprint) -> std::uint64_t {

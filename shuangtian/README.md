@@ -190,7 +190,8 @@ macOS 上 GL 已废弃）。它既不是"保证腿"也不是"加分腿"，因此
 **六页**：概览 / 组件 / 数据 / **声明式** / 控制通道 / 关于。其中「声明式」页演示
 `st::ui::dsl` 的四种典型形态（**页壳手搭 + 内容区声明式子树**，`dsl::mount_into`）：
 ① 状态驱动表单（改输入 → 另一处文本自己变）；② key 对齐列表（增删不悳动已有项身份）；
-③ 异步 `resource`（工作线程算，结果回主线程写状态）；④ 条件内容（关掉即从树中裁剪，不是 hidden）。
+③ 异步 `resource`（工作线程算，结果回主线程写状态）；④ 条件内容（关掉即从树中裁剪，不是 hidden）；
+⑤ **状态系统高层原语**（`memo` 依赖未变不重算 / `effect` 依赖变化跑一次 / `ref` 跨重组稳定且不触发重组）。
 
 ### `codeeditor` — 代码编辑器（应用面；**整个界面由声明式描述**）
 
@@ -240,7 +241,7 @@ shuangtian_run(action=build) → action=start（无头，返回端口/PID）
 | **Windows 宿主 + g++（MinGW-w64）默认编译器** | ✅ g++ 优先（版本护栏 ≥ 13）、MSVC 可回退（`vswhere`+`vcvars64` 自动定位、标志翻译、`/sourceDependencies` 依赖追踪、`bootstrap.ps1`）；Windows 目标默认静态 libgcc/libstdc++（产物不要求 mingw dll）；实测 g++ 自举 27s / 全量构建 ~31s / 测试全绿 |
 | **GPU 渲染（D3D11：硬件 → WARP）** | ✅ **M1–M6 全部落地**：设备层 / 着色器原语（文字与渐变与软件 **Δ0**）/ 投影（**Δ≤1**）/ 路径填充描边 / **DXGI swapchain 呈现** / `auto` 按实测选优。实测总帧 24.66→**1.53 ms**、送显 6.55→**0.03 ms**（详见 `DESIGN.md` §8.3） |
 | 动画与过渡 | ✅ 悬浮事件与特效（背景/描边/上浮/发光，`HoverEffect` 声明式）、帧驱动过渡（`UiRoot` 时间轴 + 续帧协议）、3D 旋转 |
-| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、key 对齐复用、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、异常冻结、**子树挂载 `mount_into`**（宿主界面里的一页用声明式）；双宿主一致性 fixture；示例见上方两个（codeeditor 整页 + gallery 声明式页）；协议 `ui.create`/`ui.remove` 在线建删 |
+| **声明式 UI（`st::ui::dsl` + `ui::DeclarativeHost`）** | ✅ **双宿主**：C++ struct 组件 + `State<T>` + `build()`，与 JS `compose()`/`useState`（复用 ScriptHost）——≈ Jetpack Compose / 鸿蒙 ArkTS；**状态系统高层原语 `memo`/`effect`/`ref`/`persisted`（JS 侧同名的 `useMemo`/`useEffect`/`useRef`/`usePersisted`）**、ArkTS 链式修饰、**`resource`/`useResource` 异步**（线程池 + 取消牌 + 代次丢弃）、key 对齐复用、**嵌套作用域树**（每层独立失效）、`custom<T>` 逃生舱、`overlay` 生命周期、`menu_bar`、`select`/`table`/`tree` 数据驱动、全局快捷键、条件裁剪、异常冻结、**子树挂载 `mount_into`**（宿主界面里的一页用声明式）；双宿主一致性 fixture；示例见上方两个（codeeditor 整页 + gallery 声明式页）；协议 `ui.create`/`ui.remove` 在线建删 |
 
 ## 相关文档
 

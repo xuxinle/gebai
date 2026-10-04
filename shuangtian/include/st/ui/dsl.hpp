@@ -70,7 +70,19 @@ class StateBase {
   /// 读：把「当前重组作用域」登记为订阅者（重组期间由 thread-local 提供当前 Composer）。
   virtual void subscribe() { detail::on_state_read(this); }
   /// 写：失效订阅它的所有活跃 Composer（调度下一帧重组）。
-  virtual void invalidate() { detail::on_state_write(this); }
+  virtual void invalidate() {
+    ++version_;
+    detail::on_state_write(this);
+  }
+
+  /// 写版本号（每次失效自增）。
+  ///
+  /// 用途：`memo`/`effect` 的依赖比较——「依赖变过没有」只能靠版本（值类型未必可比较，
+  /// 且「写回等值」已被 `State::set` 挡掉，所以版本变 ⇔ 真变）。
+  [[nodiscard]] auto version() const noexcept -> std::uint64_t { return version_; }
+
+ private:
+  std::uint64_t version_{0};
 };
 
 /// thread-local：当前正在重组的 Composer（State 读时用它登记依赖）。
@@ -91,6 +103,10 @@ class State : public StateBase {
     invalidate_const();
     return value_;
   }
+  /// 非响应式读（不登记依赖）：`ref` 用——读它不该建立订阅。
+  [[nodiscard]] auto peek() const noexcept -> const T& { return value_; }
+  /// 非响应式可变引用（不登记依赖、不失效）：`ref` 的落点——改它不触发重组。
+  [[nodiscard]] auto peek_mut() noexcept -> T& { return value_; }
   /// 写值（相等不触发；变化才失效 + 调度重组）。
   void set(T next) {
     if (next == value_) return;
@@ -111,9 +127,37 @@ class State : public StateBase {
   T value_{};
 };
 
-/// 依赖集（memo/effect 用）：按 StateBase 指针比较。
+/// 依赖集（memo/effect 用）：按 StateBase 指针 + 写版本比较。
+///
+/// 用法：`c.deps(a, b)` 或直接 `Deps{{&a, &b}}`——顺序参与指纹（同一写法每帧顺序相同）。
 struct Deps {
   std::vector<StateBase*> items{};
+};
+
+/// memo 的缓存槽：依赖指纹 + 缓存值。
+///
+/// 相等性只比 `valid`/`signature`（不比值）：缓存值类型 T 不必可比较，
+/// 而「依赖没变」本就等价于「缓存仍然有效」。
+template <class T>
+struct MemoSlot {
+  bool valid{false};
+  std::string signature{};
+  T value{};
+
+  auto operator==(const MemoSlot& other) const -> bool {
+    return valid == other.valid && signature == other.signature;
+  }
+};
+
+/// effect 的槽：依赖指纹 + 上一次的清理函数。
+struct EffectSlot {
+  bool valid{false};
+  std::string signature{};
+  std::function<void()> cleanup{};
+
+  auto operator==(const EffectSlot& other) const -> bool {
+    return valid == other.valid && signature == other.signature;
+  }
 };
 
 // ── 异步资源（`resource`，对应 JS 侧 `useResource`）───────────────────────
@@ -165,6 +209,10 @@ class AsyncCancel {
 /// 订阅登记辅助（Composer 侧调用）。
 void detail_subscribe(StateBase& state);
 
+/// 依赖指纹：`(指针, 版本)` 逐项拼接（顺序敏感——与调用方书写顺序一致）。
+/// `memo`/`effect` 用它判断「依赖是否变过」：指纹相同即视为未变（不重算、不重跑）。
+[[nodiscard]] auto deps_signature(const Deps& deps) -> std::string;
+
 // ──────────────────────────────────────────────────────────────────────────
 // 重组器
 // ──────────────────────────────────────────────────────────────────────────
@@ -182,6 +230,7 @@ struct ReconcileStats {
   int elements_created{0};    ///< 新建元素数
   int elements_removed{0};    ///< 移除元素数
   int properties_applied{0};  ///< 经 apply_properties 落地的属性数
+  int effects_run{0};         ///< 本次执行的 effect 数（依赖变化的）
   bool budget_exceeded{false};///< 预算耗尽（剩余作用域顺延）
   std::string error;          ///< 首个错误（frozen 时填）
 };
@@ -240,6 +289,39 @@ class Composer {
 
   /// 子作用域登记（`sub_component` 调；首次记录宿主位置，之后复用）。
   void register_sub_scope(std::shared_ptr<Component> component, const std::string& key);
+
+  // —─ 会话级持久状态（`persisted` 的底座）—─
+  /// 按**名字**（不是调用点序号）取/建强类型状态槽。
+  ///
+  /// 与 `state_slot`（按序号）的区别：名字是稳定的业务身份——不但跟调用点顺序无关，
+  /// 还能在组件被临时条件剪掉又重新声明时拿回旧值（“会话级持久”的含义）。
+  template <class T>
+  [[nodiscard]] auto persisted_slot(const std::string& key, T initial) -> State<T>& {
+    StateBase* existing = persisted_lookup(key);
+    if (auto* typed = dynamic_cast<State<T>*>(existing); typed != nullptr) return *typed;
+    auto fresh = std::make_unique<State<T>>(std::move(initial));
+    State<T>* raw = fresh.get();
+    persisted_store(key, std::move(fresh));
+    return *raw;
+  }
+  /// 会话级状态仓里的键列表（诊断/测试；协议可读回）。
+  [[nodiscard]] auto persisted_keys() const -> std::vector<std::string>;
+  /// 按名字查已存在的状态（无则 nullptr）。
+  [[nodiscard]] auto persisted_lookup(const std::string& key) -> StateBase*;
+  /// 按名字放入状态（已有同名则替换）。
+  void persisted_store(const std::string& key, std::unique_ptr<StateBase> state);
+  // —─ 副作用（`effect` 的底座）—─
+  /// `effect` 的落地：依赖变化时登记待执行；真正的执行在**本帧重组结束之后**
+  /// （`run_pending_effects`）——副作用里写状态属于「连锁写」，隔帧生效（§4.2），
+  /// 内联执行会让这次写被同帧的脏标记清理吞掉。
+  void effect_impl(std::function<std::function<void()>()> body, const Deps& deps);
+  /// 执行本帧登记的副作用（重组末尾调用）：依赖变化的作用域先跑旧清理，再跑新体。
+  /// 返回执行数。
+  auto run_pending_effects() -> std::size_t;
+  /// 跑全部已登记 effect 的清理函数（Composer 析构时调用；不抛异常）。
+  void run_all_effect_cleanups();
+  /// 本帧登记的待跑 effect 数（诊断/测试用；跑完清空）。
+  [[nodiscard]] auto pending_effect_count() const noexcept -> std::size_t;
 
   // —─ 异步（`resource` 的底座）—─
   /// 输入指纹变化时开新一代：**旧代翻牌取消**，返回新 token；未变化返回 0（不重发）。
@@ -640,6 +722,90 @@ auto mount_into(UiRoot& root, Element& host, std::shared_ptr<Component> root_com
 ///   return result;
 /// }, query.value());
 /// ```
+/// `memo`（≈ `remember` / `useMemo`）：依赖未变则复用上次结果，变了才重算。
+///
+/// ```cpp
+/// const auto rows = dsl::memo<std::vector<Row>>(c, [&] { return filter(items.value()); },
+///                                               Deps{{&items, &query}});
+/// ```
+///
+/// 「变了才重算」的判据 = 依赖集的 `(指针, 写版本)` 指纹（§状态系统的 Deps）。
+/// 结果缓存在 hook 槽里（跨重组保持）；**槽对齐按调用点序号**——与 `resource` 同规则，
+/// 所以 `memo` 不能写在条件分支里（同 React Hooks 的规则）。
+template <class T, class Fn>
+[[nodiscard]] auto memo(Composer& c, Fn&& fn, const Deps& deps) -> const T& {
+  const std::string signature = deps_signature(deps);
+  State<MemoSlot<T>>& slot = c.state_slot<MemoSlot<T>>(c.hook_index(), MemoSlot<T>{});
+  const MemoSlot<T>& current = slot.peek();
+  if (!current.valid || current.signature != signature) {
+    MemoSlot<T> next;
+    next.valid = true;
+    next.signature = signature;
+    next.value = static_cast<T>(fn());
+    slot.peek_mut() = std::move(next);   // 非响应式写：缓存槽不是界面状态
+  }
+  return slot.peek().value;
+}
+
+/// `effect`（≈ `useEffect` / `LaunchedEffect`）：依赖变化时执行一次。
+///
+/// - 依赖指纹未变 → 不重跑；变了 → **先跑上次的清理**，再跑本次的体；
+/// - 体可返回清理函数（`[]() -> std::function<void()>`），也可以什么都不返回；
+/// - 执行时机是**本帧重组结束之后**（不是 build 中途）：副作用里写状态属于连锁写，
+///   隔帧生效——内联执行的那次写会被同帧脏标记清理吞掉（界面停在旧值）。
+/// - Composer 析构时跑全部清理（≈ 组件卸载）。
+///
+/// ```cpp
+/// dsl::effect(c, [&] {
+///   auto conn = subscribe(topic.value());
+///   return [conn] { conn.close(); };        // 清理（可省略）
+/// }, Deps{{&topic}});
+/// ```
+template <class Fn>
+void effect(Composer& c, Fn&& fn, const Deps& deps) {
+  using Result = std::invoke_result_t<Fn&>;
+  if constexpr (std::is_void_v<Result>) {
+    c.effect_impl(
+        [body = std::forward<Fn>(fn)]() mutable -> std::function<void()> {
+          body();
+          return {};
+        },
+        deps);
+  } else {
+    c.effect_impl(
+        [body = std::forward<Fn>(fn)]() mutable -> std::function<void()> { return body(); }, deps);
+  }
+}
+
+/// `ref`（≈ `useRef` / `remember { mutableStateOf() }` 的非响应式版）：
+/// 跨重组稳定的可变槽。**改它不触发重组**（要驱动界面就用 `State`）。
+///
+/// 典型用途：跨帧保留的元素指针/定时器号/游标等「实现细节状态」，
+/// 与「界面状态」分开——后者写一次就要重建界面，前者写不该重建。
+///
+/// ```cpp
+/// auto& pending = dsl::ref<bool>(c, false);   // 同一调用点每帧拿回同一个槽
+/// ```
+template <class T>
+[[nodiscard]] auto ref(Composer& c, T initial = {}) -> T& {
+  State<T>& slot = c.state_slot<T>(c.hook_index(), std::move(initial));
+  return slot.peek_mut();
+}
+
+/// `persisted`（≈ JS 侧 `usePersisted`）：**会话级持久**状态。
+///
+/// 与 `state_slot`（按调用点序号）的区别在**身份**：按名字取槽——跟顺序无关，
+/// 而且组件被条件分支剪掉又重新声明时值还在（这正是「持久」的含义）。
+/// 生命周期 = Composer（即会话）。
+///
+/// ```cpp
+/// auto& draft = dsl::persisted<std::string>(c, "editor.draft", "");
+/// ```
+template <class T>
+[[nodiscard]] auto persisted(Composer& c, const std::string& key, T initial = {}) -> State<T>& {
+  return c.persisted_slot<T>(key, std::move(initial));
+}
+
 template <class T, class Fetcher, class Input>
 [[nodiscard]] auto resource(Composer& c, Fetcher fetcher, const Input& input)
     -> State<AsyncValue<T>>& {

@@ -1313,9 +1313,33 @@ struct DeclarativePage : st::ui::dsl::Component {
   st::ui::dsl::State<std::string> draft{""};
   st::ui::dsl::State<bool> show_stats{true};
   st::ui::dsl::State<std::string> query{"shuangtian"};
+  st::ui::dsl::State<std::string> filter{""};        // ⑤ 派生：过滤词（memo 的依赖）
+  st::ui::dsl::State<std::string> effect_log{""};    // ⑤ 副作用写的行（effect 的产物）
 
   void build(st::ui::dsl::Composer& c) override {
     using namespace st::ui::dsl;
+
+    // ⑤ hooks 集中在 build 开头：hooks 按**调用点序号**对齐槽位，顺序必须每帧一致
+    //    （写在条件分支里会错位——同 React Hooks 的规则）。
+    // Deps 用局部变量传（不仅为了好看：gcc 的 -Wdangling-reference 对「实参里有临时
+    // Deps、返回值又是引用」会误报——具名变量同时回避误报、也让依赖列表更好读）。
+    const Deps memo_deps{{&todos, &filter}};
+    const Deps effect_deps{{&name}};
+    const auto& visible = memo<std::vector<TodoRow>>(
+        c,
+        [&] {
+          std::vector<TodoRow> out;
+          for (const auto& item : todos.value()) {
+            if (filter.value().empty() || item.text.find(filter.value()) != std::string::npos) {
+              out.push_back(item);
+            }
+          }
+          return out;
+        },
+        memo_deps);
+    int& builds = ref<int>(c, 0);
+    ++builds;   // ref：每次重组自增（它**不触发**重组——要驱动界面得用 State）
+    effect(c, [this] { effect_log.set("name 变了 → " + name.value()); }, effect_deps);
 
     // ① 表单 + 计数（状态驱动重组）
     (void)card(c, {.gap = 10.0f, .padding = 16.0f, .key = "form"}, [&] {
@@ -1389,6 +1413,23 @@ struct DeclarativePage : st::ui::dsl::Component {
           (void)text(c, [&] { return "点击 " + std::to_string(clicks.value()) + " 次"; });
         });
       }
+    });
+
+    // ⑤ 状态系统的高层原语：memo（依赖未变不重算）/ effect（依赖变化跑一次）/
+    //    ref（跨重组稳定、不触发重组）。三种在同一份 build 里共存，槽位按调用点对齐。
+    (void)card(c, {.gap = 10.0f, .padding = 16.0f, .key = "hooks"}, [&] {
+      (void)heading(c, "⑤ memo / effect / ref", 3);
+      (void)input(c, filter.value(), [this](std::string next) { filter.set(std::move(next)); },
+                  {.id = "decl-filter", .key = "filter"});
+      (void)text(c,
+                 [&] {
+                   return "memo 过滤出 " + std::to_string(visible.size()) + " / " +
+                          std::to_string(todos.value().size()) + " 项（每帧 " +
+                          std::to_string(builds) + " 次 build）";
+                 },
+                 {.id = "decl-memo", .key = "memo-line"});
+      (void)text(c, [&] { return "effect：" + effect_log.value(); },
+                 {.id = "decl-effect", .key = "effect-line"});
     });
   }
 

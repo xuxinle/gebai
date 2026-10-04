@@ -304,6 +304,14 @@ auto DeclarativeHost::tick() -> bool {
   if (!outcome) return false;
   bool rerun = st::json_get_i64(*outcome, "rerun", 0) > 0;
 
+  // 重组中登记的 effect（useEffect）：**重组之后**执行——副作用里写状态是连锁写，
+  // 隔帧生效；内联执行会被同帧的 dirty 清理吞掉（界面停在旧值）。
+  // 返回 1 = effect 里写了状态（`dirty` 为真）⇒ 需要再重组一帧；
+  // 返回 0 = 只是跑了副作用而没改界面 ⇒ 不多请求一帧。
+  if (auto effects = impl_->script->call("__d_run_effects", {}); effects.has_value()) {
+    if (st::json_as_i64(*effects, 0) > 0) rerun = true;
+  }
+
   // 重组中新起的异步（如 useResource 因输入变化重发请求）→ 同帧再泵**一轮**并重组。
   // 只做一轮：防止"请求→重组→再请求"的链子把一帧拖成无限循环；没跑完的留给下一帧。
   if (impl_->script->pump_jobs() > 0) {

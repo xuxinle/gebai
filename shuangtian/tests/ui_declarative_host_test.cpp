@@ -387,3 +387,193 @@ ST_TEST(declarative_for_each_key_alignment) {
   ST_CHECK_EQ(root->child_at(1)->derived_id(), id_a);   // 身份仍保持
   ST_CHECK_EQ(root->child_count(), 4U);                 // C A + 两个按钮（B 已删）
 }
+
+// ── useMemo / useEffect / useRef / usePersisted（hooks 槽位体系）───────────
+//
+// 这四个与 `useResource` **共用一个调用点游标**（同一 build 里第 N 个 hook = 第 N 个槽）——
+// 所以必须与 useResource 混用时槽也不串（下面的用例就故意混着写）。
+
+// useMemo：依赖未变不重算（依赖按值 JSON 比较）。
+ST_TEST(declarative_use_memo_caches_by_deps) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let calls = 0;
+    let seed = null;
+    let other = null;
+    compose('Memo', () => {
+      if (seed === null) seed = useState(1);
+      if (other === null) other = useState(0);
+      const doubled = useMemo(() => { calls++; return seed.value * 2; }, [seed.value]);
+      return column({}, [
+        text(() => 'v=' + doubled),
+        text(() => 'calls=' + calls),
+        text(() => 'other=' + other.value),
+        button('bump', () => { seed.value = seed.value + 1; }),
+        button('mine', () => { other.value = other.value + 1; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  st::ui::Element* root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("v=2"));
+  ST_CHECK_EQ(root->child_at(1)->semantics_text(), std::string("calls=1"));
+
+  // ① 无关状态写 → 重跑 build，但依赖未变 → 不重算
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(4), "click", ""));   // mine
+  (void)fx.decl->tick();
+  fx.root.layout(true);
+  root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(1)->semantics_text(), std::string("calls=1"));
+  ST_CHECK_EQ(root->child_at(2)->semantics_text(), std::string("other=1"));
+
+  // ② 依赖写 → 重算
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(3), "click", ""));   // bump
+  (void)fx.decl->tick();
+  fx.root.layout(true);
+  root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("v=4"));
+  ST_CHECK_EQ(root->child_at(1)->semantics_text(), std::string("calls=2"));
+}
+
+// useEffect：依赖变化才跑（首帧跑一次、依赖不变不重跑），且副作用里写的状态必须落地。
+ST_TEST(declarative_use_effect_runs_on_dep_change) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let topic = null;
+    let log = null;
+    compose('Effect', () => {
+      if (topic === null) topic = useState(1);
+      if (log === null) log = useState('');
+      useEffect(() => { log.value = log.value + topic.value; }, [topic.value]);
+      return column({}, [
+        text(() => 'log=' + log.value),
+        button('next', () => { topic.value = topic.value + 1; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  st::ui::Element* root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("log=1"));
+
+  // 点一次 → effect 重跑 → 它写的状态必须能收敛（引擎在同次 tick 内再重组一帧）
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(1), "click", ""));
+  (void)fx.decl->tick();
+  fx.root.layout(true);
+  root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("log=12"));
+
+  // 再来一次：每轮 topic 变化恰好追加一次（无重复执行）
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(1), "click", ""));
+  (void)fx.decl->tick();
+  fx.root.layout(true);
+  root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("log=123"));
+}
+
+// useRef：跨重组稳定、改它不触发重组（要驱动界面用 useState）。
+ST_TEST(declarative_use_ref_is_stable_and_not_reactive) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let tick = null;
+    compose('Ref', () => {
+      if (tick === null) tick = useState(0);
+      const counter = useRef(0);
+      counter.current = counter.current + 1;      // 每帧重组累加
+      return column({}, [
+        text(() => 'n=' + counter.current + '/t=' + tick.value),
+        button('bump', () => { tick.value = tick.value + 1; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  st::ui::Element* root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("n=1/t=0"));
+
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(1), "click", ""));
+  (void)fx.decl->tick();
+  fx.root.layout(true);
+  root = fx.root.content();
+  // 跨重组保持（新槽会从 0 起 → 这里会变 n=1）
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("n=2/t=1"));
+
+  // 无脏时不重跑（ref 的写不标脏；这里也没有别的东西标脏）
+  ST_CHECK_EQ(fx.decl->tick(), false);
+}
+
+// usePersisted：初值从宿主状态仓读回（协议 `script.state` 同源）、写穿透回去。
+ST_TEST(declarative_use_persisted_round_trips_host_state) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  ST_CHECK(fx.script->set_state(*st::json_parse(R"({"draft":"草稿"})")).has_value());
+  auto status = fx.decl->run(R"JS(
+    let draft = null;
+    compose('Persist', () => {
+      if (draft === null) draft = usePersisted('draft', '');
+      return column({}, [
+        text(() => 'd=' + draft.value),
+        button('edit', () => { draft.value = draft.value + '!'; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  st::ui::Element* root = fx.root.content();
+  // 初值来自宿主状态仓（不是 fallback ''）
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("d=草稿"));
+
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(1), "click", ""));
+  (void)fx.decl->tick();
+  fx.root.layout(true);
+  root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("d=草稿!"));
+  // 写穿透：宿主状态仓里也是新值
+  auto host_state = fx.script->state();
+  ST_REQUIRE(host_state.has_value());
+  ST_CHECK_EQ(st::json_get_string(*host_state, "draft", ""), std::string("草稿!"));
+}
+
+// hooks 混合：useState/useMemo/useEffect/useRef/useResource 同在一个 build 里，
+// 槽位按调用点对齐（串了就会出现「第 2 个 hook 拿到第 1 个的缓存」这类静默错位）。
+ST_TEST(declarative_hook_slots_do_not_mix) {
+  Fixture fx;
+  ST_REQUIRE(fx.ready());
+  auto status = fx.decl->run(R"JS(
+    let n = null;
+    compose('Mix', () => {
+      if (n === null) n = useState(2);
+      const twice = useMemo(() => n.value * 2, [n.value]);
+      const seen = useRef('');
+      useEffect(() => { seen.current = 'e' + n.value; }, [n.value]);
+      const res = useResource(() => Promise.resolve('r' + n.value), n.value);
+      return column({}, [
+        text(() => 'twice=' + twice),
+        text(() => 'seen=' + seen.current),
+        text(() => 'res=' + (res.value.status === 'ok' ? res.value.value : res.value.status)),
+        button('bump', () => { n.value = n.value + 1; }),
+      ]);
+    })
+  )JS");
+  ST_REQUIRE(status.has_value());
+  fx.root.layout(true);
+  st::ui::Element* root = fx.root.content();
+  // 首帧：memo 槽拿到的是 n=2（不是 resource 的 pending 对象）
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("twice=4"));
+  // effect 在重组末尾跑（首挂走 compose 的 __d_reconcile，不经 tick）——tick 一次让它落地
+  (void)fx.decl->tick();
+
+  // 点一次：四个 hook 的槽都跟着 n 前进（串槽的话这里会读到旧值/pending）
+  ST_CHECK(st::ui::invoke_element(fx.root, *root->child_at(3), "click", ""));
+  (void)fx.decl->tick();   // 同一次 tick 内：重组 → effect → 泵微任务 → 再重组（异步结果同帧可见）
+  fx.root.layout(true);
+  root = fx.root.content();
+  ST_CHECK_EQ(root->child_at(0)->semantics_text(), std::string("twice=6"));
+  // effect 在本帧内跑完并收敛（seen 是 ref：effect 写了它，收敛那一帧的 build 看得到）
+  ST_CHECK_EQ(root->child_at(1)->semantics_text(), std::string("seen=e3"));
+  ST_CHECK_EQ(root->child_at(2)->semantics_text(), std::string("res=r3"));
+}
