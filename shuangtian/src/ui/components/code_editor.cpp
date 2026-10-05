@@ -119,8 +119,15 @@ CodeEditor::CodeEditor() {
 
 CodeEditor::~CodeEditor() = default;
 
+void CodeEditor::set_font_scale(float scale) {
+  // 夹取到可读区间：0 会让整屏文字消失（且崩溃式难查），过大则一行放不下几个字。
+  font_scale_ = std::clamp(scale, 0.5f, 4.0f);
+  font_size_px_ = -1.0f;   // 档位与绝对字号互斥
+  mark_layout_dirty();
+}
+
 void CodeEditor::set_font_size(float size) {
-  font_size_ = size;
+  font_size_px_ = size;
   mark_layout_dirty();
 }
 
@@ -140,8 +147,15 @@ auto CodeEditor::available_languages() -> std::vector<std::string> {
 }
 
 void CodeEditor::apply_theme(const Theme& theme) {
-  (void)theme;  // 语法配色在绘制时按 `theme.syntax()` 取（无需缓存到样式）
-  style_.font_size = font_size_;
+  // 语法配色在绘制时按 `theme.syntax()` 取（无需缓存到样式），但**基准字号必须在这里落**：
+  // 主题是字号缩放（`--ui-font-scale` → `Metrics::scale_fonts`）的唯一真值源，
+  // 不读它就会与普通文字脱钩（edit 前：本组件硬写绝对像素，缩放全局生效惟它不动）。
+  theme_base_font_ = theme.metrics().font_base;
+  const float size = font_size();
+  if (std::abs(style_.font_size - size) > 0.001f) {
+    style_.font_size = size;
+    mark_layout_dirty();   // 行高/列宽/滚动极限全部依赖字号
+  }
   style_.background = math::Color{0, 0, 0, 0};
   mark_dirty();
 }
@@ -778,25 +792,25 @@ auto CodeEditor::toggle_comment() -> bool {
 // ————————————————————————————————————————————————————————————————————————————
 
 auto CodeEditor::line_height(const RenderContext& context) const -> float {
-  return text_port_of(context).line_height(font_size_);
+  return text_port_of(context).line_height(font_size());
 }
 
 auto CodeEditor::gutter_width(const RenderContext& context) const -> float {
   if (!show_line_numbers_) return 0.0f;
   const TextPort& port = text_port_of(context);
   const std::size_t digits = std::to_string(std::max<std::size_t>(line_count(), 1)).size();
-  return port.measure_width(std::string(digits, '0'), font_size_, text::FontRole::Monospace) + kGutterPadding * 2.0f;
+  return port.measure_width(std::string(digits, '0'), font_size(), text::FontRole::Monospace) + kGutterPadding * 2.0f;
 }
 
 auto CodeEditor::rebuild_line_geometry(const RenderContext& context) const -> void {
   if (!geometry_dirty_) return;
   rebuild_tokens();
-  line_height_cache_ = text_port_of(context).line_height(font_size_);
+  line_height_cache_ = text_port_of(context).line_height(font_size());
   gutter_cache_ = gutter_width(context);
   max_line_width_cache_ = 0.0f;
   const TextPort& port = text_port_of(context);
   for (const auto& [begin, end] : line_spans_) {
-    const float width = port.measure_width(std::string_view(text_).substr(begin, end - begin), font_size_, text::FontRole::Monospace);
+    const float width = port.measure_width(std::string_view(text_).substr(begin, end - begin), font_size(), text::FontRole::Monospace);
     max_line_width_cache_ = std::max(max_line_width_cache_, width);
   }
   geometry_dirty_ = false;
@@ -906,7 +920,7 @@ auto CodeEditor::x_for_index(const RenderContext& context, std::size_t index) co
   // 且偏移随列号线性累积（实测 45 列处偏 7.7px——用户报的“光标漂移”就是这个）。
   // 这条路径是全部 x 坐标的量尺：`paint_content` 的 pen 递推跟它同源，两者不能分家。
   return text_origin(context).x +
-         text_port_of(context).measure_width(prefix, font_size_, text::FontRole::Monospace);
+         text_port_of(context).measure_width(prefix, font_size(), text::FontRole::Monospace);
 }
 
 auto CodeEditor::index_at_point(const RenderContext& context, math::Point point) const -> std::size_t {
@@ -928,7 +942,7 @@ auto CodeEditor::index_at_point(const RenderContext& context, math::Point point)
     const std::size_t next = utf8_next(text_, index);
     const std::size_t from = expanded.map[index - begin];
     const std::size_t to = expanded.map[std::min(next, end) - begin];
-    const float advance = port.measure_width(expanded.text.substr(from, to - from), font_size_,
+    const float advance = port.measure_width(expanded.text.substr(from, to - from), font_size(),
                                              text::FontRole::Monospace);
     if (width + advance * 0.5f > target) return index;
     width += advance;
@@ -1125,7 +1139,7 @@ auto CodeEditor::last_visible_line(const RenderContext& context) const -> std::s
 // ————————————————————————————————————————————————————————————————————————————
 
 void CodeEditor::measure(const RenderContext& context, const Constraints& constraints) {
-  const float height = text_port_of(context).line_height(font_size_);
+  const float height = text_port_of(context).line_height(font_size());
   const float rows = std::min(static_cast<float>(line_count()), 24.0f);
   const float natural_height = rows * height + kTopPadding + kBottomPadding;
   measured_ = math::Size{constraints.max_width, std::min(constraints.max_height, std::max(80.0f, natural_height))};
@@ -1138,7 +1152,7 @@ void CodeEditor::arrange(const RenderContext& context, math::Rect rect) {
   // 行高缓存可能在本次 arrange 之前已由绘制填过；若还没有，这儿补上
   // （仅当上下文有可用文本端口时——属性面的视口推算依赖它，见 get_property）。
   if (line_height_cache_ <= 0.0f && context.text != nullptr) {
-    line_height_cache_ = context.text->line_height(font_size_);
+    line_height_cache_ = context.text->line_height(font_size());
   }
   (void)context;
 }
@@ -1179,7 +1193,7 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       const std::size_t at = std::min(offset, row.size());
       const std::size_t mapped = expanded.map[at];
       return origin_x + port.measure_width(std::string_view(expanded.text).substr(0, mapped),
-                                           font_size_, text::FontRole::Monospace);
+                                           font_size(), text::FontRole::Monospace);
     };
 
     // 悬停行底纹（最淡的一层；当前行与选择压在它上面）
@@ -1251,7 +1265,7 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     // “缩进参考线”这类装饰“看不见就等于没有”。亮度差拉到 ~25% 既不抢正文，
     // 又能一眼看出缩进层次（与主流编辑器同量级）。
     if (indent_guides_ && !row.empty()) {
-      const float space_w = text_port_of(context).measure_width(" ", font_size_,
+      const float space_w = text_port_of(context).measure_width(" ", font_size(),
                                                                text::FontRole::Monospace);
       const std::size_t unit = static_cast<std::size_t>(std::max(1, tab_width_));
       // 缩进宽度按**展开后**的视觉列算（与绘制/命中同一量尺）——原先 Tab 按
@@ -1281,9 +1295,9 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       if (mapped_to <= mapped_from) return;
       const std::string_view slice =
           std::string_view(expanded.text).substr(mapped_from, mapped_to - mapped_from);
-      port.draw(canvas, slice, math::Point{pen, row_top}, font_size_, color,
+      port.draw(canvas, slice, math::Point{pen, row_top}, font_size(), color,
                 text::FontRole::Monospace);
-      pen += port.measure_width(slice, font_size_, text::FontRole::Monospace);
+      pen += port.measure_width(slice, font_size(), text::FontRole::Monospace);
     };
     if (tokens.empty()) {
       draw_span(0, row.size(), syntax.plain);
@@ -1303,10 +1317,10 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     // 行号
     if (show_line_numbers_ && gutter_cache_ > 0.0f) {
       const std::string number = std::to_string(line + 1);
-      const float number_width = port.measure_width(number, font_size_, text::FontRole::Monospace);
+      const float number_width = port.measure_width(number, font_size(), text::FontRole::Monospace);
       port.draw(canvas, number,
                 math::Point{bounds_.x + gutter_cache_ - kGutterPadding - number_width, row_top},
-                font_size_, line == current ? syntax.plain : syntax.line_number,
+                font_size(), line == current ? syntax.plain : syntax.line_number,
                 text::FontRole::Monospace);
     }
   }
@@ -1362,7 +1376,7 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
 void CodeEditor::activate() { set_focusable(true); }
 
 void CodeEditor::mark_layout_dirty() {
-  // **不向上冒泡**：本组件的几何只取决于自身 `bounds_` 与 `font_size_`（行高/最大行宽
+  // **不向上冒泡**：本组件的几何只取决于自身 `bounds_` 与**解析后的字号**（行高/最大行宽
   // 都是惰性重算的），父容器不需要重新 measure/arrange 它。
   //
   // 为什么必须这么做：基类实现会把 `layout_dirty` 一路冒泡到根元素，而
@@ -1743,7 +1757,10 @@ auto CodeEditor::get_property(std::string_view name) const -> std::optional<std:
                  line_count() - 1);
     return std::to_string(first + 1);
   }
-  if (name == "font_size") return std::format("{}", font_size_);
+  if (name == "font_size") return std::format("{}", font_size());
+  // 字体档位（倍数）：读回的是**输入値**而非解析后的像素——两个属性各自有存在的理由
+  //（`font_size` 回答“多大”，`font_scale` 回答“相对正文多少倍”）。
+  if (name == "font_scale") return std::format("{}", font_scale_);
   if (name == "find_needle") return find_needle_;
   if (name == "find_matches") return std::to_string(find_matches_.size());
   if (name == "find_active") {
@@ -1763,6 +1780,25 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
   const auto truthy = [](std::string_view text) {
     return text == "true" || text == "1" || text == "yes";
   };
+  if (name == "font_scale") {
+    try {
+      set_font_scale(std::stof(std::string(value)));
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+  if (name == "font_size") {
+    // 负值/零 = 恢复“跟随主题”（与 `set_font_size` 的语义一致）。
+    try {
+      const float size = std::stof(std::string(value));
+      font_size_px_ = size > 0.0f ? size : -1.0f;
+      mark_layout_dirty();
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
   if (name == "text") {
     set_text(std::string(value));
     return true;
@@ -1841,7 +1877,7 @@ auto CodeEditor::set_property(std::string_view name, std::string_view value) -> 
 auto CodeEditor::property_names() const -> std::vector<std::string_view> {
   return {"text",   "language",  "cursor",   "line",       "column",     "lines",
           "selection", "selected_text", "read_only", "highlight", "show_line_numbers",
-          "tab_width", "indent_guides", "auto_pairs", "font_size", "scroll",
+          "tab_width", "indent_guides", "auto_pairs", "font_size", "font_scale", "scroll",
           "first_visible_line", "visible_lines", "goto_line", "find_needle", "find_matches",
           "find_active"};
 }

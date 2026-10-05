@@ -88,8 +88,32 @@ class CodeEditor : public Element {
   void set_auto_pairs(bool value) noexcept { auto_pairs_ = value; }
   [[nodiscard]] auto auto_pairs() const noexcept -> bool { return auto_pairs_; }
   [[nodiscard]] auto insert_spaces() const noexcept -> bool { return insert_spaces_; }
+  /// 字号**档位倍数**：实际字号 = `theme.metrics().font_size`（基准） × 本值。
+  ///
+  /// 为什么不是绝对像素：绝对字号（曾经硬写 13.0）会**与主题脱钩**——
+  /// 用户把 `--ui-font-scale` 调大后，普通文字跟着缩放、编辑器纹丝不动
+  /// （实测：`--ui-font-scale 1.5` 时 UI 文字 15→22.5，而编辑器恒为 13.5）。
+  /// 档位表达还能让「编辑器字体大小」设置面板直接列出 0.85/1.0/1.15…。
+  ///
+  /// 默认 `1.0` = 与正文同级（`font_base`）。代码编辑器与正文同号即可读性而言是合适的。
+  void set_font_scale(float scale);
+  [[nodiscard]] auto font_scale() const noexcept -> float { return font_scale_; }
+
+  /// 显式指定**绝对**字号（逻辑像素）；负值恢复“跟随主题”。
+  ///
+  /// 两个入口都有存在的理由：控件协议/宿主想要“就这个像素值”时用 `set_font_size`，
+  /// 而想要“跟着主题走”时用 `set_font_scale`（或负值复位）。
   void set_font_size(float size);
-  [[nodiscard]] auto font_size() const noexcept -> float { return font_size_; }
+  /// **实际字号**（逻辑像素）——= 显式值（若设过）否则 `主题 base × 档位`。
+  /// 这是“字号”一词的自然含义（“这行字多大”），绘制/度量/测试都读它。
+  [[nodiscard]] auto font_size() const noexcept -> float {
+    return font_size_px_ > 0.0f ? font_size_px_ : theme_base_font_ * font_scale_;
+  }
+  /// 显式绝对字号（<=0 = 未设，跟主题）。
+  ///
+  /// 与 `font_size()` 分开是因为“输入”与“结果”是两件事：`font_size()` 跟着主题变，
+  /// 而本值只在调用方真的写过 `set_font_size` 时才非负。
+  [[nodiscard]] auto font_size_override() const noexcept -> float { return font_size_px_; }
 
   // —— 光标与选择 ——
 
@@ -300,7 +324,15 @@ class CodeEditor : public Element {
   std::size_t anchor_{0};
   float scroll_x_{0.0f};
   float scroll_y_{0.0f};
-  float font_size_{13.0f};
+  float font_scale_{1.0f};
+  /// 显式绝对字号（<=0 = 未设，按 `font_scale_` 跟主题）。
+  float font_size_px_{-1.0f};
+  /// 主题的基准字号（`apply_theme` 记下）。实际字号由它 **惰性算出**：
+  ///
+  /// 不能把结果缓存成快照——`apply_theme` 只在 `UiRoot::layout()` 里跑，
+  /// 而改 `font_scale` 只标了元素脏（本组件故意不让布局脏冒泡到根）→
+  /// 快照会停在旧值上（实测：档位 1.15→1.0 后 `font_size` 仍报 17.25）。
+  float theme_base_font_{15.0f};
   int tab_width_{4};
   bool insert_spaces_{true};
   bool read_only_{false};

@@ -160,7 +160,7 @@ ST_TEST(code_editor_tab_expands_to_tab_stops) {
   const float before = fx.editor.caret_offset_x(fx.context);
   fx.editor.set_cursor_index(1);
   const float after = fx.editor.caret_offset_x(fx.context);
-  const float space = fx.port->measure_width(" ", 13.0f, st::text::FontRole::Monospace);
+  const float space = fx.port->measure_width(" ", fx.editor.font_size(), st::text::FontRole::Monospace);
   ST_CHECK(space > 0.0f);
   ST_CHECK(std::abs((after - before) - space * 4.0f) < 0.5f);
 }
@@ -171,7 +171,7 @@ ST_TEST(code_editor_click_after_tab_lands_after_it) {
   if (!fx.has_font()) return;
   fx.editor.set_text("\tabc\n");
   fx.editor.set_tab_width(4);
-  const float space = fx.port->measure_width(" ", 13.0f, st::text::FontRole::Monospace);
+  const float space = fx.port->measure_width(" ", fx.editor.font_size(), st::text::FontRole::Monospace);
   const st::math::Rect box = fx.editor.bounds();
   // 文本原点 → 越过 4 个空格宽后，落点应在 `a`（索引 1）之后
   const float origin_x = box.x + box.width * 0.0f;  // 先算相对量

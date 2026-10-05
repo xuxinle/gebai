@@ -71,6 +71,12 @@
 
 namespace {
 
+/// 编辑器字号档位（相对正文 `font_base` 的倍数）。
+///
+/// 为什么用档位而不是绝对像素：主题是字号缩放的唯一真值源——
+/// 绝对像素会与 `--ui-font-scale` 脱钩（实测踩到：UI 文字 15→22.5，
+/// 编辑器恒为 13.5）。档位还让“设置面板列几档字号”变成一件自然的事。
+constexpr float kEditorFontScale{1.15f};   // 比正文大一号，代码行距更松
 
 using namespace st::ui;
 using namespace st::ui::dsl;
@@ -439,6 +445,9 @@ struct CodeEditorPage : Component {
 
   // —— 非状态引用（逃生舱的强类型句柄；每次 build 重新取得）——
   CodeEditor* editor{nullptr};
+  /// 编辑器是否已套用初始配置（字号档位/缩进宽）。只做一次：
+  /// 这些值可以随后由属性面改（设置面板/控制通道），每帧重写就把它抹了。
+  bool editor_configured_{false};
   MenuBar* menu_bar_ptr{nullptr};
   CommandPalette* palette_ptr{nullptr};
   Input* find_replace_input{nullptr};   ///< 替换文本不进状态（不参与重组）
@@ -957,7 +966,14 @@ struct CodeEditorPage : Component {
       // 底部面板就全回默认值）。
       (void)custom<CodeEditor>(c, [this](CodeEditor& ed) {
         ed.set_id("editor");   // 控制通道钩子：tools/*.py 依赖
-        ed.set_font_size(13.5f);
+    // 字号档位只在**首次**装上时设一次（见 `configure_editor`）。
+        // 每帧无条件写会把控制通道 / 设置项的 `set font_scale=…` 当场抹掉——
+        // 与 `read_only` 同一类缺陷（实测：把档位改成 1.0，下一帧就变回 1.15）。
+        if (!editor_configured_) {
+          ed.set_font_scale(kEditorFontScale);
+          ed.set_tab_width(4);
+          editor_configured_ = true;
+        }
         ed.style().grow = true;
         ed.style().padding = st::math::Insets{8.0f, 4.0f, 8.0f, 4.0f};
         ed.on_change = [this](std::string_view) { on_edit(); };

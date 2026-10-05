@@ -405,6 +405,16 @@ ST_TEST(code_editor_properties_roundtrip) {
   ST_CHECK(editor.set_property("tab_width", "2"));
   ST_CHECK_EQ(editor.tab_width(), 2);
 
+  // 字号：两个入口各写各的输入，互不覆盖
+  ST_CHECK(editor.set_property("font_scale", "0.8"));
+  ST_CHECK(std::abs(editor.font_scale() - 0.8F) < 0.001F);
+  ST_CHECK(editor.set_property("font_size", "20"));
+  ST_CHECK(std::abs(editor.font_size_override() - 20.0F) < 0.001F);   // 输入侧
+  ST_CHECK(std::abs(editor.font_size() - 20.0F) < 0.001F);            // 显式值优先
+  ST_CHECK(editor.set_property("font_size", "-1"));                  // 复位 = 跟随主题
+  ST_CHECK(editor.font_size_override() < 0.0F);                       // 输入侧已复位
+  ST_CHECK(editor.font_size() > 0.0F);                                // 实际字号恒为正
+
   // 选择属性：`begin:end`
   ST_CHECK(editor.set_property("selection", "0:4"));
   ST_CHECK_EQ(editor.selected_text(), std::string("line"));
