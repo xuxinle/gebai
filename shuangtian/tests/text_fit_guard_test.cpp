@@ -95,25 +95,58 @@ struct Sharpness {
 /// 对细笔画而言，两者应当差出一个**可观测**的幅度——如果不差，
 /// 说明修正没生效（或者护栏本来就自洽，那这条断言就该被重新审视）。
 ///
-/// 反例（故意破坏）：把源码里 `budget` 换回 `max_shift`（即回退成
-/// 「逐边独立判定」），本用例当场变红。
+/// **判据是 A/B（拟合 vs 不拟合），不是绝对阈值**。
+///
+/// 为什么必须改成 A/B（2026-10-05 修）：本用例原先钉绝对阈值
+/// （`mid/solid < 0.70`、`half < 240`），那两个数是**在覆盖率 gamma 默认 0.6 时标的**。
+/// 后来默认γ先后变成 2.2 → 1.10（深色主题另有 0.60 档，见 `kDefaultCoverageGamma`），
+/// 整个覆盖率分布被映射平移：同一份正确实现下 CJK 的 `mid/solid` 变成 **0.865**、
+/// 拉丁 **0.602**——**恒红**，而它守的实现一直是对的。
+/// 同一次 gamma 改动已把本文件里另外四条「墨量守恒」用例显式改用 γ=1 量，漏了这条。
+///
+/// A/B 的好处：γ 是**对两份位图施加的同一变换**，比值把它约掉——判据在任意 γ / 任意
+/// 默认值下都成立，不需要跟着默认值重标（本轮实测 1.00 与 1.10 两档数字仅小数位差异）。
+///
+/// **阈值取 0.85 而不是 0.75**：
+/// - 正确实现 CJK 实测 −48%、拉丁 −29%（相对**不拟合**）；
+/// - 回退 `budget` 后 CJK 只剩 −19%、拉丁 −15%（实测，见下方回退验证）。
+/// 即「预算过大」的失效模式（−19% ≈ 0.81）距 0.85 只有 5% 余量，而 0.75 会让它**通过**——
+/// 所以阈值必须贴在正确值这一侧，不能图宽松。反向余量：正确值 0.52 / 0.71，
+/// 离 0.85 有 16%‾20%，足够吸收字体差异。
+///
+/// **回退验证（写入本仓库的理由）**：把 `grid_fit.cpp` 的 `budget` 换成裸 `max_shift`
+/// （即回退成「逐边独立判定」），本用例**当场变红**（0.81 > 0.85 不成立）：
+/// ```
+/// [fit/护栏] 中文 @20.25px：half 362 → 294（-19%）· mid/solid 2.444 → 1.439
+/// 断言失败: ratio < 0.85
+/// ```
 ST_TEST(grid_fit_quantized_stems_keep_both_edges) {
   FontFixture fixture;
   if (!fixture.ok) return;
   // 细笔画区间：13.5 逻辑 px @1.5 DPI = 20.25 物理像素
   constexpr float kPixelSize = 20.25f;
-  TextRenderer renderer(*fixture.stack, 1.5f);
-  renderer.set_subpixel(false);
-  renderer.set_grid_fit(GridFitMode::Normal);
-  const Sharpness fixed = scan(renderer, kCjk, kPixelSize);
+  TextRenderer unfitted(*fixture.stack, 1.5f);
+  unfitted.set_subpixel(false);
+  unfitted.set_grid_fit(GridFitMode::Off);
+  TextRenderer fitted(*fixture.stack, 1.5f);
+  fitted.set_subpixel(false);
+  fitted.set_grid_fit(GridFitMode::Normal);
 
-  st::print("[fit/护栏] CJK @{}px：half={} mid={} solid={} ink={:.1f}\n", kPixelSize, fixed.half,
-            fixed.mid, fixed.solid, fixed.ink);
-  // 半覆盖像素必须被压到很低：修正前实测 313、修正后 175（同一把尺子）。
-  ST_CHECK(fixed.half < 240);
-  // 同时中间调不能反涨（不然就是「把糊边换成了另一种糊」）
-  ST_CHECK(fixed.solid > 0);
-  ST_CHECK(static_cast<double>(fixed.mid) / static_cast<double>(fixed.solid) < 0.70);
+  for (const auto& [name, text] : {std::pair{"中文", kCjk}, std::pair{"拉丁", kLatin}}) {
+    const Sharpness base = scan(unfitted, text, kPixelSize);
+    const Sharpness after = scan(fitted, text, kPixelSize);
+    ST_REQUIRE(base.half > 0);
+    const double ratio = static_cast<double>(after.half) / static_cast<double>(base.half);
+    st::print("[fit/护栏] {} @{}px：half {} → {}（{:+.0f}%）· mid/solid {:.3f} → {:.3f}\n", name,
+              kPixelSize, base.half, after.half, (ratio - 1.0) * 100.0,
+              static_cast<double>(base.mid) / static_cast<double>(base.solid),
+              static_cast<double>(after.mid) / static_cast<double>(after.solid));
+    // ① 拟合必须**显著**减少半覆盖像素（糊边的直接证据）
+    ST_CHECK(ratio < 0.85);
+    // ② 同时不能是「把糊边换成了另一种糊」：实心像素要涨、半覆盖要降
+    ST_CHECK(after.solid > 0);
+    ST_CHECK(after.solid > base.solid);
+  }
 }
 
 /// ② 量化只在小字号开：物理尺寸超过阈值后墨量接近恒等。

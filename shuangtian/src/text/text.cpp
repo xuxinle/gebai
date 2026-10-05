@@ -801,7 +801,11 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   // 排查半天才发现是取到了缓存里同一份位图——“参数改了却看不出变化”。
   const auto fit_shift_bucket = static_cast<std::uint64_t>(std::lround(fit_max_shift * 100.0f));
   // 墨量补偿同样进键：它改变位图内容（同 gamma 一类的映射变化）。
-  const auto ink_bucket = ink_compensation_ ? 1ULL : 0ULL;
+  //
+  // ⚠ 字面量一律写成 `std::uint64_t{…}` 而不是 `1ULL`：在 LP64 平台上
+  // `unsigned long` ≠ `unsigned long long`，而初始化列表要求**所有**元素同一类型——
+  // 一个 `1ULL` 会让整条链推导失败（-Werror 下直接编译不过，且只在 Linux/macOS 暴露）。
+  const auto ink_bucket = ink_compensation_ ? std::uint64_t{1} : std::uint64_t{0};
   // **亚像素滤波强度也进键**：它直接改位图的子像素值（锐度与彩边的取舍），
   // 漏掉就会“改了 ST_TEXT_LCD_TAPS 看不出变化”（与 gamma/墨量补偿同一类疏漏）。
   std::uint64_t taps_bucket = 0;
@@ -817,9 +821,8 @@ auto TextRenderer::glyph_bitmap(const FontFace& face, GlyphId glyph, float pixel
   for (const std::uint64_t field :
        {static_cast<std::uint64_t>(face.face_index()), static_cast<std::uint64_t>(glyph),
         static_cast<std::uint64_t>(size_bucket), supersample_bucket, gamma_bucket,
-        correct_bucket, lcd ? 1ULL : 0ULL, fit_bucket, fit_shift_bucket, ink_bucket,
-        taps_bucket,
-        static_cast<std::uint64_t>(steps)}) {
+        correct_bucket, lcd ? std::uint64_t{1} : std::uint64_t{0}, fit_bucket, fit_shift_bucket,
+        ink_bucket, taps_bucket, static_cast<std::uint64_t>(steps)}) {
     key = mix(key, field);
   }
   {
