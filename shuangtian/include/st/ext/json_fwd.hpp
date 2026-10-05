@@ -103,13 +103,21 @@ namespace st {
 /// 与 `st/ext/json.hpp` 里的定义是同一条 `using`（那个头包含本头，不是重复定义）。
 using Json = nlohmann::ordered_json;
 
-/// 空的 JSON 对象（`{}`）——**在只含前向声明的头里构造 `Json` 成员/实参的唯一正道**。
+/// 空的 JSON 对象（`{}`）——**在只含前向声明的头里取得 `Json` 实参的唯一正道**。
 ///
-/// 为什么需要它：`Json` 在公共头里是前向声明，而 `Json::object()`、`Json` 作为**成员**
-/// 或**按值实参**都要求完整类型（`Result<Json>` 同理：`Result` 内是 `std::variant`，
-/// 成员需要完整类型）。把构造收进这个在 `.cpp`（有完整类型）里定义的函数，
-/// 头文件就只需要签名。
-/// 典型用法：`st::Json extra_fields = empty_json_object();`（成员默认值）。
-[[nodiscard]] auto empty_json_object() -> Json;
+/// 为什么需要它：`Json` 在公共头里是前向声明，而 `Json::object()` / `Json` 作为**成员**
+/// 都要求完整类型。把构造收进这个在 `.cpp`（有完整类型）里定义的函数，头就只需要签名。
+///
+/// **返回 `const&` 而非按值——这是关键，不要改回按值。**
+/// 按值返回会让**每一个调用它的模板体**都要求 `Json` 完整类型（按值传参要构造临时对象）；
+/// 而返回引用不要求（绑定引用不需要完整类型）。实测（GCC 13/14 对照）：
+/// `dsl.hpp` 的 `custom<T>` 里传 `empty_json_object()`，
+/// 按值返回时**实例化即报 incomplete type**，改返回引用后**零错误**。
+/// 后果就是 `custom<T>` 的使用方（如 `examples/codeeditor/main.cpp`）
+/// 被迫额外包含 `st/ext/json.hpp`——而 `dsl.hpp` 切前向头的收益正是为了免掉这个代价，
+/// `88ba665` 就是因此漏补了 examples/ 而编不过。返回引用从根上消除该需求。
+///
+/// 典型用法：`st::Json extra_fields = empty_json_object();`（拷贝一份成员，语义不变）。
+[[nodiscard]] auto empty_json_object() -> const Json&;
 
 }  // namespace st

@@ -51,7 +51,7 @@
 #include "st/core/print.hpp"
 #include "st/core/string.hpp"
 #include "st/core/time.hpp"
-#include "st/ext/json.hpp"   // dsl::custom<T> 实例化需要 Json 完整类型（dsl.hpp 只含前向声明）
+#include "st/ext/json.hpp"   // script->eval() 返回 Result<Json>（std::variant 成员需完整类型）
 #include "st/text/highlight.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"

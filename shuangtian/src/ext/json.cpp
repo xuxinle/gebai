@@ -14,8 +14,12 @@
 
 namespace st {
 
-/// 见 `st/ext/json_fwd.hpp` 的声明。
-auto empty_json_object() -> Json { return Json::object(); }
+/// 见 `st/ext/json_fwd.hpp` 的声明（为何返回引用而非按值，那里有完整理由）。
+/// 与下面的 `null_node()` 同一模式：函数内 `static const`，常量、线程安全初始化。
+auto empty_json_object() -> const Json& {
+  static const Json instance = Json::object();
+  return instance;
+}
 namespace {
 
 /// 解析失败时的共享空节点（`json_at`/`json_path` 缺键时返回它）。

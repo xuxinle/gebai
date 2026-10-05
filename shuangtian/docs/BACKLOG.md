@@ -803,16 +803,37 @@
   它自己的提交信息写着「需要完整类型的 .cpp（**含测试/示例**）自行包含 json.hpp」：
   **说明了但没做到**，且无任何机械检查会因“examples 编不过”而变红。
 
-  修复：① `examples/codeeditor/main.cpp` 补显式 `st/ext/json.hpp`（按字母序）；
-  ② 把 `dsl.hpp` 里那句**错误的**注释「`Json` 只出现在签名里」改成事实：模板实例化需要
-  完整类型，谁用 `custom<T>` 谁负责包含；③ 在 `custom<T>` 内加 `static_assert` 完整性守卫
-  （用 concept 而非 `sizeof`——后者会先报自己的错、盖掉消息），把报错从「标准库内部 300 行
-  模板栈」变成一句「**custom<T> 需要完整的 st::Json —— 请在本 .cpp 顶部包含
-  `st/ext/json.hpp`**」。守卫有效性已反向验证（临时移除 include → 断言当场给出指引）。
+    修复（**最终形态**）：① `examples/codeeditor/main.cpp` 补显式 `st/ext/json.hpp`；
+  ② 把 `dsl.hpp` 那句**错误的**注释「`Json` 只出现在签名里」改成事实；
+  ③ **根治：把 `empty_json_object()` 从「按值返回 `Json`」改为「返回 `const Json&`」**——
+  这是需求本身的来源：`custom<T>` 只因要按值传 `empty_json_object()` 的返回值才需要完整类型，
+  改为引用后需求**从根上消失**（`create_element` 本来就收 `const Json&`，全链引用）。
+  实施于 `json_fwd.hpp`（签名）+ `json.cpp`（函数内 `static const`，与同文件 `null_node()` 同模式），
+  并在两处注释里写明「**不要改回按值**」及理由。
 
-  教训：**「改公共头 + 手动给 .cpp 补 include」这个模式必然漏**，尤其当目标目录不在
+  **踩过的坑（值得记）**：第一版修法是加 `concept CompleteType = requires { sizeof(T); }`
+  做完整性守卫（报错可读），结果在 GCC 16.2 上炸出 `-Werror=sfinae-incomplete`：
+  `requires { sizeof(T) }` 是 **SFINAE 上下文**，探测不完整类型会被记录，当该类型随后被定义时，
+  GCC 15+ 判定为缺陷。**触发者是 `server.cpp`——它根本没实例化 `custom<T>`**：
+  因为 static_assert 条件不依赖 `T`，解析期就求值了（且 `server.cpp` 先含 `dsl.hpp`、后含
+  `json.hpp`，正好构成「先失败、后定义」）。对照实测：`concept` 版本报错，直接写
+  `static_assert(sizeof(Json) > 0, …)` 则不会（非 SFINAE 上下文）——但两者都只是绕过，
+  返回引用才是消因。容器只有 GCC 13/14（无此警告），MinGW 16.2 才现形。
+
+  教训一：**「改公共头 + 手动给 .cpp 补 include」这个模式必然漏**，尤其当目标目录不在
   `st test` 的编译范围内（examples/tools）。这类改动要枚举**所有**包含该头的 TU
   （可用 `grep -rl` 列全），而不是只改眼前的 src/tests。
+  教训二：**能用数据结构/签名消除的需求，不要用断言去探测**——守卫依赖编译器行为
+  （SFINAE 上下文是否被记录），而返回引用把需求彻底去掉，不依赖任何编译器。
+- [ ] **`bench_thresholds_have_bounded_headroom` 余量卡在上限上，重编即误报**（待修）：
+  `kMaxHeadroom = 3.5`（自检「阈值/实测 ≤ 3.5」），而实际余量在 **3.46~3.51** 之间——
+  即**踩在上限上**。实测：在同一工作区**加一行纯注释**（零语义变化）触发重编，
+  bench 就从 6 passed 变成 4 passed/2 failed（连跑 3 次稳定复现；去掉注释又全绿）。
+  这不是测试写得假，而是它想卡的两头（“太松抓不住退化”与“太紧噪声即误报”）本来就窄，
+  而“重编改变代码布局→实测比值漂移”未被纳入余量预算。
+  影响：**任何不相关改动重编后都可能看到 1~2 条 bench 红灯**，容易被当成回归误判（本轮就撞到了）。
+  方向：或把上限放宽到 4.0 并同时收紧阈值（保持“抓得住 3 倍退化”），
+  或对同一度量取多次最小值（减少布局敏感），或把该自检标记为“需人工复核”而非硬断言。
 
 > 审视报告「第一梯队」与「第二梯队」（含渲染侧：增量重绘/整形缓存/LRU/渐变快路径）
 > 均已在上述条目落地；无头环境无法验证的窗口模式 vsync 如实留在 P1。

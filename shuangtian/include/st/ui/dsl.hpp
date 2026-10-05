@@ -36,15 +36,15 @@
 // 本头对 `Json` 只用**前向声明**（见 `st/ext/json_fwd.hpp`），收益是砍掉每个 TU
 // 无条件解析 nlohmann 的代价（实测 -23% 预处理行数）。
 //
-// ⚠ **但本头的 `custom<T>` / `custom_container<T>` 是模板，实例化时需要 `Json` 完整类型**
-// （模板体会调 `create_element(…, empty_json_object(), …)`，而 `Result<Json>` / 按值
-// 传 `Json` 都要求完整类型）。因此：**谁实例化 `custom<T>`，谁就必须自己包含
-// `st/ext/json.hpp`**。不包含时不会报在 `dsl.hpp`，而是在标准库 `variant`/`type_traits`
-// 里报「invalid use of incomplete type … basic_json」（报错地点极难反推到本头）。
-// 这不是理论问题：`88ba665` 把本头从 json.hpp 切到前向头时补了 src/tests 的用例，
-// 漏了 `examples/codeeditor/main.cpp`，于是 `st build codeeditor` 直接编不过。
-// 已修的调用方：`examples/codeeditor/main.cpp`、`src/ui/dsl.cpp`、
-// `tests/ui_dsl_test.cpp`（均有显式 `st/ext/json.hpp`）。
+// ✅ **本头所有声明与模板体都只在前向声明下成立**——`custom<T>` 也不例外：
+// 它把 `empty_json_object()`（返回 `const Json&`）直传给 `create_element(const Json&)`，
+// 全链都是引用，不需要 `Json` 完整类型。**因此使用 `custom<T>` 的 .cpp 无需额外包含
+// `st/ext/json.hpp`**（历史上需要过，是因为 `empty_json_object()` 曾按值返回；
+// 改为返回引用后该需求从根上消失——理由与实测见 `st/ext/json_fwd.hpp` 该函数的注释）。
+//
+// ⚠ 若将来有人把 `empty_json_object()` 改回按值返回，这里会重新变成硬需求：
+// 使用方将在一个塔的模板栈里报 “invalid use of incomplete type … basic_json”，
+// 很难反推到本头。详见 `st/ext/json_fwd.hpp` 的里注释。
 #include "st/ext/json_fwd.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/ui_root.hpp"
@@ -64,11 +64,6 @@ namespace detail {
 /// State 读/写的接线点（dsl.cpp 实现；StateBase 虚函数默认实现调用）。
 void on_state_read(StateBase* state);
 void on_state_write(StateBase* state);
-
-/// 类型是否**完整**（可用于 `sizeof`）。仅用于给 `custom<T>` 的完整性要求
-/// 提供一句可读的编译错误——见该函数内的 static_assert 说明。
-template <class T>
-concept CompleteType = requires { sizeof(T); };
 }
 
 /// 声明式组件基类（≈ @Component struct）。
@@ -635,13 +630,6 @@ template <class T>
 template <class T>
 [[nodiscard]] auto custom(Composer& c, std::function<void(T&)> configure = {},
                           const BoxProps& props = {}, std::string_view key = {}) -> T& {
-  // 完整性守卫：本头只前向声明 `Json`（为砍掉每个 TU 无条件解析 nlohmann 的代价），
-  // 而本函数体需要**完整类型**（`empty_json_object()` 的返回、`create_element` 的按值实参）。
-  // 缺它时若不拦，报错会落在标准库 `variant`/`type_traits` 内部（incomplete type
-  // 在 `Result<Json>` 的 `std::variant` 上炸开，300 行模板栈里看不出与本头的关系）。
-  // 用 concept 而非 `sizeof`：`sizeof` 会先报自己的错、盖掉下面这条消息。
-  static_assert(detail::CompleteType<st::Json>,
-                "custom<T> 需要完整的 st::Json —— 请在本 .cpp 顶部包含 \"st/ext/json.hpp\"");
   Element* element = c.create_element(type_name<T>(), st::empty_json_object(), key);
   // 未知类型：**必须是显式错误**——静默返回假元素会让界面缺块而不报，最难查。
   // 这里不做异常（禁令 L5：业务错误走 Result/致命断言）：编译期类型 + 注册表
