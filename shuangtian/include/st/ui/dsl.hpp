@@ -594,6 +594,9 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 ///
 /// 声明式元素类型名（与 `make_element` 的注册名一致）。
 ///
+/// `custom<T>` 用它把 C++ 类型转成注册名。**与 `make_element` 同源**（组件清单
+/// `ST_COMPONENT_LIST` 的两处展开，见 `dsl.cpp`）——不再存在“两张类型表”的可能。
+///
 /// 为什么要显式取 type 名而不是 `T{}.type()`：组件构造函数参数各异（`Button(label)`、
 /// `Table(columns)`），`T{}` 不成立。取 type 名的正道是**问工厂**（`make_element` 的
 /// 注册表就是权威），但那里需要 type 字符串——所以提供这个特化表（特化定义在
@@ -999,5 +1002,12 @@ template <class T, class Fetcher, class Input>
 
 /// 元素工厂：类型名 → 构造（dsl 内部与后续协议/脚本建元素共用；未知类型返回 nullptr）。
 [[nodiscard]] auto make_element(std::string type) -> std::unique_ptr<Element>;
+
+/// 全部可声明组件的注册名（升序不保证，按清单顺序）。
+///
+/// 用途：诊断、控制协议 `ui.create` 的合法类型枚举，以及**一致性单测**——
+/// 钉住「`make_element(名)` 构造出的元素，其 `type()` 就是该名；且 `custom<T>` 取的
+/// 名字也在表里」这一不变量。原先是两套表，破了吗编译器不会说（静默失效的温床）。
+[[nodiscard]] auto registered_element_types() -> std::vector<std::string>;
 
 }  // namespace st::ui::dsl

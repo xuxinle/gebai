@@ -1,6 +1,7 @@
 #include "st/ui/dsl.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -1100,103 +1101,111 @@ void Composer::sweep_overlays() {
 auto Composer::root() noexcept -> UiRoot& { return impl_->root; }
 // ── 元素工厂（type → 构造；dsl 内部 + 后续协议/脚本共用）─────────────────
 
-// —— `custom<T>` 的类型名特化（组件定义在本文件可见处）——
-// 新增可声明组件时在这里补一行（比写 32 个包装函数便宜得多）。
-//lint-allow: L3 类型名特化表（36 行机械重复，一个宏压缩；无模板替代形式）
-#define ST_DSL_TYPE(TYPE, NAME) /* lint-allow: L3 同上 */      \
-  template <>                                                   \
-  [[nodiscard]] auto type_name<TYPE>() -> std::string { return NAME; }
+// ── 组件注册表：**类型身份的唯一真源**（结构评审 A1） ─────────────────────
+//
+// 背景：同一份「组件类型」原先散在**两处**，谁也不认识谁——
+//   ① `type_name<T>()` 特化表（38 行，给 `custom<T>` 用）；
+//   ② `make_element` 的 `if (type == "...")` 链（42 行，给协议/脚本/属性填装用）。
+// 新增组件漏改一边就是**静默失效**（`custom<T>` 报「未注册」，或 `make_element` 返回空
+// → 声明式节点凭空消失），而编译器不会提醒。
+//
+// 现在**一份清单、两处派生**：清单是唯一的类型身份表，`ST_COMPONENT_LIST` 之外没有第二份。
+//
+//   - `ST_DSL_REGISTRY`：清单 → `kComponents` 表（`make_element` 按注册名查表）；
+//   - `ST_DSL_TYPENAME`：清单 → `type_name<T>()` 特化（`custom<T>` 按类型取名字）。
+//
+// 于是「新增一个可声明组件」= 在清单里加**一行**。
+//
+// 注册名是**对外契约**（属性面 / 控制协议 / 脚本都按它寻址），改名属破坏性变更；
+// 特别注意 `IconView` 的注册名是 `"Icon"`、`TextArea`/`CommandPalette` 与类名同名——
+// 这些都不是笔误，而是既有对外契约。名字唯一性与两处派生的一致性由单测钉住
+// （`tests/ui_dsl_test.cpp` 的 `dsl_registry_*`）。
+//
+// 为什么用 X-macro 而不是模板：组件的构造函数签名各异（`Button(label)`、`Table(columns)`、
+// `MenuPanel(items)`），没有统一的 `T{}` 形态，因此无法只靠模板从类型推出实例化方式。
+// X-macro 是「一份清单、多次展开」在 C++ 里的标准解法——这里是 `CONVENTIONS` §8 认可的
+// 机械重复压缩用途（与 `ST_DSL_TYPE` 原用法同类）。
 
-ST_DSL_TYPE(Panel, "Panel")
-ST_DSL_TYPE(Text, "Text")
-ST_DSL_TYPE(Heading, "Heading")
-ST_DSL_TYPE(IconView, "Icon")
-ST_DSL_TYPE(Button, "Button")
-ST_DSL_TYPE(Card, "Card")
-ST_DSL_TYPE(Divider, "Divider")
-ST_DSL_TYPE(KeyValueRow, "KeyValueRow")
-ST_DSL_TYPE(Spacer, "Spacer")
-ST_DSL_TYPE(Input, "Input")
-ST_DSL_TYPE(TextArea, "TextArea")
-ST_DSL_TYPE(Checkbox, "Checkbox")
-ST_DSL_TYPE(Radio, "Radio")
-ST_DSL_TYPE(Switch, "Switch")
-ST_DSL_TYPE(Slider, "Slider")
-ST_DSL_TYPE(Select, "Select")
-ST_DSL_TYPE(List, "List")
-ST_DSL_TYPE(ListItem, "ListItem")
-ST_DSL_TYPE(Table, "Table")
-ST_DSL_TYPE(Tree, "Tree")
-ST_DSL_TYPE(ScrollView, "ScrollView")
-ST_DSL_TYPE(ScrollBar, "ScrollBar")
-ST_DSL_TYPE(SplitView, "SplitView")
-ST_DSL_TYPE(Tabs, "Tabs")
-ST_DSL_TYPE(ProgressBar, "ProgressBar")
-ST_DSL_TYPE(Spinner, "Spinner")
-ST_DSL_TYPE(Badge, "Badge")
-ST_DSL_TYPE(Chip, "Chip")
-ST_DSL_TYPE(Avatar, "Avatar")
-ST_DSL_TYPE(Tooltip, "Tooltip")
-ST_DSL_TYPE(Dialog, "Dialog")
-ST_DSL_TYPE(Toast, "Toast")
-ST_DSL_TYPE(MenuBar, "MenuBar")
-ST_DSL_TYPE(FileDialog, "FileDialog")
-ST_DSL_TYPE(CodeEditor, "CodeEditor")
-ST_DSL_TYPE(CommandPalette, "CommandPalette")
-ST_DSL_TYPE(TitleBar, "TitleBar")
-ST_DSL_TYPE(WindowFrame, "WindowFrame")
-ST_DSL_TYPE(MarkdownView, "MarkdownView")
+// 组件清单：`(C++ 类型, 注册名, 构造表达式)`。**新增组件只改这里一行。**
+#define ST_COMPONENT_LIST(X) /* lint-allow: L3 一份清单多处展开（X-macro） */ \
+  X(Panel, "Panel", std::make_unique<Panel>())                            \
+  X(Text, "Text", std::make_unique<Text>())                               \
+  X(Heading, "Heading", std::make_unique<Heading>())                      \
+  X(IconView, "Icon", std::make_unique<IconView>())                       \
+  X(Button, "Button", std::make_unique<Button>(""))                       \
+  X(Card, "Card", std::make_unique<Card>())                               \
+  X(Divider, "Divider", std::make_unique<Divider>())                      \
+  X(KeyValueRow, "KeyValueRow", std::make_unique<KeyValueRow>("", ""))     \
+  X(Spacer, "Spacer", std::make_unique<Spacer>())                         \
+  X(Input, "Input", std::make_unique<Input>())                            \
+  X(TextArea, "TextArea", std::make_unique<TextArea>())                   \
+  X(Checkbox, "Checkbox", std::make_unique<Checkbox>(""))                 \
+  X(Radio, "Radio", std::make_unique<Radio>(""))                          \
+  X(Switch, "Switch", std::make_unique<Switch>(""))                       \
+  X(Slider, "Slider", std::make_unique<Slider>())                         \
+  X(Select, "Select", std::make_unique<Select>())                         \
+  X(List, "List", std::make_unique<List>())                               \
+  X(ListItem, "ListItem", std::make_unique<ListItem>("", ""))             \
+  X(Table, "Table", std::make_unique<Table>())                            \
+  X(Tree, "Tree", std::make_unique<Tree>())                               \
+  X(ScrollView, "ScrollView", std::make_unique<ScrollView>())             \
+  X(ScrollBar, "ScrollBar", std::make_unique<ScrollBar>())                \
+  X(SplitView, "SplitView", std::make_unique<SplitView>())                \
+  X(Tabs, "Tabs", std::make_unique<Tabs>())                               \
+  X(ProgressBar, "ProgressBar", std::make_unique<ProgressBar>())          \
+  X(Spinner, "Spinner", std::make_unique<Spinner>())                      \
+  X(Badge, "Badge", std::make_unique<Badge>())                            \
+  X(Chip, "Chip", std::make_unique<Chip>())                               \
+  X(Avatar, "Avatar", std::make_unique<Avatar>())                         \
+  X(Tooltip, "Tooltip", std::make_unique<Tooltip>())                      \
+  X(Dialog, "Dialog", std::make_unique<Dialog>())                         \
+  X(Toast, "Toast", std::make_unique<Toast>())                            \
+  X(MenuBar, "MenuBar", std::make_unique<MenuBar>())                      \
+  X(MenuPanel, "MenuPanel", std::make_unique<MenuPanel>(std::vector<MenuItem>{})) \
+  X(FileDialog, "FileDialog", std::make_unique<FileDialog>())             \
+  X(CodeEditor, "CodeEditor", std::make_unique<CodeEditor>())             \
+  X(CommandPalette, "CommandPalette", std::make_unique<CommandPalette>()) \
+  X(MarkdownView, "MarkdownView", std::make_unique<MarkdownView>())       \
+  X(TitleBar, "TitleBar", std::make_unique<TitleBar>())                   \
+  X(WindowFrame, "WindowFrame", std::make_unique<WindowFrame>())
+
+//lint-allow: L3 组件清单的 X-macro 展开（一份清单多处派生；无模板替代形式）
+#define ST_DSL_REGISTRY(TYPE, NAME, CONSTRUCT) /* lint-allow: L3 同上 */ \
+  { NAME, []() -> std::unique_ptr<Element> { return CONSTRUCT; } },
+
+/// 注册表条目：注册名 → 构造器。
+struct ComponentEntry {
+  std::string_view name;
+  std::unique_ptr<Element> (*create)();
+};
+
+/// 全部可声明组件（由清单展开，**不手工维护**）。
+const ComponentEntry kComponents[]{ST_COMPONENT_LIST(ST_DSL_REGISTRY)};
+
+//lint-allow: L3 同上（清单的第二处展开）
+#define ST_DSL_TYPENAME(TYPE, NAME, CONSTRUCT) /* lint-allow: L3 同上 */                \
+  template <>                                                                      \
+  [[nodiscard]] auto type_name<TYPE>() -> std::string { return NAME; }              \
+  static_assert(true, "type_name 特化定义需要分号终止");
+
+ST_COMPONENT_LIST(ST_DSL_TYPENAME)
+
+#undef ST_DSL_REGISTRY
+#undef ST_DSL_TYPENAME
 
 auto make_element(std::string type) -> std::unique_ptr<Element> {
-  // 基础
-  if (type == "Text") return std::make_unique<Text>();
-  if (type == "Heading") return std::make_unique<Heading>();
-  if (type == "Icon") return std::make_unique<IconView>();
-  if (type == "Button") return std::make_unique<Button>("");
-  if (type == "Card") return std::make_unique<Card>();
-  if (type == "Divider") return std::make_unique<Divider>();
-  if (type == "KeyValueRow") return std::make_unique<KeyValueRow>("", "");
-  if (type == "Panel") return std::make_unique<Panel>();
-  if (type == "Spacer") return std::make_unique<Spacer>();
-  // 输入类
-  if (type == "Input") return std::make_unique<Input>();
-  if (type == "TextArea") return std::make_unique<TextArea>();
-  if (type == "Checkbox") return std::make_unique<Checkbox>();
-  if (type == "Radio") return std::make_unique<Radio>();
-  if (type == "Switch") return std::make_unique<Switch>();
-  if (type == "Slider") return std::make_unique<Slider>();
-  if (type == "Select") return std::make_unique<Select>();
-  // 列表类
-  if (type == "ListItem") return std::make_unique<ListItem>("", "");
-  if (type == "List") return std::make_unique<List>();
-  if (type == "Table") return std::make_unique<Table>();
-  if (type == "Tree") return std::make_unique<Tree>();
-  // 容器/滚动/标签
-  if (type == "ScrollView") return std::make_unique<ScrollView>();
-  if (type == "ScrollBar") return std::make_unique<ScrollBar>();
-  if (type == "SplitView") return std::make_unique<SplitView>();
-  if (type == "Tabs") return std::make_unique<Tabs>();
-  // 反馈类
-  if (type == "ProgressBar") return std::make_unique<ProgressBar>();
-  if (type == "Spinner") return std::make_unique<Spinner>();
-  if (type == "Badge") return std::make_unique<Badge>();
-  if (type == "Chip") return std::make_unique<Chip>();
-  if (type == "Avatar") return std::make_unique<Avatar>();
-  if (type == "Tooltip") return std::make_unique<Tooltip>();
-  // 浮层/菜单/对话框
-  if (type == "Dialog") return std::make_unique<Dialog>();
-  if (type == "Toast") return std::make_unique<Toast>();
-  if (type == "MenuBar") return std::make_unique<MenuBar>();
-  if (type == "MenuPanel") return std::make_unique<MenuPanel>(std::vector<MenuItem>{});
-  if (type == "FileDialog") return std::make_unique<FileDialog>();
-  // 文本/多媒体
-  if (type == "CodeEditor") return std::make_unique<CodeEditor>();
-  if (type == "CommandPalette") return std::make_unique<CommandPalette>();
-  if (type == "MarkdownView") return std::make_unique<MarkdownView>();
-  // 窗框（自绘标题栏 + 内容槽 + 缩放边缘；窗口控制由 ui::WindowControl 端口注入）
-  if (type == "TitleBar") return std::make_unique<TitleBar>();
-  if (type == "WindowFrame") return std::make_unique<WindowFrame>();
+  for (const ComponentEntry& entry : kComponents) {
+    if (entry.name == type) return entry.create();
+  }
   return nullptr;
+}
+
+/// 全部注册名（诊断 / 测试 / 协议 `ui.create` 的合法类型枚举）。
+auto registered_element_types() -> std::vector<std::string> {
+  std::vector<std::string> names;
+  names.reserve(std::size(kComponents));
+  for (const ComponentEntry& entry : kComponents) names.emplace_back(entry.name);
+  return names;
 }
 
 // ── BoxProps 应用 ─────────────────────────────────────────────────────────
