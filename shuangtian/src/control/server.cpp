@@ -72,6 +72,14 @@ inline constexpr std::size_t kKeepAliveLogLines = 200;
   if (!node.fill.empty()) value["fill"] = node.fill;
   if (node.radius > 0.0f) value["radius"] = static_cast<double>(node.radius);
   if (!node.text.empty()) value["text"] = node.text;
+  // 文本颜色/字号/字重：与 `fill`（背景）分开报——同一层上不同的笔画。
+  // 它们是“标红/加大/加粗到底生效了没”的唯一读数口（语义树里没有、像素里难断言），
+  // 因此**有文本就报**，不当“默认值不报”处理。
+  if (!node.text_color.empty()) {
+    value["text_color"] = node.text_color;
+    value["font_size"] = static_cast<double>(node.font_size);
+    value["font_weight"] = node.font_weight;
+  }
   value["hit_target"] = node.hit_target;
   if (!node.children.empty()) {
     Json children = Json::array();

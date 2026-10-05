@@ -278,6 +278,15 @@ void Element::collect_visual(VisualNode& node) const {
   node.fill = style_.background.a != 0U ? style_.background.to_css() : std::string{};
   node.radius = style_.radius;
   node.text = semantics_text();
+  // 文本**颜色/字号/字重**上报（只在本层真的画了文字时；语义文本为空就不报）：
+  // 这三项既不在语义树里、像素里也不好断言，是"标红生效了吗"唯一便宜的读数口。
+  // 判据用 `style_.background` 之外的信息也可，但**以语义文本为准最诚实**——
+  // 没有文本的层就算 style 里有色值，画面上也没有那笔颜色可断言。
+  if (!node.text.empty()) {
+    node.text_color = style_.color.to_css();
+    node.font_size = style_.font_size;
+    node.font_weight = std::string(ui::to_string(style_.font_weight));
+  }
   node.hit_target = true;
   for (const auto& child : children_) {
     if (!child->visible_) continue;
@@ -294,6 +303,22 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   if (name == "hovered") return hovered_ ? "true" : "false";
   if (name == "hover_progress") return std::format("{:.3f}", static_cast<double>(hover_t_));
   if (name == "hover_effect") return hover_effect_.enabled ? "true" : "false";
+  // 显式排版覆盖的读回口（与写入口 `set_text_*` 对称）：
+  // `color` 读的是**最终生效值**（`style_.color`，已是主题或覆盖的结果），
+  // 而 `color_override` 读的是"有没有显式设过"——两者用途不同：
+  // 前者给"看起来对不对"，后者给"我设的有没有被主题盖掉"。
+  if (name == "color") return style_.color.to_css();
+  if (name == "color_override") {
+    return text_color_override_.has_value() ? std::optional<std::string>(text_color_override_->to_css())
+                                            : std::nullopt;
+  }
+  if (name == "tone_override") {
+    return text_tone_override_.has_value()
+               ? std::optional<std::string>(std::string(tone_name(*text_tone_override_)))
+               : std::nullopt;
+  }
+  if (name == "size") return std::format("{:.2f}", static_cast<double>(style_.font_size));
+  if (name == "weight") return std::string(ui::to_string(style_.font_weight));
   return std::nullopt;
 }
 
@@ -304,7 +329,8 @@ auto Element::set_property(std::string_view name, std::string_view value) -> boo
 }
 
 auto Element::property_names() const -> std::vector<std::string_view> {
-  return {"hovered", "hover_progress", "hover_effect"};
+  return {"hovered", "hover_progress", "hover_effect", "color", "color_override",
+          "tone_override", "size", "weight"};
 }
 
 auto Element::invoke_action(std::string_view action, std::string_view argument) -> bool {

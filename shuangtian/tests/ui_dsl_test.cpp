@@ -1143,6 +1143,124 @@ ST_TEST(dsl_for_each_reuses_by_key) {
   (void)stats_before;
 }
 
+// ── `BoxProps` 的排版三件套（color / hex_color / size / weight）────────────────
+//
+// 起因（真实应用）：错误提示想标红（设计稿给的是 `#dc2626`）、标题想加大加粗，而
+// `BoxProps` 当时只有盒模型字段——DSL 主路径表达不出这三样，只能走 `custom<Text>` 逃生船，
+// 或者放弃并写成"错误："前缀（靠文案区分严重程度，观感差且没法自动化断言）。
+//
+// 本组用例钉两件事：
+// ① **真的落到样式上**（颜色/字号/字重从视觉树读得到）；
+// ② **不会被 `apply_theme` 盖回去**——`apply_theme` 每帧从主题重算这三项，
+//    "记不住显式覆盖"的症状是"设了颜色首帧对、下一帧就没了"，只在多帧后显形。
+
+/// 从视觉树里按 id 找节点（`visual_tree()` 的 id 与真值树一致）。
+[[nodiscard]] auto find_visual(const VisualNode& node, const ElementId& id) -> const VisualNode* {
+  if (node.id == id) return &node;
+  for (const VisualNode& child : node.children) {
+    if (const VisualNode* hit = find_visual(child, id); hit != nullptr) return hit;
+  }
+  return nullptr;
+}
+
+struct StyledPage : Component {
+  State<int> noise{0};
+
+  void build(Composer& c) override {
+    column(c, {.id = "styled"}, [&] {
+      // 语义色调（跟着主题走）。⚠ 指定初始化器**必须按声明顺序**：
+      // color/hex_color/size/weight 在 `BoxProps` 里排在 id/key **之前**。
+      text(c, [] { return std::string("错误：出错了"); },
+           {.color = Tone::Danger, .id = "err"});
+      // 字面色值（对标设计稿）：`#dc2626` 就是主题 danger 的浅色主题取值
+      text(c, [] { return std::string("红色字面"); }, {.hex_color = "#dc2626", .id = "hex"});
+      // 字号 + 字重（标题的诉求：加大加粗）
+      text(c, [] { return std::string("大字重"); },
+           {.size = 24.0F, .weight = FontWeight::Bold, .id = "big"});
+      // 不设任何排版字段：必须原样沿用主题（不能被"覆盖机制"波及）
+      text(c, [] { return std::string("默认"); }, {.id = "plain"});
+      (void)noise.value();   // 无关状态：用来触发后续重组
+    });
+  }
+};
+
+ST_TEST(dsl_box_props_carry_text_style) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto page = std::make_shared<StyledPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  const VisualNode tree = root.visual_tree();
+  const VisualNode* err = find_visual(tree, "err");
+  const VisualNode* hex = find_visual(tree, "hex");
+  const VisualNode* big = find_visual(tree, "big");
+  const VisualNode* plain = find_visual(tree, "plain");
+  ST_REQUIRE(err != nullptr);
+  ST_REQUIRE(hex != nullptr);
+  ST_REQUIRE(big != nullptr);
+  ST_REQUIRE(plain != nullptr);
+
+  // ① 颜色真的落到了样式上（视觉树上报——语义树里没有颜色，像素里又难断言）
+  const st::math::Color danger = tone_color(Theme::light(), Tone::Danger);
+  ST_CHECK_EQ(err->text_color, danger.to_css());
+  // 字面色值走同一条路（`#dc2626` 解析成同一个色）
+  ST_CHECK_EQ(hex->text_color, danger.to_css());
+  ST_CHECK_EQ(hex->text_color, std::string("#dc2626"));
+
+  // ② 字号/字重（标题的"加大加粗"）
+  ST_CHECK(std::abs(big->font_size - 24.0F) < 0.001F);
+  ST_CHECK_EQ(big->font_weight, std::string("bold"));
+
+  // ③ 没设的字段**不动**（沿用主题）——覆盖机制不能"顺手把默认值也写死"
+  const Theme theme = Theme::light();
+  ST_CHECK(std::abs(plain->font_size - theme.metrics().font_base) < 0.001F);
+  ST_CHECK_EQ(plain->font_weight, std::string("regular"));
+  ST_CHECK_EQ(plain->text_color, theme.colors().text.to_css());
+}
+
+/// ② 显式覆盖必须在**多帧重组后**仍然生效（防"被 apply_theme 盖回去"）。
+///
+/// 反例（故意破坏）：把 `Text::apply_theme` 末尾的 `apply_text_overrides()` 删掉，
+/// 本用例当场变红——而上面的单帧用例**照样绿**（首帧的样式是 `apply_box` 直接写进去的，
+/// 还没被主题重算过）。这就是为什么这条必须单独存在。
+ST_TEST(dsl_box_props_survive_theme_reapply) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto page = std::make_shared<StyledPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  // 强制多帧重组 + 重新布局（每次都走 `UiRoot::layout` → `apply_theme_tree`）
+  for (int frame = 0; frame < 3; ++frame) {
+    page->noise.set(page->noise.value() + 1);
+    (void)host->tick();
+    root.layout(true);
+  }
+
+  const VisualNode tree = root.visual_tree();
+  const VisualNode* err = find_visual(tree, "err");
+  const VisualNode* big = find_visual(tree, "big");
+  ST_REQUIRE(err != nullptr);
+  ST_REQUIRE(big != nullptr);
+  ST_CHECK_EQ(err->text_color, tone_color(Theme::light(), Tone::Danger).to_css());
+  ST_CHECK(std::abs(big->font_size - 24.0F) < 0.001F);
+  ST_CHECK_EQ(big->font_weight, std::string("bold"));
+
+  // 主题切换后：**语义色调跟着新主题走，字面色值不变**——这正是两者分工的验收点
+  root.set_theme(Theme::dark());
+  root.layout(true);
+  const VisualNode dark_tree = root.visual_tree();
+  const VisualNode* dark_err = find_visual(dark_tree, "err");
+  const VisualNode* dark_hex = find_visual(dark_tree, "hex");
+  ST_REQUIRE(dark_err != nullptr);
+  ST_REQUIRE(dark_hex != nullptr);
+  ST_CHECK_EQ(dark_err->text_color, tone_color(Theme::dark(), Tone::Danger).to_css());
+  ST_CHECK_EQ(dark_hex->text_color, std::string("#dc2626"));   // 字面色值不随主题变
+}
+
 // ── `for_each` 的 index 参数（重复文案的列表项不再串台）────────────────────────
 //
 // 起因（真实应用）：待办列表的勾选框回调要"改第几项"，而 `item_fn` 当时只给 item——

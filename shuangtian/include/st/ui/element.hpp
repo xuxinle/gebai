@@ -130,10 +130,30 @@ struct VisualNode {
   std::string fill{};      ///< 主填充（css 字符串，如 `#2563eb`）
   float radius{0.0f};
   std::string text{};      ///< 该层绘制的文本（若有）
+  /// 该层**文本实际用了什么颜色/字号/字重**（`style_.color` 的 css 串）。
+  ///
+  /// 为何必须上报：文本颜色是**像素里才看得见、语义树里根本没有**的属性——
+  /// 不给它一个读数口，“标红生效了吗”就只能靠截图逐像素猜（脆且慢）。
+  /// 白底黑字时还要区分“未设”与“黑白”——所以用**空串**表示“本层不画文本”。
+  /// （2026-10-05 补：DSL `BoxProps::color/size/weight` 就是靠它做回归断言的。）
+  std::string text_color{};
+  float font_size{0.0f};
+  std::string font_weight{};   ///< `regular`/`medium`/`semi_bold`/`bold`
   bool hit_target{false};  ///< 是否参与命中测试
   std::uint32_t depth{0};
   std::vector<VisualNode> children{};
 };
+
+/// 字重的稳定短名（视觉树上报与控制通道用；不要拿枚举序号，那会随枚举顺序变）。
+[[nodiscard]] constexpr auto to_string(FontWeight weight) noexcept -> std::string_view {
+  switch (weight) {
+    case FontWeight::Regular: return "regular";
+    case FontWeight::Medium: return "medium";
+    case FontWeight::SemiBold: return "semi_bold";
+    case FontWeight::Bold: return "bold";
+  }
+  return "regular";
+}
 
 /// 布局约束。
 struct Constraints {
@@ -398,7 +418,67 @@ class Element {
   [[nodiscard]] auto bounds() const noexcept -> math::Rect { return bounds_; }
   [[nodiscard]] auto measured_size() const noexcept -> math::Size { return measured_; }
   /// 从主题刷新 `style_`（UiRoot 在布局前按脏标记调用）：组件据此把 token 落到具体样式。
-  virtual void apply_theme(const Theme& theme) { (void)theme; }
+  ///
+  /// ⚠ 覆写时**必须把显式覆盖放回去**（见 `apply_text_overrides`）：
+  /// `apply_theme` 是每帧从主题重算颜色/字号/字重的地方，而 DSL 的
+  /// `BoxProps::color/hex_color/size/weight` 是“盖过主题”的显式意图——
+  /// 不调本函数就是一个“设了颜色，首帧对、下一帧被主题盖回”的隐形 bug。
+  virtual void apply_theme(const Theme& theme) { (void)theme; apply_text_overrides(); }
+
+  // —— 排版覆盖（DSL `BoxProps` 的落点）——
+  //
+  // 为什么放在基类而不是每个组件各写一份：要盖过主题的是**任何会画文字的元素**
+  // （Text/Heading/Button/Badge/List 项…），而在每个 `apply_theme` 里重抄一遍
+  // “有没有显式覆盖”的判定，漏一个就是那个组件静默不生效。
+  // 这里把「意图」与「落位」分开：调用方设一次意图（set_text_*），
+  // `apply_theme` 末尾统一回放（`apply_text_overrides`）。
+
+  /// 设文本色（显式值，盖过主题的 tone 映射）。已存的**色调覆盖被清除**（二者互斥）。
+  void set_text_color(math::Color color) {
+    text_color_override_ = color;
+    text_tone_override_.reset();
+    mark_dirty();
+  }
+  /// 设文本色为**主题语义色调**（跟着主题走；首选方式）。已存的字面色覆盖被清除。
+  void set_text_tone(Tone tone) {
+    text_tone_override_ = tone;
+    text_color_override_.reset();
+    mark_dirty();
+  }
+  /// 设字号（显式值，盖过主题的 `font_base`）。
+  void set_text_size(float size) {
+    text_size_override_ = size;
+    mark_layout_dirty();   // 字号变 → 度量变（不只是重绘）
+  }
+  /// 设字重（显式值）。
+  void set_text_weight(FontWeight weight) {
+    text_weight_override_ = weight;
+    mark_dirty();
+  }
+  [[nodiscard]] auto text_color_override() const noexcept -> const std::optional<math::Color>& {
+    return text_color_override_;
+  }
+  [[nodiscard]] auto text_tone_override() const noexcept -> const std::optional<Tone>& {
+    return text_tone_override_;
+  }
+  [[nodiscard]] auto text_size_override() const noexcept -> float { return text_size_override_; }
+  [[nodiscard]] auto text_weight_override() const noexcept -> const std::optional<FontWeight>& {
+    return text_weight_override_;
+  }
+  /// 把显式排版覆盖回放进 `style_`（`apply_theme` 末尾调；没有覆盖就不动）。
+  void apply_text_overrides() {
+    if (text_color_override_.has_value()) style_.color = *text_color_override_;
+    if (text_size_override_ >= 0.0f) style_.font_size = text_size_override_;
+    if (text_weight_override_.has_value()) style_.font_weight = *text_weight_override_;
+  }
+  /// 清掉全部显式排版覆盖（回到纯主题；测试与“恢复默认”用）。
+  void clear_text_overrides() {
+    text_color_override_.reset();
+    text_tone_override_.reset();
+    text_size_override_ = -1.0f;
+    text_weight_override_.reset();
+    mark_layout_dirty();
+  }
   /// 计算自身尺寸（写入 `measured_`）；容器组件需递归测量子节点。
   virtual void measure(const RenderContext& context, const Constraints& constraints);
   /// 应用最终矩形并布局子节点。
@@ -561,6 +641,13 @@ class Element {
   mutable bool damage_needs_full_{false};
   /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
   void* owner_{nullptr};
+
+  /// 排版显式覆盖（DSL `BoxProps` 的落点）——缺省表示“不干预主题”。
+  /// 色值用两个 `optional`（互斥：设一个清另一个），于是“最后设的那个生效”不需要额外排序逻辑。
+  std::optional<math::Color> text_color_override_{};
+  std::optional<Tone> text_tone_override_{};
+  float text_size_override_{-1.0f};
+  std::optional<FontWeight> text_weight_override_{};
 };
 
 /// 便捷容器：行/列布局面板。

@@ -1126,6 +1126,21 @@ void apply_box(Element& element, const BoxProps& props) {
   if (props.radius >= 0.0f) style.radius = props.radius;
   if (!props.key.empty()) element.set_key(props.key);
   if (!props.id.empty()) element.set_id(props.id);
+  // 排版三件套：**记成显式覆盖**（`apply_theme` 正常会从主题重算颜色/字号/字重，
+  // 不记就每帧被主题盖回默认值——症状是“设了颜色，首帧对、下一帧就没了”）。
+  //
+  // 色值两种写法：字面 `hex_color` 优先于语义 `color`（两者同给时以更具体的为准）。
+  if (!props.hex_color.empty()) {
+    if (const auto parsed = svg::parse_color(props.hex_color); parsed.has_value()) {
+      element.set_text_color(*parsed);
+    }
+    // 解析失败即当成没设（不把色值写坏、也不静默改成黑）：`parse_color` 认
+    // `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa` 与 17 个 CSS 基本色名。
+  } else if (props.color.has_value()) {
+    element.set_text_tone(*props.color);
+  }
+  if (props.size >= 0.0f) element.set_text_size(props.size);
+  if (props.weight.has_value()) element.set_text_weight(*props.weight);
 }
 
 // ── 组件包装 ──────────────────────────────────────────────────────────────

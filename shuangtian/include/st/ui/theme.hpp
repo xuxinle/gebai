@@ -191,6 +191,21 @@ class Theme {
 
 /// 色调 → 实际颜色（亮/暗主题通用）。
 [[nodiscard]] auto tone_color(const Theme& theme, Tone tone) -> math::Color;
+/// 色调的稳定短名（控制通道/视觉树上报复用；不要拿枚举序号——那会随枚举顺序变）。
+[[nodiscard]] constexpr auto tone_name(Tone tone) noexcept -> std::string_view {
+  switch (tone) {
+    case Tone::Default: return "default";
+    case Tone::Muted: return "muted";
+    case Tone::Faint: return "faint";
+    case Tone::Primary: return "primary";
+    case Tone::Accent: return "accent";
+    case Tone::Success: return "success";
+    case Tone::Warning: return "warning";
+    case Tone::Danger: return "danger";
+    case Tone::OnPrimary: return "on_primary";
+  }
+  return "default";
+}
 /// 色调的浅底（徽标/Chip 背景）。
 [[nodiscard]] auto tone_soft_color(const Theme& theme, Tone tone) -> math::Color;
 

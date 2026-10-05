@@ -20,20 +20,9 @@ namespace {
   return context.text != nullptr ? *context.text : NullTextPort::instance();
 }
 
-[[nodiscard]] auto tone_name(Tone tone) noexcept -> std::string_view {
-  switch (tone) {
-    case Tone::Default: return "default";
-    case Tone::Muted: return "muted";
-    case Tone::Faint: return "faint";
-    case Tone::Primary: return "primary";
-    case Tone::Accent: return "accent";
-    case Tone::Success: return "success";
-    case Tone::Warning: return "warning";
-    case Tone::Danger: return "danger";
-    case Tone::OnPrimary: return "on_primary";
-  }
-  return "default";
-}
+// 注：`tone_name` 曾在这里另写一份——现在共用 `st::ui::tone_name`（theme.hpp）。
+// 两份实现会让"色调短名"有两个真相源（且匿名命名空间那份还会遮蔽共享版，
+// 表现为调用处 `ambiguous` 编译错误），所以只留一份。
 
 [[nodiscard]] auto tone_from_name(std::string_view name) -> std::optional<Tone> {
   if (name == "default") return Tone::Default;

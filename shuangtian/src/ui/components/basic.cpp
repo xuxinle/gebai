@@ -56,10 +56,14 @@ void Text::set_weight(FontWeight weight) {
 }
 
 void Text::apply_theme(const Theme& theme) {
-  style_.color = tone_color(theme, tone_);
+  style_.color = text_tone_override().has_value() ? tone_color(theme, *text_tone_override())
+                                                  : tone_color(theme, tone_);
   style_.font_size = font_size_override_ > 0.0f ? font_size_override_ : theme.metrics().font_base;
   style_.font_weight = weight_;
   style_.background = math::Color{0, 0, 0, 0};
+  // 显式排版覆盖（DSL `BoxProps::color/hex_color/size/weight`）**最后**回放——
+  // 放末尾就不必逐个字段去问“这个是不是被显式设过”
+  apply_text_overrides();
 }
 
 void Text::measure(const RenderContext& context, const Constraints& constraints) {
@@ -169,6 +173,7 @@ void Heading::apply_theme(const Theme& theme) {
   style_.font_weight = level_ <= 2 ? FontWeight::Bold : FontWeight::SemiBold;
   style_.color = theme.colors().text;
   style_.background = math::Color{0, 0, 0, 0};
+  apply_text_overrides();
 }
 
 // —— IconView ——
@@ -190,7 +195,11 @@ void IconView::set_tone(Tone tone) {
   mark_dirty();
 }
 
-void IconView::apply_theme(const Theme& theme) { style_.color = tone_color(theme, tone_); }
+void IconView::apply_theme(const Theme& theme) {
+  style_.color = text_tone_override().has_value() ? tone_color(theme, *text_tone_override())
+                                                  : tone_color(theme, tone_);
+  apply_text_overrides();
+}
 
 void IconView::measure(const RenderContext& context, const Constraints& constraints) {
   (void)context;
@@ -318,6 +327,9 @@ void Button::apply_theme(const Theme& theme) {
   if (style_.shadow.color.a == 0U && variant_ == Variant::Primary && !inactive) {
     // 主按钮的轻微投影提升层次
   }
+  // 显式排版覆盖最后回放（与 Text 同口径）：错误提示/危险按钮想标红时，
+  // 不必再为“把颜色写到按钮上”去开后门
+  apply_text_overrides();
 }
 
 void Button::measure(const RenderContext& context, const Constraints& constraints) {
