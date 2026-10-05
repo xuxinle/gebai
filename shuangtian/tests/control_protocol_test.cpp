@@ -979,3 +979,41 @@ ST_TEST(wait_connection_is_reusable_after_satisfied) {
   ST_CHECK(waited["result"].value("satisfied", false));
   ST_CHECK(probe.call("get", get_params).value("ok", false));
 }
+
+// ————————————————————————————————————————————————————————————————————————————
+// 能力清单不得与实现漂移（结构评审：重复真源）
+// ————————————————————————————————————————————————————————————————————————————
+
+/// `hello` 返回的 `capabilities` 是**手写的第二份「有哪些方法」清单**，
+/// 与 `handle` 里的 `if (method == "...")` 分派链是两套真源。
+///
+/// 风险是**静默漂移**：新增一个方法却忘了加进 `capabilities`（客户端据此判断能否调用，
+/// 于是新方法永远没人用），或删掉一个方法却留着它（客户端调了才发现 Unsupported）。
+/// 两种都不会被编译器发现，也不会让任何既有用例变红。
+///
+/// 这条用例遍历 `capabilities` 里的每个名字**真的发一次请求**，并断言
+/// 「不是 `未知方法` 错误」——即声明的能力必须真的被实现。
+ST_TEST(capabilities_list_matches_implemented_methods) {
+  ServerFixture fx;
+  Probe probe(fx.port, fx.token);
+  const Json hello = probe.call("hello");
+  ST_REQUIRE(hello.value("ok", false));
+  const Json& result = hello["result"];
+  ST_REQUIRE(result.contains("capabilities"));
+  ST_REQUIRE(result["capabilities"].is_array());
+  ST_CHECK(result["capabilities"].size() >= 19U);
+
+  // 只探「参数无关、必定可调用」的那一类方法：其余（wait/invoke/input.*/set/capture…）
+  // 要么需要有效目标，要么会阻塞或产生副作用——它们是否**存在**由 `hello` 之外的方式保证
+  // （调用它们得到的是「参数错误」而不是「未知方法」，同样能区分存在与否）。
+  // 这里对每个声明能力都发一次**空参数**请求，断言错误（若有）不是「未知方法」。
+  for (const auto& capability : result["capabilities"]) {
+    const std::string method = capability.get<std::string>();
+    const Json reply = probe.call(method, Json::object(), 2000);
+    const std::string message = reply.contains("error") && reply["error"].is_object()
+                                    ? reply["error"].value("message", std::string{})
+                                    : std::string{};
+    const bool unknown_method = message.find("未知方法") != std::string::npos;
+    ST_CHECK(!unknown_method);
+  }
+}
