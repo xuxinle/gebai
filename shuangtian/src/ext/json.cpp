@@ -13,6 +13,9 @@
 #include "st/core/fs.hpp"
 
 namespace st {
+
+/// 见 `st/ext/json_fwd.hpp` 的声明。
+auto empty_json_object() -> Json { return Json::object(); }
 namespace {
 
 /// 解析失败时的共享空节点（`json_at`/`json_path` 缺键时返回它）。

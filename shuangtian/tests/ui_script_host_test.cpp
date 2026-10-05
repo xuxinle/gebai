@@ -25,6 +25,8 @@
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 /// 等宽假文本端口（8px/码点）：度量可复现，不依赖系统字体。

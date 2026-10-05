@@ -11,6 +11,8 @@
 
 #include "st/ui/selector.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace st::ui {
 
 auto rect_to_json(math::Rect rect) -> st::Json {

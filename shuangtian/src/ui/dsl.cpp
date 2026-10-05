@@ -34,6 +34,8 @@
 #include "st/ui/components/tree.hpp"
 #include "st/ui/components/window_frame.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace st::ui::dsl {
 
 // ── thread-local 当前 Composer + 全局活跃 Composer 注册表 ────────────────

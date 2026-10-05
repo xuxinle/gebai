@@ -20,6 +20,8 @@
 #include "st/ui/dsl.hpp"
 #include "st/ui/selector.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace st::control {
 namespace {
 

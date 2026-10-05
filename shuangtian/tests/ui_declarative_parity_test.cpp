@@ -14,6 +14,8 @@
 #include "st/ui/text_port.hpp"
 #include "st/ui/ui_root.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 class FixtureTextPort final : public st::ui::TextPort {

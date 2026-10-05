@@ -32,6 +32,8 @@
 #include "st/ui/components/input.hpp"
 #include "st/ui/ui_root.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 using st::Json;

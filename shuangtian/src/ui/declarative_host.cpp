@@ -9,6 +9,7 @@
 
 #include "battery/embed.hpp"
 #include "st/core/log.hpp"
+#include "st/ext/json.hpp"   // 内联脚本的宿主函数要读写 Json（完整类型）
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/dsl.hpp"

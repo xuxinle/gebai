@@ -23,6 +23,8 @@
 #include <thread>
 #include <vector>
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 using namespace st::ui;

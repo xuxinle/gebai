@@ -431,6 +431,8 @@ ST_TEST(lint_l14_flags_system_headers_and_dlopen) {
 #include <unistd.h>
 #endif
 #include <dlfcn.h>
+
+#include "st/ext/json.hpp"
 )CPP");
   ST_CHECK_EQ(count_rule(violations, "L14"), 3U);
 }

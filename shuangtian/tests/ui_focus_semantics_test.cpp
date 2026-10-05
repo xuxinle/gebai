@@ -47,6 +47,8 @@
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 using st::math::Color;

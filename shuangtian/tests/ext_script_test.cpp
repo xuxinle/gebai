@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 using st::ext::ScriptEngine;

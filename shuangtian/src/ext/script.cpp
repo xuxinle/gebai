@@ -15,6 +15,8 @@
 
 #include "quickjs/quickjs.h"
 
+#include "st/ext/json.hpp"
+
 namespace st::ext {
 
 /// 引擎状态：QuickJS 运行时/上下文 + 配额 + 宿主函数表。

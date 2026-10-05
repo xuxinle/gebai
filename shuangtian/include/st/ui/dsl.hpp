@@ -33,7 +33,9 @@
 #include <utility>
 #include <vector>
 
-#include "st/ext/json.hpp"
+// `Json` 只出现在签名里 → 用**前向头**；模板体内那个 `Json::object()` 走
+// `empty_json_object()`（定义在 dsl.cpp，那里有完整类型）。见 `st/ext/json_fwd.hpp`。
+#include "st/ext/json_fwd.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/ui_root.hpp"
 
@@ -618,7 +620,7 @@ template <class T>
 template <class T>
 [[nodiscard]] auto custom(Composer& c, std::function<void(T&)> configure = {},
                           const BoxProps& props = {}, std::string_view key = {}) -> T& {
-  Element* element = c.create_element(type_name<T>(), st::Json::object(), key);
+  Element* element = c.create_element(type_name<T>(), st::empty_json_object(), key);
   // 未知类型：**必须是显式错误**——静默返回假元素会让界面缺块而不报，最难查。
   // 这里不做异常（禁令 L5：业务错误走 Result/致命断言）：编译期类型 + 注册表
   // 应当一致，不一致就是程序缺陷——直接终止并打印出缺的类型名。

@@ -18,6 +18,8 @@
 #include "st/ui/text_port.hpp"
 #include "st/ui/ui_root.hpp"
 
+#include "st/ext/json.hpp"
+
 namespace {
 
 /// 等宽假文本端口（与 ui_script_host_test 同款）。
