@@ -4,7 +4,7 @@
   "kind": "static_library",
   "cxx_standard": 20,
   "include_dirs": ["include", "third_party", "third_party/sqlite"],
-  "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "control", "app", "pkg"],
+  "modules": ["core", "math", "codec", "raster", "text", "md", "ui", "shell", "control", "app", "pkg", "ext"],
   "sources": [
     "src/core/*.cpp",
     "src/math/*.cpp",
