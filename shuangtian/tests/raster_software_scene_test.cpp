@@ -79,6 +79,10 @@ void write_png_at(const Canvas& canvas, const char* path) {
 }
 
 /// 按文件名写到产物目录（自动建目录）。
+///
+/// （`-O2` 会对这里的 `directory + "/" + leaf` 报 `-Warray-bounds` 误报——
+/// 那是 GCC 13 把短串拼接的 SSO 缓冲区当成了 memcpy 边界。统一在**档位**上处理，
+/// 见 `src/pkg/build.cpp` 的 `profile_flags`，不在每个调用点打补丁。）
 void write_png(const Canvas& canvas, const char* leaf) {
   const std::string directory = std::string(kArtifactDir) + "/scene";
   (void)st::fs::create_directories(directory);

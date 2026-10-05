@@ -1304,10 +1304,35 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
   // 只需文件:行号，不需要逐变量单步的完整 DWARF；完整调试信息（局部变量/类型/内联展开）
   // 占编译时间的 25–33%、占对象体积 73%（实测 build.cpp：9.1 MB → 2.4 MB，9.6 s → 6.4 s）。
   // 全量调试信息留给显式的 `debug`/`san` 档：把便宜的默认给日常，把贵的给真需要的场合。
+  // `-Warray-bounds` 与 `-Wnull-dereference` 是**同一类**："优化档 + libstdc++ 内联"下
+  // GCC 13 的误报。实测形态：`std::string + "/" + leaf` 这种短串拼接会被它判成
+  // "memcpy offset [32, 42] out of bounds"（把 SSO 缓冲区当成了目标边界），
+  // 而 `operator+` 明明会重新分配。
+  //
+  // 后果比一条警告严重得多：**`release` 档（`-O2`）原先根本编译不过**
+  // （`tests/raster_software_scene_test.cpp` / `text_glyph_integrity_test.cpp` 两处），
+  // 等于四个构建档里有一档长期无法评估——而"发布档能不能编"正是最该被保证的事。
+  // 用户侧的评估手段问题，与这条是同一个根：**没有人在跑它**。
+  //
+  // 口径：`-O0` 的档（quick/debug）**保留**该警告（那里不会误报，是真检查）；
+  // 优化档关掉。真实越界由 `san` 档的 ASan 在运行期抓（那才是权威判据）。
+  // 这一族是「GCC 13 在优化档下对**被内联的 libstdc++ 代码**做静态分析」的误报，
+  // 不是一条两条：实测在 `release`（-O2）下依次撞到
+  // `-Warray-bounds`（把 SSO 缓冲区当 memcpy 边界）与 `-Wstringop-overflow`
+  // （写 27 字节到 16 字节区域——同一条 `std::string + "/" + x` 的另一种报法）。
+  // 逐条追是打地鼠，故按**族**处理。
+  //
+  // 口径与既有 `-Wno-null-dereference` 完全一致（同一段注释上方已说明其性质）：
+  // **只有 -O0 的档（quick/debug）保留这些静态分析警告**（那里不误报，是真检查）；
+  // 优化档关掉，真越界交给 `san` 档的 ASan 在运行期抓。
+  constexpr const char* kOptimizerFalsePositives[] = {"-Wno-null-dereference",
+                                                      "-Wno-array-bounds",
+                                                      "-Wno-stringop-overflow"};
   if (profile == "dev") {
     // 快速迭代档（默认）：-O1 兼顾编译速度与运行帧率（日常开发/无头验证用）
     return std::vector<std::string>{"-O1", "-g1", "-fno-omit-frame-pointer",
-                                    "-Wno-null-dereference"};
+                                    kOptimizerFalsePositives[0], kOptimizerFalsePositives[1],
+                                    kOptimizerFalsePositives[2]};
   }
   if (profile == "quick") {
     // 最速迭代档：-O0（单文件编译最快，适合"改一行看一眼"的内循环）
@@ -1318,7 +1343,8 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
     return std::vector<std::string>{"-O0", "-g", "-fno-omit-frame-pointer"};
   }
   if (profile == "release") {
-    return std::vector<std::string>{"-O2", "-DNDEBUG", "-Wno-null-dereference"};
+    return std::vector<std::string>{"-O2", "-DNDEBUG", kOptimizerFalsePositives[0],
+                                    kOptimizerFalsePositives[1], kOptimizerFalsePositives[2]};
   }
   if (profile == "san") {
     // sanitizer 档同样关掉两个"优化 + 系统头"下的 GCC 误报：
@@ -1327,7 +1353,8 @@ auto profile_flags(std::string_view profile) -> Result<std::vector<std::string>>
     // 保留完整 `-g`：崩溃报告里的变量值是可行动信息，不属于"迭代速度"可牺牲的部分。
     return std::vector<std::string>{"-O1", "-g", "-fno-omit-frame-pointer",
                                     "-fsanitize=address,undefined", "-Wno-maybe-uninitialized",
-                                    "-Wno-null-dereference"};
+                                    "-Wno-null-dereference", "-Wno-array-bounds",
+                                    "-Wno-stringop-overflow"};
   }
   return unexpected(ErrorCode::Invalid, std::format("未知构建档位: {}", profile));
 }
