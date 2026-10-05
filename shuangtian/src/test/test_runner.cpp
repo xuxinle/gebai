@@ -32,6 +32,11 @@ std::uint64_t total_checks{0};
   return instance;
 }
 
+/// 是否包含慢用例（由 `--slow` / `ST_TEST_SLOW` 设定）。
+/// 真值源是进程级开关：用例注册是静态初始化，环境变量在 `main` 里读取后才生效，
+/// 所以判定放在 `run_all` 的循环里（那时开关已经设好了）。
+bool g_include_slow{false};
+
 }  // namespace
 
 auto Registry::instance() -> Registry& {
@@ -41,15 +46,24 @@ auto Registry::instance() -> Registry& {
 
 void Registry::add(std::string name, std::function<void()> body) {
   const std::scoped_lock lock(registry_mutex());
-  case_list.push_back(Case{std::move(name), std::move(body), 0});
+  case_list.push_back(Case{std::move(name), std::move(body), 0, false});
 }
 
 void Registry::add(std::string name, std::function<void()> body, std::int64_t timeout_ms) {
   const std::scoped_lock lock(registry_mutex());
-  case_list.push_back(Case{std::move(name), std::move(body), timeout_ms});
+  case_list.push_back(Case{std::move(name), std::move(body), timeout_ms, false});
+}
+
+void Registry::add_slow(std::string name, std::function<void()> body) {
+  const std::scoped_lock lock(registry_mutex());
+  case_list.push_back(Case{std::move(name), std::move(body), 0, true});
 }
 
 auto Registry::cases() -> std::vector<Case>& { return case_list; }
+
+void set_include_slow(bool value) { g_include_slow = value; }
+
+auto include_slow() -> bool { return g_include_slow; }
 
 void Registry::record_failure(std::string_view file, int line, std::string message) {
   const std::scoped_lock lock(registry_mutex());
@@ -71,6 +85,7 @@ auto run_all(std::string_view filter) -> int {
   auto& registry = Registry::instance();
   int failed_cases = 0;
   int passed_cases = 0;
+  int skipped_slow = 0;
   std::uint64_t checks_before = registry.check_count();
   last_case_results.clear();
 
@@ -84,6 +99,12 @@ auto run_all(std::string_view filter) -> int {
 
   for (auto& item : registry.cases()) {
     if (!filter.empty() && item.name.find(filter) == std::string::npos) continue;
+    // 慢/环境敏感用例：默认跳过（见 `Case::slow` 的注释）。
+    // **显式指名时仍然跑**——`st test frame_cost` 这种用法意图明确，不该被门挡掉。
+    if (item.slow && !include_slow() && filter.empty()) {
+      ++skipped_slow;
+      continue;
+    }
     registry.clear_failures();
     const std::int64_t start_ns = time::now_ns();
 
@@ -155,8 +176,13 @@ auto run_all(std::string_view filter) -> int {
   }
 
   const std::uint64_t checks = registry.check_count() - checks_before;
-  std::fprintf(stdout, "\n  %d passed, %d failed, %llu assertions\n", passed_cases, failed_cases,
+  std::fprintf(stdout, "\n  %d passed, %d failed, %llu assertions", passed_cases, failed_cases,
                static_cast<unsigned long long>(checks));
+  if (skipped_slow > 0) {
+    std::fprintf(stdout, "（另 %d 个慢/环境敏感用例默认跳过：`--slow` 或 `st test --slow`）",
+                 skipped_slow);
+  }
+  std::fprintf(stdout, "\n");
   std::fflush(stdout);
   return failed_cases;
 }

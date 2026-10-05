@@ -60,6 +60,20 @@ struct Arguments {
   }
 };
 
+/// **布尔选项**名单：它们没有值，后面跟的东西是**位置参数**，不是它们的值。
+///
+/// 为何必须显式列：解析器把 `--name <非减号开头>` 一律当成“带值选项”（见下方分支），
+/// 于是 `st test --slow frame_cost` 会把 `frame_cost` 当成 `--slow` 的值——
+/// filter 变空、全部用例都跑（实测）。同样的坑对 `--list`/`--san` 一直存在（如
+/// `st test --list pkg_` 会列全部）。列在这里就一次性堵住。
+[[nodiscard]] auto is_boolean_option(std::string_view name) -> bool {
+  static constexpr std::string_view kBooleanOptions[] = {
+      "san", "list", "slow", "verbose", "v", "force", "all", "help", "rules",
+      "no-pch", "quiet", "release",
+  };
+  return std::ranges::find(kBooleanOptions, name) != std::end(kBooleanOptions);
+}
+
 [[nodiscard]] auto parse_arguments(int argc, char** argv) -> Arguments {
   Arguments arguments;
   for (int index = 1; index < argc; ++index) {
@@ -69,6 +83,11 @@ struct Arguments {
       const std::size_t equals = body.find('=');
       if (equals != std::string_view::npos) {
         arguments.options[std::string(body.substr(0, equals))] = std::string(body.substr(equals + 1));
+        continue;
+      }
+      // 布尔选项：直接记 flag，**绝不吃下一个参数**（见 `is_boolean_option`）。
+      if (is_boolean_option(body)) {
+        arguments.flags.emplace_back(body);
         continue;
       }
       // 下一个参数只要以 `-` 开头就不当值：否则 `--san -j 6` 会把 `-j` 吃成 `--san` 的值
@@ -99,6 +118,11 @@ struct Arguments {
       if (equals != std::string_view::npos) {
         arguments.options[std::string(body.substr(0, equals))] =
             std::string(body.substr(equals + 1));
+        continue;
+      }
+      // 短布尔选项（`-v`）同理不吃下一个参数。
+      if (is_boolean_option(body)) {
+        arguments.flags.emplace_back(body);
         continue;
       }
       if (index + 1 < argc && !std::string_view(argv[index + 1]).starts_with("-")) {
@@ -134,6 +158,9 @@ void print_usage() {
                         交叉编译：--toolchain=<名>（工具链在 st.pkg 的 toolchains 段声明）
   run <target> [args]   构建并运行目标（无头演示：run gallery -- --headless --frames 3）
   test [filter]         构建并运行单元测试（--san 开 ASan/UBSan 档，-j N 控并发；同支持 --jobs-large/--max-memory）
+                        --slow 额外跑“慢/环境敏感”用例（量帧耗时/吞吐的性能门禁、
+                        真编译的集成用例）——它们默认跳过：占测试壁钟近三分之一，
+                        且在共享机器上会偶发红灯；显式写用例名仍会跑它
                         --list 只列用例不跑；--format junit [--junit-out 路径] 写逐用例报告（CI）
   lint [--explain RULE] 禁令扫描（CONVENTIONS §8；无参数即扫描工程，--rules 列出规则）
   deps                  解析依赖并打印依赖树（--locked 只读 st.lock）
@@ -287,10 +314,12 @@ auto command_test(const Arguments& arguments) -> int {
     junit_path = arguments.get("junit-out", "");
     if (junit_path.empty()) junit_path = st::fs::join(manifest->directory, "build/test-results.xml");
   }
-  st::print("{}测试 [{}]{}{}\n", list_only ? "列出" : "运行", options.profile,
+  st::print("{}测试 [{}]{}{}", list_only ? "列出" : "运行", options.profile,
               filter.empty() ? "" : std::format(" 过滤: {}", filter),
               junit_path.empty() ? "" : std::format(" → {}", junit_path));
-  auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path);
+  st::print("{}\n", arguments.has("slow") ? "（含慢/环境敏感用例）" : "");
+  auto code = st::pkg::run_tests(*manifest, options, filter, list_only, junit_path,
+                                 /*include_slow=*/arguments.has("slow"));
   if (!code) {
     std::fprintf(stderr, "%s\n", code.error().message.c_str());
     return 1;

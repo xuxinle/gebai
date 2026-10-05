@@ -284,7 +284,7 @@ inline constexpr double kMaxHeadroom{3.5};
 
 }  // namespace
 
-ST_TEST(bench_rounded_card_fill) {
+ST_TEST_SLOW(bench_rounded_card_fill) {
   const double unit = baseline_ms_per_pixel();
   const Measurement m = measure_rounded_cards(unit);
   st::print("[bench] 圆角卡片填充 ×60: {:.2f} ms（{:.3f} ms/张，{:.2f}× 清屏单位，阈值 {}×）\n",
@@ -293,7 +293,7 @@ ST_TEST(bench_rounded_card_fill) {
   ST_CHECK(m.ratio <= kRoundedCardsLimit);
 }
 
-ST_TEST(bench_card_shadow) {
+ST_TEST_SLOW(bench_card_shadow) {
   const double unit = baseline_ms_per_pixel();
   const Measurement m = measure_card_shadows(unit);
   st::print("[bench] 卡片投影 ×20（blur=16）: {:.2f} ms（{:.3f} ms/个，{:.2f}× 清屏单位，阈值 {}×）\n",
@@ -302,7 +302,7 @@ ST_TEST(bench_card_shadow) {
   ST_CHECK(m.ratio <= kShadowLimit);
 }
 
-ST_TEST(bench_text_draw) {
+ST_TEST_SLOW(bench_text_draw) {
   bool available = false;
   const Measurement m = measure_text(&available);
   if (!available) {
@@ -315,7 +315,7 @@ ST_TEST(bench_text_draw) {
   ST_CHECK(m.ratio <= kTextLimit);
 }
 
-ST_TEST(bench_gradient_fill) {
+ST_TEST_SLOW(bench_gradient_fill) {
   const double unit = baseline_ms_per_pixel();
   const Measurement m = measure_gradients(unit);
   st::print("[bench] 渐变填充 ×200（1200×36）: {:.2f} ms（{:.3f} ms/块，{:.2f}× 清屏单位，阈值 {}×）\n",
@@ -336,7 +336,7 @@ ST_TEST(bench_gradient_fill) {
 ///
 /// 与 `CONVENTIONS §7.1`「新写的回归测试必须验证它真能抓住那个缺陷」同一条纪律，
 /// 只是从**功能**测试推广到**性能**测试：断言自己也要被验证。
-ST_TEST(bench_thresholds_have_bounded_headroom) {
+ST_TEST_SLOW(bench_thresholds_have_bounded_headroom) {
   const double unit = baseline_ms_per_pixel();
   const auto check = [](const char* name, double limit, const Measurement& m) {
     ST_REQUIRE(m.ratio > 0.0);
@@ -375,7 +375,7 @@ ST_TEST(bench_thresholds_have_bounded_headroom) {
 ///
 /// 注意它**不是**在测"渲染会不会懒优化"——`fill_rect` 重复 N 次是真的画 N 次
 /// （同一矩形重画仍要走完整条光栅化路径），这正是我们要模拟的退化形态。
-ST_TEST(bench_fault_multiplication_is_caught) {
+ST_TEST_SLOW(bench_fault_multiplication_is_caught) {
   const double unit = baseline_ms_per_pixel();
   const auto check = [](const char* name, double limit, const Measurement& m) {
     const bool caught = m.ratio * kFaultFactor > limit;

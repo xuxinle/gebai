@@ -262,7 +262,7 @@ inline constexpr double kFaultFactor{3.0};
 
 }  // namespace
 
-ST_TEST(frame_cost_stays_within_budget) {
+ST_TEST_SLOW(frame_cost_stays_within_budget) {
   const double unit = clear_ms();
   const FrameTiming timing = measure_frames_best(40);
   const double ratio = timing.best / unit;
@@ -278,7 +278,7 @@ ST_TEST(frame_cost_stays_within_budget) {
 }
 
 /// p95 也要在预算内：只看 p50 会漏掉"偶发超时"（如每 N 帧重建一次缓存）。
-ST_TEST(frame_cost_p95_stays_within_budget) {
+ST_TEST_SLOW(frame_cost_p95_stays_within_budget) {
   const double unit = clear_ms();
   const FrameTiming timing = measure_frames_best(40);
   const double ratio = timing.p95 / unit;
@@ -294,7 +294,7 @@ ST_TEST(frame_cost_p95_stays_within_budget) {
 ///
 /// 与 `raster_bench` 的同名自检同理：让"阈值不能太松"成为可检查的性质，
 /// 而不是靠人记得。谁把 `kFrameLimit` 放宽到抓不住退化，这里当场红灯。
-ST_TEST(frame_budget_threshold_has_bounded_headroom) {
+ST_TEST_SLOW(frame_budget_threshold_has_bounded_headroom) {
   const double unit = clear_ms();
   const FrameTiming timing = measure_frames_best(30);
   const double ratio = timing.best / unit;
@@ -327,7 +327,7 @@ ST_TEST(frame_budget_threshold_has_bounded_headroom) {
 }
 
 /// **帧门禁自检（二）**：`kFaultFactor` 倍退化必然被发现。
-ST_TEST(frame_budget_fault_multiplication_is_caught) {
+ST_TEST_SLOW(frame_budget_fault_multiplication_is_caught) {
   const double unit = clear_ms();
   const FrameTiming timing = measure_frames_best(30);
   const double ratio = timing.best / unit;
@@ -349,7 +349,7 @@ ST_TEST(frame_budget_fault_multiplication_is_caught) {
 /// 分别报出 layout 与 paint 的耗时——**门禁只报"帧超预算"是不足以行动的**：
 /// "24ms" 不指向任何具体动作，而"layout 占 20ms / paint 占 4ms"直接指出该改哪里。
 /// （这与 `control::Metrics` 分阶段上报 layout/paint/present 是同一个理由。）
-ST_TEST(frame_cost_breakdown_for_diagnostics) {
+ST_TEST_SLOW(frame_cost_breakdown_for_diagnostics) {
   const double unit = clear_ms();
   // 与 `measure_frames` 同一口径：挂真实文本端口（无字体环境时退化为零字形）。
   RootFixture fixture;

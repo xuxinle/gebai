@@ -74,8 +74,12 @@ struct BuildStats {
 /// 构建测试可执行文件（库源 + tests + 测试框架入口）并运行；返回退出码。
 /// `list_only` = 只列出用例名（`st test --list`，仍可带 filter）；
 /// `junit_path` 非空时给测试进程设 `ST_JUNIT_XML`，逐用例结果写成 JUnit XML（CI 消费）。
+/// `include_slow` = 额外跑“慢/环境敏感”用例（见 `test.hpp` 的 `ST_TEST_SLOW`）：
+/// 默认 false——它们量机器性能或需真编译，占测试壁钟近三分之一，
+/// 且在共享机器上会**偶发红灯**；迭代内循环默认不附这个不确定性。
 [[nodiscard]] auto run_tests(const Manifest& manifest, const BuildOptions& options,
                              std::string_view filter, bool list_only = false,
-                             std::string_view junit_path = {}) -> Result<int>;
+                             std::string_view junit_path = {},
+                             bool include_slow = false) -> Result<int>;
 
 }  // namespace st::pkg

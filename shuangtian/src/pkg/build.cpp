@@ -1649,7 +1649,7 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
 }
 
 auto run_tests(const Manifest& manifest, const BuildOptions& options, std::string_view filter,
-               bool list_only, std::string_view junit_path) -> Result<int> {
+               bool list_only, std::string_view junit_path, bool include_slow) -> Result<int> {
   const std::string root = options.root.empty() ? manifest.directory : options.root;
   auto flags = profile_flags(options.profile);
   if (!flags) return forward_error(flags.error());
@@ -1779,6 +1779,9 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   std::vector<std::string> args;
   // `--list` 交测试进程处理（列出用例名后即退，不跑测试；filter 仍生效）
   if (list_only) args.push_back("--list");
+  // 慢/环境敏感用例默认跳过（量机器性能的帧/吞吐门禁、需真编译的集成用例）——
+  // 它们耗时长且在共享机器上偶发红灯，不该阻塞迭代内循环；`st test --slow` 显式开启。
+  if (include_slow) args.push_back("--slow");
   if (!filter.empty()) args.push_back(std::string(filter));
   // 交叉产物仅在与宿主平台不同时拒绝执行（目标==宿主则照常跑，见 runs_on_host）
   if (!toolchain->runs_on_host()) {

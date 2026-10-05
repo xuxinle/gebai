@@ -2581,7 +2581,7 @@ stpm 另提供依赖获取能力（版本求解 + SHA-256 校验 + 缓存 + vend
 | `st init <name>` | 生成工程骨架 |
 | `st build [target] [--profile dev\|quick\|debug\|release\|san] [--locked] [-j N] [--jobs-large N] [--max-memory MiB]` | 构建 |
 | `st run <target> [args…]` | 构建并运行 |
-| `st test [filter] [--san]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费） |
+| `st test [filter] [--san] [--slow]` | 构建并运行单测（含 sanitizer 档）；`--list` 只列用例不跑；`--format junit [--junit-out 路径]` 写逐用例 XML 报告（CI 消费）；**`--slow` 额外跑慢/环境敏感用例**（默认跳过，见 §8.5） |
 | `st lint [--explain <rule>]` | 禁令静态扫描（`CONVENTIONS.md` §8） |
 | `st add <spec>` / `st remove <name>` | 依赖增删（改清单 + 重求解 + 写 lock；**规划中**，CLI 尚未接线） |
 | `st fetch` / `st sync` | 获取依赖 / 同步 lock（**规划中**；当前 HTTP 仅明文 + 解包未实现，实际可用源为 path） |
@@ -3063,7 +3063,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**762 用例 / 17846 断言**，debug 档实测；`st test --san` 全绿 0 报告） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限；**`ST_TEST_SLOW` 标记“量机器性能/需真编译”**——这类用例默认跳过，`--slow` 或显式指名才跑） | `st test` | 全绿（**753 用例 / 18161 断言**，debug 档实测；`st test --san` 全绿 0 报告；另 12 个慢用例默认跳过） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

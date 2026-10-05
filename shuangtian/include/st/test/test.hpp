@@ -30,6 +30,12 @@ struct Case {
   /// 而**集成级**用例要真编译、真跑产物，在 debug 档下 10 s 不够（实测 18 s）——
   /// 它会在测试框架里报软超时失败，而那不是被测对象的问题。
   std::int64_t timeout_ms{0};
+  /// 慢/环境敏感用例：默认**不跑**（`--slow` 显式开启，`set_include_slow`）。
+  ///
+  /// 适用对象是**量机器性能**的用例（帧耗时/吞吐阈值）与需要真编译的集成用例：
+  /// 它们耗时由环境决定，在共享机器上还会被邻居抬高而**偶发红灯**。
+  /// 把“代码对不对”与“这台机器此刻快不快”分开报，是它们不阻塞内循环的前提。
+  bool slow{false};
 };
 
 /// 单个用例的运行结果（junit 报告与超时标记用）。
@@ -49,6 +55,8 @@ class Registry {
   void add(std::string name, std::function<void()> body);
   /// 带显式软超时的注册（ms；`0` = 用默认值）。
   void add(std::string name, std::function<void()> body, std::int64_t timeout_ms);
+  /// 注册一个**慢**用例（默认不跑，`--slow` 开启）。
+  void add_slow(std::string name, std::function<void()> body);
   [[nodiscard]] auto cases() -> std::vector<Case>&;
 
   void record_failure(std::string_view file, int line, std::string message);
@@ -57,6 +65,10 @@ class Registry {
   [[nodiscard]] auto check_count() const noexcept -> std::uint64_t;
   void count_check() noexcept;
 };
+
+/// 是否包含慢用例（`--slow` / `ST_TEST_SLOW=1`）。默认 false。
+void set_include_slow(bool value);
+[[nodiscard]] auto include_slow() -> bool;
 
 /// 运行全部用例（`filter` 非空时按名称子串过滤）；返回失败用例数。
 /// 单用例软超时（默认 10s，`ST_TEST_TIMEOUT_MS` 覆盖）：超时标记 FAIL 但**不硬杀**——
@@ -85,6 +97,13 @@ struct Registrar {
   }
 };
 
+/// 慢用例注册器（`ST_TEST_SLOW` 生成的静态对象调用）。
+struct SlowRegistrar {
+  SlowRegistrar(std::string_view name, std::function<void()> body) {
+    Registry::instance().add_slow(std::string(name), std::move(body));
+  }
+};
+
 }  // namespace st::test
 
 /// 定义并注册一个测试用例（函数体即用例）。
@@ -94,6 +113,19 @@ struct Registrar {
   const ::st::test::Registrar st_test_registrar_##test_name{                      \
       #test_name, &st_test_case_##test_name};                                     \
   }                                                                               \
+  static void st_test_case_##test_name()
+
+/// 注册一个**慢/环境敏感**用例（默认不跑，`--slow` 开启）。
+///
+/// 列入这里的理由必须是“耗时或成败取决于环境，而非代码正确性”：
+/// 量帧耗时/吞吐阈值的性能门禁、需要真编译真跑进程的集成用例。
+/// 组件功能与不变量用例**不属于**这里——它们快且确定，必须留在默认路径上。
+#define ST_TEST_SLOW(test_name)                                                    \
+  static void st_test_case_##test_name();                                          \
+  namespace {                                                                      \
+  const ::st::test::SlowRegistrar st_test_registrar_##test_name{                   \
+      #test_name, &st_test_case_##test_name};                                      \
+  }                                                                                \
   static void st_test_case_##test_name()
 
 /// 同 `ST_TEST`，但指定本用例的**软超时上限**（ms）。
