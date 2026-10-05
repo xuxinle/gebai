@@ -850,6 +850,25 @@ class GpuCanvas final : public Surface {
   ///
   /// `CoverageFormat::Lcd` 时走**两遍混合**（见下方实现注释）：硬件混合的 α 是标量，
   /// 而亚像素的彩边恰恰长在“逐通道的目标衰减”上——一次绘制做不到，两次可以。
+  /// 逐行原语：GPU 侧把**一行**覆盖率当「一行宽的纹理片」上传后画四边形。
+  ///
+  /// 为什么要有这个（而不是只留 `blend_coverage_bitmap`）：`Surface` 的默认
+  /// `blend_coverage_bitmap` 是按行驱动这两个原语的——即接口只要求"能做一行"。
+  /// GPU 覆写了整块版本（下面的 `blend_coverage_bitmap`，一次上传整张遮罩 + 纹理缓存，
+  /// 明显更快），故这两个逐行版本**实际不会被默认实现调到**；但它们是纯虚，
+  /// 必须给出实现。这里按语义**一致**的方式落地：把这一行当 1 行的位图交给同一台机制
+  /// （不做任何近似），而不是留一个 `not_yet()` 之类的空壳。
+  void blend_coverage_row(int y, int x_begin, std::span<const float> coverage, const Paint& paint,
+                          float opacity, BlendMode blend) override {
+    blend_coverage_bitmap(x_begin, y, coverage, static_cast<int>(coverage.size()), 1, paint, opacity,
+                          blend, 0, CoverageFormat::Grayscale);
+  }
+  void blend_coverage_row_lcd(int y, int x_begin, std::span<const float> coverage,
+                              const Paint& paint, float opacity, BlendMode blend) override {
+    blend_coverage_bitmap(x_begin, y, coverage, static_cast<int>(coverage.size() / 3U), 1, paint,
+                          opacity, blend, 0, CoverageFormat::Lcd);
+  }
+
   void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width, int height,
                              const Paint& paint, float opacity, BlendMode blend,
                              std::uint64_t cache_key = 0,

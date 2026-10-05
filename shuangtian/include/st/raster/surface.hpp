@@ -192,10 +192,49 @@ class Surface {
   /// 混合按**逐通道 α**做：`out_c = S_c·α_c + D_c·(1 - a_s·α_c)`（`S` 预乘源色、
   /// `a_s` 源 alpha）——这正是亚像素渲染的彩边来源，`α_c` 不能退化成标量
   /// （黑字压白底时彩边全在 `D_c·(1-α_c)` 那一项上，退化了就等于什么都没做）。
+  /// ## 为什么它是**非纯虚**（结构评审 A4：这是本文件自己第 15 行明令禁止的那一类）
+  ///
+  /// 本头第 15 行写着「接口只放『两边都能做』的原语，像『按覆盖率运行段混合一行』这种
+  /// **软件内部机制**留在 `Canvas` 上」——而 `blend_coverage_bitmap` 恰恰是那条规则的反例：
+  ///
+  /// - 软件侧它只是「逐行走 `blend_coverage_row`」的一层循环，**不需要** `cache_key`；
+  /// - GPU 侧却要为它维护一套 `MaskCacheEntry` 纹理缓存（按稳定身份换键），
+  ///   也就是被迫实现一份由 CPU 数据结构定义的机制。
+  ///
+  /// 而它的消费方只有 3 处（`text` 的字形位图、`shell/backend` 的自检图案、
+  /// 以及 `Canvas` 自己的覆盖实现），**没有一处是"两者都要做不同事"**。
+  ///
+  /// 所以这里给出**默认实现**：拆成 `blend_coverage_row` / `blend_coverage_row_lcd`
+  /// 两个逐行原语（**两侧都天然做得到**：软件直接走行混合，GPU 把行作为
+  /// 一行宽的纹理片上传），默认实现按行驱动它们。后端**可以**覆写本方法走更快的
+  /// 整块路径（GPU 现在是这么做的），但**不再被要求**实现一套 CPU 内部机制。
+  /// `cache_key` 保留在参数里：它是给"选择覆盖实现的后端"用的**提示**，
+  /// 默认实现忽略它（见 `Canvas::blend_coverage_bitmap` 里的同类说明）。
   virtual void blend_coverage_bitmap(int x, int y, std::span<const float> coverage, int width,
                                      int height, const Paint& paint, float opacity,
                                      BlendMode blend, std::uint64_t cache_key = 0,
-                                     CoverageFormat format = CoverageFormat::Grayscale) = 0;
+                                     CoverageFormat format = CoverageFormat::Grayscale) {
+    (void)cache_key;
+    if (width <= 0 || height <= 0 || opacity <= 0.0f) return;
+    const std::size_t channels = format == CoverageFormat::Lcd ? 3U : 1U;
+    const std::size_t stride = static_cast<std::size_t>(width) * channels;
+    if (coverage.size() < static_cast<std::size_t>(height) * stride) return;
+    for (int row = 0; row < height; ++row) {
+      const auto line = coverage.subspan(static_cast<std::size_t>(row) * stride, stride);
+      if (format == CoverageFormat::Lcd) {
+        blend_coverage_row_lcd(y + row, x, line, paint, opacity, blend);
+      } else {
+        blend_coverage_row(y + row, x, line, paint, opacity, blend);
+      }
+    }
+  }
+
+  /// 混合**一行**灰度覆盖率（`coverage` 为 `width` 个值）。两侧都必须实现。
+  virtual void blend_coverage_row(int y, int x_begin, std::span<const float> coverage,
+                                  const Paint& paint, float opacity, BlendMode blend) = 0;
+  /// 混合**一行**亚像素（LCD）覆盖率（`coverage` 为 `width * 3` 个值，逐通道 α）。
+  virtual void blend_coverage_row_lcd(int y, int x_begin, std::span<const float> coverage,
+                                      const Paint& paint, float opacity, BlendMode blend) = 0;
 
   // —— 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素） ——
   virtual void push_clip_rect(math::Rect rect) = 0;

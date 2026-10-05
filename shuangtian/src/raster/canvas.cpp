@@ -621,6 +621,12 @@ void Canvas::blend_coverage_row(int y, int x_begin, std::span<const float> cover
   }
 }
 
+void Canvas::blend_coverage_row_lcd(int y, int x_begin, std::span<const float> coverage,
+                                    const Paint& paint, float opacity, BlendMode blend) {
+  // 亚像素混合的既有实现（算法未动，只是换个名字对上 `Surface` 的逐行原语）。
+  blend_coverage_row_subpixel(y, x_begin, coverage, paint, opacity, blend);
+}
+
 void Canvas::blend_coverage_row_subpixel(int y, int x_begin, std::span<const float> coverage,
                                          const Paint& paint, float opacity, BlendMode blend) {
   if (y < 0 || y >= physical_height_) return;

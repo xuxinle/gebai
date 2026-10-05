@@ -127,6 +127,12 @@ class Canvas final : public Surface {
                              const Paint& paint, float opacity, BlendMode blend,
                              std::uint64_t cache_key = 0,
                              CoverageFormat format = CoverageFormat::Grayscale) override;
+  /// 逐行灰度混合（软件内部机制；`Surface` 默认实现按行驱动它）。
+  void blend_coverage_row(int y, int x_begin, std::span<const float> coverage, const Paint& paint,
+                          float opacity, BlendMode blend) override;
+  /// 逐行亚像素混合（转发到已有的 `blend_coverage_row_subpixel`，算法不变）。
+  void blend_coverage_row_lcd(int y, int x_begin, std::span<const float> coverage,
+                              const Paint& paint, float opacity, BlendMode blend) override;
 
   // —— 裁剪 ——
   /// 裁剪（逻辑坐标入参；内部按 `device_scale` 换算到物理像素）。
@@ -164,8 +170,7 @@ class Canvas final : public Surface {
 
   /// 低层：以覆盖率调制画笔颜色混合一行（栅格化器与自定义绘制使用）。
   /// `coverage[0]` 对应该行 `x_begin` 像素。
-  void blend_coverage_row(int y, int x_begin, std::span<const float> coverage, const Paint& paint,
-                          float opacity, BlendMode blend);
+
   /// 低层：**亚像素**版——每像素三个覆盖率（`[R,G,B]` 交错）。
   /// `coverage[0..2]` 对应该行 `x_begin` 像素的三个子像素。
   ///
