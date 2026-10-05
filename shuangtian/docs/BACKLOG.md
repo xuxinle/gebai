@@ -790,6 +790,29 @@
   `st/pch.hpp`（里面含 `<map>`）——于是**日常构建全绿、只有全新环境自举（无 PCH）才失败**
   （`error: 'map' is not a member of 'std'`，行号指向使用处 372 行）。已补 `<map>`（并归位 `<set>` 字母序），
   并在 CONVENTIONS §6 新增第 6 条「每个 `.cpp` 自包含、不得依赖 PCH/传递包含」、§10.3 扩为三个静默失效点。
+- [x] **修 `build codeeditor` 编不过（Json 前向头漏补 `examples/`）**：
+  `88ba665`（Json 前向头解耦）把 `dsl.hpp` 的 `#include "st/ext/json.hpp"` 换成前向声明，
+  给 `src/*`+`tests/*` 的 18 个 .cpp 补了 `json.hpp`——**却漏了整个 `examples/`**。
+  而 `dsl::custom<T>` 是**模板**，实例化时需要 `Json` 完整类型（模板体调
+  `create_element(…, empty_json_object(), …)`），于是 `examples/codeeditor/main.cpp` 报
+  「invalid use of incomplete type … basic_json」——报错落在标准库 `variant`/`type_traits`
+  内部（300 行模板栈），完全看不出与 `dsl.hpp` 的关系。
+
+  **为什么一路没被发现**：该提交自己的验证声明只跑 `st test` + `lint`，而 `st test` 只编
+  `tests/*_test.cpp`、**不编 `examples/`** 也不编 `tools/`——两个环节都覆盖不到 codeeditor。
+  它自己的提交信息写着「需要完整类型的 .cpp（**含测试/示例**）自行包含 json.hpp」：
+  **说明了但没做到**，且无任何机械检查会因“examples 编不过”而变红。
+
+  修复：① `examples/codeeditor/main.cpp` 补显式 `st/ext/json.hpp`（按字母序）；
+  ② 把 `dsl.hpp` 里那句**错误的**注释「`Json` 只出现在签名里」改成事实：模板实例化需要
+  完整类型，谁用 `custom<T>` 谁负责包含；③ 在 `custom<T>` 内加 `static_assert` 完整性守卫
+  （用 concept 而非 `sizeof`——后者会先报自己的错、盖掉消息），把报错从「标准库内部 300 行
+  模板栈」变成一句「**custom<T> 需要完整的 st::Json —— 请在本 .cpp 顶部包含
+  `st/ext/json.hpp`**」。守卫有效性已反向验证（临时移除 include → 断言当场给出指引）。
+
+  教训：**「改公共头 + 手动给 .cpp 补 include」这个模式必然漏**，尤其当目标目录不在
+  `st test` 的编译范围内（examples/tools）。这类改动要枚举**所有**包含该头的 TU
+  （可用 `grep -rl` 列全），而不是只改眼前的 src/tests。
 
 > 审视报告「第一梯队」与「第二梯队」（含渲染侧：增量重绘/整形缓存/LRU/渐变快路径）
 > 均已在上述条目落地；无头环境无法验证的窗口模式 vsync 如实留在 P1。
