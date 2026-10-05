@@ -14,7 +14,12 @@
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::text_port_of;
+
 namespace {
 
 // —— 版式常量（尺寸/间距；颜色一律来自主题 token，不在此出现）——
@@ -55,10 +60,6 @@ constexpr std::uint32_t kMaxNestingDepth{32U};
 /// 标题上间距（H1..H6；`DESIGN.md` §5 的 4px 栅格）。
 constexpr std::array<float, 6> kHeadingMargins{24.0f, 20.0f, 16.0f, 14.0f, 12.0f, 10.0f};
 
-/// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口，布局照常）。
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
 
 // —— 形状填充辅助 ——
 // 背景/圆点在光栅器里必须走**它接受的绕向**：`Path` 的 `add_rect` / `add_rounded_rect` /

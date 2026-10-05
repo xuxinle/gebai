@@ -14,13 +14,9 @@ namespace st::ui {
 
 using components_internal::draw_line;
 using components_internal::fill_round_rect;
+using components_internal::text_port_of;
 
 namespace {
-
-/// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
 
 /// 勾选标记（✓：两段折线，笔画宽 1.6；颜色由调用方给）。
 void draw_check(raster::Surface& canvas, math::Rect box, float size, math::Color color) {

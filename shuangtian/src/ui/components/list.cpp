@@ -6,13 +6,13 @@
 
 #include "st/raster/paint.hpp"
 
-namespace st::ui {
-namespace {
+#include "components_internal.hpp"
 
-/// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
+namespace st::ui {
+
+using components_internal::text_port_of;
+
+namespace {
 
 /// 单行文本绘制（省略号截断 + 对齐），不修改 `style_`（同一节点可有多种字号/颜色）。
 void draw_text(const RenderContext& context, raster::Surface& canvas, std::string_view text,

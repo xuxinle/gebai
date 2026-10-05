@@ -18,13 +18,9 @@ namespace st::ui {
 
 using components_internal::paint_focus_ring;
 using components_internal::paint_outline;
+using components_internal::text_port_of;
 
 namespace {
-
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  static const NullTextPort fallback;
-  return context.text != nullptr ? *context.text : fallback;
-}
 
 
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token，此处只留几何与动效常量）——

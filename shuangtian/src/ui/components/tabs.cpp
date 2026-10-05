@@ -13,13 +13,13 @@
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
 
-namespace st::ui {
-namespace {
+#include "components_internal.hpp"
 
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  static const NullTextPort fallback;
-  return context.text != nullptr ? *context.text : fallback;
-}
+namespace st::ui {
+
+using components_internal::text_port_of;
+
+namespace {
 
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
 constexpr float k_indicator_height = 2.0f;  // 选中指示条厚度

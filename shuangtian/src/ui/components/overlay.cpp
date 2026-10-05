@@ -16,30 +16,10 @@ namespace st::ui {
 
 using components_internal::draw_line;
 using components_internal::fill_round_rect;
+using components_internal::text_port_of;
+using components_internal::tone_from_name;
 
 namespace {
-
-/// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口）。
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
-
-// 注：`tone_name` 曾在这里另写一份——现在共用 `st::ui::tone_name`（theme.hpp）。
-// 两份实现会让"色调短名"有两个真相源，且匿名命名空间那份会遮蔽共享版，
-// 表现为调用处 `ambiguous` 编译错误（-Werror 下直接不过），所以只留一份。
-
-[[nodiscard]] auto tone_from_name(std::string_view name) -> std::optional<Tone> {
-  if (name == "default") return Tone::Default;
-  if (name == "muted") return Tone::Muted;
-  if (name == "faint") return Tone::Faint;
-  if (name == "primary") return Tone::Primary;
-  if (name == "accent") return Tone::Accent;
-  if (name == "success") return Tone::Success;
-  if (name == "warning") return Tone::Warning;
-  if (name == "danger") return Tone::Danger;
-  if (name == "on_primary") return Tone::OnPrimary;
-  return std::nullopt;
-}
 
 /// 正文最多折行数（超出以省略号收尾）。
 inline constexpr std::size_t kMaxBodyLines = 12;

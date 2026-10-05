@@ -18,6 +18,7 @@
 namespace st::ui {
 
 using components_internal::paint_focus_ring;
+using components_internal::text_port_of;
 
 namespace {
 
@@ -57,10 +58,6 @@ constexpr double k_blink_duty = 0.55;
   std::size_t cursor = index;
   while (cursor > 0 && is_continuation(utf8[cursor])) --cursor;
   return cursor;
-}
-
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
 }
 
 /// 把主题 token 同步到 `style_`（仅填充未显式设置的项），供 `paint_box` 与 `visual` 树使用。

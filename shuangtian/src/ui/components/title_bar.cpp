@@ -9,7 +9,12 @@
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::text_port_of;
+
 namespace {
 
 /// 三个控制按钮的图标：最小化 / 最大化（未最大化）/ 还原（已最大化）/ 关闭。
@@ -49,11 +54,6 @@ constexpr float k_close_hover_alpha = 0.16f;
 /// 普通控制按钮悬浮/按压底色透明度（`surface_pressed` 派生）。
 constexpr float k_button_hover_alpha = 0.10f;
 constexpr float k_button_press_alpha = 0.18f;
-
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  static const NullTextPort fallback;
-  return context.text != nullptr ? *context.text : fallback;
-}
 
 /// 圆角填充（按钮底色的统一画法；半径取 `min(radius_sm, 矩形短边一半)`）。
 void fill_rounded(raster::Surface& canvas, math::Rect rect, float radius, math::Color color) {

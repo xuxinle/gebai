@@ -15,7 +15,12 @@
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::text_port_of;
+
 namespace {
 
 /// UTF-8 前一个码点起点。
@@ -76,10 +81,6 @@ inline constexpr float kCursorWidth{1.6f};
 inline constexpr float kScrollBarWidth{9.0f};
 inline constexpr std::int64_t kCoalesceWindowMs{600};
 inline constexpr std::size_t kMaxUndoDepth{256};
-
-[[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
-  return context.text != nullptr ? *context.text : NullTextPort::instance();
-}
 
 /// 令牌类别 → 语法色板取色。
 [[nodiscard]] auto token_color(const SyntaxPalette& palette, text::TokenKind kind) noexcept

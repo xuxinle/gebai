@@ -12,6 +12,7 @@
 /// 风格与 `src/raster/rasterize_internal.hpp`、`src/pkg/pkg_internal.hpp` 一致：只被
 /// `src/ui/components/*.cpp` 包含的私有头，不进 `include/st`（不属于对外 API）。
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -22,12 +23,28 @@
 #include "st/raster/path.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/text_port.hpp"
+#include "st/ui/theme.hpp"
 
 namespace st::ui::components_internal {
 
 /// 文本端口取用（`RenderContext::text` 可为空 → 退化为 no-op 端口，布局仍可运行）。
 [[nodiscard]] inline auto text_port_of(const RenderContext& context) -> const TextPort& {
   return context.text != nullptr ? *context.text : NullTextPort::instance();
+}
+
+/// 色调短名 → `Tone`（控制通道属性面解析；未知名返回 `nullopt`）。
+/// 此前 feedback / overlay 各拄一份逐字相同的实现。
+[[nodiscard]] inline auto tone_from_name(std::string_view name) -> std::optional<Tone> {
+  if (name == "default") return Tone::Default;
+  if (name == "muted") return Tone::Muted;
+  if (name == "faint") return Tone::Faint;
+  if (name == "primary") return Tone::Primary;
+  if (name == "accent") return Tone::Accent;
+  if (name == "success") return Tone::Success;
+  if (name == "warning") return Tone::Warning;
+  if (name == "danger") return Tone::Danger;
+  if (name == "on_primary") return Tone::OnPrimary;
+  return std::nullopt;
 }
 
 /// 圆角矩形填充（**四角独立半径**；四角同半径时的简写在下方；`radius == 0` 即普通矩形）。
