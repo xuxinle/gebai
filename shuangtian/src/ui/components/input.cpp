@@ -37,20 +37,10 @@ constexpr double k_blink_duty = 0.55;
   return (static_cast<std::uint8_t>(value) & 0xC0) == 0x80;
 }
 
-/// 前一个码点起点（`index` 为字节位置，可等于 size）。
-[[nodiscard]] auto utf8_prev(std::string_view utf8, std::size_t index) noexcept -> std::size_t {
-  if (index == 0) return 0;
-  std::size_t cursor = index < utf8.size() ? index - 1 : utf8.size();
-  while (cursor > 0 && cursor < utf8.size() && is_continuation(utf8[cursor])) --cursor;
-  return cursor;
-}
-
-/// 下一个码点起点（不超过 size）。
-[[nodiscard]] auto utf8_next(std::string_view utf8, std::size_t index) noexcept -> std::size_t {
-  std::size_t cursor = index + 1;
-  while (cursor < utf8.size() && is_continuation(utf8[cursor])) ++cursor;
-  return cursor > utf8.size() ? utf8.size() : cursor;
-}
+// `utf8_prev` / `utf8_next` 现由骨架层提供（`st/core/string.hpp`）：单一真相源，
+// 并修掉旧副本在**文末光标**下的缺陷（旧版 `utf8_prev(text, size) == size`，
+// 导致打字后（光标=文末）退格什么都不删）。见
+// `tests/ui_input_test.cpp: ui_text_area_backspace_at_end_deletes_last_codepoint`。
 
 /// 夹取到合法码点边界。
 [[nodiscard]] auto snap_index(std::string_view utf8, std::size_t index) noexcept -> std::size_t {

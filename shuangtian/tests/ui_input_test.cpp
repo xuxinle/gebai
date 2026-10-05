@@ -301,3 +301,61 @@ ST_TEST(ui_text_area_read_only_blocks_editing_but_keeps_navigation) {
   ST_CHECK(!area.semantics_flags().editable);
   ST_CHECK(area.semantics_flags().visible);
 }
+
+/// 多字节文本的**文末编辑**（`TextArea`）：打字后光标停在文末，退格必须删掉最后一个码点。
+///
+/// 为何单列：`TextArea::utf8_prev(text, index)` 早期版本在 `index == text.size()`（光标恰在
+/// 文末，即**每一次打字之后**的状态）时返回 `size` 而非末码点起点——于是 `erase(size, 0)`
+/// 什么都不删，表现为「打完字退格键没反应」。"文中"退格（光标不在末尾）不受影响，
+/// 故早期用例未覆盖到。本用例既是回归门禁，也是 `utf8_next/prev` 收敛后的语义钉桩。
+ST_TEST(ui_text_area_backspace_at_end_deletes_last_codepoint) {
+  TextArea area;
+  Theme theme = Theme::light();
+  RenderContext context{theme, nullptr, 0.0};
+  area.measure(context, st::ui::Constraints{.max_width = 320.0F, .max_height = 120.0F});
+  area.arrange(context, Rect{0.0F, 0.0F, 320.0F, 120.0F});
+
+  const auto type_text = [&](std::string_view text) {
+    st::ui::Event typed;
+    typed.kind = st::ui::EventKind::TextInput;
+    typed.text = std::string(text);
+    ST_CHECK(area.on_event(context, typed));
+  };
+  const auto press = [&](std::string_view key) {
+    st::ui::Event event;
+    event.kind = st::ui::EventKind::KeyDown;
+    event.key = std::string(key);
+    ST_CHECK(area.on_event(context, event));
+  };
+
+  // 单字节：文末退格删一个字符。
+  type_text("abc");
+  ST_CHECK_EQ(area.value(), std::string("abc"));
+  press("Backspace");
+  ST_CHECK_EQ(area.value(), std::string("ab"));
+
+  // 多字节：每个汉字 3 字节，退格按**码点**删（不得只删 1 字节而把 UTF-8 截断）。
+  type_text("霜天");
+  ST_CHECK_EQ(area.value(), std::string("ab霜天"));
+  press("Backspace");
+  ST_CHECK_EQ(area.value(), std::string("ab霜"));  // 删掉末码点「天」（而非末字节）
+  press("Backspace");
+  ST_CHECK_EQ(area.value(), std::string("ab"));
+
+  // 混合串末尾是多字节："a霜" 文末退格应删整个「霜」。
+  type_text("a霜");
+  ST_CHECK_EQ(area.value(), std::string("aba霜"));
+  press("Backspace");
+  ST_CHECK_EQ(area.value(), std::string("aba"));
+
+  // 删空后再按不得越界（负索引/下溢）。
+  for (int index = 0; index < 4; ++index) press("Backspace");
+  ST_CHECK_EQ(area.value(), std::string(""));
+  press("Backspace");
+  ST_CHECK_EQ(area.value(), std::string(""));
+
+  // 与 `Delete` 对称：文末 `Delete` 无字符可删（不崩、不变）。
+  type_text("霜");
+  press("Delete");
+  ST_CHECK_EQ(area.value(), std::string("霜"));
+}

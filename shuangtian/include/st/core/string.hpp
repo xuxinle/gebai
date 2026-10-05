@@ -63,6 +63,24 @@ auto encode_utf8(char32_t codepoint, std::string& out) -> void;
 [[nodiscard]] auto utf8_slice(std::string_view text, std::size_t begin, std::size_t count) -> std::string_view;
 /// 第 n 个码点的字节偏移（n == 长度时返回字节长度）。
 [[nodiscard]] auto utf8_offset(std::string_view text, std::size_t index) noexcept -> std::size_t;
+/// 第 `index` 字节处**所在码点**的起始字节偏移（光标向左一步）。
+///
+/// 语义（正式定义，与 `utf8_next` 配成一对）：
+/// - `index == 0` → `0`；
+/// - `index >= text.size()` → **最后一个码点的起点**（文本非空）/ `0`（空文本）；
+///   即「光标在文末时向左一步」——这是**编辑场景的默认**（打字后光标停在文末，
+///   退格必须删掉末码点而不是什么都不删）；
+/// - 否则从 `index - 1` 往回跳过 ASCII 延续字节（`10xxxxxx`）到该码点首字节。
+///
+/// 注：若 `index` 恰落在某码点的延续字节上（非法光标位置），返回该码点首字节——
+/// 即“左移到所在码点起点”，不复原调用方传入的越界偏移。
+[[nodiscard]] auto utf8_prev(std::string_view text, std::size_t index) noexcept -> std::size_t;
+/// 第 `index` 字节处**所在码点之后**的起始字节偏移（光标向右一步）。
+///
+/// 语义（正式定义，与 `utf8_prev` 配成一对）：
+/// - `index + 1 > text.size()` → `text.size()`（已到/越过文末）；
+/// - 否则从 `index + 1` 往后跳过 ASCII 延续字节，得到下一个码点起点。
+[[nodiscard]] auto utf8_next(std::string_view text, std::size_t index) noexcept -> std::size_t;
 [[nodiscard]] auto utf8_is_valid(std::string_view text) noexcept -> bool;
 
 [[nodiscard]] constexpr auto is_space_codepoint(char32_t value) noexcept -> bool {

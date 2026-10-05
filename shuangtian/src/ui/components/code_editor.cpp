@@ -23,21 +23,8 @@ using components_internal::text_port_of;
 
 namespace {
 
-/// UTF-8 前一个码点起点。
-[[nodiscard]] auto utf8_prev(std::string_view utf8, std::size_t index) noexcept -> std::size_t {
-  if (index == 0) return 0;
-  std::size_t probe = index - 1;
-  while (probe > 0 && (static_cast<unsigned char>(utf8[probe]) & 0xC0U) == 0x80U) --probe;
-  return probe;
-}
-
-/// UTF-8 后一个码点起点。
-[[nodiscard]] auto utf8_next(std::string_view utf8, std::size_t index) noexcept -> std::size_t {
-  if (index >= utf8.size()) return utf8.size();
-  std::size_t probe = index + 1;
-  while (probe < utf8.size() && (static_cast<unsigned char>(utf8[probe]) & 0xC0U) == 0x80U) ++probe;
-  return probe;
-}
+// `utf8_prev` / `utf8_next` 现由骨架层提供（`st/core/string.hpp`）：与本文件原副本逐值等价，
+// 收敛后与 `Input`/`TextArea` 共用同一份语义（旧 `Input` 副本在文末光标下有缺陷）。
 
 [[nodiscard]] auto is_word_char(char raw) noexcept -> bool {
   return (raw >= 'a' && raw <= 'z') || (raw >= 'A' && raw <= 'Z') || (raw >= '0' && raw <= '9') ||

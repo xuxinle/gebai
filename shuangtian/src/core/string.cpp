@@ -312,6 +312,21 @@ auto utf8_offset(std::string_view text, std::size_t index) noexcept -> std::size
   return offset;
 }
 
+auto utf8_prev(std::string_view text, std::size_t index) noexcept -> std::size_t {
+  if (index == 0U || text.empty()) return 0;
+  // 光标在（或越过）文末：向左一步 = 最后一个码点的起点。
+  std::size_t cursor = index >= text.size() ? text.size() - 1U : index - 1U;
+  while (cursor > 0U && (static_cast<unsigned char>(text[cursor]) & 0xC0U) == 0x80U) --cursor;
+  return cursor;
+}
+
+auto utf8_next(std::string_view text, std::size_t index) noexcept -> std::size_t {
+  if (index + 1U > text.size()) return text.size();
+  std::size_t cursor = index + 1U;
+  while (cursor < text.size() && (static_cast<unsigned char>(text[cursor]) & 0xC0U) == 0x80U) ++cursor;
+  return cursor;
+}
+
 auto utf8_slice(std::string_view text, std::size_t begin, std::size_t count) -> std::string_view {
   const std::size_t start = utf8_offset(text, begin);
   const std::size_t stop = utf8_offset(text, begin + count);

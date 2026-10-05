@@ -16,6 +16,13 @@
   （作者为此用例旧修过 SIGSEGV），是**测试跨派发持有裸指针**违规：改为用 `overlay_count()==0`
   断言摘除结果，不再解引用失效指针。修后 `st test --san` = 697 passed/0 failed/0 ASan 报告。
   （已先实验确认该 UAF **先于重构存在**：组件目录整目录回退到 2089c30 后仍 5/5 失败。）
+- [x] **两份 `utf8_prev` 语义分歧（含一个真缺陷）**：收敛为骨架层 `st::utf8_prev/utf8_next`
+  （`st/core/string.hpp`，与既有 `decode_utf8`/`utf8_offset` 同族），`Input`/`TextArea`/
+  `CodeEditor` 共用一份。同时修掉旧 `input.cpp` 副本的缺陷：旧版 `utf8_prev(text, size) == size`，
+  而打字后光标恰在文末（`insert_text` 后 `cursor_ += size`）——`erase(size, 0)` 什么都不删，
+  表现为「打完字退格键没反应」（中文/英文均中招）。`code_editor` 版本已正确，其语义即正式定义。
+  回归：`tests/ui_input_test.cpp: ui_text_area_backspace_at_end_deletes_last_codepoint`
+  （先在旧代码上跑红、修复后转绿）+ `tests/core_basics_test.cpp` 两组边界单测。
 
 ## 2026-10-05 实战反馈轮：新发现（P1）
 
@@ -47,13 +54,6 @@
 - [ ] **`st test` 的集成用例在无框架根的目录下静默跳过**：
   `tests/pkg_integration_test.cpp` 拿不到 `ST_TEST_FRAMEWORK_ROOT` 时跳过（不假绿，
   但也不提醒）。若将来把它当 CI 门禁，需要让“跳过”在汇总里也可见（如计数行报“跳过 N”）。
-- [ ] **两份 `utf8_prev` 在文本末尾语义不一致**（2026 重构时发现，未动）：
-  `src/ui/components/input.cpp` 与 `src/ui/components/code_editor.cpp` 各一份 `utf8_next/prev`。
-  `utf8_prev(text, index)` 在 `index == text.size()` 时：`code_editor` 版返回**末码点起点**，
-  `input` 版返回 `size`。多数调用点有 `cursor_ > 0 ? … : 0` 保护，但
-  `input.cpp` 的删字/选字与 `code_editor.cpp:585` 是裸调用，两者对“文本末尾光标”行为不同。
-  骨架层已有 `st/core/string.hpp` 的 `decode_utf8`/`utf8_offset` 可作基准。
-  建议：以正式 UTF-8 边界语义（含“末尾”）为准收敛为一份，**补边界单测**后统一（勿盲合）。
 
 ### 画廊全场景补全（v0.1.5，2026-09-30 第二轮审视）
 
