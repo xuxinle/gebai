@@ -726,13 +726,27 @@ void LanguageRegistry::reset_to_builtin() {
   impl_->specs = std::move(fresh);
 }
 
+/// 进程级语言注册表（内置 30+ 语言 + 应用自定义）。
+///
+/// **故意永不析构**（`new` 之后不 delete）：它是进程生存期的共享单例。若作为函数内
+/// `static` 对象构造，它会在 `main` 退出后与其它翻译单元的静态对象（`text.cpp` /
+/// `font.cpp` 的字形缓存等）一同析构——而**跨翻译单元的析构顺序是未定义的**。
+/// 一旦某个静态对象在自己的析构里还调用 `highlight()` / `language_from_path()`
+/// （例如某个带 markdown 渲染的 UI 组件的静态析构），就会用到已析构的注册表（UB），
+/// 表现为“退出时偶发崩溃”，极难复现。
+///
+/// 进程级单例用堆分配、不析构是标准做法：泄漏的只是 OS 在进程退出时必回收的一份内存，
+/// 换来的是“退出期不可能用到死对象”。
+///
+/// 注：成员里的 `std::shared_mutex` 也随之永不析构——这正是要的效果（不存在“锁已毁、
+/// 线程还在用”的窗口）。
 auto global_languages() -> LanguageRegistry& {
-  static LanguageRegistry registry = [] {
-    LanguageRegistry instance;
-    instance.reset_to_builtin();
+  static LanguageRegistry* const registry = [] {
+    auto* instance = new LanguageRegistry();  // lint-allow: L1 进程级单例，故意不析构（理由见上）
+    instance->reset_to_builtin();
     return instance;
   }();
-  return registry;
+  return *registry;
 }
 
 // ============================ 顶层 API ============================

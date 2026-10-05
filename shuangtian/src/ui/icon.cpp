@@ -437,6 +437,9 @@ bool Icon::has(std::string_view name) noexcept {
 }
 
 auto svg_registry() -> SvgIconRegistry& {
+  // 图标 sprite 表按设计全局唯一（应用启动时装载一次，所有 IconView 共享）。
+  // 只持有不可变源文本与位图缓存，退出期无跨 TU 引用。
+  // lint-allow: L8 进程级图标 sprite 表（按设计跨实例共享），持有不可变数据
   static SvgIconRegistry instance;  // NOLINT(cppcoreguidelines-avoid-non-const-global-vars)
   return instance;
 }

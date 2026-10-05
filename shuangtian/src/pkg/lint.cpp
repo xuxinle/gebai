@@ -20,7 +20,7 @@ struct RuleSpec {
 };
 
 /// 规则表（与 `CONVENTIONS.md` §8 一一对应）。
-constexpr std::array<RuleSpec, 13> kRules{{
+constexpr std::array<RuleSpec, 14> kRules{{
     {"L1", "禁止裸 new/delete/malloc/free（用 unique_ptr/RAII/容器）",
      R"(\bnew\s|\bdelete\s|\bmalloc\s*\(|\bfree\s*\(|\brealloc\s*\()"},
     {"L2", "禁止 C 风格强制转换（用 static_cast/bit_cast）",
@@ -54,6 +54,22 @@ constexpr std::array<RuleSpec, 13> kRules{{
     // L13 需要作用域判断（「当前类是否继承 Element」「这行是否在 semantics_flags 覆写
     // 体内」都表达不成单行正则），由 `check_element_state()` 单独实现。
     {"L13", "组件不得遮蔽 Element 保护成员、semantics_flags 覆写不得重建标志", ""},
+    // L14：系统头单点封装。
+    //
+    // 为什么需要它：`CONVENTIONS.md` §10 第 1 条要求「平台差异只能出现在 platform_* 里」，
+    // 而这条约束原先**只在文档里**——§8 写着「lint 亦检查禁用 include」，实现里却
+    // 没有这道检查。于是 `src/core/entry.cpp` 长期直接 `#include <windows.h>` 无人发现。
+    //
+    // 判据（两类，都只看代码行）：
+    //   ① 系统头 include：`#include <windows.h>` 等；
+    //   ② 直接用 `dlopen`/`dlsym` 家族（应当经 `st::process` 单点封装）。
+    //
+    // 白名单（`rule_exempt(file_name, "L14")`）：`platform_*` 单点封装文件，**外加
+    // 清单 `lint.exempt.L14` 登记的具名文件**（如 `core/entry.cpp`——`ST_MAIN` 需在
+    // 调用点正规化 Windows 的 ANSI `argv`，而它的职责不属于任何 `platform_*` 横切层）。
+    // 两条通道都各自计数，不允许静默。
+    {"L14", "系统头/平台 API 只能出现在 platform_* 单点封装（见 §10 第 1 条）",
+     R"(#\s*include\s*<(windows|unistd|dlfcn|shellapi|winsock2|arpa/inet|netinet/in|sys/socket|poll|fcntl)\.h?>|\bdlopen\s*\(|\bdlsym\s*\()"},
 }};
 
 /// 去掉行注释与块注释状态（保留字符串内容，简单启发式）。
@@ -98,6 +114,10 @@ constexpr std::array<RuleSpec, 13> kRules{{
 ///   位级重解释只能在这里发生，且必须单点封装。
 /// - **L3**：测试框架 `test.hpp` 的断言宏——这是"函数式宏"唯一被认可的用途
 ///   （需要在断言里拿到调用点文件/行号与表达式原文）。
+/// - **L14**：同样以 `platform_*` 为边界（系统头的唯一合法落脚点）；`backend.cpp`
+///   额外获准——它需要 `dlopen` 做**运行时后端探测**，而这正是 §10 第 1 条
+///   「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测这一层本身就是
+///   平台差异的**唯一**判定点，放进 `platform_*` 只会让"有没有这个后端"这件事被拆散。
 [[nodiscard]] auto rule_exempt(std::string_view file_name, std::string_view rule) -> bool {
   if (rule == "L6") {
     return file_name.find("platform_") != std::string_view::npos ||
@@ -105,6 +125,9 @@ constexpr std::array<RuleSpec, 13> kRules{{
   }
   if (rule == "L3") {
     return file_name == "test.hpp";
+  }
+  if (rule == "L14") {
+    return file_name.find("platform_") != std::string_view::npos || file_name == "backend.cpp";
   }
   return false;
 }
@@ -149,12 +172,35 @@ constexpr std::array<RuleSpec, 13> kRules{{
   return tail.find(rule) != std::string_view::npos;
 }
 
+/// 把字符串字面量的**内容**替换为空格（定义在本文件后部；此处前向声明——
+/// L8 的花括号计数必须在“净代码”上做，见 `check_mutable_globals` 的误报防线）。
+[[nodiscard]] auto strip_string_literals(std::string_view line, bool& in_raw_string) -> std::string;
+
 /// 命名空间作用域下的**可变全局**声明判定（L8）。
 ///
-/// 只看单行必然误报（局部变量、函数定义都会被卷进来，实测误报近千条），因此这里做两件事：
-/// ① **跟踪花括号深度**，只在深度 0（命名空间作用域）判定；
-/// ② 只在形如 `类型 名字 = …;` / `类型 名字{…};` / `类型 名字;` 且**不含函数调用/定义特征**时命中。
-/// 允许的前缀：`const`/`constexpr`/`consteval`/`inline`/`using`/`typedef`/`extern`/`template` 等。
+/// ## 历史缺陷（本轮修复）
+///
+/// 旧实现只判 `line_depth == 0`（花括号深度为 0）。但本工程几乎每个文件的辅助全局都
+/// 包在**匿名命名空间**里（`namespace { ... }`），深度恒 ≥1——于是可变全局
+/// **全部漏网**，L8 实际近乎失效（还掩盖了一个真实缺陷：`on_state_write` 里无锁遍历
+/// 那个漏网的容器）。
+///
+/// ## 现行判据
+///
+/// ① **全局作用域**：花括号标签栈只由 `N`（namespace 体）组成——含文件级与嵌套
+///    匿名/具名 namespace。这才是 L8 的原意（进程级全局）。
+/// ② **函数内局部 `static`**：同样是“一次初始化、进程生存期共享”的可变状态，
+///    只是藏在函数里，一并判（类体内的 `static` 是静态成员，同属进程级状态，也判）。
+///
+/// ## 误报防线（三条，均由实测误报反推）
+///
+/// - **净代码视图**：花括号计数必须在**剔除字符串字面量**后的文本上做。markdown 解析器
+///   里满是大括号字面量（`"{"`/`"}"`），按原文计数会让栈严重错位（实测把类成员
+///   判成了全局）。
+/// - **签名续行**：函数声明的续行（`float radius = 0.0f) {`）看着就像全局声明。用
+///   “本行以 `)`/`{`/`,` 结尾”与“括号未平衡”排除——两条件对**声明行**都不成立。
+/// - **前置作用域豁免**：`// lint-allow: L8 <原因>` 写在命名空间开括号**之前**是既有惯例
+///   （`log.cpp`/`test_runner.cpp`）——往后 50 行内生效，让整块登记一次即可。
 [[nodiscard]] auto check_mutable_globals(const std::vector<std::string_view>& lines,
                                          std::string_view path, std::size_t& suppressed)
     -> std::vector<LintViolation> {
@@ -163,40 +209,100 @@ constexpr std::array<RuleSpec, 13> kRules{{
       R"(^[A-Za-z_][\w:]*\s*(?:<[^;{}]*>)?\s*[\*&]?\s*[a-z_][\w]*\s*(?:=[^=]|\{|;\s*$))");
   static const std::regex allowed_prefix(
       R"(^(?:const|constexpr|consteval|inline|using|typedef|extern|template|namespace|class|struct|enum|union|return|if|else|for|while|switch|do|case|break|continue|public|private|protected|static_assert|friend|virtual|explicit|operator)\b)");
+  static const std::regex namespace_open(R"(^\s*namespace\b)");
+  static const std::regex class_open(R"(^\s*(?:class|struct|union)\b)");
+  static const std::regex static_word(R"(\bstatic\b)");
+  static const std::regex immutable_word(R"(\b(?:const|constexpr|consteval)\b)");
+  // `thread_local` 是**每线程**一份，不是“进程级共享”——L8 针对的恰恰是共享可变状态。
+  // 线程局部状态反而是一种**避免**共享的手段，不应被本条惩罚（本框架的
+  // `tls_composer` 就是重组线程的“当前 Composer”，正是正确用法）。
+  static const std::regex thread_local_word(R"(\bthread_local\b)");
+  static const std::regex declaration_tail(R"([),{]$)");
+  // 前置存储说明符：`static std::string store;` 里的 `static` 会占住“类型”位，
+  // 让后面的 `[a-z_][\w]*` 只能匹配到 `std`（限定名 `std::string` 解析不出）。
+  // 先剥掉再匹配——剥掉后 `static` 的语义已由 `has_static` 捕获，不影响判定。
+  static const std::regex storage_prefix(R"(^(?:static|inline|extern|thread_local)\s+)");
+
+  const std::string file_name = fs::file_name(path);
+  if (rule_exempt(file_name, "L8")) return violations;
+
+  // 作用域标签栈：'N' = namespace 体、'C' = class/struct/union 体、'O' = 其他块。
+  std::vector<char> scopes;
   bool in_block_comment = false;
-  int depth = 0;
+  bool in_raw_string = false;
+  int open_parens = 0;
+  // 前置作用域豁免的剩余行数（`// lint-allow: L8 …` 写在命名空间开括号之前，见函数头）。
+  int block_allow_remaining = 0;
+
+  const auto at_global_scope = [&scopes] {
+    return std::ranges::all_of(scopes, [](char tag) { return tag == 'N'; });
+  };
+  const auto inside_class = [&scopes] {
+    return std::ranges::find(scopes, 'C') != scopes.end();
+  };
+
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const std::string_view raw = lines[index];
-    const std::string stripped = strip_comments(raw, in_block_comment);
-    const int line_depth = depth;
-    // 更新深度（判断发生在行首深度上：命名空间作用域的声明深度为 0）
-    for (const char glyph : stripped) {
-      if (glyph == '{') ++depth;
-      else if (glyph == '}') depth = depth > 0 ? depth - 1 : 0;
+    const std::string uncommented = strip_comments(raw, in_block_comment);
+    // 净代码视图：字符串内容换成空格（花括号计数必须在这上面做）。
+    const std::string code = strip_string_literals(uncommented, in_raw_string);
+    const std::string body = std::string(trim(code));
+
+    const bool allow_here = has_allow_comment(raw, "L8");
+    // **仅当该行是纯注释行**才开启作用域窗口：这才是前置登记（`// lint-allow: L8 …`
+    // 单独一行、写在命名空间开括号之前）的形态。贴在声明行尾的豁免仍是单点语义
+    // （否则下一行的真全局会被上一行的注释“顺带”豁免掉）。
+    if (allow_here && std::string(trim(code)).empty()) block_allow_remaining = 50;
+
+    // —— 先判定本行（用**行首**的作用域）——
+    if (!body.empty() && body.front() != '#' && !inside_class()) {
+      const bool has_static = std::regex_search(body, static_word);
+      const bool immutable = std::regex_search(body, immutable_word);
+      const bool per_thread = std::regex_search(body, thread_local_word);
+      // 函数签名的续行（`... = 0.0f) {`）——签名本身不在此行起头，排除。
+      const bool continuation = open_parens > 0 || std::regex_search(body, declaration_tail);
+      const bool candidate = (at_global_scope() || has_static) && !immutable && !per_thread &&
+                             !continuation && !std::regex_search(body, allowed_prefix);
+      if (candidate) {
+        // 含 '(' 且不含 '=' → 更像函数声明/定义/调用，跳过（保守优先，宁可漏报不误报）
+        const bool has_paren = body.find('(') != std::string::npos;
+        const bool has_assign = body.find('=') != std::string::npos;
+        std::string declarator = body;
+        std::smatch storage;
+        if (std::regex_search(declarator, storage, storage_prefix)) declarator = storage.suffix();
+        if (!(has_paren && !has_assign) && std::regex_search(declarator, declaration)) {
+          if (allow_here || block_allow_remaining > 0) {
+            ++suppressed;
+          } else {
+            LintViolation violation;
+            violation.file = std::string(path);
+            violation.line = static_cast<int>(index) + 1;
+            violation.rule = "L8";
+            violation.text = body;
+            violations.push_back(std::move(violation));
+          }
+        }
+      }
     }
-    if (line_depth != 0) continue;
-    const std::string body = std::string(trim(stripped));
-    if (body.empty()) continue;
-    // 预处理指令、注释、宏续行等不在本规则范围
-    if (body.front() == '#') continue;
-    if (std::regex_search(body, allowed_prefix)) continue;
-    // 含 '(' 且不含 '=' → 更像函数声明/定义/调用，跳过（保守优先，宁可漏报不误报）
-    const bool has_paren = body.find('(') != std::string::npos;
-    const bool has_assign = body.find('=') != std::string::npos;
-    if (has_paren && !has_assign) continue;
-    if (!std::regex_search(body, declaration)) continue;
-    const std::string file_name = fs::file_name(path);
-    if (rule_exempt(file_name, "L8")) continue;
-    if (has_allow_comment(raw, "L8")) {
-      ++suppressed;
-      continue;
+
+    // —— 再更新作用域栈与括号平衡（用净代码视图）——
+    const bool opens_namespace = std::regex_search(body, namespace_open);
+    const bool opens_class = std::regex_search(body, class_open);
+    for (const char glyph : code) {
+      if (glyph == '(') {
+        ++open_parens;
+      } else if (glyph == ')') {
+        if (open_parens > 0) --open_parens;
+      } else if (glyph == '{') {
+        scopes.push_back(opens_namespace ? 'N' : (opens_class ? 'C' : 'O'));
+        // 同一行只吃第一个标签（`namespace X { namespace Y {` 极少见；
+        // 漏掉一个内层只会让判定偏保守）。
+        if (opens_namespace || opens_class) continue;
+      } else if (glyph == '}') {
+        if (!scopes.empty()) scopes.pop_back();
+      }
     }
-    LintViolation violation;
-    violation.file = std::string(path);
-    violation.line = static_cast<int>(index) + 1;
-    violation.rule = "L8";
-    violation.text = body;
-    violations.push_back(std::move(violation));
+    if (block_allow_remaining > 0) --block_allow_remaining;
   }
   return violations;
 }

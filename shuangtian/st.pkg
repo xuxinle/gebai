@@ -41,6 +41,12 @@
     "-Wimplicit-fallthrough"
   ],
   "defines": ["ST_VERSION=\"0.1.0\"", "ST_ENABLE_LINT=1"],
+  "lint": {
+    "//": "规则豁免：规则 id → 路径 glob。成片/基于位置的边界走这里（单点破例走行内 // lint-allow）。两通道都需在 CONVENTIONS.md §8 登记，且各自计数、不静默。",
+    "exempt": {
+      "L14": ["src/core/entry.cpp"]
+    }
+  },
   "system_libs": ["pthread", "dl", "m"],
   "toolchains": {
     "mingw": {

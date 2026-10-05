@@ -821,6 +821,7 @@ ST_TEST(dsl_spacer_positive_size_is_fixed) {
 // memo：依赖未变 → 不重算（结果跨重组复用）；依赖变了 → 重算。
 // 判据是依赖的 `(指针, 写版本)` 指纹，不是值比较（值类型未必可比较）。
 ST_TEST(dsl_memo_reuses_until_deps_change) {
+  // lint-allow: L8 测试内的计数器，需被 lambda 捕获并跨重组共享（单用例作用域）
   static int calls = 0;   // 计算次数（跨实例共享——本用例只挂一个 Composer）
   struct MemoPage : Component {
     State<int> seed{1};
@@ -864,6 +865,7 @@ ST_TEST(dsl_memo_reuses_until_deps_change) {
 
 // effect：依赖变化才跑一次；变化前先跑上次的清理；写状态不丢（连锁写隔帧）。
 ST_TEST(dsl_effect_runs_on_dep_change_and_cleans_up) {
+  // lint-allow: L8 测试内的计数器，需被 lambda 捕获并跨重组共享（单用例作用域）
   static int runs = 0;
   static int cleanups = 0;
   struct EffectPage : Component {

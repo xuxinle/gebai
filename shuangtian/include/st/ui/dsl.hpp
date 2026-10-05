@@ -26,6 +26,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -304,7 +305,8 @@ void rebuild_all();
   // —— build() 内可用的声明 API（由组件包装函数调用；也可直接用）——
   /// 登记一个状态订阅（State::value() 读时自动调到这里）。
   void add_dependency(StateBase* state);
-  /// 内部：State 写通知（订阅了它才标脏）。
+  /// 内部：State 写通知。**线程安全**——按调用线程分流：
+  /// 重组线程/UI 线程直接标脏；其他线程投递回 UI 线程（下一帧 `pump_async` 落地）。
   void notify_state_written(StateBase* state);
 
   // —─ hook 槽位（`resource` 等需要跨重组保持的状态；与 JS 侧游标同理）—─
@@ -442,6 +444,9 @@ void rebuild_all();
 
  private:
   struct Impl;
+  /// 真正落地标脏（**只允许在 UI 线程/重组线程调用**）：查订阅表 → 标脏根或对应子作用域。
+  /// `notify_state_written` 分流出这条路径；其他线程必须先投递回 UI 线程。
+  void mark_state_dirty(StateBase* state);
   std::unique_ptr<Impl> impl_;
 };
 

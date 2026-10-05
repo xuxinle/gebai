@@ -290,29 +290,49 @@ libstdc++ 内部代码（`vector::insert`、`<regex>` 的 `std::function` 控制
 | L5 | `\bthrow\b` | 测试内的断言宏实现 |
 | L6 | `reinterpret_cast` | `platform_*.cpp`、`simd_*.cpp` |
 | L7 | `\bprintf\s*\(`、`\bsprintf\s*\(` | 无（CLI/示例改用 `st::print`，见 §9） |
-| L8 | 可变全局：**作用域感知**——仅花括号深度 0（命名空间作用域）且形如 `类型 名字 = …/;` 的声明（单行正则无法区分局部变量，故该规则由专用检查实现） | 无 |
+| L8 | 可变全局：**作用域感知**——① 全局作用域（花括号标签栈只由 namespace 组成，含匿名/嵌套）里的可变声明；② 非 const 的函数内局部 `static`（同为进程生存期共享状态）。类成员不判；含 `const`/`constexpr`/`consteval` 不判（单行正则无法区分局部变量，故该规则由专用检查实现） | ① 行内 `// lint-allow: L8 原因`；② **前置作用域豁免**：`// lint-allow: L8` 写在命名空间开括号前，往后 50 行内生效（整块登记一次，`log.cpp`/`test_runner.cpp` 的既有惯例） |
 | L9 | `\.detach\s*\(`、`\.lock\s*\(`（裸互斥） | 无 |
 | L10 | 单参构造缺 `explicit`（提示级，不导致失败） | `// lint-allow: L10 原因` |
 | L11 | `\bstd::endl\b` | 无 |
 | L12 | `\.at\s*\(`（键缺失即抛异常，而本框架无通用异常边界） | 无（Json 用 `json_at`/`json_find`，容器用 `find`） |
 | L13 | 组件**遮蔽** `Element` 保护成员（`focused_`/`key_`…）；`semantics_flags` 覆写以 `SemanticsFlags flags{}` 起手 | 无（专用检查：需判断「当前类是否继承 `Element`」与「是否在覆写体内」，单行正则表达不了；同类先例 L8） |
+| L14 | `#include <windows.h>`/`<unistd.h>`/`<dlfcn.h>`/`<shellapi.h>`/`<winsock2.h>`/`<arpa/inet.h>`/`<netinet/in.h>`/`<sys/socket.h>`/`<poll.h>`/`<fcntl.h>`，以及直接用 `dlopen`/`dlsym`（§10 第 1 条：平台差异只能出现在 `platform_*`） | `platform_*.cpp`（单点封装）；`shell/backend.cpp`（需 `dlopen` 做**运行时后端探测**本身）；清单 `lint.exempt.L14` 登记的 `core/entry.cpp`（见下表） |
 
 **扫描语义（重要）**：匹配前先做两层净化——① **注释**不参与任何规则；② **字符串字面量内容**不参与任何规则
 （关键字表、规则表自身的正则字符串都不是代码，否则 linter 会对着自己的关键词表报几十条"违规"）。
 只涉及**代码文本**。
 
 **文件级豁免登记（§9 变更流程要求）**：
-| 规则 | 豁免对象 | 理由 |
-|---|---|---|
-| L6 | `platform_*.cpp`、`simd*.cpp/.hpp` | 系统 API 与 SIMD intrinsics 的位级重解释只能在这里发生（单点封装） |
-| L3 | `include/st/test/test.hpp` | 断言宏需要在调用点取得文件/行号与表达式原文，是函数式宏唯一被认可的用途 |
-| L3 | `include/st/core/entry.hpp`（`ST_MAIN`）| 需在调用点生成 `main` 并正规化 `argv` 编码（Windows 的 `argv` 是 ANSI）。宏而非函数是语言限制：`main` 的签名与返回语义只能在调用点展开 |
-| L10 | 逐行 `// lint-allow: L10 …` | `Result`/`Value` 的隐式值构造是刻意设计（与 `std::expected` 一致） |
+| 规则 | 豁免对象 | 理由 | 通道 |
+|---|---|---|---|
+| L6 | `platform_*.cpp`、`simd*.cpp/.hpp` | 系统 API 与 SIMD intrinsics 的位级重解释只能在这里发生（单点封装） | 内置 |
+| L3 | `include/st/test/test.hpp` | 断言宏需要在调用点取得文件/行号与表达式原文，是函数式宏唯一被认可的用途 | 内置 |
+| L3 | `include/st/core/entry.hpp`（`ST_MAIN`）| 需在调用点生成 `main` 并正规化 `argv` 编码（Windows 的 `argv` 是 ANSI）。宏而非函数是语言限制：`main` 的签名与返回语义只能在调用点展开 | 内置 |
+| L10 | 逐行 `// lint-allow: L10 …` | `Result`/`Value` 的隐式值构造是刻意设计（与 `std::expected` 一致） | 行内 |
+| L8 | `src/core/log.cpp`（日志级别/sink/listener）、`src/test/test_runner.cpp`（测试注册表） | 二者是**进程级基础设施**：日志 sink 与测试注册表按设计全局唯一，注入 Context 无处可注（调用方是整个进程）。已在命名空间开括号前用前置作用域豁免整块登记 | 行内（前置） |
+| L8 | `src/raster/platform_d3d11.cpp` 的 `g_live_canvases` | 进程级诊断计数器（跨设备/跨线程的 GPU 画布存活数），已用 `atomic` | 行内 |
+| L8 | `src/ui/dsl.cpp` 的 `active_composers` | State 写在重组之外时靠它定位订阅者，**必须跨 Composer 实例可见**；已加锁并快照遍历（见 A2 修复） | 行内 |
+| L8 | `src/ui/components/code_editor.cpp` 的 `editor_clipboard` | 进程级剪贴板是**刻意的跨实例共享语义**（同一应用内复制到另一处粘贴）；访问点已收敛到单一函数 | 行内 |
+| L8 | `src/ui/icon.cpp` 的 `svg_registry` | 图标 sprite 表按设计全局唯一（启动时装载一次，所有 `IconView` 共享），只持有不可变源文本与位图缓存 | 行内 |
+| L8 | `tests/ui_dsl_test.cpp` 的用例级计数器 | 需被 lambda 捕获并跨重组共享；作用域限于单个用例（不跨用例泄漏） | 行内（前置） |
+| L14 | `src/core/entry.cpp` | `ST_MAIN` 需在调用点正规化 Windows 的 ANSI `argv`（`<windows.h>`/`<shellapi.h>`）+ POSIX 侧 `<unistd.h>`。这是**进程入口**的职责，不属于任何 `platform_*` 横切层 | **清单**（`st.pkg` 的 `lint.exempt.L14`） |
+| L14 | `src/shell/backend.cpp` | 需 `dlopen` 做**运行时后端探测**——而这正是 §10 第 1 条「平台后端一律运行时探测（不产生链接期依赖）」的实现处：探测本身就是平台差异的唯一判定点 | 内置 |
+
+> 两条豁免通道都**各自计数**（`st lint` 汇总行报出「行内 N / 清单 M」），不允许静默。
+>
+> 附带一条：`thread_local` **不在** L8 判据内——它是“每线程一份”，正是**避免**共享可变状态的手段，
+> 不应被惩罚（`dsl.cpp` 的 `tls_composer` 即正确用例）。
 
 > L12 只收 `.at(` 而不收 `.value()`：`value()` 是自有组件的常见 getter 名（`Slider::value()` 等），
 > 文本级规则无法区分接收者类型，收进来会天天误报。Json 上的 `.value()` 由 §3.8 的约定与评审把关。
 
-`st lint --explain <rule>` 打印规则详情。lint 亦检查**文件布局**（头/实现同名、目录归属）与**禁用 include**（`<windows.h>`/`<X11/Xlib.h>` 只能出现在 `platform_*`）。
+`st lint --explain <rule>` 打印规则详情。lint **确实**检查**禁用 include**（L14：系统头只能出现在 `platform_*` 与已登记豁免里）——
+这条自 2026-10 起由规则实现（此前仅是本节的纸面断言，见 `docs/BACKLOG.md`）。
+
+> L8 的判据在 2026-10 收紧过一次（旧实现只判花括号深度 0，而本工程几乎每个文件的辅助全局都在
+> **匿名命名空间**里，于是全部漏网——包括 `src/ui/dsl.cpp` 那个无锁遍历的 `active_composers`）。
+> 收紧后同一次扫描从“0 违反”变成 6 条真问题，均已登记豁免或修复；这印证了“写着已检查、实际没检查”
+> 比“不检查”更危险。
 
 **控制台输出统一走 `st::print`（`st/core/print.hpp`）**：`std::format` 语法且**编译期校验**格式串与实参类型，
 从根本上消掉 printf 的格式串缺陷（L7 因此可以全局禁止而不留后门）。

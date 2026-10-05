@@ -252,6 +252,9 @@ struct DeviceHolder {
   return instance;
 }
 
+// 画布存活计数（诊断/降级用）。真进程级计数器：跨所有设备与窗口、由多个线程增减，
+// 不存在“注入 Context”的落点（它记录的正是**进程全局**的 GPU 画布数）。已用 atomic。
+// lint-allow: L8 进程级诊断计数器（跨设备/跨线程），已 atomic
 std::atomic<std::uint32_t> g_live_canvases{0};
 
 // ————————————————————————————————————————————————————————————————————————————

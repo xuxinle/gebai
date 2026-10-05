@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "st/core/log.hpp"
+#include "st/core/print.hpp"
 #include "st/ui/actions.hpp"
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/code_editor.hpp"
@@ -37,12 +39,47 @@ namespace st::ui::dsl {
 
 namespace {
 thread_local Composer* tls_composer = nullptr;
-/// 全局活跃 Composer 表（State 写时找不到 thread-local 时逐个通知——
-/// 事件回调在主循环发起，不在重组线程上，thread-local 为空）。
+
+/// 活跃 Composer 注册表（进程级）。
+///
+/// 为什么需要它：`State` 的写**发生在重组之外**时（事件回调；以及工作线程），
+/// `thread_local` 为空——此时只能靠「全进程有哪些 Composer」来定位订阅者。
+///
+/// ## 并发契约（本处曾是无锁遍历，属真实缺陷）
+///
+/// - **容器有锁**（`active_composers_mutex`）：注册/注销在 `Composer` 构造/析构里发生，
+///   而写通知可能来自另一个线程——无锁时「迭代中 erase」会让迭代器失效（UB）。
+/// - **一律先快照再通知**：通知会跑到用户代码（effect 清理、组件 build），期间再有人
+///   注册/注销也不会踩坏正在遍历的容器。
+/// - **真值树只在 UI 线程动**：`Impl` 的作用域树与元素树由 `reconcile` 独占。非 UI 线程
+///   写状态时不在这里直接标脏，而是**投递回 UI 线程**（见 `Composer::notify_state_written`），
+///   由 `pump_async()` 在 `reconcile()` 之前落地——语义仍是「下一帧可见」。
+///
+/// 生命期约定（宿主需遵守）：`Composer`（及其宿主 `DeclarativeHost`）必须在 UI 线程上
+/// 销毁，且不得与仍在持帧的事件回调并发析构。
+// lint-allow: L8 依赖登记需跨 Composer 实例可见（State 写在重组之外时靠它定位订阅者），故必须进程级；已加锁并快照遍历
 std::unordered_set<Composer*> active_composers;
+std::mutex active_composers_mutex;
+
+/// 快照当前活跃 Composer（持锁拷贝，返回后即可无锁遍历）。
+[[nodiscard]] auto snapshot_active_composers() -> std::vector<Composer*> {
+  std::lock_guard<std::mutex> guard(active_composers_mutex);
+  return {active_composers.begin(), active_composers.end()};
 }
+}  // namespace
 
 auto current_composer() noexcept -> Composer* { return tls_composer; }
+
+/// 声明式包装函数的不变量失败：`create_element(type)` 返回 nullptr。
+///
+/// 为什么不再沿用旧的 `static Element* none = nullptr; return *none;`：
+/// 那是**解引用空指针**（未定义行为）——优化器可以把它变成任意行为，而作者的本意是
+/// “这里不可能发生”。真实缺陷就该**立刻、带类型名、可定位**地失败，而不是悄悄 UB。
+/// （`make_element` 已覆盖全部内置组件；走到这里只可能是新组件忘了登记。）
+[[noreturn]] void fail_missing_element_factory(std::string_view type) {
+  st::eprint("[dsl] 内部错误：create_element(\"{}\") 返回空——make_element 未覆盖该类型", type);
+  std::abort();
+}
 
 namespace detail {
 
@@ -52,12 +89,16 @@ void on_state_read(StateBase* state) {
 
 void on_state_write(StateBase* state) {
   if (state == nullptr) return;
-  // 事件回调线程：thread-local 为空 → 通知全部活跃 Composer（各自判断是否订阅过它）
+  // ① 正在重组（thread-local 有值）：直接通知它，别的 Composer 与本状态无关。
   if (tls_composer != nullptr) {
     tls_composer->notify_state_written(state);
     return;
   }
-  for (Composer* composer : active_composers) composer->notify_state_written(state);
+  // ② 不在重组中（事件回调 / 工作线程）：通知全部活跃 Composer，各自判断是否订阅过它。
+  //    先快照——通知过程可能注销别的 Composer（`~Composer`）。
+  for (Composer* composer : snapshot_active_composers()) {
+    composer->notify_state_written(state);
+  }
 }
 
 }  // namespace detail
@@ -87,6 +128,9 @@ struct Composer::Impl {
   Guardrails guardrails{};
   std::shared_ptr<Component> component{};
   bool mounted{false};
+  /// 构造它的线程 = UI 线程。用于区分「主线程事件回调」与「工作线程写状态」：
+  /// 后者必须投递回本线程才能标脏（作用域树由 `reconcile` 独占，见 §notify_state_written）。
+  std::thread::id ui_thread{std::this_thread::get_id()};
 
   // 依赖图：StateBase* → 订阅作用域集合（v1 单作用域 = 根组件 build，
   // 多作用域（子组件作用域）在 M2 后续版本引入；先把依赖收集管道打通）。
@@ -440,13 +484,19 @@ struct Composer::Impl {
 Composer::Composer(UiRoot& root, Guardrails guardrails)
     : impl_(std::make_unique<Impl>(root, guardrails)) {
   impl_->owner = this;
-  active_composers.insert(this);
+  {
+    std::lock_guard<std::mutex> guard(active_composers_mutex);
+    active_composers.insert(this);
+  }
 }
 
 Composer::~Composer() {
   // 先跑 effect 清理（≈ 组件卸载）：清理里可能读/写状态，故在摘掉活跃注册表之前。
   run_all_effect_cleanups();
-  active_composers.erase(this);
+  {
+    std::lock_guard<std::mutex> guard(active_composers_mutex);
+    active_composers.erase(this);
+  }
 }
 
 void Composer::register_sub_scope(std::shared_ptr<Component> component, const std::string& key) {
@@ -795,6 +845,25 @@ auto Composer::pump_async() -> std::size_t {
 }
 
 void Composer::notify_state_written(StateBase* state) {
+  if (!impl_->mounted) return;
+  // 线程分流（本函数曾有无锁/跨线程写树的缺陷）：
+  //
+  // A. 重组线程（正在跑 build）：订阅表在本线程内刚收集，直接判。
+  // B. UI 主线程（事件回调/帧循环，非重组）：直接标脏——**行为与改造前逐位相同**，
+  //    仍由下一帧 `reconcile` 落地。
+  // C. 其他线程（`resource` 的工作线程等）：**不能触碰作用域树**（`reconcile` 独占），
+  //    投递回 UI 线程执行；`tick()` 里 `pump_async()` 排在 `reconcile()` 之前，
+  //    所以仍是「下一帧可见」，与 A/B 同语义。
+  const bool on_reconcile_thread = tls_composer == this;
+  const bool on_ui_thread = impl_->ui_thread == std::this_thread::get_id();
+  if (on_reconcile_thread || on_ui_thread) {
+    mark_state_dirty(state);
+    return;
+  }
+  post_to_main([this, state] { mark_state_dirty(state); });
+}
+
+void Composer::mark_state_dirty(StateBase* state) {
   if (!impl_->mounted) return;
   // ① 根作用域订阅了它：整根重跑
   if (impl_->subscribed_states.count(state) > 0) {
@@ -1166,8 +1235,7 @@ auto row(Composer& c, const BoxProps& props, std::function<void()> children) -> 
   st::Json props_json = st::Json::object();
   Element* element = c.create_element("Panel", props_json, props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;  // 不应发生（make_element 覆盖 Panel）
+    fail_missing_element_factory("Panel");
   }
   apply_box(*element, props);
   element->style().direction = FlexDirection::Row;
@@ -1180,8 +1248,7 @@ auto column(Composer& c, const BoxProps& props, std::function<void()> children) 
   st::Json props_json = st::Json::object();
   Element* element = c.create_element("Panel", props_json, props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Panel");
   }
   apply_box(*element, props);
   element->style().direction = FlexDirection::Column;
@@ -1216,8 +1283,7 @@ auto title_bar(Composer& c, std::string title, std::function<void(TitleBar&)> co
 auto text(Composer& c, std::function<std::string()> content, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Text", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Text");
   }
   apply_box(*element, props);
   if (auto* text_element = dynamic_cast<Text*>(element); text_element != nullptr) {
@@ -1232,8 +1298,7 @@ auto button(Composer& c, std::string label, std::function<void()> on_click,
             const BoxProps& props) -> Element& {
   Element* element = c.create_element("Button", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Button");
   }
   apply_box(*element, props);
   if (auto* button_element = dynamic_cast<Button*>(element); button_element != nullptr) {
@@ -1247,8 +1312,7 @@ auto checkbox(Composer& c, std::string label, bool checked,
               std::function<void(bool)> on_change, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Checkbox", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Checkbox");
   }
   apply_box(*element, props);
   if (auto* box = dynamic_cast<Checkbox*>(element); box != nullptr) {
@@ -1263,8 +1327,7 @@ auto switch_(Composer& c, bool checked, std::function<void(bool)> on_change,
              const BoxProps& props) -> Element& {
   Element* element = c.create_element("Switch", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Switch");
   }
   apply_box(*element, props);
   if (auto* sw = dynamic_cast<Switch*>(element); sw != nullptr) {
@@ -1278,8 +1341,7 @@ auto slider(Composer& c, float value, std::function<void(float)> on_change,
             const BoxProps& props) -> Element& {
   Element* element = c.create_element("Slider", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Slider");
   }
   apply_box(*element, props);
   if (auto* slider_element = dynamic_cast<Slider*>(element); slider_element != nullptr) {
@@ -1293,8 +1355,7 @@ auto input(Composer& c, std::string value, std::function<void(std::string)> on_i
            const BoxProps& props, bool password) -> Element& {
   Element* element = c.create_element("Input", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Input");
   }
   apply_box(*element, props);
   if (auto* input_element = dynamic_cast<Input*>(element); input_element != nullptr) {
@@ -1314,8 +1375,7 @@ auto input(Composer& c, std::string value, std::function<void(std::string)> on_i
 auto progress(Composer& c, float value, const BoxProps& props) -> Element& {
   Element* element = c.create_element("ProgressBar", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("ProgressBar");
   }
   apply_box(*element, props);
   if (auto* bar = dynamic_cast<ProgressBar*>(element); bar != nullptr) {
@@ -1327,8 +1387,7 @@ auto progress(Composer& c, float value, const BoxProps& props) -> Element& {
 auto badge(Composer& c, std::string text_value, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Badge", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Badge");
   }
   apply_box(*element, props);
   if (auto* badge_element = dynamic_cast<Badge*>(element); badge_element != nullptr) {
@@ -1341,8 +1400,7 @@ auto heading(Composer& c, std::string content, std::uint32_t level, const BoxPro
     -> Element& {
   Element* element = c.create_element("Heading", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Heading");
   }
   apply_box(*element, props);
   if (auto* head = dynamic_cast<Heading*>(element); head != nullptr) {
@@ -1355,8 +1413,7 @@ auto heading(Composer& c, std::string content, std::uint32_t level, const BoxPro
 auto divider(Composer& c, bool vertical) -> Element& {
   Element* element = c.create_element("Divider", st::Json::object());
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Divider");
   }
   if (vertical) element->style().width = 1.0f;  // 竖线近似：v1 水平线为主
   return *element;
@@ -1365,8 +1422,7 @@ auto divider(Composer& c, bool vertical) -> Element& {
 auto card(Composer& c, const BoxProps& props, std::function<void()> children) -> Element& {
   Element* element = c.create_element("Card", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Card");
   }
   apply_box(*element, props);
   BuildScope scope(c, element);
@@ -1377,8 +1433,7 @@ auto card(Composer& c, const BoxProps& props, std::function<void()> children) ->
 auto spacer(Composer& c, float size) -> Element& {
   Element* element = c.create_element("Spacer", st::Json::object());
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Spacer");
   }
   // `size <= 0` = **弹性空隙**（不是“0 宽固定块”）：
   // `spacer()` 是右对齐的惯用写法，而固定宽度为 0 的块在布局里等同于“不存在”
@@ -1396,8 +1451,7 @@ auto spacer(Composer& c, float size) -> Element& {
 auto icon(Composer& c, std::string name, float size, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Icon", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Icon");
   }
   apply_box(*element, props);
   if (auto* view = dynamic_cast<IconView*>(element); view != nullptr) {
@@ -1411,8 +1465,7 @@ auto markdown(Composer& c, std::function<std::string()> source, const BoxProps& 
     -> Element& {
   Element* element = c.create_element("MarkdownView", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("MarkdownView");
   }
   apply_box(*element, props);
   if (auto* view = dynamic_cast<MarkdownView*>(element); view != nullptr) {
@@ -1481,8 +1534,7 @@ auto list(Composer& c, const std::vector<ListItemData>& items,
           std::function<void(std::size_t)> on_click, const BoxProps& props) -> Element& {
   Element* element = c.create_element("List", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("List");
   }
   apply_box(*element, props);
   if (auto* list_element = dynamic_cast<List*>(element); list_element != nullptr) {
@@ -1509,8 +1561,7 @@ auto select(Composer& c, const std::vector<SelectOptionData>& options,
             std::function<void(std::size_t)> on_change, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Select", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Select");
   }
   apply_box(*element, props);
   if (auto* widget = dynamic_cast<Select*>(element); widget != nullptr) {
@@ -1542,8 +1593,7 @@ auto table(Composer& c, const std::vector<TableColumnData>& columns,
            std::function<void(std::size_t)> on_row_click, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Table", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Table");
   }
   apply_box(*element, props);
   if (auto* widget = dynamic_cast<Table*>(element); widget != nullptr) {
@@ -1568,8 +1618,7 @@ auto tree(Composer& c, const std::vector<TreeNodeData>& nodes,
           std::function<void(const std::string&)> on_select, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Tree", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Tree");
   }
   apply_box(*element, props);
   if (auto* widget = dynamic_cast<Tree*>(element); widget != nullptr) {
@@ -1602,8 +1651,7 @@ auto tabs(Composer& c, const std::vector<TabData>& items, std::size_t active,
          std::function<void(const std::string&)> on_close, const BoxProps& props) -> Element& {
   Element* element = c.create_element("Tabs", st::Json::object(), props.key);
   if (element == nullptr) {
-    static Element* none = nullptr;
-    return *none;
+    fail_missing_element_factory("Tabs");
   }
   apply_box(*element, props);
   if (auto* tabs_element = dynamic_cast<Tabs*>(element); tabs_element != nullptr) {

@@ -321,3 +321,138 @@ ST_TEST(lint_manifest_tolerates_malformed_exempt_section) {
   if (manifest.has_value()) ST_CHECK(manifest->lint_exempt.empty());
 }
 
+// ————————————————————————————————————————————————————————————————————————————
+// L8：可变全局（作用域感知）
+//
+// 本组用例锁的是一个**真实失效过的判据**：旧实现只判“花括号深度 0”，而本工程
+// （以及任何标准做法）把辅助全局放在匿名命名空间里 —— 深度恒 ≥1，于是全部漏网。
+// 于是 `src/ui/dsl.cpp` 的 `active_composers`（后被发现无锁遍历）长期“合规”。
+// 用例必须同时锁住“匿名命名空间里能抓到”与“不误报”，否则收紧后的规则会天天假失败。
+// ————————————————————————————————————————————————————————————————————————————
+
+/// ① 匿名命名空间里的可变全局必须命中（旧实现漏网的那一类）。
+ST_TEST(lint_l8_flags_mutable_global_inside_anonymous_namespace) {
+  const auto violations = lint_source("l8_anon_ns.cpp", R"CPP(
+namespace st::probe {
+namespace {
+std::unordered_set<int*> registry;
+std::mutex registry_mutex;
+}  // namespace
+}  // namespace st::probe
+)CPP");
+  ST_CHECK_EQ(count_rule(violations, "L8"), 2U);
+}
+
+/// ② 具名命名空间（含嵌套）里的同名全局同样命中。
+ST_TEST(lint_l8_flags_mutable_global_in_named_namespace) {
+  const auto violations = lint_source("l8_named_ns.cpp", R"CPP(
+namespace st::probe {
+namespace detail {
+int counter = 0;
+}
+}
+)CPP");
+  ST_CHECK_EQ(count_rule(violations, "L8"), 1U);
+}
+
+/// ③ 函数内局部 `static` 命中（它同样是进程生存期共享状态）。
+/// 真实原型：进程级剪贴板 `static std::string clipboard;`、全局语言注册表。
+ST_TEST(lint_l8_flags_function_local_static) {
+  const auto violations = lint_source("l8_fn_static.cpp", R"CPP(
+std::string& clipboard() {
+  static std::string store;
+  return store;
+}
+)CPP");
+  ST_CHECK_EQ(count_rule(violations, "L8"), 1U);
+}
+
+/// ④ 反例必须干净：不能误报函数签名续行、类成员、不可变全局，
+/// 以及字符串字面量里的大括号（按原文计数会让作用域栈错位，
+/// 实测会把类成员判成全局——markdown 解析器里满是大括号字面量）。
+ST_TEST(lint_l8_ignores_signatures_members_and_immutables) {
+  const auto violations = lint_source("l8_clean.cpp", R"CPP(
+namespace st::probe {
+
+constexpr int kLimit = 8;
+const std::string kName = "probe";
+static const char* const kGlyphs = "{}[]";
+
+class Widget {
+ public:
+  std::string text_{};
+  int count_{0};
+ private:
+  std::string buffer_{};
+};
+
+void fill(int size, float radius = 0.0f) {
+  if (radius <= 0.0f) return;
+  (void)size;
+}
+
+}  // namespace st::probe
+)CPP");
+  ST_CHECK_EQ(count_rule(violations, "L8"), 0U);
+}
+
+/// ⑤ 行内豁免：写在命名空间开括号**之前**时开启作用域窗口（既有惯例，
+/// `log.cpp`/`test_runner.cpp` 靠它整块登记）；写在声明行上则是单点豁免。
+ST_TEST(lint_l8_prefix_allow_comment_covers_scope) {
+  const auto block_form = lint_source("l8_allow_block.cpp", R"CPP(
+// lint-allow: L8 日志为进程级基础设施（见 CONVENTIONS §8 登记）
+namespace st::probe {
+namespace {
+std::string sink;
+std::mutex sink_mutex;
+}  // namespace
+}  // namespace st::probe
+)CPP");
+  ST_CHECK_EQ(count_rule(block_form, "L8"), 0U);
+
+  const auto single_form = lint_source("l8_allow_single.cpp", R"CPP(
+std::string g_sink;  // lint-allow: L8 进程级日志 sink
+std::mutex g_other;
+)CPP");
+  ST_CHECK_EQ(count_rule(single_form, "L8"), 1U);   // 只豁免本行，下一行的真全局仍命中
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// L14：系统头 / 平台 API 单点封装（§10 第 1 条）
+//
+// 本规则补的是一个“文档写了、实现没写”的缺口（§8 一直声称检查禁用 include）。
+// ————————————————————————————————————————————————————————————————————————————
+
+ST_TEST(lint_l14_flags_system_headers_and_dlopen) {
+  const auto violations = lint_source("l14_headers.cpp", R"CPP(
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+#include <dlfcn.h>
+)CPP");
+  ST_CHECK_EQ(count_rule(violations, "L14"), 3U);
+}
+
+ST_TEST(lint_l14_flags_direct_dlopen_calls) {
+  const auto violations = lint_source("l14_dlopen.cpp", R"CPP(
+void* handle = dlopen("libx.so", 2);
+void* symbol = dlsym(handle, "init");
+)CPP");
+  ST_CHECK_EQ(count_rule(violations, "L14"), 2U);
+}
+
+/// `platform_*` 是系统头的合法落脚点（单点封装）；`backend.cpp` 因运行时后端探测获准。
+ST_TEST(lint_l14_exempts_platform_and_backend_files) {
+  const auto platform = lint_source("platform_probe.cpp", "#include <windows.h>\n");
+  ST_CHECK_EQ(count_rule(platform, "L14"), 0U);
+
+  const auto backend = lint_source("backend.cpp", "#include <dlfcn.h>\n");
+  ST_CHECK_EQ(count_rule(backend, "L14"), 0U);
+
+  // 普通文件不获准（豁免不能泛化）。
+  const auto plain = lint_source("ordinary.cpp", "#include <windows.h>\n");
+  ST_CHECK_EQ(count_rule(plain, "L14"), 1U);
+}
+
