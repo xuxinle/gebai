@@ -14,7 +14,13 @@
 #include "st/raster/path.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::paint_focus_ring;
+using components_internal::paint_outline;
+
 namespace {
 
 // —— 几何常量（颜色/间距/字号一律取自 `context.theme` 的 token）——
@@ -22,31 +28,6 @@ constexpr float k_track_height = 6.0f;    // 轨道高（圆角 = 高/2，胶囊
 constexpr float k_knob_size = 16.0f;      // 滑块直径
 constexpr float k_default_width = 220.0f; // 未显式指定宽度时的自然宽度
 constexpr float k_glow_alpha = 0.22f;     // 拖拽光圈的透明度（primary 派生）
-
-/// 焦点环：控件矩形外扩 `metrics.focus_width / 2`，圆角跟随控件（与 Input 同一口径）。
-/// 圆角夹取到「短边一半 - 2」：半径等于半边的圆角路径描边会退化（无极值直线段时描边塌成发丝线，
-/// 圆形指示器/圆形滑块尤其明显），故圆形控件用近似圆的圆角矩形画环。
-void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
-                      float radius) {
-  const float width = context.theme.metrics().focus_width;
-  if (width <= 0.0f || rect.is_empty()) return;
-  const float offset = width * 0.5f;
-  const math::Rect outer = rect.inflate(offset);
-  const float limit = std::max(std::min(outer.width, outer.height) * 0.5f - 2.0f, 0.0f);
-  raster::Path ring;
-  ring.add_rounded_rect(outer, std::min(radius + offset, limit));
-  canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring), width);
-}
-
-/// 圆角描边：线宽完全落在矩形内侧。
-void paint_outline(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
-                   float width) {
-  if (width <= 0.0f || color.a == 0U || rect.is_empty()) return;
-  const float half = width * 0.5f;
-  raster::Path outline;
-  outline.add_rounded_rect(rect.inset(math::Insets::all(half)), radius > half ? radius - half : 0.0f);
-  canvas.stroke_path(outline, raster::Paint::solid(color), width);
-}
 
 /// 滑块半径：控件被压矮时随之收缩（几何在 measure/paint/命中间保持一致）。
 [[nodiscard]] auto slider_knob_radius(math::Rect bounds) noexcept -> float {

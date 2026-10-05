@@ -12,7 +12,12 @@
 #include "st/raster/paint.hpp"
 #include "st/raster/path.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::paint_focus_ring;
+
 namespace {
 
 /// 最小占比的合法区间：低于 0.02 手柄自身都放不下；高于 0.5 两侧倒挂。
@@ -23,16 +28,6 @@ constexpr float kMaxStep = 0.25f;
 constexpr float kMinHandleSize = 4.0f;
 /// 手柄命中区上限：太宽会吃掉两侧面板的点击区（内容里的按钮点不到）。
 constexpr float kMaxHandleSize = 24.0f;
-
-/// 焦点环（与 Input/Slider 同一口径：外扩 `focus_width/2` 描边）。
-void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect) {
-  const float width = context.theme.metrics().focus_width;
-  if (width <= 0.0f || rect.is_empty()) return;
-  const float offset = width * 0.5f;
-  raster::Path ring;
-  ring.add_rounded_rect(rect.inflate(offset), 0.0f);
-  canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring), width);
-}
 
 }  // namespace
 
@@ -269,7 +264,7 @@ void SplitView::paint_content(const RenderContext& context, raster::Surface& can
                        thickness * 0.5f);
     }
   }
-  if (focused_) paint_focus_ring(context, canvas, handle_rect());
+  if (focused_) paint_focus_ring(context, canvas, handle_rect(), 0.0f);
 }
 
 auto SplitView::on_event(const RenderContext& context, Event& event) -> bool {

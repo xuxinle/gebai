@@ -14,7 +14,13 @@
 #include "st/ui/icon.hpp"
 #include "st/ui/text_port.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::paint_focus_ring;
+using components_internal::paint_outline;
+
 namespace {
 
 [[nodiscard]] auto text_port_of(const RenderContext& context) -> const TextPort& {
@@ -32,31 +38,6 @@ constexpr float k_min_control_width = 160.0f;
 /// 选项显示文本（`label` 空则回落到 `value`）。
 [[nodiscard]] auto shown_label(const SelectOption& option) -> std::string_view {
   return option.label.empty() ? std::string_view(option.value) : std::string_view(option.label);
-}
-
-/// 焦点环：控件矩形外扩 `metrics.focus_width / 2`，圆角跟随控件（与 Input 同一口径）。
-/// 圆角夹取到「短边一半 - 2」：半径等于半边的圆角路径描边会退化（无极值直线段时描边塌成发丝线，
-/// 圆形指示器/圆形滑块尤其明显），故圆形控件用近似圆的圆角矩形画环。
-void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
-                      float radius) {
-  const float width = context.theme.metrics().focus_width;
-  if (width <= 0.0f || rect.is_empty()) return;
-  const float offset = width * 0.5f;
-  const math::Rect outer = rect.inflate(offset);
-  const float limit = std::max(std::min(outer.width, outer.height) * 0.5f - 2.0f, 0.0f);
-  raster::Path ring;
-  ring.add_rounded_rect(outer, std::min(radius + offset, limit));
-  canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring), width);
-}
-
-/// 圆角描边：线宽完全落在矩形内侧。
-void paint_outline(raster::Surface& canvas, math::Rect rect, float radius, math::Color color,
-                   float width) {
-  if (width <= 0.0f || color.a == 0U || rect.is_empty()) return;
-  const float half = width * 0.5f;
-  raster::Path outline;
-  outline.add_rounded_rect(rect.inset(math::Insets::all(half)), radius > half ? radius - half : 0.0f);
-  canvas.stroke_path(outline, raster::Paint::solid(color), width);
 }
 
 /// 左对齐、垂直居中的单行文本。

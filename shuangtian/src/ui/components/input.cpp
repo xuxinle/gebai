@@ -13,7 +13,12 @@
 #include "st/raster/path.hpp"
 #include "st/ui/icon.hpp"
 
+#include "components_internal.hpp"
+
 namespace st::ui {
+
+using components_internal::paint_focus_ring;
+
 namespace {
 
 // —— 尺度常量（颜色一律取自主题 token，此处只有几何与动效常量）——
@@ -83,17 +88,6 @@ void paint_border(raster::Surface& canvas, math::Rect rect, float radius, math::
   const double phase = std::fmod(context.time_seconds, k_blink_period);
   const double normalized = phase < 0.0 ? phase + k_blink_period : phase;
   return normalized < k_blink_period * k_blink_duty;
-}
-
-/// 焦点环：控件外侧 2px（`metrics.focus_width`），圆角跟随控件，颜色为 `colors.focus_ring`。
-void paint_focus_ring(const RenderContext& context, raster::Surface& canvas, math::Rect rect,
-                      float radius) {
-  const float width = context.theme.metrics().focus_width;
-  if (width <= 0.0f) return;
-  const float offset = width * 0.5f;
-  raster::Path ring;
-  ring.add_rounded_rect(rect.inflate(offset), radius + offset);
-  canvas.stroke_path(ring, raster::Paint::solid(context.theme.colors().focus_ring), width);
 }
 
 /// 一行文本内按水平偏移定位字节列（`offset_x` 相对行首）。
