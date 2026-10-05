@@ -109,6 +109,39 @@ constexpr std::array<RuleSpec, 13> kRules{{
   return false;
 }
 
+/// 清单配置的规则豁免（`st.pkg` 的 `lint.exempt`）：`{ "规则": ["路径 glob", …] }`。
+///
+/// ## 为何需要它（2026-10-05，来自实战）
+///
+/// `st lint` 把 dev-tools 应用 `llm.cpp` 里 9 处 `throw std::runtime_error` 判成 L5 违规，
+/// 而那些 throw 是 **worker 线程向主线程传播错误**的合理用法——跨线程边界上，
+/// 异常是唯一能完整携带"错误在子线程里发生在哪一步"的机制（`Result` 只能在线程内传递）。
+/// 但 lint 是**文本级**检查，看不到"这行在哪个线程上下文里"。
+///
+/// 两个选择：① 让业务层改用 `Result`（把异常硬掰成返回值，跨线程时丢失调用栈与
+/// 错误的来源层次，为迁就工具而降低代码质量）；② **让工具承认自己看不出来的地方**
+/// （把边界显式写进清单，审计留痕、可复查）。选 ②——工具服务于约束，不是反过来。
+///
+/// ## 与行内豁免（`// lint-allow: L5 原因`）的分工
+///
+/// - 行内：**单点**、就地说明（"这一行为什么破例"），适合零星例外；
+/// - 清单：**成片**、集中的边界（"这一层与框架的约定不同"），且需在
+///   `CONVENTIONS.md` §8 登记（"哪些边界可以不同"变成可复查的清单，而不是散落各处的注释）。
+///
+/// 两者都不允许静默：清单里的 glob 命中即计入 `LintReport::suppressed`，
+/// `st lint` 的汇总行会如实报出"豁免 N 处"。
+[[nodiscard]] auto manifest_exempt(std::string_view path, std::string_view rule,
+                                  const LintExemptions& exemptions, std::size_t& suppressed) -> bool {
+  const auto rule_it = exemptions.find(std::string(rule));
+  if (rule_it == exemptions.end()) return false;
+  for (const std::string& pattern : rule_it->second) {
+    if (!st::fs::match_glob(pattern, path)) continue;
+    ++suppressed;
+    return true;
+  }
+  return false;
+}
+
 [[nodiscard]] auto has_allow_comment(std::string_view raw_line, std::string_view rule) -> bool {
   const std::size_t position = raw_line.find("lint-allow:");
   if (position == std::string_view::npos) return false;
@@ -351,8 +384,9 @@ constexpr std::array<std::string_view, 17> kElementStateMembers{
   return patterns;
 }
 
-[[nodiscard]] auto scan_text(std::string_view path, std::string_view text,
-                             std::size_t& suppressed) -> std::vector<LintViolation> {
+[[nodiscard]] auto scan_text(std::string_view path, std::string_view text, std::size_t& suppressed,
+                             const LintExemptions& exemptions, std::size_t& manifest_suppressed)
+    -> std::vector<LintViolation> {
   const auto lines = split(text, '\n');
   const std::string file_name = fs::file_name(path);
   std::vector<LintViolation> violations;
@@ -371,10 +405,12 @@ constexpr std::array<std::string_view, 17> kElementStateMembers{
       const RuleSpec& rule = kRules[rule_index];
       if (rule_exempt(file_name, rule.id)) continue;
       if (!std::regex_search(stripped, patterns[rule_index])) continue;
+      // 两条豁免通道：行内（单点）与清单（成片边界）。两者都各自计数（不静默）。
       if (has_allow_comment(raw, rule.id)) {
         ++suppressed;
         continue;
       }
+      if (manifest_exempt(path, rule.id, exemptions, manifest_suppressed)) continue;
       LintViolation violation;
       violation.file = std::string(path);
       violation.line = static_cast<int>(index) + 1;
@@ -399,10 +435,12 @@ auto lint_file(std::string_view path) -> Result<std::vector<LintViolation>> {
   auto text = fs::read_text(path);
   if (!text) return forward_error(text.error());
   std::size_t suppressed = 0;
-  return scan_text(path, *text, suppressed);
+  std::size_t manifest_suppressed = 0;
+  // 单文件入口不接清单（调用方可能是编辑器里的一行一文件）——传空豁免表
+  return scan_text(path, *text, suppressed, LintExemptions{}, manifest_suppressed);
 }
 
-auto lint_project(std::string_view root) -> Result<LintReport> {
+auto lint_project(std::string_view root, const LintExemptions& exemptions) -> Result<LintReport> {
   LintReport report;
   const std::array<std::string_view, 5> roots{"include", "src", "tests", "examples", "tools"};
   for (const auto& directory : roots) {
@@ -418,7 +456,16 @@ auto lint_project(std::string_view root) -> Result<LintReport> {
       auto text = fs::read_text(full);
       if (!text) return forward_error(text.error());
       ++report.files_scanned;
-      auto violations = scan_text(full, *text, report.suppressed);
+      // 清单豁免的 glob 相对**工程根**（不是相对 `include/` 那层）——
+      // 写清单的人想的是"src/app/llm.cpp"，不是相对某个扫描子目录的路径。
+      const std::string relative = fs::join(directory, entry.path);
+      std::size_t manifest_hits = 0;
+      auto violations =
+          scan_text(relative, *text, report.suppressed, exemptions, manifest_hits);
+      report.suppressed_by_manifest += manifest_hits;
+      // 违规的 `file` 字段仍报**绝对路径**（用户要能直接点开/搜索到）——
+      // 只在匹配 glob 时用相对路径。
+      for (auto& violation : violations) violation.file = full;
       for (auto& violation : violations) report.violations.push_back(std::move(violation));
     }
   }

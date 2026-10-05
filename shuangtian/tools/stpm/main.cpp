@@ -312,7 +312,15 @@ auto command_lint(const Arguments& arguments) -> int {
     std::fprintf(stderr, "错误: %s\n", root.error().to_string().c_str());
     return 1;
   }
-  auto report = st::pkg::lint_project(*root);
+  auto manifest = load_manifest(arguments);
+  if (!manifest) {
+    std::fprintf(stderr, "错误: %s\n", manifest.error().to_string().c_str());
+    return 1;
+  }
+  // 清单里的 `lint.exempt`：成片边界（如业务层 worker 线程用异常传错）的工程级豁免。
+  // 需在 `CONVENTIONS.md` §8 登记——「哪些边界可以不同」变成可复查的清单，
+  // 而不是散落各处的行内注释。
+  auto report = st::pkg::lint_project(*root, manifest->lint_exempt);
   if (!report) {
     std::fprintf(stderr, "错误: %s\n", report.error().to_string().c_str());
     return 1;
@@ -323,8 +331,12 @@ auto command_lint(const Arguments& arguments) -> int {
     st::print("{}{}:{} [{}] {}\n", violation.advisory ? "(提示) " : "", violation.file,
                 violation.line, violation.rule, violation.text);
   }
-  st::print("\n扫描 {} 个文件，违反 {} 项（提示 {} 项，豁免 {} 处）\n", report->files_scanned,
-              failing, report->violations.size() - failing, report->suppressed);
+  // 豁免计数**分开报**：行内（单点破例）与清单（工程级边界）是两种性质的东西，
+  // 混在一起就看不出全局边界有多宽。
+  st::print("\n扫描 {} 个文件，违反 {} 项（提示 {} 项，豁免 {} 处：行内 {} / 清单 {}）\n",
+              report->files_scanned, failing, report->violations.size() - failing,
+              report->suppressed, report->suppressed - report->suppressed_by_manifest,
+              report->suppressed_by_manifest);
   return failing == 0 ? 0 : 1;
 }
 

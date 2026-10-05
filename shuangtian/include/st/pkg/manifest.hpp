@@ -10,6 +10,7 @@
 /// - `extra_fields` 保存本层未识别的顶层字段，`to_json` 原样回写（与真实清单互操作时不丢字段）。
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -137,6 +138,9 @@ struct Manifest {
   /// nlohmann 的 initializer_list 构造，得到「含一个空对象的**数组**」而非对象，
   /// 之后按对象使用即抛 `type_error.305`——花括号在 nlohmann 里是「造数组」的信号。
   st::Json extra_fields = st::Json::object();
+  /// 规则豁免（`lint.exempt`）：规则 id → 路径 glob 列表（相对工程根）。
+  /// 用途与两条豁免通道的分工见 `st::pkg::LintExemptions` 与 `lint.cpp` 的 `manifest_exempt`。
+  std::map<std::string, std::vector<std::string>> lint_exempt{};
 
   /// 查目标（不存在返回 nullptr；返回指针非拥有，生命周期同本清单）。
   [[nodiscard]] auto find_target(std::string_view target_name) const -> const TargetSpec*;

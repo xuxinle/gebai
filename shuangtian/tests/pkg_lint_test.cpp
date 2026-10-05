@@ -18,6 +18,7 @@
 
 #include "st/core/fs.hpp"
 #include "st/pkg/lint.hpp"
+#include "st/pkg/manifest.hpp"
 
 namespace {
 
@@ -219,3 +220,104 @@ class ProbeWidget : public Element {
 )";
   ST_CHECK(!has_rule(lint_source("l13_allow.hpp", source), "L13"));
 }
+
+// ── 清单豁免（`lint.exempt`）：工程级边界 ────────────────────────────────────────
+//
+// 起因（真实应用 dev-tools）：`st lint` 把 `llm.cpp` 里 9 处 `throw std::runtime_error`
+// 判成 L5 违规，而那些 throw 是 **worker 线程向主线程传播错误**的合理用法——
+// 跨线程边界上，异常是唯一能完整携带"错误在子线程里发生在哪一步"的机制。
+// 但 lint 是**文本级**检查，看不到"这行在哪个线程上下文里"。
+//
+// 修法是让工具承认自己看不出来的地方（把边界写进清单），而不是把业务层的异常
+// 硬掰成 `Result`（为迁就工具而降低代码质量）。
+
+/// ① 清单豁免真的生效——**且只在声明的范围内**。
+///
+/// 本条的重点是后半句：如果豁免"顺手放行了别的文件/别的规则"，它就是一把过宽的钥匙。
+ST_TEST(lint_manifest_exemption_scopes_to_declared_paths) {
+  using st::pkg::LintExemptions;
+  const std::string root = st::fs::join(st::fs::temp_dir(), "st-lint-exempt-probe");
+  (void)st::fs::remove_all(root);
+  ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src/app")).has_value());
+  ST_REQUIRE(st::fs::create_directories(st::fs::join(root, "src/ui")).has_value());
+  // 跨线程错误传播写法的探针（L5：throw）
+  const std::string source = R"(
+namespace app {
+void worker() { throw 42; }
+}
+)";
+  ST_REQUIRE(st::fs::write_text(st::fs::join(root, "src/app/llm.cpp"), source).has_value());
+  ST_REQUIRE(st::fs::write_text(st::fs::join(root, "src/ui/other.cpp"), source).has_value());
+
+  // 不豁免：两个文件都报
+  {
+    auto report = st::pkg::lint_project(root, LintExemptions{});
+    ST_REQUIRE(report.has_value());
+    std::size_t l5 = 0;
+    for (const auto& violation : report->violations) {
+      if (violation.rule == "L5") ++l5;
+    }
+    ST_CHECK_EQ(l5, 2U);
+    ST_CHECK_EQ(report->suppressed_by_manifest, 0U);
+  }
+  // 只豁免 `src/app/**`：业务层那些 throw 不再报，但 `src/ui/other.cpp` **照旧报**
+  {
+    auto report = st::pkg::lint_project(root, LintExemptions{{"L5", {"src/app/**"}}});
+    ST_REQUIRE(report.has_value());
+    std::size_t l5 = 0;
+    for (const auto& violation : report->violations) {
+      if (violation.rule == "L5") ++l5;
+    }
+    ST_CHECK_EQ(l5, 1U);
+    ST_CHECK_EQ(report->suppressed_by_manifest, 1U);   // 豁免计数可见（不静默）
+  }
+  // 只豁免 L5：同一个文件里的别的规则**不受影响**（豁免是“规则×路径”的交叉，不是“整文件放行”）
+  {
+    auto report = st::pkg::lint_project(root, LintExemptions{{"L11", {"src/app/**"}}});
+    ST_REQUIRE(report.has_value());
+    std::size_t l5 = 0;
+    for (const auto& violation : report->violations) {
+      if (violation.rule == "L5") ++l5;
+    }
+    ST_CHECK_EQ(l5, 2U);   // 换了规则名 → 一条都不豁免
+  }
+  (void)st::fs::remove_all(root);
+}
+
+/// ② 清单里的 `lint.exempt` 能真的被解析出来（否则上面那条只是“库函数能用”，
+/// 而应用写了清单却不生效——那正是用户真正会碰到的失效点）。
+ST_TEST(lint_manifest_parses_exempt_section) {
+  // 用**带分隔符**的裸字符串（`R"JSON(...)JSON"`）：JSON 里本来就有 `)"` 结尾形状
+  // （`  })"` 后面紧跟 `\n` 时会提前终止裸串），普通 `R"(...)"` 会静默截断。
+  // 裸串的结束标记必须**紧贴**内容（`)JSON"` 三个记号连续）——把 `)` 与 `JSON"`
+  // 拆到两行（中间夹一个换行）会让编译器认为裸串未结束。
+  const std::string text = R"JSON({
+  "name": "probe",
+  "version": "0.1.0",
+  "lint": { "exempt": { "L5": ["src/app/*.cpp", "src/net/*.cpp"] } }
+}
+)JSON";
+  auto manifest = st::pkg::Manifest::parse_json(st::Json::parse(text), "/tmp/probe");
+  ST_REQUIRE(manifest.has_value());
+  const auto found = manifest->lint_exempt.find("L5");
+  ST_REQUIRE(found != manifest->lint_exempt.end());
+  ST_CHECK_EQ(found->second.size(), 2U);
+  ST_CHECK_EQ(found->second[0], std::string("src/app/*.cpp"));
+}
+
+/// ③ 清单里的 lint 段写坏（不是对象 / 规则值不是数组）**不能**让清单解析失败。
+///
+/// 理由是分工：lint 段是辅助配置，报错应当来自代码而不是配置的笔误；
+/// 而且**宽松忽略**比报错更安全——报错会让一个只想跑构建的人被 lint 配置卡住。
+ST_TEST(lint_manifest_tolerates_malformed_exempt_section) {
+  const std::string text = R"JSON({
+  "name": "probe",
+  "version": "0.1.0",
+  "lint": { "exempt": { "L5": "src/app/*.cpp", "L6": [1, 2] } }
+}
+)JSON";
+  auto manifest = st::pkg::Manifest::parse_json(st::Json::parse(text), "/tmp/probe");
+  ST_CHECK(manifest.has_value());
+  if (manifest.has_value()) ST_CHECK(manifest->lint_exempt.empty());
+}
+

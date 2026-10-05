@@ -230,6 +230,26 @@ auto Manifest::parse_json(const st::Json& json, std::string_view directory) -> R
   manifest.defines = json_get_string_array(json, "defines");
   manifest.system_libs = json_get_string_array(json, "system_libs");
 
+  // `lint.exempt`：`{ "L5": ["src/app/*.cpp"], … }` —— 规则 id → 路径 glob 列表。
+  // 用于"这一层与框架的约定不同"这类**成片边界**（如业务层 worker 线程用异常传错）。
+  // 非对象/非数组一律忽略而不是报错：清单里的 lint 段是**辅助配置**，
+  // 写错它不该让构建失败——构建失败的原因应当是代码，不是 lint 配置的笔误。
+  if (const st::Json* lint = st::json_find(json, "lint"); lint != nullptr && lint->is_object()) {
+    if (const st::Json* exempt = st::json_find(*lint, "exempt");
+        exempt != nullptr && exempt->is_object()) {
+      // 注：nlohmann 的 `items()` 返回**代理对象**（不是 pair）——必须用结构化绑定，
+      // 写 `entry.first/.second` 编译不过（与 `src/pkg/*.cpp` 其它遍历同口径）。
+      for (const auto& [rule, patterns] : exempt->items()) {
+        if (!patterns.is_array()) continue;
+        std::vector<std::string> list;
+        for (const auto& item : patterns) {
+          if (item.is_string()) list.push_back(st::json_as_string(item));
+        }
+        if (!list.empty()) manifest.lint_exempt[rule] = std::move(list);
+      }
+    }
+  }
+
   // `framework`：字符串简写或对象形态（`{"path": "...", "inherit_flags": true}`）
   if (const st::Json* framework = st::json_find(json, "framework"); framework != nullptr &&
                                                                     !framework->is_null()) {
