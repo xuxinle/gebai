@@ -9,7 +9,39 @@
 - 度量探针与门禁基线落盘 `docs/OPTIMIZATION_BASELINE.md`。
 - 门禁：700 测试 / 0 lint 违反 / 增量构建 9.5s。
 
-### P2 巨型函数拆分（进行中：2/5，均为收益最高项）
+### P4 Element 瘦身 + owner 类型化（完成，2 半各一提交）
+
+**A3 owner_ 类型化**（`29bdfcd`）：`void* owner_` + `owner_as<T>()`（内部 `static_cast`）
+→ `Element::HostFocus` 小契约（与 `WindowControl` 同一手法）。
+原来转到错误类型是**静默 UB**（-Werror 全开也不报警），现在写错即编译错误。
+
+**A2 附属状态惰性分配**（`c39b0d8`）：
+
+| 类型 | 改动前 | 改动后 |
+|---|---|---|
+| `Element` | 432 B | **376 B**（-13%） |
+| `Text` / `Button` | 496 / 544 | 440 / 488 |
+| `Input` / `Table` | 608 / 584 | 552 / 528 |
+| `CodeEditor` | 888 | 832 |
+
+收进惰性 `RenderExtras` 的是：悬浮过渡 5 字段、损坏区 3 字段 + `paint_margin_hint`、
+排版覆盖 4 字段。其中**最值的一项**是：损坏区只写在**所在树的根元素**上
+（`record_damage` 把损坏区记到根）——即 42 种元素全都背着、却只有 1 个实例真用到。
+访问器签名全部保持不变。
+
+> **实测修正了立项估算**：原计划的“瘦到 ~120B”**不可达**——432 字节里绝大部分是核心字段
+> （`Style` 140 + `id_` 32 + `key_` 32 + `children_` 24 + 布局/绘制 60 + 交互标志 ≈ 350），
+> 可压缩的只有约 80 字节。除非把核心也 PIMPL（巨大风险换零收益），否则 120B 是空想。
+> 故只做有实测依据的那一半——**并把估算的错误如实记在这里**。
+
+**验证**：全量 **713 passed / 0 failed**；**ASan/UBSan 档 713 passed / 0 failed**
+（惰性 `unique_ptr` 生命周期风险的直接证据）；lint 0 违反；两示例无头运行通过。
+
+**顺带修一处真实的一致性缺陷**：lint L13 的 `kElementStateMembers` 是与 `element.hpp`
+**手工同步的字段清单**（注释自己承认），本次重构恰好漏改了它——漏掉的 `hover_t_`
+正是被搬走的字段之一。已逐项核对补齐（17 → 19 项）。
+
+### P2 巨型函数拆分（2/5，均为收益最高项）
 
 | 目标 | 改动前 | 改动后 | 提交 |
 |---|---|---|---|
@@ -63,7 +95,6 @@ capabilities 19 项），会静默漂移。护栏按 §7.1 验证过真能抓住
 
 - **P2 巨型函数拆分**（纯机械，测试兜底）：`control/server.cpp` `handle()` 840 行 / 23 个 `method ==` 分派 → 方法表驱动；`text/highlight_builtin.cpp` 511 行单函数 → 语言数据分文件；`pkg/build.cpp` 匿名命名空间 1100 行拆分；`pkg/lint.cpp` `check_mutable_globals`（本轮已重写，可再拆）；`code_editor.cpp` 超长函数。
 - **P3 组件类型身份单一真源**（A1，收益最大）：引入组件自注册描述符（name/factory/属性表/DSL 入口一处定义），消掉 `dsl.cpp` 里 `ST_DSL_TYPE` 表 + `make_element` 40 条 if 链 + 20 处 `fail_missing_element_factory` 入口的机械重复。**新增组件从「改 4 处」变「改 1 处」**。
-- **P4 Element 瘦身 + owner 类型化**（A2+A3）：`sizeof(Element)` 432B → 目标 ~120B（低频状态移入惰性分配的 `ElementExtras`，公共 API 保持兼容）；`owner_` 的 `void*` + `static_cast` 逃生舱 → 类型化宿主查询契约（照 `WindowControl` 正面样板）。注意：改基类会触发 76~100 个 TU 重编。**风险最高的一项**——动的是 42 个组件共用的基类。
 - **P2 剩余**：`pkg/build.cpp`（345 行 `compile_units`）、`ui/components/code_editor.cpp`（超长编辑函数）。
 - **P5 后端接口分层 + json 解耦**（A4+B5）：`raster::Surface` 34 个纯虚按关注点拆为 `PathRasterizer`/`ClipStack`/`Compositor`/`PixelAccess`；`nlohmann/json.hpp`（25526 行）经 8 个公共头泄漏 → 前向声明 + 仅 `.cpp` 包含。
 - **P6 文档同步 + 全量验证**：更新 `DESIGN.md`（新契约）、`CONVENTIONS.md`（已随 P1 更新 §8）、`docs/BACKLOG.md`；跑 `st test --san`、无头启动冒烟、控制通道连通性。
