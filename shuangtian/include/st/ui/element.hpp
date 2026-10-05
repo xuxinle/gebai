@@ -374,58 +374,62 @@ class Element {
   /// 用 `context.time_seconds` 推进——少一条需要应用驱动的生命周期，也就不存在
   /// "忘了 tick 所以动画不动"这类问题。动画期间会 `mark_dirty` 让下一帧继续。
   auto advance_hover(const RenderContext& context) const -> float {
+    RenderExtras& state = extras();   // 惰性创建：第一次推进悬浮过渡时才分配
     const float target = hovered_ ? 1.0f : 0.0f;
     const double duration = context.theme.metrics().hover_duration;
     const double now = context.time_seconds;
     // `advancing`：时间在走吗？静态帧（首帧/离屏单帧/测试）直接到位，
     // 免得画面停在半程。这条与 `Switch::knob_progress` 同一口径。
-    const bool advancing = now > last_hover_time_;
-    last_hover_time_ = now;
+    const bool advancing = now > state.last_hover_time;
+    state.last_hover_time = now;
 
     // ⚠ 这里必须严格区分"正在过渡"与"已经静止"。
     // 早先的写法是"只要 elapsed < 1 就声明 animating"，而静止元素每帧都会把
     // `hover_start_` 重置为当前时间 → elapsed 恒为 0 → **永久声明 animating**
     // → 根节点每帧都脏 → 应用 100% 占一个核（实测 6 秒耗 6.12 秒 CPU）。
     // 忙循环对"帧耗时基准"是不可见的，所以当时没被测出来。
-    if (hover_start_ >= 0.0) {   // —— 过渡中 ——
+    if (state.hover_start >= 0.0) {   // —— 过渡中 ——
       if (duration <= 0.0 || !advancing) {
-        hover_t_ = target;
-        hover_start_ = -1.0;
-        hover_animating_ = false;
-        return hover_t_;
+        state.hover_t = target;
+        state.hover_start = -1.0;
+        state.hover_animating = false;
+        return state.hover_t;
       }
-      const double progress = (now - hover_start_) / duration;
+      const double progress = (now - state.hover_start) / duration;
       if (progress >= 1.0) {
-        hover_t_ = target;
-        hover_start_ = -1.0;
-        hover_animating_ = false;
+        state.hover_t = target;
+        state.hover_start = -1.0;
+        state.hover_animating = false;
       } else {
-        hover_t_ = hover_from_ + (target - hover_from_) * static_cast<float>(progress);
-        hover_animating_ = true;   // 只在这一支声明"还要下一帧"
+        state.hover_t = state.hover_from + (target - state.hover_from) * static_cast<float>(progress);
+        state.hover_animating = true;   // 只在这一支声明"还要下一帧"
         // 同时上报损坏区：过渡帧只需重画该元素那块（增量重绘；否则下一帧
         // 损坏区为空 → 回落整帧，实测悬停过渡仍然每帧全屏）。
         record_damage();
       }
-      return hover_t_;
+      return state.hover_t;
     }
 
     // —— 静止：只有目标与当前值不同才启动过渡 ——
-    if (hover_t_ != target) {
+    if (state.hover_t != target) {
       if (duration <= 0.0 || !advancing) {
-        hover_t_ = target;   // 静态帧直接落位（不卡半程）
-        hover_animating_ = false;
-        return hover_t_;
+        state.hover_t = target;   // 静态帧直接落位（不卡半程）
+        state.hover_animating = false;
+        return state.hover_t;
       }
-      hover_from_ = hover_t_;   // 从**当前视觉进度**接着动（不跳变）
-      hover_start_ = now;
-      hover_animating_ = true;
+      state.hover_from = state.hover_t;   // 从**当前视觉进度**接着动（不跳变）
+      state.hover_start = now;
+      state.hover_animating = true;
       record_damage();
-      return hover_t_;
+      return state.hover_t;
     }
-    hover_animating_ = false;   // 真正静止：不请求下一帧
-    return hover_t_;
+    state.hover_animating = false;   // 真正静止：不请求下一帧
+    return state.hover_t;
   }  /// 当前悬浮进度（不推进，只读；用于布局等非绘制阶段）。
-  [[nodiscard]] auto hover_progress() const noexcept -> float { return hover_t_; }
+  [[nodiscard]] auto hover_progress() const noexcept -> float {
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr ? state->hover_t : 0.0f;
+  }
   [[nodiscard]] auto pressed() const noexcept -> bool { return pressed_; }
   [[nodiscard]] auto focused() const noexcept -> bool { return focused_; }
   void set_hovered(bool value) noexcept { hovered_ = value; }
@@ -453,48 +457,63 @@ class Element {
 
   /// 设文本色（显式值，盖过主题的 tone 映射）。已存的**色调覆盖被清除**（二者互斥）。
   void set_text_color(math::Color color) {
-    text_color_override_ = color;
-    text_tone_override_.reset();
+    extras().text_color_override = color;
+    extras().text_tone_override.reset();
     mark_dirty();
   }
   /// 设文本色为**主题语义色调**（跟着主题走；首选方式）。已存的字面色覆盖被清除。
   void set_text_tone(Tone tone) {
-    text_tone_override_ = tone;
-    text_color_override_.reset();
+    extras().text_tone_override = tone;
+    extras().text_color_override.reset();
     mark_dirty();
   }
   /// 设字号（显式值，盖过主题的 `font_base`）。
   void set_text_size(float size) {
-    text_size_override_ = size;
+    extras().text_size_override = size;
     mark_layout_dirty();   // 字号变 → 度量变（不只是重绘）
   }
   /// 设字重（显式值）。
   void set_text_weight(FontWeight weight) {
-    text_weight_override_ = weight;
+    extras().text_weight_override = weight;
     mark_dirty();
   }
+  // 读取侧不分配：无附属状态时返回静态空值（`extras_if_any()` 为 nullptr 即"未设过"）。
+  static const std::optional<math::Color> kNoColor;
+  static const std::optional<Tone> kNoTone;
+  static const std::optional<FontWeight> kNoWeight;
   [[nodiscard]] auto text_color_override() const noexcept -> const std::optional<math::Color>& {
-    return text_color_override_;
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr ? state->text_color_override : kNoColor;
   }
   [[nodiscard]] auto text_tone_override() const noexcept -> const std::optional<Tone>& {
-    return text_tone_override_;
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr ? state->text_tone_override : kNoTone;
   }
-  [[nodiscard]] auto text_size_override() const noexcept -> float { return text_size_override_; }
+  [[nodiscard]] auto text_size_override() const noexcept -> float {
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr ? state->text_size_override : -1.0f;
+  }
   [[nodiscard]] auto text_weight_override() const noexcept -> const std::optional<FontWeight>& {
-    return text_weight_override_;
+    const RenderExtras* state = extras_if_any();
+    return state != nullptr ? state->text_weight_override : kNoWeight;
   }
   /// 把显式排版覆盖回放进 `style_`（`apply_theme` 末尾调；没有覆盖就不动）。
   void apply_text_overrides() {
-    if (text_color_override_.has_value()) style_.color = *text_color_override_;
-    if (text_size_override_ >= 0.0f) style_.font_size = text_size_override_;
-    if (text_weight_override_.has_value()) style_.font_weight = *text_weight_override_;
+    const RenderExtras* state = extras_if_any();
+    if (state == nullptr) return;   // 从未设过覆盖：不动（连分配都不做）
+    if (state->text_color_override.has_value()) style_.color = *state->text_color_override;
+    if (state->text_size_override >= 0.0f) style_.font_size = state->text_size_override;
+    if (state->text_weight_override.has_value()) style_.font_weight = *state->text_weight_override;
   }
   /// 清掉全部显式排版覆盖（回到纯主题；测试与“恢复默认”用）。
   void clear_text_overrides() {
-    text_color_override_.reset();
-    text_tone_override_.reset();
-    text_size_override_ = -1.0f;
-    text_weight_override_.reset();
+    RenderExtras* state = extras_if_any() != nullptr ? extras_.get() : nullptr;
+    if (state != nullptr) {
+      state->text_color_override.reset();
+      state->text_tone_override.reset();
+      state->text_size_override = -1.0f;
+      state->text_weight_override.reset();
+    }
     mark_layout_dirty();
   }
   /// 计算自身尺寸（写入 `measured_`）；容器组件需递归测量子节点。
@@ -574,11 +593,12 @@ class Element {
     record_damage();
   }
   [[nodiscard]] auto animation_requested() const noexcept -> bool {
-    return animation_requested_ || hover_animating_;
+    const RenderExtras* state = extras_if_any();
+    return animation_requested_ || (state != nullptr && state->hover_animating);
   }
   void clear_animation_request() const noexcept {
     animation_requested_ = false;
-    hover_animating_ = false;
+    if (RenderExtras* state = extras_.get(); state != nullptr) state->hover_animating = false;
   }
   /// 标记“本元素（及其祖先）需要重新 measure/arrange”。
   ///
@@ -638,35 +658,58 @@ class Element {
   /// 行为注入回调（`set_event_handler`；组件实现之后、冒泡之前调用）。
   std::function<bool(Event&)> event_handler_{};
   /// 悬浮过渡状态（mutable：绘制是 const 方法，与 `Switch::toggle_time_` 同一套做法）。
-  mutable float hover_t_{0.0f};
-  mutable float hover_from_{0.0f};
-  mutable double hover_start_{-1.0};    ///< 过渡起点时间；`-1` = 未在过渡中
-  /// 上一帧的时间戳。初值 0 与 `Switch::last_time_` 同口径：
-  /// 静态首帧（time=0）要判成"时间没在走"→ 直接落位，否则画面会停在过渡起点。
-  mutable double last_hover_time_{0.0};
-  mutable bool hover_animating_{false};
+  ///
+  /// **惰性分配**（结构评审 A2）：这组字段是“悬浮过渡在飞”时的瞬时状态，
+  /// 而绝大多数元素从未启动过过渡（子项无 hover 效果、静态界面、离屏渲染）。
+  /// 但它们与 `damage_ * / paint_margin_hint_ / text_*_override_` 一共占了
+  /// `sizeof(Element)` 中约 **80 字节**（实测 432 → 352），而后几项的使用率甚至更低：
+  /// `damage_*` 只写在**根元素**上（`record_damage` 把损坏区记到所在树的根），
+  /// `text_*_override_` 只有接了 DSL 排版覆盖的元素才有。
+  /// 存成指针后，"未用到"只付 8 字节，"用到"才付一份堆分配。
+  struct RenderExtras {
+    float hover_t{0.0f};
+    float hover_from{0.0f};
+    double hover_start{-1.0};            ///< 过渡起点时间；`-1` = 未在过渡中
+    /// 上一帧时间戳。初值 0 与 `Switch::last_time_` 同口径：
+    /// 静态首帧（time=0）要判成"时间没在走"→ 直接落位，否则画面会停在过渡起点。
+    double last_hover_time{0.0};
+    bool hover_animating{false};
+    /// 上次绘制时的安全外扩（`paint_margin`；-1 = 尚未绘制过 → 损坏区按整帧兜底）。
+    float paint_margin_hint{-1.0f};
+    /// 累积的损坏区（记录在**所在树的根元素**上；UiRoot 帧首取走）。
+    math::Rect damage{};
+    bool damage_valid{false};
+    bool damage_needs_full{false};
+    /// 排版显式覆盖（DSL `BoxProps` 的落点）——缺省表示"不干预主题"。
+    /// 色值用两个 `optional`（互斥：设一个清另一个），于是"最后设的那个生效"不需要额外排序逻辑。
+    std::optional<math::Color> text_color_override{};
+    std::optional<Tone> text_tone_override{};
+    float text_size_override{-1.0f};
+    std::optional<FontWeight> text_weight_override{};
+  };
+
+  /// 取（必要时创建）渲染附属状态。**非 const** 的入口（`advance_hover` 用 `mutable` 成员调）。
+  [[nodiscard]] auto extras() const noexcept -> RenderExtras& {
+    if (extras_ == nullptr) extras_ = std::make_unique<RenderExtras>();
+    return *extras_;
+  }
+  /// 只读访问（**不存在则为 `nullptr`**）：查询路径用，不分配。
+  [[nodiscard]] auto extras_if_any() const noexcept -> const RenderExtras* {
+    return extras_.get();
+  }
+
   /// 组件主动请求的续帧（与悬浮过渡共用汇总链路）。
   mutable bool animation_requested_{false};
   bool pressed_{false};
   bool focused_{false};
   bool dirty_{true};
   bool layout_dirty_{true};
-  /// 上次绘制时的安全外扩（`paint_margin`；-1 = 尚未绘制过 → 损坏区按整帧兜底）。
-  mutable float paint_margin_hint_{-1.0f};
-  /// 累积的损坏区（记录在**所在树的根元素**上；UiRoot 帧首取走）。
-  mutable math::Rect damage_{};
-  mutable bool damage_valid_{false};
-  mutable bool damage_needs_full_{false};
   /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
   /// 宿主焦点契约（未上树时为 `nullptr`）。**类型化**——见上方 `HostFocus` 的说明。
   HostFocus* host_{nullptr};
-
-  /// 排版显式覆盖（DSL `BoxProps` 的落点）——缺省表示“不干预主题”。
-  /// 色值用两个 `optional`（互斥：设一个清另一个），于是“最后设的那个生效”不需要额外排序逻辑。
-  std::optional<math::Color> text_color_override_{};
-  std::optional<Tone> text_tone_override_{};
-  float text_size_override_{-1.0f};
-  std::optional<FontWeight> text_weight_override_{};
+  /// 渲染附属状态（悬浮过渡 / 损坏区 / 排版覆盖）——惰性：未用到则为 `nullptr`。
+  /// `mutable`：这些状态在 `paint()`（const）里推进（与原先各字段上的 `mutable` 同义）。
+  mutable std::unique_ptr<RenderExtras> extras_{};
 };
 
 /// 便捷容器：行/列布局面板。

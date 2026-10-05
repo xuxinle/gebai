@@ -146,6 +146,11 @@ auto NullTextPort::wrap_limited(std::string_view utf8, float size, float max_wid
 
 // —— Element ——
 
+// 读取侧用的静态空值（无附属状态时返回它，避免为"读一下"就分配）。
+const std::optional<math::Color> Element::kNoColor{};
+const std::optional<Tone> Element::kNoTone{};
+const std::optional<FontWeight> Element::kNoWeight{};
+
 Element::Element() = default;
 Element::~Element() = default;
 
@@ -301,7 +306,7 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   // `hovered` 暴露给控制通道：悬浮是**只能看像素、看不出状态**的交互态，
   // 不给读取口就只能靠截图猜（自动化验证会很脆）。
   if (name == "hovered") return hovered_ ? "true" : "false";
-  if (name == "hover_progress") return std::format("{:.3f}", static_cast<double>(hover_t_));
+  if (name == "hover_progress") return std::format("{:.3f}", static_cast<double>(hover_progress()));
   if (name == "hover_effect") return hover_effect_.enabled ? "true" : "false";
   // 显式排版覆盖的读回口（与写入口 `set_text_*` 对称）：
   // `color` 读的是**最终生效值**（`style_.color`，已是主题或覆盖的结果），
@@ -309,12 +314,14 @@ auto Element::get_property(std::string_view name) const -> std::optional<std::st
   // 前者给"看起来对不对"，后者给"我设的有没有被主题盖掉"。
   if (name == "color") return style_.color.to_css();
   if (name == "color_override") {
-    return text_color_override_.has_value() ? std::optional<std::string>(text_color_override_->to_css())
-                                            : std::nullopt;
+    const auto& override_color = text_color_override();
+    return override_color.has_value() ? std::optional<std::string>(override_color->to_css())
+                                      : std::nullopt;
   }
   if (name == "tone_override") {
-    return text_tone_override_.has_value()
-               ? std::optional<std::string>(std::string(tone_name(*text_tone_override_)))
+    const auto& override_tone = text_tone_override();
+    return override_tone.has_value()
+               ? std::optional<std::string>(std::string(tone_name(*override_tone)))
                : std::nullopt;
   }
   if (name == "size") return std::format("{:.2f}", static_cast<double>(style_.font_size));
@@ -364,25 +371,29 @@ void Element::record_damage() const noexcept {
   for (const Element* current = parent_; current != nullptr; current = current->parent_) {
     top = current;
   }
-  if (paint_margin_hint_ < 0.0f) {
+  if (extras_if_any() == nullptr || extras().paint_margin_hint < 0.0f) {
     // 从未绘制过 → 绘制外扩（阴影/发光）未知：保守要求整帧，不能只重画 bounds。
-    top->damage_needs_full_ = true;
-    top->damage_valid_ = true;
+    top->extras().damage_needs_full = true;
+    top->extras().damage_valid = true;
     return;
   }
-  const math::Rect extent = bounds_.inflate(paint_margin_hint_);
-  top->damage_ = top->damage_valid_ ? top->damage_.union_with(extent) : extent;
-  top->damage_valid_ = true;
+  const RenderExtras& self = extras();
+  const math::Rect extent = bounds_.inflate(self.paint_margin_hint);
+  RenderExtras& top_state = top->extras();
+  top_state.damage = top_state.damage_valid ? top_state.damage.union_with(extent) : extent;
+  top->extras().damage_valid = true;
 }
 
 auto Element::take_damage() const noexcept -> DamageReport {
   DamageReport report;
-  report.rect = damage_;
-  report.valid = damage_valid_;
-  report.needs_full = damage_needs_full_;
-  damage_ = math::Rect{};
-  damage_valid_ = false;
-  damage_needs_full_ = false;
+  const RenderExtras& state = extras();
+  report.rect = state.damage;
+  report.valid = state.damage_valid;
+  report.needs_full = state.damage_needs_full;
+  RenderExtras& mutable_state = extras();
+  mutable_state.damage = math::Rect{};
+  mutable_state.damage_valid = false;
+  mutable_state.damage_needs_full = false;
   return report;
 }
 
@@ -782,7 +793,7 @@ void Element::paint(const RenderContext& context, raster::Surface& canvas) const
                                   static_cast<float>(physical.height) * inv};
     const float margin = paint_margin(context);
     // 留存本次绘制的外扩量：元素后续标脏时据此算损坏区（增量重绘）。
-    paint_margin_hint_ = margin;
+    extras().paint_margin_hint = margin;
     if (!subtree_may_paint(*this, logical_clip, margin)) return;
   }
   if (context.painted_elements != nullptr) ++*context.painted_elements;

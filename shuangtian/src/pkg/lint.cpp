@@ -374,13 +374,19 @@ constexpr std::array<RuleSpec, 14> kRules{{
 
 /// Element 保护成员名（L13 用）。
 ///
-/// **与 `include/st/ui/element.hpp` 的成员表保持同步**：基类新增保护成员时
+/// **与 `include/st/ui/element.hpp` 的成员表保持同步**：基类新增或改名保护成员时
 /// 往这里补一笔，否则新成员被遮蔽时规则漏报。
-constexpr std::array<std::string_view, 17> kElementStateMembers{
-    "style_",   "bounds_",        "measured_",      "id_",          "key_",
-    "parent_",  "children_",      "visible_",       "enabled_",     "focusable_",
-    "hovered_", "pressed_",       "focused_",       "dirty_",       "layout_dirty_",
-    "hover_t_", "hover_effect_",
+///
+/// ⚠ 这是一份**手工同步的重复真源**（当前与 `element.hpp` 逐项核对过）。它在 P4 的
+/// `Element` 瘦身（`hover_t_` 等移入 `RenderExtras`）时**确实漏改过一次**——
+/// 恰好漏掉的 `hover_t_` 正好是 A2 重构会动到的字段，正好说明了这类清单的风险。
+/// 将来若要把 `Element` 的成员表也做成单一真源（如从 `element.hpp` 生成），
+/// 这里是首要候选。
+constexpr std::array<std::string_view, 19> kElementStateMembers{
+    "style_",      "bounds_",        "measured_",       "id_",          "key_",
+    "parent_",     "children_",      "visible_",        "enabled_",     "focusable_",
+    "hovered_",    "pressed_",       "focused_",        "dirty_",       "layout_dirty_",
+    "hover_effect_", "host_",       "animation_requested_", "extras_",
 };
 
 /// L13：组件不得**遮蔽** `Element` 的保护成员；`semantics_flags` 覆写不得重建标志。
