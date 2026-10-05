@@ -33,6 +33,25 @@
 - [ ] **`st test` 的集成用例在无框架根的目录下静默跳过**：
   `tests/pkg_integration_test.cpp` 拿不到 `ST_TEST_FRAMEWORK_ROOT` 时跳过（不假绿，
   但也不提醒）。若将来把它当 CI 门禁，需要让“跳过”在汇总里也可见（如计数行报“跳过 N”）。
+- [ ] **两份 `utf8_prev` 在文本末尾语义不一致**（2026 重构时发现，未动）：
+  `src/ui/components/input.cpp` 与 `src/ui/components/code_editor.cpp` 各一份 `utf8_next/prev`。
+  `utf8_prev(text, index)` 在 `index == text.size()` 时：`code_editor` 版返回**末码点起点**，
+  `input` 版返回 `size`。多数调用点有 `cursor_ > 0 ? … : 0` 保护，但
+  `input.cpp` 的删字/选字与 `code_editor.cpp:585` 是裸调用，两者对“文本末尾光标”行为不同。
+  骨架层已有 `st/core/string.hpp` 的 `decode_utf8`/`utf8_offset` 可作基准。
+  建议：以正式 UTF-8 边界语义（含“末尾”）为准收敛为一份，**补边界单测**后统一（勿盲合）。
+- [ ] **`st test --san` 全量档当前非零报告（预先存在的 UAF，已定位，未修）**：
+  `ui_select_opens_via_overlay_host`（`tests/ui_tabs_test.cpp:468`）在 san 档 **5/5 稳定**报
+  heap-use-after-free：测试持有的 `overlay = root.overlay_at(0)` 指针，在 `click_at`（第 ③ 步选行）
+  触发 `Select::handle_pick` → `dismiss_pending_` → overlay 宿主延迟摘除 →
+  `UiRoot::reap_overlays()`（`dispatch` 末尾）析构 `SelectPanel` 后**悬垂**，紧接着第 468 行
+  `overlay->visible()` 读已释放对象。
+  **已验证与 2026-10 组件重构无关**：将 `src/ui/components/` 整目录回退到重构前提交
+  （`git checkout 2089c30 -- shuangtian/src/ui/components`）后，同一用例仍 5/5 失败。
+  涉及 `UiRoot` 的 overlay 延迟析构（`remove_overlay`/`graveyard_`）与 `Select` 的
+  `panel_`/`dismiss_pending_` 生命周期——需专项修（测试侧要么不跨移除持有指针、要么改用
+  `overlay_at` 后立即拷 `visible()`；框架侧要明确 `handle_pick` 后的摘除时序）。
+  影响：`st test --san`（CI sanitizer 门禁）因此非零，其它用例与 dev/release 档均通过。
 
 ### 画廊全场景补全（v0.1.5，2026-09-30 第二轮审视）
 

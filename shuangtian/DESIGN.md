@@ -192,6 +192,12 @@ class Canvas {                      // 像素缓冲（RGBA8888 预乘 alpha）
   否则逆时针轮廓整片丢失（圆角矩形、阴影、字形全部中招）。
 - **孔洞靠轮廓方向相反实现**：外轮廓与内轮廓方向相反时中间镂空；同向则填实（符合规范）。
 
+> **历史遗迹已清理（2026 重构）**：上述「取绝对值」语义刚落地前，`blend_coverage_row` 一度只吃
+> **正绕向**覆盖率，于是 `feedback` / `overlay` / `table` / `file_dialog` 等组件各自抄了一份
+> `oriented(path)`（按扁平化折线反转重建）。画布侧统一为 `std::abs(coverage)` 后，该归一层已退化为
+> **恒等变换**，却仍在每次填充里白跑一遍路径扁平化 + 反转重建。这些逐字副本已随
+> `src/ui/components/components_internal.hpp` 的收敛一并删除。
+
 回归测试：`tests/raster_fill_test.cpp`（开口三角形补闭合边、嵌套轮廓留孔、逆时针轮廓可见、
 CJK 多轮廓字形不糊块、Latin/CJK 带孔字形墨迹占比上限）。
 
