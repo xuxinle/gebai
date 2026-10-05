@@ -9,6 +9,7 @@
 #include "st/ui/components/basic.hpp"
 #include "st/ui/components/input.hpp"
 #include "st/ui/components/list.hpp"
+#include "st/ui/components/markdown_view.hpp"
 #include "st/ui/components/scroll.hpp"
 #include "st/ui/components/select.hpp"
 #include "st/ui/components/table.hpp"
@@ -1141,6 +1142,50 @@ ST_TEST(dsl_for_each_reuses_by_key) {
   ST_CHECK_EQ(stats.elements_removed, 0);
   ST_CHECK_EQ(stats.elements_moved, 0);
   (void)stats_before;
+}
+
+// ── `dsl::markdown`：把 MarkdownView 的样板收敛到一处 ─────────────────────────
+//
+// 起因（真实应用）：三页（时间 / JSON / 待办）渲染 LLM 的 Markdown 结果，每页都写
+// 一遍 `custom<MarkdownView>` + 手工 `set_markdown`，每页 ~15 行样板。样板不只是冗——
+// 它让"三页行为是否一致"变成人工对照。
+//
+// 本条钉两件事（后者才是关键）：① 一行能建出 MarkdownView；② **惰性闭包在重组时
+// 重新求值**（与 `text` 同口径）——否则流式回答只会渲染第一帧的内容，之后永不更新。
+ST_TEST(dsl_markdown_wrapper_reevaluates_source) {
+  struct MdPage : Component {
+    State<std::string> source{"# 标题\n\n正文"};
+
+    void build(Composer& c) override {
+      column(c, {.id = "md-host"}, [&] {
+        // 走包装：不写 custom<MarkdownView>，配置收敛进实现
+        // （`markdown` 标了 nodiscard——返回值是强类型引用，流式场景用它调 append_chunk）
+        (void)markdown(c, [&] { return source.value(); }, {.id = "md"});
+      });
+    }
+  };
+
+  UiRoot root;
+  root.set_viewport({640.0F, 480.0F});
+  auto page = std::make_shared<MdPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  auto* view = dynamic_cast<MarkdownView*>(root.find("md"));
+  ST_REQUIRE(view != nullptr);
+  ST_CHECK(view->markdown().find("标题") != std::string::npos);
+  const std::size_t blocks_before = view->block_count();
+  ST_CHECK(blocks_before > 0U);
+
+  // ② 换源后重组：内容**必须跟着变**（惰性闭包被重新求值）
+  page->source.set("# 换了一份\n\n新的正文\n\n- 甲\n- 乙");
+  (void)host->tick();
+  root.layout(true);
+  view = dynamic_cast<MarkdownView*>(root.find("md"));
+  ST_REQUIRE(view != nullptr);
+  ST_CHECK(view->markdown().find("换了一份") != std::string::npos);
+  ST_CHECK(view->block_count() > blocks_before);
 }
 
 // ── `BoxProps` 的排版三件套（color / hex_color / size / weight）────────────────

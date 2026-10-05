@@ -1390,6 +1390,22 @@ auto icon(Composer& c, std::string name, float size, const BoxProps& props) -> E
   return *element;
 }
 
+auto markdown(Composer& c, std::function<std::string()> source, const BoxProps& props)
+    -> Element& {
+  Element* element = c.create_element("MarkdownView", st::Json::object(), props.key);
+  if (element == nullptr) {
+    static Element* none = nullptr;
+    return *none;
+  }
+  apply_box(*element, props);
+  if (auto* view = dynamic_cast<MarkdownView*>(element); view != nullptr) {
+    // `source` 是惰性闭包（与 `text` 同口径）：重组时重新求值，闭包内读 State 即自动订阅。
+    // `set_markdown` 自带相等早退，所以这里不必像 `input` 那样手写幂等判定。
+    view->set_markdown(source ? source() : std::string());
+  }
+  return *element;
+}
+
 auto overlay(Composer& c, std::string_view key, const BoxProps& props,
              std::function<void()> children) -> Element& {
   // 槽位（同 key 复用宿主）；`key` 即身份，本次不声明 → sweep 移除

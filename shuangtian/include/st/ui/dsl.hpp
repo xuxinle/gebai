@@ -559,6 +559,25 @@ auto heading(Composer& c, std::string content, std::uint32_t level = 1,
 [[nodiscard]] auto icon(Composer& c, std::string name, float size = 18.0f,
                         const BoxProps& props = {}) -> Element&;
 
+/// Markdown 视图（`MarkdownView`）：把 `st::md` 的块模型渲染成自绘组件，支持流式增量。
+///
+/// `source` 是**惰性闭包**（与 `text` 同口径）：重组时重新求值，闭包内读 State 即自动订阅。
+/// 增量流式的场景用 `append` 属性或直接拿返回的元素调 `append_chunk`（返回强类型引用）。
+///
+/// ```cpp
+/// markdown(c, [&] { return answer.value(); }, {.grow = true, .width = 640.0F});
+/// ```
+///
+/// 为什么需要这个包装（2026-10-05，实战）：三页（时间 / JSON / 待办）渲染 LLM 的
+/// Markdown 结果，每页都写一遗 `custom<MarkdownView>` + 手工 `set_markdown` +
+/// 字号码/最大宽度/贴底等一串配置（每页 ~15 行样板）。样板不只是冗——它让
+/// “三页行为是否一致”变成人工对照，而包装把配置收敛到一处。
+///
+/// `props.size` / `props.color` 会映射到**正文字号 / 正文色**（排版三件套的下放；
+/// 代码块字号与标题阶梯仍按主题算）。
+[[nodiscard]] auto markdown(Composer& c, std::function<std::string()> source,
+                            const BoxProps& props = {}) -> Element&;
+
 // —— 逃生舱：任意组件 + 一等接口访问 ——
 ///
 /// 声明式元素类型名（与 `make_element` 的注册名一致）。
