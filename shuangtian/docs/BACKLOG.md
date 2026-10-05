@@ -24,6 +24,32 @@
   回归：`tests/ui_input_test.cpp: ui_text_area_backspace_at_end_deletes_last_codepoint`
   （先在旧代码上跑红、修复后转绿）+ `tests/core_basics_test.cpp` 两组边界单测。
 
+## 已完成（2026-10 结构优化轮 · 分支 optimize/structure-2026）
+
+详细的改动清单与实测数据见 `docs/OPTIMIZATION_REPORT.md`；基线与度量探针见
+`docs/OPTIMIZATION_BASELINE.md`。要点：
+
+- [x] **修 4 处真实缺陷**：`active_composers` 无锁遍历（并发 UB）、语言注册表的跨 TU
+  静态析构顺序、`dsl.cpp` 20 处解引用空指针、`owner_` 的 `void*` 类型擦除。
+- [x] **补 2 处工具缺口**：L8 原先只判花括号深度 0（**匿名命名空间里的可变全局全部漏网**，
+  规则近乎失效）；L14 原先只在文档里声称存在（禁用 include 检查）。
+  收紧 L8 后**同一次扫描**从 0 违反变成 6 条真问题——「文档写了、工具没做」比不做更危险。
+- [x] **消重复真源**：组件类型身份原先有**两套表**（`type_name` 特化 + `make_element`
+  if 链，互不相识；漏改一处即静默失效）→ 收敛为一份清单，新增组件从改 3 处变改 1 处。
+  连带修 L13 的 `kElementStateMembers`（与 `element.hpp` 手工同步、本轮已漏改过一次）。
+- [x] **拆巨型函数**：`control/server.cpp` 的 `handle()` 840 → 29 行（+ 22 个方法函数）；
+  `highlight_builtin.cpp` 511 行单函数 → 30 个具名函数。
+- [x] **Element 瘦身**：`sizeof` 432 → 376 字节（渲染附属状态惰性分配）。
+- [x] **json 前向头**：`app.hpp` / `control.hpp` 的预处理展开各降 23%；
+  `manifest.hpp` 因 `Json` 成员是**语言限制**做不了，已在头里写明。
+- [x] **新增 `st stats`**：源码结构度量工具（单遍扫描、剥离注释与字符串），
+  把"最大函数/热点头/复杂度"从一次性脚本变成可复现的一条命令。
+
+**如实记录的两处判断修正**（都写进了对应代码注释与报告）：
+1. 立项时写的 `sizeof(Element)` 目标「~120B」**不可达**（核心字段就占 350，可压缩只约 80）；
+2. 评审时写的 `Surface`「34 个纯虚拆成 4 路」是**过度设计**——真正有问题、也确实能修的
+   只有 `blend_coverage_bitmap` 一处（它违反 `surface.hpp` 自己第 15 行的规则）。
+
 ## 2026-10-05 实战反馈轮：新发现（P1）
 
 来自一个 7 页真实应用（`dev-tools`，霜天原生重写）的反馈。前四项（`for_each` 索引、
