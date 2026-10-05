@@ -510,7 +510,6 @@ class TextRenderer {                               // 字形 → 位图缓存（
   尾部增量淘汰）——旧实现超 512 条目全清，CJK 大文档滚动时会有周期性重栅格化尖峰
   （由 2026-09-30 审视定位并修复）。
 - 回退链默认：`ST_FONT_LATIN` / `ST_FONT_CJK` / 系统探测（`/usr/share/fonts`、`C:\Windows\Fonts`、`/System/Library/Fonts`）。
-
 ### 4.3.1 文字抗锯齿：灰度 vs 亚像素（LCD）
 
 **起因**：屏幕上 125% DPI、13.5px 正文「看着就是糊的」，而 Chrome/VSCode 的字看着锐。
@@ -1842,6 +1841,32 @@ if (palette_open_.value()) {          // 条件声明
 菜单栏同理：`menu_bar(...)` 声明 + `on_open_menu` 写状态，面板由 `menu_panel_overlay`
 按状态声明（面板内容首次认领时构造，同 key 复用）。
 
+**浮层宿主的命中语义（`OverlayHost`）**
+
+浮层内容挂在铺满视口的宿主上，而宿主若按 `bounds` 命中就会**吃掉整屏输入**
+（下层元素全点不动）。因此宿主按浮层性质选两种形态：
+
+- **穿透**（缺省）：`hit_test` 只认子元素——**非模态浮层**（查找条）用，
+  面板开着时用户仍要能点编辑器、能选中文字。
+- **屏障**：`hit_test` 认整个视口，面板外的点击触发关闭回调且**不传给下层**——
+  **瞬态浮层**（下拉菜单）用：点外就相当于“我要它消失”，且不应顺手把背后那个按钮点了。
+
+`overlay_slot` 归 `OverlayHost`（`dsl.cpp`）；`menu_panel_overlay` 切屏障并接关闭回调。
+
+**浮层键盘派发（`UiRoot::dispatch_key_into`）**
+
+模态分支对 overlay 不能只调一次宿主的 `on_event`：宿主自己不认键（它只是坐标系），
+真正认 Esc/↑↓ 的 `MenuPanel`/`CommandPalette` 在**子树里**。因此按深度优先下钻
+（**容器自身优先**，否则过滤输入框会先把方向键当“光标移动”吞掉），找到第一个
+能处理的节点为止——“Esc 关面板”“面板内方向键导航”都靠这一步。
+
+**元素宿主契约（`Element::adopt_host`）**
+
+`host_`（`HostFocus`，供“要宿主给我焦点”的组件用）不能只在 `UiRoot::set_content/add_overlay`
+递归写一次：声明式每帧新建元素是直接 `add_child`，那些新元素的 `host_` 会永远是空——
+`CommandPalette::grab_focus()` 只能走兜底路径（面板打开了、键盘焦点还在编辑器里）。
+继承点因此收敛到 `Element::add_child/insert_child`，新元素随挂入自动继承父元素的宿主。
+
 实测：一个 2063 行的命令式 IDE 界面（`examples/codeeditor`）用声明式重写后，**连同它原本的
 声明式分身（当时叫 `codeeditor-dsl`，695 行，已在整合中删除）一起合并成 1605 行**（−40%）
 ——差的不是控件数而是**同步代码**：声明式里所有「改完要点哪里」的手工同步都不存在了
@@ -2988,7 +3013,7 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**739 用例 / 17614 断言**，release 档实测；`st test --san` 739 全绿 0 报告） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**748 用例 / 17767 断言**，debug 档实测；`st test --san` 全绿 0 报告） |
 | 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
  | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |

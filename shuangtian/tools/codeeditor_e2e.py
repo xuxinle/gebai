@@ -198,6 +198,129 @@ def main():
         check(shot.get("path"), "截图未落盘")
         print(f"[9] 截图已落盘: {shot['path']}")
 
+        # —— 10. 菜单面板的**关闭路径**（本轮修复；旧行为：打开后关不掉）——
+        # 根因：声明式 overlay 宿主是铺满视口的 `Panel`，命中按整块矩形算 → 吞掉全屏点击；
+        # 而浮层键盘分派只问最外层宿主（它不认 Esc），真正的 `MenuPanel` 在子树里收不到。
+        client.click_at(16, 52)
+        time.sleep(0.4)
+        # 面板外的点击：瞬态浮层（菜单）应**关闭且不穿透**——
+        # 旧行为：overlay 宿主是铺满视口的 Panel，把整屏点击都吃掉（什么都点不到）；
+        # 中途尝试过“穿透”，但那会让“想关菜单”顺手触发背后的按钮（真实误操作）。
+        check(client.count("MenuPanel") == 1, "重新打开菜单失败")
+        outside = client.ok("input.mouse", {"kind": "click", "x": 1000, "y": 740, "button": 1})
+        time.sleep(0.5)
+        check(client.count("MenuPanel") == 0, "点面板外未关闭菜单面板")
+        check(outside.get("hit", {}).get("id") != "content",
+              "瞬态浮层应屏障面板外点击（不应穿透到下层内容）")
+        # 关闭后重新打开必须还能开（反向验证“关闭”真回到了可交互状态）
+        client.click_at(16, 52)
+        time.sleep(0.4)
+        check(client.count("MenuPanel") == 1, "关闭后无法重新打开菜单")
+        client.ok("input.key", {"key": "Escape"})
+        time.sleep(0.5)
+        check(client.count("MenuPanel") == 0, "Esc 未关闭菜单面板")
+        print("[10] 菜单面板 Esc / 面板外点击均可关闭（瞬态浮层屏障）")
+
+        # —— 11. 命令面板：打开即聚焦 + 方向键导航 + Esc ——
+        client.ok("input.key", {"key": "p", "ctrl": True, "shift": True})
+        time.sleep(0.7)
+        check(client.count("#command-palette") == 1, "命令面板未打开")
+        focused = [m["id"] for m in client.ok("find", {"selector": ":focused"})["matches"]]
+        check("palette-input" in focused,
+              f"面板打开后焦点未交给过滤框（敲字会跑进代码里）: {focused}")
+        active0 = int(client.ok("get", {"id": "command-palette"})["props"]["active"])
+        client.ok("input.key", {"key": "ArrowDown"})
+        time.sleep(0.35)
+        active1 = int(client.ok("get", {"id": "command-palette"})["props"]["active"])
+        check(active1 != active0, f"方向键未移动高亮（仍为 {active0}）")
+        # 打字必须进面板（而不是底层编辑器）
+        before_len = len(client.text("editor"))
+        client.ok("input.text", {"text": "theme"})
+        time.sleep(0.5)
+        check(len(client.text("editor")) == before_len, "面板打开时输入跑进了编辑器")
+        check(client.ok("get", {"id": "command-palette"})["props"]["query"] == "theme",
+              "过滤词未进面板")
+        client.ok("input.key", {"key": "Escape"})
+        time.sleep(0.5)
+        check(client.count("#command-palette") == 0, "Esc 未关闭命令面板")
+        print("[11] 命令面板：打开即聚焦、方向键导航、Esc 可关")
+
+        # —— 11b. 查找条是**非模态**浮层：开着也能点编辑器（与瞬态菜单相反）——
+        client.ok("invoke", {"id": "editor", "action": "focus"})
+        client.ok("input.key", {"key": "f", "ctrl": True})
+        time.sleep(0.7)
+        check(client.count("#find-needle") == 1, "查找条未出现")
+        editor_box = client.ok("find", {"selector": "CodeEditor"})["matches"][0]["bounds"]
+        hit = client.ok("input.mouse", {"kind": "click",
+                                        "x": editor_box["x"] + 120,
+                                        "y": editor_box["y"] + 120, "button": 1})
+        check(hit.get("hit", {}).get("id") == "editor",
+              f"非模态查找条吞掉了编辑器点击: {hit.get('hit')}")
+        client.ok("invoke", {"id": "find-close", "action": "click"})
+        time.sleep(0.4)
+        print("[11b] 非模态浮层（查找条）不阻断下层交互")
+
+        # —— 12. 编辑器翻页（旧行为：PageDown 把视口弹回顶部）——
+        client.ok("set", {"id": "editor", "props": {
+            "text": "\n".join(f"row {i}" for i in range(300))}})
+        time.sleep(0.4)
+        client.ok("invoke", {"id": "editor", "action": "focus"})
+        line0 = int(client.ok("get", {"id": "editor"})["props"]["line"])
+        client.ok("input.key", {"key": "PageDown"})
+        time.sleep(0.45)
+        line1 = int(client.ok("get", {"id": "editor"})["props"]["line"])
+        check(line1 > line0, f"PageDown 未移动光标: {line0} → {line1}")
+        client.ok("input.key", {"key": "PageUp"})
+        time.sleep(0.45)
+        line2 = int(client.ok("get", {"id": "editor"})["props"]["line"])
+        check(line2 == line0, f"PageUp 未回到原行: {line0} → {line2}")
+        print("[12] 编辑器翻页正确（PageDown {}→{}，PageUp 回到 {}）".format(line0, line1, line2))
+
+        # —— 13. 拖垂直滚动条不改光标（旧行为：光标被拖到别的行）——
+        editor_box = client.ok("find", {"selector": "CodeEditor"})["matches"][0]["bounds"]
+        cursor_before = int(client.ok("get", {"id": "editor"})["props"]["cursor"])
+        bar_x = editor_box["x"] + editor_box["width"] - 7
+        client.ok("input.mouse", {"kind": "down", "x": bar_x,
+                                  "y": editor_box["y"] + 20, "button": 1})
+        client.ok("input.mouse", {"kind": "move", "x": bar_x,
+                                  "y": editor_box["y"] + editor_box["height"] - 20, "button": 1})
+        client.ok("input.mouse", {"kind": "up", "x": bar_x,
+                                  "y": editor_box["y"] + editor_box["height"] - 20, "button": 1})
+        time.sleep(0.45)
+        props = client.ok("get", {"id": "editor"})["props"]
+        check(int(props["cursor"]) == cursor_before,
+              f"拖滚动条把光标挪走了: {cursor_before} → {props['cursor']}")
+        check(float(props["scroll"].split(",")[1]) > 100.0, "拖滚动条未生效")
+        print("[13] 垂直滚动条可拖且不动光标")
+
+        # —— 14. 只读模式挡住所有编辑入口（旧行为：SelectAll+Delete 清空全文）——
+        client.ok("set", {"id": "editor", "props": {"text": "keep me\nline two\n"}})
+        time.sleep(0.3)
+        client.ok("set", {"id": "editor", "props": {"read_only": "true"}})
+        client.ok("invoke", {"id": "editor", "action": "select_all"})
+        client.ok("input.key", {"key": "Delete"})
+        time.sleep(0.35)
+        client.ok("invoke", {"id": "editor", "action": "insert", "argument": "X"})
+        time.sleep(0.35)
+        text_now = client.text("editor")
+        check(text_now == "keep me\nline two\n", f"只读模式被击穿: {text_now!r}")
+        check(client.ok("get", {"id": "editor"})["props"]["read_only"] == "true",
+              "只读标志自身被编辑重置了")
+        client.ok("set", {"id": "editor", "props": {"read_only": "false"}})
+        time.sleep(0.3)
+        print("[14] 只读模式挡住 Delete/Backspace/insert")
+
+        # —— 15. 属性面不被每次重组重置（旧行为：切底部面板 → language/read_only 回默认）——
+        client.ok("set", {"id": "editor", "props": {"language": "python", "read_only": "true"}})
+        time.sleep(0.3)
+        client.ok("invoke", {"id": "bottom-tabs", "action": "select", "argument": "0"})
+        time.sleep(0.7)
+        props = client.ok("get", {"id": "editor"})["props"]
+        check(props["language"] == "python", f"重组后语言被重置: {props['language']}")
+        check(props["read_only"] == "true", f"重组后只读态被重置: {props['read_only']}")
+        client.ok("set", {"id": "editor", "props": {"read_only": "false"}})
+        print("[15] 属性面在重组后保持（language / read_only）")
+
         print("\n[OK] codeeditor 端到端全部通过")
         return 0
     finally:

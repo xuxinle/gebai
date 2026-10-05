@@ -308,6 +308,23 @@ void UiRoot::update_hover(Element* target) {
   (void)context;
 }
 
+auto UiRoot::dispatch_key_into(Element* root, Event& event) -> bool {
+  // 顺序：**先问本元素自身，再下钻子元素**。
+  //
+  // 为何不能先子后父：方向键/Enter/Esc 在浮层里是**容器级语义**
+  //（命令面板的 ↑↓ 移高亮、菜单面板的 ↑↓ 选项），而焦点子元素（过滤输入框）
+  // 会先把 ArrowDown 当“光标移动”吞掉——「面板的方向键导航永远不生效」就这么来的。
+  // 容器先拿：它不认就（返回 false）继续下沉给子元素。
+  if (root == nullptr) return false;
+  if (root->on_event(render_context(), event)) return true;
+  for (std::size_t index = root->child_count(); index > 0; --index) {
+    Element* child = root->child_at(index - 1);
+    if (child == nullptr || !child->visible()) continue;
+    if (dispatch_key_into(child, event)) return true;
+  }
+  return false;
+}
+
 auto UiRoot::dispatch(Event& event) -> bool {
   // 分发前先清悬垂指针：界面每帧都可能重建子树（列表刷新、页面替换），
   // 而焦点/悬停/按压指针可能正指着已被销毁的元素
@@ -416,13 +433,17 @@ auto UiRoot::dispatch(Event& event) -> bool {
       //    否则「Esc 关对话框」永远送不进去（焦点还在被遮住的内容元素上）。
       //    浮层不处理再回落焦点元素（浅层浮层如 Toast 不拦截正常输入）。
       //    不拦截命中的浮层（`intercepts_input()` 为假，如已隐藏的命令面板）跳过。
-      for (auto iterator = overlays_.rbegin(); iterator != overlays_.rend(); ++iterator) {
-        if (*iterator == nullptr || !(*iterator)->visible()) continue;
-        if (!(*iterator)->intercepts_input()) continue;
-        if (dispatch_to(**iterator, event)) {
-          handled = true;
-          break;
-        }
+      //
+      //    为什么是**递归下钻**而不是只问最上层：声明式浮层的根是一个铺满视口的
+      //    宿主容器（它自己不会处理 Esc），真正认 Esc 的 `MenuPanel`/`CommandPalette`
+      //    在其子树里。只问宿主 → 宿主返回 false → 整个浮层链被跳过，
+      //    「Esc 关面板」永远失效（实测：菜单/命令面板都关不掉）。
+      //    深度优先（后声明者优先）与命中测试同一序：最上面的浮层先拿。
+      for (auto iterator = overlays_.rbegin(); iterator != overlays_.rend() && !handled; ++iterator) {
+        Element* overlay = iterator->get();
+        if (overlay == nullptr || !overlay->visible()) continue;
+        if (!overlay->intercepts_input()) continue;
+        handled = dispatch_key_into(overlay, event);
       }
       if (handled) break;
       // ③ 焦点元素优先处理（含冒泡）：组件对自己认识的键返回 true。

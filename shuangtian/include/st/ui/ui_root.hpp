@@ -204,6 +204,11 @@ class UiRoot : public Element::HostFocus {
   void collect_focus_order(Element& element, std::vector<Element*>& order);
   void update_hover(Element* target);
 
+  /// 浮层键盘下钻：深度优先（后声明者优先）找**第一个能处理**该键的节点，
+  /// 子树都不处理再问 `root` 自身。浮层容器（铺满视口的声明式宿主）自己不认键，
+  /// 真正的面板在子树里——见 `dispatch` 的模态分支注释。
+  auto dispatch_key_into(Element* root, Event& event) -> bool;
+
   Theme theme_{};
   std::unique_ptr<Element> content_{};
   std::vector<std::unique_ptr<Element>> overlays_{};

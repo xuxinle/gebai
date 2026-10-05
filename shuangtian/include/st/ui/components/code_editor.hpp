@@ -163,6 +163,15 @@ class CodeEditor : public Element {
   /// 「光标画在 x」与「按 x 反查落点」必须回环到同一个字符索引。
   [[nodiscard]] auto caret_offset_x(const RenderContext& context) const -> float;
 
+  // —— 滚动条几何（与绘制/命中同一份；暴露出来是为了可断言）——
+
+  /// 垂直滚动条轨道矩形（内容未溢出时为空）。
+  [[nodiscard]] auto v_scroll_bar_rect(const RenderContext& context) const -> math::Rect;
+  /// 垂直滚动条滑块当前矩形（空 = 无滚动条）。
+  [[nodiscard]] auto v_scroll_thumb_rect(const RenderContext& context) const -> math::Rect;
+  /// 水平滚动条轨道矩形（内容未溢出时为空）。
+  [[nodiscard]] auto h_scroll_bar_rect() const -> math::Rect;
+
   // —— 回调 ——
 
   std::function<void(std::string_view)> on_change{};       ///< 内容变化（传最新全文）
@@ -229,6 +238,21 @@ class CodeEditor : public Element {
   [[nodiscard]] auto index_at_point(const RenderContext& context, math::Point point) const
       -> std::size_t;
   [[nodiscard]] auto x_for_index(const RenderContext& context, std::size_t index) const -> float;
+  /// 制表符展开结果：`text` 是 `\t` 按制表位补空格的形态，`map[i]` 是
+  /// 「原始行内偏移 i → 展开后偏移」的映射（长度 = 原始长度 + 1）。
+  struct TabExpansion {
+    std::string text{};
+    std::vector<std::size_t> map{};
+  };
+  /// 把一行按 `tab_width_` 展开（逻辑列以**码点**计，`\t` 补到下一个制表位）。
+  ///
+  /// 为什么必须展开而不是把 `\t` 当普通字形去量/去画：量宽与绘制是两条独立路径，
+  /// 字体对 `\t` 的处理（宽度 0 / 小方块 / 按制表位）与「一个字符宽」都不一致，
+  /// 于是**光标、选择、缩进参考线、鼠标命中与真实字位全部错位**，而且随列号累积。
+  /// 展开成空格后两条路径天然同源（都是普通字形度量）。
+  [[nodiscard]] auto expand_tabs(std::string_view row) const -> TabExpansion;
+  /// 垂直滚动条拖拽：`pointer_y` → 新滚动偏移。
+  void apply_v_scroll_drag(const RenderContext& context, float pointer_y);
   [[nodiscard]] auto line_of_index(std::size_t index) const -> std::size_t;
   [[nodiscard]] auto line_start(std::size_t line) const -> std::size_t;
   [[nodiscard]] auto line_end(std::size_t line) const -> std::size_t;
@@ -239,8 +263,6 @@ class CodeEditor : public Element {
   [[nodiscard]] auto matching_bracket() const -> std::optional<std::pair<std::size_t, std::size_t>>;
   /// 鼠标位置落在第几行（不在文本区则 -1）。
   [[nodiscard]] auto hover_line_at(const RenderContext& context, math::Point point) const -> int;
-  /// 水平滚动条轨道矩形（空 = 无溢出/未布局）。
-  [[nodiscard]] auto h_scroll_bar_rect() const -> math::Rect;
   /// 可达最大水平偏移。
   [[nodiscard]] auto max_scroll_x(const RenderContext& context) const -> float;
   void apply_h_scroll_drag(const RenderContext& context, float pointer_x);
@@ -307,6 +329,9 @@ class CodeEditor : public Element {
   int hover_line_{-1};
   /// 水平滚动条拖拽中（左键在滑块/轨道上按下后跟 move）。
   bool h_dragging_{false};
+  /// 垂直滚动条拖拽中（同上，垂直方向）。
+  bool v_dragging_{false};
+  float v_drag_offset_{0.0f};
   float h_drag_offset_{0.0f};
   mutable std::shared_ptr<const text::LanguageSpec> spec_cache_{};
   mutable bool spec_resolved_{false};

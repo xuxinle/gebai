@@ -209,6 +209,9 @@ auto Element::add_child(std::unique_ptr<Element> child) -> Element* {
   Element* raw = child.get();
   warn_on_duplicate_key(*this, *raw);
   children_.push_back(std::move(child));
+  // 新子元素继承本元素的宿主（与 UiRoot::wire_owner 同一契约）：不这样做的话，
+  // 声明式每帧新建的元素 `host_` 恒为空——“要宿主给我焦点”的组件全部失效。
+  raw->adopt_host();
   mark_layout_dirty();
   return raw;
 }
@@ -220,6 +223,7 @@ auto Element::insert_child(std::size_t index, std::unique_ptr<Element> child) ->
   const std::size_t position = index > children_.size() ? children_.size() : index;
   warn_on_duplicate_key(*this, *raw);
   children_.insert(children_.begin() + static_cast<std::ptrdiff_t>(position), std::move(child));
+  raw->adopt_host();   // 同 add_child：新挂入的子元素继承宿主契约
   mark_layout_dirty();
   return raw;
 }
@@ -246,6 +250,21 @@ void Element::clear_children() {
 auto Element::hit_test(math::Point point) const noexcept -> bool {
   if (!visible_) return false;
   return bounds_.contains(point);
+}
+
+auto Element::hit_test_children(math::Point point) const noexcept -> bool {
+  for (const auto& child : children_) {
+    if (child == nullptr || !child->visible()) continue;
+    if (child->hit_test(point) || child->hit_test_children(point)) return true;
+  }
+  return false;
+}
+
+void Element::adopt_host() {
+  if (parent_ != nullptr) host_ = parent_->host_;
+  for (const auto& child : children_) {
+    if (child != nullptr) child->adopt_host();
+  }
 }
 
 auto Element::semantics_flags() const -> SemanticsFlags {

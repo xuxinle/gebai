@@ -323,6 +323,16 @@ class Element {
   [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }
   void set_host(HostFocus* host) noexcept { host_ = host; }
 
+  /// 把宿主契约**转发到整棵子树**（新挂入的子元素也能拿到宿主）。
+  ///
+  /// 为什么不能只在 `UiRoot::set_content/add_overlay` 时递归写一次：声明式每次重组
+  /// 都会新建元素（`create_element` 直接 `add_child`，不经过 UiRoot），于是**新元素的
+  /// `host_` 永远是空**——`CommandPalette::grab_focus()` 这类「要宿主给我焦点」的组件
+  /// 只能走兜底路径，表现为「面板打开了，键盘焦点却留在底层编辑器」。
+  ///
+  /// 挂载点收敛到 `add_child`/`insert_child`，新元素随挂入自动继承父元素的宿主。
+  void adopt_host();
+
   // —— 样式 ——
   [[nodiscard]] auto style() noexcept -> Style& { return style_; }
   [[nodiscard]] auto style() const noexcept -> const Style& { return style_; }
@@ -334,6 +344,14 @@ class Element {
   [[nodiscard]] auto focusable() const noexcept -> bool { return focusable_; }
   void set_focusable(bool value) noexcept { focusable_ = value; }
   [[nodiscard]] virtual auto hit_test(math::Point) const noexcept -> bool;
+
+  /// 仅命中**子树内可交互的孙元素**（不含自身矩形）：默认实现为「任一子元素 `hit_test`」。
+  ///
+  /// 用途：窗口级容器（声明式 overlay 宿主 Panel、模态遮罩等）自身铺满视口、
+  /// 但**不应按整块矩形吃掉下层输入**——否则面板外的点击（想点编辑器、想关面板）
+  /// 全部被容器吞掉，表现为「界面卡死」。这类容器覆写本函数，把命中收窄到
+  /// 真正在自己的子元素上。
+  [[nodiscard]] virtual auto hit_test_children(math::Point point) const noexcept -> bool;
 
   // —— 交互状态 ——
   /// 悬浮"特效"的声明式开关（组件自己决定怎么用）。

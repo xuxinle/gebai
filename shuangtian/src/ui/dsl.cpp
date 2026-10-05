@@ -71,6 +71,58 @@ std::mutex active_composers_mutex;
 }
 }  // namespace
 
+namespace {
+
+/// 声明式 overlay 宿主：给浮层内容一个坐标系，并决定**面板外的输入怎么走**。
+///
+/// 两种语义（由 `set_outside_barrier` 选，默认穿透）：
+///
+/// - **穿透**（默认）：`hit_test` 只认子元素。用于**非模态浮层**（查找条）——
+///   面板开着时用户仍要能点编辑器、能选中文字，浮层不该把整屏占住。
+/// - **屏障**：`hit_test` 认整个视口，并在面板外按下+点击时发 `on_outside_click`。
+///   用于**瞬态浮层**（下拉菜单）——与 Flutter modal barrier / Web backdrop 同款：
+///   点外面就相当于“我要它消失”，且不应该顺手把下层那个东西也点了
+///   （“想关菜单却触发了背后的按钮”是真实的误操作）。
+///
+/// 为何不统一：这两个需求正好相反，由一个开关表达比在每个组件里各写一套判定便宜——
+/// 而且“面板外”的几何只有宿主自己知道。
+class OverlayHost : public Panel {
+ public:
+  /// 面板外点击回调（仅在屏障形态下触发）。
+  std::function<void()> on_outside_click{};
+
+  /// 屏障形态：面板外也命中本宿主（输入不再穿透下层）。
+  void set_outside_barrier(bool value) noexcept { barrier_ = value; }
+
+  [[nodiscard]] auto hit_test(math::Point point) const noexcept -> bool override {
+    return barrier_ ? Element::hit_test(point) : hit_test_children(point);
+  }
+
+  auto on_event(const RenderContext& context, Event& event) -> bool override {
+    if (!barrier_) return Panel::on_event(context, event);
+    switch (event.kind) {
+      case EventKind::MouseDown:
+        outside_press_ = on_outside_click != nullptr && !hit_test_children(event.position);
+        return true;   // 屏障：消费，不让下层拿到这次按下
+      case EventKind::Click:
+        if (outside_press_ && on_outside_click != nullptr) on_outside_click();
+        outside_press_ = false;
+        return true;
+      case EventKind::MouseUp:
+      case EventKind::MouseMove:
+        return true;   // 屏障内不把移动派给下层（避免 hover 闪烁）
+      default:
+        return Panel::on_event(context, event);
+    }
+  }
+
+ private:
+  bool barrier_{false};
+  bool outside_press_{false};
+};
+
+}  // namespace
+
 auto current_composer() noexcept -> Composer* { return tls_composer; }
 
 /// 声明式包装函数的不变量失败：`create_element(type)` 返回 nullptr。
@@ -1073,7 +1125,7 @@ auto Composer::overlay_slot(std::string_view key) -> Element* {
     return found->second;
   }
   // 新建：FillViewport 形态（浮层自行定位卡片——模态/命令面板标准形态）
-  auto host = std::make_unique<Panel>(FlexDirection::Column);
+  auto host = std::make_unique<OverlayHost>();
   host->set_id("overlay-" + name);
   Element* raw = host.get();
   impl_->root.add_overlay(std::move(host), UiRoot::OverlayLayout::FillViewport);
@@ -1087,6 +1139,17 @@ void Composer::register_shortcut(std::string key, UiRoot::Shortcut mods,
   // 转调 UiRoot：快捷键表是 root 级资源（先于焦点链派发，文本组件吞键也拦得住）。
   (void)impl_->root.register_shortcut(std::move(key), std::move(mods), std::move(handler));
 }
+
+/// 声明式 overlay 宿主：铺满视口，但**只在自己的子元素上命中**。
+///
+/// 为什么不能直接用 `Panel`：`Element::hit_test` 是「bounds 含点」——铺满视口的宿主
+/// 会把整屏点击都吃下，于是浮层盖上来之后编辑器、侧栏、状态栏**全部点不动**
+/// （实测：菜单面板打开后，连“点面板外把它关掉”都做不到）。
+///
+/// 宿主的职责是「给浮层内容一个坐标系」，不是「占住屏幕」：命中收窄到子元素，
+/// 浮层外的点击自然落到下层内容——与 `ContextMenu` 的 dismiss barrier 相比这里
+/// 选择**穿透**而非拦截，因为声明式浮层（查找条/菜单面板）都不需要屏障语义。
+/// 定义在文件头部（`overlay_slot` 之前）。
 
 void Composer::sweep_overlays() {
   // 重组末尾：本次 build 未认领的 overlay → 移除（“关掉”的表达就是“不声明”）。
@@ -1526,7 +1589,18 @@ auto menu_bar(Composer& c, const std::vector<MenuData>& menus,
       on_action(menu, item);
     };
   }
-  if (on_open_menu) bar->on_open_menu = std::move(on_open_menu);
+  if (on_open_menu) bar->on_open_menu = on_open_menu;
+  // 下拉面板的关闭请求（Esc / 点面板外 / 激活条目）必须回落给调用方——
+  // 面板的 `on_close` 已在 `MenuBar::make_panel` 里发，但**谁来摘这个 overlay**
+  // 只有调用方知道。不接它的话：“Esc 关了”的只是 `MenuBar::open_index_`，
+  // 面板本身永远留在屏上（实测：菜单打开后关不掉）。
+  //
+  // 这里接的是**同一个 `on_open_menu` 回调的逆语义**：`kNoIndex` 表示“不打开任何菜单”，
+  // 即声明层面不认领那个 overlay，下一帧框架 sweep 自动摘除。
+  bar->on_menu_close = [bar, on_open_menu]() {
+    bar->set_open_index(MenuBar::kNoIndex);
+    if (on_open_menu) on_open_menu(MenuBar::kNoIndex);
+  };
   return bar;
 }
 
@@ -1537,6 +1611,15 @@ void menu_panel_overlay(Composer& c, MenuBar& bar, std::size_t index) {
   // 只在首次认领时构造面板（同 key 复用——面板内状态保持）
   if (host->child_count() == 0) {
     host->add_child(bar.make_panel(index));
+  }
+  // 点面板外 = 关闭请求：下拉菜单的通行手势（菜单栏自己没有全屏命中，
+  // 只有宿主知道“点在面板外”）。事件仍**穿透**给下层，
+  // 于是“点空白处”既关了菜单、又落到该落的地方。
+  // 菜单是**瞬态浮层**：面板外点击=“我要它消失”，且不应顺手点到下层
+  //（“想关菜单却触发了背后的按钮”是真实误操作）——切到屏障形态。
+  if (auto* overlay_host = dynamic_cast<OverlayHost*>(host); overlay_host != nullptr) {
+    overlay_host->set_outside_barrier(true);
+    overlay_host->on_outside_click = [&bar]() { bar.close_panel(); };
   }
   bar.set_open_index(index);
 }

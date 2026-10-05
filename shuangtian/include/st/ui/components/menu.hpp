@@ -148,6 +148,17 @@ class MenuBar : public Element {
   /// 不接它 = 关闭路径彻底静默（面板留在屏上）。
   std::function<void()> on_menu_close{};
 
+  /// 请求关闭当前打开的下拉面板（外部关闭源的**公开入口**：点面板外、窗口失焦…）。
+  ///
+  /// 为什么要暴露：`on_menu_close` 是**出向**回调（面板告诉调用方“我关了”），
+  /// 而“点面板外”这类由 **overlay 宿主**发现的手势需要一个**入向**入口——
+  /// 宿主与 MenuBar 共同构成“下拉菜单”这一个交互体，它得有个名字。
+  void close_panel() {
+    if (open_index_ == kNoIndex) return;
+    set_open_index(kNoIndex);
+    if (on_menu_close) on_menu_close();
+  }
+
   static constexpr std::size_t kNoIndex{static_cast<std::size_t>(-1)};
 
  private:

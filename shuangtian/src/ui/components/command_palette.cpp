@@ -280,6 +280,14 @@ auto CommandPalette::property_names() const -> std::vector<std::string_view> {
 
 auto CommandPalette::invoke_action(std::string_view action, std::string_view argument) -> bool {
   if (action == "activate" || action == "submit") return activate_highlighted();
+  // 关闭：`on_close` 是声明式 overlay 的“不认领”信号（下一帧框架 sweep 摘除）。
+  // 没有它的话，`invoke(close)` 只能得到 `handled=false`——面板既关不掉，
+  // 又因为遮罩仍在而挡住后面所有点击（实测：E2E 里“关了面板再点菜单”永远失败）。
+  if (action == "close") {
+    set_visible(false);
+    if (on_close) on_close();
+    return true;
+  }
   if (action == "select") {
     // argument：序号或命令 id
     if (argument.empty()) return false;

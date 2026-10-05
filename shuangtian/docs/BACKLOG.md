@@ -3,6 +3,61 @@
 > 本文件是唯一权威清单，完成后移入「已完成」并在 DESIGN.md 更新里程碑。
 > **诚实原则**：写着「待做」却已完成的条目会误导读者；写着「已完成」却没落地的条目更糟。
 
+## 已完成（2026-10-05 codeeditor 可用性打磨轮）
+
+背景：报告「很多特性实际都不能用」——改为**控制通道实测驱动**：逐条跑真实交互、
+截图/像素测量取证，再按根因深浅分流到框架层与示例层。以下条目全部带回归测试，
+并对关键修复做了**逆向验证**（临时回退修复 → 测试变红 → 恢复）。
+
+### 框架层（`ui` 通用，不只 codeeditor 受益）
+
+- [x] **声明式 overlay 宿主吞掉全屏输入**：宿主是铺满视口的 `Panel`，而 `Element::hit_test`
+  按整块矩形算 → 浮层一挂上，编辑器/侧栏/状态栏**全部点不动**（实测：菜单打开后
+  连“点面板外关掉它”都做不到）。改为 `OverlayHost`：命中默认收窄到子元素（非模态浮层穿透），
+  可按需切**屏障形态**（瞬态浮层：面板外点击=关闭且不穿透）。回归：`codeeditor_e2e.py [10]/[11b]`。
+- [x] **浮层键盘分派只问最外层宿主**：`UiRoot::dispatch` 的模态分支对 overlay 只调一次
+  `on_event`；宿主自己不认 Esc → 真正认键的 `MenuPanel`/`CommandPalette` 在子树里收不到，
+  “Esc 关面板”永远失效。新增 `dispatch_key_into`（深度优先下钻，容器自身优先），
+  并修掉“先子后父”会让输入框先吞掉方向键的问题。回归：同上。
+- [x] **`dsl::menu_bar` 未接 `on_menu_close`**：面板关闭请求无处可去（`MenuBar::open_index_`
+  关了，overlay 还在）；且缺一个“外部请求关闭”的**公开入口**。补 `MenuBar::close_panel()`
+  并在声明式封装里接线。
+- [x] **`CommandPalette` 没有 `close` 动作**：`invoke(close)` 恒 `handled=false`——
+  面板关不掉且遮罩仍在，把后续所有点击都挡住（实测：E2E“关了面板再点菜单”必失败）。
+- [x] **`Element` 新增元素拿不到宿主契约**：`host_` 只在 `UiRoot::set_content/add_overlay`
+  递归写一次，而声明式每帧新建元素是直接 `add_child`——于是 `CommandPalette::grab_focus()`
+  只能走兜底路径，“面板打开了、键盘焦点还在编辑器里”（敲字跑进代码）。
+  把继承点收敛到 `Element::add_child/insert_child`（`adopt_host()`）。
+- [x] **`CodeEditor`：PageUp/PageDown 无效且把视口弹回顶部**：旧实现只改 `scroll_y_`，
+  而其后 `ensure_cursor_visible` 按“光标恒可见”把它拉回光标行——光标在第 1 行时永远原地不动
+  （实测：手工设 `scroll=0,400`，一按 PageDown 立刻回到 0）。改为翻页 = 光标按可见行数移动 + 视口跟随。
+- [x] **`CodeEditor`：制表符量尺与绘制不同源**：`\t` 被当普通字形量宽/绘制，
+  于是光标、选择、查找高亮、缩进参考线、鼠标命中**全部错位且随列号累积**
+  （实测：同一段代码 Tab 缩进与 4 空格缩进渲染宽度不一致）。新增 `expand_tabs`
+  （展开到制表位 + 偏移映射），绘制/量宽/命中统一走它。像素证据：修复后两种缩进截图**逐段一致**。
+- [x] **`CodeEditor`：拖垂直滚动条会改光标**：命中落在“移光标”分支（实测光标从第 1 行跳到第 30 行）；
+  且命中判据（`content_width > bounds_`）与实际 `max_scroll_x()` 不同口径。改为两条滚动条
+  有独立拖拽态、几何收口到 `v_scroll_bar_rect/v_scroll_thumb_rect`（与绘制同一份）。
+- [x] **`CodeEditor`：只读保护只靠各入口自觉**：`delete_selection` 未查 `read_only_`，
+  配合属性面被重组重置就会“只读下清空全文”。保护下沉到 `delete_selection`（所有删除路径的必经点）。
+- [x] **示例每帧重设编辑器属性**：`build_editor_area` 每次重组都执行 `set_language/set_read_only`，
+  控制通道 `set read_only=true` / `set language=python` **活不过一次重组**（实测：
+  设完只读后一按 `select_all`——它写状态触发重组——立刻被改回 `false`）。改为只写“持久配置”，
+  语言/只读态归“当前标签”与属性面所有。
+
+### 示例层（`examples/codeeditor`）
+
+- [x] 菜单「编辑/选择」里的 `copy`/`paste`/`goto-line` 是**假的**（copy 只读不写剪贴板、
+  paste 插死字符串「（剪贴板内容）」、goto-line 恒跳第 1 行）→ 接真实 API。
+- [x] 查找条打开后未聚焦（敲字跑进编辑器）→ 帧首 `apply_pending_focus` 经宿主契约聚焦。
+
+### 验证
+
+- `st test` **748 用例全绿**（+9 新用例，`tests/ui_code_editor_paging_test.cpp`）/ `st lint` 0 违规 /
+  `codeeditor_e2e.py` **15 组全通过**（+6 组）/ mingw 交叉编译通过。
+- **逆向验证**（回退修复必须让测试变红）：PageDown、垂直滚动条拖拽、Tab 命中、
+  浮层键盘下钻、overlay 命中收窄、示例属性面——共 6 处逐条验证。
+
 ## 已完成（2026-10 代码重构轮）
 
 - [x] **组件绘制层重复助手收敛**（`components_internal.hpp`）：`oriented`(4 逐字副本，已变死代码)、

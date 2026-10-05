@@ -419,6 +419,8 @@ struct CodeEditorPage : Component {
   MenuBar* menu_bar_ptr{nullptr};
   CommandPalette* palette_ptr{nullptr};
   Input* find_replace_input{nullptr};   ///< 替换文本不进状态（不参与重组）
+  Input* find_needle_input{nullptr};    ///< 查找输入框（打开后把焦点交给它）
+  bool focus_find_pending_{false};      ///< 「查找条开→下一帧聚焦输入框」的待办标记
   Input* terminal_input{nullptr};
 
   // —— 动作：只写状态（同步由框架做）——
@@ -601,6 +603,23 @@ struct CodeEditorPage : Component {
       editor->find_next(false);
     }
     update_find_counter();
+    // 查找条出现后把焦点交给查找输入框：否则敲的字会落到底层编辑器里
+    //（与命令面板 `grab_focus()` 同一回事；查找条的构建在下一帧，故走待办标记）。
+    focus_find_pending_ = true;
+  }
+
+  /// 帧首处理“查找条已出现→把焦点交给它”（构建期拿不到输入框实例）。
+  void apply_pending_focus() {
+    if (!focus_find_pending_) return;
+    if (find_needle_input == nullptr) return;
+    focus_find_pending_ = false;
+    if (!find_open_.value()) return;
+    // 走宿主焦点契约（与 `CommandPalette::grab_focus` 同一路径）：
+    // 直接把 `Input::activate()` 当“拿焦点”是错的——它的语义是“触发默认动作”
+    // （对 Input 就是 `on_submit`，会当场多执行一次查找）。
+    if (auto* host = find_needle_input->host(); host != nullptr) {
+      (void)host->set_keyboard_focus(find_needle_input);
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -622,6 +641,8 @@ struct CodeEditorPage : Component {
       build_status_bar(c);
       build_find_bar(c);
     });
+    // 帧首处理“查找条已出现→聚焦查找输入框”（构建期拿不到输入框实例）。
+    apply_pending_focus();
     // 命令面板：**条件声明**（关掉 = 本帧不声明 → 框架 sweep 摘除）
     if (palette_open_.value()) build_palette(c);
     // 文本灌入：只在本帧的编辑器实例与「已装载的标签」不一致时写
@@ -730,9 +751,25 @@ struct CodeEditorPage : Component {
     else if (menu == "edit" && item == "redo") editor->redo();
     else if (menu == "edit" && item == "comment") editor->toggle_comment();
     else if (item == "select-all") editor->select_all();
-    else if (item == "copy") (void)editor->selected_text();
-    else if (item == "paste") editor->insert_text("（剪贴板内容）");
-    else if (item == "goto-line") editor->goto_line(1);
+    else if (item == "copy") {
+      // 真实复制：写编辑器剪贴板（无头环境没有系统剪贴板，见组件侧说明）
+      const std::string picked = editor->selected_text();
+      status_.set(picked.empty() ? "没有选中内容"
+                                 : std::format("已复制 {} 字符", st::utf8_length(picked)));
+      (void)editor->invoke_action("copy", {});
+    } else if (item == "paste") {
+      (void)editor->invoke_action("paste", {});
+    } else if (item == "cut") {
+      (void)editor->invoke_action("cut", {});
+    } else if (item == "goto-line") {
+      // 真实“转到行”：弹输入条太迂回，这里用命令面板的文件表代替跳转语义不够直观，
+      // 故改为“跳到当前问题的第一行”（真能在状态栏看到效果），无问题时如实报告。
+      if (problems_.empty()) {
+        status_.set("转到行：当前没有可跳转的问题行");
+      } else {
+        jump_to_problem(0);
+      }
+    }
   }
 
   // —— 3. 主体三栏 ——
@@ -865,17 +902,17 @@ struct CodeEditorPage : Component {
         });
         return;
       }
-      const std::size_t index = active < buffers.size() ? active : 0;
-      const auto& buffer = buffers[index];
       // 编辑器：custom<T> 逃生舱（CodeEditor 的一等接口属性面覆盖不到）。
-      // 只写元数据（字体/行宽/只读）——**文本由 build() 末尾按「装载的标签」灌入**：
-      // `set_text` 会清撤销栈并把光标归零，每次重组都写会让打字被重置（实测踩到）。
-      (void)custom<CodeEditor>(c, [this, &buffer](CodeEditor& ed) {
+      //
+      // **只写“持久配置”**（字体/行宽），且每项都自带相等早退——它们在语义上是
+      // 宿主配置、不归属性面管。**语言与只读态不在这里写**：它们由“当前标签”决定
+      // （见 `build()` 末尾的装载逻辑与 `#editor` 的动作面），每次重组都重设会把
+      // 控制通道 `set language=...` / `set read_only=true` 当场抹掉（实测：切一次
+      // 底部面板就全回默认值）。
+      (void)custom<CodeEditor>(c, [this](CodeEditor& ed) {
         ed.set_id("editor");   // 控制通道钩子：tools/*.py 依赖
         ed.set_font_size(13.5f);
         ed.set_tab_width(4);
-        ed.set_language(buffer.language);
-        ed.set_read_only(false);
         ed.style().grow = true;
         ed.style().padding = st::math::Insets{8.0f, 4.0f, 8.0f, 4.0f};
         ed.on_change = [this](std::string_view) { on_edit(); };
@@ -986,6 +1023,7 @@ struct CodeEditorPage : Component {
             field.set_id("find-needle");
             field.set_placeholder("查找");
             field.style().width = 170.0f;
+            find_needle_input = &field;
             field.on_change = [this](std::string_view value) {
               if (editor == nullptr) return;
               editor->set_find(std::string(value));
@@ -1029,7 +1067,9 @@ struct CodeEditorPage : Component {
         };
         palette.on_close = [this] { palette_open_.set(false); };
         palette_ptr = &palette;
-        // 面板显示后必须把焦点交给过滤框——不调的话敲的字会跑进底层编辑器里（实测踩到）
+        // 面板显示后必须把焦点交给过滤框——不调的话敲的字会跑进底层编辑器里（实测踩到）。
+        // 这一步要在**挂树之后**调：`Element::add_child` 会把宿主契约一路继承下去，
+        // 此时 `grab_focus()` 才能经 `UiRoot::set_focus` 真把键盘焦点转过来。
         palette.grab_focus();
       }, {.id = "command-palette"});
     });

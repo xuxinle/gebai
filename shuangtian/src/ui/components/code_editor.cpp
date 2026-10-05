@@ -425,6 +425,10 @@ void CodeEditor::notify_change() {
 }
 
 void CodeEditor::delete_selection() {
+  // 只读保护放在**这一层**：所有删除路径（Backspace/Delete/Ctrl+X/替换/
+  // `replace_selection`）都经它下来，只靠各入口自己判会漏（实测：只读下
+  // `select_all` + Delete 能把全文清空）。
+  if (read_only_) return;
   const auto [begin, end] = selection();
   if (begin == end) return;
   text_.erase(begin, end - begin);
@@ -826,12 +830,77 @@ auto CodeEditor::visible_line_range(const RenderContext& context) const
   return {std::min(first, total > 0 ? total - 1 : 0), std::min(last + 1, total)};
 }
 
+auto CodeEditor::expand_tabs(std::string_view row) const -> TabExpansion {
+  TabExpansion expansion;
+  expansion.map.resize(row.size() + 1);
+  expansion.text.reserve(row.size() + 8);
+  std::size_t column = 0;   // 逻辑列（码点）
+  const std::size_t width = static_cast<std::size_t>(std::max(1, tab_width_));
+  for (std::size_t index = 0; index < row.size();) {
+    expansion.map[index] = expansion.text.size();
+    const char raw = row[index];
+    if (raw == '\t') {
+      // 补到下一个制表位（至少一列：列 0 的 Tab 展开为 width 个空格）
+      const std::size_t filler = width - (column % width);
+      expansion.text.append(filler, ' ');
+      column += filler;
+      ++index;
+      continue;
+    }
+    // 非 ASCII：整码点一起走（避免把一个多字节字符截成一个字节）
+    const std::size_t next = (static_cast<unsigned char>(raw) < 0x80U) ? index + 1 : utf8_next(row, index);
+    expansion.text.append(row.substr(index, next - index));
+    expansion.map[next] = expansion.text.size();
+    column += 1;
+    index = next;
+  }
+  expansion.map[row.size()] = expansion.text.size();
+  return expansion;
+}
+
+auto CodeEditor::v_scroll_bar_rect(const RenderContext& context) const -> math::Rect {
+  if (bounds_.is_empty()) return {};
+  // 内容未溢出时不画也不命中（否则空文档上下也会有一条可拖的条纹）
+  if (content_height() <= bounds_.height || bounds_.height <= 0.0f) return {};
+  const float reserve = max_scroll_x(context) > 0.5f ? kScrollBarWidth : 0.0f;
+  return math::Rect{bounds_.right() - kScrollBarWidth - 2.0f, bounds_.y,
+                    kScrollBarWidth, std::max(1.0f, bounds_.height - reserve)};
+}
+
+auto CodeEditor::v_scroll_thumb_rect(const RenderContext& context) const -> math::Rect {
+  const math::Rect track = v_scroll_bar_rect(context);
+  if (track.width <= 0.0f) return {};
+  const float total = content_height();
+  if (total <= 0.0f) return {};
+  const float thumb = std::max(24.0f, track.height * std::min(1.0f, track.height / total));
+  const float travel = std::max(1.0f, track.height - thumb);
+  const float max_scroll = std::max(1.0f, total - bounds_.height);
+  const float offset = std::clamp(scroll_y_ / max_scroll, 0.0f, 1.0f) * travel;
+  return math::Rect{track.x, track.y + offset, track.width, thumb};
+}
+
+void CodeEditor::apply_v_scroll_drag(const RenderContext& context, float pointer_y) {
+  const math::Rect track = v_scroll_bar_rect(context);
+  if (track.width <= 0.0f) return;
+  const float total = content_height();
+  const float thumb = std::max(24.0f, track.height * std::min(1.0f, track.height / total));
+  const float travel = std::max(1.0f, track.height - thumb);
+  const float local = std::clamp((pointer_y - track.y - v_drag_offset_) / travel, 0.0f, 1.0f);
+  const float max_scroll = std::max(0.0f, total - bounds_.height);
+  // **不碰光标**：滚动条的语义是“看另一个地方”，不是“把光标挪过去”。
+  scroll_y_ = local * max_scroll;
+  mark_dirty();
+}
+
 auto CodeEditor::x_for_index(const RenderContext& context, std::size_t index) const -> float {
   rebuild_line_geometry(context);
   const std::size_t line = line_of_index(index);
   const std::size_t start = line_start(line);
   const std::size_t stop = std::min(index, text_.size());
-  const std::string_view prefix = std::string_view(text_).substr(start, stop - start);
+  const std::string_view raw = std::string_view(text_).substr(start, stop - start);
+  // **制表符按制表位展开后再量宽**：展开后与绘制同源（见 `expand_tabs`）。
+  const TabExpansion expanded = expand_tabs(raw);
+  const std::string_view prefix = expanded.text;
   // **字体角色必须与绘制一致**（Monospace）：漏传则落到接口默认的 Proportional，
   // 于是“量宽用比例字体、绘字用等宽字体”，光标/选择/查找高亮/缩进线全部对不上字，
   // 且偏移随列号线性累积（实测 45 列处偏 7.7px——用户报的“光标漂移”就是这个）。
@@ -850,11 +919,17 @@ auto CodeEditor::index_at_point(const RenderContext& context, math::Point point)
   const TextPort& port = text_port_of(context);
   const float target = point.x - (bounds_.x + gutter_cache_ + kGutterPadding - scroll_x_);
   if (target <= 0.0f) return begin;
+  // **先展开制表符再逐字量宽**（与绘制/x_for_index 同一量尺）：
+  // 直接把 `\t` 当字形去量会让命中在含 Tab 的行上整体错位。
+  const TabExpansion expanded = expand_tabs(std::string_view(text_).substr(begin, end - begin));
   float width = 0.0f;
   std::size_t index = begin;
   while (index < end) {
     const std::size_t next = utf8_next(text_, index);
-    const float advance = port.measure_width(std::string_view(text_).substr(index, next - index), font_size_, text::FontRole::Monospace);
+    const std::size_t from = expanded.map[index - begin];
+    const std::size_t to = expanded.map[std::min(next, end) - begin];
+    const float advance = port.measure_width(expanded.text.substr(from, to - from), font_size_,
+                                             text::FontRole::Monospace);
     if (width + advance * 0.5f > target) return index;
     width += advance;
     index = next;
@@ -1096,6 +1171,16 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     const float row_top = origin_y + static_cast<float>(line) * height;
     const auto [begin, end] = line_spans_[line];
     const std::string_view row = std::string_view(text_).substr(begin, end - begin);
+    // **本行所有 x 坐标的唯一量尺**：制表符先展开、所有偏移经 `expanded.map` 换算。
+    // 选择/命中高亮/缩进参考线/token 递推各自量宽都会因 `\t` 而错位，
+    // 统一到这一处后它们天然同源。
+    const TabExpansion expanded = expand_tabs(row);
+    const auto x_at = [&](std::size_t offset) -> float {
+      const std::size_t at = std::min(offset, row.size());
+      const std::size_t mapped = expanded.map[at];
+      return origin_x + port.measure_width(std::string_view(expanded.text).substr(0, mapped),
+                                           font_size_, text::FontRole::Monospace);
+    };
 
     // 悬停行底纹（最淡的一层；当前行与选择压在它上面）
     if (static_cast<int>(line) == hover_line_ && line != current) {
@@ -1121,12 +1206,8 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
         if (hit_end <= begin || hit_begin >= end) continue;
         const std::size_t from = std::max(hit_begin, begin);
         const std::size_t to = std::min(hit_end, end);
-        const float x0 = origin_x + port.measure_width(
-                                         std::string_view(text_).substr(begin, from - begin),
-                                         font_size_, text::FontRole::Monospace);
-        const float x1 = origin_x + port.measure_width(
-                                         std::string_view(text_).substr(begin, to - begin),
-                                         font_size_, text::FontRole::Monospace);
+        const float x0 = x_at(from - begin);
+        const float x1 = x_at(to - begin);
         canvas.fill_rect(math::Rect{x0, row_top, std::max(x1 - x0, 2.0f), height},
                          raster::Paint::solid(m == find_active_ ? syntax.find_active
                                                                 : syntax.find_highlight),
@@ -1141,10 +1222,8 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
       if (slice_end > slice_begin || (sel_begin <= begin && sel_end >= end + 1)) {
         const std::size_t from = std::max(slice_begin, begin);
         const std::size_t to = std::min(std::max(slice_end, from), end);
-        const float x0 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, from - begin), font_size_, text::FontRole::Monospace);
-        const float x1 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, to - begin), font_size_, text::FontRole::Monospace);
+        const float x0 = x_at(from < begin ? 0 : from - begin);
+        const float x1 = x_at(to < begin ? 0 : to - begin);
         const float width = std::max(x1 - x0, (to == from && to < end) ? 2.0f : 0.0f);
         if (width > 0.0f) {
           canvas.fill_rect(math::Rect{x0, row_top, width, height},
@@ -1157,11 +1236,9 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     if (brackets.has_value()) {
       for (const std::size_t position : {brackets->first, brackets->second}) {
         if (position < begin || position >= end) continue;
-        const float x0 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, position - begin), font_size_, text::FontRole::Monospace);
+        const float x0 = x_at(position < begin ? 0 : position - begin);
         const std::size_t next = utf8_next(text_, position);
-        const float x1 = origin_x + port.measure_width(
-                                       std::string_view(text_).substr(begin, next - begin), font_size_, text::FontRole::Monospace);
+        const float x1 = x_at(next < begin ? 0 : std::min(next, end) - begin);
         canvas.fill_rect(math::Rect{x0 - 1.0f, row_top, x1 - x0 + 2.0f, height},
                          raster::Paint::solid(syntax.matching_bracket), 2.0f);
       }
@@ -1175,49 +1252,52 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
     // 又能一眼看出缩进层次（与主流编辑器同量级）。
     if (indent_guides_ && !row.empty()) {
       const float space_w = text_port_of(context).measure_width(" ", font_size_,
-                                                               text::FontRole::Monospace);      std::size_t visual = 0;
+                                                               text::FontRole::Monospace);
+      const std::size_t unit = static_cast<std::size_t>(std::max(1, tab_width_));
+      // 缩进宽度按**展开后**的视觉列算（与绘制/命中同一量尺）——原先 Tab 按
+      // `tab_width`、空格按 1 各自累加，含 Tab 的行参考线会与字符错位。
+      std::size_t visual = 0;
       for (std::size_t probe = begin; probe < end; ++probe) {
         const char raw = text_[probe];
         if (raw != ' ' && raw != '\t') break;
-        const std::size_t width = raw == '\t'
-                                      ? static_cast<std::size_t>(tab_width_) - (visual % static_cast<std::size_t>(tab_width_))
-                                      : 1U;
-        const std::size_t previous_level = visual / static_cast<std::size_t>(tab_width_);
-        visual += width;
-        const std::size_t level = visual / static_cast<std::size_t>(tab_width_);
-        // 每跨过一个完整缩进级画一条
+        const std::size_t previous_level = visual / unit;
+        visual += raw == '\t' ? unit - (visual % unit) : 1U;
+        const std::size_t level = visual / unit;
         for (std::size_t step = previous_level; step < level; ++step) {
-          const float x = origin_x + static_cast<float>((step + 1) * static_cast<std::size_t>(tab_width_)) * space_w - 0.5f;
+          const float x = origin_x + static_cast<float>((step + 1) * unit) * space_w - 0.5f;
           canvas.fill_rect(math::Rect{x, row_top, 1.0f, height},
                            raster::Paint::solid(colors.border_strong), 0.0f);
         }
       }
     }
 
-    // token 着色绘制（无 token 时整行按 plain 画）
+    // token 着色绘制：**统一走展开后的字形串**（`\t` 已变成空格）——
+    // 直接 `draw(row)` 会把制表符交给字体自己处理，与上方量尺不同源。
     float pen = origin_x;
     const auto& tokens = line < line_tokens_.size() ? line_tokens_[line] : LineTokens{};
+    const auto draw_span = [&](std::size_t from, std::size_t to, math::Color color) {
+      const std::size_t mapped_from = expanded.map[std::min(from, row.size())];
+      const std::size_t mapped_to = expanded.map[std::min(to, row.size())];
+      if (mapped_to <= mapped_from) return;
+      const std::string_view slice =
+          std::string_view(expanded.text).substr(mapped_from, mapped_to - mapped_from);
+      port.draw(canvas, slice, math::Point{pen, row_top}, font_size_, color,
+                text::FontRole::Monospace);
+      pen += port.measure_width(slice, font_size_, text::FontRole::Monospace);
+    };
     if (tokens.empty()) {
-      port.draw(canvas, row, math::Point{pen, row_top}, font_size_, syntax.plain, text::FontRole::Monospace);
+      draw_span(0, row.size(), syntax.plain);
     } else {
       std::size_t consumed = 0;
       for (const auto& token : tokens) {
-        if (token.begin > consumed) {
-          const std::string_view gap = row.substr(consumed, token.begin - consumed);
-          port.draw(canvas, gap, math::Point{pen, row_top}, font_size_, syntax.plain, text::FontRole::Monospace);
-          pen += port.measure_width(gap, font_size_, text::FontRole::Monospace);
-        }
-        const std::size_t length = std::min(token.end, row.size()) - std::min(token.begin, row.size());
-        if (length == 0 || token.begin >= row.size()) continue;
-        const std::string_view slice = row.substr(token.begin, length);
-        port.draw(canvas, slice, math::Point{pen, row_top}, font_size_, token_color(syntax, token.kind),
-                   text::FontRole::Monospace);
-        pen += port.measure_width(slice, font_size_, text::FontRole::Monospace);
-        consumed = token.begin + length;
+        const std::size_t token_begin = std::min(token.begin, row.size());
+        if (token_begin > consumed) draw_span(consumed, token_begin, syntax.plain);
+        const std::size_t length = std::min(token.end, row.size()) - token_begin;
+        if (length == 0) continue;
+        draw_span(token_begin, token_begin + length, token_color(syntax, token.kind));
+        consumed = token_begin + length;
       }
-      if (consumed < row.size()) {
-        port.draw(canvas, row.substr(consumed), math::Point{pen, row_top}, font_size_, syntax.plain, text::FontRole::Monospace);
-      }
+      if (consumed < row.size()) draw_span(consumed, row.size(), syntax.plain);
     }
 
     // 行号
@@ -1244,27 +1324,20 @@ void CodeEditor::paint_content(const RenderContext& context, raster::Surface& ca
 
   // —— 滚动条（两条都画；滑块长度与位置由内容/视口比例推出）——
   //
-  // 之前只有一根 9px 的自绘竖条（不可拖拽）且完全没有水平条：长行只能靠 Shift+滚轮，
-  // 而“有没有溢出”看不出来。现在竖条让出底部一行给水平条，两者都支持拖拽。
-  const bool has_v = content_height() > bounds_.height && bounds_.height > 0.0f;
-  const bool has_h = max_scroll_x(context) > 0.5f;
-  const float bar_reserve = has_h ? kScrollBarWidth : 0.0f;
-
-  if (has_v) {
-    const float track_h = std::max(1.0f, bounds_.height - bar_reserve);
-    const float total_height = content_height();
-    const float ratio = track_h / total_height;
-    const float thumb = std::max(24.0f, track_h * ratio);
-    const float travel = track_h - thumb;
-    const float max_scroll = std::max(1.0f, total_height - bounds_.height);
-    const float offset = std::clamp(scroll_y_ / max_scroll, 0.0f, 1.0f) * travel;
-    const float bar_x = bounds_.right() - kScrollBarWidth - 2.0f;
-    canvas.fill_rect(math::Rect{bar_x, bounds_.y + offset, kScrollBarWidth * 0.5f, thumb},
-                     raster::Paint::solid(colors.border_strong), kScrollBarWidth * 0.25f);
-    canvas.fill_rect(math::Rect{bar_x + kScrollBarWidth * 0.5f - 1.5f, bounds_.y + offset, 3.0f, thumb},
-                     raster::Paint::solid(colors.text_faint), 1.5f);
+  // 两条滚动条的几何都由 `v_scroll_bar_rect`/`h_scroll_bar_rect` 给出（与命中同一份）。
+  const float bar_x = bounds_.right() - kScrollBarWidth - 2.0f;
+  const float bar_h = std::max(1.0f, bounds_.height - (max_scroll_x(context) > 0.5f ? kScrollBarWidth : 0.0f));
+  const math::Rect v_track = v_scroll_bar_rect(context);
+  const math::Rect v_thumb = v_scroll_thumb_rect(context);
+  if (v_track.width > 0.0f) {
+    canvas.fill_rect(math::Rect{bar_x, bounds_.y, kScrollBarWidth, bar_h},
+                     raster::Paint::solid(colors.surface_alt), kScrollBarWidth * 0.5f);
+    canvas.fill_rect(math::Rect{v_thumb.x + kScrollBarWidth * 0.5f - 1.5f, v_thumb.y, 3.0f,
+                                v_thumb.height},
+                     raster::Paint::solid(colors.border_strong), 1.5f);
   }
 
+  const bool has_h = max_scroll_x(context) > 0.5f;
   if (has_h) {
     const math::Rect track = h_scroll_bar_rect();
     canvas.fill_rect(track, raster::Paint::solid(colors.surface_alt), kScrollBarWidth * 0.5f);
@@ -1308,8 +1381,20 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
   switch (event.kind) {
     case EventKind::MouseDown: {
       rebuild_line_geometry(context);
-      // 滚动条优先：水平条落在文本区底部一行，命中时进拖拽而不是移光标
-      if (h_scroll_bar_rect().contains(event.position) && content_width(context) > bounds_.width) {
+      // 滚动条优先：两条滚动条都**不能落到“移光标”分支**上——
+      // 拖滚动条是“看另一个地方”，把光标一起挪走是错的（实测：拖垂直条后光标从第 1 行跳到第 30 行）。
+      const math::Rect v_track = v_scroll_bar_rect(context);
+      if (v_track.width > 0.0f && v_track.contains(event.position)) {
+        const math::Rect thumb = v_scroll_thumb_rect(context);
+        v_dragging_ = true;
+        // 点在滑块上：保留相对抓取点（不跳变）；点在轨道上：直接跳到该位置
+        v_drag_offset_ = thumb.contains(event.position)
+                             ? event.position.y - thumb.y
+                             : thumb.height * 0.5f;
+        apply_v_scroll_drag(context, event.position.y);
+        return true;
+      }
+      if (h_scroll_bar_rect().contains(event.position) && max_scroll_x(context) > 0.0f) {
         h_dragging_ = true;
         apply_h_scroll_drag(context, event.position.x);
         return true;
@@ -1350,6 +1435,10 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
         apply_h_scroll_drag(context, event.position.x);
         return true;
       }
+      if (v_dragging_) {
+        apply_v_scroll_drag(context, event.position.y);
+        return true;
+      }
       // 悬停行底纹（阅读长文件时定位当前行；VSCode 同族反馈）
       const int line = hover_line_at(context, event.position);
       if (line != hover_line_) {
@@ -1361,10 +1450,12 @@ auto CodeEditor::on_event(const RenderContext& context, Event& event) -> bool {
     case EventKind::MouseUp:
       selecting_ = false;
       h_dragging_ = false;
+      v_dragging_ = false;
       return false;  // 不吞：Click 的激活语义照常走
     case EventKind::Click:
       selecting_ = false;
       h_dragging_ = false;
+      v_dragging_ = false;
       return false;  // 不吞：Click 的激活语义照常走
     case EventKind::Wheel: {
       // Shift+滚轮 = 水平滚动（主流编辑器惯例；也是长行唯一不靠拖拽的入口）
@@ -1501,13 +1592,28 @@ auto CodeEditor::handle_key(const RenderContext& context, const Event& event) ->
     smart_home(extend);
   } else if (key == "End") {
     move_to_edge(true, extend);
-  } else if (key == "PageUp") {
-    scroll_y_ = std::max(0.0f, scroll_y_ - std::max(1.0f, bounds_.height - 40.0f));
+  } else if (key == "PageUp" || key == "PageDown" || key == "Pageup" || key == "Pagedown") {
+    // 翻页 = 滚一屏 **且把光标带进视口**（主流编辑器语义）。
+    //
+    // 原先只改 `scroll_y_`：它不移动光标，而其后 `ensure_cursor_visible()` 又按
+    // “光标恒在视口内”把滚动偏移拉回光标那一行——**光标在第 1 行时翻页永远原地不动**
+    // （实测：scroll 手工设到 400，一按 PageDown 就被拉回 0）。光标先按可见行数移动，
+    // 滚动随之跟上，两者不再打架。
+    const bool down = key == "PageDown" || key == "Pagedown";
+    const std::size_t rows = std::max<std::size_t>(1, visible_line_count(context) - 1);
+    const std::size_t line = line_of_index(cursor_);
+    const std::size_t total = line_count();
+    const std::size_t target = down ? std::min(line + rows, total == 0 ? 0 : total - 1)
+                                    : (line > rows ? line - rows : 0);
+    cursor_ = index_at_column(target, column_of(cursor_));
+    if (!extend) anchor_ = cursor_;
+    ensure_cursor_visible(context);
+    // 滚到“新光标恰好处于原先的相对位置”：向下把目标行顶到视口末，向上顶到视口首。
+    scroll_y_ = static_cast<float>(target) * line_height_cache_ - kTopPadding;
+    clamp_scroll(context);
     mark_dirty();
-  } else if (key == "PageDown") {
-    scroll_y_ = std::min(std::max(0.0f, content_height() - bounds_.height),
-                         scroll_y_ + std::max(1.0f, bounds_.height - 40.0f));
-    mark_dirty();
+    if (on_cursor_change) on_cursor_change();
+    return true;
   } else if (key == "Escape") {
     clear_selection();
     mark_dirty();
