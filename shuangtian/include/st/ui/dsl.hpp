@@ -232,6 +232,13 @@ struct ReconcileStats {
   int elements_created{0};    ///< 新建元素数
   int elements_removed{0};    ///< 移除元素数
   int elements_moved{0};      ///< 因 key 重排而换位的元素数（诊断：增量对齐的代价）
+  /// 本次 keyed 区段里出现的**重名 key**（去重后的清单，诊断用）。
+  ///
+  /// 为什么值得单独统计：key 重名时对齐会退回「按位置」，而按位置在数据重排后会
+  /// 把状态带到别的行上（勾选/光标/滚动这类元素级状态会“串台”）。这类缺陷在画面上
+  /// **看不出来**（行数、文案都对），只有操作性判断（“点第三条却改了第一条”）能暴露。
+  /// 有了这个计数，至少能在测试与诊断里一眼看到“你的 key 重了”。
+  std::vector<std::string> key_collisions{};
   int properties_applied{0};  ///< 经 apply_properties 落地的属性数
   int effects_run{0};         ///< 本次执行的 effect 数（依赖变化的）
   bool budget_exceeded{false};///< 预算耗尽（剩余作用域顺延）
@@ -271,6 +278,11 @@ void rebuild_all();
   /// 还没轮到**（它的 key 在本区段里，待会儿会被复用）——分不清这一点就会把它当残留
   /// 销毁，key 复用整个失效（实测：头插一项后其余项全部重建、id 漂移）。
   /// 与 `end_keyed_region()` 成对。
+  ///
+  /// **key 必须唯一**：重复的 key 会被**旁路**（该 item 退回按位置对齐），
+  /// 否则同一个 key 的第二项会把第一项的元素“偷”走——列表直接少一行。
+  /// 旁路而不是报错：重复 key 是常见业务数据（两条待办同名），不该让界面直接不渲染。
+  /// 重名清单一并记进 `ReconcileStats::key_collisions`（诊断可见）。
   void begin_keyed_region(const std::vector<std::string>& keys);
   /// 收尾一个 keyed 区段（与 `begin_keyed_region` 成对）。
   void end_keyed_region();
@@ -674,17 +686,26 @@ auto tree(Composer& c, const std::vector<TreeNodeData>& nodes,
 /// 编辑光标得以保留）。
 ///
 /// ```cpp
-/// for_each<Row>(c, rows.value(), [](const Row& r) { return r.id; }, [&](const Row& r) {
-///   list_item(c, {.text = r.name});
+/// for_each<Row>(c, rows.value(), [](const Row& r) { return r.id; },
+///               [&](const Row& r, std::size_t index) {
+///   list_item(c, {.text = r.name});   // index：回调里按位置动手（勾选/删除/上下移）时用
 /// });
 /// ```
 ///
 /// 契约（与 hooks 同一类，不知道就会写错）：
 /// - **`item_fn` 必须为每个 item 恰好声明一个顶层元素**（对齐单位是「一个子元素 ↔ 一个 key」）；
+/// - **`item_fn` 可只收 item（不写第二参）**：弧数按签名分派，两种写法都编译得过——
+///   不想用索引就不必写（不强迫每个调用方都接一个用不上的参数）；
 /// - `key_fn` 返回的业务身份在一帧内**不得重复**（重复时后一个按位置落位）；
 /// - 与 `sub_component` 不同，这里**不为每个 item 建独立作用域**——独立作用域需要
 ///   「每个 item 一个 Component」，而 `for_each` 的形态是就地声明（避免为简单列表
 ///   逼用户把 item 抽成组件）。需要 item 级细粒度失效时用 `sub_component`。
+///
+/// **`index` 参数为何必须给**（2026-10-05 新增，来自实战）：列表项的回调
+/// （勾选 / 删除 / 上下移）都要知道“我是第几项”。没有它时只能拿业务 key 反查整份数据
+/// （`find_if` 全表）——而当 key 用的是**显示文案**（“写周报”这类天然会重复的字符串）时，
+/// 反查只能命中**第一**个同文案的项：界面表现为「点第二条的勾选框，第一条被勾上」。
+/// 索引是唯一能确定“就是这一条”的凭据。
 template <class T, class KeyFn, class ItemFn>
 void for_each(Composer& c, const std::vector<T>& items, KeyFn key_fn, ItemFn item_fn) {
   // 先交整集合给重组器：它据此区分「还没轮到的兄弟」与「真残留」。
@@ -694,7 +715,12 @@ void for_each(Composer& c, const std::vector<T>& items, KeyFn key_fn, ItemFn ite
   c.begin_keyed_region(keys);
   for (std::size_t index = 0; index < items.size(); ++index) {
     c.begin_keyed_item(keys[index], index);
-    item_fn(items[index]);
+    // 按签名分派：只收一个形参的 item_fn 也直接用（见上方契约）
+    if constexpr (std::is_invocable_v<ItemFn&, const T&, std::size_t>) {
+      item_fn(items[index], index);
+    } else {
+      item_fn(items[index]);
+    }
     c.end_keyed_item();
   }
   c.end_keyed_region();

@@ -1143,6 +1143,147 @@ ST_TEST(dsl_for_each_reuses_by_key) {
   (void)stats_before;
 }
 
+// ── `for_each` 的 index 参数（重复文案的列表项不再串台）────────────────────────
+//
+// 起因（真实应用）：待办列表的勾选框回调要"改第几项"，而 `item_fn` 当时只给 item——
+// 回调只能拿业务 key 回原文查（`find_if` 全表）。key 用的是**显示文案**（"写周报"这种
+// 天然会重复的字符串）时，回查永远命中**第一**条：界面上表现为
+// 「点第二条的勾选框，第一条被勾上」——两条同文案的行看起来完全独立，行为却串台。
+//
+// 所以本组用例钉三件事（对应交接清单里的三条判据）：
+// ① 两条同 text 的 item → 渲染**两行独立**（各自有元素、各自能定位）；
+// ② 点第二条的勾选框 → 只改第二条；
+// ③ 删第一条后 → 第二条的**身份（id）不漂移**。
+//
+// 为什么必须用"同 text"当场景：key 若天然唯一（如 id），三条判据**在修复前也全绿**——
+// 那样就成了"恒绿测试"（拦不住任何东西）。这个场景才是它存在的理由。
+struct DupRow {
+  std::string text{};      ///< 显示文案，**刻意重复**（就是 key，也就是踩坑的那个形状）
+  bool checked{false};
+  // `State<T>` 的相等比较需要它（与 `Task` 同口径）
+  auto operator==(const DupRow& other) const -> bool = default;
+};
+
+struct DupKeyPage : Component {
+  State<std::vector<DupRow>> rows{
+      std::vector<DupRow>{{"写周报", false}, {"写周报", false}}};
+  /// 每次 `item_fn` 收到的索引（按声明顺序）——用来断言"索引确实传进来了"
+  std::vector<std::size_t> seen_index{};
+
+  void build(Composer& c) override {
+    seen_index.clear();
+    column(c, {.id = "dups"}, [&] {
+      for_each<DupRow>(
+          c, rows.value(), [](const DupRow& row) { return row.text; },
+          [&](const DupRow& row, std::size_t index) {
+            seen_index.push_back(index);
+            // 回调里按 index 定位（这正是实战需要的形状：index 捕获进闭包，
+            // 于是点击处理能直接写"改第 index 项"，而不必反查）
+            checkbox(c, row.text, row.checked,
+                     [this, index](bool state) {
+                       auto copy = rows.value();
+                       if (index < copy.size()) copy[index].checked = state;
+                       rows.set(copy);
+                     },
+                     {.key = row.text});
+          });
+    });
+  }
+};
+
+ST_TEST(dsl_for_each_item_callback_gets_index) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto page = std::make_shared<DupKeyPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  // ① 两条同文案的 item → **两行独立**（不是两行都落在同一个元素上）
+  Element* list = root.find("dups");
+  ST_REQUIRE(list != nullptr);
+  ST_CHECK_EQ(list->child_count(), 2U);
+  ST_CHECK(list->child_at(0) != list->child_at(1));
+  // 索引按序传进来（不用 `ST_CHECK_EQ`：它要格式化 `vector`，而测试框架只给标量
+  // 装了 formatter——顺手也证明了这条断言不需要扩测试框架）
+  ST_REQUIRE(page->seen_index.size() == 2U);
+  ST_CHECK_EQ(page->seen_index[0], 0U);
+  ST_CHECK_EQ(page->seen_index[1], 1U);
+  // 重名 key 必须被记为**诊断信息**（对齐退回按位置，但调用方得能知道“我把 key 写重了”）
+  const ReconcileStats stats = host->stats();
+  ST_CHECK_EQ(stats.key_collisions.size(), 1U);
+  if (!stats.key_collisions.empty()) ST_CHECK_EQ(stats.key_collisions[0], std::string("写周报"));
+}
+
+ST_TEST(dsl_for_each_index_targets_the_right_row) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto page = std::make_shared<DupKeyPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+
+  Element* list = root.find("dups");
+  ST_REQUIRE(list != nullptr);
+  ST_REQUIRE(list->child_count() == 2U);
+
+  // ② 点**第二条**的勾选框 → 只改第二条（修复前：回查 key 命中第一条 → 第一条被改）
+  auto* second = dynamic_cast<Checkbox*>(list->child_at(1));
+  ST_REQUIRE(second != nullptr);
+  ST_CHECK(second->checked() == false);
+  second->activate();   // 勾选：触发 `on_change`（回调里按 index 定位）
+  (void)host->tick();
+  root.layout(true);
+
+  const auto rows = page->rows.value();
+  ST_REQUIRE(rows.size() == 2U);
+  ST_CHECK(rows[0].checked == false);   // 第一条**不受影响**（这就是本用例的全部意义）
+  ST_CHECK(rows[1].checked == true);
+
+  // ③ 删掉第一条 → 第二条的 id 不漂移（身份跟 key 走的另一种表现：
+  //    两条同 key 时靠**位置**兜底，删前项后后项仍能各就各位）
+  list = root.find("dups");
+  ST_REQUIRE(list != nullptr);
+  const ElementId id_second_before = list->child_at(1)->derived_id();
+  auto remaining = page->rows.value();
+  remaining.erase(remaining.begin());
+  page->rows.set(remaining);
+  (void)host->tick();
+  root.layout(true);
+  list = root.find("dups");
+  ST_REQUIRE(list != nullptr);
+  ST_REQUIRE(list->child_count() == 1U);
+  ST_CHECK_EQ(list->child_at(0)->derived_id(), id_second_before);
+}
+
+/// 单参 `item_fn` 仍然可用（按签名分派；不强迫每个调用方都接一个用不上的参数）。
+///
+/// 这条防的是"为了加索引而把既有调用点全改一遍"——那会让 API 变更的成本转嫁到
+/// 每一个只是渲染列表的页面上（本仓多处如此）。分派两种签名，两边都不需要改。
+struct SingleArgPage : Component {
+  void build(Composer& c) override {
+    column(c, {.id = "single"}, [&] {
+      for_each<Task>(c, std::vector<Task>{{"a", "甲"}}, [](const Task& task) { return task.id; },
+                     [&](const Task& task) {   // 只收一个参数：老写法必须照样编译
+                       text(c, [task] { return task.name; }, {.key = task.id + "-label"});
+                     });
+    });
+  }
+};
+
+ST_TEST(dsl_for_each_single_argument_item_fn_still_works) {
+  UiRoot root;
+  root.set_viewport({400.0F, 300.0F});
+  auto host = dsl::mount(root, std::make_shared<SingleArgPage>());
+  ST_REQUIRE(host != nullptr);
+  root.layout(true);
+  Element* list = root.find("single");
+  ST_REQUIRE(list != nullptr);
+  ST_CHECK_EQ(list->child_count(), 1U);
+  // 列表里那一个元素就是 `item_fn` 声明的 Text（它的 key 是 `a-label`）
+  ST_CHECK_EQ(list->child_at(0)->key(), std::string("a-label"));
+}
+
 // ── 谬误注入：递归 build 被深度护栏截住（不是靠栈自己撞上限）──────────────
 //
 // 形态：组件在自己的 `build` 里又声明一个**自己**（写成状态计数就很容易踩到——

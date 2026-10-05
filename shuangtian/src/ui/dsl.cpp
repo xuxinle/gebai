@@ -416,9 +416,12 @@ struct Composer::Impl {
   /// 正在构建的 keyed item（`for_each`）：没有显式传入 key 的首个声明自动带上它。
   /// 空 = 不在 keyed 区段（或该 item 还没声明元素）。
   std::string keyed_item_key{};
-  /// 当前 keyed 区段（`for_each`）用到的全部 key：区分「还没轮到的兄弟」（待复用）
-  /// 与「真残留」（本次数据里没有它——可释放）。
+  /// 本区段用到的全部 key：区分「还没轮到的兄弟」（待复用）与「真残留」（本次数据里没有它——可释放）。
   std::unordered_set<std::string> keyed_region{};
+  /// 本区段里**重复出现**过的 key（对齐时必须旁路它们，见 `begin_keyed_region`）。
+  std::unordered_set<std::string> keyed_duplicates{};
+  /// 本区段里**已被认领**的元素：同一 key 只允许被一个 item 认领（防“后来者偷走前一个的元素”）。
+  std::unordered_set<const Element*> claimed_keyed{};
   bool keyed_region_active{false};
 
   std::unordered_map<const Element*, std::size_t> child_cursor{};  // 每父元素的子游标
@@ -883,17 +886,25 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
   // 两套机制共用同一份对齐代码：命中 key ⇒ 把元素挪到当前游标位；**优先挪**——
   // 先挪开，被释放的那格恰好就是新元素要落的位置（于是不必做中间缓冲）。
   auto& cursor = impl_->child_cursor[parent];
-  const std::size_t content_count = parent->content_child_count();
+  std::size_t content_count = parent->content_child_count();
   const std::string wanted_key = !key.empty() ? std::string(key) : impl_->keyed_item_key;
-  // ① 按 key 找既有元素（**只取第一个**：同 key 重复时后一个退回位置对齐，不歧义）
+  // ① 按 key 找既有元素（跳过的元素 = 本区段里已被认领的同区兄弟/本 item 自己的）
+  //
+  // ⚠ **重名 key 必须旁路**（2026-10-05 修，实测事故）：key 重复时若照旧“取第一个”，
+  // 第二项会把第一项的**元素偷走**（挪到自己的游标位），于是两项落到同一个元素上、
+  // 列表直接少一行——而文案与行数在画面上看起来都没错（少的那行正是被偷的），
+  // 排查方向很容易跑偏。改成：重名的 key **退回按位置对齐**（两项各自守住自己的位置），
+  // 重名清单记进 `ReconcileStats::key_collisions`。
+  const bool key_is_unique =
+      !wanted_key.empty() && impl_->keyed_duplicates.count(wanted_key) == 0;
   Element* existing = nullptr;
-  if (!wanted_key.empty()) {
-    for (std::size_t index = 0; index < content_count; ++index) {
-      Element* candidate = parent->child_at(index);
-      if (candidate != nullptr && candidate->key() == wanted_key) {
-        existing = candidate;
-        break;
-      }
+  if (key_is_unique) {
+    for (std::size_t position = 0; position < content_count; ++position) {
+      Element* candidate = parent->child_at(position);
+      if (candidate == nullptr || candidate->key() != wanted_key) continue;
+      if (impl_->claimed_keyed.count(candidate) != 0) continue;   // 已被认领（同区兄弟）
+      existing = candidate;
+      break;
     }
   }
   // ② 命中且不在游标位：挪到游标位（其余元素相对顺序不变；挪出的那格留给本项）
@@ -935,6 +946,8 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
   ++cursor;
   // key/id 先行截获（id 的本职是被外部引用——保持选择器安全）
   if (!wanted_key.empty() && element->key() != wanted_key) element->set_key(wanted_key);
+  // 本项声明过的元素都算「已认领」（同区兄弟 / 同一 item 的多个顶层元素）
+  impl_->claimed_keyed.insert(element);
   if (props.is_object() && !props.empty()) {
     auto applied = ui::apply_properties(impl_->root, *element, props);
     if (applied.is_array()) {
@@ -1581,8 +1594,19 @@ void Composer::end_keyed_item() { impl_->keyed_item_key.clear(); }
 void Composer::begin_keyed_region(const std::vector<std::string>& keys) {
   // 本区段用到的全部 key：新建项顶到游标位时「那个位置上的兄弟是否还有归宿」靠它判断。
   impl_->keyed_region.clear();
+  impl_->keyed_duplicates.clear();
+  impl_->claimed_keyed.clear();
+  impl_->last_stats.key_collisions.clear();
+  std::unordered_set<std::string> seen;
   for (const std::string& key : keys) {
-    if (!key.empty()) impl_->keyed_region.insert(key);
+    if (key.empty()) continue;
+    impl_->keyed_region.insert(key);
+    // 重名 → 列入旁路集（并只在诊断里报一次）
+    if (!seen.insert(key).second) {
+      if (impl_->keyed_duplicates.insert(key).second) {
+        impl_->last_stats.key_collisions.push_back(key);
+      }
+    }
   }
   // 本区段游标从当前子位数起（区段前的兄弟已经声明过了）——区段结束前不动它。
   impl_->keyed_region_active = true;
@@ -1590,6 +1614,8 @@ void Composer::begin_keyed_region(const std::vector<std::string>& keys) {
 
 void Composer::end_keyed_region() {
   impl_->keyed_region.clear();
+  impl_->keyed_duplicates.clear();
+  impl_->claimed_keyed.clear();
   impl_->keyed_region_active = false;
   impl_->keyed_item_key.clear();
 }
