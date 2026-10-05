@@ -333,8 +333,13 @@ auto command_stats(const Arguments& arguments) -> int {
   for (const auto& f : stats->complex_functions) {
     st::print("  CC≈{:4d}  {:5d} 行  {}:{}  {}\n", f.complexity, f.lines, f.file, f.line, f.name);
   }
-  st::print("\n被包含最多的头（改动它 = 这些单元要重编）\n");
+  st::print("\n函数长度分布\n");
+  st::print("  >=200 行 {} · 150-199 {} · 100-149 {}\n", stats->functions_over_200,
+            stats->functions_over_150, stats->functions_over_100);
+  st::print("\n被包含最多的头（直接包含数）\n");
   for (const auto& h : stats->hot_headers) st::print("  {:4d}   {}\n", h.includers, h.header);
+  st::print("\n爆炸半径（改它要重编多少 .cpp，含传递）\n");
+  for (const auto& h : stats->blast_radius) st::print("  {:4d}   {}\n", h.includers, h.header);
   return 0;
 }
 

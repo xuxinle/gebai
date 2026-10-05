@@ -57,10 +57,16 @@ struct ProjectStats {
   int lines{0};
   int code_lines{0};
   int functions{0};
+  /// 函数长度分布（归一化后行数）。
+  int functions_over_200{0};
+  int functions_over_150{0};
+  int functions_over_100{0};
   std::vector<FileStat> biggest_files{};      ///< 按行数降序
   std::vector<FunctionStat> biggest_functions{};  ///< 按行数降序
   std::vector<FunctionStat> complex_functions{};  ///< 按近似复杂度降序
   std::vector<IncludeStat> hot_headers{};     ///< 按被包含次数降序
+  /// 头文件**爆炸半径**：包含它的 `.cpp` 数（含传递）——即“改这个头要重编多少”。
+  std::vector<IncludeStat> blast_radius{};    ///< 按传递包含它的 .cpp 数降序
 };
 
 /// 扫描工程（`include/`、`src/`、`tests/`、`examples/`、`tools/`）。

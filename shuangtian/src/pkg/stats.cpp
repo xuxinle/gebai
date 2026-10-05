@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <set>
 #include <format>
 
 #include "st/core/fs.hpp"
@@ -138,6 +139,9 @@ auto collect_stats(std::string_view root, std::size_t top) -> Result<ProjectStat
   ProjectStats stats;
   std::vector<FunctionStat> all_functions;
   std::map<std::string, int> header_includers;
+  /// 包含图：相对路径 → 它直接包含的项目内头（相对路径，`include/` 前缀已剥）。
+  std::map<std::string, std::vector<std::string>> include_graph;
+  std::vector<std::string> unit_files;   ///< 所有 `.cpp`（爆炸半径以它们为分母）
 
   const std::array<std::string_view, 5> roots{"include", "src", "tests", "examples", "tools"};
   for (const std::string_view directory : roots) {
@@ -276,7 +280,9 @@ auto collect_stats(std::string_view root, std::size_t top) -> Result<ProjectStat
       ++stats.files;
       stats.code_lines += file.code_lines;
 
-      // 头文件被包含统计（只对 `.hpp` 有意义）。
+      // 包含关系：同时供"热点头"与"爆炸半径"两处用（一份数据两个视图）。
+      if (relative.ends_with(".cpp")) unit_files.push_back(relative);
+      auto& edges = include_graph[relative];
       for (const std::string_view line : raw_lines) {
         const std::string_view trimmed = trim(line);
         if (!trimmed.starts_with("#include")) continue;
@@ -285,11 +291,21 @@ auto collect_stats(std::string_view root, std::size_t top) -> Result<ProjectStat
         if (open == std::string_view::npos || close == std::string_view::npos) continue;
         const std::string target(trimmed.substr(open + 1, close - open - 1));
         header_includers[target] += 1;
+        edges.push_back(target);
       }
     }
   }
 
   stats.functions = static_cast<int>(all_functions.size());
+  for (const FunctionStat& function : all_functions) {
+    if (function.lines >= 200) {
+      ++stats.functions_over_200;
+    } else if (function.lines >= 150) {
+      ++stats.functions_over_150;
+    } else if (function.lines >= 100) {
+      ++stats.functions_over_100;
+    }
+  }
   std::ranges::sort(stats.biggest_files, [](const FileStat& a, const FileStat& b) {
     return a.lines > b.lines;
   });
@@ -315,6 +331,55 @@ auto collect_stats(std::string_view root, std::size_t top) -> Result<ProjectStat
     return a.includers > b.includers;
   });
   if (stats.hot_headers.size() > top) stats.hot_headers.resize(top);
+
+  // —— 爆炸半径：对每个「项目内头」算传递闭包命中多少个 `.cpp` ——
+  //
+  // 为什么需要它（与"热点头"的区别）：`hot_headers` 只数**直接** include 的文件数，
+  // 而真正决定"改一个头要重编多少"的是**传递**闭包（如 `element.hpp` 直接被 56 个文件
+  // 包含，但经 `ui_root.hpp` 等中转，实际波及面更大）。这是增构改动前必须知道的数。
+  //
+  // 实现：先对每个 `.cpp` 做一次 DFS 求它的传递包含集（记忆化到 `closure_of`），
+  // 再反向累计。**按 `.cpp` 序遍历一次**，复杂度 O(单元数 × 平均闭包大小)——亚秒级。
+  std::map<std::string, std::vector<std::string>> closure_of;   // .cpp → 传递包含的头
+  const auto resolve = [](const std::string& token) -> std::string {
+    // `st/xxx.hpp` → `include/st/xxx.hpp`；`tests/...` 之类的相对引用原样保留。
+    if (token.starts_with("st/")) return "include/" + token;
+    return token;
+  };
+  const auto closure = [&](const std::string& unit) {
+    const auto cached = closure_of.find(unit);
+    if (cached != closure_of.end()) return cached->second;
+    std::vector<std::string> reached;
+    std::vector<std::string> pending{unit};
+    std::set<std::string> seen{unit};
+    while (!pending.empty()) {
+      const std::string current = pending.back();
+      pending.pop_back();
+      const auto edges = include_graph.find(current);
+      if (edges == include_graph.end()) continue;
+      for (const std::string& raw : edges->second) {
+        const std::string target = resolve(raw);
+        if (include_graph.find(target) == include_graph.end()) continue;   // 系统头/第三方
+        if (seen.insert(target).second) {
+          reached.push_back(target);
+          pending.push_back(target);
+        }
+      }
+    }
+    closure_of[unit] = reached;
+    return reached;
+  };
+  std::map<std::string, int> blast;
+  for (const std::string& unit : unit_files) {
+    for (const std::string& header : closure(unit)) blast[header] += 1;
+  }
+  for (auto& [header, count] : blast) {
+    stats.blast_radius.push_back(IncludeStat{header, count});
+  }
+  std::ranges::sort(stats.blast_radius, [](const IncludeStat& a, const IncludeStat& b) {
+    return a.includers > b.includers;
+  });
+  if (stats.blast_radius.size() > top) stats.blast_radius.resize(top);
   return stats;
 }
 
