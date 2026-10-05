@@ -755,9 +755,16 @@
   （文本/DPI 默认同源；`tools/st_consistency_check.py`）——含四处真实缺陷修复：
   测试注册表静态初始化顺序（g++ 下启动即崩）、MSVC PCH 创建静默空转（C1083 假阴/假阳）、
   第三方运行时的 STL 弃用警告被 `/WX` 拦截、PCH 身份未入编译指纹与缓存键（LNK2011）。
-- [x] **CI 三平台矩阵**（.github/workflows/shuangtian-ci.yml：linux/windows/macos
-  test+lint，Linux 附 mingw 交叉编译）
+- [x] ~~**CI 三平台矩阵**~~（.github/workflows/shuangtian-ci.yml）——**已删除**（2026-10）：
+  该工作流自建立起从未实际启用过，不产生任何门禁作用，却持续制造「有护栏」的错觉
+  （真实代价见下条：`stats.cpp` 缺 `<map>` 这类缺陷本应由它拦住，实际一路进到自举才爆）。
+  三平台编译验证改由发布前手工执行 `bootstrap.sh` / `bootstrap.ps1` + `st test` 承担。
 - [x] **文档漂移全修** + check_docs.py v2（§ 引用/路径实存/组件清单/用例数四类自动核对）
+- [x] **修首次自举失败（`st stats` 缺 `<map>`）+ 补「翻译单元自包含」约定**：
+  `src/pkg/stats.cpp` 用了 4 处 `std::map` 却从未 `#include <map>`，而 `st build` 自动 `-include`
+  `st/pch.hpp`（里面含 `<map>`）——于是**日常构建全绿、只有全新环境自举（无 PCH）才失败**
+  （`error: 'map' is not a member of 'std'`，行号指向使用处 372 行）。已补 `<map>`（并归位 `<set>` 字母序），
+  并在 CONVENTIONS §6 新增第 6 条「每个 `.cpp` 自包含、不得依赖 PCH/传递包含」、§10.3 扩为三个静默失效点。
 
 > 审视报告「第一梯队」与「第二梯队」（含渲染侧：增量重绘/整形缓存/LRU/渐变快路径）
 > 均已在上述条目落地；无头环境无法验证的窗口模式 vsync 如实留在 P1。

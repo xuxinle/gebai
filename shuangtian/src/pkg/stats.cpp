@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <set>
 #include <format>
+#include <map>
+#include <set>
 
 #include "st/core/fs.hpp"
 #include "st/core/string.hpp"

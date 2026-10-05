@@ -2518,8 +2518,12 @@ st run gallery --toolchain=mingw          # 宿主==目标才执行；否则拒�
 st doctor                                 # 探测清单声明的工具链是否真的装了
 ```
 
-CI（`.github/workflows/shuangtian-ci.yml`）在 Linux 作业里对 **gallery 与 `st` 自身**都做
-mingw 交叉编译——这是 Windows 分支唯一的持续验证手段。
+mingw 交叉编译在**发布前手工执行**（`st build gallery --toolchain=mingw` 与
+`st build st --toolchain=mingw`）——这是 Windows 分支唯一的验证手段。
+
+> 曾有一个三平台 CI 工作流（`.github/workflows/shuangtian-ci.yml`）负责跑这套命令，
+> 但它**自建立起从未实际启用**，不产生任何门禁作用；已于 2026-10 删除（理由与教训见 `docs/BACKLOG.md`）。
+> 也就是说：**交叉编译与三平台验证目前没有自动防线**，属于提交前的手工纪律。
 
 **关键设计点**：
 
