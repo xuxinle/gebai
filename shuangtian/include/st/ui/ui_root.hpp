@@ -114,6 +114,29 @@ class UiRoot : public Element::HostFocus {
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);
 
+  /// 登记一棵**声明式树的推进回调**（由 `dsl::DeclarativeHost` 构造时自登记、
+  /// 析构时落旗标失活）：帧首由 UI 统一推进。
+  ///
+  /// 为什么需要它：同一个页面可以占**多处树位**（`mount_into` 把声明式树挂到既有元素
+  /// 的子位，如标题栏的附属槽）——于是进程里同时存在多棵声明式树，每棵都要在每帧被
+  /// “kick”一下才会重组。曾经的做法是**让调用方自己记得**：主循环里写 `host->tick()`；
+  /// 漏掉第二棵时，点击命中了、状态也变了，**但面板永远不出现**
+  /// （实测：codeeditor 菜单与标题栏合并成一行时踩到）。
+  ///
+  /// 登记后 `tick_declarative_hosts()` 一次推全部——漏不掉，调用方也不必知道有几棵。
+  /// 用回调而不是存 `DeclarativeHost*`：`ui_root` 不该反向依赖 `dsl`。
+  void register_declarative_host(std::function<bool()> advance);
+  [[nodiscard]] auto declarative_host_count() const noexcept -> std::size_t {
+    return declarative_hosts_.size();
+  }
+  /// 推进全部已登记的声明式树（主循环里、`app.tick()` 之前调）。
+  /// 回调自己判定“本帧要不要做事”（不脏就返回）——与调用方原先写的
+  /// `if (host->dirty()) host->tick()` 同义。
+  ///
+  /// 返回本次**真的重组了**的树数：调用方据此决定要不要 `request_repaint()`
+  /// （帧节拍：重组出了新内容才需要重绘）。
+  auto tick_declarative_hosts() -> std::size_t;
+
   /// 语义树（`tree` 协议；`max_depth == 0` 表示不限）。
   [[nodiscard]] auto semantics(std::uint32_t max_depth = 0) const -> SemanticsNode;
   /// 视觉树（`visual` 协议）。
@@ -233,6 +256,9 @@ class UiRoot : public Element::HostFocus {
     std::function<bool()> handler{};
   };
   std::vector<std::pair<std::string, ShortcutEntry>> shortcuts_{};
+  /// 已登记的声明式树推进回调（见 `register_declarative_host`）。
+  /// 回调返回 true 表示“本帧真的重组了”（用于统计重组次数）。
+  std::vector<std::function<bool()>> declarative_hosts_{};
   /// 上限：单帧变更清单超过它即截断——事件流是对"改了什么"的提示，
   /// 不是全量日志；无界清单会把一次批量操作变成巨型事件帧。
   static constexpr std::size_t kMaxChangedIds = 64;

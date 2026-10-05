@@ -1779,11 +1779,11 @@ auto run_app(int argc, char** argv) -> int {
     const std::int64_t frame_start_ms = st::time::now_ms();
     // 帧首推进：先在编辑器上补做「上一帧记下的跳转」（切标签/打开文件后
     // 编辑器实例要等重组才拿到，所以跳转请求排队到这一帧落地）。
-    // 两棵声明树各自推进：`host` 描述内容槽，`menu_host_` 描述标题栏那一行。
-    // 漏掉后者的话菜单状态改了、面板永远不会出现（而点击仍“命中 menubar”，
-    // 看上去像菜单坏了）——实测踩到。
-    if (host->dirty()) (void)host->tick();
-    if (page->menu_host_ != nullptr && page->menu_host_->dirty()) (void)page->menu_host_->tick();
+    // 声明式树统一推进（**全部已登记的树**，不只本页那棵）：
+    // 一个页面可以占多处树位（如菜单挂在标题栏的附属槽），各自是一棵树；
+    // 靠调用方逐个记得 `host->tick()` 就会漏（漏了的表现是“点击命中、状态也变、
+    // 面板不出现”）。登记由 `DeclarativeHost` 构造时自动完成。
+    app.root().tick_declarative_hosts();
     app.tick();
     ++frames;
     if (options.frames > 0 && frames >= options.frames) break;

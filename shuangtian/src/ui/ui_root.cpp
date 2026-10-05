@@ -812,6 +812,22 @@ auto UiRoot::overlay_at(std::size_t index) const noexcept -> Element* {
   return index < overlays_.size() ? overlays_[index].get() : nullptr;
 }
 
+void UiRoot::register_declarative_host(std::function<bool()> advance) {
+  if (!advance) return;
+  declarative_hosts_.push_back(std::move(advance));
+}
+
+auto UiRoot::tick_declarative_hosts() -> std::size_t {
+  // 拷贝一份再遍历：推进过程中组件可能重建子树、甚至登记新的宿主
+  // （如页面切换）——直接迭代原容器会在遍历中失效。
+  const auto hosts = declarative_hosts_;
+  std::size_t rebuilt = 0;
+  for (const auto& advance : hosts) {
+    if (advance()) ++rebuilt;
+  }
+  return rebuilt;
+}
+
 void UiRoot::remove_overlay(Element* overlay) {
   for (auto iterator = overlays_.begin(); iterator != overlays_.end(); ++iterator) {
     if (iterator->get() == overlay) {

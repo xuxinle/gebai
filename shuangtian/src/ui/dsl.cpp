@@ -981,6 +981,25 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
       }
       return element;
     }
+    // **单根契约的破坏必须报错**（2026-10-06 补，来自实测段错误）。
+    //
+    // 根层只允许**一个**顶层声明：第二次声明会 `set_content()` 顶掉第一个
+    // （连同把它析构），于是任何保存了第一个元素指针的地方（组件字段、测试、
+    // `custom<T>` 的返回值）当场悬垂——实测表现为下一次访问跳到地址 0 的
+    // **SIGSEGV**，且现场只有调用方那一行，看不出是这里干的。
+    //
+    // 旧行为是静默替换（因为“替换根”本身是合法能力：换页时根元素类型变了就要重建）。
+    // 区分两者只看一件事：**本帧是否已经落过根元素**——`root_replaced` 就是它。
+    // 已落过还想再落 = 一次 build 里声明了两个顶层元素，那是契约错误，不是换页。
+    if (impl_->root_replaced) {
+      if (impl_->last_stats.error.empty()) {
+        impl_->last_stats.error = std::format(
+            "一个 build() 里声明了多个顶层元素（根层第二个 {}）——DSL 是**单根**契约："
+            "把两个顶层元素包进 column/row（或用一个容器）再声明",
+            type);
+      }
+      std::fprintf(stderr, "[dsl] %s\n", impl_->last_stats.error.c_str());
+    }
     auto created = make_element(std::string(type));
     if (created == nullptr) return nullptr;
     element = created.get();
@@ -1076,7 +1095,27 @@ auto Composer::create_element(std::string_view type, const st::Json& props,
     if (created == nullptr) return nullptr;
     element = created.get();
     Element* occupant = cursor < parent->content_child_count() ? parent->child_at(cursor) : nullptr;
-    if (occupant != nullptr && impl_->keyed_region.count(occupant->key()) == 0) {
+    // ⚠ **无 key 的元素不得当残留释放**（2026-10-06 修，实测段错误）。
+    //
+    // “无 key”不等于“无主”：`key` 是**列表内的身份**（仅由 `for_each` 背书或显式 `.key`
+    // 给出），而大量元素只有 `.id`（id 是**给外部引用的稳定名字**，两回事）。
+    // 旧判定只问“key 在不在本区段里”——无 key 的元素（`""`）同样不命中，于是被当
+    // “上帧残留”摘掉并析构，而调用方（组件字段、测试、`custom<T>` 的返回值）还指着它。
+    //
+    // 实测后果：两个 `row(.id=...)` 顺序声明（第二个类型对不上 → 走本分支），
+    // 第一个被当场销毁，调用方持有的指针 vptr 清零，下一行
+    // `bar->content_child_count()` 跳到地址 0 → **SIGSEGV**，且每次必崩。
+    //
+    // 口径：**只释放“有 key、但 key 不在本轮列表里”的元素**（那才是被数据移除的旧项）。
+    // 无 key 的元素归位置对齐管：类型不符就在它前面插入新元素，
+    // 多余的那个由本轮结束时的尾部截断处理（那里才能确定谁真的没被声明）。
+    //
+    // ⚠ 注意不能反过来写成“释放 keyed 但未认领的”——那恰好毁掉 key 复用
+    // （占着游标位的只是“还没轮到”的兄弟）。实测：这么改 `dsl_for_each_reuses_by_key`
+    // 当场变红（身份丢失、child_at 全对不上）。
+    const bool occupant_is_stale =
+        occupant != nullptr && impl_->keyed_region.count(occupant->key()) == 0;
+    if (occupant_is_stale) {
       auto removed = parent->remove_child(occupant);
       (void)removed;   // 释放旧元素（它的 key 不在本次列表里 = 已被数据移除）
       ++impl_->last_stats.elements_removed;
@@ -1782,7 +1821,33 @@ auto tabs(Composer& c, const std::vector<TabData>& items, std::size_t active,
 }
 
 DeclarativeHost::DeclarativeHost(UiRoot& root, Guardrails guardrails)
-    : composer_(std::make_unique<Composer>(root, guardrails)) {}
+    : composer_(std::make_unique<Composer>(root, guardrails)), root_(&root) {
+  // **自登记**：本树每帧由 `UiRoot::tick_declarative_hosts()` 统一推进。
+  // 为何不让调用方自己记得：一个页面可以占多处树位（`mount_into` 挂进标题栏的
+  // 附属槽），进程里于是有多棵树；漏推第二棵时“点击命中了、状态也变了、
+  // 面板就是不出现”（codeeditor 菜单与标题栏合并时实测）。
+  //
+  // 以**弱引用**持有宿主回调（`weak_from_this` 风格）：`DeclarativeHost` 常由
+  // `unique_ptr` 持有，析构时不保证还有机会清表——所以回调里先确认
+  // “本对象还在”。用 `shared_ptr<atomic<bool>>` 做存活旗标最省事且无需侵入所有权。
+  auto alive = std::make_shared<std::atomic<bool>>(true);
+  alive_ = alive;
+  root.register_declarative_host([this, alive] {
+    if (!alive->load()) return false;
+    // **先泵异步再判脏**（顺序不能反）：异步结果到达时状态还没写（scope 不脏），
+    // 只在 dirty 时才推进的话异步结果永远落不了地（gallery 实测：“任务永远停在计算中”）。
+    (void)composer_->pump_async();
+    if (!dirty()) return false;
+    last_ = tick();
+    return true;
+  });
+}
+
+DeclarativeHost::~DeclarativeHost() {
+  // 先落存活旗标（表里的回调从此直接返回），再析构——回调捕获了 `this`，
+  // 反过来（先析构再落旗标）会让下一帧的推进入栈一个已死对象。
+  if (alive_ != nullptr) alive_->store(false);
+}
 
 // keyed 区段（`for_each`）：置上当前项的 key——随后该 item 声明的首个元素
 // 自动按这个 key 跨位置复用（也可以显式传 `.key`，显式优先）。

@@ -1214,13 +1214,19 @@ struct AxisPaddingPage : Component {
 
   void build(Composer& c) override {
     // ⚠ 指定初始化器必须按声明顺序：padding_x/padding_y 在 margin 之后、width 之前。
-    axis_bar = &row(c, {.gap = 5.0F, .padding_x = 10.0F, .height = 26.0F, .id = "axis"}, [&] {
-      (void)text(c, [] { return std::string("内容"); }, {.id = "axis-text"});
+    //
+    // **两根行必须包在一个顶层容器里**：DSL 是单根契约——直接声明两个顶层元素，
+    // 第二个会 `set_content()` 顶掉并**析构**第一个，本页保存的 `axis_bar` 当场悬垂
+    // （实测：下一个用例访问它跳地址 0 → SIGSEGV）。框架现已对这种写法报错。
+    column(c, {.gap = 0.0F, .id = "axis-padding-page"}, [&] {
+      axis_bar = &row(c, {.gap = 5.0F, .padding_x = 10.0F, .height = 26.0F, .id = "axis"}, [&] {
+        (void)text(c, [] { return std::string("内容"); }, {.id = "axis-text"});
+      });
+      mixed_bar =
+          &row(c, {.padding = 4.0F, .padding_x = 12.0F, .height = 26.0F, .id = "mixed"}, [&] {
+            (void)text(c, [] { return std::string("内容"); }, {.id = "mixed-text"});
+          });
     });
-    mixed_bar =
-        &row(c, {.padding = 4.0F, .padding_x = 12.0F, .height = 26.0F, .id = "mixed"}, [&] {
-          (void)text(c, [] { return std::string("内容"); }, {.id = "mixed-text"});
-        });
   }
 };
 
@@ -1255,7 +1261,96 @@ ST_TEST(dsl_box_props_axis_padding_reaches_layout) {
   ST_CHECK(child_height > bar->bounds().height - 4.0F);
 }
 
-// ── `BoxProps` 的排版三件套（color / hex_color / size / weight）────────────────
+// ── 单根契约（DSL 的 build 只能声明一个顶层元素）─────────────────────────
+//
+// 起因（2026-10-06，实测 SIGSEGV）：`st test` 全量必崩，崩在
+// `dsl_box_props_axis_padding_reaches_layout`（那个测试自己多写了一个顶层元素）。
+//
+// 真因：`build()` 里的第二个顶层声明会 `set_content()` 顶掉并**析构**第一个，
+// 任何保存了第一个元素指针的地方当场悬垂——vptr 已清零，
+// 下一次访问（`bar->content_child_count()`）跳到地址 0。
+// 现场只有调用方那一行，看不出是 DSL 干的，排查代价很高。
+//
+// 旧行为是**静默替换**（因为“替换根”本身是合法能力：换页时根元素类型变了就要重建）。
+// 区分两者只看一件事：本帧是否已经落过根元素。已落过还想再落 = 契约错误。
+//
+// 排查记录（免得重走）：我曾把真因误判为“腾位分支把无 key 元素当残留释放”，
+// 并写了对应修法——但**逆向验证发现那条用例对旧实现也是绿的**（回退后全量 755 仍全绿），
+// 于是修法回退。**逆向验证这一步不能省**：不然会交付一个改错方向的“修复”。
+
+/// 在同一 build 里声明两个顶层元素的页（**违反单根契约**，用于钉住诊断）。
+struct MultiRootPage : Component {
+  Element* first{nullptr};
+  Element* second{nullptr};
+  void build(Composer& c) override {
+    first = &row(c, {.height = 10.0F, .id = "first-root"}, [&] {});
+    second = &row(c, {.height = 10.0F, .id = "second-root"}, [&] {});   // 非法：应报错
+  }
+};
+
+ST_TEST(dsl_multi_root_declaration_is_diagnosed) {
+  // 钉两件事：① 有可读诊断（而不是静默销毁）；② 进程不崩——
+  // 改之前这里会让任何再用 `first` 的代码跳地址 0。
+  UiRoot root;
+  root.set_viewport({400.0F, 120.0F});
+  auto page = std::make_shared<MultiRootPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  // 诊断产生在**首次重组**（即 `mount` 里那一次）——两个顶层声明在同一个 build 里，
+  // 所以错误当场就落在 `mount` 的统计里；随后的 `tick()` 可能在作用域不脏时不重跑，
+  // 读它就取不到了。
+  const auto stats = host->stats();
+  ST_CHECK(!stats.error.empty());
+  ST_CHECK(stats.error.find("多个顶层元素") != std::string::npos);
+  // 第二个（非法的那个）成为根；第一个已被替换——不再去碰它（那是未定义行为）
+  ST_CHECK(page->second != nullptr);
+  ST_CHECK(root.content() == page->second);
+}
+
+/// 两个无 key 的孪生兄弟（类型不同 + 同类型两种情形）必须各自存活。
+///
+/// 为何要保留这条用例（它**没**钉住缺陷）：排查真崩溃时我曾定位到“腾位分支把无 key
+/// 元素当残留释放”，并写了对应的修法；但**逆向验证发现用例对旧实现也绿**——
+/// 把修复回退后全量 755 条仍然全绿、也不再崩。结论：那条路径不是真因
+/// （真因是单根违例，见上），于是修法已回退。
+/// 本用例作为**已观测行为的护栏**保留：它现在真实地钉住了“无 key 孪生兄弟各活各的”
+/// 这个不变量（两个元素都在、顺序对、重跑不重建），成本极低。
+struct SiblingNoKeyPage : Component {
+  Element* a{nullptr};
+  Element* b{nullptr};
+  void build(Composer& c) override {
+    column(c, {.gap = 0.0F, .id = "host"}, [&] {
+      a = &row(c, {.height = 10.0F, .id = "row-a"}, [&] {});
+      b = &text(c, [] { return std::string("b"); }, {.id = "text-b"});
+    });
+  }
+};
+
+ST_TEST(dsl_keyless_siblings_are_not_recycled_as_stale) {
+  UiRoot root;
+  root.set_viewport({400.0F, 120.0F});
+  auto page = std::make_shared<SiblingNoKeyPage>();
+  auto host = dsl::mount(root, page);
+  ST_REQUIRE(host != nullptr);
+  (void)host->tick();
+  root.layout(true);
+
+  Element* host_el = root.find("host");
+  ST_REQUIRE(host_el != nullptr);
+  ST_CHECK_EQ(host_el->content_child_count(), static_cast<std::size_t>(2));
+  ST_CHECK(host_el->child_at(0) == page->a);
+  ST_CHECK(host_el->child_at(1) == page->b);
+  // 两个指针都还活着（可安全访问）
+  ST_CHECK_EQ(page->a->id(), ElementId("row-a"));
+  ST_CHECK(page->b->bounds().height >= 0.0F);
+
+  // 重跑一遍（增量重组）也必须稳定：不重建、不换身份
+  Element* first_before = host_el->child_at(0);
+  (void)host->tick();
+  ST_CHECK(host_el->child_at(0) == first_before);
+  ST_CHECK_EQ(host_el->content_child_count(), static_cast<std::size_t>(2));
+}
+
 //
 // 起因（真实应用）：错误提示想标红（设计稿给的是 `#dc2626`）、标题想加大加粗，而
 // `BoxProps` 当时只有盒模型字段——DSL 主路径表达不出这三样，只能走 `custom<Text>` 逃生船，

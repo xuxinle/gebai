@@ -820,6 +820,10 @@ void for_each(Composer& c, const std::vector<T>& items, KeyFn key_fn, ItemFn ite
 class DeclarativeHost {
  public:
   explicit DeclarativeHost(UiRoot& root, Guardrails guardrails = {});
+  /// **自登记**的收尾：落存活旗标，此后宿主回调直接返回（见构造函数注释）。
+  ~DeclarativeHost();
+  DeclarativeHost(const DeclarativeHost&) = delete;
+  DeclarativeHost& operator=(const DeclarativeHost&) = delete;
   auto mount(std::shared_ptr<Component> root_component) -> bool;
   /// 子树挂载：声明式树挂到 `host` 的子位（宿主元素已在真值树上）。
   auto mount_into(Element& host, std::shared_ptr<Component> root_component) -> bool;
@@ -834,6 +838,8 @@ class DeclarativeHost {
  private:
   std::unique_ptr<Composer> composer_;
   ReconcileStats last_{};
+  UiRoot* root_{nullptr};              ///< 宿主（用于请求重绘；不持有）
+  std::shared_ptr<std::atomic<bool>> alive_{};   ///< 登记回调的存活旗标
 };
 
 /// 子组件作用域：让一个子 `Component` 拥有**独立的重组作用域**——
