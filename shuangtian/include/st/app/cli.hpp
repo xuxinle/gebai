@@ -19,6 +19,7 @@
 /// | `--theme MODE` | `light`/`dark`/`system` |
 /// | `--control-port N` | 控制通道端口（`0` = 自动选空闲端口） |
 /// | `--control-file PATH` | 把端口等写入该文件（自动化流程据此连接） |
+/// | `--shots DIR` | 无头截图的落盘目录（控制通道 `encode=file` 且未给 `path` 时用） |
 /// | `--enable-script` | 开启进程内脚本能力（默认关闭） |
 /// | `--frames N` / `--ms N` | 跑够帧数/毫秒后退出（无头演示与回归用） |
 ///

@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+// `<format>`：`std::format`（`element_snapshot` 里格式化悬浮进度）。
+// 本工程在 GCC 上不靠其它头间接带入它——Linux 档编译不过就是这么来的。
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>

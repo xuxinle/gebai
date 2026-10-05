@@ -51,6 +51,9 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 
 #include <atomic>
 #include <cmath>
+// `<cstring>`：`std::memcpy`（下方映射常量缓冲时用）。**不能靠 <windows.h> 间接带入**——
+// 那是实现细节，换编译器/换 SDK 就断（本文件在 MinGW 上曾因缺它而编译不过）。
+#include <cstring>
 #include <format>
 #include <mutex>
 #include <span>
@@ -58,7 +61,6 @@ auto create_presenter(void*, int, int) -> Result<std::unique_ptr<Presenter>> {
 #include <utility>
 #include <vector>
 
-#include "rasterize_internal.hpp"
 #include "rasterize_internal.hpp"
 #include "st/core/fs.hpp"
 #include "st/core/log.hpp"

@@ -709,8 +709,20 @@ struct FrameworkFlags {
 ///
 /// MSVC 的处理是**先按 GCC 风格拼好、再整体翻译**：清单（含框架自己的 `st.pkg`）只写一份
 /// 跨平台标志，翻译规则集中在 `pkg/compiler.hpp`——否则"哪个平台漏了哪个开关"会永久发散。
+///
+/// ⚠ **`framework_c_flags` 必须来自框架清单**（不是调用方工程的 `c_flags`）。
+/// 这里曾直接用调用方 `manifest.c_flags`：框架自己写的是
+/// `"c_flags": ["-std=gnu11", "-include", "st_sqlite3_config.h"]`
+/// （为 sqlite3.c 前置那一组 `SQLITE_*` 开关），而引用方工程的 `c_flags` 一般是**空**的——
+/// 于是框架单元里唯一那个 C 源（sqlite3.c）丢了 `-include`，
+/// `SQLITE_ENABLE_COLUMN_METADATA` 没定义 ⇒ `sqlite3_column_table_name/origin_name`
+/// 在**链接期**才报 undefined reference（编译期毫无症状，因为头文件里根本不声明它们）。
+///
+/// 为什么"编译期没症状"必须写下来：框架自身构建时 `manifest` 就是框架清单，
+/// 两者恰好相等，所以**框架自己构建一百次都不会复现**——只有"独立工程引用框架"才暴露。
 [[nodiscard]] auto make_framework_flags(const Manifest& framework_manifest,
                                         const std::vector<std::string>& framework_include_dirs,
+                                        const std::vector<std::string>& framework_c_flags,
                                         const std::vector<std::string>& profile_flags_list,
                                         const ResolvedToolchain& toolchain) -> FrameworkFlags {
   FrameworkFlags out;
@@ -723,7 +735,8 @@ struct FrameworkFlags {
   for (const auto& item : toolchain.defines) out.flags.push_back(std::format("-D{}", item));
   for (const auto& item : profile_flags_list) out.flags.push_back(item);
 
-  out.c_flags = framework_manifest.c_flags;
+  // C 源专用标志：框架的 `c_flags`（含 `-include st_sqlite3_config.h` 这类前置头）
+  out.c_flags = framework_c_flags;
   for (const auto& item : framework_manifest.defines) {
     out.c_flags.push_back(std::format("-D{}", item));
   }
@@ -1416,10 +1429,13 @@ auto build(const Manifest& manifest, const BuildOptions& options) -> Result<Buil
   std::vector<CompileUnit> units =
       make_units(effective, all_sources, object_dir, third_party_paths, library_includes,
                  framework_sources);
-  // 框架单元专用的标志集（框架自己的头/宏/严格集）——它决定框架对象能否跨工程命中缓存
+  // 框架单元专用的标志集（框架自己的头/宏/严格集）——它决定框架对象能否跨工程命中缓存。
+  // **C 标志必须取 `framework->c_flags`**（框架清单的）：取 `manifest.c_flags` 在框架自建时
+  // 恰好相等（同一个清单），只有独立工程引用时才暴露——见 `make_framework_flags` 的注释。
   std::optional<FrameworkFlags> framework_flags;
   if (framework.has_value()) {
-    framework_flags = make_framework_flags(manifest, framework->include_dirs, *flags, *toolchain);
+    framework_flags = make_framework_flags(manifest, framework->include_dirs, framework->c_flags,
+                                           *flags, *toolchain);
   }
   std::size_t rebuilt = 0;
   const std::int64_t compile_start = time::now_ns();
@@ -1679,7 +1695,8 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
       make_units(effective, all, object_dir, third_party_paths, test_includes, framework_sources);
   std::optional<FrameworkFlags> framework_flags;
   if (framework.has_value()) {
-    framework_flags = make_framework_flags(manifest, framework->include_dirs, *flags, *toolchain);
+    framework_flags = make_framework_flags(manifest, framework->include_dirs, framework->c_flags,
+                                           *flags, *toolchain);
   }
   std::size_t rebuilt = 0;
   auto compiled = compile_units(effective, options, units, *flags, *toolchain,
@@ -1703,6 +1720,10 @@ auto run_tests(const Manifest& manifest, const BuildOptions& options, std::strin
   process::Options run_options{.capture_output = false};
   // JUnit 报告路径经环境变量下发（测试框架入口读取，见 src/test/test_main.cpp）
   if (!junit_path.empty()) run_options.env["ST_JUNIT_XML"] = std::string(junit_path);
+  // 框架根也经环境变量下发：**集成级用例**（`tests/pkg_integration_test.cpp`）要真建一个
+  // 引用 framework 的最小工程来构建——而"框架在哪"只有构建驱动知道（它是从清单目录/可执行位置
+  // 推出来的）。让测试进程去猜仓库布局会随目录结构变化而碎，也容易猜错后构造出假失败。
+  run_options.env["ST_TEST_FRAMEWORK_ROOT"] = manifest.directory;
   auto result = process::run(output, args, run_options);
   if (!result) return forward_error(result.error());
   return result->exit_code;

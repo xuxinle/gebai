@@ -49,8 +49,9 @@ auto common_options_usage(std::string_view program) -> std::string {
               "  --renderer MODE       渲染器：auto（按实测帧耗时选更快）/ gpu / software\n"
         "  --text-lcd MODE       文字抗锯齿：auto（默认亚像素 LCD）/ on / off（灰度基准）\n"
         "  --text-fit MODE       字形网格拟合：auto（默认 normal）/ off / light / normal\n"
-    "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
+      "  --control-port N      控制通道端口（0 = 自动选空闲端口）\n"
       "  --control-file PATH   把端口等写入该文件（自动化流程据此连接）\n"
+      "  --shots DIR           无头截图的落盘目录（控制通道 `encode=file` 且未给 path 时用）\n"
       "  --enable-script       开启进程内脚本能力（默认关闭）\n"
       "  --frames N            跑够 N 帧后退出\n"
       "  --ms N                跑够 N 毫秒后退出\n",
@@ -181,6 +182,15 @@ auto parse_common_options(int argc, char** argv, CommonOptions& options) -> Stat
       auto parsed = value(argument);
       if (!parsed) return forward_error(parsed.error());
       options.app.control_file = *parsed;
+    } else if (argument == "--shots") {
+      // 无头截图目录。**必须吸收**：这是**外部驱动方**（歌白桌面子Agent、各 e2e 脚本）
+      // 启动应用时的固定契约（`--headless --control-port 0 --control-file X --shots DIR`），
+      // 而独立工程走的是应用的 `main` → 本函数——不认它就直接「未知参数」退出，
+      // 表现是「应用起不来、等不到控制通道就绪」，排查时看的是应用日志而不是参数表。
+      // 语义与「不影响行为」不同：它是**真实转发的配置**（截图落盘位置），只是可选。
+      auto parsed = value(argument);
+      if (!parsed) return forward_error(parsed.error());
+      options.app.screenshot_dir = *parsed;
     } else if (argument == "--enable-script") {
       options.app.enable_script = true;
     } else if (argument == "--frames") {
