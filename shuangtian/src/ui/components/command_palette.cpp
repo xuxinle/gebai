@@ -75,8 +75,10 @@ void CommandPalette::grab_focus() {
   // 直接 `input_->activate()`：后者的语义是“触发本元素默认动作”（对 Input 就是
   // on_submit 提交），拿它当“拿焦点”会当场触发一次提交。
   if (input_ == nullptr) return;
-  if (auto* root = owner_as<UiRoot>(); root != nullptr) {
-    (void)root->set_focus(input_);
+  // 类型化宿主契约（原先 `owner_as<UiRoot>()` 是 `void*` + `static_cast`：
+  // 转到错误类型是静默 UB；现在走 `Element::HostFocus`，写错即编译错误）。
+  if (auto* host = this->host(); host != nullptr) {
+    (void)host->set_keyboard_focus(input_);
     return;
   }
   // 未上树（单元测试/嵌入式）：至少让输入框自己可接收键盘

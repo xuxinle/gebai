@@ -292,18 +292,36 @@ class Element {
 
   /// 宿主（`UiRoot`）的非拥有指针，未上树时为 `nullptr`。
   ///
-  /// 用途：子树里的组件需要主动**改变焦点**时（例如命令面板要求“打开后键盘直达
-  /// 过滤框”），而焦点簿记归根所有——`UiRoot::set_focus` 是唯一入口（它要发
-  /// FocusOut/FocusIn 并维护 Tab 环）。直接把 `UiRoot` 写进头文件会造成
-  /// `element.hpp ↔ ui_root.hpp` 循环依赖，因此这里存**类型擦除的 `void*`**，
-  /// 由 `UiRoot` 在挂载/摘除时维护；需要根的子组件在自己的 .cpp 里包含
-  /// `ui_root.hpp` 并强转（依赖方向仍然单向）。`owner_as<T>()` 把这步收成一行。
-  [[nodiscard]] auto owner() const noexcept -> void* { return owner_; }
-  void set_owner(void* owner) noexcept { owner_ = owner; }
-  template <typename T>
-  [[nodiscard]] auto owner_as() const noexcept -> T* {
-    return static_cast<T*>(owner_);
-  }
+  /// 用途：子树里的组件需要主动改变**焦点**（例如命令面板要求“打开后键盘直达
+  /// 过滤框”——不调这句则敲的字会跑进底层编辑器，面板看着开着却打不了字），
+  /// 而焦点簿记归根所有（`UiRoot::set_focus` 是唯一入口：它要发 FocusOut/FocusIn
+  /// 并维护 Tab 环）。
+  ///
+  /// ## 为什么不是 `void*`（结构评审 A3）
+  ///
+  /// 原先这里存的是**类型擦除的 `void*`**，靠 `owner_as<T>()`（内部 `static_cast`）
+  /// 强转回来。它确实躲开了 `element.hpp ↔ ui_root.hpp` 的循环依赖，**但代价是
+  /// 类型系统完全失效**：转到错误类型是静默 UB，编译器（-Wall -Wextra -Werror 全开）
+  /// 一句话都不会说。
+  ///
+  /// 现在换成**小契约 `HostFocus`**（与 `shell` 的 `WindowControl` 同一手法：
+  /// 上层/平台中立的窄接口下沉，实现方去实现它）：
+  ///   · 依赖方向仍然单向（`ui_root` 包含 `element`，反向只认这个界面）；
+  ///   · `static_cast` 到错类型这类错误**变成编译错误**；
+  ///   · 没宿主时**如实返回 `false`**（“没宿主”与“要了但没成”两件事可分）。
+  ///
+  /// 为什么只放“焦点”这一个能力、不把 `UiRoot` 整个暴露成接口：界面越窄越好
+  /// （消费者只有一个：`CommandPalette::grab_focus`）。将来真需要更多宿主能力时，
+  /// 应**继续往这个界面加纯虚函数**，而不要退回 `void*`。
+  class HostFocus {
+   public:
+    virtual ~HostFocus() = default;
+    /// 把键盘焦点转到 `element`（等价 `UiRoot::set_focus`）；不可聚焦/不在树上时为 `false`。
+    virtual auto set_keyboard_focus(Element* element) -> bool = 0;
+  };
+
+  [[nodiscard]] auto host() const noexcept -> HostFocus* { return host_; }
+  void set_host(HostFocus* host) noexcept { host_ = host; }
 
   // —— 样式 ——
   [[nodiscard]] auto style() noexcept -> Style& { return style_; }
@@ -640,7 +658,8 @@ class Element {
   mutable bool damage_valid_{false};
   mutable bool damage_needs_full_{false};
   /// 宿主（`UiRoot`），由 UiRoot 在挂载/摘除时维护；未上树为 nullptr。
-  void* owner_{nullptr};
+  /// 宿主焦点契约（未上树时为 `nullptr`）。**类型化**——见上方 `HostFocus` 的说明。
+  HostFocus* host_{nullptr};
 
   /// 排版显式覆盖（DSL `BoxProps` 的落点）——缺省表示“不干预主题”。
   /// 色值用两个 `optional`（互斥：设一个清另一个），于是“最后设的那个生效”不需要额外排序逻辑。

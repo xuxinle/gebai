@@ -18,7 +18,7 @@
 
 namespace st::ui {
 
-class UiRoot {
+class UiRoot : public Element::HostFocus {
  public:
   UiRoot();
   ~UiRoot();
@@ -108,6 +108,8 @@ class UiRoot {
   /// 返回 `true` = 焦点状态已按请求应用（含「本就如此」的幂等情形）；
   /// **调用方应当检查返回值**（控制通道/脚本据此如实报告，而不是静默丢弃焦点请求）。
   auto set_focus(Element* element) -> bool;
+  /// `Element::HostFocus` 的实现（子组件隔着 `element.hpp` 请求焦点时用）。
+  auto set_keyboard_focus(Element* element) -> bool override { return set_focus(element); }
   /// 当前焦点元素（**调用前会清理悬垂指针**，树里已不在则返回 `nullptr`）。
   [[nodiscard]] auto focused() -> Element*;
   void focus_next(bool backwards = false);
@@ -183,8 +185,8 @@ class UiRoot {
   void assign_ids(Element& element, const std::string& prefix);
   /// 回收“分发期间摘除的叠加层”（延迟析构的墓场）。
   void reap_overlays();
-  /// 把宿主指针（`this`）写到整棵子树（`Element::set_owner`）。
-  /// 子组件据此请求焦点/找根，同时保持 `element.hpp` 不反向依赖 `ui_root.hpp`。
+  /// 把宿主契约（`this`，作为 `Element::HostFocus`）写到整棵子树（`Element::set_host`）。
+  /// 子组件据此请求焦点，同时保持 `element.hpp` 不反向依赖 `ui_root.hpp`。
   void wire_owner(Element& element);
   void layout_subtree(Element& element, math::Rect rect);
   void paint_subtree(const RenderContext& context, Element& element, raster::Surface& canvas);

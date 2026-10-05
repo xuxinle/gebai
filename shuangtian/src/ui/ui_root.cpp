@@ -17,9 +17,9 @@ UiRoot::UiRoot() : theme_(Theme::light()) {}
 UiRoot::~UiRoot() = default;
 
 void UiRoot::wire_owner(Element& element) {
-  // 把宿主指针写到整棵子树：子组件（如命令面板要“打开即拿到焦点”）需要主动
+  // 把宿主契约写到整棵子树：子组件（如命令面板要“打开即拿到焦点”）需要主动
   // 调 `UiRoot::set_focus`，而焦点簿记归根所有。边走边写，幂等。
-  element.set_owner(this);
+  element.set_host(this);
   for (std::size_t index = 0; index < element.child_count(); ++index) {
     if (Element* child = element.child_at(index); child != nullptr) wire_owner(*child);
   }
