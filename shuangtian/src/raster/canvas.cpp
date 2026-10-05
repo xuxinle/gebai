@@ -325,6 +325,23 @@ void Canvas::set_device_scale(float scale) noexcept {
   inverse_scale_ = 1.0f / scale_;
 }
 
+auto Canvas::resize(int physical_width, int physical_height) -> Status {
+  const int width = physical_width > 0 ? physical_width : 0;
+  const int height = physical_height > 0 ? physical_height : 0;
+  if (width == 0 || height == 0) {
+    return unexpected(ErrorCode::Invalid, "画布尺寸必须为正");
+  }
+  if (width == physical_width_ && height == physical_height_) return ok();
+  physical_width_ = width;
+  physical_height_ = height;
+  pixels_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0U);
+  // 裁剪栈重置：旧栈顶的矩形是按旧尺寸算的，留着会让新画布的内容被裁到"旧的那块"。
+  clip_stack_.clear();
+  clip_stack_.push_back(ClipFrame{math::IntRect{0, 0, width, height}, nullptr, 0, 0});
+  // 阴影遮罩缓存**故意保留**：见头文件里的说明（它与画布尺寸无关）。
+  return ok();
+}
+
 auto Canvas::to_physical(math::Rect rect) const noexcept -> math::IntRect {
   const math::Rect scaled = math::Rect{rect.x * scale_, rect.y * scale_, rect.width * scale_,
                                        rect.height * scale_};

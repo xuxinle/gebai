@@ -24,6 +24,7 @@
 #include <string_view>
 #include <vector>
 
+#include "st/core/error.hpp"
 #include "st/math/color.hpp"
 #include "st/math/geometry.hpp"
 #include "st/raster/paint.hpp"
@@ -114,6 +115,23 @@ class Surface {
   [[nodiscard]] virtual auto supports_partial_repaint() const noexcept -> bool { return false; }
   /// 运行时切换 DPI（重建后端缓冲；软件与 GPU 语义一致）。
   virtual void set_device_scale(float scale) = 0;
+
+  /// **原地改尺寸**：保留设备/上下文/缓存，只重开与尺寸相关的缓冲。
+  ///
+  /// 为什么它是接口的一部分，而不是"再 `create_canvas` 一个"：
+  /// 拖动窗口边框时每个中间尺寸都要换缓冲，而"换缓冲"与"重建整套设备资源"是两件事——
+  /// 后者要建 D3D11 纹理/渲染目标、换 swapchain、换 DIB，还要把渲染器选型重跑一遍
+  /// （实测 gallery 1600×1000：一帧 31.9ms 里绘图只占 3.1ms，**剩下 ~29ms 是重建**）。
+  /// 把前者抽成接口，拖动才能逐帧跟上；这也是“条图不开 GL/不重建设备”的前提。
+  ///
+  /// 契约：成功后 `physical_width()/physical_height()` 即为新值，内容**不保证保留**
+  /// （调用方必须整帧重绘）；`device_scale()` 不变。
+  /// 不支持的实现如实返回 `Unsupported`——调用方据此回落到"新建一个面"。
+  [[nodiscard]] virtual auto resize(int physical_width, int physical_height) -> Status {
+    (void)physical_width;
+    (void)physical_height;
+    return unexpected(ErrorCode::Unsupported, "该绘制面不支持原地改尺寸");
+  }
   [[nodiscard]] auto logical_bounds() const noexcept -> math::Rect {
     return math::Rect{0.0f, 0.0f, static_cast<float>(width()), static_cast<float>(height())};
   }

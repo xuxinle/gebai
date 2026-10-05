@@ -9,6 +9,7 @@
 /// 明确的 `Unsupported` 答复（软件光栅器与 UI 层与平台无关，补后端是纯粹的窗口层工作量）。
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -106,6 +107,19 @@ class Backend {
   /// 约定：`create_window` 只建不显；应用在**首帧 `present()` 之后**调本函数。
   /// 无头后端不需观感，默认空实现即可。
   virtual void show_when_ready() {}
+
+  /// 安装「拖动/缩放时立即重绘」的钩子（由 app 层安装；后端不认识 app 层）。
+  ///
+  /// **为什么必须有它**：用户拖边框走的是窗口系统的模态循环
+  /// （Win32：`DefWindowProc` 收 `SC_SIZE` 后自己跑消息循环），它**阻塞应用主循环**——
+  /// 期间 `WM_SIZE`/`WM_PAINT` 是唯一的执行机会。不在这里驱动一次渲染，屏幕就只能
+  /// 停在旧内容上：实测拖动 30 步、`metrics.frames` 只涨 **0~2**，而"旧尺寸的帧被
+  /// DXGI 拉到新客户区"的逐像素差异高达 `mean|Δ|=19.3`（**21.8% 像素明显不同**）——
+  /// 这就是用户看到的"拖动时被拉伸扭曲、松手才重画"。
+  ///
+  /// 语义：后端在"尺寸已变、需要重画"时调用它；实现必须**同步完成一帧**
+  /// （重建缓冲 → 布局 → 绘制 → 送显）。后端要保证重入安全（多次调用不会嵌套成环）。
+  virtual void set_resize_repaint(std::function<void()> repaint) { (void)repaint; }
 
   // —— 自绘窗框所需的窗口控制 ——
   //

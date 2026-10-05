@@ -506,7 +506,7 @@ class Win32Backend final : public Backend {
     return ok();
   }
 
-  // **尺寸重建发生在这里**（取画布时），不在 present()。
+  // **尺寸重建发生在取画布时**，不在 present()。
   //
   // 时序原因（真实缺陷）：render_frame 的顺序是"取画布 → 画 → present"。
   // 重建若放在 present()，本帧画的是**旧**画布，present 时才换新画布——
@@ -514,14 +514,25 @@ class Win32Backend final : public Backend {
   // 又变化时置位，已经变过了）→ 屏幕停留在拉伸的旧内容上，直到某个
   // 输入事件再触发重绘。用户实测"最大化后没有立即变锐利"就是这个时序。
   // 放在 framebuffer()：重建 → 本帧就画进新画布 → present 一帧到位。
-  // （仍在窗口过程之外：重建发生在帧循环里，消息泵不被阻塞。）
+  //
+  // ⚠ **不再有 `!in_size_loop_` 这个条件**。旧实现在拖动模态循环里跳过重建
+  // （怕的是"每个中间尺寸都做全套重建"），结果是：拖动中虽然被驱动着重画，
+  // 但每帧都画进**旧尺寸**的画布，再由 DXGI 拉到新客户区——实测拖动中画面仍有
+  // 25.5% 像素与"同尺寸正确渲染"不同（内容整体被横向拉了 ~1.16 倍）。
+  // 现在重建已经变便宜（见 `resize_buffers_in_place`），拖动期间必须真重建。
   [[nodiscard]] auto framebuffer() -> raster::Surface& override {
-    if (size_dirty_ && !in_size_loop_) {
+    if (size_dirty_) {
       size_dirty_ = false;
       (void)sync_buffers_to_client(scale_);
     }
     return *surface_;
   }
+
+  /// 拖动/缩放中"尺寸已变、需要重画"时由后端同步重画一帧（接口契约见 `shell.hpp`）。
+  void set_resize_repaint(std::function<void()> repaint) override {
+    repaint_ = std::move(repaint);
+  }
+
   [[nodiscard]] auto renderer_name() const noexcept -> std::string_view override {
     return renderer_name_;
   }
@@ -581,11 +592,40 @@ class Win32Backend final : public Backend {
     // 供 `logical_size()` 汇报——避免"整数折算"再被下游当成精确值使用
     logical_width_exact_ = static_cast<float>(clamped_width) / scale_;
     logical_height_exact_ = static_cast<float>(clamped_height) / scale_;
-        SurfaceChoice choice = create_surface_for(clamped_width, clamped_height, scale_, renderer_);
+    // ⚠ 渲染器**只在首次建面时选型一次**（`resolved_renderer_`）。
+    //
+    // 为什么必须记住：`auto` 的判据是"实测哪条更快"，要建两块探测画布并各跑 3 轮负载；
+    // 而 `allocate_buffers` 是**每次尺寸变化都要走**的路径——拖动缩放时每个中间尺寸一次。
+    // 实测（gallery 1600×1000 @1.5x，GPU）：一次尺寸变化后的一帧 31.9ms，其中
+    // 布局 0.16 + 绘制 2.75 + 送显 0.17 = 3.1ms，**剩下 ~29ms 全是这笔重复选型**。
+    // 同一进程、同一设备下"谁更快"不会变，重复测只是白花时间（还堵在拖动路径上）。
+    const std::string wanted = resolved_renderer_.empty() ? renderer_ : resolved_renderer_;
+
+    // ── 快路径：已有画布 + 同缩放 + 只是尺寸变了 → **原地换缓冲** ──
+    //
+    // 拖动缩放时这条路径每个中间尺寸都要走一次（实测一次拖动 30~100 次）。
+    // 它省掉的是：重建 D3D11 设备层资源、重传字形/路径遮罩缓存、重建 swapchain。
+    // 失败（如实报 `Unsupported` / 重建目标失败）就**落到下面的全套重建**——
+    // 快路径是优化而不是新的正确性前提。
+    if (!resolved_renderer_.empty() && surface_ != nullptr && scale == scale_) {
+      if (auto fast = resize_buffers_in_place(clamped_width, clamped_height); fast) {
+        renderer_note_ = renderer_base_note_;
+        if (presenter_ != nullptr) renderer_note_ += std::format(" · {}", presenter_->note());
+        return ok();
+      }
+    }
+
+    SurfaceChoice choice = create_surface_for(clamped_width, clamped_height, scale_, wanted);
     if (choice.surface == nullptr) return unexpected(ErrorCode::Io, "创建绘制面失败");
+    if (resolved_renderer_.empty()) {
+      resolved_renderer_ = choice.name;
+      // 首次的选型理由（含 `auto 实测（…）` 那段）要留住：它是"为什么是这条"的答案，
+      // 重建时丢掉它，`metrics.renderer_note` 就变成一个无法复现的选择说明。
+      renderer_base_note_ = choice.note;
+    }
     surface_ = std::move(choice.surface);
     renderer_name_ = std::move(choice.name);
-    renderer_note_ = std::move(choice.note);
+    renderer_note_ = renderer_base_note_;
     surface_->clear(math::Color{0, 0, 0, 0});
 
     // GPU 画布 + 真实窗口 → 建 swapchain 呈现器（这一步是"零拷贝上屏"的全部前提）
@@ -601,6 +641,44 @@ class Win32Backend final : public Backend {
       }
     }
 
+    dib_width_ = 0;
+    dib_height_ = 0;
+    if (!ensure_dib()) return unexpected(ErrorCode::Io, "CreateDIBSection 失败");
+    return ok();
+  }
+
+  /// 快路径：**保留设备/上下文/缓存，只换与尺寸相关的缓冲**。
+  ///
+  /// 由 `allocate_buffers` 在"已经建过面、同缩放、只是尺寸变了"时优先尝试。
+  /// 失败时返回错误，调用方回落全套重建（快路径不是新的正确性前提）。
+  [[nodiscard]] auto resize_buffers_in_place(int physical_width, int physical_height) -> Status {
+    if (surface_ == nullptr) return unexpected(ErrorCode::Invalid, "尚未分配绘制面");
+    if (surface_->physical_width() == physical_width &&
+        surface_->physical_height() == physical_height) {
+      return ok();
+    }
+    if (auto status = surface_->resize(physical_width, physical_height); !status) {
+      return status;
+    }
+    // swapchain 跟着改：`ResizeBuffers` 只换后备缓冲（不重建 swapchain，不会闪一下）。
+    // 失败就把呈现器丢掉：下一次 `present()` 会自动落到 GDI blit（语义与旧行为一致），
+    // 而不是让一个尺寸错的后备缓冲继续呈现（那正是"拉伸发糊"的老病根）。
+    if (presenter_ != nullptr) {
+      if (auto resized = presenter_->resize(physical_width, physical_height); !resized) {
+        log::warn("swapchain 改尺寸失败（{}），本轮呈现回退 GDI blit",
+                  resized.error().message);
+        presenter_.reset();
+      }
+    }
+    // DIB **惰性重建**：GPU 路径的呈现根本不碰它，而它是一块物理像素大小的内存
+    // （1900×1200 ≈ 9 MiB），每帧重建等于每帧白写一遍内存。下次 `blit()` 时再建。
+    release_dib();
+    return ok();
+  }
+
+  /// 丢掉 DIB 与内存 DC（下一次 `blit()` 按当前尺寸重建）。
+  void release_dib() {
+    dib_pixels_ = nullptr;
     if (dib_ != nullptr) {
       ::DeleteObject(dib_);
       dib_ = nullptr;
@@ -609,6 +687,18 @@ class Win32Backend final : public Backend {
       ::DeleteDC(memory_dc_);
       memory_dc_ = nullptr;
     }
+  }
+
+  /// 确保 DIB 与内存 DC 匹配当前画布尺寸（软件路径的 `blit()` 用）。
+  ///
+  /// 尺寸不匹配就重建：DIB 比画布小的话 `blit()` 会写出界（那是内存破坏，不是花屏）。
+  [[nodiscard]] auto ensure_dib() -> bool {
+    if (surface_ == nullptr) return false;
+    if (dib_ != nullptr && dib_width_ == surface_->physical_width() &&
+        dib_height_ == surface_->physical_height()) {
+      return true;
+    }
+    release_dib();
     HDC screen = ::GetDC(window_ != nullptr ? window_ : nullptr);
     memory_dc_ = ::CreateCompatibleDC(screen);
     if (window_ != nullptr) {
@@ -616,8 +706,7 @@ class Win32Backend final : public Backend {
     } else {
       ::ReleaseDC(nullptr, screen);
     }
-    if (memory_dc_ == nullptr) return unexpected(ErrorCode::Io, "CreateCompatibleDC 失败");
-
+    if (memory_dc_ == nullptr) return false;
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biWidth = surface_->physical_width();
@@ -628,10 +717,15 @@ class Win32Backend final : public Backend {
     info.bmiHeader.biCompression = BI_RGB;
     void* pixels = nullptr;
     dib_ = ::CreateDIBSection(memory_dc_, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
-    if (dib_ == nullptr || pixels == nullptr) return unexpected(ErrorCode::Io, "CreateDIBSection 失败");
+    if (dib_ == nullptr || pixels == nullptr) {
+      release_dib();
+      return false;
+    }
     dib_pixels_ = static_cast<std::uint32_t*>(pixels);
+    dib_width_ = surface_->physical_width();
+    dib_height_ = surface_->physical_height();
     (void)::SelectObject(memory_dc_, dib_);
-    return ok();
+    return true;
   }
 
   /// 建绘制面：与 headless 后端同一套语义（`auto` = 实测选更快的那条）。
@@ -724,6 +818,7 @@ class Win32Backend final : public Backend {
   /// 画布内部是 `0xRRGGBBAA`（预乘），而 GDI 的 32bpp DIB 是内存序 B,G,R,A
   /// （即小端 `0xAARRGGBB`）——**必须逐像素重排**，否则红蓝互换（截图看着像"色调不对"）。
   void blit() {
+    if (!ensure_dib()) return;
     const std::span<const std::uint32_t> source = surface_->pixels();
     const std::size_t count =
         std::min(source.size(), static_cast<std::size_t>(surface_->physical_width()) *
@@ -743,8 +838,38 @@ class Win32Backend final : public Backend {
     ::ReleaseDC(window_, window_dc);
   }
 
+  /// 拖动/缩放中：**同步重建缓冲 + 重绘一帧 + 送显**。
+  ///
+  /// 为什么必须在窗口过程里做：用户拖边框走的是窗口系统的模态循环
+  /// （Win32：`DefWindowProc` 拿到 `SC_SIZE` 后自己跑消息循环），**整个模态循环期间
+  /// 应用主循环一次都不转**。实测（真鼠标拖边 30 步）：`metrics.frames` 只涨 0~2——
+  /// 也就是说旧实现下的"拉伸贴满"其实连触发都少，屏幕上就是旧尺寸那一帧被
+  /// DXGI 非等比拉到新客户区（逐像素差异 21.8% 像素明显不同）。
+  ///
+  /// 两个必须的护栏：
+  ///
+  /// ① **重入保护** `resizing_`：`repaint` 内部会调 `framebuffer()`/`present()`，
+  ///    而它们又会 `pump_messages()` 并可能再次进入 `WM_SIZE`。没有这个标志
+  ///    就是无限递归（实测表现：拖动时直接栈溢出崩掉）。
+  /// ② **期间禁止 `pump_messages`**（`suppress_pump_`）：`PeekMessage(PM_REMOVE)`
+  ///    取的是**本线程整个消息队列**，会把系统缩放手势赖以跟踪鼠标的 `WM_MOUSEMOVE`
+  ///    一并抽走——实测症状极隐蔽：帧渲染了 31 次（说明本函数在跑），
+  ///    但**窗口尺寸一动不动**（手势被饿死）。重绘只需“重建 + 画 + 送显”，
+  ///    不需要抽消息；系统会把 `WM_SIZE`/`WM_PAINT` 直接派发进来。
+  void repaint_for_resize() {
+    if (resizing_ || repaint_ == nullptr) return;
+    resizing_ = true;
+    suppress_pump_ = true;
+    repaint_();
+    suppress_pump_ = false;
+    resizing_ = false;
+  }
+
   /// 取空窗口消息并入队（`WM_PAINT` 等由系统消息驱动；应用循环调用本函数推进）。
   void pump_messages() {
+    // 拖动重绘期间**绝不抽消息**：那会把系统缩放手势的 `WM_MOUSEMOVE` 抢走，
+    // 结果是"帧在渲染、窗口却不动"（见 `repaint_for_resize` 的②）。
+    if (suppress_pump_) return;
     MSG message{};
     while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0) {
       if (message.message == WM_QUIT) {
@@ -824,25 +949,33 @@ class Win32Backend final : public Backend {
         return 0;
       }
 
-      // ── 调整窗口大小的"节流"：进入移动/缩放循环时置标志，退出时一次性重建 ──
+      // ── 调整窗口大小：**逐帧跟上**（不再"拖动中拉伸贴满、松手才重建"）──
       //
-      // 为什么必须节流：拖动边框时 `WM_SIZE` **每个中间尺寸都发一次**（一次拖动几十上百次），
-      // 而每次 `sync_buffers_to_client` 都会走完整的 `allocate_buffers`——
-      // 重建画布、D3D11 纹理/渲染目标、**整个 swapchain**、DIB。实测一次拖动期间
-      // 几十次全套重建，界面明显卡顿。
+      // 旧做法与它的问题（用户实测："拖动边框缩放时内置高度或宽度被拉伸扭曲，
+      // 只在拖动释放才重新渲染"）：
+      // - `WM_ENTERSIZEMOVE` 置标志 → 拖动期间**不重建也不重绘**；
+      // - 送显时把旧尺寸那一帧交给 DXGI，由它**非等比拉伸**铺满新客户区。
+      // 实测（真鼠标拖边，1920×1200 @1.5x，GPU）：拖动 30 步只渲染了 **0~2 帧**，
+      // "拖动中的画面"与"同一尺寸的正确渲染"逐像素差异 `mean|Δ|=19.3`、
+      // **21.8% 的像素明显不同**（文字、边框、分隔线全被拉变形）。
       //
-      // 节流后的行为：
-      // - 拖动中：只记下"尺寸脏了"，**不重建**。呈现时用现有缓冲区**拉伸贴满**客户区
-      //   （`WM_PAINT` 里 `present` 已按当前客户区尺寸输出）——瞬间是糊的，但跟手；
-      // - 松手（`WM_EXITSIZEMOVE`）：按最终客户区重建一次，恢复 1:1 锐利。
-      // 这正是原生应用的通用做法（"resize 时拉伸、放开后重建"）。
+      // 那时怕的是"每个中间尺寸都做全套重建"（建 Canvas + D3D11 纹理/RT + 整个
+      // swapchain + DIB，实测一次拖动几十次、界面明显卡）。现在这笔成本已被拆掉：
+      // ① 渲染器选型只做一次（`resolved_renderer_`，此前**每次重建都在重跑 `auto`
+      //    基准**，实测占一次重建 ~29ms 里的绝大部分）；
+      // ② 画布走 `Surface::resize` 原地换缓冲（不重建设备/上下文/字形与路径缓存）；
+      // ③ 交换链走 `ResizeBuffers`（不重建 swapchain）。
+      // 于是"逐帧重建 + 逐帧重绘"变得可行（GPU 路径实测整帧 1.3~3.1ms）。
+      //
+      // `WM_SIZE` 只负责**记录尺寸**；真正的重建 + 重绘在下面 `repaint_for_resize()`
+      // 里同步做——因为拖动期间应用主循环被系统模态循环堵住，窗口过程是唯一机会。
       case WM_ENTERSIZEMOVE: {
         in_size_loop_ = true;
         return 0;
       }
       case WM_EXITSIZEMOVE: {
         in_size_loop_ = false;
-        // 只在尺寸真的变了时置脏（只挪了位置 → 不白建）；重建统一发生在 present()
+        // 松手：按最终客户区重建一次（拖动中可能丢帧；这里是"最后一次对齐机会"）。
         if (surface_ != nullptr) {
           RECT client{};
           if (::GetClientRect(window, &client) != 0 &&
@@ -851,6 +984,7 @@ class Win32Backend final : public Backend {
             size_dirty_ = true;
           }
         }
+        repaint_for_resize();
         return 0;
       }
       case WM_GETMINMAXINFO: {
@@ -969,7 +1103,9 @@ class Win32Backend final : public Backend {
             }
           }
         }
-        // **只记"尺寸脏"与"待定尺寸"，重建推迟到 `framebuffer()`**（不在窗口过程里做）。
+        // **只记"尺寸脏"与"待定尺寸"**，实际重建推迟到 `framebuffer()`（本函数给的重绘
+        // 一帧里就会用到）——而不在窗口过程里直接重建，因为重建还要更新 `logical_*`
+        // 与 swapchain，那些由 `allocate_buffers` 一处口径管。
         // 同时**立即**更新 `logical_size()` 的数据源——这是打破"等待输入"死锁的关键：
         //
         //   tick 的渲染条件是 `logical_size() != root.viewport()`；若 logical_size
@@ -988,6 +1124,9 @@ class Win32Backend final : public Backend {
           logical_height_exact_ = static_cast<float>(client.bottom) / scale_;
           logical_width_ = std::max(1, static_cast<int>(std::lround(logical_width_exact_)));
           logical_height_ = std::max(1, static_cast<int>(std::lround(logical_height_exact_)));
+          // **立即重绘一帧**（而不是等应用主循环）——拖动期间主循环被系统模态循环
+          // 堵住，这里是唯一的执行机会。见 `repaint_for_resize()` 的说明。
+          repaint_for_resize();
         }
         return 0;
       }
@@ -1100,6 +1239,9 @@ class Win32Backend final : public Backend {
   HDC memory_dc_{nullptr};
   HBITMAP dib_{nullptr};
   std::uint32_t* dib_pixels_{nullptr};
+  /// DIB 当前覆盖的物理尺寸（0 = 未分配）。`blit()` 靠它判断要不要惰性重建。
+  int dib_width_{0};
+  int dib_height_{0};
   WPARAM pending_key_{0};
   /// 绘制面：软件或 GPU（由 `--renderer` / `auto` 决定）。
   /// 之前这里是具体 `Canvas` 且完全忽略 `options.renderer`——真实窗口下**永远走软件**，
@@ -1109,8 +1251,13 @@ class Win32Backend final : public Backend {
   std::unique_ptr<raster::gpu::Presenter> presenter_{};
   std::uint64_t present_frames_{0};
   bool present_fallback_logged_{false};
-  /// 请求的渲染器（来自 `--renderer`）。
+  /// 请求的渲染器（来自 `--renderer`；`auto` 表示"首次建面时实测选优"）。
   std::string renderer_{"auto"};
+  /// **已解析**的渲染器（`"gpu"` / `"software"`）；空 = 尚未选型。
+  /// 见 `allocate_buffers` 里的说明：选型只做一次，尺寸变化不再重跑基准。
+  std::string resolved_renderer_{};
+  /// 首次选型的理由（`auto 实测（…）` 那段）；后续重建沿用，不丢可复现性。
+  std::string renderer_base_note_{};
   std::string renderer_name_{"software"};
   std::string renderer_note_{};
   std::deque<ui::Event> events_{};
@@ -1124,8 +1271,13 @@ class Win32Backend final : public Backend {
   std::uint64_t frames_{0};
   bool class_registered_{false};
   bool close_requested_{false};
-  /// 正处于"移动/缩放"模态循环（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE`）：
-  /// 此期间 `WM_SIZE` 只记尺寸、不重建缓冲（拖动跟手），退出时一次性重建。
+  /// 拖动/缩放期间"尺寸已变、需要重画"时由后端调用的钩子（见接口声明）。
+  std::function<void()> repaint_{};
+  /// 拖放重绘的重入保护（见 `repaint_for_resize`）。
+  bool resizing_{false};
+  /// 拖动重绘期间抑制抽消息（见 `repaint_for_resize` 的②）。
+  bool suppress_pump_{false};
+  /// 正处于"移动/缩放"模态循环（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE`）。
   bool in_size_loop_{false};
   /// 客户区尺寸已变化、待 `framebuffer()` 重建（每帧至多一次的节流）。
   /// 最大化/还原不走拖动模态，靠它把重建从窗口过程挪到帧循环里。

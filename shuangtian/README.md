@@ -28,7 +28,7 @@
 | **没有 GPU / 驱动不全** | 软件光栅器（扫描线覆盖率抗锯齿 + SIMD 快路径）完整可用、且是**语义真相源**；GPU（D3D11）是首选路径，不可用时自动回退，不阻断任何功能 |
 | **HiDPI 屏上字发虚、发丝线糊** | 逻辑像素 / 物理像素分离：`Canvas` 绘制 API 收逻辑坐标，内部按 `device_scale` 在**物理分辨率**上光栅化（字形亦按物理尺寸重栅格化）；运行时 `app.set_scale` 即时切换 |
 | **想让界面逻辑少写 C++** | 内置脚本层（QuickJS，默认关闭）：`$('#status').set({text:'…'})`、`on('#save','click',…)`、`every(1000,…)`——读写与协议 `get`/`set`/`invoke` **同一份实现**；跨语言边界用「快照批量 + 变更集提交」，跨界次数与改了多少属性无关 |
-| **要真的弹出窗口** | Windows 上开箱即用（直接双击 exe）：Win32 窗口后端已实现——DPI 感知、鼠标/键盘/滚轮、剪贴板、窗口缩放跟随；**窗框一律自绘**（`ui::WindowFrame`：标题栏 + 内容槽 + 八向缩放边缘，不用系统标题栏——三平台因此长得一模一样，见 `CONVENTIONS.md` §10 第 7 条）；Linux 侧 `x11`/`wayland` 仍是探测 + 明确 `Unsupported` |
+| **要真的弹出窗口** | Windows 上开箱即用（直接双击 exe）：Win32 窗口后端已实现——DPI 感知、鼠标/键盘/滚轮、剪贴板、**窗口缩放逐帧真重绘**（拖动中一直 1:1 锐利，不是“先拉伸、松手才重建”；实测拖动中画面与同尺寸正确渲染**逐像素相同**，见 `DESIGN.md` §4.6.1）；**窗框一律自绘**（`ui::WindowFrame`：标题栏 + 内容槽 + 八向缩放边缘，不用系统标题栏——三平台因此长得一模一样，见 `CONVENTIONS.md` §10 第 7 条）；Linux 侧 `x11`/`wayland` 仍是探测 + 明确 `Unsupported` |
 | **要在别处写一个霜天应用** | 独立工程：清单写 `"framework": {"path": "…"}` 即可（源/头/标志/嵌入/交叉编译工具链自动并入，无需安装、无需 CMake）；`st init` 生成工程骨架，首个工程冷构建 ≈30s、**第二个 ≈4s**（共享对象缓存）。详见 `docs/independent_project.md` |
 | **要在 Linux 上产出 Windows 程序** | 交叉编译：清单声明工具链，`st build gallery --toolchain=mingw` → `build/dev-mingw/bin/gallery.exe`（实测 PE32+，仅依赖 Windows 自带 DLL） |
 | **要保证代码在三个平台都对** | `CONVENTIONS` §10 跨平台强制约束（平台差异只能进 `platform_*`；路径统一 UTF-8 经 `st::fs`；`argv` 经 `ST_MAIN` 正规化；系统库按目标平台解析） |

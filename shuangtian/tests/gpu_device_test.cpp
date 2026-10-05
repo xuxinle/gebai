@@ -19,6 +19,7 @@
 namespace {
 
 using st::math::Color;
+using st::raster::Paint;
 using st::raster::Surface;
 using st::raster::gpu::DeviceInfo;
 using st::raster::gpu::Options;
@@ -115,6 +116,43 @@ ST_TEST(gpu_canvas_reports_device_scale_and_geometry) {
   ST_CHECK_EQ(physical.y, 4);
   ST_CHECK_EQ(physical.width, 6);
   ST_CHECK_EQ(physical.height, 8);
+}
+
+ST_TEST(gpu_canvas_resize_in_place) {
+  // 拖动缩放靠的就是这条：每个中间尺寸都要改一次缓冲。
+  // 旧路径是"丢掉整块 GpuCanvas、`create_canvas` 一个新的"——那会连带丢掉字形遮罩/
+  // 渐变/路径遮罩缓存（每帧重传整个字形集）并重建设备层资源。
+  if (!device_info().has_value()) return;
+  auto surface = st::raster::gpu::create_canvas(200, 100, 2.0f, Options{});
+  ST_CHECK(surface.has_value());
+  if (!surface.has_value()) return;
+  Surface& target = **surface;
+
+  if (auto status = target.resize(320, 160); !status) {
+    ST_CHECK(false);   // GPU 画布必须支持原地改尺寸
+    return;
+  }
+  ST_CHECK_EQ(target.physical_width(), 320);
+  ST_CHECK_EQ(target.physical_height(), 160);
+  ST_CHECK_NEAR(target.device_scale(), 2.0f, 0.001f);   // DPI 不变
+  // 新缓冲可用且能画满整块：裁剪栈重置到新尺寸（不重置的话右下角会被裁掉）
+  target.clear(Color{0, 0, 0, 0});
+  target.fill_rect(st::math::Rect{0.0f, 0.0f, static_cast<float>(target.width()),
+                                  static_cast<float>(target.height())},
+                   Paint::solid(Color{0x11, 0x22, 0x33, 0xFF}));
+  const auto pixels = target.pixels();
+  const auto at = [&pixels, &target](int x, int y) {
+    return pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(target.physical_width()) +
+                  static_cast<std::size_t>(x)];
+  };
+  // 右下角必须也被填上（裁剪栈没重置的话这里会是透明）
+  // 画布像素布局是 `0xRRGGBBAA`（与软件光栅器同一约定，见 `Surface::pixels`）
+  constexpr std::uint32_t kExpected = 0x112233FFU;
+  ST_CHECK_EQ(at(319, 159), kExpected);
+  ST_CHECK_EQ(at(0, 0), kExpected);
+  // 幂等 + 非法尺寸
+  ST_CHECK(target.resize(320, 160).has_value());
+  ST_CHECK(!target.resize(-1, 160).has_value());
 }
 
 ST_TEST(gpu_canvas_image_export_is_rgba8) {

@@ -638,7 +638,7 @@ class GpuCanvas final : public Surface {
     for (auto& entry : path_cache_) {
       if (entry.view != nullptr) entry.view->Release();
     }
-    for (auto& entry : shadow_cache_) release_shadow_targets(entry.targets);
+    release_shadow_cache();
     release_readback();
     release_resources();
     context_->Release();
@@ -658,6 +658,49 @@ class GpuCanvas final : public Surface {
     if (scale <= 0.0f || scale == scale_) return;
     scale_ = scale;
     // 物理缓冲不变（与软件画布同语义：scale 只影响逻辑↔物理换算）
+  }
+
+  /// 原地改尺寸：**不重建设备/上下文**，只重建目标纹理与相关视图。
+  ///
+  /// 保留什么、丢什么，分界线是"它依不依赖于尺寸":
+  /// - 设备/上下文/着色器管线/字形遮罩缓存/渐变 ramp/路径遮罩：与尺寸无关 → **保留**；
+  ///   拖动缩放时重建它们等于每帧重传整个字形集（实测这是重建里的大头）。
+  /// - 目标纹理/`rtv`/回读暂存/回读缓冲/裁剪栈/阴影缓存：与尺寸钩着 → **重建**；
+  ///   阴影目标按区域尺寸分配，留着会直接画出错误结果（比丢掉缓存贵得多）。
+  [[nodiscard]] auto resize(int physical_width, int physical_height) -> Status override {
+    const int width = physical_width > 0 ? physical_width : 0;
+    const int height = physical_height > 0 ? physical_height : 0;
+    if (width == 0 || height == 0) {
+      return unexpected(ErrorCode::Invalid, "画布尺寸必须为正");
+    }
+    if (width == physical_width_ && height == physical_height_) return ok();
+    // 先释放依赖于旧尺寸的东西（顺序重要：回读暂存先于目标纹理释放没差别，
+    // 但目标纹理一旦换成新的，旧 `rtv` 就是悬垂视图——必须成对先清）。
+    if (rtv_ != nullptr) {
+      rtv_->Release();
+      rtv_ = nullptr;
+    }
+    if (target_ != nullptr) {
+      target_->Release();
+      target_ = nullptr;
+    }
+    release_shadow_cache();
+    release_readback();
+    readback_.clear();
+    physical_width_ = width;
+    physical_height_ = height;
+    create_target();
+    if (target_ == nullptr || rtv_ == nullptr) {
+      return unexpected(ErrorCode::Io, "GPU 画布：重建渲染目标失败");
+    }
+    readback_dirty_ = true;
+    // 裁剪栈是物理像素矩形：旧栈顶按旧尺寸算，必须重置（否则内容被裁到旧那块）。
+    clip_stack_.clear();
+    ClipFrame frame;
+    frame.rect = math::IntRect{0, 0, width, height};
+    frame.mode = 1;
+    clip_stack_.push_back(frame);
+    return ok();
   }
 
   [[nodiscard]] auto to_physical(math::Rect rect) const noexcept -> math::IntRect override {
@@ -1628,6 +1671,12 @@ class GpuCanvas final : public Surface {
     }
   }
 
+  /// 丢掉阴影缓存（目标纹理按尺寸分配，改尺寸后旧目标尺寸不对）。
+  void release_shadow_cache() {
+    for (auto& entry : shadow_cache_) release_shadow_targets(entry.targets);
+    shadow_cache_.clear();
+  }
+
   /// 从 GPU 拉回像素（`0xRRGGBBAA` 预乘，与软件画布同一布局）。
   auto ensure_readback() -> bool {
     if (target_ == nullptr) return false;
@@ -1805,17 +1854,32 @@ class D3dPresenter final : public Presenter {
 
   auto present(Surface& canvas, int width, int height) -> Status override {
     if (swapchain_ == nullptr) return unexpected(ErrorCode::Invalid, "呈现器未就绪");
-    // 拖动期间 win32 后端不重建画布（`WM_ENTERSIZEMOVE`..`WM_EXITSIZEMOVE` 节流），
-    // 因此这里的 `width/height` 与后备缓冲一致 → 不触发 ResizeBuffers，
-    // 呈现的是旧尺寸内容、由 DXGI 拉伸到新客户区（模糊但跟手，松手后恢复锐利）。
+    // 尺寸不匹配时**不再让 DXGI 自己拉**（那块内容会被非等比拉伸 → 文字/边框全变形）。
+    //
+    // 正常路径上画布与后备缓冲是同步的（画布 `resize` 之后紧接着 `ResizeBuffers`），
+    // 走不到这里。能走到只有两种情况：
+    // - 画布 `resize` 失败（内存不够/设备丢失）→ 后备缓冲仍是旧尺寸；
+    // - DPI 变化那一帧的时序缝隙。
+    // 这两种情况下"拉伸一帧"比"黑一帧"更难排查（用户看到的是整个界面变形，
+    // 而不是一块空白），所以这里失败就**如实报错**，由上层落回 GDI blit。
     if (width != width_ || height != height_) {
       if (auto resized = resize(width, height); !resized) return resized;
+      if (backbuffer_ == nullptr) {
+        return unexpected(ErrorCode::Invalid, "后备缓冲缺失");
+      }
+    }
+    auto* canvas_at = dynamic_cast<GpuCanvas*>(&canvas);
+    if (canvas_at == nullptr || canvas_at->target() == nullptr) {
+      return unexpected(ErrorCode::Invalid, "present 失败：画布与后备缓冲尺寸不一致");
+    }
+    if (canvas_at->physical_width() != width_ || canvas_at->physical_height() != height_) {
+      return unexpected(ErrorCode::Invalid,
+                        std::format("present 失败：画布 {}x{} 与后备缓冲 {}x{} 不一致",
+                                    canvas_at->physical_width(), canvas_at->physical_height(),
+                                    width_, height_));
     }
     // 画布必须是本进程的 GPU 画布：不同设备之间无法直接拷贝纹理
-    auto* gpu_canvas = dynamic_cast<GpuCanvas*>(&canvas);
-    if (gpu_canvas == nullptr || gpu_canvas->target() == nullptr) {
-      return unexpected(ErrorCode::Invalid, "present 需要本进程创建的 GPU 画布");
-    }
+    auto* gpu_canvas = canvas_at;
     if (backbuffer_ == nullptr) {
       if (auto acquired = acquire_backbuffer(); !acquired) return acquired;
     }

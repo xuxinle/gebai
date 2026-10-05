@@ -200,6 +200,41 @@ ST_TEST(dpi_runtime_scale_switch) {
   ST_CHECK_EQ(bounds.height, 80);
 }
 
+// —— 拖动缩放：`Canvas::resize` 必须原地换缓冲，且新画布立刻可用 ——
+//
+// 为什么需要它：拖动期间每个中间尺寸都要换一次缓冲（实测一次拖动 30~100 次）。
+// 旧路径是“新建一块 Canvas”替换掉旧的（丢掉阴影遮罩缓存，新缓冲还得重新清）；
+// 现在走原地 resize——它必须真改尺寸、真清屏、**把裁剪栈重置到新尺寸**，
+// 否则内容会被旧裁剪矩截住（表现：拖动时右边/下边一片空白，而画布尺寸看着是对的）。
+ST_TEST(dpi_canvas_resize_in_place_rebuilds_buffer_and_clip) {
+  Canvas canvas = Canvas::for_logical_size(80, 40, 1.5f);
+  ST_CHECK_EQ(canvas.physical_width(), 120);
+  ST_CHECK_EQ(canvas.physical_height(), 60);
+
+  if (auto status = canvas.resize(200, 100); !status) {
+    ST_CHECK(false);   // 软件画布必须支持原地改尺寸（无 Unsupported 的理由）
+    return;
+  }
+  ST_CHECK_EQ(canvas.physical_width(), 200);
+  ST_CHECK_EQ(canvas.physical_height(), 100);
+  ST_CHECK_NEAR(canvas.device_scale(), 1.5, 1e-6);   // DPI 不变
+  // 内容不保证保留：新缓冲必须是从透明开始的（否则会看到旧尺寸那一帧的残影）
+  ST_CHECK_EQ(canvas.content_bounds().width, 0);
+  // 裁剪栈重置到**新画布**：不重置的话下面的填充会被旧矩形截掉。
+  // （软件光栅器 `fill_rect` 返回 void，所以这里直接看像素结果。）
+  canvas.fill_rect(Rect{0.0f, 0.0f, static_cast<float>(canvas.width()),
+                        static_cast<float>(canvas.height())},
+                   Paint::solid(Color::rgb(1, 2, 3)));
+  const st::math::IntRect bounds = canvas.content_bounds();
+  ST_CHECK_EQ(bounds.width, 200);
+  ST_CHECK_EQ(bounds.height, 100);
+  // 幂等：同尺寸再调一次不得报错也不得丢内容
+  ST_CHECK(canvas.resize(200, 100).has_value());
+  ST_CHECK_EQ(canvas.content_bounds().width, 200);
+  // 非法尺寸必须被拒绝（0 尺寸的缓冲会让后续所有寻址越界）
+  ST_CHECK(!canvas.resize(0, 100).has_value());
+}
+
 // —— Canvas 移动语义必须保留 DPI 缩放（真实缺陷回归）——
 //
 // 症状：运行时切 DPI（`*canvas = Canvas::for_logical_size(w, h, 2.0f)`）后，新画布物理尺寸是 2x

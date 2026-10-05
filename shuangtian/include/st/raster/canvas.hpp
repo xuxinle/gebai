@@ -84,6 +84,14 @@ class Canvas final : public Surface {
   /// GPU 画布暂不接（整帧仅 ~1ms，局部路径要另维护一套状态，收益不划算）。
   [[nodiscard]] auto supports_partial_repaint() const noexcept -> bool override { return true; }
   void set_device_scale(float scale) noexcept override;
+
+  /// 原地改尺寸：**只重开像素缓冲与基础裁剪帧**，阴影遮罩缓存保留。
+  ///
+  /// 为什么阴影缓存要留：那些遮罩只取决于几何参数（卡片尺寸/圆角/模糊半径），
+  /// 与画布尺寸无关。拖动缩放时每换一次尺寸就丢掉它们，会让每一帧都为同样的
+  /// 卡片重新光栅化 + 模糊（实测阴影是单帧最重的绘制项）。
+  /// 注意：裁剪栈必须重置为"整块新画布"——旧裁剪帧的矩形是按旧尺寸算的。
+  [[nodiscard]] auto resize(int physical_width, int physical_height) -> Status override;
   /// 逻辑矩形 → 物理整数矩形（向外取整，覆盖完整像素）。
   [[nodiscard]] auto to_physical(math::Rect rect) const noexcept -> math::IntRect override;
   [[nodiscard]] auto to_physical(math::Point point) const noexcept -> math::Point override;

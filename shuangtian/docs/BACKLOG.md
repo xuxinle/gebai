@@ -556,7 +556,31 @@
 - [x] **单行 Input 动作面**（2026-10-02 落地）：`invoke submit/activate/clear` 与 TextArea 对齐；
   测试 `ui_input_invoke_*` 3 用例 + `tools/input_action_e2e.py` 真实应用端到端。
   - [ ] **虚拟化长列表**：终端/输出面板的 ScrollView+Text 累积全文，日志长了退化；
-  - [x] **桌面窗框：自绘标题栏（跨平台无差异）**（**2026-10-04 落地，Win32 先行**）：
+  - [x] **拖动缩放：逐帧真重绘（去掉“拉伸贴满、松手才重建”）**（**2026-10-04 落地**）：
+  用户现象“拖动边框缩放时内置高度或宽度被拉伸扭曲，只在释放才重新渲染”。
+  ① **量化**（`tools/live_resize_probe.py`，真鼠标 `SendInput` 拖边 + 屏幕像素抓图）：
+  拖动 30 步 `metrics.frames` 只涨 **0~2**；“拖动中的画面” vs “同尺寸正确渲染”
+  `mean|Δ|=19.3`、**21.8% 像素明显不同**（内容被横向拉了 ~1.16×）；
+  一次尺寸变化的重建开销（`last_frame − layout − paint − present`）**~28.9 ms**；
+  ② **根因与三笔成本**（顺序即依赖）：`renderer_ == "auto"` 在 `allocate_buffers` 里
+  **每次尺寸变化都重跑选型基准**（建两块探测画布 + 各跑 3 轮）→ 选型只做一次
+  （`resolved_renderer_`，理由也留住）；画布走新增的 `Surface::resize` 原地换缓冲
+  （保留设备/上下文/字形与路径缓存与 swapchain）；交换链走 `ResizeBuffers`、DIB 惰性重建；
+  ③ **旧实现的最后一块拼图**：`framebuffer()` 里 `size_dirty_ && !in_size_loop_` 把重建
+  **在拖动期间整段禁掉**了（所以“重绘 32 帧”但每帧都画进旧尺寸画布）。
+  ④ **两个护栏**（实测踩出来）：重入保护（没有就是拖动时栈溢出）；重绘期间
+  **禁止 `pump_messages`**（`PeekMessage(PM_REMOVE)` 会把系统缩放手势的 `WM_MOUSEMOVE`
+  抽走——症状极隐蔽：“帧在渲染、窗口却不动”）；
+  ⑤ **视口对齐**：`render_frame()` 入口同步视口（拖动中 `tick()` 不转，布局会按旧视口排）；
+  ⑥ **兜底**：`present` 在画布与后备缓冲不一致时**如实报错**（回退 GDI blit），
+  不再让 DXGI 默默拉伸（“拉伸一帧”比“黑一帧”更难排查）；
+  结果：拖动中画面与同尺寸正确渲染**逐像素相同**（GPU 与 software 两条路径都实测），
+  渲染帧数 30/30、重建开销 **28.9 ms → 1.3~2.4 ms**；回归防线
+  `tools/resize_regression_check.py`（空闲 3 秒 0 帧、最大化/还原、程序化改尺寸、正常关窗）。
+  新增 2 用例（`dpi_canvas_resize_in_place_*` / `gpu_canvas_resize_in_place`）；
+  全量 **676 用例 / 17197 断言全绿**、lint 0 违规。
+
+- [x] **桌面窗框：自绘标题栏（跨平台无差异）**（**2026-10-04 落地，Win32 先行**）：
     ① **平台层去装饰建窗** ✅：`WS_POPUP|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX`（去
     `WS_CAPTION`/`WS_SYSMENU`，**保留** `WS_THICKFRAME`），`WM_NCCALCSIZE` 客户区覆盖整窗，
     `WM_NCHITTEST` 用 `ui::resize_edge_at` 接管八向缩放与拖动（**Aero Snap 随之保留**——

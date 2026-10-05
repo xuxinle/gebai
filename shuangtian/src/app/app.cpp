@@ -615,6 +615,11 @@ auto Application::start() -> Status {
   impl_->device_scale = impl_->backend->device_scale();
   impl_->started_ms = time::now_ms();
   impl_->started_ns = time::now_ns();  // 动画时间轴零点（与 started_ms 同源）
+  // **拖动缩放时逐帧跟上**（见 `Backend::set_resize_repaint` 的契约）：
+  // 用户拖边框走的是窗口系统模态循环，它**阻塞应用主循环**——不在那里驱动渲染，
+  // 屏幕就只能停在旧尺寸那一帧上（DXGI 再把它非等比拉到新客户区 → 用户看到的
+  // "拖动中拉伸扭曲、松手才重绘"）。这里把"重画一帧"交给后端去调。
+  impl_->backend->set_resize_repaint([this] { render_frame(); });
   started_ = true;
   render_frame();
   // 首帧已画完 → 窗口可以露面了。
@@ -644,6 +649,17 @@ void Application::render_frame() {
   if (impl_->profiling) {
     impl_->profiler.clear();  // 分解看的是**最后一帧**（与其余阶段指标同一口径）
     canvas.set_profiler(&impl_->profiler);
+  }
+  // **布局视口必须在这里对齐后端尺寸**，而不是只靠 `tick()` 那一条。
+  //
+  // 为什么：拖动缩放期间主循环不转，帧是由窗口过程（`WM_SIZE`）直接驱动的；
+  // 那时 `tick()` 根本没机会把新视口同步给 UI 树——布局会按**旧视口**排，
+  // 画进新尺寸的画布，表现为"右边/下边一片空"（实测拖动时能看到）。
+  // 放在 render_frame 入口还有第二个好处：重建与重绘在**同一帧内**使用一致的尺寸，
+  // 不会出现"画在旧画布、present 新画布"的错位。
+  const math::Size backend_size = impl_->backend->logical_size();
+  if (backend_size.width > 0.0f && backend_size.height > 0.0f) {
+    root_.set_viewport(backend_size);
   }
   root_.layout();
   // 时间轴推进：动画（开关/悬浮过渡/3D 旋转）都靠它。
@@ -682,6 +698,9 @@ void Application::tick() {
     root_.set_viewport(window_size);
     impl_->repaint = true;
   }
+  // 拖放重绘走过的尺寸同步：`WM_SIZE` 里已经立即重画过一帧（因为模态循环期间主循环
+  // 不转），这里只负责把**布局视口**改到同一条线上——两边不一致的话，下一帧仍会
+  // 按旧视口排布（表现为"松手后内容才重新排列"）。
   if (impl_->repaint || root_.dirty()) render_frame();
   // 脚本定时器与"高频事件合并"的补发：按帧推进，不额外起线程
   if (impl_->script != nullptr) (void)impl_->script->tick(0.0);
