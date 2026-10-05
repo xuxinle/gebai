@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <functional>
 #include <map>
@@ -24,6 +25,7 @@
 #include "st/pkg/memory.hpp"
 #include "st/pkg/registry.hpp"
 #include "st/pkg/semver.hpp"
+#include "st/pkg/stats.hpp"
 
 namespace {
 
@@ -296,6 +298,46 @@ auto command_test(const Arguments& arguments) -> int {
   return *code;
 }
 
+/// `st stats [--top N]`：源码结构度量（见 `st/pkg/stats.hpp` 的说明）。
+///
+/// 为什么把它做进工具链而不是留一次性脚本：结构评审反复要数同几件事
+/// （最大函数、热点头、复杂度），一次性脚本既慢又不可复现——"最大函数 511 行"
+/// 这种结论下次没人能一键复核。做进 `st` 之后，这把尺子随代码一起演进。
+auto command_stats(const Arguments& arguments) -> int {
+  auto root = project_root();
+  if (!root) {
+    std::fprintf(stderr, "错误: %s\n", root.error().to_string().c_str());
+    return 1;
+  }
+  std::size_t top = 10;
+  if (!arguments.get("top").empty()) {
+    top = static_cast<std::size_t>(std::strtoul(arguments.get("top").c_str(), nullptr, 10));
+    if (top == 0) top = 10;
+  }
+  auto stats = st::pkg::collect_stats(*root, top);
+  if (!stats) {
+    std::fprintf(stderr, "错误: %s\n", stats.error().to_string().c_str());
+    return 1;
+  }
+  st::print("源码结构度量（{} 个文件）\n", stats->files);
+  st::print("  总行数 {} · 非空行 {} · 函数 {}\n\n", stats->lines, stats->code_lines,
+            stats->functions);
+
+  st::print("最大文件\n");
+  for (const auto& f : stats->biggest_files) st::print("  {:5d} 行  {}\n", f.lines, f.path);
+  st::print("\n最大函数（含注释与签名）\n");
+  for (const auto& f : stats->biggest_functions) {
+    st::print("  {:5d} 行  {}:{}  {}\n", f.lines, f.file, f.line, f.name);
+  }
+  st::print("\n最复杂函数（近似圈复杂度）\n");
+  for (const auto& f : stats->complex_functions) {
+    st::print("  CC≈{:4d}  {:5d} 行  {}:{}  {}\n", f.complexity, f.lines, f.file, f.line, f.name);
+  }
+  st::print("\n被包含最多的头（改动它 = 这些单元要重编）\n");
+  for (const auto& h : stats->hot_headers) st::print("  {:4d}   {}\n", h.includers, h.header);
+  return 0;
+}
+
 auto command_lint(const Arguments& arguments) -> int {
   if (arguments.has("rules")) {
     for (const auto& [rule, description] : st::pkg::known_rules()) {
@@ -552,6 +594,7 @@ auto command_init(const Arguments& arguments) -> int {
     return 1;
   }
   const std::string main_template = R"CPP(#include <cstdio>
+#include <cstdlib>
 
 #include "st/app/app.hpp"
 #include "st/app/cli.hpp"
@@ -710,6 +753,7 @@ auto run_app(int argc, char** argv) -> int {
   if (arguments.command == "run") return command_run(arguments);
   if (arguments.command == "test") return command_test(arguments);
   if (arguments.command == "lint") return command_lint(arguments);
+  if (arguments.command == "stats") return command_stats(arguments);
   if (arguments.command == "doctor") return command_doctor(arguments);
   if (arguments.command == "tree") return command_tree(arguments);
   if (arguments.command == "deps") return command_deps(arguments);
