@@ -18,68 +18,13 @@
 #include "st/ui/text_port.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
+#include "tests/support/text_port_fixtures.hpp"
+
+// 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。
+using st::test::FixedAdvanceTextPort;
 
 namespace {
 
-/// 等宽假文本端口（8px/码点，行高 1.45×字号）：度量可复现，绘制只记录不落地。
-class FeedbackTestTextPort final : public st::ui::TextPort {
- public:
-  static constexpr float kAdvance{8.0f};
-
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
-    return st::math::Size{measure_width(utf8, size), line_height(size)};
-  }
-
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
-                     st::text::FontRole role = st::text::FontRole::Proportional) const
-      -> float override {
-      (void)role;  // 桩：等宽与比例同宽，无需区分
-    (void)size;
-    return kAdvance * static_cast<float>(st::utf8_length(utf8));
-  }
-
-  [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
-
-  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color,
-            st::text::FontRole role = st::text::FontRole::Proportional,
-            float embolden = 0.0f, bool = false) const override {
-    (void)role;      // 桩
-    (void)embolden;  // 桩（桩不模拟字重：断言只关心布局与颜色）
-    (void)canvas;
-    (void)origin;
-    (void)size;
-    (void)color;
-    drawn.emplace_back(utf8);
-  }
-
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
-      -> std::string override {
-    if (max_width <= 0.0f) return {};
-    if (measure_width(utf8, size) <= max_width) return std::string(utf8);
-    const auto capacity = static_cast<std::size_t>(max_width / kAdvance);
-    if (capacity <= 1U) return std::string("…");
-    return std::string(st::utf8_slice(utf8, 0, capacity - 1U)) + "…";
-  }
-
-  [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
-      -> std::vector<std::string_view> override {
-    (void)size;
-    (void)max_width;
-    return {utf8};
-  }
-
-  [[nodiscard]] auto wrap_limited(std::string_view utf8, float size, float max_width,
-                                  std::size_t max_lines) const
-      -> std::vector<std::string> override {
-    (void)size;
-    (void)max_width;
-    (void)max_lines;
-    return {std::string(utf8)};
-  }
-
-  mutable std::vector<std::string> drawn{};
-};
 
 /// 直通 alpha 合成（预期像素用）。
 [[nodiscard]] auto composite(st::math::Color base, st::math::Color over) -> st::math::Color {
@@ -122,7 +67,7 @@ class FeedbackTestTextPort final : public st::ui::TextPort {
 
 ST_TEST(ui_progressbar_fill_and_track) {
   st::ui::Theme theme = st::ui::Theme::light();
-  FeedbackTestTextPort port;
+  FixedAdvanceTextPort port;
   st::ui::RenderContext context{theme, &port, 0.0};
 
   st::ui::ProgressBar bar;
@@ -166,7 +111,7 @@ ST_TEST(ui_progressbar_fill_and_track) {
 
 ST_TEST(ui_spinner_animation) {
   st::ui::Theme theme = st::ui::Theme::light();
-  FeedbackTestTextPort port;
+  FixedAdvanceTextPort port;
   const st::ui::RenderContext at0{theme, &port, 0.0};
   const st::ui::RenderContext at03{theme, &port, 0.3};
   const st::ui::RenderContext at12{theme, &port, 1.2};
@@ -207,7 +152,7 @@ ST_TEST(ui_spinner_animation) {
 
 ST_TEST(ui_badge_chip_avatar) {
   st::ui::Theme theme = st::ui::Theme::light();
-  FeedbackTestTextPort port;
+  FixedAdvanceTextPort port;
   st::ui::RenderContext context{theme, &port, 0.0};
   const st::ui::Constraints constraints;
 
@@ -305,7 +250,7 @@ ST_TEST(ui_badge_chip_avatar) {
 
 ST_TEST(ui_tooltip_target_and_visibility) {
   st::ui::Theme theme = st::ui::Theme::light();
-  FeedbackTestTextPort port;
+  FixedAdvanceTextPort port;
   st::ui::RenderContext context{theme, &port, 0.0};
   const st::ui::Constraints constraints;
 
@@ -430,7 +375,7 @@ ST_TEST(ui_dialog_scrim_and_dismiss) {
 
 ST_TEST(ui_toast_tone_bar) {
   st::ui::Theme theme = st::ui::Theme::light();
-  FeedbackTestTextPort port;
+  FixedAdvanceTextPort port;
   st::ui::RenderContext context{theme, &port, 0.0};
   const st::ui::Constraints constraints;
 
@@ -459,7 +404,7 @@ ST_TEST(ui_toast_tone_bar) {
 
 ST_TEST(ui_toast_auto_dismiss) {
   st::ui::Theme theme = st::ui::Theme::light();
-  FeedbackTestTextPort port;
+  FixedAdvanceTextPort port;
   const st::ui::Constraints constraints;
 
   auto toast = st::ui::Toast::make("已保存", st::ui::Tone::Success);

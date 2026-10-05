@@ -15,35 +15,13 @@
 #include "st/ui/ui_root.hpp"
 
 #include "st/ext/json.hpp"
+#include "tests/support/text_port_fixtures.hpp"
+
+// 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。
+using st::test::FixedAdvanceTextPort;
 
 namespace {
 
-class FixtureTextPort final : public st::ui::TextPort {
- public:
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
-    return st::math::Size{8.0F * static_cast<float>(utf8.size()), size * 1.45F};
-  }
-  [[nodiscard]] auto measure_width(std::string_view utf8, float,
-                     st::text::FontRole = st::text::FontRole::Proportional) const
-      -> float override {
-    return 8.0F * static_cast<float>(utf8.size());
-  }
-  [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45F; }
-  void draw(st::raster::Surface&, std::string_view, st::math::Point, float, st::math::Color,
-            st::text::FontRole = st::text::FontRole::Proportional, float = 0.0F,
-            bool = false) const override {}
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float, float) const -> std::string override {
-    return std::string(utf8);
-  }
-  [[nodiscard]] auto wrap(std::string_view utf8, float, float) const
-      -> std::vector<std::string_view> override {
-    return {utf8};
-  }
-  [[nodiscard]] auto wrap_limited(std::string_view utf8, float, float, std::size_t) const
-      -> std::vector<std::string> override {
-    return {std::string(utf8)};
-  }
-};
 
 /// 结构性签名：type + 语义文本（不含几何与 id 细节——双宿主的 id 生成路径不同，
 /// 语义面才是"同一界面"的判据）。
@@ -102,7 +80,7 @@ compose('Fixture', () => {
 }  // namespace
 
 ST_TEST(dual_host_mount_signature_matches) {
-  FixtureTextPort port;
+  FixedAdvanceTextPort port;
   // —— C++ 宿主 ——
   st::ui::UiRoot cpp_root;
   cpp_root.set_text_port(&port);
@@ -130,7 +108,7 @@ ST_TEST(dual_host_mount_signature_matches) {
 }
 
 ST_TEST(dual_host_state_step_signature_matches) {
-  FixtureTextPort port;
+  FixedAdvanceTextPort port;
   // C++：点 3 次 + 展开
   st::ui::UiRoot cpp_root;
   cpp_root.set_text_port(&port);
@@ -225,7 +203,7 @@ compose('ParityList', () => {
 }  // namespace
 
 ST_TEST(dual_host_list_and_condition_signature_matches) {
-  FixtureTextPort port;
+  FixedAdvanceTextPort port;
   // —— C++ ——
   st::ui::UiRoot cpp_root;
   cpp_root.set_text_port(&port);
@@ -275,7 +253,7 @@ ST_TEST(dual_host_list_and_condition_signature_matches) {
 // key 复用的一致性：两宿主在「头部插入」后，既有项的**元素身份**都必须保持
 // （不是“结构看起来一样”——id 稳定性才是 key 复用的意义所在）。
 ST_TEST(dual_host_key_identity_survives_insert) {
-  FixtureTextPort port;
+  FixedAdvanceTextPort port;
   // C++
   st::ui::UiRoot cpp_root;
   cpp_root.set_text_port(&port);

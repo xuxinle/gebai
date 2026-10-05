@@ -20,96 +20,16 @@
 #include "st/ui/components/markdown_view.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
+#include "tests/support/text_port_fixtures.hpp"
+
+// 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。
+using st::test::ProportionalTextPort;
 
 namespace {
 
-/// 测试用文本端口：不做字形光栅化，把每次 `draw` 落成**同色实心块**（宽度按码点估算）。
-/// 目的：像素断言与系统字体无关、完全确定 —— 断言验证的是**组件向文本端口提交的颜色与布局**，
-/// 而不是字形覆盖率（字形的正确性由 text 层单测覆盖）。
-/// 折行由组件自研（不依赖端口 `wrap`），故此处 `wrap` 仅按显式换行切分。
-class StubTextPort final : public st::ui::TextPort {
- public:
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
-    return st::math::Size{measure_width(utf8, size), line_height(size)};
-  }
 
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
-                     st::text::FontRole role = st::text::FontRole::Proportional) const
-      -> float override {
-      (void)role;  // 桩：等宽与比例同宽，无需区分
-    float width = 0.0f;
-    std::size_t index = 0;
-    while (index < utf8.size()) {
-      const st::Codepoint codepoint = st::decode_utf8(utf8, index);
-      width += codepoint.value < 0x80U ? size * 0.55f : size;
-    }
-    return width;
-  }
-
-  [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45f; }
-
-  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color,
-            st::text::FontRole role = st::text::FontRole::Proportional,
-            float embolden = 0.0f, bool = false) const override {
-    (void)role;      // 桩
-    (void)embolden;  // 桩（桩不模拟字重：断言只关心布局与颜色）
-    if (utf8.empty()) return;
-    // 落成**整像素**矩形：端口的输出与坐标的像素对齐方式无关，断言只关心颜色与位置
-    const float x = std::round(origin.x);
-    const float y = std::round(origin.y + size * 0.25f);
-    const float width = std::max(std::round(measure_width(utf8, size)), 1.0f);
-    const float height = std::max(std::round(size * 0.7f), 1.0f);
-    canvas.fill_rect(st::math::Rect{x, y, width, height}, st::raster::Paint::solid(color));
-  }
-
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
-      -> std::string override {
-    if (measure_width(utf8, size) <= max_width) return std::string(utf8);
-    const float ellipsis_width = size;  // 「…」按一个全角宽度计
-    std::string out;
-    float width = 0.0f;
-    std::size_t index = 0;
-    while (index < utf8.size()) {
-      const std::size_t start = index;
-      const st::Codepoint codepoint = st::decode_utf8(utf8, index);
-      const float char_width = codepoint.value < 0x80U ? size * 0.55f : size;
-      if (width + char_width + ellipsis_width > max_width) break;
-      out.append(utf8.substr(start, index - start));
-      width += char_width;
-    }
-    out.append("…");
-    return out;
-  }
-
-  [[nodiscard]] auto wrap(std::string_view utf8, float, float) const
-      -> std::vector<std::string_view> override {
-    std::vector<std::string_view> lines;
-    std::size_t begin = 0;
-    while (begin <= utf8.size()) {
-      std::size_t end = utf8.find('\n', begin);
-      if (end == std::string_view::npos) end = utf8.size();
-      lines.push_back(utf8.substr(begin, end - begin));
-      if (end >= utf8.size()) break;
-      begin = end + 1;
-    }
-    return lines;
-  }
-
-  [[nodiscard]] auto wrap_limited(std::string_view utf8, float size, float max_width,
-                                  std::size_t max_lines) const -> std::vector<std::string> override {
-    std::vector<std::string> out;
-    for (const std::string_view line : wrap(utf8, size, max_width)) {
-      if (out.size() >= max_lines) break;
-      out.emplace_back(line);
-    }
-    if (out.empty()) out.emplace_back();
-    return out;
-  }
-};
-
-[[nodiscard]] auto stub_port() -> const StubTextPort& {
-  static const StubTextPort port;
+[[nodiscard]] auto stub_port() -> const ProportionalTextPort& {
+  static const ProportionalTextPort port;
   return port;
 }
 

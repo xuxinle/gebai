@@ -31,6 +31,11 @@
 #include "st/ui/components/basic.hpp"
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
+#include "tests/support/text_port_fixtures.hpp"
+
+// 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。
+using st::test::RecordingTextPort;
+using st::test::RendererTextPort;
 
 namespace {
 
@@ -49,49 +54,6 @@ struct InkStats {
   float peak{0.0f};
 };
 
-/// 记录**最后一次 draw 收到的 `bold` 参数**的转发端口。
-///
-/// 为什么需要它：字重链路是 `Text::set_weight` → `style_.font_weight` → `paint_text`
-/// → `port.draw(…, bold)` 四段，任何一段断掉，像素都退回 Regular——
-/// 而只看墨量无法区分“哪一段断了”。这个间谍把**中间那一跳**暴露出来。
-class SpyPort final : public st::ui::TextPort {
- public:
-  explicit SpyPort(const st::ui::TextPort& inner) : inner_(inner) {}
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
-    return inner_.measure(utf8, size);
-  }
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
-                                   st::text::FontRole role) const -> float override {
-    return inner_.measure_width(utf8, size, role);
-  }
-  [[nodiscard]] auto line_height(float size) const -> float override {
-    return inner_.line_height(size);
-  }
-  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color, st::text::FontRole role, float embolden, bool bold) const override {
-    last_bold = bold;
-    last_embolden = embolden;
-    inner_.draw(canvas, utf8, origin, size, color, role, embolden, bold);
-  }
-  [[nodiscard]] auto has_real_bold() const -> bool override { return inner_.has_real_bold(); }
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
-      -> std::string override {
-    return inner_.ellipsize(utf8, size, max_width);
-  }
-  [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
-      -> std::vector<std::string_view> override {
-    return inner_.wrap(utf8, size, max_width);
-  }
-  [[nodiscard]] auto wrap_limited(std::string_view utf8, float size, float max_width,
-                                  std::size_t max_lines) const -> std::vector<std::string> override {
-    return inner_.wrap_limited(utf8, size, max_width, max_lines);
-  }
-  mutable bool last_bold{false};
-  mutable float last_embolden{0.0f};
-
- private:
-  const st::ui::TextPort& inner_;
-};
 
 }  // namespace
 
@@ -114,7 +76,7 @@ ST_TEST(ui_text_weight_reaches_pixels) {
               reg ? reg->path() : "<null>", bld ? bld->path() : "<null>");
   }
 
-  SpyPort spy(port);
+  RecordingTextPort spy(port);
   const auto paint = [&](FontWeight weight) -> InkStats {
     Theme theme = Theme::light();
     RenderContext context{theme, &spy, 0.0};

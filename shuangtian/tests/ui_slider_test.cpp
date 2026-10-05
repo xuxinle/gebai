@@ -26,6 +26,10 @@
 #include "st/ui/element.hpp"
 #include "st/ui/theme.hpp"
 #include "st/ui/ui_root.hpp"
+#include "tests/support/text_port_fixtures.hpp"
+
+// 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。
+using st::test::RendererTextPort;
 
 namespace {
 
@@ -33,59 +37,13 @@ using st::math::Color;
 using st::math::Point;
 using st::math::Rect;
 
-/// 把 `text::TextRenderer` 适配成 `ui::TextPort`（ui 层不依赖 text 层，测试作为宿主注入）。
-class FontPort final : public st::ui::TextPort {
- public:
-  explicit FontPort(const st::text::FontStack& stack) : renderer_(stack) {}
-
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
-    return renderer_.measure(utf8, size);
-  }
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
-                     st::text::FontRole role = st::text::FontRole::Proportional) const
-      -> float override {
-      (void)role;  // 桩：等宽与比例同宽，无需区分
-    return renderer_.measure_width(utf8, size, role);
-  }
-  [[nodiscard]] auto line_height(float size) const -> float override {
-    return renderer_.line_height(size);
-  }
-  void draw(st::raster::Surface& canvas, std::string_view utf8, st::math::Point origin, float size,
-            st::math::Color color,
-            st::text::FontRole role = st::text::FontRole::Proportional,
-            float embolden = 0.0f, bool = false) const override {
-    (void)role;      // 桩
-    (void)embolden;  // 桩
-    (void)renderer_.draw(canvas, utf8, origin, size, color, role, embolden);
-  }
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float size, float max_width) const
-      -> std::string override {
-    return renderer_.ellipsize(utf8, size, max_width);
-  }
-  [[nodiscard]] auto wrap(std::string_view utf8, float size, float max_width) const
-      -> std::vector<std::string_view> override {
-    return renderer_.wrap(utf8, size, max_width);
-  }
-  [[nodiscard]] auto wrap_limited(std::string_view utf8, float size, float max_width,
-                                  std::size_t max_lines) const -> std::vector<std::string> override {
-    std::vector<std::string> lines;
-    for (const auto& line : renderer_.wrap(utf8, size, max_width)) {
-      if (lines.size() >= max_lines) break;
-      lines.emplace_back(line);
-    }
-    return lines;
-  }
-
- private:
-  st::text::TextRenderer renderer_;
-};
 
 /// 滑块半径（与组件文档一致：16px 滑块 → 半径 8；控件压矮时随高度收缩）。
 constexpr float k_knob_radius = 8.0f;
 
 struct Harness {
   std::optional<st::text::FontStack> stack{};
-  std::unique_ptr<FontPort> port{};
+  std::unique_ptr<RendererTextPort> port{};
   st::ui::UiRoot root{};
 
   Harness() {
@@ -95,7 +53,7 @@ struct Harness {
       return;
     }
     stack.emplace(std::move(*loaded));
-    port = std::make_unique<FontPort>(*stack);
+    port = std::make_unique<RendererTextPort>(*stack);
     root.set_text_port(port.get());
   }
 

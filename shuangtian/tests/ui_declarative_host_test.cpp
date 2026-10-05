@@ -19,39 +19,16 @@
 #include "st/ui/ui_root.hpp"
 
 #include "st/ext/json.hpp"
+#include "tests/support/text_port_fixtures.hpp"
+
+// 测试在匿名命名空间内，`st::test::X` 得写全；用具名别名让用例读起来干净。
+using st::test::FixedAdvanceTextPort;
 
 namespace {
 
-/// 等宽假文本端口（与 ui_script_host_test 同款）。
-class DeclarativeTestTextPort final : public st::ui::TextPort {
- public:
-  [[nodiscard]] auto measure(std::string_view utf8, float size) const -> st::math::Size override {
-    return st::math::Size{8.0F * static_cast<float>(st::utf8_length(utf8)), size * 1.45F};
-  }
-  [[nodiscard]] auto measure_width(std::string_view utf8, float size,
-                     st::text::FontRole role = st::text::FontRole::Proportional) const -> float override {
-    (void)role;
-    (void)size;
-    return 8.0F * static_cast<float>(st::utf8_length(utf8));
-  }
-  [[nodiscard]] auto line_height(float size) const -> float override { return size * 1.45F; }
-  void draw(st::raster::Surface&, std::string_view, st::math::Point, float, st::math::Color,
-            st::text::FontRole = st::text::FontRole::Proportional,
-            float = 0.0F, bool = false) const override {}
-  [[nodiscard]] auto ellipsize(std::string_view utf8, float, float) const -> std::string override {
-    return std::string(utf8);
-  }
-  [[nodiscard]] auto wrap(std::string_view utf8, float, float) const -> std::vector<std::string_view> override {
-    return {utf8};
-  }
-  [[nodiscard]] auto wrap_limited(std::string_view utf8, float, float, std::size_t) const
-      -> std::vector<std::string> override {
-    return {std::string(utf8)};
-  }
-};
 
 struct Fixture {
-  DeclarativeTestTextPort port{};
+  FixedAdvanceTextPort port{};
   st::ui::UiRoot root{};
   std::unique_ptr<st::ui::ScriptHost> script{};
   std::unique_ptr<st::ui::DeclarativeHost> decl{};
