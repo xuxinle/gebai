@@ -136,6 +136,28 @@ list->sync_items(rows);        // 同 key 的项沿用同一元素与同一 id�
 | `未找到工程清单` | `project` 指错目录，或还没 `init` |
 | `框架路径下没有 st.pkg` | `framework.path` 不是框架根（应是含 `st.pkg` 的目录） |
 | 链接缺符号 | 清单里没写 `framework`，或 `sources` 与 target 源重复匹配同一批文件 |
+| 链接缺 `sqlite3_column_table_name` / `sqlite3_column_origin_name` | 框架的 C 标志（`-include st_sqlite3_config.h`）没走到框架单元——这是 2026-10-05 修掉的缺陷，**升级框架后自动消失**；若在两版本之间碰到，报因就在 `make_framework_flags` 的 `framework_c_flags` 形参（详见下文“只在这条路径上暴露的缺陷”）。 |
+| 应用启动即退、等不到控制通道就绪 | 开了应用自己的 argv 解析而**漏了共享 CLI**（`st::app::parse_common_options`）；或共享 CLI 不认驱动方传的某个参数（如 `--shots`）——错误在应用日志里是一句“未知参数”。 |
 | 交叉编译说"清单未定义工具链" | 框架的 `toolchains` 没被并入 → 确认 `framework.path` 正确（工具链随框架继承） |
 | 中文路径打不开 | 用 `st::fs` 的接口（`fs::read_text`/`to_path`），不要 `ifstream(std::string)` |
 | 控制通道连不上 | 入口没解析 `--control-port`/`--control-file`（见上文"命令行"） |
+
+## 只在这条路径上暴露的缺陷（为什么框架单测全绿也拦不住）
+
+“引用 framework 的独立工程”与“框架自己构建”**不是同一条路径**，有三处差异会让缺陷
+只在前者显形。三处都已在 2026-10-05 修复，写在这里是因为**它们为什么当时抓不到**比缺陷本身更值得记住：
+
+1. **框架的 C 标志被调用方工程的顶掉**：`make_framework_flags` 曾用调用方的
+   `manifest.c_flags`（独立工程一般是**空**的）而非框架的。于是框架单元里唯一的 C 源
+   （`sqlite3.c`）丢了 `-include st_sqlite3_config.h` ⇒ `SQLITE_ENABLE_COLUMN_METADATA`
+   未定义 ⇒ `sqlite3_column_table_name` **链接期** undefined reference。
+   **为什么框架自己构建不报**：那时 `manifest` 就是框架清单，两者恰好相等——自建一百次都不复现。
+2. **共享 CLI 不认 `--shots`**：驱动方启动应用的固定契约含它，落进 `else` 分支 ⇒
+   `Invalid` ⇒ 模板 `main` 打印错误并 return 1 ⇒ “应用起不来”。
+3. **框架源缺头**（`<cstring>` / `<format>`）：在新编译器/新 SDK 上才报，
+   而框架自己构建时碰巧有间接包含。
+
+**防复发机制（已建）**：`tests/pkg_integration_test.cpp` —— 真建一个引用 framework 的
+最小工程、真构建、真跑起来（判据是**产物能不能跑**，不是“函数返回了 ok”：
+缺陷 1 在编译期零症状，任何不走到“链接 + 执行”的检查都会漏掉它）。
+由 `st test` 随全套单测一起跑；`ST_INTEGRATION_BUILD=0` 可关（关掉时明确跳过，不假绿）。

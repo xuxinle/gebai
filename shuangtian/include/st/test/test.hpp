@@ -24,6 +24,12 @@ namespace st::test {
 struct Case {
   std::string name{};
   std::function<void()> body{};
+  /// 本用例的软超时上限（ms）；`0` = 用默认值。
+  ///
+  /// 为何需要逐用例覆盖：默认值（10 s）是按“单元级用例”标的（最慢的动画类 ~100 ms），
+  /// 而**集成级**用例要真编译、真跑产物，在 debug 档下 10 s 不够（实测 18 s）——
+  /// 它会在测试框架里报软超时失败，而那不是被测对象的问题。
+  std::int64_t timeout_ms{0};
 };
 
 /// 单个用例的运行结果（junit 报告与超时标记用）。
@@ -41,6 +47,8 @@ class Registry {
   static auto instance() -> Registry&;
 
   void add(std::string name, std::function<void()> body);
+  /// 带显式软超时的注册（ms；`0` = 用默认值）。
+  void add(std::string name, std::function<void()> body, std::int64_t timeout_ms);
   [[nodiscard]] auto cases() -> std::vector<Case>&;
 
   void record_failure(std::string_view file, int line, std::string message);
@@ -71,6 +79,10 @@ struct Registrar {
   Registrar(std::string_view name, std::function<void()> body) {
     Registry::instance().add(std::string(name), std::move(body));
   }
+  /// 带显式软超时的注册（`ST_TEST_WITH_TIMEOUT` 用）。
+  Registrar(std::string_view name, std::function<void()> body, std::int64_t timeout_ms) {
+    Registry::instance().add(std::string(name), std::move(body), timeout_ms);
+  }
 };
 
 }  // namespace st::test
@@ -81,6 +93,19 @@ struct Registrar {
   namespace {                                                                     \
   const ::st::test::Registrar st_test_registrar_##test_name{                      \
       #test_name, &st_test_case_##test_name};                                     \
+  }                                                                               \
+  static void st_test_case_##test_name()
+
+/// 同 `ST_TEST`，但指定本用例的**软超时上限**（ms）。
+///
+/// 用途：**集成级**用例（真编译一个工程、真跑一个进程）——它们的耗时由外部工具决定
+/// （debug 档实测 18 s），而不是被测代码的快慢。不覆盖的话它们会在测试框架里
+/// 报软超时失败，把一个“框架默认值不适合这类用例”的问题误报成“被测对象有问题”。
+#define ST_TEST_WITH_TIMEOUT(test_name, timeout_ms)                                \
+  static void st_test_case_##test_name();                                         \
+  namespace {                                                                     \
+  const ::st::test::Registrar st_test_registrar_##test_name{                      \
+      #test_name, &st_test_case_##test_name, (timeout_ms)};                        \
   }                                                                               \
   static void st_test_case_##test_name()
 

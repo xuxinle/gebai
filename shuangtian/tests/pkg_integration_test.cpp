@@ -106,7 +106,7 @@ ST_MAIN(run_app)
 
 }  // namespace
 
-ST_TEST(independent_project_builds_links_and_runs) {
+ST_TEST_WITH_TIMEOUT(independent_project_builds_links_and_runs, 120'000) {
   if (const char* disabled = std::getenv("ST_INTEGRATION_BUILD");
       disabled != nullptr && std::string_view(disabled) == "0") {
     st::print("[独立工程] ST_INTEGRATION_BUILD=0 → 跳过（**非通过**：真构建被显式关闭）\n");

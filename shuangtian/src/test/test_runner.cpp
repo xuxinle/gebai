@@ -41,7 +41,12 @@ auto Registry::instance() -> Registry& {
 
 void Registry::add(std::string name, std::function<void()> body) {
   const std::scoped_lock lock(registry_mutex());
-  case_list.push_back(Case{std::move(name), std::move(body)});
+  case_list.push_back(Case{std::move(name), std::move(body), 0});
+}
+
+void Registry::add(std::string name, std::function<void()> body, std::int64_t timeout_ms) {
+  const std::scoped_lock lock(registry_mutex());
+  case_list.push_back(Case{std::move(name), std::move(body), timeout_ms});
 }
 
 auto Registry::cases() -> std::vector<Case>& { return case_list; }
@@ -112,12 +117,15 @@ auto run_all(std::string_view filter) -> int {
         joined = true;
         break;
       }
-      if (time::now_ns() - start_ns > timeout_ms * 1'000'000LL &&
-          !timed_out.exchange(true)) {
-        std::fprintf(stdout, "  \x1b[33mTIME\x1b[0m %-44s 超过 %lld ms 仍在运行（软超时标记 FAIL，继续等待）\n",
-                     item.name.c_str(), static_cast<long long>(timeout_ms));
-        std::fflush(stdout);
-      }
+          // 逐用例的软超时：用例自带时用它（集成级用例真编译、真跑产物，耗时由外部工具
+    // 决定而不是被测代码的快慢），否则用全局默认。
+    const std::int64_t case_timeout_ms = item.timeout_ms > 0 ? item.timeout_ms : timeout_ms;
+    if (time::now_ns() - start_ns > case_timeout_ms * 1'000'000LL &&
+        !timed_out.exchange(true)) {
+      std::fprintf(stdout, "  \x1b[33mTIME\x1b[0m %-44s 超过 %lld ms 仍在运行（软超时标记 FAIL，继续等待）\n",
+                   item.name.c_str(), static_cast<long long>(case_timeout_ms));
+      std::fflush(stdout);
+    }
     }
     // 走到这说明用例已结束（join 完成）。超时但最终结束的用例按失败计。
     if (timed_out.load()) registry.record_failure("timeout", 0, "用例超过软超时上限");

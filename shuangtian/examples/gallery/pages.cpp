@@ -1343,22 +1343,26 @@ struct DeclarativePage : st::ui::dsl::Component {
 
     // ⑤ hooks 集中在 build 开头：hooks 按**调用点序号**对齐槽位，顺序必须每帧一致
     //    （写在条件分支里会错位——同 React Hooks 的规则）。
-    // Deps 用局部变量传（不仅为了好看：gcc 的 -Wdangling-reference 对「实参里有临时
-    // Deps、返回值又是引用」会误报——具名变量同时回避误报、也让依赖列表更好读）。
+    //
+    // 下面两个 `Deps` 与一个 lambda 都**具名**传——不是为了好看，是绕开 GCC 的
+    // `-Wdangling-reference` 误报：该启发式看到「返回引用的函数」+「实参里有绑定到
+    // 临时的东西」就报（它**不看**被引用的对象其实是 `Composer` 里活得更久的缓存槽）。
+    // 实测触发点先后踩过两个：临时 `Deps`（已用局部变量回避）、以及这里把 lambda
+    // 直接写在实参里（闭包对象本身是临时——“a temporary bound to a reference parameter”）。
+    // 具名变量把两个触发条件都消掉，改动面最小，也不像 `-Wno-dangling-reference`
+    // 那样把本文件里**真正**的悬垂风险一并静默掉。
     const Deps memo_deps{{&todos, &filter}};
     const Deps effect_deps{{&name}};
-    const auto& visible = memo<std::vector<TodoRow>>(
-        c,
-        [&] {
-          std::vector<TodoRow> out;
-          for (const auto& item : todos.value()) {
-            if (filter.value().empty() || item.text.find(filter.value()) != std::string::npos) {
-              out.push_back(item);
-            }
-          }
-          return out;
-        },
-        memo_deps);
+    const auto visible_source = [&] {
+      std::vector<TodoRow> out;
+      for (const auto& item : todos.value()) {
+        if (filter.value().empty() || item.text.find(filter.value()) != std::string::npos) {
+          out.push_back(item);
+        }
+      }
+      return out;
+    };
+    const auto& visible = memo<std::vector<TodoRow>>(c, visible_source, memo_deps);
     int& builds = ref<int>(c, 0);
     ++builds;   // ref：每次重组自增（它**不触发**重组——要驱动界面得用 State）
     effect(c, [this] { effect_log.set("name 变了 → " + name.value()); }, effect_deps);

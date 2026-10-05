@@ -140,7 +140,10 @@ st_test_count = 0
 st_assert_hint = 0
 for f in (root / 'tests').glob('*_test.cpp'):
     src = f.read_text(encoding='utf-8', errors='ignore')
+    # 两种注册宏都算：`ST_TEST` 与 `ST_TEST_WITH_TIMEOUT`（后者给集成级用例
+    # 指定软超时——它也是“一个用例”，漏数会让文档里的用例数对不上）。
     st_test_count += len(re.findall(r'\bST_TEST\s*\(', src))
+    st_test_count += len(re.findall(r'\bST_TEST_WITH_TIMEOUT\s*\(', src))
 design_text = (root / 'DESIGN.md').read_text(encoding='utf-8')
 for m in re.finditer(r'(\d+)\s*用例\s*/\s*(\d+)\s*断言', design_text):
     doc_cases = int(m.group(1))

@@ -1652,6 +1652,26 @@ compose('TodoPage', () => Column([
   见 `docs/declarative.md` §4.0.1）、`ref<T>(c, init)`（跨重组稳定、**不响应式**：
   改它不触发重组）、`persisted<T>(c, key, init)`（**按名字**取槽：会话级持久，
   条件剪掉再声明能拿回旧值）。`Deps{{&a, &b}}` 的指纹是 `(指针, 写版本)`。
+- **`BoxProps` 的排版三件套**：`color`（语义 `Tone`，跟着主题走）/ `hex_color`（字面色值，
+  对标设计稿；两者同给时字面优先）/ `size` / `weight`——**唯一一组会盖过主题 token** 的字段
+  （缺省不干预主题）。落地是「记成显式覆盖」（`Element::set_text_*` + `apply_text_overrides`），
+  因为颜色/字号/字重平时由 `apply_theme` **每帧**从主题重算——不记就是
+  “设了颜色首帧对、下一帧被主题盖回去”。`apply_text_overrides` 放在覆写末尾统一回放：
+  要盖过主题的是**任何会画文字的元素**，逐个组件重抄判定必漏。
+  > 视觉树 `visual` 协议同步上报 `text_color`/`font_size`/`font_weight`：文本颜色
+  > **语义树里没有、像素里难断言**——不给读数口，“标红生效了吗”就只能靠截图逐像素猜。
+- **组件包装的边界补齐（安全/语义相关）**：`dsl::input(..., password)`——`Input::set_password`
+  一直存在但声明式主路径没暴露，键/令牌级能力不该只对“愿意写逃生船”的调用方开放；
+  `TextArea::set_read_only`——**只读 ≠ 禁用**：`set_enabled(false)` 会让它变灰且不可交互，
+  而 JSON 格式化输出这类只读展示恰恰需要能滚动看；只读下编辑禁入但光标/滚动/焦点照常。
+- **`dsl::markdown(c, source_fn, props)`**：把 `MarkdownView` 的配置收敛到一处
+  （三页 LLM 结果各自写 `custom<MarkdownView>` + 一串配置是 ~15 行/页的样板）。
+  `source` 是惰性闭包（与 `text` 同口径）：重组时重新求值，流式回答因此逐帧更新。
+- **`FileDialog::set_pending_path(path)` / `select_entry(i)`**（属性面 `pending_path`、
+  动作 `select`）：给 headless/自动化一条程序化选路入口——组件选路全靠鼠标点列表 +
+  在文件名行打字，无头下智能体根本“选不了文件”。语义：目录→进入；文件→进入其所在目录 +
+  回填文件名 + 选中列表项；**不存在→返回 false 且不改任何状态**（不静默去别处）。
+
 - **单根语义**：build 的首个顶层声明直接落在 `UiRoot::content()` 槽位（不预建容器层）。
 - **位置对齐复用 + key 复用**：每个父元素一个子游标，重跑 build 时按位置+类型对齐——同位同型只
   更新（经 `ui::apply_properties`），异型替换，声明变少裁残。条件分支因此天然工作。
@@ -1664,6 +1684,21 @@ compose('TodoPage', () => Column([
   **分不清这一点就会把它当残留销毁**（实测：头插一项后其余项全部重建、id 漂移）。
   契约：`item_fn` 为每个 item 恰好声明一个顶层元素；`key_fn` 的返回值一帧内不要重复。
   需要 item 级细粒度失效时改用 `sub_component`（`for_each` 不为每项建独立作用域）。
+  - **`item_fn` 可收 `(const T&, std::size_t index)`**：数据按签名分派，两种写法都编译得过。
+    索引是列表项回调（勾选/删除/上下移）唯一能确定“就是这一条”的凭据——
+    没有它时只能拿业务 key 回原文查，而 key 用**显示文案**时（两条“写周报”）回查永远
+    命中第一条：界面上表现为「点第二条的勾选框，第一条被勾上」。
+  - **key 必须唯一；重复的 key 会被旁路**（该 item 退回按位置对齐），重名清单记进
+    `ReconcileStats::key_collisions`。不旁路的话第二项会把第一项的**元素偷走**
+    （挪到自己的游标位），两项落到同一个元素上——列表直接少一行，而文案与行数在画面上
+    “看起来都对”（少的那行正是被偷的）。旁路而不报错：重复 key 是常见业务数据，
+    不该让界面直接不渲染。
+  - **对齐复杂度是 O(N)**：key 查找从**当前游标**起扫（不是从位置 0）——
+    游标之前的位置已经对齐完了，要复用的元素不可能待在游标之前。
+    从 0 扫是 O(N²)：实测 5000 项改一条数据 **43.6 ms → 1.36 ms**
+    （对照：同一列表去掉 key 只要 0.67 ms）。
+    `ReconcileStats::alignment_probes` 把这个复杂度变成**确定性可断言的计数**
+    （时间会随机器负载抖动，不足以当回归判据）。
 - **护栏**：build 抛异常 → 冻结该作用域（保留上一帧 UI）+ `stats.error` 上报；
   **作用域嵌套深度** 超 `Guardrails::max_depth`（默认 64）→ **拒绝声明** + 写 `stats.error`
   （递归 build 在此被截住，不是靠栈撞上限——见 `tests/ui_dsl_test.cpp` 的谬误注入用例）；
@@ -2856,13 +2891,14 @@ GPU 结果要落到 `Surface` 仍要经过回读）——**成本确定，收益
 | 层次 | 手段 | 命令 | 现状 |
 |---|---|---|---|
 | 单元测试 | 自研测试框架（`ST_TEST`/`ST_CHECK*`；`--list` 列用例、`--format junit` 出 CI 报告、per-case
- 超时护栏） | `st test` | 全绿（**676 用例 / 17197 断言**；g++ 与回退 MSVC 两侧同批结果，唯 1 个已登记的
-字形墨量阈值存
-量项待校准） |
+ 超时护栏——集成级用例可用 `ST_TEST_WITH_TIMEOUT` 自带更宽的上限） | `st test` | 全绿（**697 用例 /
+17228 断言**，dev 与 debug 两档同批结果） |
+| 独立工程集成 | **真建一个引用 framework 的最小工程**、真构建真跑（`tests/pkg_integration_test.cpp`）
+ | `st test pkg_integration` | 全绿（`ST_INTEGRATION_BUILD=0` 可关；关掉时明确跳过而非假绿） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告（需带 sanitizer 运行库的编译器；MinGW 发行版不带时构建前明确报错） |
 | 内置通道一致性 | `tools/st_consistency_check.py`：窗口帧缓冲 vs 客户区实际像素（逐像素） + 无头 vs 窗口同参数（scale/文本形态/拟合/截图接近度） | `python tools/st_consistency_check.py`（Windows 真机） | 5 项全过（呈现 0.000%、同源项全等） |
 | sanitizer | ASan + UBSan 全量复跑（UB 即 bug，不是"测试问题"） | `st test --san` | 零报告 |
-| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include | `st lint` | 0 违规（254 文件、12 处登记豁免） |
+| 禁令扫描 | **13 条**禁用特性规则（L1–L13；L8/L13 为作用域感知的专用检查）+ 文件布局 + 禁用 include；豁免两条通道：**行内** `// lint-allow:` 与**清单** `lint.exempt`（规则 × 路径 glob，现测 12 处均为行内、清单 0 处） | `st lint` | 0 违规（289 文件、豁免 12 处） |
 | 无头视觉 | `tools/st_visual_check.py`：dev/san × gallery/codeeditor 全序列（查询/操作/输入/主题/DPI 2x）+ 截图 + sanitizer 日志检查 | `python3 tools/st_visual_check.py` | 0 失败步 |
 | 字体对照 | `tools/ft_compare.cpp`：用 FreeType 对照自研 CFF 解释器的轮廓数/包围盒（**仅测试用，不进框架构建**） | 手工编译运行 | 一致 |
 | 文字抗锯齿对照 | `tools/lcd_compare.cpp`：同一段文字按 灰度/亚像素(滤波)/亚像素(原始) 各渲一张 PNG，并打印某个扫描行的边缘剖面（**仅验证用，不进框架构建**） | 手工编译运行（命令见文件头） | 见 §4.3.1 的实测表 |
